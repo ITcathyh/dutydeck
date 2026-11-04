@@ -18,6 +18,18 @@ describe('timeline reading preferences', () => {
     expect(restored.heights.size).toBe(0);
   });
 
+  it('applies the caller default only to views without saved state and restores a saved follow after reload', async () => {
+    const { getTimelineReadingState, saveTimelineReadingState } = await import('./timeline-reading-state');
+    expect(getTimelineReadingState('workbench').following).toBe(true);
+    expect(getTimelineReadingState('share', false).following).toBe(false);
+    getTimelineReadingState('share', false).following = true;
+    saveTimelineReadingState();
+    vi.resetModules();
+    const reloaded = await import('./timeline-reading-state');
+    expect(reloaded.getTimelineReadingState('share', false).following).toBe(true);
+    expect(reloaded.getTimelineReadingState('workbench').following).toBe(true);
+  });
+
   it('bounds stored scopes and disclosure records', async () => {
     const { getTimelineReadingState, saveTimelineReadingState } = await import('./timeline-reading-state');
     for (let index = 0; index < 50; index++) getTimelineReadingState(`task-${index}`);

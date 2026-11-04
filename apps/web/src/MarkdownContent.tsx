@@ -1,8 +1,10 @@
 import { memo, useEffect, useRef, useState, type ReactNode } from 'react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkCjkFriendly from 'remark-cjk-friendly';
 import { Check, Copy } from 'lucide-react';
 import { Highlight, Prism, themes } from 'prism-react-renderer';
+import { isIndexColumn, isSequenceColumn, nowrapColumns } from './share-view';
 
 const languageAliases: Record<string, string> = {
   csharp: 'csharp', cs: 'csharp', html: 'markup', js: 'javascript', jsx: 'jsx',
@@ -121,6 +123,92 @@ const markdownComponents: Components = {
   table({ children }) { return <div className="markdown-table-scroll" role="region" aria-label="表格，可横向滚动" tabIndex={0}><table>{children}</table></div>; }
 };
 
-export const MarkdownContent = memo(function MarkdownContent({ children }: { children: string }) {
-  return <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{children}</ReactMarkdown>;
+type MarkdownNode = { type: string; value?: string; align?: Array<string | null>; children?: MarkdownNode[]; data?: { hName?: string; hProperties?: Record<string, unknown>; hChildren?: unknown[] } };
+const nodeText = (node: MarkdownNode): string => node.type === 'break' ? '\n' : node.value ?? (node.children ?? []).map(nodeText).join('');
+const withProperties = (node: MarkdownNode, properties: Record<string, unknown>) => { node.data = { ...node.data, hProperties: { ...node.data?.hProperties, ...properties } }; };
+const visitNodes = (node: MarkdownNode, visit: (node: MarkdownNode) => void) => { visit(node); node.children?.forEach(child => visitNodes(child, visit)); };
+
+/** Agent 常在表格单元格里写 `<br>` 换行。不开启原始 HTML，只把这一种标签当作换行。 */
+function remarkHtmlBreaks() {
+  return (tree: unknown) => visitNodes(tree as MarkdownNode, node => {
+    node.children?.forEach((child, index) => { if (child.type === 'html' && /^<br\s*\/?>$/i.test(child.value?.trim() ?? '')) node.children![index] = { type: 'break' }; });
+  });
+}
+
+/** 单元格里的长路径、文件名只在 / . _ - 之后断开；<wbr> 不进入复制出的文字。 */
+const breakable = /[^\s]{17,}/g;
+function breakPieces(value: string): Array<{ text: string } | { wbr: true }> {
+  const pieces: Array<{ text: string } | { wbr: true }> = [];
+  let last = 0;
+  for (const match of value.matchAll(breakable)) {
+    const token = match[0];
+    const at = match.index!;
+    for (const point of token.matchAll(/(?<=.)[/._-](?=.)/g)) {
+      const cut = at + point.index! + 1;
+      pieces.push({ text: value.slice(last, cut) }, { wbr: true });
+      last = cut;
+    }
+  }
+  pieces.push({ text: value.slice(last) });
+  return pieces;
+}
+function insertBreaks(cell: MarkdownNode) {
+  visitNodes(cell, node => {
+    if (node.type === 'inlineCode' && node.value) {
+      const pieces = breakPieces(node.value);
+      if (pieces.length > 1) node.data = { ...node.data, hChildren: pieces.map(piece => 'text' in piece ? { type: 'text', value: piece.text } : { type: 'element', tagName: 'wbr', properties: {}, children: [] }) };
+    }
+    if (!node.children?.some(child => child.type === 'text')) return;
+    node.children = node.children.flatMap(child => child.type !== 'text' || !child.value ? [child]
+      : breakPieces(child.value).map(piece => 'text' in piece ? { type: 'text', value: piece.text } : { type: 'shareBreak', data: { hName: 'wbr' } }));
+  });
+}
+
+/*
+  分享页的结论排版：首段是段落时标成导语。表格每个单元格带上对应表头（窄屏把一行排成一张小卡时显示列名），
+  序号列、第一个非序号列和数值列分别标出，供窄屏合成卡片标题行：标题在左、数值在右；序号恰好是 1..n 时窄屏不显示。
+  数值列是标题列之外第一个整列不折行且右对齐的列。短列整列不折行，长列拿到剩余宽度。
+  任意列数的表格都适用，不看单元格内容的语义。
+*/
+function remarkShareLayout() {
+  return (tree: unknown) => {
+    const root = tree as MarkdownNode;
+    if (root.children?.[0]?.type === 'paragraph') withProperties(root.children[0], { className: ['share-lead'] });
+    visitNodes(root, node => {
+      if (node.type !== 'table') return;
+      const [header, ...rows] = node.children ?? [];
+      const labels = (header?.children ?? []).map(cell => nodeText(cell).trim());
+      const columns = labels.map((label, index) => [label, ...rows.map(row => nodeText(row.children?.[index] ?? { type: 'text', value: '' }))]);
+      const nowrap = nowrapColumns(columns);
+      const indexColumn = labels.length > 1 && isIndexColumn(labels[0]!, columns[0]!.slice(1)) ? 0 : -1;
+      const titleColumn = indexColumn + 1;
+      const valueColumn = labels.findIndex((_, index) => index !== indexColumn && index !== titleColumn && nowrap[index] && node.align?.[index] === 'right');
+      const sequence = indexColumn === 0 && isSequenceColumn(columns[0]!.slice(1));
+      for (const row of [header, ...rows]) row?.children?.forEach((cell, index) => {
+        const className = [nowrap[index] && 'share-nowrap', index === indexColumn && 'share-cell-index', index === indexColumn && sequence && 'share-cell-seq',
+          index === titleColumn && 'share-cell-title', index === valueColumn && 'share-cell-value'].filter(Boolean);
+        withProperties(cell, { ...(className.length ? { className } : {}), ...(row !== header && labels[index] ? { dataLabel: labels[index] } : {}) });
+        insertBreaks(cell);
+      });
+    });
+  };
+}
+
+const shareComponents: Components = {
+  ...markdownComponents,
+  // 分享页只读：外链在新窗口打开，不把读者带离结论。
+  a({ href, children }) {
+    const external = /^https?:\/\//i.test(href ?? '');
+    return <a href={href} className={external ? 'share-ext' : undefined} {...(external ? { target: '_blank', rel: 'noreferrer' } : {})}>{children}</a>;
+  },
+  table({ children }) { return <div className="share-table" role="region" aria-label="表格" tabIndex={0}><table>{children}</table></div>; }
+};
+
+// remark-cjk-friendly：让 `**「抖动」**，` 这类紧挨中文标点的强调也能成立（CommonMark 的定界规则会拒绝它）。
+const remarkPlugins = [remarkGfm, remarkCjkFriendly, remarkHtmlBreaks];
+const shareRemarkPlugins = [...remarkPlugins, remarkShareLayout];
+
+export const MarkdownContent = memo(function MarkdownContent({ children, variant }: { children: string; variant?: 'share' }) {
+  if (variant === 'share') return <ReactMarkdown remarkPlugins={shareRemarkPlugins} components={shareComponents}>{children}</ReactMarkdown>;
+  return <ReactMarkdown remarkPlugins={remarkPlugins} components={markdownComponents}>{children}</ReactMarkdown>;
 });

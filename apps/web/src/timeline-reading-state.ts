@@ -34,9 +34,10 @@ function hydrate() {
   } catch { /* Storage can be unavailable; in-memory navigation still works. */ }
 }
 
-export function getTimelineReadingState(key: string): TimelineReadingState {
+/** followByDefault 只在这个视图还没有阅读状态时生效；保存过的状态原样恢复。 */
+export function getTimelineReadingState(key: string, followByDefault = true): TimelineReadingState {
   hydrate();
-  const state = states.get(key) ?? { following: true, scrollTop: 0, disclosures: new Map<string, boolean>(), heights: new Map<string, number>() };
+  const state = states.get(key) ?? { following: followByDefault, scrollTop: 0, disclosures: new Map<string, boolean>(), heights: new Map<string, number>() };
   states.delete(key);
   states.set(key, state);
   if (states.size > limit) states.delete(states.keys().next().value!);

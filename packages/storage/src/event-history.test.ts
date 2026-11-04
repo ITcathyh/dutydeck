@@ -78,3 +78,35 @@ it('retains a bounded latest native command catalog independently of completed c
   await repos.events.append(event(6, 'status', { state: 'commands', availableCommands: ['invalid', 7, { name: '/safe', description: 'still usable' }, { name: 'n'.repeat(5000) }] }));
   expect((await repos.events.listHistoryOutline!('s')).commandCatalog).toEqual({ sequence: 6, commands: [{ name: 'safe', description: 'still usable' }], truncated: true });
 });
+
+it('projects each tool call as a start offset and duration, sampling long turns while keeping the exact count', async () => {
+  const at = (seconds: number) => new Date(Date.UTC(2026, 10, 4, 6, 37) + seconds * 1000).toISOString();
+  const timed = (sequence: number, type: AgentEvent['type'], data: unknown, seconds: number): AgentEvent => ({ ...event(sequence, type, data, 'a', 'attempt-a'), timestamp: at(seconds) });
+  const repos = await fixture();
+  for (const item of [timed(1, 'text', { role: 'user', text: 'instruction' }, 0), timed(2, 'tool_call', { id: 'slow', status: 'running' }, 5),
+    timed(3, 'tool_result', { id: 'fast', status: 'completed' }, 8), timed(4, 'tool_result', { id: 'slow', status: 'completed' }, 65),
+    timed(5, 'tool_call', { id: 'batched', status: 'running', startedAt: at(20) }, 70), timed(6, 'tool_result', { id: 'batched', status: 'completed', startedAt: at(20), completedAt: at(30) }, 70),
+    timed(7, 'text', { text: 'final' }, 90), timed(8, 'completed', { outcome: 'completed' }, 91), timed(9, 'raw_terminal', { text: 'late repaint' }, 900)]) await repos.events.append(item);
+  expect((await repos.events.listHistoryOutline!('s')).turns[0]).toMatchObject({ toolCount: 3, activity: { endedAt: at(91), tools: [[5000, 60000], [8000, 0], [20000, 10000]] } });
+
+  const long = await fixture();
+  await long.events.append(timed(1, 'text', { role: 'user', text: 'instruction' }, 0));
+  let sequence = 1;
+  for (let index = 0; index < 300; index++) await long.events.append(timed(++sequence, 'tool_call', { id: `tool-${index}`, status: 'running' }, index));
+  await long.events.append(timed(++sequence, 'tool_result', { id: 'tool-150', status: 'completed' }, 450));
+  await long.events.append(timed(++sequence, 'text', { text: 'final' }, 460));
+  const [turn] = (await long.events.listHistoryOutline!('s')).turns;
+  expect(turn?.toolCount).toBe(300);
+  expect(turn?.activity?.tools).toHaveLength(240);
+  expect(turn?.activity?.tools).toContainEqual([150_000, 300_000]);
+  expect(turn?.activity?.tools.map(([offset]) => offset)).toEqual([...turn!.activity!.tools.map(([offset]) => offset)].sort((left, right) => left - right));
+});
+
+it('omits the tool rhythm when the recorded timestamps cannot be read', async () => {
+  const repos = await fixture();
+  await repos.events.append({ ...event(1, 'text', { role: 'user', text: 'instruction' }, 'a', 'attempt-a'), timestamp: 'unknown' });
+  await repos.events.append({ ...event(2, 'text', { text: 'final' }, 'a', 'attempt-a'), timestamp: 'unknown' });
+  const [turn] = (await repos.events.listHistoryOutline!('s')).turns;
+  expect(turn?.output.text).toBe('final');
+  expect(turn).not.toHaveProperty('activity');
+});

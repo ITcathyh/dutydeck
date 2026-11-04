@@ -14,6 +14,14 @@ export interface HistoryTurnSummary {
   toolCount: number;
   artifactReferences: EventArtifactReference[];
   artifactReferencesTruncated?: boolean;
+  /** Tool-call rhythm for read-only views; older projections omit it. */
+  activity?: HistoryTurnActivity;
+}
+export interface HistoryTurnActivity {
+  /** Completion receipt time, or the latest recorded content in the turn. */
+  endedAt: string;
+  /** Ordered by start; offsets are from the turn `timestamp`. Sampled to a bounded length, so use `toolCount` for the exact count. */
+  tools: Array<[startOffsetMs: number, durationMs: number]>;
 }
 export interface HistoryOutline {
   turns: HistoryTurnSummary[];

@@ -1,5 +1,5 @@
 import { useTimelineDisclosure } from '../timeline-disclosure';
-import { memo } from 'react';
+import { createContext, memo, useContext } from 'react';
 import { BookOpen, BrainCircuit, ChevronDown, ChevronRight, Database, FilePenLine, FlaskConical, GitBranch, Globe2, LoaderCircle, Search, Terminal, Users, Wrench } from 'lucide-react';
 import type { TimelineActivityGroup, TimelineEvent } from '../timeline';
 import { CodeBlock } from '../MarkdownContent';
@@ -11,6 +11,9 @@ import { elapsedMilliseconds, formatElapsed, groupToolActivityRows, toolActionLa
   别给其它 span 加 rounded-full，也别把这里的 LoaderCircle 换成 Spinner 原语——
   Spinner 内部就是一个 rounded-full 的 span，会让「未终结时没有终态圆点」的断言抓错元素。
 */
+
+/** 标题里命令、路径的显示方式；默认原样显示，只读分享页换成缩写。title 始终是原文。 */
+export const ToolDetailFormat = createContext<((detail: string) => string) | undefined>(undefined);
 
 export function ToolKindIcon({ kind, size = 14 }: { kind: ToolKind; size?: number }) {
   if (kind === 'read') return <BookOpen size={size}/>;
@@ -29,6 +32,7 @@ export const ToolCard = memo(function ToolCard({ event, ongoing = false, preferD
   const data = event.data; const done = data.status === 'completed'; const failed = data.status === 'failed'; const terminal = done || failed;
   const [open, setOpen] = useTimelineDisclosure(`tool:${event.id}`, ongoing && !terminal); const hasDetails = data.input !== undefined || data.output !== undefined || data.parts?.length > 0;
   const presentation = toolPresentation(data);
+  const formatDetail = useContext(ToolDetailFormat);
   const elapsed = formatElapsed(elapsedMilliseconds(data.startedAt ?? event.timestamp, terminal ? data.completedAt ?? event.timestamp : undefined));
   const statusLabel = failed ? '失败' : done ? '已完成' : '执行中'; const actionLabel = preferDescription ? toolDescription(data) ?? toolActionLabel(presentation, terminal) : toolActionLabel(presentation, terminal);
   const tone = failed ? 'text-danger' : done ? 'text-success' : 'text-info';
@@ -36,7 +40,7 @@ export const ToolCard = memo(function ToolCard({ event, ongoing = false, preferD
   const detailJson = open ? JSON.stringify({ ...(data.input !== undefined ? { input: data.input } : {}), ...(data.output !== undefined ? { output: data.output } : {}) }, null, 2) : '';
   return <div data-timeline-event={event.id} className="overflow-hidden">
     <button type="button" disabled={!hasDetails} onClick={() => setOpen(value => !value)} className="group/tool flex min-h-10 w-full items-center gap-2 py-1.5 text-left transition-colors hover:text-primary disabled:cursor-default">
-      <span className={`grid h-5 w-5 shrink-0 place-items-center ${tone}`}><ToolKindIcon kind={presentation.kind} size={13}/></span><span className="min-w-0 flex-1 truncate text-caption text-subtle"><span className="font-medium text-secondary">{actionLabel}</span>{presentation.detail && <span title={presentation.detail} className="ml-1.5 font-mono text-subtle">{presentation.detail}</span>}</span>
+      <span className={`grid h-5 w-5 shrink-0 place-items-center ${tone}`}><ToolKindIcon kind={presentation.kind} size={13}/></span><span className="min-w-0 flex-1 truncate text-caption text-subtle"><span className="font-medium text-secondary">{actionLabel}</span>{presentation.detail && <span title={presentation.detail} className="ml-1.5 font-mono text-subtle">{formatDetail ? formatDetail(presentation.detail) : presentation.detail}</span>}</span>
       <span className="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-caption tabular-nums text-subtle">{elapsed && <span>{elapsed}</span>}{!terminal ? <LoaderCircle size={11} className="animate-spin text-info-solid"/> : <span className={`h-1.5 w-1.5 rounded-full ${failed ? 'bg-danger-solid' : 'bg-success-solid'}`}/>}<span className={tone}>{statusLabel}</span>{hasDetails && (open ? <ChevronDown size={12}/> : <ChevronRight size={12}/>)}</span>
     </button>
     {open && hasDetails && <div className="mb-2 ml-7 border-l border-default pl-3">{(data.input !== undefined || data.output !== undefined) && <CodeBlock className="language-json" code={detailJson}/>}<EventContent data={{ parts: data.parts }}/></div>}

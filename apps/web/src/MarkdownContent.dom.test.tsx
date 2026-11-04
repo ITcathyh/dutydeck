@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { act, StrictMode } from 'react';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import redactedAutomationReport from './fixtures/automation-report.redacted.md?raw';
 import { CodeBlock, MarkdownContent } from './MarkdownContent';
@@ -287,6 +287,61 @@ describe('GFM reports', () => {
     expect(container.querySelector('script')).toBeNull();
     expect(container.querySelector('img')).toBeNull();
     expect(screen.getByText('危险').getAttribute('href')).not.toMatch(/^javascript:/);
+  });
+});
+
+describe('CJK emphasis and table line breaks', () => {
+  it('parses bold next to Chinese punctuation and turns <br> into a line break without enabling raw HTML', () => {
+    const { container } = render(<MarkdownContent>{'该报警分级判定为**「抖动」**，未投递卡片。\n\n| 状态 |\n| --- |\n| 自动认领完成<br>人工无观测<br/>（`no_observation`） |'}</MarkdownContent>);
+    expect(container.querySelector('strong')?.textContent).toBe('「抖动」');
+    expect(container.textContent).not.toContain('**');
+    const cell = container.querySelector('tbody td')!;
+    expect(cell.querySelectorAll('br')).toHaveLength(2);
+    expect(cell.textContent).toBe('自动认领完成\n人工无观测\n（no_observation）');
+    expect(container.textContent).not.toContain('<br');
+  });
+
+  it('share tables keep short columns on one line, mark the index and title columns, and break long paths only after / . _ -', () => {
+    const table = ['| # | 维度 | 详情说明 | 数据来源 |', '|---|---|---|---|',
+      '| 1 | 基本信息 | 核心服务触发 critical 告警但持续仅 1min 且异常时序仅 1 条，无 24h 重复与并发扩散 | `.state/classification_results.ndjson` |',
+      '| 2 | 卡片投递 | 分级为「抖动」而非「重要」，不进入 RCA 队列与卡片投递链路 | ingress/chatter/ledger-2026 |'].join('\n');
+    const { container } = render(<MarkdownContent variant="share">{table}</MarkdownContent>);
+    const columnClasses = [...container.querySelectorAll('tbody tr:first-child td')].map(cell => cell.className);
+    expect(columnClasses[0]).toContain('share-nowrap');
+    expect(columnClasses[0]).toContain('share-cell-index');
+    expect(columnClasses[1]).toContain('share-nowrap');
+    expect(columnClasses[1]).toContain('share-cell-title');
+    expect(columnClasses[2]).not.toContain('share-nowrap');
+    const code = container.querySelector('tbody code')!;
+    expect(code.querySelectorAll('wbr')).toHaveLength(3);
+    expect(code.innerHTML).toBe('.state/<wbr>classification_<wbr>results.<wbr>ndjson');
+    expect(code.textContent).toBe('.state/classification_results.ndjson');
+    expect(container.querySelectorAll('tbody tr:nth-child(2) td')[3]!.querySelectorAll('wbr')).toHaveLength(3);
+    // 短数字不插断点
+    expect(container.querySelector('tbody td.share-cell-index wbr')).toBeNull();
+  });
+
+  it('share tables mark the value column (short, unwrapped, right-aligned) and a plain 1..n index for the phone card title row', () => {
+    const long = '，新浪财经转引野村月报；是否含极速版、火山版未明确';
+    const table = ['| # | 指标 | 数据 | 时间与来源 |', '|---|---|---:|---|',
+      `| 1 | 抖音 DAU | **7.14 亿** | 2026 年 7 月${long} |`, '| 2 | 站内分享渗透（视频、评论） | **21.08%** | 同一内部周报 |'].join('\n');
+    const { container } = render(<MarkdownContent variant="share">{table}</MarkdownContent>);
+    const cells = [...container.querySelectorAll('tbody tr:first-child td')];
+    expect(cells[0]!.className).toContain('share-cell-seq');
+    expect(cells[1]!.className).toContain('share-cell-title');
+    expect(cells[2]!.className).toContain('share-cell-value');
+    expect(cells[3]!.className).not.toContain('share-cell-value');
+    expect(cells[3]!.getAttribute('data-label')).toBe('时间与来源');
+    cleanup();
+    // 列顺序任意：数值列在最后、序号不是 1..n 时照样识别；没有右对齐短列时不标数值列。
+    const reordered = render(<MarkdownContent variant="share">{['| # | 项目 | 说明 | 金额 |', '|---|---|---|---:|', `| 3 | 甲 | 说明${long} | 12 |`, '| 7 | 乙 | 短 | 5 |'].join('\n')}</MarkdownContent>);
+    const row = [...reordered.container.querySelectorAll('tbody tr:first-child td')];
+    expect(row[0]!.className).toContain('share-cell-index');
+    expect(row[0]!.className).not.toContain('share-cell-seq');
+    expect(row[3]!.className).toContain('share-cell-value');
+    cleanup();
+    const plain = render(<MarkdownContent variant="share">{['| 指标 | 数据 | 来源 |', '|---|---|---|', `| 甲 | 1 | 说明${long} |`].join('\n')}</MarkdownContent>);
+    expect(plain.container.querySelector('.share-cell-value')).toBeNull();
   });
 });
 

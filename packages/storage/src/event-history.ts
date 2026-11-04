@@ -3,6 +3,7 @@ import { extractEventArtifactReferences, type HistoryOutline, type HistoryTurnSu
 
 export const HISTORY_PROMPT_LIMIT = 1024;
 export const HISTORY_OUTPUT_LIMIT = 4096;
+export const HISTORY_ACTIVITY_LIMIT = 240;
 type Boundary = { first: number; last: number; id: string; timestamp: string; taskId: string | null; attemptId: string | null; status: string | null; ended: number };
 
 /** SQLite projects bounded fields; neither raw nor tool input/output blobs enter JS. */
@@ -81,6 +82,13 @@ function projectHistoryOutline(sqlite: Database.Database, sessionId: string): Hi
     WHERE e.session_id=? AND e.type IN ('error','completed')
       AND ((e.task_id IS NOT NULL AND p.first IS NULL) OR (e.task_id IS NULL AND e.type='error'))
   `).get(sessionId, sessionId) as { first: number | null };
+  // Adapters that batch-write events carry the original call times in the payload; prefer them over write times.
+  const toolSpans = sqlite.prepare(`SELECT COALESCE(MIN(json_extract(data,'$.startedAt')),MIN(timestamp)) AS started,COALESCE(MAX(json_extract(data,'$.completedAt')),MAX(timestamp)) AS ended FROM events
+    WHERE session_id=? AND sequence BETWEEN ? AND ? AND type IN ('tool_call','tool_result') AND json_valid(data)
+    GROUP BY COALESCE(json_extract(data,'$.id'),id) ORDER BY started`);
+  // The turn ends at its completion receipt; terminal repaints and status pings can trail it by minutes.
+  const turnEnd = sqlite.prepare(`SELECT COALESCE(MAX(CASE WHEN type='completed' THEN timestamp END),MAX(CASE WHEN type NOT IN ('raw_terminal','status') THEN timestamp END)) AS value
+    FROM events WHERE session_id=? AND sequence BETWEEN ? AND ?`);
   const turns: HistoryTurnSummary[] = [];
   let liveAfter = 0;
   for (const range of boundaries) {
@@ -111,9 +119,12 @@ function projectHistoryOutline(sqlite: Database.Database, sessionId: string): Hi
         if (!seen.has(revision)) { seen.add(revision); artifacts.push({ ...ref, partIndex, revision }); }
       }
     }
+    const activity = turnActivity(range.timestamp, (turnEnd.get(sessionId, range.first, range.last) as { value: string | null }).value,
+      toolSpans.all(sessionId, range.first, range.last) as Array<{ started: string; ended: string }>);
     turns.push({ id: range.id, ...(range.taskId ? { taskId: range.taskId } : {}), ...(range.attemptId ? { attemptId: range.attemptId } : {}),
       firstSequence: range.first, lastSequence: range.last, timestamp: range.timestamp, status: range.status ?? 'unverified',
-      prompt: { text: prompt.text, truncated: Boolean(prompt.truncated) }, output: { text: output.text, truncated: Boolean(output.truncated) }, toolCount, artifactReferences: artifacts, artifactReferencesTruncated: references.length > 128 });
+      prompt: { text: prompt.text, truncated: Boolean(prompt.truncated) }, output: { text: output.text, truncated: Boolean(output.truncated) }, toolCount, artifactReferences: artifacts, artifactReferencesTruncated: references.length > 128,
+      ...(activity ? { activity } : {}) });
     liveAfter = range.last;
   }
   const commandEvent = sqlite.prepare(`SELECT id,sequence,json_array_length(data,'$.availableCommands') AS count FROM events
@@ -132,4 +143,18 @@ function projectHistoryOutline(sqlite: Database.Database, sessionId: string): Hi
       truncated: commandEvent.count > 128 || rows.length < Math.min(128, commandEvent.count) || rows.some(row => Boolean(row.shortened)) };
   }
   return { turns, highWaterMark, liveAfter, ...(commandCatalog ? { commandCatalog } : {}) };
+}
+
+/** Each tool id spans its earliest to latest event. Long turns keep the longest call of each bucket, so spikes survive sampling. */
+function turnActivity(start: string, end: string | null, spans: Array<{ started: string; ended: string }>): HistoryTurnSummary['activity'] {
+  const origin = Date.parse(start);
+  if (!end || !Number.isFinite(origin) || !Number.isFinite(Date.parse(end))) return;
+  const tools = spans.flatMap(span => {
+    const started = Date.parse(span.started), ended = Date.parse(span.ended);
+    return Number.isFinite(started) && Number.isFinite(ended) ? [[Math.max(0, started - origin), Math.max(0, ended - started)] as [number, number]] : [];
+  });
+  if (tools.length <= HISTORY_ACTIVITY_LIMIT) return { endedAt: end, tools };
+  return { endedAt: end, tools: Array.from({ length: HISTORY_ACTIVITY_LIMIT }, (_, index) =>
+    tools.slice(Math.floor(index * tools.length / HISTORY_ACTIVITY_LIMIT), Math.floor((index + 1) * tools.length / HISTORY_ACTIVITY_LIMIT))
+      .reduce((longest, tool) => tool[1] > longest[1] ? tool : longest)) };
 }

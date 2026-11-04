@@ -8,7 +8,7 @@ export type TimelineSection =
   | { kind: 'activity'; id: string; groups: TimelineActivityGroup[]; hasAnswer: boolean; taskStatus: string; isLatestTurn: boolean; startedAt: string; completedAt?: string };
 
 const isActivity = (event: TimelineEvent) => event.type === 'thinking' || event.type === 'tool_call' || event.type === 'tool_result';
-const isChildDiagnostic = (data: TimelineEvent['data']) => data.diagnostic === data.state
+export const isChildDiagnostic = (data: TimelineEvent['data']) => data.diagnostic === data.state
   && typeof data.id === 'string' && /^child_diagnostic_[a-f0-9]{64}$/.test(data.id)
   && typeof data.activityId === 'string' && typeof data.parentTurnId === 'string' && typeof data.childTurnId === 'string'
   && typeof data.parentThreadId === 'string' && typeof data.childThreadId === 'string'

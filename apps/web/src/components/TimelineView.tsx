@@ -1,5 +1,5 @@
 import { ArrowDown, MessageSquare } from 'lucide-react';
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, useContext, type ReactNode } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, useContext, type ReactNode } from 'react';
 import type { TimelineEvent, TimelineSection } from '../timeline';
 import { isNearScrollBottom, useTimelineAutoScroll } from '../useTimelineAutoScroll';
 import { Button, EmptyState, Skeleton } from './primitives';
@@ -13,9 +13,16 @@ import { loadTurnHistory } from '../event-history';
 import { buildTimelineSections, createTimelineProjector } from '../timeline';
 import { useTimelineDisclosure } from '../timeline-disclosure';
 import { MarkdownContent } from '../MarkdownContent';
+import { ShareTurn, type EarlierPlace } from './ShareTurn';
+import { liveTurnFacts, turnMomentWidth } from '../share-view';
 
 export type TimelineViewProps = {
   fullWidth?: boolean;
+  /** 只读分享页：每轮渲染成结论卡，header（英雄区）与 aside（侧栏）随内容一起滚动。 */
+  variant?: 'share';
+  header?: ReactNode;
+  aside?: ReactNode;
+  onScrollTop?(scrollTop: number): void;
   activeSessionId?: string;
   historyTurns?: HistoryTurnSummary[];
   sourceEvents?: DockEvent[];
@@ -97,8 +104,10 @@ const TimelineBody = memo(function TimelineBody({ timelineSections, activeOutput
 type TimelineTurn = { id: string; sections: TimelineSection[]; summary?: HistoryTurnSummary };
 type TimelineRow = TimelineTurn & { top: number; height: number };
 
-export function TimelineView({ fullWidth = false, historyTurns, sourceEvents, activeSessionId, readingScopeKey = activeSessionId ?? 'empty', visible: isVisible = true, eventsLoading, onResolvePermission, resolvingPermissionId, timeline, timelineSections, awaitingAnswer, hasOngoingActivity, latestUserIndex, activeOutputLabel, footer, renderProgress, hasOlder, loadedEventCount, olderError, loadOlder }: TimelineViewProps) {
-  const reading = useMemo(() => getTimelineReadingState(readingScopeKey), [readingScopeKey]);
+export function TimelineView({ fullWidth = false, variant, header, aside, onScrollTop, historyTurns, sourceEvents, activeSessionId, readingScopeKey = activeSessionId ?? 'empty', visible: isVisible = true, eventsLoading, onResolvePermission, resolvingPermissionId, timeline, timelineSections, awaitingAnswer, hasOngoingActivity, latestUserIndex, activeOutputLabel, footer, renderProgress, hasOlder, loadedEventCount, olderError, loadOlder }: TimelineViewProps) {
+  const share = variant === 'share';
+  // 分享页第一次打开从英雄区开始读，不自动滚到最底部；读者滚到底后才跟随新内容，刷新后照旧跟随。
+  const reading = useMemo(() => getTimelineReadingState(readingScopeKey, !share), [readingScopeKey, share]);
   const disclosures = reading.disclosures;
   const progressRef = useRef<HTMLDivElement>(null);
   const timelineScroll = useTimelineAutoScroll(readingScopeKey, timeline, awaitingAnswer, { initialFollowing: reading.following, enabled: isVisible });
@@ -157,9 +166,15 @@ export function TimelineView({ fullWidth = false, historyTurns, sourceEvents, ac
     previousFirst.current = first ? { id: first.id, events: new Set(eventIds(first)) } : undefined;
     return [...summaryTurns, ...result];
   }, [timelineSections, turnCache, summaryTurns]);
+  // 分享页「更早 N 轮」的总开关和轮内展开一样按会话保存，刷新后仍能恢复到读过的那一轮。
+  // 收起时被藏起的轮次不进虚拟列表：它们不渲染，测不到高度，留着会按默认高度占出大片空白。
+  const [, rerenderEarlier] = useReducer((version: number) => version + 1, 0);
+  const earlierOpen = disclosures.get('share-earlier') ?? false;
+  const setEarlierOpen = useCallback((open: boolean) => { disclosures.set('share-earlier', open); saveTimelineReadingState(); rerenderEarlier(); }, [disclosures]);
+  const layoutTurns = useMemo(() => share && !earlierOpen && turns.length > 2 ? [turns[0]!, turns.at(-1)!] : turns, [share, earlierOpen, turns]);
   const layout = useMemo(() => {
     let top = 0;
-    const rows = turns.map(turn => {
+    const rows = layoutTurns.map(turn => {
       const height = heights.get(turn.id) ?? 180;
       let row = rowCache.get(turn);
       if (!row || row.top !== top || row.height !== height || row.id !== turn.id) {
@@ -169,7 +184,13 @@ export function TimelineView({ fullWidth = false, historyTurns, sourceEvents, ac
       return row;
     });
     return { rows, height: top };
-  }, [turns, heights, measureVersion, rowCache]);
+  }, [layoutTurns, heights, measureVersion, rowCache]);
+  // 分享页的英雄区在滚动容器里、列表上方：行坐标从列表起点算，和 scrollTop 比较前先扣掉这段偏移。工作台不扣（偏移按 0）。
+  const listStartRef = useRef<HTMLDivElement>(null);
+  const listOffset = () => {
+    const container = timelineScroll.containerRef.current, start = listStartRef.current;
+    return share && container && start ? start.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop : 0;
+  };
   const restoredRow = anchor.current && (layout.rows.find(row => row.id === anchor.current!.id) ?? layout.rows.find(row => row.sections.some(section => section.kind === 'event' ? section.event.id === anchor.current!.eventId : section.groups.some(group => group.events.some(event => event.id === anchor.current!.eventId)))));
   const top = !timelineScroll.isFollowing && Number.isFinite(viewport.top) ? (restoredRow ? restoredRow.top + anchor.current!.offset : viewport.top) : Math.max(0, layout.height - viewport.height);
   const firstMatch = layout.rows.findIndex(row => row.top + row.height >= top - 800);
@@ -180,15 +201,16 @@ export function TimelineView({ fullWidth = false, historyTurns, sourceEvents, ac
   const syncViewport = (captureAnchor = true) => {
     const container = timelineScroll.containerRef.current;
     if (!container || !isVisible) return;
-    setViewport({ top: container.scrollTop, height: container.clientHeight || 960 });
+    const offset = listOffset();
+    setViewport({ top: container.scrollTop - offset, height: container.clientHeight || 960 });
     if (!captureAnchor) return;
     const containerTop = container.getBoundingClientRect().top;
     // A scroll can precede mounting its new virtual window. Do not capture
     // an overscan event still far below the visible viewport.
     const element = [...container.querySelectorAll<HTMLElement>('[data-timeline-event]')].find(element => { const rect = element.getBoundingClientRect(); return rect.bottom > containerTop && rect.top < containerTop + container.clientHeight; });
     const rowId = element?.closest<HTMLElement>('[data-timeline-turn]')?.dataset.timelineTurn;
-    const row = layout.rows.find(row => row.id === rowId) ?? layout.rows.find(row => row.top + row.height > container.scrollTop);
-    anchor.current = row ? { id: row.id, offset: container.scrollTop - row.top,
+    const row = layout.rows.find(row => row.id === rowId) ?? layout.rows.find(row => row.top + row.height > container.scrollTop - offset);
+    anchor.current = row ? { id: row.id, offset: container.scrollTop - offset - row.top,
       ...(element ? { eventId: element.dataset.timelineEvent, screenOffset: element.getBoundingClientRect().top - containerTop } : {}) } : undefined;
     reading.following = timelineScroll.isFollowing;
     reading.scrollTop = container.scrollTop;
@@ -205,7 +227,7 @@ export function TimelineView({ fullWidth = false, historyTurns, sourceEvents, ac
       if (element && anchor.current.screenOffset !== undefined) container.scrollTop += element.getBoundingClientRect().top - container.getBoundingClientRect().top - anchor.current.screenOffset;
       else {
         const row = layout.rows.find(row => row.id === anchor.current!.id);
-        if (row) container.scrollTop = row.top + anchor.current.offset;
+        if (row) container.scrollTop = row.top + anchor.current.offset + listOffset();
       }
     }
     programmedScrollTop.current = timelineScroll.isFollowing ? undefined : container.scrollTop;
@@ -219,6 +241,7 @@ export function TimelineView({ fullWidth = false, historyTurns, sourceEvents, ac
   useLayoutEffect(() => () => { saveTimelineReadingState(); }, [reading, isVisible]);
   const onScroll = () => {
     if (!isVisible) return;
+    onScrollTop?.(timelineScroll.containerRef.current?.scrollTop ?? 0);
     const scrollTop = timelineScroll.containerRef.current?.scrollTop;
     if (scrollTop === programmedScrollTop.current) { syncViewport(false); return; }
     programmedScrollTop.current = undefined;
@@ -231,7 +254,7 @@ export function TimelineView({ fullWidth = false, historyTurns, sourceEvents, ac
     const container = timelineScroll.containerRef.current;
     if (!row || !container) return;
     reading.following = false; anchor.current = { id: row.id, offset: 0, eventId: row.id, screenOffset: 0 };
-    container.scrollTop = row.top; programmedScrollTop.current = undefined;
+    container.scrollTop = row.top + listOffset(); programmedScrollTop.current = undefined;
     timelineScroll.onScroll(); syncViewport(false);
   };
   useEffect(() => {
@@ -262,38 +285,51 @@ export function TimelineView({ fullWidth = false, historyTurns, sourceEvents, ac
     observer.observe(progress);
     return () => observer.disconnect();
   }, [readingScopeKey, timelineScroll.isFollowing, isVisible]);
+  // 分享页：最新一轮以外的轮次都是「更早轮次」，在同一个容器里按时间排列；收起时那一行写最近一轮的时间。
+  const earlierLast = share ? turns.at(-2) : undefined;
+  const earlierLastAt = useMemo(() => earlierLast && (earlierLast.summary?.timestamp ?? liveTurnFacts(earlierLast.sections, false).startedAt), [earlierLast]);
+  const earlierPlaces = useMemo(() => {
+    const earlier = share ? turns.slice(0, -1) : [];
+    const widths = new Set(earlier.map(turn => turnMomentWidth(turn.summary?.timestamp ?? liveTurnFacts(turn.sections, false).startedAt)));
+    const width = widths.has('year') ? 'year' : widths.has('day') ? 'day' : 'clock';
+    return new Map(earlier.map((turn, index): [string, EarlierPlace] => [turn.id,
+      { index, count: earlier.length, lastAt: earlierLastAt, width, open: earlierOpen, onToggle: setEarlierOpen }]));
+  }, [share, turns, earlierLastAt, earlierOpen, setEarlierOpen]);
+  const content = <>
+    {eventsLoading
+      ? <TimelineSkeleton/>
+      : turns.length
+        ? <>
+            {turns.length > 1 && !share && <label className="mb-4 flex items-center gap-2 text-caption text-subtle">跳到轮次<select aria-label="跳到轮次" defaultValue="" onChange={event => { jumpToRow(event.target.value); event.target.value = ''; }} className="max-w-64 rounded border border-default bg-surface px-2 py-1"><option value="" disabled>选择历史轮次</option>{turns.map((turn, index) => <option key={turn.id} value={turn.id}>第 {index + 1} 轮{turn.summary ? ` · ${turn.summary.prompt.text.slice(0, 40)}` : ' · 当前记录'}</option>)}</select></label>}
+            <div ref={listStartRef} aria-hidden="true" style={{ height: visible[0]?.top ?? 0 }}/>
+            {visible.map(row => <MeasuredTurn key={row.id} id={row.id} onMeasure={height => {
+              if (heights.get(row.id) === height) return;
+              heights.set(row.id, height); setMeasureVersion(version => version + 1);
+            }}>{share && activeSessionId ? <ShareTurn id={row.id} summary={row.summary} sections={row.sections} earlier={earlierPlaces.get(row.id)}/> : row.summary && activeSessionId ? <HistoryTurn sessionId={activeSessionId} summary={row.summary} activeOutputLabel={activeOutputLabel} requestedSource={requestedSource}/> : <TimelineBody key={requestedSource && containsSource(row, requestedSource.sequence) ? requestedSource.requestId : undefined}
+              timelineSections={row.sections} activeOutputLabel={activeOutputLabel}
+              onResolvePermission={onResolvePermission} resolvingPermissionId={resolvingPermissionId}
+              awaitingAnswer={awaitingAnswer && row.id === turns.at(-1)?.id}
+              hasOngoingActivity={hasOngoingActivity} timeline={timeline} latestUserIndex={latestUserIndex}
+            />}</MeasuredTurn>)}
+            <div aria-hidden="true" style={{ height: Math.max(0, layout.height - ((visible.at(-1)?.top ?? 0) + (visible.at(-1)?.height ?? 0))) }}/>
+          </>
+        : !renderProgress && !hasOlder && <TimelineEmptyState/>}
+    {renderProgress && <div ref={progressRef}>{renderProgress(!eventsLoading && !turns.length && !hasOlder ? <TimelineEmptyState/> : null)}</div>}
+    {!eventsLoading && turns.length > 0 && footer}
+  </>;
   return <TimelineDisclosureContext.Provider value={disclosures}><div className="relative min-h-0 flex-1 bg-canvas">
     <div ref={timelineScroll.containerRef} onScroll={onScroll}
       style={{ overflowAnchor: 'none' }} data-timeline-scroll="true" data-history-start={historyTurns?.[0]?.firstSequence ?? timeline[0]?.sequence} data-history-loaded={loadedEventCount} data-history-complete={hasOlder === false} className="absolute inset-0 overscroll-contain overflow-y-auto">
-      <div className={`mx-auto w-full py-8 sm:py-10 ${fullWidth ? 'px-3 sm:px-5' : 'max-w-[880px] px-5 sm:px-8'}`}>
-        {eventsLoading
-          ? <TimelineSkeleton/>
-          : turns.length
-            ? <>
-                {turns.length > 1 && <label className="mb-4 flex items-center gap-2 text-caption text-subtle">跳到轮次<select aria-label="跳到轮次" defaultValue="" onChange={event => { jumpToRow(event.target.value); event.target.value = ''; }} className="max-w-64 rounded border border-default bg-surface px-2 py-1"><option value="" disabled>选择历史轮次</option>{turns.map((turn, index) => <option key={turn.id} value={turn.id}>第 {index + 1} 轮{turn.summary ? ` · ${turn.summary.prompt.text.slice(0, 40)}` : ' · 当前记录'}</option>)}</select></label>}
-                <div aria-hidden="true" style={{ height: visible[0]?.top ?? 0 }}/>
-                {visible.map(row => <MeasuredTurn key={row.id} id={row.id} onMeasure={height => {
-                  if (heights.get(row.id) === height) return;
-                  heights.set(row.id, height); setMeasureVersion(version => version + 1);
-                }}>{row.summary && activeSessionId ? <HistoryTurn sessionId={activeSessionId} summary={row.summary} activeOutputLabel={activeOutputLabel} requestedSource={requestedSource}/> : <TimelineBody key={requestedSource && containsSource(row, requestedSource.sequence) ? requestedSource.requestId : undefined}
-                  timelineSections={row.sections} activeOutputLabel={activeOutputLabel}
-                  onResolvePermission={onResolvePermission} resolvingPermissionId={resolvingPermissionId}
-                  awaitingAnswer={awaitingAnswer && row.id === turns.at(-1)?.id}
-                  hasOngoingActivity={hasOngoingActivity} timeline={timeline} latestUserIndex={latestUserIndex}
-                />}</MeasuredTurn>)}
-                <div aria-hidden="true" style={{ height: Math.max(0, layout.height - ((visible.at(-1)?.top ?? 0) + (visible.at(-1)?.height ?? 0))) }}/>
-              </>
-            : !renderProgress && !hasOlder && <TimelineEmptyState/>}
-        {renderProgress && <div ref={progressRef}>{renderProgress(!eventsLoading && !turns.length && !hasOlder ? <TimelineEmptyState/> : null)}</div>}
-        {!eventsLoading && turns.length > 0 && footer}
-      </div>
+      {share
+        ? <div className="share-content">{header}<div className="share-layout share-gutter"><div className="share-main">{content}</div>{aside}</div></div>
+        : <div className={`mx-auto w-full py-8 sm:py-10 ${fullWidth ? 'px-3 sm:px-5' : 'max-w-[880px] px-5 sm:px-8'}`}>{content}</div>}
     </div>
     {/* 历史全部加载完后这行提示只留给读屏，不再压在第一条消息上。 */}
     {!eventsLoading && loadedEventCount !== undefined && <div className={olderError || hasOlder ? 'absolute left-5 top-1 z-sticky rounded bg-canvas px-2 py-1 text-meta text-subtle' : 'sr-only'}>
       <span role="status">{olderError ? `已加载 ${loadedEventCount} 条，历史加载中断` : hasOlder ? `已加载 ${loadedEventCount} 条，正在加载全部历史…` : `已加载 ${historyTurns?.length ?? 0} 轮摘要、${loadedEventCount} 条原始记录`}</span>
       {olderError && <button onClick={() => void loadOlder?.()} className="ml-2 text-caption text-danger" title={olderError}>重试加载历史</button>}
     </div>}
-    {!timelineScroll.isFollowing && <ScrollToBottomButton onClick={() => { reading.following = true; reading.anchor = undefined; anchor.current = undefined; timelineScroll.scrollToBottom(); saveTimelineReadingState(); }}/>}
+    {!timelineScroll.isFollowing && !share && <ScrollToBottomButton onClick={() => { reading.following = true; reading.anchor = undefined; anchor.current = undefined; timelineScroll.scrollToBottom(); saveTimelineReadingState(); }}/>}
   </div></TimelineDisclosureContext.Provider>;
 }
 
@@ -337,7 +373,7 @@ function HistoryTurn({ sessionId, summary, activeOutputLabel, requestedSource }:
     <div data-timeline-event={summary.id}>
       <div className="mb-2 whitespace-pre-wrap text-body text-primary">{summary.prompt.text || '历史执行记录'}{summary.prompt.truncated && <span className="text-caption text-subtle">（指令已截断，展开读取完整记录）</span>}</div>
       <div className="mb-3 text-meta text-subtle">{labels[summary.status] ?? summary.status} · {summary.toolCount} 次工具调用 · 事件 {summary.firstSequence}–{summary.lastSequence}{summary.artifactReferences.length > 0 && ` · ${summary.artifactReferences.length} 个产物引用`}{summary.artifactReferencesTruncated && '（引用清单已截断，展开查看全部）'}</div>
-      {(!open || !detail.isSuccess) && summary.output.text && <MarkdownContent>{summary.output.text}</MarkdownContent>}
+      {(!open || !detail.isSuccess) && summary.output.text && <div className="assistant-output markdown text-body text-primary"><MarkdownContent>{summary.output.text}</MarkdownContent></div>}
       {(!open || !detail.isSuccess) && summary.output.truncated && <p className="text-caption text-subtle">最终输出已截断；展开可读取完整内容。</p>}
     </div>
     <button className="my-2 min-h-10 text-caption text-info" aria-expanded={open} onClick={() => setOpen(!open)}>{open ? '收起完整记录' : '展开完整记录'}</button>

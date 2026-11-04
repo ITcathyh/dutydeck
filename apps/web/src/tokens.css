@@ -119,6 +119,22 @@
   --code-inline-bg: #eeede7;
   --code-inline-text: #292b27;
   --code-inline-border: #e4e3dc;
+
+  /* 只读分享页：品牌光晕（橙棕为主、紫色点缀）、浮起的结论卡、毛玻璃细条与执行中光边。 */
+  --share-glow-primary: rgba(222, 150, 108, .34);
+  --share-glow-accent: rgba(124, 58, 237, .10);
+  --share-glow-warm: rgba(236, 200, 150, .30);
+  --share-edge: linear-gradient(90deg, transparent, rgba(166, 85, 53, .45) 30%, rgba(124, 58, 237, .28) 70%, transparent);
+  --share-card-shadow: 0 0 0 1px rgba(41, 43, 39, .06), 0 1px 2px rgba(41, 43, 39, .04), 0 24px 48px -24px rgba(110, 60, 30, .22);
+  --share-failure-shadow: 0 24px 48px -28px rgba(176, 82, 72, .5);
+  --share-glass: rgba(250, 249, 246, .74);
+  --share-row-hover: rgba(166, 85, 53, .045);
+  --share-live-primary: rgba(166, 85, 53, .70);
+  --share-live-accent: rgba(124, 58, 237, .50);
+  --share-live-glow: rgba(166, 85, 53, .38);
+  --share-avatar: linear-gradient(135deg, #c27450, #8a5bd8);
+  --share-avatar-text: #fffefa;
+  --share-brand-shadow: 0 2px 8px -2px rgba(0, 0, 0, .35);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -189,6 +205,21 @@
     --code-inline-bg: #2d322c;
     --code-inline-text: #eaece4;
     --code-inline-border: #3a4037;
+
+    --share-glow-primary: rgba(196, 98, 58, .24);
+    --share-glow-accent: rgba(124, 58, 237, .22);
+    --share-glow-warm: rgba(224, 160, 128, .10);
+    --share-edge: linear-gradient(90deg, transparent, rgba(224, 160, 128, .55) 30%, rgba(167, 139, 250, .42) 70%, transparent);
+    --share-card-shadow: 0 0 0 1px rgba(255, 255, 255, .07), 0 1px 2px rgba(0, 0, 0, .4), 0 28px 60px -24px rgba(0, 0, 0, .65);
+    --share-failure-shadow: 0 24px 48px -28px rgba(0, 0, 0, .7);
+    --share-glass: rgba(30, 33, 30, .72);
+    --share-row-hover: rgba(224, 160, 128, .05);
+    --share-live-primary: rgba(224, 160, 128, .75);
+    --share-live-accent: rgba(167, 139, 250, .55);
+    --share-live-glow: rgba(224, 160, 128, .30);
+    --share-avatar: linear-gradient(135deg, #b0603e, #7a52c4);
+    --share-avatar-text: #fffefa;
+    --share-brand-shadow: 0 2px 8px -2px rgba(0, 0, 0, .6);
   }
 }
 
@@ -259,6 +290,21 @@
   --code-inline-bg: #2d322c;
   --code-inline-text: #eaece4;
   --code-inline-border: #3a4037;
+
+  --share-glow-primary: rgba(196, 98, 58, .24);
+  --share-glow-accent: rgba(124, 58, 237, .22);
+  --share-glow-warm: rgba(224, 160, 128, .10);
+  --share-edge: linear-gradient(90deg, transparent, rgba(224, 160, 128, .55) 30%, rgba(167, 139, 250, .42) 70%, transparent);
+  --share-card-shadow: 0 0 0 1px rgba(255, 255, 255, .07), 0 1px 2px rgba(0, 0, 0, .4), 0 28px 60px -24px rgba(0, 0, 0, .65);
+  --share-failure-shadow: 0 24px 48px -28px rgba(0, 0, 0, .7);
+  --share-glass: rgba(30, 33, 30, .72);
+  --share-row-hover: rgba(224, 160, 128, .05);
+  --share-live-primary: rgba(224, 160, 128, .75);
+  --share-live-accent: rgba(167, 139, 250, .55);
+  --share-live-glow: rgba(224, 160, 128, .30);
+  --share-avatar: linear-gradient(135deg, #b0603e, #7a52c4);
+  --share-avatar-text: #fffefa;
+  --share-brand-shadow: 0 2px 8px -2px rgba(0, 0, 0, .6);
 }
 
 @media (max-width: 767px) {
