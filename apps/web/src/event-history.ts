@@ -30,7 +30,7 @@ export function mergeReconciledEvents(current: EventWindow | undefined, incoming
   // input where deduplication and ordering are actually needed.
   let ordered = true;
   for (let index = 1; index < incoming.length; index++) {
-    if (incoming[index - 1]!.sequence >= incoming[index]!.sequence) {
+    if (!(incoming[index - 1]!.sequence < incoming[index]!.sequence)) {
       ordered = false;
       break;
     }

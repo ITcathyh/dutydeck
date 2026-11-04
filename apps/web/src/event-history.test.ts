@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { api, type DockEvent } from './api';
-import { completeEventHistory, createEventWindow, loadHistoryRange, loadProjectedHistory, mergeLiveEvent, newestSequence } from './event-history';
+import { completeEventHistory, createEventWindow, loadHistoryRange, loadProjectedHistory, mergeLiveEvent, mergeReconciledEvents, newestSequence } from './event-history';
 
 const event = (sequence: number, text = String(sequence)): DockEvent => ({ id: `e-${sequence}`, sequence, type: 'text', timestamp: '', data: { text } });
 
@@ -95,5 +95,12 @@ describe('projected event history', () => {
     expect(window.events.map(item => item.sequence)).toEqual(Array.from({ length: 1_207 }, (_, index) => index + 1));
     expect(window.events[1_204]?.data.text).toBe('updated');
     expect(newestSequence(window)).toBe(1_207);
+  });
+
+  it('keeps the fallback deduplication semantics for NaN sequences', () => {
+    const first = event(Number.NaN, 'first');
+    const second = event(Number.NaN, 'second');
+    const result = mergeReconciledEvents(createEventWindow([event(1)]), [first, second]);
+    expect(result.events.filter(item => Number.isNaN(item.sequence))).toEqual([second]);
   });
 });
