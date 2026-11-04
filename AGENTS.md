@@ -40,7 +40,7 @@ pnpm exec tsx apps/server/src/cli.ts --local-only --port 14310 --no-lark-listen
 - **任务与恢复**：沿用执行账本和原生回执区分未提交、执行中与结果未知。超时、断线或重启不能当作“没有执行”自动重发；改生命周期时覆盖停止、迟到回执和恢复后的轮次归属，不能仅凭终端出现文本判完成。入口在 `packages/agent-runtime/`，跨层回归在 `tests/`。
 - **数据库升级**：结构变化同步 `packages/storage/src/schema.ts` 与 `migrations.ts`，追加迁移版本；测试已有数据升级、重复打开和外键完整性。旧程序会拒绝更高 schema，不能把切回旧代码当作数据库回滚。
 - **打包入口**：新增共享包、子路径导出或运行时资源时，核对包 `exports/files`、根与 Web 的 Vitest alias、`apps/server/scripts/build.mjs` 的打包映射和资源复制；源码测试通过不能证明发布产物可运行。
-- 用户可见的行为、命令或配置变化，同一个改动里更新 `README.md` 和 `README.en.md`；`CLAUDE.md` 只引用本文件，项目执行规则集中维护在这里。
+- 用户可见的行为、命令或配置变化，同一个改动里更新 `docs/zh/` 与 `docs/en/` 下对应的文档；`README.md` / `README.en.md` 只放概览，功能卖点、上手步骤或支持的 Agent 变化时同步两份 README。`CLAUDE.md` 只引用本文件，项目执行规则集中维护在这里。
 
 ## 验证
 

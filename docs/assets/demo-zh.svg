@@ -1,0 +1,113 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 560" width="1000" height="560" role="img" aria-label="Dutydeck demo">
+<defs>
+  <linearGradient id="lg-bg" x1="8" y1="5" x2="57" y2="61" gradientUnits="userSpaceOnUse"><stop stop-color="#292b31"/><stop offset="1" stop-color="#090a0d"/></linearGradient>
+  <linearGradient id="lg-beam" x1="18" y1="45" x2="48" y2="17" gradientUnits="userSpaceOnUse"><stop stop-color="#fff"/><stop offset="1" stop-color="#b8b9c2"/></linearGradient>
+  <linearGradient id="lg-pulse" x1="38" y1="20" x2="50" y2="31" gradientUnits="userSpaceOnUse"><stop stop-color="#c4b5fd"/><stop offset="1" stop-color="#7c3aed"/></linearGradient>
+  <linearGradient id="demo-bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#120f24"/><stop offset="1" stop-color="#0a1020"/></linearGradient>
+  <style>
+    text { white-space: pre; }
+    .pulse { transform-box: fill-box; transform-origin: center; animation: pulse 2.4s ease-in-out infinite; }
+    .flow { animation: dash 1.2s linear infinite; }
+    .flow-back { animation: dash 1.2s linear infinite reverse; }
+    .cursor { animation: blink 1s steps(1) infinite; }
+    @keyframes pulse { 0%,100% { transform: scale(1) } 50% { transform: scale(1.35) } }
+    @keyframes dash { to { stroke-dashoffset: -24 } }
+    @keyframes blink { 50% { opacity: 0 } }
+.a1 { opacity: 0; animation: ka1 14.0s linear infinite; }
+@keyframes ka1 { 0%, 2.14% { opacity: 0; transform: translateY(6px) } 4.64%, 94.29% { opacity: 1; transform: none } 96.79%, 100% { opacity: 0; transform: none } }
+.a2 { opacity: 0; animation: ka2 14.0s linear infinite; }
+@keyframes ka2 { 0%, 7.14% { opacity: 0; transform: translateY(6px) } 9.64%, 61.43% { opacity: 1; transform: none } 63.93%, 100% { opacity: 0; transform: none } }
+.a3 { opacity: 0; animation: ka3 14.0s linear infinite; }
+@keyframes ka3 { 0%, 63.93% { opacity: 0; transform: translateY(6px) } 66.43%, 94.29% { opacity: 1; transform: none } 96.79%, 100% { opacity: 0; transform: none } }
+.a4 { opacity: 0; animation: ka4 14.0s linear infinite; }
+@keyframes ka4 { 0%, 11.43% { opacity: 0; transform: translateY(6px) } 13.93%, 94.29% { opacity: 1; transform: none } 96.79%, 100% { opacity: 0; transform: none } }
+.a5 { opacity: 0; animation: ka5 14.0s linear infinite; }
+@keyframes ka5 { 0%, 12.86% { opacity: 0; transform: translateY(6px) } 15.36%, 60.00% { opacity: 1; transform: none } 62.50%, 100% { opacity: 0; transform: none } }
+.a6 { opacity: 0; animation: ka6 14.0s linear infinite; }
+@keyframes ka6 { 0%, 18.57% { opacity: 0; transform: translateY(6px) } 21.07%, 60.00% { opacity: 1; transform: none } 62.50%, 100% { opacity: 0; transform: none } }
+.a7 { opacity: 0; animation: ka7 14.0s linear infinite; }
+@keyframes ka7 { 0%, 24.29% { opacity: 0; transform: translateY(6px) } 26.79%, 60.00% { opacity: 1; transform: none } 62.50%, 100% { opacity: 0; transform: none } }
+.a8 { opacity: 0; animation: ka8 14.0s linear infinite; }
+@keyframes ka8 { 0%, 30.00% { opacity: 0; transform: translateY(6px) } 32.50%, 60.00% { opacity: 1; transform: none } 62.50%, 100% { opacity: 0; transform: none } }
+.a9 { opacity: 0; animation: ka9 14.0s linear infinite; }
+@keyframes ka9 { 0%, 37.14% { opacity: 0; transform: translateY(6px) } 39.64%, 52.14% { opacity: 1; transform: none } 54.64%, 100% { opacity: 0; transform: none } }
+.a10 { opacity: 0; animation: ka10 14.0s linear infinite; }
+@keyframes ka10 { 0%, 46.43% { opacity: 0; transform: none } 48.93%, 50.71% { opacity: 1; transform: none } 53.21%, 100% { opacity: 0; transform: none } }
+.a11 { opacity: 0; animation: ka11 14.0s linear infinite; }
+@keyframes ka11 { 0%, 54.64% { opacity: 0; transform: translateY(6px) } 57.14%, 94.29% { opacity: 1; transform: none } 96.79%, 100% { opacity: 0; transform: none } }
+.a12 { opacity: 0; animation: ka12 14.0s linear infinite; }
+@keyframes ka12 { 0%, 62.50% { opacity: 0; transform: translateY(6px) } 65.00%, 94.29% { opacity: 1; transform: none } 96.79%, 100% { opacity: 0; transform: none } }
+.a13 { opacity: 0; animation: ka13 14.0s linear infinite; }
+@keyframes ka13 { 0%, 10.71% { opacity: 0; transform: translateY(6px) } 13.21%, 94.29% { opacity: 1; transform: none } 96.79%, 100% { opacity: 0; transform: none } }
+.a14 { opacity: 0; animation: ka14 14.0s linear infinite; }
+@keyframes ka14 { 0%, 13.57% { opacity: 0; transform: translateY(6px) } 16.07%, 94.29% { opacity: 1; transform: none } 96.79%, 100% { opacity: 0; transform: none } }
+.a15 { opacity: 0; animation: ka15 14.0s linear infinite; }
+@keyframes ka15 { 0%, 18.57% { opacity: 0; transform: translateY(6px) } 21.07%, 94.29% { opacity: 1; transform: none } 96.79%, 100% { opacity: 0; transform: none } }
+.a16 { opacity: 0; animation: ka16 14.0s linear infinite; }
+@keyframes ka16 { 0%, 24.29% { opacity: 0; transform: translateY(6px) } 26.79%, 94.29% { opacity: 1; transform: none } 96.79%, 100% { opacity: 0; transform: none } }
+.a17 { opacity: 0; animation: ka17 14.0s linear infinite; }
+@keyframes ka17 { 0%, 30.00% { opacity: 0; transform: translateY(6px) } 32.50%, 94.29% { opacity: 1; transform: none } 96.79%, 100% { opacity: 0; transform: none } }
+.a18 { opacity: 0; animation: ka18 14.0s linear infinite; }
+@keyframes ka18 { 0%, 35.71% { opacity: 0; transform: translateY(6px) } 38.21%, 94.29% { opacity: 1; transform: none } 96.79%, 100% { opacity: 0; transform: none } }
+.a19 { opacity: 0; animation: ka19 14.0s linear infinite; }
+@keyframes ka19 { 0%, 38.57% { opacity: 0; transform: translateY(6px) } 41.07%, 52.14% { opacity: 1; transform: none } 54.64%, 100% { opacity: 0; transform: none } }
+.a20 { opacity: 0; animation: ka20 14.0s linear infinite; }
+@keyframes ka20 { 0%, 54.64% { opacity: 0; transform: translateY(6px) } 57.14%, 94.29% { opacity: 1; transform: none } 96.79%, 100% { opacity: 0; transform: none } }
+.a21 { opacity: 0; animation: ka21 14.0s linear infinite; }
+@keyframes ka21 { 0%, 57.14% { opacity: 0; transform: translateY(6px) } 59.64%, 94.29% { opacity: 1; transform: none } 96.79%, 100% { opacity: 0; transform: none } }
+.a22 { opacity: 0; animation: ka22 14.0s linear infinite; }
+@keyframes ka22 { 0%, 61.43% { opacity: 0; transform: translateY(6px) } 63.93%, 94.29% { opacity: 1; transform: none } 96.79%, 100% { opacity: 0; transform: none } }
+  </style>
+</defs>
+<rect width="1000" height="560" rx="24" fill="url(#demo-bg)"/>
+<rect x="20" y="20" width="440" height="520" rx="16" fill="#f5f6f7"/>
+<path d="M36 20h408a16 16 0 0 1 16 16v32H20V36a16 16 0 0 1 16-16z" fill="#ffffff"/>
+<line x1="20" y1="68" x2="460" y2="68" stroke="#e4e6ea"/>
+<text x="40" y="50" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="16" font-weight="700" fill="#1f2329" text-anchor="start" >研发群</text>
+<text x="96" y="50" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="13" font-weight="400" fill="#8f959e" text-anchor="start" >· 5 人</text>
+<g class="a1"><circle cx="46" cy="102" r="14" fill="#7c5cff"/><text x="46" y="107" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="14" font-weight="700" fill="#fff" text-anchor="middle" >A</text><text x="70" y="94" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="12" font-weight="400" fill="#8f959e" text-anchor="start" >Alice</text><rect x="70" y="100" width="372" height="38" rx="8" fill="#e1eaff"/><text x="82" y="124" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="14" font-weight="400" fill="#1f2329" text-anchor="start" >@研发助手 给结算页加满减优惠，并补单测</text></g>
+<g class="a2"><rect x="70" y="144" width="40" height="22" rx="11" fill="#ffffff" stroke="#e4e6ea"/><text x="90" y="160" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="13" font-weight="400" fill="#1f2329" text-anchor="middle" >👌</text></g>
+<g class="a3"><rect x="70" y="144" width="40" height="22" rx="11" fill="#ffffff" stroke="#e4e6ea"/><text x="90" y="160" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="13" font-weight="400" fill="#1f2329" text-anchor="middle" >✅</text></g>
+<g class="a4"><g transform="translate(32 182) scale(0.4375)">
+  <rect width="64" height="64" rx="16" fill="url(#lg-bg)" stroke="#ffffff22"/>
+  <path d="M42 17H29c-8.3 0-15 6.7-15 15s6.7 15 15 15h13" fill="none" stroke="url(#lg-beam)" stroke-width="5" stroke-linecap="round"/>
+  <path d="M42 25H30a7 7 0 0 0 0 14h12" fill="none" stroke="#71717a" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="45" cy="25" r="5" fill="url(#lg-pulse)" stroke="#ddd6fe" stroke-width="1.5"/>
+  <circle cx="45" cy="39" r="3" fill="#f4f4f5"/>
+</g><text x="70" y="194" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="12" font-weight="400" fill="#8f959e" text-anchor="start" >研发助手</text><rect x="122" y="183" width="46" height="16" rx="4" fill="#eef1ff"/><text x="127" y="195" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="10" font-weight="400" fill="#3370ff" text-anchor="start" >机器人</text></g>
+<g class="a5"><rect x="70" y="204" width="372" height="156" rx="10" fill="#ffffff" stroke="#dee0e3"/><path d="M80 204h352a10 10 0 0 1 10 10v42H70V214a10 10 0 0 1 10-10z" fill="#3370ff"/><text x="86" y="228" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="15" font-weight="700" fill="#fff" text-anchor="start" >给结算页加满减优惠</text><text x="86" y="246" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="12" font-weight="400" fill="#ffffffcc" text-anchor="start" >Claude Code · 执行中</text><rect x="384" y="324" width="42" height="26" rx="6" fill="#fff" stroke="#f54a45"/><text x="405.0" y="342" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="12" font-weight="400" fill="#f54a45" text-anchor="middle" >中断</text></g>
+<g class="a6"><circle cx="90" cy="272" r="3.5" fill="#3370ff"/><text x="100" y="276" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="13" font-weight="400" fill="#1f2329" text-anchor="start" >读取 src/cart.ts</text></g>
+<g class="a7"><circle cx="90" cy="294" r="3.5" fill="#3370ff"/><text x="100" y="298" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="13" font-weight="400" fill="#1f2329" text-anchor="start" >修改 src/cart.ts</text><text x="300" y="298" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono','Noto Sans Mono CJK SC',monospace" font-size="12" font-weight="600" fill="#2ea121" text-anchor="start" >+38 −6</text></g>
+<g class="a8"><circle cx="90" cy="316" r="3.5" fill="#3370ff"/><text x="100" y="320" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="13" font-weight="400" fill="#1f2329" text-anchor="start" >新增 src/cart.test.ts</text><text x="300" y="320" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono','Noto Sans Mono CJK SC',monospace" font-size="12" font-weight="600" fill="#2ea121" text-anchor="start" >+48</text></g>
+<g class="a9"><rect x="70" y="372" width="372" height="112" rx="10" fill="#ffffff" stroke="#dee0e3"/><path d="M80 372h352a10 10 0 0 1 10 10v30H70V382a10 10 0 0 1 10-10z" fill="#ff8800"/><text x="86" y="397" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="15" font-weight="700" fill="#fff" text-anchor="start" >待审批</text><text x="86" y="434" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="13" font-weight="600" fill="#1f2329" text-anchor="start" >执行命令：pnpm test</text><rect x="86" y="446" width="74" height="28" rx="6" fill="#3370ff" stroke="#3370ff"/><text x="123.0" y="465" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="12" font-weight="600" fill="#fff" text-anchor="middle" >允许本次</text><rect x="168" y="446" width="126" height="28" rx="6" fill="#fff" stroke="#d0d3d6"/><text x="231.0" y="465" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="12" font-weight="400" fill="#1f2329" text-anchor="middle" >本会话允许此命令</text><rect x="302" y="446" width="48" height="28" rx="6" fill="#fff" stroke="#d0d3d6"/><text x="326.0" y="465" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="12" font-weight="400" fill="#1f2329" text-anchor="middle" >拒绝</text></g>
+<g class="a10"><circle cx="123" cy="460" r="16" fill="#ffffff66" stroke="#fff" stroke-width="2"/></g>
+<g class="a11"><rect x="70" y="372" width="372" height="36" rx="10" fill="#ffffff" stroke="#dee0e3"/><circle cx="90" cy="390" r="8" fill="#2ea121"/><text x="90" y="394" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="11" font-weight="700" fill="#fff" text-anchor="middle" >✓</text><text x="106" y="395" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="12" font-weight="400" fill="#646a73" text-anchor="start" >已允许 · Alice · 执行命令：pnpm test</text></g>
+<g class="a12"><rect x="70" y="204" width="372" height="156" rx="10" fill="#ffffff" stroke="#dee0e3"/><path d="M80 204h352a10 10 0 0 1 10 10v42H70V214a10 10 0 0 1 10-10z" fill="#2ea121"/><text x="86" y="228" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="15" font-weight="700" fill="#fff" text-anchor="start" >已完成</text><text x="86" y="246" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="12" font-weight="400" fill="#ffffffcc" text-anchor="start" >给结算页加满减优惠</text><text x="86" y="278" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="13" font-weight="400" fill="#1f2329" text-anchor="start" >满减规则已接入结算流程，新增 6 个单测。</text><text x="86" y="304" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="13" fill="#1f2329">📄 改动 3 个文件 <tspan font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono','Noto Sans Mono CJK SC',monospace" font-size="12" font-weight="600" fill="#2ea121">+86 −12</tspan><tspan fill="#3370ff"> · 查看改动</tspan></text><text x="86" y="332" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="13" font-weight="400" fill="#1f2329" text-anchor="start" >✅ 验证通过 · pnpm test 退出码 0</text></g>
+<path id="wire" d="M462 280H546" stroke="#7c3aed55" stroke-width="2"/>
+<path class="flow" d="M462 270H546" stroke="#c4b5fd" stroke-width="2" stroke-dasharray="4 8"/>
+<path class="flow-back" d="M462 290H546" stroke="#93c5fd" stroke-width="2" stroke-dasharray="4 8"/>
+<g transform="translate(482 228) scale(0.53125)">
+  <rect width="64" height="64" rx="16" fill="url(#lg-bg)" stroke="#ffffff22"/>
+  <path d="M42 17H29c-8.3 0-15 6.7-15 15s6.7 15 15 15h13" fill="none" stroke="url(#lg-beam)" stroke-width="5" stroke-linecap="round"/>
+  <path d="M42 25H30a7 7 0 0 0 0 14h12" fill="none" stroke="#71717a" stroke-width="4" stroke-linecap="round"/>
+  <circle class="pulse" cx="45" cy="25" r="5" fill="url(#lg-pulse)" stroke="#ddd6fe" stroke-width="1.5"/>
+  <circle cx="45" cy="39" r="3" fill="#f4f4f5"/>
+</g>
+<text x="504" y="320" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="11" font-weight="700" fill="#e4e4f7" text-anchor="middle" >Dutydeck</text>
+<text x="504" y="335" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="10" font-weight="400" fill="#a9a6d6" text-anchor="middle" >守护进程</text>
+<rect x="548" y="20" width="432" height="520" rx="16" fill="#0d1117" stroke="#ffffff1a"/>
+<circle cx="572" cy="44" r="6" fill="#ff5f57"/><circle cx="592" cy="44" r="6" fill="#febc2e"/><circle cx="612" cy="44" r="6" fill="#28c840"/>
+<text x="764" y="48" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono','Noto Sans Mono CJK SC',monospace" font-size="12" font-weight="400" fill="#8b949e" text-anchor="middle" >devbox — ~/acme-shop（独立 worktree）</text>
+<line x1="548" y1="68" x2="980" y2="68" stroke="#ffffff14"/>
+<g class="a13"><text x="568" y="98" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono','Noto Sans Mono CJK SC',monospace" font-size="13" font-weight="400" fill="#8b949e" text-anchor="start" >~/acme-shop  ⎇ dutydeck/discount-7f3a</text></g>
+<g class="a14"><text x="568" y="124" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono','Noto Sans Mono CJK SC',monospace" font-size="13" font-weight="600" fill="#e6edf3" text-anchor="start" >&gt; 给结算页加满减优惠，并补单测</text></g>
+<g class="a15"><text x="568" y="156" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono','Noto Sans Mono CJK SC',monospace" font-size="13" font-weight="400" fill="#d2a8ff" text-anchor="start" >⏺ Read(src/cart.ts)</text><text x="568" y="178" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono','Noto Sans Mono CJK SC',monospace" font-size="13" font-weight="400" fill="#8b949e" text-anchor="start" >  ⎿  214 lines</text></g>
+<g class="a16"><text x="568" y="206" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono','Noto Sans Mono CJK SC',monospace" font-size="13" font-weight="400" fill="#d2a8ff" text-anchor="start" >⏺ Update(src/cart.ts)</text><text x="568" y="228" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono','Noto Sans Mono CJK SC',monospace" font-size="13" font-weight="400" fill="#8b949e" text-anchor="start" >  ⎿  </text><text x="614" y="228" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono','Noto Sans Mono CJK SC',monospace" font-size="13" font-weight="600" fill="#3fb950" text-anchor="start" >+38</text><text x="648" y="228" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono','Noto Sans Mono CJK SC',monospace" font-size="13" font-weight="600" fill="#f85149" text-anchor="start" >−6</text></g>
+<g class="a17"><text x="568" y="256" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono','Noto Sans Mono CJK SC',monospace" font-size="13" font-weight="400" fill="#d2a8ff" text-anchor="start" >⏺ Write(src/cart.test.ts)</text><text x="568" y="278" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono','Noto Sans Mono CJK SC',monospace" font-size="13" font-weight="400" fill="#8b949e" text-anchor="start" >  ⎿  </text><text x="614" y="278" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono','Noto Sans Mono CJK SC',monospace" font-size="13" font-weight="600" fill="#3fb950" text-anchor="start" >+48</text></g>
+<g class="a18"><text x="568" y="306" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono','Noto Sans Mono CJK SC',monospace" font-size="13" font-weight="400" fill="#d2a8ff" text-anchor="start" >⏺ Bash(pnpm test)</text></g>
+<g class="a19"><text x="568" y="328" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono','Noto Sans Mono CJK SC',monospace" font-size="13" font-weight="400" fill="#e3b341" text-anchor="start" >  ⏸ 等待飞书审批…</text></g>
+<g class="a20"><text x="568" y="328" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono','Noto Sans Mono CJK SC',monospace" font-size="13" font-weight="600" fill="#3fb950" text-anchor="start" >  ✓ 42 passed · 1.8s</text></g>
+<g class="a21"><text x="568" y="362" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono','Noto Sans Mono CJK SC',monospace" font-size="13" font-weight="400" fill="#e6edf3" text-anchor="start" >⏺ 满减规则已接入结算流程，新增 6 个单测。</text></g>
+<g class="a22"><text x="568" y="396" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono','Noto Sans Mono CJK SC',monospace" font-size="13" font-weight="600" fill="#c4b5fd" text-anchor="start" >[dutydeck] 验证 pnpm test → 退出码 0 ✓</text></g>
+<rect class="cursor" x="568" y="414" width="8" height="16" fill="#e6edf3"/>
+</svg>

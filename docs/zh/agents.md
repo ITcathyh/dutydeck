@@ -1,0 +1,142 @@
+# Agent 配置与权限姿态 <a id="agent-config"></a>
+
+> [← 返回 README](../../README.md) · [全部文档](../../README.md#docs) · [English](../en/agents.md)
+
+Dutydeck 默认优先用终端适配器运行本机已安装的 CLI Agent，新会话的终端后端默认是 `tmux`；同一入口同时支持终端与 ACP 时优先终端。没有可用终端适配器或其命令不可用时，仍按原规则发现 ACP（Agent Client Protocol）入口。已配置的 Herdr 后端、已有会话的协议和权限保持不变；`DUTYDECK_AGENTS_JSON` 显式指定的协议、命令和权限优先。
+
+内置 CodeM（`codem`）终端适配器使用显式 `--session` / `--resume` 会话标识，不使用“最近会话”猜测；需要本机已安装 `codem` 命令，权限为 `full-trust` 时追加 `--yolo`。
+
+内置 Codex 的 `codex`、`codex-cli` 终端入口及「Codex (ACP)」（`codex-acp`）在发现探测和启动执行进程时，优先遵循显式设置的 `CODEX_PATH`，支持指向 `PATH` 之外的可执行程序；未显式设置时使用 Dutydeck 进程 `PATH` 中的 Codex，沿用用户的登录和配置；升级用户安装的 Codex 后，新启动的进程自动使用新版本。找不到用户安装或显式指定路径的 Codex 时会报错，不使用 ACP 适配器缓存中的版本。
+
+Codex 终端 Agent 会从 `CODEX_HOME/config.toml` 读取 `[profiles.<name>]` 配置，并在 Web 新建任务时提供 profile 选择；选择结果只作用于新会话，未选择时沿用 Agent 默认 profile。profile 名称不会写入 Agent 的环境变量。
+
+## 1. 自定义 Agent (`DUTYDECK_AGENTS_JSON`)
+
+用环境变量 `DUTYDECK_AGENTS_JSON` 注册自定义 Agent。
+
+### 示例：接入 Claude Code（经代理网关）
+```json
+[
+  {
+    "id": "ccflash",
+    "name": "CCFlash (Claude Code)",
+    "protocol": "pty-cli",
+    "adapterId": "claude-code",
+    "command": "claude",
+    "args": ["--settings", "/home/username/.claude/ccflash.settings.json"],
+    "model": "claude-sonnet-5-5",
+    "permissionMode": "ask"
+  }
+]
+```
+
+配套的 `ccflash.settings.json`：
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8320",
+    "ANTHROPIC_AUTH_TOKEN": "your-proxy-token"
+  }
+}
+```
+
+> **最佳实践**：
+> - 用 `--settings` 指定独立配置文件，避免多任务并发时改动全局 `~/.claude/settings.json`。
+> - `command` 必须是二进制的绝对路径或 `PATH` 里的可执行程序，不能用 shell alias。
+> - `command` 找不到的 Agent **不会被登记**。`dutydeck doctor` 会报 fail 并点名这个 Agent 和命令，daemon 启动日志也会告警。
+> - 默认的 tmux 后端下，Agent 配置里的 `env.PATH`（包括空串）会原样作为 Agent 进程的 `PATH`，`command` 只写命令名时也在这个 `PATH` 里查找；是否登记仍按 Dutydeck 服务自己的 `PATH` 判断。自定义 `PATH` 时要包含 `command` 所在目录，或把 `command` 写成绝对路径，否则 Agent 能登记却启动失败。
+> - `DUTYDECK_AGENTS_JSON` 写错（JSON 语法或字段）时，报错会点名这个变量。
+
+### 示例：接入标准 ACP Agent
+```json
+[
+  {
+    "id": "custom-acp",
+    "name": "My Custom ACP",
+    "protocol": "acp",
+    "command": "/usr/local/bin/my-acp-agent",
+    "args": ["serve"],
+    "permissionMode": "ask"
+  }
+]
+```
+
+`timeout` 以秒为单位，默认 `600`，必须能精确换算为 1–2147483647 的整数毫秒（即 `0.001`–`2147483.647` 秒）。模型目录的备用 CLI 探测使用该 Agent 实际配置的直接 CLI 可执行路径、清洗后的 `env` 和 `cwd`，只透传已支持的全局选项（带值选项须分开参数和值）。其他启动参数、等号形式或包装命令不执行备用探测，保留配置中的默认模型，不替换成宿主命令。
+
+### 终端任务状态与恢复
+
+Claude Code 终端会话优先使用 OSC 7501 状态信号判断忙碌、等待审批和完成；信号不可用时自动回退到屏幕识别，后续有效信号可重新接管；与本轮输入绑定、且写在最新忙态信号之后的原生终态（包括守护进程重启接回的轮次），或真实审批已裁决时，可解除丢失信号留下的忙态。
+
+终端模式（`pty-cli`）CLI 空闲时自行退出后，下一条任务会先确认旧进程已退出并退役，再按既有原生会话恢复规则重建终端；无法确认安全恢复时，该任务会以“未提交”失败。已提交但结果未知的任务仍需核对，不自动重发。
+
+Unix PTY 在退出关闭读端前最多补读 1 MiB 尾部数据，保留 UTF-8 解码、暂停/恢复和先输出后退出的顺序；直接终端与 pane 中继使用同一实现。此退出路径已在 Linux / Node 22 验证，macOS 尚未验证，Windows 沿用原实现。
+
+Claude Code 日志已显示支持整轮结束标记（`turn_duration`）时，分块回答会等该标记再结束，保留同轮后续文本、Stop hook 收尾和晚到错误；没有该标记的旧格式保留兼容收尾。调用 Skill 工具产生的工具上下文不会被误判为新的用户输入，Skill 调用结束后的最终答案和任务完成事件正常交付。
+
+Claude Code 在 Linux 上提供可核验的原生 PID 状态时，Dutydeck 会跟随同一已验证进程在 `/clear`、`/resume` 或 `/branch` 后切换采集来源，并持久保存新的恢复身份；新文件中的已有历史不重复投递。执行中的轮次遇到来源切换会进入“结果未知”，需走既有人工核对入口，不自动重发。空文件或只有元数据的新文件不作为冷恢复目标，也不会因此退回切换前的旧上下文。缺少进程出生标识等字段的旧版 CLI，以及 macOS，继续使用既有 marker 归属路径，不承诺跟随原生切换。
+
+Linux 上，原生 PID 状态缺失或暂时无法核验时仍按既有 marker 采集；这类情况或最新会话身份尚未确认写入数据库时，自动空闲清理和正常服务关闭会保留原终端。只有能完整核实为原会话进程、已确认空闲且为 `full-trust`，并且没有未决任务、权限等待或后台任务的 tmux 终端可自动重新接管；其余保持阻塞，等待人工确认。
+
+自动空闲清理关闭终端后，最多等 10 秒确认原进程都已退出（Claude 终端外层的状态转发进程会随 Claude 一起退出）。仍没能确认时，服务日志记一条告警，发给这个会话的消息直接报“停止受阻”（`DRIVER_STOP_UNVERIFIED`），不会排进队列不动；后台 45 秒后复核，之后间隔加倍、最长 30 分钟一次，确认退出后自动恢复，不用重启或手动回收；第一次复核仍未通过时在会话里提醒一次（飞书会话发到原话题）。原生会话一直确认不了的终端（比如卡在启动确认框），闲置超过释放阈值再加 18 小时后照常回收并记一条告警；原生记录留在磁盘上，回收只结束进程。服务启动时，某个会话保存的工作目录不在了（比如 worktree 被删），只跳过这个会话并在日志和会话里记下原因，其他会话照常恢复。
+
+Codex 在同一原生会话切换日志文件时，会校验会话归属、读完旧文件的完整记录，再接续新文件；复制的历史不会重复投递，其他会话的文件不会被接入。
+
+Codex 和 TraeX 恢复原生会话时，只使用能确认属于当前会话的记录；继承的上下文不足以证明归属时会拒绝恢复，避免续接其他会话。Codex 会话空闲释放后，下一轮会恢复已验证的原生上下文。
+
+Codex 和 TraeX 终端任务按当前原生轮次的成功、失败或取消事件结算，部分回答不抵消随后出现的失败；取消记为中断。Codex 恢复中的轮次即使尚无正文输出，只要确认了对应输入和失败或取消终态，也会按该终态结束。TraeX 可读取含大型模型目录的会话元数据，正常接收最终回答并结束任务；恢复会先读完同一会话的旧日志段，再读取新段；新版 canonical 记录保留过程、输入回执和最终回答，并去除镜像重复。
+
+TraeX 用完整终端画面区分忙碌与就绪，兼容独立一行的快捷键页脚；正文或草稿里的状态引用不作为活动页脚。Codex 支持 `›` / `»` 输入提示及 0.164.0 仅显示模型与每周剩余额度的状态栏，信任和更新菜单不视为输入就绪。Cursor 普通输入只发一次 Enter，保留多行输入和普通任务排队；不附带空输入的第二次控制动作。Claude Code、Seed、Relay 的空输入框可被识别为空闲，以便继续处理待确认任务的恢复操作；支持空输入框与权限模式栏之间最多两行自定义 `statusLine`，恢复会话后也能提交首条消息。
+
+Codex 当前父轮明确启动的直接子任务若报告额度耗尽或请求限流，Web 和飞书进度记录会显示固定诊断，不展示上游错误原文。父任务继续；Dutydeck 不因该诊断自动重试或切换账号。这是有界的尽力观察，恢复前已启动的子任务不会补报；TraeX 尚未启用此诊断。
+
+Claude 的后台 Agent、Bash 和 Monitor 按原生任务 ID 单独计数。主轮已有明确回答、且 CLI 没有继续等待子任务时可以完成，后台任务继续运行；旧版 pending 计数和明确的 Waiting 画面仍等待合并结果。晚到通知保留原输入归属，不成为下一轮回答。重启会重建后台状态，非持久 Monitor 按 CLI 期限到期；`/clear` 后旧日志仅用于核对已知后台任务的停止通知。Claude 在已知项目 memory 目录成功执行 Write/Edit 后，最终结果保留同轮正文和后记；普通业务文件或 Bash 命令不触发此规则。
+
+Codex 明确报告模型容量已满、且本次没有业务工具或权限调用时，最多自动续跑两次，分别等待 30 秒和 90 秒，每次单独记录执行 attempt。停止或新输入取消尚未提交的续跑；每次提交重新检查原请求者的当前权限，重启保留等待时间和取消状态。提交或完成结果未知时不自动重放；429、额度、鉴权和普通服务端错误不属于模型容量错误。多步骤工作会等待这条已核验的自动重试链，成功后继续下游步骤；人工另行重跑的结果不会被自动认领。
+
+Codex 显示可识别的模型迁移菜单时，Dutydeck 只选 “Use existing model”，再等待输入框；选中行或菜单不明确时留给人工处理。终端采集 socket 支持较长或非 ASCII 的临时目录路径。
+
+### 终端模式 Agent 与飞书审批
+
+- Claude Code / Seed / Relay 的终端模式支持飞书审批，`ask` 和 `approve-reads` 都可用，靠 PermissionRequest hook 实现。
+- 其它终端模式 CLI 只能用 `full-trust`。已有 `ask` / `approve-reads` 机器人切换默认 Agent 时，保存会拒绝不支持审批的 Agent，保留原 Agent 与权限；不会自动提升权限。历史不兼容配置在会话启动时仍会报错，两条修法是：`dutydeck settings bot set <appId> permissionMode=full-trust fullTrustConfirmed=true`，或换成 ACP / Claude 终端模式 Agent。
+- 飞书会话里的 Claude 终端模式固定用 `default` 权限模式启动，本机 `~/.claude` 里设的 `auto` 等默认模式不生效。注意下面[已知限制](troubleshooting.md#known-limits)里的 allow 规则。
+
+---
+
+## 2. 权限模式 (Permission Posture)
+
+机器人（飞书）可用 `ask`、`approve-reads`、`full-trust`。`deny-all` 不能用于飞书机器人，只能用在 Agent 配置 / Web 会话上。
+
+| 权限模式 | 行为 | 适用 |
+|---|---|---|
+| `ask` | 写文件、执行命令等特权操作挂起，在飞书 / Web 推送审批。**新建机器人的默认值**，前提是所选 Agent 支持飞书审批（见上） | 日常开发 |
+| `approve-reads` | 自动放行读取和搜索，写操作和命令执行需审批；访问网络不算读操作。支持 ACP 和 Claude 终端模式 | 代码审查、问题排查 |
+| `deny-all` | 自动拒绝一切特权操作。不能用于飞书机器人 | 只读探索 |
+| `full-trust` | 跳过所有确认，直接放行 | 隔离沙箱或无人值守流水线。所选 Agent 不支持飞书审批时，机器人只能用它，并需要确认 |
+
+Codex ACP 的非完全信任会话在每轮原生请求（包括恢复后）使用 `untrusted` 审批策略、用户审查和只读沙箱，写入或提权命令先交给 Dutydeck 审批；不会使用 Codex ACP 的自动审查。Codex 原生策略仍可直接放行其判定安全的读取，因此不保证每个只读动作都产生审批请求；`approve-reads` 也会放行执行端明确声明的读取和搜索。`full-trust` 明确使用原生完全访问策略。上述设置只作用于该子进程，不修改全局 Codex 配置。
+
+默认值按入口略有不同：`lark create` 默认 `ask`，所选 Agent 不支持审批时必须加 `--full-trust`；Web 向导里，所选 Agent 支持审批则默认 `ask`，否则默认 `full-trust`。
+
+飞书邮箱准入与身份查询遇到已确认的账号无效、跨应用或不可见错误时，同一客户端最多缓存失败 60 秒，修复权限后可能需等待这段时间再试。机器人配置刷新或凭据更换会清除缓存；成功身份、限流、服务端错误、网络错误和超时不缓存，撤销权限仍会在后续查询时检查。
+
+---
+
+## 3. 核心环境变量一览
+
+| 环境变量 | 默认值 | 作用 |
+|---|---|---|
+| `DUTYDECK_HOST` | `127.0.0.1` | 监听 IP（局域网访问设为 `0.0.0.0`） |
+| `DUTYDECK_PORT` | `4310` | Web 与 API 端口 |
+| `DUTYDECK_AUTH` | `true` | 非本机访问是否要求认证（填 `false` 关闭；在非回环地址关闭认证会拒绝启动，除非加 `--unsafe-no-auth`） |
+| `DUTYDECK_DEFAULT_CWD` | 启动路径 | 默认工作区绝对路径 |
+| `DUTYDECK_DATABASE_URL` | `<cwd>/.dutydeck/dutydeck.db` | SQLite 数据库文件路径 |
+| `DUTYDECK_AGENTS_JSON` | `[]` | 自定义 Agent 注册列表 |
+| `DUTYDECK_CLEANUP_INTERVAL_MS` | `300000` | 周期清理间隔，整数毫秒，范围 1–2147483647 |
+| `DUTYDECK_DRIVER_IDLE_TIMEOUT_MS` | `21600000` | 空闲终端释放阈值，非负毫秒；`0` 禁用，不受周期定时器的 32 位上限限制；仍有原生后台任务的会话不释放 |
+| `DUTYDECK_USAGE_PRICING_JSON` | 内置价格表 | 整表覆盖用量估算的单价 |
+| `DUTYDECK_DEPLOY_WINDOW` | 不限 | `dutydeck deploy` 允许的时段，如 `10:00-11:00,16:00-17:00`（Asia/Shanghai） |
+| `LARK_APP_ID` | - | 仅 `dutydeck lark send` 等命令行发卡片的备用来源 |
+| `LARK_APP_SECRET` | - | 同上。机器人用 `dutydeck setup` 配置，Secret 存在机器人配置里，不需要它 |
+
+CI 相关的令牌和 webhook 密钥**不再是环境变量**，见[插件](plugins.md)。

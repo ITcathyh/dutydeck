@@ -17,8 +17,11 @@ apps/server/public
 # 端到端验收产物
 artifacts/
 
-# 本地文档、调研数据与登录二维码
-/docs/
+# 本地文档、调研数据与登录二维码；docs 下只有使用文档和 README 素材入库
+/docs/*
+!/docs/zh/
+!/docs/en/
+!/docs/assets/
 /.scratch_cost/
 /.bdev-codex-qr.png
 
