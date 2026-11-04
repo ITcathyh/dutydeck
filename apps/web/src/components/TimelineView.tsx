@@ -15,6 +15,7 @@ import { useTimelineDisclosure } from '../timeline-disclosure';
 import { MarkdownContent } from '../MarkdownContent';
 
 export type TimelineViewProps = {
+  fullWidth?: boolean;
   activeSessionId?: string;
   historyTurns?: HistoryTurnSummary[];
   sourceEvents?: DockEvent[];
@@ -96,7 +97,7 @@ const TimelineBody = memo(function TimelineBody({ timelineSections, activeOutput
 type TimelineTurn = { id: string; sections: TimelineSection[]; summary?: HistoryTurnSummary };
 type TimelineRow = TimelineTurn & { top: number; height: number };
 
-export function TimelineView({ historyTurns, sourceEvents, activeSessionId, readingScopeKey = activeSessionId ?? 'empty', visible: isVisible = true, eventsLoading, onResolvePermission, resolvingPermissionId, timeline, timelineSections, awaitingAnswer, hasOngoingActivity, latestUserIndex, activeOutputLabel, footer, renderProgress, hasOlder, loadedEventCount, olderError, loadOlder }: TimelineViewProps) {
+export function TimelineView({ fullWidth = false, historyTurns, sourceEvents, activeSessionId, readingScopeKey = activeSessionId ?? 'empty', visible: isVisible = true, eventsLoading, onResolvePermission, resolvingPermissionId, timeline, timelineSections, awaitingAnswer, hasOngoingActivity, latestUserIndex, activeOutputLabel, footer, renderProgress, hasOlder, loadedEventCount, olderError, loadOlder }: TimelineViewProps) {
   const reading = useMemo(() => getTimelineReadingState(readingScopeKey), [readingScopeKey]);
   const disclosures = reading.disclosures;
   const progressRef = useRef<HTMLDivElement>(null);
@@ -264,7 +265,7 @@ export function TimelineView({ historyTurns, sourceEvents, activeSessionId, read
   return <TimelineDisclosureContext.Provider value={disclosures}><div className="relative min-h-0 flex-1 bg-canvas">
     <div ref={timelineScroll.containerRef} onScroll={onScroll}
       style={{ overflowAnchor: 'none' }} data-timeline-scroll="true" data-history-start={historyTurns?.[0]?.firstSequence ?? timeline[0]?.sequence} data-history-loaded={loadedEventCount} data-history-complete={hasOlder === false} className="absolute inset-0 overscroll-contain overflow-y-auto">
-      <div className="mx-auto w-full max-w-[880px] px-5 py-8 sm:px-8 sm:py-10">
+      <div className={`mx-auto w-full py-8 sm:py-10 ${fullWidth ? 'px-3 sm:px-5' : 'max-w-[880px] px-5 sm:px-8'}`}>
         {eventsLoading
           ? <TimelineSkeleton/>
           : turns.length
