@@ -157,7 +157,7 @@ dutydeck setup
 dutydeck start && dutydeck doctor
 ```
 
-Open **http://127.0.0.1:4310** (no login for local requests). Click 「绑定飞书 Bot」 (Bind Lark bot) → 「一键创建飞书机器人」 (one-click create), finish the authorization, and start dispatching from Lark.
+Open `http://127.0.0.1:4310` (no login for local requests). Click 「绑定飞书 Bot」 (Bind Lark bot) → 「一键创建飞书机器人」 (one-click create), finish the authorization, and start dispatching from Lark.
 
 <sub>Scripted installs, development from source and more options: <a href="docs/en/getting-started.md">Getting started</a>.</sub>
 
@@ -177,36 +177,9 @@ Open **http://127.0.0.1:4310** (no login for local requests). Click 「绑定飞
 
 ## 🏗️ How It Works <a id="how-it-works"></a>
 
-```mermaid
-flowchart LR
-  subgraph IN["Interfaces"]
-    direction TB
-    L["📱 Lark / Feishu<br/>DMs · groups · cards"]
-    W["🖥️ Web workbench<br/>tasks · diffs · traces"]
-    X["⌨️ CLI · HTTP triggers"]
-  end
-  CORE["<b>Dutydeck daemon</b><br/>runs on your machine<br/><br/>task queue · permission gate<br/>verification gate · execution ledger<br/>memory · plugin host"]
-  DB[("SQLite")]
-  subgraph AG["Local agents"]
-    direction TB
-    T["Terminal adapters (tmux / Herdr)<br/>Claude Code · Codex · Gemini …"]
-    A["ACP agents"]
-  end
-  L <-->|"long connection · Card 2.0"| CORE
-  W <-->|"HTTP · SSE"| CORE
-  X --> CORE
-  CORE --- DB
-  CORE <-->|"PTY"| T
-  CORE <-->|"ACP"| A
-  classDef core fill:#2e1065,stroke:#a78bfa,stroke-width:2px,color:#ffffff
-  classDef entry fill:#eff4ff,stroke:#3370ff,color:#1f2329
-  classDef agent fill:#0d1117,stroke:#30363d,color:#e6edf3
-  class CORE core
-  class L,W,X entry
-  class T,A agent
-  style IN fill:#3370ff10,stroke:#3370ff80
-  style AG fill:#8b949e14,stroke:#8b949e80
-```
+<p align="center">
+  <img src="docs/assets/arch-en.svg" alt="Architecture: Lark, the Web workbench and CLI/HTTP triggers connect to the Dutydeck daemon on your machine, which drives local agents over PTY or ACP" width="100%">
+</p>
 
 - **Local-first**: agents, code and credentials stay on your machine. The daemon listens on `127.0.0.1` by default; remote access requires login.
 - **No guessing**: every turn is recorded in an execution ledger; timeouts, disconnects and restarts are never treated as "not executed" and re-sent automatically.

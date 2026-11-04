@@ -157,7 +157,7 @@ dutydeck setup
 dutydeck start && dutydeck doctor
 ```
 
-打开 **http://127.0.0.1:4310**，本机访问免登录。在首屏点「绑定飞书 Bot」→「一键创建飞书机器人」，按向导授权后就能在飞书里派活了。
+打开 `http://127.0.0.1:4310`，本机访问免登录。在首屏点「绑定飞书 Bot」→「一键创建飞书机器人」，按向导授权后就能在飞书里派活了。
 
 <sub>脚本化安装、源码开发和更多选项见 <a href="docs/zh/getting-started.md">快速上手</a>。</sub>
 
@@ -177,36 +177,9 @@ dutydeck start && dutydeck doctor
 
 ## 🏗️ 工作原理 <a id="how-it-works"></a>
 
-```mermaid
-flowchart LR
-  subgraph IN["交互入口"]
-    direction TB
-    L["📱 飞书 / Lark<br/>私聊 · 群聊 · 卡片"]
-    W["🖥️ Web 工作台<br/>任务 · 改动 · 追踪"]
-    X["⌨️ CLI · HTTP 触发器"]
-  end
-  CORE["<b>Dutydeck 守护进程</b><br/>跑在你的机器上<br/><br/>任务队列 · 权限门禁<br/>验证门禁 · 执行账本<br/>长期记忆 · 插件 Host"]
-  DB[("SQLite")]
-  subgraph AG["本机 Agent"]
-    direction TB
-    T["终端适配器（tmux / Herdr）<br/>Claude Code · Codex · Gemini …"]
-    A["ACP Agent"]
-  end
-  L <-->|"长连接 · Card 2.0"| CORE
-  W <-->|"HTTP · SSE"| CORE
-  X --> CORE
-  CORE --- DB
-  CORE <-->|"PTY"| T
-  CORE <-->|"ACP"| A
-  classDef core fill:#2e1065,stroke:#a78bfa,stroke-width:2px,color:#ffffff
-  classDef entry fill:#eff4ff,stroke:#3370ff,color:#1f2329
-  classDef agent fill:#0d1117,stroke:#30363d,color:#e6edf3
-  class CORE core
-  class L,W,X entry
-  class T,A agent
-  style IN fill:#3370ff10,stroke:#3370ff80
-  style AG fill:#8b949e14,stroke:#8b949e80
-```
+<p align="center">
+  <img src="docs/assets/arch-zh.svg" alt="架构：飞书、Web 工作台和 CLI/HTTP 触发器连到跑在本机的 Dutydeck 守护进程，守护进程通过终端（PTY）或 ACP 驱动本机 Agent" width="100%">
+</p>
 
 - **本地优先**：Agent、代码和凭据都留在你的机器上；守护进程默认只监听 `127.0.0.1`，非本机访问需要登录。
 - **不靠猜**：每一轮任务记入执行账本；超时、断线、重启都不会被当作“没执行”而自动重发。
