@@ -25,9 +25,19 @@ export function mergeLiveEvent(current: EventWindow | undefined, event: DockEven
 export function mergeReconciledEvents(current: EventWindow | undefined, incoming: DockEvent[]): EventWindow {
   if (!current) return createEventWindow(incoming);
   if (!incoming.length) return current;
-  const additions = new Map<number, DockEvent>();
-  for (const event of incoming) additions.set(event.sequence, event);
-  const page = [...additions.values()].sort((a, b) => a.sequence - b.sequence);
+  // SSE batches and API pages are already ordered and unique in the normal
+  // path. Keep that path linear and reserve Map+sort for recovery/malformed
+  // input where deduplication and ordering are actually needed.
+  let ordered = true;
+  for (let index = 1; index < incoming.length; index++) {
+    if (incoming[index - 1]!.sequence >= incoming[index]!.sequence) {
+      ordered = false;
+      break;
+    }
+  }
+  const page = ordered
+    ? incoming.slice()
+    : [...new Map(incoming.map(event => [event.sequence, event])).values()].sort((a, b) => a.sequence - b.sequence);
   if (page[0]!.sequence > (current.events.at(-1)?.sequence ?? -Infinity)) {
     return { ...current, events: current.events.concat(page), previousEvents: current.events, changes: page };
   }
