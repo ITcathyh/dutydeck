@@ -1,7 +1,7 @@
-import { render } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
-import type { Session } from '../api';
-import { SessionRow } from './SessionRow';
+import type { RunSummary, Session } from '../api';
+import { SessionRow, contextBadgePercent } from './SessionRow';
 
 const makeSession = (state: string, archivedAt?: string): Session => ({
   id: 'session-1',
@@ -126,5 +126,43 @@ describe('SessionRow 身份信息的可达性', () => {
 
     const fallbackOnly = render(<SessionRow session={sessionWith()} active={false} onClick={() => {}}/>);
     expect(fallbackOnly.container.querySelector('button')!.textContent).toContain('尚未获取任务目标');
+  });
+});
+
+describe('SessionRow 上下文占用徽标', () => {
+  const summary = (context?: RunSummary['context']): RunSummary => ({ sessionId: 'session-1', taskId: 't', prompt: '整理发布说明', status: 'completed', queuedCount: 0, updatedAt: '', ...(context ? { context } : {}) });
+  const ctx = (used: number, size?: number) => ({ used, ...(size ? { size } : {}), observedAt: '2026-11-05T00:00:00.000Z' });
+  const renderBadge = (context?: RunSummary['context']) => render(<SessionRow session={makeSession('idle')} summary={summary(context)} active={false} onClick={() => {}}/>);
+
+  it('占用达到 80% 时显示徽标，文本替代和 title 都说明百分比', () => {
+    renderBadge(ctx(820, 1000));
+    const badge = screen.getByTestId('context-badge');
+    expect(badge.getAttribute('title')).toBe('上下文已用 82%');
+    expect(badge.textContent).toContain('上下文已用 82%');
+    // 可见的 82% 只是装饰，读屏读 sr-only 的完整说明，不会读成两遍
+    expect(badge.querySelector('[aria-hidden="true"]')!.textContent).toBe('82%');
+    expect(screen.getByRole('button').getAttribute('title')).toContain('上下文已用 82%');
+  });
+
+  it('恰好 80% 显示，79.9% 不显示，超过容量按 100% 封顶', () => {
+    expect(contextBadgePercent(ctx(800, 1000))).toBe(80);
+    expect(contextBadgePercent(ctx(799, 1000))).toBeUndefined();
+    expect(contextBadgePercent(ctx(1500, 1000))).toBe(100);
+  });
+
+  it.each([
+    ['低于 80%', ctx(500, 1000)],
+    ['没有上下文数据', undefined],
+    ['缺少容量', ctx(900)],
+    ['容量为 0', { used: 900, size: 0, observedAt: '2026-11-05T00:00:00.000Z' }],
+  ])('%s 时不显示徽标也不报错', (_name, context) => {
+    renderBadge(context);
+    expect(screen.queryByTestId('context-badge')).toBeNull();
+    expect(screen.getByRole('button').getAttribute('title')).not.toContain('上下文');
+  });
+
+  it('没有摘要时不显示徽标', () => {
+    render(<SessionRow session={makeSession('idle')} active={false} onClick={() => {}}/>);
+    expect(screen.queryByTestId('context-badge')).toBeNull();
   });
 });

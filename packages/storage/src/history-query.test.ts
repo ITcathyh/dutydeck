@@ -82,3 +82,16 @@ it('backfills the usage index and independently reads valid latest fields across
     expect(await reader.events.listLatestUsage!('empty')).toEqual([]);
   } finally { reader.close(); writer.close(); }
 });
+
+it('returns one latest valid context event per session without raw payloads', async () => {
+  const repos = createRepositories(':memory:');
+  try {
+    for (const id of ['a', 'b', 'c']) await repos.sessions.save({ id, runId: `run-${id}`, agentId: 'codex', cwd: '/tmp', state: 'completed', createdAt: '1', updatedAt: '1' });
+    const usage = (sessionId: string, sequence: number, data: unknown) => repos.events.append({ id: `${sessionId}-${sequence}`, sessionId, sequence, type: 'status', timestamp: String(sequence), data, raw: 'large raw payload' } as any);
+    await usage('a', 1, { state: 'usage', used: 10, size: 100 });
+    await usage('a', 2, { state: 'usage', used: 20, size: 100 });
+    await usage('a', 3, { state: 'usage', used: -1 });
+    await usage('b', 1, { state: 'usage', rateLimits: { fiveHour: { usedPercent: 1 } } });
+    expect(await repos.events.listLatestContexts!()).toEqual([{ sessionId: 'a', timestamp: '2', data: { state: 'usage', used: 20, size: 100 } }]);
+  } finally { repos.close(); }
+});

@@ -1,12 +1,14 @@
 import { z } from 'zod';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { RuntimeError } from '@dutydeck/shared';
-import type { SessionUsageSnapshot } from '@dutydeck/shared';
+import type { ContextUsage, SessionUsageSnapshot } from '@dutydeck/shared';
 import type { UsageLedger } from './usage-ledger.js';
 
 export interface UsageRouteOptions {
   ledger: UsageLedger;
   snapshot?(sessionId: string): Promise<SessionUsageSnapshot>;
+  /** 会话列表摘要附带的最近上下文占用（全部会话一次取出），只读已有用量事件。 */
+  contexts?(): Promise<ReadonlyMap<string, ContextUsage>>;
   /** 安装管理员校验；汇总与上限跨所有 Bot，未授权一律 403。 */
   authorize(request: FastifyRequest): Promise<boolean> | boolean;
 }

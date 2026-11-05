@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { workPlanSchema, type WorkItem } from '@dutydeck/shared';
-import { api, type Agent, type Session } from '../api';
+import { api, type Agent, type Session, type Task } from '../api';
 import { WorkItemProgress } from './WorkItemProgress';
 import { WorkItemsPanel } from './WorkItemsPanel';
 import { TimelineView } from './TimelineView';
@@ -103,7 +103,8 @@ const parallelPlan = {
 const records = (items: WorkItem[]) => ({ items, templates: [] });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.useRealTimers(); });
 
-function mount(items: WorkItem[] = [goal()], initialSession = session, eventsLoading = false) {
+function mount(items: WorkItem[] = [goal()], initialSession = session, eventsLoading = false, tasks: Task[] = []) {
+  vi.spyOn(api, 'tasks').mockResolvedValue(tasks);
   const fetchItems = vi.spyOn(api, 'workItems').mockResolvedValue(records(items));
   const fetchRequests = vi.spyOn(api, 'workItemRequests').mockResolvedValue([]);
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
@@ -293,5 +294,67 @@ describe('WorkItemProgress', () => {
     expect(workPlanSchema.safeParse(failed().plan).success).toBe(true);
     expect(workPlanSchema.safeParse(skippedGoal().plan).success).toBe(true);
     expect(workPlanSchema.safeParse(parallelPlan).success).toBe(true);
+  });
+});
+
+describe('WorkItemProgress 步骤耗时', () => {
+  const at = (minutes: number, seconds = 0) => new Date(Date.parse(time) + (minutes * 60 + seconds) * 1000).toISOString();
+  const stepItem = (label: string) => screen.getByRole('list', { name: '进度步骤' }).querySelectorAll('li')[['research', 'review', 'summary'].indexOf(label)]!;
+  const task = (id: string, status: string, createdAt: string, updatedAt: string): Task => ({ id, sessionId: 'child/2', prompt: 'p', status, createdAt, updatedAt });
+  const research = (attempts: WorkItem['steps'][number]['attempts'], status: WorkItem['steps'][number]['status'] = 'failed') => failed({
+    steps: [
+      { id: 'research', status, attempts },
+      { id: 'review', status: 'completed', attempts: [], answer: '无需补充' },
+      { id: 'summary', status: 'completed', attempts: [{ id: 'a3', number: 1, status: 'completed', createdAt: time, updatedAt: time }] },
+    ],
+  });
+
+  it('有任务记录时按任务的创建到结束计算，不受尝试之后补写的更新时间影响', async () => {
+    const item = research([{ id: 'a2', number: 2, status: 'completed', sessionId: 'child/2', taskId: 't2', createdAt: time, updatedAt: at(10) }], 'completed');
+    mount([item], session, false, [task('t2', 'completed', at(0, 20), at(2))]);
+    await screen.findByRole('list', { name: '进度步骤' });
+    await waitFor(() => expect(stepItem('research').querySelector('summary')!.textContent).toContain('用时 1 分 40 秒'));
+    expect(stepItem('research').textContent).not.toContain('约');
+    expect(stepItem('research').textContent).not.toContain('10 分');
+  });
+
+  it('运行中的尝试从任务创建时间起算已运行时长，没有尝试的步骤不显示', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(Date.parse(at(5)));
+    const item = goal({ steps: [
+      { id: 'research', status: 'running', attempts: [{ id: 'a2', number: 2, status: 'accepted', sessionId: 'child/2', taskId: 't2', createdAt: time, updatedAt: time }] },
+      { id: 'review', status: 'pending', attempts: [] },
+      { id: 'summary', status: 'pending', attempts: [] },
+    ] });
+    mount([item], session, false, [task('t2', 'running', at(1), at(1))]);
+    await screen.findByRole('list', { name: '进度步骤' });
+    await waitFor(() => expect(stepItem('research').textContent).toContain('已运行 4 分钟'));
+    expect(stepItem('review').textContent).not.toMatch(/已运行|用时/);
+    expect(stepItem('summary').textContent).not.toMatch(/已运行|用时/);
+  });
+
+  it('任务记录读不到时退回尝试时间戳并标「约」，展开后每次尝试各带自己的耗时', async () => {
+    const item = research([
+      { id: 'a1', number: 1, status: 'interrupted', createdAt: time, updatedAt: at(0, 45) },
+      { id: 'a2', number: 2, status: 'failed', error: '当前执行离线', sessionId: 'child/2', taskId: 'missing', createdAt: time, updatedAt: at(2, 30) },
+    ]);
+    mount([item]);
+    await screen.findByRole('list', { name: '进度步骤' });
+    expect(stepItem('research').querySelector('summary')!.textContent).toContain('用时 约 2 分 30 秒');
+    expect(stepItem('research').textContent).toContain('第 1 次尝试 · 已中断 · 用时 约 45 秒');
+    expect(stepItem('summary').textContent).toContain('用时 <1 秒');
+    expect(stepItem('review').textContent).not.toMatch(/已运行|用时/);
+  });
+
+  it('任务还没结束时先用尝试时间戳，不把未结束的任务当成终点；准备中和时间无法解析的尝试不显示耗时', async () => {
+    const item = goal({ steps: [
+      { id: 'research', status: 'failed', attempts: [{ id: 'a2', number: 2, status: 'failed', sessionId: 'child/2', taskId: 't2', createdAt: time, updatedAt: at(3) }] },
+      { id: 'review', status: 'running', attempts: [{ id: 'a1', number: 1, status: 'preparing', createdAt: time, updatedAt: time }] },
+      { id: 'summary', status: 'completed', attempts: [{ id: 'a3', number: 1, status: 'completed', createdAt: 'bad', updatedAt: 'bad' }] },
+    ] });
+    mount([item], session, false, [task('t2', 'running', at(0, 10), at(0, 10))]);
+    await screen.findByRole('list', { name: '进度步骤' });
+    expect(stepItem('research').querySelector('summary')!.textContent).toContain('用时 约 3 分钟');
+    expect(stepItem('review').textContent).not.toMatch(/已运行|用时/);
+    expect(stepItem('summary').textContent).not.toMatch(/已运行|用时/);
   });
 });

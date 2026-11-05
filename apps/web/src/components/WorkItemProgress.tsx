@@ -1,11 +1,47 @@
 import { useId, useState, type ReactNode } from 'react';
-import type { WorkItem } from '@dutydeck/shared';
+import { useQueries } from '@tanstack/react-query';
+import type { WorkAttempt, WorkItem } from '@dutydeck/shared';
 import { ChevronDown, ChevronRight } from 'lucide-react';
-import type { Agent, Session } from '../api';
+import { api, type Agent, type Session, type Task } from '../api';
 import { sessionPath } from '../app-route';
+import { elapsedMilliseconds, formatElapsed } from '../tool-presentation';
 import { Badge, Banner, Button, Spinner } from './primitives';
 import { isSessionActionDisabled } from './ui';
 import { useWorkItems, useWorkItemRequests, workStatusLabels } from './workItemQueries';
+
+const finishedStatus = ['completed', 'failed', 'interrupted', 'cancelled'];
+/**
+ * 步骤耗时。有任务记录时用任务的创建/最后更新时间（不含准备阶段，也不受之后补写的评审证据影响）；
+ * 任务记录读不到时退回尝试自己的时间戳，标「约」。执行端已接收的尝试算运行中，准备中、需要处理的尝试没有可信耗时。
+ */
+function attemptDuration(attempt: WorkAttempt | undefined, now: number, tasks: ReadonlyMap<string, Task>) {
+  if (!attempt || attempt.status !== 'accepted' && !finishedStatus.includes(attempt.status)) return;
+  const running = attempt.status === 'accepted';
+  const task = attempt.taskId ? tasks.get(attempt.taskId) : undefined;
+  const exact = Boolean(task && task.status !== 'queued' && (running || finishedStatus.includes(task.status)));
+  const elapsed = exact
+    ? elapsedMilliseconds(task!.createdAt, running ? undefined : task!.updatedAt, now)
+    : elapsedMilliseconds(attempt.createdAt, running ? undefined : attempt.updatedAt, now);
+  if (elapsed === undefined) return;
+  const label = running ? '已运行' : '用时';
+  if (elapsed < 1_000) return `${label} <1 秒`;
+  return `${label} ${exact ? '' : '约 '}${formatElapsed(elapsed)}`;
+}
+
+/** 读出目标各尝试所在会话的任务记录（复用任务列表的查询缓存）；已结束的尝试等到任务也结束前，每 5 秒补读一次。 */
+function useAttemptTasks(item: WorkItem, enabled: boolean): ReadonlyMap<string, Task> {
+  const attempts = item.steps.flatMap(step => step.attempts).filter(attempt => attempt.sessionId && attempt.taskId);
+  const sessionIds = [...new Set(attempts.map(attempt => attempt.sessionId!))];
+  const results = useQueries({ queries: sessionIds.map(sessionId => ({
+    queryKey: ['tasks', sessionId], queryFn: () => api.tasks(sessionId), enabled, staleTime: 30_000, retry: false,
+    refetchInterval: (query: { state: { data?: Task[]; status: string } }) => {
+      if (query.state.status === 'error') return false;
+      return attempts.some(attempt => attempt.sessionId === sessionId && finishedStatus.includes(attempt.status)
+        && !finishedStatus.includes(query.state.data?.find(task => task.id === attempt.taskId)?.status ?? '')) ? 5_000 : false;
+    },
+  })) });
+  return new Map(results.flatMap(result => result.data ?? []).map(task => [task.id, task]));
+}
 
 type Props = { emptyState?: ReactNode; session: Session; agents: Agent[]; onOpenItem(id: string): void; onSelectSession(id: string): void };
 
@@ -37,6 +73,8 @@ function GoalProgress({ item, session, agents, onOpen, onSelectSession }: { item
   const attention = item.steps.filter(step => ['running', 'waiting', 'failed', 'blocked'].includes(step.status));
   const needsAction = ['waiting', 'failed', 'blocked'].includes(item.status) || item.steps.some(step => ['waiting', 'failed', 'blocked'].includes(step.status)) || (hasRunning && Boolean(requests.data?.length));
   const readOnly = isSessionActionDisabled(session);
+  const now = Date.now();
+  const attemptTasks = useAttemptTasks(item, expanded);
   return <article aria-label={`目标：${item.title}`} className="min-w-0 border-b border-default py-3">
     <div className="flex min-w-0 flex-wrap items-center gap-2">
       <button type="button" aria-expanded={expanded} aria-controls={stepsId} aria-label={`${expanded ? '收起' : '展开'}目标：${item.title}`} className="flex min-h-10 min-w-0 flex-1 basis-full items-center sm:basis-auto gap-2 rounded text-left text-body font-semibold hover:text-link focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring" onClick={() => setDisclosure({ status: item.status, expanded: !expanded })}>
@@ -68,6 +106,7 @@ function GoalProgress({ item, session, agents, onOpen, onSelectSession }: { item
                   <span className={step?.status === 'failed' ? 'text-danger' : ['waiting', 'blocked'].includes(step?.status ?? '') ? 'text-warning' : 'text-secondary'}>{workStatusLabels[step?.status ?? 'pending']}</span>
                   <span className="min-w-0 break-words text-subtle [overflow-wrap:anywhere]">{definition.kind === 'wait' ? '用户回答' : agents.find(agent => agent.id === definition.agentId)?.name ?? definition.agentId}</span>
                   {attempt && attempt.number > 1 && <span className="text-secondary">第 {attempt.number} 次尝试</span>}
+                  {attemptDuration(attempt, now, attemptTasks) && <span className="text-secondary">{attemptDuration(attempt, now, attemptTasks)}</span>}
                 </span>
               </summary>
               <div className="space-y-2 pb-3 pl-4 text-caption">
@@ -75,7 +114,7 @@ function GoalProgress({ item, session, agents, onOpen, onSelectSession }: { item
                 <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{definition.instruction}</p>
                 {step?.answer !== undefined && <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">已保存回答：{step.answer}</p>}
                 {step?.attempts.map(record => <div key={record.id} className="space-y-1">
-                  <p className="text-secondary">第 {record.number} 次尝试 · {workStatusLabels[record.status]}</p>
+                  <p className="text-secondary">第 {record.number} 次尝试 · {workStatusLabels[record.status]}{attemptDuration(record, now, attemptTasks) ? ` · ${attemptDuration(record, now, attemptTasks)}` : ''}</p>
                   {record.error && <p className="whitespace-pre-wrap break-words text-danger [overflow-wrap:anywhere]">{record.error}</p>}
                   {record.output && <p className="text-secondary">已有步骤产物，可在目标详情查看。</p>}
                   {record.sessionId && <a href={sessionPath(record.sessionId)} className="inline-block text-link hover:underline" onClick={event => { if (event.button === 0 && !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey) { event.preventDefault(); onSelectSession(record.sessionId!); } }}>查看第 {record.number} 次尝试的执行记录</a>}

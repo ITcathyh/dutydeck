@@ -430,10 +430,14 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   });
   app.get('/api/sessions/summaries', async (request, reply) => {
     const respond = async (summaries: unknown[]) => {
-      const reports = await sessionTaskReports(summaries.map(value => (value as { sessionId: string }).sessionId));
+      const ids = summaries.map(value => (value as { sessionId: string }).sessionId);
+      const reports = await sessionTaskReports(ids);
+      const contexts = await options.usage?.contexts?.().catch(() => undefined);
       summaries = summaries.map(value => {
-        const report = reports.get((value as { sessionId: string }).sessionId);
-        return report ? { ...(value as object), taskReport: report } : value;
+        const id = (value as { sessionId: string }).sessionId;
+        const report = reports.get(id);
+        const context = contexts?.get(id);
+        return report || context ? { ...(value as object), ...(report ? { taskReport: report } : {}), ...(context ? { context } : {}) } : value;
       });
       const etag = `"${createHash('sha256').update(JSON.stringify(summaries)).digest('base64url')}"`;
       // Browsers revalidate the private representation every poll. Permission

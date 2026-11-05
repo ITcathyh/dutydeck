@@ -282,6 +282,18 @@ describe('HTTP API boundary', () => {
     expect(runtime.getTasks).not.toHaveBeenCalled(); expect(runtime.listSessions).not.toHaveBeenCalled();
   });
 
+  it('attaches the latest context usage to run summaries and batches one lookup per request and leaves rows unchanged when it is missing or fails', async () => {
+    const row = (sessionId: string) => ({ sessionId, taskId: `t-${sessionId}`, prompt: 'goal', status: 'completed', queuedCount: 0, updatedAt: '1' });
+    const context = { used: 850, size: 1000, observedAt: '2026-11-05T00:00:00.000Z' };
+    const runtime = { listRunSummaries: vi.fn(async () => [row('hot'), row('none'), row('broken')]), getTasks: vi.fn(), listSessions: vi.fn() };
+    const contexts = vi.fn(async () => new Map([['hot', context], ['unlisted', context]]));
+    const app = await buildApp(runtime as any, { usage: { ledger: {}, authorize: () => false, contexts } as any }); apps.push(app);
+    expect((await app.inject({ method: 'GET', url: '/api/sessions/summaries' })).json()).toEqual([{ ...row('hot'), context }, row('none'), row('broken')]);
+    expect(contexts).toHaveBeenCalledTimes(1);
+    contexts.mockRejectedValueOnce(new Error('db busy'));
+    expect((await app.inject({ method: 'GET', url: '/api/sessions/summaries' })).json()).toEqual([row('hot'), row('none'), row('broken')]);
+  });
+
   it('projects the first task goal and current queued count as a cross-session run summary', async () => {
     const sessions = [
       { id: 's1', updatedAt: '2026-01-01T00:00:00.000Z' },
