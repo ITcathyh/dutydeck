@@ -571,6 +571,7 @@ export * from './permission-display.js';
 export * from './credential-redaction.js';
 export * from './agent-command-approval.js';
 export * from './remote-approval.js';
+export * from './cli-capabilities.js';
 export * from './agent-model-service.js';
 
 export * from './database-control.js';

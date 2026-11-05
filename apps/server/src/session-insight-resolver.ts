@@ -29,8 +29,9 @@ import {
   type StreamIdentity,
   type TaskAttempt,
   type TranscriptSourceObservation,
+  transcriptClientForAdapter,
 } from '@dutydeck/shared';
-import { buildSessionMarker, transcriptClientForAdapter } from '@dutydeck/pty-driver';
+import { buildSessionMarker } from '@dutydeck/pty-driver';
 
 // ---------------------------------------------------------------------------
 // 公共类型

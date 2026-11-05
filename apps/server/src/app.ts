@@ -23,7 +23,7 @@ import Fastify, { type FastifyRequest } from 'fastify';
 import { open, readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { extname, resolve, sep } from 'node:path';
-import { installationOwnerTaskActor, permissionModes, RuntimeError, toPublicAgent, type ExecutionActor, type PermissionMode, type PolicyAction, type PolicyDecision } from '@dutydeck/shared';
+import { installationOwnerTaskActor, permissionModes, supportsCodexProfiles, RuntimeError, toPublicAgent, type ExecutionActor, type PermissionMode, type PolicyAction, type PolicyDecision } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { registerLarkRoutes, type LarkRoutesOptions } from './lark/routes.js';
 import { discoverAgentModels } from './agent-models.js';
@@ -314,7 +314,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     if (!options.sessionNames || !await options.sessionNames.authorize(request)) throw new RuntimeError('AGENT_SETTINGS_OWNER_REQUIRED', 'Installation owner authorization is required', 403);
     const agent = (await runtime.listAgents()).find(item => item.id === request.params.id);
     if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', 'Unknown agent', 404);
-    if (agent.protocol !== 'pty-cli' || !['codex', 'codex-cli'].includes(agent.id)) throw new RuntimeError('AGENT_CONFIG_UNSUPPORTED', 'Only terminal Codex agents support this configuration', 400);
+    if (!supportsCodexProfiles(agent)) throw new RuntimeError('AGENT_CONFIG_UNSUPPORTED', 'Only terminal Codex agents support this configuration', 400);
     return { id: agent.id, codexProfile: agent.codexProfile ?? '' };
   });
   app.patch<{ Params: { id: string }; Body: unknown }>('/api/agents/:id/config', async request => {
@@ -323,7 +323,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     if (!agents) throw new RuntimeError('AGENT_CONFIG_UNAVAILABLE', 'Agent configuration persistence is unavailable', 503);
     const agent = await agents.get(request.params.id);
     if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', 'Unknown agent', 404);
-    if (agent.protocol !== 'pty-cli' || !['codex', 'codex-cli'].includes(agent.id)) throw new RuntimeError('AGENT_CONFIG_UNSUPPORTED', 'Only terminal Codex agents support this configuration', 400);
+    if (!supportsCodexProfiles(agent)) throw new RuntimeError('AGENT_CONFIG_UNSUPPORTED', 'Only terminal Codex agents support this configuration', 400);
     const patch = agentConfigPatchSchema.parse(request.body);
     if (patch.codexProfile) {
       const discovered = await discoverAgentModels(agent, undefined, true);

@@ -7,7 +7,7 @@ import { childEnvironment } from '@dutydeck/shared/child-environment';
 import { promisify } from 'node:util';
 import { createAcpRuntime, createAgentRegistry, createRuntimeStore, type AcpRuntime, type AcpRuntimeEnsureInput, type AcpRuntimeHandle, type AcpRuntimeStatus } from 'acpx/runtime';
 import { acpxAgentEnvironment, acpxPermissionMode, prepareAcpxAgentLaunch } from '@dutydeck/acp-client';
-import type { AgentConfig } from '@dutydeck/shared';
+import { supportsCodexProfiles, type AgentConfig } from '@dutydeck/shared';
 
 const run = promisify(execFile);
 const ACP_MODEL_PROBE_TIMEOUT_MS = 30_000;
@@ -55,7 +55,7 @@ async function discoverCodexProfiles(agent: AgentConfig): Promise<AgentProfile[]
   // Profiles are a terminal Codex CLI concept. ACP sessions receive their
   // configuration through ACPX session options and currently have no profile
   // field, so do not advertise a setting that that path would ignore.
-  if (agent.protocol !== 'pty-cli' || !['codex', 'codex-cli'].includes(agent.id)) return [];
+  if (!supportsCodexProfiles(agent)) return [];
   const root = agent.env.CODEX_HOME?.trim() || process.env.CODEX_HOME?.trim() || join(homedir(), '.codex');
   try {
     const source = await readFile(join(root, 'config.toml'), 'utf8');

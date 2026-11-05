@@ -2,7 +2,7 @@ import { clearTaskReportSafely, readSessionTaskReportReference, readSessionTaskR
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import type { AgentCapabilities, AgentConfig, AgentDriver, AgentEvent, DriverFactory, DriverTranscriptSourceObservation, EventType, EventWindowOptions, NormalizedDriverEvent, PermissionMode, PermissionRequestData, PromptAssemblyData, PromptPart, PromptSourceDiagnostics, PublicTaskRecord, RepositoryBundle, RuntimeControlClaim, Session, SkillDeliveryMetadata, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy, TranscriptSourceObservation, VerificationCommandInput, VerificationResponse, WorkspaceCleanupBlocker, WorkspaceCleanupPreview, WorkspaceCleanupResult, WorkspaceResponse } from '@dutydeck/shared';
-import { timeLoop, eventHasContent, normalizeEventContent, deferredConfirmationId, agentCommandApprovalReason, isAgentCommandAutoApproval, canonicalExecutionJson, ptyRetirementRecoverySchema, steeringRecoveryDecisionSchema, executionRecoveryDecisionSchema, unknownTaskResolutionSchema, executionActorSchema, taskRequestV1Schema, steerableTaskNamespace, makeId, now, RuntimeError, workspaceModes, sessionNameConfigKey, normalizeSessionName, parseLarkSourceId, supportsRemoteApproval, redactCredentialText, PROMPT_NOT_WRITTEN, unknownTaskActionLabels } from '@dutydeck/shared';
+import { timeLoop, eventHasContent, normalizeEventContent, deferredConfirmationId, agentCommandApprovalReason, isAgentCommandAutoApproval, canonicalExecutionJson, ptyRetirementRecoverySchema, steeringRecoveryDecisionSchema, executionRecoveryDecisionSchema, unknownTaskResolutionSchema, executionActorSchema, taskRequestV1Schema, steerableTaskNamespace, makeId, now, RuntimeError, workspaceModes, sessionNameConfigKey, normalizeSessionName, parseLarkSourceId, supportsRemoteApproval, supportsNativeFork, redactCredentialText, PROMPT_NOT_WRITTEN, unknownTaskActionLabels } from '@dutydeck/shared';
 import { listAcpxBuiltinAgents, AcpxAdapter, testRegexWithTimeout, ProcessTreeCpu, readNativeCreationRecord } from '@dutydeck/acp-client';
 import { JsonlTransport, PipeTransport, probeAgent, PtyTransport } from '@dutydeck/transports';
 import { mkdir, realpath, writeFile } from 'node:fs/promises';
@@ -2206,7 +2206,7 @@ export class DutydeckRuntime {
       && !(initialConfigured.permissionMode === 'approve-reads' && supportsRemoteApproval({ ...initialConfigured, protocol: 'pty-cli' }))) {
       throw new RuntimeError('PERMISSION_MODE_UNSUPPORTED', 'PTY Agent only supports ask (approve in the terminal) or explicit full-trust mode; approve-reads requires a Claude Code family CLI', 422);
     }
-    if (input.nativeForkSessionId && (capability.protocol !== 'pty-cli' || !['claude-code', 'codex'].includes(agent.adapterId ?? agent.id))) {
+    if (input.nativeForkSessionId && (capability.protocol !== 'pty-cli' || !supportsNativeFork(agent))) {
       throw new RuntimeError('FORK_UNSUPPORTED', 'This Agent does not support native session copying', 422);
     }
     const terminalBackend = capability.protocol === 'pty-cli' ? await this.options.terminalBackend?.() ?? 'tmux' : undefined;

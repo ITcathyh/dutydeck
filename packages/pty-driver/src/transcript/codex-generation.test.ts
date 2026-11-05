@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, renameSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
@@ -48,6 +48,16 @@ it('uses a verified native index, including a canonical filename, and rejects pa
   expect(findRolloutBySessionId(h.root, sid)).toBe(old);
   const outside = join(h.dir, `rollout-outside-${sid}.jsonl`); writeFileSync(outside, line({ type: 'session_meta', payload: { id: sid } })); h.index(outside);
   expect(findRolloutBySessionId(h.root, sid)).not.toBe(outside);
+});
+it('reuses a verified rollout on stat alone and verifies a replaced file again', () => {
+  const h = fixture(), old = h.segment('20'), next = h.segment('21', `_${gen}`);
+  expect(findRolloutBySessionId(h.root, sid)).toBe(next);
+  // Same file, now unreadable: only a cached verification can still accept it.
+  chmodSync(next, 0o000);
+  try { expect(findRolloutBySessionId(h.root, sid)).toBe(next); } finally { chmodSync(next, 0o644); }
+  // A different file at the same path (new inode) carrying a foreign header must be read again and refused.
+  const swap = `${next}.swap`; writeFileSync(swap, line({ type: 'session_meta', payload: { id: foreign, cwd: h.dir } })); renameSync(swap, next);
+  expect(findRolloutBySessionId(h.root, sid)).toBe(old);
 });
 it('preserves exact receipt and native turn while draining old records and replaying copied history once', async () => {
   const h = fixture(), old = h.segment('20'), source = h.source(), events: NormalizedDriverEvent[] = [];

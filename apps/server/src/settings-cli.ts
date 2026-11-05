@@ -1,6 +1,6 @@
 import type { SavePluginBinding } from '@dutydeck/shared';
 import type { AgentModelSettingsPatch } from './agent-model-settings.js';
-import { collaborationParticipationModes, groupReplyModes, mentionPolicies, riskControlModes, type GroupBinding, type UpdateGroupBindingInput, type PublicChannelBotFoundation, type UpdateChannelBotInput, type UpdateCollaborationSettingsInput } from '@dutydeck/shared';
+import { collaborationParticipationModes, groupReplyModes, supportsCodexProfiles, mentionPolicies, riskControlModes, type GroupBinding, type UpdateGroupBindingInput, type PublicChannelBotFoundation, type UpdateChannelBotInput, type UpdateCollaborationSettingsInput } from '@dutydeck/shared';
 import type { CollaborationRouteOptions } from './collaboration-routes.js';
 import type { GroupConfigPatch, ManagedGroup, ManagedGroupBot } from './lark/group-management.js';
 import type { SaveLarkConfigRequest } from './lark/routes.js';
@@ -352,7 +352,7 @@ export async function runSettingsCli(action: SettingsAction, input: SettingsCliI
       if (input.appId) return settings;
       const agents = await request('GET', '/api/agents') as Array<{ id: string; protocol?: string; codexProfile?: string }>;
       const agent = agents.find(item => item.id === required(input.agentId, 'Agent ID'));
-      if (agent?.protocol !== 'pty-cli' || !['codex', 'codex-cli'].includes(agent.id)) return settings;
+      if (!agent || !supportsCodexProfiles(agent)) return settings;
       const config = await request('GET', agentConfigPath(input)) as Record<string, unknown>;
       return { ...settings, ...(typeof config.codexProfile === 'string' && config.codexProfile ? { codexProfile: config.codexProfile } : {}) };
     }
