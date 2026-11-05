@@ -63,11 +63,20 @@ export interface UsageTotals {
   unknownCostEntries: number;
   /** 已计价记录 / 总记录；没有记录时为 null，不代表免费。 */
   costCoverage: number | null;
+  /** costUsd 里不计入月度上限的部分（终端模式 Codex 的估算）。 */
+  capExcludedCostUsd?: number;
 }
+/**
+ * 终端模式 Codex 读数的 usageRef 前缀（pty-driver 的 codex-turn-usage.ts）。这些记录入账、出现在用量报表里，
+ * 但暂不计入月度上限、75%/95% 提醒和 /status 的已用比例（是否计入待定），上限口径与入账前一致。
+ */
+export const codexTerminalUsageRefPrefix = 'codex-pty:';
 /** model 筛选里表示「没有记下型号」的记录。 */
 export const usageUnknownModel = '__unknown__';
 /** since 含、until 不含（ISO 时刻）；model 可取 usageUnknownModel。 */
-export interface UsageFilter { since?: string; until?: string; appId?: string; chatId?: string; sessionId?: string; rootSessionId?: string; model?: string; agentId?: string; origin?: string }
+export interface UsageFilter { since?: string; until?: string; appId?: string; chatId?: string; sessionId?: string; rootSessionId?: string; model?: string; agentId?: string; origin?: string;
+  /** 按月度上限口径汇总：不计入上限的记录（见 codexTerminalUsageRefPrefix）费用按未知、无用量数据算。只作用于 totals。 */
+  capCounted?: boolean }
 /** day 按 daemon 本地时区的日历日分组（YYYY-MM-DD），升序；其余按成本降序。 */
 export type UsageDimension = 'appId' | 'chatId' | 'actorId' | 'category' | 'model' | 'agentId' | 'origin' | 'day';
 /** 缺 model（或 appId 等）的分组表示该维度未知，不并入任何已知值。 */

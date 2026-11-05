@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 import { cachedStatement } from './database-control.js';
-import { usageCategories, usageUnknownModel, type UsageCap, type UsageCapScope, type UsageDimension, type UsageFilter, type UsageGroup, type UsageLedgerEntry, type UsageLedgerRepository, type UsageTaskPage, type UsageTaskRow, type UsageTotals } from '@dutydeck/shared';
+import { codexTerminalUsageRefPrefix, usageCategories, usageUnknownModel, type UsageCap, type UsageCapScope, type UsageDimension, type UsageFilter, type UsageGroup, type UsageLedgerEntry, type UsageLedgerRepository, type UsageTaskPage, type UsageTaskRow, type UsageTotals } from '@dutydeck/shared';
 
 export function createUsageLedgerSchema(db: Database.Database): void {
   const categories = usageCategories.map(category => `'${category}'`).join(', ');
@@ -90,7 +90,14 @@ export function migrateUsagePricing(db: Database.Database): void {
   createUsageLedgerSchema(db);
 }
 
-interface LedgerRow { app_id: string | null; chat_id: string | null; actor_id: string | null; category: string | null; entries: number; token_entries: number | null; partial_token_entries: number | null; cost_usd: number | null; estimated_cost_usd: number | null; input_tokens: number | null; output_tokens: number | null; cache_read_tokens: number | null; cache_write_tokens: number | null; unavailable: number | null; unpriced: number | null; priced_entries: number | null }
+/** 不计入月度上限的记录，见 codexTerminalUsageRefPrefix。上限判定、提醒与 /status 都经 totals({ capCounted: true }) 共用这一条件。 */
+const capExcluded = `instr(usage_ref, '${codexTerminalUsageRefPrefix}') = 1`;
+/** 上限口径下的账本：不计入上限的记录保留 token，费用按未知、状态按无用量数据，与这些记录入账前一致。 */
+const capCountedLedger = `(SELECT recorded_at, app_id, chat_id, session_id, root_session_id, agent_id, origin, model, usage_ref, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+  CASE WHEN ${capExcluded} THEN NULL ELSE cost_usd END AS cost_usd, CASE WHEN ${capExcluded} THEN 0 ELSE cost_estimated END AS cost_estimated,
+  CASE WHEN ${capExcluded} THEN 'unavailable' ELSE data_status END AS data_status FROM usage_ledger) AS usage_ledger`;
+
+interface LedgerRow { app_id: string | null; chat_id: string | null; actor_id: string | null; category: string | null; entries: number; token_entries: number | null; partial_token_entries: number | null; cost_usd: number | null; estimated_cost_usd: number | null; input_tokens: number | null; output_tokens: number | null; cache_read_tokens: number | null; cache_write_tokens: number | null; unavailable: number | null; unpriced: number | null; priced_entries: number | null; cap_excluded_cost_usd: number | null }
 interface CapRow { scope: UsageCapScope; app_id: string; chat_id: string; monthly_cost_usd: number; updated_at: string }
 
 const aggregates = `COUNT(*) AS entries, SUM(cost_usd) AS cost_usd, SUM(CASE WHEN cost_estimated = 1 THEN cost_usd END) AS estimated_cost_usd,
@@ -99,7 +106,8 @@ const aggregates = `COUNT(*) AS entries, SUM(cost_usd) AS cost_usd, SUM(CASE WHE
   SUM(CASE WHEN (input_tokens IS NULL OR output_tokens IS NULL) AND (input_tokens IS NOT NULL OR output_tokens IS NOT NULL OR cache_read_tokens IS NOT NULL OR cache_write_tokens IS NOT NULL) THEN 1 ELSE 0 END) AS partial_token_entries,
   SUM(CASE WHEN data_status = 'unavailable' THEN 1 ELSE 0 END) AS unavailable,
   SUM(CASE WHEN data_status = 'unpriced' THEN 1 ELSE 0 END) AS unpriced,
-  SUM(CASE WHEN cost_usd IS NOT NULL AND data_status IN ('reported', 'estimated') THEN 1 ELSE 0 END) AS priced_entries`;
+  SUM(CASE WHEN cost_usd IS NOT NULL AND data_status IN ('reported', 'estimated') THEN 1 ELSE 0 END) AS priced_entries,
+  SUM(CASE WHEN ${capExcluded} THEN cost_usd END) AS cap_excluded_cost_usd`;
 /** 群按 (Bot, 群) 分组：同一个群里的两个 Bot 各算各的。day 按进程本地时区（daemon 时区）切日。 */
 const groupings: Record<UsageDimension, Array<[keyof UsageGroup, string]>> = {
   appId: [['appId', 'app_id']], chatId: [['appId', 'app_id'], ['chatId', 'chat_id']], actorId: [['actorId', 'actor_id']], category: [['category', 'category']],
@@ -128,7 +136,8 @@ function totalsOf(row: LedgerRow): UsageTotals {
     entries: row.entries, tokenEntries: row.token_entries ?? 0, partialTokenEntries: row.partial_token_entries ?? 0, costUsd: row.cost_usd ?? 0, estimatedCostUsd: row.estimated_cost_usd ?? 0,
     inputTokens: row.input_tokens ?? 0, outputTokens: row.output_tokens ?? 0, cacheReadTokens: row.cache_read_tokens ?? 0, cacheWriteTokens: row.cache_write_tokens ?? 0,
     unavailable: row.unavailable ?? 0, unpriced: row.unpriced ?? 0, pricedEntries: row.priced_entries ?? 0,
-    unknownCostEntries: row.entries - (row.priced_entries ?? 0), costCoverage: row.entries ? (row.priced_entries ?? 0) / row.entries : null
+    unknownCostEntries: row.entries - (row.priced_entries ?? 0), costCoverage: row.entries ? (row.priced_entries ?? 0) / row.entries : null,
+    ...(row.cap_excluded_cost_usd ? { capExcludedCostUsd: row.cap_excluded_cost_usd } : {})
   };
 }
 
@@ -204,7 +213,7 @@ export function createUsageLedgerRepository(sqlite: Database.Database): UsageLed
     },
     async totals(filter: UsageFilter): Promise<UsageTotals> {
       const { sql, values } = where(filter);
-      return totalsOf(sqlite.prepare(`SELECT ${aggregates} FROM usage_ledger ${sql}`).get(...values) as LedgerRow);
+      return totalsOf(sqlite.prepare(`SELECT ${aggregates} FROM ${filter.capCounted ? capCountedLedger : 'usage_ledger'} ${sql}`).get(...values) as LedgerRow);
     },
     async summarize(dimension: UsageDimension, filter: UsageFilter): Promise<UsageGroup[]> {
       const { sql, values } = where(filter);

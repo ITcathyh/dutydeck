@@ -80,7 +80,7 @@ export interface TranscriptEventSource {
   /** A native cancellation bound to the same exact input as takeInputError. */
   takeInputCancellation?(): boolean;
   /** Token usage of the model calls recorded since the last call, as a status/turn_usage event. Only
-   *  transcripts that record usage (Claude) implement it; undefined means the turn's usage is unknown. */
+   *  transcripts that record usage (Claude, Codex) implement it; undefined means the turn's usage is unknown. */
   takeTurnUsage?(): NormalizedDriverEvent | undefined;
 }
 

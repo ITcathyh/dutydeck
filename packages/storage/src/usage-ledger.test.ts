@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { usageUnknownModel, type UsageLedgerEntry } from '@dutydeck/shared';
+import { codexTerminalUsageRefPrefix, usageUnknownModel, type UsageLedgerEntry } from '@dutydeck/shared';
 import { createRepositories } from './index.js';
 
 const entry = (patch: Partial<UsageLedgerEntry>): UsageLedgerEntry => ({
@@ -26,6 +26,20 @@ describe('usage ledger repository', () => {
       expect(await repos.usage.lastCumulativeCost('ses_1')).toBe(0.75);
       expect(await repos.usage.lastCumulativeCost('ses_2')).toBeUndefined();
       expect(await repos.usage.totals({ sessionId: 'ses_1' })).toMatchObject({ entries: 3, costUsd: 0.75, unavailable: 1 });
+    } finally { repos.close(); }
+  });
+
+  it('reports Codex terminal estimates in totals and groups, but counts them as unknown under the cap view', async () => {
+    const repos = createRepositories(':memory:');
+    try {
+      await repos.usage.append(entry({ attemptId: 'c1', usageRef: `${codexTerminalUsageRefPrefix}thread:resp_1`, agentId: 'codex-pty', inputTokens: 1000, outputTokens: 10, costUsd: 2, costEstimated: true, dataStatus: 'estimated' }));
+      await repos.usage.append(entry({ attemptId: 'c2', usageRef: `${codexTerminalUsageRefPrefix}thread:resp_2`, agentId: 'codex-pty', inputTokens: 5, dataStatus: 'unpriced' }));
+      await repos.usage.append(entry({ attemptId: 'r1', usageRef: 'req_1', costUsd: 0.5, cumulativeCostUsd: 0.5 }));
+      await repos.usage.append(entry({ attemptId: 'n1', dataStatus: 'unavailable' }));
+      expect(await repos.usage.totals({ appId: 'cli_a' })).toMatchObject({ entries: 4, costUsd: 2.5, estimatedCostUsd: 2, capExcludedCostUsd: 2, inputTokens: 1005, pricedEntries: 2, unpriced: 1, unavailable: 1 });
+      expect(await repos.usage.totals({ appId: 'cli_a', capCounted: true })).toEqual(expect.objectContaining({ entries: 4, costUsd: 0.5, estimatedCostUsd: 0, inputTokens: 1005, pricedEntries: 1, unpriced: 0, unavailable: 3, unknownCostEntries: 3 }));
+      expect((await repos.usage.totals({ appId: 'cli_a', capCounted: true })).capExcludedCostUsd).toBeUndefined();
+      expect(await repos.usage.summarize('agentId', { appId: 'cli_a' })).toMatchObject([{ agentId: 'codex-pty', costUsd: 2, capExcludedCostUsd: 2 }, { agentId: 'claude', costUsd: 0.5 }]);
     } finally { repos.close(); }
   });
 

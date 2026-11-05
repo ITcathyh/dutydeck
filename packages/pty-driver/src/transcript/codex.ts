@@ -35,6 +35,7 @@ import { CodexToolProjection, mapCodexCompletedTool } from './codex-tools.js';
 import { CodexInputReceipt } from './codex-input-receipt.js';
 import { CodexChildLimits, childDiagnosticLimits } from './codex-child-limits.js';
 import { NativeTurn, nativeTaskError } from './native-turn.js';
+import { CodexTurnUsage } from './codex-turn-usage.js';
 
 const SESSION_SCAN_MAX_DEPTH = 3;
 /** Newest-first cap on rollout candidates examined. */
@@ -353,6 +354,7 @@ export class CodexTranscriptTailer implements TranscriptEventSource {
   private readonly turn = new NativeTurn(true);
   private readonly inputReceipt?: CodexInputReceipt;
   private readonly children: CodexChildLimits;
+  private readonly usage: CodexTurnUsage;
   private childTimer?: NodeJS.Timeout;
   private readonly childCallbacks = new Set<(event: NormalizedDriverEvent) => void>();
 
@@ -361,6 +363,7 @@ export class CodexTranscriptTailer implements TranscriptEventSource {
     this.children = new CodexChildLimits(root);
     let cliSessionId: string | undefined;
     const nativeId = () => cliSessionId ??= opts.sessionId ? resolveCliSessionId('codex', { sessionId: opts.sessionId, cwd: opts.cwd, env: opts.env }) : undefined;
+    this.usage = new CodexTurnUsage(nativeId);
     if (opts.sessionId) this.inputReceipt = new CodexInputReceipt(codexHistoryPath(opts.env), nativeId, text => this.turn.bindHistory(text));
     const explicit = opts.transcriptPath;
     let resolved: string | undefined, refreshAt = 0;
@@ -395,6 +398,7 @@ export class CodexTranscriptTailer implements TranscriptEventSource {
       validateRestorePath: path => !explicit && !!nativeId() && matchesRollout(root, path, nativeId()!),
       mapEntry: (entry, baseline) => {
         const bound = this.turn.observe(entry, baseline);
+        this.usage.observe(entry, !!baseline);
         this.children.observe(entry, baseline, this.turn.activeTurnId());
         if (!baseline && this.turn.requiresBinding() && !bound) return mapCodexEntry(entry)?.filter(event => event.type === 'status');
         const events = projection.map(entry);
@@ -429,6 +433,8 @@ export class CodexTranscriptTailer implements TranscriptEventSource {
   hasTurnTerminal(): boolean { return this.turn.hasTerminal(); }
   hasRecoveredInput(): boolean { return this.turn.hasRecoveredInput(); }
   takeTurnError(): NormalizedDriverEvent | undefined { return this.turn.takeError(); }
+  /** See CodexTurnUsage. */
+  takeTurnUsage(): NormalizedDriverEvent | undefined { return this.usage.take(); }
   takeInputError(): NormalizedDriverEvent | undefined { return this.turn.takeError(); }
   takeInputCancellation(): boolean { return this.turn.takeCancellation(); }
   waitForInput(prompt: string, signal: AbortSignal): Promise<void> {

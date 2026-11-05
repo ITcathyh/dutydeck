@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { executionTaskId } from '@dutydeck/storage';
-import { makeId, parseLarkSourceId, RuntimeError, type UsageBackgroundLimits, type UsageBackgroundBudget, type AttemptRef, type RepositoryBundle, type Session, type TaskRequestV1, type UsageCap, type UsageCapScope, type UsageCategory, type UsageGroup, type UsageLedgerEntry, type UsageTotals, type UsageFilter, type UsageReport, type UsageReportFilter, type UsageTaskPage, type JsonValue } from '@dutydeck/shared';
+import { codexTerminalUsageRefPrefix, makeId, parseLarkSourceId, RuntimeError, type UsageBackgroundLimits, type UsageBackgroundBudget, type AttemptRef, type RepositoryBundle, type Session, type TaskRequestV1, type UsageCap, type UsageCapScope, type UsageCategory, type UsageGroup, type UsageLedgerEntry, type UsageTotals, type UsageFilter, type UsageReport, type UsageReportFilter, type UsageTaskPage, type JsonValue } from '@dutydeck/shared';
 import { isLarkPerGroupMemoryPool, larkMemoryScopeOfPool } from './lark/memory.js';
 
 const rateSchema = z.object({ inputPerMTok: z.number().nonnegative(), cachedInputPerMTok: z.number().nonnegative(), outputPerMTok: z.number().nonnegative(), cacheWritePerMTok: z.number().nonnegative().optional(), provider: z.string().trim().min(1).optional() }).strict();
@@ -314,8 +314,9 @@ export class UsageLedger {
   private async capsFor(appId: string, chatId?: string): Promise<UsageCap[]> {
     return (await this.repos.usage.listCaps()).filter(cap => cap.appId === appId && (cap.scope === 'bot' || cap.chatId === chatId));
   }
-  private spent(cap: UsageCap, since: Date) {
-    return this.repos.usage.totals({ since: since.toISOString(), appId: cap.appId, ...(cap.scope === 'group' ? { chatId: cap.chatId } : {}) });
+  /** 上限判定、75%/95% 提醒与 /status 共用的本月已用量：capCounted 让终端模式 Codex 的估算不计入上限，见 codexTerminalUsageRefPrefix。 */
+  private spent(scope: UsageCapScope, appId: string, chatId: string | undefined, since: Date) {
+    return this.repos.usage.totals({ since: since.toISOString(), appId, ...(scope === 'group' ? { chatId } : {}), capCounted: true });
   }
 
   /** runtime 的 admitTask 钩子：本月已用满 Bot 或群上限时拒绝新任务。子步骤属于已派发的根任务，不在这里拦。 */
@@ -358,7 +359,7 @@ export class UsageLedger {
   async refusal(appId: string, chatId?: string, request?: Pick<TaskRequestV1, 'namespace' | 'key'>): Promise<string | undefined> {
     const since = usageMonthStart(this.now());
     for (const cap of (await this.capsFor(appId, chatId)).sort((a, b) => a.scope === b.scope ? 0 : a.scope === 'group' ? -1 : 1)) {
-      const totals = await this.spent(cap, since);
+      const totals = await this.spent(cap.scope, cap.appId, cap.chatId, since);
       if (totals.costUsd < cap.monthlyCostUsd) continue;
       const reason = capRefusal(cap, totals.costUsd, unknownUsageNote(totals));
       void this.explain(cap, chatId, reason, request).catch(error => this.options.log?.warn({ error, appId }, '用量上限说明发送失败'));
@@ -390,13 +391,13 @@ export class UsageLedger {
 
   /** 用到上限的 75%、95% 各提醒一次：群上限发到该群，Bot 上限发到这次用量所在的群或私聊。 */
   private async alert(entry: UsageLedgerEntry) {
-    if (!entry.appId || !entry.costUsd || !this.options.notify) return;
+    if (!entry.appId || !entry.costUsd || entry.usageRef?.startsWith(codexTerminalUsageRefPrefix) || !this.options.notify) return;
     const now = this.now();
     const month = monthKey(now);
     for (const cap of await this.capsFor(entry.appId, entry.chatId)) {
       const chatId = cap.scope === 'group' ? cap.chatId : entry.chatId;
       if (!chatId?.startsWith('oc_')) continue;
-      const totals = await this.spent(cap, usageMonthStart(now));
+      const totals = await this.spent(cap.scope, cap.appId, cap.chatId, usageMonthStart(now));
       const spent = totals.costUsd;
       const claimed: number[] = [];
       for (const threshold of usageAlertThresholds) {
@@ -463,7 +464,7 @@ export class UsageLedger {
     const since = usageMonthStart(this.now());
     const caps = await this.capsFor(appId, chatId);
     const part = async (scope: UsageCapScope) => {
-      const totals = await this.repos.usage.totals({ since: since.toISOString(), appId, ...(scope === 'group' ? { chatId } : {}) });
+      const totals = await this.spent(scope, appId, chatId, since);
       const cap = caps.find(item => item.scope === scope);
       const estimated = totals.estimatedCostUsd > 0 ? `，含估算 ${usd(totals.estimatedCostUsd)}` : '';
       const limit = cap ? `上限 ${usd(cap.monthlyCostUsd)}，已用 ${percent(totals.costUsd, cap.monthlyCostUsd)}%` : '未设上限';

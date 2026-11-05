@@ -45,6 +45,18 @@ describe('usage overview', () => {
     expect(within(screen.getByRole('region', { name: '按机器人' })).getByText(/\$1\.20（含估算 \$0\.20）/)).toBeTruthy();
   });
 
+  it('shows Codex terminal estimates as not counted against the cap, and leaves them out of the cap progress', async () => {
+    const month = window(3, '2026-08-31T16:00:00.000Z');
+    month.bots = [row({ appId: 'cli_a', costUsd: 3, capExcludedCostUsd: 1 })];
+    month.chats = [row({ appId: 'cli_a', chatId: 'oc_1', costUsd: 3, capExcludedCostUsd: 1 })];
+    vi.spyOn(api, 'usageSummary').mockResolvedValue({ ...summary, month });
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    mount();
+    const byBot = await screen.findByRole('region', { name: '按机器人' });
+    expect(within(byBot).getByText(/其中 \$1\.00 为终端模式 Codex 估算，不计入上限/)).toBeTruthy();
+    expect(within(screen.getByRole('region', { name: '月度成本上限' })).getByText('本月 $2.00 / 上限 $4.00（50%）')).toBeTruthy();
+  });
+
   it('saves and deletes caps, then refreshes the summary', async () => {
     const read = vi.spyOn(api, 'usageSummary').mockResolvedValue(summary);
     vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
