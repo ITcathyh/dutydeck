@@ -26,5 +26,21 @@ describe('fallback transports', () => {
       expect(events.map(event => event.raw ?? '').join('')).toBe(expected);
     } finally { await transport.stop(); }
   });
+  it.skipIf(process.platform === 'win32')('scrubs daemon secrets and session identities from the compatibility PTY environment', async () => {
+    const saved = { LARK_APP_SECRET: process.env.LARK_APP_SECRET, BOTMUX_SESSION_ID: process.env.BOTMUX_SESSION_ID };
+    process.env.LARK_APP_SECRET = 'svc-secret'; process.env.BOTMUX_SESSION_ID = 'other-session';
+    const events: any[] = [];
+    let exit!: () => void;
+    const done = new Promise<void>(resolve => { exit = resolve; });
+    const agent = { ...config('', 'pty'), command: '/bin/sh', args: ['-c', 'echo "L=${LARK_APP_SECRET:-none} B=${BOTMUX_SESSION_ID:-none} K=$KEEP"'], env: { KEEP: 'agent-value' } };
+    const transport = new PtyTransport(agent, { onEvent: event => events.push(event), onExit: exit });
+    try {
+      await transport.start(); await done;
+      expect(events.map(event => event.raw ?? '').join('')).toContain('L=none B=none K=agent-value');
+    } finally {
+      await transport.stop();
+      for (const [key, value] of Object.entries(saved)) if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  });
   it('stop terminates the entire fallback process tree', async () => { const dir = await mkdtemp(join(tmpdir(), 'dutydeck-tree-')); dirs.push(dir); const pidFile = join(dir, 'child.pid'); const agent = { ...config('tests/fixtures/process-tree-agent.mjs', 'jsonl'), env: { DUTYDECK_TEST_PID_FILE: pidFile } }; const transport = new JsonlTransport(agent, { onEvent() {} }); await transport.start(); await vi.waitFor(async () => expect(Number(await readFile(pidFile, 'utf8'))).toBeGreaterThan(0), { timeout: 3_000 }); const childPid = Number(await readFile(pidFile, 'utf8')); await transport.stop(); await vi.waitFor(() => { let alive = true; try { process.kill(childPid, 0); } catch { alive = false; } expect(alive).toBe(false); }, { timeout: 3_000 }); });
 });

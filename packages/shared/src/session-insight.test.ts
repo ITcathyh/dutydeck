@@ -574,16 +574,16 @@ describe('Session Insight V1 Specification and Contracts (T0)', () => {
       overPerFile.files[0].trace = Array.from({ length: 20001 }, (_, i) => buildEvent(i + 1));
       expect(() => analyzeFilesResultSchema.parse(overPerFile)).toThrow();
 
-      // Two files each under the per-file max but jointly over 20,000 are rejected
+      // Two files each under the per-file max but jointly over 20,000 (10,001 + 10,000) are rejected
       const overShared = JSON.parse(readFileSync(resultPath, 'utf-8'));
       const secondFile = JSON.parse(JSON.stringify(overShared.files[0]));
       overShared.files[0].sourceKey = 'src_a';
-      overShared.files[0].trace = Array.from({ length: 15000 }, (_, i) => ({
+      overShared.files[0].trace = Array.from({ length: 10001 }, (_, i) => ({
         ...buildEvent(i + 1),
         sourceKey: 'src_a'
       }));
       secondFile.sourceKey = 'src_b';
-      secondFile.trace = Array.from({ length: 15000 }, (_, i) => ({
+      secondFile.trace = Array.from({ length: 10000 }, (_, i) => ({
         ...buildEvent(i + 1),
         sourceKey: 'src_b'
       }));

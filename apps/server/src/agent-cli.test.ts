@@ -93,6 +93,10 @@ describe('dutydeck agent', () => {
     const root = await mkdtemp(join(tmpdir(), 'dutydeck-agent-cli-')); roots.push(root);
     await writeFile(join(root, 'brief.json'), '{"goal":"拆任务","idempotencyKey":"b1"}');
     expect(await agent(['work', 'delegate', '--file', join(root, 'brief.json')])).toMatchObject({ url: '/work-items/delegations', body: { goal: '拆任务', idempotencyKey: 'b1' } });
+    await writeFile(join(root, 'revision.json'), '{"expectedRevision":4,"plan":{"title":"P"},"reason":"收窄"}');
+    // 修订的 --dry-run 由服务计算影响预览，而不是只在本地描述请求。
+    expect(await agent(['work', 'revise', 'goal_1', '--file', join(root, 'revision.json'), '--dry-run'])).toMatchObject({ calls: 1, url: '/work-items/goal_1/revise', body: { expectedRevision: 4, plan: { title: 'P' }, reason: '收窄', dryRun: true } });
+    expect((await agent(['work', 'revise', 'goal_1', '--file', join(root, 'revision.json')])).body).toEqual({ expectedRevision: 4, plan: { title: 'P' }, reason: '收窄' });
   });
 
   it('失败也只有一个 JSON：服务的错误原样带出 params，退出码非 0', async () => {

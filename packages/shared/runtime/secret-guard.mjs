@@ -35,6 +35,8 @@ const pathRules = [
   // 含密钥目录和本轮策略文件：删掉策略文件就能让这个 hook 放行，所以除发布目录 releases/<版本>/ 里的程序外都不让碰
   // （Agent 调用的群工具、relay 命令在那里）；路径里带 ../ 的不算发布目录。
   ['Dutydeck 数据目录', new RegExp(String.raw`(?<![\w-])\.dutydeck(?![\w.-])(?!/(?:[^\s'"/]+/)*releases/[^\s'"/]+/(?![^\s'"]*\.\./))`)],
+  // 工作区拦截 Hook 的配置：改成空操作就能关掉拦截（见 apps/server/src/lark/security-hooks.ts）。
+  ['Agent 拦截 Hook 配置', new RegExp(String.raw`(?<![\w-])\.(?:codex|cursor|trae)/hooks\.json(?![\w.-])|(?<![\w-])\.claude/settings(?:\.local)?\.json(?![\w.-])|(?<![\w-])\.pi/extensions(?:/|(?![\w.-]))`)],
   ['进程环境变量', /\/proc\/[^/\s]+\/environ/],
 ];
 
@@ -83,6 +85,13 @@ export function protectedPathFinding(path, { cwd = process.cwd(), home = process
   return match(pathRules, normalize(isAbsolute(expanded) ? expanded : resolve(cwd, expanded), home));
 }
 
+/**
+ * 执行命令的工具名：Claude Code / Codex 的 Bash、Monitor，Cursor 的 Shell，Pi 的 bash，以及其他 CLI 常见的写法。
+ * 不认识的工具只要输入里带 command / cmd 也按命令检查，新接入的 CLI 换了工具名不会漏拦。
+ */
+const commandTools = new Set(['bash', 'monitor', 'shell', 'exec_command', 'local_shell', 'shell_command', 'run_terminal_cmd', 'run_shell_command', 'execute_command']);
+const fileKeys = ['file_path', 'notebook_path', 'path', 'glob'];
+
 const strings = value => typeof value === 'string' ? [value]
   : Array.isArray(value) ? value.flatMap(strings)
     : value && typeof value === 'object' ? Object.values(value).flatMap(strings) : [];
@@ -93,23 +102,22 @@ export function secretGuardFinding(event, { home = process.env.HOME || homedir()
   const input = event?.tool_input ?? event?.toolInput ?? {};
   const cwd = typeof event?.cwd === 'string' && event.cwd ? event.cwd : process.cwd();
   const options = { cwd, home };
-  if (tool === 'Bash' || tool === 'Monitor') {
+  if (tool === 'apply_patch') {
+    const paths = strings(input).flatMap(text => [...text.matchAll(/^\*\*\* (?:(?:Add|Update|Delete) File|Move to): (.+)$/gm)].map(item => item[1]));
+    for (const path of paths) { const found = protectedPathFinding(path, options); if (found) return found; }
+    return undefined;
+  }
+  for (const key of fileKeys) {
+    const found = protectedPathFinding(input[key], options);
+    if (found) return found;
+  }
+  if (commandTools.has(tool.toLowerCase()) || input.command !== undefined || input.cmd !== undefined) {
     const command = normalize(strings(input.command ?? input.cmd).join(' '), home);
     const found = match(pathRules, command) ?? match(commandRules, command);
     if (found) return found;
     if ((agentDirectory.test(command) || agentDirectory.test(normalize(cwd, home))) && agentDataName.test(command)) {
       return { label: 'Agent 登录信息或会话记录', match: agentDataName.exec(command)[0] };
     }
-    return undefined;
-  }
-  if (tool === 'apply_patch') {
-    const paths = strings(input).flatMap(text => [...text.matchAll(/^\*\*\* (?:(?:Add|Update|Delete) File|Move to): (.+)$/gm)].map(item => item[1]));
-    for (const path of paths) { const found = protectedPathFinding(path, options); if (found) return found; }
-    return undefined;
-  }
-  for (const key of ['file_path', 'notebook_path', 'path', 'glob']) {
-    const found = protectedPathFinding(input[key], options);
-    if (found) return found;
   }
   return undefined;
 }

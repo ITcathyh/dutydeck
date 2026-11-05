@@ -8,6 +8,7 @@ import { AgentModelSettings } from './AgentModelSettings';
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); localStorage.clear(); });
 it('saves service settings, retains a blank key, clears keys and invalidates model choices', async () => {
+  const user = userEvent.setup({ delay: null });
   const state = { agentId: 'claude', model: 'old-model', baseUrl: 'https://old.example', authMode: 'bearer' as const, hasApiKey: true, apiKeyAvailable: true, appliesTo: 'next_process' as const };
   vi.spyOn(agentModelSettingsApi, 'get').mockResolvedValue(state);
   const set = vi.spyOn(agentModelSettingsApi, 'set').mockImplementation(async (_id, patch) => ({ ...state, ...patch, hasApiKey: !patch.clearApiKey }));
@@ -15,25 +16,26 @@ it('saves service settings, retains a blank key, clears keys and invalidates mod
   client.setQueryData(['agent-models', 'claude', 'old'], { models: [{ id: 'old', name: 'Old' }] });
   writeCachedAgentModels('claude', 'old', { models: [{ id: 'old', name: 'Old' }], reasoningEfforts: [] });
   render(<QueryClientProvider client={client}><AgentModelSettings agentId="claude"/></QueryClientProvider>);
-  await userEvent.click(screen.getByText('模型服务配置'));
+  await user.click(screen.getByText('模型服务配置'));
   const key = await screen.findByLabelText('API Key');
   expect(key.getAttribute('type')).toBe('password'); expect((key as HTMLInputElement).value).toBe('');
-  await userEvent.clear(screen.getByLabelText('服务地址')); await userEvent.type(screen.getByLabelText('服务地址'), 'https://new.example');
-  await userEvent.selectOptions(screen.getByLabelText('认证方式'), 'api-key');
-  await userEvent.click(screen.getByRole('button', { name: '保存模型配置' }));
+  await user.clear(screen.getByLabelText('服务地址')); await user.type(screen.getByLabelText('服务地址'), 'https://new.example');
+  await user.selectOptions(screen.getByLabelText('认证方式'), 'api-key');
+  await user.click(screen.getByRole('button', { name: '保存模型配置' }));
   await waitFor(() => expect(set).toHaveBeenCalledWith('claude', { baseUrl: 'https://new.example', authMode: 'api-key' }));
   await screen.findByRole('status');
   expect(readCachedAgentModels('claude', 'old')).toBeUndefined(); expect(client.getQueryData(['agent-models', 'claude', 'old'])).toBeUndefined();
-  await userEvent.type(key, 'SECRET_CANARY'); await userEvent.click(screen.getByRole('button', { name: '保存模型配置' }));
+  await user.type(key, 'SECRET_CANARY'); await user.click(screen.getByRole('button', { name: '保存模型配置' }));
   await waitFor(() => expect(set).toHaveBeenLastCalledWith('claude', { apiKey: 'SECRET_CANARY', clearApiKey: false }));
   await waitFor(() => expect((key as HTMLInputElement).value).toBe(''));
   expect(document.body.textContent).not.toContain('SECRET_CANARY');
-  await userEvent.click(screen.getByRole('button', { name: '清除 API Key' }));
+  await user.click(screen.getByRole('button', { name: '清除 API Key' }));
   await waitFor(() => expect(set).toHaveBeenLastCalledWith('claude', { clearApiKey: true }));
   await waitFor(() => expect(screen.queryByRole('button', { name: '清除 API Key' })).toBeNull());
 });
 
 it('saves only the selected bot account inside an outer form, reports unsaved changes and preserves the shared cache', async () => {
+  const user = userEvent.setup({ delay: null });
   const state = { agentId: 'claude', appId: 'cli_a', model: '', baseUrl: '', authMode: 'bearer' as const, hasApiKey: false, apiKeyAvailable: false, appliesTo: 'next_process' as const };
   const get = vi.spyOn(agentModelSettingsApi, 'get').mockResolvedValue(state);
   const set = vi.spyOn(agentModelSettingsApi, 'set').mockResolvedValue({ ...state, hasApiKey: true, apiKeyAvailable: true });
@@ -43,15 +45,15 @@ it('saves only the selected bot account inside an outer form, reports unsaved ch
   client.setQueryData(['agent-models', 'claude', 'shared'], shared);
   writeCachedAgentModels('claude', 'shared', shared);
   render(<QueryClientProvider client={client}><form onSubmit={submit}><AgentModelSettings agentId="claude" botAppId="cli_a" onDirtyChange={dirty}/></form></QueryClientProvider>);
-  await userEvent.click(screen.getByText('模型服务配置'));
+  await user.click(screen.getByText('模型服务配置'));
   const input = await screen.findByLabelText('API Key');
   expect(get).toHaveBeenCalledWith('claude', 'cli_a');
   expect(document.querySelectorAll('form')).toHaveLength(1);
   expect(screen.queryByLabelText('默认模型')).toBeNull();
-  await userEvent.type(screen.getByLabelText('服务地址'), 'https://gateway.example');
-  await userEvent.type(input, 'BOT_UI_CANARY');
+  await user.type(screen.getByLabelText('服务地址'), 'https://gateway.example');
+  await user.type(input, 'BOT_UI_CANARY');
   await waitFor(() => expect(dirty).toHaveBeenLastCalledWith(true, false));
-  await userEvent.click(screen.getByRole('button', { name: '保存模型配置' }));
+  await user.click(screen.getByRole('button', { name: '保存模型配置' }));
   await waitFor(() => expect(set).toHaveBeenCalledWith('claude', { baseUrl: 'https://gateway.example', apiKey: 'BOT_UI_CANARY', clearApiKey: false }, 'cli_a'));
   await waitFor(() => expect(dirty).toHaveBeenLastCalledWith(false, false));
   expect(submit).not.toHaveBeenCalled();

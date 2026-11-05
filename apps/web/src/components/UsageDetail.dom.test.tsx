@@ -33,7 +33,7 @@ function mount() {
   render(<QueryClientProvider client={client}><UsageOverview bots={bots} onOpenTask={onOpenTask}/></QueryClientProvider>);
   return { onOpenTask };
 }
-const openDetail = async () => { await userEvent.setup().click(await screen.findByRole('tab', { name: '明细' })); };
+const openDetail = async () => { await userEvent.setup({ delay: null }).click(await screen.findByRole('tab', { name: '明细' })); };
 
 describe('usage detail tab', () => {
   it('states the daemon time zone, trends by day and shows unknown and unpriced usage apart from zero', async () => {
@@ -61,7 +61,7 @@ describe('usage detail tab', () => {
     const read = vi.spyOn(api, 'usageReport').mockResolvedValue(report);
     const tasks = vi.spyOn(api, 'usageTasks').mockResolvedValue({ total: 45, tasks: [task({})] });
     mount();
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     await user.click(await screen.findByRole('tab', { name: '明细' }));
     const form = await screen.findByRole('form', { name: '明细筛选' });
     expect((within(form).getByLabelText('开始日期') as HTMLInputElement).value).toBe('2026-09-23');
@@ -93,7 +93,7 @@ describe('usage detail tab', () => {
     expect(within(list).getByText(/含 1 条子步骤记录/)).toBeTruthy();
     expect(within(list).getByText(/费用未知 · 1 次/)).toBeTruthy();
     expect(within(list).queryByRole('button', { name: '下一页' })).toBeNull();
-    await userEvent.setup().click(within(list).getByRole('button', { name: '打开任务 task_1' }));
+    await userEvent.setup({ delay: null }).click(within(list).getByRole('button', { name: '打开任务 task_1' }));
     expect(onOpenTask).toHaveBeenCalledWith('ses_root');
   });
 

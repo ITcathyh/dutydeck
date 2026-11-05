@@ -189,6 +189,8 @@ export function registerRelayRoutes(app: FastifyInstance, options: RelayRoutesOp
       const capability = service.verifySession(request.headers.authorization, request.params.id);
       const owner = runtime?.getActiveTaskContext(capability.sessionId);
       const controller = new AbortController();
+      // 提问方断开（进程被杀、客户端超时）后没人再等答案：撤掉提问，免得提问卡挂着、回答落空。
+      reply.raw.once('close', () => { if (!reply.raw.writableFinished) controller.abort('提问方已断开'); });
       release = watchSession(capability.sessionId, { ...owner, controller });
       await service.resolveSession(request.headers.authorization, request.params.id);
       // The durable settlement may already precede subscription while the

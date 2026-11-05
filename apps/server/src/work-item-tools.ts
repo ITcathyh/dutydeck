@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
+import { z } from 'zod';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
-import { createWorkItemSchema, RuntimeError, toPublicAgent } from '@dutydeck/shared';
+import { createWorkItemSchema, reviseWorkPlanSchema, RuntimeError, toPublicAgent } from '@dutydeck/shared';
 import type { LarkAgentToolsService } from './lark/agent-tools.js';
 import { agentGroupToolBearerToken } from './lark/agent-tools.js';
 import { delegationBriefSchema, type LeaderDelegationService } from './leader-delegation.js';
@@ -9,6 +10,7 @@ import { discoverSkillCatalog } from './skill-catalog.js';
 import type { WorkItemService } from './work-items.js';
 import { runTemplateInput, templateNameInput, workInput } from './work-item-routes.js';
 
+const agentReviseInput = reviseWorkPlanSchema.extend({ dryRun: z.boolean().optional() }).strict();
 const requestKey = (taskId: string, key: string) => createHash('sha256').update(JSON.stringify([taskId, key])).digest('hex');
 
 export interface WorkItemToolsOptions { runtime: DutydeckRuntime; work: WorkItemService; tools: LarkAgentToolsService; delegations?: LeaderDelegationService }
@@ -52,6 +54,13 @@ export async function registerWorkItemTools(app: FastifyInstance, options: WorkI
     const scope = await context(request.headers.authorization, request.headers['x-dutydeck-work-turn']);
     return options.work.get(scope.sessionId, request.params.id, scope.actorId);
   });
+  // Agent 修订只能收窄计划；扩大范围或目标本身要求确认时记为待确认修订，由人工确认后生效。dryRun 只返回影响预览。
+  app.post<{ Params: { id: string } }>(`${base}/:id/revise`, async request => {
+    const scope = await context(request.headers.authorization, request.headers['x-dutydeck-work-turn']);
+    const { dryRun, ...input } = workInput(agentReviseInput, request.body);
+    return dryRun ? options.work.previewRevision(scope.sessionId, request.params.id, input, scope.actorId, 'agent')
+      : options.work.revise(scope.sessionId, request.params.id, input, scope.actorId, 'agent');
+  });
   app.post<{ Params: { id: string } }>(`${base}/:id/template`, async request => {
     const scope = await context(request.headers.authorization, request.headers['x-dutydeck-work-turn']);
     return options.work.saveTemplate(scope.sessionId, request.params.id, workInput(templateNameInput, request.body).name, scope.actorId);
@@ -63,6 +72,6 @@ export async function registerWorkItemTools(app: FastifyInstance, options: WorkI
   });
 }
 
-export const workbenchAgentPrompt = (command = 'dutydeck work', confirmation = false) => `[Dutydeck 目标编排] 多 Agent 协作、可重复流程或分阶段等待用 ${command}，先读它的 --help（JSON、隔离、等待与审查协议）；普通单步工作直接完成。${confirmation ? '计划接收后为 awaiting_confirmation，要等用户点确认卡「开始执行」才派发。' : ''}收到目标编号只表示计划已接收，简述分工和编号后结束本轮，不轮询、不重复创建或群发报告；不能代用户确认、回答等待或批准权限。`;
+export const workbenchAgentPrompt = (command = 'dutydeck work', confirmation = false) => `[Dutydeck 目标编排] 多 Agent 协作、可重复流程或分阶段等待用 ${command}，先读它的 --help（JSON、隔离、等待与审查协议）；普通单步工作直接完成。${confirmation ? '计划接收后为 awaiting_confirmation，要等用户点确认卡「开始执行」才派发。' : ''}收到目标编号只表示计划已接收，简述分工和编号后结束本轮，不轮询、不重复创建或群发报告；不能代用户确认、回答等待或批准权限。用户要求调整进行中的目标时用 ${command} revise 修改原计划，不另建替代目标。`;
 
 export const layeredWorkbenchPrompt = (command = 'dutydeck work', confirmation = false) => `[Dutydeck 分层协作] 你是本话题 PMO：问答、查询、总结和一次性小事可自行完成；改代码、测试、多步或多人工作通过 ${command} delegate --file <JSON文件> 交给 Leader。先读此命令的 --help 获取简报协议；Leader 看不到话题历史，需提供必要事实、约束与验收标准，勿附秘密。${confirmation ? '计划需用户确认卡上「开始执行」后派发。' : '计划就绪后执行。'}交接后结束本轮，不轮询、不重复执行；接收不等于完成，不代用户批准。`;

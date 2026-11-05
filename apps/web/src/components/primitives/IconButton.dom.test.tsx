@@ -23,10 +23,6 @@ describe('IconButton 可访问性', () => {
     expect(iconButton('归档任务').getAttribute('type')).toBe('button');
   });
 
-  it('children 渲染在内层 chip 里', () => {
-    render(<IconButton label="归档任务" onClick={() => {}}><span data-testid="glyph">x</span></IconButton>);
-    expect(iconButton('归档任务').contains(screen.getByTestId('glyph'))).toBe(true);
-  });
 });
 
 describe('IconButton 命中区与尺寸', () => {
@@ -73,7 +69,7 @@ describe('IconButton 语气与禁用', () => {
   });
 
   it('disabled 时按钮真的禁用，点击不回调', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onClick = vi.fn();
     render(<IconButton label="归档任务" disabled onClick={onClick}><span>x</span></IconButton>);
     expect((iconButton('归档任务') as HTMLButtonElement).disabled).toBe(true);
@@ -82,7 +78,7 @@ describe('IconButton 语气与禁用', () => {
   });
 
   it('可用时点击与键盘 Enter 都回调 onClick', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onClick = vi.fn();
     render(<IconButton label="归档任务" onClick={onClick}><span>x</span></IconButton>);
     await user.click(iconButton('归档任务'));

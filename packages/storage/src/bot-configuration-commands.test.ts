@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -20,6 +20,19 @@ import { runMigrations } from './migrations.js';
 import { createConfigurationReader } from './bot-configuration-reader.js';
 import { createConfigurationCommands } from './bot-configuration-commands.js';
 
+// 迁移只依赖 SQL：先在内存里迁移一次，之后每个用例把这份空库镜像写成新文件，免得每次重跑全部迁移。
+let migratedImage: Buffer | undefined;
+function migratedDatabase(path: string): Database.Database {
+  if (!migratedImage) {
+    const template = new Database(':memory:');
+    runMigrations(template);
+    migratedImage = template.serialize();
+    template.close();
+  }
+  writeFileSync(path, migratedImage);
+  return new Database(path);
+}
+
 const owner: ManagementActor = { kind: 'installation_owner', principalId: 'principal_installation_owner' };
 const adminActor: ManagementActor = { kind: 'principal', principalId: 'principal_admin', channelBotId: 'bot_test' };
 const time = '2026-01-01T00:00:00.000Z';
@@ -33,9 +46,8 @@ function fixture() {
   const dir = mkdtempSync(join(tmpdir(), 'dutydeck-commands-test-'));
   cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
   const path = join(dir, 'database.sqlite');
-  let db = new Database(path);
+  let db = migratedDatabase(path);
   db.pragma('journal_mode = WAL');
-  runMigrations(db);
   db.prepare("UPDATE configuration_authority SET authority='v2' WHERE id=1").run();
   cleanup.push(() => {
     if (db.open) db.close();

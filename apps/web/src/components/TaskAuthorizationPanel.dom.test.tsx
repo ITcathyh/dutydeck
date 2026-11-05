@@ -34,7 +34,7 @@ describe('task authorization evidence', () => {
     vi.spyOn(api, 'taskAuthorizations').mockResolvedValue([]);
     const client = new QueryClient();
     const view = render(<QueryClientProvider client={client}><TaskAuthorizationPanel sessionId="s1" tasks={[]}/></QueryClientProvider>);
-    await vi.waitFor(() => expect(api.taskAuthorizations).toHaveBeenCalled());
+    await vi.waitFor(() => expect(api.taskAuthorizations).toHaveBeenCalled(), { interval: 5 });
     expect(view.container.textContent).toBe('');
   });
 });

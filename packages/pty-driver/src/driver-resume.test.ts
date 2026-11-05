@@ -29,7 +29,7 @@ import { buildSessionMarker } from './session-id/index.js';
 /** Poll an assertion until it passes or times out. Generous by default: the
  *  tmux spawn → pipe-pane → tail -F chain sees multi-second jitter under the
  *  full concurrent suite, and the first tmux test pays server cold-start. */
-async function waitForAssert<T>(fn: () => T, timeoutMs = 30_000, intervalMs = 100): Promise<T> {
+async function waitForAssert<T>(fn: () => T, timeoutMs = 30_000, intervalMs = 20): Promise<T> {
   const start = Date.now();
   let lastError: unknown;
   for (;;) {
@@ -43,7 +43,7 @@ async function waitForAssert<T>(fn: () => T, timeoutMs = 30_000, intervalMs = 10
   }
 }
 
-function waitFor(predicate: () => boolean, timeoutMs = 30_000, intervalMs = 100): Promise<void> {
+function waitFor(predicate: () => boolean, timeoutMs = 30_000, intervalMs = 20): Promise<void> {
   return waitForAssert(() => {
     if (!predicate()) throw new Error('not yet');
   }, timeoutMs, intervalMs) as Promise<void>;
@@ -532,6 +532,8 @@ describe('PtyCliDriver resume session id resolution', () => {
     `, 'utf8');
 
     const exits: Array<number | null> = [];
+    const events: NormalizedDriverEvent[] = [];
+    const firstBackend = new PtyBackend();
     const adapter: CliAdapter = {
       id: 'exit-probe',
       capabilities: { resume: true },
@@ -541,15 +543,17 @@ describe('PtyCliDriver resume session id resolution', () => {
       completionPattern: /MOCK DONE/,
     };
     const driver = new PtyCliDriver({
-      agent: agentConfig({ cwd }), adapter, backend: new PtyBackend(),
-      onEvent: () => {}, onExit: code => exits.push(code), sessionId: SESSION_ID,
+      agent: agentConfig({ cwd }), adapter, backend: firstBackend,
+      onEvent: event => events.push(event), onExit: code => exits.push(code), sessionId: SESSION_ID,
     });
 
     await driver.start();
-    await waitFor(() => driver.getCliSessionId() !== undefined || true, 5_000).catch(() => {});
-    await new Promise(r => setTimeout(r, 1500));   // 让首个 CLI 真正跑起来
+    // 让首个 CLI 真正跑起来：等它的输出出现在屏幕上。
+    await waitFor(() => events.some(e => e.type === 'raw_terminal' && String(e.data?.text).includes('MOCK READY')), 10_000);
+    const firstExited = new Promise<void>(resolve => firstBackend.onExit(() => resolve()));
     await driver.resume();                          // 内部 kill 旧后端 + 重 spawn
-    await new Promise(r => setTimeout(r, 3000));    // 留足信号送达 + 回调的时间
+    await firstExited;                              // 旧后端的 exit 回调已经送达 driver
+    await new Promise(r => setTimeout(r, 50));      // 再让同一批 exit 回调的后续 tick 跑完
 
     // 旧后端的退出不该冒泡成 driver 退出
     expect(exits, `不该上报退出，实际上报了 ${JSON.stringify(exits)}`).toEqual([]);

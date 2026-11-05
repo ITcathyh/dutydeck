@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -10,6 +10,19 @@ import {
   canonicalSnapshotJson
 } from './bot-configuration-reader.js';
 import type { BotSnapshot } from '@dutydeck/shared';
+
+// 迁移只依赖 SQL：先在内存里迁移一次，之后每个用例把这份空库镜像写成新文件，免得每次重跑全部迁移。
+let migratedImage: Buffer | undefined;
+function migratedDatabase(path: string): Database.Database {
+  if (!migratedImage) {
+    const template = new Database(':memory:');
+    runMigrations(template);
+    migratedImage = template.serialize();
+    template.close();
+  }
+  writeFileSync(path, migratedImage);
+  return new Database(path);
+}
 
 describe('bot configuration reader', () => {
   const directories: string[] = [];
@@ -30,9 +43,8 @@ describe('bot configuration reader', () => {
 
   function setupTestDatabase(): { db: Database.Database; path: string } {
     const path = join(tempDir(), 'test.db');
-    const db = new Database(path);
+    const db = migratedDatabase(path);
     db.pragma('journal_mode = WAL');
-    runMigrations(db);
     return { db, path };
   }
 

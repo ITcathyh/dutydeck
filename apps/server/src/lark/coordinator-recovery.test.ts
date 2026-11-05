@@ -277,6 +277,38 @@ describe('飞书命令在 coordinator 重建后的会话定位', () => {
     } finally { without.stop(); }
   });
 
+  it('/pr follow <链接> 认领已有的 PR 并回执带「停止跟进」；不是链接或编号时仍当标题；没有权限的人不能认领', async () => {
+    const { runtime } = persistentRuntime();
+    const first = coordinatorFor(runtime, cardService());
+    await first.handle(dm('om_initial', '先创建工作项'), config);
+    await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledOnce());
+    const followed = {
+      id: 'pr_9', sessionId: 'ses_1', provider: 'github', providerName: 'GitHub', repository: 'acme/app', status: 'open', title: 'Login fix', claimed: true,
+      bodySummary: '', branch: 'feature/login', target: 'main', baseSha: 'a'.repeat(40), headSha: 'b'.repeat(40), files: [], excluded: [], commits: [],
+      pullRequest: { number: 12, url: 'https://github.com/acme/app/pull/12', label: '#12' },
+      ciRounds: 0, reviewRounds: 0, expiresAt: '2026-10-13T00:00:00.000Z', createdAt: '2026-10-13T00:00:00.000Z', updatedAt: '2026-10-13T00:00:00.000Z'
+    };
+    const proposal = { ...followed, id: 'pr_1', status: 'proposed', claimed: undefined, branch: 'dutydeck/follow-up-later-0a1b2c3d', expiresAt: '2026-10-13T00:30:00.000Z' };
+    const pullRequests = { availability: () => ({ available: true }), follow: vi.fn(async () => followed), prepare: vi.fn(async () => proposal), attachCard: vi.fn(async () => {}) };
+    const service = cardService();
+    const coordinator = new LarkMessageCoordinator(runtime as any, service as any, silentLog(), Math.random, 'ou_bot', undefined, undefined, undefined, undefined, undefined, { automation: { pullRequests } as any });
+    try {
+      await coordinator.handle(dm('om_follow', '/pr follow https://github.com/acme/app/pull/12'), config);
+      await vi.waitFor(() => expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ taskName: '已跟进 #12' })));
+      expect(pullRequests.follow).toHaveBeenCalledWith('ses_1', { pullRequest: 'https://github.com/acme/app/pull/12' }, 'ou_user_a');
+      const card = service.send.mock.calls.find(([input]: any[]) => input.taskName === '已跟进 #12')?.[0];
+      expect(card.markdown).toContain('`feature/login` → `main`');
+      expect(card.elements.filter((element: any) => element.tag === 'button').map((element: any) => [element.text.content, element.behaviors[0].value]))
+        .toEqual([['停止跟进', { dutydeck_pr: 'pr_9', op: 'stop' }]]);
+      await coordinator.handle(dm('om_title', '/pr follow up later'), config);
+      await vi.waitFor(() => expect(pullRequests.prepare).toHaveBeenCalledWith('ses_1', { title: 'follow up later' }, 'ou_user_a'));
+      expect(pullRequests.follow).toHaveBeenCalledOnce();
+      await coordinator.handle(dm('om_denied', '/pr follow #12'), { ...config, allowedUsers: [{ openId: 'ou_carol', name: 'Carol' }] });
+      await vi.waitFor(() => expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ taskName: '/pr 未执行', markdown: expect.stringContaining('无法执行 /pr') })));
+      expect(pullRequests.follow).toHaveBeenCalledOnce();
+    } finally { first.stop(); coordinator.stop(); }
+  });
+
   it('/pr 确认卡的按钮走中断/重试同一道权限门，只认本会话所在群的卡', async () => {
     const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
     const { runtime, sessions } = persistentRuntime();

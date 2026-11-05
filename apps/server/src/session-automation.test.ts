@@ -7,6 +7,8 @@ import { promisify } from 'node:util';
 import {
   canonicalExecutionJson,
   previewSessionSchedule,
+  RuntimeError,
+  writeTaskReport,
   sessionScheduleOccurrenceSchema,
   type AttemptResultV1,
   type CiPipelineStatus,
@@ -14,12 +16,14 @@ import {
   type RuntimeControlClaim,
   type Session,
   type TaskRecord,
-  type TaskRequestV1
+  type TaskRequestV1,
+  type WorkItem
 } from '@dutydeck/shared';
 import { createRepositories, executionTaskId } from '@dutydeck/storage';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ciProviders, ciStatus, TEST_CI_REMOTE, type StatusMock } from './ci-provider.test-helpers.js';
-import { SessionAutomationService, type SessionAutomationRuntime, type AutomationDeliveryContext } from './session-automation.js';
+import { workItemProgressStatus } from './work-items.js';
+import { SessionAutomationService, type SessionAutomationRuntime, type AutomationDeliveryContext, type SessionAutomationServiceOptions } from './session-automation.js';
 
 const run = promisify(execFile);
 const cleanups: Array<() => void | Promise<void>> = [];
@@ -144,7 +148,7 @@ function ledgerRuntime(repos: Repos, harnessSession: HarnessSession, options: { 
   return runtime;
 }
 
-async function fixture(options: { database?: string; clock?: Date; status?: StatusMock; providerId?: string; crashAfterAcceptance?: boolean; deliver?: (sessionId: string, result: AttemptResultV1, occurrenceId: string, sourceId: string, context?: AutomationDeliveryContext) => Promise<void>; onScheduleDisabled?: (schedule: any, reason: string) => Promise<void>; onScheduleOverdue?: (schedule: any, notice: any) => Promise<void | 'not_requested'> } = {}) {
+async function fixture(options: { database?: string; clock?: Date; status?: StatusMock; providerId?: string; crashAfterAcceptance?: boolean; deliver?: (sessionId: string, result: AttemptResultV1, occurrenceId: string, sourceId: string, context?: AutomationDeliveryContext) => Promise<void>; onScheduleDisabled?: (schedule: any, reason: string) => Promise<void>; onScheduleProblem?: (schedule: any, notice: any) => Promise<{ messageId?: string } | void>; onScheduleOverdue?: (schedule: any, notice: any) => Promise<void | 'not_requested'>; extra?: Partial<SessionAutomationServiceOptions> } = {}) {
   const directory = options.database ? undefined : await mkdtemp(join(tmpdir(), 'dutydeck-automation-db-'));
   if (directory) cleanups.push(() => rm(directory, { recursive: true, force: true }));
   const database = options.database ?? join(directory!, 'dutydeck.db');
@@ -168,7 +172,9 @@ async function fixture(options: { database?: string; clock?: Date; status?: Stat
     clock: () => new Date(now.value),
     deliver: options.deliver,
     onScheduleDisabled: options.onScheduleDisabled,
-    onScheduleOverdue: options.onScheduleOverdue
+    onScheduleProblem: options.onScheduleProblem,
+    onScheduleOverdue: options.onScheduleOverdue,
+    ...options.extra
   });
   cleanups.push(() => service.close());
   return { database, repositories, cwd, session, now, allowed, service, ...mocked };
@@ -474,6 +480,27 @@ describe('SessionAutomationService schedules', () => {
     expect(h.dispatches).toHaveLength(0);
   });
 
+  it('counts CI condition errors as failures: tells the thread and pauses the schedule after three in a row', async () => {
+    const onScheduleProblem = vi.fn(async (_schedule: unknown, notice: { messageId?: string }) => ({ messageId: notice.messageId ?? 'om_notice' }));
+    const onScheduleDisabled = vi.fn(async () => {});
+    const h = await fixture({ onScheduleProblem, onScheduleDisabled });
+    const created = await h.service.createSchedule(h.session.id, { ...scheduleInput, condition: { kind: 'ci_new_failure' } }, 'ou_owner');
+    await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+    // 用户在工作区提交了新代码：计划创建时冻结的 HEAD 不再是当前提交。
+    await run('git', ['-C', h.cwd, 'commit', '--allow-empty', '-qm', 'next']);
+    for (const minute of [1, 2, 3]) {
+      h.now.value = new Date(`2026-09-12T00:0${minute}:01.000Z`);
+      await h.service.tick();
+      await vi.waitFor(async () => { await h.service.tick(); expect(onScheduleProblem).toHaveBeenCalledTimes(minute); });
+    }
+    expect((await h.service.listBySession(h.session.id)).occurrences.map(item => item.conditionStatus)).toEqual(['error', 'error', 'error']);
+    expect(onScheduleProblem.mock.calls[0]![1]).toMatchObject({ text: expect.stringContaining('当前提交已经变了') });
+    expect(onScheduleProblem.mock.calls[2]![1]).toMatchObject({ text: expect.stringContaining('已连续 3 次没做成') });
+    expect(JSON.parse((await h.repositories.config.get(`session_automation/schedule/${created.id}`))!).enabled).toBe(false);
+    await vi.waitFor(async () => { await h.service.tick(); expect(onScheduleDisabled).toHaveBeenCalledOnce(); });
+    expect(h.dispatches).toHaveLength(0);
+  });
+
   it('OCR-07 dispatches a failed rerun once and remembers its attempt across reconstruction', async () => {
     const responses: CiPipelineStatus[] = [];
     const request = vi.fn(async () => responses.shift()!) as StatusMock;
@@ -630,14 +657,15 @@ describe('SessionAutomationService schedules', () => {
     const created = await h.service.createSchedule(h.session.id, scheduleInput, 'ou_owner');
     await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
     const timestamp = '2026-09-12T00:00:00.000Z';
-    for (let index = 0; index < 1_001; index += 1) {
+    // 造数据走单事务批量写入，避免 1001 次独立提交；被测的 tick 扫描路径不变。
+    await h.repositories.config.compareAndSetBatch!([], Array.from({ length: 1_001 }, (_, index) => {
       const id = `dummy_${String(index).padStart(4, '0')}`;
-      await h.repositories.config.set(`session_automation/occurrence/${id}`, JSON.stringify(sessionScheduleOccurrenceSchema.parse({
+      return { key: `session_automation/occurrence/${id}`, value: JSON.stringify(sessionScheduleOccurrenceSchema.parse({
         schemaVersion: 1, id, revision: 1, scheduleId: 'other', sessionId: 'other', generation: 1,
         scheduledForUtc: timestamp, conditionStatus: 'skipped', runStatus: 'skipped',
         delivery: { status: 'not_requested', attempts: 0, updatedAt: timestamp }, createdAt: timestamp, updatedAt: timestamp
-      })));
-    }
+      })) };
+    }));
     // 经真实账本接受两条任务：一条结算完成，一条仍 queued；occurrence 不带 admission，由 refresh 固定 legacy_partial。
     const accept = (key: string) => {
       const id = executionTaskId('schedule', h.session.id, key);
@@ -835,6 +863,24 @@ describe('bounded automatic result delivery', () => {
       await vi.waitFor(() => expect(new Set(sent).size).toBe(6));
       expect(h.dispatches).toHaveLength(6);
     } finally { release(); }
+  });
+
+  it('backs off a permanently failing result delivery, stops after three attempts and shows it as an error', async () => {
+    const deliver = vi.fn(async () => { throw new Error('report target missing'); });
+    const h = await fixture({ deliver }); await completedSchedules(h);
+    const delivery = async () => (await h.service.listBySession(h.session.id)).occurrences[0]!.delivery;
+    await vi.waitFor(async () => { await h.service.tick(); expect(await delivery()).toMatchObject({ status: 'error', attempts: 1 }); });
+    for (let tick = 0; tick < 5; tick++) await h.service.tick();
+    expect(deliver).toHaveBeenCalledTimes(1);
+    for (const attempts of [2, 3]) {
+      h.now.value = new Date(h.now.value.getTime() + 60_000 * (attempts - 1));
+      await vi.waitFor(async () => { await h.service.tick(); expect(await delivery()).toMatchObject({ status: 'error', attempts }); });
+    }
+    h.now.value = new Date(h.now.value.getTime() + 60 * 60_000);
+    for (let tick = 0; tick < 5; tick++) await h.service.tick();
+    expect(deliver).toHaveBeenCalledTimes(3);
+    expect(await delivery()).toMatchObject({ status: 'error', attempts: 3, error: expect.stringContaining('不再自动重发') });
+    expect((await h.service.listSchedules({}, async () => true)).items[0]!.health).not.toBe('delivery');
   });
 
   it('renews a long send, prevents a second instance claim, and aborts a lost lease without stale settlement', async () => {
@@ -1083,6 +1129,8 @@ describe('SessionAutomationService CI subscriptions', () => {
     await h.service.tick();
     await vi.waitFor(async () => expect((await h.service.listBySession(h.session.id)).subscriptions[0]?.delivery).toMatchObject({ status: 'error', attempts: 1 }));
     await h.service.tick();
+    expect(deliver).toHaveBeenCalledTimes(1);
+    h.now.value = new Date(h.now.value.getTime() + 60_000);
     await vi.waitFor(async () => {
       await h.service.tick();
       expect((await h.service.listBySession(h.session.id)).subscriptions[0]?.delivery).toMatchObject({ status: 'delivered', attempts: 2 });
@@ -1327,18 +1375,20 @@ it('keeps the latest 1000 occurrences of one deleted schedule independently of o
   await h.service.tick();
   await h.service.deleteSchedule(h.session.id, created.id, { expectedRevision: 1 }, 'ou_owner');
   const timestamp = '2026-09-13T00:00:00.000Z';
-  const storeOccurrence = async (id: string, scheduleId: string, scheduledForUtc: string) => {
-    await h.repositories.config.set(`session_automation/occurrence/${id}`, JSON.stringify(sessionScheduleOccurrenceSchema.parse({
+  const occurrence = (id: string, scheduleId: string, scheduledForUtc: string) => ({
+    key: `session_automation/occurrence/${id}`,
+    value: JSON.stringify(sessionScheduleOccurrenceSchema.parse({
       schemaVersion: 1, id, revision: 1, scheduleId, sessionId: h.session.id, generation: 1, scheduledForUtc,
       conditionStatus: 'skipped', runStatus: 'skipped', delivery: { status: 'not_requested', attempts: 0, updatedAt: timestamp }, createdAt: timestamp, updatedAt: timestamp
-    })));
-  };
-  for (let i = 0; i < 1001; i++) await storeOccurrence(`other_occ_${i}`, 'other-schedule', timestamp);
+    }))
+  });
+  // 造数据走单事务批量写入，避免逐条提交。
+  await h.repositories.config.compareAndSetBatch!([], Array.from({ length: 1001 }, (_, i) => occurrence(`other_occ_${i}`, 'other-schedule', timestamp)));
   expect((await h.service.listBySession(h.session.id)).occurrences.some(item => item.id === original.id)).toBe(false);
   const retained = await h.service.getScheduleHistory(h.session.id, created.id, 'ou_owner');
   expect(retained).toHaveLength(1);
   expect(retained[0]).toMatchObject({ id: original.id, runStatus: 'completed', result: { output: { text: 'target result' } } });
-  for (let i = 0; i < 1001; i++) await storeOccurrence(`own_occ_${i}`, created.id, new Date(Date.parse(timestamp) + i * 60_000).toISOString());
+  await h.repositories.config.compareAndSetBatch!([], Array.from({ length: 1001 }, (_, i) => occurrence(`own_occ_${i}`, created.id, new Date(Date.parse(timestamp) + i * 60_000).toISOString())));
   const history = await h.service.getScheduleHistory(h.session.id, created.id, 'ou_owner');
   expect(history).toHaveLength(1000);
   expect(history[0]!.id).toBe('own_occ_1000');
@@ -2368,4 +2418,192 @@ it('rejects an agent create request against an enabled same-name recurring plan 
   const own = await h.service.requestSchedule(h.session.id, { ...scheduleInput, name: 'idempotent plan' }, 'ou_owner', receipt);
   await h.service.updateSchedule(h.session.id, own.schedule.id, { expectedRevision: own.schedule.revision, enabled: true }, 'ou_owner');
   expect((await h.service.requestSchedule(h.session.id, { ...scheduleInput, name: 'idempotent plan' }, 'ou_owner', receipt)).schedule.id).toBe(own.schedule.id);
+});
+
+describe('follow-up until done: completion condition, deadline and run state', () => {
+  const followUp = { ...scheduleInput, completionCondition: 'PR 已合并', deadlineAt: '2026-09-12T18:00:00+08:00' };
+  async function enable(h: Awaited<ReturnType<typeof fixture>>, input: Record<string, unknown> = followUp) {
+    const created = await h.service.createSchedule(h.session.id, input as typeof scheduleInput, 'ou_owner');
+    return h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+  }
+  const runState = async (h: Awaited<ReturnType<typeof fixture>>, id: string) => (await h.service.listBySession(h.session.id, 'ou_owner')).runStates?.[id];
+
+  it('injects the completion condition, stop-self instruction and deadline into each run without changing the saved prompt', async () => {
+    const h = await fixture();
+    const schedule = await enable(h);
+    expect(schedule).toMatchObject({ prompt: scheduleInput.prompt, completionCondition: 'PR 已合并', deadlineAt: '2026-09-12T10:00:00.000Z' });
+    h.now.value = new Date('2026-09-12T00:01:01.000Z'); await h.service.tick();
+    const request = h.repositories.execution.getAcceptedTask(h.dispatches[0]!.id)!.request!;
+    expect(request.prompt.startsWith(scheduleInput.prompt)).toBe(true);
+    expect(request.prompt).toContain('完成条件：PR 已合并');
+    expect(request.prompt).toContain('schedule stop-self');
+    expect(request.prompt).toContain('截止时间：2026/9/12 18:00:00（Asia/Shanghai）');
+    expect(await runState(h, schedule.id)).toBe('running');
+  });
+
+  it('marks a stop-self after confirmed delivery as completed and never fires again', async () => {
+    const h = await fixture({ deliver: async () => {} });
+    const schedule = await enable(h);
+    h.now.value = new Date('2026-09-12T00:01:01.000Z'); await h.service.tick();
+    const task = h.dispatches[0]!;
+    const attempt = bound(h.repositories).claimNext({ sessionId: h.session.id, runId: h.session.runId })!.attempt!;
+    await h.service.requestScheduleStop(h.session.id, task.id, attempt.attemptId, 'ou_owner');
+    h.settleTask(task.id);
+    await h.service.tick();
+    await vi.waitFor(async () => expect((await h.service.getScheduleDefinition(h.session.id, schedule.id, 'ou_owner')).enabled).toBe(false));
+    const stopped = await h.service.getScheduleDefinition(h.session.id, schedule.id, 'ou_owner');
+    expect(stopped.outcome).toMatchObject({ kind: 'completed' });
+    expect(stopped.disabledReason).toBeUndefined();
+    expect(await runState(h, schedule.id)).toBe('completed');
+    h.now.value = new Date('2026-09-12T00:05:01.000Z'); await h.service.tick(); await h.service.tick();
+    expect(h.dispatches).toHaveLength(1);
+  });
+
+  it.each(['failed', 'report_blocked'] as const)('does not treat a %s run as completed even when it requested stop-self', async kind => {
+    const h = await fixture({ deliver: async () => {} });
+    const schedule = await enable(h);
+    h.now.value = new Date('2026-09-12T00:01:01.000Z'); await h.service.tick();
+    const task = h.dispatches[0]!;
+    const attempt = bound(h.repositories).claimNext({ sessionId: h.session.id, runId: h.session.runId })!.attempt!;
+    await h.service.requestScheduleStop(h.session.id, task.id, attempt.attemptId, 'ou_owner');
+    if (kind === 'report_blocked') await writeTaskReport(h.repositories.config, { schemaVersion: 1, taskId: task.id, sessionId: h.session.id, status: 'blocked', summary: '等 CI 修好', reportedAt: h.now.value.toISOString() });
+    h.settleTask(task.id, kind === 'failed' ? 'failed' : 'completed');
+    await h.service.tick();
+    await vi.waitFor(async () => expect(JSON.parse((await h.repositories.config.get(`session_automation/stop_request/${task.id}`))!).status).toBe('rejected'));
+    const current = await h.service.getScheduleDefinition(h.session.id, schedule.id, 'ou_owner');
+    expect(current.enabled).toBe(true);
+    expect(current.outcome).toBeUndefined();
+    expect(await runState(h, schedule.id)).toBe('failed');
+  });
+
+  it('disables at the deadline with a notice, records deadline_reached and starts no later run', async () => {
+    const onScheduleDisabled = vi.fn(async () => {});
+    const h = await fixture({ onScheduleDisabled });
+    const schedule = await enable(h, { ...followUp, trigger: { kind: 'interval', everySeconds: 3600, anchorAt: '2026-09-12T00:30:00.000Z' }, deadlineAt: '2026-09-12T01:00:00.000Z' });
+    h.now.value = new Date('2026-09-12T00:10:00.000Z'); await h.service.tick();
+    expect(await runState(h, schedule.id)).toBe('waiting');
+    h.now.value = new Date('2026-09-12T01:30:01.000Z'); await h.service.tick(); await h.service.tick();
+    const stopped = await h.service.getScheduleDefinition(h.session.id, schedule.id, 'ou_owner');
+    expect(stopped).toMatchObject({ enabled: false, outcome: { kind: 'deadline_reached' } });
+    expect(stopped.disabledReason).toContain('已到截止时间 2026/9/12 09:00:00（Asia/Shanghai），未确认完成');
+    expect(onScheduleDisabled).toHaveBeenCalledOnce();
+    expect(h.dispatches).toHaveLength(0);
+    expect(await runState(h, schedule.id)).toBe('deadline_reached');
+    await expect(h.service.updateSchedule(h.session.id, schedule.id, { expectedRevision: stopped.revision, enabled: true }, 'ou_owner')).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_DEADLINE_PASSED' });
+    const reopened = await h.service.updateSchedule(h.session.id, schedule.id, { expectedRevision: stopped.revision, enabled: true, deadlineAt: null }, 'ou_owner');
+    expect(reopened.outcome).toBeUndefined();
+    expect(await runState(h, schedule.id)).toBe('waiting');
+  });
+
+  it('rejects follow-up settings that cannot be honoured', async () => {
+    const h = await fixture();
+    await expect(h.service.createSchedule(h.session.id, { ...followUp, trigger: { kind: 'at', localDateTime: '2026-09-12T09:00:00' } }, 'ou_owner')).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_FOLLOW_UP_REQUIRES_RECURRING', statusCode: 400 });
+    await expect(h.service.createSchedule(h.session.id, { ...followUp, deadlineAt: '2026-09-11T00:00:00.000Z' }, 'ou_owner')).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_DEADLINE_PASSED', statusCode: 409 });
+    const created = await h.service.createSchedule(h.session.id, scheduleInput, 'ou_owner');
+    await expect(h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, deadlineAt: '2026-09-11T00:00:00.000Z' }, 'ou_owner')).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_DEADLINE_PASSED' });
+    const updated = await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, completionCondition: '构建通过' }, 'ou_owner');
+    expect(updated).toMatchObject({ completionCondition: '构建通过', generation: 2 });
+    expect((await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 2, completionCondition: null }, 'ou_owner')).completionCondition).toBeUndefined();
+    await expect(h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 2, completionCondition: 'x' }, 'ou_owner')).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_REVISION_CONFLICT' });
+  });
+
+  it('shows a run waiting on a pending approval or question as awaiting_human', async () => {
+    const waiting = { value: false };
+    const h = await fixture({ extra: { awaitingHuman: () => waiting.value } });
+    const schedule = await enable(h);
+    h.now.value = new Date('2026-09-12T00:01:01.000Z'); await h.service.tick();
+    expect(await runState(h, schedule.id)).toBe('running');
+    waiting.value = true;
+    expect(await runState(h, schedule.id)).toBe('awaiting_human');
+    const page = await h.service.listSchedules({}, async () => ({ actorId: 'ou_owner' }));
+    expect(page.items[0]).toMatchObject({ runState: 'awaiting_human' });
+  });
+});
+
+describe('work-template schedules', () => {
+  function templates(initial: Record<string, string> = {}) {
+    const statuses = new Map(Object.entries(initial));
+    const available = { value: true };
+    const fake = {
+      statuses, available,
+      list: vi.fn(async () => available.value ? [{ id: 'template_a', version: 2 }] : []),
+      run: vi.fn(async (_session: string, id: string, version: number, _goal: string, key: string) => {
+        if (!available.value) throw new RuntimeError('WORK_TEMPLATE_NOT_FOUND', 'Template version not found', 404);
+        const workId = `work_${key}`;
+        statuses.set(workId, statuses.get(workId) ?? 'awaiting_confirmation');
+        return { id: workId, status: statuses.get(workId)!, template: `${id}@${version}` };
+      }),
+      status: vi.fn(async (_session: string, id: string) => statuses.get(id))
+    };
+    return fake;
+  }
+  const templateInput = { ...scheduleInput, prompt: '检查发布进展', workTemplate: { id: 'template_a', version: 2 } };
+
+  it('starts the saved template as the goal instead of dispatching a turn, keeps confirmation and skips while the last work item is active', async () => {
+    const workTemplates = templates();
+    const h = await fixture({ extra: { workTemplates } });
+    const created = await h.service.createSchedule(h.session.id, templateInput, 'ou_owner');
+    const schedule = await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+    h.now.value = new Date('2026-09-12T00:01:01.000Z'); await h.service.tick();
+    expect(h.dispatches).toHaveLength(0);
+    expect(workTemplates.run).toHaveBeenCalledOnce();
+    const [sessionId, id, version, goal, key, actor] = workTemplates.run.mock.calls[0]!;
+    expect({ sessionId, id, version, goal, actor }).toEqual({ sessionId: h.session.id, id: 'template_a', version: 2, goal: '检查发布进展', actor: 'ou_owner' });
+    const [occurrence] = (await h.service.listBySession(h.session.id, 'ou_owner')).occurrences;
+    expect(occurrence).toMatchObject({ runStatus: 'completed', workItemId: `work_${key}`, delivery: { status: 'not_requested' } });
+    // 模板启动沿用确认规则：待确认显示为等待人工。
+    expect((await h.service.listBySession(h.session.id, 'ou_owner')).runStates?.[schedule.id]).toBe('awaiting_human');
+    h.now.value = new Date('2026-09-12T00:02:01.000Z'); await h.service.tick();
+    expect(workTemplates.run).toHaveBeenCalledOnce();
+    const history = (await h.service.listBySession(h.session.id, 'ou_owner')).occurrences;
+    expect(history.at(-1)).toMatchObject({ runStatus: 'skipped', error: expect.stringContaining('还没结束') });
+    workTemplates.statuses.set(`work_${key}`, 'completed');
+    h.now.value = new Date('2026-09-12T00:03:01.000Z'); await h.service.tick();
+    expect(workTemplates.run).toHaveBeenCalledTimes(2);
+  });
+
+  it('treats a failed work item with a pending plan revision as unfinished and skips the next start', async () => {
+    const workTemplates = templates();
+    // 与 service.ts 的接线一致：状态经 workItemProgressStatus 换算。
+    const items = new Map<string, Pick<WorkItem, 'status' | 'pendingRevision'>>();
+    workTemplates.status.mockImplementation(async (_session: string, id: string) => items.has(id) ? workItemProgressStatus(items.get(id)!) : undefined);
+    const h = await fixture({ extra: { workTemplates } });
+    const created = await h.service.createSchedule(h.session.id, templateInput, 'ou_owner');
+    const schedule = await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+    h.now.value = new Date('2026-09-12T00:01:01.000Z'); await h.service.tick();
+    const key = workTemplates.run.mock.calls[0]![4];
+    items.set(`work_${key}`, { status: 'failed', pendingRevision: { version: 2 } as WorkItem['pendingRevision'] });
+    expect((await h.service.listBySession(h.session.id, 'ou_owner')).runStates?.[schedule.id]).toBe('running');
+    h.now.value = new Date('2026-09-12T00:02:01.000Z'); await h.service.tick();
+    expect(workTemplates.run).toHaveBeenCalledOnce();
+    expect((await h.service.listBySession(h.session.id, 'ou_owner')).occurrences.at(-1)).toMatchObject({ runStatus: 'skipped', error: expect.stringContaining('还没结束') });
+    // 放弃修订后只剩失败：算已结束，下一次照常启动。
+    items.set(`work_${key}`, { status: 'failed' });
+    h.now.value = new Date('2026-09-12T00:03:01.000Z'); await h.service.tick();
+    expect(workTemplates.run).toHaveBeenCalledTimes(2);
+  });
+
+  it('fails the run with an explanation and notifies when the template was deleted', async () => {
+    const workTemplates = templates();
+    const onScheduleProblem = vi.fn(async () => {});
+    const h = await fixture({ extra: { workTemplates, onScheduleProblem } });
+    const created = await h.service.createSchedule(h.session.id, templateInput, 'ou_owner');
+    const schedule = await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+    workTemplates.available.value = false;
+    h.now.value = new Date('2026-09-12T00:01:01.000Z'); await h.service.tick(); await h.service.tick();
+    const [occurrence] = (await h.service.listBySession(h.session.id, 'ou_owner')).occurrences;
+    expect(occurrence).toMatchObject({ runStatus: 'error', error: expect.stringContaining('已删除或不可用') });
+    expect(onScheduleProblem).toHaveBeenCalledWith(expect.objectContaining({ id: schedule.id }), expect.objectContaining({ text: expect.stringContaining('已删除或不可用') }));
+    expect((await h.service.listBySession(h.session.id, 'ou_owner')).runStates?.[schedule.id]).toBe('failed');
+    expect(h.dispatches).toHaveLength(0);
+  });
+
+  it('validates the template and its combination rules before saving', async () => {
+    const h = await fixture({ extra: { workTemplates: templates() } });
+    await expect(h.service.createSchedule(h.session.id, { ...templateInput, workTemplate: { id: 'template_a', version: 9 } }, 'ou_owner')).rejects.toMatchObject({ code: 'WORK_TEMPLATE_NOT_FOUND', statusCode: 404 });
+    await expect(h.service.createSchedule(h.session.id, { ...templateInput, completionCondition: '完成' }, 'ou_owner')).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_TEMPLATE_UNSUPPORTED' });
+    await expect(h.service.createSchedule(h.session.id, { ...templateInput, mode: 'fresh' }, 'ou_owner')).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_TEMPLATE_UNSUPPORTED' });
+    const without = await fixture();
+    await expect(without.service.createSchedule(without.session.id, templateInput, 'ou_owner')).rejects.toMatchObject({ code: 'WORK_TEMPLATE_UNAVAILABLE' });
+  });
 });

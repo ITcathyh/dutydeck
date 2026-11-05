@@ -57,3 +57,19 @@ it('recovers pending and failed deliveries after reopening while retaining pause
     expect(await repos.workItems.listScheduledIds()).toEqual(['blocked', 'confirm', 'pending']);
   } finally { repos.close(); rmSync(directory, { recursive: true, force: true }); }
 });
+
+it('keeps child sessions of steps retired by a plan revision bound without counting them as active', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'work-item-index-retired-')), path = join(directory, 'state.db');
+  const repos = createRepositories(path);
+  try {
+    const record = { stoppedAttempts: ['old'], item: { parentSessionId: 'parent', status: 'running', delivery: { status: 'pending' },
+      steps: [{ status: 'running', attempts: [{ id: 'live', sessionId: 'live-child' }] }],
+      retiredSteps: [{ status: 'running', attempts: [{ id: 'old', sessionId: 'retired-child' }] }] } };
+    await repos.config.set('work_item:work', JSON.stringify(record));
+    expect(await repos.workItems.findByChildSession('retired-child')).toBe('work');
+    expect(await repos.workItems.findByChildSession('live-child')).toBe('work');
+    expect(await repos.workItems.countActiveSteps()).toBe(1);
+    await repos.config.set('work_item:work', JSON.stringify({ ...record, item: { ...record.item, retiredSteps: undefined } }));
+    expect(await repos.workItems.findByChildSession('retired-child')).toBeUndefined();
+  } finally { repos.close(); rmSync(directory, { recursive: true, force: true }); }
+});

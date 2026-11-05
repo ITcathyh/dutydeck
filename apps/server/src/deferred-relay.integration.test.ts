@@ -6,7 +6,7 @@ import { buildApp } from './app.js';
 import { runNativeAskHook } from './native-ask-hook.js';
 
 const cleanups: Array<() => Promise<void>> = [];
-afterEach(async () => { for (const close of cleanups.splice(0).reverse()) await close(); });
+afterEach(async () => { vi.useRealTimers(); for (const close of cleanups.splice(0).reverse()) await close(); });
 const native = { hook_event_name: 'PreToolUse', tool_name: 'AskUserQuestion', tool_input: { questions: [
   { question: '确认写入？', options: [{ label: '确认' }, { label: '取消' }] },
   { question: '第二道问题不能登记', options: [{ label: '下一步' }] }
@@ -126,10 +126,14 @@ describe('deferred relay delivery and host stop handshake', () => {
   it('fails closed when an unknown client omits the deferred ACK', async () => {
     const h = await harness();
     const headers = { authorization: `Bearer ${h.capabilities.tokenFor('ses_fixture')}` };
+    // 只伪造定时器，用推进时钟代替真实等待服务端 5 秒的 ACK 超时。
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const response = await h.app.inject({ method: 'POST', url: '/api/relay/sessions/self/ask', headers, payload: { question: 'Q', choices: [{ label: 'Y' }] } });
     expect(response.json().status).toBe('deferred');
-    await vi.waitFor(() => expect(h.runtime.deferTurn).toHaveBeenCalledWith('ses_fixture', 'task_original', 'confirmation_fixture', true, 'attempt_original'), { timeout: 7_000 });
-  }, 10_000);
+    expect(h.runtime.deferTurn).toHaveBeenCalledExactlyOnceWith('ses_fixture', 'task_original', 'confirmation_fixture', false, 'attempt_original');
+    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.waitFor(() => expect(h.runtime.deferTurn).toHaveBeenCalledWith('ses_fixture', 'task_original', 'confirmation_fixture', true, 'attempt_original'));
+  });
   it('native function returns explicit deferred, denies the tool and does not submit the next question', async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ status: 'deferred', askId: 'r1' })));
     const output = JSON.parse(await runNativeAskHook(native, { env: { dutydeck_relay_url: 'http://localhost', dutydeck_relay_token: 'token' }, fetcher }));

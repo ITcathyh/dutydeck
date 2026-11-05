@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -16,6 +16,19 @@ import {
   type ConfigurationCommand, type ConfigurationCommandContext, type ConfigurationAccess
 } from './configuration-transaction.js';
 
+// 迁移只依赖 SQL：先在内存里迁移一次，之后每个用例把这份空库镜像写成新文件，免得每次重跑全部迁移。
+let migratedImage: Buffer | undefined;
+function migratedDatabase(path: string): Database.Database {
+  if (!migratedImage) {
+    const template = new Database(':memory:');
+    runMigrations(template);
+    migratedImage = template.serialize();
+    template.close();
+  }
+  writeFileSync(path, migratedImage);
+  return new Database(path);
+}
+
 const schema = botChangeRefSchema.extend({ patch: botConfigPatchV2Schema });
 type Input = ReturnType<typeof schema.parse>;
 type Snapshot = ReturnType<typeof botSnapshotSchema.parse>;
@@ -29,9 +42,8 @@ function fixture() {
   const dir = mkdtempSync(join(tmpdir(), 'dutydeck-configuration-command-'));
   cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
   const path = join(dir, 'database.sqlite');
-  let db = new Database(path);
+  let db = migratedDatabase(path);
   db.pragma('journal_mode = WAL');
-  runMigrations(db);
   db.prepare("UPDATE configuration_authority SET authority='v2' WHERE id=1").run();
   cleanup.push(() => { if (db.open) db.close(); });
   const reopen = () => { db.close(); db = new Database(path); db.pragma('foreign_keys=ON'); return db; };
@@ -155,7 +167,7 @@ describe('configuration command transactions', () => {
     }
     const before = db.serialize();
     expect(() => runConfigurationCommand(db, request(), changed)).toThrow(/CONFIGURATION_OPERATION_CONFLICT/);
-    expect(db.serialize()).toEqual(before);
+    expect(db.serialize().equals(before)).toBe(true);
   });
 
   it('rechecks current roles before a cached result after revoke and expiry', () => {

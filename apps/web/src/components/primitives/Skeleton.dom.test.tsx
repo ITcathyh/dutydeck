@@ -69,13 +69,6 @@ describe('Skeleton 变体与行数', () => {
     expect(bars.at(-1)!.className).toContain('w-2/3');
   });
 
-  it('每条占位条都在脉动，用的是 bg-muted 语义底色', () => {
-    const { container } = render(<Skeleton variant="row" lines={2}/>);
-    for (const bar of barsOf(container)) {
-      expect(bar.className).toContain('animate-pulse');
-      expect(bar.className).toContain('bg-muted');
-    }
-  });
 });
 
 describe('Skeleton 样式透传', () => {

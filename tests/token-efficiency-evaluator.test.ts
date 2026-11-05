@@ -7,7 +7,8 @@ const fixture = (fault?: string): Manifest => ({ version: 1, frozenConfig: { mod
   cases: [{ id: 'fact', type: 'retrieval', input: { messageId: 'm1', requiredWord: 'confirmed' }, toolData: { messages: [{ id: 'm1', text: 'ship on Friday' }, { id: 'm2', text: 'other message' }], fault }, files: { 'initial.txt': 'frozen' },
     checks: [{ kind: 'exact', path: ['fact'], value: 'ship on Friday' }, { kind: 'exact', path: ['requiredWord'], value: 'confirmed' }, { kind: 'schema', path: [], required: ['messageId', 'fact', 'requiredWord'] }] }] });
 
-describe('paired token efficiency replay evaluator', () => {
+// Each case spawns its own runner processes in separate temporary workspaces, so cases run concurrently.
+describe.concurrent('paired token efficiency replay evaluator', () => {
   it('executes both arms, retains raw usage, deduplicates shared background receipts, and labels mock benefit unverified', async () => {
     const report = await evaluate(fixture());
     expect(report.status).toBe('unverified');

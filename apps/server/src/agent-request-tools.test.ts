@@ -109,6 +109,18 @@ describe('Agent schedule requests', () => {
     expect(f.sendConfirmation).not.toHaveBeenCalled();
   });
 
+  it('turns "keep following until done" into a completion condition and a Beijing-time deadline on create and update', async () => {
+    const f = await setup();
+    const created = await f.request(f.group, { every: 30, prompt: '看看 PR 状态', name: '跟 PR', until: 'PR 已合并', deadline: '2026-12-01T18:00' });
+    expect(created.statusCode).toBe(200);
+    expect(f.requestSchedule.mock.calls[0]![1]).toMatchObject({ completionCondition: 'PR 已合并', deadlineAt: '2026-12-01T10:00:00.000Z' });
+    expect((await f.request(f.group, { every: 30, prompt: '看看 PR 状态', deadline: 'not-a-time' })).statusCode).toBe(400);
+    const patched = await f.agent('PATCH', `schedules/${created.json().scheduleId}`, { until: 'CI 通过', deadline: '2026-12-02T09:00' });
+    expect(patched.statusCode).toBe(200);
+    expect(f.updateSchedule.mock.calls[0]![2]).toMatchObject({ completionCondition: 'CI 通过', deadlineAt: '2026-12-02T01:00:00.000Z', enabled: false });
+    expect((await f.agent('PATCH', `schedules/${created.json().scheduleId}`, { deadline: 'tomorrow' })).statusCode).toBe(400);
+  });
+
   it('passes the fresh-session mode through and rejects unknown modes', async () => {
     const f = await setup();
     expect((await f.request(f.group, { cron: '0 2 * * *', prompt: '更新并部署', name: '部署', mode: 'fresh' })).statusCode).toBe(200);

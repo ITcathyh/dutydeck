@@ -754,6 +754,18 @@ describe('全适配器横切契约', () => {
     }
   });
 
+  it('喂服务端派生的稳定会话 id（ses_work_ 等）时：自铸 id 的 CLI 同样返回 null，argv 与 fresh 一致', () => {
+    const hex = 'a'.repeat(64);
+    for (const dutydeckId of ['work', 'schedule', 'memory', 'collab'].map(kind => `ses_${kind}_${hex}`)) {
+      for (const id of CLI_MINTED_ID_ADAPTERS) {
+        const adapter = createCliAdapter(id);
+        expect(adapter.buildResumeCommand!(dutydeckId), `${id} 收到 ${dutydeckId} 必须返回 null`).toBeNull();
+        expect(adapter.buildArgs({ sessionId: dutydeckId, resume: true, resumeSessionId: dutydeckId }), `${id} 不该带着 ${dutydeckId} 续接`)
+          .toEqual(adapter.buildArgs({ sessionId: dutydeckId }));
+      }
+    }
+  });
+
   it('喂 dutydeck 自己的 ses_<uuid> 时：dutydeck 钉过 id 的 CLI 必须照常 resume', () => {
     // 反向断言，防「一刀切全返回 null」：claude `--session-id` 这类适配器在
     // fresh spawn 时就把 id 钉成了 dutydeck 的，那个 id 就是有效的 resume 目标，
@@ -835,21 +847,29 @@ describe('全适配器横切契约', () => {
   });
 
   it('writeInput 在裸 PTY 后端上把 prompt 送达且以提交收尾', async () => {
-    for (const id of EXPECTED_IDS) {
-      const adapter = createCliAdapter(id);
-      const writes: string[] = [];
-      await adapter.writeInput({ write: data => { writes.push(data); return true; },
-        readScreen: () => 'TraeX\n❯ Ask TraeCode CLI\nContext 100% left' }, 'hello');
-      const joined = writes.join('');
-      expect(joined.length, `${id} 应向裸 PTY 写入内容`).toBeGreaterThan(0);
-      // pass-through 壳（riff/mojo）由后端负责提交语义，不追加 \r。
-      if (id === 'riff' || id === 'mojo') {
-        expect(joined, `${id} 是直通壳，应原样写入`).toBe('hello');
-        continue;
+    // 适配器在写入与提交之间有固定等待；用假时钟推进，断言只看写入序列。
+    vi.useFakeTimers();
+    try {
+      for (const id of EXPECTED_IDS) {
+        const adapter = createCliAdapter(id);
+        const writes: string[] = [];
+        const pending = adapter.writeInput({ write: data => { writes.push(data); return true; },
+          readScreen: () => 'TraeX\n❯ Ask TraeCode CLI\nContext 100% left' }, 'hello');
+        await vi.runAllTimersAsync();
+        await pending;
+        const joined = writes.join('');
+        expect(joined.length, `${id} 应向裸 PTY 写入内容`).toBeGreaterThan(0);
+        // pass-through 壳（riff/mojo）由后端负责提交语义，不追加 \r。
+        if (id === 'riff' || id === 'mojo') {
+          expect(joined, `${id} 是直通壳，应原样写入`).toBe('hello');
+          continue;
+        }
+        expect(joined, `${id} 应以 CR 提交`).toContain('\r');
       }
-      expect(joined, `${id} 应以 CR 提交`).toContain('\r');
+    } finally {
+      vi.useRealTimers();
     }
-  }, 30_000);
+  });
 });
 
 describe('runner 类适配器', () => {

@@ -80,9 +80,8 @@ it('preserves the hourly allowance across more than 500 unrelated actions and re
   await expect(later.run(scope, second.id, send)).rejects.toMatchObject({ code: 'COLLABORATION_DELIVERY_SUPPRESSED' });
 });
 it('shares an hourly allowance across replies and reminders and rechecks pause after queueing', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'collaboration-delivery-'));
-  const repos = createRepositories(join(directory, 'test.db')), repository = repos.collaboration;
-  cleanups.push(async () => { repos.close(); await rm(directory, { recursive: true, force: true }); });
+  const repos = createRepositories(':memory:'), repository = repos.collaboration;
+  cleanups.push(async () => { repos.close(); });
   const scope = { appId: 'app', chatId: 'chat' };
   await repository.updateSettings(scope, { expectedRevision: 0, maxProactivePerHour: 1 }, 'owner');
   const begin = (id: string, kind: string) => repository.beginAction({ scope, id, kind, requesterId: 'owner', inputDigest: id, payload: {} });

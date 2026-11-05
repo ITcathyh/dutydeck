@@ -62,6 +62,8 @@ describe('loadPluginDirectory', () => {
       'commands/empty.md': '---\ndescription: x\n---\n',
       'triggers/ping.json': JSON.stringify({ auth: { type: 'token' }, target: { botAppId: '{{config.bot}}', chatId: 'oc' }, prompt: 'x' }),
       'triggers/broken.json': '{',
+      'triggers/tpl.json': JSON.stringify({ auth: { type: 'token' }, target: { botAppId: 'cli', chatId: 'oc' }, workTemplate: { session: '{{config.tpl_session}}', id: 't', version: '{{config.tpl_version}}', goal: 'g' } }),
+      'triggers/both.json': JSON.stringify({ auth: { type: 'token' }, target: { botAppId: 'cli', chatId: 'oc' }, prompt: 'x', workTemplate: { session: 's', id: 't', version: 1, goal: 'g' } }),
       'hooks/hooks.json': JSON.stringify({ 'task.received': [{ command: 'x' }] })
     });
     const issues = await issuesOf(root);
@@ -72,6 +74,9 @@ describe('loadPluginDirectory', () => {
       expect.objectContaining({ file: 'commands/empty.md' }),
       expect.objectContaining({ file: 'triggers/ping.json', field: 'target.botAppId' }),
       expect.objectContaining({ file: 'triggers/broken.json', message: expect.stringContaining('JSON') }),
+      expect.objectContaining({ file: 'triggers/tpl.json', field: 'workTemplate.session' }),
+      expect.objectContaining({ file: 'triggers/tpl.json', field: 'workTemplate.version' }),
+      expect.objectContaining({ file: 'triggers/both.json', message: expect.stringContaining('workTemplate') }),
       expect.objectContaining({ file: 'hooks/hooks.json', field: 'task.received.0.timeout' })
     ]));
   });

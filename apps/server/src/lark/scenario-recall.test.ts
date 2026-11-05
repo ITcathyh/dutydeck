@@ -23,6 +23,7 @@ vi.mock('./open-platform-session.js', () => ({ connectLarkOpenPlatformSession: v
 
 const cleanups: Array<() => Promise<void> | void> = [];
 afterEach(async () => {
+  vi.useRealTimers();
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
 
@@ -93,7 +94,9 @@ describe('findScenarioRecall', () => {
     const entry = await alarmPack();
     const withProvider = (provider: ScenarioProvider): RegisteredScenarioPack => ({ ...entry, providers: new Map([['alert-key', new ScenarioProviderCaller('alarm', provider)]]) });
     let calls = 0;
-    const slow = withProvider({ id: 'alert-key', correlationKey: () => { calls += 1; const until = Date.now() + 600; while (Date.now() < until); return { title: 'same' }; } });
+    // 只假 Date：同步 provider 每次让时钟走 600ms，等同于阻塞 600ms，计时与超时判定仍走产品代码。
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const slow = withProvider({ id: 'alert-key', correlationKey: () => { calls += 1; vi.setSystemTime(Date.now() + 600); return { title: 'same' }; } });
     const log = { warn: vi.fn() };
     expect(await findScenarioRecall({ ...await current(), packs: [slow], mappings: async () => [recalled, recalled], log })).toBeUndefined();
     expect(calls).toBe(2);
@@ -103,7 +106,9 @@ describe('findScenarioRecall', () => {
   });
 
   it('counts only provider calls toward the 1 second: a slow read of the card mappings still finds the earlier turn', async () => {
-    const slowMappings = () => new Promise<Array<{ sessionId: string; extra: string }>>(resolve => setTimeout(() => resolve([recalled]), 1_200));
+    // 只假 Date：读卡片映射期间时钟走 1.2s，超过整轮 provider 预算，但不应计入。
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const slowMappings = async () => { vi.setSystemTime(Date.now() + 1_200); return [recalled]; };
     expect(await findScenarioRecall({ ...await current(), mappings: slowMappings })).toMatchObject({ packId: 'alarm', conclusion: 'demo.svc.file 突发流量尖刺触发分片代理限流' });
   });
 });

@@ -1,4 +1,4 @@
-import { RelayCliError, RelayHttpClient, relayAskExitCodes, type RelayClientOptions } from '@dutydeck/relay';
+import { RelayCliError, RelayHttpClient, relayAskDefaultTimeoutMs, relayAskExitCodes, type RelayClientOptions } from '@dutydeck/relay';
 
 import { taskReportInputSchema } from '@dutydeck/shared';
 
@@ -18,6 +18,9 @@ export interface RelaySessionCliOptions {
 
 /** 会话 id 由服务端从 token 反解；CLI 只需把 token 带上，路径里的 id 用占位符。 */
 const sessionPath = (suffix: string) => `/sessions/self/${suffix}`;
+
+/** ask 到期后服务端才回 expired；客户端多等这么久，免得和服务端同时到点被当成不可用。 */
+const askResponseMarginMs = 30_000;
 
 /**
  * `dutydeck session send` —— 非阻塞推送。
@@ -70,7 +73,7 @@ export async function runSessionAsk(
     ...(cliOptions.choices === undefined ? {} : { choices }),
     ...(cliOptions.multiple ? { multiple: true } : {}),
     ...(timeoutMs === undefined ? {} : { timeoutMs })
-  });
+  }, (timeoutMs ?? relayAskDefaultTimeoutMs) + askResponseMarginMs);
   return payload as unknown as RelayAskResult;
 }
 

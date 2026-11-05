@@ -149,6 +149,14 @@ export interface CiPipelineStatus {
 }
 export interface CiFailureLog { job?: string; stage?: string; reason?: string; log?: string }
 export interface CiPullRequestInput { title: string; body?: string; head: string; base: string; draft?: boolean }
+/**
+ * PR 当前状态。`headBranch`、`baseBranch`、`headRepository`、`title` 可选：给了 `headBranch` 的 provider 才支持
+ * 认领已有 PR（`/pr follow`）；`headRepository` 与 `matchRepository` 返回的 slug 同一写法，用来拒绝来自 fork 的 PR，不给时拒绝认领。
+ */
+export interface CiPullRequestState {
+  state: 'open' | 'closed' | 'merged'; headSha?: string;
+  headBranch?: string; baseBranch?: string; headRepository?: string; title?: string; url?: string;
+}
 export interface CiReviewComment {
   id: string; author?: string; body: string; path?: string; line?: number; url?: string; createdAt?: string;
   /** 作者是仓库所有者、成员或协作者，且不是机器人；由 provider 判定。不是 true 的评论不会被自动交给 Agent 修改，只发卡片问人。 */
@@ -192,7 +200,7 @@ export interface CiProvider {
   getFailureLogs?(repository: CiRepository, runId: string): Promise<CiFailureLog[]>;
   createPullRequest?(repository: CiRepository, input: CiPullRequestInput): Promise<{ id: string; number: number; url: string }>;
   listReviewComments?(repository: CiRepository, pullRequest: number): Promise<CiReviewComment[]>;
-  getPullRequest?(repository: CiRepository, pullRequest: number): Promise<{ state: 'open' | 'closed' | 'merged'; headSha?: string }>;
+  getPullRequest?(repository: CiRepository, pullRequest: number): Promise<CiPullRequestState>;
   postComment?(repository: CiRepository, pullRequest: number, body: string): Promise<{ id: string; url?: string }>;
   webhook?: {
     verify(request: CiWebhookRequest): CiWebhookVerification | Promise<CiWebhookVerification>;

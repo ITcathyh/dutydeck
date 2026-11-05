@@ -1,6 +1,6 @@
 import type { DoctorCheck } from '../doctor/types.js';
 import { listBuiltinPlugins } from './builtin.js';
-import { resolveTriggerTarget } from './host.js';
+import { resolveTrigger } from './host.js';
 import { loadPluginDirectory, type LoadedPlugin } from './manifest.js';
 import { pluginSecretKey, PluginStore } from './store.js';
 
@@ -59,7 +59,7 @@ export async function pluginDoctorChecks(dataDir: string, builtinRoot?: string):
       if (entry.candidate) problems.push({ text: `候选 ${entry.candidate.version ?? entry.candidate.id} 尚未激活${entry.candidate.validation?.status === 'failed' ? '；隔离注册验证失败' : ''}`, command: `dutydeck plugin status ${entry.name}` });
       for (const host of activation.hosts) if (!host.activated) problems.push({ text: `Host PID ${host.pid} 未完成实际激活或加载失败`, command: `dutydeck plugin status ${entry.name}` });
       for (const [triggerId, trigger] of plugin.triggers) {
-        if (!resolveTriggerTarget(trigger.target, config)) problems.push({ text: `触发器 ${triggerId} 的目标缺少配置`, command: `dutydeck plugin config ${entry.name} <配置项> --value <值>` });
+        if (!resolveTrigger(trigger, config)) problems.push({ text: `触发器 ${triggerId} 的目标或工作项模板缺少配置`, command: `dutydeck plugin config ${entry.name} <配置项> --value <值>` });
         if (!store.triggerToken(entry.name, triggerId)) problems.push({ text: `触发器 ${triggerId} 还没有令牌`, command: `dutydeck plugin trigger-token ${entry.name}/${triggerId}` });
       }
       problems.push(...scenarioProblems(plugin));

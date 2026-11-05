@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { createWorkbenchFetch } from '../workbench-fetch.js';
 import { RuntimeError, parseLarkSourceId, type AcceptedTask, type RepositoryBundle, type WorkItem, type WorkPlan } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
-import type { WorkItemService } from '../work-items.js';
+import { workPlanDigest, type WorkItemService } from '../work-items.js';
 import { leaderReviewStepId, leaderReviewTitle } from '../leader-delegation.js';
 import type { WorkItemInteractions, WorkItemRequest } from '../work-item-interactions.js';
 import { readLarkConfig, type StoredLarkConfig } from './config.js';
@@ -21,6 +21,8 @@ const labels: Record<string, string> = { awaiting_confirmation: '待确认', pen
 // completed 不在此列：目标完成卡走独立的 deliver 通道，notify 对 completed 直接跳过。
 const focusStatuses = new Set(['awaiting_confirmation', 'waiting', 'blocked', 'failed']);
 const focusOf = (status: string) => focusStatuses.has(status) ? status : '';
+/** 卡片与文字确认命令里的摘要前缀长度；文字命令接受不短于它的任意前缀。 */
+const DIGEST_PREFIX = 12;
 
 /**
  * N2 缺陷守卫：亮屏指纹只包含焦点态（waiting/blocked/failed）与待决请求身份，
@@ -31,14 +33,19 @@ export function workNoticeFingerprint(item: WorkItem, requests: WorkItemRequest[
   return digest(JSON.stringify([
     focusOf(item.status),
     item.steps.map(step => [step.id, focusOf(step.status)]),
-    requests.map(request => [request.stepId, request.requestId, request.kind])
+    requests.map(request => [request.stepId, request.requestId, request.kind]),
+    // 待确认的计划修订是新的人工闸门，要推新卡；按内容摘要区分，Agent 替换修订内容或影响重算也会推新卡。没有修订时指纹与旧版本一致。
+    ...item.pendingRevision ? [['revision', item.pendingRevision.digest]] : [],
+    // 首次确认前 Agent 改过计划（版本号已递增）：按计划摘要换指纹，重新推确认卡；未改过的计划指纹与旧版本一致。
+    ...item.status === 'awaiting_confirmation' && (item.planVersion ?? 1) > 1 ? [['plan', workPlanDigest(item.plan)]] : []
   ]));
 }
 
 function workHasFocus(item: WorkItem, requests: WorkItemRequest[]) {
   return focusStatuses.has(item.status)
     || item.steps.some(step => focusStatuses.has(step.status))
-    || requests.length > 0;
+    || requests.length > 0
+    || Boolean(item.pendingRevision);
 }
 
 /**
@@ -273,9 +280,31 @@ export function workItemElements(item: WorkItem, requests: WorkItemRequest[] = [
         form_action_type: 'submit', behaviors: [{ type: 'callback', value }] }
     ]
   });
+  const revised = (item.planVersion ?? 1) > 1 ? ` · 计划已修订（v${item.planVersion}）` : '';
   const elements: Array<Record<string, any>> = [
-    { tag: 'markdown', content: `**${reviewStatusLabel(item) ?? labels[item.status] ?? item.status} · ${item.title}**\n\n${item.goal.slice(0, 2000)}` }
+    { tag: 'markdown', content: `**${reviewStatusLabel(item) ?? labels[item.status] ?? item.status} · ${item.title}**${revised}\n\n${item.goal.slice(0, 2000)}` }
   ];
+  const pending = item.pendingRevision;
+  // 待确认修订不改变目标状态：先列出修订内容和确认入口，下面照常展示按当前计划执行的步骤。
+  if (pending) {
+    const titles = new Map([...item.plan.steps, ...pending.plan.steps].map(definition => [definition.id, definition.title]));
+    const names = (ids: string[]) => ids.length ? ids.map(id => titles.get(id) ?? id).join('、') : '无';
+    elements.push({ tag: 'markdown', content: [
+      `**Agent 提出计划修订（v${pending.version} · 摘要 ${pending.digest.slice(0, DIGEST_PREFIX)}），确认后才生效；在此之前按当前计划继续执行**`,
+      ...pending.reason ? [`原因：${pending.reason.slice(0, 1000)}`] : [],
+      `需要确认：${pending.confirmationReasons.join('；').slice(0, 1000)}`,
+      `保留：${names(pending.impact.keep)}`, `重跑：${names(pending.impact.rerun)}`, `先停止：${names(pending.impact.stop)}`,
+      `作废已完成结果：${names(pending.impact.discard ?? [])}`, `删除：${names(pending.impact.remove)}`, `新增：${names(pending.impact.add)}`
+    ].join('\n') });
+    pending.plan.steps.forEach((definition, index) => {
+      elements.push({ tag: 'markdown', content: `**${index + 1}. ${definition.title}**${definition.kind === 'wait' ? ' · 等待你补充' : agentLine(definition.agentId)}\n${definition.instruction.slice(0, 600)}` });
+    });
+    // 目标阻塞时确认必然失败（修订不能替代对未知执行的核对），只给放弃。
+    if (item.status === 'blocked') elements.push({ tag: 'markdown', content: '目标需要先处理阻塞，处理前不能确认这次修订；可以先放弃。' },
+      action('discard', '放弃修订', { revision_digest: pending.digest }));
+    else elements.push({ tag: 'markdown', content: `文字确认：\`/work confirm ${item.id} ${pending.digest.slice(0, DIGEST_PREFIX)}\`` },
+      action('confirm', '确认修订', { revision_digest: pending.digest }), action('discard', '放弃修订', { revision_digest: pending.digest }));
+  }
   // 闸门：确认前只展示计划本身（分工、依赖、工作区），不展示执行期的重试/回答入口。
   if (item.status === 'awaiting_confirmation') {
     const titles = new Map(item.plan.steps.map(definition => [definition.id, definition.title]));
@@ -288,7 +317,8 @@ export function workItemElements(item: WorkItem, requests: WorkItemRequest[] = [
       ];
       elements.push({ tag: 'markdown', content: `**${index + 1}. ${definition.title}**\n${facts.join(' · ')}\n${definition.instruction.slice(0, 600)}` });
     });
-    elements.push(action('confirm', '开始执行'), action('cancel', '取消计划'), action('show', '刷新目标'));
+    elements.push({ tag: 'markdown', content: `文字确认：\`/work confirm ${item.id} ${workPlanDigest(item.plan).slice(0, DIGEST_PREFIX)}\`` },
+      action('confirm', '开始执行'), action('cancel', '取消计划'), action('show', '刷新目标'));
     return elements;
   }
   for (const step of item.steps) {
@@ -300,7 +330,8 @@ export function workItemElements(item: WorkItem, requests: WorkItemRequest[] = [
       answerForm(`work_answer_${item.id}_${step.id}`, '输入回答内容', `提交回答：${definition.title}`,
         { dutydeck_work_item: 'answer', work_id: item.id, parent_session_id: item.parentSessionId, revision: item.revision, step_id: step.id }),
       action('retry', `重试：${definition.title}`, { step_id: step.id }));
-    if (step.status === 'failed' && item.status === 'failed') elements.push(action('retry', `重试：${definition.title}`, { step_id: step.id }));
+    // 有待确认修订时重试会被拒绝，先确认或放弃修订。
+    if (step.status === 'failed' && item.status === 'failed' && !pending) elements.push(action('retry', `重试：${definition.title}`, { step_id: step.id }));
   }
   for (const request of requests) {
     elements.push({ tag: 'markdown', content: `**${request.kind === 'permission' ? '工具授权' : 'Agent 提问'} · ${request.stepId}**\n${request.text.slice(0, 4000)}` });
@@ -335,6 +366,11 @@ export class LarkWorkbench {
     private readonly work: () => WorkItemService, private readonly interactions: () => WorkItemInteractions,
     private readonly authorize: (sessionId: string, actorId?: string) => Promise<boolean>,
     private readonly options: { env?: NodeJS.ProcessEnv; authorizeAgent?: (sessionId: string, actorId: string, agentId: string) => Promise<boolean>; client?: (config: StoredLarkConfig) => LarkCardService; log: { warn: (...args: any[]) => void } }) {}
+
+  /** 只读：「待处理」汇总读工作项与步骤请求，沿用工作项自己的读权限与身份。 */
+  inboxSource() {
+    return { list: (sessionId: string, actorId: string) => this.work().listBySession(sessionId, actorId), requests: (sessionId: string, workId: string, actorId: string) => this.interactions().list(sessionId, workId, actorId) };
+  }
 
   private client(config: StoredLarkConfig) { this.assertOpen(); return this.options.client?.(config) ?? createLarkCardService(this.options.env ?? process.env, this.http.fetch, config); }
 
@@ -541,7 +577,7 @@ export class LarkWorkbench {
     }
     const requests = await this.interactions().list(item.parentSessionId, item.id, actorId);
     this.assertOpen();
-    if (item.status === 'running' && !item.steps.some(step => step.status === 'waiting') && !requests.length) return;
+    if (item.status === 'running' && !item.steps.some(step => step.status === 'waiting') && !requests.length && !current.pendingRevision) return;
     // 停在受阻、失败、等待的目标每秒都会走到这里：上一轮已处理完且目标与待决请求都没变时，不再读配置、渲染整卡。
     const settledKey = `${current.revision}\0${digest(JSON.stringify(requests))}`;
     if (this.settledNotices.get(current.id) === settledKey) return;
@@ -638,9 +674,17 @@ export class LarkWorkbench {
         await this.interactions().terminalInput(sessionId, id, { stepId: rest[0], taskId: rest[1], ...(action === 'input' ? { text: rest.slice(2).join(' ') } : { key: rest[2] }) }, actorId);
         text = `已向当前步骤发送${action === 'input' ? '文字' : '按键'}。\n\n\`/work terminal ${id} ${rest[0]}\``;
       }
-    } else if (id && ['show', 'confirm', 'cancel', 'retry', 'answer', 'save', 'requests', 'respond'].includes(action!)) {
+    } else if (id && ['show', 'confirm', 'discard', 'cancel', 'retry', 'answer', 'save', 'requests', 'respond'].includes(action!)) {
       item = await this.work().get(sessionId, id, actorId);
-      if (action === 'confirm') item = await this.work().confirm(sessionId, id, item.revision, actorId);
+      // 文字确认必须带卡片上显示的摘要（至少 12 位），确认的就是看到的那份：有待确认修订时比修订摘要，
+      // 首次确认前比计划摘要；Agent 换了内容则拒绝。报错不回显当前摘要，免得没看卡片就照抄确认。
+      const pending = item.pendingRevision;
+      const expected = pending?.digest ?? (item.status === 'awaiting_confirmation' ? workPlanDigest(item.plan) : undefined);
+      const token = rest[0]?.toLowerCase();
+      const revisionDigest = expected && token && token.length >= DIGEST_PREFIX && /^[0-9a-f]{1,64}$/.test(token) && expected.startsWith(token) ? expected : undefined;
+      if (action === 'confirm' && expected && !revisionDigest) throw new RuntimeError('WORK_ITEM_REVISION_CONFIRM_MISMATCH', `${pending ? '待确认修订' : '待确认计划'}已变化或命令没带摘要。请查看最新卡片，用卡片上的命令确认。`, 409);
+      if (action === 'confirm') item = await this.work().confirm(sessionId, id, item.revision, actorId, revisionDigest);
+      if (action === 'discard') item = await this.work().discardRevision(sessionId, id, item.revision, actorId, pending ? revisionDigest : undefined);
       if (action === 'cancel') item = await this.work().cancel(sessionId, id, item.revision, actorId);
       if (action === 'retry') item = await this.work().retryStep(sessionId, id, rest[0] ?? '', item.revision, actorId);
       if (action === 'answer') item = await this.work().answer(sessionId, id, rest[0] ?? '', rest.slice(1).join(' '), item.revision, actorId);
@@ -687,14 +731,19 @@ export class LarkWorkbench {
     if (!await this.authorize(mapping.sessionId, actorId)) throw new RuntimeError('WORK_ITEM_FORBIDDEN', '当前账号无权操作此目标', 403);
     const item = await this.work().get(mapping.sessionId, saved.workId, actorId);
     const operation = value.dutydeck_work_item;
-    const stale = saved.revision !== value.revision;
+    // 修订确认/放弃按钮绑定内容摘要：运行中 revision 会随调度变化，只要待确认内容没换就仍然有效。
+    const digestBound = ['confirm', 'discard'].includes(operation) && typeof value.revision_digest === 'string';
+    const stale = digestBound ? item.pendingRevision?.digest !== value.revision_digest : saved.revision !== value.revision;
     let toast = '目标状态已更新';
     if (stale) {
       // revision CAS 失败：别人已经推进过目标，本次点击不再落操作，直接把最新状态发回话题。
       toast = '目标状态已变化，已刷新最新卡片';
     } else if (operation === 'confirm') {
-      await this.work().confirm(mapping.sessionId, item.id, Number(value.revision), actorId);
-      toast = '计划已确认，开始执行';
+      await this.work().confirm(mapping.sessionId, item.id, Number(value.revision), actorId, digestBound ? value.revision_digest : undefined);
+      toast = item.pendingRevision ? `修订 v${item.pendingRevision.version} 已生效` : '计划已确认，开始执行';
+    } else if (operation === 'discard') {
+      await this.work().discardRevision(mapping.sessionId, item.id, Number(value.revision), actorId, digestBound ? value.revision_digest : undefined);
+      toast = '已放弃修订，按原计划继续';
     } else if (operation === 'cancel') {
       await this.work().cancel(mapping.sessionId, item.id, Number(value.revision), actorId);
     } else if (operation === 'retry') {

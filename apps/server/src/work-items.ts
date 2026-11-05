@@ -1,6 +1,6 @@
 import { promptDigest } from './prompt-context.js';
 import { createHash } from 'node:crypto';
-import { canonicalExecutionJson, createWorkItemSchema, executionActorSchema, installationOwnerTaskActor, parseLarkSourceId, RuntimeError, timeLoop, type LoopTimingLog, taskAdmissionV1Schema, taskRequestV1Schema, workPlanSchema, workReviewVerdictSchema, type CreateWorkItemInput, type ExecutionActor, type PermissionMode, type RepositoryBundle, type Session, type TaskAdmissionV1, type TaskRecord, type TaskRequestV1, type ToolRiskPolicy, type WorkItem, type WorkPlan, type WorkStep, type WorkTemplate } from '@dutydeck/shared';
+import { analyzeWorkPlanRevision, canonicalExecutionJson, canonicalPlanJson, createWorkItemSchema, reviseWorkPlanSchema, workRevisionConfirmationReasons, type ReviseWorkPlanInput, type WorkRevisionImpact, type WorkRevisionPreview, executionActorSchema, installationOwnerTaskActor, parseLarkSourceId, RuntimeError, timeLoop, type LoopTimingLog, taskAdmissionV1Schema, taskRequestV1Schema, workPlanSchema, workReviewVerdictSchema, type CreateWorkItemInput, type ExecutionActor, type PermissionMode, type RepositoryBundle, type Session, type TaskAdmissionV1, type TaskRecord, type TaskRequestV1, type ToolRiskPolicy, type PendingWorkRevision, type WorkItem, type WorkPlan, type WorkStep, type WorkTemplate } from '@dutydeck/shared';
 import { executionTaskId } from '@dutydeck/storage';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { readWorkAttemptResult } from './task-results.js';
@@ -22,8 +22,29 @@ async function bounded<T>(operation: Promise<T>, milliseconds: number): Promise<
 }
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const time = () => new Date().toISOString();
+/** 成果通知最多发这么多次；之后停在 error，失败原因留给 Web 展示。 */
+const DELIVERY_MAX_ATTEMPTS = 3;
+function failDelivery(delivery: WorkItem['delivery'], error: string) {
+  delivery.status = 'error';
+  if (delivery.attempts >= DELIVERY_MAX_ATTEMPTS) {
+    delivery.error = `${error}（已尝试 ${delivery.attempts} 次，不再自动重发）`;
+    delete delivery.nextAttemptAt;
+  } else {
+    delivery.error = error;
+    delivery.nextAttemptAt = new Date(Date.now() + 60_000 * delivery.attempts).toISOString();
+  }
+}
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 const last = (step: WorkStep) => step.attempts.at(-1);
+/** 计划修订作废的尝试不再作为下游输入或审查依据。 */
+const liveAttempts = (step: WorkStep) => step.attempts.filter(attempt => !attempt.supersededByPlanVersion);
+/** 计入重试与返工上限的尝试：只有人提交的修订作废的尝试才不计；Agent 发起的修订（含经人确认的）照常计数，反复修订不能刷新次数。 */
+const countedAttempts = (item: WorkItem, step: WorkStep) => step.attempts.filter(attempt => !attempt.supersededByPlanVersion
+  || item.planHistory?.find(version => version.version === attempt.supersededByPlanVersion)?.source !== 'human');
+const pendingRevisionDigest = (revision: Pick<PendingWorkRevision, 'version' | 'plan' | 'reason' | 'impact' | 'confirmationReasons'>) => hash(canonicalPlanJson({
+  version: revision.version, plan: revision.plan, reason: revision.reason ?? null, impact: revision.impact, confirmationReasons: revision.confirmationReasons }));
+/** 首次确认时绑定的计划摘要：Agent 改过尚未确认的计划后，旧卡片和旧文字命令里的摘要随之失效。 */
+export const workPlanDigest = (plan: WorkPlan) => hash(canonicalPlanJson(plan));
 const settled = (step: WorkStep) => ['completed', 'skipped'].includes(step.status);
 const fingerprint = (value: unknown) => hash(JSON.stringify(value));
 /** Tool commentary may precede a single, explicitly delimited final verdict. */
@@ -35,6 +56,16 @@ function parseReview(text: string) {
   return workReviewVerdictSchema.parse(JSON.parse(final[1]!));
 }
 /** Stable WorkItem id, so callers can pin delivery before the plan exists. */
+/** 定时计划与触发器眼中的进度：失败但带待确认修订的工作项还在等人决定（确认后按新计划继续），按执行中计，不释放名额。 */
+export function workItemProgressStatus(item: Pick<WorkItem, 'status' | 'pendingRevision'>): WorkItem['status'] {
+  return item.status === 'failed' && item.pendingRevision ? 'running' : item.status;
+}
+/** 同步读取工作项进度状态（见 workItemProgressStatus），供触发器运行状态查询使用；记录缺失或损坏时返回 undefined。 */
+export function readWorkItemStatus(config: { getSync?(key: string): string | undefined }, id: string): WorkItem['status'] | undefined {
+  const raw = config.getSync?.(PREFIX + id);
+  if (!raw) return undefined;
+  try { const item = (JSON.parse(raw) as { item?: Pick<WorkItem, 'status' | 'pendingRevision'> }).item; return item ? workItemProgressStatus(item) : undefined; } catch { return undefined; }
+}
 export const workItemId = (parentSessionId: string, actorId: string | undefined, idempotencyKey: string) => 'work_' + hash(JSON.stringify([parentSessionId, actorId, idempotencyKey]));
 interface FrozenAgent { fingerprint: string; permissionMode: PermissionMode }
 interface StoredWork {
@@ -57,7 +88,10 @@ interface StoredWork {
   /** 创建这份计划的父任务；步骤的用量归到它名下。 */
   parentTaskId?: string;
   promptPolicyVersion?: 'legacy-v1' | 'optimized-v1';
+  /** 创建时是否要求人工确认；Agent 修订这类目标时同样需要确认。旧记录缺省时按父会话重新判定。 */
+  confirmationRequired?: boolean;
 }
+interface PlannedRevision { plan: WorkPlan; impact: WorkRevisionImpact; agents: Record<string, FrozenAgent>; reasons: string[]; unconfirmed: boolean }
 interface StoredTemplate { template: WorkTemplate; actorId: string }
 interface RecordState { raw: string; value: StoredWork }
 export interface WorkItemServiceOptions {
@@ -80,6 +114,8 @@ export class WorkItemService {
   private readonly effects = new Map<string, Promise<void>>();
   private closed = false;
   private timer?: NodeJS.Timeout;
+  /** 本实例交付失败过的目标：只对它们退避；上一个进程记下的失败，打开后立刻补发一次。 */
+  private readonly failedDeliveries = new Set<string>();
   constructor(private readonly options: WorkItemServiceOptions) {
     if (!options.repositories.config.compareAndSet || !options.repositories.config.list) throw new Error('Work items require ConfigRepository CAS and list');
   }
@@ -121,7 +157,12 @@ export class WorkItemService {
     return (await this.repos.workItems.listByParent(parentSessionId)).map(row => JSON.parse(row.value) as StoredWork);
   }
   /** 公开投影：item 本身不含 admission/actor 等私有执行材料（它们只存在 StoredWork 外层）。 */
-  private view(record: StoredWork): WorkItem { return structuredClone(record.item); }
+  private view(record: StoredWork): WorkItem {
+    const item = structuredClone(record.item);
+    item.planVersion ??= 1;
+    item.planHistory ??= [{ version: 1, plan: item.plan, createdAt: item.createdAt, source: 'create' }];
+    return item;
+  }
   private parentFingerprint(session: Session) {
     return fingerprint({ agentId: session.agentId, cwd: session.cwd, permissionMode: session.permissionMode, model: session.model, reasoningEffort: session.reasoningEffort, systemPrompt: session.systemPrompt, source: session.source, sourceId: session.sourceId });
   }
@@ -162,7 +203,7 @@ export class WorkItemService {
     const id = await this.repos.workItems.findByChildSession(sessionId);
     if (!id) return undefined;
     const record = (await this.read(id)).value;
-    const step = record.item.steps.find(step => step.attempts.some(attempt => attempt.sessionId === sessionId))!;
+    const step = [...record.item.steps, ...record.item.retiredSteps ?? []].find(step => step.attempts.some(attempt => attempt.sessionId === sessionId))!;
     return { parentSessionId: record.item.parentSessionId, actorId: record.actorId, workId: record.item.id, stepId: step.id, ...(record.parentTaskId ? { parentTaskId: record.parentTaskId } : {}) };
   }
   async authorizeExecution(sessionId: string, actorId?: string): Promise<boolean> {
@@ -172,8 +213,8 @@ export class WorkItemService {
       return false;
     }
     const { value } = await this.read(binding.workId);
-    const step = value.item.steps.find(step => step.id === binding.stepId)!;
-    if ((actorId !== value.actorId && actorId !== installationOwnerTaskActor) || last(step)?.sessionId !== sessionId || step.status !== 'running' || this.closed || this.executionExpired(step)) throw new RuntimeError('WORK_ITEM_TASK_REVOKED', 'Work attempt is no longer active', 403);
+    const step = value.item.steps.find(step => step.id === binding.stepId);
+    if (!step || (actorId !== value.actorId && actorId !== installationOwnerTaskActor) || last(step)?.sessionId !== sessionId || step.status !== 'running' || this.closed || this.executionExpired(step)) throw new RuntimeError('WORK_ITEM_TASK_REVOKED', 'Work attempt is no longer active', 403);
     try {
       await this.assertExecution(value);
       const session = await this.repos.sessions.get(sessionId);
@@ -204,7 +245,7 @@ export class WorkItemService {
     }
     const { value } = await this.read(binding.workId);
     const session = await this.repos.sessions.get(sessionId);
-    const attempt = value.item.steps.flatMap(step => step.attempts).find(attempt => attempt.sessionId === sessionId);
+    const attempt = [...value.item.steps, ...value.item.retiredSteps ?? []].flatMap(step => step.attempts).find(attempt => attempt.sessionId === sessionId);
     const allowed = [value.actor, value.cancellationActor].filter(Boolean).some(recorded => canonicalExecutionJson(recorded) === canonicalExecutionJson(actor));
     if (!allowed || !attempt || session?.source !== 'work_item' || session.sourceId !== attempt.id) throw new RuntimeError('WORK_ITEM_FORBIDDEN', 'Actor does not own this managed execution resource', 403);
     return true;
@@ -223,9 +264,9 @@ export class WorkItemService {
   }
   /**
    * confirmation 显式为 true/false 时覆盖默认闸门判定；工具与 HTTP 入口一律不传，只走默认判定。
-   * parentTaskId 供父任务结束后才创建的计划沿用原任务的风险策略；缺省取当前活动任务。
+   * parentTaskId 供父任务结束后才创建的计划沿用原任务的风险策略；缺省取当前活动任务；null 表示不归属任何父任务。
    */
-  async create(parentSessionId: string, input: CreateWorkItemInput, actorId?: string, confirmation?: boolean, parentTaskId?: string): Promise<WorkItem> {
+  async create(parentSessionId: string, input: CreateWorkItemInput, actorId?: string, confirmation?: boolean, parentTaskId?: string | null): Promise<WorkItem> {
     input = createWorkItemSchema.parse(input);
     const parent = await this.access(parentSessionId, actorId);
     if (parent.archivedAt || ['stopped', 'failed'].includes(parent.state)) throw new RuntimeError('WORK_ITEM_PARENT_INACTIVE', 'Parent session is not runnable', 409);
@@ -249,11 +290,12 @@ export class WorkItemService {
         const permissionMode = rank[Math.min(rank.indexOf(parent.permissionMode ?? 'ask'), rank.indexOf(agent.permissionMode))]!;
         agents[agent.id] = { fingerprint: fingerprint(agent), permissionMode };
       }
-      const taskId = parentTaskId ?? this.options.runtime.getActiveTaskContext(parentSessionId)?.taskId;
+      const taskId = parentTaskId === null ? undefined : parentTaskId ?? this.options.runtime.getActiveTaskContext(parentSessionId)?.taskId;
       const parentTask = taskId ? (await this.repos.tasks.listBySession(parentSessionId)).find(task => task.id === taskId) : undefined;
       const timestamp = time();
-      const item: WorkItem = { id, parentSessionId, title: input.plan.title, goal: input.goal, revision: 1, status: gated ? 'awaiting_confirmation' : 'running', plan: input.plan, steps: input.plan.steps.map(step => ({ id: step.id, status: 'pending', attempts: [] })), createdAt: timestamp, updatedAt: timestamp, delivery: { status: this.options.deliver ? 'pending' : 'not_requested', attempts: 0 } };
-      const record: StoredWork = { item, actorId: actorId!, actor, inputHash, parentFingerprint: this.parentFingerprint(parent), cwd: parent.cwd, agents, stoppedAttempts: [], riskPolicy: parentTask?.executionContext?.riskPolicy, promptPolicyVersion: parentTask?.executionContext?.promptPolicyVersion ?? 'legacy-v1', ...(taskId ? { parentTaskId: taskId } : {}) };
+      const item: WorkItem = { id, parentSessionId, title: input.plan.title, goal: input.goal, revision: 1, status: gated ? 'awaiting_confirmation' : 'running', plan: input.plan, steps: input.plan.steps.map(step => ({ id: step.id, status: 'pending', attempts: [] })), createdAt: timestamp, updatedAt: timestamp, delivery: { status: this.options.deliver ? 'pending' : 'not_requested', attempts: 0 },
+        planVersion: 1, planHistory: [{ version: 1, plan: input.plan, createdAt: timestamp, source: 'create' }] };
+      const record: StoredWork = { item, actorId: actorId!, actor, inputHash, confirmationRequired: gated, parentFingerprint: this.parentFingerprint(parent), cwd: parent.cwd, agents, stoppedAttempts: [], riskPolicy: parentTask?.executionContext?.riskPolicy, promptPolicyVersion: parentTask?.executionContext?.promptPolicyVersion ?? 'legacy-v1', ...(taskId ? { parentTaskId: taskId } : {}) };
       await this.options.prepareDelivery?.(parentSessionId, id, input.idempotencyKey);
       await this.access(parentSessionId, actorId);
       if (!await this.repos.config.compareAndSet!(PREFIX + id, undefined, JSON.stringify(record))) throw new RuntimeError('WORK_ITEM_CONFLICT', 'Work-item creation conflicted', 409);
@@ -268,11 +310,32 @@ export class WorkItemService {
   /** Existence only, without authorization: recovery bookkeeping for a caller that derived the id itself. */
   async exists(id: string): Promise<boolean> { return Boolean(await this.repos.config.get(PREFIX + id)); }
 
-  /** 人工确认后计划才入队；确认者走与其它目标操作相同的授权判定。 */
-  async confirm(parentSessionId: string, id: string, expectedRevision: number, actorId?: string): Promise<WorkItem> {
+  /**
+   * 人工确认后计划才入队；确认者走与其它目标操作相同的授权判定。
+   * 有待确认修订时确认的是修订：带 revisionDigest 时只认内容摘要（运行中的目标 revision 随调度变化），否则要求 revision 一致。
+   */
+  async confirm(parentSessionId: string, id: string, expectedRevision: number, actorId?: string, revisionDigest?: string): Promise<WorkItem> {
     return this.serial(id, async () => {
-      const state = await this.owned(parentSessionId, id, actorId); this.revision(state, expectedRevision);
-      if (state.value.item.status !== 'awaiting_confirmation') throw new RuntimeError('WORK_ITEM_NOT_AWAITING_CONFIRMATION', 'This plan is not awaiting confirmation', 409);
+      const state = await this.owned(parentSessionId, id, actorId);
+      const pending = this.pendingRevision(state, expectedRevision, revisionDigest);
+      if (!pending && state.value.item.status !== 'awaiting_confirmation') throw new RuntimeError('WORK_ITEM_NOT_AWAITING_CONFIRMATION', 'This plan is not awaiting confirmation', 409);
+      if (pending) {
+        // 确认时按当时的步骤状态重算影响与授权；停止失败则原计划与待确认修订都保持不变。
+        const planned = await this.planRevision(state, pending.plan, actorId!, 'agent');
+        // 等待确认期间步骤可能开始运行或已完成：要停止或要作废结果的步骤超出确认者看到过的范围时，
+        // 不执行这次确认，把影响更新为最新结果并换摘要，旧卡片和旧待处理条目随之失效。
+        // 停止与作废合在一起比：看到过「先停止 B」，B 跑完变成「作废 B」不算新情况。
+        const shown = pending.acknowledged ?? [...pending.impact.stop, ...pending.impact.discard ?? []];
+        const unseen = [...new Set([...planned.impact.stop, ...planned.impact.discard ?? []])].filter(id => !shown.includes(id));
+        if (unseen.length) {
+          const refreshed = { ...pending, impact: planned.impact, confirmationReasons: planned.reasons, acknowledged: [...new Set([...shown, ...unseen])] };
+          state.value.item.pendingRevision = { ...refreshed, digest: pendingRevisionDigest(refreshed) };
+          await this.write(state);
+          throw new RuntimeError('WORK_ITEM_REVISION_IMPACT_CHANGED', `The revision now also stops or discards ${unseen.join(', ')}; review the updated impact and confirm again`, 409);
+        }
+        await this.applyRevision(state, planned, 'agent', actorId!, pending.reason);
+        return this.view(state.value);
+      }
       await this.assertExecution(state.value);
       state.value.item.status = 'running';
       await this.write(state); return this.view(state.value);
@@ -291,6 +354,7 @@ export class WorkItemService {
         : state.value.actor;
       if (!cancellationActor) throw new RuntimeError('WORK_ITEM_ACTOR_REQUIRED', 'Cancellation actor domain cannot be verified', 403);
       state.value.cancellationActor = cancellationActor;
+      delete state.value.item.pendingRevision;
       state.value.item.status = 'cancelling';
       state.value.item.delivery.status = 'not_requested';
       await this.write(state);
@@ -338,8 +402,10 @@ export class WorkItemService {
   async retryStep(parentSessionId: string, id: string, stepId: string, expectedRevision: number, actorId?: string): Promise<WorkItem> {
     return this.serial(id, async () => {
       const state = await this.owned(parentSessionId, id, actorId); this.revision(state, expectedRevision);
+      // 有待确认修订时重试会改变修订影响的前提，先确认或放弃修订。
+      if (state.value.item.pendingRevision) throw new RuntimeError('WORK_ITEM_REVISION_PENDING', 'Confirm or discard the pending plan revision before retrying a step', 409);
       const step = state.value.item.steps.find(step => step.id === stepId);
-      if (!step || step.status !== 'failed' || step.attempts.length >= 3 || ['cancelled', 'cancelling'].includes(state.value.item.status) || state.value.item.delivery.status === 'not_requested' && state.value.item.error?.startsWith('Cancellation')) throw new RuntimeError('WORK_ITEM_RETRY_UNSAFE', 'Only a settled failed step can be retried, at most three attempts', 409);
+      if (!step || step.status !== 'failed' || countedAttempts(state.value.item, step).length >= 3 || ['cancelled', 'cancelling'].includes(state.value.item.status) || state.value.item.delivery.status === 'not_requested' && state.value.item.error?.startsWith('Cancellation')) throw new RuntimeError('WORK_ITEM_RETRY_UNSAFE', 'Only a settled failed step can be retried, at most three attempts', 409);
       await this.assertExecution(state.value);
       step.status = 'pending'; state.value.item.status = 'running'; delete state.value.item.error;
       await this.write(state); return this.view(state.value);
@@ -355,6 +421,130 @@ export class WorkItemService {
       step.answer = answer; step.status = 'completed'; state.value.item.status = 'running';
       await this.write(state); return this.view(state.value);
     });
+  }
+  /** 只计算修订影响和授权，不写记录、不停止任何步骤。 */
+  async previewRevision(parentSessionId: string, id: string, input: Pick<ReviseWorkPlanInput, 'expectedRevision' | 'plan'>, actorId?: string, via: 'human' | 'agent' = 'human'): Promise<WorkRevisionPreview> {
+    const state = await this.owned(parentSessionId, id, actorId); this.revision(state, input.expectedRevision);
+    const planned = await this.planRevision(state, input.plan, actorId!, via);
+    const version = state.value.item.planVersion ?? 1;
+    return { revision: state.value.item.revision, planVersion: version, nextVersion: version + 1, impact: planned.impact, requiresConfirmation: planned.reasons.length > 0, confirmationReasons: planned.reasons };
+  }
+  /**
+   * 人提交的修订在预览后直接生效；Agent 的修订若超出收窄范围或目标本身要求确认，先记为待确认修订，
+   * 由人工确认后才生效。待确认期间计划冻结在当前版本，目标状态不变、已生效的步骤照常收结果和派发；
+   * 再次提交会替换待确认内容（摘要随之变化）。生效前必须证明受影响的运行中步骤已停止，否则整次修订失败、计划不变。
+   */
+  async revise(parentSessionId: string, id: string, input: ReviseWorkPlanInput, actorId?: string, via: 'human' | 'agent' = 'human'): Promise<WorkItem> {
+    input = reviseWorkPlanSchema.parse(input);
+    return this.serial(id, async () => {
+      const state = await this.owned(parentSessionId, id, actorId); this.revision(state, input.expectedRevision);
+      const planned = await this.planRevision(state, input.plan, actorId!, via);
+      const item = state.value.item;
+      if (planned.reasons.length) {
+        const pending = { version: (item.planVersion ?? 1) + 1, plan: planned.plan, requestedAt: time(), source: 'agent' as const, ...(input.reason ? { reason: input.reason } : {}), impact: planned.impact, confirmationReasons: planned.reasons };
+        item.pendingRevision = { ...pending, digest: pendingRevisionDigest(pending) };
+        await this.write(state); return this.view(state.value);
+      }
+      await this.applyRevision(state, planned, via, actorId!, input.reason);
+      return this.view(state.value);
+    });
+  }
+  /** 放弃待确认的 Agent 修订，目标按原计划继续。 */
+  async discardRevision(parentSessionId: string, id: string, expectedRevision: number, actorId?: string, revisionDigest?: string): Promise<WorkItem> {
+    return this.serial(id, async () => {
+      const state = await this.owned(parentSessionId, id, actorId);
+      if (!this.pendingRevision(state, expectedRevision, revisionDigest)) throw new RuntimeError('WORK_ITEM_NO_PENDING_REVISION', 'There is no plan revision awaiting confirmation', 409);
+      delete state.value.item.pendingRevision;
+      await this.write(state); return this.view(state.value);
+    });
+  }
+  /**
+   * 带摘要时核对所见内容：有待确认修订时比修订摘要，首次确认前比计划摘要；不带摘要时按 revision 防并发。
+   * 返回当前待确认修订（可能没有）。
+   */
+  private pendingRevision(state: RecordState, expectedRevision: number, digest?: string) {
+    const item = state.value.item; const pending = item.pendingRevision;
+    if (digest === undefined) { this.revision(state, expectedRevision); return pending; }
+    const mismatch = () => new RuntimeError('WORK_ITEM_REVISION_CONFIRM_MISMATCH', 'The plan awaiting confirmation changed; review the latest card before confirming', 409);
+    if (pending) { if (pending.digest !== digest) throw mismatch(); return pending; }
+    if (item.status !== 'awaiting_confirmation') throw new RuntimeError('WORK_ITEM_NO_PENDING_REVISION', 'There is no plan revision awaiting confirmation', 409);
+    if (workPlanDigest(item.plan) !== digest) throw mismatch();
+    return undefined;
+  }
+  private async planRevision(state: RecordState, input: WorkPlan, actorId: string, via: 'human' | 'agent'): Promise<PlannedRevision> {
+    const record = state.value; const item = record.item;
+    // 结果未知、取消中或已结束的目标不能修订：修订不能替代对未知执行的人工核对。
+    if (!['awaiting_confirmation', 'running', 'waiting', 'failed'].includes(item.status)) throw new RuntimeError('WORK_ITEM_REVISION_UNSAFE', 'Only an unfinished work item without unresolved execution can be revised', 409);
+    const plan = workPlanSchema.parse(input);
+    if (fingerprint(plan) === fingerprint(workPlanSchema.parse(item.plan))) throw new RuntimeError('WORK_ITEM_REVISION_EMPTY', 'The revised plan is identical to the current plan', 400);
+    await this.assertExecution(record);
+    const impact = analyzeWorkPlanRevision(item, plan);
+    const unsafe = [...impact.rerun, ...impact.remove].find(id => ['blocked', 'cancelled'].includes(item.steps.find(step => step.id === id)!.status));
+    if (unsafe) throw new RuntimeError('WORK_ITEM_REVISION_UNSAFE', `Step ${unsafe} requires reconciliation before the plan can change`, 409);
+    const parent = await this.access(item.parentSessionId, actorId);
+    const rank: PermissionMode[] = ['deny-all', 'ask', 'approve-reads', 'full-trust'];
+    const agents: Record<string, FrozenAgent> = {};
+    for (const step of plan.steps) {
+      if (step.kind !== 'agent' || agents[step.agentId!]) continue;
+      if (record.agents[step.agentId!]) { agents[step.agentId!] = record.agents[step.agentId!]!; continue; }
+      if (this.options.authorizeAgent && !await this.options.authorizeAgent(item.parentSessionId, actorId, step.agentId!)) throw new RuntimeError('WORK_ITEM_AGENT_FORBIDDEN', 'Agent selection is not authorized', 403);
+      const agent = await this.repos.agents.get(step.agentId!);
+      if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', `Unknown agent: ${step.agentId}`, 404);
+      agents[agent.id] = { fingerprint: fingerprint(agent), permissionMode: rank[Math.min(rank.indexOf(parent.permissionMode ?? 'ask'), rank.indexOf(agent.permissionMode))]! };
+    }
+    // 尚未确认的初始计划改了也仍要确认，不另起一道修订确认。
+    const unconfirmed = item.status === 'awaiting_confirmation';
+    const gated = record.confirmationRequired ?? Boolean(await this.options.requireConfirmation?.(parent));
+    const reasons = via === 'agent' && !unconfirmed ? [...gated ? ['本目标要求人工确认计划'] : [], ...workRevisionConfirmationReasons(item, plan)] : [];
+    return { plan, impact, agents, reasons, unconfirmed };
+  }
+  private async applyRevision(state: RecordState, planned: PlannedRevision, source: 'human' | 'agent', actorId: string, reason?: string) {
+    const record = state.value; const item = record.item;
+    const version = (item.planVersion ?? 1) + 1;
+    const stopped: string[] = [];
+    for (const id of planned.impact.stop) {
+      const attempt = last(item.steps.find(step => step.id === id)!)!;
+      if (record.stoppedAttempts.includes(attempt.id)) continue;
+      let proven = false;
+      if (record.actor && attempt.sessionId) {
+        try { proven = await bounded(this.options.runtime.stopWorkItemSession(attempt.sessionId, record.actor), 10_000); } catch { /* Unproven stops abort the revision. */ }
+      }
+      if (proven) { stopped.push(attempt.id); continue; }
+      // 从未创建子会话的准备中尝试没有可停止的执行；其余无法证明停止的一律放弃修订。
+      if (!attempt.sessionId || await this.repos.sessions.get(attempt.sessionId)) {
+        if (stopped.length) { record.stoppedAttempts.push(...stopped); await this.write(state).catch(() => {}); }
+        throw new RuntimeError('WORK_ITEM_REVISION_STOP_FAILED', `Cannot prove step ${id} stopped; plan version ${version - 1} is unchanged${stopped.length ? ' and already stopped steps need reconciliation' : ''}`, 409);
+      }
+    }
+    const timestamp = time();
+    record.stoppedAttempts.push(...stopped);
+    const previous = new Map(item.steps.map(step => [step.id, step]));
+    const retired = [...item.retiredSteps ?? []];
+    const supersede = (step: WorkStep) => {
+      for (const attempt of step.attempts) {
+        if (attempt.supersededByPlanVersion) continue;
+        attempt.supersededByPlanVersion = version;
+        if (['preparing', 'accepted'].includes(attempt.status)) { attempt.status = 'interrupted'; attempt.error = `Stopped by plan revision v${version}; inspect effects of the stopped run`; attempt.updatedAt = timestamp; }
+      }
+      delete step.answer;
+      if (record.reworkWorkspaces) delete record.reworkWorkspaces[step.id];
+    };
+    item.steps = planned.plan.steps.map(definition => {
+      const old = previous.get(definition.id);
+      if (old && planned.impact.keep.includes(definition.id)) return old;
+      if (old) { supersede(old); old.status = 'pending'; return old; }
+      // 删除后又加回的步骤沿用原尝试历史，保证尝试编号与子会话不重复。
+      const revived = retired.findIndex(step => step.id === definition.id);
+      return { id: definition.id, status: 'pending' as const, attempts: revived >= 0 ? retired.splice(revived, 1)[0]!.attempts : [] };
+    });
+    for (const id of planned.impact.remove) { const old = previous.get(id)!; supersede(old); retired.push(old); }
+    if (retired.length) item.retiredSteps = retired; else delete item.retiredSteps;
+    item.planHistory = [...this.view(record).planHistory!, { version, plan: planned.plan, createdAt: timestamp, source, actor: actorId === installationOwnerTaskActor ? 'installation_owner' : 'creator', ...(reason ? { reason } : {}), impact: planned.impact }];
+    item.plan = planned.plan; item.title = planned.plan.title; item.planVersion = version;
+    record.agents = planned.agents;
+    delete item.pendingRevision; delete item.error;
+    if (!planned.unconfirmed) item.status = item.steps.some(step => step.status === 'failed') ? 'failed' : 'running';
+    await this.write(state);
   }
   async saveTemplate(parentSessionId: string, workId: string, name: string, actorId?: string): Promise<WorkTemplate> {
     if (!name.trim() || name.length > 200) throw new RuntimeError('WORK_TEMPLATE_NAME_INVALID', 'Template name must contain 1–200 characters');
@@ -374,10 +564,11 @@ export class WorkItemService {
     await this.access(parentSessionId, actorId);
     return (await this.repos.config.list!(TEMPLATES)).map(row => JSON.parse(row.value) as StoredTemplate).filter(record => record.template.parentSessionId === parentSessionId && (record.actorId === actorId || actorId === installationOwnerTaskActor)).map(record => record.template);
   }
-  async runTemplate(parentSessionId: string, templateId: string, version: number, goal: string, idempotencyKey: string, actorId?: string, confirmation?: boolean): Promise<WorkItem> {
+  /** detached：定时或触发器启动，不归属父会话此刻正在跑的那一轮（不计入其用量、不沿用其风险策略）。 */
+  async runTemplate(parentSessionId: string, templateId: string, version: number, goal: string, idempotencyKey: string, actorId?: string, confirmation?: boolean, detached = false): Promise<WorkItem> {
     const template = (await this.listTemplates(parentSessionId, actorId)).find(template => template.id === templateId && template.version === version);
     if (!template) throw new RuntimeError('WORK_TEMPLATE_NOT_FOUND', 'Template version not found', 404);
-    return this.create(parentSessionId, { goal, plan: template.plan, idempotencyKey }, actorId, confirmation);
+    return this.create(parentSessionId, { goal, plan: template.plan, idempotencyKey }, actorId, confirmation, detached ? null : undefined);
   }
   tick(): Promise<void> {
     if (this.closed) return Promise.resolve();
@@ -413,13 +604,14 @@ export class WorkItemService {
   private async prompt(record: StoredWork, definition: WorkPlan['steps'][number]): Promise<string> {
     const inputs = await Promise.all(definition.dependsOn.map(async id => {
       const step = record.item.steps.find(step => step.id === id)!;
-      const attempt = last(step);
+      const attempt = liveAttempts(step).at(-1);
       const workspace = definition.reviewPolicy && attempt?.sessionId ? await this.options.runtime.getWorkspace(attempt.sessionId) : undefined;
       if (definition.reviewPolicy && step.status === 'completed' && attempt && workspace?.state !== 'ready') throw new Error(`Review workspace unavailable for ${id}`);
       return { stepId: id, status: step.status, answer: step.answer, attemptId: attempt?.id, generatedResult: attempt?.output,
         ...(workspace ? { workspace: { cwd: workspace.cwd, branch: workspace.branch, baselineCommit: workspace.baselineCommit } } : {}) };
     }));
-    const previousReview = record.item.steps.find(step => step.id === record.item.plan.outputStepId)?.attempts.slice().reverse().find(attempt => attempt.review)?.review;
+    const output = record.item.steps.find(step => step.id === record.item.plan.outputStepId);
+    const previousReview = output && liveAttempts(output).reverse().find(attempt => attempt.review)?.review;
     const feedback = previousReview?.decision === 'rework' && (previousReview.targetStepId === definition.id || definition.reviewPolicy) ? `\nRework feedback (previous reviewed version):\n${JSON.stringify(previousReview)}\n${definition.reviewPolicy ? 'Verify the previous findings against the new artifacts as well as the acceptance criteria.' : 'Continue in the same workspace; preserve the previous implementation and fix the review findings.'}` : '';
     const review = definition.reviewPolicy ? `\nIndependent review: inspect the actual upstream workspace paths. Process completion is not acceptance. End with exactly one fenced block labelled dutydeck-review containing the verdict JSON (on its own lines), with no non-whitespace text after its closing fence. Tool commentary may precede it. A bare JSON object is also accepted: {"decision":"accept|rework|stop","reviewed":[{"stepId":"...","attemptId":"...","digest":"..."}],"targetStepId":"only for rework","feedback":"user-readable conclusion, evidence and remaining issues"}. Copy stepId, attemptId and generatedResult.digest for EVERY completed Agent input. These identify generated artifacts, not proof of code correctness. Use accept only after checking the acceptance criteria; rework requires one allowed target; stop for missing context or issues outside those targets. Policy: ${JSON.stringify(definition.reviewPolicy)}` : '';
     const upstream = record.promptPolicyVersion === 'optimized-v1' ? renderWorkUpstream(inputs) : JSON.stringify(inputs);
@@ -481,6 +673,7 @@ export class WorkItemService {
     let state = await this.read(id); let record = state.value;
     if (record.item.status === 'cancelling') { await this.cancelChildren(id); return; }
     // 待确认的计划只是持久记录，确认前不做任何执行准备，也不派发步骤。
+    // 待确认的修订不在此列：它不改状态，调度按当前生效的计划照常收结果和派发。
     if (record.item.status === 'awaiting_confirmation') return;
     if (record.item.status === 'cancelled') return;
     if (record.item.status === 'blocked' && !await this.reconcileBlocked(state)) return;
@@ -588,7 +781,7 @@ export class WorkItemService {
     if (output.status === 'completed') {
       const definition = record.item.plan.steps.find(step => step.id === output.id)!;
       if (definition.reviewPolicy) { await this.applyReview(state, output, definition); return; }
-      record.item.output = { ...last(output)!.output!, stepId: output.id }; record.item.status = 'completed'; await this.write(state); this.scheduleDelivery(record.item.id);
+      record.item.output = { ...last(output)!.output!, stepId: output.id }; record.item.status = 'completed'; delete record.item.pendingRevision; await this.write(state); this.scheduleDelivery(record.item.id);
     } else {
       const status = record.item.steps.some(step => step.status === 'running') ? 'running'
         : record.item.steps.some(step => step.status === 'waiting') ? 'waiting'
@@ -620,11 +813,11 @@ export class WorkItemService {
     attempt.review = verdict;
     if (verdict.decision === 'accept') {
       const text = verdict.feedback;
-      record.item.output = { text, digest: hash(text), stepId: output.id }; record.item.status = 'completed';
+      record.item.output = { text, digest: hash(text), stepId: output.id }; record.item.status = 'completed'; delete record.item.pendingRevision;
       await this.write(state); this.scheduleDelivery(record.item.id); return;
     }
     const policy = definition.reviewPolicy!;
-    const rounds = output.attempts.filter(attempt => attempt.review?.decision === 'rework').length;
+    const rounds = countedAttempts(record.item, output).filter(attempt => attempt.review?.decision === 'rework').length;
     if (verdict.decision === 'stop' || rounds > policy.maxReworkRounds || !policy.allowedTargetStepIds.includes(verdict.targetStepId!) || !expected.some(value => value.stepId === verdict.targetStepId)) {
       record.item.status = 'blocked';
       record.item.error = `${verdict.decision === 'stop' ? 'Review stopped' : rounds > policy.maxReworkRounds ? 'Review rework limit reached' : 'Review target is not allowed'}: ${verdict.feedback}`;
@@ -910,10 +1103,13 @@ export class WorkItemService {
       let state = await this.read(id);
       const item = state.value.item;
       if (item.status !== 'completed' || !['pending', 'error'].includes(item.delivery.status)) return;
+      // 最多 DELIVERY_MAX_ATTEMPTS 次；本实例失败过的按 1、2 分钟退避，没到时间不发也不写库。
+      if (item.delivery.status === 'error' && (item.delivery.attempts >= DELIVERY_MAX_ATTEMPTS
+        || this.failedDeliveries.has(id) && item.delivery.nextAttemptAt && item.delivery.nextAttemptAt > time())) return;
       try { await this.assertExecution(state.value, true); }
       catch (error) {
         if (this.closed) return;
-        item.delivery.status = 'error'; item.delivery.error = errorText(error); await this.write(state); return;
+        item.delivery.attempts++; failDelivery(item.delivery, errorText(error)); await this.write(state); this.failedDeliveries.add(id); return;
       }
       item.delivery.attempts++; await this.write(state);
       let failure: string | undefined;
@@ -925,9 +1121,10 @@ export class WorkItemService {
       state = await this.read(id);
       const current = state.value.item;
       if (current.status !== 'completed' || current.delivery.attempts !== item.delivery.attempts || current.output?.digest !== item.output?.digest || !['pending', 'error'].includes(current.delivery.status)) return;
-      current.delivery.status = failure === undefined ? 'delivered' : 'error';
-      if (failure === undefined) delete current.delivery.error; else current.delivery.error = failure;
+      if (failure === undefined) { current.delivery.status = 'delivered'; delete current.delivery.error; delete current.delivery.nextAttemptAt; }
+      else failDelivery(current.delivery, failure);
       await this.write(state);
+      if (failure !== undefined) this.failedDeliveries.add(id);
     });
   }
   async close() {

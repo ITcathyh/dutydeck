@@ -5,11 +5,12 @@ import { programStatusCommand } from './program-status-launch.js';
  * Architecture (no PTY, no attach). Third-party attribution: see THIRD_PARTY_NOTICES.md.
  *   - `tmux new-session -d -s <name> -x <cols> -y <rows> -c <cwd>` starts a
  *     bare shell in a detached session through an asynchronous, env-scrubbed client.
- *   - Session-specific env is staged with `set-environment -t <session>`, the
- *     pane is atomically replaced with the CLI via `respawn-pane`, then the
- *     staged values are immediately removed from tmux. This avoids both the
- *     shared server-global environment and typing secrets/large launch lines
- *     into an interactive shell's visible history.
+ *   - Session-specific env is exported by the private launch script that
+ *     `respawn-pane` runs, so values (API keys included) never appear in a
+ *     tmux client's argv, the shared server-global environment, or an
+ *     interactive shell's visible history. Only names a POSIX shell cannot
+ *     export are staged with `set-environment -t <session>` and removed again
+ *     right after the respawn.
  *   - `tmux pipe-pane` sends output through a bounded Unix socket writer.
  *     Overflow reports a gap and the driver atomically restores the screen.
  *   - Writes go through `tmux send-keys -l` (long/multiline text via
@@ -123,6 +124,13 @@ function isTimeoutError(err: unknown): boolean {
   return (err as NodeJS.ErrnoException | null | undefined)?.code === 'ETIMEDOUT';
 }
 
+/** Names /bin/sh can `export`; the rest still go through tmux set-environment. */
+const SHELL_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/** tmux parses an argument ending in `;` as a command separator and drops
+ *  that `;`; a trailing `\;` is kept as a literal semicolon. */
+const tmuxLiteralArg = (value: string): string => value.endsWith(';') ? `${value.slice(0, -1)}\\;` : value;
+
 /** Single-quote-escape a string for /bin/sh (replaces ' with '\'' ). */
 function shellescape(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`;
@@ -136,17 +144,19 @@ function shellescape(s: string): string {
  * in the tmux command itself.  The script removes itself before exec so the
  * launch directory never accumulates credentials or stale arguments.
  *
- * respawn-pane replaces the staged session PATH (and any `-e PATH=`) with
- * the management client's PATH, so the child's own PATH, including an empty
- * one, is restored after the cleanup commands and before exec. As with
- * PtyBackend, a bare `bin` is then resolved through that PATH.
+ * The child environment is exported here too, so its values never travel in
+ * a tmux client's argv where other local users could read them from
+ * /proc/<pid>/cmdline. respawn-pane hands the pane the management client's
+ * PATH, so the child's own PATH, including an empty one, is exported after
+ * the cleanup commands and before exec. As with PtyBackend, a bare `bin` is
+ * then resolved through that PATH.
  */
-async function writeLaunchScript(bin: string, args: string[], childPath: string | undefined, programStatus?: boolean): Promise<{ path: string; directory: string }> {
+async function writeLaunchScript(bin: string, args: string[], environment: Record<string, string>, programStatus?: boolean): Promise<{ path: string; directory: string }> {
   const directory = await mkdtemp(join(tmpdir(), 'dutydeck-tmux-launch-'));
   const path = join(directory, 'launch.sh');
-  const searchPath = childPath === undefined ? '' : `PATH=${shellescape(childPath)}; export PATH\n`;
+  const exports = Object.entries(environment).map(([key, value]) => `${key}=${shellescape(value)}; export ${key}\n`).join('');
   const command = ['exec', ...programStatusCommand(bin, args, programStatus)].map(shellescape).join(' ');
-  await writeFile(path, `#!/bin/sh\nrm -f -- "$0"\nrmdir -- "$(dirname -- "$0")" 2>/dev/null || true\n${searchPath}${command}\n`, { mode: 0o700 });
+  await writeFile(path, `#!/bin/sh\nrm -f -- "$0"\nrmdir -- "$(dirname -- "$0")" 2>/dev/null || true\n${exports}${command}\n`, { mode: 0o700 });
   await chmod(path, 0o700);
   return { path, directory };
 }
@@ -304,12 +314,15 @@ export class TmuxBackend implements SessionBackend {
       this.socketPath = (await runTmux(['display-message', '-p', '-t', `=${this.sessionName}`, '#{socket_path}'])).trim();
       await this.writeOwnershipMarker();
       check();
-      // 2. Stage the child environment on this session only. injectEnv is
-      // applied last so it wins on collisions, matching PtyBackend.
+      // 2. Scope the child environment to this session only. injectEnv is
+      // applied last so it wins on collisions, matching PtyBackend. Names the
+      // launch script cannot export are staged on the session.
       const childEnvironment = { ...opts.env, ...opts.injectEnv };
+      const scripted = Object.fromEntries(Object.entries(childEnvironment).filter(([key]) => SHELL_NAME.test(key)));
+      const staged = Object.fromEntries(Object.entries(childEnvironment).filter(([key]) => !SHELL_NAME.test(key)));
       await this.scrubStaleGlobalEnvironment(childEnvironment);
       check();
-      await this.stageSessionEnvironment(childEnvironment);
+      await this.stageSessionEnvironment(staged);
       check();
 
       // 3. Stream output through a bounded private socket capture.
@@ -317,18 +330,18 @@ export class TmuxBackend implements SessionBackend {
       check();
 
       // 4. Replace the bootstrap shell through a private script instead of
-      // sending the complete argv in the tmux control message. tmux forks the
-      // pane with a snapshot of the session environment before respawn-pane
-      // returns; clear the staged values immediately afterwards so secrets do
-      // not linger in tmux. The script unlinks itself before exec.
-      const launch = await writeLaunchScript(bin, args, childEnvironment.PATH, opts.programStatus);
+      // sending the complete argv and environment in the tmux control
+      // message. tmux forks the pane with a snapshot of the session
+      // environment before respawn-pane returns; clear any staged values
+      // immediately afterwards. The script unlinks itself before exec.
+      const launch = await writeLaunchScript(bin, args, scripted, opts.programStatus);
       try {
         (await runTmux(['respawn-pane', '-k', '-t', this.sessionName, '-c', opts.cwd, '/bin/sh', launch.path]));
       } catch (error) {
         await rm(launch.directory, { recursive: true, force: true });
         throw error;
       }
-      await this.clearSessionEnvironment(Object.keys(childEnvironment));
+      await this.clearSessionEnvironment(Object.keys(staged));
       check();
 
       this.startExitWatcher();
@@ -686,7 +699,7 @@ export class TmuxBackend implements SessionBackend {
   }
 
   private async stageSessionEnvironment(environment: Record<string, string>): Promise<void> {
-    const commands = Object.entries(environment).flatMap(([key, value]) => ['set-environment', '-t', this.sessionName, '--', key, value, ';']);
+    const commands = Object.entries(environment).flatMap(([key, value]) => ['set-environment', '-t', this.sessionName, '--', key, tmuxLiteralArg(value), ';']);
     await this.runEnvironmentCommands(commands);
   }
 
@@ -727,7 +740,7 @@ export class TmuxBackend implements SessionBackend {
       (await this.pasteLiteral(text, generation));
       return;
     }
-    (await runTmux(['send-keys', '-t', this.sessionName, '-l', '--', text]));
+    (await runTmux(['send-keys', '-t', this.sessionName, '-l', '--', tmuxLiteralArg(text)]));
   }
 
   private async pasteLiteral(text: string, generation: number): Promise<void> {

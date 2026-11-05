@@ -256,6 +256,8 @@ export interface PermissionRequestData {
   title: string;
   options?: Array<{ id: string; label: string; kind?: string }>;
   status: 'pending' | 'approved' | 'rejected';
+  /** 拒绝时用户（或自动拒绝）给出的说明，已脱敏并截断；只在 status 为 rejected 时出现。 */
+  reason?: string;
 }
 
 export interface ToolRiskPolicy {
@@ -568,6 +570,7 @@ export * from './verification.js';
 
 export * from './session-automation.js';
 export * from './pull-requests.js';
+export * from './inbox.js';
 export * from './work-items.js';
 
 export * from './permission-display.js';

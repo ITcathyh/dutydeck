@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { createWorkItemSchema, RuntimeError } from '@dutydeck/shared';
+import { createWorkItemSchema, reviseWorkPlanSchema, RuntimeError } from '@dutydeck/shared';
 import type { SessionAutomationRouteOptions } from './session-automation-routes.js';
 import type { WorkItemService } from './work-items.js';
 import type { WorkItemInteractions } from './work-item-interactions.js';
@@ -23,6 +23,9 @@ const revisionInput = z.object({ expectedRevision: revision }).strict();
 const retryInput = revisionInput.extend({ stepId });
 const answerInput = retryInput.extend({ answer: z.string().trim().min(1).max(4_000) });
 export const templateNameInput = z.object({ name: z.string().trim().min(1).max(200) }).strict();
+// 带 revisionDigest 时确认/放弃的是摘要对应的那份待确认修订，不受运行中 revision 变化影响。
+const pendingRevisionInput = revisionInput.extend({ revisionDigest: z.string().regex(/^[0-9a-f]{64}$/).optional() });
+const revisePreviewInput = reviseWorkPlanSchema.pick({ expectedRevision: true, plan: true }).strict();
 export const runTemplateInput = z.object({ version: revision, goal: z.string().trim().min(1).max(32_000), idempotencyKey: z.string().min(1).max(200) }).strict();
 
 export async function registerWorkItemRoutes(app: FastifyInstance, options: WorkItemRouteOptions) {
@@ -43,8 +46,8 @@ export async function registerWorkItemRoutes(app: FastifyInstance, options: Work
   app.post<{ Params: Params }>(base, async request => options.service.create(request.params.sessionId, workInput(createWorkItemSchema, request.body), await actor(request, request.params.sessionId)));
   app.get<{ Params: Params }>(`${base}/:id`, async request => options.service.get(request.params.sessionId, request.params.id, await actor(request, request.params.sessionId, true)));
   app.post<{ Params: Params }>(`${base}/:id/confirm`, async request => {
-    const input = workInput(revisionInput, request.body);
-    return options.service.confirm(request.params.sessionId, request.params.id, input.expectedRevision, await actor(request, request.params.sessionId));
+    const input = workInput(pendingRevisionInput, request.body);
+    return options.service.confirm(request.params.sessionId, request.params.id, input.expectedRevision, await actor(request, request.params.sessionId), input.revisionDigest);
   });
   app.post<{ Params: Params }>(`${base}/:id/cancel`, async request => {
     const input = workInput(revisionInput, request.body);
@@ -57,6 +60,18 @@ export async function registerWorkItemRoutes(app: FastifyInstance, options: Work
   app.post<{ Params: Params }>(`${base}/:id/answer`, async request => {
     const input = workInput(answerInput, request.body);
     return options.service.answer(request.params.sessionId, request.params.id, input.stepId, input.answer, input.expectedRevision, await actor(request, request.params.sessionId));
+  });
+  app.post<{ Params: Params }>(`${base}/:id/revise/preview`, async request => {
+    const input = workInput(revisePreviewInput, request.body);
+    return options.service.previewRevision(request.params.sessionId, request.params.id, input, await actor(request, request.params.sessionId));
+  });
+  app.post<{ Params: Params }>(`${base}/:id/revise`, async request => {
+    const input = workInput(reviseWorkPlanSchema, request.body);
+    return options.service.revise(request.params.sessionId, request.params.id, input, await actor(request, request.params.sessionId));
+  });
+  app.post<{ Params: Params }>(`${base}/:id/revision/discard`, async request => {
+    const input = workInput(pendingRevisionInput, request.body);
+    return options.service.discardRevision(request.params.sessionId, request.params.id, input.expectedRevision, await actor(request, request.params.sessionId), input.revisionDigest);
   });
   app.post<{ Params: Params }>(`${base}/:id/template`, async request => options.service.saveTemplate(request.params.sessionId, request.params.id, workInput(templateNameInput, request.body).name, await actor(request, request.params.sessionId)));
   app.post<{ Params: Params }>('/api/sessions/:sessionId/work-templates/:id/run', async request => {

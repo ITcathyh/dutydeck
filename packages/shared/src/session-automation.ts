@@ -75,6 +75,8 @@ const executionContextSchema = z.object({
   permissionMode: z.enum(['ask', 'approve-reads', 'full-trust', 'deny-all']).optional(),
   contextMode: z.literal('prompt_only')
 }).strict();
+const completionConditionSchema = z.string().trim().min(1).max(2_000);
+const workTemplateRefSchema = z.object({ id: z.string().min(1).max(200), version: z.number().int().positive() }).strict();
 const disableNotificationSchema = z.object({
   status: z.enum(['pending', 'sending', 'delivered', 'error', 'unknown', 'not_requested']),
   attempts: z.number().int().nonnegative(), updatedAt: timestamp,
@@ -99,6 +101,14 @@ export const sessionScheduleSchema = z.object({
   disableNotification: disableNotificationSchema.optional(),
   name: z.string().trim().min(1).max(200),
   prompt: z.string().trim().min(1).max(20_000),
+  /** 设了模板时，每次触发用 prompt 作目标启动这个已保存的工作项模板，而不是派发一轮对话。 */
+  workTemplate: workTemplateRefSchema.optional(),
+  /** 每次运行注入提示：达成时由 Agent 用 stop-self 停用。 */
+  completionCondition: completionConditionSchema.optional(),
+  /** 到点仍启用就自动停用并告知「已到截止，未确认完成」。 */
+  deadlineAt: timestamp.optional(),
+  /** 计划为何结束：stop-self 确认完成，或到截止时间自动停用。重新启用时清除。 */
+  outcome: z.object({ kind: z.enum(['completed', 'deadline_reached']), at: timestamp }).strict().optional(),
   trigger: scheduleTriggerSchema,
   timezone: z.string().min(1).max(100),
   dstPolicy: z.object({ gap: z.enum(scheduleDstGapPolicies), overlap: z.enum(scheduleDstOverlapPolicies) }).strict(),
@@ -138,7 +148,10 @@ export const createSessionScheduleInputSchema = z.object({
   condition: scheduleConditionInputSchema,
   mode: z.enum(sessionScheduleModes).optional(),
   misfirePolicy: z.enum(['skip', 'coalesce']).optional(),
-  maxLatenessSeconds: z.number().int().positive().optional()
+  maxLatenessSeconds: z.number().int().positive().optional(),
+  workTemplate: workTemplateRefSchema.optional(),
+  completionCondition: completionConditionSchema.optional(),
+  deadlineAt: timestamp.optional()
 }).strict();
 export type CreateSessionScheduleInput = z.infer<typeof createSessionScheduleInputSchema>;
 
@@ -154,7 +167,11 @@ export const updateSessionScheduleInputSchema = z.object({
   /** 只能在 `session` 与 `fresh` 之间切换；`independent` 创建后不可切换。 */
   mode: z.enum(['session', 'fresh']).optional(),
   misfirePolicy: z.enum(['skip', 'coalesce']).optional(),
-  maxLatenessSeconds: z.number().int().positive().nullable().optional()
+  maxLatenessSeconds: z.number().int().positive().nullable().optional(),
+  /** `null` 清除。 */
+  workTemplate: workTemplateRefSchema.nullable().optional(),
+  completionCondition: completionConditionSchema.nullable().optional(),
+  deadlineAt: timestamp.nullable().optional()
 }).strict().refine(value => Object.keys(value).some(key => key !== 'expectedRevision'), { message: 'At least one field must be updated' });
 export type UpdateSessionScheduleInput = z.infer<typeof updateSessionScheduleInputSchema>;
 
@@ -217,6 +234,8 @@ export const sessionScheduleOccurrenceV2Schema = z.object({
   blockReason: z.enum(automationBlockReasons).optional(),
   actor: executionActorSchema.optional(),
   actorId: z.string().min(1).optional(),
+  /** 模板计划这次启动的工作项。 */
+  workItemId: z.string().min(1).optional(),
   createdAt: timestamp,
   updatedAt: timestamp
 }).strict();
@@ -348,9 +367,18 @@ export type AutomationDeliveryTarget =
   | { kind: 'lark'; appId: string; chatId: string; replyMessageId: string; replyInThread: boolean }
   | { kind: 'unavailable' };
 
+/**
+ * 计划跟进到哪一步：等下次运行、本轮在跑、等人（审批、提问未答、结果待核对、工作项待确认）、
+ * 最近一轮失败、已完成（stop-self）、已到截止（未确认完成）、被停用。
+ */
+export const scheduleRunStates = ['waiting', 'running', 'awaiting_human', 'failed', 'completed', 'deadline_reached', 'disabled'] as const;
+export type ScheduleRunState = (typeof scheduleRunStates)[number];
+
 export interface SessionAutomationList {
   /** Read-only projection of each plan's frozen destination; absent on older instances. */
   deliveryTargets?: Record<string, AutomationDeliveryTarget>;
+  /** 每个计划的跟进状态；旧实例没有。 */
+  runStates?: Record<string, ScheduleRunState>;
   schedules: PublicSessionSchedule[];
   subscriptions: PublicCiSubscription[];
   occurrences: PublicSessionScheduleOccurrence[];
@@ -362,6 +390,7 @@ export interface AutomationScheduleSummary {
   schedule: PublicSessionSchedule;
   session: { id: string; title: string; agentId: string; state: string; archivedAt?: string };
   health: AutomationScheduleHealth;
+  runState?: ScheduleRunState;
   latestOccurrence?: PublicSessionScheduleOccurrence;
   blocker?: { sessionId?: string; taskId?: string; attemptId?: string; status: string; waitingSince: string; restricted?: boolean };
   overdue?: { from: string; to: string };
@@ -413,4 +442,20 @@ function asPreviewDefinition(schedule: Pick<SessionSchedule, 'id' | 'name' | 'tr
 
 export function previewSessionSchedule(schedule: Pick<SessionSchedule, 'id' | 'name' | 'trigger' | 'timezone' | 'dstPolicy'>, after: Date) {
   return previewNextSchedule(asPreviewDefinition(schedule), after);
+}
+
+/**
+ * 截止时间输入：带时区偏移的 ISO 时间原样换成 UTC；不带偏移的 `YYYY-MM-DDTHH:mm[:ss]` 按计划时区的当地时间解释
+ * （夏令时跳过的时刻顺延，重复时刻取第一次）。无法解析时抛错。
+ */
+export function resolveScheduleDeadline(value: string, timezone: string): string {
+  const text = value.trim();
+  if (/[zZ]$|[+-]\d{2}:?\d{2}$/.test(text)) {
+    const date = new Date(text);
+    if (Number.isNaN(date.getTime())) throw new Error(`Invalid deadline: ${value}`);
+    return date.toISOString();
+  }
+  const preview = previewNextSchedule(asPreviewDefinition({ id: 'deadline', name: 'deadline', trigger: { kind: 'at', localDateTime: text }, timezone, dstPolicy: { gap: 'shift_forward', overlap: 'first' } }), new Date(0));
+  if (!preview) throw new Error(`Invalid deadline: ${value}`);
+  return preview.scheduledForUtc;
 }

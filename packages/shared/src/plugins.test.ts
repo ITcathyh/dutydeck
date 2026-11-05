@@ -36,6 +36,11 @@ describe('plugin manifest schema', () => {
     const trigger = pluginTriggerSchema.parse({ auth: { type: 'token' }, target: { botAppId: 'cli_a', chatId: 'oc_b' }, prompt: 'x' });
     expect(trigger).toMatchObject({ auth: { header: 'x-dutydeck-token' }, target: { session: 'new' }, maxConcurrent: 4 });
     expect(pluginTriggerSchema.safeParse({ auth: { type: 'hmac-sha256' }, target: { botAppId: 'a', chatId: 'b' }, prompt: 'x' }).success).toBe(false);
+    const workTemplate = { session: '{{config.session}}', id: 'template_x', version: '{{config.version}}', goal: '{{payload}}' };
+    expect(pluginTriggerSchema.parse({ auth: { type: 'token' }, target: { botAppId: 'a', chatId: 'b' }, workTemplate }).workTemplate).toEqual(workTemplate);
+    expect(pluginTriggerSchema.safeParse({ auth: { type: 'token' }, target: { botAppId: 'a', chatId: 'b' }, prompt: 'x', workTemplate }).success).toBe(false);
+    expect(pluginTriggerSchema.safeParse({ auth: { type: 'token' }, target: { botAppId: 'a', chatId: 'b' } }).success).toBe(false);
+    expect(pluginTriggerSchema.safeParse({ auth: { type: 'token' }, target: { botAppId: 'a', chatId: 'b' }, workTemplate: { ...workTemplate, version: 0 } }).success).toBe(false);
   });
 });
 

@@ -13,6 +13,15 @@ describe('web api adapter', () => {
     expect(fetcher).toHaveBeenCalledWith('/api/sessions', { credentials: 'same-origin', signal: controller.signal });
   });
 
+  it('审批裁决只在带说明时才在请求体里加 reason', async () => {
+    const fetcher = vi.fn(async () => ({ ok: true, json: async () => ({}) }));
+    vi.stubGlobal('fetch', fetcher);
+    await api.permission('s1', 'p1', false, '改用测试库');
+    await api.permission('s1', 'p1', false);
+    await api.permission('s1', 'p1', true);
+    expect(fetcher.mock.calls.map(call => JSON.parse((call as unknown as [string, { body: string }])[1].body))).toEqual([{ approved: false, reason: '改用测试库' }, { approved: false }, { approved: true }]);
+  });
+
   it('构造 backward / forward 有界事件窗口 URL', () => {
     expect(eventsUrl('s1', { before: 200, limit: 50, direction: 'backward' })).toBe('/api/sessions/s1/events?before=200&limit=50&direction=backward');
     expect(eventsUrl('s1', { after: 200, limit: 50, direction: 'forward' })).toBe('/api/sessions/s1/events?after=200&limit=50&direction=forward');

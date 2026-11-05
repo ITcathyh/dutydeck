@@ -13,11 +13,11 @@ function Harness({ autoFocus = false }: { autoFocus?: boolean }) {
 
 describe('useDialogFocus', () => {
   it('moves focus in, traps Tab in the dialog, and restores the opener', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(<Harness/>);
     const opener = screen.getByRole('button', { name: '打开' });
     await user.click(opener);
-    await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: '第一项' })));
+    await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: '第一项' })), { interval: 5 });
     await user.tab();
     const finish = screen.getByRole('button', { name: '完成' });
     expect(document.activeElement).toBe(finish);
@@ -30,11 +30,11 @@ describe('useDialogFocus', () => {
   });
 
   it('restores the opener even when a dialog field uses autoFocus', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(<Harness autoFocus/>);
     const opener = screen.getByRole('button', { name: '打开' });
     await user.click(opener);
-    await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole('textbox', { name: '任务目标' })));
+    await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole('textbox', { name: '任务目标' })), { interval: 5 });
     await user.keyboard('{Tab}{Tab}');
     await user.click(screen.getByRole('button', { name: '完成' }));
     expect(document.activeElement).toBe(opener);

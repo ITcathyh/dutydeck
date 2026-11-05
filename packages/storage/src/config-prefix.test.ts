@@ -26,7 +26,8 @@ it('preserves SQLite prefix semantics and binary order at Unicode and NUL bounda
 
 it('seeks a small prefix without evaluating unrelated config namespaces', async () => {
   const repos = createRepositories(':memory:'); opened.push(repos);
-  for (let index = 0; index < 10_000; index++) await repos.config.set(`unrelated.${index}`, 'history');
+  // 库里不跑 ANALYZE，查询计划不随行数变化；全表扫描时 visits 会等于总行数，1000 行足以区分。
+  for (let index = 0; index < 1_000; index++) await repos.config.set(`unrelated.${index}`, 'history');
   for (const key of ['relay.ask.1', 'relay.ask.2', 'relay.ask.3']) await repos.config.set(key, 'ask');
   const prepare = Database.prototype.prepare;
   let visits = 0;

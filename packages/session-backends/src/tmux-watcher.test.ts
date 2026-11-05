@@ -68,8 +68,10 @@ describe('asynchronous tmux exit watcher', () => {
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
     cleanup.push(() => new Promise<void>(resolve => server.close(() => resolve())));
     const address = server.address() as { port: number };
+    // Fire the first 1s watcher tick at once; the fixture commands still really sleep.
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     for (let index = 0; index < 4; index++) watch();
-    await new Promise(resolve => setTimeout(resolve, 1010));
+    vi.advanceTimersByTime(1000);
     const durations: number[] = [];
     for (let index = 0; index < 12; index++) {
       const start = performance.now();
@@ -134,9 +136,12 @@ it('uses one client per tick against a real private tmux socket and observes ses
     vi.mocked(runCommand).mockRejectedValueOnce(race);
     expect(await backend.probePaneAsync()).toEqual({ probe: 'unknown', pid: null });
   }
+  // Drive the 1s watcher interval by hand; each tick still probes the real tmux server.
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
   const { watcher, exit } = watch();
   expect(await backend.probePaneAsync()).toEqual({ probe: 'missing', pid: null });
-  await new Promise(resolve => setTimeout(resolve, 3200));
+  await vi.waitFor(() => { vi.advanceTimersByTime(1000); expect(exit).toHaveBeenCalled(); }, { timeout: 5_000, interval: 20 });
+  vi.advanceTimersByTime(3000);
   expect(exit).toHaveBeenCalledTimes(1); watcher.stopExitWatcher();
 });
 

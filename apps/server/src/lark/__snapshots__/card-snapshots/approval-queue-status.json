@@ -441,6 +441,47 @@
                 ]
               },
               {
+                "tag": "form",
+                "element_id": "workflow_reject_form",
+                "name": "workflow_reject_<id:3>",
+                "direction": "vertical",
+                "vertical_spacing": "8px",
+                "margin": "0px",
+                "elements": [
+                  {
+                    "tag": "input",
+                    "element_id": "workflow_reject_input",
+                    "name": "reason",
+                    "input_type": "multiline_text",
+                    "max_length": 1000,
+                    "placeholder": {
+                      "tag": "plain_text",
+                      "content": "原因会记入审批记录；终端模式的 Agent 会收到，ACP 模式的只知道被拒绝。留空等同于「拒绝」"
+                    }
+                  },
+                  {
+                    "tag": "button",
+                    "element_id": "workflow_reject_submit",
+                    "type": "default",
+                    "text": {
+                      "tag": "plain_text",
+                      "content": "拒绝并说明"
+                    },
+                    "form_action_type": "submit",
+                    "behaviors": [
+                      {
+                        "type": "callback",
+                        "value": {
+                          "dutydeck_workflow": "reject",
+                          "request_id": "<id:3>",
+                          "generation": "<id:2>"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
                 "tag": "markdown",
                 "element_id": "workflow_deadline",
                 "text_size": "notation",

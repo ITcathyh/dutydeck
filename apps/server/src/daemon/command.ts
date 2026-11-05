@@ -926,10 +926,14 @@ export function systemdServiceControl(unit: string, deps: DaemonCommandDeps): Se
 const HEALTH_TIMEOUT_MS = 90_000;
 const HEALTH_INTERVAL_MS = 1_000;
 
+/** 本机健康检查能用的地址；address 没记录或不是本机明文 http 时返回 undefined。 */
+export function healthCheckUrl(address: string | undefined, deps: DaemonCommandDeps): URL | undefined {
+  return resolveLocalUrl(address, deps.localAddresses ?? (() => Object.values(networkInterfaces()).flatMap(entries => entries?.map(entry => entry.address) ?? [])));
+}
+
 /** 重启后等到换上新的主进程，并且它的 /health 返回 ok。服务在 runtime 初始化完成后才开始监听。 */
 export async function waitForServiceHealth(service: ServiceControl, previousPid: number | undefined, address: string | undefined, deps: DaemonCommandDeps, timeoutMs = HEALTH_TIMEOUT_MS): Promise<{ ok: true; pid: number } | { ok: false; error: string }> {
-  const localAddresses = deps.localAddresses ?? (() => Object.values(networkInterfaces()).flatMap(entries => entries?.map(entry => entry.address) ?? []));
-  const url = resolveLocalUrl(address, localAddresses);
+  const url = healthCheckUrl(address, deps);
   if (!url) return { ok: false, error: `监听地址（${address ?? '未记录'}）不可用于本机健康检查。` };
   const fetcher = deps.fetch ?? fetch;
   const sleeper = deps.sleep ?? sleep;

@@ -268,7 +268,18 @@ describe('systemd 托管下的 stop / restart / start 路由', () => {
     writeState(dir, state);
     const world = systemctl({ mainPid: old.pid, workingDirectory: tmp });
 
-    const result = await daemonRestart({}, { serve: vi.fn(), runCommand: world.run, platform: 'linux', checkSqlite: passingSqlite });
+    // 就绪等待按 Date.now() 计 15 秒截止、真实 sleep 轮询；只伪造 Date 并逐步拨快，免得真等 15 秒。
+    vi.useFakeTimers({ toFake: ['Date'] });
+    let result: Awaited<ReturnType<typeof daemonRestart>>;
+    try {
+      let settled = false;
+      const restarting = daemonRestart({}, { serve: vi.fn(), runCommand: world.run, platform: 'linux', checkSqlite: passingSqlite }).finally(() => { settled = true; });
+      while (!settled) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+        vi.setSystemTime(Date.now() + 1_000);
+      }
+      result = await restarting;
+    } finally { vi.useRealTimers(); }
 
     // 旧一代仍在运行：running 为 true，不再同时报 state: 'not-running'。
     expect(result).toMatchObject({ ok: false, action: 'restart', running: true });

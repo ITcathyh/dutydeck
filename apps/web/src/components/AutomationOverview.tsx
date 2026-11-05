@@ -10,6 +10,7 @@ import { ScheduleFoundationPanel } from './ScheduleFoundationPanel';
 import { scheduleNextExecution, scheduleRule, SessionAutomationPanel } from './SessionAutomationPanel';
 import { AutomationRunDetail } from './AutomationRunDetail';
 import { automationTime } from './AutomationHistory';
+import { runStateLabels } from './automation-display';
 
 const healthLabels = { blocked: '等待人工核对', queued: '等待执行资源', running: '正在执行', delivery: '等待结果投递', disabled: '已停用', ready: '等待到期', error: '需要处理错误' };
 const pageSize = 20;
@@ -21,6 +22,7 @@ function PlanState({ item, instanceId }: { item: AutomationScheduleSummary; inst
   const wait = blocker ? Math.max(0, Math.floor((Date.now() - new Date(blocker.waitingSince).getTime()) / 60_000)) : 0;
   return <div className="space-y-1 text-caption">
     <p className={item.health === 'blocked' || item.health === 'error' ? 'text-warning' : 'text-secondary'}>{healthLabels[item.health]}</p>
+    {item.runState && <p className={['awaiting_human', 'failed', 'deadline_reached'].includes(item.runState) ? 'text-warning' : 'text-secondary'}>跟进：{runStateLabels[item.runState] ?? item.runState}</p>}
     {blocker && <div className="break-all text-warning">
       <p>{blocker.restricted ? '无权查看的执行正在占用所需资源' : blocker.taskId ? `阻塞来源：任务 ${blocker.taskId}${blocker.attemptId ? ` · 尝试 ${blocker.attemptId}` : ''}` : '阻塞来源暂时无法定位'} · 自 {automationTime(blocker.waitingSince, schedule.timezone)} 等待约 {wait} 分钟。{blocker.status === 'reconcile_required' ? '原执行结果未知；后续计划等待核对，不会自动重发。' : '等待此执行释放资源。'}</p>
       {!blocker.restricted && blocker.sessionId && blocker.taskId && <a className="text-link underline" href={`${instanceId ? `/instances/${instanceId}` : ''}/sessions/${encodeURIComponent(blocker.sessionId)}?reconcileTask=${encodeURIComponent(blocker.taskId)}#unknown-task-${encodeURIComponent(blocker.taskId)}`}>查看阻塞证据并核对</a>}

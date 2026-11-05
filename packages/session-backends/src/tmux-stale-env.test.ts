@@ -93,22 +93,43 @@ describe('TmuxBackend stale global environment scrubbing (unit)', () => {
     // 对于原本已经以 '-' 开头的被 unset 变量，也不需要重复发 -r
     expect(removedKeys).not.toContain('ALREADY_REMOVED_VAR');
 
-    // 现有的 session 设置与清理语义保持不变：
-    // 本次传入的变量被 stage (不带 -r 和 -u)
-    const stagedCalls = setEnvCalls.filter(args => !args.includes('-r') && !args.includes('-u'));
-    const stagedKeys = stagedCalls.map(args => {
-      const idx = args.indexOf('--');
-      return idx !== -1 ? args[idx + 1] : undefined;
-    });
-    expect(stagedKeys).toEqual(expect.arrayContaining(['PATH', 'HOME', 'SHARED_GLOBAL_VAR', 'LOCAL_FRESH_VAR']));
+    // 本次传入的变量写进私有启动脚本，不经 tmux 命令行，也就不需要 stage/-u 清理
+    expect(setEnvCalls.filter(args => !args.includes('-r'))).toEqual([]);
+    const scriptPath = recordedCommands.find(command => command[0] === 'respawn-pane')!.at(-1)!;
+    const script = await readFile(scriptPath, 'utf8');
+    for (const [key, value] of [['PATH', '/usr/bin:/bin'], ['HOME', '/home/test'], ['SHARED_GLOBAL_VAR', 'existing_in_global'], ['LOCAL_FRESH_VAR', 'fresh_val']]) {
+      expect(script).toContain(`${key}='${value}'; export ${key}\n`);
+    }
+    await rm(scriptPath.replace(/\/launch\.sh$/, ''), { recursive: true, force: true });
+  });
 
-    // 本次传入的变量在 respawn 后被 clearSessionEnvironment 清理 (带 -u)
-    const unsetCalls = setEnvCalls.filter(args => args.includes('-u'));
-    const unsetKeys = unsetCalls.map(args => {
-      const idx = args.indexOf('--');
-      return idx !== -1 ? args[idx + 1] : undefined;
+  it('keeps environment values such as API keys out of every tmux client argv', async () => {
+    backend = new TmuxBackend('test-session-env-argv');
+    await backend.spawn('/bin/sh', ['-c', 'echo test'], {
+      cwd: tmpdir(), cols: 80, rows: 24,
+      env: { PATH: '/usr/bin:/bin', FAKE_API_KEY: 'sk-test-123', PROMPT_COMMAND: 'history -a;' },
     });
-    expect(unsetKeys).toEqual(expect.arrayContaining(['PATH', 'HOME', 'SHARED_GLOBAL_VAR', 'LOCAL_FRESH_VAR']));
+    expect(recordedCommands.flat().some(arg => arg.includes('sk-test-123') || arg.includes('history -a'))).toBe(false);
+    const scriptPath = recordedCommands.find(command => command[0] === 'respawn-pane')!.at(-1)!;
+    const script = await readFile(scriptPath, 'utf8');
+    expect(script).toContain("FAKE_API_KEY='sk-test-123'; export FAKE_API_KEY\n");
+    expect(script).toContain("PROMPT_COMMAND='history -a;'; export PROMPT_COMMAND\n");
+    await rm(scriptPath.replace(/\/launch\.sh$/, ''), { recursive: true, force: true });
+  });
+
+  it('stages names a shell cannot export through tmux, keeping a trailing semicolon', async () => {
+    backend = new TmuxBackend('test-session-env-odd-name');
+    await backend.spawn('/bin/sh', ['-c', 'echo test'], {
+      cwd: tmpdir(), cols: 80, rows: 24,
+      env: { PATH: '/usr/bin:/bin', 'BASH_FUNC_f%%': '() { true;' },
+    });
+    const staged = recordedCommands.filter(args => args[0] === 'set-environment' && !args.includes('-r') && !args.includes('-u'));
+    expect(staged).toEqual([['set-environment', '-t', 'test-session-env-odd-name', '--', 'BASH_FUNC_f%%', '() { true\\;']]);
+    expect(recordedCommands.filter(args => args[0] === 'set-environment' && args.includes('-u')))
+      .toEqual([['set-environment', '-u', '-t', 'test-session-env-odd-name', '--', 'BASH_FUNC_f%%']]);
+    const scriptPath = recordedCommands.find(command => command[0] === 'respawn-pane')!.at(-1)!;
+    expect(await readFile(scriptPath, 'utf8')).not.toContain('BASH_FUNC');
+    await rm(scriptPath.replace(/\/launch\.sh$/, ''), { recursive: true, force: true });
   });
 
   it('recognizes injectEnv as part of childEnvironment and does not emit -r for it', async () => {

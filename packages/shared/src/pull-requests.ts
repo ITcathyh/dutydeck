@@ -50,6 +50,8 @@ export interface PublicPullRequest {
   pullRequest?: { number: number; url: string; label: string };
   ciRounds: number;
   reviewRounds: number;
+  /** 认领的已有 PR（`/pr follow`）：不是 DutyDeck 开的，跟进时推到它原来的源分支。 */
+  claimed?: boolean;
   reason?: string;
   expiresAt: string;
   createdAt: string;

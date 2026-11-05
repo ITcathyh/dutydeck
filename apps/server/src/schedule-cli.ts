@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { createSessionScheduleInputSchema, updateSessionScheduleInputSchema, previewSessionSchedule, type PublicSessionSchedule, type SessionAutomationList } from '@dutydeck/shared';
+import { createSessionScheduleInputSchema, updateSessionScheduleInputSchema, previewSessionSchedule, resolveScheduleDeadline, type PublicSessionSchedule, type SessionAutomationList } from '@dutydeck/shared';
 import { executeLocalRuntimeRequest, type LocalRuntimeRequestDependencies } from './local-runtime-request.js';
 import { AgentGroupToolHttpClient } from './lark/agent-tools-cli.js';
 
@@ -8,6 +8,7 @@ export type ScheduleCliAction = 'create' | 'list' | 'show' | 'update' | 'enable'
 export interface ScheduleCliInput {
   session?: string; agent?: string; cwd?: string; model?: string; permissionMode?: string; workspace?: string;
   name?: string; prompt?: string; cron?: string; every?: string; at?: string; timezone?: string; mode?: string;
+  until?: string; deadline?: string; template?: string;
   additional?: boolean;
   input?: string; file?: string; expectedRevision?: string; idempotencyKey?: string;
   instance?: string; url?: string; database?: string;
@@ -34,14 +35,27 @@ async function configuration(input: ScheduleCliInput, create: boolean) {
   if (input.at !== undefined) values.trigger = { kind: 'at', localDateTime: input.at };
   if (input.every !== undefined) values.trigger = { kind: 'interval', everySeconds: Number(input.every) * 60, anchorAt: new Date().toISOString() };
   for (const key of ['name', 'prompt', 'timezone', 'mode'] as const) if (input[key] !== undefined) values[key] = input[key];
+  if (input.until !== undefined) values.completionCondition = input.until;
+  if (input.template !== undefined) {
+    const match = /^(.+)@(\d+)$/.exec(input.template.trim());
+    if (!match) argument('--template takes <template-id>@<version>');
+    values.workTemplate = { id: match![1], version: Number(match![2]) };
+  }
   if (create) {
     if (input.additional) values.additional = true;
-    const parsed = createSessionScheduleInputSchema.parse({ timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', dstPolicy: { gap: 'skip', overlap: 'first' }, condition: { kind: 'always' }, ...values });
+    values.timezone ??= Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    if (input.deadline !== undefined) values.deadlineAt = deadline(input.deadline, String(values.timezone));
+    const parsed = createSessionScheduleInputSchema.parse({ dstPolicy: { gap: 'skip', overlap: 'first' }, condition: { kind: 'always' }, ...values });
     previewSessionSchedule({ id: 'preview', ...parsed }, new Date());
     return parsed;
   }
-  // Validate before any request; the actual revision is captured from the server below.
-  return updateSessionScheduleInputSchema.parse({ ...values, expectedRevision: 1 });
+  // Validate before any request; the actual revision is captured from the server below. A local deadline is resolved in the schedule's timezone once it is read.
+  return updateSessionScheduleInputSchema.parse({ ...values, ...(input.deadline !== undefined ? { deadlineAt: deadline(input.deadline, String(values.timezone ?? 'UTC')) } : {}), expectedRevision: 1 });
+}
+
+function deadline(value: string, timezone: string) {
+  try { return resolveScheduleDeadline(value, timezone); }
+  catch { return argument('--deadline takes an ISO time with offset or YYYY-MM-DDTHH:mm in the schedule timezone'); }
 }
 
 export async function runScheduleCli(action: ScheduleCliAction, id: string | undefined, input: ScheduleCliInput, dependencies: LocalRuntimeRequestDependencies = {}): Promise<unknown> {
@@ -91,7 +105,8 @@ export async function runScheduleCli(action: ScheduleCliAction, id: string | und
   if (action === 'delete') return request('DELETE', endpoint, { expectedRevision });
   if (action === 'run') return request('POST', `${endpoint}/run`, { expectedRevision, idempotencyKey: input.idempotencyKey ?? randomUUID() });
   if (action === 'enable' || action === 'disable') return request('PATCH', endpoint, { expectedRevision, enabled: action === 'enable' });
-  return request('PATCH', endpoint, { ...config, expectedRevision });
+  const timezone = (config as { timezone?: string } | undefined)?.timezone ?? schedule.timezone;
+  return request('PATCH', endpoint, { ...config, ...(input.deadline !== undefined ? { deadlineAt: deadline(input.deadline, timezone) } : {}), expectedRevision });
 }
 
 export interface ScheduleRequestCliInput { turn?: string; prompt?: string; name?: string; every?: string; cron?: string; at?: string; mode?: string; additional?: boolean; env?: NodeJS.ProcessEnv; fetcher?: typeof fetch }

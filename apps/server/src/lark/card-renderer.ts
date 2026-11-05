@@ -2,7 +2,7 @@ import { isChildDiagnostic, terminalTaskStatuses, type AgentEvent, type Verifica
 import type { StoredLarkConfig } from './config.js';
 import { boundLarkCardElements, LarkServiceError } from './service.js';
 import { redactTraceText, sensitiveTraceKey } from './secret-redaction.js';
-import { collapsiblePanel, escapeCardInline } from './card-elements.js';
+import { collapsiblePanel, escapeCardInline, neutralizeCardTags } from './card-elements.js';
 import { maxLarkVerificationRepairRounds, type LarkAutoVerificationNote } from './auto-verification.js';
 
 // 卡片渲染与限流/拒绝判断辅助。
@@ -988,7 +988,8 @@ const permissionAlert = (entry: TraceEntry, index: number): LarkCardElement => {
   const status = String(entry.data.status ?? 'pending').toLowerCase();
   const pending = /pending|waiting|requested/.test(status);
   const rejected = /reject|denied|blocked|cancel/.test(status);
-  const title = truncateTrace(entry.data.title, 800) || 'Agent 请求执行受保护操作';
+  // title 是 Agent 侧内容，转义后才不会自带「已授权」之类的卡片标签冒充审批结果。
+  const title = escapeCardInline(truncateTrace(entry.data.title, 800)) || 'Agent 请求执行受保护操作';
   // pending 不带标签：卡片顶部已经是橙色色带，状态行也已经写着「等待审批」，
   // 这里再挂一个「待审批」就是同一件事的第三遍，而它正好压在要批的那个操作前面。
   // 已拦截 / 已授权则必须自己说——那时任务状态行显示的是「执行中」，不是审批结果。
@@ -1190,7 +1191,7 @@ export function renderLarkCardElements(
   elements.push(...permissionEntries.map(permissionAlert));
   elements.push(...errorEntries.map(errorAlert));
   if (finalText && view !== 'process') {
-    elements.push({ tag: 'markdown', element_id: 'final_output', content: completed ? finalText : `**当前进展**\n\n${finalText}`, text_align: 'left', text_size: 'normal_v2', margin: '0px' });
+    elements.push({ tag: 'markdown', element_id: 'final_output', content: completed ? neutralizeCardTags(finalText) : `**当前进展**\n\n${neutralizeCardTags(finalText)}`, text_align: 'left', text_size: 'normal_v2', margin: '0px' });
   } else if (completed && view !== 'process' && idleTimeout) {
     // 一轮因长时间没有输出被停掉：原因写清楚，而不是「结果不完整」。「继续」按钮由 buildLarkCard 按这个 id 补上。
     const silence = idleTimeout.minutes ? `${idleTimeout.minutes} 分钟` : '很长时间';
@@ -1274,7 +1275,7 @@ export function renderLarkResultTextElements(text: string): LarkCardElement[] {
     elements.push({
       tag: 'markdown',
       element_id: 'final_output',
-      content: finalText,
+      content: neutralizeCardTags(finalText),
       text_align: 'left',
       text_size: 'normal_v2',
       margin: '0px'

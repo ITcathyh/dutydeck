@@ -45,7 +45,7 @@ import { fileURLToPath } from 'node:url';
 import { buildApp } from './app.js';
 import { parsePeerInstances } from './instance-proxy.js';
 import { localLoopbackUrl } from './local-api-url.js';
-import { WorkItemService } from './work-items.js';
+import { WorkItemService, workItemProgressStatus } from './work-items.js';
 import { WorkItemInteractions } from './work-item-interactions.js';
 import { LarkWorkbench } from './lark/workbench.js';
 import { createLarkCardService } from './lark/service.js';
@@ -423,6 +423,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     readBot: async appId => (await readLarkConfigs(repos.config)).find(bot => bot.appId === appId),
     fallbackAgentId: () => config.agents[0]?.id,
     sendText: (bot, input) => createLarkCardService(env, workbenchHttp.fetch, bot as StoredLarkConfig).sendText(input),
+    workItems: () => workItems,
     log: { warn: (details, message) => app?.log.warn(details, message) }
   }) : undefined;
   if (pluginWiring) setupCleanup.push(() => pluginWiring.dispose());
@@ -605,6 +606,15 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   const ciWebhook = ciProviders.list().some(({ provider }) => provider.webhook) ? new CiWebhookService({ repositories: repos, runtime, providers: ciProviders, onEvent: (providerId, event) => pullRequests.onWebhookEvent(providerId, event),
     prepareDelivery: automationIntegration.prepareDelivery, notify: notifyCi, log: { warn: (...args: unknown[]) => app?.log.warn(...args as [unknown, string]) } }) : undefined;
   const automation = new SessionAutomationService({ repositories: repos, runtime, ...automationIntegration, ciProviders, pullRequests, ...(ciWebhook ? { ciWebhook } : {}),
+    // 工作项服务与提问代理在下方创建；这里只在运行时调用。
+    awaitingHuman: sessionId => runtime.getPendingPermissions(sessionId).length > 0 || relayBroker.listPending(sessionId).length > 0,
+    workTemplates: {
+      list: (sessionId, actorId) => workItems.listTemplates(sessionId, actorId),
+      // 定时启动的工作项不归属父会话此刻正在跑的那一轮。
+      run: (sessionId, templateId, version, goal, key, actorId) => workItems.runTemplate(sessionId, templateId, version, goal, key, actorId, undefined, true),
+      // 失败但带待确认修订的工作项还没结束，上一次没结束时不启动新的。
+      status: async (sessionId, id, actorId) => workItemProgressStatus(await workItems.get(sessionId, id, actorId))
+    },
     log: { warn: (details, message) => app?.log.warn(details, message) } });
   setupCleanup.push(() => automation.close());
   if (ciWebhook) setupCleanup.push(() => ciWebhook.close());

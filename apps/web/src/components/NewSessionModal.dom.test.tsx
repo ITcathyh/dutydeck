@@ -7,6 +7,12 @@ import { newSessionDrafts } from '../new-session-drafts';
 import { setInstance } from '../instance';
 import { NewSessionModal } from './NewSessionModal';
 
+// user.type 每个字符都会触发一次整树重渲染；这里的输入不依赖逐键行为，点击聚焦后一次粘贴写入。
+async function typeInto(user: Pick<typeof userEvent, 'click' | 'paste'>, element: Element, text: string) {
+  await user.click(element);
+  await user.paste(text);
+}
+
 const agent: Agent = { id: 'codex', name: 'Codex', protocol: 'acp', permissionMode: 'ask' };
 const session: Session = { id: 's1', agentId: 'codex', state: 'idle', cwd: '/repo', runId: 'r1', createdAt: '', updatedAt: '' };
 const task: Task = { id: 't1', sessionId: 's1', prompt: '修复登录超时', status: 'queued', createdAt: '', updatedAt: '' };
@@ -32,7 +38,7 @@ describe('NewSessionModal create → dispatch', () => {
     render(<QueryClientProvider client={client}><NewSessionModal open onClose={() => {}} onCreated={onCreated} agents={[agent]}/></QueryClientProvider>);
     const submit = screen.getByRole('button', { name: '创建并执行' }) as HTMLButtonElement;
     expect(submit.disabled).toBe(true);
-    await user.type(screen.getByLabelText('任务目标'), '修复登录超时');
+    await typeInto(user, screen.getByLabelText('任务目标'), '修复登录超时');
     await user.click(submit);
     await waitFor(() => expect(onCreated).toHaveBeenCalledWith(session, task));
     expect(create).toHaveBeenCalledWith({ agentId: 'codex', permissionMode: 'ask', workspaceMode: 'worktree' });
@@ -49,7 +55,7 @@ describe('NewSessionModal create → dispatch', () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<QueryClientProvider client={client}><NewSessionModal open initialAgentId={initialAgentId} agents={agents} onClose={() => {}} onCreated={() => {}}/></QueryClientProvider>);
     expect(screen.getByRole('button', { name: initialAgentId === 'codex' ? /Codex/ : /Claude Code/ })).toBeTruthy();
-    await userEvent.type(screen.getByLabelText('任务目标'), '修复登录超时');
+    await typeInto(userEvent, screen.getByLabelText('任务目标'), '修复登录超时');
     await userEvent.click(screen.getByRole('button', { name: '创建并执行' }));
     await waitFor(() => expect(create).toHaveBeenCalledWith({ agentId: initialAgentId, permissionMode: 'ask', workspaceMode: 'worktree' }));
   });
@@ -83,7 +89,7 @@ describe('NewSessionModal create → dispatch', () => {
     const send = vi.spyOn(api, 'send').mockRejectedValueOnce(new Error('网络断开')).mockResolvedValueOnce({ accepted: true, task });
     const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
     render(<QueryClientProvider client={client}><NewSessionModal open onClose={() => {}} onCreated={onCreated} agents={[agent]}/></QueryClientProvider>);
-    await user.type(screen.getByLabelText('任务目标'), '修复登录超时');
+    await typeInto(user, screen.getByLabelText('任务目标'), '修复登录超时');
     await user.click(screen.getByRole('button', { name: '创建并执行' }));
     expect((await screen.findByRole('alert')).textContent).toContain('不会重复创建任务');
     await user.click(screen.getByRole('button', { name: '重试发送' }));
@@ -109,7 +115,7 @@ describe('NewSessionModal create → dispatch', () => {
     const trusted: Agent = { id: 'codex', name: 'Codex', protocol: 'acp', permissionMode: 'full-trust' };
     const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
     render(<QueryClientProvider client={client}><NewSessionModal open onClose={() => {}} onCreated={() => {}} agents={[trusted]}/></QueryClientProvider>);
-    await user.type(screen.getByLabelText('任务目标'), '执行高权限任务');
+    await typeInto(user, screen.getByLabelText('任务目标'), '执行高权限任务');
     const submit = screen.getByRole('button', { name: '创建并执行' }) as HTMLButtonElement;
     expect(submit.disabled).toBe(true);
     await user.click(screen.getByRole('checkbox', { name: /确认允许 Agent 直接操作/ }));
@@ -143,7 +149,7 @@ describe('NewSessionModal 弹层外壳（契约 §7 / §8.1）', () => {
     vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
     renderModal({ onClose });
 
-    await user.type(screen.getByLabelText('任务目标'), '修复登录超时');
+    await typeInto(user, screen.getByLabelText('任务目标'), '修复登录超时');
     await user.click(screen.getByRole('button', { name: /Codex/ }));
     expect(screen.getByRole('listbox')).toBeTruthy();
 
@@ -165,7 +171,7 @@ describe('NewSessionModal 弹层外壳（契约 §7 / §8.1）', () => {
     vi.spyOn(api, 'send').mockReturnValue(new Promise(() => {}));
     const { baseElement } = renderModal({ onClose });
 
-    await user.type(screen.getByLabelText('任务目标'), '修复登录超时');
+    await typeInto(user, screen.getByLabelText('任务目标'), '修复登录超时');
     await user.click(screen.getByRole('button', { name: '创建并执行' }));
     // Session 已建好、目标还挂在网络上：这一刻按 Escape 最容易把写操作丢在半路。
     // （提交按钮此时已改口播「重试发送」，所以按 type 定位而不是按名字。）
@@ -189,7 +195,7 @@ describe('NewSessionModal pending exits', () => {
     const onClose = vi.fn(), onCreated = vi.fn();
     const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
     render(<QueryClientProvider client={client}><NewSessionModal open onClose={onClose} onCreated={onCreated} agents={[agent, { ...agent, id: 'legacy', name: 'Legacy PTY', protocol: 'pty' }]}/></QueryClientProvider>);
-    await userEvent.type(screen.getByLabelText('任务目标'), task.prompt);
+    await typeInto(userEvent, screen.getByLabelText('任务目标'), task.prompt);
     await userEvent.click(screen.getByRole('button', { name: '创建并执行' }));
     await waitFor(() => expect(create).toHaveBeenCalledOnce());
     await userEvent.click(screen.getByRole('button', { name: 'Codex' }));
@@ -227,7 +233,7 @@ describe('NewSessionModal pending exits', () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
     const modal = (agents: Agent[]) => <QueryClientProvider client={client}><NewSessionModal open onClose={onClose} onCreated={onCreated} onOpenAgentSetup={onOpenAgentSetup} agents={agents}/></QueryClientProvider>;
     const { rerender } = render(modal([agent]));
-    await userEvent.type(screen.getByLabelText('任务目标'), task.prompt);
+    await typeInto(userEvent, screen.getByLabelText('任务目标'), task.prompt);
     await userEvent.click(screen.getByRole('button', { name: '创建并执行' }));
     await waitFor(() => expect(create).toHaveBeenCalledOnce());
     rerender(modal(refresh === 'legacy' ? [{ ...agent, protocol: 'pty' }] : []));
@@ -267,7 +273,7 @@ describe('NewSessionModal pending exits', () => {
     render(<QueryClientProvider client={client}>{stage === 'schedule'
       ? <NewSessionModal open mode="schedule" onClose={onClose} onSessionCreated={onCreated} agents={[agent]}/>
       : <NewSessionModal open onClose={onClose} onCreated={onCreated} agents={[agent]}/>}</QueryClientProvider>);
-    if (stage !== 'schedule') await userEvent.type(screen.getByLabelText('任务目标'), task.prompt);
+    if (stage !== 'schedule') await typeInto(userEvent, screen.getByLabelText('任务目标'), task.prompt);
     await userEvent.click(screen.getByRole('button', { name: stage === 'schedule' ? '下一步：设置计划' : '创建并执行' }));
     await waitFor(() => expect(stage === 'send' ? send : create).toHaveBeenCalledTimes(1));
     const dialog = screen.getByRole('dialog');
@@ -291,7 +297,7 @@ describe('NewSessionModal pending exits', () => {
     const onClose = vi.fn();
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<QueryClientProvider client={client}><NewSessionModal open onClose={onClose} onCreated={() => {}} agents={[agent]}/></QueryClientProvider>);
-    await userEvent.type(screen.getByLabelText('任务目标'), task.prompt);
+    await typeInto(userEvent, screen.getByLabelText('任务目标'), task.prompt);
     await userEvent.click(screen.getByRole('button', { name: '创建并执行' }));
     await screen.findByRole('alert');
     expect(screen.getByRole('button', { name: 'Codex' }).matches(':disabled')).toBe(stage === 'send');
@@ -313,8 +319,8 @@ describe('new task draft continuity', () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
     const modal = () => <QueryClientProvider client={client}><NewSessionModal open agents={[agent]} onClose={() => {}} onCreated={onCreated}/></QueryClientProvider>;
     const view = render(modal());
-    await userEvent.type(screen.getByLabelText('任务目标'), task.prompt);
-    await userEvent.type(screen.getByLabelText('工作目录'), '/repo');
+    await typeInto(userEvent, screen.getByLabelText('任务目标'), task.prompt);
+    await typeInto(userEvent, screen.getByLabelText('工作目录'), '/repo');
     await userEvent.click(screen.getByRole('button', { name: '创建并执行' }));
     await screen.findByRole('alert');
     view.unmount();
@@ -336,7 +342,7 @@ describe('new task draft continuity', () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
     const modal = () => <QueryClientProvider client={client}><NewSessionModal open agents={[{ ...agent, permissionMode: 'full-trust' }]} onClose={() => {}} onCreated={() => {}}/></QueryClientProvider>;
     const first = render(modal());
-    await userEvent.type(screen.getByLabelText('任务目标'), task.prompt);
+    await typeInto(userEvent, screen.getByLabelText('任务目标'), task.prompt);
     await userEvent.click(screen.getByRole('checkbox', { name: /确认允许 Agent 直接操作/ }));
     await userEvent.click(screen.getByRole('button', { name: '创建并执行' }));
     await screen.findByRole('alert');
@@ -396,7 +402,7 @@ describe('new task draft continuity', () => {
     vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<QueryClientProvider client={client}><NewSessionModal open initialAgentId="legacy" agents={[{ ...agent, id: 'legacy', name: 'Legacy', protocol: 'pty' }, agent]} onClose={() => {}} onCreated={() => {}}/></QueryClientProvider>);
-    await userEvent.type(screen.getByLabelText('任务目标'), '保留目标');
+    await typeInto(userEvent, screen.getByLabelText('任务目标'), '保留目标');
     expect((screen.getByRole('button', { name: '创建并执行' }) as HTMLButtonElement).disabled).toBe(true);
     await userEvent.click(screen.getByRole('button', { name: 'Legacy' }));
     await userEvent.click(screen.getByRole('option', { name: /Codex/ }));

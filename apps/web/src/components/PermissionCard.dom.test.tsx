@@ -8,7 +8,7 @@ const permission = (status: string): TimelineEvent => ({ id: 'event-1', sequence
 
 describe('PermissionCard', () => {
   it('pending 审批首个决定提交后阻止重复允许与拒绝', async () => {
-    const user = userEvent.setup(); const onResolve = vi.fn();
+    const user = userEvent.setup({ delay: null }); const onResolve = vi.fn();
     render(<PermissionCard event={permission('pending')} onResolve={onResolve}/>);
     await user.click(screen.getByRole('button', { name: '允许本次' }));
     await user.click(screen.getByRole('button', { name: '拒绝' }));
@@ -23,7 +23,7 @@ describe('PermissionCard', () => {
     expect(screen.getByText('来源：执行端工具请求')).toBeTruthy();
     expect(screen.getByText('目录：/work/project')).toBeTruthy();
     expect(screen.getByText('资源：/work/project/file.ts')).toBeTruthy();
-    await userEvent.setup().click(screen.getByText('查看命令（已脱敏）'));
+    await userEvent.setup({ delay: null }).click(screen.getByText('查看命令（已脱敏）'));
     expect(screen.getByText('pnpm test --token=[REDACTED]')).toBeTruthy();
     expect(view.container.textContent).not.toContain('synthetic-secret');
     expect(screen.getByText('本次选择只处理这一条请求，不改变后续授权方式。')).toBeTruthy();
@@ -64,10 +64,10 @@ describe('PermissionCard', () => {
 it('失败回执结束提交后允许重试，不把请求显示为已允许', async () => {
   const onResolve = vi.fn();
   const view = render(<PermissionCard event={permission('pending')} onResolve={onResolve}/>);
-  await userEvent.setup().click(screen.getByRole('button', { name: '允许本次' }));
+  await userEvent.setup({ delay: null }).click(screen.getByRole('button', { name: '允许本次' }));
   view.rerender(<PermissionCard event={permission('pending')} resolving onResolve={onResolve}/>);
   view.rerender(<PermissionCard event={permission('pending')} resolving={false} onResolve={onResolve}/>);
-  await userEvent.setup().click(screen.getByRole('button', { name: '拒绝' }));
+  await userEvent.setup({ delay: null }).click(screen.getByRole('button', { name: '拒绝' }));
   expect(onResolve).toHaveBeenLastCalledWith('permission-1', false);
   expect(screen.queryByText('已允许')).toBeNull();
 });
@@ -75,9 +75,60 @@ it('失败回执结束提交后允许重试，不把请求显示为已允许', a
 it('立即失败的异步请求释放本地锁，且不生成成功回执', async () => {
   const onResolve = vi.fn().mockRejectedValue(new Error('网络失败'));
   render(<PermissionCard event={permission('pending')} onResolve={onResolve}/>);
-  await userEvent.setup().click(screen.getByRole('button', { name: '允许本次' }));
+  await userEvent.setup({ delay: null }).click(screen.getByRole('button', { name: '允许本次' }));
   await waitFor(() => expect((screen.getByRole('button', { name: '允许本次' }) as HTMLButtonElement).disabled).toBe(false));
-  await userEvent.setup().click(screen.getByRole('button', { name: '拒绝' }));
+  await userEvent.setup({ delay: null }).click(screen.getByRole('button', { name: '拒绝' }));
   expect(onResolve).toHaveBeenCalledTimes(2);
   expect(screen.queryByText('已允许')).toBeNull();
+});
+
+describe('拒绝并说明', () => {
+  it('展开输入框，空白不能提交，提交时把原因交给 onResolve 且之后不能重复提交', async () => {
+    const user = userEvent.setup(); const onResolve = vi.fn();
+    render(<PermissionCard event={permission('pending')} onResolve={onResolve}/>);
+    expect(screen.queryByLabelText('拒绝原因')).toBeNull();
+    await user.click(screen.getByRole('button', { name: '拒绝并说明' }));
+    const submit = screen.getByRole('button', { name: '提交拒绝' }) as HTMLButtonElement;
+    expect(submit.disabled).toBe(true);
+    await user.type(screen.getByLabelText('拒绝原因'), '   ');
+    expect(submit.disabled).toBe(true);
+    await user.type(screen.getByLabelText('拒绝原因'), '改用测试库');
+    await user.click(submit);
+    await user.click(screen.getByRole('button', { name: '提交拒绝' }));
+    expect(onResolve).toHaveBeenCalledExactlyOnceWith('permission-1', false, '改用测试库');
+  });
+
+  it('原「拒绝」仍一键提交且不带原因，展开输入框不影响它', async () => {
+    const user = userEvent.setup(); const onResolve = vi.fn();
+    render(<PermissionCard event={permission('pending')} onResolve={onResolve}/>);
+    await user.click(screen.getByRole('button', { name: '拒绝并说明' }));
+    await user.type(screen.getByLabelText('拒绝原因'), '不应带上');
+    await user.click(screen.getByRole('button', { name: '拒绝' }));
+    expect(onResolve).toHaveBeenCalledExactlyOnceWith('permission-1', false);
+  });
+
+  it('提交失败后保留输入，可再次提交', async () => {
+    const user = userEvent.setup(); const onResolve = vi.fn().mockRejectedValueOnce(new Error('网络失败')).mockResolvedValue(undefined);
+    render(<PermissionCard event={permission('pending')} onResolve={onResolve}/>);
+    await user.click(screen.getByRole('button', { name: '拒绝并说明' }));
+    await user.type(screen.getByLabelText('拒绝原因'), '先别动');
+    await user.click(screen.getByRole('button', { name: '提交拒绝' }));
+    await waitFor(() => expect((screen.getByRole('button', { name: '提交拒绝' }) as HTMLButtonElement).disabled).toBe(false));
+    expect((screen.getByLabelText('拒绝原因') as HTMLTextAreaElement).value).toBe('先别动');
+    await user.click(screen.getByRole('button', { name: '提交拒绝' }));
+    expect(onResolve).toHaveBeenCalledTimes(2);
+  });
+
+  it('已拒绝的审批显示脱敏、截断后的原因；没有原因时仍只显示「已拒绝」', () => {
+    const rejected = permission('rejected');
+    const view = render(<PermissionCard event={rejected}/>);
+    expect(view.container.textContent).toContain('已拒绝');
+    expect(view.container.textContent).not.toContain('已拒绝：');
+    rejected.data.reason = `改用测试库 password=hunter2 ${'长'.repeat(400)}`;
+    view.rerender(<PermissionCard event={rejected}/>);
+    expect(view.container.textContent).toContain('已拒绝：改用测试库 password=[REDACTED]');
+    expect(view.container.textContent).not.toContain('hunter2');
+    expect(view.container.textContent!.length).toBeLessThan(600);
+    expect(screen.queryByRole('button')).toBeNull();
+  });
 });

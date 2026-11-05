@@ -11,6 +11,7 @@ import { LarkMessageCoordinator, type PersistedLarkCardTask } from './coordinato
 import { explicitFinalContext, sendExplicitFinal } from './explicit-final.js';
 import { larkControlPhrase } from './coordinator-inbound.js';
 import { larkAgentAvailabilityLine } from './commands.js';
+import { larkAgentUnavailableReason } from './agent-fallback.js';
 import type { LarkMessageEvent } from './listener.js';
 import { buildLarkCard } from './service.js';
 
@@ -570,7 +571,12 @@ describe('/status 的 Agent 状态行', () => {
 
 
 describe('Bot Agent fallback with real Runtime and SQLite', () => {
-  it.each(['AGENT_LOGIN_REQUIRED', 'claude_api_rate_limit', 'claude_api_overloaded', 'usage_limit_exceeded'])('switches once for %s before activity, then keeps the fallback after restart', async code => {
+  // 这几个代码都只经 larkAgentUnavailableReason 的集合判断进入同一条切换路径：逐个确认分类，端到端只跑两个代表。
+  it('classifies every provider code used here as unavailable', () => {
+    for (const code of ['AGENT_LOGIN_REQUIRED', 'claude_api_rate_limit', 'claude_api_overloaded', 'usage_limit_exceeded']) expect(larkAgentUnavailableReason({ code, message: 'Provider unavailable' })).toBe('Provider unavailable');
+  });
+
+  it.each(['AGENT_LOGIN_REQUIRED', 'usage_limit_exceeded'])('switches once for %s before activity, then keeps the fallback after restart', async code => {
     const h = await topic({ fallback: true });
     h.config.defaultModel = 'primary-model';
     h.steps.push({ kind: 'provider', code, activity: [{ type: 'raw_terminal', data: { text: 'provider status screen' } } as any] });
@@ -617,8 +623,8 @@ describe('Bot Agent fallback with real Runtime and SQLite', () => {
   });
 
   it.each([
+    // thinking 与 tool_call 走 larkFallbackHasActivity 的同一分支；text 另有 role=user 例外，单独保留。
     { type: 'text', data: { text: '已经开始处理' } },
-    { type: 'thinking', data: { text: '正在分析' } },
     push
   ] as NormalizedDriverEvent[])('does not replay after $type activity even when the final window is truncated', async activity => {
     const h = await topic({ fallback: true });
@@ -718,5 +724,87 @@ describe('handoff of persisted legacy Lark source IDs', () => {
     expect(text).toContain('原目标：legacy goal');
     expect(text).toContain('用户备注：legacy note');
     expect(text).toContain('outputDigest=unknown（未读取账本结果）');
+  });
+});
+
+describe('收尾操作与控制语的并发和失败', () => {
+  it('控制语执行期间入站记录标成命令，重启后不会被当成普通消息重放', async () => {
+    const h = await topic();
+    await h.send('om_first', '整理本周报警并回复群里');
+    await until(async () => Boolean(await h.repos.channelMappings.get('lark-card:app', 'om_first')) && (await h.tasks())[0]?.status === 'completed');
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    for (const method of [h.service.reply, h.service.send]) {
+      const original = method.getMockImplementation()!;
+      method.mockImplementation(async (input: any) => {
+        if (input.taskName === '/cancel 未执行') await gate;
+        return original(input);
+      });
+    }
+    const handling = h.send('om_stop', '停一下');
+    await until(() => h.calls().some(input => input.taskName === '/cancel 未执行'));
+    expect(JSON.parse(await h.repos.config.get('lark.inbox.app.om_stop') ?? '{}')).toMatchObject({ state: 'command' });
+    release();
+    await handling;
+    expect(JSON.parse(await h.repos.config.get('lark.inbox.app.om_stop') ?? '{}')).toMatchObject({ state: 'accepted' });
+    expect(h.prompts).toHaveLength(1);
+  });
+
+  it('不按控制处理的「继续」改回普通消息，照常执行', async () => {
+    const h = await topic();
+    await h.send('om_first', '整理本周报警并回复群里');
+    await until(async () => Boolean(await h.repos.channelMappings.get('lark-card:app', 'om_first')) && (await h.tasks())[0]?.status === 'completed');
+    await h.send('om_go', '继续');
+    await until(() => h.prompts.length === 2);
+    await until(async () => JSON.parse(await h.repos.config.get('lark.inbox.app.om_go') ?? '{}').state === 'accepted');
+  });
+
+  it('「重新执行」已认领这一轮时，「在原对话继续」不再结束它、不发「继续」', async () => {
+    const h = await topic();
+    await unconfirmedTurn(h, [push]);
+    const { saved } = await h.mapping();
+    const cardId = saved.card_message_id!;
+    await until(() => h.lastUpdate(cardId)?.statusLabel === '结果未知');
+    const card = h.lastUpdate(cardId);
+    const key = 'lark.redispatch.app.om_first.1';
+    const held = JSON.parse((await h.repos.config.get(key))!);
+    expect(held).toMatchObject({ phase: 'held' });
+    // 模拟「重新执行」先一步把这一轮认领走（同一进程，对账不会接手）。
+    await h.repos.config.set(key, JSON.stringify({ ...held, phase: 'claimed', boot: (h.coordinator as any).relaunchBoot }));
+    expect(await h.coordinator.handleAction(callbackValueOf(card, 'continue_in_place'), 'ou_alice', { messageId: cardId, chatId: 'oc_group' }))
+      .toMatchObject({ type: 'warning' });
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect((await h.tasks())[0]).toMatchObject({ status: 'reconcile_required' });
+    expect(h.texts()).not.toContain('「在原对话继续」继续');
+    expect(h.prompts).toHaveLength(1);
+  });
+
+  it('「在原对话继续」没能结束这一轮时交还认领，卡上的按钮照旧可用', async () => {
+    const h = await topic();
+    await unconfirmedTurn(h, [push]);
+    const { saved } = await h.mapping();
+    const cardId = saved.card_message_id!;
+    await until(() => h.lastUpdate(cardId)?.statusLabel === '结果未知');
+    const card = h.lastUpdate(cardId);
+    const settle = vi.spyOn(h.coordinator as any, 'settleInterruptedAttempt').mockRejectedValueOnce(new Error('执行资源未确认停止'));
+    expect(await h.coordinator.handleAction(callbackValueOf(card, 'continue_in_place'), 'ou_alice', { messageId: cardId, chatId: 'oc_group' }))
+      .toMatchObject({ type: 'warning' });
+    expect(JSON.parse((await h.repos.config.get('lark.redispatch.app.om_first.1'))!)).toMatchObject({ phase: 'held' });
+    settle.mockRestore();
+    expect(await h.coordinator.handleAction(callbackValueOf(card, 'continue_in_place'), 'ou_alice', { messageId: cardId, chatId: 'oc_group' }))
+      .toMatchObject({ type: 'success' });
+    await until(() => h.prompts.length === 2);
+    expect(JSON.parse((await h.repos.config.get('lark.redispatch.app.om_first.1'))!)).toMatchObject({ phase: 'moved' });
+  });
+
+  it('Agent 已停下但自动结束失败：不留「已自动结束」的原因，之后的结果卡不会这样写', async () => {
+    const h = await topic();
+    vi.spyOn(h.coordinator as any, 'settleInterruptedAttempt').mockRejectedValue(new Error('执行资源未确认停止'));
+    await unconfirmedTurn(h);
+    const { saved } = await h.mapping();
+    expect((await h.tasks())[0]).toMatchObject({ status: 'reconcile_required' });
+    const raw = await h.repos.config.get('lark.settled.app.om_first.1');
+    expect(raw === undefined || JSON.parse(raw).revoked === true).toBe(true);
+    expect(await (h.coordinator as any).continueCause('app', 'om_first', saved.turn ?? 0, saved.scope_id, 'interrupted', [])).toBeUndefined();
   });
 });

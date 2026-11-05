@@ -1,5 +1,5 @@
 import { safeLarkWebUrl } from './card-actions.js';
-import { taskReportAttentionText, type TaskReport, permissionDisplayText, isSupersededMatterSession } from '@dutydeck/shared';
+import { taskReportAttentionText, type TaskReport, permissionDisplayText, isSupersededMatterSession, inboxKindLabels, type InboxItemKind } from '@dutydeck/shared';
 import { larkCommandEcho } from './commands.js';
 import { escapeCardInline, markdownElement } from './card-elements.js';
 
@@ -45,6 +45,20 @@ export interface LarkTaskDashboardEntry {
   ownerOpenId?: string;
   /** 显式不可重试（例如被 /new 作废）时，失败/中断行不出现重试。 */
   retryable?: boolean;
+}
+
+/**
+ * 任务看板之外等人决定的对象（计划卡、工作项确认、PR 确认等）。这些对象的按钮绑在各自的原卡上，
+ * 看板上只给计数和跳转：盲点批准一份看不到内容的计划或清单不安全。
+ */
+export interface LarkTaskDashboardDecision {
+  kind: InboxItemKind;
+  title: string;
+  /** 所属会话的显示名，缺省时不写。 */
+  session?: string;
+  waitingMs: number;
+  /** 回到原会话的链接；没有就写「请在原会话处理」。 */
+  url?: string;
 }
 
 export interface LarkTaskDashboardResult {
@@ -332,6 +346,33 @@ const taskRow = (item: IndexedEntry, rowIndex: number, now: number, sharedWorksp
   };
 };
 
+const MAX_DECISION_ROWS = 5;
+
+const waitingText = (ms: number) => {
+  const minutes = Math.floor(Math.max(0, ms) / 60_000);
+  if (minutes < 1) return '不到 1 分钟';
+  if (minutes < 60) return `${minutes} 分钟`;
+  const hours = Math.floor(minutes / 60);
+  return hours < 24 ? `${hours} 小时` : `${Math.floor(hours / 24)} 天`;
+};
+
+const decisionElements = (decisions: LarkTaskDashboardDecision[]): Array<Record<string, any>> => {
+  if (!decisions.length) return [];
+  const counts = new Map<InboxItemKind, number>();
+  for (const decision of decisions) counts.set(decision.kind, (counts.get(decision.kind) ?? 0) + 1);
+  const elements = [markdownElement('task_dashboard_decisions_header',
+    `**等你决定**（${decisions.length}）\n${[...counts].map(([kind, count]) => `${inboxKindLabels[kind]} ${count}`).join(' · ')}`)];
+  decisions.slice(0, MAX_DECISION_ROWS).forEach((decision, index) => {
+    const url = validAppLink(decision.url);
+    elements.push(markdownElement(`task_dashboard_decision_${index}`, [
+      `${inboxKindLabels[decision.kind]} · ${escapeCardInline(compactText(decision.title, MAX_TITLE_CHARS, '未命名'))}`,
+      [decision.session && escapeCardInline(compactText(decision.session, MAX_TITLE_CHARS, '')), `已等待 ${waitingText(decision.waitingMs)}`, url ? `[去处理](${url})` : '请在原会话处理'].filter(Boolean).join(' · ')
+    ].join('\n')));
+  });
+  if (decisions.length > MAX_DECISION_ROWS) elements.push(markdownElement('task_dashboard_decisions_more', `另有 ${decisions.length - MAX_DECISION_ROWS} 项，请在 Web 总览的「待你决定」查看。`));
+  return elements;
+};
+
 const validPage = (page: number) => Number.isFinite(page) && Number.isInteger(page) && page >= 1 ? page : 1;
 
 const navigation = (page: number, totalPages: number) => ({
@@ -384,18 +425,24 @@ export function buildLarkTaskDashboard(
   entries: LarkTaskDashboardEntry[],
   page = 1,
   now = Date.now(),
-  currentChatId?: string
+  currentChatId?: string,
+  decisions: LarkTaskDashboardDecision[] = []
 ): LarkTaskDashboardResult {
   const ordered = orderEntries(entries);
   const totalPages = Math.max(1, Math.ceil(ordered.length / PAGE_SIZE));
   const currentPage = Math.min(totalPages, validPage(page));
 
-  if (!ordered.length) {
+  if (!ordered.length && !decisions.length) {
     return {
       elements: [markdownElement('task_dashboard_empty', '暂无可查看的任务，可发送目标开始工作。'), navigation(1, 1)],
       page: 1,
       totalPages: 1
     };
+  }
+  // 等你决定的对象只在第一页列出，翻页时不重复占位。
+  const decisionBlock = currentPage === 1 ? decisionElements(decisions) : [];
+  if (!ordered.length) {
+    return { elements: [...decisionBlock, markdownElement('task_dashboard_empty', '暂无可查看的任务，可发送目标开始工作。'), navigation(1, 1)], page: 1, totalPages: 1 };
   }
 
   const pageEntries = ordered.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
@@ -413,7 +460,7 @@ export function buildLarkTaskDashboard(
       sharedWorkspace && `工作区：${escapeCardInline(sharedWorkspace)}`,
       sharedAgent && `Agent：${escapeCardInline(sharedAgent)}`]
       .filter(Boolean).join(' · ')
-  )];
+  ), ...decisionBlock];
   let lastGroup: DashboardGroup | undefined;
   pageEntries.forEach((item, index) => {
     if (item.group !== lastGroup) {

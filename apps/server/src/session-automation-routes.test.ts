@@ -107,6 +107,23 @@ describe('session automation routes', () => {
     expect(authorize).toHaveBeenLastCalledWith(expect.any(Object), 'ses_1', 'run.interrupt');
   });
 
+  it('认领已有 PR 要 run.interrupt 权限，没有权限时不读取 PR', async () => {
+    const app = Fastify(); apps.push(app);
+    const pullRequests = { follow: vi.fn(async () => ({ id: 'pr_9', claimed: true })) };
+    const target = Object.assign(service(), { pullRequests });
+    let allowed = false;
+    const authorize = vi.fn(async () => ({ allowed, actorId: 'ou_user' }));
+    await registerSessionAutomationRoutes(app, { service: target as any, authorize });
+    const link = 'https://git.example.com/group/repo/pull/12';
+    expect((await app.inject({ method: 'POST', url: '/api/sessions/ses_1/pull-requests/follow', payload: { pullRequest: link } })).statusCode).toBe(403);
+    expect(authorize).toHaveBeenLastCalledWith(expect.any(Object), 'ses_1', 'run.interrupt');
+    expect(pullRequests.follow).not.toHaveBeenCalled();
+    allowed = true;
+    expect((await app.inject({ method: 'POST', url: '/api/sessions/ses_1/pull-requests/follow', payload: {} })).statusCode).toBe(400);
+    expect((await app.inject({ method: 'POST', url: '/api/sessions/ses_1/pull-requests/follow', payload: { pullRequest: link } })).json()).toEqual({ pullRequest: { id: 'pr_9', claimed: true } });
+    expect(pullRequests.follow).toHaveBeenCalledWith('ses_1', { pullRequest: link }, 'ou_user');
+  });
+
   it('没有接入开 PR 时列表给出不可用说明', async () => {
     const app = Fastify(); apps.push(app);
     await registerSessionAutomationRoutes(app, { service: service(), authorize: async () => true });

@@ -18,7 +18,12 @@ export function createWorkItemIndexSchema(db: Database.Database): void {
       PRIMARY KEY(session_id,config_key)
     );
   `);
-  const project = (source: string, where: string) => `
+  // The outer migration transaction commits the backfill and schema_migrations marker together.
+  db.exec(project('configs', "substr(key,1,10)='work_item:'"));
+  createWorkItemIndexTriggers(db);
+}
+
+const project = (source: string, where: string) => `
     INSERT INTO work_item_index(config_key,parent_session_id,needs_tick,active_steps)
     SELECT config_key,json_extract(document,'$.item.parentSessionId'),
       CASE WHEN json_extract(document,'$.item.status')='cancelled' THEN 0
@@ -32,15 +37,26 @@ export function createWorkItemIndexSchema(db: Database.Database): void {
            AND NOT EXISTS (SELECT 1 FROM json_each(document,'$.stoppedAttempts') stopped
              WHERE stopped.value=json_extract(CASE WHEN step.type='object' THEN step.value ELSE '{}' END,'$.attempts[#-1].id'))))
     FROM (SELECT key AS config_key,CASE WHEN json_valid(value) THEN value ELSE '{}' END AS document FROM ${source} WHERE ${where});
+    ${projectSessions(source, where)}
+`;
+
+/** 计划修订删掉的步骤移到 retiredSteps，其子会话仍归属原工作项。 */
+const projectSessions = (source: string, where: string) => ['$.item.steps', '$.item.retiredSteps'].map(path => `
     INSERT OR IGNORE INTO work_item_sessions(session_id,config_key)
     SELECT json_extract(CASE WHEN attempt.type='object' THEN attempt.value ELSE '{}' END,'$.sessionId'),config_key
     FROM (SELECT key AS config_key,CASE WHEN json_valid(value) THEN value ELSE '{}' END AS document FROM ${source} WHERE ${where}),
-      json_each(document,'$.item.steps') step,
+      json_each(document,'${path}') step,
       json_each(CASE WHEN step.type='object' THEN step.value ELSE '{}' END,'$.attempts') attempt
-    WHERE json_type(CASE WHEN attempt.type='object' THEN attempt.value ELSE '{}' END,'$.sessionId')='text';
-  `;
-  // The outer migration transaction commits the backfill and schema_migrations marker together.
-  db.exec(project('configs', "substr(key,1,10)='work_item:'"));
+    WHERE json_type(CASE WHEN attempt.type='object' THEN attempt.value ELSE '{}' END,'$.sessionId')='text';`).join('\n');
+
+/** 重建触发器并补齐 retiredSteps 的子会话归属；已有索引行保持不变。 */
+export function refreshWorkItemIndexTriggers(db: Database.Database): void {
+  db.exec('DROP TRIGGER IF EXISTS work_item_config_insert; DROP TRIGGER IF EXISTS work_item_config_update; DROP TRIGGER IF EXISTS work_item_config_delete;');
+  db.exec(projectSessions('configs', "substr(key,1,10)='work_item:' AND key IN (SELECT config_key FROM work_item_index)"));
+  createWorkItemIndexTriggers(db);
+}
+
+function createWorkItemIndexTriggers(db: Database.Database): void {
   db.exec(`
     CREATE TRIGGER work_item_config_insert AFTER INSERT ON configs WHEN substr(new.key,1,10)='work_item:' BEGIN
       ${project('(SELECT new.key AS key,new.value AS value)', '1')}

@@ -1,6 +1,6 @@
 import { groupLarkTasksByMatter } from './task-dashboard.js';
 import { describe, expect, it } from 'vitest';
-import { buildLarkTaskDashboard, type LarkTaskDashboardEntry } from './task-dashboard.js';
+import { buildLarkTaskDashboard, type LarkTaskDashboardDecision, type LarkTaskDashboardEntry } from './task-dashboard.js';
 import { parseLarkCardActionValue } from './card-actions.js';
 import { buildLarkCard } from './service.js';
 
@@ -479,4 +479,42 @@ it.each(['waiting', 'blocked'] as const)('shows a superseded source with a curre
   for (const report of [{ ...taskReport, status: 'ready' as const }, { ...taskReport, status: 'dropped' as const }, { ...taskReport, clearedAt: taskReport.reportedAt }]) {
     expect(groupLarkTasksByMatter([{ ...source, taskReport: report }, child])[0]?.taskId).toBe('child_task');
   }
+});
+
+describe('buildLarkTaskDashboard 等你决定', () => {
+  const decision = (overrides: Partial<LarkTaskDashboardDecision> = {}): LarkTaskDashboardDecision => ({ kind: 'plan', title: '整理依赖', session: '发版', waitingMs: 12 * 60_000, url: 'https://applink.feishu.cn/client/chat/open?openChatId=oc_1', ...overrides });
+  const decisionText = (elements: Array<Record<string, any>>) => elements.filter(element => String(element.element_id ?? '').startsWith('task_dashboard_decision')).map(element => String(element.content)).join('\n');
+
+  it('在表头之后列出各类计数与条目：类型、标题、会话、等待时长和跳转链接，不渲染任何决定按钮', () => {
+    const { elements } = buildLarkTaskDashboard([entry()], 1, Date.parse('2026-09-08T01:00:00Z'), undefined, [decision(), decision({ kind: 'work_item_confirm', title: '发布工作项', url: undefined }), decision({ kind: 'work_item_revision', title: '改计划的工作项' }), decision({ kind: 'plan', title: '另一个计划' })]);
+    expect(elements.findIndex(element => element.element_id === 'task_dashboard_decisions_header')).toBe(elements.findIndex(element => element.element_id === 'task_dashboard_header') + 1);
+    const text = decisionText(elements);
+    expect(text).toContain('**等你决定**（4）');
+    expect(text).toContain('计划待批准 2 · 工作项待确认 1 · 工作项计划修订待确认 1');
+    expect(text).toContain('工作项计划修订待确认 · 改计划的工作项');
+    expect(text).toContain('计划待批准 · 整理依赖');
+    expect(text).toContain('发版 · 已等待 12 分钟 · [去处理](https://applink.feishu.cn/client/chat/open?openChatId=oc_1)');
+    expect(text).toContain('已等待 12 分钟 · 请在原会话处理');
+    expect(JSON.stringify(elements.filter(element => String(element.element_id ?? '').startsWith('task_dashboard_decision')))).not.toContain('callback');
+  });
+
+  it('超过 5 条只列前 5 条并指向 Web 总览；标题里的尖括号被转义；非法链接不渲染成链接', () => {
+    const many = Array.from({ length: 7 }, (_, index) => decision({ title: index === 0 ? '<at id=all></at>' : `计划 ${index}`, url: index === 1 ? 'javascript:alert(1)' : decision().url }));
+    const { elements } = buildLarkTaskDashboard([entry()], 1, undefined, undefined, many);
+    expect(elements.filter(element => /^task_dashboard_decision_\d$/.test(String(element.element_id)))).toHaveLength(5);
+    const text = decisionText(elements);
+    expect(text).toContain('另有 2 项，请在 Web 总览的「待你决定」查看。');
+    expect(text).toContain('&lt;at id=all&gt;&lt;/at&gt;');
+    expect(text).not.toContain('javascript:');
+  });
+
+  it('只在第一页出现；没有任务行但有待决定对象时仍然渲染', () => {
+    const entries = Array.from({ length: 12 }, (_, index) => entry({ taskId: `t${index}`, title: `任务 ${index}` }));
+    expect(decisionText(buildLarkTaskDashboard(entries, 1, undefined, undefined, [decision()]).elements)).toContain('等你决定');
+    expect(decisionText(buildLarkTaskDashboard(entries, 2, undefined, undefined, [decision()]).elements)).toBe('');
+    const onlyDecisions = buildLarkTaskDashboard([], 1, undefined, undefined, [decision()]);
+    expect(decisionText(onlyDecisions.elements)).toContain('等你决定');
+    expect(onlyDecisions.page).toBe(1);
+    expect(buildLarkTaskDashboard([], 1, undefined, undefined, []).elements[0]).toMatchObject({ element_id: 'task_dashboard_empty' });
+  });
 });

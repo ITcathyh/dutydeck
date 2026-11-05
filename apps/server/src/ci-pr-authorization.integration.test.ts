@@ -1,12 +1,12 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import type { AgentDriver, NormalizedDriverEvent } from '@dutydeck/shared';
 import { createRepositories, executionTaskId } from '@dutydeck/storage';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import { CiProviderRegistry } from './ci-providers.js';
 import { CiWebhookService } from './ci-webhook.js';
 import { PullRequestService, type PullRequestRecord } from './pull-requests.js';
@@ -14,6 +14,23 @@ import { PullRequestService, type PullRequestRecord } from './pull-requests.js';
 const run = promisify(execFile);
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
+afterAll(async () => { if (template) await rm(await template, { recursive: true, force: true }); });
+
+// 远端与已提交的工作区只建一次，每个用例复制一份私有副本，避免用例间共享 Git 状态。
+let template: Promise<string> | undefined;
+const repositoryTemplate = () => template ??= (async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dutydeck-authorization-template-'));
+  const remote = join(root, 'remote.git'), cwd = join(root, 'work');
+  await run('git', ['init', '-q', '--bare', '-b', 'main', remote]);
+  await run('git', ['clone', '-q', remote, cwd]);
+  const git = (...args: string[]) => run('git', ['-C', cwd, ...args]);
+  await git('config', 'user.email', 'test@example.com');
+  await git('config', 'user.name', 'Test');
+  await writeFile(join(cwd, 'app.ts'), 'export const a = 1;\n');
+  await git('add', '.');
+  await git('commit', '-qm', 'initial');
+  return root;
+})();
 
 describe.each(['CI', 'PR'] as const)('%s 最终提交授权', kind => {
   it.each(['cancel', 'metadata', 'contention'] as const)('检查期间并发 %s 后，真实 runtime 只提交仍获授权的任务', async mutation => {
@@ -21,14 +38,9 @@ describe.each(['CI', 'PR'] as const)('%s 最终提交授权', kind => {
     cleanups.push(() => rm(root, { recursive: true, force: true }));
     const remote = join(root, 'remote.git');
     const cwd = join(root, 'work');
-    await run('git', ['init', '-q', '--bare', '-b', 'main', remote]);
-    await run('git', ['clone', '-q', remote, cwd]);
+    await cp(await repositoryTemplate(), root, { recursive: true });
     const git = async (...args: string[]) => (await run('git', ['-C', cwd, ...args])).stdout.trim();
-    await git('config', 'user.email', 'test@example.com');
-    await git('config', 'user.name', 'Test');
-    await writeFile(join(cwd, 'app.ts'), 'export const a = 1;\n');
-    await git('add', '.');
-    await git('commit', '-qm', 'initial');
+    await git('remote', 'set-url', 'origin', remote);
     const headSha = await git('rev-parse', 'HEAD');
     const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
     cleanups.push(async () => repos.close());

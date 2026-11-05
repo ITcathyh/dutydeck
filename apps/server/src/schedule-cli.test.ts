@@ -46,6 +46,23 @@ describe('schedule CLI', () => {
     expect(handler).toHaveBeenCalledWith('update', 'schedule_1', expect.objectContaining({ mode: 'fresh' }));
   });
 
+  it('maps --until, --deadline and --template to the follow-up fields and validates them before any request', async () => {
+    const f = fixture();
+    await f.run('create', { session: 'ses_1', name: 'Follow PR', prompt: 'Check the PR', every: '30', timezone: 'Asia/Shanghai', until: 'PR merged', deadline: '2026-12-01T18:00', template: 'template_abc@3' });
+    expect(f.requests.at(-1)).toMatchObject({ method: 'POST', body: { completionCondition: 'PR merged', deadlineAt: '2026-12-01T10:00:00.000Z', workTemplate: { id: 'template_abc', version: 3 } } });
+    await f.run('update', { session: 'ses_1', deadline: '2026-12-02T09:00', timezone: 'UTC' }, 'schedule_1');
+    expect(f.requests.at(-1)).toMatchObject({ method: 'PATCH', body: { expectedRevision: 4, deadlineAt: '2026-12-02T09:00:00.000Z' } });
+    await f.run('update', { session: 'ses_1', input: '{"completionCondition":null,"deadlineAt":null,"workTemplate":null}' }, 'schedule_1');
+    expect(f.requests.at(-1)).toMatchObject({ method: 'PATCH', body: { completionCondition: null, deadlineAt: null, workTemplate: null } });
+    const count = f.requests.length;
+    await expect(f.run('create', { session: 'ses_1', name: 'Bad', prompt: 'x', every: '5', template: 'template_abc' })).rejects.toMatchObject({ code: 'SCHEDULE_ARGUMENT_INVALID' });
+    await expect(f.run('create', { session: 'ses_1', name: 'Bad', prompt: 'x', every: '5', deadline: 'soon' })).rejects.toMatchObject({ code: 'SCHEDULE_ARGUMENT_INVALID' });
+    expect(f.requests).toHaveLength(count);
+    const handler = vi.fn();
+    await createCliProgram('test', { schedule: handler }).parseAsync(['node', 'dutydeck', 'schedule', 'create', '--session', 'ses_1', '--until', 'done', '--deadline', '2026-12-01T18:00', '--template', 't@1']);
+    expect(handler).toHaveBeenCalledWith('create', undefined, expect.objectContaining({ until: 'done', deadline: '2026-12-01T18:00', template: 't@1' }));
+  });
+
   it('validates input before requests and preserves the created session ID on a partial failure', async () => {
     const f = fixture();
     for (const input of [

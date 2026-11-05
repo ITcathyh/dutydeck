@@ -2,18 +2,24 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import type { PublicCiProvider, PublicCiSubscription, PublicSessionSchedule, PublicSessionScheduleOccurrence } from '@dutydeck/shared';
+import type { PublicCiProvider, PublicCiSubscription, PublicSessionSchedule, PublicSessionScheduleOccurrence, ScheduleRunState } from '@dutydeck/shared';
 import { api, ApiError, type Session } from '../api';
 import { setInstance } from '../instance';
 import { SessionAutomationPanel, scheduleRule } from './SessionAutomationPanel';
+
+// user.type 每个字符都会触发一次整树重渲染；这里的输入不依赖逐键行为，点击聚焦后一次粘贴写入。
+async function typeInto(user: Pick<typeof userEvent, 'click' | 'paste'>, element: Element, text: string) {
+  await user.click(element);
+  await user.paste(text);
+}
 
 const session: Session = { id: 's1', agentId: 'a', cwd: '/project/worktree', state: 'completed', runId: 'r', createdAt: '2026-09-12T00:00:00Z', updatedAt: '2026-09-12T00:00:00Z' };
 const schedule: PublicSessionSchedule = { schemaVersion: 1, id: 'plan1', revision: 3, generation: 1, sessionId: session.id, name: '巡检', prompt: '检查构建', trigger: { kind: 'cron', expression: '*/17 3-9 * 2,7 1-5' }, timezone: 'America/New_York', dstPolicy: { gap: 'shift_forward', overlap: 'second' }, condition: { kind: 'always' }, enabled: false, createdAt: session.createdAt, updatedAt: session.updatedAt };
 const clients: QueryClient[] = [];
 afterEach(() => { setInstance(undefined); cleanup(); clients.forEach(client => client.clear()); clients.length = 0; vi.restoreAllMocks(); });
 const testCi: PublicCiProvider = { id: 'test-ci', displayName: 'Test CI', polling: true, webhook: false };
-function mount(schedules: PublicSessionSchedule[] = [], providers: PublicCiProvider[] = [testCi], subscriptions: PublicCiSubscription[] = [], currentSession = session) {
-  const read = vi.spyOn(api, 'automation').mockResolvedValue({ schedules, subscriptions, occurrences: [], deliveryTargets: Object.fromEntries(schedules.map(item => [item.id, { kind: 'task' as const, sessionId: session.id }])) });
+function mount(schedules: PublicSessionSchedule[] = [], providers: PublicCiProvider[] = [testCi], subscriptions: PublicCiSubscription[] = [], currentSession = session, runStates?: Record<string, ScheduleRunState>) {
+  const read = vi.spyOn(api, 'automation').mockResolvedValue({ schedules, subscriptions, occurrences: [], deliveryTargets: Object.fromEntries(schedules.map(item => [item.id, { kind: 'task' as const, sessionId: session.id }])), ...(runStates ? { runStates } : {}) });
   vi.spyOn(api, 'automationHistory').mockImplementation(async (_sessionId, scheduleId, offset = 0, limit = 20) => {
     const data = await read.mock.results.at(-1)?.value;
     const occurrences = (data?.occurrences ?? []).filter((item: PublicSessionScheduleOccurrence) => item.scheduleId === scheduleId).slice().reverse();
@@ -28,11 +34,11 @@ function mount(schedules: PublicSessionSchedule[] = [], providers: PublicCiProvi
 async function fill(kind: string) {
   const user = userEvent.setup();
   await user.click(await screen.findByText('为此任务创建计划'));
-  await user.type(screen.getByLabelText('计划名称'), '日常检查');
-  await user.type(screen.getByLabelText('执行指令'), '检查测试结果');
+  await typeInto(user, screen.getByLabelText('计划名称'), '日常检查');
+  await typeInto(user, screen.getByLabelText('执行指令'), '检查测试结果');
   await user.selectOptions(screen.getByLabelText('触发方式'), kind);
   await user.clear(screen.getByLabelText('时区'));
-  await user.type(screen.getByLabelText('时区'), 'Asia/Shanghai');
+  await typeInto(user, screen.getByLabelText('时区'), 'Asia/Shanghai');
   return user;
 }
 
@@ -170,7 +176,7 @@ describe('session automation schedules', () => {
     const user = userEvent.setup();
     await user.click(await screen.findByRole('button', { name: '编辑' }));
     if (old.trigger.kind === 'cron') expect((screen.getByLabelText('Cron 表达式') as HTMLInputElement).value).toBe(old.trigger.expression);
-    await user.type(screen.getByLabelText('计划名称'), '修改');
+    await typeInto(user, screen.getByLabelText('计划名称'), '修改');
     await user.click(screen.getByRole('button', { name: '保存计划' }));
     await waitFor(() => expect(update).toHaveBeenCalledWith('s1', 'plan1', { expectedRevision: 3, name: '巡检修改' }));
   });
@@ -265,7 +271,7 @@ describe('session automation CI providers', () => {
     await fill('at');
     fireEvent.change(screen.getByLabelText('指定时区的本地时间'), { target: { value: '2026-10-01T11:20' } });
     await user.selectOptions(screen.getByLabelText('执行条件'), 'ci_new_failure');
-    await user.type(screen.getByLabelText('检查的工作流（可选）'), 'ci.yml');
+    await typeInto(user, screen.getByLabelText('检查的工作流（可选）'), 'ci.yml');
     await user.click(screen.getByRole('button', { name: '保存计划' }));
     await waitFor(() => expect(create).toHaveBeenCalledWith('s1', expect.objectContaining({ condition: { kind: 'ci_new_failure', workflow: 'ci.yml' } })));
   });
@@ -331,7 +337,7 @@ describe('schedule management and execution policy', () => {
     const create = vi.spyOn(api, 'createSchedule').mockResolvedValue({ schedule });
     const user = await fill('daily');
     await user.selectOptions(screen.getByLabelText('运行模式'), 'independent');
-    await user.type(screen.getByLabelText('补跑有效期（分钟，可选）'), '30');
+    await typeInto(user, screen.getByLabelText('补跑有效期（分钟，可选）'), '30');
     expect(screen.getByText(/资源协调仅覆盖当前实例数据库/)).toBeTruthy();
     await user.click(screen.getByRole('button', { name: '保存计划' }));
     await waitFor(() => expect(create).toHaveBeenCalledWith('s1', expect.objectContaining({ mode: 'independent', misfirePolicy: 'coalesce', maxLatenessSeconds: 1800 })));
@@ -368,7 +374,7 @@ describe('schedule management and execution policy', () => {
     mount([schedule]);
     const update = vi.spyOn(api, 'updateSchedule').mockResolvedValue({ schedule });
     await userEvent.click(await screen.findByRole('button', { name: '编辑' }));
-    await userEvent.type(screen.getByLabelText('执行指令'), '新的要求');
+    await typeInto(userEvent, screen.getByLabelText('执行指令'), '新的要求');
     await userEvent.click(screen.getByRole('button', { name: '保存计划' }));
     await waitFor(() => expect(update).toHaveBeenCalledWith('s1', 'plan1', { expectedRevision: 3, prompt: '检查构建新的要求' }));
   });
@@ -383,7 +389,7 @@ it('uses the owning session when editing, enabling, running, deleting and openin
   const remove = vi.spyOn(api, 'deleteSchedule').mockResolvedValue({ schedule: sibling });
   const user = userEvent.setup();
   await user.click(await screen.findByRole('button', { name: '编辑' }));
-  await user.type(screen.getByLabelText('计划名称'), '改');
+  await typeInto(user, screen.getByLabelText('计划名称'), '改');
   await user.click(screen.getByRole('button', { name: '保存计划' }));
   await waitFor(() => expect(update).toHaveBeenCalledWith('source-session', sibling.id, { expectedRevision: sibling.revision, name: '巡检改' }));
   await user.click(screen.getByRole('button', { name: '启用' }));
@@ -404,4 +410,33 @@ it('allows a frozen matter plan to run after its source is archived', async () =
   const run = vi.spyOn(api, 'runSchedule').mockResolvedValue({ occurrence: {} as PublicSessionScheduleOccurrence });
   await userEvent.click(await screen.findByRole('button', { name: '立即执行' }));
   await waitFor(() => expect(run).toHaveBeenCalledWith(session.id, schedule.id, expect.objectContaining({ expectedRevision: schedule.revision })));
+});
+
+describe('follow-up until done', () => {
+  it('shows the run state, completion condition and deadline of a plan', async () => {
+    mount([{ ...schedule, completionCondition: 'PR 已合并', deadlineAt: '2026-12-01T15:00:00.000Z', outcome: { kind: 'deadline_reached', at: '2026-12-01T15:00:00.000Z' } }], [testCi], [], session, { plan1: 'deadline_reached' });
+    await screen.findByText('巡检 · 已到截止，未确认完成');
+    expect(screen.getByText('直到：PR 已合并（达成后由 Agent 停用）')).toBeTruthy();
+    expect(screen.getByText(/截止：2026\/12\/1 10:00:00 · America\/New_York/)).toBeTruthy();
+  });
+
+  it('saves a completion condition and a deadline in the plan timezone, or a saved work template as the action', async () => {
+    vi.spyOn(api, 'workItems').mockResolvedValue({ items: [], templates: [{ id: 'template_a', parentSessionId: 's1', name: '发布检查', version: 2, plan: {} as never, createdAt: session.createdAt }] });
+    mount();
+    const create = vi.spyOn(api, 'createSchedule').mockResolvedValue({ schedule });
+    const user = await fill('daily');
+    await user.type(screen.getByLabelText('一直跟进，直到（可选）'), 'CI 通过');
+    fireEvent.change(screen.getByLabelText('截止时间（可选）'), { target: { value: '2026-12-01T18:00' } });
+    await user.click(screen.getByRole('button', { name: '保存计划' }));
+    await waitFor(() => expect(create).toHaveBeenCalledWith('s1', expect.objectContaining({ completionCondition: 'CI 通过', deadlineAt: '2026-12-01T10:00:00.000Z' })));
+    expect(create.mock.calls[0]![1]).not.toHaveProperty('workTemplate');
+    await user.click(await screen.findByText('为此任务创建计划'));
+    await user.type(screen.getByLabelText('计划名称'), '模板');
+    await user.selectOptions(await screen.findByLabelText('每次执行'), 'template_a@2');
+    expect(screen.queryByLabelText('一直跟进，直到（可选）')).toBeNull();
+    await user.type(screen.getByLabelText('工作项目标'), '检查发布');
+    await user.click(screen.getByRole('button', { name: '保存计划' }));
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(2));
+    expect(create.mock.calls[1]![1]).toMatchObject({ prompt: '检查发布', workTemplate: { id: 'template_a', version: 2 } });
+  });
 });

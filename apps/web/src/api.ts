@@ -7,7 +7,7 @@ export type { HistoryOutline, HistoryTurnSummary } from '@dutydeck/shared';
 import type { AutomationSchedulePage, AutomationRunDetail } from '@dutydeck/shared';
 import type { PluginBinding, SavePluginBinding, PluginConfigSchema, PluginBindingScope } from '@dutydeck/shared';
 import type { LarkAllowedUser, PublicLarkConfig, PublicLarkConfigCollection, RiskControlMode, SaveLarkConfigInput } from '@dutydeck/shared';
-import type { LarkAppCreationJob, PermissionMode, ScenarioBinding, ScenarioParam, SessionSourceContext, SessionUsageSnapshot } from '@dutydeck/shared';
+import type { InboxAction, InboxResponse, LarkAppCreationJob, PermissionMode, ScenarioBinding, ScenarioParam, SessionSourceContext, SessionUsageSnapshot } from '@dutydeck/shared';
 import type {
   SessionInsightDetailsResponse,
   SessionInsightRefreshResponse,
@@ -20,7 +20,7 @@ import type {
   SessionInsightCompareResponse,
   SessionInsightExportRequest
 } from '@dutydeck/shared';
-import type { CreateWorkItemInput, UnknownTaskAction, UnknownTaskFacts, WorkItem, WorkTemplate } from '@dutydeck/shared';
+import type { CreateWorkItemInput, ReviseWorkPlanInput, UnknownTaskAction, UnknownTaskFacts, WorkItem, WorkRevisionPreview, WorkTemplate } from '@dutydeck/shared';
 import type { WorkspaceMode, WorkspaceResponse, WorkspaceCleanupPreview, WorkspaceCleanupResult, VerificationResponse, VerificationCommandInput, SkillDeliveryMetadata, SessionAutomationList, PublicSessionScheduleOccurrence, CreateSessionScheduleInput, UpdateSessionScheduleInput, SubscribeCiInput, SessionSchedule, CiSubscription, PublicCiProvider, PublicPullRequest, PullRequestAvailability } from '@dutydeck/shared';
 import type { WorkspaceOrganization, WorkspaceOrganizationSnapshot } from '@dutydeck/shared';
 import type { UsageBackgroundBudget, UsageCap, UsageGroup, UsageReport, UsageReportFilter, UsageTaskPage, UsageTotals } from '@dutydeck/shared';
@@ -34,6 +34,7 @@ export type PeerInstance = { id: string; name: string };
 export type { WorkspaceOrganization, WorkspaceOrganizationSnapshot };
 export type { ScheduleTrigger };
 export type { PermissionMode };
+export type { InboxAction, InboxItem, InboxItemKind, InboxResponse } from '@dutydeck/shared';
 export type { WorkspaceMode };
 export type Agent = PublicAgent;
 export type AgentModel = { id: string; name: string };
@@ -285,6 +286,10 @@ export const api = {
   cancelWorkItem: (sessionId: string, id: string, expectedRevision: number) => send<WorkItem>('POST', `/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/cancel`, { expectedRevision }),
   retryWorkStep: (sessionId: string, id: string, stepId: string, expectedRevision: number) => send<WorkItem>('POST', `/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/retry`, { stepId, expectedRevision }),
   answerWorkStep: (sessionId: string, id: string, stepId: string, answer: string, expectedRevision: number) => send<WorkItem>('POST', `/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/answer`, { stepId, answer, expectedRevision }),
+  previewWorkRevision: (sessionId: string, id: string, input: Omit<ReviseWorkPlanInput, 'reason'>) => send<WorkRevisionPreview>('POST', `/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/revise/preview`, input),
+  reviseWorkItem: (sessionId: string, id: string, input: ReviseWorkPlanInput) => send<WorkItem>('POST', `/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/revise`, input),
+  confirmWorkItem: (sessionId: string, id: string, expectedRevision: number, revisionDigest?: string) => send<WorkItem>('POST', `/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/confirm`, { expectedRevision, ...(revisionDigest ? { revisionDigest } : {}) }),
+  discardWorkRevision: (sessionId: string, id: string, expectedRevision: number, revisionDigest?: string) => send<WorkItem>('POST', `/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/revision/discard`, { expectedRevision, ...(revisionDigest ? { revisionDigest } : {}) }),
   saveWorkTemplate: (sessionId: string, id: string, name: string) => send<WorkTemplate>('POST', `/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/template`, { name }),
   runWorkTemplate: (sessionId: string, id: string, input: { version: number; goal: string; idempotencyKey: string }) => send<WorkItem>('POST', `/api/sessions/${encodeURIComponent(sessionId)}/work-templates/${encodeURIComponent(id)}/run`, input),
   automationSchedules: async (params: URLSearchParams, instance?: string | null) => {
@@ -304,6 +309,7 @@ export const api = {
   cancelCi: (id: string, subscriptionId: string, expectedRevision: number) => send<{ subscription: CiSubscription }>('POST', `/api/sessions/${id}/automation/ci/${subscriptionId}/cancel`, { expectedRevision }),
   pullRequests: (id: string) => json<PullRequestAvailability & { items: PublicPullRequest[] }>(`/api/sessions/${id}/pull-requests`),
   preparePullRequest: (id: string, input: { title?: string }) => send<{ pullRequest: PublicPullRequest }>('POST', `/api/sessions/${id}/pull-requests`, input),
+  followPullRequest: (id: string, pullRequest: string) => send<{ pullRequest: PublicPullRequest }>('POST', `/api/sessions/${id}/pull-requests/follow`, { pullRequest }),
   confirmPullRequest: (id: string, pullRequestId: string) => json<{ message: string; pullRequest: PublicPullRequest }>(`/api/sessions/${id}/pull-requests/${pullRequestId}/confirm`, { method: 'POST' }),
   cancelPullRequest: (id: string, pullRequestId: string) => json<{ pullRequest: PublicPullRequest }>(`/api/sessions/${id}/pull-requests/${pullRequestId}/cancel`, { method: 'POST' }),
   sessionCapabilities: (id: string) => json<SessionCapabilities>(`/api/sessions/${id}/capabilities`),
@@ -403,7 +409,10 @@ export const api = {
   assignWorkspaceGroups: (input: { groupId: string | null; sessionIds?: string[]; directories?: string[] }) => send<WorkspaceOrganizationSnapshot>('PUT', '/api/workspace-groups/assignments', input),
   restart: (id: string) => json<Session>(`/api/sessions/${id}/restart`, { method: 'POST' }),
   action: (id: string, action: string) => json(`/api/sessions/${id}/${action}`, { method: 'POST' }),
-  permission: (id: string, permissionId: string, approved: boolean) => send('POST', `/api/sessions/${id}/permissions/${permissionId}`, { approved })
+  permission: (id: string, permissionId: string, approved: boolean, reason?: string) => send('POST', `/api/sessions/${id}/permissions/${permissionId}`, reason ? { approved, reason } : { approved }),
+  inbox: () => json<InboxResponse>('/api/inbox', { cache: 'no-store' }),
+  /** 待处理条目上的动作：服务端给出原对象现有的接口与带版本的请求体，这里原样调用。 */
+  inboxAction: (action: InboxAction) => send<unknown>(action.method ?? 'POST', action.path!, action.body ?? {})
 };
 
 export const foundationApi = {

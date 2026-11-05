@@ -1,7 +1,9 @@
 import { MatterDetails } from './MatterDetails';
+import { InboxPanel } from './InboxPanel';
+import { inboxCoveredSessionIds } from '../inbox-model';
 import { useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, Archive, ArrowRight, CheckCircle2, ChevronRight, CircleDot, MessageSquare, Search, Plus, Radio, Settings2 } from 'lucide-react';
-import type { Agent, LarkBotConfig, RunSummary, Session } from '../api';
+import type { Agent, InboxAction, InboxItem, LarkBotConfig, RunSummary, Session } from '../api';
 import {
   attentionReasonForSession,
   groupSessionsByMatter,
@@ -23,6 +25,8 @@ import { formatLarkNavSummary, projectLarkBotStatus } from '../lark-status';
 import { shortcutDefinitions, workbenchViewShortcutIds } from '../useKeyboardShortcuts';
 
 export type WorkspaceListFilters = { query: string; project: string };
+/** 「待你决定」汇总：服务端把所有等人点按钮的对象列在一处，这里负责展示与执行。 */
+export type WorkspaceInbox = { items: InboxItem[]; loading: boolean; failed: boolean; onRetry?(): void; call(action: InboxAction): Promise<unknown>; onSettled?(): void };
 
 type OverviewProps = {
   sessions: Session[];
@@ -41,6 +45,7 @@ type OverviewProps = {
   mode?: 'home' | 'tasks';
   filters?: WorkspaceListFilters;
   onFiltersChange?(filters: WorkspaceListFilters): void;
+  inbox?: WorkspaceInbox;
   onOpenChanges?(id: string): void;
   onSelect(id: string): void;
   onSelectAttention?(id: string): void;
@@ -176,7 +181,7 @@ function LarkBotsOverview({ bots, agents, loading, agentsLoading, listeningDisab
   </Card>;
 }
 
-export function WorkspaceOverview({ sessions: rawSessions, summaries, agents, loading, agentsLoading = false, larkBots, larkBotsLoading = false, larkListeningDisabled = false, larkBotsFailed = false, larkBotsRetrying = false, onRetryLarkBots, view, onViewChange, mode = 'home', filters, onFiltersChange, onOpenChanges, onSelect, onSelectAttention, onBulkArchive, onCreate, onOpenAgentSetup, onOpenLarkSetup, onManageBots = onOpenLarkSetup }: OverviewProps) {
+export function WorkspaceOverview({ sessions: rawSessions, summaries, agents, loading, agentsLoading = false, larkBots, larkBotsLoading = false, larkListeningDisabled = false, larkBotsFailed = false, larkBotsRetrying = false, onRetryLarkBots, view, onViewChange, mode = 'home', filters, onFiltersChange, inbox, onOpenChanges, onSelect, onSelectAttention, onBulkArchive, onCreate, onOpenAgentSetup, onOpenLarkSetup, onManageBots = onOpenLarkSetup }: OverviewProps) {
   const sessions = useMemo(() => groupSessionsByMatter(rawSessions, summaries), [rawSessions, summaries]);
   const rawById = useMemo(() => new Map(rawSessions.map(session => [session.id, session])), [rawSessions]);
   const [matterId, setMatterId] = useState<string>();
@@ -196,7 +201,9 @@ export function WorkspaceOverview({ sessions: rawSessions, summaries, agents, lo
   const counts = workbenchCounts(sessions, summaries);
   const allOrdered = orderSessionsForWorkbench(sessions, view, summaries);
   const search = query.trim().toLocaleLowerCase();
-  const ordered = home ? allOrdered : allOrdered.filter(session => {
+  // 权限、提问、等你决定的收尾报告、结果未知已在「待你决定」里逐条列出；总览首页不再让同一会话在下面再占一行。
+  const covered = home && inbox && !inbox.failed ? inboxCoveredSessionIds(inbox.items) : undefined;
+  const ordered = home ? (covered?.size ? allOrdered.filter(session => !(['decision', 'recovery'].includes(sessionAttention(session, summaries[session.id])) && (session.matter?.sessionIds ?? [session.id]).some(id => covered.has(id)))) : allOrdered) : allOrdered.filter(session => {
     const members = session.matter ? session.matter.sessionIds.map(id => rawById.get(id)).filter((item): item is Session => Boolean(item)) : [session];
     return members.some(member => (!project || sessionWorkspaceName(member) === project) && (!search || [session.matter?.title, sessionDisplayName(member, summaries[member.id]?.prompt), sessionWorkspaceName(member), agents.find(agent => agent.id === member.agentId)?.name ?? member.agentId].join(' ').toLocaleLowerCase().includes(search)));
   });
@@ -248,6 +255,7 @@ export function WorkspaceOverview({ sessions: rawSessions, summaries, agents, lo
         <Button variant="ghost" onClick={() => { setSelecting(false); setSelectedIds([]); }}>退出多选</Button>
       </div>}
 
+      {home && !selecting && inbox && <InboxPanel items={inbox.items} loading={inbox.loading} failed={inbox.failed} onRetry={inbox.onRetry} call={inbox.call} onSettled={inbox.onSettled} onOpen={onSelectAttention ?? onSelect}/>}
       {matterId && <MatterDetails id={matterId} onClose={() => setMatterId(undefined)} onSelect={onSelect}/>}
       <div className={home && !selecting ? 'ui-workbench-grid' : 'mt-5'}>
         <section aria-label="任务列表" className="min-w-0">
@@ -257,7 +265,7 @@ export function WorkspaceOverview({ sessions: rawSessions, summaries, agents, lo
             return <section key={section.id} aria-labelledby={`task-section-${section.id}`}>
               <div className="mb-3 flex items-center gap-2"><span aria-hidden="true" className={`h-1.5 w-1.5 rounded-full ${sectionDot[section.id]}`}/><h2 id={`task-section-${section.id}`} className="text-title font-semibold text-primary">{sectionCopy[section.id].title}</h2><span className="text-caption tabular-nums text-subtle">{section.sessions.length}</span></div><p className="sr-only">{sectionCopy[section.id].description}</p>
               <div className={section.id === 'attention' ? 'overflow-hidden rounded-lg border border-default bg-surface' : 'border-y border-default'}>
-                {rows.length ? rows.map(session => <TaskRow key={session.id} session={session} summary={summaries[session.id]} agent={agents.find(agent => agent.id === session.agentId)} section={section.id} onSelect={session.matter && session.matter.sessionIds.length > 1 ? () => setMatterId(session.matter!.id) : home && section.id === 'attention' ? onSelectAttention ?? onSelect : onSelect} selection={selecting ? { checked: selected.includes(session.id), disabled: session.source === 'work_item', onChange: () => setSelectedIds(current => current.includes(session.id) ? current.filter(id => id !== session.id) : [...current, session.id]) } : undefined}/>) : <EmptyState tone="positive" title="需要你处理的事项已清空" description="正在进行的任务会继续推进。"/>}
+                {rows.length ? rows.map(session => <TaskRow key={session.id} session={session} summary={summaries[session.id]} agent={agents.find(agent => agent.id === session.agentId)} section={section.id} onSelect={session.matter && session.matter.sessionIds.length > 1 ? () => setMatterId(session.matter!.id) : home && section.id === 'attention' ? onSelectAttention ?? onSelect : onSelect} selection={selecting ? { checked: selected.includes(session.id), disabled: session.source === 'work_item', onChange: () => setSelectedIds(current => current.includes(session.id) ? current.filter(id => id !== session.id) : [...current, session.id]) } : undefined}/>) : <EmptyState tone="positive" title={inbox && !inbox.failed && inbox.items.length > 0 ? '没有需要恢复的任务' : '需要你处理的事项已清空'} description="正在进行的任务会继续推进。"/>}
                 {truncated && <button type="button" onClick={() => onViewChange(sectionView[section.id])} className="flex min-h-10 w-full items-center justify-center gap-2 border-t border-default px-3 py-2 text-caption text-action hover:bg-hover">查看全部 {section.sessions.length} 个{sectionCopy[section.id].title}的任务<ArrowRight aria-hidden="true" size={14}/></button>}
               </div>
             </section>;

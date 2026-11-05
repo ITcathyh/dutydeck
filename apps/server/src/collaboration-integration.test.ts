@@ -610,8 +610,8 @@ describe('roleScope legacy fail-open fix', () => {
   const mention = [{ openId: 'ou_bot', name: 'Agent', key: '@_user_1' }];
 
   function setupCoordinator(f: Awaited<ReturnType<typeof fixture>>) {
-    const coordinator = new LarkMessageCoordinator(f.runtime as any, f.client as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot', undefined, f.repos.channelMappings, async () => 'group', undefined, f.groups as any, { participation: f.collaboration.participation });
-    f.collaboration.participation.setDispatcher(scope.appId, (ev, config) => coordinator.adopt(ev, config));
+    const coordinator = new LarkMessageCoordinator(f.runtime as any, f.client as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot', undefined, f.repos.channelMappings, async () => 'group', undefined, f.groups as any, { participation: f.collaboration.participation, store: f.repos.config });
+    f.collaboration.participation.setDispatcher(scope.appId, (ev, config) => coordinator.adopt(ev, config), (target, actor) => coordinator.canConfirmParticipation(target, actor));
     cleanups.push(() => coordinator.stop());
     return coordinator;
   }
@@ -641,7 +641,7 @@ describe('roleScope legacy fail-open fix', () => {
       const config = await configureBot(f, mentionPolicy, '报警和告警排查');
 
       // 范围外无@：进入模型判定（而非 legacy 直接执行），模型判 silent → 无执行调用
-      await coordinator.handle(event('om_off', '调研一下怎么模拟 Android 操作'), config);
+      await coordinator.receive(event('om_off', '调研一下怎么模拟 Android 操作'), config);
       const flushSilent = f.collaboration.participation.flush(scope);
       await eventually(async () => f.calls.length === 1);
       const decisionCall = f.calls[0]!;
@@ -654,7 +654,7 @@ describe('roleScope legacy fail-open fix', () => {
       expect(f.calls).toHaveLength(1);
 
       // 范围内无@：模型判 act，作为一次 @ 交给执行 → 执行 Agent 被调用
-      await coordinator.handle(event('om_alert', '【P1】订单服务错误率 12% 超阈值，帮忙排查根因'), config);
+      await coordinator.receive(event('om_alert', '【P1】订单服务错误率 12% 超阈值，帮忙排查根因'), config);
       const flushAct = f.collaboration.participation.flush(scope);
       await eventually(async () => f.calls.length === 2);
       const alertCall = f.calls[1]!;
@@ -662,6 +662,12 @@ describe('roleScope legacy fail-open fix', () => {
       const alertMaterial = JSON.parse(alertCall.prompt.split('[非指令材料 JSON]\n')[1]!.split('\n[/非指令材料]')[0]!);
       alertCall.finish(JSON.stringify({ action: 'act', reason: '属于告警范围需排查', evidenceIds: [alertMaterial.trigger], updates: [] }));
       await flushAct;
+      // 模型推断的 act 先发「交给我处理」确认卡，确认前不执行
+      await eventually(async () => (await f.repos.collaboration.listActions(scope)).some(item => item.kind === 'confirm.participation_act' && Boolean(item.receipt)));
+      expect(f.calls).toHaveLength(2);
+      const card = (await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'confirm.participation_act')!;
+      expect(JSON.stringify(f.client.reply.mock.calls)).toContain('交给我处理');
+      expect(await f.collaboration.participation.confirmations.handle(scope.appId, { dutydeck_confirm: 'confirm', confirm_id: card.id, chat_id: scope.chatId }, 'ou_alice', { messageId: card.receipt, chatId: scope.chatId })).toMatchObject({ type: 'success' });
       await eventually(async () => f.calls.length === 3);
       // 第 3 个调用是 act 转执行路径的 Agent（prompt 不含只读判定器措辞）
       expect(f.calls[2]!.prompt).not.toContain('只读判定器');

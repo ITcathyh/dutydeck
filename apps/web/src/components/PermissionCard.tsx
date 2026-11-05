@@ -1,16 +1,18 @@
 import { useEffect, useRef, useState } from 'react';
-import { permissionDisplayText, type PermissionRequestData } from '@dutydeck/shared';
-import { Check, ShieldAlert, X } from 'lucide-react';
+import { permissionDisplayText, permissionRejectReasonMaxLength, type PermissionRequestData } from '@dutydeck/shared';
+import { Check, MessageSquareX, ShieldAlert, X } from 'lucide-react';
 import type { TimelineEvent } from '../timeline';
 import { Button } from './primitives';
 
 const resolvedLabels: Record<string, string> = { approved: '已允许', rejected: '已拒绝', cancelled: '已取消', expired: '已失效' };
 
-export function PermissionCard({ event, resolving = false, onResolve }: { event: TimelineEvent; resolving?: boolean; onResolve?(permissionId: string, approved: boolean): void | Promise<unknown> }) {
+export function PermissionCard({ event, resolving = false, onResolve }: { event: TimelineEvent; resolving?: boolean; onResolve?(permissionId: string, approved: boolean, reason?: string): void | Promise<unknown> }) {
   const permissionId = String(event.data.id ?? event.id);
   const pending = event.data.status === 'pending';
   const submitted = useRef(false);
   const [submitting, setSubmitting] = useState(false);
+  const [explaining, setExplaining] = useState(false);
+  const [reason, setReason] = useState('');
   const wasResolving = useRef(resolving);
   useEffect(() => {
     if (!pending || wasResolving.current && !resolving) {
@@ -19,12 +21,12 @@ export function PermissionCard({ event, resolving = false, onResolve }: { event:
     }
     wasResolving.current = resolving;
   }, [pending, resolving]);
-  useEffect(() => { submitted.current = false; setSubmitting(false); }, [permissionId]);
-  const decide = (approved: boolean) => {
+  useEffect(() => { submitted.current = false; setSubmitting(false); setExplaining(false); setReason(''); }, [permissionId]);
+  const decide = (approved: boolean, why?: string) => {
     if (submitted.current || resolving || !pending) return;
     submitted.current = true;
     setSubmitting(true);
-    const result = onResolve?.(permissionId, approved);
+    const result = why ? onResolve?.(permissionId, approved, why) : onResolve?.(permissionId, approved);
     if (result) void result.then(() => {}, () => {
       submitted.current = false;
       setSubmitting(false);
@@ -32,6 +34,7 @@ export function PermissionCard({ event, resolving = false, onResolve }: { event:
   };
   const processing = resolving || submitting;
   const operation = (event.data as PermissionRequestData).operation;
+  const rejectedReason = event.data.status === 'rejected' ? permissionDisplayText(event.data.reason, [], 300) : '';
   // 外壳是契约 §5 白名单第 5 类：状态语义色软底卡片配同色外圈。高度远超 48px，圆角取 rounded-lg。
   return <aside aria-label="权限审批" className="ui-timeline-item my-4 rounded-lg border border-warning-border bg-warning-soft px-4 py-3.5">
     <div className="flex items-start gap-3"><div className="mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-md bg-warning-border text-warning"><ShieldAlert size={15}/></div><div className="min-w-0 flex-1"><div className="text-body font-semibold text-primary">需要操作授权</div><p className="mt-1 text-body leading-6 text-secondary">{permissionDisplayText(event.data.title) || 'Agent 请求执行受控操作'}</p>
@@ -42,7 +45,12 @@ export function PermissionCard({ event, resolving = false, onResolve }: { event:
         {operation.command && <details><summary className="min-h-10 cursor-pointer py-2">查看命令（已脱敏）</summary><pre className="whitespace-pre-wrap break-all rounded-md bg-muted p-2">{permissionDisplayText(operation.command)}</pre></details>}
       </div> : <p className="mt-2 text-caption text-subtle">执行端未提供详细操作。</p>}
       <p className="mt-2 text-caption text-secondary">本次选择只处理这一条请求，不改变后续授权方式。</p>
-      {pending && onResolve ? <div className="mt-3 flex flex-wrap items-center gap-2"><Button variant="secondary" tone="inverse" loading={processing} onClick={() => decide(true)} icon={<Check size={14}/>}>允许本次</Button><Button variant="secondary" disabled={processing} onClick={() => decide(false)} icon={<X size={14}/>} className="border-warning-border text-warning hover:bg-warning-soft">拒绝</Button></div> : <div className="mt-2 text-caption font-medium text-subtle">{pending ? '等待当前操作者处理' : resolvedLabels[event.data.status] ?? event.data.status ?? '已处理'}</div>}
+      {pending && onResolve ? <div className="mt-3 flex flex-wrap items-center gap-2"><Button variant="secondary" tone="inverse" loading={processing} onClick={() => decide(true)} icon={<Check size={14}/>}>允许本次</Button><Button variant="secondary" disabled={processing} onClick={() => decide(false)} icon={<X size={14}/>} className="border-warning-border text-warning hover:bg-warning-soft">拒绝</Button><Button variant="secondary" disabled={processing} aria-expanded={explaining} onClick={() => setExplaining(open => !open)} icon={<MessageSquareX size={14}/>} className="border-warning-border text-warning hover:bg-warning-soft">拒绝并说明</Button></div> : <div className="mt-2 text-caption font-medium text-subtle">{pending ? '等待当前操作者处理' : `${resolvedLabels[event.data.status] ?? event.data.status ?? '已处理'}${rejectedReason ? `：${rejectedReason}` : ''}`}</div>}
+      {pending && onResolve && explaining && <div className="mt-2">
+        <textarea aria-label="拒绝原因" value={reason} maxLength={permissionRejectReasonMaxLength} disabled={processing} onChange={event => setReason(event.target.value)} placeholder="原因会记入审批记录；终端模式的 Agent 会收到，ACP 模式的只知道被拒绝"
+          className="min-h-16 w-full resize-y rounded-md border border-default bg-surface px-2.5 py-2 text-body text-primary outline-none placeholder:text-subtle focus-visible:ring-2 focus-visible:ring-focus-ring"/>
+        <div className="mt-1.5"><Button variant="secondary" loading={processing} disabled={!reason.trim()} onClick={() => decide(false, reason.trim())} icon={<X size={14}/>} className="border-warning-border text-warning hover:bg-warning-soft">提交拒绝</Button></div>
+      </div>}
       {pending && processing && <p role="status" className="mt-2 text-caption text-secondary">正在提交本次决定，等待服务端确认。</p>}
     </div></div>
   </aside>;

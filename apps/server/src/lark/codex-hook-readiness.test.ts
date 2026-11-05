@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from 'vitest';
+import { it, type TestContext } from 'vitest';
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -7,11 +7,9 @@ import { createInterface } from 'node:readline';
 import { agentConfigSchema } from '@dutydeck/shared';
 import { installLarkHook, larkHookStatus } from './security-hooks.js';
 
-const directories: string[] = [];
-afterEach(async () => { for (const directory of directories.splice(0)) await rm(directory, { recursive: true, force: true }); });
-
-async function fixture() {
-  const directory = await mkdtemp(join(tmpdir(), 'dutydeck-native-hook-')); directories.push(directory);
+// 每个用例有独立 HOME/workspace，可并发；5 秒截止用例的等待由产品常量决定，并发让它与其余用例重叠。
+async function fixture(onTestFinished: TestContext['onTestFinished']) {
+  const directory = await mkdtemp(join(tmpdir(), 'dutydeck-native-hook-')); onTestFinished(() => rm(directory, { recursive: true, force: true }));
   const home = join(directory, 'home'), workspace = join(directory, 'workspace');
   await mkdir(home); await mkdir(workspace);
   const agent = agentConfigSchema.parse({ id: 'codex-acp', name: 'Codex (ACP)', command: 'npx', protocol: 'acp', env: { CODEX_PATH: resolve('tests/fixtures/mock-codex-hooks.mjs'), CODEX_HOME: home } });
@@ -20,8 +18,8 @@ async function fixture() {
   return { directory, home, workspace, agent, state, status };
 }
 
-it('requires project loading and trust of the current generated hook, without caching successful checks', async () => {
-  const f = await fixture();
+it.concurrent('requires project loading and trust of the current generated hook, without caching successful checks', async ({ expect, onTestFinished }) => {
+  const f = await fixture(onTestFinished);
   expect(await installLarkHook(f.agent.id, f.workspace, f.agent)).toMatchObject({ installed: true, nativeReady: false, reason: expect.stringContaining('项目信任') });
   await f.state({ projectTrusted: true });
   expect(await f.status()).toMatchObject({ installed: true, nativeReady: false, reason: expect.stringContaining('尚未受信任') });
@@ -32,19 +30,19 @@ it('requires project loading and trust of the current generated hook, without ca
   expect(await f.status()).toMatchObject({ nativeReady: false });
 });
 
-it.each([
+it.concurrent.for([
   { enabled: false }, { emptyHash: true }, { missingHook: true }, { rpcError: true },
   { hookOverride: { command: 'some other command' } }, { hookOverride: { matcher: 'Read' } },
   { hookOverride: { sourcePath: '/wrong/hooks.json' } }, { hookTrustStatus: 'unknown' }
-])('fails closed for an unusable native hook: %j', async invalid => {
-  const f = await fixture();
+])('fails closed for an unusable native hook: %j', async (invalid, { expect, onTestFinished }) => {
+  const f = await fixture(onTestFinished);
   await installLarkHook(f.agent.id, f.workspace, f.agent);
   await f.state({ projectTrusted: true, hookTrustStatus: 'trusted', ...invalid });
   expect(await f.status()).toMatchObject({ installed: true, nativeReady: false });
 });
 
-it('accepts the same physical workspace through a symlink and never sends a model request', async () => {
-  const f = await fixture();
+it.concurrent('accepts the same physical workspace through a symlink and never sends a model request', async ({ expect, onTestFinished }) => {
+  const f = await fixture(onTestFinished);
   const alias = join(f.directory, 'workspace-alias'), report = join(f.directory, 'rpc.jsonl');
   await symlink(f.workspace, alias);
   await f.state({ projectTrusted: true, hookTrustStatus: 'trusted', report });
@@ -53,8 +51,8 @@ it('accepts the same physical workspace through a symlink and never sends a mode
   expect(methods).toEqual(['initialize', 'config/read', 'hooks/list']);
 });
 
-it('terminates an unresponsive metadata process at the deadline', async () => {
-  const f = await fixture();
+it.concurrent('terminates an unresponsive metadata process at the deadline', async ({ expect, onTestFinished }) => {
+  const f = await fixture(onTestFinished);
   await installLarkHook(f.agent.id, f.workspace, f.agent);
   const report = join(f.directory, 'rpc.jsonl');
   await f.state({ hang: true, report });
@@ -63,8 +61,8 @@ it('terminates an unresponsive metadata process at the deadline', async () => {
   await expect.poll(() => { try { process.kill(pid, 0); return false; } catch { return true; } }).toBe(true);
 });
 
-it.runIf(process.env.DUTYDECK_CODEX_NATIVE_TESTS === 'true')('checks a real Codex project, current hook trust and modified hash without a model turn', async () => {
-  const f = await fixture();
+it.runIf(process.env.DUTYDECK_CODEX_NATIVE_TESTS === 'true')('checks a real Codex project, current hook trust and modified hash without a model turn', async ({ expect, onTestFinished }) => {
+  const f = await fixture(onTestFinished);
   const agent = { ...f.agent, env: { CODEX_PATH: process.env.DUTYDECK_TEST_CODEX_PATH || 'codex', CODEX_HOME: f.home } };
   const status = await installLarkHook(agent.id, f.workspace, agent);
   expect(status).toMatchObject({ installed: true, nativeReady: false, reason: expect.stringContaining('项目信任') });

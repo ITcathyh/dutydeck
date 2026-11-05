@@ -283,7 +283,13 @@ export function createGithubProvider(options = {}) {
     if (!value || typeof value !== 'object' || typeof value.state !== 'string') throw new GithubError('GITHUB_RESPONSE_INVALID', 'GitHub did not return the pull request');
     return {
       state: value.merged === true || typeof value.merged_at === 'string' ? 'merged' : value.state === 'closed' ? 'closed' : 'open',
-      ...(typeof value.head?.sha === 'string' ? { headSha: value.head.sha.toLowerCase() } : {})
+      ...(typeof value.head?.sha === 'string' ? { headSha: value.head.sha.toLowerCase() } : {}),
+      // 认领已有 PR（/pr follow）要知道往哪个分支推；来自 fork 的 PR 的 head 仓库不是本仓库，宿主据此拒绝。
+      ...(typeof value.head?.ref === 'string' ? { headBranch: value.head.ref } : {}),
+      ...(typeof value.base?.ref === 'string' ? { baseBranch: value.base.ref } : {}),
+      ...(typeof value.head?.repo?.full_name === 'string' ? { headRepository: value.head.repo.full_name } : {}),
+      ...(typeof value.title === 'string' ? { title: value.title } : {}),
+      ...(typeof value.html_url === 'string' ? { url: value.html_url } : {})
     };
   }
 

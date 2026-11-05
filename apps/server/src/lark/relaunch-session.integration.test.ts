@@ -385,29 +385,20 @@ describe('卡住的任务在飞书里转到新会话（真实 Runtime + SQLite�
     expect((await h.tasks(third.id)).map(task => task.prompt)).toEqual(['重新开始']);
   });
 
-  it('旧卡收尾后页脚「查看详情」仍是登录回调按钮，不退回直链', async () => {
-    const h = await blockedTopic({ web: true });
-    const { coordinator, service } = await h.start('p2');
-    const run = await h.relaunchButton(service, 'om_queued', 'run_in_new_session');
-    expect(await coordinator.handleAction(run.value, 'ou_alice', run.context)).toMatchObject({ type: 'success' });
-    await until(() => h.lastUpdate(service, run.cardId)?.statusLabel === '已转到新会话队列');
-    const retired = h.lastUpdate(service, run.cardId);
-    expect(callbackButtonCount(retired)).toBe(1);
-    const detail = callbackValueOf(retired, 'detail');
-    expect(detail).toEqual({ action: 'detail', task_id: 'om_queued', turn: '1' });
-    // 登录链接绑定原会话：留给管理员核对的原任务在那里。
-    expect(retired.capabilities).toMatchObject({ detailLogin: true, webUrl: `https://dutydeck.example.com/sessions/${h.oldSessionId}` });
-  });
-
-  it('真实转交后在旧卡上点「查看详情」：管理员私信里的登录链接兑换出原会话，非管理员被拒且不发私信', async () => {
+  it('旧卡收尾后页脚「查看详情」仍是登录回调按钮；点它时管理员私信里的登录链接兑换出原会话，非管理员被拒且不发私信', async () => {
     const h = await blockedTopic({ web: true });
     const { coordinator, service } = await h.start('p2');
     const run = await h.relaunchButton(service, 'om_queued', 'run_in_new_session');
     expect(await coordinator.handleAction(run.value, 'ou_alice', run.context)).toMatchObject({ type: 'success' });
     await until(() => h.lastUpdate(service, run.cardId)?.statusLabel === '已转到新会话队列');
     const fresh = (await h.sessions()).find(item => item.id !== h.oldSessionId)!;
+    const retired = h.lastUpdate(service, run.cardId);
+    expect(callbackButtonCount(retired)).toBe(1);
     // 回调值取旧卡页脚按钮上的，context 是旧卡本身。
-    const detail = callbackValueOf(h.lastUpdate(service, run.cardId), 'detail');
+    const detail = callbackValueOf(retired, 'detail');
+    expect(detail).toEqual({ action: 'detail', task_id: 'om_queued', turn: '1' });
+    // 登录链接绑定原会话：留给管理员核对的原任务在那里。
+    expect(retired.capabilities).toMatchObject({ detailLogin: true, webUrl: `https://dutydeck.example.com/sessions/${h.oldSessionId}` });
     const privateMessages = () => service.send.mock.calls.map(([input]) => input as any).filter(input => input.receiveId);
 
     expect(await coordinator.handleAction(detail, 'ou_mallory', run.context)).toMatchObject({ type: 'warning', content: expect.stringContaining('仅机器人管理员') });

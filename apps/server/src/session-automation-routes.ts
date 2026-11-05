@@ -150,6 +150,13 @@ export async function registerSessionAutomationRoutes(app: FastifyInstance, opti
     return { pullRequest: await pullRequests().prepare(request.params.sessionId, input, actorId) };
   });
 
+  // 认领已有的 PR：权限与开 PR 相同，认领后直接开始跟进。
+  app.post<{ Params: { sessionId: string } }>('/api/sessions/:sessionId/pull-requests/follow', async request => {
+    const actorId = await authorize(request, request.params.sessionId, 'run.interrupt');
+    const input = parse(followInputSchema, request.body ?? {});
+    return { pullRequest: await pullRequests().follow(request.params.sessionId, input, actorId) };
+  });
+
   app.post<{ Params: { sessionId: string; id: string } }>('/api/sessions/:sessionId/pull-requests/:id/confirm', async request => {
     const actorId = await authorize(request, request.params.sessionId, 'run.interrupt');
     await owned(request.params.sessionId, request.params.id);
@@ -164,3 +171,4 @@ export async function registerSessionAutomationRoutes(app: FastifyInstance, opti
 }
 
 const prepareInputSchema = z.object({ title: z.string().trim().max(120).optional() }).strict();
+const followInputSchema = z.object({ pullRequest: z.string().trim().min(1).max(2_000) }).strict();

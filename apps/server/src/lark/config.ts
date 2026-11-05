@@ -189,7 +189,11 @@ const invalidForwardingMessage = '存储的 cardActionForwarding 无效；请提
 export const larkConfigBlockingError = (config: StoredLarkConfig): string | undefined =>
   invalidLarkFields.get(config)?.values().next().value?.message;
 
-const serializeLarkConfigs = (configs: StoredLarkConfig[]) => JSON.stringify(configs.map(stored => {
+// 整条解析失败的机器人配置：不进运行时，原样挂在读出的列表上，写回时追加在后面，
+// 不让一条坏配置在下一次保存时连同其他机器人一起丢掉。同 appId 的机器人重新保存后即替换它。
+const invalidLarkEntries = new WeakMap<StoredLarkConfig[], unknown[]>();
+
+const serializeLarkConfigs = (configs: StoredLarkConfig[], preserved: unknown[] = invalidLarkEntries.get(configs) ?? []) => JSON.stringify([...configs.map(stored => {
   const invalid = invalidLarkFields.get(stored);
   if (!invalid) return stored;
   const config: Record<string, unknown> = { ...stored };
@@ -199,7 +203,19 @@ const serializeLarkConfigs = (configs: StoredLarkConfig[]) => JSON.stringify(con
     config[field] = raw;
   }
   return config;
-}));
+}), ...preserved.filter(raw => !configs.some(config => config.appId === rawAppId(raw)))]);
+
+const rawAppId = (raw: unknown) => raw && typeof raw === 'object' && typeof (raw as { appId?: unknown }).appId === 'string' ? (raw as { appId: string }).appId : undefined;
+
+/** 一条已存的机器人配置能否解析；不能时返回原因（不含配置内容）。doctor 用它报告被隔离的条目。 */
+export function larkBotEntryError(raw: unknown): string | undefined {
+  try { normalizeStoredConfig(raw as Partial<StoredLarkConfig>); return undefined; }
+  catch (error) {
+    // 只报字段路径和校验说明，不带原值（可能是密钥）。
+    const issue = (error as { issues?: Array<{ path?: unknown[]; message?: string }> })?.issues?.[0];
+    return issue ? `${issue.path?.join('.') || '配置'}：${issue.message ?? '格式不对'}` : '配置结构无效';
+  }
+}
 
 function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskControlShape): StoredLarkConfig | undefined {
   if (!parsed.appId || !parsed.appSecret) return undefined;
@@ -321,18 +337,25 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
 export async function readLarkConfigs(repository?: ConfigRepository, options: { readOnly?: boolean } = {}): Promise<StoredLarkConfig[]> {
   const stored = await repository?.get(larkBotsConfigKey);
   if (stored) {
-    try {
-      const parsed = JSON.parse(stored);
-      if (Array.isArray(parsed)) {
-        const configs = parsed.map(item => normalizeStoredConfig(item)).filter((item): item is StoredLarkConfig => Boolean(item));
-        if (!options.readOnly && parsed.some(needsRiskControlMigration)) {
-          if (repository?.compareAndSet) {
-            if (!await repository.compareAndSet(larkBotsConfigKey, stored, serializeLarkConfigs(configs))) return readLarkConfigs(repository, options);
-          } else await repository?.set(larkBotsConfigKey, serializeLarkConfigs(configs));
-        }
-        return configs;
-      }
-    } catch {}
+    // lark.bots 已存在时绝不回退迁移旧键 lark.credentials：那会用一个旧机器人覆盖全部现有配置。
+    let parsed: unknown;
+    try { parsed = JSON.parse(stored); } catch { return []; }
+    if (!Array.isArray(parsed)) return [];
+    const configs: StoredLarkConfig[] = [];
+    const preserved: unknown[] = [];
+    for (const item of parsed) {
+      try {
+        const config = normalizeStoredConfig(item);
+        if (config) configs.push(config);
+      } catch { preserved.push(item); }
+    }
+    if (preserved.length) invalidLarkEntries.set(configs, preserved);
+    if (!options.readOnly && parsed.some(item => !preserved.includes(item) && needsRiskControlMigration(item))) {
+      if (repository?.compareAndSet) {
+        if (!await repository.compareAndSet(larkBotsConfigKey, stored, serializeLarkConfigs(configs))) return readLarkConfigs(repository, options);
+      } else await repository?.set(larkBotsConfigKey, serializeLarkConfigs(configs));
+    }
+    return configs;
   }
   const legacy = await repository?.get(larkCredentialsConfigKey);
   if (!legacy) return [];
@@ -707,8 +730,11 @@ async function deleteLarkConfigUnlocked(repository: ConfigRepository | undefined
   if (!repository) throw new LarkServiceError('LARK_CONFIG_STORAGE_UNAVAILABLE', 'Lark configuration storage is unavailable', 503);
   const configs = await readLarkConfigs(repository);
   const next = configs.filter(config => config.appId !== appId);
-  if (next.length === configs.length) throw new LarkServiceError('LARK_BOT_NOT_FOUND', `Unknown Lark bot: ${appId}`, 404);
-  await repository.set(larkBotsConfigKey, serializeLarkConfigs(next));
+  // 解析失败被隔离的条目也能按 appId 删掉。
+  const preserved = invalidLarkEntries.get(configs) ?? [];
+  const keptPreserved = preserved.filter(raw => rawAppId(raw) !== appId);
+  if (next.length === configs.length && keptPreserved.length === preserved.length) throw new LarkServiceError('LARK_BOT_NOT_FOUND', `Unknown Lark bot: ${appId}`, 404);
+  await repository.set(larkBotsConfigKey, serializeLarkConfigs(next, keptPreserved));
   return next;
 }
 

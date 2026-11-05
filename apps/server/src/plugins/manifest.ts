@@ -274,8 +274,13 @@ export async function loadPluginDirectory(rootInput: string, options: { reserved
     if (raw === undefined) continue;
     const trigger = pluginTriggerSchema.safeParse(raw);
     if (!trigger.success) { issues.push(...zodIssues(file, trigger.error)); continue; }
-    for (const field of ['botAppId', 'chatId'] as const) for (const match of trigger.data.target[field].matchAll(/\{\{\s*config\.([a-z][a-z0-9_]*)\s*\}\}/g)) {
-      if (!manifest.userConfig?.[match[1]!]) issues.push({ file, field: `target.${field}`, message: `引用了未在 userConfig 声明的配置项 ${match[1]}` });
+    const template = trigger.data.workTemplate;
+    const configured: Array<[string, string]> = [
+      ['target.botAppId', trigger.data.target.botAppId], ['target.chatId', trigger.data.target.chatId],
+      ...(template ? [['workTemplate.session', template.session], ['workTemplate.id', template.id], ...(typeof template.version === 'string' ? [['workTemplate.version', template.version]] : [])] as Array<[string, string]> : [])
+    ];
+    for (const [field, value] of configured) for (const match of value.matchAll(/\{\{\s*config\.([a-z][a-z0-9_]*)\s*\}\}/g)) {
+      if (!manifest.userConfig?.[match[1]!]) issues.push({ file, field, message: `引用了未在 userConfig 声明的配置项 ${match[1]}` });
     }
     triggers.set(id, trigger.data);
   }

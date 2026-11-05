@@ -18,7 +18,9 @@
  * history.jsonl is scanned from the END (recent sessions live at the tail)
  * and the LAST marker hit wins: a session resumed several times appends a
  * fresh line each time, and the newest line names the session that is
- * actually still alive.
+ * actually still alive. Only a native session's FIRST submit counts: the
+ * marker rides on the first prompt, so the same marker pasted into a later
+ * message of another session (a quoted log, a copied prompt) cannot claim it.
  *
  * The rollout fallback additionally requires the recorded `cwd` to match, so
  * a marker that somehow leaked into another project's transcript cannot
@@ -78,7 +80,16 @@ function recordRolloutMarkers(text: string, markers: Marker[], state: RolloutMar
   }
 }
 
-/** Read history once, retaining the newest hit for each marker format. */
+/** Is line `index` the earliest submit of `nativeId` in the history window? */
+function isFirstSubmit(lines: string[], index: number, nativeId: string): boolean {
+  for (let i = 0; i < index; i++) {
+    if (!lines[i]!.includes(nativeId)) continue;
+    try { if (JSON.parse(lines[i]!.trim())?.session_id === nativeId) return false; } catch { /* partial or malformed line */ }
+  }
+  return true;
+}
+
+/** Read history once, retaining the newest first-submit hit for each marker format. */
 function findSessionIdsInHistory(historyPath: string, markers: Marker[]): Array<string | undefined> {
   const matches: Array<string | undefined> = markers.map(() => undefined);
   const lines = readTail(historyPath, HISTORY_TAIL_BYTES).split('\n');
@@ -88,6 +99,7 @@ function findSessionIdsInHistory(historyPath: string, markers: Marker[]): Array<
     let parsed: any;
     try { parsed = JSON.parse(line.trim()); } catch { continue; }
     if (typeof parsed?.text !== 'string' || typeof parsed.session_id !== 'string' || !parsed.session_id) continue;
+    if (!isFirstSubmit(lines, i, parsed.session_id)) continue;
     markers.forEach((marker, index) => {
       if (!matches[index] && matchesMarker(parsed.text, marker)) matches[index] = parsed.session_id;
     });

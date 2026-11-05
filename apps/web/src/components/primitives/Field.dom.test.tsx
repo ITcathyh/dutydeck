@@ -9,7 +9,7 @@ import { Field, Input, Select, Textarea } from './Field';
 
 describe('Field label 绑定', () => {
   it('label 的 htmlFor 指向控件 id，点标签能聚焦控件', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(<Field label="工作目录"><Input/></Field>);
     const input = screen.getByLabelText('工作目录') as HTMLInputElement;
     const label = document.querySelector('label')!;

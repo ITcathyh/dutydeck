@@ -15,7 +15,13 @@ it('reads only the latest matching permission event and sees external commits wi
   const directory = mkdtempSync(join(tmpdir(), 'permission-events-'));
   const path = join(directory, 'state.db'), writer = createRepositories(path), reader = createRepositories(path);
   try {
-    for (let sequence = 1; sequence <= 5000; sequence++) await writer.events.append({ ...permission('s', 't', sequence), type: 'text', data: { text: 'x'.repeat(500) } });
+    // 5000 条无关的历史文本事件只用来撑大表，单事务批量写入；被测的权限事件仍走 events.append。
+    const filler = new Database(path);
+    const insert = filler.prepare('INSERT INTO events (id,session_id,task_id,sequence,type,timestamp,data) VALUES (?,?,?,?,?,?,?)');
+    filler.transaction(() => {
+      for (let sequence = 1; sequence <= 5000; sequence++) insert.run(`s-${sequence}`, 's', 't', sequence, 'text', String(sequence), JSON.stringify({ text: 'x'.repeat(500) }));
+    })();
+    filler.close();
     await writer.events.append(permission('s', 't', 5001));
     await writer.events.append(permission('s', 'other-task', 5002, 'rejected'));
     await writer.events.append(permission('other-session', 't', 5003, 'rejected'));

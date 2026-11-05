@@ -50,7 +50,8 @@ dutydeck deploy prune --releases /path/to/releases
 - **并发部署与清理**：共用同一个实际发布根目录的操作互斥，包括不同 unit 的部署、`--no-restart` 和手动 `deploy prune`（含 `--dry-run`）。已有操作进行时，后来的命令会明确报忙并拒绝执行，待前一操作结束后重试；不同发布根目录可独立操作。
 - **备份期间保持暂停接单**：排空后先备份数据库再切换版本，备份期间每 5 秒续一次排空。续期失败，或备份结束时又有任务在执行，部署不切换版本、不重启，旧服务继续运行，记为失败并写明原因；等任务结束后重新部署，确认可以中断任务时加 `--force`。
 - **回滚**：健康检查不过时先停服务。多个 unit 共用同一个 `current` 时，以目标 unit 实际运行的版本为回滚目标；无法核实运行版本时拒绝切换。目标已停服时，历史上部署成功的版本只有在数据库 schema 与当前匹配才作为回滚候选；确认 schema 没变才自动切回，schema 变了就停止自动回滚，保护数据，不会恢复旧数据库快照。
-- **自动清理**：每次部署成功后保留最新 5 个发布目录和部署记录，其中只有最新 2 份记录留着数据库备份（含本次），更早的记录只删备份文件、保留 `manifest.json`。deploy 建的记录超过 24 小时仍没有 `manifest.json`（部署进程被强制杀掉留下的），不占保留个数，直接删除。`current`、它的上一版和仍被运行中进程引用的版本永远保留；自动清理和手动 `deploy prune` 都会额外保留各 unit 最近一次成功部署的版本。清理失败只告警，不影响部署结果。
+- **缺地址或数据库时拒绝**：目标 unit 没记录可用的健康检查地址或数据库路径（例如被 `dutydeck stop` 停过）时，deploy 直接拒绝，不切换版本也不重启。先启动该 unit 让它记下地址，或用 `--runtime` 指向写有 `address`、`databasePath` 的 `deployment.json`。
+- **自动清理**：每次部署成功后保留最新 5 个发布目录；部署记录按 unit 分别保留最新 5 个，每个 unit 只有最新 2 份记录留着数据库备份（含本次），同一发布根下依次部署多个 unit 时互不挤占。更早的记录只删备份文件、保留 `manifest.json`；`manifest.json` 里没记 unit 的旧记录不按份数删备份。deploy 建的记录超过 24 小时仍没有 `manifest.json`（部署进程被强制杀掉留下的），不占保留个数，直接删除。`current`、它的上一版和仍被运行中进程引用的版本永远保留；自动清理和手动 `deploy prune` 都会额外保留各 unit 最近一次成功部署的版本。清理失败只告警，不影响部署结果。
 - **历史数据保留**：服务每小时分批清理一次数据库里的历史数据，只动已结束的任务，未结束、结果未知和旧版待退役会话的数据不动：终端模式超过 30 天的轮次只留最后一屏的内容；旧版本存的会话状态快照和工具调用镜像超过 30 天删除；群策略、群绑定、群信息和角色的修订记录每项只留最近 20 条。事件记录本身不删，Web 历史仍然完整连续。已有旧库的终端输出存在缺口时，网页仍可展开历史轮次、原始日志和执行追踪，显示剩余记录；读取未到达请求终点或分页异常仍会报错，可重试。清理不做 VACUUM，数据库文件不会变小，腾出的空间留给后续写入复用；要缩小文件，停服后对数据库执行 `VACUUM`。
 - **手动清理** `deploy prune`：选项 `--releases/--runtime/--unit`、`--keep N`（默认 5）、`--dry-run`、`--include-unmarked`、`--json`。手工部署留下的记录（没有 `created_by: dutydeck deploy` 标记）默认不动，只有加 `--include-unmarked` 才会清，并且仍被进程引用或 1 小时内改过的会跳过。最近 1 小时内改过的 `.partial` 目录同样跳过（可能是正在进行的部署）。
 - **单 Bot 独立进程**：`dutydeck start --foreground --database /path/to/bot.db --bot-app-id cli_xxx`。
@@ -206,10 +207,10 @@ dutydeck settings bot set cli_xxx cardActionForwarding=null 'eventHandlers=[{"id
 - 不要在非本机地址上用 `--no-auth`：外部人员可能借 Agent 在宿主机上执行命令。在非回环地址关闭认证会拒绝启动，除非显式加 `--unsafe-no-auth`。
 - **凭据保护**：机器人对外开放后，防止群里其他人借 Agent 套出本机的令牌、密钥和 Agent 会话记录。跟随机器人设置里的「风险控制」，只约束不在「高危操作允许名单」里的发送人和其他机器人；名单里的人照常使用，完全信任模式也不受影响。
   - 约束提示：给 Agent 加一条规则，不读取、复制、输出或发送凭据和 Agent 会话记录（如 `~/.claude`、`~/.claude.json`、`~/.codex`），被要求时一句话拒绝。
-  - 强制拦截：另外在工具调用前检查，拦下读写凭据文件和会话记录（如 `~/.codex/auth.json`、`~/.ssh` 私钥、`.env`）、打印环境变量里的密钥这类操作，命令不会执行，Agent 收到拦截原因。Claude Code（终端和 ACP）和完全信任模式的 Codex 终端，这个检查随启动参数传给本次启动的 Agent，不改 `~/.claude`、`~/.codex` 下的全局配置；Codex 走 ACP 时由工作区里的拦截 Hook 检查。
+  - 强制拦截：另外在工具调用前检查，拦下读写凭据文件和会话记录（如 `~/.codex/auth.json`、`~/.ssh` 私钥、`.env`）、打印环境变量里的密钥这类操作，命令不会执行，Agent 收到拦截原因。Claude Code（终端和 ACP）和完全信任模式的 Codex 终端，这个检查随启动参数传给本次启动的 Agent，不改 `~/.claude`、`~/.codex` 下的全局配置；Codex 走 ACP 时由工作区里的拦截 Hook 检查，Cursor、Trae 和 Pi 也由工作区 Hook（Pi 是项目扩展）检查，命令类工具（如 Cursor 的 `Shell`、Pi 的 `bash`）和文件工具用同一套规则。本轮风控策略文件（`.dutydeck/` 下）和这些 Hook 配置（`.codex/hooks.json`、`.cursor/hooks.json`、`.trae/hooks.json`、`.claude/settings.json`、`.pi/extensions/`）同样受保护，Agent 不能改掉拦截再执行；Hook 文件和本版本生成的内容不一致时显示未安装，需要重新安装。
   - Codex（包括 `codex-acp`）的工作区 Hook 只有被原生 Codex 加载、启用，并信任当前内容哈希时才算就绪；仅有 `hooks.json` 文件不够。保存强制风控或启动会话时会通过无模型调用的 `config/read`、`hooks/list` 检查；不支持检查、出错或超过 5 秒均拒绝放行。请使用该 Agent 相同的 `CODEX_PATH` / `CODEX_HOME`，在目标工作区确认项目信任，再用 `/hooks` 仅审核 Dutydeck PreToolUse Hook，最后在 Web 点「重新检查 Hook」。Dutydeck 不自动信任项目或其他 Hook。
   - Claude Code 终端（包括 adapter 为 `claude-code` 的自定义 Agent，如 ccflash）和经 Dutydeck 启动的 ACP Claude，这个检查同时管高危操作正则，开强制拦截不用装工作区 Hook。自定义的 ACP Claude 要用随版本发布的 `dist/agents/claude-acp.mjs` 启动，自己拷贝出去的旧版本不带这个检查。
-  - 任何模式下，飞书卡片、结果和群工具发出的消息都会把常见格式的密钥（如 `sk-ant-`、`ghp_`、JWT）和服务、Agent 环境变量里的密钥值替换成 `[REDACTED]`。
+  - 任何模式下，飞书卡片、结果和群工具发出的消息都会把常见格式的密钥（如 `sk-ant-`、`ghp_`、JWT）和服务、Agent 环境变量里的密钥值替换成 `[REDACTED]`。Agent 回复和审批请求里写的飞书卡片标签（如 `<at id=all></at>`、`<text_tag>`、`<font>`）按文字显示，不会 @ 人或显示成彩色标签。
 
 ## 7. 给 Agent 用的命令行（`dutydeck agent`）
 
@@ -222,6 +223,7 @@ dutydeck settings bot set cli_xxx cardActionForwarding=null 'eventHandlers=[{"id
 - **输出**：stdout 只有一个 JSON。成功 `{"ok":true,"data":...}`；失败 `{"ok":false,"error":{"code","message","hint"?,"params"?:[{"name","reason"}]}}`，退出码非 0。`params` 指出哪个参数不对，能给可选值时写在 `reason` 里。
 - **查看**：`status`、`agents`、`tasks [--page]`、`queue`、`schedules`、`ci`，以及 `group`、`history`、`memory`、`work`、`collaborate` 的读取命令。结果直接交给 Agent，不在群里发卡；权限与这一轮的发起人在原话题自己发这条命令相同。
 - **写入**：`session new/resume/fork`、`retry`、`plan --task`、`schedule create/enable/disable`、`queue cancel/top`、`access grant/revoke --member`、`pr open`、`ci wait/fix/cancel`、`repair` 在这一轮的请求消息下发确认卡，点「确认」后与对应的斜杠命令走同一条路执行。`group send`、`memory add` 等照旧直接生效。写入命令都支持 `--dry-run`：只返回将要做什么、要不要确认、确认卡上写什么，不执行、不发卡。
+- **修订目标计划**：`work revise <目标编号> --file revision.json`，JSON 为 `{"expectedRevision":<show 返回的 revision>,"plan":{完整新计划},"reason":"原因"}`；`--dry-run` 由服务计算影响（保留、重跑、先停止、删除、新增），不改动目标。只收窄的修订直接生效，扩大范围或目标本身要求确认时记为待确认修订，等用户「确认修订」；在此之前目标按当前计划继续执行。规则见 [目标计划修订](web-console.md#work-plan-revision)；旧入口 `dutydeck work revise` 用法相同。
 - **任务归属**：读取、写入、最终交付和交接都校验本次执行的 `--turn`。缺失、旧任务或同任务旧尝试的凭证会被拒绝；晚到的旧请求不会改算到新任务和新请求人。帮助仍可离线查看。
 - **升级旧会话**：旧提示词里的无轮次工具调用不再接受。使用宿主在本轮提供的新命令前缀；上一轮的前缀不能跨轮复用。旧的群工具、历史和记忆入口可在顶层传入凭证，例如 `dutydeck --agent-turn "$TURN" group self`。
 
@@ -231,7 +233,7 @@ dutydeck settings bot set cli_xxx cardActionForwarding=null 'eventHandlers=[{"id
 
 ## 8. 自动只读巡检
 
-实例启动约 5 分钟后首次巡检，之后每小时检查长连接、未确认的结果投递、排队受阻、结果未知、逾期计划及后台记忆作业。发现新问题时汇总私信机器人所有者；同一问题恢复前只报一次，恢复时不发消息。巡检不修改或重试任务，Web 实例不发私信。通知发送结果未知且超过去重窗口时不重复私信，可在 doctor 中查看。运行 `dutydeck doctor` 可查看未恢复的问题及首次发现时间。
+实例启动约 5 分钟后首次巡检，之后每小时检查长连接、未确认的结果投递、排队受阻、结果未知、逾期计划及后台记忆作业。发现新问题时汇总私信机器人所有者；同一问题恢复前只报一次，恢复时不发消息。巡检不修改或重试任务，Web 实例不发私信。私信发送失败时约 5 分钟后重发同一条（同一去重编号），直到去重窗口（55 分钟）用完；之后结果仍未知时不重复私信，可在 doctor 中查看。运行 `dutydeck doctor` 可查看未恢复的问题及首次发现时间。
 
 已恢复的巡检发现保留 7 天，每个范围最多保留最近 1000 条；活动问题和未完成通知引用的记录不清理。
 

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { previewSessionSchedule, type AutomationDeliveryTarget, type CreateSessionScheduleInput, type UpdateSessionScheduleInput, type PublicSessionSchedule as SessionSchedule } from '@dutydeck/shared';
+import { previewSessionSchedule, resolveScheduleDeadline, type AutomationDeliveryTarget, type CreateSessionScheduleInput, type UpdateSessionScheduleInput, type PublicSessionSchedule as SessionSchedule } from '@dutydeck/shared';
 import { api, ApiError, type Session } from '../api';
 import { currentInstance } from '../instance';
 import { requestId } from '../request-id';
@@ -11,8 +11,22 @@ import { Banner, Button, Field, Input, Select, Spinner, Textarea, Dialog } from 
 import { isSessionActionDisabled } from './ui';
 
 const ciLabels: Record<string, string> = { waiting: '等待构建', dispatching: '提交续作中', accepted: '已提交续作', completed: '续作已结束', cancelled: '已取消', expired: '已过期', stale_head: '提交已变化，等待停止', session_inactive: '会话已结束', revoked: '权限已撤销', error: '查询失败' };
-import { runLabels } from './automation-display';
+import { runLabels, runStateLabels } from './automation-display';
 export { runLabels } from './automation-display';
+
+/** UTC 时间换成指定时区的 datetime-local 输入值。 */
+function localInputValue(value: string, timezone: string) {
+  try { return new Date(value).toLocaleString('sv-SE', { timeZone: timezone, hour12: false }).replace(' ', 'T').slice(0, 16); }
+  catch { return ''; }
+}
+
+export function scheduleFollowUp(item: SessionSchedule): string[] {
+  return [
+    ...(item.workTemplate ? [`每次启动工作项模板 ${item.workTemplate.id}（版本 ${item.workTemplate.version}），以执行指令为目标`] : []),
+    ...(item.completionCondition ? [`直到：${item.completionCondition}（达成后由 Agent 停用）`] : []),
+    ...(item.deadlineAt ? [`截止：${automationTime(item.deadlineAt, item.timezone)}（到点仍未确认完成就自动停用并告知）`] : [])
+  ];
+}
 
 export function scheduleNextExecution(item: SessionSchedule): string {
   if (!item.enabled) return '未启用，暂无下一次执行';
@@ -72,6 +86,10 @@ export function SessionAutomationPanel({ session, initialScheduleId, openCreateF
   const [mode, setMode] = useState<'session' | 'independent' | 'fresh'>('session');
   const [misfirePolicy, setMisfirePolicy] = useState<'skip' | 'coalesce'>('coalesce');
   const [latenessMinutes, setLatenessMinutes] = useState('');
+  const [until, setUntil] = useState('');
+  const [deadline, setDeadline] = useState('');
+  const [template, setTemplate] = useState('');
+  const templates = useQuery({ queryKey: ['work-templates', currentInstance() ?? null, session.id], queryFn: () => api.workItems(session.id), retry: false, enabled: !isSessionActionDisabled(session) });
 
   const [notice, setNotice] = useState('');
   const [enabling, setEnabling] = useState<SessionSchedule>();
@@ -107,7 +125,10 @@ export function SessionAutomationPanel({ session, initialScheduleId, openCreateF
       name: name.trim(), prompt: prompt.trim(), timezone, mode, misfirePolicy, ...(latenessMinutes ? { maxLatenessSeconds: Number(latenessMinutes) * 60 } : {}),
       trigger,
       dstPolicy: editing?.dstPolicy ?? { gap: 'skip', overlap: 'first' },
-      condition: condition === 'always' ? { kind: 'always' } : { kind: 'ci_new_failure', ...(conditionWorkflow.trim() ? { workflow: conditionWorkflow.trim() } : {}) }
+      condition: condition === 'always' ? { kind: 'always' } : { kind: 'ci_new_failure', ...(conditionWorkflow.trim() ? { workflow: conditionWorkflow.trim() } : {}) },
+      ...(until.trim() ? { completionCondition: until.trim() } : {}),
+      ...(deadline ? { deadlineAt: resolveScheduleDeadline(deadline, timezone) } : {}),
+      ...(template ? { workTemplate: { id: template.slice(0, template.lastIndexOf('@')), version: Number(template.slice(template.lastIndexOf('@') + 1)) } } : {})
     };
     return input;
   };
@@ -123,8 +144,11 @@ export function SessionAutomationPanel({ session, initialScheduleId, openCreateF
     if (misfirePolicy !== (editing.misfirePolicy ?? 'coalesce')) patch.misfirePolicy = misfirePolicy;
     if (input.maxLatenessSeconds !== editing.maxLatenessSeconds) patch.maxLatenessSeconds = input.maxLatenessSeconds ?? null;
     if (mode !== (editing.mode ?? 'session') && mode !== 'independent') patch.mode = mode;
+    if (input.completionCondition !== editing.completionCondition) patch.completionCondition = input.completionCondition ?? null;
+    if (input.deadlineAt !== editing.deadlineAt) patch.deadlineAt = input.deadlineAt ?? null;
+    if (JSON.stringify(input.workTemplate ?? null) !== JSON.stringify(editing.workTemplate ?? null)) patch.workTemplate = input.workTemplate ?? null;
     return Object.keys(patch).length === 1 ? Promise.resolve({ schedule: editing }) : api.updateSchedule(editing.sessionId, editing.id, patch);
-  }, onSuccess: async () => { await refresh(); setNotice(editing ? '计划已更新。' : '计划已保存，点击「启用」后才会运行。'); setEditing(undefined); setName(''); setPrompt(''); }, onError: refresh });
+  }, onSuccess: async () => { await refresh(); setNotice(editing ? '计划已更新。' : '计划已保存，点击「启用」后才会运行。'); setEditing(undefined); setName(''); setPrompt(''); setUntil(''); setDeadline(''); setTemplate(''); }, onError: refresh });
   const edit = (item: SessionSchedule) => {
     setMode(item.mode ?? 'session'); setMisfirePolicy(item.misfirePolicy ?? 'coalesce'); setLatenessMinutes(item.maxLatenessSeconds ? String(item.maxLatenessSeconds / 60) : '');
     setEditing(item); setName(item.name); setPrompt(item.prompt); setTimezone(item.timezone); setKind(item.trigger.kind); setCondition(item.condition.kind);
@@ -132,6 +156,8 @@ export function SessionAutomationPanel({ session, initialScheduleId, openCreateF
     if (item.trigger.kind === 'cron') setCron(item.trigger.expression);
     if (item.trigger.kind === 'at') setAt(item.trigger.localDateTime);
     setConditionWorkflow(item.condition.kind === 'ci_new_failure' ? item.condition.workflow ?? '' : '');
+    setUntil(item.completionCondition ?? ''); setDeadline(item.deadlineAt ? localInputValue(item.deadlineAt, item.timezone) : '');
+    setTemplate(item.workTemplate ? `${item.workTemplate.id}@${item.workTemplate.version}` : '');
   };
   useEffect(() => {
     if (!initialScheduleId || openedSchedule.current === initialScheduleId) return;
@@ -175,7 +201,10 @@ export function SessionAutomationPanel({ session, initialScheduleId, openCreateF
         <p className="text-caption text-secondary">{mode === 'independent' ? '只使用下方显式指令，不读取来源聊天的新消息。创建时冻结执行身份、模型、权限和交付位置；Git 仓库创建专用受管 worktree，失败则拒绝创建。资源协调仅覆盖当前实例数据库，其他实例和外部工具不受此约束。' : mode === 'fresh' ? '每次触发在一个新会话里只执行下方指令，不带聊天历史，适合固定的更新、部署、巡检。保存时冻结当前任务的 Agent、目录、模型和权限；上一次的执行会话在下一次触发时归档。来源任务停止或归档后，下一次触发改用新会话。' : '沿用当前任务目录和聊天上下文；来源任务停止或归档后，下一次触发改用新会话。'}{editing?.mode === 'independent' && '独立计划保存后不能切换模式；需要其他模式时创建新计划。'}</p>
         <p className="break-all text-caption text-subtle">执行身份：{editing?.executionContext?.agentId ?? session.agentId} · 模型 {editing?.executionContext?.model ?? session.model ?? 'Agent 默认模型'} · 权限 {editing?.executionContext?.permissionMode ?? session.permissionMode ?? '当前任务权限'} · 目录 {editing?.executionContext?.cwd ?? session.cwd}</p>
         <Field label="计划名称"><Input required value={name} maxLength={200} onChange={event => setName(event.target.value)}/></Field>
-        <Field label="执行指令"><Textarea required rows={2} value={prompt} maxLength={20000} onChange={event => setPrompt(event.target.value)}/></Field>
+        <Field label={template ? '工作项目标' : '执行指令'}><Textarea required rows={2} value={prompt} maxLength={20000} onChange={event => setPrompt(event.target.value)}/></Field>
+        {(!!templates.data?.templates?.length || template) && <Field label="每次执行" hint="选择模板后，每次触发以上面的内容为目标启动这个已保存的工作项模板；需要确认的计划仍要人工确认。模板计划只支持沿用当前任务、每次到期执行，不支持完成条件"><Select value={template} onChange={event => setTemplate(event.target.value)}><option value="">执行上面的指令</option>{templates.data?.templates?.map(item => <option key={`${item.id}@${item.version}`} value={`${item.id}@${item.version}`}>启动工作项模板：{item.name}（版本 {item.version}）</option>)}{template && !templates.data?.templates?.some(item => `${item.id}@${item.version}` === template) && <option value={template}>已保存的模板 {template}（当前不可见）</option>}</Select></Field>}
+        {!template && <Field label="一直跟进，直到（可选）" hint="每次运行把这个条件告诉 Agent；它确认达成后会停用本计划（需要本轮提供 stop-self，飞书来源的任务支持）。只用于循环计划"><Textarea rows={2} value={until} maxLength={2000} onChange={event => setUntil(event.target.value)} placeholder="例如：PR 已合并且 CI 通过"/></Field>}
+        <Field label="截止时间（可选）" hint="按下方时区的当地时间；到点仍未确认完成就自动停用并告知。只用于循环计划"><Input type="datetime-local" value={deadline} onChange={event => setDeadline(event.target.value)}/></Field>
         <Field label="触发方式"><Select value={kind} onChange={event => setKind(event.target.value as typeof kind)}><option value="at">一次</option><option value="daily">每天</option><option value="weekly">每周</option><option value="interval">固定间隔</option><option value="cron">高级 Cron</option></Select></Field>
         {(kind === 'daily' || kind === 'weekly') && <Field label="执行时间" hint="按下方时区的当地时间执行"><Input type="time" required value={time} onChange={event => setTime(event.target.value)}/></Field>}
         {kind === 'weekly' && <Field label="星期"><Select value={weekday} onChange={event => setWeekday(event.target.value)}>{['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'].map((label, index) => <option key={index} value={index}>{label}</option>)}</Select></Field>}
@@ -191,9 +220,10 @@ export function SessionAutomationPanel({ session, initialScheduleId, openCreateF
       </form>
     </details>}
     {data?.schedules.map(item => <div key={item.id} className="rounded-lg border border-default p-3 text-caption">
-      <div className="flex flex-wrap items-center justify-between gap-2"><strong>{item.name} · {item.enabled ? '已启用' : '已停用'}</strong>{data && <div className="flex flex-wrap gap-2">{canManageSchedule(item) && <><Button disabled={run.isPending} onClick={() => run.mutate(item)}>立即执行</Button><Button onClick={() => edit(item)}>编辑</Button></>}<Button disabled={toggle.isPending || (!item.enabled && !canManageSchedule(item))} onClick={() => { toggle.reset(); if (item.enabled) toggle.mutate(item); else setEnabling(item); }}>{item.enabled ? '停用' : '启用'}</Button><Button variant="danger" onClick={() => { remove.reset(); setDeleting(item); }}>删除</Button></div>}</div>
+      <div className="flex flex-wrap items-center justify-between gap-2"><strong>{item.name} · {data.runStates?.[item.id] ? runStateLabels[data.runStates[item.id]!] : item.enabled ? '已启用' : '已停用'}</strong>{data && <div className="flex flex-wrap gap-2">{canManageSchedule(item) && <><Button disabled={run.isPending} onClick={() => run.mutate(item)}>立即执行</Button><Button onClick={() => edit(item)}>编辑</Button></>}<Button disabled={toggle.isPending || (!item.enabled && !canManageSchedule(item))} onClick={() => { toggle.reset(); if (item.enabled) toggle.mutate(item); else setEnabling(item); }}>{item.enabled ? '停用' : '启用'}</Button><Button variant="danger" onClick={() => { remove.reset(); setDeleting(item); }}>删除</Button></div>}</div>
       <details className="mt-2"><summary className="cursor-pointer">执行指令与上下文</summary><p className="whitespace-pre-wrap break-words text-body text-secondary">{item.prompt}</p><p className="break-all text-subtle">{item.mode === 'independent' ? `独立计划 · 仅显式指令 · ${item.executionContext?.agentId ?? session.agentId} · ${item.executionContext?.cwd ?? '目录待核实'} · 协调范围：当前实例数据库` : item.mode === 'fresh' ? `每次新会话 · 不带聊天历史 · ${item.executionContext?.agentId ?? session.agentId} · ${item.executionContext?.cwd ?? session.cwd}` : `沿用任务上下文 · ${session.cwd}`}</p></details>
       <p className="mt-2 text-secondary">{scheduleRule(item)}</p>
+      {scheduleFollowUp(item).map(line => <p key={line} className="break-words text-secondary">{line}</p>)}
       <details className="mt-1 text-subtle"><summary className="cursor-pointer">精确规则与执行条件</summary><p className="mt-1 break-all">{item.trigger.kind === 'cron' ? item.trigger.expression : item.trigger.kind === 'interval' ? `每 ${item.trigger.everySeconds} 秒，自 ${item.trigger.anchorAt} 起` : item.trigger.localDateTime}</p><p>{item.condition.kind === 'always' ? '每次到期执行' : `CI 新失败 · ${item.condition.provider}${item.condition.workflow ? ` · ${item.condition.workflow}` : ''}`}</p></details>
       <p className="text-secondary">{scheduleNextExecution(item)}</p>
       <p className="text-subtle">{item.timezone} · {item.misfirePolicy === 'skip' ? '错过就跳过' : item.maxLatenessSeconds ? `错过后 ${item.maxLatenessSeconds / 60} 分钟内合并补一次` : '错过后最多补一次'}</p>
@@ -213,6 +243,7 @@ export function SessionAutomationPanel({ session, initialScheduleId, openCreateF
         <dl className="space-y-2 text-caption text-secondary">
           <div><dt className="font-semibold">运行模式与补跑</dt><dd>{enabling.mode === 'independent' ? '独立计划，仅显式指令，协调范围为当前实例数据库' : enabling.mode === 'fresh' ? '每次新会话，不带聊天历史' : '沿用任务上下文'} · {enabling.misfirePolicy === 'skip' ? '错过就跳过' : '恢复后最多补一次'}{enabling.maxLatenessSeconds ? `，有效期 ${enabling.maxLatenessSeconds / 60} 分钟` : ''}</dd></div><div><dt className="font-semibold">何时运行</dt><dd>{scheduleRule(enabling)}</dd></div>
           <div><dt className="font-semibold">执行条件</dt><dd>{enabling.condition.kind === 'always' ? '每次到期执行' : `CI 出现新的失败构建时执行 · ${enabling.condition.workflow ?? '所有工作流'}`}</dd></div>
+          {scheduleFollowUp(enabling).length > 0 && <div><dt className="font-semibold">跟进与截止</dt>{scheduleFollowUp(enabling).map(line => <dd key={line} className="break-words">{line}</dd>)}</div>}
           <div><dt className="font-semibold">所属任务与目录</dt><dd className="break-all">{sessionDisplayName(session, taskTitle, session.id)} · {enabling.executionContext?.cwd ?? session.cwd}</dd></div>
           <div><dt className="font-semibold">冻结的执行身份</dt><dd>{enabling.executionContext?.agentId ?? session.agentId} · 模型 {enabling.executionContext?.model ?? session.model ?? 'Agent 默认模型'} · 权限 {enabling.executionContext?.permissionMode ?? session.permissionMode ?? '当前任务权限'}</dd></div>
           <div><dt className="font-semibold">保存的投递位置</dt><dd className="break-all">{scheduleDelivery(enablingTarget, session)}</dd></div>

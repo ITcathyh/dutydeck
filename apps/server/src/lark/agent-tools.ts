@@ -454,14 +454,16 @@ function agentSelfMatchers(appId: string | undefined, openId: string | undefined
   return { isSelfIdentifier, isSelfPeer };
 }
 
-// 无显式幂等键时，按「会话 + 群 + 发送目标（--to 对象 / --reply-to 回复目标）+ 归一化内容」派生
+// 无显式幂等键时，按「会话 + 本轮任务与尝试 + 群 + 发送目标（--to 对象 / --reply-to 回复目标）+ 归一化内容」派生
 // 确定性 UUIDv5 形态的去重键，让无 key 的失败重试也命中飞书平台 uuid 去重。
-// 作用域是同一会话内的重试：chat_id 只按应用隔离、不按会话隔离，因此必须纳入 sessionId，
-// 避免同群两个不同会话输出相同内容（如两条「已完成」）被平台折叠。
+// 作用域是同一轮内的重试：chat_id 只按应用隔离、不按会话隔离，因此必须纳入 sessionId，
+// 避免同群两个不同会话输出相同内容（如两条「已完成」）被平台折叠；也必须纳入 taskId/attemptId，
+// 否则同一会话一小时内两轮发同样的「今日无新增告警」，第二轮会被平台按同一 uuid 静默吞掉。
 // 任一维度不同摘要即不同，绝不会把不同消息合并。空白归一化与发送路由保持一致，防止空格绕过合并。
-const deterministicSendUuid = (input: { sessionId: string; chatId: string; content: string; to: string; replyTo: string; inThread: boolean }) => {
+const deterministicSendUuid = (input: { sessionId: string; taskId?: string; attemptId?: string; chatId: string; content: string; to: string; replyTo: string; inThread: boolean }) => {
   const fingerprint = JSON.stringify({
     session: input.sessionId,
+    ...(input.taskId ? { task: input.taskId, attempt: input.attemptId ?? '' } : {}),
     chat: input.chatId,
     ...(input.to ? { to: input.to } : {}),
     ...(input.replyTo ? { replyTo: input.replyTo, ...(input.inThread ? { thread: true } : {}) } : {}),
@@ -1238,8 +1240,11 @@ export class LarkAgentToolsService {
       });
     }
     if (content.length > 20_000) throw new AgentGroupToolError('INVALID_GROUP_MESSAGE', 'content 不能超过 20000 个字符。', 400);
+    const turn = this.requestTurn(context.sessionId) ?? this.options.workbenchTask?.(context.sessionId);
     const idempotencyKey = input.idempotencyKey?.trim() || deterministicSendUuid({
       sessionId: context.sessionId,
+      taskId: turn?.taskId,
+      attemptId: turn?.attemptId,
       chatId: context.chatId,
       content,
       // --to 的匹配规则是 trim 后大小写不敏感，指纹做同样归一化，避免空白/大小写差异绕过合并。

@@ -8,6 +8,13 @@ export const markdownElement = (elementId: string, content: string): CardElement
 
 export const escapeCardInline = (value: string) => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
 
+/**
+ * Agent 产出的卡片 markdown 正文：保留 markdown 写法，只把能拼出飞书卡片标签（@ 人、彩色标签、字体、链接等）的 < 换成全角，
+ * 平台就不会把 Agent 写的 <at id=all></at> 渲染成 @所有人。系统要 @ 的人由 renderGroupMention 另行拼在正文外。
+ */
+export const neutralizeCardTags = (value: string) =>
+  value.replace(/<(?=\/?\s*(?:at|text_tag|font|a|link|local_datetime|number_tag|person|img|raw|br|hr)\b)/giu, '＜');
+
 /** 标题行右侧带展开箭头的折叠面板；版式未传的项取最常用的值。 */
 export const collapsiblePanel = (elementId: string, title: CardElement, elements: CardElement[], layout: {
   expanded?: boolean; verticalSpacing?: string; padding?: string; margin?: string; iconSize?: string;

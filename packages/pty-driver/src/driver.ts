@@ -65,6 +65,11 @@ const planPhaseDenyReason = '先出计划阶段不执行需要确认的操作，
 const sessionPermissionMode = (env: Record<string, string>): PermissionMode =>
   env.dutydeck_session_permission_mode === 'full-trust' || env.dutydeck_session_permission_mode === 'approve-reads' ? env.dutydeck_session_permission_mode : 'ask';
 
+/** 写进终端前的提示词：换行统一成 \n，再删掉除 \n、\t 外的 C0/C1 控制字符。
+ *  正文里夹带的 ESC[201~ 会提前结束括号粘贴，后面的换行就成了回车提交。 */
+const terminalSafePrompt = (text: string): string =>
+  text.replace(/\r\n?/g, '\n').replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '');
+
 const DEFAULT_COLS = 120;
 const DEFAULT_ROWS = 30;
 /** raw_terminal 节流窗口：窗口内屏幕文本没变就不发。 */
@@ -480,10 +485,8 @@ export class PtyCliDriver implements AgentDriver {
       routingPrefix = `${prefix}\n`;
       finalPrompt = `${routingPrefix}${finalPrompt}`;
     }
-    if (this.adapter.capabilities.nativeInputReceipt) {
-      finalPrompt = finalPrompt.replace(/\r\n?/g, '\n');
-      routingPrefix = routingPrefix?.replace(/\r\n?/g, '\n');
-    }
+    finalPrompt = terminalSafePrompt(finalPrompt);
+    routingPrefix = routingPrefix === undefined ? undefined : terminalSafePrompt(routingPrefix);
     let rejectWrite!: (error: Error) => void;
     const writeCancelled = new Promise<never>((_, reject) => {
       this.turnWriteReject = rejectWrite = reject;

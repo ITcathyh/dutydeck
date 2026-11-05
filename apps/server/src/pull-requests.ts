@@ -1,8 +1,8 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   isTerminalTaskStatus, RuntimeError, wrapUntrusted,
-  type CiFailureLog, type CiProvider, type CiReviewComment, type PublicPullRequest, type PullRequestAvailability,
-  type PullRequestStatus, type RepositoryBundle, type TaskRecord
+  type CiFailureLog, type CiProvider, type CiRepository, type CiReviewComment, type PublicPullRequest, type PullRequestAvailability,
+  type PullRequestStatus, type RepositoryBundle, type Session, type TaskRecord
 } from '@dutydeck/shared';
 import { executionTaskId } from '@dutydeck/storage';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
@@ -11,7 +11,7 @@ import { changeRequestLabel, resolveCiHead, type CiProviderRegistry } from './ci
 import { codeBlock, errorMessage, isRunnable, iso, short, SingleFlight } from './ci-common.js';
 import { ciFixLimits, failureFingerprint, type CiNotice } from './ci-webhook.js';
 import {
-  assertPushTarget, buildCommit, defaultBranch, diffTrees, git, localCommits, originPushUrl, pushBranch, remoteBranchSha, remoteUrlLabel, sameEntry, treeEntries,
+  assertClaimedPushTarget, isSafeBranchName, assertPushTarget, buildCommit, defaultBranch, diffTrees, fetchBranches, git, localCommits, originPushUrl, pushBranch, remoteBranchSha, remoteUrlLabel, sameEntry, treeEntries,
   type PathContent, type TreeEntry
 } from './pull-request-git.js';
 import { readTaskOutput } from './task-results.js';
@@ -19,6 +19,8 @@ import { listTurnDiffRecords, readTurnDiffRecord, snapshotWorkingTree } from './
 
 const RECORD_PREFIX = 'pull_request/record/';
 const TASK_PREFIX = 'pull_request/task/';
+/** 认领的已有 PR → 正在跟进它的记录编号；同一个 PR 同时只有一条记录在跟进。 */
+const CLAIM_PREFIX = 'pull_request/claim/';
 /** 确认清单的有效期：过期后工作区可能已经变了，要重新 /pr。 */
 const PROPOSAL_TTL_MS = 30 * 60_000;
 const POLL_INTERVAL_MS = 2 * 60_000;
@@ -29,6 +31,10 @@ const SNAPSHOT_TIMEOUT_MS = 15_000;
 const FAILURE_LOG_TIMEOUT_MS = 20_000;
 /** 自己发的 PR 评论都带这个标记，读评论时跳过。 */
 export const PR_COMMENT_MARKER = '<!-- dutydeck -->';
+
+export type PendingPullRequestDecision =
+  | { kind: 'confirm'; pullRequest: PublicPullRequest; revision: number; createdAt: string }
+  | { kind: 'question'; pullRequest: PublicPullRequest; revision: number; createdAt: string; question: { commentId: string; question: string; excerpt: string } };
 
 export const pullRequestLimits = {
   ciRounds: ciFixLimits.rounds, sameError: ciFixLimits.sameError, files: ciFixLimits.files, lines: ciFixLimits.lines,
@@ -47,6 +53,8 @@ const recordSchema = z.object({
   sessionId: z.string().min(1),
   /** 发起 /pr 的人；确认与跟进的权限判断以它为任务发起人。 */
   actorId: z.string().min(1).optional(),
+  /** 认领的已有 PR（`/pr follow`），不是 DutyDeck 开的：推送到它原来的源分支。 */
+  claimed: z.literal(true).optional(),
   confirmedBy: z.string().min(1).optional(),
   provider: z.string().min(1),
   repository: z.object({ owner: z.string(), name: z.string(), slug: z.string().min(1) }).strict(),
@@ -215,7 +223,7 @@ export class PullRequestService {
       ...(value.commitsUnverified ? { commitsUnverified: true } : {}),
       ...(value.headSha ? { headSha: value.headSha } : {}),
       ...(value.pullRequest ? { pullRequest: { number: value.pullRequest.number, url: value.pullRequest.url, label: changeRequestLabel(provider, value.pullRequest.number) } } : {}),
-      ciRounds: value.ciRounds, reviewRounds: value.reviewRounds, ...(value.reason ? { reason: value.reason } : {}),
+      ciRounds: value.ciRounds, reviewRounds: value.reviewRounds, ...(value.reason ? { reason: value.reason } : {}), ...(value.claimed ? { claimed: true } : {}),
       expiresAt: value.expiresAt, createdAt: value.createdAt, updatedAt: value.updatedAt
     };
   }
@@ -225,6 +233,19 @@ export class PullRequestService {
   async listBySession(sessionId: string): Promise<PublicPullRequest[]> {
     return (await this.list()).map(item => item.value).filter(item => item.sessionId === sessionId)
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt)).map(item => this.toPublic(item));
+  }
+
+  /** 只读：等人决定的 PR 对象，未过期的确认清单，以及已开出 PR 上含义不清、还没回答的评审意见。待处理汇总用。 */
+  async listPendingDecisions(): Promise<PendingPullRequestDecision[]> {
+    const now = this.clock().getTime();
+    return (await this.list()).flatMap(({ value }): PendingPullRequestDecision[] => {
+      const pullRequest = this.toPublic(value);
+      if (value.status === 'proposed') return Date.parse(value.expiresAt) > now ? [{ kind: 'confirm', pullRequest, revision: value.revision, createdAt: value.createdAt }] : [];
+      if (value.status !== 'open') return [];
+      return value.questions.filter(question => !question.answer).map(question => ({
+        kind: 'question', pullRequest, revision: value.revision, createdAt: value.updatedAt, question: { commentId: question.commentId, question: question.question, excerpt: question.excerpt }
+      }));
+    });
   }
 
   private async notice(value: PullRequestRecord, notice: CiNotice) {
@@ -259,11 +280,7 @@ export class PullRequestService {
       throw error;
     });
     const cwd = session.cwd;
-    // 确认卡上写的是 repository，代码实际推到 origin 的推送地址，两者必须是同一个仓库。
-    const pushUrl = remoteUrlLabel(await originPushUrl(cwd));
-    if (this.options.providers.match(pushUrl, provider => provider.id === head.provider.id)?.repository.slug.toLowerCase() !== head.repository.slug.toLowerCase()) {
-      throw new RuntimeError('PR_PUSH_URL_MISMATCH', `origin 的推送地址 ${pushUrl} 不是 ${head.repository.slug}，代码会推到确认卡上没写的仓库，不能开 PR。请让 origin 的推送地址指向 ${head.repository.slug} 后再试。`, 409);
-    }
+    const pushUrl = remoteUrlLabel(await this.verifiedPushUrl(cwd, head.provider, head.repository, '开 PR'));
     const target = await defaultBranch(cwd);
     if (!target) throw new RuntimeError('PR_TARGET_UNKNOWN', '无法确定目标分支：origin 没有默认分支。可以先执行 git remote set-head origin --auto。', 409);
     const commonDir = (await git({ cwd }, ['rev-parse', '--path-format=absolute', '--git-common-dir'])).trim();
@@ -321,6 +338,123 @@ export class PullRequestService {
       expiresAt: iso(now + PROPOSAL_TTL_MS), createdAt: iso(now), updatedAt: iso(now)
     });
     if (!await this.store().compareAndSet(recordKey(id), undefined, JSON.stringify(record))) throw new RuntimeError('PR_CONFLICT', 'PR 记录编号冲突，请重试。', 409);
+    return this.toPublic(record);
+  }
+
+  /** 确认卡（或认领）上写的是 repository，代码实际推到 origin 的推送地址，两者必须是同一个仓库。返回带账号口令的地址。 */
+  private async verifiedPushUrl(cwd: string, provider: CiProvider, repository: CiRepository, action: string) {
+    const url = await originPushUrl(cwd);
+    const label = remoteUrlLabel(url);
+    if (this.options.providers.match(label, item => item.id === provider.id)?.repository.slug.toLowerCase() !== repository.slug.toLowerCase()) {
+      throw new RuntimeError('PR_PUSH_URL_MISMATCH', `origin 的推送地址 ${label} 不是 ${repository.slug}，代码会推到别的仓库，不能${action}。请让 origin 的推送地址指向 ${repository.slug} 后再试。`, 409);
+    }
+    return url;
+  }
+
+  /**
+   * 认领一个已有的 PR（飞书 `/pr follow <链接>`、CLI、API），之后和 DutyDeck 自己开的 PR 一样跟进 CI 和评审意见。
+   * 调用方先核对操作者对这个会话的操作权限。认领前核对：
+   * - PR 和会话工作区的 origin 是同一个仓库（链接按 provider 的 matchRepository 认，不认具体平台的链接写法）；
+   * - PR 还开着，源分支在本仓库（不是 fork），不是目标分支或默认分支；
+   * - 源分支能从 origin 取到，且和平台给的 head 一致；工作区里 PR 改到的文件和 PR 分支一致（要先检出 PR 分支）。
+   * 认领时 PR 上已有的评论算已处理，只跟进之后的新评论；可信评论的判定和自己开的 PR 相同。CI 从当前 head 开始看。
+   */
+  async follow(sessionId: string, input: { pullRequest: string }, actorId?: string): Promise<PublicPullRequest> {
+    const session = await this.options.runtime.getSession(sessionId);
+    if (!session) throw new RuntimeError('SESSION_NOT_FOUND', 'Session not found', 404);
+    if (!isRunnable(session)) throw new RuntimeError('SESSION_NOT_ACTIVE', '会话已结束，不能再跟进 PR。', 409);
+    const followable = (provider: CiProvider) => typeof provider.getPullRequest === 'function';
+    if (!this.options.providers.list().some(item => followable(item.provider))) {
+      throw new RuntimeError('PR_PROVIDER_UNAVAILABLE', '没有安装能读取 PR 信息的 CI 插件（需要 getPullRequest），不能跟进已有 PR。', 409);
+    }
+    const head = await resolveCiHead(session.cwd, this.options.providers, undefined, followable).catch(error => {
+      if ((error as { code?: string }).code === 'CI_REMOTE_UNSUPPORTED') throw new RuntimeError('PR_REMOTE_UNSUPPORTED', '当前工作区的 origin 不归任何能读取 PR 的 CI 插件处理。', 400);
+      throw error;
+    });
+    const { provider, repository } = head;
+    const number = pullRequestNumber(input.pullRequest, provider, repository);
+    const label = changeRequestLabel(provider, number);
+    const cwd = session.cwd;
+
+    let state: Awaited<ReturnType<NonNullable<CiProvider['getPullRequest']>>>;
+    try { state = await provider.getPullRequest!(repository, number); }
+    catch (error) { throw new RuntimeError('PR_LOOKUP_FAILED', `读取 ${repository.slug} 的 ${label} 失败：${errorMessage(error)}`, 409); }
+    if (state.state !== 'open') throw new RuntimeError('PR_NOT_OPEN', `${label} ${state.state === 'merged' ? '已合并' : '已关闭'}，不需要跟进。`, 409);
+    const branch = state.headBranch;
+    const headSha = state.headSha?.toLowerCase();
+    if (!branch || !headSha || !sha.safeParse(headSha).success) {
+      throw new RuntimeError('PR_FOLLOW_UNSUPPORTED', `${provider.displayName} 插件没有给出 ${label} 的源分支和提交，不能认领。`, 409);
+    }
+    // 插件不给源仓库时无法排除 fork：拒绝认领，而不是默认当作同仓库。
+    if (!state.headRepository) {
+      throw new RuntimeError('PR_HEAD_REPOSITORY_UNKNOWN', `${provider.displayName} 插件没有给出 ${label} 的源分支所在仓库，无法确认它不是来自 fork 的 PR，不能认领。`, 409);
+    }
+    if (state.headRepository.toLowerCase() !== repository.slug.toLowerCase()) {
+      throw new RuntimeError('PR_FORK_UNSUPPORTED', `${label} 的源分支在 ${state.headRepository}，不在 ${repository.slug}。DutyDeck 只能推到 origin，不能跟进来自 fork 的 PR。`, 409);
+    }
+    const pushUrl = await this.verifiedPushUrl(cwd, provider, repository, '跟进这个 PR');
+    const target = state.baseBranch ?? await defaultBranch(cwd);
+    if (!target) throw new RuntimeError('PR_TARGET_UNKNOWN', '无法确定 PR 的目标分支。', 409);
+    if (!isSafeBranchName(target)) throw new RuntimeError('PR_TARGET_UNKNOWN', `${label} 的目标分支名不是合法的分支名，不能认领。`, 409);
+    assertClaimedPushTarget(branch, target, await defaultBranch(cwd));
+
+    const claimKey = `${CLAIM_PREFIX}${createHash('sha256').update(JSON.stringify([provider.id, repository.slug.toLowerCase(), number])).digest('hex')}`;
+    const claimRaw = await this.options.repositories.config.get(claimKey);
+    const claimed = claimRaw ? await this.read(claimRaw) : undefined;
+    if (claimed && ['proposed', 'pushing', 'open'].includes(claimed.value.status)) {
+      if (claimed.value.sessionId === sessionId) return this.toPublic(claimed.value);
+      throw new RuntimeError('PR_ALREADY_FOLLOWED', `${label} 已在另一个会话（${claimed.value.sessionId}）里跟进，先在那里停止跟进再认领。`, 409);
+    }
+    const own = (await this.list()).find(item => item.value.status === 'open' && item.value.provider === provider.id
+      && item.value.repository.slug.toLowerCase() === repository.slug.toLowerCase() && item.value.pullRequest?.number === number);
+    if (own) {
+      if (own.value.sessionId === sessionId) return this.toPublic(own.value);
+      throw new RuntimeError('PR_ALREADY_FOLLOWED', `${label} 已在另一个会话（${own.value.sessionId}）里跟进，先在那里停止跟进再认领。`, 409);
+    }
+
+    // 源分支能从 origin 取到，且就是平台给的 head；取下来的提交只进对象库，不建分支、不动检出。
+    const remoteHead = await remoteBranchSha(cwd, pushUrl, branch).catch(error => { throw new RuntimeError('PR_BRANCH_UNAVAILABLE', `读取 origin 上的分支 ${branch} 失败：${errorMessage(error)}`, 409); });
+    if (!remoteHead) throw new RuntimeError('PR_BRANCH_UNAVAILABLE', `origin 上没有 ${label} 的源分支 ${branch}，无法检出。`, 409);
+    if (remoteHead !== headSha) throw new RuntimeError('PR_BRANCH_MOVED', `origin 上 ${branch} 是 ${short(remoteHead)}，${provider.displayName} 给的 ${label} head 是 ${short(headSha)}，请稍后重试。`, 409);
+    const targetHead = await remoteBranchSha(cwd, pushUrl, target).catch(() => undefined);
+    if (!targetHead) throw new RuntimeError('PR_TARGET_UNKNOWN', `origin 上没有目标分支 ${target}。`, 409);
+    try { await fetchBranches(cwd, pushUrl, [branch, target]); }
+    catch (error) { throw new RuntimeError('PR_BRANCH_UNAVAILABLE', `取不到分支 ${branch}：${errorMessage(error)}`, 409); }
+    const baseSha = (await git({ cwd }, ['merge-base', headSha, targetHead]).catch(() => '')).trim();
+    if (!sha.safeParse(baseSha).success) throw new RuntimeError('PR_BRANCH_UNAVAILABLE', `${branch} 和 ${target} 没有共同的提交，无法确定 PR 改了哪些文件。`, 409);
+    const files = await diffTrees({ cwd }, baseSha, headSha);
+    const paths = files.map(file => file.path);
+    const diverged = await divergentPaths(cwd, headSha, paths);
+    if (diverged.length) {
+      throw new RuntimeError('PR_WORKSPACE_MISMATCH', `会话工作区里这些文件和 ${label} 的源分支 ${branch} 不一致：${diverged.slice(0, 5).join('、')}${diverged.length > 5 ? ` 等 ${diverged.length} 个` : ''}。`
+        + `请先在会话工作区检出 PR 分支（git fetch origin ${branch} && git checkout ${branch}），并处理掉这些文件里的未提交改动后再认领。`, 409);
+    }
+    // 认领前已有的评论不算新的评审意见：只跟进认领之后的。
+    let existing: string[] = [];
+    if (provider.listReviewComments) {
+      try { existing = (await provider.listReviewComments(repository, number)).map(comment => comment?.id).filter((id): id is string => typeof id === 'string'); }
+      catch (error) { throw new RuntimeError('PR_LOOKUP_FAILED', `读取 ${label} 的评论失败：${errorMessage(error)}`, 409); }
+    }
+
+    const id = `pr_${randomUUID().replace(/-/g, '')}`;
+    const now = this.clock().getTime();
+    await this.options.prepareDelivery?.(sessionId, id);
+    const record = recordSchema.parse({
+      schemaVersion: 1, id, revision: 1, sessionId, ...(actorId ? { actorId } : {}), claimed: true, provider: provider.id, repository, pushUrl: remoteUrlLabel(pushUrl),
+      status: 'open', title: oneLine(state.title ?? '', 200) || label, body: '', branch, target, baseSha, files, excluded: [], commits: [], contents: [], paths, headSha,
+      pullRequest: { id: String(number), number, url: state.url ?? (/^https?:\/\//i.test(input.pullRequest.trim()) ? input.pullRequest.trim() : '') },
+      ciRounds: 0, reviewRounds: 0, fingerprints: {}, handledComments: existing.slice(-2_000), ownComments: [], questions: [],
+      expiresAt: iso(now), nextPollAt: iso(now), createdAt: iso(now), updatedAt: iso(now)
+    });
+    if (!await this.store().compareAndSet(recordKey(id), undefined, JSON.stringify(record))) throw new RuntimeError('PR_CONFLICT', 'PR 记录编号冲突，请重试。', 409);
+    if (!await this.store().compareAndSet(claimKey, claimRaw ?? undefined, id)) {
+      // 并发认领同一个 PR：输的一方作废自己的记录，按赢的一方回报。
+      await this.update(id, value => ({ ...value, status: 'cancelled', reason: '同一个 PR 已被并发认领' }));
+      const winner = await this.read((await this.options.repositories.config.get(claimKey))!);
+      if (winner?.value.sessionId === sessionId) return this.toPublic(winner.value);
+      throw new RuntimeError('PR_ALREADY_FOLLOWED', `${label} 已在另一个会话里跟进。`, 409);
+    }
+    void this.tick().catch(error => this.options.log?.warn({ error }, 'PR 跟进失败'));
     return this.toPublic(record);
   }
 
@@ -483,10 +617,8 @@ export class PullRequestService {
   /** 工作区里 PR 涉及的文件必须和 PR 分支一致，否则 Agent 改出来的东西对不上 PR。返回不一致的说明。 */
   private async workspaceDivergence(cwd: string, value: PullRequestRecord): Promise<string | undefined> {
     if (!value.headSha || !value.paths.length) return undefined;
-    let snapshot: Awaited<ReturnType<typeof workspaceSnapshot>>;
-    try { snapshot = await workspaceSnapshot(cwd); } catch (error) { return `${errorMessage(error)}已停止自动跟进。`; }
-    const [workspace, pr] = await Promise.all([treeEntries({ cwd }, snapshot.tree, value.paths), treeEntries({ cwd }, value.headSha, value.paths)]);
-    const changed = value.paths.filter(path => !sameEntry(workspace.get(path), pr.get(path)));
+    let changed: string[];
+    try { changed = await divergentPaths(cwd, value.headSha, value.paths); } catch (error) { return `${errorMessage(error)}已停止自动跟进。`; }
     return changed.length ? `工作区里这些文件已和 PR 不一致：${changed.slice(0, 5).join('、')}${changed.length > 5 ? ' 等' : ''}。为避免把别的改动推进 PR，已停止自动跟进。` : undefined;
   }
 
@@ -617,7 +749,7 @@ export class PullRequestService {
       failure.log ? `日志末尾：\n${failure.log.slice(-3_000)}` : '没有拿到这项任务的日志。'
     ].join('\n')).join('\n\n');
     const prompt = [
-      `你开出的 ${this.label(value)}（${value.repository.slug}，分支 ${value.branch}）的 CI 在提交 ${value.headSha} 上失败，请修复（第 ${round}/${pullRequestLimits.ciRounds} 轮）。`,
+      `${value.claimed ? '你在跟进的' : '你开出的'} ${this.label(value)}（${value.repository.slug}，分支 ${value.branch}）的 CI 在提交 ${value.headSha} 上失败，请修复（第 ${round}/${pullRequestLimits.ciRounds} 轮）。`,
       '',
       '规则：',
       `1. 直接修改当前工作区里的文件。不要 git commit、git push、切换分支或改写提交：这一轮结束后 DutyDeck 会把你的改动提交并推到 PR 分支。${scopeRule(value.paths)}`,
@@ -639,7 +771,7 @@ export class PullRequestService {
       return `评论 ${item.ref}${location}${item.comment?.author ? `，作者 ${oneLine(item.comment.author, 40)}` : ''}：\n${wrapUntrusted(`review:${base.provider}`, item.body)}`;
     }).join('\n\n');
     const prompt = [
-      `你开出的 ${this.label(base)}（${base.repository.slug}，分支 ${base.branch}）收到评审意见，请逐条处理（第 ${round}/${pullRequestLimits.reviewRounds} 轮）。`,
+      `${base.claimed ? '你在跟进的' : '你开出的'} ${this.label(base)}（${base.repository.slug}，分支 ${base.branch}）收到评审意见，请逐条处理（第 ${round}/${pullRequestLimits.reviewRounds} 轮）。`,
       '',
       '规则：',
       `1. 直接修改当前工作区里的文件。不要 git commit、git push、切换分支或改写提交：这一轮结束后 DutyDeck 会把你的改动提交并推到 PR 分支，并在 PR 上回复。${scopeRule(base.paths)}`,
@@ -743,9 +875,9 @@ export class PullRequestService {
       }
       try {
         const remote = await confirmedPushUrl(session.cwd, value);
-        if (await remoteBranchSha(session.cwd, remote, value.branch) !== headSha) throw new Error(`远端 ${value.branch} 已不是 DutyDeck 推送的 ${short(headSha)}（有人推送过或分支已删除），没有推送`);
+        if (await remoteBranchSha(session.cwd, remote, value.branch) !== headSha) throw new Error(`远端 ${value.branch} 已不是${value.claimed ? '上次核对的' : ' DutyDeck 推送的'} ${short(headSha)}（有人推送过或分支已删除），没有推送`);
         headSha = await buildCommit(session.cwd, headSha, changes.contents, `${current.kind === 'ci' ? 'Fix CI' : 'Address review comments'} (DutyDeck round ${current.round})\n`);
-        await pushBranch(session.cwd, remote, headSha, value.branch, value.target);
+        await pushBranch(session.cwd, remote, headSha, value.branch, value.target, value.claimed === true);
       } catch (error) { await this.fail(value.id, `${name}的改动推送失败：${errorMessage(error)}，已停止自动跟进。`, ['open']); return; }
     }
     const ownComments: string[] = [];
@@ -809,6 +941,40 @@ async function confirmedPushUrl(cwd: string, value: PullRequestRecord) {
   const url = await originPushUrl(cwd);
   if (remoteUrlLabel(url) !== value.pushUrl) throw new Error(`origin 的推送地址从确认时的 ${value.pushUrl} 变成了 ${remoteUrlLabel(url)}，没有推送`);
   return url;
+}
+
+/** 工作区里和 PR 提交不一致的路径。 */
+async function divergentPaths(cwd: string, headSha: string, paths: string[]) {
+  if (!paths.length) return [];
+  const snapshot = await workspaceSnapshot(cwd);
+  const [workspace, pr] = await Promise.all([treeEntries({ cwd }, snapshot.tree, paths), treeEntries({ cwd }, headSha, paths)]);
+  return paths.filter(path => !sameEntry(workspace.get(path), pr.get(path)));
+}
+
+/**
+ * `/pr follow` 的参数：编号（`12`、`#12`、`!12`）指工作区仓库里的 PR；链接取路径里最后一个纯数字段当编号，
+ * 前面的地址逐级去掉末段交给 provider 的 matchRepository，认出的仓库必须就是工作区的仓库。
+ */
+export function pullRequestNumber(input: string, provider: CiProvider, repository: CiRepository): number {
+  const text = input.trim();
+  const plain = /^[#!]?(\d{1,9})$/.exec(text);
+  if (plain) return Number(plain[1]);
+  let url: URL;
+  try { url = new URL(text); } catch { throw new RuntimeError('PR_LINK_INVALID', '请给出 PR 链接或编号，例如 /pr follow https://<平台>/<仓库>/pull/12 或 /pr follow 12。', 400); }
+  const segments = url.pathname.split('/').filter(Boolean);
+  let index = segments.length - 1;
+  while (index >= 0 && !/^\d{1,9}$/.test(segments[index]!)) index -= 1;
+  if (!['http:', 'https:'].includes(url.protocol) || index < 1) throw new RuntimeError('PR_LINK_INVALID', `${text} 不像 PR 链接：路径里找不到 PR 编号。`, 400);
+  for (let end = index; end >= 1; end -= 1) {
+    let matched: CiRepository | undefined;
+    try { matched = provider.matchRepository(`${url.protocol}//${url.host}/${segments.slice(0, end).join('/')}`); } catch { matched = undefined; }
+    if (!matched) continue;
+    if (matched.slug.toLowerCase() !== repository.slug.toLowerCase()) {
+      throw new RuntimeError('PR_REPOSITORY_MISMATCH', `这个 PR 在 ${matched.slug}，会话工作区的仓库是 ${repository.slug}。请在工作区是 ${matched.slug} 的会话里认领。`, 409);
+    }
+    return Number(segments[index]);
+  }
+  throw new RuntimeError('PR_REPOSITORY_MISMATCH', `链接 ${text} 不属于会话工作区的仓库 ${repository.slug}（${provider.displayName}）。请在工作区是该 PR 所在仓库的会话里认领。`, 409);
 }
 
 /** 拍工作区快照；拍不了时抛出带原因和处理办法的错误。 */

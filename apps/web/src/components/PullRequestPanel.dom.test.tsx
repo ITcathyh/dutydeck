@@ -36,9 +36,20 @@ function mount(list: { available: boolean; hint?: string; items: PublicPullReque
 const writes = (requests: Array<{ method: string; url: string; body?: string }>) => requests.filter(item => item.method === 'POST').map(item => [item.url, item.body]);
 
 describe('开 PR 面板', () => {
+  it('填链接点「跟进」认领已有的 PR，不弹确认框；认领的记录标为已有 PR', async () => {
+    const requests = mount({ available: true, items: [{ ...proposal, id: 'pr_9', status: 'open', claimed: true, title: 'Login fix', branch: 'feature/login' }] });
+    const user = userEvent.setup();
+    expect(await screen.findByText('跟进中 · 已有 PR · Login fix')).toBeTruthy();
+    expect((screen.getByRole('button', { name: '跟进' }) as HTMLButtonElement).disabled).toBe(true);
+    await user.type(screen.getByLabelText('跟进已有的 PR'), 'https://github.com/acme/app/pull/12');
+    await user.click(screen.getByRole('button', { name: '跟进' }));
+    await waitFor(() => expect(writes(requests)).toEqual([['/api/sessions/s1/pull-requests/follow', JSON.stringify({ pullRequest: 'https://github.com/acme/app/pull/12' })]]));
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+  });
+
   it('点「开 PR」只生成确认清单；确认框列出文件、不包含的文件、分支、标题和正文摘要，点确认才发推送请求', async () => {
     const requests = mount({ available: true, items: [] });
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     await user.type(await screen.findByLabelText('PR 标题（可选）'), 'Fix login');
     await user.click(screen.getByRole('button', { name: '开 PR' }));
     const dialog = await screen.findByRole('alertdialog', { name: '确认推送并开 PR' });
@@ -63,7 +74,7 @@ describe('开 PR 面板', () => {
 
   it('取消确认框只发取消请求，不推送', async () => {
     const requests = mount({ available: true, items: [] });
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     await user.click(await screen.findByRole('button', { name: '开 PR' }));
     const dialog = await screen.findByRole('alertdialog');
     await user.click(within(dialog).getByRole('button', { name: '取消' }));
@@ -80,7 +91,7 @@ describe('开 PR 面板', () => {
   it('列出已有的 PR：链接、跟进轮次和停止跟进；飞书发起的待确认清单可以在这里确认', async () => {
     const opened: PublicPullRequest = { ...proposal, id: 'pr_2', status: 'open', ciRounds: 1, reviewRounds: 2, pullRequest: { number: 7, url: 'https://github.com/acme/app/pull/7', label: 'PR #7' } };
     const requests = mount({ available: true, items: [opened, proposal] });
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const link = await screen.findByRole('link', { name: 'PR #7' });
     expect(link.getAttribute('href')).toBe('https://github.com/acme/app/pull/7');
     expect(screen.getByText('已自动修 CI 1 轮、处理评审意见 2 轮')).toBeTruthy();

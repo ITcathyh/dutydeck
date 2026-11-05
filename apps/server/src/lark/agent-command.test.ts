@@ -438,7 +438,7 @@ describe('busy message triage through real runtime and confirmation cards', () =
 
   it.each(['repair', 'pr.open', 'settings.set', 'schedule.create', 'status', 'progress'])('queues a busy %s message when its card cannot be delivered', async action => {
     const h = await busyHarness();
-    const prepare = vi.fn(async () => ({ id: 'pr_test', sessionId: h.active.sessionId, title: '修复', branch: 'dutydeck/test', baseBranch: 'main', commits: [], files: [], excluded: [], bodySummary: '', createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60000).toISOString(), status: 'proposed' }));
+    const prepare = vi.fn(async () => ({ id: 'pr_test', sessionId: h.active.sessionId, provider: 'github', providerName: 'GitHub', repository: 'group/repo', title: '修复', branch: 'dutydeck/test', target: 'main', commits: [], files: [], excluded: [], bodySummary: '', createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60000).toISOString(), status: 'proposed' }));
     const attachCard = vi.fn();
     const integration = createAutomationIntegration(h.repos, h.runtime, { authorize: async () => undefined } as any,
       { client: () => h.service as any, log: { warn: vi.fn() } });
@@ -465,7 +465,7 @@ describe('busy message triage through real runtime and confirmation cards', () =
     const h = await busyHarness();
     const proposals: any[] = [];
     const prepare = vi.fn(async () => {
-      const proposal = { id: `pr_${proposals.length + 1}`, sessionId: h.active.sessionId, title: '修复', branch: 'dutydeck/test', target: 'main', commits: [], files: [], excluded: [], bodySummary: '', createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60000).toISOString(), status: 'proposed' };
+      const proposal = { id: `pr_${proposals.length + 1}`, sessionId: h.active.sessionId, provider: 'github', providerName: 'GitHub', repository: 'group/repo', title: '修复', branch: 'dutydeck/test', target: 'main', commits: [], files: [], excluded: [], bodySummary: '', createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60000).toISOString(), status: 'proposed' };
       proposals.push(proposal); return proposal;
     });
     const attachCard = vi.fn();

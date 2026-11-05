@@ -1,10 +1,16 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { WorkItem, WorkTemplate } from '@dutydeck/shared';
 import { WorkItemsPanel } from './WorkItemsPanel';
 import { api, type Agent, type Session } from '../api';
+
+// user.type 每个字符都会触发一次整树重渲染；这里的输入不依赖逐键行为，点击聚焦后一次粘贴写入。
+async function typeInto(user: Pick<typeof userEvent, 'click' | 'paste'>, element: Element, text: string) {
+  await user.click(element);
+  await user.paste(text);
+}
 
 const time = '2026-09-12T00:00:00Z';
 const session: Session = { id: 's1', agentId: 'a', cwd: '/project', state: 'completed', runId: 'r', createdAt: time, updatedAt: time };
@@ -86,7 +92,7 @@ describe('WorkItemsPanel', () => {
     });
     const view = mount(); await view.open();
     const answer = await screen.findByLabelText('回答：负责人意见');
-    await userEvent.type(answer, '补充成本分析');
+    await typeInto(userEvent, answer, '补充成本分析');
     await userEvent.click(screen.getByRole('button', { name: '提交回答' }));
     expect(calls).toEqual([{ url: '/api/sessions/s1/work-items/w1/answer', body: { stepId: 'review', answer: '补充成本分析', expectedRevision: 7 } }]);
     expect(screen.getByRole('button', { name: '提交回答' }).hasAttribute('disabled')).toBe(true);
@@ -106,7 +112,7 @@ describe('WorkItemsPanel', () => {
       return response(String(url).endsWith('/requests') ? [] : { items: [current], templates: [] });
     });
     const view = mount(); await view.open();
-    await userEvent.type(await screen.findByLabelText('回答：负责人意见'), '继续汇总');
+    await typeInto(userEvent, await screen.findByLabelText('回答：负责人意见'), '继续汇总');
     await userEvent.click(screen.getByRole('button', { name: '提交回答' }));
     expect(posts).toEqual([{ url: '/api/sessions/s1/work-items/w1/answer', body: { stepId: 'review', answer: '继续汇总', expectedRevision: 7 } }]);
   });
@@ -139,7 +145,7 @@ describe('WorkItemsPanel', () => {
     const view = mount(); await view.open();
     await screen.findByText(/当前会话还没有工作项目标/);
     await userEvent.click(screen.getByText('新建目标或复用模板'));
-    await userEvent.type(screen.getByLabelText('本次目标'), '研究数据库方案');
+    await typeInto(userEvent, screen.getByLabelText('本次目标'), '研究数据库方案');
     await userEvent.selectOptions(screen.getByLabelText('风险分析 Agent'), 'c');
     await userEvent.click(screen.getByRole('button', { name: '开始目标' }));
     await screen.findByText(/连接中断/);
@@ -147,7 +153,7 @@ describe('WorkItemsPanel', () => {
     await userEvent.click(screen.getByRole('button', { name: '关闭目标详情' }));
     await view.open();
     await userEvent.click(screen.getByText('新建目标或复用模板'));
-    await userEvent.type(screen.getByLabelText('本次目标'), '研究数据库方案');
+    await typeInto(userEvent, screen.getByLabelText('本次目标'), '研究数据库方案');
     await userEvent.selectOptions(screen.getByLabelText('风险分析 Agent'), 'c');
     await userEvent.click(screen.getByRole('button', { name: '开始目标' }));
     await waitFor(() => expect(bodies).toHaveLength(2));
@@ -172,7 +178,7 @@ describe('WorkItemsPanel', () => {
       const view = mount(); await view.open();
       await screen.findByText(/当前会话还没有工作项目标/);
       await userEvent.click(screen.getByText('新建目标或复用模板'));
-      await userEvent.type(screen.getByLabelText('本次目标'), '研究数据库方案');
+      await typeInto(userEvent, screen.getByLabelText('本次目标'), '研究数据库方案');
       await userEvent.click(screen.getByRole('button', { name: '开始目标' }));
       await screen.findByText(/连接中断/);
       await waitFor(() => expect(screen.getByRole('button', { name: '开始目标' }).hasAttribute('disabled')).toBe(false));
@@ -196,7 +202,7 @@ describe('WorkItemsPanel', () => {
     const view = mount(); await view.open();
     await screen.findByText(/当前会话还没有工作项目标/);
     await userEvent.click(screen.getByText('新建目标或复用模板'));
-    await userEvent.type(screen.getByLabelText('本次目标'), '研究数据库方案');
+    await typeInto(userEvent, screen.getByLabelText('本次目标'), '研究数据库方案');
     await userEvent.click(screen.getByRole('button', { name: '开始目标' }));
     expect(await screen.findByText(/目标未提交：浏览器不提供随机数/)).toBeTruthy();
     expect(posts).toEqual([]);
@@ -209,13 +215,13 @@ describe('WorkItemsPanel', () => {
     await screen.findByRole('heading', { name: '调查目标 · 等待回答' });
     await userEvent.click(screen.getByText('保存为流程模板'));
     await userEvent.clear(screen.getByLabelText('模板名称'));
-    await userEvent.type(screen.getByLabelText('模板名称'), '每周调研');
+    await typeInto(userEvent, screen.getByLabelText('模板名称'), '每周调研');
     await userEvent.click(screen.getByRole('button', { name: '保存模板' }));
     await waitFor(() => expect(requests.find(request => request.url.endsWith('/template'))?.body).toEqual({ name: '每周调研' }));
     await userEvent.click(screen.getByText('新建目标或复用模板'));
     await waitFor(() => expect((screen.getByLabelText('执行流程') as HTMLSelectElement).disabled).toBe(false));
     await userEvent.selectOptions(screen.getByLabelText('执行流程'), 't1:3');
-    await userEvent.type(screen.getByLabelText('本次目标'), '研究新的问题');
+    await typeInto(userEvent, screen.getByLabelText('本次目标'), '研究新的问题');
     await userEvent.click(screen.getByRole('button', { name: '开始目标' }));
     await waitFor(() => expect(requests.find(request => request.url.endsWith('/work-templates/t1/run'))?.body).toEqual({ version: 3, goal: '研究新的问题', idempotencyKey: expect.any(String) }));
   });
@@ -227,7 +233,7 @@ describe('WorkItemsPanel', () => {
       return response({ items: String(url).includes('/s1/') ? [item()] : [], templates: [] });
     });
     const view = mount(); await view.open();
-    await userEvent.type(await screen.findByLabelText('回答：负责人意见'), '旧会话回答');
+    await typeInto(userEvent, await screen.findByLabelText('回答：负责人意见'), '旧会话回答');
     await userEvent.click(screen.getByRole('button', { name: '提交回答' }));
     view.rerenderSession({ ...session, id: 's2' });
     expect(screen.queryByRole('dialog')).toBeNull();
@@ -291,10 +297,83 @@ describe('WorkItemsPanel', () => {
     expect(await screen.findByText('需要覆盖哪个地区？')).toBeTruthy();
     expect(posts).toHaveLength(0);
     expect(screen.getByRole('button', { name: '发送执行回答' }).hasAttribute('disabled')).toBe(true);
-    await userEvent.type(screen.getByLabelText('执行回答：独立分析'), '中国与欧洲');
+    await typeInto(userEvent, screen.getByLabelText('执行回答：独立分析'), '中国与欧洲');
     await userEvent.click(screen.getByRole('button', { name: '发送执行回答' }));
     expect(posts).toEqual([{ url: '/api/sessions/s1/work-items/w1/respond', body: { stepId: 'research', taskId: 'task1', requestId: 'question1', kind: 'question', answer: '中国与欧洲' } }]);
     await waitFor(() => expect(screen.queryByRole('button', { name: '发送执行回答' })).toBeNull());
   });
 
+});
+
+describe('WorkItemsPanel plan revision', () => {
+  const revisedPlan = () => { const plan = structuredClone(item().plan); plan.steps[2]!.instruction = '汇总材料并排序'; return plan; };
+  it('previews the impact of an edited plan before submitting it with the same revision, and shows version history', async () => {
+    const requests: Array<{ url: string; method: string; body?: any }> = [];
+    let current = item();
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+      const request = { url: String(url), method: init?.method ?? 'GET', body: init?.body ? JSON.parse(String(init.body)) : undefined };
+      requests.push(request);
+      if (request.method === 'GET') return response(request.url.endsWith('/requests') ? [] : { items: [current], templates: [] });
+      if (request.url.endsWith('/revise/preview')) return response({ revision: 7, planVersion: 1, nextVersion: 2, requiresConfirmation: false, confirmationReasons: [], impact: { keep: ['research', 'review'], rerun: ['summary'], stop: [], remove: [], add: [] } });
+      current = { ...current, revision: 8, planVersion: 2, plan: request.body.plan, planHistory: [
+        { version: 1, plan: item().plan, createdAt: time, source: 'create' },
+        { version: 2, plan: request.body.plan, createdAt: time, source: 'human', actor: 'creator', reason: request.body.reason, impact: { keep: ['research', 'review'], rerun: ['summary'], stop: [], remove: [], add: [] } }
+      ] };
+      return response(current);
+    });
+    const view = mount(); await view.open();
+    await userEvent.click(await screen.findByText('修改计划'));
+    const editor = screen.getByLabelText('计划 JSON');
+    fireEvent.change(editor, { target: { value: JSON.stringify(revisedPlan()) } });
+    fireEvent.change(screen.getByLabelText('修改原因'), { target: { value: '需要排序' } });
+    expect(screen.getByRole('button', { name: '提交修订' }).hasAttribute('disabled')).toBe(true);
+    await userEvent.click(screen.getByRole('button', { name: '预览影响' }));
+    expect(await screen.findByText('提交后成为 v2')).toBeTruthy();
+    expect(within(screen.getByRole('region', { name: '修订影响预览' })).getByText('形成报告')).toBeTruthy();
+    // 预览之后再改草稿，预览作废，必须重新预览才能提交。
+    fireEvent.change(editor, { target: { value: JSON.stringify(revisedPlan()) + ' ' } });
+    expect(screen.getByRole('button', { name: '提交修订' }).hasAttribute('disabled')).toBe(true);
+    fireEvent.change(editor, { target: { value: JSON.stringify(revisedPlan()) } });
+    await userEvent.click(screen.getByRole('button', { name: '预览影响' }));
+    await screen.findByText('提交后成为 v2');
+    await userEvent.click(screen.getByRole('button', { name: '提交修订' }));
+    expect(await screen.findByText('计划已更新为 v2。')).toBeTruthy();
+    const writes = requests.filter(request => request.method === 'POST');
+    expect(writes.map(request => [request.url, request.body.expectedRevision])).toEqual([['/api/sessions/s1/work-items/w1/revise/preview', 7], ['/api/sessions/s1/work-items/w1/revise/preview', 7], ['/api/sessions/s1/work-items/w1/revise', 7]]);
+    expect(writes[2]!.body).toEqual({ expectedRevision: 7, plan: revisedPlan(), reason: '需要排序' });
+    await userEvent.click(screen.getByText('计划版本历史（2）'));
+    expect(screen.getByText(/v2 · 人工修改 · 目标创建人/)).toBeTruthy();
+    expect(screen.getByText('原因：需要排序')).toBeTruthy();
+  });
+
+  it('confirms or discards a pending Agent revision on a running item, bound to the revision content digest', async () => {
+    const digest = 'ab12cd34'.repeat(8);
+    const pendingItem = item({ status: 'running', pendingRevision: { version: 2, plan: revisedPlan(), requestedAt: time, source: 'agent', reason: '用户追加要求', impact: { keep: ['research', 'review'], rerun: ['summary'], stop: [], remove: [], add: [] }, confirmationReasons: ['本目标要求人工确认计划'], digest } });
+    const requests = requestsMock(pendingItem);
+    const view = mount(); await view.open();
+    const section = await screen.findByRole('region', { name: '待确认的计划修订' });
+    expect(within(section).getByText('需要确认：本目标要求人工确认计划')).toBeTruthy();
+    expect(within(section).getByText('原因：用户追加要求')).toBeTruthy();
+    expect(within(section).getByText(/摘要 ab12cd34ab12）/)).toBeTruthy();
+    await userEvent.click(within(section).getByRole('button', { name: '确认修订' }));
+    await waitFor(() => expect(requests.some(request => request.method === 'POST')).toBe(true));
+    expect(requests.find(request => request.method === 'POST')).toMatchObject({ url: '/api/sessions/s1/work-items/w1/confirm', body: { expectedRevision: 7, revisionDigest: digest } });
+    cleanup(); vi.restoreAllMocks();
+    const discards = requestsMock(pendingItem);
+    const again = mount(); await again.open();
+    await userEvent.click(within(await screen.findByRole('region', { name: '待确认的计划修订' })).getByRole('button', { name: '放弃修订' }));
+    await waitFor(() => expect(discards.find(request => request.method === 'POST')).toMatchObject({ url: '/api/sessions/s1/work-items/w1/revision/discard', body: { expectedRevision: 7, revisionDigest: digest } }));
+  });
+
+  it('offers only discarding a pending revision while the item is blocked', async () => {
+    const digest = 'ab12cd34'.repeat(8);
+    const blocked = item({ status: 'blocked', pendingRevision: { version: 2, plan: revisedPlan(), requestedAt: time, source: 'agent', impact: { keep: ['research', 'review'], rerun: ['summary'], stop: [], discard: ['summary'], remove: [], add: [] }, confirmationReasons: ['本目标要求人工确认计划'], digest } });
+    requestsMock(blocked);
+    const view = mount(); await view.open();
+    const section = await screen.findByRole('region', { name: '待确认的计划修订' });
+    expect(within(section).queryByRole('button', { name: '确认修订' })).toBeNull();
+    expect(within(section).getByRole('button', { name: '放弃修订' })).toBeTruthy();
+    expect(within(section).getByText(/处理前不能确认这次修订/)).toBeTruthy();
+    expect(within(section).getByText(/作废已完成结果/)).toBeTruthy();
+  });
 });

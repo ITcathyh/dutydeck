@@ -17,7 +17,8 @@ import { assemblePrompt } from '../prompt-context.js';
 import type { PrepareSkillPromptResult } from '../skill-delivery.js';
 import type { PluginHookBus } from './hooks.js';
 import type { PluginToolIdentity, PluginCommandIdentity } from '@dutydeck/shared';
-import type { TriggerDispatch } from './triggers.js';
+import { TriggerTemplateUnavailableError, type TriggerAccepted, type TriggerDispatch } from './triggers.js';
+import type { WorkItemService } from '../work-items.js';
 import { scopeApplies } from './scope.js';
 
 /** 触发器开的会话：sourceId 为 `<appId>:<chatId>:plugin:<插件>:<触发器>`。 */
@@ -154,13 +155,16 @@ export interface TriggerBot { appId: string; workspace?: string; defaultAgentId?
  * 触发器会话与群里人发起的会话互不复用。
  */
 export function createTriggerDispatcher(deps: {
-  runtime: Pick<DutydeckRuntime, 'start' | 'dispatch' | 'listSessions'> & Partial<Pick<DutydeckRuntime, 'cancelQueued'>>;
+  runtime: Pick<DutydeckRuntime, 'start' | 'dispatch' | 'listSessions'> & Partial<Pick<DutydeckRuntime, 'cancelQueued' | 'getSession'>>;
   readBot(appId: string): Promise<TriggerBot | undefined>;
   fallbackAgentId(): string | undefined;
+  /** 启动工作项模板；没有时声明了 workTemplate 的触发器不可用。 */
+  work?(): Pick<WorkItemService, 'runTemplate'>;
 }) {
-  return async (request: TriggerDispatch): Promise<{ sessionId: string; taskId: string }> => {
+  return async (request: TriggerDispatch): Promise<TriggerAccepted> => {
     const bot = await deps.readBot(request.target.botAppId);
     if (!bot) throw new Error(`机器人 ${request.target.botAppId} 未配置`);
+    if (request.workTemplate) return runTriggerTemplate(deps, request as TriggerDispatch & { workTemplate: NonNullable<TriggerDispatch['workTemplate']> }, bot.appId);
     const sourceId = `${bot.appId}:${request.target.chatId}:plugin:${request.plugin}:${request.triggerId}`;
     let session: Session | undefined;
     if (request.target.session === 'reuse') {
@@ -190,9 +194,47 @@ export function createTriggerDispatcher(deps: {
       const permissionMode = bot.permissionMode === 'full-trust' && !bot.fullTrustConfirmed ? undefined : bot.permissionMode;
       sessionId = (await deps.runtime.start({ agentId, ...(cwd ? { cwd } : {}), source: PLUGIN_TRIGGER_SOURCE, sourceId, ...(permissionMode ? { permissionMode } : {}) })).id;
     }
-    const task = await deps.runtime.dispatch(sessionId, request.prompt, 'queue', request.prompt, undefined, installationOwnerTaskActor, `plugin-trigger:${request.key}`);
+    const task = await deps.runtime.dispatch(sessionId, request.prompt!, 'queue', request.prompt!, undefined, installationOwnerTaskActor, `plugin-trigger:${request.key}`);
     return { sessionId, taskId: task.id };
   };
+}
+
+/**
+ * 在模板所在会话里按模板启动工作项，身份与普通触发器任务相同（安装者）。模板所在会话必须是触发器目标机器人和群的飞书会话，
+ * 插件作用域按该会话的机器人与工作区核对；是否要人工确认沿用工作项的默认判定（飞书群里要确认）。
+ * 工作项编号由派发键决定，同一事件重试拿回同一个工作项。
+ */
+async function runTriggerTemplate(deps: Parameters<typeof createTriggerDispatcher>[0], request: TriggerDispatch & { workTemplate: NonNullable<TriggerDispatch['workTemplate']> }, botAppId: string): Promise<TriggerAccepted> {
+  const unavailable = (cause: string, message: string) => new TriggerTemplateUnavailableError(cause, message);
+  const { session: sessionId, id, version, goal } = request.workTemplate;
+  const work = deps.work?.();
+  if (!work || !deps.runtime.getSession) throw unavailable('WORK_ITEMS_UNAVAILABLE', '当前实例不能启动工作项模板');
+  const parsedVersion = typeof version === 'number' ? version : /^[1-9][0-9]{0,8}$/.test(version.trim()) ? Number(version.trim()) : undefined;
+  if (!parsedVersion) throw unavailable('WORK_TEMPLATE_VERSION_INVALID', `工作项模板版本 ${version} 不是正整数`);
+  const session = await deps.runtime.getSession(sessionId);
+  if (!session) throw unavailable('WORK_TEMPLATE_SESSION_NOT_FOUND', `模板所在会话 ${sessionId} 不存在`);
+  const source = parseLarkSourceId(session.sourceId);
+  if (session.source !== 'lark' || source.appId !== botAppId || source.chatId !== request.target.chatId) {
+    throw unavailable('WORK_TEMPLATE_TARGET_MISMATCH', `模板所在会话 ${sessionId} 不是机器人 ${botAppId} 在 ${request.target.chatId} 里的飞书会话`);
+  }
+  let cwd: string | undefined = session.cwd;
+  let scope = request.scope;
+  if (scope.startsWith('workspace:')) {
+    try { scope = `workspace:${await realpath(scope.slice('workspace:'.length))}`; cwd = await realpath(session.cwd); }
+    catch { throw unavailable('PLUGIN_SCOPE_UNRESOLVED', `插件 ${request.plugin} 的作用域或模板所在会话工作区无法解析`); }
+  }
+  if (!scopeApplies(scope, { botAppId, cwd })) throw unavailable('PLUGIN_SCOPE_MISMATCH', `插件 ${request.plugin} 的作用域不允许在模板所在会话执行`);
+  if (goal.trim().length > 32_000) throw unavailable('WORK_TEMPLATE_GOAL_TOO_LONG', '渲染后的目标超过 32000 字符');
+  const idempotencyKey = `plugin-trigger:${createHash('sha256').update(request.key).digest('hex').slice(0, 40)}`;
+  try {
+    // 触发器启动的工作项不归属父会话此刻正在跑的那一轮（用量与风险策略都不沿用）。
+    const item = await work.runTemplate(sessionId, id, parsedVersion, goal, idempotencyKey, installationOwnerTaskActor, undefined, true);
+    return { sessionId, workItemId: item.id, awaitingConfirmation: item.status === 'awaiting_confirmation' };
+  } catch (error) {
+    // 模板缺失、无权、会话不可运行或交付位置无法确认都是配置问题，不是投递暂时失败。
+    if (error instanceof RuntimeError && error.statusCode < 500) throw unavailable(error.code, error.code === 'WORK_TEMPLATE_NOT_FOUND' ? `工作项模板 ${id} 的版本 ${parsedVersion} 不存在或已不可用（会话 ${sessionId}）` : error.message);
+    throw error;
+  }
 }
 
 const resultLimit = 8_000;
