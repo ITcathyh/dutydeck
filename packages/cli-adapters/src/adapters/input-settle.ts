@@ -48,6 +48,20 @@ export async function waitForInputEcho(backend: PtyLike, since: number): Promise
 }
 
 /**
+ * bracketed paste 写入 prompt（后端有 pasteText 就用它，tmux 侧是 load-buffer + paste-buffer -p），等 settleMs
+ * 再发 Enter。内嵌的 \n 保持为内容，随后的 Enter 才是提交。waitForEcho 为真时等完 settleMs 再等回显稳定。
+ */
+export async function pasteAndSubmit(backend: PtyLike, prompt: string, { settleMs = 200, waitForEcho = false }: { settleMs?: number; waitForEcho?: boolean } = {}): Promise<void> {
+  const typedAt = Date.now();
+  if (backend.pasteText) await backend.pasteText(prompt);
+  else await backend.write('\x1b[200~' + prompt + '\x1b[201~');
+  await delay(settleMs);
+  if (waitForEcho) await waitForInputEcho(backend, typedAt);
+  if (backend.sendSpecialKeys) await backend.sendSpecialKeys('Enter');
+  else await backend.write('\r');
+}
+
+/**
  * 写入 prompt 再提交：有按键接口时写入、等 200ms、发 Enter；否则写 fallbackText（默认就是 prompt）、等 1000ms、写 `\r`。
  * paste 为真时用 pasteText 代替 sendText；stopWhenRejected 为真时 sendText 返回 false 就不再提交。
  */

@@ -20,3 +20,15 @@ it('reads at most two recent receipts in same-millisecond insertion order using 
     expect(await repos.tasks.listRecentBySession!('missing')).toEqual([]);
   } finally { prepare.mockRestore(); repos.close(); }
 });
+
+it('lists each session\'s last receipt in one query, matching the last entry of listRecentBySession', async () => {
+  const repos = createRepositories(':memory:');
+  try {
+    for (const id of ['a', 'b', 'c']) await repos.tasks.save({ id, sessionId: 's', prompt: id, status: 'completed', createdAt: '2026-11-01T00:00:00.000Z', updatedAt: '2026-11-01T00:00:00.000Z' });
+    await repos.tasks.save({ id: 'late', sessionId: 't', prompt: 'late', status: 'completed', createdAt: '2026-11-03T00:00:00.000Z', updatedAt: '2026-11-03T00:00:00.000Z' });
+    await repos.tasks.save({ id: 'early', sessionId: 't', prompt: 'early', status: 'completed', createdAt: '2026-11-02T00:00:00.000Z', updatedAt: '2026-11-02T00:00:00.000Z' });
+    const latest = new Map((await repos.tasks.listLatestPerSession!()).map(task => [task.sessionId, task.id]));
+    expect(latest).toEqual(new Map([['s', 'c'], ['t', 'late']]));
+    for (const sessionId of ['s', 't']) expect((await repos.tasks.listRecentBySession!(sessionId)).at(-1)?.id).toBe(latest.get(sessionId));
+  } finally { repos.close(); }
+});

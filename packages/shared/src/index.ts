@@ -5,6 +5,7 @@ export * from './event-content.js';
 export * from './task-report.js';
 export * from './plugin-results.js';
 export * from './loop-timing.js';
+export * from './records.js';
 import { z } from 'zod';
 import {
   channelBotBrands,
@@ -412,6 +413,8 @@ export interface TaskRepository {
   listBySession(sessionId: string): Promise<TaskRecord[]>;
   /** Last two receipts, oldest first; same-time receipts retain storage insertion order. */
   listRecentBySession?(sessionId: string): Promise<TaskRecord[]>;
+  /** Each session's last receipt, ordered like the final entry of listRecentBySession. */
+  listLatestPerSession?(): Promise<TaskRecord[]>;
   get?(id: string): Promise<TaskRecord | undefined>;
   create?(task: TaskRecord): Promise<boolean>;
   enqueue?(task: TaskRecord, position: 'front' | 'back'): Promise<{ task: TaskRecord; created: boolean }>;
@@ -571,6 +574,7 @@ export * from './permission-display.js';
 export * from './credential-redaction.js';
 export * from './agent-command-approval.js';
 export * from './remote-approval.js';
+export * from './cli-capabilities.js';
 export * from './agent-model-service.js';
 
 export * from './database-control.js';
@@ -579,6 +583,7 @@ export * from './task-execution.js';
 
 export * from './bot-configuration.js';
 export * from './bot-configuration-scope.js';
+export * from './lark-config.js';
 
 export * from './driver-resources.js';
 

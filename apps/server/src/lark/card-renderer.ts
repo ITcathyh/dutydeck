@@ -1,4 +1,4 @@
-import type { AgentEvent, VerificationResponse, VerificationStatus } from '@dutydeck/shared';
+import { isChildDiagnostic, terminalTaskStatuses, type AgentEvent, type VerificationResponse, type VerificationStatus } from '@dutydeck/shared';
 import type { StoredLarkConfig } from './config.js';
 import { boundLarkCardElements, LarkServiceError } from './service.js';
 import { redactTraceText, sensitiveTraceKey } from './secret-redaction.js';
@@ -18,7 +18,7 @@ type TraceToolKind = 'command' | 'read' | 'edit' | 'search' | 'web' | 'git' | 't
 const visibleTraceGroupLimit = 5;
 
 // 任务终态集合：reconcile 与 trace 渲染共用（runtime task 状态机的终态判定）。
-export const terminalTaskStates = new Set(['completed', 'failed', 'interrupted', 'cancelled']);
+export const terminalTaskStates = new Set<string>(terminalTaskStatuses);
 
 export const isLarkMessageRateLimit = (error: unknown): error is LarkServiceError => error instanceof LarkServiceError
   && Number(error.details?.upstreamCode) === 230020;
@@ -62,16 +62,6 @@ export function patchRejectedCardDelta(previous: LarkCardElement[] = [], current
     ...(suffix ? current.slice(current.length - suffix) : [])
   ]);
 }
-
-const isChildDiagnostic = (value: unknown) => {
-  if (!value || typeof value !== 'object') return false;
-  const data = value as Record<string, any>;
-  return data.diagnostic === data.state
-  && typeof data.id === 'string' && /^child_diagnostic_[a-f0-9]{64}$/.test(data.id)
-  && typeof data.activityId === 'string' && typeof data.parentTurnId === 'string' && typeof data.childTurnId === 'string'
-  && typeof data.parentThreadId === 'string' && typeof data.childThreadId === 'string'
-  && (data.state === 'child_quota' && data.code === 'usage_limit_exceeded' || data.state === 'child_rate_limit' && data.code === 'rate_limit');
-};
 
 function compactTraceEntries(events: AgentEvent[]): TraceEntry[] {
   const result: TraceEntry[] = [];
@@ -197,10 +187,10 @@ export const steeringOutcomeText = (outcome: string) => ({
   incompatible: '这条内容的执行设置（权限模式、模型或高危操作策略）与正在执行的那一轮不同，不能插话。'
 } as Record<string, string>)[outcome] ?? 'Agent 没有接受插话。';
 
+const textFence = (text: string) => `\`\`\`text\n${text.replaceAll('```', '``\\`')}\n\`\`\``;
 const fenced = (value: unknown) => {
   if (value === undefined) return '';
-  const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
-  return `\n\n\`\`\`text\n${text.replaceAll('```', '``\\`')}\n\`\`\``;
+  return `\n\n${textFence(typeof value === 'string' ? value : JSON.stringify(value, null, 2))}`;
 };
 
 const truncate = (value: unknown, limit: number) => {
@@ -577,7 +567,7 @@ const terminalPanel = (record: Extract<StageRecord, { kind: 'terminal' }>, index
     content: '终端输出',
     text_size: 'notation',
     icon: { tag: 'standard_icon', token: toolIcon('command'), color: 'grey' }
-  }, [{ tag: 'markdown', content: `\`\`\`text\n${clipped.replaceAll('```', '``\\`')}\n\`\`\``, text_size: 'notation', margin: '0px' }], { margin, iconSize: '12px 12px' });
+  }, [{ tag: 'markdown', content: textFence(clipped), text_size: 'notation', margin: '0px' }], { margin, iconSize: '12px 12px' });
 };
 
 const stageRecordPanel = (record: StageRecord, index: string | number, margin = '0px 0px 0px 20px'): LarkCardElement =>
@@ -617,7 +607,7 @@ const toolPanel = (entry: TraceEntry, index: string | number, margin = '0px 0px 
   if (tool.output) parts.push({ label: '结果', text: tool.output });
   // 只有一段内容时省掉标签：面板标题已经说明这是哪个工具，一个「结果」字样只多占一行。
   const sections = parts.map(part => {
-    const fenced = `\`\`\`text\n${part.text.replaceAll('```', '``\\`')}\n\`\`\``;
+    const fenced = textFence(part.text);
     return parts.length > 1 ? `${part.label}\n\n${fenced}` : fenced;
   });
   const title = {
@@ -668,6 +658,20 @@ const splitGroupByToolKind = (group: TraceGroup): TraceGroup[] => {
   return parts;
 };
 
+/** 阶段面板的状态与计数。只算最终没有恢复的失败：失败后同类调用成功的不算。 */
+const stageStatus = (tools: Array<ReturnType<typeof toolPresentation>>) => {
+  const failed = unresolvedFailureFlags(tools).filter(Boolean).length;
+  const succeeded = tools.filter(item => item.statusLabel === '已完成').length;
+  const running = tools.filter(item => item.statusLabel === '执行中').length;
+  const status = failed > 0 && succeeded > 0
+    ? { label: '有失败', color: 'grey' }
+    : failed > 0
+      ? { label: '失败', color: 'grey' }
+      : running > 0 ? { label: '执行中', color: 'trace_running' }
+      : { label: '已完成', color: 'green' };
+  return { ...status, failed, succeeded, running };
+};
+
 const historyGroupPanel = (
   group: TraceGroup,
   index: number,
@@ -679,17 +683,8 @@ const historyGroupPanel = (
   const records = stageRecords(group.actions, keepScreenFallback);
   const tools = records.flatMap(record => record.kind === 'tool' ? [record.entry] : []);
   const statuses = tools.map(entry => toolPresentation(entry));
-  // 只标最终没有恢复的失败；失败后同类调用成功的不算。
-  const failedCount = unresolvedFailureFlags(statuses).filter(Boolean).length;
-  const succeededCount = statuses.filter(item => item.statusLabel === '已完成').length;
-  const runningCount = statuses.filter(item => item.statusLabel === '执行中').length;
+  const { failed: failedCount, succeeded: succeededCount, running: runningCount, ...status } = stageStatus(statuses);
   const hasFailed = failedCount > 0;
-  const status = hasFailed && succeededCount > 0
-    ? { label: '有失败', color: 'grey' }
-    : hasFailed
-      ? { label: '失败', color: 'grey' }
-      : runningCount > 0 ? { label: '执行中', color: 'trace_running' }
-      : { label: '已完成', color: 'green' };
 
   const assistantNarrative = [...group.narratives].reverse().find(entry => entry.type === 'text');
   const narrativeText = assistantNarrative?.data.text ? redactTraceText(String(assistantNarrative.data.text)).trim() : '';
@@ -817,18 +812,11 @@ const currentRunningStagePanel = (group: TraceGroup, index: number, showFallback
     ? truncateInline(narrativeText, narrativeLimit)
     : (primaryTool ? truncateInline(toolHeadline(primaryTool), 92) : '正在执行…');
 
-  const failedCount = unresolvedFailureFlags(toolPresentations).filter(Boolean).length;
-  const succeededCount = toolPresentations.filter(item => item.statusLabel === '已完成').length;
+  const { failed: failedCount, ...status } = stageStatus(toolPresentations);
   const hasFailed = failedCount > 0;
-  const stageStatus = hasFailed && succeededCount > 0
-    ? { label: '有失败', color: 'grey' }
-    : hasFailed
-      ? { label: '失败', color: 'grey' }
-      : toolPresentations.some(item => item.statusLabel === '执行中') ? { label: '执行中', color: 'trace_running' }
-      : { label: '已完成', color: 'green' };
 
   const statusSuffix = hasFailed
-    ? `　<font color='${stageStatus.color}'>● ${stageStatus.label}</font>`
+    ? `　<font color='${status.color}'>● ${status.label}</font>`
     : '';
 
   const elements: LarkCardElement[] = [];
@@ -1135,9 +1123,6 @@ export function renderLarkCardElements(
   events: AgentEvent[],
   config: Pick<StoredLarkConfig, 'traceLimit' | 'hideTraceOnComplete' | 'compactTrace'>,
   completed = false,
-  compensation = false,
-  /** 保留入参以免改动全部调用点；下一步提示移除后渲染不再按会话类型分叉。 */
-  _chatType?: string,
   view: 'combined' | 'process' | 'result' = 'combined',
   /** 结果卡按任务终态补内容：失败时带上最后没恢复的失败步骤；agentName 用于「没有任何输出」那句。 */
   resultOptions: { state?: string; agentName?: string } = {}
@@ -1178,9 +1163,6 @@ export function renderLarkCardElements(
   const background = [...events].reverse().find(event => event.type === 'status' && (event.data as any)?.state === 'background_work')?.data as Record<string, any> | undefined;
   if (background && background.count > 0) elements.push({ tag: 'markdown', element_id: 'background_work', content: `${background.mainTurnEnded ? '主回合已结束 · ' : ''}后台子任务运行中（${background.count}）`, text_size: 'notation', margin: '4px 0px' });
 
-  if (compensation) {
-    elements.push({ tag: 'markdown', content: "<font color='orange'>原运行卡片未能更新，Dutydeck 已补发终态结果。</font>", text_size: 'notation', margin: '0px 0px 8px 0px' });
-  }
   elements.push(...permissionEntries.map(permissionAlert));
   elements.push(...errorEntries.map(errorAlert));
   if (finalText && view !== 'process') {
@@ -1256,10 +1238,10 @@ export function renderLarkCardElements(
 }
 
 export const renderLarkProcessElements = (events: AgentEvent[], config: Pick<StoredLarkConfig, 'traceLimit' | 'hideTraceOnComplete' | 'compactTrace'>, terminal = false) =>
-  renderLarkCardElements(events, config, terminal, false, undefined, 'process');
+  renderLarkCardElements(events, config, terminal, 'process');
 
 export const renderLarkResultElements = (events: AgentEvent[], options: { state?: string; agentName?: string } = {}) =>
-  renderLarkCardElements(events, { hideTraceOnComplete: true }, true, false, undefined, 'result', options);
+  renderLarkCardElements(events, { hideTraceOnComplete: true }, true, 'result', options);
 
 export function renderLarkResultTextElements(text: string): LarkCardElement[] {
   const finalText = redactTraceText(text).trim();
@@ -1285,7 +1267,7 @@ export function renderLarkResultTextElements(text: string): LarkCardElement[] {
   return elements;
 }
 
-export function renderLarkTrace(events: AgentEvent[], config: Pick<StoredLarkConfig, 'traceLimit'>, _completed = false) {
+export function renderLarkTrace(events: AgentEvent[], config: Pick<StoredLarkConfig, 'traceLimit'>) {
   let entries = compactTraceEntries(events);
   if (config.traceLimit) entries = entries.slice(-config.traceLimit);
   if (!entries.length) return '正在思考中…';

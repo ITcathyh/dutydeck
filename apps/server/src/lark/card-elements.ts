@@ -37,3 +37,9 @@ export const countCardComponents = (value: unknown): number => {
   return (typeof record.tag === 'string' ? 1 : 0)
     + Object.values(record).reduce<number>((sum, item) => sum + countCardComponents(item), 0);
 };
+
+/** 容错解析卡片回调 action.value：字符串按 JSON 解析；结果不是普通对象时返回 undefined。 */
+export const parseCardActionValue = (raw: unknown): Record<string, unknown> | undefined => {
+  if (typeof raw === 'string') { try { raw = JSON.parse(raw); } catch { return undefined; } }
+  return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : undefined;
+};

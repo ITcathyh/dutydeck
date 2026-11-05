@@ -16,7 +16,7 @@
  * memory-tools 负责暴露给 Agent 的 HTTP/CLI 面。
  */
 import { createHash, randomBytes } from 'node:crypto';
-import { RuntimeError, type MemoryJob, type MemoryJobRepository, type MemoryJobVersion, type JsonValue, type ConfigRepository } from '@dutydeck/shared';
+import { RuntimeError, type MemoryJob, type MemoryJobRepository, type MemoryJobVersion, type JsonValue, type ConfigRepository, type LarkGroupMemoryScope } from '@dutydeck/shared';
 import { relevance } from './text-relevance.js';
 import { redactTraceText } from './secret-redaction.js';
 
@@ -29,8 +29,7 @@ export interface LarkMemoryScope { appId: string; chatId: string; pool: string }
 /** 群共享池的标识；飞书 chat_id 都是 oc_ / ou_ 开头，不会与它冲突。 */
 export const larkGroupMemoryPool = 'groups';
 
-/** 群聊记忆范围：shared 本机器人各群共用一个池；per-group 每个群各自一个池。 */
-export type LarkGroupMemoryScope = 'shared' | 'per-group';
+export type { LarkGroupMemoryScope } from '@dutydeck/shared';
 export const isLarkGroupMemoryScope = (value: unknown): value is LarkGroupMemoryScope => value === 'shared' || value === 'per-group';
 export const normalizeLarkGroupMemoryScope = (value: unknown): LarkGroupMemoryScope => value === 'per-group' ? 'per-group' : 'shared';
 

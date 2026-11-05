@@ -5,7 +5,7 @@ import {
   DriverDetachedError,
   DriverRecoveryError,
   PromptNotWrittenError,
-  remoteApprovalCliAdapterIds,
+  isClaudeFamilyCli,
   RuntimeError,
   type AgentConfig,
   type PermissionMode,
@@ -25,7 +25,7 @@ import { TerminalSnapshot } from '@dutydeck/terminal-renderer';
 import { IdleDetector } from './idle-detector.js';
 import { TurnCpu } from './turn-cpu.js';
 import { createTranscriptTailer, type TranscriptEventSource, type TranscriptPosition } from './transcript/index.js';
-import { buildSessionMarker, resolveCliSessionId, hasPinnedClaudeSession, claudeSessionIdLookup } from './session-id/index.js';
+import { buildSessionMarker, resolveCliSessionId, hasPinnedClaudeSession } from './session-id/index.js';
 import { hostname } from 'node:os';
 import { isDeepStrictEqual } from 'node:util';
 import { statSync } from 'node:fs';
@@ -150,6 +150,10 @@ export class PtyCliDriver implements AgentDriver {
   setPermissionMode?: AgentDriver['setPermissionMode'];
   private backgroundEvidenceUntil = 0;
   private screenProgress = '';
+  /** 屏幕进展最多每 SCREEN_PROGRESS_INTERVAL_MS 计算一次：上次计算的时间和尾沿补算的定时器。 */
+  private screenProgressCheckedAt = 0;
+  private screenProgressTimer?: NodeJS.Timeout;
+  private static readonly SCREEN_PROGRESS_INTERVAL_MS = 200;
   private refreshingScreen = false;
   private static readonly TURN_GRACE_MS = 15_000;
   /** 后台子 agent 在飞时最多推迟 completed 这么久（见 holdForBackgroundWork）。
@@ -236,15 +240,15 @@ export class PtyCliDriver implements AgentDriver {
     this.backend = opts.backend ?? new PtyBackend();
     this.cwd = opts.agent.cwd ?? process.cwd();
     this.claudeSettings = new ClaudeSettings(this.adapter.id, this.sessionId);
-    this.planGuardSupported = remoteApprovalCliAdapterIds.includes(this.adapter.id);
+    this.planGuardSupported = isClaudeFamilyCli(this.adapter.id);
     this.planGuardActive = opts.agent.permissionMode === 'deny-all';
     this.spawnPermissionMode = this.planGuardActive ? sessionPermissionMode(opts.agent.env) : opts.agent.permissionMode;
     // 守卫脚本跟着任务走：上一个驱动留下的（daemon 在计划阶段之后重启）也按本次任务的模式改正。
     if (this.planGuardSupported) this.claudeSettings.setPlanGuard(this.planGuardActive);
     this.cliSessionId = opts.cliSessionId;
-    this.claudeResumeSource = claudeSessionIdLookup.adapterIds.includes(this.adapter.id) ? opts.claudeResumeSource : undefined;
+    this.claudeResumeSource = isClaudeFamilyCli(this.adapter.id) ? opts.claudeResumeSource : undefined;
     this.optsNativeForkSessionId = opts.nativeForkSessionId;
-    if (remoteApprovalCliAdapterIds.includes(this.adapter.id)) {
+    if (isClaudeFamilyCli(this.adapter.id)) {
       this.requestPermission = request => this.requestHookPermission(request);
       this.resolvePermission = async (id, approved, reason) => this.resolveHookPermission(id, approved, reason);
       this.setPermissionMode = mode => this.switchTaskPermission(mode);
@@ -512,7 +516,7 @@ export class PtyCliDriver implements AgentDriver {
         this.inputPrepared = true;
       }
       check();
-      if (this.processProbe && claudeSessionIdLookup.adapterIds.includes(this.adapter.id)) {
+      if (this.processProbe && isClaudeFamilyCli(this.adapter.id)) {
         await Promise.race([this.transcript?.flush(), writeCancelled]);
         check();
       }
@@ -998,7 +1002,7 @@ export class PtyCliDriver implements AgentDriver {
   }
 
   async prepareForIdleRetirement(): Promise<boolean> {
-    if (process.platform === 'linux' && this.processProbe && claudeSessionIdLookup.adapterIds.includes(this.adapter.id)) {
+    if (process.platform === 'linux' && this.processProbe && isClaudeFamilyCli(this.adapter.id)) {
       // Retirement must not inherit the idle discovery backoff. A missing PID
       // record may be a startup/partial-write window, not a proven old dialect.
       if (!this.sampleClaudeNativeSession?.(true)) return false;
@@ -1026,7 +1030,7 @@ export class PtyCliDriver implements AgentDriver {
     if (this.claudeResumeSource) {
       return claudeResumeFromObservation(this.claudeResumeSource, this.cwd, this.spawnEnv());
     }
-    if (!this.adapter.buildResumeCommand || (!claudeSessionIdLookup.adapterIds.includes(this.adapter.id) && this.adapter.id !== 'codex')) return undefined;
+    if (!this.adapter.buildResumeCommand || (!isClaudeFamilyCli(this.adapter.id) && this.adapter.id !== 'codex')) return undefined;
     const found = resolveCliSessionId(this.adapter.id, {
       sessionId: this.sessionId, cwd: this.cwd, env: this.spawnEnv(), requireMarker: true,
     });
@@ -1271,7 +1275,7 @@ export class PtyCliDriver implements AgentDriver {
     // can replace its PID. Native state is accepted only from this process tree.
     let nativeResolver: ClaudeNativeSessionResolver | undefined;
     let rootIdentity: ReturnType<ProcessProbe['identify']> | undefined;
-    if (pid && this.processProbe && claudeSessionIdLookup.adapterIds.includes(this.adapter.id)) {
+    if (pid && this.processProbe && isClaudeFamilyCli(this.adapter.id)) {
       try { rootIdentity = this.processProbe.identify(pid); } catch { /* Unsupported platform retains marker resolution. */ }
     }
     this.backendPid = pid ? { backend, pid } : undefined;
@@ -1740,7 +1744,17 @@ export class PtyCliDriver implements AgentDriver {
       && /[❯›]|(?:yes|allow|deny|answer|waiting)/i.test(footer);
   }
 
+  /** 输出块很密而整屏转文本较贵，这里只服务分钟级的卡住检测：标脏后最多每 200ms 算一次，间隔内的变化由尾沿补算。 */
   private noteScreenProgress(): void {
+    if (!this.turnActive || this.screenProgressTimer) return;
+    const wait = this.screenProgressCheckedAt + PtyCliDriver.SCREEN_PROGRESS_INTERVAL_MS - Date.now();
+    if (wait <= 0) { this.checkScreenProgress(); return; }
+    this.screenProgressTimer = setTimeout(() => { this.screenProgressTimer = undefined; this.checkScreenProgress(); }, wait);
+    this.screenProgressTimer.unref();
+  }
+
+  private checkScreenProgress(): void {
+    this.screenProgressCheckedAt = Date.now();
     if (!this.turnActive) return;
     // Animation, spinner counters and footer time changes are not progress.
     const lines = this.snapshot?.viewportText().split('\n').map(line => line.trim()) ?? [];

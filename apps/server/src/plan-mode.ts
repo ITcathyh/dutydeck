@@ -1,4 +1,5 @@
-import { remoteApprovalCliAdapterIds, type AgentConfig } from '@dutydeck/shared';
+import { inferAcpInsightClient } from '@dutydeck/acp-client';
+import { isClaudeFamilyCli, type AgentConfig } from '@dutydeck/shared';
 
 /**
  * 先出计划：第一轮只调研、出计划（任务以 deny-all 运行，写操作被拦），用户批准后在同一会话按原权限执行。
@@ -34,19 +35,14 @@ export const planAgentPrompt = (material: string) => `${planInstructionBlock}\n\
 /** 计划卡和 Web 计划操作的有效期：与审批卡同一个 24 小时上限。 */
 export const planDecisionWindowMs = 24 * 60 * 60_000;
 
-/** Claude ACP：内置 claude，或启动命令 / 入口是 claude-agent-acp 一类。codex-acp 等在沙箱里写文件不问，拦不住。 */
-const isClaudeAcp = (agent: Pick<AgentConfig, 'id' | 'command' | 'args' | 'adapterId'>) =>
-  agent.id === 'claude' || /^claude/i.test(agent.adapterId ?? '')
-  || /^claude/i.test(agent.command.split(/[\\/]/).pop() ?? '')
-  || agent.args.some(arg => /claude-(?:agent-|code-)?acp/i.test(arg));
-
 /**
  * 这个会话能不能先出计划。能保证计划阶段不改文件的只有两种：Claude 家族终端（PreToolUse 守卫）和 Claude ACP
- * （deny-all 拒绝一切需要确认的工具调用）。不能时返回给用户看的原因，调用方必须拒绝，不能退回直接执行。
+ * （deny-all 拒绝一切需要确认的工具调用；codex-acp 等在沙箱里写文件不问，拦不住）。不能时返回给用户看的原因，
+ * 调用方必须拒绝，不能退回直接执行。
  */
 export function planUnsupportedReason(session: { protocol?: string }, agent: Pick<AgentConfig, 'id' | 'name' | 'command' | 'args' | 'adapterId'> | undefined): string | undefined {
-  const supported = agent && (session.protocol === 'pty-cli' ? remoteApprovalCliAdapterIds.includes(agent.adapterId ?? agent.id)
-    : session.protocol === 'acp' && isClaudeAcp(agent));
+  const supported = agent && (session.protocol === 'pty-cli' ? isClaudeFamilyCli(agent.adapterId ?? agent.id)
+    : session.protocol === 'acp' && inferAcpInsightClient(agent) === 'claude');
   if (supported) return undefined;
   return `当前 Agent（${agent?.name ?? '未知'}）不支持先出计划：只有 Claude Code（终端模式或 ACP）能保证计划阶段不改文件。请直接下达任务，或换用 Claude Code 的会话。`;
 }

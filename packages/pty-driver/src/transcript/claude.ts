@@ -680,6 +680,8 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
           this.backgroundOffsets.set(sibling, { dev: stat.dev, ino: stat.ino, offset: offset + end + 1 });
           if (end < 0) continue;
           for (const line of bytes.subarray(0, end).toString('utf8').split('\n')) {
+            // Only these three record shapes are read below; skip parsing every other line of the sibling.
+            if (!line.includes('queue-operation') && !line.includes('task_notification') && !line.includes('task-notification')) continue;
             try {
               const entry = JSON.parse(line);
               const content = entry.type === 'queue-operation' && entry.operation === 'enqueue' ? entry.content

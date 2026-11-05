@@ -258,6 +258,11 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
       async listRecentBySession(sessionId) {
         return (sqlite.prepare('SELECT * FROM tasks WHERE session_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 2').all(sessionId) as TaskRowLike[]).map(decodeTask).reverse();
       },
+      async listLatestPerSession() {
+        return (sqlite.prepare(`SELECT t.* FROM tasks t JOIN (
+          SELECT rowid AS rid, ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY created_at DESC, rowid DESC) AS rn FROM tasks
+        ) latest ON t.rowid = latest.rid WHERE latest.rn = 1`).all() as TaskRowLike[]).map(decodeTask);
+      },
       async enqueue(task, position) {
         if (task.status !== 'queued') {
           throw new Error(`Cannot enqueue task with status '${task.status}': status must be 'queued'`);

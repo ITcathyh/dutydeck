@@ -23,7 +23,7 @@ import Fastify, { type FastifyRequest } from 'fastify';
 import { open, readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { extname, resolve, sep } from 'node:path';
-import { installationOwnerTaskActor, permissionModes, RuntimeError, toPublicAgent, type ExecutionActor, type PermissionMode, type PolicyAction, type PolicyDecision } from '@dutydeck/shared';
+import { installationOwnerTaskActor, permissionModes, supportsCodexProfiles, RuntimeError, toPublicAgent, type ExecutionActor, type PermissionMode, type PolicyAction, type PolicyDecision } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { registerLarkRoutes, type LarkRoutesOptions } from './lark/routes.js';
 import { discoverAgentModels } from './agent-models.js';
@@ -314,7 +314,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     if (!options.sessionNames || !await options.sessionNames.authorize(request)) throw new RuntimeError('AGENT_SETTINGS_OWNER_REQUIRED', 'Installation owner authorization is required', 403);
     const agent = (await runtime.listAgents()).find(item => item.id === request.params.id);
     if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', 'Unknown agent', 404);
-    if (agent.protocol !== 'pty-cli' || !['codex', 'codex-cli'].includes(agent.id)) throw new RuntimeError('AGENT_CONFIG_UNSUPPORTED', 'Only terminal Codex agents support this configuration', 400);
+    if (!supportsCodexProfiles(agent)) throw new RuntimeError('AGENT_CONFIG_UNSUPPORTED', 'Only terminal Codex agents support this configuration', 400);
     return { id: agent.id, codexProfile: agent.codexProfile ?? '' };
   });
   app.patch<{ Params: { id: string }; Body: unknown }>('/api/agents/:id/config', async request => {
@@ -323,7 +323,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     if (!agents) throw new RuntimeError('AGENT_CONFIG_UNAVAILABLE', 'Agent configuration persistence is unavailable', 503);
     const agent = await agents.get(request.params.id);
     if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', 'Unknown agent', 404);
-    if (agent.protocol !== 'pty-cli' || !['codex', 'codex-cli'].includes(agent.id)) throw new RuntimeError('AGENT_CONFIG_UNSUPPORTED', 'Only terminal Codex agents support this configuration', 400);
+    if (!supportsCodexProfiles(agent)) throw new RuntimeError('AGENT_CONFIG_UNSUPPORTED', 'Only terminal Codex agents support this configuration', 400);
     const patch = agentConfigPatchSchema.parse(request.body);
     if (patch.codexProfile) {
       const discovered = await discoverAgentModels(agent, undefined, true);
@@ -337,6 +337,11 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', `Unknown agent: ${request.params.id}`, 404);
     return discoverAgentModels(await options.agentModelSettings?.resolve(agent) ?? agent, request.query.model?.trim() || undefined, request.query.refresh === '1' || request.query.refresh === 'true');
   });
+  /** 各会话的收尾报告；运行时有批量接口时一次查完。 */
+  const sessionTaskReports = async (sessionIds: string[]): Promise<Map<string, import('@dutydeck/shared').TaskReport | undefined>> => {
+    if (typeof runtime.getSessionTaskReports === 'function') return runtime.getSessionTaskReports(sessionIds);
+    return new Map(await Promise.all(sessionIds.map(async id => [id, await runtime.getSessionTaskReport?.(id)] as const)));
+  };
   app.get('/api/sessions', async request => {
     const sessions = await runtime.listSessions();
     const visible = (await Promise.all(sessions.map(async session => await canViewSession(request, session.id) ? session : undefined))).filter((session): session is typeof sessions[number] => Boolean(session));
@@ -352,8 +357,9 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
       group.sessions.push(session);
     }
     const projections = new Map<string, { id: string; title: string; status: import('@dutydeck/shared').Matter['status']; superseded: Set<string> }>();
+    const reports = groups.size ? await sessionTaskReports([...groups.values()].flatMap(group => group.sessions.map(session => session.id))) : new Map();
     for (const [id, { matter, links, sessions }] of groups) {
-      const reportedSessions = await Promise.all(sessions.map(async session => ({ ...session, taskReport: await runtime.getSessionTaskReport?.(session.id) })));
+      const reportedSessions = sessions.map(session => ({ ...session, taskReport: reports.get(session.id) }));
       const origin = links.find(link => link.kind === 'session' && link.relation === 'origin');
       const superseded = new Set<string>();
       for (const link of links.filter(link => link.kind === 'reply_target' && link.refId.startsWith('session:'))) {
@@ -404,11 +410,11 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   });
   app.get('/api/sessions/summaries', async (request, reply) => {
     const respond = async (summaries: unknown[]) => {
-      summaries = await Promise.all(summaries.map(async value => {
-        const summary = value as { sessionId: string };
-        const report = await runtime.getSessionTaskReport?.(summary.sessionId);
-        return report ? { ...summary, taskReport: report } : value;
-      }));
+      const reports = await sessionTaskReports(summaries.map(value => (value as { sessionId: string }).sessionId));
+      summaries = summaries.map(value => {
+        const report = reports.get((value as { sessionId: string }).sessionId);
+        return report ? { ...(value as object), taskReport: report } : value;
+      });
       const etag = `"${createHash('sha256').update(JSON.stringify(summaries)).digest('base64url')}"`;
       // Browsers revalidate the private representation every poll. Permission
       // filtering precedes hashing, so revoked/removed entries invalidate it too.

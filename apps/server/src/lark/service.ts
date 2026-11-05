@@ -1648,15 +1648,6 @@ export class LarkCardService {
     return { invalidUserIdList: invalidList };
   }
 
-  async safeUrgentApp(input: LarkUrgentAppInput, log?: { warn?: (details: unknown, msg?: string) => void }): Promise<LarkUrgentResult | undefined> {
-    try {
-      return await this.urgentApp(input);
-    } catch (error) {
-      log?.warn?.({ error, messageId: input?.messageId, userIdList: input?.userIdList }, '飞书应用内加急失败，不影响主任务');
-      return undefined;
-    }
-  }
-
   async pin(messageId: string): Promise<LarkPinResult> {
     const resolvedMessageId = required(messageId, 'messageId');
     const payload = await this.request('/open-apis/im/v1/pins', {
@@ -1669,30 +1660,11 @@ export class LarkCardService {
     };
   }
 
-  async safePin(messageId: string, log?: { warn?: (details: unknown, msg?: string) => void }): Promise<LarkPinResult | undefined> {
-    try {
-      return await this.pin(messageId);
-    } catch (error) {
-      log?.warn?.({ error, messageId }, '飞书卡片置顶失败，不影响主任务');
-      return undefined;
-    }
-  }
-
   async unpin(messageId: string): Promise<void> {
     const resolvedMessageId = required(messageId, 'messageId');
     await this.request(`/open-apis/im/v1/pins/${encodeURIComponent(resolvedMessageId)}`, {
       method: 'DELETE'
     });
-  }
-
-  async safeUnpin(messageId: string, log?: { warn?: (details: unknown, msg?: string) => void }): Promise<boolean> {
-    try {
-      await this.unpin(messageId);
-      return true;
-    } catch (error) {
-      log?.warn?.({ error, messageId }, '飞书取消卡片置顶失败，不影响主任务');
-      return false;
-    }
   }
 
   async listPins(chatId: string, pageToken?: string): Promise<LarkPinsResult> {

@@ -1,16 +1,9 @@
-import { normalizeCardCallback, cardActionMatchesHandler, cardActionRoute, forwardCardAction, isBuiltinCardAction, parseCardActionForwarding, parseCardActionValue, type CardActionForwarding } from './card-action-forwarding.js';
+import { normalizeCardCallback, cardActionMatchesHandler, cardActionRoute, forwardCardAction, isBuiltinCardAction, parseCardActionForwarding, type CardActionForwarding } from './card-action-forwarding.js';
+import { parseCardActionValue } from './card-elements.js';
 import { LarkServiceError } from './service.js';
 
-export const larkEventTypes = ['card.action.trigger', 'im.message.receive_v1'] as const;
-export type LarkEventType = typeof larkEventTypes[number];
-export interface LarkEventHandler {
-  id: string;
-  eventTypes: LarkEventType[];
-  url: string;
-  token: string;
-  owner?: string;
-  legacyActions?: string[];
-}
+import { larkEventTypes, type LarkEventHandler, type LarkEventType } from '@dutydeck/shared';
+export { larkEventTypes, type LarkEventHandler, type LarkEventType };
 export type LarkEventToast = { type: 'success' | 'info' | 'warning' | 'error'; content: string };
 export type LarkEventDecision = { decision: 'continue' | 'stop'; toast?: LarkEventToast };
 

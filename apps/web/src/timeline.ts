@@ -1,4 +1,5 @@
-import { appendEventContent } from '@dutydeck/shared';
+import { appendEventContent, isChildDiagnostic, isTerminalTaskStatus } from '@dutydeck/shared';
+export { isChildDiagnostic };
 import type { DockEvent, Task } from './api';
 
 export type TimelineEvent = DockEvent & { data: DockEvent['data'] & { role?: 'user' | 'assistant' } };
@@ -8,11 +9,6 @@ export type TimelineSection =
   | { kind: 'activity'; id: string; groups: TimelineActivityGroup[]; hasAnswer: boolean; taskStatus: string; isLatestTurn: boolean; startedAt: string; completedAt?: string };
 
 const isActivity = (event: TimelineEvent) => event.type === 'thinking' || event.type === 'tool_call' || event.type === 'tool_result';
-export const isChildDiagnostic = (data: TimelineEvent['data']) => data.diagnostic === data.state
-  && typeof data.id === 'string' && /^child_diagnostic_[a-f0-9]{64}$/.test(data.id)
-  && typeof data.activityId === 'string' && typeof data.parentTurnId === 'string' && typeof data.childTurnId === 'string'
-  && typeof data.parentThreadId === 'string' && typeof data.childThreadId === 'string'
-  && (data.state === 'child_quota' && data.code === 'usage_limit_exceeded' || data.state === 'child_rate_limit' && data.code === 'rate_limit');
 // 运行时留在会话里的提醒（state=notice）在时间线上显示，其余状态事件不显示。
 const isInvisible = (event: DockEvent) => event.type === 'status' ? !isChildDiagnostic(event.data) && event.data?.state !== 'notice'
   : event.type === 'task' || event.type === 'completed' || event.type === 'raw_terminal';
@@ -129,7 +125,6 @@ function appendTimeline(timeline: TimelineEvent[], source: DockEvent[], toolInde
   }
 }
 
-const terminalTaskStatuses = new Set(['completed', 'failed', 'interrupted', 'cancelled']);
 const assistantDescription = (event: TimelineEvent) => event.type === 'text' && event.data.role !== 'user';
 const stripPreviewLinks = (text: string) => text.replace(/\[([^\]]+)]\([^)]+\)/g, '$1');
 const stripPreviewMarkup = (text: string) => stripPreviewLinks(text).replace(/<[^>]+>/g, '');
@@ -188,7 +183,7 @@ export function buildTimelineSections(timeline: TimelineEvent[], tasks: Task[] =
     const userMessage = turn.find(event => event.type === 'text' && event.data.role === 'user');
     // 插话并入了正在执行的那一轮，这一段的状态跟着那一轮走。
     const task = tasksById.get(userMessage?.data.steering?.target?.taskId ?? userMessage?.data.taskId ?? turn.find(event => event.taskId || event.data.taskId)?.taskId ?? turn.find(event => event.data.taskId)?.data.taskId);
-    const terminal = task ? terminalTaskStatuses.has(task.status) : turnIndex < turns.length - 1 || !latestTurn;
+    const terminal = task ? isTerminalTaskStatus(task.status) : turnIndex < turns.length - 1 || !latestTurn;
     const lastActivityIndex = turn.reduce((latest, event, index) => isActivity(event) && !isChildDiagnostic(event.data) ? index : latest, -1);
     const lastAssistantTextIndex = turn.reduce((latest, event, index) => event.type === 'text' && event.data.role !== 'user' ? index : latest, -1);
     const finalIndex = terminal && lastAssistantTextIndex > lastActivityIndex ? lastAssistantTextIndex : -1;

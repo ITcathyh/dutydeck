@@ -982,22 +982,6 @@ describe('Lark card service', () => {
       .rejects.toBeInstanceOf(LarkServiceError);
   });
 
-  it('safeUrgentApp catches failures and returns undefined without throwing', async () => {
-    const fetcher = vi.fn()
-      .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
-      .mockResolvedValueOnce(response({ code: 99991663, msg: 'urgent failed' }, 500));
-    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test', LARK_API_RETRY_MAX_ATTEMPTS: '0' }, fetcher as typeof fetch);
-    const warn = vi.fn();
-
-    const result = await service.safeUrgentApp(
-      { messageId: 'om_card', userIdList: ['ou_target'] },
-      { warn }
-    );
-    expect(result).toBeUndefined();
-    expect(warn).toHaveBeenCalledTimes(1);
-    expect(warn.mock.calls[0]?.[1]).toContain('加急');
-  });
-
   it('pins, unpins, and lists message pins', async () => {
     const fetcher = vi.fn()
       .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
@@ -1117,23 +1101,5 @@ describe('Lark card service', () => {
     const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test', LARK_API_RETRY_MAX_ATTEMPTS: '0' }, fetcher as typeof fetch);
     await expect(service.syncSlashCommands([{ command: 'help', description: '看帮助' }]))
       .rejects.toMatchObject({ code: 'LARK_OPENAPI_ERROR', details: { upstreamCode: 99991672 } });
-  });
-
-  it('safePin and safeUnpin catch failures and do not throw', async () => {
-    const fetcher = vi.fn()
-      .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
-      .mockResolvedValueOnce(response({ code: 230002, msg: 'pin forbidden' }, 403))
-      .mockResolvedValueOnce(response({ code: 230003, msg: 'unpin not found' }, 404));
-    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test', LARK_API_RETRY_MAX_ATTEMPTS: '0' }, fetcher as typeof fetch);
-    const warn = vi.fn();
-
-    const pinRes = await service.safePin('om_fail_pin', { warn });
-    expect(pinRes).toBeUndefined();
-    expect(warn).toHaveBeenCalled();
-
-    warn.mockClear();
-    const unpinRes = await service.safeUnpin('om_fail_unpin', { warn });
-    expect(unpinRes).toBe(false);
-    expect(warn).toHaveBeenCalled();
   });
 });

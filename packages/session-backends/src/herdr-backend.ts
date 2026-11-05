@@ -27,6 +27,17 @@ export function herdrControlEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessE
   return Object.fromEntries(Object.entries(env).filter(([key]) => !/^HERDR_/i.test(key)));
 }
 
+/**
+ * Cache key for an ownedProcesses verdict: pid, start time and the environment block address range
+ * (/proc/<pid>/stat fields 22, 50, 51). exec keeps pid and start time but builds a new stack, so the
+ * environment range moves and the process is classified again; a setuid change exposes or hides those
+ * fields and changes the key too. Older kernels without the fields get no cache.
+ */
+function processVerdictKey(pid: string, stat: string[]): string | undefined {
+  const envStart = stat[47], envEnd = stat[48];
+  return envStart && envEnd ? `${pid}:${stat[19]}:${envStart}:${envEnd}` : undefined;
+}
+
 /** A dedicated named server and an argv-launched primary pane. Never uses default or focused targets. */
 export class HerdrBackend implements SessionBackend {
   readonly kind = 'herdr' as const;
@@ -46,6 +57,9 @@ export class HerdrBackend implements SessionBackend {
   private captures: PhysicalProcessIdentity[] = [];
   private executionTimer?: NodeJS.Timeout;
   private naturalExit?: Promise<boolean>;
+  /** ownedProcesses verdicts from clean reads, keyed by processVerdictKey; reset when the launch marker changes. */
+  private processVerdicts = new Map<string, PhysicalProcessIdentity | 'foreign'>();
+  private processVerdictLaunch?: string;
   private size = { cols: 120, rows: 30 };
 
   constructor(readonly sessionName: string, private readonly options: HerdrBackendOptions) {
@@ -309,6 +323,7 @@ export class HerdrBackend implements SessionBackend {
                   if (await this.finishNaturalExit()) return;
                   const snapshot = await this.captureOwnedIdentity() as State;
                   if (this.stream !== child || this.state !== state || generation !== this.lifecycle) return;
+                  if (isDeepStrictEqual(this.state.identities, snapshot.identities)) return;
                   this.state.identities = snapshot.identities; this.persist();
                 } catch { /* Unknown observations never prove exit. */ }
                 finally { polling = false; }
@@ -419,6 +434,9 @@ export class HerdrBackend implements SessionBackend {
     if (!state || !/^[a-f0-9]{64}$/.test(state.launch_id)) throw new Error('HERDR_OWNERSHIP_MARKER_UNAVAILABLE');
     const marker = `dutydeck_terminal_launch_id=${state.launch_id}`;
     const identities: PhysicalProcessIdentity[] = [];
+    if (this.processVerdictLaunch !== state.launch_id) { this.processVerdicts.clear(); this.processVerdictLaunch = state.launch_id; }
+    // A full /proc scan keeps only the verdicts it saw again; a partial (stats) scan adds to them.
+    const verdicts = stats ? this.processVerdicts : new Map<string, PhysicalProcessIdentity | 'foreign'>();
     for (const entry of stats ? stats.keys() : readdirSync('/proc').filter(name => /^\d+$/.test(name))) {
       let stage = 'stat', originalStart: string | undefined;
       try {
@@ -427,18 +445,26 @@ export class HerdrBackend implements SessionBackend {
         if (stat[0] === 'Z' || stat[0] === 'X') continue;
         // A process born before this immutable root cannot inherit this launch's private marker.
         if (BigInt(originalStart!) < BigInt(state.root.start)) continue;
+        const key = processVerdictKey(entry, stat), known = key ? this.processVerdicts.get(key) : undefined;
+        if (key && known) {
+          verdicts.set(key, known);
+          if (known !== 'foreign') identities.push(known);
+          continue;
+        }
+        const remember = (verdict: PhysicalProcessIdentity | 'foreign') => { if (key) verdicts.set(key, verdict); };
         stage = 'uid';
         const uids = readFileSync(`/proc/${entry}/status`, 'utf8').match(/^Uid:\s+(.+)$/m)?.[1]?.trim().split(/\s+/);
         // /proc directory ownership changes when dumpability changes, even without a process UID change.
         if (!uids) throw new Error('PROCESS_UID_UNKNOWN');
-        if (!uids.includes(String(process.getuid!()))) continue;
+        if (!uids.includes(String(process.getuid!()))) { remember('foreign'); continue; }
         stage = 'environ';
         if (readFileSync(`/proc/${entry}/environ`, 'utf8').split('\0').includes(marker)) {
           stage = 'identity';
           const identity = this.options.processProbe.identify(Number(entry));
           if (stats && identity.start !== originalStart) throw new Error('PROCESS_IDENTITY_CHANGED');
           identities.push(identity);
-        }
+          if (identity.start === originalStart) remember(identity);
+        } else remember('foreign');
       } catch (error) {
         const errno = (error as NodeJS.ErrnoException).code;
         if (errno === 'ENOENT' || errno === 'ESRCH') continue;
@@ -494,6 +520,7 @@ export class HerdrBackend implements SessionBackend {
         throw new Error(`HERDR_OWNERSHIP_CENSUS_UNKNOWN pid=${entry} stage=${stage} errno=${errno ?? 'unknown'} retry_errno=${retryErrno ?? 'unknown'} state_start=${observed} comm=${JSON.stringify(comm)} cgroup=${JSON.stringify(cgroup)}`);
       }
     }
+    this.processVerdicts = verdicts;
     return identities;
   }
   private async descendants(): Promise<PhysicalProcessIdentity[]> {

@@ -7,6 +7,11 @@ import { nativeContextExpectedSchema, nativeContextRefSchema, resourceOperationS
 
 export const taskStatuses = ['queued', 'running', 'reconcile_required', 'completed', 'failed', 'interrupted', 'cancelled'] as const;
 export type TaskStatus = typeof taskStatuses[number];
+/** Statuses after which a task never runs again. `reconcile_required` is not terminal: its outcome is still unknown. */
+export const terminalTaskStatuses = ['completed', 'failed', 'interrupted', 'cancelled'] as const satisfies readonly TaskStatus[];
+export function isTerminalTaskStatus(status: string | null | undefined): status is typeof terminalTaskStatuses[number] {
+  return (terminalTaskStatuses as readonly string[]).includes(status ?? '');
+}
 export const attemptStates = ['preparing', 'active', 'suspended', 'reconcile_required', 'legacy_unresolved', 'settled'] as const;
 export type AttemptState = typeof attemptStates[number];
 export type SubmissionState = 'not_submitted' | 'intent_recorded' | 'acknowledged' | 'legacy_unknown';

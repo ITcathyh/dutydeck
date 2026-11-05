@@ -1,7 +1,7 @@
 import { lstat, readdir, realpath, rm } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import type { ConfigRepository, TaskRepository } from '@dutydeck/shared';
+import { isTerminalTaskStatus, type ConfigRepository, type TaskRepository } from '@dutydeck/shared';
 import type { LarkInboxRecord } from './lark/task-inbox.js';
 import type { LarkInteraction } from './lark/workflow-interactions.js';
 import { existsSync, realpathSync, renameSync, rmSync, statSync } from 'node:fs';
@@ -87,7 +87,7 @@ export async function readLarkResourceReferences(store: ConfigRepository, tasks:
   for (const record of records) {
     const task = record.taskId ? await tasks.get(record.taskId) : undefined;
     if (record.state === 'received' || record.state === 'unrouted'
-      || (record.taskId && (!task || !['completed', 'failed', 'interrupted', 'cancelled'].includes(task.status)))) {
+      || (record.taskId && (!task || !isTerminalTaskStatus(task.status)))) {
       held.add(key(record.appId, record.event.messageId));
     }
   }

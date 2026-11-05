@@ -1,6 +1,6 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
-import { delay } from './input-settle.js';
+import { pasteAndSubmit } from './input-settle.js';
 
 /** CodeM's interactive terminal surface. It owns history by an explicit
  * session id; never use a global "latest" resume shortcut. */
@@ -20,11 +20,7 @@ export function createCodemAdapter(): CliAdapter {
     },
 
     async writeInput(backend: PtyLike, prompt: string): Promise<void> {
-      if (backend.pasteText) await backend.pasteText(prompt);
-      else await backend.write(`\x1b[200~${prompt}\x1b[201~`);
-      await delay(200);
-      if (backend.sendSpecialKeys) await backend.sendSpecialKeys('Enter');
-      else await backend.write('\r');
+      await pasteAndSubmit(backend, prompt);
     },
 
     buildResumeCommand(sessionId: string): string[] | null {

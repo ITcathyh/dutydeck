@@ -20,6 +20,7 @@
 import { existsSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { pinnedSessionUuid } from '@dutydeck/cli-adapters';
+import { claudeFamilyCliAdapterIds, isClaudeFamilyCli } from '@dutydeck/shared';
 import { claudeProjectDir } from '../cli-paths.js';
 import { byMtimeDesc, parseJsonlObjects, readHead, nativeTranscriptObjects, walkFiles } from './fs-scan.js';
 import { buildSessionMarker, isUsableMarker } from './marker.js';
@@ -55,7 +56,7 @@ function markedSession(path: string, sessionId: string, exactPinned = false): st
 
 /** A pinned native id may not be reused for a fresh launch, even when its marker is unreadable. */
 export function hasPinnedClaudeSession(adapterId: string, { sessionId, cwd, env }: SessionIdLookupContext): boolean {
-  if (!claudeSessionIdLookup.adapterIds.includes(adapterId)) return false;
+  if (!isClaudeFamilyCli(adapterId)) return false;
   try { lstatSync(join(claudeProjectDir(cwd, env), `${bareId(sessionId)}.jsonl`)); return true; }
   catch (error) { return (error as NodeJS.ErrnoException).code !== 'ENOENT'; }
 }
@@ -65,7 +66,7 @@ export const claudeSessionIdLookup: SessionIdLookup = {
   // `sessionId`-per-entry field, same filename-is-the-session-id rule. Only
   // the root differs, and that arrives with `ctx.env` (the fork's own
   // CLAUDE_CONFIG_DIR must be set through `agent.env`).
-  adapterIds: ['claude-code', 'seed', 'relay'],
+  adapterIds: claudeFamilyCliAdapterIds,
 
   resolve({ sessionId, cwd, env, requireMarker }: SessionIdLookupContext): string | undefined {
     const projectDir = claudeProjectDir(cwd, env);
