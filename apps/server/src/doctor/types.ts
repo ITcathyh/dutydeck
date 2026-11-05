@@ -104,6 +104,8 @@ export interface DatabaseProbeResult {
   appliedVersion?: number;
   /** 请求的 configs 键值；键存在但无值时为 undefined。按前缀读到的键也并在这里。 */
   values?: Readonly<Record<string, string | undefined>>;
+  /** 近 30 天用量记录里因型号未知而记为未定价的型号（去重）；usage_ledger 表不存在时缺席。 */
+  unpricedUsageModels?: readonly string[];
 }
 
 /**
@@ -160,6 +162,8 @@ export interface DoctorDependencies {
   username?: string;
   /** 当前进程 uid，默认 process.getuid（Windows 上没有，对应检查直接跳过）。 */
   getuid?: () => number | undefined;
+  /** 读指定进程的有效 uid（用于运行中的守护进程），读不到返回 undefined。默认 `ps -o uid= -p <pid>`。 */
+  processUid?: (pid: number) => number | undefined;
   /** daemonStatus() 的注入点。 */
   daemonStatus?: () => DoctorDaemonStatus;
   /**

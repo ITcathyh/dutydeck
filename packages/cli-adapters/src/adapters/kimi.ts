@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
 import { delay, submitPrompt } from './input-settle.js';
@@ -6,17 +7,31 @@ const BRACKETED_PASTE_START = '\x1b[200~';
 const BRACKETED_PASTE_END = '\x1b[201~';
 const KIMI_FIRST_WRITE_SETTLE_MS = 250;
 
+const KIMI_HELP_TIMEOUT_MS = 3000;
+
 const kimiFirstWriteSeen = new WeakSet<PtyLike>();
+const kimiAutoSupport = new Map<string, boolean>();
+
+/** 读一次 `<command> --help` 并按命令缓存：帮助里列出 `--auto` 才算支持。
+ *  同样叫 `kimi` 的 Python 版 kimi-cli 没有 `--auto`，传了会因未知选项退出；探测失败也按不支持处理。 */
+function kimiSupportsAuto(command: string): boolean {
+  const cached = kimiAutoSupport.get(command);
+  if (cached !== undefined) return cached;
+  const result = spawnSync(command, ['--help'], { encoding: 'utf8', timeout: KIMI_HELP_TIMEOUT_MS, env: { ...process.env, NO_COLOR: '1' } });
+  const supported = result.status === 0 && /(^|[\s,])--auto(?![\w-])/m.test(`${result.stdout ?? ''}\n${result.stderr ?? ''}`);
+  kimiAutoSupport.set(command, supported);
+  return supported;
+}
 
 export function createKimiAdapter(): CliAdapter {
   return {
     id: 'kimi',
     capabilities: { resume: true },
 
-    buildArgs({ resume, resumeSessionId, model, permissionMode }: AdapterSessionContext): string[] {
-      // 新版 Kimi Code 的 `--yolo` 只放行普通工具调用（2.0 起是“需要时询问”），高危操作仍会停下等人；
-      // `--auto`（Never Ask）才是免审批。新建与恢复都走这里，不再带 `--yolo`。
-      const args: string[] = permissionMode === 'full-trust' ? ['--auto'] : [];
+    buildArgs({ command, resume, resumeSessionId, model, permissionMode }: AdapterSessionContext): string[] {
+      // Kimi Code 的 `--yolo` 只放行普通工具调用，高危操作仍会停下等人；`--auto`（Never Ask）才是免审批。
+      // Python 版 kimi-cli 只有 `--yolo`（它在那里就是全部放行），所以只在帮助里确认有 `--auto` 时才用它。
+      const args: string[] = permissionMode === 'full-trust' ? [kimiSupportsAuto(command || 'kimi') ? '--auto' : '--yolo'] : [];
       if (model && model.trim()) {
         args.push('--model', model.trim());
       }

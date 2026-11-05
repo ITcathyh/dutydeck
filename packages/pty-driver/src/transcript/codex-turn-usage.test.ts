@@ -102,3 +102,28 @@ it('does not count a generation handoff that copies earlier responses with new o
   appendFileSync(segment('05', `_${gen}`), response('resp_1', [100, 0, 1], [100, 0, 1], 7) + response('resp_2', [40, 0, 4], [140, 0, 5], 8)); await flush();
   expect(take(source)).toMatchObject({ usageRef: `codex-pty:${sid}:resp_2`, breakdown: { inputTokens: 40, outputTokens: 4 } });
 });
+
+it('after the counter restarts, a new total equal to one seen before the restart is still counted', async () => {
+  const { source, append } = await tail(meta() + tokenCount([1000, 0, 10], [1000, 0, 10], '2026-11-05T10:00:00.000Z'));
+  await append(tokenCount([2000, 0, 20], [1000, 0, 10], '2026-11-05T10:00:05.000Z'));
+  expect(take(source)?.breakdown).toEqual({ inputTokens: 1000, outputTokens: 10, cachedReadTokens: 0, cachedWriteTokens: 0 });
+  // Restart straight onto a total seen before (new timestamp): a restart, not a copy.
+  await append(tokenCount([1000, 0, 10], [1000, 0, 10], '2026-11-05T10:01:00.000Z'));
+  expect(take(source)).toMatchObject({ partial: true, breakdown: { inputTokens: 1000, outputTokens: 10 } });
+  // Restart again, then the new run climbs back to 1000 and 2000: both increments count.
+  await append(tokenCount([300, 0, 3], [300, 0, 3], '2026-11-05T10:02:00.000Z'));
+  expect(take(source)).toMatchObject({ partial: true, breakdown: { inputTokens: 300, outputTokens: 3 } });
+  await append(tokenCount([1000, 0, 10], [700, 0, 7], '2026-11-05T10:03:00.000Z') + tokenCount([2000, 0, 20], [1000, 0, 10], '2026-11-05T10:04:00.000Z'));
+  expect(take(source)).toEqual({ state: 'turn_usage', usageRef: `codex-pty:${sid}:2026-11-05T10:04:00.000Z`,
+    breakdown: { inputTokens: 1700, outputTokens: 17, cachedReadTokens: 0, cachedWriteTokens: 0 } });
+});
+
+it('without timestamps, repeats and copies within a run are skipped but a new run after a restart counts again', async () => {
+  const { source, append } = await tail(meta() + tokenCount([1000, 0, 10], [1000, 0, 10]));
+  await append(tokenCount([2000, 0, 20], [1000, 0, 10]) + tokenCount([2000, 0, 20], [1000, 0, 10]) + tokenCount([1000, 0, 10], [1000, 0, 10]));
+  expect(take(source)?.breakdown).toEqual({ inputTokens: 1000, outputTokens: 10, cachedReadTokens: 0, cachedWriteTokens: 0 });
+  await append(tokenCount([300, 0, 3], [300, 0, 3]));
+  expect(take(source)).toMatchObject({ partial: true, breakdown: { inputTokens: 300 } });
+  await append(tokenCount([1000, 0, 10], [700, 0, 7]));
+  expect(take(source)?.breakdown).toEqual({ inputTokens: 700, outputTokens: 7, cachedReadTokens: 0, cachedWriteTokens: 0 });
+});

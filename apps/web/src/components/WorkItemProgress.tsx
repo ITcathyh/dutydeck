@@ -1,4 +1,4 @@
-import { useId, useState, type ReactNode } from 'react';
+import { useEffect, useId, useState, type ReactNode } from 'react';
 import { useQueries } from '@tanstack/react-query';
 import type { WorkAttempt, WorkItem } from '@dutydeck/shared';
 import { ChevronDown, ChevronRight } from 'lucide-react';
@@ -11,21 +11,34 @@ import { useWorkItems, useWorkItemRequests, workStatusLabels } from './workItemQ
 
 const finishedStatus = ['completed', 'failed', 'interrupted', 'cancelled'];
 /**
- * 步骤耗时。有任务记录时用任务的创建/最后更新时间（不含准备阶段，也不受之后补写的评审证据影响）；
- * 任务记录读不到时退回尝试自己的时间戳，标「约」。执行端已接收的尝试算运行中，准备中、需要处理的尝试没有可信耗时。
+ * 步骤耗时，一律标「约」。有任务记录时用任务的创建/最后更新时间（不含准备阶段，也不受之后补写的评审证据影响），
+ * 但任务创建时间是入队时间，会把排队时间算进去，任务记录里没有真正开始执行的时间；
+ * 任务记录读不到时退回尝试自己的时间戳。执行端已接收的尝试算运行中，准备中、需要处理的尝试没有可信耗时。
  */
 function attemptDuration(attempt: WorkAttempt | undefined, now: number, tasks: ReadonlyMap<string, Task>) {
   if (!attempt || attempt.status !== 'accepted' && !finishedStatus.includes(attempt.status)) return;
   const running = attempt.status === 'accepted';
   const task = attempt.taskId ? tasks.get(attempt.taskId) : undefined;
-  const exact = Boolean(task && task.status !== 'queued' && (running || finishedStatus.includes(task.status)));
-  const elapsed = exact
+  const fromTask = Boolean(task && task.status !== 'queued' && (running || finishedStatus.includes(task.status)));
+  const elapsed = fromTask
     ? elapsedMilliseconds(task!.createdAt, running ? undefined : task!.updatedAt, now)
     : elapsedMilliseconds(attempt.createdAt, running ? undefined : attempt.updatedAt, now);
   if (elapsed === undefined) return;
   const label = running ? '已运行' : '用时';
   if (elapsed < 1_000) return `${label} <1 秒`;
-  return `${label} ${exact ? '' : '约 '}${formatElapsed(elapsed)}`;
+  return `${label} 约 ${formatElapsed(elapsed)}`;
+}
+
+/** 当前时间；enabled 时每秒刷新一次，让「已运行」跟着走。 */
+function useNow(enabled: boolean): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!enabled) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1_000);
+    return () => clearInterval(timer);
+  }, [enabled]);
+  return enabled ? now : Date.now();
 }
 
 /** 读出目标各尝试所在会话的任务记录（复用任务列表的查询缓存）；已结束的尝试等到任务也结束前，每 5 秒补读一次。 */
@@ -73,7 +86,7 @@ function GoalProgress({ item, session, agents, onOpen, onSelectSession }: { item
   const attention = item.steps.filter(step => ['running', 'waiting', 'failed', 'blocked'].includes(step.status));
   const needsAction = ['waiting', 'failed', 'blocked'].includes(item.status) || item.steps.some(step => ['waiting', 'failed', 'blocked'].includes(step.status)) || (hasRunning && Boolean(requests.data?.length));
   const readOnly = isSessionActionDisabled(session);
-  const now = Date.now();
+  const now = useNow(expanded && item.steps.some(step => step.attempts.some(attempt => attempt.status === 'accepted')));
   const attemptTasks = useAttemptTasks(item, expanded);
   return <article aria-label={`目标：${item.title}`} className="min-w-0 border-b border-default py-3">
     <div className="flex min-w-0 flex-wrap items-center gap-2">

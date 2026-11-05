@@ -4,11 +4,17 @@ import { createHash } from 'node:crypto';
 import { basename, dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { isClaudeFamilyCli, shellQuote as quote, type AgentConfig } from '@dutydeck/shared';
-import { highRiskBlockedSuffix, secretGuardScriptPath } from '@dutydeck/shared/secret-guard';
+import { highRiskBlockedSuffix, highRiskCheckFailedSuffix, secretGuardScriptPath, sentenceEnd } from '@dutydeck/shared/secret-guard';
 import { codexHookReadiness } from './codex-hook-readiness.js';
 import { LarkServiceError } from './service.js';
 
-const guardVersion = 'dutydeck-high-risk-guard-v5';
+const guardVersion = 'dutydeck-high-risk-guard-v6';
+
+// 生成脚本里内联的拒绝原因拼接，与 secret-guard 的 highRiskBlockedReason / highRiskCheckFailedReason 同义：
+// 高危命中接“请让有高危授权的人确认”，正则检查本身出错接各自的说明；原因已带句末标点时不再补句号。
+const reasonHelpers = `const sentence = text => ${sentenceEnd}.test(text) ? text : text + '。';
+const blockedReason = reason => sentence(String(reason).trim()) + ${JSON.stringify(highRiskBlockedSuffix)};
+const checkFailedReason = detail => sentence(detail) + ${JSON.stringify(highRiskCheckFailedSuffix)};`;
 
 type HookAgentId = 'codex' | 'claude' | 'trae' | 'cursor' | 'pi';
 type HookAdapter = {
@@ -118,13 +124,14 @@ const risky = secretReason ? true : await new Promise(resolve => {
   const worker = new Worker(regexWorker, { eval: true, workerData: { pattern: policy.pattern, input: values.join('\\n') } });
   let settled = false;
   const finish = value => { if (settled) return; settled = true; clearTimeout(timer); worker.removeAllListeners(); void worker.terminate(); resolve(value); };
-  const timer = setTimeout(() => { matchError = '正则匹配超过 1000ms，已终止并拒绝操作'; finish(true); }, 1000);
-  worker.once('message', result => { if (result.error) matchError = '正则匹配失败：' + result.error; finish(result.error ? true : result.matched === true); });
-  worker.once('error', error => { matchError = '正则匹配隔离任务失败：' + error.message; finish(true); });
-  worker.once('exit', code => { if (code !== 0) { matchError = '正则匹配隔离任务异常退出：' + code; finish(true); } });
+  const timer = setTimeout(() => { matchError = '高危正则匹配超过 1000ms，已终止'; finish(true); }, 1000);
+  worker.once('message', result => { if (result.error) matchError = '高危正则无法使用：' + result.error; finish(result.error ? true : result.matched === true); });
+  worker.once('error', error => { matchError = '高危正则匹配的隔离线程失败：' + error.message; finish(true); });
+  worker.once('exit', code => { if (code !== 0) { matchError = '高危正则匹配的隔离线程异常退出：' + code; finish(true); } });
 });
 if (!risky) process.exit(0);
-const reason = secretReason || (matchError || policy.reason || '当前飞书发送人无权执行高危操作') + ${JSON.stringify(highRiskBlockedSuffix)};
+${reasonHelpers}
+const reason = secretReason || (matchError ? checkFailedReason(matchError) : blockedReason(policy.reason || '当前飞书发送人无权执行高危操作'));
 ${deny}
 `;
 }
@@ -139,11 +146,12 @@ const matches = (pattern: string, input: string) => new Promise<{ risky: boolean
   const worker = new Worker(regexWorker, { eval: true, workerData: { pattern, input } });
   let settled = false;
   const finish = (value: { risky: boolean; error?: string }) => { if (settled) return; settled = true; clearTimeout(timer); worker.removeAllListeners(); void worker.terminate(); resolve(value); };
-  const timer = setTimeout(() => finish({ risky: true, error: '正则匹配超过 1000ms，已终止并拒绝操作' }), 1000);
-  worker.once('message', result => finish(result.error ? { risky: true, error: '正则匹配失败：' + result.error } : { risky: result.matched === true }));
-  worker.once('error', error => finish({ risky: true, error: '正则匹配隔离任务失败：' + error.message }));
-  worker.once('exit', code => { if (code !== 0) finish({ risky: true, error: '正则匹配隔离任务异常退出：' + code }); });
+  const timer = setTimeout(() => finish({ risky: true, error: '高危正则匹配超过 1000ms，已终止' }), 1000);
+  worker.once('message', result => finish(result.error ? { risky: true, error: '高危正则无法使用：' + result.error } : { risky: result.matched === true }));
+  worker.once('error', error => finish({ risky: true, error: '高危正则匹配的隔离线程失败：' + error.message }));
+  worker.once('exit', code => { if (code !== 0) finish({ risky: true, error: '高危正则匹配的隔离线程异常退出：' + code }); });
 });
+${reasonHelpers}
 
 export default function (pi: any) {
   pi.on('tool_call', async (event: any, ctx: any) => {
@@ -161,7 +169,7 @@ export default function (pi: any) {
     if (!policy.pattern) return undefined;
     const result = await matches(policy.pattern, JSON.stringify({ tool_name: event.toolName, tool_input: event.input }));
     if (!result.risky) return undefined;
-    return { block: true, reason: (result.error || policy.reason || '当前飞书发送人无权执行高危操作') + ${JSON.stringify(highRiskBlockedSuffix)} };
+    return { block: true, reason: result.error ? checkFailedReason(result.error) : blockedReason(policy.reason || '当前飞书发送人无权执行高危操作') };
   });
 }
 `;

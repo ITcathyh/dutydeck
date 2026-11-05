@@ -87,6 +87,14 @@ export function modelHasPrice(pricing: UsagePricing, model: string): boolean {
   return pricing.source !== 'builtin' || pricing.models.some(entry => matchesModel(name, entry.match.toLowerCase()));
 }
 
+/**
+ * 型号名是不是交给 CLI 运行时解析的别名（opus、sonnet[1m]、default 这类不带版本号的纯字母名）。
+ * 账本计价优先用运行时上报的完整型号，别名实际按哪个型号计价要看运行时，单看配置判断不了有没有价。
+ */
+export function isRuntimeModelAlias(model: string): boolean {
+  return /^[a-z]+$/.test(normalizeModelName(model));
+}
+
 export function estimateCostUsd(pricing: UsagePricing, model: string | undefined, tokens: Tokens, provider?: string): number | undefined {
   const { rate } = priceSelection(pricing, model, provider);
   if (!rate || (tokens.cacheWriteTokens ?? 0) > 0 && rate.cacheWritePerMTok === undefined) return undefined;

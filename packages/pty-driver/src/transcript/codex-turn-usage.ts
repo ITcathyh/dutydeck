@@ -5,10 +5,13 @@
  * response's own usage); those are summed, each id once. Older rollouts only have `event_msg token_count`;
  * there the cumulative `total_token_usage` is differenced: the same token_count is often written several
  * times in a row, so summing its `last_token_usage` would count one response repeatedly. Resume appends to
- * the same rollout and continues the cumulative total; a total already seen (a repeated line, or history
- * copied into a fork) is skipped. A smaller, new total means the counter restarted: that
+ * the same rollout and continues the cumulative total. The totals are read as a monotonic run: a total equal
+ * to the last one is a repeated line; a line already seen (same timestamp and total, e.g. history copied into
+ * a fork or generation file) is skipped. A smaller total that is not such a copy means the counter restarted:
+ * a new run begins, so a later total that happens to equal one from before the restart still counts. That
  * response's own `last_token_usage` is kept as a lower bound and the reading is marked partial (the ledger
- * then records the tokens with an unknown cost, usage_incomplete), never a negative difference.
+ * then records the tokens with an unknown cost, usage_incomplete), never a negative difference. Lines without
+ * a timestamp cannot be told apart from copies, so a total already seen in the current run is skipped.
  *
  * Records before the tailer's start point (baseline) only seed the seen ids and the cumulative reference,
  * so a restore or a generation replay never books history again. The usageRef names the native thread and
@@ -33,6 +36,8 @@ export class CodexTurnUsage {
   /** The CLI writes token_usage_record; token_count is then display-only. */
   private records = false;
   private reference?: Tokens;
+  /** Totals of the current monotonic run (since the last restart), for lines without a timestamp. */
+  private run = new Set<number>();
   private pending?: Omit<Tokens, 'total'>;
   private lastRef?: string;
   private partial = false;
@@ -58,14 +63,22 @@ export class CodexTurnUsage {
     if (entry.type === 'event_msg' && p.type === 'token_count') {
       const total = tokensOf(p.info?.total_token_usage);
       if (!total) return;
-      // A cumulative total seen before is a repeated line or history copied into a fork/generation file.
-      const key = `total_${total.total}`;
-      if (this.seen.has(key)) return;
-      this.remember(key);
+      const stamp = typeof entry.timestamp === 'string' && entry.timestamp ? entry.timestamp : undefined;
+      // The same line seen before is history copied into a fork/generation file.
+      if (stamp) {
+        const key = `total_${stamp}_${total.total}`;
+        if (this.seen.has(key)) return;
+        this.remember(key);
+      } else if (this.run.has(total.total)) return;
       const previous = this.reference;
+      // Equal to the last total: the same reading written again.
+      if (previous && total.total === previous.total) return;
+      const restarted = !!previous && total.total < previous.total;
+      if (restarted) this.run = new Set();
+      this.run.add(total.total);
+      if (this.run.size > SEEN_KEYS_MAX) this.run.delete(this.run.values().next().value as number);
       this.reference = total;
       if (baseline || this.records) return;
-      const restarted = !!previous && total.total < previous.total;
       const delta = previous && !restarted
         ? { input: Math.max(0, total.input - previous.input), cached: Math.max(0, total.cached - previous.cached), cacheWrite: Math.max(0, total.cacheWrite - previous.cacheWrite), output: Math.max(0, total.output - previous.output) }
         : tokensOf(p.info?.last_token_usage);

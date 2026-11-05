@@ -3,6 +3,8 @@ import type { PermissionMode } from '@dutydeck/shared';
 /** buildArgs 的会话上下文（精简字段集） */
 export interface AdapterSessionContext {
   sessionId: string;
+  /** 将要启动的 CLI 命令（AgentConfig.command）。需要按已安装版本选参数的适配器用它探测。 */
+  command?: string;
   cwd?: string;
   resume?: boolean;
   resumeSessionId?: string;

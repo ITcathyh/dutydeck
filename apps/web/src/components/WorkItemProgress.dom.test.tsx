@@ -309,12 +309,11 @@ describe('WorkItemProgress 步骤耗时', () => {
     ],
   });
 
-  it('有任务记录时按任务的创建到结束计算，不受尝试之后补写的更新时间影响', async () => {
+  it('有任务记录时按任务的创建到结束计算，不受尝试之后补写的更新时间影响；任务创建时间含排队，所以标「约」', async () => {
     const item = research([{ id: 'a2', number: 2, status: 'completed', sessionId: 'child/2', taskId: 't2', createdAt: time, updatedAt: at(10) }], 'completed');
     mount([item], session, false, [task('t2', 'completed', at(0, 20), at(2))]);
     await screen.findByRole('list', { name: '进度步骤' });
-    await waitFor(() => expect(stepItem('research').querySelector('summary')!.textContent).toContain('用时 1 分 40 秒'));
-    expect(stepItem('research').textContent).not.toContain('约');
+    await waitFor(() => expect(stepItem('research').querySelector('summary')!.textContent).toContain('用时 约 1 分 40 秒'));
     expect(stepItem('research').textContent).not.toContain('10 分');
   });
 
@@ -327,9 +326,35 @@ describe('WorkItemProgress 步骤耗时', () => {
     ] });
     mount([item], session, false, [task('t2', 'running', at(1), at(1))]);
     await screen.findByRole('list', { name: '进度步骤' });
-    await waitFor(() => expect(stepItem('research').textContent).toContain('已运行 4 分钟'));
+    await waitFor(() => expect(stepItem('research').textContent).toContain('已运行 约 4 分钟'));
     expect(stepItem('review').textContent).not.toMatch(/已运行|用时/);
     expect(stepItem('summary').textContent).not.toMatch(/已运行|用时/);
+  });
+
+  it('有运行中的尝试时每秒刷新「已运行」，卸载后不留定时器；没有运行中的尝试不起定时器', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] }); vi.setSystemTime(Date.parse(at(0, 10)));
+    const running = goal({ steps: [
+      { id: 'research', status: 'running', attempts: [{ id: 'a2', number: 1, status: 'accepted', createdAt: time, updatedAt: time }] },
+      { id: 'review', status: 'pending', attempts: [] },
+      { id: 'summary', status: 'pending', attempts: [] },
+    ] });
+    // 只追踪 1 秒间隔的定时器：react-query 等别的轮询不归这里管。
+    const setSpy = vi.spyOn(globalThis, 'setInterval');
+    const clearSpy = vi.spyOn(globalThis, 'clearInterval');
+    const secondTimers = () => setSpy.mock.calls.flatMap((call, index) => call[1] === 1_000 ? [setSpy.mock.results[index]!.value] : []);
+    const view = mount([running]);
+    await screen.findByRole('list', { name: '进度步骤' });
+    expect(stepItem('research').textContent).toContain('已运行 约 10 秒');
+    act(() => { vi.advanceTimersByTime(3_000); });
+    expect(stepItem('research').textContent).toContain('已运行 约 13 秒');
+    const started = secondTimers();
+    expect(started).toHaveLength(1);
+    view.unmount();
+    expect(clearSpy.mock.calls.map(call => call[0])).toContain(started[0]);
+    cleanup(); setSpy.mockClear();
+    mount([research([{ id: 'a1', number: 1, status: 'failed', createdAt: time, updatedAt: at(0, 5) }])]);
+    await screen.findByRole('list', { name: '进度步骤' });
+    expect(secondTimers()).toHaveLength(0);
   });
 
   it('任务记录读不到时退回尝试时间戳并标「约」，展开后每次尝试各带自己的耗时', async () => {
