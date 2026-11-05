@@ -158,6 +158,8 @@ export interface DoctorDependencies {
   platform?: string;
   /** 默认 os.userInfo().username，仅用于拼 linger 提示。 */
   username?: string;
+  /** 当前进程 uid，默认 process.getuid（Windows 上没有，对应检查直接跳过）。 */
+  getuid?: () => number | undefined;
   /** daemonStatus() 的注入点。 */
   daemonStatus?: () => DoctorDaemonStatus;
   /**

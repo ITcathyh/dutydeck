@@ -12,6 +12,7 @@ import { WATCH_PREFIX } from '../watch.js';
  */
 import { larkBotEntryError, larkBotsConfigKey, larkExecutionConfirmed, larkMemoryEnabled, publicLarkConfigs, type StoredLarkConfig } from '../lark/config.js';
 import { AUTH_TOKEN_CONFIG_KEY } from '../auth/auth.js';
+import { modelHasPrice, type UsagePricing } from '../usage-ledger.js';
 import { larkMemoryErrorLabel } from '../lark/memory.js';
 import { larkMemoryPipelineRules } from '../lark/memory-pipeline.js';
 import { larkListenerStatusKey, type LarkListenerStatus } from '../lark/listener-status.js';
@@ -71,6 +72,21 @@ export function checkNodeVersion(nodeVersion: string): DoctorCheck {
     remedy: `Dutydeck 要求 Node.js >= ${REQUIRED_NODE_VERSION}。请升级 Node 后重跑，例如用 nvm 装一个满足要求的版本。`,
     command: `nvm install ${REQUIRED_NODE_VERSION}`,
     verify: 'node --version'
+  };
+}
+
+/**
+ * 以 root 运行：完全信任模式下 Agent 继承守护进程的身份，等于拿到整机权限。
+ * uid 取不到（Windows 没有 getuid）或不是 0 时不产出检查项。
+ */
+export function checkRunAsRoot(uid: number | undefined): DoctorCheck | undefined {
+  if (uid !== 0) return undefined;
+  return {
+    id: 'process.root',
+    label: '运行身份',
+    level: 'warn',
+    detail: '当前以 root 运行',
+    remedy: '完全信任模式下 Agent 不再询问就能执行命令，以 root 运行意味着它拥有整机权限（读写任意文件、装卸软件、改系统配置）。建议改用普通用户运行 Dutydeck，再重启守护进程。'
   };
 }
 
@@ -682,6 +698,36 @@ export function checkLarkMemory(observation: LarkMemoryObservation, now: Date): 
   }
   if (!observed.length) return { ...base, level: 'skip', detail: '开启会话记忆的机器人还没有记下过任何轮次' };
   return { ...base, level: 'ok', detail: observed.join('；') };
+}
+
+// ─── 7c. usage.unpriced ─────────────────────────────────────────────────────
+
+const botModelKeys = ['defaultModel', 'fallbackModel', 'memoryModel', 'decisionModel', 'responseModel'] as const;
+
+/**
+ * 机器人上配置的型号里，价格表覆盖不到的那些。用量上限按花费累计，没有单价的型号花费算不出来，上限对它们不起作用。
+ * 数据来源只用已读到的 lark.bots，不查用量记录。
+ */
+export function checkUnpricedModels(rawBots: string | undefined, pricing: UsagePricing): DoctorCheck | undefined {
+  let parsed: unknown;
+  try { parsed = rawBots ? JSON.parse(rawBots) : undefined; } catch { return undefined; }
+  if (!Array.isArray(parsed)) return undefined;
+  const unpriced = new Set<string>();
+  for (const bot of parsed) {
+    if (!bot || typeof bot !== 'object') continue;
+    for (const key of botModelKeys) {
+      const model = (bot as Record<string, unknown>)[key];
+      if (typeof model === 'string' && model.trim() && !modelHasPrice(pricing, model.trim())) unpriced.add(model.trim());
+    }
+  }
+  if (unpriced.size === 0) return undefined;
+  return {
+    id: 'usage.unpriced',
+    label: '用量定价',
+    level: 'warn',
+    detail: `以下模型未定价，用量上限对它们无效：${[...unpriced].join('、')}`,
+    remedy: '这些型号不在价格表里，用量记为“未定价”，月度用量上限不会计入它们的花费。在 DUTYDECK_USAGE_PRICING_JSON 里补上对应型号的单价（整表覆盖，需包含原有型号）后重启；不需要限额时可忽略。'
+  };
 }
 
 // ─── 8. access.posture / access.token ────────────────────────────────────────

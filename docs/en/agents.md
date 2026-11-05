@@ -6,6 +6,8 @@ Dutydeck prefers terminal adapters for installed CLI agents, with `tmux` as the 
 
 The built-in CodeM (`codem`) terminal adapter uses explicit `--session` / `--resume` identifiers and never guesses the latest session. It requires the local `codem` command and adds `--yolo` for `full-trust` sessions.
 
+The built-in Kimi (`kimi`) terminal adapter passes `--auto` (Never Ask) for `full-trust` sessions, both new and resumed, and no longer passes `--yolo`: in current Kimi Code `--yolo` only auto-approves regular tool calls, and risky actions still wait for a human. `--auto` requires Kimi Code 0.10.0 or later.
+
 The built-in `codex` and `codex-cli` terminal entries and “Codex (ACP)” (`codex-acp`) give an explicit `CODEX_PATH` priority for discovery, version detection and launch, including executables outside `PATH`. Without that override, each new execution process resolves Codex from the Dutydeck process `PATH`, using the user's login and configuration. New processes use user-installed upgrades automatically. If the user-installed or explicitly configured Codex is missing, startup fails instead of using the ACP adapter's cached version.
 
 Codex terminal Agents read `[profiles.<name>]` entries from `CODEX_HOME/config.toml` and expose those profiles in the Web new-session dialog. A selected profile applies to the new session only; leaving it empty keeps the Agent's default profile. The profile name is passed as a Codex CLI option rather than persisted in the Agent environment.

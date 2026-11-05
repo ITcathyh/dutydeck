@@ -14,7 +14,9 @@ export function createKimiAdapter(): CliAdapter {
     capabilities: { resume: true },
 
     buildArgs({ resume, resumeSessionId, model, permissionMode }: AdapterSessionContext): string[] {
-      const args: string[] = permissionMode === 'full-trust' ? ['--yolo'] : [];
+      // 新版 Kimi Code 的 `--yolo` 只放行普通工具调用（2.0 起是“需要时询问”），高危操作仍会停下等人；
+      // `--auto`（Never Ask）才是免审批。新建与恢复都走这里，不再带 `--yolo`。
+      const args: string[] = permissionMode === 'full-trust' ? ['--auto'] : [];
       if (model && model.trim()) {
         args.push('--model', model.trim());
       }

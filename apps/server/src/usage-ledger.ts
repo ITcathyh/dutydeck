@@ -81,6 +81,12 @@ function priceSelection(pricing: UsagePricing, model: string | undefined, provid
   return { rate, pricingSource, pricingVersion, ...(matched ? { pricingMatch: matched.match } : {}) };
 }
 
+/** 价格表是否覆盖这个型号（不看 Agent 提供方）。内置表只认列出的型号，自定义表还有 default 兜底。 */
+export function modelHasPrice(pricing: UsagePricing, model: string): boolean {
+  const name = normalizeModelName(model);
+  return pricing.source !== 'builtin' || pricing.models.some(entry => matchesModel(name, entry.match.toLowerCase()));
+}
+
 export function estimateCostUsd(pricing: UsagePricing, model: string | undefined, tokens: Tokens, provider?: string): number | undefined {
   const { rate } = priceSelection(pricing, model, provider);
   if (!rate || (tokens.cacheWriteTokens ?? 0) > 0 && rate.cacheWritePerMTok === undefined) return undefined;
