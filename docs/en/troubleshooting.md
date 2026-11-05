@@ -9,7 +9,7 @@
 - **Credential protection matches rules; it is not isolation.** Rewriting a command (encoding, building the path, writing a script and running it) may get past it, and in full-trust mode senders outside the allowlist can still make the agent run any command as the local user. For bots open to others, use enforced mode or don't give them full trust.
 - Cursor terminal sessions with raw-screen output only may show an answer in playback but still be recorded as failed because normalized final text is unavailable.
 - The verification gate only applies to Lark tasks and needs a command configured.
-- Codex and Traex terminal modes report no usage, so caps don't apply to them; cost figures are estimates.
+- Traex terminal mode reports no usage; Codex terminal mode records per-turn tokens and estimated cost but is not yet counted against caps. Caps don't apply to either; cost figures are estimates.
 - Plain token trigger auth has no timestamp or nonce and relies on HTTPS or an internal network; HMAC-signed requests carry a timestamp and a one-time nonce (see Plugins → Security).
 - Draft pages are hidden unless "experimental features" is turned on.
 

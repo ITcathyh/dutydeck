@@ -114,7 +114,8 @@ function UsageCaps({ bots, caps, month, botName, chatName, groups }: { bots: Lar
   const refresh = () => void qc.invalidateQueries({ queryKey: ['usage-summary'] });
   const save = useMutation({ mutationFn: api.setUsageCap, onSuccess: () => { setAmount(''); refresh(); } });
   const remove = useMutation({ mutationFn: api.deleteUsageCap, onSuccess: refresh });
-  const used = (cap: UsageCap) => (cap.scope === 'bot' ? month.bots.find(row => row.appId === cap.appId) : month.chats.find(row => row.appId === cap.appId && row.chatId === cap.chatId))?.costUsd ?? 0;
+  // 与服务端上限判定同一口径：终端模式 Codex 的估算不计入上限。
+  const used = (cap: UsageCap) => { const row = cap.scope === 'bot' ? month.bots.find(row => row.appId === cap.appId) : month.chats.find(row => row.appId === cap.appId && row.chatId === cap.chatId); return Math.max(0, (row?.costUsd ?? 0) - (row?.capExcludedCostUsd ?? 0)); };
   // 可选的群：该 Bot 所在的群，加上本月在账本里出现过的群。
   const chatOptions = [...new Set([...groups.filter(group => group.bots.some(bot => bot.appId === appId)).map(group => group.chatId),
     ...month.chats.filter(row => row.appId === appId && row.chatId?.startsWith('oc_')).map(row => row.chatId!), ...(chatId ? [chatId] : [])])];

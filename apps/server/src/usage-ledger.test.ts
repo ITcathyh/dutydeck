@@ -456,6 +456,55 @@ describe('terminal-mode (PTY) Claude usage in the ledger', () => {
   });
 });
 
+describe('terminal-mode (PTY) Codex usage in the ledger', () => {
+  const pty = session('ses_codex_pty', 'lark', 'cli_a:oc_1:group:chat:oc_1', 'codex-pty');
+  const lark = (key: string) => request({ key, actor: { kind: 'channel', id: 'ou_1', appId: 'cli_a' } });
+  // 与 packages/pty-driver 的 codex-turn-usage.test.ts 中 takeTurnUsage 的读数同一形状。
+  const reading = (usageRef: string, model: string, breakdown: Record<string, number>) => ({ state: 'turn_usage', usageRef, model, breakdown });
+
+  it('books each turn increment once, estimates a priced model and keeps only tokens for an unpriced one', async () => {
+    const h = harness({ requests: { t1: lark('lark:cli_a:om_1:1'), t2: lark('lark:cli_a:om_2:1'), t3: lark('lark:cli_a:om_3:1') } });
+    await h.repos.sessions.save(pty);
+    await h.ledger.record(pty, { taskId: 't1', attemptId: 'a1' }, reading('codex-pty:sid:resp_2', 'gpt-5-codex', { inputTokens: 400_000, outputTokens: 100_000, cachedReadTokens: 600_000, cachedWriteTokens: 0 }));
+    await h.ledger.record(pty, { taskId: 't1', attemptId: 'a1' });
+    await h.ledger.record(pty, { taskId: 't2', attemptId: 'a2' }, reading('codex-pty:sid:resp_3', 'gpt-6-astra', { inputTokens: 100, outputTokens: 7, cachedReadTokens: 2900, cachedWriteTokens: 0 }));
+    // 恢复后重读到已入账的同一读数：这一轮记一条，但 token 不再计入。
+    await h.ledger.record(pty, { taskId: 't3', attemptId: 'a3' }, reading('codex-pty:sid:resp_3', 'gpt-6-astra', { inputTokens: 100, outputTokens: 7, cachedReadTokens: 2900, cachedWriteTokens: 0 }));
+    const entries = (await h.repos.usage.listEntries({ sessionId: pty.id })).sort((a, b) => a.attemptId.localeCompare(b.attemptId));
+    expect(entries.map(entry => [entry.dataStatus, entry.inputTokens, entry.cacheReadTokens, entry.usageRef])).toEqual([
+      ['estimated', 400_000, 600_000, 'codex-pty:sid:resp_2'], ['unpriced', 100, 2900, 'codex-pty:sid:resp_3'], ['unavailable', undefined, undefined, undefined]]);
+    expect(entries[0]!.costUsd).toBeCloseTo(1.575);
+    expect(entries[1]).toMatchObject({ model: 'gpt-6-astra', modelSource: 'reading', unpricedReason: 'unknown_model' });
+    expect(entries[1]!.costUsd).toBeUndefined();
+    h.repos.close();
+  });
+
+  it('reports Codex terminal amounts but keeps them out of the cap refusal, the 75%/95% alerts and the /status percentage', async () => {
+    const h = harness({ requests: { t1: lark('lark:cli_a:om_1:1'), t2: lark('lark:cli_a:om_2:1'), t3: lark('lark:cli_a:om_3:1') } });
+    await h.repos.sessions.save(pty); await h.repos.sessions.save(group);
+    await h.ledger.setCap({ scope: 'bot', appId: 'cli_a', monthlyCostUsd: 2 });
+    // $2.25 of Codex terminal estimate alone: already over the cap if it counted.
+    await h.ledger.record(pty, { taskId: 't1', attemptId: 'a1' }, reading('codex-pty:sid:resp_1', 'gpt-5-codex', { inputTokens: 1_000_000, outputTokens: 100_000 }));
+    await new Promise(resolve => setImmediate(resolve));
+    const month = await h.ledger.summary();
+    expect(month.month.totals).toMatchObject({ entries: 1, pricedEntries: 1, capExcludedCostUsd: expect.closeTo(2.25) });
+    expect(month.month.totals.costUsd).toBeCloseTo(2.25);
+    expect(h.notify).not.toHaveBeenCalled();
+    await expect(h.ledger.admit(pty, lark('lark:cli_a:om_2:1'))).resolves.toBeUndefined();
+    // /status：已用比例与入账前一致，Codex 终端这条仍按「无用量」计。
+    expect(await h.ledger.describe('cli_a')).toBe('**本月用量**：本机器人 $0.00（上限 $2.00，已用 0%）；另有 1 次费用未知（0 次缺费率、1 次无用量），美元上限不覆盖这部分');
+    // 其他来源照常计入：$1.6 到 80%，提醒里的已用金额不含 Codex 终端的 $2.25。
+    await h.ledger.record(group, { taskId: 't2', attemptId: 'a2' }, { usageRef: 'r2', cost: { amount: 1.6 } });
+    await vi.waitFor(() => expect(h.notify).toHaveBeenCalledTimes(1));
+    expect(String(h.notify.mock.calls[0]![1])).toContain('本机器人本月成本已用 $1.60，达到月度上限 $2.00 的 80%');
+    await h.ledger.record(group, { taskId: 't3', attemptId: 'a3' }, { usageRef: 'r3', cost: { amount: 2 } });
+    await expect(h.ledger.admit(pty, lark('lark:cli_a:om_4:1'))).rejects.toMatchObject({ code: 'USAGE_CAP_EXCEEDED',
+      message: expect.stringContaining('（已用 $2.00），新任务不再执行') });
+    await expect(h.ledger.refusal('cli_a', 'oc_1')).resolves.toContain('1 次任务的费用未知：0 次缺单价、1 次无用量数据');
+    h.repos.close();
+  });
+});
+
 describe('usage report (drill-down)', () => {
   // 两个型号 × 两个日期（含一个归到根任务的子步骤），日期按本地时区切分，与 SQLite 的 localtime 一致。
   const root = session('ses_root', 'lark', 'cli_a:oc_1:group:thread:om_root');
