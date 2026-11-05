@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { hostname, userInfo } from 'node:os';
 import type { ConfigRepository } from '@dutydeck/shared';
-import { describeWebBaseUrlReachability, larkBotsConfigKey, larkCredentialsConfigKey, larkExecutionConfirmed, larkExecutionIdentity, larkMemoryEnabled, larkPermissionMode, publicLarkConfig, publicLarkConfigs, readLarkConfigs, saveLarkConfig } from './config.js';
+import { describeWebBaseUrlReachability, larkBotsConfigKey, larkCredentialsConfigKey, larkExecutionConfirmed, larkExecutionIdentity, larkMemoryEnabled, larkPermissionMode, publicLarkConfig, publicLarkConfigs, readLarkConfigs, saveLarkConfig, deleteLarkConfig } from './config.js';
 
 const createRepository = (initial: Record<string, string> = {}): ConfigRepository => {
   const store = new Map<string, string>(Object.entries(initial));
@@ -196,6 +196,35 @@ describe('Lark risk-control migration', () => {
     const [persisted] = JSON.parse((await repository.get(larkBotsConfigKey))!);
     expect(persisted).toMatchObject({ appId: 'cli_credential', riskControlMode: 'guidance' });
     expect(persisted).not.toHaveProperty('softGateEnabled');
+  });
+
+  it('isolates an unparseable bot entry instead of replacing lark.bots with the legacy credential', async () => {
+    const good = { appId: 'cli_good', appSecret: 'secret-good', name: 'Good', riskControlMode: 'off' };
+    const bad = { appId: 'cli_bad', appSecret: 'secret-bad', riskControlMode: 'off', defaultAgentWeights: [{ agentId: 'codex', weight: 1, extra: true }] };
+    const repository = createRepository({
+      [larkBotsConfigKey]: JSON.stringify([good, null, bad]),
+      [larkCredentialsConfigKey]: JSON.stringify({ appId: 'cli_old', appSecret: 'secret-old' })
+    });
+
+    expect((await readLarkConfigs(repository)).map(config => config.appId)).toEqual(['cli_good']);
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_good', name: 'Good 2' });
+    const persisted = JSON.parse((await repository.get(larkBotsConfigKey))!);
+    expect(persisted.map((item: { appId?: string } | null) => item?.appId)).toEqual(['cli_good', undefined, 'cli_bad']);
+    expect(persisted[0]).toMatchObject({ name: 'Good 2' });
+    expect(persisted.slice(1)).toEqual([null, bad]);
+
+    // 同 appId 重新保存替换坏条目；也能按 appId 删掉坏条目。
+    await saveLarkConfig(repository, undefined, { appId: 'cli_bad', appSecret: 'secret-bad' });
+    expect(JSON.parse((await repository.get(larkBotsConfigKey))!).filter((item: { appId?: string } | null) => item?.appId === 'cli_bad')).toHaveLength(1);
+    expect((await readLarkConfigs(repository)).map(config => config.appId)).toEqual(['cli_good', 'cli_bad']);
+    await deleteLarkConfig(repository, 'cli_bad');
+    expect(JSON.parse((await repository.get(larkBotsConfigKey))!).map((item: { appId?: string } | null) => item?.appId)).toEqual(['cli_good', undefined]);
+  });
+
+  it('does not migrate the legacy credential when lark.bots exists but is unreadable', async () => {
+    const repository = createRepository({ [larkBotsConfigKey]: '{not json', [larkCredentialsConfigKey]: JSON.stringify({ appId: 'cli_old', appSecret: 'secret-old' }) });
+    expect(await readLarkConfigs(repository)).toEqual([]);
+    expect(await repository.get(larkBotsConfigKey)).toBe('{not json');
   });
 
   it('exposes only riskControlMode in the public API view', async () => {

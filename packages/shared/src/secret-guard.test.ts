@@ -84,6 +84,20 @@ describe('secret guard', () => {
     expect(bash(command)).toBeUndefined();
   });
 
+  it('treats every command tool name as a command, and protects the guard policy and hook configs', () => {
+    for (const tool_name of ['Shell', 'bash', 'shell', 'exec_command', 'SomeNewTool']) {
+      expect(secretGuardFinding({ tool_name, tool_input: { command: 'cat ~/.codex/auth.json' }, cwd: '/work/repo' }, { home })).toBeDefined();
+      expect(secretGuardFinding({ tool_name, tool_input: { command: 'pnpm test' }, cwd: '/work/repo' }, { home })).toBeUndefined();
+    }
+    expect(secretGuardFinding({ tool_name: 'exec_command', tool_input: { cmd: ['bash', '-lc', 'echo {} > .dutydeck/security/sessions/ses_1.json'] }, cwd: '/work/repo' }, { home })).toBeDefined();
+    for (const path of ['.codex/hooks.json', '.cursor/hooks.json', '.trae/hooks.json', '.claude/settings.json', '.claude/settings.local.json', '.pi/extensions/dutydeck-high-risk-guard.ts']) {
+      expect(bash(`echo noop > ${path}`)).toMatchObject({ label: 'Agent 拦截 Hook 配置' });
+      expect(secretGuardFinding({ tool_name: 'Write', tool_input: { file_path: path, content: '{}' }, cwd: '/work/repo' }, { home })).toMatchObject({ label: 'Agent 拦截 Hook 配置' });
+    }
+    expect(bash('cat .cursor/rules/style.md')).toBeUndefined();
+    expect(bash('cat src/hooks.json')).toBeUndefined();
+  });
+
   it('checks file tools by resolved path and ignores prose fields', () => {
     expect(read('/home/alice/.codex/auth.json')?.label).toMatch(/Codex/);
     expect(read('auth.json', '/home/alice/.codex')).toBeDefined();

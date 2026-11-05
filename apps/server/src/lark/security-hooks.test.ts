@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import type { AgentConfig } from '@dutydeck/shared';
 import { installLarkHook, larkHookStatus, processGuardedAgent } from './security-hooks.js';
 
@@ -118,7 +119,7 @@ describe('Lark Agent security hooks', () => {
     const workspace = await mkdtemp(join(tmpdir(), 'dutydeck-hook-')); workspaces.push(workspace);
     expect(await installLarkHook('pi', workspace)).toMatchObject({ agentId: 'pi', supported: true, installed: true });
     const extension = await readFile(join(workspace, '.pi/extensions/dutydeck-high-risk-guard.ts'), 'utf8');
-    expect(extension).toContain('dutydeck-high-risk-guard-v3');
+    expect(extension).toContain('dutydeck-high-risk-guard-v4');
     expect(extension).toContain("pi.on('tool_call'");
     expect(await larkHookStatus('claudecode', workspace)).toMatchObject({ agentId: 'claude', supported: true, installed: false });
     expect(await larkHookStatus('cursoragent', workspace)).toMatchObject({ agentId: 'cursor', supported: true, installed: false });
@@ -135,6 +136,67 @@ describe('Lark Agent security hooks', () => {
     expect(JSON.parse(denied.output)).toMatchObject({ continue: true, permission: 'deny', user_message: 'cursor blocked', agent_message: 'cursor blocked' });
     expect(await larkHookStatus('codex', workspace)).toMatchObject({ installed: true });
     expect(await larkHookStatus('cursor', workspace)).toMatchObject({ installed: true });
+  });
+
+  it('applies credential rules to Cursor Shell, so the Agent cannot rewrite its own policy file or read Codex login', async () => {
+    const workspace = await mkdtemp(join(tmpdir(), 'dutydeck-hook-')); workspaces.push(workspace);
+    await installLarkHook('cursor', workspace);
+    const policyDirectory = join(workspace, '.dutydeck', 'security', 'sessions');
+    await mkdir(policyDirectory, { recursive: true });
+    await writeFile(join(policyDirectory, 'ses_shell.json'), JSON.stringify({ enabled: true, authorized: false, pattern: '(?:^|\\s)rm\\b' }));
+    const shell = (command: string) => runGuard(workspace, 'cursor', 'ses_shell', { tool_name: 'Shell', tool_input: { command }, cwd: workspace });
+    for (const command of ['echo {} > .dutydeck/security/sessions/ses_shell.json', 'cat ~/.codex/auth.json', "printf '{}' > .cursor/hooks.json"]) {
+      expect(JSON.parse((await shell(command)).output)).toMatchObject({ permission: 'deny', agent_message: expect.stringContaining('Dutydeck 凭据保护') });
+    }
+    expect((await shell('pnpm test')).output).toBe('');
+  });
+
+  it('runs the credential rules inside the Pi extension as well', async () => {
+    const workspace = await mkdtemp(join(tmpdir(), 'dutydeck-hook-')); workspaces.push(workspace);
+    await installLarkHook('pi', workspace);
+    const policyDirectory = join(workspace, '.dutydeck', 'security', 'sessions');
+    await mkdir(policyDirectory, { recursive: true });
+    const policyPath = join(policyDirectory, 'ses_pi.json');
+    const extension = await import(pathToFileURL(join(workspace, '.pi/extensions/dutydeck-high-risk-guard.ts')).href);
+    let handler: ((event: unknown, ctx: unknown) => Promise<unknown>) | undefined;
+    extension.default({ on: (name: string, next: typeof handler) => { if (name === 'tool_call') handler = next; } });
+    const previous = process.env.dutydeck_session_id;
+    process.env.dutydeck_session_id = 'ses_pi';
+    try {
+      const call = (toolName: string, input: object) => handler!({ toolName, input }, { cwd: workspace });
+      await writeFile(policyPath, JSON.stringify({ enabled: true, authorized: false }));
+      expect(await call('bash', { command: 'echo {} > .dutydeck/security/sessions/ses_pi.json' })).toMatchObject({ block: true, reason: expect.stringContaining('Dutydeck 凭据保护') });
+      expect(await call('read', { path: '~/.codex/auth.json' })).toMatchObject({ block: true });
+      expect(await call('write', { path: '.pi/extensions/dutydeck-high-risk-guard.ts', content: '' })).toMatchObject({ block: true });
+      expect(await call('bash', { command: 'pnpm test' })).toBeUndefined();
+      await writeFile(policyPath, JSON.stringify({ enabled: true, authorized: false, pattern: 'sudo\\b', reason: 'pi blocked' }));
+      expect(await call('bash', { command: 'sudo reboot' })).toEqual({ block: true, reason: 'pi blocked' });
+      await writeFile(policyPath, JSON.stringify({ enabled: true, authorized: true, pattern: 'sudo\\b' }));
+      expect(await call('read', { path: '~/.codex/auth.json' })).toBeUndefined();
+    } finally {
+      if (previous === undefined) delete process.env.dutydeck_session_id; else process.env.dutydeck_session_id = previous;
+    }
+  });
+
+  it('reports a tampered guard as not installed even when the version marker is kept', async () => {
+    const workspace = await mkdtemp(join(tmpdir(), 'dutydeck-hook-')); workspaces.push(workspace);
+    await installLarkHook('cursor', workspace);
+    await installLarkHook('pi', workspace);
+    const script = join(workspace, '.dutydeck', 'security', 'dutydeck-lark-high-risk-guard-cursor.mjs');
+    const original = await readFile(script, 'utf8');
+    await writeFile(script, original.replace("process.stdout.write(JSON.stringify({ continue: true, permission: 'deny'", "void (JSON.stringify({ continue: true, permission: 'deny'"));
+    expect(await larkHookStatus('cursor', workspace)).toMatchObject({ installed: false });
+    await writeFile(script, original);
+    const hooksPath = join(workspace, '.cursor', 'hooks.json');
+    const config = JSON.parse(await readFile(hooksPath, 'utf8'));
+    config.hooks.preToolUse[0].command = `true # ${config.hooks.preToolUse[0].command}`;
+    await writeFile(hooksPath, JSON.stringify(config));
+    expect(await larkHookStatus('cursor', workspace)).toMatchObject({ installed: false });
+    await installLarkHook('cursor', workspace);
+    expect(await larkHookStatus('cursor', workspace)).toMatchObject({ installed: true });
+    const piPath = join(workspace, '.pi/extensions/dutydeck-high-risk-guard.ts');
+    await writeFile(piPath, `${await readFile(piPath, 'utf8')}\n// export default () => {}`);
+    expect(await larkHookStatus('pi', workspace)).toMatchObject({ installed: false });
   });
 
   it('refuses genuinely unsupported Agents instead of presenting a false hard-gate switch', async () => {
