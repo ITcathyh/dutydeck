@@ -31,7 +31,11 @@ export class MattersService implements MatterTracking {
   summary(sessionId: string) {
     try {
       const matter = this.repos.matters?.find('session', sessionId);
-      return matter ? { id: matter.id, title: matter.title, status: matter.status, supersededSessionIds: this.repos.matters!.links(matter.id).filter(link => link.kind === 'reply_target' && link.refId.startsWith('session:')).map(link => link.refId.slice(8)), sessionIds: this.repos.matters!.links(matter.id).filter(link => link.kind === 'session').map(link => link.refId) } : undefined;
+      if (!matter) return undefined;
+      const links = this.repos.matters!.links(matter.id);
+      const forkSessionIds = links.filter(link => link.kind === 'session' && link.relation === 'fork').map(link => link.refId);
+      return { id: matter.id, title: matter.title, status: matter.status, supersededSessionIds: links.filter(link => link.kind === 'reply_target' && link.refId.startsWith('session:')).map(link => link.refId.slice(8)), sessionIds: links.filter(link => link.kind === 'session').map(link => link.refId),
+        ...(forkSessionIds.length ? { forkSessionIds } : {}) };
     } catch { console.warn('MATTER_READ_FAILED'); return undefined; }
   }
 }

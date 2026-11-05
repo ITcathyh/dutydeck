@@ -46,6 +46,10 @@ export interface LarkRuntime {
   listSessions?(): Promise<Session[]>;
   getSession(id: string): Promise<Session | undefined>;
   resume?(id: string): Promise<Session>;
+  /** 空闲时切换会话的模型 / 思考强度 / 名称；与 Web 的 PATCH /api/sessions/:id/config、/name 调同一组方法。 */
+  setModel?(id: string, model: string): Promise<Session>;
+  setReasoningEffort?(id: string, reasoningEffort: string): Promise<Session>;
+  setSessionName?(id: string, name: string | null): Promise<Session>;
   stop?(id: string, actor?: ExecutionActor): Promise<unknown>;
   send(id: string, prompt: string, agentPrompt?: string, riskPolicy?: ToolRiskPolicy, actorId?: string): Promise<unknown>;
   dispatch?(id: string, prompt: string, mode?: 'queue' | 'interrupt', agentPrompt?: string, riskPolicy?: ToolRiskPolicy, actorId?: string, idempotencyKey?: string, skillRequests?: string[], supplied?: import('@dutydeck/shared').TaskRequestV1, idleCompactHours?: number, promptParts?: import('@dutydeck/shared').PromptPart[], permissionMode?: PermissionMode): Promise<{ id: string; status: string; queuedAhead?: number; replayed?: boolean }>;

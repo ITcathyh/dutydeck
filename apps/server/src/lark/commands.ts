@@ -19,7 +19,7 @@
  * 3. **诚实表达能力**：命令只有在 LarkRuntime 真的具备对应能力时才存在。LarkRuntime 里
  *    带 `?` 的方法（stop / dispatch / cancelQueued / getTasks / listAgents / listSessions）
  *    在运行时可能缺失；缺失时对应命令不会出现在 /help，也只会路由成 `unavailable`，
- *    绝不会变成一个执行不了的 intent。Dutydeck 今天支撑不了的命令（/cwd、/model、/agent）
+ *    绝不会变成一个执行不了的 intent。Dutydeck 今天支撑不了的命令（/cwd、/agent）
  *    直接不注册，宁可少而诚实。
  *
  * 4. `/help` **正文只用 markdown**：飞书卡片 schema 2.0 拒绝 `note` 标签（ErrCode 200861），
@@ -136,6 +136,10 @@ export interface LarkCommandCapabilities {
   /** runtime.injectQueued（把排队中的一轮送进正在执行的那一轮）。缺失时 /steer 只能提到队首，/queue steer 停用。 */
   injectQueued?: boolean;
   resume?: boolean;
+  /** runtime.setModel / setReasoningEffort / setSessionName 与 Web 的会话配置、改名接口同源。 */
+  setModel?: boolean;
+  setReasoningEffort?: boolean;
+  setSessionName?: boolean;
   stop: boolean;
   getTasks: boolean;
   listAgents: boolean;
@@ -144,7 +148,7 @@ export interface LarkCommandCapabilities {
 
 const capabilityKeys = [
   'getSession', 'send', 'dispatch', 'interrupt', 'cancelQueued', 'steerQueued', 'injectQueued',
-  'stop', 'resume', 'getTasks', 'listAgents', 'listSessions'
+  'stop', 'resume', 'setModel', 'setReasoningEffort', 'setSessionName', 'getTasks', 'listAgents', 'listSessions'
 ] as const satisfies readonly (keyof LarkCommandCapabilities)[];
 
 /** 从真实 runtime 对象探测能力。coordinator 直接传 this.runtime 即可。 */
@@ -159,7 +163,7 @@ export function larkCommandCapabilities(runtime: unknown): LarkCommandCapabiliti
 // 命令注册表
 // ---------------------------------------------------------------------------
 
-export type LarkCommandName = 'work' | 'schedule' | 'ci' | 'pr' | 'help' | 'repair' | 'status' | 'cancel' | 'retry' | 'resume' | 'fork' | 'new' | 'tasks' | 'answer' | 'approve' | 'reject' | 'remember' | 'memory' | 'forget' | 'agents' | 'queue' | 'steer' | 'plan' | 'grant' | 'revoke';
+export type LarkCommandName = 'work' | 'schedule' | 'ci' | 'pr' | 'help' | 'repair' | 'status' | 'cancel' | 'retry' | 'resume' | 'fork' | 'model' | 'effort' | 'rename' | 'new' | 'tasks' | 'answer' | 'approve' | 'reject' | 'remember' | 'memory' | 'forget' | 'agents' | 'queue' | 'steer' | 'plan' | 'grant' | 'revoke';
 
 export interface LarkCommandDefinition {
   name: LarkCommandName;
@@ -257,7 +261,10 @@ export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
     unavailableReason: '当前 Dutydeck 运行时无法结束旧会话（缺少 stop），/new 不能保证下一条消息真的开启新会话，已停用。'
   },
   { name: 'resume', summary: '恢复本话题最近关闭的会话；用 list 查看最近几个，再按编号选择', usage: '/resume [会话编号]；/resume list', mutating: true, requires: c => c.resume === true && c.stop && c.listSessions && c.getTasks && c.getSession && c.listAgents, unavailableReason: '当前运行时不支持恢复会话。可以用 /new --handoff 交接上下文。' },
-  { name: 'fork', summary: '带上下文在新话题开分身，与原会话并行；git 仓库默认用独立 worktree', usage: '/fork [任务]；/fork [--agent Agent编号] [--cwd 目录] [--workspace shared|worktree] [--model 模型] [--effort 强度] -- 任务', mutating: true, requires: c => c.getSession && c.listAgents && c.getTasks && c.dispatch, unavailableReason: '当前运行时无法读取源会话或 Agent，不能开分身。' },
+  { name: 'fork', summary: '带上下文在新话题开分身，与原会话并行；git 仓库默认用独立 worktree；list 列出这个会话的所有分身及其状态、话题链接', usage: '/fork [任务]；/fork [--agent Agent编号] [--cwd 目录] [--workspace shared|worktree] [--model 模型] [--effort 强度] -- 任务；/fork list', mutating: true, requires: c => c.getSession && c.listAgents && c.getTasks && c.dispatch, unavailableReason: '当前运行时无法读取源会话或 Agent，不能开分身。' },
+  { name: 'model', summary: '查看本会话当前模型与可选项；带模型名则在空闲时切换，下一轮起生效', usage: '/model [模型]', mutating: true, requires: c => c.getSession && c.setModel === true, unavailableReason: '当前运行时不支持切换会话模型，/model 已停用。可以用 /new --model 模型 -- 任务 开新会话时指定。' },
+  { name: 'effort', summary: '查看本会话当前思考强度与可选项；带档位则在空闲时切换，下一轮起生效', usage: '/effort [档位]', mutating: true, requires: c => c.getSession && c.setReasoningEffort === true, unavailableReason: '当前运行时不支持切换会话思考强度，/effort 已停用。可以用 /new --effort 档位 -- 任务 开新会话时指定。' },
+  { name: 'rename', summary: '给本会话改名（Web、/tasks、/resume list 都显示新名称）；--clear 恢复默认标题。需要安装管理员权限', usage: '/rename <名称>；/rename --clear', mutating: true, requires: c => c.getSession && c.setSessionName === true, unavailableReason: '当前运行时不支持会话改名，/rename 已停用。' },
   {
     name: 'agents',
     summary: '列出本机可用的 Agent、版本与本机器人当前默认使用的那个',

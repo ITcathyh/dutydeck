@@ -466,7 +466,7 @@ describe('未识别命令的透传归一化', () => {
   });
 
   it('Dutydeck 没有的命令一律走透传，不伪造能力', () => {
-    for (const text of ['/relay', '/adopt', '/cli', '/cwd /tmp', '/repo x', '/model gpt-5', '/agent codex']) {
+    for (const text of ['/relay', '/adopt', '/cli', '/cwd /tmp', '/repo x', '/agent codex']) {
       const route = routeLarkCommand(text, context());
       expect(route.kind).toBe('unknown_command');
     }
@@ -694,8 +694,43 @@ describe('控制命令明确拼错只纠正，不执行或自动改写', () => {
   it('控制能力缺失也不能把取消笔误变成新任务', () => {
     expect(routeLarkCommand('/cancle', context({ capabilities: capabilities({ interrupt: false, cancelQueued: false, stop: false }) }))).toMatchObject({ kind: 'correction' });
   });
-  it.each(['/usr/bin/bash', '/tmp', '/model', '/review'])('%s 继续交给 CLI', text => {
+  it.each(['/usr/bin/bash', '/tmp', '/review'])('%s 继续交给 CLI', text => {
     expect(['unknown_command', 'not_a_command']).toContain(routeLarkCommand(text, context()).kind);
+  });
+});
+
+describe('会话配置与分身命令的注册与能力门', () => {
+  const switching = (overrides: Partial<LarkCommandCapabilities> = {}) =>
+    capabilities({ setModel: true, setReasoningEffort: true, setSessionName: true, ...overrides });
+
+  it('/model、/effort、/rename 缺少对应运行时能力时只会 unavailable，不产生 intent', () => {
+    for (const [text, key] of [['/model', 'setModel'], ['/effort high', 'setReasoningEffort'], ['/rename 新名', 'setSessionName']] as const) {
+      expect(routeLarkCommand(text, context({ capabilities: switching() }))).toMatchObject({ kind: 'intent', command: text.slice(1).split(' ')[0] });
+      expect(routeLarkCommand(text, context({ capabilities: switching({ [key]: false }) }))).toMatchObject({ kind: 'unavailable' });
+      expect(routeLarkCommand(text, context({ capabilities: capabilities() }))).toMatchObject({ kind: 'unavailable' });
+    }
+  });
+
+  it('三条命令都要白名单权限，协作机器人不能执行', () => {
+    for (const text of ['/model', '/effort', '/rename x']) {
+      expect(routeLarkCommand(text, context({ capabilities: switching(), operator: { kind: 'user', allowlisted: false } }))).toMatchObject({ kind: 'denied' });
+      expect(routeLarkCommand(text, context({ capabilities: switching(), operator: { kind: 'bot', allowlisted: true } }))).toMatchObject({ kind: 'denied' });
+    }
+  });
+
+  it('运行时能力探测认得 setModel、setReasoningEffort、setSessionName', () => {
+    expect(larkCommandCapabilities({ setModel() {}, setReasoningEffort() {}, setSessionName() {} })).toMatchObject({ setModel: true, setReasoningEffort: true, setSessionName: true });
+    expect(larkCommandCapabilities({})).toMatchObject({ setModel: false, setReasoningEffort: false, setSessionName: false });
+  });
+
+  it('/help 列出新命令与 /fork list 的用法', () => {
+    const help = renderLarkCommandHelp(switching(), { pageSize: 50 }).text;
+    for (const usage of ['/model [模型]', '/effort [档位]', '/rename <名称>；/rename --clear', '/fork list']) expect(help).toContain(usage);
+    expect(renderLarkCommandHelp(capabilities(), { pageSize: 50 }).text).not.toContain('/rename <名称>');
+  });
+
+  it('/fork list 沿用 /fork 的路由，参数交给 coordinator', () => {
+    expect(routeLarkCommand('/fork list', context())).toMatchObject({ kind: 'intent', command: 'fork', args: ['list'] });
   });
 });
 

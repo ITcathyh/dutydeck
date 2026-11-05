@@ -22,7 +22,7 @@ export interface MatterRepository {
   ensureSession(input: { sessionId: string; title: string; sourceSessionId?: string; relation?: MatterRelation; originAppId?: string; originChatId?: string; originMessageId?: string }): Matter;
   link(input: Omit<MatterLink, 'createdAt'>): void;
 }
-export interface MatterSummary { id: string; title: string; status: Matter['status']; sessionIds: string[]; supersededSessionIds?: string[] }
+export interface MatterSummary { id: string; title: string; status: Matter['status']; sessionIds: string[]; supersededSessionIds?: string[]; /** relation=fork 的会话；没有分身时缺省。 */ forkSessionIds?: string[] }
 
 export interface MatterSessionInput {
   sourceSessionId?: string; relation?: MatterRelation; title?: string;
