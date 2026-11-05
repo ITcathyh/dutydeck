@@ -201,6 +201,16 @@ const withRejectReason = (message: string, reason?: string) => reason ? `${messa
 
 /** 「其他」文字输入：选项之外的答案。表单字段名 other，与选项值 answer 分开，旧卡片没有这个字段。 */
 const otherAnswerMaxLength = 1000;
+const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+/**
+ * 飞书文档没写 input 的 max_length 按什么计数。按字素（用户看到的一个字符，如组合 emoji）计数是
+ * UTF-16 码元、码点、字素几种口径里最宽的：输入框放行的文字，服务端一定不拒。
+ */
+const graphemeLength = (text: string) => {
+  let length = 0;
+  for (const _ of graphemeSegmenter.segment(text)) length++;
+  return length;
+};
 const otherAnswerInput: LarkCardElement = {
   tag: 'input', element_id: 'workflow_answer_other', name: 'other', input_type: 'multiline_text', max_length: otherAnswerMaxLength,
   placeholder: { tag: 'plain_text', content: '其他（选填）：没有合适的选项时，在这里写下你的答案' }
@@ -1368,7 +1378,7 @@ export class LarkWorkflowInteractions {
         const invalidChoice = () => new LarkServiceError('LARK_ANSWER_CHOICE_INVALID', '提交的选项已失效，请点选卡片上的最新选项，或引用本卡片直接回复答案。', 400);
         // 「其他」文字只有带输入框的普通提问卡才会提交；ADHD 提问卡只收选项，带了也不采纳。
         const other = record.adhdMode === true ? undefined : input.other?.trim();
-        if (other && Array.from(other).length > otherAnswerMaxLength) throw new LarkServiceError('LARK_ANSWER_TOO_LONG', `其他答案不能超过 ${otherAnswerMaxLength} 个字符。`, 400);
+        if (other && graphemeLength(other) > otherAnswerMaxLength) throw new LarkServiceError('LARK_ANSWER_TOO_LONG', `其他答案不能超过 ${otherAnswerMaxLength} 个字符。`, 400);
         if (record.multiple) {
           const picked = Array.isArray(input.selected)
             ? [...new Set(input.selected.filter((value): value is string => typeof value === 'string'))]
