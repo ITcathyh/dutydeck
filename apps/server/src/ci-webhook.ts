@@ -4,7 +4,7 @@ import { executionTaskId } from '@dutydeck/storage';
 import { z } from 'zod';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { changeRequestLabel, ciProviderLabel, git, resolveCiBranchHead, type CiProviderRegistry } from './ci-providers.js';
-import { codeBlock, errorMessage, isRunnable, iso, short, SingleFlight } from './ci-common.js';
+import { codeBlock, errorMessage, isRunnable, iso, short, SingleFlight, withTimeout } from './ci-common.js';
 import { readTaskOutput } from './task-results.js';
 
 const SUBSCRIPTION_PREFIX = 'ci_webhook/subscription/';
@@ -496,15 +496,10 @@ export class CiWebhookService {
     if (event.failures.length || !event.pipelineId || !provider?.getFailureLogs) return;
     const parts = value.repository.split('/');
     const repository = { owner: parts[0]!, name: parts.at(-1)!, slug: value.repository };
-    let timer: NodeJS.Timeout | undefined;
     try {
-      const logs = await Promise.race([
-        provider.getFailureLogs(repository, event.pipelineId),
-        new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error('timeout')), FAILURE_LOG_TIMEOUT_MS); })
-      ]);
+      const logs = await withTimeout(provider.getFailureLogs(repository, event.pipelineId), FAILURE_LOG_TIMEOUT_MS);
       event.failures = normalizeFailures(logs);
     } catch (error) { this.options.log?.warn({ error, subscriptionId: value.id }, '读取 CI 失败日志失败'); }
-    finally { clearTimeout(timer); }
   }
 
   private async onPipeline(item: Stored, event: CiEvent, eventKey: string) {

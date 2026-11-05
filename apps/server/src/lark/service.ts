@@ -278,14 +278,14 @@ export interface LarkConfigurationStatus {
 // 等人处理的卡在 buildLarkCard 里强制转 orange——橙色在这套配色里没有别的用途，
 // 一眼就能从一片蓝绿里跳出来。
 const statePresentation = {
-  queued: { title: '排队中', color: 'grey', template: 'grey', tagColor: 'neutral' },
-  running: { title: '正在执行', color: 'wathet', template: 'blue', tagColor: 'blue' },
-  completed: { title: '已完成', color: 'green', template: 'green', tagColor: 'green' },
-  failed: { title: '已失败', color: 'red', template: 'red', tagColor: 'red' },
-  interrupted: { title: '已中断', color: 'grey', template: 'grey', tagColor: 'neutral' },
-  cancelled: { title: '已取消', color: 'grey', template: 'grey', tagColor: 'neutral' },
-  reconcile_required: { title: '需要核对', color: 'orange', template: 'orange', tagColor: 'orange' },
-  legacy_unresolved: { title: '需要核对', color: 'orange', template: 'orange', tagColor: 'orange' }
+  queued: { title: '排队中', color: 'grey', template: 'grey' },
+  running: { title: '正在执行', color: 'wathet', template: 'blue' },
+  completed: { title: '已完成', color: 'green', template: 'green' },
+  failed: { title: '已失败', color: 'red', template: 'red' },
+  interrupted: { title: '已中断', color: 'grey', template: 'grey' },
+  cancelled: { title: '已取消', color: 'grey', template: 'grey' },
+  reconcile_required: { title: '需要核对', color: 'orange', template: 'orange' },
+  legacy_unresolved: { title: '需要核对', color: 'orange', template: 'orange' }
 } as const;
 const clipCardField = (value: string, limit: number) => {
   const characters = Array.from(value);
@@ -443,64 +443,72 @@ const stripFirstToolSection = (group: Record<string, unknown>): boolean => {
   return true;
 };
 
+const isTraceGroup = (element: Record<string, unknown>) =>
+  typeof element.element_id === 'string' && element.element_id.startsWith('trace_group_');
+
+/** 省略提示的 id 与已省略分组数；legacyNoticeId 用来认出旧数据里另一种前缀的同一条提示。 */
+type TraceOmission = { noticeId: string; legacyNoticeId?: string; omittedGroups: number };
+
+const upsertOmissionNotice = (elements: Array<Record<string, unknown>>, omission: TraceOmission) => {
+  const notice = {
+    tag: 'markdown', element_id: omission.noticeId,
+    content: `<font color='grey'>内容较长，已省略 ${omission.omittedGroups} 个较早执行分组。</font>`,
+    text_size: 'x-small', margin: '4px 0px'
+  };
+  const index = elements.findIndex(element =>
+    element.element_id === omission.noticeId || (omission.legacyNoticeId !== undefined && element.element_id === omission.legacyNoticeId));
+  if (index >= 0) elements[index] = notice;
+  else {
+    const firstGroup = elements.findIndex(isTraceGroup);
+    elements.splice(firstGroup < 0 ? elements.length : firstGroup, 0, notice);
+  }
+};
+
+/**
+ * 从最旧的 trace 分组裁掉一步，原地修改 mainElements；没有 trace 分组可裁时返回 false。
+ * 快照裁剪和整卡裁剪共用，两处只有省略提示 id 和预算不同。
+ */
+const trimOldestTraceGroup = (mainElements: Array<Record<string, unknown>>, omission: TraceOmission): boolean => {
+  const groupIndex = mainElements.findIndex(isTraceGroup);
+  if (groupIndex < 0) return false;
+  const group = mainElements[groupIndex] as Record<string, unknown>;
+  const groupElements = Array.isArray(group.elements) ? group.elements as Array<Record<string, unknown>> : [];
+  const remainingGroups = mainElements.filter(isTraceGroup).length;
+  // 优先从最旧分组中剥离工具输入输出，保留可扫描的分组结构；
+  // 仅当分组已无内容可剥离时，才删除整个分组。
+  if (stripFirstToolSection(group)) return true;
+  // 只剩一个 trace 分组时，优先从分组内部移除最旧的子元素，保留最近的活动，避免整组被丢弃后用户什么都看不到。
+  if (remainingGroups === 1 && groupElements.length > 1) {
+    const hasTitle = ['current_title', 'current_head'].includes(String((groupElements[0] as Record<string, unknown>)?.element_id));
+    group.elements = hasTitle && groupElements.length > 2 ? [groupElements[0], ...groupElements.slice(2)] : groupElements.slice(1);
+    return true;
+  }
+  mainElements.splice(groupIndex, 1);
+  omission.omittedGroups++;
+  upsertOmissionNotice(mainElements, omission);
+  return true;
+};
+
 export function boundLarkCardElements(elements: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
   const withinLimits = (value: unknown) => cardBytes(value) <= larkCardSnapshotLimits.bytes
     && countCardComponents(value) <= larkCardSnapshotLimits.components;
-  const omissionNotice = (count: number) => ({
-    tag: 'markdown', element_id: 'dutydeck_snapshot_omission',
-    content: `<font color='grey'>内容较长，已省略 ${count} 个较早执行分组。</font>`,
-    text_size: 'x-small', margin: '4px 0px'
-  });
-  const upsertOmissionNotice = (els: Array<Record<string, unknown>>, count: number) => {
-    if (count <= 0) return;
-    const notice = omissionNotice(count);
-    // 同上：旧快照里的省略提示 id 是 dockmux_ 前缀，认不出来就会 upsert 成第二条。
-    const index = els.findIndex(element =>
-      element.element_id === 'dutydeck_snapshot_omission' || element.element_id === 'dockmux_snapshot_omission');
-    if (index >= 0) els[index] = notice;
-    else {
-      const firstGroup = els.findIndex(element => typeof element.element_id === 'string' && element.element_id.startsWith('trace_group_'));
-      els.splice(firstGroup < 0 ? els.length : firstGroup, 0, notice);
-    }
-  };
   const mainElements = [...elements];
-  let omittedGroups = 0;
-  while (true) {
-    const candidate = [...mainElements];
-    if (withinLimits(candidate)) return candidate;
-    const groupIndex = mainElements.findIndex(element => typeof element.element_id === 'string' && element.element_id.startsWith('trace_group_'));
-    if (groupIndex < 0) {
-      // 步骤总数和最后失败的步骤很小，照样带上；它们也不能被当成正文。
-      const meta = mainElements.filter(element => ['trace_steps', 'trace_summary', 'failure_step'].includes(String(element.element_id)));
-      const fallbackText = String((mainElements.find(element => element.element_id === 'final_output') as any)?.content
-        ?? (mainElements.find(element => element.tag === 'markdown' && !meta.includes(element)) as any)?.content ?? '内容过长');
-      return [
-        ...mainElements.filter(element => element.element_id === 'task_report'),
-        ...meta,
-        { tag: 'markdown', element_id: 'final_output', content: fallbackText.length > 4_000 ? `${fallbackText.slice(0, 3_999)}…` : fallbackText, text_align: 'left', text_size: 'normal_v2', margin: '0px' },
-        { tag: 'markdown', element_id: 'dutydeck_snapshot_omission', content: "<font color='grey'>卡片内容超过飞书限制，过程记录已收起。</font>", text_size: 'x-small', margin: '8px 0px 0px 0px' }
-      ];
-    }
-    const group = mainElements[groupIndex] as Record<string, unknown>;
-    const groupElements = Array.isArray(group.elements) ? group.elements as Array<Record<string, unknown>> : [];
-    const remainingGroups = mainElements.filter(element => typeof element.element_id === 'string' && element.element_id.startsWith('trace_group_')).length;
-    // 优先从最旧分组中剥离工具输入输出，保留可扫描的分组结构；
-    // 仅当分组已无内容可剥离时，才删除整个分组。
-    if (stripFirstToolSection(group)) continue;
-    // 只剩一个 trace 分组时，优先从分组内部移除最旧的子元素，保留最近的活动，避免整组被丢弃后用户什么都看不到。
-    if (remainingGroups === 1 && groupElements.length > 1) {
-      const hasTitle = ['current_title', 'current_head'].includes(String((groupElements[0] as Record<string, unknown>)?.element_id));
-      if (hasTitle && groupElements.length > 2) {
-        group.elements = [groupElements[0], ...groupElements.slice(2)];
-        continue;
-      }
-      group.elements = groupElements.slice(1);
-      continue;
-    }
-    mainElements.splice(groupIndex, 1);
-    omittedGroups++;
-    upsertOmissionNotice(mainElements, omittedGroups);
+  // 旧快照里的省略提示 id 是 dockmux_ 前缀，认不出来就会 upsert 成第二条。
+  const omission: TraceOmission = { noticeId: 'dutydeck_snapshot_omission', legacyNoticeId: 'dockmux_snapshot_omission', omittedGroups: 0 };
+  while (!withinLimits(mainElements)) {
+    if (trimOldestTraceGroup(mainElements, omission)) continue;
+    // 步骤总数和最后失败的步骤很小，照样带上；它们也不能被当成正文。
+    const meta = mainElements.filter(element => ['trace_steps', 'trace_summary', 'failure_step'].includes(String(element.element_id)));
+    const fallbackText = String((mainElements.find(element => element.element_id === 'final_output') as any)?.content
+      ?? (mainElements.find(element => element.tag === 'markdown' && !meta.includes(element)) as any)?.content ?? '内容过长');
+    return [
+      ...mainElements.filter(element => element.element_id === 'task_report'),
+      ...meta,
+      { tag: 'markdown', element_id: 'final_output', content: fallbackText.length > 4_000 ? `${fallbackText.slice(0, 3_999)}…` : fallbackText, text_align: 'left', text_size: 'normal_v2', margin: '0px' },
+      { tag: 'markdown', element_id: 'dutydeck_snapshot_omission', content: "<font color='grey'>卡片内容超过飞书限制，过程记录已收起。</font>", text_size: 'x-small', margin: '8px 0px 0px 0px' }
+    ];
   }
+  return mainElements;
 }
 const required = (value: string | undefined, name: string) => {
   const resolved = value?.trim();
@@ -578,7 +586,6 @@ function buildDefaultLarkCard(input: LarkCardInput) {
   const liveTitle = explicitStatusLabel
     ? clipCardField(input.statusLabel!.trim(), 32)
     : state === 'running' ? '执行中' : state === 'completed' && input.cardKind === 'result' ? '运行完成' : presentation.title;
-  const compactTaskName = taskName;
   // 操作按钮统一由 card-actions.ts 这一唯一事实源决定：渲染端与 coordinator 回调端
   // 共用同一张能力表，因此不可能出现「界面上有按钮但回调拒绝执行」的死按钮。
   //
@@ -757,7 +764,7 @@ function buildDefaultLarkCard(input: LarkCardInput) {
     const reportElements = isResultCard ? mainElements.filter(element => element.element_id === 'task_report') : [];
     const finalIds = new Set(['final_output', 'result_missing']);
     const finalElements = mainElements.filter(element => finalIds.has(String(element.element_id ?? '')));
-    const traceElements = mainElements.filter(element => typeof element.element_id === 'string' && element.element_id.startsWith('trace_group_'));
+    const traceElements = mainElements.filter(isTraceGroup);
     const omissionNotice = mainElements.find(element => element.element_id === 'trace_omission');
     const attentionElements = mainElements.filter(element => {
       const id = String(element.element_id ?? '');
@@ -1027,7 +1034,7 @@ function buildDefaultLarkCard(input: LarkCardInput) {
       ? `${statusLabel} · ${progress || taskName}`
       : `${taskName} · ${statusLabel}`);
     // 标题只占一行：卡片回复在原消息下面，用户原话已经在引用里，标题只需要让人认出是哪件事。
-    const headerTitle = isProcessCard || isResultCard ? clipTitleWidth(compactTaskName || 'Dutydeck') : (compactTaskName || 'Dutydeck');
+    const headerTitle = isProcessCard || isResultCard ? clipTitleWidth(taskName || 'Dutydeck') : (taskName || 'Dutydeck');
 
     const baseCard = {
       schema: '2.0' as const,
@@ -1082,51 +1089,10 @@ function buildDefaultLarkCard(input: LarkCardInput) {
     };
   };
   const withinLimits = (card: unknown) => cardBytes(card) <= larkCardSafeLimits.bytes && countCardComponents(card) <= larkCardSafeLimits.components;
-  const omissionNotice = (count: number) => ({
-    tag: 'markdown', element_id: 'dutydeck_omission',
-    content: `<font color='grey'>内容较长，已省略 ${count} 个较早执行分组。</font>`,
-    text_size: 'x-small', margin: '4px 0px'
-  });
-  const upsertOmissionNotice = (elements: Array<Record<string, unknown>>, count: number) => {
-    if (count <= 0) return;
-    const notice = omissionNotice(count);
-    const index = elements.findIndex(element => element.element_id === 'dutydeck_omission');
-    if (index >= 0) elements[index] = notice;
-    else {
-      const firstGroup = elements.findIndex(element => typeof element.element_id === 'string' && element.element_id.startsWith('trace_group_'));
-      elements.splice(firstGroup < 0 ? elements.length : firstGroup, 0, notice);
-    }
-  };
-  let mainElements = [...sourceMainElements];
-  let omittedGroups = 0;
+  const mainElements = [...sourceMainElements];
+  const omission: TraceOmission = { noticeId: 'dutydeck_omission', omittedGroups: 0 };
   let card = assemble(mainElements);
-  while (!withinLimits(card)) {
-    const groupIndex = mainElements.findIndex(element => typeof element.element_id === 'string' && element.element_id.startsWith('trace_group_'));
-    if (groupIndex < 0) break;
-    const group = mainElements[groupIndex] as Record<string, unknown>;
-    const groupElements = Array.isArray(group.elements) ? group.elements as Array<Record<string, unknown>> : [];
-    const remainingGroups = mainElements.filter(element => typeof element.element_id === 'string' && element.element_id.startsWith('trace_group_')).length;
-    // 优先从最旧分组中剥离工具输入输出，保留可扫描的分组结构；
-    // 仅当分组已无内容可剥离时，才删除整个分组。
-    if (stripFirstToolSection(group)) {
-      card = assemble(mainElements);
-      continue;
-    }
-    // 只剩一个 trace 分组时，优先从分组内部移除最旧的子元素，保留最近的活动。
-    if (remainingGroups === 1 && groupElements.length > 1) {
-      const hasTitle = ['current_title', 'current_head'].includes(String((groupElements[0] as Record<string, unknown>)?.element_id));
-      if (hasTitle && groupElements.length > 2) {
-        group.elements = [groupElements[0], ...groupElements.slice(2)];
-      } else {
-        group.elements = groupElements.slice(1);
-      }
-    } else {
-      mainElements.splice(groupIndex, 1);
-      omittedGroups++;
-      upsertOmissionNotice(mainElements, omittedGroups);
-    }
-    card = assemble(mainElements);
-  }
+  while (!withinLimits(card) && trimOldestTraceGroup(mainElements, omission)) card = assemble(mainElements);
   if (withinLimits(card)) return card;
   const fallbackText = String((sourceMainElements.find(element => element.element_id === 'final_output') as Record<string, unknown> | undefined)?.content
     ?? (sourceMainElements.find(element => element.tag === 'markdown' && !metaIds.has(String(element.element_id ?? ''))) as Record<string, unknown> | undefined)?.content
@@ -1156,7 +1122,7 @@ function buildDefaultLarkCard(input: LarkCardInput) {
     return {
       schema: '2.0',
       ...(receiptOnly ? {} : { header: {
-        title: { tag: 'plain_text', content: clipTitleWidth(compactTaskName || 'Dutydeck') },
+        title: { tag: 'plain_text', content: clipTitleWidth(taskName || 'Dutydeck') },
         ...headerSubtitle(userStatus.reason),
         text_tag_list: headerTags(statusLabel, userStatus.tagColor),
         template: userStatus.template,
@@ -1177,7 +1143,7 @@ function buildDefaultLarkCard(input: LarkCardInput) {
   }
   return {
     schema: '2.0',
-    header: { title: { tag: 'plain_text', content: compactTaskName }, ...(agentTags.length ? { text_tag_list: agentTags } : {}), template: presentation.template },
+    header: { title: { tag: 'plain_text', content: taskName }, ...(agentTags.length ? { text_tag_list: agentTags } : {}), template: presentation.template },
     config: { update_multi: true, width_mode: 'default', streaming_mode: false, summary: { content: `${taskName} · ${liveTitle}` } },
     body: {
       direction: 'vertical', padding: '10px 12px',
@@ -1195,6 +1161,8 @@ export class LarkServiceError extends Error {
   constructor(public readonly code: string, message: string, public readonly statusCode = 400, public readonly details?: Record<string, unknown>) {
     super(message); this.name = 'LarkServiceError';
   }
+  /** 飞书业务码；没有或不是数字时为 NaN，与 Number(details.upstreamCode) 同义。 */
+  get upstreamCode(): number { return Number(this.details?.upstreamCode); }
 }
 
 export const larkIdentityPermissionHelp = (error?: unknown, appId?: string) => {
@@ -1220,7 +1188,6 @@ export class LarkCardService {
   private tokenFlight?: { promise: Promise<string>; abort: AbortController; waiters: Set<(error: unknown) => void>; settled: boolean };
   private readonly lifecycle = new AbortController();
   private budget() { return requestBudgets.getStore()?.get(this); }
-  private loadingImageKey?: string;
   private loadingImagePromise?: Promise<string | undefined>;
   private identityFailures = new Map<string, { error: LarkServiceError; expiresAt: number }>();
 
@@ -1258,20 +1225,15 @@ export class LarkCardService {
   }
 
   private ensureLoadingImageKey(beforeSend?: LarkWriteGuard) {
-    if (this.loadingImageKey) return Promise.resolve(this.loadingImageKey);
-    if (this.loadingImagePromise) return this.loadingImagePromise;
-    this.loadingImagePromise = (async () => {
+    return this.loadingImagePromise ??= (async () => {
       try {
         const form = new FormData();
         form.append('image_type', 'message');
         form.append('image', new Blob([await readFile(new URL('./assets/dutydeck-bouncing-ball.webp', import.meta.url))], { type: 'image/webp' }), 'dutydeck-bouncing-ball.webp');
         const payload = await this.request('/open-apis/im/v1/images', { form, retry: false, beforeSend });
-        if (!payload.data?.image_key) return undefined;
-        this.loadingImageKey = String(payload.data.image_key);
-        return this.loadingImageKey;
+        return payload.data?.image_key ? String(payload.data.image_key) : undefined;
       } catch { return undefined; }
     })();
-    return this.loadingImagePromise;
   }
 
   async send(input: LarkSendInput): Promise<LarkMessageResult> {
@@ -1747,7 +1709,7 @@ export class LarkCardService {
             try { response = await this.resourceResponse(url, token, signal, start === undefined ? undefined : `bytes=${start}-${end}`); }
             catch (error) {
               // The documented full-GET size response negotiates Range; it is not a failed transport attempt.
-              if (start === undefined && error instanceof LarkServiceError && Number(error.details?.upstreamCode) === 234037
+              if (start === undefined && error instanceof LarkServiceError && error.upstreamCode === 234037
                 && Number(error.details?.upstreamHttpStatus) === 400) return { rangeRequired: true as const };
               throw error;
             }
@@ -1953,7 +1915,7 @@ export class LarkCardService {
         // Only explicit invalid/cross-app/not-visible identity codes are definitive.
         // Permission scopes, throttling and transport failures must remain retryable.
         if (error instanceof LarkServiceError && error.code === 'LARK_OPENAPI_ERROR' && !signal.aborted
-          && [41050, 41012, 40001, 99992361].includes(Number(error.details?.upstreamCode))
+          && [41050, 41012, 40001, 99992361].includes(error.upstreamCode)
           && [200, 400, 403, 404].includes(Number(error.details?.upstreamHttpStatus))) {
           failures.delete(path);
           if (failures.size >= 1000) failures.delete(failures.keys().next().value!);
@@ -1998,7 +1960,7 @@ export class LarkCardService {
     try { return await (options.method === 'GET' ? this.identityRequest(path) : this.request(path, options)); }
     catch (error) {
       if (error instanceof LarkServiceError && error.code === 'LARK_OPENAPI_ERROR') {
-        const code = Number(error.details?.upstreamCode);
+        const code = error.upstreamCode;
         throw Object.assign(new Error(error.message), { code: Number.isFinite(code) ? code : undefined, data: error.details?.upstreamData });
       }
       throw error;

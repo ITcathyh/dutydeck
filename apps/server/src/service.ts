@@ -37,7 +37,7 @@ import { loadConfigWithDiagnostics, resolveDatabaseUrl, type AppConfig } from '@
 import { logDroppedAgents } from './agent-config-log.js';
 import { assertBotProcessStartup, childProcessIdentity, createRepositories, observeProcess } from '@dutydeck/storage';
 import { createPtyRetirementControl } from './pty-recovery.js';
-import { COLLABORATION_LIST_LIMIT, installationOwnerTaskActor, makeId, RuntimeError, timeLoop, workPlanConfirmationRequired, type DriverFactory, type PolicyAction, type PolicyDecision } from '@dutydeck/shared';
+import { COLLABORATION_LIST_LIMIT, installationOwnerTaskActor, makeId, RuntimeError, timeLoop, workPlanConfirmationRequired, type DriverFactory, type PolicyAction, type PolicyDecision, type Session } from '@dutydeck/shared';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { larkResourceRoot, pruneLarkResourceDirectories, readLarkResourceReferences } from './resource-retention.js';
@@ -630,8 +630,15 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     prepareDelivery: (sessionId, id, key) => workbench.prepareDelivery(sessionId, id, key), notice: (workId, text, key) => workbench.notice(workId, text, key),
     log: { warn: (details, message) => app?.log.warn(details, message) } });
   setupCleanup.push(() => delegations.close());
-  const authorizeSessionRequest = async (request: import('fastify').FastifyRequest | import('node:http').IncomingMessage, sessionId: string, boundary: 'session' | 'high_risk' | 'terminal', action: PolicyAction): Promise<PolicyDecision> => {
-    const session = await runtime.getSession(sessionId);
+  const authorizeSessionRequest = async (request: import('fastify').FastifyRequest | import('node:http').IncomingMessage, sessionId: string, boundary: 'session' | 'high_risk' | 'terminal', action: PolicyAction): Promise<PolicyDecision> =>
+    authorizeLoadedSession(request, sessionId, await runtime.getSession(sessionId), boundary, action);
+  /** List routes check every session per poll; one listSessions replaces a getSession per id. */
+  const authorizeSessionRequests = async (request: import('fastify').FastifyRequest, sessionIds: string[], boundary: 'session' | 'high_risk', action: PolicyAction, listed?: Session[]): Promise<PolicyDecision[]> => {
+    // A route that already listed sessions passes them in, so the list is read once per request.
+    const sessions = new Map((listed ?? await runtime.listSessions()).map(session => [session.id, session]));
+    return Promise.all(sessionIds.map(sessionId => authorizeLoadedSession(request, sessionId, sessions.get(sessionId), boundary, action)));
+  };
+  const authorizeLoadedSession = async (request: import('fastify').FastifyRequest | import('node:http').IncomingMessage, sessionId: string, session: Session | undefined, boundary: 'session' | 'high_risk' | 'terminal', action: PolicyAction): Promise<PolicyDecision> => {
     if (session?.source === 'work_item') {
       const binding = await workItems.parentForSession(sessionId);
       if (!binding || !['task.view_result', 'terminal.read'].includes(action)) return { allowed: false, action, code: 'WORK_ITEM_MANAGED_SESSION', reason: '此会话由目标编排管理，请在目标中操作步骤', source: 'integration' };
@@ -890,6 +897,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       } },
       executionPolicy: {
         authorize: (request, sessionId, boundary, action) => authorizeSessionRequest(request, sessionId, boundary, action),
+        authorizeMany: (request, sessionIds, boundary, action, sessions) => authorizeSessionRequests(request, sessionIds, boundary, action, sessions),
       },
       turnDiffs: { store: repos.config,
         requestLarkReview: review => requestLarkTurnDiffReview({ configs: repos.config, mappings: repos.channelMappings, confirmations: collaboration?.participation.confirmations }, review) },

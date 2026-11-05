@@ -1,5 +1,5 @@
 import { larkMessageAnchor } from './message-anchor.js';
-import { createHash } from 'node:crypto';
+import { sha256Hex as digest } from '../hash.js';
 import { createWorkbenchFetch } from '../workbench-fetch.js';
 import { RuntimeError, parseLarkSourceId, type AcceptedTask, type RepositoryBundle, type WorkItem, type WorkPlan } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
@@ -13,7 +13,6 @@ import { neutralizeCardTags } from './card-elements.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { PersistedLarkCardTask } from './coordinator.js';
 
-const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 const originKey = (sessionId: string, key: string) => `workbench.origin.${digest(`${sessionId}\0${key}`)}`;
 interface Target { appId: string; chatId: string; replyMessageId: string; replyInThread: boolean }
 const labels: Record<string, string> = { awaiting_confirmation: '待确认', pending: '待执行', running: '执行中', waiting: '待你补充', completed: '已完成', failed: '执行失败', blocked: '需要处理', cancelling: '正在停止', cancelled: '已取消', skipped: '已跳过' };
@@ -576,8 +575,8 @@ export class LarkWorkbench {
       this.forget(current.id);
       return;
     }
-    const requests = await this.interactions().list(item.parentSessionId, item.id, actorId);
-    this.assertOpen();
+    // current 刚按同一身份 get 过（含授权），直接复用，不再重复授权和读库。
+    const requests = this.interactions().pending(current);
     if (item.status === 'running' && !item.steps.some(step => step.status === 'waiting') && !requests.length && !current.pendingRevision) return;
     // 停在受阻、失败、等待的目标每秒都会走到这里：上一轮已处理完且目标与待决请求都没变时，不再读配置、渲染整卡。
     const settledKey = `${current.revision}\0${digest(JSON.stringify(requests))}`;

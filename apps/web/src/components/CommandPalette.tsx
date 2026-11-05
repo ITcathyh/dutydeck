@@ -46,6 +46,8 @@ function matchAction(action: CommandAction, terms: string[]): boolean {
   return terms.every(term => haystack.includes(term));
 }
 
+const closedPalette = { sections: [] as PaletteSection[], items: [] as PaletteSection['items'], taskCount: 0, actionCount: 0, searching: false };
+
 export function CommandPalette({ open, onClose, sessions, summaries, agents, actions, onSelectSession }: CommandPaletteProps) {
   const dialogRef = useDialogFocus(open);
   const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
@@ -57,6 +59,8 @@ export function CommandPalette({ open, onClose, sessions, summaries, agents, act
   const optionId = (index: number) => `${baseId}-option-${index}`;
 
   const { sections, items, taskCount, actionCount, searching } = useMemo(() => {
+    // 关闭时不渲染，父组件每次渲染都不必重新检索。
+    if (!open) return closedPalette;
     const terms = taskSearchTerms(query);
     const visibleActions = actions.filter(action => (!action.searchOnly || terms.length > 0) && matchAction(action, terms));
     const matches = terms.length
@@ -78,14 +82,15 @@ export function CommandPalette({ open, onClose, sessions, summaries, agents, act
       items: matches.map(match => ({ kind: 'task', key: `task-${match.session.id}`, index: index++, match }))
     });
     return { sections: built, items: built.flatMap(section => section.items), taskCount: matches.length, actionCount: visibleActions.length, searching: terms.length > 0 };
-  }, [actions, agents, query, sessions, summaries]);
+  }, [open, actions, agents, query, sessions, summaries]);
 
   const enabled = (index: number) => { const item = items[index]; return Boolean(item) && !(item.kind === 'action' && item.action.disabled); };
   const firstEnabled = () => { for (let index = 0; index < items.length; index += 1) if (enabled(index)) return index; return -1; };
 
   useEffect(() => { if (open) { setQuery(''); setActiveIndex(0); } }, [open]);
   // 列表变化后把高亮落到第一个可用项；全部禁用时用 -1 表示「当前没有可执行项」。
-  useEffect(() => { setActiveIndex(previous => (enabled(previous) ? previous : firstEnabled())); }, [items]);
+  // 依赖输入而不是 items：关闭时 items 恒为空，打开本身不算列表变化。
+  useEffect(() => { setActiveIndex(previous => (enabled(previous) ? previous : firstEnabled())); }, [actions, agents, query, sessions, summaries]);
   useEffect(() => { if (open) optionRefs.current[activeIndex]?.scrollIntoView?.({ block: 'nearest' }); }, [activeIndex, open]);
 
   if (!open) return null;

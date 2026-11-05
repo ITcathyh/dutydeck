@@ -400,11 +400,18 @@ export default function App() {
   const eventList = events.data?.events ?? [];
   const taskContext = useMemo(() => currentContextStats(eventList, sessionUsage.data?.snapshot?.context), [eventList, sessionUsage.data?.snapshot?.context]);
   const commandCatalog = events.data?.outline?.commandCatalog;
+  const latestCommandsEvent = useMemo(() => {
+    for (let index = eventList.length - 1; index >= 0; index--) {
+      const event = eventList[index]!;
+      if (event.type === 'status' && event.data?.state === 'commands' && Array.isArray(event.data.availableCommands)) return event;
+    }
+    return undefined;
+  }, [eventList]);
+  // 依赖找到的那条事件而不是整个列表：新到的其他事件不会生成新的命令数组。
   const eventCommands = useMemo(() => {
-    const live = commandsFromEvents(eventList);
-    const latest = [...eventList].reverse().find(event => event.type === 'status' && event.data?.state === 'commands' && Array.isArray(event.data.availableCommands));
-    return !commandCatalog || latest && latest.sequence >= commandCatalog.sequence ? live : commandCatalog.commands;
-  }, [eventList, commandCatalog]);
+    const live = commandsFromEvents(latestCommandsEvent ? [latestCommandsEvent] : []);
+    return !commandCatalog || latestCommandsEvent && latestCommandsEvent.sequence >= commandCatalog.sequence ? live : commandCatalog.commands;
+  }, [latestCommandsEvent, commandCatalog]);
   const advertisedCommands = useMemo(() => [...eventCommands, ...(pluginCommands.data ?? [])], [eventCommands, pluginCommands.data]);
   const projectTimeline = useMemo(() => createTimelineProjector(), [activeSessionId]);
   const historyTurns = events.data?.outline?.turns;
@@ -431,7 +438,12 @@ export default function App() {
     for (let index = timeline.length - 1; index >= 0; index--) if (timeline[index].type === 'text' && timeline[index].data.role === 'user') return index;
     return -1;
   }, [timeline]);
-  const awaitingAnswer = useMemo(() => busyStates.has(active?.state ?? '') && latestUserIndex >= 0 && !timeline.slice(latestUserIndex + 1).some(event => event.type === 'text' && event.data.role !== 'user'), [active?.state, latestUserIndex, timeline]);
+  // Same as "no assistant text after the latest user message", without copying the running turn.
+  const awaitingAnswer = useMemo(() => {
+    if (!busyStates.has(active?.state ?? '') || latestUserIndex < 0) return false;
+    for (let index = timeline.length - 1; index > latestUserIndex; index--) if (timeline[index].type === 'text' && timeline[index].data.role !== 'user') return false;
+    return true;
+  }, [active?.state, latestUserIndex, timeline]);
   const hasOngoingActivity = useMemo(() => timelineSections.some(section => section.kind === 'activity' && section.isLatestTurn && awaitingAnswer), [timelineSections, awaitingAnswer]);
   const isPtyCli = activeAgent?.protocol === 'pty-cli';
 

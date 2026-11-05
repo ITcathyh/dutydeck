@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { sleep } from '../daemon/time.js';
 import type { ConfigRepository } from '@dutydeck/shared';
 import { COMPLETION_REACTION_EMOJI, FAILURE_REACTION_EMOJI, reactionDedupeKey, type ReactionRecord } from './reaction-records.js';
 import { isLarkReplyTargetUnavailable, larkFailureKind } from './api-gate.js';
@@ -64,7 +65,7 @@ async function claimDelivery(store: ConfigRepository, key: string, validate?: (v
       if (await store.compareAndSet(claimKey, current, JSON.stringify(claim))) return { claimKey, claimRaw: JSON.stringify(claim) };
     }
     if (Date.now() >= deadline) throw new Error('LARK_DELIVERY_BUSY');
-    await new Promise(resolve => setTimeout(resolve, 25));
+    await sleep(25);
   }
 }
 
@@ -340,7 +341,7 @@ const withinTableLimits = (elements: unknown) => {
   return visit(elements) && total <= larkCardTableLimits.card;
 };
 /** 结果卡被平台按卡片内容拒收：230099 卡片内容创建失败（表格超限、非法图片等），230025 超过消息体积上限。 */
-const isLarkResultCardRejected = (error: unknown) => error instanceof LarkServiceError && [230099, 230025].includes(Number(error.details?.upstreamCode));
+const isLarkResultCardRejected = (error: unknown) => error instanceof LarkServiceError && [230099, 230025].includes(error.upstreamCode);
 
 /** forceAttachment：整卡已被平台拒收，这次直接走「节选 + 附件」，节选卡换一个 UUID（内容不同）。 */
 export async function prepareLarkResult(
@@ -399,8 +400,8 @@ export async function prepareLarkResult(
 /** Only documented audit/sensitive-content codes count; general card/permission failures do not. */
 export const isLarkFinalContentAuditRejected = (error: unknown) => error instanceof LarkServiceError
   && larkFailureKind(error) === 'rejected'
-  && ([230022, 230028, 11312, 11248].includes(Number(error.details?.upstreamCode))
-    || Number(error.details?.upstreamCode) === 18054 && /sensitive|audit|敏感|审[核计]/i.test(error.message));
+  && ([230022, 230028, 11312, 11248].includes(error.upstreamCode)
+    || error.upstreamCode === 18054 && /sensitive|audit|敏感|审[核计]/i.test(error.message));
 
 const contentAuditNotice = '本轮结果被飞书内容安全审核拒收，原文不会自动重发。请在有权访问的工作台查看结果；如需发送到聊天，请先脱敏。';
 

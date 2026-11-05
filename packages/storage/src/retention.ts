@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
 import type { HistoryRetentionResult } from '@dutydeck/shared';
+import { cachedStatement } from './database-control.js';
 
 /**
  * 历史数据保留：只动已结束任务的数据，未结、"结果未知"、旧版待退役会话的数据一律不碰。
@@ -30,9 +31,9 @@ const isScreen = (data: string) => `CASE WHEN json_valid(${data}) THEN json_extr
 
 /** 新帧写入后清空本轮倒数第 TERMINAL_SCREENS_TO_KEEP+1 帧；每帧只移出一帧，与写入同一事务。 */
 export function compactTerminalScreens(db: Database.Database, attemptId: string): void {
-  const evicted = db.prepare(`SELECT id, data FROM events WHERE attempt_id=? AND type='raw_terminal' AND ${isScreen('data')}
+  const evicted = cachedStatement(db, `SELECT id, data FROM events WHERE attempt_id=? AND type='raw_terminal' AND ${isScreen('data')}
     ORDER BY sequence DESC LIMIT 1 OFFSET ?`).get(attemptId, TERMINAL_SCREENS_TO_KEEP) as { id: string; data: string } | undefined;
-  if (evicted && evicted.data !== COMPACTED_TERMINAL_SCREEN) db.prepare('UPDATE events SET data=? WHERE id=?').run(COMPACTED_TERMINAL_SCREEN, evicted.id);
+  if (evicted && evicted.data !== COMPACTED_TERMINAL_SCREEN) cachedStatement(db, 'UPDATE events SET data=? WHERE id=?').run(COMPACTED_TERMINAL_SCREEN, evicted.id);
 }
 
 // 已结束：attempt 已结算，任务不在待核对，结算结果也不是"结果未知"。
@@ -79,9 +80,9 @@ export function createRetentionRepository(db: Database.Database, ledgerAuthority
               AND EXISTS (SELECT 1 FROM events l WHERE l.attempt_id=e.attempt_id AND l.sequence>e.sequence AND l.type='raw_terminal')
             ELSE ${quietSession('e.session_id')}
               AND EXISTS (SELECT 1 FROM events l WHERE l.session_id=e.session_id AND l.sequence>e.sequence AND l.attempt_id IS NULL AND l.type='raw_terminal') END`);
-        const hasOld = db.prepare('SELECT 1 FROM events WHERE rowid>? AND rowid<=? AND timestamp<? LIMIT 1');
-        const compact = db.prepare('UPDATE events SET data=? WHERE id=?');
-        const last = (db.prepare('SELECT COALESCE(MAX(rowid),0) AS n FROM events').get() as { n: number }).n;
+        const hasOld = cachedStatement(db, 'SELECT 1 FROM events WHERE rowid>? AND rowid<=? AND timestamp<? LIMIT 1');
+        const compact = cachedStatement(db, 'UPDATE events SET data=? WHERE id=?');
+        const last = (cachedStatement(db, 'SELECT COALESCE(MAX(rowid),0) AS n FROM events').get() as { n: number }).n;
         let changed = 0;
         // rowid 大致随时间递增：扫到一整段都比保留期新就停，其余留给下一轮。
         for (let after = 0; after < last && !stopped(); after += SCAN) {
@@ -101,23 +102,23 @@ export function createRetentionRepository(db: Database.Database, ledgerAuthority
             THEN ${settledAttempt("json_extract(c.payload,'$.attemptId')")} AND NOT ${legacySession("json_extract(c.payload,'$.sessionId')")}
             ELSE json_extract(c.payload,'$.sessionId') IS NOT NULL AND ${quietSession("json_extract(c.payload,'$.sessionId')")} END
           ORDER BY c.id LIMIT ?`);
-        const remove = db.prepare('DELETE FROM task_execution_commands WHERE id=?');
+        const remove = cachedStatement(db, 'DELETE FROM task_execution_commands WHERE id=?');
         return pages(after => (page.all(after, cutoff, BATCH) as Array<{ id: string }>).map(row => row.id), 'session_state:', id => remove.run(id).changes);
       };
 
       /** tool_calls 是工具事件的镜像（事件本身保留），会话没有未结任务时删超过保留期的。 */
       const toolCalls = () => {
         const page = db.prepare(`SELECT c.rowid AS id FROM tool_calls c WHERE c.rowid>? AND c.updated_at<? AND ${quietSession('c.session_id')} ORDER BY c.rowid LIMIT ?`);
-        const remove = db.prepare('DELETE FROM tool_calls WHERE rowid=?');
+        const remove = cachedStatement(db, 'DELETE FROM tool_calls WHERE rowid=?');
         return pages(after => (page.all(after, cutoff, BATCH) as Array<{ id: number }>).map(row => row.id), 0, id => remove.run(id).changes);
       };
 
       /** 每个实体按修订号只留最近 ENTITY_VERSIONS_TO_KEEP 条。 */
       const entityVersions = async () => {
-        const entities = db.prepare('SELECT entity_kind AS kind, entity_id AS id FROM wp1a_entity_versions GROUP BY entity_kind, entity_id HAVING COUNT(*)>?')
+        const entities = cachedStatement(db, 'SELECT entity_kind AS kind, entity_id AS id FROM wp1a_entity_versions GROUP BY entity_kind, entity_id HAVING COUNT(*)>?')
           .all(ENTITY_VERSIONS_TO_KEEP) as Array<{ kind: string; id: string }>;
-        const stale = db.prepare('SELECT id FROM wp1a_entity_versions WHERE entity_kind=? AND entity_id=? ORDER BY to_revision DESC, id DESC LIMIT -1 OFFSET ?');
-        const remove = db.prepare('DELETE FROM wp1a_entity_versions WHERE id=?');
+        const stale = cachedStatement(db, 'SELECT id FROM wp1a_entity_versions WHERE entity_kind=? AND entity_id=? ORDER BY to_revision DESC, id DESC LIMIT -1 OFFSET ?');
+        const remove = cachedStatement(db, 'DELETE FROM wp1a_entity_versions WHERE id=?');
         let changed = 0;
         for (const entity of entities) {
           if (stopped()) break;

@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { commitLarkAgentReply } from './agent-reply-delivery.js';
 import { parseFinalCardBody, type FinalCardBody } from './final-card.js';
-import { createHash } from 'node:crypto';
+import { jsonSha256 as digest } from '../hash.js';
 import { larkFailureKind } from './api-gate.js';
 import { isLarkMessageUnupdatable } from './card-renderer.js';
 import type { ConfigRepository, ChannelMapping } from '@dutydeck/shared';
@@ -73,7 +73,6 @@ export async function resolveExplicitFinalContext(rows: ChannelMapping[], bindin
     || ((binding.threadId || binding.threadRootMessageId) && !saved.reply_in_thread)) return;
   return explicitFinalContext(row, saved, task.attemptId);
 }
-const digest = (scope: ExplicitFinalScope) => createHash('sha256').update(JSON.stringify(scope)).digest('hex');
 const keyFor = (scope: ExplicitFinalScope) => `lark.explicit_final.${digest(scope)}`;
 const uuidFor = (scope: ExplicitFinalScope) => `final_${digest(scope).slice(0, 40)}`;
 const targetFor = (scope: ExplicitFinalScope): DeliveryTarget => ({ chatId: scope.chat_id,

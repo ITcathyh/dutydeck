@@ -8,14 +8,14 @@ import { executionTaskId } from '@dutydeck/storage';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { z } from 'zod';
 import { changeRequestLabel, resolveCiHead, type CiProviderRegistry } from './ci-providers.js';
-import { codeBlock, errorMessage, isRunnable, iso, short, SingleFlight } from './ci-common.js';
+import { codeBlock, errorMessage, isRunnable, iso, short, SingleFlight, withTimeout } from './ci-common.js';
 import { ciFixLimits, failureFingerprint, type CiNotice } from './ci-webhook.js';
 import {
   assertClaimedPushTarget, isSafeBranchName, assertPushTarget, buildCommit, defaultBranch, diffTrees, fetchBranches, git, localCommits, originPushUrl, pushBranch, remoteBranchSha, remoteUrlLabel, sameEntry, treeEntries,
   type PathContent, type TreeEntry
 } from './pull-request-git.js';
 import { readTaskOutput } from './task-results.js';
-import { listTurnDiffRecords, readTurnDiffRecord, snapshotWorkingTree } from './turn-diff.js';
+import { listTurnDiffRecords, readTurnDiffRecord, snapshotWorkingTree, type SnapshotSkip } from './turn-diff.js';
 
 const RECORD_PREFIX = 'pull_request/record/';
 const TASK_PREFIX = 'pull_request/task/';
@@ -991,20 +991,20 @@ export function pullRequestNumber(input: string, provider: CiProvider, repositor
 
 /** 拍工作区快照；拍不了时抛出带原因和处理办法的错误。 */
 async function workspaceSnapshot(cwd: string) {
-  let reason: string | undefined;
+  let reason: SnapshotSkip | undefined;
   const snapshot = await snapshotWorkingTree(cwd, SNAPSHOT_TIMEOUT_MS, { onSkip: value => { reason = value; } });
   if (!snapshot) throw new RuntimeError('PR_SNAPSHOT_FAILED', snapshotFailure(reason), 503);
   return snapshot;
 }
 
 /** 快照拍不了的原因，加上能怎么处理。 */
-export function snapshotFailure(reason: string | undefined) {
-  if (!reason) return '读取工作区改动失败，请稍后重试。';
-  const file = /^未跟踪文件 (.+) 有 \d+ 字节/.exec(reason)?.[1];
-  if (file) return `读取工作区改动失败：${reason}。把 ${file} 加进 .gitignore 后再试。`;
-  if (reason.startsWith('未跟踪文件')) return `读取工作区改动失败：${reason}。把不需要提交的未跟踪文件加进 .gitignore 后再试。`;
-  if (reason.includes('时限')) return `读取工作区改动超时：${reason}。通常是未跟踪的生成文件太多，把它们加进 .gitignore 后再试。`;
-  return `读取工作区改动失败：${reason}。`;
+export function snapshotFailure(skip: SnapshotSkip | undefined) {
+  if (!skip) return '读取工作区改动失败，请稍后重试。';
+  const { message } = skip;
+  if (skip.kind === 'untracked_file_size') return `读取工作区改动失败：${message}。把 ${skip.file} 加进 .gitignore 后再试。`;
+  if (skip.kind === 'untracked_count' || skip.kind === 'untracked_total_size') return `读取工作区改动失败：${message}。把不需要提交的未跟踪文件加进 .gitignore 后再试。`;
+  if (skip.kind === 'timeout') return `读取工作区改动超时：${message}。通常是未跟踪的生成文件太多，把它们加进 .gitignore 后再试。`;
+  return `读取工作区改动失败：${message}。`;
 }
 
 /** 跟进轮只自动推送 PR 里已有的文件，提前告诉 Agent。 */
@@ -1036,9 +1036,4 @@ export function parseReviewVerdicts(output: string) {
     verdicts.set(match[1]!, { kind: match[2] as 'DONE' | 'ASK', text: match[3] ?? '' });
   }
   return verdicts;
-}
-
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  return Promise.race([promise, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('timeout')), ms); timer.unref?.(); })]).finally(() => clearTimeout(timer));
 }

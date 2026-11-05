@@ -21,15 +21,15 @@ const visibleTraceGroupLimit = 5;
 export const terminalTaskStates = new Set<string>(terminalTaskStatuses);
 
 export const isLarkMessageRateLimit = (error: unknown): error is LarkServiceError => error instanceof LarkServiceError
-  && Number(error.details?.upstreamCode) === 230020;
+  && error.upstreamCode === 230020;
 
 export const larkRateLimitBackoffMs = (failures: number) => Math.min(60_000, 5_000 * (2 ** Math.max(0, failures - 1)));
 
 export const isLarkCardContentRejected = (error: unknown): error is LarkServiceError => error instanceof LarkServiceError
-  && [230028, 230099].includes(Number(error.details?.upstreamCode));
+  && [230028, 230099].includes(error.upstreamCode);
 
 export const isLarkMessageUnupdatable = (error: unknown): error is LarkServiceError => error instanceof LarkServiceError
-  && [230012, 230030, 230031].includes(Number(error.details?.upstreamCode));
+  && [230012, 230030, 230031].includes(error.upstreamCode);
 
 const rejectedDeltaElement = (changedCount: number): LarkCardElement => ({
   tag: 'markdown',
@@ -76,7 +76,8 @@ function compactTraceEntries(events: AgentEvent[]): TraceEntry[] {
     if (event.type === 'text' && data.role === 'user') continue;
     // 账本只留每轮最近几屏的内容，更早的整屏帧只剩空壳（compacted），不是一段空白输出。
     if (event.type === 'raw_terminal' && data.compacted === true) continue;
-    if (event.type === 'raw_terminal' && typeof data.text === 'string') {
+    // 只有对象形态的 JSON 才可能是状态帧；普通终端文本不走 JSON.parse，免得每帧每条都抛一次异常。
+    if (event.type === 'raw_terminal' && typeof data.text === 'string' && /^\s*\{/.test(data.text)) {
       try {
         const raw = JSON.parse(data.text);
         if (raw && typeof raw === 'object' && raw.type === 'status') continue;
@@ -347,7 +348,34 @@ const toolIcon = (kind: TraceToolKind) => ({
   tool: 'setting_outlined'
 }[kind]);
 
+// 步骤是否失败、是否仍在执行。只看状态、命令和输出原文，不做脱敏：只要状态的地方（如判断还有没有工具没返回）
+// 不必为每一步跑整套脱敏正则；toolPresentation 也用这一份，两处判断不会分叉。
+const toolStatus = (entry: TraceEntry) => {
+  const data = entry.data;
+  const normalized = (String(data.name ?? data.title ?? '').trim() || '工具').toLowerCase();
+  const command = typeof data.input === 'string' ? data.input.trim() : firstValue(data.input, ['command', 'cmd']);
+  const status = String(data.status ?? (entry.type === 'tool_result' ? 'completed' : 'running')).toLowerCase();
+  // grep / rg / find / test 这类命令「没有匹配」时以非零码退出，那是答案不是故障：
+  // 命令属于这一类、输出里又没有报错字样时，不按失败算。
+  const outputText = data.output === undefined ? '' : typeof data.output === 'string' ? data.output : JSON.stringify(data.output);
+  const noMatchExit = /^(?:sudo\s+)?(?:grep|egrep|fgrep|rg|find|test|\[|diff|cmp)(?:\s|$)/.test(stripEnvAssignments(command ?? '').trim())
+    || /^(?:grep|glob|search)$/.test(normalized);
+  const benignNonZeroExit = /fail|error/.test(status) && noMatchExit
+    && !/(?:error|fatal|denied|no such file|not found|cannot|can't|invalid|unrecognized|usage:|timed? ?out)/i.test(outputText);
+  const failed = /fail|error|reject|cancel/.test(status) && !benignNonZeroExit;
+  const running = /running|pending|started|in_progress/.test(status);
+  return { failed, running };
+};
+
 const toolPresentation = (entry: TraceEntry) => {
+  const cached = toolPresentations.get(entry);
+  if (cached && cached.type === entry.type && cached.data === entry.data && cached.timestamp === entry.timestamp) return cached.value;
+  const value = presentTool(entry);
+  toolPresentations.set(entry, { type: entry.type, data: entry.data, timestamp: entry.timestamp, value });
+  return value;
+};
+
+const presentTool = (entry: TraceEntry) => {
   const data = entry.data;
   const name = String(data.name ?? data.title ?? '').trim() || '工具';
   const normalized = name.toLowerCase();
@@ -402,16 +430,7 @@ const toolPresentation = (entry: TraceEntry) => {
   // `{cwd:'/srv/repo', args:{file_path:'a.ts'}}` 会让 path 取到 cwd、而独立查一次
   // ['path','file_path'] 递归到 a.ts 判成 true，标题就退化成一个裸的 /srv/repo。
   const selfEvidentDetail = Boolean(command || url || (path && path === firstValue(data.input, ['path', 'file_path'])));
-  const status = String(data.status ?? (entry.type === 'tool_result' ? 'completed' : 'running')).toLowerCase();
-  // grep / rg / find / test 这类命令「没有匹配」时以非零码退出，那是答案不是故障：
-  // 命令属于这一类、输出里又没有报错字样时，不按失败算。
-  const outputText = data.output === undefined ? '' : typeof data.output === 'string' ? data.output : JSON.stringify(data.output);
-  const noMatchExit = /^(?:sudo\s+)?(?:grep|egrep|fgrep|rg|find|test|\[|diff|cmp)(?:\s|$)/.test(stripEnvAssignments(command ?? '').trim())
-    || /^(?:grep|glob|search)$/.test(normalized);
-  const benignNonZeroExit = /fail|error/.test(status) && noMatchExit
-    && !/(?:error|fatal|denied|no such file|not found|cannot|can't|invalid|unrecognized|usage:|timed? ?out)/i.test(outputText);
-  const failed = /fail|error|reject|cancel/.test(status) && !benignNonZeroExit;
-  const running = /running|pending|started|in_progress/.test(status);
+  const { failed, running } = toolStatus(entry);
   // 步骤标题只用人话：英文的工具描述（"Search for … in home directory"）不进标题，
   // 中文描述保留——它比「分类 + 命令」更能说清这一步在做什么。
   const readableDescription = description && /[\u4e00-\u9fff]/.test(description) ? description : undefined;
@@ -437,7 +456,10 @@ const toolPresentation = (entry: TraceEntry) => {
   };
 };
 
-type ToolPresentation = ReturnType<typeof toolPresentation>;
+type ToolPresentation = ReturnType<typeof presentTool>;
+// 一次渲染里同一步骤会被分组、状态、计数和面板反复取呈现（每次都要跑整套脱敏正则）；按条目缓存结果。
+// 条目在 compactTraceEntries 结束后不再被改写，缓存仍核对 type/data/timestamp，任何一个换了就重算。
+const toolPresentations = new WeakMap<TraceEntry, { type: TraceEntry['type']; data: TraceEntry['data']; timestamp: string; value: ToolPresentation }>();
 
 // 一句话说清这一步在做什么：中文描述优先，其次是「分类：关键对象」（运行命令：bytedcli babi bill cost list），
 // 对象说不清自己时只写分类名。与 toolPanel 的标题同一套取舍，只是不转义——调用方各自按落点转义。
@@ -485,9 +507,12 @@ export function busyProgressSummary(events: AgentEvent[]): { phase: string; late
     latest: tool ? toolHeadline(toolPresentation(tool)).slice(0, 200) : '暂无可见步骤' };
 }
 
-export const hasUnresolvedToolCalls = (events: AgentEvent[]) => compactTraceEntries(events).some(entry =>
-  (entry.type === 'tool_call' || entry.type === 'tool_result') && toolPresentation(entry).statusLabel === '执行中'
-);
+// 「执行中」即 statusLabel 的判定：没失败且状态像在跑。
+export const hasUnresolvedToolCalls = (events: AgentEvent[]) => compactTraceEntries(events).some(entry => {
+  if (entry.type !== 'tool_call' && entry.type !== 'tool_result') return false;
+  const { failed, running } = toolStatus(entry);
+  return !failed && running;
+});
 
 type StageRecord = { kind: 'tool'; entry: TraceEntry } | { kind: 'terminal'; entries: TraceEntry[]; text: string };
 

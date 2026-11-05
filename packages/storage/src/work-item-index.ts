@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3';
+import { cachedStatement } from './database-control.js';
 import type { RepositoryBundle } from '@dutydeck/shared';
 
 /** Derived from the existing config JSON; triggers keep CAS and scheduling atomic. */
@@ -76,16 +77,16 @@ function createWorkItemIndexTriggers(db: Database.Database): void {
 export function createWorkItemIndexRepository(db: Database.Database): RepositoryBundle['workItems'] {
   return {
     async listScheduledIds() {
-      return (db.prepare('SELECT substr(config_key,11) AS id FROM work_item_index WHERE needs_tick=1 ORDER BY config_key').all() as Array<{ id: string }>).map(row => row.id);
+      return (cachedStatement(db, 'SELECT substr(config_key,11) AS id FROM work_item_index WHERE needs_tick=1 ORDER BY config_key').all() as Array<{ id: string }>).map(row => row.id);
     },
     async listByParent(parentSessionId) {
-      return db.prepare('SELECT key,value FROM work_item_index JOIN configs ON key=config_key WHERE parent_session_id=? ORDER BY config_key').all(parentSessionId) as Array<{ key: string; value: string }>;
+      return cachedStatement(db, 'SELECT key,value FROM work_item_index JOIN configs ON key=config_key WHERE parent_session_id=? ORDER BY config_key').all(parentSessionId) as Array<{ key: string; value: string }>;
     },
     async findByChildSession(sessionId) {
-      return (db.prepare('SELECT substr(config_key,11) AS id FROM work_item_sessions WHERE session_id=? ORDER BY config_key LIMIT 1').get(sessionId) as { id: string } | undefined)?.id;
+      return (cachedStatement(db, 'SELECT substr(config_key,11) AS id FROM work_item_sessions WHERE session_id=? ORDER BY config_key LIMIT 1').get(sessionId) as { id: string } | undefined)?.id;
     },
     async countActiveSteps() {
-      return (db.prepare('SELECT COALESCE(SUM(active_steps),0) AS count FROM work_item_index WHERE active_steps>0').get() as { count: number }).count;
+      return (cachedStatement(db, 'SELECT COALESCE(SUM(active_steps),0) AS count FROM work_item_index WHERE active_steps>0').get() as { count: number }).count;
     }
   };
 }

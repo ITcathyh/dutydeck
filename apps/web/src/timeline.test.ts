@@ -290,6 +290,25 @@ describe('conversation timeline', () => {
 });
 
 describe('incremental turn projection', () => {
+  it('relabels only the streamed group when a live turn is re-projected', () => {
+    const project = createTimelineProjector();
+    let window = createEventWindow([
+      event(1, 'text', { role: 'user', text: '开始' }),
+      event(2, 'text', { text: '**先**查看目录' }),
+      event(3, 'tool_call', { id: 't1', name: 'Bash', status: 'completed' }),
+      event(4, 'text', { text: '再' })
+    ]);
+    const labels = () => {
+      const { timelineSections } = project(window.events, [], false, window);
+      return timelineSections.flatMap(section => section.kind === 'activity' ? section.groups.map(group => group.label) : []);
+    };
+    expect(labels()).toEqual(['先查看目录', '再']);
+    window = mergeReconciledEvents(window, [event(5, 'text', { text: '运行 `pnpm test`' })]);
+    expect(labels()).toEqual(['先查看目录', '再运行 pnpm test']);
+    window = mergeReconciledEvents(window, [event(6, 'tool_call', { id: 't2', name: 'Bash', status: 'running' }), event(7, 'text', { text: '[看结果](url)' })]);
+    expect(labels()).toEqual(['先查看目录', '再运行 pnpm test', '看结果']);
+  });
+
   it('keeps long activity labels identical around incomplete Markdown and list boundaries', () => {
     const originalPreview = (text: string) => {
       const plain = text.replace(/\[([^\]]+)]\([^)]+\)/g, '$1').replace(/<[^>]+>/g, '')

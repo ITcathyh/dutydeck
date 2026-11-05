@@ -342,7 +342,7 @@ export type SubscribeCiInput = z.input<typeof subscribeCiInputSchema>;
 export const cancelCiInputSchema = z.object({ expectedRevision: z.number().int().positive() }).strict();
 export type CancelCiInput = z.infer<typeof cancelCiInputSchema>;
 
-export type PublicSessionSchedule = Omit<SessionSchedule, 'actorId' | 'dispatchPrompt' | 'taskStartOccurrenceId' | 'pendingOccurrence'>;
+export type PublicSessionSchedule = Omit<SessionSchedule, 'actorId' | 'taskStartOccurrenceId' | 'pendingOccurrence'>;
 export type PublicCiSubscription = Omit<
   CiSubscriptionV2,
   'actorId' | 'actor' | 'dispatchPrompt' | 'taskStartedAt' | 'leaseOwner' | 'leaseExpiresAt' | 'admission'

@@ -90,6 +90,9 @@ interface AttemptTools {
 // 本包不再自定义 AgentDriver / DriverFactory / NormalizedDriverEvent。
 export type { AgentDriver, DriverFactory, NormalizedDriverEvent };
 
+// 执行账本使用的规范 JSON sha256 摘要，供 server 生成同一规则的稳定 ID。
+export { digest } from './ledger.js';
+
 // Session Insight 来源 key 计算规则与稳定实例 ID 配置键，供 resolver (T3d) 复用同一规则。
 export {
   createTranscriptSourceKeys,
@@ -423,12 +426,10 @@ export class DutydeckRuntime {
   private ownerOf(id: string) { return owner(id, this.transitions.get(id) ?? this.transition(id)); }
   private async scoped<T>(id: string, operation: () => Promise<T>) {
     this.assertReady();
-    if (this.shuttingDown) return Promise.reject(new RuntimeError('RUNTIME_SHUTTING_DOWN', 'Dutydeck is shutting down', 503));
     return this.mutations.run(this.lifecycle(id), operation);
   }
   private async readWorkspace<T>(id: string, operation: () => Promise<T>): Promise<T> {
     this.assertReady();
-    if (this.shuttingDown) return Promise.reject(new RuntimeError('RUNTIME_SHUTTING_DOWN', 'Dutydeck is shutting down', 503));
     const token = owner(id, this.workspaceReaders);
     return this.mutations.run(token, () => this.mutations.wait(operation));
   }
@@ -803,6 +804,15 @@ export class DutydeckRuntime {
     }
   }
 
+  /** The submission's single local PTY resource, if the original turn can still be taken over through it. */
+  private recoverableResource(sessionId: string, runId: string, refs: NonNullable<TaskAttempt['submission']>['resourceRefs']) {
+    const resource = refs.length === 1 ? this.repos.execution.getResources(sessionId).find(row => row.resourceId === refs[0]!.resourceId) : undefined;
+    if (!resource || resource.kind !== 'local_only' || resource.stage !== 'created' || resource.runId !== runId
+      || resource.identity?.identityId !== refs[0]!.identityId || resource.observations.at(-1)?.state === 'gone'
+      || this.resourceBlockers(sessionId).some(block => block.resourceId !== resource.resourceId)) return undefined;
+    return resource;
+  }
+
   private async recoverPersistentTurn(session: Session, task: TaskRecord): Promise<boolean> {
     const attempt = this.repos.execution.getTaskExecution(task.id)?.currentAttempt;
     const submission = attempt?.submission, recovery = submission?.recovery;
@@ -811,11 +821,8 @@ export class DutydeckRuntime {
       || attempt.reconcileReason && !['PREVIOUS_RUNTIME_RESULT_UNKNOWN', 'DAEMON_SHUTDOWN'].includes(attempt.reconcileReason.code)
       || this.stopBlocks.has(session.id) || this.drivers.has(session.id)
       || this.bound().getPendingQueueActions(this.fence(session)).some(action => action.target?.attemptId === attempt.attemptId)) return false;
-    const refs = submission.resourceRefs;
-    const resource = refs.length === 1 ? this.repos.execution.getResources(session.id).find(row => row.resourceId === refs[0]!.resourceId) : undefined;
-    if (!resource || resource.kind !== 'local_only' || resource.stage !== 'created' || resource.runId !== session.runId
-      || resource.identity?.identityId !== refs[0]!.identityId || resource.observations.at(-1)?.state === 'gone'
-      || this.resourceBlockers(session.id).some(block => block.resourceId !== resource.resourceId)) return false;
+    const resource = this.recoverableResource(session.id, session.runId, submission.resourceRefs);
+    if (!resource) return false;
     const agent = await this.mutations.wait(() => this.repos.agents.get(session.agentId));
     if (!agent) return false;
     const workspace = await this.mutations.wait(() => this.workspaces.get(session.id));
@@ -1121,7 +1128,6 @@ export class DutydeckRuntime {
 
   async cleanWorkspace(sessionId: string, fingerprint: string): Promise<WorkspaceCleanupResult> {
     this.assertReady();
-    if (this.shuttingDown) return Promise.reject(new RuntimeError('RUNTIME_SHUTTING_DOWN', 'Dutydeck is shutting down', 503));
     const existingRun = this.cleaningRuns.get(sessionId);
     if (existingRun) return existingRun;
 
@@ -1456,40 +1462,34 @@ export class DutydeckRuntime {
       }).catch(error => { if (reserved) this.ptyRetirements.delete(id); throw error; });
       if (replayed) return { replayed: true, recovery: await this.inspectExecutionRecovery(id, actor) };
       try {
-        if (!replayed) {
-          if (!receipt) {
-            // 原终端已不存在时改用不存在证明；它只在所有者运行时已退出时才被账本接受（observeDetachedLocalResource）。
-            const absence = control.captureAbsence ? await this.mutations.wait(() => control.captureAbsence!(session)) : undefined;
-            const snapshot = absence ?? await this.mutations.wait(() => Promise.resolve(control.capture(session)));
-            canonicalExecutionJson(snapshot);
-            await this.mutations.write(id, async () => {
-              await checkScope(); const { resource } = checkResource();
-              receipt = { input, actor, identity: resource.identity!, snapshot, ...(absence !== undefined ? { absent: true as const } : {}) };
-              await this.repos.config.set(key, canonicalExecutionJson(receipt));
-            });
-          }
-          if (!receipt!.absent && !await this.mutations.wait(() => Promise.resolve(control.verify(session, receipt!.snapshot)))) {
-            const proof = await this.mutations.wait(() => control.stop(session, receipt!.snapshot, async snapshot => {
-              canonicalExecutionJson(snapshot);
-              await this.mutations.write(id, async () => {
-                await checkScope(); checkResource(); receipt = { ...receipt!, snapshot };
-                await this.repos.config.set(key, canonicalExecutionJson(receipt));
-              });
-            }));
-            canonicalExecutionJson(proof);
-            await this.mutations.write(id, async () => {
-              await checkScope(); checkResource(); receipt = { ...receipt!, snapshot: proof };
-              await this.repos.config.set(key, canonicalExecutionJson(receipt));
-            });
-          }
+        if (!receipt) {
+          // 原终端已不存在时改用不存在证明；它只在所有者运行时已退出时才被账本接受（observeDetachedLocalResource）。
+          const absence = control.captureAbsence ? await this.mutations.wait(() => control.captureAbsence!(session)) : undefined;
+          const snapshot = absence ?? await this.mutations.wait(() => Promise.resolve(control.capture(session)));
+          canonicalExecutionJson(snapshot);
           await this.mutations.write(id, async () => {
             await checkScope(); const { resource } = checkResource();
-            if (!await this.mutations.wait(() => Promise.resolve(control.verify(session, receipt!.snapshot)))) throw new RuntimeError('PTY_EXIT_UNVERIFIED', 'Original PTY processes have not all been proven gone', 409);
-            const observation = { observationId, state: 'gone' as const, identityId: resource.identity!.identityId, observedAt: now(), evidenceRef: `pty-retirement:${digest(receipt)}` };
-            if (receipt!.absent) this.bound().observeDetachedLocalResource(this.fence(session), resource.resourceId, input.expectedRevision, observation);
-            else this.bound().observed(this.fence(session), resource.resourceId, input.expectedRevision, observation);
+            receipt = { input, actor, identity: resource.identity!, snapshot, ...(absence !== undefined ? { absent: true as const } : {}) };
+            await this.repos.config.set(key, canonicalExecutionJson(receipt));
           });
         }
+        if (!receipt!.absent && !await this.mutations.wait(() => Promise.resolve(control.verify(session, receipt!.snapshot)))) {
+          const persistSnapshot = async (snapshot: unknown) => {
+            canonicalExecutionJson(snapshot);
+            await this.mutations.write(id, async () => {
+              await checkScope(); checkResource(); receipt = { ...receipt!, snapshot };
+              await this.repos.config.set(key, canonicalExecutionJson(receipt));
+            });
+          };
+          await persistSnapshot(await this.mutations.wait(() => control.stop(session, receipt!.snapshot, persistSnapshot)));
+        }
+        await this.mutations.write(id, async () => {
+          await checkScope(); const { resource } = checkResource();
+          if (!await this.mutations.wait(() => Promise.resolve(control.verify(session, receipt!.snapshot)))) throw new RuntimeError('PTY_EXIT_UNVERIFIED', 'Original PTY processes have not all been proven gone', 409);
+          const observation = { observationId, state: 'gone' as const, identityId: resource.identity!.identityId, observedAt: now(), evidenceRef: `pty-retirement:${digest(receipt)}` };
+          if (receipt!.absent) this.bound().observeDetachedLocalResource(this.fence(session), resource.resourceId, input.expectedRevision, observation);
+          else this.bound().observed(this.fence(session), resource.resourceId, input.expectedRevision, observation);
+        });
       } finally { this.ptyRetirements.delete(id); }
       await this.clearVerifiedStopBlock(session);
       if (!this.resourceBlockers(id).length) {
@@ -2017,11 +2017,8 @@ export class DutydeckRuntime {
         if (!session || session.protocol !== 'pty-cli' || session.terminalBackend !== 'tmux'
           || !driver?.canRecoverTurn || !attempt || attempt.state !== 'active' || !submission || !recovery
           || task.interruptedByActor || this.acceptedInput(task).executionOptions.permissionMode !== 'full-trust') continue;
-        const refs = submission.resourceRefs;
-        const resource = refs.length === 1 ? this.repos.execution.getResources(id).find(row => row.resourceId === refs[0]!.resourceId) : undefined;
-        if (!resource || resource.kind !== 'local_only' || resource.stage !== 'created' || resource.runId !== session.runId
-          || resource.identity?.identityId !== refs[0]!.identityId || resource.observations.at(-1)?.state === 'gone'
-          || this.resourceBlockers(id).some(block => block.resourceId !== resource.resourceId)) continue;
+        const resource = this.recoverableResource(id, session.runId, submission.resourceRefs);
+        if (!resource) continue;
         const unchanged = () => this.queueHeld && !this.shuttingDown && this.activeTasks.get(id) === task && task.status === 'running'
           && this.drivers.get(id) === driver && !this.stopBlocks.has(id) && !this.verifyingSessions.has(id)
           && !this.steeringSessions.has(id) && !this.permissionsForSession(id).length
@@ -3113,13 +3110,17 @@ export class DutydeckRuntime {
     };
     void run.then(finish, finish);
   }
+  /** A turn, steering, verification, stop or driver retirement still owns the session. */
+  private sessionHeld(id: string): boolean {
+    return this.attempts.has(id) || this.activeTurns.has(id) || this.steeringSessions.has(id) || this.verifyingSessions.has(id)
+      || this.stopBlocks.has(id) || this.blockedDrivers.has(id) || this.stopRuns.has(id) || this.retiringDrivers.has(id)
+      || this.blockedVerificationSessions.has(id);
+  }
   /** Ephemeral proof from the original adapters; no idle evidence survives a runtime restart. */
   private idleResourceChecks(): ResourceCheckRef[] {
     const checks: ResourceCheckRef[] = [];
     for (const [id, driver] of this.drivers) {
-      if (this.attempts.has(id) || this.activeTurns.has(id) || this.steeringSessions.has(id) || this.verifyingSessions.has(id)
-        || this.stopBlocks.has(id) || this.blockedDrivers.has(id) || this.stopRuns.has(id) || this.retiringDrivers.has(id)
-        || this.blockedVerificationSessions.has(id) || this.driverOperations.get(driver)?.size
+      if (this.sessionHeld(id) || this.driverOperations.get(driver)?.size
         || this.permissionsForSession(id).length || driver.isDetachedForShutdown?.() || driver.hasBackgroundWork?.() !== false) continue;
       if (driver.isIdle?.() !== true) {
         const original = this.localResources.get(driver);
@@ -3141,10 +3142,7 @@ export class DutydeckRuntime {
     const blockers = this.repos.execution.getTaskExecution(taskId)?.blockers ?? [];
     let closed = false;
     for (const otherId of new Set(blockers.filter(value => value.code === 'WORKSPACE_PHYSICAL_RESOURCE_UNSAFE').map(value => value.sessionId))) {
-      if (otherId === id || this.repos.execution.getUnresolvedTasks(otherId).length || this.attempts.has(otherId)
-        || this.activeTurns.has(otherId) || this.verifyingSessions.has(otherId) || this.blockedVerificationSessions.has(otherId)
-        || this.steeringSessions.has(otherId) || this.stopRuns.has(otherId) || this.retiringDrivers.has(otherId)
-        || this.stopBlocks.has(otherId) || this.blockedDrivers.has(otherId)
+      if (otherId === id || this.repos.execution.getUnresolvedTasks(otherId).length || this.sessionHeld(otherId)
         || blockers.some(value => value.sessionId === otherId && value.code !== 'WORKSPACE_PHYSICAL_RESOURCE_UNSAFE')) continue;
       const driver = this.drivers.get(otherId);
       if (!driver || driver.hasBackgroundWork?.() === true || this.driverOperations.get(driver)?.size || this.permissionsForSession(otherId).length) continue;

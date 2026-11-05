@@ -4,7 +4,7 @@
 // 本模块是纯函数：外部事实（父消息是谁发的、最近谁说过话、群里几个人）由调用方查好放进上下文，
 // 查不到就留空，对应的规则不触发。规则只决定接不接话，不改变任何授权：交出去的消息仍按发送者本人重新鉴权。
 
-import type { CollaborationFollowup, CollaborationMandate, CollaborationObservation, ParticipationLevel } from '@dutydeck/shared';
+import { escapeRegExp, type CollaborationFollowup, type CollaborationMandate, type CollaborationObservation, type ParticipationLevel } from '@dutydeck/shared';
 
 export type ParticipationRule =
   | 'calls_name' | 'reply_to_self' | 'owned_topic' | 'owned_item' | 'follow_up' | 'single_human' | 'eager_default'
@@ -80,7 +80,6 @@ export interface RuleContext {
 
 const FOLLOW_UP_WINDOW_MS = 5 * 60_000;
 const genericNameTokens = new Set(['bot', 'robot', 'tag', 'ai', 'agent', '机器人', '助手', '测试', '验证']);
-const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /** 去掉飞书文本里的 @ 占位符。 */
 export const stripMentionPlaceholders = (text: string) => text.replace(/@_user_\d+|@_all/g, ' ').replace(/\s+/g, ' ').trim();

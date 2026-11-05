@@ -1,4 +1,5 @@
 import { assertBotProcessApp } from './bot-process.js';
+import { cachedStatement } from './database-control.js';
 import { isThenable, naturalKeyConflict, notFound, revisionConflict } from './foundation-errors.js';
 import type Database from 'better-sqlite3';
 import { createHash } from 'node:crypto';
@@ -106,9 +107,9 @@ export interface FoundationRepositories {
 }
 
 export function createFoundationRepositories(sqlite: Database.Database): FoundationRepositories {
-  const selectSecretRef = sqlite.prepare('SELECT * FROM secret_refs WHERE id = ?');
-  const selectChannelBot = sqlite.prepare('SELECT * FROM channel_bots WHERE id = ?');
-  const insertVersion = sqlite.prepare(`
+  const selectSecretRef = cachedStatement(sqlite, 'SELECT * FROM secret_refs WHERE id = ?');
+  const selectChannelBot = cachedStatement(sqlite, 'SELECT * FROM channel_bots WHERE id = ?');
+  const insertVersion = cachedStatement(sqlite, `
     INSERT INTO foundation_entity_versions (
       entity_kind, entity_id, from_revision, to_revision, before_json, after_hash, created_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -146,12 +147,12 @@ export function createFoundationRepositories(sqlite: Database.Database): Foundat
     // Keep invalidation in the caller's SQLite transaction. A credential
     // metadata revision is the fencing version: facts bound to an older
     // revision must never become current again.
-    sqlite.prepare(`
+    cachedStatement(sqlite, `
       UPDATE remote_chat_facts
       SET revision = revision + 1, expires_at = ?, invalidated_at = ?, error_code = 'REMOTE_CREDENTIAL_ROTATED', updated_at = ?
       WHERE credential_ref_id = ? AND credential_revision = ? AND invalidated_at IS NULL
     `).run(invalidatedAt, invalidatedAt, invalidatedAt, credentialRefId, currentRevision);
-    sqlite.prepare(`
+    cachedStatement(sqlite, `
       UPDATE remote_identity_facts
       SET revision = revision + 1,
           expires_at = CASE WHEN checked_at > ? THEN checked_at ELSE ? END,
@@ -161,12 +162,12 @@ export function createFoundationRepositories(sqlite: Database.Database): Foundat
   };
 
   const invalidateRemoteFactsForBot = (channelBotId: string, invalidatedAt: string, errorCode: 'REMOTE_CHANNEL_BOT_BINDING_CHANGED' | 'REMOTE_APP_ID_CHANGED'): void => {
-    sqlite.prepare(`
+    cachedStatement(sqlite, `
       UPDATE remote_chat_facts
       SET revision = revision + 1, expires_at = ?, invalidated_at = ?, error_code = ?, updated_at = ?
       WHERE channel_bot_id = ? AND invalidated_at IS NULL
     `).run(invalidatedAt, invalidatedAt, errorCode, invalidatedAt, channelBotId);
-    sqlite.prepare(`
+    cachedStatement(sqlite, `
       UPDATE remote_identity_facts
       SET revision = revision + 1,
           expires_at = CASE WHEN checked_at > ? THEN checked_at ELSE ? END,
@@ -180,7 +181,7 @@ export function createFoundationRepositories(sqlite: Database.Database): Foundat
     if (getSecretRef(input.id)) throw naturalKeyConflict('secret_ref', input.id);
     const timestamp = new Date().toISOString();
     const entity = secretRefMetadataSchema.parse({ ...input, schemaVersion: 1, revision: 1, createdAt: timestamp, updatedAt: timestamp });
-    sqlite.prepare(`
+    cachedStatement(sqlite, `
       INSERT INTO secret_refs (
         id, schema_version, revision, kind, provider, reference_key, status, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -203,7 +204,7 @@ export function createFoundationRepositories(sqlite: Database.Database): Foundat
       status: input.status ?? current.status,
       updatedAt: new Date().toISOString()
     });
-    const result = sqlite.prepare(`
+    const result = cachedStatement(sqlite, `
       UPDATE secret_refs SET revision = ?, kind = ?, provider = ?, reference_key = ?, status = ?, updated_at = ?
       WHERE id = ? AND revision = ?
     `).run(next.revision, next.kind, next.provider, next.referenceKey, next.status, next.updatedAt, id, input.expectedRevision);
@@ -218,15 +219,15 @@ export function createFoundationRepositories(sqlite: Database.Database): Foundat
     const current = getSecretRef(id);
     if (!current) throw notFound('secret_ref', id);
     if (current.revision !== expectedRevision) throw revisionConflict('secret_ref', id, expectedRevision);
-    const references = sqlite.prepare(`SELECT (
+    const references = cachedStatement(sqlite, `SELECT (
       (SELECT COUNT(*) FROM channel_bots WHERE credential_ref = ?) +
       (SELECT COUNT(*) FROM remote_identity_facts WHERE credential_ref_id = ?) +
       (SELECT COUNT(*) FROM remote_chat_facts WHERE credential_ref_id = ?)
     ) AS count`).get(id, id, id) as { count: number };
     if (references.count > 0) throw new RuntimeError('FOUNDATION_SECRET_REF_REFERENCED', `SecretRef ${id} is still referenced by a ChannelBot`, 409);
-    const deleted = sqlite.prepare('DELETE FROM secret_refs WHERE id = ? AND revision = ?').run(id, expectedRevision);
+    const deleted = cachedStatement(sqlite, 'DELETE FROM secret_refs WHERE id = ? AND revision = ?').run(id, expectedRevision);
     if (deleted.changes !== 1) throw revisionConflict('secret_ref', id, expectedRevision);
-    sqlite.prepare('DELETE FROM foundation_entity_versions WHERE entity_kind = ? AND entity_id = ?').run('secret_ref', id);
+    cachedStatement(sqlite, 'DELETE FROM foundation_entity_versions WHERE entity_kind = ? AND entity_id = ?').run('secret_ref', id);
     return current;
   };
 
@@ -237,7 +238,7 @@ export function createFoundationRepositories(sqlite: Database.Database): Foundat
   };
 
   const findChannelBotByNaturalKey = (channel: string, externalAppId: string): ChannelBotFoundation | undefined => {
-    const row = sqlite.prepare('SELECT * FROM channel_bots WHERE channel = ? AND external_app_id = ?').get(channel, externalAppId) as ChannelBotRow | undefined;
+    const row = cachedStatement(sqlite, 'SELECT * FROM channel_bots WHERE channel = ? AND external_app_id = ?').get(channel, externalAppId) as ChannelBotRow | undefined;
     return row ? decodeChannelBot(row) : undefined;
   };
 
@@ -257,7 +258,7 @@ export function createFoundationRepositories(sqlite: Database.Database): Foundat
       createdAt: timestamp,
       updatedAt: timestamp
     });
-    sqlite.prepare(`
+    cachedStatement(sqlite, `
       INSERT INTO channel_bots (
         id, schema_version, revision, channel, external_app_id, display_name, brand, credential_ref,
         state, desired_listener_state, full_trust_confirmed, created_at, updated_at
@@ -302,7 +303,7 @@ export function createFoundationRepositories(sqlite: Database.Database): Foundat
       state: input.state ?? current.state,
       updatedAt: new Date().toISOString()
     });
-    const result = sqlite.prepare(`
+    const result = cachedStatement(sqlite, `
       UPDATE channel_bots SET revision = ?, external_app_id = ?, display_name = ?, brand = ?, credential_ref = ?, state = ?, updated_at = ?
       WHERE id = ? AND revision = ?
     `).run(next.revision, next.externalAppId, next.displayName, next.brand, next.credentialRef ?? null, next.state, next.updatedAt, id, input.expectedRevision);
@@ -341,7 +342,7 @@ export function createFoundationRepositories(sqlite: Database.Database): Foundat
       const current = entityKind === 'secret_ref' ? getSecretRef(entityId) : getChannelBot(entityId);
       if (!current) throw notFound(entityKind, entityId);
       if (current.revision !== expectedRevision) throw revisionConflict(entityKind, entityId, expectedRevision);
-      const version = sqlite.prepare(`
+      const version = cachedStatement(sqlite, `
         SELECT before_json, after_hash FROM foundation_entity_versions
         WHERE entity_kind = ? AND entity_id = ? AND to_revision = ?
       `).get(entityKind, entityId, expectedRevision) as VersionRow | undefined;
@@ -349,7 +350,7 @@ export function createFoundationRepositories(sqlite: Database.Database): Foundat
 
       if (version.before_json === null) {
         if (entityKind === 'secret_ref') {
-          const references = sqlite.prepare(`SELECT (
+          const references = cachedStatement(sqlite, `SELECT (
             (SELECT COUNT(*) FROM channel_bots WHERE credential_ref = ?) +
             (SELECT COUNT(*) FROM remote_identity_facts WHERE credential_ref_id = ?) +
             (SELECT COUNT(*) FROM remote_chat_facts WHERE credential_ref_id = ?)
@@ -357,11 +358,11 @@ export function createFoundationRepositories(sqlite: Database.Database): Foundat
           if (references.count > 0) {
             throw new RuntimeError('FOUNDATION_ROLLBACK_REFERENCED', `SecretRef ${entityId} is still referenced`, 409);
           }
-          sqlite.prepare('DELETE FROM secret_refs WHERE id = ? AND revision = ?').run(entityId, expectedRevision);
+          cachedStatement(sqlite, 'DELETE FROM secret_refs WHERE id = ? AND revision = ?').run(entityId, expectedRevision);
         } else {
-          sqlite.prepare('DELETE FROM channel_bots WHERE id = ? AND revision = ?').run(entityId, expectedRevision);
+          cachedStatement(sqlite, 'DELETE FROM channel_bots WHERE id = ? AND revision = ?').run(entityId, expectedRevision);
         }
-        sqlite.prepare('DELETE FROM foundation_entity_versions WHERE entity_kind = ? AND entity_id = ?').run(entityKind, entityId);
+        cachedStatement(sqlite, 'DELETE FROM foundation_entity_versions WHERE entity_kind = ? AND entity_id = ?').run(entityKind, entityId);
         outcome = { entityKind, entityId, action: 'deleted', deletedRevision: expectedRevision };
         return;
       }
@@ -394,14 +395,14 @@ export function createFoundationRepositories(sqlite: Database.Database): Foundat
 
   return {
     secretRefs: {
-      async list() { return (sqlite.prepare('SELECT * FROM secret_refs ORDER BY created_at, id').all() as SecretRefRow[]).map(decodeSecretRef); },
+      async list() { return (cachedStatement(sqlite, 'SELECT * FROM secret_refs ORDER BY created_at, id').all() as SecretRefRow[]).map(decodeSecretRef); },
       async get(id) { return getSecretRef(id); },
       async create(input) { return transact(repositories => repositories.secretRefs.create(input)); },
       async update(id, input) { return transact(repositories => repositories.secretRefs.update(id, input)); },
       async remove(id, expectedRevision) { return transact(repositories => repositories.secretRefs.remove(id, expectedRevision)); }
     },
     channelBots: {
-      async list() { return (sqlite.prepare('SELECT * FROM channel_bots ORDER BY created_at, id').all() as ChannelBotRow[]).map(decodeChannelBot); },
+      async list() { return (cachedStatement(sqlite, 'SELECT * FROM channel_bots ORDER BY created_at, id').all() as ChannelBotRow[]).map(decodeChannelBot); },
       async get(id) { return getChannelBot(id); },
       async create(input) { return transact(repositories => repositories.channelBots.create(input)); },
       async update(id, input) { return transact(repositories => repositories.channelBots.update(id, input)); },

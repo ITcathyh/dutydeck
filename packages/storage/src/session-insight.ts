@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3';
+import { cachedStatement } from './database-control.js';
 import { Buffer } from 'node:buffer';
 import {
   RuntimeError,
@@ -30,7 +31,8 @@ import {
   type SessionInsightRawTaskRow,
   type HostEvidenceRaw,
   type InsightPruneResult,
-  type PublishInsightParams
+  type PublishInsightParams,
+  now as nowIso
 } from '@dutydeck/shared';
 import type { OpenControl } from './database-control.js';
 
@@ -95,10 +97,8 @@ export function createSessionInsightRepository(
   db: Database.Database,
   control: OpenControl
 ): SessionInsightRepository {
-  const nowIso = (): string => new Date().toISOString();
-
   const getSessionRunId = db.transaction((sessionId: string): string => {
-    const row = db.prepare('SELECT run_id FROM sessions WHERE id = ?').get(sessionId) as
+    const row = cachedStatement(db, 'SELECT run_id FROM sessions WHERE id = ?').get(sessionId) as
       | { run_id: string }
       | undefined;
     if (!row) fail('INSIGHT_NOT_FOUND', `Session ${sessionId} does not exist`, 404);
@@ -108,21 +108,20 @@ export function createSessionInsightRepository(
   /** 确保每 session 一行 idle 刷新记录，返回当前行。 */
   const ensureRefreshRow = (sessionId: string): RefreshRow =>
     db.transaction((sid: string): RefreshRow => {
-      const existing = db.prepare('SELECT * FROM insight_refresh WHERE session_id = ?').get(sid) as
+      const existing = cachedStatement(db, 'SELECT * FROM insight_refresh WHERE session_id = ?').get(sid) as
         | RefreshRow
         | undefined;
       if (existing) return existing;
-      db.prepare(
-        `INSERT INTO insight_refresh
+      cachedStatement(db, `INSERT INTO insight_refresh
            (session_id, request_id, state, binding_revision, current_snapshot_id, process_run_id,
             queued_at, started_at, finished_at, last_checked_at, error_code)
          VALUES (?, NULL, 'idle', 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL)`
       ).run(sid);
-      return db.prepare('SELECT * FROM insight_refresh WHERE session_id = ?').get(sid) as RefreshRow;
+      return cachedStatement(db, 'SELECT * FROM insight_refresh WHERE session_id = ?').get(sid) as RefreshRow;
     })(sessionId);
 
   const readResourceRow = (resourceId: string): DriverResource | undefined => {
-    const row = db.prepare('SELECT json FROM driver_resources WHERE id = ?').get(resourceId) as
+    const row = cachedStatement(db, 'SELECT json FROM driver_resources WHERE id = ?').get(resourceId) as
       | { json: string }
       | undefined;
     return row ? (taskExecutionSchemas.resource.parse(JSON.parse(row.json)) as DriverResource) : undefined;
@@ -305,8 +304,7 @@ export function createSessionInsightRepository(
       return; // 同 ID 同 payload 幂等。
     }
 
-    db.prepare(
-      `INSERT INTO insight_sources
+    cachedStatement(db, `INSERT INTO insight_sources
          (observation_id, session_id, run_id, driver_instance_id, source_key, proof_kind, private_payload_json, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
@@ -339,7 +337,7 @@ export function createSessionInsightRepository(
         : null;
       if (previousFingerprint !== fingerprint) {
         const row = ensureRefreshRow(parsed.sessionId);
-        db.prepare('UPDATE insight_refresh SET binding_revision = binding_revision + 1 WHERE session_id = ?').run(
+        cachedStatement(db, 'UPDATE insight_refresh SET binding_revision = binding_revision + 1 WHERE session_id = ?').run(
           row.session_id
         );
       }
@@ -379,8 +377,7 @@ export function createSessionInsightRepository(
     });
   };
 
-  const selectActiveSnapshot = db.prepare(
-    'SELECT * FROM insight_snapshots WHERE snapshot_id = ? AND tombstoned = 0'
+  const selectActiveSnapshot = cachedStatement(db, 'SELECT * FROM insight_snapshots WHERE snapshot_id = ? AND tombstoned = 0'
   );
 
   /** 发布事务内的保留策略：每 session 当前 + 最近 1 份旧快照，再按 512MiB 全局淘汰最旧缓存。 */
@@ -393,14 +390,13 @@ export function createSessionInsightRepository(
         .get(snapshotId) as { payload_bytes: number } | undefined;
       if (!row) return 0;
       // 与指针清空原子完成；事件随快照淘汰物理删除。
-      db.prepare('DELETE FROM insight_events WHERE snapshot_id = ?').run(snapshotId);
-      db.prepare(
-        `UPDATE insight_snapshots
+      cachedStatement(db, 'DELETE FROM insight_events WHERE snapshot_id = ?').run(snapshotId);
+      cachedStatement(db, `UPDATE insight_snapshots
            SET summary_json = NULL, manifest_json = NULL, host_evidence_json = NULL,
                payload_bytes = 0, tombstoned = 1
          WHERE snapshot_id = ?`
       ).run(snapshotId);
-      db.prepare('UPDATE insight_refresh SET current_snapshot_id = NULL WHERE current_snapshot_id = ?').run(
+      cachedStatement(db, 'UPDATE insight_refresh SET current_snapshot_id = NULL WHERE current_snapshot_id = ?').run(
         snapshotId
       );
       pruned += 1;
@@ -481,8 +477,7 @@ export function createSessionInsightRepository(
     if (record.binding_revision !== expectedBindingRevision) {
       // 来源修订变化：本次置 failed(source_binding_changed)，旧 current_snapshot_id 保留，
       // 不提交混合结果。失败状态随本事务提交，由外层在提交后抛错。
-      db.prepare(
-        `UPDATE insight_refresh
+      cachedStatement(db, `UPDATE insight_refresh
            SET state = 'failed', error_code = 'source_binding_changed', finished_at = ?
          WHERE session_id = ? AND request_id = ? AND state = 'running'`
       ).run(nowIso(), sessionId, requestId);
@@ -519,8 +514,7 @@ export function createSessionInsightRepository(
       .prepare('SELECT snapshot_id FROM insight_snapshots WHERE session_id = ? AND cache_key = ? AND tombstoned = 0')
       .get(sessionId, validatedSnapshot.cacheKey) as { snapshot_id: string } | undefined;
     if (existing) {
-      db.prepare(
-        `UPDATE insight_refresh
+      cachedStatement(db, `UPDATE insight_refresh
            SET state = 'succeeded', current_snapshot_id = ?, error_code = NULL,
                finished_at = ?, last_checked_at = ?
          WHERE session_id = ?`
@@ -530,8 +524,7 @@ export function createSessionInsightRepository(
       return 'published' as const;
     }
 
-    db.prepare(
-      `INSERT INTO insight_snapshots
+    cachedStatement(db, `INSERT INTO insight_snapshots
          (snapshot_id, session_id, cache_key, schema_version, engine_version, parser_version,
           metric_version, redaction_version, summary_json, manifest_json, host_evidence_json,
           payload_bytes, tombstoned, created_at)
@@ -552,8 +545,7 @@ export function createSessionInsightRepository(
       validatedSnapshot.createdAt
     );
     // 事件与快照在同一事务内插入：中途抛错整体回滚，不留下可读半快照。
-    const insertEvent = db.prepare(
-      `INSERT INTO insight_events
+    const insertEvent = cachedStatement(db, `INSERT INTO insight_events
          (snapshot_id, ordinal, event_id, kind, tool_name, result_status, event_json)
        VALUES (?, ?, ?, ?, ?, ?, ?)`
     );
@@ -569,8 +561,7 @@ export function createSessionInsightRepository(
       );
     });
 
-    db.prepare(
-      `UPDATE insight_refresh
+    cachedStatement(db, `UPDATE insight_refresh
          SET state = 'succeeded', current_snapshot_id = ?, error_code = NULL,
              finished_at = ?, last_checked_at = ?
        WHERE session_id = ?`
@@ -655,7 +646,7 @@ export function createSessionInsightRepository(
     },
 
     getState(sessionId: string): SessionInsightRefreshRecord {
-      const row = db.prepare('SELECT * FROM insight_refresh WHERE session_id = ?').get(sessionId) as
+      const row = cachedStatement(db, 'SELECT * FROM insight_refresh WHERE session_id = ?').get(sessionId) as
         | RefreshRow
         | undefined;
       if (row) return toRefreshRecord(row);
@@ -673,7 +664,7 @@ export function createSessionInsightRepository(
 
     getStatus(sessionId: string): SessionInsightStatus {
       getSessionRunId(sessionId);
-      const row = db.prepare('SELECT * FROM insight_refresh WHERE session_id = ?').get(sessionId) as
+      const row = cachedStatement(db, 'SELECT * FROM insight_refresh WHERE session_id = ?').get(sessionId) as
         | RefreshRow
         | undefined;
       const state = row?.state ?? 'idle';
@@ -717,8 +708,7 @@ export function createSessionInsightRepository(
           fail('INSIGHT_QUEUE_FULL', 'Session insight refresh queue is full', 429);
         }
         const queuedAt = nowIso();
-        db.prepare(
-          `UPDATE insight_refresh
+        cachedStatement(db, `UPDATE insight_refresh
              SET request_id = ?, state = 'queued', process_run_id = ?,
                  queued_at = ?, started_at = NULL, finished_at = NULL, error_code = NULL
            WHERE session_id = ?`
@@ -764,8 +754,7 @@ export function createSessionInsightRepository(
         // Binding revision is authoritative even on a cache hit: a source change during analysis
         // must fail the request rather than silently reusing an older snapshot.
         if (row.binding_revision !== expectedBindingRevision) {
-          db.prepare(
-            `UPDATE insight_refresh
+          cachedStatement(db, `UPDATE insight_refresh
                SET state = 'failed', error_code = 'source_binding_changed', finished_at = ?
              WHERE session_id = ? AND request_id = ? AND state = 'running'`
           ).run(nowIso(), sessionId, requestId);
@@ -776,8 +765,7 @@ export function createSessionInsightRepository(
           .get(sessionId, cacheKey) as { snapshot_id: string } | undefined;
         if (!existing) return { outcome: 'miss' };
         const checkedAt = nowIso();
-        db.prepare(
-          `UPDATE insight_refresh
+        cachedStatement(db, `UPDATE insight_refresh
              SET state = 'succeeded', current_snapshot_id = ?, error_code = NULL,
                  finished_at = ?, last_checked_at = ?
            WHERE session_id = ? AND request_id = ? AND state = 'running'`
@@ -823,7 +811,7 @@ export function createSessionInsightRepository(
             .prepare('SELECT * FROM insight_snapshots WHERE snapshot_id = ?')
             .get(snapshotId) as SnapshotRow | undefined;
         }
-        const refresh = db.prepare('SELECT current_snapshot_id FROM insight_refresh WHERE session_id = ?').get(sessionId) as
+        const refresh = cachedStatement(db, 'SELECT current_snapshot_id FROM insight_refresh WHERE session_id = ?').get(sessionId) as
           | { current_snapshot_id: string | null }
           | undefined;
         if (!refresh?.current_snapshot_id) return undefined;
@@ -1050,7 +1038,7 @@ export function createSessionInsightRepository(
         const hasMore = sessionRows.length > limit;
         const page = hasMore ? sessionRows.slice(0, limit) : sessionRows;
 
-        const selectSnapshot = db.prepare('SELECT * FROM insight_snapshots WHERE snapshot_id = ? AND tombstoned = 0');
+        const selectSnapshot = cachedStatement(db, 'SELECT * FROM insight_snapshots WHERE snapshot_id = ? AND tombstoned = 0');
 
         const rows: SessionInsightSummaryRawRow[] = page.map(row => {
           let snapshot: SessionInsightSummaryRawRow['snapshot'];

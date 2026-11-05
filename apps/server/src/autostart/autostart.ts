@@ -441,7 +441,8 @@ async function lingerOn(config: ResolvedAutostart): Promise<boolean | undefined>
   return shown.stdout.trim().endsWith('=yes');
 }
 
-function firstLine(value: string): string {
+/** 命令输出的第一行（去掉首尾空白）。 */
+export function firstLine(value: string): string {
   const line = value.trim().split('\n')[0];
   return line ? line.trim() : '';
 }

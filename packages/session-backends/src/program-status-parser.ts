@@ -114,26 +114,32 @@ export class ProgramStatusFramingStream {
     this.buffered = '';
     let cursor = 0;
 
-    const emitData = (text: string) => {
-      if (!text) return;
-      const last = parts[parts.length - 1];
-      if (last && last.type === 'data') {
-        last.text += text;
-      } else {
-        parts.push({ type: 'data', text });
-      }
+    // Consecutive data forms one part. Passthrough is almost always one
+    // contiguous run of `str`, so extend the run and slice once instead of
+    // concatenating per escape sequence; only a skipped frame splits a run.
+    let text = '', runStart = 0, runEnd = 0;
+    const flushRun = () => {
+      text += str.slice(runStart, runEnd);
+      if (text) parts.push({ type: 'data', text });
+      text = ''; runStart = runEnd = 0;
     };
+    const emitData = (start: number, end: number) => {
+      if (end <= start) return;
+      if (runEnd !== start) { text += str.slice(runStart, runEnd); runStart = start; }
+      runEnd = end;
+    };
+    const pushPart = (part: ProgramStatusPart) => { flushRun(); parts.push(part); };
 
     while (cursor < str.length) {
       const escIdx = str.indexOf('\x1b', cursor);
       if (escIdx === -1) {
-        emitData(str.slice(cursor));
+        emitData(cursor, str.length);
         cursor = str.length;
         break;
       }
 
       if (escIdx > cursor) {
-        emitData(str.slice(cursor, escIdx));
+        emitData(cursor, escIdx);
         cursor = escIdx;
       }
 
@@ -147,7 +153,7 @@ export class ProgramStatusFramingStream {
 
       if (str[cursor + 1] !== ']') {
         // Non-OSC escape sequence (e.g. CSI \x1b[)
-        emitData(str.slice(cursor, cursor + 2));
+        emitData(cursor, cursor + 2);
         cursor += 2;
         continue;
       }
@@ -180,8 +186,7 @@ export class ProgramStatusFramingStream {
           break;
         }
         if (isEsc && str[termIdx + 1] !== '\\') {
-          const malformed = str.slice(cursor, termIdx);
-          if (Buffer.byteLength(malformed) <= this.maxBufferSize) emitData(malformed);
+          if (Buffer.byteLength(str.slice(cursor, termIdx)) <= this.maxBufferSize) emitData(cursor, termIdx);
           cursor = termIdx;
           continue;
         }
@@ -192,11 +197,11 @@ export class ProgramStatusFramingStream {
         }
         const payload = str.slice(contentStart, termIdx);
         if (payload.trim() === '?') {
-          parts.push({ type: 'probe' });
+          pushPart({ type: 'probe' });
         } else {
           const event = parseProgramStatusPayload(payload);
           if (event) {
-            parts.push({ type: 'status', event });
+            pushPart({ type: 'status', event });
           }
         }
 
@@ -205,10 +210,11 @@ export class ProgramStatusFramingStream {
       }
 
       // Another OSC code (e.g. \x1b]0;, \x1b]8;, \x1b]52;, \x1b]777;, \x1b]1989;)
-      emitData(str.slice(cursor, cursor + 2));
+      emitData(cursor, cursor + 2);
       cursor += 2;
     }
 
+    flushRun();
     return parts;
   }
 

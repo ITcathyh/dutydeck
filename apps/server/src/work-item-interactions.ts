@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { stripVTControlCharacters } from 'node:util';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import type { RelayAskBroker } from '@dutydeck/relay';
-import { RuntimeError } from '@dutydeck/shared';
+import { RuntimeError, type WorkItem } from '@dutydeck/shared';
 import type { WorkItemService } from './work-items.js';
 import { workInput } from './work-item-routes.js';
 
@@ -25,7 +25,11 @@ export class WorkItemInteractions {
     private readonly authorizeInteraction: (parentSessionId: string, actorId: string, action: 'high_risk.execute' | 'terminal.write' | 'terminal.read') => Promise<boolean>) {}
 
   async list(parentSessionId: string, workId: string, actorId?: string): Promise<WorkItemRequest[]> {
-    const item = await this.work.get(parentSessionId, workId, actorId);
+    return this.pending(await this.work.get(parentSessionId, workId, actorId));
+  }
+
+  /** 调用方须已用 work.get 按同一身份取到 item（即已完成授权）。 */
+  pending(item: WorkItem): WorkItemRequest[] {
     if (['cancelling', 'cancelled', 'completed'].includes(item.status)) return [];
     const requests: WorkItemRequest[] = [];
     for (const step of item.steps) {

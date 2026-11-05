@@ -123,7 +123,7 @@ export function TimelineView({ fullWidth = false, variant, header, aside, onScro
   }, [reading]);
   const programmedScrollTop = useRef<number | undefined>(undefined);
   const turnAliases = useRef(new Map<string, string>());
-  const previousFirst = useRef<{ id: string; events: Set<string> } | undefined>(undefined);
+  const previousFirst = useRef<{ id: string; sections: TimelineSection[] } | undefined>(undefined);
   const previousScope = useRef(readingScopeKey);
   if (previousScope.current !== readingScopeKey) {
     turnAliases.current.clear(); previousFirst.current = undefined;
@@ -152,18 +152,20 @@ export function TimelineView({ fullWidth = false, variant, header, aside, onScro
       if (section.kind === 'event' && section.event.data.role === 'user' && !section.event.data.steering) appendTurn(index);
     }
     if (start < timelineSections.length) appendTurn(timelineSections.length);
-    const eventIds = (turn: typeof result[number]) => turn.sections.flatMap(section => section.kind === 'event' ? [section.event.id] : section.groups.flatMap(group => group.events.map(event => event.id)));
+    const eventIds = (sections: TimelineSection[]) => sections.flatMap(section => section.kind === 'event' ? [section.event.id] : section.groups.flatMap(group => group.events.map(event => event.id)));
     if (previousFirst.current && result[0]?.id !== previousFirst.current.id) {
       // Only a prepended boundary fragment can change its first event id.
+      // The id set is built here, not on every live append to the first turn.
+      const previousEvents = new Set(eventIds(previousFirst.current.sections));
       for (const turn of result) {
-        if (eventIds(turn).some(id => previousFirst.current!.events.has(id))) {
+        if (eventIds(turn.sections).some(id => previousEvents.has(id))) {
           turnAliases.current.set(turn.id, previousFirst.current.id); break;
         }
       }
     }
     for (const turn of result) turn.id = turnAliases.current.get(turn.id) ?? turn.id;
     const first = result[0];
-    previousFirst.current = first ? { id: first.id, events: new Set(eventIds(first)) } : undefined;
+    previousFirst.current = first ? { id: first.id, sections: first.sections } : undefined;
     return [...summaryTurns, ...result];
   }, [timelineSections, turnCache, summaryTurns]);
   // 分享页「更早 N 轮」的总开关和轮内展开一样按会话保存，刷新后仍能恢复到读过的那一轮。

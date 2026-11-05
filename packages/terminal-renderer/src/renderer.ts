@@ -87,11 +87,20 @@ export class TerminalSnapshot {
   private readonly serializer = new SerializeAddon();
   private sgrMouse = false;
   private cursorVisible = true;
+  /** Bumped whenever the buffer may have changed; text reads are cached per revision. */
+  private revision = 0;
+  private cacheRevision = -1;
+  private readonly textCache = new Map<string, string>();
+  private readonly invalidate = () => { this.revision++; };
 
   constructor(cols: number = DEFAULT_COLS, rows: number = DEFAULT_ROWS) {
     this.terminal = new Terminal({ cols, rows, scrollback: 5000, allowProposedApi: true });
     // The addon uses the shared buffer API; its typings require browser-only members.
     this.terminal.loadAddon(this.serializer as unknown as ITerminalAddon);
+    // Parsing and resizing are the only buffer mutations. A write's own
+    // callback runs right after its chunk is parsed, before onWriteParsed.
+    this.terminal.onWriteParsed(this.invalidate);
+    this.terminal.onResize(this.invalidate);
     // SerializeAddon restores tracking, but omits the SGR mouse encoding.
     for (const final of ['h', 'l']) {
       this.terminal.parser.registerCsiHandler({ prefix: '?', final }, params => {
@@ -109,7 +118,7 @@ export class TerminalSnapshot {
 
   /** Feed raw PTY data into the virtual terminal. */
   write(data: string): void {
-    this.terminal.write(data);
+    this.terminal.write(data, this.invalidate);
   }
 
   /**
@@ -120,7 +129,7 @@ export class TerminalSnapshot {
   writeAndFlush(data: string): Promise<void> {
     return new Promise((resolve, reject) => {
       try {
-        this.terminal.write(data, resolve);
+        this.terminal.write(data, () => { this.invalidate(); resolve(); });
       } catch (error) {
         reject(error);
       }
@@ -139,6 +148,20 @@ export class TerminalSnapshot {
   /** Resize the virtual terminal. */
   resize(cols: number, rows: number): void {
     this.terminal.resize(cols, rows);
+    this.invalidate();
+  }
+
+  private cached(key: string, read: () => string): string {
+    if (this.cacheRevision !== this.revision) {
+      this.textCache.clear();
+      this.cacheRevision = this.revision;
+    }
+    let value = this.textCache.get(key);
+    if (value === undefined) {
+      value = read();
+      this.textCache.set(key, value);
+    }
+    return value;
   }
 
   /**
@@ -147,7 +170,7 @@ export class TerminalSnapshot {
    * and trailing blank lines trimmed.
    */
   text(): string {
-    return readViewportText(this.terminal, { filter: true });
+    return this.cached('text', () => readViewportText(this.terminal, { filter: true }));
   }
 
   /**
@@ -157,11 +180,15 @@ export class TerminalSnapshot {
    * also keeps box borders and spacing for structural composer recognition.
    */
   viewportText(options: { preserveStructure?: boolean } = {}): string {
-    return readViewportText(this.terminal, { filter: false, ...options });
+    return this.cached(options.preserveStructure ? 'structure' : 'viewport', () => readViewportText(this.terminal, { filter: false, ...options }));
   }
 
   /** Last non-empty logical line, joining physical rows wrapped by xterm. */
   lastLine(): string {
+    return this.cached('lastLine', () => this.readLastLine());
+  }
+
+  private readLastLine(): string {
     const buffer = this.terminal.buffer.active;
     let row = buffer.baseY + this.terminal.rows - 1;
     while (row >= buffer.baseY && !buffer.getLine(row)?.translateToString(true).trim()) row--;
@@ -175,7 +202,10 @@ export class TerminalSnapshot {
     return cleanBoxDrawing(text).trim();
   }
 
-  /** Expose the underlying xterm-headless instance (PNG rendering, etc.). */
+  /** Expose the underlying xterm-headless instance (PNG rendering, etc.).
+   *  Mutate it only through this class so cached screen text stays current.
+   *  Register only synchronous parser handlers: an async handler pauses parsing
+   *  mid-chunk without a write callback or onWriteParsed, leaving the cache stale. */
   get xterm(): InstanceType<typeof Terminal> { return this.terminal; }
 
   dispose(): void {

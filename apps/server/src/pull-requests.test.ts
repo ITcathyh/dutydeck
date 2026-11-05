@@ -603,8 +603,8 @@ describe('PR 跟进：CI 失败', () => {
 
     await f.turn('task_user_2', () => f.write('src/other.ts', 'export {};\n'));
     await expect(f.service.prepare(f.session.id, {}, 'ou_owner')).rejects.toMatchObject({ code: 'PR_SNAPSHOT_FAILED', message: expect.stringContaining('把 dump.bin 加进 .gitignore 后再试') });
-    expect(snapshotFailure('写入快照失败：超过 15000 毫秒时限')).toContain('超时');
-    expect(snapshotFailure('未跟踪文件 2001 个，超过 2000 个')).toContain('把不需要提交的未跟踪文件加进 .gitignore');
+    expect(snapshotFailure({ kind: 'timeout', message: '写入快照失败：超过 15000 毫秒时限' })).toContain('超时');
+    expect(snapshotFailure({ kind: 'untracked_count', message: '未跟踪文件 2001 个，超过 2000 个' })).toContain('把不需要提交的未跟踪文件加进 .gitignore');
   });
 });
 

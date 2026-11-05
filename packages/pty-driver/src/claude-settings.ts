@@ -2,11 +2,11 @@ import { createHash, randomUUID } from 'node:crypto';
 import { lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, rmdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { shellQuote as quote } from '@dutydeck/shared';
 import { planGuardScript } from './plan-guard.js';
 
 const claudeAdapters = new Set(['claude-code', 'seed', 'relay', 'genius']);
 const planGuardFile = 'plan-guard.mjs';
-const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
 function settingsArgs(args: string[]): { rest: string[]; value?: string } {
   const rest: string[] = [];

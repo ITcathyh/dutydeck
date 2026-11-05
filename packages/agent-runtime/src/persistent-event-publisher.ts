@@ -24,13 +24,6 @@ interface Subscription {
   pendingWake: boolean;
 }
 
-function cloneEvent<T>(event: AgentEvent<T>): AgentEvent<T> {
-  if (typeof structuredClone === 'function') {
-    return structuredClone(event);
-  }
-  return JSON.parse(JSON.stringify(event));
-}
-
 function yieldEventLoop(): Promise<void> {
   return new Promise((resolve) => {
     if (typeof setImmediate === 'function') {
@@ -254,9 +247,10 @@ export class PersistentEventPublisher {
           break;
         }
 
-        const deliveredEvent = cloneEvent(event);
+        // Each listWindow call decodes fresh rows, so subscriptions never share an event object.
+        const sequence = event.sequence;
         try {
-          const result = sub.listener(deliveredEvent);
+          const result = sub.listener(event);
           if (result && typeof (result as Promise<void>).then === 'function') {
             await result;
           }
@@ -266,7 +260,7 @@ export class PersistentEventPublisher {
           break;
         }
 
-        sub.cursor = event.sequence;
+        sub.cursor = sequence;
       }
 
       if (listenerFailed) {

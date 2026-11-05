@@ -11,9 +11,9 @@
  * - 私有的 root/path/env/stdout/stderr 不进 DTO/log；诊断只记 requestId/code/count。
  */
 import { createHash } from 'node:crypto';
+import { digest } from '@dutydeck/runtime';
 import { dirname } from 'node:path';
 import {
-  canonicalExecutionJson,
   RuntimeError,
   SESSION_INSIGHT_LIMITS,
   type AcceptedTask,
@@ -1118,7 +1118,7 @@ export class SessionInsightService {
         })
         .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
     };
-    return createHash('sha256').update(canonicalExecutionJson(payload)).digest('hex');
+    return digest(payload);
   }
 
   private buildManifest(input: {

@@ -267,9 +267,6 @@ function sameTrigger(left: SessionSchedule['trigger'], right: SessionSchedule['t
 }
 export const scheduleRequestKey = (occurrenceIdValue: string) => `session-automation:schedule:${occurrenceIdValue}`;
 export const ciRequestKey = (subscriptionId: string) => `session-automation:ci:${subscriptionId}`;
-function canonicalTaskId(namespace: TaskRequestV1['namespace'], sessionId: string, key: string) {
-  return executionTaskId(namespace, sessionId, key);
-}
 function isSessionRunnable(session: Session | undefined) {
   return Boolean(session && !session.archivedAt && !['stopped', 'failed'].includes(session.state));
 }
@@ -301,6 +298,11 @@ function admissionFor(candidate: TaskRequestV1, existing: AcceptedTask | undefin
   if (!existing) return { version: 1, kind: 'canonical', taskIdVersion: 'v1', taskId: newTaskId, request: candidate };
   if (existing.replayValidation === 'legacy_partial' || !existing.request || existing.task.digestVersion !== 'v1') return legacyAdmission(existing);
   return { version: 1, kind: 'canonical', taskIdVersion: 'v1', taskId: existing.task.id, request: existing.request };
+}
+/** 首次冻结 admission：返回要用的请求和要写入记录的字段；已接受过的沿用其 taskId。 */
+function freezeAdmission(namespace: TaskRequestV1['namespace'], sessionId: string, candidate: TaskRequestV1, existing: AcceptedTask | undefined, actor: ExecutionActor) {
+  const admission = admissionFor(candidate, existing, executionTaskId(namespace, sessionId, candidate.key));
+  return { admission, request: existing?.request ?? candidate, fields: { admission, actor, ...(existing ? { taskId: admission.taskId } : {}) } };
 }
 
 type AutomationTaskLabel = 'Scheduled task' | 'CI continuation';
@@ -567,6 +569,11 @@ export class SessionAutomationService {
     catch { this.invalidRecord(key, raw); throw new RuntimeError('SESSION_AUTOMATION_RECORD_INVALID', 'Stored session automation record is invalid', 500); }
   }
 
+  /** 重置为待投递，保留已用次数。 */
+  private undelivered(delivery: { attempts: number }) {
+    return { status: 'not_requested' as const, attempts: delivery.attempts, updatedAt: iso(this.clock()) };
+  }
+
   private async replace(key: string, raw: string, value: unknown) {
     return this.requireStore().compareAndSet(key, raw, JSON.stringify(value));
   }
@@ -577,9 +584,14 @@ export class SessionAutomationService {
 
   /** 幂等补齐同一授权 binding：来源 CAS 之后、dispatch 之前；崩溃重开补同一映射。 */
   private async ensureTaskBinding(taskId: string, binding: TaskBinding) {
-    if (await this.createRecord(taskBindingKey(taskId), binding)) return;
-    const existing = await this.getRecord(taskBindingKey(taskId), value => taskBindingSchema.parse(value));
-    if (!existing) throw new RuntimeError('SESSION_AUTOMATION_TASK_BINDING_CONFLICT', 'Automation task binding disappeared', 409);
+    // Every tick re-checks the bindings of all recorded occurrences; they almost always exist,
+    // so read first instead of paying for a failing insert CAS each time.
+    let existing = await this.getRecord(taskBindingKey(taskId), value => taskBindingSchema.parse(value));
+    if (!existing) {
+      if (await this.createRecord(taskBindingKey(taskId), binding)) return;
+      existing = await this.getRecord(taskBindingKey(taskId), value => taskBindingSchema.parse(value));
+      if (!existing) throw new RuntimeError('SESSION_AUTOMATION_TASK_BINDING_CONFLICT', 'Automation task binding disappeared', 409);
+    }
 
     if (existing.value.schemaVersion === 2 && binding.schemaVersion === 2) {
       if (sameV2Binding(existing.value, binding)) return;
@@ -2005,16 +2017,13 @@ export class SessionAutomationService {
         if (occurrence.triggerSource !== 'manual') await this.advanceSchedule(schedule, occurrence.scheduledForUtc);
         return;
       }
-      const admission = admissionFor(candidateRequest, existingAccepted, canonicalTaskId('schedule', session.id, candidateRequest.key));
-      taskId = admission.taskId;
-      taskIdVersion = admission.taskIdVersion;
-      request = existingAccepted?.request ?? candidateRequest;
+      const frozen = freezeAdmission('schedule', session.id, candidateRequest, existingAccepted, actor);
+      ({ request } = frozen);
+      ({ taskId, taskIdVersion } = frozen.admission);
       const withAdmission = sessionScheduleOccurrenceV2Schema.parse({
         ...accepted,
         revision: accepted.revision + 1,
-        admission,
-        actor,
-        ...(existingAccepted ? { taskId } : {}),
+        ...frozen.fields,
         updatedAt: iso(this.clock())
       });
       if (!await this.replace(occurrenceKey(occurrence.id), JSON.stringify(accepted), withAdmission)) return;
@@ -2178,7 +2187,7 @@ export class SessionAutomationService {
       ...patch,
       schemaVersion: 2,
       revision: base.revision + 1,
-      ...(shouldResetDelivery ? { delivery: { status: 'not_requested', attempts: base.delivery.attempts, updatedAt: iso(this.clock()) } } : {}),
+      ...(shouldResetDelivery ? { delivery: this.undelivered(base.delivery) } : {}),
       leaseOwner: undefined,
       leaseExpiresAt: undefined,
       updatedAt: iso(this.clock())
@@ -2190,7 +2199,7 @@ export class SessionAutomationService {
     const current = await this.getRecord(scheduleKey(schedule.id), readStoredSessionSchedule);
     if (!current || current.value.generation !== schedule.generation || current.value.nextDueAt !== due) return;
     const upcoming = previewSessionSchedule(current.value, this.clock())?.scheduledForUtc;
-    const updated = sessionScheduleSchema.parse({ ...current.value, enabled: current.value.enabled, nextDueAt: upcoming, updatedAt: current.value.updatedAt });
+    const updated = sessionScheduleSchema.parse({ ...current.value, nextDueAt: upcoming });
     await this.replace(scheduleKey(schedule.id), current.raw, updated);
   }
 
@@ -2457,9 +2466,15 @@ export class SessionAutomationService {
       return;
     }
     if (base.leaseExpiresAt && new Date(base.leaseExpiresAt) > now) return;
+    const claimed = await this.claimCiLease(stored.raw, base, now);
+    if (!claimed) return;
+    await this.pollCi(claimed);
+  }
+
+  /** 以 CAS 领取 CI 订阅租约；被他人改过返回 undefined。 */
+  private async claimCiLease(raw: string, base: CiSubscriptionV2, now: Date) {
     const claimed = ciSubscriptionV2Schema.parse({ ...base, revision: base.revision + 1, schemaVersion: 2, leaseOwner: this.ownerId, leaseExpiresAt: plus(now, CLAIM_TTL_MS), updatedAt: iso(now) });
-    if (!await this.replace(ciKey(base.id), stored.raw, claimed)) return;
-    await this.pollCi({ raw: JSON.stringify(claimed), value: claimed });
+    return await this.replace(ciKey(base.id), raw, claimed) ? { raw: JSON.stringify(claimed), value: claimed } : undefined;
   }
 
   private async pollCi(stored: { raw: string; value: CiSubscription }) {
@@ -2541,9 +2556,8 @@ export class SessionAutomationService {
       }
     }
 
-    const claimedBase = ciSubscriptionV2Schema.parse({ ...claimed0, schemaVersion: 2, revision: claimed0.revision + 1, leaseOwner: this.ownerId, leaseExpiresAt: plus(now, CLAIM_TTL_MS), updatedAt: iso(now) });
-    if (!await this.replace(ciKey(claimed0.id), stored.raw, claimedBase)) return;
-    const claimed: { raw: string; value: CiSubscriptionV2 } = { raw: JSON.stringify(claimedBase), value: claimedBase };
+    const claimed = await this.claimCiLease(stored.raw, claimed0, now);
+    if (!claimed) return;
     const session = await this.options.runtime.getSession(claimed.value.sessionId);
     if (!isSessionRunnable(session)) { await this.finishCi(claimed, 'session_inactive', 'Session is no longer active'); return; }
     try {
@@ -2555,12 +2569,12 @@ export class SessionAutomationService {
     await this.dispatchCi(claimed, session!);
   }
 
-  private async dispatchCi(dispatching: { value: CiSubscriptionV2; raw?: string }, session: Session) {
+  private async dispatchCi(dispatching: { value: CiSubscriptionV2; raw: string }, session: Session) {
     let record = dispatching.value;
     const prompt = record.dispatchPrompt;
     if (!prompt) throw new RuntimeError('SESSION_AUTOMATION_CI_PROMPT_MISSING', 'Persisted CI continuation prompt is missing', 500);
     const actor = record.actor ?? resolveAutomationActor(session, record.actorId);
-    if (!actor) { await this.finishCi({ raw: dispatching.raw ?? JSON.stringify(record), value: record }, 'error', 'CI actor domain cannot be verified'); return; }
+    if (!actor) { await this.finishCi({ raw: dispatching.raw, value: record }, 'error', 'CI actor domain cannot be verified'); return; }
 
     let request: TaskRequestV1;
     let taskId: string;
@@ -2577,24 +2591,20 @@ export class SessionAutomationService {
       try {
         existingAccepted = this.execution.lookupAccepted(candidateRequest);
       } catch (err) {
-        await this.finishCi({ raw: dispatching.raw ?? JSON.stringify(record), value: record }, 'blocked', errorMessage(err));
+        await this.finishCi({ raw: dispatching.raw, value: record }, 'blocked', errorMessage(err));
         return;
       }
-      const admission = admissionFor(candidateRequest, existingAccepted, canonicalTaskId('automation', record.sessionId, candidateRequest.key));
-      taskId = admission.taskId;
-      taskIdVersion = admission.taskIdVersion;
-      request = existingAccepted?.request ?? candidateRequest;
+      const frozen = freezeAdmission('automation', record.sessionId, candidateRequest, existingAccepted, actor);
+      ({ request } = frozen);
+      ({ taskId, taskIdVersion } = frozen.admission);
       const withAdmission = ciSubscriptionV2Schema.parse({
         ...record,
         schemaVersion: 2,
         revision: record.revision + 1,
-        admission,
-        actor,
-        ...(existingAccepted ? { taskId } : {}),
+        ...frozen.fields,
         updatedAt: iso(this.clock())
       });
-      const raw = dispatching.raw ?? JSON.stringify(record);
-      if (!await this.replace(ciKey(record.id), raw, withAdmission)) return;
+      if (!await this.replace(ciKey(record.id), dispatching.raw, withAdmission)) return;
       record = withAdmission;
     }
 
@@ -2652,7 +2662,7 @@ export class SessionAutomationService {
       revision: base.revision + 1,
       status,
       nextPollAt: undefined,
-      ...(shouldResetDelivery ? { delivery: { status: 'not_requested', attempts: base.delivery.attempts, updatedAt: iso(this.clock()) } } : {}),
+      ...(shouldResetDelivery ? { delivery: this.undelivered(base.delivery) } : {}),
       leaseOwner: undefined,
       leaseExpiresAt: undefined,
       updatedAt: iso(this.clock())
@@ -2699,7 +2709,7 @@ export class SessionAutomationService {
       const accepted = this.execution.getAcceptedTask(value.taskId);
       if (!accepted) return undefined;
       if (accepted.task.sessionId !== (value.executionSessionId ?? value.sessionId)) {
-        const blocked = sessionScheduleOccurrenceV2Schema.parse({ ...value, schemaVersion: 2, revision: value.revision + 1, runStatus: 'blocked', blockReason: 'admission_conflict', error: 'Accepted task belongs to another session', delivery: { status: 'not_requested', attempts: value.delivery.attempts, updatedAt: iso(this.clock()) }, updatedAt: iso(this.clock()) });
+        const blocked = sessionScheduleOccurrenceV2Schema.parse({ ...value, schemaVersion: 2, revision: value.revision + 1, runStatus: 'blocked', blockReason: 'admission_conflict', error: 'Accepted task belongs to another session', delivery: this.undelivered(value.delivery), updatedAt: iso(this.clock()) });
         await this.replace(occurrenceKey(value.id), item.raw, blocked);
         return { raw: JSON.stringify(blocked), value: blocked };
       }
@@ -2720,7 +2730,7 @@ export class SessionAutomationService {
         try { accepted = this.execution.lookupAccepted(candidateRequest); }
         catch (error) {
           const blocked = sessionScheduleOccurrenceV2Schema.parse({ ...value, revision: value.revision + 1, runStatus: 'blocked', blockReason: 'admission_conflict',
-            error: errorMessage(error), delivery: { status: 'not_requested', attempts: value.delivery.attempts, updatedAt: iso(this.clock()) } });
+            error: errorMessage(error), delivery: this.undelivered(value.delivery) });
           if (!await this.replace(occurrenceKey(value.id), item.raw, blocked)) return undefined;
           return { raw: JSON.stringify(blocked), value: blocked };
         }
@@ -2753,7 +2763,7 @@ export class SessionAutomationService {
       const accepted = this.execution.getAcceptedTask(value.taskId);
       if (!accepted) return undefined;
       if (accepted.task.sessionId !== value.sessionId) {
-        const blocked = ciSubscriptionV2Schema.parse({ ...value, schemaVersion: 2, revision: value.revision + 1, status: 'blocked', error: 'Accepted task belongs to another session', delivery: { status: 'not_requested', attempts: value.delivery.attempts, updatedAt: iso(this.clock()) }, updatedAt: iso(this.clock()) });
+        const blocked = ciSubscriptionV2Schema.parse({ ...value, schemaVersion: 2, revision: value.revision + 1, status: 'blocked', error: 'Accepted task belongs to another session', delivery: this.undelivered(value.delivery), updatedAt: iso(this.clock()) });
         await this.replace(ciKey(value.id), item.raw, blocked);
         return { raw: JSON.stringify(blocked), value: blocked };
       }
@@ -2850,7 +2860,7 @@ export class SessionAutomationService {
         await this.finishOccurrence(working, {
           runStatus: 'interrupted',
           error: 'Selected task was cancelled before execution',
-          delivery: { status: 'not_requested', attempts: working.value.delivery.attempts, updatedAt: iso(this.clock()) }
+          delivery: this.undelivered(working.value.delivery)
         });
       }
       return;
@@ -2884,9 +2894,9 @@ export class SessionAutomationService {
         leaseExpiresAt: undefined,
         ...(recoverLegacyCapacity && working.value.delivery.status === 'not_requested' && this.options.deliver
           ? { delivery: { status: 'pending', attempts: working.value.delivery.attempts, updatedAt: iso(this.clock()) } } : {}),
-        ...(result.outcome === 'cancelled' ? { delivery: { status: 'not_requested', attempts: working.value.delivery.attempts, updatedAt: iso(this.clock()) } } : {}),
+        ...(result.outcome === 'cancelled' ? { delivery: this.undelivered(working.value.delivery) } : {}),
         // 同因第 2 次起不再另发结果卡，由 sendRunNotice 改上一条。
-        ...(streak && streak.count > 1 && working.value.delivery.status !== 'delivered' ? { delivery: { status: 'not_requested', attempts: working.value.delivery.attempts, updatedAt: iso(this.clock()) } } : {}),
+        ...(streak && streak.count > 1 && working.value.delivery.status !== 'delivered' ? { delivery: this.undelivered(working.value.delivery) } : {}),
         updatedAt: iso(this.clock())
       });
       if (!await this.replace(occurrenceKey(value.id), working.raw, settled)) return;
@@ -2972,7 +2982,7 @@ export class SessionAutomationService {
         leaseExpiresAt: undefined,
         ...(recoverLegacyCapacity && working.value.delivery.status === 'not_requested' && this.options.deliver
           ? { delivery: { status: 'pending', attempts: working.value.delivery.attempts, updatedAt: iso(this.clock()) } } : {}),
-        ...(result.outcome === 'cancelled' ? { delivery: { status: 'not_requested', attempts: working.value.delivery.attempts, updatedAt: iso(this.clock()) } } : {}),
+        ...(result.outcome === 'cancelled' ? { delivery: this.undelivered(working.value.delivery) } : {}),
         updatedAt: iso(this.clock())
       });
       if (!await this.replace(ciKey(value.id), working.raw, completed)) return;

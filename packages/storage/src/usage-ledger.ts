@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3';
+import { cachedStatement } from './database-control.js';
 import { usageCategories, usageUnknownModel, type UsageCap, type UsageCapScope, type UsageDimension, type UsageFilter, type UsageGroup, type UsageLedgerEntry, type UsageLedgerRepository, type UsageTaskPage, type UsageTaskRow, type UsageTotals } from '@dutydeck/shared';
 
 export function createUsageLedgerSchema(db: Database.Database): void {
@@ -136,7 +137,7 @@ function capOf(row: CapRow): UsageCap {
 }
 
 export function createUsageLedgerRepository(sqlite: Database.Database): UsageLedgerRepository {
-  const insert = sqlite.prepare(`INSERT OR IGNORE INTO usage_ledger (id, recorded_at, app_id, chat_id, session_id, task_id, attempt_id, root_task_id, root_session_id, actor_id, category, origin, agent_id, model, provider, model_source, pricing_source, pricing_version, pricing_match, unpriced_reason,
+  const insert = cachedStatement(sqlite, `INSERT OR IGNORE INTO usage_ledger (id, recorded_at, app_id, chat_id, session_id, task_id, attempt_id, root_task_id, root_session_id, actor_id, category, origin, agent_id, model, provider, model_source, pricing_source, pricing_version, pricing_match, unpriced_reason,
     input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, cost_estimated, data_status, cumulative_cost_usd, usage_ref)
     VALUES (@id, @recordedAt, @appId, @chatId, @sessionId, @taskId, @attemptId, @rootTaskId, @rootSessionId, @actorId, @category, @origin, @agentId, @model, @provider, @modelSource, @pricingSource, @pricingVersion, @pricingMatch, @unpricedReason,
     @inputTokens, @outputTokens, @cacheReadTokens, @cacheWriteTokens, @costUsd, @costEstimated, @dataStatus, @cumulativeCostUsd, @usageRef)`);
@@ -156,28 +157,28 @@ export function createUsageLedgerRepository(sqlite: Database.Database): UsageLed
     async claimBackgroundTask(appId, month, taskId, limit): Promise<boolean> {
       if (!Number.isSafeInteger(limit) || limit < 0) throw new Error('Invalid automatic task limit');
       return sqlite.transaction(() => {
-        if (sqlite.prepare('SELECT 1 FROM usage_background_admissions WHERE app_id = ? AND task_id = ?').get(appId, taskId)) return true;
-        const { count } = sqlite.prepare('SELECT COUNT(*) AS count FROM usage_background_admissions WHERE app_id = ? AND month = ?').get(appId, month) as { count: number };
+        if (cachedStatement(sqlite, 'SELECT 1 FROM usage_background_admissions WHERE app_id = ? AND task_id = ?').get(appId, taskId)) return true;
+        const { count } = cachedStatement(sqlite, 'SELECT COUNT(*) AS count FROM usage_background_admissions WHERE app_id = ? AND month = ?').get(appId, month) as { count: number };
         if (count >= limit) return false;
-        sqlite.prepare('INSERT INTO usage_background_admissions (app_id, month, task_id, admitted_at) VALUES (?, ?, ?, ?)').run(appId, month, taskId, new Date().toISOString());
+        cachedStatement(sqlite, 'INSERT INTO usage_background_admissions (app_id, month, task_id, admitted_at) VALUES (?, ?, ?, ?)').run(appId, month, taskId, new Date().toISOString());
         return true;
       }).immediate();
     },
     async backgroundTaskCounts(month) {
-      return (sqlite.prepare('SELECT app_id AS appId, COUNT(*) AS tasks FROM usage_background_admissions WHERE month = ? GROUP BY app_id ORDER BY app_id').all(month)) as Array<{ appId: string; tasks: number }>;
+      return (cachedStatement(sqlite, 'SELECT app_id AS appId, COUNT(*) AS tasks FROM usage_background_admissions WHERE month = ? GROUP BY app_id ORDER BY app_id').all(month)) as Array<{ appId: string; tasks: number }>;
     },
     async hasAttempt(attemptId: string): Promise<boolean> {
-      return Boolean(sqlite.prepare('SELECT 1 FROM usage_ledger WHERE attempt_id = ?').get(attemptId));
+      return Boolean(cachedStatement(sqlite, 'SELECT 1 FROM usage_ledger WHERE attempt_id = ?').get(attemptId));
     },
     async hasUsageRef(sessionId: string, usageRef: string): Promise<boolean> {
-      return Boolean(sqlite.prepare('SELECT 1 FROM usage_ledger WHERE session_id = ? AND usage_ref = ?').get(sessionId, usageRef));
+      return Boolean(cachedStatement(sqlite, 'SELECT 1 FROM usage_ledger WHERE session_id = ? AND usage_ref = ?').get(sessionId, usageRef));
     },
     async lastCumulativeCost(sessionId: string, excludeAttemptId?: string): Promise<number | undefined> {
-      const row = sqlite.prepare('SELECT cumulative_cost_usd FROM usage_ledger WHERE session_id = ? AND cumulative_cost_usd IS NOT NULL ORDER BY recorded_at DESC, rowid DESC LIMIT 1')
+      const row = cachedStatement(sqlite, 'SELECT cumulative_cost_usd FROM usage_ledger WHERE session_id = ? AND cumulative_cost_usd IS NOT NULL ORDER BY recorded_at DESC, rowid DESC LIMIT 1')
         .get(sessionId) as { cumulative_cost_usd: number } | undefined;
       if (row) return row.cumulative_cost_usd;
       // 账本上线前就在跑的会话没有记录可比：退回到事件表里此前各轮流式上报的累计成本，避免首轮把历史成本整笔记进来。
-      const reported = sqlite.prepare(`SELECT json_extract(data, '$.cost.amount') AS amount FROM events
+      const reported = cachedStatement(sqlite, `SELECT json_extract(data, '$.cost.amount') AS amount FROM events
         WHERE session_id = ? AND type = 'status' AND json_extract(data, '$.state') = 'usage' AND json_extract(data, '$.cost.amount') IS NOT NULL AND attempt_id IS NOT ?
         ORDER BY sequence DESC LIMIT 1`).get(sessionId, excludeAttemptId ?? null) as { amount: number } | undefined;
       return typeof reported?.amount === 'number' ? reported.amount : undefined;
@@ -241,24 +242,24 @@ export function createUsageLedgerRepository(sqlite: Database.Database): UsageLed
       } satisfies UsageTaskRow)) };
     },
     async listCaps(): Promise<UsageCap[]> {
-      return (sqlite.prepare('SELECT * FROM usage_caps ORDER BY scope, app_id, chat_id').all() as CapRow[]).map(capOf);
+      return (cachedStatement(sqlite, 'SELECT * FROM usage_caps ORDER BY scope, app_id, chat_id').all() as CapRow[]).map(capOf);
     },
     async setCap(cap): Promise<UsageCap> {
       const updatedAt = new Date().toISOString();
-      sqlite.prepare(`INSERT INTO usage_caps (scope, app_id, chat_id, monthly_cost_usd, updated_at) VALUES (?, ?, ?, ?, ?)
+      cachedStatement(sqlite, `INSERT INTO usage_caps (scope, app_id, chat_id, monthly_cost_usd, updated_at) VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(scope, app_id, chat_id) DO UPDATE SET monthly_cost_usd = excluded.monthly_cost_usd, updated_at = excluded.updated_at`)
         .run(cap.scope, cap.appId, chatKey(cap.scope, cap.chatId), cap.monthlyCostUsd, updatedAt);
       return { scope: cap.scope, appId: cap.appId, ...(cap.scope === 'group' && cap.chatId ? { chatId: cap.chatId } : {}), monthlyCostUsd: cap.monthlyCostUsd, updatedAt };
     },
     async deleteCap(scope, appId, chatId): Promise<boolean> {
-      return sqlite.prepare('DELETE FROM usage_caps WHERE scope = ? AND app_id = ? AND chat_id = ?').run(scope, appId, chatKey(scope, chatId)).changes === 1;
+      return cachedStatement(sqlite, 'DELETE FROM usage_caps WHERE scope = ? AND app_id = ? AND chat_id = ?').run(scope, appId, chatKey(scope, chatId)).changes === 1;
     },
     async claimAlert(scope, appId, chatId, month, threshold): Promise<boolean> {
-      return sqlite.prepare('INSERT OR IGNORE INTO usage_cap_alerts (scope, app_id, chat_id, month, threshold, notified_at) VALUES (?, ?, ?, ?, ?, ?)')
+      return cachedStatement(sqlite, 'INSERT OR IGNORE INTO usage_cap_alerts (scope, app_id, chat_id, month, threshold, notified_at) VALUES (?, ?, ?, ?, ?, ?)')
         .run(scope, appId, chatKey(scope, chatId), month, threshold, new Date().toISOString()).changes === 1;
     },
     async releaseAlert(scope, appId, chatId, month, threshold): Promise<void> {
-      sqlite.prepare('DELETE FROM usage_cap_alerts WHERE scope = ? AND app_id = ? AND chat_id = ? AND month = ? AND threshold = ?').run(scope, appId, chatKey(scope, chatId), month, threshold);
+      cachedStatement(sqlite, 'DELETE FROM usage_cap_alerts WHERE scope = ? AND app_id = ? AND chat_id = ? AND month = ? AND threshold = ?').run(scope, appId, chatKey(scope, chatId), month, threshold);
     }
   };
 }

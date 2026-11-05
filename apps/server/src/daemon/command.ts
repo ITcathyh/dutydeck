@@ -30,7 +30,7 @@ import {
 } from './daemon.js';
 import { environmentFromCli, type CliOptions } from '../cli-program.js';
 import { appConfigSchema, resolveDatabaseUrl } from '@dutydeck/config';
-import { AUTOSTART_LINUX_UNIT, defaultRunCommand, type AutostartCommandOutput, type AutostartRunCommand } from '../autostart/autostart.js';
+import { AUTOSTART_LINUX_UNIT, defaultRunCommand, firstLine, type AutostartCommandOutput, type AutostartRunCommand } from '../autostart/autostart.js';
 import { sleep } from './time.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -668,10 +668,6 @@ interface SystemdUnitInfo {
   args: string[];
   /** unit 文件路径（FragmentPath）。 */
   fragmentPath?: string;
-}
-
-function firstLine(value: string): string {
-  return value.trim().split('\n')[0]?.trim() ?? '';
 }
 
 /** unit 不存在时 LoadState=not-found；systemctl 不可用或连不上 user systemd 时返回 undefined。 */

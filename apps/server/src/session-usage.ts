@@ -55,16 +55,16 @@ export async function sessionUsageSnapshot(repos: RepositoryBundle, sessionId: s
     let native: SessionUsageSnapshot | undefined;
     if (source) {
       const path = source.verifiedPath ?? (client === 'claude' ? join(claudeProjectDir(session.cwd, { CLAUDE_CONFIG_DIR: source.dataRoot }), `${source.nativeSessionId}.jsonl`) : undefined);
-      if (client === 'codex') native = await readCodexSessionUsage(source.nativeSessionId!, { CODEX_HOME: source.dataRoot }, session.cwd);
-      if (!native && path) native = await readNativeTranscriptUsage({ client, path, dataRoot: source.dataRoot, nativeSessionId: source.nativeSessionId!, cwd: session.cwd });
+      native = await readNativeUsage(client, source.nativeSessionId!, { CODEX_HOME: source.dataRoot }, session.cwd,
+        path ? { client, path, dataRoot: source.dataRoot, nativeSessionId: source.nativeSessionId!, cwd: session.cwd } : undefined);
     } else {
       if (!selected && ['acp', 'auto'].includes(session.protocol ?? agent.protocol ?? 'auto')) {
         const record = await createRuntimeStore({ stateDir: join(session.cwd, '.dutydeck', 'acpx') }).load(session.id);
         if (record?.cwd === session.cwd && record.name === session.id) nativeId = record.agentSessionId ?? (client === 'codex' ? record.acpSessionId : undefined);
       }
       if (nativeId) {
-        native = client === 'codex' ? await readCodexSessionUsage(nativeId, env, session.cwd)
-          : await readNativeTranscriptUsage({ client, path: join(claudeProjectDir(session.cwd, env), `${nativeId}.jsonl`), dataRoot: claudeDataDir(env), nativeSessionId: nativeId, cwd: session.cwd });
+        native = await readNativeUsage(client, nativeId, env, session.cwd,
+          client === 'codex' ? undefined : { client, path: join(claudeProjectDir(session.cwd, env), `${nativeId}.jsonl`), dataRoot: claudeDataDir(env), nativeSessionId: nativeId, cwd: session.cwd });
       } else if (!selected && session.protocol === 'pty-cli' && repos.execution.authority() === 'ledger_v1') {
         const dataRoot = client === 'claude' ? claudeDataDir(env) : codexHome(env);
         const paths = new Set(repos.execution.getSessionExecutions(sessionId).flatMap(execution => execution.attempts.flatMap(attempt => attempt.recoveryControllers.flatMap(recovered => recovered.evidence.kind === 'original_turn' && recovered.evidence.recovery?.transcript?.path ? [recovered.evidence.recovery.transcript.path] : []))));
@@ -79,10 +79,7 @@ export async function sessionUsageSnapshot(repos: RepositoryBundle, sessionId: s
               if (checkpointSources.size > 32) checkpointSources.delete(checkpointSources.keys().next().value!);
             }
           }
-          if (bound) {
-            if (bound.client === 'codex') native = await readCodexSessionUsage(bound.nativeSessionId, { CODEX_HOME: bound.dataRoot }, bound.cwd);
-            native ??= await readNativeTranscriptUsage(bound);
-          }
+          if (bound) native = await readNativeUsage(bound.client, bound.nativeSessionId, { CODEX_HOME: bound.dataRoot }, bound.cwd, bound);
         }
       }
     }
@@ -98,3 +95,9 @@ export async function sessionUsageSnapshot(repos: RepositoryBundle, sessionId: s
   return snapshot;
 }
 const checkpointSources = new Map<string, NativeUsageSource>();
+
+/** codex 先读它自己的会话用量；读不到或不是 codex 时再读给定的原生 transcript（没给就不读）。 */
+async function readNativeUsage(client: NativeUsageSource['client'], nativeSessionId: string, codexEnv: Parameters<typeof readCodexSessionUsage>[1], cwd: string, transcript?: NativeUsageSource) {
+  const codex = client === 'codex' ? await readCodexSessionUsage(nativeSessionId, codexEnv, cwd) : undefined;
+  return codex ?? (transcript ? await readNativeTranscriptUsage(transcript) : undefined);
+}

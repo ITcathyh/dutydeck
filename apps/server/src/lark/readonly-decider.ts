@@ -1,4 +1,5 @@
 import { busyTriagePrompt, parseBusyTriageResult, type BusyTriageResult } from './busy-triage.js';
+import { sleep } from '../daemon/time.js';
 import { createHash } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -347,7 +348,7 @@ export async function runReadonlyPrompt(runtime: LarkMemoryPipelineRuntime, repo
       const status = await Promise.race([terminal, cancelled]);
       if (status !== 'completed') throw new RuntimeError('COLLABORATION_DECISION_FAILED', `Decision ended with ${status}`, 409);
       for (let index = 0; index < 3; index++) {
-        if (index) await new Promise(resolve => setTimeout(resolve, 100));
+        if (index) await sleep(100);
         signal.throwIfAborted();
         const attempt = repos.execution.getTaskExecution(taskId)?.attempts.find(item => item.number === 1);
         if (!attempt) continue;

@@ -1,4 +1,5 @@
 import { explicitFinalTextReceiptReader, completeExplicitFinal, readConfirmedExplicitFinal, explicitFinalContext, hasExplicitFinal, withExplicitFinalLock } from './explicit-final.js';
+import { sleep } from '../daemon/time.js';
 import { describeLarkTaskRecovery, notifyLarkTaskRecovery, verifiedLarkRecoveryOutput } from './task-recovery.js';
 import { readTaskReportSafely } from '@dutydeck/shared';
 import { taskReportCardElements } from './task-report-card.js';
@@ -420,7 +421,7 @@ export async function performLarkCardReconcile(input: {
           if (isLarkMessageUnupdatable(error)) break;
           if (attempt < 3) {
             const delay = isLarkMessageRateLimit(error) ? larkRateLimitBackoffMs(attempt) : attempt * 300;
-            await new Promise(resolve => setTimeout(resolve, delay));
+            await sleep(delay);
           }
         }
       }

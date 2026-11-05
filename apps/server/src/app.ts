@@ -91,6 +91,11 @@ export interface TerminalRouteOptions {
 
 export interface SessionExecutionPolicy {
   authorize(request: FastifyRequest, sessionId: string, boundary: 'session' | 'high_risk', action: PolicyAction): Promise<PolicyDecision>;
+  /**
+   * Same decisions as calling authorize for each id, in the same order; lets list routes read sessions once.
+   * `sessions` is the caller's own runtime.listSessions() result; when given, it is used instead of reading again.
+   */
+  authorizeMany?(request: FastifyRequest, sessionIds: string[], boundary: 'session' | 'high_risk', action: PolicyAction, sessions?: import('@dutydeck/shared').Session[]): Promise<PolicyDecision[]>;
 }
 
 export interface BuildAppOptions {
@@ -165,6 +170,15 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   const canViewSession = async (request: FastifyRequest, sessionId: string) => {
     if (!options.executionPolicy) return true;
     return (await options.executionPolicy.authorize(request, sessionId, 'session', 'task.view_result')).allowed;
+  };
+  /** Keep the items the caller may view, preserving order. */
+  const filterViewable = async <T>(request: FastifyRequest, items: T[], sessionId: (item: T) => string, sessions?: import('@dutydeck/shared').Session[]): Promise<T[]> => {
+    const policy = options.executionPolicy;
+    if (!policy) return items;
+    const allowed = policy.authorizeMany
+      ? (await policy.authorizeMany(request, items.map(sessionId), 'session', 'task.view_result', sessions)).map(decision => decision.allowed)
+      : await Promise.all(items.map(item => canViewSession(request, sessionId(item))));
+    return items.filter((_item, index) => allowed[index]);
   };
   app.addHook('preClose', async () => { for (const stream of streams) stream.end(); streams.clear(); });
 
@@ -364,7 +378,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   };
   app.get('/api/sessions', async request => {
     const sessions = await runtime.listSessions();
-    const visible = (await Promise.all(sessions.map(async session => await canViewSession(request, session.id) ? session : undefined))).filter((session): session is typeof sessions[number] => Boolean(session));
+    const visible = await filterViewable(request, sessions, session => session.id, sessions);
     const ids = new Set(visible.map(session => session.id));
     const membership = new Map<string, string>();
     const groups = new Map<string, { matter: import('@dutydeck/shared').Matter; links: import('@dutydeck/shared').MatterLink[]; sessions: typeof visible }>();
@@ -435,22 +449,22 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
         const report = reports.get((value as { sessionId: string }).sessionId);
         return report ? { ...(value as object), taskReport: report } : value;
       });
-      const etag = `"${createHash('sha256').update(JSON.stringify(summaries)).digest('base64url')}"`;
+      // Hash and send the same serialization instead of letting Fastify stringify it again.
+      const body = JSON.stringify(summaries);
+      const etag = `"${createHash('sha256').update(body).digest('base64url')}"`;
       // Browsers revalidate the private representation every poll. Permission
       // filtering precedes hashing, so revoked/removed entries invalidate it too.
       reply.header('Cache-Control', 'private, no-cache').header('Vary', 'Cookie, Authorization').header('ETag', etag);
       if (request.headers['if-none-match'] === etag) return reply.code(304).send();
-      return summaries;
+      return reply.type('application/json; charset=utf-8').send(body);
     };
     if (typeof runtime.listRunSummaries === 'function') {
       const summaries = await runtime.listRunSummaries();
       if (!options.executionPolicy) return respond(summaries);
-      return respond((await Promise.all(summaries.map(async summary => await canViewSession(request, summary.sessionId) ? summary : undefined))).filter(Boolean));
+      return respond(await filterViewable(request, summaries, summary => summary.sessionId));
     }
     const listed = await runtime.listSessions();
-    const sessions = options.executionPolicy
-      ? (await Promise.all(listed.map(async session => await canViewSession(request, session.id) ? session : undefined))).filter((session): session is typeof listed[number] => Boolean(session))
-      : listed;
+    const sessions = await filterViewable(request, listed, session => session.id);
     const summaries = await Promise.all(sessions.map(async session => {
       const tasks = (await runtime.getTasks(session.id))
         .filter((task: any) => typeof task.prompt === 'string' && task.prompt.trim() && task.status !== 'cancelled')

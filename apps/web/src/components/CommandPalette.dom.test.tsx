@@ -31,6 +31,16 @@ const input = () => screen.getByRole('combobox', { name: '搜索任务与命令'
 const selected = () => screen.getAllByRole('option').find(option => option.getAttribute('aria-selected') === 'true');
 
 describe('CommandPalette 开合与筛选', () => {
+  it('重新打开时高亮与列表输入是否变化一致：输入未变停在第 0 项，输入变了才落到第一个可用项', () => {
+    const actions = [action({ disabled: true }), action({ id: 'settings', label: '打开设置' })];
+    const view = render(<CommandPalette {...baseProps} open={false} actions={actions}/>);
+    view.rerender(<CommandPalette {...baseProps} open actions={actions}/>);
+    expect(selected()?.textContent).toContain('创建任务');
+    view.rerender(<CommandPalette {...baseProps} open={false} actions={actions}/>);
+    view.rerender(<CommandPalette {...baseProps} open actions={[...actions]}/>);
+    expect(selected()?.textContent).toContain('打开设置');
+  });
+
   it('open=false 时返回 null，不渲染任何 dialog', () => {
     const { container } = render(<CommandPalette {...baseProps} open={false} actions={[action()]}/>);
     expect(container.firstChild).toBeNull();

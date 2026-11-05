@@ -149,14 +149,28 @@ const previewText = (value: unknown, limit = 100) => {
   return text.length <= limit ? text : `${text.slice(0, Math.max(1, limit - 1)).trimEnd()}…`;
 };
 
+// Rebuilding a live turn relabels every earlier group; their events keep identity,
+// so reuse the preview while the text is the same string.
+const descriptionPreviews = new WeakMap<TimelineEvent, { text: unknown; preview: string }>();
+const descriptionPreview = (event: TimelineEvent) => {
+  const text = event.data.text, cached = descriptionPreviews.get(event);
+  if (cached && cached.text === text) return cached.preview;
+  const preview = previewText(text);
+  descriptionPreviews.set(event, { text, preview });
+  return preview;
+};
+
 function activityLabel(events: TimelineEvent[]) {
-  const description = [...events].reverse().find(event => event.type === 'text' && event.data.role !== 'user');
-  const descriptionText = previewText(description?.data.text);
+  let description: TimelineEvent | undefined;
+  for (let index = events.length - 1; index >= 0 && !description; index--) {
+    const event = events[index]!;
+    if (event.type === 'text' && event.data.role !== 'user') description = event;
+  }
+  const descriptionText = description ? descriptionPreview(description) : '';
   if (descriptionText) return descriptionText;
   const tool = events.find(event => event.type === 'tool_call' || event.type === 'tool_result');
   if (tool) return toolDescription(tool.data) ?? toolDisplayName(tool.data);
-  const thinking = [...events].reverse().find(event => event.type === 'thinking');
-  return thinking ? '思考过程' : '执行过程';
+  return events.some(event => event.type === 'thinking') ? '思考过程' : '执行过程';
 }
 
 /** 时间线里最新一条仍待处理的权限请求 id；同一请求后来的决议已在 buildTimeline 里合并成最终状态。 */
