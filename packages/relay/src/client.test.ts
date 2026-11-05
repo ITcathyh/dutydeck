@@ -1,4 +1,6 @@
+import { spawn } from 'node:child_process';
 import { createServer, type ServerResponse } from 'node:http';
+import { fileURLToPath } from 'node:url';
 import { afterEach, expect, it, vi } from 'vitest';
 import { RelayHttpClient } from './client.js';
 
@@ -35,3 +37,19 @@ it('still bounds a request by the caller deadline', async () => {
   const client = new RelayHttpClient({ env: { dutydeck_relay_url: server.url, dutydeck_relay_token: 'fixture-token' } });
   await expect(client.post('/sessions/self/send', { text: 'x' }, 200)).rejects.toMatchObject({ code: 'RELAY_UNAVAILABLE', exitCode: 3 });
 });
+
+it('lets the CLI process exit right after the response instead of holding a keep-alive socket', async () => {
+  const server = createServer((request, response) => { request.resume(); request.on('end', () => { response.setHeader('content-type', 'application/json'); response.end('{"ok":true}'); }); });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  cleanup.push(() => new Promise<void>(resolve => { server.closeAllConnections(); server.close(() => resolve()); }));
+  const { port } = server.address() as { port: number };
+  const script = `import { RelayHttpClient } from ${JSON.stringify(fileURLToPath(new URL('./client.ts', import.meta.url)))};
+await new RelayHttpClient({ env: { dutydeck_relay_url: 'http://127.0.0.1:${port}/api/relay', dutydeck_relay_token: 't' } }).post('/sessions/self/send', { text: 'x' });
+process.stdout.write(String(Date.now()));`;
+  const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script], { cwd: fileURLToPath(new URL('../../../', import.meta.url)) });
+  let stdout = '';
+  child.stdout.on('data', chunk => { stdout += chunk; });
+  const exitedAt = await new Promise<number>(resolve => child.on('exit', () => resolve(Date.now())));
+  expect(Number(stdout)).toBeGreaterThan(0);
+  expect(exitedAt - Number(stdout)).toBeLessThan(500);
+}, 30_000);
