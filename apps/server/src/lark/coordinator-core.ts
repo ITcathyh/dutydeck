@@ -2,7 +2,7 @@ import { larkMessageAnchor } from './message-anchor.js';
 import type { LarkGroupParticipation } from './group-participation.js';
 import { randomUUID } from 'node:crypto';
 import type { RelayAskBroker, RelayAskContext, RelayDeferredAsk } from '@dutydeck/relay';
-import { LarkWorkflowInteractions, type LarkInteraction, type LarkInteractionContext } from './workflow-interactions.js';
+import { LarkWorkflowInteractions, larkAutoApprovalEventPrefix, type LarkAutoApprovalSource, type LarkInteraction, type LarkInteractionContext } from './workflow-interactions.js';
 import { LarkTaskInbox, type LarkInboxRecord } from './task-inbox.js';
 import type { LarkLaunchOptions } from './new-session.js';
 import { LarkMemoryStore } from './memory.js';
@@ -206,9 +206,11 @@ export abstract class LarkCoordinatorCore {
       groupMention: larkNotice('permission_card', task.config, task.event).mentionAllowed,
       highRiskPattern: task.config.highRiskPattern || defaultHighRiskPattern,
       // 按「本会话允许」或工作区规则自动批准的请求不另发卡：在进度卡原来那条权限记录上标注，随下一帧原位刷新。
-      onSessionAllowed: (permissionId: string, workspaceRule?: string) => {
-        task.events.push({ id: `session_allowed_${permissionId}`, sessionId: task.sessionId ?? '', sequence: 0, timestamp: new Date().toISOString(),
-          type: 'permission_request', data: { id: permissionId, sessionAllowed: true, ...(workspaceRule ? { workspaceRule } : {}) } });
+      // autoApprovedBy 写明来源；sessionAllowed 只用于「本会话允许」，工作区规则不复用它。
+      onAutoApproved: (permissionId: string, source: LarkAutoApprovalSource) => {
+        task.events.push({ id: `${larkAutoApprovalEventPrefix}${permissionId}`, sessionId: task.sessionId ?? '', sequence: 0, timestamp: new Date().toISOString(),
+          type: 'permission_request', data: { id: permissionId, autoApprovedBy: source.by,
+            ...(source.by === 'workspace_rule' ? { workspaceRule: source.rule } : { sessionAllowed: true }) } });
       }
     };
   }
@@ -400,14 +402,15 @@ export abstract class LarkCoordinatorCore {
    * - 非托管群：回落部署级静态白名单，与该形态下其他管理动作口径一致。
    */
   /**
-   * 建工作区审批规则的人：托管群按群策略要求所有者或管理员（与 /grant 同一动作 grant.create）；
+   * 建工作区审批规则的人：规则对整个机器人生效，所以按机器人级身份判断，不看卡片所在群的群级角色。
+   * 接入群管理的 Bot 只认机器人级管理员（不限定群的 admin 角色）；
    * 非托管 Bot 没有管理员角色，只认部署时配置的非空访问白名单里的人，白名单为空时谁都不能建。
    */
   protected async authorizeWorkspaceRule(record: LarkInteraction, actor: string) {
     const config = await readLarkConfig(this.workflowOptions.store, record.appId);
     if (!config?.listening) return false;
-    const decision = await this.groupManager?.authorize(config.appId, record.event.chatId, actor, 'grant.create', record.sessionId);
-    if (decision) return decision.allowed;
+    const botAdmin = await this.groupManager?.botAdmin(config.appId, actor);
+    if (botAdmin !== undefined) return botAdmin;
     const restricted = (config.allowedUsers ?? []).length > 0 || (config.allowedEmails ?? []).length > 0;
     return restricted && await this.isStaticOperatorAllowed(config, actor, record.event.chatId);
   }

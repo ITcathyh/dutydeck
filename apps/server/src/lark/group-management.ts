@@ -401,6 +401,20 @@ export class LarkGroupManager {
   }
 
   /**
+   * 这个人是否是机器人级管理员：在本 Bot 上有生效、未过期、不限定群的 admin 角色。
+   * Bot 还没接入群管理（没有 live owner）时返回 undefined，由调用方回落非托管口径。
+   */
+  async botAdmin(appId: string, openId: string): Promise<boolean | undefined> {
+    const owner = await this.owner(appId);
+    if (!owner) return undefined;
+    if ((await this.repos.channelBots.get(owner.channelBotId))?.state === 'disabled') return false;
+    const id = principalId(appId, openId);
+    const now = this.now().toISOString();
+    return (await this.repos.roleAssignments.listByChannelBot(owner.channelBotId, 500)).some(role =>
+      role.role === 'admin' && !role.groupBindingId && role.principalId === id && role.state === 'active' && (!role.expiresAt || role.expiresAt > now));
+  }
+
+  /**
    * 本群被显式授予高风险审批门的成员 open_id，只供审批卡挑选 @ 对象；
    * 某人此刻能不能批准，仍由调用方按审批时的同一道判断逐个确认。
    */

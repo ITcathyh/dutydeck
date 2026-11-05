@@ -20,7 +20,7 @@ export function WorkspaceApprovalRules() {
   const rules = query.data?.rules ?? [];
   return <Card padding="md" className="mt-4">
     <h4 className="text-body font-semibold text-primary">按工作区允许的命令 · 仅此实例</h4>
-    <p className="mt-1 text-caption text-secondary">飞书审批卡上点「本工作区允许此类命令」后保存在这里：同一机器人在同一目录里以这些词开头的命令不再弹卡（复合命令每段都要覆盖，高危命令照常弹卡）。规则只看命令文字，例如允许 <code>pnpm test</code> 后，Agent 改了 package.json 里的脚本就能借它执行任意代码。撤销后立即生效。</p>
+    <p className="mt-1 text-caption text-secondary">飞书审批卡上点「本工作区允许此类命令」后保存在这里：同一机器人在同一执行目录里执行这些命令（只带允许的参数）不再弹卡（复合命令每段都要覆盖，高危命令照常弹卡）。规则只看命令文字，例如允许 <code>pnpm test</code> 后，Agent 改了 package.json 里的脚本就能借它执行任意代码。撤销后立即生效。</p>
     {query.isLoading ? <Spinner/> : query.isError
       ? <div className="mt-3"><Banner tone={query.error instanceof ApiError && query.error.status === 403 ? 'warning' : 'danger'} action={{ label: '重试', onClick: () => void query.refetch() }}>
         {query.error instanceof ApiError && query.error.status === 403 ? '安装管理员登录后才能查看和撤销这些规则。' : '读取工作区审批规则失败'}</Banner></div>

@@ -1,6 +1,6 @@
 import { realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { parse } from 'node:path';
+import { isAbsolute, parse } from 'node:path';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { RuntimeError, deriveWorkspaceApprovalRule, matchWorkspaceApprovalRules, type PermissionRequestData, type Session, type WorkspaceApprovalRule, type WorkspaceApprovalRuleRepository } from '@dutydeck/shared';
@@ -16,18 +16,21 @@ export interface WorkspaceApprovalOptions {
 /**
  * 按工作区记住的审批规则（审批卡「本工作区允许此类命令」）。规则按机器人（appId）隔离，不跨机器人共享。
  * 只作用于飞书来源、非完全信任会话里由飞书用户亲自发起、且发起人就是这张卡的发起人的轮次；
- * 工作区是会话执行目录的真实路径（不用 Agent 报的 operation.cwd），每次都重新解析、重新查库；
+ * 工作区是这条命令的执行目录（Agent 报的 operation.cwd，即审批卡上显示的目录）的真实路径，每次都重新解析、重新查库；
+ * 没报执行目录、目录解析不出来，或执行目录与规则的工作区不是同一个目录时，不生成规则也不放行。
  * 家目录和文件系统根覆盖面太大，不能作为工作区。
  * 命令只认执行端交来的字符串原文（commandExact），高危正则由调用方在每次匹配前重跑。
  */
 export class WorkspaceApprovals implements LarkWorkspaceApprovals {
   constructor(private readonly options: WorkspaceApprovalOptions) {}
 
-  private async workspace(scope: LarkWorkspaceApprovalScope) {
+  private async workspace(scope: LarkWorkspaceApprovalScope, request: PermissionRequestData) {
+    const cwd = request.operation?.cwd;
+    if (!cwd || !isAbsolute(cwd)) return undefined;
     if (!scope.requester || this.options.humanRequester(scope.taskId) !== scope.requester) return undefined;
     const session = await this.options.getSession(scope.sessionId);
     if (!session || session.source !== 'lark' || session.permissionMode === 'full-trust') return undefined;
-    return realpath(session.cwd).then(path => WorkspaceApprovals.allowedWorkspace(path)).catch(() => undefined);
+    return realpath(cwd).then(path => WorkspaceApprovals.allowedWorkspace(path)).catch(() => undefined);
   }
 
   /** 家目录（真实路径）和文件系统根不能建规则，也不按规则放行。 */
@@ -44,13 +47,13 @@ export class WorkspaceApprovals implements LarkWorkspaceApprovals {
   async candidate(scope: LarkWorkspaceApprovalScope, request: PermissionRequestData) {
     const command = WorkspaceApprovals.command(request);
     const pattern = command && deriveWorkspaceApprovalRule(command);
-    const workspace = pattern ? await this.workspace(scope) : undefined;
+    const workspace = pattern ? await this.workspace(scope, request) : undefined;
     return pattern && workspace ? { workspace, pattern } : undefined;
   }
 
   async match(scope: LarkWorkspaceApprovalScope, request: PermissionRequestData) {
     const command = WorkspaceApprovals.command(request);
-    const workspace = command ? await this.workspace(scope) : undefined;
+    const workspace = command ? await this.workspace(scope, request) : undefined;
     if (!command || !workspace) return undefined;
     return matchWorkspaceApprovalRules(command, this.options.rules.list({ appId: scope.appId, workspace }))?.map(rule => rule.pattern).join('、');
   }

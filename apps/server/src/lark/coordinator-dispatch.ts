@@ -61,7 +61,7 @@ import {
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkGroup, LarkTaskState, LarkTask, PersistedLarkCardTask } from './coordinator.js';
 import { parseCardTask } from './persisted-card-task.js';
-import type { LarkInteraction } from './workflow-interactions.js';
+import { larkAutoApprovalEventPrefix, type LarkInteraction } from './workflow-interactions.js';
 import { planInstructionBlock, planTaskOf, planUnsupportedReason } from '../plan-mode.js';
 import type { LarkCardCapabilities } from './card-actions.js';
 import { type LarkCommandPrompt, larkCardChannel, relaunchRetainedPrefix, relaunchRetainedKey, sendTaskCard, withoutLeadingBotMention } from './coordinator-core.js';
@@ -1810,8 +1810,8 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
               const persistedEvents = await loadLarkTaskEvents(this.runtime, session.id, runtimeTaskId, recentLimit);
               // 读事件期间用户可能已经重试；旧轮次不得改写新一轮的事件缓冲。
               if (this.stopped || task.turn !== currentTurn) return;
-              // 「本会话允许」自动批准的标注只在内存里，重读的执行记录里没有，接回去。
-              task.events = [...persistedEvents, ...task.events.filter(item => item.id.startsWith('session_allowed_'))];
+              // 自动批准（本会话允许、工作区规则）的标注只在内存里，重读的执行记录里没有，接回去。
+              task.events = [...persistedEvents, ...task.events.filter(item => item.id.startsWith(larkAutoApprovalEventPrefix))];
             } catch (error) {
               this.log.warn({ error, taskId: task.id, runtimeTaskId }, '读取任务最终事件失败，使用已接收事件生成终态卡片');
             }

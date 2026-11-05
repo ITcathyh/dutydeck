@@ -112,6 +112,23 @@ describe('live group configuration', () => {
     capabilities.close();
   });
 
+  it('recognizes only active, unexpired admin roles that are not scoped to a group as bot-level admins', async () => {
+    const owner = (await manager.owner('cli_one'))!;
+    const [alice, bob] = (await manager.members('cli_one', 'oc_one')).members;
+    const gates = { terminalWrite: false, highRisk: false, groupToolsSend: false };
+    // bob 只是本群管理员。
+    const binding = (await save()).binding!;
+    await repos.roleAssignments.create({ id: 'group_admin', channelBotId: owner.channelBotId, groupBindingId: binding.id, principalId: bob!.principalId, role: 'admin', operateScope: 'none', actionGates: gates });
+    expect(await manager.botAdmin('cli_one', 'ou_alice')).toBe(false);
+    expect(await manager.botAdmin('cli_one', 'ou_bob')).toBe(false);
+    await repos.roleAssignments.create({ id: 'bot_admin', channelBotId: owner.channelBotId, principalId: alice!.principalId, role: 'admin', operateScope: 'none', actionGates: gates, expiresAt: '2026-09-08T00:00:00.000Z' });
+    expect(await manager.botAdmin('cli_one', 'ou_alice')).toBe(true);
+    expect(await manager.botAdmin('cli_two', 'ou_alice')).toBe(false);
+    time = new Date('2026-09-09T00:00:00.000Z');
+    expect(await manager.botAdmin('cli_one', 'ou_alice')).toBe(false);
+    expect(await manager.botAdmin('cli_unknown', 'ou_alice')).toBeUndefined();
+  });
+
   it('discovers two Bots in two groups with valid evidence, without activating configuration', async () => {
     const { groups } = await manager.groups();
     expect(groups).toHaveLength(2);
