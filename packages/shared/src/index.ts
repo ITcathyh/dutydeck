@@ -439,6 +439,8 @@ export interface EventRepository {
   getDeferredConfirmationId(sessionId: string, taskId: string): Promise<string | undefined>;
   /** Latest context and each quota window, independent of the timeline window. */
   listLatestUsage?(sessionId: string): Promise<AgentEvent[]>;
+  /** 一次查询取出每个会话最近一条带有效 `used` 的用量事件（只含会话、时间和数据，不含原始载荷）；没有用量事件的会话不返回。 */
+  listLatestContexts?(): Promise<Array<{ sessionId: string; timestamp: string; data: { used?: unknown; size?: unknown } }>>;
   /** 有硬上限的游标窗口；无论查询方向如何，结果均按 sequence 升序。 */
   listWindow(sessionId: string, options?: EventWindowOptions): Promise<AgentEvent[]>;
 }

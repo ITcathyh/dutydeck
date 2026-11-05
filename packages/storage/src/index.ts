@@ -411,6 +411,14 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
         }));
         return rows.flat().map(decodeEvent);
       },
+      async listLatestContexts() {
+        // 字面量 type='status' 才能命中 events_session_status 部分索引（见迁移 41）。
+        const rows = sqlite.prepare(`SELECT e.session_id AS sessionId, e.timestamp, e.data FROM sessions s JOIN events e ON e.rowid = (
+          SELECT rowid FROM events WHERE session_id=s.id AND type='status' AND json_extract(data,'$.state')='usage'
+            AND json_type(data,'$.used') IN ('integer','real') AND json_extract(data,'$.used') >= 0
+          ORDER BY sequence DESC LIMIT 1)`).all() as Array<{ sessionId: string; timestamp: string; data: string }>;
+        return rows.map(row => ({ sessionId: row.sessionId, timestamp: row.timestamp, data: JSON.parse(row.data) }));
+      },
       async listWindow(sessionId, options = {}) {
         const requestedLimit = Number.isFinite(options.limit) ? Math.trunc(options.limit!) : EVENT_WINDOW_DEFAULT_LIMIT;
         const limit = Math.max(1, Math.min(EVENT_WINDOW_MAX_LIMIT, requestedLimit));

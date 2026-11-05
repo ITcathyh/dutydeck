@@ -16,6 +16,7 @@ import { PluginResultToolRegistry } from './plugins/result-tools.js';
 import { LarkPluginResultAdapter } from './lark/plugin-result-delivery.js';
 import { LarkPluginResultIdentity, type PluginResultIdentityOptions } from './lark/plugin-result-identity.js';
 import { AgentModelSettings } from './agent-model-settings.js';
+import { createSessionContexts } from './session-context.js';
 import { sessionUsageSnapshot } from './session-usage.js';
 import { HerdrBackend } from '@dutydeck/session-backends';
 import { TerminalSettings, primaryHerdrBinary } from './terminal-settings.js';
@@ -803,7 +804,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       },
       plan: { store: repos.config },
       webRoot,
-      usage: { ledger: usageLedger, snapshot: sessionId => sessionUsageSnapshot(repos, sessionId, options.env ?? process.env), authorize: async request => Boolean(await resolveInstallationPrincipal(request)) },
+      usage: { ledger: usageLedger, snapshot: sessionId => sessionUsageSnapshot(repos, sessionId, options.env ?? process.env), contexts: createSessionContexts(repos), authorize: async request => Boolean(await resolveInstallationPrincipal(request)) },
       collaboration: { service: collaboration.service, runtime, tools: agentTools, evaluation: collaboration.evaluation, extensions: collaboration.extensions,
         authorizeManagement: async request => await resolveInstallationPrincipal(request) ? installationOwnerTaskActor : undefined,
         bootstrap: scope => collaboration!.participation.bootstrap(scope), prepareSettings: (scope, patch) => collaboration!.prepareSettings(scope, patch), onChange: scope => collaboration!.onChange(scope),

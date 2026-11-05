@@ -456,3 +456,16 @@ it('有一级自动化导航时实验策略独立标明，不恢复重复定时�
   expect(screen.getByRole('button', { name: /^自动化/ }).getAttribute('aria-current')).toBe('page');
   for (const nav of container.querySelectorAll('nav')) expect(nav.querySelectorAll('button').length).toBeGreaterThan(0);
 });
+
+describe('SessionList 上下文占用徽标', () => {
+  const session = (id: string): Session => ({ id, agentId: 'codex', state: 'idle', cwd: '/repo/solo', runId: `run-${id}`, createdAt: '', updatedAt: '' });
+  const summary = (id: string, used?: number): RunSummary => ({ sessionId: id, taskId: `task-${id}`, prompt: `任务 ${id}`, status: 'idle', queuedCount: 0, updatedAt: '', ...(used === undefined ? {} : { context: { used, size: 1000, observedAt: '2026-11-05T00:00:00.000Z' } }) });
+
+  it('只有占用达到 80% 的会话行带徽标', () => {
+    render(<SessionList {...baseProps} open sessions={[session('hot'), session('cool'), session('none')]} summaries={{ hot: summary('hot', 900), cool: summary('cool', 100), none: summary('none') }}/>);
+    const badges = screen.getAllByTestId('context-badge');
+    expect(badges).toHaveLength(1);
+    expect(badges[0]!.closest('button')!.getAttribute('title')).toContain('任务 hot');
+    expect(badges[0]!.textContent).toContain('上下文已用 90%');
+  });
+});
