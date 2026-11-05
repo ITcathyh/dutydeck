@@ -746,8 +746,7 @@ export class PtyTransport {
   constructor(private readonly agent: AgentConfig, private readonly options: ProcessTransportOptions) {}
   async start() {
     if (this.child) return;
-    const env = Object.fromEntries(Object.entries({ ...process.env, ...this.agent.env }).filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
-    this.child = spawnPty(this.agent.command, this.agent.args, { name: 'xterm-256color', cwd: this.agent.cwd ?? process.cwd(), env });
+    this.child = spawnPty(this.agent.command, this.agent.args, { name: 'xterm-256color', cwd: this.agent.cwd ?? process.cwd(), env: childEnvironment(process.env, this.agent.env) });
     this.child.onData(raw => this.options.onEvent({ type: 'raw_terminal', data: { text: raw }, raw }));
     this.child.onExit(({ exitCode }) => { this.child = undefined; this.options.onExit?.(exitCode); });
   }

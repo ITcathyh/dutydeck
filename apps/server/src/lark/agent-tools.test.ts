@@ -46,6 +46,7 @@ async function setup(
   executionPolicy?: LarkAgentToolsOptions['executionPolicy'],
   chatId = 'oc_group',
   sessionId = 'ses_lark',
+  options: Partial<LarkAgentToolsOptions> = {},
 ) {
   const repos = createRepositories(':memory:'); repositories.push(repos);
   const activeSession = session({ id: sessionId, sourceId: `cli_current:${chatId}:group` });
@@ -61,7 +62,8 @@ async function setup(
     pollIntervalMs: 50,
     ...(groupToolsCommand ? { groupToolsCommand } : {}),
     ...(executionPolicy ? { executionPolicy } : {}),
-    clientFactory: config => clients[config.appId] ?? fakeClient()
+    clientFactory: config => clients[config.appId] ?? fakeClient(),
+    ...options
   });
   return { repos, activeSession, capabilities, tools, token: environment.dutydeck_group_tools_token! };
 }
@@ -586,6 +588,30 @@ describe('Agent group collaboration domain service', () => {
     const sessionSetup = await setup({ cli_current: otherSession }, undefined, undefined, 'oc_group', 'ses_other');
     await sessionSetup.tools.send(sessionSetup.token, { content: '发布窗口已开启' });
     expect(vi.mocked(otherSession.sendText).mock.calls[0]![0].idempotencyKey).not.toBe(sendKey(0));
+  });
+
+  it('scopes the derived send key to the current task attempt so a later turn is not swallowed', async () => {
+    const current = fakeClient();
+    const active = { taskId: 'task-one', attemptId: 'attempt-one' };
+    const { tools, token } = await setup({ cli_current: current }, undefined, undefined, 'oc_group', 'ses_lark', { workbenchTask: () => active });
+    const sendKey = (index: number) => vi.mocked(current.sendText).mock.calls[index]![0].idempotencyKey!;
+    const replyKey = (index: number) => vi.mocked(current.replyText).mock.calls[index]![0].idempotencyKey!;
+
+    // 同一轮内重试仍去重。
+    await tools.send(token, { content: '今日无新增告警' });
+    await tools.send(token, { content: '今日无新增告警' });
+    expect(sendKey(1)).toBe(sendKey(0));
+    await tools.send(token, { content: '收到', replyTo: 'om_root' });
+    // 同一任务换了尝试、或换了任务，都是新的一轮，键不同。
+    active.attemptId = 'attempt-two';
+    await tools.send(token, { content: '今日无新增告警' });
+    expect(sendKey(2)).not.toBe(sendKey(0));
+    await tools.send(token, { content: '收到', replyTo: 'om_root' });
+    expect(replyKey(1)).not.toBe(replyKey(0));
+    active.taskId = 'task-two';
+    await tools.send(token, { content: '今日无新增告警' });
+    expect(sendKey(3)).not.toBe(sendKey(2));
+    expect(sendKey(3)).not.toBe(sendKey(0));
   });
 
   describe('group messages with time window and query filtering', () => {

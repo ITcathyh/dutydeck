@@ -22,6 +22,18 @@ async function bounded<T>(operation: Promise<T>, milliseconds: number): Promise<
 }
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const time = () => new Date().toISOString();
+/** 成果通知最多发这么多次；之后停在 error，失败原因留给 Web 展示。 */
+const DELIVERY_MAX_ATTEMPTS = 3;
+function failDelivery(delivery: WorkItem['delivery'], error: string) {
+  delivery.status = 'error';
+  if (delivery.attempts >= DELIVERY_MAX_ATTEMPTS) {
+    delivery.error = `${error}（已尝试 ${delivery.attempts} 次，不再自动重发）`;
+    delete delivery.nextAttemptAt;
+  } else {
+    delivery.error = error;
+    delivery.nextAttemptAt = new Date(Date.now() + 60_000 * delivery.attempts).toISOString();
+  }
+}
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 const last = (step: WorkStep) => step.attempts.at(-1);
 /** 计划修订作废的尝试不再作为下游输入或审查依据。 */
@@ -102,6 +114,8 @@ export class WorkItemService {
   private readonly effects = new Map<string, Promise<void>>();
   private closed = false;
   private timer?: NodeJS.Timeout;
+  /** 本实例交付失败过的目标：只对它们退避；上一个进程记下的失败，打开后立刻补发一次。 */
+  private readonly failedDeliveries = new Set<string>();
   constructor(private readonly options: WorkItemServiceOptions) {
     if (!options.repositories.config.compareAndSet || !options.repositories.config.list) throw new Error('Work items require ConfigRepository CAS and list');
   }
@@ -1089,10 +1103,13 @@ export class WorkItemService {
       let state = await this.read(id);
       const item = state.value.item;
       if (item.status !== 'completed' || !['pending', 'error'].includes(item.delivery.status)) return;
+      // 最多 DELIVERY_MAX_ATTEMPTS 次；本实例失败过的按 1、2 分钟退避，没到时间不发也不写库。
+      if (item.delivery.status === 'error' && (item.delivery.attempts >= DELIVERY_MAX_ATTEMPTS
+        || this.failedDeliveries.has(id) && item.delivery.nextAttemptAt && item.delivery.nextAttemptAt > time())) return;
       try { await this.assertExecution(state.value, true); }
       catch (error) {
         if (this.closed) return;
-        item.delivery.status = 'error'; item.delivery.error = errorText(error); await this.write(state); return;
+        item.delivery.attempts++; failDelivery(item.delivery, errorText(error)); await this.write(state); this.failedDeliveries.add(id); return;
       }
       item.delivery.attempts++; await this.write(state);
       let failure: string | undefined;
@@ -1104,9 +1121,10 @@ export class WorkItemService {
       state = await this.read(id);
       const current = state.value.item;
       if (current.status !== 'completed' || current.delivery.attempts !== item.delivery.attempts || current.output?.digest !== item.output?.digest || !['pending', 'error'].includes(current.delivery.status)) return;
-      current.delivery.status = failure === undefined ? 'delivered' : 'error';
-      if (failure === undefined) delete current.delivery.error; else current.delivery.error = failure;
+      if (failure === undefined) { current.delivery.status = 'delivered'; delete current.delivery.error; delete current.delivery.nextAttemptAt; }
+      else failDelivery(current.delivery, failure);
       await this.write(state);
+      if (failure !== undefined) this.failedDeliveries.add(id);
     });
   }
   async close() {

@@ -7,6 +7,9 @@ import { launchAgent } from './launcher-process.mjs';
 import { fileURLToPath } from 'node:url';
 import { parseEnv } from 'node:util';
 
+const policyUrl = new URL('./child-environment.mjs', import.meta.url);
+const { childEnvironment } = await import(existsSync(policyUrl) ? policyUrl.href : '@dutydeck/shared/child-environment');
+
 async function settingsEnvironment(file) {
   try {
     const parsed = JSON.parse(await readFile(file, 'utf8'));
@@ -61,7 +64,8 @@ const settingsEnv = Object.assign(
   await settingsEnvironment(join(process.cwd(), '.claude', 'settings.json')),
   await settingsEnvironment(join(process.cwd(), '.claude', 'settings.local.json'))
 );
-const env = { ...settingsEnv, ...process.env };
+// 工作目录 .env 可能是 dutydeck 自己的服务配置：并进来的变量同样过一遍子进程清洗，不把服务密钥和别的会话身份带给 Claude。
+const env = { ...childEnvironment(settingsEnv), ...process.env };
 const installedClaude = await findClaudeExecutable(env.PATH);
 if (installedClaude && process.platform !== 'win32') {
   const guarded = await guardedExecutable();

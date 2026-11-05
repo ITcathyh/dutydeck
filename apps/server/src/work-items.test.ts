@@ -535,10 +535,27 @@ describe('WorkItemService with real Runtime and SQLite', () => {
     const item = await f.create({ ...plan, steps: [plan.steps[0]!], outputStepId: 'a' }); await f.tick(); await eventually(async () => f.calls.length === 1);
     await f.finish(f.calls[0]!, 'Ready'); await f.tick(); expect((await f.get(item.id)).delivery.status).toBe('error');
     expect(await f.repos.workItems.listScheduledIds()).toContain(item.id);
+    // 上一个实例记下的失败：重新打开后不等退避，立刻补发一次。
     await f.recreateService();
     await f.tick(); expect((await f.get(item.id)).delivery.status).toBe('delivered'); expect(f.calls).toHaveLength(1); expect(f.deliveries).toHaveBeenCalledTimes(2);
+    expect((await f.get(item.id)).delivery.nextAttemptAt).toBeUndefined();
     expect(await f.repos.workItems.listScheduledIds()).not.toContain(item.id);
     await f.tick(); expect(f.deliveries).toHaveBeenCalledTimes(2);
+  });
+  it('backs off a permanently failing delivery, stops after three attempts and keeps the failure visible', async () => {
+    const f = await fixture(); f.deliveries.mockRejectedValue(new Error('origin missing'));
+    const item = await f.create(singlePlan); await f.tick(); await eventually(async () => f.calls.length === 1);
+    await f.finish(f.calls[0]!, 'Ready'); await f.tick(); await eventually(async () => f.deliveries.mock.calls.length === 1);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const revision = (await f.get(item.id)).revision;
+      for (let tick = 0; tick < 5; tick++) await f.tick();
+      expect(f.deliveries).toHaveBeenCalledTimes(1); expect((await f.get(item.id)).revision).toBe(revision);
+      for (let minute = 0; minute < 10; minute++) { vi.setSystemTime(Date.now() + 60_000); await f.tick(); await f.tick(); }
+      expect(f.deliveries).toHaveBeenCalledTimes(3);
+      expect((await f.get(item.id)).delivery).toMatchObject({ status: 'error', attempts: 3, error: expect.stringContaining('不再自动重发') });
+      expect((await f.get(item.id)).delivery.nextAttemptAt).toBeUndefined();
+    } finally { vi.useRealTimers(); }
   });
   it('preserves invalid historical JSON without preventing another work item from advancing', async () => {
     const f = await fixture();

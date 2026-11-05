@@ -307,6 +307,19 @@ describe.each([
     expect(resolveCliSessionId(adapter, { sessionId: OTHER_SESSION, cwd })).toBe(decoyCliId);
   });
 
+  it('a marker pasted into a later message of another session cannot claim it', () => {
+    const { root, cwd } = makeHome();
+    writeJsonl(join(root, 'history.jsonl'), [
+      { session_id: ourCliId, ts: 1, text: firstPrompt(OUR_SESSION, 'original') },
+      { session_id: decoyCliId, ts: 2, text: firstPrompt(OTHER_SESSION, 'their work') },
+      // The decoy session's user pastes our first prompt (marker included) while diagnosing.
+      { session_id: decoyCliId, ts: 3, text: `看看这段：\n${firstPrompt(OUR_SESSION, 'original')}` },
+    ]);
+    expect(resolveCliSessionId(adapter, { sessionId: OUR_SESSION, cwd, requireMarker: true })).toBe(ourCliId);
+    expect(resolveCliSessionId(adapter, { sessionId: OUR_SESSION, cwd })).toBe(ourCliId);
+    expect(resolveCliSessionId(adapter, { sessionId: OTHER_SESSION, cwd })).toBe(decoyCliId);
+  });
+
   it('prefers the newest history line when one session carries the marker twice', () => {
     const { root, cwd } = makeHome();
     const resumedId = '01a02e6e-aaaa-bbbb-cccc-dddddddddddd';

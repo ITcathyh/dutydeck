@@ -9,7 +9,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { AUTOSTART_LINUX_UNIT } from '../autostart/autostart.js';
 import type { DeployCliOptions, DeployPruneCliOptions } from '../cli-program.js';
 import { pidAlive } from './daemon.js';
-import { DRAIN_INTERVAL_MS, drainRuntime, systemdServiceControl, unitRuntime, waitForServiceHealth, type DaemonCommandDeps, type DrainResult, type RuntimeEndpoint, type ServiceControl, type UnitRuntime } from './command.js';
+import { DRAIN_INTERVAL_MS, drainRuntime, healthCheckUrl, systemdServiceControl, unitRuntime, waitForServiceHealth, type DaemonCommandDeps, type DrainResult, type RuntimeEndpoint, type ServiceControl, type UnitRuntime } from './command.js';
 
 /**
  * `dutydeck deploy`：把一个已构建好的检出目录做成不可变的发布目录，排空后切换 `current` 并重启，
@@ -446,12 +446,13 @@ function pruneReleases(releases: string, previous: string | undefined, processPa
 
 /**
  * 删掉更早的部署记录（manifest 与数据库备份）。默认只算 manifest.json 里 created_by 是 DEPLOY_RECORD_CREATOR 的，
- * 按名字保留最新 RELEASES_TO_KEEP 个；本次的记录还没写 manifest，直接算进去，它和上一版的记录总是保留。
- * 留下的记录里只有最新 DATABASE_BACKUPS_TO_KEEP 份数据库备份（本次的总算一份），更早的只删 manifest 记下的备份文件。
+ * 按 manifest 的 unit 分组，每组按名字保留最新 RELEASES_TO_KEEP 个；本次的记录还没写 manifest，算进 `unit` 那组，它和上一版的记录总是保留。
+ * 每组留下的记录里只有最新 DATABASE_BACKUPS_TO_KEEP 份数据库备份（本次的总算一份），更早的只删 manifest 记下的备份文件；
+ * 没记 unit 的记录不按份数删备份。
  * deploy 建的、超过 24 小时仍没有 manifest 的记录是中途被杀的部署，不占保留个数，直接删。
  * `includeUnmarked` 时手工部署留下的记录（名字以日期开头）也参与排序，但只在确认没有进程引用、也不是刚改过时才删。
  */
-function pruneRecords(deployments: string, current: string, previous: string | undefined, opts: PruneOptions = {}, processPaths?: () => string[] | undefined): { removed: string[]; freedBytes: number } {
+function pruneRecords(deployments: string, current: string, previous: string | undefined, unit: string | undefined, opts: PruneOptions = {}, processPaths?: () => string[] | undefined): { removed: string[]; freedBytes: number } {
   const result = { removed: [] as string[], freedBytes: 0 };
   const readManifest = (name: string): Record<string, unknown> | undefined => {
     try { return JSON.parse(readFileSync(join(deployments, name, 'manifest.json'), 'utf8')); } catch { return undefined; }
@@ -463,9 +464,16 @@ function pruneRecords(deployments: string, current: string, previous: string | u
   for (const name of unfinished) removeEntry(join(deployments, name), name, 'unfinished', result, opts);
   const eligible = names.filter(name => !unfinished.has(name))
     .filter(name => name === current || marked(name) || (opts.includeUnmarked === true && RECORD_NAME.test(name)));
+  // 同一发布根下的几个 unit 各留各的：按 manifest 记的 unit 分组，本次的记录还没写 manifest，用本次的 unit。
+  const groupOf = (name: string): string | undefined => {
+    const recorded = readManifest(name)?.unit;
+    return typeof recorded === 'string' && recorded ? recorded : name === current ? unit : undefined;
+  };
+  const groups = new Map<string | undefined, string[]>();
+  for (const name of eligible.sort().reverse()) groups.set(groupOf(name), [...groups.get(groupOf(name)) ?? [], name]);
   let paths: string[] | undefined;
   let pathsRead = false;
-  for (const name of eligible.sort().reverse().slice(opts.keep ?? RELEASES_TO_KEEP)) {
+  for (const name of [...groups.values()].flatMap(group => group.slice(opts.keep ?? RELEASES_TO_KEEP))) {
     if (name === current || name === previous) continue;
     const path = join(deployments, name);
     if (!marked(name)) {
@@ -476,14 +484,19 @@ function pruneRecords(deployments: string, current: string, previous: string | u
     }
     removeEntry(path, name, 'record', result, opts);
   }
-  let backups = 0;
+  const backups = new Map<string, number>();
   for (const name of eligible.filter(name => name === current || marked(name)).sort().reverse()) {
     if (result.removed.includes(name)) continue;
+    // 没记 unit 的记录分不出是哪个数据库的备份，不按份数删。
+    const group = groupOf(name);
+    if (group === undefined) continue;
     const manifest = name === current ? undefined : readManifest(name);
     const files = [manifest?.database_backup, manifest?.database_before_rollback]
       .filter((file): file is string => typeof file === 'string' && dirname(resolve(file)) === resolve(deployments, name) && existsSync(file));
     if (name !== current && files.length === 0) continue;
-    if (++backups <= DATABASE_BACKUPS_TO_KEEP) continue;
+    const count = (backups.get(group) ?? 0) + 1;
+    backups.set(group, count);
+    if (count <= DATABASE_BACKUPS_TO_KEEP) continue;
     for (const file of files) removeEntry(file, `${name}/${basename(file)}`, 'backup', result, opts);
   }
   return result;
@@ -697,6 +710,15 @@ async function deployLocked(options: DeployCliOptions, deps: DeployDeps, target:
     return refused(`unit ${target.unit} 的 ExecStart 运行的是 ${target.service?.script ?? '（读不到）'}，不是 ${script}，切换 current 不会生效。首次切换：先 dutydeck deploy --no-restart 准备发布目录，再按 dutydeck deploy --print-unit 的输出改写 unit，daemon-reload 后 dutydeck restart --unit ${target.unit}。`);
   }
 
+  // 地址或数据库没记录（例如 unit 被 stop 清掉了状态）：切过去既验不了新版本，也核不了回滚用的数据库，最后只会把服务停掉。
+  const missing = [
+    ...(!healthCheckUrl(target.endpoint.address, deps) ? [`健康检查地址（${target.endpoint.address ?? '未记录'}）`] : []),
+    ...(!target.endpoint.database ? ['数据库路径'] : [])
+  ];
+  if (restart && missing.length > 0) {
+    return refused(`确定不了 unit ${target.unit} 的${missing.join('和')}，没有切换版本，也没有重启。先启动该 unit 让它记下监听地址和数据库，或用 --runtime 指向写有 address、databasePath 的 deployment.json 后重试。`);
+  }
+
   const source = options.source ? resolve(options.source) : findCheckout(process.cwd());
   if (!source) return refused('当前目录不在 Dutydeck 仓库里，用 --source 指定已构建好的检出目录。');
   info(`校验构建产物：${source}`);
@@ -755,7 +777,7 @@ async function deployLocked(options: DeployCliOptions, deps: DeployDeps, target:
       warn(`清理旧发布目录失败：${message(error)}`);
     }
     try {
-      prunedRecords = pruneRecords(target.deployments, id, previousRelease && basename(previousRelease));
+      prunedRecords = pruneRecords(target.deployments, id, previousRelease && basename(previousRelease), target.unit);
       Object.assign(manifest, { pruned_records: prunedRecords.removed, records_freed_bytes: prunedRecords.freedBytes });
     } catch (error) {
       warn(`清理旧部署记录失败：${message(error)}`);
@@ -991,7 +1013,7 @@ export async function runDeployPrune(options: DeployPruneCliOptions, deps: Deplo
     let inUse: string[] = [];
     try {
       inUse = pruneReleases(releases, previous, processPaths, warn, opts).inUse;
-      if (existsSync(deployments)) pruneRecords(deployments, current ? basename(current) : '', previous && basename(previous), opts, processPaths);
+      if (existsSync(deployments)) pruneRecords(deployments, current ? basename(current) : '', previous && basename(previous), undefined, opts, processPaths);
     } catch (error) {
       report.errors.push(message(error));
     }

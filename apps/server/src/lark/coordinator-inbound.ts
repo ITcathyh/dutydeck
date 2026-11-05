@@ -890,7 +890,13 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       let commandRoute = inbox?.request ? undefined : await this.routeChatCommand(event, config, prompt, group, scopeId, acknowledgement);
       // C2：机器人话题里的「继续」「停」「重来」先按控制处理，不适用时照常当普通消息。
       const control = !inbox?.request && commandRoute === undefined ? larkControlPhrase(prompt) : undefined;
-      if (control) commandRoute = await this.routeControlPhrase(control, event, config, prompt, group, scopeId, acknowledgement);
+      if (control) {
+        // 与斜杠命令同规则：执行期间重启，入站记录不能被当成普通消息重放（重放会再停一次或再执行一次）。
+        if (inbox) await this.inbox!.update(inbox, { state: 'command' });
+        commandRoute = await this.routeControlPhrase(control, event, config, prompt, group, scopeId, acknowledgement);
+        // 不按控制处理时就是普通消息，改回 received，重启后照常恢复。
+        if (inbox && commandRoute === undefined) await this.inbox!.update(inbox, { state: 'received' });
+      }
       if (commandRoute === 'handled') {
         await clearAcknowledgement();
         if (inbox) await this.inbox!.update(inbox, { state: 'accepted', ...((await this.inbox!.reload(inbox))?.reason !== 'command_rejected' ? { reason: 'command_handled' as const } : {}) });
@@ -3167,6 +3173,13 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         capabilities: this.capabilitiesForTask(task)
       })) return { type: 'warning', content: '这个任务不能在当前对话重试，请按卡片上的说明处理' };
       if (!operatorOpenId) return { type: 'warning', content: '缺少操作人身份，无法重试' };
+      // runtime 已接收过这一轮：只有它确认停在失败、中断或取消才重试；已执行、仍在跑或读不到都不重发。
+      if (task.sessionId && task.runtimeTaskId && this.runtime.getTasks) {
+        const runtimeTaskId = task.runtimeTaskId;
+        const status = (await this.runtime.getTasks(task.sessionId).catch(() => undefined))?.find(item => item.id === runtimeTaskId)?.status;
+        if (actionStale()) return { type: 'warning', content: '任务已开始新一轮，请在最新的卡片上操作' };
+        if (!status || !['failed', 'interrupted', 'cancelled'].includes(status)) return { type: 'warning', content: '这一轮在 Agent 那边已执行或结果未知，不能直接重试，请发送 /status 查看' };
+      }
       const retryEvent = { ...task.event, senderOpenId: operatorOpenId, senderType: 'user', senderAppId: undefined };
       const previousState = task.state;
       task.state = 'queued';

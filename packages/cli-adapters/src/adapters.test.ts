@@ -754,6 +754,18 @@ describe('全适配器横切契约', () => {
     }
   });
 
+  it('喂服务端派生的稳定会话 id（ses_work_ 等）时：自铸 id 的 CLI 同样返回 null，argv 与 fresh 一致', () => {
+    const hex = 'a'.repeat(64);
+    for (const dutydeckId of ['work', 'schedule', 'memory', 'collab'].map(kind => `ses_${kind}_${hex}`)) {
+      for (const id of CLI_MINTED_ID_ADAPTERS) {
+        const adapter = createCliAdapter(id);
+        expect(adapter.buildResumeCommand!(dutydeckId), `${id} 收到 ${dutydeckId} 必须返回 null`).toBeNull();
+        expect(adapter.buildArgs({ sessionId: dutydeckId, resume: true, resumeSessionId: dutydeckId }), `${id} 不该带着 ${dutydeckId} 续接`)
+          .toEqual(adapter.buildArgs({ sessionId: dutydeckId }));
+      }
+    }
+  });
+
   it('喂 dutydeck 自己的 ses_<uuid> 时：dutydeck 钉过 id 的 CLI 必须照常 resume', () => {
     // 反向断言，防「一刀切全返回 null」：claude `--session-id` 这类适配器在
     // fresh spawn 时就把 id 钉成了 dutydeck 的，那个 id 就是有效的 resume 目标，

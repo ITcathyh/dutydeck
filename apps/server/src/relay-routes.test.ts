@@ -1,3 +1,4 @@
+import { request } from 'node:http';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildApp } from './app.js';
 import { createRepositories } from '@dutydeck/storage';
@@ -323,6 +324,22 @@ describe('relay ask — blocking round trip over HTTP', () => {
 
     const response = await inFlight;
     expect(response.json()).toMatchObject({ status: 'cancelled' });
+  });
+
+  it('withdraws the question when the asking client disconnects', async () => {
+    const { app, capabilities, broker } = await harness();
+    await app.listen({ port: 0, host: '127.0.0.1' });
+    const { port } = app.server.address() as { port: number };
+    const client = request({ host: '127.0.0.1', port, method: 'POST', path: '/api/relay/sessions/self/ask',
+      headers: { ...auth(capabilities.tokenFor('ses_a')), 'content-type': 'application/json' } });
+    client.on('error', () => {});
+    client.end(JSON.stringify({ question: '还在吗？', timeoutMs: 60_000 }));
+    await vi.waitFor(() => expect(broker.listPending('ses_a')).toHaveLength(1));
+    const askId = broker.listPending('ses_a')[0]!.id;
+    client.destroy();
+    await vi.waitFor(() => expect(broker.listPending('ses_a')).toHaveLength(0));
+    const late = await app.inject({ method: 'POST', url: `/api/relay/sessions/ses_a/asks/${askId}/answer`, payload: { answer: '在' } });
+    expect(late.statusCode).not.toBe(200);
   });
 
   it('rejects answering an unknown ask and a cross-session answer', async () => {

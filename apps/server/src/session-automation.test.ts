@@ -148,7 +148,7 @@ function ledgerRuntime(repos: Repos, harnessSession: HarnessSession, options: { 
   return runtime;
 }
 
-async function fixture(options: { database?: string; clock?: Date; status?: StatusMock; providerId?: string; crashAfterAcceptance?: boolean; deliver?: (sessionId: string, result: AttemptResultV1, occurrenceId: string, sourceId: string, context?: AutomationDeliveryContext) => Promise<void>; onScheduleDisabled?: (schedule: any, reason: string) => Promise<void>; onScheduleOverdue?: (schedule: any, notice: any) => Promise<void | 'not_requested'>; extra?: Partial<SessionAutomationServiceOptions> } = {}) {
+async function fixture(options: { database?: string; clock?: Date; status?: StatusMock; providerId?: string; crashAfterAcceptance?: boolean; deliver?: (sessionId: string, result: AttemptResultV1, occurrenceId: string, sourceId: string, context?: AutomationDeliveryContext) => Promise<void>; onScheduleDisabled?: (schedule: any, reason: string) => Promise<void>; onScheduleProblem?: (schedule: any, notice: any) => Promise<{ messageId?: string } | void>; onScheduleOverdue?: (schedule: any, notice: any) => Promise<void | 'not_requested'>; extra?: Partial<SessionAutomationServiceOptions> } = {}) {
   const directory = options.database ? undefined : await mkdtemp(join(tmpdir(), 'dutydeck-automation-db-'));
   if (directory) cleanups.push(() => rm(directory, { recursive: true, force: true }));
   const database = options.database ?? join(directory!, 'dutydeck.db');
@@ -172,6 +172,7 @@ async function fixture(options: { database?: string; clock?: Date; status?: Stat
     clock: () => new Date(now.value),
     deliver: options.deliver,
     onScheduleDisabled: options.onScheduleDisabled,
+    onScheduleProblem: options.onScheduleProblem,
     onScheduleOverdue: options.onScheduleOverdue,
     ...options.extra
   });
@@ -476,6 +477,27 @@ describe('SessionAutomationService schedules', () => {
     responses.push(new Error('network unavailable'));
     await h.service.tick();
     expect((await h.service.listBySession(h.session.id)).occurrences.find(item => item.scheduledForUtc === '2026-09-12T00:02:00.000Z')).toMatchObject({ conditionStatus: 'error', runStatus: 'error' });
+    expect(h.dispatches).toHaveLength(0);
+  });
+
+  it('counts CI condition errors as failures: tells the thread and pauses the schedule after three in a row', async () => {
+    const onScheduleProblem = vi.fn(async (_schedule: unknown, notice: { messageId?: string }) => ({ messageId: notice.messageId ?? 'om_notice' }));
+    const onScheduleDisabled = vi.fn(async () => {});
+    const h = await fixture({ onScheduleProblem, onScheduleDisabled });
+    const created = await h.service.createSchedule(h.session.id, { ...scheduleInput, condition: { kind: 'ci_new_failure' } }, 'ou_owner');
+    await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+    // 用户在工作区提交了新代码：计划创建时冻结的 HEAD 不再是当前提交。
+    await run('git', ['-C', h.cwd, 'commit', '--allow-empty', '-qm', 'next']);
+    for (const minute of [1, 2, 3]) {
+      h.now.value = new Date(`2026-09-12T00:0${minute}:01.000Z`);
+      await h.service.tick();
+      await vi.waitFor(async () => { await h.service.tick(); expect(onScheduleProblem).toHaveBeenCalledTimes(minute); });
+    }
+    expect((await h.service.listBySession(h.session.id)).occurrences.map(item => item.conditionStatus)).toEqual(['error', 'error', 'error']);
+    expect(onScheduleProblem.mock.calls[0]![1]).toMatchObject({ text: expect.stringContaining('当前提交已经变了') });
+    expect(onScheduleProblem.mock.calls[2]![1]).toMatchObject({ text: expect.stringContaining('已连续 3 次没做成') });
+    expect(JSON.parse((await h.repositories.config.get(`session_automation/schedule/${created.id}`))!).enabled).toBe(false);
+    await vi.waitFor(async () => { await h.service.tick(); expect(onScheduleDisabled).toHaveBeenCalledOnce(); });
     expect(h.dispatches).toHaveLength(0);
   });
 
@@ -843,6 +865,24 @@ describe('bounded automatic result delivery', () => {
     } finally { release(); }
   });
 
+  it('backs off a permanently failing result delivery, stops after three attempts and shows it as an error', async () => {
+    const deliver = vi.fn(async () => { throw new Error('report target missing'); });
+    const h = await fixture({ deliver }); await completedSchedules(h);
+    const delivery = async () => (await h.service.listBySession(h.session.id)).occurrences[0]!.delivery;
+    await vi.waitFor(async () => { await h.service.tick(); expect(await delivery()).toMatchObject({ status: 'error', attempts: 1 }); });
+    for (let tick = 0; tick < 5; tick++) await h.service.tick();
+    expect(deliver).toHaveBeenCalledTimes(1);
+    for (const attempts of [2, 3]) {
+      h.now.value = new Date(h.now.value.getTime() + 60_000 * (attempts - 1));
+      await vi.waitFor(async () => { await h.service.tick(); expect(await delivery()).toMatchObject({ status: 'error', attempts }); });
+    }
+    h.now.value = new Date(h.now.value.getTime() + 60 * 60_000);
+    for (let tick = 0; tick < 5; tick++) await h.service.tick();
+    expect(deliver).toHaveBeenCalledTimes(3);
+    expect(await delivery()).toMatchObject({ status: 'error', attempts: 3, error: expect.stringContaining('不再自动重发') });
+    expect((await h.service.listSchedules({}, async () => true)).items[0]!.health).not.toBe('delivery');
+  });
+
   it('renews a long send, prevents a second instance claim, and aborts a lost lease without stale settlement', async () => {
     let context!: AutomationDeliveryContext;
     const h = await fixture({ deliver: async (_session, _result, _id, _source, control) => {
@@ -1089,6 +1129,8 @@ describe('SessionAutomationService CI subscriptions', () => {
     await h.service.tick();
     await vi.waitFor(async () => expect((await h.service.listBySession(h.session.id)).subscriptions[0]?.delivery).toMatchObject({ status: 'error', attempts: 1 }));
     await h.service.tick();
+    expect(deliver).toHaveBeenCalledTimes(1);
+    h.now.value = new Date(h.now.value.getTime() + 60_000);
     await vi.waitFor(async () => {
       await h.service.tick();
       expect((await h.service.listBySession(h.session.id)).subscriptions[0]?.delivery).toMatchObject({ status: 'delivered', attempts: 2 });

@@ -739,8 +739,13 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
     await f.work.tick();
     await vi.waitFor(async () => expect((await f.work.get(parent.id, waiting.id, 'ou_alice')).delivery.status).toBe('error'));
     const count = f.prompts.length;
-    await f.work.tick();
-    await vi.waitFor(async () => expect((await f.work.get(parent.id, waiting.id, 'ou_alice')).delivery.status).toBe('delivered'));
+    // 同一实例里的真实发送失败按 1 分钟退避后再发。
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(Date.now() + 60_000);
+      await f.work.tick();
+      await vi.waitFor(async () => expect((await f.work.get(parent.id, waiting.id, 'ou_alice')).delivery.status).toBe('delivered'));
+    } finally { vi.useRealTimers(); }
     expect(f.prompts).toHaveLength(count);
     expect((await f.work.get(parent.id, waiting.id, 'ou_alice')).output?.text).toBeTruthy();
   });

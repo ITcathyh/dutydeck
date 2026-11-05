@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve as resolvePath } from 'node:path';
 import { agentConfigSchema, agentWeightsSchema, type Session } from '@dutydeck/shared';
@@ -143,6 +143,32 @@ describe('weighted primary Agent routing', () => {
   });
 });
 
+
+it('upgrades a previously installed Dutydeck hook when an enforced session starts, keeping other hooks', async () => {
+  const { config, repos, runtime, resolve } = await fixture();
+  await repos.agents.save(agentConfigSchema.parse({ id: 'cursor', name: 'cursor', command: process.execPath, cwd: config.workspace, protocol: 'acp' }));
+  const enforced = { ...config, riskControlMode: 'enforced' as const, defaultAgentId: 'cursor', defaultAgentWeights: undefined };
+  // 没装过时不替用户安装，照旧拒绝启动。
+  await expect(resolve(undefined, enforced)).rejects.toMatchObject({ code: 'RISK_CONTROL_HOOK_NOT_READY' });
+  await expect(readFile(join(config.workspace!, '.cursor', 'hooks.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+
+  // 模拟升级前装好的 v3：脚本是旧版本，Hook 配置里还有一条用户自己的 Hook。
+  await installLarkHook('cursor', config.workspace);
+  const script = join(config.workspace!, '.dutydeck', 'security', 'dutydeck-lark-high-risk-guard-cursor.mjs');
+  await writeFile(script, (await readFile(script, 'utf8')).replace('dutydeck-high-risk-guard-v4', 'dutydeck-high-risk-guard-v3'));
+  const hooksPath = join(config.workspace!, '.cursor', 'hooks.json');
+  const hooks = JSON.parse(await readFile(hooksPath, 'utf8'));
+  const custom = { command: 'echo user-hook', matcher: 'Shell' };
+  hooks.hooks.preToolUse.unshift(custom);
+  await writeFile(hooksPath, JSON.stringify(hooks));
+
+  expect((await resolve(undefined, enforced)).agentId).toBe('cursor');
+  expect(runtime.start).toHaveBeenCalledOnce();
+  expect(await readFile(script, 'utf8')).toContain('dutydeck-high-risk-guard-v4');
+  const upgraded = JSON.parse(await readFile(hooksPath, 'utf8')).hooks.preToolUse;
+  expect(upgraded).toHaveLength(2);
+  expect(upgraded[0]).toEqual(custom);
+});
 
 it('refuses to start an enforced session until the installed Codex hook is natively loaded and trusted', async () => {
   const { config, repos, runtime, resolve } = await fixture();

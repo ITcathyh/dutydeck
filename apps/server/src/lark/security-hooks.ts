@@ -1,5 +1,6 @@
 import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { constants, existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { basename, dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { isClaudeFamilyCli, type AgentConfig } from '@dutydeck/shared';
@@ -7,7 +8,7 @@ import { secretGuardScriptPath } from '@dutydeck/shared/secret-guard';
 import { codexHookReadiness } from './codex-hook-readiness.js';
 import { LarkServiceError } from './service.js';
 
-const guardVersion = 'dutydeck-high-risk-guard-v3';
+const guardVersion = 'dutydeck-high-risk-guard-v4';
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
 type HookAgentId = 'codex' | 'claude' | 'trae' | 'cursor' | 'pi';
@@ -129,7 +130,7 @@ ${deny}
 `;
 }
 
-const piGuardExtension = `// ${guardVersion}
+const piGuardExtension = () => `// ${guardVersion}
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Worker } from 'node:worker_threads';
@@ -152,7 +153,13 @@ export default function (pi: any) {
     const root = process.env.DUTYDECK_POLICY_ROOT || ctx?.cwd || process.cwd();
     let policy: any;
     try { policy = JSON.parse(readFileSync(join(root, '.dutydeck', 'security', 'sessions', sessionId + '.json'), 'utf8')); } catch { return undefined; }
-    if (!policy.enabled || policy.authorized || !policy.pattern) return undefined;
+    if (!policy.enabled || policy.authorized) return undefined;
+    // 凭据保护：和命令类 Hook 同一套规则（含本会话策略文件和 Hook 配置的路径保护）；规则模块加载失败按拒绝处理。
+    const secretReason = await import(${JSON.stringify(pathToFileURL(secretGuardScriptPath()).href)})
+      .then(guard => { const finding = guard.secretGuardFinding({ tool_name: event.toolName, tool_input: event.input, cwd: ctx?.cwd || process.cwd() }); return finding ? guard.secretGuardReason(finding) : ''; })
+      .catch(() => 'Dutydeck 凭据保护规则加载失败，已拦截');
+    if (secretReason) return { block: true, reason: secretReason };
+    if (!policy.pattern) return undefined;
     const result = await matches(policy.pattern, JSON.stringify({ tool_name: event.toolName, tool_input: event.input }));
     if (!result.risky) return undefined;
     return { block: true, reason: result.error || policy.reason || '当前飞书发送人无权执行高危操作' };
@@ -160,12 +167,19 @@ export default function (pi: any) {
 }
 `;
 
+const digest = (value: unknown) => createHash('sha256').update(typeof value === 'string' ? value : JSON.stringify(value)).digest('hex');
+
+// 已安装要求脚本和 Hook 条目与本版本生成的内容逐字节一致：只查版本标记的话，
+// Agent 把拦截逻辑改成空操作但留下标记，就绪检查仍会判已安装。
 async function installedState(adapter: HookAdapter, workspace: string) {
   const { hooksPath, scriptPath } = paths(adapter, workspace);
-  if (adapter.kind === 'pi-extension') return (await readFile(scriptPath, 'utf8')).includes(guardVersion);
+  const script = await readFile(scriptPath, 'utf8');
+  if (adapter.kind === 'pi-extension') return digest(script) === digest(piGuardExtension());
+  if (digest(script) !== digest(commandGuardScript(adapter.kind === 'cursor-json' ? 'cursor' : 'standard'))) return false;
   const config = await readableJson(hooksPath, {});
-  const scriptCurrent = (await readFile(scriptPath, 'utf8')).includes(guardVersion);
-  return scriptCurrent && JSON.stringify(config.hooks?.[adapter.eventKey!]).includes(markerFor(adapter));
+  const entries = config.hooks?.[adapter.eventKey!];
+  const expected = digest(hookEntry(adapter, workspace));
+  return Array.isArray(entries) && entries.some(entry => digest(entry) === expected);
 }
 
 export async function larkHookStatus(agentId?: string, workspace?: string, agent?: Pick<AgentConfig, 'id'> & Partial<AgentConfig>): Promise<LarkHookStatus> {
@@ -197,6 +211,12 @@ export async function larkHookStatus(agentId?: string, workspace?: string, agent
 }
 
 const hookCommand = (adapter: HookAdapter, workspace: string) => `DUTYDECK_POLICY_ROOT=${quote(workspace)} ${quote(process.execPath)} ${quote(paths(adapter, workspace).scriptPath)}`;
+const hookEntry = (adapter: HookAdapter, workspace: string) => {
+  const command = hookCommand(adapter, workspace);
+  return adapter.kind === 'cursor-json'
+    ? { command, matcher: '.*', timeout: 5, failClosed: true }
+    : { matcher: '.*', hooks: [{ type: 'command', command, timeout: 5, statusMessage: 'Dutydeck 高危操作风险检查' }] };
+};
 
 async function installJsonHook(adapter: HookAdapter, workspace: string) {
   const { hooksPath, scriptPath } = paths(adapter, workspace);
@@ -207,10 +227,7 @@ async function installJsonHook(adapter: HookAdapter, workspace: string) {
   const config = await readableJson(hooksPath, fallback);
   const hooks = config.hooks && typeof config.hooks === 'object' && !Array.isArray(config.hooks) ? config.hooks : {};
   const entries = Array.isArray(hooks[adapter.eventKey!]) ? hooks[adapter.eventKey!] : [];
-  const command = hookCommand(adapter, workspace);
-  const entry = adapter.kind === 'cursor-json'
-    ? { command, matcher: '.*', timeout: 5, failClosed: true }
-    : { matcher: '.*', hooks: [{ type: 'command', command, timeout: 5, statusMessage: 'Dutydeck 高危操作风险检查' }] };
+  const entry = hookEntry(adapter, workspace);
   const existingIndex = entries.findIndex((item: unknown) => {
     const serialized = JSON.stringify(item);
     return serialized.includes(markerFor(adapter)) || serialized.includes(legacyMarkerFor(adapter));
@@ -218,6 +235,33 @@ async function installJsonHook(adapter: HookAdapter, workspace: string) {
   if (existingIndex >= 0) entries[existingIndex] = entry;
   else entries.push(entry);
   await writeFile(hooksPath, `${JSON.stringify({ ...config, ...(adapter.kind === 'cursor-json' ? { version: 1 } : {}), hooks: { ...hooks, [adapter.eventKey!]: entries } }, null, 2)}\n`, { mode: 0o600 });
+}
+
+// 工作区里是否装过 Dutydeck 的拦截 Hook（任何版本）：Pi 看扩展文件头的版本标记，其余看 Hook 配置里有没有 Dutydeck 的条目。
+async function previouslyInstalled(adapter: HookAdapter, workspace: string) {
+  const { hooksPath, scriptPath } = paths(adapter, workspace);
+  try {
+    if (adapter.kind === 'pi-extension') return (await readFile(scriptPath, 'utf8')).startsWith('// dutydeck-high-risk-guard-v');
+    const entries = (await readableJson(hooksPath, {})).hooks?.[adapter.eventKey!];
+    return Array.isArray(entries) && entries.some(item => {
+      const serialized = JSON.stringify(item);
+      return serialized.includes(markerFor(adapter)) || serialized.includes(legacyMarkerFor(adapter));
+    });
+  } catch { return false; }
+}
+
+/**
+ * 会话启动前把工作区里 Dutydeck 装过、但不是当前版本（升级前的旧版或被改过）的拦截 Hook 重写成当前版本，
+ * 免得升级后每个工作区都要去 Web 重装才能启动。只重写 Dutydeck 自己的脚本、Pi 扩展和 Hook 条目，
+ * 同一配置里的其他 Hook 原样保留；从没装过、工作区不可写或配置无法解析时不动，交给就绪检查报原因。
+ */
+export async function upgradeInstalledLarkHook(agentId: string | undefined, workspace: string | undefined, agent?: Pick<AgentConfig, 'id'> & Partial<AgentConfig>): Promise<void> {
+  const adapter = adapterFor(agentId);
+  if (!adapter || !workspace || processGuardedAgent(agent)) return;
+  if (!await previouslyInstalled(adapter, workspace) || await installedState(adapter, workspace).catch(() => false)) return;
+  try { await access(workspace, constants.W_OK); } catch { return; }
+  if (adapter.kind === 'pi-extension') await writeFile(paths(adapter, workspace).scriptPath, piGuardExtension(), { mode: 0o600 });
+  else await installJsonHook(adapter, workspace);
 }
 
 export async function installLarkHook(agentId: string | undefined, workspace: string | undefined, agent?: AgentConfig): Promise<LarkHookStatus> {
@@ -229,7 +273,7 @@ export async function installLarkHook(agentId: string | undefined, workspace: st
   if (adapter.kind === 'pi-extension') {
     const { scriptPath } = paths(adapter, workspace);
     await mkdir(dirname(scriptPath), { recursive: true });
-    await writeFile(scriptPath, piGuardExtension, { mode: 0o600 });
+    await writeFile(scriptPath, piGuardExtension(), { mode: 0o600 });
   } else await installJsonHook(adapter, workspace);
   return larkHookStatus(agentId, workspace, agent);
 }

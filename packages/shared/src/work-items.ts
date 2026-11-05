@@ -101,7 +101,8 @@ export interface WorkItem {
   status: 'awaiting_confirmation' | 'running' | 'waiting' | 'failed' | 'completed' | 'cancelling' | 'cancelled' | 'blocked';
   plan: WorkPlan; steps: WorkStep[]; createdAt: string; updatedAt: string;
   output?: { text: string; digest: string; stepId: string }; error?: string;
-  delivery: { status: 'pending' | 'delivered' | 'error' | 'not_requested'; attempts: number; error?: string };
+  /** 失败后 nextAttemptAt 之前不重发；attempts 到上限后停在 error，不再自动重发。 */
+  delivery: { status: 'pending' | 'delivered' | 'error' | 'not_requested'; attempts: number; error?: string; nextAttemptAt?: string };
   /** 当前生效的计划版本；旧记录缺省为 1。 */
   planVersion?: number;
   /** 每个生效过的计划版本，按版本号递增；旧记录缺省时只有创建时的版本 1。 */
