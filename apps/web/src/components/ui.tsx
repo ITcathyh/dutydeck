@@ -25,6 +25,10 @@ export const stateTone: Record<string, string> = { starting: 'bg-warning-solid',
 export const busyStates = new Set(['starting', 'thinking', 'running_tool', 'waiting_for_permission', 'interrupting']);
 export const parseMemberNames = (value: string) => [...new Set(value.split(/[\n,，]/).map(item => item.trim()).filter(Boolean))];
 
+export function isSessionActionDisabled(session: Pick<Session, 'archivedAt' | 'state'>): boolean {
+  return Boolean(session.archivedAt) || session.state === 'stopped' || session.state === 'failed';
+}
+
 /**
  * 一条任务对用户呈现的**有效状态**：归档优先于运行状态。这是全站唯一的判据。
  *

@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { PublicPullRequest, PullRequestStatus } from '@dutydeck/shared';
 import { api, type Session } from '../api';
 import { Banner, Button, Dialog, Field, Input } from './primitives';
+import { isSessionActionDisabled } from './ui';
 
 const statusLabels: Record<PullRequestStatus, string> = { proposed: '等待确认', pushing: '推送中', open: '跟进中', merged: '已合并', closed: '已关闭', stopped: '已停止跟进', cancelled: '已取消', expired: '确认已过期', failed: '失败' };
 const excludedReasons = { not_session: '不是本会话改的', changed_after: '本会话改过，之后又被改动，无法确认' } as const;
@@ -19,7 +20,7 @@ export function PullRequestPanel({ session }: { session: Session }) {
   const prepare = useMutation({ mutationFn: () => api.preparePullRequest(session.id, title.trim() ? { title: title.trim() } : {}), onSuccess: result => { setNotice(''); setProposal(result.pullRequest); void refresh(); } });
   const confirm = useMutation({ mutationFn: (id: string) => api.confirmPullRequest(session.id, id), onSuccess: result => { setProposal(undefined); setTitle(''); setNotice(result.message); void refresh(); } });
   const cancel = useMutation({ mutationFn: (id: string) => api.cancelPullRequest(session.id, id), onSuccess: () => { setProposal(undefined); void refresh(); } });
-  const readOnly = Boolean(session.archivedAt) || ['stopped', 'failed'].includes(session.state);
+  const readOnly = isSessionActionDisabled(session);
   const data = records.data;
   const error = records.error ?? prepare.error ?? cancel.error;
   const additions = proposal?.files.reduce((sum, file) => sum + file.additions, 0) ?? 0;

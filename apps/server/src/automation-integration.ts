@@ -33,7 +33,10 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
   client?: (config: StoredLarkConfig) => LarkCardService;
   log: { warn: (...args: any[]) => void };
 }) {
+  type AutomationDeliveryTarget = { appId: string; chatId: string; replyMessageId: string; replyInThread: boolean };
   const client = (config: StoredLarkConfig) => options.client?.(config) ?? createLarkCardService(options.env ?? process.env, globalThis.fetch, config);
+  const readDeliveryTarget = async (automationId: string): Promise<AutomationDeliveryTarget | null> =>
+    JSON.parse(await repos.config.get(`automation.delivery-target.${automationId}`) ?? 'null') as AutomationDeliveryTarget | null;
   const authorize = async (sessionId: string, actorId?: string, context?: AutomationDeliveryContext, readOnly = false) => {
     context?.signal.throwIfAborted();
     const session = await runtime.getSession(sessionId);
@@ -70,8 +73,7 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
     const { appId, chatId } = parseLarkSourceId(session.sourceId);
     if (!appId || !chatId) throw new RuntimeError('AUTOMATION_DESTINATION_MISSING', '无法确认原会话', 409);
     const key = `automation.delivery-target.${automationId}`;
-    type Target = { appId: string; chatId: string; replyMessageId: string; replyInThread: boolean };
-    let target: Target | undefined = JSON.parse(await repos.config.get(key) ?? 'null');
+    let target: AutomationDeliveryTarget | undefined = JSON.parse(await repos.config.get(key) ?? 'null');
     if (!target) {
       const mappings = (await repos.channelMappings.list(`lark-card:${appId}`)).filter(mapping => mapping.sessionId === sessionId)
         .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id));
@@ -124,7 +126,7 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
     const session = await runtime.getSession(schedule.sessionId);
     if (!session || session.source !== 'lark') throw new RuntimeError('AUTOMATION_DESTINATION_MISSING', '只能在飞书会话里代设定时任务', 409);
     const { appId, chatId } = parseLarkSourceId(session.sourceId);
-    const target = JSON.parse(await repos.config.get(`automation.delivery-target.${schedule.id}`) ?? 'null') as { appId: string; chatId: string; replyMessageId: string; replyInThread: boolean } | null;
+    const target = await readDeliveryTarget(schedule.id);
     const config = appId ? await readLarkConfig(repos.config, appId) : undefined;
     if (!target || !config || target.appId !== appId || target.chatId !== chatId) throw new RuntimeError('AUTOMATION_DESTINATION_MISSING', '自动任务缺少接收时保存的回报位置', 409);
     const card = scheduleRequestCard(schedule, target.replyInThread);
@@ -266,7 +268,7 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
     if (!config || !appId || !chatId) throw new RuntimeError('AUTOMATION_DESTINATION_MISSING', '原机器人或会话已不可用', 409);
 
     // 5. 话题目标必须是该来源已冻结的目标
-    const target = JSON.parse(await repos.config.get(`automation.delivery-target.${sourceId}`) ?? 'null') as { appId: string; chatId: string; replyMessageId: string; replyInThread: boolean } | null;
+    const target = await readDeliveryTarget(sourceId);
     if (!target || target.appId !== appId || target.chatId !== chatId) throw new RuntimeError('AUTOMATION_DESTINATION_MISSING', '自动任务缺少接收时保存的回报位置', 409);
 
     // 6. 渲染与发送
@@ -325,7 +327,7 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
     if (!session) throw new RuntimeError('AUTOMATION_SESSION_MISSING', '自动任务的会话不存在', 404);
     if (session.source !== 'lark') return;
     const { appId, chatId } = parseLarkSourceId(session.sourceId);
-    const target = JSON.parse(await repos.config.get(`automation.delivery-target.${schedule.id}`) ?? 'null') as { appId: string; chatId: string; replyMessageId: string; replyInThread: boolean } | null;
+    const target = await readDeliveryTarget(schedule.id);
     const config = appId ? await readLarkConfig(repos.config, appId) : undefined;
     if (!target || !config || target.appId !== appId || target.chatId !== chatId) throw new RuntimeError('AUTOMATION_DESTINATION_MISSING', missing, 409);
     return { session, config, target };
@@ -396,7 +398,7 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
     const session = await runtime.getSession(sessionId);
     if (!session || session.source !== 'lark') return undefined;
     const { appId, chatId } = parseLarkSourceId(session.sourceId);
-    const target = JSON.parse(await repos.config.get(`automation.delivery-target.${sourceId}`) ?? 'null') as { appId: string; chatId: string; replyMessageId: string; replyInThread: boolean } | null;
+    const target = await readDeliveryTarget(sourceId);
     const config = appId ? await readLarkConfig(repos.config, appId) : undefined;
     if (!target || !config || target.appId !== appId || target.chatId !== chatId) throw new RuntimeError('AUTOMATION_DESTINATION_MISSING', '自动任务缺少接收时保存的回报位置', 409);
     const elements: Array<Record<string, unknown>> = [

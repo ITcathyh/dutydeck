@@ -4,6 +4,7 @@ import { ChevronDown, ChevronRight } from 'lucide-react';
 import type { Agent, Session } from '../api';
 import { sessionPath } from '../app-route';
 import { Badge, Banner, Button, Spinner } from './primitives';
+import { isSessionActionDisabled } from './ui';
 import { useWorkItems, useWorkItemRequests, workStatusLabels } from './workItemQueries';
 
 type Props = { emptyState?: ReactNode; session: Session; agents: Agent[]; onOpenItem(id: string): void; onSelectSession(id: string): void };
@@ -35,7 +36,7 @@ function GoalProgress({ item, session, agents, onOpen, onSelectSession }: { item
   const skipped = item.steps.filter(step => step.status === 'skipped').length;
   const attention = item.steps.filter(step => ['running', 'waiting', 'failed', 'blocked'].includes(step.status));
   const needsAction = ['waiting', 'failed', 'blocked'].includes(item.status) || item.steps.some(step => ['waiting', 'failed', 'blocked'].includes(step.status)) || (hasRunning && Boolean(requests.data?.length));
-  const readOnly = Boolean(session.archivedAt) || ['stopped', 'failed'].includes(session.state);
+  const readOnly = isSessionActionDisabled(session);
   return <article aria-label={`目标：${item.title}`} className="min-w-0 border-b border-default py-3">
     <div className="flex min-w-0 flex-wrap items-center gap-2">
       <button type="button" aria-expanded={expanded} aria-controls={stepsId} aria-label={`${expanded ? '收起' : '展开'}目标：${item.title}`} className="flex min-h-10 min-w-0 flex-1 basis-full items-center sm:basis-auto gap-2 rounded text-left text-body font-semibold hover:text-link focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring" onClick={() => setDisclosure({ status: item.status, expanded: !expanded })}>

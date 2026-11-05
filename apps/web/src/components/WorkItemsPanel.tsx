@@ -4,7 +4,7 @@ import type { CreateWorkItemInput, WorkItem, WorkPlan, WorkTemplate } from '@dut
 import { ListChecks, X } from 'lucide-react';
 import { api, type Agent, type Session, type WorkItemRequest } from '../api';
 import { Banner, Button, Dialog, Field, IconButton, Input, Select, Spinner, Textarea } from './primitives';
-import { ToolbarButton } from './ui';
+import { isSessionActionDisabled, ToolbarButton } from './ui';
 import { sessionPath } from '../app-route';
 import { requestId } from '../request-id';
 
@@ -65,7 +65,7 @@ function SessionWorkItems({ session, agents, onSelectSession, control }: Props) 
     },
     onSettled: async () => { await Promise.all([qc.invalidateQueries({ queryKey }), qc.invalidateQueries({ queryKey: ['work-item-requests', session.id] })]); }
   });
-  const readOnly = Boolean(session.archivedAt) || ['stopped', 'failed'].includes(session.state);
+  const readOnly = isSessionActionDisabled(session);
   const disabled = readOnly || mutation.isPending || records.isFetching || records.isError || !records.data;
   const items = records.data?.items ?? [];
   const selected = selectedId ? items.find(item => item.id === selectedId) : items[0];

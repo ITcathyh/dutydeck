@@ -4,6 +4,7 @@ import { FileDiff } from 'lucide-react';
 import { api, type Session } from '../api';
 import { Banner, Button, EmptyState, Spinner } from './primitives';
 import { TurnDiffContent } from './TurnDiffPage';
+import { isSessionActionDisabled } from './ui';
 
 export function SessionChangesPanel({ session, onBack }: { session: Session; onBack?(): void }) {
   const turns = useQuery({ queryKey: ['turnDiffs', session.id], queryFn: () => api.turnDiffs(session.id), refetchInterval: 10_000 });
@@ -23,6 +24,6 @@ export function SessionChangesPanel({ session, onBack }: { session: Session; onB
     {turns.isPending && <div className="grid min-h-40 place-items-center"><Spinner label="读取改动轮次…"/></div>}
     {turns.error && <div className="p-4"><Banner tone="danger">读取改动失败：{turns.error.message}<Button variant="ghost" onClick={() => void turns.refetch()}>重试</Button></Banner></div>}
     {!turns.isPending && !turns.error && !taskId && <EmptyState icon={<FileDiff size={22}/>} title="尚无本轮改动" description="只有在 Git 仓库中完成且记录到文件差异的轮次才会出现在这里。"/>}
-    {taskId && <TurnDiffContent key={`${session.id}:${taskId}`} sessionId={session.id} taskId={taskId} shared={false} readOnly={Boolean(session.archivedAt) || session.source === 'work_item' || ['stopped', 'failed'].includes(session.state)} embedded/>}
+    {taskId && <TurnDiffContent key={`${session.id}:${taskId}`} sessionId={session.id} taskId={taskId} shared={false} readOnly={isSessionActionDisabled(session) || session.source === 'work_item'} embedded/>}
   </section>;
 }

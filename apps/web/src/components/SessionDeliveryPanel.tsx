@@ -12,7 +12,7 @@ import { SessionArtifacts } from './SessionArtifacts';
 
 import { verificationLabel } from './verification-presentation';
 import { usageLabel } from './RunHeader';
-import { effectiveStatus, permissionLabels } from './ui';
+import { effectiveStatus, isSessionActionDisabled, permissionLabels } from './ui';
 
 export function SessionDeliveryPanel({ session, tasks, onClose, presentation = 'dialog' }: { session: Session; tasks: Task[]; onClose(): void; presentation?: 'dialog' | 'inspector' }) {
   const qc = useQueryClient();
@@ -53,7 +53,7 @@ export function SessionDeliveryPanel({ session, tasks, onClose, presentation = '
     }
   });
 
-  const readOnly = Boolean(session.archivedAt) || ['stopped', 'failed'].includes(session.state);
+  const readOnly = isSessionActionDisabled(session);
   const verificationUnavailable = capabilities.data?.verification === 'unavailable';
   const busy = capabilities.data?.verification !== 'available' || ['thinking', 'running_tool', 'waiting_for_permission', 'interrupting'].includes(session.state) || verify.isPending || evidence.data?.some(record => record.status === 'running');
   const skillTasks = tasks.filter(task => task.skillDeliveries?.length);

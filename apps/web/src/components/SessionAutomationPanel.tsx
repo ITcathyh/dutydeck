@@ -8,6 +8,7 @@ import { PlanHistory, automationTime } from './AutomationHistory';
 import { ConfirmDialog } from './ConfirmDialog';
 import { sessionDisplayName } from '../run-summary';
 import { Banner, Button, Field, Input, Select, Spinner, Textarea, Dialog } from './primitives';
+import { isSessionActionDisabled } from './ui';
 
 const ciLabels: Record<string, string> = { waiting: '等待构建', dispatching: '提交续作中', accepted: '已提交续作', completed: '续作已结束', cancelled: '已取消', expired: '已过期', stale_head: '提交已变化，等待停止', session_inactive: '会话已结束', revoked: '权限已撤销', error: '查询失败' };
 import { runLabels } from './automation-display';
@@ -78,7 +79,7 @@ export function SessionAutomationPanel({ session, initialScheduleId, openCreateF
   const runRequests = useRef(new Map<string, { expectedRevision: number; idempotencyKey: string }>());
   const data = records.isError ? undefined : records.data;
   const enablingTarget = enabling ? data?.deliveryTargets?.[enabling.id] : undefined;
-  const readOnly = !data || Boolean(session.archivedAt) || ['stopped', 'failed'].includes(session.state);
+  const readOnly = !data || isSessionActionDisabled(session);
   const canManageSchedule = (item: SessionSchedule) => !readOnly || item.mode === 'independent' || Boolean(item.executionContext);
   const refresh = () => Promise.all([qc.invalidateQueries({ queryKey }), qc.invalidateQueries({ queryKey: ['automation-schedules'] }), qc.invalidateQueries({ queryKey: ['automation-history'] })]);
   // 只有能主动查询构建状态的 CI 插件支持在 Web 上等待构建；webhook 型的从飞书 /ci 发起。

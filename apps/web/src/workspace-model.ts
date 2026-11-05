@@ -85,16 +85,26 @@ export function sessionMatchesView(session: Session, view: WorkbenchView, summar
 }
 
 export function workbenchCounts(sessions: Session[], summaries: Record<string, RunSummary> = {}) {
-  const current = sessions.filter(session => !session.archivedAt);
-  return {
-    all: current.length,
-    active: current.filter(session => sessionMatchesView(session, 'active', summaries[session.id])).length,
-    queuedCommands: current.reduce((count, session) => count + (summaries[session.id]?.queuedCount ?? 0), 0),
-    attention: current.filter(session => needsAttention(session, summaries[session.id])).length,
-    continuable: current.filter(session => sessionAttention(session, summaries[session.id]) === 'continue').length,
-    completed: current.filter(session => sessionMatchesView(session, 'completed', summaries[session.id])).length,
-    archived: sessions.length - current.length
-  };
+  let all = 0;
+  let active = 0;
+  let queuedCommands = 0;
+  let attention = 0;
+  let continuable = 0;
+  let completed = 0;
+  let archived = 0;
+  for (const session of sessions) {
+    if (session.archivedAt) { archived++; continue; }
+    all++;
+    const summary = summaries[session.id];
+    queuedCommands += summary?.queuedCount ?? 0;
+    switch (workbenchTaskSection(session, summary)) {
+      case 'attention': attention++; break;
+      case 'active': active++; break;
+      case 'continue': continuable++; break;
+      case 'recent': completed++; break;
+    }
+  }
+  return { all, active, queuedCommands, attention, continuable, completed, archived };
 }
 
 export function workbenchTaskSection(session: Session, summary?: RunSummary): WorkbenchTaskSection {
