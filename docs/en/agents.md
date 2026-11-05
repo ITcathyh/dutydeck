@@ -83,6 +83,18 @@ For Codex ACP, every non-full-trust native turn, including restored sessions, us
 
 Lark email admission and identity lookups cache confirmed invalid, cross-app or invisible-user failures for up to 60 seconds per client, so a permission repair may take that long to be retried. Bot configuration refreshes or credential changes clear the cache. Successful identities, rate limits, server errors, network errors and timeouts are not cached; subsequent lookups still check for revoked access.
 
+### Workspace approval rules <a id="workspace-approval-rules"></a>
+
+The "本工作区允许此类命令" (allow this kind of command in this workspace) button on Lark approval cards saves the command as a workspace rule (SQLite table `workspace_approval_rules`, with bot, creator and creation time) that survives restarts. The table arrives with a database schema upgrade; afterwards older builds refuse to open the database, so rolling back means restoring the pre-deployment database backup. No model is involved; matching is deterministic on the command text:
+
+- **Scope**: only Lark-sourced, non-`full-trust` sessions, only turns started by a Lark user in person, and only requests that would otherwise show an approval card. Web, scheduled, automation and CI/PR-triggered turns still ask; the Web approval card has no such button.
+- **Bot and workspace**: a rule applies only to the bot that created it; bots do not share rules. The workspace is the real path (realpath) of the session directory, never the directory reported by the Agent; a Git worktree and its main checkout are different workspaces and do not share rules. The home directory and the filesystem root `/` cannot hold rules; when the session directory is one of them the button does not appear.
+- **Which commands can become rules**: only the unredacted, untruncated string command received from the executor; redacted, truncated or array-form commands (such as Codex command arrays) get no button. The command must consist of plain words, and its second word must look like a subcommand. A rule keeps the first two words (three for `npm`/`pnpm`/`yarn run <script>`), never fewer than two. Commands whose first word is a shell, interpreter or wrapper (`sh`, `bash`, `env`, `sudo`, `xargs`, `node`, `python`, `npx`, `uv`, …), deletion, permission or network commands, and subcommands such as `pnpm exec`, `pnpm dlx` or `git push` cannot become rules.
+- **Coverage**: word prefixes: `pnpm test` covers `pnpm test --filter x` but not `pnpm testx`. A leading environment assignment, `$(`, backticks, `<(`, any redirection, a pipe, a single `&`, a newline, a heredoc, quotes, parentheses or braces always ask. Compound commands are split only on `&&` and `;`, and every segment must be covered, so `pnpm test && curl x` still asks.
+- **Precedence**: allow/deny from a plugin `permission.request` hook and the Agent's own deny rules come first. The high-risk pattern is re-run before every match and a matching command always asks; before an automatic allow, Dutydeck also checks that the requester still has high-risk execution permission. Rules never relax the high-risk block for unauthorized senders.
+- **Risk**: a rule looks at the command text, not at what the command runs. After allowing `pnpm test`, an Agent that edits the scripts in package.json can run arbitrary code through that command. Only create rules in repositories whose scripts you trust.
+- **List and revoke**: Web Settings → Agent → 按工作区允许的命令, or `dutydeck settings approval-rules list [--app <bot>] [--workspace <dir>] / remove <rule-id>` (installation owner). Revocation takes effect immediately; nothing is cached.
+
 ## 3. Environment variables
 
 | Variable | Default | Purpose |

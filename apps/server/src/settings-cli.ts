@@ -5,6 +5,7 @@ import type { CollaborationRouteOptions } from './collaboration-routes.js';
 import type { GroupConfigPatch, ManagedGroup, ManagedGroupBot } from './lark/group-management.js';
 import type { SaveLarkConfigRequest } from './lark/routes.js';
 import { executeLocalRuntimeRequest, type LocalRuntimeRequestDependencies } from './local-runtime-request.js';
+import { resolve } from 'node:path';
 
 export class SettingsCliError extends Error {
   constructor(public readonly code: string, message: string) {
@@ -22,7 +23,8 @@ export type SettingsAction =
   | 'channel-bot-list' | 'channel-bot-show' | 'channel-bot-set'
   | 'group-binding-list' | 'group-binding-show' | 'group-binding-add' | 'group-binding-set'
   | 'group-list' | 'group-show' | 'group-set' | 'group-members' | 'group-sync'
-  | 'usage-show' | 'usage-set-cap' | 'usage-remove-cap';
+  | 'usage-show' | 'usage-set-cap' | 'usage-remove-cap'
+  | 'approval-rule-list' | 'approval-rule-remove';
 
 export interface SettingsCliInput {
   sessionId?: string;
@@ -50,6 +52,9 @@ export interface SettingsCliInput {
   amount?: string;
   pageToken?: string;
   yes?: boolean;
+  /** approval-rules：按工作区目录过滤（按真实路径比较），以及要撤销的规则 ID。 */
+  workspace?: string;
+  ruleId?: string;
 }
 
 type FieldKind = 'boolean' | 'integer' | 'integer|null' | 'string' | 'string|null' | 'list' | 'users' | 'json' | 'override' | readonly string[];
@@ -477,5 +482,10 @@ export async function runSettingsCli(action: SettingsAction, input: SettingsCliI
       return { cap: await request('PUT', '/api/usage/caps', { ...capTarget(input), monthlyCostUsd }) };
     }
     case 'usage-remove-cap': return request('DELETE', `/api/usage/caps?${new URLSearchParams(capTarget(input))}`);
+    case 'approval-rule-list': {
+      const query = new URLSearchParams({ ...(input.appId ? { app: input.appId } : {}), ...(input.workspace ? { workspace: resolve(input.workspace) } : {}) }).toString();
+      return request('GET', `/api/workspace-approval-rules${query ? `?${query}` : ''}`);
+    }
+    case 'approval-rule-remove': return request('DELETE', `/api/workspace-approval-rules/${path(required(input.ruleId, 'Rule ID'))}`);
   }
 }

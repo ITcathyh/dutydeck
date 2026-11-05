@@ -66,4 +66,10 @@ describe('Agent text cannot forge Lark card tags', () => {
     expect(alert!.content).not.toContain('<text_tag');
     expect(alert!.content).toContain('rm -rf /');
   });
+
+  it('marks a request approved by a workspace rule with the rule it matched', () => {
+    const elements = renderLarkProcessElements([event('permission_request', { title: '运行命令', status: 'approved', workspaceRule: 'pnpm test' })], {}, false);
+    expect(elements.find(element => String(element.element_id).startsWith('risk_alert_resolved'))!.content)
+      .toBe("<text_tag color='green'>按工作区规则自动允许：pnpm test</text_tag>　运行命令");
+  });
 });

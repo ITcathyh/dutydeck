@@ -50,7 +50,7 @@ export interface LarkRuntime {
   send(id: string, prompt: string, agentPrompt?: string, riskPolicy?: ToolRiskPolicy, actorId?: string): Promise<unknown>;
   dispatch?(id: string, prompt: string, mode?: 'queue' | 'interrupt', agentPrompt?: string, riskPolicy?: ToolRiskPolicy, actorId?: string, idempotencyKey?: string, skillRequests?: string[], supplied?: import('@dutydeck/shared').TaskRequestV1, idleCompactHours?: number, promptParts?: import('@dutydeck/shared').PromptPart[], permissionMode?: PermissionMode): Promise<{ id: string; status: string; queuedAhead?: number; replayed?: boolean }>;
   getPendingPermissions?(id: string): PermissionRequestData[] | Promise<PermissionRequestData[]>;
-  resolvePermission?(id: string, requestId: string, approved: boolean, reason?: string): Promise<unknown>;
+  resolvePermission?(id: string, requestId: string, approved: boolean, reason?: string, annotation?: Pick<PermissionRequestData, 'workspaceRule'>): Promise<unknown>;
   getSessionTaskReport?(id: string): Promise<import('@dutydeck/shared').TaskReport | undefined>;
   getTasks?(id: string): Promise<TaskRecord[]>;
   getTaskRecovery?(id: string, taskId: string): Promise<{ status: string; blockers: Array<{ code: string; external?: boolean }>; activeTaskId?: string; resolvedUnknown?: boolean; verifiedOutput?: { eventId: string; digest: string } }>;
@@ -162,6 +162,8 @@ export interface LarkLongConnectionListenerOptions {
   agentCommands?: LarkAgentCommands;
   scheduleRequests?: import('../agent-schedule-request.js').LarkScheduleRequests;
   saveBotConfig?(input: import('./config.js').SaveLarkConfigInput): Promise<unknown>;
+  /** 按工作区记住的审批规则（审批卡「本工作区允许此类命令」）。 */
+  workspaceApprovals?: import('./workflow-interactions.js').LarkWorkspaceApprovals;
 }
 
 export class LarkLongConnectionListener implements LarkListener {
@@ -241,7 +243,8 @@ export class LarkLongConnectionListener implements LarkListener {
       chatModeResolver,
       this.options.executionPolicy,
       this.options.groupManager,
-      { store: this.options.workflowStore, resourceRoot: this.options.resourceRoot, broker: this.options.relayBroker, automation: this.options.automation, workbench: this.options.workbench, memory: this.options.memory, participation: this.options.participation, usage: this.options.usage, loginLinks: this.options.loginLinks, saveBotConfig: this.options.saveBotConfig, scheduleRequests: this.options.scheduleRequests },
+      { store: this.options.workflowStore, resourceRoot: this.options.resourceRoot, broker: this.options.relayBroker, automation: this.options.automation, workbench: this.options.workbench, memory: this.options.memory, participation: this.options.participation, usage: this.options.usage, loginLinks: this.options.loginLinks, saveBotConfig: this.options.saveBotConfig, scheduleRequests: this.options.scheduleRequests,
+        ...(this.options.workspaceApprovals ? { workspaceApprovals: this.options.workspaceApprovals } : {}) },
     ) : undefined;
     this.coordinator = coordinator;
     await coordinator?.initializeWorkflows(config);

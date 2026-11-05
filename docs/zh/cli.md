@@ -95,6 +95,7 @@ Web 控制台里的机器人设置、群聊策略和用量上限，都可以用�
 | 实验草稿 Bot 与 SecretRef 引用 | `dutydeck settings channel-bot list / show / set` |
 | 实验草稿群绑定策略 | `dutydeck settings group-binding list / show / add / set` |
 | 月度用量上限 | `dutydeck settings usage show / set-cap / remove-cap` |
+| 按工作区允许的命令（只能查看与撤销） | `dutydeck settings approval-rules list [--app <机器人>] [--workspace <目录>] / remove <规则 ID>` |
 | 主终端后端 | `dutydeck settings terminal-backend [tmux\|herdr]` |
 | 工作区分组 | `dutydeck workspace-groups` |
 | 只读配置来源 | `dutydeck settings explain --session <session-id>` |
@@ -107,6 +108,8 @@ dutydeck settings bot set cli_xxx groupReplyMode=auto        # 清除群回复�
 dutydeck settings bot install-hook cli_xxx --prepare fallbackAgentId=codex-acp workspace=/path/to/workspace  # 按未保存配置准备 Hook
 dutydeck settings group set oc_xxx participation=selective   # 设置群聊按需参与
 dutydeck settings usage set-cap 50 --app cli_xxx             # 设置月度用量上限（美元）
+dutydeck settings approval-rules list --workspace .          # 查看本目录的工作区审批规则（按真实路径比较）
+dutydeck settings approval-rules remove war_xxx              # 撤销一条规则，下一条同类命令恢复弹卡
 dutydeck settings group set oc_xxx 'scenarios={"alarm":{"enabled":true,"params":{"levels":["P0","P1"]}}}'  # 改告警初筛的级别
 ```
 

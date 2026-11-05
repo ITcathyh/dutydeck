@@ -27,6 +27,8 @@ dutydeck settings group set oc_xxx 'scenarios={"alarm":{"enabled":true,"params":
 #   params lists only the keys to change; {"<pack id>":null} removes a binding; `group show` lists packs and params.
 #   A direct pack must be confirmed in the group once first. alarm=<JSON> is a deprecated alias kept for one release.
 dutydeck settings usage set-cap 50 --app cli_xxx       # monthly USD cap
+dutydeck settings approval-rules list [--app cli_xxx] [--workspace .]  # workspace approval rules per bot (path compared by real path)
+dutydeck settings approval-rules remove war_xxx        # revoke a rule; the next matching command asks again
 dutydeck settings terminal-backend [tmux|herdr]
 
 # Access

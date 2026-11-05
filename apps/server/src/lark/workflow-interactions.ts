@@ -80,6 +80,8 @@ export interface LarkInteraction extends LarkInteractionContext {
   intent?: string;
   /** 可以「本会话允许」时这条命令的精确匹配键；高危、被脱敏或被截断的命令不设，卡上也不给按钮 */
   sessionAllowKey?: string;
+  /** 可以「本工作区允许此类命令」时推导出的规则；高危、非原文命令、非飞书真人发起的轮次不设，卡上也不给按钮 */
+  workspaceRule?: { workspace: string; pattern: string };
   /** 拒绝时附带的说明摘要（已脱敏、单行、截断），终态卡文案据此显示 */
   rejectReason?: string;
   /** 建卡时群 @ 开关是否开启；截止前提醒据此决定要不要 @ */
@@ -109,6 +111,12 @@ const timeoutHours = larkPermissionTimeoutMs / 3_600_000;
 /** 超时拒绝时交给 Agent 的原因（PTY 驱动会把它作为拒绝说明转告 CLI）。 */
 export const larkPermissionTimeoutReason = `超过 ${timeoutHours} 小时未处理，已自动拒绝`;
 /** 审批卡上说明等待与上限的那一行。 */
+/** 「本工作区允许此类命令」的范围与风险：前缀规则覆盖的是项目脚本，脚本内容由仓库决定。 */
+const workspaceRuleNotice = (pattern: string) => {
+  const shown = `\`${larkCommandEcho(pattern, 200).replace(/`/g, '')}\``;
+  return `「本工作区允许此类命令」由机器人所有者或管理员设置：之后这个机器人在这个目录里以 ${shown} 开头的命令都会自动允许（其他机器人不受影响），服务重启后仍有效，可在 Web 设置或 \`dutydeck settings approval-rules\` 撤销。`
+    + `风险：规则只看命令文字，不看命令实际执行什么，例如允许 ${shown} 后，Agent 改了 package.json 里的脚本，就能借这条命令执行任意代码。`;
+};
 const permissionDeadlineNotice = (expiresAt: string) =>
   `任务会一直等待审批：${larkPermissionReminderAfterMs / 60_000} 分钟无人处理会提醒一次，超过 ${timeoutHours} 小时未处理才自动拒绝（${deadlineText(expiresAt)}）。`;
 /** 审批卡顶部的意图摘要；升级前的记录没有，不渲染。 */
@@ -122,18 +130,26 @@ const maxMentionedApprovers = 3;
 const shanghaiClockFormat = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
 export const shanghaiClock = (at: number) => shanghaiClockFormat.format(at);
 /**
- * 「本会话允许此命令」的精确匹配键：目录、资源、命令逐字相同才算同一条。
- * 执行端交来的是脱敏、截断后的事实，被脱敏或截断过的命令已经不能逐字比对；高危判定复用
- * 部署配置的高危正则。这几种情况都不给按钮，宁可每次都问。
+ * 这条带命令的请求是否确定不高危：未配置高危正则、匹配超时或出错都按可能高危处理。
+ * 与执行端拦截同一口径：标题和各项事实逐行拼起来，放进带硬超时的隔离线程匹配。
+ * 正则由部署者配置，灾难性回溯不能卡住服务主线程。每条请求都重新跑，不缓存结论。
  */
-const sessionAllowKey = async (request: PermissionRequestData, highRiskPattern?: string) => {
+const clearOfHighRisk = async (request: PermissionRequestData, highRiskPattern?: string) => {
   const operation = request.operation;
-  if (!operation?.command || !highRiskPattern) return undefined;
+  if (!operation?.command || !highRiskPattern) return false;
+  const facts = [request.title, operation.cwd ?? '', operation.resource ?? '', operation.command];
+  return !await testRegexWithTimeout(highRiskPattern, facts.join('\n')).catch(() => true);
+};
+/**
+ * 「本会话允许此命令」的精确匹配键：目录、资源、命令逐字相同才算同一条。
+ * 执行端交来的是脱敏、截断后的事实，被脱敏或截断过的命令已经不能逐字比对；高危的命令也不给。
+ * 这几种情况都不给按钮，宁可每次都问。
+ */
+const sessionAllowKey = (request: PermissionRequestData, riskCleared: boolean) => {
+  const operation = request.operation;
+  if (!operation?.command || !riskCleared) return undefined;
   const facts = [operation.cwd ?? '', operation.resource ?? '', operation.command];
   if (facts.some(fact => fact.includes('[REDACTED]') || fact.endsWith('…'))) return undefined;
-  // 与执行端拦截同一口径：标题和各项事实逐行拼起来，放进带硬超时的隔离线程匹配。
-  // 正则由部署者配置，灾难性回溯不能卡住服务主线程；超时或出错都按可能高危处理。
-  if (await testRegexWithTimeout(highRiskPattern, [request.title, ...facts].join('\n')).catch(() => true)) return undefined;
   return createHash('sha256').update(facts.join('\0')).digest('hex');
 };
 /** 文字回复对上某个选项：忽略大小写与首尾空白后等于选项文本、提交值或序号，返回该选项的提交值。 */
@@ -249,6 +265,20 @@ export interface LarkWorkflowInteractionsOptions {
   urgent?: boolean | LarkWorkflowUrgentOptions;
   /** 发起人不能批准时，群里还有谁可能批准（被授予高风险审批的成员）；是否真能批准仍逐个走 authorize */
   approverCandidates?: (record: LarkInteraction) => Promise<string[]>;
+  /** 按工作区记住的审批规则；未提供时卡上没有「本工作区允许此类命令」，也不按规则自动批准 */
+  workspaceApprovals?: LarkWorkspaceApprovals;
+  /** 谁能建工作区规则：机器人所有者或管理员；未提供时一律不能建 */
+  authorizeWorkspaceRule?: (record: LarkInteraction, actor: string) => Promise<boolean>;
+}
+
+/** 一条审批属于哪个会话、哪一轮、由谁发起；工作区规则只对飞书真人发起的轮次生效。 */
+export interface LarkWorkspaceApprovalScope { appId: string; sessionId: string; taskId: string; requester?: string }
+export interface LarkWorkspaceApprovals {
+  /** 这条请求能生成的规则；不能生成返回 undefined。调用前已确认命令不高危。 */
+  candidate(scope: LarkWorkspaceApprovalScope, request: PermissionRequestData): Promise<{ workspace: string; pattern: string } | undefined>;
+  /** 命令每段都被本工作区规则覆盖时返回用到的规则（展示写法）；每次都查库，撤销立即生效。调用前已确认命令不高危。 */
+  match(scope: LarkWorkspaceApprovalScope, request: PermissionRequestData): Promise<string | undefined>;
+  remember(rule: { appId: string; workspace: string; pattern: string }, createdBy: string): Promise<void>;
 }
 
 /** Persisted cards identify a live waiter; history never recreates executable approvals. */
@@ -273,6 +303,8 @@ export class LarkWorkflowInteractions {
   /** 正在按「本会话允许」自动批准的请求，重复事件不再重复提交。 */
   private readonly autoApproving = new Set<string>();
   private readonly approverCandidates?: (record: LarkInteraction) => Promise<string[]>;
+  private readonly workspaceApprovals?: LarkWorkspaceApprovals;
+  private readonly authorizeWorkspaceRule?: (record: LarkInteraction, actor: string) => Promise<boolean>;
   private readonly onConfirmation?: (record: LarkInteraction) => Promise<void>;
   private readonly confirmationAvailable?: (record: LarkInteraction, checkAccess?: boolean) => Promise<boolean>;
   private readonly confirming = new Set<string>();
@@ -290,6 +322,8 @@ export class LarkWorkflowInteractions {
     if (!store.compareAndSet || !store.list) throw new Error('Lark workflows require persistent CAS and prefix listing');
     this.configureUrgent(options?.urgent, options?.urgentManager);
     this.approverCandidates = options?.approverCandidates;
+    this.workspaceApprovals = options?.workspaceApprovals;
+    this.authorizeWorkspaceRule = options?.authorizeWorkspaceRule;
     this.onPlanDecision = options?.onPlanDecision;
     this.onConfirmation = options?.onConfirmation;
     this.confirmationAvailable = options?.confirmationAvailable;
@@ -582,10 +616,10 @@ export class LarkWorkflowInteractions {
     return approvers;
   }
   /**
-   * 按「本会话允许」代发起人批准：发起人此刻必须仍能批准，判断与点「允许本次」同一道。
+   * 按「本会话允许」或工作区规则代发起人批准：发起人此刻必须仍能批准，判断与点「允许本次」同一道。
    * 发起人已不能批准或执行端没接住时返回 false，照常发卡交给人处理；同一请求已在处理中返回 undefined。
    */
-  private async autoApprove(context: LarkInteractionContext, nativeId: string, question: string) {
+  private async autoApprove(context: LarkInteractionContext, nativeId: string, question: string, workspaceRule?: string) {
     const key = `${context.sessionId}:${nativeId}`;
     if (this.autoApproving.has(key)) return undefined;
     this.autoApproving.add(key);
@@ -593,9 +627,17 @@ export class LarkWorkflowInteractions {
       const requester = context.event.senderOpenId;
       const probe: LarkInteraction = { ...context, id: this.interactionId(context, 'permission', nativeId), boot: this.boot, kind: 'permission', nativeId, question, state: 'pending', updatedAt: new Date().toISOString() };
       if (!requester || !await this.authorize(probe, requester, 'high_risk.execute')) return false;
-      return await this.runtime.resolvePermission!(context.sessionId, nativeId, true) !== false;
+      return await (workspaceRule
+        ? this.runtime.resolvePermission!(context.sessionId, nativeId, true, undefined, { workspaceRule })
+        : this.runtime.resolvePermission!(context.sessionId, nativeId, true)) !== false;
     } catch { return false; }
     finally { this.autoApproving.delete(key); }
+  }
+  /** 批准已被执行端接受之后才保存规则；保存失败不影响这次批准，只是之后仍会弹卡。 */
+  private async rememberWorkspaceRule(record: LarkInteraction, actorId: string) {
+    if (!record.workspaceRule || !this.workspaceApprovals) return false;
+    try { await this.workspaceApprovals.remember({ ...record.workspaceRule, appId: record.appId }, actorId); return true; }
+    catch (error) { this.log?.warn({ error: error instanceof Error ? error.message : String(error), requestId: record.id }, '工作区审批规则保存失败'); return false; }
   }
   private allowForSession(record: LarkInteraction) {
     if (!record.sessionAllowKey) return;
@@ -722,12 +764,12 @@ export class LarkWorkflowInteractions {
    * options.groupMention：群 @ 开关（P0-4，取自 Bot/群配置，配置默认开启；未传视为关闭）。开启且为群聊时在卡片最前方插入 @：
    * 问答卡 @ 发起人；审批卡 @ 能批准的人，同一任务 60 秒内的后续审批卡不再 @。关闭时不添加 @ 元素。
    * options.highRiskPattern：部署配置的高危正则，命中的命令不给「本会话允许此命令」；未传不给按钮。
-   * options.onSessionAllowed：按「本会话允许」自动批准、不再发卡时回调，调用方在进度卡上原位留一行记录。
+   * options.onSessionAllowed：按「本会话允许」或工作区规则自动批准、不再发卡时回调（按规则时带上命中的规则），调用方在进度卡上原位留一行记录。
    */
   async observe(
     context: LarkInteractionContext,
     event: AgentEvent,
-    options: { adhdMode?: boolean; structuredAskCards?: boolean; webBaseUrl?: string; groupMention?: boolean; highRiskPattern?: string; onSessionAllowed?: (permissionId: string) => void } = {}
+    options: { adhdMode?: boolean; structuredAskCards?: boolean; webBaseUrl?: string; groupMention?: boolean; highRiskPattern?: string; onSessionAllowed?: (permissionId: string, workspaceRule?: string) => void } = {}
   ) {
     if (this.closed) return;
     const data = event.data as Record<string, any>;
@@ -747,6 +789,7 @@ export class LarkWorkflowInteractions {
     let expiresAt: string | undefined;
     let remindedAt: string | undefined;
     let allowKey: string | undefined;
+    let workspaceRule: { workspace: string; pattern: string } | undefined;
     let intent: string | undefined;
     if (event.type === 'text' && data.relay === 'ask' && this.broker) {
       const ask = this.broker.get(String(data.askId));
@@ -772,12 +815,24 @@ export class LarkWorkflowInteractions {
       // 摘要只是把标题原样再说一遍时不重复展示（执行端没给工具类别和参数）。
       intent = permissionIntent(request);
       if (intent === question.split('\n')[0]) intent = undefined;
-      allowKey = await sessionAllowKey(request, options.highRiskPattern);
+      const riskCleared = await clearOfHighRisk(request, options.highRiskPattern);
+      allowKey = sessionAllowKey(request, riskCleared);
       // 发起人已对这条命令点过「本会话允许」：代发起人批准，不再发卡。自动批准前的高危复核就是上面这次隔离匹配。
       if (allowKey && this.sessionAllowed.get(context.sessionId)?.has(allowKey)) {
         const approved = await this.autoApprove(context, nativeId, question);
         if (approved === undefined) return;
         if (approved) { options.onSessionAllowed?.(nativeId); return; }
+      }
+      // 工作区规则：每次都重跑高危正则、重新查库；命中且发起人此刻仍能批准时代为批准，否则照常发卡。
+      const scope = { appId: context.appId, sessionId: context.sessionId, taskId: context.taskId, ...(context.event.senderOpenId ? { requester: context.event.senderOpenId } : {}) };
+      if (riskCleared && this.workspaceApprovals) {
+        const matched = await this.workspaceApprovals.match(scope, request).catch(() => undefined);
+        if (matched) {
+          const approved = await this.autoApprove(context, nativeId, question, matched);
+          if (approved === undefined) return;
+          if (approved) { options.onSessionAllowed?.(nativeId, matched); return; }
+        }
+        workspaceRule = await this.workspaceApprovals.candidate(scope, request).catch(() => undefined);
       }
     } else return;
     const structuredOn = options.structuredAskCards !== false && kind === 'ask';
@@ -785,7 +840,7 @@ export class LarkWorkflowInteractions {
     const created = await this.create(
       context, kind, nativeId, question,
       { ...(options.adhdMode === true ? { adhdMode: true } : {}), ...(expiresAt ? { expiresAt } : {}), ...(remindedAt ? { remindedAt } : {}), ...(structuredChoices ? { structured: true, ...(askMultiple ? { multiple: true } : {}) } : {}),
-        ...(allowKey ? { sessionAllowKey: allowKey } : {}), ...(intent ? { intent } : {}), ...(kind === 'permission' && options.groupMention === true ? { groupMention: true } : {}) }
+        ...(allowKey ? { sessionAllowKey: allowKey } : {}), ...(workspaceRule ? { workspaceRule } : {}), ...(intent ? { intent } : {}), ...(kind === 'permission' && options.groupMention === true ? { groupMention: true } : {}) }
     );
     let record = created.record;
     if (record.state !== 'pending' || record.cardId || this.delivering.has(record.id) || (this.retryAfter.get(record.id) ?? 0) > Date.now()) return;
@@ -815,9 +870,10 @@ export class LarkWorkflowInteractions {
       ? (structuredOn
         ? structuredChoices ? '点选下方选项提交；也可引用本卡片直接回复你的答案。' : '在下方填写答案并点击提交；也可引用本卡片直接回复你的答案。'
         : '请引用本卡片回复你的答案。')
-      : record.sessionAllowKey && requesterApproves
+      : [record.sessionAllowKey && requesterApproves
         ? '「允许本次」只处理这一条请求；「本会话允许此命令」仅允许目录、资源与命令完全相同的后续请求，服务重启后失效。'
-        : '本次选择只处理这一条请求，不改变后续授权方式。' };
+        : '本次选择只处理这一条请求，不改变后续授权方式。',
+        ...(record.workspaceRule && approvers.length ? [workspaceRuleNotice(record.workspaceRule.pattern)] : [])].join('\n\n') };
     const minimalAsk = kind === 'ask' && record.adhdMode === true;
     const displayedQuestion = minimalAsk ? { tag: 'markdown', content: question } : questionElement(kind, question);
     const elements: LarkCardElement[] = [
@@ -838,6 +894,8 @@ export class LarkWorkflowInteractions {
       ...(kind === 'permission' ? [button(record, 'approve', '允许本次'), button(record, 'reject', '拒绝')] : []),
       // 只有发起人能点、且只在发起人本人能批准时给；高危、被脱敏或被截断的命令没有匹配键，不给。
       ...(kind === 'permission' && record.sessionAllowKey && requesterApproves ? [button(record, 'allow_session', '本会话允许此命令')] : []),
+      // 只有机器人所有者或管理员能点，点击时校验；飞书里没人能批准时不给。
+      ...(kind === 'permission' && record.workspaceRule && approvers.length ? [button(record, 'allow_workspace', '本工作区允许此类命令')] : []),
       ...(kind === 'permission' ? [rejectReasonForm(record)] : []),
       ...(record.expiresAt && !(kind === 'ask' && record.adhdMode === true) ? [{ tag: 'markdown', element_id: 'workflow_deadline', text_size: 'notation', content: kind === 'permission'
         ? permissionDeadlineNotice(record.expiresAt)
@@ -1183,7 +1241,7 @@ export class LarkWorkflowInteractions {
     catch { return false; }
     return true;
   }
-  async respond(input: { appId: string; chatId: string; actorId?: string; requestId: string; action: 'answer' | 'approve' | 'reject' | 'accept' | 'changes' | 'allow_session' | 'plan_approve' | 'plan_revise' | 'plan_cancel'; answer?: string; reason?: string; selected?: string[]; cardId?: string; generation?: string; callback?: boolean; deferClose?: boolean }): Promise<string> {
+  async respond(input: { appId: string; chatId: string; actorId?: string; requestId: string; action: 'answer' | 'approve' | 'reject' | 'accept' | 'changes' | 'allow_session' | 'allow_workspace' | 'plan_approve' | 'plan_revise' | 'plan_cancel'; answer?: string; reason?: string; selected?: string[]; cardId?: string; generation?: string; callback?: boolean; deferClose?: boolean }): Promise<string> {
     if (!input.deferClose) return this.respondNow(input);
     const key = prefix(input.appId) + input.requestId;
     const entry = this.deferredCloses.get(key) ?? { active: 0, timer: undefined };
@@ -1212,12 +1270,16 @@ export class LarkWorkflowInteractions {
     let record = JSON.parse(raw) as LarkInteraction;
     if (record.event.chatId !== input.chatId || record.appId !== input.appId || !record.cardId) throw stale();
     if (input.callback && (input.cardId !== record.cardId || input.generation !== record.boot)) throw stale();
-    const expectedKind = input.action === 'answer' ? 'ask' : ['approve', 'reject', 'allow_session'].includes(input.action) ? 'permission' : input.action.startsWith('plan_') ? 'plan' : 'result';
+    const expectedKind = input.action === 'answer' ? 'ask' : ['approve', 'reject', 'allow_session', 'allow_workspace'].includes(input.action) ? 'permission' : input.action.startsWith('plan_') ? 'plan' : 'result';
     if (record.kind !== expectedKind) throw stale();
     if (record.durable) return this.respondConfirmation(record, input);
     if (input.action === 'allow_session') {
       if (!record.sessionAllowKey) throw new LarkServiceError('LARK_SESSION_ALLOW_UNAVAILABLE', '这条命令不能设为本会话允许，请点「允许本次」。', 400);
       if (input.actorId !== record.event.senderOpenId) throw new LarkServiceError('LARK_INTERACTION_DENIED', '只有发起人可以设置本会话允许此命令。', 403);
+    }
+    if (input.action === 'allow_workspace') {
+      if (!record.workspaceRule || !this.workspaceApprovals) throw new LarkServiceError('LARK_WORKSPACE_ALLOW_UNAVAILABLE', '这条命令不能设为本工作区允许，请点「允许本次」。', 400);
+      if (!await this.authorizeWorkspaceRule?.(record, input.actorId).catch(() => false)) throw new LarkServiceError('LARK_INTERACTION_DENIED', '只有机器人所有者或管理员可以设置本工作区允许此类命令。', 403);
     }
     // 提问过期后发起人再用文字回复：答案不再作废，交回调用方附上原问题，作为一条新消息发给 Agent。
     // 只认发起人本人；新消息照常走建任务的授权，这里不代任何人答题。
@@ -1225,7 +1287,7 @@ export class LarkWorkflowInteractions {
       throw new LarkServiceError('LARK_ASK_EXPIRED', '这条提问已过期，回复会作为新消息发给 Agent。', 409, { question: record.question });
     }
     // 计划卡三个动作与验收、中断同一道：发起人本来就能直接发这个任务，批准计划不要更高权限。
-    const policy: PolicyAction = input.action === 'approve' || input.action === 'allow_session' ? 'high_risk.execute' : 'run.interrupt';
+    const policy: PolicyAction = input.action === 'approve' || input.action === 'allow_session' || input.action === 'allow_workspace' ? 'high_risk.execute' : 'run.interrupt';
     if (!await this.authorize(record, input.actorId, policy)) throw new LarkServiceError('LARK_INTERACTION_DENIED', '当前账号无权操作此任务。', 403);
     // 截止时间已过而对账还没轮到它：先按超时收尾，迟到的批准不再生效。
     if (record.state === 'pending' && pastDeadline(record)) record = await this.timeoutPermission(record);
@@ -1313,6 +1375,7 @@ export class LarkWorkflowInteractions {
     } catch (error) {
       if ((error as { code?: string }).code === 'PERMISSION_ACCEPTED_AUDIT_FAILED') {
         if (input.action === 'allow_session') this.allowForSession(record);
+        if (input.action === 'allow_workspace') await this.rememberWorkspaceRule(record, input.actorId);
         await this.move(record, input.action === 'reject' ? 'rejected' : 'approved', undefined, rejectReason ? { rejectReason } : {}).catch(() => undefined);
         return '执行端已接受决策，审计回执暂未完成；请勿重复提交。';
       }
@@ -1330,15 +1393,21 @@ export class LarkWorkflowInteractions {
       throw error;
     }
     if (input.action === 'allow_session') this.allowForSession(record);
+    const ruleSaved = input.action === 'allow_workspace' ? await this.rememberWorkspaceRule(record, input.actorId) : false;
     const state = input.action === 'answer' ? 'answered' : input.action === 'reject' ? 'rejected' : 'approved';
     try { record = await this.move(record, state, undefined, { ...(answerLabel ? { answerLabel } : {}), ...(rejectReason ? { rejectReason } : {}) }); }
     catch { return '执行端已接受决策，回执记录暂未更新；请勿重复提交。'; }
     // 关闭后的卡写清结果、处理人和时间；ADHD 模式回显受控选项文案，自由文本回答不上卡。
     const actor = isGroupChat(record.event.chatType) && record.actorId ? renderGroupMention(record.actorId) : undefined;
     const outcome = [input.action === 'answer' ? answerLabel ? `已${answerLabel}` : '已回答' : input.action === 'reject' ? '已拒绝' : '已允许', actor, shanghaiClock(Date.parse(record.updatedAt))].filter(Boolean).join(' · ');
-    const rendered = await this.renderClosed(record, input.action === 'allow_session' ? `${outcome}\n\n本会话内完全相同的命令之后会自动允许。` : withRejectReason(outcome, rejectReason));
+    const ruleNote = !record.workspaceRule ? '' : ruleSaved
+      ? `本工作区之后以 \`${larkCommandEcho(record.workspaceRule.pattern, 200).replace(/`/g, '')}\` 开头的命令会自动允许。`
+      : '本次已允许，但工作区规则没有保存成功，之后仍会弹卡。';
+    const rendered = await this.renderClosed(record, input.action === 'allow_session' ? `${outcome}\n\n本会话内完全相同的命令之后会自动允许。`
+      : input.action === 'allow_workspace' ? `${outcome}\n\n${ruleNote}` : withRejectReason(outcome, rejectReason));
     if (!rendered) return '已处理，卡片状态更新失败，稍后自动重试；请勿重复提交。';
     if (input.action === 'answer') return echo ? `回答已送达原任务：${echo}` : '回答已送达原任务。';
+    if (input.action === 'allow_workspace') return `已允许。${ruleNote}`;
     return input.action === 'allow_session' ? '已允许，本会话内完全相同的命令之后会自动允许。' : input.action === 'approve' ? '执行端已接受本次批准。' : '执行端已接受拒绝。';
   }
   async quoted(appId: string, event: LarkMessageEvent) {

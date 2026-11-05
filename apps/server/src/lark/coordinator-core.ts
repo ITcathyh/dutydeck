@@ -160,6 +160,8 @@ export abstract class LarkCoordinatorCore {
       };
       /** Web 要求登录时提供；「查看详情」据此改为给管理员私信一次性登录链接。 */
       loginLinks?: Pick<LoginLinkStore, 'issue'>;
+      /** 按工作区记住的审批规则（审批卡「本工作区允许此类命令」）。 */
+      workspaceApprovals?: import('./workflow-interactions.js').LarkWorkspaceApprovals;
     } = {},
   ) {
     this.memory = workflowOptions.memory?.store;
@@ -169,7 +171,8 @@ export abstract class LarkCoordinatorCore {
         (record, actor, action) => this.authorizeInteraction(record, actor, action),
         { log: this.log, approverCandidates: record => this.groupManager?.highRiskOpenIds(record.appId, record.event.chatId) ?? Promise.resolve([]),
           onPlanDecision: record => this.submitPlanDecision(record),
-          onConfirmation: record => this.submitConfirmation(record), confirmationAvailable: (record, checkAccess) => this.confirmationAvailable(record, checkAccess) });
+          onConfirmation: record => this.submitConfirmation(record), confirmationAvailable: (record, checkAccess) => this.confirmationAvailable(record, checkAccess),
+          ...(workflowOptions.workspaceApprovals ? { workspaceApprovals: workflowOptions.workspaceApprovals, authorizeWorkspaceRule: (record, actor) => this.authorizeWorkspaceRule(record, actor) } : {}) });
       const unregister = workflowOptions.broker?.addDeferredHandler((input, context) => this.deferConfirmation(input, context));
       if (unregister) this.turnCleanups.add(unregister);
       // 置顶记录必须持久化：进程崩在长任务中间时，只有账本能让重启后的对账认出僵尸置顶。
@@ -202,10 +205,10 @@ export abstract class LarkCoordinatorCore {
       ...(task.config.webBaseUrl ? { webBaseUrl: task.config.webBaseUrl } : {}),
       groupMention: larkNotice('permission_card', task.config, task.event).mentionAllowed,
       highRiskPattern: task.config.highRiskPattern || defaultHighRiskPattern,
-      // 按「本会话允许」自动批准的请求不另发卡：在进度卡原来那条权限记录上标注，随下一帧原位刷新。
-      onSessionAllowed: (permissionId: string) => {
+      // 按「本会话允许」或工作区规则自动批准的请求不另发卡：在进度卡原来那条权限记录上标注，随下一帧原位刷新。
+      onSessionAllowed: (permissionId: string, workspaceRule?: string) => {
         task.events.push({ id: `session_allowed_${permissionId}`, sessionId: task.sessionId ?? '', sequence: 0, timestamp: new Date().toISOString(),
-          type: 'permission_request', data: { id: permissionId, sessionAllowed: true } });
+          type: 'permission_request', data: { id: permissionId, sessionAllowed: true, ...(workspaceRule ? { workspaceRule } : {}) } });
       }
     };
   }
@@ -396,6 +399,19 @@ export abstract class LarkCoordinatorCore {
    *   同一道安装级门（high_risk.execute）——改「谁能使唤机器人」至少和跑一条高风险命令同级。
    * - 非托管群：回落部署级静态白名单，与该形态下其他管理动作口径一致。
    */
+  /**
+   * 建工作区审批规则的人：托管群按群策略要求所有者或管理员（与 /grant 同一动作 grant.create）；
+   * 非托管 Bot 没有管理员角色，只认部署时配置的非空访问白名单里的人，白名单为空时谁都不能建。
+   */
+  protected async authorizeWorkspaceRule(record: LarkInteraction, actor: string) {
+    const config = await readLarkConfig(this.workflowOptions.store, record.appId);
+    if (!config?.listening) return false;
+    const decision = await this.groupManager?.authorize(config.appId, record.event.chatId, actor, 'grant.create', record.sessionId);
+    if (decision) return decision.allowed;
+    const restricted = (config.allowedUsers ?? []).length > 0 || (config.allowedEmails ?? []).length > 0;
+    return restricted && await this.isStaticOperatorAllowed(config, actor, record.event.chatId);
+  }
+
   protected async isGrantOperatorAllowed(config: StoredLarkConfig, operatorOpenId: string | undefined, chatId: string, action: PolicyAction): Promise<boolean> {
     if (!operatorOpenId) return false;
     const decision = await this.groupManager?.authorize(config.appId, chatId, operatorOpenId, action);

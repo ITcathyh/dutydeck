@@ -17,7 +17,7 @@
 
 ## Key Capabilities <a id="key-highlights"></a>
 
-- **Lark bridge**: streaming progress cards; phone approvals ("Allow once / Allow this command for the session / Reject"); long output bundled as Markdown attachments; `adhdMode` for conclusion-first output; a "View changes" link on result cards for the diff of that turn, with line comments.
+- **Lark bridge**: streaming progress cards; phone approvals ("Allow once / Allow this command for the session / 本工作区允许此类命令 (allow in this workspace) / Reject"); long output bundled as Markdown attachments; `adhdMode` for conclusion-first output; a "View changes" link on result cards for the diff of that turn, with line comments.
 - **Git Worktree (optional)**: edits happen in a worktree derived from HEAD. Web defaults to a worktree, **Lark defaults to `shared`** (the selected directory). In Lark, use `/new --workspace worktree`.
 - **Verification gate**: set a bot's `verificationCommand` (e.g. `pnpm test`); after a Lark task changes code, the server runs it on the host and records the result. On failure the output goes back to the agent for up to 2 repair rounds. Web sessions do not trigger it.
 - **Memory**: **off by default** (`memoryEnabled` unset means on only when the default group participation is selective or eager). Private chats are independent. In groups all groups of one bot share a pool by default; set `groupMemoryScope=per-group` (Web "Group memory scope", or `dutydeck settings bot set <appId> groupMemoryScope=per-group`) to isolate groups. Switching does not migrate or delete anything.
