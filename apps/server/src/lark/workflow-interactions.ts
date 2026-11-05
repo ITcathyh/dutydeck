@@ -2,7 +2,7 @@ import { clearTaskReportSafely } from '@dutydeck/shared';
 import { formatUnknownTaskTime as deadlineText } from '../task-resolution.js';
 import { larkMessageAnchor } from './message-anchor.js';
 import { describeLarkTaskRecovery } from './task-recovery.js';
-import { cleanPermissionRejectReason, permissionDisplayText, permissionRejectReasonHint, permissionRejectReasonMaxLength, timeLoop } from '@dutydeck/shared';
+import { cleanPermissionRejectReason, freeTextInputMaxBytes, freeTextInputMaxLength, freeTextInputViolation, permissionDisplayText, permissionRejectReasonHint, permissionRejectReasonMaxLength, timeLoop } from '@dutydeck/shared';
 import { createHash, randomUUID } from 'node:crypto';
 import type { AgentEvent, ConfigRepository, PermissionRequestData, PolicyAction } from '@dutydeck/shared';
 import type { RelayAskBroker, RelayAskChoice, RelayDeferredAsk } from '@dutydeck/relay';
@@ -187,7 +187,7 @@ const rejectReasonForm = (record: LarkInteraction): LarkCardElement => ({
   direction: 'vertical', vertical_spacing: '8px', margin: '0px',
   elements: [
     { tag: 'input', element_id: 'workflow_reject_input', name: 'reason',
-      input_type: 'multiline_text', max_length: 1000,
+      input_type: 'multiline_text', max_length: permissionRejectReasonMaxLength,
       placeholder: { tag: 'plain_text', content: `${permissionRejectReasonHint}留空等同于「拒绝」` } },
     { tag: 'button', element_id: 'workflow_reject_submit', type: 'default',
       text: { tag: 'plain_text', content: '拒绝并说明' }, form_action_type: 'submit',
@@ -196,21 +196,11 @@ const rejectReasonForm = (record: LarkInteraction): LarkCardElement => ({
 });
 
 /** 终态文案里的拒绝说明：先脱敏再折成一行并截断；转义在渲染处做。 */
-const rejectReasonSummary = (reason: string) => larkCommandEcho(permissionDisplayText(reason, [], permissionRejectReasonMaxLength), 120);
+const rejectReasonSummary = (reason: string) => larkCommandEcho(permissionDisplayText(reason, [], freeTextInputMaxBytes), 120);
 const withRejectReason = (message: string, reason?: string) => reason ? `${message}\n\n原因：${escapeLarkPromptEcho(reason)}` : message;
 
 /** 「其他」文字输入：选项之外的答案。表单字段名 other，与选项值 answer 分开，旧卡片没有这个字段。 */
-const otherAnswerMaxLength = 1000;
-const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
-/**
- * 飞书文档没写 input 的 max_length 按什么计数。按字素（用户看到的一个字符，如组合 emoji）计数是
- * UTF-16 码元、码点、字素几种口径里最宽的：输入框放行的文字，服务端一定不拒。
- */
-const graphemeLength = (text: string) => {
-  let length = 0;
-  for (const _ of graphemeSegmenter.segment(text)) length++;
-  return length;
-};
+const otherAnswerMaxLength = freeTextInputMaxLength;
 const otherAnswerInput: LarkCardElement = {
   tag: 'input', element_id: 'workflow_answer_other', name: 'other', input_type: 'multiline_text', max_length: otherAnswerMaxLength,
   placeholder: { tag: 'plain_text', content: '其他（选填）：没有合适的选项时，在这里写下你的答案' }
@@ -1378,7 +1368,7 @@ export class LarkWorkflowInteractions {
         const invalidChoice = () => new LarkServiceError('LARK_ANSWER_CHOICE_INVALID', '提交的选项已失效，请点选卡片上的最新选项，或引用本卡片直接回复答案。', 400);
         // 「其他」文字只有带输入框的普通提问卡才会提交；ADHD 提问卡只收选项，带了也不采纳。
         const other = record.adhdMode === true ? undefined : input.other?.trim();
-        if (other && graphemeLength(other) > otherAnswerMaxLength) throw new LarkServiceError('LARK_ANSWER_TOO_LONG', `其他答案不能超过 ${otherAnswerMaxLength} 个字符。`, 400);
+        if (other && freeTextInputViolation(other, otherAnswerMaxLength)) throw new LarkServiceError('LARK_ANSWER_TOO_LONG', `其他答案不能超过 ${otherAnswerMaxLength} 个字符。`, 400);
         if (record.multiple) {
           const picked = Array.isArray(input.selected)
             ? [...new Set(input.selected.filter((value): value is string => typeof value === 'string'))]
@@ -1405,7 +1395,7 @@ export class LarkWorkflowInteractions {
     }
     // 拒绝说明：与「拒绝」同一授权、同一幂等路径；只在最终提交前清洗，空说明等同于普通拒绝。
     const rejectReasonText = input.action === 'reject' && typeof input.reason === 'string' ? cleanPermissionRejectReason(input.reason) : undefined;
-    if (rejectReasonText && rejectReasonText.length > permissionRejectReasonMaxLength) throw new LarkServiceError('LARK_REASON_TOO_LONG', `拒绝说明不能超过 ${permissionRejectReasonMaxLength} 个字符。`, 400);
+    if (rejectReasonText && freeTextInputViolation(rejectReasonText, permissionRejectReasonMaxLength)) throw new LarkServiceError('LARK_REASON_TOO_LONG', `拒绝说明不能超过 ${permissionRejectReasonMaxLength} 个字符。`, 400);
     const rejectReason = rejectReasonText ? rejectReasonSummary(rejectReasonText) : undefined;
     const answerLabel = record.kind === 'ask' && record.adhdMode === true
       ? (this.broker?.get(record.nativeId)?.choices ?? []).filter(choice => (input.selected ?? [answerText]).includes(choice.value ?? choice.label)).map(choice => choice.label).join('、') || undefined

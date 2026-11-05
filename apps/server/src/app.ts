@@ -1,4 +1,4 @@
-import { matterStatusForSessions, isSupersededMatterSession, cleanPermissionRejectReason, permissionRejectReasonMaxLength } from '@dutydeck/shared';
+import { matterStatusForSessions, isSupersededMatterSession, cleanPermissionRejectReason, freeTextInputMaxBytes, freeTextInputViolation, permissionRejectReasonMaxLength } from '@dutydeck/shared';
 import { registerConfigurationExplanationRoutes, type ConfigurationExplanationOptions } from './configuration-explanation.js';
 import { registerArtifactSnapshotRoutes, type ArtifactSnapshotRouteOptions } from './artifact-snapshot-routes.js';
 import { registerPluginBusinessToolRoutes, type PluginBusinessToolRoutes } from './plugins/tool-routes.js';
@@ -617,7 +617,8 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     if (rawReason !== undefined && typeof rawReason !== 'string') throw new RuntimeError('INVALID_PERMISSION_REASON', 'reason must be a string', 400);
     const reason = rawReason === undefined ? undefined : cleanPermissionRejectReason(rawReason);
     if (reason && approved) throw new RuntimeError('INVALID_PERMISSION_REASON', 'reason is only allowed when the request is rejected', 400);
-    if (reason && reason.length > permissionRejectReasonMaxLength) throw new RuntimeError('INVALID_PERMISSION_REASON', `reason must not exceed ${permissionRejectReasonMaxLength} characters`, 400);
+    const violation = reason ? freeTextInputViolation(reason, permissionRejectReasonMaxLength) : undefined;
+    if (violation) throw new RuntimeError('INVALID_PERMISSION_REASON', violation === 'bytes' ? `reason must not exceed ${freeTextInputMaxBytes} bytes` : `reason must not exceed ${permissionRejectReasonMaxLength} characters`, 400);
     return runtime.resolvePermission(request.params.id, request.params.permissionId, approved, reason);
   });
   const parseEventCursor = (value: string | undefined, name: string) => {

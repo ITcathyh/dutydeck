@@ -227,7 +227,9 @@ describe('persistent Lark workflow interactions', () => {
       const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, async () => true);
       await workflow.observe(context(), agentEvent('permission_request', permissions[0]));
       const record = (await workflow.list('app_one'))[0]!;
-      await expect(workflow.respond(responseInput(record, { action: 'reject', reason: 'x'.repeat(2001) }))).rejects.toMatchObject({ code: 'LARK_REASON_TOO_LONG' });
+      await expect(workflow.respond(responseInput(record, { action: 'reject', reason: '长'.repeat(1001) }))).rejects.toMatchObject({ code: 'LARK_REASON_TOO_LONG' });
+      // 伪造回调：1 个字素但超过 64 KB 字节上限。
+      await expect(workflow.respond(responseInput(record, { action: 'reject', reason: `e${'\u0301'.repeat(40000)}` }))).rejects.toMatchObject({ code: 'LARK_REASON_TOO_LONG' });
       expect(resolvePermission).not.toHaveBeenCalled();
       expect(await workflow.get('app_one', record.id)).toMatchObject({ state: 'pending' });
       await workflow.respond(responseInput(record, { action: 'reject', reason: ' \n ' }));
@@ -858,6 +860,10 @@ describe('structured ask cards (P0-2)', () => {
       // 计数按字素：一个组合 emoji 是 7 个码点、11 个 UTF-16 码元，仍只算 1 个字符。
       const family = '\u{1F468}\u200D\u{1F469}\u200D\u{1F467}\u200D\u{1F466}';
       await expect(h.workflow.respond(responseInput(record, { answer: undefined, other: family.repeat(1001) })))
+        .rejects.toMatchObject({ code: 'LARK_ANSWER_TOO_LONG' });
+      expect((await findRecord(h.workflow, single.askId)).state).toBe('pending');
+      // 伪造回调：1 个字素但超过 64 KB 字节上限。
+      await expect(h.workflow.respond(responseInput(record, { answer: undefined, other: `e${'\u0301'.repeat(40000)}` })))
         .rejects.toMatchObject({ code: 'LARK_ANSWER_TOO_LONG' });
       expect((await findRecord(h.workflow, single.askId)).state).toBe('pending');
 

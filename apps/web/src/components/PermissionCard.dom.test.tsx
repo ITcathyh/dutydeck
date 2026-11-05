@@ -1,6 +1,7 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
+import { permissionRejectReasonMaxLength } from '@dutydeck/shared';
 import type { TimelineEvent } from '../timeline';
 import { PermissionCard } from './PermissionCard';
 
@@ -99,6 +100,9 @@ describe('拒绝并说明', () => {
     render(<PermissionCard event={permission('pending')} onResolve={onResolve}/>);
     expect(screen.queryByLabelText('拒绝原因')).toBeNull();
     await user.click(screen.getByRole('button', { name: '拒绝并说明' }));
+    // 与服务端字素上限、飞书输入框 max_length 一致。
+    expect((screen.getByLabelText('拒绝原因') as HTMLTextAreaElement).maxLength).toBe(permissionRejectReasonMaxLength);
+    expect(permissionRejectReasonMaxLength).toBe(1000);
     const submit = screen.getByRole('button', { name: '提交拒绝' }) as HTMLButtonElement;
     expect(submit.disabled).toBe(true);
     await user.type(screen.getByLabelText('拒绝原因'), '   ');

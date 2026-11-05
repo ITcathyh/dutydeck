@@ -348,7 +348,11 @@ describe('HTTP API boundary', () => {
     const post = (payload: unknown) => app.inject({ method: 'POST', url: '/api/sessions/s1/permissions/p1', payload: payload as Record<string, unknown> });
     // 批准不能带说明；超长、非字符串直接 400，Runtime 不会被调用。
     expect(await post({ approved: true, reason: '不该有' })).toMatchObject({ statusCode: 400 });
-    expect(await post({ approved: false, reason: 'x'.repeat(2001) })).toMatchObject({ statusCode: 400 });
+    expect(await post({ approved: false, reason: '长'.repeat(1001) })).toMatchObject({ statusCode: 400 });
+    // 伪造请求：1 个字素但超过 64 KB 字节上限。
+    const forged = await post({ approved: false, reason: `e${'\u0301'.repeat(40000)}` });
+    expect(forged.statusCode).toBe(400);
+    expect(forged.json().error.message).toContain('bytes');
     expect(await post({ approved: false, reason: 42 })).toMatchObject({ statusCode: 400 });
     expect(runtime.resolvePermission).not.toHaveBeenCalled();
     // 空白视为没有说明；批准加空白说明也只是普通批准。
@@ -358,11 +362,15 @@ describe('HTTP API boundary', () => {
     expect(runtime.resolvePermission).toHaveBeenLastCalledWith('s1', 'p1', true, undefined);
     expect((await post({ approved: false })).statusCode).toBe(200);
     expect(runtime.resolvePermission).toHaveBeenLastCalledWith('s1', 'p1', false, undefined);
-    // 去首尾空白与控制字符（保留换行）；恰好 2000 字符可以通过。
+    // 按字素计数：1000 个组合 emoji（11000 个 UTF-16 码元）照常接受。
+    const emoji = '\u{1F468}\u200D\u{1F469}\u200D\u{1F467}\u200D\u{1F466}'.repeat(1000);
+    expect((await post({ approved: false, reason: emoji })).statusCode).toBe(200);
+    expect(runtime.resolvePermission).toHaveBeenLastCalledWith('s1', 'p1', false, emoji);
+    // 去首尾空白与控制字符（保留换行）；恰好 1000 字可以通过。
     expect(await post({ approved: false, reason: '  先别动\u0007配置\n改用 /tmp  ' })).toMatchObject({ statusCode: 200 });
     expect(runtime.resolvePermission).toHaveBeenLastCalledWith('s1', 'p1', false, '先别动配置\n改用 /tmp');
-    expect((await post({ approved: false, reason: ` ${'x'.repeat(2000)} ` })).statusCode).toBe(200);
-    expect(runtime.resolvePermission).toHaveBeenLastCalledWith('s1', 'p1', false, 'x'.repeat(2000));
+    expect((await post({ approved: false, reason: ` ${'x'.repeat(1000)} ` })).statusCode).toBe(200);
+    expect(runtime.resolvePermission).toHaveBeenLastCalledWith('s1', 'p1', false, 'x'.repeat(1000));
   });
 
   it('replays missed SSE events after Last-Event-ID reconnect', async () => {
