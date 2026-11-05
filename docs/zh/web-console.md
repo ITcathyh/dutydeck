@@ -160,7 +160,22 @@ dutydeck schedule create --session ses_xxx --name 发布检查 --prompt '检查�
 dutydeck schedule update schedule_xxx --session ses_xxx --input '{"completionCondition":null,"deadlineAt":null}'
 ```
 
-`--deadline` 接受带时区偏移的 ISO 时间，或按计划时区解释的 `YYYY-MM-DDTHH:mm`。API 的创建与更新字段同名（更新传 `null` 清除），`deadlineAt` 须带时区偏移；`GET /api/sessions/:sessionId/automation` 返回 `runStates`，`GET /api/automation/schedules` 每项返回 `runState`。
+**到点先跑前置命令。** 「每次到期执行」的计划可以设一条前置命令（`precondition: {command, timeoutSeconds}`），适合“没有新提交就别叫醒 Agent”这类轮询：
+
+- 到点后、开执行会话或启动工作项模板之前，宿主在计划执行目录（保存时冻结的目录，取真实路径）里用 `/bin/sh` 跑这条命令。退出码 0 才照常执行；非 0 记为「已跳过」，不建任务、不消耗用量、不发通知，也不算一次没做成。超时（默认 15 秒，最长 20 秒）、无法启动或进程没收干净算一次没做成，在回报位置说明，连续三次自动停用。「立即执行」同样先跑前置命令，但不计入连续没做成。
+- 命令与交付前验证用同一个执行器：只带 `PATH`、`HOME`、`LANG` 等最小环境变量，不合并 Agent 配置、密钥和群工具令牌；命令在独立进程组里运行，超时或结束时整组终止。输出（stdout 与 stderr 合并）按服务进程环境里的密钥值脱敏，保留前 4 KB；计划卡片显示命令、最近一次结果、输出和自上次通过以来连续跳过的次数，运行记录里只留一句摘要（退出码和输出末尾）。
+- 只能在 Web 计划面板或本机 `dutydeck schedule --condition-command` 设置、修改或清除（要求安装管理员身份）。`dutydeck agent schedule create/update`、飞书 `/schedule` 与确认卡都不接受这个字段，请求里带了就返回 400。不能和「CI 出现新的失败构建」条件同时设置；模板计划可以用。目前只在 Linux 上可用。
+- 命令命中默认高危规则（如 `rm`、`sudo`、`git push/reset`、`curl -X POST`）时拒绝保存。这只防手误，不是安全边界：能改计划的人本来就能在这台机器上执行命令，请只写只读检查。
+- 命令单独保存，和计划修订号一次写入；计划本身的执行条件仍是「每次到期执行」。切回不认识前置命令的旧版本后，前置命令不再生效，计划每次到点都会唤醒 Agent，见[升级说明](upgrading.md)。
+
+```bash
+# 每 5 分钟看一次，工作区里有 ready.flag 才唤醒 Agent；超时 10 秒
+dutydeck schedule create --session ses_xxx --name 等就绪 --prompt '处理新到的数据' --every 5 --condition-command 'test -f ready.flag' --condition-timeout 10
+# 清除前置命令（也可 --input '{"precondition":null}'）
+dutydeck schedule update schedule_xxx --session ses_xxx --condition-command ''
+```
+
+`--deadline` 接受带时区偏移的 ISO 时间，或按计划时区解释的 `YYYY-MM-DDTHH:mm`。API 的创建与更新字段同名（更新传 `null` 清除），`deadlineAt` 须带时区偏移；`GET /api/sessions/:sessionId/automation` 返回 `runStates` 和 `preconditions`（各计划的前置命令与最近一次结果），`GET /api/automation/schedules` 每项返回 `runState`。
 
 ## 6. 实验功能（草稿页）
 “群与权限”策略页、定时任务页的导入草稿、设置里的“迁移与高级草稿”目前只保存草稿，不会生效或执行，所以默认隐藏。在「设置与接入 → 实验功能」打开“显示实验功能”后才显示。开关只保存在当前浏览器。

@@ -368,10 +368,40 @@ async function stopPersistedProcess(record: StoredVerificationRecord): Promise<s
   return undefined;
 }
 
-function runCommand(command: string, cwd: string, timeoutMs: number, signal: AbortSignal, secrets: Buffer[], onIdentity: (identity: VerificationProcessIdentity) => Promise<void>): Promise<CommandResult> {
+export interface IsolatedCommandResult {
+  exitCode?: number;
+  /** stdout 与 stderr 合并、按宿主环境中的敏感值脱敏后截到 maxOutputBytes。 */
+  output: string;
+  outputTruncated: boolean;
+  timedOut: boolean;
+  interrupted: boolean;
+  /** 无法启动等执行错误（已脱敏）。 */
+  error?: string;
+  /** 进程组没能确认退出（已脱敏）。 */
+  cleanupError?: string;
+}
+
+/**
+ * 与交付前验证同一个执行器：`/bin/sh` 在独立进程组里执行命令，环境只有 minimalToolEnvironment()，
+ * 超时或中止时整组 SIGKILL，结束后也收掉后台子进程。不写验证记录、不计算仓库指纹。
+ */
+export async function runIsolatedCommand(command: string, cwd: string, options: { timeoutMs: number; maxOutputBytes: number; signal?: AbortSignal }): Promise<IsolatedCommandResult> {
+  const secrets = sensitiveProcessValues();
+  const scrub = (text: string | undefined) => text === undefined ? undefined : redact(Buffer.from(text), secrets).toString('utf8');
+  let result: CommandResult;
+  try { result = await runCommand(command, cwd, options.timeoutMs, options.signal ?? new AbortController().signal, secrets, undefined, options.maxOutputBytes); }
+  catch (error) { result = { output: '', outputTruncated: false, timedOut: false, interrupted: Boolean(options.signal?.aborted), error: error instanceof Error ? error.message : String(error) }; }
+  const error = scrub(result.error);
+  const cleanupError = scrub(result.cleanupError);
+  return { ...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}), output: result.output, outputTruncated: result.outputTruncated,
+    timedOut: result.timedOut, interrupted: result.interrupted, ...(error ? { error } : {}), ...(cleanupError ? { cleanupError } : {}) };
+}
+
+/** onIdentity 缺省时不记录进程身份，直接写入命令（不需要跨重启找回进程的调用方）。 */
+function runCommand(command: string, cwd: string, timeoutMs: number, signal: AbortSignal, secrets: Buffer[], onIdentity?: (identity: VerificationProcessIdentity) => Promise<void>, maxOutputBytes = MAX_OUTPUT_BYTES): Promise<CommandResult> {
   return new Promise(resolve => {
     const safetyMargin = Math.max(0, ...secrets.map(secret => secret.length - 1));
-    const captureLimit = MAX_OUTPUT_BYTES + safetyMargin;
+    const captureLimit = maxOutputBytes + safetyMargin;
     const marker = makeId('dutydeck_verification_process');
     const child = spawn('/bin/sh', ['-s', '--', marker], { cwd, detached: true, env: minimalToolEnvironment(), stdio: ['pipe', 'pipe', 'pipe'] });
     const chunks: Buffer[] = [];
@@ -418,6 +448,11 @@ function runCommand(command: string, cwd: string, timeoutMs: number, signal: Abo
     timer.unref?.();
     child.once('spawn', () => {
       identityRun = (async () => {
+        if (!onIdentity) {
+          if (terminated || signal.aborted) { terminate(); return; }
+          child.stdin?.end(command + '\n');
+          return;
+        }
         const identity = child.pid ? await readLinuxProcessIdentity(child.pid, marker) : undefined;
         if (!identity || identity.processGroupId !== child.pid) throw new Error('Unable to establish verification process identity');
         await onIdentity(identity);
@@ -453,8 +488,8 @@ function runCommand(command: string, cwd: string, timeoutMs: number, signal: Abo
       }
       const raw = Buffer.concat(chunks);
       const redacted = redact(raw, secrets);
-      if (raw.length > MAX_OUTPUT_BYTES || redacted.length > MAX_OUTPUT_BYTES) outputTruncated = true;
-      const output = redacted.subarray(0, MAX_OUTPUT_BYTES).toString('utf8');
+      if (raw.length > maxOutputBytes || redacted.length > maxOutputBytes) outputTruncated = true;
+      const output = redacted.subarray(0, maxOutputBytes).toString('utf8');
       resolve({ ...(exitCode !== undefined ? { exitCode } : {}), output, outputTruncated, timedOut, interrupted, ...(spawnError ? { error: spawnError } : {}), ...(cleanupError ? { cleanupError } : {}) });
     }
   });

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { previewSessionSchedule, resolveScheduleDeadline, type AutomationDeliveryTarget, type CreateSessionScheduleInput, type UpdateSessionScheduleInput, type PublicSessionSchedule as SessionSchedule } from '@dutydeck/shared';
+import { previewSessionSchedule, resolveScheduleDeadline, SCHEDULE_PRECONDITION_DEFAULT_TIMEOUT_SECONDS, SCHEDULE_PRECONDITION_MAX_TIMEOUT_SECONDS, type AutomationDeliveryTarget, type PublicSchedulePrecondition, type CreateSessionScheduleInput, type UpdateSessionScheduleInput, type PublicSessionSchedule as SessionSchedule } from '@dutydeck/shared';
 import { api, ApiError, type Session } from '../api';
 import { currentInstance } from '../instance';
 import { requestId } from '../request-id';
@@ -26,6 +26,16 @@ export function scheduleFollowUp(item: SessionSchedule): string[] {
     ...(item.completionCondition ? [`直到：${item.completionCondition}（达成后由 Agent 停用）`] : []),
     ...(item.deadlineAt ? [`截止：${automationTime(item.deadlineAt, item.timezone)}（到点仍未确认完成就自动停用并告知）`] : [])
   ];
+}
+
+/** 前置命令的最近一次结果，一行说明。 */
+export function preconditionSummary(precondition: PublicSchedulePrecondition, timezone: string): string {
+  const last = precondition.last;
+  const result = !last ? '尚未运行'
+    : last.outcome === 'passed' ? `通过（退出码 0），已唤醒 Agent · ${automationTime(last.at, timezone)}`
+    : last.outcome === 'skipped' ? `退出码 ${last.exitCode}，已跳过 · ${automationTime(last.at, timezone)}`
+    : `${last.timedOut ? `超过 ${precondition.timeoutSeconds} 秒未结束` : `无法执行：${last.error ?? '未知错误'}`}，计入没做成 · ${automationTime(last.at, timezone)}`;
+  return `最近一次前置命令：${result} · 连续跳过 ${precondition.skippedInARow} 次`;
 }
 
 export function scheduleNextExecution(item: SessionSchedule): string {
@@ -89,6 +99,8 @@ export function SessionAutomationPanel({ session, initialScheduleId, openCreateF
   const [until, setUntil] = useState('');
   const [deadline, setDeadline] = useState('');
   const [template, setTemplate] = useState('');
+  const [checkCommand, setCheckCommand] = useState('');
+  const [checkTimeout, setCheckTimeout] = useState(String(SCHEDULE_PRECONDITION_DEFAULT_TIMEOUT_SECONDS));
   const templates = useQuery({ queryKey: ['work-templates', currentInstance() ?? null, session.id], queryFn: () => api.workItems(session.id), retry: false, enabled: !isSessionActionDisabled(session) });
 
   const [notice, setNotice] = useState('');
@@ -128,7 +140,8 @@ export function SessionAutomationPanel({ session, initialScheduleId, openCreateF
       condition: condition === 'always' ? { kind: 'always' } : { kind: 'ci_new_failure', ...(conditionWorkflow.trim() ? { workflow: conditionWorkflow.trim() } : {}) },
       ...(until.trim() ? { completionCondition: until.trim() } : {}),
       ...(deadline ? { deadlineAt: resolveScheduleDeadline(deadline, timezone) } : {}),
-      ...(template ? { workTemplate: { id: template.slice(0, template.lastIndexOf('@')), version: Number(template.slice(template.lastIndexOf('@') + 1)) } } : {})
+      ...(template ? { workTemplate: { id: template.slice(0, template.lastIndexOf('@')), version: Number(template.slice(template.lastIndexOf('@') + 1)) } } : {}),
+      ...(condition === 'always' && checkCommand.trim() ? { precondition: { command: checkCommand.trim(), timeoutSeconds: Number(checkTimeout) || SCHEDULE_PRECONDITION_DEFAULT_TIMEOUT_SECONDS } } : {})
     };
     return input;
   };
@@ -147,8 +160,10 @@ export function SessionAutomationPanel({ session, initialScheduleId, openCreateF
     if (input.completionCondition !== editing.completionCondition) patch.completionCondition = input.completionCondition ?? null;
     if (input.deadlineAt !== editing.deadlineAt) patch.deadlineAt = input.deadlineAt ?? null;
     if (JSON.stringify(input.workTemplate ?? null) !== JSON.stringify(editing.workTemplate ?? null)) patch.workTemplate = input.workTemplate ?? null;
+    const savedCheck = data?.preconditions?.[editing.id];
+    if (input.precondition?.command !== savedCheck?.command || input.precondition && input.precondition.timeoutSeconds !== savedCheck?.timeoutSeconds) patch.precondition = input.precondition ?? null;
     return Object.keys(patch).length === 1 ? Promise.resolve({ schedule: editing }) : api.updateSchedule(editing.sessionId, editing.id, patch);
-  }, onSuccess: async () => { await refresh(); setNotice(editing ? '计划已更新。' : '计划已保存，点击「启用」后才会运行。'); setEditing(undefined); setName(''); setPrompt(''); setUntil(''); setDeadline(''); setTemplate(''); }, onError: refresh });
+  }, onSuccess: async () => { await refresh(); setNotice(editing ? '计划已更新。' : '计划已保存，点击「启用」后才会运行。'); setEditing(undefined); setName(''); setPrompt(''); setUntil(''); setDeadline(''); setTemplate(''); setCheckCommand(''); setCheckTimeout(String(SCHEDULE_PRECONDITION_DEFAULT_TIMEOUT_SECONDS)); }, onError: refresh });
   const edit = (item: SessionSchedule) => {
     setMode(item.mode ?? 'session'); setMisfirePolicy(item.misfirePolicy ?? 'coalesce'); setLatenessMinutes(item.maxLatenessSeconds ? String(item.maxLatenessSeconds / 60) : '');
     setEditing(item); setName(item.name); setPrompt(item.prompt); setTimezone(item.timezone); setKind(item.trigger.kind); setCondition(item.condition.kind);
@@ -158,6 +173,8 @@ export function SessionAutomationPanel({ session, initialScheduleId, openCreateF
     setConditionWorkflow(item.condition.kind === 'ci_new_failure' ? item.condition.workflow ?? '' : '');
     setUntil(item.completionCondition ?? ''); setDeadline(item.deadlineAt ? localInputValue(item.deadlineAt, item.timezone) : '');
     setTemplate(item.workTemplate ? `${item.workTemplate.id}@${item.workTemplate.version}` : '');
+    const check = data?.preconditions?.[item.id];
+    setCheckCommand(check?.command ?? ''); setCheckTimeout(String(check?.timeoutSeconds ?? SCHEDULE_PRECONDITION_DEFAULT_TIMEOUT_SECONDS));
   };
   useEffect(() => {
     if (!initialScheduleId || openedSchedule.current === initialScheduleId) return;
@@ -216,6 +233,10 @@ export function SessionAutomationPanel({ session, initialScheduleId, openCreateF
         <p className="text-caption text-secondary">保存预览：{preview} · {misfirePolicy === 'skip' ? '错过就跳过' : latenessMinutes ? `只在 ${latenessMinutes} 分钟内合并补一次` : '恢复后最多补一次'}</p>
         <Field label="执行条件"><Select value={condition} onChange={event => setCondition(event.target.value as typeof condition)}><option value="always">每次到期执行</option><option value="ci_new_failure" disabled={providers.isSuccess && !pollingProviders.length && condition !== 'ci_new_failure'}>CI 出现新的失败构建时执行{providers.isSuccess && !pollingProviders.length ? '（未安装 CI 插件）' : ''}</option></Select></Field>
         {condition === 'ci_new_failure' && <Field label="检查的工作流（可选）"><Input value={conditionWorkflow} onChange={event => setConditionWorkflow(event.target.value)}/></Field>}
+        {condition === 'always' ? <>
+          <Field label="前置命令（可选）" hint="到点后先在计划执行目录里运行这条命令：退出码 0 才唤醒 Agent，非 0 跳过这次；超时或无法执行算一次没做成。只带最小环境变量（不含 Agent 配置与密钥），输出保留 4 KB。留空则每次到期都执行"><Input value={checkCommand} maxLength={2000} onChange={event => setCheckCommand(event.target.value)} placeholder="例如：test -f ready.flag"/></Field>
+          {checkCommand.trim() && <Field label="前置命令超时（秒）"><Input type="number" min={1} max={SCHEDULE_PRECONDITION_MAX_TIMEOUT_SECONDS} step={1} required value={checkTimeout} onChange={event => setCheckTimeout(event.target.value)}/></Field>}
+        </> : data?.preconditions?.[editing?.id ?? ''] && <p className="text-caption text-warning">前置命令不能和 CI 条件同时使用；按 CI 条件保存会清除已设的前置命令。</p>}
         <div className="flex gap-2"><Button type="submit" variant="primary" loading={save.isPending}>保存计划</Button>{editing && <Button onClick={() => setEditing(undefined)}>取消编辑</Button>}</div>
       </form>
     </details>}
@@ -225,6 +246,10 @@ export function SessionAutomationPanel({ session, initialScheduleId, openCreateF
       <p className="mt-2 text-secondary">{scheduleRule(item)}</p>
       {scheduleFollowUp(item).map(line => <p key={line} className="break-words text-secondary">{line}</p>)}
       <details className="mt-1 text-subtle"><summary className="cursor-pointer">精确规则与执行条件</summary><p className="mt-1 break-all">{item.trigger.kind === 'cron' ? item.trigger.expression : item.trigger.kind === 'interval' ? `每 ${item.trigger.everySeconds} 秒，自 ${item.trigger.anchorAt} 起` : item.trigger.localDateTime}</p><p>{item.condition.kind === 'always' ? '每次到期执行' : `CI 新失败 · ${item.condition.provider}${item.condition.workflow ? ` · ${item.condition.workflow}` : ''}`}</p></details>
+      {data.preconditions?.[item.id] && <details className="mt-1 text-secondary"><summary className="cursor-pointer break-all">前置命令：<code>{data.preconditions[item.id]!.command}</code>（{data.preconditions[item.id]!.timeoutSeconds} 秒）</summary>
+        <p>{preconditionSummary(data.preconditions[item.id]!, item.timezone)}</p>
+        {data.preconditions[item.id]!.last?.output && <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-all text-subtle">{data.preconditions[item.id]!.last!.output}{data.preconditions[item.id]!.last!.outputTruncated ? '\n…（已截断）' : ''}</pre>}
+      </details>}
       <p className="text-secondary">{scheduleNextExecution(item)}</p>
       <p className="text-subtle">{item.timezone} · {item.misfirePolicy === 'skip' ? '错过就跳过' : item.maxLatenessSeconds ? `错过后 ${item.maxLatenessSeconds / 60} 分钟内合并补一次` : '错过后最多补一次'}</p>
       {item.disabledReason && <p className="text-warning">停用原因：{item.disabledReason === 'Session is no longer active' ? '来源任务已结束或归档' : item.disabledReason === 'Schedule authorization is no longer available' ? '计划执行权限已失效' : item.disabledReason} · {automationTime(item.disabledAt, item.timezone)}</p>}
@@ -243,6 +268,7 @@ export function SessionAutomationPanel({ session, initialScheduleId, openCreateF
         <dl className="space-y-2 text-caption text-secondary">
           <div><dt className="font-semibold">运行模式与补跑</dt><dd>{enabling.mode === 'independent' ? '独立计划，仅显式指令，协调范围为当前实例数据库' : enabling.mode === 'fresh' ? '每次新会话，不带聊天历史' : '沿用任务上下文'} · {enabling.misfirePolicy === 'skip' ? '错过就跳过' : '恢复后最多补一次'}{enabling.maxLatenessSeconds ? `，有效期 ${enabling.maxLatenessSeconds / 60} 分钟` : ''}</dd></div><div><dt className="font-semibold">何时运行</dt><dd>{scheduleRule(enabling)}</dd></div>
           <div><dt className="font-semibold">执行条件</dt><dd>{enabling.condition.kind === 'always' ? '每次到期执行' : `CI 出现新的失败构建时执行 · ${enabling.condition.workflow ?? '所有工作流'}`}</dd></div>
+          {data?.preconditions?.[enabling.id] && <div><dt className="font-semibold">前置命令</dt><dd className="break-all"><code>{data.preconditions[enabling.id]!.command}</code> · 退出码 0 才唤醒 Agent，最长 {data.preconditions[enabling.id]!.timeoutSeconds} 秒</dd></div>}
           {scheduleFollowUp(enabling).length > 0 && <div><dt className="font-semibold">跟进与截止</dt>{scheduleFollowUp(enabling).map(line => <dd key={line} className="break-words">{line}</dd>)}</div>}
           <div><dt className="font-semibold">所属任务与目录</dt><dd className="break-all">{sessionDisplayName(session, taskTitle, session.id)} · {enabling.executionContext?.cwd ?? session.cwd}</dd></div>
           <div><dt className="font-semibold">冻结的执行身份</dt><dd>{enabling.executionContext?.agentId ?? session.agentId} · 模型 {enabling.executionContext?.model ?? session.model ?? 'Agent 默认模型'} · 权限 {enabling.executionContext?.permissionMode ?? session.permissionMode ?? '当前任务权限'}</dd></div>

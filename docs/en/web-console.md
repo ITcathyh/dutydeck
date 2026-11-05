@@ -99,7 +99,22 @@ dutydeck schedule create --session ses_xxx --name 'Release check' --prompt "Chec
 dutydeck schedule update schedule_xxx --session ses_xxx --input '{"completionCondition":null,"deadlineAt":null}'
 ```
 
-`--deadline` accepts an ISO time with offset, or `YYYY-MM-DDTHH:mm` in the plan timezone. API create and update use the same field names (`null` clears on update); `deadlineAt` must carry an offset. `GET /api/sessions/:sessionId/automation` returns `runStates`, and each item of `GET /api/automation/schedules` returns `runState`.
+**Run a pre-check command first.** A plan with the always condition can set a pre-check command (`precondition: {command, timeoutSeconds}`), for polls like "don't wake the Agent unless there is a new commit":
+
+- When the plan is due, before an execution session is opened or a work-item template is started, the host runs the command with `/bin/sh` in the plan's execution directory (the directory frozen at save time, resolved to its real path). Only exit 0 continues the run. A non-zero exit records the run as skipped: no task, no usage, no notification, and it does not count as a failed run. A timeout (15 seconds by default, at most 20), a failure to start, or a process group that does not exit counts as a failed run, is explained at the delivery destination, and three in a row disable the plan. "Run now" also runs the pre-check but does not count toward consecutive failures.
+- The command uses the same runner as pre-delivery verification: only a minimal environment (`PATH`, `HOME`, `LANG` and similar), without Agent configuration, secrets or group tool tokens. It runs in its own process group, which is killed on timeout or exit. Output (stdout and stderr together) is redacted against secret values in the service environment and kept to the first 4 KB. The plan card shows the command, its latest result and output, and how many runs were skipped in a row since it last passed; the run record keeps a one-line summary (exit code and the end of the output).
+- Only the Web plan panel or the local `dutydeck schedule --condition-command` can set, change or clear it (installation owner identity required). `dutydeck agent schedule create/update`, the Lark `/schedule` command and confirm cards do not accept the field; a request carrying it gets 400. It cannot be combined with the CI new-failure condition; template plans can use it. Linux only for now.
+- Commands matching the default high-risk rules (such as `rm`, `sudo`, `git push/reset`, `curl -X POST`) are rejected on save. This only guards against mistakes and is not a security boundary: anyone who can edit plans can already run commands on this machine, so keep the command a read-only check.
+- The command is stored separately and written together with the plan revision; the plan's own condition stays "always". After switching back to an older version that does not know pre-check commands, the command no longer applies and the plan wakes the Agent every time; see [Upgrade Notes](upgrading.md).
+
+```bash
+# Check every 5 minutes; wake the Agent only when ready.flag exists in the workspace; 10-second timeout
+dutydeck schedule create --session ses_xxx --name wait-ready --prompt 'Process the new data' --every 5 --condition-command 'test -f ready.flag' --condition-timeout 10
+# Clear the pre-check command (or --input '{"precondition":null}')
+dutydeck schedule update schedule_xxx --session ses_xxx --condition-command ''
+```
+
+`--deadline` accepts an ISO time with offset, or `YYYY-MM-DDTHH:mm` in the plan timezone. API create and update use the same field names (`null` clears on update); `deadlineAt` must carry an offset. `GET /api/sessions/:sessionId/automation` returns `runStates` and `preconditions` (each plan's pre-check command and latest result), and each item of `GET /api/automation/schedules` returns `runState`.
 
 ## Goal plan revisions <a id="work-plan-revision"></a>
 

@@ -770,7 +770,11 @@ Examples:
       .option('--until <condition>', 'Completion condition checked on every run; once met the Agent stops the schedule with stop-self (recurring schedules only)')
       .option('--deadline <time>', 'Disable automatically at this time if completion is not confirmed: ISO time with offset, or YYYY-MM-DDTHH:mm in the schedule timezone')
       .option('--template <id@version>', 'Start this saved work-item template on every run, with --prompt as its goal (session mode only)')
-      .option('--input <json>', 'Complete create input or update patch as JSON; null clears completionCondition, deadlineAt or workTemplate')
+      .option('--condition-command <command>', action === 'create'
+        ? 'Pre-check shell command run in the schedule directory before waking the Agent; exit 0 runs, non-zero skips this time'
+        : 'Replace the pre-check shell command; an empty string clears it')
+      .option('--condition-timeout <seconds>', 'Pre-check timeout in seconds, 1-20 (default 15); a timeout counts as a failed run')
+      .option('--input <json>', 'Complete create input or update patch as JSON; null clears completionCondition, deadlineAt, workTemplate or precondition')
       .option('--file <path>', 'Read the JSON input from this file');
     if (action === 'create') command
       .option('--additional', '确需在本事项另建一个循环计划')

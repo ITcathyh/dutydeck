@@ -2,7 +2,9 @@ import { recordAutomationAuthorization } from './task-authorization.js';
 import { MattersService } from './matters.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
+import { realpath } from 'node:fs/promises';
 import { promisify } from 'node:util';
+import { runIsolatedCommand } from '@dutydeck/runtime';
 import {
   type ConfigRepository,
   RuntimeError,
@@ -62,7 +64,12 @@ import {
   type AutomationRunDetail,
   type ScheduleRunState,
   type AgentEvent,
-  type StartSessionInput
+  type StartSessionInput,
+  installationOwnerTaskActor,
+  SCHEDULE_PRECONDITION_DEFAULT_TIMEOUT_SECONDS,
+  SCHEDULE_PRECONDITION_MAX_OUTPUT_BYTES,
+  type PublicSchedulePrecondition,
+  type SchedulePreconditionInput
 } from '@dutydeck/shared';
 import { executionTaskId } from '@dutydeck/storage';
 import { CiProviderRegistry, ciProviderLabel, resolveCiHead, type CiHead } from './ci-providers.js';
@@ -70,6 +77,7 @@ import type { CiWebhookService } from './ci-webhook.js';
 import type { PullRequestService } from './pull-requests.js';
 import { readTaskAttemptResult } from './task-results.js';
 import { workItemId } from './work-items.js';
+import { defaultHighRiskPattern } from './lark/config.js';
 import { z } from 'zod';
 
 const SCHEDULE_PREFIX = 'session_automation/schedule/';
@@ -119,6 +127,27 @@ const FRESH_RETRY_PREFIX = 'session_automation/fresh_retry/';
 const freshRetrySchema = z.object({
   version: z.literal(1), occurrenceId: z.string().min(1), generation: z.number().int().positive(), mode: z.literal('session').optional()
 }).strict();
+/**
+ * 计划的前置命令单独存一条记录，计划本身仍是 `always`：切回旧版本时旧程序照常读计划，只是不跑前置命令、每次都唤醒 Agent。
+ * 与计划修订号用 compareAndSetBatch 一次写入；清除时写不带命令的墓碑（配置表不支持删除这类键）。
+ */
+const PRECONDITION_PREFIX = 'session_automation/precondition/';
+const preconditionSchema = z.object({
+  version: z.literal(1), scheduleRevision: z.number().int().positive(),
+  command: z.string().min(1).max(2_000).optional(), timeoutSeconds: z.number().int().positive().optional(), updatedAt: z.string()
+}).strict();
+type StoredPrecondition = z.infer<typeof preconditionSchema>;
+/** 最近一次前置命令结果与连续跳过次数，供 Web 与 CLI 展示；运行记录里另存一句摘要。 */
+const PRECONDITION_STATUS_PREFIX = 'session_automation/precondition_status/';
+const preconditionStatusSchema = z.object({
+  version: z.literal(1), occurrenceId: z.string().min(1), at: z.string(), outcome: z.enum(['passed', 'skipped', 'error']),
+  exitCode: z.number().int().optional(), timedOut: z.boolean().optional(), output: z.string(), outputTruncated: z.boolean(),
+  error: z.string().optional(), skippedInARow: z.number().int().nonnegative(),
+  /** 产生这条结果的前置命令设置（其 scheduleRevision）；命令改过后旧结果不再展示。 */
+  setAt: z.number().int().positive()
+}).strict();
+type PreconditionStatus = z.infer<typeof preconditionStatusSchema>;
+const highRiskCommand = new RegExp(defaultHighRiskPattern, 'i');
 const errorReasons: Record<string, string> = {
   OPERATION_REVOKED: '执行会话被锁住了', DRIVER_STOP_UNVERIFIED: '执行会话上次没能确认已停下', DRIVER_STOP_BLOCKED: '执行会话上次没能确认已停下',
   SESSION_NOT_ACTIVE: '执行会话已不可用', SESSION_STOPPING: '执行会话正在停止', SESSION_RESOURCE_BLOCKED: '执行会话的终端还没收干净'
@@ -230,6 +259,16 @@ function scheduleKey(id: string) { return `${SCHEDULE_PREFIX}${id}`; }
 function occurrenceKey(id: string) { return `${OCCURRENCE_PREFIX}${id}`; }
 function overdueKey(occurrenceId: string) { return `${OVERDUE_PREFIX}${occurrenceId}`; }
 function ciKey(id: string) { return `${CI_PREFIX}${id}`; }
+function preconditionKey(scheduleId: string) { return `${PRECONDITION_PREFIX}${scheduleId}`; }
+function preconditionStatusKey(scheduleId: string) { return `${PRECONDITION_STATUS_PREFIX}${scheduleId}`; }
+/** 运行记录里的一句摘要：退出码或错误，加输出末尾。完整输出（4 KB）在前置命令状态记录里。 */
+function preconditionSummary(status: Pick<PreconditionStatus, 'outcome' | 'exitCode' | 'timedOut' | 'output' | 'error'>, timeoutSeconds: number) {
+  const head = status.timedOut ? `前置命令超过 ${timeoutSeconds} 秒未结束，已终止`
+    : status.error ? `前置命令无法执行：${status.error.replace(/[\r\n]+/g, ' ').slice(0, 200)}`
+    : `前置命令退出码 ${status.exitCode ?? '未知'}，本次不唤醒 Agent`;
+  const tail = clipTail(status.output, 300).replace(/[\r\n]+/g, ' ');
+  return tail ? `${head}；输出：${tail}` : head;
+}
 function taskBindingKey(taskId: string) { return `${TASK_BINDING_PREFIX}${taskId}`; }
 function iso(date: Date) { return date.toISOString(); }
 function plus(date: Date, milliseconds: number) { return new Date(date.getTime() + milliseconds).toISOString(); }
@@ -464,6 +503,8 @@ export class SessionAutomationService {
   private tickRequested = false;
   private readonly subscriptions = new Map<string, () => void>();
   private readonly quarantinedSchedules = new Set<string>();
+  /** 关闭时终止正在跑的前置命令；那次触发留在待执行，租约过期后由下次启动重新判定。 */
+  private readonly preconditionAbort = new AbortController();
 
   private invalidRecord(key: string, raw: string) {
     // Record identifiers are enough for repair. Never log the stored payload or parser issues.
@@ -715,9 +756,15 @@ export class SessionAutomationService {
       const history = occurrences.map(item => item.value).filter(item => item.scheduleId === schedule.id).sort((a, b) => b.scheduledForUtc.localeCompare(a.scheduledForUtc) || b.id.localeCompare(a.id));
       runStates[schedule.id] = await this.runState(schedule, history);
     }
+    const preconditions: NonNullable<SessionAutomationList['preconditions']> = {};
+    await Promise.all(publicSchedules.map(async schedule => {
+      const precondition = await this.publicPrecondition(schedule.id);
+      if (precondition) preconditions[schedule.id] = precondition;
+    }));
     return {
       deliveryTargets,
       runStates,
+      preconditions,
       schedules: publicSchedules,
       subscriptions: subscriptions.map(item => item.value).filter(item => item.sessionId === sessionId).sort((a, b) => a.createdAt.localeCompare(b.createdAt)).slice(-MAX_RECORDS).map(publicSubscription),
       occurrences: occurrences.map(item => item.value).filter(item => sessionIds.includes(item.sessionId)).sort((a, b) => a.scheduledForUtc.localeCompare(b.scheduledForUtc)).slice(-MAX_RECORDS).map(publicOccurrence)
@@ -812,6 +859,8 @@ export class SessionAutomationService {
     const now = iso(this.clock());
     const deadlineAt = input.deadlineAt ? new Date(input.deadlineAt).toISOString() : undefined;
     await this.assertFollowUpSettings(sessionId, { ...input, mode: input.mode ?? 'session', deadlineAt, enabled: false }, actorId, { deadline: true, template: true });
+    this.assertPreconditionInput(input.precondition, actorId);
+    this.assertPreconditionCondition(input.condition, Boolean(input.precondition));
     const condition = input.condition.kind === 'always' ? input.condition : await this.ciCondition(session, input.condition);
     await receipt?.prepareDelivery?.(id);
     if (input.mode === 'fresh' && !this.options.runtime.startScheduleSession) throw new RuntimeError('FRESH_SCHEDULE_UNAVAILABLE', 'Fresh-session schedules are unavailable on this instance', 503);
@@ -853,7 +902,7 @@ export class SessionAutomationService {
       updatedAt: now
     });
     previewSessionSchedule(schedule, this.clock());
-    if (!await this.createRecord(scheduleKey(schedule.id), schedule)) {
+    if (!await (input.precondition ? this.saveWithPrecondition(schedule.id, undefined, schedule, input.precondition) : this.createRecord(scheduleKey(schedule.id), schedule))) {
       if (receipt) {
         const saved = await this.getRecord(scheduleKey(id), readStoredSessionSchedule);
         if (saved) return publicSchedule(saved.value);
@@ -881,6 +930,8 @@ export class SessionAutomationService {
   async requestSchedule(sessionId: string, rawInput: CreateSessionScheduleInput, actorId: string, receipt: { key: string; newMode?: 'fresh'; prepareDelivery?: (id: string) => Promise<void> }): Promise<{ schedule: PublicSessionSchedule; updated?: { changed: boolean; wasEnabled: boolean } }> {
     await this.requireAuthorized(sessionId, actorId);
     const input = createSessionScheduleInputSchema.parse(rawInput);
+    // 聊天代建与飞书确认卡不开放前置命令：命令只由安装管理员在 Web 或本机 CLI 设置。
+    if (input.precondition) throw new RuntimeError('SESSION_AUTOMATION_PRECONDITION_FORBIDDEN', 'Pre-check commands cannot be requested from chat; set them from the Web schedule panel or the local dutydeck schedule CLI', 400);
     const own = await this.getRecord(scheduleKey(receiptScheduleId(sessionId, actorId, receipt.key)), readStoredSessionSchedule);
     if (own) return { schedule: publicSchedule(own.value) };
     await this.assertMatterScheduleAvailable(sessionId, input, actorId);
@@ -1201,6 +1252,9 @@ export class SessionAutomationService {
     const reenabled = input.enabled === true && !stored.value.enabled;
     await this.assertFollowUpSettings(sessionId, { trigger: input.trigger ?? stored.value.trigger, mode: modeChanged ? input.mode : currentMode, condition: input.condition ?? stored.value.condition, ...followUp, enabled: input.enabled ?? stored.value.enabled },
       actorId ?? stored.value.actorId, { deadline: input.deadlineAt !== undefined || reenabled, template: input.workTemplate !== undefined && input.workTemplate !== null || reenabled });
+    this.assertPreconditionInput(input.precondition, actorId);
+    this.assertPreconditionCondition(input.condition ?? stored.value.condition, input.precondition !== undefined ? Boolean(input.precondition)
+      : Boolean((await this.getRecord(preconditionKey(id), value => preconditionSchema.parse(value)))?.value.command));
     let condition = stored.value.condition;
     if (input.condition) condition = input.condition.kind === 'always' ? input.condition : await this.ciCondition(session, input.condition);
     const now = this.clock();
@@ -1231,7 +1285,7 @@ export class SessionAutomationService {
       ...candidate,
       nextDueAt: executionChanged ? candidate.enabled ? previewSessionSchedule(candidate, now)?.scheduledForUtc : undefined : stored.value.nextDueAt
     });
-    if (!await this.replace(scheduleKey(id), stored.raw, schedule)) throw new RuntimeError('SESSION_AUTOMATION_REVISION_CONFLICT', 'Session schedule revision changed', 409);
+    if (!await (input.precondition !== undefined ? this.saveWithPrecondition(id, stored.raw, schedule, input.precondition) : this.replace(scheduleKey(id), stored.raw, schedule))) throw new RuntimeError('SESSION_AUTOMATION_REVISION_CONFLICT', 'Session schedule revision changed', 409);
     if (modeChanged) await this.retireFreshSessions(schedule);
     if (schedule.enabled && !stored.value.enabled) await this.resetStreak(id);
     return publicSchedule(schedule);
@@ -1434,6 +1488,7 @@ export class SessionAutomationService {
 
   async close(): Promise<void> {
     this.closed = true;
+    this.preconditionAbort.abort();
     for (const unsubscribe of this.subscriptions.values()) unsubscribe();
     this.subscriptions.clear();
     for (const { controller } of this.deliveries.values()) controller.abort();
@@ -1878,6 +1933,11 @@ export class SessionAutomationService {
       await this.finishOccurrence({ raw: stored.raw, value: occurrence }, { conditionStatus: 'invalidated', runStatus: 'invalidated', error: 'Schedule generation changed before dispatch' });
       return;
     }
+    // 前置命令在开执行会话、启动工作项模板之前判定；没通过就不唤醒 Agent。
+    const gated = await this.preconditionGate(scheduleStored, { raw: stored.raw, value: occurrence });
+    if (!gated) return;
+    ({ schedule: scheduleStored, occurrence: stored } = gated);
+    occurrence = gated.occurrence.value;
     if (scheduleStored.value.workTemplate) {
       await this.startWorkTemplate(scheduleStored, { raw: stored.raw, value: occurrence });
       return;
@@ -2034,6 +2094,115 @@ export class SessionAutomationService {
   }
 
   /**
+   * 前置命令判定：没设时原样返回。退出码 0 续租后返回，继续开会话或启动模板；非 0 记 skipped（不通知、不计连续没做成）；
+   * 超时、无法执行或进程组没收干净记 error，计入连续没做成（连续 STREAK_PAUSE 次自动停用）。返回 undefined 表示这次已收尾或已被别处接手。
+   */
+  private async preconditionGate(scheduleStored: { raw: string; value: SessionSchedule }, stored: { raw: string; value: SessionScheduleOccurrenceV2 }): Promise<{ schedule: { raw: string; value: SessionSchedule }; occurrence: { raw: string; value: SessionScheduleOccurrenceV2 } } | undefined> {
+    const schedule = scheduleStored.value;
+    const occurrence = stored.value;
+    if (occurrence.conditionStatus !== 'pending') return { schedule: scheduleStored, occurrence: stored };
+    const precondition = (await this.getRecord(preconditionKey(schedule.id), value => preconditionSchema.parse(value)))?.value;
+    if (!precondition?.command) return { schedule: scheduleStored, occurrence: stored };
+    const manual = occurrence.triggerSource === 'manual';
+    const timeoutSeconds = precondition.timeoutSeconds ?? SCHEDULE_PRECONDITION_DEFAULT_TIMEOUT_SECONDS;
+    try { await this.requireAuthorized(schedule.sessionId, occurrenceActorId(schedule, occurrence)); }
+    catch (error) {
+      await this.disableSchedule(scheduleStored);
+      await this.finishOccurrence(stored, { conditionStatus: 'error', runStatus: 'error', error: errorMessage(error) });
+      return undefined;
+    }
+    const settle = async (target: { raw: string; value: SessionScheduleOccurrenceV2 }, status: Omit<PreconditionStatus, 'version' | 'skippedInARow' | 'setAt' | 'occurrenceId' | 'at'>) => {
+      const summary = preconditionSummary(status, timeoutSeconds);
+      if (!await this.finishOccurrence(target, status.outcome === 'skipped' ? { conditionStatus: 'skipped', runStatus: 'skipped', error: summary } : { conditionStatus: 'error', runStatus: 'error', error: summary })) return undefined;
+      await this.notePrecondition(schedule.id, precondition, { occurrenceId: occurrence.id, at: iso(this.clock()), ...status });
+      if (manual) return undefined;
+      if (status.outcome === 'error') await this.recordOutcome(target.value, { key: 'precondition:error', kind: 'error', reason: status.timedOut ? `前置命令超过 ${timeoutSeconds} 秒未结束` : `前置命令无法执行：${(status.error ?? '未知错误').slice(0, 160)}` });
+      await this.advanceSchedule(schedule, occurrence.scheduledForUtc);
+      return undefined;
+    };
+    let cwd: string;
+    try { cwd = await realpath(schedule.executionContext?.cwd ?? (await this.requireSession(schedule.sessionId)).cwd); }
+    catch (error) { return settle(stored, { outcome: 'error', output: '', outputTruncated: false, error: `执行目录不可用：${errorMessage(error)}` }); }
+    // 续租后再跑：命令最长 20 秒，留在 30 秒租约内，期间其他 tick 与实例不会接手这次触发。
+    const leased = await this.renewOccurrenceLease(stored);
+    if (!leased) return undefined;
+    const result = await runIsolatedCommand(precondition.command, cwd, { timeoutMs: timeoutSeconds * 1_000, maxOutputBytes: SCHEDULE_PRECONDITION_MAX_OUTPUT_BYTES, signal: this.preconditionAbort.signal });
+    if (result.interrupted) return undefined;
+    const current = await this.getRecord(scheduleKey(schedule.id), readStoredSessionSchedule);
+    if (!current || current.value.generation !== occurrence.generation || current.value.deletedAt || !current.value.enabled && !manual) {
+      await this.finishOccurrence(leased, { conditionStatus: 'invalidated', runStatus: 'invalidated', error: 'Schedule changed while its pre-check command ran' });
+      return undefined;
+    }
+    const error = result.cleanupError ?? result.error;
+    const outcome = result.timedOut || error || result.exitCode === undefined ? 'error' as const : result.exitCode === 0 ? 'passed' as const : 'skipped' as const;
+    const status = { outcome, ...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}), ...(result.timedOut ? { timedOut: true } : {}),
+      output: result.output, outputTruncated: result.outputTruncated,
+      ...(outcome === 'error' && !result.timedOut ? { error: error ?? '进程被信号终止' } : {}) };
+    if (outcome !== 'passed') return settle(leased, status);
+    const renewed = await this.renewOccurrenceLease(leased);
+    if (!renewed) return undefined;
+    await this.notePrecondition(schedule.id, precondition, { occurrenceId: occurrence.id, at: iso(this.clock()), ...status });
+    return { schedule: current, occurrence: renewed };
+  }
+
+  private async readPreconditionStatus(scheduleId: string) {
+    try { return await this.getRecord(preconditionStatusKey(scheduleId), value => preconditionStatusSchema.parse(value)); }
+    catch { return undefined; }
+  }
+
+  private async notePrecondition(scheduleId: string, precondition: StoredPrecondition, entry: Omit<PreconditionStatus, 'version' | 'skippedInARow' | 'setAt'>) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const prior = await this.readPreconditionStatus(scheduleId);
+      const carried = prior?.value.setAt === precondition.scheduleRevision ? prior.value.skippedInARow : 0;
+      const next = preconditionStatusSchema.parse({ version: 1, ...entry, setAt: precondition.scheduleRevision,
+        skippedInARow: entry.outcome === 'skipped' ? carried + 1 : entry.outcome === 'passed' ? 0 : carried });
+      if (await (prior ? this.replace(preconditionStatusKey(scheduleId), prior.raw, next) : this.createRecord(preconditionStatusKey(scheduleId), next))) return;
+    }
+  }
+
+  private async publicPrecondition(scheduleId: string): Promise<PublicSchedulePrecondition | undefined> {
+    let precondition: StoredPrecondition | undefined;
+    try { precondition = (await this.getRecord(preconditionKey(scheduleId), value => preconditionSchema.parse(value)))?.value; }
+    catch { return undefined; }
+    if (!precondition?.command) return undefined;
+    const status = (await this.readPreconditionStatus(scheduleId))?.value;
+    const current = status?.setAt === precondition.scheduleRevision ? status : undefined;
+    return {
+      command: precondition.command, timeoutSeconds: precondition.timeoutSeconds ?? SCHEDULE_PRECONDITION_DEFAULT_TIMEOUT_SECONDS,
+      ...(current ? { last: {
+        occurrenceId: current.occurrenceId, at: current.at, outcome: current.outcome,
+        ...(current.exitCode !== undefined ? { exitCode: current.exitCode } : {}), ...(current.timedOut ? { timedOut: true } : {}),
+        output: current.output, outputTruncated: current.outputTruncated, ...(current.error ? { error: current.error } : {})
+      } } : {}),
+      skippedInARow: current?.skippedInARow ?? 0
+    };
+  }
+
+  /** 前置命令只接受安装管理员（Web 计划面板与本机 CLI）；默认高危规则只防手误，不是安全边界。 */
+  private assertPreconditionInput(input: SchedulePreconditionInput | null | undefined, actorId: string | undefined) {
+    if (input === undefined) return;
+    if (actorId !== installationOwnerTaskActor) throw new RuntimeError('SESSION_AUTOMATION_PRECONDITION_FORBIDDEN', 'Pre-check commands can only be set from the Web schedule panel or the local dutydeck schedule CLI', 403);
+    if (!input) return;
+    if (process.platform !== 'linux') throw new RuntimeError('SESSION_AUTOMATION_PRECONDITION_UNAVAILABLE', 'Pre-check commands currently require Linux', 503);
+    if (highRiskCommand.test(input.command)) throw new RuntimeError('SESSION_AUTOMATION_PRECONDITION_HIGH_RISK', 'The pre-check command matches the default high-risk command rules; use a read-only check instead', 400);
+  }
+
+  private assertPreconditionCondition(condition: { kind: string }, hasPrecondition: boolean) {
+    if (hasPrecondition && condition.kind === 'ci_new_failure') throw new RuntimeError('SESSION_AUTOMATION_PRECONDITION_CONFLICT', 'A pre-check command cannot be combined with the CI new-failure condition', 400);
+  }
+
+  /** 计划与前置命令记录一次写入：任一方在读之后变过就整体不写。 */
+  private async saveWithPrecondition(id: string, expected: string | undefined, schedule: SessionSchedule, input: SchedulePreconditionInput | null) {
+    const store = this.options.repositories.config;
+    if (!store.compareAndSetBatch) throw new RuntimeError('SESSION_AUTOMATION_STORAGE_UNAVAILABLE', 'Pre-check commands require atomic batch storage', 503);
+    const current = await store.get(preconditionKey(id));
+    const record = preconditionSchema.parse({ version: 1, scheduleRevision: schedule.revision,
+      ...(input ? { command: input.command, timeoutSeconds: input.timeoutSeconds ?? SCHEDULE_PRECONDITION_DEFAULT_TIMEOUT_SECONDS } : {}), updatedAt: iso(this.clock()) });
+    return store.compareAndSetBatch([{ key: scheduleKey(id), expected }, { key: preconditionKey(id), expected: current }],
+      [{ key: scheduleKey(id), value: JSON.stringify(schedule) }, { key: preconditionKey(id), value: JSON.stringify(record) }]);
+  }
+
+  /**
    * 模板计划的一次触发：以计划指令为目标、按触发编号作幂等键启动已保存的工作项模板，确认规则沿用模板启动。
    * 上一次启动的工作项还没结束时跳过这次；模板被删或不可用时这次记为出错并在回报位置说明。
    */
@@ -2177,7 +2346,7 @@ export class SessionAutomationService {
     await this.replace(occurrenceKey(stored.value.id), current.raw, updated);
   }
 
-  private async finishOccurrence(stored: { raw: string; value: SessionScheduleOccurrence }, patch: Partial<SessionScheduleOccurrenceV2>) {
+  private async finishOccurrence(stored: { raw: string; value: SessionScheduleOccurrence }, patch: Partial<SessionScheduleOccurrenceV2>): Promise<boolean> {
     const base = migrateOccurrence(stored.value);
     const noTask = !base.taskId && patch.runStatus && !['pending', 'accepted'].includes(patch.runStatus);
     const blocked = patch.runStatus === 'blocked';
@@ -2192,7 +2361,7 @@ export class SessionAutomationService {
       leaseExpiresAt: undefined,
       updatedAt: iso(this.clock())
     });
-    await this.replace(occurrenceKey(base.id), stored.raw, updated);
+    return this.replace(occurrenceKey(base.id), stored.raw, updated);
   }
 
   private async advanceSchedule(schedule: SessionSchedule, due: string) {
