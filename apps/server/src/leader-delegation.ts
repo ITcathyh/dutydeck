@@ -1,8 +1,8 @@
 import { execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { sha256Hex as hash } from './hash.js';
 import { promisify } from 'node:util';
 import { z } from 'zod';
-import { parseLarkSourceId, RuntimeError, timeLoop, workPlanSchema, type AgentConfig, type RepositoryBundle, type WorkPlan } from '@dutydeck/shared';
+import { errorMessage as errorText, now as time, parseLarkSourceId, RuntimeError, timeLoop, workPlanSchema, type AgentConfig, type RepositoryBundle, type WorkPlan } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { larkPermissionMode, readLarkConfig } from './lark/config.js';
 import { runReadonlyPrompt } from './lark/readonly-decider.js';
@@ -18,9 +18,6 @@ const RESUME_LIMIT_MS = 30 * 60_000;
 const NOTICE_RETRY_MS = 60 * 60_000;
 export const leaderReviewStepId = 'leader_review';
 export const leaderReviewTitle = 'Leader 验收';
-const hash = (value: string) => createHash('sha256').update(value).digest('hex');
-const time = () => new Date().toISOString();
-const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 /** worktree 步骤需要 git 仓库，否则子会话起不来。 */
 const gitRepository = (cwd: string) => promisify(execFile)('git', ['-C', cwd, 'rev-parse', '--show-toplevel'], { timeout: 10_000 }).then(() => true, () => false);
 

@@ -1,4 +1,5 @@
 import { execFile, spawn } from 'node:child_process';
+import { sleep } from './daemon/time.js';
 import { createHmac } from 'node:crypto';
 import { accessSync, constants, realpathSync } from 'node:fs';
 import { delimiter, isAbsolute, resolve } from 'node:path';
@@ -98,7 +99,7 @@ export class HerdrSessions {
           catch (pending) {
             if (!(pending instanceof RelayError) || pending.code !== 'server_not_running') throw pending;
             if (child.exitCode !== null || child.signalCode !== null || Date.now() >= deadline) throw new RelayError('HERDR_START_FAILED', '专属 Herdr server 未就绪；未回退到 default。', 503);
-            await new Promise(resolve => setTimeout(resolve, 100));
+            await sleep(100);
           }
         }
       }

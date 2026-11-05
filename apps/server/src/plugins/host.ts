@@ -1,6 +1,6 @@
 import { PluginBusinessToolRegistry } from './business-tools.js';
 import { PluginBindings } from './bindings.js';
-import { RuntimeError, type PluginBindingScope, type PluginBindingContext } from '@dutydeck/shared';
+import { RuntimeError, type PluginBinding, type PluginBindingScope, type PluginBindingContext } from '@dutydeck/shared';
 import { PluginResultToolRegistry } from './result-tools.js';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -17,7 +17,7 @@ import { ScenarioProviderCaller } from './scenario-providers.js';
 import { scenarioPackDigest, ScenarioRegistry, type RegisteredScenarioPack } from './scenario-registry.js';
 import { scopeApplies } from './scope.js';
 import type { ScopedPluginTrigger } from './triggers.js';
-import { pluginSecretKey, PluginStore, type PluginLockEntry } from './store.js';
+import { pluginSecretKey, PluginStore, type LockFile, type PluginLockEntry } from './store.js';
 import { PluginServiceSupervisor } from './service-supervisor.js';
 
 export interface PluginDiagnostic { plugin: string; scenario?: string; message: string }
@@ -94,11 +94,12 @@ export class PluginHost {
     });
   }
 
-  async resolveBinding(pluginName: string, context: PluginBindingScope): Promise<PluginBindingContext | undefined> {
+  /** snapshot 是调用方本次已读出的绑定与锁文件；getSecret 时仍现读。 */
+  async resolveBinding(pluginName: string, context: PluginBindingScope, snapshot?: { bindings: () => PluginBinding[]; lock: () => LockFile }): Promise<PluginBindingContext | undefined> {
     const active = this.active.find(item => item.entry.name === pluginName);
     if (!active || !scopeApplies(active.entry.scope, context)) throw new RuntimeError('PLUGIN_UNAVAILABLE', 'Plugin is not active in this scope', 403);
-    if (!active.builtin && !this.store.get(pluginName).enabled) throw new RuntimeError('PLUGIN_DISABLED', 'Plugin was disabled', 403);
-    const binding = this.bindings.resolve(pluginName, context, active.plugin.manifest);
+    if (!active.builtin && !this.store.get(pluginName, snapshot?.lock()).enabled) throw new RuntimeError('PLUGIN_DISABLED', 'Plugin was disabled', 403);
+    const binding = this.bindings.resolve(pluginName, context, active.plugin.manifest, snapshot?.bindings);
     return binding ? Object.freeze({ ...binding, getSecret: async (key: string) => {
       if (!active.builtin && !this.store.get(pluginName).enabled) throw new RuntimeError('PLUGIN_DISABLED', 'Plugin was disabled', 403);
       return binding.getSecret(key);
@@ -112,14 +113,18 @@ export class PluginHost {
 
   async requiredSkillRequests(context: PluginBindingScope) {
     const requests: Array<{ ref: string; binding: { id: string; revision: number } }> = [];
-    for (const name of new Set(this.bindings.list().map(binding => binding.plugin))) {
-      if (this.bindings.select(name, context)?.enabled && !this.active.some(item => item.entry.name === name)) throw new RuntimeError('PLUGIN_BINDING_UNAVAILABLE', `Bound package ${name} failed to load or is disabled; repair it or disable this binding before accepting tasks`, 409);
+    // 本次只读一遍绑定文件和锁文件（锁文件用到才读）。
+    const bindings = this.bindings.list();
+    let lock: LockFile | undefined;
+    const snapshot = { bindings: () => bindings, lock: () => lock ??= this.store.readLock() };
+    for (const name of new Set(bindings.map(binding => binding.plugin))) {
+      if (this.bindings.select(name, context, snapshot.bindings)?.enabled && !this.active.some(item => item.entry.name === name)) throw new RuntimeError('PLUGIN_BINDING_UNAVAILABLE', `Bound package ${name} failed to load or is disabled; repair it or disable this binding before accepting tasks`, 409);
     }
     for (const active of this.active) {
       if (!scopeApplies(active.entry.scope, context)) continue;
-      const selected = this.bindings.select(active.entry.name, context);
+      const selected = this.bindings.select(active.entry.name, context, snapshot.bindings);
       if (!selected?.enabled) continue;
-      const binding = await this.resolveBinding(active.entry.name, context);
+      const binding = await this.resolveBinding(active.entry.name, context, snapshot);
       if (!binding) continue;
       for (const ref of new Set([...(active.plugin.manifest.requiredSkills ?? []), ...selected.skills])) requests.push({ ref, binding: { id: binding.bindingId, revision: binding.revision } });
     }
@@ -127,7 +132,9 @@ export class PluginHost {
   }
 
   skillEntries(context: { workspaceRoot: string; botAppId?: string; chatId?: string }) {
-    return this.active.filter(({ entry, plugin, builtin }) => (builtin || this.store.get(entry.name).enabled) && this.bindings.select(entry.name, { ...context, cwd: context.workspaceRoot })?.enabled !== false && plugin.skillsDir && scopeApplies(entry.scope, { cwd: context.workspaceRoot, botAppId: context.botAppId })).map(({ entry, plugin }) => ({ path: plugin.skillsDir!, plugin: entry.name, version: plugin.manifest.version, root: plugin.root, resources: plugin.manifest.skillResources }));
+    // 绑定文件和锁文件各至多读一遍，用到才读。
+    let lock: LockFile | undefined, bindings: PluginBinding[] | undefined;
+    return this.active.filter(({ entry, plugin, builtin }) => (builtin || this.store.get(entry.name, lock ??= this.store.readLock()).enabled) && this.bindings.select(entry.name, { ...context, cwd: context.workspaceRoot }, () => bindings ??= this.bindings.list())?.enabled !== false && plugin.skillsDir && scopeApplies(entry.scope, { cwd: context.workspaceRoot, botAppId: context.botAppId })).map(({ entry, plugin }) => ({ path: plugin.skillsDir!, plugin: entry.name, version: plugin.manifest.version, root: plugin.root, resources: plugin.manifest.skillResources }));
   }
 
   static empty(dataDir: string): PluginHost { return new PluginHost(new PluginStore(dataDir), defaultBuiltinPluginRoot()); }

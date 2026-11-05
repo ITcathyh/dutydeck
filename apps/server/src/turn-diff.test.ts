@@ -270,8 +270,8 @@ describe('turn diff snapshots', () => {
     for (let index = 0; index < 5; index++) await writeFile(join(dir, `new-${index}.txt`), 'x'.repeat(100));
     const before = await objectFiles(dir);
     const reasons: string[] = [];
-    expect(await snapshotWorkingTree(dir, undefined, { limits: { fileBytes: 1_000, totalBytes: 10_000, files: 4 }, onSkip: reason => reasons.push(reason) })).toBeUndefined();
-    expect(await snapshotWorkingTree(dir, undefined, { limits: { fileBytes: 1_000, totalBytes: 300, files: 10 }, onSkip: reason => reasons.push(reason) })).toBeUndefined();
+    expect(await snapshotWorkingTree(dir, undefined, { limits: { fileBytes: 1_000, totalBytes: 10_000, files: 4 }, onSkip: skip => reasons.push(skip.message) })).toBeUndefined();
+    expect(await snapshotWorkingTree(dir, undefined, { limits: { fileBytes: 1_000, totalBytes: 300, files: 10 }, onSkip: skip => reasons.push(skip.message) })).toBeUndefined();
     expect(reasons).toEqual(['未跟踪文件 5 个，超过 4 个', '未跟踪文件合计超过 300 字节']);
     expect(await objectFiles(dir)).toEqual(before);
     expect(await snapshotWorkingTree(dir, undefined, { limits: { fileBytes: 1_000, totalBytes: 10_000, files: 10 } })).toBeDefined();
@@ -287,7 +287,7 @@ describe('turn diff snapshots', () => {
     const before = await objectFiles(dir);
     const reasons: string[] = [];
     for (const timeout of [150, 300, 600]) {
-      expect(await snapshotWorkingTree(dir, timeout, { onSkip: reason => reasons.push(reason) })).toBeUndefined();
+      expect(await snapshotWorkingTree(dir, timeout, { onSkip: skip => reasons.push(skip.message) })).toBeUndefined();
       expect((await objectFiles(dir)).files.filter(file => /\/tmp_/.test(file))).toEqual([foreign]);
       expect(await objectFiles(dir)).toEqual(before);
     }
@@ -309,7 +309,7 @@ describe('turn diff snapshots', () => {
     await git('config', 'filter.slow.clean', `mkdir -p '${join(objects, 'ab')}' && echo other > '${looseTemp}' && touch '${ready}' && sleep 1; exit 1`);
     await git('config', 'filter.slow.required', 'true');
     const reasons: string[] = [];
-    const snapshot = snapshotWorkingTree(dir, 4_000, { onSkip: reason => reasons.push(reason) });
+    const snapshot = snapshotWorkingTree(dir, 4_000, { onSkip: skip => reasons.push(skip.message) });
     const waitFor = async <T>(probe: () => Promise<T | undefined>) => {
       for (let attempt = 0; attempt < 300; attempt++) { const value = await probe(); if (value) return value; await new Promise(resolve => setTimeout(resolve, 10)); }
       throw new Error('timed out waiting');

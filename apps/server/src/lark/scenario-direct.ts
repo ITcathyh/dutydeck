@@ -4,7 +4,7 @@
 // decideDirect 是纯函数，实时和回放共用；runDirectScenario 是执行器：先记录再派发，开话题，交给 dispatcher 收养。
 // 强制契约（场景包设计 2.1）：来源限定、排除自身、确认人、去重、每小时上限、只在接话人上运行，包里省略配置只会得到默认值。
 
-import { createHash } from 'node:crypto';
+import { jsonSha256 as digest } from '../hash.js';
 import { z } from 'zod';
 import { collaborationScenarioSchema, type CollaborationScenarioSnapshot, DECIDER_META_KEY, SCENARIO_RECORD, RuntimeError, scenarioBindingStatus, scenarioDirectLimits, scenarioPolicyVersion, scenarioRecordOf, scenarioTriggerSources, resolveScenarioParams, wrapUntrusted,
   type CollaborationDecision, type CollaborationDeciderMeta, type CollaborationRepository, type CollaborationScope, type ListedItems, type ParticipationLevel, type PromptPart,
@@ -18,7 +18,6 @@ import { keywordsMatch, sourceTextFingerprint } from './scenario-fingerprint.js'
 import { renderScenarioTemplate, sanitizeDisplayName, templateText } from './scenario-template.js';
 
 const HOUR_MS = 3_600_000;
-const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
 /** 场景记录 id 和开话题第一句的幂等键。格式与升级前的记录一致，旧记录照样能按 id 查到。 */
 export const directRecordId = (packId: string, scope: CollaborationScope, messageId: string) => `decision_${packId}_${digest([scope, messageId])}`.slice(0, 128);

@@ -1,4 +1,4 @@
-import { agentConfigSchema, type AgentConfig } from '@dutydeck/shared';
+import { agentConfigSchema, errorMessage as describeError, type AgentConfig } from '@dutydeck/shared';
 import { listAcpxBuiltinAgents } from '@dutydeck/acp-client';
 import { commandExists } from '@dutydeck/transports';
 import { z } from 'zod';
@@ -115,8 +115,6 @@ export class AgentsJsonError extends Error {
   }
 }
 
-const describeError = (error: unknown) => error instanceof Error ? error.message : String(error);
-
 /** 解析 DUTYDECK_AGENTS_JSON；任何失败都点名变量（和出错的条目），而不是只抛 JSON/zod 的原始报错。 */
 function parseAgentsJson(raw: string | undefined): AgentConfig[] {
   if (!raw) return [];
@@ -189,11 +187,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, ptyContribution
   return loadConfigWithDiagnostics(env, ptyContributions, pluginAgents).config;
 }
 
-const shellQuote = (value: string) => /^[\w./@+:=-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
+/** 仅含安全字符时原样输出，否则按 sh 单引号转义；区别于 @dutydeck/shared 的 shellQuote（总是加引号）。 */
+export const shellQuoteIfNeeded = (value: string) => /^[\w./@+:=-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
 
 /** 面向用户的说明：哪个 Agent、哪个命令找不到，以及可复制的修法（改用绝对路径）。 */
 export function describeDroppedAgent(agent: DroppedAgent): { detail: string; remedy: string; command: string } {
-  const quoted = shellQuote(agent.command);
+  const quoted = shellQuoteIfNeeded(agent.command);
   if (agent.command.includes('/')) {
     return {
       detail: `Agent「${agent.id}」的命令 ${agent.command} 不存在或没有执行权限，未被登记`,

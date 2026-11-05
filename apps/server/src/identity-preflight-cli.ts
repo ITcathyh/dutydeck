@@ -1,3 +1,4 @@
+import { asRecord as record } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
 import { getAuthToken } from './auth/auth.js';
 import { readDaemonStatus, resolveDaemonDir, type DaemonState } from './daemon/daemon.js';
@@ -17,7 +18,6 @@ export interface IdentityPreflightCliDependencies {
   getAccessToken?: (database: string) => Promise<string | null>;
 }
 
-const record = (value: unknown): Record<string, any> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, any> : {};
 const optional = <T>(condition: boolean, key: string, value: T) => condition ? { [key]: value } : {};
 
 function projectIdentity(value: unknown) {

@@ -39,6 +39,9 @@ function processVerdictKey(pid: string, stat: string[]): string | undefined {
 }
 
 /** A dedicated named server and an argv-launched primary pane. Never uses default or focused targets. */
+/** A process in the owned scope could not be classified yet; stopOwnedIdentity retries these until its deadline. */
+export class HerdrCensusUnknownError extends Error {}
+
 export class HerdrBackend implements SessionBackend {
   readonly kind = 'herdr' as const;
   readonly ownerId: string;
@@ -517,7 +520,7 @@ export class HerdrBackend implements SessionBackend {
           }
         }
         try { comm = readFileSync(`/proc/${entry}/comm`, 'utf8').trim(); } catch { /* Diagnostic metadata only. */ }
-        throw new Error(`HERDR_OWNERSHIP_CENSUS_UNKNOWN pid=${entry} stage=${stage} errno=${errno ?? 'unknown'} retry_errno=${retryErrno ?? 'unknown'} state_start=${observed} comm=${JSON.stringify(comm)} cgroup=${JSON.stringify(cgroup)}`);
+        throw new HerdrCensusUnknownError(`HERDR_OWNERSHIP_CENSUS_UNKNOWN pid=${entry} stage=${stage} errno=${errno ?? 'unknown'} retry_errno=${retryErrno ?? 'unknown'} state_start=${observed} comm=${JSON.stringify(comm)} cgroup=${JSON.stringify(cgroup)}`);
       }
     }
     this.processVerdicts = verdicts;
@@ -634,7 +637,7 @@ export class HerdrBackend implements SessionBackend {
     const census = async <T>(read: () => T | Promise<T>): Promise<T> => {
       for (;;) {
         try { return await read(); } catch (error) {
-          if (!(error instanceof Error) || !error.message.startsWith('HERDR_OWNERSHIP_CENSUS_UNKNOWN') || Date.now() >= deadline) throw error;
+          if (!(error instanceof HerdrCensusUnknownError) || Date.now() >= deadline) throw error;
           await new Promise(resolve => setTimeout(resolve, 25));
         }
       }

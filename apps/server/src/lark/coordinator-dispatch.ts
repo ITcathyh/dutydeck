@@ -26,6 +26,7 @@ import { relevantMemoryBudget, renderLarkMemoryInjection, renderMemoryIndex } fr
 import { larkAdhdModePrompt } from './adhd-mode.js';
 import type { AgentEvent, PolicyAction, Session, TaskRecord, ToolRiskPolicy } from '@dutydeck/shared';
 import { deferredConfirmationId, RuntimeError, supportsRemoteApproval } from '@dutydeck/shared';
+import { isBotSenderType } from './card-mentions.js';
 import { defaultHighRiskPattern, defaultLarkIdleCompactHours, defaultLarkTraceLimit, larkMemoryEnabled, larkPermissionMode, readLarkConfigs, type StoredLarkConfig } from './config.js';
 import { formatRolePrompt } from './role-format.js';
 import { boundLarkCardElements, larkIdentityPermissionHelp, LarkServiceError } from './service.js';
@@ -240,13 +241,16 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     }
     task.queuedApproval = approval?.record.id;
     // 这两个审批按钮不在原审批卡上：登记成任务导航卡，回调才按 /tasks 行内审批的路径受理，鉴权与一次性决议照旧。
-    if (approval && task.cardMessageId) {
-      await this.workflowOptions.store?.set(`lark.task_dashboard.${task.config.appId}.${task.cardMessageId}`, JSON.stringify({
-        messageId: task.event.messageId, ...(task.event.replyMessageId ? { replyMessageId: task.event.replyMessageId } : {}), chatId: task.event.chatId, chatType: task.event.chatType,
-        senderOpenId: task.event.senderOpenId, messageType: 'text', content: '', mentions: []
-      } satisfies LarkMessageEvent));
-    }
+    if (approval && task.cardMessageId) await this.saveTaskDashboardOrigin(task.config, { messageId: task.cardMessageId }, task.event);
     return { capabilities, approval };
+  }
+
+  /** 把一张卡登记成任务导航卡：回调按 /tasks 看板的路径受理。 */
+  protected saveTaskDashboardOrigin(config: StoredLarkConfig, card: { messageId: string }, event: LarkMessageEvent) {
+    return this.workflowOptions.store?.set(`lark.task_dashboard.${config.appId}.${card.messageId}`, JSON.stringify({
+      messageId: event.messageId, ...(event.replyMessageId ? { replyMessageId: event.replyMessageId } : {}), chatId: event.chatId, chatType: event.chatType,
+      senderOpenId: event.senderOpenId, messageType: 'text', content: '', mentions: []
+    } satisfies LarkMessageEvent));
   }
 
   /** 回调端按此刻的队列重算排队卡的插队按钮：与渲染同一个判断，卡上画得出的按钮才受理。 */
@@ -369,7 +373,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     // 两条都得是人发的普通文字：命令、附件和机器人消息各自成一轮。
     // 只认纯文本且不是引用：引用、富文本和合并转发带的材料不在 prompt 原文里，并过去就丢了。
     const plain = async (item: LarkTask) => {
-      if (item.event.senderType === 'app' || item.event.senderType === 'bot' || item.event.messageType !== 'text' || item.event.parentId) return false;
+      if (isBotSenderType(item.event.senderType) || item.event.messageType !== 'text' || item.event.parentId) return false;
       const parsed = await parsePrompt(item.event, this.botOpenId).catch(() => undefined);
       return Boolean(parsed && !parsed.resources.length && parsed.prompt.trim() && !parseSlashCommand(parsed.prompt));
     };
@@ -981,10 +985,10 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     const cardContext: { beforeSend: () => void; agentName: string; showAgentName: boolean; permissionMode: ReturnType<typeof larkPermissionMode>; workspace?: string; scenarioRecall?: LarkScenarioRecallLine; adhdMode?: true } = { beforeSend: beforeTurnSend, agentName: await this.resolveAgentName(config), showAgentName: config.showAgentName === true, permissionMode: larkPermissionMode(config), ...(config.workspace ? { workspace: config.workspace } : {}), ...(config.adhdMode === true && task.id.startsWith('confirmation_') ? { adhdMode: true } : {}) };
     const clearAcknowledgement = () => this.clearAcknowledgementReaction(task);
     /** 执行前就失败：结束待办记录、发失败卡、撤掉收到表情。inboxReason 缺省同 taskName。 */
-    const failBeforeRun = async (taskName: string, markdown: string, idempotencyKey: string, options: { inboxReason?: string; readOnly?: true } = {}) => {
+    const failBeforeRun = async (taskName: string, markdown: string, idempotencyKey: string, reason: 'access_denied' | 'context_failed' | 'plan_unsupported' | 'identity_failed', options: { inboxReason?: string; readOnly?: true } = {}) => {
       if (launcherRecovery) throw new Error(taskName);
       task.state = 'failed'; task.retryable = false; task.startedAt = Date.now();
-      if (task.inbox) await this.inbox!.update(task.inbox, { reason: idempotencyKey.startsWith('fail_acl_') ? 'access_denied' : idempotencyKey.startsWith('context_failed_') ? 'context_failed' : idempotencyKey.startsWith('plan_unsupported_') ? 'plan_unsupported' : 'identity_failed', detail: (options.inboxReason ?? taskName).slice(0, 500) });
+      if (task.inbox) await this.inbox!.update(task.inbox, { reason, detail: (options.inboxReason ?? taskName).slice(0, 500) });
       await this.failPendingInbox(task, options.inboxReason ?? taskName);
       const card = await sendTaskCard(this.service, event, { ...cardContext, state: 'failed', retryable: false, ...(options.readOnly ? { readOnly: true } : {}),
         taskId: task.id, taskName, markdown, idempotencyKey: idempotencyKey.slice(0, 50),
@@ -995,7 +999,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     const failContextRead = async (error: unknown, activeSession?: Session) => {
       if (this.stopped || task.turn !== currentTurn || await this.supersededTurn(task, activeSession)) return;
       this.log.warn({ error, chatId: event.chatId, messageId: event.messageId }, '执行前读取飞书上下文失败');
-      await failBeforeRun('上下文读取失败', '上下文读取超时或失败，Agent 尚未执行。请稍后重新发送请求。', `context_failed_${task.id}`,
+      await failBeforeRun('上下文读取失败', '上下文读取超时或失败，Agent 尚未执行。请稍后重新发送请求。', `context_failed_${task.id}`, 'context_failed',
         { inboxReason: '上下文读取超时或失败', readOnly: true });
     };
     // 用户仅 @ 机器人而未发送文字时，拉取最近聊天记录作为上下文，让 Agent 判断用户意图。
@@ -1020,13 +1024,13 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     const highRiskAllowedEmails = config.highRiskAllowedEmails ?? [];
     const highRiskPattern = config.highRiskPattern || defaultHighRiskPattern;
     const riskControlEnabled = config.riskControlMode !== 'off';
-    const botSender = event.senderType === 'app' || event.senderType === 'bot';
+    const botSender = isBotSenderType(event.senderType);
     let trustedPeerBot = false;
     if (botSender) {
       try {
         trustedPeerBot = Boolean(config.groupToolsEnabled && event.senderOpenId && await this.peerBotAuthorized?.(event.chatId, event.senderOpenId));
       } catch (error) {
-        await failBeforeRun('Agent 协作身份校验失败', withGroupMention(`**无法验证发起交接的 Agent。**\n\n${error instanceof Error ? error.message : String(error)}`), `fail_peer_${event.messageId}_${currentTurn}`);
+        await failBeforeRun('Agent 协作身份校验失败', withGroupMention(`**无法验证发起交接的 Agent。**\n\n${error instanceof Error ? error.message : String(error)}`), `fail_peer_${event.messageId}_${currentTurn}`, 'identity_failed');
         return;
       }
     } else if ((!allowedUsers.length && allowedEmails.length) || (riskControlEnabled && !highRiskAllowedUsers.length && highRiskAllowedEmails.length)) {
@@ -1035,7 +1039,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         actorEmails = await this.service.getUserEmails(event.senderOpenId);
         if (!actorEmails.length) throw new LarkServiceError('LARK_SENDER_EMAIL_EMPTY', '飞书没有返回当前发送人的邮箱字段', 409);
       } catch (error) {
-        await failBeforeRun('身份解析权限缺失', withGroupMention(larkIdentityPermissionHelp(error, config.appId)), `fail_id_${event.messageId}_${currentTurn}`);
+        await failBeforeRun('身份解析权限缺失', withGroupMention(larkIdentityPermissionHelp(error, config.appId)), `fail_id_${event.messageId}_${currentTurn}`, 'identity_failed');
         return;
       }
     }
@@ -1048,7 +1052,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       ? (!accessRestricted || (peerBotsAllowed && trustedPeerBot) || Boolean(allowedBot))
       : !accessRestricted || (allowedUsers.length ? Boolean(allowedUser) : actorEmails.some(email => allowedEmails.includes(email)));
     if (!allowed) {
-      await failBeforeRun('访问被拒绝', withGroupMention('**当前账号不在机器人白名单中。**\n\n如需使用，请联系机器人管理员添加你。'), `fail_acl_${event.messageId}_${currentTurn}`);
+      await failBeforeRun('访问被拒绝', withGroupMention('**当前账号不在机器人白名单中。**\n\n如需使用，请联系机器人管理员添加你。'), `fail_acl_${event.messageId}_${currentTurn}`, 'access_denied');
       return;
     }
     const highRiskAuthorized = botSender
@@ -1141,7 +1145,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       const reason = !this.workflows || !this.inbox || !this.runtime.dispatch ? '当前服务没有计划卡所需的存储或无法派发任务，不能先出计划。'
         : planUnsupportedReason(session, (await this.runtime.listAgents?.())?.find(item => item.id === session.agentId) as Parameters<typeof planUnsupportedReason>[1]);
       if (reason) {
-        await failBeforeRun('无法先出计划', withGroupMention(reason), `plan_unsupported_${event.messageId}_${currentTurn}`, { inboxReason: '当前 Agent 不支持先出计划', readOnly: true });
+        await failBeforeRun('无法先出计划', withGroupMention(reason), `plan_unsupported_${event.messageId}_${currentTurn}`, 'plan_unsupported', { inboxReason: '当前 Agent 不支持先出计划', readOnly: true });
         return;
       }
     }
@@ -1364,8 +1368,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       let awaitingAnswer = false;
       if (task.state === 'running' && this.workflows && task.sessionId) {
         try {
-          const asks = await this.workflows.pendingAsks(config.appId);
-          awaitingAnswer = asks.some(item => item.sessionId === task.sessionId && item.kind === 'ask');
+          awaitingAnswer = (await this.workflows.pendingAsks(config.appId, task.sessionId)).length > 0;
         } catch (error) {
           this.log.warn({ error, taskId: task.id }, '读取等待回答状态失败');
         }

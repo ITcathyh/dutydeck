@@ -1,3 +1,4 @@
+import { escapeRegExp } from '@dutydeck/shared';
 import { backupSqlite } from '@dutydeck/storage';
 import { checkSqliteDriver, childProcessIdentity, describeSqliteDriverFailure, observeProcess, type ProcessIdentity } from '@dutydeck/storage';
 import Database from 'better-sqlite3';
@@ -344,7 +345,6 @@ const RELEASE_NAME = /^\d{8}T\d{6}Z-[0-9a-f]{7}(-dirty)?(-[A-Za-z0-9]{6})?$/;
 /** deploy 用 mkdtemp 建的部署记录名，末尾一定有 6 位随机后缀；手工部署的记录没有。 */
 const DEPLOY_RECORD_NAME = /^\d{8}T\d{6}Z-[0-9a-f]{7}(-dirty)?-[A-Za-z0-9]{6}$/;
 const PARTIAL_NAME = /^\..+\.partial$/;
-const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 function diskUsage(path: string): number {
   const stat = lstatSync(path);

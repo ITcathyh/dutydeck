@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { sha256Hex as hash } from '../hash.js';
 import { access, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { isAbsolute } from 'node:path';
@@ -24,7 +24,6 @@ export interface ManagedGroupBot {
 export interface ManagedGroup { key: string; chatId: string; name: string; bots: ManagedGroupBot[] }
 interface LiveOwner { channelBotId: string; credentialRefId: string; fingerprint: string; activeGroups: string[] }
 interface RunContext { activeOpenId?: string; appId: string; chatId: string; bindingId: string; principalId: string; openId: string; sourceId: string; revision: number; agentId: string; cwd: string; model?: string; reasoningEffort?: string }
-const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const ownerKey = (appId: string) => `lark.live-owner.${appId}`;
 const runKey = (sessionId: string) => `lark.run-context.${sessionId}`;
 const principalId = (appId: string, openId: string) => `principal_${hash(`${appId}\0${openId}`)}`;
@@ -476,7 +475,11 @@ export class LarkGroupManager {
     const id = options.installationOwner ? 'principal_installation_owner' : principalId(appId, openId!);
     const isMember = options.installationOwner || options.memberObserved || options.readOnly || await this.isMember(config, chatId, openId!);
     if (!isMember) return deny(action, '无法确认当前账号仍在此群中。');
-    if (openId && !options.readOnly) await this.repos.config.set(`lark.principal.${id}`, JSON.stringify({ appId, openId, name: openId }));
+    if (openId && !options.readOnly) {
+      const principalKey = `lark.principal.${id}`;
+      const principal = JSON.stringify({ appId, openId, name: openId });
+      if (await this.repos.config.get(principalKey) !== principal) await this.repos.config.set(principalKey, principal);
+    }
     const effective = detail.effective!;
     if (effective.access.mode === 'disabled') return deny(action, '此群已禁止发起和操作任务。');
     const run = sessionId ? parse<RunContext>(await this.repos.config.get(runKey(sessionId))) : undefined;

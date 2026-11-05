@@ -1,4 +1,4 @@
-import type { PolicyDecision, TerminalStream } from '@dutydeck/shared';
+import { errorMessage, type PolicyDecision, type TerminalStream } from '@dutydeck/shared';
 import type { FastifyInstance } from 'fastify';
 import type { IncomingMessage } from 'node:http';
 import type { Socket } from 'node:net';
@@ -49,11 +49,6 @@ export const terminalConnectionLimits = {
 type SendBudget = { bytes: number };
 
 const TERMINAL_PATH_PREFIX = '/api/terminal/';
-
-/** 从 unknown 提取错误信息 */
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 
 /**
  * WS 升级的访问认证，终端与转发到其他实例的升级共用。不传 auth = 不认证（loopback 场景）。

@@ -1,4 +1,5 @@
 import { open } from 'node:fs/promises';
+import { sleep } from '../daemon/time.js';
 import type { AgentGroupCliOptions, HistoryShowCliOptions } from '../cli-program.js';
 
 interface GroupToolErrorBody {
@@ -43,7 +44,7 @@ export class AgentGroupToolHttpClient {
     this.token = (env.dutydeck_group_tools_token ?? env.DUTYDECK_GROUP_TOOLS_TOKEN)?.trim() ?? '';
     this.turn = options.turn;
     this.fetcher = options.fetcher ?? globalThis.fetch;
-    this.sleep = options.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms)));
+    this.sleep = options.sleep ?? sleep;
     if (!this.baseUrl || !this.token) {
       throw new AgentGroupToolCliError({
         code: 'GROUP_TOOL_CONTEXT_REQUIRED',

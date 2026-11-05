@@ -22,14 +22,15 @@ export class PluginBindings {
     return fileSchema.parse(JSON.parse(readFileSync(this.path, 'utf8'))).bindings;
   }
   get(id: string) { return this.list().find(binding => binding.id === id); }
-  select(plugin: string, scope: PluginBindingScope): PluginBinding | undefined {
+  /** bindings 让调用方在一次操作里共用同一份绑定文件（用到才读）；不传时现读。 */
+  select(plugin: string, scope: PluginBindingScope, bindings: () => PluginBinding[] = () => this.list()): PluginBinding | undefined {
     if (!scope.botAppId) {
       if (!scope.cwd) return undefined;
       let root: string;
       try { root = realpathSync(scope.cwd); } catch { return undefined; }
-      return this.list().find(binding => binding.plugin === plugin && binding.workspaceRoot === root);
+      return bindings().find(binding => binding.plugin === plugin && binding.workspaceRoot === root);
     }
-    const candidates = this.list().filter(binding => binding.plugin === plugin && binding.botAppId === scope.botAppId);
+    const candidates = bindings().filter(binding => binding.plugin === plugin && binding.botAppId === scope.botAppId);
     return (scope.chatId ? candidates.find(binding => binding.chatId === scope.chatId) : undefined) ?? candidates.find(binding => !binding.chatId);
   }
   save(input: SavePluginBinding, manifest?: PluginManifest): PluginBinding {
@@ -64,8 +65,8 @@ export class PluginBindings {
       return binding;
     } finally { lock.close(); if (existsSync(temporary)) unlinkSync(temporary); }
   }
-  resolve(plugin: string, scope: PluginBindingScope, manifest: PluginManifest): PluginBindingContext | undefined {
-    const binding = this.select(plugin, scope);
+  resolve(plugin: string, scope: PluginBindingScope, manifest: PluginManifest, bindings?: () => PluginBinding[]): PluginBindingContext | undefined {
+    const binding = this.select(plugin, scope, bindings);
     if (!binding) return undefined;
     if (!binding.enabled) throw new RuntimeError('PLUGIN_BINDING_DISABLED', `Binding ${binding.id} is disabled`, 403);
     let config: Record<string, unknown>;

@@ -42,6 +42,7 @@ import { tmpdir, homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openSseStream as connectSseStream } from './smoke-sse.mjs';
+import { waitFor, waitForVisibleLocator } from './e2e-harness.mjs';
 import net from 'node:net';
 import { chromium } from '@playwright/test';
 
@@ -133,32 +134,6 @@ async function request(method, path, body) {
 }
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-
-async function waitFor(label, predicate, { timeoutMs = 30_000, intervalMs = 300 } = {}) {
-  const deadline = Date.now() + timeoutMs;
-  let last;
-  while (Date.now() < deadline) {
-    try {
-      last = await predicate();
-      if (last) return last;
-    } catch (error) {
-      last = error;
-    }
-    await sleep(intervalMs);
-  }
-  throw new Error(`等待「${label}」超时（${timeoutMs}ms）${last instanceof Error ? `：${last.message}` : ''}`);
-}
-
-/** 文案可以微调，但产品主入口必须是浏览器可见、可点的语义化按钮。 */
-async function waitForVisibleLocator(label, factories, timeoutMs = 15_000) {
-  return waitFor(label, async () => {
-    for (const factory of factories) {
-      const locator = factory().first();
-      if (await locator.isVisible().catch(() => false)) return locator;
-    }
-    return undefined;
-  }, { timeoutMs, intervalMs: 100 });
-}
 
 // ── 假 CLI ─────────────────────────────────────────────────────────────────
 /**

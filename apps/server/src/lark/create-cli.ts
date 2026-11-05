@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { supportsRemoteApproval, type AgentRepository, type ConfigRepository } from '@dutydeck/shared';
+import { shellQuote as quote, supportsRemoteApproval, type AgentRepository, type ConfigRepository } from '@dutydeck/shared';
 import type { LarkCreateCliOptions } from '../cli-program.js';
 import { createCliUi, type CliUi } from '../cli-ui.js';
 import { InvalidWorkingDirectoryError, validateWorkingDirectory } from '../setup/detect.js';
@@ -33,7 +33,6 @@ export interface LarkCreateCliResult {
 
 class LarkCreateCliError extends Error {}
 
-const quote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
 const active = (job: LarkAppCreationJob) => ['preparing', 'waiting_for_scan', 'creating', 'configuring'].includes(job.status);
 
 /** The CLI owns its creation run; persisted jobs and Bot configs are shared with the Dashboard. */

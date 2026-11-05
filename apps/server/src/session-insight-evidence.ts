@@ -21,7 +21,7 @@
  *   字节预算，goals 只吃剩余预算，巨大历史 goals 不会饿死三类关键证据；
  *   侧类与 goals 都按「活跃/最新优先」挑选，发布顺序仍回到规范升序。
  */
-import { createHash } from 'node:crypto';
+import { digest as executionJsonDigest } from '@dutydeck/runtime';
 import {
   canonicalExecutionJson,
   hostEvidenceSnapshotSchema,
@@ -351,7 +351,7 @@ function projectUsage(entries: NonNullable<HostEvidenceInput['usageEntries']>): 
  * - 数组须为规范升序（各投影函数已保证）。
  */
 export function computeHostEvidenceDigest(businessFacts: object): string {
-  return createHash('sha256').update(canonicalExecutionJson(businessFacts)).digest('hex');
+  return executionJsonDigest(businessFacts);
 }
 
 interface ClassSpec {

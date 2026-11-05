@@ -1,9 +1,8 @@
 import type { ChildProcess } from 'node:child_process';
 import { childProcessIdentity } from '@dutydeck/storage';
 import { makeId, now, RuntimeError, taskExecutionSchemas, type BoundExecutionRepository, type ChildPermit, type DriverContext, type DriverResource, type DriverSubmission, type DriverSubmissionInput, type ExecutionRepository, type NativeContextIdentity, type NativeContextExpected, type NativeContextRef, type OperationPermit, type ResourceOperationScope, type SessionFence } from '@dutydeck/shared';
-import { createHash } from 'node:crypto';
 import { canonicalExecutionJson } from '@dutydeck/shared';
-const digest = (value: unknown) => createHash('sha256').update(canonicalExecutionJson(value)).digest('hex');
+import { digest } from './ledger.js';
 
 type Permit = OperationPermit | ChildPermit;
 interface Entry { resourceId: string; operation: boolean; scope: ResourceOperationScope; child?: ChildProcess; exited: boolean; valid?: () => boolean; tail?: Promise<void>; finishTail?: () => void; finished?: boolean; exit?: Promise<void>; }

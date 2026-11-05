@@ -1,7 +1,7 @@
 import type Database from 'better-sqlite3';
 import { createHash, randomUUID } from 'node:crypto';
 import {
-  executionActorSchema, acceptedTaskInputSchema, isTerminalTaskStatus, acceptedTaskInputV2Schema, canonicalExecutionJson, taskExecutionSchemas, taskRequestV1Schema, steeringRecoveryDecisionSchema, steerableTaskNamespace, parseLarkSourceId, RuntimeError,
+  executionActorSchema, acceptedTaskInputSchema, isTerminalTaskStatus, acceptedTaskInputV2Schema, canonicalExecutionJson, taskExecutionSchemas, taskRequestV1Schema, steeringRecoveryDecisionSchema, steerableTaskNamespace, parseLarkSourceId, RuntimeError, now as timestamp,
   type AcceptedTask, type AcceptedTaskInput, type AgentEvent, type AttemptFence, type BoundExecutionRepository,
   type CommitResult, type DriverResource, type ExecutionBlocker, type ExecutionController, type ExecutionRepository,
   type ExecutionTask, type ExecutionUpgradeCounts, type ExecutionUpgradeSnapshot, type QueueAction, type RecoveryDecisionInput, type ResourceCheckRef, type Session,
@@ -31,7 +31,6 @@ export function executionTaskId(namespace: TaskRequestV1['namespace'], sessionId
 function json(value: unknown) { return JSON.stringify(value); }
 function stable(value: unknown) { return canonicalExecutionJson(value); }
 function same(a: unknown, b: unknown) { return stable(a) === stable(b); }
-function timestamp() { return new Date().toISOString(); }
 export const LEGACY_RETIREMENT_NOTICE = '升级已结束旧会话，历史记录保留；原上下文未自动恢复，请用 /new 新建。';
 function rowJson<T>(row: unknown): T | undefined { return row ? JSON.parse((row as { json: string }).json) as T : undefined; }
 function noCredentials(value: unknown): void {
@@ -324,8 +323,9 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
   const eventById = statement('SELECT * FROM events WHERE id=?');
   const eventSourceKey = (f: SessionFence, event: AppendInput, a?: TaskAttempt) => event.sourceId ? stable([f.sessionId, a ? ['attempt', a.attemptId] : ['run', f.runId], event.sourceId]) : null;
   const storedEvents = (f: SessionFence, event: AppendInput, a?: TaskAttempt) => eventsByIdOrSource().all(event.id, eventSourceKey(f, event, a)) as any[];
-  const append = (f: SessionFence, event: AppendInput, a?: TaskAttempt, settlementId?: string, stored = storedEvents(f, event, a)): AgentEvent => {
+  const append = (f: SessionFence, event: AppendInput, a?: TaskAttempt, settlementId?: string, stored?: any[]): AgentEvent => {
     const sourceKey = eventSourceKey(f, event, a);
+    stored ??= eventsByIdOrSource().all(event.id, sourceKey) as any[];
     const payload = { sessionId: f.sessionId, type: event.type, data: event.data, raw: event.raw ?? null, taskId: a?.taskId ?? null, attemptId: a?.attemptId ?? null, settlementId: settlementId ?? null };
     if (stored.length) {
       if (stored.length !== 1) fail('EVENT_IDEMPOTENCY_CONFLICT');
@@ -334,8 +334,10 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
       return decodeEvent(old);
     }
     const sequence = (nextEventSequence().get(f.sessionId) as { n: number }).n;
-    insertEvent().run(event.id, f.sessionId, sequence, event.type, event.timestamp ?? timestamp(), json(event.data), event.raw ?? null, a?.taskId ?? null, a?.attemptId ?? null, settlementId ?? null, sourceKey);
-    return decodeEvent(eventById().get(event.id));
+    // Decode the exact values just written instead of reading the row back.
+    const row = { id: event.id, session_id: f.sessionId, sequence, type: event.type, timestamp: event.timestamp ?? timestamp(), data: json(event.data), raw: event.raw ?? null, task_id: a?.taskId ?? null, attempt_id: a?.attemptId ?? null, settlement_id: settlementId ?? null };
+    insertEvent().run(row.id, row.session_id, row.sequence, row.type, row.timestamp, row.data, row.raw, row.task_id, row.attempt_id, row.settlement_id, sourceKey);
+    return decodeEvent(row);
   };
   const nextPosition = (sessionId: string, position: 'front' | 'back') => {
     const r = cached("SELECT MIN(COALESCE(queue_position,0)) AS lo,MAX(COALESCE(queue_position,0)) AS hi FROM tasks WHERE session_id=? AND status='queued'").get(sessionId) as { lo: number | null; hi: number | null };

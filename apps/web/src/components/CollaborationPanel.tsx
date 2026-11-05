@@ -51,7 +51,6 @@ export type CollaborationPanelProps = {
   chatId: string;
   groupName?: string;
   botName?: string;
-  className?: string;
 };
 
 type ActiveTab = 'settings' | 'followups' | 'mandates' | 'actions' | 'decisions';
@@ -208,7 +207,7 @@ function TriggerFields({ draft, disabled, cronHint, onChange }: {
  * 内部实现组件，由外层 CollaborationPanel 按 `${appId}:${chatId}` 的 key 强制重建，
  * 保证切换群 / 切换 Bot 时 query、草稿、对话框、回放结果全部隔离。
  */
-function CollaborationPanelInner({ appId, chatId, groupName, botName, className }: CollaborationPanelProps) {
+function CollaborationPanelInner({ appId, chatId, groupName, botName }: CollaborationPanelProps) {
   const queryClient = useQueryClient();
   const queryKey = ['collaboration-overview', appId, chatId];
 
@@ -278,7 +277,6 @@ function CollaborationPanelInner({ appId, chatId, groupName, botName, className 
 
   // ---- 待办事项：新建 (稳定 ID 与不可变快照重试) ----
   const [createFollowupOpen, setCreateFollowupOpen] = useState(false);
-  const [followupStableId, setFollowupStableId] = useState<string>('');
   const followupFrozenPayloadRef = useRef<CreateCollaborationFollowupInput | null>(null);
   const [newFollowupGoal, setNewFollowupGoal] = useState('');
   const [newFollowupProgress, setNewFollowupProgress] = useState('');
@@ -291,7 +289,6 @@ function CollaborationPanelInner({ appId, chatId, groupName, botName, className 
   const resetFollowupForm = () => {
     followupFrozenPayloadRef.current = null;
     createFollowupMutation.reset();
-    setFollowupStableId('');
     setNewFollowupGoal('');
     setNewFollowupProgress('');
     setNewFollowupOwnerId('');
@@ -304,7 +301,6 @@ function CollaborationPanelInner({ appId, chatId, groupName, botName, className 
   const openNewFollowupDialog = () => {
     if (!createFollowupOpen) {
       resetFollowupForm();
-      setFollowupStableId(generateStableId('followup'));
       setCreateFollowupOpen(true);
     }
   };
@@ -340,8 +336,8 @@ function CollaborationPanelInner({ appId, chatId, groupName, botName, className 
       return;
     }
 
-    const id = followupStableId || generateStableId('followup');
-    if (!followupStableId) setFollowupStableId(id);
+    // ID 只在首次提交时生成一次，随冻结快照一起用于重试。
+    const id = generateStableId('followup');
 
     const payload: CreateCollaborationFollowupInput = {
       id,
@@ -431,7 +427,6 @@ function CollaborationPanelInner({ appId, chatId, groupName, botName, className 
 
   // ---- 委托任务：新建 (稳定 ID、冻结 anchorAt 与不可变快照重试) ----
   const [createMandateOpen, setCreateMandateOpen] = useState(false);
-  const [mandateStableId, setMandateStableId] = useState<string>('');
   const [mandateFrozenAnchorAt, setMandateFrozenAnchorAt] = useState<string>('');
   const mandateFrozenPayloadRef = useRef<CreateCollaborationMandateInput | null>(null);
   const [newMandateGoal, setNewMandateGoal] = useState('');
@@ -448,7 +443,6 @@ function CollaborationPanelInner({ appId, chatId, groupName, botName, className 
   const resetMandateForm = () => {
     mandateFrozenPayloadRef.current = null;
     createMandateMutation.reset();
-    setMandateStableId('');
     setMandateFrozenAnchorAt('');
     setNewMandateGoal('');
     setNewMandatePrompt('');
@@ -460,7 +454,6 @@ function CollaborationPanelInner({ appId, chatId, groupName, botName, className 
   const openNewMandateDialog = () => {
     if (!createMandateOpen) {
       resetMandateForm();
-      setMandateStableId(generateStableId('mandate'));
       setMandateFrozenAnchorAt(new Date().toISOString());
       setCreateMandateOpen(true);
     }
@@ -500,8 +493,8 @@ function CollaborationPanelInner({ appId, chatId, groupName, botName, className 
       if (!timezone) throw new Error('时区不能为空（如 Asia/Shanghai）');
       const trigger = buildTrigger(newSchedule, mandateFrozenAnchorAt || new Date().toISOString());
 
-      const id = mandateStableId || generateStableId('mandate');
-      if (!mandateStableId) setMandateStableId(id);
+      // ID 只在首次提交时生成一次，随冻结快照一起用于重试。
+      const id = generateStableId('mandate');
 
       const payload: CreateCollaborationMandateInput = {
         id,
@@ -664,9 +657,7 @@ function CollaborationPanelInner({ appId, chatId, groupName, botName, className 
   if (overviewQuery.isLoading) {
     return (
       <div
-        className={`grid h-64 place-items-center rounded-lg border border-subtle bg-surface p-6 ${
-          className ?? ''
-        }`}
+        className="grid h-64 place-items-center rounded-lg border border-subtle bg-surface p-6"
       >
         <Spinner label="正在读取通用协作数据…" />
       </div>
@@ -677,7 +668,7 @@ function CollaborationPanelInner({ appId, chatId, groupName, botName, className 
     const error = overviewQuery.error;
     const forbidden = error instanceof ApiError && error.status === 403;
     return (
-      <div className={`space-y-3 rounded-lg border border-subtle bg-surface p-6 ${className ?? ''}`}>
+      <div className="space-y-3 rounded-lg border border-subtle bg-surface p-6">
         <Banner
           tone="danger"
           action={{ label: '重试', onClick: () => void overviewQuery.refetch() }}
@@ -714,9 +705,7 @@ function CollaborationPanelInner({ appId, chatId, groupName, botName, className 
 
   return (
     <div
-      className={`space-y-4 rounded-lg border border-subtle bg-surface p-4 shadow-sm sm:p-6 ${
-        className ?? ''
-      }`}
+      className="space-y-4 rounded-lg border border-subtle bg-surface p-4 shadow-sm sm:p-6"
     >
       {/* 头部 */}
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-subtle pb-4">

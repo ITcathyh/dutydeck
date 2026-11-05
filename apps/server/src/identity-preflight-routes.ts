@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import { z, ZodError } from 'zod';
+import { z } from 'zod';
 import {
   RuntimeError,
   toPublicRemoteChatFact,
@@ -11,6 +11,7 @@ import {
   type RemoteIdentityFact,
   type RepositoryBundle,
 } from '@dutydeck/shared';
+import { parseOrThrow } from './route-validation.js';
 import { IdentityPreflightError, LarkIdentityPreflightProbe, type LarkIdentityPreflightEvidence } from './lark/identity-preflight.js';
 
 export type IdentityPreflightRepositories = Pick<RepositoryBundle,
@@ -36,13 +37,7 @@ function stableFactId(prefix: 'remote_identity' | 'remote_chat', naturalKey: str
 }
 
 function safeParse(input: unknown) {
-  try { return runBodySchema.parse(input ?? {}); }
-  catch (error) {
-    if (error instanceof ZodError) {
-      throw new RuntimeError('IDENTITY_PREFLIGHT_VALIDATION_FAILED', error.issues.map(issue => `${issue.path.join('.') || 'body'}: ${issue.message}`).join('; '), 400);
-    }
-    throw error;
-  }
+  return parseOrThrow('IDENTITY_PREFLIGHT_VALIDATION_FAILED', runBodySchema, input ?? {});
 }
 
 function isAllowed(decision: boolean | PolicyDecision): boolean {

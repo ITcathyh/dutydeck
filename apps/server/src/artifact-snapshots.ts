@@ -1,4 +1,5 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
+import { sha256Hex as hash } from './hash.js';
 import { constants, realpathSync, statSync } from 'node:fs';
 import { link, mkdir, open, realpath, unlink, type FileHandle } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
@@ -17,7 +18,6 @@ const hex = z.string().regex(/^[a-f0-9]{64}$/);
 const identity = z.string().min(1).max(1024);
 export const artifactSnapshotReferenceSchema = z.object({ taskId: identity, attemptId: identity, eventId: identity, sequence: z.number().int().nonnegative().safe(), partIndex: z.number().int().nonnegative().safe(), revision: identity }).strict();
 const snapshotSchema = artifactSnapshotReferenceSchema.extend({ version: z.literal(1), id: hex, sessionId: identity, size: z.number().int().min(0).max(artifactSnapshotLimit), sha256: hex, capturedAt: z.string().datetime(), mimeType: z.enum(['text/plain', 'application/octet-stream']), name: z.string().min(1).max(180).refine(value => !/[\x00-\x1f\x7f/\\]/.test(value)) }).strict();
-const hash = (data: Buffer | string) => createHash('sha256').update(data).digest('hex');
 const refParts = (ref: ArtifactSnapshotReference) => [ref.taskId, ref.attemptId, ref.eventId, ref.sequence, ref.partIndex, ref.revision];
 const snapshotId = (sessionId: string, ref: ArtifactSnapshotReference, sha256: string) => hash(JSON.stringify([sessionId, ...refParts(ref), sha256]));
 function fail(code: string, message: string, status = 400): never { throw new RuntimeError(code, message, status); }

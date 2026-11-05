@@ -1,5 +1,5 @@
 import { useTimelineDisclosure } from '../timeline-disclosure';
-import { createContext, memo, useContext } from 'react';
+import { createContext, memo, useContext, useMemo } from 'react';
 import { BookOpen, BrainCircuit, ChevronDown, ChevronRight, Database, FilePenLine, FlaskConical, GitBranch, Globe2, LoaderCircle, Search, Terminal, Users, Wrench } from 'lucide-react';
 import type { TimelineActivityGroup, TimelineEvent } from '../timeline';
 import { CodeBlock } from '../MarkdownContent';
@@ -37,7 +37,7 @@ export const ToolCard = memo(function ToolCard({ event, ongoing = false, preferD
   const statusLabel = failed ? '失败' : done ? '已完成' : '执行中'; const actionLabel = preferDescription ? toolDescription(data) ?? toolActionLabel(presentation, terminal) : toolActionLabel(presentation, terminal);
   const tone = failed ? 'text-danger' : done ? 'text-success' : 'text-info';
   // 展开区不走 ```json 包一层再喂 MarkdownContent：工具输出里可能自带三个反引号，会炸掉解析。
-  const detailJson = open ? JSON.stringify({ ...(data.input !== undefined ? { input: data.input } : {}), ...(data.output !== undefined ? { output: data.output } : {}) }, null, 2) : '';
+  const detailJson = useMemo(() => open ? JSON.stringify({ ...(data.input !== undefined ? { input: data.input } : {}), ...(data.output !== undefined ? { output: data.output } : {}) }, null, 2) : '', [open, data.input, data.output]);
   return <div data-timeline-event={event.id} className="overflow-hidden">
     <button type="button" disabled={!hasDetails} onClick={() => setOpen(value => !value)} className="group/tool flex min-h-10 w-full items-center gap-2 py-1.5 text-left transition-colors hover:text-primary disabled:cursor-default">
       <span className={`grid h-5 w-5 shrink-0 place-items-center ${tone}`}><ToolKindIcon kind={presentation.kind} size={13}/></span><span className="min-w-0 flex-1 truncate text-caption text-subtle"><span className="font-medium text-secondary">{actionLabel}</span>{presentation.detail && <span title={presentation.detail} className="ml-1.5 font-mono text-subtle">{formatDetail ? formatDetail(presentation.detail) : presentation.detail}</span>}</span>
@@ -81,7 +81,7 @@ export function ActivityContent({ events, ongoing = false }: { events: TimelineE
   </div>;
 }
 
-export function ActivityGroupPanel({ group, ongoing = false }: { group: TimelineActivityGroup; ongoing?: boolean }) {
+export const ActivityGroupPanel = memo(function ActivityGroupPanel({ group, ongoing = false }: { group: TimelineActivityGroup; ongoing?: boolean }) {
   const [open, setOpen] = useTimelineDisclosure(`group:${group.id}`, ongoing);
   const toolCount = group.events.filter(event => event.type === 'tool_call' || event.type === 'tool_result').length;
   const thinkingCount = group.events.filter(event => event.type === 'thinking').length;
@@ -100,4 +100,10 @@ export function ActivityGroupPanel({ group, ongoing = false }: { group: Timeline
       <ActivityContent events={group.events} ongoing={ongoing}/>
     </div>
   </details>;
-}
+}, (previous, next) => {
+  // 只跳过已结束且有固定结束时间的组（耗时不再变）；组对象常被重建，按字段和各事件引用比较。
+  const before = previous.group, after = next.group;
+  return !next.ongoing && !previous.ongoing && Boolean(after.completedAt)
+    && before.id === after.id && before.label === after.label && before.startedAt === after.startedAt && before.completedAt === after.completedAt
+    && before.events.length === after.events.length && before.events.every((event, index) => event === after.events[index]);
+});

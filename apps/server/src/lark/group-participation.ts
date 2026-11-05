@@ -5,7 +5,7 @@ import { RuntimeError, COLLABORATION_LIST_LIMIT, DECISION_BUDGET_GATE, DECISION_
 import { BOT_LOOP_DEPTH_LIMIT, BOT_LOOP_GATE, BOT_TURN_RECORD } from '@dutydeck/shared';
 import { DECIDER_META_KEY, INTRUSIVE_FEEDBACK_PREFIX, MISSED_FEEDBACK_PREFIX, deciderMetaOf, isDecisionGate, participationLevelBehaviors, participationLevelLabels, participationLevelPhraseHint, participationLevelPhrases, participationLevels, resolveParticipation } from '@dutydeck/shared';
 import { resolveScenarioParams, scenarioBindingStatus, scenarioMajorVersion, scenarioRecordOf, scenarioSourceBots, scenarioTriggerSources, type CollaborationDuty, type ScenarioBinding, type ScenarioBotRef, type ScenarioMessage, type ScenarioPack, type UpdateCollaborationDutyInput } from '@dutydeck/shared';
-import { createHash } from 'node:crypto';
+import { jsonSha256 as digest } from '../hash.js';
 import type { CollaborationRepository, CollaborationScope, CollaborationFollowup, CollaborationSnapshot, CollaborationObservation, CollaborationDecision, CollaborationAction, CollaborationTeamContext, CollaborationDeciderMeta, CollaborationScenarioSnapshot, CollaborationSettings, ParticipationLevel } from '@dutydeck/shared';
 import { larkMemoryEnabled, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
@@ -68,7 +68,6 @@ type Slot = { pending?: Pending; timer?: NodeJS.Timeout; running?: Promise<void>
 export type ParticipationDispatcher = (event: LarkMessageEvent, config: StoredLarkConfig) => Promise<void>;
 /** 一次回合门禁的结论：放行返回 undefined，拦下返回可直接落日志的理由。 */
 export type BotTurnGate = string | undefined;
-const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const keyFor = (scope: CollaborationScope) => JSON.stringify([scope.appId, scope.chatId]);
 const teamContextTimeoutMs = 10_000;
 /** 主动回复与 act 转执行共用每小时主动发言额度。规则判为「在叫我」的转执行等同一次 @，不占这个额度。 */

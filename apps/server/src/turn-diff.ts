@@ -65,15 +65,18 @@ const diffArgs = (gitDir: string) => ['--git-dir', gitDir, '-c', 'core.quotePath
 const snapshotPathspec = ['--', '.', ':(exclude,glob)**/.dutydeck/**'];
 
 /** 未跟踪文件超过上限时返回原因，没超过返回 undefined。 */
-async function untrackedOverLimit(top: string, timeout: number, limits: typeof TURN_SNAPSHOT_UNTRACKED_LIMITS): Promise<string | undefined> {
+/** 快照没拍的原因：kind 供调用方分支，message 是给人看的中文说明。 */
+export type SnapshotSkip = { kind: 'untracked_count' | 'untracked_file_size' | 'untracked_total_size' | 'timeout' | 'error'; file?: string; message: string };
+
+async function untrackedOverLimit(top: string, timeout: number, limits: typeof TURN_SNAPSHOT_UNTRACKED_LIMITS): Promise<SnapshotSkip | undefined> {
   const paths = (await git(['ls-files', '-o', '--exclude-standard', '-z', ...snapshotPathspec], { cwd: top, timeout })).split('\0').filter(Boolean);
-  if (paths.length > limits.files) return `未跟踪文件 ${paths.length} 个，超过 ${limits.files} 个`;
+  if (paths.length > limits.files) return { kind: 'untracked_count', message: `未跟踪文件 ${paths.length} 个，超过 ${limits.files} 个` };
   let total = 0;
   for (const path of paths) {
     const size = (await lstat(join(top, path)).catch(() => undefined))?.size ?? 0;
-    if (size > limits.fileBytes) return `未跟踪文件 ${path} 有 ${size} 字节，超过单个文件上限 ${limits.fileBytes} 字节`;
+    if (size > limits.fileBytes) return { kind: 'untracked_file_size', file: path, message: `未跟踪文件 ${path} 有 ${size} 字节，超过单个文件上限 ${limits.fileBytes} 字节` };
     total += size;
-    if (total > limits.totalBytes) return `未跟踪文件合计超过 ${limits.totalBytes} 字节`;
+    if (total > limits.totalBytes) return { kind: 'untracked_total_size', message: `未跟踪文件合计超过 ${limits.totalBytes} 字节` };
   }
   return undefined;
 }
@@ -107,7 +110,7 @@ async function adoptObjects(from: string, to: string) {
  * 给 cwd 所在仓库的整个工作区拍快照，返回公共 git 目录和树 ID；失败、超时或未跟踪文件超过上限时返回 undefined，
  * 不是 git 仓库以外的原因交给 onSkip 记日志。
  */
-export async function snapshotWorkingTree(cwd: string, timeoutMs = TURN_SNAPSHOT_TIMEOUT_MS, options: { limits?: typeof TURN_SNAPSHOT_UNTRACKED_LIMITS; onSkip?: (reason: string) => void } = {}): Promise<{ gitDir: string; tree: string } | undefined> {
+export async function snapshotWorkingTree(cwd: string, timeoutMs = TURN_SNAPSHOT_TIMEOUT_MS, options: { limits?: typeof TURN_SNAPSHOT_UNTRACKED_LIMITS; onSkip?: (skip: SnapshotSkip) => void } = {}): Promise<{ gitDir: string; tree: string } | undefined> {
   const deadline = Date.now() + timeoutMs;
   // 每一步开始前都核对时限：子进程的超时只管单个命令，几步加起来不能超过这一次快照的时限。
   const remaining = () => {
@@ -144,7 +147,10 @@ export async function snapshotWorkingTree(cwd: string, timeoutMs = TURN_SNAPSHOT
     return { gitDir, tree };
   } catch (error) {
     // 不是 git 仓库不算异常，不记。
-    if (stage !== '定位仓库') options.onSkip?.(`${stage}失败：${Date.now() >= deadline ? `超过 ${timeoutMs} 毫秒时限` : error instanceof Error ? error.message.split('\n')[0] : String(error)}`);
+    if (stage !== '定位仓库') {
+      const timedOut = Date.now() >= deadline;
+      options.onSkip?.({ kind: timedOut ? 'timeout' : 'error', message: `${stage}失败：${timedOut ? `超过 ${timeoutMs} 毫秒时限` : error instanceof Error ? error.message.split('\n')[0] : String(error)}` });
+    }
     return undefined;
   } finally {
     if (scratch) await rm(scratch, { recursive: true, force: true }).catch(() => {});
@@ -298,7 +304,7 @@ export function createTurnDiffObserver(store: ConfigRepository, options: { timeo
     if (!session.cwd) return;
     const key = turnDiffKey(session.id, taskId);
     const snapshotOptions = { ...(options.limits ? { limits: options.limits } : {}),
-      onSkip: (reason: string) => options.log?.warn({ sessionId: session.id, taskId, phase, cwd: session.cwd, reason }, '这一轮没有记录改动范围') };
+      onSkip: (skip: SnapshotSkip) => options.log?.warn({ sessionId: session.id, taskId, phase, cwd: session.cwd, reason: skip.message }, '这一轮没有记录改动范围') };
     if (phase === 'start') {
       const snapshot = await snapshotWorkingTree(session.cwd, options.timeoutMs, snapshotOptions);
       if (!snapshot) return;

@@ -1,4 +1,5 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
+import { digest } from '@dutydeck/runtime';
 import { canonicalExecutionJson, RuntimeError, type JsonValue, type PluginToolAction, type PluginToolBinding, type PluginToolIdentity } from '@dutydeck/shared';
 import { PluginBusinessToolRegistry, validateToolInput, type BusinessToolEntry } from './business-tools.js';
 import { PluginToolGrants } from './tool-grants.js';
@@ -19,7 +20,6 @@ const freezeJson = <T>(value: T): T => {
   return value;
 };
 const pluginIdentity = (identity: PluginToolIdentity) => freezeJson(structuredClone(identity));
-const digest = (value: unknown) => createHash('sha256').update(canonicalExecutionJson(value)).digest('hex');
 const scopeKey = (identity: PluginToolIdentity) => identity.channel === 'lark' ? `lark:${identity.botAppId}:${identity.chatId}` : `web:${identity.actor.id}:${identity.workspaceRoot}`;
 const receipt = (action: PluginToolAction) => ({ actionId: action.id, status: action.status, ...(action.receipt ? { receipt: action.receipt } : {}), ...(action.error ? { error: action.error } : {}) });
 export class PluginBusinessToolService {

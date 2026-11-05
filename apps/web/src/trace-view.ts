@@ -1,3 +1,4 @@
+import { asRecord as record } from '@dutydeck/shared';
 import type { DockEvent } from './api';
 import { stateLabels } from './components/ui';
 import { createEventWindow } from './event-history';
@@ -20,7 +21,6 @@ export type TraceRow = {
   duration?: number;
 };
 
-const record = (value: unknown): Record<string, any> => value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 const string = (value: unknown) => typeof value === 'string' && value ? value : undefined;
 const traceTime = (value: unknown) => {
   const parsed = typeof value === 'string' && value.trim() ? Date.parse(value) : NaN;
@@ -48,7 +48,7 @@ function describe(event: DockEvent): Pick<TraceRow, 'category' | 'label' | 'summ
   if (event.type === 'text') return { category: data.role === 'user' ? 'user' : data.role === 'system' ? 'system' : 'assistant', label: data.role === 'user' ? data.steering ? '插话' : '用户输入' : '消息', summary, failed };
   if (event.type === 'thinking') return { category: 'assistant', label: '思考', summary, failed };
   if (event.type === 'error') return { category: 'error', label: '错误', summary, failed };
-  if (event.type === 'status' && ['prompt_assembly', 'usage', 'compaction'].includes(data.state)) return { category: 'context', label: data.state === 'prompt_assembly' ? '提示词组装' : data.state === 'compaction' ? '上下文压缩' : '上下文用量', summary, failed };
+  if (event.type === 'status' && typeof data.state === 'string' && ['prompt_assembly', 'usage', 'compaction'].includes(data.state)) return { category: 'context', label: data.state === 'prompt_assembly' ? '提示词组装' : data.state === 'compaction' ? '上下文压缩' : '上下文用量', summary, failed };
   const labels: Record<string, string> = { status: '会话状态', completed: '轮次结束', permission_request: '权限请求', raw_terminal: '终端输出' };
   return { category: 'system', label: labels[event.type] ?? event.type, summary, failed };
 }

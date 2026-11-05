@@ -6,7 +6,8 @@ import { larkElapsedLabel } from './card-status.js';
 import { agentSettingsConfirmKind, parseAgentSettings, showAgentSettings } from './agent-settings.js';
 import { createHash } from 'node:crypto';
 import { describeLarkTaskRecovery, larkContinuePrompt, larkRecoveryRetainedNote, larkReliability, larkSteeringUnknownNote } from './task-recovery.js';
-import { deadlineText, type LarkInteraction } from './workflow-interactions.js';
+import type { LarkInteraction } from './workflow-interactions.js';
+import { formatUnknownTaskTime as deadlineText } from '../task-resolution.js';
 import type { LarkInboxAdoption, LarkInboxRecord } from './task-inbox.js';
 import { larkConfirmationInputDigest, isLarkFirstCardUndelivered } from './task-inbox.js';
 import { larkForkWorkspaceMode, larkNativeForkId, larkResumeUnavailable } from './session-branches.js';
@@ -23,6 +24,7 @@ import { decideWake, isExplicitWake, wakeSignals, type WakeFacts } from './wake-
 import { directScenarioPrompt } from './scenario-direct.js';
 import { larkScenarioAdoptionOf } from './scenario-legacy.js';
 import { executeScheduleCommand, scheduleRequestCard } from './schedule-command.js';
+import { isBotSenderType } from './card-mentions.js';
 import { larkExecutionIdentity, larkMemoryEnabled, larkPermissionMode, readLarkConfig, saveLarkConfig, type StoredLarkConfig } from './config.js';
 import type { LarkMessageResource } from './message-content.js';
 import { LarkServiceError } from './service.js';
@@ -275,13 +277,6 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       idempotencyKey: `workflow_reply_${event.replyKey ?? event.messageId}`.slice(0, 50) }, this.log);
   }
 
-  private saveTaskDashboardOrigin(config: StoredLarkConfig, card: { messageId: string }, event: LarkMessageEvent) {
-    return this.workflowOptions.store?.set(`lark.task_dashboard.${config.appId}.${card.messageId}`, JSON.stringify({
-      messageId: event.messageId, ...(event.replyMessageId ? { replyMessageId: event.replyMessageId } : {}), chatId: event.chatId, chatType: event.chatType,
-      senderOpenId: event.senderOpenId, messageType: 'text', content: '', mentions: []
-    } satisfies LarkMessageEvent));
-  }
-
   private async taskDashboard(event: LarkMessageEvent, config: StoredLarkConfig, page: number) {
     const { entries, sessions } = await this.taskDashboardData(event, config);
     return buildLarkTaskDashboard(entries, page, undefined, event.chatId, await this.taskDashboardDecisions(event, config, sessions)).elements;
@@ -377,7 +372,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     const quoted = await this.workflows.quoted(config.appId, event);
     const names = ['tasks', 'answer', 'approve', 'reject'];
     if (!quoted && (!parsed || !names.includes(parsed.name))) return false;
-    if (event.senderType === 'app' || event.senderType === 'bot') {
+    if (isBotSenderType(event.senderType)) {
       await this.workflowReply(event, config, '任务操作需由人类成员发起。', { failed: true }); return true;
     }
     try {
@@ -735,7 +730,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     const quotedWorkflow = await this.workflows?.quoted(config.appId, event);
     const mentionsBot = this.botOpenId ? event.mentions.some(mention => mention.openId === this.botOpenId) : event.mentions.some(mention => mention.mentionedType === 'bot');
     if (this.stopped) return;
-    const botSender = event.senderType === 'app' || event.senderType === 'bot';
+    const botSender = isBotSenderType(event.senderType);
     const explicit = isExplicitWake({ chatType: event.chatType, botSender, mentionsBot, quotedWorkflow: Boolean(quotedWorkflow), adopted });
     let helpOnly = false;
     let recognizedCommand = false;
@@ -1179,7 +1174,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     const pluginPrompt = expandLarkPluginCommand(prompt, pluginScope);
     if (pluginPrompt !== undefined) return pluginPrompt;
     if (!parseSlashCommand(prompt)) return undefined;
-    const botSender = event.senderType === 'app' || event.senderType === 'bot';
+    const botSender = isBotSenderType(event.senderType);
     const allowlisted = await this.commandAllowlisted(config, event.chatType, event.chatId, event.senderOpenId, group.sessionId);
     const pluginCommands = larkPluginCommandHelp(pluginScope);
     const route = routeLarkCommand(prompt, {
@@ -1577,7 +1572,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
           if (route.args[0] === 'consolidate') {
             // /memory 整体是只读命令，但 consolidate 会改写账本：这里单独挡住机器人发送者，
             // 与 /remember、/forget 的 mutating 口径一致。
-            if (event.senderType === 'app' || event.senderType === 'bot') {
+            if (isBotSenderType(event.senderType)) {
               await replyCard('/memory consolidate 未执行', '机器人发送者不能整理本聊天的记忆。', { failed: true });
               return 'handled';
             }
@@ -1603,7 +1598,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
                 : '**还没有「不许记」规则。**\n\n发送 `/memory ignore <一句话描述>` 添加，例如 `/memory ignore 不要记任何人的薪资`。后台提取会把规则当作约束，写入前再按规则过滤一次。');
               return 'handled';
             }
-            if (event.senderType === 'app' || event.senderType === 'bot') {
+            if (isBotSenderType(event.senderType)) {
               await replyCard('/memory ignore 未执行', '机器人发送者不能修改「不许记」规则。', { failed: true });
               return 'handled';
             }
@@ -2231,7 +2226,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         await this.service.send({ receiveId: operatorOpenId, receiveIdType: 'open_id', taskName: links ? '登录 Dutydeck Web' : '任务详情', state: 'completed', readOnly: true,
           permissionMode: larkPermissionMode(config), elements });
       } catch (error) {
-        const upstreamCode = error instanceof LarkServiceError ? Number(error.details?.upstreamCode) : undefined;
+        const upstreamCode = error instanceof LarkServiceError ? error.upstreamCode : undefined;
         this.log.warn({ upstreamCode, messageId: context.messageId }, '私信 Web 登录链接失败');
         // 230013：点击人不在应用可用范围内，机器人无法与其单聊。
         return { type: 'error', content: upstreamCode === 230013

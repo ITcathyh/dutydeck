@@ -88,7 +88,8 @@ function clip(text: string, limit: number): string {
   return `${flat.slice(0, end)}…`;
 }
 
-function clock(iso: string): string {
+/** 北京时间的 MM-DD HH:MM。 */
+export function clock(iso: string): string {
   const parts = Object.fromEntries(clockFormat.formatToParts(new Date(iso)).map(part => [part.type, part.value]));
   return `${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
 }

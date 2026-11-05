@@ -319,7 +319,7 @@ export class PtyCliDriver implements AgentDriver {
     if (this.stopped) throw new Error('Driver stopped');
     if (this.started) return;
     const startingBackend = this.backend, generation = this.wiringGeneration;
-    const check = () => { if (this.stopped || this.backend !== startingBackend || this.wiringGeneration !== generation) throw new Error('PTY startup cancelled by lifecycle change'); };
+    const check = () => { if (this.superseded(startingBackend, generation)) throw new Error('PTY startup cancelled by lifecycle change'); };
     this.assertPermissionModeSupported();
 
     // Runtime reconnects a persisted Dutydeck session by constructing a fresh
@@ -651,7 +651,7 @@ export class PtyCliDriver implements AgentDriver {
     const transcript = this.transcript;
     const generation = this.wiringGeneration;
     await transcript.flush();
-    if (this.stopped || this.backend !== backend || this.wiringGeneration !== generation) return undefined;
+    if (this.superseded(backend, generation)) return undefined;
     const turnId = randomUUID();
     this.preparedTurnId = turnId;
     return { kind: 'pty-jsonl-v1', turnId, transcript: transcript.checkpoint() };
@@ -723,7 +723,7 @@ export class PtyCliDriver implements AgentDriver {
       attachedBackend = this.backend;
       generation = this.wiringGeneration;
       await this.transcript?.flush();
-      if (this.stopped || this.backend !== attachedBackend || this.wiringGeneration !== generation) {
+      if (this.superseded(attachedBackend, generation)) {
         throw new Error('PTY recovery cancelled by lifecycle change');
       }
       (await this.markTmuxReattached());
@@ -732,7 +732,7 @@ export class PtyCliDriver implements AgentDriver {
     } catch (err) {
       // A stopped/replaced attachment no longer owns the driver's waiters or
       // wiring. In particular, never detach a newer backend from this catch.
-      if (attachedBackend && (this.stopped || this.backend !== attachedBackend || this.wiringGeneration !== generation)) {
+      if (attachedBackend && this.superseded(attachedBackend, generation)) {
         rejectCompletion?.(err instanceof Error ? err : new Error(String(err)));
         throw err;
       }
@@ -781,14 +781,13 @@ export class PtyCliDriver implements AgentDriver {
     // backend so a late poll or delayed Enter cannot submit after interrupt.
     const interruptError = new Error('Driver interrupted');
     this.cancelActiveSubmission(interruptError);
-    this.turnWriteReject?.(interruptError);
     await this.submissionMetadata;
-    if (this.stopped || this.backend !== backend || this.wiringGeneration !== generation || (this.turnReject && this.turnReject !== turn)) return;
+    if (this.superseded(backend, generation) || (this.turnReject && this.turnReject !== turn)) return;
     if (this.persistentBackend()) {
       try { await this.persistentBackend()!.setDutydeckMetadata('turn_id', 'interrupted'); } catch { /* Runtime's durable interrupt intent also prevents adoption. */ }
     }
     this.interruptPending = this.turnActive;
-    if (this.stopped || this.backend !== backend || this.wiringGeneration !== generation || (this.turnReject && this.turnReject !== turn)) return;
+    if (this.superseded(backend, generation) || (this.turnReject && this.turnReject !== turn)) return;
     await backend.interrupt();
     // Ctrl-C only requests cancellation. Keep send() and Runtime's attempt open
     // until idle detection observes the prompt; a busy or silent pane is not proof.
@@ -802,7 +801,7 @@ export class PtyCliDriver implements AgentDriver {
     this.assertPermissionModeSupported();
     if (this.backend instanceof HerdrBackend && this.backend.hasState() && !(await this.backend.isStopped())) {
       await this.transcript?.flush();
-      if (this.stopped || this.backend !== backend || this.wiringGeneration !== generation) return;
+      if (this.superseded(backend, generation)) return;
       await this.reattachHerdr();
       (await this.markTmuxReattached());
       return;
@@ -812,7 +811,7 @@ export class PtyCliDriver implements AgentDriver {
     const tmuxProbe = tmuxName === undefined ? 'missing' : (await TmuxBackend.probeSession(tmuxName));
     if (tmuxName !== undefined && tmuxProbe === 'exists') {
       await this.transcript?.flush();
-      if (this.stopped || this.backend !== backend || this.wiringGeneration !== generation) return;
+      if (this.superseded(backend, generation)) return;
       (await this.reattachTmux(tmuxName, this.started));
       // daemon 重启后的典型形态：新 driver 直接 resume()，从没调过 start()。
       // 必须置 started，否则接下来的 send() 会走 start() 再 spawn 一次，
@@ -829,7 +828,7 @@ export class PtyCliDriver implements AgentDriver {
     if (!this.adapter.buildResumeCommand) return;   // 无 resume 能力 → no-op
     const plan = this.planResume();
     await this.transcript?.flush();
-    if (this.stopped || this.backend !== backend || this.wiringGeneration !== generation) return;
+    if (this.superseded(backend, generation)) return;
     await this.respawn(plan.args);
     if (plan.kind === 'resume') {
       (await this.markResumed());
@@ -1067,21 +1066,16 @@ export class PtyCliDriver implements AgentDriver {
       && tmuxBackend !== undefined;
     const stopReason = preservePersistentSession ? new DriverDetachedError() : new Error('Driver stopped');
     this.cancelActiveSubmission(stopReason);
-    this.turnWriteReject?.(stopReason);
     await this.submissionMetadata;
     if (!preservePersistentSession && !this.recoveryRejected && tmuxBackend) {
       try { await tmuxBackend.setDutydeckMetadata('turn_id', 'stopped'); } catch { /* Exit proof still required below. */ }
     }
     if (this.turnActive) {
-      this.turnActive = false;
-      this.turnReject?.(stopReason);
-      this.turnResolve = null;
-      this.turnReject = null;
+      this.failTurn(stopReason);
     }
     // A synchronous backend completion can clear turnActive while an adapter
     // still awaits its write promise. stop() must release that send() too.
     this.cancelActiveSubmission(stopReason);
-    this.turnWriteReject?.(stopReason);
     this.turnWriteReject = null;
     if (this.backend instanceof HerdrBackend || this.backend instanceof TmuxBackend) await this.backend.cancelPending();
     await this.transcript?.flush().catch(() => {});
@@ -1268,7 +1262,7 @@ export class PtyCliDriver implements AgentDriver {
   /** 把一个后端接线进事件流（start / reattach / respawn 共用）。 */
   private async wire(backend: SessionBackend, restoreTranscript?: DriverTurnRecovery['transcript']): Promise<void> {
     const generation = this.wiringGeneration;
-    const check = () => { if (this.stopped || this.backend !== backend || this.wiringGeneration !== generation) throw new Error('PTY wiring cancelled by lifecycle change'); };
+    const check = () => { if (this.superseded(backend, generation)) throw new Error('PTY wiring cancelled by lifecycle change'); };
     const pid = await backend.getPid?.();
     check();
     // Freeze the owned backend birth identity before any asynchronous startup
@@ -1410,10 +1404,7 @@ export class PtyCliDriver implements AgentDriver {
         this.turnReject = null;
       })().catch(error => {
         if (backend !== this.backend || !this.turnActive) return;
-        this.turnActive = false;
-        this.turnReject?.(error instanceof Error ? error : new Error(String(error)));
-        this.turnResolve = null;
-        this.turnReject = null;
+        this.failTurn(error instanceof Error ? error : new Error(String(error)));
       }).finally(() => {
         completing = false;
         if (idleAgain && this.turnActive && this.idleDetector?.programStatusTerminal()) {
@@ -1469,7 +1460,7 @@ export class PtyCliDriver implements AgentDriver {
     // turn is then reported as "no final output" while the screen shows a
     // perfectly good answer.
     this.sampleClaudeNativeSession = rootIdentity && this.processProbe ? forceDiscovery => {
-        if (this.stopped || backend !== this.backend || generation !== this.wiringGeneration) return;
+        if (this.superseded(backend, generation)) return;
         try {
           nativeResolver ??= new ClaudeNativeSessionResolver(rootIdentity!, this.cwd, this.spawnEnv(), this.processProbe!);
           const source = nativeResolver.resolve(forceDiscovery);
@@ -1482,17 +1473,17 @@ export class PtyCliDriver implements AgentDriver {
       nativeSessionPath: this.claudeResumeSource && claudeResumeFromObservation(this.claudeResumeSource, this.cwd, this.spawnEnv()) ? this.claudeResumeSource.verifiedPath ?? undefined : undefined,
       nativeSession: this.sampleClaudeNativeSession,
       onNativeSession: source => {
-        if (this.stopped || backend !== this.backend || generation !== this.wiringGeneration) return;
+        if (this.superseded(backend, generation)) return;
         this.cliSessionId = source.resumable ? source.nativeSessionId : undefined;
         const observation = this.transcriptSources.recordNativeSession(source);
         if (observation.observationId !== this.claudeResumeSource?.observationId) this.claudeSourceConfirmed = false;
         this.claudeResumeSource = observation;
       },
       onNativeSessionSwitch: () => {
-        if (this.stopped || backend !== this.backend || generation !== this.wiringGeneration) return;
+        if (this.superseded(backend, generation)) return;
         const error = new DriverRecoveryError('Claude changed its native session during this attempt; its outcome remains unknown and input was not resent');
         if (this.turnActive) {
-          this.cancelActiveSubmission(error); this.turnWriteReject?.(error);
+          this.cancelActiveSubmission(error);
           this.turnActive = false; this.preparedTurnId = undefined;
           this.clearTurnDeadline(); this.clearRenderedCompletion(); this.clearBackgroundHold(); this.clearProgramStatusDrain();
           this.turnReject?.(error); this.turnResolve = null; this.turnReject = null;
@@ -1573,12 +1564,9 @@ export class PtyCliDriver implements AgentDriver {
     if (backend instanceof HerdrBackend) backend.onDisconnect(error => {
       if (backend !== this.backend || this.stopped) return;
       this.cancelActiveSubmission(error);
-      this.turnWriteReject?.(error);
       this.turnWriteReject = null;
       if (this.turnActive) {
-        this.turnActive = false;
-        this.turnReject?.(new DriverRecoveryError(error.message));
-        this.turnResolve = null; this.turnReject = null;
+        this.failTurn(new DriverRecoveryError(error.message));
       }
       this.teardownWiring();
       this.emitEvent({ type: 'status', data: { state: 'terminal_disconnected', message: error.message } });
@@ -1726,7 +1714,7 @@ export class PtyCliDriver implements AgentDriver {
         const idle: AgentIdleTimeoutData = { message: `${timeoutMinutes} 分钟没有任何输出，已停止`, code: AGENT_IDLE_TIMEOUT, timeoutMinutes, retryable: true };
         this.emitEvent({ type: 'error', data: idle });
         this.turnActive = false;
-        this.cancelActiveSubmission(error); this.turnWriteReject?.(error);
+        this.cancelActiveSubmission(error);
         this.turnReject?.(error); this.turnReject = null; this.turnResolve = null;
         this.emitEvent({ type: 'status', data: { state: 'turn_timeout', timeoutSeconds: this.agent.timeout, message: error.message } });
       })().catch(error => {
@@ -1834,7 +1822,6 @@ export class PtyCliDriver implements AgentDriver {
     }
     const exitError = new Error(`Agent exited with code ${code}`);
     this.cancelActiveSubmission(exitError);
-    this.turnWriteReject?.(exitError);
     this.turnWriteReject = null;
     this.exitCallback(code);
   }
@@ -1969,7 +1956,7 @@ export class PtyCliDriver implements AgentDriver {
     this.teardownWiring();
     const generation = this.wiringGeneration;
     await backend.attach({ cols: DEFAULT_COLS, rows: DEFAULT_ROWS });
-    if (this.stopped || this.backend !== backend || this.wiringGeneration !== generation) {
+    if (this.superseded(backend, generation)) {
       throw new Error('PTY recovery cancelled by lifecycle change');
     }
     (await this.wire(backend, restoreTranscript));
@@ -1995,7 +1982,7 @@ export class PtyCliDriver implements AgentDriver {
     // attach 到既有会话：不重建 session、不重发 CLI 启动命令，只重建捕获。
     const generation = this.wiringGeneration;
     await backend.attach({ cols: DEFAULT_COLS, rows: DEFAULT_ROWS });
-    if (this.stopped || this.backend !== backend || this.wiringGeneration !== generation) throw new Error('PTY recovery cancelled by lifecycle change');
+    if (this.superseded(backend, generation)) throw new Error('PTY recovery cancelled by lifecycle change');
     await this.wire(backend, restoreTranscript);
   }
 
@@ -2060,11 +2047,24 @@ export class PtyCliDriver implements AgentDriver {
     return proxy;
   }
 
+  /** The driver stopped, or the backend/wiring this async step started on was replaced. */
+  private superseded(backend: SessionBackend, generation: number): boolean {
+    return this.stopped || this.backend !== backend || this.wiringGeneration !== generation;
+  }
+
+  private failTurn(error: Error): void {
+    this.turnActive = false;
+    this.turnReject?.(error);
+    this.turnResolve = null;
+    this.turnReject = null;
+  }
+
   private cancelActiveSubmission(error: Error): void {
     if (this.activeSubmission) {
       this.cancelSubmission(this.activeSubmission, error);
       this.activeSubmission = undefined;
     }
+    this.turnWriteReject?.(error);
   }
 
   private cancelSubmission(submission: { cancelError?: Error; receiptAbort?: AbortController }, error: Error): void {
@@ -2091,7 +2091,7 @@ export class PtyCliDriver implements AgentDriver {
     // 「事件来自哪个后端实例」过滤掉它（见那里的说明）。
     const previousBackend = this.backend;
     if (previousBackend instanceof HerdrBackend) await previousBackend.stopOwnedIdentity();
-    if (this.stopped || this.backend !== previousBackend || this.wiringGeneration !== generation) throw new Error('PTY respawn cancelled by lifecycle change');
+    if (this.superseded(previousBackend, generation)) throw new Error('PTY respawn cancelled by lifecycle change');
     try {
       await previousBackend.kill();
     } catch {
@@ -2110,9 +2110,9 @@ export class PtyCliDriver implements AgentDriver {
         env: respawnEnv,
         programStatus: this.usesProgramStatus,
       });
-      if (this.stopped || this.backend !== backend || this.wiringGeneration !== generation) throw new Error('PTY respawn cancelled by lifecycle change');
+      if (this.superseded(backend, generation)) throw new Error('PTY respawn cancelled by lifecycle change');
     } catch (error) {
-      if (backend instanceof HerdrBackend && (this.stopped || this.backend !== backend || this.wiringGeneration !== generation)) {
+      if (backend instanceof HerdrBackend && this.superseded(backend, generation)) {
         await backend.cancelPending();
         try { await backend.stopOwnedIdentity(); } catch { /* Keep failed physical exit unproven. */ }
       }

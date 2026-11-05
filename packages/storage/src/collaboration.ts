@@ -59,7 +59,8 @@ import {
   type ScenarioBinding,
   type ScheduleActionFence,
   SCENARIO_WINDOW_LIMIT,
-  SCENARIO_RECORD
+  SCENARIO_RECORD,
+  now
 } from '@dutydeck/shared';
 import { scheduleWriterLeaseKey } from './schedule-foundation.js';
 import { fromLegacyDecision, legacyScenarioGate, retireLegacyDutyColumns, withLegacyDutyScenarios } from './scenario-legacy.js';
@@ -67,10 +68,6 @@ import { fromLegacyDecision, legacyScenarioGate, retireLegacyDutyColumns, withLe
 const DEFAULT_SETTINGS_UPDATED_AT = '1970-01-01T00:00:00.000Z';
 const DEFAULT_OBSERVATION_WINDOW = 30;
 
-
-function now(): string {
-  return new Date().toISOString();
-}
 
 function makeId(prefix: string): string {
   return `${prefix}_${crypto.randomUUID()}`;

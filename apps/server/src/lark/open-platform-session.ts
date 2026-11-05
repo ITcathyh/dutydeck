@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { sleep } from '../daemon/time.js';
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
@@ -423,7 +424,7 @@ async function loginWithQr(
     }
     const remainingAfterPollMs = maxWaitMs - (Date.now() - startedAt);
     if (remainingAfterPollMs <= 0) throw new Error('等待飞书扫码超时');
-    if (pollIntervalMs > 0) await delay(Math.min(pollIntervalMs, remainingAfterPollMs));
+    if (pollIntervalMs > 0) await sleep(Math.min(pollIntervalMs, remainingAfterPollMs));
   }
 }
 
@@ -686,10 +687,6 @@ function readJson(body: string): unknown {
 function assertLoginPayload(payload: unknown, prefix: string): void {
   if (numericCode(payload) === 0) return;
   throw new Error(`${prefix}：${payloadMessage(payload)}`);
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 function positiveTimeout(value: number | undefined, fallback: number): number {

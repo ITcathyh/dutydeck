@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { HerdrBackend } from './herdr-backend.js';
+import { HerdrBackend, HerdrCensusUnknownError } from './herdr-backend.js';
 
 const sample = vi.hoisted(() => ({ enabled: false, mode: '', failed: false, envReads: 0 }));
 const login = (scope: string) => `1:name=systemd:/user.slice/user-${process.getuid!()}.slice/${scope}\n`;
@@ -103,7 +103,7 @@ describe('Herdr explicit stop census retries', () => {
     const proof = vi.spyOn(backend, 'isStopped').mockImplementation(() => killed);
     return { backend, state, snapshot, capture, kill, proof, signal };
   }
-  const unknown = () => { throw new Error('HERDR_OWNERSHIP_CENSUS_UNKNOWN fixture'); };
+  const unknown = () => { throw new HerdrCensusUnknownError('HERDR_OWNERSHIP_CENSUS_UNKNOWN fixture'); };
   it('retries transient reads and pre-kill checks while preserving one receipt and the exact process fence', async () => {
     vi.useFakeTimers(); const f = stopFixture(), order: string[] = [];
     f.capture.mockImplementationOnce(unknown).mockImplementationOnce(() => { order.push('snapshot'); return f.snapshot; }).mockImplementationOnce(unknown);

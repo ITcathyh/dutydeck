@@ -3,14 +3,13 @@
 // 判定前取上下文来源的材料，连同判定指引和执行指令冻结进判定快照的 scenario；回复、act 的执行和回放都读这份冻结内容，不读当前加载的包。
 // 取材料失败时这个包弃权：快照只记 abstained 和原因，规则按没有这个包重新求值。
 
-import { createHash } from 'node:crypto';
+import { jsonSha256 as digest } from '../hash.js';
 import { SCENARIO_LIMITS, deciderMetaOf, wrapUntrusted, type CollaborationDecision, type CollaborationObservation, type CollaborationScenarioSnapshot, type CollaborationScope,
   type PromptPart, type ScenarioContextResult, type ScenarioMessage } from '@dutydeck/shared';
 import { prepareSkillPrompt } from '../skill-delivery.js';
 import type { RegisteredScenarioPack } from '../plugins/scenario-registry.js';
 import type { DeadlineResult } from '../plugins/scenario-providers.js';
 
-const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
 /** 观察 refs 里的标记：入站时这条真人消息命中了这个 model 包。 */
 export const SCENARIO_REF_PREFIX = 'dutydeck:scenario:';

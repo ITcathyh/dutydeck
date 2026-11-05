@@ -1,5 +1,6 @@
 import { boundCollaborationSnapshot } from './collaboration-context.js';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
+import { digest as hash } from '@dutydeck/runtime';
 import { canonicalExecutionJson, previewNextSchedule, RuntimeError, type CollaborationAction, type CollaborationMandate, type CollaborationScope, type CollaborationSnapshot, type ScheduleDefinition, type ScheduleActionFence, type ScheduleExecutionFence, type ScheduleLease, type ScheduleOccurrence } from '@dutydeck/shared';
 import { scheduleWriterLeaseKey } from '@dutydeck/storage';
 import { CollaborationService, collaborationContextSignature, scheduleMatchesMandate, type CollaborationAuthorization, type CollaborationRepositories } from './collaboration-service.js';
@@ -26,7 +27,6 @@ export interface ScheduleExecutorOptions {
   now?: () => Date;
   holderId?: string;
 }
-const hash = (value: unknown) => createHash('sha256').update(canonicalExecutionJson(value)).digest('hex');
 const bootstrapSignature = (snapshot: CollaborationSnapshot) => hash({ status: snapshot.bootstrap?.status ?? null, missing: snapshot.bootstrap?.missing ?? [] });
 const actionId = (occurrence: ScheduleOccurrence, kind: string) => `collaboration_${kind}_${occurrence.idempotencyKey}`;
 const terminal = (state: string) => ['settled','failed','suppressed'].includes(state);
@@ -129,12 +129,13 @@ export class ScheduleExecutor {
       if (this.closed || processed >= 20) break;
       this.lastScheduleId = mandate.scheduleDefinitionId;
       try {
+        // 已取消/暂停/完成的委托不再产生新执行：没有在途 occurrence 时直接跳过（先查在途、不读计划），
+        // 既不续租约也不写任何记录。在途工作仍需借租约完成一次性收尾（取消 Agent、suppress）。
+        const inactivePending = mandate.status !== 'active' ? await this.repos.scheduleOccurrences.listUnsettled(mandate.scheduleDefinitionId) : undefined;
+        if (inactivePending?.length === 0) { this.lastOccurrenceIds.delete(mandate.scheduleDefinitionId); continue; }
         let schedule = await this.repos.scheduleDefinitions.get(mandate.scheduleDefinitionId);
         if (!schedule || schedule.sourceNamespace !== 'collaboration') continue;
-        const pending = await this.repos.scheduleOccurrences.listUnsettled(schedule.id);
-        // 已取消/暂停/完成的委托不再产生新执行：没有在途 occurrence 时直接跳过，
-        // 既不续租约也不写任何记录。在途工作仍需借租约完成一次性收尾（取消 Agent、suppress）。
-        if (mandate.status !== 'active' && !pending.length) { this.lastOccurrenceIds.delete(schedule.id); continue; }
+        const pending = inactivePending ?? await this.repos.scheduleOccurrences.listUnsettled(schedule.id);
         const lease = await this.lease(schedule); if (!lease) continue;
         const pendingStart = pending.findIndex(occurrence => occurrence.id === this.lastOccurrenceIds.get(mandate.scheduleDefinitionId)) + 1;
         if (!pending.length) this.lastOccurrenceIds.delete(schedule.id);
