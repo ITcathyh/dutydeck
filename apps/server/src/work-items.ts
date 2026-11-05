@@ -327,11 +327,15 @@ export class WorkItemService {
         // 停止与作废合在一起比：看到过「先停止 B」，B 跑完变成「作废 B」不算新情况。
         const shown = pending.acknowledged ?? [...pending.impact.stop, ...pending.impact.discard ?? []];
         const unseen = [...new Set([...planned.impact.stop, ...planned.impact.discard ?? []])].filter(id => !shown.includes(id));
-        if (unseen.length) {
+        // 等待期间出现新的确认理由（例如要重跑的步骤失败了）同样超出确认者看到过的内容。
+        const newReasons = planned.reasons.filter(reason => !pending.confirmationReasons.includes(reason));
+        if (unseen.length || newReasons.length) {
           const refreshed = { ...pending, impact: planned.impact, confirmationReasons: planned.reasons, acknowledged: [...new Set([...shown, ...unseen])] };
           state.value.item.pendingRevision = { ...refreshed, digest: pendingRevisionDigest(refreshed) };
           await this.write(state);
-          throw new RuntimeError('WORK_ITEM_REVISION_IMPACT_CHANGED', `The revision now also stops or discards ${unseen.join(', ')}; review the updated impact and confirm again`, 409);
+          throw new RuntimeError('WORK_ITEM_REVISION_IMPACT_CHANGED', unseen.length
+            ? `The revision now also stops or discards ${unseen.join(', ')}; review the updated impact and confirm again`
+            : `The revision now also requires confirmation for: ${newReasons.join('; ')}; review the updated impact and confirm again`, 409);
         }
         await this.applyRevision(state, planned, 'agent', actorId!, pending.reason);
         return this.view(state.value);

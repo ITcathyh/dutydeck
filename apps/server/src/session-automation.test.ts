@@ -22,7 +22,7 @@ import {
 import { createRepositories, executionTaskId } from '@dutydeck/storage';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ciProviders, ciStatus, TEST_CI_REMOTE, type StatusMock } from './ci-provider.test-helpers.js';
-import { workItemProgressStatus } from './work-items.js';
+import { workItemId, workItemProgressStatus } from './work-items.js';
 import { SessionAutomationService, type SessionAutomationRuntime, type AutomationDeliveryContext, type SessionAutomationServiceOptions } from './session-automation.js';
 
 const run = promisify(execFile);
@@ -2533,7 +2533,7 @@ describe('work-template schedules', () => {
         statuses.set(workId, statuses.get(workId) ?? 'awaiting_confirmation');
         return { id: workId, status: statuses.get(workId)!, template: `${id}@${version}` };
       }),
-      status: vi.fn(async (_session: string, id: string) => statuses.get(id))
+      progress: vi.fn(async (id: string) => statuses.get(id))
     };
     return fake;
   }
@@ -2566,7 +2566,7 @@ describe('work-template schedules', () => {
     const workTemplates = templates();
     // 与 service.ts 的接线一致：状态经 workItemProgressStatus 换算。
     const items = new Map<string, Pick<WorkItem, 'status' | 'pendingRevision'>>();
-    workTemplates.status.mockImplementation(async (_session: string, id: string) => items.has(id) ? workItemProgressStatus(items.get(id)!) : undefined);
+    workTemplates.progress.mockImplementation(async (id: string) => items.has(id) ? workItemProgressStatus(items.get(id)!) : undefined);
     const h = await fixture({ extra: { workTemplates } });
     const created = await h.service.createSchedule(h.session.id, templateInput, 'ou_owner');
     const schedule = await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
@@ -2596,6 +2596,151 @@ describe('work-template schedules', () => {
     expect(onScheduleProblem).toHaveBeenCalledWith(expect.objectContaining({ id: schedule.id }), expect.objectContaining({ text: expect.stringContaining('已删除或不可用') }));
     expect((await h.service.listBySession(h.session.id, 'ou_owner')).runStates?.[schedule.id]).toBe('failed');
     expect(h.dispatches).toHaveLength(0);
+  });
+
+  /** 按真实接线派生编号（含启动者身份）；进度查询不做授权，没有的工作项返回 undefined。 */
+  function ownedTemplates() {
+    const items = new Map<string, { actorId?: string; status: string }>();
+    const fail = { value: undefined as Error | undefined };
+    const fake = {
+      items, fail,
+      list: vi.fn(async () => [{ id: 'template_a', version: 2 }]),
+      run: vi.fn(async (session: string, _id: string, _version: number, _goal: string, key: string, actorId?: string) => {
+        const id = workItemId(session, actorId, key);
+        if (!items.has(id)) items.set(id, { actorId, status: 'running' });
+        if (fail.value) throw fail.value;
+        return { id, status: items.get(id)!.status };
+      }),
+      progress: vi.fn(async (id: string) => items.get(id)?.status)
+    };
+    return fake;
+  }
+
+  it('checks the previous work item by its stored starter after someone else re-enables the schedule and becomes its owner', async () => {
+    const workTemplates = ownedTemplates();
+    const h = await fixture({ extra: { workTemplates } });
+    const created = await h.service.createSchedule(h.session.id, templateInput, 'ou_owner');
+    const enabled = await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+    h.now.value = new Date('2026-09-12T00:01:01.000Z'); await h.service.tick();
+    const first = workItemId(h.session.id, 'ou_owner', workTemplates.run.mock.calls[0]![4]);
+    expect((await h.service.listBySession(h.session.id, 'ou_owner')).occurrences.at(-1)).toMatchObject({ runStatus: 'completed', workItemId: first });
+    // B 停用再启用：计划所有者变成 B。
+    const disabled = await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: enabled.revision, enabled: false }, 'ou_other');
+    await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: disabled.revision, enabled: true }, 'ou_other');
+    workTemplates.items.get(first)!.status = 'completed';
+    h.now.value = new Date('2026-09-12T00:02:01.000Z'); await h.service.tick();
+    expect(workTemplates.run).toHaveBeenCalledTimes(2);
+    expect(workTemplates.run.mock.calls[1]![5]).toBe('ou_other');
+  });
+
+  it('checks an errored start by the derived id of its stored starter: missing means finished, existing still blocks', async () => {
+    const workTemplates = ownedTemplates();
+    const h = await fixture({ extra: { workTemplates } });
+    const created = await h.service.createSchedule(h.session.id, templateInput, 'ou_owner');
+    const enabled = await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+    // 启动报错且工作项没建出：下次照常启动。
+    workTemplates.fail.value = new RuntimeError('WORK_ITEM_PARENT_INACTIVE', 'Parent session is not runnable', 409);
+    workTemplates.run.mockImplementationOnce(async () => { throw workTemplates.fail.value; });
+    h.now.value = new Date('2026-09-12T00:01:01.000Z'); await h.service.tick();
+    expect((await h.service.listBySession(h.session.id, 'ou_owner')).occurrences.at(-1)).toMatchObject({ runStatus: 'error' });
+    // 这次启动报错但工作项其实建好了（旧版本记为出错）；随后 B 停用再启用成为所有者。
+    workTemplates.fail.value = new RuntimeError('WORK_ITEM_CONFLICT', 'Work-item creation conflicted', 409);
+    workTemplates.progress.mockResolvedValueOnce(undefined).mockResolvedValueOnce(undefined);
+    h.now.value = new Date('2026-09-12T00:02:01.000Z'); await h.service.tick();
+    expect(workTemplates.run).toHaveBeenCalledTimes(2);
+    expect((await h.service.listBySession(h.session.id, 'ou_owner')).occurrences.at(-1)).toMatchObject({ runStatus: 'error' });
+    workTemplates.fail.value = undefined;
+    const disabled = await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: enabled.revision, enabled: false }, 'ou_other');
+    await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: disabled.revision, enabled: true }, 'ou_other');
+    h.now.value = new Date('2026-09-12T00:03:01.000Z'); await h.service.tick();
+    expect(workTemplates.run).toHaveBeenCalledTimes(2);
+    expect((await h.service.listBySession(h.session.id, 'ou_owner')).occurrences.at(-1)).toMatchObject({ runStatus: 'skipped' });
+  });
+
+  it('checks the previous work item as whoever started it, so a manual run by someone else still blocks the next scheduled start', async () => {
+    const workTemplates = ownedTemplates();
+    const h = await fixture({ extra: { workTemplates } });
+    const created = await h.service.createSchedule(h.session.id, templateInput, 'ou_owner');
+    const schedule = await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+    await h.service.runSchedule(h.session.id, schedule.id, { expectedRevision: schedule.revision, idempotencyKey: 'manual-b' }, 'ou_other');
+    expect(workTemplates.run).toHaveBeenCalledOnce();
+    expect(workTemplates.run.mock.calls[0]![5]).toBe('ou_other');
+    h.now.value = new Date('2026-09-12T00:01:01.000Z'); await h.service.tick();
+    expect(workTemplates.run).toHaveBeenCalledOnce();
+    expect((await h.service.listBySession(h.session.id, 'ou_owner')).occurrences.at(-1)).toMatchObject({ runStatus: 'skipped', error: expect.stringContaining('还没结束') });
+    expect((await h.service.listBySession(h.session.id, 'ou_owner')).runStates?.[schedule.id]).toBe('running');
+  });
+
+  it('treats only a missing previous work item as finished and skips when its status cannot be read', async () => {
+    const workTemplates = ownedTemplates();
+    const h = await fixture({ extra: { workTemplates } });
+    const created = await h.service.createSchedule(h.session.id, templateInput, 'ou_owner');
+    await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+    h.now.value = new Date('2026-09-12T00:01:01.000Z'); await h.service.tick();
+    expect(workTemplates.run).toHaveBeenCalledOnce();
+    workTemplates.progress.mockRejectedValueOnce(new Error('database is locked'));
+    h.now.value = new Date('2026-09-12T00:02:01.000Z'); await h.service.tick();
+    expect(workTemplates.run).toHaveBeenCalledOnce();
+    // 工作项被删除：查不到即视为已结束，照常启动。
+    workTemplates.items.clear();
+    h.now.value = new Date('2026-09-12T00:03:01.000Z'); await h.service.tick();
+    expect(workTemplates.run).toHaveBeenCalledTimes(2);
+  });
+
+  it('records a start that errored after the work item was created as started, and does not overlap it next time', async () => {
+    const workTemplates = ownedTemplates();
+    const h = await fixture({ extra: { workTemplates } });
+    const created = await h.service.createSchedule(h.session.id, templateInput, 'ou_owner');
+    const schedule = await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+    workTemplates.fail.value = new RuntimeError('WORK_ITEM_CONFLICT', 'Work-item creation conflicted', 409);
+    h.now.value = new Date('2026-09-12T00:01:01.000Z'); await h.service.tick();
+    const key = workTemplates.run.mock.calls[0]![4];
+    expect((await h.service.listBySession(h.session.id, 'ou_owner')).occurrences.at(-1)).toMatchObject({ runStatus: 'completed', workItemId: workItemId(h.session.id, 'ou_owner', key) });
+    expect((await h.service.listBySession(h.session.id, 'ou_owner')).runStates?.[schedule.id]).toBe('running');
+    workTemplates.fail.value = undefined;
+    h.now.value = new Date('2026-09-12T00:02:01.000Z'); await h.service.tick();
+    expect(workTemplates.run).toHaveBeenCalledOnce();
+  });
+
+  it('also checks an earlier errored start whose work item exists, written before the start was recorded as started', async () => {
+    const workTemplates = ownedTemplates();
+    const h = await fixture({ extra: { workTemplates } });
+    const created = await h.service.createSchedule(h.session.id, templateInput, 'ou_owner');
+    await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+    // 模拟旧版本：工作项建好了，触发却记为出错、没有 workItemId。
+    workTemplates.fail.value = new RuntimeError('WORK_ITEM_CONFLICT', 'Work-item creation conflicted', 409);
+    workTemplates.progress.mockResolvedValueOnce(undefined);
+    h.now.value = new Date('2026-09-12T00:01:01.000Z'); await h.service.tick();
+    expect((await h.service.listBySession(h.session.id, 'ou_owner')).occurrences.at(-1)).toMatchObject({ runStatus: 'error' });
+    workTemplates.fail.value = undefined;
+    h.now.value = new Date('2026-09-12T00:02:01.000Z'); await h.service.tick();
+    expect(workTemplates.run).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the run state running while later triggers are skipped behind an active work item', async () => {
+    const workTemplates = templates();
+    const h = await fixture({ extra: { workTemplates } });
+    const created = await h.service.createSchedule(h.session.id, templateInput, 'ou_owner');
+    const schedule = await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+    h.now.value = new Date('2026-09-12T00:01:01.000Z'); await h.service.tick();
+    workTemplates.statuses.set(`work_${workTemplates.run.mock.calls[0]![4]}`, 'running');
+    h.now.value = new Date('2026-09-12T00:02:01.000Z'); await h.service.tick();
+    const listed = await h.service.listBySession(h.session.id, 'ou_owner');
+    expect(listed.occurrences.at(-1)).toMatchObject({ runStatus: 'skipped' });
+    expect(listed.runStates?.[schedule.id]).toBe('running');
+  });
+
+  it('refuses to reuse a disabled same-name schedule when the requested work template differs', async () => {
+    const h = await fixture({ extra: { workTemplates: templates() } });
+    const receipt = (key: string) => ({ key, prepareDelivery: vi.fn(async () => {}) });
+    const withTemplate = await h.service.createSchedule(h.session.id, templateInput, 'ou_owner');
+    await expect(h.service.requestSchedule(h.session.id, { ...templateInput, workTemplate: undefined, prompt: 'Changed' }, 'ou_owner', receipt('turn-1'))).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_TEMPLATE_MISMATCH', statusCode: 409, message: expect.stringContaining('schedule update') });
+    expect(await h.service.getScheduleDefinition(h.session.id, withTemplate.id)).toMatchObject({ workTemplate: { id: 'template_a', version: 2 }, prompt: templateInput.prompt });
+    const plain = await h.service.createSchedule(h.session.id, { ...scheduleInput, name: 'Plain' }, 'ou_owner');
+    await expect(h.service.requestSchedule(h.session.id, { ...templateInput, name: 'Plain' }, 'ou_owner', receipt('turn-2'))).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_TEMPLATE_MISMATCH' });
+    expect((await h.service.getScheduleDefinition(h.session.id, plain.id)).workTemplate).toBeUndefined();
+    // 模板一致时照常兼容更新。
+    await expect(h.service.requestSchedule(h.session.id, { ...templateInput, prompt: 'Changed' }, 'ou_owner', receipt('turn-3'))).resolves.toMatchObject({ schedule: { id: withTemplate.id, prompt: 'Changed' }, updated: { changed: true } });
   });
 
   it('validates the template and its combination rules before saving', async () => {

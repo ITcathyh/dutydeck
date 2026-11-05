@@ -55,20 +55,21 @@ describe('InboxPanel', () => {
     const user = userEvent.setup();
     const call = vi.fn(async (action: InboxAction) => {
       if (action.path === '/p/2') throw new ApiError('gone', 'PERMISSION_NOT_FOUND', 404);
-      if (action.path === '/p/3') throw new ApiError('无权批准', 'POLICY_DENIED', 403);
+      if (action.path === '/p/3') throw new ApiError('无权拒绝', 'POLICY_DENIED', 403);
       return {};
     });
     render(<InboxPanel {...props} call={call} items={[permission(1), permission(2), permission(3)]}/>);
     await user.click(screen.getByRole('checkbox', { name: '全选权限审批' }));
     expect(screen.getByText('已选 3 项')).toBeTruthy();
-    await user.click(screen.getByRole('button', { name: '批量批准' }));
+    expect(screen.queryByRole('button', { name: '批量批准' })).toBeNull();
+    await user.click(screen.getByRole('button', { name: '批量拒绝' }));
     expect(call).not.toHaveBeenCalled();
-    expect(screen.getByText('确认对 3 项执行「批准」？')).toBeTruthy();
+    expect(screen.getByText('确认对 3 项执行「拒绝」？')).toBeTruthy();
     await user.click(screen.getByRole('button', { name: '确认执行' }));
-    expect(await screen.findByText('批准：成功 1 项，已失效 1 项，失败 1 项。')).toBeTruthy();
-    expect(call.mock.calls.map(([action]) => (action as InboxAction).body)).toEqual([{ approved: true }, { approved: true }, { approved: true }]);
+    expect(await screen.findByText('拒绝：成功 1 项，已失效 1 项，失败 1 项。')).toBeTruthy();
+    expect(call.mock.calls.map(([action]) => (action as InboxAction).body)).toEqual([{ approved: false }, { approved: false }, { approved: false }]);
     expect(screen.getByText(/已失效：gone/)).toBeTruthy();
-    expect(screen.getByText(/失败：无权批准/)).toBeTruthy();
+    expect(screen.getByText(/失败：无权拒绝/)).toBeTruthy();
   });
 
   it('必须先看内容的条目（工作项首次确认）没有勾选框，只能逐项点按钮；修订只批量放弃', async () => {

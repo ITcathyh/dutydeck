@@ -860,6 +860,60 @@ describe('认领已有的 PR（/pr follow）', () => {
     expect(record.handledComments).toEqual(expect.arrayContaining(['review:old', 'review:new', 'issue:9']));
   });
 
+  it('认领键抢到之前记录不到期，后台轮询不会先跟进它；抢到后立即轮询', async () => {
+    const f = await fixture();
+    const head = await f.external({ checkout: true });
+    f.state.pipeline = failed(head);
+    const compareAndSet = f.config.compareAndSet!.bind(f.config);
+    let pendingNextPoll: string | undefined;
+    vi.spyOn(f.config, 'compareAndSet').mockImplementation(async (key, expected, next) => {
+      if (key.startsWith('pull_request/claim/')) {
+        // 抢锁前插一次后台轮询：记录已写入但还不该被跟进。
+        const [row] = await f.config.list!('pull_request/record/');
+        pendingNextPoll = JSON.parse(row!.value).nextPollAt;
+        await f.service.tick(); await f.service.idle();
+        expect(f.provider.getPipelineStatus).not.toHaveBeenCalled();
+      }
+      return compareAndSet(key, expected, next);
+    });
+    const followed = await f.service.follow(f.session.id, { pullRequest: link }, 'ou_owner');
+    expect(Date.parse(pendingNextPoll!)).toBeGreaterThan(f.now.value);
+    expect((await f.service.get(followed.id))!.nextPollAt).toBe(new Date(f.now.value).toISOString());
+    await f.service.idle();
+    expect(f.provider.getPipelineStatus).toHaveBeenCalled();
+    expect(f.dispatches).toHaveLength(1);
+  });
+
+  it('认领时已有评论超过 2000 条会被截断：按其中最晚的评论时间排除，认领后的新评论照常处理', async () => {
+    const f = await fixture();
+    await f.external({ checkout: true });
+    f.state.pipeline = { state: 'success', runs: [] };
+    f.state.comments = Array.from({ length: 2_001 }, (_, index) => ({ id: `review:old${index}`, author: 'alice', trusted: true, body: `Old ${index}`,
+      createdAt: new Date(Date.parse('2026-10-10T00:00:00Z') + index * 1_000).toISOString() }));
+    const followed = await f.service.follow(f.session.id, { pullRequest: link }, 'ou_owner');
+    await f.service.idle();
+    const record = (await f.service.get(followed.id))!;
+    expect(record.handledComments).toHaveLength(2_000);
+    expect(record.handledComments).not.toContain('review:old0');
+    expect(record.commentsBaselineAt).toBe(new Date(Date.parse('2026-10-10T00:00:00Z') + 2_000 * 1_000).toISOString());
+    await f.poll();
+    expect(f.dispatches).toHaveLength(0);
+    f.state.comments = [...f.state.comments, { id: 'review:new', author: 'alice', trusted: true, body: 'Use a constant', createdAt: '2026-10-13T08:05:00Z' }];
+    await f.poll();
+    expect(f.dispatches).toHaveLength(1);
+    expect(f.dispatches[0]!.prompt).toContain('Use a constant');
+    expect(f.dispatches[0]!.prompt).not.toContain('Old 0');
+  });
+
+  it('认领时已有评论不超过 2000 条不写评论基线，只按编号排除', async () => {
+    const f = await fixture();
+    await f.external({ checkout: true });
+    f.state.comments = [{ id: 'review:old', author: 'alice', trusted: true, body: 'Old', createdAt: '2026-10-11T08:00:00Z' }];
+    const followed = await f.service.follow(f.session.id, { pullRequest: link }, 'ou_owner');
+    await f.service.idle();
+    expect((await f.service.get(followed.id))!.commentsBaselineAt).toBeUndefined();
+  });
+
   it('PR 合并后停止跟进；停止后可以重新认领；同一会话重复认领返回原记录，别的会话认领被拒', async () => {
     const f = await fixture();
     await f.external({ checkout: true });

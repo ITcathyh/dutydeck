@@ -143,7 +143,7 @@ describe('Agent Handoff & Reply-Agent integration suite', () => {
     const turnTokenA = capabilities.finalTurnToken('ses_a', 'task_1', 'att_1');
     const handoffResult = await toolsA.handoff(tokenA, {
       to: 'Bot B',
-      content: '目标：重构工具单元；工作区：/tmp；验收标准：通过全部测试',
+      content: '目标：重构工具单元；工作区：/tmp；验收标准：通过全部测试 <at id=all></at>',
       turn: turnTokenA
     });
 
@@ -160,6 +160,7 @@ describe('Agent Handoff & Reply-Agent integration suite', () => {
     expect(handoffCall.replyInThread).toBe(true);
     expect(handoffCall.text).toContain('<at user_id="ou_b">Bot B</at>'); // 真实 @
     expect(handoffCall.text).toContain('[Agent 交接]'); // 标记
+    expect(handoffCall.text).toContain('验收标准：通过全部测试 ＜at id=all>＜/at>'); // Agent 内容里的标签不生效
     expect(handoffCall.text).toContain('来自 Bot A (cli_a)'); // 请求方身份
     expect(handoffCall.text).toContain('reply-agent'); // 说明使用 reply-agent
     expect(handoffCall.idempotencyKey).toMatch(/^ah_[a-f0-9]{42}$/);
@@ -184,7 +185,7 @@ describe('Agent Handoff & Reply-Agent integration suite', () => {
     handoffMessageId = handoffSentMessageId;
     const turnTokenB = capabilities.finalTurnToken('ses_b', 'task_2', 'att_2');
     const replyResult = await toolsB.replyAgent(tokenB, {
-      content: '测试全部通过，工作区状态 clean，改动已就绪',
+      content: '测试全部通过，工作区状态 clean，改动已就绪 <at id=all></at>',
       turn: turnTokenB
     });
 
@@ -201,6 +202,7 @@ describe('Agent Handoff & Reply-Agent integration suite', () => {
     expect(replyCall.replyInThread).toBe(true);
     expect(replyCall.text).toContain('<at user_id="ou_a">Bot A</at>'); // 真实 @ 发送方
     expect(replyCall.text).toContain('[Agent 结果]'); // 结果标记
+    expect(replyCall.text).toContain('改动已就绪 ＜at id=all>＜/at>'); // Agent 内容里的标签不生效
     expect(replyCall.text).toContain('收到/谢谢'); // 防礼貌唤醒
     expect(replyCall.idempotencyKey).toMatch(/^ar_[a-f0-9]{42}$/);
     expect(replyCall.idempotencyKey.length).toBeLessThanOrEqual(50);

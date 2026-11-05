@@ -151,6 +151,15 @@ it('routes common settings commands and lists their risk and whitelist in help',
   const createHelp = createOut.join('').replace(/\s+/g, '');
   expect(createHelp).toContain('需要试跑就在本轮直接执行一次，不要建“测试任务”');
   expect(createHelp).toContain('fresh(defaultfor--every/--cron)');
+  // 更新只换触发方式不改时区：--cron/--at 按计划自身时区，--deadline 按北京时间。
+  const update = root.commands.find(command => command.name() === 'schedule')!.commands.find(command => command.name() === 'update')!;
+  const updateOut: string[] = [];
+  update.configureOutput({ writeOut: text => { updateOut.push(text); } });
+  update.outputHelp();
+  const updateHelp = updateOut.join('').replace(/\s+/g, '');
+  expect(updateHelp).toContain('五段Cron表达式，按计划自身的时区');
+  expect(updateHelp).toContain('仅执行一次的时间，按计划自身的时区');
+  expect(updateHelp).toContain('截止的北京时间');
   const settings = root.commands.find(command => command.name() === 'settings')!;
   const set = settings.commands.find(command => command.name() === 'set')!;
   const output: string[] = [];

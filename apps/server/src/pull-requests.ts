@@ -82,6 +82,8 @@ const recordSchema = z.object({
   /** 已经看过 CI 结论的提交：失败已处理或已通过，不再重复处理。 */
   ciCheckedSha: sha.optional(),
   handledComments: z.array(z.string()).max(2_000),
+  /** 认领时已有评论超过 handledComments 上限时，记下其中最晚的创建时间：不晚于它的评论都是认领前的，截断后也不当新意见。未截断、旧记录和 DutyDeck 开的 PR 没有。 */
+  commentsBaselineAt: timestamp.optional(),
   ownComments: z.array(z.string()).max(2_000),
   /** 含义不清、交给人决定的评论。 */
   questions: z.array(z.object({
@@ -431,9 +433,15 @@ export class PullRequestService {
     }
     // 认领前已有的评论不算新的评审意见：只跟进认领之后的。
     let existing: string[] = [];
+    let baseline: number | undefined;
     if (provider.listReviewComments) {
-      try { existing = (await provider.listReviewComments(repository, number)).map(comment => comment?.id).filter((id): id is string => typeof id === 'string'); }
+      let comments: CiReviewComment[];
+      try { comments = await provider.listReviewComments(repository, number); }
       catch (error) { throw new RuntimeError('PR_LOOKUP_FAILED', `读取 ${label} 的评论失败：${errorMessage(error)}`, 409); }
+      existing = comments.map(comment => comment?.id).filter((id): id is string => typeof id === 'string');
+      // 只有已处理列表装不下（会截断）时才记基线；用平台给的创建时间，不受本机时钟偏差影响。没有时间的评论只靠编号排除。
+      const times = existing.length > 2_000 ? comments.map(comment => commentTime(comment)).filter((time): time is number => time !== undefined) : [];
+      if (times.length) baseline = times.reduce((latest, time) => Math.max(latest, time));
     }
 
     const id = `pr_${randomUUID().replace(/-/g, '')}`;
@@ -443,8 +451,9 @@ export class PullRequestService {
       schemaVersion: 1, id, revision: 1, sessionId, ...(actorId ? { actorId } : {}), claimed: true, provider: provider.id, repository, pushUrl: remoteUrlLabel(pushUrl),
       status: 'open', title: oneLine(state.title ?? '', 200) || label, body: '', branch, target, baseSha, files, excluded: [], commits: [], contents: [], paths, headSha,
       pullRequest: { id: String(number), number, url: state.url ?? (/^https?:\/\//i.test(input.pullRequest.trim()) ? input.pullRequest.trim() : '') },
-      ciRounds: 0, reviewRounds: 0, fingerprints: {}, handledComments: existing.slice(-2_000), ownComments: [], questions: [],
-      expiresAt: iso(now), nextPollAt: iso(now), createdAt: iso(now), updatedAt: iso(now)
+      ciRounds: 0, reviewRounds: 0, fingerprints: {}, handledComments: existing.slice(-2_000), ...(baseline !== undefined ? { commentsBaselineAt: iso(baseline) } : {}), ownComments: [], questions: [],
+      // 先不到期：认领键抢到之前，后台轮询不能把这条记录当作在跟进。
+      expiresAt: iso(now), nextPollAt: iso(now + POLL_INTERVAL_MS), createdAt: iso(now), updatedAt: iso(now)
     });
     if (!await this.store().compareAndSet(recordKey(id), undefined, JSON.stringify(record))) throw new RuntimeError('PR_CONFLICT', 'PR 记录编号冲突，请重试。', 409);
     if (!await this.store().compareAndSet(claimKey, claimRaw ?? undefined, id)) {
@@ -454,8 +463,9 @@ export class PullRequestService {
       if (winner?.value.sessionId === sessionId) return this.toPublic(winner.value);
       throw new RuntimeError('PR_ALREADY_FOLLOWED', `${label} 已在另一个会话里跟进。`, 409);
     }
+    const started = await this.update(id, value => value.status === 'open' && !value.task ? { ...value, nextPollAt: iso(this.clock().getTime()) } : undefined);
     void this.tick().catch(error => this.options.log?.warn({ error }, 'PR 跟进失败'));
-    return this.toPublic(record);
+    return this.toPublic(started?.value ?? record);
   }
 
   /** 飞书确认卡发出后记下卡片消息 ID：只有这张卡上的按钮有效。 */
@@ -693,8 +703,10 @@ export class PullRequestService {
     }
     if (provider.listReviewComments && !stored.value.reviewsPaused) {
       const handled = new Set([...stored.value.handledComments, ...stored.value.ownComments, ...stored.value.questions.map(question => question.commentId)]);
+      const baseline = stored.value.commentsBaselineAt ? Date.parse(stored.value.commentsBaselineAt) : undefined;
       const fresh = (await provider.listReviewComments(value.repository, value.pullRequest.number))
-        .filter(comment => comment && typeof comment.id === 'string' && !handled.has(comment.id) && typeof comment.body === 'string' && comment.body.trim() && !comment.body.includes(PR_COMMENT_MARKER));
+        .filter(comment => comment && typeof comment.id === 'string' && !handled.has(comment.id) && typeof comment.body === 'string' && comment.body.trim() && !comment.body.includes(PR_COMMENT_MARKER)
+          && !(baseline !== undefined && (commentTime(comment) ?? Infinity) <= baseline));
       // 只有仓库所有者、成员、协作者的人类账号的评论自动交给 Agent；其余的发卡片问人，不占处理轮次。
       const untrusted = fresh.filter(comment => comment.trusted !== true).slice(0, pullRequestLimits.commentsPerRound)
         .map(comment => ({ id: comment.id, excerpt: excerptOf(comment), question: untrustedAuthor(comment) }));
@@ -1004,6 +1016,12 @@ function scopeRule(paths: string[]) {
 function untrustedAuthor(comment: CiReviewComment) {
   const role = [comment.isBot ? '机器人' : undefined, comment.authorAssociation ? oneLine(comment.authorAssociation, 40) : comment.isBot ? undefined : '身份未知'].filter(Boolean).join('，');
   return `评论作者 ${comment.author ? oneLine(comment.author, 40) : '未知'}（${role}）不是仓库所有者、成员或协作者的个人账号，没有自动处理。要按这条评论修改吗？`;
+}
+
+/** 平台给的评论创建时间（毫秒）；没有或读不懂时 undefined。 */
+function commentTime(comment: CiReviewComment | undefined) {
+  const time = typeof comment?.createdAt === 'string' ? Date.parse(comment.createdAt) : NaN;
+  return Number.isFinite(time) ? time : undefined;
 }
 
 function excerptOf(comment: CiReviewComment) {

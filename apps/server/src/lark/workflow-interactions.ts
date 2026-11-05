@@ -819,7 +819,7 @@ export class LarkWorkflowInteractions {
         ? '「允许本次」只处理这一条请求；「本会话允许此命令」仅允许目录、资源与命令完全相同的后续请求，服务重启后失效。'
         : '本次选择只处理这一条请求，不改变后续授权方式。' };
     const minimalAsk = kind === 'ask' && record.adhdMode === true;
-    const displayedQuestion = minimalAsk ? { tag: 'markdown', content: question } : questionElement(kind, question);
+    const displayedQuestion = questionElement(kind, question);
     const elements: LarkCardElement[] = [
       ...(!minimalAsk && groupMentionTag ? [{ tag: 'markdown', element_id: 'group_mention', content: groupMentionTag }] : []),
       ...(minimalAsk ? [] : intentElements(record)),
@@ -1026,7 +1026,7 @@ export class LarkWorkflowInteractions {
     return { status: 'deferred' as const, askId: record.id, reason: '确认已登记，等待用户点击后另起一轮；本轮结束，不执行依赖该确认的操作。' };
   }
   private confirmationElements(record: LarkInteraction) {
-    return [{ tag: 'markdown', content: record.question }, ...(record.multiple
+    return [questionElement('ask', record.question), ...(record.multiple
       ? [multipleChoiceForm(record, record.durable!.choices)] : singleChoiceElements(record, record.durable!.choices))];
   }
   private async deliverConfirmation(record: LarkInteraction) {

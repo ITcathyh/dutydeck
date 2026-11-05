@@ -69,6 +69,7 @@ import { CiProviderRegistry, ciProviderLabel, resolveCiHead, type CiHead } from 
 import type { CiWebhookService } from './ci-webhook.js';
 import type { PullRequestService } from './pull-requests.js';
 import { readTaskAttemptResult } from './task-results.js';
+import { workItemId } from './work-items.js';
 import { z } from 'zod';
 
 const SCHEDULE_PREFIX = 'session_automation/schedule/';
@@ -192,8 +193,15 @@ export interface ScheduleWorkTemplates {
   list(parentSessionId: string, actorId?: string): Promise<Array<{ id: string; version: number }>>;
   /** 同一幂等键重试返回同一工作项。 */
   run(parentSessionId: string, templateId: string, version: number, goal: string, idempotencyKey: string, actorId?: string): Promise<{ id: string; status: string }>;
-  status(parentSessionId: string, workItemId: string, actorId?: string): Promise<string | undefined>;
+  /**
+   * 内部进度查询，不做授权：编号只来自触发记录或按启动者派生，不受计划改归属或会话授权变化影响。
+   * 工作项不存在时返回 undefined；存在但读不出状态时返回 'unknown'。
+   */
+  progress(workItemId: string): Promise<string | undefined>;
 }
+/** 一次触发启动工作项时用的身份：手动运行用点运行的人，其余用计划所有者。 */
+const occurrenceActorId = (schedule: SessionSchedule, occurrence: Pick<SessionScheduleOccurrenceV2, 'triggerSource' | 'actor' | 'actorId'>) =>
+  occurrence.actorId ?? (occurrence.triggerSource === 'manual' && occurrence.actor?.kind !== 'unspecified' ? occurrence.actor?.id : schedule.actorId);
 /** 仍在进行、尚需人或系统推进的工作项状态；上一次没结束时不再启动新的。 */
 const activeWorkItemStatuses = new Set(['awaiting_confirmation', 'running', 'waiting', 'blocked', 'cancelling']);
 
@@ -714,8 +722,10 @@ export class SessionAutomationService {
       return value.runStatus === 'blocked' || unknown || value.taskId && this.options.awaitingHuman?.(value.executionSessionId ?? value.sessionId) ? 'awaiting_human' : 'running';
     }
     const latest = history[0] && migrateOccurrence(history[0]);
-    if (latest?.workItemId && this.options.workTemplates) {
-      const status = await this.options.workTemplates.status(schedule.sessionId, latest.workItemId, schedule.actorId).catch(() => undefined);
+    // 被跳过的触发不带工作项；看最近一次真正启动的工作项。
+    const started = history.map(migrateOccurrence).find(item => item.workItemId);
+    if (started?.workItemId && this.options.workTemplates) {
+      const status = await this.options.workTemplates.progress(started.workItemId).catch(() => undefined);
       if (status === 'awaiting_confirmation' || status === 'blocked') return 'awaiting_human';
       if (status && activeWorkItemStatuses.has(status)) return 'running';
       if (status === 'failed') return 'failed';
@@ -867,6 +877,10 @@ export class SessionAutomationService {
       .sort((a, b) => Number(b.enabled) - Number(a.enabled) || b.updatedAt.localeCompare(a.updatedAt));
     if (!existing || input.additional) return { schedule: await this.createSchedule(sessionId, input.mode || !receipt.newMode || !this.options.runtime.startScheduleSession ? input : { ...input, mode: receipt.newMode }, actorId, receipt) };
     if (input.mode === 'independent' && existing.mode !== 'independent') throw new RuntimeError('SESSION_AUTOMATION_MODE_IMMUTABLE', 'An existing schedule cannot switch to independent mode', 409);
+    // 兼容更新不改工作项模板：模板不一致时不静默保留或丢掉，让 Agent 显式改用 update 或换名称。
+    if (input.workTemplate?.id !== existing.workTemplate?.id || input.workTemplate?.version !== existing.workTemplate?.version) {
+      throw new RuntimeError('SESSION_AUTOMATION_TEMPLATE_MISMATCH', `已有同名计划「${existing.name}」的工作项模板与这次请求不一致；要改原计划请用 schedule update ${existing.id}，要另建请换一个名称`, 409);
+    }
     const mode = input.mode === 'independent' ? undefined : input.mode;
     const patch: Omit<UpdateSessionScheduleInput, 'expectedRevision'> = {
       ...(input.prompt !== existing.prompt ? { prompt: input.prompt } : {}),
@@ -2016,9 +2030,9 @@ export class SessionAutomationService {
    */
   private async startWorkTemplate(scheduleStored: { raw: string; value: SessionSchedule }, stored: { raw: string; value: SessionScheduleOccurrenceV2 }) {
     const schedule = scheduleStored.value;
-    const occurrence = stored.value;
+    let occurrence = stored.value;
     const template = schedule.workTemplate!;
-    const actorId = occurrence.triggerSource === 'manual' && occurrence.actor?.kind !== 'unspecified' ? occurrence.actor?.id : schedule.actorId;
+    const actorId = occurrenceActorId(schedule, occurrence);
     const fail = async (code: string, message: string) => {
       await this.finishOccurrence(stored, { conditionStatus: 'passed', runStatus: 'error', error: message });
       if (occurrence.triggerSource !== 'manual') {
@@ -2033,21 +2047,43 @@ export class SessionAutomationService {
       return;
     }
     if (!this.options.workTemplates) { await fail('WORK_TEMPLATE_UNAVAILABLE', '本实例没有启用工作项模板，无法启动'); return; }
-    const previous = (await this.listRecords(OCCURRENCE_PREFIX, value => sessionScheduleOccurrenceSchema.parse(value), undefined, { field: 'runStatus', values: ['completed'], scheduleId: schedule.id }))
-      .map(item => migrateOccurrence(item.value)).filter(item => item.scheduleId === schedule.id && item.workItemId && item.id !== occurrence.id)
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
-    const previousStatus = previous?.workItemId ? await this.options.workTemplates.status(schedule.sessionId, previous.workItemId, actorId).catch(() => undefined) : undefined;
-    if (previousStatus && activeWorkItemStatuses.has(previousStatus)) {
-      await this.finishOccurrence(stored, { conditionStatus: 'skipped', runStatus: 'skipped', error: `上一次启动的工作项 ${previous!.workItemId} 还没结束` });
-      if (occurrence.triggerSource !== 'manual') await this.advanceSchedule(schedule, occurrence.scheduledForUtc);
-      return;
+    const workTemplates = this.options.workTemplates;
+    // 启动前记下启动者：计划之后改归属，也能按原身份派生和核对这次的工作项；重试沿用同一身份。
+    if (actorId && !occurrence.actorId) {
+      const withActor = sessionScheduleOccurrenceV2Schema.parse({ ...occurrence, revision: occurrence.revision + 1, actorId, updatedAt: iso(this.clock()) });
+      if (!await this.replace(occurrenceKey(occurrence.id), stored.raw, withActor)) return;
+      stored = { raw: JSON.stringify(withActor), value: withActor };
+      occurrence = withActor;
+    }
+    const records = (await this.listRecords(OCCURRENCE_PREFIX, value => sessionScheduleOccurrenceSchema.parse(value), undefined, { field: 'runStatus', values: ['completed', 'error'], scheduleId: schedule.id }))
+      .map(item => migrateOccurrence(item.value)).filter(item => item.scheduleId === schedule.id && item.id !== occurrence.id)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    // 最近一次带工作项的启动，加上它之后出错的启动：出错时工作项可能其实已建好，按派生编号一并核对。
+    const lastStarted = records.findIndex(item => item.runStatus === 'completed' && item.workItemId);
+    const previous = records.slice(0, lastStarted < 0 ? undefined : lastStarted + 1)
+      .filter(item => item.workItemId || item.runStatus === 'error')
+      .map(item => item.workItemId ?? workItemId(schedule.sessionId, occurrenceActorId(schedule, item), `schedule:${item.id}`));
+    for (const id of previous) {
+      // 只有确认不存在才算已结束；读不出状态按没结束处理，宁可少启动一次。
+      const status = await workTemplates.progress(id).catch(() => 'unknown');
+      if (status && (status === 'unknown' || activeWorkItemStatuses.has(status))) {
+        await this.finishOccurrence(stored, { conditionStatus: 'skipped', runStatus: 'skipped', error: `上一次启动的工作项 ${id} 还没结束` });
+        if (occurrence.triggerSource !== 'manual') await this.advanceSchedule(schedule, occurrence.scheduledForUtc);
+        return;
+      }
     }
     let item: { id: string; status: string };
-    try { item = await this.options.workTemplates.run(schedule.sessionId, template.id, template.version, schedule.prompt, `schedule:${occurrence.id}`, actorId); }
+    const key = `schedule:${occurrence.id}`;
+    try { item = await workTemplates.run(schedule.sessionId, template.id, template.version, schedule.prompt, key, actorId); }
     catch (error) {
-      const code = errorCode(error);
-      await fail(code, code === 'WORK_TEMPLATE_NOT_FOUND' ? `工作项模板 ${template.id}（版本 ${template.version}）已删除或不可用，这次没有启动` : `工作项模板没能启动：${errorMessage(error)}`);
-      return;
+      // 工作项已经建好（如响应丢失后重试冲突）时按成功记录，避免下次重叠启动。
+      const id = workItemId(schedule.sessionId, actorId, key);
+      if (await workTemplates.progress(id).catch(() => undefined) !== undefined) item = { id, status: 'unknown' };
+      else {
+        const code = errorCode(error);
+        await fail(code, code === 'WORK_TEMPLATE_NOT_FOUND' ? `工作项模板 ${template.id}（版本 ${template.version}）已删除或不可用，这次没有启动` : `工作项模板没能启动：${errorMessage(error)}`);
+        return;
+      }
     }
     await this.finishOccurrence(stored, { conditionStatus: 'passed', runStatus: 'completed', workItemId: item.id });
     if (occurrence.triggerSource !== 'manual') {

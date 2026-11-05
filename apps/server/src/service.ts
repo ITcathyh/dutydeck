@@ -45,7 +45,7 @@ import { fileURLToPath } from 'node:url';
 import { buildApp } from './app.js';
 import { parsePeerInstances } from './instance-proxy.js';
 import { localLoopbackUrl } from './local-api-url.js';
-import { WorkItemService, workItemProgressStatus } from './work-items.js';
+import { WorkItemService, readWorkItemStatus } from './work-items.js';
 import { WorkItemInteractions } from './work-item-interactions.js';
 import { LarkWorkbench } from './lark/workbench.js';
 import { createLarkCardService } from './lark/service.js';
@@ -613,7 +613,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       // 定时启动的工作项不归属父会话此刻正在跑的那一轮。
       run: (sessionId, templateId, version, goal, key, actorId) => workItems.runTemplate(sessionId, templateId, version, goal, key, actorId, undefined, true),
       // 失败但带待确认修订的工作项还没结束，上一次没结束时不启动新的。
-      status: async (sessionId, id, actorId) => workItemProgressStatus(await workItems.get(sessionId, id, actorId))
+      progress: async id => await workItems.exists(id) ? readWorkItemStatus(repos.config, id) ?? 'unknown' : undefined
     },
     log: { warn: (details, message) => app?.log.warn(details, message) } });
   setupCleanup.push(() => automation.close());

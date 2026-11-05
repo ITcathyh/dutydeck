@@ -286,8 +286,8 @@ export function addAgentCommands(program: Command, run: AgentCliRunner) {
     .option('--prompt <text>', '每次触发时执行的指令')
     .option('--name <name>', '计划名称')
     .option('--every <minutes>', '执行间隔，按整分钟填写', integer(1, 525_600))
-    .option('--cron <expression>', '五段 Cron 表达式，按北京时间')
-    .option('--at <local-time>', '仅执行一次的北京时间，格式 YYYY-MM-DDTHH:mm')
+    .option('--cron <expression>', '五段 Cron 表达式，按计划自身的时区（聊天里新建的计划是北京时间）')
+    .option('--at <local-time>', '仅执行一次的时间，按计划自身的时区，格式 YYYY-MM-DDTHH:mm')
     .addOption(new Option('--mode <mode>', 'session 沿用会话；fresh 每次新会话').choices(['session', 'fresh']))
     .option('--until <condition>', '完成条件；每次运行核对，达成后用 schedule stop-self 停用')
     .option('--deadline <local-time>', '截止的北京时间 YYYY-MM-DDTHH:mm；到点仍未确认完成就自动停用');

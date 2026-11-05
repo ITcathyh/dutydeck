@@ -45,10 +45,10 @@ export async function runInboxAction(action: InboxAction, call: (action: InboxAc
 
 /**
  * 可批量的动作白名单：只有不会开始执行、也不需要先看内容的决定。
- * 计划批准、PR 确认推送、工作项确认（含确认修订）一点就会执行，必须逐项看过内容再点，所以不在其中。
+ * 权限批准、计划批准、PR 确认推送、工作项确认（含确认修订）一点就会执行，必须逐项看过内容再点，所以不在其中。
  */
 const batchable: Partial<Record<InboxItemKind, ReadonlySet<InboxAction['id']>>> = {
-  permission: new Set(['approve', 'reject']),
+  permission: new Set(['reject']),
   work_item_revision: new Set(['discard'])
 };
 const isBatchAction = (item: InboxItem, action: InboxAction) => action.type === 'api' && batchable[item.kind]?.has(action.id) === true;

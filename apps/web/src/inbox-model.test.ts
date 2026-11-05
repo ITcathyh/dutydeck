@@ -8,9 +8,12 @@ const item = (id: string, kind: InboxItem['kind'], actions: InboxAction[], sessi
 const permission = (id: string) => item(`permission:s1:${id}`, 'permission', [api('approve', `/p/${id}`, { approved: true }), api('reject', `/p/${id}`, { approved: false }), open]);
 
 describe('inbox 批量', () => {
-  it('同类条目给出它们共有的直接动作，不含「查看」', () => {
-    expect(inboxBatchActions([permission('1'), permission('2')]).map(action => action.id)).toEqual(['approve', 'reject']);
-    expect(inboxBatchActions([permission('1')]).map(action => action.id)).toEqual(['approve', 'reject']);
+  it('权限审批批量只给拒绝：批准会让 Agent 继续执行，必须逐项看过内容', async () => {
+    expect(inboxBatchActions([permission('1'), permission('2')]).map(action => action.id)).toEqual(['reject']);
+    expect(inboxBatchActions([permission('1')]).map(action => action.id)).toEqual(['reject']);
+    const call = vi.fn(async () => ({}));
+    expect(await runInboxBatch([permission('1')], 'approve', call, () => {})).toEqual({ ok: 0, stale: 0, failed: 1 });
+    expect(call).not.toHaveBeenCalled();
   });
 
   it('混选不同类型、或没有共同接口动作时不提供批量', () => {
@@ -65,9 +68,9 @@ describe('inbox 批量', () => {
       return { ok: true };
     });
     const seen: string[] = [];
-    const tally = await runInboxBatch(items, 'approve', call, (it, result) => seen.push(`${it.id.split(':')[2]}:${result.state}`));
+    const tally = await runInboxBatch(items, 'reject', call, (it, result) => seen.push(`${it.id.split(':')[2]}:${result.state}`));
     expect(tally).toEqual({ ok: 2, stale: 1, failed: 1 });
-    expect(call.mock.calls.map(([action]) => [action.path, action.body])).toEqual([['/p/1', { approved: true }], ['/p/2', { approved: true }], ['/p/3', { approved: true }], ['/p/4', { approved: true }]]);
+    expect(call.mock.calls.map(([action]) => [action.path, action.body])).toEqual([['/p/1', { approved: false }], ['/p/2', { approved: false }], ['/p/3', { approved: false }], ['/p/4', { approved: false }]]);
     expect(seen).toEqual(['1:running', '1:ok', '2:running', '2:stale', '3:running', '3:failed', '4:running', '4:ok']);
   });
 

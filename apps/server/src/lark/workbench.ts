@@ -9,6 +9,7 @@ import type { WorkItemInteractions, WorkItemRequest } from '../work-item-interac
 import { readLarkConfig, type StoredLarkConfig } from './config.js';
 import { createLarkCardService, type LarkCardService } from './service.js';
 import { patchLarkCard, sendLarkResult } from './result-delivery.js';
+import { neutralizeCardTags } from './card-elements.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { PersistedLarkCardTask } from './coordinator.js';
 
@@ -282,22 +283,22 @@ export function workItemElements(item: WorkItem, requests: WorkItemRequest[] = [
   });
   const revised = (item.planVersion ?? 1) > 1 ? ` · 计划已修订（v${item.planVersion}）` : '';
   const elements: Array<Record<string, any>> = [
-    { tag: 'markdown', content: `**${reviewStatusLabel(item) ?? labels[item.status] ?? item.status} · ${item.title}**${revised}\n\n${item.goal.slice(0, 2000)}` }
+    { tag: 'markdown', content: `**${reviewStatusLabel(item) ?? labels[item.status] ?? item.status} · ${neutralizeCardTags(item.title)}**${revised}\n\n${neutralizeCardTags(item.goal.slice(0, 2000))}` }
   ];
   const pending = item.pendingRevision;
   // 待确认修订不改变目标状态：先列出修订内容和确认入口，下面照常展示按当前计划执行的步骤。
   if (pending) {
     const titles = new Map([...item.plan.steps, ...pending.plan.steps].map(definition => [definition.id, definition.title]));
-    const names = (ids: string[]) => ids.length ? ids.map(id => titles.get(id) ?? id).join('、') : '无';
+    const names = (ids: string[]) => ids.length ? neutralizeCardTags(ids.map(id => titles.get(id) ?? id).join('、')) : '无';
     elements.push({ tag: 'markdown', content: [
       `**Agent 提出计划修订（v${pending.version} · 摘要 ${pending.digest.slice(0, DIGEST_PREFIX)}），确认后才生效；在此之前按当前计划继续执行**`,
-      ...pending.reason ? [`原因：${pending.reason.slice(0, 1000)}`] : [],
+      ...pending.reason ? [`原因：${neutralizeCardTags(pending.reason.slice(0, 1000))}`] : [],
       `需要确认：${pending.confirmationReasons.join('；').slice(0, 1000)}`,
       `保留：${names(pending.impact.keep)}`, `重跑：${names(pending.impact.rerun)}`, `先停止：${names(pending.impact.stop)}`,
       `作废已完成结果：${names(pending.impact.discard ?? [])}`, `删除：${names(pending.impact.remove)}`, `新增：${names(pending.impact.add)}`
     ].join('\n') });
     pending.plan.steps.forEach((definition, index) => {
-      elements.push({ tag: 'markdown', content: `**${index + 1}. ${definition.title}**${definition.kind === 'wait' ? ' · 等待你补充' : agentLine(definition.agentId)}\n${definition.instruction.slice(0, 600)}` });
+      elements.push({ tag: 'markdown', content: `**${index + 1}. ${neutralizeCardTags(definition.title)}**${definition.kind === 'wait' ? ' · 等待你补充' : agentLine(definition.agentId)}\n${neutralizeCardTags(definition.instruction.slice(0, 600))}` });
     });
     // 目标阻塞时确认必然失败（修订不能替代对未知执行的核对），只给放弃。
     if (item.status === 'blocked') elements.push({ tag: 'markdown', content: '目标需要先处理阻塞，处理前不能确认这次修订；可以先放弃。' },
@@ -312,10 +313,10 @@ export function workItemElements(item: WorkItem, requests: WorkItemRequest[] = [
     item.plan.steps.forEach((definition, index) => {
       const facts = [
         ...(definition.kind === 'wait' ? ['等待你补充'] : [agentLine(definition.agentId).replace(/^ · /, ''), definition.workspaceMode === 'worktree' ? '独立 worktree' : '共享工作区']),
-        definition.dependsOn.length ? `依赖：${definition.dependsOn.map(id => titles.get(id) ?? id).join('、')}` : '无依赖',
-        ...(definition.when ? [`仅当「${titles.get(definition.when.stepId) ?? definition.when.stepId}」回答「${definition.when.equals}」`] : [])
+        definition.dependsOn.length ? `依赖：${neutralizeCardTags(definition.dependsOn.map(id => titles.get(id) ?? id).join('、'))}` : '无依赖',
+        ...(definition.when ? [neutralizeCardTags(`仅当「${titles.get(definition.when.stepId) ?? definition.when.stepId}」回答「${definition.when.equals}」`)] : [])
       ];
-      elements.push({ tag: 'markdown', content: `**${index + 1}. ${definition.title}**\n${facts.join(' · ')}\n${definition.instruction.slice(0, 600)}` });
+      elements.push({ tag: 'markdown', content: `**${index + 1}. ${neutralizeCardTags(definition.title)}**\n${facts.join(' · ')}\n${neutralizeCardTags(definition.instruction.slice(0, 600))}` });
     });
     elements.push({ tag: 'markdown', content: `文字确认：\`/work confirm ${item.id} ${workPlanDigest(item.plan).slice(0, DIGEST_PREFIX)}\`` },
       action('confirm', '开始执行'), action('cancel', '取消计划'), action('show', '刷新目标'));
@@ -324,7 +325,7 @@ export function workItemElements(item: WorkItem, requests: WorkItemRequest[] = [
   for (const step of item.steps) {
     const definition = item.plan.steps.find(value => value.id === step.id)!;
     const attempt = step.attempts.at(-1);
-    elements.push({ tag: 'markdown', content: `**${labels[step.status]} · ${definition.title}**${agentLine(definition.agentId)}\n${attempt?.error?.slice(0, 1200) ?? ''}${step.status === 'waiting' ? `\n${definition.instruction}\n\n回复：\`/work answer ${item.id} ${step.id} 你的回答\`` : ''}` });
+    elements.push({ tag: 'markdown', content: `**${labels[step.status]} · ${neutralizeCardTags(definition.title)}**${agentLine(definition.agentId)}\n${neutralizeCardTags(attempt?.error?.slice(0, 1200) ?? '')}${step.status === 'waiting' ? `\n${neutralizeCardTags(definition.instruction)}\n\n回复：\`/work answer ${item.id} ${step.id} 你的回答\`` : ''}` });
     if (step.status === 'running') elements.push({ tag: 'markdown', content: `如 CLI 等待终端确认：\`/work terminal ${item.id} ${step.id}\`` });
     if (step.status === 'waiting') elements.push(
       answerForm(`work_answer_${item.id}_${step.id}`, '输入回答内容', `提交回答：${definition.title}`,
@@ -334,7 +335,7 @@ export function workItemElements(item: WorkItem, requests: WorkItemRequest[] = [
     if (step.status === 'failed' && item.status === 'failed' && !pending) elements.push(action('retry', `重试：${definition.title}`, { step_id: step.id }));
   }
   for (const request of requests) {
-    elements.push({ tag: 'markdown', content: `**${request.kind === 'permission' ? '工具授权' : 'Agent 提问'} · ${request.stepId}**\n${request.text.slice(0, 4000)}` });
+    elements.push({ tag: 'markdown', content: `**${request.kind === 'permission' ? '工具授权' : 'Agent 提问'} · ${request.stepId}**\n${neutralizeCardTags(request.text.slice(0, 4000))}` });
     const extra = { step_id: request.stepId, request_id: request.requestId, task_id: request.taskId, request_kind: request.kind };
     if (request.kind === 'permission') elements.push(action('respond', '批准本次调用', { ...extra, answer: 'approve' }), action('respond', '拒绝本次调用', { ...extra, answer: 'reject' }));
     else {
@@ -343,8 +344,8 @@ export function workItemElements(item: WorkItem, requests: WorkItemRequest[] = [
         { dutydeck_work_item: 'respond', work_id: item.id, parent_session_id: item.parentSessionId, revision: item.revision, ...extra }));
     }
   }
-  if (item.error) elements.push({ tag: 'markdown', content: item.error.slice(0, 2000) });
-  if (item.output) elements.push({ tag: 'markdown', element_id: 'final_output', content: item.output.text });
+  if (item.error) elements.push({ tag: 'markdown', content: neutralizeCardTags(item.error.slice(0, 2000)) });
+  if (item.output) elements.push({ tag: 'markdown', element_id: 'final_output', content: neutralizeCardTags(item.output.text) });
   elements.push(action('show', '刷新目标'));
   if (['running', 'waiting', 'failed', 'blocked'].includes(item.status)) elements.push(action('cancel', '停止全部步骤'));
   return elements;
@@ -700,7 +701,7 @@ export class LarkWorkbench {
       }
     } else if (!action) {
       const items = await this.work().listBySession(sessionId, actorId);
-      text = '**Dutydeck 工作台**\n\n直接描述目标，让 Dutydeck 安排步骤、选择 Agent 并交付成果。\n\n' + (items.slice(0, 8).map(value => `**${labels[value.status]} · ${value.title}**\n\`/work show ${value.id}\``).join('\n\n') || '此话题暂无目标。') + '\n\n双 Agent 会诊：`/work consult [--agents A,B] -- <问题>`\n快速开始：`/work research 研究目标`\n自己编排：`/work plan 第一步；第二步`（先出待确认卡）\n常用流程：`/work templates`\n定时与 CI：`/schedule`、`/ci`';
+      text = '**Dutydeck 工作台**\n\n直接描述目标，让 Dutydeck 安排步骤、选择 Agent 并交付成果。\n\n' + (items.slice(0, 8).map(value => `**${labels[value.status]} · ${neutralizeCardTags(value.title)}**\n\`/work show ${value.id}\``).join('\n\n') || '此话题暂无目标。') + '\n\n双 Agent 会诊：`/work consult [--agents A,B] -- <问题>`\n快速开始：`/work research 研究目标`\n自己编排：`/work plan 第一步；第二步`（先出待确认卡）\n常用流程：`/work templates`\n定时与 CI：`/schedule`、`/ci`';
     } else throw new RuntimeError('WORK_ITEM_COMMAND_INVALID', '用法：/work；/work consult [--agents A,B] -- <问题>；/work research 目标；/work plan 用分号分隔的多个步骤；/work show 编号；/work templates；/work run 流程编号 版本 目标；/work save 目标编号 名称；/work answer 目标编号 步骤编号 回答', 400);
     if (text) {
       await sendLarkResult(this.client(config), target, { state: 'completed', readOnly: true, retryable: false, taskId: event.messageId, taskName: 'Dutydeck 工作台',

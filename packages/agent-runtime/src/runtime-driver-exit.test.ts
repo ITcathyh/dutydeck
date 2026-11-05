@@ -60,12 +60,10 @@ process.stdin.on('data', data => {
   return { runtime, repos, session, drivers, exits, writeInput, exit };
 }
 
-// Exit code 0 rebuild is also covered by the explicit-resume case below; a
-// nonzero code additionally marks the session failed before the rebuild.
-it('rebuilds an idle PTY exited with a nonzero code before submitting concurrent new inputs', async () => {
+it.each([0, 17])('rebuilds an idle PTY exited with code %s before submitting concurrent new inputs', async code => {
   const h = await fixture();
   const original = h.drivers[0]!;
-  await h.exit(17);
+  await h.exit(code);
   const pending = h.runtime.send(h.session.id, 'new input');
   const queued = h.runtime.send(h.session.id, 'another input');
   const tasks = await Promise.all([pending, queued]);

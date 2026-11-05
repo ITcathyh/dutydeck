@@ -16,7 +16,7 @@ import { readTaskAttemptResult, resolveTaskResultAttemptId, type TaskResultRepos
 import { withLarkContextReadTimeout } from './context-read-timeout.js';
 import type { LarkTeamContextReader } from './team-context.js';
 import { parseLarkMessageContent } from './message-content.js';
-import { escapeCardInline } from './card-elements.js';
+import { escapeCardInline, neutralizeCardTags } from './card-elements.js';
 import { larkMemoryToolsPrompt, type LarkGroupMemoryScope } from './memory.js';
 import { stableMemoryCommand } from './memory-view.js';
 import { larkMemoryEnabled, readLarkConfig, readLarkConfigs, type StoredLarkConfig } from './config.js';
@@ -1260,7 +1260,8 @@ export class LarkAgentToolsService {
       throw new AgentGroupToolError('INVALID_GROUP_REPLY_TARGET', 'replyTo 只能使用 om_* messageId，不能使用 omt_* threadId。', 400);
     }
 
-    let text = content;
+    // 文本消息不解码实体，只中和 Agent 内容里的卡片标签；去重键仍按原始 content 计算。
+    let text = neutralizeCardTags(content);
     if (input.to?.trim()) {
       const target = input.to.trim().toLowerCase();
       const [{ peers }, { members }] = await Promise.all([this.peersFor(context), this.membersFor(context)]);
@@ -1274,7 +1275,7 @@ export class LarkAgentToolsService {
       if (matches.length > 1) throw new AgentGroupToolError('GROUP_TARGET_AMBIGUOUS', `目标 ${input.to.trim()} 对应多个群成员，请改用 appId 或 openId。`, 409);
       const match = matches[0]!;
       const mentionId = match.openId ?? match.memberId;
-      text = `<at user_id="${mentionId}">${escapeCardInline(match.name)}</at> ${content}`;
+      text = `<at user_id="${mentionId}">${escapeCardInline(match.name)}</at> ${text}`;
     }
 
     if (input.replyTo?.trim()) {
@@ -1431,7 +1432,7 @@ export class LarkAgentToolsService {
 
     const senderBotName = context.config.name ?? botInfo.appName ?? context.appId;
     const mentionId = targetPeer.openId ?? targetPeer.memberId;
-    const text = `<at user_id="${mentionId}">${escapeCardInline(targetPeer.name)}</at> [Agent 交接] 来自 ${escapeCardInline(senderBotName)} (${context.appId})\n请在原话题内完成任务并使用 reply-agent 回传实质结果（一次回传，无须重复确认）：\n\n${content}`;
+    const text = `<at user_id="${mentionId}">${escapeCardInline(targetPeer.name)}</at> [Agent 交接] 来自 ${escapeCardInline(senderBotName)} (${context.appId})\n请在原话题内完成任务并使用 reply-agent 回传实质结果（一次回传，无须重复确认）：\n\n${neutralizeCardTags(content)}`;
 
     const targetId = targetPeer.openId ?? targetPeer.appId ?? targetPeer.memberId;
     const idempotencyKey = deterministicAgentActionKey({
@@ -1493,7 +1494,7 @@ export class LarkAgentToolsService {
     }
 
     const mentionId = targetPeer.openId ?? targetPeer.memberId;
-    const text = `<at user_id="${mentionId}">${escapeCardInline(targetPeer.name)}</at> [Agent 结果]\n任务交付结果如下（这是最终结果，请勿为“收到/谢谢”等礼貌确认再次唤醒）：\n\n${content}`;
+    const text = `<at user_id="${mentionId}">${escapeCardInline(targetPeer.name)}</at> [Agent 结果]\n任务交付结果如下（这是最终结果，请勿为“收到/谢谢”等礼貌确认再次唤醒）：\n\n${neutralizeCardTags(content)}`;
 
     const targetId = targetPeer.openId ?? targetPeer.appId ?? targetPeer.memberId;
     const idempotencyKey = deterministicAgentActionKey({

@@ -64,7 +64,8 @@ it('real CLI forwards immutable attempt credentials for legacy group, history, m
     let body = '';
     request.on('data', chunk => { body += String(chunk); });
     request.on('end', () => {
-      requests.push({ url: request.url, turn: request.headers['x-dutydeck-work-turn'] as string | undefined, body });
+      // Host tools may probe newly opened local ports (e.g. GET /); only CLI calls target the group-tools path.
+      if (request.url?.startsWith('/api/lark/agent-tools/')) requests.push({ url: request.url, turn: request.headers['x-dutydeck-work-turn'] as string | undefined, body });
       response.setHeader('content-type', 'application/json');
       response.end(JSON.stringify({ done: true }));
     });

@@ -463,6 +463,17 @@ describe('Agent group collaboration domain service', () => {
     expect(current.sendText).toHaveBeenCalledWith(expect.objectContaining({ text: '配置里是 [REDACTED]' }));
   });
 
+  it('neutralizes card tags in Agent text but keeps the real mention prefix', async () => {
+    const current = fakeClient({
+      listChatMembers: vi.fn(async input => ({ items: input.memberTypes?.includes('user') ? [{ memberId: 'ou_human', openId: 'ou_human', memberType: 'user' as const, name: '伟哥' }] : [], hasMore: false, securityLimited: false }))
+    });
+    const { tools, token } = await setup({ cli_current: current });
+    await tools.send(token, { content: '<at id=all></at> 看 <text_tag>x</text_tag>', to: '伟哥', idempotencyKey: 'tag-1' });
+    expect(current.sendText).toHaveBeenCalledWith({
+      chatId: 'oc_group', text: '<at user_id="ou_human">伟哥</at> ＜at id=all>＜/at> 看 ＜text_tag>x＜/text_tag>', idempotencyKey: 'tag-1'
+    });
+  });
+
   it('discovers and mentions a human member in the scoped group', async () => {
     const current = fakeClient({
       listChatMembers: vi.fn(async input => ({

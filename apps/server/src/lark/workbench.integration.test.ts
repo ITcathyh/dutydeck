@@ -282,6 +282,16 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
     expect((await f.childTasks()).map(task => task.sessionId)).toEqual([f.prompts[1]!.sessionId]);
   });
 
+  it('/work 列表里目标标题的卡片标签被中和', async () => {
+    const f = await fixture();
+    await f.coordinator.handle(message('om_plan_tag', '/work plan <at id=all></at>调研；核查'), f.config);
+    expect((await f.item()).title).toContain('<at id=all>');
+    await f.workbench.command((await f.parent()).id, '', message('om_list_tag', ''), f.config);
+    const listing = JSON.stringify(f.cards.at(-1)!.input);
+    expect(listing).toContain('Dutydeck 工作台');
+    expect(listing).not.toMatch(/<\s*\/?\s*at\b/iu);
+  });
+
   it('人可以自己起一次编排：/work plan 拼出计划、先出一张待确认卡，确认后才执行', async () => {
     const f = await fixture();
     await f.coordinator.handle(message('om_plan', '/work plan 调研可行方案；核查风险与反例'), f.config);

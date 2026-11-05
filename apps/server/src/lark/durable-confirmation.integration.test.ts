@@ -26,7 +26,7 @@ const event = (messageId: string, text = '把发布会事项记到待办 A', act
   senderType: 'user', messageType: 'text', content: JSON.stringify({ text: `@_user_1 ${text}` }),
   mentions: [{ key: '@_user_1', name: 'Dock', openId: 'ou_bot', mentionedType: 'bot' }]
 });
-async function harness(options: { deliveryFailures?: number; threaded?: boolean; chatType?: string; continuation?: 'ask' | 'permission'; native?: boolean; legacy?: boolean; beforeMarkerCrash?: boolean } = {}) {
+async function harness(options: { deliveryFailures?: number; threaded?: boolean; chatType?: string; continuation?: 'ask' | 'permission'; native?: boolean; legacy?: boolean; beforeMarkerCrash?: boolean; question?: string } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-durable-confirmation-'));
   let repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   const sends: string[] = [];
@@ -109,7 +109,7 @@ async function harness(options: { deliveryFailures?: number; threaded?: boolean;
     result = { status: 'deferred', askId: /^deferred:([^ ]+)/.exec(output.stopReason)![1]! };
   } else {
     const response = await app?.inject({ method: 'POST', url: '/api/relay/sessions/self/ask', headers,
-      payload: { question: '确认写入 A？', choices: [{ label: '确认写入', value: 'write' }, { label: '取消', value: 'cancel' }] } });
+      payload: { question: options.question ?? '确认写入 A？', choices: [{ label: '确认写入', value: 'write' }, { label: '取消', value: 'cancel' }] } });
     if (options.beforeMarkerCrash) {
       expect(response!.statusCode).toBe(500);
       const registered = (await interactions()).find(item => item.durable)!;
@@ -403,6 +403,12 @@ describe('ADHD durable confirmation — actual Runtime and SQLite', () => {
     expect(h.service.reply.mock.calls.every(([input]) => input.messageId.startsWith('om_'))).toBe(true);
     await h.click(); expect(await h.repos.config.list!(`lark.inbox.${h.config.appId}.confirmation_`)).toHaveLength(1);
   });
+  it('escapes card tags from the Agent question on a durable confirmation card', async () => {
+    const h = await harness({ question: '确认 <at id=all></at> <text_tag>写入</text_tag>？' });
+    const cardInput = h.service.reply.mock.calls.find(([input]) => input.taskId === h.record.id)![0];
+    expect(cardInput.elements[0].content).toBe('确认 &lt;at id=all&gt;&lt;/at&gt; &lt;text\\_tag&gt;写入&lt;/text\\_tag&gt;？');
+  });
+
   it('has only question/buttons, survives five minutes and later same-session messages, and snapshots the original object', async () => {
     const h = await harness();
     expect(Date.parse(h.record.expiresAt!) - Date.now()).toBeGreaterThan(23 * 3_600_000);

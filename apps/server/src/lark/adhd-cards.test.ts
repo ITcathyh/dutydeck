@@ -70,6 +70,12 @@ describe('ADHD card presentation', () => {
     expect(JSON.stringify(card)).toContain('primary');
     await expect(JSON.stringify(card, null, 2)).toMatchFileSnapshot('./__fixtures__/adhd-ask-minimal.json');
   });
+  it('escapes card tags from the Agent question on the minimal ask card', async () => {
+    const h = await harness(true, { single: true, question: '确认 <at id=all></at> <text_tag>写入</text_tag>？' });
+    const card = buildLarkCard(h.reply.mock.calls[0]![0]);
+    expect((card as any).body.elements[0]).toMatchObject({ tag: 'markdown', content: '确认 &lt;at id=all&gt;&lt;/at&gt; &lt;text\\_tag&gt;写入&lt;/text\\_tag&gt;？' });
+  });
+
   it('preserves 825e9ee card JSON with ADHD disabled except for pending interaction streaming_mode', async () => {
     vi.useFakeTimers({ now: fixedTime });
     const snapshots: Record<string, unknown> = { result: buildLarkCard(resultInput(false)) };

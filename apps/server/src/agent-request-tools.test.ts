@@ -119,6 +119,11 @@ describe('Agent schedule requests', () => {
     expect(patched.statusCode).toBe(200);
     expect(f.updateSchedule.mock.calls[0]![2]).toMatchObject({ completionCondition: 'CI 通过', deadlineAt: '2026-12-02T01:00:00.000Z', enabled: false });
     expect((await f.agent('PATCH', `schedules/${created.json().scheduleId}`, { deadline: 'tomorrow' })).statusCode).toBe(400);
+    // 计划时区不是北京时间时，--deadline 仍按北京时间解释，与新建一致。
+    const id = created.json().scheduleId;
+    f.saved.set(id, { ...f.saved.get(id)!, timezone: 'UTC' });
+    expect((await f.agent('PATCH', `schedules/${id}`, { deadline: '2026-12-03T09:00' })).statusCode).toBe(200);
+    expect(f.updateSchedule.mock.calls.at(-1)![2]).toMatchObject({ deadlineAt: '2026-12-03T01:00:00.000Z' });
   });
 
   it('passes the fresh-session mode through and rejects unknown modes', async () => {

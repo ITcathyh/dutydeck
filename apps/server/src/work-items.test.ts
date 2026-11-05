@@ -1130,6 +1130,26 @@ describe('Plan revision with real Runtime and SQLite', () => {
     expect(current.planHistory!.at(-1)!.impact).toMatchObject({ discard: ['b'] });
   });
 
+  it('refuses a confirmation when a step to rerun fails while waiting, adding a new confirmation reason', async () => {
+    const f = await fixture(); f.gate(); const item = await f.create();
+    await f.service.confirm(f.parent.id, item.id, item.revision, 'ou_owner');
+    await f.tick(); await eventually(async () => f.calls.length === 1);
+    expect(f.calls[0]!.prompt).toContain('Research A');
+    const withA = { ...plan, steps: plan.steps.map(step => step.id === 'a' ? { ...step, instruction: 'Research A with sources' } : step) };
+    const shown = (await f.service.revise(f.parent.id, item.id, { expectedRevision: (await f.get(item.id)).revision, plan: withA }, 'ou_owner', 'agent')).pendingRevision!;
+    expect(shown.impact).toMatchObject({ rerun: ['a', 'join'], stop: ['a'] });
+    expect(shown.confirmationReasons).not.toContain('重跑已失败的步骤 a');
+    // 等待确认期间 a 失败：停止与作废都没有新增，但确认理由多了「重跑已失败的步骤」。
+    await f.finish(f.calls[0]!, '', true); await f.tick();
+    await eventually(async () => (await f.get(item.id)).steps[0]!.status === 'failed');
+    await expect(f.service.confirm(f.parent.id, item.id, 1, 'ou_owner', shown.digest)).rejects.toMatchObject({ code: 'WORK_ITEM_REVISION_IMPACT_CHANGED', statusCode: 409 });
+    const refreshed = (await f.get(item.id)).pendingRevision!;
+    expect(refreshed.digest).not.toBe(shown.digest);
+    expect(refreshed.confirmationReasons).toContain('重跑已失败的步骤 a');
+    await expect(f.service.confirm(f.parent.id, item.id, 1, 'ou_owner', shown.digest)).rejects.toMatchObject({ code: 'WORK_ITEM_REVISION_CONFIRM_MISMATCH' });
+    expect(await f.service.confirm(f.parent.id, item.id, 1, 'ou_owner', refreshed.digest)).toMatchObject({ planVersion: 2, plan: withA });
+  });
+
   it('does not refuse again when a step already shown as stopped finishes and is discarded instead', async () => {
     const f = await fixture(); f.gate();
     const gated: WorkPlan = { title: 'Wait before join', outputStepId: 'join', steps: [

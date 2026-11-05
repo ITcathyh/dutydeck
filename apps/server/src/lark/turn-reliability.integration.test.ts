@@ -759,6 +759,23 @@ describe('收尾操作与控制语的并发和失败', () => {
     await until(async () => JSON.parse(await h.repos.config.get('lark.inbox.app.om_go') ?? '{}').state === 'accepted');
   });
 
+  it.each(['继续', '重来'])('「%s」在判断上一轮时出错：改回普通消息照常执行，不丢消息', async phrase => {
+    const h = await topic();
+    await h.send('om_first', '整理本周报警并回复群里');
+    await until(async () => Boolean(await h.repos.channelMappings.get('lark-card:app', 'om_first')) && (await h.tasks())[0]?.status === 'completed');
+    const getTasks = h.runtime.getTasks.bind(h.runtime);
+    let failed = false;
+    vi.spyOn(h.runtime, 'getTasks').mockImplementation(async (...args: Parameters<typeof getTasks>) => {
+      if (!failed) { failed = true; throw new Error('storage busy'); }
+      return getTasks(...args);
+    });
+    await h.send('om_go', phrase);
+    expect(failed).toBe(true);
+    await until(() => h.prompts.length === 2);
+    expect(h.prompts[1]!.prompt).toContain(phrase);
+    await until(async () => JSON.parse(await h.repos.config.get('lark.inbox.app.om_go') ?? '{}').state === 'accepted');
+  });
+
   it('「重新执行」已认领这一轮时，「在原对话继续」不再结束它、不发「继续」', async () => {
     const h = await topic();
     await unconfirmedTurn(h, [push]);

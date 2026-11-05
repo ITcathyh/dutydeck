@@ -92,7 +92,8 @@ export async function registerAgentRequestTools(app: FastifyInstance, options: A
     const { every, cron, at, dryRun, until, deadline, ...rest } = body;
     let deadlineAt: string | undefined;
     if (deadline !== undefined) {
-      try { deadlineAt = resolveScheduleDeadline(deadline, current.timezone); }
+      // 与新建一致按北京时间解释，不随计划时区变化；错误提示也写的是北京时间。
+      try { deadlineAt = resolveScheduleDeadline(deadline, 'Asia/Shanghai'); }
       catch { throw new AgentCommandParamError('INVALID_ARGUMENT', '--deadline 要写北京时间 YYYY-MM-DDTHH:mm。', [{ name: '--deadline', reason: '格式 YYYY-MM-DDTHH:mm' }]); }
     }
     const fields = { ...rest, ...(until !== undefined ? { completionCondition: until } : {}), ...(deadlineAt ? { deadlineAt } : {}) };

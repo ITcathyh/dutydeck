@@ -1253,10 +1253,10 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     if (kind === 'stop') return await this.routeChatCommand(event, config, '/cancel', group, scopeId, acknowledgement) === 'handled' ? 'handled' : undefined;
     const confirm = (text: string) => this.service.replyText({ messageId: larkMessageAnchor(event), ...(event.threadId?.trim() ? { replyInThread: true } : {}),
       text, idempotencyKey: `control_${event.messageId}`.slice(0, 50) }).catch(error => this.log.warn({ error, messageId: event.messageId }, '控制语回执发送失败'));
-    const tasks = await this.runtime.getTasks(sessionId);
-    const unresolved = this.runtime.inspectExecutionRecovery ? await this.unresolvedTurns(sessionId) : [];
-    const last = tasks.at(-1);
     try {
+      const tasks = await this.runtime.getTasks(sessionId);
+      const unresolved = this.runtime.inspectExecutionRecovery ? await this.unresolvedTurns(sessionId) : [];
+      const last = tasks.at(-1);
       if (kind === 'continue') {
         if (unresolved.length) {
           if (!await this.isOperatorAllowed(config, event.senderOpenId, event.chatId, sessionId)) return undefined;
@@ -1286,7 +1286,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       await confirm('好，重新执行上一条请求。');
       return typeof retry === 'string' ? { prompt: retry } : retry;
     } catch (error) {
-      // 那一轮还没停稳等原因收不了口：当普通消息排队，排队卡上会写清楚并给按钮。
+      // 读不到上一轮或那一轮还没停稳等原因收不了口：当普通消息排队，排队卡上会写清楚并给按钮。
       this.log.warn({ error, sessionId, kind }, '控制语未能按控制处理，按普通消息处理');
       return undefined;
     }
