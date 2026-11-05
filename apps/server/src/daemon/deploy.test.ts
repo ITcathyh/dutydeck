@@ -313,6 +313,43 @@ describe('dutydeck deploy', () => {
     expect(existsSync(results[0]!.manifest!)).toBe(true);
   }, 60_000);
 
+  it('同一发布根依次部署 4 个 unit：每个 unit 各留自己最新 2 份数据库备份', async () => {
+    const units = await Promise.all(['web', 'cli-a', 'cli-b', 'cli-c'].map(async name => {
+      const root = join(tmp, name), unitDatabase = join(root, 'dutydeck.db'), unitPort = await freePort();
+      mkdirSync(root, { recursive: true });
+      const db = new Database(unitDatabase);
+      db.exec('CREATE TABLE configs (key TEXT PRIMARY KEY, value TEXT)');
+      db.close();
+      writeFileSync(join(root, 'deployment.json'), JSON.stringify({ unit: `dutydeck-${name}.service`, address: `http://127.0.0.1:${unitPort}`, databasePath: unitDatabase }));
+      return { root, service: processService(releases, unitPort, unitDatabase), backups: [] as string[] };
+    }));
+    try {
+      for (let round = 0; round < 3; round++) {
+        if (round) nextCommit(source);
+        for (const unit of units) {
+          const result = await runDeploy({ source, runtime: unit.root, releases }, deps({ service: unit.service }));
+          expect(result, result.error).toMatchObject({ ok: true, status: 'deployed' });
+          unit.backups.push(JSON.parse(readFileSync(result.manifest!, 'utf8')).database_backup);
+        }
+      }
+      for (const unit of units) expect(unit.backups.map(file => existsSync(file))).toEqual([false, true, true]);
+    } finally {
+      for (const unit of units) await unit.service.stop();
+    }
+  }, 120_000);
+
+  it('拿不到健康检查地址或数据库路径时拒绝部署：不切 current，也不重启', async () => {
+    for (const deployment of [{ databasePath: database }, { address: `http://127.0.0.1:${port}` }]) {
+      writeFileSync(join(bot, 'deployment.json'), JSON.stringify(deployment));
+      const restart = vi.fn(service.restart);
+      const result = await runDeploy({ source, runtime: bot }, deps({ service: { ...service, restart } }));
+      expect(result).toMatchObject({ ok: false, status: 'refused', error: expect.stringContaining('address' in deployment ? '数据库路径' : '健康检查地址') });
+      expect(restart).not.toHaveBeenCalled();
+      expect(existsSync(join(releases, 'current'))).toBe(false);
+    }
+    expect(existsSync(join(bot, '.dutydeck', 'deployments'))).toBe(false);
+  });
+
   it.each(['read', 'restart', 'health', 'rollback'])('独立进程在 %s 阶段持有同根锁，完成后释放', async stage => {
     const first = await owner(stage);
     await first.wait('locked');
@@ -859,14 +896,14 @@ describe('dutydeck deploy', () => {
     'same-schema', 'ddl-during-stop', 'migration-set-changed', 'current-unreadable', 'current-missing',
     'backup-missing', 'backup-unreadable', 'backup-schema-changed', 'initial-schema-unknown', 'initial-database-missing',
     'preservation-failed', 'stop-failed', 'stop-still-running', 'stop-threw', 'stop-check-threw',
-    'no-persistent-database', 'memory-database'
+    'memory-database'
   ])('回滚边界：%s', async scenario => {
     const first = await runDeploy({ source, runtime: bot, restart: false }, deps());
     nextCommit(source);
     if (scenario === 'initial-database-missing') rmSync(database);
-    // 部署元数据不能证明服务没有持久库；受控服务仍会写真实 database 文件。
-    if (scenario === 'no-persistent-database' || scenario === 'memory-database') {
-      writeFileSync(join(bot, 'deployment.json'), JSON.stringify({ address: `http://127.0.0.1:${port}`, ...(scenario === 'memory-database' ? { databasePath: ':memory:' } : {}) }));
+    // 部署元数据不能证明服务没有持久库；受控服务仍会写真实 database 文件。没记数据库路径的在切换前就被拒绝，见上面的用例。
+    if (scenario === 'memory-database') {
+      writeFileSync(join(bot, 'deployment.json'), JSON.stringify({ address: `http://127.0.0.1:${port}`, databasePath: ':memory:' }));
     }
     let clock = Date.now(), pid: number | undefined, backup: string | undefined, stopping = false;
     const ran: string[] = [], copies: Array<[string, string]> = [];
@@ -940,7 +977,7 @@ describe('dutydeck deploy', () => {
       expect(copies).toHaveLength(1);
       expect(manifest.schema_version_at_rollback).toBeUndefined();
     }
-    if (scenario === 'no-persistent-database' || scenario === 'memory-database') {
+    if (scenario === 'memory-database') {
       expect(result.error).toContain('无法验证目标数据库');
       expect(copies).toEqual([]);
       expect(manifest.schema_version_at_rollback).toBeUndefined();
@@ -1254,7 +1291,7 @@ describe('dutydeck deploy', () => {
     symlinkSync(basename(previous!), join(releases, 'current'));
     const own = Array.from({ length: 7 }, (_, index) => {
       const name = `2026010${index + 1}T000000Z-${String(index).repeat(7)}`;
-      write(join(deployments, name, 'manifest.json'), JSON.stringify({ created_by: 'dutydeck deploy', status: 'deployed' }));
+      write(join(deployments, name, 'manifest.json'), JSON.stringify({ created_by: 'dutydeck deploy', unit: 'dutydeck.service', status: 'deployed' }));
       write(join(deployments, name, 'dutydeck.db'), 'x'.repeat(8192));
       return name;
     });
@@ -1594,7 +1631,7 @@ describe('dutydeck deploy prune', () => {
       const name = releaseName(index);
       write(join(deployments, name, 'dutydeck.db'), 'b'.repeat(8192));
       write(join(deployments, name, 'manifest.json'), JSON.stringify({
-        created_by: 'dutydeck deploy', database_backup: join(deployments, name, 'dutydeck.db'),
+        created_by: 'dutydeck deploy', unit: 'dutydeck.service', database_backup: join(deployments, name, 'dutydeck.db'),
         ...(index === 1 ? { database_before_rollback: outside } : {}), ...(index === 2 ? { database_before_rollback: join(deployments, name, 'dutydeck.db.before-rollback') } : {})
       }));
     }
@@ -1609,6 +1646,21 @@ describe('dutydeck deploy prune', () => {
     expect([1, 2, 3, 4].map(index => existsSync(join(deployments, releaseName(index), 'dutydeck.db')))).toEqual([false, false, true, true]);
     expect([1, 2, 3, 4].every(index => existsSync(join(deployments, releaseName(index), 'manifest.json')))).toBe(true);
     expect(existsSync(outside)).toBe(true);
+  });
+
+  it('没记 unit 的旧部署记录分不出属于哪个数据库，备份不按份数删', async () => {
+    const rel = makeReleases(4);
+    link(basename(rel[3]!), join(releases, 'current'));
+    for (let index = 1; index <= 4; index++) {
+      const name = releaseName(index);
+      write(join(deployments, name, 'dutydeck.db'), 'b'.repeat(8192));
+      write(join(deployments, name, 'manifest.json'), JSON.stringify({ created_by: 'dutydeck deploy', database_backup: join(deployments, name, 'dutydeck.db') }));
+    }
+
+    const result = await runDeployPrune({ releases }, { processPaths: noProcesses });
+
+    expect(result, result.error).toMatchObject({ ok: true, items: [] });
+    expect([1, 2, 3, 4].every(index => existsSync(join(deployments, releaseName(index), 'dutydeck.db')))).toBe(true);
   });
 
   it('--include-unmarked 看不了进程时不删手工部署的记录', async () => {

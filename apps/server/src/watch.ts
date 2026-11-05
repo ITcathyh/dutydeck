@@ -8,6 +8,8 @@ export const WATCH_PREFIX = 'watch_findings/';
 export const WATCH_FIRST_RUN_MS = 5 * 60_000;
 export const WATCH_INTERVAL_MS = 60 * 60_000;
 export const WATCH_NOTIFICATION_RETRY_MS = 55 * 60_000;
+/** 私信没确认成功时，隔这么久再巡检一次重发，赶在 WATCH_NOTIFICATION_RETRY_MS 的幂等窗口内。 */
+export const WATCH_NOTIFICATION_RETRY_DELAY_MS = 5 * 60_000;
 export const WATCH_RECOVERED_RETENTION_MS = 7 * 24 * 60 * 60_000;
 export const WATCH_RECOVERED_LIMIT = 1_000;
 export const WATCH_RECEIVER_WARN_MS = 24 * 60 * 60_000;
@@ -55,7 +57,7 @@ export function watchSummary(findings: WatchFinding[]): string {
 
 /** Each instance has one runner. A stable provider UUID also covers a crash after send but before saving its receipt. */
 export class DutydeckWatch {
-  private running?: Promise<void>;
+  private running?: Promise<boolean>;
   constructor(private readonly options: {
     store: ConfigRepository;
     collect(): Promise<WatchScope[]>;
@@ -63,7 +65,8 @@ export class DutydeckWatch {
     warn(details: unknown, message: string): void;
     now?: () => Date;
   }) {}
-  run(): Promise<void> {
+  /** 返回 true 表示有私信没确认成功，应在 WATCH_NOTIFICATION_RETRY_DELAY_MS 后再跑一次。 */
+  run(): Promise<boolean> {
     if (this.running) return this.running;
     this.running = this.inspect().finally(() => { this.running = undefined; });
     return this.running;
@@ -88,7 +91,8 @@ export class DutydeckWatch {
       }
     } catch (error) { this.options.warn({ appId, error }, '清理已恢复巡检记录失败'); }
   }
-  private async inspect() {
+  private async inspect(): Promise<boolean> {
+    let retry = false;
     const scopes = await this.options.collect();
     const at = (this.options.now?.() ?? new Date()).toISOString();
     for (const scope of scopes) {
@@ -177,21 +181,26 @@ export class DutydeckWatch {
           members: unsent.map(f => ({ fingerprint: f.fingerprint, episode: f.episode })) });
         await this.options.store.set(notificationKey, JSON.stringify(notification));
         await deliver(notification);
-      } catch (error) { this.options.warn({ appId: scope.appId, error }, '巡检私信未确认成功，下轮检查投递状态'); }
+      } catch (error) {
+        retry = true;
+        this.options.warn({ appId: scope.appId, error }, '巡检私信未确认成功，几分钟后重试');
+      }
     }
+    return retry;
   }
 }
 
 /** Stop timers first and drain the in-flight read/send before repositories and HTTP clients close. */
-export function startDutydeckWatch(watch: Pick<DutydeckWatch, 'run'>, warn: (error: unknown) => void) {
+export function startDutydeckWatch(watch: { run(): Promise<boolean | void> }, warn: (error: unknown) => void) {
   let stopped = false;
   let timer: ReturnType<typeof setTimeout>;
   let running: Promise<void> | undefined;
   const tick = () => {
     if (stopped) return;
-    running = watch.run().catch(warn).finally(() => {
+    let retry = false;
+    running = watch.run().then(pending => { retry = pending === true; }, warn).finally(() => {
       running = undefined;
-      if (!stopped) { timer = setTimeout(tick, WATCH_INTERVAL_MS); timer.unref(); }
+      if (!stopped) { timer = setTimeout(tick, retry ? WATCH_NOTIFICATION_RETRY_DELAY_MS : WATCH_INTERVAL_MS); timer.unref(); }
     });
   };
   timer = setTimeout(tick, WATCH_FIRST_RUN_MS); timer.unref();

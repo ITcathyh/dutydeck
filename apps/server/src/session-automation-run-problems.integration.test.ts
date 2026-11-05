@@ -129,6 +129,23 @@ describe('schedule trigger errors', () => {
     expect(await f.sent()).toEqual([scheduleInput.prompt]);
   }, 30_000);
 
+  it('runs only the retry in a fresh session and returns an explicit session-mode loop to its source session next time', async () => {
+    const f = await fixture();
+    const created = await f.enabled();
+    vi.spyOn(f.runtime, 'dispatchRequest').mockRejectedValueOnce(new RuntimeError('SESSION_STOPPING', 'Session is stopping', 409));
+    await f.runMinute(1, 2);
+    const [, retry] = await f.occurrences();
+    expect(retry).toMatchObject({ id: expect.stringMatching(/^occ_retry_/), runStatus: 'completed' });
+    expect(retry.executionSessionId).toMatch(/^ses_schedule_/);
+    await f.runMinute(2, 3);
+    const next = (await f.occurrences())[2];
+    expect(next).toMatchObject({ runStatus: 'completed', sessionId: f.parent.id });
+    expect(next.executionSessionId).toBeUndefined();
+    expect(await f.schedule(created.id)).toMatchObject({ mode: 'session', enabled: true });
+    expect((await f.schedule(created.id)).executionSessionId).toBeUndefined();
+    expect((await f.runtime.getSession(retry.executionSessionId))?.archivedAt).toEqual(expect.any(String));
+  }, 30_000);
+
   it('retries only once: when the fresh retry is also unavailable it says so in the thread instead of looping', async () => {
     const f = await fixture();
     const created = await f.enabled();

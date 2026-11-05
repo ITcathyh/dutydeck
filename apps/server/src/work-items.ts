@@ -22,6 +22,18 @@ async function bounded<T>(operation: Promise<T>, milliseconds: number): Promise<
 }
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const time = () => new Date().toISOString();
+/** 成果通知最多发这么多次；之后停在 error，失败原因留给 Web 展示。 */
+const DELIVERY_MAX_ATTEMPTS = 3;
+function failDelivery(delivery: WorkItem['delivery'], error: string) {
+  delivery.status = 'error';
+  if (delivery.attempts >= DELIVERY_MAX_ATTEMPTS) {
+    delivery.error = `${error}（已尝试 ${delivery.attempts} 次，不再自动重发）`;
+    delete delivery.nextAttemptAt;
+  } else {
+    delivery.error = error;
+    delivery.nextAttemptAt = new Date(Date.now() + 60_000 * delivery.attempts).toISOString();
+  }
+}
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 const last = (step: WorkStep) => step.attempts.at(-1);
 const settled = (step: WorkStep) => ['completed', 'skipped'].includes(step.status);
@@ -910,10 +922,12 @@ export class WorkItemService {
       let state = await this.read(id);
       const item = state.value.item;
       if (item.status !== 'completed' || !['pending', 'error'].includes(item.delivery.status)) return;
+      // 失败后按 1、2 分钟退避，最多 DELIVERY_MAX_ATTEMPTS 次；没到时间不发也不写库。
+      if (item.delivery.status === 'error' && (item.delivery.attempts >= DELIVERY_MAX_ATTEMPTS || item.delivery.nextAttemptAt && item.delivery.nextAttemptAt > time())) return;
       try { await this.assertExecution(state.value, true); }
       catch (error) {
         if (this.closed) return;
-        item.delivery.status = 'error'; item.delivery.error = errorText(error); await this.write(state); return;
+        item.delivery.attempts++; failDelivery(item.delivery, errorText(error)); await this.write(state); return;
       }
       item.delivery.attempts++; await this.write(state);
       let failure: string | undefined;
@@ -925,8 +939,8 @@ export class WorkItemService {
       state = await this.read(id);
       const current = state.value.item;
       if (current.status !== 'completed' || current.delivery.attempts !== item.delivery.attempts || current.output?.digest !== item.output?.digest || !['pending', 'error'].includes(current.delivery.status)) return;
-      current.delivery.status = failure === undefined ? 'delivered' : 'error';
-      if (failure === undefined) delete current.delivery.error; else current.delivery.error = failure;
+      if (failure === undefined) { current.delivery.status = 'delivered'; delete current.delivery.error; delete current.delivery.nextAttemptAt; }
+      else failDelivery(current.delivery, failure);
       await this.write(state);
     });
   }
