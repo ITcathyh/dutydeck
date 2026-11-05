@@ -1,4 +1,4 @@
-import type { AgentEvent, VerificationResponse, VerificationStatus } from '@dutydeck/shared';
+import { terminalTaskStatuses, type AgentEvent, type VerificationResponse, type VerificationStatus } from '@dutydeck/shared';
 import type { StoredLarkConfig } from './config.js';
 import { boundLarkCardElements, LarkServiceError } from './service.js';
 import { redactTraceText, sensitiveTraceKey } from './secret-redaction.js';
@@ -18,7 +18,7 @@ type TraceToolKind = 'command' | 'read' | 'edit' | 'search' | 'web' | 'git' | 't
 const visibleTraceGroupLimit = 5;
 
 // 任务终态集合：reconcile 与 trace 渲染共用（runtime task 状态机的终态判定）。
-export const terminalTaskStates = new Set(['completed', 'failed', 'interrupted', 'cancelled']);
+export const terminalTaskStates = new Set<string>(terminalTaskStatuses);
 
 export const isLarkMessageRateLimit = (error: unknown): error is LarkServiceError => error instanceof LarkServiceError
   && Number(error.details?.upstreamCode) === 230020;

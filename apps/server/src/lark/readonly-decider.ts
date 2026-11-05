@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { RuntimeError, type AgentEvent, type CollaborationObservation, type CollaborationSnapshot, type PermissionMode } from '@dutydeck/shared';
+import { isTerminalTaskStatus, RuntimeError, type AgentEvent, type CollaborationObservation, type CollaborationSnapshot, type PermissionMode } from '@dutydeck/shared';
 import { boundCollaborationSnapshot } from '../collaboration-context.js';
 import { readAttemptResult, type AttemptResultRepositories } from '../task-results.js';
 import type { StoredLarkConfig } from './config.js';
@@ -333,7 +333,7 @@ export async function runReadonlyPrompt(runtime: LarkMemoryPipelineRuntime, repo
       const receive = (event: AgentEvent) => {
         if (!receiving || signal.aborted || event.type !== 'task') return;
         const task = (event.data as { task?: { id?: string; status?: string } })?.task;
-        if (task && task.id === taskId && ['completed', 'failed', 'cancelled', 'interrupted'].includes(task.status ?? '')) settle(task.status!);
+        if (task && task.id === taskId && isTerminalTaskStatus(task.status)) settle(task.status!);
       };
       unsubscribe = runtime.subscribe(session.id, event => {
         if (!receiving || signal.aborted) return;

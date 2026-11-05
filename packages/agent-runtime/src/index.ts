@@ -1,4 +1,4 @@
-import { clearTaskReportSafely, readSessionTaskReportReference, readSessionTaskReport, taskReportInputSchema, writeTaskReport, type TaskReportInput } from '@dutydeck/shared';
+import { clearTaskReportSafely, isTerminalTaskStatus, readSessionTaskReportReference, readSessionTaskReport, taskReportInputSchema, writeTaskReport, type TaskReportInput } from '@dutydeck/shared';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import type { AgentCapabilities, AgentConfig, AgentDriver, AgentEvent, DriverFactory, DriverTranscriptSourceObservation, EventType, EventWindowOptions, NormalizedDriverEvent, PermissionMode, PermissionRequestData, PromptAssemblyData, PromptPart, PromptSourceDiagnostics, PublicTaskRecord, RepositoryBundle, RuntimeControlClaim, Session, SkillDeliveryMetadata, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy, TranscriptSourceObservation, VerificationCommandInput, VerificationResponse, WorkspaceCleanupBlocker, WorkspaceCleanupPreview, WorkspaceCleanupResult, WorkspaceResponse } from '@dutydeck/shared';
@@ -2038,20 +2038,30 @@ export class DutydeckRuntime {
     if (input.source !== 'lark' || !/^[^:]+:[^:]+:group:collaboration:.+$/.test(input.sourceId ?? '') || !/^ses_collab_[a-f0-9]{64}$/.test(stableSessionId) || input.workspaceMode === 'worktree') {
       throw new RuntimeError('INVALID_BACKGROUND_SESSION', 'Background sessions require a stable authorized Lark group scope and shared workspace', 400);
     }
-    await beforeStart();
-    const pending = this.backgroundStarts.get(stableSessionId);
-    if (pending) { await pending; return this.startBackgroundSession(input, stableSessionId, beforeStart); }
-    const agent = await this.repos.agents.get(input.agentId);
-    if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', 'Background Agent not found', 404);
-    const existing = await this.repos.sessions.get(stableSessionId);
-    if (existing) {
+    return this.startStable(input, stableSessionId, beforeStart, 'Background', async (existing, agent) => {
       const expected = { source: input.source, sourceId: input.sourceId, agentId: input.agentId, ...sessionConfigOf(agent, input), systemPrompt: agent.systemPrompt };
       if (Object.entries(expected).some(([key, value]) => (existing[key as keyof Session] ?? undefined) !== (value ?? undefined))) throw new RuntimeError('BACKGROUND_SESSION_CONFLICT', 'Background session immutable configuration changed', 409);
       return existing;
-    }
+    }, () => this.startBackgroundSession(input, stableSessionId, beforeStart));
+  }
+
+  /**
+   * Shared birth path for stable-identity sessions: reuse an existing session after `reuse` checks its frozen
+   * configuration, otherwise reserve the identity in `backgroundStarts` and start it. `retry` re-enters the
+   * public entry point (re-validating) after waiting for a concurrent start of the same identity.
+   */
+  private async startStable(input: StartSessionInput, stableSessionId: string, beforeStart: () => Promise<void>, label: string,
+    reuse: (existing: Session, agent: AgentConfig) => Promise<Session>, retry: () => Promise<Session>): Promise<Session> {
+    await beforeStart();
+    const pending = this.backgroundStarts.get(stableSessionId);
+    if (pending) { await pending; return retry(); }
+    const agent = await this.repos.agents.get(input.agentId);
+    if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', `${label} Agent not found`, 404);
+    const existing = await this.repos.sessions.get(stableSessionId);
+    if (existing) return reuse(existing, agent);
     // Recheck after the asynchronous reads before reserving the stable identity.
     const raced = this.backgroundStarts.get(stableSessionId);
-    if (raced) { await raced; return this.startBackgroundSession(input, stableSessionId, beforeStart); }
+    if (raced) { await raced; return retry(); }
     const start = this.startSession(input, { id: stableSessionId, beforeStart });
     this.backgroundStarts.set(stableSessionId, start);
     try { return await start; } finally { if (this.backgroundStarts.get(stableSessionId) === start) this.backgroundStarts.delete(stableSessionId); }
@@ -2079,24 +2089,12 @@ export class DutydeckRuntime {
     if (input.source !== 'lark-memory' || !/^[A-Za-z0-9_-]+:[A-Za-z0-9_-]+:memory$/.test(input.sourceId ?? '') || !/^ses_memory_[a-f0-9]{64}$/.test(stableSessionId) || input.workspaceMode === 'worktree') {
       throw new RuntimeError('INVALID_MEMORY_SESSION', 'Memory sessions require a stable authorized Lark group scope and shared workspace', 400);
     }
-    await beforeStart();
-    const pending = this.backgroundStarts.get(stableSessionId);
-    if (pending) { await pending; return this.startMemorySession(input, stableSessionId, beforeStart); }
-    const agent = await this.repos.agents.get(input.agentId);
-    if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', 'Memory Agent not found', 404);
-    const existing = await this.repos.sessions.get(stableSessionId);
-    if (existing) {
+    return this.startStable(input, stableSessionId, beforeStart, 'Memory', async (existing, agent) => {
       const { capability } = this.sessionCapability(agent, input);
       const expected = { protocol: capability.protocol, workspaceMode: input.workspaceMode ?? 'shared', source: input.source, sourceId: input.sourceId, agentId: input.agentId, ...sessionConfigOf(agent, input), systemPrompt: agent.systemPrompt };
       if (Object.entries(expected).some(([key, value]) => ((key === 'workspaceMode' ? existing.workspaceMode ?? 'shared' : existing[key as keyof Session]) ?? undefined) !== (value ?? undefined))) throw new RuntimeError('MEMORY_SESSION_CONFLICT', 'Memory session immutable configuration changed', 409);
       return existing;
-    }
-    // Recheck after the asynchronous reads before reserving the stable identity.
-    const raced = this.backgroundStarts.get(stableSessionId);
-    if (raced) { await raced; return this.startMemorySession(input, stableSessionId, beforeStart); }
-    const start = this.startSession(input, { id: stableSessionId, beforeStart });
-    this.backgroundStarts.set(stableSessionId, start);
-    try { return await start; } finally { if (this.backgroundStarts.get(stableSessionId) === start) this.backgroundStarts.delete(stableSessionId); }
+    }, () => this.startMemorySession(input, stableSessionId, beforeStart));
   }
 
   /** The schedule admission and frozen configuration must be durable before session birth. */
@@ -2106,26 +2104,16 @@ export class DutydeckRuntime {
     if (input.source !== 'schedule' || !input.sourceId || !/^ses_schedule_[a-f0-9]{64}$/.test(stableSessionId) || (input.workspaceMode !== 'worktree' && input.workspaceMode !== 'shared')) {
       throw new RuntimeError('INVALID_SCHEDULE_SESSION', 'Schedule sessions require a stable identity and an explicit workspace mode', 400);
     }
-    await beforeStart();
-    const pending = this.backgroundStarts.get(stableSessionId);
-    if (pending) { await pending; return this.startScheduleSession(input, stableSessionId, beforeStart); }
-    const agent = await this.repos.agents.get(input.agentId);
-    if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', 'Schedule Agent not found', 404);
-    const existing = await this.repos.sessions.get(stableSessionId);
-    if (existing) {
+    return this.startStable(input, stableSessionId, beforeStart, 'Schedule', async (existing, agent) => {
       const current = await this.withSessionMetadata(existing);
       const { capability } = this.sessionCapability(agent, input);
       const { cwd, ...configured } = sessionConfigOf(agent, input);
       const expected = { protocol: capability.protocol, workspaceMode: input.workspaceMode, source: input.source, sourceId: input.sourceId, agentId: input.agentId, ...configured, systemPrompt: agent.systemPrompt };
       if (current.workspaceSourceCwd !== cwd || Object.entries(expected).some(([key, value]) => ((key === 'workspaceMode' ? current.workspaceMode ?? 'shared' : current[key as keyof Session]) ?? undefined) !== (value ?? undefined))) throw new RuntimeError('SCHEDULE_SESSION_CONFLICT', 'Schedule session immutable configuration changed', 409);
+      // Reusing a schedule session re-runs the admission hook against the existing identity.
       await beforeStart();
       return current;
-    }
-    const raced = this.backgroundStarts.get(stableSessionId);
-    if (raced) { await raced; return this.startScheduleSession(input, stableSessionId, beforeStart); }
-    const start = this.startSession(input, { id: stableSessionId, beforeStart });
-    this.backgroundStarts.set(stableSessionId, start);
-    try { return await start; } finally { if (this.backgroundStarts.get(stableSessionId) === start) this.backgroundStarts.delete(stableSessionId); }
+    }, () => this.startScheduleSession(input, stableSessionId, beforeStart));
   }
 
   /** A persisted stopped flag alone is not evidence that a previous process stopped. */
@@ -2924,7 +2912,7 @@ export class DutydeckRuntime {
     return settled;
   }
   private notifyTaskSettled(session: Session, settled: PublicTaskRecord) {
-    if (this.options.onTaskSettled && ['completed', 'failed', 'interrupted', 'cancelled'].includes(settled.status)) {
+    if (this.options.onTaskSettled && isTerminalTaskStatus(settled.status)) {
       void Promise.resolve().then(() => this.options.onTaskSettled!(session, settled)).catch(() => {});
     }
   }

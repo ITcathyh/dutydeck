@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { RuntimeError, type CiFailureLog, type CiWebhookEvent, type CiWebhookRequest, type CiWebhookVerification, type RepositoryBundle, type Session, type TaskRecord } from '@dutydeck/shared';
+import { isTerminalTaskStatus, RuntimeError, type CiFailureLog, type CiWebhookEvent, type CiWebhookRequest, type CiWebhookVerification, type RepositoryBundle, type Session, type TaskRecord } from '@dutydeck/shared';
 import { executionTaskId } from '@dutydeck/storage';
 import { z } from 'zod';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
@@ -22,7 +22,6 @@ export const ciFixLimits = { rounds: 3, sameError: 2, files: 10, lines: 300 } as
 export const webhookTimestampToleranceMs = 5 * 60_000;
 export const webhookEventTtlMs = 24 * 60 * 60_000;
 
-const terminalTaskStatuses = new Set(['completed', 'failed', 'interrupted', 'cancelled']);
 const activeStatuses = new Set(['waiting', 'failed', 'running']);
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
 const timestamp = z.string().datetime({ offset: true });
@@ -645,14 +644,14 @@ export class CiWebhookService {
         if (now - Date.parse(value.updatedAt) >= REDISPATCH_AFTER_MS) await this.dispatch(item);
         continue;
       }
-      if (terminalTaskStatuses.has(task.status)) await this.settle(item, task);
+      if (isTerminalTaskStatus(task.status)) await this.settle(item, task);
     }
     // 任务结束后删除绑定；一直没投递成功的绑定在订阅有效期过后删除。未结束的任务要靠绑定在 authorizeTask 处拦截，不能提前删。
     const bindings = this.options.repositories.ciWebhook;
     for (const binding of bindings.listTaskBindings()) {
       if (this.closed) return;
       const task = await this.options.repositories.tasks.get?.(binding.taskId);
-      if (task ? terminalTaskStatuses.has(task.status) : this.clock().getTime() - binding.createdAt >= SUBSCRIPTION_TTL_MS) bindings.unbindTask(binding.taskId);
+      if (task ? isTerminalTaskStatus(task.status) : this.clock().getTime() - binding.createdAt >= SUBSCRIPTION_TTL_MS) bindings.unbindTask(binding.taskId);
     }
   }
 
