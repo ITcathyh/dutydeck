@@ -202,7 +202,7 @@
         },
         {
           "tag": "markdown",
-          "content": "点选下方选项提交；也可引用本卡片直接回复你的答案。"
+          "content": "点选下方选项提交，或在「其他」里填写后提交；也可引用本卡片直接回复你的答案。"
         },
         {
           "tag": "markdown",
@@ -247,6 +247,48 @@
                 "generation": "boot_example",
                 "answer": "cancel"
               }
+            }
+          ]
+        },
+        {
+          "tag": "form",
+          "element_id": "workflow_other_form",
+          "name": "workflow_ask_other_c00e5a54b4c8caa19cf088d5",
+          "direction": "vertical",
+          "vertical_spacing": "8px",
+          "margin": "0px",
+          "elements": [
+            {
+              "tag": "input",
+              "element_id": "workflow_answer_other",
+              "name": "other",
+              "input_type": "multiline_text",
+              "max_length": 1000,
+              "placeholder": {
+                "tag": "plain_text",
+                "content": "其他（选填）：没有合适的选项时，在这里写下你的答案"
+              }
+            },
+            {
+              "tag": "button",
+              "element_id": "workflow_other_submit",
+              "type": "default",
+              "text": {
+                "tag": "plain_text",
+                "content": "提交其他答案"
+              },
+              "form_action_type": "submit",
+              "behaviors": [
+                {
+                  "type": "callback",
+                  "value": {
+                    "dutydeck_workflow": "answer",
+                    "request_id": "c00e5a54b4c8caa19cf088d5",
+                    "generation": "boot_example",
+                    "other": true
+                  }
+                }
+              ]
             }
           ]
         },
@@ -409,7 +451,7 @@
         },
         {
           "tag": "markdown",
-          "content": "点选下方选项提交；也可引用本卡片直接回复你的答案。"
+          "content": "点选下方选项提交，或在「其他」里填写后提交；也可引用本卡片直接回复你的答案。"
         },
         {
           "tag": "markdown",
@@ -450,6 +492,17 @@
                   "value": "cancel"
                 }
               ]
+            },
+            {
+              "tag": "input",
+              "element_id": "workflow_answer_other",
+              "name": "other",
+              "input_type": "multiline_text",
+              "max_length": 1000,
+              "placeholder": {
+                "tag": "plain_text",
+                "content": "其他（选填）：没有合适的选项时，在这里写下你的答案"
+              }
             },
             {
               "tag": "button",

@@ -3,6 +3,7 @@ import type { StoredLarkConfig } from './config.js';
 import { boundLarkCardElements, LarkServiceError } from './service.js';
 import { redactTraceText, sensitiveTraceKey } from './secret-redaction.js';
 import { collapsiblePanel, escapeCardInline, neutralizeCardTags } from './card-elements.js';
+import { repairCardStrongPunctuation } from './card-strong-punctuation.js';
 import { maxLarkVerificationRepairRounds, type LarkAutoVerificationNote } from './auto-verification.js';
 
 // 卡片渲染与限流/拒绝判断辅助。
@@ -16,6 +17,8 @@ export type TraceGroup = { narratives: TraceEntry[]; actions: TraceEntry[] };
 export type LarkCardElement = Record<string, any>;
 type TraceToolKind = 'command' | 'read' | 'edit' | 'search' | 'web' | 'git' | 'test' | 'data' | 'agent' | 'tool';
 const visibleTraceGroupLimit = 5;
+/** Agent 产出的卡片 markdown 正文：中和飞书标签，并修复标点紧贴 `**` 导致的粗体失效。 */
+const agentMarkdownBody = (text: string) => repairCardStrongPunctuation(neutralizeCardTags(text));
 
 // 任务终态集合：reconcile 与 trace 渲染共用（runtime task 状态机的终态判定）。
 export const terminalTaskStates = new Set<string>(terminalTaskStatuses);
@@ -1191,7 +1194,7 @@ export function renderLarkCardElements(
   elements.push(...permissionEntries.map(permissionAlert));
   elements.push(...errorEntries.map(errorAlert));
   if (finalText && view !== 'process') {
-    elements.push({ tag: 'markdown', element_id: 'final_output', content: completed ? neutralizeCardTags(finalText) : `**当前进展**\n\n${neutralizeCardTags(finalText)}`, text_align: 'left', text_size: 'normal_v2', margin: '0px' });
+    elements.push({ tag: 'markdown', element_id: 'final_output', content: completed ? agentMarkdownBody(finalText) : `**当前进展**\n\n${agentMarkdownBody(finalText)}`, text_align: 'left', text_size: 'normal_v2', margin: '0px' });
   } else if (completed && view !== 'process' && idleTimeout) {
     // 一轮因长时间没有输出被停掉：原因写清楚，而不是「结果不完整」。「继续」按钮由 buildLarkCard 按这个 id 补上。
     const silence = idleTimeout.minutes ? `${idleTimeout.minutes} 分钟` : '很长时间';
@@ -1275,7 +1278,7 @@ export function renderLarkResultTextElements(text: string): LarkCardElement[] {
     elements.push({
       tag: 'markdown',
       element_id: 'final_output',
-      content: neutralizeCardTags(finalText),
+      content: agentMarkdownBody(finalText),
       text_align: 'left',
       text_size: 'normal_v2',
       margin: '0px'

@@ -2898,7 +2898,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         if (fromDashboard && String(workflow.generation ?? '') !== record?.boot) {
           return { type: 'warning', content: '审批已失效，请刷新 /tasks 后重试。' };
         }
-        let answer: { answer?: string; reason?: string; selected?: string[] } = {};
+        let answer: { answer?: string; reason?: string; selected?: string[]; other?: string } = {};
         if (action === 'reject') {
           // 「拒绝并说明」表单的输入在 form_value.reason；普通「拒绝」按钮没有 form_value。
           const formReason = (workflow.form_value as { reason?: unknown } | undefined)?.reason;
@@ -2911,8 +2911,15 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         if (action === 'answer') {
           if (workflow.multiple === true) {
             // 多选值由平台放在 form_value.answer（string[]）；容忍单值形态，过滤去重在 respond 内。
-            const raw = (workflow.form_value as { answer?: unknown } | undefined)?.answer;
-            answer = { selected: Array.isArray(raw) ? raw : typeof raw === 'string' ? [raw] : [] };
+            const formValue = workflow.form_value as { answer?: unknown; other?: unknown } | undefined;
+            const raw = formValue?.answer;
+            // 「其他」输入在 form_value.other；旧卡片没有这个字段。
+            answer = { selected: Array.isArray(raw) ? raw : typeof raw === 'string' ? [raw] : [],
+              ...(typeof formValue?.other === 'string' ? { other: formValue.other } : {}) };
+          } else if (workflow.other === true) {
+            // 单选卡的「其他」表单：回调带 other:true，文字在 form_value.other；点选项按钮没有这个标记。
+            const formOther = (workflow.form_value as { other?: unknown } | undefined)?.other;
+            answer = { other: typeof formOther === 'string' ? formOther : '' };
           } else {
             // 单选按钮直接带 answer；自由文本 input 的提交值在 form_value.answer。
             const formAnswer = (workflow.form_value as { answer?: unknown } | undefined)?.answer;

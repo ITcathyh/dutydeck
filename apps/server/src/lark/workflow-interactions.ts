@@ -183,6 +183,25 @@ const rejectReasonForm = (record: LarkInteraction): LarkCardElement => ({
 const rejectReasonSummary = (reason: string) => larkCommandEcho(permissionDisplayText(reason, [], permissionRejectReasonMaxLength), 120);
 const withRejectReason = (message: string, reason?: string) => reason ? `${message}\n\n原因：${escapeLarkPromptEcho(reason)}` : message;
 
+/** 「其他」文字输入：选项之外的答案。表单字段名 other，与选项值 answer 分开，旧卡片没有这个字段。 */
+const otherAnswerMaxLength = 1000;
+const otherAnswerInput: LarkCardElement = {
+  tag: 'input', element_id: 'workflow_answer_other', name: 'other', input_type: 'multiline_text', max_length: otherAnswerMaxLength,
+  placeholder: { tag: 'plain_text', content: '其他（选填）：没有合适的选项时，在这里写下你的答案' }
+};
+
+/** 单选卡的「其他」表单：回调带 other:true，文字在 form_value.other；点选项按钮仍然直接提交。 */
+const otherAnswerForm = (record: LarkInteraction): LarkCardElement => ({
+  tag: 'form', element_id: 'workflow_other_form', name: `workflow_ask_other_${record.id}`,
+  direction: 'vertical', vertical_spacing: '8px', margin: '0px',
+  elements: [
+    otherAnswerInput,
+    { tag: 'button', element_id: 'workflow_other_submit', type: 'default',
+      text: { tag: 'plain_text', content: '提交其他答案' }, form_action_type: 'submit',
+      behaviors: [{ type: 'callback', value: { dutydeck_workflow: 'answer', request_id: record.id, generation: record.boot, other: true } }] }
+  ]
+});
+
 /** 单选：每个选项一个回调按钮，点按即提交，回调 value 复用 dutydeck_workflow 命名空间。 */
 const singleChoiceElements = (record: LarkInteraction, choices: RelayAskChoice[]): LarkCardElement[] =>
   choices.map((choice, index) => ({
@@ -198,13 +217,14 @@ const singleChoiceElements = (record: LarkInteraction, choices: RelayAskChoice[]
  * 多选：JSON 2.0 原生表单（form + multi_select_static + form_action_type:'submit' 按钮）。
  * 提交时按钮 value 仍走 dutydeck_workflow，所选值由平台放在 event.action.form_value.answer（string[]）。
  */
-const multipleChoiceForm = (record: LarkInteraction, choices: RelayAskChoice[]): LarkCardElement => ({
+const multipleChoiceForm = (record: LarkInteraction, choices: RelayAskChoice[], withOther = false): LarkCardElement => ({
   tag: 'form', element_id: 'workflow_answer_form', name: `workflow_ask_${record.id}`,
   direction: 'vertical', vertical_spacing: '8px', margin: '0px',
   elements: [
     { tag: 'multi_select_static', element_id: 'workflow_answer_select', name: 'answer', behaviors: [],
       placeholder: { tag: 'plain_text', content: '选择一个或多个选项' },
       options: choices.map(choice => ({ text: { tag: 'plain_text', content: choice.label }, value: choice.value ?? choice.label })) },
+    ...(withOther ? [otherAnswerInput] : []),
     { tag: 'button', element_id: 'workflow_answer_submit', type: 'primary',
       text: { tag: 'plain_text', content: '提交选择' }, form_action_type: 'submit',
       behaviors: [{ type: 'callback', value: { dutydeck_workflow: 'answer', request_id: record.id, generation: record.boot, multiple: true } }] }
@@ -845,14 +865,18 @@ export class LarkWorkflowInteractions {
     ];
     // 结构化问答仅在开关开启且记录本身带选项时渲染；持久记录缺 structured（升级前的卡）
     // 一律走自由文本形态，绝不让新渲染逻辑作用于旧记录。
-    let structuredParts: LarkCardElement[] | undefined;
+    // 候选按优先级排：先带「其他」输入，放不下再退回只有选项的版本。ADHD 提问卡只保留问题和按钮，不加输入。
+    let structuredCandidates: { parts: LarkCardElement[]; withOther: boolean }[] = [];
     if (structuredOn && kind === 'ask') {
       if (record.structured && structuredChoices) {
-        structuredParts = record.multiple
-          ? [multipleChoiceForm(record, structuredChoices)]
-          : singleChoiceElements(record, structuredChoices);
+        const withOther = record.adhdMode !== true;
+        structuredCandidates = record.multiple
+          ? [...(withOther ? [{ parts: [multipleChoiceForm(record, structuredChoices, true)], withOther }] : []),
+            { parts: [multipleChoiceForm(record, structuredChoices)], withOther: false }]
+          : [...(withOther ? [{ parts: [...singleChoiceElements(record, structuredChoices), otherAnswerForm(record)], withOther }] : []),
+            { parts: singleChoiceElements(record, structuredChoices), withOther: false }];
       } else if (!record.structured) {
-        structuredParts = [freeTextForm(record)];
+        structuredCandidates = [{ parts: [freeTextForm(record)], withOther: false }];
       }
     }
     const safeWebBaseUrl = structuredOn && kind === 'ask' ? safeLarkWebUrl(options.webBaseUrl) : undefined;
@@ -865,8 +889,10 @@ export class LarkWorkflowInteractions {
           content: `可选项：\n${labels.slice(0, visible).join('\n')}${visible < labels.length ? `\n还有 ${labels.length - visible} 个选项未展示，请查看全文附件。` : ''}` } });
         const fullTextParts = labels.length ? [choicesElement(labels.length)] : [];
         let contentElements = [questionElement(kind, question), ...fullTextParts];
-        if (structuredParts && this.withinAskCardBudget([...elements, ...structuredParts], safeWebBaseUrl)) {
-          elements.push(...structuredParts);
+        const structuredFit = structuredCandidates.find(candidate => this.withinAskCardBudget([...elements, ...candidate.parts], safeWebBaseUrl));
+        if (structuredFit) {
+          if (structuredFit.withOther) hintElement.content = '点选下方选项提交，或在「其他」里填写后提交；也可引用本卡片直接回复你的答案。';
+          elements.push(...structuredFit.parts);
         } else {
           hintElement.content = '请引用本卡片回复你的答案。';
           if (this.withinAskCardBudget([...elements, ...fullTextParts], safeWebBaseUrl)) {
@@ -1183,7 +1209,7 @@ export class LarkWorkflowInteractions {
     catch { return false; }
     return true;
   }
-  async respond(input: { appId: string; chatId: string; actorId?: string; requestId: string; action: 'answer' | 'approve' | 'reject' | 'accept' | 'changes' | 'allow_session' | 'plan_approve' | 'plan_revise' | 'plan_cancel'; answer?: string; reason?: string; selected?: string[]; cardId?: string; generation?: string; callback?: boolean; deferClose?: boolean }): Promise<string> {
+  async respond(input: { appId: string; chatId: string; actorId?: string; requestId: string; action: 'answer' | 'approve' | 'reject' | 'accept' | 'changes' | 'allow_session' | 'plan_approve' | 'plan_revise' | 'plan_cancel'; answer?: string; reason?: string; selected?: string[]; other?: string; cardId?: string; generation?: string; callback?: boolean; deferClose?: boolean }): Promise<string> {
     if (!input.deferClose) return this.respondNow(input);
     const key = prefix(input.appId) + input.requestId;
     const entry = this.deferredCloses.get(key) ?? { active: 0, timer: undefined };
@@ -1274,12 +1300,20 @@ export class LarkWorkflowInteractions {
       if (record.structured && input.callback) {
         const values = (this.broker?.get(record.nativeId)?.choices ?? []).map(choice => choice.value ?? choice.label);
         const invalidChoice = () => new LarkServiceError('LARK_ANSWER_CHOICE_INVALID', '提交的选项已失效，请点选卡片上的最新选项，或引用本卡片直接回复答案。', 400);
+        // 「其他」文字只有带输入框的普通提问卡才会提交；ADHD 提问卡只收选项，带了也不采纳。
+        const other = record.adhdMode === true ? undefined : input.other?.trim();
+        if (other && Array.from(other).length > otherAnswerMaxLength) throw new LarkServiceError('LARK_ANSWER_TOO_LONG', `其他答案不能超过 ${otherAnswerMaxLength} 个字符。`, 400);
         if (record.multiple) {
           const picked = Array.isArray(input.selected)
             ? [...new Set(input.selected.filter((value): value is string => typeof value === 'string'))]
             : [];
-          if (!picked.length || picked.some(value => !values.includes(value))) throw invalidChoice();
-          answerText = picked.join('、');
+          if (picked.some(value => !values.includes(value))) throw invalidChoice();
+          if (!picked.length && !other) throw invalidChoice();
+          // 选项和「其他」文字都有时分行标明：Agent 收到的是一条文本，要能分清哪些是所选项、哪些是补充。
+          answerText = picked.length && other ? `所选项：${picked.join('、')}\n补充文字：${other}` : picked.length ? picked.join('、') : other!;
+        } else if (input.other !== undefined && record.adhdMode !== true) {
+          if (!other) throw new LarkServiceError('LARK_ANSWER_EMPTY', '请先填写其他答案，或点选上方选项。', 400);
+          answerText = other;
         } else {
           answerText = input.answer?.trim() ?? '';
           if (!answerText || !values.includes(answerText)) throw invalidChoice();
