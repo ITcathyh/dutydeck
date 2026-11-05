@@ -446,6 +446,16 @@ describe('Agent schedule request delivery', () => {
     const button = sent.elements.find((element: any) => element.element_id === 'schedule_request_toggle');
     expect(button.text.content).toBe('确认启用');
     expect(button.behaviors[0].value).toEqual({ dutydeck_schedule_enable: 'schedule_req', card: 'request' });
+    expect(JSON.stringify(sent.elements)).not.toContain('**直到**');
+  });
+
+  it('shows the completion condition and deadline on the confirmation card', async () => {
+    const f = await fixture();
+    await f.repos.config.set('automation.delivery-target.schedule_req', JSON.stringify({ appId: 'cli_a', chatId: 'oc_chat', replyMessageId: 'om_request', replyInThread: true }));
+    await f.sendScheduleRequest({ ...schedule, completionCondition: 'PR 已合并', deadlineAt: '2026-12-01T10:00:00.000Z' });
+    const elements = JSON.stringify((f.client.reply.mock.calls[0]![0] as any).elements);
+    expect(elements).toContain('**直到**：PR 已合并（达成后自动停用）');
+    expect(elements).toContain('**截止**：2026/12/1 18:00:00（到点仍未完成就停用并告知）');
   });
 });
 

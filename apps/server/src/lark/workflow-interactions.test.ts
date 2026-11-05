@@ -186,6 +186,72 @@ describe('persistent Lark workflow interactions', () => {
     } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
   });
 
+  it('审批卡带「拒绝并说明」表单，提交的原因交给执行端，终态卡只显示脱敏摘要，重复提交按已处理拒绝', async () => {
+    const { directory, repositories } = await openDatabase();
+    try {
+      const permissions: PermissionRequestData[] = [{ id: 'perm_reason', title: '删除目录', status: 'pending' }];
+      const { runtime, resolvePermission } = makeRuntime([runningTask()], permissions);
+      const { service, reply } = makeService();
+      const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, async () => true);
+      await workflow.observe(context(), agentEvent('permission_request', permissions[0]));
+      const sent = reply.mock.calls[0]![0] as any;
+      const form = sent.elements.find((element: any) => element.element_id === 'workflow_reject_form');
+      expect(form.tag).toBe('form');
+      expect(form.elements[0]).toMatchObject({ tag: 'input', name: 'reason' });
+      const record = (await workflow.list('app_one'))[0]!;
+      expect(form.elements[1]).toMatchObject({ form_action_type: 'submit', behaviors: [{ type: 'callback', value: { dutydeck_workflow: 'reject', request_id: record.id, generation: record.boot } }] });
+      // 原有「拒绝」按钮保持一键。
+      expect(sent.elements.find((element: any) => element.element_id === 'workflow_reject')).toMatchObject({ tag: 'button' });
+
+      await expect(workflow.respond(responseInput(record, { action: 'reject', reason: '  不要动 prod\u0007 目录，改用 /tmp，token=abc123xyz <at id=all></at>  ' }))).resolves.toContain('已接受拒绝');
+      expect(resolvePermission).toHaveBeenCalledWith('ses_one', 'perm_reason', false, '不要动 prod 目录，改用 /tmp，token=abc123xyz <at id=all></at>');
+      expect(await workflow.get('app_one', record.id)).toMatchObject({ state: 'rejected', rejectReason: expect.stringContaining('token=[REDACTED]') });
+      const closed = JSON.stringify(vi.mocked(service.update).mock.calls.at(-1)![0]);
+      expect(closed).toContain('已拒绝');
+      expect(closed).toContain('原因：不要动 prod 目录，改用 /tmp，token=[REDACTED]');
+      expect(closed).not.toContain('abc123xyz');
+      expect(closed).not.toContain('<at id=all>');
+      // 已裁决后再点：与普通拒绝一样返回已处理，不再调用执行端。
+      await expect(workflow.respond(responseInput(record, { action: 'reject', reason: '再说一次' }))).rejects.toMatchObject({ code: 'LARK_INTERACTION_EXPIRED' });
+      expect(resolvePermission).toHaveBeenCalledOnce();
+    } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('拒绝说明为空白时等同普通拒绝，超长时在提交前拒绝且审批仍可处理', async () => {
+    const { directory, repositories } = await openDatabase();
+    try {
+      const permissions: PermissionRequestData[] = [{ id: 'perm_blank', title: '写入配置', status: 'pending' }];
+      const { runtime, resolvePermission } = makeRuntime([runningTask()], permissions);
+      const { service } = makeService();
+      const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, async () => true);
+      await workflow.observe(context(), agentEvent('permission_request', permissions[0]));
+      const record = (await workflow.list('app_one'))[0]!;
+      await expect(workflow.respond(responseInput(record, { action: 'reject', reason: 'x'.repeat(2001) }))).rejects.toMatchObject({ code: 'LARK_REASON_TOO_LONG' });
+      expect(resolvePermission).not.toHaveBeenCalled();
+      expect(await workflow.get('app_one', record.id)).toMatchObject({ state: 'pending' });
+      await workflow.respond(responseInput(record, { action: 'reject', reason: ' \n ' }));
+      expect(resolvePermission).toHaveBeenCalledWith('ses_one', 'perm_blank', false);
+      expect((await workflow.get('app_one', record.id))?.rejectReason).toBeUndefined();
+      expect(JSON.stringify(vi.mocked(service.update).mock.calls.at(-1)![0])).not.toContain('原因：');
+    } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('拒绝说明沿用普通拒绝的授权策略（run.interrupt），不要求更高权限', async () => {
+    const { directory, repositories } = await openDatabase();
+    try {
+      const permissions: PermissionRequestData[] = [{ id: 'perm_authz', title: '写入配置', status: 'pending' }];
+      const { runtime, resolvePermission } = makeRuntime([runningTask()], permissions);
+      const { service } = makeService();
+      const authorize = vi.fn(async () => true);
+      const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, authorize);
+      await workflow.observe(context(), agentEvent('permission_request', permissions[0]));
+      const record = (await workflow.list('app_one'))[0]!;
+      await workflow.respond(responseInput(record, { action: 'reject', reason: '不要这样做' }));
+      expect(authorize).toHaveBeenCalledWith(expect.anything(), 'user_one', 'run.interrupt');
+      expect(resolvePermission).toHaveBeenCalledWith('ses_one', 'perm_authz', false, '不要这样做');
+    } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
   it('retries an undelivered live permission with the same UUID and excludes concurrent deliveries', async () => {
     const { directory, repositories } = await openDatabase();
     const at = Date.now();
@@ -1867,6 +1933,18 @@ describe('permission cards follow authoritative Runtime decisions from every ent
       expect(h.resolvePermission).toHaveBeenCalledOnce();
       expect(h.service.update.mock.calls.at(-1)[0]).toMatchObject({ statusLabel: action === 'approve' ? '已允许' : '已拒绝' });
       expect(JSON.stringify(h.service.update.mock.calls)).not.toMatch(/已失效|排队受阻/);
+    });
+  });
+
+  it('Web 端带说明拒绝后，飞书卡收起文案显示脱敏的原因摘要', async () => {
+    await withPermission(async h => {
+      const decision = agentEvent('permission_request', { id: 'native_web', status: 'rejected', reason: '改用测试库 password=hunter2 再试' }, { taskId: 'task_one' });
+      await h.workflow.observe(context(), decision);
+      expect(await h.workflow.get('app_one', h.record.id)).toMatchObject({ state: 'rejected', rejectReason: '改用测试库 password=[REDACTED] 再试' });
+      const closed = JSON.stringify(h.service.update.mock.calls.at(-1)[0]);
+      expect(closed).toContain('已拒绝');
+      expect(closed).toContain('原因：改用测试库 password=[REDACTED] 再试');
+      expect(closed).not.toContain('hunter2');
     });
   });
 

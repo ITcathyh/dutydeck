@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createCliUi } from '../cli-ui.js';
 import { discoverSkills, setPluginSkillRoots } from '../skill-catalog.js';
 import { runPluginCli } from './cli.js';
-import { PluginHost, resolveTriggerTarget } from './host.js';
+import { PluginHost, resolveTrigger, resolveTriggerTarget } from './host.js';
 import { directPack, markerProviders, providerPack, scenarioMessage, writePlugin } from './scenario-fixtures.test-helpers.js';
 import { loadDaemonPlugins } from './service-wiring.js';
 import { PluginStore } from './store.js';
@@ -156,6 +156,10 @@ describe('PluginHost', () => {
     expect(host.trigger('hello', 'ping')?.target).toEqual({ botAppId: 'cli_hello', chatId: 'oc_hello', session: 'new' });
     expect(host.trigger('hello', 'missing')).toBeUndefined();
     expect(resolveTriggerTarget({ botAppId: 'x{{ config.a }}', chatId: 'c', session: 'reuse' }, { a: '1' })).toEqual({ botAppId: 'x1', chatId: 'c', session: 'reuse' });
+    const templated = { auth: { type: 'token' as const, header: 'x' }, target: { botAppId: 'b', chatId: 'c', session: 'new' as const }, maxConcurrent: 1,
+      workTemplate: { session: '{{config.s}}', id: '{{config.t}}', version: '{{config.v}}', goal: '{{payload}}' } };
+    expect(resolveTrigger(templated, { s: 'ses_1', t: 'template_x', v: '3' })?.workTemplate).toEqual({ session: 'ses_1', id: 'template_x', version: '3', goal: '{{payload}}' });
+    expect(resolveTrigger(templated, { s: 'ses_1', t: 'template_x' })).toBeUndefined();
   });
 
   it('runs the example command hook with plugin env and data dir', async () => {

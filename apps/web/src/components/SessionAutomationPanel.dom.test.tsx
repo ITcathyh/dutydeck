@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import type { PublicCiProvider, PublicCiSubscription, PublicSessionSchedule, PublicSessionScheduleOccurrence } from '@dutydeck/shared';
+import type { PublicCiProvider, PublicCiSubscription, PublicSessionSchedule, PublicSessionScheduleOccurrence, ScheduleRunState } from '@dutydeck/shared';
 import { api, ApiError, type Session } from '../api';
 import { setInstance } from '../instance';
 import { SessionAutomationPanel, scheduleRule } from './SessionAutomationPanel';
@@ -12,8 +12,8 @@ const schedule: PublicSessionSchedule = { schemaVersion: 1, id: 'plan1', revisio
 const clients: QueryClient[] = [];
 afterEach(() => { setInstance(undefined); cleanup(); clients.forEach(client => client.clear()); clients.length = 0; vi.restoreAllMocks(); });
 const testCi: PublicCiProvider = { id: 'test-ci', displayName: 'Test CI', polling: true, webhook: false };
-function mount(schedules: PublicSessionSchedule[] = [], providers: PublicCiProvider[] = [testCi], subscriptions: PublicCiSubscription[] = [], currentSession = session) {
-  const read = vi.spyOn(api, 'automation').mockResolvedValue({ schedules, subscriptions, occurrences: [], deliveryTargets: Object.fromEntries(schedules.map(item => [item.id, { kind: 'task' as const, sessionId: session.id }])) });
+function mount(schedules: PublicSessionSchedule[] = [], providers: PublicCiProvider[] = [testCi], subscriptions: PublicCiSubscription[] = [], currentSession = session, runStates?: Record<string, ScheduleRunState>) {
+  const read = vi.spyOn(api, 'automation').mockResolvedValue({ schedules, subscriptions, occurrences: [], deliveryTargets: Object.fromEntries(schedules.map(item => [item.id, { kind: 'task' as const, sessionId: session.id }])), ...(runStates ? { runStates } : {}) });
   vi.spyOn(api, 'automationHistory').mockImplementation(async (_sessionId, scheduleId, offset = 0, limit = 20) => {
     const data = await read.mock.results.at(-1)?.value;
     const occurrences = (data?.occurrences ?? []).filter((item: PublicSessionScheduleOccurrence) => item.scheduleId === scheduleId).slice().reverse();
@@ -404,4 +404,33 @@ it('allows a frozen matter plan to run after its source is archived', async () =
   const run = vi.spyOn(api, 'runSchedule').mockResolvedValue({ occurrence: {} as PublicSessionScheduleOccurrence });
   await userEvent.click(await screen.findByRole('button', { name: '立即执行' }));
   await waitFor(() => expect(run).toHaveBeenCalledWith(session.id, schedule.id, expect.objectContaining({ expectedRevision: schedule.revision })));
+});
+
+describe('follow-up until done', () => {
+  it('shows the run state, completion condition and deadline of a plan', async () => {
+    mount([{ ...schedule, completionCondition: 'PR 已合并', deadlineAt: '2026-12-01T15:00:00.000Z', outcome: { kind: 'deadline_reached', at: '2026-12-01T15:00:00.000Z' } }], [testCi], [], session, { plan1: 'deadline_reached' });
+    await screen.findByText('巡检 · 已到截止，未确认完成');
+    expect(screen.getByText('直到：PR 已合并（达成后由 Agent 停用）')).toBeTruthy();
+    expect(screen.getByText(/截止：2026\/12\/1 10:00:00 · America\/New_York/)).toBeTruthy();
+  });
+
+  it('saves a completion condition and a deadline in the plan timezone, or a saved work template as the action', async () => {
+    vi.spyOn(api, 'workItems').mockResolvedValue({ items: [], templates: [{ id: 'template_a', parentSessionId: 's1', name: '发布检查', version: 2, plan: {} as never, createdAt: session.createdAt }] });
+    mount();
+    const create = vi.spyOn(api, 'createSchedule').mockResolvedValue({ schedule });
+    const user = await fill('daily');
+    await user.type(screen.getByLabelText('一直跟进，直到（可选）'), 'CI 通过');
+    fireEvent.change(screen.getByLabelText('截止时间（可选）'), { target: { value: '2026-12-01T18:00' } });
+    await user.click(screen.getByRole('button', { name: '保存计划' }));
+    await waitFor(() => expect(create).toHaveBeenCalledWith('s1', expect.objectContaining({ completionCondition: 'CI 通过', deadlineAt: '2026-12-01T10:00:00.000Z' })));
+    expect(create.mock.calls[0]![1]).not.toHaveProperty('workTemplate');
+    await user.click(await screen.findByText('为此任务创建计划'));
+    await user.type(screen.getByLabelText('计划名称'), '模板');
+    await user.selectOptions(await screen.findByLabelText('每次执行'), 'template_a@2');
+    expect(screen.queryByLabelText('一直跟进，直到（可选）')).toBeNull();
+    await user.type(screen.getByLabelText('工作项目标'), '检查发布');
+    await user.click(screen.getByRole('button', { name: '保存计划' }));
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(2));
+    expect(create.mock.calls[1]![1]).toMatchObject({ prompt: '检查发布', workTemplate: { id: 'template_a', version: 2 } });
+  });
 });

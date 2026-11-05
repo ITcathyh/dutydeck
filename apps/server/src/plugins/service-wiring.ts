@@ -2,7 +2,7 @@ import { PluginCommandQueryService } from './command-query.js';
 import { PluginToolGrants } from './tool-grants.js';
 import { dirname } from 'node:path';
 import { resolveDatabaseUrl } from '@dutydeck/config';
-import { installationOwnerTaskActor, type ConfigRepository, type CiWebhookRepository, type ExecutionRepository, type PublicTaskRecord, type Session } from '@dutydeck/shared';
+import { installationOwnerTaskActor, type ConfigRepository, type WorkItem, type CiWebhookRepository, type ExecutionRepository, type PublicTaskRecord, type Session } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { readTaskAttemptResult } from '../task-results.js';
 import { setPluginSkillRoots } from '../skill-catalog.js';
@@ -12,6 +12,7 @@ import { createTriggerDispatcher, PLUGIN_TRIGGER_SOURCE, PluginRuntimeHooks, ses
 import type { PluginRouteOptions } from './routes.js';
 import type { ScenarioRegistry } from './scenario-registry.js';
 import { PluginTriggerService } from './triggers.js';
+import { readWorkItemStatus, type WorkItemService } from '../work-items.js';
 
 const stderrLog = { warn: (data: Record<string, unknown>, message: string) => process.stderr.write(`[dutydeck] ${message} ${JSON.stringify(data)}\n`) };
 
@@ -28,12 +29,26 @@ export async function loadDaemonPlugins(env: NodeJS.ProcessEnv, options: { built
   } catch (error) { await host.dispose(); throw error; }
 }
 
+/**
+ * 只取消首次确认前、还没有任何步骤尝试过的工作项；按读到的修订号取消，期间有人确认则修订号冲突、不取消。
+ * 带待确认修订的工作项已经在执行，不属于「未确认」，只能从工作项本身取消。
+ */
+export async function cancelUnconfirmedWorkItem(work: Pick<WorkItemService, 'get' | 'cancel'>, sessionId: string, workItemId: string): Promise<boolean> {
+  try {
+    const item = await work.get(sessionId, workItemId, installationOwnerTaskActor);
+    if (item.status !== 'awaiting_confirmation' || item.pendingRevision || [...item.steps, ...item.retiredSteps ?? []].some(step => step.attempts.length)) return false;
+    return (await work.cancel(sessionId, workItemId, item.revision, installationOwnerTaskActor)).status === 'cancelled';
+  } catch { return false; }
+}
+
 export interface PluginWiringDeps {
   runtime: () => DutydeckRuntime;
   repositories: { config: ConfigRepository; execution: Pick<ExecutionRepository, 'getTaskExecution' | 'getAttemptEvents' | 'getAcceptedTask'>; ciWebhook: Pick<CiWebhookRepository, 'claimEvent' | 'releaseEvent' | 'bindTask' | 'listTaskBindings' | 'unbindTask'> };
   readBot(appId: string): Promise<(TriggerBot & { appSecret?: string }) | undefined>;
   fallbackAgentId(): string | undefined;
   sendText(bot: TriggerBot & { appSecret?: string }, input: { chatId: string; text: string; idempotencyKey: string }): Promise<unknown>;
+  /** 触发器启动工作项模板；daemon 装配完成后才会被调用。 */
+  workItems?: () => Pick<WorkItemService, 'runTemplate' | 'get' | 'cancel'>;
   log: { warn(data: Record<string, unknown>, message: string): void };
 }
 
@@ -50,12 +65,14 @@ export function wirePlugins(host: PluginHost, deps: PluginWiringDeps) {
   const triggers = new PluginTriggerService({
     lookup: (plugin, id) => host.trigger(plugin, id),
     token: (plugin, id) => host.triggerToken(plugin, id),
-    deliver: createTriggerDispatcher({ runtime: { start: input => deps.runtime().start(input), dispatch: (...args) => deps.runtime().dispatch(...args), listSessions: () => deps.runtime().listSessions(), cancelQueued: (...args) => deps.runtime().cancelQueued(...args) },
-      readBot: deps.readBot, fallbackAgentId: deps.fallbackAgentId }),
+    deliver: createTriggerDispatcher({ runtime: { start: input => deps.runtime().start(input), dispatch: (...args) => deps.runtime().dispatch(...args), listSessions: () => deps.runtime().listSessions(), cancelQueued: (...args) => deps.runtime().cancelQueued(...args), getSession: id => deps.runtime().getSession(id) },
+      readBot: deps.readBot, fallbackAgentId: deps.fallbackAgentId, ...(deps.workItems ? { work: deps.workItems } : {}) }),
     cancel: async (sessionId, taskId) => {
       try { await deps.runtime().cancelQueued(sessionId, taskId, installationOwnerTaskActor); return true; }
       catch { return false; }
     },
+    workStatus: workItemId => readWorkItemStatus(deps.repositories.config, workItemId),
+    cancelWork: async (sessionId, workItemId) => deps.workItems ? cancelUnconfirmedWorkItem(deps.workItems(), sessionId, workItemId) : false,
     isSettled: taskId => {
       const status = deps.repositories.execution.getTaskExecution(taskId)?.task.status;
       return !status || ['completed', 'failed', 'interrupted', 'cancelled'].includes(status);

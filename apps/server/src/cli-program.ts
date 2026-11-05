@@ -6,6 +6,7 @@ import type { RecoveryCliOptions, RecoveryOperation } from './recovery-cli.js';
 import type { WorkspaceGroupsAction } from './workspace-groups-cli.js';
 import type { SessionNamesAction } from './session-names-cli.js';
 import type { ScheduleCliAction, ScheduleCliInput, ScheduleRequestCliInput } from './schedule-cli.js';
+import type { PullRequestCliAction, PullRequestCliInput } from './pull-request-cli.js';
 import { pluginBindingFields, agentFields, agentConfigFields, botFields, channelBotFields, fieldsHelp, groupFields, groupBindingFields, groupBindingCreateFields, type SettingsAction, type SettingsCliInput } from './settings-cli.js';
 import { agentCommandHelp } from './lark/agent-command.js';
 import { addAgentCommands } from './agent-cli.js';
@@ -246,7 +247,7 @@ export interface CliHandlers {
   larkCreate?(name: string | undefined, options: LarkCreateCliOptions): void | Promise<void>;
   larkUpdate?(markdown: string | undefined, options: LarkCliOptions): void | Promise<void>;
   identityPreflight?(channelBotId: string, options: IdentityPreflightCliOptions): void | Promise<void>;
-  work?(operation: string, args: string[], options?: { file?: string; key?: string; turn?: string }): void | Promise<void>;
+  work?(operation: string, args: string[], options?: { file?: string; key?: string; turn?: string; dryRun?: boolean }): void | Promise<void>;
   groupSelf?(): void | Promise<void>;
   groupPeers?(): void | Promise<void>;
   groupMembers?(): void | Promise<void>;
@@ -272,6 +273,7 @@ export interface CliHandlers {
   settings?(action: SettingsAction, input: SettingsCommandInput): void | Promise<void>;
   schedule?(action: ScheduleCliAction, id: string | undefined, input: ScheduleCliInput): void | Promise<void>;
   scheduleRequest?(input: ScheduleRequestCliInput): void | Promise<void>;
+  pullRequest?(action: PullRequestCliAction, argument: string | undefined, input: PullRequestCliInput): void | Promise<void>;
   sessionHerdr?(args: string[]): void | Promise<void>;
   sessionReport?(options: { status: string; question?: string; summary?: string }): void | Promise<void>;
   sessionSend?(text: string): void | Promise<void>;
@@ -566,11 +568,15 @@ Examples:
 
   const work = program.command('work').description('Arrange durable goals, Agent steps and reusable workflows in the current Feishu conversation').requiredOption('--turn <token>', 'Current task capability supplied by Dutydeck');
   work.addHelpText('after', workbenchHelp() + '\n' + layeredWorkbenchHelp());
-  const workOptions = (options: { file?: string; key?: string } = {}) => ({ ...options, turn: work.opts().turn as string });
+  const workOptions = (options: { file?: string; key?: string; dryRun?: boolean } = {}) => ({ ...options, turn: work.opts().turn as string });
   for (const operation of ['list', 'templates', 'agents', 'skills']) work.command(operation).action(() => handlers.work?.(operation, [], workOptions()));
   work.command('show <id>').action(id => handlers.work?.('show', [id], workOptions()));
   work.command('create').addHelpText('after', workbenchHelp()).requiredOption('--file <path>', 'JSON plan with goal and a stable idempotencyKey').action(options => handlers.work?.('create', [], workOptions(options)));
   work.command('delegate').addHelpText('after', layeredWorkbenchHelp()).requiredOption('--file <path>', 'JSON brief with goal, context and a stable idempotencyKey').action(options => handlers.work?.('delegate', [], workOptions(options)));
+  work.command('revise <id>').description('Revise the plan of an unfinished goal; widening changes wait for human confirmation').addHelpText('after', workbenchHelp())
+    .requiredOption('--file <path>', 'JSON with expectedRevision, the complete new plan and an optional reason')
+    .option('--dry-run', 'Only preview which steps are kept, rerun, stopped, removed or added')
+    .action((id, options) => handlers.work?.('revise', [id], workOptions(options)));
   work.command('save <id> <name>').action((id, name) => handlers.work?.('save', [id, name], workOptions()));
   work.command('run <template> <version> <goal>').requiredOption('--key <key>', 'Stable request key for this run').action((id, version, goal, options) => handlers.work?.('run', [id, version, goal], workOptions(options)));
 
@@ -761,7 +767,10 @@ Examples:
       .option('--mode <mode>', action === 'create'
         ? 'session (default): run in the session with its history; fresh: a new session each time, results still go back here; independent: one dedicated worktree session'
         : 'Switch between session and fresh; independent schedules cannot switch')
-      .option('--input <json>', 'Complete create input or update patch as JSON')
+      .option('--until <condition>', 'Completion condition checked on every run; once met the Agent stops the schedule with stop-self (recurring schedules only)')
+      .option('--deadline <time>', 'Disable automatically at this time if completion is not confirmed: ISO time with offset, or YYYY-MM-DDTHH:mm in the schedule timezone')
+      .option('--template <id@version>', 'Start this saved work-item template on every run, with --prompt as its goal (session mode only)')
+      .option('--input <json>', 'Complete create input or update patch as JSON; null clears completionCondition, deadlineAt or workTemplate')
       .option('--file <path>', 'Read the JSON input from this file');
     if (action === 'create') command
       .option('--additional', '确需在本事项另建一个循环计划')
@@ -787,6 +796,16 @@ Examples:
     .option('--at <local-time>', 'Run once at YYYY-MM-DDTHH:mm, Asia/Shanghai time')
     .option('--mode <mode>', 'fresh (default for --every/--cron): run each time in a new conversation without this chat history; session (default for --at): continue in this conversation, only when the user asks for it')
     .action(options => handlers.scheduleRequest?.(options));
+  const pullRequests = program.command('pr').description('Follow pull requests of a session: list, claim an existing PR, stop following; every command prints JSON');
+  for (const [action, usage, description] of [
+    ['list', 'list', 'List PRs opened or followed by the session'],
+    ['follow', 'follow <link>', 'Claim an existing PR (link or number) in the session workspace repository and follow its CI and review comments'],
+    ['stop', 'stop <id>', 'Stop following (or cancel an unconfirmed /pr proposal)']
+  ] as const) {
+    withTarget(pullRequests.command(usage)).description(description)
+      .requiredOption('--session <id>', 'Session that owns the PR follow-up')
+      .action((...args: unknown[]) => handlers.pullRequest?.(action, action === 'list' ? undefined : args[0] as string, (args.at(-1) as Command).optsWithGlobals()));
+  }
   withTarget(settings.command('explain').description('Explain saved configuration, current session and recorded task/attempt evidence (read-only)'))
     .requiredOption('--session <id>', 'Session to explain')
     .option('--task <id>', 'Accepted task snapshot and tool action evidence')

@@ -1,4 +1,4 @@
-import { matterStatusForSessions, isSupersededMatterSession } from '@dutydeck/shared';
+import { matterStatusForSessions, isSupersededMatterSession, cleanPermissionRejectReason, permissionRejectReasonMaxLength } from '@dutydeck/shared';
 import { registerConfigurationExplanationRoutes, type ConfigurationExplanationOptions } from './configuration-explanation.js';
 import { registerArtifactSnapshotRoutes, type ArtifactSnapshotRouteOptions } from './artifact-snapshot-routes.js';
 import { registerPluginBusinessToolRoutes, type PluginBusinessToolRoutes } from './plugins/tool-routes.js';
@@ -13,6 +13,8 @@ import { registerRecoveryRoutes, type RecoveryRouteOptions } from './recovery-ro
 import { registerWorkspaceGroupRoutes, type WorkspaceGroupRouteOptions } from './workspace-group-routes.js';
 import { registerSessionNameRoutes, type SessionNameRouteOptions } from './session-name-routes.js';
 import { registerPlanRoutes, type PlanRouteOptions } from './plan-routes.js';
+import { registerInboxRoutes } from './inbox.js';
+import { listPendingLarkDecisionCards } from './lark/workflow-interactions.js';
 import { z, ZodError } from 'zod';
 import { registerCollaborationRoutes, type CollaborationRouteOptions } from './collaboration-routes.js';
 import { AgentGroupToolError } from './lark/agent-tools.js';
@@ -227,6 +229,24 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   if (options.ciHooks) await registerCiHookRoutes(app, options.ciHooks);
   if (options.plugins) await registerPluginRoutes(app, options.plugins);
   if (options.workItems) await registerWorkItemRoutes(app, options.workItems);
+  {
+    const store = options.plan?.store ?? options.lark?.config;
+    const workItems = options.workItems;
+    registerInboxRoutes(app, runtime, {
+      canView: canViewSession,
+      sources: {
+        runtime, store,
+        ...(options.relay?.broker ? { asks: (sessionId: string) => options.relay!.broker!.listPending(sessionId) } : {}),
+        ...(workItems ? { workItems: { list: (sessionId, actorId) => workItems.service.listBySession(sessionId, actorId), ...(workItems.interactions ? { requests: (sessionId, workId, actorId) => workItems.interactions!.list(sessionId, workId, actorId) } : {}) } } : {}),
+        ...(options.automation?.service.pullRequests ? { pullRequests: options.automation.service.pullRequests } : {}),
+        ...(store?.list ? { larkCards: () => listPendingLarkDecisionCards(store) } : {})
+      },
+      ...(workItems ? { workItemActor: async (request, sessionId) => {
+        const decision = await workItems.authorize(request, sessionId, 'task.view_result');
+        return decision && typeof decision === 'object' && decision.allowed && 'actorId' in decision ? decision.actorId : undefined;
+      } } : {})
+    });
+  }
   if (options.workItemTools) await registerWorkItemTools(app, options.workItemTools);
   if (options.agentRequests) await registerAgentRequestTools(app, options.agentRequests);
   if (options.memoryTools) await registerLarkMemoryTools(app, options.memoryTools);
@@ -563,9 +583,14 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     const decision = await requireSessionExecution(request, request.params.id, 'session', 'run.interrupt');
     return runtime.archive(request.params.id, decision?.source === 'owner' ? installationOwnerActor : undefined);
   });
-  app.post<{ Params: { id: string; permissionId: string }; Body: { approved: boolean } }>('/api/sessions/:id/permissions/:permissionId', async request => {
+  app.post<{ Params: { id: string; permissionId: string }; Body: { approved: boolean; reason?: string } }>('/api/sessions/:id/permissions/:permissionId', async request => {
     await requireSessionExecution(request, request.params.id, 'high_risk', 'high_risk.execute');
-    return runtime.resolvePermission(request.params.id, request.params.permissionId, request.body.approved);
+    const { approved, reason: rawReason } = request.body;
+    if (rawReason !== undefined && typeof rawReason !== 'string') throw new RuntimeError('INVALID_PERMISSION_REASON', 'reason must be a string', 400);
+    const reason = rawReason === undefined ? undefined : cleanPermissionRejectReason(rawReason);
+    if (reason && approved) throw new RuntimeError('INVALID_PERMISSION_REASON', 'reason is only allowed when the request is rejected', 400);
+    if (reason && reason.length > permissionRejectReasonMaxLength) throw new RuntimeError('INVALID_PERMISSION_REASON', `reason must not exceed ${permissionRejectReasonMaxLength} characters`, 400);
+    return runtime.resolvePermission(request.params.id, request.params.permissionId, approved, reason);
   });
   const parseEventCursor = (value: string | undefined, name: string) => {
     if (value === undefined) return undefined;

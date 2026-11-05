@@ -34,7 +34,7 @@ export type TimelineViewProps = {
   loadOlder?(): Promise<void>;
   eventsLoading: boolean;
   /** 不传时授权卡只显示状态、不给按钮（只读分享页） */
-  onResolvePermission?(permissionId: string, approved: boolean): void;
+  onResolvePermission?(permissionId: string, approved: boolean, reason?: string): void | Promise<unknown>;
   resolvingPermissionId?: string;
   timeline: TimelineEvent[];
   timelineSections: TimelineSection[];

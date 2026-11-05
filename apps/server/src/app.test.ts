@@ -309,6 +309,29 @@ describe('HTTP API boundary', () => {
     expect(runtime.dispatch).not.toHaveBeenCalled();
   });
 
+  it('validates the optional rejection reason of a permission decision before handing it to Runtime', async () => {
+    const runtime: any = { resolvePermission: vi.fn(async (_id: string, permissionId: string, approved: boolean, reason?: string) => ({ id: permissionId, status: approved ? 'approved' : 'rejected', ...(reason ? { reason } : {}) })) };
+    const app = await buildApp(runtime); apps.push(app);
+    const post = (payload: unknown) => app.inject({ method: 'POST', url: '/api/sessions/s1/permissions/p1', payload: payload as Record<string, unknown> });
+    // 批准不能带说明；超长、非字符串直接 400，Runtime 不会被调用。
+    expect(await post({ approved: true, reason: '不该有' })).toMatchObject({ statusCode: 400 });
+    expect(await post({ approved: false, reason: 'x'.repeat(2001) })).toMatchObject({ statusCode: 400 });
+    expect(await post({ approved: false, reason: 42 })).toMatchObject({ statusCode: 400 });
+    expect(runtime.resolvePermission).not.toHaveBeenCalled();
+    // 空白视为没有说明；批准加空白说明也只是普通批准。
+    expect((await post({ approved: false, reason: ' \n\t ' })).statusCode).toBe(200);
+    expect(runtime.resolvePermission).toHaveBeenLastCalledWith('s1', 'p1', false, undefined);
+    expect((await post({ approved: true, reason: '  ' })).statusCode).toBe(200);
+    expect(runtime.resolvePermission).toHaveBeenLastCalledWith('s1', 'p1', true, undefined);
+    expect((await post({ approved: false })).statusCode).toBe(200);
+    expect(runtime.resolvePermission).toHaveBeenLastCalledWith('s1', 'p1', false, undefined);
+    // 去首尾空白与控制字符（保留换行）；恰好 2000 字符可以通过。
+    expect(await post({ approved: false, reason: '  先别动\u0007配置\n改用 /tmp  ' })).toMatchObject({ statusCode: 200 });
+    expect(runtime.resolvePermission).toHaveBeenLastCalledWith('s1', 'p1', false, '先别动配置\n改用 /tmp');
+    expect((await post({ approved: false, reason: ` ${'x'.repeat(2000)} ` })).statusCode).toBe(200);
+    expect(runtime.resolvePermission).toHaveBeenLastCalledWith('s1', 'p1', false, 'x'.repeat(2000));
+  });
+
   it('replays missed SSE events after Last-Event-ID reconnect', async () => {
     const missed = { id: 'e2', sessionId: 's1', sequence: 2, type: 'text', timestamp: new Date().toISOString(), data: { text: 'replayed' } };
     const runtime: any = { listAgents: async () => [], listSessions: async () => [], getSession: async () => undefined, start: vi.fn(), send: vi.fn(), interrupt: vi.fn(), pause: vi.fn(), resume: vi.fn(), stop: vi.fn(), restart: vi.fn(), resolvePermission: vi.fn(), getEventWindow: vi.fn(async (_id: string, options: any) => options.afterSequence === 1 ? [missed] : []), subscribe: vi.fn(() => () => {}) };

@@ -20,6 +20,23 @@ const decisionPolicy = { approve: ['session', 'run.interrupt'], revise: ['sessio
 const decisionKey = (sessionId: string, taskId: string) => `plan.web.${sessionId}.${taskId}`;
 const decided = { approve: 'approved', revise: 'needs_changes', cancel: 'cancelled' } as const;
 
+type PlanTask = { id: string; prompt: string; status: string; createdAt: string; updatedAt: string };
+export type PlanState = { state: 'none' | 'planning' | 'pending' | 'approved' | 'needs_changes' | 'cancelled' | 'expired'; taskId?: string; expiresAt?: string; operable?: boolean };
+
+/** 会话里最近一份计划的状态。GET 接口与「待处理」汇总共用同一套判定。 */
+export async function readPlanState(store: ConfigRepository, current: { id: string; source?: string }, tasks: PlanTask[]): Promise<PlanState> {
+  const latest = tasks.reduce<PlanTask | undefined>((last, task) => !last || Date.parse(task.createdAt) >= Date.parse(last.createdAt) ? task : last, undefined);
+  if (!latest || planTaskOf(latest.prompt) === undefined) return { state: 'none' };
+  if (latest.status === 'queued' || latest.status === 'running') return { state: 'planning', taskId: latest.id };
+  if (latest.status !== 'completed') return { state: 'none' };
+  const raw = await store.get(decisionKey(current.id, latest.id));
+  const decision = raw ? JSON.parse(raw) as PlanDecision : undefined;
+  if (decision && decision.state !== 'resolving' && decision.state !== 'open') return { state: decision.state, taskId: latest.id };
+  const expiresAt = new Date(Date.parse(latest.updatedAt) + planDecisionWindowMs).toISOString();
+  if (Date.parse(expiresAt) <= Date.now()) return { state: 'expired', taskId: latest.id };
+  return { state: 'pending', taskId: latest.id, expiresAt, operable: current.source !== 'lark' };
+}
+
 /**
  * Web 上的先出计划：计划轮与飞书 /plan 同一套（请求原文带 /plan、任务以 deny-all 运行），
  * 批准、提修改意见、取消在会话页的计划卡上做。飞书会话从飞书 /plan 发起，Web 只展示计划，决定留在飞书计划卡上。
@@ -42,17 +59,7 @@ export function registerPlanRoutes(app: FastifyInstance, runtime: DutydeckRuntim
 
   app.get<{ Params: { id: string } }>('/api/sessions/:id/plan', async request => {
     await requireSessionExecution(request, request.params.id, 'session', 'task.view_result');
-    const current = await session(request.params.id);
-    const latest = await latestTask(request.params.id);
-    if (!latest || planTaskOf(latest.prompt) === undefined) return { state: 'none' };
-    if (latest.status === 'queued' || latest.status === 'running') return { state: 'planning', taskId: latest.id };
-    if (latest.status !== 'completed') return { state: 'none' };
-    const raw = await options.store.get(decisionKey(current.id, latest.id));
-    const decision = raw ? JSON.parse(raw) as PlanDecision : undefined;
-    if (decision && decision.state !== 'resolving' && decision.state !== 'open') return { state: decision.state, taskId: latest.id };
-    const expiresAt = new Date(Date.parse(latest.updatedAt) + planDecisionWindowMs).toISOString();
-    if (Date.parse(expiresAt) <= Date.now()) return { state: 'expired', taskId: latest.id };
-    return { state: 'pending', taskId: latest.id, expiresAt, operable: current.source !== 'lark' };
+    return readPlanState(options.store, await session(request.params.id), await runtime.getTasks(request.params.id));
   });
 
   app.post<{ Params: { id: string } }>('/api/sessions/:id/plan', async (request, reply) => {

@@ -216,7 +216,9 @@ describe('GitHub provider: pull request follow-up', () => {
     const pulls: Record<number, unknown> = {
       1: { number: 1, state: 'open', merged: false, merged_at: null, head: { sha: 'A'.repeat(40) } },
       2: { number: 2, state: 'closed', merged: true, merged_at: '2026-10-01T00:00:00Z', head: { sha: 'b'.repeat(40) } },
-      3: { number: 3, state: 'closed', merged: false, merged_at: null }
+      3: { number: 3, state: 'closed', merged: false, merged_at: null },
+      4: { number: 4, state: 'open', merged: false, title: 'Fix login', html_url: 'https://github.com/octo/repo/pull/4',
+        head: { sha: 'c'.repeat(40), ref: 'feature/login', repo: { full_name: 'fork/repo' } }, base: { ref: 'main' } }
     };
     const request = vi.fn(async (input: string | URL | Request) => {
       const match = /\/repos\/octo\/repo\/pulls\/(\d+)$/.exec(new URL(String(input)).pathname);
@@ -226,6 +228,7 @@ describe('GitHub provider: pull request follow-up', () => {
     await expect(provider.getPullRequest(repo, 1)).resolves.toEqual({ state: 'open', headSha: 'a'.repeat(40) });
     await expect(provider.getPullRequest(repo, 2)).resolves.toEqual({ state: 'merged', headSha: 'b'.repeat(40) });
     await expect(provider.getPullRequest(repo, 3)).resolves.toEqual({ state: 'closed' });
+    await expect(provider.getPullRequest(repo, 4)).resolves.toEqual({ state: 'open', headSha: 'c'.repeat(40), headBranch: 'feature/login', baseBranch: 'main', headRepository: 'fork/repo', title: 'Fix login', url: 'https://github.com/octo/repo/pull/4' });
     await expect(provider.getPullRequest(repo, 0)).rejects.toMatchObject({ code: 'GITHUB_PULL_REQUEST_INVALID' });
   });
 

@@ -121,6 +121,15 @@ dutydeck plugin uninstall <名字>
 - 去重 24 小时，重启后仍有效；去重键是 `dedupeKey` 渲染结果，没写就用整个请求体。`maxConcurrent` 默认 4，范围 1 到 32。
 - 模板里 `{{payload.a.b}}` 取请求体字段，`{{payload}}` 取整个请求体。进入 prompt 的每个取值都被当作**不可信数据**包裹（带随机边界，单个取值最多 2 万字符）。模板读不到鉴权头、`authorization` 和 `cookie`。
 - 任务结果以文本发回目标群，最多 8000 字符。
+- **启动工作项模板**：把 `prompt` 换成 `workTemplate`（两者只能写一个），触发时按已保存的工作项模板开一个工作项，而不是发一段提示词：
+
+  ```json
+  "workTemplate": { "session": "{{config.template_session}}", "id": "{{config.template_id}}", "version": 2, "goal": "处理告警：{{payload.title}}" }
+  ```
+
+  `session` 是保存模板的会话编号，`id` 与 `version` 见 `GET /api/sessions/<会话>/work-items` 返回的 `templates`（会话里的 Agent 也可用 `dutydeck work templates --turn "$TURN"`）；三者都可写 `{{config.<键>}}`，`version` 可写数字或解析为正整数的配置。模板只能在保存它的会话里启动，这个会话必须是 `target` 那个机器人在 `target.chatId` 里的飞书会话；`target.session` 不使用。工作项以安装者身份启动，是否要人工确认沿用模板启动的规则（飞书群里须在群内确认后才执行），结果按工作项自己的交付发回该会话的原话题。`goal` 和 `prompt` 一样渲染，外部取值同样包成不可信数据。
+  - 接受时返回 `202 {runId, sessionId, workItemId, awaitingConfirmation, statusUrl}`。模板或版本不存在、模板所在会话不存在或不属于目标群、作用域不允许、会话不可运行或交付位置无法确认时返回 `422 PLUGIN_TRIGGER_TEMPLATE_UNAVAILABLE`，`cause` 是原因代码（如 `WORK_TEMPLATE_NOT_FOUND`），不创建工作项，同时撤销去重记录，修好配置后可用同一事件重发。
+  - 运行状态跟随工作项：等确认为 `queued`，执行中或等待人工为 `running`，完成 `succeeded`，失败 `failed`，取消 `cancelled`，结果待核对为 `unknown`。等确认、执行中、等待人工和结果待核对的工作项都占 `maxConcurrent` 名额。`cancel` 只取消首次确认前、还没有任何步骤执行过的工作项；已开始的（包括正等人确认计划修订的）保持 `running`，到工作项里停止；失败但带待确认修订的工作项也按 `running` 计、继续占名额，失败后才收到修订的会在下一次触发时重新占回（限触发后 24 小时内的运行记录）。触发器启动的工作项不归属模板会话里此刻正在运行的那一轮，不沿用它的风险策略，也不计入它的用量。
 
 ```bash
 dutydeck plugin install examples/plugins/hello --yes
@@ -280,7 +289,7 @@ dutydeck plugin-tool call private-export/export-report --json '{"reportId":"week
 - `id`、`displayName`（必填，出现在卡片、提示词和 Web 上）、可选 `changeRequestLabel(n)`；
 - `matchRepository(remoteUrl)`：远端地址归自己就返回仓库（`{owner, name, slug}`），否则返回 `undefined`；
 - `getPipelineStatus(query)`（轮询用）、`getFailureLogs(repository, runId)`（补失败日志）；
-- 可选 PR 方法，`/pr` 和 Web「开 PR」会实际用到：`createPullRequest`（开 PR）、`listReviewComments`（读评审意见）、`postComment`（回复），以及 `getPullRequest(repository, number)`，返回 `{ state: 'open' | 'closed' | 'merged', headSha? }`，用来发现 PR 已合并或关闭。没实现 `getPullRequest` 的插件只能靠 webhook 的 merge_request 事件发现合并或关闭；两者都没有时，跟进会一直轮询，直到达到轮次上限或有人手动停止。`listReviewComments` 返回的每条 `CiReviewComment` 带 `trusted`、`isBot`、`authorAssociation`：**不给 `trusted: true` 的评论不会被自动处理**，只会发“需要你决定”卡片。github 插件的判定是 `author_association` 为 OWNER、MEMBER、COLLABORATOR 之一且不是 Bot 账号。`postComment` 返回的 `id` 要和 `listReviewComments` 里同一条评论的 `id` 写法一致，否则会把自己的回复当成新评论；
+- 可选 PR 方法，`/pr` 和 Web「开 PR」会实际用到：`createPullRequest`（开 PR）、`listReviewComments`（读评审意见）、`postComment`（回复），以及 `getPullRequest(repository, number)`，返回 `{ state: 'open' | 'closed' | 'merged', headSha?, headBranch?, baseBranch?, headRepository?, title?, url? }`，用来发现 PR 已合并或关闭。同时给出 `headBranch` 和 `headRepository` 的插件才支持 `/pr follow` 认领已有 PR；`headRepository` 与工作区仓库不一致时按来自 fork 拒绝认领，没给时无法排除 fork，也拒绝认领。没实现 `getPullRequest` 的插件只能靠 webhook 的 merge_request 事件发现合并或关闭；两者都没有时，跟进会一直轮询，直到达到轮次上限或有人手动停止。`listReviewComments` 返回的每条 `CiReviewComment` 带 `trusted`、`isBot`、`authorAssociation`：**不给 `trusted: true` 的评论不会被自动处理**，只会发“需要你决定”卡片。github 插件的判定是 `author_association` 为 OWNER、MEMBER、COLLABORATOR 之一且不是 Bot 账号。`postComment` 返回的 `id` 要和 `listReviewComments` 里同一条评论的 `id` 写法一致，否则会把自己的回复当成新评论；
 - 可选 `webhook: { verify(req), parse(req) }`：`verify` 可返回 `signedAt`（宿主据此做 5 分钟重放窗口）；`parse` 返回统一的 `CiWebhookEvent`，请求体有问题时抛出 `statusCode: 400`。事件里 `timeIsAdvisory: true` 表示 `occurredAt` 只用于排序，不做重放窗口检查。缺哪个可选方法，对应能力就不可用。
 
 仓库自带两个 CI 插件（从源码检出目录安装；npm 发布包里不带它们）：

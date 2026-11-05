@@ -121,8 +121,8 @@ const operations: Record<string, Operation> = {
   'session.new': action('session.new', (_args, o) => ({ agent: o.agent, model: o.model, effort: o.effort, cwd: o.cwd, workspace: o.workspace, handoff: o.handoff, note: o.note, task: o.task })),
   retry: action('retry'),
   plan: action('plan', (_args, o) => ({ task: o.task })),
-  'schedule.create': { risk: 'write-confirm', serverDryRun: true, request: (_args, o) => ({ method: 'POST', path: '/schedules', body: { prompt: o.prompt, name: o.name, every: o.every, cron: o.cron, at: o.at, mode: o.mode, ...(o.additional ? { additional: true } : {}) } }) },
-  'schedule.update': { risk: 'write-confirm', serverDryRun: true, request: ([id], o) => ({ method: 'PATCH', path: `/schedules/${encodeURIComponent(id!)}`, body: { prompt: o.prompt, name: o.name, every: o.every, cron: o.cron, at: o.at, mode: o.mode } }) },
+  'schedule.create': { risk: 'write-confirm', serverDryRun: true, request: (_args, o) => ({ method: 'POST', path: '/schedules', body: { prompt: o.prompt, name: o.name, every: o.every, cron: o.cron, at: o.at, mode: o.mode, until: o.until, deadline: o.deadline, ...(o.additional ? { additional: true } : {}) } }) },
+  'schedule.update': { risk: 'write-confirm', serverDryRun: true, request: ([id], o) => ({ method: 'PATCH', path: `/schedules/${encodeURIComponent(id!)}`, body: { prompt: o.prompt, name: o.name, every: o.every, cron: o.cron, at: o.at, mode: o.mode, until: o.until, deadline: o.deadline } }) },
   'schedule.stop-self': write('POST', () => '/schedules/stop-self', () => ({})),
   'schedule.enable': action('schedule.enable', ([scheduleId]) => ({ id: scheduleId })),
   'schedule.disable': action('schedule.disable', ([scheduleId]) => ({ id: scheduleId })),
@@ -162,6 +162,7 @@ const operations: Record<string, Operation> = {
   'work.show': read(([goalId]) => `/work-items/${id(goalId)}`),
   'work.create': workFile('/work-items'),
   'work.delegate': workFile('/work-items/delegations'),
+  'work.revise': { risk: 'write', serverDryRun: true, request: async ([goalId], options) => ({ method: 'POST', path: `/work-items/${id(goalId)}/revise`, body: await jsonInput({ file: options.file }, true) }) },
   'work.save': write('POST', ([goalId]) => `/work-items/${id(goalId)}/template`, ([, name]) => ({ name })),
   'work.run': write('POST', ([template]) => `/work-items/templates/${id(template)}/run`, ([, version, goal], o) => ({ version, goal, idempotencyKey: o.key })),
   'collaborate.status': read(() => '/collaboration'),
@@ -270,14 +271,16 @@ export function addAgentCommands(program: Command, run: AgentCliRunner) {
   const schedule = group(agent, 'schedule', 'Create, enable or disable schedules of this conversation');
   sub(schedule, 'create', 'Set up a schedule for the requester; it is created disabled and starts after they click 启用 on the card', 'schedule.create', 'write-confirm',
     ["schedule create --every 15 --prompt '看看这个话题有没有排查结论'", "schedule create --cron '0 9 * * 1-5' --prompt '汇总昨天的告警' --name 晨报", "schedule create --at 2026-10-17T10:00 --prompt '提醒我看发布结果'"],
-    '时间按北京时间；--every、--cron、--at 只选一个。--prompt 只写每次要做的事，不写频率。修改已有计划先用 schedules 查编号，再用 schedule update <编号>；启停用 schedule enable/disable <编号>。同事项已有生效循环计划时，确需再建才加 --additional。循环任务默认每次在新会话里执行；只有用户明确要求接着上次的对话做时才加 --mode session。需要试跑就在本轮直接执行一次，不要建“测试任务”。不要用 crontab、后台 sleep 或循环脚本代替。')
+    '时间按北京时间；--every、--cron、--at 只选一个。--prompt 只写每次要做的事，不写频率。修改已有计划先用 schedules 查编号，再用 schedule update <编号>；启停用 schedule enable/disable <编号>。同事项已有生效循环计划时，确需再建才加 --additional。循环任务默认每次在新会话里执行；只有用户明确要求接着上次的对话做时才加 --mode session。用户要求一直跟进、直到某件事办完时，用 --until 写完成条件（有期限再加 --deadline），不要把停止条件只写进 --prompt。需要试跑就在本轮直接执行一次，不要建“测试任务”。不要用 crontab、后台 sleep 或循环脚本代替。')
     .option('--additional', '确需在本事项另建一个循环计划')
     .requiredOption('--prompt <text>', 'Complete instructions to execute each time')
     .option('--name <name>', '计划名称；修改已有计划请用 schedule update <编号>')
     .option('--every <minutes>', 'Fixed interval in whole minutes', integer(1, 525_600))
     .option('--cron <expression>', 'Five-field cron expression, Asia/Shanghai time')
     .option('--at <local-time>', 'Run once at YYYY-MM-DDTHH:mm, Asia/Shanghai time')
-    .addOption(new Option('--mode <mode>', 'fresh (default for --every/--cron): run each time in a new conversation without this conversation\'s history; session (default for --at): run in this conversation with its history, only when the user asks to continue from the previous conversation').choices(['session', 'fresh']));
+    .addOption(new Option('--mode <mode>', 'fresh (default for --every/--cron): run each time in a new conversation without this conversation\'s history; session (default for --at): run in this conversation with its history, only when the user asks to continue from the previous conversation').choices(['session', 'fresh']))
+    .option('--until <condition>', '用户说「一直跟进直到…」时写完成条件；每次运行核对，达成后用 schedule stop-self 停用（仅循环计划）')
+    .option('--deadline <local-time>', '到这个北京时间（YYYY-MM-DDTHH:mm）仍未确认完成就自动停用并告知');
   sub(schedule, 'update', '修改已有计划并保留编号；更新后需用户确认启用', 'schedule.update', 'write-confirm', ["schedule update <编号> --every 30", "schedule update <编号> --prompt '汇总新的内容'"])
     .argument('<id>', 'schedules 显示的计划编号')
     .option('--prompt <text>', '每次触发时执行的指令')
@@ -285,7 +288,9 @@ export function addAgentCommands(program: Command, run: AgentCliRunner) {
     .option('--every <minutes>', '执行间隔，按整分钟填写', integer(1, 525_600))
     .option('--cron <expression>', '五段 Cron 表达式，按北京时间')
     .option('--at <local-time>', '仅执行一次的北京时间，格式 YYYY-MM-DDTHH:mm')
-    .addOption(new Option('--mode <mode>', 'session 沿用会话；fresh 每次新会话').choices(['session', 'fresh']));
+    .addOption(new Option('--mode <mode>', 'session 沿用会话；fresh 每次新会话').choices(['session', 'fresh']))
+    .option('--until <condition>', '完成条件；每次运行核对，达成后用 schedule stop-self 停用')
+    .option('--deadline <local-time>', '截止的北京时间 YYYY-MM-DDTHH:mm；到点仍未确认完成就自动停用');
   sub(schedule, 'stop-self', 'Request disabling this scheduled task after its successful result is delivered', 'schedule.stop-self', 'write', ['schedule stop-self']);
   sub(schedule, 'enable', 'Enable a schedule', 'schedule.enable', 'write-confirm', ['schedule enable <编号>']).argument('<id>', 'Schedule id shown by schedules');
   sub(schedule, 'disable', 'Disable a schedule', 'schedule.disable', 'write-confirm', ['schedule disable <编号>']).argument('<id>', 'Schedule id shown by schedules');
@@ -397,6 +402,8 @@ export function addAgentCommands(program: Command, run: AgentCliRunner) {
     .requiredOption('--file <path>', 'JSON plan with goal and a stable idempotencyKey');
   sub(work, 'delegate', 'Hand a brief to the Leader (layered mode)', 'work.delegate', 'write', ['work delegate --file brief.json'])
     .requiredOption('--file <path>', 'JSON brief with goal, context and a stable idempotencyKey');
+  sub(work, 'revise', 'Revise the plan of an unfinished goal; --dry-run previews the impact', 'work.revise', 'write', ['work revise <目标编号> --file revision.json --dry-run', 'work revise <目标编号> --file revision.json'])
+    .argument('<id>', 'Goal id').requiredOption('--file <path>', 'JSON with expectedRevision, the complete new plan and an optional reason');
   sub(work, 'save', 'Save a goal as an immutable template version', 'work.save', 'write', ['work save <目标编号> <流程名称>']).argument('<id>', 'Goal id').argument('<name>', 'Template name');
   sub(work, 'run', 'Run a template version for a new goal', 'work.run', 'write', ['work run <模板编号> 1 <新目标> --key <稳定请求键>'])
     .argument('<template>', 'Template id').argument('<version>', 'Template version', integer(1)).argument('<goal>', 'New goal')

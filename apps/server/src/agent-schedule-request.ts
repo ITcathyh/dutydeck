@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import { RuntimeError, createSessionScheduleInputSchema, describeScheduleTrigger, previewSessionSchedule, type PublicSessionSchedule } from '@dutydeck/shared';
+import { RuntimeError, createSessionScheduleInputSchema, describeScheduleTrigger, previewSessionSchedule, resolveScheduleDeadline, type PublicSessionSchedule } from '@dutydeck/shared';
 import { AgentCommandParamError, agentParamIssues } from './lark/agent-command.js';
 import type { SessionAutomationService } from './session-automation.js';
 
@@ -13,6 +13,9 @@ const requestSchema = z.object({
   at: z.string().trim().min(1).optional(),
   /** fresh：每次在新会话里执行，不带本对话历史；session：接着本对话做。不填时新建的循环计划用 fresh，一次性（--at）沿用本对话；更新同名计划时不改它的模式。 */
   mode: z.enum(['session', 'fresh']).optional(),
+  /** 「一直跟进直到…」的完成条件，和截止的北京时间。 */
+  until: z.string().trim().min(1).max(2_000).optional(),
+  deadline: z.string().trim().min(1).optional(),
   dryRun: z.boolean().optional()
 }).strict().refine(input => [input.every, input.cron, input.at].filter(value => value !== undefined).length === 1, { message: '--every、--cron、--at 只选一个', path: ['trigger'] });
 const scheduleParam = (key: string) => key === 'trigger' ? '--every/--cron/--at' : `--${key}`;
@@ -30,12 +33,14 @@ export function parseAgentScheduleRequest(raw: unknown) {
   let next: ReturnType<typeof previewSessionSchedule>;
   try {
     input = createSessionScheduleInputSchema.parse({ ...(body.additional ? { additional: true } : {}), name: body.name ?? body.prompt.slice(0, 100), prompt: body.prompt, trigger,
-      timezone: 'Asia/Shanghai', dstPolicy: { gap: 'skip', overlap: 'first' }, condition: { kind: 'always' }, ...(body.mode ? { mode: body.mode } : {}) });
+      timezone: 'Asia/Shanghai', dstPolicy: { gap: 'skip', overlap: 'first' }, condition: { kind: 'always' }, ...(body.mode ? { mode: body.mode } : {}),
+      ...(body.until ? { completionCondition: body.until } : {}), ...(body.deadline ? { deadlineAt: resolveScheduleDeadline(body.deadline, 'Asia/Shanghai') } : {}) });
     next = previewSessionSchedule({ id: 'preview', ...input }, new Date());
   }
   catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new AgentCommandParamError('SCHEDULE_REQUEST_INVALID', message, [{ name: scheduleParam(body.every !== undefined ? 'every' : body.cron !== undefined ? 'cron' : 'at'), reason: message }]);
+    const param = /deadline/i.test(message) ? '--deadline' : scheduleParam(body.every !== undefined ? 'every' : body.cron !== undefined ? 'cron' : 'at');
+    throw new AgentCommandParamError('SCHEDULE_REQUEST_INVALID', message, [{ name: param, reason: message }]);
   }
   return { body, dryRun, input, next };
 }
@@ -59,7 +64,7 @@ export async function runAgentScheduleRequest(options: {
     if (active.length) throw new RuntimeError('MATTER_SCHEDULE_EXISTS', `本事项已有生效的循环计划：${active.map(schedule => `${schedule.name}（${schedule.id}）`).join('、')}。修改请用 schedule update <编号>；确需再建请加 --additional。`, 409);
   }
   if (dryRun) return { dryRun: true, needsConfirmation: true, schedule: { name: input.name, prompt: input.prompt, when: describeScheduleTrigger(input.trigger, input.timezone), timezone: input.timezone, ...(next ? { nextRunAt: next.localLabel } : {}) },
-    confirmCard: { title: '定时任务', body: `**做什么**：${input.prompt}\n**什么时候**：${describeScheduleTrigger(input.trigger, input.timezone)}\n点「启用」后开始，不点不会执行。` },
+    confirmCard: { title: '定时任务', body: `**做什么**：${input.prompt}\n**什么时候**：${describeScheduleTrigger(input.trigger, input.timezone)}\n${input.completionCondition ? `**直到**：${input.completionCondition}\n` : ''}${input.deadlineAt ? `**截止**：${new Date(input.deadlineAt).toLocaleString('zh-CN', { timeZone: input.timezone, hour12: false })}\n` : ''}点「启用」后开始，不点不会执行。` },
     effect: `在本轮请求消息下发启用卡；计划先建成停用状态，用户点「启用」后才开始，结果发回当前对话。修改已有计划请用 schedule update <编号>；生效循环计划不会被创建请求改动，已停用同名计划保留兼容更新。${(input.mode ?? newMode) === 'fresh' ? '每次在新会话里执行，不带本对话历史。' : ''}` };
   // 同一条消息里同样的请求重试时拿回同一个计划，不会再建一个、再发一张卡；已停用同名计划保留兼容更新。
   const { schedule, updated } = await options.automation.requestSchedule(sessionId, input, actorId, {

@@ -12,6 +12,7 @@ import {
   scheduleTriggerSchema,
   type ScheduleDefinition
 } from './schedule-foundation.js';
+import { resolveScheduleDeadline } from './session-automation.js';
 
 const timestamp = '2026-01-01T00:00:00.000Z';
 const base = (trigger: ScheduleDefinition['trigger'], overrides: Partial<ScheduleDefinition> = {}): ScheduleDefinition => scheduleDefinitionSchema.parse({
@@ -167,4 +168,17 @@ it.each(['0/5/2 * * * *', '1-2-3 * * * *', '0,,5 * * * *', ',1 * * * *', '1, * *
 });
 it.each(['*/5 * * * *', '1-20/3 * * * *', '0,5,10 * * * *', '0 9 * * 1-5'])('preserves valid cron syntax %s', expression => {
   expect(scheduleTriggerSchema.safeParse({ kind: 'cron', expression }).success).toBe(true);
+});
+
+describe('resolveScheduleDeadline', () => {
+  it('keeps explicit offsets and reads local times in the schedule timezone', () => {
+    expect(resolveScheduleDeadline('2026-12-01T18:00:00+08:00', 'UTC')).toBe('2026-12-01T10:00:00.000Z');
+    expect(resolveScheduleDeadline('2026-12-01T10:00:00Z', 'Asia/Shanghai')).toBe('2026-12-01T10:00:00.000Z');
+    expect(resolveScheduleDeadline('2026-12-01T18:00', 'Asia/Shanghai')).toBe('2026-12-01T10:00:00.000Z');
+    // 夏令时跳过的当地时刻顺延到存在的时间。
+    expect(resolveScheduleDeadline('2026-03-08T02:30', 'America/New_York')).toBe('2026-03-08T07:00:00.000Z');
+  });
+  it.each(['soon', '2026-02-30T10:00', '2026-12-01', '2026-12-01T25:00'])('rejects %s', value => {
+    expect(() => resolveScheduleDeadline(value, 'Asia/Shanghai')).toThrow();
+  });
 });

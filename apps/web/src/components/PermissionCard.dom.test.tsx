@@ -81,3 +81,54 @@ it('立即失败的异步请求释放本地锁，且不生成成功回执', asyn
   expect(onResolve).toHaveBeenCalledTimes(2);
   expect(screen.queryByText('已允许')).toBeNull();
 });
+
+describe('拒绝并说明', () => {
+  it('展开输入框，空白不能提交，提交时把原因交给 onResolve 且之后不能重复提交', async () => {
+    const user = userEvent.setup(); const onResolve = vi.fn();
+    render(<PermissionCard event={permission('pending')} onResolve={onResolve}/>);
+    expect(screen.queryByLabelText('拒绝原因')).toBeNull();
+    await user.click(screen.getByRole('button', { name: '拒绝并说明' }));
+    const submit = screen.getByRole('button', { name: '提交拒绝' }) as HTMLButtonElement;
+    expect(submit.disabled).toBe(true);
+    await user.type(screen.getByLabelText('拒绝原因'), '   ');
+    expect(submit.disabled).toBe(true);
+    await user.type(screen.getByLabelText('拒绝原因'), '改用测试库');
+    await user.click(submit);
+    await user.click(screen.getByRole('button', { name: '提交拒绝' }));
+    expect(onResolve).toHaveBeenCalledExactlyOnceWith('permission-1', false, '改用测试库');
+  });
+
+  it('原「拒绝」仍一键提交且不带原因，展开输入框不影响它', async () => {
+    const user = userEvent.setup(); const onResolve = vi.fn();
+    render(<PermissionCard event={permission('pending')} onResolve={onResolve}/>);
+    await user.click(screen.getByRole('button', { name: '拒绝并说明' }));
+    await user.type(screen.getByLabelText('拒绝原因'), '不应带上');
+    await user.click(screen.getByRole('button', { name: '拒绝' }));
+    expect(onResolve).toHaveBeenCalledExactlyOnceWith('permission-1', false);
+  });
+
+  it('提交失败后保留输入，可再次提交', async () => {
+    const user = userEvent.setup(); const onResolve = vi.fn().mockRejectedValueOnce(new Error('网络失败')).mockResolvedValue(undefined);
+    render(<PermissionCard event={permission('pending')} onResolve={onResolve}/>);
+    await user.click(screen.getByRole('button', { name: '拒绝并说明' }));
+    await user.type(screen.getByLabelText('拒绝原因'), '先别动');
+    await user.click(screen.getByRole('button', { name: '提交拒绝' }));
+    await waitFor(() => expect((screen.getByRole('button', { name: '提交拒绝' }) as HTMLButtonElement).disabled).toBe(false));
+    expect((screen.getByLabelText('拒绝原因') as HTMLTextAreaElement).value).toBe('先别动');
+    await user.click(screen.getByRole('button', { name: '提交拒绝' }));
+    expect(onResolve).toHaveBeenCalledTimes(2);
+  });
+
+  it('已拒绝的审批显示脱敏、截断后的原因；没有原因时仍只显示「已拒绝」', () => {
+    const rejected = permission('rejected');
+    const view = render(<PermissionCard event={rejected}/>);
+    expect(view.container.textContent).toContain('已拒绝');
+    expect(view.container.textContent).not.toContain('已拒绝：');
+    rejected.data.reason = `改用测试库 password=hunter2 ${'长'.repeat(400)}`;
+    view.rerender(<PermissionCard event={rejected}/>);
+    expect(view.container.textContent).toContain('已拒绝：改用测试库 password=[REDACTED]');
+    expect(view.container.textContent).not.toContain('hunter2');
+    expect(view.container.textContent!.length).toBeLessThan(600);
+    expect(screen.queryByRole('button')).toBeNull();
+  });
+});

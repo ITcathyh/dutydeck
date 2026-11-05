@@ -36,6 +36,17 @@ function mount(list: { available: boolean; hint?: string; items: PublicPullReque
 const writes = (requests: Array<{ method: string; url: string; body?: string }>) => requests.filter(item => item.method === 'POST').map(item => [item.url, item.body]);
 
 describe('开 PR 面板', () => {
+  it('填链接点「跟进」认领已有的 PR，不弹确认框；认领的记录标为已有 PR', async () => {
+    const requests = mount({ available: true, items: [{ ...proposal, id: 'pr_9', status: 'open', claimed: true, title: 'Login fix', branch: 'feature/login' }] });
+    const user = userEvent.setup();
+    expect(await screen.findByText('跟进中 · 已有 PR · Login fix')).toBeTruthy();
+    expect((screen.getByRole('button', { name: '跟进' }) as HTMLButtonElement).disabled).toBe(true);
+    await user.type(screen.getByLabelText('跟进已有的 PR'), 'https://github.com/acme/app/pull/12');
+    await user.click(screen.getByRole('button', { name: '跟进' }));
+    await waitFor(() => expect(writes(requests)).toEqual([['/api/sessions/s1/pull-requests/follow', JSON.stringify({ pullRequest: 'https://github.com/acme/app/pull/12' })]]));
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+  });
+
   it('点「开 PR」只生成确认清单；确认框列出文件、不包含的文件、分支、标题和正文摘要，点确认才发推送请求', async () => {
     const requests = mount({ available: true, items: [] });
     const user = userEvent.setup();

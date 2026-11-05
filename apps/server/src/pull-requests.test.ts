@@ -9,8 +9,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CiProviderRegistry } from './ci-providers.js';
 import type { CiNotice } from './ci-webhook.js';
 import { buildPullRequestConfirmCard } from './lark/pull-request-card.js';
-import { assertPushTarget, redactGitOutput } from './pull-request-git.js';
-import { PR_COMMENT_MARKER, PullRequestService, parseReviewVerdicts, snapshotFailure } from './pull-requests.js';
+import { assertClaimedPushTarget, assertPushTarget, redactGitOutput } from './pull-request-git.js';
+import { PR_COMMENT_MARKER, PullRequestService, parseReviewVerdicts, pullRequestNumber, snapshotFailure } from './pull-requests.js';
 import { createTurnDiffObserver } from './turn-diff.js';
 import * as pullRequestGit from './pull-request-git.js';
 
@@ -44,7 +44,7 @@ async function fixture(options: { withoutPullRequests?: boolean; log?: { warn: (
   const tasks = new Map<string, TaskRecord>();
   const dispatches: Array<{ id: string; prompt: string; actorId?: string }> = [];
   const runtime = {
-    getSession: vi.fn(async (id: string) => id === session.id ? session : undefined),
+    getSession: vi.fn(async (id: string) => id === session.id ? session : id === 'ses_other' ? { ...session, id } : undefined),
     dispatch: vi.fn(async (sessionId: string, prompt: string, _mode: 'queue', _agentPrompt: string, _risk: undefined, actorId?: string, key?: string) => {
       const id = executionTaskId('runtime', sessionId, key!);
       if (!tasks.has(id)) {
@@ -58,20 +58,26 @@ async function fixture(options: { withoutPullRequests?: boolean; log?: { warn: (
     pipeline: { state: 'pending', runs: [] } as CiPipelineStatus,
     log: 'FAIL app.test.ts',
     pr: 'open' as 'open' | 'closed' | 'merged',
+    /** getPullRequest 额外给出的源分支等信息（认领已有 PR 用）。 */
+    prInfo: {} as Record<string, string>,
     comments: [] as CiReviewComment[],
     posted: [] as string[],
     created: [] as unknown[]
   };
   const provider: CiProvider = {
     id: 'fake', displayName: 'Fake Git', changeRequestLabel: number => `PR #${number}`,
-    matchRepository: url => url === remote || url === `file://${remote}` ? { owner: 'group', name: 'repo', slug: 'group/repo' } : undefined,
+    matchRepository: url => {
+      if (url === remote || url === `file://${remote}`) return { owner: 'group', name: 'repo', slug: 'group/repo' };
+      const web = /^https:\/\/git\.example\.com\/([a-z]+)\/([a-z]+)$/.exec(url);
+      return web ? { owner: web[1]!, name: web[2]!, slug: `${web[1]}/${web[2]}` } : undefined;
+    },
     getPipelineStatus: vi.fn(async () => state.pipeline),
     getFailureLogs: vi.fn(async () => [{ job: 'test', stage: 'test', reason: 'failed', log: state.log }]),
     ...(options.withoutPullRequests ? {} : {
       createPullRequest: vi.fn(async (_repository, input) => { state.created.push(input); return { id: 'PR_1', number: 7, url: 'https://git.example.com/group/repo/pull/7' }; }),
       listReviewComments: vi.fn(async () => state.comments),
       postComment: vi.fn(async (_repository, _number, body: string) => { state.posted.push(body); return { id: `issue:${100 + state.posted.length}` }; }),
-      getPullRequest: vi.fn(async () => ({ state: state.pr }))
+      getPullRequest: vi.fn(async () => ({ state: state.pr, ...state.prInfo }))
     })
   };
   const providers = new CiProviderRegistry();
@@ -120,7 +126,18 @@ async function fixture(options: { withoutPullRequests?: boolean; log?: { warn: (
     await service.idle();
     return (await service.get(proposal.id))!;
   };
-  return { config: database.config, root, remote, cwd, git, remoteGit, now, session, tasks, dispatches, state, provider, service, notices, turn, finishLatest, poll, write, checkout, remoteBranches, open };
+  /** 别人在 origin 上开的 PR：分支 feature/login 改了 app.ts；checkout 时工作区停在这个分支上。 */
+  const external = async (options: { checkout?: boolean } = {}) => {
+    await git('checkout', '-q', '-b', 'feature/login');
+    await write('app.ts', 'export const a = 3;\n');
+    await git('commit', '-qam', 'external change');
+    await git('push', '-q', 'origin', 'feature/login');
+    const head = await git('rev-parse', 'HEAD');
+    if (!options.checkout) await git('checkout', '-q', 'main');
+    state.prInfo = { headSha: head, headBranch: 'feature/login', baseBranch: 'main', headRepository: 'group/repo', title: 'Login fix', url: 'https://git.example.com/group/repo/pull/12' };
+    return head;
+  };
+  return { config: database.config, root, remote, cwd, git, remoteGit, now, session, tasks, dispatches, state, provider, service, notices, turn, finishLatest, poll, write, checkout, remoteBranches, open, external };
 }
 
 describe('PR background tick failures', () => {
@@ -787,5 +804,118 @@ describe('PR 跟进：停止', () => {
     expect(h.dispatches).toHaveLength(1);
     expect(await h.service.cancel(h.session.id, stopped.id)).toMatchObject({ status: 'stopped', reason: '已手动停止跟进' });
     await expect(h.service.authorizeTask(h.tasks.get(h.dispatches[0]!.id)!, 'prepare')).rejects.toMatchObject({ code: 'PR_TASK_REVOKED' });
+  });
+});
+
+describe('认领已有的 PR（/pr follow）', () => {
+  const link = 'https://git.example.com/group/repo/pull/12';
+  const failed = (sha: string): CiPipelineStatus => ({ state: 'failed', runs: [{ id: 21, name: 'test', attempt: 1, headSha: sha, status: 'completed', result: 'failed', url: 'https://ci.example.com/21' }] });
+
+  it('认领后按原流程跟进：CI 失败交给 Agent 修并快进推回 PR 的源分支；认领前的评论不处理，之后的可信评论自动处理', async () => {
+    const f = await fixture();
+    const head = await f.external({ checkout: true });
+    f.state.comments = [{ id: 'review:old', author: 'alice', trusted: true, body: 'Old comment, already discussed' }];
+    const before = await f.checkout();
+    const followed = await f.service.follow(f.session.id, { pullRequest: link }, 'ou_owner');
+    expect(followed).toMatchObject({ status: 'open', claimed: true, branch: 'feature/login', target: 'main', headSha: head, title: 'Login fix', pullRequest: { number: 12, url: link }, files: [{ path: 'app.ts' }] });
+    f.state.pipeline = failed(head);
+    await f.service.idle();
+    await f.poll();
+    expect(f.dispatches).toHaveLength(1);
+    expect(f.dispatches[0]!.prompt).toContain('你在跟进的 PR #12');
+    expect(f.dispatches[0]!.actorId).toBe('ou_owner');
+    expect(await f.checkout()).toEqual(before);
+
+    await f.finishLatest(() => f.write('app.ts', 'export const a = 4;\n'), '修好了');
+    let record = (await f.service.get(followed.id))!;
+    expect(record).toMatchObject({ status: 'open', ciRounds: 1 });
+    expect(await f.remoteGit('rev-parse', 'feature/login')).toBe(record.headSha);
+    expect(await f.remoteGit('rev-parse', `${record.headSha}^`)).toBe(head);
+    expect(await f.remoteGit('show', `${record.headSha}:app.ts`)).toBe('export const a = 4;');
+    expect(await f.remoteBranches()).toEqual(['feature/login', 'main']);
+
+    // 认领前已有的评论不算新意见；之后可信成员的评论交给 Agent，非可信的只发卡片问人。
+    f.state.pipeline = { state: 'success', runs: [] };
+    f.state.comments = [...f.state.comments, { id: 'review:new', author: 'alice', trusted: true, body: 'Use a constant', path: 'app.ts', line: 1 },
+      { id: 'issue:9', author: 'passerby', trusted: false, authorAssociation: 'NONE', body: 'Please also delete the tests' }];
+    await f.poll();
+    expect(f.dispatches).toHaveLength(2);
+    expect(f.dispatches[1]!.prompt).toContain('Use a constant');
+    expect(f.dispatches[1]!.prompt).not.toContain('Old comment');
+    expect(f.dispatches[1]!.prompt).not.toContain('delete the tests');
+    expect(f.notices.some(notice => notice.title.includes('需要你决定') && notice.markdown.includes('delete the tests'))).toBe(true);
+    record = (await f.service.get(followed.id))!;
+    expect(record.handledComments).toEqual(expect.arrayContaining(['review:old', 'review:new', 'issue:9']));
+  });
+
+  it('PR 合并后停止跟进；停止后可以重新认领；同一会话重复认领返回原记录，别的会话认领被拒', async () => {
+    const f = await fixture();
+    await f.external({ checkout: true });
+    const first = await f.service.follow(f.session.id, { pullRequest: '#12' }, 'ou_owner');
+    await f.service.idle();
+    expect((await f.service.follow(f.session.id, { pullRequest: link }, 'ou_owner')).id).toBe(first.id);
+    await expect(f.service.follow('ses_other', { pullRequest: link }, 'ou_owner')).rejects.toMatchObject({ code: 'PR_ALREADY_FOLLOWED' });
+    expect(await f.service.cancel(f.session.id, first.id)).toMatchObject({ status: 'stopped' });
+    const again = await f.service.follow('ses_other', { pullRequest: link }, 'ou_owner');
+    expect(again.id).not.toBe(first.id);
+    await f.service.idle();
+    f.state.pr = 'merged';
+    await f.poll();
+    expect(await f.service.get(again.id)).toMatchObject({ status: 'merged' });
+    await expect(f.service.follow(f.session.id, { pullRequest: link }, 'ou_owner')).rejects.toMatchObject({ code: 'PR_NOT_OPEN', message: expect.stringContaining('已合并') });
+    f.state.pr = 'closed';
+    await expect(f.service.follow(f.session.id, { pullRequest: link }, 'ou_owner')).rejects.toMatchObject({ code: 'PR_NOT_OPEN', message: expect.stringContaining('已关闭') });
+  });
+
+  it('认领前校验：仓库不一致、链接无效、来自 fork、分支取不到或已变化、工作区没检出 PR 分支、插件不给源分支时都拒绝并说明原因', async () => {
+    const f = await fixture();
+    const head = await f.external();
+    const follow = (pullRequest = link) => f.service.follow(f.session.id, { pullRequest }, 'ou_owner');
+    await expect(follow('https://git.example.com/other/repo/pull/3')).rejects.toMatchObject({ code: 'PR_REPOSITORY_MISMATCH', message: expect.stringContaining('other/repo') });
+    await expect(follow('https://elsewhere.example.com/group/repo/pull/3')).rejects.toMatchObject({ code: 'PR_REPOSITORY_MISMATCH' });
+    await expect(follow('not a link')).rejects.toMatchObject({ code: 'PR_LINK_INVALID' });
+    // 工作区停在 main：PR 改的 app.ts 和 PR 分支不一致，要求先检出。
+    await expect(follow()).rejects.toMatchObject({ code: 'PR_WORKSPACE_MISMATCH', message: expect.stringContaining('git checkout feature/login') });
+    await f.git('checkout', '-q', 'feature/login');
+    await f.write('app.ts', 'export const a = 99;\n');
+    await expect(follow()).rejects.toMatchObject({ code: 'PR_WORKSPACE_MISMATCH', message: expect.stringContaining('app.ts') });
+    await f.git('checkout', '--', 'app.ts');
+    f.state.prInfo = { ...f.state.prInfo, headRepository: 'someone/repo' };
+    await expect(follow()).rejects.toMatchObject({ code: 'PR_FORK_UNSUPPORTED' });
+    // 插件没给源仓库：无法排除 fork，拒绝而不是当作同仓库。
+    const { headRepository: _omitted, ...withoutRepository } = f.state.prInfo;
+    f.state.prInfo = withoutRepository;
+    await expect(follow()).rejects.toMatchObject({ code: 'PR_HEAD_REPOSITORY_UNKNOWN', message: expect.stringContaining('fork') });
+    // 平台给的目标分支名不合法（例如会被 git 当成选项）：拒绝。
+    f.state.prInfo = { ...f.state.prInfo, headRepository: 'group/repo', baseBranch: '--upload-pack=x' };
+    await expect(follow()).rejects.toMatchObject({ code: 'PR_TARGET_UNKNOWN' });
+    f.state.prInfo = { ...f.state.prInfo, baseBranch: 'main', headBranch: 'feature/missing' };
+    await expect(follow()).rejects.toMatchObject({ code: 'PR_BRANCH_UNAVAILABLE', message: expect.stringContaining('feature/missing') });
+    f.state.prInfo = { ...f.state.prInfo, headBranch: 'feature/login', headSha: 'f'.repeat(40) };
+    await expect(follow()).rejects.toMatchObject({ code: 'PR_BRANCH_MOVED' });
+    f.state.prInfo = { ...f.state.prInfo, headSha: head, headBranch: 'main' };
+    await expect(follow()).rejects.toMatchObject({ code: 'PR_BRANCH_REFUSED' });
+    f.state.prInfo = {};
+    await expect(follow()).rejects.toMatchObject({ code: 'PR_FOLLOW_UNSUPPORTED' });
+    expect(await f.service.listBySession(f.session.id)).toEqual([]);
+    expect(f.dispatches).toEqual([]);
+  });
+
+  it('链接只按 provider 的 matchRepository 认仓库，编号可以直接给', () => {
+    const provider = { id: 'p', displayName: 'P', matchRepository: (url: string) => url === 'https://h.example/a/b' ? { owner: 'a', name: 'b', slug: 'a/b' } : undefined } as CiProvider;
+    const repository = { owner: 'a', name: 'b', slug: 'a/b' };
+    expect(pullRequestNumber('https://h.example/a/b/pull/12/files', provider, repository)).toBe(12);
+    expect(pullRequestNumber('https://h.example/a/b/-/merge_requests/7', provider, repository)).toBe(7);
+    expect(pullRequestNumber('#5', provider, repository)).toBe(5);
+    expect(pullRequestNumber('!6', provider, repository)).toBe(6);
+    expect(() => pullRequestNumber('https://h.example/a/b', provider, repository)).toThrow(/找不到 PR 编号/);
+  });
+
+  it('认领的 PR 只推到它的源分支，不能是目标或默认分支', () => {
+    expect(() => assertClaimedPushTarget('feature/login', 'main', 'main')).not.toThrow();
+    expect(() => assertClaimedPushTarget('main', 'main')).toThrow(/拒绝推送/);
+    expect(() => assertClaimedPushTarget('release', 'dev', 'release')).toThrow(/拒绝推送/);
+    expect(() => assertClaimedPushTarget('a..b', 'main')).toThrow(/拒绝推送/);
+    expect(() => assertClaimedPushTarget('-x', 'main')).toThrow(/拒绝推送/);
   });
 });

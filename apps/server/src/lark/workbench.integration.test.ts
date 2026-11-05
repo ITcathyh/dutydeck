@@ -6,7 +6,7 @@ import { RuntimeError, agentConfigSchema, workPlanConfirmationRequired, workPlan
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import { RelayAskBroker, RelayCapabilityRegistry } from '@dutydeck/relay';
-import { WorkItemService } from '../work-items.js';
+import { WorkItemService, workPlanDigest } from '../work-items.js';
 import type { WorkItemRequest } from '../work-item-interactions.js';
 import { WorkItemInteractions } from '../work-item-interactions.js';
 import { LarkWorkbench, composeWorkPlan, consultWorkPlan, parseLarkConsultCommand, researchWorkPlan, resolveConsultAgents, workItemElements, workNoticeFingerprint } from './workbench.js';
@@ -150,6 +150,42 @@ describe('亮屏指纹与卡片元素（纯函数）', () => {
     const operations = elements.flatMap(element => element.behaviors?.map((behavior: any) => behavior.value.dutydeck_work_item) ?? []);
     expect(operations).toEqual(['confirm', 'cancel', 'show']);
     expect(rendered).not.toContain('/work answer');
+    expect(rendered).toContain(`/work confirm work_1 ${workPlanDigest(preview.plan).slice(0, 12)}`);
+    // 未改过的待确认计划指纹不变；Agent 改过（版本号递增）后按计划摘要换指纹，重新推确认卡。
+    expect(workNoticeFingerprint(preview)).toBe(workNoticeFingerprint({ ...preview, plan: { ...preview.plan, title: '别的标题' } }));
+    const edited = { ...preview, planVersion: 2 };
+    expect(workNoticeFingerprint(edited)).not.toBe(workNoticeFingerprint(preview));
+    expect(workNoticeFingerprint({ ...edited, plan: { ...edited.plan, title: '又改了' } })).not.toBe(workNoticeFingerprint(edited));
+  });
+
+  it('待确认的计划修订按内容摘要换指纹推新卡，卡面列影响与确认/放弃并照常列出执行中的步骤；生效后标出计划版本', () => {
+    const running = baseItem('running', 'running');
+    const nextPlan = { ...running.plan, steps: [{ ...running.plan.steps[0]!, instruction: '扩大调研范围' }] };
+    const digest = 'c0ffee12'.repeat(8);
+    const pending: WorkItem = { ...running, pendingRevision: { version: 2, plan: nextPlan, requestedAt: '2026-11-05T00:00:00Z', source: 'agent', reason: '用户追加了范围',
+      impact: { keep: [], rerun: ['alpha'], stop: ['alpha'], remove: [], add: [] }, confirmationReasons: ['本目标要求人工确认计划'], digest } };
+    expect(workNoticeFingerprint(pending)).not.toBe(workNoticeFingerprint({ ...pending, pendingRevision: undefined }));
+    // 同一版本号下 Agent 换了修订内容：摘要变了，指纹也必须变，才会推出新卡。
+    expect(workNoticeFingerprint({ ...pending, pendingRevision: { ...pending.pendingRevision!, digest: 'beef'.repeat(16) } })).not.toBe(workNoticeFingerprint(pending));
+    const elements = workItemElements(pending);
+    const rendered = JSON.stringify(elements);
+    expect(rendered).toContain('计划修订（v2 · 摘要 c0ffee12c0ff）');
+    expect(rendered).toContain('先停止：独立研究');
+    expect(rendered).toContain('扩大调研范围');
+    expect(rendered).toContain(`/work confirm work_1 c0ffee12c0ff`);
+    expect(rendered).toContain('执行中 · 独立研究');
+    const buttons = elements.flatMap(element => element.behaviors?.map((behavior: any) => behavior.value) ?? []);
+    expect(buttons.map((value: any) => value.dutydeck_work_item)).toEqual(['confirm', 'discard', 'show', 'cancel']);
+    expect(buttons.slice(0, 2).map((value: any) => value.revision_digest)).toEqual([digest, digest]);
+    expect(JSON.stringify(workItemElements({ ...pending, pendingRevision: { ...pending.pendingRevision!, impact: { ...pending.pendingRevision!.impact, discard: ['alpha'] } } }))).toContain('作废已完成结果：独立研究');
+    // 阻塞时确认必然失败：只给放弃，不给确认，也不给文字确认命令。
+    const blocked = workItemElements({ ...pending, status: 'blocked', steps: [{ id: 'alpha', status: 'blocked', attempts: [] }] });
+    const blockedButtons = blocked.flatMap(element => element.behaviors?.map((behavior: any) => behavior.value.dutydeck_work_item) ?? []);
+    expect(blockedButtons).toEqual(['discard', 'show', 'cancel']);
+    expect(JSON.stringify(blocked)).toContain('处理前不能确认这次修订');
+    expect(JSON.stringify(blocked)).not.toContain('/work confirm');
+    expect(JSON.stringify(workItemElements({ ...running, planVersion: 2 }))).toContain('计划已修订（v2）');
+    expect(JSON.stringify(workItemElements(running))).not.toContain('计划已修订');
   });
 
   it('S5：agent 有显示名时展示「名称（agentId）」，名称缺失或与 id 相同则只显示 agentId', () => {
@@ -274,6 +310,73 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
     await expect(f.workbench.command(item.parentSessionId, `plan 只有一步`, message('om_plan_bad', ''), f.config)).rejects.toMatchObject({ code: 'WORK_ITEM_PLAN_STEPS_REQUIRED' });
     // 超长分段要给出可读报错，而不是把 zod 的校验 JSON 贴到卡上。
     await expect(f.workbench.command(item.parentSessionId, `plan ${'很'.repeat(30_001)}；第二步`, message('om_plan_long', ''), f.config)).rejects.toMatchObject({ code: 'WORK_ITEM_PLAN_STEP_TOO_LONG' });
+  });
+
+  it('待确认修订：目标照常执行，卡片按内容摘要推送，文字确认必须带当前摘要，旧卡按钮在内容被替换后失效', async () => {
+    const f = await fixture('held');
+    await f.coordinator.handle(message('om_plan', '/work plan 调研可行方案；核查风险与反例'), f.config);
+    const parent = (await f.parent()).id;
+    let item = await f.item();
+    item = await f.work.confirm(parent, item.id, item.revision, 'ou_alice');
+    await f.work.tick();
+    await vi.waitFor(async () => expect((await f.item()).steps.some(step => step.status === 'running')).toBe(true));
+    item = await f.item();
+    const revisedPlan = (instruction: string) => ({ ...item.plan, steps: item.plan.steps.map(step => step.id === 'report' ? { ...step, instruction } : step) });
+    item = await f.work.revise(parent, item.id, { expectedRevision: item.revision, plan: revisedPlan('汇总时附上反例清单'), reason: '用户要求反例' }, 'ou_alice', 'agent');
+    expect(item.status).toBe('running');
+    const first = item.pendingRevision!;
+    const revisionCards = () => f.cards.filter(card => card.input.elements?.some((element: any) => element.behaviors?.[0]?.value?.revision_digest));
+    await f.work.tick();
+    await vi.waitFor(() => expect(revisionCards()).toHaveLength(1));
+    const button = (card: { input: any }) => card.input.elements.find((element: any) => element.behaviors?.[0]?.value?.dutydeck_work_item === 'confirm' && element.behaviors[0].value.revision_digest).behaviors[0].value;
+    expect(button(revisionCards()[0]!).revision_digest).toBe(first.digest);
+    // 文字确认不带摘要、摘要对不上或不足 12 位：拒绝，计划不变；报错不回显当前摘要，只让人去看最新卡片。
+    const bare = await f.workbench.command(parent, `confirm ${item.id}`, message('om_confirm_bare', ''), f.config).then(() => undefined, (error: RuntimeError) => error);
+    expect(bare).toMatchObject({ code: 'WORK_ITEM_REVISION_CONFIRM_MISMATCH', message: expect.stringContaining('用卡片上的命令确认') });
+    expect(bare!.message).not.toContain(first.digest.slice(0, 8));
+    await expect(f.workbench.command(parent, `confirm ${item.id} 000000000000`, message('om_confirm_wrong', ''), f.config)).rejects.toMatchObject({ code: 'WORK_ITEM_REVISION_CONFIRM_MISMATCH' });
+    await expect(f.workbench.command(parent, `confirm ${item.id} ${first.digest.slice(0, 8)}`, message('om_confirm_short', ''), f.config)).rejects.toMatchObject({ code: 'WORK_ITEM_REVISION_CONFIRM_MISMATCH' });
+    // Agent 用同一版本号替换修订内容：摘要变化，推出新卡。
+    item = await f.work.revise(parent, item.id, { expectedRevision: (await f.item()).revision, plan: revisedPlan('汇总时只列已核实的反例'), reason: '用户要求反例' }, 'ou_alice', 'agent');
+    const second = item.pendingRevision!;
+    expect(second.version).toBe(first.version);
+    expect(second.digest).not.toBe(first.digest);
+    await f.work.tick();
+    await vi.waitFor(() => expect(revisionCards()).toHaveLength(2));
+    // 旧卡按钮绑定旧摘要：点击只刷新，不确认替换后的内容；旧摘要的文字确认同样被拒。
+    const stale = await f.coordinator.handleAction(button(revisionCards()[0]!), 'ou_alice', { messageId: revisionCards()[0]!.messageId, chatId: 'oc_group' });
+    expect(stale.type).toBe('success');
+    expect((await f.item()).pendingRevision?.digest).toBe(second.digest);
+    await expect(f.workbench.command(parent, `confirm ${item.id} ${first.digest.slice(0, 12)}`, message('om_confirm_old', ''), f.config)).rejects.toMatchObject({ code: 'WORK_ITEM_REVISION_CONFIRM_MISMATCH' });
+    expect((await f.item()).planVersion).toBe(1);
+    // 卡片给 12 位，更长的前缀同样接受。
+    await f.workbench.command(parent, `confirm ${item.id} ${second.digest.slice(0, 20)}`, message('om_confirm_ok', ''), f.config);
+    const confirmed = await f.item();
+    expect(confirmed).toMatchObject({ planVersion: 2, status: 'running' });
+    expect(confirmed.pendingRevision).toBeUndefined();
+    expect(confirmed.plan.steps.find(step => step.id === 'report')!.instruction).toBe('汇总时只列已核实的反例');
+    for (const release of f.releases.values()) release();
+  });
+
+  it('首次确认的文字命令要带计划摘要；Agent 改了未确认的计划后重新推确认卡，旧摘要失效', async () => {
+    const f = await fixture();
+    await f.coordinator.handle(message('om_plan', '/work plan 调研可行方案；核查风险与反例'), f.config);
+    const parent = (await f.parent()).id;
+    let item = await f.item();
+    const confirmCards = () => f.cards.filter(card => card.input.elements?.some((element: any) => element.behaviors?.[0]?.value?.dutydeck_work_item === 'confirm'));
+    expect(confirmCards()).toHaveLength(1);
+    const seen = workPlanDigest(item.plan).slice(0, 12);
+    expect(JSON.stringify(confirmCards()[0]!.input.elements)).toContain(`/work confirm ${item.id} ${seen}`);
+    await expect(f.workbench.command(parent, `confirm ${item.id}`, message('om_confirm_bare', ''), f.config)).rejects.toMatchObject({ code: 'WORK_ITEM_REVISION_CONFIRM_MISMATCH' });
+    item = await f.work.revise(parent, item.id, { expectedRevision: item.revision, plan: { ...item.plan, steps: item.plan.steps.map(step => step.id === 'step1' ? { ...step, instruction: 'Agent 改过的调研范围' } : step) } }, 'ou_alice', 'agent');
+    expect(item).toMatchObject({ status: 'awaiting_confirmation', planVersion: 2 });
+    await f.work.tick();
+    await vi.waitFor(() => expect(confirmCards()).toHaveLength(2));
+    expect(JSON.stringify(confirmCards()[1]!.input.elements)).toContain('Agent 改过的调研范围');
+    await expect(f.workbench.command(parent, `confirm ${item.id} ${seen}`, message('om_confirm_old', ''), f.config)).rejects.toMatchObject({ code: 'WORK_ITEM_REVISION_CONFIRM_MISMATCH' });
+    expect((await f.item()).status).toBe('awaiting_confirmation');
+    await f.workbench.command(parent, `confirm ${item.id} ${workPlanDigest(item.plan).slice(0, 12)}`, message('om_confirm_new', ''), f.config);
+    expect(await f.item()).toMatchObject({ status: 'running', planVersion: 2 });
   });
 
   it('待确认卡只出一张：通知侧与命令侧抢同一条剧集键，抢到的才发', async () => {

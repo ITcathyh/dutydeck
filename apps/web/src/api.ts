@@ -6,7 +6,7 @@ import type { HistoryOutline } from '@dutydeck/shared';
 export type { HistoryOutline, HistoryTurnSummary } from '@dutydeck/shared';
 import type { AutomationSchedulePage, AutomationRunDetail } from '@dutydeck/shared';
 import type { PluginBinding, SavePluginBinding, PluginConfigSchema, PluginBindingScope } from '@dutydeck/shared';
-import type { AgentWeight, LarkAppCreationJob, PermissionMode, ScenarioBinding, ScenarioParam, SessionSourceContext, SessionUsageSnapshot } from '@dutydeck/shared';
+import type { AgentWeight, InboxAction, InboxResponse, LarkAppCreationJob, PermissionMode, ScenarioBinding, ScenarioParam, SessionSourceContext, SessionUsageSnapshot } from '@dutydeck/shared';
 import type {
   SessionInsightDetailsResponse,
   SessionInsightRefreshResponse,
@@ -19,7 +19,7 @@ import type {
   SessionInsightCompareResponse,
   SessionInsightExportRequest
 } from '@dutydeck/shared';
-import type { CreateWorkItemInput, UnknownTaskAction, UnknownTaskFacts, WorkItem, WorkTemplate } from '@dutydeck/shared';
+import type { CreateWorkItemInput, ReviseWorkPlanInput, UnknownTaskAction, UnknownTaskFacts, WorkItem, WorkRevisionPreview, WorkTemplate } from '@dutydeck/shared';
 import type { WorkspaceMode, WorkspaceResponse, WorkspaceCleanupPreview, WorkspaceCleanupResult, VerificationResponse, VerificationCommandInput, SkillDeliveryMetadata, SessionAutomationList, PublicSessionScheduleOccurrence, CreateSessionScheduleInput, UpdateSessionScheduleInput, SubscribeCiInput, SessionSchedule, CiSubscription, PublicCiProvider, PublicPullRequest, PullRequestAvailability } from '@dutydeck/shared';
 import type { WorkspaceOrganization, WorkspaceOrganizationSnapshot } from '@dutydeck/shared';
 import type { UsageBackgroundBudget, UsageCap, UsageGroup, UsageReport, UsageReportFilter, UsageTaskPage, UsageTotals } from '@dutydeck/shared';
@@ -33,6 +33,7 @@ export type PeerInstance = { id: string; name: string };
 export type { WorkspaceOrganization, WorkspaceOrganizationSnapshot };
 export type { ScheduleTrigger };
 export type { PermissionMode };
+export type { InboxAction, InboxItem, InboxItemKind, InboxResponse } from '@dutydeck/shared';
 export type { WorkspaceMode };
 export type Agent = PublicAgent;
 export type AgentModel = { id: string; name: string };
@@ -372,6 +373,10 @@ export const api = {
   cancelWorkItem: (sessionId: string, id: string, expectedRevision: number) => json<WorkItem>(`/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/cancel`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision }) }),
   retryWorkStep: (sessionId: string, id: string, stepId: string, expectedRevision: number) => json<WorkItem>(`/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/retry`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ stepId, expectedRevision }) }),
   answerWorkStep: (sessionId: string, id: string, stepId: string, answer: string, expectedRevision: number) => json<WorkItem>(`/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/answer`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ stepId, answer, expectedRevision }) }),
+  previewWorkRevision: (sessionId: string, id: string, input: Omit<ReviseWorkPlanInput, 'reason'>) => json<WorkRevisionPreview>(`/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/revise/preview`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
+  reviseWorkItem: (sessionId: string, id: string, input: ReviseWorkPlanInput) => json<WorkItem>(`/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/revise`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
+  confirmWorkItem: (sessionId: string, id: string, expectedRevision: number, revisionDigest?: string) => json<WorkItem>(`/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/confirm`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision, ...(revisionDigest ? { revisionDigest } : {}) }) }),
+  discardWorkRevision: (sessionId: string, id: string, expectedRevision: number, revisionDigest?: string) => json<WorkItem>(`/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/revision/discard`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision, ...(revisionDigest ? { revisionDigest } : {}) }) }),
   saveWorkTemplate: (sessionId: string, id: string, name: string) => json<WorkTemplate>(`/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/template`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name }) }),
   runWorkTemplate: (sessionId: string, id: string, input: { version: number; goal: string; idempotencyKey: string }) => json<WorkItem>(`/api/sessions/${encodeURIComponent(sessionId)}/work-templates/${encodeURIComponent(id)}/run`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
   automationSchedules: async (params: URLSearchParams, instance?: string | null) => {
@@ -391,6 +396,7 @@ export const api = {
   cancelCi: (id: string, subscriptionId: string, expectedRevision: number) => json<{ subscription: CiSubscription }>(`/api/sessions/${id}/automation/ci/${subscriptionId}/cancel`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision }) }),
   pullRequests: (id: string) => json<PullRequestAvailability & { items: PublicPullRequest[] }>(`/api/sessions/${id}/pull-requests`),
   preparePullRequest: (id: string, input: { title?: string }) => json<{ pullRequest: PublicPullRequest }>(`/api/sessions/${id}/pull-requests`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
+  followPullRequest: (id: string, pullRequest: string) => json<{ pullRequest: PublicPullRequest }>(`/api/sessions/${id}/pull-requests/follow`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ pullRequest }) }),
   confirmPullRequest: (id: string, pullRequestId: string) => json<{ message: string; pullRequest: PublicPullRequest }>(`/api/sessions/${id}/pull-requests/${pullRequestId}/confirm`, { method: 'POST' }),
   cancelPullRequest: (id: string, pullRequestId: string) => json<{ pullRequest: PublicPullRequest }>(`/api/sessions/${id}/pull-requests/${pullRequestId}/cancel`, { method: 'POST' }),
   sessionCapabilities: (id: string) => json<SessionCapabilities>(`/api/sessions/${id}/capabilities`),
@@ -566,7 +572,10 @@ export const api = {
   assignWorkspaceGroups: (input: { groupId: string | null; sessionIds?: string[]; directories?: string[] }) => json<WorkspaceOrganizationSnapshot>('/api/workspace-groups/assignments', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
   restart: (id: string) => json<Session>(`/api/sessions/${id}/restart`, { method: 'POST' }),
   action: (id: string, action: string) => json(`/api/sessions/${id}/${action}`, { method: 'POST' }),
-  permission: (id: string, permissionId: string, approved: boolean) => json(`/api/sessions/${id}/permissions/${permissionId}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ approved }) })
+  permission: (id: string, permissionId: string, approved: boolean, reason?: string) => json(`/api/sessions/${id}/permissions/${permissionId}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(reason ? { approved, reason } : { approved }) }),
+  inbox: () => json<InboxResponse>('/api/inbox', { cache: 'no-store' }),
+  /** 待处理条目上的动作：服务端给出原对象现有的接口与带版本的请求体，这里原样调用。 */
+  inboxAction: (action: InboxAction) => json<unknown>(action.path!, { method: action.method ?? 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(action.body ?? {}) })
 };
 
 export const foundationApi = {

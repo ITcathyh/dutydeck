@@ -73,6 +73,7 @@ it.each(['completed', 'reconcile_required'])('refreshes the full %s task after i
   vi.spyOn(api, 'workItemRequests').mockResolvedValue([]);
   vi.spyOn(api, 'automation').mockResolvedValue({ schedules: [], subscriptions: [], occurrences: [] });
   vi.spyOn(api, 'workspaceGroups').mockResolvedValue({ organization: { groups: [], directoryGroups: {}, sessionGroups: {} }, workspaces: [] });
+  vi.spyOn(api, 'inbox').mockResolvedValue({ generatedAt: '2026-11-05T00:00:00Z', items: [] });
   const unknown = vi.spyOn(api, 'unknownTasks').mockResolvedValue([{ taskId: task.id, status: 'reconcile_required', actionable: true, kind: 'attempt', target: 'attempt_1', submission: 'intent_recorded', reasonCode: 'RESULT_UNKNOWN', prompt: task.prompt, factLines: ['结果未知，需要人工决定'] }]);
   const client = new QueryClient();
   const view = render(<StrictMode><QueryClientProvider client={client}><App/></QueryClientProvider></StrictMode>);

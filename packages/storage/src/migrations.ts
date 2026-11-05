@@ -2,7 +2,7 @@ import { createMatterSchema } from './matters.js';
 import { createConfigReadIndexes } from './config-query.js';
 import { createPluginResultSchema } from './plugin-results-migration.js';
 import { createMemoryConsumedTaskSchema, createMemoryJobSchema } from './memory-jobs.js';
-import { createWorkItemIndexSchema } from './work-item-index.js';
+import { createWorkItemIndexSchema, refreshWorkItemIndexTriggers } from './work-item-index.js';
 import { createScheduleExecutionSchema } from './schedule-execution-migration.js'
 import type Database from 'better-sqlite3'
 import { createTaskExecutionSchema } from './task-execution-migration.js'
@@ -636,7 +636,9 @@ export const migrations: Migration[] = [
       CASE WHEN json_valid(data) THEN json_extract(data,'$.id') END,sequence)
       WHERE type='permission_request'`);
   } },
-  { version: 44, name: 'matters', up: createMatterSchema }
+  { version: 44, name: 'matters', up: createMatterSchema },
+  // 计划修订把删除的步骤移到 retiredSteps；索引触发器同时投影其子会话归属，旧记录不改写。
+  { version: 45, name: 'work_item_retired_step_sessions', up(db) { if (tableExistsForMigration(db, 'work_item_index')) refreshWorkItemIndexTriggers(db) } }
 ]
 
 /** v38：collaboration_duties 加 scenarios_json 列，把旧的 alarm_json 转进去。 */

@@ -15,7 +15,8 @@ import { formatLarkHandoff, larkHandoffAck, larkHandoffTitle, larkHandoffEventLi
 import { explicitFinalContext, readExplicitFinal } from './explicit-final.js';
 import { redactTraceText } from './secret-redaction.js';
 import { readGitSnapshot } from './git-status.js';
-import { buildLarkTaskDashboard, pageLarkTaskDashboard, type LarkTaskDashboardEntry } from './task-dashboard.js';
+import { buildLarkTaskDashboard, pageLarkTaskDashboard, type LarkTaskDashboardDecision, type LarkTaskDashboardEntry } from './task-dashboard.js';
+import { collectInbox } from '../inbox.js';
 import { isLarkGroupChatMemoryPool, isLarkGroupMemoryPool, isLarkPerGroupMemoryPool, isLarkMemoryId, isLarkMemoryIgnoreRuleId, larkMemoryLimits, larkMemoryScope, renderLarkMemoryList, renderLarkMemoryStatusLine } from './memory.js';
 import { deferredConfirmationId, describeScheduleTrigger, scenarioPolicyVersion, parseLarkSourceId, resolveParticipation, RuntimeError, timeLoop, type PolicyAction, type Session, type TaskRecord } from '@dutydeck/shared';
 import { decideWake, isExplicitWake, wakeSignals, type WakeFacts } from './wake-decision.js';
@@ -49,7 +50,7 @@ import { escapeLarkPromptEcho, renderQueueSummary, QUEUE_SUMMARY_MAX_ITEMS } fro
 import { larkNotice } from './notify-tier.js';
 import { claimLarkTaskDispatches, larkTaskAgentAllowlistConfigured, larkTaskAgentGuid, releaseLarkTaskClaim } from './task-agent.js';
 import { buildRepairConfirmCard, parseRepairCardActionValue, renderRepairResultCard, runOpenPlatformRepair } from './repair.js';
-import { buildPullRequestConfirmCard } from './pull-request-card.js';
+import { buildPullRequestConfirmCard, buildPullRequestFollowCard } from './pull-request-card.js';
 import { connectLarkOpenPlatformSession } from './open-platform-session.js';
 import { findLarkThreadContinuation, listPersistedLarkSessions, larkSourceId, larkGroupKey, larkSessionConfigKey, parsePrompt, resolveLarkScopeId } from './session-resolver.js';
 import type { LarkMessageEvent } from './listener.js';
@@ -282,13 +283,40 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
   }
 
   private async taskDashboard(event: LarkMessageEvent, config: StoredLarkConfig, page: number) {
-    return buildLarkTaskDashboard(await this.taskDashboardEntries(event, config), page, undefined, event.chatId).elements;
+    const { entries, sessions } = await this.taskDashboardData(event, config);
+    return buildLarkTaskDashboard(entries, page, undefined, event.chatId, await this.taskDashboardDecisions(event, config, sessions)).elements;
+  }
+
+  /**
+   * 任务看板之外等人决定的对象：与 Web 总览「待你决定」同一套汇总，只取看板上没有行的类型，
+   * 且只看 /tasks 已经按发送人权限筛出来的那些会话。这些对象的按钮绑在各自的原卡上，所以只给跳转。
+   */
+  private async taskDashboardDecisions(event: LarkMessageEvent, config: StoredLarkConfig, sessions: Map<string, { session: Session; url: string }>): Promise<LarkTaskDashboardDecision[]> {
+    if (!this.workflowOptions.store || !event.senderOpenId) return [];
+    const actorId = event.senderOpenId;
+    const interactions = await this.workflows?.list(config.appId).catch(() => []) ?? [];
+    const items = await collectInbox({
+      runtime: { getTasks: id => this.runtime.getTasks?.(id) ?? Promise.resolve([]) },
+      store: this.workflowOptions.store,
+      larkCards: async () => interactions,
+      ...(this.workflowOptions.workbench ? { workItems: this.workflowOptions.workbench.inboxSource() } : {}),
+      ...(this.workflowOptions.automation?.pullRequests ? { pullRequests: this.workflowOptions.automation.pullRequests } : {})
+    }, [...sessions.values()].map(entry => entry.session), {
+      actorFor: () => actorId,
+      kinds: new Set(['plan', 'work_item_confirm', 'work_item_revision', 'work_item_answer', 'work_item_request', 'pull_request_confirm', 'pull_request_question'])
+    }).catch(error => { this.log.warn({ error }, '读取任务看板的待决定对象失败'); return []; });
+    return items.map(item => ({ kind: item.kind, title: item.title, session: item.sessionTitle, waitingMs: item.waitingMs, url: sessions.get(item.sessionId)?.url }));
   }
 
   /** /tasks 列出的任务：只有发送人能看结果的那些。 */
   private async taskDashboardEntries(event: LarkMessageEvent, config: StoredLarkConfig) {
+    return (await this.taskDashboardData(event, config)).entries;
+  }
+
+  private async taskDashboardData(event: LarkMessageEvent, config: StoredLarkConfig) {
     if (!event.senderOpenId) throw new LarkServiceError('LARK_IDENTITY_REQUIRED', '缺少当前成员身份。', 403);
     const entries: LarkTaskDashboardEntry[] = [];
+    const sessions = new Map<string, { session: Session; url: string }>();
     const interactions = await this.workflows?.list(config.appId) ?? [];
     // Agent 显示名只查一次；查不到名字就退化成 agentId，绝不留空让读者猜是谁在跑。
     const agentNames = new Map((await this.runtime.listAgents?.().catch(() => []) ?? []).map(agent => [agent.id, agent.name] as const));
@@ -319,6 +347,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       const recovery = ['queued', 'reconcile_required', 'legacy_unresolved'].includes(task.status)
         ? await describeLarkTaskRecovery(this.runtime, mapping.sessionId, task.id, task.status) : undefined;
       const matter = this.runtime.getMatter?.(session.id);
+      sessions.set(session.id, { session, url: url.toString() });
       entries.push({ ...(taskReport?.taskId === task.id ? { taskReport } : {}), ...(matter ? { matter: { id: matter.id, title: matter.title, sessionId: session.id, superseded: matter.supersededSessionIds?.includes(session.id) } } : {}), taskId: task.id, title: saved.task_name, workspace: session.cwd, agent: agentNames.get(session.agentId) ?? session.agentId, status: pending && task.status === 'running'
         ? pending.kind === 'ask' ? 'waiting_for_answer' : 'waiting_for_permission' : task.status, updatedAt: task.updatedAt, url: url.toString(),
         ...(recovery ? { detail: recovery.markdown, blocked: recovery.blocked } : {}),
@@ -339,7 +368,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
           : {}),
         ...(result && ['pending', 'accepted', 'needs_changes'].includes(result.state) ? { feedback: result.state as 'pending' | 'accepted' | 'needs_changes' } : {}) });
     }
-    return entries;
+    return { entries, sessions };
   }
 
   private async routeWorkflow(event: LarkMessageEvent, config: StoredLarkConfig, prompt: string, scope: { id: string; prompt?: string }, receipts?: LarkCommandReceipts): Promise<boolean> {
@@ -1344,6 +1373,13 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         if (!pullRequests) throw new Error('当前服务未接入开 PR。');
         if (!sessionId) throw new Error('当前话题还没有可用的工作项，请先发送任务。');
         if (!event.senderOpenId || !await this.isOperatorAllowed(config, event.senderOpenId, event.chatId, sessionId)) throw new Error('当前账号没有操作此任务的权限。');
+        // `/pr follow <链接或编号>` 认领已有的 PR；其余参数仍是新 PR 的标题。
+        const [subcommand, link, ...extra] = route.args;
+        if (subcommand === 'follow' && link && !extra.length && /^(?:[#!]?\d{1,9}|https?:\/\/\S+)$/i.test(link)) {
+          const card = buildPullRequestFollowCard(await pullRequests.follow(sessionId, { pullRequest: link }, event.senderOpenId));
+          await replyCard(card.title, card.markdown, { elements: card.elements });
+          return 'handled';
+        }
         // A failed busy confirmation queues this same request; its Agent may retry /pr later.
         const proposalKey = `lark.pr_proposal.${config.appId}.${createHash('sha256').update(JSON.stringify([event.messageId, sessionId, event.senderOpenId, route.argsText.trim()])).digest('hex')}`;
         const preparedId = await this.workflowOptions.store?.get(proposalKey);
@@ -2340,9 +2376,10 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     const event = this.agentCommandEvent(config, { ...place, messageId: requested.messageId }, request.actorId, command, []);
     if (request.view === 'tasks') {
       if (!this.workflows) throw new RuntimeError('AGENT_COMMAND_UNAVAILABLE', '当前机器人无法查询任务列表。', 409);
-      const entries = await this.taskDashboardEntries(event, config);
+      const { entries, sessions } = await this.taskDashboardData(event, config);
       const { page, totalPages, entries: items } = pageLarkTaskDashboard(entries, request.page ?? 1);
-      return { page, totalPages, total: entries.length, tasks: items.map(entry => ({ taskId: entry.taskId, title: entry.title, status: entry.status, agent: entry.agent, workspace: entry.workspace,
+      const decisions = await this.taskDashboardDecisions(event, config, sessions);
+      return { page, totalPages, total: entries.length, decisions: decisions.map(({ kind, title, session, waitingMs, url }) => ({ kind, title, ...(session ? { session } : {}), waitingMs, ...(url ? { url } : {}) })), tasks: items.map(entry => ({ taskId: entry.taskId, title: entry.title, status: entry.status, agent: entry.agent, workspace: entry.workspace,
         updatedAt: entry.updatedAt, ...(entry.taskReport ? { taskReport: entry.taskReport } : {}), ...(entry.url ? { url: entry.url } : {}), ...(entry.detail ? { detail: entry.detail } : {}), ...(entry.feedback ? { feedback: entry.feedback } : {}),
         ...(entry.pendingApproval ? { pendingApproval: entry.pendingApproval.commandSummary } : {}) })) };
     }
@@ -2860,7 +2897,12 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         if (fromDashboard && String(workflow.generation ?? '') !== record?.boot) {
           return { type: 'warning', content: '审批已失效，请刷新 /tasks 后重试。' };
         }
-        let answer: { answer?: string; selected?: string[] } = {};
+        let answer: { answer?: string; reason?: string; selected?: string[] } = {};
+        if (action === 'reject') {
+          // 「拒绝并说明」表单的输入在 form_value.reason；普通「拒绝」按钮没有 form_value。
+          const formReason = (workflow.form_value as { reason?: unknown } | undefined)?.reason;
+          if (typeof formReason === 'string') answer = { reason: formReason };
+        }
         if (action === 'plan_revise') {
           const formAnswer = (workflow.form_value as { answer?: unknown } | undefined)?.answer;
           answer = { answer: typeof formAnswer === 'string' ? formAnswer : '' };

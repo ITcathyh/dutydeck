@@ -15,6 +15,7 @@ export const workbenchHelp = (command = 'dutydeck work') => `${bindingHelp(comma
 最多 12 步，无循环；依赖全部完成后执行汇总，失败分支可独立重试。需要并行修改代码时显式使用 workspaceMode:worktree；shared 不提供写入隔离。每个后台步骤是独立 Session，只获得目标、步骤指令及上游成果；把必要来源和材料放入 goal/instruction，不转交无关群历史、账户信息或秘密。Agent 的最终回答被保存为步骤产物，不等于平台验证通过。
 人工补充使用 kind:wait 的步骤，instruction 写具体问题，省略 agentId。可给后续步骤设置 when:{stepId:"上游等待ID",equals:"期望的完整回答"} 来选择分支。所有步骤必须通向一个不带条件的最终agent步骤。不要将普通完成反馈强制变为人工等待。
 最终agent步骤可加 reviewPolicy:{maxReworkRounds:2,allowedTargetStepIds:["impl"]}（限制0..3次，只允许不同Agent的无条件末端worker）。宿主绑定审查版本并复用原工作区，工作执行器会自动注入审查协议而无需展开JSON verdict全文；仅accept完成，stop、超限或不合法结论将阻塞流程，取消停止下一轮。无policy仍为原有行为。
+- ${command} revise <目标编号> --file <JSON文件> [--dry-run]：修改未结束目标的计划，JSON 为 {"expectedRevision":show返回的revision,"plan":{完整新计划，格式同create},"reason":"修改原因"}。--dry-run 只返回影响：keep 保留结果、rerun 作废结果重跑、stop 先停止的运行中步骤、remove 删除、add 新增。未受影响的已完成步骤不重跑；停不下来时整次修订失败、计划不变。你只能收窄：改未失败步骤的标题或指令、删除不带审查的 Agent 步骤、增加依赖、减少 Skill；新增步骤或 Agent、换 Agent、加 Skill、改工作区/条件/审查、去掉依赖、删除人工等待或带审查的步骤、更换最终输出步骤、让已失败步骤重跑，或目标本身要求确认时，修订记为待确认（pendingRevision），等用户确认后才生效；在此之前目标按原计划继续执行，再次提交会替换待确认内容。被修订作废的尝试仍计入重试和返工上限。revision 冲突说明目标已变化，先 show 再决定，不要盲目重试。
 - ${command} save <目标编号> <流程名称>：保存不可变模板版本。
 - ${command} run <模板编号> <版本> <新目标> --key <稳定请求键>：复用指定版本。
 收到目标编号只表示计划持久接收。需确认的话题状态为 awaiting_confirmation：用户点卡片「开始执行」前一个步骤都不派发，点「取消计划」即作废；无需确认时直接入队。按本轮提示和实际返回状态向用户简述分工与编号、必要时说明等待确认，然后结束本轮，不轮询确认结果。Dutydeck 会回传等待和最终成果，不要轮询占住父任务或另行重复发送最终报告。失败或结果未知时不要自动创建替代目标，先报告并由用户决定重试。工具不提供代替用户回答等待、批准权限或确认计划的入口。`;

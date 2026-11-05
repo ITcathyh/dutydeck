@@ -1,6 +1,6 @@
 import type {
   PluginHookInput, PluginHookOutput, CiRepository, CiPipelineQuery, CiPipelineStatus,
-  CiFailureLog, CiPullRequestInput, CiReviewComment, CiWebhookVerification, CiWebhookEvent
+  CiFailureLog, CiPullRequestInput, CiPullRequestState, CiReviewComment, CiWebhookVerification, CiWebhookEvent
 } from '@dutydeck/plugin-sdk';
 import type { PluginQuery, PluginAction } from './plugin-tools.js';
 import type { PluginResultTool } from './plugin-results.js';
@@ -17,6 +17,7 @@ export type {
   CiPipelineStatus,
   CiFailureLog,
   CiPullRequestInput,
+  CiPullRequestState,
   CiReviewComment,
   CiWebhookVerification,
   CiWebhookEvent,
@@ -170,12 +171,23 @@ export const pluginTriggerSchema = z.object({
     chatId: z.string().min(1),
     session: z.enum(['new', 'reuse']).default('new')
   }).strict(),
-  prompt: z.string().min(1).max(20_000),
+  /** 与 workTemplate 二选一。 */
+  prompt: z.string().min(1).max(20_000).optional(),
+  /**
+   * 启动一个已保存的工作项模板，代替 prompt。session、id、version 可写 `{{config.<键>}}`；
+   * 模板所在会话须是 target 那个机器人和群的飞书会话；goal 与 prompt 一样渲染，外部取值包成不可信数据。
+   */
+  workTemplate: z.object({
+    session: z.string().min(1).max(200),
+    id: z.string().min(1).max(200),
+    version: z.union([z.number().int().positive(), z.string().min(1).max(200)]),
+    goal: z.string().min(1).max(20_000)
+  }).strict().optional(),
   /** Stable request key template. `dedupeKey` remains accepted for v1 compatibility. */
   idempotencyKey: z.string().min(1).max(1_000).optional(),
   dedupeKey: z.string().min(1).max(1_000).optional(),
   maxConcurrent: z.number().int().min(1).max(32).default(4)
-}).strict();
+}).strict().refine(value => (value.prompt === undefined) !== (value.workTemplate === undefined), { message: 'prompt 与 workTemplate 必须且只能写一个', path: ['prompt'] });
 export type PluginTrigger = z.infer<typeof pluginTriggerSchema>;
 
 export const pluginHookOutputSchema = z.object({
@@ -209,7 +221,7 @@ export interface CiProvider {
   createPullRequest?(repository: CiRepository, input: CiPullRequestInput): Promise<{ id: string; number: number; url: string }>;
   listReviewComments?(repository: CiRepository, pullRequest: number): Promise<CiReviewComment[]>;
   /** PR 当前状态；`/pr` 跟进据此在合并或关闭后停止。没有时只能靠 webhook 的 pull_request 事件得知。 */
-  getPullRequest?(repository: CiRepository, pullRequest: number): Promise<{ state: 'open' | 'closed' | 'merged'; headSha?: string }>;
+  getPullRequest?(repository: CiRepository, pullRequest: number): Promise<CiPullRequestState>;
   postComment?(repository: CiRepository, pullRequest: number, body: string): Promise<{ id: string; url?: string }>;
   /** 有 webhook 时 `/ci wait`、`/ci fix` 走事件驱动的续作与修复。 */
   webhook?: {

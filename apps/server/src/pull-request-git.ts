@@ -8,6 +8,7 @@ import { RuntimeError } from '@dutydeck/shared';
 /**
  * `/pr` 用到的 git 操作。全部不动用户的检出：不切分支、不改 index、不写工作区、不建本地分支，
  * 提交用临时 index + `git commit-tree` 生成，推送到 origin 的推送地址的 `refs/heads/dutydeck/...`，推送地址须和生成清单时记下的一致。
+ * 认领的已有 PR（`/pr follow`）例外：推到这个 PR 的源分支，同样只快进、不 force。
  * 推送用本机的 git 凭据；错误信息去掉 URL 里的账号口令后才往外给。
  */
 
@@ -178,9 +179,29 @@ export function assertPushTarget(branch: string, target: string) {
   }
 }
 
+/**
+ * 认领的已有 PR 的源分支：合法分支名，且不是目标分支或仓库默认分支。只在认领时核对过它就是这个 PR 的源分支后才用，
+ * 推送仍只快进（远端须还是上次核对的提交）。
+ */
+/** 平台给出的分支名：只收常规字符，拒绝以 `-` 开头（会被 git 当成选项）、`..`、`.lock` 等写法。 */
+export const isSafeBranchName = (branch: string) => /^[A-Za-z0-9._][A-Za-z0-9._/-]{0,199}$/.test(branch) && !/(^|\/)\.|\.\.|\/\/|\/$|\.lock(\/|$)|@\{/.test(branch);
+
+export function assertClaimedPushTarget(branch: string, target: string, defaultBranchName?: string) {
+  if (!isSafeBranchName(branch) || branch === target || branch === defaultBranchName) {
+    throw new RuntimeError('PR_BRANCH_REFUSED', `拒绝推送到 ${branch}：它是目标分支、默认分支或不是合法的分支名`, 409);
+  }
+}
+
+/** 把远端分支的提交取到本地对象库，不建本地分支、不写 FETCH_HEAD、不动检出。 */
+export async function fetchBranches(cwd: string, url: string, branches: string[]) {
+  const remote = directRemote(url);
+  await git({ cwd }, ['fetch', '--quiet', '--no-tags', '--no-write-fetch-head', remote.name, ...branches.map(branch => `refs/heads/${branch}`)], { env: remote.env, timeout: PUSH_TIMEOUT_MS });
+}
+
 /** 普通推送（不带 --force，refspec 不带 +）：新分支，或在已推送的提交上快进。url 是 originPushUrl 核对过的地址，不是 origin 这个名字。 */
-export async function pushBranch(cwd: string, url: string, commit: string, branch: string, target: string) {
-  assertPushTarget(branch, target);
+export async function pushBranch(cwd: string, url: string, commit: string, branch: string, target: string, claimed = false) {
+  if (claimed) assertClaimedPushTarget(branch, target);
+  else assertPushTarget(branch, target);
   const remote = directRemote(url);
   await git({ cwd }, ['push', '--porcelain', remote.name, `${commit}:refs/heads/${branch}`], { env: remote.env, timeout: PUSH_TIMEOUT_MS });
 }

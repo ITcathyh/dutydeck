@@ -2,7 +2,7 @@ import { clearTaskReportSafely, readSessionTaskReportReference, readSessionTaskR
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import type { AgentCapabilities, AgentConfig, AgentDriver, AgentEvent, DriverFactory, DriverTranscriptSourceObservation, EventType, EventWindowOptions, NormalizedDriverEvent, PermissionMode, PermissionRequestData, PromptAssemblyData, PromptPart, PromptSourceDiagnostics, PublicTaskRecord, RepositoryBundle, RuntimeControlClaim, Session, SkillDeliveryMetadata, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy, TranscriptSourceObservation, VerificationCommandInput, VerificationResponse, WorkspaceCleanupBlocker, WorkspaceCleanupPreview, WorkspaceCleanupResult, WorkspaceResponse } from '@dutydeck/shared';
-import { timeLoop, eventHasContent, normalizeEventContent, deferredConfirmationId, agentCommandApprovalReason, isAgentCommandAutoApproval, canonicalExecutionJson, ptyRetirementRecoverySchema, steeringRecoveryDecisionSchema, executionRecoveryDecisionSchema, unknownTaskResolutionSchema, executionActorSchema, taskRequestV1Schema, steerableTaskNamespace, makeId, now, RuntimeError, workspaceModes, sessionNameConfigKey, normalizeSessionName, parseLarkSourceId, supportsRemoteApproval, redactCredentialText, PROMPT_NOT_WRITTEN, unknownTaskActionLabels } from '@dutydeck/shared';
+import { timeLoop, eventHasContent, normalizeEventContent, deferredConfirmationId, agentCommandApprovalReason, isAgentCommandAutoApproval, canonicalExecutionJson, ptyRetirementRecoverySchema, steeringRecoveryDecisionSchema, executionRecoveryDecisionSchema, unknownTaskResolutionSchema, executionActorSchema, taskRequestV1Schema, steerableTaskNamespace, makeId, now, RuntimeError, permissionDisplayText, permissionRejectReasonMaxLength, workspaceModes, sessionNameConfigKey, normalizeSessionName, parseLarkSourceId, supportsRemoteApproval, redactCredentialText, PROMPT_NOT_WRITTEN, unknownTaskActionLabels } from '@dutydeck/shared';
 import { listAcpxBuiltinAgents, AcpxAdapter, testRegexWithTimeout, ProcessTreeCpu, readNativeCreationRecord } from '@dutydeck/acp-client';
 import { JsonlTransport, PipeTransport, probeAgent, PtyTransport } from '@dutydeck/transports';
 import { mkdir, realpath, writeFile } from 'node:fs/promises';
@@ -301,6 +301,8 @@ export class DutydeckRuntime {
   private readonly queueRuns = new Map<string, Promise<void>>();
   private readonly permissions = new Map<string, { request: PermissionRequestData; nativeId: string; fence: AttemptRef & SessionFence; generation: number; owner?: Owner }>();
   private readonly permissionResolutions = new Map<string, string>();
+  /** 正在提交的拒绝说明（已脱敏）；驱动在裁决时同步发出的终态事件据此补上 reason。 */
+  private readonly permissionRejectReasons = new Map<string, string>();
   private readonly sessionGenerations = new Map<string, number>();
   private readonly exitedDriverGenerations = new Map<string, number>();
   private readonly driverEventChains = new Map<string, Promise<void>>();
@@ -1793,6 +1795,8 @@ export class DutydeckRuntime {
     const scopedId = (nativeId: string) => scope && isAttemptRef(scope) ? `turn_${digest([scope.taskId, scope.attemptId, nativeId])}` : nativeId;
     if (event.type === 'permission_request' || event.type === 'tool_call' || event.type === 'tool_result') {
       data = { ...data, id: scopedId(String(data.id)), ...(data.toolCallId ? { toolCallId: scopedId(String(data.toolCallId)) } : {}) };
+      const rejectReason = event.type === 'permission_request' && data.status === 'rejected' && !data.reason ? this.permissionRejectReasons.get(this.permissionKey(session.id, data.id)) : undefined;
+      if (rejectReason) data = { ...data, reason: rejectReason };
     }
     let tools: AttemptTools | undefined;
     if ((event.type === 'tool_call' || event.type === 'tool_result') && scope && isAttemptRef(scope)) {
@@ -3722,7 +3726,10 @@ export class DutydeckRuntime {
     const claim = makeId('permission_claim'); this.permissionResolutions.set(key, claim);
     try {
       if (!this.mutations.valid(pending.owner) || pending.generation !== (this.sessionGenerations.get(sessionId) ?? 0) || this.permissions.get(key) !== pending) throw new RuntimeError('PERMISSION_EXPIRED', 'Permission request is no longer active', 409);
-      const request = { ...pending.request, status: approved ? 'approved' as const : 'rejected' as const };
+      // 记录里的说明脱敏后保存；交给执行端的仍是用户原文。
+      const shownReason = !approved && reason ? permissionDisplayText(reason, [], permissionRejectReasonMaxLength) : '';
+      const request = { ...pending.request, status: approved ? 'approved' as const : 'rejected' as const, ...(shownReason ? { reason: shownReason } : {}) };
+      if (shownReason) this.permissionRejectReasons.set(key, shownReason);
       // Keep the stored request pending while recording the requested decision.
       // A failed driver call must not be represented as an accepted decision.
       const intent = { ...pending.request, resolutionIntent: request.status };
@@ -3751,7 +3758,7 @@ export class DutydeckRuntime {
       }
       // Subsequent driver events own the session state; an approval must not overwrite a completed turn.
       return request;
-    } finally { if (this.permissionResolutions.get(key) === claim) this.permissionResolutions.delete(key); }
+    } finally { this.permissionRejectReasons.delete(key); if (this.permissionResolutions.get(key) === claim) this.permissionResolutions.delete(key); }
     });
   }
 

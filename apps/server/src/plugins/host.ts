@@ -26,12 +26,28 @@ export interface BuiltinPluginEntry { name: string; version?: string; source: { 
 export interface ActivePlugin { entry: PluginLockEntry | BuiltinPluginEntry; plugin: LoadedPlugin; config: Readonly<Record<string, string>>; builtin: boolean; slots: PluginWebSlotDeclaration[] }
 
 const configPlaceholder = /\{\{\s*config\.([a-z][a-z0-9_]*)\s*\}\}/g;
+/** 把 `{{config.<键>}}` 换成 userConfig 取值；有键没设置时 missing 置位。 */
+function configFiller(config: Readonly<Record<string, string>>) {
+  const state = { missing: false };
+  const fill = (value: string) => value.replace(configPlaceholder, (_match, key: string) => { const found = config[key]; if (found === undefined || found === '') state.missing = true; return found ?? ''; });
+  return { state, fill };
+}
 /** 触发器目标里的 `{{config.<键>}}` 换成 userConfig 取值；有键没设置时返回 undefined（触发器不可用）。 */
 export function resolveTriggerTarget(target: PluginTrigger['target'], config: Readonly<Record<string, string>>): PluginTrigger['target'] | undefined {
-  let missing = false;
-  const fill = (value: string) => value.replace(configPlaceholder, (_match, key: string) => { const found = config[key]; if (found === undefined || found === '') missing = true; return found ?? ''; });
+  const { state, fill } = configFiller(config);
   const resolved = { ...target, botAppId: fill(target.botAppId), chatId: fill(target.chatId) };
-  return missing ? undefined : resolved;
+  return state.missing ? undefined : resolved;
+}
+
+/** 目标与工作项模板引用一起解析；任一处缺配置时触发器不可用。 */
+export function resolveTrigger(trigger: PluginTrigger, config: Readonly<Record<string, string>>): PluginTrigger | undefined {
+  const target = resolveTriggerTarget(trigger.target, config);
+  if (!target) return undefined;
+  if (!trigger.workTemplate) return { ...trigger, target };
+  const { state, fill } = configFiller(config);
+  const { session, id, version } = trigger.workTemplate;
+  const workTemplate = { ...trigger.workTemplate, session: fill(session), id: fill(id), version: typeof version === 'string' ? fill(version) : version };
+  return state.missing ? undefined : { ...trigger, target, workTemplate };
 }
 
 export interface PluginHostOptions {
@@ -371,9 +387,9 @@ export class PluginHost {
     const active = this.active.find(({ entry }) => entry.name === pluginName);
     const trigger = active?.plugin.triggers.get(triggerId);
     if (!active || !trigger) return undefined;
-    const target = resolveTriggerTarget(trigger.target, active.config);
-    if (!target) return undefined;
-    return scopeApplies(active.entry.scope, { botAppId: target.botAppId }) || active.entry.scope.startsWith('workspace:') ? { ...trigger, target, scope: active.entry.scope } : undefined;
+    const resolved = resolveTrigger(trigger, active.config);
+    if (!resolved) return undefined;
+    return scopeApplies(active.entry.scope, { botAppId: resolved.target.botAppId }) || active.entry.scope.startsWith('workspace:') ? { ...resolved, scope: active.entry.scope } : undefined;
   }
 
   triggerToken(pluginName: string, triggerId: string): string | undefined {

@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { agentConfigSchema, workPlanSchema, type AgentDriver, type WorkItem, type WorkPlan } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime } from '@dutydeck/runtime';
-import { WorkItemService } from './work-items.js';
+import { WorkItemService, readWorkItemStatus, workItemProgressStatus, workPlanDigest } from './work-items.js';
 
 const cleanup: Array<() => Promise<void>> = [];
 it('does not read historical completed result blobs during idle ticks, including after reopen', async () => {
@@ -511,6 +511,23 @@ describe('WorkItemService with real Runtime and SQLite', () => {
     expect(await f.service.listTemplates(f.parent.id, 'ou_owner')).toHaveLength(2);
   });
 
+  it('does not attribute a detached template run (schedule or trigger) to the parent session\'s running turn', async () => {
+    const f = await fixture(); const item = await f.create();
+    const template = await f.service.saveTemplate(f.parent.id, item.id, 'Research', 'ou_owner');
+    const riskPolicy = { enabled: true, authorized: false, pattern: 'rm -rf', reason: 'parent turn policy' };
+    await f.runtime.dispatch(f.parent.id, 'parent turn', 'queue', undefined, riskPolicy, 'ou_owner');
+    await eventually(async () => Boolean(f.runtime.getActiveTaskContext(f.parent.id)) && f.calls.some(call => call.sessionId === f.parent.id));
+    const turn = f.runtime.getActiveTaskContext(f.parent.id)!.taskId;
+    const stored = async (id: string) => JSON.parse((await f.repos.config.get(`work_item:${id}`))!);
+    // 对照：交互入口（人或本轮 Agent）启动模板时归属当前这一轮，沿用它的风险策略。
+    const inline = await f.service.runTemplate(f.parent.id, template.id, 1, 'Inline subject', 'template-inline', 'ou_owner');
+    expect(await stored(inline.id)).toMatchObject({ parentTaskId: turn, riskPolicy });
+    const detached = await f.service.runTemplate(f.parent.id, template.id, 1, 'Scheduled subject', 'template-detached', 'ou_owner', undefined, true);
+    const record = await stored(detached.id);
+    expect(record.parentTaskId).toBeUndefined();
+    expect(record.riskPolicy).toBeUndefined();
+  });
+
   it('does not automatically replay an interrupted accepted attempt after restart', async () => {
     const f = await fixture(); const item = await f.create({ ...plan, steps: [plan.steps[0]!], outputStepId: 'a' });
     await f.tick(); await eventually(async () => f.calls.length === 1); await f.reboot(); await f.tick();
@@ -871,6 +888,25 @@ describe('Bounded independent review with real Runtime and SQLite', () => {
     await f.reboot(); await f.tick(); expect(f.calls).toHaveLength(5);
   });
 
+  it.each([['agent', true], ['human', false]] as const)('review rounds superseded by the %s revision count toward the rework limit: %s', async (source, limited) => {
+    const f = await fixture(); const item = await reachReview(f, reviewPlan(1));
+    await f.finish(f.calls[2]!, reviewVerdict(f.calls[2]!, 'rework', 'Fix edge case')); await f.tick(); await f.tick();
+    await eventually(async () => f.calls.length === 4); await f.finish(f.calls[3]!, 'Version 2'); await f.tick();
+    await eventually(async () => f.calls.length === 5);
+    // 把第一轮返工的审查尝试标成被某次修订作废：Agent 修订作废的仍计数，人提交的修订作废的不计。
+    const key = `work_item:${item.id}`; const raw = (await f.repos.config.get(key))!; const record = JSON.parse(raw);
+    const time = new Date().toISOString();
+    record.item.planVersion = 2;
+    record.item.planHistory = [{ version: 1, plan: reviewPlan(1), createdAt: time, source: 'create' }, { version: 2, plan: reviewPlan(1), createdAt: time, source, actor: 'creator' }];
+    record.item.steps[2].attempts[0].supersededByPlanVersion = 2;
+    expect(await f.repos.config.compareAndSet!(key, raw, JSON.stringify(record))).toBe(true);
+    await f.finish(f.calls[4]!, reviewVerdict(f.calls[4]!, 'rework', 'Still failing')); await f.tick();
+    if (limited) {
+      expect(await f.get(item.id)).toMatchObject({ status: 'blocked', error: 'Review rework limit reached: Still failing' });
+      await f.tick(); expect(f.calls).toHaveLength(5);
+    } else await eventually(async () => { await f.tick(); return f.calls.length === 6; });
+  });
+
   it.each(['cancel', 'revoke'] as const)('does not dispatch a rework after %s', async action => {
     const f = await fixture(); const item = await reachReview(f);
     await f.finish(f.calls[2]!, reviewVerdict(f.calls[2]!, 'rework', 'Fix edge case')); await f.tick();
@@ -889,5 +925,309 @@ describe('Bounded independent review with real Runtime and SQLite', () => {
     const workspace = JSON.parse((await f.repos.config.get(key))!); workspace.cwd = join(f.directory, 'different');
     await f.repos.config.set(key, JSON.stringify(workspace)); await f.tick();
     expect((await f.get(item.id)).status).toBe('blocked'); expect(f.calls).toHaveLength(3);
+  });
+});
+
+describe('Plan revision with real Runtime and SQLite', () => {
+  const stored = async (f: Awaited<ReturnType<typeof fixture>>, id: string) => JSON.parse((await f.repos.config.get(`work_item:${id}`))!);
+  /** a、b 完成，join 运行中。 */
+  async function joinRunning(f: Awaited<ReturnType<typeof fixture>>) {
+    const item = await f.create();
+    for (const [index, text] of ['First result', 'Second result'].entries()) {
+      await eventually(async () => { await f.tick(); return f.calls.length === index + 1; });
+      await f.finish(f.calls[index]!, text);
+    }
+    await eventually(async () => { await f.tick(); return f.calls.length === 3; });
+    return item;
+  }
+  /** 被停止的运行结果未知：只有人工核对（这里标为失败）后，同一仓库才会开始重跑。 */
+  async function reconcileStopped(f: Awaited<ReturnType<typeof fixture>>, sessionId: string) {
+    const old = f.repos.execution.getSessionExecutions(sessionId)[0]!;
+    expect(old.currentAttempt).toMatchObject({ state: 'reconcile_required', reconcileReason: { code: 'STOP_RESULT_UNKNOWN' } });
+    const facts = await f.runtime.inspectUnknownTask(sessionId, old.task.id);
+    await f.runtime.resolveUnknownTask(sessionId, { taskId: old.task.id, target: facts.target!, decisionId: `test:${sessionId}`, action: 'failed', evidenceRefs: ['fixture:stopped-by-revision-reviewed'] }, { kind: 'installation_owner', id: 'installation_owner' });
+  }
+  const withJoin = (instruction: string): WorkPlan => ({ ...plan, steps: plan.steps.map(step => step.id === 'join' ? { ...step, instruction } : step) });
+
+  it('keeps unaffected results, stops and reruns the changed running step, and records the version history', async () => {
+    const f = await fixture(); const item = await joinRunning(f);
+    const running = await f.get(item.id); const oldJoin = running.steps[2]!.attempts[0]!;
+    const preview = await f.service.previewRevision(f.parent.id, item.id, { expectedRevision: running.revision, plan: withJoin('Compare and rank both results') }, 'ou_owner');
+    expect(preview).toMatchObject({ planVersion: 1, nextVersion: 2, requiresConfirmation: false, impact: { keep: ['a', 'b'], rerun: ['join'], stop: ['join'], remove: [], add: [] } });
+    expect((await f.get(item.id)).revision).toBe(running.revision);
+    expect(f.stopped).not.toContain(oldJoin.sessionId);
+    const revised = await f.service.revise(f.parent.id, item.id, { expectedRevision: running.revision, plan: withJoin('Compare and rank both results'), reason: '需要排序' }, 'ou_owner');
+    expect(f.stopped).toContain(oldJoin.sessionId);
+    expect(revised).toMatchObject({ planVersion: 2, status: 'running', steps: [{ status: 'completed' }, { status: 'completed' }, { status: 'pending' }] });
+    expect(revised.steps[2]!.attempts[0]).toMatchObject({ supersededByPlanVersion: 2, status: 'interrupted' });
+    expect(revised.planHistory!.map(version => [version.version, version.source, version.actor, version.reason])).toEqual([[1, 'create', undefined, undefined], [2, 'human', 'creator', '需要排序']]);
+    expect(revised.planHistory![0]!.plan).toEqual(plan);
+    expect(JSON.stringify(revised)).not.toContain('ou_owner');
+    await expect(f.service.authorizeExecution(oldJoin.sessionId!, 'ou_owner')).rejects.toMatchObject({ code: 'WORK_ITEM_TASK_REVOKED' });
+    for (let round = 0; round < 3; round++) await f.tick();
+    expect(f.calls).toHaveLength(3);
+    await reconcileStopped(f, oldJoin.sessionId!);
+    await eventually(async () => { await f.tick(); return f.calls.length === 4; });
+    expect(f.calls[3]!.prompt).toContain('Compare and rank both results');
+    expect(f.calls[3]!.prompt).toContain('First result'); expect(f.calls[3]!.prompt).toContain('Second result');
+    expect(f.calls[3]!.sessionId).not.toBe(oldJoin.sessionId);
+    await f.finish(f.calls[3]!, 'Ranked comparison'); await f.tick();
+    const done = await f.get(item.id);
+    expect(done).toMatchObject({ status: 'completed', output: { text: 'Ranked comparison' } });
+    expect(done.steps[0]!.attempts).toHaveLength(1); expect(done.steps[1]!.attempts).toHaveLength(1);
+    expect(f.calls).toHaveLength(4);
+  });
+
+  it('rejects stale and concurrent revisions so only one plan wins', async () => {
+    const f = await fixture(); f.gate(); const item = await f.create();
+    await expect(f.service.revise(f.parent.id, item.id, { expectedRevision: item.revision + 1, plan: withJoin('x') }, 'ou_owner')).rejects.toMatchObject({ code: 'WORK_ITEM_CONFLICT', statusCode: 409 });
+    const results = await Promise.allSettled([withJoin('first'), withJoin('second')].map(next => f.service.revise(f.parent.id, item.id, { expectedRevision: item.revision, plan: next }, 'ou_owner')));
+    expect(results.map(result => result.status).sort()).toEqual(['fulfilled', 'rejected']);
+    expect((results.find(result => result.status === 'rejected') as PromiseRejectedResult).reason).toMatchObject({ code: 'WORK_ITEM_CONFLICT' });
+    const current = await f.get(item.id);
+    // 未确认的初始计划改了仍待确认，不派发。
+    expect(current).toMatchObject({ planVersion: 2, status: 'awaiting_confirmation' });
+    await expect(f.service.revise(f.parent.id, item.id, { expectedRevision: current.revision, plan: current.plan }, 'ou_owner')).rejects.toMatchObject({ code: 'WORK_ITEM_REVISION_EMPTY' });
+    await expect(f.service.revise(f.parent.id, item.id, { expectedRevision: current.revision, plan: withJoin('other') }, 'ou_other')).rejects.toMatchObject({ statusCode: 403 });
+    await f.tick(); expect(f.calls).toHaveLength(0);
+  });
+
+  it('refuses unauthorized new Agents', async () => {
+    const f = await fixture(); const item = await f.create({ ...plan, steps: plan.steps.map(step => ({ ...step, agentId: 'alpha' })) });
+    f.denyAgent('beta');
+    await expect(f.service.previewRevision(f.parent.id, item.id, { expectedRevision: item.revision, plan }, 'ou_owner')).rejects.toMatchObject({ code: 'WORK_ITEM_AGENT_FORBIDDEN' });
+  });
+
+  it.each(['unproven', 'throws'] as const)('keeps the original plan when a running step cannot be proven stopped (%s)', async outcome => {
+    const f = await fixture(); const item = await joinRunning(f);
+    const before = await stored(f, item.id);
+    const stop = vi.spyOn(f.runtime, 'stopWorkItemSession');
+    if (outcome === 'throws') stop.mockRejectedValue(new Error('driver unreachable')); else stop.mockResolvedValue(false);
+    await expect(f.service.revise(f.parent.id, item.id, { expectedRevision: before.item.revision, plan: withJoin('Changed') }, 'ou_owner')).rejects.toMatchObject({ code: 'WORK_ITEM_REVISION_STOP_FAILED', statusCode: 409 });
+    expect(stop).toHaveBeenCalledWith(f.calls[2]!.sessionId, expect.anything());
+    expect(await stored(f, item.id)).toEqual(before);
+    stop.mockRestore();
+    await f.finish(f.calls[2]!, 'Original comparison'); await f.tick();
+    expect(await f.get(item.id)).toMatchObject({ status: 'completed', planVersion: 1, plan, output: { text: 'Original comparison' } });
+    expect(f.calls).toHaveLength(3);
+  });
+
+  it('is all-old after a restart between the stop and the commit, and never resends the stopped step', async () => {
+    const f = await fixture(); const item = await joinRunning(f);
+    const before = await f.get(item.id);
+    const cas = f.repos.config.compareAndSet!.bind(f.repos.config);
+    const crash = vi.spyOn(f.repos.config, 'compareAndSet').mockImplementation(async (key, expected, value) => {
+      if (key === `work_item:${item.id}` && value.includes('"planVersion":2')) throw new Error('process exited');
+      return cas(key, expected, value);
+    });
+    await expect(f.service.revise(f.parent.id, item.id, { expectedRevision: before.revision, plan: withJoin('Changed') }, 'ou_owner')).rejects.toThrow('process exited');
+    crash.mockRestore();
+    expect(f.stopped).toContain(before.steps[2]!.attempts[0]!.sessionId);
+    await f.reboot(); await f.tick(); await f.tick();
+    const after = await f.get(item.id);
+    expect(after).toMatchObject({ planVersion: 1, plan, status: 'blocked' });
+    expect(after.steps.map(step => step.status)).toEqual(['completed', 'completed', 'blocked']);
+    expect(f.calls).toHaveLength(3);
+    await expect(f.service.revise(f.parent.id, item.id, { expectedRevision: after.revision, plan: withJoin('Changed') }, 'ou_owner')).rejects.toMatchObject({ code: 'WORK_ITEM_REVISION_UNSAFE' });
+  });
+
+  it('lets an Agent narrow the plan directly but holds widening changes for human confirmation while the current plan keeps running, across a restart', async () => {
+    const f = await fixture(); const item = await f.create(); await f.tick(); await eventually(async () => f.calls.length === 1);
+    let current = await f.get(item.id);
+    const narrowed = withJoin('Short comparison');
+    current = await f.service.revise(f.parent.id, item.id, { expectedRevision: current.revision, plan: narrowed }, 'ou_owner', 'agent');
+    expect(current).toMatchObject({ planVersion: 2, status: 'running' });
+    expect(current.planHistory!.at(-1)).toMatchObject({ source: 'agent', actor: 'creator' });
+    const widened: WorkPlan = { ...narrowed, steps: [...narrowed.steps.slice(0, 2), { id: 'extra', title: 'Extra', kind: 'agent', agentId: 'beta', instruction: 'More', dependsOn: [] }, { ...narrowed.steps[2]!, dependsOn: ['a', 'b', 'extra'] }] };
+    const preview = await f.service.previewRevision(f.parent.id, item.id, { expectedRevision: current.revision, plan: widened }, 'ou_owner', 'agent');
+    expect(preview).toMatchObject({ requiresConfirmation: true, confirmationReasons: ['新增步骤 extra'] });
+    current = await f.service.revise(f.parent.id, item.id, { expectedRevision: current.revision, plan: widened, reason: 'needs more evidence' }, 'ou_owner', 'agent');
+    // 待确认修订不改状态：计划冻结在 v2，目标仍是 running。
+    expect(current).toMatchObject({ status: 'running', planVersion: 2, plan: narrowed, pendingRevision: { version: 3, reason: 'needs more evidence', impact: { add: ['extra'], rerun: ['join'] }, digest: expect.stringMatching(/^[0-9a-f]{64}$/) } });
+    const digest = current.pendingRevision!.digest;
+    await f.finish(f.calls[0]!, 'First result');
+    await f.reboot();
+    // 待确认期间照常收运行中步骤的结果，并按当前生效的 v2 派发下一步。
+    await eventually(async () => { await f.tick(); return f.calls.length === 2; });
+    expect(f.calls[1]!.prompt).toContain('Research B');
+    current = await f.get(item.id);
+    expect(current).toMatchObject({ status: 'running', planVersion: 2, plan: narrowed, pendingRevision: { version: 3, digest } });
+    expect(current.steps.map(step => step.status)).toEqual(['completed', 'running', 'pending']);
+    await expect(f.service.confirm(f.parent.id, item.id, current.revision, 'ou_other')).rejects.toMatchObject({ statusCode: 403 });
+    await expect(f.service.confirm(f.parent.id, item.id, current.revision, 'ou_owner', 'f'.repeat(64))).rejects.toMatchObject({ code: 'WORK_ITEM_REVISION_CONFIRM_MISMATCH', statusCode: 409 });
+    // 带摘要确认只认内容：调度推进 revision 之后，旧 revision 加正确摘要仍可确认。
+    current = await f.service.confirm(f.parent.id, item.id, current.revision - 1, 'ou_owner', digest);
+    expect(current).toMatchObject({ planVersion: 3, status: 'running', plan: widened });
+    expect(current.pendingRevision).toBeUndefined();
+    expect(current.planHistory!.at(-1)).toMatchObject({ version: 3, source: 'agent', reason: 'needs more evidence' });
+    await f.finish(f.calls[1]!, 'Second result');
+    await eventually(async () => { await f.tick(); return f.calls.length === 3; });
+    expect(f.calls[2]!.prompt).toContain('More');
+  });
+
+  it('replacing a pending revision changes its digest, and confirming with the old digest is rejected', async () => {
+    const f = await fixture(); f.gate(); const item = await f.create();
+    let current = await f.service.confirm(f.parent.id, item.id, item.revision, 'ou_owner');
+    current = await f.service.revise(f.parent.id, item.id, { expectedRevision: current.revision, plan: withJoin('Narrow one') }, 'ou_owner', 'agent');
+    const first = current.pendingRevision!;
+    current = await f.service.revise(f.parent.id, item.id, { expectedRevision: current.revision, plan: withJoin('Narrow two') }, 'ou_owner', 'agent');
+    const second = current.pendingRevision!;
+    expect(second.version).toBe(first.version);
+    expect(second.digest).not.toBe(first.digest);
+    await expect(f.service.confirm(f.parent.id, item.id, current.revision, 'ou_owner', first.digest)).rejects.toMatchObject({ code: 'WORK_ITEM_REVISION_CONFIRM_MISMATCH' });
+    await expect(f.service.discardRevision(f.parent.id, item.id, current.revision, 'ou_owner', first.digest)).rejects.toMatchObject({ code: 'WORK_ITEM_REVISION_CONFIRM_MISMATCH' });
+    expect((await f.get(item.id)).pendingRevision?.digest).toBe(second.digest);
+    current = await f.service.confirm(f.parent.id, item.id, current.revision, 'ou_owner', second.digest);
+    expect(current.plan).toEqual(withJoin('Narrow two'));
+  });
+
+  it('refuses a confirmation whose stop or discarded results grew since the revision was shown, and refreshes impact and digest', async () => {
+    const f = await fixture(); f.gate(); const item = await f.create();
+    let current = await f.service.confirm(f.parent.id, item.id, item.revision, 'ou_owner');
+    await f.tick(); await eventually(async () => f.calls.length === 1);
+    expect(f.calls[0]!.prompt).toContain('Research A');
+    const withB = { ...plan, steps: plan.steps.map(step => step.id === 'b' ? { ...step, instruction: 'Research B with sources' } : step) };
+    current = await f.service.revise(f.parent.id, item.id, { expectedRevision: (await f.get(item.id)).revision, plan: withB }, 'ou_owner', 'agent');
+    // 提交时 b 还没开始：卡片上「先停止」为空。
+    const shown = current.pendingRevision!;
+    expect(shown.impact).toMatchObject({ rerun: ['b', 'join'], stop: [], discard: [] });
+    // 等待确认期间 b 开始运行。
+    await f.finish(f.calls[0]!, 'First result');
+    await eventually(async () => { await f.tick(); return f.calls.length === 2; });
+    const runningB = f.calls[1]!.sessionId;
+    await expect(f.service.confirm(f.parent.id, item.id, 1, 'ou_owner', shown.digest)).rejects.toMatchObject({ code: 'WORK_ITEM_REVISION_IMPACT_CHANGED', statusCode: 409 });
+    current = await f.get(item.id);
+    expect(f.stopped).not.toContain(runningB);
+    expect(current).toMatchObject({ planVersion: 1, plan, pendingRevision: { version: shown.version, impact: { stop: ['b'], discard: [] } } });
+    const refreshed = current.pendingRevision!;
+    expect(refreshed.digest).not.toBe(shown.digest);
+    // 旧卡片、旧待处理条目带着旧摘要，不能再确认。
+    await expect(f.service.confirm(f.parent.id, item.id, 1, 'ou_owner', shown.digest)).rejects.toMatchObject({ code: 'WORK_ITEM_REVISION_CONFIRM_MISMATCH' });
+    // 再等一会儿 b 完成、join 开始运行：b 从「先停止」变成「作废」已经看到过，新出现的是要停止的 join。
+    await f.finish(f.calls[1]!, 'Second result');
+    await eventually(async () => { await f.tick(); return f.calls.length === 3; });
+    await expect(f.service.confirm(f.parent.id, item.id, 1, 'ou_owner', refreshed.digest)).rejects.toMatchObject({ code: 'WORK_ITEM_REVISION_IMPACT_CHANGED', message: expect.stringContaining("stops or discards join;") });
+    const latest = (await f.get(item.id)).pendingRevision!;
+    expect(latest.impact).toMatchObject({ stop: ['join'], discard: ['b'] });
+    expect(latest.acknowledged).toEqual(['b', 'join']);
+    current = await f.service.confirm(f.parent.id, item.id, 1, 'ou_owner', latest.digest);
+    expect(current).toMatchObject({ planVersion: 2, plan: withB });
+    expect(current.steps.find(step => step.id === 'b')!.attempts[0]).toMatchObject({ supersededByPlanVersion: 2 });
+    expect(current.planHistory!.at(-1)!.impact).toMatchObject({ discard: ['b'] });
+  });
+
+  it('does not refuse again when a step already shown as stopped finishes and is discarded instead', async () => {
+    const f = await fixture(); f.gate();
+    const gated: WorkPlan = { title: 'Wait before join', outputStepId: 'join', steps: [
+      { id: 'b', title: 'Research', kind: 'agent', agentId: 'beta', instruction: 'Research B', dependsOn: [] },
+      { id: 'ask', title: 'Ask', kind: 'wait', instruction: 'Proceed?', dependsOn: [] },
+      { id: 'join', title: 'Synthesis', kind: 'agent', agentId: 'alpha', instruction: 'Compare', dependsOn: ['b', 'ask'] }
+    ] };
+    const item = await f.create(gated);
+    await f.service.confirm(f.parent.id, item.id, item.revision, 'ou_owner');
+    await eventually(async () => { await f.tick(); return f.calls.length === 1; });
+    const next = { ...gated, steps: gated.steps.map(step => step.id === 'b' ? { ...step, instruction: 'Research B with sources' } : step) };
+    const pending = (await f.service.revise(f.parent.id, item.id, { expectedRevision: (await f.get(item.id)).revision, plan: next }, 'ou_owner', 'agent')).pendingRevision!;
+    expect(pending.impact).toMatchObject({ rerun: ['b', 'join'], stop: ['b'], discard: [] });
+    // b 跑完：现在是「作废 b」，join 还在等人工回答没开始。
+    await f.finish(f.calls[0]!, 'Research result'); await f.tick();
+    expect((await f.get(item.id)).steps.map(step => step.status)).toEqual(['completed', 'waiting', 'pending']);
+    const confirmed = await f.service.confirm(f.parent.id, item.id, 1, 'ou_owner', pending.digest);
+    expect(confirmed).toMatchObject({ planVersion: 2, plan: next });
+    expect(confirmed.planHistory!.at(-1)!.impact).toMatchObject({ stop: [], discard: ['b'] });
+  });
+
+  it('binds a digest-based first confirmation to the plan the person saw, even after an Agent edits the unconfirmed plan', async () => {
+    const f = await fixture(); f.gate(); const item = await f.create();
+    const seen = workPlanDigest(item.plan);
+    const edited = await f.service.revise(f.parent.id, item.id, { expectedRevision: item.revision, plan: withJoin('Agent changed this') }, 'ou_owner', 'agent');
+    expect(edited).toMatchObject({ status: 'awaiting_confirmation', planVersion: 2 });
+    await expect(f.service.confirm(f.parent.id, item.id, edited.revision, 'ou_owner', seen)).rejects.toMatchObject({ code: 'WORK_ITEM_REVISION_CONFIRM_MISMATCH' });
+    expect((await f.get(item.id)).status).toBe('awaiting_confirmation');
+    expect(await f.service.confirm(f.parent.id, item.id, edited.revision, 'ou_owner', workPlanDigest(edited.plan))).toMatchObject({ status: 'running', planVersion: 2 });
+  });
+
+  it('reports a failed work item with a pending revision as still in progress to schedules and triggers', async () => {
+    const f = await fixture(); const item = await f.create();
+    const pendingRevision = { version: 2 } as WorkItem['pendingRevision'];
+    expect(workItemProgressStatus({ status: 'failed', pendingRevision })).toBe('running');
+    expect(workItemProgressStatus({ status: 'failed' })).toBe('failed');
+    expect(workItemProgressStatus({ status: 'blocked', pendingRevision })).toBe('blocked');
+    const key = `work_item:${item.id}`; const raw = (await f.repos.config.get(key))!; const record = JSON.parse(raw);
+    record.item.status = 'failed'; record.item.pendingRevision = pendingRevision;
+    expect(await f.repos.config.compareAndSet!(key, raw, JSON.stringify(record))).toBe(true);
+    expect(readWorkItemStatus(f.repos.config, item.id)).toBe('running');
+  });
+
+  it('rejects a step retry while a revision is pending, and allows it after the revision is discarded', async () => {
+    const f = await fixture(); const item = await f.create(); await f.tick(); await eventually(async () => f.calls.length === 1);
+    await f.finish(f.calls[0]!, 'Kept result'); await f.tick(); await eventually(async () => f.calls.length === 2); await f.finish(f.calls[1]!, '', true); await f.tick();
+    let current = await f.get(item.id); expect(current.status).toBe('failed');
+    const failedId = current.steps.find(step => step.status === 'failed')!.id;
+    // 改已失败的步骤会让它自动重跑，Agent 提交时必须等人确认。
+    current = await f.service.revise(f.parent.id, item.id, { expectedRevision: current.revision, plan: { ...plan, steps: plan.steps.map(step => step.id === failedId ? { ...step, instruction: 'Try another source' } : step) } }, 'ou_owner', 'agent');
+    expect(current).toMatchObject({ status: 'failed', planVersion: 1, pendingRevision: { confirmationReasons: [`重跑已失败的步骤 ${failedId}`] } });
+    await expect(f.service.retryStep(f.parent.id, item.id, failedId, current.revision, 'ou_owner')).rejects.toMatchObject({ code: 'WORK_ITEM_REVISION_PENDING', statusCode: 409 });
+    current = await f.service.discardRevision(f.parent.id, item.id, current.revision, 'ou_owner');
+    expect(current).toMatchObject({ status: 'failed', planVersion: 1 });
+    expect(current.pendingRevision).toBeUndefined();
+    await f.service.retryStep(f.parent.id, item.id, failedId, current.revision, 'ou_owner'); await f.tick();
+    await eventually(async () => f.calls.length === 3);
+  });
+
+  it.each([['agent', true], ['human', false]] as const)('attempts superseded by the %s revision count toward the retry limit: %s', async (source, limited) => {
+    const f = await fixture(); const item = await f.create();
+    const key = `work_item:${item.id}`; const raw = (await f.repos.config.get(key))!; const record = JSON.parse(raw);
+    const time = new Date().toISOString();
+    const attempt = (number: number, superseded?: number) => ({ id: `${item.id}:b:${number}`, number, status: 'failed', createdAt: time, updatedAt: time, ...(superseded ? { supersededByPlanVersion: superseded } : {}) });
+    record.item.status = 'failed'; record.item.planVersion = 2;
+    record.item.planHistory = [{ version: 1, plan, createdAt: time, source: 'create' }, { version: 2, plan, createdAt: time, source, actor: 'creator' }];
+    record.item.steps[1] = { id: 'b', status: 'failed', attempts: [attempt(1, 2), attempt(2, 2), attempt(3)] };
+    expect(await f.repos.config.compareAndSet!(key, raw, JSON.stringify(record))).toBe(true);
+    const current = await f.get(item.id);
+    const retry = f.service.retryStep(f.parent.id, item.id, 'b', current.revision, 'ou_owner');
+    if (limited) await expect(retry).rejects.toMatchObject({ code: 'WORK_ITEM_RETRY_UNSAFE' });
+    else expect(await retry).toMatchObject({ status: 'running', steps: [{}, { id: 'b', status: 'pending' }, {}] });
+  });
+
+  it('requires confirmation for any Agent revision of a gated work item and can discard it', async () => {
+    const f = await fixture(); f.gate(); const item = await f.create();
+    const confirmed = await f.service.confirm(f.parent.id, item.id, item.revision, 'ou_owner');
+    const pending = await f.service.revise(f.parent.id, item.id, { expectedRevision: confirmed.revision, plan: withJoin('Narrow only') }, 'ou_owner', 'agent');
+    expect(pending).toMatchObject({ status: 'running', planVersion: 1, plan, pendingRevision: { confirmationReasons: ['本目标要求人工确认计划'] } });
+    // 待确认修订期间保存模板，只保存已经确认生效的计划，不带入未确认的修订。
+    expect((await f.service.saveTemplate(f.parent.id, item.id, '已确认计划', 'ou_owner')).plan).toEqual(plan);
+    const discarded = await f.service.discardRevision(f.parent.id, item.id, pending.revision, 'ou_owner');
+    expect(discarded).toMatchObject({ status: 'running', planVersion: 1, plan });
+    expect(discarded.pendingRevision).toBeUndefined();
+    await expect(f.service.discardRevision(f.parent.id, item.id, discarded.revision, 'ou_owner')).rejects.toMatchObject({ code: 'WORK_ITEM_NO_PENDING_REVISION' });
+    // 人工修订预览后直接生效，不再要求确认。
+    expect(await f.service.revise(f.parent.id, item.id, { expectedRevision: discarded.revision, plan: withJoin('Human change') }, 'ou_owner')).toMatchObject({ status: 'running', planVersion: 2 });
+  });
+
+  it('retires a removed running step, keeps its child bound, and does not reuse its attempt identity when re-added', async () => {
+    const f = await fixture(); const item = await f.create(); await f.tick(); await eventually(async () => f.calls.length === 1);
+    const running = await f.get(item.id);
+    const removedStep = running.steps.find(step => step.status === 'running' && step.attempts[0]!.sessionId === f.calls[0]!.sessionId)!;
+    const keptId = removedStep.id === 'a' ? 'b' : 'a';
+    const withoutStep: WorkPlan = { ...plan, steps: plan.steps.filter(step => step.id !== removedStep.id).map(step => step.id === 'join' ? { ...step, dependsOn: [keptId] } : step) };
+    const revised = await f.service.revise(f.parent.id, item.id, { expectedRevision: running.revision, plan: withoutStep }, 'ou_owner');
+    expect(f.stopped).toContain(f.calls[0]!.sessionId);
+    expect(revised.retiredSteps).toMatchObject([{ id: removedStep.id, attempts: [{ supersededByPlanVersion: 2 }] }]);
+    expect(await f.service.parentForSession(f.calls[0]!.sessionId)).toMatchObject({ workId: item.id, stepId: removedStep.id });
+    // 停下的那次执行结果未知：核对前同一工作区不开始任何新步骤（保留的另一步也在等）。
+    for (let round = 0; round < 3; round++) await f.tick();
+    expect(f.calls).toHaveLength(1);
+    expect((await f.get(item.id)).steps.find(step => step.id === keptId)).toMatchObject({ status: 'pending', attempts: [] });
+    await expect(f.service.authorizeExecution(f.calls[0]!.sessionId, 'ou_owner')).rejects.toMatchObject({ code: 'WORK_ITEM_TASK_REVOKED' });
+    const readded = await f.service.revise(f.parent.id, item.id, { expectedRevision: revised.revision, plan }, 'ou_owner');
+    expect(readded.retiredSteps).toBeUndefined();
+    expect(readded.steps.find(step => step.id === removedStep.id)!.attempts).toHaveLength(1);
+    await reconcileStopped(f, f.calls[0]!.sessionId);
+    await eventually(async () => { await f.tick(); return (await f.get(item.id)).steps.find(step => step.id === removedStep.id)!.attempts.length === 2; });
+    const attempts = (await f.get(item.id)).steps.find(step => step.id === removedStep.id)!.attempts;
+    expect(attempts[1]).toMatchObject({ number: 2 });
+    expect(attempts[1]!.sessionId).not.toBe(attempts[0]!.sessionId);
+    expect(new Set(f.calls.map(call => call.sessionId)).size).toBe(f.calls.length);
   });
 });

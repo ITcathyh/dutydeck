@@ -1,7 +1,7 @@
 import { clearTaskReportSafely } from '@dutydeck/shared';
 import { larkMessageAnchor } from './message-anchor.js';
 import { describeLarkTaskRecovery } from './task-recovery.js';
-import { permissionDisplayText, timeLoop } from '@dutydeck/shared';
+import { cleanPermissionRejectReason, permissionDisplayText, permissionRejectReasonMaxLength, timeLoop } from '@dutydeck/shared';
 import { createHash, randomUUID } from 'node:crypto';
 import type { AgentEvent, ConfigRepository, PermissionRequestData, PolicyAction } from '@dutydeck/shared';
 import type { RelayAskBroker, RelayAskChoice, RelayDeferredAsk } from '@dutydeck/relay';
@@ -79,6 +79,8 @@ export interface LarkInteraction extends LarkInteractionContext {
   intent?: string;
   /** 可以「本会话允许」时这条命令的精确匹配键；高危、被脱敏或被截断的命令不设，卡上也不给按钮 */
   sessionAllowKey?: string;
+  /** 拒绝时附带的说明摘要（已脱敏、单行、截断），终态卡文案据此显示 */
+  rejectReason?: string;
   /** 建卡时群 @ 开关是否开启；截止前提醒据此决定要不要 @ */
   groupMention?: boolean;
   /** plan：用户在计划卡上的决定与修改意见，进入 resolving 时写入，重启后据此补完提交 */
@@ -150,12 +152,36 @@ const pastDeadline = (record: LarkInteraction, now = Date.now()) => hasDeadline(
  */
 const confirmationDeadline = (record: LarkInteraction) => record.expiresAt ? Date.parse(record.expiresAt)
   : Date.parse(record.cardCreatedAt ?? record.updatedAt) + larkPermissionTimeoutMs;
-const prefix = (appId: string) => `lark.interaction.${appId}.`;
+const interactionPrefix = 'lark.interaction.';
+const prefix = (appId: string) => `${interactionPrefix}${appId}.`;
+/** 只读：所有机器人下仍在等人点按钮的计划卡与验收卡。「待处理」汇总用，是否仍有效由调用方对照任务状态判断。 */
+export async function listPendingLarkDecisionCards(store: Pick<ConfigRepository, 'list'>): Promise<LarkInteraction[]> {
+  return (await store.list!(interactionPrefix)).map(row => JSON.parse(row.value) as LarkInteraction)
+    .filter(record => (record.kind === 'plan' || record.kind === 'result') && record.state === 'pending');
+}
 const stale = () => new LarkServiceError('LARK_INTERACTION_EXPIRED', '此操作已处理或失效。请发送 `/status` 查看任务状态，不要重复操作旧卡。', 409);
 const button = (record: LarkInteraction, action: string, label: string): LarkCardElement => ({
   tag: 'button', element_id: `workflow_${action}`, text: { tag: 'plain_text', content: label }, type: action === 'approve' ? 'primary' : 'default',
   behaviors: [{ type: 'callback', value: { dutydeck_workflow: action, request_id: record.id, generation: record.boot } }]
 });
+
+/** 「拒绝并说明」：JSON 2.0 表单，input 提交值在 form_value.reason，回调与「拒绝」同一个动作。 */
+const rejectReasonForm = (record: LarkInteraction): LarkCardElement => ({
+  tag: 'form', element_id: 'workflow_reject_form', name: `workflow_reject_${record.id}`,
+  direction: 'vertical', vertical_spacing: '8px', margin: '0px',
+  elements: [
+    { tag: 'input', element_id: 'workflow_reject_input', name: 'reason',
+      input_type: 'multiline_text', max_length: 1000,
+      placeholder: { tag: 'plain_text', content: '原因会记入审批记录；终端模式的 Agent 会收到，ACP 模式的只知道被拒绝。留空等同于「拒绝」' } },
+    { tag: 'button', element_id: 'workflow_reject_submit', type: 'default',
+      text: { tag: 'plain_text', content: '拒绝并说明' }, form_action_type: 'submit',
+      behaviors: [{ type: 'callback', value: { dutydeck_workflow: 'reject', request_id: record.id, generation: record.boot } }] }
+  ]
+});
+
+/** 终态文案里的拒绝说明：先脱敏再折成一行并截断；转义在渲染处做。 */
+const rejectReasonSummary = (reason: string) => larkCommandEcho(permissionDisplayText(reason, [], permissionRejectReasonMaxLength), 120);
+const withRejectReason = (message: string, reason?: string) => reason ? `${message}\n\n原因：${escapeLarkPromptEcho(reason)}` : message;
 
 /** 单选：每个选项一个回调按钮，点按即提交，回调 value 复用 dutydeck_workflow 命名空间。 */
 const singleChoiceElements = (record: LarkInteraction, choices: RelayAskChoice[]): LarkCardElement[] =>
@@ -420,7 +446,8 @@ export class LarkWorkflowInteractions {
       if (current.timedOutAt || ['approved', 'rejected'].includes(current.state)
         || current.state === 'resolving' && current.boot === this.boot) return current;
       try {
-        return await this.move(current, receipt.status, undefined, { closeMessage: undefined, cardClosedAt: undefined, closeAttempts: 0, closeRetryAt: undefined });
+        return await this.move(current, receipt.status, undefined, { closeMessage: undefined, cardClosedAt: undefined, closeAttempts: 0, closeRetryAt: undefined,
+          ...(receipt.status === 'rejected' && receipt.reason ? { rejectReason: rejectReasonSummary(receipt.reason) } : {}) });
       } catch (error) {
         if (!(error instanceof LarkServiceError) || error.code !== 'LARK_INTERACTION_EXPIRED') throw error;
       }
@@ -434,7 +461,7 @@ export class LarkWorkflowInteractions {
     const outcome = record.kind === 'plan'
       ? ({ approved: '已批准', needs_changes: '已提修改意见', rejected: '已取消' } as Record<string, string>)[record.state]
       : ({ answered: record.adhdMode === true && record.answerLabel ? `已${record.answerLabel}` : '已回答', approved: '已允许', rejected: '已拒绝' } as Record<string, string>)[record.state];
-    return [[outcome ?? '已处理', actor, shanghaiClock(Date.parse(record.updatedAt))].filter(Boolean).join(' · '),
+    return [withRejectReason([outcome ?? '已处理', actor, shanghaiClock(Date.parse(record.updatedAt))].filter(Boolean).join(' · '), record.state === 'rejected' ? record.rejectReason : undefined),
       ...(record.kind === 'plan' ? [planClosedText(record)] : [])].join('\n\n');
   }
   private async renderClosed(record: LarkInteraction, message: string) {
@@ -502,7 +529,7 @@ export class LarkWorkflowInteractions {
   private async renderPendingPermission(record: LarkInteraction) {
     if (!record.cardId) return;
     await this.service.update({ messageId: record.cardId, taskId: record.id, taskName: record.taskName || '确认本次操作', permissionMode: 'ask', state: 'running', statusLabel: '待审批', awaitingHuman: true, readOnly: true,
-      elements: [...intentElements(record), { tag: 'div', text: { tag: 'plain_text', content: record.question.slice(0, 6000) } }, { tag: 'markdown', content: '上次提交未送达执行端，请重新批准或拒绝。' }, button(record, 'approve', '允许本次'), button(record, 'reject', '拒绝')] }).catch(() => undefined);
+      elements: [...intentElements(record), { tag: 'div', text: { tag: 'plain_text', content: record.question.slice(0, 6000) } }, { tag: 'markdown', content: '上次提交未送达执行端，请重新批准或拒绝。' }, button(record, 'approve', '允许本次'), button(record, 'reject', '拒绝'), rejectReasonForm(record)] }).catch(() => undefined);
   }
   async expireTask(appId: string, taskId: string) {
     for (let record of await this.list(appId)) {
@@ -811,6 +838,7 @@ export class LarkWorkflowInteractions {
       ...(kind === 'permission' ? [button(record, 'approve', '允许本次'), button(record, 'reject', '拒绝')] : []),
       // 只有发起人能点、且只在发起人本人能批准时给；高危、被脱敏或被截断的命令没有匹配键，不给。
       ...(kind === 'permission' && record.sessionAllowKey && requesterApproves ? [button(record, 'allow_session', '本会话允许此命令')] : []),
+      ...(kind === 'permission' ? [rejectReasonForm(record)] : []),
       ...(record.expiresAt && !(kind === 'ask' && record.adhdMode === true) ? [{ tag: 'markdown', element_id: 'workflow_deadline', text_size: 'notation', content: kind === 'permission'
         ? permissionDeadlineNotice(record.expiresAt)
         : `回答截止时间：${deadlineText(record.expiresAt)}。超时后请发送 /status 查看任务状态。` }] : [])
@@ -1153,7 +1181,7 @@ export class LarkWorkflowInteractions {
     catch { return false; }
     return true;
   }
-  async respond(input: { appId: string; chatId: string; actorId?: string; requestId: string; action: 'answer' | 'approve' | 'reject' | 'accept' | 'changes' | 'allow_session' | 'plan_approve' | 'plan_revise' | 'plan_cancel'; answer?: string; selected?: string[]; cardId?: string; generation?: string; callback?: boolean; deferClose?: boolean }): Promise<string> {
+  async respond(input: { appId: string; chatId: string; actorId?: string; requestId: string; action: 'answer' | 'approve' | 'reject' | 'accept' | 'changes' | 'allow_session' | 'plan_approve' | 'plan_revise' | 'plan_cancel'; answer?: string; reason?: string; selected?: string[]; cardId?: string; generation?: string; callback?: boolean; deferClose?: boolean }): Promise<string> {
     if (!input.deferClose) return this.respondNow(input);
     const key = prefix(input.appId) + input.requestId;
     const entry = this.deferredCloses.get(key) ?? { active: 0, timer: undefined };
@@ -1263,6 +1291,10 @@ export class LarkWorkflowInteractions {
       }
       if (!answerText) throw new LarkServiceError('LARK_ANSWER_EMPTY', '回答不能为空。', 400);
     }
+    // 拒绝说明：与「拒绝」同一授权、同一幂等路径；只在最终提交前清洗，空说明等同于普通拒绝。
+    const rejectReasonText = input.action === 'reject' && typeof input.reason === 'string' ? cleanPermissionRejectReason(input.reason) : undefined;
+    if (rejectReasonText && rejectReasonText.length > permissionRejectReasonMaxLength) throw new LarkServiceError('LARK_REASON_TOO_LONG', `拒绝说明不能超过 ${permissionRejectReasonMaxLength} 个字符。`, 400);
+    const rejectReason = rejectReasonText ? rejectReasonSummary(rejectReasonText) : undefined;
     const answerLabel = record.kind === 'ask' && record.adhdMode === true
       ? (this.broker?.get(record.nativeId)?.choices ?? []).filter(choice => (input.selected ?? [answerText]).includes(choice.value ?? choice.label)).map(choice => choice.label).join('、') || undefined
       : undefined;
@@ -1271,13 +1303,15 @@ export class LarkWorkflowInteractions {
       // The authoritative broker/runtime repeats the single-consumer and liveness check.
       if (input.action === 'answer') await this.broker!.answer(record.nativeId, answerText, { sessionId: record.sessionId });
       else {
-        const resolved = await this.runtime.resolvePermission!(record.sessionId, record.nativeId, input.action !== 'reject');
+        const resolved = rejectReasonText
+          ? await this.runtime.resolvePermission!(record.sessionId, record.nativeId, false, rejectReasonText)
+          : await this.runtime.resolvePermission!(record.sessionId, record.nativeId, input.action !== 'reject');
         if (resolved === false) throw stale();
       }
     } catch (error) {
       if ((error as { code?: string }).code === 'PERMISSION_ACCEPTED_AUDIT_FAILED') {
         if (input.action === 'allow_session') this.allowForSession(record);
-        await this.move(record, input.action === 'reject' ? 'rejected' : 'approved').catch(() => undefined);
+        await this.move(record, input.action === 'reject' ? 'rejected' : 'approved', undefined, rejectReason ? { rejectReason } : {}).catch(() => undefined);
         return '执行端已接受决策，审计回执暂未完成；请勿重复提交。';
       }
       // Runtime may reject before its driver consumes the decision (for example
@@ -1295,12 +1329,12 @@ export class LarkWorkflowInteractions {
     }
     if (input.action === 'allow_session') this.allowForSession(record);
     const state = input.action === 'answer' ? 'answered' : input.action === 'reject' ? 'rejected' : 'approved';
-    try { record = await this.move(record, state, undefined, answerLabel ? { answerLabel } : {}); }
+    try { record = await this.move(record, state, undefined, { ...(answerLabel ? { answerLabel } : {}), ...(rejectReason ? { rejectReason } : {}) }); }
     catch { return '执行端已接受决策，回执记录暂未更新；请勿重复提交。'; }
     // 关闭后的卡写清结果、处理人和时间；ADHD 模式回显受控选项文案，自由文本回答不上卡。
     const actor = isGroupChat(record.event.chatType) && record.actorId ? renderGroupMention(record.actorId) : undefined;
     const outcome = [input.action === 'answer' ? answerLabel ? `已${answerLabel}` : '已回答' : input.action === 'reject' ? '已拒绝' : '已允许', actor, shanghaiClock(Date.parse(record.updatedAt))].filter(Boolean).join(' · ');
-    const rendered = await this.renderClosed(record, input.action === 'allow_session' ? `${outcome}\n\n本会话内完全相同的命令之后会自动允许。` : outcome);
+    const rendered = await this.renderClosed(record, input.action === 'allow_session' ? `${outcome}\n\n本会话内完全相同的命令之后会自动允许。` : withRejectReason(outcome, rejectReason));
     if (!rendered) return '已处理，卡片状态更新失败，稍后自动重试；请勿重复提交。';
     if (input.action === 'answer') return echo ? `回答已送达原任务：${echo}` : '回答已送达原任务。';
     return input.action === 'allow_session' ? '已允许，本会话内完全相同的命令之后会自动允许。' : input.action === 'approve' ? '执行端已接受本次批准。' : '执行端已接受拒绝。';

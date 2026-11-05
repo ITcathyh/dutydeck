@@ -938,6 +938,44 @@ describe('runtime lifecycle acceptance', () => {
     await h.runtime.shutdown(); h.repos.close();
   });
 
+  it('forwards the user rejection reason verbatim to the driver and records a redacted copy in the permission record', async () => {
+    const h = harness(); const permissionTurn = deferred();
+    h.driver.requestPermission = vi.fn(input => { h.emit({ type: 'permission_request', data: { ...input, id: 'hook_r', status: 'pending' } }); return { id: 'hook_r', decision: new Promise(() => {}) }; });
+    h.driver.send = vi.fn(async () => { await permissionTurn.promise; h.emit({ type: 'text', data: { text: 'done' } }); h.emit({ type: 'completed', data: { stopReason: 'end_turn' } }); });
+    await h.runtime.initialize([agent]); const s = await h.runtime.start({ agentId: 'mock' });
+    const turn = h.runtime.send(s.id, 'test');
+    await vi.waitFor(() => expect(h.driver.send).toHaveBeenCalled());
+    h.runtime.requestDriverPermission(s.id, { title: 'Run tests', operation: { source: 'claude_permission_hook', kind: 'execute', command: 'pnpm test' } });
+    await vi.waitFor(() => expect(h.runtime.getPendingPermissions(s.id)).toHaveLength(1));
+    const [pending] = h.runtime.getPendingPermissions(s.id);
+    const reason = '改用测试库，password=hunter2 不要外传';
+    expect(await h.runtime.resolvePermission(s.id, pending!.id, false, reason)).toMatchObject({ status: 'rejected', reason: '改用测试库，password=[REDACTED] 不要外传' });
+    expect(h.driver.resolvePermission).toHaveBeenCalledWith('hook_r', false, reason);
+    const saved = (await h.runtime.getEvents(s.id)).filter(event => event.type === 'permission_request' && (event.data as any).status === 'rejected');
+    expect(saved.map(event => (event.data as any).reason)).toEqual(['改用测试库，password=[REDACTED] 不要外传']);
+    expect(JSON.stringify(saved)).not.toContain('hunter2');
+    permissionTurn.resolve(); expect((await turn).status).toBe('completed');
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
+  it('does not add a reason to approvals, and a rejection without a reason keeps the two-argument driver call', async () => {
+    const h = harness(); const permissionTurn = deferred();
+    h.driver.requestPermission = vi.fn(input => { h.emit({ type: 'permission_request', data: { ...input, id: 'hook_n', status: 'pending' } }); return { id: 'hook_n', decision: new Promise(() => {}) }; });
+    h.driver.send = vi.fn(async () => { await permissionTurn.promise; h.emit({ type: 'text', data: { text: 'done' } }); h.emit({ type: 'completed', data: { stopReason: 'end_turn' } }); });
+    await h.runtime.initialize([agent]); const s = await h.runtime.start({ agentId: 'mock' });
+    const turn = h.runtime.send(s.id, 'test');
+    await vi.waitFor(() => expect(h.driver.send).toHaveBeenCalled());
+    h.runtime.requestDriverPermission(s.id, { title: 'Run tests' });
+    await vi.waitFor(() => expect(h.runtime.getPendingPermissions(s.id)).toHaveLength(1));
+    const [pending] = h.runtime.getPendingPermissions(s.id);
+    const approved = await h.runtime.resolvePermission(s.id, pending!.id, true, '不该出现');
+    expect(approved.status).toBe('approved');
+    expect(approved).not.toHaveProperty('reason');
+    expect(h.driver.resolvePermission).toHaveBeenCalledWith('hook_n', true);
+    permissionTurn.resolve(); expect((await turn).status).toBe('completed');
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
   it('registers driver-originated hook permissions only during a turn and forwards the rejection reason', async () => {
     const h = harness(); const permissionTurn = deferred();
     const request = { title: 'Run tests', operation: { source: 'claude_permission_hook' as const, kind: 'execute', command: 'pnpm test' } };

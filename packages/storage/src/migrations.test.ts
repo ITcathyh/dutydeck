@@ -68,7 +68,7 @@ const BUSINESS_TABLES = [
 ]
 
 const SESSION_PATCH_COLUMNS = ['reasoning_effort', 'system_prompt', 'permission_mode', 'source', 'source_id', 'archived_at']
-const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44]
+const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45]
 const temporaryDirectories: string[] = []
 const linuxIt = process.platform === 'linux' ? it : it.skip
 
@@ -115,6 +115,28 @@ describe('storage migrations', () => {
     expect(db.prepare('SELECT active_steps FROM work_item_index WHERE config_key=?').pluck().get('work_item:blocked')).toBe(1);
     expect(db.prepare('SELECT session_id FROM work_item_sessions ORDER BY session_id').pluck().all()).toEqual(['child', 'unresolved-child']);
     expect(db.prepare('SELECT key,value FROM configs ORDER BY key').all()).toEqual([...records].sort(([a], [b]) => a!.localeCompare(b!)).map(([key, value]) => ({ key, value })));
+    expect(appliedVersions(db)).toEqual(ALL_VERSIONS);
+    expect(db.pragma('foreign_key_check')).toEqual([]);
+    db.close();
+  });
+  it('v45 backfills retired-step child sessions of existing work records and indexes later revisions', () => {
+    const db = new Database(':memory:');
+    db.exec('CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,applied_at TEXT NOT NULL)');
+    withMigrationTransaction(db, () => { for (const migration of migrations.filter(item => item.version <= 44)) { migration.up(db); db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run(migration.version, '2026-11-01'); } });
+    // 还原升级前的触发器：只投影 $.item.steps 的子会话。
+    for (const { name, sql } of db.prepare("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND name LIKE 'work_item_config_%'").all() as Array<{ name: string; sql: string }>) {
+      db.exec(`DROP TRIGGER ${name}`);
+      db.exec(sql.replace(/INSERT OR IGNORE INTO work_item_sessions[^;]*'\$\.item\.retiredSteps'[^;]*;/g, ''));
+    }
+    const value = JSON.stringify({ item: { status: 'running', steps: [{ status: 'pending', attempts: [{ sessionId: 'live' }] }], retiredSteps: [{ status: 'running', attempts: [{ sessionId: 'retired' }] }] } });
+    db.prepare('INSERT INTO configs VALUES (?,?)').run('work_item:old', value);
+    expect(db.prepare('SELECT session_id FROM work_item_sessions').pluck().all()).toEqual(['live']);
+    runMigrations(db);
+    expect(db.prepare('SELECT session_id FROM work_item_sessions ORDER BY session_id').pluck().all()).toEqual(['live', 'retired']);
+    expect(db.prepare('SELECT value FROM configs WHERE key=?').pluck().get('work_item:old')).toBe(value);
+    db.prepare('UPDATE configs SET value=? WHERE key=?').run(JSON.stringify({ item: { status: 'running', steps: [], retiredSteps: [{ attempts: [{ sessionId: 'later' }] }] } }), 'work_item:old');
+    expect(db.prepare('SELECT session_id FROM work_item_sessions').pluck().all()).toEqual(['later']);
+    runMigrations(db);
     expect(appliedVersions(db)).toEqual(ALL_VERSIONS);
     expect(db.pragma('foreign_key_check')).toEqual([]);
     db.close();

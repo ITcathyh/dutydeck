@@ -10,7 +10,7 @@ import { agentSettingsRequestSchema } from './lark/agent-settings.js';
 import { runAgentScheduleRequest } from './agent-schedule-request.js';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { RuntimeError, type PublicSessionSchedule } from '@dutydeck/shared';
+import { RuntimeError, resolveScheduleDeadline, type PublicSessionSchedule } from '@dutydeck/shared';
 import { agentGroupToolBearerToken, type LarkAgentToolsService } from './lark/agent-tools.js';
 import { AgentCommandParamError, agentActionCommand, larkAgentViews, type LarkAgentViewName } from './lark/agent-command.js';
 import type { SessionAutomationService } from './session-automation.js';
@@ -83,12 +83,19 @@ export async function registerAgentRequestTools(app: FastifyInstance, options: A
     const { sessionId, actorId, taskId } = await turnContext(request);
     const body = z.object({ prompt: z.string().trim().min(1).optional(), name: z.string().trim().min(1).optional(),
       every: z.number().int().positive().optional(), cron: z.string().min(1).optional(), at: z.string().min(1).optional(),
-      mode: z.enum(['session', 'fresh']).optional(), dryRun: z.boolean().optional() }).strict().parse(request.body);
+      mode: z.enum(['session', 'fresh']).optional(), until: z.string().trim().min(1).max(2_000).optional(), deadline: z.string().trim().min(1).optional(),
+      dryRun: z.boolean().optional() }).strict().parse(request.body);
     if ([body.every, body.cron, body.at].filter(value => value !== undefined).length > 1) throw new RuntimeError('SCHEDULE_REQUEST_INVALID', '--every、--cron、--at 只选一个。', 400);
     if (!options.automation.listBySession || !options.automation.updateSchedule) throw new RuntimeError('SESSION_AUTOMATION_UNAVAILABLE', '当前实例不支持更新计划。', 503);
     const current = (await options.automation.listBySession(sessionId, actorId)).schedules.find(item => item.id === request.params.id);
     if (!current) throw new RuntimeError('SESSION_AUTOMATION_SCHEDULE_NOT_FOUND', '本事项没有这个可见的计划。', 404);
-    const { every, cron, at, dryRun, ...fields } = body;
+    const { every, cron, at, dryRun, until, deadline, ...rest } = body;
+    let deadlineAt: string | undefined;
+    if (deadline !== undefined) {
+      try { deadlineAt = resolveScheduleDeadline(deadline, current.timezone); }
+      catch { throw new AgentCommandParamError('INVALID_ARGUMENT', '--deadline 要写北京时间 YYYY-MM-DDTHH:mm。', [{ name: '--deadline', reason: '格式 YYYY-MM-DDTHH:mm' }]); }
+    }
+    const fields = { ...rest, ...(until !== undefined ? { completionCondition: until } : {}), ...(deadlineAt ? { deadlineAt } : {}) };
     const trigger = every !== undefined ? { kind: 'interval' as const, everySeconds: every * 60, anchorAt: new Date().toISOString() }
       : cron !== undefined ? { kind: 'cron' as const, expression: cron } : at !== undefined ? { kind: 'at' as const, localDateTime: at } : undefined;
     if (!trigger && Object.values(fields).every(value => value === undefined)) throw new RuntimeError('SCHEDULE_REQUEST_INVALID', '请提供要修改的时间或内容。', 400);

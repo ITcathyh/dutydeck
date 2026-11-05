@@ -34,7 +34,7 @@ function UserMessage({ id, text, steered = false }: { id: string; text: string; 
   </div></div>;
 }
 
-export function TimelineItem({ event, final = false, assistantLabel = 'Agent', onResolvePermission, resolvingPermissionId }: { event: TimelineEvent; final?: boolean; assistantLabel?: string; onResolvePermission?(permissionId: string, approved: boolean): void; resolvingPermissionId?: string }) {
+export function TimelineItem({ event, final = false, assistantLabel = 'Agent', onResolvePermission, resolvingPermissionId }: { event: TimelineEvent; final?: boolean; assistantLabel?: string; onResolvePermission?(permissionId: string, approved: boolean, reason?: string): void | Promise<unknown>; resolvingPermissionId?: string }) {
   if (event.type === 'tool_call' || event.type === 'tool_result') return <ToolCard event={event}/>;
   if (event.type === 'permission_request') return <PermissionCard event={event} onResolve={onResolvePermission} resolving={resolvingPermissionId === String(event.data.id ?? event.id)}/>;
   // warning / error 横幅收敛到 Banner 原语：tone 决定配色，role 由 Banner 按语义分流

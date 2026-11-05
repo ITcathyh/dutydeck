@@ -16,13 +16,15 @@ export function PullRequestPanel({ session }: { session: Session }) {
   const [title, setTitle] = useState('');
   const [proposal, setProposal] = useState<PublicPullRequest>();
   const [notice, setNotice] = useState('');
+  const [link, setLink] = useState('');
   const refresh = () => qc.invalidateQueries({ queryKey });
   const prepare = useMutation({ mutationFn: () => api.preparePullRequest(session.id, title.trim() ? { title: title.trim() } : {}), onSuccess: result => { setNotice(''); setProposal(result.pullRequest); void refresh(); } });
   const confirm = useMutation({ mutationFn: (id: string) => api.confirmPullRequest(session.id, id), onSuccess: result => { setProposal(undefined); setTitle(''); setNotice(result.message); void refresh(); } });
+  const follow = useMutation({ mutationFn: () => api.followPullRequest(session.id, link.trim()), onSuccess: result => { setLink(''); setNotice(`已开始跟进 ${result.pullRequest.pullRequest?.label ?? 'PR'}。`); void refresh(); } });
   const cancel = useMutation({ mutationFn: (id: string) => api.cancelPullRequest(session.id, id), onSuccess: () => { setProposal(undefined); void refresh(); } });
   const readOnly = isSessionActionDisabled(session);
   const data = records.data;
-  const error = records.error ?? prepare.error ?? cancel.error;
+  const error = records.error ?? prepare.error ?? follow.error ?? cancel.error;
   const additions = proposal?.files.reduce((sum, file) => sum + file.additions, 0) ?? 0;
   const deletions = proposal?.files.reduce((sum, file) => sum + file.deletions, 0) ?? 0;
 
@@ -36,9 +38,13 @@ export function PullRequestPanel({ session }: { session: Session }) {
       <div className="min-w-0 flex-1"><Field label="PR 标题（可选）"><Input value={title} maxLength={120} onChange={event => setTitle(event.target.value)} placeholder="留空用任务名"/></Field></div>
       <Button type="submit" variant="primary" loading={prepare.isPending}>开 PR</Button>
     </form>}
+    {data?.available && !readOnly && <form className="flex flex-wrap items-end gap-2" onSubmit={event => { event.preventDefault(); if (link.trim()) follow.mutate(); }}>
+      <div className="min-w-0 flex-1"><Field label="跟进已有的 PR"><Input value={link} maxLength={2000} onChange={event => setLink(event.target.value)} placeholder="PR 链接或编号；工作区需已检出该 PR 的分支"/></Field></div>
+      <Button type="submit" loading={follow.isPending} disabled={!link.trim()}>跟进</Button>
+    </form>}
     {data?.items.map(item => <div key={item.id} className="rounded-lg border border-default p-3 text-caption">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <strong>{statusLabels[item.status]} · {item.title}</strong>
+        <strong>{statusLabels[item.status]} · {item.claimed ? '已有 PR · ' : ''}{item.title}</strong>
         {!readOnly && item.status === 'proposed' && <Button onClick={() => setProposal(item)}>查看并确认</Button>}
         {!readOnly && item.status === 'open' && <Button disabled={cancel.isPending} onClick={() => cancel.mutate(item.id)}>停止跟进</Button>}
       </div>

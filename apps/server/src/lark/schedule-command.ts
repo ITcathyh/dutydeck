@@ -27,7 +27,7 @@ export async function scheduleNameConflictNotice(error: unknown, automation: Pic
  * Agent 代建计划的确认卡，发出和点按钮后原位重绘共用：做什么、什么时候、发到哪。
  * 没启用时给「确认启用」，启用后给「停用」；按钮带 card: 'request'，回调据此只重绘这张卡。
  */
-export function scheduleRequestCard(schedule: Pick<PublicSessionSchedule, 'id' | 'name' | 'prompt' | 'trigger' | 'timezone' | 'enabled' | 'nextDueAt'>, replyInThread: boolean): LarkCardInput & { elements: Array<Record<string, unknown>> } {
+export function scheduleRequestCard(schedule: Pick<PublicSessionSchedule, 'id' | 'name' | 'prompt' | 'trigger' | 'timezone' | 'enabled' | 'nextDueAt' | 'completionCondition' | 'deadlineAt'>, replyInThread: boolean): LarkCardInput & { elements: Array<Record<string, unknown>> } {
   const prompt = schedule.prompt.trim();
   const characters = Array.from(prompt);
   const summary = characters.length > 140 ? characters.slice(0, 139).join('') + '…' : prompt;
@@ -40,6 +40,8 @@ export function scheduleRequestCard(schedule: Pick<PublicSessionSchedule, 'id' |
         `**做什么**：${escapeCardInline(summary)}`,
         `**什么时候**：${describeScheduleTrigger(schedule.trigger, schedule.timezone)}`,
         `**时区**：${escapeCardInline(schedule.timezone)}`,
+        ...(schedule.completionCondition ? [`**直到**：${escapeCardInline(schedule.completionCondition)}（达成后自动停用）`] : []),
+        ...(schedule.deadlineAt ? [`**截止**：${new Date(schedule.deadlineAt).toLocaleString('zh-CN', { timeZone: schedule.timezone, hour12: false })}（到点仍未完成就停用并告知）`] : []),
         `**发到哪**：${replyInThread ? '本话题' : '本会话'}`,
         schedule.enabled ? `已启用${next ? `，下一次 ${next}` : ''}。每次的结果卡上也能停用。` : '当前未启用。点「确认启用」后才会按计划执行。'
       ].join('\n') },

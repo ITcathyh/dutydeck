@@ -1,6 +1,6 @@
 import { useRef, useState, type RefObject } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import type { CreateWorkItemInput, WorkItem, WorkPlan, WorkTemplate } from '@dutydeck/shared';
+import type { CreateWorkItemInput, WorkItem, WorkPlan, WorkRevisionImpact, WorkRevisionPreview, WorkTemplate } from '@dutydeck/shared';
 import { ListChecks, X } from 'lucide-react';
 import { api, type Agent, type Session, type WorkItemRequest } from '../api';
 import { Banner, Button, Dialog, Field, IconButton, Input, Select, Spinner, Textarea } from './primitives';
@@ -22,7 +22,10 @@ type Action =
   | { kind: 'template'; item: WorkItem; name: string }
   | { kind: 'cancel'; item: WorkItem }
   | { kind: 'retry'; item: WorkItem; stepId: string }
-  | { kind: 'answer'; item: WorkItem; stepId: string; answer: string };
+  | { kind: 'answer'; item: WorkItem; stepId: string; answer: string }
+  | { kind: 'revise'; item: WorkItem; plan: WorkPlan; reason?: string }
+  | { kind: 'confirm'; item: WorkItem }
+  | { kind: 'discard'; item: WorkItem };
 
 // Session changes remount all local drafts and mutation observers, including direct prop updates.
 export function WorkItemsPanel(props: Props) {
@@ -51,6 +54,9 @@ function SessionWorkItems({ session, agents, onSelectSession, control }: Props) 
         case 'cancel': return api.cancelWorkItem(session.id, action.item.id, action.item.revision);
         case 'retry': return api.retryWorkStep(session.id, action.item.id, action.stepId, action.item.revision);
         case 'answer': return api.answerWorkStep(session.id, action.item.id, action.stepId, action.answer, action.item.revision);
+        case 'revise': return api.reviseWorkItem(session.id, action.item.id, { expectedRevision: action.item.revision, plan: action.plan, ...(action.reason ? { reason: action.reason } : {}) });
+        case 'confirm': return api.confirmWorkItem(session.id, action.item.id, action.item.revision, action.item.pendingRevision?.digest);
+        case 'discard': return api.discardWorkRevision(session.id, action.item.id, action.item.revision, action.item.pendingRevision?.digest);
       }
     },
     onSuccess: (result, action) => {
@@ -60,7 +66,8 @@ function SessionWorkItems({ session, agents, onSelectSession, control }: Props) 
         const item = result as WorkItem;
         qc.setQueryData<{ items: WorkItem[]; templates: WorkTemplate[] }>(queryKey, current => current ? { ...current, items: [item, ...current.items.filter(existing => existing.id !== item.id)] } : undefined);
         setSelectedId(item.id);
-        setNotice(action.kind === 'cancel' ? '已提交取消请求；各步骤的停止状态见下方。' : action.kind === 'answer' ? '回答已保存。' : action.kind === 'retry' ? '已提交单步重试。' : '目标已接收。');
+        setNotice(action.kind === 'cancel' ? '已提交取消请求；各步骤的停止状态见下方。' : action.kind === 'answer' ? '回答已保存。' : action.kind === 'retry' ? '已提交单步重试。'
+          : action.kind === 'revise' || action.kind === 'confirm' ? `计划已更新为 v${item.planVersion ?? 1}。` : action.kind === 'discard' ? '已放弃修订，按原计划继续。' : '目标已接收。');
       }
     },
     onSettled: async () => { await Promise.all([qc.invalidateQueries({ queryKey }), qc.invalidateQueries({ queryKey: ['work-item-requests', session.id] })]); }
@@ -98,6 +105,7 @@ function SessionWorkItems({ session, agents, onSelectSession, control }: Props) 
             {requests.data?.map(request => <ExecutionRequest key={`${selected.id}:${request.stepId}:${request.kind}:${request.requestId}`} request={request} title={selected.plan.steps.find(step => step.id === request.stepId)?.title ?? request.stepId} disabled={disabled || requests.isFetching || requests.isError} onAnswer={answer => act({ kind: 'respond', item: selected, request, answer })}/>)}
           </section>}
           {selected && <GoalDetails key={selected.id} item={selected} session={session} agents={agents} disabled={disabled} onAction={act} onSelectSession={id => { setOpen(false); onSelectSession(id); }}/>}
+          {selected && <PlanRevision key={`revise:${selected.id}`} item={selected} sessionId={session.id} disabled={disabled || readOnly} onAction={act}/>}
         </section>}
       </div></Dialog.Body>
     </Dialog>}
@@ -154,7 +162,15 @@ function GoalDetails({ item, session, agents, disabled, onAction, onSelectSessio
   return <div className="space-y-4">
     <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-body font-semibold">{item.title} · {statusLabels[item.status]}</h3>{cancellable && <Button disabled={disabled} onClick={() => onAction({ kind: 'cancel', item })}>取消目标</Button>}</div>
     <p className="whitespace-pre-wrap text-body">{item.goal}</p>
-    <p className="text-caption text-subtle">修订 {item.revision} · 更新于 {new Date(item.updatedAt).toLocaleString()} · {deliveryLabels[item.delivery.status]}</p>
+    {item.pendingRevision && <section aria-label="待确认的计划修订" className="space-y-2 rounded-lg border border-default p-3">
+      <h4 className="text-body font-semibold">Agent 提出计划修订（v{item.pendingRevision.version} · 摘要 {item.pendingRevision.digest.slice(0, 12)}），确认后才生效；在此之前按当前计划继续执行</h4>
+      {item.pendingRevision.reason && <p className="whitespace-pre-wrap text-caption">原因：{item.pendingRevision.reason}</p>}
+      <p className="text-caption text-secondary">需要确认：{item.pendingRevision.confirmationReasons.join('；')}</p>
+      <ImpactSummary impact={item.pendingRevision.impact} titles={stepTitles(item)}/>
+      {item.status === 'blocked' && <p className="text-caption text-secondary">目标需要先处理阻塞，处理前不能确认这次修订；可以先放弃。</p>}
+      <div className="flex gap-2"><Button disabled={disabled} onClick={() => onAction({ kind: 'discard', item })}>放弃修订</Button>{item.status !== 'blocked' && <Button variant="primary" disabled={disabled} onClick={() => onAction({ kind: 'confirm', item })}>确认修订</Button>}</div>
+    </section>}
+    <p className="text-caption text-subtle">计划 v{item.planVersion ?? 1} · 修订 {item.revision} · 更新于 {new Date(item.updatedAt).toLocaleString()} · {deliveryLabels[item.delivery.status]}</p>
     {item.error && <Banner tone="danger">{item.error}</Banner>}
     {item.delivery.error && <Banner tone="warning">成果通知：{item.delivery.error}</Banner>}
     {item.output && <section aria-label="最终成果" className="space-y-2 rounded-lg bg-muted p-3"><h4 className="text-body font-semibold">最终成果</h4><pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words text-body">{item.output.text}</pre><p className="break-all text-caption text-subtle">来源步骤 {item.output.stepId} · {item.output.digest}</p></section>}
@@ -163,7 +179,7 @@ function GoalDetails({ item, session, agents, disabled, onAction, onSelectSessio
         const step = item.steps.find(record => record.id === definition.id);
         const status = step?.status ?? 'pending';
         return <li key={definition.id} className="rounded-lg border border-default p-3">
-          <div className="flex flex-wrap items-center justify-between gap-2"><h4 className="text-caption font-semibold">{definition.title} · {statusLabels[status]}</h4>{step?.status === 'failed' && item.status === 'failed' && <Button disabled={disabled} onClick={() => onAction({ kind: 'retry', item, stepId: step.id })}>重试此步骤</Button>}</div>
+          <div className="flex flex-wrap items-center justify-between gap-2"><h4 className="text-caption font-semibold">{definition.title} · {statusLabels[status]}</h4>{step?.status === 'failed' && item.status === 'failed' && !item.pendingRevision && <Button disabled={disabled} onClick={() => onAction({ kind: 'retry', item, stepId: step.id })}>重试此步骤</Button>}</div>
           <p className="mt-1 text-caption text-secondary">{definition.kind === 'wait' ? '等待用户回答' : `执行 Agent：${agents.find(agent => agent.id === definition.agentId)?.name ?? definition.agentId}`}</p>
           <p className="text-caption text-subtle">依赖：{definition.dependsOn.length ? definition.dependsOn.map(id => item.plan.steps.find(value => value.id === id)?.title ?? id).join('、') : '无'}</p>
           {definition.kind === 'agent' && <p className="break-all text-caption text-subtle">工作目录：{definition.workspaceMode === 'worktree' ? `独立工作目录（基于 ${session.cwd}；实际路径见执行记录）` : session.cwd}</p>}
@@ -196,4 +212,68 @@ function ExecutionRequest({ request, title, disabled, onAnswer }: { request: Wor
     <p className="whitespace-pre-wrap text-body">{request.text}</p>
     {request.kind === 'permission' ? <div className="flex gap-2"><Button disabled={disabled} onClick={() => onAnswer('reject')}>拒绝此操作</Button><Button variant="primary" disabled={disabled} onClick={() => onAnswer('approve')}>批准此操作</Button></div> : <form className="space-y-2" onSubmit={event => { event.preventDefault(); if (!disabled && answer.trim()) onAnswer(answer.trim()); }}><Field label={`执行回答：${title}`}><Textarea required maxLength={4000} disabled={disabled} value={answer} onChange={event => setAnswer(event.target.value)}/></Field><Button type="submit" variant="primary" disabled={disabled || !answer.trim()}>发送执行回答</Button></form>}
   </section>;
+}
+
+const revisable = ['awaiting_confirmation', 'running', 'waiting', 'failed'];
+const sourceLabels = { create: '创建', human: '人工修改', agent: 'Agent 修改' } as const;
+const actorLabels = { creator: '目标创建人', installation_owner: '安装管理员' } as const;
+function stepTitles(item: WorkItem) {
+  return new Map([...(item.planHistory ?? []).flatMap(version => version.plan.steps), ...(item.pendingRevision?.plan.steps ?? []), ...item.plan.steps].map(step => [step.id, step.title]));
+}
+
+function ImpactSummary({ impact, titles }: { impact: WorkRevisionImpact; titles: Map<string, string> }) {
+  const rows: Array<[string, string[]]> = [['保留结果', impact.keep], ['作废并重跑', impact.rerun], ['先停止', impact.stop], ['作废已完成结果', impact.discard ?? []], ['删除', impact.remove], ['新增', impact.add]];
+  return <ul className="space-y-1 text-caption" aria-label="修订影响">
+    {rows.map(([label, ids]) => <li key={label}><span className="font-semibold">{label}：</span>{ids.length ? ids.map(id => titles.get(id) ?? id).join('、') : '无'}</li>)}
+  </ul>;
+}
+
+/** 编辑完整计划 JSON → 预览影响 → 提交；预览与提交绑定同一修订号和同一份计划。 */
+function PlanRevision({ item, sessionId, disabled, onAction }: { item: WorkItem; sessionId: string; disabled: boolean; onAction(action: Action): void }) {
+  const [draft, setDraft] = useState(() => JSON.stringify(item.plan, null, 2));
+  const [reason, setReason] = useState('');
+  const [preview, setPreview] = useState<{ text: string; revision: number; result: WorkRevisionPreview } | undefined>();
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const parse = (): WorkPlan => {
+    try { return JSON.parse(draft) as WorkPlan; } catch { throw new Error('计划不是合法的 JSON'); }
+  };
+  const previewed = preview?.text === draft && preview.revision === item.revision ? preview.result : undefined;
+  const runPreview = async () => {
+    setError(''); setPreview(undefined); setBusy(true);
+    try { setPreview({ text: draft, revision: item.revision, result: await api.previewWorkRevision(sessionId, item.id, { expectedRevision: item.revision, plan: parse() }) }); }
+    catch (failure) { setError(failure instanceof Error ? failure.message : String(failure)); }
+    finally { setBusy(false); }
+  };
+  const history = item.planHistory ?? [];
+  return <div className="space-y-3">
+    {revisable.includes(item.status) && <details className="rounded-lg border border-default p-3">
+      <summary className="cursor-pointer text-caption font-semibold">修改计划</summary>
+      <form className="mt-3 space-y-3" onSubmit={event => { event.preventDefault(); if (!disabled && previewed) onAction({ kind: 'revise', item, plan: parse(), ...(reason.trim() ? { reason: reason.trim() } : {}) }); }}>
+        <p className="text-caption text-subtle">编辑完整计划（格式同创建时的 plan），先预览影响再提交。未受影响的已完成步骤保留结果；受影响的步骤作废结果并重跑；运行中的受影响步骤会先停止，无法证明停止时修订失败、计划不变；停下的那次执行结果未知，在它的执行记录里核对（标为失败或已完成）之前，这一步保持待执行，同一工作区里的其他新步骤也会等待，核对后才重跑。</p>
+        {error && <Banner tone="danger">修订未提交：{error}</Banner>}
+        <Field label="计划 JSON"><Textarea rows={12} value={draft} disabled={disabled || busy} onChange={event => setDraft(event.target.value)} className="font-mono"/></Field>
+        <Field label="修改原因"><Input maxLength={2000} value={reason} disabled={disabled || busy} onChange={event => setReason(event.target.value)} placeholder="可选，记录在版本历史中"/></Field>
+        {previewed && <section aria-label="修订影响预览" className="space-y-2 rounded bg-muted p-2">
+          <p className="text-caption font-semibold">提交后成为 v{previewed.nextVersion}</p>
+          <ImpactSummary impact={previewed.impact} titles={new Map([...stepTitles(item), ...parse().steps.map(step => [step.id, step.title] as const)])}/>
+        </section>}
+        <div className="flex gap-2">
+          <Button type="button" disabled={disabled || busy} onClick={() => void runPreview()}>预览影响</Button>
+          <Button type="submit" variant="primary" disabled={disabled || busy || !previewed}>提交修订</Button>
+        </div>
+      </form>
+    </details>}
+    <details className="rounded-lg border border-default p-3">
+      <summary className="cursor-pointer text-caption font-semibold">计划版本历史（{history.length}）</summary>
+      <ol className="mt-3 space-y-2" aria-label="计划版本历史">
+        {history.slice().reverse().map(version => <li key={version.version} className="space-y-1">
+          <p className="text-caption font-semibold">v{version.version} · {sourceLabels[version.source]}{version.actor ? ` · ${actorLabels[version.actor]}` : ''} · {new Date(version.createdAt).toLocaleString()}</p>
+          {version.reason && <p className="whitespace-pre-wrap text-caption">原因：{version.reason}</p>}
+          {version.impact && <ImpactSummary impact={version.impact} titles={stepTitles(item)}/>}
+          <details><summary className="cursor-pointer text-caption">查看此版本计划</summary><pre className="mt-1 max-h-72 overflow-auto whitespace-pre-wrap break-words rounded bg-muted p-2 text-caption">{JSON.stringify(version.plan, null, 2)}</pre></details>
+        </li>)}
+      </ol>
+    </details>
+  </div>;
 }

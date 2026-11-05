@@ -59,6 +59,7 @@ import {
   type AutomationScheduleSummary,
   type AutomationHistoryPage,
   type AutomationRunDetail,
+  type ScheduleRunState,
   type AgentEvent,
   type StartSessionInput
 } from '@dutydeck/shared';
@@ -171,8 +172,31 @@ export interface SessionAutomationServiceOptions {
   ciWebhook?: CiWebhookService;
   /** `/pr` 与 Web「开 PR」：会话改动开 PR 并跟进。 */
   pullRequests?: PullRequestService;
+  /** 执行会话里是否有未处理的权限审批或 Agent 提问；用于把计划显示为「等待人工」。 */
+  awaitingHuman?: (sessionId: string) => boolean;
+  /** 计划可选择每次启动一个已保存的工作项模板；启动沿用模板启动的权限与确认规则。 */
+  workTemplates?: ScheduleWorkTemplates;
   clock?: () => Date;
   pollIntervalMs?: number;
+}
+
+export interface ScheduleWorkTemplates {
+  list(parentSessionId: string, actorId?: string): Promise<Array<{ id: string; version: number }>>;
+  /** 同一幂等键重试返回同一工作项。 */
+  run(parentSessionId: string, templateId: string, version: number, goal: string, idempotencyKey: string, actorId?: string): Promise<{ id: string; status: string }>;
+  status(parentSessionId: string, workItemId: string, actorId?: string): Promise<string | undefined>;
+}
+/** 仍在进行、尚需人或系统推进的工作项状态；上一次没结束时不再启动新的。 */
+const activeWorkItemStatuses = new Set(['awaiting_confirmation', 'running', 'waiting', 'blocked', 'cancelling']);
+
+/** 有完成条件的循环计划：每次运行在指令后附上完成条件与截止时间，告知 Agent 达成时用 stop-self 请求停用。 */
+export function scheduleTaskPrompt(schedule: Pick<SessionSchedule, 'prompt' | 'completionCondition' | 'deadlineAt' | 'timezone'>): string {
+  if (!schedule.completionCondition) return schedule.prompt;
+  const lines = [schedule.prompt, '', '---', '这是一个「一直跟进，直到办完」的定时计划。', `完成条件：${schedule.completionCondition}`,
+    '每次运行先核对完成条件。确认已经达成时，用本轮提供的 `schedule stop-self` 命令请求停用本计划，并在结果里写明达成依据；宿主只在本轮成功且结果确认送达后才停用。'
+    + '未达成或无法确认时照常汇报进展和下一步，不要调用。本轮没有提供这个命令时，在结果开头写明「已达成完成条件」，由用户停用。'];
+  if (schedule.deadlineAt) lines.push(`截止时间：${new Date(schedule.deadlineAt).toLocaleString('zh-CN', { timeZone: schedule.timezone, hour12: false })}（${schedule.timezone}）。到点仍未确认完成，宿主会自动停用本计划。`);
+  return lines.join('\n');
 }
 
 function errorMessage(error: unknown): string {
@@ -650,12 +674,37 @@ export class SessionAutomationService {
         ? { kind: 'lark', ...parsed.data }
         : { kind: 'unavailable' };
     }));
+    const runStates: NonNullable<SessionAutomationList['runStates']> = {};
+    for (const schedule of schedules.map(item => item.value).filter(item => publicSchedules.some(visible => visible.id === item.id))) {
+      const history = occurrences.map(item => item.value).filter(item => item.scheduleId === schedule.id).sort((a, b) => b.scheduledForUtc.localeCompare(a.scheduledForUtc) || b.id.localeCompare(a.id));
+      runStates[schedule.id] = await this.runState(schedule, history);
+    }
     return {
       deliveryTargets,
+      runStates,
       schedules: publicSchedules,
       subscriptions: subscriptions.map(item => item.value).filter(item => item.sessionId === sessionId).sort((a, b) => a.createdAt.localeCompare(b.createdAt)).slice(-MAX_RECORDS).map(publicSubscription),
       occurrences: occurrences.map(item => item.value).filter(item => sessionIds.includes(item.sessionId)).sort((a, b) => a.scheduledForUtc.localeCompare(b.scheduledForUtc)).slice(-MAX_RECORDS).map(publicOccurrence)
     };
+  }
+
+  /** 计划跟进到哪一步；history 按计划时间从新到旧。 */
+  private async runState(schedule: SessionSchedule, history: SessionScheduleOccurrence[]): Promise<ScheduleRunState> {
+    if (!schedule.enabled) return schedule.outcome?.kind ?? 'disabled';
+    const open = history.find(item => openRunStatuses.has(item.runStatus));
+    if (open) {
+      const value = migrateOccurrence(open);
+      const unknown = value.taskId && this.execution.getTaskExecution(value.taskId)?.attempts.some(attempt => attempt.state === 'reconcile_required' || attempt.state === 'legacy_unresolved');
+      return value.runStatus === 'blocked' || unknown || value.taskId && this.options.awaitingHuman?.(value.executionSessionId ?? value.sessionId) ? 'awaiting_human' : 'running';
+    }
+    const latest = history[0] && migrateOccurrence(history[0]);
+    if (latest?.workItemId && this.options.workTemplates) {
+      const status = await this.options.workTemplates.status(schedule.sessionId, latest.workItemId, schedule.actorId).catch(() => undefined);
+      if (status === 'awaiting_confirmation' || status === 'blocked') return 'awaiting_human';
+      if (status && activeWorkItemStatuses.has(status)) return 'running';
+      if (status === 'failed') return 'failed';
+    }
+    return latest && ['failed', 'interrupted', 'error'].includes(latest.runStatus) ? 'failed' : 'waiting';
   }
 
   private async ciCondition(session: Session, input: { kind: 'ci_new_failure'; provider?: string; workflow?: string }) {
@@ -697,6 +746,20 @@ export class SessionAutomationService {
     }
   }
 
+  /** 完成条件、截止时间与工作项模板的组合规则；模板须是来源任务里计划身份可见的已保存版本。 */
+  private async assertFollowUpSettings(sessionId: string, candidate: Pick<SessionSchedule, 'trigger' | 'mode' | 'workTemplate' | 'completionCondition' | 'deadlineAt' | 'enabled'> & { condition: { kind: string } }, actorId: string | undefined, changed: { deadline: boolean; template: boolean }) {
+    if ((candidate.completionCondition || candidate.deadlineAt) && candidate.trigger.kind === 'at') throw new RuntimeError('SESSION_AUTOMATION_FOLLOW_UP_REQUIRES_RECURRING', 'Completion conditions and deadlines apply only to recurring schedules', 400);
+    if (candidate.deadlineAt && changed.deadline && Date.parse(candidate.deadlineAt) <= this.clock().getTime()) throw new RuntimeError('SESSION_AUTOMATION_DEADLINE_PASSED', 'The schedule deadline has already passed; set a later deadline or clear it', 409);
+    if (!candidate.workTemplate) return;
+    if (candidate.completionCondition) throw new RuntimeError('SESSION_AUTOMATION_TEMPLATE_UNSUPPORTED', 'A completion condition needs a scheduled agent turn that can call stop-self; work-template schedules support only a deadline', 400);
+    if (candidate.mode === 'independent' || candidate.mode === 'fresh') throw new RuntimeError('SESSION_AUTOMATION_TEMPLATE_UNSUPPORTED', 'Work-template schedules start the work item in the source task; use session mode', 400);
+    if (candidate.condition.kind !== 'always') throw new RuntimeError('SESSION_AUTOMATION_TEMPLATE_UNSUPPORTED', 'Work-template schedules support only the always condition', 400);
+    if (!changed.template) return;
+    if (!this.options.workTemplates) throw new RuntimeError('WORK_TEMPLATE_UNAVAILABLE', 'Work templates are unavailable on this instance', 503);
+    const { id, version } = candidate.workTemplate;
+    if (!(await this.options.workTemplates.list(sessionId, actorId)).some(item => item.id === id && item.version === version)) throw new RuntimeError('WORK_TEMPLATE_NOT_FOUND', `Work template ${id} version ${version} is not available in this task`, 404);
+  }
+
   async createSchedule(sessionId: string, rawInput: CreateSessionScheduleInput, actorId?: string, receipt?: { key: string; prepareDelivery?: (id: string) => Promise<void> }): Promise<PublicSessionSchedule> {
     await this.requireAuthorized(sessionId, actorId);
     const session = await this.requireSession(sessionId);
@@ -709,6 +772,8 @@ export class SessionAutomationService {
     await this.assertNameAvailable(sessionId, input.name);
     await this.assertMatterScheduleAvailable(sessionId, input, actorId);
     const now = iso(this.clock());
+    const deadlineAt = input.deadlineAt ? new Date(input.deadlineAt).toISOString() : undefined;
+    await this.assertFollowUpSettings(sessionId, { ...input, mode: input.mode ?? 'session', deadlineAt, enabled: false }, actorId, { deadline: true, template: true });
     const condition = input.condition.kind === 'always' ? input.condition : await this.ciCondition(session, input.condition);
     await receipt?.prepareDelivery?.(id);
     if (input.mode === 'fresh' && !this.options.runtime.startScheduleSession) throw new RuntimeError('FRESH_SCHEDULE_UNAVAILABLE', 'Fresh-session schedules are unavailable on this instance', 503);
@@ -734,6 +799,9 @@ export class SessionAutomationService {
       mode: input.mode ?? 'session',
       misfirePolicy: input.misfirePolicy ?? 'coalesce',
       ...(input.maxLatenessSeconds ? { maxLatenessSeconds: input.maxLatenessSeconds } : {}),
+      ...(input.workTemplate ? { workTemplate: input.workTemplate } : {}),
+      ...(input.completionCondition ? { completionCondition: input.completionCondition } : {}),
+      ...(deadlineAt ? { deadlineAt } : {}),
       ...(input.mode === 'independent' ? {
         executionSessionId: `ses_schedule_${createHash('sha256').update(id).digest('hex')}`,
         executionContext: { cwd: session.workspaceSourceCwd ?? session.cwd, sourceCwd: session.workspaceSourceCwd ?? session.cwd, agentId: session.agentId,
@@ -790,7 +858,9 @@ export class SessionAutomationService {
       ...(input.timezone !== existing.timezone ? { timezone: input.timezone } : {}),
       ...(canonicalExecutionJson(input.dstPolicy) !== canonicalExecutionJson(existing.dstPolicy) ? { dstPolicy: input.dstPolicy } : {}),
       ...(input.condition.kind !== existing.condition.kind ? { condition: input.condition } : {}),
-      ...(mode && mode !== existing.mode ? { mode } : {})
+      ...(mode && mode !== existing.mode ? { mode } : {}),
+      ...((input.completionCondition ?? undefined) !== existing.completionCondition ? { completionCondition: input.completionCondition ?? null } : {}),
+      ...((input.deadlineAt ? new Date(input.deadlineAt).toISOString() : undefined) !== existing.deadlineAt ? { deadlineAt: input.deadlineAt ?? null } : {})
     };
     const changed = Object.keys(patch).length > 0;
     const schedule = changed
@@ -997,7 +1067,7 @@ export class SessionAutomationService {
       const summary: AutomationScheduleSummary = {
         engine: 'session', schedule: publicSchedule(schedule),
         session: { id: session.id, title: session.name ?? session.id, agentId: schedule.executionContext?.agentId ?? session.agentId, state: session.state, ...(session.archivedAt ? { archivedAt: session.archivedAt } : {}) },
-        health, ...(latest ? { latestOccurrence: publicOccurrence(latest) } : {}), ...(blocker ? { blocker } : {}),
+        health, runState: await this.runState(schedule, history), ...(latest ? { latestOccurrence: publicOccurrence(latest) } : {}), ...(blocker ? { blocker } : {}),
         ...(schedule.enabled && schedule.nextDueAt && schedule.nextDueAt < iso(this.clock()) ? { overdue: { from: schedule.nextDueAt, to: iso(this.clock()) } } : {})
       };
       if (query.name && !schedule.name.toLocaleLowerCase().includes(query.name.toLocaleLowerCase())
@@ -1081,6 +1151,14 @@ export class SessionAutomationService {
       // 正在执行的那次仍归属原会话；等它结束再切换，避免它的回执失去归属。
       if (await this.hasPendingOccurrence(stored.value)) throw new RuntimeError('SESSION_AUTOMATION_SCHEDULE_BUSY', 'This schedule already has unfinished work', 409);
     }
+    const followUp = {
+      workTemplate: input.workTemplate === undefined ? stored.value.workTemplate : input.workTemplate ?? undefined,
+      completionCondition: input.completionCondition === undefined ? stored.value.completionCondition : input.completionCondition ?? undefined,
+      deadlineAt: input.deadlineAt === undefined ? stored.value.deadlineAt : input.deadlineAt ? new Date(input.deadlineAt).toISOString() : undefined
+    };
+    const reenabled = input.enabled === true && !stored.value.enabled;
+    await this.assertFollowUpSettings(sessionId, { trigger: input.trigger ?? stored.value.trigger, mode: modeChanged ? input.mode : currentMode, condition: input.condition ?? stored.value.condition, ...followUp, enabled: input.enabled ?? stored.value.enabled },
+      actorId ?? stored.value.actorId, { deadline: input.deadlineAt !== undefined || reenabled, template: input.workTemplate !== undefined && input.workTemplate !== null || reenabled });
     let condition = stored.value.condition;
     if (input.condition) condition = input.condition.kind === 'always' ? input.condition : await this.ciCondition(session, input.condition);
     const now = this.clock();
@@ -1102,6 +1180,9 @@ export class SessionAutomationService {
       ...(executionChanged && actorId && stored.value.mode !== 'independent' ? { actorId } : {}),
       ...(input.misfirePolicy !== undefined ? { misfirePolicy: input.misfirePolicy } : {}),
       ...(input.maxLatenessSeconds !== undefined ? { maxLatenessSeconds: input.maxLatenessSeconds ?? undefined } : {}),
+      ...followUp,
+      // 重新启用开始新一段跟进：上一段的完成或到截止结论不再适用。
+      ...(reenabled ? { outcome: undefined } : {}),
       updatedAt: iso(now)
     };
     const schedule = sessionScheduleSchema.parse({
@@ -1273,7 +1354,8 @@ export class SessionAutomationService {
         const occurrence = (await this.getRecord(occurrenceKey(request.occurrenceId), value => migrateOccurrence(sessionScheduleOccurrenceSchema.parse(value))))?.value;
         const task = this.execution.getTaskExecution(request.taskId)?.task;
         if (!occurrence || occurrence.sessionId !== request.sessionId || occurrence.scheduleId !== request.scheduleId || occurrence.generation !== request.generation || occurrence.admission?.taskId !== request.taskId) { await finish('rejected', 'binding_changed'); return; }
-        if (['failed', 'interrupted', 'cancelled'].includes(task?.status ?? '') || occurrence.result && occurrence.result.outcome !== 'completed') { await finish('rejected', 'task_not_successful'); return; }
+        // Agent 收尾报了受阻或等人决定时计划层记为没做成（runStatus=failed），同样不算完成。
+        if (['failed', 'interrupted', 'cancelled'].includes(task?.status ?? '') || occurrence.result && (occurrence.result.outcome !== 'completed' || occurrence.runStatus !== 'completed')) { await finish('rejected', 'task_not_successful'); return; }
         if (!task || task.status !== 'completed' || task.currentAttemptId !== request.attemptId || occurrence.runtimeAttemptId !== request.attemptId || occurrence.result?.outcome !== 'completed' || occurrence.delivery.status !== 'delivered') return;
         const accepted = this.execution.getAcceptedTask(request.taskId);
         const session = await this.options.runtime.getSession(request.sessionId);
@@ -1284,7 +1366,7 @@ export class SessionAutomationService {
         }
         catch { await finish('rejected', 'authorization_revoked'); return; }
         const stopped = sessionScheduleSchema.parse({ ...schedule.value, revision: schedule.value.revision + 1, generation: schedule.value.generation + 1,
-          enabled: false, nextDueAt: undefined, stopRequestId: request.taskId, updatedAt: iso(this.clock()) });
+          enabled: false, nextDueAt: undefined, stopRequestId: request.taskId, outcome: { kind: 'completed', at: iso(this.clock()) }, updatedAt: iso(this.clock()) });
         if (await this.replace(scheduleKey(request.scheduleId), schedule.raw, stopped)) await finish('applied');
       });
     }
@@ -1524,6 +1606,7 @@ export class SessionAutomationService {
       this.watchSession(item.value.sessionId);
       if (item.value.executionSessionId) this.watchSession(item.value.executionSessionId);
       await this.isolate(() => this.synchronizeLifecycle(item));
+      await this.isolate(() => this.enforceDeadline(item.value));
       await this.isolate(() => this.planSchedule(item.value));
       await this.isolate(() => this.followUpOccurrence(item.value.id));
       await this.isolate(() => this.remindOverdue(item.value));
@@ -1576,6 +1659,21 @@ export class SessionAutomationService {
       version: 1, status: failed ? 'error' : 'sent', attempts, updatedAt: iso(this.clock()),
       ...(failed ? { nextAttemptAt: plus(this.clock(), 60_000 * attempts) } : {})
     }));
+  }
+
+  /**
+   * 到截止时间仍启用的计划：停用（不再生成新的触发）并按停用告知发到回报位置，结论记为「已到截止，未确认完成」。
+   * 已提交的那一轮照常收尾；计划已换代，它之后的 stop-self 不再改变结论。
+   */
+  private async enforceDeadline(snapshot: SessionSchedule) {
+    if (!snapshot.deadlineAt || !snapshot.enabled || snapshot.deletedAt || Date.parse(snapshot.deadlineAt) > this.clock().getTime()) return;
+    const stored = await this.getRecord(scheduleKey(snapshot.id), readStoredSessionSchedule);
+    const deadlineAt = stored?.value.deadlineAt;
+    if (!stored || !deadlineAt || !stored.value.enabled || stored.value.deletedAt || Date.parse(deadlineAt) > this.clock().getTime()) return;
+    const label = new Date(deadlineAt).toLocaleString('zh-CN', { timeZone: stored.value.timezone, hour12: false });
+    if (await this.disableSchedule(stored, `已到截止时间 ${label}（${stored.value.timezone}），未确认完成`, { kind: 'deadline_reached', at: iso(this.clock()) })) {
+      this.warn({ scheduleId: stored.value.id, deadlineAt }, '定时计划已到截止时间，已自动停用');
+    }
   }
 
   /** 从触发记录和任务状态取卡点；取不到就只说还没开始或还没结束。 */
@@ -1739,6 +1837,10 @@ export class SessionAutomationService {
       await this.finishOccurrence({ raw: stored.raw, value: occurrence }, { conditionStatus: 'invalidated', runStatus: 'invalidated', error: 'Schedule generation changed before dispatch' });
       return;
     }
+    if (scheduleStored.value.workTemplate) {
+      await this.startWorkTemplate(scheduleStored, { raw: stored.raw, value: occurrence });
+      return;
+    }
     let schedule = scheduleStored.value;
     const origin = await this.options.runtime.getSession(schedule.sessionId);
     let sessionMaybe: Session | undefined;
@@ -1855,13 +1957,13 @@ export class SessionAutomationService {
     let occurrenceWithAdmission: { raw: string; value: SessionScheduleOccurrenceV2 };
 
     if (working.value.admission) {
-      request = working.value.admission.request ?? this.buildRequest(session, 'schedule', scheduleRequestKey(occurrence.id), schedule.prompt, actor);
+      request = working.value.admission.request ?? this.buildRequest(session, 'schedule', scheduleRequestKey(occurrence.id), scheduleTaskPrompt(schedule), actor);
       taskId = working.value.admission.taskId;
       taskIdVersion = working.value.admission.taskIdVersion;
       occurrenceWithAdmission = { raw: JSON.stringify(accepted), value: accepted };
     } else {
       // 首次无 admission：先构造候选请求，复用真实仓储 execution.lookupAccepted(request)
-      const candidateRequest = this.buildRequest(session, 'schedule', scheduleRequestKey(occurrence.id), schedule.prompt, actor);
+      const candidateRequest = this.buildRequest(session, 'schedule', scheduleRequestKey(occurrence.id), scheduleTaskPrompt(schedule), actor);
       let existingAccepted;
       try {
         existingAccepted = this.execution.lookupAccepted(candidateRequest);
@@ -1887,6 +1989,52 @@ export class SessionAutomationService {
     }
     await this.dispatchOccurrence(occurrenceWithAdmission, request, taskId, taskIdVersion);
     if (occurrence.triggerSource !== 'manual') await this.advanceSchedule(schedule, occurrence.scheduledForUtc);
+  }
+
+  /**
+   * 模板计划的一次触发：以计划指令为目标、按触发编号作幂等键启动已保存的工作项模板，确认规则沿用模板启动。
+   * 上一次启动的工作项还没结束时跳过这次；模板被删或不可用时这次记为出错并在回报位置说明。
+   */
+  private async startWorkTemplate(scheduleStored: { raw: string; value: SessionSchedule }, stored: { raw: string; value: SessionScheduleOccurrenceV2 }) {
+    const schedule = scheduleStored.value;
+    const occurrence = stored.value;
+    const template = schedule.workTemplate!;
+    const actorId = occurrence.triggerSource === 'manual' && occurrence.actor?.kind !== 'unspecified' ? occurrence.actor?.id : schedule.actorId;
+    const fail = async (code: string, message: string) => {
+      await this.finishOccurrence(stored, { conditionStatus: 'passed', runStatus: 'error', error: message });
+      if (occurrence.triggerSource !== 'manual') {
+        await this.recordOutcome(occurrence, { key: `error:${code}`, kind: 'error', reason: message });
+        await this.advanceSchedule(schedule, occurrence.scheduledForUtc);
+      }
+    };
+    try { await this.requireAuthorized(schedule.sessionId, actorId); }
+    catch (error) {
+      await this.disableSchedule(scheduleStored);
+      await this.finishOccurrence(stored, { conditionStatus: 'error', runStatus: 'error', error: errorMessage(error) });
+      return;
+    }
+    if (!this.options.workTemplates) { await fail('WORK_TEMPLATE_UNAVAILABLE', '本实例没有启用工作项模板，无法启动'); return; }
+    const previous = (await this.listRecords(OCCURRENCE_PREFIX, value => sessionScheduleOccurrenceSchema.parse(value), undefined, { field: 'runStatus', values: ['completed'], scheduleId: schedule.id }))
+      .map(item => migrateOccurrence(item.value)).filter(item => item.scheduleId === schedule.id && item.workItemId && item.id !== occurrence.id)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+    const previousStatus = previous?.workItemId ? await this.options.workTemplates.status(schedule.sessionId, previous.workItemId, actorId).catch(() => undefined) : undefined;
+    if (previousStatus && activeWorkItemStatuses.has(previousStatus)) {
+      await this.finishOccurrence(stored, { conditionStatus: 'skipped', runStatus: 'skipped', error: `上一次启动的工作项 ${previous!.workItemId} 还没结束` });
+      if (occurrence.triggerSource !== 'manual') await this.advanceSchedule(schedule, occurrence.scheduledForUtc);
+      return;
+    }
+    let item: { id: string; status: string };
+    try { item = await this.options.workTemplates.run(schedule.sessionId, template.id, template.version, schedule.prompt, `schedule:${occurrence.id}`, actorId); }
+    catch (error) {
+      const code = errorCode(error);
+      await fail(code, code === 'WORK_TEMPLATE_NOT_FOUND' ? `工作项模板 ${template.id}（版本 ${template.version}）已删除或不可用，这次没有启动` : `工作项模板没能启动：${errorMessage(error)}`);
+      return;
+    }
+    await this.finishOccurrence(stored, { conditionStatus: 'passed', runStatus: 'completed', workItemId: item.id });
+    if (occurrence.triggerSource !== 'manual') {
+      await this.recordOutcome(occurrence);
+      await this.advanceSchedule(schedule, occurrence.scheduledForUtc);
+    }
   }
 
   private async dispatchOccurrence(
@@ -1983,7 +2131,7 @@ export class SessionAutomationService {
    */
   private async fallbackToFresh(stored: { raw: string; value: SessionSchedule }, occurrenceId?: string, force = false) {
     const schedule = stored.value;
-    if (schedule.mode === 'independent' || schedule.mode === 'fresh' || !this.options.runtime.startScheduleSession) return stored;
+    if (schedule.mode === 'independent' || schedule.mode === 'fresh' || schedule.workTemplate || !this.options.runtime.startScheduleSession) return stored;
     const origin = await this.options.runtime.getSession(schedule.sessionId);
     const legacyLoop = schedule.mode === undefined && origin?.source === 'lark' && schedule.trigger.kind !== 'at';
     let replaced = false;
@@ -2196,10 +2344,11 @@ export class SessionAutomationService {
     }));
   }
 
-  private async disableSchedule(stored: { raw: string; value: SessionSchedule }, reason = 'Schedule authorization is no longer available'): Promise<boolean> {
+  private async disableSchedule(stored: { raw: string; value: SessionSchedule }, reason = 'Schedule authorization is no longer available', outcome?: SessionSchedule['outcome']): Promise<boolean> {
     if (!stored.value.enabled) return false;
     const disabled = sessionScheduleSchema.parse({
       ...stored.value,
+      ...(outcome ? { outcome } : {}),
       revision: stored.value.revision + 1,
       generation: stored.value.generation + 1,
       enabled: false,
@@ -2493,11 +2642,12 @@ export class SessionAutomationService {
     }
     // 若 V1 来源没有 taskId（接受响应丢失或旧版未记），通过 lookupAccepted 查找已存在的接受事实
     const scheduleStored = schedules.get(value.scheduleId);
+    if (value.workItemId || scheduleStored?.value.workTemplate) return undefined;
     if (scheduleStored) {
       const session = await this.options.runtime.getSession(value.sessionId);
       const actor = resolveAutomationActor(session, scheduleStored.value.actorId);
       if (session && actor) {
-        const candidateRequest = this.buildRequest(session, 'schedule', scheduleRequestKey(value.id), scheduleStored.value.prompt, actor);
+        const candidateRequest = this.buildRequest(session, 'schedule', scheduleRequestKey(value.id), scheduleTaskPrompt(scheduleStored.value), actor);
         let accepted;
         try { accepted = this.execution.lookupAccepted(candidateRequest); }
         catch (error) {

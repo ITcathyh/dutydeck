@@ -28,7 +28,7 @@ async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   let broker!: RelayAskBroker;
   let release: (() => void) | undefined;
-  const send = vi.fn(); const resolvePermission = vi.fn(); const compact = vi.fn();
+  const send = vi.fn(); const resolvePermission = vi.fn(); const resolveReasons: string[] = []; const compact = vi.fn();
   const runtime = new DutydeckRuntime(repos, {
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit, _exit, sessionId) => {
@@ -81,7 +81,7 @@ async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options
             }
           } finally { busy = false; }
         },
-        resolvePermission: async (id, approved) => { resolvePermission(id, approved); emit({ type: 'permission_request', data: { id, title: '修改文件', status: approved ? 'approved' : 'rejected', options: [{ id: 'once', label: '一次', kind: 'allow_once' }] } }); currentRelease?.(); currentRelease = undefined; return true; }
+        resolvePermission: async (id, approved, reason) => { resolvePermission(id, approved); if (reason !== undefined) resolveReasons.push(reason); emit({ type: 'permission_request', data: { id, title: '修改文件', status: approved ? 'approved' : 'rejected', options: [{ id: 'once', label: '一次', kind: 'allow_once' }] } }); currentRelease?.(); currentRelease = undefined; return true; }
       };
       return driver;
     }
@@ -160,7 +160,7 @@ async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options
       return mapping.externalId === 'om_task' && saved.state === 'completed' && saved.final_delivery_state === 'delivered';
     })).toBe(true));
   };
-  return { repos, runtime, broker, config, coordinator, createCoordinator, groupManager, service, cards, files, log, send, compact, resolvePermission, interactions, completed };
+  return { repos, runtime, broker, config, coordinator, createCoordinator, groupManager, service, cards, files, log, send, compact, resolvePermission, resolveReasons, interactions, completed };
 }
 
 async function seedLegacyResult(h: Awaited<ReturnType<typeof harness>>) {
@@ -980,6 +980,30 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     await h.completed();
   });
 
+  it('「拒绝并说明」表单回调：原因交给驱动并写入审批记录，终态卡显示摘要，授权与重复点击和「拒绝」一致', async () => {
+    const h = await harness('permission');
+    await h.coordinator.handle(event('om_task', '修改实现'), h.config);
+    await vi.waitFor(async () => expect((await h.interactions()).find(item => item.kind === 'permission')?.cardId).toBeTruthy());
+    const request = (await h.interactions()).find(item => item.kind === 'permission')!;
+    const card = h.cards.get(request.cardId!)!;
+    const form = card.elements.find((element: any) => element.element_id === 'workflow_reject_form');
+    const value = { ...form.elements[1].behaviors[0].value, form_value: { reason: '先在测试目录验证，token=abc123 不要外传' } };
+    expect(value).toMatchObject({ dutydeck_workflow: 'reject', request_id: request.id, generation: request.boot });
+    expect(await h.coordinator.handleAction(value, 'ou_alice', { messageId: 'om_forged', chatId: 'oc_group' })).toMatchObject({ type: 'error' });
+    expect(await h.coordinator.handleAction(value, 'ou_bob', { messageId: request.cardId, chatId: 'oc_group' })).toMatchObject({ type: 'error' });
+    expect(h.resolvePermission).not.toHaveBeenCalled();
+    const outcomes = await Promise.all([1, 2].map(() => h.coordinator.handleAction(value, 'ou_alice', { messageId: request.cardId, chatId: 'oc_group' })));
+    expect(outcomes.filter(outcome => outcome.type === 'success')).toHaveLength(1);
+    expect(h.resolvePermission).toHaveBeenCalledExactlyOnceWith('native_permission', false);
+    expect(h.resolveReasons).toEqual(['先在测试目录验证，token=abc123 不要外传']);
+    const events = await h.runtime.getEvents(request.sessionId);
+    expect(events.filter(item => item.type === 'permission_request' && (item.data as any).status === 'rejected').map(item => (item.data as any).reason))
+      .toEqual(['先在测试目录验证，token=[REDACTED] 不要外传']);
+    await vi.waitFor(() => expect(JSON.stringify(h.cards.get(request.cardId!))).toContain('原因：先在测试目录验证，token=[REDACTED] 不要外传'), { timeout: 5_000 });
+    expect(JSON.stringify(h.cards.get(request.cardId!))).not.toContain('abc123');
+    await h.completed();
+  });
+
   it('approves by quoting the permission card, whose request id is no longer printed anywhere', async () => {
     const h = await harness('permission');
     await h.coordinator.handle(event('om_task', '修改实现'), h.config);
@@ -1372,5 +1396,23 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     const tasks = await h.runtime.getTasks(session!.id);
     expect(tasks.map(task => task.prompt)).toEqual(['生成初稿', '补充一个例子']);
     expect(await h.repos.tasks.get!(tasks[1]!.id)).toMatchObject({ sessionId: session!.id, prompt: '补充一个例子' });
+  });
+
+  it('lists a pending plan card under 等你决定 on /tasks with a link back to the topic, without repeating result-acceptance cards already shown on task rows', async () => {
+    const h = await harness();
+    await h.coordinator.handle(event('om_task', '先出计划'), h.config);
+    await h.completed();
+    const record = { ...await seedLegacyResult(h), kind: 'plan', question: '计划', cardCreatedAt: new Date(Date.now() - 5 * 60_000).toISOString(), expiresAt: new Date(Date.now() + 3_600_000).toISOString() } as LarkInteraction;
+    await h.repos.config.set(`lark.interaction.${h.config.appId}.${record.id}`, JSON.stringify(record));
+    await h.coordinator.handle(event('om_tasks', '/tasks'), h.config);
+    const card = JSON.stringify([...h.cards.values()].find(item => item.taskId === 'om_tasks'));
+    expect(card).toContain('**等你决定**（1）');
+    expect(card).toContain('计划待批准 1');
+    expect(card).toContain('已等待 5 分钟');
+    expect(card).toContain('client/thread/open');
+    // 验收卡已经在任务行上显示「待验收」，等你决定区不重复列。
+    await h.repos.config.set(`lark.interaction.${h.config.appId}.${record.id}`, JSON.stringify({ ...record, kind: 'result' }));
+    await h.coordinator.handle(event('om_tasks2', '/tasks'), h.config);
+    expect(JSON.stringify([...h.cards.values()].find(item => item.taskId === 'om_tasks2'))).not.toContain('等你决定');
   });
 });

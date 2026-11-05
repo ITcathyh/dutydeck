@@ -1,7 +1,7 @@
 import { createHmac } from 'node:crypto';
 import Fastify from 'fastify';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { pluginTriggerSchema, type PluginTrigger } from '@dutydeck/shared';
+import { pluginTriggerSchema, type PluginTrigger, type WorkItem } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
 import { PluginCommandRegistry } from './commands.js';
 import { isPluginTriggerRequest, registerPluginRoutes } from './routes.js';
@@ -111,6 +111,41 @@ describe('PluginTriggerService', () => {
     const runId = (accepted.body as { runId: string }).runId;
     const restarted = new PluginTriggerService({ ...options, taskStatus: () => undefined });
     expect(restarted.getRun('ci', 'build', runId)).toMatchObject({ runId, taskId: 'durable-task', status: 'running', sessionId: 's1' });
+  });
+
+  it('tracks a work-item run by its work item across restarts and frees the slot once the work ends', async () => {
+    const rows: Array<{ taskId: string; subscriptionId: string; createdAt: number }> = [];
+    const runBindings = {
+      bindTask: (taskId: string, subscriptionId: string, createdAt: number) => rows.push({ taskId, subscriptionId, createdAt }),
+      listTaskBindings: () => rows,
+      unbindTask: (taskId: string) => { const index = rows.findIndex(row => row.taskId === taskId); if (index >= 0) rows.splice(index, 1); }
+    };
+    const trigger = pluginTriggerSchema.parse({ auth: { type: 'token' }, target: { botAppId: 'cli_a', chatId: 'oc_b' }, dedupeKey: '{{payload.id}}', maxConcurrent: 1,
+      workTemplate: { session: 'ses_1', id: 'template_x', version: 2, goal: '处理 {{payload.title}}' } });
+    const deliver = vi.fn(async (_request: TriggerDispatch) => ({ sessionId: 'ses_1', workItemId: `work_${deliver.mock.calls.length}`, awaitingConfirmation: true }));
+    const statuses = new Map<string, WorkItem['status']>();
+    const isSettled = vi.fn(() => true);
+    const options = { lookup: () => ({ ...trigger, scope: 'global' }), token: () => 'secret-token', deliver, runBindings, isSettled, workStatus: (id: string) => statuses.get(id), now: () => 10_000 };
+    const first = new PluginTriggerService(options);
+    const accepted = await first.receive(request(body({ id: 1, title: '告警' })));
+    expect(accepted).toMatchObject({ statusCode: 202, body: { workItemId: 'work_1', awaitingConfirmation: true } });
+    expect(deliver.mock.calls[0]![0]).not.toHaveProperty('prompt');
+    expect(deliver.mock.calls[0]![0]).toMatchObject({ workTemplate: { session: 'ses_1', id: 'template_x', version: 2, goal: expect.stringContaining('UNTRUSTED_DATA') } });
+    expect(rows).toEqual([expect.objectContaining({ taskId: 'work:work_1' })]);
+    statuses.set('work_1', 'awaiting_confirmation');
+    const restarted = new PluginTriggerService(options);
+    const runId = (accepted.body as { runId: string }).runId;
+    expect(restarted.getRun('ci', 'build', runId)).toEqual(expect.objectContaining({ workItemId: 'work_1', status: 'queued' }));
+    expect(restarted.getRun('ci', 'build', runId)).not.toHaveProperty('taskId');
+    // 任务结算判定不适用于工作项：等确认的工作项仍占名额。
+    expect((await restarted.receive(request(body({ id: 2, title: '再来' })))).statusCode).toBe(429);
+    statuses.set('work_1', 'blocked');
+    expect(restarted.getRun('ci', 'build', runId)?.status).toBe('unknown');
+    expect((await restarted.receive(request(body({ id: 2, title: '再来' })))).statusCode).toBe(429);
+    statuses.set('work_1', 'completed');
+    expect(restarted.getRun('ci', 'build', runId)?.status).toBe('succeeded');
+    expect((await restarted.receive(request(body({ id: 2, title: '再来' })))).statusCode).toBe(202);
+    expect(isSettled).not.toHaveBeenCalledWith('work:work_1');
   });
 
   it('rejects an HMAC nonce replay even when the body changes', async () => {
