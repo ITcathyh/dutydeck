@@ -62,7 +62,7 @@ describe('InboxPanel', () => {
     expect(explain.getAttribute('aria-expanded')).toBe('true');
     const box = screen.getByLabelText('拒绝原因') as HTMLTextAreaElement;
     expect(box.maxLength).toBe(2000);
-    expect(box.placeholder).toBe('原因会记入审批记录；终端模式的 Agent 会收到，ACP 模式的只知道被拒绝');
+    expect(box.placeholder).toBe('原因会记录在审批历史；终端模式的 Agent 会收到原因，ACP 模式的 Agent 只知道被拒绝。');
     const submit = screen.getByRole('button', { name: '提交拒绝' });
     expect((submit as HTMLButtonElement).disabled).toBe(true);
     await user.type(box, '  改用 pnpm ');

@@ -2,7 +2,7 @@ import { clearTaskReportSafely } from '@dutydeck/shared';
 import { formatUnknownTaskTime as deadlineText } from '../task-resolution.js';
 import { larkMessageAnchor } from './message-anchor.js';
 import { describeLarkTaskRecovery } from './task-recovery.js';
-import { cleanPermissionRejectReason, permissionDisplayText, permissionRejectReasonMaxLength, timeLoop } from '@dutydeck/shared';
+import { cleanPermissionRejectReason, permissionDisplayText, permissionRejectReasonHint, permissionRejectReasonMaxLength, timeLoop } from '@dutydeck/shared';
 import { createHash, randomUUID } from 'node:crypto';
 import type { AgentEvent, ConfigRepository, PermissionRequestData, PolicyAction } from '@dutydeck/shared';
 import type { RelayAskBroker, RelayAskChoice, RelayDeferredAsk } from '@dutydeck/relay';
@@ -188,7 +188,7 @@ const rejectReasonForm = (record: LarkInteraction): LarkCardElement => ({
   elements: [
     { tag: 'input', element_id: 'workflow_reject_input', name: 'reason',
       input_type: 'multiline_text', max_length: 1000,
-      placeholder: { tag: 'plain_text', content: '原因会记入审批记录；终端模式的 Agent 会收到，ACP 模式的只知道被拒绝。留空等同于「拒绝」' } },
+      placeholder: { tag: 'plain_text', content: `${permissionRejectReasonHint}留空等同于「拒绝」` } },
     { tag: 'button', element_id: 'workflow_reject_submit', type: 'default',
       text: { tag: 'plain_text', content: '拒绝并说明' }, form_action_type: 'submit',
       behaviors: [{ type: 'callback', value: { dutydeck_workflow: 'reject', request_id: record.id, generation: record.boot } }] }

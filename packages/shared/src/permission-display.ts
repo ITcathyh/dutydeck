@@ -15,6 +15,9 @@ export function permissionDisplayText(value: unknown, secrets: string[] = [], li
 /** 用户拒绝审批时附带说明的长度上限（去控制字符、去首尾空白之后计）。 */
 export const permissionRejectReasonMaxLength = 2000;
 
+/** 「拒绝并说明」输入框提示；Web 审批卡、收件箱和飞书审批卡共用。ACP 驱动回执只有 reject_once，原因送不到 Agent。 */
+export const permissionRejectReasonHint = '原因会记录在审批历史；终端模式的 Agent 会收到原因，ACP 模式的 Agent 只知道被拒绝。';
+
 /** 去掉控制字符（保留换行与制表符）和首尾空白；空串返回 undefined，表示没有说明。 */
 export function cleanPermissionRejectReason(value: string): string | undefined {
   return value.replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '').trim() || undefined;

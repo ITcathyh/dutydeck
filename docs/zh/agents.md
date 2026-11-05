@@ -102,6 +102,7 @@ Codex 显示可识别的模型迁移菜单时，Dutydeck 只选 “Use existing 
 - Claude Code / Seed / Relay 的终端模式支持飞书审批，`ask` 和 `approve-reads` 都可用，靠 PermissionRequest hook 实现。
 - 其它终端模式 CLI 只能用 `full-trust`。已有 `ask` / `approve-reads` 机器人切换默认 Agent 时，保存会拒绝不支持审批的 Agent，保留原 Agent 与权限；不会自动提升权限。历史不兼容配置在会话启动时仍会报错，两条修法是：`dutydeck settings bot set <appId> permissionMode=full-trust fullTrustConfirmed=true`，或换成 ACP / Claude 终端模式 Agent。
 - 飞书会话里的 Claude 终端模式固定用 `default` 权限模式启动，本机 `~/.claude` 里设的 `auto` 等默认模式不生效。注意下面[已知限制](troubleshooting.md#known-limits)里的 allow 规则。
+- Web 发起的 Claude 终端会话选 `ask` 或 `approve-reads` 时不改 Claude 的权限模式，沿用本机 Claude 的默认模式：默认是 `auto` 时，写文件和执行命令可能不经审批直接执行。需要审批时出现的是终端里的原生确认，不走 Dutydeck 审批卡；要逐项确认，在终端里按 Shift+Tab 切到需确认的模式，或把本机 Claude 的默认权限模式改掉。
 
 ---
 

@@ -1,10 +1,9 @@
 import { Fragment, useEffect, useId, useMemo, useState } from 'react';
-import { inboxKindLabels } from '@dutydeck/shared';
+import { inboxKindLabels, permissionRejectReasonHint } from '@dutydeck/shared';
 import type { InboxAction, InboxItem } from '../api';
 import {
   formatWaiting, inboxBatchActions, inboxKindCounts, isInboxSelectable, runInboxAction, runInboxBatch, type InboxResult
 } from '../inbox-model';
-import { permissionRejectReasonHint } from './PermissionCard';
 import { Badge, Banner, Button, Card, Skeleton } from './primitives';
 
 type InboxPanelProps = {

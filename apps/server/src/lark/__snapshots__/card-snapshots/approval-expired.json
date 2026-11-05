@@ -445,7 +445,7 @@
                     "max_length": 1000,
                     "placeholder": {
                       "tag": "plain_text",
-                      "content": "原因会记入审批记录；终端模式的 Agent 会收到，ACP 模式的只知道被拒绝。留空等同于「拒绝」"
+                      "content": "原因会记录在审批历史；终端模式的 Agent 会收到原因，ACP 模式的 Agent 只知道被拒绝。留空等同于「拒绝」"
                     }
                   },
                   {
