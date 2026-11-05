@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ConfigRepository } from '@dutydeck/shared';
-import { DutydeckWatch, WATCH_RECOVERED_RETENTION_MS, WATCH_RECOVERED_LIMIT, WATCH_FIRST_RUN_MS, WATCH_INTERVAL_MS, WATCH_PREFIX, checkWatchFindings, readWatchFindings, startDutydeckWatch, watchFingerprint, watchFindingSchema, type WatchScope, type WatchSignal } from './watch.js';
+import { DutydeckWatch, WATCH_RECOVERED_RETENTION_MS, WATCH_RECOVERED_LIMIT, WATCH_FIRST_RUN_MS, WATCH_INTERVAL_MS, WATCH_NOTIFICATION_RETRY_DELAY_MS, WATCH_PREFIX, checkWatchFindings, readWatchFindings, startDutydeckWatch, watchFingerprint, watchFindingSchema, type WatchScope, type WatchSignal } from './watch.js';
 
 const at = '2026-11-01T02:00:00.000Z';
 const signal = (objectId = 'task_1', kind = 'result_delivery'): WatchSignal => ({ kind, objectId, title: '结果投递未确认成功', since: at, location: 'https://example.test/session/1' });
@@ -153,6 +153,27 @@ describe('watch scheduling and CLI', () => {
     await vi.advanceTimersByTimeAsync(1); expect(run).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(WATCH_INTERVAL_MS); expect(run).toHaveBeenCalledTimes(2);
     await stop(); await vi.advanceTimersByTimeAsync(WATCH_INTERVAL_MS); expect(run).toHaveBeenCalledTimes(2);
+  });
+  it('retries a failed direct message within minutes on the production schedule', async () => {
+    vi.useFakeTimers({ now: Date.parse(at) });
+    const h = fixture(); h.scope.signals = [signal()]; h.send.mockRejectedValueOnce(new Error('飞书 5xx'));
+    const stop = startDutydeckWatch(new DutydeckWatch({ store: h.store, collect: async () => [h.scope], send: h.send, warn: h.warn, now: () => new Date() }), vi.fn());
+    await vi.advanceTimersByTimeAsync(WATCH_FIRST_RUN_MS); expect(h.send).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(WATCH_NOTIFICATION_RETRY_DELAY_MS); expect(h.send).toHaveBeenCalledTimes(2);
+    expect(h.send.mock.calls[1]?.[0]).toEqual(h.send.mock.calls[0]?.[0]);
+    expect(h.findings()[0]?.notifiedAt).toEqual(expect.any(String)); expect(h.findings()[0]?.notificationUnknownAt).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(WATCH_INTERVAL_MS); expect(h.send).toHaveBeenCalledTimes(2);
+    await stop();
+  });
+  it('retries a persistent failure only inside the provider window, then records it as unknown and returns to hourly', async () => {
+    vi.useFakeTimers({ now: Date.parse(at) });
+    const h = fixture(); h.scope.signals = [signal()]; h.send.mockRejectedValue(new Error('飞书 5xx'));
+    const stop = startDutydeckWatch(new DutydeckWatch({ store: h.store, collect: async () => [h.scope], send: h.send, warn: h.warn, now: () => new Date() }), vi.fn());
+    await vi.advanceTimersByTimeAsync(WATCH_FIRST_RUN_MS + 55 * 60_000);
+    expect(h.send).toHaveBeenCalledTimes(11);
+    expect(h.findings()[0]?.notificationUnknownAt).toEqual(expect.any(String)); expect(h.findings()[0]?.notifiedAt).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(WATCH_INTERVAL_MS); expect(h.send).toHaveBeenCalledTimes(11);
+    await stop();
   });
   it('waits for an in-flight check before stopping and does not schedule another', async () => {
     vi.useFakeTimers(); let release!: () => void;

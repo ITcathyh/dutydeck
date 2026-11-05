@@ -99,7 +99,8 @@ export interface WorkItem {
   status: 'awaiting_confirmation' | 'running' | 'waiting' | 'failed' | 'completed' | 'cancelling' | 'cancelled' | 'blocked';
   plan: WorkPlan; steps: WorkStep[]; createdAt: string; updatedAt: string;
   output?: { text: string; digest: string; stepId: string }; error?: string;
-  delivery: { status: 'pending' | 'delivered' | 'error' | 'not_requested'; attempts: number; error?: string };
+  /** 失败后 nextAttemptAt 之前不重发；attempts 到上限后停在 error，不再自动重发。 */
+  delivery: { status: 'pending' | 'delivered' | 'error' | 'not_requested'; attempts: number; error?: string; nextAttemptAt?: string };
 }
 export interface WorkTemplate { id: string; parentSessionId: string; name: string; version: number; plan: WorkPlan; createdAt: string }
 /**
