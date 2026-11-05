@@ -350,6 +350,11 @@ export function listLarkCommands(capabilities: LarkCommandCapabilities): LarkCom
  * 这里会把后者压成前者，恰好毁掉诚实表达能力这条要求。能力门见
  * {@link isLarkCommandAvailable}。
  */
+/** `/fork list`、`/resume list`（只有单词 list）只列出，不改会话：按查看类命令处理。 */
+export function larkCommandMutates(definition: LarkCommandDefinition, parsed: ParsedSlashCommand): boolean {
+  return definition.mutating && !((definition.name === 'fork' || definition.name === 'resume') && parsed.args.length === 1 && parsed.args[0] === 'list');
+}
+
 export function resolveLarkCommand(parsed: ParsedSlashCommand): LarkCommandDefinition | undefined {
   return commandLookup.get(parsed.name);
 }
@@ -511,7 +516,7 @@ export function evaluateLarkCommand(text: unknown, context: LarkCommandContext):
       reason: definition.unavailableReason ?? defaultUnavailable(definition.name)
     };
   }
-  if (definition.mutating && context.operator.kind === 'bot') {
+  if (larkCommandMutates(definition, parsed) && context.operator.kind === 'bot') {
     return { verdict: 'denied', parsed, definition, reason: denyBotOperator(definition.name) };
   }
   return { verdict: 'allowed', parsed, definition };
@@ -532,7 +537,7 @@ export type LarkCommandAuthorization =
 export function authorizeLarkCommandText(text: unknown, context: LarkCommandContext): LarkCommandAuthorization {
   const evaluated = evaluateLarkCommand(text, context);
   if (evaluated.verdict === 'not_a_command' || evaluated.verdict === 'unknown') return { recognized: false };
-  const base = { recognized: true as const, command: evaluated.definition.name, mutating: evaluated.definition.mutating };
+  const base = { recognized: true as const, command: evaluated.definition.name, mutating: larkCommandMutates(evaluated.definition, evaluated.parsed) };
   if (evaluated.verdict === 'allowed') return { ...base, decision: 'allowed' };
   return { ...base, decision: evaluated.verdict === 'denied' ? 'denied' : 'unavailable', reason: evaluated.reason };
 }

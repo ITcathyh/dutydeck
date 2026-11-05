@@ -5,7 +5,7 @@
  */
 import { z } from 'zod';
 import { RuntimeError } from '@dutydeck/shared';
-import { larkCommandRegistry, parseSlashCommand, resolveLarkCommand, type ParsedSlashCommand } from './commands.js';
+import { larkCommandMutates, larkCommandRegistry, parseSlashCommand, resolveLarkCommand, type ParsedSlashCommand } from './commands.js';
 
 /** 只能由用户自己做的：停止和插话针对 Agent 正在跑的这一轮，模型与思考强度只能在空闲时切换（Agent 代发时这一轮必在运行），批准和回答是用户对 Agent 的答复；记忆另有 dutydeck memory。 */
 const userOnly: Record<string, string> = {
@@ -80,7 +80,7 @@ export function agentCommandPlan(command: string): { parsed: ParsedSlashCommand;
   const reason = userOnly[definition.name];
   if (reason) throw new RuntimeError('AGENT_COMMAND_USER_ONLY', reason, 400);
   if (definition.name === 'schedule' && parsed.args[0] === 'every') throw new RuntimeError('AGENT_COMMAND_UNSUPPORTED', '新建定时任务用 dutydeck schedule request。', 400);
-  return { parsed, summary: definition.summary, confirm: definition.mutating && !confirmsItself.has(definition.name) && !(viewWithoutArgs.has(definition.name) && !parsed.args.length) };
+  return { parsed, summary: definition.summary, confirm: larkCommandMutates(definition, parsed) && !confirmsItself.has(definition.name) && !(viewWithoutArgs.has(definition.name) && !parsed.args.length) };
 }
 
 /** 确认卡正文：命令说明加原样命令，dry-run 预览和真发的卡用同一份。 */

@@ -234,6 +234,10 @@ const TURN_STALL_UNKNOWN_CPU_SILENCE_MS = 10 * 60_000;
 const TURN_STALL_CPU_WINDOW_MS = 10_000;
 export interface TurnStall { taskId: string; silentMs: number; queued: number; cpu: 'inactive' | 'unknown' }
 
+/** changeDriverConfiguration 在调用驱动之前的拒绝（轮次占用、上一次配置未完成或有待审批、驱动不能保留上下文）原样抛出，调用方据此给出专用提示。 */
+const switchRejection = (error: unknown) =>
+  error instanceof RuntimeError && ['TURN_IN_PROGRESS', 'DRIVER_CONFIGURATION_BUSY', 'TASK_OPTIONS_UNSUPPORTED'].includes(error.code) ? error : undefined;
+
 export class DutydeckRuntime {
   private readonly mutations = new SessionMutations(() => this.assertBinding());
   private readonly runtimeInstanceId = makeId('runtime');
@@ -3516,7 +3520,7 @@ export class DutydeckRuntime {
     const driver = await this.reconnect(session);
     if (!driver.setModel) throw new RuntimeError('MODEL_SWITCH_UNSUPPORTED', `Agent ${session.agentId} does not support runtime model switching`, 422);
     try { await this.changeDriverConfiguration(session, driver, current => ({ ...current, model: normalized }), { model: normalized }); }
-    catch (error) { throw new RuntimeError('MODEL_SWITCH_FAILED', error instanceof Error ? error.message : String(error), 422); }
+    catch (error) { throw switchRejection(error) ?? new RuntimeError('MODEL_SWITCH_FAILED', error instanceof Error ? error.message : String(error), 422); }
     await this.emit(id, 'status', { state: session.state, model: normalized });
     return this.withSessionMetadata(session);
     });
@@ -3530,7 +3534,7 @@ export class DutydeckRuntime {
     const driver = await this.reconnect(session);
     if (!driver.setReasoningEffort) throw new RuntimeError('REASONING_SWITCH_UNSUPPORTED', `Agent ${session.agentId} does not support runtime reasoning effort switching`, 422);
     try { await this.changeDriverConfiguration(session, driver, current => ({ ...current, reasoningEffort: normalized }), { reasoningEffort: normalized }); }
-    catch (error) { throw new RuntimeError('REASONING_SWITCH_FAILED', error instanceof Error ? error.message : String(error), 422); }
+    catch (error) { throw switchRejection(error) ?? new RuntimeError('REASONING_SWITCH_FAILED', error instanceof Error ? error.message : String(error), 422); }
     await this.emit(id, 'status', { state: session.state, reasoningEffort: normalized });
     return this.withSessionMetadata(session);
     });

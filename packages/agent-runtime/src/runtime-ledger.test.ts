@@ -340,6 +340,14 @@ describe('Runtime uses the execution ledger', () => {
     expect((await h.runtime.send(h.session.id, 'after ACK')).status).toBe('completed'); expect(h.sent).toEqual(['after ACK']);
     expect(original).toHaveBeenCalledTimes(1);
   });
+  it('keeps the busy code when a pending permission blocks a model or effort switch', async () => {
+    const h = await fixture(); h.driver().setReasoningEffort = vi.fn(async () => {});
+    // 待审批请求只在一轮执行中出现；这里直接让运行时看到一条，覆盖切换前的检查。
+    vi.spyOn(h.runtime as unknown as { permissionsForSession(id: string): unknown[] }, 'permissionsForSession').mockReturnValue([{}]);
+    await expect(h.runtime.setModel(h.session.id, 'B')).rejects.toMatchObject({ code: 'DRIVER_CONFIGURATION_BUSY' });
+    await expect(h.runtime.setReasoningEffort(h.session.id, 'high')).rejects.toMatchObject({ code: 'DRIVER_CONFIGURATION_BUSY' });
+    expect(h.models).toEqual([]); expect(h.driver().setReasoningEffort).not.toHaveBeenCalled();
+  });
   it('drains a revoked configuration ACK before releasing the claim and never clears it as known', async () => {
     const h = await fixture(); const entered = deferred(), release = deferred();
     cleanup.push(async () => { release.resolve(); });

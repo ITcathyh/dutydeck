@@ -2,7 +2,7 @@ import { realpath, stat } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
 import { getCliAdapter } from '@dutydeck/cli-adapters';
 import type { AgentConfig } from '@dutydeck/shared';
-import { discoverAgentModels } from '../agent-models.js';
+import { discoverAgentModels, type AgentModelsResult } from '../agent-models.js';
 
 export interface LarkLaunchOptions { agentId?: string; cwd?: string; model?: string; reasoningEffort?: string; workspaceMode?: 'shared' | 'worktree'; nativeForkSessionId?: string; useAgentDefaults?: boolean; automaticFallback?: true }
 export const larkNewSessionUsage = '/new [--agent Agent编号] [--cwd 绝对路径] [--workspace shared|worktree] [--model 模型] [--effort 强度] -- 任务内容；带交接：/new [以上选项] --handoff [备注] [-- 任务内容]';
@@ -53,7 +53,9 @@ export async function validateLarkLaunchOptions(
   options: LarkLaunchOptions,
   agent: Pick<AgentConfig, 'id' | 'name'> & Partial<AgentConfig>,
   /** 机器人配置里的「别名 → 绝对路径」表；非绝对路径的 --cwd 先查这张表，命中后仍走下面同一套校验。 */
-  workspaceAliases?: Record<string, string>
+  workspaceAliases?: Record<string, string>,
+  /** 调用方已经探测过时传入同一份结果，避免再探测一次（/model、/effort 用）。 */
+  discover: (agent: AgentConfig, model?: string) => Promise<AgentModelsResult> = discoverAgentModels
 ): Promise<LarkLaunchOptions> {
   const result = { ...options };
   // 形态校验挡住明显不是 Agent 编号的输入；是否真实存在由调用方对着 runtime.listAgents 判断。
@@ -92,7 +94,7 @@ export async function validateLarkLaunchOptions(
   } else {
     if (agent.protocol !== 'acp' && agent.protocol !== 'auto') throw new Error('当前 Agent 协议不支持指定模型或推理强度。');
     if (!agent.command || !agent.args || !agent.env || !agent.protocol) throw new Error('当前运行时无法验证首轮模型配置，请先配置 Agent。');
-    const available = await discoverAgentModels({ ...agent, ...(result.cwd ? { cwd: result.cwd } : {}) } as AgentConfig, result.model ?? agent.model);
+    const available = await discover({ ...agent, ...(result.cwd ? { cwd: result.cwd } : {}) } as AgentConfig, result.model ?? agent.model);
     if (result.model && !available.models.some(item => item.id === result.model)) throw new Error('Agent 未提供所选模型，请检查模型名称或使用默认模型。');
     if (result.reasoningEffort && !available.reasoningEfforts.some(item => item.id === result.reasoningEffort)) throw new Error('所选模型未提供此推理强度。');
   }

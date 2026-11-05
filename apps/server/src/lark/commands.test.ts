@@ -729,6 +729,18 @@ describe('会话配置与分身命令的注册与能力门', () => {
     expect(renderLarkCommandHelp(capabilities(), { pageSize: 50 }).text).not.toContain('/rename <名称>');
   });
 
+  it('/fork list、/resume list 只列出，协作机器人也能发，权限门按查看类报告', () => {
+    const bot = context({ operator: { kind: 'bot', allowlisted: true } });
+    for (const text of ['/fork list', '/resume list']) {
+      expect(routeLarkCommand(text, bot)).toMatchObject({ kind: 'intent', args: ['list'] });
+      expect(authorizeLarkCommandText(text, bot)).toMatchObject({ decision: 'allowed', mutating: false });
+    }
+    for (const text of ['/fork 并行任务', '/resume ses_1', '/fork -- list']) {
+      expect(routeLarkCommand(text, bot)).toMatchObject({ kind: 'denied' });
+      expect(authorizeLarkCommandText(text, context())).toMatchObject({ mutating: true });
+    }
+  });
+
   it('/fork list 沿用 /fork 的路由，参数交给 coordinator', () => {
     expect(routeLarkCommand('/fork list', context())).toMatchObject({ kind: 'intent', command: 'fork', args: ['list'] });
   });

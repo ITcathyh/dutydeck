@@ -101,6 +101,15 @@ const approvalSummary = (record: LarkInteraction) => {
 };
 
 export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
+  private readonly launchBindingTails = new Map<string, Promise<void>>();
+  /** 同一 scope 的启动绑定先读后写串行执行：/new 写事项边界与 /model、/effort 切换后改绑定不能交错，否则后写的一方会抹掉先写的标记。 */
+  protected withLaunchBinding<T>(sourceId: string, operation: () => Promise<T>): Promise<T> {
+    const next = (this.launchBindingTails.get(sourceId) ?? Promise.resolve()).then(operation);
+    const settled = next.then(() => {}, () => {});
+    this.launchBindingTails.set(sourceId, settled);
+    void settled.then(() => { if (this.launchBindingTails.get(sourceId) === settled) this.launchBindingTails.delete(sourceId); });
+    return next;
+  }
   private resourceRetention(task: LarkTask) {
     const root = this.workflowOptions.resourceRoot;
     return root ? { root, retain: async (directory: string) => {
@@ -576,10 +585,13 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     const boundarySession = [...targets][0] ?? persisted.at(-1)?.id;
     if (boundarySession && this.cardMappings) try {
       const sourceId = larkSourceId(config, event.chatId, event.chatType, scopeId);
-      const binding = await this.cardMappings.get(`lark-launch:${config.appId}`, sourceId);
-      const extra = binding?.extra ? JSON.parse(binding.extra) : {};
-      await this.cardMappings.save({ id: `lark-launch:${sourceId}`, channel: `lark-launch:${config.appId}`, externalId: sourceId,
-        sessionId: boundarySession, extra: JSON.stringify({ ...extra, matterBoundary: true }), createdAt: new Date().toISOString() });
+      const mappings = this.cardMappings;
+      await this.withLaunchBinding(sourceId, async () => {
+        const binding = await mappings.get(`lark-launch:${config.appId}`, sourceId);
+        const extra = binding?.extra ? JSON.parse(binding.extra) : {};
+        await mappings.save({ id: `lark-launch:${sourceId}`, channel: `lark-launch:${config.appId}`, externalId: sourceId,
+          sessionId: boundarySession, extra: JSON.stringify({ ...extra, matterBoundary: true }), createdAt: new Date().toISOString() });
+      });
     } catch (error) { this.log.warn({ error }, '保存事项边界失败'); }
     return { retired: targets.size > 0, retained: retained.size > 0 };
   }
