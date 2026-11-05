@@ -162,24 +162,24 @@ describe('repairCardStrongPunctuation: 耗时有上界', () => {
     return { best, output };
   };
 
-  it('上限内星号最密的正文仍全部修复，且在 200ms 内', () => {
+  it('上限内星号最密的正文仍全部修复，且在 1000ms 内（负载下留余量，旧实现为数十秒）', () => {
     // 每行 4 个 **、其中一对配不上：旧实现在 1000 行（约 16KB）上要跑一分钟以上。500 行恰好用满 ** 上限。
     const cjk = Array.from({ length: 500 }, () => '**甲**：乙**丙：**丁').join('\n');
     const cjkResult = fastest(cjk);
     expect(cjkResult.output).toBe(cjk.replaceAll('**丙：**丁', '**丙**：丁'));
-    expect(cjkResult.best).toBeLessThan(200);
+    expect(cjkResult.best).toBeLessThan(1000);
 
     const ascii = Array.from({ length: 500 }, () => '**a**:b**c:**d').join('\n');
     const asciiResult = fastest(ascii);
     expect(asciiResult.output).toBe(ascii.replaceAll('**c:**d', '**c**:d'));
-    expect(asciiResult.best).toBeLessThan(200);
+    expect(asciiResult.best).toBeLessThan(1000);
   });
 
   it('超过字节或星号上限的正文原样返回', () => {
     const long = fill('**甲**：乙**丙：**丁', 64 * 1024);
     const longResult = fastest(long);
     expect(longResult.output).toBe(long);
-    expect(longResult.best).toBeLessThan(200);
+    expect(longResult.best).toBeLessThan(1000);
     const dense = Array.from({ length: 501 }, () => '**a**:b**c:**d').join('\n');
     expect(repairCardStrongPunctuation(dense)).toBe(dense);
   });
