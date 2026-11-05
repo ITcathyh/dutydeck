@@ -438,7 +438,12 @@ export default function App() {
     for (let index = timeline.length - 1; index >= 0; index--) if (timeline[index].type === 'text' && timeline[index].data.role === 'user') return index;
     return -1;
   }, [timeline]);
-  const awaitingAnswer = useMemo(() => busyStates.has(active?.state ?? '') && latestUserIndex >= 0 && !timeline.slice(latestUserIndex + 1).some(event => event.type === 'text' && event.data.role !== 'user'), [active?.state, latestUserIndex, timeline]);
+  // Same as "no assistant text after the latest user message", without copying the running turn.
+  const awaitingAnswer = useMemo(() => {
+    if (!busyStates.has(active?.state ?? '') || latestUserIndex < 0) return false;
+    for (let index = timeline.length - 1; index > latestUserIndex; index--) if (timeline[index].type === 'text' && timeline[index].data.role !== 'user') return false;
+    return true;
+  }, [active?.state, latestUserIndex, timeline]);
   const hasOngoingActivity = useMemo(() => timelineSections.some(section => section.kind === 'activity' && section.isLatestTurn && awaitingAnswer), [timelineSections, awaitingAnswer]);
   const isPtyCli = activeAgent?.protocol === 'pty-cli';
 
