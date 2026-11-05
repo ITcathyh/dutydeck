@@ -2760,23 +2760,29 @@ describe('schedule pre-check command', () => {
     return h.service.updateSchedule(h.session.id, created.id, { expectedRevision: created.revision, enabled: true }, owner);
   };
   const at = (h: Awaited<ReturnType<typeof fixture>>, minute: number) => { h.now.value = new Date(`2026-09-12T00:${String(minute).padStart(2, '0')}:01.000Z`); };
+  // 前置命令在后台跑：等本实例所有前置命令及其后续处理结束。
+  const settle = async (service: SessionAutomationService) => {
+    const runs = (service as unknown as { preconditionRuns: Map<string, Promise<void>> }).preconditionRuns;
+    while (runs.size) await Promise.allSettled([...runs.values()]);
+  };
+  const tick = async (h: Awaited<ReturnType<typeof fixture>>) => { await h.service.tick(); await settle(h.service); };
 
   it('wakes the Agent only on exit 0; a non-zero exit skips without a task, a notice or a failure count', async () => {
     const onScheduleProblem = vi.fn(async () => ({ messageId: 'om_notice' }));
     const h = await fixture({ onScheduleProblem });
     const schedule = await enable(h, { precondition: { command: 'test -f go' } });
-    at(h, 1); await h.service.tick();
+    at(h, 1); await tick(h);
     let listed = await h.service.listBySession(h.session.id, owner);
     expect(listed.occurrences.at(-1)).toMatchObject({ conditionStatus: 'skipped', runStatus: 'skipped', error: expect.stringContaining('退出码 1'), delivery: { status: 'not_requested' } });
     expect(listed.preconditions?.[schedule.id]).toMatchObject({ command: 'test -f go', timeoutSeconds: 15, skippedInARow: 1, last: { outcome: 'skipped', exitCode: 1 } });
-    at(h, 2); await h.service.tick();
+    at(h, 2); await tick(h);
     expect((await h.service.listBySession(h.session.id, owner)).preconditions?.[schedule.id]?.skippedInARow).toBe(2);
     expect(h.dispatches).toHaveLength(0);
     expect(onScheduleProblem).not.toHaveBeenCalled();
     expect(await h.repositories.config.get(`session_automation/streak/${schedule.id}`)).toBeUndefined();
 
     await run('touch', [join(h.cwd, 'go')]);
-    at(h, 3); await h.service.tick();
+    at(h, 3); await tick(h);
     expect(h.dispatches).toHaveLength(1);
     listed = await h.service.listBySession(h.session.id, owner);
     expect(listed.occurrences.at(-1)).toMatchObject({ conditionStatus: 'passed', runStatus: 'accepted' });
@@ -2790,8 +2796,8 @@ describe('schedule pre-check command', () => {
     const schedule = await enable(h, { precondition: { command: 'sleep 30', timeoutSeconds: 1 } });
     for (const minute of [1, 2, 3]) {
       at(h, minute);
-      await h.service.tick();
-      await vi.waitFor(async () => { await h.service.tick(); expect(onScheduleProblem).toHaveBeenCalledTimes(minute); });
+      await tick(h);
+      await vi.waitFor(async () => { await tick(h); expect(onScheduleProblem).toHaveBeenCalledTimes(minute); });
     }
     const listed = await h.service.listBySession(h.session.id, owner);
     expect(listed.occurrences.map(item => [item.conditionStatus, item.runStatus])).toEqual([['error', 'error'], ['error', 'error'], ['error', 'error']]);
@@ -2808,7 +2814,7 @@ describe('schedule pre-check command', () => {
     process.env.DUTYDECK_PRECHECK_TEST_TOKEN = 'precheck-secret-value-1234';
     cleanups.push(() => { delete process.env.DUTYDECK_PRECHECK_TEST_TOKEN; });
     const schedule = await enable(h, { precondition: { command: 'pwd; env; exit 3' } });
-    at(h, 1); await h.service.tick();
+    at(h, 1); await tick(h);
     const last = (await h.service.listBySession(h.session.id, owner)).preconditions?.[schedule.id]?.last;
     expect(last).toMatchObject({ outcome: 'skipped', exitCode: 3 });
     expect(last!.output.split('\n')[0]).toBe(await realpath(h.cwd));
@@ -2824,7 +2830,7 @@ describe('schedule pre-check command', () => {
   it('keeps output within 4 KB', async () => {
     const h = await fixture();
     const schedule = await enable(h, { precondition: { command: 'head -c 20000 /dev/zero | tr "\\0" a; exit 1' } });
-    at(h, 1); await h.service.tick();
+    at(h, 1); await tick(h);
     const last = (await h.service.listBySession(h.session.id, owner)).preconditions?.[schedule.id]?.last;
     expect(Buffer.byteLength(last!.output)).toBe(4_096);
     expect(last!.outputTruncated).toBe(true);
@@ -2841,7 +2847,9 @@ describe('schedule pre-check command', () => {
     await vi.waitFor(async () => expect((await readFile(log, 'utf8').catch(() => '')).length).toBeGreaterThan(0));
     await second.tick();
     await first;
+    await settle(h.service);
     await second.tick();
+    await settle(second);
     expect((await readFile(log, 'utf8')).trim().split('\n')).toEqual(['run']);
     expect((await h.service.listBySession(h.session.id, owner)).occurrences).toHaveLength(1);
   });
@@ -2854,12 +2862,76 @@ describe('schedule pre-check command', () => {
     };
     const h = await fixture({ extra: { workTemplates } });
     await enable(h, { workTemplate: { id: 'template_a', version: 2 }, precondition: { command: 'test -f go' } });
-    at(h, 1); await h.service.tick();
+    at(h, 1); await tick(h);
     expect(workTemplates.run).not.toHaveBeenCalled();
     await run('touch', [join(h.cwd, 'go')]);
-    at(h, 2); await h.service.tick();
+    at(h, 2); await tick(h);
     expect(workTemplates.run).toHaveBeenCalledOnce();
   });
+
+  it('records a passed pre-check before starting the template, so recovery after a crash starts it without rerunning the command', async () => {
+    let cwd = '';
+    let release: (() => void) | undefined;
+    const workTemplates = {
+      list: vi.fn(async () => [{ id: 'template_a', version: 2 }]),
+      run: vi.fn(async (_session: string, _id: string, _version: number, _goal: string, key: string) => {
+        // 工作项消费掉 ready.flag；第一次启动后“进程退出”，不回到收尾。
+        await rm(join(cwd, 'ready.flag'), { force: true });
+        if (workTemplates.run.mock.calls.length === 1) await new Promise<void>(resolve => { release = resolve; });
+        return { id: `work_${key}`, status: 'running' };
+      }),
+      progress: vi.fn(async () => undefined)
+    };
+    const h = await fixture({ extra: { workTemplates } });
+    cwd = h.cwd;
+    const log = join(h.cwd, 'runs.log');
+    await run('touch', [join(h.cwd, 'ready.flag')]);
+    await enable(h, { workTemplate: { id: 'template_a', version: 2 }, precondition: { command: `echo run >> ${log}; test -f ready.flag` } });
+    at(h, 1); await h.service.tick();
+    await vi.waitFor(() => expect(workTemplates.run).toHaveBeenCalledOnce());
+    const [pending] = (await h.service.listBySession(h.session.id, owner)).occurrences;
+    expect(pending).toMatchObject({ conditionStatus: 'passed', runStatus: 'pending' });
+
+    // 租约过期后由新实例恢复：不重跑前置命令，按同一派生键启动工作项并记为已启动。
+    const second = new SessionAutomationService({ repositories: h.repositories, runtime: h, authorize: async () => true, clock: () => new Date(h.now.value), workTemplates });
+    cleanups.push(() => second.close());
+    h.now.value = new Date('2026-09-12T00:01:40.000Z');
+    await second.tick(); await settle(second);
+    expect((await readFile(log, 'utf8')).trim().split('\n')).toEqual(['run']);
+    expect(workTemplates.run.mock.calls.map(call => call[4])).toEqual([`schedule:${pending!.id}`, `schedule:${pending!.id}`]);
+    const [recovered] = (await second.listBySession(h.session.id, owner)).occurrences;
+    expect(recovered).toMatchObject({ id: pending!.id, conditionStatus: 'passed', runStatus: 'completed', workItemId: `work_schedule:${pending!.id}` });
+    release!();
+    await settle(h.service);
+  });
+
+  it('runs the pre-check in the background: other schedules and a manual run do not wait, and one occurrence runs it once', async () => {
+    const h = await fixture();
+    const log = join(h.cwd, 'slow.log');
+    const slow = await enable(h, { name: 'Slow', precondition: { command: `echo run >> ${log}; sleep 2` } });
+    await enable(h, { name: 'Plain', additional: true });
+    at(h, 1);
+    let started = Date.now();
+    await h.service.tick();
+    expect(Date.now() - started).toBeLessThan(1_500);
+    expect(h.dispatches).toHaveLength(1);
+    // 命令还在跑时再触发 tick，同一次触发不会再跑一份。
+    await h.service.tick();
+    await settle(h.service);
+    expect((await readFile(log, 'utf8')).trim().split('\n')).toEqual(['run']);
+    expect(h.dispatches).toHaveLength(2);
+
+    expect((await h.service.listBySession(h.session.id, owner)).occurrences.find(item => item.scheduleId === slow.id)).toMatchObject({ conditionStatus: 'passed', runStatus: 'accepted' });
+
+    const m = await fixture();
+    const paused = await m.service.createSchedule(m.session.id, { ...scheduleInput, precondition: { command: 'sleep 2' } }, owner);
+    started = Date.now();
+    const manual = await m.service.runSchedule(m.session.id, paused.id, { expectedRevision: paused.revision, idempotencyKey: 'manual-1' }, owner);
+    expect(Date.now() - started).toBeLessThan(1_500);
+    expect(manual).toMatchObject({ triggerSource: 'manual', conditionStatus: 'pending', runStatus: 'pending' });
+    await settle(m.service);
+    expect((await m.service.listBySession(m.session.id, owner)).occurrences.find(item => item.id === manual.id)).toMatchObject({ conditionStatus: 'passed', runStatus: 'accepted' });
+  }, 15_000);
 
   it('accepts the setting only from the installation owner and rejects risky or conflicting settings', async () => {
     const h = await fixture();

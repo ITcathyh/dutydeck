@@ -185,12 +185,14 @@ describe('turn diff snapshots', () => {
     expect(resolveTurnDiffComment(diff.files, { path: renamed, side: 'new', line: 4 })).toBe(' line 2\n line 3\n+rename addition');
     expect(resolveTurnDiffComment(diff.files, { path: typed, side: 'new', line: 1 })).toBe('+keep.txt');
     expect(diff.truncated).toBe(false);
-    const patch = Buffer.from((await git('-c', 'core.quotePath=false', 'diff', '--no-ext-diff', '--no-textconv', before.tree, after.tree)).stdout);
-    const lastHeader = patch.lastIndexOf('diff --git ');
-    const total = patch.indexOf(Buffer.from('中文'), lastHeader) + 1;
+    // 同一级里先读没改名的文件，再读改名：把整页上限卡在最后读的改名段 header 的中文路径中间。
+    const patchOf = async (...args: string[]) => Buffer.from((await git('-c', 'core.quotePath=false', 'diff', '--no-ext-diff', '--no-textconv', ...args)).stdout);
+    const plain = await patchOf('--no-renames', before.tree, after.tree, '--', `:(literal)${edited}`, `:(literal)b${suffix}`, `:(literal)${typed}`);
+    const renamePatch = await patchOf('-M', before.tree, after.tree, '--', `:(literal)${oldPath}`, `:(literal)${renamed}`);
+    const total = plain.length + renamePatch.indexOf(Buffer.from('中文')) + 1;
     const truncated = await readTurnDiff(before.gitDir, before.tree, after.tree, { file: 10_000, total });
-    expect(truncated.files.slice(0, 3)).toEqual(diff.files.slice(0, 3));
-    expect(truncated.files[3]).toMatchObject({ path: typed, placeholder: 'omitted', hunks: [] });
+    expect([truncated.files[0], truncated.files[1], truncated.files[3]]).toEqual([diff.files[0], diff.files[1], diff.files[3]]);
+    expect(truncated.files[2]).toMatchObject({ path: renamed, oldPath, status: 'renamed', placeholder: 'omitted', hunks: [] });
     expect(truncated.truncated).toBe(true);
   });
 
@@ -436,6 +438,56 @@ describe('turn diff snapshots', () => {
     const lock = await readTurnDiffFile(before!.gitDir, before!.tree, after!.tree, 'pnpm-lock.yaml');
     expect(lock!.placeholder).toBeUndefined();
     expect(lock!.hunks.flatMap(hunk => hunk.lines)).toHaveLength(3_000);
+  });
+
+  it('pairs renames in the patch exactly as the file list does, even when batches would detect them differently', async () => {
+    const { dir, git } = await repo();
+    const body = (name: string) => Array.from({ length: 20 }, (_, line) => `${name} stable line ${line}`).join('\n') + '\n';
+    await mkdir(join(dir, 'tests'));
+    const moved = ['src-a.ts', 'src-b.ts', 'tests/c.test.ts', 'tests/d.test.ts'];
+    for (const path of moved) await writeFile(join(dir, path), body(path));
+    await git('add', '.'); await git('commit', '-m', 'before renames');
+    // 整次比较有 4 对候选，超过上限 3，不配对改名；按源码、测试分批后每批 2 对，在上限内会配对。
+    await git('config', 'diff.renameLimit', '3');
+    const before = (await snapshotWorkingTree(dir))!;
+    for (const path of moved) {
+      const target = path.replace(/(\.test)?\.ts$/, '-moved$1.ts');
+      await rename(join(dir, path), join(dir, target));
+      await writeFile(join(dir, target), `${body(path)}edited\n`);
+    }
+    const after = (await snapshotWorkingTree(dir))!;
+    const diff = await readTurnDiff(before.gitDir, before.tree, after.tree);
+    expect(diff.files.map(file => [file.path, file.status, file.placeholder ?? 'shown'])).toEqual([
+      ['src-a-moved.ts', 'added', 'shown'], ['src-a.ts', 'deleted', 'shown'], ['src-b-moved.ts', 'added', 'shown'], ['src-b.ts', 'deleted', 'shown'],
+      ['tests/c-moved.test.ts', 'added', 'shown'], ['tests/c.test.ts', 'deleted', 'shown'], ['tests/d-moved.test.ts', 'added', 'shown'], ['tests/d.test.ts', 'deleted', 'shown']
+    ]);
+    expect(diff.truncated).toBe(false);
+
+    // 反过来：只拿改名两端分批时，同名文件变成唯一，git 按文件名配对会配错（a/x→dd/x）；仍按整次比较的配对展示。
+    await git('config', '--unset', 'diff.renameLimit');
+    const shared = Array.from({ length: 40 }, (_, line) => `shared line ${line}`).join('\n') + '\n';
+    for (const dirName of ['a', 'c', 'e', 'f']) await mkdir(join(dir, dirName));
+    await writeFile(join(dir, 'a/x.ts'), `${shared}alpha\n`);
+    await writeFile(join(dir, 'c/y.ts'), `${shared}gamma\n`);
+    await writeFile(join(dir, 'e/x.ts'), body('e'));
+    await writeFile(join(dir, 'f/y.ts'), body('f'));
+    await git('add', '.'); await git('commit', '-m', 'before crossed renames');
+    const crossBefore = (await snapshotWorkingTree(dir))!;
+    for (const dirName of ['b', 'd']) await mkdir(join(dir, dirName));
+    await rename(join(dir, 'a/x.ts'), join(dir, 'b/y.ts'));
+    await rename(join(dir, 'c/y.ts'), join(dir, 'd/x.ts'));
+    await writeFile(join(dir, 'b/y.ts'), `${shared}alpha\nedit\n`);
+    await writeFile(join(dir, 'd/x.ts'), `${shared}gamma\nedit\n`);
+    await rm(join(dir, 'e/x.ts')); await rm(join(dir, 'f/y.ts'));
+    const crossAfter = (await snapshotWorkingTree(dir))!;
+    expect((await git('diff', '-M', '--name-status', crossBefore.tree, crossAfter.tree, '--', 'a/x.ts', 'b/y.ts', 'c/y.ts', 'd/x.ts')).stdout).toContain('a/x.ts\td/x.ts');
+    const crossed = await readTurnDiff(crossBefore.gitDir, crossBefore.tree, crossAfter.tree);
+    expect(crossed.files.map(file => [file.oldPath, file.path, file.status, file.placeholder ?? 'shown'])).toEqual([
+      ['a/x.ts', 'b/y.ts', 'renamed', 'shown'], ['c/y.ts', 'd/x.ts', 'renamed', 'shown'], [undefined, 'e/x.ts', 'deleted', 'shown'], [undefined, 'f/y.ts', 'deleted', 'shown']
+    ]);
+    expect(resolveTurnDiffComment(crossed.files, { path: 'b/y.ts', side: 'new', line: 42 })).toContain('+edit');
+    expect(crossed.truncated).toBe(false);
+
   });
 
   it('reads source before tests and docs when the page budget runs out, and keeps renames intact', async () => {
