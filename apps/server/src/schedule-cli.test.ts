@@ -46,6 +46,33 @@ describe('schedule CLI', () => {
     expect(handler).toHaveBeenCalledWith('update', 'schedule_1', expect.objectContaining({ mode: 'fresh' }));
   });
 
+  it('maps --condition-command and --condition-timeout to the pre-check command, clears it with an empty value and shows its last result', async () => {
+    const f = fixture();
+    await f.run('create', { session: 'ses_1', name: 'Poll', prompt: 'Review new commits', every: '5', timezone: 'UTC', conditionCommand: 'test -f go', conditionTimeout: '10' });
+    expect(f.requests.at(-1)).toMatchObject({ method: 'POST', body: { condition: { kind: 'always' }, precondition: { command: 'test -f go', timeoutSeconds: 10 } } });
+    await f.run('update', { session: 'ses_1', conditionCommand: 'test -f ready' }, 'schedule_1');
+    expect(f.requests.at(-1)).toMatchObject({ method: 'PATCH', body: { expectedRevision: 4, precondition: { command: 'test -f ready' } } });
+    expect(f.requests.at(-1)!.body.precondition).not.toHaveProperty('timeoutSeconds');
+    await f.run('update', { session: 'ses_1', conditionCommand: '' }, 'schedule_1');
+    expect(f.requests.at(-1)).toMatchObject({ method: 'PATCH', body: { expectedRevision: 4, precondition: null } });
+    await f.run('update', { session: 'ses_1', input: '{"precondition":null}' }, 'schedule_1');
+    expect(f.requests.at(-1)).toMatchObject({ method: 'PATCH', body: { precondition: null } });
+    const count = f.requests.length;
+    for (const input of [{ conditionCommand: 'test -f go', conditionTimeout: '21' }, { conditionCommand: 'test -f go', conditionTimeout: '1.5' }, { conditionTimeout: '5' }, { conditionCommand: '  ' }]) {
+      await expect(f.run('create', { session: 'ses_1', name: 'Bad', prompt: 'x', every: '5', ...input })).rejects.toMatchObject({ code: 'SCHEDULE_ARGUMENT_INVALID' });
+    }
+    await expect(f.run('update', { session: 'ses_1', conditionCommand: '', conditionTimeout: '5' }, 'schedule_1')).rejects.toMatchObject({ code: 'SCHEDULE_ARGUMENT_INVALID' });
+    expect(f.requests).toHaveLength(count);
+    const handler = vi.fn();
+    await createCliProgram('test', { schedule: handler }).parseAsync(['node', 'dutydeck', 'schedule', 'update', 'schedule_1', '--condition-command', 'test -f go', '--condition-timeout', '5']);
+    expect(handler).toHaveBeenCalledWith('update', 'schedule_1', expect.objectContaining({ conditionCommand: 'test -f go', conditionTimeout: '5' }));
+
+    const precondition = { command: 'test -f go', timeoutSeconds: 15, skippedInARow: 2, last: { occurrenceId: 'occ_1', at: '2026-10-15T00:00:00.000Z', outcome: 'skipped', exitCode: 1, output: '', outputTruncated: false } };
+    const shown = fixture();
+    shown.fetcher.mockImplementation(async () => new Response(JSON.stringify({ schedules: [schedule], subscriptions: [], occurrences: [], preconditions: { schedule_1: precondition } }), { headers: { 'content-type': 'application/json' } }));
+    expect(await shown.run('show', { session: 'ses_1' }, 'schedule_1')).toEqual({ schedule, precondition });
+  });
+
   it('maps --until, --deadline and --template to the follow-up fields and validates them before any request', async () => {
     const f = fixture();
     await f.run('create', { session: 'ses_1', name: 'Follow PR', prompt: 'Check the PR', every: '30', timezone: 'Asia/Shanghai', until: 'PR merged', deadline: '2026-12-01T18:00', template: 'template_abc@3' });

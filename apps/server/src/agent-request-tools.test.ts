@@ -126,6 +126,23 @@ describe('Agent schedule requests', () => {
     expect(f.updateSchedule.mock.calls.at(-1)![2]).toMatchObject({ deadlineAt: '2026-12-03T01:00:00.000Z' });
   });
 
+  it('rejects a pre-check command on Agent create and update routes without saving anything', async () => {
+    const f = await setup();
+    for (const field of [{ precondition: { command: 'test -f go' } }, { conditionCommand: 'test -f go' }, { condition: { kind: 'always' } }]) {
+      const created = await f.request(f.group, { every: 15, prompt: '看看 PR 状态', ...field });
+      expect(created.statusCode).toBe(400);
+    }
+    expect(f.requestSchedule).not.toHaveBeenCalled();
+    expect(f.sendConfirmation).not.toHaveBeenCalled();
+    const saved = await f.request(f.group, { every: 15, prompt: '看看 PR 状态' });
+    const id = saved.json().scheduleId;
+    for (const field of [{ precondition: { command: 'test -f go' } }, { precondition: null }, { conditionCommand: 'test -f go' }]) {
+      expect((await f.agent('PATCH', `schedules/${id}`, field)).statusCode).toBe(400);
+    }
+    expect(f.updateSchedule).not.toHaveBeenCalled();
+    expect(f.sendConfirmation).toHaveBeenCalledTimes(1);
+  });
+
   it('passes the fresh-session mode through and rejects unknown modes', async () => {
     const f = await setup();
     expect((await f.request(f.group, { cron: '0 2 * * *', prompt: '更新并部署', name: '部署', mode: 'fresh' })).statusCode).toBe(200);

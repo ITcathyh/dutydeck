@@ -125,6 +125,9 @@ describe('dutydeck agent', () => {
     expect(await usage(['queue', 'drop', '1'])).toMatchObject({ code: 'UNKNOWN_COMMAND', params: [{ name: '<命令>', reason: '没有这个命令：drop；可用：cancel、top' }] });
     expect(await usage(['retry', 'now'])).toMatchObject({ code: 'INVALID_ARGUMENT', params: [{ name: '<参数>', reason: '多余的参数' }] });
     expect(await usage(['schedule', 'enable'])).toMatchObject({ params: [{ name: '<id>', reason: '必填' }] });
+    // 前置命令只能在 Web 计划面板或本机 dutydeck schedule 设置，Agent 入口没有这个参数。
+    expect(await usage(['schedule', 'create', '--every', '30', '--prompt', 'x', '--condition-command', 'test -f go'])).toMatchObject({ params: [{ name: '--condition-command', reason: '不支持这个参数' }] });
+    expect(await usage(['schedule', 'update', 'sch_1', '--condition-command', 'test -f go'])).toMatchObject({ params: [{ name: '--condition-command', reason: '不支持这个参数' }] });
   });
 });
 

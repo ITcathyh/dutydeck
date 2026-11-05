@@ -58,6 +58,19 @@ const scheduleConditionInputSchema = z.preprocess(legacyCondition, z.discriminat
   z.object({ kind: z.literal('ci_new_failure'), provider: providerId.optional(), workflow: z.string().trim().min(1).max(255).optional() }).strict()
 ]));
 
+/**
+ * 前置命令：到点后、开执行会话或启动工作项模板之前，在计划执行目录里跑这条命令；退出码 0 才唤醒 Agent，
+ * 非 0 记为跳过。命令单独存记录，不写进计划的 `condition`，旧程序照常读计划（只是不跑前置命令）。
+ */
+export const SCHEDULE_PRECONDITION_DEFAULT_TIMEOUT_SECONDS = 15;
+export const SCHEDULE_PRECONDITION_MAX_TIMEOUT_SECONDS = 20;
+export const SCHEDULE_PRECONDITION_MAX_OUTPUT_BYTES = 4_096;
+export const schedulePreconditionInputSchema = z.object({
+  command: z.string().trim().min(1).max(2_000),
+  timeoutSeconds: z.number().int().min(1).max(SCHEDULE_PRECONDITION_MAX_TIMEOUT_SECONDS).optional()
+}).strict();
+export type SchedulePreconditionInput = z.infer<typeof schedulePreconditionInputSchema>;
+
 const scheduleMisfireSchema = z.object({
   policy: z.enum(['skip', 'coalesce']), from: timestamp, to: timestamp, reason: z.string()
 }).strict();
@@ -151,7 +164,9 @@ export const createSessionScheduleInputSchema = z.object({
   maxLatenessSeconds: z.number().int().positive().optional(),
   workTemplate: workTemplateRefSchema.optional(),
   completionCondition: completionConditionSchema.optional(),
-  deadlineAt: timestamp.optional()
+  deadlineAt: timestamp.optional(),
+  /** 只接受安装管理员（Web 计划面板、本机 `dutydeck schedule`）；Agent 与飞书入口一律拒绝。 */
+  precondition: schedulePreconditionInputSchema.optional()
 }).strict();
 export type CreateSessionScheduleInput = z.infer<typeof createSessionScheduleInputSchema>;
 
@@ -171,7 +186,9 @@ export const updateSessionScheduleInputSchema = z.object({
   /** `null` 清除。 */
   workTemplate: workTemplateRefSchema.nullable().optional(),
   completionCondition: completionConditionSchema.nullable().optional(),
-  deadlineAt: timestamp.nullable().optional()
+  deadlineAt: timestamp.nullable().optional(),
+  /** `null` 清除。只接受安装管理员。 */
+  precondition: schedulePreconditionInputSchema.nullable().optional()
 }).strict().refine(value => Object.keys(value).some(key => key !== 'expectedRevision'), { message: 'At least one field must be updated' });
 export type UpdateSessionScheduleInput = z.infer<typeof updateSessionScheduleInputSchema>;
 
@@ -374,7 +391,28 @@ export type AutomationDeliveryTarget =
 export const scheduleRunStates = ['waiting', 'running', 'awaiting_human', 'failed', 'completed', 'deadline_reached', 'disabled'] as const;
 export type ScheduleRunState = (typeof scheduleRunStates)[number];
 
+/** 计划的前置命令与最近一次结果；输出已截断并脱敏。 */
+export interface PublicSchedulePrecondition {
+  command: string;
+  timeoutSeconds: number;
+  last?: {
+    occurrenceId: string;
+    at: string;
+    /** passed：退出码 0，唤醒了 Agent；skipped：非 0，这次跳过；error：超时或无法执行，计入连续没做成。 */
+    outcome: 'passed' | 'skipped' | 'error';
+    exitCode?: number;
+    timedOut?: boolean;
+    output: string;
+    outputTruncated: boolean;
+    error?: string;
+  };
+  /** 自上次通过（或设置）以来连续跳过的次数。 */
+  skippedInARow: number;
+}
+
 export interface SessionAutomationList {
+  /** 设了前置命令的计划；旧实例没有。 */
+  preconditions?: Record<string, PublicSchedulePrecondition>;
   /** Read-only projection of each plan's frozen destination; absent on older instances. */
   deliveryTargets?: Record<string, AutomationDeliveryTarget>;
   /** 每个计划的跟进状态；旧实例没有。 */

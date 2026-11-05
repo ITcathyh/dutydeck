@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import type { PublicCiProvider, PublicCiSubscription, PublicSessionSchedule, PublicSessionScheduleOccurrence, ScheduleRunState } from '@dutydeck/shared';
+import type { PublicCiProvider, PublicCiSubscription, PublicSchedulePrecondition, PublicSessionSchedule, PublicSessionScheduleOccurrence, ScheduleRunState } from '@dutydeck/shared';
 import { api, ApiError, type Session } from '../api';
 import { setInstance } from '../instance';
 import { SessionAutomationPanel, scheduleRule } from './SessionAutomationPanel';
@@ -18,8 +18,8 @@ const schedule: PublicSessionSchedule = { schemaVersion: 1, id: 'plan1', revisio
 const clients: QueryClient[] = [];
 afterEach(() => { setInstance(undefined); cleanup(); clients.forEach(client => client.clear()); clients.length = 0; vi.restoreAllMocks(); });
 const testCi: PublicCiProvider = { id: 'test-ci', displayName: 'Test CI', polling: true, webhook: false };
-function mount(schedules: PublicSessionSchedule[] = [], providers: PublicCiProvider[] = [testCi], subscriptions: PublicCiSubscription[] = [], currentSession = session, runStates?: Record<string, ScheduleRunState>) {
-  const read = vi.spyOn(api, 'automation').mockResolvedValue({ schedules, subscriptions, occurrences: [], deliveryTargets: Object.fromEntries(schedules.map(item => [item.id, { kind: 'task' as const, sessionId: session.id }])), ...(runStates ? { runStates } : {}) });
+function mount(schedules: PublicSessionSchedule[] = [], providers: PublicCiProvider[] = [testCi], subscriptions: PublicCiSubscription[] = [], currentSession = session, runStates?: Record<string, ScheduleRunState>, preconditions?: Record<string, PublicSchedulePrecondition>) {
+  const read = vi.spyOn(api, 'automation').mockResolvedValue({ schedules, subscriptions, occurrences: [], deliveryTargets: Object.fromEntries(schedules.map(item => [item.id, { kind: 'task' as const, sessionId: session.id }])), ...(runStates ? { runStates } : {}), ...(preconditions ? { preconditions } : {}) });
   vi.spyOn(api, 'automationHistory').mockImplementation(async (_sessionId, scheduleId, offset = 0, limit = 20) => {
     const data = await read.mock.results.at(-1)?.value;
     const occurrences = (data?.occurrences ?? []).filter((item: PublicSessionScheduleOccurrence) => item.scheduleId === scheduleId).slice().reverse();
@@ -438,5 +438,41 @@ describe('follow-up until done', () => {
     await user.click(screen.getByRole('button', { name: '保存计划' }));
     await waitFor(() => expect(create).toHaveBeenCalledTimes(2));
     expect(create.mock.calls[1]![1]).toMatchObject({ prompt: '检查发布', workTemplate: { id: 'template_a', version: 2 } });
+  });
+});
+
+describe('schedule pre-check command', () => {
+  const precondition = { command: 'test -f go', timeoutSeconds: 10, skippedInARow: 4, last: { occurrenceId: 'o1', at: '2026-09-12T01:00:00Z', outcome: 'skipped' as const, exitCode: 1, output: 'not ready', outputTruncated: false } };
+  const withPrecondition = () => mount([schedule], [testCi], [], session, undefined, { plan1: precondition });
+
+  it('saves a labelled pre-check command with its timeout on create', async () => {
+    mount();
+    const create = vi.spyOn(api, 'createSchedule').mockResolvedValue({ schedule });
+    const user = await fill('interval');
+    await typeInto(user, screen.getByLabelText('前置命令（可选）'), 'test -f go');
+    const timeout = screen.getByLabelText('前置命令超时（秒）');
+    await user.clear(timeout);
+    await typeInto(user, timeout, '8');
+    await user.click(screen.getByRole('button', { name: '保存计划' }));
+    await waitFor(() => expect(create).toHaveBeenCalledWith('s1', expect.objectContaining({ condition: { kind: 'always' }, precondition: { command: 'test -f go', timeoutSeconds: 8 } })));
+  });
+
+  it('shows the latest pre-check result and skip count, keeps it on unrelated edits and clears it when emptied', async () => {
+    withPrecondition();
+    const user = userEvent.setup();
+    await screen.findByText('test -f go');
+    expect(screen.getByText(/最近一次前置命令：退出码 1，已跳过.*连续跳过 4 次/)).toBeTruthy();
+    expect(screen.getByText('not ready')).toBeTruthy();
+    const update = vi.spyOn(api, 'updateSchedule').mockResolvedValue({ schedule });
+    await user.click(screen.getByRole('button', { name: '编辑' }));
+    expect((screen.getByLabelText('前置命令（可选）') as HTMLInputElement).value).toBe('test -f go');
+    expect((screen.getByLabelText('前置命令超时（秒）') as HTMLInputElement).value).toBe('10');
+    await typeInto(user, screen.getByLabelText('计划名称'), '修改');
+    await user.click(screen.getByRole('button', { name: '保存计划' }));
+    await waitFor(() => expect(update).toHaveBeenCalledWith('s1', 'plan1', { expectedRevision: 3, name: '巡检修改' }));
+    await user.click(await screen.findByRole('button', { name: '编辑' }));
+    await user.clear(screen.getByLabelText('前置命令（可选）'));
+    await user.click(screen.getByRole('button', { name: '保存计划' }));
+    await waitFor(() => expect(update).toHaveBeenLastCalledWith('s1', 'plan1', { expectedRevision: 3, precondition: null }));
   });
 });

@@ -8,7 +8,7 @@ export type ScheduleCliAction = 'create' | 'list' | 'show' | 'update' | 'enable'
 export interface ScheduleCliInput {
   session?: string; agent?: string; cwd?: string; model?: string; permissionMode?: string; workspace?: string;
   name?: string; prompt?: string; cron?: string; every?: string; at?: string; timezone?: string; mode?: string;
-  until?: string; deadline?: string; template?: string;
+  until?: string; deadline?: string; template?: string; conditionCommand?: string; conditionTimeout?: string;
   additional?: boolean;
   input?: string; file?: string; expectedRevision?: string; idempotencyKey?: string;
   instance?: string; url?: string; database?: string;
@@ -40,6 +40,16 @@ async function configuration(input: ScheduleCliInput, create: boolean) {
     const match = /^(.+)@(\d+)$/.exec(input.template.trim());
     if (!match) argument('--template takes <template-id>@<version>');
     values.workTemplate = { id: match![1], version: Number(match![2]) };
+  }
+  if (input.conditionTimeout !== undefined && input.conditionCommand === undefined) argument('--condition-timeout needs --condition-command');
+  if (input.conditionCommand !== undefined) {
+    const timeout = input.conditionTimeout === undefined ? undefined : Number(input.conditionTimeout);
+    if (timeout !== undefined && !(Number.isInteger(timeout) && timeout >= 1 && timeout <= 20)) argument('--condition-timeout takes whole seconds from 1 to 20');
+    if (!input.conditionCommand.trim()) {
+      if (create) argument('--condition-command must not be empty');
+      if (timeout !== undefined) argument('--condition-timeout cannot be used when clearing --condition-command');
+      values.precondition = null;
+    } else values.precondition = { command: input.conditionCommand, ...(timeout !== undefined ? { timeoutSeconds: timeout } : {}) };
   }
   if (create) {
     if (input.additional) values.additional = true;
@@ -99,7 +109,10 @@ export async function runScheduleCli(action: ScheduleCliAction, id: string | und
   // An explicitly targeted session can still read the tombstone after deletion.
   const schedule = found ?? (input.session ? (await request('GET', `${automationPath(input.session)}/schedules/${path(id!)}`) as { schedule: PublicSessionSchedule }).schedule : undefined);
   if (!schedule) throw new ScheduleCliError('SCHEDULE_NOT_FOUND', 'Schedule not found on this runtime; use --session to inspect a deleted schedule');
-  if (action === 'show') return { schedule };
+  if (action === 'show') {
+    const precondition = records.find(record => record.schedules.some(item => item.id === schedule.id))?.preconditions?.[schedule.id];
+    return { schedule, ...(precondition ? { precondition } : {}) };
+  }
   const endpoint = `${automationPath(schedule.sessionId)}/schedules/${path(schedule.id)}`;
   const expectedRevision = input.expectedRevision === undefined ? schedule.revision : Number(input.expectedRevision);
   if (action === 'delete') return request('DELETE', endpoint, { expectedRevision });

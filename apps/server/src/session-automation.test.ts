@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -2750,5 +2750,160 @@ describe('work-template schedules', () => {
     await expect(h.service.createSchedule(h.session.id, { ...templateInput, mode: 'fresh' }, 'ou_owner')).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_TEMPLATE_UNSUPPORTED' });
     const without = await fixture();
     await expect(without.service.createSchedule(without.session.id, templateInput, 'ou_owner')).rejects.toMatchObject({ code: 'WORK_TEMPLATE_UNAVAILABLE' });
+  });
+});
+
+describe('schedule pre-check command', () => {
+  const owner = 'installation_owner';
+  const enable = async (h: Awaited<ReturnType<typeof fixture>>, input: Record<string, unknown>) => {
+    const created = await h.service.createSchedule(h.session.id, { ...scheduleInput, ...input }, owner);
+    return h.service.updateSchedule(h.session.id, created.id, { expectedRevision: created.revision, enabled: true }, owner);
+  };
+  const at = (h: Awaited<ReturnType<typeof fixture>>, minute: number) => { h.now.value = new Date(`2026-09-12T00:${String(minute).padStart(2, '0')}:01.000Z`); };
+
+  it('wakes the Agent only on exit 0; a non-zero exit skips without a task, a notice or a failure count', async () => {
+    const onScheduleProblem = vi.fn(async () => ({ messageId: 'om_notice' }));
+    const h = await fixture({ onScheduleProblem });
+    const schedule = await enable(h, { precondition: { command: 'test -f go' } });
+    at(h, 1); await h.service.tick();
+    let listed = await h.service.listBySession(h.session.id, owner);
+    expect(listed.occurrences.at(-1)).toMatchObject({ conditionStatus: 'skipped', runStatus: 'skipped', error: expect.stringContaining('退出码 1'), delivery: { status: 'not_requested' } });
+    expect(listed.preconditions?.[schedule.id]).toMatchObject({ command: 'test -f go', timeoutSeconds: 15, skippedInARow: 1, last: { outcome: 'skipped', exitCode: 1 } });
+    at(h, 2); await h.service.tick();
+    expect((await h.service.listBySession(h.session.id, owner)).preconditions?.[schedule.id]?.skippedInARow).toBe(2);
+    expect(h.dispatches).toHaveLength(0);
+    expect(onScheduleProblem).not.toHaveBeenCalled();
+    expect(await h.repositories.config.get(`session_automation/streak/${schedule.id}`)).toBeUndefined();
+
+    await run('touch', [join(h.cwd, 'go')]);
+    at(h, 3); await h.service.tick();
+    expect(h.dispatches).toHaveLength(1);
+    listed = await h.service.listBySession(h.session.id, owner);
+    expect(listed.occurrences.at(-1)).toMatchObject({ conditionStatus: 'passed', runStatus: 'accepted' });
+    expect(listed.preconditions?.[schedule.id]).toMatchObject({ skippedInARow: 0, last: { outcome: 'passed', exitCode: 0 } });
+    expect(listed.schedules[0]!.enabled).toBe(true);
+  });
+
+  it('counts a timeout as a failed run, tells the thread and disables the schedule after three in a row', async () => {
+    const onScheduleProblem = vi.fn(async (_schedule: unknown, notice: { messageId?: string }) => ({ messageId: notice.messageId ?? 'om_notice' }));
+    const h = await fixture({ onScheduleProblem });
+    const schedule = await enable(h, { precondition: { command: 'sleep 30', timeoutSeconds: 1 } });
+    for (const minute of [1, 2, 3]) {
+      at(h, minute);
+      await h.service.tick();
+      await vi.waitFor(async () => { await h.service.tick(); expect(onScheduleProblem).toHaveBeenCalledTimes(minute); });
+    }
+    const listed = await h.service.listBySession(h.session.id, owner);
+    expect(listed.occurrences.map(item => [item.conditionStatus, item.runStatus])).toEqual([['error', 'error'], ['error', 'error'], ['error', 'error']]);
+    expect(listed.occurrences[0]!.error).toContain('超过 1 秒未结束');
+    expect(listed.preconditions?.[schedule.id]?.last).toMatchObject({ outcome: 'error', timedOut: true });
+    expect(onScheduleProblem.mock.calls[0]![1]).toMatchObject({ text: expect.stringContaining('前置命令超过 1 秒未结束') });
+    expect(onScheduleProblem.mock.calls[2]![1]).toMatchObject({ text: expect.stringContaining('已连续 3 次没做成') });
+    expect(listed.schedules[0]).toMatchObject({ enabled: false, disabledReason: expect.stringContaining('连续 3 次没做成') });
+    expect(h.dispatches).toHaveLength(0);
+  }, 20_000);
+
+  it('runs in the real execution directory with only the minimal tool environment', async () => {
+    const h = await fixture();
+    process.env.DUTYDECK_PRECHECK_TEST_TOKEN = 'precheck-secret-value-1234';
+    cleanups.push(() => { delete process.env.DUTYDECK_PRECHECK_TEST_TOKEN; });
+    const schedule = await enable(h, { precondition: { command: 'pwd; env; exit 3' } });
+    at(h, 1); await h.service.tick();
+    const last = (await h.service.listBySession(h.session.id, owner)).preconditions?.[schedule.id]?.last;
+    expect(last).toMatchObject({ outcome: 'skipped', exitCode: 3 });
+    expect(last!.output.split('\n')[0]).toBe(await realpath(h.cwd));
+    expect(last!.output).toMatch(/^PATH=/m);
+    expect(last!.output).not.toContain('precheck-secret-value-1234');
+    expect(last!.output).not.toContain('DUTYDECK_PRECHECK_TEST_TOKEN');
+    expect(last!.output).not.toMatch(/^DUTYDECK_/m);
+    // 运行记录里只留摘要，完整输出（截到 4 KB）在前置命令状态里。
+    const [occurrence] = (await h.service.listBySession(h.session.id, owner)).occurrences;
+    expect(occurrence!.error!.length).toBeLessThan(600);
+  });
+
+  it('keeps output within 4 KB', async () => {
+    const h = await fixture();
+    const schedule = await enable(h, { precondition: { command: 'head -c 20000 /dev/zero | tr "\\0" a; exit 1' } });
+    at(h, 1); await h.service.tick();
+    const last = (await h.service.listBySession(h.session.id, owner)).preconditions?.[schedule.id]?.last;
+    expect(Buffer.byteLength(last!.output)).toBe(4_096);
+    expect(last!.outputTruncated).toBe(true);
+  });
+
+  it('runs the command once while its lease is held, across ticks and another service instance', async () => {
+    const h = await fixture();
+    const second = new SessionAutomationService({ repositories: h.repositories, runtime: h, authorize: async () => true, clock: () => new Date(h.now.value) });
+    cleanups.push(() => second.close());
+    const log = join(h.cwd, 'runs.log');
+    await enable(h, { precondition: { command: `echo run >> ${log}; sleep 1; exit 1` } });
+    at(h, 1);
+    const first = h.service.tick();
+    await vi.waitFor(async () => expect((await readFile(log, 'utf8').catch(() => '')).length).toBeGreaterThan(0));
+    await second.tick();
+    await first;
+    await second.tick();
+    expect((await readFile(log, 'utf8')).trim().split('\n')).toEqual(['run']);
+    expect((await h.service.listBySession(h.session.id, owner)).occurrences).toHaveLength(1);
+  });
+
+  it('gates work-template schedules before starting the template', async () => {
+    const workTemplates = {
+      list: vi.fn(async () => [{ id: 'template_a', version: 2 }]),
+      run: vi.fn(async (_session: string, _id: string, _version: number, _goal: string, key: string) => ({ id: `work_${key}`, status: 'running' })),
+      progress: vi.fn(async () => undefined)
+    };
+    const h = await fixture({ extra: { workTemplates } });
+    await enable(h, { workTemplate: { id: 'template_a', version: 2 }, precondition: { command: 'test -f go' } });
+    at(h, 1); await h.service.tick();
+    expect(workTemplates.run).not.toHaveBeenCalled();
+    await run('touch', [join(h.cwd, 'go')]);
+    at(h, 2); await h.service.tick();
+    expect(workTemplates.run).toHaveBeenCalledOnce();
+  });
+
+  it('accepts the setting only from the installation owner and rejects risky or conflicting settings', async () => {
+    const h = await fixture();
+    const precondition = { command: 'test -f go' };
+    await expect(h.service.createSchedule(h.session.id, { ...scheduleInput, precondition }, 'ou_owner')).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_PRECONDITION_FORBIDDEN', statusCode: 403 });
+    await expect(h.service.requestSchedule(h.session.id, { ...scheduleInput, precondition }, 'ou_owner', { key: 'turn-1' })).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_PRECONDITION_FORBIDDEN', statusCode: 400 });
+    await expect(h.service.createSchedule(h.session.id, { ...scheduleInput, precondition: { command: 'git fetch && git reset --hard origin/main' } }, owner)).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_PRECONDITION_HIGH_RISK', statusCode: 400 });
+    await expect(h.service.createSchedule(h.session.id, { ...scheduleInput, condition: { kind: 'ci_new_failure' }, precondition }, owner)).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_PRECONDITION_CONFLICT', statusCode: 400 });
+    expect((await h.service.listBySession(h.session.id, owner)).schedules).toHaveLength(0);
+
+    const created = await h.service.createSchedule(h.session.id, { ...scheduleInput, precondition }, owner);
+    await expect(h.service.updateSchedule(h.session.id, created.id, { expectedRevision: created.revision, condition: { kind: 'ci_new_failure' } }, owner)).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_PRECONDITION_CONFLICT' });
+    await expect(h.service.updateSchedule(h.session.id, created.id, { expectedRevision: created.revision, precondition: null }, 'ou_owner')).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_PRECONDITION_FORBIDDEN' });
+    // 其他人改计划的其他字段不动前置命令。
+    const renamed = await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: created.revision, name: 'Renamed' }, 'ou_owner');
+    expect((await h.service.listBySession(h.session.id, owner)).preconditions?.[created.id]?.command).toBe('test -f go');
+    expect(renamed.revision).toBe(created.revision + 1);
+  });
+
+  it('writes the command record with the schedule revision, keeps the plan readable by old versions and clears with a tombstone', async () => {
+    const h = await fixture();
+    const created = await h.service.createSchedule(h.session.id, { ...scheduleInput, precondition: { command: 'test -f go', timeoutSeconds: 5 } }, owner);
+    const raw = () => h.repositories.config.get(`session_automation/schedule/${created.id}`).then(value => JSON.parse(value!));
+    const record = () => h.repositories.config.get(`session_automation/precondition/${created.id}`).then(value => JSON.parse(value!));
+    // 计划本身仍是旧结构：条件写 always、没有新字段，旧程序的严格解析照常通过。
+    expect((await raw()).condition).toEqual({ kind: 'always' });
+    expect(await raw()).not.toHaveProperty('precondition');
+    expect(await record()).toMatchObject({ version: 1, scheduleRevision: created.revision, command: 'test -f go', timeoutSeconds: 5 });
+
+    const batch = vi.spyOn(h.repositories.config, 'compareAndSetBatch');
+    const updated = await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: created.revision, precondition: { command: 'test -f ready' } }, owner);
+    expect(batch).toHaveBeenCalledOnce();
+    expect(batch.mock.calls[0]![1].map(write => write.key)).toEqual([`session_automation/schedule/${created.id}`, `session_automation/precondition/${created.id}`]);
+    expect(await record()).toMatchObject({ scheduleRevision: updated.revision, command: 'test -f ready', timeoutSeconds: 15 });
+
+    // 并发改动让计划修订号变了：两条记录都不写。
+    await expect(h.service.updateSchedule(h.session.id, created.id, { expectedRevision: created.revision, precondition: null }, owner)).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_REVISION_CONFLICT' });
+    expect((await record()).command).toBe('test -f ready');
+
+    const cleared = await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: updated.revision, precondition: null }, owner);
+    expect(await record()).toEqual({ version: 1, scheduleRevision: cleared.revision, updatedAt: expect.any(String) });
+    expect((await h.service.listBySession(h.session.id, owner)).preconditions).toEqual({});
+    await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: cleared.revision, enabled: true }, owner);
+    at(h, 1); await h.service.tick();
+    expect(h.dispatches).toHaveLength(1);
   });
 });

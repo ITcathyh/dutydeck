@@ -93,6 +93,9 @@ export type { AgentDriver, DriverFactory, NormalizedDriverEvent };
 // 执行账本使用的规范 JSON sha256 摘要，供 server 生成同一规则的稳定 ID。
 export { digest } from './ledger.js';
 
+// 定时计划前置命令复用交付前验证的执行器与最小工具环境。
+export { runIsolatedCommand, type IsolatedCommandResult } from './verification.js';
+
 // Session Insight 来源 key 计算规则与稳定实例 ID 配置键，供 resolver (T3d) 复用同一规则。
 export {
   createTranscriptSourceKeys,
