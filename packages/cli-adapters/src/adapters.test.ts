@@ -439,9 +439,13 @@ describe('cursor', () => {
 describe('kimi', () => {
   const adapter = createKimiAdapter();
 
-  it('安全模式无 bypass，full-trust 使用 --yolo', () => {
+  it('安全模式无 bypass，full-trust 使用 --auto 而不是 --yolo', () => {
     expect(adapter.buildArgs({ sessionId: SID, permissionMode: 'ask' })).toEqual([]);
-    expect(adapter.buildArgs({ sessionId: SID, ...FULL_TRUST })).toEqual(['--yolo']);
+    expect(adapter.buildArgs({ sessionId: SID, ...FULL_TRUST })).toEqual(['--auto']);
+  });
+
+  it('full-trust 恢复会话同样用 --auto，不带 --yolo', () => {
+    expect(adapter.buildArgs({ sessionId: SID, resume: true, resumeSessionId: 'kimi-sid', ...FULL_TRUST })).toEqual(['--auto', '--resume', 'kimi-sid']);
   });
 
   it('resume=true：--resume 精确 id；绝不 --continue', () => {
@@ -605,7 +609,7 @@ describe('全适配器横切契约', () => {
     gemini: ['--yolo'],
     grok: ['--always-approve'],
     cursor: ['--trust', '--force'],
-    kimi: ['--yolo'],
+    kimi: ['--auto'],
     antigravity: ['--dangerously-skip-permissions'],
     coco: ['--yolo'],
     hermes: ['--yolo', '--accept-hooks'],

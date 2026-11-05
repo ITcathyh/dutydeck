@@ -4,11 +4,11 @@ import { createHash } from 'node:crypto';
 import { basename, dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { isClaudeFamilyCli, shellQuote as quote, type AgentConfig } from '@dutydeck/shared';
-import { secretGuardScriptPath } from '@dutydeck/shared/secret-guard';
+import { highRiskBlockedSuffix, secretGuardScriptPath } from '@dutydeck/shared/secret-guard';
 import { codexHookReadiness } from './codex-hook-readiness.js';
 import { LarkServiceError } from './service.js';
 
-const guardVersion = 'dutydeck-high-risk-guard-v4';
+const guardVersion = 'dutydeck-high-risk-guard-v5';
 
 type HookAgentId = 'codex' | 'claude' | 'trae' | 'cursor' | 'pi';
 type HookAdapter = {
@@ -124,7 +124,7 @@ const risky = secretReason ? true : await new Promise(resolve => {
   worker.once('exit', code => { if (code !== 0) { matchError = '正则匹配隔离任务异常退出：' + code; finish(true); } });
 });
 if (!risky) process.exit(0);
-const reason = secretReason || matchError || policy.reason || '当前飞书发送人无权执行高危操作';
+const reason = secretReason || (matchError || policy.reason || '当前飞书发送人无权执行高危操作') + ${JSON.stringify(highRiskBlockedSuffix)};
 ${deny}
 `;
 }
@@ -161,7 +161,7 @@ export default function (pi: any) {
     if (!policy.pattern) return undefined;
     const result = await matches(policy.pattern, JSON.stringify({ tool_name: event.toolName, tool_input: event.input }));
     if (!result.risky) return undefined;
-    return { block: true, reason: result.error || policy.reason || '当前飞书发送人无权执行高危操作' };
+    return { block: true, reason: (result.error || policy.reason || '当前飞书发送人无权执行高危操作') + ${JSON.stringify(highRiskBlockedSuffix)} };
   });
 }
 `;

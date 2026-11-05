@@ -5,7 +5,7 @@ import { join, resolve as resolvePath } from 'node:path';
 import { agentConfigSchema, agentWeightsSchema, type Session } from '@dutydeck/shared';
 import { createRepositories, type RepositoryBundle } from '@dutydeck/storage';
 import { readLarkConfig, publicLarkConfig, saveLarkConfig, type StoredLarkConfig } from './config.js';
-import { installLarkHook } from './security-hooks.js';
+import { installLarkHook, larkHookStatus } from './security-hooks.js';
 import { larkSessionConfigKey, listPersistedLarkSessions, resolveLarkSession, selectLarkAgent } from './session-resolver.js';
 
 const weights = [{ agentId: 'codex', weight: 30 }, { agentId: 'ccflash', weight: 70 }];
@@ -155,7 +155,7 @@ it('upgrades a previously installed Dutydeck hook when an enforced session start
   // 模拟升级前装好的 v3：脚本是旧版本，Hook 配置里还有一条用户自己的 Hook。
   await installLarkHook('cursor', config.workspace);
   const script = join(config.workspace!, '.dutydeck', 'security', 'dutydeck-lark-high-risk-guard-cursor.mjs');
-  await writeFile(script, (await readFile(script, 'utf8')).replace('dutydeck-high-risk-guard-v4', 'dutydeck-high-risk-guard-v3'));
+  await writeFile(script, (await readFile(script, 'utf8')).replace('dutydeck-high-risk-guard-v5', 'dutydeck-high-risk-guard-v3'));
   const hooksPath = join(config.workspace!, '.cursor', 'hooks.json');
   const hooks = JSON.parse(await readFile(hooksPath, 'utf8'));
   const custom = { command: 'echo user-hook', matcher: 'Shell' };
@@ -164,7 +164,7 @@ it('upgrades a previously installed Dutydeck hook when an enforced session start
 
   expect((await resolve(undefined, enforced)).agentId).toBe('cursor');
   expect(runtime.start).toHaveBeenCalledOnce();
-  expect(await readFile(script, 'utf8')).toContain('dutydeck-high-risk-guard-v4');
+  expect(await readFile(script, 'utf8')).toContain('dutydeck-high-risk-guard-v5');
   const upgraded = JSON.parse(await readFile(hooksPath, 'utf8')).hooks.preToolUse;
   expect(upgraded).toHaveLength(2);
   expect(upgraded[0]).toEqual(custom);
@@ -183,4 +183,26 @@ it('refuses to start an enforced session until the installed Codex hook is nativ
   await writeFile(join(home, 'hooks-probe-state.json'), JSON.stringify({ projectTrusted: true, hookTrustStatus: 'trusted' }));
   await expect(resolve(undefined, enforced)).resolves.toMatchObject({ agentId: 'codex' });
   expect(runtime.start).toHaveBeenCalledOnce();
+});
+
+it('upgrades an old Codex guard script without changing the hook command, so native trust and enforced sessions keep working', async () => {
+  const { config, repos, runtime, resolve } = await fixture();
+  const home = join(config.workspace!, 'codex-home');
+  await mkdir(home);
+  const agent = { ...(await repos.agents.get('codex'))!, env: { CODEX_PATH: resolvePath('tests/fixtures/mock-codex-hooks.mjs'), CODEX_HOME: home } };
+  await repos.agents.save(agent);
+  await installLarkHook(agent.id, config.workspace, agent);
+  await writeFile(join(home, 'hooks-probe-state.json'), JSON.stringify({ projectTrusted: true, hookTrustStatus: 'trusted' }));
+  const enforced = { ...config, riskControlMode: 'enforced' as const, defaultAgentWeights: undefined };
+  const script = join(config.workspace!, '.dutydeck', 'security', 'dutydeck-lark-high-risk-guard-codex.mjs');
+  const hooksPath = join(config.workspace!, '.codex', 'hooks.json');
+  const hooksBefore = await readFile(hooksPath, 'utf8');
+  // 升级前装好的旧版脚本：Dutydeck 判定为未安装，但 Codex 按命令判定的信任仍有效。
+  await writeFile(script, (await readFile(script, 'utf8')).replace('dutydeck-high-risk-guard-v5', 'dutydeck-high-risk-guard-v4'));
+  expect(await larkHookStatus(agent.id, config.workspace, agent)).toMatchObject({ installed: false });
+  await expect(resolve(undefined, enforced)).resolves.toMatchObject({ agentId: 'codex' });
+  expect(runtime.start).toHaveBeenCalledOnce();
+  expect(await readFile(script, 'utf8')).toContain('dutydeck-high-risk-guard-v5');
+  expect(await readFile(hooksPath, 'utf8')).toBe(hooksBefore);
+  expect(await larkHookStatus(agent.id, config.workspace, agent)).toMatchObject({ installed: true, nativeReady: true });
 });

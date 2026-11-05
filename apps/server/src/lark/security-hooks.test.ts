@@ -46,10 +46,37 @@ describe('Lark Agent security hooks', () => {
     await writeFile(join(policyDirectory, 'ses_guard.json'), JSON.stringify({ enabled: true, authorized: false, pattern: '(?:^|\\s)rm\\b', reason: 'blocked by test' }));
     const denied = await runGuard(workspace, 'codex', 'ses_guard', { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'rm -rf /tmp/example' } });
     expect(denied.code).toBe(0);
-    expect(JSON.parse(denied.output)).toMatchObject({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: 'blocked by test' } });
+    expect(JSON.parse(denied.output)).toMatchObject({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: expect.stringContaining('blocked by test') } });
+    const reason = JSON.parse(denied.output).hookSpecificOutput.permissionDecisionReason as string;
+    expect(reason).toContain('没有执行');
+    expect(reason).toContain('不要重试同一命令或换写法绕过');
+    expect(reason).toContain('让有高危授权的人确认');
+    expect(reason).not.toContain('rm -rf /tmp/example');
     expect((await runGuard(workspace, 'codex', 'ses_guard', { tool_name: 'Bash', tool_input: { command: 'pwd' } })).output).toBe('');
     await writeFile(join(policyDirectory, 'ses_guard.json'), JSON.stringify({ enabled: true, authorized: true, pattern: 'rm\\b' }));
     expect((await runGuard(workspace, 'codex', 'ses_guard', { tool_name: 'Bash', tool_input: { command: 'rm file' } })).output).toBe('');
+  });
+
+  it('never echoes the blocked command back to the Agent', async () => {
+    const workspace = await mkdtemp(join(tmpdir(), 'dutydeck-hook-')); workspaces.push(workspace);
+    await installLarkHook('codex', workspace);
+    const policyDirectory = join(workspace, '.dutydeck', 'security', 'sessions');
+    await mkdir(policyDirectory, { recursive: true });
+    await writeFile(join(policyDirectory, 'ses_noecho.json'), JSON.stringify({ enabled: true, authorized: false, pattern: '(?:^|\\s)rm\\b', reason: '当前飞书发送人不在高危操作允许名单中' }));
+    const token = 'ghp_abcdefghijklmnopqrstuvwxyz0123456789';
+    const denied = await runGuard(workspace, 'codex', 'ses_noecho', { tool_name: 'Bash', tool_input: { command: `rm -rf /data --token=${token} password=hunter2` } });
+    const reason = JSON.parse(denied.output).hookSpecificOutput.permissionDecisionReason as string;
+    expect(reason).toBe('当前飞书发送人不在高危操作允许名单中。没有执行。不要重试同一命令或换写法绕过，请让有高危授权的人确认。');
+  });
+
+  it('uses the same wording when the policy carries no reason', async () => {
+    const workspace = await mkdtemp(join(tmpdir(), 'dutydeck-hook-')); workspaces.push(workspace);
+    await installLarkHook('codex', workspace);
+    const policyDirectory = join(workspace, '.dutydeck', 'security', 'sessions');
+    await mkdir(policyDirectory, { recursive: true });
+    await writeFile(join(policyDirectory, 'ses_default.json'), JSON.stringify({ enabled: true, authorized: false, pattern: '(?:^|\\s)rm\\b' }));
+    const denied = await runGuard(workspace, 'codex', 'ses_default', { tool_name: 'Bash', tool_input: { command: 'rm x' } });
+    expect(JSON.parse(denied.output).hookSpecificOutput.permissionDecisionReason).toBe('当前飞书发送人无权执行高危操作。没有执行。不要重试同一命令或换写法绕过，请让有高危授权的人确认。');
   });
 
   it('also blocks credential reads for unauthorized senders, even without a high-risk pattern', async () => {
@@ -119,7 +146,7 @@ describe('Lark Agent security hooks', () => {
     const workspace = await mkdtemp(join(tmpdir(), 'dutydeck-hook-')); workspaces.push(workspace);
     expect(await installLarkHook('pi', workspace)).toMatchObject({ agentId: 'pi', supported: true, installed: true });
     const extension = await readFile(join(workspace, '.pi/extensions/dutydeck-high-risk-guard.ts'), 'utf8');
-    expect(extension).toContain('dutydeck-high-risk-guard-v4');
+    expect(extension).toContain('dutydeck-high-risk-guard-v5');
     expect(extension).toContain("pi.on('tool_call'");
     expect(await larkHookStatus('claudecode', workspace)).toMatchObject({ agentId: 'claude', supported: true, installed: false });
     expect(await larkHookStatus('cursoragent', workspace)).toMatchObject({ agentId: 'cursor', supported: true, installed: false });
@@ -133,7 +160,7 @@ describe('Lark Agent security hooks', () => {
     await mkdir(policyDirectory, { recursive: true });
     await writeFile(join(policyDirectory, 'ses_cursor.json'), JSON.stringify({ enabled: true, authorized: false, pattern: 'sudo\\b', reason: 'cursor blocked' }));
     const denied = await runGuard(workspace, 'cursor', 'ses_cursor', { tool_name: 'Shell', tool_input: { command: 'sudo reboot' } });
-    expect(JSON.parse(denied.output)).toMatchObject({ continue: true, permission: 'deny', user_message: 'cursor blocked', agent_message: 'cursor blocked' });
+    expect(JSON.parse(denied.output)).toMatchObject({ continue: true, permission: 'deny', user_message: expect.stringContaining('cursor blocked'), agent_message: expect.stringContaining('不要重试同一命令或换写法绕过') });
     expect(await larkHookStatus('codex', workspace)).toMatchObject({ installed: true });
     expect(await larkHookStatus('cursor', workspace)).toMatchObject({ installed: true });
   });
@@ -170,7 +197,7 @@ describe('Lark Agent security hooks', () => {
       expect(await call('write', { path: '.pi/extensions/dutydeck-high-risk-guard.ts', content: '' })).toMatchObject({ block: true });
       expect(await call('bash', { command: 'pnpm test' })).toBeUndefined();
       await writeFile(policyPath, JSON.stringify({ enabled: true, authorized: false, pattern: 'sudo\\b', reason: 'pi blocked' }));
-      expect(await call('bash', { command: 'sudo reboot' })).toEqual({ block: true, reason: 'pi blocked' });
+      expect(await call('bash', { command: 'sudo reboot' })).toEqual({ block: true, reason: 'pi blocked。没有执行。不要重试同一命令或换写法绕过，请让有高危授权的人确认。' });
       await writeFile(policyPath, JSON.stringify({ enabled: true, authorized: true, pattern: 'sudo\\b' }));
       expect(await call('read', { path: '~/.codex/auth.json' })).toBeUndefined();
     } finally {

@@ -122,6 +122,9 @@ export function secretGuardFinding(event, { home = process.env.HOME || homedir()
   return undefined;
 }
 
+/** 高危拦截的统一说明，接在拦截原因后面：不回显命令，只告诉 Agent 不要绕过、该找谁。 */
+export const highRiskBlockedSuffix = '。没有执行。不要重试同一命令或换写法绕过，请让有高危授权的人确认。';
+
 export function secretGuardReason(finding) {
   return `Dutydeck 凭据保护：这一步会读取或改动${finding.label}（${finding.match}），已拦截，没有执行。`
     + '不要换别的方式读取、复制或输出它；需要用凭据时直接运行已登录的命令行工具，确实要看内容就请用户本人在终端处理。';
@@ -175,7 +178,7 @@ async function highRiskReason(policy, event) {
   return new Promise(resolve => {
     const worker = new Worker(regexWorker, { eval: true, workerData: { pattern: policy.pattern, input } });
     let settled = false;
-    const finish = reason => { if (settled) return; settled = true; clearTimeout(timer); worker.removeAllListeners(); void worker.terminate(); resolve(reason); };
+    const finish = reason => { if (settled) return; settled = true; clearTimeout(timer); worker.removeAllListeners(); void worker.terminate(); resolve(reason ? reason + highRiskBlockedSuffix : reason); };
     const timer = setTimeout(() => finish('正则匹配超过 1000ms，已终止并拒绝操作'), 1000);
     worker.once('message', result => finish(result.error ? `正则匹配失败：${result.error}` : result.matched ? policy.reason || '当前飞书发送人无权执行高危操作' : ''));
     worker.once('error', error => finish(`正则匹配隔离任务失败：${error.message}`));

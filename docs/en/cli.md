@@ -7,7 +7,7 @@ Before ending a turn, agents can run `dutydeck session report --status waiting -
 ```bash
 # Daemon
 dutydeck start [--cwd /path] [--port 4310] [--host 0.0.0.0]
-dutydeck status | restart | stop | update | doctor
+dutydeck status | restart | stop | update | doctor   # doctor warns when running as root (in full-trust mode the Agent then has whole-machine access) and when a configured bot model has no price, so usage caps do not cover it
 
 # Immutable release deploy and cleanup
 dutydeck deploy --source /path/to/checkout

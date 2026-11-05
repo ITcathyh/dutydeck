@@ -153,8 +153,8 @@ describe('secret guard', () => {
     try {
       expect(new RegExp(secretGuardToolMatcher).test('mcp__lark__send_message')).toBe(true);
       policy({ enabled: true, authorized: false, pattern: '(?:^|\\s)rm\\b', reason: '当前飞书发送人不在高危操作允许名单中' });
-      expect(reason(run('Bash', { command: 'rm -rf /tmp/example' }))).toBe('当前飞书发送人不在高危操作允许名单中');
-      expect(reason(run('mcp__fs__exec', { argv: ['rm', 'x'] }))).toBe('当前飞书发送人不在高危操作允许名单中');
+      expect(reason(run('Bash', { command: 'rm -rf /tmp/example' }))).toBe('当前飞书发送人不在高危操作允许名单中。没有执行。不要重试同一命令或换写法绕过，请让有高危授权的人确认。');
+      expect(reason(run('mcp__fs__exec', { argv: ['rm', 'x'] }))).toBe('当前飞书发送人不在高危操作允许名单中。没有执行。不要重试同一命令或换写法绕过，请让有高危授权的人确认。');
       expect(reason(run('Bash', { command: 'cat .env' }))).toContain('Dutydeck 凭据保护');
       expect(reason(run('Bash', { command: 'pnpm test' }))).toBe('');
       policy({ enabled: true, authorized: false, pattern: '(' });

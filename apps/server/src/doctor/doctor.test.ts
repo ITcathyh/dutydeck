@@ -59,6 +59,7 @@ function deps(overrides: Partial<DoctorDependencies> = {}): DoctorDependencies {
     nodeVersion: 'v22.12.0',
     platform: 'linux',
     username: 'tester',
+    getuid: () => 1000,
     config: baseConfig,
     daemonStatus: () => ({ running: true, pid: 4242, ready: true, address: 'http://127.0.0.1:4310', authEnabled: true }),
     daemonRecord: () => ({ pid: 4242, ready: true, host: '127.0.0.1', port: 4310, authEnabled: true, database: baseConfig.databaseUrl }),
@@ -288,6 +289,22 @@ describe('node.version', () => {
     expect(check.level).toBe('fail');
     expect(check.detail).toContain('v22.11.0');
     expect(check.remedy).toContain(REQUIRED_NODE_VERSION);
+  });
+});
+
+describe('process.root', () => {
+  it('以 root 运行为 warn，说明完全信任模式下 Agent 拥有整机权限', async () => {
+    const report = await runDoctor({ json: true }, deps({ getuid: () => 0 }));
+    const check = find(report, 'process.root')!;
+    expect(check.level).toBe('warn');
+    expect(check.remedy).toContain('完全信任');
+    expect(check.remedy).toContain('整机权限');
+    expect(report.ok).toBe(true);
+  });
+
+  it('非 root 或取不到 uid（Windows）时不出现', async () => {
+    expect(find(await runDoctor({ json: true }, deps({ getuid: () => 1000 })), 'process.root')).toBeUndefined();
+    expect(find(await runDoctor({ json: true }, deps({ getuid: () => undefined })), 'process.root')).toBeUndefined();
   });
 });
 
@@ -662,6 +679,29 @@ describe('lark', () => {
     })), 'lark.config')!;
     expect(check.level).toBe('skip');
     expect(check.detail).toContain('数据库不可读');
+  });
+});
+
+describe('usage.unpriced', () => {
+  const botsWith = (models: Record<string, string>) => [{ appId: 'cli_ok', appSecret: FIXTURE_APP_SECRET, name: '机器人甲', listening: true, defaultAgentId: 'claude', ...models }];
+  const withBots = (bots: unknown, env: NodeJS.ProcessEnv = {}) => deps({
+    env,
+    databaseProbe: () => ({ exists: true, appliedVersion: 14, values: { [larkBotsConfigKey]: JSON.stringify(bots) } })
+  });
+
+  it('价格表没有的已配置型号为 warn，只列未定价的', async () => {
+    const report = await runDoctor({ json: true }, withBots(botsWith({ defaultModel: 'claude-opus-4-8', fallbackModel: 'kimi-k2.5', memoryModel: ' kimi-k2.5 ', responseModel: 'gpt-5.2' })));
+    const check = find(report, 'usage.unpriced')!;
+    expect(check.level).toBe('warn');
+    expect(check.detail).toBe('以下模型未定价，用量上限对它们无效：kimi-k2.5');
+    expect(check.remedy).toBeTruthy();
+  });
+
+  it('型号都有价、没配型号、或用自定义价格表覆盖时不出现', async () => {
+    expect(find(await runDoctor({ json: true }, withBots(botsWith({ defaultModel: 'gpt-5.2[xhigh]' }))), 'usage.unpriced')).toBeUndefined();
+    expect(find(await runDoctor({ json: true }, withBots(botsWith({}))), 'usage.unpriced')).toBeUndefined();
+    const pricing = JSON.stringify({ default: { inputPerMTok: 1, cachedInputPerMTok: 0.1, outputPerMTok: 5 }, models: [] });
+    expect(find(await runDoctor({ json: true }, withBots(botsWith({ defaultModel: 'kimi-k2.5' }), { DUTYDECK_USAGE_PRICING_JSON: pricing })), 'usage.unpriced')).toBeUndefined();
   });
 });
 

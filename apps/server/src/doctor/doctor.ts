@@ -57,15 +57,18 @@ import {
   checkLarkListener,
   checkLarkMemory,
   checkNodeVersion,
+  checkRunAsRoot,
   checkPlatformPickers,
   checkPort,
   checkPostureDrift,
   checkSchema,
+  checkUnpricedModels,
   larkBotsConfigKey,
   larkListenerStatusKey,
   summarize,
   type DirectoryObservation
 } from './checks.js';
+import { parseUsagePricing } from '../usage-ledger.js';
 import type {
   DatabaseProbeResult,
   DoctorAutostartResult,
@@ -200,6 +203,8 @@ export async function runDoctor(
 
   // ---- 1. Node 版本 ----
   checks.push(checkNodeVersion(nodeVersion));
+  const rootCheck = checkRunAsRoot(dependencies.getuid ? dependencies.getuid() : process.getuid?.());
+  if (rootCheck) checks.push(rootCheck);
 
   // ---- 2. 守护进程 ----
   progress('检查守护进程状态');
@@ -302,6 +307,12 @@ export async function runDoctor(
     databaseUnreadable ? { unavailable: true } : { ...(probe.values?.[larkBotsConfigKey] ? { raw: probe.values[larkBotsConfigKey] } : {}), ...(probe.values ? { values: probe.values } : {}) },
     new Date()
   ));
+
+  // 价格表来自环境变量覆盖或内置表；覆盖值解析失败时服务本身就起不来，这里不重复报。
+  const unpriced = databaseUnreadable ? undefined : (() => {
+    try { return checkUnpricedModels(probe.values?.[larkBotsConfigKey], parseUsagePricing(env.DUTYDECK_USAGE_PRICING_JSON)); } catch { return undefined; }
+  })();
+  if (unpriced) checks.push(unpriced);
 
   checks.push(checkWatchFindings(probe.values ?? {}, databaseUnreadable));
 
