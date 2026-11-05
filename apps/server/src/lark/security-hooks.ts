@@ -3,13 +3,12 @@ import { constants, existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { basename, dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { isClaudeFamilyCli, type AgentConfig } from '@dutydeck/shared';
+import { isClaudeFamilyCli, shellQuote as quote, type AgentConfig } from '@dutydeck/shared';
 import { secretGuardScriptPath } from '@dutydeck/shared/secret-guard';
 import { codexHookReadiness } from './codex-hook-readiness.js';
 import { LarkServiceError } from './service.js';
 
 const guardVersion = 'dutydeck-high-risk-guard-v4';
-const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
 type HookAgentId = 'codex' | 'claude' | 'trae' | 'cursor' | 'pi';
 type HookAdapter = {

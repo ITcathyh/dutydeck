@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import { z, ZodError } from 'zod';
+import { z } from 'zod';
+import { parseOrThrow } from './route-validation.js';
 import {
   RuntimeError,
   createScheduleDefinitionInputSchema,
@@ -45,13 +46,7 @@ function capability(options: ScheduleManagementOptions) {
   };
 }
 
-function parse<S extends z.ZodTypeAny>(schema: S, input: unknown): z.output<S> {
-  try { return schema.parse(input); }
-  catch (error) {
-    if (error instanceof ZodError) throw new RuntimeError('SCHEDULE_VALIDATION_FAILED', error.issues.map(issue => `${issue.path.join('.') || 'body'}: ${issue.message}`).join('; '), 400);
-    throw error;
-  }
-}
+const parse = <S extends z.ZodTypeAny>(schema: S, input: unknown) => parseOrThrow('SCHEDULE_VALIDATION_FAILED', schema, input);
 
 function publicDefinition(definition: ScheduleDefinition) {
   return {

@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { jsonSha256 as hash } from './hash.js';
 import { RuntimeError, describeScheduleTrigger, type CollaborationMandate, type CollaborationScope, type ConfigRepository, type ScheduleDelivery } from '@dutydeck/shared';
 import type { CollaborationService } from './collaboration-service.js';
 import type { LarkCardService } from './lark/service.js';
@@ -28,7 +28,6 @@ export interface MandateCardOrigin { threadRootMessageId?: string }
 export interface MandateCardContext { messageId?: string; chatId?: string }
 type PendingInput = Awaited<ReturnType<CollaborationService['prepareMandate']>>;
 
-const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const oneLine = (text: string, limit: number) => { const flat = text.replace(/\s+/g, ' ').trim(); return flat.length > limit ? `${flat.slice(0, limit)}…` : flat; };
 const button = (action: string, label: string, ref: string, type: 'primary' | 'default' | 'text'): Element => ({
   tag: 'button', element_id: `mandate_${action}`, text: { tag: 'plain_text', content: label }, type,

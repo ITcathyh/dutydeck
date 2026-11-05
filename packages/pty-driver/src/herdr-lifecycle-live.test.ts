@@ -7,7 +7,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { AgentConfig } from '@dutydeck/shared';
 import type { CliAdapter } from '@dutydeck/cli-adapters';
 import { childProcessIdentity, observeProcess } from '@dutydeck/storage';
-import { HerdrBackend, herdrControlEnvironment } from '@dutydeck/session-backends';
+import { HerdrBackend, HerdrCensusUnknownError, herdrControlEnvironment } from '@dutydeck/session-backends';
 import { PtyCliDriver } from './driver.js';
 
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -140,7 +140,7 @@ describe.skipIf(process.env.DUTYDECK_TEST_HERDR !== 'true')('Herdr lifecycle rac
       const internal = f.backend as any, owned = internal.ownedProcesses.bind(internal);
       let allowProof = false;
       vi.spyOn(internal, 'ownedProcesses').mockImplementation(() => {
-        if (observeProcess(root) === 'dead' && !allowProof) throw new Error('HERDR_OWNERSHIP_CENSUS_UNKNOWN temporary fixture');
+        if (observeProcess(root) === 'dead' && !allowProof) throw new HerdrCensusUnknownError('HERDR_OWNERSHIP_CENSUS_UNKNOWN temporary fixture');
         return owned();
       });
       (await f.backend.write('exit\n'));
@@ -162,7 +162,7 @@ describe.skipIf(process.env.DUTYDECK_TEST_HERDR !== 'true')('Herdr lifecycle rac
       const internal = f.backend as any, owned = internal.ownedProcesses.bind(internal);
       let allowProof = false;
       vi.spyOn(internal, 'ownedProcesses').mockImplementation(() => {
-        if (observeProcess(root) === 'dead' && !allowProof) throw new Error('HERDR_OWNERSHIP_CENSUS_UNKNOWN temporary fixture');
+        if (observeProcess(root) === 'dead' && !allowProof) throw new HerdrCensusUnknownError('HERDR_OWNERSHIP_CENSUS_UNKNOWN temporary fixture');
         return owned();
       });
       (await f.backend.write('exit\n')); await expect.poll(() => observeProcess(root)).toBe('dead');
@@ -238,7 +238,7 @@ describe.skipIf(process.env.DUTYDECK_TEST_HERDR !== 'true')('Herdr lifecycle rac
       const nextProof = (await current.captureOwnedIdentity());
       expect((await current.verifyOwnedIdentity(nextProof))).toBe(true);
       expect((await current.verifyOwnedIdentity({ ...(nextProof as object), launch_id: originalLaunch }))).toBe(false);
-      const census = vi.spyOn(current as any, 'ownedProcesses').mockImplementation(() => { throw new Error('HERDR_OWNERSHIP_CENSUS_UNKNOWN'); });
+      const census = vi.spyOn(current as any, 'ownedProcesses').mockImplementation(() => { throw new HerdrCensusUnknownError('HERDR_OWNERSHIP_CENSUS_UNKNOWN'); });
       expect((await current.verifyOwnedIdentity(nextProof))).toBe(false); census.mockRestore();
       expect(observeProcess(oldIdentity)).toBe('alive'); expect(observeProcess(worker)).toBe('alive');
       (await current.detach());

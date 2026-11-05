@@ -5,7 +5,7 @@ import { larkMessageAnchor } from './message-anchor.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { lstat, mkdir, mkdtemp, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, extname, join, resolve } from 'node:path';
-import { supportsRemoteApproval, type ChannelMappingRepository, type Session } from '@dutydeck/shared';
+import { escapeRegExp, supportsRemoteApproval, type ChannelMappingRepository, type Session } from '@dutydeck/shared';
 import { LEGACY_RETIREMENT_NOTICE } from '@dutydeck/storage';
 import { larkHookStatus, upgradeInstalledLarkHook } from './security-hooks.js';
 import type { LarkLaunchOptions } from './new-session.js';
@@ -102,8 +102,6 @@ export const larkSourceId = (config: StoredLarkConfig, chatId: string, chatType:
 
 const selfMentionMarker = '\u0000dutydeck-self-mention\u0000';
 
-const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
 const removeMentionToken = (text: string, token: string) => text.replace(
   new RegExp(`([^\\S\\r\\n]*)${escapeRegExp(token)}([^\\S\\r\\n]*)`, 'g'),
   (_match, before: string, after: string) => before && after ? ' ' : ''
@@ -179,7 +177,7 @@ const withExtension = (fileName: string, extension: string) => {
 
 const resourceFailureGuidance = (error: unknown) => {
   if (error instanceof ResourceRangeError) return '请重新提供可完整下载且不超过 512 MiB 的文件。';
-  const upstreamCode = error instanceof LarkServiceError ? Number(error.details?.upstreamCode) : undefined;
+  const upstreamCode = error instanceof LarkServiceError ? error.upstreamCode : undefined;
   if (upstreamCode === 234002 || upstreamCode === 14005) {
     return '该错误通常表示机器人无权访问这条消息所在的会话，或附件已被删除，并非缺少 API scope；请用户重新上传附件，并确认机器人仍在对应会话中。';
   }

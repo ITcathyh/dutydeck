@@ -1,7 +1,7 @@
 import { CollaborationDelivery } from './collaboration-delivery.js';
 import { createHash } from 'node:crypto';
 import { canonicalExecutionJson, installationOwnerTaskActor, parseLarkSourceId, participationLevelFields, resolveParticipation, RuntimeError, type CollaborationRepository, type CollaborationScope, type ScheduleDelivery, type CollaborationSettings, type UpdateCollaborationSettingsInput, type PolicyAction, type RepositoryBundle, type ToolRiskPolicy } from '@dutydeck/shared';
-import type { DutydeckRuntime } from '@dutydeck/runtime';
+import { digest, type DutydeckRuntime } from '@dutydeck/runtime';
 import { CollaborationService, type CollaborationAuthorization } from './collaboration-service.js';
 import { ScheduleExecutor, type ScheduleExecutionInput } from './schedule-executor.js';
 import { readConfirmedLarkBoundMessage } from './lark/result-delivery.js';
@@ -216,7 +216,7 @@ export function createCollaborationIntegration(options: CollaborationIntegration
       || schedule.sourceNamespace !== 'collaboration' || schedule.sourceOwnership !== 'dutydeck'
       || typeof action.payload.text !== 'string' || !action.payload.delivery || typeof action.payload.delivery !== 'object'
       || schedule.delivery.chatRef !== scope.chatId || canonicalExecutionJson(action.payload.delivery) !== canonicalExecutionJson(JSON.parse(JSON.stringify(schedule.delivery)))
-      || createHash('sha256').update(canonicalExecutionJson(action.payload)).digest('hex') !== action.inputDigest) return;
+      || digest(action.payload) !== action.inputDigest) return;
     return {
       idempotencyKey: createHash('sha256').update(input.actionId).digest('hex').slice(0, 32), chatId: scope.chatId,
       identity: canonicalExecutionJson({ source: 'collaboration', scope, actionId: action.id, inputDigest: action.inputDigest,
@@ -252,7 +252,7 @@ export function createCollaborationIntegration(options: CollaborationIntegration
     onObservation: async snapshot => { await scheduler.tick(); }
   });
   options.configureExtensions?.(extensions);
-  const policyKey = (scope: CollaborationScope, version: string) => `collaboration.policy.${createHash('sha256').update(canonicalExecutionJson([scope, version])).digest('hex')}`;
+  const policyKey = (scope: CollaborationScope, version: string) => `collaboration.policy.${digest([scope, version])}`;
   const prepareSettings = async (scope: CollaborationScope, patch: UpdateCollaborationSettingsInput) => {
     const current = await repos.collaboration.getSettings(scope);
     if (current.revision !== patch.expectedRevision) throw new RuntimeError('COLLABORATION_REVISION_CONFLICT', '群设置已变化，请重新加载。', 409);

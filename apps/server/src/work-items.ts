@@ -1,6 +1,6 @@
 import { promptDigest } from './prompt-context.js';
-import { createHash } from 'node:crypto';
-import { analyzeWorkPlanRevision, canonicalExecutionJson, canonicalPlanJson, createWorkItemSchema, reviseWorkPlanSchema, workRevisionConfirmationReasons, type ReviseWorkPlanInput, type WorkRevisionImpact, type WorkRevisionPreview, executionActorSchema, installationOwnerTaskActor, parseLarkSourceId, RuntimeError, timeLoop, type LoopTimingLog, taskAdmissionV1Schema, taskRequestV1Schema, workPlanSchema, workReviewVerdictSchema, type CreateWorkItemInput, type ExecutionActor, type PermissionMode, type RepositoryBundle, type Session, type TaskAdmissionV1, type TaskRecord, type TaskRequestV1, type ToolRiskPolicy, type PendingWorkRevision, type WorkItem, type WorkPlan, type WorkStep, type WorkTemplate } from '@dutydeck/shared';
+import { sha256Hex as hash } from './hash.js';
+import { analyzeWorkPlanRevision, canonicalExecutionJson, errorMessage as errorText, now as time, canonicalPlanJson, createWorkItemSchema, reviseWorkPlanSchema, workRevisionConfirmationReasons, type ReviseWorkPlanInput, type WorkRevisionImpact, type WorkRevisionPreview, executionActorSchema, installationOwnerTaskActor, parseLarkSourceId, RuntimeError, timeLoop, type LoopTimingLog, taskAdmissionV1Schema, taskRequestV1Schema, workPlanSchema, workReviewVerdictSchema, type CreateWorkItemInput, type ExecutionActor, type PermissionMode, type RepositoryBundle, type Session, type TaskAdmissionV1, type TaskRecord, type TaskRequestV1, type ToolRiskPolicy, type PendingWorkRevision, type WorkItem, type WorkPlan, type WorkStep, type WorkTemplate } from '@dutydeck/shared';
 import { executionTaskId } from '@dutydeck/storage';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { readWorkAttemptResult } from './task-results.js';
@@ -20,8 +20,6 @@ async function bounded<T>(operation: Promise<T>, milliseconds: number): Promise<
     })]);
   } finally { if (timer) clearTimeout(timer); }
 }
-const hash = (value: string) => createHash('sha256').update(value).digest('hex');
-const time = () => new Date().toISOString();
 /** 成果通知最多发这么多次；之后停在 error，失败原因留给 Web 展示。 */
 const DELIVERY_MAX_ATTEMPTS = 3;
 function failDelivery(delivery: WorkItem['delivery'], error: string) {
@@ -34,7 +32,6 @@ function failDelivery(delivery: WorkItem['delivery'], error: string) {
     delivery.nextAttemptAt = new Date(Date.now() + 60_000 * delivery.attempts).toISOString();
   }
 }
-const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 const last = (step: WorkStep) => step.attempts.at(-1);
 /** 计划修订作废的尝试不再作为下游输入或审查依据。 */
 const liveAttempts = (step: WorkStep) => step.attempts.filter(attempt => !attempt.supersededByPlanVersion);
@@ -580,7 +577,8 @@ export class WorkItemService {
   private async runTick() {
     for (const id of await this.repos.workItems.listScheduledIds()) {
       if (this.closed) break;
-      try { await this.serial(id, () => this.drive(id)); }
+      let driven: StoredWork | undefined;
+      try { driven = await this.serial(id, () => this.drive(id)); }
       catch (error) {
         if (this.closed) break;
         if (error instanceof RuntimeError && error.code === 'WORK_ITEM_CONFLICT') continue;
@@ -594,7 +592,7 @@ export class WorkItemService {
         } catch { continue; } // Preserve corrupt records and failed repairs without blocking other work.
       }
       if (this.closed) break;
-      const latest = (await this.read(id)).value;
+      const latest = driven ?? (await this.read(id)).value;
       const current = latest.item;
       if (['awaiting_confirmation', 'running', 'waiting', 'failed', 'blocked'].includes(current.status)) {
         this.effect('notify:' + current.id, async () => { await this.options.notify?.(this.view(latest), latest.actorId); });
@@ -669,15 +667,16 @@ export class WorkItemService {
     state.value.item.status = 'blocked'; state.value.item.error = message;
     await this.write(state);
   }
-  private async drive(id: string) {
+  /** 返回本轮写完后的记录；取消分支由 cancelChildren 另行读写，返回 undefined 让调用方重读。 */
+  private async drive(id: string): Promise<StoredWork | undefined> {
     let state = await this.read(id); let record = state.value;
-    if (record.item.status === 'cancelling') { await this.cancelChildren(id); return; }
+    if (record.item.status === 'cancelling') { await this.cancelChildren(id); return undefined; }
     // 待确认的计划只是持久记录，确认前不做任何执行准备，也不派发步骤。
     // 待确认的修订不在此列：它不改状态，调度按当前生效的计划照常收结果和派发。
-    if (record.item.status === 'awaiting_confirmation') return;
-    if (record.item.status === 'cancelled') return;
-    if (record.item.status === 'blocked' && !await this.reconcileBlocked(state)) return;
-    if (record.item.status === 'completed') { this.scheduleDelivery(record.item.id); return; }
+    if (record.item.status === 'awaiting_confirmation') return record;
+    if (record.item.status === 'cancelled') return record;
+    if (record.item.status === 'blocked' && !await this.reconcileBlocked(state)) return record;
+    if (record.item.status === 'completed') { this.scheduleDelivery(record.item.id); return record; }
     await this.assertExecution(record);
     if (!record.actor) {
       const parent = await this.access(record.item.parentSessionId, record.actorId);
@@ -695,7 +694,7 @@ export class WorkItemService {
         record.item.error = 'Work item actor domain cannot be verified from the parent session';
         await this.haltBlocked(state);
         await this.write(state);
-        return;
+        return record;
       }
       record.actor = executionActorSchema.parse(actor);
       await this.write(state);
@@ -727,7 +726,7 @@ export class WorkItemService {
             record.item.error = attempt.error;
             await this.haltBlocked(state);
             await this.write(state);
-            return;
+            return record;
           }
         } else if (attempt && !attempt.resultBoundary) {
           attempt.resultBoundary = attempt.result ? 'verified' : 'legacy_output_unresolved';
@@ -750,9 +749,9 @@ export class WorkItemService {
     }
     if (record.item.steps.some(step => step.status === 'blocked' || step.status === 'cancelled')) {
       record.item.status = 'blocked'; record.item.error = record.item.error ?? record.item.steps.find(step => step.status === 'blocked' || step.status === 'cancelled')?.attempts.at(-1)?.error ?? 'An execution requires reconciliation';
-      await this.haltBlocked(state); await this.write(state); return;
+      await this.haltBlocked(state); await this.write(state); return record;
     }
-    if (record.item.steps.some(step => step.status === 'failed')) { if (record.item.status !== 'failed') { record.item.status = 'failed'; await this.write(state); } return; }
+    if (record.item.steps.some(step => step.status === 'failed')) { if (record.item.status !== 'failed') { record.item.status = 'failed'; await this.write(state); } return record; }
     for (const definition of record.item.plan.steps) {
       const step = record.item.steps.find(step => step.id === definition.id)!;
       if (step.status !== 'pending' || !definition.dependsOn.every(id => settled(record.item.steps.find(step => step.id === id)!))) continue;
@@ -775,12 +774,12 @@ export class WorkItemService {
       record.admissions[attemptId] = { version: 1, kind: 'canonical', taskIdVersion: 'v1', taskId, request };
       step.status = 'running'; await this.write(state);
       await this.launch(state, step);
-      if (record.item.steps.some(step => step.status === 'blocked')) { await this.haltBlocked(state); await this.write(state); return; }
+      if (record.item.steps.some(step => step.status === 'blocked')) { await this.haltBlocked(state); await this.write(state); return record; }
     }
     const output = record.item.steps.find(step => step.id === record.item.plan.outputStepId)!;
     if (output.status === 'completed') {
       const definition = record.item.plan.steps.find(step => step.id === output.id)!;
-      if (definition.reviewPolicy) { await this.applyReview(state, output, definition); return; }
+      if (definition.reviewPolicy) { await this.applyReview(state, output, definition); return record; }
       record.item.output = { ...last(output)!.output!, stepId: output.id }; record.item.status = 'completed'; delete record.item.pendingRevision; await this.write(state); this.scheduleDelivery(record.item.id);
     } else {
       const status = record.item.steps.some(step => step.status === 'running') ? 'running'
@@ -788,6 +787,7 @@ export class WorkItemService {
         : ['skipped', 'cancelled'].includes(output.status) ? 'blocked' : 'running';
       if (status !== record.item.status) { record.item.status = status; await this.write(state); }
     }
+    return record;
   }
   private async reworkWorkspace(record: StoredWork, stepId: string) {
     const reused = record.reworkWorkspaces?.[stepId];

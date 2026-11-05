@@ -1,4 +1,6 @@
 import { larkMessageAnchor } from './message-anchor.js';
+import { formatUnknownTaskTime } from '../task-resolution.js';
+import { sleep } from '../daemon/time.js';
 import { explicitFinalTextReceiptReader, type ExplicitFinalTextReceiptReader } from './explicit-final.js';
 import { createHash } from 'node:crypto';
 import { isLarkTurnMemoryElement } from './memory-view.js';
@@ -20,7 +22,7 @@ import { parseCardTask, parseOptionalCardTask } from './persisted-card-task.js';
 import { larkCardChannel, withoutLeadingBotMention, larkScopeContinuesFor, sendTaskCard } from './coordinator-core.js';
 import { scheduleNameConflictNotice } from './schedule-command.js';
 import { LarkCoordinatorCore } from './coordinator-core.js';
-import type { LarkInteraction } from './workflow-interactions.js';
+import { shanghaiClock, type LarkInteraction } from './workflow-interactions.js';
 import { planFollowUpEvent } from './plan-flow.js';
 import { LarkServiceError } from './service.js';
 
@@ -31,8 +33,6 @@ import { LarkServiceError } from './service.js';
 const larkRequestText = (prompt: string, botName?: string) => withoutLeadingBotMention(prompt, botName).replace(/\s+/g, ' ');
 /** 同一发起人在同一个聊天里多久之内发过同一句话，才算重复请求。 */
 const repeatedRequestWindowMs = 14 * 24 * 60 * 60 * 1000;
-/** 北京时间的 HH:MM，秒数直接舍去。 */
-const shanghaiClock = (at: number) => new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(at);
 const resultActionDigest = (...parts: Array<string | number>) => createHash('sha256').update(parts.join('\0')).digest('hex').slice(0, 32);
 /**
  * 续问按钮的去重认领：同一张结果卡（任务 + 轮次）上的同一个按钮只提交一轮，落库后重启仍成立。阶段与转交认领同一套：
@@ -127,15 +127,17 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
       let current: { sessionId: string; extra?: string | null } | undefined;
       try { current = await this.cardMappings.get(channel, task.id); }
       catch { /* 读不到就整体覆写：至少保证当前轮次可恢复 */ }
-      const merged = this.mergeCardTaskExtra(current?.extra, extra, task.turn, current?.sessionId === task.sessionId);
+      const merged = JSON.stringify(this.mergeCardTaskExtra(current?.extra, extra, task.turn, current?.sessionId === task.sessionId));
       // 新建记录、换了会话（/new 之后 sessionId 变了）、或存储没有 CAS（测试替身）时
       // 只能整行落库——compareAndSetExtra 写不了 extra 以外的列。
       if (!current || current.sessionId !== task.sessionId || typeof this.cardMappings.compareAndSetExtra !== 'function' || attempt >= 5) {
         if (attempt >= 5) this.log.warn({ taskId: task.id, turn: task.turn }, '飞书卡片映射并发写冲突反复失败，改为整行覆写');
-        await this.cardMappings.save({ ...row, extra: JSON.stringify(merged) });
+        await this.cardMappings.save({ ...row, extra: merged });
         return;
       }
-      if (await this.cardMappings.compareAndSetExtra(row.id, current.extra, JSON.stringify(merged))) return;
+      // 心跳帧多数没有新内容：合并结果与库里一致时，CAS 写入也只是原值覆盖，直接跳过。
+      if (merged === current.extra) return;
+      if (await this.cardMappings.compareAndSetExtra(row.id, current.extra, merged)) return;
     }
   }
 
@@ -695,7 +697,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
         void this.refreshResultVerification(task, config).catch(error => this.log.warn({ error, taskId: task.id }, '定时任务已建好，结果卡按钮未能更新'));
       }
       const nextDue = schedule.nextDueAt
-        ? `${new Date(schedule.nextDueAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })}（北京时间）` : '未排定';
+        ? formatUnknownTaskTime(schedule.nextDueAt) : '未排定';
       void sendTaskCard(this.service, { ...task.event, messageId: target.resultMessageId, replyMessageId: target.resultMessageId }, {
         state: 'completed', readOnly: true, retryable: false, taskId: task.id, taskName: '定时任务',
         markdown: `**已设为每天 ${view.time} 自动执行「${larkCommandEcho(schedule.name, 100)}」。**\n\n下一次：${nextDue}\n\n停用：\`/schedule disable ${schedule.id}\``,
@@ -897,7 +899,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
         catch (error) {
           failure = error;
           if (!(error instanceof RuntimeError && error.code === 'SESSION_BUSY') || attempt >= 20 || this.stopped || task.turn !== plan.turn) break;
-          await new Promise(resolve => setTimeout(resolve, 250));
+          await sleep(250);
         }
       }
       if (this.stopped || task.turn !== plan.turn) return;

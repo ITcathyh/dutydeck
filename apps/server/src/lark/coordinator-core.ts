@@ -484,7 +484,7 @@ export abstract class LarkCoordinatorCore {
       // 通讯录 API 找不到该 open_id 对应的用户（Feishu 错误码 230001），
       // 说明操作人是机器人——bot 不在企业通讯录中。
       // 白名单为"所有人"时已在上方放行；白名单受限则需校验是否为 peer bot 或已加入机器人白名单。
-      const upstreamCode = error instanceof LarkServiceError ? Number(error.details?.upstreamCode) : undefined;
+      const upstreamCode = error instanceof LarkServiceError ? error.upstreamCode : undefined;
       if (upstreamCode === 230001) {
         return Boolean(peerBotsAllowed && config.groupToolsEnabled && chatId && await this.peerBotAuthorized?.(chatId, operatorOpenId));
       }

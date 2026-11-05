@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { assertNativeContextRecord, createAcpRuntime, createAgentRegistry, createRuntimeStore, type AcpPermissionDecision, type AcpRuntime, type AcpRuntimeResourceScope, type AcpRuntimeHandle, type AcpRuntimeProcessEvent, type AcpRuntimeStatus, type AcpRuntimeTurn, type AcpSessionStore } from 'acpx/runtime';
 import type { AgentConfig, AgentDriver, DriverSteeringOutcome, DriverTranscriptSourceObservation, InsightClient, NormalizedDriverEvent, PermissionMode, ToolRiskPolicy, DriverSubmission, DriverSubmissionInput, NativeContextIdentity, NativeContextExpected, NativeConfigurationRequest, NativeConfigurationProof, OperationPermit, ChildPermit } from '@dutydeck/shared';
 import { agentCommandApprovalReason, isAgentCommandAutoApproval, AGENT_IDLE_TIMEOUT, claudeRateLimits, permissionDisplayText, taskExecutionSchemas, canonicalExecutionJson, type AgentIdleTimeoutData } from '@dutydeck/shared';
-import { eventContentText, eventHasContent, normalizeEventContent } from '@dutydeck/shared';
+import { eventContentText, eventHasContent, normalizeEventContent, shellQuote } from '@dutydeck/shared';
 import { childEnvironment } from '@dutydeck/shared/child-environment';
 import { testRegexWithTimeout } from './regex-timeout.js';
 import { PROCESS_CPU_MIN_WINDOW_MS, ProcessTreeCpu } from './process-cpu.js';
@@ -221,7 +221,6 @@ function permissionFacts(tool: any, secrets: string[] = []) {
   };
 }
 
-function shellQuote(value: string) { return `'${value.replaceAll("'", "'\\''")}'`; }
 export function renderAgentCommand(agent: AgentConfig) { return [agent.command, ...agent.args].map(shellQuote).join(' '); }
 export function buildAcpxSessionOptions(agent: AgentConfig) {
   return {

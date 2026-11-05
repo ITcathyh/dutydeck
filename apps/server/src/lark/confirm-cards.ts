@@ -6,7 +6,7 @@
 //
 // 复用方式：按种类注册一个 handler（谁能确认、确认后做什么），再用 request 发卡。
 
-import { createHash } from 'node:crypto';
+import { jsonSha256 as digest } from '../hash.js';
 import type { CollaborationAction, CollaborationRepository, CollaborationScope } from '@dutydeck/shared';
 import { buildLarkConfirmElements, parseLarkConfirmValue } from './card-actions.js';
 import type { StoredLarkConfig } from './config.js';
@@ -48,7 +48,6 @@ export interface LarkConfirmCardsOptions {
 }
 type Toast = { type: 'success' | 'info' | 'warning' | 'error'; content: string };
 const actionKind = (kind: string) => `confirm.${kind}`;
-const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 export const larkConfirmActionId = (kind: string, scope: CollaborationScope, key: string) => `confirm_${digest([kind, scope, key])}`;
 
 export class LarkConfirmCards {

@@ -1,4 +1,5 @@
 import { clearTaskReportSafely } from '@dutydeck/shared';
+import { formatUnknownTaskTime as deadlineText } from '../task-resolution.js';
 import { larkMessageAnchor } from './message-anchor.js';
 import { describeLarkTaskRecovery } from './task-recovery.js';
 import { cleanPermissionRejectReason, permissionDisplayText, permissionRejectReasonMaxLength, timeLoop } from '@dutydeck/shared';
@@ -97,7 +98,6 @@ export interface LarkInteraction extends LarkInteractionContext {
   closeRetryAt?: number;
   cardClosedAt?: string;
 }
-export const deadlineText = (expiresAt: string) => `${new Date(expiresAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })}（北京时间）`;
 /**
  * 权限卡审批硬上限：任务一直等审批，超过这个时长仍无人处理才自动拒绝。
  * 用户离开几个小时回来仍能批准；上限只防一张没人点的卡无限期堵住同一会话后面的任务。
@@ -120,7 +120,7 @@ const approvalMentionWindowMs = 60_000;
 const maxMentionedApprovers = 3;
 /** 北京时间的 HH:MM，与 coordinator-cards 的卡片时间同一写法。 */
 const shanghaiClockFormat = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
-const shanghaiClock = (at: number) => shanghaiClockFormat.format(at);
+export const shanghaiClock = (at: number) => shanghaiClockFormat.format(at);
 /**
  * 「本会话允许此命令」的精确匹配键：目录、资源、命令逐字相同才算同一条。
  * 执行端交来的是脱敏、截断后的事实，被脱敏或截断过的命令已经不能逐字比对；高危判定复用
@@ -1161,9 +1161,11 @@ export class LarkWorkflowInteractions {
       ? this.broker?.get(record.nativeId)?.status === 'pending'
       : (await this.runtime.getPendingPermissions?.(record.sessionId))?.some(item => item.id === record.nativeId) === true;
   }
-  async pendingAsks(appId: string) {
+  /** sessionId 给定时只看该会话的提问：先按内存字段筛，再对剩下的逐条问执行端是否还在等。 */
+  async pendingAsks(appId: string, sessionId?: string) {
     const pending: LarkInteraction[] = [];
     for (const record of await this.list(appId)) {
+      if (sessionId !== undefined && record.sessionId !== sessionId) continue;
       if (!record.durable && record.kind === 'ask' && record.state === 'pending' && record.cardId && await this.live(record)) pending.push(record);
     }
     return pending;

@@ -1,4 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { clock } from './group-task-context.js';
+import { sleep } from '../daemon/time.js';
 import { commitLarkAgentReply } from './agent-reply-delivery.js';
 import { parseFinalCardBody } from './final-card.js';
 import { deliveryPrompt, isFrozenCollaborationSession } from '../prompt-context.js';
@@ -11,7 +13,7 @@ import type { LarkGroupManager } from './group-management.js';
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { resolve } from 'node:path';
 import { deliverArtifact, type ArtifactClient } from './artifact-delivery.js';
-import { parseLarkSourceId, workPlanConfirmationRequired, type ChannelMapping, type ChannelMappingRepository, type CollaborationObservation, type CollaborationScope, type CollaborationTeamContext, type ConfigRepository, type PolicyAction, type PolicyDecision, type Session, type SessionRepository, type TaskRecord, type TaskRepository } from '@dutydeck/shared';
+import { parseLarkSourceId, shellQuote, workPlanConfirmationRequired, type ChannelMapping, type ChannelMappingRepository, type CollaborationObservation, type CollaborationScope, type CollaborationTeamContext, type ConfigRepository, type PolicyAction, type PolicyDecision, type Session, type SessionRepository, type TaskRecord, type TaskRepository } from '@dutydeck/shared';
 import { readTaskAttemptResult, resolveTaskResultAttemptId, type TaskResultRepositories } from '../task-results.js';
 import { withLarkContextReadTimeout } from './context-read-timeout.js';
 import type { LarkTeamContextReader } from './team-context.js';
@@ -349,11 +351,6 @@ const clip = (text: string, limit: number) => {
   return `${text.slice(0, end)}…`;
 };
 const flat = (text: string) => text.replace(/\s+/g, ' ').trim();
-const clockFormat = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
-const clock = (iso: string) => {
-  const parts = Object.fromEntries(clockFormat.formatToParts(new Date(iso)).map(part => [part.type, part.value]));
-  return `${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
-};
 
 /** 同一机器人、同一聊天的飞书任务会话；群参与的后台委托会话除外（记忆、判定、leader 会话的 source 不是 lark）。 */
 function inChat(session: Pick<Session, 'source' | 'sourceId'>, binding: LarkAgentSessionBinding) {
@@ -1184,7 +1181,7 @@ export class LarkAgentToolsService {
       if (result.messages.length) return result;
       const remaining = deadline - Date.now();
       if (remaining <= 0) return { ...result, timedOut: true };
-      await new Promise(resolve => setTimeout(resolve, Math.min(this.pollIntervalMs, remaining)));
+      await sleep(Math.min(this.pollIntervalMs, remaining));
     }
   }
 
@@ -1513,7 +1510,6 @@ export class LarkAgentToolsService {
   }
 }
 
-const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
 export const dutydeckGroupToolsCommand = (entrypoint: string, execPath = process.execPath, tsxLoader?: string) => {
   const absoluteEntrypoint = resolve(entrypoint);

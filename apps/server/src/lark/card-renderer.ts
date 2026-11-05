@@ -21,15 +21,15 @@ const visibleTraceGroupLimit = 5;
 export const terminalTaskStates = new Set<string>(terminalTaskStatuses);
 
 export const isLarkMessageRateLimit = (error: unknown): error is LarkServiceError => error instanceof LarkServiceError
-  && Number(error.details?.upstreamCode) === 230020;
+  && error.upstreamCode === 230020;
 
 export const larkRateLimitBackoffMs = (failures: number) => Math.min(60_000, 5_000 * (2 ** Math.max(0, failures - 1)));
 
 export const isLarkCardContentRejected = (error: unknown): error is LarkServiceError => error instanceof LarkServiceError
-  && [230028, 230099].includes(Number(error.details?.upstreamCode));
+  && [230028, 230099].includes(error.upstreamCode);
 
 export const isLarkMessageUnupdatable = (error: unknown): error is LarkServiceError => error instanceof LarkServiceError
-  && [230012, 230030, 230031].includes(Number(error.details?.upstreamCode));
+  && [230012, 230030, 230031].includes(error.upstreamCode);
 
 const rejectedDeltaElement = (changedCount: number): LarkCardElement => ({
   tag: 'markdown',

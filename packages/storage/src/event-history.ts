@@ -89,6 +89,8 @@ function projectHistoryOutline(sqlite: Database.Database, sessionId: string): Hi
   // The turn ends at its completion receipt; terminal repaints and status pings can trail it by minutes.
   const turnEnd = sqlite.prepare(`SELECT COALESCE(MAX(CASE WHEN type='completed' THEN timestamp END),MAX(CASE WHEN type NOT IN ('raw_terminal','status') THEN timestamp END)) AS value
     FROM events WHERE session_id=? AND sequence BETWEEN ? AND ?`);
+  const toolCalls = sqlite.prepare(`SELECT COUNT(DISTINCT COALESCE(json_extract(data,'$.id'),id)) AS count FROM events
+    WHERE session_id=? AND sequence BETWEEN ? AND ? AND type IN ('tool_call','tool_result') AND json_valid(data)`);
   const turns: HistoryTurnSummary[] = [];
   let liveAfter = 0;
   for (const range of boundaries) {
@@ -102,8 +104,7 @@ function projectHistoryOutline(sqlite: Database.Database, sessionId: string): Hi
     const prompt = text.get(sessionId, range.first, range.last, 'user', HISTORY_PROMPT_LIMIT, HISTORY_PROMPT_LIMIT, sessionId, HISTORY_PROMPT_LIMIT + 1) as { text: string; truncated: number };
     const after = (lastActivity.get(range.first - 1, sessionId, range.first, range.last) as { sequence: number }).sequence;
     const output = text.get(sessionId, after + 1, range.last, 'assistant', HISTORY_OUTPUT_LIMIT, HISTORY_OUTPUT_LIMIT, sessionId, HISTORY_OUTPUT_LIMIT + 1) as { text: string; truncated: number };
-    const toolCount = (sqlite.prepare(`SELECT COUNT(DISTINCT COALESCE(json_extract(data,'$.id'),id)) AS count FROM events
-      WHERE session_id=? AND sequence BETWEEN ? AND ? AND type IN ('tool_call','tool_result') AND json_valid(data)`).get(sessionId, range.first, range.last) as { count: number }).count;
+    const toolCount = (toolCalls.get(sessionId, range.first, range.last) as { count: number }).count;
     const artifacts: HistoryTurnSummary['artifactReferences'] = [];
     const seen = new Set<string>();
     const references = parts.all(sessionId, range.first, range.last) as Array<any>;

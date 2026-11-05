@@ -1,5 +1,5 @@
 import { larkMessageAnchor } from './message-anchor.js';
-import type { PromptPart } from '@dutydeck/shared';
+import { errorMessage as errorText, type PromptPart } from '@dutydeck/shared';
 import { promptDigest } from '../prompt-context.js';
 import { parseLarkMessageContent, type LarkMessageResource } from './message-content.js';
 import type { LarkMessageEvent } from './listener.js';
@@ -73,8 +73,6 @@ const cursorPosition = (cursor: LarkContextCursor): LarkContextCursor => ({
 const cursorStartTimeSeconds = (cursor: LarkContextCursor) => cursor.scanStartTime ?? Math.floor(cursor.createTime / 1_000);
 
 const trimMessageId = (value: unknown) => String(value ?? '').trim();
-
-const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 
 const messageLabel = (messageId: string, senderName?: string) => {
   const name = senderName?.trim();

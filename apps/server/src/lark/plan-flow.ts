@@ -2,13 +2,12 @@ import type { LarkCardElement } from './card-renderer.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkInteraction } from './workflow-interactions.js';
 import { planApprovedPrompt, planRevisePrompt } from '../plan-mode.js';
+import { formatUnknownTaskTime as shanghaiTime } from '../task-resolution.js';
 
 /** 飞书里的先出计划：计划轮结束后的结果卡带上计划操作，批准或提修改意见时以操作人身份在原话题提交下一轮。 */
 export type LarkPlanDecision = 'approve' | 'revise' | 'cancel';
 
 export const planStaleText = '会话里已经有更新的任务，这份计划不再能批准或修改。需要的话请重新发送 /plan。';
-
-const shanghaiTime = (at: string) => `${new Date(at).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })}（北京时间）`;
 
 const callback = (record: LarkInteraction, action: string) => ({ type: 'callback', value: { dutydeck_workflow: action, request_id: record.id, generation: record.boot } });
 

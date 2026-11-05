@@ -400,11 +400,18 @@ export default function App() {
   const eventList = events.data?.events ?? [];
   const taskContext = useMemo(() => currentContextStats(eventList, sessionUsage.data?.snapshot?.context), [eventList, sessionUsage.data?.snapshot?.context]);
   const commandCatalog = events.data?.outline?.commandCatalog;
+  const latestCommandsEvent = useMemo(() => {
+    for (let index = eventList.length - 1; index >= 0; index--) {
+      const event = eventList[index]!;
+      if (event.type === 'status' && event.data?.state === 'commands' && Array.isArray(event.data.availableCommands)) return event;
+    }
+    return undefined;
+  }, [eventList]);
+  // 依赖找到的那条事件而不是整个列表：新到的其他事件不会生成新的命令数组。
   const eventCommands = useMemo(() => {
-    const live = commandsFromEvents(eventList);
-    const latest = [...eventList].reverse().find(event => event.type === 'status' && event.data?.state === 'commands' && Array.isArray(event.data.availableCommands));
-    return !commandCatalog || latest && latest.sequence >= commandCatalog.sequence ? live : commandCatalog.commands;
-  }, [eventList, commandCatalog]);
+    const live = commandsFromEvents(latestCommandsEvent ? [latestCommandsEvent] : []);
+    return !commandCatalog || latestCommandsEvent && latestCommandsEvent.sequence >= commandCatalog.sequence ? live : commandCatalog.commands;
+  }, [latestCommandsEvent, commandCatalog]);
   const advertisedCommands = useMemo(() => [...eventCommands, ...(pluginCommands.data ?? [])], [eventCommands, pluginCommands.data]);
   const projectTimeline = useMemo(() => createTimelineProjector(), [activeSessionId]);
   const historyTurns = events.data?.outline?.turns;

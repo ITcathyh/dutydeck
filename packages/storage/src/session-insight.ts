@@ -30,7 +30,8 @@ import {
   type SessionInsightRawTaskRow,
   type HostEvidenceRaw,
   type InsightPruneResult,
-  type PublishInsightParams
+  type PublishInsightParams,
+  now as nowIso
 } from '@dutydeck/shared';
 import type { OpenControl } from './database-control.js';
 
@@ -95,8 +96,6 @@ export function createSessionInsightRepository(
   db: Database.Database,
   control: OpenControl
 ): SessionInsightRepository {
-  const nowIso = (): string => new Date().toISOString();
-
   const getSessionRunId = db.transaction((sessionId: string): string => {
     const row = db.prepare('SELECT run_id FROM sessions WHERE id = ?').get(sessionId) as
       | { run_id: string }

@@ -1,8 +1,8 @@
-import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { isAbsolute, join, relative } from 'node:path';
-import { canonicalExecutionJson, type LegacyRetirementCandidate, type LegacyRetirementReceipt } from '@dutydeck/shared';
+import { digest } from '@dutydeck/runtime';
+import { type LegacyRetirementCandidate, type LegacyRetirementReceipt } from '@dutydeck/shared';
 import { captureOwnedTmuxIdentity, dutydeckPtySessionName, stopOwnedTmux, type OwnedTmuxExitProof } from '@dutydeck/pty-driver';
 import { childProcessIdentity, observeProcess } from '@dutydeck/storage';
 
@@ -19,7 +19,6 @@ export type LegacyRetirementVerification =
 
 type VerificationState = { tmux?: { path: string; dev: bigint; ino: bigint }; exitProof?: OwnedTmuxExitProof };
 
-const digest = (value: unknown) => createHash('sha256').update(canonicalExecutionJson(value)).digest('hex');
 const blocked = (sessionId: string, code: string, detail?: string): LegacyRetirementVerification => ({
   status: 'blocked', sessionId, code, ...(detail ? { detail } : {})
 });

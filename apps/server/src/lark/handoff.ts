@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { sha256Hex as digest } from '../hash.js';
 import type { AgentEvent } from '@dutydeck/shared';
 import type { LarkGitSnapshot } from './git-status.js';
 import { redactTraceText } from './secret-redaction.js';
@@ -20,7 +20,6 @@ const clip = (text: string, limit: number, trim = true) => {
   const chars = Array.from(trim ? redacted.trim() : redacted);
   return chars.length > limit ? `${chars.slice(0, limit).join('')}…（已截断）` : chars.join('');
 };
-const digest = (text: string) => createHash('sha256').update(text).digest('hex');
 const source = (turn: Pick<LarkHandoffTurn, 'taskId' | 'attemptId'>) => `task=${turn.taskId ?? 'unknown'} attempt=${turn.attemptId ?? 'unknown'}`;
 
 /** 只把匹配调用 ID 和 attempt 的明确终态当作回执；助手叙述不参与判断。 */

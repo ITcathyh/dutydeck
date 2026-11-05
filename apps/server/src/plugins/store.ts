@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { sleep } from '../daemon/time.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { cp, mkdir, mkdtemp, readdir, readFile, readlink, realpath, lstat, rename, rm, stat, writeFile } from 'node:fs/promises';
@@ -48,7 +49,7 @@ const lockEntrySchema = z.object({
 }).strict();
 export type PluginLockEntry = z.infer<typeof lockEntrySchema>;
 const lockFileSchema = z.object({ version: z.literal(1), plugins: z.record(z.string(), lockEntrySchema) }).strict();
-type LockFile = z.infer<typeof lockFileSchema>;
+export type LockFile = z.infer<typeof lockFileSchema>;
 
 export type PluginSource = PluginLockEntry['source'];
 
@@ -238,8 +239,9 @@ export class PluginStore {
 
   list(): PluginLockEntry[] { return Object.values(this.readLock().plugins); }
 
-  get(name: string): PluginLockEntry {
-    const entry = this.readLock().plugins[name];
+  /** lock 是调用方已读出的同一份锁文件；不传时现读。 */
+  get(name: string, lock?: LockFile): PluginLockEntry {
+    const entry = (lock ?? this.readLock()).plugins[name];
     if (!entry) throw new PluginStoreError('PLUGIN_NOT_INSTALLED', `插件 ${name} 未安装`);
     return entry;
   }
@@ -404,7 +406,7 @@ export class PluginStore {
         catch (error) {
           if ((error as { code?: string }).code !== 'SQLITE_BUSY') throw error;
           if (Date.now() >= deadline) throw new PluginStoreError('PLUGIN_CONFIG_BUSY', '插件状态正在被另一个进程修改，请稍后重试');
-          await new Promise(resolve => setTimeout(resolve, 10));
+          await sleep(10);
         }
       }
       // 不能用同步 transaction(callback)：文件的异步读改写完成前必须保留事务。

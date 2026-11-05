@@ -1,7 +1,7 @@
 // 群里的场景包：哪些包对这个机器人生效、来源消息命中哪个包、群里开关的说法、/status 的行。
 // 包作者写的正则一律经宿主的正则执行器跑（一个包一次调用，超时或出错只让这个包弃权），provider 经截止时间封装调用。
 
-import { isDecisionGate, resolveScenarioParams, scenarioBindingStatus, scenarioRecordOf, scenarioSourceBots, type CollaborationDecision, type CollaborationDuty, type ScenarioBinding, type ScenarioMessage, type ScenarioPack } from '@dutydeck/shared';
+import { errorMessage as errorText, isDecisionGate, resolveScenarioParams, scenarioBindingStatus, scenarioRecordOf, scenarioSourceBots, type CollaborationDecision, type CollaborationDuty, type ScenarioBinding, type ScenarioMessage, type ScenarioPack } from '@dutydeck/shared';
 import { ScenarioRegistry, type RegisteredScenarioPack } from '../plugins/scenario-registry.js';
 import { scenarioRegexRunner, type ScenarioRegexJob, type ScenarioRegexRunner } from '../plugins/scenario-regex.js';
 import { stripMentionPlaceholders } from './participation-rules.js';
@@ -13,7 +13,6 @@ export type ScenarioPhrase = { entry: RegisteredScenarioPack; kind: 'enable'; ca
 
 /** 判定快照里冻结的场景（model 包）。 */
 const snapshotScenario = (item: CollaborationDecision) => (item.inputSnapshot as { scenario?: { packId?: unknown; status?: unknown } }).scenario;
-const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 const stringList = (value: unknown): string[] => Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
 
 export class LarkScenarios {

@@ -5,7 +5,7 @@
  *   · agents.default：机器人默认 Agent 的可用性。默认 Agent 存在 lark.bots 的 defaultAgentId 里，
  *     不是环境变量；没有机器人就没有默认 Agent，如实说明而不是编一个。
  */
-import { agentProbeTarget, describeDroppedAgent, type DroppedAgent } from '@dutydeck/config';
+import { agentProbeTarget, describeDroppedAgent, shellQuoteIfNeeded as quote, type DroppedAgent } from '@dutydeck/config';
 import type { AgentProbeResult, DoctorCheck, DoctorConfig } from './types.js';
 
 export function checkDroppedAgents(dropped: ReadonlyArray<DroppedAgent>): DoctorCheck[] {
@@ -44,8 +44,6 @@ export function agentsToProbe(bots: ReadonlyArray<DefaultAgentBot>, agents: Doct
     return [{ id, ...probeTargetOf(agent) }];
   });
 }
-
-const quote = (value: string) => /^[\w./@+:=-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
 
 interface Verdict { level: 'ok' | 'warn' | 'fail'; detail: string; remedy?: string; command?: string }
 

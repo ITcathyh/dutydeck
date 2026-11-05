@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
+import { digest as executionJsonDigest } from '@dutydeck/runtime';
 import { z } from 'zod';
-import { RuntimeError, canonicalExecutionJson, countDecisionUsage, isBotTurnRecord, previewNextSchedule, scheduleDeliverySchema, scheduleTriggerSchema, DECISION_WINDOW_LIMIT, listWindowIncomplete, type CollaborationMandate, type CollaborationRepository, type CollaborationScope, type CollaborationSnapshot, type CreateScheduleDefinitionInput, type RepositoryBundle, type ScheduleDefinition } from '@dutydeck/shared';
+import { RuntimeError, countDecisionUsage, isBotTurnRecord, previewNextSchedule, scheduleDeliverySchema, scheduleTriggerSchema, DECISION_WINDOW_LIMIT, listWindowIncomplete, type CollaborationMandate, type CollaborationRepository, type CollaborationScope, type CollaborationSnapshot, type CreateScheduleDefinitionInput, type RepositoryBundle, type ScheduleDefinition } from '@dutydeck/shared';
 
 export type CollaborationRepositories = Pick<RepositoryBundle, 'scheduleDefinitions' | 'scheduleGenerations' | 'scheduleOccurrences' | 'scheduleWatermarks' | 'scheduleLeases'> & { collaboration: CollaborationRepository };
 export type CollaborationAuthorization = (scope: CollaborationScope, actorId: string, action: 'read' | 'write' | 'manage' | 'execute' | 'deliver') => Promise<boolean>;
@@ -29,7 +30,7 @@ export function scheduleMandateBinding(schedule: ScheduleDefinition) {
 }
 const executionDigest = (mandate: CollaborationMandate) => {
   const { revision: _revision, deliveryPaused: _deliveryPaused, createdAt: _createdAt, updatedAt: _updatedAt, ...execution } = mandate;
-  return createHash('sha256').update(canonicalExecutionJson(JSON.parse(JSON.stringify(execution)))).digest('hex');
+  return executionJsonDigest(JSON.parse(JSON.stringify(execution)));
 };
 /** UI delivery toggles retain the pinned execution generation; other changes do not. */
 export function scheduleMatchesMandate(schedule: ScheduleDefinition, mandate: CollaborationMandate): boolean {
@@ -42,7 +43,7 @@ export function collaborationContextSignature(snapshot: CollaborationSnapshot): 
   const { notificationsPaused: _notificationsPaused, revision: _settingsRevision, updatedAt: _settingsUpdatedAt, ...semanticSettings } = settings;
   const { updatedAt: _bootstrapUpdatedAt, ...semanticBootstrap } = bootstrap ?? {};
   const semanticMandates = mandates.map(({ deliveryPaused: _deliveryPaused, revision: _revision, updatedAt: _updatedAt, ...mandate }) => mandate);
-  return createHash('sha256').update(canonicalExecutionJson(JSON.parse(JSON.stringify({ ...context, settings: semanticSettings, mandates: semanticMandates, ...(bootstrap ? { bootstrap: semanticBootstrap } : {}) })))).digest('hex');
+  return executionJsonDigest(JSON.parse(JSON.stringify({ ...context, settings: semanticSettings, mandates: semanticMandates, ...(bootstrap ? { bootstrap: semanticBootstrap } : {}) })));
 }
 const binding = (mandate: Pick<CollaborationMandate, 'id' | 'scope' | 'revision'>, digest?: string) => JSON.stringify({ kind: 'collaboration', mandateId: mandate.id, mandateRevision: mandate.revision, scope: mandate.scope, ...(digest ? { executionDigest: digest } : {}) });
 const idFor = (scope: CollaborationScope, id: string) => 'collaboration_schedule_' + createHash('sha256').update(JSON.stringify([scope, id])).digest('hex');
@@ -63,7 +64,7 @@ export class CollaborationService {
     try { return await current; } finally { if (this.locks.get(id) === current) this.locks.delete(id); }
   }
   private async command(scope: CollaborationScope, actorId: string, id: string, kind: string, input: unknown) {
-    const digest = createHash('sha256').update(canonicalExecutionJson(input)).digest('hex');
+    const digest = executionJsonDigest(input);
     await this.repositories.collaboration.beginAction({ id: `command_${createHash('sha256').update(JSON.stringify([scope,kind,id])).digest('hex')}`, scope, kind: `command:${kind}`, requesterId: actorId, inputDigest: digest, payload: { input } });
   }
   async get(scope: CollaborationScope, actorId: string) {

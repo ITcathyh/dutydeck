@@ -20,6 +20,7 @@
  * 本次运行须先确认旧执行已恢复，未知运行继续阻塞；不会读取旧输出。
  */
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { sleep } from '../daemon/time.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { currentProcessIdentity, observeProcess } from '@dutydeck/storage';
 import { readTaskAttemptResult, type TaskResultRepositories } from '../task-results.js';
@@ -81,7 +82,6 @@ export const larkMemoryPipelineRules = {
 
 const recoveryTaskStatuses = ['reconcile_required', 'legacy_unresolved'];
 
-const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 export interface LarkMemoryPipelineRuntime {
   resolveMemorySessionInput?(input: StartSessionInput): Promise<StartSessionInput & { protocol: AgentCapabilities['protocol'] }>;
@@ -936,7 +936,7 @@ export class LarkMemoryPipeline {
   private async readOutput(sessionId: string, taskId: string): Promise<string> {
     let lastError: unknown;
     for (let attempt = 0; attempt < larkMemoryPipelineRules.resultReads; attempt++) {
-      if (attempt > 0) await delay(larkMemoryPipelineRules.resultRetryMs);
+      if (attempt > 0) await sleep(larkMemoryPipelineRules.resultRetryMs);
       try {
         const attemptId = this.attemptIdFor(taskId);
         if (attemptId) {
