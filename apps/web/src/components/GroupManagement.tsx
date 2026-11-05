@@ -4,7 +4,6 @@ import {
   Users,
   Search,
   RefreshCw,
-  Check,
   ChevronDown,
   ChevronRight,
   Shield,
@@ -30,7 +29,7 @@ import type {
   RoleAssignment
 } from '@dutydeck/shared';
 import { participationLevelBehaviors, participationLevelFields, participationLevelLabels, participationLevels, resolveParticipation } from '@dutydeck/shared';
-import { Badge, Banner, Button, Card, EmptyState, Input, Select, Spinner } from './primitives';
+import { Badge, Banner, Button, Card, ConflictBanner, EmptyState, Input, SaveBar, Select, Spinner } from './primitives';
 import { AgentSelect, CompactSelect } from './CompactSelect';
 import { DirectoryPicker } from './DirectoryPicker';
 import { CollaborationPanel } from './CollaborationPanel';
@@ -893,19 +892,13 @@ export function GroupManagement({
 
               {/* 冲突提示 */}
               {draftKey && conflicts[draftKey] && (
-                <Banner tone="danger">
-                  <div className="flex items-start justify-between gap-4">
-                    <div>
-                      <strong className="block">别人刚改过这个群的设置</strong>
-                      <p className="mt-1 text-caption">
-                        {conflicts[draftKey]}。你填的内容已保留，没有被提交。可以放弃自己的修改、载入最新设置后重来。
-                      </p>
-                    </div>
-                    <Button variant="secondary" size="sm" loading={groupsQuery.isFetching} onClick={() => void discardAndReload()}>
-                      放弃修改并载入最新
-                    </Button>
-                  </div>
-                </Banner>
+                <ConflictBanner
+                  title="别人刚改过这个群的设置"
+                  message={conflicts[draftKey]}
+                  advice="可以放弃自己的修改、载入最新设置后重来。"
+                  busy={groupsQuery.isFetching}
+                  onDiscard={() => void discardAndReload()}
+                />
               )}
 
               <div className="flex items-center justify-between gap-2">
@@ -1497,38 +1490,17 @@ export function GroupManagement({
                   </div>
 
                   {/* 底部聚合保存条 */}
-                  <div className="flex flex-wrap items-center justify-between gap-3 border-t border-subtle pt-4">
-                    <div className="text-caption text-subtle">
-                      {presentationError ? (
-                        <span className="font-medium text-danger">{presentationError}</span>
-                      ) : isDirty ? (
-                        <span className="font-medium text-warning">● 有未保存的修改</span>
-                      ) : (
-                        <span>已保存。</span>
-                      )}
-                      <span className="ml-2 hidden sm:inline text-meta text-subtle">
-                        （执行设置用于新话题，权限立即生效）
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <Button
-                        variant="secondary"
-                        disabled={!isDirty || savingThisBot}
-                        onClick={resetDraft}
-                      >
-                        放弃修改
-                      </Button>
-                      <Button
-                        variant="primary"
-                        disabled={!isDirty || Boolean(presentationError)}
-                        loading={savingThisBot}
-                        onClick={submitSave}
-                      >
-                        <Check size={14} className="mr-1.5" />
-                        保存配置
-                      </Button>
-                    </div>
-                  </div>
+                  <SaveBar
+                    className="border-t border-subtle pt-4"
+                    dirty={isDirty}
+                    saving={savingThisBot}
+                    error={presentationError}
+                    savedText="已保存。"
+                    hint="（执行设置用于新话题，权限立即生效）"
+                    saveLabel="保存配置"
+                    onReset={resetDraft}
+                    onSave={submitSave}
+                  />
                 </div>
               )}
 

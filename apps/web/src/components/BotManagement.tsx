@@ -15,8 +15,7 @@ import {
   ChevronDown,
   ChevronRight,
   Shield,
-  ArrowLeft,
-  Check
+  ArrowLeft
 } from 'lucide-react';
 import {
   api,
@@ -28,7 +27,7 @@ import {
 } from '../api';
 import { buildLarkBotAppLink, projectLarkBotStatus } from '../lark-status';
 import { useDraftStore, type BotDraft } from '../draft-store';
-import { Badge, Banner, Button, Card, EmptyState, Field, IconButton, Input, Select, Spinner, Textarea } from './primitives';
+import { Badge, Banner, Button, Card, ConflictBanner, EmptyState, Field, IconButton, Input, SaveBar, Select, Spinner, Textarea } from './primitives';
 import { AgentSelect, CompactSelect } from './CompactSelect';
 import { DirectoryPicker } from './DirectoryPicker';
 import { ConfirmDialog } from './ConfirmDialog';
@@ -518,19 +517,13 @@ export function BotManagement({
 
               {/* 冲突提示 */}
               {conflicts[activeBot.appId] && (
-                <Banner tone="danger">
-                  <div className="flex items-start justify-between gap-4">
-                    <div>
-                      <strong className="block">别人刚改过这个机器人的配置</strong>
-                      <p className="mt-1 text-caption">
-                        {conflicts[activeBot.appId]}。你填的内容已保留，没有被提交。可以放弃自己的修改、载入最新配置后重来，也可以逐项核对后再保存一次。
-                      </p>
-                    </div>
-                    <Button variant="secondary" size="sm" loading={larkConfig.isFetching} onClick={() => void discardAndReload()}>
-                      放弃修改并载入最新
-                    </Button>
-                  </div>
-                </Banner>
+                <ConflictBanner
+                  title="别人刚改过这个机器人的配置"
+                  message={conflicts[activeBot.appId]}
+                  advice="可以放弃自己的修改、载入最新配置后重来，也可以逐项核对后再保存一次。"
+                  busy={larkConfig.isFetching}
+                  onDiscard={() => void discardAndReload()}
+                />
               )}
 
               {/* Bot 头部名片卡 */}
@@ -1155,36 +1148,17 @@ export function BotManagement({
               </Card>}
 
               {/* 底部保存条 */}
-              <div className="sticky bottom-0 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-default bg-surface p-4 shadow-card">
-                <div className="text-caption text-subtle">
-                  {isDirty ? (
-                    <span className="font-medium text-warning">● 有未保存的修改</span>
-                  ) : (
-                    <span>已保存。</span>
-                  )}
-                  <span className="ml-2 hidden sm:inline text-meta text-subtle">
-                    （执行设置用于新话题，权限立即生效）
-                  </span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <Button
-                    variant="secondary"
-                    disabled={!isDirty || savingThisBot}
-                    onClick={resetCurrentDraft}
-                  >
-                    放弃修改
-                  </Button>
-                  <Button
-                    variant="primary"
-                    disabled={!isDirty || !idleCompactHoursValid}
-                    loading={savingThisBot}
-                    onClick={submitSave}
-                  >
-                    <Check size={14} className="mr-1.5" />
-                    保存配置
-                  </Button>
-                </div>
-              </div>
+              <SaveBar
+                className="sticky bottom-0 rounded-lg border border-default bg-surface p-4 shadow-card"
+                dirty={isDirty}
+                saving={savingThisBot}
+                saveDisabled={!idleCompactHoursValid}
+                savedText="已保存。"
+                hint="（执行设置用于新话题，权限立即生效）"
+                saveLabel="保存配置"
+                onReset={resetCurrentDraft}
+                onSave={submitSave}
+              />
             </div>
           )}
         </main>

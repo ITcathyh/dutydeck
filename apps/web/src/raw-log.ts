@@ -3,8 +3,15 @@ import type { EventWindow } from './event-history';
 
 const rawText = (events: DockEvent[]) => events.filter(event => event.type === 'raw_terminal').map(event => event.raw ?? event.data.text).join('');
 
-/** Reuse the log for unrelated events. New raw output is eagerly joined so
- * opening the panel still receives a complete string ready for display. */
+/** Whether rawText(events) would be non-empty, without joining the log. */
+export const hasRawText = (events: DockEvent[]) => events.some(event => {
+  if (event.type !== 'raw_terminal') return false;
+  const text = event.raw ?? event.data.text;
+  return text !== undefined && text !== null && String(text) !== '';
+});
+
+/** Reuse the log for unrelated events; output appended before or after the
+ * previous window is joined onto the cached text instead of rebuilding it. */
 export function createRawLogProjector() {
   let previous: DockEvent[] | undefined;
   let text = '';

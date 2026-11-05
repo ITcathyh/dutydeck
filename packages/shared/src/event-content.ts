@@ -77,6 +77,16 @@ export function appendEventContent(previous: readonly EventContentPart[], curren
 }
 
 export const eventContentText = (parts: readonly EventContentPart[]) => parts.filter((part): part is Extract<EventContentPart, { type: 'text' }> => part.type === 'text').map(part => part.text).join('');
+/** 子任务额度/限流诊断（status 事件），时间线和飞书过程卡都把它当一条工具结果展示。 */
+export const isChildDiagnostic = (value: unknown) => {
+  if (!value || typeof value !== 'object') return false;
+  const data = value as Record<string, unknown>;
+  return data.diagnostic === data.state
+    && typeof data.id === 'string' && /^child_diagnostic_[a-f0-9]{64}$/.test(data.id)
+    && typeof data.activityId === 'string' && typeof data.parentTurnId === 'string' && typeof data.childTurnId === 'string'
+    && typeof data.parentThreadId === 'string' && typeof data.childThreadId === 'string'
+    && (data.state === 'child_quota' && data.code === 'usage_limit_exceeded' || data.state === 'child_rate_limit' && data.code === 'rate_limit');
+};
 export function eventHasContent(data: { text?: unknown; parts?: unknown } | undefined): boolean {
   return Boolean(typeof data?.text === 'string' && data.text.trim() || Array.isArray(data?.parts) && data.parts.some(part => part?.type === 'text' ? typeof part.text === 'string' && part.text.trim() : Boolean(part?.type && part.type !== 'unsupported')));
 }
