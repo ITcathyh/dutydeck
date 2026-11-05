@@ -64,7 +64,7 @@ function git(args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; t
 }
 
 /** 读树对象的 git 参数：固定前缀与路径格式，不受用户 diff 配置（外部 diff、textconv、颜色、noprefix）影响。 */
-const diffArgs = (gitDir: string) => ['--git-dir', gitDir, '-c', 'core.quotePath=false', 'diff', '--no-color', '--no-ext-diff', '--no-textconv', '-M', '--src-prefix=a/', '--dst-prefix=b/'];
+const diffArgs = (gitDir: string, renames = true) => ['--git-dir', gitDir, '-c', 'core.quotePath=false', 'diff', '--no-color', '--no-ext-diff', '--no-textconv', renames ? '-M' : '--no-renames', '--src-prefix=a/', '--dst-prefix=b/'];
 
 /** .dutydeck 下是平台数据，不算这一轮的改动。 */
 const snapshotPathspec = ['--', '.', ':(exclude,glob)**/.dutydeck/**'];
@@ -258,6 +258,12 @@ async function generatedPaths(gitDir: string, tree: string, paths: string[], tim
   return generated;
 }
 
+/** 补丁段是不是清单里这一对改名。含空格的路径未加引号，改名的 diff header 可能相同，所以还要核对 rename 元数据。 */
+function renameSection(section: string[], entry: { path: string; oldPath?: string }) {
+  return section[0] === `diff --git ${patchPath(`a/${entry.oldPath}`)} ${patchPath(`b/${entry.path}`)}`
+    && section.includes(`rename from ${patchPath(entry.oldPath!)}`) && section.includes(`rename to ${patchPath(entry.path)}`);
+}
+
 const HUNK_HEADER = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
 
 /** 与 core.quotePath=false 的 Git 补丁路径格式一致：空格、Unicode 原样，控制字符用 C 转义。 */
@@ -290,7 +296,7 @@ function parseHunks(section: string[]): TurnDiffHunk[] {
 }
 
 /**
- * 两棵树之间的改动，按文件拆好给 diff 页。文件清单与增删行数来自 numstat，正文来自同一次比较的补丁：
+ * 两棵树之间的改动，按文件拆好给 diff 页。文件清单、增删行数和改名配对来自整次比较的 numstat，正文按同样的改名配对分批读补丁：
  * 按路径关联补丁段，普通文件与符号链接互换时合并同一路径的删除、新增两段。
  * 锁文件（固定文件名单）和 .gitattributes 标了 linguist-generated 的文件折叠：只给统计，不读正文。
  * 其余文件按源码、测试、文档的顺序分批读补丁，共用整页预算，所以预算不够时被省略的是文档、测试，而不是源码；
@@ -305,21 +311,32 @@ export async function readTurnDiff(gitDir: string, before: string, after: string
   const sections: string[][] = [];
   let incomplete: string[] | undefined;
   let remaining = limits.total;
+  const readBatch = async (paths: string[], renames: boolean) => {
+    const patch = await readPatch([...diffArgs(gitDir, renames), '--unified=3', before, after, '--', ...paths.map(path => `:(literal)${path}`)], remaining, timeoutMs);
+    remaining -= Buffer.byteLength(patch.text);
+    const batch: string[][] = [];
+    for (const line of patch.text.split('\n')) {
+      if (line.startsWith('diff --git ')) batch.push([line]);
+      else batch.at(-1)?.push(line);
+    }
+    // 被截断的最后一段不完整，同一路径已读到的另一段也不能单独展开。
+    if (patch.cut) incomplete = batch.pop();
+    sections.push(...batch);
+    return batch;
+  };
+  const more = () => remaining > 0 && !incomplete;
+  // 改名以整次比较（numstat）为准：分批时候选文件变少，git 的改名检测（上限、最佳配对）可能和整次比较不同。
+  // 没改名的文件按 --no-renames 读，不会在批内被配成改名；改名的两端放进同一批按 -M 读，批内没配成清单里那一对的再单独读这一对。
   for (const tier of [0, 1, 2]) {
     const group = entries.filter(entry => !folds.get(entry) && classifyDiffPath(entry.path).tier === tier);
-    // 每批 200 个文件，路径放在命令行上；改名的两端放进同一批，rename 检测才认得出来。
-    for (let start = 0; start < group.length && remaining > 0 && !incomplete; start += 200) {
-      const paths = group.slice(start, start + 200).flatMap(entry => [entry.path, ...(entry.oldPath !== undefined ? [entry.oldPath] : [])]).map(path => `:(literal)${path}`);
-      const patch = await readPatch([...diffArgs(gitDir), '--unified=3', before, after, '--', ...paths], remaining, timeoutMs);
-      remaining -= Buffer.byteLength(patch.text);
-      const batch: string[][] = [];
-      for (const line of patch.text.split('\n')) {
-        if (line.startsWith('diff --git ')) batch.push([line]);
-        else batch.at(-1)?.push(line);
-      }
-      // 被截断的最后一段不完整，同一路径已读到的另一段也不能单独展开。
-      if (patch.cut) incomplete = batch.pop();
-      sections.push(...batch);
+    const plain = group.filter(entry => entry.oldPath === undefined);
+    const renamed = group.filter(entry => entry.oldPath !== undefined);
+    // 每批 200 个路径，放在命令行上。
+    for (let start = 0; start < plain.length && more(); start += 200) await readBatch(plain.slice(start, start + 200).map(entry => entry.path), false);
+    for (let start = 0; start < renamed.length && more(); start += 100) {
+      const chunk = renamed.slice(start, start + 100);
+      const batch = await readBatch(chunk.flatMap(entry => [entry.oldPath!, entry.path]), true);
+      for (const entry of chunk) if (more() && !batch.some(section => renameSection(section, entry))) await readBatch([entry.oldPath!, entry.path], true);
     }
   }
   const byHeader = new Map<string, string[][]>();
@@ -331,8 +348,7 @@ export async function readTurnDiff(gitDir: string, before: string, after: string
     const patchHeader = `diff --git ${patchPath(`a/${entry.oldPath ?? entry.path}`)} ${patchPath(`b/${entry.path}`)}`;
     // 含空格的路径未加引号，改名的 diff header 可能相同；用 rename 元数据区分，避免误合并。
     const matching = (byHeader.get(patchHeader) ?? []).filter(section => entry.oldPath !== undefined
-      ? section.includes(`rename from ${patchPath(entry.oldPath)}`) && section.includes(`rename to ${patchPath(entry.path)}`)
-      : !section.some(line => line.startsWith('rename from ')));
+      ? renameSection(section, entry) : !section.some(line => line.startsWith('rename from ')));
     const headers = matching.flatMap(section => {
       const end = section.findIndex(line => line.startsWith('@@ ') || line.startsWith('Binary files '));
       return section.slice(0, end < 0 ? section.length : end);

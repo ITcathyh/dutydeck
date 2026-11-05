@@ -505,6 +505,8 @@ export class SessionAutomationService {
   private readonly quarantinedSchedules = new Set<string>();
   /** 关闭时终止正在跑的前置命令；那次触发留在待执行，租约过期后由下次启动重新判定。 */
   private readonly preconditionAbort = new AbortController();
+  /** 本实例正在后台跑的前置命令，按触发编号；close 时等它们收尾。 */
+  private readonly preconditionRuns = new Map<string, Promise<void>>();
 
   private invalidRecord(key: string, raw: string) {
     // Record identifiers are enough for repair. Never log the stored payload or parser issues.
@@ -1493,7 +1495,7 @@ export class SessionAutomationService {
     this.subscriptions.clear();
     for (const { controller } of this.deliveries.values()) controller.abort();
     try { if (this.currentTick) await this.currentTick; }
-    finally { await Promise.allSettled([...this.manualRuns, ...[...this.deliveries.values()].map(item => item.run)]); }
+    finally { await Promise.allSettled([...this.manualRuns, ...this.preconditionRuns.values(), ...[...this.deliveries.values()].map(item => item.run)]); }
   }
 
   async authorizeTask(task: TaskRecord, phase: 'prepare' | 'submit' = 'prepare'): Promise<void> {
@@ -2094,8 +2096,9 @@ export class SessionAutomationService {
   }
 
   /**
-   * 前置命令判定：没设时原样返回。退出码 0 续租后返回，继续开会话或启动模板；非 0 记 skipped（不通知、不计连续没做成）；
-   * 超时、无法执行或进程组没收干净记 error，计入连续没做成（连续 STREAK_PAUSE 次自动停用）。返回 undefined 表示这次已收尾或已被别处接手。
+   * 前置命令判定：没设或这次已判定通过时原样返回，继续开会话或启动模板。否则在后台跑命令并返回 undefined：
+   * 退出码 0 记下通过后由 runPrecondition 接着处理；非 0 记 skipped（不通知、不计连续没做成）；
+   * 超时、无法执行或进程组没收干净记 error，计入连续没做成（连续 STREAK_PAUSE 次自动停用）。
    */
   private async preconditionGate(scheduleStored: { raw: string; value: SessionSchedule }, stored: { raw: string; value: SessionScheduleOccurrenceV2 }): Promise<{ schedule: { raw: string; value: SessionSchedule }; occurrence: { raw: string; value: SessionScheduleOccurrenceV2 } } | undefined> {
     const schedule = scheduleStored.value;
@@ -2123,26 +2126,67 @@ export class SessionAutomationService {
     let cwd: string;
     try { cwd = await realpath(schedule.executionContext?.cwd ?? (await this.requireSession(schedule.sessionId)).cwd); }
     catch (error) { return settle(stored, { outcome: 'error', output: '', outputTruncated: false, error: `执行目录不可用：${errorMessage(error)}` }); }
-    // 续租后再跑：命令最长 20 秒，留在 30 秒租约内，期间其他 tick 与实例不会接手这次触发。
+    // 同一实例里同一次触发只跑一份；跨实例和后续 tick 靠租约挡住。
+    if (this.preconditionRuns.has(occurrence.id)) return undefined;
     const leased = await this.renewOccurrenceLease(stored);
-    if (!leased) return undefined;
-    const result = await runIsolatedCommand(precondition.command, cwd, { timeoutMs: timeoutSeconds * 1_000, maxOutputBytes: SCHEDULE_PRECONDITION_MAX_OUTPUT_BYTES, signal: this.preconditionAbort.signal });
-    if (result.interrupted) return undefined;
-    const current = await this.getRecord(scheduleKey(schedule.id), readStoredSessionSchedule);
-    if (!current || current.value.generation !== occurrence.generation || current.value.deletedAt || !current.value.enabled && !manual) {
-      await this.finishOccurrence(leased, { conditionStatus: 'invalidated', runStatus: 'invalidated', error: 'Schedule changed while its pre-check command ran' });
-      return undefined;
+    if (!leased || this.preconditionRuns.has(occurrence.id)) return undefined;
+    // 命令在后台跑，不占定时器主循环；结束后接着走这次触发的后续流程。
+    const run = this.runPrecondition(schedule, precondition, leased, cwd, timeoutSeconds, settle)
+      .catch(error => { this.warn({ scheduleId: schedule.id, occurrenceId: occurrence.id, code: errorCode(error) }, '前置命令后续处理失败'); })
+      .finally(() => { this.preconditionRuns.delete(occurrence.id); });
+    this.preconditionRuns.set(occurrence.id, run);
+    return undefined;
+  }
+
+  /**
+   * 跑前置命令期间每 CLAIM_TTL_MS/3 续一次租；续租失败（这次触发已被改动或接手）就终止命令。
+   * 通过后先把 conditionStatus=passed 写进这次触发，再接着处理：之后崩溃恢复直接开会话或启动模板，不重跑命令。
+   */
+  private async runPrecondition(schedule: SessionSchedule, precondition: StoredPrecondition, leased: { raw: string; value: SessionScheduleOccurrenceV2 }, cwd: string, timeoutSeconds: number,
+    settle: (target: { raw: string; value: SessionScheduleOccurrenceV2 }, status: Omit<PreconditionStatus, 'version' | 'skippedInARow' | 'setAt' | 'occurrenceId' | 'at'>) => Promise<undefined>) {
+    const occurrence = leased.value;
+    const manual = occurrence.triggerSource === 'manual';
+    const controller = new AbortController();
+    const onClose = () => controller.abort();
+    this.preconditionAbort.signal.addEventListener('abort', onClose, { once: true });
+    if (this.preconditionAbort.signal.aborted) controller.abort();
+    let current = leased;
+    let renewing = Promise.resolve();
+    const timer = setInterval(() => {
+      renewing = renewing.then(async () => {
+        if (controller.signal.aborted) return;
+        const renewed = await this.renewOccurrenceLease(current);
+        if (renewed) current = renewed;
+        else controller.abort();
+      }).catch(() => { controller.abort(); });
+    }, CLAIM_TTL_MS / 3);
+    let result: Awaited<ReturnType<typeof runIsolatedCommand>>;
+    try { result = await runIsolatedCommand(precondition.command!, cwd, { timeoutMs: timeoutSeconds * 1_000, maxOutputBytes: SCHEDULE_PRECONDITION_MAX_OUTPUT_BYTES, signal: controller.signal }); }
+    finally {
+      clearInterval(timer);
+      this.preconditionAbort.signal.removeEventListener('abort', onClose);
+      await renewing;
+    }
+    // 关闭或丢了租约：这次触发留在待执行，租约过期后重新判定。
+    if (result.interrupted || controller.signal.aborted) return;
+    const latest = await this.getRecord(scheduleKey(schedule.id), readStoredSessionSchedule);
+    if (!latest || latest.value.generation !== occurrence.generation || latest.value.deletedAt || !latest.value.enabled && !manual) {
+      await this.finishOccurrence(current, { conditionStatus: 'invalidated', runStatus: 'invalidated', error: 'Schedule changed while its pre-check command ran' });
+      return;
     }
     const error = result.cleanupError ?? result.error;
     const outcome = result.timedOut || error || result.exitCode === undefined ? 'error' as const : result.exitCode === 0 ? 'passed' as const : 'skipped' as const;
     const status = { outcome, ...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}), ...(result.timedOut ? { timedOut: true } : {}),
       output: result.output, outputTruncated: result.outputTruncated,
       ...(outcome === 'error' && !result.timedOut ? { error: error ?? '进程被信号终止' } : {}) };
-    if (outcome !== 'passed') return settle(leased, status);
-    const renewed = await this.renewOccurrenceLease(leased);
-    if (!renewed) return undefined;
+    if (outcome !== 'passed') { await settle(current, status); return; }
+    const now = this.clock();
+    const passed = sessionScheduleOccurrenceV2Schema.parse({ ...current.value, revision: current.value.revision + 1, conditionStatus: 'passed',
+      leaseOwner: this.ownerId, leaseExpiresAt: plus(now, CLAIM_TTL_MS), updatedAt: iso(now) });
+    if (!await this.replace(occurrenceKey(occurrence.id), current.raw, passed)) return;
     await this.notePrecondition(schedule.id, precondition, { occurrenceId: occurrence.id, at: iso(this.clock()), ...status });
-    return { schedule: current, occurrence: renewed };
+    if (this.closed) return;
+    await this.processOccurrence({ raw: JSON.stringify(passed), value: passed });
   }
 
   private async readPreconditionStatus(scheduleId: string) {
