@@ -114,7 +114,14 @@ it('keeps creation successful but reports a native slash menu failure in normal 
 
 it('keeps automatic publication timeout distinct from a human review and never reconnects or republishes', async () => {
   const h = await harness(true, 1);
-  const result = await runLarkCreate('Bot', { agent: 'ccflash', listen: true }, h.context);
+  // The configurator re-reads a status-1 version ten times, one second apart; skip the real waits.
+  const realSetTimeout = globalThis.setTimeout;
+  const pauses = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((handler: () => void, ms?: number, ...args: unknown[]) =>
+    realSetTimeout(handler, ms === 1_000 ? 0 : ms, ...args)) as typeof setTimeout);
+  let skipped = 0;
+  const result = await runLarkCreate('Bot', { agent: 'ccflash', listen: true }, h.context)
+    .finally(() => { skipped = pauses.mock.calls.filter(([, ms]) => ms === 1_000).length; pauses.mockRestore(); });
+  expect(skipped).toBe(9);
   expect(result).toMatchObject({ ok: false, job: { status: 'failed', retryable: false }, error: expect.stringContaining('publish_verification_pending') });
   expect(h.output()).not.toContain('正在等待飞书管理员审核');
   expect(h.syncListener).not.toHaveBeenCalled();

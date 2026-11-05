@@ -248,10 +248,17 @@ describe('relay ask', () => {
   it('expires after the timeout instead of hanging forever', async () => {
     const { publisher } = recordingPublisher();
     const broker = new RelayAskBroker(publisher);
-    const outcome = await broker.register({ sessionId: 'ses_a', question: '在吗？', timeoutMs: 1_000 });
-    expect(outcome).toMatchObject({ status: 'expired' });
-    expect(broker.listPending('ses_a')).toHaveLength(0);
-    expect(broker.get(outcome.askId)).toMatchObject({ status: 'expired' });
+    vi.useFakeTimers();
+    try {
+      const pending = broker.register({ sessionId: 'ses_a', question: '在吗？', timeoutMs: 1_000 });
+      await vi.advanceTimersByTimeAsync(999);
+      expect(broker.listPending('ses_a')).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      const outcome = await pending;
+      expect(outcome).toMatchObject({ status: 'expired' });
+      expect(broker.listPending('ses_a')).toHaveLength(0);
+      expect(broker.get(outcome.askId)).toMatchObject({ status: 'expired' });
+    } finally { vi.useRealTimers(); }
   });
 
   it('wakes blocked asks when the session ends — never leaves the child hanging', async () => {

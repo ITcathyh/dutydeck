@@ -16,8 +16,12 @@ it('does not read historical completed result blobs during idle ticks, including
   let repos = createRepositories(path);
   let service = new WorkItemService({ repositories: repos, runtime: {} as DutydeckRuntime, authorize: async () => true });
   try {
-    for (let i = 0; i < 100; i++) await repos.config.set(`work_item:old-${i}`, JSON.stringify({ item: { id: `old-${i}`, status: 'completed', delivery: { status: 'delivered' }, output: { text: 'x'.repeat(16 * 1024) } } }));
-    await service.close(); repos.close(); repos = createRepositories(path);
+    await service.close(); repos.close();
+    // 历史数据只是造数：单事务写入，避免 100 次独立提交。
+    const seed = new Database(path), insert = seed.prepare('INSERT INTO configs (key, value) VALUES (?, ?)');
+    try { seed.transaction(() => { for (let i = 0; i < 100; i++) insert.run(`work_item:old-${i}`, JSON.stringify({ item: { id: `old-${i}`, status: 'completed', delivery: { status: 'delivered' }, output: { text: 'x'.repeat(16 * 1024) } } })); })(); }
+    finally { seed.close(); }
+    repos = createRepositories(path);
     service = new WorkItemService({ repositories: repos, runtime: {} as DutydeckRuntime, authorize: async () => true });
     const get = vi.spyOn(repos.config, 'get'), list = vi.spyOn(repos.config, 'list');
     await service.tick(); await service.tick();
@@ -241,9 +245,9 @@ describe('Work-item queue admission and execution deadlines', () => {
     await f.tick(); expect(await f.repos.workItems.countActiveSteps()).toBe(12);
     expect((await f.runtime.listSessions()).filter(session => session.source === 'work_item')).toHaveLength(12);
     expect(f.calls).toHaveLength(0);
-    f.runtime.setQueueHeld(false); await vi.waitFor(() => expect(f.calls).toHaveLength(6), { timeout: 10_000 });
+    f.runtime.setQueueHeld(false); await vi.waitFor(() => expect(f.calls).toHaveLength(6), { timeout: 10_000, interval: 5 });
     await f.tick(); expect(f.calls).toHaveLength(6);
-    await f.finish(f.calls[0]!, 'Permit released'); await vi.waitFor(() => expect(f.calls).toHaveLength(7), { timeout: 10_000 });
+    await f.finish(f.calls[0]!, 'Permit released'); await vi.waitFor(() => expect(f.calls).toHaveLength(7), { timeout: 10_000, interval: 5 });
     await f.tick(); expect(f.calls).toHaveLength(7);
     const tasks = (await Promise.all((await f.runtime.listSessions()).filter(session => session.source === 'work_item').map(session => f.repos.tasks.listBySession(session.id)))).flat();
     expect(tasks.filter(task => task.status === 'running')).toHaveLength(6);
@@ -426,33 +430,24 @@ describe('WorkItemService with real Runtime and SQLite', () => {
     expect((await f.get(item.id).catch(() => undefined))).toBeUndefined();
   });
 
-  it('only retries the failed branch and preserves succeeded siblings', async () => {
-    const f = await fixture(); const item = await f.create(); await f.tick(); await eventually(async () => f.calls.length === 1);
-    await f.finish(f.calls[0]!, 'Kept result'); await f.tick(); await eventually(async () => f.calls.length === 2); await f.finish(f.calls[1]!, '', true); await f.tick();
-    const failed = await f.get(item.id); expect(failed.status).toBe('failed');
-    await f.service.retryStep(f.parent.id, item.id, 'b', failed.revision, 'ou_owner'); await f.tick();
-    await eventually(async () => f.calls.length === 3);
-    expect(f.calls[2]!.prompt).toContain('Research B'); expect((await f.get(item.id)).steps[0]!.attempts).toHaveLength(1);
-    await f.finish(f.calls[2]!, 'New result'); await f.tick(); await eventually(async () => f.calls.length === 4);
-    expect(f.calls[3]!.prompt).toContain('Kept result'); expect(f.calls[3]!.prompt).toContain('New result');
-  });
-
-  it('stops each child once its result is saved and retries in a fresh child', async () => {
+  it('retries only the failed branch in a fresh child, preserving succeeded siblings and stopping each saved child', async () => {
     const f = await fixture(); const item = await f.create(); await f.tick(); await eventually(async () => f.calls.length === 1);
     await f.finish(f.calls[0]!, 'Kept result'); await f.tick(); await eventually(async () => f.calls.length === 2);
     const [kept, failed] = f.calls.map(call => call.sessionId);
     await f.finish(f.calls[1]!, '', true); await f.tick();
-    const { revision } = await f.get(item.id);
+    const { revision, status } = await f.get(item.id); expect(status).toBe('failed');
     // 停止在 tick 之外进行且不写记录：卡片刚拿到的版本号仍然有效，可以立刻重试。
     await eventually(async () => [kept, failed].every(id => f.stopped.includes(id)));
     expect(f.stopped).not.toContain(f.parent.id);
     expect((await f.get(item.id)).revision).toBe(revision);
     await f.service.retryStep(f.parent.id, item.id, 'b', revision, 'ou_owner'); await f.tick();
     await eventually(async () => f.calls.length === 3);
+    expect(f.calls[2]!.prompt).toContain('Research B'); expect((await f.get(item.id)).steps[0]!.attempts).toHaveLength(1);
     // 重试起的是新子会话，运行中不能被回收。
     await f.tick(); await new Promise(resolve => setTimeout(resolve, 20));
     expect(f.stopped).not.toContain(f.calls[2]!.sessionId);
     await f.finish(f.calls[2]!, 'New result'); await f.tick(); await eventually(async () => f.calls.length === 4);
+    expect(f.calls[3]!.prompt).toContain('Kept result'); expect(f.calls[3]!.prompt).toContain('New result');
     await f.finish(f.calls[3]!, 'Complete comparison'); await f.tick();
     expect((await f.get(item.id)).status).toBe('completed');
     await eventually(async () => [f.calls[2]!.sessionId, f.calls[3]!.sessionId].every(id => f.stopped.includes(id)));
@@ -548,7 +543,9 @@ describe('WorkItemService with real Runtime and SQLite', () => {
   it('preserves invalid historical JSON without preventing another work item from advancing', async () => {
     const f = await fixture();
     const corrupt = ['{invalid', ...[null, true, 1, 'bad', [], [1], {}, { item: null }, { item: 'bad' }, { item: 1 }, { item: true }, { item: [] }, { item: [1] }, { item: {} }].map(value => JSON.stringify(value))];
-    for (const [index, raw] of corrupt.entries()) await f.repos.config.set(`work_item:000-corrupt-${index}`, raw);
+    const seed = new Database(join(f.directory, 'test.db')), insert = seed.prepare('INSERT INTO configs (key, value) VALUES (?, ?)');
+    try { seed.transaction(() => { for (const [index, raw] of corrupt.entries()) insert.run(`work_item:000-corrupt-${index}`, raw); })(); }
+    finally { seed.close(); }
     const item = await f.create({ ...plan, steps: [plan.steps[0]!], outputStepId: 'a' });
     await f.tick(); await eventually(async () => f.calls.length === 1);
     for (const [index, raw] of corrupt.entries()) expect(await f.repos.config.get(`work_item:000-corrupt-${index}`)).toBe(raw);

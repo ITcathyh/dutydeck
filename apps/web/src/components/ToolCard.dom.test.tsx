@@ -77,7 +77,7 @@ describe('ToolCard 状态渲染分支', () => {
 
 describe('ToolCard 展开交互', () => {
   it('点击展开后渲染 input/output JSON，再点收起', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const { container } = render(<ToolCard event={toolEvent({ status: 'completed', input: { command: 'ls -la' }, output: 'total 0' })}/>);
     expect(codeBlock(container)).toBeNull();
     await user.click(screen.getByRole('button', { name: /运行命令/ }));
@@ -91,7 +91,7 @@ describe('ToolCard 展开交互', () => {
   });
 
   it('没有 input/output 时按钮 disabled，点击不展开', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const { container } = render(<ToolCard event={toolEvent({ status: 'completed', input: undefined, output: undefined })}/>);
     const button = screen.getByRole('button');
     expect((button as HTMLButtonElement).disabled).toBe(true);
@@ -136,7 +136,7 @@ describe('ToolBatch 聚合状态', () => {
   });
 
   it('展开后逐条渲染子卡片，子卡片用动作标签而非重复 description', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const { container } = render(<ToolBatch description="读取三个文件" events={batch(['completed', 'failed'])}/>);
     await user.click(screen.getByRole('button', { name: /读取三个文件/ }));
     const nested = container.querySelector('.border-l');
@@ -161,7 +161,7 @@ describe('ToolCard 终态更新', () => {
     description.mockClear();
     view.rerender(<ToolCard event={event} ongoing/>);
     expect(description).not.toHaveBeenCalled();
-    await userEvent.click(screen.getByRole('button', { name: /固定工具说明/ }));
+    await userEvent.setup({ delay: null }).click(screen.getByRole('button', { name: /固定工具说明/ }));
     expect(codeBlock(view.container)?.textContent).toContain('固定输出');
     expect(description).toHaveBeenCalled();
   });
@@ -185,7 +185,7 @@ describe('ToolCard 终态更新', () => {
     const initial = project(events.events, tasks, false, events).timeline[0]!;
     Object.freeze(initial.data); Object.freeze(initial);
     const view = render(<ToolCard event={initial}/>);
-    await userEvent.click(screen.getByRole('button', { name: /运行命令/ }));
+    await userEvent.setup({ delay: null }).click(screen.getByRole('button', { name: /运行命令/ }));
     const card = view.container.querySelector('[data-timeline-event]');
     expect(codeBlock(view.container)?.textContent).toContain('初始结果');
     events = mergeLiveEvent(events, toolEvent({ id: 'call-1', status: 'failed', input: { command: 'cat missing-file' }, output: '迟到的失败原因' }, { id: 'late-result', sequence: 2, type: 'tool_result', timestamp: '2026-08-27T00:00:03.000Z' }));
@@ -212,7 +212,7 @@ describe('ToolCard 终态更新', () => {
     expect(screen.getByRole('button', { name: /已运行命令/ })).toBe(button);
     expect(document.activeElement).toBe(button);
     view.rerender(<TimelineDisclosureContext.Provider value={second}><ToolCard event={event} ongoing preferDescription={false}/></TimelineDisclosureContext.Provider>);
-    await userEvent.click(button);
+    await userEvent.setup({ delay: null }).click(button);
     expect(codeBlock(view.container)?.textContent).toContain('输出');
     expect(second.get('tool:tool-1')).toBe(true);
     expect(first.get('tool:tool-1')).toBe(false);
@@ -230,7 +230,7 @@ describe('ToolCard 终态更新', () => {
     expect(codeBlock(view.container)?.textContent).toContain('const result = 42;');
     expect(view.container.querySelector('[data-timeline-event="tool-1"]')).toBeTruthy();
     details.open = true; fireEvent(details, new Event('toggle'));
-    await userEvent.click(screen.getByRole('button', { name: /运行命令/ }));
+    await userEvent.setup({ delay: null }).click(screen.getByRole('button', { name: /运行命令/ }));
     const card = view.container.querySelector('[data-timeline-event="tool-1"]')!;
     const output = card.querySelector('.code-renderer');
     const range = document.createRange(); range.selectNodeContents(thinking);

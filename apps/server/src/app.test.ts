@@ -456,6 +456,8 @@ describe('HTTP API boundary', () => {
     controller.abort();
     await vi.waitFor(() => expect(unsubscribe).toHaveBeenCalledOnce());
     finishReplay?.([]);
+    // 中止后的 fetch 连接会挂到 keep-alive 超时（约 4s）才让 app.close 返回；断言已完成，直接断开以免拖慢清理。
+    app.server.closeAllConnections();
   });
 
   it('serves bounded event windows by default and for forward cursors', async () => {

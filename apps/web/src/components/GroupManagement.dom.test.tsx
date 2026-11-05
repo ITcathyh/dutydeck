@@ -8,6 +8,12 @@ import { inheritPresentationOverride, type GroupBinding, type RoleAssignment } f
 import { resetDrafts } from '../draft-store';
 import { GroupManagement } from './GroupManagement';
 
+// user.type 每个字符都会触发一次整树重渲染；这里的输入不依赖逐键行为，点击聚焦后一次粘贴写入。
+async function typeInto(user: Pick<typeof userEvent, 'click' | 'paste'>, element: Element, text: string) {
+  await user.click(element);
+  await user.paste(text);
+}
+
 // 草稿是模块级 store（切走视图也要留住），用例之间必须显式清空，否则互相串。
 beforeEach(() => resetDrafts());
 afterEach(() => { vi.restoreAllMocks(); resetDrafts(); });
@@ -335,7 +341,7 @@ describe('GroupManagement', () => {
     await user.click(workspaceRadios[1]);
 
     const dirInput = screen.getByPlaceholderText('例如 /data/projects/oncall');
-    await user.type(dirInput, '/data/projects/oncall');
+    await typeInto(user, dirInput, '/data/projects/oncall');
 
     await user.click(screen.getByRole('button', { name: '保存配置' }));
 
@@ -409,7 +415,7 @@ describe('GroupManagement', () => {
     await user.selectOptions(screen.getByLabelText('群卡片 @ 发起人'), 'off');
     await user.selectOptions(screen.getByLabelText('Trace 阶段上限'), 'set');
     await user.clear(screen.getByLabelText('本群 Trace 阶段上限值'));
-    await user.type(screen.getByLabelText('本群 Trace 阶段上限值'), '4');
+    await typeInto(user, screen.getByLabelText('本群 Trace 阶段上限值'), '4');
 
     await user.click(screen.getByRole('button', { name: '保存配置' }));
 
@@ -454,13 +460,13 @@ describe('GroupManagement', () => {
     await user.click(screen.getByRole('button', { name: /群工具与值班设置/ }));
     await user.selectOptions(screen.getByLabelText('推送间隔'), 'set');
     await user.clear(screen.getByLabelText('本群推送间隔毫秒'));
-    await user.type(screen.getByLabelText('本群推送间隔毫秒'), '100');
+    await typeInto(user, screen.getByLabelText('本群推送间隔毫秒'), '100');
 
     expect(screen.getByText('本群推送间隔要填 500-20000 之间的整数。')).toBeTruthy();
     expect((screen.getByRole('button', { name: /保存配置/ }) as HTMLButtonElement).disabled).toBe(true);
 
     await user.clear(screen.getByLabelText('本群推送间隔毫秒'));
-    await user.type(screen.getByLabelText('本群推送间隔毫秒'), '800');
+    await typeInto(user, screen.getByLabelText('本群推送间隔毫秒'), '800');
     await user.click(screen.getByRole('button', { name: /保存配置/ }));
 
     await waitFor(() => {

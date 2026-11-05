@@ -63,9 +63,11 @@ it('runs the actual CLI through current task identity, authorization and optiona
   await app.listen({ host: '127.0.0.1', port: 0 }); const url = `http://127.0.0.1:${(app.server.address() as { port: number }).port}`;
   const cli = resolve(import.meta.dirname, '../cli.ts'); const loader = createRequire(import.meta.url).resolve('tsx');
   const run = (args: string[]) => promisify(execFile)(process.execPath, ['--import', loader, cli, 'tool', ...args, '--turn', h.turn], { cwd: root, env: { PATH: process.env.PATH, HOME: root, NODE_OPTIONS: '--conditions=development', dutydeck_relay_url: `${url}/api/relay`, dutydeck_relay_token: h.token }, timeout: 15_000 });
-  expect(JSON.parse((await run(['list', '--summary'])).stdout).tools).toEqual([{ id: 'tickets/read', description: 'Read', version: '1', effect: 'read' }]);
-  expect(JSON.parse((await run(['describe', 'tickets/read'])).stdout).tool.inputSchema.type).toBe('object');
-  expect(JSON.parse((await run(['manual', 'tickets/read', 'guide'])).stdout).text).toBe('Current task manual');
+  // 三次只读调用互不依赖，并发启动 CLI 省掉两次串行冷启动。
+  const [list, describe, manual] = await Promise.all([run(['list', '--summary']), run(['describe', 'tickets/read']), run(['manual', 'tickets/read', 'guide'])]);
+  expect(JSON.parse(list.stdout).tools).toEqual([{ id: 'tickets/read', description: 'Read', version: '1', effect: 'read' }]);
+  expect(JSON.parse(describe.stdout).tool.inputSchema.type).toBe('object');
+  expect(JSON.parse(manual.stdout).text).toBe('Current task manual');
   expect(execute).not.toHaveBeenCalled();
   h.release(); await vi.waitFor(() => expect(h.repos.execution.getAcceptedTask(h.active.taskId)?.task.status).toBe('completed'));
   await expect(run(['describe', 'tickets/read'])).rejects.toMatchObject({ stderr: expect.stringContaining('PLUGIN_TOOL_TURN_EXPIRED') });

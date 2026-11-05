@@ -500,9 +500,11 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
   });
 
   it('delivers exactly a retained process card and a complete streamed result, then leaves both unchanged on recovery', async () => {
-    const answerChunks = Array.from({ length: 1700 }, (_, index) => `line${index}\n`);
+    // traceLimit=10 时实时缓冲 200 条、恢复读取 500 条；600 段正文同时超过两者，与默认 50（1000/1500 条）下用 1700 段覆盖的路径相同。
+    const answerChunks = Array.from({ length: 600 }, (_, index) => `line${index}\n`);
     const answer = answerChunks.join('').trim();
     const h = await harness('normal', { answerChunks });
+    h.config.traceLimit = 10;
     await h.coordinator.handle(event('om_task', '生成完整结果'), { ...h.config, hideTraceOnComplete: true });
     await h.completed();
     expect(h.service.reply).toHaveBeenCalledTimes(2);

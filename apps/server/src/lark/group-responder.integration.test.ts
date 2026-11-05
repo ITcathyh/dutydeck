@@ -49,6 +49,15 @@ describe('durable responder announcements', () => {
       if (input.eventId === release.messageId && !failed) { failed = true; throw new Error('temporary observation failure after responder sync'); }
       return observe(input);
     });
+    // Hold the coordinator's 30s timers and fire them after the reclaim instead of waiting in real time.
+    const realSetTimeout = globalThis.setTimeout;
+    const held: Array<() => void> = [];
+    const timers = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((handler: () => void, ms?: number, ...args: unknown[]) => {
+      if (ms !== 30_000) return realSetTimeout(handler, ms, ...args);
+      held.push(handler);
+      return realSetTimeout(() => {}, ms);
+    }) as typeof setTimeout);
+    cleanups.push(async () => timers.mockRestore());
     await h.receive(release);
     await waitFor(async () => failed && (await h.inboxRecord(release.messageId))?.state === 'unrouted');
     expect((await h.repos.collaboration.getDuty(h.scope)).responder).toBeUndefined();
@@ -56,12 +65,14 @@ describe('durable responder announcements', () => {
     const reclaimed = await h.repos.collaboration.getDuty(h.scope);
     expect(reclaimed.responder?.appId).toBe(responder.appId);
     // This is the coordinator's actual scheduled recovery, without private method calls.
-    await waitFor(async () => (await h.inboxRecord(release.messageId))?.state === 'ignored', 35_000);
+    expect(held.length).toBeGreaterThan(0);
+    for (const fire of held.splice(0)) fire();
+    await waitFor(async () => (await h.inboxRecord(release.messageId))?.state === 'ignored');
     expect(failed).toBe(true);
     expect(await h.repos.collaboration.getDuty(h.scope)).toEqual(reclaimed);
     expect(h.dispatched).toEqual([]);
     expect(h.prompts).toEqual([]);
-  }, 40_000);
+  });
 
   it.each([0, 1_000])('allows a current release (offset %i), preserves inbox dedup, and retains the ambient no-responder guard', async offset => {
     const h = await harness();

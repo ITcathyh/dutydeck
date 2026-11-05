@@ -25,7 +25,7 @@ describe('verification beside task results', () => {
     const { onOpenEvidence } = mount([{ id: 'v', status: 'failed', stale: false }]);
     await screen.findByText('验证失败');
     expect(screen.queryByText('验证通过')).toBeNull();
-    await userEvent.setup().click(screen.getByRole('button', { name: '查看验证证据' }));
+    await userEvent.setup({ delay: null }).click(screen.getByRole('button', { name: '查看验证证据' }));
     expect(onOpenEvidence).toHaveBeenCalledOnce();
   });
   it.each([

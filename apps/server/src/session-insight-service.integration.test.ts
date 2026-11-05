@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import { createTranscriptSourceKeys } from '@dutydeck/runtime';
 import type { InsightClient, RepositoryBundle } from '@dutydeck/shared';
+import { resolveSessionInsightEngine } from './session-insight-engine.js';
 import { SessionInsightResolver } from './session-insight-resolver.js';
 import { SessionInsightService } from './session-insight-service.js';
 
@@ -21,8 +22,12 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })));
 });
 
+// 真实引擎定位结果只读，fork 用例共享一次版本握手；每次分析仍启动真实分析器子进程。
+let sharedEngine: ReturnType<typeof resolveSessionInsightEngine> | undefined;
+const sharedResolveEngine = () => (sharedEngine ??= resolveSessionInsightEngine());
+
 // Real resolver, immutable file capture, default analyzer subprocess and SQLite publication.
-async function harness(client: InsightClient = 'codex', sessionCwd?: string) {
+async function harness(client: InsightClient = 'codex', sessionCwd?: string, resolveEngine?: () => ReturnType<typeof resolveSessionInsightEngine>) {
   const root = await mkdtemp(join(tmpdir(), 'insight-integration-'));
   roots.push(root);
   const nativeRoot = join(root, 'native');
@@ -39,7 +44,7 @@ async function harness(client: InsightClient = 'codex', sessionCwd?: string) {
   const resolver = new SessionInsightResolver({ repositories: repos, configuredRoots: [{ client, path: nativeRoot }], instanceId: 'integration', createTranscriptSourceKeys });
   const diagnostics: unknown[] = [];
   const service = new SessionInsightService({
-    insightRepository: repos.insight, resolver, dataDir: join(root, 'analysis'), processRunId: 'integration',
+    insightRepository: repos.insight, resolver, dataDir: join(root, 'analysis'), processRunId: 'integration', ...(resolveEngine ? { resolveEngine } : {}),
     hostEvidence: {
       readHostEvidenceRaw: id => repos.insight.readHostEvidenceRaw(id),
       getSessionExecutions: id => repos.execution.getSessionExecutions(id),
@@ -116,7 +121,7 @@ describe('session insight real service pipeline regressions', () => {
     ['traex', { subagent: { thread_fork: { parent_thread_id: 'parent' } } }],
     ['codex', { kind: 'fork', parent_session_id: 'parent' }]
   ] as const)('excludes supported %s fork history from cohort totals without discarding source observations: %j', async (client, source) => {
-    const h = await harness(client);
+    const h = await harness(client, undefined, sharedResolveEngine);
     // Supported synthetic dialects: these assert user/tool counts, not token accounting.
     const inherited = [
       { timestamp: at, type: 'response_item', payload: { type: 'message', id: 'inherited', role: 'user', content: 'parent input' } },

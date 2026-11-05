@@ -479,8 +479,9 @@ describe('production PTY backend injection', () => {
       "process.stdin.setRawMode(true); process.stdin.setEncoding('utf8');",
       "process.stdout.write('Claude Code v2.1.267 (mock)\\r\\n❯ \\r\\n'); let input = ''; let count = 0;",
       // The real adapter pastes a multiline routing block, then Enter commits it.
+      // Echo keystrokes like the real CLI, so the adapter's echo wait settles instead of timing out.
       "process.stdin.on('data', data => {",
-      "  input += data; const end = input.indexOf('\\x1b[201~');",
+      "  process.stdout.write('.'); input += data; const end = input.indexOf('\\x1b[201~');",
       "  if (end < 0 || !input.slice(end + 6).includes('\\r')) return;",
       "  const prompt = input.slice(input.indexOf('\\x1b[200~') + 6, end); input = '';",
       "  appendFileSync(transcript, JSON.stringify({ type: 'user', sessionId, timestamp: new Date().toISOString(), message: { role: 'user', content: prompt } }) + '\\n');",
@@ -603,8 +604,9 @@ describe('production PTY backend injection', () => {
       "const write = record => appendFileSync(transcript, JSON.stringify(record) + '\\n');",
       "process.stdin.setRawMode(true); process.stdin.setEncoding('utf8'); let input = '';",
       "process.stdout.write('Claude Code v2.1.267 (mock)\\r\\n❯ \\r\\n');",
+      // Echo keystrokes like the real CLI, so the adapter's echo wait settles instead of timing out.
       "process.stdin.on('data', data => {",
-      "  input += data; const end = input.indexOf('\\x1b[201~');",
+      "  process.stdout.write('.'); input += data; const end = input.indexOf('\\x1b[201~');",
       "  if (end < 0 || !input.slice(end + 6).includes('\\r')) return;",
       "  const prompt = input.slice(input.indexOf('\\x1b[200~') + 6, end); input = '';",
       "  write({ type: 'user', sessionId, timestamp: new Date().toISOString(), message: { role: 'user', content: prompt } });",

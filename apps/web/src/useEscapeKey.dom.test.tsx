@@ -11,7 +11,7 @@ describe('useEscapeKey', () => {
   afterEach(() => { vi.restoreAllMocks(); });
 
   it('enabled 时按 Escape 调用 handler', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const handler = vi.fn();
     renderHook(() => useEscapeKey(true, handler));
     await user.keyboard('{Escape}');
@@ -19,7 +19,7 @@ describe('useEscapeKey', () => {
   });
 
   it('enabled=false 时按 Escape 完全不回调（提交中不允许被关掉）', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const handler = vi.fn();
     renderHook(() => useEscapeKey(false, handler));
     await user.keyboard('{Escape}');
@@ -27,7 +27,7 @@ describe('useEscapeKey', () => {
   });
 
   it('enabled 从 false 翻到 true 后才开始响应，翻回 false 立即停', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const handler = vi.fn();
     const { rerender } = renderHook(({ enabled }) => useEscapeKey(enabled, handler), { initialProps: { enabled: false } });
     await user.keyboard('{Escape}');
@@ -41,7 +41,7 @@ describe('useEscapeKey', () => {
   });
 
   it('其它按键一律忽略', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const handler = vi.fn();
     renderHook(() => useEscapeKey(true, handler));
     await user.keyboard('{Enter}{Tab}{ArrowDown} a');
@@ -49,7 +49,7 @@ describe('useEscapeKey', () => {
   });
 
   it('卸载后摘掉 document 上的监听', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const handler = vi.fn();
     const removeEventListener = vi.spyOn(document, 'removeEventListener');
     const { unmount } = renderHook(() => useEscapeKey(true, handler));
@@ -60,7 +60,7 @@ describe('useEscapeKey', () => {
   });
 
   it('换了 handler 直接生效，调用的是最新那个而不是首帧那个', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const first = vi.fn();
     const second = vi.fn();
     const { rerender } = renderHook(({ handler }) => useEscapeKey(true, handler), { initialProps: { handler: first } });
@@ -73,7 +73,7 @@ describe('useEscapeKey', () => {
   });
 
   it('handler 每帧都换（内联箭头函数）也不重挂监听，事件不会丢在挂载间隙', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const calls: number[] = [];
     const addEventListener = vi.spyOn(document, 'addEventListener');
     const { rerender } = renderHook(({ tick }) => useEscapeKey(true, () => calls.push(tick)), { initialProps: { tick: 1 } });
@@ -99,7 +99,7 @@ describe('useEscapeKey', () => {
     一次 Escape 只能收起最上面那一层；两层一起关会让用户在想收下拉时丢掉整张表单。
   */
   it('嵌套时只有最上层响应，一次 Escape 不会连关两层', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const outer = vi.fn();
     const inner = vi.fn();
     renderHook(() => useEscapeKey(true, outer));

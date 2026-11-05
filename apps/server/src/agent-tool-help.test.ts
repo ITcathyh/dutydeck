@@ -2,12 +2,13 @@ import { execFile } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { describe, it } from 'vitest';
 
 const execute = promisify(execFile);
 const cli = fileURLToPath(new URL('./cli.ts', import.meta.url));
 describe('offline Agent tool help', () => {
-  it.each([
+  // 每条都是独立子进程启动，彼此无共享状态，并发跑以缩短文件墙钟。
+  it.concurrent.for([
     [['work', '--help'], ['"steps"', 'reviewPolicy', 'kind:wait', 'workspaceMode:worktree', 'awaiting_confirmation', '不能据名称宣称工具已授权']],
     [['work', 'create', '--help'], ['idempotencyKey', 'outputStepId', 'allowedTargetStepIds', '不要轮询']],
     [['work', 'delegate', '--help'], ['"context"', 'Leader 和 Worker 看不到本话题历史', '仅当本轮提示明确启用分层协作时适用']],
@@ -16,7 +17,7 @@ describe('offline Agent tool help', () => {
     [['memory', '--help'], ['memory search', 'memory remove', '只在用户明确要求记住/忘记时写入', '不保存凭据']],
     [['session', 'herdr', '--help'], ['session_name/workspace_id/root_pane_id', 'pane split', 'default session', '--remote', 'stop']],
     [['session', 'ask', '--help'], ['--choices', '--multiple', '124', 'stdout']]
-  ])('reads %j without service credentials', async (args, expected) => {
+  ] as Array<[string[], string[]]>)('reads %j without service credentials', async ([args, expected], { expect }) => {
     const result = await execute(process.execPath, ['--import', createRequire(import.meta.url).resolve('tsx'), cli, ...args], {
       env: { PATH: process.env.PATH, NODE_OPTIONS: '--conditions=development' }, timeout: 15_000
     });

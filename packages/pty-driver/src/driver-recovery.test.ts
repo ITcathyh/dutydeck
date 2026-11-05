@@ -212,7 +212,8 @@ tmuxDescribe('PtyCliDriver in-flight tmux turn recovery', () => {
     await first.prepareForDaemonShutdown();
     await first.stop();
     await expect(pending).rejects.toBeInstanceOf(DriverDetachedError);
-    await new Promise(resolve => setTimeout(resolve, 500));
+    // The shell finishes the turn while no driver is attached.
+    await waitFor(() => expect(execFileSync('tmux', ['capture-pane', '-p', '-t', f.name], { encoding: 'utf8' })).toMatch(/^SHELL-DONE\s*$/m));
     appendFileSync(f.transcript, assistant('offline final answer'));
 
     const events: NormalizedDriverEvent[] = [];

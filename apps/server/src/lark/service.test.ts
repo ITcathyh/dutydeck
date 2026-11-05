@@ -2,8 +2,9 @@ import { describe, expect, it, vi } from 'vitest';
 import { boundLarkCardElements, buildLarkCard, createLarkCardService, larkCardSafeLimits, larkCardSnapshotLimits, larkCardStates, larkConfigurationStatus, larkIdentityPermissionHelp, LarkServiceError, loadLarkBotConfig } from './service.js';
 
 const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+// Every service here shares the per-app token bucket for cli_test; LARK_API_QPS lifts the default 15 QPS so tests do not queue on it (the gate itself is covered by api-gate.test.ts).
 const configured = {
-  LARK_APP_ID: 'cli_test',
+  LARK_APP_ID: 'cli_test', LARK_API_QPS: '10000',
   LARK_APP_SECRET: 'secret_test',
   LARK_RECEIVE_ID: 'user@example.com',
   LARK_RECEIVE_ID_TYPE: 'email',
@@ -505,7 +506,7 @@ describe('Lark card service', () => {
     const fetcher = vi.fn()
       .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
       .mockResolvedValueOnce(response({ code: 0, data: { message_id: 'om_group', chat_id: 'oc_group' } }));
-    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_API_QPS: '10000', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
     await expect(service.send({ chatId: 'oc_group', state: 'completed', markdown: '群聊消息' })).resolves.toEqual({ messageId: 'om_group', chatId: 'oc_group' });
     expect(fetcher.mock.calls[1]?.[0]).toContain('receive_id_type=chat_id');
     expect(JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body)).receive_id).toBe('oc_group');
@@ -515,7 +516,7 @@ describe('Lark card service', () => {
     const fetcher = vi.fn()
       .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
       .mockResolvedValueOnce(response({ code: 0, data: { message_id: 'om_reply', chat_id: 'oc_group' } }));
-    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_API_QPS: '10000', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
     await expect(service.reply({ messageId: 'om_source', replyInThread: true, state: 'completed', taskId: 'task-1', markdown: '话题内回复', idempotencyKey: 'task-1' })).resolves.toEqual({ messageId: 'om_reply', chatId: 'oc_group' });
     expect(fetcher.mock.calls[1]?.[0]).toContain('/open-apis/im/v1/messages/om_source/reply');
     const body = JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body));
@@ -531,7 +532,7 @@ describe('Lark card service', () => {
     const fetcher = vi.fn()
       .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
       .mockResolvedValueOnce(response({ code: 0, data: { message_id: 'om_reply', chat_id: 'oc_group' } }));
-    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_API_QPS: '10000', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
     await expect(service.reply({ messageId: 'om_source', replyInThread: true, replyRootId: 'om_root', state: 'completed', taskId: 'task-2', markdown: '锚到话题根' })).resolves.toEqual({ messageId: 'om_reply', chatId: 'oc_group' });
     // 话题根锚点：path 用 replyRootId（om_root），而非触发消息 om_source。
     expect(fetcher.mock.calls[1]?.[0]).toContain('/open-apis/im/v1/messages/om_root/reply');
@@ -543,7 +544,7 @@ describe('Lark card service', () => {
     const fetcher = vi.fn()
       .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
       .mockResolvedValueOnce(response({ code: 0, data: { message_id: 'om_reply', chat_id: 'oc_group' } }));
-    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_API_QPS: '10000', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
     await service.reply({ messageId: 'om_source', replyRootId: 'om_root', state: 'completed', taskId: 'task-3', markdown: '非话题回复' });
     // 未开 replyInThread 时 replyRootId 不生效，path 仍用触发消息 om_source。
     expect(fetcher.mock.calls[1]?.[0]).toContain('/open-apis/im/v1/messages/om_source/reply');
@@ -556,7 +557,7 @@ describe('Lark card service', () => {
       .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
       .mockResolvedValueOnce(response({ code: 0, data: { reaction_id: 'reaction-1' } }))
       .mockResolvedValueOnce(response({ code: 0, data: {} }));
-    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_API_QPS: '10000', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
     await expect(service.addReaction('om_input', 'SMILE')).resolves.toEqual({ messageId: 'om_input', reactionId: 'reaction-1', emojiType: 'SMILE' });
     await expect(service.deleteReaction('om_input', 'reaction-1')).resolves.toBeUndefined();
     expect(fetcher.mock.calls[1]?.[0]).toContain('/messages/om_input/reactions');
@@ -640,7 +641,7 @@ describe('Lark card service', () => {
     const fetcher = vi.fn()
       .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
       .mockResolvedValueOnce(response({ code: 0, bot: { open_id: 'ou_bot' } }));
-    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_API_QPS: '10000', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
     await expect(service.getBotOpenId()).resolves.toBe('ou_bot');
     expect(fetcher.mock.calls[1]?.[0]).toContain('/open-apis/bot/v3/info');
     expect(fetcher.mock.calls[1]?.[1]?.method).toBe('GET');
@@ -651,7 +652,7 @@ describe('Lark card service', () => {
       .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
       .mockResolvedValueOnce(response({ code: 0, bot: { app_name: '超级智慧大脑', open_id: 'ou_bot', avatar_url: 'https://example.com/avatar.png', activate_status: 2 } }))
       .mockResolvedValueOnce(response({ code: 0, data: { user: { email: 'USER@example.com', enterprise_email: 'staff@company.com' } } }));
-    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_API_QPS: '10000', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
     await expect(service.getBotInfo()).resolves.toEqual({ appName: '超级智慧大脑', openId: 'ou_bot', avatarUrl: 'https://example.com/avatar.png', activateStatus: 2 });
     await expect(service.getUserEmails('ou_sender')).resolves.toEqual(['user@example.com', 'staff@company.com']);
     expect(fetcher.mock.calls[1]?.[0]).toContain('/open-apis/bot/v3/info');
@@ -663,7 +664,7 @@ describe('Lark card service', () => {
       .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
       .mockResolvedValueOnce(response({ code: 0, data: { user_ids: ['ou_sample'] } }))
       .mockResolvedValueOnce(response({ code: 0, data: { user: { email: 'SAMPLE@example.com' } } }));
-    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_API_QPS: '10000', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
     await expect(service.checkIdentityResolution()).resolves.toEqual({ verified: true, sampleOpenId: 'ou_sample', sampleEmails: ['sample@example.com'] });
     expect(fetcher.mock.calls[1]?.[0]).toContain('/open-apis/contact/v3/scopes?user_id_type=open_id&page_size=100');
     expect(fetcher.mock.calls[2]?.[0]).toContain('/open-apis/contact/v3/users/ou_sample?user_id_type=open_id');
@@ -673,7 +674,7 @@ describe('Lark card service', () => {
     const fetcher = vi.fn()
       .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
       .mockResolvedValueOnce(response({ code: 0, data: { user_ids: [] } }));
-    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_API_QPS: '10000', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
     await expect(service.checkIdentityResolution()).rejects.toMatchObject({ code: 'LARK_CONTACT_DATA_SCOPE_EMPTY', statusCode: 409 });
   });
 
@@ -687,7 +688,7 @@ describe('Lark card service', () => {
     const fetcher = vi.fn()
       .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
       .mockResolvedValueOnce(response({ code: 0, data: { items: [{ chat_id: 'oc_group', name: '研发群', description: '项目协作', owner_id: 'ou_owner', external: false, chat_mode: 'group', chat_status: 'normal' }], has_more: false } }));
-    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_API_QPS: '10000', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
     await expect(service.listChats()).resolves.toEqual({
       items: [{ chatId: 'oc_group', name: '研发群', description: '项目协作', ownerId: 'ou_owner', external: false, chatMode: 'group', chatStatus: 'normal' }],
       hasMore: false
@@ -700,7 +701,7 @@ describe('Lark card service', () => {
       .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
       .mockResolvedValueOnce(response({ code: 0, data: { items: [], has_more: false } }))
       .mockResolvedValueOnce(response({ code: 0, data: { items: [], has_more: false } }));
-    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_API_QPS: '10000', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
     await service.listChats(undefined, 'ByCreateTimeAsc');
     expect(fetcher.mock.calls[1]?.[0]).toContain('sort_type=ByCreateTimeAsc');
     await service.listChats();
@@ -722,7 +723,7 @@ describe('Lark card service', () => {
           has_more: false
         }
       }));
-    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_API_QPS: '10000', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
     const result = await service.listChats();
     expect(result.items).toEqual([
       { chatId: 'oc_normal', name: '正常群', chatMode: 'group', chatStatus: 'normal', external: false },
@@ -762,7 +763,7 @@ describe('Lark card service', () => {
       }
       return response({ code: 99999, msg: 'unexpected URL ' + href }, 500);
     });
-    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_API_QPS: '10000', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
     const resolved = await service.resolveChatUsersByNames(['张三']);
     expect(resolved).toEqual([{ openId: 'ou_zhang', name: '张三' }]);
   });
@@ -773,7 +774,7 @@ describe('Lark card service', () => {
       .mockResolvedValueOnce(response({ code: 0, data: { items: [{ chat_id: 'oc_one', name: '一群', external: false }, { chat_id: 'oc_two', name: '二群', external: false }], has_more: false } }))
       .mockResolvedValueOnce(response({ code: 0, data: { users: [{ member_id: 'ou_first', open_id: 'ou_first', name: '张伟' }], has_more: false } }))
       .mockResolvedValueOnce(response({ code: 0, data: { users: [{ member_id: 'ou_second', open_id: 'ou_second', name: '张伟' }], has_more: false } }));
-    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_API_QPS: '10000', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
     await expect(service.resolveChatUsersByNames(['张伟'])).rejects.toMatchObject({ code: 'LARK_USER_NAME_AMBIGUOUS', statusCode: 409 });
   });
 
@@ -785,7 +786,7 @@ describe('Lark card service', () => {
       .mockResolvedValueOnce(response({ code: 0, data: { items: [{ message_id: 'om_1', chat_id: 'oc_group', msg_type: 'text', create_time: '1000', body: { content: '{"text":"hello"}' } }] } }))
       .mockResolvedValueOnce(response({ code: 0, data: { message_id: 'om_sent', chat_id: 'oc_group' } }))
       .mockResolvedValueOnce(response({ code: 0, data: { message_id: 'om_reply', chat_id: 'oc_group' } }));
-    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_API_QPS: '10000', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
     await expect(service.listChatMembers({ chatId: 'oc_group', memberTypes: ['bot'] })).resolves.toMatchObject({
       items: [{ memberId: 'ou_peer', memberType: 'bot', openId: 'ou_peer', appId: 'cli_peer', name: 'Peer Bot' }], hasMore: false, memberTotal: 1, securityLimit: 100, securityLimited: true
     });
@@ -809,7 +810,7 @@ describe('Lark card service', () => {
         { message_id: 'om_root', chat_id: 'oc_group', msg_type: 'text', create_time: '1000', thread_id: 'omt_topic', body: { content: '{"text":"第一轮"}' } },
         { message_id: 'om_reply', chat_id: 'oc_group', msg_type: 'text', create_time: '2000', thread_id: 'omt_topic', body: { content: '{"text":"第二轮"}' } }
       ], has_more: false } }));
-    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_API_QPS: '10000', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
     const result = await service.listChatMessages({ chatId: 'oc_group', order: 'asc', pageSize: 20 });
     expect(result.items.map(item => ({ messageId: item.messageId, threadId: item.threadId }))).toEqual([
       { messageId: 'om_root', threadId: 'omt_topic' },
@@ -844,7 +845,7 @@ describe('Lark card service', () => {
       .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
       .mockResolvedValueOnce(response({ code: 0, data: { image_key: 'img_loading' } }))
       .mockResolvedValueOnce(response({ code: 0, data: { message_id: 'om_reply_card', chat_id: 'oc_group' } }));
-    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_API_QPS: '10000', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
     await expect(service.reply({ messageId: 'om_trigger', state: 'running', taskId: 't1', taskName: '任务', idempotencyKey: 'reply-card-1' })).resolves.toEqual({ messageId: 'om_reply_card', chatId: 'oc_group' });
     expect(fetcher.mock.calls[2]?.[0]).toContain('/open-apis/im/v1/messages/om_trigger/reply');
     const body = JSON.parse(String(fetcher.mock.calls[2]?.[1]?.body));
@@ -866,7 +867,7 @@ describe('Lark card service', () => {
     const fetcher = vi.fn()
       .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
       .mockImplementation(async () => rateLimited());
-    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test', LARK_API_RETRY_MAX_ATTEMPTS: '0' }, fetcher as typeof fetch);
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_API_QPS: '10000', LARK_APP_SECRET: 'secret_test', LARK_API_RETRY_MAX_ATTEMPTS: '0' }, fetcher as typeof fetch);
     const error = await service.update({ messageId: 'om_card', state: 'running', taskId: 't1' }).catch(caught => caught);
     expect(error).toBeInstanceOf(LarkServiceError);
     expect((error as LarkServiceError).details?.upstreamHttpStatus).toBe(429);
@@ -878,7 +879,7 @@ describe('Lark card service', () => {
     const fetcher = vi.fn()
       .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
       .mockImplementation(async () => response({ code: 99991663, msg: 'invalid param' }, 400));
-    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test', LARK_API_RETRY_MAX_ATTEMPTS: '0' }, fetcher as typeof fetch);
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_API_QPS: '10000', LARK_APP_SECRET: 'secret_test', LARK_API_RETRY_MAX_ATTEMPTS: '0' }, fetcher as typeof fetch);
     const error = await service.update({ messageId: 'om_card', state: 'running', taskId: 't1' }).catch(caught => caught);
     expect(error).toBeInstanceOf(LarkServiceError);
     expect((error as LarkServiceError).details).not.toHaveProperty('retryAfterMs');
@@ -890,7 +891,7 @@ describe('Lark card service', () => {
       .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
       .mockResolvedValueOnce(response({ code: 0, data: { file_key: 'file_key_1' } }))
       .mockResolvedValueOnce(response({ code: 0, data: { message_id: 'om_file', chat_id: 'oc_dm' } }));
-    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_API_QPS: '10000', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
     await expect(service.uploadFile({ data: bytes, filename: 'raw.bin', idempotencyKey: 'artifact-1' })).resolves.toBe('file_key_1');
     const form = fetcher.mock.calls[1]![1].body as FormData;
     const part = form.get('file') as Blob;
@@ -901,11 +902,11 @@ describe('Lark card service', () => {
   });
 
   it('rejects external and non-docx wiki URLs before fetching document content', async () => {
-    const fetcher = vi.fn(); const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    const fetcher = vi.fn(); const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_API_QPS: '10000', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
     await expect(service.readDocument('https://example.com/docx/abc')).rejects.toMatchObject({ code: 'INVALID_DOCUMENT_URL' });
     expect(fetcher).not.toHaveBeenCalled();
     const wikiFetcher = vi.fn().mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 })).mockResolvedValueOnce(response({ code: 0, data: { node: { obj_type: 'sheet', obj_token: 'sheet_1' } } }));
-    const wiki = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, wikiFetcher as typeof fetch);
+    const wiki = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_API_QPS: '10000', LARK_APP_SECRET: 'secret_test' }, wikiFetcher as typeof fetch);
     await expect(wiki.readDocument('https://feishu.cn/wiki/wiki_token')).rejects.toMatchObject({ code: 'UNSUPPORTED_DOCUMENT_TYPE' });
     expect(wikiFetcher).toHaveBeenCalledTimes(2);
   });
@@ -918,7 +919,7 @@ describe('Lark card service', () => {
         { block_type: 12, bullet: { elements: [{ mention_doc: { title: '子文档', url: 'https://tenant.larkoffice.com/docx/child' } }] } },
         { block_type: 2, text: { elements: [{ text_run: { content: '入口', text_element_style: { link: { url: 'https://tenant.larkoffice.com/wiki/linked' } } } }] } }
       ], has_more: false } }));
-    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_API_QPS: '10000', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
     await expect(service.readDocument('https://tenant.larkoffice.com/docx/root')).resolves.toMatchObject({
       text: '根文档正文',
       links: ['https://tenant.larkoffice.com/docx/child', 'https://tenant.larkoffice.com/wiki/linked'],
@@ -930,7 +931,7 @@ describe('Lark card service', () => {
       .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
       .mockResolvedValueOnce(response({ code: 0, data: { content: '仍可读的正文' } }))
       .mockResolvedValueOnce(response({ code: 99991663, msg: 'permission denied' }, 403));
-    const failedService = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, failed as typeof fetch);
+    const failedService = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_API_QPS: '10000', LARK_APP_SECRET: 'secret_test' }, failed as typeof fetch);
     await expect(failedService.readDocument('https://tenant.larkoffice.com/docx/root')).resolves.toMatchObject({
       text: '仍可读的正文', linkError: expect.stringContaining('permission denied')
     });
@@ -944,7 +945,7 @@ describe('Lark card service', () => {
       .mockResolvedValueOnce(response({ code: 0, data: { content: '正文' } }))
       .mockResolvedValueOnce(response({ code: 0, data: { items: [{ text: { elements: [{ mention_doc: { url: first } }] } }], has_more: true, page_token: 'next' } }))
       .mockResolvedValueOnce(response({ code: 0, data: { items: [{ text: { elements: [{ mention_doc: { url: second } }] } }], has_more: true, page_token: 'next' } }));
-    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_API_QPS: '10000', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
     await expect(service.readDocument('https://tenant.larkoffice.com/docx/root')).resolves.toMatchObject({
       text: '正文', links: [first, second], linkError: expect.stringContaining('未完整读取')
     });
@@ -955,7 +956,7 @@ describe('Lark card service', () => {
     const fetcher = vi.fn()
       .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
       .mockResolvedValueOnce(response({ code: 0, data: { invalid_user_id_list: [] } }));
-    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_API_QPS: '10000', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
     const result = await service.urgentApp({
       messageId: 'om_target_msg',
       userIdList: ['ou_user_1', 'ou_user_2'],
@@ -972,7 +973,7 @@ describe('Lark card service', () => {
     const fetcher = vi.fn()
       .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
       .mockResolvedValueOnce(response({ code: 230001, msg: 'message not found' }, 400));
-    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_API_QPS: '10000', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
 
     await expect(service.urgentApp({ messageId: '', userIdList: ['ou_1'] }))
       .rejects.toMatchObject({ code: 'LARK_NOT_CONFIGURED' });
@@ -988,7 +989,7 @@ describe('Lark card service', () => {
       .mockResolvedValueOnce(response({ code: 0, data: { pin: { message_id: 'om_pin_msg', chat_id: 'oc_pin_chat' } } }))
       .mockResolvedValueOnce(response({ code: 0 }))
       .mockResolvedValueOnce(response({ code: 0, data: { items: [{ message_id: 'om_pin_msg', chat_id: 'oc_pin_chat' }], has_more: false } }));
-    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_API_QPS: '10000', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
 
     const pinResult = await service.pin('om_pin_msg');
     expect(pinResult).toEqual({ messageId: 'om_pin_msg', chatId: 'oc_pin_chat' });
@@ -1018,7 +1019,7 @@ describe('Lark card service', () => {
       ] } }))
       .mockResolvedValueOnce(response({ code: 0, data: { command_id: 'cmd_new' } }))
       .mockResolvedValueOnce(response({ code: 0, data: {} }));
-    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_API_QPS: '10000', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
 
     await expect(service.syncSlashCommands([
       { command: 'help', description: '新说明' },
@@ -1052,7 +1053,7 @@ describe('Lark card service', () => {
         items: [{ command_id: 'cmd_tasks', command: 'tasks', description: { default_value: '看任务' } }],
         has_more: false
       } }));
-    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_API_QPS: '10000', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
 
     // 第二页里的 tasks 已经存在：把分页当不存在会把它当成缺失去重复创建，逐条撞唯一性失败。
     await expect(service.syncSlashCommands([
@@ -1070,7 +1071,7 @@ describe('Lark card service', () => {
       .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
       // 没有 has_more / page_token：按全量处理，不再多请求一次。
       .mockResolvedValueOnce(response({ code: 0, data: { items: [{ command_id: 'cmd_help', command: 'help', description: { default_value: '看帮助' } }] } }));
-    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_API_QPS: '10000', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
     await expect(service.syncSlashCommands([{ command: 'help', description: '看帮助' }])).resolves.toEqual({ created: [], updated: [] });
     expect(fetcher).toHaveBeenCalledTimes(2);
   });
@@ -1079,7 +1080,7 @@ describe('Lark card service', () => {
     const fetcher = vi.fn().mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }));
     // 每次新建 Response：同一个实例的 body 只能读一次。
     fetcher.mockImplementation(async () => response({ code: 0, data: { items: [], has_more: true, page_token: 'stuck' } }));
-    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_API_QPS: '10000', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
     await expect(service.syncSlashCommands([])).resolves.toEqual({ created: [], updated: [] });
     // token 不再变化就停：同步不会被一个坏响应卡死。
     expect(fetcher.mock.calls.length).toBeLessThanOrEqual(4);
@@ -1089,7 +1090,7 @@ describe('Lark card service', () => {
     const fetcher = vi.fn()
       .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
       .mockResolvedValueOnce(response({ code: 0, data: { items: [{ command_id: 'cmd_help', command: 'help', description: { default_value: '看帮助' } }] } }));
-    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_API_QPS: '10000', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
     await expect(service.syncSlashCommands([{ command: 'help', description: '看帮助' }])).resolves.toEqual({ created: [], updated: [] });
     expect(fetcher).toHaveBeenCalledTimes(2);
   });
@@ -1098,7 +1099,7 @@ describe('Lark card service', () => {
     const fetcher = vi.fn()
       .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
       .mockResolvedValueOnce(response({ code: 99991672, msg: 'no permission' }, 403));
-    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test', LARK_API_RETRY_MAX_ATTEMPTS: '0' }, fetcher as typeof fetch);
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_API_QPS: '10000', LARK_APP_SECRET: 'secret_test', LARK_API_RETRY_MAX_ATTEMPTS: '0' }, fetcher as typeof fetch);
     await expect(service.syncSlashCommands([{ command: 'help', description: '看帮助' }]))
       .rejects.toMatchObject({ code: 'LARK_OPENAPI_ERROR', details: { upstreamCode: 99991672 } });
   });

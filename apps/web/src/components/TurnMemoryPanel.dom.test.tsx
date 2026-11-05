@@ -44,14 +44,14 @@ describe('turn memory in the task detail', () => {
   it('deletes one memory with the turn it belongs to and refetches', async () => {
     const { sessionMemory } = mount(async () => ({ turns: [turn] }));
     const forget = vi.spyOn(api, 'forgetSessionMemory').mockResolvedValue({ removed: { id: 'mem_00000003' } });
-    await userEvent.setup().click(await screen.findByRole('button', { name: '删除记忆 mem_00000003' }));
+    await userEvent.setup({ delay: null }).click(await screen.findByRole('button', { name: '删除记忆 mem_00000003' }));
     expect(forget).toHaveBeenCalledWith('s1', 'task_1', 'mem_00000003');
     await waitFor(() => expect(sessionMemory).toHaveBeenCalledTimes(2));
   });
   it('keeps the list when deletion is rejected', async () => {
     mount(async () => ({ turns: [turn] }));
     const forget = vi.spyOn(api, 'forgetSessionMemory').mockRejectedValue(new ApiError('无权删除', 'POLICY_DENIED', 403));
-    await userEvent.setup().click(await screen.findByRole('button', { name: '删除记忆 mem_00000001' }));
+    await userEvent.setup({ delay: null }).click(await screen.findByRole('button', { name: '删除记忆 mem_00000001' }));
     expect(forget).toHaveBeenCalledOnce();
     expect(screen.getByText('回复统一用中文')).toBeTruthy();
   });

@@ -38,7 +38,7 @@ describe('one-click Lark app creation', () => {
   });
 
   it('starts only on click, shows the QR, and opens the saved Bot after completion', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const start = vi.spyOn(api, 'createLarkApp').mockImplementation(async input => waiting(input.requestId));
     vi.spyOn(api, 'larkAppCreationJob').mockImplementation(async requestId => waiting(requestId));
     const { client, onCreated } = renderPanel();
@@ -60,7 +60,7 @@ describe('one-click Lark app creation', () => {
   });
 
   it('reconnects by querying only, and resubmits the same request ID only after this instance reports it missing', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const start = vi.spyOn(api, 'createLarkApp').mockRejectedValueOnce(new Error('response lost')).mockImplementation(async input => waiting(input.requestId));
     const poll = vi.spyOn(api, 'larkAppCreationJob').mockRejectedValueOnce(new Error('temporarily unavailable')).mockRejectedValueOnce(missing()).mockImplementation(async requestId => waiting(requestId));
     renderPanel();
@@ -76,7 +76,7 @@ describe('one-click Lark app creation', () => {
   });
 
   it('lets a request this instance does not know be abandoned locally without creating anything', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     sessionStorage.setItem(pendingKey, JSON.stringify({ requestId: id, name: '研发助手' }));
     const start = vi.spyOn(api, 'createLarkApp');
     vi.spyOn(api, 'larkAppCreationJob').mockRejectedValue(missing());
@@ -102,7 +102,7 @@ describe('one-click Lark app creation', () => {
   });
 
   it('keeps a created app on failure and offers its saved Bot instead of creating again', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     sessionStorage.setItem(pendingKey, JSON.stringify({ requestId: id, name: '研发助手' }));
     const start = vi.spyOn(api, 'createLarkApp');
     const retry = vi.spyOn(api, 'retryLarkAppCreation');
@@ -116,7 +116,7 @@ describe('one-click Lark app creation', () => {
   });
 
   it('retries a safe failure using the existing job', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     sessionStorage.setItem(pendingKey, JSON.stringify({ requestId: id, name: '研发助手' }));
     const start = vi.spyOn(api, 'createLarkApp');
     vi.spyOn(api, 'larkAppCreationJob').mockResolvedValue({ ...waiting(), status: 'failed', appId: 'cli_existing', retryable: true, error: '凭据暂时不可读' });
@@ -128,7 +128,7 @@ describe('one-click Lark app creation', () => {
   });
 
   it('shows submitted review without a retry or new-create action and permits Agent setup', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     sessionStorage.setItem(pendingKey, JSON.stringify({ requestId: id, name: '研发助手' }));
     const start = vi.spyOn(api, 'createLarkApp');
     const retry = vi.spyOn(api, 'retryLarkAppCreation');
@@ -146,7 +146,7 @@ describe('one-click Lark app creation', () => {
   });
 
   it('cancels a waiting QR and does not let an older poll restore it', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     sessionStorage.setItem(pendingKey, JSON.stringify({ requestId: id, name: '研发助手' }));
     let release!: (job: LarkAppCreationJob) => void;
     const poll = vi.spyOn(api, 'larkAppCreationJob').mockResolvedValueOnce(waiting()).mockImplementation(() => new Promise(resolve => { release = resolve; }));
@@ -189,7 +189,7 @@ it('can request a fresh scan only for a safe retry of the same job', async () =>
 
 describe('pending creation records belong to one instance', () => {
   it('does not show, query or lock another instance with a pending creation, and resumes it in its own instance', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const start = vi.spyOn(api, 'createLarkApp').mockImplementation(async input => waiting(input.requestId));
     const poll = vi.spyOn(api, 'larkAppCreationJob').mockImplementation(async requestId => waiting(requestId));
     setInstance('a');
@@ -228,7 +228,7 @@ describe('pending creation records belong to one instance', () => {
   });
 
   it('never creates from an old shared record the current instance does not know, and lets it be abandoned', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     setInstance('b');
     sessionStorage.setItem(legacyKey, JSON.stringify({ requestId: id, name: 'A bot' }));
     const start = vi.spyOn(api, 'createLarkApp');

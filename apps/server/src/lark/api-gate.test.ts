@@ -70,9 +70,9 @@ describe('Lark api gate token bucket', () => {
   });
 
   it('keeps buckets per appId so a saturated app does not delay another', async () => {
-    // burst=1 / qps=5 → A 的第 2、3 个调用要等 200ms / 400ms；B 必须立刻放行。
+    // burst=1 / qps=5 → A 的第 2 个调用要等 200ms；B 必须立刻放行。
     const env = gateEnv({ LARK_API_QPS: '5', LARK_API_BURST: '1' });
-    const saturating = Array.from({ length: 3 }, () => executeWithLarkGate('cli_app_a', 'card.patch', async () => 'a', { env }));
+    const saturating = Array.from({ length: 2 }, () => executeWithLarkGate('cli_app_a', 'card.patch', async () => 'a', { env }));
 
     const startedAt = Date.now();
     await expect(executeWithLarkGate('cli_app_b', 'card.patch', async () => 'b', { env })).resolves.toBe('b');
@@ -82,7 +82,8 @@ describe('Lark api gate token bucket', () => {
   });
 
   it('warns with appId and op when a rate-limit wait exceeds 100ms', async () => {
-    const env = gateEnv({ LARK_API_QPS: '2', LARK_API_BURST: '1' });
+    // qps=5 → 第二个调用按令牌计算等待约 200ms，超过 100ms 告警线。
+    const env = gateEnv({ LARK_API_QPS: '5', LARK_API_BURST: '1' });
     const { log, entries } = recordingLog();
     const first = executeWithLarkGate('cli_warn', 'message.send', async () => 'first', { env, log });
     const second = executeWithLarkGate('cli_warn', 'card.patch', async () => 'second', { env, log });

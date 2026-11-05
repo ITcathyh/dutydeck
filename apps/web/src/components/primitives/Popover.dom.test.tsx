@@ -26,7 +26,7 @@ describe('Popover 原语', () => {
   });
 
   it('portal 到 document.body，不被祖先的 overflow 裁掉', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const { container } = render(<Harness/>);
     await user.click(screen.getByRole('button', { name: '选择模型' }));
     const option = screen.getByText('选项甲');
@@ -35,7 +35,7 @@ describe('Popover 原语', () => {
   });
 
   it('Escape 关闭并把焦点还给触发器', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(<Harness/>);
     const trigger = screen.getByRole('button', { name: '选择模型' });
     await user.click(trigger);
@@ -46,7 +46,7 @@ describe('Popover 原语', () => {
   });
 
   it('点外部关闭，点面板内部不关', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(<Harness/>);
     await user.click(screen.getByRole('button', { name: '选择模型' }));
     await user.click(screen.getByText('选项甲'));
@@ -56,7 +56,7 @@ describe('Popover 原语', () => {
   });
 
   it('点触发器自身由触发器负责收起，Popover 不重复处理（否则关了又开）', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(<Harness/>);
     const trigger = screen.getByRole('button', { name: '选择模型' });
     await user.click(trigger);
@@ -66,7 +66,7 @@ describe('Popover 原语', () => {
   });
 
   it('不锁焦点：Tab 能走出浮层（与 Dialog 的关键区别）', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(<Harness/>);
     await user.click(screen.getByRole('button', { name: '选择模型' }));
     const outside = screen.getByRole('button', { name: '外部按钮' });
@@ -75,7 +75,7 @@ describe('Popover 原语', () => {
   });
 
   it('usePopoverTrigger 提供 aria-expanded / aria-haspopup', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(<Harness/>);
     const trigger = screen.getByRole('button', { name: '选择模型' });
     expect(trigger.getAttribute('aria-expanded')).toBe('false');
@@ -85,7 +85,7 @@ describe('Popover 原语', () => {
   });
 
   it('按 placement 定位，并支持 anchor / 固定宽度 / auto 三种宽度', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const rect = { top: 100, bottom: 140, left: 50, right: 250, width: 200, height: 40, x: 50, y: 100, toJSON: () => ({}) } as DOMRect;
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(rect);
 
@@ -113,7 +113,7 @@ describe('Popover 原语', () => {
   });
 
   it('复用 index.css 的 ui-popover 动画类，不自造 keyframes', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const { baseElement } = render(<Harness/>);
     await user.click(screen.getByRole('button', { name: '选择模型' }));
     expect(baseElement.querySelector('.ui-popover')).toBeTruthy();
@@ -121,7 +121,7 @@ describe('Popover 原语', () => {
   });
 
   it('只使用语义 token 类，不出现硬编码调色板', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(<Harness/>);
     await user.click(screen.getByRole('button', { name: '选择模型' }));
     const panel = screen.getByText('选项甲').parentElement as HTMLElement;
@@ -130,7 +130,7 @@ describe('Popover 原语', () => {
   });
 
   it('关闭后摘掉 Escape 与 pointerdown 监听', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onClose = vi.fn();
     const anchor = { current: document.createElement('button') };
     const { rerender } = render(<Popover open onClose={onClose} anchor={anchor}>内容</Popover>);

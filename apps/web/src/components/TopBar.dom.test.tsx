@@ -33,7 +33,7 @@ describe('TopBar 全局入口', () => {
     const onOpenSearch = vi.fn();
     const onOpenShortcuts = vi.fn();
     const onThemeChange = vi.fn();
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     renderTopBar({ onOpenSearch, onOpenShortcuts, onThemeChange });
 
     // 搜索：详情页里此前只剩 Mod+K，没有任何可见入口，而命令面板是「设置」「飞书」的唯一发现路径。
@@ -59,7 +59,7 @@ describe('TopBar 全局入口', () => {
     */
     const onGoHome = vi.fn();
     renderTopBar({ onGoHome });
-    await userEvent.click(screen.getByRole('button', { name: 'Dutydeck 首页，回到任务中心' }));
+    await userEvent.setup({ delay: null }).click(screen.getByRole('button', { name: 'Dutydeck 首页，回到任务中心' }));
     expect(onGoHome).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole('button', { name: '回到任务中心' })).toBeNull();
   });
@@ -89,7 +89,7 @@ describe('TopBar 全局入口', () => {
   });
 
   it('每个交互元素都能 Tab 到，并且有可见 focus 环', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     renderTopBar();
     // md:hidden 的汉堡在 jsdom 里仍然渲染（CSS 不生效），所以它也在 Tab 序列里。
     const interactive = [
@@ -141,7 +141,7 @@ describe('TopBar 实例切换', () => {
 
   it('列出主服务和其他实例，选中后交给调用方跳转', async () => {
     const onInstanceChange = vi.fn();
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     renderTopBar({ instances: [{ id: 'tag', name: 'Tag · CCFlash' }], onInstanceChange });
     await user.click(screen.getByRole('button', { name: '主服务' }));
     await user.click(within(screen.getByRole('listbox', { name: '切换 Dutydeck 实例' })).getByRole('option', { name: 'Tag · CCFlash' }));
@@ -150,7 +150,7 @@ describe('TopBar 实例切换', () => {
 
   it('在其他实例里选回主服务时传 undefined', async () => {
     const onInstanceChange = vi.fn();
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     renderTopBar({ instances: [{ id: 'tag', name: 'Tag · CCFlash' }], instance: 'tag', onInstanceChange });
     await user.click(screen.getByRole('button', { name: 'Tag · CCFlash' }));
     await user.click(screen.getByRole('option', { name: '主服务' }));

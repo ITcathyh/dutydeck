@@ -20,7 +20,7 @@ const pending: PlanState = { state: 'pending', taskId: 'task_1', expiresAt: '202
 
 describe('plan approval in the task detail', () => {
   it('approves, cancels and sends revision feedback for the latest plan', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const { decide } = mount([task('/plan 把登录页报错改成中文')], pending);
     const card = await screen.findByRole('region', { name: '执行计划待批准' });
     expect(within(card).getByText(/Agent 还没有改任何东西/)).toBeTruthy();

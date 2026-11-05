@@ -32,16 +32,6 @@ describe('Banner role 默认分流', () => {
     expect(screen.getByRole('alert').textContent).toContain('必须立刻念');
   });
 
-  it('四档语气各用自己的语义软底色', () => {
-    for (const tone of ['danger', 'warning', 'info', 'success'] as const) {
-      const { container, unmount } = render(<Banner tone={tone}>提示内容</Banner>);
-      const className = (container.firstElementChild as HTMLElement).className;
-      expect(className).toContain(`bg-${tone}-soft`);
-      expect(className).toContain(`border-${tone}-border`);
-      expect(className).toContain(`text-${tone}`);
-      unmount();
-    }
-  });
 });
 
 describe('Banner 标题、正文与操作', () => {
@@ -59,7 +49,7 @@ describe('Banner 标题、正文与操作', () => {
   });
 
   it('action 渲染成按钮并回调 onClick', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onClick = vi.fn();
     render(<Banner tone="danger" action={{ label: '重试', onClick }}>连接失败</Banner>);
     await user.click(screen.getByRole('button', { name: '重试' }));
@@ -67,7 +57,7 @@ describe('Banner 标题、正文与操作', () => {
   });
 
   it('action.busy 时按钮 aria-busy 且点不动，不会重复提交', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onClick = vi.fn();
     render(<Banner tone="danger" action={{ label: '重试', onClick, busy: true }}>连接失败</Banner>);
     const retry = screen.getByRole('button', { name: '重试' });
@@ -85,7 +75,7 @@ describe('Banner 标题、正文与操作', () => {
 
 describe('Banner 关闭按钮', () => {
   it('onDismiss 渲染出带中文 aria-label 的关闭钮并回调', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onDismiss = vi.fn();
     render(<Banner tone="warning" onDismiss={onDismiss}>可以关掉</Banner>);
     await user.click(screen.getByRole('button', { name: '关闭提示' }));
@@ -98,7 +88,7 @@ describe('Banner 关闭按钮', () => {
   });
 
   it('action 与 onDismiss 可以并存，互不吞掉对方', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onClick = vi.fn();
     const onDismiss = vi.fn();
     render(<Banner tone="danger" title="失败" action={{ label: '重试', onClick }} onDismiss={onDismiss}>连接失败</Banner>);

@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RelayAskBroker, RelayError, relayHintLines, type RelayAskChoice } from '@dutydeck/relay';
-import { askOutput, runSessionReport } from './relay-cli.js';
+import { askOutput, runSessionAsk, runSessionReport } from './relay-cli.js';
 
 const workspace = fileURLToPath(new URL('../../../', import.meta.url));
 const cli = fileURLToPath(new URL('./cli.ts', import.meta.url));
@@ -21,6 +21,8 @@ async function harness() {
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
+    // CLI 子进程启动时会对同端口发一次 GET /（与 relay 无关）；不计入 relay 请求，也不让空 body 触发未处理异常。
+    if (request.method !== 'POST') { response.statusCode = 404; response.end(); return; }
     const body = JSON.parse(Buffer.concat(chunks).toString());
     requests.push({ url: request.url, authorization: request.headers.authorization, body });
     response.setHeader('content-type', 'application/json');
@@ -46,7 +48,10 @@ async function harness() {
       timeout: 12_000
     }, (error, stdout, stderr) => resolve({ code: error ? typeof error.code === 'number' ? error.code : -1 : 0, stdout, stderr }));
   });
-  return { requests, invoke };
+  // 同进程走真实 HTTP 与 broker；子进程启动只留给需要验证 cli.ts 输出与退出码的用例。
+  const env = { dutydeck_relay_url: `http://127.0.0.1:${address.port}/api/relay`, dutydeck_relay_token: 'fixture-token' };
+  const ask = (options: Parameters<typeof runSessionAsk>[1]) => runSessionAsk('选哪个方案？', options, { env });
+  return { requests, invoke, ask };
 }
 
 describe('session ask CLI over HTTP', () => {
@@ -80,28 +85,37 @@ describe('session ask CLI over HTTP', () => {
 
   it('keeps plain asks free of choice fields', async () => {
     const h = await harness();
-    expect(await h.invoke([])).toEqual({ code: 0, stdout: 'a\n', stderr: '' });
+    expect(askOutput(await h.ask({}))).toEqual({ stdout: 'a\n', stderr: '', exitCode: 0 });
     expect(h.requests[0]?.body).toEqual({ question: '选哪个方案？' });
   });
 
-  it.each([
-    ['malformed JSON', ['--choices', '{'], '--choices'],
-    ['multiple without choices', ['--multiple'], '--multiple']
-  ])('rejects %s before issuing HTTP', async (_name, args, message) => {
+  it('rejects malformed JSON before issuing HTTP', async () => {
     const h = await harness();
-    const result = await h.invoke(args as string[]);
+    const result = await h.invoke(['--choices', '{']);
     expect(result.code).toBe(2);
     expect(result.stdout).toBe('');
-    expect(result.stderr).toContain(message);
+    expect(result.stderr).toContain('--choices');
     expect(h.requests).toHaveLength(0);
   });
 
-  it.each(['null', '{}', '[]', '[{"label":"甲","value":"a"},{"label":"乙","value":"a"}]'])('uses broker validation for invalid choices %s', async choicesJson => {
+  it('rejects multiple without choices before issuing HTTP', async () => {
     const h = await harness();
-    const result = await h.invoke(['--choices', choicesJson]);
+    await expect(h.ask({ multiple: true })).rejects.toMatchObject({ code: 'RELAY_INVALID_CHOICES', exitCode: 2, message: expect.stringContaining('--multiple') });
+    expect(h.requests).toHaveLength(0);
+  });
+
+  it('uses broker validation for invalid choices through the real CLI', async () => {
+    const h = await harness();
+    const result = await h.invoke(['--choices', '[{"label":"甲","value":"a"},{"label":"乙","value":"a"}]']);
     expect(result.code).toBe(2);
     expect(result.stdout).toBe('');
     expect(result.stderr).toMatch(/选项/);
+    expect(h.requests).toHaveLength(1);
+  });
+
+  it.each(['null', '{}', '[]'])('uses broker validation for invalid choices %s', async choicesJson => {
+    const h = await harness();
+    await expect(h.ask({ choices: choicesJson })).rejects.toMatchObject({ code: 'RELAY_INVALID_CHOICES', exitCode: 2, message: expect.stringMatching(/选项/) });
     expect(h.requests).toHaveLength(1);
   });
 

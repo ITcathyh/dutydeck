@@ -12,7 +12,7 @@ const history: History = { revision: 4, versions: [
   { schemaVersion: 1, appId: 'app', version: 2, source: 'web', savedAt: '2026-11-01T01:00:00.000Z', sha256: 'b'.repeat(64), characters: 2, current: true }
 ] };
 function mount(disabled = false) {
-  const onRollback = vi.fn(), user = userEvent.setup();
+  const onRollback = vi.fn(), user = userEvent.setup({ delay: null });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   render(<QueryClientProvider client={client}><BotPromptHistory appId="app" revision={4} disabled={disabled} onRollback={onRollback}/></QueryClientProvider>);
   vi.spyOn(api, 'botPromptHistory').mockResolvedValue(history);

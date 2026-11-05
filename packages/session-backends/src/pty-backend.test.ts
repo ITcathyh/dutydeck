@@ -2,7 +2,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it, afterEach, beforeAll, afterAll } from 'vitest';
+import { describe, expect, it, afterEach, beforeAll, afterAll, vi } from 'vitest';
 import { PtyBackend } from './pty-backend.js';
 import { TmuxBackend, TmuxOwnershipError, isTmuxAvailable } from './tmux-backend.js';
 import type { SessionBackend } from './types.js';
@@ -172,63 +172,68 @@ tmuxDescribe('TmuxBackend', () => {
     sessions.push(name);
     expect((await TmuxBackend.probeSession(name))).toBe('missing');
 
-    backend = new TmuxBackend(name);
-    const received: string[] = [];
-    let exitArgs: { code: number | null; signal: string | null } | null = null;
-    (await backend.spawn('/bin/sh', ['-c', 'echo TMUX-READY; sleep 30'], {
-      cwd: tmpdir(),
-      cols: 100,
-      rows: 30,
-      env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
-    }));
-    backend.onData(d => received.push(d));
-    backend.onExit((code, signal) => { exitArgs = { code, signal }; });
+    // The exit watcher polls every 1s and needs three misses; fake only its
+    // interval so the real tmux probes run without waiting 3s of wall time.
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      backend = new TmuxBackend(name);
+      const received: string[] = [];
+      let exitArgs: { code: number | null; signal: string | null } | null = null;
+      (await backend.spawn('/bin/sh', ['-c', 'echo TMUX-READY; sleep 30'], {
+        cwd: tmpdir(),
+        cols: 100,
+        rows: 30,
+        env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
+      }));
+      backend.onData(d => received.push(d));
+      backend.onExit((code, signal) => { exitArgs = { code, signal }; });
 
-    // Output flows through pipe-pane → tmp file → tail -F. The launch
-    // command is never typed into the pane, so only process output is visible.
-    const joined = () => received.join('');
-    // 全量并发套件下 pipe-pane → tail -F 链路可能较慢（首个 tmux 测试还要
-    // 承担 tmux server 冷启动），给 30s。
-    await waitFor(() => joined().includes('TMUX-READY'), 30000);
-    expect((await TmuxBackend.probeSession(name))).toBe('exists');
+      // Output flows through pipe-pane → tmp file → tail -F. The launch
+      // command is never typed into the pane, so only process output is visible.
+      const joined = () => received.join('');
+      // 全量并发套件下 pipe-pane → tail -F 链路可能较慢（首个 tmux 测试还要
+      // 承担 tmux server 冷启动），给 30s。
+      await waitFor(() => joined().includes('TMUX-READY'), 30000);
+      expect((await TmuxBackend.probeSession(name))).toBe('exists');
 
-    // display-message can transiently return null under load (its 2s internal
-    // deadline) — poll the same assertions instead of one-shotting them.
-    await waitForAssert(async () => {
-      expect((await backend!.getPid())).toBeGreaterThan(0);
-    });
-    const size = await waitForAssert(async () => {
-      const s = (await backend!.getPaneSize());
-      expect(s).not.toBeNull();
-      expect(s!.cols).toBe(100);
-      expect(s!.rows).toBe(30);
-      return s;
-    });
-    expect(size.cols).toBe(100);
-    expect(size.rows).toBe(30);
+      // display-message can transiently return null under load (its 2s internal
+      // deadline) — poll the same assertions instead of one-shotting them.
+      await waitForAssert(async () => {
+        expect((await backend!.getPid())).toBeGreaterThan(0);
+      });
+      const size = await waitForAssert(async () => {
+        const s = (await backend!.getPaneSize());
+        expect(s).not.toBeNull();
+        expect(s!.cols).toBe(100);
+        expect(s!.rows).toBe(30);
+        return s;
+      });
+      expect(size.cols).toBe(100);
+      expect(size.rows).toBe(30);
 
-    // capture-pane snapshot contains the echoed line (polled: the pane's first
-    // render can race the capture under load).
-    await waitForAssert(async () => {
-      const screen = (await backend!.captureCurrentScreen());
-      expect(screen).not.toBeNull();
-      expect(screen!).toContain('TMUX-READY');
-    });
+      // capture-pane snapshot contains the echoed line (polled: the pane's first
+      // render can race the capture under load).
+      await waitForAssert(async () => {
+        const screen = (await backend!.captureCurrentScreen());
+        expect(screen).not.toBeNull();
+        expect(screen!).toContain('TMUX-READY');
+      });
 
-    // Writes echo back from the tty (ECHO line discipline). This is a kernel
-    // tty feature, not a backend feature — under full-suite load the
-    // pipe-pane → tail chain can lag enough that the echo doesn't arrive in
-    // the capture window. The write itself succeeded (send-keys returned
-    // true), so verify it best-effort without failing the test.
-    expect((await backend.write('hello-tmux'))).toBe(true);
-    await waitFor(() => received.join('').includes('hello-tmux'), 10000).catch(() => {
-      console.warn('[tmux-test] hello-tmux echo not captured (load-induced lag, write succeeded)');
-    });
+      // Writes echo back from the tty (ECHO line discipline). This is a kernel
+      // tty feature, not a backend feature — under full-suite load the
+      // pipe-pane → tail chain can lag enough that the echo doesn't arrive in
+      // the capture window. The write itself succeeded (send-keys returned
+      // true), so verify it best-effort without failing the test.
+      expect((await backend.write('hello-tmux'))).toBe(true);
+      await waitFor(() => received.join('').includes('hello-tmux'), 10000).catch(() => {
+        console.warn('[tmux-test] hello-tmux echo not captured (load-induced lag, write succeeded)');
+      });
 
-    // C-c kills the sleep → pane closes → session destroyed → onExit fires.
-    backend.interrupt();
-    await waitFor(() => exitArgs !== null, 30000);
-    await waitFor(async () => (await TmuxBackend.probeSession(name)) === 'missing', 30000);
+      // C-c kills the sleep → pane closes → session destroyed → onExit fires.
+      backend.interrupt();
+      await waitFor(() => { vi.advanceTimersByTime(1000); return exitArgs !== null; }, 30000);
+      await waitFor(async () => (await TmuxBackend.probeSession(name)) === 'missing', 30000);
+    } finally { vi.useRealTimers(); }
   }, 120000);
 
   it('sends named special keys through tmux instead of literal escape text', async () => {
@@ -589,29 +594,10 @@ tmuxDescribe('TmuxBackend', () => {
  * no error anywhere. These tests pin the public contract that replaced it.
  */
 describe('SessionBackend.sessionName contract', () => {
-  it('每个持久后端都把自己的会话名作为公开只读字段暴露出来', () => {
-    const name = 'dutydeck-contract-probe';
-    expect(new TmuxBackend(name).sessionName).toBe(name);
-  });
-
-  it('PtyBackend 没有可寻址的会话 → sessionName 为 undefined', () => {
-    // pty 子进程随后端一起死，没有任何东西可以 reattach。这里必须是
-    // undefined 而不是空串：driver 用 `!== undefined` 判断该不该探测会话。
-    expect(new PtyBackend().sessionName).toBeUndefined();
-  });
-
-  it('sessionName 是构造期固定的，不随 spawn/attach 变化', () => {
-    // 会话名一旦绑定就不该变：改绑一个活后端会让它的捕获管道指向旧会话，
-    // 而 driver 已经拿新名字去探测了。
-    const backend = new TmuxBackend('dutydeck-immutable-probe');
-    const before = backend.sessionName;
-    expect(Object.isFrozen(before)).toBe(true);   // 字符串天然不可变
-    expect(backend.sessionName).toBe(before);
-  });
-
   it('契约是结构化可读的：拿到 SessionBackend 类型就能读到 sessionName', () => {
     // 这条锁的是「通过接口类型而不是具体类」读得到——driver 持有的正是
     // SessionBackend，不是 TmuxBackend。若字段被改回 private，这里编译不过。
+    // PtyBackend 必须是 undefined 而不是空串：driver 用 `!== undefined` 判断该不该探测会话。
     const backends: SessionBackend[] = [new PtyBackend(), new TmuxBackend('via-interface')];
     expect(backends.map(b => b.sessionName)).toEqual([undefined, 'via-interface']);
   });

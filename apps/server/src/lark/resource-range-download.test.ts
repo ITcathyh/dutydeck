@@ -12,7 +12,13 @@ const temporary = async () => { const path = await mkdtemp(join(tmpdir(), 'dutyd
 const env = (suffix: string) => ({ LARK_APP_ID: `cli_range_${suffix}`, LARK_APP_SECRET: 'synthetic', LARK_API_QPS: '10000', LARK_API_BURST: '10000', LARK_API_RETRY_MAX_ATTEMPTS: '3', LARK_API_RETRY_BASE_MS: '1', LARK_API_RETRY_MAX_MS: '1' });
 const error = (code = 234037, status = 400) => Response.json({ code, msg: 'synthetic resource error' }, { status });
 const hash = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
-const bytes = (offset: number, length: number) => { const data = new Uint8Array(length); for (let index = 0; index < length; index++) data[index] = (offset + index) % 251; return data; };
+// 第 i 个字节是 (offset + i) % 251；按周期预生成一段，切片复制，避免对 100MB 逐字节取模。
+const chunkBytes = 64 * 1024;
+const pattern = Uint8Array.from({ length: chunkBytes + 251 }, (_, index) => index % 251);
+const bytes = (offset: number, length: number) => {
+  if (length <= chunkBytes) return pattern.slice(offset % 251, offset % 251 + length);
+  const data = new Uint8Array(length); for (let index = 0; index < length; index += chunkBytes) data.set(bytes(offset + index, Math.min(chunkBytes, length - index)), index); return data;
+};
 const stream = (start: number, length: number) => new ReadableStream<Uint8Array>({ pull(controller) {
   const count = Math.min(64 * 1024, length); if (!count) { controller.close(); return; }
   controller.enqueue(bytes(start, count)); start += count; length -= count;

@@ -28,6 +28,7 @@ function mount(value = detail) {
 describe('one automation run', () => {
   it('renders the exact frozen result, semantic table, missing stages and copyable raw output', async () => {
     const { read } = mount();
+    const user = userEvent.setup({ delay: null });
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
     await screen.findByRole('region', { name: '单次运行详情' });
@@ -35,10 +36,10 @@ describe('one automation run', () => {
     expect(screen.getByText(/配置版本 2 · 当前计划版本 4/)).toBeTruthy();
     expect(screen.getByRole('table').querySelector('thead th')?.textContent).toBe('项目');
     expect(screen.getAllByText('未记录').length).toBeGreaterThanOrEqual(3);
-    await userEvent.click(screen.getByText('本轮冻结的执行输入'));
+    await user.click(screen.getByText('本轮冻结的执行输入'));
     expect(screen.getByText('frozen old input')).toBeTruthy();
     expect(screen.queryByText('new input')).toBeNull();
-    await userEvent.click(screen.getByRole('button', { name: '复制结果原文' }));
+    await user.click(screen.getByRole('button', { name: '复制结果原文' }));
     await screen.findByText('原文已复制');
     expect(writeText).toHaveBeenCalledWith(detail.occurrence.result!.output.text);
     expect(screen.getByRole('link', { name: '打开执行任务查看过程证据' }).getAttribute('href')).toBe('/sessions/execution');
@@ -65,7 +66,7 @@ describe('one automation run', () => {
     expect(screen.queryByRole('region', { name: '结果未知：other' })).toBeNull();
     expect(screen.getByText(/结果未知不能视为未执行/)).toBeTruthy();
     expect(replay).not.toHaveBeenCalled();
-    await userEvent.click(screen.getByRole('button', { name: '重新执行' }));
+    await userEvent.setup({ delay: null }).click(screen.getByRole('button', { name: '重新执行' }));
     expect(await screen.findByRole('alertdialog', { name: '确认重新执行？' })).toBeTruthy();
     expect(replay).not.toHaveBeenCalled();
   });
@@ -76,7 +77,7 @@ describe('one automation run', () => {
       { taskId: 't', attemptId: 'successor', number: 2, state: 'settled', outcome: 'completed', createdAt: time, updatedAt: time, manualRetry: { causeAttemptId: 'attempt-original', decisionId: 'decision-1' } }
     ] });
     await screen.findByRole('table');
-    await userEvent.click(screen.getByText('执行尝试与恢复关系（2）'));
+    await userEvent.setup({ delay: null }).click(screen.getByText('执行尝试与恢复关系（2）'));
     expect(screen.getByText(/原始尝试.*结果未知/)).toBeTruthy();
     expect(screen.getByText(/人工明确重试的后继 · 来源尝试 attempt-original · 决策 decision-1/)).toBeTruthy();
     expect(screen.getByText(/后继结果不证明原始尝试未执行/)).toBeTruthy();

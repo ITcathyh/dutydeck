@@ -73,7 +73,7 @@ it('creates one stable token for independent callers of the same trigger', async
 
 it('rechecks installation after waiting for uninstall and does not recreate removed tokens', async () => {
   await store.ensureTriggerToken('tokens', 't0');
-  const uninstall = await writer('uninstall', '', true), token = await writer('rotate', 't0');
+  const [uninstall, token] = await Promise.all([writer('uninstall', '', true), writer('rotate', 't0')]);
   uninstall.start(); await uninstall.wait('locked');
   token.start(); await token.wait('attempt');
   await new Promise(resolve => setTimeout(resolve, 100));
@@ -85,11 +85,11 @@ it('rechecks installation after waiting for uninstall and does not recreate remo
 });
 
 it('releases a killed token owner and preserves the next successful write', async () => {
-  const owner = await writer('ensure', 't0', true);
+  const [owner, next] = await Promise.all([writer('ensure', 't0', true), writer('ensure', 't1')]);
   owner.start(); await owner.wait('locked');
   const exited = new Promise(resolve => owner.child.once('exit', resolve));
   owner.child.kill('SIGKILL'); await exited;
-  const next = await writer('ensure', 't1'); next.start();
+  next.start();
   const result = await next.result();
   expect(result).toMatchObject({ ok: true, created: true });
   expect(store.triggerToken('tokens', 't1')).toBe(result.token);
@@ -98,7 +98,7 @@ it('releases a killed token owner and preserves the next successful write', asyn
 
 it('serializes two rotations of the same trigger in acquisition order', async () => {
   const original = await store.ensureTriggerToken('tokens', 't0');
-  const first = await writer('rotate', 't0', true), second = await writer('rotate', 't0');
+  const [first, second] = await Promise.all([writer('rotate', 't0', true), writer('rotate', 't0')]);
   first.start(); await first.wait('locked');
   second.start(); await second.wait('attempt');
   await new Promise(resolve => setTimeout(resolve, 100));

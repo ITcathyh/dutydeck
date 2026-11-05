@@ -652,14 +652,15 @@ describe('SessionAutomationService schedules', () => {
     const created = await h.service.createSchedule(h.session.id, scheduleInput, 'ou_owner');
     await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
     const timestamp = '2026-09-12T00:00:00.000Z';
-    for (let index = 0; index < 1_001; index += 1) {
+    // 造数据走单事务批量写入，避免 1001 次独立提交；被测的 tick 扫描路径不变。
+    await h.repositories.config.compareAndSetBatch!([], Array.from({ length: 1_001 }, (_, index) => {
       const id = `dummy_${String(index).padStart(4, '0')}`;
-      await h.repositories.config.set(`session_automation/occurrence/${id}`, JSON.stringify(sessionScheduleOccurrenceSchema.parse({
+      return { key: `session_automation/occurrence/${id}`, value: JSON.stringify(sessionScheduleOccurrenceSchema.parse({
         schemaVersion: 1, id, revision: 1, scheduleId: 'other', sessionId: 'other', generation: 1,
         scheduledForUtc: timestamp, conditionStatus: 'skipped', runStatus: 'skipped',
         delivery: { status: 'not_requested', attempts: 0, updatedAt: timestamp }, createdAt: timestamp, updatedAt: timestamp
-      })));
-    }
+      })) };
+    }));
     // 经真实账本接受两条任务：一条结算完成，一条仍 queued；occurrence 不带 admission，由 refresh 固定 legacy_partial。
     const accept = (key: string) => {
       const id = executionTaskId('schedule', h.session.id, key);
@@ -1369,18 +1370,20 @@ it('keeps the latest 1000 occurrences of one deleted schedule independently of o
   await h.service.tick();
   await h.service.deleteSchedule(h.session.id, created.id, { expectedRevision: 1 }, 'ou_owner');
   const timestamp = '2026-09-13T00:00:00.000Z';
-  const storeOccurrence = async (id: string, scheduleId: string, scheduledForUtc: string) => {
-    await h.repositories.config.set(`session_automation/occurrence/${id}`, JSON.stringify(sessionScheduleOccurrenceSchema.parse({
+  const occurrence = (id: string, scheduleId: string, scheduledForUtc: string) => ({
+    key: `session_automation/occurrence/${id}`,
+    value: JSON.stringify(sessionScheduleOccurrenceSchema.parse({
       schemaVersion: 1, id, revision: 1, scheduleId, sessionId: h.session.id, generation: 1, scheduledForUtc,
       conditionStatus: 'skipped', runStatus: 'skipped', delivery: { status: 'not_requested', attempts: 0, updatedAt: timestamp }, createdAt: timestamp, updatedAt: timestamp
-    })));
-  };
-  for (let i = 0; i < 1001; i++) await storeOccurrence(`other_occ_${i}`, 'other-schedule', timestamp);
+    }))
+  });
+  // 造数据走单事务批量写入，避免逐条提交。
+  await h.repositories.config.compareAndSetBatch!([], Array.from({ length: 1001 }, (_, i) => occurrence(`other_occ_${i}`, 'other-schedule', timestamp)));
   expect((await h.service.listBySession(h.session.id)).occurrences.some(item => item.id === original.id)).toBe(false);
   const retained = await h.service.getScheduleHistory(h.session.id, created.id, 'ou_owner');
   expect(retained).toHaveLength(1);
   expect(retained[0]).toMatchObject({ id: original.id, runStatus: 'completed', result: { output: { text: 'target result' } } });
-  for (let i = 0; i < 1001; i++) await storeOccurrence(`own_occ_${i}`, created.id, new Date(Date.parse(timestamp) + i * 60_000).toISOString());
+  await h.repositories.config.compareAndSetBatch!([], Array.from({ length: 1001 }, (_, i) => occurrence(`own_occ_${i}`, created.id, new Date(Date.parse(timestamp) + i * 60_000).toISOString())));
   const history = await h.service.getScheduleHistory(h.session.id, created.id, 'ou_owner');
   expect(history).toHaveLength(1000);
   expect(history[0]!.id).toBe('own_occ_1000');

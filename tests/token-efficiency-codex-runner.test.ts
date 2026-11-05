@@ -3,9 +3,10 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, expect, it } from 'vitest';
+import { afterAll, expect, it } from 'vitest';
 const directories: string[] = [];
-afterEach(async () => { for (const dir of directories.splice(0)) await rm(dir, { recursive: true, force: true }); });
+// Cleanup waits for all cases: they run concurrently, each in its own workspace.
+afterAll(async () => { for (const dir of directories.splice(0)) await rm(dir, { recursive: true, force: true }); });
 const script = fileURLToPath(new URL('../scripts/token-efficiency-codex-runner.mts', import.meta.url));
 const loader = fileURLToPath(new URL('../node_modules/tsx/dist/loader.mjs', import.meta.url));
 
@@ -41,7 +42,7 @@ else {
   return { ...execution, args: JSON.parse(await readFile(join(workspace, 'argv.json'), 'utf8')) as string[] };
 }
 
-it('uses safe argv, separates diagnostics, and preserves provider usage and requested-model provenance', async () => {
+it.concurrent('uses safe argv, separates diagnostics, and preserves provider usage and requested-model provenance', async () => {
   const result = await run();
   expect(result.code).toBe(0);
   expect(result.stderr).toContain('fixture provider diagnostics');
@@ -53,20 +54,20 @@ it('uses safe argv, separates diagnostics, and preserves provider usage and requ
   expect(result.args.at(-1)).toContain('new prompt');
 });
 
-it('rejects emitted tool events even when the model was instructed not to call tools', async () => {
+it.concurrent('rejects emitted tool events even when the model was instructed not to call tools', async () => {
   const result = await run('tool');
   expect(result.code).not.toBe(0);
   expect(result.stdout).toBe('');
   expect(result.stderr).toContain('Tool/event forbidden');
 });
 
-it.each(['missing_cache_write', 'cache_write_nonzero'])('leaves %s normalization unavailable', async mode => {
+it.concurrent.each(['missing_cache_write', 'cache_write_nonzero'])('leaves %s normalization unavailable', async mode => {
   const result = await run(mode);
   expect(result.code).toBe(0);
   expect(JSON.parse(result.stdout).attempts[0]).not.toHaveProperty('usage');
 });
 
-it('retains the exact disabled-code-host warning while rejecting other errors', async () => {
+it.concurrent('retains the exact disabled-code-host warning while rejecting other errors', async () => {
   const warning = await run('disabled_code_warning');
   expect(warning.code).toBe(0);
   expect(JSON.parse(warning.stdout).attempts[0].rawUsage.events).toContainEqual(expect.objectContaining({ item: expect.objectContaining({ type: 'error' }) }));
