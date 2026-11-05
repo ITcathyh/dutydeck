@@ -116,8 +116,10 @@ type RecordStatus = PullRequestRecord['status'];
 type FollowTask = NonNullable<PullRequestRecord['task']>;
 
 /**
- * running：已登记、在后台跑（或被重启、会话忙打断，下次轮询重跑）；passed：可以推送（forced 表示验证没过、有人选了仍然推送）；
- * failed：没通过，等人处理。PR 记录此时是 stopped 且保留 task，旧版本看到的就是「已停止跟进」，不会推送。
+ * running：已登记、在后台跑（或被重启、暂时性错误打断，下次轮询重跑）；passed：可以推送（forced 表示验证没过、有人选了仍然推送）；
+ * failed：没通过，等人处理。PR 记录随后改成 stopped 且保留 task，旧版本看到的就是「已停止跟进」，不会推送。
+ * 两条记录分两步写：写完 failed、PR 记录还没停下时重启或写冲突，下次轮询按 failed 把 PR 记录补成 stopped 并补发卡片。
+ * failure.status 为 workspace_changed 表示验证前后工作区里这一轮改的文件和要推送的内容对不上。
  */
 const verifySchema = z.object({
   schemaVersion: z.literal(1),
@@ -130,6 +132,13 @@ const verifySchema = z.object({
   cardMessageId: z.string().optional()
 }).strict();
 type VerifyState = z.infer<typeof verifySchema>;
+type VerifyFailure = NonNullable<VerifyState['failure']>;
+
+/** 验证没能开始或被打断的暂时情况：状态留在 running，下次轮询重跑，不算验证失败。其余错误都按验证失败等人处理。 */
+const TRANSIENT_VERIFY_ERRORS = new Set([
+  'SESSION_BUSY', 'VERIFICATION_IN_PROGRESS', 'SESSION_STOPPING', 'RUNTIME_SHUTTING_DOWN', 'SESSION_RUN_CONFLICT', 'TURN_IN_PROGRESS',
+  'RESOURCE_REVISION_CONFLICT', 'PR_CONFLICT'
+]);
 
 export interface PullRequestServiceOptions {
   repositories: Pick<RepositoryBundle, 'config' | 'tasks'> & { execution: Pick<RepositoryBundle['execution'], 'getTaskExecution' | 'getAttemptEvents' | 'getAcceptedTask'> };
@@ -157,6 +166,10 @@ function verificationLine(record: VerificationResponse) {
 
 const oneLine = (value: string, max: number) => value.replace(/\s+/g, ' ').trim().slice(0, max);
 const recordKey = (id: string) => `${RECORD_PREFIX}${id}`;
+const claimKeyFor = (providerId: string, slug: string, number: number) => `${CLAIM_PREFIX}${createHash('sha256').update(JSON.stringify([providerId, slug.toLowerCase(), number])).digest('hex')}`;
+/** 这条记录仍占着它的 PR：等确认、推送中、跟进中，或推送前验证没过、等人处理（stopped 且保留这一轮任务）。占着时别的会话不能认领。 */
+const holdsPullRequest = (value: PullRequestRecord) => ['proposed', 'pushing', 'open'].includes(value.status) || (value.status === 'stopped' && value.task !== undefined);
+const roundName = (task: FollowTask) => task.kind === 'ci' ? `CI 修复第 ${task.round} 轮` : `评审意见第 ${task.round} 轮`;
 
 /** 分支名只用标题里的小写字母数字，中文标题回落到 changes；后缀是记录编号，保证不和已有分支重名。 */
 export function pullRequestBranch(title: string, id: string) {
@@ -187,6 +200,8 @@ export class PullRequestService {
   private readonly pendingSettlements = new Map<string, () => Promise<void>>();
   /** 正在后台跑的推送前验证，按 PR 记录编号。不放进 inflight：关闭服务时不等验证跑完（运行时会把它记为被中断，重启后重跑）。 */
   private readonly verifying = new Map<string, Promise<void>>();
+  /** 验证失败卡没发出去时，下次补发的最早时间（按 PR 记录编号）；只在内存里，重启后马上补发一次。 */
+  private readonly attentionRetryAt = new Map<string, number>();
 
   constructor(private readonly options: PullRequestServiceOptions) {
     this.clock = options.clock ?? (() => new Date());
@@ -463,14 +478,14 @@ export class PullRequestService {
     if (!isSafeBranchName(target)) throw new RuntimeError('PR_TARGET_UNKNOWN', `${label} 的目标分支名不是合法的分支名，不能认领。`, 409);
     assertClaimedPushTarget(branch, target, await defaultBranch(cwd));
 
-    const claimKey = `${CLAIM_PREFIX}${createHash('sha256').update(JSON.stringify([provider.id, repository.slug.toLowerCase(), number])).digest('hex')}`;
+    const claimKey = claimKeyFor(provider.id, repository.slug, number);
     const claimRaw = await this.options.repositories.config.get(claimKey);
     const claimed = claimRaw ? await this.read(claimRaw) : undefined;
-    if (claimed && ['proposed', 'pushing', 'open'].includes(claimed.value.status)) {
+    if (claimed && holdsPullRequest(claimed.value)) {
       if (claimed.value.sessionId === sessionId) return this.toPublic(claimed.value);
       throw new RuntimeError('PR_ALREADY_FOLLOWED', `${label} 已在另一个会话（${claimed.value.sessionId}）里跟进，先在那里停止跟进再认领。`, 409);
     }
-    const own = (await this.list()).find(item => item.value.status === 'open' && item.value.provider === provider.id
+    const own = (await this.list()).find(item => holdsPullRequest(item.value) && item.value.provider === provider.id
       && item.value.repository.slug.toLowerCase() === repository.slug.toLowerCase() && item.value.pullRequest?.number === number);
     if (own) {
       if (own.value.sessionId === sessionId) return this.toPublic(own.value);
@@ -719,6 +734,7 @@ export class PullRequestService {
         else if (value.status === 'pushing' && now - Date.parse(value.updatedAt) >= STALE_PUSH_MS && !this.inflight.size) {
           await this.fail(value.id, `推送过程中断，请检查远端是否已有分支 ${value.branch}，必要时重新发起。`, ['pushing']);
         } else if (value.status === 'open' && value.task) await this.checkTask(item);
+        else if (value.status === 'stopped' && value.task) await this.retryAttention(value, now);
         else if (value.status === 'open' && (!value.nextPollAt || Date.parse(value.nextPollAt) <= now)) await this.poll(item);
       } catch (error) {
         this.options.log?.warn({ error, pullRequestId: value.id }, 'PR 跟进失败');
@@ -917,7 +933,7 @@ export class PullRequestService {
   private async settle(stored: Stored, task: TaskRecord) {
     const value = stored.value;
     const current = value.task!;
-    const name = current.kind === 'ci' ? `CI 修复第 ${current.round} 轮` : `评审意见第 ${current.round} 轮`;
+    const name = roundName(current);
     if (task.status !== 'completed') { await this.fail(value.id, `${name}任务${taskStatusLabels[task.status] ?? task.status}，已停止自动跟进。`, ['open']); return; }
     const session = await this.options.runtime.getSession(value.sessionId);
     if (!session) { await this.fail(value.id, '会话已不存在，已停止自动跟进。', ['open']); return; }
@@ -952,7 +968,7 @@ export class PullRequestService {
         await this.fail(value.id, `${name}改到了 PR 之外的文件：${outside.slice(0, 5).join('、')}${outside.length > 5 ? ` 等 ${outside.length} 个` : ''}。它们可能是 Agent 新建的，也可能是这一轮期间别的话题或编辑器改的，没有推送，已停止自动跟进。确认这些改动都该进 PR 的话，自己提交并推到 ${value.branch}；之后的 CI 和评审意见请人处理。`, ['open']);
         return;
       }
-      const verified = await this.verifyBeforePush(value, current, name);
+      const verified = await this.verifyBeforePush(value, current, name, session.cwd, changes.contents);
       if (verified === undefined) return;
       verification = verified;
       try {
@@ -1004,19 +1020,30 @@ export class PullRequestService {
   /**
    * 修复轮推送前的验证门。返回写进推送通知的一句说明表示可以推送；返回 undefined 表示这次不推送
    * （已在后台开始验证、验证没过在等人处理）。机器人没配验证命令时照旧直接推送。
+   * 推送的是这一轮结束时的快照（contents）；验证跑在工作区上，所以验证前、推送前各核对一次：这一轮改的文件在工作区里必须还是快照里的内容。
    */
-  private async verifyBeforePush(value: PullRequestRecord, current: FollowTask, name: string): Promise<string | undefined> {
+  private async verifyBeforePush(value: PullRequestRecord, current: FollowTask, name: string, cwd: string, contents: PathContent[]): Promise<string | undefined> {
     const command = this.options.runtime.runVerification ? (await this.options.verificationCommand?.(value.sessionId))?.trim() : undefined;
     if (!command) return '未配置验证命令，推送前没有验证。';
     const stored = await this.readVerify(value.id);
     const state = stored?.value.taskId === current.id ? stored.value : undefined;
     if (state?.state === 'passed') {
-      return `${state.forced ? `推送前验证没有通过，已按人工确认仍然推送（\`${commandLabel(state.command)}\`）` : `推送前在工作区跑了验证命令 \`${commandLabel(state.command)}\`，通过`}。验证针对的是推送时的工作区，不是推送的这个提交。`;
+      if (state.forced) return `推送前验证没有通过，已按人工确认仍然推送（\`${commandLabel(state.command)}\`）。`;
+      const drift = await workspaceDrift(cwd, contents);
+      if (drift) { await this.verificationFailed(value.id, current, name, drift, 'passed'); return undefined; }
+      return `推送前在工作区跑了验证命令 \`${commandLabel(state.command)}\`，通过。验证前后工作区里这一轮改的文件都和推送的内容一致；`
+        + '工作区里不属于这个 PR 的未提交改动也参与了验证，推送的提交里没有它们。';
     }
-    if (state?.state === 'failed') return undefined;
-    // 没跑过，或上次没跑完（服务重启、会话忙）：在后台重新跑，跑完回到推送这一步。
+    // 上次写完 failed 没来得及停下 PR 记录（重启或写冲突）：补成等人处理。
+    if (state?.state === 'failed') { await this.needsAttention(value.id, current, name, state); return undefined; }
+    // 没跑过，或上次没跑完（服务重启、暂时性错误）：在后台重新跑，跑完回到推送这一步。
     const next: VerifyState = { schemaVersion: 1, taskId: current.id, state: 'running', command, startedAt: iso(this.clock().getTime()) };
     if (!state && !await this.writeVerify(value.id, stored?.raw, next)) return undefined;
+    // 验证前：工作区里这一轮改的文件还得是要推送的内容（例如验证被会话忙推迟期间，别的轮次又改了它们）。
+    let drift: VerifyFailure | undefined;
+    try { drift = await workspaceDrift(cwd, contents); }
+    catch (error) { drift = { status: 'error', output: '', error: `读不到工作区：${errorMessage(error)}` }; }
+    if (drift) { await this.verificationFailed(value.id, current, name, drift); return undefined; }
     const run = this.runPushVerification(value.id, value.sessionId, current, command, name)
       .catch(error => this.options.log?.warn({ error, pullRequestId: value.id }, 'PR 推送前验证失败'))
       .finally(() => this.verifying.delete(value.id));
@@ -1024,13 +1051,13 @@ export class PullRequestService {
     return undefined;
   }
 
-  /** 后台跑一次推送前验证。会话忙、被重启打断都不算失败：状态留在 running，下次轮询重跑。 */
+  /** 后台跑一次推送前验证。暂时性错误（见 TRANSIENT_VERIFY_ERRORS）、被重启打断都不算失败：状态留在 running，下次轮询重跑。 */
   private async runPushVerification(id: string, sessionId: string, task: FollowTask, command: string, name: string) {
     let record: VerificationResponse;
     try { record = await this.options.runtime.runVerification!(sessionId, { command }, task.actorId); }
     catch (error) {
-      if (error instanceof RuntimeError && (error.code === 'SESSION_BUSY' || error.code === 'VERIFICATION_IN_PROGRESS')) return;
-      await this.verificationFailed(id, task, command, name, { status: 'error', output: '', error: errorMessage(error) });
+      if (error instanceof RuntimeError && TRANSIENT_VERIFY_ERRORS.has(error.code)) return;
+      await this.verificationFailed(id, task, name, { status: 'error', output: '', error: errorMessage(error) });
       return;
     }
     if (record.status === 'interrupted' || record.status === 'running') return;
@@ -1043,36 +1070,64 @@ export class PullRequestService {
       }
       return;
     }
-    await this.verificationFailed(id, task, command, name, { status: record.status, ...(record.exitCode !== undefined ? { exitCode: record.exitCode } : {}), output: record.output });
+    await this.verificationFailed(id, task, name, { status: record.status, ...(record.exitCode !== undefined ? { exitCode: record.exitCode } : {}), output: record.output });
   }
 
-  /** 验证没过：不推送、不提交、不重试，也不算新的修复轮次。PR 记录停在 stopped 并保留这一轮的任务，发卡等人选。 */
-  private async verificationFailed(id: string, task: FollowTask, command: string, name: string, failure: NonNullable<VerifyState['failure']>) {
+  /** 验证没过：不推送、不提交、不重试，也不算新的修复轮次。先记 failed，再停下 PR 记录、发卡等人选。from 是验证状态应处的那一步。 */
+  private async verificationFailed(id: string, task: FollowTask, name: string, failure: VerifyFailure, from: 'running' | 'passed' = 'running') {
     const stored = await this.readVerify(id);
-    if (stored?.value.taskId !== task.id || stored.value.state !== 'running') return;
+    if (stored?.value.taskId !== task.id || stored.value.state !== from || stored.value.forced) return;
     const output = tailBytes(redactCredentialText(failure.output), VERIFY_OUTPUT_BYTES);
     const recorded = { ...failure, output, ...(failure.error ? { error: oneLine(redactCredentialText(failure.error), 500) } : {}) };
-    if (!await this.writeVerify(id, stored.raw, { ...stored.value, state: 'failed', failure: recorded })) return;
-    const result = recorded.error ? `没能执行：${recorded.error}` : `${verificationStatusLabels[recorded.status as VerificationResponse['status']] ?? recorded.status}${recorded.exitCode !== undefined ? `，退出码 ${recorded.exitCode}` : ''}`;
-    const reason = `${name}推送前验证没有通过（\`${commandLabel(command)}\`，${result}）。没有推送，也没有提交，改动留在工作区，等人处理：选「仍然推送」或「停止跟进」。`.slice(0, 2_000);
+    const next: VerifyState = { ...stored.value, state: 'failed', failure: recorded };
+    if (!await this.writeVerify(id, stored.raw, next)) return;
+    await this.needsAttention(id, task, name, next);
+  }
+
+  /** 按已记下的 failed 把 PR 记录停成等人处理，并发失败卡（卡片没发出去时由轮询按同一个投递键补发）。重复调用只停一次、只认一张卡。 */
+  private async needsAttention(id: string, task: FollowTask, name: string, verify: VerifyState) {
+    const failure = verify.failure ?? { status: 'error', output: '', error: '没有记下失败原因' };
+    const result = failure.status === 'workspace_changed' ? failure.error!
+      : failure.error ? `没能执行：${failure.error}` : `${verificationStatusLabels[failure.status as VerificationResponse['status']] ?? failure.status}${failure.exitCode !== undefined ? `，退出码 ${failure.exitCode}` : ''}`;
+    const reason = `${name}推送前验证没有通过（\`${commandLabel(verify.command)}\`，${result}）。没有推送，也没有提交，改动留在工作区，等人处理：选「仍然推送」或「停止跟进」。`.slice(0, 2_000);
     const saved = await this.update(id, value => value.status === 'open' && value.task?.id === task.id ? { ...value, status: 'stopped', reason } : undefined);
-    if (saved?.value.status !== 'stopped' || saved.value.task?.id !== task.id || saved.value.reason !== reason) return;
+    if (saved?.value.status !== 'stopped' || saved.value.task?.id !== task.id) return;
+    const latest = await this.readVerify(id);
+    if (latest?.value.taskId !== task.id || latest.value.state !== 'failed' || latest.value.cardMessageId) return;
+    this.attentionRetryAt.set(id, this.clock().getTime() + POLL_INTERVAL_MS);
     const messageId = await this.notice(saved.value, {
       key: `${id}:verify-failed:${task.id}`, title: `${this.label(saved.value)} 推送前验证没通过`, failed: true,
-      markdown: [this.summary(saved.value, reason), '', `- 验证命令：\`${commandLabel(command)}\``, `- 结果：${result}`,
-        ...(output ? ['', `输出（末尾 ${VERIFY_OUTPUT_BYTES / 1024} KB 以内，已脱敏）：`, codeBlock(output)] : [])].join('\n'),
+      markdown: [this.summary(saved.value, saved.value.reason ?? reason), '', `- 验证命令：\`${commandLabel(verify.command)}\``, `- 结果：${result}`,
+        ...(failure.output ? ['', `输出（末尾 ${VERIFY_OUTPUT_BYTES / 1024} KB 以内，已脱敏）：`, codeBlock(failure.output)] : [])].join('\n'),
       actions: [
         { label: '仍然推送', value: { dutydeck_pr: id, op: 'force_push' } },
         { label: '停止跟进', value: { dutydeck_pr: id, op: 'stop' }, type: 'default' }
       ]
     });
-    if (messageId) {
-      const latest = await this.readVerify(id);
-      if (latest?.value.taskId === task.id && latest.value.state === 'failed') await this.writeVerify(id, latest.raw, { ...latest.value, cardMessageId: messageId });
-    }
+    if (!messageId) return;
+    this.attentionRetryAt.delete(id);
+    const current = await this.readVerify(id);
+    if (current?.value.taskId === task.id && current.value.state === 'failed') await this.writeVerify(id, current.raw, { ...current.value, cardMessageId: messageId });
   }
 
-  /** 验证没过的卡上「仍然推送」：回到推送这一步，推送前的其余核对照做。只认最新那张失败卡，重复点只推一次。 */
+  /** 轮询到等人处理的记录：失败卡没发出去（没有卡片消息 ID）时按间隔补发。 */
+  private async retryAttention(value: PullRequestRecord, now: number) {
+    if (this.verifying.has(value.id) || (this.attentionRetryAt.get(value.id) ?? 0) > now) return;
+    const verify = await this.readVerify(value.id);
+    if (verify?.value.taskId !== value.task!.id || verify.value.state !== 'failed' || verify.value.cardMessageId) return;
+    await this.needsAttention(value.id, value.task!, roundName(value.task!), verify.value);
+  }
+
+  /** 这条记录仍是这个 PR 唯一的跟进者：认领的记录认领键还指向它，且没有别的记录占着同一个 PR。 */
+  private async ownsPullRequest(value: PullRequestRecord) {
+    if (!value.pullRequest) return true;
+    const number = value.pullRequest.number;
+    if (value.claimed && await this.options.repositories.config.get(claimKeyFor(value.provider, value.repository.slug, number)) !== value.id) return false;
+    return !(await this.list()).some(({ value: other }) => other.id !== value.id && holdsPullRequest(other) && other.provider === value.provider
+      && other.repository.slug.toLowerCase() === value.repository.slug.toLowerCase() && other.pullRequest?.number === number);
+  }
+
+  /** 验证没过之后「仍然推送」（飞书失败卡、Web PR 面板）：回到推送这一步，推送前的其余核对照做。只认最新那张失败卡，重复点只推一次。 */
   async forcePush(id: string, card?: { messageId: string }): Promise<string> {
     const stored = await this.read(id);
     if (!stored) throw new RuntimeError('PR_NOT_FOUND', '找不到这条 PR 记录。', 404);
@@ -1080,6 +1135,9 @@ export class PullRequestService {
     const task = stored.value.task;
     if (stored.value.status !== 'stopped' || !task || verify?.value.taskId !== task.id || verify.value.state !== 'failed') return `这次验证失败已经处理过了。${this.statusText(stored.value)}`;
     if (card && verify.value.cardMessageId && verify.value.cardMessageId !== card.messageId) throw new RuntimeError('PR_CARD_STALE', '这张卡片已失效，请在最新的卡片上操作。', 409);
+    if (!await this.ownsPullRequest(stored.value)) {
+      throw new RuntimeError('PR_ALREADY_FOLLOWED', `${this.label(stored.value)} 已由别的记录跟进，这一轮的改动不再推送；请在这里停止跟进。`, 409);
+    }
     if (!await this.writeVerify(id, verify.raw, { ...verify.value, state: 'passed', forced: true })) return '这次验证失败已经处理过了。';
     const saved = await this.update(id, value => value.status === 'stopped' && value.task?.id === task.id ? { ...value, status: 'open', reason: undefined } : undefined);
     if (saved?.value.status !== 'open') return `这次验证失败已经处理过了。${this.statusText(saved?.value ?? stored.value)}`;
@@ -1106,6 +1164,8 @@ export class PullRequestService {
 /** 对外展示的状态：推送前验证中、验证没过等人处理由 PR 记录加验证状态推出，PR 记录本身不存这两个状态。 */
 function publicStatus(value: PullRequestRecord, verify: VerifyState | undefined): PullRequestStatus {
   if (value.status === 'stopped' && value.task) return 'needs_attention';
+  // 验证已记 failed、PR 记录还没停下（下次轮询会补上）：按等人处理展示。
+  if (value.status === 'open' && value.task && verify?.taskId === value.task.id && verify.state === 'failed') return 'needs_attention';
   if (value.status === 'open' && value.task && verify?.taskId === value.task.id && verify.state === 'running') return 'verifying';
   return value.status;
 }
@@ -1118,6 +1178,16 @@ function tailBytes(text: string, max: number) {
   const bytes = Buffer.from(text, 'utf8');
   if (bytes.length <= max) return text;
   return bytes.subarray(bytes.length - max).toString('utf8').replace(/^�+/, '');
+}
+
+/** 工作区里这一轮改的文件和这一轮结束时的快照（要推送的内容）不一致时返回失败说明。 */
+async function workspaceDrift(cwd: string, contents: PathContent[]): Promise<VerifyFailure | undefined> {
+  if (!contents.length) return undefined;
+  const snapshot = await workspaceSnapshot(cwd);
+  const current = await treeEntries({ cwd }, snapshot.tree, contents.map(item => item.path));
+  const changed = contents.filter(item => !sameEntry(current.get(item.path), item.sha ? { mode: item.mode ?? '100644', sha: item.sha } : undefined)).map(item => item.path);
+  if (!changed.length) return undefined;
+  return { status: 'workspace_changed', output: '', error: `这一轮结束后工作区里这些文件又被改动：${changed.slice(0, 5).join('、')}${changed.length > 5 ? ` 等 ${changed.length} 个` : ''}，验证的已不是要推送的内容` };
 }
 
 /** 现在 origin 的推送地址必须还是生成清单时记下的那个；返回要推送的地址（带本机配置的账号口令，不记进记录）。 */

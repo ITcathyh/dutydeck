@@ -312,6 +312,7 @@ export const api = {
   preparePullRequest: (id: string, input: { title?: string }) => send<{ pullRequest: PublicPullRequest }>('POST', `/api/sessions/${id}/pull-requests`, input),
   followPullRequest: (id: string, pullRequest: string) => send<{ pullRequest: PublicPullRequest }>('POST', `/api/sessions/${id}/pull-requests/follow`, { pullRequest }),
   confirmPullRequest: (id: string, pullRequestId: string) => json<{ message: string; pullRequest: PublicPullRequest }>(`/api/sessions/${id}/pull-requests/${pullRequestId}/confirm`, { method: 'POST' }),
+  forcePushPullRequest: (id: string, pullRequestId: string) => json<{ message: string }>(`/api/sessions/${id}/pull-requests/${pullRequestId}/force-push`, { method: 'POST' }),
   cancelPullRequest: (id: string, pullRequestId: string) => json<{ pullRequest: PublicPullRequest }>(`/api/sessions/${id}/pull-requests/${pullRequestId}/cancel`, { method: 'POST' }),
   sessionCapabilities: (id: string) => json<SessionCapabilities>(`/api/sessions/${id}/capabilities`),
   workspace: (id: string) => json<WorkspaceResponse | null>(`/api/sessions/${id}/workspace`),

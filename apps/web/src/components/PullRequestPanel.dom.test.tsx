@@ -26,6 +26,7 @@ function mount(list: { available: boolean; hint?: string; items: PublicPullReque
     const body = method === 'GET' ? list
       : path.endsWith('/confirm') ? { message: '已确认，正在推送分支并开 PR，完成后会通知。', pullRequest: { ...proposal, status: 'pushing' } }
       : path.endsWith('/cancel') ? { pullRequest: { ...proposal, status: 'cancelled' } }
+      : path.endsWith('/force-push') ? { message: '已确认，仍然推送这一轮的改动，推送前的其余核对照做，完成后会通知。' }
       : { pullRequest: proposal };
     return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
   });
@@ -109,6 +110,24 @@ describe('开 PR 面板', () => {
     expect(screen.getByText('验证未通过，等人处理 · Needs human')).toBeTruthy();
     expect(screen.getByText(/推送前验证没有通过/).className).toContain('text-warning');
     expect(screen.getAllByRole('button', { name: '停止跟进' })).toHaveLength(2);
+  });
+
+  it('验证未通过等人处理时可以点「仍然推送」，只对这条记录发请求；验证中不显示这个按钮', async () => {
+    const verifying: PublicPullRequest = { ...proposal, id: 'pr_3', status: 'verifying', title: 'Verifying' };
+    const attention: PublicPullRequest = { ...proposal, id: 'pr_4', status: 'needs_attention', title: 'Needs human' };
+    const requests = mount({ available: true, items: [verifying, attention] });
+    const user = userEvent.setup({ delay: null });
+    await screen.findByText('推送前验证中 · Verifying');
+    expect(screen.getAllByRole('button', { name: '仍然推送' })).toHaveLength(1);
+    await user.click(screen.getByRole('button', { name: '仍然推送' }));
+    await waitFor(() => expect(writes(requests)).toEqual([['/api/sessions/s1/pull-requests/pr_4/force-push', undefined]]));
+    expect((await screen.findByRole('status')).textContent).toContain('仍然推送这一轮的改动');
+  });
+
+  it('会话结束后只读：不显示「仍然推送」', async () => {
+    mount({ available: true, items: [{ ...proposal, id: 'pr_4', status: 'needs_attention', title: 'Needs human' }] }, 'stopped');
+    expect(await screen.findByText('验证未通过，等人处理 · Needs human')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '仍然推送' })).toBeNull();
   });
 
   it('会话结束后只读：不显示开 PR 和确认入口', async () => {

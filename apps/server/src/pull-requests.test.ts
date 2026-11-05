@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { cp, mkdir, mkdtemp, readFile, rm, truncate, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -81,6 +82,8 @@ async function fixture(options: { withoutPullRequests?: boolean; log?: { warn: (
     verifications: [] as VerificationResponse[],
     posted: [] as string[],
     created: [] as unknown[],
+    /** 接下来这么多次通知发送失败。 */
+    notifyFailures: 0,
     verify: async (sessionId: string, command: string, _actorId?: string): Promise<VerificationResponse> => verificationRecord(sessionId, command, 'passed')
   };
   const provider: CiProvider = {
@@ -109,7 +112,10 @@ async function fixture(options: { withoutPullRequests?: boolean; log?: { warn: (
     const created = new PullRequestService({
       repositories: { config: database.config, tasks: { get: async (id: string) => tasks.get(id), save: async () => {}, listBySession: async () => [] }, execution: {} as any },
       runtime, providers, readTaskOutput: (_sessionId, taskId) => outputs.get(taskId),
-      notify: async (_sessionId, _id, notice) => { notices.push(notice); return `om_${notices.length}`; },
+      notify: async (_sessionId, _id, notice) => {
+        if (state.notifyFailures > 0) { state.notifyFailures -= 1; throw new Error('飞书发送失败'); }
+        notices.push(notice); return `om_${notices.length}`;
+      },
       ...(options.verificationCommand ? { verificationCommand: async () => options.verificationCommand } : {}),
       clock: () => new Date(now.value), log: options.log
     });
@@ -1082,7 +1088,7 @@ describe('PR 跟进：修复轮推送前验证', () => {
     expect(f.notices.at(-1)!.markdown).toContain('未配置验证命令，推送前没有验证。');
   });
 
-  it('验证在后台跑，期间展示为验证中、不推送；通过后才推送，通知写明验证针对工作区而不是推送的提交', async () => {
+  it('验证在后台跑，期间展示为验证中、不推送；通过后才推送，通知如实写验证对象：这一轮的文件和推送内容一致，工作区别的改动也参与了验证', async () => {
     const f = await fixture({ verificationCommand: 'pnpm test' });
     const gate = deferred<VerificationResponse>();
     f.state.verify = () => gate.promise;
@@ -1109,7 +1115,7 @@ describe('PR 跟进：修复轮推送前验证', () => {
     expect(after.task).toBeUndefined();
     expect(await f.remoteGit('rev-parse', pr.branch)).toBe(after.headSha);
     expect(await f.remoteGit('show', `${after.headSha}:app.ts`)).toBe('export const a = 11;');
-    expect(f.notices.at(-1)!.markdown).toMatch(/验证命令 `pnpm test`，通过。验证针对的是推送时的工作区，不是推送的这个提交/);
+    expect(f.notices.at(-1)!.markdown).toMatch(/验证命令 `pnpm test`，通过。验证前后工作区里这一轮改的文件都和推送的内容一致；工作区里不属于这个 PR 的未提交改动也参与了验证，推送的提交里没有它们。/);
     expect(f.runtime.runVerification).toHaveBeenCalledOnce();
   });
 
@@ -1222,5 +1228,168 @@ describe('PR 跟进：修复轮推送前验证', () => {
     expect(after.headSha).not.toBe(pr.headSha);
     expect(await f.remoteGit('rev-parse', pr.branch)).toBe(after.headSha);
     expect(f.runtime.runVerification).toHaveBeenCalledTimes(2);
+  });
+
+  it('记下验证失败后、停下 PR 记录前写冲突或重启：下次轮询补成等人处理并补发卡片，仍然推送可用', async () => {
+    const f = await fixture({ verificationCommand: 'pnpm test' });
+    f.state.verify = async (sessionId, command) => verificationRecord(sessionId, command, 'failed', { exitCode: 1 });
+    const pr = await f.open();
+    f.state.pipeline = failed(pr.headSha!);
+    await f.poll();
+    // PR 记录的写入一直冲突：验证状态已是 failed，PR 记录停不下来。
+    const compareAndSet = f.config.compareAndSet!.bind(f.config);
+    const blocked = vi.spyOn(f.config, 'compareAndSet').mockImplementation(async (key, expected, value) =>
+      key === `pull_request/record/${pr.id}` && JSON.parse(value).status === 'stopped' ? false : compareAndSet(key, expected, value));
+    const notices = f.notices.length;
+    await f.finishLatest(() => f.write('app.ts', 'export const a = 11;\n'), '修好了');
+    await f.service.idle();
+    expect(JSON.parse((await f.config.get(`pull_request/verify/${pr.id}`))!)).toMatchObject({ state: 'failed' });
+    expect(await f.service.get(pr.id)).toMatchObject({ status: 'open', task: expect.any(Object) });
+    expect((await f.service.listBySession('ses_pr'))[0]).toMatchObject({ status: 'needs_attention' });
+    expect(f.notices).toHaveLength(notices);
+
+    blocked.mockRestore();
+    await f.restart();
+    await f.service.tick();
+    await f.service.idle();
+    expect(await f.service.get(pr.id)).toMatchObject({ status: 'stopped', reason: expect.stringContaining('推送前验证没有通过') });
+    expect(f.notices).toHaveLength(notices + 1);
+    expect(f.notices.at(-1)!.title).toContain('推送前验证没通过');
+    expect(f.runtime.runVerification).toHaveBeenCalledOnce();
+    // 再轮询不重发卡、不重跑验证。
+    await f.poll();
+    expect(f.notices).toHaveLength(notices + 1);
+    expect(await f.service.forcePush(pr.id, { messageId: `om_${f.notices.length}` })).toContain('仍然推送');
+    await settleAgain(f);
+    const pushed = (await f.service.get(pr.id))!;
+    expect(await f.remoteGit('rev-parse', pr.branch)).toBe(pushed.headSha);
+    expect(pushed.headSha).not.toBe(pr.headSha);
+  });
+
+  it('验证没过、等人处理期间别的会话不能认领同一个 PR；仍然推送前核对这条记录仍是唯一的跟进者', async () => {
+    const f = await fixture({ verificationCommand: 'pnpm test' });
+    f.state.verify = async (sessionId, command) => verificationRecord(sessionId, command, 'failed', { exitCode: 1 });
+    const pr = await fixRound(f);
+    await settleAgain(f);
+    expect((await f.service.listBySession('ses_pr'))[0]).toMatchObject({ status: 'needs_attention' });
+    f.state.prInfo = { headSha: pr.headSha!, headBranch: pr.branch, baseBranch: 'main', headRepository: 'group/repo', title: 'Fix login flow', url: pr.pullRequest!.url };
+    await expect(f.service.follow('ses_other', { pullRequest: pr.pullRequest!.url }, 'ou_owner')).rejects.toMatchObject({ code: 'PR_ALREADY_FOLLOWED', message: expect.stringContaining('ses_pr') });
+
+    // 升级前已被别的会话认领（旧版本放行了）：这条记录不再推送，验证状态不变，可以停止跟进。
+    const raw = JSON.parse((await f.config.get(`pull_request/record/${pr.id}`))!);
+    await f.config.set('pull_request/record/pr_legacy', JSON.stringify({ ...raw, id: 'pr_legacy', sessionId: 'ses_other', status: 'open', task: undefined, reason: undefined, claimed: true }));
+    await expect(f.service.forcePush(pr.id)).rejects.toMatchObject({ code: 'PR_ALREADY_FOLLOWED' });
+    expect(JSON.parse((await f.config.get(`pull_request/verify/${pr.id}`))!)).toMatchObject({ state: 'failed' });
+    expect(await f.service.get(pr.id)).toMatchObject({ status: 'stopped' });
+    await f.config.set('pull_request/record/pr_legacy', JSON.stringify({ ...raw, id: 'pr_legacy', sessionId: 'ses_other', status: 'stopped', task: undefined }));
+
+    // 认领的记录：认领键已指向别的记录时同样不推送。
+    await f.config.set(`pull_request/record/${pr.id}`, JSON.stringify({ ...JSON.parse((await f.config.get(`pull_request/record/${pr.id}`))!), claimed: true }));
+    const key = `pull_request/claim/${createHash('sha256').update(JSON.stringify(['fake', 'group/repo', pr.pullRequest!.number])).digest('hex')}`;
+    await f.config.set(key, 'pr_legacy');
+    await expect(f.service.forcePush(pr.id)).rejects.toMatchObject({ code: 'PR_ALREADY_FOLLOWED' });
+    await f.config.set(key, pr.id);
+    expect(await f.service.forcePush(pr.id)).toContain('仍然推送');
+    await settleAgain(f);
+    expect(await f.remoteGit('rev-parse', pr.branch)).toBe((await f.service.get(pr.id))!.headSha);
+  });
+
+  it('验证被推迟期间工作区里这一轮的文件又被改：不跑验证、不推送，等人处理；仍然推送推的是这一轮结束时的内容', async () => {
+    const f = await fixture({ verificationCommand: 'pnpm test' });
+    let calls = 0;
+    f.state.verify = async (sessionId, command) => {
+      calls += 1;
+      if (calls === 1) throw new RuntimeError('SESSION_BUSY', 'busy', 409);
+      return verificationRecord(sessionId, command, 'passed');
+    };
+    const pr = await fixRound(f);
+    expect(calls).toBe(1);
+    await f.write('app.ts', 'export const a = 12;\n');
+    await settleAgain(f);
+    expect(calls).toBe(1);
+    expect(await f.service.get(pr.id)).toMatchObject({ status: 'stopped', reason: expect.stringMatching(/又被改动：app\.ts，验证的已不是要推送的内容/) });
+    expect(f.notices.at(-1)!.title).toContain('推送前验证没通过');
+    expect(await f.remoteGit('rev-parse', pr.branch)).toBe(pr.headSha);
+    expect(await f.service.forcePush(pr.id)).toContain('仍然推送');
+    await settleAgain(f);
+    const pushed = (await f.service.get(pr.id))!;
+    expect(await f.remoteGit('show', `${pushed.headSha}:app.ts`)).toBe('export const a = 11;');
+  });
+
+  it('验证通过后、推送前工作区里这一轮的文件又被改：不推送，按验证失败等人处理', async () => {
+    const f = await fixture({ verificationCommand: 'pnpm test' });
+    const gate = deferred<VerificationResponse>();
+    f.state.verify = () => gate.promise;
+    const pr = await f.open();
+    f.state.pipeline = failed(pr.headSha!);
+    await f.poll();
+    const task = f.tasks.get(f.dispatches.at(-1)!.id)!;
+    await f.turn(task.id, () => f.write('app.ts', 'export const a = 11;\n'));
+    task.status = 'completed';
+    await f.service.tick();
+    expect(f.runtime.runVerification).toHaveBeenCalledOnce();
+    await f.write('app.ts', 'export const a = 12;\n');
+    gate.resolve(verificationRecord('ses_pr', 'pnpm test', 'passed'));
+    await settleAgain(f);
+    expect(await f.service.get(pr.id)).toMatchObject({ status: 'stopped', reason: expect.stringContaining('又被改动：app.ts') });
+    expect(JSON.parse((await f.config.get(`pull_request/verify/${pr.id}`))!)).toMatchObject({ state: 'failed', failure: { status: 'workspace_changed' } });
+    expect(await f.remoteGit('rev-parse', pr.branch)).toBe(pr.headSha);
+    expect(f.runtime.runVerification).toHaveBeenCalledOnce();
+  });
+
+  it.each(['SESSION_STOPPING', 'RUNTIME_SHUTTING_DOWN', 'VERIFICATION_IN_PROGRESS', 'SESSION_RUN_CONFLICT', 'TURN_IN_PROGRESS', 'RESOURCE_REVISION_CONFLICT'])('暂时性错误 %s 不算验证失败：保持验证中，下次轮询重跑，通过后推送', async code => {
+    const f = await fixture({ verificationCommand: 'pnpm test' });
+    let calls = 0;
+    f.state.verify = async (sessionId, command) => {
+      calls += 1;
+      if (calls === 1) throw new RuntimeError(code, 'temporary', 409);
+      return verificationRecord(sessionId, command, 'passed');
+    };
+    const pr = await fixRound(f);
+    const notices = f.notices.length;
+    expect((await f.service.listBySession('ses_pr'))[0]).toMatchObject({ status: 'verifying' });
+    await settleAgain(f);
+    await settleAgain(f);
+    expect(calls).toBe(2);
+    expect(f.notices.slice(notices).some(notice => notice.title.includes('验证没通过'))).toBe(false);
+    expect(await f.remoteGit('rev-parse', pr.branch)).toBe((await f.service.get(pr.id))!.headSha);
+  });
+
+  it('不在暂时性错误清单里的错误（例如会话已停止）按验证失败等人处理', async () => {
+    const f = await fixture({ verificationCommand: 'pnpm test' });
+    f.state.verify = async () => { throw new RuntimeError('INVALID_STATE', 'Cannot verify while session is stopped', 409); };
+    const pr = await fixRound(f);
+    await settleAgain(f);
+    expect(await f.service.get(pr.id)).toMatchObject({ status: 'stopped', reason: expect.stringContaining('没能执行：Cannot verify while session is stopped') });
+    expect(f.runtime.runVerification).toHaveBeenCalledOnce();
+  });
+
+  it('验证失败卡没发出去：按间隔用同一个投递键补发，发出后不再重发；Web 不带卡片也能仍然推送', async () => {
+    const f = await fixture({ verificationCommand: 'pnpm test' });
+    f.state.verify = async (sessionId, command) => verificationRecord(sessionId, command, 'failed', { exitCode: 1 });
+    const pr = await f.open();
+    f.state.pipeline = failed(pr.headSha!);
+    await f.poll();
+    f.state.notifyFailures = 2;
+    const notices = f.notices.length;
+    await f.finishLatest(() => f.write('app.ts', 'export const a = 11;\n'), '修好了');
+    await f.service.idle();
+    expect(await f.service.get(pr.id)).toMatchObject({ status: 'stopped' });
+    expect(f.notices).toHaveLength(notices);
+    // 间隔没到不补发。
+    await f.service.tick();
+    expect(f.state.notifyFailures).toBe(1);
+    await f.poll();
+    expect(f.state.notifyFailures).toBe(0);
+    expect(f.notices).toHaveLength(notices);
+    await f.poll();
+    expect(f.notices).toHaveLength(notices + 1);
+    expect(f.notices.at(-1)!.key).toBe(`${pr.id}:verify-failed:${(await f.service.get(pr.id))!.task!.id}`);
+    expect(JSON.parse((await f.config.get(`pull_request/verify/${pr.id}`))!)).toMatchObject({ cardMessageId: `om_${f.notices.length}` });
+    await f.poll();
+    expect(f.notices).toHaveLength(notices + 1);
+    expect(await f.service.forcePush(pr.id)).toContain('仍然推送');
+    await settleAgain(f);
+    expect(await f.remoteGit('rev-parse', pr.branch)).toBe((await f.service.get(pr.id))!.headSha);
   });
 });

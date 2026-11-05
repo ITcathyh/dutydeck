@@ -21,10 +21,11 @@ export function PullRequestPanel({ session }: { session: Session }) {
   const prepare = useMutation({ mutationFn: () => api.preparePullRequest(session.id, title.trim() ? { title: title.trim() } : {}), onSuccess: result => { setNotice(''); setProposal(result.pullRequest); void refresh(); } });
   const confirm = useMutation({ mutationFn: (id: string) => api.confirmPullRequest(session.id, id), onSuccess: result => { setProposal(undefined); setTitle(''); setNotice(result.message); void refresh(); } });
   const follow = useMutation({ mutationFn: () => api.followPullRequest(session.id, link.trim()), onSuccess: result => { setLink(''); setNotice(`已开始跟进 ${result.pullRequest.pullRequest?.label ?? 'PR'}。`); void refresh(); } });
+  const forcePush = useMutation({ mutationFn: (id: string) => api.forcePushPullRequest(session.id, id), onSuccess: result => { setNotice(result.message); void refresh(); } });
   const cancel = useMutation({ mutationFn: (id: string) => api.cancelPullRequest(session.id, id), onSuccess: () => { setProposal(undefined); void refresh(); } });
   const readOnly = isSessionActionDisabled(session);
   const data = records.data;
-  const error = records.error ?? prepare.error ?? follow.error ?? cancel.error;
+  const error = records.error ?? prepare.error ?? follow.error ?? forcePush.error ?? cancel.error;
   const additions = proposal?.files.reduce((sum, file) => sum + file.additions, 0) ?? 0;
   const deletions = proposal?.files.reduce((sum, file) => sum + file.deletions, 0) ?? 0;
 
@@ -46,7 +47,10 @@ export function PullRequestPanel({ session }: { session: Session }) {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <strong>{statusLabels[item.status]} · {item.claimed ? '已有 PR · ' : ''}{item.title}</strong>
         {!readOnly && item.status === 'proposed' && <Button onClick={() => setProposal(item)}>查看并确认</Button>}
-        {!readOnly && (item.status === 'open' || item.status === 'verifying' || item.status === 'needs_attention') && <Button disabled={cancel.isPending} onClick={() => cancel.mutate(item.id)}>停止跟进</Button>}
+        {!readOnly && (item.status === 'open' || item.status === 'verifying' || item.status === 'needs_attention') && <div className="flex gap-2">
+          {item.status === 'needs_attention' && <Button loading={forcePush.isPending && forcePush.variables === item.id} disabled={forcePush.isPending || cancel.isPending} onClick={() => forcePush.mutate(item.id)}>仍然推送</Button>}
+          <Button disabled={cancel.isPending || forcePush.isPending} onClick={() => cancel.mutate(item.id)}>停止跟进</Button>
+        </div>}
       </div>
       <p className="mt-1 break-all text-secondary">{item.providerName} · {item.repository} · {item.branch} → {item.target}{item.pullRequest && <> · <a className="text-link" href={item.pullRequest.url} target="_blank" rel="noreferrer">{item.pullRequest.label}</a></>}</p>
       {(item.ciRounds > 0 || item.reviewRounds > 0) && <p className="text-subtle">已自动修 CI {item.ciRounds} 轮、处理评审意见 {item.reviewRounds} 轮</p>}

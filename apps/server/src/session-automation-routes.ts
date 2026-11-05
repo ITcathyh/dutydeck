@@ -158,6 +158,13 @@ export async function registerSessionAutomationRoutes(app: FastifyInstance, opti
     return pullRequests().confirm(request.params.id, actorId);
   });
 
+  // 推送前验证没过、等人处理时「仍然推送」：权限与确认推送相同（飞书失败卡上的同名按钮也是这道门）。
+  app.post<{ Params: { sessionId: string; id: string } }>('/api/sessions/:sessionId/pull-requests/:id/force-push', async request => {
+    await authorize(request, request.params.sessionId, 'run.interrupt');
+    await owned(request.params.sessionId, request.params.id);
+    return { message: await pullRequests().forcePush(request.params.id) };
+  });
+
   app.post<{ Params: { sessionId: string; id: string } }>('/api/sessions/:sessionId/pull-requests/:id/cancel', async request => {
     await authorize(request, request.params.sessionId, 'run.interrupt');
     await owned(request.params.sessionId, request.params.id);

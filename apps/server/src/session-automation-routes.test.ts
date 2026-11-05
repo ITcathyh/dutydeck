@@ -82,7 +82,8 @@ describe('session automation routes', () => {
       prepare: vi.fn(async () => ({ id: 'pr_1' })),
       get: vi.fn(async (id: string) => ({ pr_1: { id: 'pr_1', sessionId: 'ses_1' }, pr_2: { id: 'pr_2', sessionId: 'ses_2' } } as Record<string, unknown>)[id]),
       confirm: vi.fn(async () => ({ message: '已确认', pullRequest: { id: 'pr_1' } })),
-      cancel: vi.fn(async () => ({ id: 'pr_1', status: 'cancelled' }))
+      cancel: vi.fn(async () => ({ id: 'pr_1', status: 'cancelled' })),
+      forcePush: vi.fn(async () => '已确认，仍然推送这一轮的改动')
     };
     const target = Object.assign(service(), { pullRequests });
     let allowed = true;
@@ -100,8 +101,15 @@ describe('session automation routes', () => {
     allowed = false;
     expect((await app.inject({ method: 'POST', url: '/api/sessions/ses_1/pull-requests/pr_1/confirm' })).statusCode).toBe(403);
     expect((await app.inject({ method: 'POST', url: '/api/sessions/ses_1/pull-requests/pr_1/cancel' })).statusCode).toBe(403);
+    expect((await app.inject({ method: 'POST', url: '/api/sessions/ses_1/pull-requests/pr_1/force-push' })).statusCode).toBe(403);
     expect(pullRequests.confirm).not.toHaveBeenCalled();
+    expect(pullRequests.forcePush).not.toHaveBeenCalled();
     allowed = true;
+    // 仍然推送：与确认推送同一道权限，只认本会话的记录。
+    expect((await app.inject({ method: 'POST', url: '/api/sessions/ses_1/pull-requests/pr_2/force-push' })).statusCode).toBe(404);
+    expect((await app.inject({ method: 'POST', url: '/api/sessions/ses_1/pull-requests/pr_1/force-push' })).json()).toEqual({ message: '已确认，仍然推送这一轮的改动' });
+    expect(pullRequests.forcePush).toHaveBeenCalledExactlyOnceWith('pr_1');
+    expect(authorize).toHaveBeenLastCalledWith(expect.any(Object), 'ses_1', 'run.interrupt');
     expect((await app.inject({ method: 'POST', url: '/api/sessions/ses_1/pull-requests/pr_1/confirm' })).json()).toEqual({ message: '已确认', pullRequest: { id: 'pr_1' } });
     expect(pullRequests.confirm).toHaveBeenCalledWith('pr_1', 'ou_user');
     expect(authorize).toHaveBeenLastCalledWith(expect.any(Object), 'ses_1', 'run.interrupt');
