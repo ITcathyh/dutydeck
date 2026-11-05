@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import {
-  readSessionTaskReport, sessionWorkspaceDirectory, workspaceName,
+  permissionRejectReasonMaxLength, readSessionTaskReport, sessionWorkspaceDirectory, workspaceName,
   type ConfigRepository, type InboxAction, type InboxItem, type InboxItemKind, type InboxResponse,
   type PermissionRequestData, type Session, type TaskRecord, type WorkItem
 } from '@dutydeck/shared';
@@ -82,7 +82,7 @@ export async function collectInbox(sources: InboxSources, sessions: Session[], o
           title: oneLine(request.title, 160), detail: oneLine(request.operation?.command ?? request.operation?.resource, 200) || undefined,
           actions: [
             post('approve', '批准', `/api/sessions/${enc(sid)}/permissions/${enc(request.id)}`, { approved: true }, 'primary'),
-            post('reject', '拒绝', `/api/sessions/${enc(sid)}/permissions/${enc(request.id)}`, { approved: false }, 'danger'), open]
+            { ...post('reject', '拒绝', `/api/sessions/${enc(sid)}/permissions/${enc(request.id)}`, { approved: false }, 'danger'), reasonMaxLength: permissionRejectReasonMaxLength }, open]
         });
       }
       for (const ask of want('question') ? sources.asks?.(sid) ?? [] : []) add('question', ask.id, ask.createdAt, { title: oneLine(ask.question, 160), actions: [open] });

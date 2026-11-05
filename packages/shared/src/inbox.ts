@@ -37,6 +37,8 @@ export interface InboxAction {
   method?: 'POST';
   path?: string;
   body?: Record<string, unknown>;
+  /** 有值时可附可选的 `reason`（不超过该长度）合入 body 再提交；不填时照原 body 提交。 */
+  reasonMaxLength?: number;
 }
 
 export interface InboxItem {

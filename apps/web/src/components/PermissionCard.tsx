@@ -4,6 +4,8 @@ import { Check, MessageSquareX, ShieldAlert, X } from 'lucide-react';
 import type { TimelineEvent } from '../timeline';
 import { Button } from './primitives';
 
+/** 拒绝原因输入框的说明，收件箱的同类输入沿用这一句。 */
+export const permissionRejectReasonHint = '原因会记入审批记录；终端模式的 Agent 会收到，ACP 模式的只知道被拒绝';
 const resolvedLabels: Record<string, string> = { approved: '已允许', rejected: '已拒绝', cancelled: '已取消', expired: '已失效' };
 
 export function PermissionCard({ event, resolving = false, onResolve }: { event: TimelineEvent; resolving?: boolean; onResolve?(permissionId: string, approved: boolean, reason?: string): void | Promise<unknown> }) {
@@ -47,7 +49,7 @@ export function PermissionCard({ event, resolving = false, onResolve }: { event:
       <p className="mt-2 text-caption text-secondary">本次选择只处理这一条请求，不改变后续授权方式。</p>
       {pending && onResolve ? <div className="mt-3 flex flex-wrap items-center gap-2"><Button variant="secondary" tone="inverse" loading={processing} onClick={() => decide(true)} icon={<Check size={14}/>}>允许本次</Button><Button variant="secondary" disabled={processing} onClick={() => decide(false)} icon={<X size={14}/>} className="border-warning-border text-warning hover:bg-warning-soft">拒绝</Button><Button variant="secondary" disabled={processing} aria-expanded={explaining} onClick={() => setExplaining(open => !open)} icon={<MessageSquareX size={14}/>} className="border-warning-border text-warning hover:bg-warning-soft">拒绝并说明</Button></div> : <div className="mt-2 text-caption font-medium text-subtle">{pending ? '等待当前操作者处理' : `${resolvedLabels[event.data.status] ?? event.data.status ?? '已处理'}${rejectedReason ? `：${rejectedReason}` : ''}`}</div>}
       {pending && onResolve && explaining && <div className="mt-2">
-        <textarea aria-label="拒绝原因" value={reason} maxLength={permissionRejectReasonMaxLength} disabled={processing} onChange={event => setReason(event.target.value)} placeholder="原因会记入审批记录；终端模式的 Agent 会收到，ACP 模式的只知道被拒绝"
+        <textarea aria-label="拒绝原因" value={reason} maxLength={permissionRejectReasonMaxLength} disabled={processing} onChange={event => setReason(event.target.value)} placeholder={permissionRejectReasonHint}
           className="min-h-16 w-full resize-y rounded-md border border-default bg-surface px-2.5 py-2 text-body text-primary outline-none placeholder:text-subtle focus-visible:ring-2 focus-visible:ring-focus-ring"/>
         <div className="mt-1.5"><Button variant="secondary" loading={processing} disabled={!reason.trim()} onClick={() => decide(false, reason.trim())} icon={<X size={14}/>} className="border-warning-border text-warning hover:bg-warning-soft">提交拒绝</Button></div>
       </div>}
