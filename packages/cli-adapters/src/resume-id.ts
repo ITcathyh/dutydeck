@@ -26,7 +26,9 @@ import { createHash } from 'node:crypto';
  * `ses_` alone is not a discriminator: OpenCode mints `ses_<base62>` and mtr
  * mints `ses_<26 alnum>` in their OWN namespaces. What identifies a dutydeck id
  * is the whole shape produced by `makeId('ses')` — `ses_` + `crypto.randomUUID()`
- * — whose hyphenated body no CLI-native `ses_` format here uses.
+ * — whose hyphenated body no CLI-native `ses_` format here uses, plus the
+ * server's stable `ses_<kind>_<sha256>` ids (work items, schedules, memory,
+ * collaboration), whose underscore body none of them uses either.
  *
  * WHY THE PREFIX IS REQUIRED, AND A BARE UUID IS NOT ENOUGH
  * ---------------------------------------------------------
@@ -42,6 +44,11 @@ import { createHash } from 'node:crypto';
 const DUTYDECK_SESSION_ID_RE =
   /^ses_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/** Stable ids the server derives instead: `ses_work_` / `ses_schedule_` /
+ *  `ses_memory_` / `ses_collab_` + sha256 hex. The `_` after the kind keeps
+ *  them apart from OpenCode's base62 and mtr's alphanumeric `ses_` ids. */
+const DUTYDECK_STABLE_SESSION_ID_RE = /^ses_[a-z]+_[0-9a-f]{64}$/i;
+
 /**
  * Is this dutydeck's own session id rather than one the CLI minted?
  *
@@ -55,7 +62,7 @@ const DUTYDECK_SESSION_ID_RE =
  * the CLIs whose ids are opaque, where "not ours" is all that can be proven.
  */
 export function isDutydeckSessionId(sessionId: string): boolean {
-  return DUTYDECK_SESSION_ID_RE.test(sessionId);
+  return DUTYDECK_SESSION_ID_RE.test(sessionId) || DUTYDECK_STABLE_SESSION_ID_RE.test(sessionId);
 }
 
 /**
