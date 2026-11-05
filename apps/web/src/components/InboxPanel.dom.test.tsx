@@ -7,7 +7,7 @@ import { InboxPanel } from './InboxPanel';
 const act = (id: InboxAction['id'], path: string, body: Record<string, unknown> = {}): InboxAction => ({ id, label: ({ approve: '批准', reject: '拒绝', confirm: '确认开始', cancel: '取消', discard: '放弃修订' } as Record<string, string>)[id] ?? id, type: 'api', method: 'POST', path, body });
 const open: InboxAction = { id: 'open', label: '查看', type: 'open' };
 const base = { createdAt: '2026-11-05T00:00:00Z', waitingMs: 12 * 60_000, sessionTitle: '发版', workspace: 'repo' };
-const permission = (n: number): InboxItem => ({ ...base, id: `permission:s${n}:p${n}`, kind: 'permission', sessionId: `s${n}`, title: `权限 ${n}`, actions: [act('approve', `/p/${n}`, { approved: true }), act('reject', `/p/${n}`, { approved: false }), open] });
+const permission = (n: number): InboxItem => ({ ...base, id: `permission:s${n}:p${n}`, kind: 'permission', sessionId: `s${n}`, title: `权限 ${n}`, actions: [act('approve', `/p/${n}`, { approved: true }), { ...act('reject', `/p/${n}`, { approved: false }), reasonMaxLength: 2000 }, open] });
 const work = (n: number): InboxItem => ({ ...base, id: `work_item_confirm:s1:w${n}`, kind: 'work_item_confirm', sessionId: 's1', title: `工作项 ${n}`, revision: 3, actions: [act('confirm', `/w/${n}/confirm`, { expectedRevision: 3 }), act('cancel', `/w/${n}/cancel`, { expectedRevision: 3 }), open] });
 const revision = (n: number): InboxItem => ({ ...base, id: `work_item_revision:s1:w${n}`, kind: 'work_item_revision', sessionId: 's1', title: `修订 ${n}`, revision: 3, actions: [act('confirm', `/w/${n}/confirm`, { expectedRevision: 3 }), act('discard', `/w/${n}/revision/discard`, { expectedRevision: 3 }), open] });
 const result: InboxItem = { ...base, id: 'result_acceptance:s1:t1', kind: 'result_acceptance', sessionId: 's1', title: '修复登录', actions: [{ id: 'lark_card', label: '请在飞书卡片上处理', type: 'lark_card' }, open] };
@@ -51,6 +51,27 @@ describe('InboxPanel', () => {
     expect(await screen.findByText(/已失效：Work item changed/)).toBeTruthy();
   });
 
+  it('拒绝可附原因：直接拒绝的请求体不变；「拒绝并说明」填写后把原因合入请求体，输入框有标签与长度上限', async () => {
+    const user = userEvent.setup(); const call = vi.fn(async (_action: InboxAction) => ({}));
+    render(<InboxPanel {...props} call={call} items={[permission(1), permission(2)]}/>);
+    await user.click(screen.getAllByRole('button', { name: '拒绝' })[0]!);
+    expect(call.mock.calls[0]![0].body).toStrictEqual({ approved: false });
+    const explain = screen.getAllByRole('button', { name: '拒绝并说明' })[1]!;
+    expect(explain.getAttribute('aria-expanded')).toBe('false');
+    await user.click(explain);
+    expect(explain.getAttribute('aria-expanded')).toBe('true');
+    const box = screen.getByLabelText('拒绝原因') as HTMLTextAreaElement;
+    expect(box.maxLength).toBe(2000);
+    expect(box.placeholder).toBe('原因会记入审批记录；终端模式的 Agent 会收到，ACP 模式的只知道被拒绝');
+    const submit = screen.getByRole('button', { name: '提交拒绝' });
+    expect((submit as HTMLButtonElement).disabled).toBe(true);
+    await user.type(box, '  改用 pnpm ');
+    await user.click(submit);
+    expect(call.mock.calls[1]![0]).toMatchObject({ path: '/p/2', body: { approved: false, reason: '改用 pnpm' } });
+    expect(await screen.findAllByText('已处理')).toHaveLength(2);
+    expect(screen.queryByLabelText('拒绝原因')).toBeNull();
+  });
+
   it('多选同类后需二次确认才批量执行，逐项显示成功、已失效与失败', async () => {
     const user = userEvent.setup();
     const call = vi.fn(async (action: InboxAction) => {
@@ -67,7 +88,7 @@ describe('InboxPanel', () => {
     expect(screen.getByText('确认对 3 项执行「拒绝」？')).toBeTruthy();
     await user.click(screen.getByRole('button', { name: '确认执行' }));
     expect(await screen.findByText('拒绝：成功 1 项，已失效 1 项，失败 1 项。')).toBeTruthy();
-    expect(call.mock.calls.map(([action]) => (action as InboxAction).body)).toEqual([{ approved: false }, { approved: false }, { approved: false }]);
+    expect(call.mock.calls.map(([action]) => (action as InboxAction).body)).toStrictEqual([{ approved: false }, { approved: false }, { approved: false }]);
     expect(screen.getByText(/已失效：gone/)).toBeTruthy();
     expect(screen.getByText(/失败：无权拒绝/)).toBeTruthy();
   });

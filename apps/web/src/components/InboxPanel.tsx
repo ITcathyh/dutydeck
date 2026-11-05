@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useId, useMemo, useState } from 'react';
 import { inboxKindLabels } from '@dutydeck/shared';
 import type { InboxAction, InboxItem } from '../api';
 import {
   formatWaiting, inboxBatchActions, inboxKindCounts, isInboxSelectable, runInboxAction, runInboxBatch, type InboxResult
 } from '../inbox-model';
+import { permissionRejectReasonHint } from './PermissionCard';
 import { Badge, Banner, Button, Card, Skeleton } from './primitives';
 
 type InboxPanelProps = {
@@ -36,6 +37,9 @@ export function InboxPanel({ items, loading, failed = false, onRetry, call, onOp
   const [summary, setSummary] = useState<string>();
   const [expanded, setExpanded] = useState(false);
   const [batching, setBatching] = useState(false);
+  /** 正在填拒绝原因的条目；同一时间只展开一条。 */
+  const [explaining, setExplaining] = useState<{ itemId: string; reason: string }>();
+  const reasonIdPrefix = useId();
 
   // 条目消失（已处理或已失效）后，把它从选择与结果里清掉。
   useEffect(() => {
@@ -54,6 +58,7 @@ export function InboxPanel({ items, loading, failed = false, onRetry, call, onOp
     setResult(item.id, { state: 'running' });
     const result = await runInboxAction(action, call);
     setResult(item.id, result);
+    if (result.state !== 'failed') setExplaining(current => current?.itemId === item.id ? undefined : current);
     onSettled?.();
   };
   const runBatch = async () => {
@@ -102,6 +107,10 @@ export function InboxPanel({ items, loading, failed = false, onRetry, call, onOp
         const first = previous?.kind !== item.kind;
         const groupIds = items.filter(candidate => candidate.kind === item.kind && isInboxSelectable(candidate)).map(candidate => candidate.id);
         const groupSelected = groupIds.length > 0 && groupIds.every(id => selected.includes(id));
+        const busy = result?.state === 'running' || result?.state === 'ok' || batching;
+        const reasonAction = item.actions.find(action => action.type === 'api' && action.reasonMaxLength);
+        const reasonOpen = reasonAction && explaining?.itemId === item.id;
+        const reasonId = `${reasonIdPrefix}-${index}`;
         return <div key={item.id}>
           {first && <div className="flex items-center gap-2 border-t border-default bg-muted px-4 py-1.5 first:border-t-0">
             {groupIds.length > 1 && <label className="flex min-h-8 cursor-pointer items-center gap-2 text-caption text-secondary">
@@ -118,13 +127,22 @@ export function InboxPanel({ items, loading, failed = false, onRetry, call, onOp
               {item.detail && <p className="mt-1 break-words text-caption text-secondary">{item.detail}</p>}
               <p className="mt-1 text-caption text-subtle">{item.sessionTitle} · {item.workspace} · 已等待 {formatWaiting(item.waitingMs)}{item.revision !== undefined && typeof item.revision === 'number' ? ` · 版本 ${item.revision}` : ''}</p>
               {result && <p className="mt-1" role="status"><ResultText result={result}/></p>}
+              {reasonOpen && <div className="mt-2">
+                <label htmlFor={reasonId} className="text-caption font-medium text-secondary">拒绝原因</label>
+                <textarea id={reasonId} value={explaining.reason} maxLength={reasonAction.reasonMaxLength} disabled={busy} onChange={event => setExplaining({ itemId: item.id, reason: event.target.value })} placeholder={permissionRejectReasonHint}
+                  className="mt-1 min-h-16 w-full resize-y rounded-md border border-default bg-surface px-2.5 py-2 text-body text-primary outline-none placeholder:text-subtle focus-visible:ring-2 focus-visible:ring-focus-ring"/>
+                <div className="mt-1.5"><Button size="sm" variant="danger" disabled={busy || !explaining.reason.trim()} onClick={() => void runOne(item, { ...reasonAction, body: { ...reasonAction.body, reason: explaining.reason.trim() } })}>提交拒绝</Button></div>
+              </div>}
             </div>
             <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
               {item.actions.map(action => action.type === 'lark_card'
                 ? <span key={action.id} className="text-caption text-subtle">{action.label}</span>
                 : action.type === 'open'
                   ? <Button key={action.id} size="sm" variant="ghost" onClick={() => onOpen(item.sessionId)}>{action.label}</Button>
-                  : <Button key={action.id} size="sm" variant={toneOf(action)} disabled={result?.state === 'running' || result?.state === 'ok' || batching} onClick={() => void runOne(item, action)}>{action.label}</Button>)}
+                  : <Fragment key={action.id}>
+                    <Button size="sm" variant={toneOf(action)} disabled={busy} onClick={() => void runOne(item, action)}>{action.label}</Button>
+                    {action === reasonAction && <Button size="sm" variant="secondary" disabled={busy} aria-expanded={Boolean(reasonOpen)} aria-controls={reasonOpen ? reasonId : undefined} onClick={() => setExplaining(reasonOpen ? undefined : { itemId: item.id, reason: '' })}>{action.label}并说明</Button>}
+                  </Fragment>)}
             </div>
           </div>
         </div>;

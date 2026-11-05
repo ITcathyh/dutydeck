@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import Fastify from 'fastify';
-import type { ConfigRepository, Session, TaskRecord, WorkItem } from '@dutydeck/shared';
+import { permissionRejectReasonMaxLength, type ConfigRepository, type InboxAction, type Session, type TaskRecord, type WorkItem } from '@dutydeck/shared';
 import { signSessionShareToken } from './auth/auth.js';
 import { buildApp } from './app.js';
 import { collectInbox, registerInboxRoutes, type InboxSources } from './inbox.js';
@@ -40,7 +40,9 @@ describe('collectInbox', () => {
     const [permission] = items;
     expect(permission).toMatchObject({ id: 'permission:s1:p1', sessionTitle: '发版', workspace: 's1', waitingMs: 30 * 60_000, detail: 'rm -rf build' });
     expect(permission!.actions[0]).toMatchObject({ id: 'approve', type: 'api', method: 'POST', path: '/api/sessions/s1/permissions/p1', body: { approved: true } });
-    expect(permission!.actions[1]).toMatchObject({ id: 'reject', body: { approved: false } });
+    expect(permission!.actions[1]).toMatchObject({ id: 'reject', reasonMaxLength: permissionRejectReasonMaxLength });
+    expect(permission!.actions[1]!.body).toStrictEqual({ approved: false });
+    expect(permission!.actions[0]).not.toHaveProperty('reasonMaxLength');
     expect(items[2]).toMatchObject({ title: '发布哪个版本？', waitingMs: 15 * 60_000 });
   });
 
@@ -214,6 +216,31 @@ describe('GET /api/inbox', () => {
     const ok = await app.inject({ method: 'GET', url: '/api/inbox', headers: { authorization: 'Bearer secret-token' }, ...remote });
     expect(ok.statusCode).toBe(200);
     expect(ok.json().items.map((item: { id: string }) => item.id)).toEqual(['permission:s1:p1']);
+  });
+});
+
+describe('收件箱拒绝原因', () => {
+  it('按条目上的拒绝动作提交：不填原因时请求体不变，填了原因交给 Agent，超长原因被原接口拒绝', async () => {
+    const resolved: unknown[][] = [];
+    const stub: any = {
+      listSessions: async () => [session('s1')], getTasks: async () => [], getSession: async (id: string) => ({ id }),
+      getPendingPermissions: () => [{ id: 'p1', title: 'a', status: 'pending' }],
+      resolvePermission: async (...args: unknown[]) => { resolved.push(args); return true; }
+    };
+    const app = await buildApp(stub);
+    try {
+      const [item] = (await app.inject({ method: 'GET', url: '/api/inbox' })).json().items;
+      const reject = (item.actions as InboxAction[]).find(action => action.id === 'reject')!;
+      expect(reject.reasonMaxLength).toBe(permissionRejectReasonMaxLength);
+      const submit = (reason?: string) => app.inject({ method: reject.method!, url: reject.path!, payload: reason === undefined ? reject.body : { ...reject.body, reason } });
+      expect((await submit()).statusCode).toBe(200);
+      expect((await submit('改用 pnpm')).statusCode).toBe(200);
+      expect(resolved).toEqual([['s1', 'p1', false, undefined], ['s1', 'p1', false, '改用 pnpm']]);
+      const tooLong = await submit('x'.repeat(reject.reasonMaxLength! + 1));
+      expect(tooLong.statusCode).toBe(400);
+      expect(tooLong.json()).toMatchObject({ error: { code: 'INVALID_PERMISSION_REASON' } });
+      expect(resolved).toHaveLength(2);
+    } finally { await app.close(); }
   });
 });
 
