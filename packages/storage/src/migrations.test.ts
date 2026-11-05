@@ -159,8 +159,12 @@ describe('storage migrations', () => {
     expect({ sessions: db.prepare('SELECT * FROM sessions').all(), configs: db.prepare('SELECT * FROM configs ORDER BY key').all() }).toEqual(before);
     expect(db.pragma('foreign_key_check')).toEqual([]);
     expect(db.pragma('integrity_check', { simple: true })).toBe('ok');
-    // 规则至少两个词，必须记录机器人和创建人。
-    expect(() => db.prepare("INSERT INTO workspace_approval_rules VALUES ('x','cli_a','/r','pnpm','ou_a','t')").run()).toThrow(/CHECK/);
+    // 规则是白名单命令词以单个空格连接，可以是单个词（pytest）；必须记录机器人和创建人。
+    for (const [index, pattern] of ['pytest', 'pnpm test', 'pnpm run build:web', 'make lint-all_2'].entries())
+      db.prepare("INSERT INTO workspace_approval_rules VALUES (?,'cli_a','/r',?,'ou_a','t')").run(`ok${index}`, pattern);
+    for (const pattern of ['', ' pytest', 'pytest ', 'pnpm  test', 'pnpm\ttest', '1pytest', 'pytest;rm', 'pnpm test $(x)', 'git log /tmp', 'a'.repeat(1025)])
+      expect(() => db.prepare("INSERT INTO workspace_approval_rules VALUES ('x','cli_a','/r',?,'ou_a','t')").run(pattern), JSON.stringify(pattern)).toThrow(/CHECK/);
+    db.prepare("DELETE FROM workspace_approval_rules").run();
     expect(() => db.prepare("INSERT INTO workspace_approval_rules VALUES ('x','cli_a','/r','pnpm test',NULL,'t')").run()).toThrow(/NOT NULL/);
     expect(() => db.prepare("INSERT INTO workspace_approval_rules VALUES ('x',NULL,'/r','pnpm test','ou_a','t')").run()).toThrow(/NOT NULL/);
     runMigrations(db);

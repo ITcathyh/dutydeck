@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
 import { delay, submitPrompt } from './input-settle.js';
@@ -10,17 +10,24 @@ const KIMI_FIRST_WRITE_SETTLE_MS = 250;
 const KIMI_HELP_TIMEOUT_MS = 3000;
 
 const kimiFirstWriteSeen = new WeakSet<PtyLike>();
+/** 按命令缓存的 `--auto` 探测；存 Promise，并发启动同一命令只读一次帮助。 */
+const kimiAutoProbes = new Map<string, Promise<boolean>>();
 const kimiAutoSupport = new Map<string, boolean>();
 
-/** 读一次 `<command> --help` 并按命令缓存：帮助里列出 `--auto` 才算支持。
- *  同样叫 `kimi` 的 Python 版 kimi-cli 没有 `--auto`，传了会因未知选项退出；探测失败也按不支持处理。 */
-function kimiSupportsAuto(command: string): boolean {
-  const cached = kimiAutoSupport.get(command);
-  if (cached !== undefined) return cached;
-  const result = spawnSync(command, ['--help'], { encoding: 'utf8', timeout: KIMI_HELP_TIMEOUT_MS, env: { ...process.env, NO_COLOR: '1' } });
-  const supported = result.status === 0 && /(^|[\s,])--auto(?![\w-])/m.test(`${result.stdout ?? ''}\n${result.stderr ?? ''}`);
-  kimiAutoSupport.set(command, supported);
-  return supported;
+/** 异步读一次 `<command> --help`：帮助里列出 `--auto` 才算支持。
+ *  同样叫 `kimi` 的 Python 版 kimi-cli 没有 `--auto`，传了会因未知选项退出；探测失败也按不支持处理。
+ *  env 用 driver 给的 spawn 环境（已经过 child-environment 清洗），与真正启动 CLI 时一致。 */
+function probeKimiAuto(command: string, env: Record<string, string>): Promise<boolean> {
+  let probe = kimiAutoProbes.get(command);
+  if (!probe) {
+    probe = new Promise<boolean>(resolve => {
+      execFile(command, ['--help'], { encoding: 'utf8', timeout: KIMI_HELP_TIMEOUT_MS, env: { ...env, NO_COLOR: '1' } }, (error, stdout, stderr) => {
+        resolve(!error && /(^|[\s,])--auto(?![\w-])/m.test(`${stdout ?? ''}\n${stderr ?? ''}`));
+      });
+    }).then(supported => { kimiAutoSupport.set(command, supported); return supported; });
+    kimiAutoProbes.set(command, probe);
+  }
+  return probe;
 }
 
 export function createKimiAdapter(): CliAdapter {
@@ -28,10 +35,15 @@ export function createKimiAdapter(): CliAdapter {
     id: 'kimi',
     capabilities: { resume: true },
 
+    async prepareLaunch({ command, permissionMode }: AdapterSessionContext, env: Record<string, string>): Promise<void> {
+      if (permissionMode === 'full-trust') await probeKimiAuto(command || 'kimi', env);
+    },
+
     buildArgs({ command, resume, resumeSessionId, model, permissionMode }: AdapterSessionContext): string[] {
       // Kimi Code 的 `--yolo` 只放行普通工具调用，高危操作仍会停下等人；`--auto`（Never Ask）才是免审批。
-      // Python 版 kimi-cli 只有 `--yolo`（它在那里就是全部放行），所以只在帮助里确认有 `--auto` 时才用它。
-      const args: string[] = permissionMode === 'full-trust' ? [kimiSupportsAuto(command || 'kimi') ? '--auto' : '--yolo'] : [];
+      // Python 版 kimi-cli 只有 `--yolo`（它在那里就是全部放行），所以只在 prepareLaunch 确认帮助里有 `--auto` 时才用它；
+      // 没探测过（调用方没先 prepareLaunch）也按不支持处理。
+      const args: string[] = permissionMode === 'full-trust' ? [kimiAutoSupport.get(command || 'kimi') ? '--auto' : '--yolo'] : [];
       if (model && model.trim()) {
         args.push('--model', model.trim());
       }

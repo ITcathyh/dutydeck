@@ -17,16 +17,19 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { PtyLike } from './types.js';
 
-// Kimi 适配器读 `<command> --help` 决定 full-trust 用 `--auto` 还是 `--yolo`；按命令名给假帮助，缺省是支持 `--auto` 的 Kimi Code。
+// Kimi 适配器在 prepareLaunch 里异步读 `<command> --help` 决定 full-trust 用 `--auto` 还是 `--yolo`；
+// 按命令名给假帮助，缺省是支持 `--auto` 的 Kimi Code。回调放到下一个宏任务，模拟真实子进程的异步返回。
 const kimiHelp = vi.hoisted(() => ({
-  byCommand: new Map<string, { status: number | null; stdout: string }>(),
-  calls: [] as string[],
+  byCommand: new Map<string, { error?: Error; stdout: string }>(),
+  calls: [] as Array<{ command: string; env: Record<string, string> }>,
 }));
 vi.mock('node:child_process', async (importOriginal) => ({
   ...(await importOriginal<typeof import('node:child_process')>()),
-  spawnSync: (command: string) => {
-    kimiHelp.calls.push(command);
-    return { stderr: '', ...(kimiHelp.byCommand.get(command) ?? { status: 0, stdout: '  --auto  Never ask\n  --yolo\n' }) };
+  spawnSync: () => { throw new Error('kimi must not probe synchronously'); },
+  execFile: (command: string, _args: string[], options: { env: Record<string, string> }, callback: (error: Error | null, stdout: string, stderr: string) => void) => {
+    kimiHelp.calls.push({ command, env: options.env });
+    const result = kimiHelp.byCommand.get(command) ?? { stdout: '  --auto  Never ask\n  --yolo\n' };
+    setTimeout(() => callback(result.error ?? null, result.stdout, ''), 0);
   },
 }));
 
@@ -451,29 +454,45 @@ describe('cursor', () => {
 
 describe('kimi', () => {
   const adapter = createKimiAdapter();
+  const ENV = { PATH: '/usr/bin', HOME: '/home/u' };
 
-  it('安全模式无 bypass，full-trust 使用 --auto 而不是 --yolo', () => {
+  it('安全模式无 bypass，full-trust 探测后使用 --auto 而不是 --yolo', async () => {
     expect(adapter.buildArgs({ sessionId: SID, permissionMode: 'ask' })).toEqual([]);
+    await adapter.prepareLaunch!({ sessionId: SID, ...FULL_TRUST }, ENV);
     expect(adapter.buildArgs({ sessionId: SID, ...FULL_TRUST })).toEqual(['--auto']);
-  });
-
-  it('full-trust 恢复会话同样用 --auto，不带 --yolo', () => {
     expect(adapter.buildArgs({ sessionId: SID, resume: true, resumeSessionId: 'kimi-sid', ...FULL_TRUST })).toEqual(['--auto', '--resume', 'kimi-sid']);
   });
 
-  it('帮助里没有 --auto 的 Python 版 kimi-cli 退回 --yolo；帮助按命令只读一次', () => {
-    kimiHelp.byCommand.set('/opt/py/kimi', { status: 0, stdout: '  --yolo, -y  Automatically approve all actions\n  --auto-update\n' });
+  it('探测异步进行、不阻塞事件循环，用调用方给的环境，按命令只读一次帮助', async () => {
     const before = kimiHelp.calls.length;
-    expect(adapter.buildArgs({ sessionId: SID, command: '/opt/py/kimi', ...FULL_TRUST })).toEqual(['--yolo']);
-    expect(adapter.buildArgs({ sessionId: SID, command: '/opt/py/kimi', resume: true, resumeSessionId: 'kimi-sid', ...FULL_TRUST })).toEqual(['--yolo', '--resume', 'kimi-sid']);
-    expect(kimiHelp.calls.slice(before)).toEqual(['/opt/py/kimi']);
+    const order: string[] = [];
+    const first = adapter.prepareLaunch!({ sessionId: SID, command: '/opt/async/kimi', ...FULL_TRUST }, ENV).then(() => order.push('probe'));
+    const second = adapter.prepareLaunch!({ sessionId: SID, command: '/opt/async/kimi', ...FULL_TRUST }, ENV);
+    // 探测进行中 buildArgs 不等待、不起子进程，按不支持处理。
+    expect(adapter.buildArgs({ sessionId: SID, command: '/opt/async/kimi', ...FULL_TRUST })).toEqual(['--yolo']);
+    order.push('sync');
+    await Promise.all([first, second]);
+    expect(order).toEqual(['sync', 'probe']);
+    await adapter.prepareLaunch!({ sessionId: SID, command: '/opt/async/kimi', ...FULL_TRUST }, ENV);
+    expect(kimiHelp.calls.slice(before)).toEqual([{ command: '/opt/async/kimi', env: { ...ENV, NO_COLOR: '1' } }]);
+    expect(adapter.buildArgs({ sessionId: SID, command: '/opt/async/kimi', ...FULL_TRUST })).toEqual(['--auto']);
   });
 
-  it('帮助读取失败时不冒险传 --auto；非 full-trust 不读帮助', () => {
-    kimiHelp.byCommand.set('/opt/broken/kimi', { status: null, stdout: '' });
+  it('帮助里没有 --auto 的 Python 版 kimi-cli 退回 --yolo', async () => {
+    kimiHelp.byCommand.set('/opt/py/kimi', { stdout: '  --yolo, -y  Automatically approve all actions\n  --auto-update\n' });
+    await adapter.prepareLaunch!({ sessionId: SID, command: '/opt/py/kimi', ...FULL_TRUST }, ENV);
+    expect(adapter.buildArgs({ sessionId: SID, command: '/opt/py/kimi', ...FULL_TRUST })).toEqual(['--yolo']);
+    expect(adapter.buildArgs({ sessionId: SID, command: '/opt/py/kimi', resume: true, resumeSessionId: 'kimi-sid', ...FULL_TRUST })).toEqual(['--yolo', '--resume', 'kimi-sid']);
+  });
+
+  it('帮助读取失败或超时时不冒险传 --auto；非 full-trust 不读帮助；没探测过也退回 --yolo', async () => {
+    kimiHelp.byCommand.set('/opt/broken/kimi', { error: Object.assign(new Error('timed out'), { killed: true }), stdout: '  --auto\n' });
+    await adapter.prepareLaunch!({ sessionId: SID, command: '/opt/broken/kimi', ...FULL_TRUST }, ENV);
     expect(adapter.buildArgs({ sessionId: SID, command: '/opt/broken/kimi', ...FULL_TRUST })).toEqual(['--yolo']);
     const before = kimiHelp.calls.length;
+    await adapter.prepareLaunch!({ sessionId: SID, command: '/opt/other/kimi', permissionMode: 'ask' }, ENV);
     expect(adapter.buildArgs({ sessionId: SID, command: '/opt/other/kimi', permissionMode: 'ask' })).toEqual([]);
+    expect(adapter.buildArgs({ sessionId: SID, command: '/opt/never/kimi', ...FULL_TRUST })).toEqual(['--yolo']);
     expect(kimiHelp.calls.length).toBe(before);
   });
 
@@ -662,9 +681,11 @@ describe('全适配器横切契约', () => {
     }
   });
 
-  it('full-trust 为每个支持显式放行的 CLI 注入其原生参数/settings', () => {
+  it('full-trust 为每个支持显式放行的 CLI 注入其原生参数/settings', async () => {
     for (const [id, signatures] of Object.entries(fullTrustSignatures)) {
-      const serialized = createCliAdapter(id).buildArgs({ sessionId: SID, ...FULL_TRUST }).join('\u0000');
+      const adapter = createCliAdapter(id);
+      await adapter.prepareLaunch?.({ sessionId: SID, ...FULL_TRUST }, {});
+      const serialized = adapter.buildArgs({ sessionId: SID, ...FULL_TRUST }).join('\u0000');
       for (const signature of signatures) {
         expect(serialized, `${id}/full-trust 应包含 ${signature}`).toContain(signature);
       }

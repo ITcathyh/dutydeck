@@ -83,6 +83,44 @@ describe('PtyCliDriver（PtyBackend + 假 CLI 集成）', () => {
     } finally { await driver.stop(); }
   }, 30_000);
 
+  it('awaits adapter.prepareLaunch with the cleaned spawn env before buildArgs on start and on resume respawn', async () => {
+    const inherited = { BOTMUX_SESSION_ID: 'outer-turn', DUTYDECK_API_TOKEN: 'daemon-secret', ANTHROPIC_API_KEY: 'daemon-key' };
+    const saved = Object.fromEntries(Object.keys(inherited).map(key => [key, process.env[key]]));
+    Object.assign(process.env, inherited);
+    const calls: string[] = [];
+    const envs: Record<string, string>[] = [];
+    let prepared = false;
+    const adapter: CliAdapter = {
+      id: 'mock', capabilities: { resume: true },
+      prepareLaunch: async (_context, env) => {
+        calls.push('prepare');
+        envs.push(env);
+        await new Promise(resolve => setTimeout(resolve, 20));
+        prepared = true;
+      },
+      buildArgs: context => { calls.push(context.resume ? 'buildArgs:resume' : 'buildArgs'); expect(prepared).toBe(true); prepared = false; return [fixturePath]; },
+      buildResumeCommand: id => ['--resume', id],
+      writeInput: (backend, prompt) => { backend.write(prompt + '\n'); },
+      completionPattern: /MOCK DONE/,
+    };
+    const driver = new PtyCliDriver({ agent: { id: 'mock', name: 'Mock', command: process.execPath, args: [], protocol: 'pty-cli',
+      cwd: dir, env: { KIMI_ACCOUNT: 'configured' }, permissionMode: 'full-trust', timeout: 600, capabilities: { pause: false, resume: true }, builtin: false },
+      adapter, backend: new PtyBackend(), onEvent: () => {}, onExit: () => {}, sessionId: 'prepare-session' });
+    try {
+      await driver.start();
+      await driver.resume();
+      expect(calls).toEqual(['prepare', 'buildArgs', 'prepare', 'buildArgs:resume']);
+      for (const env of envs) {
+        expect(env.KIMI_ACCOUNT).toBe('configured');
+        expect(env.PATH).toBe(process.env.PATH);
+        for (const key of Object.keys(inherited)) expect(env[key], key).toBeUndefined();
+      }
+    } finally {
+      await driver.stop();
+      for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+    }
+  });
+
   it('start 收 raw_terminal，每轮 send 恰好一次 completed，stop 触发生命周期回调', async () => {
     const events: NormalizedDriverEvent[] = [];
     let exitCode: number | null | undefined;

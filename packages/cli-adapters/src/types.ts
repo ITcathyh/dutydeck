@@ -61,6 +61,11 @@ export interface CliAdapterCapabilities {
 export interface CliAdapter {
   readonly id: string;
   readonly capabilities: CliAdapterCapabilities;
+  /**
+   * 每次 spawn/respawn 前、调用 buildArgs 之前由 driver 等待的异步准备（如探测已安装 CLI 的选项）。
+   * env 是即将用于启动 CLI 的子进程环境（已按 child-environment 清洗）；探测结果由适配器自己缓存，buildArgs 保持同步。
+   */
+  prepareLaunch?(ctx: AdapterSessionContext, env: Record<string, string>): Promise<void>;
   /** 构造 spawn 参数（bin 由 driver 层的 AgentConfig.command 提供，适配器不解析 bin 路径） */
   buildArgs(ctx: AdapterSessionContext): string[];
   /** 把 prompt 写进后端（paste+Enter / 分块 stdin / runner 帧，因 CLI 而异） */

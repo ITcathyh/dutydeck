@@ -52,6 +52,16 @@ describe('WorkspaceApprovals', () => {
     expect(await h.approvals.candidate({ ...scope, appId: 'cli_b' }, request('pnpm test', true, h.link))).toEqual({ workspace: h.workspace, pattern: 'pnpm test' });
   });
 
+  it('saves a single-word pytest rule and matches later pytest commands with it', async () => {
+    const h = await setup();
+    const candidate = await h.approvals.candidate(scope, request('pytest -q tests', true, h.link));
+    expect(candidate).toEqual({ workspace: h.workspace, pattern: 'pytest' });
+    await h.approvals.remember({ appId: 'cli_a', ...candidate! }, 'ou_alice');
+    expect(await h.approvals.list({ workspace: h.workspace })).toEqual([expect.objectContaining({ pattern: 'pytest', createdBy: 'ou_alice' })]);
+    expect(await h.approvals.match(scope, request('pytest -x tests/unit', true, h.link))).toBe('pytest');
+    expect(await h.approvals.match(scope, request('pytest -p plugin', true, h.link))).toBeUndefined();
+  });
+
   it('ignores saved rules outside the whitelist and checks the arguments (findings 1, 4)', async () => {
     const h = await setup();
     for (const pattern of ['pnpm exec', 'git stash', 'npm config']) h.repos.workspaceApprovalRules!.add({ appId: 'cli_a', workspace: h.workspace, pattern, createdBy: 'ou_alice' });

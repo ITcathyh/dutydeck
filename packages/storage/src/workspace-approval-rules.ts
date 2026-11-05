@@ -2,13 +2,15 @@ import type Database from 'better-sqlite3';
 import { makeId, type WorkspaceApprovalRule, type WorkspaceApprovalRuleRepository } from '@dutydeck/shared';
 import { cachedStatement } from './database-control.js';
 
-/** v46：按工作区记住的审批规则，按机器人（app_id）隔离。工作区是目录的真实路径、机器人可能已删除，都不是表里的实体，所以没有外键。 */
+/** v46：按工作区记住的审批规则，按机器人（app_id）隔离。工作区是目录的真实路径、机器人可能已删除，都不是表里的实体，所以没有外键。
+ * pattern 只约束 shared 白名单规则的形状：字母开头、由 `[A-Za-z0-9:_-]` 词以单个空格连接，可以是单个词（如 `pytest`）。 */
 export function createWorkspaceApprovalRuleSchema(db: Database.Database) {
   db.exec(`CREATE TABLE workspace_approval_rules (
     id TEXT PRIMARY KEY,
     app_id TEXT NOT NULL CHECK(length(app_id) BETWEEN 1 AND 256),
     workspace TEXT NOT NULL CHECK(length(workspace) BETWEEN 1 AND 4096),
-    pattern TEXT NOT NULL CHECK(length(pattern) BETWEEN 3 AND 1024 AND instr(pattern, ' ') > 0),
+    pattern TEXT NOT NULL CHECK(length(pattern) BETWEEN 1 AND 1024 AND pattern GLOB '[A-Za-z]*' AND pattern NOT GLOB '*[^A-Za-z0-9:_ -]*'
+      AND pattern NOT GLOB '* ' AND instr(pattern, '  ') = 0),
     created_by TEXT NOT NULL CHECK(length(created_by) BETWEEN 1 AND 256),
     created_at TEXT NOT NULL,
     UNIQUE(app_id, workspace, pattern)

@@ -354,6 +354,8 @@ export class PtyCliDriver implements AgentDriver {
     if (persistent && !nativeSessionId && this.hasPinnedNativeSession()) {
       throw new DriverRecoveryError('Pinned Claude session exists without a verified session marker; refusing to reuse its id for a fresh launch');
     }
+    await this.prepareLaunch();
+    check();
     const resumeFragment = nativeSessionId && this.adapter.buildResumeCommand?.(nativeSessionId);
     if (nativeSessionId && resumeFragment) {
       this.cliSessionId = nativeSessionId;
@@ -453,6 +455,11 @@ export class PtyCliDriver implements AgentDriver {
     for (const pending of this.transcriptSources.pendingLaunches()) {
       await this.verifyTranscriptLaunch(pending.observationId, pending.client, pending.dataRoot);
     }
+  }
+
+  /** buildArgs 之前的异步准备（如 Kimi 探测 `--auto`），用即将启动 CLI 的同一份清洗后环境；不阻塞事件循环。 */
+  private async prepareLaunch(): Promise<void> {
+    await this.adapter.prepareLaunch?.(this.sessionContext(), this.spawnEnv());
   }
 
   /** spawn 环境，首次调用时算好并缓存。resume-without-start 也走这里。 */
@@ -827,6 +834,8 @@ export class PtyCliDriver implements AgentDriver {
     }
     // 路径 2：适配器支持 CLI 级 resume → kill 旧后端，带 resume 参数重 spawn。
     if (!this.adapter.buildResumeCommand) return;   // 无 resume 能力 → no-op
+    await this.prepareLaunch();
+    if (this.superseded(backend, generation)) return;
     const plan = this.planResume();
     await this.transcript?.flush();
     if (this.superseded(backend, generation)) return;
