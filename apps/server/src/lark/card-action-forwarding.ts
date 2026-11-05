@@ -2,12 +2,8 @@ import { parseLarkCardActionValue } from './card-actions.js';
 import { parseCardActionValue } from './card-elements.js';
 import { LarkServiceError } from './service.js';
 
-export interface CardActionForwarding {
-  owner: string;
-  url: string;
-  token: string;
-  legacyActions?: string[];
-}
+import type { CardActionForwarding } from '@dutydeck/shared';
+export type { CardActionForwarding };
 
 /** Validate at both the save and load boundaries; never accept remote plaintext credentials. */
 export function parseCardActionForwarding(value: unknown): CardActionForwarding | undefined {

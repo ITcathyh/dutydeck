@@ -1,4 +1,4 @@
-import { terminalTaskStatuses, type AgentEvent, type VerificationResponse, type VerificationStatus } from '@dutydeck/shared';
+import { isChildDiagnostic, terminalTaskStatuses, type AgentEvent, type VerificationResponse, type VerificationStatus } from '@dutydeck/shared';
 import type { StoredLarkConfig } from './config.js';
 import { boundLarkCardElements, LarkServiceError } from './service.js';
 import { redactTraceText, sensitiveTraceKey } from './secret-redaction.js';
@@ -62,16 +62,6 @@ export function patchRejectedCardDelta(previous: LarkCardElement[] = [], current
     ...(suffix ? current.slice(current.length - suffix) : [])
   ]);
 }
-
-const isChildDiagnostic = (value: unknown) => {
-  if (!value || typeof value !== 'object') return false;
-  const data = value as Record<string, any>;
-  return data.diagnostic === data.state
-  && typeof data.id === 'string' && /^child_diagnostic_[a-f0-9]{64}$/.test(data.id)
-  && typeof data.activityId === 'string' && typeof data.parentTurnId === 'string' && typeof data.childTurnId === 'string'
-  && typeof data.parentThreadId === 'string' && typeof data.childThreadId === 'string'
-  && (data.state === 'child_quota' && data.code === 'usage_limit_exceeded' || data.state === 'child_rate_limit' && data.code === 'rate_limit');
-};
 
 function compactTraceEntries(events: AgentEvent[]): TraceEntry[] {
   const result: TraceEntry[] = [];

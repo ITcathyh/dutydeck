@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { DockEvent } from './api';
 import { createEventWindow, mergeReconciledEvents } from './event-history';
-import { createRawLogProjector } from './raw-log';
+import { createRawLogProjector, hasRawText } from './raw-log';
 
 const event = (sequence: number, type = 'raw_terminal', text = `screen ${sequence}\n`): DockEvent => ({ id: `raw-${sequence}`, sequence, type, timestamp: '', data: { text } });
 const full = (events: DockEvent[]) => events.filter(event => event.type === 'raw_terminal').map(event => event.raw ?? event.data.text).join('');
@@ -32,5 +32,11 @@ describe('complete incremental raw log', () => {
       expect(project(window.events, window)).toContain('complete old screen\n');
     }
     expect(read).not.toHaveBeenCalled();
+  });
+
+  it('reports raw output exactly when the projected log would be non-empty', () => {
+    const raw = (sequence: number, data: Record<string, unknown>, rawText?: string): DockEvent => ({ id: `r${sequence}`, sequence, type: 'raw_terminal', timestamp: '', data, ...(rawText === undefined ? {} : { raw: rawText }) });
+    const cases: DockEvent[][] = [[], [raw(1, { text: '' })], [raw(1, {})], [raw(1, { text: 'x' })], [raw(1, { text: 'x' }, '')], [raw(1, {}, 'y')], [{ id: 't', sequence: 1, type: 'text', timestamp: '', data: { text: 'z' } }]];
+    for (const events of cases) expect(hasRawText(events)).toBe(Boolean(createRawLogProjector()(events)));
   });
 });

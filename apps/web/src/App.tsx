@@ -19,7 +19,7 @@ import { FolderCog, PanelRightClose, PanelRightOpen, Terminal, X } from 'lucide-
 import { api, type RunSummary, type Session, type SteeringResult, type Task } from './api';
 import { useDockStore } from './store';
 import { createTimelineProjector, pendingPermissionId } from './timeline';
-import { createRawLogProjector } from './raw-log';
+import { createRawLogProjector, hasRawText } from './raw-log';
 import { Composer, type SendMode } from './components/Composer';
 import { busyStates, effectiveStatus, ToolbarButton } from './components/ui';
 import { Banner, Button, Card, Dialog, IconButton, Spinner } from './components/primitives';
@@ -36,7 +36,7 @@ import { loadSessions } from './sessions-query';
 import { buildPrompt, commandsFromEvents, currentContextStats, getModelReadiness } from './composer-utils';
 import { agentModelsQueryKey, loadAgentModels, readCachedAgentModels } from './model-cache';
 import { useEventHistory } from './useEventHistory';
-import { completeEventHistory, type EventWindow } from './event-history';
+import { createCompleteHistoryProjector, type EventWindow } from './event-history';
 import { summaryFromTasks } from './run-summary';
 import { nextActionForState, sessionWorkspaceName, type WorkbenchView } from './workspace-model';
 import { appLocationPath, OVERLAY_HISTORY_MARK, parseAppLocation, type AppLocation, type OverlayRoute, type PrimaryNav, type LarkSetupTarget } from './app-route';
@@ -410,8 +410,13 @@ export default function App() {
   const visibleTasks = useMemo(() => { const summarized = new Set(historyTurns?.map(turn => turn.taskId)); return tasks.data?.filter(task => !summarized.has(task.id)); }, [tasks.data, historyTurns]);
   const { timeline, timelineSections } = useMemo(() => projectTimeline(eventList, visibleTasks, events.data?.hasOlder, events.data), [projectTimeline, eventList, visibleTasks, events.data?.hasOlder]);
   const projectRaw = useMemo(() => createRawLogProjector(), [activeSessionId]);
-  const completeRawEvents = useMemo(() => completeEventHistory(events.rawEvents, eventList), [events.rawEvents, eventList]);
-  const raw = useMemo(() => projectRaw(completeRawEvents ?? eventList), [projectRaw, completeRawEvents, eventList]);
+  const projectCompleteHistory = useMemo(() => createCompleteHistoryProjector(), [activeSessionId]);
+  const completeHistory = useMemo(() => projectCompleteHistory(events.rawEvents, events.data), [projectCompleteHistory, events.rawEvents, events.data]);
+  const completeRawEvents = completeHistory?.events;
+  const rawSource = completeHistory ?? events.data;
+  // 原始日志面板打开时才拼接全文；关着只需知道有没有原始输出。
+  const raw = useMemo(() => rawVisible ? projectRaw(rawSource?.events ?? [], rawSource) : '', [rawVisible, projectRaw, rawSource]);
+  const rawAvailable = useMemo(() => Boolean(events.data?.highWaterMark) || (rawVisible ? Boolean(raw) : hasRawText(rawSource?.events ?? [])), [events.data?.highWaterMark, rawVisible, raw, rawSource]);
   const fullHistoryNeeded = rawVisible || traceOpen;
   useEffect(() => { if (fullHistoryNeeded) void events.loadAll(); else events.releaseRaw(); }, [fullHistoryNeeded, activeSessionId, events.loadAll, events.releaseRaw]);
   useEffect(() => {
@@ -514,7 +519,7 @@ export default function App() {
       'restart-run': () => { if (active.state === 'failed' || active.state === 'stopped') restart.mutate(active.id); },
       'archive-run': () => { if (!active.archivedAt) { archive.reset(); setArchiveConfirm(true); } },
       'toggle-detail-tab': () => { setDetailTab(tab => tab === 'timeline' ? 'changes' : tab === 'changes' && isPtyCli ? 'terminal' : 'timeline'); },
-      'toggle-raw-log': () => { if (events.data?.highWaterMark || raw) toggleRawPanel(); }
+      'toggle-raw-log': () => { if (rawAvailable) toggleRawPanel(); }
     } : {})
   // openCreateTask / openSettings / openLarkSetup / act 每次渲染重建但只读最新 state，hook 内部用 ref 同步，
   // 因此依赖数组只跟踪真正影响可用性的值。
@@ -524,7 +529,7 @@ export default function App() {
   // 打开或刷新任务中心后按 n 永久跳到设置与接入。hook 内部同步的是这个 memo 对象本身，
   // 救不了对象里的陈旧闭包。
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [active, agents.data, isPtyCli, raw, selectSession, toggleRawPanel, detailTab, taskViews, sidebarCollapsed, mobile, setPrimaryNav]);
+  }), [active, agents.data, isPtyCli, rawAvailable, selectSession, toggleRawPanel, detailTab, taskViews, sidebarCollapsed, mobile, setPrimaryNav]);
   useKeyboardShortcuts(shortcutHandlers, { enabled: !overlayOpen, sessionOpen: Boolean(active) });
   /**
    * 帮助面板的可用性标注刻意不传 enabled。
@@ -606,7 +611,7 @@ export default function App() {
       : primaryNav === 'groups' ? <Suspense fallback={<div className="grid min-h-0 flex-1 place-items-center"><Spinner label="正在打开群聊管理…"/></div>}><GroupManagement selectedChatId={selectedChatId} selectedAppId={selectedAppId} onSelectGroup={selectGroup} onNavigateToBot={selectBot} agents={agents.data ?? []}/></Suspense>
       : primaryNav === 'automation' ? <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6"><h1 className="mb-5 text-display font-semibold">自动化</h1><Suspense fallback={<Spinner label="正在读取任务自动化…"/>}><AutomationOverview agents={agents.data ?? []} capabilities={systemCapabilities.data} onOpenAgentSetup={() => openSettings('agents')} sessions={visibleSessions} summaries={runSummaries} onSelectSession={selectSession}/></Suspense></div>
       : route.kind === 'not-found' ? renderNotFound('page') : blockingMainQueryFailures.length ? renderBlockingFailure() : route.kind === 'session' && sessions.isPending ? <div className="grid min-h-0 flex-1 place-items-center"><Spinner label="正在加载任务…"/></div> : missingActiveSession ? renderNotFound('session') : active ? <>
-        <RunHeader session={active} agent={activeAgent} taskPrompt={runSummaries[active.id]?.prompt} streamStatus={streamStatus} queuedTasks={queuedTasks} usage={sessionUsage.data} rawVisible={rawVisible} rawAvailable={Boolean(events.data?.highWaterMark || raw)} restarting={restart.isPending} onInterrupt={() => void act('interrupt')} onRestart={() => restart.mutate(active.id)} onOpenPrompt={() => setSystemPromptOpen(true)} onArchive={() => { archive.reset(); setArchiveConfirm(true); }} onToggleRaw={toggleRawPanel} onRename={() => openRenameSession(active)} onOpenInsight={() => openOverlay({ kind: 'insight' })} onOpenTrace={() => openOverlay({ kind: 'trace' })} tools={<>{active.source !== 'work_item' && <WorkItemsPanel session={active} agents={agents.data ?? []} onSelectSession={selectSession} control={{ open: workItemPanel?.sessionId === active.id, selectedId: workItemPanel?.sessionId === active.id ? workItemPanel.itemId : '', onOpenChange: open => setWorkItemPanel(open ? { sessionId: active.id, itemId: '' } : null), onSelectItem: itemId => setWorkItemPanel(current => current?.sessionId === active.id ? { sessionId: active.id, itemId } : current) }}/>}<ToolbarButton label="工作目录、验证与自动化" text="工作目录" icon={<FolderCog size={14}/>} onClick={openInspector}/></>}/>
+        <RunHeader session={active} agent={activeAgent} taskPrompt={runSummaries[active.id]?.prompt} streamStatus={streamStatus} queuedTasks={queuedTasks} usage={sessionUsage.data} rawVisible={rawVisible} rawAvailable={rawAvailable} restarting={restart.isPending} onInterrupt={() => void act('interrupt')} onRestart={() => restart.mutate(active.id)} onOpenPrompt={() => setSystemPromptOpen(true)} onArchive={() => { archive.reset(); setArchiveConfirm(true); }} onToggleRaw={toggleRawPanel} onRename={() => openRenameSession(active)} onOpenInsight={() => openOverlay({ kind: 'insight' })} onOpenTrace={() => openOverlay({ kind: 'trace' })} tools={<>{active.source !== 'work_item' && <WorkItemsPanel session={active} agents={agents.data ?? []} onSelectSession={selectSession} control={{ open: workItemPanel?.sessionId === active.id, selectedId: workItemPanel?.sessionId === active.id ? workItemPanel.itemId : '', onOpenChange: open => setWorkItemPanel(open ? { sessionId: active.id, itemId: '' } : null), onSelectItem: itemId => setWorkItemPanel(current => current?.sessionId === active.id ? { sessionId: active.id, itemId } : current) }}/>}<ToolbarButton label="工作目录、验证与自动化" text="工作目录" icon={<FolderCog size={14}/>} onClick={openInspector}/></>}/>
         <MemoryManagementPanel key={active.id} session={active}/>
 
         <div className="flex shrink-0 items-center border-b border-default bg-surface px-3 sm:px-5"><div className="min-w-0 flex-1"><RunDetailTabs value={!isPtyCli && detailTab === 'terminal' ? 'timeline' : detailTab} onChange={setDetailTab} terminalAvailable={Boolean(isPtyCli)}/></div><Button variant="ghost" aria-label="结果检视" data-result-inspector-trigger icon={<PanelRightOpen size={15}/>} onClick={inspectorOpen ? closeInspector : openInspector}>结果检视</Button></div>

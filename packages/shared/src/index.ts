@@ -583,6 +583,7 @@ export * from './task-execution.js';
 
 export * from './bot-configuration.js';
 export * from './bot-configuration-scope.js';
+export * from './lark-config.js';
 
 export * from './driver-resources.js';
 

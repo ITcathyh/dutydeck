@@ -1,4 +1,5 @@
-import { appendEventContent, isTerminalTaskStatus } from '@dutydeck/shared';
+import { appendEventContent, isChildDiagnostic, isTerminalTaskStatus } from '@dutydeck/shared';
+export { isChildDiagnostic };
 import type { DockEvent, Task } from './api';
 
 export type TimelineEvent = DockEvent & { data: DockEvent['data'] & { role?: 'user' | 'assistant' } };
@@ -8,11 +9,6 @@ export type TimelineSection =
   | { kind: 'activity'; id: string; groups: TimelineActivityGroup[]; hasAnswer: boolean; taskStatus: string; isLatestTurn: boolean; startedAt: string; completedAt?: string };
 
 const isActivity = (event: TimelineEvent) => event.type === 'thinking' || event.type === 'tool_call' || event.type === 'tool_result';
-export const isChildDiagnostic = (data: TimelineEvent['data']) => data.diagnostic === data.state
-  && typeof data.id === 'string' && /^child_diagnostic_[a-f0-9]{64}$/.test(data.id)
-  && typeof data.activityId === 'string' && typeof data.parentTurnId === 'string' && typeof data.childTurnId === 'string'
-  && typeof data.parentThreadId === 'string' && typeof data.childThreadId === 'string'
-  && (data.state === 'child_quota' && data.code === 'usage_limit_exceeded' || data.state === 'child_rate_limit' && data.code === 'rate_limit');
 // 运行时留在会话里的提醒（state=notice）在时间线上显示，其余状态事件不显示。
 const isInvisible = (event: DockEvent) => event.type === 'status' ? !isChildDiagnostic(event.data) && event.data?.state !== 'notice'
   : event.type === 'task' || event.type === 'completed' || event.type === 'raw_terminal';

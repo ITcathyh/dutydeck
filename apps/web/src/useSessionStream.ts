@@ -59,8 +59,13 @@ export function useSessionStream(sessionId: string | undefined, runId: string | 
       if (statuses.length) {
         const firstStatus = Math.min(...statuses.map(event => event.sequence));
         // A recovered older status may contain metadata absent from later live statuses.
-        statuses = [...statuses, ...(cached?.events.filter(event => event.type === 'status' && event.sequence > firstStatus) ?? [])]
-          .sort((a, b) => a.sequence - b.sequence);
+        // The cached window is sorted by sequence, so only its suffix after firstStatus is scanned.
+        const later: import('./api').DockEvent[] = [];
+        const cachedEvents = cached?.events ?? [];
+        for (let index = cachedEvents.length - 1; index >= 0 && cachedEvents[index]!.sequence > firstStatus; index--) {
+          if (cachedEvents[index]!.type === 'status') later.push(cachedEvents[index]!);
+        }
+        statuses = [...statuses, ...later.reverse()].sort((a, b) => a.sequence - b.sequence);
       }
       const newTask = batch.some(event => event.type === 'task' && !cached?.events.some(item => item.sequence === event.sequence));
       qc.setQueryData<EventWindow>(['events', sessionId], current => mergeReconciledEvents(current, batch));

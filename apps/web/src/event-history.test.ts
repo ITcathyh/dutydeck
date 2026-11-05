@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { api, type DockEvent } from './api';
-import { completeEventHistory, createEventWindow, loadHistoryRange, loadProjectedHistory, mergeLiveEvent, mergeReconciledEvents, newestSequence } from './event-history';
+import { completeEventHistory, createCompleteHistoryProjector, createEventWindow, loadHistoryRange, loadProjectedHistory, mergeLiveEvent, mergeReconciledEvents, newestSequence } from './event-history';
 
 const event = (sequence: number, text = String(sequence)): DockEvent => ({ id: `e-${sequence}`, sequence, type: 'text', timestamp: '', data: { text } });
 
@@ -102,5 +102,24 @@ describe('projected event history', () => {
     const second = event(Number.NaN, 'second');
     const result = mergeReconciledEvents(createEventWindow([event(1)]), [first, second]);
     expect(result.events.filter(item => Number.isNaN(item.sequence))).toEqual([second]);
+  });
+
+  it('matches completeEventHistory while appending only the contiguous live tail', () => {
+    const complete = [event(1), event(3), event(5)];
+    const project = createCompleteHistoryProjector();
+    let live = createEventWindow([event(5, 'live')]);
+    let result = project(complete, live)!;
+    expect(result.events).toEqual(completeEventHistory(complete, live.events));
+    const steps = [event(6), event(8), event(7), event(9), event(4, 'late')];
+    for (const next of steps) {
+      const previous = result;
+      live = mergeLiveEvent(live, next);
+      result = project(complete, live)!;
+      expect(result.events).toEqual(completeEventHistory(complete, live.events));
+      if (next.sequence === 8) expect(result).toBe(previous);
+      if (next.sequence === 7) expect(result.changes?.map(item => item.sequence)).toEqual([7, 8]);
+    }
+    expect(project(complete, live)).toBe(result);
+    expect(project(undefined, live)).toBeUndefined();
   });
 });
