@@ -720,3 +720,85 @@ describe('handoff of persisted legacy Lark source IDs', () => {
     expect(text).toContain('outputDigest=unknown（未读取账本结果）');
   });
 });
+
+describe('收尾操作与控制语的并发和失败', () => {
+  it('控制语执行期间入站记录标成命令，重启后不会被当成普通消息重放', async () => {
+    const h = await topic();
+    await h.send('om_first', '整理本周报警并回复群里');
+    await until(async () => Boolean(await h.repos.channelMappings.get('lark-card:app', 'om_first')) && (await h.tasks())[0]?.status === 'completed');
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    for (const method of [h.service.reply, h.service.send]) {
+      const original = method.getMockImplementation()!;
+      method.mockImplementation(async (input: any) => {
+        if (input.taskName === '/cancel 未执行') await gate;
+        return original(input);
+      });
+    }
+    const handling = h.send('om_stop', '停一下');
+    await until(() => h.calls().some(input => input.taskName === '/cancel 未执行'));
+    expect(JSON.parse(await h.repos.config.get('lark.inbox.app.om_stop') ?? '{}')).toMatchObject({ state: 'command' });
+    release();
+    await handling;
+    expect(JSON.parse(await h.repos.config.get('lark.inbox.app.om_stop') ?? '{}')).toMatchObject({ state: 'accepted' });
+    expect(h.prompts).toHaveLength(1);
+  });
+
+  it('不按控制处理的「继续」改回普通消息，照常执行', async () => {
+    const h = await topic();
+    await h.send('om_first', '整理本周报警并回复群里');
+    await until(async () => Boolean(await h.repos.channelMappings.get('lark-card:app', 'om_first')) && (await h.tasks())[0]?.status === 'completed');
+    await h.send('om_go', '继续');
+    await until(() => h.prompts.length === 2);
+    await until(async () => JSON.parse(await h.repos.config.get('lark.inbox.app.om_go') ?? '{}').state === 'accepted');
+  });
+
+  it('「重新执行」已认领这一轮时，「在原对话继续」不再结束它、不发「继续」', async () => {
+    const h = await topic();
+    await unconfirmedTurn(h, [push]);
+    const { saved } = await h.mapping();
+    const cardId = saved.card_message_id!;
+    await until(() => h.lastUpdate(cardId)?.statusLabel === '结果未知');
+    const card = h.lastUpdate(cardId);
+    const key = 'lark.redispatch.app.om_first.1';
+    const held = JSON.parse((await h.repos.config.get(key))!);
+    expect(held).toMatchObject({ phase: 'held' });
+    // 模拟「重新执行」先一步把这一轮认领走（同一进程，对账不会接手）。
+    await h.repos.config.set(key, JSON.stringify({ ...held, phase: 'claimed', boot: (h.coordinator as any).relaunchBoot }));
+    expect(await h.coordinator.handleAction(callbackValueOf(card, 'continue_in_place'), 'ou_alice', { messageId: cardId, chatId: 'oc_group' }))
+      .toMatchObject({ type: 'warning' });
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect((await h.tasks())[0]).toMatchObject({ status: 'reconcile_required' });
+    expect(h.texts()).not.toContain('「在原对话继续」继续');
+    expect(h.prompts).toHaveLength(1);
+  });
+
+  it('「在原对话继续」没能结束这一轮时交还认领，卡上的按钮照旧可用', async () => {
+    const h = await topic();
+    await unconfirmedTurn(h, [push]);
+    const { saved } = await h.mapping();
+    const cardId = saved.card_message_id!;
+    await until(() => h.lastUpdate(cardId)?.statusLabel === '结果未知');
+    const card = h.lastUpdate(cardId);
+    const settle = vi.spyOn(h.coordinator as any, 'settleInterruptedAttempt').mockRejectedValueOnce(new Error('执行资源未确认停止'));
+    expect(await h.coordinator.handleAction(callbackValueOf(card, 'continue_in_place'), 'ou_alice', { messageId: cardId, chatId: 'oc_group' }))
+      .toMatchObject({ type: 'warning' });
+    expect(JSON.parse((await h.repos.config.get('lark.redispatch.app.om_first.1'))!)).toMatchObject({ phase: 'held' });
+    settle.mockRestore();
+    expect(await h.coordinator.handleAction(callbackValueOf(card, 'continue_in_place'), 'ou_alice', { messageId: cardId, chatId: 'oc_group' }))
+      .toMatchObject({ type: 'success' });
+    await until(() => h.prompts.length === 2);
+    expect(JSON.parse((await h.repos.config.get('lark.redispatch.app.om_first.1'))!)).toMatchObject({ phase: 'moved' });
+  });
+
+  it('Agent 已停下但自动结束失败：不留「已自动结束」的原因，之后的结果卡不会这样写', async () => {
+    const h = await topic();
+    vi.spyOn(h.coordinator as any, 'settleInterruptedAttempt').mockRejectedValue(new Error('执行资源未确认停止'));
+    await unconfirmedTurn(h);
+    const { saved } = await h.mapping();
+    expect((await h.tasks())[0]).toMatchObject({ status: 'reconcile_required' });
+    const raw = await h.repos.config.get('lark.settled.app.om_first.1');
+    expect(raw === undefined || JSON.parse(raw).revoked === true).toBe(true);
+    expect(await (h.coordinator as any).continueCause('app', 'om_first', saved.turn ?? 0, saved.scope_id, 'interrupted', [])).toBeUndefined();
+  });
+});
