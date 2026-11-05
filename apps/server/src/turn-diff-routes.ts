@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { installationOwnerTaskActor, RuntimeError, type ConfigRepository, type PolicyAction, type PolicyDecision } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { isValidTurnDiffCredential, SHARE_TOKEN_QUERY_KEY } from './auth/auth.js';
-import { buildTurnDiffReviewPrompt, listTurnDiffRecords, readTurnDiff, readTurnDiffRecord, resolveTurnDiffComment, type TurnDiffReviewComment } from './turn-diff.js';
+import { buildTurnDiffReviewPrompt, listTurnDiffRecords, readTurnDiff, readTurnDiffFile, readTurnDiffRecord, resolveTurnDiffComment, type TurnDiffReviewComment } from './turn-diff.js';
 
 export type TurnDiffReviewRequest = { sessionId: string; taskId: string; comments: TurnDiffReviewComment[]; prompt: string };
 
@@ -70,6 +70,20 @@ export function registerTurnDiffRoutes(app: FastifyInstance, runtime: DutydeckRu
     const { record, diff } = await load(id, taskId);
     const task = (await runtime.getTasks(id)).find(item => item.id === taskId);
     return { sessionId: id, taskId, title: titleOf(task?.prompt), finishedAt: record.finishedAt, ...diff, access: shared ? 'shared' : 'owner' };
+  });
+
+  // 折叠的锁文件、生成物按需读正文。鉴权与整页相同（登录用户或「查看改动」token）。
+  app.get<{ Params: { id: string; taskId: string }; Querystring: { path?: string } }>('/api/sessions/:id/tasks/:taskId/diff/file', async request => {
+    const { id, taskId } = request.params;
+    await access(request, id, taskId, 'task.view_result');
+    const path = z.string().min(1).max(1024).parse(request.query.path);
+    const record = await readTurnDiffRecord(options.store, id, taskId);
+    if (!record?.after || !record.summary) throw new RuntimeError('TURN_DIFF_NOT_FOUND', '这一轮没有记录到改动', 404);
+    let file;
+    try { file = await readTurnDiffFile(record.gitDir, record.before, record.after, path); }
+    catch { throw new RuntimeError('TURN_DIFF_EXPIRED', '这一轮的改动记录已经不在仓库里了（仓库被清理或移走）', 410); }
+    if (!file) throw new RuntimeError('TURN_DIFF_FILE_NOT_FOUND', '这一轮没有改这个文件', 404);
+    return file;
   });
 
   app.post<{ Params: { id: string; taskId: string } }>('/api/sessions/:id/tasks/:taskId/diff/comments', async (request, reply) => {

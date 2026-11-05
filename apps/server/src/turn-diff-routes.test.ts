@@ -16,7 +16,7 @@ const owner = { authorization: 'Bearer secret-token' };
 const SECRET = 'share-secret';
 const NOW = Date.parse('2026-10-13T00:00:00Z');
 
-async function setup(options: { requestLarkReview?: (review: any) => Promise<'sent' | 'no_origin' | 'unavailable'> } = {}) {
+async function setup(options: { requestLarkReview?: (review: any) => Promise<'sent' | 'no_origin' | 'unavailable'>; lockfile?: boolean } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'turn-diff-routes-'));
   cleanup.push(() => rm(dir, { recursive: true, force: true }));
   const git = (...args: string[]) => run('git', args, { cwd: dir });
@@ -31,6 +31,7 @@ async function setup(options: { requestLarkReview?: (review: any) => Promise<'se
   await observe({ id: 'ses_1', cwd: dir }, 'task_1', 'start');
   await writeFile(join(dir, 'app.ts'), 'export const a = 1;\nexport const b = 20;\nexport const c = 3;\n');
   await writeFile(join(dir, 'new.ts'), 'export const d = 4;\n');
+  if (options.lockfile) await writeFile(join(dir, 'package-lock.json'), '{\n  "lockfileVersion": 3\n}\n');
   await observe({ id: 'ses_1', cwd: dir }, 'task_1', 'end');
   const runtime: any = {
     getTasks: vi.fn(async () => [{ id: 'task_1', prompt: '把 b 改成 20\n再加一个文件' }]),
@@ -77,6 +78,28 @@ describe('turn diff routes', () => {
         { taskId: 'task_1', summary: { files: 2, additions: 2, deletions: 1 }, finishedAt: expect.any(String) }
       ]);
       expect((await app.inject({ method: 'GET', url: diffUrl(undefined, 'task_9'), headers: owner, ...remote })).statusCode).toBe(404);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('folds the lockfile in the page and serves its body on demand with the same access rules', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(NOW);
+    try {
+      const { app, token } = await setup({ lockfile: true });
+      const page = await app.inject({ method: 'GET', url: diffUrl(token()), ...remote });
+      expect(page.json().files.map((file: any) => [file.path, file.placeholder ?? 'shown', file.additions])).toEqual([
+        ['app.ts', 'shown', 1], ['new.ts', 'shown', 1], ['package-lock.json', 'folded_lockfile', 3]
+      ]);
+      const fileUrl = (share?: string, path = 'package-lock.json', taskId = 'task_1') => `${diffUrl(undefined, taskId, 'ses_1', '/file')}?path=${encodeURIComponent(path)}${share ? `&share=${encodeURIComponent(share)}` : ''}`;
+      for (const headers of [undefined, owner]) {
+        const response = await app.inject({ method: 'GET', url: fileUrl(headers ? undefined : token()), ...(headers ? { headers } : {}), ...remote });
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toMatchObject({ path: 'package-lock.json', status: 'added', additions: 3, hunks: [{ lines: [{ kind: 'add', newLine: 1, text: '{' }, { text: '  "lockfileVersion": 3' }, { text: '}' }] }] });
+        expect(response.json().placeholder).toBeUndefined();
+      }
+      expect((await app.inject({ method: 'GET', url: fileUrl(token(), 'untouched.ts'), ...remote })).statusCode).toBe(404);
+      expect((await app.inject({ method: 'GET', url: fileUrl(undefined), ...remote })).statusCode).toBe(401);
+      expect((await app.inject({ method: 'GET', url: fileUrl(token(), 'package-lock.json', 'task_2'), ...remote })).statusCode).toBe(401);
+      expect((await app.inject({ method: 'GET', url: `${diffUrl(token(), 'task_1', 'ses_1', '/file')}`, ...remote })).statusCode).toBe(400);
     } finally { vi.useRealTimers(); }
   });
 

@@ -230,7 +230,7 @@ export type TurnDiffSummary = { files: number; additions: number; deletions: num
 export type TurnDiffLine = { kind: 'context' | 'add' | 'del'; oldLine?: number; newLine?: number; text: string };
 export type TurnDiffFile = {
   path: string; oldPath?: string; status: 'added' | 'deleted' | 'modified' | 'renamed'; additions: number; deletions: number;
-  placeholder?: 'binary' | 'too_large' | 'omitted'; hunks: Array<{ header: string; lines: TurnDiffLine[] }>;
+  placeholder?: 'binary' | 'too_large' | 'omitted' | 'folded_lockfile' | 'folded_generated'; hunks: Array<{ header: string; lines: TurnDiffLine[] }>;
 };
 export type TurnDiff = { sessionId: string; taskId: string; title?: string; finishedAt?: string; summary: TurnDiffSummary; files: TurnDiffFile[]; truncated: boolean; access: 'shared' | 'owner' };
 export type TurnDiffCommentInput = { path: string; side: 'old' | 'new'; line: number; body: string };
@@ -319,6 +319,8 @@ export const api = {
   verifications: (id: string) => json<VerificationResponse[]>(`/api/sessions/${id}/verifications`),
   turnDiffs: (id: string) => json<Array<{ taskId: string; summary: TurnDiffSummary; finishedAt?: string }>>(`/api/sessions/${id}/diffs`),
   turnDiff: (id: string, taskId: string) => json<TurnDiff>(`/api/sessions/${id}/tasks/${taskId}/diff`),
+  /** 折叠的锁文件、生成物按需读正文。 */
+  turnDiffFile: (id: string, taskId: string, path: string) => json<TurnDiffFile>(`/api/sessions/${id}/tasks/${taskId}/diff/file?path=${encodeURIComponent(path)}`),
   submitTurnDiffComments: (id: string, taskId: string, comments: TurnDiffCommentInput[]) => send<{ delivery: 'dispatched' | 'lark_confirmation' }>('POST', `/api/sessions/${id}/tasks/${taskId}/diff/comments`, { comments }),
   verify: (id: string, input: VerificationCommandInput) => send<VerificationResponse>('POST', `/api/sessions/${id}/verifications`, input),
   authStatus: () => json<BrowserAuthState>('/api/auth/status', { cache: 'no-store' }),

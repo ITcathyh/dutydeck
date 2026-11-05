@@ -15,7 +15,9 @@ const statusLabel: Record<TurnDiffFile['status'], string> = { added: '新增', d
 const placeholderText: Record<NonNullable<TurnDiffFile['placeholder']>, string> = {
   binary: '二进制文件，不显示内容。',
   too_large: '这个文件的改动太大，页面上不显示。',
-  omitted: '超出页面显示上限，没有展开。'
+  omitted: '超出页面显示上限，没有展开。',
+  folded_lockfile: '已折叠：锁文件，只显示增删行数。',
+  folded_generated: '已折叠：生成物（.gitattributes 标了 linguist-generated），只显示增删行数。'
 };
 const linePrefix = { add: '+', del: '-', context: ' ' } as const;
 const lineTone = { add: 'bg-success-soft', del: 'bg-danger-soft', context: '' } as const;
@@ -53,6 +55,12 @@ export function TurnDiffContent({ sessionId, taskId, shared, embedded = false, r
   const submit = useMutation({
     mutationFn: (submitted: readonly Draft[]) => api.submitTurnDiffComments(sessionId, taskId, submitted.map(({ code: _code, ...comment }) => comment)),
     onSuccess: (_result, submitted) => setDrafts(current => current.filter(draft => !submitted.includes(draft)))
+  });
+  /** 折叠的锁文件、生成物点「展开查看」后按需读到的正文，按路径存。展开后的行不能评论：服务端按整页 diff 补全评论的代码片段，里面没有折叠文件的正文。 */
+  const [expanded, setExpanded] = useState<Record<string, TurnDiffFile>>({});
+  const expand = useMutation({
+    mutationFn: (path: string) => api.turnDiffFile(sessionId, taskId, path),
+    onSuccess: file => setExpanded(current => ({ ...current, [file.path]: file }))
   });
   const fileVersions = useMemo(() => diff.data?.files.map(file => JSON.stringify(file)) ?? [], [diff.data?.files]);
 
@@ -95,7 +103,7 @@ export function TurnDiffContent({ sessionId, taskId, shared, embedded = false, r
       {submit.isSuccess && <Banner tone="success">{submit.data.delivery === 'lark_confirmation' ? '评论已发到飞书话题，等有权限的人确认后交给 Agent 修改。' : '评论已作为新一轮请求发回当前任务。'}</Banner>}
       {submit.isError && <Banner tone="danger">提交失败：{submit.error.message}</Banner>}
       {files.length === 0 && <EmptyState icon={<FileDiff size={22}/>} title="这一轮没有改动文件"/>}
-      {files.map((file, fileIndex) => <div key={file.path} id={`diff-${taskId}-${fileIndex}`}>
+      {files.map((listed, fileIndex) => { const file = expanded[listed.path] ?? listed; const folded = Boolean(listed.placeholder?.startsWith('folded_')); return <div key={file.path} id={`diff-${taskId}-${fileIndex}`}>
       <label className="mb-1 flex min-h-11 items-center justify-end gap-2 text-caption text-subtle"><input type="checkbox" aria-label={`已查看 ${file.path}`} checked={viewed[file.path] === fileVersions[fileIndex]} onChange={event => setViewed(current => ({ ...current, [file.path]: event.target.checked ? fileVersions[fileIndex]! : '' }))}/>已查看此版本</label>
       <details open={files.length <= 8 && !file.placeholder} className="overflow-hidden rounded-md border border-default bg-surface">
         <summary className="flex cursor-pointer items-start gap-2 px-3 py-2 text-caption">
@@ -104,7 +112,11 @@ export function TurnDiffContent({ sessionId, taskId, shared, embedded = false, r
           <span className="shrink-0 text-meta"><span className="text-success">+{file.additions}</span> <span className="text-danger">−{file.deletions}</span></span>
         </summary>
         {file.placeholder
-          ? <p className="border-t border-default px-3 py-3 text-caption text-subtle">{placeholderText[file.placeholder]}</p>
+          ? <div className="flex flex-wrap items-center gap-2 border-t border-default px-3 py-3 text-caption text-subtle">
+            <p className="min-w-0 flex-1">{placeholderText[file.placeholder]}</p>
+            {folded && file === listed && <Button size="sm" variant="ghost" loading={expand.isPending && expand.variables === file.path} onClick={() => expand.mutate(file.path)}>展开查看</Button>}
+            {expand.isError && expand.variables === file.path && <p className="w-full text-danger">展开失败：{expand.error.message}</p>}
+          </div>
           : <div className="border-t border-default font-mono text-meta">
             {file.hunks.map((hunk, hunkIndex) => <Fragment key={hunkIndex}>
               <div className="break-all bg-muted px-3 py-1 text-subtle">{hunk.header}</div>
@@ -113,7 +125,7 @@ export function TurnDiffContent({ sessionId, taskId, shared, embedded = false, r
                 const draft = drafts.find(item => sameTarget(item, target));
                 const open = editing && sameTarget(editing, target);
                 return <Fragment key={lineIndex}>
-                  <button type="button" disabled={readOnly} aria-label={`评论 ${file.path} 第 ${target.line} 行${sideLabel(target.side)}`} onClick={() => startComment(target, hunk.lines.slice(Math.max(0, lineIndex - 2), lineIndex + 1).map(item => `${linePrefix[item.kind]}${item.text}`).join('\n'))}
+                  <button type="button" disabled={readOnly || folded} aria-label={`评论 ${file.path} 第 ${target.line} 行${sideLabel(target.side)}`} onClick={() => startComment(target, hunk.lines.slice(Math.max(0, lineIndex - 2), lineIndex + 1).map(item => `${linePrefix[item.kind]}${item.text}`).join('\n'))}
                     className={`flex w-full items-start text-left hover:bg-hover ${lineTone[line.kind]}`}>
                     <span className="w-10 shrink-0 select-none px-1 text-right text-subtle">{line.oldLine ?? ''}</span>
                     <span className="w-10 shrink-0 select-none px-1 text-right text-subtle">{line.newLine ?? ''}</span>
@@ -136,7 +148,7 @@ export function TurnDiffContent({ sessionId, taskId, shared, embedded = false, r
               })}
             </Fragment>)}
           </div>}
-      </details></div>)}
+      </details></div>; })}
     </Main>
     </div>
     {drafts.length > 0 && <footer className="sticky bottom-0 border-t border-default bg-surface">
