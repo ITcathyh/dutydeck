@@ -5,13 +5,15 @@ import { runAgentScheduleRequest } from '../agent-schedule-request.js';
 import { larkElapsedLabel } from './card-status.js';
 import { agentSettingsConfirmKind, parseAgentSettings, showAgentSettings } from './agent-settings.js';
 import { createHash } from 'node:crypto';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { describeLarkTaskRecovery, larkContinuePrompt, larkRecoveryRetainedNote, larkReliability, larkSteeringUnknownNote } from './task-recovery.js';
 import type { LarkInteraction } from './workflow-interactions.js';
 import { formatUnknownTaskTime as deadlineText } from '../task-resolution.js';
 import type { LarkInboxAdoption, LarkInboxRecord } from './task-inbox.js';
 import { larkConfirmationInputDigest, isLarkFirstCardUndelivered } from './task-inbox.js';
 import { larkForkWorkspaceMode, larkNativeForkId, larkResumeUnavailable } from './session-branches.js';
-import { parseLarkNewSession } from './new-session.js';
+import { parseLarkNewSession, validateLarkLaunchOptions } from './new-session.js';
+import { discoverAgentModels } from '../agent-models.js';
 import { formatLarkHandoff, larkHandoffAck, larkHandoffTitle, larkHandoffEventLimit, larkHandoffIndexLimit } from './handoff.js';
 import { explicitFinalContext, readExplicitFinal } from './explicit-final.js';
 import { redactTraceText } from './secret-redaction.js';
@@ -19,7 +21,7 @@ import { readGitSnapshot } from './git-status.js';
 import { buildLarkTaskDashboard, pageLarkTaskDashboard, type LarkTaskDashboardDecision, type LarkTaskDashboardEntry } from './task-dashboard.js';
 import { collectInbox } from '../inbox.js';
 import { isLarkGroupChatMemoryPool, isLarkGroupMemoryPool, isLarkPerGroupMemoryPool, isLarkMemoryId, isLarkMemoryIgnoreRuleId, larkMemoryLimits, larkMemoryScope, renderLarkMemoryList, renderLarkMemoryStatusLine } from './memory.js';
-import { deferredConfirmationId, describeScheduleTrigger, scenarioPolicyVersion, parseLarkSourceId, resolveParticipation, RuntimeError, timeLoop, type PolicyAction, type Session, type TaskRecord } from '@dutydeck/shared';
+import { deferredConfirmationId, describeScheduleTrigger, scenarioPolicyVersion, parseLarkSourceId, resolveParticipation, normalizeSessionName, RuntimeError, SESSION_NAME_MAX_LENGTH, timeLoop, type AgentConfig, type PolicyAction, type Session, type TaskRecord } from '@dutydeck/shared';
 import { decideWake, isExplicitWake, wakeSignals, type WakeFacts } from './wake-decision.js';
 import { directScenarioPrompt } from './scenario-direct.js';
 import { larkScenarioAdoptionOf } from './scenario-legacy.js';
@@ -34,6 +36,7 @@ import { busyProgressSummary, eventsForRuntimeTask, loadLarkTaskWindow, renderLa
 import { sendLarkFile } from './result-delivery.js';
 import { larkResultDeliveryIssues } from './reconciler.js';
 import { larkSessionDetailUrl } from './detail-link.js';
+import { clock } from './group-task-context.js';
 import { isLarkCardActionAvailable, parseLarkCardActionValue, safeLarkWebUrl } from './card-actions.js';
 import {
   larkAgentAvailabilityLine,
@@ -54,7 +57,7 @@ import { claimLarkTaskDispatches, larkTaskAgentAllowlistConfigured, larkTaskAgen
 import { buildRepairConfirmCard, parseRepairCardActionValue, renderRepairResultCard, runOpenPlatformRepair } from './repair.js';
 import { buildPullRequestConfirmCard, buildPullRequestFollowCard } from './pull-request-card.js';
 import { connectLarkOpenPlatformSession } from './open-platform-session.js';
-import { findLarkThreadContinuation, listPersistedLarkSessions, larkSourceId, larkGroupKey, larkSessionConfigKey, parsePrompt, resolveLarkScopeId } from './session-resolver.js';
+import { findLarkThreadContinuation, listPersistedLarkSessions, larkSessionMatchesScope, larkSourceId, larkGroupKey, larkSessionConfigKey, parsePrompt, resolveLarkScopeId } from './session-resolver.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkGroup, LarkTask, PersistedLarkCardTask } from './coordinator.js';
 import { parseCardTask, parseOptionalCardTask } from './persisted-card-task.js';
@@ -118,6 +121,39 @@ const larkControlPhrases = new Map<string, 'continue' | 'stop' | 'restart'>([
 export function larkControlPhrase(prompt: string) {
   const text = prompt.replace(/@\S+/g, '').replace(/[\s\p{P}\p{S}]/gu, '');
   return text.length <= 6 ? larkControlPhrases.get(text) : undefined;
+}
+
+type ChatCommandReply = (taskName: string, markdown: string, options?: { elements?: LarkCardElement[]; failed?: boolean }) => Promise<{ messageId: string } | undefined>;
+
+const larkForkStatusLabels: Record<string, string> = {
+  queued: '排队中', running: '进行中', completed: '已完成', failed: '失败', interrupted: '已中断', cancelled: '已取消', reconcile_required: '需要核对'
+};
+
+/** /model、/effort 不带参数时的可选项：ACP Agent 来自探测（10 秒内读不到就当没有），命令行 Agent 的思考强度用启动校验同一份档位表。 */
+async function larkSessionConfigOptions(agent: Pick<AgentConfig, 'id' | 'name'> & Partial<AgentConfig> | undefined, session: Session, model: boolean): Promise<string[]> {
+  if (agent?.protocol === 'pty-cli') return model ? [] : ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'];
+  if (!agent?.command || !agent.args || !agent.env || !agent.protocol) return [];
+  const abort = new AbortController();
+  try {
+    const found = await Promise.race([discoverAgentModels(agent as AgentConfig, session.model),
+      sleep(10_000, undefined, { signal: abort.signal }).catch(() => undefined)]);
+    return (model ? found?.models : found?.reasoningEfforts)?.map(item => item.id) ?? [];
+  } catch { return []; }
+  finally { abort.abort(); }
+}
+
+/** 运行时拒绝切换的已知原因翻成人话；返回 undefined 表示不是已知原因，交给通用失败回执。 */
+function larkSessionConfigFailure(error: unknown, input: { command: string; label: string; flag: string; agent: string }): string | undefined {
+  if (!(error instanceof RuntimeError)) return undefined;
+  const { command, label, flag, agent } = input;
+  switch (error.code) {
+    case 'TURN_IN_PROGRESS': return `**当前有一轮正在执行，${label}没有改动。**\n\n等本轮结束后再发送 \`${command} ...\`；要立刻停下可发 \`/cancel\`。`;
+    case 'DRIVER_CONFIGURATION_BUSY': return `**上一次配置变更还没完成，${label}没有改动。**\n\n稍后再试。`;
+    case 'MODEL_SWITCH_UNSUPPORTED': case 'REASONING_SWITCH_UNSUPPORTED': case 'TASK_OPTIONS_UNSUPPORTED':
+      return `**${larkCommandEcho(agent, 64)} 不支持在会话中切换${label}，${label}没有改动。**\n\n要换${label}，用 \`/new ${flag} -- 任务\` 开新会话。`;
+    case 'MODEL_SWITCH_FAILED': case 'REASONING_SWITCH_FAILED': return `**切换${label}失败。**\n\n${larkCommandEcho(error.message, 200)}\n\n发送 \`${command}\` 查看当前值。`;
+    default: return undefined;
+  }
 }
 
 export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
@@ -343,7 +379,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         ? await describeLarkTaskRecovery(this.runtime, mapping.sessionId, task.id, task.status) : undefined;
       const matter = this.runtime.getMatter?.(session.id);
       sessions.set(session.id, { session, url: url.toString() });
-      entries.push({ ...(taskReport?.taskId === task.id ? { taskReport } : {}), ...(matter ? { matter: { id: matter.id, title: matter.title, sessionId: session.id, superseded: matter.supersededSessionIds?.includes(session.id) } } : {}), taskId: task.id, title: saved.task_name, workspace: session.cwd, agent: agentNames.get(session.agentId) ?? session.agentId, status: pending && task.status === 'running'
+      entries.push({ ...(taskReport?.taskId === task.id ? { taskReport } : {}), ...(matter ? { matter: { id: matter.id, title: matter.title, sessionId: session.id, superseded: matter.supersededSessionIds?.includes(session.id) } } : {}), taskId: task.id, title: session.name ? `${session.name} · ${saved.task_name}` : saved.task_name, workspace: session.cwd, agent: agentNames.get(session.agentId) ?? session.agentId, status: pending && task.status === 'running'
         ? pending.kind === 'ask' ? 'waiting_for_answer' : 'waiting_for_permission' : task.status, updatedAt: task.updatedAt, url: url.toString(),
         ...(recovery ? { detail: recovery.markdown, blocked: recovery.blocked } : {}),
         ...(liveTask ? {
@@ -1759,6 +1795,14 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         }
         return restored;
       }
+      if (route.command === 'model' || route.command === 'effort') {
+        await this.executeSessionConfigCommand(route, config, event, sessionId, replyCard);
+        return 'handled';
+      }
+      if (route.command === 'rename') {
+        await this.executeRenameCommand(route, config, event, sessionId, replyCard);
+        return 'handled';
+      }
       if (route.command === 'resume') {
         if (!this.runtime.resume || !this.cardMappings) throw new Error('当前运行时不支持恢复会话。可以用 /new --handoff。');
         if (route.args.length > 1 || (route.args[0]?.startsWith('--'))) throw new Error('用法：/resume [会话编号]；用 /resume list 查看最近关闭的会话。');
@@ -1799,6 +1843,10 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         return 'handled';
       }
       if (route.command === 'fork') {
+        if (route.args.length === 1 && route.args[0] === 'list') {
+          await this.replyForkList(config, event, sessionId, replyCard);
+          return 'handled';
+        }
         if (event.chatType !== 'group' && config.p2pMode !== 'thread') throw new Error('当前私聊整段共用一个会话，没有独立话题，不能并行开分身。请在机器人设置把私聊模式改成“每条消息一个话题”后再试。');
         if (!sessionId || !this.cardMappings || !this.inbox) throw new Error('当前没有可分身的会话，或未接入新话题存储。请先在此话题开始一个任务。');
         const source = await this.runtime.getSession(sessionId);
@@ -1909,6 +1957,143 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     return 'handled';
   }
 
+  /** /model、/effort：不带参数回当前值与可选项；带参数在会话空闲时切换（与 Web 的 PATCH /api/sessions/:id/config 同一组运行时调用和 run.change_model 权限）。 */
+  private async executeSessionConfigCommand(
+    route: Extract<LarkCommandRoute, { kind: 'intent' }>, config: StoredLarkConfig, event: LarkMessageEvent, sessionId: string | undefined, reply: ChatCommandReply
+  ) {
+    const model = route.command === 'model';
+    const command = model ? '/model' : '/effort';
+    const label = model ? '模型' : '思考强度';
+    const flag = model ? '--model 模型' : '--effort 档位';
+    const fail = (markdown: string) => reply(`${command} 未执行`, markdown, { failed: true });
+    if (route.args.length > 1) { await fail(`**用法：\`${model ? '/model [模型]' : '/effort [档位]'}\`**`); return; }
+    const session = sessionId ? await this.runtime.getSession(sessionId) : undefined;
+    if (!session) { await fail(`**当前话题还没有会话。**\n\n先发一条任务开始会话；想在开始时就指定${label}，用 \`/new ${flag} -- 任务\`。`); return; }
+    if (session.archivedAt || ['stopped', 'failed'].includes(session.state)) { await fail('**当前会话已关闭，不能切换。**\n\n发送 `/resume` 恢复，或用 `/new` 开新会话。'); return; }
+    const agent = (await this.runtime.listAgents?.())?.find(item => item.id === session.agentId);
+    const current = model ? session.model ?? agent?.model : session.reasoningEffort ?? agent?.reasoningEffort;
+    const requested = route.args[0];
+    if (!requested) {
+      const options = await larkSessionConfigOptions(agent, session, model);
+      const shown = options.slice(0, 30).map(item => `\`${larkCommandEcho(item, 64)}\``).join('、');
+      await reply(`当前${label}`, [
+        `**当前${label}：${current ? `\`${larkCommandEcho(current, 64)}\`` : '未指定（Agent 默认）'}**`,
+        shown ? `可选：${shown}${options.length > 30 ? `，等共 ${options.length} 项` : ''}` : '可选项暂时读取不到，可以直接输入名称尝试。',
+        `切换：\`${command} ${model ? '<模型>' : '<档位>'}\`。只在会话空闲时切换，下一轮起使用新值；本轮运行中会被拒绝。`
+      ].join('\n\n'));
+      return;
+    }
+    // 权限照搬 /new --model：执行策略先过，受管理的群再过群级授权（run.change_model 是群管理员动作）。
+    try { await this.requireExecution('session', 'run.change_model'); }
+    catch (error) {
+      if (!(error instanceof LarkServiceError)) throw error;
+      await fail(`**当前没有切换${label}的权限。**\n\n${larkCommandEcho(error.message, 200)}`); return;
+    }
+    if (config.managedGroup) {
+      const decision = await this.groupManager?.authorize(config.appId, event.chatId, event.senderOpenId, 'run.change_model');
+      if (!decision?.allowed) { await fail(`**当前账号没有切换会话${label}的权限。**\n\n${larkCommandEcho(decision?.reason ?? '群里受管理时，这需要群管理员权限。', 200)}`); return; }
+    }
+    if (!agent) { await fail('**找不到本会话的 Agent，没有切换。**'); return; }
+    // 按 Agent 的模型列表校验（与 /new 首轮配置同一份校验，用探测缓存，不强制刷新）；思考强度按会话当前模型取档位。
+    try {
+      await validateLarkLaunchOptions(model ? { model: requested } : { reasoningEffort: requested },
+        { ...agent, ...(session.model ?? agent.model ? { model: session.model ?? agent.model } : {}), cwd: session.cwd, permissionMode: larkPermissionMode(config) }, config.workspaceAliases);
+    } catch (error) { await fail(`**${larkCommandEcho(error instanceof Error ? error.message : String(error), 200)}**\n\n发送 \`${command}\` 查看可选项。`); return; }
+    if (requested === (model ? session.model : session.reasoningEffort)) { await reply(`${command} 无需切换`, `**当前${label}已经是 \`${larkCommandEcho(requested, 64)}\`。**`); return; }
+    let updated: Session;
+    try {
+      updated = await (model ? this.runtime.setModel!(session.id, requested) : this.runtime.setReasoningEffort!(session.id, requested));
+    } catch (error) {
+      const text = larkSessionConfigFailure(error, { command, label, flag, agent: agent.name ?? session.agentId });
+      if (!text) throw error;
+      await fail(text); return;
+    }
+    const pinned = await this.pinSwitchedSession(config, updated);
+    await reply(`已切换${label}`, `**${label}已切换为 \`${larkCommandEcho(requested, 64)}\`。**\n\n原值：${current ? `\`${larkCommandEcho(current, 64)}\`` : 'Agent 默认'}。下一轮起使用新值。${pinned ? '' : '\n\n注意：没能保存会话绑定，服务重启后这个话题可能不会沿用当前会话。'}`);
+  }
+
+  /**
+   * 切换后的模型与机器人配置的默认模型不一致时，普通消息的会话匹配（larkSessionMatchesScope）会在重启后认不出这条会话，
+   * 悄悄另开新会话。像 /resume 一样写一条持久的启动绑定，让它按会话编号被认回来。返回 false 表示需要绑定却没写成。
+   */
+  private async pinSwitchedSession(config: StoredLarkConfig, session: Session): Promise<boolean> {
+    if (!session.sourceId || larkSessionMatchesScope(session, config, session.sourceId)) return true;
+    if (!this.cardMappings) return false;
+    try {
+      const channel = `lark-launch:${config.appId}`;
+      const binding = await this.cardMappings.get(channel, session.sourceId);
+      if (binding?.channel === channel && binding.externalId === session.sourceId && binding.sessionId === session.id) return true;
+      // 旧绑定属于别的会话，它的事项边界等标记不能带到这条会话上；fallback 仍按“非显式指定 Agent”处理。
+      await this.cardMappings.save({ id: `lark-launch:${session.sourceId}`, channel, externalId: session.sourceId, sessionId: session.id,
+        extra: JSON.stringify({ baseConfigKey: larkSessionConfigKey(config), explicitAgent: false }), createdAt: new Date().toISOString() });
+      return true;
+    } catch (error) {
+      this.log.warn({ error, sessionId: session.id }, '保存切换后的会话绑定失败');
+      return false;
+    }
+  }
+
+  /** /rename：保存逻辑是 runtime.setSessionName；权限对齐 Web 的“安装管理员”门（fail closed）。 */
+  private async executeRenameCommand(
+    route: Extract<LarkCommandRoute, { kind: 'intent' }>, config: StoredLarkConfig, event: LarkMessageEvent, sessionId: string | undefined, reply: ChatCommandReply
+  ) {
+    const fail = (markdown: string) => reply('/rename 未执行', markdown, { failed: true });
+    const text = route.argsText;
+    if (!text || text.startsWith('--') && text !== '--clear') { await fail('**用法：`/rename <名称>`；`/rename --clear` 恢复默认标题。**'); return; }
+    // Web 改名要求安装管理员：受管理的群只认机器人所有者或群管理员；其它情况与 /repair 同口径（未配置白名单时不开放）。
+    const managed = this.groupManager && event.chatType === 'group'
+      ? await this.groupManager.authorize(config.appId, event.chatId, event.senderOpenId, 'channel_bot.update') : undefined;
+    const auth = managed ? { allowed: managed.allowed && (managed.source === 'owner' || managed.source === 'admin') }
+      : await this.isRepairOperatorAllowed(config, event.senderOpenId, event.chatId);
+    if (!auth.allowed) {
+      await fail('reason' in auth && auth.reason === 'unconfigured' ? '未配置操作白名单时，飞书里不能执行 /rename，请在 Web 上改名。' : '当前账号无权改名：需要机器人所有者或管理员权限（与 Web 改名一致）。');
+      return;
+    }
+    let name: string | null;
+    try { name = text === '--clear' ? null : normalizeSessionName(text); }
+    catch (error) {
+      if (!(error instanceof RuntimeError)) throw error;
+      await fail(`**名称不合法。**\n\n名称不能为空、不能换行，最长 ${SESSION_NAME_MAX_LENGTH} 个字符。`); return;
+    }
+    const session = sessionId ? await this.runtime.getSession(sessionId) : undefined;
+    if (!session) { await fail('**当前话题还没有会话。**\n\n先发一条任务开始会话，再改名。'); return; }
+    try { await this.runtime.setSessionName!(session.id, name); }
+    catch (error) {
+      if (!(error instanceof RuntimeError) || error.code !== 'INVALID_WORK_SESSION') throw error;
+      await fail('**工作项管理的会话不能改名。**'); return;
+    }
+    const before = session.name ? `\`${escapeLarkPromptEcho(larkCommandEcho(session.name, 80))}\`` : '默认标题';
+    await reply('已改名', name === null ? `**已恢复默认标题。**\n\n原名称：${before}。` : `**会话名称已改为 \`${escapeLarkPromptEcho(larkCommandEcho(name, 80))}\`。**\n\n原名称：${before}。Web、/tasks 和 /resume list 都显示新名称。`);
+  }
+
+  /** /fork list：同一事项（源会话与它的所有分身共用）里 relation=fork 的会话，只列调用人能查看结果的。 */
+  private async replyForkList(config: StoredLarkConfig, event: LarkMessageEvent, sessionId: string | undefined, reply: ChatCommandReply) {
+    if (!this.runtime.getMatter) throw new Error('当前运行时读不到分身关系，/fork list 不可用。');
+    const forkIds = sessionId ? this.runtime.getMatter(sessionId)?.forkSessionIds ?? [] : [];
+    const agentNames = new Map((await this.runtime.listAgents?.().catch(() => []) ?? []).map(agent => [agent.id, agent.name] as const));
+    const rows: Array<{ id: string; title: string; status: string; agent: string; updatedAt: string; link?: string }> = [];
+    for (const id of forkIds) {
+      const fork = await this.runtime.getSession(id);
+      const source = parseLarkSourceId(fork?.sourceId);
+      if (!fork || fork.source !== 'lark' || source.appId !== config.appId || source.chatId !== event.chatId || source.chatType !== event.chatType) continue;
+      const tasks = await this.runtime.getTasks?.(id) ?? [];
+      const first = [...tasks].sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0];
+      if (!first || !await this.isTaskOperatorAllowed(config, event, { id: first.id, sessionId: id }, 'task.view_result')) continue;
+      const last = tasks.reduce((latest, task) => (task.updatedAt || task.createdAt) > (latest.updatedAt || latest.createdAt) ? task : latest, first);
+      const closed = Boolean(fork.archivedAt) || ['stopped', 'failed'].includes(fork.state);
+      const origin = await this.larkTaskOrigin(config, event.chatId, { id: first.id, sessionId: id });
+      const topicId = source.scope[0] === 'thread' ? source.scope[1] : undefined;
+      rows.push({ id, title: fork.name ?? origin?.title ?? larkTaskTitle(first.prompt, config.name),
+        status: closed ? '已关闭' : larkForkStatusLabels[last.status] ?? fork.state, agent: agentNames.get(fork.agentId) ?? fork.agentId,
+        updatedAt: [fork.updatedAt, last.updatedAt || last.createdAt].sort().at(-1)!,
+        ...(topicId ? { link: await this.service.getMessageLink(topicId).catch(() => undefined) } : {}) });
+    }
+    if (!rows.length) { await reply('分身列表', `**${forkIds.length ? '没有你可查看的分身' : '还没有分身'}。**\n\n发送 \`/fork [任务]\` 在新话题开分身。`); return; }
+    rows.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    const listed = rows.slice(0, 10).map(row => `**${escapeLarkPromptEcho(larkCommandEcho(row.title, 60))}**${row.id === sessionId ? '（当前话题）' : ''}\n\`${row.id}\` · ${row.status} · ${larkCommandEcho(row.agent, 40)} · 更新 ${clock(row.updatedAt)}\n${row.link ? `[打开话题](${row.link})` : '话题链接暂不可用'}`);
+    await reply('分身列表', `${listed.join('\n\n')}${rows.length > 10 ? `\n\n另有 ${rows.length - 10} 个分身未列出。` : ''}`);
+  }
+
   private async closedScopeSessions(config: StoredLarkConfig, event: LarkMessageEvent, scopeId: string) {
     const candidates: Array<{ session: Session; firstTaskId: string; closedAt: string; approximate: boolean; title: string }> = [];
     for (const session of await listPersistedLarkSessions(this.runtime, config, event.chatId, event.chatType, scopeId, this.cardMappings)) {
@@ -1921,7 +2106,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       const events = await this.runtime.getRecentEvents?.(session.id, 500) ?? [];
       const closed = events.filter(item => item.type === 'status' && ['stopped', 'failed'].includes((item.data as { state?: string })?.state ?? ''))
         .sort((a, b) => b.sequence - a.sequence)[0];
-      candidates.push({ session, firstTaskId: first.id, closedAt: closed?.timestamp ?? session.updatedAt, approximate: !closed, title: origin.title ?? larkTaskTitle(first.prompt, config.name) });
+      candidates.push({ session, firstTaskId: first.id, closedAt: closed?.timestamp ?? session.updatedAt, approximate: !closed, title: session.name ?? origin.title ?? larkTaskTitle(first.prompt, config.name) });
     }
     candidates.sort((a, b) => b.closedAt.localeCompare(a.closedAt));
     return candidates;

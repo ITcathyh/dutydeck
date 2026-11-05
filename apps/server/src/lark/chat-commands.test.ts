@@ -21,6 +21,15 @@ import { LarkGroupManager } from './group-management.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
 
+// /model、/effort 按 Agent 的模型列表校验；不要在测试里真的探测 ACP。
+vi.mock('../agent-models.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../agent-models.js')>(),
+  discoverAgentModels: vi.fn(async () => ({
+    models: [{ id: 'model-a', name: 'A' }, { id: 'model-b', name: 'B' }],
+    reasoningEfforts: [{ id: 'low', name: 'low' }, { id: 'high', name: 'high' }], source: 'acp' as const
+  }))
+}));
+
 const cleanups: Array<() => Promise<void> | void> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
@@ -37,13 +46,14 @@ const mentioning = (id: string, text: string, member: { openId?: string; name: s
     { key: '@_user_2', name: member.name, ...(member.openId ? { openId: member.openId } : {}), mentionedType: 'user' }
   ] });
 
-async function harness(options: { native?: boolean; answer?: boolean; managedGroup?: boolean; configPatch?: Partial<StoredLarkConfig>; steer?: AgentDriver['steer']; hold?: (prompt: string) => Promise<void> | undefined; reportIdle?: boolean } = {}) {
+async function harness(options: { native?: boolean; answer?: boolean; managedGroup?: boolean; configPatch?: Partial<StoredLarkConfig>; steer?: AgentDriver['steer']; hold?: (prompt: string) => Promise<void> | undefined; reportIdle?: boolean; switching?: { model?: boolean; effort?: boolean } } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-commands-'));
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   let release: (() => void) | undefined;
   const gate = new Promise<void>(done => { release = done; });
   const prompts: string[] = [];
   const forks: Array<string | undefined> = [];
+  const switched: string[] = [];
   const runtime = new DutydeckRuntime(repos, {
     matterTracking: new MattersService(repos),
     probe: () => ({ protocol: options.native ? 'pty-cli' : 'acp', available: true, pause: false, resume: true }),
@@ -70,6 +80,8 @@ async function harness(options: { native?: boolean; answer?: boolean; managedGro
           } finally { sending = false; }
         },
         ...(options.steer ? { steer: options.steer } : {}),
+        ...(options.switching?.model ? { setModel: async (model: string) => { switched.push(`model:${model}`); } } : {}),
+        ...(options.switching?.effort ? { setReasoningEffort: async (effort: string) => { switched.push(`effort:${effort}`); } } : {}),
         // 与真实 ACP 驱动一样报告自己是否空闲：结果未知的一轮要等驱动空闲才能人工处理。
         ...(options.reportIdle ? { isIdle: () => !sending } : {})
       };
@@ -154,7 +166,7 @@ async function harness(options: { native?: boolean; answer?: boolean; managedGro
   /** 等某条指令真的开跑：只等它出现在队列里的用例，会在「谁在执行」上偶发竞态。 */
   const waitRunning = async (text: string) => vi.waitFor(async () =>
     expect((await runtime.getTasks(await sessionId())).some(task => task.prompt.includes(text) && task.status === 'running')).toBe(true));
-  return { forks, agents, repos, runtime, config, coordinator, createCoordinator, service, cards, log, groupManager, steerQueued, prompts,
+  return { forks, switched, agents, repos, runtime, config, coordinator, createCoordinator, service, cards, log, groupManager, steerQueued, prompts,
     receipts, lastReceipt, receiptNamed, markdownOf, unknownNotices, dispatch, sessionId, waitRunning, cwd, release: () => release?.() };
 }
 
@@ -832,4 +844,337 @@ it('records the source matter when /retry replaces a stopped interrupted session
   await vi.waitFor(async () => { child = (await h.runtime.listSessions()).find(session => session.id !== parent)?.id ?? ''; expect((await h.runtime.getTasks(child)).length).toBeGreaterThan(0); });
   expect(track).toHaveBeenCalledWith(child, expect.objectContaining({ sourceSessionId: parent, relation: 'retry' }));
   expect(h.repos.matters!.find('session', child)?.id).toBe(h.repos.matters!.find('session', parent)?.id);
+});
+
+/** 跑完一轮任务让会话空闲；/model、/effort 只在空闲时切换。 */
+async function idleSession(h: Awaited<ReturnType<typeof harness>>, text = '原始任务') {
+  h.release();
+  await h.dispatch('om_task', text);
+  const id = await h.sessionId();
+  await vi.waitFor(async () => expect((await h.runtime.getTasks(id)).at(-1)?.status).toBe('completed'));
+  return id;
+}
+/** 群里放开给全体成员对话：成员能发命令，但不是机器人所有者或管理员。 */
+async function openToMembers(h: Awaited<ReturnType<typeof harness>>) {
+  const access = (await h.groupManager!.groupAccess(h.config.appId, 'oc_group'))!;
+  await h.groupManager!.save(h.config.appId, 'oc_group', { expectedRevision: access.revision, patch: { accessOverride: { mode: 'all_chat_members', principalIds: [] } } });
+}
+
+describe('/model 与 /effort 切换当前会话', () => {
+  it('不带参数回当前值与可选项，不改任何东西', async () => {
+    const h = await harness({ answer: true, switching: { model: true, effort: true }, configPatch: { defaultModel: 'model-a' } });
+    await idleSession(h);
+    await h.coordinator.handle(event('om_m0', '/model'), h.config);
+    const model = h.markdownOf(h.receiptNamed('当前模型'));
+    expect(model).toContain('model-a'); expect(model).toContain('model-b'); expect(model).toContain('/model <模型>');
+    await h.coordinator.handle(event('om_e0', '/effort'), h.config);
+    const effort = h.markdownOf(h.receiptNamed('当前思考强度'));
+    expect(effort).toContain('未指定'); expect(effort).toContain('low'); expect(effort).toContain('high');
+    expect(h.switched).toEqual([]);
+  });
+
+  it('空闲时 /model 与 /effort 调用运行时切换，会话保存新值', async () => {
+    const h = await harness({ answer: true, switching: { model: true, effort: true }, configPatch: { defaultModel: 'model-a' } });
+    const id = await idleSession(h);
+    await h.coordinator.handle(event('om_m1', '/model model-b'), h.config);
+    expect(h.receiptNamed('已切换模型')).toMatchObject({ state: 'completed' });
+    expect(h.markdownOf(h.receiptNamed('已切换模型'))).toContain('model-a');
+    await h.coordinator.handle(event('om_e1', '/effort high'), h.config);
+    expect(h.receiptNamed('已切换思考强度')).toMatchObject({ state: 'completed' });
+    expect(h.switched).toEqual(['model:model-b', 'effort:high']);
+    expect(await h.runtime.getSession(id)).toMatchObject({ model: 'model-b', reasoningEffort: 'high' });
+    // 再发同一个值不重复切换。
+    await h.coordinator.handle(event('om_m2', '/model model-b'), h.config);
+    expect(h.receiptNamed('/model 无需切换')).toBeTruthy();
+    expect(h.switched).toHaveLength(2);
+  });
+
+  it('本轮运行中被拒绝并提示等本轮结束，模型不变', async () => {
+    const h = await harness({ answer: true, switching: { model: true, effort: true }, configPatch: { defaultModel: 'model-a' } });
+    await h.dispatch('om_task', '长任务'); await h.waitRunning('长任务');
+    const id = await h.sessionId();
+    await h.coordinator.handle(event('om_m3', '/model model-b'), h.config);
+    expect(h.receiptNamed('/model 未执行')).toMatchObject({ state: 'failed' });
+    expect(h.markdownOf(h.receiptNamed('/model 未执行'))).toContain('本轮结束');
+    await h.coordinator.handle(event('om_e3', '/effort high'), h.config);
+    expect(h.markdownOf(h.receiptNamed('/effort 未执行'))).toContain('本轮结束');
+    expect(h.switched).toEqual([]);
+    expect((await h.runtime.getSession(id))?.model).toBe('model-a');
+  });
+
+  it('Agent 不支持运行中切换时写明原因，模型不变', async () => {
+    const h = await harness({ answer: true, configPatch: { defaultModel: 'model-a' } });
+    const id = await idleSession(h);
+    await h.coordinator.handle(event('om_m4', '/model model-b'), h.config);
+    expect(h.receiptNamed('/model 未执行')).toMatchObject({ state: 'failed' });
+    expect(h.markdownOf(h.receiptNamed('/model 未执行'))).toContain('不支持');
+    expect((await h.runtime.getSession(id))?.model).toBe('model-a');
+  });
+
+  it('不在 Agent 模型列表里或格式不对的值不会交给运行时', async () => {
+    const h = await harness({ answer: true, switching: { model: true, effort: true } });
+    await idleSession(h);
+    await h.coordinator.handle(event('om_m5', '/model nope-model'), h.config);
+    expect(h.markdownOf(h.receiptNamed('/model 未执行'))).toContain('未提供所选模型');
+    await h.coordinator.handle(event('om_m6', '/model bad!name'), h.config);
+    expect(h.markdownOf(h.receiptNamed('/model 未执行'))).toContain('格式不正确');
+    await h.coordinator.handle(event('om_e6', '/effort extreme'), h.config);
+    expect(h.markdownOf(h.receiptNamed('/effort 未执行'))).toContain('推理强度');
+    await h.coordinator.handle(event('om_m7', '/model model-a model-b'), h.config);
+    expect(h.markdownOf(h.receiptNamed('/model 未执行'))).toContain('用法');
+    expect(h.switched).toEqual([]);
+  });
+
+  it('没有会话或会话已关闭时不切换', async () => {
+    const h = await harness({ answer: true, switching: { model: true } });
+    await h.coordinator.handle(event('om_m8', '/model model-b'), h.config);
+    expect(h.markdownOf(h.receiptNamed('/model 未执行'))).toContain('还没有会话');
+    await idleSession(h);
+    await h.coordinator.handle(event('om_new', '/new'), h.config);
+    await h.coordinator.handle(event('om_m9', '/model model-b'), h.config);
+    expect(h.switched).toEqual([]);
+  });
+
+  it('执行策略拒绝时不切换', async () => {
+    const h = await harness({ answer: true, switching: { model: true } });
+    await idleSession(h);
+    const authorize = vi.fn(async (_boundary: string, action: string) => ({ allowed: action !== 'run.change_model', action, code: 'denied', reason: '策略不允许切换模型', source: 'integration' as const }));
+    (h.coordinator as any).executionPolicy = { integrationMode: 'legacy_unmanaged', authorize };
+    await h.coordinator.handle(event('om_m10', '/model model-b'), h.config);
+    expect(authorize).toHaveBeenCalledWith('session', 'run.change_model');
+    expect(h.markdownOf(h.receiptNamed('/model 未执行'))).toContain('策略不允许切换模型');
+    expect(h.switched).toEqual([]);
+  });
+
+  it('受管理的群里需要 run.change_model 群级授权，普通成员被拒', async () => {
+    const h = await harness({ managedGroup: true, switching: { model: true, effort: true }, answer: true });
+    await openToMembers(h);
+    await idleSession(h);
+    const authorize = vi.spyOn(h.groupManager!, 'authorize');
+    await h.coordinator.handle(event('om_m11', '/model model-b'), h.config);
+    expect(authorize.mock.calls.some(call => call[3] === 'run.change_model')).toBe(true);
+    expect(h.receiptNamed('/model 未执行')).toMatchObject({ state: 'failed' });
+    expect(h.markdownOf(h.receiptNamed('/model 未执行'))).toContain('权限');
+    await h.coordinator.handle(event('om_e11', '/effort high'), h.config);
+    expect(h.markdownOf(h.receiptNamed('/effort 未执行'))).toContain('权限');
+    expect(h.switched).toEqual([]);
+    // 有群级授权才放行。
+    authorize.mockImplementation(async (_app, _chat, _actor, action) => ({ allowed: true, action, code: 'ok', reason: 'ok', source: 'admin' as const }));
+    await h.coordinator.handle(event('om_m12', '/model model-b'), h.config);
+    expect(h.switched).toEqual(['model:model-b']);
+  });
+
+  it('切换后服务重启，下一条消息仍用同一会话和新模型（默认模型不同也不另开会话）', async () => {
+    const h = await harness({ answer: true, switching: { model: true }, configPatch: { defaultModel: 'model-a' } });
+    const id = await idleSession(h);
+    await h.coordinator.handle(event('om_m13', '/model model-b'), h.config);
+    expect((await h.runtime.getSession(id))?.model).toBe('model-b');
+    const rebuilt = h.createCoordinator(); await rebuilt.initializeWorkflows(h.config);
+    await rebuilt.handle(event('om_after', '重启后的任务'), h.config);
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(id)).some(task => task.prompt.includes('重启后的任务'))).toBe(true));
+    expect(await h.runtime.listSessions()).toHaveLength(1);
+    expect((await h.runtime.getSession(id))?.model).toBe('model-b');
+    rebuilt.stop();
+  });
+
+  it('写持久绑定时不把别的会话的事项边界标记带过来', async () => {
+    const h = await harness({ answer: true, switching: { model: true }, configPatch: { defaultModel: 'model-a' } });
+    const id = await idleSession(h);
+    const sourceId = (await h.runtime.getSession(id))!.sourceId!;
+    const channel = `lark-launch:${h.config.appId}`;
+    await h.repos.channelMappings.save({ id: `lark-launch:${sourceId}`, channel, externalId: sourceId, sessionId: 'ses_retired',
+      extra: JSON.stringify({ baseConfigKey: 'old', matterBoundary: true, explicitAgent: true }), createdAt: new Date().toISOString() });
+    await h.coordinator.handle(event('om_pin', '/model model-b'), h.config);
+    const binding = await h.repos.channelMappings.get(channel, sourceId);
+    expect(binding?.sessionId).toBe(id);
+    expect(JSON.parse(binding!.extra!)).toEqual({ baseConfigKey: expect.any(String), explicitAgent: false });
+  });
+
+  it('/new --model 开的会话切换后重启，首轮配置不把新值覆盖回去', async () => {
+    const h = await harness({ answer: true, switching: { model: true } });
+    h.release();
+    await h.coordinator.handle(event('om_first', '/new --model model-a -- 首轮任务'), h.config);
+    await vi.waitFor(async () => expect((await h.runtime.listSessions()).length).toBe(1));
+    const id = await h.sessionId();
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(id)).at(-1)?.status).toBe('completed'));
+    expect((await h.runtime.getSession(id))?.model).toBe('model-a');
+    await h.coordinator.handle(event('om_m14', '/model model-b'), h.config);
+    const rebuilt = h.createCoordinator(); await rebuilt.initializeWorkflows(h.config);
+    await rebuilt.handle(event('om_after2', '重启后的任务'), h.config);
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(id)).some(task => task.prompt.includes('重启后的任务'))).toBe(true));
+    expect(await h.runtime.listSessions()).toHaveLength(1);
+    expect((await h.runtime.getSession(id))?.model).toBe('model-b');
+    rebuilt.stop();
+  });
+
+  it('切换后 /new 再 /resume，恢复的会话仍是新模型', async () => {
+    const h = await harness({ answer: true, switching: { model: true }, configPatch: { defaultModel: 'model-a' } });
+    const id = await idleSession(h);
+    await h.coordinator.handle(event('om_m15', '/model model-b'), h.config);
+    await h.coordinator.handle(event('om_new2', '/new'), h.config);
+    expect((await h.runtime.getSession(id))?.state).toBe('stopped');
+    await h.coordinator.handle(event('om_resume2', '/resume'), h.config);
+    expect((await h.runtime.getSession(id))?.state).toBe('idle');
+    expect((await h.runtime.getSession(id))?.model).toBe('model-b');
+    const rebuilt = h.createCoordinator(); await rebuilt.initializeWorkflows(h.config);
+    await rebuilt.handle(event('om_after3', '恢复后的任务'), h.config);
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(id)).some(task => task.prompt.includes('恢复后的任务'))).toBe(true));
+    expect(await h.runtime.listSessions()).toHaveLength(1);
+    rebuilt.stop();
+  });
+});
+
+describe('/rename 给会话改名', () => {
+  const admin = { allowedUsers: [{ openId: 'ou_alice', name: 'Alice' }] };
+
+  it('安装管理员改名后 Web、/tasks、/resume list 都显示新名称，--clear 恢复默认', async () => {
+    const h = await harness({ answer: true, configPatch: admin });
+    const id = await idleSession(h);
+    await h.coordinator.handle(event('om_r1', '/rename 发布排查'), h.config);
+    expect(h.receiptNamed('已改名')).toMatchObject({ state: 'completed' });
+    expect((await h.runtime.getSession(id))?.name).toBe('发布排查');
+    expect((await h.runtime.listSessions()).find(session => session.id === id)?.name).toBe('发布排查');
+    await h.coordinator.handle(event('om_tasks', '/tasks'), h.config);
+    await vi.waitFor(() => expect(h.cards.map(card => h.markdownOf(card)).join('\n')).toContain('发布排查 · '));
+
+    await h.coordinator.handle(event('om_r2', '/rename --clear'), h.config);
+    expect(h.markdownOf(h.receiptNamed('已改名'))).toContain('已恢复默认标题');
+    expect((await h.runtime.getSession(id))?.name).toBeUndefined();
+
+    await h.coordinator.handle(event('om_r2b', '/rename 发布排查'), h.config);
+    await h.coordinator.handle(event('om_new', '/new'), h.config);
+    await h.coordinator.handle(event('om_list', '/resume list'), h.config);
+    expect(h.markdownOf(h.receiptNamed('最近关闭的会话'))).toContain('发布排查');
+  });
+
+  it('普通成员改不了：受管理的群只认机器人所有者或管理员', async () => {
+    const h = await harness({ managedGroup: true, answer: true });
+    await openToMembers(h);
+    const id = await idleSession(h);
+    const authorize = vi.spyOn(h.groupManager!, 'authorize');
+    await h.coordinator.handle(event('om_r3', '/rename 偷偷改名'), h.config);
+    expect(authorize.mock.calls.some(call => call[3] === 'channel_bot.update')).toBe(true);
+    expect(h.receiptNamed('/rename 未执行')).toMatchObject({ state: 'failed' });
+    expect(h.markdownOf(h.receiptNamed('/rename 未执行'))).toContain('管理员');
+    expect((await h.runtime.getSession(id))?.name).toBeUndefined();
+    // 只是被放行的群策略（非 owner/admin 来源）也不行。
+    authorize.mockImplementation(async (_app, _chat, _actor, action) => ({ allowed: true, action, code: 'ok', reason: 'ok', source: 'group_policy' as const }));
+    await h.coordinator.handle(event('om_r4', '/rename 仍然偷偷改名'), h.config);
+    expect((await h.runtime.getSession(id))?.name).toBeUndefined();
+    // 管理员来源才放行。
+    authorize.mockImplementation(async (_app, _chat, _actor, action) => ({ allowed: true, action, code: 'ok', reason: 'ok', source: 'admin' as const }));
+    await h.coordinator.handle(event('om_r5', '/rename 管理员改名'), h.config);
+    expect((await h.runtime.getSession(id))?.name).toBe('管理员改名');
+  });
+
+  it('未配置白名单时飞书里不开放改名，请在 Web 上操作', async () => {
+    const h = await harness({ answer: true });
+    const id = await idleSession(h);
+    await h.coordinator.handle(event('om_r6', '/rename 新名'), h.config);
+    expect(h.markdownOf(h.receiptNamed('/rename 未执行'))).toContain('未配置操作白名单');
+    expect((await h.runtime.getSession(id))?.name).toBeUndefined();
+  });
+
+  it('白名单之外的发送人不能改名', async () => {
+    const h = await harness({ answer: true, configPatch: admin });
+    const id = await idleSession(h);
+    await h.coordinator.handle(event('om_r7', '/rename 新名', { senderOpenId: 'ou_bob' }), h.config);
+    expect(h.lastReceipt()).toMatchObject({ state: 'failed' });
+    expect((await h.runtime.getSession(id))?.name).toBeUndefined();
+  });
+
+  it('工作项管理的会话与 Web 一样被拒绝', async () => {
+    const h = await harness({ answer: true, configPatch: admin });
+    const id = await idleSession(h);
+    // 运行时对工作项子会话的拒绝由 packages/agent-runtime/src/session-name.test.ts 覆盖；这里验证飞书把它翻成人话，名称不变。
+    const setName = vi.spyOn(h.runtime, 'setSessionName').mockRejectedValueOnce(new RuntimeError('INVALID_WORK_SESSION', 'Work-item managed sessions cannot be renamed', 400));
+    await h.coordinator.handle(event('om_r8', '/rename 子会话'), h.config);
+    expect(h.receiptNamed('/rename 未执行')).toMatchObject({ state: 'failed' });
+    expect(setName).toHaveBeenCalledWith(id, '子会话');
+    expect(h.markdownOf(h.receiptNamed('/rename 未执行'))).toContain('工作项');
+    expect((await h.runtime.getSession(id))?.name).toBeUndefined();
+  });
+
+  it('用法与名称不合法时给出原因，不改名', async () => {
+    const h = await harness({ answer: true, configPatch: admin });
+    const id = await idleSession(h);
+    for (const [index, text] of ['/rename', '/rename --foo', `/rename ${'长'.repeat(81)}`, '/rename 第一行\n第二行'].entries()) {
+      await h.coordinator.handle(event(`om_bad_${index}`, text), h.config);
+      expect(h.lastReceipt()).toMatchObject({ taskName: '/rename 未执行', state: 'failed' });
+    }
+    expect(h.markdownOf(h.lastReceipt())).toContain('不能换行');
+    expect((await h.runtime.getSession(id))?.name).toBeUndefined();
+  });
+});
+
+describe('/fork list 列出分身', () => {
+  const idsIn = (text: string) => [...text.matchAll(/ses_[\w-]+/g)].map(match => match[0]);
+
+  it('没有分身时直说；有分身时源会话与任一分身里列出同一组，含状态、Agent、更新时间和话题链接', async () => {
+    const h = await harness();
+    await h.dispatch('om_task', '源任务'); await h.waitRunning('源任务');
+    const source = await h.sessionId();
+    await h.coordinator.handle(event('om_none', '/fork list'), h.config);
+    expect(h.markdownOf(h.receiptNamed('分身列表'))).toContain('还没有分身');
+
+    await h.coordinator.handle(event('om_fork1', '/fork 并行任务一'), h.config);
+    await h.coordinator.handle(event('om_fork2', '/fork 并行任务二'), h.config);
+    const forks = (await h.runtime.listSessions()).filter(session => session.id !== source);
+    expect(forks).toHaveLength(2);
+
+    await h.coordinator.handle(event('om_list1', '/fork list'), h.config);
+    const fromSource = h.markdownOf(h.lastReceipt());
+    expect(idsIn(fromSource).sort()).toEqual(forks.map(fork => fork.id).sort());
+    expect(fromSource).not.toContain(source);
+    for (const label of ['并行任务一', '并行任务二', 'Mock Agent', 'https://example.test/message/']) expect(fromSource).toContain(label);
+    expect(fromSource).toMatch(/(进行中|排队中)/);
+    expect(fromSource).not.toContain('当前话题');
+
+    // 在其中一个分身的话题里查，结果相同，并标出当前话题。
+    const child = forks.find(fork => fork.sourceId!.endsWith(':thread:om_card_1')) ?? forks[0]!;
+    const threadId = child.sourceId!.split(':').at(-1)!;
+    await h.coordinator.handle(event('om_list2', '/fork list', { threadId, rootId: threadId }), h.config);
+    const fromFork = h.markdownOf(h.lastReceipt());
+    expect(idsIn(fromFork).sort()).toEqual(idsIn(fromSource).sort());
+    expect(fromFork).toContain('当前话题');
+  });
+
+  it('只列同一个群里、调用人看得到结果的分身；其他群或没有任务的不出现', async () => {
+    const h = await harness({ answer: true });
+    await h.dispatch('om_task', '源任务'); await h.waitRunning('源任务');
+    const source = await h.sessionId();
+    await h.coordinator.handle(event('om_fork', '/fork 本群分身'), h.config);
+    const own = (await h.runtime.listSessions()).find(session => session.id !== source)!;
+    h.release();
+    // 先登记事项再发任务，让它们和源会话在同一事项里，只差所在的群和有没有任务。
+    const otherChat = await h.runtime.start({ agentId: 'mock', source: 'lark', sourceId: `${h.config.appId}:oc_other:group:thread:om_other`, permissionMode: 'ask' });
+    await h.runtime.trackMatterSession(otherChat.id, { sourceSessionId: source, relation: 'fork', title: '别的群' });
+    await h.runtime.send(otherChat.id, '别的群的分身', undefined, undefined, 'ou_alice');
+    const noTask = await h.runtime.start({ agentId: 'mock', source: 'lark', sourceId: `${h.config.appId}:oc_group:group:thread:om_empty`, permissionMode: 'ask' });
+    await h.runtime.trackMatterSession(noTask.id, { sourceSessionId: source, relation: 'fork', title: '没有任务' });
+    expect(h.runtime.getMatter(source)?.forkSessionIds).toEqual(expect.arrayContaining([own.id, otherChat.id, noTask.id]));
+
+    await h.coordinator.handle(event('om_list', '/fork list'), h.config);
+    const text = h.markdownOf(h.lastReceipt());
+    expect(text).toContain(own.id);
+    expect(text).not.toContain(otherChat.id); expect(text).not.toContain('别的群的分身'); expect(text).not.toContain('oc_other'); expect(text).not.toContain('om_other');
+    expect(text).not.toContain(noTask.id);
+    expect(h.service.getMessageLink.mock.calls.map(call => call[0])).not.toContain('om_other');
+  });
+
+  it('管理的群里看不到结果的分身不列出', async () => {
+    const h = await harness({ managedGroup: true });
+    await openToMembers(h);
+    await h.dispatch('om_task', '源任务'); await h.waitRunning('源任务');
+    const source = await h.sessionId();
+    await h.coordinator.handle(event('om_fork', '/fork 本群分身'), h.config);
+    const own = (await h.runtime.listSessions()).find(session => session.id !== source)!;
+    // 查看结果的权限被收回时，分身不出现，也不泄露存在。
+    const authorize = vi.spyOn(h.groupManager!, 'authorize');
+    authorize.mockImplementation(async (_app, _chat, _actor, action, sessionId) => ({ allowed: action !== 'task.view_result' || sessionId !== own.id, action, code: 'x', reason: 'x', source: 'group_policy' as const }));
+    await h.coordinator.handle(event('om_list', '/fork list'), h.config);
+    const text = h.markdownOf(h.lastReceipt());
+    expect(text).not.toContain(own.id);
+    expect(text).toContain('没有你可查看的分身');
+  });
 });

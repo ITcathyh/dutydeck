@@ -126,7 +126,7 @@ describe('Agent 代发飞书命令', () => {
     expect(agentCommandPlan('/queue cancel 2').confirm).toBe(true);
     expect(agentCommandPlan('/new --agent codex -- 修复登录').confirm).toBe(true);
     expect(agentCommandPlan('/schedule disable sch_1').confirm).toBe(true);
-    for (const command of ['/stop', '/cancel', '/approve req_1', '/answer q_1 好', '/remember x']) {
+    for (const command of ['/stop', '/cancel', '/model model-b', '/effort high', '/approve req_1', '/answer q_1 好', '/remember x']) {
       expect(() => agentCommandPlan(command)).toThrow(expect.objectContaining({ code: 'AGENT_COMMAND_USER_ONLY' }));
     }
     expect(() => agentCommandPlan('/schedule every 15 看看')).toThrow(expect.objectContaining({ code: 'AGENT_COMMAND_UNSUPPORTED' }));

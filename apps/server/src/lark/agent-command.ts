@@ -7,10 +7,12 @@ import { z } from 'zod';
 import { RuntimeError } from '@dutydeck/shared';
 import { larkCommandRegistry, parseSlashCommand, resolveLarkCommand, type ParsedSlashCommand } from './commands.js';
 
-/** 只能由用户自己做的：停止和插话针对 Agent 正在跑的这一轮，批准和回答是用户对 Agent 的答复；记忆另有 dutydeck memory。 */
+/** 只能由用户自己做的：停止和插话针对 Agent 正在跑的这一轮，模型与思考强度只能在空闲时切换（Agent 代发时这一轮必在运行），批准和回答是用户对 Agent 的答复；记忆另有 dutydeck memory。 */
 const userOnly: Record<string, string> = {
   cancel: '停止当前任务要用户点进度卡上的「中断」，或直接说“停”。',
   steer: '插话要用户在你执行时直接发消息。',
+  model: '切换模型只能在本轮结束后进行，请用户在本轮结束后发 /model。',
+  effort: '切换思考强度只能在本轮结束后进行，请用户在本轮结束后发 /effort。',
   approve: '批准工具调用要用户在审批卡上点按钮，或回复“可以”。',
   reject: '拒绝工具调用要用户在审批卡上点按钮。',
   answer: '你的提问要用户在话题里直接回复。',

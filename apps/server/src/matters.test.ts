@@ -24,6 +24,19 @@ describe('matter tracking', () => {
       expect(service.summary('plain-new')?.id).not.toBe(service.summary('child')?.id);
     } finally { repos.close(); }
   });
+  it('lists fork sessions identically from the source or any fork, and leaves other relations out', async () => {
+    const repos = createRepositories(':memory:');
+    try {
+      const service = new MattersService(repos);
+      await service.session('source', { title: 'goal' });
+      expect(service.summary('source')?.forkSessionIds).toBeUndefined();
+      await service.session('fork-1', { sourceSessionId: 'source', relation: 'fork' });
+      await service.session('fork-2', { sourceSessionId: 'fork-1', relation: 'fork' });
+      await service.session('resumed', { sourceSessionId: 'source', relation: 'resume' });
+      for (const id of ['source', 'fork-1', 'fork-2']) expect(service.summary(id)?.forkSessionIds?.sort()).toEqual(['fork-1', 'fork-2']);
+      expect(service.summary('source')?.sessionIds).toEqual(expect.arrayContaining(['source', 'fork-1', 'fork-2', 'resumed']));
+    } finally { repos.close(); }
+  });
   it('only logs association failure', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const service = new MattersService({ matters: { ensureSession() { throw new Error('write failed'); } } as any, sessions: {} as any, tasks: {} as any });
