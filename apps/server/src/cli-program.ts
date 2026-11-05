@@ -932,6 +932,13 @@ alarm=<JSON> (the old flat alarm subscription) still works for one release and i
     .requiredOption('--app <app-id>', 'Bot')
     .option('--chat <chat-id>', 'Group (oc_...)'))
     .action((options, command) => runSettings('usage-remove-cap', command, { appId: options.app, chatId: options.chat }));
+  const approvalRules = settings.command('approval-rules').description('Commands allowed per bot and workspace from Lark approval cards (dashboard: Agent > 按工作区允许的命令); new rules are only created on a card');
+  withTarget(approvalRules.command('list').description('List rules: bot, workspace (real path), command prefix, who created it and when')
+    .option('--app <app-id>', 'Only this bot')
+    .option('--workspace <path>', 'Only this workspace directory, compared by real path'))
+    .action((options, command) => runSettings('approval-rule-list', command, { appId: options.app, workspace: options.workspace }));
+  withTarget(approvalRules.command('remove <rule-id>').description('Revoke a rule; the next matching command asks for approval again'))
+    .action((ruleId, _options, command) => runSettings('approval-rule-remove', command, { ruleId }));
 
   const session = program.command('session').enablePositionalOptions().description('Relay messages to the user who owns the current Dutydeck session');
   session.command('list')

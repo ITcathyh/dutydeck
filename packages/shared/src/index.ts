@@ -251,13 +251,16 @@ export interface PermissionRequestData {
    * Bounded, redacted facts supplied by the ACP tool call or the Claude PermissionRequest hook; never raw input.
    * kind follows ACP tool kinds (execute / edit / delete / move / read / search / fetch / other);
    * resourceCount is how many files the operation touches when more than one is known.
+   * commandExact：command 是执行端交来的字符串原文，没有被脱敏、截断或去掉控制字符；只有这样的命令才能按工作区规则匹配。
    */
-  operation?: { source: 'acp_tool_call' | 'claude_permission_hook'; kind?: string; cwd?: string; resource?: string; resourceCount?: number; command?: string };
+  operation?: { source: 'acp_tool_call' | 'claude_permission_hook'; kind?: string; cwd?: string; resource?: string; resourceCount?: number; command?: string; commandExact?: true };
   title: string;
   options?: Array<{ id: string; label: string; kind?: string }>;
   status: 'pending' | 'approved' | 'rejected';
   /** 拒绝时用户（或自动拒绝）给出的说明，已脱敏并截断；只在 status 为 rejected 时出现。 */
   reason?: string;
+  /** 按工作区规则自动允许时命中的规则（多条以「、」连接）；只在 status 为 approved 时出现。 */
+  workspaceRule?: string;
 }
 
 export interface ToolRiskPolicy {
@@ -518,6 +521,8 @@ export interface HistoryRetentionResult { terminalFrames: number; sessionStateCo
 
 export interface RepositoryBundle {
   matters?: import('./matters.js').MatterRepository;
+  /** 按工作区记住的审批规则；内存仓储与旧测试替身可以不提供，此时不出现「本工作区允许」。 */
+  workspaceApprovalRules?: import('./workspace-approval-rules.js').WorkspaceApprovalRuleRepository;
   pluginResults: import('./plugin-results.js').PluginResultRepository;
   workItems: {
     listScheduledIds(): Promise<string[]>;
@@ -578,6 +583,7 @@ export * from './work-items.js';
 export * from './permission-display.js';
 export * from './credential-redaction.js';
 export * from './agent-command-approval.js';
+export * from './workspace-approval-rules.js';
 export * from './remote-approval.js';
 export * from './cli-capabilities.js';
 export * from './agent-model-service.js';

@@ -54,6 +54,30 @@ describe('runtime host hooks', () => {
     await h.runtime.shutdown(); h.repos.close();
   });
 
+  it('writes the matched workspace rule into the approved audit record and never into a rejection', async () => {
+    const h = harness({});
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    h.driver.send = vi.fn(async () => {
+      h.emit({ type: 'permission_request', data: { id: 'p1', title: 'Run?', status: 'pending' } });
+      h.emit({ type: 'permission_request', data: { id: 'p2', title: 'Other?', status: 'pending' } });
+      await gate;
+      h.emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+    });
+    await h.runtime.initialize([agent]);
+    const session = await h.runtime.start({ agentId: 'mock' });
+    const turn = h.runtime.send(session.id, 'work');
+    await vi.waitFor(() => expect(h.runtime.getPendingPermissions(session.id)).toHaveLength(2));
+    const [first, second] = h.runtime.getPendingPermissions(session.id);
+    expect(await h.runtime.resolvePermission(session.id, first!.id, true, undefined, { workspaceRule: 'pnpm test' })).toMatchObject({ status: 'approved', workspaceRule: 'pnpm test' });
+    expect(await h.runtime.resolvePermission(session.id, second!.id, false, undefined, { workspaceRule: 'pnpm test' })).not.toHaveProperty('workspaceRule');
+    const audit = (await h.runtime.getEvents(session.id)).filter(event => event.type === 'permission_request' && (event.data as any).status !== 'pending').map(event => [(event.data as any).title, (event.data as any).workspaceRule]);
+    expect(audit).toEqual([['Run?', 'pnpm test'], ['Other?', undefined]]);
+    release();
+    await turn;
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
   it('treats a throwing reviewer as undecided', async () => {
     const h = harness({ reviewPermission: async () => { throw new Error('hook crashed'); } });
     let release!: () => void;

@@ -12,6 +12,7 @@ import { createUsageLedgerRepository } from './usage-ledger.js'
 import { createMemoryJobRepository } from './memory-jobs.js'
 
 const BUSINESS_TABLES = [
+  'workspace_approval_rules',
   'matters',
   'matter_links',
   'agent_configs',
@@ -68,7 +69,7 @@ const BUSINESS_TABLES = [
 ]
 
 const SESSION_PATCH_COLUMNS = ['reasoning_effort', 'system_prompt', 'permission_mode', 'source', 'source_id', 'archived_at']
-const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45]
+const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46]
 const temporaryDirectories: string[] = []
 const linuxIt = process.platform === 'linux' ? it : it.skip
 
@@ -140,6 +141,52 @@ describe('storage migrations', () => {
     expect(appliedVersions(db)).toEqual(ALL_VERSIONS);
     expect(db.pragma('foreign_key_check')).toEqual([]);
     db.close();
+  });
+  it('v46 adds workspace approval rules to an existing database without touching its data, and survives reopening', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dutydeck-v46-'));
+    temporaryDirectories.push(directory);
+    const filename = join(directory, 'state.sqlite');
+    const db = new Database(filename);
+    db.exec('CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,applied_at TEXT NOT NULL)');
+    withMigrationTransaction(db, () => { for (const migration of migrations.filter(item => item.version <= 45)) { migration.up(db); db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run(migration.version, '2026-11-01'); } });
+    db.prepare('INSERT INTO sessions (id, agent_id, state, cwd, run_id, created_at, updated_at) VALUES (?,?,?,?,?,?,?)').run('ses_old', 'agent', 'idle', '/work', 'run', '2026-11-01T00:00:00.000Z', '2026-11-01T00:00:00.000Z');
+    db.prepare('INSERT INTO configs VALUES (?,?)').run('old:key', 'old value');
+    const before = { sessions: db.prepare('SELECT * FROM sessions').all(), configs: db.prepare('SELECT * FROM configs ORDER BY key').all() };
+    expect(tableNames(db)).not.toContain('workspace_approval_rules');
+    runMigrations(db);
+    expect(appliedVersions(db)).toEqual(ALL_VERSIONS);
+    expect(columnNames(db, 'workspace_approval_rules')).toEqual(['id', 'app_id', 'workspace', 'pattern', 'created_by', 'created_at']);
+    expect({ sessions: db.prepare('SELECT * FROM sessions').all(), configs: db.prepare('SELECT * FROM configs ORDER BY key').all() }).toEqual(before);
+    expect(db.pragma('foreign_key_check')).toEqual([]);
+    expect(db.pragma('integrity_check', { simple: true })).toBe('ok');
+    // 规则至少两个词，必须记录机器人和创建人。
+    expect(() => db.prepare("INSERT INTO workspace_approval_rules VALUES ('x','cli_a','/r','pnpm','ou_a','t')").run()).toThrow(/CHECK/);
+    expect(() => db.prepare("INSERT INTO workspace_approval_rules VALUES ('x','cli_a','/r','pnpm test',NULL,'t')").run()).toThrow(/NOT NULL/);
+    expect(() => db.prepare("INSERT INTO workspace_approval_rules VALUES ('x',NULL,'/r','pnpm test','ou_a','t')").run()).toThrow(/NOT NULL/);
+    runMigrations(db);
+    expect(appliedVersions(db)).toEqual(ALL_VERSIONS);
+    db.close();
+
+    const first = createRepositories(filename);
+    let id: string;
+    try {
+      const added = first.workspaceApprovalRules!.add({ appId: 'cli_a', workspace: '/repo', pattern: 'pnpm test', createdBy: 'ou_alice' });
+      id = added.id;
+      expect(added).toEqual({ id: expect.stringMatching(/^war_/), appId: 'cli_a', workspace: '/repo', pattern: 'pnpm test', createdBy: 'ou_alice', createdAt: expect.any(String) });
+      expect(first.workspaceApprovalRules!.add({ appId: 'cli_a', workspace: '/repo', pattern: 'pnpm test', createdBy: 'ou_bob' })).toEqual(added);
+      first.workspaceApprovalRules!.add({ appId: 'cli_a', workspace: '/repo-worktree', pattern: 'pnpm test', createdBy: 'ou_alice' });
+      first.workspaceApprovalRules!.add({ appId: 'cli_b', workspace: '/repo', pattern: 'pnpm test', createdBy: 'ou_alice' });
+    } finally { first.close(); }
+    const reopened = createRepositories(filename);
+    try {
+      expect(reopened.workspaceApprovalRules!.list({ appId: 'cli_a', workspace: '/repo' })).toEqual([expect.objectContaining({ id, pattern: 'pnpm test', createdBy: 'ou_alice' })]);
+      expect(reopened.workspaceApprovalRules!.list({ workspace: '/repo' })).toHaveLength(2);
+      expect(reopened.workspaceApprovalRules!.list()).toHaveLength(3);
+      expect(reopened.workspaceApprovalRules!.remove(id)).toBe(true);
+      expect(reopened.workspaceApprovalRules!.remove(id)).toBe(false);
+      expect(reopened.workspaceApprovalRules!.list({ appId: 'cli_a', workspace: '/repo' })).toEqual([]);
+      expect(reopened.workspaceApprovalRules!.list({ appId: 'cli_b', workspace: '/repo' })).toHaveLength(1);
+    } finally { reopened.close(); }
   });
   it('declares migrations in ascending version order', () => {
     expect(migrations.map(migration => migration.version)).toEqual(ALL_VERSIONS)

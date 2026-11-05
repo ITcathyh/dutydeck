@@ -998,7 +998,9 @@ const permissionAlert = (entry: TraceEntry, index: number): LarkCardElement => {
   // 已拦截 / 已授权则必须自己说——那时任务状态行显示的是「执行中」，不是审批结果。
   const resolvedTag = pending ? '' : rejected
     ? "<text_tag color='red'>已拦截</text_tag>　"
-    // 按「本会话允许」自动批准的不发审批卡，进度卡上这一行就是它唯一的记录。
+    // 按「本会话允许」或工作区规则自动批准的不发审批卡，进度卡上这一行就是它唯一的记录。
+    : typeof entry.data.workspaceRule === 'string' && entry.data.workspaceRule
+      ? `<text_tag color='green'>按工作区规则自动允许：${escapeCardInline(truncateTrace(entry.data.workspaceRule, 200))}</text_tag>　`
     : entry.data.sessionAllowed === true ? "<text_tag color='green'>本会话已允许</text_tag>　"
     : "<text_tag color='green'>已授权</text_tag>　";
   // 已拦截是唯一需要指引的分支：它是终局，而且下一步与部署形态无关。

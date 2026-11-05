@@ -43,6 +43,17 @@ describe('PermissionCard', () => {
     expect(screen.queryByRole('button')).toBeNull();
   });
 
+  it('按工作区规则自动允许的记录写明命中的规则；Web 审批卡不提供「本工作区允许」', () => {
+    const approved = permission('approved');
+    approved.data.workspaceRule = 'pnpm test';
+    const view = render(<PermissionCard event={approved}/>);
+    expect(screen.getByText('按工作区规则自动允许：pnpm test')).toBeTruthy();
+    const pending = permission('pending');
+    pending.data.operation = { source: 'acp_tool_call', command: 'pnpm test', commandExact: true };
+    view.rerender(<PermissionCard event={pending} onResolve={vi.fn()}/>);
+    expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['允许本次', '拒绝', '拒绝并说明']);
+  });
+
   // 全站风险最高的两个决策按钮曾是 h-8（32px），低于契约 §9 的 40px 触控目标。
   // 用 Button 默认 md 档后是 h-10；这条守的是别有人把它改回 size="sm"。
   it('允许 / 拒绝的触控目标是 40px，不是 32px', () => {

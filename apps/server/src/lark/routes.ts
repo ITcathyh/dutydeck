@@ -38,6 +38,7 @@ const larkError = (reply: FastifyReply, error: unknown) => {
 
 export interface LarkRoutesOptions {
   scheduleRequests?: import('../agent-schedule-request.js').LarkScheduleRequests;
+  workspaceApprovals?: import('./workflow-interactions.js').LarkWorkspaceApprovals;
   clearBotModelSettings?: (appId: string) => Promise<void>;
   renameBotModelSettings?: (oldAppId: string, newAppId: string) => Promise<void>;
   participation?: LarkGroupParticipation;
@@ -109,6 +110,7 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
     agentCommands: options.agentTools?.commands,
     saveBotConfig: input => saveBotConfig(input),
     scheduleRequests: options.scheduleRequests,
+    ...(options.workspaceApprovals ? { workspaceApprovals: options.workspaceApprovals } : {}),
     peerBotAuthorized: (appId, chatId, senderOpenId) => options.agentTools?.isConfiguredPeer(appId, chatId, senderOpenId) ?? Promise.resolve(false)
   });
   let listenerSyncTail: Promise<void> = Promise.resolve();

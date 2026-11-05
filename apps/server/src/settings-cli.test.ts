@@ -715,6 +715,19 @@ describe('settings CLI requests', () => {
     expect(fetcher).toHaveBeenLastCalledWith(new URL('http://127.0.0.1:4310/api/usage/caps?scope=group&appId=cli_a&chatId=oc_1'), expect.objectContaining({ method: 'DELETE' }));
     await expect(run(fetcher, 'usage-set-cap', { appId: 'cli_a', amount: 'ten' })).rejects.toMatchObject({ code: 'SETTINGS_VALUE_INVALID' });
   });
+
+  it('lists workspace approval rules, optionally for one workspace, and revokes one by id', async () => {
+    const fetcher = vi.fn(async () => json({ rules: [] }));
+    await run(fetcher, 'approval-rule-list');
+    expect(fetcher).toHaveBeenLastCalledWith(new URL('http://127.0.0.1:4310/api/workspace-approval-rules'), expect.objectContaining({ method: 'GET' }));
+    await run(fetcher, 'approval-rule-list', { workspace: 'relative/dir' });
+    expect(fetcher).toHaveBeenLastCalledWith(new URL(`http://127.0.0.1:4310/api/workspace-approval-rules?${new URLSearchParams({ workspace: resolve('relative/dir') })}`), expect.objectContaining({ method: 'GET' }));
+    await run(fetcher, 'approval-rule-list', { appId: 'cli_a', workspace: '/repo' });
+    expect(fetcher).toHaveBeenLastCalledWith(new URL('http://127.0.0.1:4310/api/workspace-approval-rules?app=cli_a&workspace=%2Frepo'), expect.objectContaining({ method: 'GET' }));
+    await run(fetcher, 'approval-rule-remove', { ruleId: 'war_1/x' });
+    expect(fetcher).toHaveBeenLastCalledWith(new URL('http://127.0.0.1:4310/api/workspace-approval-rules/war_1%2Fx'), expect.objectContaining({ method: 'DELETE' }));
+    await expect(run(fetcher, 'approval-rule-remove')).rejects.toBeInstanceOf(SettingsCliError);
+  });
 });
 
 describe('settings commands', () => {
@@ -749,6 +762,10 @@ describe('settings commands', () => {
     expect(settings).toHaveBeenLastCalledWith('bot-set', expect.objectContaining({ appId: 'cli_a', pairs: [], appSecretFd: '0', url: 'http://127.0.0.1:4401', database: '/tmp/bot.db' }));
     await createCliProgram('0.0.7', { settings }).parseAsync(['node', 'dutydeck', 'settings', 'usage', 'set-cap', '30', '--app', 'cli_a', '--chat', 'oc_1']);
     expect(settings).toHaveBeenLastCalledWith('usage-set-cap', expect.objectContaining({ amount: '30', appId: 'cli_a', chatId: 'oc_1' }));
+    await createCliProgram('0.0.7', { settings }).parseAsync(['node', 'dutydeck', 'settings', 'approval-rules', 'list', '--app', 'cli_a', '--workspace', '/repo', '--instance', 'tag']);
+    expect(settings).toHaveBeenLastCalledWith('approval-rule-list', expect.objectContaining({ appId: 'cli_a', workspace: '/repo', instance: 'tag' }));
+    await createCliProgram('0.0.7', { settings }).parseAsync(['node', 'dutydeck', 'settings', 'approval-rules', 'remove', 'war_1']);
+    expect(settings).toHaveBeenLastCalledWith('approval-rule-remove', expect.objectContaining({ ruleId: 'war_1' }));
   });
 });
 

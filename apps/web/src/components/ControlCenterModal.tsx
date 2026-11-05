@@ -3,6 +3,7 @@ import { PluginBindingsPanel } from './PluginBindingsPanel';
 import { ConfirmDialog } from './ConfirmDialog';
 import { AgentModelSettings } from './AgentModelSettings';
 import { CodexProfileSettings } from './CodexProfileSettings';
+import { WorkspaceApprovalRules } from './WorkspaceApprovalRules';
 import { supportsModelServiceSettings } from '../agent-model-support';
 import { currentInstance } from '../instance';
 import type { LarkSetupTarget } from '../app-route';
@@ -284,6 +285,7 @@ function AgentSection({ agents, legacyBots, modelReset, onModelDirtyChange, onCr
   return <section aria-labelledby="control-agents">
     <div className="flex flex-wrap items-end justify-between gap-3"><div><h3 id="control-agents" className="text-title font-semibold text-primary">Agent</h3><p className="mt-1 text-caption text-subtle">Agent 是在这台机器上执行任务的 CLI。Dutydeck 会自动发现已安装并登录的受支持 CLI。</p></div>{statePill(agents.length ? `${agents.length} 个可用` : '尚未找到', agents.length ? 'ready' : 'blocked')}</div>
     <TerminalBackendSettings/>
+    <WorkspaceApprovalRules/>
     {agents.length > 0 && <div className="mt-4 grid gap-3 sm:grid-cols-2">{agents.map(agent => {
       const boundBots = legacyBots.filter(bot => bot.defaultAgentId === agent.id);
       return <Card key={agent.id} as="article" padding="md">

@@ -1,5 +1,6 @@
 import { createMatterRepository } from './matters.js';
 import { cachedStatement } from './database-control.js';
+import { createWorkspaceApprovalRuleRepository } from './workspace-approval-rules.js';
 export { assertDatabaseNotQuarantined, restoreQuarantinePath } from './database-control.js';
 export { backupSqlite, withOfflineDatabase, BACKUP_SCHEMA_VERSION } from './offline-backup.js';
 import { readHistoryOutline } from './event-history.js';
@@ -227,6 +228,7 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
   return {
     control,
     matters: createMatterRepository(sqlite),
+    workspaceApprovalRules: createWorkspaceApprovalRuleRepository(sqlite),
     execution,
     insight,
     agents: {

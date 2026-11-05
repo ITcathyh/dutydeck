@@ -385,6 +385,12 @@ describe('acpx ACP boundary', () => {
     expect(normalizeAcpxEvent({ type: 'permission_request', requestId: 'perm-one', update: { toolCallId: 'tool-one', title: 'Edit file', kind: 'edit', locations: [{ path: 'src/a.ts' }] } }))
       .toMatchObject({ type: 'permission_request', data: { operation: { source: 'acp_tool_call', kind: 'edit', resource: 'src/a.ts' } } });
     expect((normalizeAcpxEvent({ type: 'permission_request', requestId: 'perm-one', update: { toolCallId: 'tool-one', title: 'Edit file', kind: 'edit', locations: [{ path: 'src/a.ts' }] } }) as any).data.operation.resourceCount).toBeUndefined();
+    // 只有与字符串原文逐字相同的命令才标 commandExact（工作区审批规则只认这种）；脱敏过的、数组形式的不标。
+    const commandOf = (command: unknown) => (normalizeAcpxEvent({ type: 'permission_request', requestId: 'perm-cmd', update: { toolCallId: 'tool-cmd', kind: 'execute', rawInput: { command } } }) as any).data.operation;
+    expect(commandOf('pnpm test --filter x')).toMatchObject({ command: 'pnpm test --filter x', commandExact: true });
+    expect(commandOf('pnpm test --token=abc123')).not.toHaveProperty('commandExact');
+    expect(commandOf(' pnpm test')).not.toHaveProperty('commandExact');
+    expect(commandOf(['bash', '-lc', 'pnpm test'])).toEqual({ source: 'acp_tool_call', kind: 'execute' });
     expect(normalizeAcpxEvent({ jsonrpc: '2.0', method: 'session/update', params: { update: { sessionUpdate: 'tool_call_update', toolCallId: 'tool-1', title: 'pwd' } } })).toMatchObject({ type: 'tool_call', data: { id: 'tool-1', status: 'running' } });
     expect(normalizeAcpxEvent({ jsonrpc: '2.0', method: 'session/update', params: { update: { sessionUpdate: 'tool_call_update', toolCallId: 'tool-1', status: 'completed' } } })).toMatchObject({ type: 'tool_result', data: { id: 'tool-1', status: 'completed' } });
     expect(normalizeAcpxEvent({ type: 'status', tag: 'usage_update', used: 1200, size: 200000, breakdown: { totalTokens: 1300 } })).toEqual({ type: 'status', data: { state: 'usage', used: 1200, size: 200000, breakdown: { totalTokens: 1300 }, cost: undefined } });

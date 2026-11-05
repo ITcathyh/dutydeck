@@ -28,6 +28,7 @@ import { resolveExplicitFinalContext } from './lark/explicit-final.js';
 import { larkResultDeliveryIssues } from './lark/reconciler.js';
 import { createCollaborationIntegration } from './collaboration-integration.js';
 import { isAutomatedRequest } from './agent-request-tools.js';
+import { WorkspaceApprovals } from './workspace-approvals.js';
 import { LeaderDelegationService } from './leader-delegation.js';
 import { renderMemoryIndex } from './lark/memory-view.js';
 import type { CollaborationExtensions } from './collaboration-extensions.js';
@@ -452,6 +453,15 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     return session;
   });
   const matters = new MattersService(repos);
+  // 只认飞书用户亲自发起的轮次：定时、自动化、CI/PR 触发的不按工作区规则放行。
+  const workspaceApprovals = repos.workspaceApprovalRules ? new WorkspaceApprovals({
+    rules: repos.workspaceApprovalRules,
+    getSession: id => repos.sessions.get(id),
+    humanRequester: taskId => {
+      const request = repos.execution.getAcceptedTask(taskId)?.request;
+      return request && !isAutomatedRequest(request) && request.actor.kind === 'channel' ? request.actor.id : undefined;
+    }
+  }) : undefined;
   const ptyRetirement = createPtyRetirementControl({ identify: childProcessIdentity, observe: observeProcess }, session => primaryHerdrBackend(session.id));
   const runtime: DutydeckRuntime = new DutydeckRuntime(repos, {
     matterTracking: matters,
@@ -805,6 +815,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       plan: { store: repos.config },
       webRoot,
       usage: { ledger: usageLedger, snapshot: sessionId => sessionUsageSnapshot(repos, sessionId, options.env ?? process.env), contexts: createSessionContexts(repos), authorize: async request => Boolean(await resolveInstallationPrincipal(request)) },
+      ...(workspaceApprovals ? { workspaceApprovals: { service: workspaceApprovals, authorize: async (request: import('fastify').FastifyRequest) => Boolean(await resolveInstallationPrincipal(request)) } } : {}),
       collaboration: { service: collaboration.service, runtime, tools: agentTools, evaluation: collaboration.evaluation, extensions: collaboration.extensions,
         authorizeManagement: async request => await resolveInstallationPrincipal(request) ? installationOwnerTaskActor : undefined,
         bootstrap: scope => collaboration!.participation.bootstrap(scope), prepareSettings: (scope, patch) => collaboration!.prepareSettings(scope, patch), onChange: scope => collaboration!.onChange(scope),
@@ -818,6 +829,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
         usage: usageLedger,
         automation,
         scheduleRequests: { prepareDelivery: automationIntegration.prepareMessageDelivery, sendConfirmation: automationIntegration.sendScheduleRequest },
+        ...(workspaceApprovals ? { workspaceApprovals } : {}),
         workbench,
         relayBroker,
         env,

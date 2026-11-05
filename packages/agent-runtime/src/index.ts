@@ -3734,7 +3734,8 @@ export class DutydeckRuntime {
     return [...this.permissions.entries()].filter(([key, pending]) => key.startsWith(sessionId + ':') && this.mutations.valid(pending.owner) && !this.permissionResolutions.has(key)).map(([, value]) => ({ ...value.request }));
   }
 
-  async resolvePermission(sessionId: string, permissionId: string, approved: boolean, reason?: string) {
+  /** annotation.workspaceRule：按工作区规则代为批准时命中的规则，写进最终的审批记录。 */
+  async resolvePermission(sessionId: string, permissionId: string, approved: boolean, reason?: string, annotation?: Pick<PermissionRequestData, 'workspaceRule'>) {
     return this.scoped(sessionId, async () => {
     const { driver } = await this.active(sessionId);
     const key = this.permissionKey(sessionId, permissionId);
@@ -3747,7 +3748,8 @@ export class DutydeckRuntime {
       if (!this.mutations.valid(pending.owner) || pending.generation !== (this.sessionGenerations.get(sessionId) ?? 0) || this.permissions.get(key) !== pending) throw new RuntimeError('PERMISSION_EXPIRED', 'Permission request is no longer active', 409);
       // 记录里的说明脱敏后保存；交给执行端的仍是用户原文。
       const shownReason = !approved && reason ? permissionDisplayText(reason, [], permissionRejectReasonMaxLength) : '';
-      const request = { ...pending.request, status: approved ? 'approved' as const : 'rejected' as const, ...(shownReason ? { reason: shownReason } : {}) };
+      const request = { ...pending.request, status: approved ? 'approved' as const : 'rejected' as const, ...(shownReason ? { reason: shownReason } : {}),
+        ...(approved && annotation?.workspaceRule ? { workspaceRule: annotation.workspaceRule } : {}) };
       if (shownReason) this.permissionRejectReasons.set(key, shownReason);
       // Keep the stored request pending while recording the requested decision.
       // A failed driver call must not be represented as an accepted decision.

@@ -1,4 +1,5 @@
 import type { TaskAuthorization } from '@dutydeck/shared';
+import type { WorkspaceApprovalRule } from '@dutydeck/shared';
 export type { TaskAuthorization } from '@dutydeck/shared';
 import type { ConfigurationExplanation } from '@dutydeck/shared';
 import type { ArtifactSnapshot, ArtifactSnapshotReference, ArtifactSnapshotPreview } from '@dutydeck/shared';
@@ -766,6 +767,12 @@ export const collaborationApi = {
     send<CollaborationReplayResponse>('POST', `/api/lark/groups/${encodeURIComponent(appId)}/${encodeURIComponent(chatId)}/collaboration/replay`, body),
   bootstrap: (appId: string, chatId: string) =>
     send<{ bootstrap: CollaborationBootstrap }>('POST', `/api/lark/groups/${encodeURIComponent(appId)}/${encodeURIComponent(chatId)}/collaboration/bootstrap`, {})
+};
+
+/** 飞书审批卡「本工作区允许此类命令」保存的规则：只能查看和撤销，安装管理员可用。 */
+export const workspaceApprovalRulesApi = {
+  list: () => json<{ rules: WorkspaceApprovalRule[] }>('/api/workspace-approval-rules', { cache: 'no-store' }),
+  remove: (id: string) => json<{ removed: string }>(`/api/workspace-approval-rules/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 };
 
 export const terminalSettingsApi = {

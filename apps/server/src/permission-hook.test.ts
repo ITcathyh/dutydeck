@@ -218,6 +218,17 @@ describe('HookPermissionRequests', () => {
     expect(await requests.submit('ses_hook', { permissionId })).toEqual({ status: 'expired' });
   });
 
+  it('marks the command exact only when the hook reported it as the unredacted original', async () => {
+    const runtime = fakeRuntime();
+    const requests = new HookPermissionRequests(runtime, { waitMs: 1 });
+    await requests.submit('ses_hook', { ...facts, commandIsExact: true });
+    await requests.submit('ses_hook', { ...facts, command: 'deploy --token=[REDACTED]', commandIsExact: false });
+    expect(runtime.requests.map(request => request.operation)).toEqual([
+      { source: 'claude_permission_hook', kind: 'execute', cwd: '/repo', command: 'pnpm test', commandExact: true },
+      { source: 'claude_permission_hook', kind: 'execute', cwd: '/repo', command: 'deploy --token=[REDACTED]' }
+    ]);
+  });
+
   it.each([
     ['a non-Lark session', session({ source: 'web' })],
     ['a full-trust session', session({ permissionMode: 'full-trust' })],

@@ -3060,7 +3060,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     if (workflow && workflowAction !== undefined) {
       if (!this.workflows || !context?.messageId || !context.chatId || !this.reconcileConfig) return { type: 'error', content: '卡片身份不完整或已失效。' };
       const action = workflowAction;
-      if (!['approve', 'reject', 'accept', 'changes', 'answer', 'allow_session', 'plan_approve', 'plan_revise', 'plan_cancel'].includes(action)) return { type: 'error', content: '无法识别任务操作。' };
+      if (!['approve', 'reject', 'accept', 'changes', 'answer', 'allow_session', 'allow_workspace', 'plan_approve', 'plan_revise', 'plan_cancel'].includes(action)) return { type: 'error', content: '无法识别任务操作。' };
       // P0-1：overflow 菜单只承载唯一的回调选项（审批行的「拒绝」），其余点选一律拒绝，
       // 防止共用 behaviors.value 被误当成任意动作执行。
       if (context.actionTag === 'overflow' && !(action === 'reject' && context.option === 'reject')) {
@@ -3113,7 +3113,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
           }
         }
         const content = await this.workflows.respond({ appId: this.reconcileConfig.appId, chatId: context.chatId, deferClose: true,
-          actorId: operatorOpenId, requestId, action: action as 'answer' | 'approve' | 'reject' | 'accept' | 'changes' | 'allow_session' | 'plan_approve' | 'plan_revise' | 'plan_cancel',
+          actorId: operatorOpenId, requestId, action: action as 'answer' | 'approve' | 'reject' | 'accept' | 'changes' | 'allow_session' | 'allow_workspace' | 'plan_approve' | 'plan_revise' | 'plan_cancel',
           ...(fromDashboard ? {} : { cardId: context.messageId, generation: String(workflow.generation ?? ''), callback: true }),
           ...answer });
         if (action === 'accept' || action === 'changes') await this.refreshResultFeedback(this.reconcileConfig, requestId).catch(error => this.log.warn({ error }, '验收已记录，卡片刷新失败'));

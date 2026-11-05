@@ -129,7 +129,8 @@ export class HookPermissionRequests {
     if (session.permissionMode === 'approve-reads' && (kind === 'read' || kind === 'search')) return { status: 'approved' };
     const handle = this.runtime.requestDriverPermission(sessionId, {
       title,
-      operation: { source: 'claude_permission_hook', kind, ...(cwd ? { cwd } : {}), ...(resource ? { resource } : {}), ...(command ? { command } : {}) },
+      operation: { source: 'claude_permission_hook', kind, ...(cwd ? { cwd } : {}), ...(resource ? { resource } : {}),
+        ...(command ? { command, ...(body.commandIsExact === true && command === exactCommand?.trim() ? { commandExact: true as const } : {}) } : {}) },
     });
     if (!handle) return { status: 'native' };
     const id = randomUUID();
