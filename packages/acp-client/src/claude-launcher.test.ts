@@ -80,4 +80,15 @@ describe('Claude ACP launcher', () => {
     expect(await readFile(file, 'utf8')).toBe(original);
   });
 
+  it('strips service secrets and other session identities that a workspace .env brings in', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dutydeck-claude-dotenv-')); dirs.push(root);
+    await mkdir(join(root, '.claude'));
+    await writeFile(join(root, '.env'), 'LARK_APP_SECRET=svc-secret\nDUTYDECK_ACCESS_TOKEN=svc-token\nBOTMUX_SESSION_ID=other-session\ndutydeck_relay_token=other-relay\nANTHROPIC_BASE_URL=https://dotenv.example\n');
+    const inspect = `process.stdout.write(JSON.stringify(Object.fromEntries(['LARK_APP_SECRET', 'DUTYDECK_ACCESS_TOKEN', 'BOTMUX_SESSION_ID', 'dutydeck_relay_token', 'ANTHROPIC_BASE_URL'].map(key => [key, process.env[key] ?? null]))))`;
+    const inherited = { ...process.env };
+    for (const key of ['LARK_APP_SECRET', 'DUTYDECK_ACCESS_TOKEN', 'BOTMUX_SESSION_ID', 'dutydeck_relay_token', 'ANTHROPIC_BASE_URL']) delete inherited[key];
+    const result = spawnSync(process.execPath, [resolve('packages/acp-client/agents/claude-acp.mjs')], { cwd: root, env: { ...inherited, CLAUDE_CONFIG_DIR: join(root, '.claude'), DUTYDECK_CLAUDE_ACP_COMMAND: process.execPath, DUTYDECK_CLAUDE_ACP_ARGS_JSON: JSON.stringify(['-e', inspect]) }, encoding: 'utf8' });
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({ LARK_APP_SECRET: null, DUTYDECK_ACCESS_TOKEN: null, BOTMUX_SESSION_ID: null, dutydeck_relay_token: null, ANTHROPIC_BASE_URL: 'https://dotenv.example' });
+  });
 });

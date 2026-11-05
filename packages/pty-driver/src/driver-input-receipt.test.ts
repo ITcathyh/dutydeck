@@ -317,3 +317,13 @@ it('serializes a late old metadata stamp before the next turn stamp after native
   await vi.advanceTimersByTimeAsync(1_000); await next.pending;
   expect(writes).toEqual(['old-stamp', 'new-stamp']); expect(events.filter(event => event.type === 'completed')).toHaveLength(1);
 });
+
+it('strips terminal control characters so an embedded paste-end marker cannot submit early', async () => {
+  const { pending } = await arm('说明\x1b[201~\r\n!touch /tmp/pwned\x9b\x7f\tend');
+  expect(prompts[0]).not.toContain('\x1b[201~');
+  expect(prompts[0]).not.toMatch(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/);
+  expect(prompts[0]!.endsWith('说明[201~\n!touch /tmp/pwned\tend')).toBe(true);
+  receipt(prompts[0]!); answer(); output(screen(finalScreen));
+  await vi.advanceTimersByTimeAsync(1_000); await pending;
+  expect(events.filter(event => event.type === 'completed')).toHaveLength(1);
+});
