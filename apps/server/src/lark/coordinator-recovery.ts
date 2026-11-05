@@ -393,19 +393,12 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
           return { type: 'warning', content: '这条任务现在不需要转到新会话，请发送 /status 查看最新状态' };
         }
       }
-      // 按发送人隔离的会话只接发起人本人的消息（与续聊同一条规则）：别人既不能替发起人转交，也不能换成自己的身份在这个会话里执行原文。
-      if (!larkScopeContinuesFor(saved.scope_id!, operatorOpenId)) {
-        return { type: 'warning', content: '这个会话按发起人隔离，只有发起人本人可以转到新会话，未执行' };
-      }
-      const chatType = saved.chat_type ?? 'group';
-      const effective = chatType === 'group' && this.groupManager ? await this.groupManager.resolved(config, saved.chat_id) : config;
-      // 与「在这个话题里发一条新消息」同一套入口检查；托管群另需 /new 对当前会话的操作权，取消排队任务还要有取消权。
-      if (!await this.currentAccess(effective, saved.chat_id, chatType, operatorOpenId, 'task.create', undefined, operatorOpenId)
-        || effective.managedGroup && !await this.isOperatorAllowed(effective, operatorOpenId, saved.chat_id, mapping.sessionId)
-        || action === 'run_in_new_session' && !alreadyCancelled
-          && !await this.isOperatorAllowed(effective, operatorOpenId, saved.chat_id, mapping.sessionId, saved.sender_open_id)) {
-        return { type: 'warning', content: '当前账号没有在这个话题发起任务的权限，未执行' };
-      }
+      // 取消排队任务还要有取消权。
+      const gate = await this.cardActionGate(config, saved, operatorOpenId, mapping.sessionId, {
+        scope: '这个会话按发起人隔离，只有发起人本人可以转到新会话，未执行', access: '当前账号没有在这个话题发起任务的权限，未执行'
+      }, action === 'run_in_new_session' && !alreadyCancelled);
+      if ('warning' in gate) return { type: 'warning', content: gate.warning };
+      const { effective } = gate;
       await this.requireExecution('listener', 'task.create');
       await this.requireExecution('session', 'task.create');
       // 执行身份照重试，换成点击人。
@@ -839,6 +832,23 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
   }
 
   /**
+   * 卡片按钮共用门禁。按发起人隔离的会话只接发起人本人的操作（与续聊同一条规则）；入口检查与「在这个话题里发一条新消息」相同；
+   * 托管群另需对当前会话的操作权；senderRights 时还要有操作原发起人任务的权限。通过时返回本群生效的配置，否则返回给点击人的提示。
+   */
+  private async cardActionGate(config: StoredLarkConfig, saved: PersistedLarkCardTask, operatorOpenId: string, sessionId: string,
+    denied: { scope: string; access: string }, senderRights: boolean): Promise<{ effective: StoredLarkConfig } | { warning: string }> {
+    if (!larkScopeContinuesFor(saved.scope_id!, operatorOpenId)) return { warning: denied.scope };
+    const chatType = saved.chat_type ?? 'group';
+    const effective = chatType === 'group' && this.groupManager ? await this.groupManager.resolved(config, saved.chat_id) : config;
+    if (!await this.currentAccess(effective, saved.chat_id, chatType, operatorOpenId, 'task.create', undefined, operatorOpenId)
+      || effective.managedGroup && !await this.isOperatorAllowed(effective, operatorOpenId, saved.chat_id, sessionId)
+      || senderRights && !await this.isOperatorAllowed(effective, operatorOpenId, saved.chat_id, sessionId, saved.sender_open_id)) {
+      return { warning: denied.access };
+    }
+    return { effective };
+  }
+
+  /**
    * 「在原对话继续」（continue_in_place）：不重放原请求，在原会话里让 Agent 接着做。
    * - 结果未知停下的那一轮：先按没做完处理（closeUnresolvedTurn），再代发一句「继续」交给原会话，Agent 收到的是按原因写的接续说明。
    * - 无进展超时停下、或 Agent 停下后自动结束的那一轮（已是失败或中断）：直接代发「继续」。
@@ -869,13 +879,10 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
       if (!own && !queued && !['failed', 'interrupted'].includes(runtimeTask.status)) {
         return { type: 'warning', content: '这一轮现在不需要继续，请发送 /status 查看最新状态' };
       }
-      if (!larkScopeContinuesFor(saved.scope_id, operatorOpenId)) return { type: 'warning', content: '这个会话按发起人隔离，只有发起人本人可以操作，未执行' };
-      const chatType = saved.chat_type ?? 'group';
-      const effective = chatType === 'group' && this.groupManager ? await this.groupManager.resolved(config, saved.chat_id) : config;
-      if (!await this.currentAccess(effective, saved.chat_id, chatType, operatorOpenId, 'task.create', undefined, operatorOpenId)
-        || effective.managedGroup && !await this.isOperatorAllowed(effective, operatorOpenId, saved.chat_id, mapping.sessionId)) {
-        return { type: 'warning', content: '当前账号没有在这个话题发起任务的权限，未执行' };
-      }
+      const gate = await this.cardActionGate(config, saved, operatorOpenId, mapping.sessionId, {
+        scope: '这个会话按发起人隔离，只有发起人本人可以操作，未执行', access: '当前账号没有在这个话题发起任务的权限，未执行'
+      }, false);
+      if ('warning' in gate) return { type: 'warning', content: gate.warning };
       await this.requireExecution('listener', 'task.create');
       await this.requireExecution('session', 'task.create');
       if (!this.foreignActionConfirmed(operatorOpenId, saved.sender_open_id, `${taskId}|${turn}|continue_in_place`)) {
@@ -960,14 +967,10 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
       if (record.phase !== 'held') return { type: 'warning', content: record.phase === 'claimed' ? '正在重新执行，请勿重复点击' : '这一轮已经处理过，请发送 /status 查看最新状态' };
       const inbox = await this.redispatchInbox(appId, mapping, saved);
       if (!inbox) return { type: 'warning', content: '此卡已失效，请在最新的任务卡上操作' };
-      if (!larkScopeContinuesFor(saved.scope_id!, operatorOpenId)) return { type: 'warning', content: '这个会话按发起人隔离，只有发起人本人可以操作，未执行' };
-      const chatType = saved.chat_type ?? 'group';
-      const effective = chatType === 'group' && this.groupManager ? await this.groupManager.resolved(config, saved.chat_id) : config;
-      if (!await this.currentAccess(effective, saved.chat_id, chatType, operatorOpenId, 'task.create', undefined, operatorOpenId)
-        || effective.managedGroup && !await this.isOperatorAllowed(effective, operatorOpenId, saved.chat_id, mapping.sessionId)
-        || action === 'abandon_turn' && !await this.isOperatorAllowed(effective, operatorOpenId, saved.chat_id, mapping.sessionId, saved.sender_open_id)) {
-        return { type: 'warning', content: '当前账号没有在这个话题操作这条任务的权限，未执行' };
-      }
+      const gate = await this.cardActionGate(config, saved, operatorOpenId, mapping.sessionId, {
+        scope: '这个会话按发起人隔离，只有发起人本人可以操作，未执行', access: '当前账号没有在这个话题操作这条任务的权限，未执行'
+      }, action === 'abandon_turn');
+      if ('warning' in gate) return { type: 'warning', content: gate.warning };
       if (action === 'replay_turn') {
         if (await this.isDeferredTask(mapping.sessionId, record.runtimeTaskId)) return { type: 'warning', content: '确认已登记，请使用原确认卡。' };
         await this.requireExecution('listener', 'task.create');

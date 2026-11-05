@@ -60,11 +60,14 @@ describe('runtime lifecycle acceptance', () => {
       expect((await h.runtime.getSessionTaskReport(s.id))?.status).toBe('blocked');
       gates[0]!.resolve(); expect((await sending).status).toBe('completed');
       expect((await h.runtime.getSessionTaskReport(s.id))?.summary).toBe('缺少账号');
+      // 批量版与逐个读取一致；没有任务的会话不在结果里。
+      expect(await h.runtime.getSessionTaskReports([s.id, 'ses_missing'])).toEqual(new Map([[s.id, await h.runtime.getSessionTaskReport(s.id)]]));
       await expect(h.runtime.reportCurrentTask(s.id, { status: 'ready' }, owner)).rejects.toMatchObject({ code: 'TASK_NOT_ACTIVE' });
       const next = h.runtime.send(s.id, 'reply');
       await vi.waitFor(() => expect(h.driver.send).toHaveBeenCalledTimes(2));
       expect((await readTaskReport(h.repos.config, owner.taskId))?.clearedAt).toBeTruthy();
       expect(await h.runtime.getSessionTaskReport(s.id)).toBeUndefined();
+      expect((await h.runtime.getSessionTaskReports([s.id])).size).toBe(0);
       await expect(h.runtime.reportCurrentTask(s.id, { status: 'ready' }, owner)).rejects.toMatchObject({ code: 'TASK_NOT_ACTIVE' });
       const current = h.runtime.getActiveTaskContext(s.id)!;
       await h.runtime.reportCurrentTask(s.id, { status: 'waiting', question: '还继续吗？' }, current);

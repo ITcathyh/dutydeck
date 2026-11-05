@@ -16,6 +16,7 @@
 // 任何时候都不要把 Agent 输出、工具参数或错误原文塞进按钮 label 或 callback value。
 
 import { unknownTaskActionLabels } from '@dutydeck/shared';
+import { parseCardActionValue } from './card-elements.js';
 
 /** 与 card-renderer.ts 的 LarkCardElement 结构一致，这里本地定义以避免 import 环。 */
 export type LarkCardElement = Record<string, any>;
@@ -649,15 +650,8 @@ export function buildLarkCardDetailButton(context: LarkCardActionContext): LarkC
  * - 任何畸形输入返回 undefined，绝不抛异常（回调路径抛异常会让用户只看到一个失败 toast）
  */
 export function parseLarkCardActionValue(value: unknown): LarkCardActionValue | undefined {
-  let parsed: unknown = value;
-  if (typeof parsed === 'string') {
-    const text = parsed.trim();
-    if (!text) return undefined;
-    try { parsed = JSON.parse(text); } catch { return undefined; }
-  }
-  // 数组也是 object，必须显式排除，否则 ['cancel'] 之类的输入会走到属性读取。
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
-  const record = parsed as Record<string, unknown>;
+  const record = parseCardActionValue(value);
+  if (!record) return undefined;
   const action = typeof record.action === 'string' ? record.action.trim() : '';
   const definition = larkCardActionDefinitions.find(item => item.action === action);
   if (!definition) return undefined;

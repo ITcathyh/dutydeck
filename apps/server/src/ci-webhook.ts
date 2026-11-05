@@ -4,6 +4,7 @@ import { executionTaskId } from '@dutydeck/storage';
 import { z } from 'zod';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { changeRequestLabel, ciProviderLabel, git, resolveCiBranchHead, type CiProviderRegistry } from './ci-providers.js';
+import { codeBlock, errorMessage, isRunnable, iso, short, SingleFlight } from './ci-common.js';
 import { readTaskOutput } from './task-results.js';
 
 const SUBSCRIPTION_PREFIX = 'ci_webhook/subscription/';
@@ -142,10 +143,6 @@ const httpsUrl = (value: unknown) => {
     return url?.protocol === 'https:' ? url.href.replace(/[()[\]']/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`) : undefined;
   } catch { return undefined; }
 };
-const iso = (ms: number) => new Date(ms).toISOString();
-const short = (value: string) => value.slice(0, 12);
-const errorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error)).replace(/[\r\n]+/g, ' ').slice(0, 300);
-const isRunnable = (session: Session | undefined): session is Session => Boolean(session && !session.archivedAt && !['stopped', 'failed'].includes(session.state));
 const providerOf = (value: CiWebhookSubscription) => value.provider ?? LEGACY_PROVIDER_ID;
 /** 名字以字母或数字结尾时补一个空格再接中文。 */
 const spaced = (label: string) => /[A-Za-z0-9]$/.test(label) ? `${label} ` : label;
@@ -232,7 +229,6 @@ export function untrustedCiBlock(content: string, nonce: string) {
   return `<<<UNTRUSTED_CI_LOG ${nonce}>>>\n${content.replace(markerPattern, '[已移除伪造的标记]')}\n<<<END_UNTRUSTED_CI_LOG ${nonce}>>>`;
 }
 
-const codeBlock = (value: string) => `\`\`\`\n${value.replace(/```/g, "'''")}\n\`\`\``;
 
 async function changeSize(cwd: string, base: string, head: string) {
   const rows = (await git(cwd, ['diff', '--numstat', base, head])).split('\n').filter(Boolean);
@@ -253,7 +249,7 @@ const taskStatusLabels: Record<string, string> = { completed: '已完成', faile
 export class CiWebhookService {
   private readonly clock: () => Date;
   private closed = false;
-  private currentTick?: Promise<void>;
+  private readonly ticks = new SingleFlight();
 
   constructor(private readonly options: CiWebhookServiceOptions) {
     this.clock = options.clock ?? (() => new Date());
@@ -612,15 +608,12 @@ export class CiWebhookService {
 
   tick(): Promise<void> {
     if (this.closed) return Promise.resolve();
-    if (this.currentTick) return this.currentTick;
-    const operation = this.runTick().finally(() => { if (this.currentTick === operation) this.currentTick = undefined; });
-    this.currentTick = operation;
-    return operation;
+    return this.ticks.run(() => this.runTick());
   }
 
   async close() {
     this.closed = true;
-    if (this.currentTick) await this.currentTick;
+    if (this.ticks.current) await this.ticks.current;
   }
 
   private async runTick() {

@@ -1,3 +1,5 @@
+import { isRecord } from './records.js';
+
 /** ACP content with bounded non-text payloads. URIs are evidence references, never read/download grants. */
 export type EventContentPart =
   | { type: 'text'; text: string }
@@ -9,7 +11,7 @@ export type EventContentPart =
 /** Non-text payload budgets; existing text replies retain their original data.text. */
 export const eventContentLimits = Object.freeze({ parts: 64, partBytes: 128 * 1024, totalBytes: 256 * 1024 });
 const encoder = new TextEncoder();
-const record = (value: unknown): Record<string, unknown> | undefined => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+const record = (value: unknown) => isRecord(value) ? value : undefined;
 const string = (value: unknown) => typeof value === 'string' ? value : undefined;
 const short = (value: unknown) => string(value)?.slice(0, 2048);
 const unsupported = (originalType: string, reason: Extract<EventContentPart, { type: 'unsupported' }>['reason']): EventContentPart => ({ type: 'unsupported', originalType: originalType.slice(0, 80), reason });

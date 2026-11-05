@@ -145,6 +145,10 @@ export class PtyCliDriver implements AgentDriver {
   setPermissionMode?: AgentDriver['setPermissionMode'];
   private backgroundEvidenceUntil = 0;
   private screenProgress = '';
+  /** 屏幕进展最多每 SCREEN_PROGRESS_INTERVAL_MS 计算一次：上次计算的时间和尾沿补算的定时器。 */
+  private screenProgressCheckedAt = 0;
+  private screenProgressTimer?: NodeJS.Timeout;
+  private static readonly SCREEN_PROGRESS_INTERVAL_MS = 200;
   private refreshingScreen = false;
   private static readonly TURN_GRACE_MS = 15_000;
   /** 后台子 agent 在飞时最多推迟 completed 这么久（见 holdForBackgroundWork）。
@@ -1737,7 +1741,17 @@ export class PtyCliDriver implements AgentDriver {
       && /[❯›]|(?:yes|allow|deny|answer|waiting)/i.test(footer);
   }
 
+  /** 输出块很密而整屏转文本较贵，这里只服务分钟级的卡住检测：标脏后最多每 200ms 算一次，间隔内的变化由尾沿补算。 */
   private noteScreenProgress(): void {
+    if (!this.turnActive || this.screenProgressTimer) return;
+    const wait = this.screenProgressCheckedAt + PtyCliDriver.SCREEN_PROGRESS_INTERVAL_MS - Date.now();
+    if (wait <= 0) { this.checkScreenProgress(); return; }
+    this.screenProgressTimer = setTimeout(() => { this.screenProgressTimer = undefined; this.checkScreenProgress(); }, wait);
+    this.screenProgressTimer.unref();
+  }
+
+  private checkScreenProgress(): void {
+    this.screenProgressCheckedAt = Date.now();
     if (!this.turnActive) return;
     // Animation, spinner counters and footer time changes are not progress.
     const lines = this.snapshot?.viewportText().split('\n').map(line => line.trim()) ?? [];

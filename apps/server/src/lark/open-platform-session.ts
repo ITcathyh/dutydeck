@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
-import { asRecord, pickString } from './open-platform-values.js';
+import { asRecord } from '@dutydeck/shared';
+import { pickString } from './open-platform-values.js';
 
 const FEISHU_ACCOUNTS_ORIGIN = 'https://accounts.feishu.cn';
 const FEISHU_CONSOLE_ORIGIN = 'https://open.feishu.cn';

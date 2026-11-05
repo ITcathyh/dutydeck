@@ -141,15 +141,6 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
   }
 
   /**
-   * 「提到队首」会中断当前正在执行的那一轮（runtime 的 promoteQueued 带 interrupt），
-   * 所以除了队列自己的 queue.promote，还必须过与 /cancel 同一道中断门。
-   * 当前没有正在执行的任务时没有可中断的对象，直接放行。
-   */
-  protected async canInterruptCurrentTurn(config: StoredLarkConfig, event: LarkMessageEvent, sessionId: string): Promise<boolean> {
-    return !await this.currentTurnInterruptDenial(config, event, sessionId);
-  }
-
-  /**
    * 会中断正在执行的那一轮的入口（/cancel、/new、/steer、/queue top|steer、排队卡的插队按钮）与进度卡「中断」同一口径：
    * 只有这一轮的发起人和管理员能动它。被拒时返回说明，放行或没有正在执行的一轮时返回 undefined。
    */
@@ -179,8 +170,9 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     // 插话与提升都会改变那一轮，真正动手前重新过一次中断门，命令层那次检查不能替这一刻背书。
     // 这道门要查通讯录（isMember 会真打飞书接口），抛异常不能连累这条任务：
     // runtime 已经接收它、还会照跑，把它打成 failed 就是发一张与事实相反的终态卡。
-    // 插话与提升本身 fail closed：判不了就都不做。
-    const allowed = target.status === 'queued' && ahead.length > 0 && await this.canInterruptCurrentTurn(config, event, sessionId).catch(() => false);
+    // 插话与提升本身 fail closed：判不了就都不做。提升带中断（promoteQueued 的 interrupt），所以要过与 /cancel 同一道中断门。
+    const allowed = target.status === 'queued' && ahead.length > 0
+      && await this.currentTurnInterruptDenial(config, event, sessionId).then(denial => !denial, () => false);
     const running = ahead.some(item => item.status === 'running');
     // 派发到插话之间这几秒，这条可能已经自己开跑或被取消：按它此刻的状态写，不说成插话或提升失败。
     const movedNote = async () => {
@@ -887,6 +879,47 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       await this.failPendingInbox(task, task.fallbackNote);
       this.log.warn({ error, taskId: task.id }, '切换兜底 Agent 失败');
       return false;
+    }
+  }
+
+  /**
+   * 同群其他开了记忆的机器人在本群记下的约定，按内容去重（本机器人已有的 own 也算在内）；没有时返回 undefined。
+   * 任何读取失败都只记日志并返回 undefined，不影响本轮注入自己的记忆。
+   */
+  private async peerGroupMemories(appId: string, chatId: string, own: LarkMemoryEntry[]): Promise<Array<{ botName: string; entry: LarkMemoryEntry }> | undefined> {
+    const memoryStore = this.workflowOptions.memory?.store;
+    const configStore = this.workflowOptions.store;
+    if (!memoryStore || !configStore) return undefined;
+    try {
+      const allBots = await withLarkContextReadTimeout(readLarkConfigs(configStore, { readOnly: true }), '机器人配置读取');
+      const peerBots = allBots.filter(b => b.appId !== appId && larkMemoryEnabled(b));
+      if (peerBots.length === 0) return undefined;
+      const peerResults = await withLarkContextReadTimeout(Promise.all(peerBots.map(async peerBot => {
+        try {
+          // 对端的群共享池里也有它在别的群记下的条目，下面只取本群的。只读：不替对端触发旧账本迁移。
+          const peerList = await memoryStore.peek(larkMemoryScope(peerBot.appId, chatId, 'group', peerBot.groupMemoryScope));
+          const botName = peerBot.name?.trim() || peerBot.displayName?.trim() || peerBot.appId;
+          return { botName, peerList };
+        } catch {
+          return undefined;
+        }
+      })), '同群其他机器人记忆读取');
+      const seen = new Set(own.map(e => e.content.trim()));
+      const collected: Array<{ botName: string; entry: LarkMemoryEntry }> = [];
+      for (const res of peerResults) {
+        if (!res) continue;
+        for (const item of res.peerList) {
+          if (item.topic !== 'conventions' || item.chatId !== chatId) continue;
+          const text = item.content.trim();
+          if (seen.has(text)) continue;
+          seen.add(text);
+          collected.push({ botName: res.botName, entry: item });
+        }
+      }
+      return collected.length > 0 ? collected : undefined;
+    } catch (peerError) {
+      this.log.warn({ error: peerError, chatId }, '读取同群其他机器人偏好失败，跳过共享记忆');
+      return undefined;
     }
   }
 
@@ -1650,50 +1683,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           store.getState(scope)
         ]), '会话记忆读取');
 
-        let sharedEntries: Array<{ botName: string; entry: LarkMemoryEntry }> | undefined;
-        if (event.chatType === 'group' && this.workflowOptions.store) {
-          try {
-            const allBots = await withLarkContextReadTimeout(
-              readLarkConfigs(this.workflowOptions.store, { readOnly: true }),
-              '机器人配置读取'
-            );
-            const peerBots = allBots.filter(b => b.appId !== config.appId && larkMemoryEnabled(b));
-            if (peerBots.length > 0) {
-              const peerResults = await withLarkContextReadTimeout(
-                Promise.all(
-                  peerBots.map(async peerBot => {
-                    try {
-                      // 对端的群共享池里也有它在别的群记下的条目，下面只取本群的。只读：不替对端触发旧账本迁移。
-                      const peerList = await store.peek(larkMemoryScope(peerBot.appId, event.chatId, 'group', peerBot.groupMemoryScope));
-                      const botName = peerBot.name?.trim() || peerBot.displayName?.trim() || peerBot.appId;
-                      return { botName, peerList };
-                    } catch {
-                      return undefined;
-                    }
-                  })
-                ),
-                '同群其他机器人记忆读取'
-              );
-              const seen = new Set(entries.map(e => e.content.trim()));
-              const collected: Array<{ botName: string; entry: LarkMemoryEntry }> = [];
-              for (const res of peerResults) {
-                if (!res) continue;
-                for (const item of res.peerList) {
-                  if (item.topic !== 'conventions' || item.chatId !== event.chatId) continue;
-                  const text = item.content.trim();
-                  if (seen.has(text)) continue;
-                  seen.add(text);
-                  collected.push({ botName: res.botName, entry: item });
-                }
-              }
-              if (collected.length > 0) {
-                sharedEntries = collected;
-              }
-            }
-          } catch (peerError) {
-            this.log.warn({ error: peerError, chatId: event.chatId }, '读取同群其他机器人偏好失败，跳过共享记忆');
-          }
-        }
+        const sharedEntries = event.chatType === 'group' ? await this.peerGroupMemories(config.appId, event.chatId, entries) : undefined;
 
         const index = renderMemoryIndex(entries, state, { ...(shared ? { currentChatId: event.chatId } : {}), sharedEntries, query: materialPrompt.slice(0, 2_000), budget: relevantMemoryBudget });
         const memoryBlock = renderLarkMemoryInjection(index.text, { shared });

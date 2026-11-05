@@ -337,6 +337,11 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', `Unknown agent: ${request.params.id}`, 404);
     return discoverAgentModels(await options.agentModelSettings?.resolve(agent) ?? agent, request.query.model?.trim() || undefined, request.query.refresh === '1' || request.query.refresh === 'true');
   });
+  /** 各会话的收尾报告；运行时有批量接口时一次查完。 */
+  const sessionTaskReports = async (sessionIds: string[]): Promise<Map<string, import('@dutydeck/shared').TaskReport | undefined>> => {
+    if (typeof runtime.getSessionTaskReports === 'function') return runtime.getSessionTaskReports(sessionIds);
+    return new Map(await Promise.all(sessionIds.map(async id => [id, await runtime.getSessionTaskReport?.(id)] as const)));
+  };
   app.get('/api/sessions', async request => {
     const sessions = await runtime.listSessions();
     const visible = (await Promise.all(sessions.map(async session => await canViewSession(request, session.id) ? session : undefined))).filter((session): session is typeof sessions[number] => Boolean(session));
@@ -352,8 +357,9 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
       group.sessions.push(session);
     }
     const projections = new Map<string, { id: string; title: string; status: import('@dutydeck/shared').Matter['status']; superseded: Set<string> }>();
+    const reports = groups.size ? await sessionTaskReports([...groups.values()].flatMap(group => group.sessions.map(session => session.id))) : new Map();
     for (const [id, { matter, links, sessions }] of groups) {
-      const reportedSessions = await Promise.all(sessions.map(async session => ({ ...session, taskReport: await runtime.getSessionTaskReport?.(session.id) })));
+      const reportedSessions = sessions.map(session => ({ ...session, taskReport: reports.get(session.id) }));
       const origin = links.find(link => link.kind === 'session' && link.relation === 'origin');
       const superseded = new Set<string>();
       for (const link of links.filter(link => link.kind === 'reply_target' && link.refId.startsWith('session:'))) {
@@ -404,11 +410,11 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   });
   app.get('/api/sessions/summaries', async (request, reply) => {
     const respond = async (summaries: unknown[]) => {
-      summaries = await Promise.all(summaries.map(async value => {
-        const summary = value as { sessionId: string };
-        const report = await runtime.getSessionTaskReport?.(summary.sessionId);
-        return report ? { ...summary, taskReport: report } : value;
-      }));
+      const reports = await sessionTaskReports(summaries.map(value => (value as { sessionId: string }).sessionId));
+      summaries = summaries.map(value => {
+        const report = reports.get((value as { sessionId: string }).sessionId);
+        return report ? { ...(value as object), taskReport: report } : value;
+      });
       const etag = `"${createHash('sha256').update(JSON.stringify(summaries)).digest('base64url')}"`;
       // Browsers revalidate the private representation every poll. Permission
       // filtering precedes hashing, so revoked/removed entries invalidate it too.

@@ -1517,7 +1517,10 @@ export class SessionAutomationService {
     ]);
     for (const item of occurrences) {
       if (this.closed) return;
-      if (item.value.runStatus === 'pending' && (!item.value.leaseExpiresAt || new Date(item.value.leaseExpiresAt) <= this.clock())) await this.isolate(() => this.claimAndProcessOccurrence(item));
+      if (item.value.runStatus === 'pending' && (!item.value.leaseExpiresAt || new Date(item.value.leaseExpiresAt) <= this.clock())) await this.isolate(async () => {
+        const claimed = await this.renewOccurrenceLease(item);
+        if (claimed) await this.processOccurrence(claimed);
+      });
     }
     for (const item of schedules) {
       if (this.closed) return;
@@ -1707,13 +1710,6 @@ export class SessionAutomationService {
     if (!openRunStatuses.has(occurrence.value.runStatus)) await this.advanceSchedule(schedule, schedule.nextDueAt!);
   }
 
-  private async claimAndProcessOccurrence(stored: { raw: string; value: SessionScheduleOccurrence }) {
-    const now = this.clock();
-    const base = migrateOccurrence(stored.value);
-    const claimed = sessionScheduleOccurrenceV2Schema.parse({ ...base, revision: base.revision + 1, leaseOwner: this.ownerId, leaseExpiresAt: plus(now, CLAIM_TTL_MS), updatedAt: iso(now) });
-    if (await this.replace(occurrenceKey(stored.value.id), stored.raw, claimed)) await this.processOccurrence({ raw: JSON.stringify(claimed), value: claimed });
-  }
-
   private async renewOccurrenceLease(stored: { raw: string; value: SessionScheduleOccurrence }) {
     const now = this.clock();
     const base = migrateOccurrence(stored.value);
@@ -1896,14 +1892,7 @@ export class SessionAutomationService {
     taskIdVersion: 'v1' | 'legacy'
   ) {
     const occurrence = stored.value;
-    // 重投先查接受事实，命中只补同一映射，不再读 HEAD/材料、不重拼 prompt。
-    const acceptedBefore = this.execution.getAcceptedTask(taskId);
-    if (acceptedBefore?.request && canonicalRequestDigest(acceptedBefore.request) !== canonicalRequestDigest(request)) {
-      await this.finishOccurrence(stored, { runStatus: 'blocked', blockReason: 'admission_conflict', error: 'The task key already belongs to a different accepted request' });
-      return;
-    }
-    await recordAutomationAuthorization(this.options.repositories.config, request, taskId);
-    await this.ensureTaskBinding(taskId, {
+    await this.dispatchAdmitted(request, taskId, {
       schemaVersion: 2,
       kind: 'schedule',
       sessionId: request.sessionId,
@@ -1912,29 +1901,50 @@ export class SessionAutomationService {
       taskId,
       taskIdVersion,
       generation: occurrence.generation
+    }, {
+      accepted: id => this.markOccurrenceAccepted(stored, id),
+      conflict: error => this.finishOccurrence(stored, { runStatus: 'blocked', blockReason: 'admission_conflict', error }),
+      failed: async error => {
+        this.warn({ scheduleId: occurrence.scheduleId, occurrenceId: occurrence.id, sessionId: request.sessionId, code: errorCode(error) }, '定时触发派发失败');
+        if (occurrence.triggerSource !== 'manual') await this.noteTriggerError(occurrence.scheduleId, occurrence.id, errorCode(error));
+        await this.finishOccurrence(stored, { runStatus: 'error', error: errorMessage(error) });
+      }
     });
+  }
+
+  /**
+   * 按已固定的准入派发一条自动化任务。重投先查接受事实，命中只补同一映射，不再读 HEAD/材料、不重拼 prompt；
+   * 派发报错时以执行账本是否已接受为准。结算交给调用方：accepted 记接受，conflict 记准入冲突（afterDispatch 区分派发前后），failed 记派发失败。
+   */
+  private async dispatchAdmitted(request: TaskRequestV1, taskId: string, binding: TaskBinding, settle: {
+    accepted: (taskId: string) => Promise<unknown>;
+    conflict: (error: string, afterDispatch: boolean) => Promise<unknown>;
+    failed: (error: unknown) => Promise<unknown>;
+  }) {
+    const acceptedBefore = this.execution.getAcceptedTask(taskId);
+    if (acceptedBefore?.request && canonicalExecutionJson(acceptedBefore.request) !== canonicalExecutionJson(request)) {
+      await settle.conflict('The task key already belongs to a different accepted request', false);
+      return;
+    }
+    await recordAutomationAuthorization(this.options.repositories.config, request, taskId);
+    await this.ensureTaskBinding(taskId, binding);
     if (acceptedBefore) {
-      await this.markOccurrenceAccepted(stored, taskId);
+      await settle.accepted(taskId);
       return;
     }
     try {
       const task = await this.options.runtime.dispatchRequest(request);
       if (task.id !== taskId) throw new RuntimeError('SESSION_AUTOMATION_TASK_CONFLICT', 'Runtime task identity did not match the fixed admission', 409);
-      await this.markOccurrenceAccepted(stored, task.id);
+      await settle.accepted(task.id);
     } catch (error) {
       if (this.closed) return;
       const durable = this.execution.getAcceptedTask(taskId);
-      if (durable) {
-        if (durable.request && canonicalRequestDigest(durable.request) === canonicalRequestDigest(request)) {
-          await this.markOccurrenceAccepted(stored, taskId);
-          return;
-        }
-        await this.finishOccurrence(stored, { runStatus: 'blocked', blockReason: 'admission_conflict', error: 'Accepted task request conflicts with source admission' });
+      if (!durable) {
+        await settle.failed(error);
         return;
       }
-      this.warn({ scheduleId: occurrence.scheduleId, occurrenceId: occurrence.id, sessionId: request.sessionId, code: errorCode(error) }, '定时触发派发失败');
-      if (occurrence.triggerSource !== 'manual') await this.noteTriggerError(occurrence.scheduleId, occurrence.id, errorCode(error));
-      await this.finishOccurrence(stored, { runStatus: 'error', error: errorMessage(error) });
+      if (durable.request && canonicalExecutionJson(durable.request) === canonicalExecutionJson(request)) await settle.accepted(taskId);
+      else await settle.conflict('Accepted task request conflicts with source admission', true);
     }
   }
 
@@ -2287,7 +2297,7 @@ export class SessionAutomationService {
       const accepted = this.execution.getAcceptedTask(claimed0.admission.taskId);
       if (accepted) {
         // 恢复命中已接受事实：完整接受 request 必须与冻结 admission 相等，否则持久 blocked，不借 ID 补映射。
-        if (accepted.request && claimed0.admission.request && canonicalRequestDigest(accepted.request) !== canonicalRequestDigest(claimed0.admission.request)) {
+        if (accepted.request && claimed0.admission.request && canonicalExecutionJson(accepted.request) !== canonicalExecutionJson(claimed0.admission.request)) {
           await this.finishCi(stored, 'blocked', 'The accepted task request conflicts with the frozen CI admission');
           return;
         }
@@ -2363,44 +2373,25 @@ export class SessionAutomationService {
     }
 
     const stored: { raw: string; value: CiSubscriptionV2 } = { raw: JSON.stringify(record), value: record };
-    // 重投先查接受事实，命中只补同一映射，不再读 HEAD/材料、不重拼 prompt。
-    const acceptedBefore = this.execution.getAcceptedTask(taskId);
-    if (acceptedBefore?.request && canonicalRequestDigest(acceptedBefore.request) !== canonicalRequestDigest(request)) {
-      await this.finishCi(stored, 'blocked', 'The task key already belongs to a different accepted request');
-      return;
-    }
-    await recordAutomationAuthorization(this.options.repositories.config, request, taskId);
-    await this.ensureTaskBinding(taskId, {
+    const subscriptionId = record.id;
+    await this.dispatchAdmitted(request, taskId, {
       schemaVersion: 2,
       kind: 'ci',
       sessionId: record.sessionId,
-      subscriptionId: record.id,
+      subscriptionId,
       taskId,
       taskIdVersion,
       generation: CI_BINDING_GENERATION
-    });
-    if (acceptedBefore) {
-      await this.markCiAccepted(record.id, taskId);
-      return;
-    }
-    try {
-      const task = await this.options.runtime.dispatchRequest(request);
-      if (task.id !== taskId) throw new RuntimeError('SESSION_AUTOMATION_TASK_CONFLICT', 'Runtime task identity did not match the fixed admission', 409);
-      await this.markCiAccepted(record.id, task.id);
-    } catch (error) {
-      if (this.closed) return;
-      const durable = this.execution.getAcceptedTask(taskId);
-      if (durable) {
-        if (durable.request && canonicalRequestDigest(durable.request) === canonicalRequestDigest(request)) {
-          await this.markCiAccepted(record.id, taskId);
-          return;
-        }
-        await this.finishCi(stored, { status: 'blocked', blockReason: 'admission_conflict', error: 'Accepted task request conflicts with source admission' });
-        return;
+    }, {
+      accepted: id => this.markCiAccepted(subscriptionId, id),
+      conflict: (error, afterDispatch) => afterDispatch
+        ? this.finishCi(stored, { status: 'blocked', blockReason: 'admission_conflict', error })
+        : this.finishCi(stored, 'blocked', error),
+      failed: async error => {
+        const latest = await this.getRecord(ciKey(subscriptionId), value => ciSubscriptionSchema.parse(value));
+        if (latest) await this.finishCi(latest, { status: 'error', error: errorMessage(error) });
       }
-      const latest = await this.getRecord(ciKey(record.id), value => ciSubscriptionSchema.parse(value));
-      if (latest) await this.finishCi(latest, { status: 'error', error: errorMessage(error) });
-    }
+    });
   }
 
   private async returnCiToWaiting(stored: { raw: string; value: CiSubscription }, error?: string) {
@@ -2857,11 +2848,6 @@ export class SessionAutomationService {
     await this.applyScheduleStops();
   }
 
-}
-
-function canonicalRequestDigest(request: TaskRequestV1): string {
-  // 复用与账本一致的稳定 JSON 比较，避免键序差异。
-  return canonicalExecutionJson(request);
 }
 
 function sameResult(a?: AttemptResultV1, b?: AttemptResultV1): boolean {

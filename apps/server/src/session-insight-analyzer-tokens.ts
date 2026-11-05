@@ -1,7 +1,7 @@
-import type { CountMetric, FileMetrics, PulseBucket, RawTokenUsage, TraceEventTokens } from '@dutydeck/shared';
+import { asRecord, type CountMetric, type FileMetrics, type PulseBucket, type RawTokenUsage, type TraceEventTokens } from '@dutydeck/shared';
 
 export type JsonObject = Record<string, unknown>;
-export const object = (value: unknown): JsonObject => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : {};
+export const object: (value: unknown) => JsonObject = asRecord;
 export const safeToken = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 export function metric(value: number | null, reason?: string, status: CountMetric['status'] = value === null ? 'unavailable' : 'available', evidenceCount = value === null ? 0 : 1, missingCount = value === null ? 1 : 0, quality: CountMetric['quality'] = value === null ? 'unknown' : 'exact'): CountMetric {
   return { value, status, quality, evidenceCount, missingCount, reasonCodes: reason ? [reason] : [] };
