@@ -124,6 +124,11 @@ describe('Agent 代发飞书命令', () => {
     expect(agentCommandPlan('/queue').confirm).toBe(false);
     expect(agentCommandPlan('/pr 修复登录').confirm).toBe(false);
     expect(agentCommandPlan('/queue cancel 2').confirm).toBe(true);
+    // 只列出的子命令按查看处理，不弹确认卡；带别的参数仍要确认。
+    expect(agentCommandPlan('/fork list').confirm).toBe(false);
+    expect(agentCommandPlan('/resume list').confirm).toBe(false);
+    expect(agentCommandPlan('/fork -- list').confirm).toBe(true);
+    expect(agentCommandPlan('/resume ses_1').confirm).toBe(true);
     expect(agentCommandPlan('/new --agent codex -- 修复登录').confirm).toBe(true);
     expect(agentCommandPlan('/schedule disable sch_1').confirm).toBe(true);
     for (const command of ['/stop', '/cancel', '/model model-b', '/effort high', '/approve req_1', '/answer q_1 好', '/remember x']) {

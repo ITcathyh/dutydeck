@@ -20,6 +20,9 @@ import { LarkMessageCoordinator } from './coordinator.js';
 import { LarkGroupManager } from './group-management.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
+import { computeAgentModelProbeKey, discoverAgentModels } from '../agent-models.js';
+
+const deferred = () => { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done; }); return { promise, resolve }; };
 
 // /model、/effort 按 Agent 的模型列表校验；不要在测试里真的探测 ACP。
 vi.mock('../agent-models.js', async importOriginal => ({
@@ -1022,6 +1025,78 @@ describe('/model 与 /effort 切换当前会话', () => {
     expect(await h.runtime.listSessions()).toHaveLength(1);
     rebuilt.stop();
   });
+  it('有待审批请求时切换被拒，回执是“上一次配置变更还没完成”而不是通用失败', async () => {
+    const h = await harness({ answer: true, switching: { model: true, effort: true }, configPatch: { defaultModel: 'model-a' } });
+    const id = await idleSession(h);
+    vi.spyOn(h.runtime as unknown as { permissionsForSession(id: string): unknown[] }, 'permissionsForSession').mockReturnValue([{}]);
+    await h.coordinator.handle(event('om_busy_m', '/model model-b'), h.config);
+    expect(h.markdownOf(h.receiptNamed('/model 未执行'))).toContain('上一次配置变更还没完成');
+    await h.coordinator.handle(event('om_busy_e', '/effort high'), h.config);
+    expect(h.markdownOf(h.receiptNamed('/effort 未执行'))).toContain('上一次配置变更还没完成');
+    expect(h.switched).toEqual([]);
+    expect((await h.runtime.getSession(id))?.model).toBe('model-a');
+  });
+
+  it('终端会话的 /effort 直接说明不支持，不列档位、不去连终端', async () => {
+    const h = await harness({ native: true, answer: true });
+    const id = await idleSession(h);
+    expect((await h.runtime.getSession(id))?.protocol).toBe('pty-cli');
+    const setEffort = vi.spyOn(h.runtime, 'setReasoningEffort');
+    const probe = vi.mocked(discoverAgentModels); probe.mockClear();
+    await h.coordinator.handle(event('om_pty_e0', '/effort'), h.config);
+    const view = h.markdownOf(h.receiptNamed('当前思考强度'));
+    expect(view).toContain('当前 Agent 不支持在会话中切换思考强度');
+    expect(view).not.toContain('可选'); expect(view).not.toContain('xhigh');
+    await h.coordinator.handle(event('om_pty_e1', '/effort high'), h.config);
+    expect(h.markdownOf(h.receiptNamed('/effort 未执行'))).toContain('不支持在会话中切换思考强度');
+    expect(setEffort).not.toHaveBeenCalled(); expect(probe).not.toHaveBeenCalled();
+  });
+
+  it('查看与切换用同一份探测参数（命中同一份缓存），切换时探测超过 10 秒就回执，不等底层超时', async () => {
+    const h = await harness({ answer: true, switching: { model: true }, configPatch: { defaultModel: 'model-a' } });
+    await idleSession(h);
+    const probe = vi.mocked(discoverAgentModels); probe.mockClear();
+    await h.coordinator.handle(event('om_probe_view', '/model'), h.config);
+    await h.coordinator.handle(event('om_probe_switch', '/model model-b'), h.config);
+    expect(h.switched).toEqual(['model:model-b']);
+    const keys = probe.mock.calls.map(([agent, model]) => computeAgentModelProbeKey(agent, model));
+    expect(keys).toHaveLength(2); expect(keys[1]).toBe(keys[0]);
+
+    probe.mockImplementationOnce(() => new Promise(() => {}));
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const pending = h.coordinator.handle(event('om_probe_slow', '/model model-a'), h.config);
+      await vi.waitFor(() => expect(probe).toHaveBeenCalledTimes(3));
+      await vi.advanceTimersByTimeAsync(10_000);
+      await pending;
+    } finally { vi.useRealTimers(); }
+    expect(h.markdownOf(h.receiptNamed('/model 未执行'))).toContain('10 秒内没有读到');
+    expect(h.switched).toEqual(['model:model-b']);
+  });
+
+  it('切换后改绑定与 /new 写事项边界不交错：边界标记保留', async () => {
+    const h = await harness({ answer: true, switching: { model: true }, configPatch: { defaultModel: 'model-a' } });
+    const id = await idleSession(h);
+    const sourceId = (await h.runtime.getSession(id))!.sourceId!;
+    const channel = `lark-launch:${h.config.appId}`;
+    // 切换已经发给驱动之后，第一次读启动绑定时停住，让 /new 在这个窗口里结束会话并写边界。
+    const reading = deferred(), proceed = deferred();
+    const get = h.repos.channelMappings.get.bind(h.repos.channelMappings);
+    let paused = false;
+    vi.spyOn(h.repos.channelMappings, 'get').mockImplementation(async (mappingChannel, externalId) => {
+      const value = await get(mappingChannel, externalId);
+      if (!paused && mappingChannel === channel && h.switched.length) { paused = true; reading.resolve(); await proceed.promise; }
+      return value;
+    });
+    const switching = h.coordinator.handle(event('om_race_m', '/model model-b'), h.config);
+    await reading.promise;
+    const renewing = h.coordinator.handle(event('om_race_new', '/new'), h.config);
+    await vi.waitFor(async () => expect((await h.runtime.getSession(id))?.state).toBe('stopped'));
+    proceed.resolve();
+    await Promise.all([switching, renewing]);
+    expect(h.receiptNamed('/new 已受理')).toBeTruthy();
+    expect(JSON.parse((await get(channel, sourceId))!.extra!)).toMatchObject({ matterBoundary: true });
+  });
 });
 
 describe('/rename 给会话改名', () => {
@@ -1047,24 +1122,24 @@ describe('/rename 给会话改名', () => {
     expect(h.markdownOf(h.receiptNamed('最近关闭的会话'))).toContain('发布排查');
   });
 
-  it('普通成员改不了：受管理的群只认机器人所有者或管理员', async () => {
+  it('受管理的群里群管理员也改不了，只认机器人所有者（操作白名单里的人）', async () => {
     const h = await harness({ managedGroup: true, answer: true });
     await openToMembers(h);
     const id = await idleSession(h);
-    const authorize = vi.spyOn(h.groupManager!, 'authorize');
     await h.coordinator.handle(event('om_r3', '/rename 偷偷改名'), h.config);
-    expect(authorize.mock.calls.some(call => call[3] === 'channel_bot.update')).toBe(true);
     expect(h.receiptNamed('/rename 未执行')).toMatchObject({ state: 'failed' });
-    expect(h.markdownOf(h.receiptNamed('/rename 未执行'))).toContain('管理员');
-    expect((await h.runtime.getSession(id))?.name).toBeUndefined();
-    // 只是被放行的群策略（非 owner/admin 来源）也不行。
-    authorize.mockImplementation(async (_app, _chat, _actor, action) => ({ allowed: true, action, code: 'ok', reason: 'ok', source: 'group_policy' as const }));
-    await h.coordinator.handle(event('om_r4', '/rename 仍然偷偷改名'), h.config);
-    expect((await h.runtime.getSession(id))?.name).toBeUndefined();
-    // 管理员来源才放行。
+    expect(h.markdownOf(h.receiptNamed('/rename 未执行'))).toContain('未配置操作白名单');
+    // 群管理员来源的群级授权放行一切动作，改名照样被拒。
+    const authorize = vi.spyOn(h.groupManager!, 'authorize');
     authorize.mockImplementation(async (_app, _chat, _actor, action) => ({ allowed: true, action, code: 'ok', reason: 'ok', source: 'admin' as const }));
-    await h.coordinator.handle(event('om_r5', '/rename 管理员改名'), h.config);
-    expect((await h.runtime.getSession(id))?.name).toBe('管理员改名');
+    h.config.allowedUsers = [{ openId: 'ou_bob', name: 'Bob' }];
+    await h.repos.config.set(larkBotsConfigKey, JSON.stringify([h.config]));
+    await h.coordinator.handle(event('om_r4', '/rename 管理员改名'), h.config);
+    expect(h.markdownOf(h.lastReceipt())).toContain('群管理员不够');
+    expect((await h.runtime.getSession(id))?.name).toBeUndefined();
+    // 机器人所有者才放行。
+    await h.coordinator.handle(event('om_r5', '/rename 所有者改名', { senderOpenId: 'ou_bob' }), h.config);
+    expect((await h.runtime.getSession(id))?.name).toBe('所有者改名');
   });
 
   it('未配置白名单时飞书里不开放改名，请在 Web 上操作', async () => {

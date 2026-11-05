@@ -17,7 +17,8 @@ export interface LarkTaskDashboardPendingApproval {
 }
 
 export interface LarkTaskDashboardEntry {
-  matter?: { id: string; title: string; sessionId: string; superseded?: boolean };
+  /** sessionName：这一行所属会话的名称（/rename 设置）；按事项合并时跟在事项标题前面。 */
+  matter?: { id: string; title: string; sessionId: string; sessionName?: string; superseded?: boolean };
   sessionCount?: number;
   /** runtime 任务 id，仅为主控组装/排序使用，渲染层绝不输出到卡片。 */
   taskId: string;
@@ -401,7 +402,7 @@ export function groupLarkTasksByMatter(entries: LarkTaskDashboardEntry[]): LarkT
     const count = new Set(group.map(entry => entry.matter?.sessionId)).size;
     if (!group[0]?.matter || count <= 1) return group;
     const [entry] = [...group].sort((a, b) => priority(a) - priority(b) || Number(Boolean(taskReportAttentionText(b.taskReport))) - Number(Boolean(taskReportAttentionText(a.taskReport))) || timestamp(b.updatedAt) - timestamp(a.updatedAt));
-    return [{ ...entry!, title: entry!.matter!.title, sessionCount: count }];
+    return [{ ...entry!, title: entry!.matter!.sessionName ? `${entry!.matter!.sessionName} · ${entry!.matter!.title}` : entry!.matter!.title, sessionCount: count }];
   });
 }
 

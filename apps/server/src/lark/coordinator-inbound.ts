@@ -5,7 +5,6 @@ import { runAgentScheduleRequest } from '../agent-schedule-request.js';
 import { larkElapsedLabel } from './card-status.js';
 import { agentSettingsConfirmKind, parseAgentSettings, showAgentSettings } from './agent-settings.js';
 import { createHash } from 'node:crypto';
-import { setTimeout as sleep } from 'node:timers/promises';
 import { describeLarkTaskRecovery, larkContinuePrompt, larkRecoveryRetainedNote, larkReliability, larkSteeringUnknownNote } from './task-recovery.js';
 import type { LarkInteraction } from './workflow-interactions.js';
 import { formatUnknownTaskTime as deadlineText } from '../task-resolution.js';
@@ -13,7 +12,7 @@ import type { LarkInboxAdoption, LarkInboxRecord } from './task-inbox.js';
 import { larkConfirmationInputDigest, isLarkFirstCardUndelivered } from './task-inbox.js';
 import { larkForkWorkspaceMode, larkNativeForkId, larkResumeUnavailable } from './session-branches.js';
 import { parseLarkNewSession, validateLarkLaunchOptions } from './new-session.js';
-import { discoverAgentModels } from '../agent-models.js';
+import { discoverAgentModels, type AgentModelsResult } from '../agent-models.js';
 import { formatLarkHandoff, larkHandoffAck, larkHandoffTitle, larkHandoffEventLimit, larkHandoffIndexLimit } from './handoff.js';
 import { explicitFinalContext, readExplicitFinal } from './explicit-final.js';
 import { redactTraceText } from './secret-redaction.js';
@@ -129,17 +128,21 @@ const larkForkStatusLabels: Record<string, string> = {
   queued: '排队中', running: '进行中', completed: '已完成', failed: '失败', interrupted: '已中断', cancelled: '已取消', reconcile_required: '需要核对'
 };
 
-/** /model、/effort 不带参数时的可选项：ACP Agent 来自探测（10 秒内读不到就当没有），命令行 Agent 的思考强度用启动校验同一份档位表。 */
-async function larkSessionConfigOptions(agent: Pick<AgentConfig, 'id' | 'name'> & Partial<AgentConfig> | undefined, session: Session, model: boolean): Promise<string[]> {
-  if (agent?.protocol === 'pty-cli') return model ? [] : ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'];
-  if (!agent?.command || !agent.args || !agent.env || !agent.protocol) return [];
-  const abort = new AbortController();
+/** /model、/effort 查看与切换共用的一次探测：按会话当前的模型、目录和机器人的审批模式取 Agent 模型列表（与 /new 首轮校验同一份缓存键），10 秒内读不到返回 undefined。 */
+type LarkProbeAgent = Pick<AgentConfig, 'id' | 'name'> & Partial<AgentConfig>;
+async function larkSessionConfigProbe(agent: LarkProbeAgent | undefined, session: Session, permissionMode: AgentConfig['permissionMode']): Promise<{ agent?: LarkProbeAgent; result?: AgentModelsResult }> {
+  if (!agent) return {};
+  const model = session.model ?? agent.model;
+  const probeAgent: LarkProbeAgent = { ...agent, ...(model ? { model } : {}), cwd: session.cwd, permissionMode };
+  // 校验会先拒绝这些情况，不需要探测。
+  if (!['acp', 'auto'].includes(probeAgent.protocol ?? '') || !probeAgent.command || !probeAgent.args || !probeAgent.env) return { agent: probeAgent, result: { models: [], reasoningEfforts: [] } };
+  let timer: NodeJS.Timeout | undefined;
   try {
-    const found = await Promise.race([discoverAgentModels(agent as AgentConfig, session.model),
-      sleep(10_000, undefined, { signal: abort.signal }).catch(() => undefined)]);
-    return (model ? found?.models : found?.reasoningEfforts)?.map(item => item.id) ?? [];
-  } catch { return []; }
-  finally { abort.abort(); }
+    const result = await Promise.race([discoverAgentModels(probeAgent as AgentConfig, model),
+      new Promise<undefined>(resolve => { timer = setTimeout(resolve, 10_000, undefined); })]);
+    return { agent: probeAgent, ...(result ? { result } : {}) };
+  } catch { return { agent: probeAgent, result: { models: [], reasoningEfforts: [] } }; }
+  finally { clearTimeout(timer); }
 }
 
 /** 运行时拒绝切换的已知原因翻成人话；返回 undefined 表示不是已知原因，交给通用失败回执。 */
@@ -379,7 +382,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         ? await describeLarkTaskRecovery(this.runtime, mapping.sessionId, task.id, task.status) : undefined;
       const matter = this.runtime.getMatter?.(session.id);
       sessions.set(session.id, { session, url: url.toString() });
-      entries.push({ ...(taskReport?.taskId === task.id ? { taskReport } : {}), ...(matter ? { matter: { id: matter.id, title: matter.title, sessionId: session.id, superseded: matter.supersededSessionIds?.includes(session.id) } } : {}), taskId: task.id, title: session.name ? `${session.name} · ${saved.task_name}` : saved.task_name, workspace: session.cwd, agent: agentNames.get(session.agentId) ?? session.agentId, status: pending && task.status === 'running'
+      entries.push({ ...(taskReport?.taskId === task.id ? { taskReport } : {}), ...(matter ? { matter: { id: matter.id, title: matter.title, sessionId: session.id, ...(session.name ? { sessionName: session.name } : {}), superseded: matter.supersededSessionIds?.includes(session.id) } } : {}), taskId: task.id, title: session.name ? `${session.name} · ${saved.task_name}` : saved.task_name, workspace: session.cwd, agent: agentNames.get(session.agentId) ?? session.agentId, status: pending && task.status === 'running'
         ? pending.kind === 'ask' ? 'waiting_for_answer' : 'waiting_for_permission' : task.status, updatedAt: task.updatedAt, url: url.toString(),
         ...(recovery ? { detail: recovery.markdown, blocked: recovery.blocked } : {}),
         ...(liveTask ? {
@@ -1972,12 +1975,21 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     if (session.archivedAt || ['stopped', 'failed'].includes(session.state)) { await fail('**当前会话已关闭，不能切换。**\n\n发送 `/resume` 恢复，或用 `/new` 开新会话。'); return; }
     const agent = (await this.runtime.listAgents?.())?.find(item => item.id === session.agentId);
     const current = model ? session.model ?? agent?.model : session.reasoningEffort ?? agent?.reasoningEffort;
+    const currentLine = `**当前${label}：${current ? `\`${larkCommandEcho(current, 64)}\`` : '未指定（Agent 默认）'}**`;
+    const unsupported = `${larkCommandEcho(agent?.name ?? session.agentId, 64)} 不支持在会话中切换${label}`;
     const requested = route.args[0];
+    // 终端驱动没有会话内切换：不列档位、不去连终端（连接会拉起终端进程）再被拒绝。
+    if (session.protocol === 'pty-cli') {
+      if (!requested) await reply(`当前${label}`, `${currentLine}\n\n当前 Agent 不支持在会话中切换${label}。要换${label}，用 \`/new ${flag} -- 任务\` 开新会话。`);
+      else await fail(`**${unsupported}，${label}没有改动。**\n\n要换${label}，用 \`/new ${flag} -- 任务\` 开新会话。`);
+      return;
+    }
     if (!requested) {
-      const options = await larkSessionConfigOptions(agent, session, model);
+      const found = (await larkSessionConfigProbe(agent, session, larkPermissionMode(config))).result;
+      const options = (model ? found?.models : found?.reasoningEfforts)?.map(item => item.id) ?? [];
       const shown = options.slice(0, 30).map(item => `\`${larkCommandEcho(item, 64)}\``).join('、');
       await reply(`当前${label}`, [
-        `**当前${label}：${current ? `\`${larkCommandEcho(current, 64)}\`` : '未指定（Agent 默认）'}**`,
+        currentLine,
         shown ? `可选：${shown}${options.length > 30 ? `，等共 ${options.length} 项` : ''}` : '可选项暂时读取不到，可以直接输入名称尝试。',
         `切换：\`${command} ${model ? '<模型>' : '<档位>'}\`。只在会话空闲时切换，下一轮起使用新值；本轮运行中会被拒绝。`
       ].join('\n\n'));
@@ -1994,10 +2006,12 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       if (!decision?.allowed) { await fail(`**当前账号没有切换会话${label}的权限。**\n\n${larkCommandEcho(decision?.reason ?? '群里受管理时，这需要群管理员权限。', 200)}`); return; }
     }
     if (!agent) { await fail('**找不到本会话的 Agent，没有切换。**'); return; }
-    // 按 Agent 的模型列表校验（与 /new 首轮配置同一份校验，用探测缓存，不强制刷新）；思考强度按会话当前模型取档位。
+    // 与查看同一次探测、同一个 10 秒上限（命中同一份缓存）；思考强度按会话当前模型取档位。
+    const probe = await larkSessionConfigProbe(agent, session, larkPermissionMode(config));
+    if (!probe.result) { await fail(`**10 秒内没有读到 Agent 的可选${label}，没有切换。**\n\n稍后再试，或发送 \`${command}\` 查看可选项。`); return; }
+    const available = probe.result;
     try {
-      await validateLarkLaunchOptions(model ? { model: requested } : { reasoningEffort: requested },
-        { ...agent, ...(session.model ?? agent.model ? { model: session.model ?? agent.model } : {}), cwd: session.cwd, permissionMode: larkPermissionMode(config) }, config.workspaceAliases);
+      await validateLarkLaunchOptions(model ? { model: requested } : { reasoningEffort: requested }, probe.agent!, config.workspaceAliases, async () => available);
     } catch (error) { await fail(`**${larkCommandEcho(error instanceof Error ? error.message : String(error), 200)}**\n\n发送 \`${command}\` 查看可选项。`); return; }
     if (requested === (model ? session.model : session.reasoningEffort)) { await reply(`${command} 无需切换`, `**当前${label}已经是 \`${larkCommandEcho(requested, 64)}\`。**`); return; }
     let updated: Session;
@@ -2019,34 +2033,39 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
   private async pinSwitchedSession(config: StoredLarkConfig, session: Session): Promise<boolean> {
     if (!session.sourceId || larkSessionMatchesScope(session, config, session.sourceId)) return true;
     if (!this.cardMappings) return false;
+    const mappings = this.cardMappings, sourceId = session.sourceId;
     try {
-      const channel = `lark-launch:${config.appId}`;
-      const binding = await this.cardMappings.get(channel, session.sourceId);
-      if (binding?.channel === channel && binding.externalId === session.sourceId && binding.sessionId === session.id) return true;
-      // 旧绑定属于别的会话，它的事项边界等标记不能带到这条会话上；fallback 仍按“非显式指定 Agent”处理。
-      await this.cardMappings.save({ id: `lark-launch:${session.sourceId}`, channel, externalId: session.sourceId, sessionId: session.id,
-        extra: JSON.stringify({ baseConfigKey: larkSessionConfigKey(config), explicitAgent: false }), createdAt: new Date().toISOString() });
-      return true;
+      // 与 /new 写事项边界串行：/new 已结束这条会话时不再改绑定，否则会抹掉它刚写的边界。
+      return await this.withLaunchBinding(sourceId, async () => {
+        const live = await this.runtime.getSession(session.id);
+        if (!live || live.archivedAt || ['stopped', 'failed'].includes(live.state)) return true;
+        const channel = `lark-launch:${config.appId}`;
+        const binding = await mappings.get(channel, sourceId);
+        if (binding?.channel === channel && binding.externalId === sourceId && binding.sessionId === session.id) return true;
+        // 旧绑定属于别的会话，它的事项边界等标记不能带到这条会话上；fallback 仍按“非显式指定 Agent”处理。
+        await mappings.save({ id: `lark-launch:${sourceId}`, channel, externalId: sourceId, sessionId: session.id,
+          extra: JSON.stringify({ baseConfigKey: larkSessionConfigKey(config), explicitAgent: false }), createdAt: new Date().toISOString() });
+        return true;
+      });
     } catch (error) {
       this.log.warn({ error, sessionId: session.id }, '保存切换后的会话绑定失败');
       return false;
     }
   }
 
-  /** /rename：保存逻辑是 runtime.setSessionName；权限对齐 Web 的“安装管理员”门（fail closed）。 */
+  /** /rename：保存逻辑是 runtime.setSessionName；权限对齐 Web 的“安装管理员”门（fail closed，只认机器人的操作白名单）。 */
   private async executeRenameCommand(
     route: Extract<LarkCommandRoute, { kind: 'intent' }>, config: StoredLarkConfig, event: LarkMessageEvent, sessionId: string | undefined, reply: ChatCommandReply
   ) {
     const fail = (markdown: string) => reply('/rename 未执行', markdown, { failed: true });
     const text = route.argsText;
     if (!text || text.startsWith('--') && text !== '--clear') { await fail('**用法：`/rename <名称>`；`/rename --clear` 恢复默认标题。**'); return; }
-    // Web 改名要求安装管理员：受管理的群只认机器人所有者或群管理员；其它情况与 /repair 同口径（未配置白名单时不开放）。
-    const managed = this.groupManager && event.chatType === 'group'
-      ? await this.groupManager.authorize(config.appId, event.chatId, event.senderOpenId, 'channel_bot.update') : undefined;
-    const auth = managed ? { allowed: managed.allowed && (managed.source === 'owner' || managed.source === 'admin') }
-      : await this.isRepairOperatorAllowed(config, event.senderOpenId, event.chatId);
-    if (!auth.allowed) {
-      await fail('reason' in auth && auth.reason === 'unconfigured' ? '未配置操作白名单时，飞书里不能执行 /rename，请在 Web 上改名。' : '当前账号无权改名：需要机器人所有者或管理员权限（与 Web 改名一致）。');
+    // Web 改名要求安装管理员。飞书里与之对应的是安装管理员在机器人设置里配置的操作白名单（机器人所有者），
+    // 受管理的群也一样；群管理员角色只管本群，不能改全局可见的会话名。未配置白名单时不开放。
+    const restricted = (config.allowedUsers ?? []).length > 0 || (config.allowedEmails ?? []).length > 0;
+    if (!restricted) { await fail('未配置操作白名单时，飞书里不能执行 /rename，请在 Web 上改名。'); return; }
+    if (!event.senderOpenId || !await this.isStaticOperatorAllowed(config, event.senderOpenId, event.chatId)) {
+      await fail('当前账号无权改名：需要是机器人所有者（机器人设置里操作白名单中的人），群管理员不够（与 Web 改名需要安装管理员一致）。');
       return;
     }
     let name: string | null;

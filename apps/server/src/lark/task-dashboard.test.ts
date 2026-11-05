@@ -461,6 +461,9 @@ it('groups a matter by the most actionable visible session and preserves a singl
   const replaced = { ...one, status: 'interrupted', matter: { ...one.matter, superseded: true } };
   expect(groupLarkTasksByMatter([replaced, { ...child, status: 'running' }])[0]?.taskId).toBe('b');
   expect(groupLarkTasksByMatter([{ ...replaced, status: 'reconcile_required', blocked: true }, { ...child, status: 'running' }])[0]?.taskId).toBe('a');
+  // 合并行代表的会话改过名时，名称跟在事项标题前面，/rename 之后 /tasks 能看到。
+  const named = { ...child, matter: { ...child.matter, sessionName: '发布排查' } };
+  expect(groupLarkTasksByMatter([one, named])).toEqual([expect.objectContaining({ taskId: 'b', title: '发布排查 · the matter', sessionCount: 2 })]);
 });
 
 it.each(['waiting', 'blocked'] as const)('shows a superseded source with a current %s report as the matter attention row', status => {
