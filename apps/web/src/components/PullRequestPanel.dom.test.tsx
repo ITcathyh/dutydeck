@@ -101,6 +101,16 @@ describe('开 PR 面板', () => {
     expect(await screen.findByRole('alertdialog', { name: '确认推送并开 PR' })).toBeTruthy();
   });
 
+  it('推送前验证中、验证未通过等人处理都显示出来，原因可见，可以停止跟进', async () => {
+    const verifying: PublicPullRequest = { ...proposal, id: 'pr_3', status: 'verifying', title: 'Verifying' };
+    const attention: PublicPullRequest = { ...proposal, id: 'pr_4', status: 'needs_attention', title: 'Needs human', reason: 'CI 修复第 1 轮推送前验证没有通过（`pnpm test`，失败，退出码 1）。' };
+    mount({ available: true, items: [verifying, attention] });
+    expect(await screen.findByText('推送前验证中 · Verifying')).toBeTruthy();
+    expect(screen.getByText('验证未通过，等人处理 · Needs human')).toBeTruthy();
+    expect(screen.getByText(/推送前验证没有通过/).className).toContain('text-warning');
+    expect(screen.getAllByRole('button', { name: '停止跟进' })).toHaveLength(2);
+  });
+
   it('会话结束后只读：不显示开 PR 和确认入口', async () => {
     mount({ available: true, items: [proposal] }, 'stopped');
     await screen.findByText('等待确认 · Fix login');

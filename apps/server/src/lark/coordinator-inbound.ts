@@ -3027,6 +3027,8 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
           const updated = await pullRequests.cancel(record.sessionId, record.id);
           return { type: 'success', content: updated.status === 'cancelled' ? '已取消，没有推送任何内容。' : updated.status === 'stopped' ? '已停止自动跟进，PR 本身不受影响。' : `当前状态：${updated.reason ?? updated.status}` };
         }
+        // 推送前验证没过的卡上「仍然推送」：权限与确认推送相同（上面同一道门）。
+        if (op === 'force_push') return { type: 'success', content: await pullRequests.forcePush(record.id, { messageId: context.messageId }) };
         if (op === 'answer' && typeof workflow.comment === 'string' && (workflow.choice === 'apply' || workflow.choice === 'ignore')) {
           return { type: 'success', content: await pullRequests.answer(record.id, { commentId: workflow.comment, choice: workflow.choice, cardMessageId: context.messageId }) };
         }
