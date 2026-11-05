@@ -2012,6 +2012,16 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         if (task.turn !== currentTurn) return;
         if (error instanceof RuntimeError && error.code === 'RUNTIME_SHUTTING_DOWN') { cleanup(); return; }
         if (launcherRecovery && !runtimeTaskId) { cleanup(); throw error; }
+        if (runtimeTaskId) {
+          // runtime 已接收这一轮，结果只能以它为准：不判失败、不给重试，保留订阅并交给对账。
+          this.log.warn({ error, taskId: task.id, runtimeTaskId }, '任务已接收，后续步骤失败，结果交给订阅与对账');
+          task.runtimeTaskId = runtimeTaskId;
+          for (const agentEvent of buffered) receive(agentEvent);
+          buffered = [];
+          await this.saveCardTask(task, task.state).catch(saveError => this.log.warn({ error: saveError, runtimeTaskId }, '任务已接收，卡片映射待对账'));
+          this.scheduleReconcile();
+          return;
+        }
         task.events.push({ id: `lark-error-${event.messageId}`, sessionId: session.id, sequence: Number.MAX_SAFE_INTEGER, type: 'error', timestamp: new Date().toISOString(), data: { message: error instanceof Error ? error.message : String(error) } });
         task.state = 'failed';
         await deliverTerminal('failed', false);
