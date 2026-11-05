@@ -34,6 +34,8 @@
  *    **绝不改写、也不拼入**发给 Agent 的 prompt。
  */
 
+import { parseCardActionValue } from './card-elements.js';
+
 // ---------------------------------------------------------------------------
 // 卡片元素（本地声明，保持零依赖）
 // ---------------------------------------------------------------------------
@@ -585,14 +587,8 @@ const helpPageCallbackValue = (page: number): Record<string, string> => ({ dutyd
  * capabilities，越界页码交给渲染侧夹到最后一页。
  */
 export function parseLarkHelpPageValue(value: unknown): { page: number } | undefined {
-  let parsed: unknown = value;
-  if (typeof parsed === 'string') {
-    const text = parsed.trim();
-    if (!text) return undefined;
-    try { parsed = JSON.parse(text); } catch { return undefined; }
-  }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
-  const record = parsed as Record<string, unknown>;
+  const record = parseCardActionValue(value);
+  if (!record) return undefined;
   if (record.dutydeck_help_page !== helpPageAction) return undefined;
   const rawPage = record.page;
   const numericPage = typeof rawPage === 'string' && rawPage.trim() ? Number(rawPage)

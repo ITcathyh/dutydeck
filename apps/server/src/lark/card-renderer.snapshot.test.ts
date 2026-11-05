@@ -103,7 +103,7 @@ describe('renderLarkCardElements 视觉快照', () => {
   });
 
   it('renderLarkTrace markdown 形态（completed）', () => {
-    const markdown = renderLarkTrace(completedEvents, config, true);
+    const markdown = renderLarkTrace(completedEvents, config);
     expect(markdown).toContain('**内部分析**');
     expect(markdown).toContain('Agent 已完成内部分析（推理原文不展示）');
     expect(markdown).toContain('**工具 · Bash** · completed');

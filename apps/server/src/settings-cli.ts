@@ -1,6 +1,6 @@
 import type { SavePluginBinding } from '@dutydeck/shared';
 import type { AgentModelSettingsPatch } from './agent-model-settings.js';
-import { collaborationParticipationModes, groupReplyModes, mentionPolicies, riskControlModes, type GroupBinding, type UpdateGroupBindingInput, type PublicChannelBotFoundation, type UpdateChannelBotInput, type UpdateCollaborationSettingsInput } from '@dutydeck/shared';
+import { collaborationParticipationModes, groupReplyModes, isRecord, mentionPolicies, riskControlModes, type GroupBinding, type UpdateGroupBindingInput, type PublicChannelBotFoundation, type UpdateChannelBotInput, type UpdateCollaborationSettingsInput } from '@dutydeck/shared';
 import type { CollaborationRouteOptions } from './collaboration-routes.js';
 import type { GroupConfigPatch, ManagedGroup, ManagedGroupBot } from './lark/group-management.js';
 import type { SaveLarkConfigRequest } from './lark/routes.js';
@@ -118,15 +118,14 @@ export const groupFields = { ...bindingFields, roleChanges: 'json', ...collabora
 /** 旧的 alarm=<JSON>（平铺的告警订阅）保留一个版本，转成 scenarios.alarm；不列在键表里。 */
 const legacyDutyFields = { alarm: 'json' } satisfies Record<string, FieldKind>;
 const legacyAlarmParams = ['sources', 'levels', 'dedupeHours', 'maxPerHour'];
-const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 
 /** 把旧格式的 alarm 并进 scenarios；requesterId、packVersion 等其余键原样带上，由服务端拒绝。 */
 function scenariosWithLegacyAlarm(scenarios: unknown, alarm: unknown): Record<string, unknown> {
   const invalid = (message: string): never => { throw new SettingsCliError('SETTINGS_VALUE_INVALID', message); };
-  const base = scenarios === undefined ? {} : isObject(scenarios) ? scenarios : invalid('scenarios expects a JSON object keyed by pack id');
+  const base = scenarios === undefined ? {} : isRecord(scenarios) ? scenarios : invalid('scenarios expects a JSON object keyed by pack id');
   if (Object.hasOwn(base, 'alarm')) throw new SettingsCliError('SETTINGS_KEYS_CONFLICT', 'alarm= and scenarios.alarm change the same pack; keep only scenarios={"alarm":...}');
   if (alarm === null) return { ...base, alarm: null };
-  const legacy = isObject(alarm) ? alarm : invalid('alarm expects a JSON object or null');
+  const legacy = isRecord(alarm) ? alarm : invalid('alarm expects a JSON object or null');
   const params = Object.fromEntries(Object.entries(legacy).filter(([key]) => legacyAlarmParams.includes(key)));
   const other = Object.fromEntries(Object.entries(legacy).filter(([key]) => !legacyAlarmParams.includes(key)));
   return { ...base, alarm: { ...other, params } };

@@ -21,7 +21,7 @@ import {
 } from './open-platform-configurator.js';
 import { createLarkCardService, LarkServiceError, type LarkCardService } from './service.js';
 import type { LarkCardElement } from './commands.js';
-import { markdownElement } from './card-elements.js';
+import { markdownElement, parseCardActionValue } from './card-elements.js';
 
 /** 原生斜杠命令写在机器人租户凭据下，与开放平台控制台会话无关。 */
 export type LarkSlashCommandSyncClient = Pick<LarkCardService, 'syncSlashCommands'>;
@@ -301,14 +301,8 @@ const repairCallbackValue = (appId: string) => ({ dutydeck_repair: 'run', app_id
  * - 任何畸形输入返回 undefined，绝不抛异常。
  */
 export function parseRepairCardActionValue(value: unknown): { action: 'run'; appId: string } | undefined {
-  let parsed: unknown = value;
-  if (typeof parsed === 'string') {
-    const text = parsed.trim();
-    if (!text) return undefined;
-    try { parsed = JSON.parse(text); } catch { return undefined; }
-  }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
-  const record = parsed as Record<string, unknown>;
+  const record = parseCardActionValue(value);
+  if (!record) return undefined;
   if (record.dutydeck_repair !== 'run') return undefined;
   const rawAppId = typeof record.app_id === 'string' ? record.app_id
     : typeof record.appId === 'string' ? record.appId : '';

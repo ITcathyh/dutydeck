@@ -1,4 +1,4 @@
-import { clearTaskReportSafely, readSessionTaskReportReference, readSessionTaskReport, taskReportInputSchema, writeTaskReport, type TaskReportInput } from '@dutydeck/shared';
+import { clearTaskReportSafely, readSessionTaskReportReference, readSessionTaskReport, SESSION_NAME_CONFIG_PREFIX, taskReportInputSchema, writeTaskReport, type SessionWorkspace, type TaskReport, type TaskReportInput } from '@dutydeck/shared';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import type { AgentCapabilities, AgentConfig, AgentDriver, AgentEvent, DriverFactory, DriverTranscriptSourceObservation, EventType, EventWindowOptions, NormalizedDriverEvent, PermissionMode, PermissionRequestData, PromptAssemblyData, PromptPart, PromptSourceDiagnostics, PublicTaskRecord, RepositoryBundle, RuntimeControlClaim, Session, SkillDeliveryMetadata, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy, TranscriptSourceObservation, VerificationCommandInput, VerificationResponse, WorkspaceCleanupBlocker, WorkspaceCleanupPreview, WorkspaceCleanupResult, WorkspaceResponse } from '@dutydeck/shared';
@@ -933,7 +933,13 @@ export class DutydeckRuntime {
       return summaries;
     }));
   }
-  async listSessions() { return this.readWorkspace('workspace_list', async () => Promise.all((await this.mutations.wait(() => this.repos.sessions.list())).map(session => this.withSessionMetadata(session)))); }
+  async listSessions() {
+    return this.readWorkspace('workspace_list', async () => {
+      const sessions = await this.mutations.wait(() => this.repos.sessions.list());
+      const metadata = await this.mutations.wait(() => this.sessionMetadataSnapshot());
+      return Promise.all(sessions.map(session => this.withSessionMetadata(session, metadata)));
+    });
+  }
   async getSession(id: string) { return this.readWorkspace(id, async () => { const session = await this.mutations.wait(() => this.repos.sessions.get(id)); return session ? this.withSessionMetadata(session) : undefined; }); }
   async setSessionName(id: string, rawName: string | null): Promise<Session> {
     this.assertReady();
@@ -1204,9 +1210,18 @@ export class DutydeckRuntime {
     return repositoryFingerprint(session.cwd);
   }
 
-  private async withSessionMetadata(session: Session): Promise<Session> {
-    const workspace = await this.mutations.wait(() => this.workspaces.get(session.id));
-    const rawName = await this.mutations.wait(() => this.repos.config.get(sessionNameConfigKey(session.id)));
+  /** 列表用：一次读出全部工作区记录与会话名，代替逐会话读取；配置仓库不支持前缀列举时返回 undefined。 */
+  private async sessionMetadataSnapshot() {
+    const config = this.repos.config;
+    if (!config.list) return undefined;
+    const [workspace, names] = await Promise.all([this.workspaces.snapshot(), config.list(SESSION_NAME_CONFIG_PREFIX)]);
+    return workspace ? { workspace, names: new Map(names.map(row => [row.key, row.value])) } : undefined;
+  }
+
+  private async withSessionMetadata(session: Session, snapshot?: { workspace: (sessionId: string) => Promise<SessionWorkspace | undefined>; names: Map<string, string> }): Promise<Session> {
+    const workspace = await this.mutations.wait(() => snapshot ? snapshot.workspace(session.id) : this.workspaces.get(session.id));
+    const rawName = snapshot ? snapshot.names.get(sessionNameConfigKey(session.id))
+      : await this.mutations.wait(() => this.repos.config.get(sessionNameConfigKey(session.id)));
     const name = rawName && rawName.trim() ? rawName.trim() : undefined;
     return {
       ...session,
@@ -1877,12 +1892,30 @@ export class DutydeckRuntime {
     }
   }
 
-  async getSessionTaskReport(sessionId: string) {
+  async getSessionTaskReport(sessionId: string, latest?: TaskRecord[]) {
     try {
-      const tasks = this.repos.tasks.listRecentBySession
-        ? await this.repos.tasks.listRecentBySession(sessionId) : await this.repos.tasks.listBySession(sessionId);
+      const tasks = latest ?? (this.repos.tasks.listRecentBySession
+        ? await this.repos.tasks.listRecentBySession(sessionId) : await this.repos.tasks.listBySession(sessionId));
       return await readSessionTaskReport(this.repos.config, sessionId, tasks);
     } catch (error) { (this.options.log ?? console).warn({ error, sessionId }, '读取会话收尾报告失败，继续处理'); }
+  }
+
+  /** 批量版 getSessionTaskReport：一次查出各会话最新一条任务再读收尾报告，结果与逐个调用相同；没有报告的会话不在结果里。 */
+  async getSessionTaskReports(sessionIds: string[]): Promise<Map<string, TaskReport>> {
+    const wanted = new Set(sessionIds);
+    let latest: Map<string, TaskRecord> | undefined;
+    if (wanted.size && this.repos.tasks.listLatestPerSession) {
+      try {
+        latest = new Map((await this.repos.tasks.listLatestPerSession()).filter(task => wanted.has(task.sessionId)).map(task => [task.sessionId, task]));
+      } catch { latest = undefined; } // 批量查询失败时退回逐会话读取，告警语义不变。
+    }
+    const reports = new Map<string, TaskReport>();
+    await Promise.all([...wanted].map(async sessionId => {
+      const task = latest?.get(sessionId);
+      const report = await this.getSessionTaskReport(sessionId, latest ? (task ? [task] : []) : undefined);
+      if (report) reports.set(sessionId, report);
+    }));
+    return reports;
   }
 
   async reportCurrentTask(sessionId: string, input: TaskReportInput, expected: { taskId: string; attemptId?: string }) {

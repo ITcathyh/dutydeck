@@ -1,4 +1,5 @@
 import { parseLarkCardActionValue } from './card-actions.js';
+import { parseCardActionValue } from './card-elements.js';
 import { LarkServiceError } from './service.js';
 
 export interface CardActionForwarding {
@@ -26,12 +27,6 @@ export function parseCardActionForwarding(value: unknown): CardActionForwarding 
   return { owner: input.owner.trim(), url: url.toString(), token: input.token,
     ...(legacy !== undefined ? { legacyActions: [...new Set((legacy as string[]).map(action => action.trim()))] } : {}) };
 }
-
-/** 容错解析卡片回调 action.value：字符串按 JSON 解析；结果不是普通对象时返回 undefined。 */
-export const parseCardActionValue = (raw: unknown): Record<string, unknown> | undefined => {
-  if (typeof raw === 'string') { try { raw = JSON.parse(raw); } catch { return undefined; } }
-  return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : undefined;
-};
 
 /** One normalized SDK callback for classification, forwarding, deduplication and execution. */
 export function normalizeCardCallback(raw: any) {

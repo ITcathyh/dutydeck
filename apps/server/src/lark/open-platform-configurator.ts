@@ -1,6 +1,7 @@
 import { larkCommandRegistry } from './commands.js';
 import { isOpenPlatformSessionExpired } from './open-platform-session.js';
-import { asRecord, isRecord, pickString } from './open-platform-values.js';
+import { asRecord, isRecord } from '@dutydeck/shared';
+import { pickString } from './open-platform-values.js';
 import type { LarkSlashCommandDefinition } from './service.js';
 
 /**

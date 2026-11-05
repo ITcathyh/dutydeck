@@ -1,4 +1,5 @@
-import { normalizeCardCallback, cardActionMatchesHandler, cardActionRoute, forwardCardAction, isBuiltinCardAction, parseCardActionForwarding, parseCardActionValue, type CardActionForwarding } from './card-action-forwarding.js';
+import { normalizeCardCallback, cardActionMatchesHandler, cardActionRoute, forwardCardAction, isBuiltinCardAction, parseCardActionForwarding, type CardActionForwarding } from './card-action-forwarding.js';
+import { parseCardActionValue } from './card-elements.js';
 import { LarkServiceError } from './service.js';
 
 export const larkEventTypes = ['card.action.trigger', 'im.message.receive_v1'] as const;

@@ -322,8 +322,10 @@ export function workItemElements(item: WorkItem, requests: WorkItemRequest[] = [
 export class LarkWorkbench {
   private readonly http = createWorkbenchFetch();
   private closed = false;
-  /** 每张工作台卡最近一次心跳 PATCH 的卡面摘要，键是消息 ID；PATCH 失败时带上下次重试的时间。 */
-  private readonly patchedContent = new Map<string, { content: string; retryAt?: number }>();
+  /** 每个目标最近一次心跳 PATCH 的卡（消息 ID 与卡面摘要），键是目标 ID；PATCH 失败时带上下次重试的时间。目标结束时删除。 */
+  private readonly patchedContent = new Map<string, { messageId: string; content: string; retryAt?: number }>();
+  /** 每个目标最近一次处理完、不需要重试的心跳（revision + 待决请求摘要），键是目标 ID：两者都没变就跳过整轮 notify。目标结束时删除。 */
+  private readonly settledNotices = new Map<string, string>();
   /** 飞书明确告知不可再更新的卡（消息太旧等永久错误）：心跳不再 PATCH，进程重启后最多再试一次。 */
   private readonly unupdatableCards = new Set<string>();
   close() { this.closed = true; this.http.close(); }
@@ -448,27 +450,37 @@ export class LarkWorkbench {
     return true;
   }
 
-  /** 找到该目标最近一张工作台卡并原位 PATCH；没有可覆盖的卡时静默跳过，PATCH 失败也不补发新卡（新卡只在 notify 的亮屏剧集里发）。 */
-  private async patchLatestCard(item: WorkItem, config: StoredLarkConfig, requests: WorkItemRequest[]) {
+  private forget(workId: string) {
+    this.patchedContent.delete(workId);
+    this.settledNotices.delete(workId);
+  }
+
+  /**
+   * 找到该目标最近一张工作台卡并原位 PATCH；没有可覆盖的卡时静默跳过，PATCH 失败也不补发新卡（新卡只在 notify 的亮屏剧集里发）。
+   * 返回 false 表示还有待重试的 PATCH。
+   */
+  private async patchLatestCard(item: WorkItem, config: StoredLarkConfig, requests: WorkItemRequest[]): Promise<boolean> {
     const cards = (await this.repos.channelMappings.list(`lark-work-card:${config.appId}`))
       .filter(card => card.sessionId === item.parentSessionId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
     for (const card of cards) {
       let saved: { workId?: string; chatId?: string } | null;
       try { saved = JSON.parse(card.extra ?? 'null'); } catch { continue; }
       if (saved?.workId !== item.id) continue;
-      if (this.unupdatableCards.has(card.externalId)) return;
+      if (this.unupdatableCards.has(card.externalId)) return true;
       // 1 秒心跳会反复走到这里：卡面没变就不再 PATCH；临时性 PATCH 失败（网络抖动、限流）隔 5 分钟再试；永久不可更新（230031 等）在上面已停。
       // 否则停在受阻、失败的目标会每秒调一次飞书接口，直到进程退出。
       const content = digest(JSON.stringify(await this.cardInput(item, config, requests)));
-      const last = this.patchedContent.get(card.externalId);
-      if (last?.content === content && (last.retryAt === undefined || Date.now() < last.retryAt)) return;
+      const last = this.patchedContent.get(item.id);
+      if (last?.messageId === card.externalId && last.content === content && (last.retryAt === undefined || Date.now() < last.retryAt)) return last.retryAt === undefined;
       const patched = await this.patchWorkCard(item, saved.chatId ?? card.externalId, config, card.externalId, requests);
-      this.patchedContent.set(card.externalId, patched ? { content } : { content, retryAt: Date.now() + 300_000 });
-      return;
+      this.patchedContent.set(item.id, { messageId: card.externalId, content, ...(patched ? {} : { retryAt: Date.now() + 300_000 }) });
+      return patched;
     }
+    return true;
   }
 
   async deliver(item: WorkItem) {
+    this.forget(item.id);
     const encoded = await this.repos.config.get(`workbench.target.${item.id}`);
     if (!encoded) {
       if ((await this.runtime.getSession(item.parentSessionId))?.source === 'lark') throw new RuntimeError('WORK_ITEM_ORIGIN_MISSING', '目标的交付位置不可用', 409);
@@ -494,15 +506,15 @@ export class LarkWorkbench {
    * 抢一条亮屏剧集：键不存在，或上一次认领的租约/退避已到期，才算抢到。
    * 抢到的一方负责发；没抢到的一方只原位 PATCH，不推新消息。
    */
-  private async claimNotice(key: string): Promise<{ claimed: boolean; attempts: number }> {
+  private async claimNotice(key: string): Promise<{ claimed: boolean; attempts: number; settled: boolean }> {
     const now = Date.now();
-    if (await this.repos.config.compareAndSet!(key, undefined, noticeSending(1, now))) return { claimed: true, attempts: 1 };
+    if (await this.repos.config.compareAndSet!(key, undefined, noticeSending(1, now))) return { claimed: true, attempts: 1, settled: false };
     const current = await this.repos.config.get(key);
     const pending = parseNoticeClaim(current);
-    // sent / patched 解析不出来，到点前的 sending / failed 也不放行：两者都不该重发。
-    if (!pending || now < pending.readyAt) return { claimed: false, attempts: 0 };
+    // sent / patched 解析不出来，到点前的 sending / failed 也不放行：两者都不该重发。settled 表示剧集键已是终态，不会再重试。
+    if (!pending || now < pending.readyAt) return { claimed: false, attempts: 0, settled: !pending };
     const attempts = pending.attempts + 1;
-    return { claimed: await this.repos.config.compareAndSet!(key, current!, noticeSending(attempts, now)), attempts };
+    return { claimed: await this.repos.config.compareAndSet!(key, current!, noticeSending(attempts, now)), attempts, settled: false };
   }
 
   /** 发出去了才把剧集键落成终态；失败置回带退避的可重试态，让下一轮心跳能把这张卡补出来。 */
@@ -523,10 +535,16 @@ export class LarkWorkbench {
     this.assertOpen();
     const current = await this.work().get(item.parentSessionId, item.id, actorId);
     this.assertOpen();
-    if (['cancelling', 'cancelled', 'completed'].includes(current.status)) return;
+    if (['cancelling', 'cancelled', 'completed'].includes(current.status)) {
+      this.forget(current.id);
+      return;
+    }
     const requests = await this.interactions().list(item.parentSessionId, item.id, actorId);
     this.assertOpen();
     if (item.status === 'running' && !item.steps.some(step => step.status === 'waiting') && !requests.length) return;
+    // 停在受阻、失败、等待的目标每秒都会走到这里：上一轮已处理完且目标与待决请求都没变时，不再读配置、渲染整卡。
+    const settledKey = `${current.revision}\0${digest(JSON.stringify(requests))}`;
+    if (this.settledNotices.get(current.id) === settledKey) return;
     const encoded = await this.repos.config.get(`workbench.target.${item.id}`);
     if (!encoded) return;
     const target = JSON.parse(encoded) as Target;
@@ -541,8 +559,9 @@ export class LarkWorkbench {
     const claim = await this.claimNotice(key);
     if (!claim.claimed) {
       // N2：同一焦点剧集内（含 running→completed、错误文案变化）只原位 PATCH，不推新消息。
-      await this.patchLatestCard(current, config, requests)
-        .catch(error => this.options.log.warn({ error, workId: current.id }, '目标卡片 PATCH 失败'));
+      const patched = await this.patchLatestCard(current, config, requests)
+        .catch(error => { this.options.log.warn({ error, workId: current.id }, '目标卡片 PATCH 失败'); return false; });
+      if (patched && claim.settled) this.settledNotices.set(current.id, settledKey);
       return;
     }
     if (focused) {
@@ -553,9 +572,10 @@ export class LarkWorkbench {
       });
     } else {
       // 离开焦点（如 waiting 已被回答）：只 PATCH 不亮屏，剧集键落终态，后续不再重复判断。
-      await this.patchLatestCard(current, config, requests)
-        .catch(error => this.options.log.warn({ error, workId: current.id }, '目标卡片 PATCH 失败'));
+      const patched = await this.patchLatestCard(current, config, requests)
+        .catch(error => { this.options.log.warn({ error, workId: current.id }, '目标卡片 PATCH 失败'); return false; });
       await this.repos.config.set(key, 'patched');
+      if (patched) this.settledNotices.set(current.id, settledKey);
     }
   }
 
@@ -698,7 +718,7 @@ export class LarkWorkbench {
     void (async () => {
       const patched = !stale && await this.patchWorkCard(updated, context.chatId!, config, context.messageId!, requests);
       // 回调 PATCH 可能比心跳晚到、把卡改回较早的快照；清掉心跳的记录，下一次心跳按当前内容再画一次。
-      this.patchedContent.delete(context.messageId!);
+      this.forget(updated.id);
       if (patched) return;
       await this.send(updated, target, config, fallbackKey, requests);
     })().catch(error => this.options.log.warn({ error, workId: updated.id }, '目标卡片刷新失败'));

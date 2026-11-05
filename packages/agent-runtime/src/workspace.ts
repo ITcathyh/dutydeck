@@ -134,7 +134,17 @@ export class WorkspaceManager {
   }
 
   async get(sessionId: string, recoverCleaning = true): Promise<SessionWorkspace | undefined> {
-    const raw = await this.config.get(workspaceKey(sessionId));
+    return this.decode(sessionId, await this.config.get(workspaceKey(sessionId)), recoverCleaning);
+  }
+
+  /** 一次读出全部工作区记录，返回按会话取用的读取函数（与 get 结果相同）；配置仓库不支持前缀列举时返回 undefined。 */
+  async snapshot(): Promise<((sessionId: string) => Promise<SessionWorkspace | undefined>) | undefined> {
+    if (!this.config.list) return undefined;
+    const rows = new Map((await this.config.list(WORKSPACE_KEY_PREFIX)).map(row => [row.key, row.value]));
+    return sessionId => this.decode(sessionId, rows.get(workspaceKey(sessionId)), true);
+  }
+
+  private async decode(sessionId: string, raw: string | undefined, recoverCleaning: boolean): Promise<SessionWorkspace | undefined> {
     if (!raw) return undefined;
     try {
       const parsed = JSON.parse(raw) as SessionWorkspace;

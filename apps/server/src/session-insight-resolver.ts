@@ -191,6 +191,16 @@ interface VerifiedFile {
   relationship?: FileRelationship;
 }
 
+const toVerifiedFile = (realPath: string, root: RootSet, nativeSessionId: string, identity: JsonIdentity): VerifiedFile => ({
+  realPath,
+  root,
+  nativeSessionId,
+  ...(identity.cwd ? { cwd: identity.cwd } : {}),
+  agentIds: identity.agentIds,
+  sidechain: identity.sidechain,
+  ...(identity.relationship ? { relationship: identity.relationship } : {}),
+});
+
 interface JsonIdentity {
   nativeSessionId?: string;
   cwd?: string;
@@ -998,7 +1008,7 @@ export class SessionInsightResolver {
             discoveryLimited: discovered.limited,
           };
         }
-        if (discovered.files.length === 1 && !discovered.limited) {
+        if (discovered.files.length === 1) {
           return { status: 'matched', files: discovered.files, discoveryLimited: false };
         }
         return {
@@ -1042,30 +1052,14 @@ export class SessionInsightResolver {
   ): Promise<{ status: 'verified'; file: VerifiedFile } | { status: 'rejected'; reason: string }> {
     ctx.checkCancelled();
     const reject = (reason: string) => ({ status: 'rejected' as const, reason });
-    const real = await canonicalRealPath(rawPath);
-    if (!real) return reject('path_unresolvable');
-    const root = claim.roots.find(candidate => isWithinRoot(real, candidate.path));
-    if (!root) return reject('path_outside_approved_root');
-    try {
-      const st = await lstat(real);
-      if (!st.isFile()) return reject('not_regular_file');
-    } catch {
-      return reject('path_unresolvable');
-    }
-    const head = await this.readIdentityHead(real, claim, ctx);
-    if (!head) return reject('content_unreadable');
-    const identity = claim.client === 'claude'
-      ? extractClaudeIdentity(head)
-      : extractCodexFamilyIdentity(head);
-    if (identity.conflictingSessionIds) return reject('content_session_id_conflict');
+    const read = await this.readCandidate(rawPath, claim.roots, claim, ctx);
+    if ('reason' in read) return reject(read.reason);
+    const { identity } = read;
     if (!identity.nativeSessionId) return reject('content_native_id_missing');
     if (claim.nativeSessionId && identity.nativeSessionId !== claim.nativeSessionId) {
       return reject('content_native_id_mismatch');
     }
-    if (identity.cwd && ctx.sessionCwd) {
-      const contentCwd = (await canonicalRealPath(identity.cwd)) ?? resolve(identity.cwd);
-      if (contentCwd !== ctx.sessionCwd) return reject('content_cwd_mismatch');
-    }
+    if (!await this.cwdMatches(identity, ctx)) return reject('content_cwd_mismatch');
     if (claim.client === 'claude') {
       if (claim.stream.kind === 'subagent') {
         if (!identity.sidechain || identity.agentIds.size !== 1
@@ -1076,64 +1070,45 @@ export class SessionInsightResolver {
         if (identity.sidechain) return reject('main_stream_cannot_be_sidechain');
       }
     }
-    return {
-      status: 'verified',
-      file: {
-        realPath: real,
-        root,
-        nativeSessionId: identity.nativeSessionId,
-        ...(identity.cwd ? { cwd: identity.cwd } : {}),
-        agentIds: identity.agentIds,
-        sidechain: identity.sidechain,
-        ...(identity.relationship ? { relationship: identity.relationship } : {}),
-      },
-    };
+    return { status: 'verified', file: toVerifiedFile(read.realPath, read.root, identity.nativeSessionId, identity) };
   }
 
-  private async readIdentityHead(
-    realPath: string,
+  /**
+   * 读候选文件开头并解出身份：真实路径须落在给定根之一、是普通文件，开头能解析出不冲突的身份。
+   * 不满足时返回拒绝原因；head 是开头的完整行，供 marker 匹配。
+   */
+  private async readCandidate(
+    rawPath: string,
+    roots: RootSet[],
     claim: StreamClaim,
     ctx: VerifyContext
-  ): Promise<Array<{ line: number; value: any }> | undefined> {
-    void claim;
-    const raw = await readHeadBytes(realPath, this.limits.identityHeadBytes, ctx.onIdentityRead, ctx.checkCancelled);
-    if (!raw) return undefined;
-    const prefix = completeLinePrefix(raw);
-    const lines = parseJsonlBuffer(prefix);
-    return lines.length > 0 ? lines : undefined;
-  }
-
-  private async inspectCandidate(
-    rawPath: string,
-    root: RootSet,
-    claim: StreamClaim,
-    ctx: VerifyContext,
-    marker: string
-  ): Promise<{ realPath: string; identity: JsonIdentity; markerMatch: boolean } | undefined> {
+  ): Promise<{ realPath: string; root: RootSet; identity: JsonIdentity; head: Buffer } | { reason: string }> {
     const real = await canonicalRealPath(rawPath);
-    if (!real || !isWithinRoot(real, root.path)) return undefined;
+    if (!real) return { reason: 'path_unresolvable' };
+    const root = roots.find(candidate => isWithinRoot(real, candidate.path));
+    if (!root) return { reason: 'path_outside_approved_root' };
     try {
       const st = await lstat(real);
-      if (!st.isFile()) return undefined;
+      if (!st.isFile()) return { reason: 'not_regular_file' };
     } catch {
-      return undefined;
+      return { reason: 'path_unresolvable' };
     }
-    const raw2 = await readHeadBytes(real, this.limits.identityHeadBytes, ctx.onIdentityRead, ctx.checkCancelled);
-    if (!raw2) return undefined;
-    const prefix = completeLinePrefix(raw2);
-    const text = prefix.toString('utf8');
-    const lines = parseJsonlBuffer(prefix);
-    if (lines.length === 0) return undefined;
+    const raw = await readHeadBytes(real, this.limits.identityHeadBytes, ctx.onIdentityRead, ctx.checkCancelled);
+    if (!raw) return { reason: 'content_unreadable' };
+    const head = completeLinePrefix(raw);
+    const lines = parseJsonlBuffer(head);
+    if (lines.length === 0) return { reason: 'content_unreadable' };
     const identity = claim.client === 'claude'
       ? extractClaudeIdentity(lines)
       : extractCodexFamilyIdentity(lines);
-    if (identity.conflictingSessionIds) return undefined;
-    if (identity.cwd && ctx.sessionCwd) {
-      const contentCwd = (await canonicalRealPath(identity.cwd)) ?? resolve(identity.cwd);
-      if (contentCwd !== ctx.sessionCwd) return undefined;
-    }
-    const markerMatch = text.includes(marker);
-    return { realPath: real, identity, markerMatch };
+    if (identity.conflictingSessionIds) return { reason: 'content_session_id_conflict' };
+    return { realPath: real, root, identity, head };
+  }
+
+  /** 内容里记了 cwd 且会话 cwd 已知时，两者须是同一目录。 */
+  private async cwdMatches(identity: JsonIdentity, ctx: VerifyContext): Promise<boolean> {
+    if (!identity.cwd || !ctx.sessionCwd) return true;
+    return ((await canonicalRealPath(identity.cwd)) ?? resolve(identity.cwd)) === ctx.sessionCwd;
   }
 
   /**
@@ -1164,14 +1139,15 @@ export class SessionInsightResolver {
         }
         remainingScans -= 1;
         // eslint-disable-next-line no-await-in-loop
-        const inspected = await this.inspectCandidate(candidate.path, root, claim, ctx, marker);
-        if (!inspected) continue;
+        const inspected = await this.readCandidate(candidate.path, [root], claim, ctx);
+        // eslint-disable-next-line no-await-in-loop
+        if ('reason' in inspected || !await this.cwdMatches(inspected.identity, ctx)) continue;
 
         if (claim.nativeSessionId) {
           if (inspected.identity.nativeSessionId !== claim.nativeSessionId) continue;
         } else {
           // marker 发现：必须 marker 命中且内容读出了有效原生 ID
-          if (!inspected.markerMatch || !inspected.identity.nativeSessionId) continue;
+          if (!inspected.head.toString('utf8').includes(marker) || !inspected.identity.nativeSessionId) continue;
         }
 
         if (claim.stream.kind === 'main' && inspected.identity.sidechain) continue;
@@ -1182,15 +1158,7 @@ export class SessionInsightResolver {
         }
         if (seenPaths.has(inspected.realPath)) continue;
         seenPaths.add(inspected.realPath);
-        out.push({
-          realPath: inspected.realPath,
-          root,
-          nativeSessionId: inspected.identity.nativeSessionId,
-          ...(inspected.identity.cwd ? { cwd: inspected.identity.cwd } : {}),
-          agentIds: inspected.identity.agentIds,
-          sidechain: inspected.identity.sidechain,
-          ...(inspected.identity.relationship ? { relationship: inspected.identity.relationship } : {}),
-        });
+        out.push(toVerifiedFile(inspected.realPath, root, inspected.identity.nativeSessionId, inspected.identity));
       }
       if (remainingScans <= 0) break;
     }
