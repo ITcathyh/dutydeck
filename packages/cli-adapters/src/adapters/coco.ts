@@ -1,5 +1,5 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
-import { delay } from './input-settle.js';
+import { pasteAndSubmit } from './input-settle.js';
 
 /**
  * CoCo（TRAE CLI 的 CoCo 形态）适配器。二进制与 traex 同源，但 TUI 是 Claude
@@ -41,16 +41,9 @@ export function createCocoAdapter(): CliAdapter {
       // 会被判成"一直没结束的 paste burst"：最后那个 Enter 被当成软换行吞掉，
       // 消息永远停在输入框里，无提交也无报错。显式的 START/END 标记让内嵌 \n
       // 保持为内容，随后的 Enter 才是明确的提交。
-      if (backend.pasteText) {
-        (await backend.pasteText(prompt));
-      } else {
-        (await backend.write('\x1b[200~' + prompt + '\x1b[201~'));
-      }
       // 含图片路径时 CoCo 要先做本地文件解析，提交前多给点时间。
       const hasImagePath = /\.(jpe?g|png|gif|webp|svg|bmp)\b/i.test(prompt);
-      await delay(hasImagePath ? 800 : 500);
-      if (backend.sendSpecialKeys) (await backend.sendSpecialKeys('Enter'));
-      else (await backend.write('\r'));
+      await pasteAndSubmit(backend, prompt, { settleMs: hasImagePath ? 800 : 500 });
     },
 
     buildResumeCommand(sessionId: string): string[] {

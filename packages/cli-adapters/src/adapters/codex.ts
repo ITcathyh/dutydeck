@@ -3,7 +3,7 @@ import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
 import { pollScreenReady } from './screen-ready-helper.js';
 import { buildCwdTrustArgs } from './cwd-trust.js';
 import { secretGuardHookCommand, secretGuardToolMatcher } from '@dutydeck/shared/secret-guard';
-import { delay, waitForInputEcho, waitForQuietScreen } from './input-settle.js';
+import { pasteAndSubmit, waitForQuietScreen } from './input-settle.js';
 
 /** Codex 活动态 busy 标记：turn 进行中重绘的状态行。 */
 const CODEX_ACTIVE_BUSY_PATTERN = /Working[^\r\n]{0,160}esc to interrupt/i;
@@ -76,18 +76,9 @@ export function createCodexAdapter(): CliAdapter {
       prompt = prompt.replace(/\r\n?/g, '\n');
       // CLI 还在输出时粘贴会和它的重绘交错：先等屏幕静止，回显稳定后再提交。
       await waitForQuietScreen(backend);
-      const typedAt = Date.now();
       // Codex 把字面 \n 当 Enter，必须 bracketed paste 包住多行内容，
       // 否则一条多行消息会被拆成多个 turn。
-      if (backend.pasteText) {
-        (await backend.pasteText(prompt));
-      } else {
-        (await backend.write('\x1b[200~' + prompt + '\x1b[201~'));
-      }
-      await delay(200);
-      await waitForInputEcho(backend, typedAt);
-      if (backend.sendSpecialKeys) (await backend.sendSpecialKeys('Enter'));
-      else (await backend.write('\r'));
+      await pasteAndSubmit(backend, prompt, { waitForEcho: true });
     },
 
     /**

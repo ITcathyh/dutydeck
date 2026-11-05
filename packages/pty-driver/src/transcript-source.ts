@@ -24,13 +24,14 @@
  *    about an old process. Such resources are recovered by the resolver.
  */
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, lstatSync, opendirSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, realpathSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { setImmediate } from 'node:timers/promises';
-import type {
-  DriverTranscriptSourceObservation,
-  InsightClient,
-  StreamIdentity,
+import {
+  transcriptClientForAdapter,
+  type DriverTranscriptSourceObservation,
+  type InsightClient,
+  type StreamIdentity,
 } from '@dutydeck/shared';
 import { pinnedSessionUuid } from '@dutydeck/cli-adapters';
 import {
@@ -45,30 +46,11 @@ import {
   traeSessionsRoot,
   type CliPathEnv,
 } from './cli-paths.js';
-import { nativeTranscriptObjects, nativeTranscriptScan, parseJsonlObjects, readHead, readTail } from './session-id/fs-scan.js';
+import { listFiles, nativeTranscriptObjects, nativeTranscriptScan, parseJsonlObjects, readHead, readTail } from './session-id/fs-scan.js';
 import { buildSessionMarker, isUsableMarker } from './session-id/marker.js';
 import { lastCodexSessionMarker } from './session-id/codex.js';
 import { codexInputText } from './transcript/input-receipt.js';
 import { userEntryMentionsMarker } from './transcript/claude-content.js';
-
-/** Adapter id → Session Insight log client. Adapter ids identify the on-disk
- *  CLIENT (transcript dialect + data root); a model provider is never a
- *  client. `seed`/`relay` are Claude forks with Claude's layout. Unknown
- *  adapters (grok/opencode/gemini/…) intentionally emit nothing. */
-export function transcriptClientForAdapter(adapterId: string): InsightClient | undefined {
-  switch (adapterId) {
-    case 'codex':
-      return 'codex';
-    case 'claude-code':
-    case 'seed':
-    case 'relay':
-      return 'claude';
-    case 'traex':
-      return 'traex';
-    default:
-      return undefined;
-  }
-}
 
 export interface TranscriptSourceBinding {
   client: InsightClient;
@@ -111,58 +93,10 @@ function markerIdentityProof(marker: string, nativeSessionId: string, verifiedPa
 
 const MARKER_HEAD_BYTES = 256 * 1024;
 const MAX_MARKER_CANDIDATES = 40;
-/** Hostile-tree guard; mirrors session-id/fs-scan's entry budget. */
-const MAX_ENUMERATED_ENTRIES = 20_000;
-
-/** A bounded file enumeration that REPORTS truncation. The shared walkFiles
- *  silently returns when its entry cap is hit, which a uniqueness claim cannot
- *  tolerate; this variant stops once it has one match past the candidate
- *  budget (or hits the entry budget) and flags `truncated` so callers never
- *  call the remainder exhaustive. Only plain files are returned
- *  (Dirent.isFile — symlinks are not followed). */
-function enumerateCandidates(
-  root: string,
-  maxDepth: number,
-  accept: (name: string) => boolean,
-): { paths: string[]; truncated: boolean } {
-  const paths: string[] = [];
-  let truncated = false;
-  let visited = 0;
-  let rootStat;
-  try {
-    if (!existsSync(root)) return { paths, truncated };
-    rootStat = statSync(root);
-  } catch {
-    return { paths, truncated };
-  }
-  if (!rootStat.isDirectory()) return { paths, truncated };
-  const stack: Array<{ dir: string; depth: number }> = [{ dir: root, depth: 0 }];
-  outer: while (stack.length > 0) {
-    const { dir, depth } = stack.pop()!;
-    let directory: ReturnType<typeof opendirSync>;
-    try {
-      directory = opendirSync(dir);
-    } catch {
-      continue;
-    }
-    try {
-      let entry: import('node:fs').Dirent | null;
-      while ((entry = directory.readSync()) !== null) {
-        if (++visited > MAX_ENUMERATED_ENTRIES) { truncated = true; break outer; }
-        const full = join(dir, entry.name);
-        if (entry.isDirectory()) {
-          if (depth < maxDepth) stack.push({ dir: full, depth: depth + 1 });
-        } else if (entry.isFile() && accept(entry.name)) {
-          paths.push(full);
-          if (paths.length > MAX_MARKER_CANDIDATES) { truncated = true; break outer; }
-        }
-      }
-    } finally {
-      try { directory.closeSync(); } catch { /* already closed */ }
-    }
-  }
-  return { paths, truncated };
-}
+/** Bounded enumeration that reports truncation: a uniqueness claim must never
+ *  call a partial list exhaustive. Only plain files (symlinks are not followed). */
+const enumerateCandidates = (root: string, maxDepth: number, accept: (name: string) => boolean) =>
+  listFiles(root, { maxDepth, accept, maxFiles: MAX_MARKER_CANDIDATES });
 
 /**
  * Confirm that a file exists, is a regular file, and its realpath resides

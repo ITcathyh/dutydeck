@@ -167,6 +167,7 @@ export class IdleDetector {
   private busyCallback: (() => void) | null = null;
   private completionPattern: RegExp | undefined;
   private idleToBusyPattern: RegExp | undefined;
+  /** Global copies built once for lastMatchIndex; the caller's RegExp objects are never mutated. */
   private staticBusyPattern: RegExp | undefined;
   private staticBusyClearPattern: RegExp | undefined;
   private busyTransitionArmed = false;
@@ -185,8 +186,8 @@ export class IdleDetector {
   constructor(patterns: IdlePatterns) {
     this.completionPattern = patterns.completionPattern;
     this.idleToBusyPattern = patterns.idleToBusyPattern;
-    this.staticBusyPattern = patterns.staticBusyPattern;
-    this.staticBusyClearPattern = patterns.staticBusyClearPattern;
+    this.staticBusyPattern = globalCopy(patterns.staticBusyPattern);
+    this.staticBusyClearPattern = globalCopy(patterns.staticBusyClearPattern);
     this.readyPattern = patterns.readyPattern;
   }
 
@@ -428,10 +429,14 @@ export class IdleDetector {
   }
 }
 
-/** Find the LAST match index of a regex in a string, or -1. Handles
- *  non-global regexes by cloning with the g flag. */
-function lastMatchIndex(re: RegExp, s: string): number {
-  const g = new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g');
+/** A private copy of `re` with the g flag, so lastMatchIndex can drive lastIndex. */
+function globalCopy(re: RegExp | undefined): RegExp | undefined {
+  return re && new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g');
+}
+
+/** Find the LAST match index of a global regex (see globalCopy) in a string, or -1. */
+function lastMatchIndex(g: RegExp, s: string): number {
+  g.lastIndex = 0;
   let last = -1;
   let m: RegExpExecArray | null;
   while ((m = g.exec(s)) !== null) {

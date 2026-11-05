@@ -2,7 +2,7 @@ import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
 import { pollScreenReady } from './screen-ready-helper.js';
 import { buildCwdTrustArgs } from './cwd-trust.js';
-import { delay } from './input-settle.js';
+import { pasteAndSubmit } from './input-settle.js';
 import { isTraexBusyScreen } from './traex-footer.js';
 
 /**
@@ -130,14 +130,7 @@ export function createTraexAdapter(): CliAdapter {
       await pollScreenReady(backend, 'TraeX', { busyPattern: TRAEX_ACTIVE_BUSY_PATTERN });
       prompt = prompt.replace(/\r\n?/g, '\n');
       // 与 Codex 相同的 bracketed-paste 策略：多行消息不能被内嵌 \n 拆成多个 turn。
-      if (backend.pasteText) {
-        (await backend.pasteText(prompt));
-      } else {
-        (await backend.write('\x1b[200~' + prompt + '\x1b[201~'));
-      }
-      await delay(200);
-      if (backend.sendSpecialKeys) (await backend.sendSpecialKeys('Enter'));
-      else (await backend.write('\r'));
+      await pasteAndSubmit(backend, prompt);
     },
 
     /** 与 codex 同源：自己铸 rollout id。收到 dutydeck 的 `ses_<uuid>` 说明反查

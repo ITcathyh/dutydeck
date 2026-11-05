@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { AgentConfig, DriverTranscriptSourceObservation, InsightClient } from '@dutydeck/shared';
+import { transcriptClientForAdapter, type AgentConfig, type DriverTranscriptSourceObservation, type InsightClient } from '@dutydeck/shared';
 import { pinnedSessionUuid, type CliAdapter } from '@dutydeck/cli-adapters';
 import { PtyBackend, TmuxBackend } from '@dutydeck/session-backends';
 import { PtyCliDriver } from './driver.js';
@@ -13,7 +13,6 @@ import * as transcriptSource from './transcript-source.js';
 import {
   TranscriptSourceTracker,
   freezeTranscriptSource,
-  transcriptClientForAdapter,
   verifyLaunchedTranscript,
   verifyLaunchedTranscriptAsync,
 } from './transcript-source.js';

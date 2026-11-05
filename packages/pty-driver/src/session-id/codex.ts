@@ -96,11 +96,6 @@ function findSessionIdsInHistory(historyPath: string, markers: Marker[]): Array<
   return matches;
 }
 
-/** Newest submit carrying this marker. Raw legacy IDs must occupy the whole input. */
-export function findSessionIdInHistory(historyPath: string, marker: string, exactText = false): string | undefined {
-  return findSessionIdsInHistory(historyPath, [{ text: marker, exactText }])[0];
-}
-
 /** Scan each rollout once for every format, retaining global marker priority. */
 function findSessionIdsInRollouts(
   sessionsRoot: string,
@@ -163,18 +158,6 @@ function findSessionIdsInRollouts(
     if (matches[0]) break;
   }
   return matches;
-}
-
-/** Scan newest-first rollouts for one marker, gated by the first metadata cwd. */
-export function findSessionIdInRollouts(
-  sessionsRoot: string,
-  marker: string,
-  cwd: string,
-  env?: CliPathEnv,
-  inputText: (entry: any, threadId?: string) => string | undefined = codexInputText,
-  exactText = false,
-): string | undefined {
-  return findSessionIdsInRollouts(sessionsRoot, [{ text: marker, exactText }], cwd, env, inputText)[0];
 }
 
 function codexFamilyResolve(
