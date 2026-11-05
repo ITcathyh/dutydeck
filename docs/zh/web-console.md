@@ -76,6 +76,7 @@ dutydeck memory manage project-unbind --session ses_web
 - 飞书结果卡的「改动 N 个文件 +A −D · 查看改动」链接 14 天有效，只能看这一轮的改动。
 - 只有在 git 仓库里、由 runtime 正常执行的轮次才记录改动。文件与符号链接互换时，差异仍归属正确文件。仓库里没被忽略的未跟踪文件太多（单个超过 20 MiB、合计超过 50 MiB 或超过 2000 个）时不记录，结果卡上没有改动行，服务日志写原因——建议把大文件和构建目录加进 `.gitignore`。
 - 「查看改动」页可以逐行评论：登录 Web 的用户提交后直接发给 Agent；只有分享链接的人提交后，会在飞书原话题出一张确认卡，有权限的人点「交给 Agent 修改」才会执行。提交期间新增或修改的评论草稿会保留。
+- 「查看改动」页按“源码、测试、文档”的顺序排文件，并在补丁总量（1 MiB）用完时先省略靠后的文档和测试，而不是源码。锁文件（固定名单：`package-lock.json`、`npm-shrinkwrap.json`、`yarn.lock`、`pnpm-lock.yaml`、`bun.lock`、`bun.lockb`、`deno.lock`、`Cargo.lock`、`go.sum`、`poetry.lock`、`uv.lock`、`Pipfile.lock`、`composer.lock`、`Gemfile.lock`、`Podfile.lock`、`pubspec.lock`、`flake.lock`、`packages.lock.json`、`gradle.lockfile`）和仓库 `.gitattributes` 里标了 `linguist-generated` 的文件默认折叠：排在最后，只显示增删行数和“已折叠”说明，不读正文、不占用 1 MiB 预算；点「展开查看」才按需读取这个文件（单个文件最多 1 MiB，超过只提示改动太大）。展开后的行不能逐行评论。不按路径猜生成物，`dist/`、`.min.js` 没有 `.gitattributes` 标记就照常显示。飞书结果卡只有改动摘要行，不受影响。
 - 轮换分享密钥 `dutydeck auth share-key rotate` 后，已发出的链接全部失效。
 
 ## 4. 用量与成本

@@ -3,7 +3,7 @@ import { cp, mkdir, mkdtemp, readFile, rm, truncate, writeFile } from 'node:fs/p
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import type { CiPipelineStatus, CiProvider, CiReviewComment, Session, TaskRecord } from '@dutydeck/shared';
+import type { CiPipelineStatus, CiProvider, CiReviewComment, Session, TaskRecord, VerificationResponse } from '@dutydeck/shared';
 import { createRepositories, executionTaskId } from '@dutydeck/storage';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import { CiProviderRegistry } from './ci-providers.js';
@@ -64,7 +64,8 @@ async function fixture(options: { withoutPullRequests?: boolean; log?: { warn: (
         dispatches.push({ id, prompt, actorId });
       }
       return { id, status: tasks.get(id)!.status };
-    })
+    }),
+    getVerifications: vi.fn(async () => state.verifications)
   };
   const state = {
     pipeline: { state: 'pending', runs: [] } as CiPipelineStatus,
@@ -73,6 +74,8 @@ async function fixture(options: { withoutPullRequests?: boolean; log?: { warn: (
     /** getPullRequest 额外给出的源分支等信息（认领已有 PR 用）。 */
     prInfo: {} as Record<string, string>,
     comments: [] as CiReviewComment[],
+    /** 会话的验证记录，按开始时间倒序（和 runtime.getVerifications 一致）。 */
+    verifications: [] as VerificationResponse[],
     posted: [] as string[],
     created: [] as unknown[]
   };
@@ -222,6 +225,48 @@ describe('开 PR：确认清单与推送', () => {
     expect(await f.checkout()).toEqual(before);
     expect(await f.service.get(proposal.id)).toMatchObject({ status: 'open', headSha: pushed, pullRequest: { number: 7 } });
     expect(f.notices.at(-1)).toMatchObject({ title: 'PR #7 已开出', actions: [{ label: '停止跟进', value: { dutydeck_pr: proposal.id, op: 'stop' } }] });
+  });
+
+  it('PR 描述写最近一次验证记录和会话编号；没有记录时写未验证，只写脱敏命令、结果、时间、是否过期', async () => {
+    const f = await fixture();
+    await f.turn('task_user_1', () => f.write('src/login.ts', 'export const login = true;\n'));
+    const none = await f.service.prepare(f.session.id, { title: 'No verification' }, 'ou_owner');
+    expect((await f.service.get(none.id))!.body.split('\n').slice(-2)).toEqual(['验证：未验证', 'DutyDeck 会话：ses_pr']);
+
+    const record = (over: Partial<VerificationResponse>): VerificationResponse => ({
+      schemaVersion: 1, revision: 1, id: 'ver_1', sessionId: 'ses_pr', command: 'pnpm test', cwd: '/private/work/dir', status: 'passed', startedAt: '2026-10-13T07:50:00.000Z',
+      completedAt: '2026-10-13T07:51:00.000Z', output: 'SECRET-OUTPUT', outputTruncated: false, stale: false, ...over
+    });
+    f.state.verifications = [
+      record({ id: 'ver_3', status: 'running', command: 'pnpm e2e', startedAt: '2026-10-13T07:59:00.000Z', completedAt: undefined }),
+      record({ id: 'ver_2', status: 'failed', command: 'API_KEY=sk-secret-value-1234567890 pnpm test `x`', startedAt: '2026-10-13T07:55:00.000Z', completedAt: '2026-10-13T07:56:00.000Z', stale: true, staleReason: 'code_changed' }),
+      record({ id: 'ver_1' })
+    ];
+    const failed = (await f.service.get((await f.service.prepare(f.session.id, { title: 'Failed verification' }, 'ou_owner')).id))!;
+    const line = failed.body.split('\n').find(item => item.startsWith('验证：'))!;
+    expect(line).toMatch(/，失败，2026-10-13T07:56:00\.000Z，验证早于最后改动$/);
+    expect(line).not.toContain('sk-secret-value');
+    expect(line).not.toContain('pnpm e2e');
+    expect(line.match(/`/g)).toHaveLength(2);
+    expect(failed.body).not.toContain('SECRET-OUTPUT');
+    expect(failed.body).not.toContain('/private/work/dir');
+    expect(failed.body.split('\n').at(-1)).toBe('DutyDeck 会话：ses_pr');
+
+    f.state.verifications = [record({ id: 'ver_1' })];
+    const passed = (await f.service.get((await f.service.prepare(f.session.id, { title: 'Passed verification' }, 'ou_owner')).id))!;
+    expect(passed.body).toContain('验证：`pnpm test`，通过，2026-10-13T07:51:00.000Z\n');
+    expect(passed.body).not.toContain('验证早于最后改动');
+  });
+
+  it('Dutydeck 创建的提交带 Dutydeck-Session trailer，不再重复写会话说明，author 和 committer 不变', async () => {
+    const f = await fixture();
+    await f.turn('task_user_1', () => f.write('src/login.ts', 'export const login = true;\n'));
+    const proposal = await f.service.prepare(f.session.id, { title: 'Named' }, 'ou_owner');
+    await f.service.confirm(proposal.id, 'ou_owner');
+    await f.service.idle();
+    expect(await f.remoteGit('log', '-1', '--format=%B', proposal.branch)).toBe('Named\n\nDutydeck-Session: ses_pr');
+    expect((await f.remoteGit('log', '-1', '--format=%(trailers:only,unfold)', proposal.branch)).split('\n').filter(Boolean)).toEqual(['Dutydeck-Session: ses_pr']);
+    expect(await f.remoteGit('log', '-1', '--format=%an <%ae>|%cn <%ce>', proposal.branch)).toBe('User <user@example.com>|User <user@example.com>');
   });
 
   it('重复和并发确认只推送一次、只开一个 PR', async () => {
@@ -492,6 +537,17 @@ describe('PR 跟进：CI 失败', () => {
     const { files: _files, status: _status, ...rest } = await f.checkout();
     const { files: _before, status: _beforeStatus, ...expected } = before;
     expect(rest).toEqual(expected);
+  });
+
+  it('跟进轮次的提交同样只带 Dutydeck-Session trailer', async () => {
+    const f = await fixture();
+    const pr = await f.open();
+    f.state.pipeline = failed(pr.headSha!);
+    await f.poll();
+    await f.finishLatest(() => f.write('app.ts', 'export const a = 11;\n'), '修好了');
+    const head = (await f.service.get(pr.id))!.headSha!;
+    expect(head).not.toBe(pr.headSha);
+    expect(await f.remoteGit('log', '-1', '--format=%B', head)).toBe('Fix CI (DutyDeck round 1)\n\nDutydeck-Session: ses_pr');
   });
 
   it('同一个错误修完又出现就停；远端分支被别人推过时不覆盖', async () => {

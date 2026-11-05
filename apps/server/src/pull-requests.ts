@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
-  isTerminalTaskStatus, RuntimeError, wrapUntrusted,
+  isTerminalTaskStatus, redactCredentialText, RuntimeError, wrapUntrusted,
   type CiFailureLog, type CiProvider, type CiRepository, type CiReviewComment, type PublicPullRequest, type PullRequestAvailability,
-  type PullRequestStatus, type RepositoryBundle, type Session, type TaskRecord
+  type PullRequestStatus, type RepositoryBundle, type Session, type TaskRecord, type VerificationResponse
 } from '@dutydeck/shared';
 import { executionTaskId } from '@dutydeck/storage';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
@@ -11,7 +11,7 @@ import { changeRequestLabel, resolveCiHead, type CiProviderRegistry } from './ci
 import { codeBlock, errorMessage, isRunnable, iso, short, SingleFlight, withTimeout } from './ci-common.js';
 import { ciFixLimits, failureFingerprint, type CiNotice } from './ci-webhook.js';
 import {
-  assertClaimedPushTarget, isSafeBranchName, assertPushTarget, buildCommit, defaultBranch, diffTrees, fetchBranches, git, localCommits, originPushUrl, pushBranch, remoteBranchSha, remoteUrlLabel, sameEntry, treeEntries,
+  assertClaimedPushTarget, isSafeBranchName, assertPushTarget, buildCommit, defaultBranch, diffTrees, fetchBranches, git, localCommits, originPushUrl, pushBranch, remoteBranchSha, remoteUrlLabel, sameEntry, treeEntries, withTrailers,
   type PathContent, type TreeEntry
 } from './pull-request-git.js';
 import { readTaskOutput } from './task-results.js';
@@ -106,7 +106,7 @@ type Stored = { key: string; raw: string; value: PullRequestRecord };
 
 export interface PullRequestServiceOptions {
   repositories: Pick<RepositoryBundle, 'config' | 'tasks'> & { execution: Pick<RepositoryBundle['execution'], 'getTaskExecution' | 'getAttemptEvents' | 'getAcceptedTask'> };
-  runtime: Pick<DutydeckRuntime, 'getSession' | 'dispatch'>;
+  runtime: Pick<DutydeckRuntime, 'getSession' | 'dispatch' | 'getVerifications'>;
   providers: CiProviderRegistry;
   prepareDelivery?: (sessionId: string, id: string) => Promise<void>;
   notify?: (sessionId: string, id: string, notice: CiNotice) => Promise<string | undefined>;
@@ -114,6 +114,16 @@ export interface PullRequestServiceOptions {
   readTaskOutput?: (sessionId: string, taskId: string) => string | undefined;
   clock?: () => Date;
   log?: { warn: (...args: any[]) => void };
+}
+
+const verificationStatusLabels: Record<VerificationResponse['status'], string> = {
+  running: '运行中', passed: '通过', failed: '失败', timed_out: '超时', interrupted: '被中断', unverified: '结果未确认'
+};
+
+/** 只写脱敏后的命令、结果、时间和是否过期：不写输出、不写目录。命令可能带着环境变量里的口令，压成一行，反引号换掉，写进 PR 描述也跑不出行内代码。 */
+function verificationLine(record: VerificationResponse) {
+  const command = oneLine(redactCredentialText(record.command), 200).replaceAll('`', "'");
+  return `\`${command}\`，${verificationStatusLabels[record.status]}，${record.completedAt ?? record.startedAt}${record.stale ? '，验证早于最后改动' : ''}`;
 }
 
 const oneLine = (value: string, max: number) => value.replace(/\s+/g, ' ').trim().slice(0, max);
@@ -326,7 +336,8 @@ export class PullRequestService {
       files.length ? `改动 ${files.length} 个文件（+${files.reduce((sum, file) => sum + file.additions, 0)} −${files.reduce((sum, file) => sum + file.deletions, 0)}）：` : '没有未提交的改动，只包含下面的本地提交。',
       ...files.slice(0, 50).map(file => `- \`${file.path}\`（+${file.additions} −${file.deletions}）`),
       ...(files.length > 50 ? [`- 另有 ${files.length - 50} 个文件`] : []),
-      ...(local.commits.length ? ['', `另含本地提交 ${local.commits.length} 个：`, ...local.commits.slice(0, 20).map(commit => `- ${commit.sha.slice(0, 8)} ${commit.subject}`)] : [])
+      ...(local.commits.length ? ['', `另含本地提交 ${local.commits.length} 个：`, ...local.commits.slice(0, 20).map(commit => `- ${commit.sha.slice(0, 8)} ${commit.subject}`)] : []),
+      '', ...await this.provenance(sessionId)
     ].join('\n');
     const now = this.clock().getTime();
     await this.options.prepareDelivery?.(sessionId, id);
@@ -339,6 +350,15 @@ export class PullRequestService {
     });
     if (!await this.store().compareAndSet(recordKey(id), undefined, JSON.stringify(record))) throw new RuntimeError('PR_CONFLICT', 'PR 记录编号冲突，请重试。', 409);
     return this.toPublic(record);
+  }
+
+  /** PR 描述末尾的来源：本会话最近一次验证记录（没有写「未验证」）和会话编号。纯文本，不放分享链接。 */
+  private async provenance(sessionId: string): Promise<string[]> {
+    let records: VerificationResponse[] = [];
+    try { records = await this.options.runtime.getVerifications(sessionId); } catch { /* 读不到验证记录按未验证写，不拦住开 PR */ }
+    // 列表按开始时间倒序；还在跑的没有结果，不算。
+    const latest = records.find(record => record.status !== 'running');
+    return [`验证：${latest ? verificationLine(latest) : '未验证'}`, `DutyDeck 会话：${sessionId}`];
   }
 
   /** 确认卡（或认领）上写的是 repository，代码实际推到 origin 的推送地址，两者必须是同一个仓库。返回带账号口令的地址。 */
@@ -534,7 +554,7 @@ export class PullRequestService {
       assertPushTarget(value.branch, value.target);
       const remote = await confirmedPushUrl(cwd, value).catch(error => { throw new Error(`${errorMessage(error)}。请重新发起。`); });
       if (await remoteBranchSha(cwd, remote, value.branch)) throw new Error(`远端已有分支 ${value.branch}，没有推送。`);
-      const commit = await buildCommit(cwd, value.baseSha, value.contents, `${value.title}\n\n由 DutyDeck 会话 ${value.sessionId} 生成。\n`);
+      const commit = await buildCommit(cwd, value.baseSha, value.contents, withTrailers(value.title, value.sessionId));
       await pushBranch(cwd, remote, commit, value.branch, value.target);
       const provider = this.options.providers.get(value.provider);
       if (!provider?.createPullRequest) throw new Error(`分支 ${value.branch} 已推送，但 CI 插件已不可用，没有开 PR。`);
@@ -876,7 +896,7 @@ export class PullRequestService {
       try {
         const remote = await confirmedPushUrl(session.cwd, value);
         if (await remoteBranchSha(session.cwd, remote, value.branch) !== headSha) throw new Error(`远端 ${value.branch} 已不是${value.claimed ? '上次核对的' : ' DutyDeck 推送的'} ${short(headSha)}（有人推送过或分支已删除），没有推送`);
-        headSha = await buildCommit(session.cwd, headSha, changes.contents, `${current.kind === 'ci' ? 'Fix CI' : 'Address review comments'} (DutyDeck round ${current.round})\n`);
+        headSha = await buildCommit(session.cwd, headSha, changes.contents, withTrailers(`${current.kind === 'ci' ? 'Fix CI' : 'Address review comments'} (DutyDeck round ${current.round})`, value.sessionId));
         await pushBranch(session.cwd, remote, headSha, value.branch, value.target, value.claimed === true);
       } catch (error) { await this.fail(value.id, `${name}的改动推送失败：${errorMessage(error)}，已停止自动跟进。`, ['open']); return; }
     }

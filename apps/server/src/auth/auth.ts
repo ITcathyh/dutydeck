@@ -350,8 +350,8 @@ export class LoginThrottle {
 /** 分享页能读的接口：单个会话的详情、事件、任务和实时流，只读 */
 const SHARED_SESSION_READ_ROUTES = new Set(['/api/sessions/:id', '/api/sessions/:id/events', '/api/sessions/:id/history', '/api/sessions/:id/tasks', '/api/sessions/:id/stream']);
 
-/** 「查看改动」页能用的接口：这一轮 diff 的只读视图，和把行评论转成飞书确认卡（不直接给 Agent 下指令）。 */
-const SHARED_TURN_DIFF_ROUTES = new Map([['/api/sessions/:id/tasks/:taskId/diff', ['GET', 'HEAD']], ['/api/sessions/:id/tasks/:taskId/diff/comments', ['POST']]]);
+/** 「查看改动」页能用的接口：这一轮 diff 的只读视图（含折叠文件按需读正文），和把行评论转成飞书确认卡（不直接给 Agent 下指令）。 */
+const SHARED_TURN_DIFF_ROUTES = new Map([['/api/sessions/:id/tasks/:taskId/diff', ['GET', 'HEAD']], ['/api/sessions/:id/tasks/:taskId/diff/file', ['GET', 'HEAD']], ['/api/sessions/:id/tasks/:taskId/diff/comments', ['POST']]]);
 
 /** 上述路由且查询串带着为路由里这个会话（「查看改动」还要加上这个任务）签发的 token */
 async function isSharedSessionRead(request: FastifyRequest, options: AuthMiddlewareOptions): Promise<boolean> {

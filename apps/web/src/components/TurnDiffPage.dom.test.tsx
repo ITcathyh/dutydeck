@@ -50,6 +50,47 @@ describe('TurnDiffPage', () => {
     expect(screen.queryByRole('link', { name: '回到任务' })).toBeNull();
   });
 
+  it('锁文件和生成物折叠显示统计与折叠原因，不提示截断；点展开才按需读正文，展开后的行不能评论', async () => {
+    vi.spyOn(api, 'turnDiff').mockResolvedValue({
+      ...diff, truncated: false, summary: { files: 3, additions: 30_002, deletions: 1 }, files: [
+        diff.files[0]!,
+        { path: 'package-lock.json', status: 'modified', additions: 30_000, deletions: 0, placeholder: 'folded_lockfile', hunks: [] },
+        { path: 'gen/api.ts', status: 'added', additions: 1, deletions: 0, placeholder: 'folded_generated', hunks: [] }
+      ]
+    });
+    const turnDiffFile = vi.spyOn(api, 'turnDiffFile').mockResolvedValue({
+      path: 'gen/api.ts', status: 'added', additions: 1, deletions: 0, hunks: [{ header: '@@ -0,0 +1 @@', lines: [{ kind: 'add', newLine: 1, text: 'export const generated = 1;' }] }]
+    });
+    renderPage();
+    expect(await screen.findByText('已折叠：锁文件，只显示增删行数。')).toBeTruthy();
+    expect(screen.getByText(/已折叠：生成物/)).toBeTruthy();
+    expect(screen.getByText('+30000')).toBeTruthy();
+    expect([...document.querySelectorAll('details')].map(file => file.open)).toEqual([true, false, false]);
+    expect(screen.queryByText('改动太多，只展开了前面的文件，其余文件只列出名字。')).toBeNull();
+    expect(turnDiffFile).not.toHaveBeenCalled();
+
+    const buttons = screen.getAllByRole('button', { name: '展开查看' });
+    expect(buttons).toHaveLength(2);
+    fireEvent.click(buttons[1]!);
+    expect(await screen.findByText('export const generated = 1;')).toBeTruthy();
+    expect(turnDiffFile).toHaveBeenCalledWith('ses_1', 'task_1', 'gen/api.ts');
+    expect(screen.getAllByRole('button', { name: '展开查看' })).toHaveLength(1);
+    expect((screen.getByRole('button', { name: '评论 gen/api.ts 第 1 行' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: '评论 src/app.ts 第 2 行（改动前）' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('展开折叠文件失败时在文件下面说明原因，可以再试', async () => {
+    vi.spyOn(api, 'turnDiff').mockResolvedValue({
+      ...diff, truncated: false, summary: { files: 1, additions: 3, deletions: 0 },
+      files: [{ path: 'package-lock.json', status: 'modified', additions: 3, deletions: 0, placeholder: 'folded_lockfile', hunks: [] }]
+    });
+    vi.spyOn(api, 'turnDiffFile').mockRejectedValue(new ApiError('这一轮的改动记录已经不在仓库里了', 'TURN_DIFF_EXPIRED', 410));
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: '展开查看' }));
+    expect(await screen.findByText('展开失败：这一轮的改动记录已经不在仓库里了')).toBeTruthy();
+    expect(screen.getByRole('button', { name: '展开查看' })).toBeTruthy();
+  });
+
   it('可以在几行上各写一条评论，一起提交；分享链接提交后说明要等飞书里确认', async () => {
     vi.spyOn(api, 'turnDiff').mockResolvedValue(diff);
     const submit = vi.spyOn(api, 'submitTurnDiffComments').mockResolvedValue({ delivery: 'lark_confirmation' });

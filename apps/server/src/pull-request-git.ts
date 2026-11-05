@@ -69,6 +69,9 @@ export async function diffTrees(repo: GitRepo, before: string, after: string): P
   return changes;
 }
 
+/** 在提交说明末尾追加 git trailer `Dutydeck-Session: <会话编号>`（单独一段，`git interpret-trailers` 能解析）。不碰 git author / committer。 */
+export const withTrailers = (message: string, sessionId: string) => `${message.trimEnd()}\n\nDutydeck-Session: ${sessionId}\n`;
+
 /** 树里这些路径的模式和 blob；不在树里的路径不出现在结果里。 */
 export async function treeEntries(repo: GitRepo, tree: string, paths: string[]): Promise<Map<string, TreeEntry>> {
   const entries = new Map<string, TreeEntry>();

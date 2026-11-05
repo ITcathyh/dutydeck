@@ -43,18 +43,23 @@ export type TurnDiffHunk = { header: string; lines: TurnDiffLine[] };
 export type TurnDiffFile = {
   path: string; oldPath?: string; status: 'added' | 'deleted' | 'modified' | 'renamed';
   additions: number; deletions: number;
-  /** binary：二进制文件；too_large：单个文件超过上限；omitted：整页超过上限后没有展开的文件。 */
-  placeholder?: 'binary' | 'too_large' | 'omitted';
+  /**
+   * binary：二进制文件；too_large：单个文件超过上限；omitted：整页超过上限后没有展开的文件；
+   * folded_lockfile / folded_generated：锁文件、.gitattributes 标了 linguist-generated 的文件默认折叠，只给统计，
+   * 不读正文、不占整页预算；要看时按文件单独读（readTurnDiffFile）。
+   */
+  placeholder?: 'binary' | 'too_large' | 'omitted' | 'folded_lockfile' | 'folded_generated';
   hunks: TurnDiffHunk[];
 };
 export type TurnDiffView = { sessionId: string; taskId: string; summary: TurnDiffSummary; files: TurnDiffFile[]; truncated: boolean; finishedAt?: string };
 
 const turnDiffKey = (sessionId: string, taskId: string) => `turn_diff.${sessionId}.${taskId}`;
 
-function git(args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; timeout: number }): Promise<string> {
+function git(args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; timeout: number; input?: string }): Promise<string> {
   return new Promise((resolve, reject) => {
-    execFile('git', args, { cwd: options.cwd, env: options.env, timeout: Math.max(1, options.timeout), maxBuffer: 16 * 1024 * 1024, killSignal: 'SIGKILL' },
+    const child = execFile('git', args, { cwd: options.cwd, env: options.env, timeout: Math.max(1, options.timeout), maxBuffer: 16 * 1024 * 1024, killSignal: 'SIGKILL' },
       (error, stdout) => error ? reject(error) : resolve(stdout));
+    if (options.input !== undefined) child.stdin?.end(options.input);
   });
 }
 
@@ -203,6 +208,56 @@ function readPatch(args: string[], limit: number, timeoutMs: number): Promise<{ 
   });
 }
 
+/** 锁文件：只认这份固定的文件名单，改动几千行也不是评审要读的内容。 */
+const LOCKFILE_NAMES = new Set(['package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lock', 'bun.lockb', 'deno.lock',
+  'Cargo.lock', 'go.sum', 'poetry.lock', 'uv.lock', 'Pipfile.lock', 'composer.lock', 'Gemfile.lock', 'Podfile.lock', 'pubspec.lock', 'flake.lock', 'packages.lock.json', 'gradle.lockfile']);
+const TEST_DIRS = new Set(['test', 'tests', '__tests__', 'spec', 'specs', 'e2e']);
+
+/** 读补丁时的分级：0 源码 > 1 测试 > 2 文档；锁文件另算（折叠）。生成物不看路径，由 .gitattributes 决定（generatedPaths）。 */
+export function classifyDiffPath(path: string): { tier: 0 | 1 | 2; lockfile?: true } {
+  const segments = path.split('/');
+  const name = segments.at(-1)!;
+  const dirs = segments.slice(0, -1);
+  if (LOCKFILE_NAMES.has(name)) return { tier: 2, lockfile: true };
+  if (dirs.some(dir => TEST_DIRS.has(dir)) || /\.(test|spec)\.[^.]+$/.test(name) || /_test\.[^.]+$/.test(name) || /^test_.+\.py$/.test(name)) return { tier: 1 };
+  if (dirs.some(dir => dir === 'docs' || dir === 'doc') || /\.(md|mdx|rst|adoc)$/i.test(name)) return { tier: 2 };
+  return { tier: 0 };
+}
+
+/**
+ * tree 里 .gitattributes 标了 linguist-generated 的路径。只取这些路径的各级目录里的 .gitattributes，放进临时 index，
+ * 让 git 自己按属性规则判断（嵌套文件、否定、通配都不用自己实现）。尽力而为：任何一步失败都当作没有生成物，不影响读 diff。
+ */
+async function generatedPaths(gitDir: string, tree: string, paths: string[], timeout: number): Promise<Set<string>> {
+  const generated = new Set<string>();
+  let scratch: string | undefined;
+  try {
+    const dirs = new Set(['']);
+    for (const path of paths) {
+      const parts = path.split('/').slice(0, -1);
+      for (let depth = 1; depth <= parts.length; depth++) dirs.add(parts.slice(0, depth).join('/'));
+    }
+    const wanted = [...dirs].map(dir => dir ? `${dir}/.gitattributes` : '.gitattributes');
+    const found: string[] = [];
+    for (let start = 0; start < wanted.length; start += 200) {
+      const output = await git(['--git-dir', gitDir, '--literal-pathspecs', 'ls-tree', '-z', tree, '--', ...wanted.slice(start, start + 200)], { timeout });
+      for (const row of output.split('\0')) {
+        const match = /^(\d{6}) blob ([0-9a-f]{40,64})\t(.+)$/s.exec(row);
+        if (match) found.push(`${match[1]} ${match[2]}\t${match[3]}\0`);
+      }
+    }
+    if (!found.length) return generated;
+    scratch = await mkdtemp(join(tmpdir(), 'dutydeck-turn-attr-'));
+    const env = { ...process.env, GIT_INDEX_FILE: join(scratch, 'index'), GIT_WORK_TREE: scratch };
+    await git(['--git-dir', gitDir, 'update-index', '--add', '-z', '--index-info'], { cwd: scratch, env, timeout, input: found.join('') });
+    const attrs = (await git(['--git-dir', gitDir, 'check-attr', '--cached', '-z', '--stdin', 'linguist-generated'], { cwd: scratch, env, timeout, input: paths.map(path => `${path}\0`).join('') })).split('\0');
+    for (let index = 0; index + 2 < attrs.length; index += 3) if (['set', 'true'].includes(attrs[index + 2]!)) generated.add(attrs[index]!);
+  } catch { /* 属性读不到就不折叠 */ } finally {
+    if (scratch) await rm(scratch, { recursive: true, force: true }).catch(() => {});
+  }
+  return generated;
+}
+
 const HUNK_HEADER = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
 
 /** 与 core.quotePath=false 的 Git 补丁路径格式一致：空格、Unicode 原样，控制字符用 C 转义。 */
@@ -237,24 +292,43 @@ function parseHunks(section: string[]): TurnDiffHunk[] {
 /**
  * 两棵树之间的改动，按文件拆好给 diff 页。文件清单与增删行数来自 numstat，正文来自同一次比较的补丁：
  * 按路径关联补丁段，普通文件与符号链接互换时合并同一路径的删除、新增两段。
- * 二进制、单文件超限只给占位；补丁总量超限时后面的文件只列名字。
+ * 锁文件（固定文件名单）和 .gitattributes 标了 linguist-generated 的文件折叠：只给统计，不读正文。
+ * 其余文件按源码、测试、文档的顺序分批读补丁，共用整页预算，所以预算不够时被省略的是文档、测试，而不是源码；
+ * 返回的文件也按这个顺序排，折叠的排最后。二进制、单文件超限只给占位；补丁总量超限时后面的文件只列名字。
+ * expand：只读这一个路径，不折叠（readTurnDiffFile）。
  */
-export async function readTurnDiff(gitDir: string, before: string, after: string, limits = { file: TURN_DIFF_FILE_LIMIT_BYTES, total: TURN_DIFF_TOTAL_LIMIT_BYTES }, timeoutMs = 15_000): Promise<{ summary: TurnDiffSummary; files: TurnDiffFile[]; truncated: boolean }> {
-  const entries = parseNumstat(await git([...diffArgs(gitDir), '--numstat', '-z', before, after], { timeout: timeoutMs }));
-  const patch = await readPatch([...diffArgs(gitDir), '--unified=3', before, after], limits.total, timeoutMs);
+export async function readTurnDiff(gitDir: string, before: string, after: string, limits = { file: TURN_DIFF_FILE_LIMIT_BYTES, total: TURN_DIFF_TOTAL_LIMIT_BYTES }, timeoutMs = 15_000, expand?: string): Promise<{ summary: TurnDiffSummary; files: TurnDiffFile[]; truncated: boolean }> {
+  const numstat = parseNumstat(await git([...diffArgs(gitDir), '--numstat', '-z', before, after], { timeout: timeoutMs }));
+  const entries = expand === undefined ? numstat : numstat.filter(entry => entry.path === expand);
+  const generated = expand === undefined ? await generatedPaths(gitDir, after, entries.filter(entry => !classifyDiffPath(entry.path).lockfile).map(entry => entry.path), timeoutMs) : new Set<string>();
+  const folds = new Map(entries.map(entry => [entry, expand !== undefined ? undefined : classifyDiffPath(entry.path).lockfile ? 'lockfile' as const : generated.has(entry.path) ? 'generated' as const : undefined]));
   const sections: string[][] = [];
-  for (const line of patch.text.split('\n')) {
-    if (line.startsWith('diff --git ')) sections.push([line]);
-    else sections.at(-1)?.push(line);
+  let incomplete: string[] | undefined;
+  let remaining = limits.total;
+  for (const tier of [0, 1, 2]) {
+    const group = entries.filter(entry => !folds.get(entry) && classifyDiffPath(entry.path).tier === tier);
+    // 每批 200 个文件，路径放在命令行上；改名的两端放进同一批，rename 检测才认得出来。
+    for (let start = 0; start < group.length && remaining > 0 && !incomplete; start += 200) {
+      const paths = group.slice(start, start + 200).flatMap(entry => [entry.path, ...(entry.oldPath !== undefined ? [entry.oldPath] : [])]).map(path => `:(literal)${path}`);
+      const patch = await readPatch([...diffArgs(gitDir), '--unified=3', before, after, '--', ...paths], remaining, timeoutMs);
+      remaining -= Buffer.byteLength(patch.text);
+      const batch: string[][] = [];
+      for (const line of patch.text.split('\n')) {
+        if (line.startsWith('diff --git ')) batch.push([line]);
+        else batch.at(-1)?.push(line);
+      }
+      // 被截断的最后一段不完整，同一路径已读到的另一段也不能单独展开。
+      if (patch.cut) incomplete = batch.pop();
+      sections.push(...batch);
+    }
   }
-  // 被截断的最后一段不完整，同一路径已读到的另一段也不能单独展开。
-  const incomplete = patch.cut ? sections.pop() : undefined;
   const byHeader = new Map<string, string[][]>();
   for (const section of sections) {
     const matching = byHeader.get(section[0]!) ?? [];
     matching.push(section); byHeader.set(section[0]!, matching);
   }
   const files = entries.map((entry): TurnDiffFile => {
+    const fold = folds.get(entry);
     const patchHeader = `diff --git ${patchPath(`a/${entry.oldPath ?? entry.path}`)} ${patchPath(`b/${entry.path}`)}`;
     // 含空格的路径未加引号，改名的 diff header 可能相同；用 rename 元数据区分，避免误合并。
     const matching = (byHeader.get(patchHeader) ?? []).filter(section => entry.oldPath !== undefined
@@ -268,15 +342,23 @@ export async function readTurnDiff(gitDir: string, before: string, after: string
     const deleted = headers.some(line => line.startsWith('deleted file mode'));
     const status = entry.oldPath !== undefined ? 'renamed' : added && !deleted ? 'added' : deleted && !added ? 'deleted' : 'modified';
     const base = { path: entry.path, ...(entry.oldPath !== undefined ? { oldPath: entry.oldPath } : {}), status, additions: entry.additions, deletions: entry.deletions } as const;
+    if (fold) return { ...base, placeholder: `folded_${fold}`, hunks: [] };
     if (entry.binary) return { ...base, placeholder: 'binary', hunks: [] };
     // UTF-8 路径可能在多字节字符中间被截断，末尾的替代字符不属于 header 前缀。
-    if (!matching.length || (incomplete && patchHeader.startsWith(incomplete[0]!.replace(/\ufffd$/, '')))) return { ...base, placeholder: 'omitted', hunks: [] };
+    if (!matching.length || (incomplete && patchHeader.startsWith(incomplete[0]!.replace(/\ufffd$/, '')))) return { ...base, placeholder: expand !== undefined ? 'too_large' : 'omitted', hunks: [] };
     const section = matching.flat();
     if (section.reduce((size, line) => size + Buffer.byteLength(line) + 1, 0) > limits.file) return { ...base, placeholder: 'too_large', hunks: [] };
     return { ...base, hunks: matching.flatMap(section => parseHunks(section)) };
   });
   const summary = { files: entries.length, additions: entries.reduce((sum, entry) => sum + entry.additions, 0), deletions: entries.reduce((sum, entry) => sum + entry.deletions, 0) };
-  return { summary, files, truncated: files.some(file => file.placeholder === 'omitted') };
+  const tierOf = (file: TurnDiffFile) => file.placeholder?.startsWith('folded_') ? 3 : classifyDiffPath(file.path).tier;
+  return { summary, files: files.sort((left, right) => tierOf(left) - tierOf(right)), truncated: files.some(file => file.placeholder === 'omitted') };
+}
+
+/** 折叠的文件按需读正文：单个文件最多读整页预算那么多，再大就只给「改动太大」占位。路径不在这一轮的改动里返回 undefined。 */
+export async function readTurnDiffFile(gitDir: string, before: string, after: string, path: string, timeoutMs = 15_000): Promise<TurnDiffFile | undefined> {
+  const limit = TURN_DIFF_TOTAL_LIMIT_BYTES;
+  return (await readTurnDiff(gitDir, before, after, { file: limit, total: limit }, timeoutMs, path)).files[0];
 }
 
 export async function readTurnDiffRecord(store: ConfigRepository, sessionId: string, taskId: string): Promise<TurnDiffRecord | undefined> {
