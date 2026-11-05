@@ -210,7 +210,15 @@
     "src/matters.ts",
     "dist/matters.js",
     "dist/matters.js.map",
-    "dist/matters.d.ts"
+    "dist/matters.d.ts",
+    "src/cli-capabilities.ts",
+    "dist/cli-capabilities.js",
+    "dist/cli-capabilities.js.map",
+    "dist/cli-capabilities.d.ts",
+    "src/records.ts",
+    "dist/records.js",
+    "dist/records.js.map",
+    "dist/records.d.ts"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
