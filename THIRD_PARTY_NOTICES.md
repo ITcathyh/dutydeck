@@ -52,6 +52,11 @@ Dutydeck 源码中包含或派生自以下第三方开源项目的代码与资�
   - 附件持有者与实例隔离设计参考 `66a0b309a`、`61627ff9f`；目标应用身份校验原则参考 `c251c8655`、`ffc70e755`。`apps/server/src/resource-retention.ts`、附件持久引用及配置保存校验按既有 inbox、执行账本和身份 helper 独立适配，未复制上游会话存储结构。 / Attachment ownership/isolation and target-app identity principles reference these commits; retention, durable references and save validation adapt Dutydeck's existing inbox, ledger and identity helpers without copying upstream session storage.
   - Bot 字段搜索设计参考 `33aef3d50`、`36b27cd4f`，宿主直查命令方向参考 `e7e035516`，均在 Botmux 快照 `313e0166182eaf7beda7e47dd260c53f9a686716` 下对照。搜索定位、公开 SDK 的聊天输出声明、授权及投递按 Dutydeck 既有接口独立实现；fake-ticket 状态示例与新增测试材料为本仓合成，不包含上游业务数据。 / Settings search and host query commands reference these designs at the stated snapshot. Navigation, public SDK chat-output opt-in, authorization and delivery are independently implemented; the fake-ticket status example and new test data are synthetic and contain no upstream business data.
 
+  2026-11-05 新增派生与设计参考 / additions and design references：
+
+  - `apps/server/src/lark/card-strong-punctuation.ts`：卡片正文中文标点紧贴 `**` 的修复，候选识别、标点挪动规则与"改写后整篇重新解析复核"的做法适配自 Botmux commit `ab42990955a3565a6444daae4b30fd746ea91454` 的 `src/im/lark/card-strong-punctuation.ts`，按下列 MIT 许可使用；解析改用 `mdast-util-from-markdown`，链接与代码范围、网址判定和测试用例按 Dutydeck 实现重写，未复制上游 markdown-it 探针。 / The candidate detection, punctuation-moving rules and whole-document re-parse gate adapt this MIT-licensed upstream file; parsing uses `mdast-util-from-markdown`, and the link/code ranges, URL check and tests are rewritten for Dutydeck without copying the upstream markdown-it probes.
+  - 提问卡"其他"文字输入的产品行为参考 Botmux commit `ad68495ab1c0da2ff3cfa97b55b8f162ff1dda8d`；表单、回调与校验按 Dutydeck 现有提问卡独立实现，未复制其实现。 / The ask-card "Other" input references this commit's product behavior only; the form, callback and validation are independently implemented.
+
 - **版权与许可证全文**:
 
 ```

@@ -827,6 +827,106 @@ describe('structured ask cards (P0-2)', () => {
     } finally { await h.cleanup(); }
   });
 
+  it('单选：卡片在选项之外带「其他」表单，填写后以文字为答案，点选项仍直接提交', async () => {
+    const h = await setupHarness();
+    try {
+      const single = await h.ask(0, [{ label: '跑全部测试', value: 'test' }, { label: '直接合并' }]);
+      await h.workflow.observe(single.ctx, single.event, { structuredAskCards: true });
+      const elements = h.cardAt(0).elements;
+      // 选项按钮仍在卡片根层级，不被表单吞掉。
+      expect(elements.filter((element: any) => element.tag === 'button').map((button: any) => button.text.content)).toEqual(['跑全部测试', '直接合并']);
+      const form = elements.find((element: any) => element.element_id === 'workflow_other_form');
+      expect(form.tag).toBe('form');
+      expect(form.elements.find((element: any) => element.tag === 'input')).toMatchObject({ name: 'other', input_type: 'multiline_text', max_length: 1000 });
+      const submit = form.elements.find((element: any) => element.tag === 'button');
+      const record = await findRecord(h.workflow, single.askId);
+      expect(submit).toMatchObject({ form_action_type: 'submit', behaviors: [{ value: { dutydeck_workflow: 'answer', request_id: record.id, generation: record.boot, other: true } }] });
+      expect(JSON.stringify(elements)).toContain('或在「其他」里填写后提交');
+      const assembled = buildLarkCard({ state: 'running', permissionMode: 'ask', elements });
+      expect(assembled.body.elements.some((element: any) => element.element_id === 'workflow_other_form')).toBe(true);
+
+      // 空文本不烧掉这张卡；纯空白同样不算。
+      await expect(h.workflow.respond(responseInput(record, { answer: undefined, other: '  ' })))
+        .rejects.toMatchObject({ code: 'LARK_ANSWER_EMPTY' });
+      expect((await findRecord(h.workflow, single.askId)).state).toBe('pending');
+
+      // 超过输入框上限的文本不被接受，卡片保持 pending。
+      await expect(h.workflow.respond(responseInput(record, { answer: undefined, other: '长'.repeat(1001) })))
+        .rejects.toMatchObject({ code: 'LARK_ANSWER_TOO_LONG' });
+      expect((await findRecord(h.workflow, single.askId)).state).toBe('pending');
+
+      // 文字原样作为答案，即使它碰巧等于某个选项的序号。
+      await h.workflow.respond(responseInput(record, { answer: undefined, other: '  先跑 2 号用例  ' }));
+      await expect(single.waiting).resolves.toMatchObject({ status: 'answered', answer: '先跑 2 号用例' });
+    } finally { await h.cleanup(); }
+  });
+
+  it('多选：「其他」输入在同一表单里，选项与文字分行标明后一次提交，只填文字也可提交', async () => {
+    const h = await setupHarness();
+    try {
+      const choices = [{ label: '甲', value: 'a' }, { label: '乙', value: 'b' }];
+      const merged = await h.ask(0, choices, true);
+      const textOnly = await h.ask(1, choices, true);
+      await h.workflow.observe(merged.ctx, merged.event, { structuredAskCards: true });
+      await h.workflow.observe(textOnly.ctx, textOnly.event, { structuredAskCards: true });
+      const form = h.cardAt(0).elements.find((element: any) => element.tag === 'form');
+      expect(form.elements.map((element: any) => element.tag)).toEqual(['multi_select_static', 'input', 'button']);
+      expect(form.elements[1]).toMatchObject({ name: 'other' });
+
+      const mergedRecord = await findRecord(h.workflow, merged.askId);
+      await h.workflow.respond(responseInput(mergedRecord, { answer: undefined, selected: ['b', 'a'], other: '再加一条' }));
+      await expect(merged.waiting).resolves.toMatchObject({ status: 'answered', answer: '所选项：b、a\n补充文字：再加一条' });
+
+      const textRecord = await findRecord(h.workflow, textOnly.askId);
+      await expect(h.workflow.respond(responseInput(textRecord, { answer: undefined, selected: [], other: '  ' })))
+        .rejects.toMatchObject({ code: 'LARK_ANSWER_CHOICE_INVALID' });
+      // 选项值仍须在选项集合内，「其他」不能替伪造值开后门。
+      await expect(h.workflow.respond(responseInput(textRecord, { answer: undefined, selected: ['x'], other: '文字' })))
+        .rejects.toMatchObject({ code: 'LARK_ANSWER_CHOICE_INVALID' });
+      await h.workflow.respond(responseInput(textRecord, { answer: undefined, selected: [], other: '都不选，我要别的' }));
+      await expect(textOnly.waiting).resolves.toMatchObject({ status: 'answered', answer: '都不选，我要别的' });
+    } finally { await h.cleanup(); }
+  });
+
+  it('带「其他」输入放不下整卡预算时，退回只有选项的版本，选项按钮不丢', async () => {
+    const h = await setupHarness();
+    try {
+      // 预算判定是私有方法：让含「其他」表单的整卡一律超限，其余照常，验证回落顺序。
+      const original = (h.workflow as any).withinAskCardBudget.bind(h.workflow);
+      (h.workflow as any).withinAskCardBudget = (elements: any[], webBaseUrl?: string) =>
+        !JSON.stringify(elements).includes('workflow_answer_other') && original(elements, webBaseUrl);
+      const single = await h.ask(0, [{ label: '甲' }, { label: '乙' }]);
+      const multiple = await h.ask(1, [{ label: '甲' }, { label: '乙' }], true);
+      await h.workflow.observe(single.ctx, single.event, { structuredAskCards: true });
+      await h.workflow.observe(multiple.ctx, multiple.event, { structuredAskCards: true });
+      for (const index of [0, 1]) {
+        const text = JSON.stringify(h.cardAt(index).elements);
+        expect(text).not.toContain('workflow_answer_other');
+        expect(text).toContain('点选下方选项提交；也可引用本卡片直接回复你的答案。');
+      }
+      expect(h.cardAt(0).elements.filter((element: any) => element.tag === 'button')).toHaveLength(2);
+      expect(h.cardAt(1).elements.some((element: any) => element.tag === 'form')).toBe(true);
+    } finally { await h.cleanup(); }
+  });
+
+  it('ADHD 提问卡不加「其他」输入，带上 other 的回调也不被采纳', async () => {
+    const h = await setupHarness();
+    try {
+      const single = await h.ask(0, [{ label: '确认' }]);
+      await h.workflow.observe(single.ctx, single.event, { structuredAskCards: true, adhdMode: true });
+      const card = h.cardAt(0);
+      expect(JSON.stringify(card.elements)).not.toContain('workflow_other');
+      expect(JSON.stringify(card.elements)).not.toContain('"tag":"input"');
+      const record = await findRecord(h.workflow, single.askId);
+      expect(record.adhdMode).toBe(true);
+      await expect(h.workflow.respond(responseInput(record, { answer: undefined, other: '自由文本' })))
+        .rejects.toMatchObject({ code: 'LARK_ANSWER_CHOICE_INVALID' });
+      expect((await findRecord(h.workflow, single.askId)).state).toBe('pending');
+      await h.workflow.respond(responseInput(record, { answer: '确认' }));
+      await expect(single.waiting).resolves.toMatchObject({ status: 'answered', answer: '确认' });
+    } finally { await h.cleanup(); }
+  });
+
   it('自由文本：无选项 ask 在开关开启时渲染 input 表单（max_length 1000），文本回答照常决议', async () => {
     const h = await setupHarness();
     try {

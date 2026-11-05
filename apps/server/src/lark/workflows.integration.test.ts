@@ -23,7 +23,7 @@ const event = (id: string, text: string, patch: Partial<LarkMessageEvent> = {}):
   senderOpenId: 'ou_alice', senderType: 'user', messageType: 'text', content: JSON.stringify({ text }),
   mentions: [{ key: '@_user_1', name: 'Dock', openId: 'ou_bot' }], ...patch
 });
-async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options: { participation?: LarkGroupParticipation; participationMode?: 'observe' | 'selective' | 'off'; mentionPolicy?: StoredLarkConfig['mentionPolicy']; managedGroup?: boolean; answerChunks?: string[]; traceEvents?: Array<Pick<AgentEvent, 'type' | 'data'>>; askTimeoutMs?: number; askChoices?: RelayAskChoice[]; permissionOperation?: PermissionRequestData['operation']; compactGate?: Promise<void> } = {}) {
+async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options: { participation?: LarkGroupParticipation; participationMode?: 'observe' | 'selective' | 'off'; mentionPolicy?: StoredLarkConfig['mentionPolicy']; managedGroup?: boolean; answerChunks?: string[]; traceEvents?: Array<Pick<AgentEvent, 'type' | 'data'>>; askTimeoutMs?: number; askChoices?: RelayAskChoice[]; askMultiple?: boolean; permissionOperation?: PermissionRequestData['operation']; compactGate?: Promise<void> } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-workflows-'));
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   let broker!: RelayAskBroker;
@@ -56,7 +56,7 @@ async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options
             try { send(prompt); } catch (error) { emit({ type: 'error', data: { message: String(error) } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } }); return; }
             currentCancelled = false;
             if (kind === 'ask') {
-              const result = await broker.register({ sessionId: sessionId!, question: '选择哪一种实现？', timeoutMs: options.askTimeoutMs, ...(options.askChoices ? { choices: options.askChoices } : {}) });
+              const result = await broker.register({ sessionId: sessionId!, question: '选择哪一种实现？', timeoutMs: options.askTimeoutMs, ...(options.askChoices ? { choices: options.askChoices, ...(options.askMultiple ? { multiple: true } : {}) } : {}) });
               if (result.status === 'answered') {
                 emit({ type: 'text', data: { text: `已收到：${result.answer}` } });
               }
@@ -884,6 +884,62 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     await h.coordinator.handle(dm('om_pick', ' 2 '), h.config);
     expect(h.broker.get(ask.nativeId)).toMatchObject({ status: 'answered', answer: 'plan_b' });
     expect([...h.cards.values()].find(card => card.taskId === 'om_pick')?.markdown).toBe('回答已送达原任务。');
+  });
+
+  it('structured ask card callbacks: the 「其他」 form answers with its text, the old option buttons and old multi forms keep working', async () => {
+    const choices = [{ label: '方案 A', value: 'plan_a' }, { label: '方案 B', value: 'plan_b' }];
+    const click = async (h: Awaited<ReturnType<typeof harness>>, ask: LarkInteraction, value: Record<string, unknown>) =>
+      h.coordinator.handleAction(value, 'ou_alice', { messageId: ask.cardId, chatId: 'oc_group' });
+    const open = async (h: Awaited<ReturnType<typeof harness>>) => {
+      const bots = JSON.parse((await h.repos.config.get(larkBotsConfigKey))!) as StoredLarkConfig[];
+      await h.repos.config.set(larkBotsConfigKey, JSON.stringify(bots.map(bot => ({ ...bot, structuredAskCards: true }))));
+      await h.coordinator.handle(event('om_task', '帮我选方案'), h.config);
+      await vi.waitFor(async () => expect((await h.interactions()).find(item => item.kind === 'ask')?.cardId).toBeTruthy());
+      return (await h.interactions()).find(item => item.kind === 'ask')!;
+    };
+
+    // 单选：「其他」表单的回调带 other:true，文字在 form_value.other。
+    const single = await harness('ask', { askChoices: choices });
+    const singleAsk = await open(single);
+    const otherForm = single.cards.get(singleAsk.cardId!).elements.find((element: any) => element.element_id === 'workflow_other_form');
+    const otherValue = otherForm.elements.find((element: any) => element.tag === 'button').behaviors[0].value;
+    expect(otherValue).toMatchObject({ dutydeck_workflow: 'answer', request_id: singleAsk.id, generation: singleAsk.boot, other: true });
+    // 与点选项同一道鉴权：无权的人填了文字也不会决议。
+    expect(await single.coordinator.handleAction({ ...otherValue, form_value: { other: '我替他答' } }, 'ou_bob', { messageId: singleAsk.cardId, chatId: 'oc_group' })).toMatchObject({ type: 'error' });
+    expect(single.broker.get(singleAsk.nativeId)?.status).toBe('pending');
+    expect(await click(single, singleAsk, { ...otherValue, form_value: { other: '   ' } })).toMatchObject({ type: 'error', content: '请先填写其他答案，或点选上方选项。' });
+    expect(single.broker.get(singleAsk.nativeId)?.status).toBe('pending');
+    expect(await click(single, singleAsk, { ...otherValue, form_value: { other: '都不是，换成方案 C' } })).toMatchObject({ type: 'success' });
+    expect(single.broker.get(singleAsk.nativeId)).toMatchObject({ status: 'answered', answer: '都不是，换成方案 C' });
+    await single.completed();
+
+    // 单选：点选项的按钮值（含已发出的旧卡）不带 other，仍按选项校验并直接提交。
+    const button = await harness('ask', { askChoices: choices });
+    const buttonAsk = await open(button);
+    const optionValue = button.cards.get(buttonAsk.cardId!).elements.find((element: any) => element.tag === 'button').behaviors[0].value;
+    expect(optionValue).not.toHaveProperty('other');
+    expect(await click(button, buttonAsk, { dutydeck_workflow: 'answer', request_id: buttonAsk.id, generation: buttonAsk.boot, answer: '不存在的选项' })).toMatchObject({ type: 'error' });
+    expect(await click(button, buttonAsk, optionValue)).toMatchObject({ type: 'success' });
+    expect(button.broker.get(buttonAsk.nativeId)).toMatchObject({ status: 'answered', answer: 'plan_a' });
+    await button.completed();
+
+    // 多选：form_value 里 other 与 answer 合并；旧卡的表单没有 other 字段，只带 answer。
+    const multi = await harness('ask', { askChoices: choices, askMultiple: true });
+    const multiAsk = await open(multi);
+    const multiForm = multi.cards.get(multiAsk.cardId!).elements.find((element: any) => element.tag === 'form');
+    const multiValue = multiForm.elements.find((element: any) => element.tag === 'button').behaviors[0].value;
+    expect(multiValue).toMatchObject({ multiple: true });
+    expect(await click(multi, multiAsk, { ...multiValue, form_value: { answer: [], other: '' } })).toMatchObject({ type: 'error' });
+    expect(await click(multi, multiAsk, { ...multiValue, form_value: { answer: ['plan_b'], other: '以及方案 C' } })).toMatchObject({ type: 'success' });
+    expect(multi.broker.get(multiAsk.nativeId)).toMatchObject({ status: 'answered', answer: '所选项：plan_b\n补充文字：以及方案 C' });
+    await multi.completed();
+
+    const legacy = await harness('ask', { askChoices: choices, askMultiple: true });
+    const legacyAsk = await open(legacy);
+    const legacyValue = legacy.cards.get(legacyAsk.cardId!).elements.find((element: any) => element.tag === 'form').elements.find((element: any) => element.tag === 'button').behaviors[0].value;
+    expect(await click(legacy, legacyAsk, { ...legacyValue, form_value: { answer: ['plan_a', 'plan_b'] } })).toMatchObject({ type: 'success' });
+    expect(legacy.broker.get(legacyAsk.nativeId)).toMatchObject({ status: 'answered', answer: 'plan_a、plan_b' });
+    await legacy.completed();
   });
 
   it('echoes a redacted free-text answer in the private-chat receipt', async () => {
