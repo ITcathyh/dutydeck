@@ -855,10 +855,27 @@ describe('structured ask cards (P0-2)', () => {
       await expect(h.workflow.respond(responseInput(record, { answer: undefined, other: '长'.repeat(1001) })))
         .rejects.toMatchObject({ code: 'LARK_ANSWER_TOO_LONG' });
       expect((await findRecord(h.workflow, single.askId)).state).toBe('pending');
+      // 计数按字素：一个组合 emoji 是 7 个码点、11 个 UTF-16 码元，仍只算 1 个字符。
+      const family = '\u{1F468}\u200D\u{1F469}\u200D\u{1F467}\u200D\u{1F466}';
+      await expect(h.workflow.respond(responseInput(record, { answer: undefined, other: family.repeat(1001) })))
+        .rejects.toMatchObject({ code: 'LARK_ANSWER_TOO_LONG' });
+      expect((await findRecord(h.workflow, single.askId)).state).toBe('pending');
 
       // 文字原样作为答案，即使它碰巧等于某个选项的序号。
       await h.workflow.respond(responseInput(record, { answer: undefined, other: '  先跑 2 号用例  ' }));
       await expect(single.waiting).resolves.toMatchObject({ status: 'answered', answer: '先跑 2 号用例' });
+    } finally { await h.cleanup(); }
+  });
+
+  it('「其他」文字按字素计数：输入框放行的 1000 个组合 emoji，服务端照常接受', async () => {
+    const h = await setupHarness();
+    try {
+      const single = await h.ask(0, [{ label: '跑全部测试', value: 'test' }]);
+      await h.workflow.observe(single.ctx, single.event, { structuredAskCards: true });
+      const record = await findRecord(h.workflow, single.askId);
+      const other = '\u{1F468}\u200D\u{1F469}\u200D\u{1F467}\u200D\u{1F466}'.repeat(1000);
+      await h.workflow.respond(responseInput(record, { answer: undefined, other }));
+      await expect(single.waiting).resolves.toMatchObject({ status: 'answered', answer: other });
     } finally { await h.cleanup(); }
   });
 

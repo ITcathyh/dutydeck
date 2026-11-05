@@ -110,6 +110,99 @@ describe('repairCardStrongPunctuation: 把标点移到闭合 ** 外侧', () => {
   });
 });
 
+describe('repairCardStrongPunctuation: 多个粗体相邻时按开闭配对', () => {
+  it.each([
+    // 前一个粗体的闭合不能和后一个粗体的开头配成一对。
+    ['**甲**：乙**丙：**丁', '**甲**：乙**丙**：丁', ['甲', '丙']],
+    // 配不上的闭合被当成开头、与后面的 ** 配错的粗体，两端都能配成新粗体时拆开重配。
+    ['**甲：**乙**丙：**丁', '**甲**：乙**丙**：丁', ['甲', '丙']],
+    ['**a：**b**c：**d **e**f', '**a**：b**c**：d **e**f', ['a', 'c', 'e']],
+    ['说明**（重要）**后面**（备注）**结尾', '说明（**重要**）后面（**备注**）结尾', ['重要', '备注']]
+  ])('%s', (input, expected, strong) => {
+    const repaired = repairCardStrongPunctuation(input);
+    expect(repaired).toBe(expected);
+    expect(strongTexts(repaired)).toEqual(strong);
+    expect(literalStars(repaired)).toBe(0);
+    expect(repairCardStrongPunctuation(repaired)).toBe(repaired);
+  });
+
+  it('每行都是相邻粗体时逐行修复（上一行末尾不再配到下一行）', () => {
+    const input = Array.from({ length: 50 }, () => '**甲**：乙**丙：**丁').join('\n');
+    const repaired = repairCardStrongPunctuation(input);
+    expect(repaired).toBe(Array.from({ length: 50 }, () => '**甲**：乙**丙**：丁').join('\n'));
+    expect(literalStars(repaired)).toBe(0);
+  });
+});
+
+describe('repairCardStrongPunctuation: 不拆合法粗体', () => {
+  it.each([
+    ['跨行粗体后接标点', '**第一行\n第二行**（重要），a**b'],
+    ['跨行粗体后接标点（无尾随星号）', '**第一行\n第二行**（重要）'],
+    ['开头紧跟标点的同行粗体', '结论：**很重要**'],
+    ['开头紧跟标点的粗体后有残缺星号', '**结论：**很重要**']
+  ])('%s', (_label, input) => {
+    expect(repairCardStrongPunctuation(input)).toBe(input);
+  });
+});
+
+describe('repairCardStrongPunctuation: 耗时有上界', () => {
+  /** 按 UTF-8 字节数重复到上限以内。 */
+  const fill = (unit: string, bytes: number) => {
+    const count = Math.floor(bytes / Buffer.byteLength(`${unit}\n`, 'utf8'));
+    return Array.from({ length: count }, () => unit).join('\n');
+  };
+  const fastest = (text: string) => {
+    let best = Infinity;
+    let output = '';
+    for (let round = 0; round < 3; round++) {
+      const started = performance.now();
+      output = repairCardStrongPunctuation(text);
+      best = Math.min(best, performance.now() - started);
+    }
+    return { best, output };
+  };
+
+  it('上限内星号最密的正文仍全部修复，且在 200ms 内', () => {
+    // 每行 4 个 **、其中一对配不上：旧实现在 1000 行（约 16KB）上要跑一分钟以上。500 行恰好用满 ** 上限。
+    const cjk = Array.from({ length: 500 }, () => '**甲**：乙**丙：**丁').join('\n');
+    const cjkResult = fastest(cjk);
+    expect(cjkResult.output).toBe(cjk.replaceAll('**丙：**丁', '**丙**：丁'));
+    expect(cjkResult.best).toBeLessThan(200);
+
+    const ascii = Array.from({ length: 500 }, () => '**a**:b**c:**d').join('\n');
+    const asciiResult = fastest(ascii);
+    expect(asciiResult.output).toBe(ascii.replaceAll('**c:**d', '**c**:d'));
+    expect(asciiResult.best).toBeLessThan(200);
+  });
+
+  it('超过字节或星号上限的正文原样返回', () => {
+    const long = fill('**甲**：乙**丙：**丁', 64 * 1024);
+    const longResult = fastest(long);
+    expect(longResult.output).toBe(long);
+    expect(longResult.best).toBeLessThan(200);
+    const dense = Array.from({ length: 501 }, () => '**a**:b**c:**d').join('\n');
+    expect(repairCardStrongPunctuation(dense)).toBe(dense);
+  });
+});
+
+describe('repairCardStrongPunctuation: 随机输入的不变量', () => {
+  it('长度不变、幂等，改写只会让字面量星号变少、粗体变多', () => {
+    const pieces = ['**', '**', '*', '甲', 'a', '：', '（', '）', ',', ' ', '\n', '`', '_', '[', '](u)'];
+    let seed = 42;
+    const random = () => { seed = (seed * 1103515245 + 12345) % 2 ** 31; return seed / 2 ** 31; };
+    for (let sample = 0; sample < 3000; sample++) {
+      const input = Array.from({ length: 4 + Math.floor(random() * 16) }, () => pieces[Math.floor(random() * pieces.length)]).join('');
+      const repaired = repairCardStrongPunctuation(input);
+      expect(repaired.length, input).toBe(input.length);
+      expect(repairCardStrongPunctuation(repaired), input).toBe(repaired);
+      if (repaired !== input) {
+        expect(literalStars(repaired), input).toBeLessThan(literalStars(input));
+        expect(strongTexts(repaired).length, input).toBeGreaterThan(strongTexts(input).length);
+      }
+    }
+  });
+});
+
 describe('repairCardStrongPunctuation: 其余内容逐字节不变', () => {
   it.each([
     ['已能配对：无标点', '**你好**再见'],
