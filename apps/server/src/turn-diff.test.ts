@@ -384,8 +384,8 @@ describe('turn diff snapshots', () => {
     const after = await snapshotWorkingTree(dir);
     const diff = await readTurnDiff(before!.gitDir, before!.tree, after!.tree);
     const byPath = new Map(diff.files.map(file => [file.path, file]));
-    expect(byPath.get('package-lock.json')).toMatchObject({ placeholder: 'folded_lockfile', hunks: [], additions: 40_000 });
-    for (const path of ['gen/api.ts', 'schema.pb.ts', 'pkg/bundle.out']) expect(byPath.get(path)).toMatchObject({ placeholder: 'folded_generated', hunks: [], additions: 1 });
+    expect(byPath.get('package-lock.json')).toMatchObject({ placeholder: 'folded_lockfile', hunks: [], additions: 40_000, status: 'added' });
+    for (const path of ['gen/api.ts', 'schema.pb.ts', 'pkg/bundle.out']) expect(byPath.get(path)).toMatchObject({ placeholder: 'folded_generated', hunks: [], additions: 1, status: 'added' });
     for (const path of ['keep.pb.ts', 'dist/app.js', 'a.min.js']) expect(byPath.get(path)!.placeholder).toBeUndefined();
     for (const name of ['one', 'two', 'three']) {
       const file = byPath.get(`src/${name}.ts`)!;
@@ -401,12 +401,27 @@ describe('turn diff snapshots', () => {
 
     // 折叠的文件可以按需读正文；超过 1 MiB 的只给「改动太大」，不在改动里的路径没有结果。
     const lock = await readTurnDiffFile(before!.gitDir, before!.tree, after!.tree, 'package-lock.json');
-    expect(lock).toMatchObject({ path: 'package-lock.json', additions: 40_000, placeholder: 'too_large', hunks: [] });
+    expect(lock).toMatchObject({ path: 'package-lock.json', status: 'added', additions: 40_000, placeholder: 'too_large', hunks: [] });
     const generated = await readTurnDiffFile(before!.gitDir, before!.tree, after!.tree, 'gen/api.ts');
     expect(generated).toMatchObject({ path: 'gen/api.ts', status: 'added' });
     expect(generated!.placeholder).toBeUndefined();
     expect(generated!.hunks.flatMap(hunk => hunk.lines).map(line => line.text)).toEqual(['generated']);
     expect(await readTurnDiffFile(before!.gitDir, before!.tree, after!.tree, 'nope.ts')).toBeUndefined();
+  });
+
+  it('reports folded files as modified or deleted without reading their patches', async () => {
+    const { dir, git } = await repo();
+    await writeFile(join(dir, 'yarn.lock'), 'a@1\n');
+    await writeFile(join(dir, 'Cargo.lock'), 'old\n');
+    await git('add', '.'); await git('commit', '-m', 'locks');
+    const before = await snapshotWorkingTree(dir);
+    await writeFile(join(dir, 'yarn.lock'), 'a@2\n');
+    await rm(join(dir, 'Cargo.lock'));
+    const after = await snapshotWorkingTree(dir);
+    const diff = await readTurnDiff(before!.gitDir, before!.tree, after!.tree);
+    expect(diff.files.map(file => [file.path, file.status, file.placeholder])).toEqual(expect.arrayContaining([
+      ['yarn.lock', 'modified', 'folded_lockfile'], ['Cargo.lock', 'deleted', 'folded_lockfile']
+    ]));
   });
 
   it('shows the body of a folded lockfile on demand when it fits in one page', async () => {

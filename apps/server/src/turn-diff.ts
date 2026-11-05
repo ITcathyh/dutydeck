@@ -327,8 +327,7 @@ export async function readTurnDiff(gitDir: string, before: string, after: string
     const matching = byHeader.get(section[0]!) ?? [];
     matching.push(section); byHeader.set(section[0]!, matching);
   }
-  const files = entries.map((entry): TurnDiffFile => {
-    const fold = folds.get(entry);
+  const parsed = entries.map(entry => {
     const patchHeader = `diff --git ${patchPath(`a/${entry.oldPath ?? entry.path}`)} ${patchPath(`b/${entry.path}`)}`;
     // 含空格的路径未加引号，改名的 diff header 可能相同；用 rename 元数据区分，避免误合并。
     const matching = (byHeader.get(patchHeader) ?? []).filter(section => entry.oldPath !== undefined
@@ -338,8 +337,18 @@ export async function readTurnDiff(gitDir: string, before: string, after: string
       const end = section.findIndex(line => line.startsWith('@@ ') || line.startsWith('Binary files '));
       return section.slice(0, end < 0 ? section.length : end);
     });
-    const added = headers.some(line => line.startsWith('new file mode'));
-    const deleted = headers.some(line => line.startsWith('deleted file mode'));
+    return { entry, patchHeader, matching, headers };
+  });
+  // 折叠、省略或截断的文件没有补丁头，新增、删除改从 --name-status 取；否则新建的锁文件会显示成「修改」。
+  const nameStatus = new Map<string, string>();
+  if (parsed.some(item => item.entry.oldPath === undefined && !item.headers.length)) {
+    const parts = (await git([...diffArgs(gitDir), '--no-renames', '--name-status', '-z', before, after], { timeout: timeoutMs })).split('\0');
+    for (let index = 0; index + 1 < parts.length; index += 2) nameStatus.set(parts[index + 1]!, parts[index]!);
+  }
+  const files = parsed.map(({ entry, patchHeader, matching, headers }): TurnDiffFile => {
+    const fold = folds.get(entry);
+    const added = headers.length ? headers.some(line => line.startsWith('new file mode')) : nameStatus.get(entry.path) === 'A';
+    const deleted = headers.length ? headers.some(line => line.startsWith('deleted file mode')) : nameStatus.get(entry.path) === 'D';
     const status = entry.oldPath !== undefined ? 'renamed' : added && !deleted ? 'added' : deleted && !added ? 'deleted' : 'modified';
     const base = { path: entry.path, ...(entry.oldPath !== undefined ? { oldPath: entry.oldPath } : {}), status, additions: entry.additions, deletions: entry.deletions } as const;
     if (fold) return { ...base, placeholder: `folded_${fold}`, hunks: [] };
