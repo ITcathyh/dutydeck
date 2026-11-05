@@ -6,9 +6,11 @@
  */
 import Database from 'better-sqlite3';
 import { createServer } from 'node:net';
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import type { AgentProbe, DatabaseProbe, DatabaseProbeResult, PortProbe, PortProbeOutcome } from './types.js';
 import { existsSync } from 'node:fs';
+
+const UNPRICED_USAGE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
 /** configs 表的形状：{ key TEXT PRIMARY KEY, value TEXT NOT NULL }。 */
 interface ConfigRow { value: string }
@@ -72,6 +74,14 @@ export const defaultDatabaseProbe: DatabaseProbe = (path, keys, prefixes = []) =
         }
       }
       result.values = values;
+    }
+    // 账本实际计价失败的型号；表不存在（旧库）时不报这一项，库仍算可读。
+    try {
+      const since = new Date(Date.now() - UNPRICED_USAGE_WINDOW_MS).toISOString();
+      const rows = db.prepare("SELECT DISTINCT model FROM usage_ledger WHERE recorded_at >= ? AND data_status = 'unpriced' AND unpriced_reason = 'unknown_model' AND model IS NOT NULL").all(since) as Array<{ model: string }>;
+      result.unpricedUsageModels = rows.map(row => row.model);
+    } catch {
+      // 没有 usage_ledger 表。
     }
     return result;
   } catch (error) {
@@ -144,3 +154,13 @@ export const defaultAgentProbe: AgentProbe = (command, timeoutMs) => new Promise
     }
   });
 });
+
+/** 读进程的有效 uid（`ps -o uid=`，Linux 与 macOS 都有）。进程不存在、没有 ps 或输出不是数字时返回 undefined。只读。 */
+export function defaultProcessUid(pid: number): number | undefined {
+  try {
+    const output = execFileSync('ps', ['-o', 'uid=', '-p', String(pid)], { encoding: 'utf8', timeout: 1_000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    return /^\d+$/.test(output) ? Number(output) : undefined;
+  } catch {
+    return undefined;
+  }
+}

@@ -22,7 +22,7 @@ dutydeck stop
 # 更新全局 Dutydeck 包并自动重启
 dutydeck update
 
-# 一键诊断（端口、SQLite、Agent 可执行性与默认 Agent、飞书监听、是否以 root 运行、机器人配置的型号是否缺价格等）
+# 一键诊断（端口、SQLite、Agent 可执行性与默认 Agent、飞书监听、守护进程是否以 root 运行、型号是否缺价格（机器人配置的非别名型号，以及近 30 天用量记录里没能计价的型号）等）
 dutydeck doctor
 ```
 

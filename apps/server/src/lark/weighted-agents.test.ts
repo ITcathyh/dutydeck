@@ -155,7 +155,7 @@ it('upgrades a previously installed Dutydeck hook when an enforced session start
   // 模拟升级前装好的 v3：脚本是旧版本，Hook 配置里还有一条用户自己的 Hook。
   await installLarkHook('cursor', config.workspace);
   const script = join(config.workspace!, '.dutydeck', 'security', 'dutydeck-lark-high-risk-guard-cursor.mjs');
-  await writeFile(script, (await readFile(script, 'utf8')).replace('dutydeck-high-risk-guard-v5', 'dutydeck-high-risk-guard-v3'));
+  await writeFile(script, (await readFile(script, 'utf8')).replace('dutydeck-high-risk-guard-v6', 'dutydeck-high-risk-guard-v3'));
   const hooksPath = join(config.workspace!, '.cursor', 'hooks.json');
   const hooks = JSON.parse(await readFile(hooksPath, 'utf8'));
   const custom = { command: 'echo user-hook', matcher: 'Shell' };
@@ -164,7 +164,7 @@ it('upgrades a previously installed Dutydeck hook when an enforced session start
 
   expect((await resolve(undefined, enforced)).agentId).toBe('cursor');
   expect(runtime.start).toHaveBeenCalledOnce();
-  expect(await readFile(script, 'utf8')).toContain('dutydeck-high-risk-guard-v5');
+  expect(await readFile(script, 'utf8')).toContain('dutydeck-high-risk-guard-v6');
   const upgraded = JSON.parse(await readFile(hooksPath, 'utf8')).hooks.preToolUse;
   expect(upgraded).toHaveLength(2);
   expect(upgraded[0]).toEqual(custom);
@@ -198,11 +198,11 @@ it('upgrades an old Codex guard script without changing the hook command, so nat
   const hooksPath = join(config.workspace!, '.codex', 'hooks.json');
   const hooksBefore = await readFile(hooksPath, 'utf8');
   // 升级前装好的旧版脚本：Dutydeck 判定为未安装，但 Codex 按命令判定的信任仍有效。
-  await writeFile(script, (await readFile(script, 'utf8')).replace('dutydeck-high-risk-guard-v5', 'dutydeck-high-risk-guard-v4'));
+  await writeFile(script, (await readFile(script, 'utf8')).replace('dutydeck-high-risk-guard-v6', 'dutydeck-high-risk-guard-v4'));
   expect(await larkHookStatus(agent.id, config.workspace, agent)).toMatchObject({ installed: false });
   await expect(resolve(undefined, enforced)).resolves.toMatchObject({ agentId: 'codex' });
   expect(runtime.start).toHaveBeenCalledOnce();
-  expect(await readFile(script, 'utf8')).toContain('dutydeck-high-risk-guard-v5');
+  expect(await readFile(script, 'utf8')).toContain('dutydeck-high-risk-guard-v6');
   expect(await readFile(hooksPath, 'utf8')).toBe(hooksBefore);
   expect(await larkHookStatus(agent.id, config.workspace, agent)).toMatchObject({ installed: true, nativeReady: true });
 });

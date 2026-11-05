@@ -8,7 +8,8 @@ import Database from 'better-sqlite3';
 import { createCliUi, type CliUiTarget } from '../cli-ui.js';
 import { runDoctor, REQUIRED_NODE_VERSION } from './doctor.js';
 import { defaultAgentProbe } from './probes.js';
-import { defaultDatabaseProbe, defaultPortProbe } from './probes.js';
+import { defaultDatabaseProbe, defaultPortProbe, defaultProcessUid } from './probes.js';
+import { defaultUsagePricing, measureUsage } from '../usage-ledger.js';
 import type {
   DoctorCheck,
   DoctorConfig,
@@ -60,6 +61,7 @@ function deps(overrides: Partial<DoctorDependencies> = {}): DoctorDependencies {
     platform: 'linux',
     username: 'tester',
     getuid: () => 1000,
+    processUid: () => 1000,
     config: baseConfig,
     daemonStatus: () => ({ running: true, pid: 4242, ready: true, address: 'http://127.0.0.1:4310', authEnabled: true }),
     daemonRecord: () => ({ pid: 4242, ready: true, host: '127.0.0.1', port: 4310, authEnabled: true, database: baseConfig.databaseUrl }),
@@ -293,18 +295,39 @@ describe('node.version', () => {
 });
 
 describe('process.root', () => {
-  it('以 root 运行为 warn，说明完全信任模式下 Agent 拥有整机权限', async () => {
-    const report = await runDoctor({ json: true }, deps({ getuid: () => 0 }));
+  it('守护进程以 root 运行为 warn，说明完全信任模式下 Agent 拥有整机权限', async () => {
+    const pids: number[] = [];
+    const report = await runDoctor({ json: true }, deps({ processUid: pid => { pids.push(pid); return 0; } }));
     const check = find(report, 'process.root')!;
+    expect(pids).toEqual([4242]);
     expect(check.level).toBe('warn');
+    expect(check.detail).toBe('守护进程（pid 4242）以 root 运行');
     expect(check.remedy).toContain('完全信任');
     expect(check.remedy).toContain('整机权限');
     expect(report.ok).toBe(true);
   });
 
+  it('用 sudo 跑 doctor、守护进程是普通用户时不误报', async () => {
+    expect(find(await runDoctor({ json: true }, deps({ getuid: () => 0, processUid: () => 1000 })), 'process.root')).toBeUndefined();
+  });
+
+  it('守护进程没在运行或读不到它的 uid 时，退回当前命令的身份并如实说明', async () => {
+    const stopped = deps({ getuid: () => 0, daemonStatus: () => ({ running: false }), processUid: () => { throw new Error('不应读停止的守护进程'); } });
+    for (const report of [await runDoctor({ json: true }, stopped), await runDoctor({ json: true }, deps({ getuid: () => 0, processUid: () => undefined }))]) {
+      const check = find(report, 'process.root')!;
+      expect(check.detail).toContain('当前命令以 root 运行');
+      expect(check.remedy).toContain('守护进程若也以这个身份启动');
+    }
+  });
+
   it('非 root 或取不到 uid（Windows）时不出现', async () => {
     expect(find(await runDoctor({ json: true }, deps({ getuid: () => 1000 })), 'process.root')).toBeUndefined();
-    expect(find(await runDoctor({ json: true }, deps({ getuid: () => undefined })), 'process.root')).toBeUndefined();
+    expect(find(await runDoctor({ json: true }, deps({ getuid: () => undefined, processUid: () => undefined })), 'process.root')).toBeUndefined();
+  });
+
+  it('默认探针读得到当前进程的 uid，读不到不存在的进程', () => {
+    expect(defaultProcessUid(process.pid)).toBe(process.getuid!());
+    expect(defaultProcessUid(2 ** 22 + 12345)).toBeUndefined();
   });
 });
 
@@ -684,9 +707,24 @@ describe('lark', () => {
 
 describe('usage.unpriced', () => {
   const botsWith = (models: Record<string, string>) => [{ appId: 'cli_ok', appSecret: FIXTURE_APP_SECRET, name: '机器人甲', listening: true, defaultAgentId: 'claude', ...models }];
-  const withBots = (bots: unknown, env: NodeJS.ProcessEnv = {}) => deps({
+  const withBots = (bots: unknown, env: NodeJS.ProcessEnv = {}, unpricedUsageModels?: string[]) => deps({
     env,
-    databaseProbe: () => ({ exists: true, appliedVersion: 14, values: { [larkBotsConfigKey]: JSON.stringify(bots) } })
+    databaseProbe: () => ({ exists: true, appliedVersion: 14, values: { [larkBotsConfigKey]: JSON.stringify(bots) }, ...(unpricedUsageModels ? { unpricedUsageModels } : {}) })
+  });
+
+  it('配置成别名的型号不按配置判未定价：账本按运行时上报的完整型号计价', async () => {
+    const report = await runDoctor({ json: true }, withBots(botsWith({ defaultModel: 'opus', fallbackModel: 'sonnet[1m]', memoryModel: 'Haiku' })));
+    expect(find(report, 'usage.unpriced')).toBeUndefined();
+    // 同一读数在账本里确实有价：别名配置 + 运行时上报完整型号。
+    const measured = measureUsage({ reading: { usageRef: 'u1', breakdown: { inputTokens: 1000, outputTokens: 10 } }, freshTokens: true, model: 'claude-opus-5-5-20260101', pricing: defaultUsagePricing });
+    expect(measured.dataStatus).toBe('estimated');
+  });
+
+  it('用量记录里账本记为型号未知的完整型号照样报出；之后补了价的不再报', async () => {
+    const check = find(await runDoctor({ json: true }, withBots(botsWith({ defaultModel: 'opus' }), {}, ['claude-opus-5-6', 'gpt-5.2'])), 'usage.unpriced')!;
+    expect(check.detail).toBe('以下模型未定价，用量上限对它们无效：claude-opus-5-6');
+    expect(check.remedy).toContain('用量记录');
+    expect(find(await runDoctor({ json: true }, withBots('not json' as unknown, {}, ['kimi-k2.5'])), 'usage.unpriced')?.detail).toContain('kimi-k2.5');
   });
 
   it('价格表没有的已配置型号为 warn，只列未定价的', async () => {
@@ -1067,6 +1105,28 @@ describe('默认探针（真实系统，仅限临时目录与本地端口）', (
       expect(result.appliedVersion).toBe(14);
       expect(result.values?.[larkBotsConfigKey]).toBe('[]');
       expect(result.values?.[AUTH_TOKEN_CONFIG_KEY]).toBeUndefined();
+      expect(result.unpricedUsageModels).toBeUndefined();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('数据库探针：读出近 30 天账本因型号未知记为未定价的型号', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dutydeck-doctor-db-'));
+    try {
+      const file = join(root, 'dutydeck.db');
+      const writer = new Database(file);
+      writer.exec('CREATE TABLE usage_ledger (recorded_at TEXT NOT NULL, model TEXT, data_status TEXT NOT NULL, unpriced_reason TEXT)');
+      const recent = new Date().toISOString(); const old = new Date(Date.now() - 40 * 86_400_000).toISOString();
+      const insert = writer.prepare('INSERT INTO usage_ledger VALUES (?, ?, ?, ?)');
+      insert.run(recent, 'claude-opus-5-6', 'unpriced', 'unknown_model');
+      insert.run(recent, 'claude-opus-5-6', 'unpriced', 'unknown_model');
+      insert.run(recent, 'claude-sonnet-5', 'unpriced', 'usage_incomplete');
+      insert.run(recent, 'gpt-5.2', 'estimated', null);
+      insert.run(recent, null, 'unpriced', 'unknown_model');
+      insert.run(old, 'kimi-k2.5', 'unpriced', 'unknown_model');
+      writer.close();
+      expect(defaultDatabaseProbe(file, []).unpricedUsageModels).toEqual(['claude-opus-5-6']);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

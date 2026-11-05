@@ -157,8 +157,17 @@ describe('secret guard', () => {
       expect(reason(run('mcp__fs__exec', { argv: ['rm', 'x'] }))).toBe('当前飞书发送人不在高危操作允许名单中。没有执行。不要重试同一命令或换写法绕过，请让有高危授权的人确认。');
       expect(reason(run('Bash', { command: 'cat .env' }))).toContain('Dutydeck 凭据保护');
       expect(reason(run('Bash', { command: 'pnpm test' }))).toBe('');
+      // 原因自带句号时不拼出“。。”。
+      policy({ enabled: true, authorized: false, pattern: '.*', reason: '群访问权限已撤销。' });
+      expect(reason(run('Bash', { command: 'pnpm test' }))).toBe('群访问权限已撤销。没有执行。不要重试同一命令或换写法绕过，请让有高危授权的人确认。');
+      // 正则写错不是权限问题：照样拒绝，但不让人去找高危授权人。
       policy({ enabled: true, authorized: false, pattern: '(' });
-      expect(reason(run('Bash', { command: 'pnpm test' }))).toContain('正则匹配失败');
+      const broken = reason(run('Bash', { command: 'pnpm test' }));
+      expect(broken).toContain('高危正则无法使用');
+      expect(broken).toContain('已按拒绝处理，没有执行');
+      expect(broken).toContain('请让管理员检查配置的高危操作正则');
+      expect(broken).not.toContain('高危授权');
+      expect(broken).not.toContain('。。');
       policy({ enabled: true, authorized: true, pattern: '(?:^|\\s)rm\\b' });
       expect(run('Bash', { command: 'rm -rf /tmp/example' }).stdout).toBe('');
     } finally { rmSync(root, { recursive: true, force: true }); }

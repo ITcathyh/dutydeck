@@ -69,6 +69,22 @@ describe('Lark Agent security hooks', () => {
     expect(reason).toBe('当前飞书发送人不在高危操作允许名单中。没有执行。不要重试同一命令或换写法绕过，请让有高危授权的人确认。');
   });
 
+  it('does not double the full stop, and reports a broken pattern as a check failure rather than missing authorization', async () => {
+    const workspace = await mkdtemp(join(tmpdir(), 'dutydeck-hook-')); workspaces.push(workspace);
+    await installLarkHook('cursor', workspace);
+    const policyDirectory = join(workspace, '.dutydeck', 'security', 'sessions');
+    await mkdir(policyDirectory, { recursive: true });
+    const reasonOf = async (policy: object) => {
+      await writeFile(join(policyDirectory, 'ses_wording.json'), JSON.stringify(policy));
+      const denied = await runGuard(workspace, 'cursor', 'ses_wording', { tool_name: 'Bash', tool_input: { command: 'rm x' } });
+      return JSON.parse(denied.output).user_message as string;
+    };
+    expect(await reasonOf({ enabled: true, authorized: false, pattern: '.*', reason: '群访问权限已撤销。' })).toBe('群访问权限已撤销。没有执行。不要重试同一命令或换写法绕过，请让有高危授权的人确认。');
+    const broken = await reasonOf({ enabled: true, authorized: false, pattern: '(' });
+    expect(broken).toMatch(/^高危正则无法使用：.*。已按拒绝处理，没有执行。这是风险管控的检查本身出错，不是权限不够；请让管理员检查配置的高危操作正则。$/);
+    expect(broken).not.toContain('高危授权');
+  });
+
   it('uses the same wording when the policy carries no reason', async () => {
     const workspace = await mkdtemp(join(tmpdir(), 'dutydeck-hook-')); workspaces.push(workspace);
     await installLarkHook('codex', workspace);
@@ -146,7 +162,7 @@ describe('Lark Agent security hooks', () => {
     const workspace = await mkdtemp(join(tmpdir(), 'dutydeck-hook-')); workspaces.push(workspace);
     expect(await installLarkHook('pi', workspace)).toMatchObject({ agentId: 'pi', supported: true, installed: true });
     const extension = await readFile(join(workspace, '.pi/extensions/dutydeck-high-risk-guard.ts'), 'utf8');
-    expect(extension).toContain('dutydeck-high-risk-guard-v5');
+    expect(extension).toContain('dutydeck-high-risk-guard-v6');
     expect(extension).toContain("pi.on('tool_call'");
     expect(await larkHookStatus('claudecode', workspace)).toMatchObject({ agentId: 'claude', supported: true, installed: false });
     expect(await larkHookStatus('cursoragent', workspace)).toMatchObject({ agentId: 'cursor', supported: true, installed: false });
@@ -198,6 +214,14 @@ describe('Lark Agent security hooks', () => {
       expect(await call('bash', { command: 'pnpm test' })).toBeUndefined();
       await writeFile(policyPath, JSON.stringify({ enabled: true, authorized: false, pattern: 'sudo\\b', reason: 'pi blocked' }));
       expect(await call('bash', { command: 'sudo reboot' })).toEqual({ block: true, reason: 'pi blocked。没有执行。不要重试同一命令或换写法绕过，请让有高危授权的人确认。' });
+      await writeFile(policyPath, JSON.stringify({ enabled: true, authorized: false, pattern: '.*', reason: '群访问权限已撤销。' }));
+      expect(await call('bash', { command: 'pnpm test' })).toEqual({ block: true, reason: '群访问权限已撤销。没有执行。不要重试同一命令或换写法绕过，请让有高危授权的人确认。' });
+      await writeFile(policyPath, JSON.stringify({ enabled: true, authorized: false, pattern: '(' }));
+      const broken = await call('bash', { command: 'pnpm test' }) as { block: boolean; reason: string };
+      expect(broken.block).toBe(true);
+      expect(broken.reason).toContain('高危正则无法使用');
+      expect(broken.reason).toContain('请让管理员检查配置的高危操作正则');
+      expect(broken.reason).not.toContain('高危授权');
       await writeFile(policyPath, JSON.stringify({ enabled: true, authorized: true, pattern: 'sudo\\b' }));
       expect(await call('read', { path: '~/.codex/auth.json' })).toBeUndefined();
     } finally {

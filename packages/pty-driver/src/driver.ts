@@ -371,6 +371,7 @@ export class PtyCliDriver implements AgentDriver {
 
     this.lastArgs = this.claudeSettings.args(this.agent.args, this.adapter.buildArgs({
       sessionId: this.sessionId,
+      command: this.agent.command,
       ...(this.optsNativeForkSessionId ? { nativeForkSessionId: this.optsNativeForkSessionId } : {}),
       cwd: this.agent.cwd,
       model: this.agent.model,
@@ -1926,6 +1927,7 @@ export class PtyCliDriver implements AgentDriver {
   private sessionContext(): AdapterSessionContext {
     return {
       sessionId: this.sessionId,
+      command: this.agent.command,
       cwd: this.cwd,
       model: this.agent.model,
       codexProfile: this.agent.codexProfile,

@@ -123,7 +123,14 @@ export function secretGuardFinding(event, { home = process.env.HOME || homedir()
 }
 
 /** 高危拦截的统一说明，接在拦截原因后面：不回显命令，只告诉 Agent 不要绕过、该找谁。 */
-export const highRiskBlockedSuffix = '。没有执行。不要重试同一命令或换写法绕过，请让有高危授权的人确认。';
+export const highRiskBlockedSuffix = '没有执行。不要重试同一命令或换写法绕过，请让有高危授权的人确认。';
+/** 高危正则没能跑完（超时、语法错误、隔离线程失败）时的说明：按拒绝处理，但不是权限问题，找授权人没用。 */
+export const highRiskCheckFailedSuffix = '已按拒绝处理，没有执行。这是风险管控的检查本身出错，不是权限不够；请让管理员检查配置的高危操作正则。';
+/** 原因本身已以句末标点结尾时不再补句号，避免拼出“。。”。生成的 Hook 脚本内联同一条正则。 */
+export const sentenceEnd = /[。！？.!?]$/;
+const sentence = text => sentenceEnd.test(text) ? text : `${text}。`;
+export const highRiskBlockedReason = reason => sentence(reason.trim()) + highRiskBlockedSuffix;
+export const highRiskCheckFailedReason = detail => sentence(detail) + highRiskCheckFailedSuffix;
 
 export function secretGuardReason(finding) {
   return `Dutydeck 凭据保护：这一步会读取或改动${finding.label}（${finding.match}），已拦截，没有执行。`
@@ -178,11 +185,11 @@ async function highRiskReason(policy, event) {
   return new Promise(resolve => {
     const worker = new Worker(regexWorker, { eval: true, workerData: { pattern: policy.pattern, input } });
     let settled = false;
-    const finish = reason => { if (settled) return; settled = true; clearTimeout(timer); worker.removeAllListeners(); void worker.terminate(); resolve(reason ? reason + highRiskBlockedSuffix : reason); };
-    const timer = setTimeout(() => finish('正则匹配超过 1000ms，已终止并拒绝操作'), 1000);
-    worker.once('message', result => finish(result.error ? `正则匹配失败：${result.error}` : result.matched ? policy.reason || '当前飞书发送人无权执行高危操作' : ''));
-    worker.once('error', error => finish(`正则匹配隔离任务失败：${error.message}`));
-    worker.once('exit', code => { if (code !== 0) finish(`正则匹配隔离任务异常退出：${code}`); });
+    const finish = reason => { if (settled) return; settled = true; clearTimeout(timer); worker.removeAllListeners(); void worker.terminate(); resolve(reason); };
+    const timer = setTimeout(() => finish(highRiskCheckFailedReason('高危正则匹配超过 1000ms，已终止')), 1000);
+    worker.once('message', result => finish(result.error ? highRiskCheckFailedReason(`高危正则无法使用：${result.error}`) : result.matched ? highRiskBlockedReason(policy.reason || '当前飞书发送人无权执行高危操作') : ''));
+    worker.once('error', error => finish(highRiskCheckFailedReason(`高危正则匹配的隔离线程失败：${error.message}`)));
+    worker.once('exit', code => { if (code !== 0) finish(highRiskCheckFailedReason(`高危正则匹配的隔离线程异常退出：${code}`)); });
   });
 }
 

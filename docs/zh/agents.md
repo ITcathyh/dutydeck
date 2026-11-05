@@ -6,7 +6,7 @@ Dutydeck 默认优先用终端适配器运行本机已安装的 CLI Agent，新�
 
 内置 CodeM（`codem`）终端适配器使用显式 `--session` / `--resume` 会话标识，不使用“最近会话”猜测；需要本机已安装 `codem` 命令，权限为 `full-trust` 时追加 `--yolo`。
 
-内置 Kimi（`kimi`）终端适配器在权限为 `full-trust` 时，新建和恢复会话都传 `--auto`（Never Ask），不再传 `--yolo`：新版 Kimi Code 里 `--yolo` 只放行普通工具调用，高危操作仍会停下等人确认。`--auto` 需要 Kimi Code 0.10.0 及以上。
+内置 Kimi（`kimi`）终端适配器在权限为 `full-trust` 时，新建和恢复会话都会先读一次 `kimi --help`（每个命令每个进程只读一次）：帮助里列出 `--auto`（Never Ask）就传 `--auto`，否则传 `--yolo`。Kimi Code 里 `--yolo` 只放行普通工具调用，高危操作仍会停下等人确认；同样叫 `kimi` 的 Python 版 kimi-cli 没有 `--auto`，在那里 `--yolo` 就是全部放行。
 
 内置 Codex 的 `codex`、`codex-cli` 终端入口及「Codex (ACP)」（`codex-acp`）在发现探测和启动执行进程时，优先遵循显式设置的 `CODEX_PATH`，支持指向 `PATH` 之外的可执行程序；未显式设置时使用 Dutydeck 进程 `PATH` 中的 Codex，沿用用户的登录和配置；升级用户安装的 Codex 后，新启动的进程自动使用新版本。找不到用户安装或显式指定路径的 Codex 时会报错，不使用 ACP 适配器缓存中的版本。
 

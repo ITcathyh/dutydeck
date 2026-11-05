@@ -36,7 +36,7 @@ import { daemonPaths, readDaemonStatus, resolveDaemonDir } from '../daemon/daemo
 import { accessMode } from '../service.js';
 import { createCliUi, type CliUi } from '../cli-ui.js';
 import { locateEnvFile } from '../env-location.js';
-import { defaultAgentProbe, defaultDatabaseProbe, defaultPortProbe } from './probes.js';
+import { defaultAgentProbe, defaultDatabaseProbe, defaultPortProbe, defaultProcessUid } from './probes.js';
 import { agentsToProbe, checkDefaultAgents, checkDroppedAgents, readDefaultAgents } from './agent-checks.js';
 import { pluginDoctorChecks } from '../plugins/doctor.js';
 import {
@@ -203,14 +203,18 @@ export async function runDoctor(
 
   // ---- 1. Node 版本 ----
   checks.push(checkNodeVersion(nodeVersion));
-  const rootCheck = checkRunAsRoot(dependencies.getuid ? dependencies.getuid() : process.getuid?.());
-  if (rootCheck) checks.push(rootCheck);
 
   // ---- 2. 守护进程 ----
   progress('检查守护进程状态');
   const status = dependencies.daemonStatus
     ? dependencies.daemonStatus()
     : daemonStatus();
+  // root 检查看守护进程：Agent 继承的是它的身份。读不到守护进程的 uid 时才退回当前命令的。
+  const daemonUid = status.running && status.pid ? (dependencies.processUid ?? defaultProcessUid)(status.pid) : undefined;
+  const rootCheck = daemonUid !== undefined
+    ? checkRunAsRoot({ subject: 'daemon', uid: daemonUid, pid: status.pid })
+    : checkRunAsRoot({ subject: 'command', uid: dependencies.getuid ? dependencies.getuid() : process.getuid?.() });
+  if (rootCheck) checks.push(rootCheck);
   const record = dependencies.daemonRecord
     ? dependencies.daemonRecord()
     : readDaemonStatus(resolveDaemonDir());
@@ -310,7 +314,7 @@ export async function runDoctor(
 
   // 价格表来自环境变量覆盖或内置表；覆盖值解析失败时服务本身就起不来，这里不重复报。
   const unpriced = databaseUnreadable ? undefined : (() => {
-    try { return checkUnpricedModels(probe.values?.[larkBotsConfigKey], parseUsagePricing(env.DUTYDECK_USAGE_PRICING_JSON)); } catch { return undefined; }
+    try { return checkUnpricedModels(probe.values?.[larkBotsConfigKey], parseUsagePricing(env.DUTYDECK_USAGE_PRICING_JSON), probe.unpricedUsageModels); } catch { return undefined; }
   })();
   if (unpriced) checks.push(unpriced);
 
