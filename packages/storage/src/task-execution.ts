@@ -8,7 +8,7 @@ import {
   type SessionFence, type TaskAttempt, type TaskRequestV1, type NativeContextSelection, type NativeContextRef, type NativeContextBinding,
   type SteeringOperation, type LegacyRetirementCandidate, type LegacyRetirementReceipt, type LegacyRetirementResult, type TaskExecutionReadContext
 } from '@dutydeck/shared';
-import type { OpenControl } from './database-control.js';
+import { cachedStatement, type OpenControl } from './database-control.js';
 import { listConfigByJsonField } from './config-query.js';
 import { currentProcessIdentity, observeProcess } from './process-identity.js';
 import { resolveExecutionWorkspace, type ExecutionWorkspaceIdentity } from './execution-workspace.js';
@@ -45,11 +45,12 @@ function noCredentials(value: unknown): void {
 export function createTaskExecutionRepository(db: Database.Database, control: OpenControl): ExecutionRepository {
   // Hot-path statements are prepared once, on first use: the repository can be built before migrations create its tables.
   const statement = (sql: string) => { let prepared: Database.Statement | undefined; return () => (prepared ??= db.prepare(sql)); };
+  const cached = (sql: string) => cachedStatement(db, sql);
   const authorityRow = statement('SELECT authority FROM execution_authority WHERE id=1');
   const authority = () => (authorityRow().get() as { authority: 'legacy' | 'ledger_v1' }).authority;
   const requireLedger = () => { if (authority() !== 'ledger_v1') fail('EXECUTION_AUTHORITY_LEGACY'); };
   const session = (sessionId: string): Session => {
-    const row = db.prepare('SELECT * FROM sessions WHERE id=?').get(sessionId) as Record<string, unknown> | undefined;
+    const row = cached('SELECT * FROM sessions WHERE id=?').get(sessionId) as Record<string, unknown> | undefined;
     if (!row) fail('SESSION_NOT_FOUND');
     const names: Record<string, string> = { terminal_backend: 'terminalBackend', agent_id: 'agentId', run_id: 'runId', source_id: 'sourceId', permission_mode: 'permissionMode', system_prompt: 'systemPrompt', reasoning_effort: 'reasoningEffort', created_at: 'createdAt', updated_at: 'updatedAt', archived_at: 'archivedAt' };
     return Object.fromEntries(Object.entries(row).filter(([, v]) => v !== null).map(([k, v]) => [names[k] ?? k, v])) as unknown as Session;
@@ -72,13 +73,13 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
   };
   const attemptRow = statement('SELECT json FROM task_attempts WHERE id=?');
   const attempt = (attemptId: string) => rowJson<TaskAttempt>(attemptRow().get(attemptId));
-  const taskAttempts = (taskId: string) => db.prepare('SELECT json FROM task_attempts WHERE task_id=? ORDER BY number,id').all(taskId).map(row => rowJson<TaskAttempt>(row)!);
+  const taskAttempts = (taskId: string) => cached('SELECT json FROM task_attempts WHERE task_id=? ORDER BY number,id').all(taskId).map(row => rowJson<TaskAttempt>(row)!);
   const getTaskExecutionState: ExecutionRepository['getTaskExecutionState'] = taskId => {
     const t = task(taskId); if (!t) return;
     requireLedger();
     return { task: t, currentAttempt: t.currentAttemptId ? attempt(t.currentAttemptId) : undefined, attempts: taskAttempts(t.id), steering: taskSteering(t.id) };
   };
-  const attempts = (sessionId: string) => db.prepare('SELECT json FROM task_attempts WHERE session_id=? ORDER BY number,id').all(sessionId).map(row => rowJson<TaskAttempt>(row)!);
+  const attempts = (sessionId: string) => cached('SELECT json FROM task_attempts WHERE session_id=? ORDER BY number,id').all(sessionId).map(row => rowJson<TaskAttempt>(row)!);
   const readResource = (row: unknown): DriverResource | undefined => {
     if (!row) return;
     const r = parseStored(taskExecutionSchemas.resource, rowJson<unknown>(row));
@@ -97,8 +98,8 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     if(r.nativeBindings?.some(binding=>r.purpose!=='acp_native_context'||binding.sessionId!==r.sessionId||binding.context.resourceId!==r.resourceId||binding.context.identityId!==r.identity?.identityId||binding.context.originRunId!==r.runId))fail('NATIVE_CONTEXT_BINDING_INVALID');
     return r;
   };
-  const resourceById = db.prepare('SELECT json FROM driver_resources WHERE id=?');
-  const resourcesBySession = db.prepare('SELECT json FROM driver_resources WHERE session_id=? ORDER BY rowid');
+  const resourceById = cached('SELECT json FROM driver_resources WHERE id=?');
+  const resourcesBySession = cached('SELECT json FROM driver_resources WHERE session_id=? ORDER BY rowid');
   const resource = (resourceId: string) => readResource(resourceById.get(resourceId));
   const resources = (sessionId: string) => resourcesBySession.all(sessionId).map(row => readResource(row)!);
   const assertChecks = (sessionId: string, checks: ResourceCheckRef[]) => {
@@ -107,15 +108,15 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
       if (!r || r.sessionId !== sessionId || r.revision !== check.expectedRevision || r.observations.at(-1)?.observationId !== check.observationId) fail('RESOURCE_OBSERVATION_CONFLICT');
     }
   };
-  const steeringOperation = (operationId: string) => rowJson<SteeringOperation>(db.prepare('SELECT json FROM task_steering_operations WHERE id=?').get(operationId));
-  const taskSteering = (taskId: string) => rowJson<SteeringOperation>(db.prepare('SELECT json FROM task_steering_operations WHERE task_id=? ORDER BY rowid DESC LIMIT 1').get(taskId));
-  const steeringBlockers = (sessionId: string): ExecutionBlocker[] => (db.prepare("SELECT task_id FROM task_steering_operations WHERE session_id=? AND state IN ('pending','unknown')").all(sessionId) as Array<{task_id:string}>).map(row => ({code:'STEERING_DELIVERY_UNKNOWN',sessionId,taskId:row.task_id}));
+  const steeringOperation = (operationId: string) => rowJson<SteeringOperation>(cached('SELECT json FROM task_steering_operations WHERE id=?').get(operationId));
+  const taskSteering = (taskId: string) => rowJson<SteeringOperation>(cached('SELECT json FROM task_steering_operations WHERE task_id=? ORDER BY rowid DESC LIMIT 1').get(taskId));
+  const steeringBlockers = (sessionId: string): ExecutionBlocker[] => (cached("SELECT task_id FROM task_steering_operations WHERE session_id=? AND state IN ('pending','unknown')").all(sessionId) as Array<{task_id:string}>).map(row => ({code:'STEERING_DELIVERY_UNKNOWN',sessionId,taskId:row.task_id}));
   // A manual settlement can deliberately retain an unknown outcome while releasing
   // admission. Only unresolved attempts (or missing ledger evidence) still hold it.
-  const unresolvedUnknownTask = (sessionId: string) => db.prepare(`SELECT t.id FROM tasks t
+  const unresolvedUnknownTask = (sessionId: string) => cached(`SELECT t.id FROM tasks t
     LEFT JOIN task_attempts a ON a.id=t.current_attempt_id AND a.task_id=t.id
     WHERE t.session_id=? AND t.status='reconcile_required' AND (a.id IS NULL OR a.state!='settled') LIMIT 1`).get(sessionId) as {id:string}|undefined;
-  const saveSteering = (value: SteeringOperation) => db.prepare('UPDATE task_steering_operations SET state=?,revision=?,json=? WHERE id=?').run(value.state,value.revision,json(value),value.operationId);
+  const saveSteering = (value: SteeringOperation) => cached('UPDATE task_steering_operations SET state=?,revision=?,json=? WHERE id=?').run(value.state,value.revision,json(value),value.operationId);
   const sameController = (a: ExecutionController, b: ExecutionController) => a.accessId === b.accessId && a.instanceId === b.instanceId && a.generation === b.generation;
   const resourceSafe = (r: DriverResource, owner?: ExecutionController): boolean => {
     if (r.purpose === 'acp_native_context') return Boolean(r.nativeReplacement || r.stage === 'created' && r.identity);
@@ -128,7 +129,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
   };
   const externalBlockers = (sessionId: string): ExecutionBlocker[] => {
     const result: ExecutionBlocker[] = [];
-    for (const row of db.prepare("SELECT key,value FROM configs WHERE key IN (?,?) OR (key>=? AND key<?)").all(`runtime_driver_stop_block:${sessionId}`, `runtime_workspace:${sessionId}`, `runtime_verification:${sessionId}:`, `runtime_verification:${sessionId};`) as Array<{ key: string; value: string }>) {
+    for (const row of cached("SELECT key,value FROM configs WHERE key IN (?,?) OR (key>=? AND key<?)").all(`runtime_driver_stop_block:${sessionId}`, `runtime_workspace:${sessionId}`, `runtime_verification:${sessionId}:`, `runtime_verification:${sessionId};`) as Array<{ key: string; value: string }>) {
       if (row.key === `runtime_driver_stop_block:${sessionId}` && row.value === '') continue;
       try {
         const v = JSON.parse(row.value);
@@ -146,19 +147,19 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
   const blockers = (sessionId: string, owner?: ExecutionController): ExecutionBlocker[] => [
     ...resources(sessionId).filter(r => !resourceSafe(r, owner)).map(r => ({ sessionId, resourceId: r.resourceId, code: 'DRIVER_RESOURCE_UNSAFE' })),
     ...externalBlockers(sessionId),
-    ...(db.prepare("SELECT 1 FROM task_attempts WHERE session_id=? AND state='legacy_unresolved' LIMIT 1").get(sessionId) ? [{ sessionId, code: 'LEGACY_MULTIPLE_EXECUTIONS' }] : [])
+    ...(cached("SELECT 1 FROM task_attempts WHERE session_id=? AND state='legacy_unresolved' LIMIT 1").get(sessionId) ? [{ sessionId, code: 'LEGACY_MULTIPLE_EXECUTIONS' }] : [])
   ];
   const workspaceIdentity = (sessionId: string, freeze = false): ExecutionWorkspaceIdentity => {
     const current = resolveExecutionWorkspace(session(sessionId).cwd);
     const key = `runtime_execution_workspace:${sessionId}`;
-    const stored = db.prepare('SELECT value FROM configs WHERE key=?').get(key) as { value: string } | undefined;
+    const stored = cached('SELECT value FROM configs WHERE key=?').get(key) as { value: string } | undefined;
     if (stored && !same(JSON.parse(stored.value), current)) fail('WORKSPACE_RESOURCE_IDENTITY_CHANGED');
-    const workspace = db.prepare('SELECT value FROM configs WHERE key=?').get(`runtime_workspace:${sessionId}`) as { value: string } | undefined;
+    const workspace = cached('SELECT value FROM configs WHERE key=?').get(`runtime_workspace:${sessionId}`) as { value: string } | undefined;
     if (workspace) {
       const value = JSON.parse(workspace.value);
       if (value.gitCommonDir && current.key !== `git:${value.gitCommonDir}`) fail('WORKSPACE_RESOURCE_IDENTITY_CHANGED');
     }
-    if (!stored && freeze) db.prepare('INSERT INTO configs(key,value) VALUES(?,?)').run(key,json(current));
+    if (!stored && freeze) cached('INSERT INTO configs(key,value) VALUES(?,?)').run(key,json(current));
     return current;
   };
   const idleResourceSafe = (r: DriverResource, checks: ResourceCheckRef[], owner?: ExecutionController): boolean => {
@@ -196,7 +197,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
       if (!receipt) return false;
       const { receiptId, ...content } = receipt, s = session(r.sessionId);
       if (!receiptEvidenceValid(receipt, s.id)) return false;
-      const entity = (db.prepare('SELECT entity FROM dutydeck_control WHERE id=1').get() as {entity:string}).entity;
+      const entity = (cached('SELECT entity FROM dutydeck_control WHERE id=1').get() as {entity:string}).entity;
       return receiptId === `legacy_retirement_${hash(stable(content))}` && receipt.sessionId === r.sessionId
         && receipt.runId === r.runId && s.runId === receipt.runId && receipt.databaseEntity === entity
         && s.protocol === receipt.protocol && s.state === 'stopped' && s.archivedAt === receipt.archivedAt
@@ -209,13 +210,13 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     catch { return [{ code: 'WORKSPACE_RESOURCE_UNVERIFIABLE', sessionId }]; }
     const result: ExecutionBlocker[] = [];
     // 飞书记忆作业只写自己的记忆目录：不参与仓库互斥，只和在同一目录里执行的会话（包括其他记忆作业）互斥。
-    const memory = (id: string) => (db.prepare('SELECT source FROM sessions WHERE id=?').get(id) as {source:string|null}|undefined)?.source === 'lark-memory';
+    const memory = (id: string) => (cached('SELECT source FROM sessions WHERE id=?').get(id) as {source:string|null}|undefined)?.source === 'lark-memory';
     const selfMemory = memory(sessionId);
     const admissionExternal = (id: string): ExecutionBlocker[] => {
-      const configuration = db.prepare('SELECT value FROM configs WHERE key=?').get(`runtime_driver_configuration:${id}`) as {value:string}|undefined;
+      const configuration = cached('SELECT value FROM configs WHERE key=?').get(`runtime_driver_configuration:${id}`) as {value:string}|undefined;
       return [...externalBlockers(id),...(configuration?.value ? [{code:'DRIVER_CONFIGURATION_UNKNOWN',sessionId:id}] : [])];
     };
-    const candidates = db.prepare(`SELECT DISTINCT session_id FROM task_attempts WHERE state IN ('preparing','active','reconcile_required','legacy_unresolved')
+    const candidates = cached(`SELECT DISTINCT session_id FROM task_attempts WHERE state IN ('preparing','active','reconcile_required','legacy_unresolved')
       UNION SELECT session_id FROM tasks WHERE status='reconcile_required'
       ${preparation ? "UNION SELECT session_id FROM tasks WHERE status='queued'" : ''}
       UNION SELECT session_id FROM task_steering_operations WHERE state IN ('pending','unknown')
@@ -227,8 +228,8 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     for (const {session_id: otherId} of candidates) {
       if (otherId === sessionId) continue;
       const directoryOnly = selfMemory || memory(otherId);
-      const unresolved = db.prepare(`SELECT task_id AS taskId,id AS attemptId FROM task_attempts WHERE session_id=? AND state IN ('preparing','active','reconcile_required','legacy_unresolved') LIMIT 1`).get(otherId) as {taskId:string;attemptId:string}|undefined;
-      const queued = preparation && db.prepare("SELECT id FROM tasks WHERE session_id=? AND status='queued' LIMIT 1").get(otherId) as {id:string}|undefined;
+      const unresolved = cached(`SELECT task_id AS taskId,id AS attemptId FROM task_attempts WHERE session_id=? AND state IN ('preparing','active','reconcile_required','legacy_unresolved') LIMIT 1`).get(otherId) as {taskId:string;attemptId:string}|undefined;
+      const queued = preparation && cached("SELECT id FROM tasks WHERE session_id=? AND status='queued' LIMIT 1").get(otherId) as {id:string}|undefined;
       const unknown = unresolvedUnknownTask(otherId);
       const steering = steeringBlockers(otherId);
       const unsafe = resources(otherId).filter(r => !resourceSafe(r) && !retiredLegacyResourceSafe(r) && !idleResourceSafe(r,checks,owner));
@@ -237,7 +238,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
       let other: ExecutionWorkspaceIdentity;
       try { other = workspaceIdentity(otherId, freeze); }
       catch {
-        const frozen = db.prepare('SELECT value FROM configs WHERE key=?').get(`runtime_execution_workspace:${otherId}`) as {value:string}|undefined;
+        const frozen = cached('SELECT value FROM configs WHERE key=?').get(`runtime_execution_workspace:${otherId}`) as {value:string}|undefined;
         let knownKey: string | undefined, knownPath: string | undefined;
         try { const known = frozen ? JSON.parse(frozen.value) : undefined; knownKey = known?.key; knownPath = known?.cwd?.path; } catch { /* Corrupt identity remains unknown. */ }
         if (directoryOnly ? knownPath && knownPath !== identity.cwd.path : knownKey && knownKey !== identity.key) continue;
@@ -252,8 +253,8 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
   // Count actual claims and unresolved execution resources, never pure accepted queues.
   const assertWorkItemCapacity = (sessionId: string, checks: ResourceCheckRef[], owner: ExecutionController) => {
     if (session(sessionId).source !== 'work_item') return;
-    const binding = db.prepare('SELECT config_key FROM work_item_sessions WHERE session_id=? ORDER BY config_key LIMIT 1').get(sessionId) as {config_key:string}|undefined;
-    const candidates = db.prepare(`SELECT DISTINCT s.id,w.config_key FROM sessions s
+    const binding = cached('SELECT config_key FROM work_item_sessions WHERE session_id=? ORDER BY config_key LIMIT 1').get(sessionId) as {config_key:string}|undefined;
+    const candidates = cached(`SELECT DISTINCT s.id,w.config_key FROM sessions s
       LEFT JOIN work_item_sessions w ON w.session_id=s.id
       WHERE s.source='work_item' AND s.id!=? AND (
         EXISTS (SELECT 1 FROM task_attempts a WHERE a.session_id=s.id AND a.state IN ('preparing','active','reconcile_required','legacy_unresolved'))
@@ -274,7 +275,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     return input;
   };
   const inputFor = (taskId: string): AcceptedTaskInput | undefined => {
-    const row = db.prepare('SELECT accepted_json FROM task_requests WHERE task_id=?').get(taskId) as { accepted_json: string | null } | undefined;
+    const row = cached('SELECT accepted_json FROM task_requests WHERE task_id=?').get(taskId) as { accepted_json: string | null } | undefined;
     return row?.accepted_json ? readInput(row.accepted_json) : undefined;
   };
   const inputBlockers = (t: ExecutionTask): ExecutionBlocker[] => {
@@ -309,12 +310,12 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     if (!row) fail('SESSION_NOT_FOUND');
     if (row.run_id !== f.runId) fail('SESSION_RUN_CONFLICT');
   };
-  const saveTask = (t: ExecutionTask) => db.prepare('UPDATE tasks SET status=?, current_attempt_id=?, revision=?, queue_position=?, updated_at=? WHERE id=?').run(t.status, t.currentAttemptId ?? null, t.revision, t.queuePosition ?? null, t.updatedAt, t.id);
-  const saveAttempt = (a: TaskAttempt) => db.prepare(`INSERT INTO task_attempts (id,task_id,session_id,run_id,number,revision,state,submission_state,submission_id,settlement_id,json) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+  const saveTask = (t: ExecutionTask) => cached('UPDATE tasks SET status=?, current_attempt_id=?, revision=?, queue_position=?, updated_at=? WHERE id=?').run(t.status, t.currentAttemptId ?? null, t.revision, t.queuePosition ?? null, t.updatedAt, t.id);
+  const saveAttempt = (a: TaskAttempt) => cached(`INSERT INTO task_attempts (id,task_id,session_id,run_id,number,revision,state,submission_state,submission_id,settlement_id,json) VALUES (?,?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,state=excluded.state,submission_state=excluded.submission_state,submission_id=excluded.submission_id,settlement_id=excluded.settlement_id,json=excluded.json`).run(a.attemptId, a.taskId, a.sessionId, a.runId, a.number, a.revision, a.state, a.submissionState, a.submission?.submissionId ?? null, a.settlementId ?? null, json(a));
-  const saveResource = (r: DriverResource) => db.prepare(`INSERT INTO driver_resources (id,session_id,run_id,parent_id,identity_id,revision,json) VALUES (?,?,?,?,?,?,?)
+  const saveResource = (r: DriverResource) => cached(`INSERT INTO driver_resources (id,session_id,run_id,parent_id,identity_id,revision,json) VALUES (?,?,?,?,?,?,?)
     ON CONFLICT(id) DO UPDATE SET identity_id=excluded.identity_id,revision=excluded.revision,json=excluded.json`).run(r.resourceId, r.sessionId, r.runId, r.parentResourceId ?? null, r.identity?.identityId ?? null, r.revision, json(r));
-  const insertAction = (q: QueueAction) => db.prepare('INSERT INTO task_queue_actions (id,session_id,task_id,revision,state,json) VALUES (?,?,?,?,?,?)').run(q.operationId, q.sessionId, q.taskId, q.revision, q.state, json(q));
+  const insertAction = (q: QueueAction) => cached('INSERT INTO task_queue_actions (id,session_id,task_id,revision,state,json) VALUES (?,?,?,?,?,?)').run(q.operationId, q.sessionId, q.taskId, q.revision, q.state, json(q));
   const decodeEvent = (r: any): AgentEvent => ({ id: r.id, sessionId: r.session_id, sequence: r.sequence, type: r.type, timestamp: r.timestamp, data: JSON.parse(r.data), ...(r.raw !== null ? { raw: r.raw } : {}), ...(r.task_id ? { taskId: r.task_id } : {}), ...(r.attempt_id ? { attemptId: r.attempt_id } : {}), ...(r.settlement_id ? { settlementId: r.settlement_id } : {}) });
   type AppendInput = { id: string; type: AgentEvent['type']; data: unknown; sourceId?: string; timestamp?: string; raw?: string };
   const eventsByIdOrSource = statement('SELECT * FROM events WHERE id=? OR (source_key IS NOT NULL AND source_key=?)');
@@ -337,14 +338,14 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     return decodeEvent(eventById().get(event.id));
   };
   const nextPosition = (sessionId: string, position: 'front' | 'back') => {
-    const r = db.prepare("SELECT MIN(COALESCE(queue_position,0)) AS lo,MAX(COALESCE(queue_position,0)) AS hi FROM tasks WHERE session_id=? AND status='queued'").get(sessionId) as { lo: number | null; hi: number | null };
+    const r = cached("SELECT MIN(COALESCE(queue_position,0)) AS lo,MAX(COALESCE(queue_position,0)) AS hi FROM tasks WHERE session_id=? AND status='queued'").get(sessionId) as { lo: number | null; hi: number | null };
     const n = position === 'front' ? Math.min(0, r.lo ?? 0) - 1 : Math.max(0, r.hi ?? 0) + 1;
     if (!Number.isSafeInteger(n)) fail('QUEUE_POSITION_EXHAUSTED');
     return n;
   };
   const nativeKey = (sessionId: string) => `runtime_native_context:${sessionId}`;
   const nativeSelection = (sessionId: string): NativeContextSelection | undefined => {
-    const row = db.prepare('SELECT value FROM configs WHERE key=?').get(nativeKey(sessionId)) as {value:string} | undefined;
+    const row = cached('SELECT value FROM configs WHERE key=?').get(nativeKey(sessionId)) as {value:string} | undefined;
     return row?.value ? parse(taskExecutionSchemas.nativeSelectionSchema, JSON.parse(row.value)) : undefined;
   };
   const nativeResource = (sessionId: string, ref: NativeContextRef) => {
@@ -356,12 +357,12 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     return r;
   };
   const nextNativeRevision = (sessionId:string) => {
-    const row=db.prepare('SELECT value FROM configs WHERE key=?').get(`${nativeKey(sessionId)}:revision`) as {value:string}|undefined;
+    const row=cached('SELECT value FROM configs WHERE key=?').get(`${nativeKey(sessionId)}:revision`) as {value:string}|undefined;
     const value=row?Number(row.value):0;if(!Number.isSafeInteger(value)||value<0||value===Number.MAX_SAFE_INTEGER)fail('NATIVE_CONTEXT_REVISION_INVALID');return value+1;
   };
   const saveNativeSelection = (sessionId: string, selection: NativeContextSelection) => {
-    db.prepare('INSERT INTO configs(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(`${nativeKey(sessionId)}:revision`,String(selection.revision));
-    db.prepare('INSERT INTO configs(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(nativeKey(sessionId), stable(selection));
+    cached('INSERT INTO configs(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(`${nativeKey(sessionId)}:revision`,String(selection.revision));
+    cached('INSERT INTO configs(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(nativeKey(sessionId), stable(selection));
   };
   const actorId = (actor: TaskRequestV1['actor']) => actor.kind === 'unspecified' ? undefined : actor.id;
   /** fresh 计划之前触发留下的会话：须有本计划某次触发的记录，且会话编号由该触发编号派生（与计划服务的 freshSessionId 同一算法）。 */
@@ -374,7 +375,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
   /** current=false 表示计划已换到新会话、这个旧 fresh 会话因未结束的工作被保留（未归档、计划未删除）。 */
   const scheduleScope = (s: Session): { origin: Session; actorId: string; current: boolean } => {
     if (!s.sourceId || !/^ses_schedule_[a-f0-9]{64}$/.test(s.id)) fail('SCHEDULE_EXECUTION_SCOPE_INVALID');
-    const row = db.prepare('SELECT value FROM configs WHERE key=?').get(`session_automation/schedule/${s.sourceId}`) as {value:string}|undefined;
+    const row = cached('SELECT value FROM configs WHERE key=?').get(`session_automation/schedule/${s.sourceId}`) as {value:string}|undefined;
     let value: {schemaVersion?:unknown;id?:unknown;sessionId?:unknown;executionSessionId?:unknown;mode?:unknown;actorId?:unknown;deletedAt?:unknown};
     try { value = JSON.parse(row?.value ?? 'null'); } catch { fail('SCHEDULE_EXECUTION_SCOPE_INVALID'); }
     if (!value || value.schemaVersion !== 1 || value.id !== s.sourceId || (value.mode !== 'independent' && value.mode !== 'fresh')
@@ -416,7 +417,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     if(actor.kind==='unspecified')fail('ACTOR_REQUIRED');
     validateActor({namespace:'runtime',sessionId:f.sessionId,actor},s);
     if(actor.kind==='channel'&&s.source==='work_item') {
-      const original=db.prepare('SELECT request_json FROM task_requests WHERE session_id=? AND request_json IS NOT NULL ORDER BY rowid').all(f.sessionId) as Array<{request_json:string}>;
+      const original=cached('SELECT request_json FROM task_requests WHERE session_id=? AND request_json IS NOT NULL ORDER BY rowid').all(f.sessionId) as Array<{request_json:string}>;
       const actors=original.map(row=>parse(taskRequestV1Schema,JSON.parse(row.request_json)).actor);
       if(!actors.length||actors.some(item=>item.kind!=='channel'||item.appId!==actor.appId))fail('TASK_ACTOR_CONFLICT');
     }
@@ -442,7 +443,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     id.parse(taskId);
     requireLedger();
     const existing = task(taskId); if (!existing) return;
-    const row = db.prepare('SELECT request_json,accepted_json,request_digest FROM task_requests WHERE task_id=?').get(taskId) as {request_json:string|null;accepted_json:string|null;request_digest:string} | undefined;
+    const row = cached('SELECT request_json,accepted_json,request_digest FROM task_requests WHERE task_id=?').get(taskId) as {request_json:string|null;accepted_json:string|null;request_digest:string} | undefined;
     const request = row?.request_json != null ? parse(taskRequestV1Schema,JSON.parse(row.request_json)) : undefined;
     const input = row?.accepted_json != null ? readInput(row.accepted_json) : undefined;
     if (request && request.sessionId !== existing.sessionId || input && input.prompt !== existing.prompt) fail('TASK_ACCEPTANCE_CONFLICT');
@@ -453,7 +454,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
   const lookup = (raw: TaskRequestV1): AcceptedTask | undefined => {
     requireLedger();
     const r = validateRequest(raw);
-    const found = db.prepare('SELECT * FROM task_requests WHERE namespace=? AND session_id=? AND request_key=?').get(r.namespace, r.sessionId, r.key) as any;
+    const found = cached('SELECT * FROM task_requests WHERE namespace=? AND session_id=? AND request_key=?').get(r.namespace, r.sessionId, r.key) as any;
     if (found) {
       if (found.request_digest !== hash(stable(r))) fail('TASK_IDEMPOTENCY_CONFLICT');
       return { task: task(found.task_id)!, input: readInput(found.accepted_json), request: JSON.parse(found.request_json), requestDigest: found.request_digest, replayValidation: 'complete' };
@@ -461,7 +462,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     const legacy = task(`task_${hash(`${r.sessionId}\0${r.key}`)}`);
     if (legacy && legacy.digestVersion === 'legacy_unverifiable') {
       if (legacy.sessionId !== r.sessionId || legacy.prompt !== r.prompt || legacy.executionContext?.actorId !== actorId(r.actor)) fail('TASK_IDEMPOTENCY_CONFLICT');
-      const stored = db.prepare('SELECT accepted_json FROM task_requests WHERE task_id=?').get(legacy.id) as { accepted_json: string | null } | undefined;
+      const stored = cached('SELECT accepted_json FROM task_requests WHERE task_id=?').get(legacy.id) as { accepted_json: string | null } | undefined;
       return { task: legacy, ...(stored?.accepted_json ? { input: readInput(stored.accepted_json) } : {}), replayValidation: 'legacy_partial' };
     }
   };
@@ -470,7 +471,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     const all = attempts(sessionId);
     const state = all.some(a => a.state === 'preparing' || a.state === 'active') ? 'thinking'
       : all.some(a => a.state === 'reconcile_required' || a.state === 'legacy_unresolved' || a.outcome === 'unknown' && task(a.taskId)?.currentAttemptId === a.attemptId) || steeringBlockers(sessionId).length ? 'interrupted' : 'idle';
-    db.prepare('UPDATE sessions SET state=?,updated_at=? WHERE id=?').run(state, timestamp(), sessionId);
+    cached('UPDATE sessions SET state=?,updated_at=? WHERE id=?').run(state, timestamp(), sessionId);
   };
   const transitions = (f: SessionFence, t: ExecutionTask, a: TaskAttempt, settled = false) => {
     saveAttempt(a); saveTask(t); sessionStatus(f.sessionId);
@@ -486,17 +487,17 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
       assertChecks(f.sessionId, parse(checksSchema, decision.resourceChecks));
     }
     const content = { ...f, attemptId: a?.attemptId ?? null, evidence: decision };
-    const old = db.prepare('SELECT json FROM recovery_decisions WHERE id=?').get(decisionId) as { json: string } | undefined;
+    const old = cached('SELECT json FROM recovery_decisions WHERE id=?').get(decisionId) as { json: string } | undefined;
     if (old) { if (old.json !== stable(content)) fail('RECOVERY_DECISION_CONFLICT'); return; }
-    db.prepare('INSERT INTO recovery_decisions VALUES (?,?,?,?)').run(decisionId, f.sessionId, a?.attemptId ?? null, stable(content));
+    cached('INSERT INTO recovery_decisions VALUES (?,?,?,?)').run(decisionId, f.sessionId, a?.attemptId ?? null, stable(content));
   };
   const readUpgradeCounts = (): ExecutionUpgradeCounts => {
-    const tasksCount = (db.prepare('SELECT COUNT(*) AS c FROM tasks').get() as { c: number }).c;
-    const attemptsCount = (db.prepare('SELECT COUNT(*) AS c FROM task_attempts').get() as { c: number }).c;
-    const resourcesCount = (db.prepare('SELECT COUNT(*) AS c FROM driver_resources').get() as { c: number }).c;
-    const hasAccessTable = Boolean(db.prepare("SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name='dutydeck_access'").get());
+    const tasksCount = (cached('SELECT COUNT(*) AS c FROM tasks').get() as { c: number }).c;
+    const attemptsCount = (cached('SELECT COUNT(*) AS c FROM task_attempts').get() as { c: number }).c;
+    const resourcesCount = (cached('SELECT COUNT(*) AS c FROM driver_resources').get() as { c: number }).c;
+    const hasAccessTable = Boolean(cached("SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name='dutydeck_access'").get());
     const registeredAccess = hasAccessTable
-      ? (db.prepare('SELECT COUNT(*) AS c FROM dutydeck_access').get() as { c: number }).c
+      ? (cached('SELECT COUNT(*) AS c FROM dutydeck_access').get() as { c: number }).c
       : 0;
     return { tasks: tasksCount, attempts: attemptsCount, resources: resourcesCount, registeredAccess };
   };
@@ -505,7 +506,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
   const retirementSnapshotDigest = (sessionId: string): string => {
     const rows = (sql: string, ...params: unknown[]) => db.prepare(sql).all(...params);
     return hash(stable({
-      session: db.prepare('SELECT * FROM sessions WHERE id=?').get(sessionId),
+      session: cached('SELECT * FROM sessions WHERE id=?').get(sessionId),
       tasks: rows('SELECT * FROM tasks WHERE session_id=? ORDER BY created_at,rowid', sessionId),
       requests: rows('SELECT * FROM task_requests WHERE session_id=? ORDER BY task_id', sessionId),
       attempts: rows('SELECT * FROM task_attempts WHERE session_id=? ORDER BY number,id', sessionId),
@@ -539,25 +540,25 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     if (sessionResources.some(item => item.resourceId !== expectedResourceId && !resourceSafe(item))) {
       result.push({ sessionId: s.id, code: 'LEGACY_RETIREMENT_OTHER_RESOURCE_UNSAFE' });
     }
-    const nonterminal = db.prepare("SELECT id FROM tasks WHERE session_id=? AND status NOT IN ('completed','failed','interrupted','cancelled') ORDER BY id").all(s.id) as Array<{ id: string }>;
+    const nonterminal = cached("SELECT id FROM tasks WHERE session_id=? AND status NOT IN ('completed','failed','interrupted','cancelled') ORDER BY id").all(s.id) as Array<{ id: string }>;
     result.push(...nonterminal.map(item => ({ sessionId: s.id, taskId: item.id, code: 'LEGACY_RETIREMENT_TASK_ACTIVE' })));
-    const unsettled = db.prepare("SELECT task_id FROM task_attempts WHERE session_id=? AND state!='settled' ORDER BY id").all(s.id) as Array<{ task_id: string }>;
+    const unsettled = cached("SELECT task_id FROM task_attempts WHERE session_id=? AND state!='settled' ORDER BY id").all(s.id) as Array<{ task_id: string }>;
     result.push(...unsettled.map(item => ({ sessionId: s.id, taskId: item.task_id, code: 'LEGACY_RETIREMENT_ATTEMPT_UNSETTLED' })));
-    if (db.prepare("SELECT 1 FROM task_queue_actions WHERE session_id=? AND state='pending' LIMIT 1").get(s.id)) {
+    if (cached("SELECT 1 FROM task_queue_actions WHERE session_id=? AND state='pending' LIMIT 1").get(s.id)) {
       result.push({ sessionId: s.id, code: 'LEGACY_RETIREMENT_QUEUE_ACTION_PENDING' });
     }
     result.push(...externalBlockers(s.id));
     return result;
   };
   const readRetirementReceipt = (sessionId: string): LegacyRetirementReceipt | undefined => {
-    const row = db.prepare('SELECT value FROM configs WHERE key=?').get(retirementKey(sessionId)) as { value: string } | undefined;
+    const row = cached('SELECT value FROM configs WHERE key=?').get(retirementKey(sessionId)) as { value: string } | undefined;
     return row ? parse(taskExecutionSchemas.legacyRetirementReceiptSchema, JSON.parse(row.value)) : undefined;
   };
   const listLegacyRetirementCandidates = (): LegacyRetirementCandidate[] => {
     control.assertMaintenance(db);
     requireLedger();
-    const entity = (db.prepare('SELECT entity FROM dutydeck_control WHERE id=1').get() as { entity: string }).entity;
-    const rows = db.prepare("SELECT id FROM sessions WHERE EXISTS (SELECT 1 FROM driver_resources WHERE session_id=sessions.id AND id LIKE 'legacy_resource_%') ORDER BY id").all() as Array<{ id: string }>;
+    const entity = (cached('SELECT entity FROM dutydeck_control WHERE id=1').get() as { entity: string }).entity;
+    const rows = cached("SELECT id FROM sessions WHERE EXISTS (SELECT 1 FROM driver_resources WHERE session_id=sessions.id AND id LIKE 'legacy_resource_%') ORDER BY id").all() as Array<{ id: string }>;
     return rows.map(row => {
       const s = session(row.id);
       let receipt: LegacyRetirementReceipt | undefined;
@@ -592,13 +593,13 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
         if (existing) {
           if (!same(existing, receipt)) fail('LEGACY_RETIREMENT_RECEIPT_CONFLICT');
           const retired = session(receipt.sessionId);
-          const currentEntity = (db.prepare('SELECT entity FROM dutydeck_control WHERE id=1').get() as { entity: string }).entity;
+          const currentEntity = (cached('SELECT entity FROM dutydeck_control WHERE id=1').get() as { entity: string }).entity;
           if (retired.runId !== receipt.runId || retired.state !== 'stopped' || retired.archivedAt !== receipt.archivedAt
             || !retired.error?.includes(LEGACY_RETIREMENT_NOTICE) || receipt.databaseEntity !== currentEntity) fail('LEGACY_RETIREMENT_FINAL_STATE_CONFLICT');
           return { session: retired, receipt: existing, replayed: true };
         }
         const s = checkSession(receipt);
-        const entity = (db.prepare('SELECT entity FROM dutydeck_control WHERE id=1').get() as { entity: string }).entity;
+        const entity = (cached('SELECT entity FROM dutydeck_control WHERE id=1').get() as { entity: string }).entity;
         if (receipt.databaseEntity !== entity) fail('LEGACY_RETIREMENT_DATABASE_CONFLICT');
         if (s.protocol !== receipt.protocol) fail('LEGACY_RETIREMENT_PROTOCOL_CONFLICT');
         const retirementBlockers = legacyRetirementBlockers(s);
@@ -607,10 +608,10 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
         if (receipt.archivedAt !== (s.archivedAt ?? receipt.verifiedAt)) fail('LEGACY_RETIREMENT_ARCHIVE_CONFLICT');
         if (!receiptEvidenceValid(receipt, s.id)) fail('LEGACY_RETIREMENT_EVIDENCE_CONFLICT');
         const error = s.error?.includes(LEGACY_RETIREMENT_NOTICE) ? s.error : [s.error, LEGACY_RETIREMENT_NOTICE].filter(Boolean).join('\n\n');
-        const updated = db.prepare("UPDATE sessions SET state='stopped',archived_at=?,error=?,updated_at=? WHERE id=? AND run_id=? AND archived_at IS ?")
+        const updated = cached("UPDATE sessions SET state='stopped',archived_at=?,error=?,updated_at=? WHERE id=? AND run_id=? AND archived_at IS ?")
           .run(receipt.archivedAt, error, receipt.verifiedAt, s.id, s.runId, s.archivedAt ?? null);
         if (updated.changes !== 1) fail('LEGACY_RETIREMENT_SNAPSHOT_CONFLICT');
-        db.prepare('INSERT INTO configs (key,value) VALUES (?,?)').run(retirementKey(s.id), stable(receipt));
+        cached('INSERT INTO configs (key,value) VALUES (?,?)').run(retirementKey(s.id), stable(receipt));
         return { session: session(s.id), receipt, replayed: false };
       }).immediate();
   };
@@ -625,7 +626,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     };
   };
   const collectAllBlockers = (): ExecutionBlocker[] => {
-    const allSessions = db.prepare('SELECT id FROM sessions ORDER BY id').all() as Array<{ id: string }>;
+    const allSessions = cached('SELECT id FROM sessions ORDER BY id').all() as Array<{ id: string }>;
     const result: ExecutionBlocker[] = [];
     for (const row of allSessions) {
       result.push(...blockers(row.id));
@@ -661,12 +662,12 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
             blockers: collectAllBlockers(), legacy: legacySummary()
           };
         }
-        for (const row of db.prepare('SELECT id FROM sessions ORDER BY id').all() as Array<{ id: string }>) {
+        for (const row of cached('SELECT id FROM sessions ORDER BY id').all() as Array<{ id: string }>) {
           const s = session(row.id);
           const f = { sessionId: s.id, runId: s.runId };
           const controller = { accessId: control.accessId, instanceId: 'legacy_unverified', generation: 0 };
           saveResource({ ...f, resourceId: legacyResourceId(s.id), kind: 'legacy', revision: 1, controller, stage: 'unknown', observations: [], createdAt: timestamp() });
-          const oldTasks = (db.prepare('SELECT id FROM tasks WHERE session_id=? ORDER BY created_at,rowid').all(s.id) as Array<{ id: string }>).map(r => task(r.id)!);
+          const oldTasks = (cached('SELECT id FROM tasks WHERE session_id=? ORDER BY created_at,rowid').all(s.id) as Array<{ id: string }>).map(r => task(r.id)!);
           const ambiguous = oldTasks.filter(t => t.status !== 'queued' && !isTerminalTaskStatus(t.status)).length > 1;
           for (const t of oldTasks) {
             const oldStatus = t.status;
@@ -676,7 +677,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
               // Legacy snapshots preserve their old evidence; digestVersion never becomes v1.
               accepted = { ...frozen, digest: hash(stable(frozen)) };
             }
-            db.prepare('INSERT INTO task_requests VALUES (?,?,?,?,?,?,?)').run(t.id, 'legacy', s.id, t.id, 'legacy_unverifiable', null, accepted ? json(accepted) : null);
+            cached('INSERT INTO task_requests VALUES (?,?,?,?,?,?,?)').run(t.id, 'legacy', s.id, t.id, 'legacy_unverifiable', null, accepted ? json(accepted) : null);
             if (t.status !== 'queued') {
               const attemptId = `legacy_attempt_${hash(t.id)}`;
               const a: TaskAttempt = { ...f, taskId: t.id, attemptId, number: 1, revision: 1, state: isTerminalTaskStatus(oldStatus) ? 'settled' : ambiguous ? 'legacy_unresolved' : 'reconcile_required', submissionState: 'legacy_unknown', controller, recoveryControllers: [],
@@ -688,11 +689,11 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
             }
             saveTask(t);
           }
-          const queued = db.prepare("SELECT id FROM tasks WHERE session_id=? AND status='queued' ORDER BY COALESCE(queue_position,0),created_at,rowid").all(s.id) as Array<{ id: string }>;
-          queued.forEach((row, index) => db.prepare('UPDATE tasks SET queue_position=? WHERE id=?').run(index + 1, row.id));
-          if (oldTasks.some(t => t.currentAttemptId && attempt(t.currentAttemptId)?.state !== 'settled')) db.prepare("UPDATE sessions SET state='interrupted' WHERE id=?").run(s.id);
+          const queued = cached("SELECT id FROM tasks WHERE session_id=? AND status='queued' ORDER BY COALESCE(queue_position,0),created_at,rowid").all(s.id) as Array<{ id: string }>;
+          queued.forEach((row, index) => cached('UPDATE tasks SET queue_position=? WHERE id=?').run(index + 1, row.id));
+          if (oldTasks.some(t => t.currentAttemptId && attempt(t.currentAttemptId)?.state !== 'settled')) cached("UPDATE sessions SET state='interrupted' WHERE id=?").run(s.id);
         }
-        db.prepare("UPDATE execution_authority SET authority='ledger_v1' WHERE id=1").run();
+        cached("UPDATE execution_authority SET authority='ledger_v1' WHERE id=1").run();
         const afterAuthority = authority();
         const after = { authority: afterAuthority, counts: readUpgradeCounts() };
         return { before, after, blockers: collectAllBlockers(), legacy: legacySummary() };
@@ -708,7 +709,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     getResources: resources,
     getRecoveryDecision(decisionId) {
       id.parse(decisionId);
-      const content = rowJson<{sessionId:string;runId:string;attemptId:string|null;evidence:unknown}>(db.prepare('SELECT json FROM recovery_decisions WHERE id=?').get(decisionId));
+      const content = rowJson<{sessionId:string;runId:string;attemptId:string|null;evidence:unknown}>(cached('SELECT json FROM recovery_decisions WHERE id=?').get(decisionId));
       if (!content) return;
       const decision = decisionSchema.safeParse(content.evidence);
       if (!decision.success) return;
@@ -736,9 +737,9 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
         const list = byTask.get(value.taskId) ?? []; list.push(value); byTask.set(value.taskId, list);
       }
       const bySteeringTask = new Map<string,SteeringOperation>();
-      for (const row of db.prepare('SELECT json FROM task_steering_operations WHERE session_id=? ORDER BY rowid').all(sessionId)) { const value=rowJson<SteeringOperation>(row)!; bySteeringTask.set(value.taskId,value); }
+      for (const row of cached('SELECT json FROM task_steering_operations WHERE session_id=? ORDER BY rowid').all(sessionId)) { const value=rowJson<SteeringOperation>(row)!; bySteeringTask.set(value.taskId,value); }
       const sharedBlockers = [...blockers(sessionId), ...steeringBlockers(sessionId)];
-      const tasks = (db.prepare('SELECT * FROM tasks WHERE session_id=? ORDER BY created_at,id').all(sessionId) as Record<string, any>[]).map(row => decodeTask(row)!);
+      const tasks = (cached('SELECT * FROM tasks WHERE session_id=? ORDER BY created_at,id').all(sessionId) as Record<string, any>[]).map(row => decodeTask(row)!);
       const admission = tasks.some(t => t.status === 'queued') ? workspaceBlockers(sessionId,context?.idleResources,owner) : [];
       return tasks.map(t => {
         const values = byTask.get(t.id) ?? [];
@@ -747,19 +748,19 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     }).deferred(); },
     getUnresolvedTasks(sessionId) {
       requireLedger();
-      return db.prepare("SELECT t.id,t.status FROM (SELECT task_id FROM task_attempts WHERE session_id=? AND state IN ('preparing','active','reconcile_required','legacy_unresolved') UNION SELECT task_id FROM task_steering_operations WHERE session_id=? AND state IN ('pending','unknown')) unresolved JOIN tasks t ON t.id=unresolved.task_id ORDER BY t.created_at,t.id")
+      return cached("SELECT t.id,t.status FROM (SELECT task_id FROM task_attempts WHERE session_id=? AND state IN ('preparing','active','reconcile_required','legacy_unresolved') UNION SELECT task_id FROM task_steering_operations WHERE session_id=? AND state IN ('pending','unknown')) unresolved JOIN tasks t ON t.id=unresolved.task_id ORDER BY t.created_at,t.id")
         .all(sessionId,sessionId) as Array<{ id: string; status: ExecutionTask['status'] }>;
     },
     getReconcileRequiredAttempts() {
       requireLedger();
-      return db.prepare("SELECT a.json FROM tasks t JOIN task_attempts a ON a.id=t.current_attempt_id AND a.task_id=t.id WHERE t.status='reconcile_required' AND a.state='reconcile_required' ORDER BY a.rowid").all().map(row => rowJson<TaskAttempt>(row)!);
+      return cached("SELECT a.json FROM tasks t JOIN task_attempts a ON a.id=t.current_attempt_id AND a.task_id=t.id WHERE t.status='reconcile_required' AND a.state='reconcile_required' ORDER BY a.rowid").all().map(row => rowJson<TaskAttempt>(row)!);
     },
     getAttemptEvents(attemptId, window = {}) {
       id.parse(attemptId);
       const limit = Math.max(1, Math.min(1000, Math.trunc(window.limit ?? 200)));
       if (!Number.isFinite(limit)) fail('EXECUTION_INVALID_INPUT');
       const backwards = window.direction === 'backward';
-      const rows = db.prepare(`SELECT * FROM events WHERE attempt_id=? AND sequence>? AND sequence<? ORDER BY sequence ${backwards ? 'DESC' : 'ASC'} LIMIT ?`).all(attemptId, window.afterSequence ?? 0, window.beforeSequence ?? Number.MAX_SAFE_INTEGER, limit);
+      const rows = cached(`SELECT * FROM events WHERE attempt_id=? AND sequence>? AND sequence<? ORDER BY sequence ${backwards ? 'DESC' : 'ASC'} LIMIT ?`).all(attemptId, window.afterSequence ?? 0, window.beforeSequence ?? Number.MAX_SAFE_INTEGER, limit);
       return (backwards ? rows.reverse() : rows).map(decodeEvent);
     },
     bind(claim) {
@@ -789,7 +790,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
       };
       const command = <T>(key: string, payload: unknown, work: () => T): T => {
         const serialized = stable(payload);
-        const old = db.prepare('SELECT payload,result FROM task_execution_commands WHERE id=?').get(key) as { payload: string; result: string } | undefined;
+        const old = cached('SELECT payload,result FROM task_execution_commands WHERE id=?').get(key) as { payload: string; result: string } | undefined;
         if (old) {
           if (old.payload !== serialized) fail('EXECUTION_OPERATION_CONFLICT');
           const result = JSON.parse(old.result);
@@ -797,7 +798,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
           return result;
         }
         const value = work();
-        db.prepare('INSERT INTO task_execution_commands VALUES (?,?,?)').run(key, serialized, json(value));
+        cached('INSERT INTO task_execution_commands VALUES (?,?,?)').run(key, serialized, json(value));
         return value;
       };
       const attemptCommand = <T>(f: AttemptFence, key: string, input: unknown, work: () => T) => {
@@ -815,7 +816,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
       };
       const queueAction = (f: SessionFence, t: ExecutionTask, source: QueueAction['source'], operation: { operationId: string; actor: TaskRequestV1['actor']; interrupt: boolean }, target?: TaskAttempt) => {
         const identity = { ...f, ...operation, source, taskId: t.id };
-        const existing = rowJson<QueueAction>(db.prepare('SELECT json FROM task_queue_actions WHERE id=?').get(operation.operationId));
+        const existing = rowJson<QueueAction>(cached('SELECT json FROM task_queue_actions WHERE id=?').get(operation.operationId));
         if (existing) {
           const { target: _target, revision: _revision, state: _state, evidence: _evidence, ...storedIdentity } = existing;
           if (!same(identity, storedIdentity)) fail('QUEUE_ACTION_IDENTITY_CONFLICT');
@@ -844,7 +845,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
         t.status = evidence.outcome === 'unknown' ? 'reconcile_required' : evidence.outcome;
         touch(t, a); return transitions(f, t, a, true);
       };
-      const cancelCapacityRetries = (f: SessionFence, reason: string) => db.prepare("SELECT json FROM task_attempts WHERE session_id=? AND run_id=? AND state IN ('suspended','preparing') AND submission_state='not_submitted'").all(f.sessionId, f.runId).map(row => rowJson<TaskAttempt>(row)!).filter(a => a.automaticRetry).map(a => {
+      const cancelCapacityRetries = (f: SessionFence, reason: string) => cached("SELECT json FROM task_attempts WHERE session_id=? AND run_id=? AND state IN ('suspended','preparing') AND submission_state='not_submitted'").all(f.sessionId, f.runId).map(row => rowJson<TaskAttempt>(row)!).filter(a => a.automaticRetry).map(a => {
         const { t } = currentAttempt({ ...f, taskId: a.taskId, attemptId: a.attemptId, expectedRevision: a.revision }, a.controller, true);
         return settle({ ...f, taskId: t.id, attemptId: a.attemptId, expectedRevision: a.revision }, t, a, `capacity_cancel:${a.attemptId}`, { kind: 'not_submitted', outcome: 'cancelled', reason });
       });
@@ -857,7 +858,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
           if (replay) return { ...result(f, replay.task, replay.task.currentAttemptId ? attempt(replay.task.currentAttemptId) : undefined, [], true), accepted: replay };
           const s = session(f.sessionId);
           try { workspaceIdentity(f.sessionId,true); } catch {
-            db.prepare('INSERT OR IGNORE INTO configs(key,value) VALUES(?,?)').run(`runtime_execution_workspace:${f.sessionId}`,json({version:1,unverifiable:true}));
+            cached('INSERT OR IGNORE INTO configs(key,value) VALUES(?,?)').run(`runtime_execution_workspace:${f.sessionId}`,json({version:1,unverifiable:true}));
           }
           if (s.archivedAt || s.state === 'stopped') fail('SESSION_NOT_ACCEPTING');
           taskExecutionSchemas.position.parse(position);
@@ -871,11 +872,11 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
           const time = timestamp();
           const taskId = executionTaskId(request.namespace, request.sessionId, request.key);
           const t: ExecutionTask = { id: taskId, sessionId: f.sessionId, prompt: input.prompt, executionContext: input.executionContext, status: 'queued', revision: 1, digestVersion: 'v1', queuePosition: nextPosition(f.sessionId, position), createdAt: time, updatedAt: time };
-          db.prepare('INSERT INTO tasks (id,session_id,prompt,status,execution_context,queue_position,revision,digest_version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)').run(t.id,t.sessionId,t.prompt,t.status,json(t.executionContext),t.queuePosition!,t.revision,t.digestVersion,time,time);
-          db.prepare('INSERT INTO task_requests VALUES (?,?,?,?,?,?,?)').run(t.id,request.namespace,request.sessionId,request.key,hash(stable(request)),json(request),json(input));
+          cached('INSERT INTO tasks (id,session_id,prompt,status,execution_context,queue_position,revision,digest_version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)').run(t.id,t.sessionId,t.prompt,t.status,json(t.executionContext),t.queuePosition!,t.revision,t.digestVersion,time,time);
+          cached('INSERT INTO task_requests VALUES (?,?,?,?,?,?,?)').run(t.id,request.namespace,request.sessionId,request.key,hash(stable(request)),json(request),json(input));
           const events = [append(f, { id: `accepted:${t.id}`, type: 'task', data: { task: { id: t.id, status: t.status } } })];
           // Accepted task events have no Attempt but retain the Task identity.
-          db.prepare('UPDATE events SET task_id=? WHERE id=?').run(t.id,events[0]!.id); events[0]!.taskId = t.id;
+          cached('UPDATE events SET task_id=? WHERE id=?').run(t.id,events[0]!.id); events[0]!.taskId = t.id;
           if (request.mode === 'interrupt') queueAction(f,t,'accept',{ operationId: `accept_interrupt:${t.id}`, actor: request.actor, interrupt: true });
           return { ...result(f,t,undefined,[...cancelled.flatMap(item => item.events), ...events]), accepted: lookup(request)! };
         }); },
@@ -890,9 +891,9 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
           if (s.archivedAt || s.state === 'stopped') fail('SESSION_NOT_ACCEPTING');
           assertResources(f, undefined, owner);
           if (steeringBlockers(f.sessionId).length) fail('STEERING_DELIVERY_UNKNOWN');
-          if (db.prepare("SELECT 1 FROM task_attempts WHERE session_id=? AND state IN ('preparing','active','reconcile_required') LIMIT 1").get(f.sessionId)) fail('SESSION_EXECUTION_BUSY');
+          if (cached("SELECT 1 FROM task_attempts WHERE session_id=? AND state IN ('preparing','active','reconcile_required') LIMIT 1").get(f.sessionId)) fail('SESSION_EXECUTION_BUSY');
           if (unresolvedUnknownTask(f.sessionId)) fail('SESSION_EXECUTION_BUSY');
-          const row = db.prepare("SELECT id FROM tasks WHERE session_id=? AND status='queued' ORDER BY COALESCE(queue_position,0),created_at,rowid LIMIT 1").get(f.sessionId) as { id: string } | undefined;
+          const row = cached("SELECT id FROM tasks WHERE session_id=? AND status='queued' ORDER BY COALESCE(queue_position,0),created_at,rowid LIMIT 1").get(f.sessionId) as { id: string } | undefined;
           if (!row) return;
           const t = task(row.id)!;
           parse(checksSchema,idleResources);
@@ -948,7 +949,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
             const target=attempt(input.target.attemptId);
             if(!target || target.taskId!==input.target.taskId || target.sessionId!==f.sessionId || target.runId!==f.runId || target.state!=='active' || target.submissionState==='not_submitted') fail('STEERING_TARGET_CONFLICT');
             const value: SteeringOperation = {...f,...input,taskId,controller:owner,state:'pending',revision:1,createdAt:timestamp(),updatedAt:timestamp()};
-            db.prepare('INSERT INTO task_steering_operations VALUES (?,?,?,?,?,?,?)').run(value.operationId,f.sessionId,f.runId,taskId,value.state,value.revision,json(value));
+            cached('INSERT INTO task_steering_operations VALUES (?,?,?,?,?,?,?)').run(value.operationId,f.sessionId,f.runId,taskId,value.state,value.revision,json(value));
             t.status='reconcile_required'; t.revision++; t.updatedAt=timestamp(); saveTask(t); sessionStatus(f.sessionId);
             return result(f,t,undefined,[append(f,{id:`steering:${value.operationId}:pending`,type:'task',data:{task:{id:t.id,status:t.status,revision:t.revision},steering:value}})]);
           });
@@ -996,13 +997,13 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
         }); },
         getPendingQueueActions(rawFence) { return write(() => {
           const f = readFence(rawFence);
-          return db.prepare("SELECT json FROM task_queue_actions WHERE session_id=? AND state IN ('pending','blocked')").all(f.sessionId).map(r => rowJson<QueueAction>(r)!).filter(q=>q.runId===f.runId);
+          return cached("SELECT json FROM task_queue_actions WHERE session_id=? AND state IN ('pending','blocked')").all(f.sessionId).map(r => rowJson<QueueAction>(r)!).filter(q=>q.runId===f.runId);
         }); },
         settleQueueAction(rawFence, operationId, expectedRevision, rawEvidence) { return write(() => {
           const f=readFence(rawFence);
           const evidence=parse(taskExecutionSchemas.queueEvidence,rawEvidence);
           return command(`queue_evidence:${evidence.evidenceId}`,{ ...f,operationId,evidence },() => {
-            const q=rowJson<QueueAction>(db.prepare('SELECT json FROM task_queue_actions WHERE id=?').get(operationId));
+            const q=rowJson<QueueAction>(cached('SELECT json FROM task_queue_actions WHERE id=?').get(operationId));
             if (!q || q.sessionId!==f.sessionId || q.runId!==f.runId) fail('QUEUE_ACTION_SCOPE_CONFLICT');
             if (q.revision!==expectedRevision) fail('QUEUE_ACTION_REVISION_CONFLICT');
             if (q.state==='applied' || q.state==='obsolete') fail('QUEUE_ACTION_ALREADY_SETTLED');
@@ -1011,7 +1012,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
             if (evidence.state==='obsolete' && target && target.state!=='settled') fail('QUEUE_TARGET_NOT_SETTLED');
             assertChecks(f.sessionId, evidence.resourceChecks);
             q.revision++;q.state=evidence.state;q.evidence=evidence;
-            if (db.prepare('UPDATE task_queue_actions SET revision=?,state=?,json=? WHERE id=? AND session_id=? AND revision=?').run(q.revision,q.state,json(q),q.operationId,f.sessionId,expectedRevision).changes !== 1) fail('QUEUE_ACTION_REVISION_CONFLICT');
+            if (cached('UPDATE task_queue_actions SET revision=?,state=?,json=? WHERE id=? AND session_id=? AND revision=?').run(q.revision,q.state,json(q),q.operationId,f.sessionId,expectedRevision).changes !== 1) fail('QUEUE_ACTION_REVISION_CONFLICT');
             return q;
           });
         }); },
@@ -1032,7 +1033,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
               if (selection.runId !== f.runId || !input.nativeContextRef || !same(input.nativeContextRef,selection.context)) fail('NATIVE_CONTEXT_SELECTION_CONFLICT');
               const native = nativeResource(f.sessionId,selection.context);
               if (!native.nativeBindings?.some(b => b.proofId === input.contextProofId && b.runId === f.runId && b.driverInstanceId === input.driverInstanceId && sameController(b.controller,owner))) fail('NATIVE_CONTEXT_PROOF_REQUIRED');
-              const configuration = db.prepare('SELECT value FROM configs WHERE key=?').get(`runtime_driver_configuration:${f.sessionId}`) as {value:string} | undefined;
+              const configuration = cached('SELECT value FROM configs WHERE key=?').get(`runtime_driver_configuration:${f.sessionId}`) as {value:string} | undefined;
               if (configuration?.value) fail('DRIVER_CONFIGURATION_UNKNOWN');
             } else if (input.nativeContextRef || input.contextProofId) fail('NATIVE_CONTEXT_SELECTION_CONFLICT');
             a.submission=input;a.submissionController=owner;a.submissionState='intent_recorded';a.state='active';touch(t,a);
@@ -1080,7 +1081,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
             requireInputOptions(t.id);
             const accepted = getAcceptedTask(t.id);
             const ordinal = taskAttempts(t.id).filter(previous => previous.automaticRetry?.reason === 'codex_capacity').length + 1;
-            const all = db.prepare('SELECT type,data FROM events WHERE attempt_id=? ORDER BY sequence').all(a.attemptId) as Array<{type:string;data:string}>;
+            const all = cached('SELECT type,data FROM events WHERE attempt_id=? ORDER BY sequence').all(a.attemptId) as Array<{type:string;data:string}>;
             const errors = all.filter(event => event.type === 'error').map(event => JSON.parse(event.data));
             if (evidence.outcome !== 'failed' || !['active', 'preparing'].includes(a.state) || a.submissionState === 'not_submitted'
               || !a.submission || a.submission.submissionId !== evidence.submissionId || ordinal > 2
@@ -1088,7 +1089,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
               || all.some(event => event.type === 'tool_call' || event.type === 'permission_request')
               || !errors.length || errors.some(error => error.code !== 'codex_capacity' || error.nativeSource !== 'codex'
                 || error.capacityReason !== 'selected_model_capacity' || error.nativeTerminal !== true || typeof error.nativeTurnId !== 'string')) fail('CAPACITY_RETRY_NOT_SAFE');
-            if (db.prepare('SELECT 1 FROM tasks WHERE session_id=? AND rowid>(SELECT rowid FROM tasks WHERE id=?) LIMIT 1').get(f.sessionId, t.id)) fail('CAPACITY_RETRY_SUPERSEDED');
+            if (cached('SELECT 1 FROM tasks WHERE session_id=? AND rowid>(SELECT rowid FROM tasks WHERE id=?) LIMIT 1').get(f.sessionId, t.id)) fail('CAPACITY_RETRY_SUPERSEDED');
             a.state = 'settled'; a.outcome = 'failed'; a.settlementId = settlementId; a.settlement = evidence; touch(t, a); saveAttempt(a);
             const next: TaskAttempt = { sessionId: f.sessionId, runId: f.runId, taskId: t.id, attemptId: `attempt_${randomUUID()}`, number: a.number + 1, revision: 1,
               state: 'suspended', submissionState: 'not_submitted', controller: owner, recoveryControllers: [], createdAt: timestamp(), updatedAt: timestamp(),
@@ -1208,13 +1209,13 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
         }); },
         createSession(rawSession) { return write(() => {
           const s=parse(sessionSchema,rawSession);
-          if(db.prepare('SELECT 1 FROM sessions WHERE id=?').get(s.id)) fail('SESSION_ALREADY_EXISTS');
-          db.prepare('INSERT INTO sessions (id,agent_id,state,cwd,model,reasoning_effort,system_prompt,permission_mode,source,source_id,archived_at,protocol,terminal_backend,run_id,error,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(s.id,s.agentId,s.state,s.cwd,s.model??null,s.reasoningEffort??null,s.systemPrompt??null,s.permissionMode??'ask',s.source??null,s.sourceId??null,s.archivedAt??null,s.protocol??null,s.terminalBackend??null,s.runId,s.error??null,s.createdAt,s.updatedAt);
+          if(cached('SELECT 1 FROM sessions WHERE id=?').get(s.id)) fail('SESSION_ALREADY_EXISTS');
+          cached('INSERT INTO sessions (id,agent_id,state,cwd,model,reasoning_effort,system_prompt,permission_mode,source,source_id,archived_at,protocol,terminal_backend,run_id,error,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(s.id,s.agentId,s.state,s.cwd,s.model??null,s.reasoningEffort??null,s.systemPrompt??null,s.permissionMode??'ask',s.source??null,s.sourceId??null,s.archivedAt??null,s.protocol??null,s.terminalBackend??null,s.runId,s.error??null,s.createdAt,s.updatedAt);
           return session(s.id);
         }); },
         finalizeSessionWorkspace(rawFence, rawProof) { return write(() => {
           const f = readFence(rawFence); const proof = parse(taskExecutionSchemas.workspaceProof, rawProof);
-          const row = db.prepare('SELECT value FROM configs WHERE key=?').get(`runtime_workspace:${f.sessionId}`) as { value: string } | undefined;
+          const row = cached('SELECT value FROM configs WHERE key=?').get(`runtime_workspace:${f.sessionId}`) as { value: string } | undefined;
           if (!row || hash(row.value) !== proof.workspaceDigest) fail('WORKSPACE_PROOF_CONFLICT');
           let decoded: unknown;
           try { decoded = JSON.parse(row.value); } catch { fail('WORKSPACE_PROOF_CONFLICT'); }
@@ -1226,7 +1227,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
           if (attempts(f.sessionId).length) fail('SESSION_WORKSPACE_HISTORY');
           if (current.cwd !== proof.expectedCwd) fail('WORKSPACE_PROOF_CONFLICT');
           assertResources(f);
-          db.prepare('UPDATE sessions SET cwd=?,updated_at=? WHERE id=?').run(ready.cwd,timestamp(),f.sessionId);
+          cached('UPDATE sessions SET cwd=?,updated_at=? WHERE id=?').run(ready.cwd,timestamp(),f.sessionId);
           return session(f.sessionId);
         }); },
         recordInterruptIntent(f, rawInput) { return write(owner => {
@@ -1239,8 +1240,8 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
             const actor = actorId(input.actor);
             if (actor !== undefined) t.interruptedByActor = actor;
             t.revision++; t.updatedAt = timestamp(); saveTask(t);
-            db.prepare('UPDATE tasks SET interrupted_by_actor=? WHERE id=?').run(t.interruptedByActor ?? null,t.id);
-            db.prepare('UPDATE sessions SET state=?,updated_at=? WHERE id=?').run('interrupting',timestamp(),f.sessionId);
+            cached('UPDATE tasks SET interrupted_by_actor=? WHERE id=?').run(t.interruptedByActor ?? null,t.id);
+            cached('UPDATE sessions SET state=?,updated_at=? WHERE id=?').run('interrupting',timestamp(),f.sessionId);
             const current = session(f.sessionId);
             const events = [append(f,{id:`interrupt:${input.operationId}:intent`,type:'task',data:{task:{id:t.id,status:t.status,revision:t.revision,interruptedByActor:t.interruptedByActor ?? null},actor:input.actor,queueAction:action}},a),
               append(f,{id:`interrupt:${input.operationId}:status`,type:'status',data:{state:current.state,error:current.error ?? null}},a)];
@@ -1271,8 +1272,8 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
           // An unchanged state and error is not a transition: no session write and no status event.
           const before = session(rawFence.sessionId);
           if (before.state === patch.state && (!('error' in patch) || (before.error ?? null) === patch.error)) return result(rawFence,pair?.t,pair?.a,[]);
-          if ('error' in patch) db.prepare('UPDATE sessions SET state=?,error=?,updated_at=? WHERE id=?').run(patch.state,patch.error,timestamp(),rawFence.sessionId);
-          else db.prepare('UPDATE sessions SET state=?,updated_at=? WHERE id=?').run(patch.state,timestamp(),rawFence.sessionId);
+          if ('error' in patch) cached('UPDATE sessions SET state=?,error=?,updated_at=? WHERE id=?').run(patch.state,patch.error,timestamp(),rawFence.sessionId);
+          else cached('UPDATE sessions SET state=?,updated_at=? WHERE id=?').run(patch.state,timestamp(),rawFence.sessionId);
           const current = session(rawFence.sessionId);
           const event = append(rawFence,{id:`session_state:${operationId}`,type:'status',data:{state:current.state,error:current.error ?? null}},pair?.a);
           return result(rawFence,pair?.t,pair?.a,[event]);
@@ -1295,7 +1296,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
           assertResources(f,safeResources);
           const selection = nativeSelection(f.sessionId);
           if (selection) saveNativeSelection(f.sessionId,{...selection,runId:newRunId,revision:nextNativeRevision(f.sessionId)});
-          db.prepare('UPDATE sessions SET run_id=?,state=?,error=NULL,updated_at=? WHERE id=?').run(newRunId,'idle',timestamp(),f.sessionId);
+          cached('UPDATE sessions SET run_id=?,state=?,error=NULL,updated_at=? WHERE id=?').run(newRunId,'idle',timestamp(),f.sessionId);
           return session(f.sessionId);
         }); },
         beforeCreate(rawFence,rawInput) { return write(owner => {
@@ -1346,7 +1347,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
               const selection = nativeSelection(f.sessionId);
               if (!selection || selection.runId !== f.runId || selection.revision !== scope.selectionRevision || !same(selection.context,scope.context)) fail('NATIVE_CONTEXT_SELECTION_CONFLICT');
               nativeResource(f.sessionId,scope.context); assertResources(f,undefined,owner);
-              const configuration = db.prepare('SELECT value FROM configs WHERE key=?').get(`runtime_driver_configuration:${f.sessionId}`) as {value:string} | undefined;
+              const configuration = cached('SELECT value FROM configs WHERE key=?').get(`runtime_driver_configuration:${f.sessionId}`) as {value:string} | undefined;
               if (configuration?.value && !scope.repairConfiguration) fail('DRIVER_CONFIGURATION_UNKNOWN');
             } else assertResources(f,undefined,owner);
             const source = control.creationSource(db, claim);
@@ -1374,7 +1375,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
         assertDriverSubmission(rawFence,rawInput) {return write(owner=>{
           const f=readFence(rawFence),input=parse(taskExecutionSchemas.driverSubmission,rawInput),a=attempt(input.attemptId),t=task(input.taskId);
           if(!a||!t||a.taskId!==input.taskId||t.currentAttemptId!==a.attemptId||a.sessionId!==f.sessionId||a.runId!==f.runId||a.state!=='active'||a.submission?.submissionId!==input.submissionId||a.submission.inputDigest!==input.inputDigest||a.submission.driverInstanceId!==input.driverInstanceId||!sameController(a.controller,owner))fail('SUBMISSION_SCOPE_CONFLICT');
-          const configuration=db.prepare('SELECT value FROM configs WHERE key=?').get(`runtime_driver_configuration:${f.sessionId}`) as {value:string}|undefined;
+          const configuration=cached('SELECT value FROM configs WHERE key=?').get(`runtime_driver_configuration:${f.sessionId}`) as {value:string}|undefined;
           if(configuration?.value)fail('DRIVER_CONFIGURATION_UNKNOWN');
         });},
         authorizeNativeContextControl(rawFence,actor) { return write(()=>{validateNativeActor(readFence(rawFence),actor);}); },
@@ -1396,7 +1397,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
         clearVerifiedStopBlock(rawFence, expectedValue) { return write(() => {
           const f = readFence(rawFence);
           const key = `runtime_driver_stop_block:${f.sessionId}`;
-          const row = db.prepare('SELECT value FROM configs WHERE key=?').get(key) as { value: string } | undefined;
+          const row = cached('SELECT value FROM configs WHERE key=?').get(key) as { value: string } | undefined;
           if (!row?.value) return false;
           if (row.value !== expectedValue) fail('DRIVER_STOP_BLOCK_CONFLICT');
           let block: { sessionId?: string; runId?: string };
@@ -1407,7 +1408,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
           if (unsafe.length) fail('SESSION_RESOURCE_BLOCKED', json(unsafe));
           const checks = resources(f.sessionId).map(r => ({ resourceId: r.resourceId, revision: r.revision, ...(r.observations.length ? { observation: r.observations.at(-1)! } : {}) }));
           command(`clear_stop:${randomUUID()}`, { ...f, expectedValue, checks }, () => {
-            db.prepare("UPDATE configs SET value='' WHERE key=? AND value=?").run(key, expectedValue);
+            cached("UPDATE configs SET value='' WHERE key=? AND value=?").run(key, expectedValue);
             return { cleared: true };
           });
           return true;
@@ -1467,7 +1468,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
             if (attempts(f.sessionId).some(a=>['active','preparing'].includes(a.state))) fail('SESSION_EXECUTION_BUSY');
             r.nativeReplacement=decision;r.revision++;saveResource(r);
             const selection=nativeSelection(f.sessionId);
-            if (selection?.context.resourceId===r.resourceId) db.prepare('DELETE FROM configs WHERE key=?').run(nativeKey(f.sessionId));
+            if (selection?.context.resourceId===r.resourceId) cached('DELETE FROM configs WHERE key=?').run(nativeKey(f.sessionId));
             return {replaced:r.resourceId};
           });
         }); },
@@ -1534,7 +1535,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
         }); },
         adoptIdleTmux(rawFence,resourceId,expectedRevision,receipt,rawObservation) { return write(owner => {
           const f=readFence(rawFence), s=session(f.sessionId), observation=parse(observationSchema,rawObservation);
-          const stored=db.prepare('SELECT value FROM configs WHERE key=?').get(`runtime_idle_terminal:${f.sessionId}`) as {value:string}|undefined;
+          const stored=cached('SELECT value FROM configs WHERE key=?').get(`runtime_idle_terminal:${f.sessionId}`) as {value:string}|undefined;
           if (!stored || stored.value!==receipt) fail('IDLE_TERMINAL_RECEIPT_CHANGED');
           const proof=JSON.parse(receipt), r=resource(resourceId), parent=r?.parentResourceId && resource(r.parentResourceId);
           if (s.protocol!=='pty-cli' || s.terminalBackend!=='tmux' || s.permissionMode!=='full-trust' || s.archivedAt
@@ -1544,8 +1545,8 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
             || r.revision!==expectedRevision || !r.identity || r.identity.identityId!==proof.identityId || observation.identityId!==r.identity.identityId
             || r.observations.at(-1)?.state==='gone' || observation.state!=='live' || observation.evidenceRef!==`idle-terminal:${hash(receipt)}`
             || !parent || parent.kind!=='operation' || parent.stage!=='created' || !sameController(parent.controller,r.controller)
-            || db.prepare("SELECT 1 FROM task_attempts WHERE session_id=? AND state IN ('preparing','active','reconcile_required','legacy_unresolved') LIMIT 1").get(f.sessionId)
-            || unresolvedUnknownTask(f.sessionId) || db.prepare("SELECT 1 FROM permission_requests WHERE session_id=? AND status='pending' LIMIT 1").get(f.sessionId)
+            || cached("SELECT 1 FROM task_attempts WHERE session_id=? AND state IN ('preparing','active','reconcile_required','legacy_unresolved') LIMIT 1").get(f.sessionId)
+            || unresolvedUnknownTask(f.sessionId) || cached("SELECT 1 FROM permission_requests WHERE session_id=? AND status='pending' LIMIT 1").get(f.sessionId)
             || externalBlockers(f.sessionId).length || steeringBlockers(f.sessionId).length) fail('IDLE_TERMINAL_ADOPTION_UNSAFE');
           // Physical/idle proof is rechecked by the runtime immediately before this
           // transaction. Preserve immutable creation ownership; transfer only holder.
@@ -1559,8 +1560,8 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
             if(r.revision!==expectedRevision || r.identity.identityId!==observation.identityId || observation.state!=='gone' || r.observations.at(-1)?.state==='gone') fail('RESOURCE_OBSERVATION_CONFLICT');
             const holder=r.holder??r.controller;
             // 访问记录只在进程正常关闭或被观测到已退出时删除；同一进程里的旧实例要先释放认领，新实例才能接上。
-            const registered=holder.accessId!==owner.accessId && Boolean(db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='dutydeck_access'").get())
-              && Boolean(db.prepare('SELECT 1 FROM dutydeck_access WHERE id=?').get(holder.accessId));
+            const registered=holder.accessId!==owner.accessId && Boolean(cached("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='dutydeck_access'").get())
+              && Boolean(cached('SELECT 1 FROM dutydeck_access WHERE id=?').get(holder.accessId));
             if(sameController(holder,owner) || registered) fail('RESOURCE_OWNER_NOT_PROVEN_EXITED');
             r.observations.push(observation);r.revision++;saveResource(r);return r;
           });

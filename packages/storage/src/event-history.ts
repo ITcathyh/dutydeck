@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3';
+import { cachedStatement } from './database-control.js';
 import { extractEventArtifactReferences, isTerminalTaskStatus, type HistoryOutline, type HistoryTurnSummary } from '@dutydeck/shared';
 
 export const HISTORY_PROMPT_LIMIT = 1024;
@@ -12,8 +13,8 @@ export function readHistoryOutline(sqlite: Database.Database, sessionId: string)
 }
 
 function projectHistoryOutline(sqlite: Database.Database, sessionId: string): HistoryOutline {
-  const highWaterMark = (sqlite.prepare('SELECT COALESCE(MAX(sequence),0) AS value FROM events WHERE session_id=?').get(sessionId) as { value: number }).value;
-  const boundaries = sqlite.prepare(`
+  const highWaterMark = (cachedStatement(sqlite, 'SELECT COALESCE(MAX(sequence),0) AS value FROM events WHERE session_id=?').get(sessionId) as { value: number }).value;
+  const boundaries = cachedStatement(sqlite, `
     WITH marked AS (
       SELECT id,sequence,timestamp,task_id,attempt_id,type,
         COALESCE(task_id,CASE WHEN json_valid(data) THEN json_extract(data,'$.taskId') END) AS owner,
@@ -36,7 +37,7 @@ function projectHistoryOutline(sqlite: Database.Database, sessionId: string): Hi
     )
     SELECT r.*,t.status FROM owned r LEFT JOIN tasks t ON t.id=r.taskId AND t.session_id=? ORDER BY r.first
   `).all(sessionId, sessionId) as Boundary[];
-  const text = sqlite.prepare(`
+  const text = cachedStatement(sqlite, `
     WITH pieces AS (
       SELECT sequence,length(json_extract(data,'$.text')) AS size
       FROM events WHERE session_id=? AND sequence BETWEEN ? AND ? AND type='text' AND json_valid(data)
@@ -49,10 +50,10 @@ function projectHistoryOutline(sqlite: Database.Database, sessionId: string): Hi
       FROM (SELECT substr(json_extract(e.data,'$.text'),1,MAX(0,?-b.used)) AS piece,b.total
         FROM budgeted b JOIN events e ON e.session_id=? AND e.sequence=b.sequence WHERE b.used<? ORDER BY b.sequence)
   `);
-  const lastActivity = sqlite.prepare(`SELECT COALESCE(MAX(sequence),?) AS sequence FROM events
+  const lastActivity = cachedStatement(sqlite, `SELECT COALESCE(MAX(sequence),?) AS sequence FROM events
     WHERE session_id=? AND sequence BETWEEN ? AND ? AND
       (type IN ('tool_call','tool_result','thinking') OR (type='text' AND json_valid(data) AND json_extract(data,'$.role')='user'))`);
-  const parts = sqlite.prepare(`
+  const parts = cachedStatement(sqlite, `
     SELECT e.id,e.sequence,e.type,e.task_id AS taskId,e.attempt_id AS attemptId,
       json_extract(e.data,'$.role') AS role,json_extract(e.data,'$.status') AS status,
       json_extract(e.data,'$.output.status') AS deliveryStatus,
@@ -71,7 +72,7 @@ function projectHistoryOutline(sqlite: Database.Database, sessionId: string): Hi
   `);
   // Preparation may settle before Runtime records a user prompt. Its terminal
   // evidence cannot belong to the preceding prompted turn (or a later prompt).
-  const unprompted = sqlite.prepare(`
+  const unprompted = cachedStatement(sqlite, `
     WITH prompts AS (
       SELECT COALESCE(task_id,json_extract(data,'$.taskId')) AS taskId,attempt_id AS attemptId,MIN(sequence) AS first
       FROM events WHERE session_id=? AND type='text' AND json_valid(data) AND json_extract(data,'$.role')='user'
@@ -83,12 +84,14 @@ function projectHistoryOutline(sqlite: Database.Database, sessionId: string): Hi
       AND ((e.task_id IS NOT NULL AND p.first IS NULL) OR (e.task_id IS NULL AND e.type='error'))
   `).get(sessionId, sessionId) as { first: number | null };
   // Adapters that batch-write events carry the original call times in the payload; prefer them over write times.
-  const toolSpans = sqlite.prepare(`SELECT COALESCE(MIN(json_extract(data,'$.startedAt')),MIN(timestamp)) AS started,COALESCE(MAX(json_extract(data,'$.completedAt')),MAX(timestamp)) AS ended FROM events
+  const toolSpans = cachedStatement(sqlite, `SELECT COALESCE(MIN(json_extract(data,'$.startedAt')),MIN(timestamp)) AS started,COALESCE(MAX(json_extract(data,'$.completedAt')),MAX(timestamp)) AS ended FROM events
     WHERE session_id=? AND sequence BETWEEN ? AND ? AND type IN ('tool_call','tool_result') AND json_valid(data)
     GROUP BY COALESCE(json_extract(data,'$.id'),id) ORDER BY started`);
   // The turn ends at its completion receipt; terminal repaints and status pings can trail it by minutes.
-  const turnEnd = sqlite.prepare(`SELECT COALESCE(MAX(CASE WHEN type='completed' THEN timestamp END),MAX(CASE WHEN type NOT IN ('raw_terminal','status') THEN timestamp END)) AS value
+  const turnEnd = cachedStatement(sqlite, `SELECT COALESCE(MAX(CASE WHEN type='completed' THEN timestamp END),MAX(CASE WHEN type NOT IN ('raw_terminal','status') THEN timestamp END)) AS value
     FROM events WHERE session_id=? AND sequence BETWEEN ? AND ?`);
+  const toolCalls = cachedStatement(sqlite, `SELECT COUNT(DISTINCT COALESCE(json_extract(data,'$.id'),id)) AS count FROM events
+    WHERE session_id=? AND sequence BETWEEN ? AND ? AND type IN ('tool_call','tool_result') AND json_valid(data)`);
   const turns: HistoryTurnSummary[] = [];
   let liveAfter = 0;
   for (const range of boundaries) {
@@ -102,8 +105,7 @@ function projectHistoryOutline(sqlite: Database.Database, sessionId: string): Hi
     const prompt = text.get(sessionId, range.first, range.last, 'user', HISTORY_PROMPT_LIMIT, HISTORY_PROMPT_LIMIT, sessionId, HISTORY_PROMPT_LIMIT + 1) as { text: string; truncated: number };
     const after = (lastActivity.get(range.first - 1, sessionId, range.first, range.last) as { sequence: number }).sequence;
     const output = text.get(sessionId, after + 1, range.last, 'assistant', HISTORY_OUTPUT_LIMIT, HISTORY_OUTPUT_LIMIT, sessionId, HISTORY_OUTPUT_LIMIT + 1) as { text: string; truncated: number };
-    const toolCount = (sqlite.prepare(`SELECT COUNT(DISTINCT COALESCE(json_extract(data,'$.id'),id)) AS count FROM events
-      WHERE session_id=? AND sequence BETWEEN ? AND ? AND type IN ('tool_call','tool_result') AND json_valid(data)`).get(sessionId, range.first, range.last) as { count: number }).count;
+    const toolCount = (toolCalls.get(sessionId, range.first, range.last) as { count: number }).count;
     const artifacts: HistoryTurnSummary['artifactReferences'] = [];
     const seen = new Set<string>();
     const references = parts.all(sessionId, range.first, range.last) as Array<any>;
@@ -127,12 +129,12 @@ function projectHistoryOutline(sqlite: Database.Database, sessionId: string): Hi
       ...(activity ? { activity } : {}) });
     liveAfter = range.last;
   }
-  const commandEvent = sqlite.prepare(`SELECT id,sequence,json_array_length(data,'$.availableCommands') AS count FROM events
+  const commandEvent = cachedStatement(sqlite, `SELECT id,sequence,json_array_length(data,'$.availableCommands') AS count FROM events
     WHERE session_id=? AND type='status' AND CASE WHEN json_valid(data) THEN json_extract(data,'$.state') END='commands'
       AND CASE WHEN json_valid(data) THEN json_type(data,'$.availableCommands') END='array' ORDER BY sequence DESC LIMIT 1`).get(sessionId) as { id: string; sequence: number; count: number } | undefined;
   let commandCatalog: HistoryOutline['commandCatalog'];
   if (commandEvent) {
-    const rows = sqlite.prepare(`SELECT json_extract(CASE WHEN j.type='object' THEN j.value ELSE '{}' END,'$.name') AS name,
+    const rows = cachedStatement(sqlite, `SELECT json_extract(CASE WHEN j.type='object' THEN j.value ELSE '{}' END,'$.name') AS name,
       CASE WHEN json_type(CASE WHEN j.type='object' THEN j.value ELSE '{}' END,'$.description')='text' THEN substr(json_extract(CASE WHEN j.type='object' THEN j.value ELSE '{}' END,'$.description'),1,1024) ELSE '' END AS description,
       length(json_extract(CASE WHEN j.type='object' THEN j.value ELSE '{}' END,'$.description'))>1024 AS shortened
       FROM events e,json_each(json_extract(e.data,'$.availableCommands')) j

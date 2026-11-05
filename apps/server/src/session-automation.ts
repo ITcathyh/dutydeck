@@ -529,9 +529,14 @@ export class SessionAutomationService {
 
   /** 幂等补齐同一授权 binding：来源 CAS 之后、dispatch 之前；崩溃重开补同一映射。 */
   private async ensureTaskBinding(taskId: string, binding: TaskBinding) {
-    if (await this.createRecord(taskBindingKey(taskId), binding)) return;
-    const existing = await this.getRecord(taskBindingKey(taskId), value => taskBindingSchema.parse(value));
-    if (!existing) throw new RuntimeError('SESSION_AUTOMATION_TASK_BINDING_CONFLICT', 'Automation task binding disappeared', 409);
+    // Every tick re-checks the bindings of all recorded occurrences; they almost always exist,
+    // so read first instead of paying for a failing insert CAS each time.
+    let existing = await this.getRecord(taskBindingKey(taskId), value => taskBindingSchema.parse(value));
+    if (!existing) {
+      if (await this.createRecord(taskBindingKey(taskId), binding)) return;
+      existing = await this.getRecord(taskBindingKey(taskId), value => taskBindingSchema.parse(value));
+      if (!existing) throw new RuntimeError('SESSION_AUTOMATION_TASK_BINDING_CONFLICT', 'Automation task binding disappeared', 409);
+    }
 
     if (existing.value.schemaVersion === 2 && binding.schemaVersion === 2) {
       if (sameV2Binding(existing.value, binding)) return;

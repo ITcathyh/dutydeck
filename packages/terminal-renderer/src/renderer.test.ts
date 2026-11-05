@@ -136,3 +136,25 @@ it('preserves structural characters and spacing only on request, within the curr
     expect(structural).not.toContain('\x1b');
   } finally { snap.dispose(); }
 });
+
+it('never serves screen text from before a parsed write or resize', async () => {
+  const snap = new TerminalSnapshot(20, 3);
+  try {
+    await snap.writeAndFlush('first');
+    expect(snap.text()).toBe('first');
+    expect(snap.lastLine()).toBe('first');
+    // Queued but unparsed bytes are not on screen yet.
+    snap.write('\r\nsecond');
+    expect(snap.viewportText()).toBe('first');
+    await flush();
+    expect(snap.viewportText()).toBe('first\nsecond');
+    expect(snap.lastLine()).toBe('second');
+    // The flush barrier itself observes the parsed chunk.
+    await snap.writeAndFlush('\x1b[2J\x1b[Hthird');
+    expect(snap.text()).toBe('third');
+    await snap.writeAndFlush('\r\n' + 'x'.repeat(20) + 'tail');
+    expect(snap.viewportText()).toBe('third\n' + 'x'.repeat(20) + '\ntail');
+    snap.resize(20, 2);
+    expect(snap.viewportText()).toBe('x'.repeat(20) + '\ntail');
+  } finally { snap.dispose(); }
+});

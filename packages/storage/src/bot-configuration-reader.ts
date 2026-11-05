@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3';
+import { cachedStatement } from './database-control.js';
 import { createHash } from 'node:crypto';
 import type { z } from 'zod';
 import {
@@ -518,7 +519,7 @@ function decodeSecretRefRow(row: SecretRefRow): SecretRefMetadata {
 
 export function createConfigurationReader(db: Database.Database): ConfigurationReader {
   const getAuthority = (): ConfigurationAuthority => {
-    const rows = db.prepare('SELECT id, authority, migration_id, legacy_collection_digest, completed_at FROM configuration_authority').all() as Array<{
+    const rows = cachedStatement(db, 'SELECT id, authority, migration_id, legacy_collection_digest, completed_at FROM configuration_authority').all() as Array<{
       id: number;
       authority: string;
       migration_id: string | null;
@@ -551,7 +552,7 @@ export function createConfigurationReader(db: Database.Database): ConfigurationR
 
     const bot = decodeBotRow(botRow);
 
-    const policyRow = db.prepare('SELECT * FROM channel_bot_policies WHERE channel_bot_id = ?').get(bot.id) as ChannelBotPolicyRow | undefined;
+    const policyRow = cachedStatement(db, 'SELECT * FROM channel_bot_policies WHERE channel_bot_id = ?').get(bot.id) as ChannelBotPolicyRow | undefined;
     if (!policyRow) {
       fail('CONFIGURATION_CORRUPTED_RELATION', `ChannelBot ${bot.id} is missing policy`, 500);
     }
@@ -559,21 +560,20 @@ export function createConfigurationReader(db: Database.Database): ConfigurationR
 
     let credential: SecretRefMetadata | undefined;
     if (bot.credentialRef) {
-      const secretRow = db.prepare('SELECT * FROM secret_refs WHERE id = ?').get(bot.credentialRef) as SecretRefRow | undefined;
+      const secretRow = cachedStatement(db, 'SELECT * FROM secret_refs WHERE id = ?').get(bot.credentialRef) as SecretRefRow | undefined;
       if (!secretRow) {
         fail('CONFIGURATION_CORRUPTED_RELATION', `ChannelBot ${bot.id} references missing secret ${bot.credentialRef}`, 500);
       }
       credential = decodeSecretRefRow(secretRow);
     }
 
-    const bindingRows = db.prepare('SELECT * FROM group_bindings WHERE channel_bot_id = ? ORDER BY id ASC').all(bot.id) as GroupBindingRow[];
+    const bindingRows = cachedStatement(db, 'SELECT * FROM group_bindings WHERE channel_bot_id = ? ORDER BY id ASC').all(bot.id) as GroupBindingRow[];
     const bindings = bindingRows.map(decodeBindingRow);
 
-    const roleRows = db.prepare('SELECT * FROM role_assignments WHERE channel_bot_id = ? ORDER BY id ASC').all(bot.id) as RoleAssignmentRow[];
+    const roleRows = cachedStatement(db, 'SELECT * FROM role_assignments WHERE channel_bot_id = ? ORDER BY id ASC').all(bot.id) as RoleAssignmentRow[];
     const roles = roleRows.map(decodeRoleRow);
 
-    const confirmationRows = db.prepare(
-      'SELECT * FROM full_trust_confirmations WHERE channel_bot_id = ? ORDER BY bot_revision DESC, id ASC'
+    const confirmationRows = cachedStatement(db, 'SELECT * FROM full_trust_confirmations WHERE channel_bot_id = ? ORDER BY bot_revision DESC, id ASC'
     ).all(bot.id) as FullTrustConfirmationRow[];
     const confirmations = confirmationRows.map(decodeConfirmationRow);
 
@@ -604,7 +604,7 @@ export function createConfigurationReader(db: Database.Database): ConfigurationR
       const limit = parsedOptions.limit;
 
       const run = db.transaction((): ChannelBotV2[] => {
-        const rows = db.prepare(`
+        const rows = cachedStatement(db, `
           SELECT * FROM channel_bots
           WHERE (? IS NULL OR id > ?)
           ORDER BY id ASC
@@ -624,7 +624,7 @@ export function createConfigurationReader(db: Database.Database): ConfigurationR
       }
 
       const run = db.transaction((): BotSnapshot | undefined => {
-        const botRow = db.prepare('SELECT * FROM channel_bots WHERE id = ?').get(botId) as ChannelBotRow | undefined;
+        const botRow = cachedStatement(db, 'SELECT * FROM channel_bots WHERE id = ?').get(botId) as ChannelBotRow | undefined;
         return assembleSnapshot(botRow);
       });
 
@@ -638,7 +638,7 @@ export function createConfigurationReader(db: Database.Database): ConfigurationR
       }
 
       const run = db.transaction((): BotSnapshot | undefined => {
-        const botRow = db.prepare("SELECT * FROM channel_bots WHERE channel = 'lark' AND external_app_id = ?").get(appId) as ChannelBotRow | undefined;
+        const botRow = cachedStatement(db, "SELECT * FROM channel_bots WHERE channel = 'lark' AND external_app_id = ?").get(appId) as ChannelBotRow | undefined;
         return assembleSnapshot(botRow);
       });
 
@@ -655,7 +655,7 @@ export function createConfigurationReader(db: Database.Database): ConfigurationR
       const limit = parsedOptions.limit;
 
       const run = db.transaction((): BotConfigurationVersionMetadata[] => {
-        const rows = db.prepare(`
+        const rows = cachedStatement(db, `
           SELECT
             v.version_id, v.bot_id, v.revision, v.change_sequence, v.change_kind, v.operation_id, v.created_at, v.snapshot_digest,
             c.bot_id AS change_bot_id, c.revision AS change_revision, c.change_kind AS change_kind_rel
@@ -714,7 +714,7 @@ export function createConfigurationReader(db: Database.Database): ConfigurationR
       }
 
       const run = db.transaction((): BotConfigurationVersion | undefined => {
-        const row = db.prepare(`
+        const row = cachedStatement(db, `
           SELECT version_id, bot_id, revision, change_sequence, change_kind, operation_id, created_at, snapshot_digest, snapshot_json
           FROM configuration_versions
           WHERE bot_id = ? AND version_id = ?
@@ -725,7 +725,7 @@ export function createConfigurationReader(db: Database.Database): ConfigurationR
         assertPositiveSafeInteger(row.revision, 'version.revision', row.version_id);
         assertPositiveSafeInteger(row.change_sequence, 'version.change_sequence', row.version_id);
 
-        const changeRow = db.prepare(`
+        const changeRow = cachedStatement(db, `
           SELECT sequence, bot_id, change_kind, revision, authorization_revision, connection_generation, timestamp
           FROM configuration_changes
           WHERE sequence = ?
@@ -798,7 +798,7 @@ export function createConfigurationReader(db: Database.Database): ConfigurationR
       }
 
       const run = db.transaction((): BotConfigChange[] => {
-        const rows = db.prepare(`
+        const rows = cachedStatement(db, `
           SELECT sequence, bot_id, change_kind, revision, authorization_revision, connection_generation, timestamp
           FROM configuration_changes
           WHERE sequence > ?

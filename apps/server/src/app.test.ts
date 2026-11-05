@@ -282,6 +282,27 @@ describe('HTTP API boundary', () => {
     expect(runtime.getTasks).not.toHaveBeenCalled(); expect(runtime.listSessions).not.toHaveBeenCalled();
   });
 
+  it('filters list routes with one batched authorization that keeps per-session decisions and order', async () => {
+    const summary = (sessionId: string) => ({ sessionId, taskId: `t_${sessionId}`, prompt: 'goal', status: 'completed', queuedCount: 0, updatedAt: '1' });
+    const sessions = ['s3', 'hidden', 's1'].map(id => ({ id, agentId: 'codex', state: 'idle', cwd: '/tmp', createdAt: '1', updatedAt: '1' }));
+    const runtime = { listRunSummaries: vi.fn(async () => sessions.map(session => summary(session.id))), listSessions: vi.fn(async () => sessions), getTasks: vi.fn() };
+    const authorize = vi.fn();
+    const authorizeMany = vi.fn(async (_request: unknown, ids: string[]) => ids.map(id => ({ allowed: id !== 'hidden' })));
+    const app = await buildApp(runtime as any, { executionPolicy: { authorize, authorizeMany } as any }); apps.push(app);
+    expect((await app.inject({ method: 'GET', url: '/api/sessions/summaries' })).json()).toEqual([summary('s3'), summary('s1')]);
+    expect(runtime.listSessions).not.toHaveBeenCalled();
+    expect((await app.inject({ method: 'GET', url: '/api/sessions' })).json().map((session: { id: string }) => session.id)).toEqual(['s3', 's1']);
+    expect(authorizeMany.mock.calls.map(call => call.slice(1, 4))).toEqual([
+      [['s3', 'hidden', 's1'], 'session', 'task.view_result'],
+      [['s3', 'hidden', 's1'], 'session', 'task.view_result']
+    ]);
+    // Summaries leave the session read to the policy; /api/sessions hands over the one list it already read.
+    expect(authorizeMany.mock.calls[0]![4]).toBeUndefined();
+    expect(runtime.listSessions).toHaveBeenCalledTimes(1);
+    expect(authorizeMany.mock.calls[1]![4]).toBe(await runtime.listSessions.mock.results[0]!.value);
+    expect(authorize).not.toHaveBeenCalled();
+  });
+
   it('projects the first task goal and current queued count as a cross-session run summary', async () => {
     const sessions = [
       { id: 's1', updatedAt: '2026-01-01T00:00:00.000Z' },

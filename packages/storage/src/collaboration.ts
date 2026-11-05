@@ -1,4 +1,5 @@
 import { actionTransition } from '@dutydeck/shared';
+import { cachedStatement } from './database-control.js';
 import type Database from 'better-sqlite3';
 import {
   COLLABORATION_LIST_LIMIT,
@@ -95,8 +96,7 @@ function getOrCreateScope(db: Database.Database, scope: CollaborationScope): Sco
   if (existing) {
     return existing;
   }
-  db.prepare(
-    'INSERT OR IGNORE INTO collaboration_scopes (app_id, chat_id, last_sequence, context_revision) VALUES (?, ?, 0, 0)'
+  cachedStatement(db, 'INSERT OR IGNORE INTO collaboration_scopes (app_id, chat_id, last_sequence, context_revision) VALUES (?, ?, 0, 0)'
   ).run(scope.appId, scope.chatId);
   return db
     .prepare('SELECT last_sequence, context_revision FROM collaboration_scopes WHERE app_id = ? AND chat_id = ?')
@@ -119,7 +119,7 @@ function nextContextSequence(db: Database.Database, scope: CollaborationScope): 
 
 function recordActivity(db: Database.Database, activity: CollaborationActivity): void {
   collaborationActivitySchema.parse(activity);
-  db.prepare(`
+  cachedStatement(db, `
     INSERT INTO collaboration_activities (
       id, app_id, chat_id, entity_kind, entity_id, revision, actor_id, source_refs_json, provenance, summary, created_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -325,7 +325,7 @@ function rowToFollowup(row: FollowupRow): CollaborationFollowup {
 
 /** 写方法在同一事务里读回刚写的行，返回值与 getFollowup 走同一套解码。 */
 function loadFollowup(sqlite: Database.Database, id: string): CollaborationFollowup {
-  return rowToFollowup(sqlite.prepare('SELECT * FROM collaboration_followups WHERE id = ?').get(id) as FollowupRow);
+  return rowToFollowup(cachedStatement(sqlite, 'SELECT * FROM collaboration_followups WHERE id = ?').get(id) as FollowupRow);
 }
 
 interface MandateRow {
@@ -372,7 +372,7 @@ function rowToMandate(row: MandateRow): CollaborationMandate {
 }
 
 function loadMandate(sqlite: Database.Database, id: string): CollaborationMandate {
-  return rowToMandate(sqlite.prepare('SELECT * FROM collaboration_mandates WHERE id = ?').get(id) as MandateRow);
+  return rowToMandate(cachedStatement(sqlite, 'SELECT * FROM collaboration_mandates WHERE id = ?').get(id) as MandateRow);
 }
 
 interface DecisionRow {
@@ -526,7 +526,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
     if (!['schedule_agent', 'schedule_delivery', 'agent_execution'].includes(action.kind)) return;
     const conflict = () => new RuntimeError('SCHEDULE_LEASE_CONFLICT', 'Scheduled action requires its current occurrence writer', 409);
     if (!fence || !action.mandateId) throw conflict();
-    const owner = sqlite.prepare(`SELECT d.channel_bot_id, d.source_namespace, d.source_ownership, d.current_generation, d.state, m.status AS mandate_status, m.delivery_paused, COALESCE(s.notifications_paused, 0) AS notifications_paused, o.idempotency_key, o.generation
+    const owner = cachedStatement(sqlite, `SELECT d.channel_bot_id, d.source_namespace, d.source_ownership, d.current_generation, d.state, m.status AS mandate_status, m.delivery_paused, COALESCE(s.notifications_paused, 0) AS notifications_paused, o.idempotency_key, o.generation
       FROM collaboration_mandates m JOIN schedule_definitions d ON d.id=m.schedule_definition_id
       JOIN schedule_occurrences o ON o.schedule_definition_id=d.id
       JOIN channel_bots b ON b.id=d.channel_bot_id
@@ -539,7 +539,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
       const request = action.payload.request as { key?: string; sourcePayload?: { occurrenceId?: string }; sessionId?: string } | undefined;
       if (request?.key !== `collaboration:${expectedId}` || request.sourcePayload?.occurrenceId !== fence.occurrenceId || request.sessionId !== action.id || action.payload.sessionId !== action.id) throw conflict();
     } else if (action.id !== expectedId) throw conflict();
-    const lease = sqlite.prepare('SELECT state, holder_id, fence_token, expires_at FROM schedule_leases WHERE lease_key=?').get(fence.leaseKey) as { state: string; holder_id: string; fence_token: number; expires_at: string } | undefined;
+    const lease = cachedStatement(sqlite, 'SELECT state, holder_id, fence_token, expires_at FROM schedule_leases WHERE lease_key=?').get(fence.leaseKey) as { state: string; holder_id: string; fence_token: number; expires_at: string } | undefined;
     if (!lease || lease.state !== 'held' || lease.holder_id !== fence.holderId || lease.fence_token !== fence.fenceToken || !lease.expires_at || lease.expires_at <= fence.now) throw conflict();
     if (dispatch && (owner.current_generation !== owner.generation || owner.state !== 'enabled' || owner.mandate_status !== 'active' || action.kind === 'schedule_delivery' && (owner.delivery_paused || owner.notifications_paused))) throw new RuntimeError('COLLABORATION_EXECUTION_STALE', 'Schedule changed before dispatch', 409);
   };
@@ -594,7 +594,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
           updatedAt: updatedTime
         });
 
-        sqlite.prepare(`
+        cachedStatement(sqlite, `
           INSERT INTO collaboration_settings (
             app_id, chat_id, revision, participation, participation_inherited, instructions, notifications_paused,
             max_proactive_per_hour, max_decisions_per_hour, retention_days, policy_version, updated_at
@@ -644,14 +644,14 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
     },
 
     async getDuty(scope: CollaborationScope): Promise<CollaborationDuty> {
-      const row = sqlite.prepare('SELECT * FROM collaboration_duties WHERE app_id = ? AND chat_id = ?').get(scope.appId, scope.chatId) as DutyRow | undefined;
+      const row = cachedStatement(sqlite, 'SELECT * FROM collaboration_duties WHERE app_id = ? AND chat_id = ?').get(scope.appId, scope.chatId) as DutyRow | undefined;
       return row ? rowToDuty(row) : collaborationDutySchema.parse({ scope, revision: 0, updatedAt: DEFAULT_SETTINGS_UPDATED_AT });
     },
 
     async updateDuty(scope: CollaborationScope, patch: UpdateCollaborationDutyInput, actorId: string): Promise<CollaborationDuty> {
       const validated = updateCollaborationDutyInputSchema.parse(patch);
       return sqlite.transaction(() => {
-        const row = sqlite.prepare('SELECT * FROM collaboration_duties WHERE app_id = ? AND chat_id = ?').get(scope.appId, scope.chatId) as DutyRow | undefined;
+        const row = cachedStatement(sqlite, 'SELECT * FROM collaboration_duties WHERE app_id = ? AND chat_id = ?').get(scope.appId, scope.chatId) as DutyRow | undefined;
         const current = row ? rowToDuty(row) : undefined;
         const revision = current?.revision ?? 0;
         if (validated.expectedRevision !== revision) {
@@ -660,7 +660,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
         const responder = validated.responder === undefined ? current?.responder : validated.responder ?? undefined;
         const scenarios = mergeScenarios(current?.scenarios, validated.scenarios);
         const duty = collaborationDutySchema.parse({ scope, revision: revision + 1, ...(responder ? { responder } : {}), ...(scenarios ? { scenarios } : {}), updatedAt: now() });
-        sqlite.prepare(`
+        cachedStatement(sqlite, `
           INSERT INTO collaboration_duties (app_id, chat_id, revision, responder_json, scenarios_json, updated_by, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(app_id, chat_id) DO UPDATE SET revision = excluded.revision, responder_json = excluded.responder_json,
             scenarios_json = excluded.scenarios_json, updated_by = excluded.updated_by, updated_at = excluded.updated_at
@@ -716,7 +716,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
           const newRevision = existing.revision + 1;
           const newSeq = nextContextSequence(sqlite, scope);
 
-          sqlite.prepare(`
+          cachedStatement(sqlite, `
             UPDATE collaboration_observations SET
               sequence = ?,
               occurred_at = ?,
@@ -761,7 +761,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
         const id = validatedInput.id ?? makeId('obs');
         const revision = 1;
 
-        sqlite.prepare(`
+        cachedStatement(sqlite, `
           INSERT INTO collaboration_observations (
             id, app_id, chat_id, sequence, source, event_id, occurred_at, received_at,
             sender_id, sender_kind, thread_id, message_id, text, refs_json, origin, missing_json, revision
@@ -839,7 +839,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
           ? rowToSettings(settingsRow)
           : defaultSettings(scope);
 
-        const obsRowsDesc = sqlite.prepare(`
+        const obsRowsDesc = cachedStatement(sqlite, `
           SELECT * FROM collaboration_observations
           WHERE app_id = ? AND chat_id = ?
           ORDER BY sequence DESC
@@ -847,21 +847,21 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
         `).all(scope.appId, scope.chatId, obsLimit) as ObservationRow[];
         const observations = obsRowsDesc.reverse().map(rowToObservation);
 
-        const followupRows = sqlite.prepare(`
+        const followupRows = cachedStatement(sqlite, `
           SELECT * FROM collaboration_followups
           WHERE app_id = ? AND chat_id = ? AND status = 'open'
           ORDER BY created_at ASC
         `).all(scope.appId, scope.chatId) as FollowupRow[];
         const followups = followupRows.map(rowToFollowup);
 
-        const mandateRows = sqlite.prepare(`
+        const mandateRows = cachedStatement(sqlite, `
           SELECT * FROM collaboration_mandates
           WHERE app_id = ? AND chat_id = ? AND status IN ('active', 'paused')
           ORDER BY created_at ASC
         `).all(scope.appId, scope.chatId) as MandateRow[];
         const mandates = mandateRows.map(rowToMandate);
 
-        const bootstrapRow = sqlite.prepare(`
+        const bootstrapRow = cachedStatement(sqlite, `
           SELECT * FROM collaboration_bootstraps
           WHERE app_id = ? AND chat_id = ?
         `).get(scope.appId, scope.chatId) as BootstrapRow | undefined;
@@ -888,7 +888,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
 
     async saveBootstrap(input: CollaborationBootstrap): Promise<CollaborationBootstrap> {
       const validated = collaborationBootstrapSchema.parse(input);
-      sqlite.prepare(`
+      cachedStatement(sqlite, `
         INSERT INTO collaboration_bootstraps (
           app_id, chat_id, status, cursor, last_event_at, missing_json, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -917,7 +917,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
           .run(before, scope.appId, scope.chatId);
         return result.changes;
       }
-      const result = sqlite.prepare('DELETE FROM collaboration_observations WHERE occurred_at < ?').run(before);
+      const result = cachedStatement(sqlite, 'DELETE FROM collaboration_observations WHERE occurred_at < ?').run(before);
       return result.changes;
     },
 
@@ -930,7 +930,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
       const revision = 1;
 
       return sqlite.transaction(() => {
-        sqlite.prepare(`
+        cachedStatement(sqlite, `
           INSERT INTO collaboration_followups (
             id, app_id, chat_id, revision, goal, status, progress, steps_json,
             owner_id, due_at, result, source_refs_json, task_ids_json, external_refs_json,
@@ -1033,7 +1033,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
         const fields = validatedPatch.fields ?? existing.fields;
         const provenance = validatedPatch.provenance ?? existing.provenance;
 
-        sqlite.prepare(`
+        cachedStatement(sqlite, `
           UPDATE collaboration_followups SET
             revision = ?,
             goal = ?,
@@ -1111,7 +1111,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
           }
         }
 
-        sqlite.prepare(`
+        cachedStatement(sqlite, `
           INSERT INTO collaboration_mandates (
             id, app_id, chat_id, revision, goal, status, requester_id, source_refs_json,
             followup_id, schedule_definition_id, mode, prompt, condition, delivery_paused,
@@ -1171,7 +1171,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
           .all(scope.appId, scope.chatId) as MandateRow[];
         return rows.map(rowToMandate);
       }
-      const rows = sqlite.prepare('SELECT * FROM collaboration_mandates ORDER BY created_at ASC').all() as MandateRow[];
+      const rows = cachedStatement(sqlite, 'SELECT * FROM collaboration_mandates ORDER BY created_at ASC').all() as MandateRow[];
       return rows.map(rowToMandate);
     },
 
@@ -1184,7 +1184,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
       const validatedPatch = updateMandateInputSchema.parse(patch);
 
       return sqlite.transaction(() => {
-        const row = sqlite.prepare('SELECT * FROM collaboration_mandates WHERE id = ?').get(id) as MandateRow | undefined;
+        const row = cachedStatement(sqlite, 'SELECT * FROM collaboration_mandates WHERE id = ?').get(id) as MandateRow | undefined;
         if (!row || row.app_id !== scope.appId || row.chat_id !== scope.chatId) {
           throw new RuntimeError('COLLABORATION_NOT_FOUND', `Mandate '${id}' not found in scope`, 404);
         }
@@ -1230,7 +1230,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
           : existing.lastProgressRevision;
         const sourceRefs = validatedPatch.sourceRefs ?? existing.sourceRefs;
 
-        sqlite.prepare(`
+        cachedStatement(sqlite, `
           UPDATE collaboration_mandates SET
             revision = ?,
             goal = ?,
@@ -1294,7 +1294,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
           return rowToDecision(existingRow);
         }
 
-        sqlite.prepare(`
+        cachedStatement(sqlite, `
           INSERT INTO collaboration_decisions (
             id, app_id, chat_id, context_revision, policy_version, action, reason,
             evidence_ids_json, status, response, input_snapshot_json, created_at
@@ -1327,7 +1327,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
 
     async listDecisions(scope: CollaborationScope, limit?: number): Promise<ListedItems<CollaborationDecision>> {
       const maxLimit = clampLimit(limit, 50);
-      const rows = sqlite.prepare(`
+      const rows = cachedStatement(sqlite, `
         SELECT * FROM collaboration_decisions
         WHERE app_id = ? AND chat_id = ?
         ORDER BY created_at DESC
@@ -1339,7 +1339,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
     async listScenarioRecords(scope: CollaborationScope, query: { packId: string; since: string; limit: number }): Promise<ListedItems<CollaborationDecision>> {
       const limit = Math.min(SCENARIO_WINDOW_LIMIT, Math.max(1, Math.trunc(query.limit)));
       // 旧版本的记录 gate 不同（见 scenario-legacy.ts），读出时已映射成本包的场景记录。
-      const rows = sqlite.prepare(`
+      const rows = cachedStatement(sqlite, `
         SELECT * FROM collaboration_decisions
         WHERE app_id = ? AND chat_id = ? AND created_at >= ? AND action = 'act' AND status != 'failed'
           AND ((json_extract(input_snapshot_json, '$.gate') = ? AND json_extract(input_snapshot_json, '$.scenario.packId') = ?)
@@ -1369,7 +1369,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
           ? (validatedPatch.response ?? null)
           : row.response;
 
-        sqlite.prepare(`
+        cachedStatement(sqlite, `
           UPDATE collaboration_decisions
           SET status = ?, response = ?
           WHERE id = ?
@@ -1398,7 +1398,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
           );
         }
 
-        sqlite.prepare(`
+        cachedStatement(sqlite, `
           INSERT INTO collaboration_feedbacks (
             id, app_id, chat_id, decision_id, actor_id, correction, expected_action, created_at
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -1419,14 +1419,14 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
 
     async listFeedback(scope: CollaborationScope, decisionId?: string): Promise<CollaborationFeedback[]> {
       if (decisionId) {
-        const rows = sqlite.prepare(`
+        const rows = cachedStatement(sqlite, `
           SELECT * FROM collaboration_feedbacks
           WHERE app_id = ? AND chat_id = ? AND decision_id = ?
           ORDER BY created_at ASC
         `).all(scope.appId, scope.chatId, decisionId) as FeedbackRow[];
         return rows.map(rowToFeedback);
       }
-      const rows = sqlite.prepare(`
+      const rows = cachedStatement(sqlite, `
         SELECT * FROM collaboration_feedbacks
         WHERE app_id = ? AND chat_id = ?
         ORDER BY created_at ASC
@@ -1485,7 +1485,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
         const revision = 1;
         const status: ActionStatus = 'intent';
 
-        sqlite.prepare(`
+        cachedStatement(sqlite, `
           INSERT INTO collaboration_actions (
             id, app_id, chat_id, revision, kind, mandate_id, mandate_revision,
             schedule_generation, context_revision, followup_revision, requester_id,
@@ -1542,7 +1542,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
     },
 
     async getDeliveryPosition(scope: CollaborationScope, actionId: string, since: string): Promise<number> {
-      const row = sqlite.prepare(`
+      const row = cachedStatement(sqlite, `
         SELECT (SELECT COUNT(*) FROM collaboration_actions prior
           WHERE prior.app_id=current.app_id AND prior.chat_id=current.chat_id
             AND prior.kind IN ('participation.reply','schedule_delivery')
@@ -1558,12 +1558,12 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
 
     async listActions(scope?: CollaborationScope, limit?: number): Promise<ListedItems<CollaborationAction>> {
       const maxLimit = clampLimit(limit, 50);
-      const rows = (scope ? sqlite.prepare(`
+      const rows = (scope ? cachedStatement(sqlite, `
           SELECT * FROM collaboration_actions
           WHERE app_id = ? AND chat_id = ?
           ORDER BY created_at DESC
           LIMIT ?
-        `).all(scope.appId, scope.chatId, maxLimit + 1) : sqlite.prepare(`
+        `).all(scope.appId, scope.chatId, maxLimit + 1) : cachedStatement(sqlite, `
         SELECT * FROM collaboration_actions
         ORDER BY created_at DESC
         LIMIT ?
@@ -1572,7 +1572,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
     },
 
     async listPendingActions(appId: string, kind: string): Promise<CollaborationAction[]> {
-      const rows = sqlite.prepare(`
+      const rows = cachedStatement(sqlite, `
         SELECT * FROM collaboration_actions
         WHERE app_id = ? AND kind = ? AND status IN ('intent', 'sending', 'unknown')
         ORDER BY created_at ASC, id ASC
@@ -1599,7 +1599,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
         const updatedAt = now();
         const { receipt, error } = transition;
 
-        sqlite.prepare(`
+        cachedStatement(sqlite, `
           UPDATE collaboration_actions SET
             revision = ?,
             status = ?,
@@ -1633,7 +1633,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
 
     async listActivities(scope: CollaborationScope, limit?: number): Promise<ListedItems<CollaborationActivity>> {
       const maxLimit = clampLimit(limit, 50);
-      const rows = sqlite.prepare(`
+      const rows = cachedStatement(sqlite, `
         SELECT * FROM collaboration_activities
         WHERE app_id = ? AND chat_id = ?
         ORDER BY created_at DESC

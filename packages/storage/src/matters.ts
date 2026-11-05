@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3';
+import { cachedStatement } from './database-control.js';
 import { randomUUID } from 'node:crypto';
 import { matterSchema, matterLinkSchema, type MatterRepository } from '@dutydeck/shared';
 
@@ -24,12 +25,12 @@ export function createMatterRepository(db: Database.Database): MatterRepository 
   };
   const get: MatterRepository['get'] = id => decode(db.prepare(`SELECT ${columns} FROM matters WHERE id=?`).get(id));
   const find: MatterRepository['find'] = (kind, refId) => {
-    const row = db.prepare('SELECT matter_id FROM matter_links WHERE kind=? AND ref_id=? ORDER BY created_at LIMIT 1').get(kind, refId) as { matter_id: string } | undefined;
+    const row = cachedStatement(db, 'SELECT matter_id FROM matter_links WHERE kind=? AND ref_id=? ORDER BY created_at LIMIT 1').get(kind, refId) as { matter_id: string } | undefined;
     return row ? get(row.matter_id) : undefined;
   };
   const link: MatterRepository['link'] = input => {
     const value = matterLinkSchema.parse({ ...input, createdAt: new Date().toISOString() });
-    db.prepare('INSERT INTO matter_links(matter_id,kind,ref_id,relation,created_at) VALUES (?,?,?,?,?) ON CONFLICT(matter_id,kind,ref_id) DO NOTHING').run(value.matterId,value.kind,value.refId,value.relation,value.createdAt);
+    cachedStatement(db, 'INSERT INTO matter_links(matter_id,kind,ref_id,relation,created_at) VALUES (?,?,?,?,?) ON CONFLICT(matter_id,kind,ref_id) DO NOTHING').run(value.matterId,value.kind,value.refId,value.relation,value.createdAt);
   };
   const ensureSession: MatterRepository['ensureSession'] = input => db.transaction(() => {
     const existing = find('session', input.sessionId);
@@ -39,9 +40,9 @@ export function createMatterRepository(db: Database.Database): MatterRepository 
     const time = new Date().toISOString();
     const matter = source ?? matterSchema.parse({ id: `matter_${randomUUID()}`, title: Array.from(input.title.trim() || '未命名事项').slice(0, 60).join(''), status: 'open', createdAt: time, updatedAt: time,
       ...(input.originAppId ? { originAppId: input.originAppId } : {}), ...(input.originChatId ? { originChatId: input.originChatId } : {}), ...(input.originMessageId ? { originMessageId: input.originMessageId } : {}) });
-    if (!source) db.prepare('INSERT INTO matters(id,title,status,created_at,updated_at,origin_app_id,origin_chat_id,origin_message_id) VALUES (?,?,?,?,?,?,?,?)').run(matter.id,matter.title,matter.status,time,time,matter.originAppId ?? null,matter.originChatId ?? null,matter.originMessageId ?? null);
+    if (!source) cachedStatement(db, 'INSERT INTO matters(id,title,status,created_at,updated_at,origin_app_id,origin_chat_id,origin_message_id) VALUES (?,?,?,?,?,?,?,?)').run(matter.id,matter.title,matter.status,time,time,matter.originAppId ?? null,matter.originChatId ?? null,matter.originMessageId ?? null);
     link({ matterId: matter.id, kind: 'session', refId: input.sessionId, relation: input.relation ?? (source ? 'handoff' : 'origin') });
     return matter;
   }).immediate();
-  return { get, find, ensureSession, link, links: id => db.prepare('SELECT matter_id AS matterId,kind,ref_id AS refId,relation,created_at AS createdAt FROM matter_links WHERE matter_id=? ORDER BY created_at,ref_id').all(id).map(row => matterLinkSchema.parse(row)) };
+  return { get, find, ensureSession, link, links: id => cachedStatement(db, 'SELECT matter_id AS matterId,kind,ref_id AS refId,relation,created_at AS createdAt FROM matter_links WHERE matter_id=? ORDER BY created_at,ref_id').all(id).map(row => matterLinkSchema.parse(row)) };
 }

@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3';
+import { cachedStatement } from './database-control.js';
 import { createHash } from 'node:crypto';
 import {
   RuntimeError,
@@ -46,7 +47,7 @@ export const SCHEDULE_VERSION_RETENTION = 50;
 
 /** v25 迁移复用同一套收敛逻辑：把历史上续租心跳写出的版本行清到保留窗口内。 */
 export function pruneScheduleEntityVersions(sqlite: Database.Database, retention = SCHEDULE_VERSION_RETENTION): void {
-  sqlite.prepare(`
+  cachedStatement(sqlite, `
     DELETE FROM schedule_entity_versions
     WHERE id NOT IN (
       SELECT id FROM (
@@ -139,30 +140,30 @@ export interface ScheduleFoundationRepositories {
 }
 
 export function createScheduleFoundationRepositories(sqlite: Database.Database): ScheduleFoundationRepositories {
-  const getDefinition = (id: string) => { const row = sqlite.prepare('SELECT * FROM schedule_definitions WHERE id = ?').get(id) as DefinitionRow | undefined; return row ? decodeDefinition(row) : undefined; };
-  const getGeneration = (id: string) => { const row = sqlite.prepare('SELECT * FROM schedule_generations WHERE id = ?').get(id) as GenerationRow | undefined; return row ? decodeGeneration(row) : undefined; };
+  const getDefinition = (id: string) => { const row = cachedStatement(sqlite, 'SELECT * FROM schedule_definitions WHERE id = ?').get(id) as DefinitionRow | undefined; return row ? decodeDefinition(row) : undefined; };
+  const getGeneration = (id: string) => { const row = cachedStatement(sqlite, 'SELECT * FROM schedule_generations WHERE id = ?').get(id) as GenerationRow | undefined; return row ? decodeGeneration(row) : undefined; };
   const getCurrentGeneration = (definition: ScheduleDefinition) => getGeneration(generationId(definition.id, definition.currentGeneration));
-  const getOccurrence = (id: string) => { const row = sqlite.prepare('SELECT * FROM schedule_occurrences WHERE id = ?').get(id) as OccurrenceRow | undefined; return row ? decodeOccurrence(row) : undefined; };
-  const getWatermark = (id: string) => { const row = sqlite.prepare('SELECT * FROM schedule_watermarks WHERE schedule_definition_id = ?').get(id) as WatermarkRow | undefined; return row ? decodeWatermark(row) : undefined; };
-  const getLease = (key: string) => { const row = sqlite.prepare('SELECT * FROM schedule_leases WHERE lease_key = ?').get(key) as LeaseRow | undefined; return row ? decodeLease(row) : undefined; };
-  const assertBot = (id: string) => { if (!sqlite.prepare('SELECT 1 FROM channel_bots WHERE id = ?').get(id)) throw new RuntimeError('SCHEDULE_CHANNEL_BOT_NOT_FOUND', `ChannelBot ${id} was not found`, 409); };
+  const getOccurrence = (id: string) => { const row = cachedStatement(sqlite, 'SELECT * FROM schedule_occurrences WHERE id = ?').get(id) as OccurrenceRow | undefined; return row ? decodeOccurrence(row) : undefined; };
+  const getWatermark = (id: string) => { const row = cachedStatement(sqlite, 'SELECT * FROM schedule_watermarks WHERE schedule_definition_id = ?').get(id) as WatermarkRow | undefined; return row ? decodeWatermark(row) : undefined; };
+  const getLease = (key: string) => { const row = cachedStatement(sqlite, 'SELECT * FROM schedule_leases WHERE lease_key = ?').get(key) as LeaseRow | undefined; return row ? decodeLease(row) : undefined; };
+  const assertBot = (id: string) => { if (!cachedStatement(sqlite, 'SELECT 1 FROM channel_bots WHERE id = ?').get(id)) throw new RuntimeError('SCHEDULE_CHANNEL_BOT_NOT_FOUND', `ChannelBot ${id} was not found`, 409); };
   const assertBinding = (id: string | undefined, botId: string) => {
     if (!id) return;
-    const row = sqlite.prepare('SELECT channel_bot_id FROM group_bindings WHERE id = ?').get(id) as { channel_bot_id: string } | undefined;
+    const row = cachedStatement(sqlite, 'SELECT channel_bot_id FROM group_bindings WHERE id = ?').get(id) as { channel_bot_id: string } | undefined;
     if (!row || row.channel_bot_id !== botId) throw new RuntimeError('SCHEDULE_GROUP_BINDING_NOT_FOUND', `GroupBinding ${id} is not scoped to the ChannelBot`, 409);
   };
   const secretStatus = (id: string | undefined): 'configured' | 'invalid' | 'missing' => {
     if (!id) return 'missing';
-    const row = sqlite.prepare('SELECT status FROM secret_refs WHERE id = ?').get(id) as { status: string } | undefined;
+    const row = cachedStatement(sqlite, 'SELECT status FROM secret_refs WHERE id = ?').get(id) as { status: string } | undefined;
     return row?.status === 'configured' ? 'configured' : row ? 'invalid' : 'missing';
   };
   const assertSecret = (id: string | undefined) => {
     if (id && secretStatus(id) === 'missing') throw new RuntimeError('SCHEDULE_SECRET_REF_NOT_FOUND', `SecretRef ${id} was not found`, 409);
   };
   const recordVersion = (kind: ScheduleVersionKind, entity: Versioned, before?: Versioned) => {
-    sqlite.prepare('INSERT INTO schedule_entity_versions (entity_kind, entity_id, from_revision, to_revision, before_json, after_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    cachedStatement(sqlite, 'INSERT INTO schedule_entity_versions (entity_kind, entity_id, from_revision, to_revision, before_json, after_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
       .run(kind, entity.id, before?.revision ?? null, entity.revision, before ? JSON.stringify(before) : null, hash(entity), new Date().toISOString());
-    sqlite.prepare(`
+    cachedStatement(sqlite, `
       DELETE FROM schedule_entity_versions
       WHERE entity_kind = ? AND entity_id = ?
         AND id NOT IN (
@@ -175,14 +176,14 @@ export function createScheduleFoundationRepositories(sqlite: Database.Database):
   };
   const insertGeneration = (definition: ScheduleDefinition) => {
     const entity = scheduleGenerationSchema.parse({ schemaVersion: 1, id: generationId(definition.id, definition.currentGeneration), scheduleDefinitionId: definition.id, generation: definition.currentGeneration, definitionRevision: definition.revision, definitionHash: hash(definitionSemantic(definition)), timezone: definition.timezone, identityRef: definition.identityRef, secretRef: definition.secretRef, state: definition.state === 'enabled' ? 'enabled' : 'staged_disabled', createdAt: definition.updatedAt });
-    sqlite.prepare('INSERT INTO schedule_generations (id, schema_version, schedule_definition_id, generation, definition_revision, definition_hash, timezone, identity_ref, secret_ref, state, created_at) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+    cachedStatement(sqlite, 'INSERT INTO schedule_generations (id, schema_version, schedule_definition_id, generation, definition_revision, definition_hash, timezone, identity_ref, secret_ref, state, created_at) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
       .run(entity.id, entity.scheduleDefinitionId, entity.generation, entity.definitionRevision, entity.definitionHash, entity.timezone, entity.identityRef ?? null, entity.secretRef ?? null, entity.state, entity.createdAt);
     return entity;
   };
 
   const insertDefinition = (definition: ScheduleDefinition) => {
     const trigger = definition.trigger;
-    sqlite.prepare(`INSERT INTO schedule_definitions (
+    cachedStatement(sqlite, `INSERT INTO schedule_definitions (
       id, schema_version, revision, channel_bot_id, group_binding_id, name, description, trigger_kind, at_local_datetime,
       interval_seconds, interval_anchor_at, cron_expression, timezone, dst_gap_policy, dst_overlap_policy, delivery_mode,
       chat_ref, root_message_ref, continuation_policy, cwd_ref, payload_ref, identity_ref, secret_ref, source_ownership,
@@ -213,12 +214,12 @@ export function createScheduleFoundationRepositories(sqlite: Database.Database):
     const input = createScheduleDefinitionInputSchema.parse(raw);
     assertBot(input.channelBotId); assertBinding(input.groupBindingId, input.channelBotId); assertSecret(input.secretRef);
     if (getDefinition(input.id)) throw new RuntimeError('SCHEDULE_NATURAL_KEY_CONFLICT', `ScheduleDefinition ${input.id} already exists`, 409);
-    if (input.sourceScheduleRef && sqlite.prepare('SELECT 1 FROM schedule_definitions WHERE source_namespace = ? AND source_schedule_ref = ?').get(input.sourceNamespace, input.sourceScheduleRef)) throw new RuntimeError('SCHEDULE_NATURAL_KEY_CONFLICT', 'The source Schedule is already mapped', 409);
+    if (input.sourceScheduleRef && cachedStatement(sqlite, 'SELECT 1 FROM schedule_definitions WHERE source_namespace = ? AND source_schedule_ref = ?').get(input.sourceNamespace, input.sourceScheduleRef)) throw new RuntimeError('SCHEDULE_NATURAL_KEY_CONFLICT', 'The source Schedule is already mapped', 409);
     const timestamp = new Date().toISOString();
     const definition = scheduleDefinitionSchema.parse({ ...input, schemaVersion: 1, revision: 1, state: 'staged', desiredExecutorState: 'disabled', currentGeneration: 1, createdAt: timestamp, updatedAt: timestamp });
     previewNextSchedule(definition, new Date(0)); // validates timezone and trigger grammar; no timer is started
     insertDefinition(definition); insertGeneration(definition);
-    sqlite.prepare('INSERT INTO schedule_watermarks (schedule_definition_id, schema_version, revision, updated_at) VALUES (?, 1, 1, ?)').run(definition.id, timestamp);
+    cachedStatement(sqlite, 'INSERT INTO schedule_watermarks (schedule_definition_id, schema_version, revision, updated_at) VALUES (?, 1, 1, ?)').run(definition.id, timestamp);
     recordVersion('schedule_definition', definition);
     return definition;
   };
@@ -240,7 +241,7 @@ export function createScheduleFoundationRepositories(sqlite: Database.Database):
     if (next.state === 'enabled' && (next.sourceNamespace !== 'collaboration' || next.sourceOwnership !== 'dutydeck' || !next.identityRef || secretStatus(next.secretRef) !== 'configured')) throw new RuntimeError('SCHEDULE_ENABLE_FORBIDDEN', 'Only validated collaboration schedules can be enabled', 409);
     assertSecret(next.secretRef); previewNextSchedule(next, new Date(0));
     const trigger = next.trigger;
-    const result = sqlite.prepare(`UPDATE schedule_definitions SET revision = ?, name = ?, description = ?, trigger_kind = ?, at_local_datetime = ?, interval_seconds = ?, interval_anchor_at = ?, cron_expression = ?, timezone = ?, dst_gap_policy = ?, dst_overlap_policy = ?, delivery_mode = ?, chat_ref = ?, root_message_ref = ?, continuation_policy = ?, cwd_ref = ?, payload_ref = ?, identity_ref = ?, secret_ref = ?, state = ?, desired_executor_state = ?, current_generation = ?, updated_at = ? WHERE id = ? AND revision = ?`)
+    const result = cachedStatement(sqlite, `UPDATE schedule_definitions SET revision = ?, name = ?, description = ?, trigger_kind = ?, at_local_datetime = ?, interval_seconds = ?, interval_anchor_at = ?, cron_expression = ?, timezone = ?, dst_gap_policy = ?, dst_overlap_policy = ?, delivery_mode = ?, chat_ref = ?, root_message_ref = ?, continuation_policy = ?, cwd_ref = ?, payload_ref = ?, identity_ref = ?, secret_ref = ?, state = ?, desired_executor_state = ?, current_generation = ?, updated_at = ? WHERE id = ? AND revision = ?`)
       .run(next.revision, next.name, next.description ?? null, trigger.kind, trigger.kind === 'at' ? trigger.localDateTime : null,
         trigger.kind === 'interval' ? trigger.everySeconds : null, trigger.kind === 'interval' ? trigger.anchorAt : null,
         trigger.kind === 'cron' ? trigger.expression : null, next.timezone, next.dstPolicy.gap, next.dstPolicy.overlap,
@@ -250,8 +251,8 @@ export function createScheduleFoundationRepositories(sqlite: Database.Database):
     insertGeneration(next); recordVersion('schedule_definition', next, current);
     if (next.sourceNamespace === 'collaboration') {
       const nextDue = next.state === 'enabled' ? (input.nextDueAt !== undefined ? input.nextDueAt : previewNextSchedule(next, new Date(next.updatedAt))?.scheduledForUtc) : undefined;
-      sqlite.prepare('UPDATE schedule_watermarks SET revision=revision+1,next_due_at=?,updated_at=? WHERE schedule_definition_id=?').run(nextDue ?? null,next.updatedAt,id);
-      sqlite.prepare("UPDATE schedule_occurrences SET state='suppressed',revision=revision+1,error='Schedule generation changed',updated_at=? WHERE schedule_definition_id=? AND state IN ('planned','claimed')").run(next.updatedAt,id);
+      cachedStatement(sqlite, 'UPDATE schedule_watermarks SET revision=revision+1,next_due_at=?,updated_at=? WHERE schedule_definition_id=?').run(nextDue ?? null,next.updatedAt,id);
+      cachedStatement(sqlite, "UPDATE schedule_occurrences SET state='suppressed',revision=revision+1,error='Schedule generation changed',updated_at=? WHERE schedule_definition_id=? AND state IN ('planned','claimed')").run(next.updatedAt,id);
     }
     return next;
   };
@@ -261,7 +262,7 @@ export function createScheduleFoundationRepositories(sqlite: Database.Database):
     const current = getDefinition(id);
     if (!current) throw notFound('ScheduleDefinition', id);
     if (current.revision !== expectedRevision) throw revisionConflict('ScheduleDefinition', id);
-    const version = sqlite.prepare('SELECT before_json, after_hash FROM schedule_entity_versions WHERE entity_kind = ? AND entity_id = ? AND to_revision = ?').get('schedule_definition', id, expectedRevision) as VersionRow | undefined;
+    const version = cachedStatement(sqlite, 'SELECT before_json, after_hash FROM schedule_entity_versions WHERE entity_kind = ? AND entity_id = ? AND to_revision = ?').get('schedule_definition', id, expectedRevision) as VersionRow | undefined;
     if (!version || version.after_hash !== hash(current)) throw new RuntimeError('SCHEDULE_ROLLBACK_CONFLICT', 'ScheduleDefinition changed after the rollback point', 409);
     if (!version.before_json) throw new RuntimeError('SCHEDULE_ROLLBACK_ROOT_UNSUPPORTED', 'The initial ScheduleDefinition is retained as disabled audit data', 409);
     const before = scheduleDefinitionSchema.parse(JSON.parse(version.before_json));
@@ -276,14 +277,14 @@ export function createScheduleFoundationRepositories(sqlite: Database.Database):
     if (!current) {
       if (input.expectedRevision !== 0 || input.expectedGeneration !== 0) throw leaseConflict('New lease requires expected revision and generation 0');
       const entity = scheduleLeaseSchema.parse({ schemaVersion: 1, id: input.id, revision: 1, leaseKey: input.leaseKey, generation: 1, holderId: input.holderId, holderIdentityRef: input.holderIdentityRef, secretRef: input.secretRef, state: 'held', scheduleSetHash: input.scheduleSetHash, fenceToken: 1, renewedAt: input.now, expiresAt, createdAt: input.now, updatedAt: input.now });
-      sqlite.prepare('INSERT INTO schedule_leases (id, schema_version, revision, lease_key, generation, holder_id, holder_identity_ref, secret_ref, state, schedule_set_hash, fence_token, renewed_at, expires_at, created_at, updated_at) VALUES (?, 1, 1, ?, 1, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)')
+      cachedStatement(sqlite, 'INSERT INTO schedule_leases (id, schema_version, revision, lease_key, generation, holder_id, holder_identity_ref, secret_ref, state, schedule_set_hash, fence_token, renewed_at, expires_at, created_at, updated_at) VALUES (?, 1, 1, ?, 1, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)')
         .run(entity.id, entity.leaseKey, entity.holderId, entity.holderIdentityRef, entity.secretRef, entity.state, entity.scheduleSetHash, entity.renewedAt, entity.expiresAt, entity.createdAt, entity.updatedAt);
       recordVersion('schedule_lease', entity); return entity;
     }
     if (current.revision !== input.expectedRevision || current.generation !== input.expectedGeneration) throw leaseConflict('Lease revision or generation does not match');
     if (current.state === 'held') throw leaseConflict('Held leases must be fenced before another acquire; expiry is not an automatic steal');
     const next = scheduleLeaseSchema.parse({ ...current, revision: current.revision + 1, generation: current.generation + 1, holderId: input.holderId, holderIdentityRef: input.holderIdentityRef, secretRef: input.secretRef, state: 'held', scheduleSetHash: input.scheduleSetHash, fenceToken: current.fenceToken + 1, renewedAt: input.now, expiresAt, updatedAt: input.now });
-    const result = sqlite.prepare(`UPDATE schedule_leases SET revision = ?, generation = ?, holder_id = ?, holder_identity_ref = ?, secret_ref = ?, state = 'held', schedule_set_hash = ?, fence_token = ?, renewed_at = ?, expires_at = ?, updated_at = ? WHERE lease_key = ? AND revision = ? AND generation = ?`)
+    const result = cachedStatement(sqlite, `UPDATE schedule_leases SET revision = ?, generation = ?, holder_id = ?, holder_identity_ref = ?, secret_ref = ?, state = 'held', schedule_set_hash = ?, fence_token = ?, renewed_at = ?, expires_at = ?, updated_at = ? WHERE lease_key = ? AND revision = ? AND generation = ?`)
       .run(next.revision, next.generation, next.holderId, next.holderIdentityRef, next.secretRef, next.scheduleSetHash, next.fenceToken, next.renewedAt, next.expiresAt, next.updatedAt, input.leaseKey, input.expectedRevision, input.expectedGeneration);
     if (result.changes !== 1) throw leaseConflict('Lease changed concurrently');
     recordVersion('schedule_lease', next, current); return next;
@@ -295,7 +296,7 @@ export function createScheduleFoundationRepositories(sqlite: Database.Database):
     if (current.revision !== input.expectedRevision || current.generation !== input.expectedGeneration || current.fenceToken !== input.expectedFenceToken || current.holderId !== input.holderId || current.state !== 'held') throw leaseConflict('Lease proof does not match the held writer');
     if (!current.expiresAt || new Date(current.expiresAt) <= new Date(input.now)) throw leaseConflict('Expired leases cannot renew; fence explicitly before reacquiring');
     const next = scheduleLeaseSchema.parse({ ...current, revision: current.revision + 1, renewedAt: input.now, expiresAt: new Date(new Date(input.now).getTime() + input.ttlMs).toISOString(), updatedAt: input.now });
-    const result = sqlite.prepare('UPDATE schedule_leases SET revision = ?, renewed_at = ?, expires_at = ?, updated_at = ? WHERE lease_key = ? AND revision = ? AND generation = ? AND fence_token = ? AND holder_id = ? AND state = ?')
+    const result = cachedStatement(sqlite, 'UPDATE schedule_leases SET revision = ?, renewed_at = ?, expires_at = ?, updated_at = ? WHERE lease_key = ? AND revision = ? AND generation = ? AND fence_token = ? AND holder_id = ? AND state = ?')
       .run(next.revision, next.renewedAt, next.expiresAt, next.updatedAt, leaseKey, input.expectedRevision, input.expectedGeneration, input.expectedFenceToken, input.holderId, 'held');
     if (result.changes !== 1) throw leaseConflict('Lease changed concurrently'); return next;
   };
@@ -305,7 +306,7 @@ export function createScheduleFoundationRepositories(sqlite: Database.Database):
     if (!current) throw notFound('ScheduleLease', leaseKey);
     if (current.revision !== input.expectedRevision || current.generation !== input.expectedGeneration || current.fenceToken !== input.expectedFenceToken) throw leaseConflict('Lease fence proof does not match');
     const next = scheduleLeaseSchema.parse({ ...current, revision: current.revision + 1, holderId: undefined, holderIdentityRef: undefined, secretRef: undefined, state: 'fenced', fenceToken: current.fenceToken + 1, renewedAt: undefined, expiresAt: input.now, updatedAt: input.now });
-    const result = sqlite.prepare(`UPDATE schedule_leases SET revision = ?, holder_id = NULL, holder_identity_ref = NULL, secret_ref = NULL, state = 'fenced', fence_token = ?, renewed_at = NULL, expires_at = ?, updated_at = ? WHERE lease_key = ? AND revision = ? AND generation = ? AND fence_token = ?`)
+    const result = cachedStatement(sqlite, `UPDATE schedule_leases SET revision = ?, holder_id = NULL, holder_identity_ref = NULL, secret_ref = NULL, state = 'fenced', fence_token = ?, renewed_at = NULL, expires_at = ?, updated_at = ? WHERE lease_key = ? AND revision = ? AND generation = ? AND fence_token = ?`)
       .run(next.revision, next.fenceToken, next.expiresAt, next.updatedAt, leaseKey, input.expectedRevision, input.expectedGeneration, input.expectedFenceToken);
     if (result.changes !== 1) throw leaseConflict('Lease changed concurrently'); recordVersion('schedule_lease', next, current); return next;
   };
@@ -321,7 +322,7 @@ export function createScheduleFoundationRepositories(sqlite: Database.Database):
     if (!transitions[current.state]?.includes(state)) throw new RuntimeError('SCHEDULE_OCCURRENCE_STATE_CONFLICT', 'Invalid occurrence transition', 409);
     if (['claimed','running'].includes(state) && (current.generation !== definition.currentGeneration || definition.state !== 'enabled')) throw new RuntimeError('SCHEDULE_GENERATION_STALE', 'Schedule changed before execution', 409);
     const next = scheduleOccurrenceSchema.parse({ ...current, revision: current.revision + 1, state, leaseKey: fence.leaseKey, leaseFenceToken: fence.fenceToken, holderId: fence.holderId, error, updatedAt: fence.now });
-    sqlite.prepare('UPDATE schedule_occurrences SET revision=?,state=?,lease_key=?,lease_fence_token=?,holder_id=?,error=?,updated_at=? WHERE id=? AND revision=?').run(next.revision,state,fence.leaseKey,fence.fenceToken,fence.holderId,error ?? null,fence.now,id,expectedRevision);
+    cachedStatement(sqlite, 'UPDATE schedule_occurrences SET revision=?,state=?,lease_key=?,lease_fence_token=?,holder_id=?,error=?,updated_at=? WHERE id=? AND revision=?').run(next.revision,state,fence.leaseKey,fence.fenceToken,fence.holderId,error ?? null,fence.now,id,expectedRevision);
     const column = state === 'claimed' ? 'last_claimed_occurrence_key' : state === 'running' ? 'last_started_occurrence_key' : 'last_settled_occurrence_key';
     if (state !== 'unknown') sqlite.prepare(`UPDATE schedule_watermarks SET revision=revision+1,${column}=?,updated_at=? WHERE schedule_definition_id=?`).run(next.idempotencyKey,fence.now,definition.id);
     return next;
@@ -329,7 +330,7 @@ export function createScheduleFoundationRepositories(sqlite: Database.Database):
 
   return {
     scheduleDefinitions: {
-      async list(limit) { return (sqlite.prepare('SELECT * FROM schedule_definitions ORDER BY updated_at DESC, id LIMIT ?').all(bounded(limit)) as DefinitionRow[]).map(decodeDefinition); },
+      async list(limit) { return (cachedStatement(sqlite, 'SELECT * FROM schedule_definitions ORDER BY updated_at DESC, id LIMIT ?').all(bounded(limit)) as DefinitionRow[]).map(decodeDefinition); },
       async get(id) { return getDefinition(id); },
       async create(input) { return transact(() => createDefinition(input)); },
       async update(id, input) { return transact(() => updateDefinition(id, input)); },
@@ -341,13 +342,13 @@ export function createScheduleFoundationRepositories(sqlite: Database.Database):
     },
     scheduleGenerations: {
       async get(id) { return getGeneration(id); },
-      async listByDefinition(id, limit) { return (sqlite.prepare('SELECT * FROM schedule_generations WHERE schedule_definition_id = ? ORDER BY generation DESC LIMIT ?').all(id, bounded(limit)) as GenerationRow[]).map(decodeGeneration); }
+      async listByDefinition(id, limit) { return (cachedStatement(sqlite, 'SELECT * FROM schedule_generations WHERE schedule_definition_id = ? ORDER BY generation DESC LIMIT ?').all(id, bounded(limit)) as GenerationRow[]).map(decodeGeneration); }
     },
     scheduleOccurrences: {
-      async listUnsettled(id) { return (sqlite.prepare("SELECT * FROM schedule_occurrences WHERE schedule_definition_id=? AND state IN ('planned','claimed','running','unknown') ORDER BY scheduled_for_utc").all(id) as OccurrenceRow[]).map(decodeOccurrence); },
+      async listUnsettled(id) { return (cachedStatement(sqlite, "SELECT * FROM schedule_occurrences WHERE schedule_definition_id=? AND state IN ('planned','claimed','running','unknown') ORDER BY scheduled_for_utc").all(id) as OccurrenceRow[]).map(decodeOccurrence); },
       async advance(id, revision, state, fence, error) { return advanceOccurrence(id, revision, state, fence, error); },
       async get(id) { return getOccurrence(id); },
-      async listByDefinition(id, limit) { return (sqlite.prepare('SELECT * FROM schedule_occurrences WHERE schedule_definition_id = ? ORDER BY scheduled_for_utc DESC LIMIT ?').all(id, bounded(limit)) as OccurrenceRow[]).map(decodeOccurrence); },
+      async listByDefinition(id, limit) { return (cachedStatement(sqlite, 'SELECT * FROM schedule_occurrences WHERE schedule_definition_id = ? ORDER BY scheduled_for_utc DESC LIMIT ?').all(id, bounded(limit)) as OccurrenceRow[]).map(decodeOccurrence); },
       async recordPlanned(definitionId, scheduledForUtc, nextDueAt, expectedGeneration) {
         return transact(() => {
           const definition = getDefinition(definitionId); if (!definition) throw notFound('ScheduleDefinition', definitionId);
@@ -359,14 +360,14 @@ export function createScheduleFoundationRepositories(sqlite: Database.Database):
             if (!Number.isFinite(due.getTime()) || due.toISOString() !== nextDueAt) throw new RuntimeError('SCHEDULE_WATERMARK_TIME_INVALID', 'Watermark next due time must use canonical UTC ISO time', 400);
           }
           const identity = occurrenceIdentity(definition, scheduledForUtc);
-          const existing = sqlite.prepare('SELECT * FROM schedule_occurrences WHERE idempotency_key = ?').get(identity.idempotencyKey) as OccurrenceRow | undefined;
+          const existing = cachedStatement(sqlite, 'SELECT * FROM schedule_occurrences WHERE idempotency_key = ?').get(identity.idempotencyKey) as OccurrenceRow | undefined;
           if (existing) return { occurrence: decodeOccurrence(existing), created: false };
           const timestamp = new Date().toISOString();
           const occurrence = scheduleOccurrenceSchema.parse({ schemaVersion: 1, id: identity.id, revision: 1, scheduleDefinitionId: definition.id, scheduleGenerationId: generation.id, generation: generation.generation, scheduledForUtc, idempotencyKey: identity.idempotencyKey, state: definition.sourceOwnership === 'botmux' && definition.sourceEnabled ? 'source_owned_pending' : 'planned', intentKind: 'task_run_snapshot', createdAt: timestamp, updatedAt: timestamp });
-          sqlite.prepare('INSERT INTO schedule_occurrences (id, schema_version, revision, schedule_definition_id, schedule_generation_id, generation, scheduled_for_utc, idempotency_key, state, intent_kind, created_at, updated_at) VALUES (?, 1, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+          cachedStatement(sqlite, 'INSERT INTO schedule_occurrences (id, schema_version, revision, schedule_definition_id, schedule_generation_id, generation, scheduled_for_utc, idempotency_key, state, intent_kind, created_at, updated_at) VALUES (?, 1, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
             .run(occurrence.id, occurrence.scheduleDefinitionId, occurrence.scheduleGenerationId, occurrence.generation, occurrence.scheduledForUtc, occurrence.idempotencyKey, occurrence.state, occurrence.intentKind, occurrence.createdAt, occurrence.updatedAt);
           const watermark = getWatermark(definition.id)!;
-          sqlite.prepare('UPDATE schedule_watermarks SET revision = ?, last_planned_occurrence_key = ?, next_due_at = ?, updated_at = ? WHERE schedule_definition_id = ? AND revision = ?')
+          cachedStatement(sqlite, 'UPDATE schedule_watermarks SET revision = ?, last_planned_occurrence_key = ?, next_due_at = ?, updated_at = ? WHERE schedule_definition_id = ? AND revision = ?')
             .run(watermark.revision + 1, occurrence.idempotencyKey, nextDueAt ?? null, timestamp, definition.id, watermark.revision);
           return { occurrence, created: true };
         });
@@ -377,7 +378,7 @@ export function createScheduleFoundationRepositories(sqlite: Database.Database):
       async restoreNextDue(id, expectedGeneration, nextDueAt) {
         const due = new Date(nextDueAt);
         if (!Number.isFinite(due.getTime()) || due.toISOString() !== nextDueAt) throw new RuntimeError('SCHEDULE_WATERMARK_TIME_INVALID', 'Watermark next due time must use canonical UTC ISO time', 400);
-        sqlite.prepare(`UPDATE schedule_watermarks SET next_due_at=?,revision=revision+1,updated_at=?
+        cachedStatement(sqlite, `UPDATE schedule_watermarks SET next_due_at=?,revision=revision+1,updated_at=?
           WHERE schedule_definition_id=? AND next_due_at IS NULL AND EXISTS (
             SELECT 1 FROM schedule_definitions WHERE id=? AND current_generation=? AND state='enabled' AND trigger_kind IN ('cron','interval'))`)
           .run(nextDueAt, new Date().toISOString(), id, id, expectedGeneration);
@@ -390,14 +391,14 @@ export function createScheduleFoundationRepositories(sqlite: Database.Database):
       async fence(key, input) { return transact(() => fenceLease(key, input)); }
     },
     archivedHammerIntegrations: {
-      async listByChannelBot(botId, limit) { return (sqlite.prepare('SELECT * FROM archived_integrations WHERE channel_bot_id = ? ORDER BY created_at, id LIMIT ?').all(botId, bounded(limit)) as HammerRow[]).map(decodeHammer); },
+      async listByChannelBot(botId, limit) { return (cachedStatement(sqlite, 'SELECT * FROM archived_integrations WHERE channel_bot_id = ? ORDER BY created_at, id LIMIT ?').all(botId, bounded(limit)) as HammerRow[]).map(decodeHammer); },
       async create(raw: CreateArchivedHammerIntegrationInput) {
         return transact(() => {
           const input = createArchivedHammerIntegrationInputSchema.parse(raw); assertBot(input.channelBotId);
-          if (sqlite.prepare('SELECT 1 FROM archived_integrations WHERE id = ? OR (channel_bot_id = ? AND kind = ?)').get(input.id, input.channelBotId, 'hammer')) throw new RuntimeError('SCHEDULE_NATURAL_KEY_CONFLICT', 'Hammer archived metadata already exists for this ChannelBot', 409);
+          if (cachedStatement(sqlite, 'SELECT 1 FROM archived_integrations WHERE id = ? OR (channel_bot_id = ? AND kind = ?)').get(input.id, input.channelBotId, 'hammer')) throw new RuntimeError('SCHEDULE_NATURAL_KEY_CONFLICT', 'Hammer archived metadata already exists for this ChannelBot', 409);
           const timestamp = new Date().toISOString();
           const entity = archivedHammerIntegrationSchema.parse({ ...input, schemaVersion: 1, revision: 1, kind: 'hammer', sourceSystem: 'botmux', state: 'archived', executorState: 'unavailable', blockerCode: 'hammer_executor_unavailable', createdAt: timestamp, updatedAt: timestamp });
-          sqlite.prepare(`INSERT INTO archived_integrations (id, schema_version, revision, channel_bot_id, kind, source_system, source_enabled, hammer_mode, enforce_gates, skills_injection, state, executor_state, blocker_code, created_at, updated_at) VALUES (?, 1, 1, ?, 'hammer', 'botmux', ?, ?, ?, ?, 'archived', 'unavailable', 'hammer_executor_unavailable', ?, ?)`)
+          cachedStatement(sqlite, `INSERT INTO archived_integrations (id, schema_version, revision, channel_bot_id, kind, source_system, source_enabled, hammer_mode, enforce_gates, skills_injection, state, executor_state, blocker_code, created_at, updated_at) VALUES (?, 1, 1, ?, 'hammer', 'botmux', ?, ?, ?, ?, 'archived', 'unavailable', 'hammer_executor_unavailable', ?, ?)`)
             .run(entity.id, entity.channelBotId, entity.sourceEnabled ? 1 : 0, entity.mode, entity.enforceGates ? 1 : 0, entity.skillsInjection, entity.createdAt, entity.updatedAt);
           recordVersion('archived_integration', entity); return entity;
         });
