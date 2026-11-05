@@ -7,7 +7,8 @@ import { AcpxAdapter } from './index.js';
 
 afterEach(() => vi.unstubAllEnvs());
 
-it.each(['codex', 'codex-acp'].flatMap(id => ['path', 'agent', 'parent'].map(source => ({ id, source }))))('uses the user Codex across real ACP launches and resume ($id, path source: $source)', async ({ id, source }) => {
+// 'codex' 与 'codex-acp' 走同一个 isCodexAcpAgent 分支，两种 id 的识别由下方缺失用例覆盖。
+it.each(['path', 'agent', 'parent'].map(source => ({ id: 'codex', source })))('uses the user Codex across real ACP launches and resume ($id, path source: $source)', async ({ id, source }) => {
   const cwd = await mkdtemp(join(tmpdir(), 'dd-codex-environment-'));
   const bin = join(cwd, 'user bin'), nextBin = join(cwd, 'next bin'), bundled = join(cwd, 'bundled');
   await mkdir(bin); await mkdir(nextBin); await mkdir(bundled);

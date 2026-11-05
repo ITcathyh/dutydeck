@@ -3,7 +3,7 @@ import { promisify } from 'node:util';
 import { getCliAdapter } from '@dutydeck/cli-adapters';
 import { resolveCliSessionId } from '@dutydeck/pty-driver';
 import { childEnvironment } from '@dutydeck/shared/child-environment';
-import type { AgentConfig, Session } from '@dutydeck/shared';
+import { supportsNativeFork, type AgentConfig, type Session } from '@dutydeck/shared';
 
 /** Only a durable marker can identify the source. Never choose the CLI's latest session. */
 export function larkNativeSessionId(session: Session, agent: Pick<AgentConfig, 'id'> & Partial<AgentConfig>): string | undefined {
@@ -24,7 +24,7 @@ export function larkResumeUnavailable(session: Session, agent: (Pick<AgentConfig
 }
 
 export function larkNativeForkId(session: Session, agent: Pick<AgentConfig, 'id'> & Partial<AgentConfig>, targetAgentId: string): string | undefined {
-  if (targetAgentId !== session.agentId || session.protocol !== 'pty-cli' || !['claude-code', 'codex'].includes(agent.adapterId ?? agent.id)) return undefined;
+  if (targetAgentId !== session.agentId || session.protocol !== 'pty-cli' || !supportsNativeFork(agent)) return undefined;
   return larkNativeSessionId(session, agent);
 }
 

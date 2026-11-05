@@ -67,7 +67,7 @@ describe('SessionNameModal 结构与交互规范', () => {
   });
 
   it('输入纯空白时保存 disabled', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     renderModal({ session: sampleSession({ name: undefined }) });
     const input = screen.getByRole('textbox', { name: '会话名称' });
     await user.type(input, '    ');
@@ -75,7 +75,7 @@ describe('SessionNameModal 结构与交互规范', () => {
   });
 
   it('取消操作关闭弹窗且不调用 API', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const setSessionNameSpy = vi.spyOn(api, 'setSessionName');
     const onClose = vi.fn();
     renderModal({ onClose });
@@ -86,7 +86,7 @@ describe('SessionNameModal 结构与交互规范', () => {
   });
 
   it('保存时自动 trim、调用 cancelQueries、更新 sessions 缓存的目标 name 并关窗', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const updatedSession: Session = sampleSession({ name: '新改的会话名' });
     const setSessionNameSpy = vi.spyOn(api, 'setSessionName').mockResolvedValue(updatedSession);
     const onClose = vi.fn();
@@ -110,7 +110,7 @@ describe('SessionNameModal 结构与交互规范', () => {
   });
 
   it('点击恢复默认名称发送 null、清除缓存中目标的 name 并关窗', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const clearedSession: Session = sampleSession({ name: undefined });
     const setSessionNameSpy = vi.spyOn(api, 'setSessionName').mockResolvedValue(clearedSession);
     const onClose = vi.fn();
@@ -127,7 +127,7 @@ describe('SessionNameModal 结构与交互规范', () => {
   });
 
   it('按 Enter 可提交保存，未变时按 Enter 不触发保存', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const setSessionNameSpy = vi.spyOn(api, 'setSessionName').mockResolvedValue(sampleSession({ name: '回车保存' }));
     renderModal({ session: sampleSession({ name: undefined }) });
 
@@ -140,7 +140,7 @@ describe('SessionNameModal 结构与交互规范', () => {
   });
 
   it('接口调用失败展示 Banner、保留用户输入且不关窗', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     vi.spyOn(api, 'setSessionName').mockRejectedValue(new Error('网络超时，修改失败'));
     const onClose = vi.fn();
     renderModal({ session: sampleSession({ name: undefined }), onClose });
@@ -155,7 +155,7 @@ describe('SessionNameModal 结构与交互规范', () => {
   });
 
   it('pending 期间禁用所有操作控件，防止重复提交与关闭', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     let resolveApi: (value: Session) => void = () => {};
     const pendingPromise = new Promise<Session>(resolve => {
       resolveApi = resolve;

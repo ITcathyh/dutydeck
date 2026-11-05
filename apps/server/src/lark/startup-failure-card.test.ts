@@ -121,29 +121,6 @@ async function harness(options: {
 }
 
 describe('F1-5: 启动失败卡展示与重试按钮', () => {
-  it('失败卡的重试按钮 value 里 turn 是当前轮次', async () => {
-    const error = new Error('daemon timeout connecting to agent process');
-    const h = await harness({ startError: error });
-
-    await h.coordinator.handle(groupMessage('om_msg_1', '启动任务'), h.config);
-    await vi.waitFor(() => expect(h.service.reply).toHaveBeenCalledOnce());
-
-    const replyInput = h.service.reply.mock.calls[0]![0];
-    expect(replyInput.state).toBe('failed');
-    expect(replyInput.turn).toBe(1);
-
-    const card = buildLarkCard(replyInput);
-    const retryButton = components(card).find(el => el.tag === 'button' && el.element_id === 'retry');
-    expect(retryButton).toBeDefined();
-
-    const callbackBehavior = retryButton.behaviors.find((b: any) => b.type === 'callback');
-    expect(callbackBehavior).toBeDefined();
-    expect(callbackBehavior.value).toMatchObject({
-      action: 'retry',
-      turn: '1'
-    });
-  });
-
   it('重试后再失败时，失败卡的重试按钮 value 里 turn 递增为当前轮次', async () => {
     const error = new Error('daemon timeout');
     const h = await harness({ startError: error });

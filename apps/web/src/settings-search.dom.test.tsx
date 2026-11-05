@@ -11,9 +11,9 @@ it('indexes form metadata without config values, disambiguates identical bot nam
   const actions = settingsSearchActions([{ name: '机器人甲', appId: 'cli_first' }, { name: '机器人甲', appId: 'cli_second' }], navigate);
   expect(actions).toHaveLength(2 * (Object.keys(botSettingFields).length + Object.keys(botDetailFields).length + 1) + 1);
   render(<CommandPalette open onClose={() => {}} sessions={[]} summaries={{}} agents={[]} actions={actions} onSelectSession={() => {}}/>);
-  const user = userEvent.setup();
+  const user = userEvent.setup({ delay: null });
   const input = screen.getByRole('combobox');
-  await user.type(input, '机器人甲 cli_second 回复方式');
+  await user.click(input); await user.paste('机器人甲 cli_second 回复方式');
   const options = screen.getAllByRole('option');
   expect(options.length).toBeGreaterThan(0);
   expect(options.every(item => item.textContent?.includes('cli_second'))).toBe(true);

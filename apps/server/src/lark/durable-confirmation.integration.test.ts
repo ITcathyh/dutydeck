@@ -123,8 +123,14 @@ async function harness(options: { deliveryFailures?: number; threaded?: boolean;
   else if (options.legacy) await runtime.interrupt(sessionId, owner.taskId, 'ou_alice');
   else { await runtime.deferTurn(sessionId, owner.taskId, result.askId, false, owner.attemptId); await runtime.deferTurn(sessionId, owner.taskId, result.askId, true, owner.attemptId); }
   await vi.waitFor(() => expect(runtime.getActiveTaskContext(sessionId)).toBeUndefined());
-  const click = (actor = 'ou_alice', answer = 'write') => coordinator.handleAction({ dutydeck_workflow: 'answer', request_id: record.id,
-    generation: record.boot, answer }, actor, { messageId: record.cardId!, chatId: original.chatId });
+  // 卡片回调答复后产品固定延迟 1s 才收卡（deferClose）。点击前换成随真实时间推进的假 setTimeout，
+  // 等收卡时快进这 1s；没被快进的定时器仍按真实时间触发，语义不变。
+  const click = (actor = 'ou_alice', answer = 'write') => {
+    if (!vi.isFakeTimers()) vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'], shouldAdvanceTime: true, advanceTimeDelta: 5 });
+    return coordinator.handleAction({ dutydeck_workflow: 'answer', request_id: record.id,
+      generation: record.boot, answer }, actor, { messageId: record.cardId!, chatId: original.chatId });
+  };
+  const elapseCloseDelay = () => vi.advanceTimersByTimeAsync(1_000);
   cleanups.push(async () => { await app?.close(); coordinator.stop(); broker.close(); await runtime.shutdown(); repos.close(); await rm(cwd, { recursive: true, force: true }); });
   return { get repos() { return repos; }, get runtime() { return runtime; }, get broker() { return broker; }, service, log, rejectedIds, record, sessionId, owner, sends, save, click, defer, interactions, get config() { return config; }, get coordinator() { return coordinator; },
     restart: async () => { coordinator.stop(); coordinator = create(); await coordinator.initializeWorkflows(config); },
@@ -134,8 +140,9 @@ async function harness(options: { deliveryFailures?: number; threaded?: boolean;
       runtime = createRuntime(); await runtime.initialize([agent]); broker = createBroker(); await broker.initialize();
       coordinator = create(); await coordinator.initializeWorkflows(config);
     },
-    waitConfirmed: () => vi.waitFor(async () => expect((await interactions()).find(item => item.id === record.id))
-      .toMatchObject({ state: 'answered', cardClosedAt: expect.any(String) }), { timeout: 2_000 }) };
+    elapseCloseDelay,
+    waitConfirmed: async () => { await elapseCloseDelay(); await vi.waitFor(async () => expect((await interactions()).find(item => item.id === record.id))
+      .toMatchObject({ state: 'answered', cardClosedAt: expect.any(String) }), { timeout: 2_000 }); } };
 }
 
 describe('ADHD durable confirmation — actual Runtime and SQLite', () => {
@@ -575,6 +582,7 @@ describe('ADHD durable confirmation — actual Runtime and SQLite', () => {
     expect(await h.click()).toMatchObject({ type: 'error', content: '已结束，未执行' });
     expect((await h.interactions())[0]!.state).toBe('expired');
     expect(await h.repos.config.list!(`lark.inbox.${h.config.appId}.confirmation_`)).toEqual([]);
+    await h.elapseCloseDelay();
     await vi.waitFor(() => expect(JSON.stringify(h.service.update.mock.calls)).toContain('已结束，未执行'), { timeout: 2_000 });
     expect(h.sends).toHaveLength(1);
   });

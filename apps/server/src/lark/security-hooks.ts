@@ -2,7 +2,7 @@ import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { constants, existsSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import type { AgentConfig } from '@dutydeck/shared';
+import { isClaudeFamilyCli, type AgentConfig } from '@dutydeck/shared';
 import { secretGuardScriptPath } from '@dutydeck/shared/secret-guard';
 import { codexHookReadiness } from './codex-hook-readiness.js';
 import { LarkServiceError } from './service.js';
@@ -44,7 +44,7 @@ const adapterFor = (agentId?: string) => {
  */
 export function processGuardedAgent(agent?: Pick<AgentConfig, 'id'> & Partial<AgentConfig>) {
   if (!agent) return false;
-  if (agent.protocol === 'pty-cli') return ['claude-code', 'seed', 'relay'].includes(agent.adapterId ?? agent.id);
+  if (agent.protocol === 'pty-cli') return isClaudeFamilyCli(agent.adapterId ?? agent.id);
   return agent.protocol === 'acp' && process.platform !== 'win32' && [...(agent.command ? [agent.command] : []), ...(agent.args ?? [])]
     .some(part => basename(part) === 'claude-acp.mjs' && existsSync(join(dirname(part), 'claude-guard.mjs')));
 }

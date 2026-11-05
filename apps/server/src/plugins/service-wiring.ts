@@ -2,7 +2,7 @@ import { PluginCommandQueryService } from './command-query.js';
 import { PluginToolGrants } from './tool-grants.js';
 import { dirname } from 'node:path';
 import { resolveDatabaseUrl } from '@dutydeck/config';
-import { installationOwnerTaskActor, type ConfigRepository, type WorkItem, type CiWebhookRepository, type ExecutionRepository, type PublicTaskRecord, type Session } from '@dutydeck/shared';
+import { installationOwnerTaskActor, isTerminalTaskStatus, type ConfigRepository, type WorkItem, type CiWebhookRepository, type ExecutionRepository, type PublicTaskRecord, type Session } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { readTaskAttemptResult } from '../task-results.js';
 import { setPluginSkillRoots } from '../skill-catalog.js';
@@ -75,7 +75,7 @@ export function wirePlugins(host: PluginHost, deps: PluginWiringDeps) {
     cancelWork: async (sessionId, workItemId) => deps.workItems ? cancelUnconfirmedWorkItem(deps.workItems(), sessionId, workItemId) : false,
     isSettled: taskId => {
       const status = deps.repositories.execution.getTaskExecution(taskId)?.task.status;
-      return !status || ['completed', 'failed', 'interrupted', 'cancelled'].includes(status);
+      return !status || isTerminalTaskStatus(status);
     },
     taskStatus: taskId => {
       const status = deps.repositories.execution.getTaskExecution(taskId)?.task.status;

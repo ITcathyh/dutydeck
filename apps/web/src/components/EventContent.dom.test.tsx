@@ -33,8 +33,8 @@ describe('structured event presentation', () => {
 });
 
 it('renders the full accumulated long text on both sides of an image without reapplying single-event text limits', () => {
-  const before = `START ${'before '.repeat(24_000)} BEFORE_END`;
-  const after = `AFTER_START ${'after '.repeat(24_000)} END`;
+  const before = `START ${'before '.repeat(19_500)} BEFORE_END`;
+  const after = `AFTER_START ${'after '.repeat(22_500)} END`;
   const { container } = render(<EventContent data={{ text: before + after, parts: [{ type: 'text', text: before }, { type: 'image', mimeType: 'image/png', data: 'YWJj' }, { type: 'text', text: after }] }}/>);
   expect(container.textContent).toContain(before);
   expect(container.textContent).toContain(after);

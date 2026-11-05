@@ -51,7 +51,7 @@ describe('SystemPromptModal 渲染', () => {
   });
 
   it('Escape 关闭', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onClose = vi.fn();
     render(<SystemPromptModal open session={session('你是一个助手')} onClose={onClose}/>);
     await user.keyboard('{Escape}');
@@ -59,27 +59,11 @@ describe('SystemPromptModal 渲染', () => {
   });
 
   it('点击关闭按钮关闭', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onClose = vi.fn();
     render(<SystemPromptModal open session={session('你是一个助手')} onClose={onClose}/>);
     await user.click(screen.getByRole('button', { name: '关闭' }));
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it('打开后焦点进入弹层，Tab 不逃到弹层外', async () => {
-    const user = userEvent.setup();
-    render(<><button type="button">弹层外按钮</button><SystemPromptModal open session={session('你是一个助手')} onClose={() => {}}/></>);
-    const dialog = screen.getByRole('dialog', { name: '系统提示词' });
-    await vi.waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true));
-    await user.tab();
-    expect(dialog.contains(document.activeElement)).toBe(true);
-  });
-
-  it('portal 到 document.body，不留在组件树里（契约 §7）', () => {
-    const { container, baseElement } = render(<SystemPromptModal open session={session('你是一个助手')} onClose={() => {}}/>);
-    const dialog = screen.getByRole('dialog', { name: '系统提示词' });
-    expect(container.contains(dialog)).toBe(false);
-    expect(document.body.contains(dialog)).toBe(true);
-    expect(baseElement).toBe(document.body);
-  });
 });

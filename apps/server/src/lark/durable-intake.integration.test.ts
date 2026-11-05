@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import type { ConfigRepository } from '@dutydeck/shared';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
@@ -43,11 +43,35 @@ const notification = (event: LarkMessageEvent) => ({ sender: { sender_id: { open
 const cleanups: Array<() => Promise<void> | void> = [];
 afterEach(async () => { vi.useRealTimers(); for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); vi.restoreAllMocks(); });
 
-async function harness() {
-  const directory = await mkdtemp(join(tmpdir(), 'dutydeck-durable-'));
+type ChildExit = { code: number | null; signal: NodeJS.Signals | null; stderr: string };
+/** 在 directory 的 state.db 上跑 durable-intake-child，等它被 SIGKILL；不 reject，启动失败落到 stderr 里由断言报告。 */
+const killedChild = (directory: string, ...events: LarkMessageEvent[]) => new Promise<ChildExit>(resolve => {
+  const child = spawn(process.execPath, ['--conditions=development', '--import', 'tsx', fileURLToPath(new URL('./durable-intake-child.mts', import.meta.url)),
+    join(directory, 'state.db'), JSON.stringify(config), ...events.map(event => JSON.stringify(event))], { stdio: ['ignore', 'ignore', 'pipe'] });
+  let stderr = ''; child.stderr.on('data', chunk => { stderr += chunk; });
+  child.on('error', error => resolve({ code: null, signal: null, stderr: String(error) })); child.on('exit', (code, signal) => resolve({ code, signal, stderr }));
+});
+const intakeKill = { original: message({ chatType: 'p2p' }) };
+const claimKill = { original: message({ senderOpenId: 'ou_alarm', senderType: 'app', mentions: [], content: '{"text":"P0 original alarm"}' }) };
+const claimKillDerived = { ...claimKill.original, senderOpenId: 'ou_admin', senderType: 'user', scenario: trustedScenario, rootId: claimKill.original.messageId, threadId: 'omt_alarm' };
+const killedRuns: Partial<Record<'intake' | 'claim', { directory: string; exit: Promise<ChildExit> }>> = {};
+// 两个 SIGKILL 子进程各自冷启动 tsx 要数秒：文件开始时并行启动，与前面的用例重叠，各自用独立数据库。
+beforeAll(async () => {
+  for (const [name, events] of [['intake', [intakeKill.original]], ['claim', [claimKill.original, claimKillDerived]]] as const) {
+    const directory = await mkdtemp(join(tmpdir(), 'dutydeck-durable-'));
+    killedRuns[name] = { directory, exit: killedChild(directory, ...events) };
+  }
+});
+// 用例被过滤掉时也等子进程退出并删掉目录（用过的目录 harness 已清理，force 不报错）。
+afterAll(async () => { for (const run of Object.values(killedRuns)) { await run!.exit; await rm(run!.directory, { recursive: true, force: true }); } });
+
+async function harness(existing?: { directory: string; exit: Promise<ChildExit> }) {
+  const directory = existing?.directory ?? await mkdtemp(join(tmpdir(), 'dutydeck-durable-'));
   const filename = join(directory, 'state.db');
+  // 复用子进程写过的数据库时先等它被杀，再由测试 reopen。
+  const exit = existing && await existing.exit;
   let repositories = createRepositories(filename);
-  await repositories.config.set(larkBotsConfigKey, JSON.stringify([config]));
+  if (!existing) await repositories.config.set(larkBotsConfigKey, JSON.stringify([config]));
   const session = { id: 'ses_durable', agentId: 'codex', state: 'idle', cwd: directory, protocol: 'acp', permissionMode: 'ask', createdAt: '', updatedAt: '' };
   const runtime = { start: vi.fn(async () => session), getSession: vi.fn(async () => session), subscribe: vi.fn(() => vi.fn()),
     dispatch: vi.fn(async (..._args: unknown[]) => ({ id: 'task_durable', sessionId: session.id, status: 'queued', queuedAhead: 0 })) };
@@ -62,7 +86,7 @@ async function harness() {
     coordinators.push(coordinator); return coordinator;
   };
   cleanups.push(async () => { coordinators.forEach(coordinator => coordinator.stop()); repositories.close(); await rm(directory, { recursive: true, force: true }); });
-  return { directory, filename, get repositories() { return repositories; }, runtime, service, log, createCoordinator,
+  return { directory, filename, exit, get repositories() { return repositories; }, runtime, service, log, createCoordinator,
     reopen: () => { repositories.close(); repositories = createRepositories(filename); },
     inbox: (id = 'om_original') => new LarkTaskInbox(repositories.config).lookup(config.appId, id) };
 }
@@ -150,14 +174,9 @@ it.each(['throw', 'reject'] as const)('a local storage %s rejects the registered
 });
 
 it('survives SIGKILL after durable intake and before routing, then recovers the original exactly once', async () => {
-  const h = await harness();
-  const original = message({ chatType: 'p2p' });
-  const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null; stderr: string }>((resolve, reject) => {
-    const child = spawn(process.execPath, ['--conditions=development', '--import', 'tsx', fileURLToPath(new URL('./durable-intake-child.mts', import.meta.url)),
-      h.filename, JSON.stringify(config), JSON.stringify(original)], { stdio: ['ignore', 'ignore', 'pipe'] });
-    let stderr = ''; child.stderr.on('data', chunk => { stderr += chunk; }); child.on('error', reject); child.on('exit', (code, signal) => resolve({ code, signal, stderr }));
-  });
-  expect(exit, exit.stderr).toMatchObject({ code: null, signal: 'SIGKILL', stderr: '' });
+  const h = await harness(killedRuns.intake);
+  const { original } = intakeKill;
+  expect(h.exit, h.exit!.stderr).toMatchObject({ code: null, signal: 'SIGKILL', stderr: '' });
   h.reopen();
   expect(await h.inbox()).toMatchObject({ state: 'unrouted', event: original });
   const coordinator = h.createCoordinator(); await coordinator.initializeWorkflows(config);
@@ -339,15 +358,9 @@ it('does not accept forged scenario or legacy triage metadata from raw receive o
 });
 
 it('recovers a trusted direct scenario receipt after SIGKILL immediately after claim, preserving requester, thread and raw alarm', async () => {
-  const h = await harness();
-  const original = message({ senderOpenId: 'ou_alarm', senderType: 'app', mentions: [], content: '{"text":"P0 original alarm"}' });
-  const derived = { ...original, senderOpenId: 'ou_admin', senderType: 'user', scenario: trustedScenario, rootId: original.messageId, threadId: 'omt_alarm' };
-  const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null; stderr: string }>((resolve, reject) => {
-    const child = spawn(process.execPath, ['--conditions=development', '--import', 'tsx', fileURLToPath(new URL('./durable-intake-child.mts', import.meta.url)),
-      h.filename, JSON.stringify(config), JSON.stringify(original), JSON.stringify(derived)], { stdio: ['ignore', 'ignore', 'pipe'] });
-    let stderr = ''; child.stderr.on('data', chunk => { stderr += chunk; }); child.on('error', reject); child.on('exit', (code, signal) => resolve({ code, signal, stderr }));
-  });
-  expect(exit, exit.stderr).toMatchObject({ code: null, signal: 'SIGKILL', stderr: '' }); h.reopen();
+  const h = await harness(killedRuns.claim);
+  const { original } = claimKill; const derived = claimKillDerived;
+  expect(h.exit, h.exit!.stderr).toMatchObject({ code: null, signal: 'SIGKILL', stderr: '' }); h.reopen();
   expect(await h.inbox()).toMatchObject({ state: 'received', originalEvent: original, event: derived });
   const groupManager = { resolved: vi.fn(async () => config), authorize: vi.fn(async (_app: string, _chat: string, actor: string) => ({ allowed: actor === 'ou_admin' })) };
   const coordinator = h.createCoordinator({ groupManager }); await coordinator.initializeWorkflows(config);

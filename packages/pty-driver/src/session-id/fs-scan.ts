@@ -9,13 +9,7 @@
 import { closeSync, existsSync, openSync, opendirSync, readSync, statSync } from 'node:fs';
 import type { Dirent } from 'node:fs';
 import { StringDecoder } from 'node:string_decoder';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
-
-/** Expand a leading `~` to the user's home directory. */
-export function expandHome(p: string): string {
-  return p.startsWith('~') ? join(homedir(), p.slice(1)) : p;
-}
 
 /** Read at most `maxBytes` from the START of a file. Session metadata and the
  *  first user prompt both live near the head, so a head window keeps the scan
@@ -122,19 +116,22 @@ export interface WalkOptions {
 const DEFAULT_MAX_ENTRIES = 20_000;
 
 /**
- * Iterative, depth-limited walk collecting files whose basename is accepted.
+ * Iterative, depth-limited walk listing plain files whose basename is accepted.
  * Symlinked directories are not followed (Dirent.isDirectory() is false for a
- * symlink), so a link loop cannot hang the scan.
+ * symlink), so a link loop cannot hang the scan. `truncated` reports that the
+ * entry budget was hit, or that more than `maxFiles` files matched (the walk
+ * stops right after the first one past it), so callers that need an
+ * exhaustive answer never treat a partial list as complete.
  */
-export function walkFiles(root: string, opts: WalkOptions): ScannedFile[] {
-  if (!existsSync(root)) return [];
+export function listFiles(root: string, opts: WalkOptions & { maxFiles?: number }): { paths: string[]; truncated: boolean } {
+  const paths: string[] = [];
   try {
-    if (!statSync(root).isDirectory()) return [];
+    if (!existsSync(root) || !statSync(root).isDirectory()) return { paths, truncated: false };
   } catch {
-    return [];
+    return { paths, truncated: false };
   }
   const maxEntries = opts.maxEntries ?? DEFAULT_MAX_ENTRIES;
-  const out: ScannedFile[] = [];
+  const maxFiles = opts.maxFiles ?? Infinity;
   let visited = 0;
   const stack: Array<{ dir: string; depth: number }> = [{ dir: root, depth: 0 }];
   while (stack.length > 0) {
@@ -148,21 +145,31 @@ export function walkFiles(root: string, opts: WalkOptions): ScannedFile[] {
     try {
       let entry: Dirent | null;
       while ((entry = directory.readSync()) !== null) {
-        if (++visited > maxEntries) return out;
+        if (++visited > maxEntries) return { paths, truncated: true };
         const full = join(dir, entry.name);
         if (entry.isDirectory()) {
           if (depth < opts.maxDepth) stack.push({ dir: full, depth: depth + 1 });
         } else if (entry.isFile() && opts.accept(entry.name)) {
-          try {
-            const st = statSync(full);
-            if (st.isFile()) out.push({ path: full, mtimeMs: st.mtimeMs, size: st.size });
-          } catch {
-            // Vanished between readdir and stat — ignore.
-          }
+          paths.push(full);
+          if (paths.length > maxFiles) return { paths, truncated: true };
         }
       }
     } finally {
       try { directory.closeSync(); } catch { /* already closed */ }
+    }
+  }
+  return { paths, truncated: false };
+}
+
+/** listFiles plus each file's mtime/size; a file that vanished before stat is dropped. */
+export function walkFiles(root: string, opts: WalkOptions): ScannedFile[] {
+  const out: ScannedFile[] = [];
+  for (const path of listFiles(root, opts).paths) {
+    try {
+      const st = statSync(path);
+      if (st.isFile()) out.push({ path, mtimeMs: st.mtimeMs, size: st.size });
+    } catch {
+      // Vanished between readdir and stat — ignore.
     }
   }
   return out;

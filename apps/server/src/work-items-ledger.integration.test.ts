@@ -13,12 +13,12 @@ import { readAttemptResult, TASK_RESULT_OUTPUT_BYTES } from './task-results.js';
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { while (cleanup.length) await cleanup.pop()!(); });
 async function eventually(check: () => Promise<boolean>) {
-  for (let i = 0; i < 200; i++) { if (await check()) return; await new Promise(resolve => setTimeout(resolve, 10)); }
+  for (let i = 0; i < 400; i++) { if (await check()) return; await new Promise(resolve => setTimeout(resolve, 5)); }
   throw new Error('Condition did not converge');
 }
 /** WorkItem 图推进是显式 tick；轮询期间重复 tick 才能观察到 Runtime 异步结算。 */
 async function eventuallyItem(f: { tick: () => Promise<void> }, check: () => Promise<boolean>) {
-  for (let i = 0; i < 200; i++) { await f.tick(); if (await check()) return; await new Promise(resolve => setTimeout(resolve, 20)); }
+  for (let i = 0; i < 400; i++) { await f.tick(); if (await check()) return; await new Promise(resolve => setTimeout(resolve, 5)); }
   throw new Error('Condition did not converge');
 }
 const single: WorkPlan = { title: 'Research', steps: [{ id: 'a', title: 'Research A', kind: 'agent', agentId: 'native', instruction: 'Research A', dependsOn: [] }], outputStepId: 'a' };

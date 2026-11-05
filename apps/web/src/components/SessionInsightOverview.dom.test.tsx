@@ -96,7 +96,7 @@ describe('SessionInsightOverview 稳定分母与覆盖维度', () => {
 
   it('分组切换时请求带 groupBy，纳入/排除原因可见', async () => {
     const spy = vi.spyOn(insightApi, 'summary').mockResolvedValue(summaryResponse({ groups: [groupRow({})], sessions: [] }));
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     mount();
     await screen.findByRole('region', { name: '分组汇总' });
     await user.selectOptions(screen.getByLabelText('分组'), 'agent');
@@ -145,7 +145,7 @@ describe('SessionInsightOverview 选择、批量有界提交与对比', () => {
       if (sessionId === 'b') throw new ApiError('队列已满', 'INSIGHT_QUEUE_FULL', 429);
       return { requestId: '22222222-2222-4222-8222-222222222222', state: 'queued', cacheHit: false };
     });
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     mount();
 
     await screen.findByRole('region', { name: '会话列表' });
@@ -155,7 +155,7 @@ describe('SessionInsightOverview 选择、批量有界提交与对比', () => {
     await user.click(screen.getByRole('button', { name: /分析所选/ }));
 
     // 三个请求按顺序逐行发出（有界串行，不构造批处理任务）。
-    await vi.waitFor(() => expect(refreshSpy).toHaveBeenCalledTimes(3));
+    await vi.waitFor(() => expect(refreshSpy).toHaveBeenCalledTimes(3), { interval: 5 });
     const list = screen.getByRole('region', { name: '会话列表' });
     expect(within(list).getByTestId('batch-state-a').textContent).toContain('已接纳');
     expect(within(list).getByTestId('batch-state-b').textContent).toContain('队列已满，未接纳');
@@ -164,7 +164,7 @@ describe('SessionInsightOverview 选择、批量有界提交与对比', () => {
 
   it('恰好选择两个有快照的会话才能进入对比；未分析会话不能凑数', async () => {
     vi.spyOn(insightApi, 'summary').mockResolvedValue(summaryResponse({ groups: [groupRow({})], sessions: rows }));
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const { onCompare } = mount();
     await screen.findByRole('region', { name: '会话列表' });
 
@@ -192,7 +192,7 @@ describe('SessionInsightOverview 选择、批量有界提交与对比', () => {
       sessionRow({ sessionId: 'd', hasSnapshot: true, snapshotId: 'snap-d', availability: 'complete', freshness: 'current', refreshState: 'succeeded' })
     ];
     vi.spyOn(insightApi, 'summary').mockResolvedValue(summaryResponse({ groups: [groupRow({})], sessions: twoSnapshotRows }));
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const { onCompare } = mount();
     await screen.findByRole('region', { name: '会话列表' });
     await user.click(screen.getByLabelText('选择会话 a'));
@@ -207,13 +207,13 @@ describe('SessionInsightOverview 选择、批量有界提交与对比', () => {
     const spy = vi.spyOn(insightApi, 'summary')
       .mockResolvedValueOnce(page1)
       .mockResolvedValueOnce(page2);
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     mount();
     const list = await screen.findByRole('region', { name: '会话列表' });
     expect(within(list).getByRole('button', { name: 'p1' })).toBeTruthy();
     const more = screen.getByRole('button', { name: '加载更多会话' });
     await user.click(more);
-    await vi.waitFor(() => expect(spy).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: 'cur-1', limit: 100 }), expect.any(AbortSignal)));
+    await vi.waitFor(() => expect(spy).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: 'cur-1', limit: 100 }), expect.any(AbortSignal)), { interval: 5 });
     expect(within(list).getByRole('button', { name: 'p2' })).toBeTruthy();
     // 覆盖统计仍是首页的完整分母，没有被第二页相加。
     const coverage = screen.getByRole('region', { name: '候选会话覆盖' });
@@ -226,7 +226,7 @@ describe('SessionInsightOverview 选择、批量有界提交与对比', () => {
     const summarySpy = vi.spyOn(insightApi, 'summary')
       .mockRejectedValueOnce(new ApiError('服务暂不可用', 'SERVICE_UNAVAILABLE', 503))
       .mockResolvedValueOnce(summaryResponse({ groups: [groupRow({})], sessions: [] }));
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     mount();
     // 首次失败立即展示错误横幅与重试按钮，不卡在 Spinner
     const banner = await screen.findByRole('alert');
@@ -241,7 +241,7 @@ describe('SessionInsightOverview 选择、批量有界提交与对比', () => {
 
   it('点击会话行打开该会话；共享来源会话有明确标注', async () => {
     vi.spyOn(insightApi, 'summary').mockResolvedValue(summaryResponse({ groups: [groupRow({})], sessions: rows }));
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const { onOpenSession } = mount();
     await screen.findByRole('region', { name: '会话列表' });
     await user.click(screen.getByRole('button', { name: 'c' }));

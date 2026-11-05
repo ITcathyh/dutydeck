@@ -1,7 +1,7 @@
 import type Database from 'better-sqlite3';
 import { createHash, randomUUID } from 'node:crypto';
 import {
-  executionActorSchema, acceptedTaskInputSchema, acceptedTaskInputV2Schema, canonicalExecutionJson, taskExecutionSchemas, taskRequestV1Schema, steeringRecoveryDecisionSchema, steerableTaskNamespace, parseLarkSourceId, RuntimeError,
+  executionActorSchema, acceptedTaskInputSchema, isTerminalTaskStatus, acceptedTaskInputV2Schema, canonicalExecutionJson, taskExecutionSchemas, taskRequestV1Schema, steeringRecoveryDecisionSchema, steerableTaskNamespace, parseLarkSourceId, RuntimeError,
   type AcceptedTask, type AcceptedTaskInput, type AgentEvent, type AttemptFence, type BoundExecutionRepository,
   type CommitResult, type DriverResource, type ExecutionBlocker, type ExecutionController, type ExecutionRepository,
   type ExecutionTask, type ExecutionUpgradeCounts, type ExecutionUpgradeSnapshot, type QueueAction, type RecoveryDecisionInput, type ResourceCheckRef, type Session,
@@ -43,15 +43,26 @@ function noCredentials(value: unknown): void {
 }
 
 export function createTaskExecutionRepository(db: Database.Database, control: OpenControl): ExecutionRepository {
-  const authority = () => (db.prepare('SELECT authority FROM execution_authority WHERE id=1').get() as { authority: 'legacy' | 'ledger_v1' }).authority;
+  // Hot-path statements are prepared once, on first use: the repository can be built before migrations create its tables.
+  const statement = (sql: string) => { let prepared: Database.Statement | undefined; return () => (prepared ??= db.prepare(sql)); };
+  const authorityRow = statement('SELECT authority FROM execution_authority WHERE id=1');
+  const authority = () => (authorityRow().get() as { authority: 'legacy' | 'ledger_v1' }).authority;
+  const requireLedger = () => { if (authority() !== 'ledger_v1') fail('EXECUTION_AUTHORITY_LEGACY'); };
   const session = (sessionId: string): Session => {
     const row = db.prepare('SELECT * FROM sessions WHERE id=?').get(sessionId) as Record<string, unknown> | undefined;
     if (!row) fail('SESSION_NOT_FOUND');
     const names: Record<string, string> = { terminal_backend: 'terminalBackend', agent_id: 'agentId', run_id: 'runId', source_id: 'sourceId', permission_mode: 'permissionMode', system_prompt: 'systemPrompt', reasoning_effort: 'reasoningEffort', created_at: 'createdAt', updated_at: 'updatedAt', archived_at: 'archivedAt' };
     return Object.fromEntries(Object.entries(row).filter(([, v]) => v !== null).map(([k, v]) => [names[k] ?? k, v])) as unknown as Session;
   };
+  const taskRow = statement('SELECT * FROM tasks WHERE id=?');
   const task = (taskId: string): ExecutionTask | undefined => {
-    return decodeTask(db.prepare('SELECT * FROM tasks WHERE id=?').get(taskId) as Record<string, any> | undefined);
+    return decodeTask(taskRow().get(taskId) as Record<string, any> | undefined);
+  };
+  // Scope checks only need ownership columns; skip decoding execution_context.
+  const taskScopeRow = statement('SELECT id,session_id,current_attempt_id FROM tasks WHERE id=?');
+  const taskScope = (taskId: string) => {
+    const r = taskScopeRow().get(taskId) as { id: string; session_id: string; current_attempt_id: string | null } | undefined;
+    return r && { id: r.id, sessionId: r.session_id, currentAttemptId: r.current_attempt_id ?? undefined };
   };
   const decodeTask = (r: Record<string, any> | undefined): ExecutionTask | undefined => {
     if (!r) return;
@@ -59,11 +70,12 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
       ...(r.execution_context ? { executionContext: JSON.parse(r.execution_context) } : {}), ...(r.current_attempt_id ? { currentAttemptId: r.current_attempt_id } : {}),
       ...(r.queue_position !== null ? { queuePosition: r.queue_position } : {}), ...(r.interrupted_by_actor ? { interruptedByActor: r.interrupted_by_actor } : {}), createdAt: r.created_at, updatedAt: r.updated_at };
   };
-  const attempt = (attemptId: string) => rowJson<TaskAttempt>(db.prepare('SELECT json FROM task_attempts WHERE id=?').get(attemptId));
+  const attemptRow = statement('SELECT json FROM task_attempts WHERE id=?');
+  const attempt = (attemptId: string) => rowJson<TaskAttempt>(attemptRow().get(attemptId));
   const taskAttempts = (taskId: string) => db.prepare('SELECT json FROM task_attempts WHERE task_id=? ORDER BY number,id').all(taskId).map(row => rowJson<TaskAttempt>(row)!);
   const getTaskExecutionState: ExecutionRepository['getTaskExecutionState'] = taskId => {
     const t = task(taskId); if (!t) return;
-    if (authority() !== 'ledger_v1') fail('EXECUTION_AUTHORITY_LEGACY');
+    requireLedger();
     return { task: t, currentAttempt: t.currentAttemptId ? attempt(t.currentAttemptId) : undefined, attempts: taskAttempts(t.id), steering: taskSteering(t.id) };
   };
   const attempts = (sessionId: string) => db.prepare('SELECT json FROM task_attempts WHERE session_id=? ORDER BY number,id').all(sessionId).map(row => rowJson<TaskAttempt>(row)!);
@@ -89,6 +101,12 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
   const resourcesBySession = db.prepare('SELECT json FROM driver_resources WHERE session_id=? ORDER BY rowid');
   const resource = (resourceId: string) => readResource(resourceById.get(resourceId));
   const resources = (sessionId: string) => resourcesBySession.all(sessionId).map(row => readResource(row)!);
+  const assertChecks = (sessionId: string, checks: ResourceCheckRef[]) => {
+    for (const check of checks) {
+      const r = resource(check.resourceId);
+      if (!r || r.sessionId !== sessionId || r.revision !== check.expectedRevision || r.observations.at(-1)?.observationId !== check.observationId) fail('RESOURCE_OBSERVATION_CONFLICT');
+    }
+  };
   const steeringOperation = (operationId: string) => rowJson<SteeringOperation>(db.prepare('SELECT json FROM task_steering_operations WHERE id=?').get(operationId));
   const taskSteering = (taskId: string) => rowJson<SteeringOperation>(db.prepare('SELECT json FROM task_steering_operations WHERE task_id=? ORDER BY rowid DESC LIMIT 1').get(taskId));
   const steeringBlockers = (sessionId: string): ExecutionBlocker[] => (db.prepare("SELECT task_id FROM task_steering_operations WHERE session_id=? AND state IN ('pending','unknown')").all(sessionId) as Array<{task_id:string}>).map(row => ({code:'STEERING_DELIVERY_UNKNOWN',sessionId,taskId:row.task_id}));
@@ -159,6 +177,17 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     parse(checksSchema, context.idleResources);
     return owner;
   };
+  const receiptEvidenceValid = (receipt: LegacyRetirementReceipt, sessionId: string): boolean => {
+    if (receipt.evidence.kind === 'pty_tmux_absent') {
+      const readable = sessionId.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 48) || 'session';
+      return receipt.protocol === 'pty-cli' && receipt.evidence.owner === `dutydeck:${sessionId}`
+        && receipt.evidence.targetName === `dutydeck-${readable}-${hash(sessionId).slice(0, 16)}`
+        && !(receipt.evidence.outcome === 'stopped_owned' && !receipt.evidence.targetId)
+        && !(receipt.evidence.outcome === 'already_missing' && (receipt.evidence.targetId || receipt.evidence.paneProcesses.length));
+    }
+    return receipt.protocol === 'acp' && receipt.evidence.acpxRecordId === sessionId
+      && receipt.evidence.recordPath.endsWith(`/sessions/${encodeURIComponent(sessionId)}.json`);
+  };
   const retiredLegacyResourceSafe = (r: DriverResource): boolean => {
     if (r.kind !== 'legacy' || r.resourceId !== legacyResourceId(r.sessionId) || r.stage !== 'unknown'
       || r.controller.instanceId !== 'legacy_unverified' || r.controller.generation !== 0) return false;
@@ -166,14 +195,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
       const receipt = readRetirementReceipt(r.sessionId);
       if (!receipt) return false;
       const { receiptId, ...content } = receipt, s = session(r.sessionId);
-      if (receipt.evidence.kind === 'pty_tmux_absent') {
-        const readable = s.id.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 48) || 'session';
-        if (receipt.protocol !== 'pty-cli' || receipt.evidence.owner !== `dutydeck:${s.id}`
-          || receipt.evidence.targetName !== `dutydeck-${readable}-${hash(s.id).slice(0, 16)}`
-          || receipt.evidence.outcome === 'stopped_owned' && !receipt.evidence.targetId
-          || receipt.evidence.outcome === 'already_missing' && (receipt.evidence.targetId || receipt.evidence.paneProcesses.length)) return false;
-      } else if (receipt.protocol !== 'acp' || receipt.evidence.acpxRecordId !== s.id
-        || !receipt.evidence.recordPath.endsWith(`/sessions/${encodeURIComponent(s.id)}.json`)) return false;
+      if (!receiptEvidenceValid(receipt, s.id)) return false;
       const entity = (db.prepare('SELECT entity FROM dutydeck_control WHERE id=1').get() as {entity:string}).entity;
       return receiptId === `legacy_retirement_${hash(stable(content))}` && receipt.sessionId === r.sessionId
         && receipt.runId === r.runId && s.runId === receipt.runId && receipt.databaseEntity === entity
@@ -269,10 +291,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
   const assertResources = (f: SessionFence, checks?: ResourceCheckRef[], owner?: ExecutionController) => {
     if (checks) {
       parse(checksSchema, checks);
-      for (const check of checks) {
-        const r = resource(check.resourceId);
-        if (!r || r.sessionId !== f.sessionId || r.revision !== check.expectedRevision || r.observations.at(-1)?.observationId !== check.observationId) fail('RESOURCE_OBSERVATION_CONFLICT');
-      }
+      assertChecks(f.sessionId, checks);
       for (const r of resources(f.sessionId)) if (r.kind !== 'operation' && r.purpose !== 'acp_native_context' && r.stage !== 'not_created' && !checks.some(check => check.resourceId === r.resourceId)) fail('RESOURCE_OBSERVATION_REQUIRED');
     }
     const unsafe = blockers(f.sessionId, owner);
@@ -283,6 +302,13 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     if (s.runId !== f.runId) fail('SESSION_RUN_CONFLICT');
     return s;
   };
+  // Same checks as checkSession without materializing the whole session row.
+  const sessionRunRow = statement('SELECT run_id FROM sessions WHERE id=?');
+  const checkRun = (f: SessionFence) => {
+    const row = sessionRunRow().get(f.sessionId) as { run_id: string | null } | undefined;
+    if (!row) fail('SESSION_NOT_FOUND');
+    if (row.run_id !== f.runId) fail('SESSION_RUN_CONFLICT');
+  };
   const saveTask = (t: ExecutionTask) => db.prepare('UPDATE tasks SET status=?, current_attempt_id=?, revision=?, queue_position=?, updated_at=? WHERE id=?').run(t.status, t.currentAttemptId ?? null, t.revision, t.queuePosition ?? null, t.updatedAt, t.id);
   const saveAttempt = (a: TaskAttempt) => db.prepare(`INSERT INTO task_attempts (id,task_id,session_id,run_id,number,revision,state,submission_state,submission_id,settlement_id,json) VALUES (?,?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,state=excluded.state,submission_state=excluded.submission_state,submission_id=excluded.submission_id,settlement_id=excluded.settlement_id,json=excluded.json`).run(a.attemptId, a.taskId, a.sessionId, a.runId, a.number, a.revision, a.state, a.submissionState, a.submission?.submissionId ?? null, a.settlementId ?? null, json(a));
@@ -290,9 +316,15 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     ON CONFLICT(id) DO UPDATE SET identity_id=excluded.identity_id,revision=excluded.revision,json=excluded.json`).run(r.resourceId, r.sessionId, r.runId, r.parentResourceId ?? null, r.identity?.identityId ?? null, r.revision, json(r));
   const insertAction = (q: QueueAction) => db.prepare('INSERT INTO task_queue_actions (id,session_id,task_id,revision,state,json) VALUES (?,?,?,?,?,?)').run(q.operationId, q.sessionId, q.taskId, q.revision, q.state, json(q));
   const decodeEvent = (r: any): AgentEvent => ({ id: r.id, sessionId: r.session_id, sequence: r.sequence, type: r.type, timestamp: r.timestamp, data: JSON.parse(r.data), ...(r.raw !== null ? { raw: r.raw } : {}), ...(r.task_id ? { taskId: r.task_id } : {}), ...(r.attempt_id ? { attemptId: r.attempt_id } : {}), ...(r.settlement_id ? { settlementId: r.settlement_id } : {}) });
-  const append = (f: SessionFence, event: { id: string; type: AgentEvent['type']; data: unknown; sourceId?: string; timestamp?: string; raw?: string }, a?: TaskAttempt, settlementId?: string): AgentEvent => {
-    const sourceKey = event.sourceId ? stable([f.sessionId, a ? ['attempt', a.attemptId] : ['run', f.runId], event.sourceId]) : null;
-    const stored = db.prepare('SELECT * FROM events WHERE id=? OR (source_key IS NOT NULL AND source_key=?)').all(event.id, sourceKey) as any[];
+  type AppendInput = { id: string; type: AgentEvent['type']; data: unknown; sourceId?: string; timestamp?: string; raw?: string };
+  const eventsByIdOrSource = statement('SELECT * FROM events WHERE id=? OR (source_key IS NOT NULL AND source_key=?)');
+  const nextEventSequence = statement('SELECT COALESCE(MAX(sequence),0)+1 AS n FROM events WHERE session_id=?');
+  const insertEvent = statement('INSERT INTO events (id,session_id,sequence,type,timestamp,data,raw,task_id,attempt_id,settlement_id,source_key) VALUES (?,?,?,?,?,?,?,?,?,?,?)');
+  const eventById = statement('SELECT * FROM events WHERE id=?');
+  const eventSourceKey = (f: SessionFence, event: AppendInput, a?: TaskAttempt) => event.sourceId ? stable([f.sessionId, a ? ['attempt', a.attemptId] : ['run', f.runId], event.sourceId]) : null;
+  const storedEvents = (f: SessionFence, event: AppendInput, a?: TaskAttempt) => eventsByIdOrSource().all(event.id, eventSourceKey(f, event, a)) as any[];
+  const append = (f: SessionFence, event: AppendInput, a?: TaskAttempt, settlementId?: string, stored = storedEvents(f, event, a)): AgentEvent => {
+    const sourceKey = eventSourceKey(f, event, a);
     const payload = { sessionId: f.sessionId, type: event.type, data: event.data, raw: event.raw ?? null, taskId: a?.taskId ?? null, attemptId: a?.attemptId ?? null, settlementId: settlementId ?? null };
     if (stored.length) {
       if (stored.length !== 1) fail('EVENT_IDEMPOTENCY_CONFLICT');
@@ -300,9 +332,9 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
       if (!same(payload, { sessionId: old.session_id, type: old.type, data: JSON.parse(old.data), raw: old.raw, taskId: old.task_id, attemptId: old.attempt_id, settlementId: old.settlement_id }) || old.source_key !== sourceKey) fail('EVENT_IDEMPOTENCY_CONFLICT');
       return decodeEvent(old);
     }
-    const sequence = (db.prepare('SELECT COALESCE(MAX(sequence),0)+1 AS n FROM events WHERE session_id=?').get(f.sessionId) as { n: number }).n;
-    db.prepare('INSERT INTO events (id,session_id,sequence,type,timestamp,data,raw,task_id,attempt_id,settlement_id,source_key) VALUES (?,?,?,?,?,?,?,?,?,?,?)').run(event.id, f.sessionId, sequence, event.type, event.timestamp ?? timestamp(), json(event.data), event.raw ?? null, a?.taskId ?? null, a?.attemptId ?? null, settlementId ?? null, sourceKey);
-    return decodeEvent(db.prepare('SELECT * FROM events WHERE id=?').get(event.id));
+    const sequence = (nextEventSequence().get(f.sessionId) as { n: number }).n;
+    insertEvent().run(event.id, f.sessionId, sequence, event.type, event.timestamp ?? timestamp(), json(event.data), event.raw ?? null, a?.taskId ?? null, a?.attemptId ?? null, settlementId ?? null, sourceKey);
+    return decodeEvent(eventById().get(event.id));
   };
   const nextPosition = (sessionId: string, position: 'front' | 'back') => {
     const r = db.prepare("SELECT MIN(COALESCE(queue_position,0)) AS lo,MAX(COALESCE(queue_position,0)) AS hi FROM tasks WHERE session_id=? AND status='queued'").get(sessionId) as { lo: number | null; hi: number | null };
@@ -408,7 +440,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
   };
   const getAcceptedTask = (taskId: string): AcceptedTask | undefined => {
     id.parse(taskId);
-    if (authority() !== 'ledger_v1') fail('EXECUTION_AUTHORITY_LEGACY');
+    requireLedger();
     const existing = task(taskId); if (!existing) return;
     const row = db.prepare('SELECT request_json,accepted_json,request_digest FROM task_requests WHERE task_id=?').get(taskId) as {request_json:string|null;accepted_json:string|null;request_digest:string} | undefined;
     const request = row?.request_json != null ? parse(taskRequestV1Schema,JSON.parse(row.request_json)) : undefined;
@@ -419,7 +451,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     return {task:existing,input,request,requestDigest:row.request_digest,replayValidation:'complete'};
   };
   const lookup = (raw: TaskRequestV1): AcceptedTask | undefined => {
-    if (authority() !== 'ledger_v1') fail('EXECUTION_AUTHORITY_LEGACY');
+    requireLedger();
     const r = validateRequest(raw);
     const found = db.prepare('SELECT * FROM task_requests WHERE namespace=? AND session_id=? AND request_key=?').get(r.namespace, r.sessionId, r.key) as any;
     if (found) {
@@ -451,11 +483,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
   const touch = (t: ExecutionTask, a: TaskAttempt) => { const at = timestamp(); t.revision++; t.updatedAt = at; a.revision++; a.updatedAt = at; };
   const recordDecision = (f: SessionFence, a: TaskAttempt | undefined, decision: RecoveryDecisionInput | unknown, decisionId: string) => {
     if (decision && typeof decision === 'object' && 'resourceChecks' in decision) {
-      const checks = parse(checksSchema, decision.resourceChecks);
-      for (const check of checks) {
-        const r = resource(check.resourceId);
-        if (!r || r.sessionId !== f.sessionId || r.revision !== check.expectedRevision || r.observations.at(-1)?.observationId !== check.observationId) fail('RESOURCE_OBSERVATION_CONFLICT');
-      }
+      assertChecks(f.sessionId, parse(checksSchema, decision.resourceChecks));
     }
     const content = { ...f, attemptId: a?.attemptId ?? null, evidence: decision };
     const old = db.prepare('SELECT json FROM recovery_decisions WHERE id=?').get(decisionId) as { json: string } | undefined;
@@ -527,7 +555,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
   };
   const listLegacyRetirementCandidates = (): LegacyRetirementCandidate[] => {
     control.assertMaintenance(db);
-    if (authority() !== 'ledger_v1') fail('EXECUTION_AUTHORITY_LEGACY');
+    requireLedger();
     const entity = (db.prepare('SELECT entity FROM dutydeck_control WHERE id=1').get() as { entity: string }).entity;
     const rows = db.prepare("SELECT id FROM sessions WHERE EXISTS (SELECT 1 FROM driver_resources WHERE session_id=sessions.id AND id LIKE 'legacy_resource_%') ORDER BY id").all() as Array<{ id: string }>;
     return rows.map(row => {
@@ -559,7 +587,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     if (receiptId !== `legacy_retirement_${hash(stable(receiptContent))}`) fail('LEGACY_RETIREMENT_RECEIPT_INVALID');
     return db.transaction((): LegacyRetirementResult => {
         control.assertMaintenance(db);
-        if (authority() !== 'ledger_v1') fail('EXECUTION_AUTHORITY_LEGACY');
+        requireLedger();
         const existing = readRetirementReceipt(receipt.sessionId);
         if (existing) {
           if (!same(existing, receipt)) fail('LEGACY_RETIREMENT_RECEIPT_CONFLICT');
@@ -577,15 +605,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
         if (retirementBlockers.length) fail('LEGACY_RETIREMENT_BLOCKED', json(retirementBlockers));
         if (retirementSnapshotDigest(s.id) !== receipt.snapshotDigest) fail('LEGACY_RETIREMENT_SNAPSHOT_CONFLICT');
         if (receipt.archivedAt !== (s.archivedAt ?? receipt.verifiedAt)) fail('LEGACY_RETIREMENT_ARCHIVE_CONFLICT');
-        if (receipt.evidence.kind === 'pty_tmux_absent') {
-          const readable = s.id.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 48) || 'session';
-          const expectedTargetName = `dutydeck-${readable}-${hash(s.id).slice(0, 16)}`;
-          if (receipt.protocol !== 'pty-cli' || receipt.evidence.owner !== `dutydeck:${s.id}`
-            || receipt.evidence.targetName !== expectedTargetName) fail('LEGACY_RETIREMENT_EVIDENCE_CONFLICT');
-          if (receipt.evidence.outcome === 'stopped_owned' && !receipt.evidence.targetId) fail('LEGACY_RETIREMENT_EVIDENCE_CONFLICT');
-          if (receipt.evidence.outcome === 'already_missing' && (receipt.evidence.targetId || receipt.evidence.paneProcesses.length)) fail('LEGACY_RETIREMENT_EVIDENCE_CONFLICT');
-        } else if (receipt.protocol !== 'acp' || receipt.evidence.acpxRecordId !== s.id
-          || !receipt.evidence.recordPath.endsWith(`/sessions/${encodeURIComponent(s.id)}.json`)) fail('LEGACY_RETIREMENT_EVIDENCE_CONFLICT');
+        if (!receiptEvidenceValid(receipt, s.id)) fail('LEGACY_RETIREMENT_EVIDENCE_CONFLICT');
         const error = s.error?.includes(LEGACY_RETIREMENT_NOTICE) ? s.error : [s.error, LEGACY_RETIREMENT_NOTICE].filter(Boolean).join('\n\n');
         const updated = db.prepare("UPDATE sessions SET state='stopped',archived_at=?,error=?,updated_at=? WHERE id=? AND run_id=? AND archived_at IS ?")
           .run(receipt.archivedAt, error, receipt.verifiedAt, s.id, s.runId, s.archivedAt ?? null);
@@ -641,14 +661,13 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
             blockers: collectAllBlockers(), legacy: legacySummary()
           };
         }
-        const terminal = new Set(['completed', 'failed', 'interrupted', 'cancelled']);
         for (const row of db.prepare('SELECT id FROM sessions ORDER BY id').all() as Array<{ id: string }>) {
           const s = session(row.id);
           const f = { sessionId: s.id, runId: s.runId };
           const controller = { accessId: control.accessId, instanceId: 'legacy_unverified', generation: 0 };
           saveResource({ ...f, resourceId: legacyResourceId(s.id), kind: 'legacy', revision: 1, controller, stage: 'unknown', observations: [], createdAt: timestamp() });
           const oldTasks = (db.prepare('SELECT id FROM tasks WHERE session_id=? ORDER BY created_at,rowid').all(s.id) as Array<{ id: string }>).map(r => task(r.id)!);
-          const ambiguous = oldTasks.filter(t => t.status !== 'queued' && !terminal.has(t.status)).length > 1;
+          const ambiguous = oldTasks.filter(t => t.status !== 'queued' && !isTerminalTaskStatus(t.status)).length > 1;
           for (const t of oldTasks) {
             const oldStatus = t.status;
             let accepted: AcceptedTaskInput | undefined;
@@ -660,9 +679,9 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
             db.prepare('INSERT INTO task_requests VALUES (?,?,?,?,?,?,?)').run(t.id, 'legacy', s.id, t.id, 'legacy_unverifiable', null, accepted ? json(accepted) : null);
             if (t.status !== 'queued') {
               const attemptId = `legacy_attempt_${hash(t.id)}`;
-              const a: TaskAttempt = { ...f, taskId: t.id, attemptId, number: 1, revision: 1, state: terminal.has(oldStatus) ? 'settled' : ambiguous ? 'legacy_unresolved' : 'reconcile_required', submissionState: 'legacy_unknown', controller, recoveryControllers: [],
+              const a: TaskAttempt = { ...f, taskId: t.id, attemptId, number: 1, revision: 1, state: isTerminalTaskStatus(oldStatus) ? 'settled' : ambiguous ? 'legacy_unresolved' : 'reconcile_required', submissionState: 'legacy_unknown', controller, recoveryControllers: [],
                 legacy: JSON.parse(json({ status: oldStatus, ...(t.executionContext?.recovery ? { recovery: t.executionContext.recovery } : {}) })), createdAt: t.createdAt, updatedAt: t.updatedAt };
-              if (terminal.has(oldStatus)) { a.outcome = oldStatus as 'completed' | 'failed' | 'interrupted' | 'cancelled'; a.settlementId = `legacy_settlement_${hash(t.id)}`; }
+              if (isTerminalTaskStatus(oldStatus)) { a.outcome = oldStatus as 'completed' | 'failed' | 'interrupted' | 'cancelled'; a.settlementId = `legacy_settlement_${hash(t.id)}`; }
               else t.status = 'reconcile_required';
               t.currentAttemptId = attemptId;
               saveAttempt(a);
@@ -705,13 +724,13 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
       return { ...state, blockers: [...blockers(t.sessionId), ...steeringBlockers(t.sessionId), ...(t.status === 'queued' ? workspaceBlockers(t.sessionId,context?.idleResources,owner) : []), ...inputBlockers(t)] };
     }).deferred(); },
     getAttempt(ref) {
-      if (authority() !== 'ledger_v1') fail('EXECUTION_AUTHORITY_LEGACY');
+      requireLedger();
       const value = attempt(ref.attemptId);
       if (value?.taskId === ref.taskId && value.sessionId === ref.sessionId && value.runId === ref.runId) return value;
     },
     getSessionExecutions(sessionId, context) { return db.transaction(() => {
       const owner = readController(context);
-      if (authority() !== 'ledger_v1') fail('EXECUTION_AUTHORITY_LEGACY');
+      requireLedger();
       const byTask = new Map<string, TaskAttempt[]>();
       for (const value of attempts(sessionId)) {
         const list = byTask.get(value.taskId) ?? []; list.push(value); byTask.set(value.taskId, list);
@@ -727,12 +746,12 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
       });
     }).deferred(); },
     getUnresolvedTasks(sessionId) {
-      if (authority() !== 'ledger_v1') fail('EXECUTION_AUTHORITY_LEGACY');
+      requireLedger();
       return db.prepare("SELECT t.id,t.status FROM (SELECT task_id FROM task_attempts WHERE session_id=? AND state IN ('preparing','active','reconcile_required','legacy_unresolved') UNION SELECT task_id FROM task_steering_operations WHERE session_id=? AND state IN ('pending','unknown')) unresolved JOIN tasks t ON t.id=unresolved.task_id ORDER BY t.created_at,t.id")
         .all(sessionId,sessionId) as Array<{ id: string; status: ExecutionTask['status'] }>;
     },
     getReconcileRequiredAttempts() {
-      if (authority() !== 'ledger_v1') fail('EXECUTION_AUTHORITY_LEGACY');
+      requireLedger();
       return db.prepare("SELECT a.json FROM tasks t JOIN task_attempts a ON a.id=t.current_attempt_id AND a.task_id=t.id WHERE t.status='reconcile_required' AND a.state='reconcile_required' ORDER BY a.rowid").all().map(row => rowJson<TaskAttempt>(row)!);
     },
     getAttemptEvents(attemptId, window = {}) {
@@ -747,21 +766,25 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
       db.transaction(() => control.validateClaim(db, claim)).immediate();
       const write = <T>(work: (owner: ExecutionController) => T): T => db.transaction(() => {
         const owner = control.validateClaim(db, claim);
-        if (authority() !== 'ledger_v1') fail('EXECUTION_AUTHORITY_LEGACY');
+        requireLedger();
         return work(owner);
       }).immediate();
-      const readFence = (raw: SessionFence) => { const f = parse(fenceSchema, raw); checkSession(f); return f; };
+      const readFence = (raw: SessionFence) => { const f = parse(fenceSchema, raw); checkRun(f); return f; };
+      const outOfScope = (f: AttemptFence, t: { id: string; sessionId: string } | undefined, a: TaskAttempt | undefined) =>
+        !t || !a || t.sessionId !== f.sessionId || a.taskId !== t.id || a.sessionId !== f.sessionId || a.runId !== f.runId;
       const attemptScope = (f: AttemptFence): { t: ExecutionTask; a: TaskAttempt } => {
-        parse(attemptFenceSchema, f); checkSession(f);
+        parse(attemptFenceSchema, f); checkRun(f);
         const t = task(f.taskId); const a = attempt(f.attemptId);
-        if (!t || !a || t.sessionId !== f.sessionId || a.taskId !== t.id || a.sessionId !== f.sessionId || a.runId !== f.runId) fail('ATTEMPT_SCOPE_CONFLICT');
-        return { t, a };
+        if (outOfScope(f, t, a)) fail('ATTEMPT_SCOPE_CONFLICT');
+        return { t: t!, a: a! };
       };
-      const currentAttempt = (f: AttemptFence, owner: ExecutionController, recovering = false) => {
-        const pair = attemptScope(f);
-        if (pair.t.currentAttemptId !== f.attemptId) fail('ATTEMPT_NOT_CURRENT');
-        if (pair.a.revision !== f.expectedRevision) fail('ATTEMPT_REVISION_CONFLICT');
-        if (!recovering && !sameController(pair.a.controller, owner)) fail('ATTEMPT_CONTROLLER_CONFLICT');
+      const assertCurrent = (f: AttemptFence, currentAttemptId: string | undefined, a: TaskAttempt, owner: ExecutionController, recovering: boolean) => {
+        if (currentAttemptId !== f.attemptId) fail('ATTEMPT_NOT_CURRENT');
+        if (a.revision !== f.expectedRevision) fail('ATTEMPT_REVISION_CONFLICT');
+        if (!recovering && !sameController(a.controller, owner)) fail('ATTEMPT_CONTROLLER_CONFLICT');
+      };
+      const currentAttempt = (f: AttemptFence, owner: ExecutionController, recovering = false, pair = attemptScope(f)) => {
+        assertCurrent(f, pair.t.currentAttemptId, pair.a, owner, recovering);
         return pair;
       };
       const command = <T>(key: string, payload: unknown, work: () => T): T => {
@@ -986,7 +1009,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
             const target=q.target ? attempt(q.target.attemptId) : undefined;
             if (evidence.state==='applied' && target && target.state!=='settled') fail('QUEUE_TARGET_NOT_SETTLED');
             if (evidence.state==='obsolete' && target && target.state!=='settled') fail('QUEUE_TARGET_NOT_SETTLED');
-            for(const check of evidence.resourceChecks) { const r=resource(check.resourceId); if(!r || r.sessionId!==f.sessionId || r.revision!==check.expectedRevision || r.observations.at(-1)?.observationId!==check.observationId) fail('RESOURCE_OBSERVATION_CONFLICT'); }
+            assertChecks(f.sessionId, evidence.resourceChecks);
             q.revision++;q.state=evidence.state;q.evidence=evidence;
             if (db.prepare('UPDATE task_queue_actions SET revision=?,state=?,json=? WHERE id=? AND session_id=? AND revision=?').run(q.revision,q.state,json(q),q.operationId,f.sessionId,expectedRevision).changes !== 1) fail('QUEUE_ACTION_REVISION_CONFLICT');
             return q;
@@ -1169,14 +1192,16 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
         appendEvent(rawFence,rawEvent) { return write(owner => {
           const event=parse(taskExecutionSchemas.event,rawEvent);
           if('attemptId' in rawFence) {
-            const {a}=attemptScope(rawFence);
+            // Hot path: check scope from ownership columns only, and reuse one event lookup for the duplicate check.
+            parse(attemptFenceSchema,rawFence);checkRun(rawFence);
+            const t=taskScope(rawFence.taskId),a=attempt(rawFence.attemptId);
+            if(outOfScope(rawFence,t,a)) fail('ATTEMPT_SCOPE_CONFLICT');
             // Duplicate output remains replayable after settlement; new output cannot mutate a settled result.
-            const sourceKey=event.sourceId?stable([rawFence.sessionId,['attempt',a.attemptId],event.sourceId]):null;
-            const old=db.prepare('SELECT 1 FROM events WHERE id=? OR source_key=?').get(event.id,sourceKey);
-            if(!old) { currentAttempt(rawFence,owner);if(a.state==='settled'||a.state==='suspended') fail('ATTEMPT_OUTPUT_CLOSED'); }
-            const stored=append(rawFence,event,a);
+            const existing=storedEvents(rawFence,event,a),old=existing.length>0;
+            if(!old) { assertCurrent(rawFence,t!.currentAttemptId,a!,owner,false);if(a!.state==='settled'||a!.state==='suspended') fail('ATTEMPT_OUTPUT_CLOSED'); }
+            const stored=append(rawFence,event,a,undefined,existing);
             // A new full-screen snapshot supersedes older ones: keep only the latest few screens' text in this attempt.
-            if(!old&&event.type==='raw_terminal'&&(event.data as {screen?:unknown})?.screen===true) compactTerminalScreens(db,a.attemptId);
+            if(!old&&event.type==='raw_terminal'&&(event.data as {screen?:unknown})?.screen===true) compactTerminalScreens(db,a!.attemptId);
             return stored;
           }
           const f=readFence(rawFence);return append(f,event);
@@ -1227,7 +1252,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
           // Callers mint a fresh operationId per patch; replay reads the patch's own event instead of a stored result snapshot.
           const scope = 'attemptId' in rawFence ? attemptScope(rawFence) : undefined;
           if (!scope) readFence(rawFence);
-          const replay = db.prepare('SELECT * FROM events WHERE id=?').get(`session_state:${operationId}`) as any;
+          const replay = eventById().get(`session_state:${operationId}`) as any;
           if (replay) {
             const data = JSON.parse(replay.data);
             if (replay.session_id !== rawFence.sessionId || replay.attempt_id !== (scope?.a.attemptId ?? null) || data.state !== patch.state || 'error' in patch && data.error !== patch.error) fail('EXECUTION_OPERATION_CONFLICT');
@@ -1235,7 +1260,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
           }
           let pair: {t: ExecutionTask; a: TaskAttempt} | undefined;
           if ('attemptId' in rawFence) {
-            pair = currentAttempt(rawFence,owner);
+            pair = currentAttempt(rawFence,owner,false,scope);
             if (!['preparing','active'].includes(pair.a.state) || !['thinking','running_tool','waiting_for_permission','interrupting'].includes(patch.state)) fail('ATTEMPT_STATE_PATCH_INVALID');
           } else {
             if (attempts(rawFence.sessionId).some(a => ['preparing','active','reconcile_required','legacy_unresolved'].includes(a.state))) fail('SESSION_EXECUTION_BUSY');

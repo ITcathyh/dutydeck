@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
-  RuntimeError, wrapUntrusted,
+  isTerminalTaskStatus, RuntimeError, wrapUntrusted,
   type CiFailureLog, type CiProvider, type CiRepository, type CiReviewComment, type PublicPullRequest, type PullRequestAvailability,
   type PullRequestStatus, type RepositoryBundle, type Session, type TaskRecord
 } from '@dutydeck/shared';
@@ -8,6 +8,7 @@ import { executionTaskId } from '@dutydeck/storage';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { z } from 'zod';
 import { changeRequestLabel, resolveCiHead, type CiProviderRegistry } from './ci-providers.js';
+import { codeBlock, errorMessage, isRunnable, iso, short, SingleFlight } from './ci-common.js';
 import { ciFixLimits, failureFingerprint, type CiNotice } from './ci-webhook.js';
 import {
   assertClaimedPushTarget, isSafeBranchName, assertPushTarget, buildCommit, defaultBranch, diffTrees, fetchBranches, git, localCommits, originPushUrl, pushBranch, remoteBranchSha, remoteUrlLabel, sameEntry, treeEntries,
@@ -41,7 +42,6 @@ export const pullRequestLimits = {
   reviewRounds: 5, commentsPerRound: 10
 } as const;
 
-const terminalTaskStatuses = new Set(['completed', 'failed', 'interrupted', 'cancelled']);
 const taskStatusLabels: Record<string, string> = { completed: '已完成', failed: '执行失败', interrupted: '被中断', cancelled: '被取消' };
 const sha = z.string().regex(/^[0-9a-f]{40,64}$/);
 const timestamp = z.string().datetime({ offset: true });
@@ -116,12 +116,7 @@ export interface PullRequestServiceOptions {
   log?: { warn: (...args: any[]) => void };
 }
 
-const iso = (ms: number) => new Date(ms).toISOString();
-const short = (value: string) => value.slice(0, 12);
-const errorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error)).replace(/[\r\n]+/g, ' ').slice(0, 300);
-const isRunnable = (session: Session | undefined): session is Session => Boolean(session && !session.archivedAt && !['stopped', 'failed'].includes(session.state));
 const oneLine = (value: string, max: number) => value.replace(/\s+/g, ' ').trim().slice(0, max);
-const codeBlock = (value: string) => `\`\`\`\n${value.replace(/```/g, "'''")}\n\`\`\``;
 const recordKey = (id: string) => `${RECORD_PREFIX}${id}`;
 
 /** 分支名只用标题里的小写字母数字，中文标题回落到 changes；后缀是记录编号，保证不和已有分支重名。 */
@@ -147,7 +142,7 @@ const statusMessages: Record<PullRequestStatus, string> = {
 export class PullRequestService {
   private readonly clock: () => Date;
   private closed = false;
-  private currentTick?: Promise<void>;
+  private readonly ticks = new SingleFlight();
   private readonly inflight = new Set<Promise<unknown>>();
   private readonly pendingSettlements = new Map<string, () => Promise<void>>();
 
@@ -211,7 +206,7 @@ export class PullRequestService {
 
   /** 等后台的推送和跟进做完（测试与关闭时用）。 */
   async idle() {
-    while (this.inflight.size || this.currentTick) await Promise.allSettled([...this.inflight, this.currentTick]);
+    while (this.inflight.size || this.ticks.current) await Promise.allSettled([...this.inflight, this.ticks.current]);
   }
 
   private label(value: PullRequestRecord) {
@@ -629,10 +624,7 @@ export class PullRequestService {
 
   tick(): Promise<void> {
     if (this.closed) return Promise.resolve();
-    if (this.currentTick) return this.currentTick;
-    const operation = this.runTick().finally(() => { if (this.currentTick === operation) this.currentTick = undefined; });
-    this.currentTick = operation;
-    return operation;
+    return this.ticks.run(() => this.runTick());
   }
 
   async close() {
@@ -667,7 +659,7 @@ export class PullRequestService {
       if (this.clock().getTime() - Date.parse(value.updatedAt) >= REDISPATCH_AFTER_MS) await this.dispatch(value);
       return;
     }
-    if (terminalTaskStatuses.has(task.status)) await this.settle(stored, task);
+    if (isTerminalTaskStatus(task.status)) await this.settle(stored, task);
   }
 
   /** 看一次 PR：状态、CI、评审意见。同一时间只跑一个跟进任务。 */

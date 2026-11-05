@@ -6,7 +6,8 @@ import type { HistoryOutline } from '@dutydeck/shared';
 export type { HistoryOutline, HistoryTurnSummary } from '@dutydeck/shared';
 import type { AutomationSchedulePage, AutomationRunDetail } from '@dutydeck/shared';
 import type { PluginBinding, SavePluginBinding, PluginConfigSchema, PluginBindingScope } from '@dutydeck/shared';
-import type { AgentWeight, InboxAction, InboxResponse, LarkAppCreationJob, PermissionMode, ScenarioBinding, ScenarioParam, SessionSourceContext, SessionUsageSnapshot } from '@dutydeck/shared';
+import type { LarkAllowedUser, PublicLarkConfig, PublicLarkConfigCollection, RiskControlMode, SaveLarkConfigInput } from '@dutydeck/shared';
+import type { InboxAction, InboxResponse, LarkAppCreationJob, PermissionMode, ScenarioBinding, ScenarioParam, SessionSourceContext, SessionUsageSnapshot } from '@dutydeck/shared';
 import type {
   SessionInsightDetailsResponse,
   SessionInsightRefreshResponse,
@@ -40,108 +41,18 @@ export type AgentModel = { id: string; name: string };
 export type AgentModelsResult = { models: AgentModel[]; profiles?: AgentModel[]; defaultModel?: string; reasoningEfforts: AgentModel[]; defaultReasoningEffort?: string; source?: 'acp' | 'cli' | 'agent'; protocol?: 'acp' };
 export type SessionCapabilities = { observedAt: string; protocol?: string; structuredApproval: string; terminal: string; turnRecovery: string; verification: string; localFileDelivery: string };
 export type SkillReference = { ref?: string; name: string; description: string; path: string; source: 'workspace' | 'user' | 'plugin' };
-export type LarkAllowedUser = { openId: string; name: string };
-export type RiskControlMode = 'off' | 'guidance' | 'enforced';
-export type LarkBotConfig = {
-  configured: true;
-  appId: string;
-  name: string;
-  tabLabel: string;
-  setupComplete: boolean;
-  workspace?: string;
-  webBaseUrl?: string;
-  /** 配置向导里答了手机打不开 Web 地址；此时没有 webBaseUrl，卡片不显示「查看详情」 */
-  webMobileReachable?: false;
-  defaultAgentId?: string;
-  fallbackAgentId?: string;
-  fallbackModel?: string;
-  defaultAgentWeights?: AgentWeight[];
-  defaultModel?: string;
-  defaultReasoningEffort?: string;
-  fullTrustConfirmed: boolean;
-  permissionMode?: 'ask' | 'approve-reads' | 'full-trust';
-  roleTitle?: string;
-  roleScope?: string;
-  preInjectPrompt: string;
-  listening: boolean;
-  activeListening: boolean;
-  groupToolsEnabled: boolean;
-  groupToolsAllowSend: boolean;
-  /** 会话记忆开关，服务端恒返回布尔；旧服务端缺省仅 Tag 模式开启。 */
-  memoryEnabled?: boolean;
-  /** 后台自动提取与整理开关，服务端恒返回布尔；旧服务端缺省按开启处理。 */
-  memoryAutoExtract?: boolean;
-  /** 群记忆范围：shared 各群共用一份（默认）；per-group 每个群各自一份。服务端恒返回；旧服务端缺省按 shared 处理。 */
-  groupMemoryScope?: 'shared' | 'per-group';
-  /** 跑提取与整理的 Agent；空表示沿用机器人默认 Agent。 */
-  memoryAgentId?: string;
-  /** 跑提取与整理的模型；空表示沿用默认模型。 */
-  memoryModel?: string;
-  decisionAgentId?: string;
-  decisionModel?: string;
-  busyTriage?: boolean;
-  /** 防止机器人互相对话的回合门禁；旧服务端缺省按关闭处理。 */
-  botLoopGuard?: boolean;
-  responseAgentId?: string;
-  responseModel?: string;
-  /** 执行方式；旧服务端缺省按 single 处理。 */
-  executionMode?: 'single' | 'layered';
-  /** 分层协作的 Leader Agent。 */
-  leaderAgentId?: string;
-  /** 分层协作里 Leader 可以指派的 Worker Agent。 */
-  workerAgentIds?: string[];
-  /** P0-2 结构化问答卡片总开关，服务端恒返回布尔；旧服务端缺省按关闭处理。 */
-  structuredAskCards?: boolean;
-  /** P0-4 群内卡片 @ 发起人总开关，服务端恒返回布尔；缺省按开启处理。 */
-  groupCardMention?: boolean;
-  /** `/new --cwd <别名>` 的别名表；没有别名时字段缺席。 */
-  workspaceAliases?: Record<string, string>;
-  /** 结果卡验证状态依赖的验证命令；未配置时字段缺席，结果卡不提验证。 */
-  verificationCommand?: string;
-  /** 完成时只贴表情、不发结果卡；旧服务端缺省按关闭处理。 */
-  completionReactionOnly?: boolean;
-  /** 中间进展静默，只保留最终结果；旧服务端缺省按关闭处理。 */
-  silentProgress?: boolean;
-  /** ADHD 友好输出；旧服务端缺省按关闭处理。 */
-  adhdMode?: boolean;
-  /** 卡片长时间无人处理时发加急提醒；服务端恒返回布尔，旧服务端缺省按关闭处理。 */
-  urgentEnabled?: boolean;
-  /** 触发加急的等待时长；服务端未配置时字段缺席，按模块默认处理。 */
-  urgentThresholdMs?: number;
-  /** 单个会话每小时的加急上限；服务端未配置时字段缺席，按模块默认处理。 */
-  urgentMaxPerHourPerChat?: number;
-  /** 「需要你操作」「完成」两档是否 @ 发起人；服务端恒返回布尔，旧服务端缺省按开启处理。 */
-  notifyMentionAction?: boolean;
-  notifyMentionDone?: boolean;
-  /** 免打扰时段 HH:MM-HH:MM；未启用时字段缺席。 */
-  notifyQuietHours?: string;
-  /** 长任务自动置顶；服务端恒返回布尔，旧服务端缺省按关闭处理。 */
-  pinLongTasks?: boolean;
-  /** 触发置顶的运行时长；服务端未配置时字段缺席，按模块默认处理。 */
-  pinAfterMs?: number;
-  pushIntervalMs: number;
-  traceLimit?: number;
-  hideTraceOnComplete: boolean;
-  /** 精简过程卡；旧服务端缺省按开启处理。 */
-  compactTrace?: boolean;
-  showAgentName?: boolean;
-  allowedUsers: LarkAllowedUser[];
-  allowedEmails: string[];
-  allowedBots: LarkAllowedUser[];
-  peerBotsAllowed: boolean;
-  highRiskAllowedUsers: LarkAllowedUser[];
-  highRiskAllowedEmails: string[];
-  highRiskPattern: string;
-  riskControlMode: RiskControlMode;
-  revision?: number;
-  p2pMode?: 'chat' | 'thread';
-  idleCompactEnabled?: boolean;
-  idleCompactHours?: number;
-  groupReplyMode?: 'chat' | 'shared' | 'new-topic' | 'chat-topic';
-  mentionPolicy?: 'always' | 'topic' | 'never' | 'ambient';
-  defaultGroupParticipation?: 'off' | 'observe' | 'selective' | 'eager';
-};
-export type LarkConfig = { configured: boolean; bots: LarkBotConfig[]; listeningDisabled: boolean };
+export type { LarkAllowedUser, RiskControlMode };
+/**
+ * 旧服务端可能不返回的字段：读取方按各自默认处理（记忆、自动提取、精简过程卡、问答卡、群内 @ 与提醒两档缺省开启，
+ * 其余开关缺省关闭；群记忆范围按 shared、执行方式按 single）。
+ */
+type LarkBotConfigLegacyOptional = 'welcomeEnabled' | 'revision' | 'memoryEnabled' | 'memoryAutoExtract' | 'groupMemoryScope' | 'botLoopGuard'
+  | 'executionMode' | 'workerAgentIds' | 'structuredAskCards' | 'groupCardMention' | 'completionReactionOnly' | 'silentProgress' | 'adhdMode'
+  | 'urgentEnabled' | 'notifyMentionAction' | 'notifyMentionDone' | 'pinLongTasks' | 'compactTrace' | 'showAgentName';
+export type LarkBotConfig = Omit<PublicLarkConfig, LarkBotConfigLegacyOptional> & Partial<Pick<PublicLarkConfig, LarkBotConfigLegacyOptional>>;
+export type LarkConfig = Omit<PublicLarkConfigCollection, 'bots'> & { bots: LarkBotConfig[] };
+/** 保存请求体；成员按姓名提交，由服务端解析为 open_id。 */
+export type SaveLarkConfigBody = SaveLarkConfigInput & { stage: 'lark' | 'agent'; allowedUserNames?: string[]; highRiskAllowedUserNames?: string[] };
 
 export type LarkMemoryGroupStatus = {
   appId: string;
@@ -336,6 +247,8 @@ export class ApiError extends Error {
   constructor(message: string, public readonly code: string, public readonly status: number, public readonly current?: unknown) { super(message); this.name = 'ApiError'; }
 }
 const json = async <T,>(url: string, init?: RequestInit, instance?: string | null): Promise<T> => { const targetUrl = instance === undefined ? instanceApiUrl(url) : instance === null ? url : `/api/instances/${encodeURIComponent(instance)}${url.slice(4)}`; const response = await fetch(withShareToken(targetUrl), { credentials: 'same-origin', ...init }); const data = await response.json(); if (!response.ok) { if (response.status === 401 && typeof window !== 'undefined') window.dispatchEvent(new Event(UNAUTHORIZED_EVENT)); throw new ApiError(data.error?.message ?? response.statusText, data.error?.code ?? 'REQUEST_FAILED', response.status, data.current); } return data; };
+/** JSON 写请求：method + JSON 请求体。 */
+const send = <T,>(method: string, url: string, body: unknown) => json<T>(url, { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
 const botAgentPath = (id: string, appId?: string) => appId
   ? `/api/lark/bots/${encodeURIComponent(appId)}/agents/${encodeURIComponent(id)}`
   : `/api/agents/${encodeURIComponent(id)}`;
@@ -366,19 +279,19 @@ export type BotPromptHistory = { revision: number; unrecordedUsages?: Array<{ ta
 export const api = {
   larkInbox: (appId: string, since: string) => json<Array<{ messageId: string; receivedAt?: string; sender: string; snippet: string; reason?: string; detail: string; mergedInto?: string; decisionId?: string }>>(`/api/lark/inbox?${new URLSearchParams({ appId, since })}`),
   workItemRequests: (sessionId: string, id: string) => json<WorkItemRequest[]>(`/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/requests`, { cache: 'no-store' }),
-  respondWorkItemRequest: (sessionId: string, id: string, input: { stepId: string; taskId: string; requestId: string; kind: 'permission' | 'question'; answer: string }) => json<unknown>(`/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/respond`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
+  respondWorkItemRequest: (sessionId: string, id: string, input: { stepId: string; taskId: string; requestId: string; kind: 'permission' | 'question'; answer: string }) => send<unknown>('POST', `/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/respond`, input),
   workItems: (sessionId: string) => json<{ items: WorkItem[]; templates: WorkTemplate[] }>(`/api/sessions/${encodeURIComponent(sessionId)}/work-items`, { cache: 'no-store' }),
   workItem: (sessionId: string, id: string) => json<WorkItem>(`/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}`, { cache: 'no-store' }),
-  createWorkItem: (sessionId: string, input: CreateWorkItemInput) => json<WorkItem>(`/api/sessions/${encodeURIComponent(sessionId)}/work-items`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
-  cancelWorkItem: (sessionId: string, id: string, expectedRevision: number) => json<WorkItem>(`/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/cancel`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision }) }),
-  retryWorkStep: (sessionId: string, id: string, stepId: string, expectedRevision: number) => json<WorkItem>(`/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/retry`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ stepId, expectedRevision }) }),
-  answerWorkStep: (sessionId: string, id: string, stepId: string, answer: string, expectedRevision: number) => json<WorkItem>(`/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/answer`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ stepId, answer, expectedRevision }) }),
-  previewWorkRevision: (sessionId: string, id: string, input: Omit<ReviseWorkPlanInput, 'reason'>) => json<WorkRevisionPreview>(`/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/revise/preview`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
-  reviseWorkItem: (sessionId: string, id: string, input: ReviseWorkPlanInput) => json<WorkItem>(`/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/revise`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
-  confirmWorkItem: (sessionId: string, id: string, expectedRevision: number, revisionDigest?: string) => json<WorkItem>(`/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/confirm`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision, ...(revisionDigest ? { revisionDigest } : {}) }) }),
-  discardWorkRevision: (sessionId: string, id: string, expectedRevision: number, revisionDigest?: string) => json<WorkItem>(`/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/revision/discard`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision, ...(revisionDigest ? { revisionDigest } : {}) }) }),
-  saveWorkTemplate: (sessionId: string, id: string, name: string) => json<WorkTemplate>(`/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/template`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name }) }),
-  runWorkTemplate: (sessionId: string, id: string, input: { version: number; goal: string; idempotencyKey: string }) => json<WorkItem>(`/api/sessions/${encodeURIComponent(sessionId)}/work-templates/${encodeURIComponent(id)}/run`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
+  createWorkItem: (sessionId: string, input: CreateWorkItemInput) => send<WorkItem>('POST', `/api/sessions/${encodeURIComponent(sessionId)}/work-items`, input),
+  cancelWorkItem: (sessionId: string, id: string, expectedRevision: number) => send<WorkItem>('POST', `/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/cancel`, { expectedRevision }),
+  retryWorkStep: (sessionId: string, id: string, stepId: string, expectedRevision: number) => send<WorkItem>('POST', `/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/retry`, { stepId, expectedRevision }),
+  answerWorkStep: (sessionId: string, id: string, stepId: string, answer: string, expectedRevision: number) => send<WorkItem>('POST', `/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/answer`, { stepId, answer, expectedRevision }),
+  previewWorkRevision: (sessionId: string, id: string, input: Omit<ReviseWorkPlanInput, 'reason'>) => send<WorkRevisionPreview>('POST', `/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/revise/preview`, input),
+  reviseWorkItem: (sessionId: string, id: string, input: ReviseWorkPlanInput) => send<WorkItem>('POST', `/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/revise`, input),
+  confirmWorkItem: (sessionId: string, id: string, expectedRevision: number, revisionDigest?: string) => send<WorkItem>('POST', `/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/confirm`, { expectedRevision, ...(revisionDigest ? { revisionDigest } : {}) }),
+  discardWorkRevision: (sessionId: string, id: string, expectedRevision: number, revisionDigest?: string) => send<WorkItem>('POST', `/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/revision/discard`, { expectedRevision, ...(revisionDigest ? { revisionDigest } : {}) }),
+  saveWorkTemplate: (sessionId: string, id: string, name: string) => send<WorkTemplate>('POST', `/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/template`, { name }),
+  runWorkTemplate: (sessionId: string, id: string, input: { version: number; goal: string; idempotencyKey: string }) => send<WorkItem>('POST', `/api/sessions/${encodeURIComponent(sessionId)}/work-templates/${encodeURIComponent(id)}/run`, input),
   automationSchedules: async (params: URLSearchParams, instance?: string | null) => {
     const page = await json<AutomationSchedulePage>(`/api/automation/schedules?${params}`, undefined, instance);
     if (!Array.isArray(page.items) || !page.counts || typeof page.total !== 'number') throw new ApiError('此实例不支持当前计划总览，请升级后重试', 'AUTOMATION_OVERVIEW_UNSUPPORTED', 404);
@@ -387,30 +300,30 @@ export const api = {
   automationHistory: (sessionId: string, scheduleId: string, offset = 0, limit = 20) => json<{ occurrences: PublicSessionScheduleOccurrence[]; total: number; offset: number; limit: number }>(`/api/sessions/${encodeURIComponent(sessionId)}/automation/schedules/${encodeURIComponent(scheduleId)}/history?offset=${offset}&limit=${limit}`),
   automationRun: (sessionId: string, scheduleId: string, occurrenceId: string) => json<AutomationRunDetail>(`/api/sessions/${encodeURIComponent(sessionId)}/automation/schedules/${encodeURIComponent(scheduleId)}/runs/${encodeURIComponent(occurrenceId)}`),
   automation: (id: string) => json<SessionAutomationList>(`/api/sessions/${id}/automation`),
-  createSchedule: (id: string, input: CreateSessionScheduleInput) => json<{ schedule: SessionSchedule }>(`/api/sessions/${id}/automation/schedules`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
-  updateSchedule: (id: string, scheduleId: string, input: UpdateSessionScheduleInput) => json<{ schedule: SessionSchedule }>(`/api/sessions/${id}/automation/schedules/${scheduleId}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
-  runSchedule: (id: string, scheduleId: string, input: { expectedRevision: number; idempotencyKey: string }) => json<{ occurrence: PublicSessionScheduleOccurrence }>(`/api/sessions/${id}/automation/schedules/${scheduleId}/run`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
-  deleteSchedule: (id: string, scheduleId: string, expectedRevision: number) => json<{ schedule: SessionSchedule }>(`/api/sessions/${id}/automation/schedules/${scheduleId}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision }) }),
-  subscribeCi: (id: string, input: SubscribeCiInput) => json<{ subscription: CiSubscription }>(`/api/sessions/${id}/automation/ci`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
+  createSchedule: (id: string, input: CreateSessionScheduleInput) => send<{ schedule: SessionSchedule }>('POST', `/api/sessions/${id}/automation/schedules`, input),
+  updateSchedule: (id: string, scheduleId: string, input: UpdateSessionScheduleInput) => send<{ schedule: SessionSchedule }>('PATCH', `/api/sessions/${id}/automation/schedules/${scheduleId}`, input),
+  runSchedule: (id: string, scheduleId: string, input: { expectedRevision: number; idempotencyKey: string }) => send<{ occurrence: PublicSessionScheduleOccurrence }>('POST', `/api/sessions/${id}/automation/schedules/${scheduleId}/run`, input),
+  deleteSchedule: (id: string, scheduleId: string, expectedRevision: number) => send<{ schedule: SessionSchedule }>('DELETE', `/api/sessions/${id}/automation/schedules/${scheduleId}`, { expectedRevision }),
+  subscribeCi: (id: string, input: SubscribeCiInput) => send<{ subscription: CiSubscription }>('POST', `/api/sessions/${id}/automation/ci`, input),
   ciProviders: (id: string) => json<{ providers: PublicCiProvider[] }>(`/api/sessions/${id}/automation/ci-providers`),
-  cancelCi: (id: string, subscriptionId: string, expectedRevision: number) => json<{ subscription: CiSubscription }>(`/api/sessions/${id}/automation/ci/${subscriptionId}/cancel`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision }) }),
+  cancelCi: (id: string, subscriptionId: string, expectedRevision: number) => send<{ subscription: CiSubscription }>('POST', `/api/sessions/${id}/automation/ci/${subscriptionId}/cancel`, { expectedRevision }),
   pullRequests: (id: string) => json<PullRequestAvailability & { items: PublicPullRequest[] }>(`/api/sessions/${id}/pull-requests`),
-  preparePullRequest: (id: string, input: { title?: string }) => json<{ pullRequest: PublicPullRequest }>(`/api/sessions/${id}/pull-requests`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
-  followPullRequest: (id: string, pullRequest: string) => json<{ pullRequest: PublicPullRequest }>(`/api/sessions/${id}/pull-requests/follow`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ pullRequest }) }),
+  preparePullRequest: (id: string, input: { title?: string }) => send<{ pullRequest: PublicPullRequest }>('POST', `/api/sessions/${id}/pull-requests`, input),
+  followPullRequest: (id: string, pullRequest: string) => send<{ pullRequest: PublicPullRequest }>('POST', `/api/sessions/${id}/pull-requests/follow`, { pullRequest }),
   confirmPullRequest: (id: string, pullRequestId: string) => json<{ message: string; pullRequest: PublicPullRequest }>(`/api/sessions/${id}/pull-requests/${pullRequestId}/confirm`, { method: 'POST' }),
   cancelPullRequest: (id: string, pullRequestId: string) => json<{ pullRequest: PublicPullRequest }>(`/api/sessions/${id}/pull-requests/${pullRequestId}/cancel`, { method: 'POST' }),
   sessionCapabilities: (id: string) => json<SessionCapabilities>(`/api/sessions/${id}/capabilities`),
   workspace: (id: string) => json<WorkspaceResponse | null>(`/api/sessions/${id}/workspace`),
   workspaceCleanupPreview: (id: string) => json<WorkspaceCleanupPreview>(`/api/sessions/${encodeURIComponent(id)}/workspace/cleanup`, { cache: 'no-store' }),
-  cleanWorkspace: (id: string, fingerprint: string) => json<WorkspaceCleanupResult>(`/api/sessions/${encodeURIComponent(id)}/workspace/cleanup`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ fingerprint }) }),
+  cleanWorkspace: (id: string, fingerprint: string) => send<WorkspaceCleanupResult>('POST', `/api/sessions/${encodeURIComponent(id)}/workspace/cleanup`, { fingerprint }),
   verifications: (id: string) => json<VerificationResponse[]>(`/api/sessions/${id}/verifications`),
   turnDiffs: (id: string) => json<Array<{ taskId: string; summary: TurnDiffSummary; finishedAt?: string }>>(`/api/sessions/${id}/diffs`),
   turnDiff: (id: string, taskId: string) => json<TurnDiff>(`/api/sessions/${id}/tasks/${taskId}/diff`),
-  submitTurnDiffComments: (id: string, taskId: string, comments: TurnDiffCommentInput[]) => json<{ delivery: 'dispatched' | 'lark_confirmation' }>(`/api/sessions/${id}/tasks/${taskId}/diff/comments`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ comments }) }),
-  verify: (id: string, input: VerificationCommandInput) => json<VerificationResponse>(`/api/sessions/${id}/verifications`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
+  submitTurnDiffComments: (id: string, taskId: string, comments: TurnDiffCommentInput[]) => send<{ delivery: 'dispatched' | 'lark_confirmation' }>('POST', `/api/sessions/${id}/tasks/${taskId}/diff/comments`, { comments }),
+  verify: (id: string, input: VerificationCommandInput) => send<VerificationResponse>('POST', `/api/sessions/${id}/verifications`, input),
   authStatus: () => json<BrowserAuthState>('/api/auth/status', { cache: 'no-store' }),
-  login: (token: string) => json<BrowserAuthState>('/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token }) }),
-  passwordLogin: (password: string) => json<BrowserAuthState>('/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password }) }),
+  login: (token: string) => send<BrowserAuthState>('POST', '/api/auth/login', { token }),
+  passwordLogin: (password: string) => send<BrowserAuthState>('POST', '/api/auth/login', { password }),
   logout: () => json<BrowserAuthState>('/api/auth/logout', { method: 'POST' }),
   instances: () => json<{ instances: PeerInstance[] }>('/api/instances', { cache: 'no-store' }),
   sessionHistory: (id: string, signal?: AbortSignal) => json<HistoryOutline>(`/api/sessions/${encodeURIComponent(id)}/history`, { signal }),
@@ -418,117 +331,41 @@ export const api = {
   // 跨任务标题的最小只读契约；服务端接入前 UI 仅使用当前已加载 tasks 的真实 prompt，不伪造摘要。
   matter: (id: string) => json<MatterDetail>(`/api/matters/${encodeURIComponent(id)}`),
   runSummaries: () => json<RunSummary[]>(RUN_SUMMARY_ENDPOINT),
-  create: (body: { agentId: string; cwd?: string; model?: string; codexProfile?: string; reasoningEffort?: string; permissionMode?: PermissionMode; workspaceMode?: WorkspaceMode }) => json<Session>('/api/sessions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
+  create: (body: { agentId: string; cwd?: string; model?: string; codexProfile?: string; reasoningEffort?: string; permissionMode?: PermissionMode; workspaceMode?: WorkspaceMode }) => send<Session>('POST', '/api/sessions', body),
   /** 先出计划：Agent 只调研出计划（写操作被拦），批准后才执行。 */
-  plan: (id: string, prompt: string) => json<{ accepted: true; task: Task; steering?: undefined }>(`/api/sessions/${id}/plan`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompt }) }),
+  plan: (id: string, prompt: string) => send<{ accepted: true; task: Task; steering?: undefined }>('POST', `/api/sessions/${id}/plan`, { prompt }),
   planState: (id: string) => json<PlanState>(`/api/sessions/${id}/plan`, { cache: 'no-store' }),
-  decidePlan: (id: string, taskId: string, action: PlanAction, feedback?: string) => json<{ state: PlanState['state']; task?: Task }>(`/api/sessions/${id}/plan/${taskId}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action, ...(feedback ? { feedback } : {}) }) }),
-  send: (id: string, prompt: string, mode: 'queue' | 'interrupt' | 'steer' = 'queue', skillRequests?: string[]) => json<{ accepted: true; task: Task; steering?: SteeringResult }>(`/api/sessions/${id}/send`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompt, mode, ...(skillRequests?.length ? { skillRequests } : {}) }) }),
-  setSessionModel: (id: string, model: string) => json<Session>(`/api/sessions/${id}/config`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model }) }),
-  setSessionReasoningEffort: (id: string, reasoningEffort: string) => json<Session>(`/api/sessions/${id}/config`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ reasoningEffort }) }),
-  setSessionName: (id: string, name: string | null) => json<Session>(`/api/sessions/${encodeURIComponent(id)}/name`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name }) }),
+  decidePlan: (id: string, taskId: string, action: PlanAction, feedback?: string) => send<{ state: PlanState['state']; task?: Task }>('POST', `/api/sessions/${id}/plan/${taskId}`, { action, ...(feedback ? { feedback } : {}) }),
+  send: (id: string, prompt: string, mode: 'queue' | 'interrupt' | 'steer' = 'queue', skillRequests?: string[]) => send<{ accepted: true; task: Task; steering?: SteeringResult }>('POST', `/api/sessions/${id}/send`, { prompt, mode, ...(skillRequests?.length ? { skillRequests } : {}) }),
+  setSessionModel: (id: string, model: string) => send<Session>('PATCH', `/api/sessions/${id}/config`, { model }),
+  setSessionReasoningEffort: (id: string, reasoningEffort: string) => send<Session>('PATCH', `/api/sessions/${id}/config`, { reasoningEffort }),
+  setSessionName: (id: string, name: string | null) => send<Session>('PATCH', `/api/sessions/${encodeURIComponent(id)}/name`, { name }),
   cancelQueued: (id: string, taskId: string) => json<Task>(`/api/sessions/${id}/queue/${taskId}`, { method: 'DELETE' }),
   steerQueued: (id: string, taskId: string) => json<Task>(`/api/sessions/${id}/queue/${taskId}/steer`, { method: 'POST' }),
   injectQueued: (id: string, taskId: string) => json<SteeringResult & { task: Task }>(`/api/sessions/${id}/queue/${taskId}/inject`, { method: 'POST' }),
   botPromptHistory: (appId: string) => json<BotPromptHistory>(`/api/lark/bots/${encodeURIComponent(appId)}/prompt-versions`),
   botPromptShow: (appId: string, version: number) => json<BotPromptVersion>(`/api/lark/bots/${encodeURIComponent(appId)}/prompt-versions/${version}`),
   botPromptDiff: (appId: string, a: number, b: number) => json<{ diff: string }>(`/api/lark/bots/${encodeURIComponent(appId)}/prompt-versions/diff?a=${a}&b=${b}`),
-  botPromptRollback: (appId: string, version: number, expectedRevision: number) => json<LarkConfig>(`/api/lark/bots/${encodeURIComponent(appId)}/prompt-versions/${version}/rollback`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision }) }),
+  botPromptRollback: (appId: string, version: number, expectedRevision: number) => send<LarkConfig>('POST', `/api/lark/bots/${encodeURIComponent(appId)}/prompt-versions/${version}/rollback`, { expectedRevision }),
   larkConfig: () => json<LarkConfig>('/api/lark/config'),
   usageReport: (query: UsageReportQuery) => json<UsageReport>(`/api/usage/report?${usageQuery(query)}`, { cache: 'no-store' }),
   usageTasks: (query: UsageReportQuery & { limit: number; offset: number }) => json<UsageTaskPage>(`/api/usage/tasks?${usageQuery(query)}`, { cache: 'no-store' }),
   usageSummary: () => json<UsageSummary>('/api/usage/summary', { cache: 'no-store' }),
-  setUsageCap: (body: UsageCapInput) => json<UsageCap>('/api/usage/caps', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
+  setUsageCap: (body: UsageCapInput) => send<UsageCap>('PUT', '/api/usage/caps', body),
   deleteUsageCap: ({ scope, appId, chatId }: Pick<UsageCap, 'scope' | 'appId' | 'chatId'>) => json<{ deleted: boolean }>(`/api/usage/caps?${new URLSearchParams({ scope, appId, ...(chatId ? { chatId } : {}) })}`, { method: 'DELETE' }),
   sessionUsage: (id: string) => json<SessionUsage>(`/api/sessions/${encodeURIComponent(id)}/usage`),
-  startLarkOpenPlatformSetup: (appId: string, forceLogin = false) => json<LarkOpenPlatformSetupJob>('/api/lark/open-platform/configure', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ appId, forceLogin }) }),
+  startLarkOpenPlatformSetup: (appId: string, forceLogin = false) => send<LarkOpenPlatformSetupJob>('POST', '/api/lark/open-platform/configure', { appId, forceLogin }),
   larkOpenPlatformSetupJob: (jobId: string) => json<LarkOpenPlatformSetupJob>(`/api/lark/open-platform/jobs/${encodeURIComponent(jobId)}`, { cache: 'no-store' }),
-  createLarkApp: (input: { requestId: string; name: string; forceLogin?: boolean }) => json<LarkAppCreationJob>('/api/lark/apps/create', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
+  createLarkApp: (input: { requestId: string; name: string; forceLogin?: boolean }) => send<LarkAppCreationJob>('POST', '/api/lark/apps/create', input),
   larkAppCreationJob: (jobId: string) => json<LarkAppCreationJob>(`/api/lark/apps/create/${encodeURIComponent(jobId)}`, { cache: 'no-store' }),
   cancelLarkAppCreation: (jobId: string) => json<LarkAppCreationJob>(`/api/lark/apps/create/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' }),
-  retryLarkAppCreation: (jobId: string, forceLogin = false) => json<LarkAppCreationJob>(`/api/lark/apps/create/${encodeURIComponent(jobId)}/retry`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ forceLogin }) }),
-  inspectLarkBot: (body: { appId: string; appSecret: string }) => json<{ appName: string; openId: string; avatarUrl?: string; activateStatus?: number }>('/api/lark/bot/inspect', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
-  saveLarkConfig: (body: {
-    stage: 'lark' | 'agent';
-    originalAppId?: string;
-    appId?: string;
-    appSecret?: string;
-    workspace?: string;
-    workspaceAliases?: Record<string, string>;
-    verificationCommand?: string;
-    webBaseUrl?: string;
-    webMobileReachable?: boolean;
-    defaultAgentId?: string;
-  fallbackAgentId?: string;
-  fallbackModel?: string;
-  defaultAgentWeights?: AgentWeight[];
-    defaultModel?: string;
-    defaultReasoningEffort?: string;
-    fullTrustConfirmed?: boolean;
-    permissionMode?: 'ask' | 'approve-reads' | 'full-trust';
-    roleTitle?: string;
-    roleScope?: string;
-    preInjectPrompt?: string;
-    listening?: boolean;
-    groupToolsEnabled?: boolean;
-    groupToolsAllowSend?: boolean;
-    memoryEnabled?: boolean;
-    memoryAutoExtract?: boolean;
-    groupMemoryScope?: 'shared' | 'per-group';
-    memoryAgentId?: string;
-    memoryModel?: string;
-    decisionAgentId?: string;
-    decisionModel?: string;
-    busyTriage?: boolean;
-    botLoopGuard?: boolean;
-    responseAgentId?: string;
-    responseModel?: string;
-    executionMode?: 'single' | 'layered';
-    leaderAgentId?: string;
-    workerAgentIds?: string[];
-    structuredAskCards?: boolean;
-    groupCardMention?: boolean;
-    completionReactionOnly?: boolean;
-    silentProgress?: boolean;
-    adhdMode?: boolean;
-    urgentEnabled?: boolean;
-    /** null = 清回模块默认（前端清空输入框就送 null）；undefined = 不改这一项。 */
-    urgentThresholdMs?: number | null;
-    urgentMaxPerHourPerChat?: number | null;
-    notifyMentionAction?: boolean;
-    notifyMentionDone?: boolean;
-    /** 空串 = 关闭免打扰时段；undefined = 不改这一项。 */
-    notifyQuietHours?: string;
-    pinLongTasks?: boolean;
-    pinAfterMs?: number | null;
-    pushIntervalMs?: number;
-    traceLimit?: number | null;
-    /** 精简过程卡；缺省继承当前配置，旧服务端按开启处理。 */
-    compactTrace?: boolean;
-    showAgentName?: boolean;
-    allowedUsers?: LarkAllowedUser[];
-    allowedUserNames?: string[];
-    allowedEmails?: string[];
-    allowedBots?: LarkAllowedUser[];
-    allowedBotNames?: string[];
-    peerBotsAllowed?: boolean;
-    highRiskAllowedUsers?: LarkAllowedUser[];
-    highRiskAllowedUserNames?: string[];
-    highRiskAllowedEmails?: string[];
-    highRiskPattern?: string;
-    riskControlMode?: RiskControlMode;
-    expectedRevision?: number;
-    p2pMode?: 'chat' | 'thread';
-    idleCompactEnabled?: boolean;
-    idleCompactHours?: number;
-    groupReplyMode?: 'chat' | 'shared' | 'new-topic' | 'chat-topic' | null;
-    mentionPolicy?: 'always' | 'topic' | 'never' | 'ambient';
-    defaultGroupParticipation?: 'off' | 'observe' | 'selective' | 'eager';
-  }) => json<LarkConfig>('/api/lark/config', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
+  retryLarkAppCreation: (jobId: string, forceLogin = false) => send<LarkAppCreationJob>('POST', `/api/lark/apps/create/${encodeURIComponent(jobId)}/retry`, { forceLogin }),
+  inspectLarkBot: (body: { appId: string; appSecret: string }) => send<{ appName: string; openId: string; avatarUrl?: string; activateStatus?: number }>('POST', '/api/lark/bot/inspect', body),
+  saveLarkConfig: (body: SaveLarkConfigBody) => send<LarkConfig>('PUT', '/api/lark/config', body),
   deleteLarkConfig: (appId: string) => json<LarkConfig>(`/api/lark/config/${encodeURIComponent(appId)}`, { method: 'DELETE' }),
   managementGroups: () => json<{ groups: ManagedGroup[] }>('/api/lark/management/groups', { cache: 'no-store' }),
-  syncGroups: (appId: string) => json<{ groups: ManagedGroup[]; error?: string }>(`/api/lark/bots/${encodeURIComponent(appId)}/sync-groups`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({}) }),
-  updateGroupBotBinding: (appId: string, chatId: string, body: { expectedRevision: number; patch: Partial<Pick<GroupBinding, 'agentOverride' | 'workspaceOverride' | 'modelOverride' | 'reasoningOverride' | 'routingOverride' | 'accessOverride' | 'groupToolsOverride' | 'presentationOverride' | 'oncall' | 'state'>>; roleChanges?: RoleChange[] }) => json<ManagedGroupBot>(`/api/lark/bots/${encodeURIComponent(appId)}/groups/${encodeURIComponent(chatId)}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
+  syncGroups: (appId: string) => send<{ groups: ManagedGroup[]; error?: string }>('POST', `/api/lark/bots/${encodeURIComponent(appId)}/sync-groups`, {}),
+  updateGroupBotBinding: (appId: string, chatId: string, body: { expectedRevision: number; patch: Partial<Pick<GroupBinding, 'agentOverride' | 'workspaceOverride' | 'modelOverride' | 'reasoningOverride' | 'routingOverride' | 'accessOverride' | 'groupToolsOverride' | 'presentationOverride' | 'oncall' | 'state'>>; roleChanges?: RoleChange[] }) => send<ManagedGroupBot>('PUT', `/api/lark/bots/${encodeURIComponent(appId)}/groups/${encodeURIComponent(chatId)}`, body),
   groupMembers: (appId: string, chatId: string, pageToken?: string) => json<GroupMembersResult>(`/api/lark/bots/${encodeURIComponent(appId)}/groups/${encodeURIComponent(chatId)}/members${pageToken ? `?pageToken=${encodeURIComponent(pageToken)}` : ''}`, { cache: 'no-store' }),
   systemDirectories: (path?: string) => json<SystemDirectoriesResult>(`/api/system/directories${path ? `?path=${encodeURIComponent(path)}` : ''}`, { cache: 'no-store' }),
   larkHookStatus: (appId: string, agentId?: string, workspace?: string) => {
@@ -540,21 +377,21 @@ export const api = {
   larkMemoryStatus: (appId: string) => json<LarkMemoryStatusResult>(`/api/lark/bots/${encodeURIComponent(appId)}/memory/status`, { cache: 'no-store' }),
   taskAuthorizations: (sessionId: string) => json<TaskAuthorization[]>(`/api/sessions/${encodeURIComponent(sessionId)}/task-authorizations`),
   unknownTasks: (sessionId: string) => json<UnknownTask[]>(`/api/sessions/${encodeURIComponent(sessionId)}/unknown-tasks`, { cache: 'no-store' }),
-  resolveUnknownTask: (sessionId: string, taskId: string, input: { target: string; action: UnknownTaskAction; allowDuplicateEffects?: true }) => json<{ replayed: boolean; status: string; decisionId: string }>(`/api/sessions/${encodeURIComponent(sessionId)}/unknown-tasks/${encodeURIComponent(taskId)}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
+  resolveUnknownTask: (sessionId: string, taskId: string, input: { target: string; action: UnknownTaskAction; allowDuplicateEffects?: true }) => send<{ replayed: boolean; status: string; decisionId: string }>('POST', `/api/sessions/${encodeURIComponent(sessionId)}/unknown-tasks/${encodeURIComponent(taskId)}`, input),
   memoryPool: (sessionId: string, q = '') => json<MemoryPoolView>(`/api/sessions/${encodeURIComponent(sessionId)}/memory-pool${q ? `?q=${encodeURIComponent(q)}` : ''}`),
-  reviseMemoryPool: (sessionId: string, entryId: string, body: MemoryWrite) => json(`/api/sessions/${encodeURIComponent(sessionId)}/memory-pool/${encodeURIComponent(entryId)}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
+  reviseMemoryPool: (sessionId: string, entryId: string, body: MemoryWrite) => send('PATCH', `/api/sessions/${encodeURIComponent(sessionId)}/memory-pool/${encodeURIComponent(entryId)}`, body),
   removeMemoryPool: (sessionId: string, entryId: string) => json(`/api/sessions/${encodeURIComponent(sessionId)}/memory-pool/${encodeURIComponent(entryId)}`, { method: 'DELETE' }),
   projectMemories: () => json<{ projects: ProjectMemorySummary[] }>('/api/project-memory'),
-  createProjectMemory: (name: string) => json<{ project: ProjectMemorySummary }>('/api/project-memory', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name }) }),
+  createProjectMemory: (name: string) => send<{ project: ProjectMemorySummary }>('POST', '/api/project-memory', { name }),
   projectMemory: (id: string, q = '') => json<MemoryPoolView & ProjectMemorySummary>(`/api/project-memory/${encodeURIComponent(id)}${q ? `?q=${encodeURIComponent(q)}` : ''}`),
-  setProjectMemoryEnabled: (id: string, enabled: boolean) => json(`/api/project-memory/${encodeURIComponent(id)}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled }) }),
-  writeProjectMemory: (id: string, body: MemoryWrite, entryId?: string) => json(`/api/project-memory/${encodeURIComponent(id)}/entries${entryId ? `/${encodeURIComponent(entryId)}` : ''}`, { method: entryId ? 'PATCH' : 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
+  setProjectMemoryEnabled: (id: string, enabled: boolean) => send('PATCH', `/api/project-memory/${encodeURIComponent(id)}`, { enabled }),
+  writeProjectMemory: (id: string, body: MemoryWrite, entryId?: string) => send(entryId ? 'PATCH' : 'POST', `/api/project-memory/${encodeURIComponent(id)}/entries${entryId ? `/${encodeURIComponent(entryId)}` : ''}`, body),
   removeProjectMemory: (id: string, entryId: string) => json(`/api/project-memory/${encodeURIComponent(id)}/entries/${encodeURIComponent(entryId)}`, { method: 'DELETE' }),
   projectMemoryBinding: (sessionId: string) => json<{ projectId: string | null }>(`/api/sessions/${encodeURIComponent(sessionId)}/project-memory`),
-  bindProjectMemory: (sessionId: string, projectId: string | null) => json(`/api/sessions/${encodeURIComponent(sessionId)}/project-memory`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ projectId }) }),
+  bindProjectMemory: (sessionId: string, projectId: string | null) => send('PUT', `/api/sessions/${encodeURIComponent(sessionId)}/project-memory`, { projectId }),
   sessionMemory: (sessionId: string) => json<{ turns: LarkTurnMemory[] }>(`/api/sessions/${encodeURIComponent(sessionId)}/memory`, { cache: 'no-store' }),
   forgetSessionMemory: (sessionId: string, taskId: string, memoryId: string) => json<{ removed: { id: string } }>(`/api/sessions/${encodeURIComponent(sessionId)}/memory/${encodeURIComponent(taskId)}/entries/${encodeURIComponent(memoryId)}`, { method: 'DELETE' }),
-  installLarkHook: (appId: string, highRiskPattern: string, expectedRevision?: number, draft?: LarkHookDraft) => json<LarkHookStatus & { configRevision?: number }>('/api/lark/hooks/install', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ appId, highRiskPattern, expectedRevision, ...(draft ? { draft } : {}) }) }),
+  installLarkHook: (appId: string, highRiskPattern: string, expectedRevision?: number, draft?: LarkHookDraft) => send<LarkHookStatus & { configRevision?: number }>('POST', '/api/lark/hooks/install', { appId, highRiskPattern, expectedRevision, ...(draft ? { draft } : {}) }),
   systemCapabilities: () => json<{ platform: string; directoryPicker: boolean; filePicker: boolean }>('/api/system/capabilities'),
   skills: (cwd?: string, botAppId?: string, chatId?: string, pluginWorkspaceRoot?: string) => json<SkillReference[]>(`/api/system/skills?${new URLSearchParams({ ...(cwd ? { cwd } : {}), ...(botAppId ? { botAppId } : {}), ...(chatId ? { chatId } : {}), ...(pluginWorkspaceRoot ? { pluginWorkspaceRoot } : {}) })}`),
   /** 已启用插件提供的斜杠命令；没有插件时服务端不注册这个接口，按空列表处理。 */
@@ -566,33 +403,33 @@ export const api = {
   selectFile: () => json<{ path: string }>('/api/system/select-file', { method: 'POST' }),
   archive: (id: string) => json<Session>(`/api/sessions/${id}/archive`, { method: 'POST' }),
   workspaceGroups: () => json<WorkspaceOrganizationSnapshot>('/api/workspace-groups'),
-  createWorkspaceGroup: (name: string) => json<WorkspaceOrganizationSnapshot>('/api/workspace-groups', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name }) }),
-  renameWorkspaceGroup: (id: string, name: string) => json<WorkspaceOrganizationSnapshot>(`/api/workspace-groups/${encodeURIComponent(id)}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name }) }),
+  createWorkspaceGroup: (name: string) => send<WorkspaceOrganizationSnapshot>('POST', '/api/workspace-groups', { name }),
+  renameWorkspaceGroup: (id: string, name: string) => send<WorkspaceOrganizationSnapshot>('PATCH', `/api/workspace-groups/${encodeURIComponent(id)}`, { name }),
   deleteWorkspaceGroup: (id: string) => json<WorkspaceOrganizationSnapshot>(`/api/workspace-groups/${encodeURIComponent(id)}`, { method: 'DELETE' }),
-  assignWorkspaceGroups: (input: { groupId: string | null; sessionIds?: string[]; directories?: string[] }) => json<WorkspaceOrganizationSnapshot>('/api/workspace-groups/assignments', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
+  assignWorkspaceGroups: (input: { groupId: string | null; sessionIds?: string[]; directories?: string[] }) => send<WorkspaceOrganizationSnapshot>('PUT', '/api/workspace-groups/assignments', input),
   restart: (id: string) => json<Session>(`/api/sessions/${id}/restart`, { method: 'POST' }),
   action: (id: string, action: string) => json(`/api/sessions/${id}/${action}`, { method: 'POST' }),
-  permission: (id: string, permissionId: string, approved: boolean, reason?: string) => json(`/api/sessions/${id}/permissions/${permissionId}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(reason ? { approved, reason } : { approved }) }),
+  permission: (id: string, permissionId: string, approved: boolean, reason?: string) => send('POST', `/api/sessions/${id}/permissions/${permissionId}`, reason ? { approved, reason } : { approved }),
   inbox: () => json<InboxResponse>('/api/inbox', { cache: 'no-store' }),
   /** 待处理条目上的动作：服务端给出原对象现有的接口与带版本的请求体，这里原样调用。 */
-  inboxAction: (action: InboxAction) => json<unknown>(action.path!, { method: action.method ?? 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(action.body ?? {}) })
+  inboxAction: (action: InboxAction) => send<unknown>(action.method ?? 'POST', action.path!, action.body ?? {})
 };
 
 export const foundationApi = {
   capabilities: () => json<FoundationCapability>('/api/foundation/capabilities', { cache: 'no-store' }),
   secretRefs: () => json<{ secretRefs: PublicSecretRef[] }>('/api/foundation/secret-refs', { cache: 'no-store' }),
   groupMatrix: () => json<GroupMatrix>('/api/foundation/group-matrix', { cache: 'no-store' }),
-  createChannelBot: (input: { id: string; externalAppId: string; displayName: string; brand: 'feishu' | 'lark' }) => json<PublicChannelBotFoundation>('/api/foundation/channel-bots', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
-  updateChannelBot: (id: string, input: UpdateChannelBotInput) => json<PublicChannelBotFoundation>(`/api/foundation/channel-bots/${encodeURIComponent(id)}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
-  createGroupBinding: (input: CreateGroupBindingInput) => json<GroupBinding>('/api/foundation/group-bindings', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
-  updateGroupBinding: (id: string, input: UpdateGroupBindingInput) => json<GroupBinding>(`/api/foundation/group-bindings/${encodeURIComponent(id)}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) })
+  createChannelBot: (input: { id: string; externalAppId: string; displayName: string; brand: 'feishu' | 'lark' }) => send<PublicChannelBotFoundation>('POST', '/api/foundation/channel-bots', input),
+  updateChannelBot: (id: string, input: UpdateChannelBotInput) => send<PublicChannelBotFoundation>('PATCH', `/api/foundation/channel-bots/${encodeURIComponent(id)}`, input),
+  createGroupBinding: (input: CreateGroupBindingInput) => send<GroupBinding>('POST', '/api/foundation/group-bindings', input),
+  updateGroupBinding: (id: string, input: UpdateGroupBindingInput) => send<GroupBinding>('PATCH', `/api/foundation/group-bindings/${encodeURIComponent(id)}`, input)
 };
 
 export const scheduleApi = {
   capabilities: () => json<ScheduleCapability>('/api/foundation/schedules/capabilities', { cache: 'no-store' }),
   list: () => json<ScheduleList>('/api/foundation/schedules', { cache: 'no-store' }),
   preview: (id: string, after?: string) => json<{ scheduleId: string; preview?: SchedulePreview; executionEligible: false; blockers: ScheduleBlocker[] }>(`/api/foundation/schedules/${encodeURIComponent(id)}/preview${after ? `?after=${encodeURIComponent(after)}` : ''}`, { cache: 'no-store' }),
-  update: (id: string, input: UpdateScheduleDefinitionInput) => json<ScheduleDetail>(`/api/foundation/schedules/${encodeURIComponent(id)}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
+  update: (id: string, input: UpdateScheduleDefinitionInput) => send<ScheduleDetail>('PATCH', `/api/foundation/schedules/${encodeURIComponent(id)}`, input),
   archivedIntegrations: (channelBotId: string) => json<{ integrations: ArchivedHammerIntegration[] }>(`/api/foundation/schedules/archived-integrations?channelBotId=${encodeURIComponent(channelBotId)}`, { cache: 'no-store' })
 };
 
@@ -910,55 +747,28 @@ export const collaborationApi = {
       { cache: 'no-store' }
     ),
   updateSettings: (appId: string, chatId: string, body: UpdateCollaborationSettingsInput) =>
-    json<{ settings: CollaborationSettings }>(
-      `/api/lark/groups/${encodeURIComponent(appId)}/${encodeURIComponent(chatId)}/collaboration/settings`,
-      { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }
-    ),
+    send<{ settings: CollaborationSettings }>('PATCH', `/api/lark/groups/${encodeURIComponent(appId)}/${encodeURIComponent(chatId)}/collaboration/settings`, body),
   updateDuty: (appId: string, chatId: string, body: UpdateCollaborationDutyInput) =>
-    json<{ duty: CollaborationDuty; announced?: boolean }>(
-      `/api/lark/groups/${encodeURIComponent(appId)}/${encodeURIComponent(chatId)}/collaboration/duty`,
-      { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }
-    ),
+    send<{ duty: CollaborationDuty; announced?: boolean }>('PATCH', `/api/lark/groups/${encodeURIComponent(appId)}/${encodeURIComponent(chatId)}/collaboration/duty`, body),
   createFollowup: (appId: string, chatId: string, body: CreateCollaborationFollowupInput) =>
-    json<{ followup: CollaborationFollowup }>(
-      `/api/lark/groups/${encodeURIComponent(appId)}/${encodeURIComponent(chatId)}/collaboration/followups`,
-      { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }
-    ),
+    send<{ followup: CollaborationFollowup }>('POST', `/api/lark/groups/${encodeURIComponent(appId)}/${encodeURIComponent(chatId)}/collaboration/followups`, body),
   updateFollowup: (appId: string, chatId: string, id: string, body: UpdateCollaborationFollowupInput) =>
-    json<{ followup: CollaborationFollowup }>(
-      `/api/lark/groups/${encodeURIComponent(appId)}/${encodeURIComponent(chatId)}/collaboration/followups/${encodeURIComponent(id)}`,
-      { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }
-    ),
+    send<{ followup: CollaborationFollowup }>('PATCH', `/api/lark/groups/${encodeURIComponent(appId)}/${encodeURIComponent(chatId)}/collaboration/followups/${encodeURIComponent(id)}`, body),
   createMandate: (appId: string, chatId: string, body: CreateCollaborationMandateInput) =>
-    json<{ mandate: CollaborationMandate; schedule?: PublicScheduleDefinition }>(
-      `/api/lark/groups/${encodeURIComponent(appId)}/${encodeURIComponent(chatId)}/collaboration/mandates`,
-      { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }
-    ),
+    send<{ mandate: CollaborationMandate; schedule?: PublicScheduleDefinition }>('POST', `/api/lark/groups/${encodeURIComponent(appId)}/${encodeURIComponent(chatId)}/collaboration/mandates`, body),
   updateMandate: (appId: string, chatId: string, id: string, body: UpdateCollaborationMandateInput) =>
-    json<{ mandate: CollaborationMandate; schedule?: PublicScheduleDefinition }>(
-      `/api/lark/groups/${encodeURIComponent(appId)}/${encodeURIComponent(chatId)}/collaboration/mandates/${encodeURIComponent(id)}`,
-      { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }
-    ),
+    send<{ mandate: CollaborationMandate; schedule?: PublicScheduleDefinition }>('PATCH', `/api/lark/groups/${encodeURIComponent(appId)}/${encodeURIComponent(chatId)}/collaboration/mandates/${encodeURIComponent(id)}`, body),
   addFeedback: (appId: string, chatId: string, decisionId: string, body: CreateCollaborationFeedbackInput) =>
-    json<{ feedback: CollaborationFeedback }>(
-      `/api/lark/groups/${encodeURIComponent(appId)}/${encodeURIComponent(chatId)}/collaboration/decisions/${encodeURIComponent(decisionId)}/feedback`,
-      { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }
-    ),
+    send<{ feedback: CollaborationFeedback }>('POST', `/api/lark/groups/${encodeURIComponent(appId)}/${encodeURIComponent(chatId)}/collaboration/decisions/${encodeURIComponent(decisionId)}/feedback`, body),
   replay: (appId: string, chatId: string, body: CollaborationReplayInput) =>
-    json<CollaborationReplayResponse>(
-      `/api/lark/groups/${encodeURIComponent(appId)}/${encodeURIComponent(chatId)}/collaboration/replay`,
-      { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }
-    ),
+    send<CollaborationReplayResponse>('POST', `/api/lark/groups/${encodeURIComponent(appId)}/${encodeURIComponent(chatId)}/collaboration/replay`, body),
   bootstrap: (appId: string, chatId: string) =>
-    json<{ bootstrap: CollaborationBootstrap }>(
-      `/api/lark/groups/${encodeURIComponent(appId)}/${encodeURIComponent(chatId)}/collaboration/bootstrap`,
-      { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({}) }
-    )
+    send<{ bootstrap: CollaborationBootstrap }>('POST', `/api/lark/groups/${encodeURIComponent(appId)}/${encodeURIComponent(chatId)}/collaboration/bootstrap`, {})
 };
 
 export const terminalSettingsApi = {
   get: () => json<{ terminalBackend: 'tmux' | 'herdr'; scope: 'pty-cli' }>('/api/settings/terminal', { cache: 'no-store' }),
-  set: (terminalBackend: 'tmux' | 'herdr') => json<{ terminalBackend: 'tmux' | 'herdr'; scope: 'pty-cli' }>('/api/settings/terminal', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ terminalBackend }) }),
+  set: (terminalBackend: 'tmux' | 'herdr') => send<{ terminalBackend: 'tmux' | 'herdr'; scope: 'pty-cli' }>('PUT', '/api/settings/terminal', { terminalBackend }),
 };
 
 // ============================================================================
@@ -1040,11 +850,7 @@ export const insightApi = {
     );
   },
   refresh: (sessionId: string) =>
-    json<SessionInsightRefreshResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/insight/refresh`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: '{}'
-    }),
+    send<SessionInsightRefreshResponse>('POST', `/api/sessions/${encodeURIComponent(sessionId)}/insight/refresh`, {}),
   cancel: (sessionId: string, requestId: string) =>
     json<SessionInsightCancelResponse>(
       `/api/sessions/${encodeURIComponent(sessionId)}/insight/refresh/${encodeURIComponent(requestId)}`,
@@ -1074,18 +880,18 @@ export type AgentModelSettingsPatch = { model?: string; baseUrl?: string; authMo
 export type AgentConfigSettings = { id: string; codexProfile: string };
 export const agentConfigApi = {
   get: (id: string) => json<AgentConfigSettings>(`/api/agents/${encodeURIComponent(id)}/config`, { cache: 'no-store' }),
-  set: (id: string, codexProfile: string | null) => json<Agent>(`/api/agents/${encodeURIComponent(id)}/config`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ codexProfile }) })
+  set: (id: string, codexProfile: string | null) => send<Agent>('PATCH', `/api/agents/${encodeURIComponent(id)}/config`, { codexProfile })
 };
 const modelSettingsUrl = (id: string, appId?: string) => `${botAgentPath(id, appId)}/model-settings`;
 export const agentModelSettingsApi = {
   get: (id: string, appId?: string) => json<AgentModelSettings>(modelSettingsUrl(id, appId), { cache: 'no-store' }),
-  set: (id: string, body: AgentModelSettingsPatch, appId?: string) => json<AgentModelSettings>(modelSettingsUrl(id, appId), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+  set: (id: string, body: AgentModelSettingsPatch, appId?: string) => send<AgentModelSettings>('PUT', modelSettingsUrl(id, appId), body)
 };
 
 export const pluginBindingsApi = {
   list: () => json<{ bindings: PluginBinding[]; packages: Array<{ name: string; version?: string; scope: string; apiVersion: number | string; configSchema: PluginConfigSchema; requiredSkills: string[]; legacyGlobal: string[]; capabilities?: string[]; permissions?: { secrets: string[]; network: string[]; filesystem: string[]; effects: string[] }; slots?: Array<{ id: string; slot: string; title: string; description?: string; elements: Array<Record<string, unknown>> }>; service?: { mode: string; status: { status: string } } }>; diagnostics: Array<{ plugin: string; message: string }> }>('/api/plugin-bindings'),
-  save: (body: SavePluginBinding) => json<{ binding: PluginBinding }>('/api/plugin-bindings', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
-  explain: (body: PluginBindingScope & { plugin: string }) => json<Record<string, unknown>>('/api/plugin-bindings/explain', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
+  save: (body: SavePluginBinding) => send<{ binding: PluginBinding }>('PUT', '/api/plugin-bindings', body),
+  explain: (body: PluginBindingScope & { plugin: string }) => send<Record<string, unknown>>('POST', '/api/plugin-bindings/explain', body),
   slot: (plugin: string, slot: string) => json<{ plugin: string; slot: string; declarations: Array<{ id: string; slot: string; title: string; description?: string; elements: Array<Record<string, unknown>> }> }>(`/api/plugins/${encodeURIComponent(plugin)}/slots/${encodeURIComponent(slot)}`)
 };
 
@@ -1105,7 +911,7 @@ export interface MemoryWrite { content: string; topic?: string; expectedFingerpr
 export interface ProjectMemorySummary { id: string; name: string; enabled: boolean; count?: number }
 export const artifactSnapshotsApi = {
   list: (sessionId: string) => json<{ snapshots: ArtifactSnapshot[] }>(`/api/sessions/${encodeURIComponent(sessionId)}/artifact-snapshots`),
-  capture: (sessionId: string, ref: ArtifactSnapshotReference) => json<ArtifactSnapshot>(`/api/sessions/${encodeURIComponent(sessionId)}/artifact-snapshots`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(ref) }),
+  capture: (sessionId: string, ref: ArtifactSnapshotReference) => send<ArtifactSnapshot>('POST', `/api/sessions/${encodeURIComponent(sessionId)}/artifact-snapshots`, ref),
   preview: (sessionId: string, id: string) => json<ArtifactSnapshotPreview>(`/api/sessions/${encodeURIComponent(sessionId)}/artifact-snapshots/${encodeURIComponent(id)}/preview`),
   download: async (sessionId: string, id: string): Promise<Blob> => {
     const response = await fetch(withShareToken(instanceApiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/artifact-snapshots/${encodeURIComponent(id)}/download`)), { credentials: 'same-origin' });

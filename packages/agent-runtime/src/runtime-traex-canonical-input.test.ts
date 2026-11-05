@@ -46,7 +46,11 @@ async function fixture(inputType: string) {
   await vi.waitFor(() => expect(writes).toHaveLength(1));
   return { runtime, repos, session, path, pending, paint: () => paint('\x1b[2J\x1b[Hanswer\r\n❯ Ask TraeCode CLI\r\nContext 100% left') };
 }
-const cases = ['text', 'input_text', 'Text', 'output_text'].flatMap(type => ['completed', 'failed', 'interrupted'].map(outcome => ({ type, outcome })));
+// The content type only selects receipt text extraction and the outcome only the
+// settlement path; any unrecognized type fails every outcome. Each type runs the
+// fast failed path, and the slower screen-settled outcomes run once.
+const cases = [...['text', 'input_text', 'Text', 'output_text'].map(type => ({ type, outcome: 'failed' })),
+  { type: 'output_text', outcome: 'completed' }, { type: 'input_text', outcome: 'interrupted' }];
 it.each(cases)('settles canonical $type as $outcome through real tailer, driver and Runtime without history', async ({ type, outcome }) => {
   const h = await fixture(type);
   if (outcome !== 'interrupted') appendFileSync(h.path, line(mutation({ type: 'AgentMessage', id: 'reply', phase: 'final_answer', content: [{ type: 'Text', text: 'answer' }] })));

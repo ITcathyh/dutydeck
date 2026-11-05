@@ -38,6 +38,7 @@ import {
   EmptyState,
   Field,
   Input,
+  SaveBar,
   Select,
   Spinner,
   Tabs,
@@ -913,37 +914,19 @@ function CollaborationPanelInner({ appId, chatId, groupName, botName, className 
                 </label>
               </div>
 
-              <div className="flex flex-wrap items-center justify-between gap-3 border-t border-subtle pt-3">
-                <div className="text-caption text-subtle">
-                  {isSettingsDirty ? (
-                    <span className="font-medium text-warning">● 有未保存的修改</span>
-                  ) : (
-                    <span>当前为已保存版本（rev {draft.revision}）。</span>
-                  )}
-                </div>
-                <div className="flex items-center gap-2">
-                  <Button
-                    variant="secondary"
-                    disabled={!isSettingsDirty || saveSettingsMutation.isPending}
-                    onClick={() => {
-                      setSettingsDraft(null);
-                      setSettingsConflict(false);
-                      setSettingsError(null);
-                    }}
-                  >
-                    放弃修改
-                  </Button>
-                  <Button
-                    variant="primary"
-                    disabled={!isSettingsDirty}
-                    loading={saveSettingsMutation.isPending}
-                    onClick={() => saveSettingsMutation.mutate(draft)}
-                  >
-                    <Check size={14} className="mr-1.5" />
-                    保存设置
-                  </Button>
-                </div>
-              </div>
+              <SaveBar
+                className="border-t border-subtle pt-3"
+                dirty={isSettingsDirty}
+                saving={saveSettingsMutation.isPending}
+                savedText={`当前为已保存版本（rev ${draft.revision}）。`}
+                saveLabel="保存设置"
+                onReset={() => {
+                  setSettingsDraft(null);
+                  setSettingsConflict(false);
+                  setSettingsError(null);
+                }}
+                onSave={() => saveSettingsMutation.mutate(draft)}
+              />
             </>
           )}
           {overviewQuery.data?.duty && (

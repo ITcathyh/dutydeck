@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
 import { createHash } from 'node:crypto';
+import { isThenable, naturalKeyConflict as conflict, notFound, revisionConflict } from './foundation-errors.js';
 import {
   RuntimeError,
   channelBotGroupPolicySchema,
@@ -135,18 +136,6 @@ function hash(entity: Wp1aEntity): string {
 }
 function boundedLimit(limit = 200): number {
   return Math.max(1, Math.min(500, Number.isFinite(limit) ? Math.trunc(limit) : 200));
-}
-function notFound(kind: EntityKind, id: string): RuntimeError {
-  return new RuntimeError('FOUNDATION_NOT_FOUND', `${kind} ${id} was not found`, 404);
-}
-function conflict(kind: EntityKind, identity: string): RuntimeError {
-  return new RuntimeError('FOUNDATION_NATURAL_KEY_CONFLICT', `${kind} already exists for ${identity}`, 409);
-}
-function revisionConflict(kind: EntityKind, id: string, revision: number): RuntimeError {
-  return new RuntimeError('FOUNDATION_REVISION_CONFLICT', `${kind} ${id} is no longer at revision ${revision}`, 409);
-}
-function isThenable(value: unknown): value is PromiseLike<unknown> {
-  return typeof value === 'object' && value !== null && 'then' in value && typeof (value as { then?: unknown }).then === 'function';
 }
 
 export interface Wp1aRepositories {

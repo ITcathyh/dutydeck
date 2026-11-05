@@ -20,7 +20,7 @@
  * unacceptable runtime dependency here), gemini/kimi (no on-disk
  * transcript). Those keep the raw_terminal fallback.
  */
-import type { NormalizedDriverEvent } from '@dutydeck/shared';
+import { claudeFamilyCliAdapterIds, transcriptClientForAdapter, type NormalizedDriverEvent } from '@dutydeck/shared';
 import type { CliPathEnv } from '../cli-paths.js';
 import type { TranscriptEventSource } from './tail.js';
 import { ClaudeTranscriptTailer, type ClaudeTranscriptTailerOptions } from './claude.js';
@@ -108,7 +108,7 @@ export interface CreateTranscriptTailerOptions {
  * that the tailer resolves `~/.claude`, which is Claude Code's tree, not
  * theirs. See the note in the driver on why the child's env is authoritative.
  */
-export const TRANSCRIPT_ADAPTER_IDS = ['claude-code', 'seed', 'relay', 'codex', 'traex', 'grok'] as const;
+export const TRANSCRIPT_ADAPTER_IDS: readonly string[] = [...claudeFamilyCliAdapterIds, 'codex', 'traex', 'grok'];
 
 /** Pick a transcript tailer by adapter id. CLIs without a native transcript
  *  (or not yet ported) return undefined — the caller falls back to
@@ -117,19 +117,17 @@ export function createTranscriptTailer(
   adapterId: string,
   opts: CreateTranscriptTailerOptions,
 ): TranscriptEventSource | undefined {
-  switch (adapterId) {
+  // Grok has a tailer but no Session Insight client, so it sits outside the dialect map.
+  if (adapterId === 'grok') return new GrokTranscriptTailer(opts as GrokTranscriptTailerOptions);
+  switch (transcriptClientForAdapter(adapterId)) {
     // Claude Code and its two forks: identical JSONL dialect and project-dir
     // layout; the fork's data root arrives via opts.env (see above).
-    case 'claude-code':
-    case 'seed':
-    case 'relay':
+    case 'claude':
       return new ClaudeTranscriptTailer(opts as ClaudeTranscriptTailerOptions);
     case 'codex':
       return new CodexTranscriptTailer(opts as CodexTranscriptTailerOptions);
     case 'traex':
       return new TraexTranscriptTailer(opts as TraexTranscriptTailerOptions);
-    case 'grok':
-      return new GrokTranscriptTailer(opts as GrokTranscriptTailerOptions);
     default:
       return undefined;
   }

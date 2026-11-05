@@ -1,11 +1,11 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, truncate, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, rm, truncate, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import type { CiPipelineStatus, CiProvider, CiReviewComment, Session, TaskRecord } from '@dutydeck/shared';
 import { createRepositories, executionTaskId } from '@dutydeck/storage';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import { CiProviderRegistry } from './ci-providers.js';
 import type { CiNotice } from './ci-webhook.js';
 import { buildPullRequestConfirmCard } from './lark/pull-request-card.js';
@@ -18,25 +18,37 @@ const run = promisify(execFile);
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
+/** 所有用例共用的初始裸仓库：只建一次，每个用例复制一份当自己的 origin。 */
+let templateRemote: Promise<string> | undefined;
+function seededRemote() {
+  return templateRemote ??= (async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dutydeck-pr-template-'));
+    cleanupTemplate = () => rm(root, { recursive: true, force: true });
+    const remote = join(root, 'remote.git');
+    const seed = join(root, 'seed');
+    await run('git', ['init', '-q', '--bare', '-b', 'main', remote]);
+    await run('git', ['init', '-q', '-b', 'main', seed]);
+    for (const [key, value] of [['user.email', 'seed@example.com'], ['user.name', 'Seed']]) await run('git', ['-C', seed, 'config', key, value]);
+    await writeFile(join(seed, 'README.md'), 'readme\n');
+    await writeFile(join(seed, 'app.ts'), 'export const a = 1;\n');
+    await run('git', ['-C', seed, 'add', '.']);
+    await run('git', ['-C', seed, 'commit', '-qm', 'initial']);
+    await run('git', ['-C', seed, 'push', '-q', remote, 'main']);
+    return remote;
+  })();
+}
+let cleanupTemplate: (() => Promise<void>) | undefined;
+afterAll(async () => { await cleanupTemplate?.(); });
+
 /** 本地裸仓库当 origin；工作区是它的克隆，origin/HEAD 指向 main。 */
 async function fixture(options: { withoutPullRequests?: boolean; log?: { warn: (...args: any[]) => void } } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'dutydeck-pr-'));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
   const remote = join(root, 'remote.git');
   const cwd = join(root, 'work');
-  const seed = join(root, 'seed');
-  await run('git', ['init', '-q', '--bare', '-b', 'main', remote]);
-  await run('git', ['init', '-q', '-b', 'main', seed]);
-  for (const [key, value] of [['user.email', 'seed@example.com'], ['user.name', 'Seed']]) await run('git', ['-C', seed, 'config', key, value]);
-  await writeFile(join(seed, 'README.md'), 'readme\n');
-  await writeFile(join(seed, 'app.ts'), 'export const a = 1;\n');
-  await run('git', ['-C', seed, 'add', '.']);
-  await run('git', ['-C', seed, 'commit', '-qm', 'initial']);
-  await run('git', ['-C', seed, 'push', '-q', remote, 'main']);
-  await run('git', ['clone', '-q', remote, cwd]);
+  await cp(await seededRemote(), remote, { recursive: true });
+  await run('git', ['clone', '-q', '-c', 'user.email=user@example.com', '-c', 'user.name=User', remote, cwd]);
   const git = async (...args: string[]) => (await run('git', ['-C', cwd, ...args])).stdout.trim();
-  await git('config', 'user.email', 'user@example.com');
-  await git('config', 'user.name', 'User');
   const remoteGit = async (...args: string[]) => (await run('git', ['--git-dir', remote, ...args])).stdout.trim();
 
   const now = { value: Date.parse('2026-10-13T08:00:00.000Z') };

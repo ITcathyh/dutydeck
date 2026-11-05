@@ -186,24 +186,7 @@ function toObservation(
   input: ObserveCollaborationInput,
   revision: number
 ): CollaborationObservation {
-  return collaborationObservationSchema.parse({
-    id,
-    scope,
-    sequence,
-    source: input.source,
-    eventId: input.eventId,
-    occurredAt: input.occurredAt,
-    receivedAt: input.receivedAt,
-    senderId: input.senderId,
-    senderKind: input.senderKind,
-    threadId: input.threadId,
-    messageId: input.messageId,
-    text: input.text,
-    refs: input.refs,
-    origin: input.origin,
-    missing: input.missing,
-    revision
-  });
+  return collaborationObservationSchema.parse({ ...input, id, scope, sequence, revision });
 }
 
 interface SettingsRow {
@@ -340,6 +323,11 @@ function rowToFollowup(row: FollowupRow): CollaborationFollowup {
   });
 }
 
+/** 写方法在同一事务里读回刚写的行，返回值与 getFollowup 走同一套解码。 */
+function loadFollowup(sqlite: Database.Database, id: string): CollaborationFollowup {
+  return rowToFollowup(sqlite.prepare('SELECT * FROM collaboration_followups WHERE id = ?').get(id) as FollowupRow);
+}
+
 interface MandateRow {
   id: string;
   app_id: string;
@@ -381,6 +369,10 @@ function rowToMandate(row: MandateRow): CollaborationMandate {
     createdAt: row.created_at,
     updatedAt: row.updated_at
   });
+}
+
+function loadMandate(sqlite: Database.Database, id: string): CollaborationMandate {
+  return rowToMandate(sqlite.prepare('SELECT * FROM collaboration_mandates WHERE id = ?').get(id) as MandateRow);
 }
 
 interface DecisionRow {
@@ -982,27 +974,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
 
         nextContextSequence(sqlite, scope);
 
-        return collaborationFollowupSchema.parse({
-          id,
-          scope,
-          revision,
-          goal: validated.goal,
-          status: validated.status,
-          progress: validated.progress,
-          steps: validated.steps,
-          ownerId: validated.ownerId,
-          dueAt: validated.dueAt,
-          result: validated.result,
-          sourceRefs: validated.sourceRefs,
-          taskIds: validated.taskIds,
-          externalRefs: validated.externalRefs,
-          fields: validated.fields,
-          createdBy: validated.createdBy,
-          updatedBy: validated.updatedBy ?? validated.createdBy,
-          provenance: validated.provenance,
-          createdAt,
-          updatedAt
-        });
+        return loadFollowup(sqlite, id);
       })();
     },
 
@@ -1113,27 +1085,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
 
         nextContextSequence(sqlite, scope);
 
-        return collaborationFollowupSchema.parse({
-          id,
-          scope,
-          revision: newRevision,
-          goal,
-          status,
-          progress,
-          steps,
-          ownerId,
-          dueAt,
-          result,
-          sourceRefs,
-          taskIds,
-          externalRefs,
-          fields,
-          createdBy: existing.createdBy,
-          updatedBy: actorId,
-          provenance,
-          createdAt: existing.createdAt,
-          updatedAt
-        });
+        return loadFollowup(sqlite, id);
       })();
     },
 
@@ -1201,25 +1153,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
 
         nextContextSequence(sqlite, scope);
 
-        return collaborationMandateSchema.parse({
-          id,
-          scope,
-          revision,
-          goal: validated.goal,
-          status: validated.status,
-          requesterId: validated.requesterId,
-          sourceRefs: validated.sourceRefs,
-          followupId: validated.followupId,
-          scheduleDefinitionId: validated.scheduleDefinitionId,
-          mode: validated.mode,
-          prompt: validated.prompt,
-          condition: validated.condition,
-          deliveryPaused: validated.deliveryPaused,
-          catchupPolicy: validated.catchupPolicy,
-          lastProgressRevision: validated.lastProgressRevision,
-          createdAt,
-          updatedAt
-        });
+        return loadMandate(sqlite, id);
       })();
     },
 
@@ -1344,25 +1278,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
 
         nextContextSequence(sqlite, scope);
 
-        return collaborationMandateSchema.parse({
-          id,
-          scope,
-          revision: newRevision,
-          goal,
-          status,
-          requesterId: existing.requesterId,
-          sourceRefs,
-          followupId,
-          scheduleDefinitionId,
-          mode,
-          prompt,
-          condition,
-          deliveryPaused,
-          catchupPolicy,
-          lastProgressRevision,
-          createdAt: existing.createdAt,
-          updatedAt
-        });
+        return loadMandate(sqlite, id);
       })();
     },
 

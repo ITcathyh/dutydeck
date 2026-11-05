@@ -1,9 +1,9 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Worker } from 'node:worker_threads';
@@ -15,7 +15,9 @@ import { AUTH_TOKEN_CONFIG_KEY, SHARE_LINK_SECRET_CONFIG_KEY, loadOrCreateAuthTo
 import { startLocalServer } from './service.js';
 
 const roots: string[] = [];
+const sharedRoots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+afterAll(() => { for (const root of sharedRoots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'dutydeck-backup-test-')); roots.push(root);
   const dataDir = join(root, 'source'); mkdirSync(dataDir);
@@ -205,8 +207,13 @@ describe('offline portable backup', () => {
     expect(() => inspectBackup(f.output)).toThrow(/snapshot size or hash mismatch/);
   });
 
+  // 只读的原始备份建一次；每个变体复制一份再篡改。
+  let pristine: Promise<ReturnType<typeof fixture>> | undefined;
   it.each(['hash', 'schema', 'corrupt', 'traversal', 'symlink', 'unlisted', 'foreign-key'])('rejects %s before creating a restore target', async kind => {
-    const f = fixture(); await createBackup(f);
+    const source = await (pristine ??= (async () => { const created = fixture(); roots.splice(roots.indexOf(created.root), 1); sharedRoots.push(created.root); await createBackup(created); return created; })());
+    const root = mkdtempSync(join(tmpdir(), 'dutydeck-backup-test-')); roots.push(root);
+    const f = { ...source, root, output: join(root, 'archive') };
+    cpSync(source.output, f.output, { recursive: true });
     const file = join(f.output, 'dutydeck.db');
     if (kind === 'hash') writeFileSync(file, 'tampered');
     if (kind === 'schema') editManifest(f.output, manifest => { manifest.schema++; });

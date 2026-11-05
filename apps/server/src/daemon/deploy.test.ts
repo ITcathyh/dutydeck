@@ -239,7 +239,9 @@ describe('dutydeck deploy', () => {
     rmSync(tmp, { recursive: true, force: true });
   });
 
-  const deps = (extra: Partial<DeployDeps> = {}): DeployDeps => ({ service, checkSqlite: passingSqlite, readToken: () => undefined, info, warn, healthTimeoutMs: 10_000, env: {}, ...extra });
+  // 健康检查与排空等待在产品里按秒轮询；这里用真实时钟、缩短每次等待，截止时间与判定不变。
+  const shortSleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, Math.min(ms, 20)));
+  const deps = (extra: Partial<DeployDeps> = {}): DeployDeps => ({ service, checkSqlite: passingSqlite, readToken: () => undefined, info, warn, healthTimeoutMs: 10_000, env: {}, sleep: shortSleep, ...extra });
 
   async function owner(stage: string) {
     const messages: Array<{ type: string; result?: DeployResult; message?: string }> = [];
@@ -292,7 +294,7 @@ describe('dutydeck deploy', () => {
     nextCommit(source);
     const requests = recordRequests();
     await expect(runDeploy({ source, runtime: bot }, deps({
-      fetch: requests.fetch,
+      fetch: requests.fetch, now: () => Date.now() + 1000, // 与上一份记录不落在同一秒
       service: { ...service, restart: async () => { throw new Error('systemctl 无响应'); } }
     }))).rejects.toThrow('systemctl 无响应');
     expect(requests.calls.filter(call => call.includes('/api/system/drain')).at(-1)).toBe('drain /api/system/drain false');
@@ -303,7 +305,8 @@ describe('dutydeck deploy', () => {
     const results: DeployResult[] = [];
     for (let index = 0; index < 3; index++) {
       if (index) nextCommit(source);
-      const result = await runDeploy({ source, runtime: bot }, deps());
+      // 记录目录按秒命名并排序：每次部署的时钟前移 1 秒，保证新旧顺序不取决于同一秒内的 commit。
+      const result = await runDeploy({ source, runtime: bot }, deps({ now: () => Date.now() + index * 1000 }));
       expect(result, result.error).toMatchObject({ ok: true, status: 'deployed' });
       results.push(result);
     }

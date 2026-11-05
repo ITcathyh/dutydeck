@@ -28,7 +28,7 @@ async function fixture(contact: 'invalid' | 'valid' | 'scope' | 'network' = 'inv
     }
     throw new Error(`Unexpected request: ${address}`);
   });
-  const app = await buildApp({} as any, { lark: { config: repos.config, listeningDisabled: true, env: {}, fetcher } });
+  const app = await buildApp({} as any, { lark: { config: repos.config, listeningDisabled: true, env: { LARK_API_RETRY_BASE_MS: '1', LARK_API_RETRY_MAX_MS: '1' }, fetcher } });
   cleanups.push(() => app.close());
   await readLarkConfig(repos.config, 'cli_source');
   return { app, repos, fetcher };

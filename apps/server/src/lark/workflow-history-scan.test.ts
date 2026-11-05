@@ -18,7 +18,7 @@ const harness = async (count: number) => {
     updatedAt: new Date().toISOString(), closeMessage: 'Approved', cardClosedAt: new Date().toISOString(),
     event: { messageId: 'request', chatId: 'chat', chatType: 'p2p', messageType: 'text', content: '', mentions: [] } };
   const save = (value: LarkInteraction) => repos.config.set(`lark.interaction.app.${value.id}`, JSON.stringify(value));
-  for (let index = 0; index < count; index++) await save({ ...record, id: `history_${index}`, cardId: `card_${index}` });
+  await repos.config.compareAndSetBatch!([], Array.from({ length: count }, (_, index) => ({ key: `lark.interaction.app.history_${index}`, value: JSON.stringify({ ...record, id: `history_${index}`, cardId: `card_${index}` }) })));
   const update = vi.fn(async (_input: { messageId: string }) => ({}));
   const workflow = new LarkWorkflowInteractions(repos.config, {} as LarkRuntime, { update } as unknown as LarkCardService, undefined, async () => true);
   cleanups.push(() => workflow.close());

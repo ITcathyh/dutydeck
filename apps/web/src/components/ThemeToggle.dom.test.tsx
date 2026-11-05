@@ -20,7 +20,7 @@ describe('ThemeToggle', () => {
   });
 
   it('选择任一外观都会回传偏好', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onChange = vi.fn();
     render(<ThemeToggle preference="system" resolved="light" onChange={onChange}/>);
     await user.click(screen.getByRole('radio', { name: /^深色/ }));

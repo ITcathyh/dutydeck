@@ -23,7 +23,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import { currentProcessIdentity, observeProcess } from '@dutydeck/storage';
 import { readTaskAttemptResult, type TaskResultRepositories } from '../task-results.js';
-import { installationOwnerTaskActor, RuntimeError, type AgentCapabilities, type AcceptedTask, type ConfigRepository, type ExecutionRepository, type MemoryJob, type MemoryJobRepository, type StartSessionInput, type TaskRequestV1, type AgentConfig, type AgentEvent, type ExecutionActor, type PermissionMode, type Session, type TaskRecord } from '@dutydeck/shared';
+import { installationOwnerTaskActor, isTerminalTaskStatus, RuntimeError, type AgentCapabilities, type AcceptedTask, type ConfigRepository, type ExecutionRepository, type MemoryJob, type MemoryJobRepository, type StartSessionInput, type TaskRequestV1, type AgentConfig, type AgentEvent, type ExecutionActor, type PermissionMode, type Session, type TaskRecord } from '@dutydeck/shared';
 import { larkMemoryEnabled, type StoredLarkConfig } from './config.js';
 import {
   isLarkGroupChatMemoryPool,
@@ -79,7 +79,6 @@ export const larkMemoryPipelineRules = {
   resultRetryMs: 500
 } as const;
 
-const terminalTaskStatuses = ['completed', 'failed', 'interrupted', 'cancelled'];
 const recoveryTaskStatuses = ['reconcile_required', 'legacy_unresolved'];
 
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -826,7 +825,7 @@ export class LarkMemoryPipeline {
       for (const task of await runtime.getTasks(session.id)) recoveries.push({ taskId: task.id, ...await runtime.getTaskRecovery(session.id, task.id) });
     } else throw this.recoveryRequired(session.id, undefined, '运行时缺少记忆会话恢复检查能力。');
     // Session-level blockers are repeated on every task, so name the unresolved task first rather than the first task listed.
-    const open = recoveries.find(recovery => !terminalTaskStatuses.includes(recovery.status) && !recovery.resolvedUnknown);
+    const open = recoveries.find(recovery => !isTerminalTaskStatus(recovery.status) && !recovery.resolvedUnknown);
     if (open) throw this.recoveryRequired(session.id, open.taskId, `记忆会话里的任务 ${open.taskId} 尚未结束（${open.status}），未继续提交任务。`);
     // Foreign occupancy gates the next admission; it does not invalidate historical results.
     // The runtime marks a blocker external only with a known different session identity.
@@ -843,7 +842,7 @@ export class LarkMemoryPipeline {
     const current = () => runtime.getTasks(session.id).then(tasks => tasks.find(task => task.id === taskId));
     let task = await current();
     if (!task) throw this.recoveryRequired(session.id, taskId);
-    if (terminalTaskStatuses.includes(task.status)) return task.status;
+    if (isTerminalTaskStatus(task.status)) return task.status;
     if (recoveryTaskStatuses.includes(task.status)) throw this.recoveryRequired(session.id, taskId);
     const actor = this.options.controlActorId;
     if (!actor) throw this.recoveryRequired(session.id, taskId, '记忆任务超时，但没有已授权的后台控制身份。');
@@ -863,7 +862,7 @@ export class LarkMemoryPipeline {
       task = await current();
       const acknowledged = Boolean(response && typeof response === 'object' && 'interrupted' in response && response.interrupted === true);
       this.options.log.warn({ sessionId: session.id, taskId, interrupted: acknowledged, status: task?.status }, '记忆任务超时后的停止核对');
-      if (!task || !terminalTaskStatuses.includes(task.status)) throw this.recoveryRequired(session.id, taskId);
+      if (!task || !isTerminalTaskStatus(task.status)) throw this.recoveryRequired(session.id, taskId);
     }
     throw new LarkMemoryError('MEMORY_RUN_TIMEOUT', '记忆会话超时，任务已确认结束。', 504);
   }
@@ -884,7 +883,7 @@ export class LarkMemoryPipeline {
       if (event.type !== 'task') return;
       const record = (event.data as { task?: { id?: string; status?: string } } | undefined)?.task;
       if (!record || record.id !== taskId || !record.status) return;
-      if (terminalTaskStatuses.includes(record.status) || recoveryTaskStatuses.includes(record.status)) resolveStatus(record.status);
+      if (isTerminalTaskStatus(record.status) || recoveryTaskStatuses.includes(record.status)) resolveStatus(record.status);
     };
     // dispatch 返回前就可能有事件到达，taskId 未知时先缓冲，拿到后回放。
     const unsubscribe = this.options.runtime.subscribe(session.id, event => {
@@ -907,9 +906,9 @@ export class LarkMemoryPipeline {
       this.checkRun();
       const dispatched = accepted?.task ?? await this.options.runtime.dispatchRequest(request, { agentPrompt: prompt });
       taskId = dispatched.id;
-      if (terminalTaskStatuses.includes(dispatched.status) || recoveryTaskStatuses.includes(dispatched.status)) resolveStatus(dispatched.status);
+      if (isTerminalTaskStatus(dispatched.status) || recoveryTaskStatuses.includes(dispatched.status)) resolveStatus(dispatched.status);
       const current = (await this.options.runtime.getTasks(session.id)).find(item => item.id === taskId);
-      if (current && (terminalTaskStatuses.includes(current.status) || recoveryTaskStatuses.includes(current.status))) resolveStatus(current.status);
+      if (current && (isTerminalTaskStatus(current.status) || recoveryTaskStatuses.includes(current.status))) resolveStatus(current.status);
       for (const event of buffered) receive(event);
       buffered = [];
 

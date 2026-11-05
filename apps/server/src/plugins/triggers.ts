@@ -108,10 +108,6 @@ const header = (headers: TriggerRequest['headers'], name: string) => {
 
 const bodyDigest = (rawBody: Buffer) => createHash('sha256').update(rawBody).digest('hex');
 
-export function hmacTriggerTimestampHeader(auth: Extract<PluginTrigger['auth'], { type: 'hmac-sha256' }>): string {
-  return auth.timestampHeader;
-}
-
 export function hmacTriggerNonceHeader(auth: Extract<PluginTrigger['auth'], { type: 'hmac-sha256' }>): string {
   return auth.nonceHeader;
 }

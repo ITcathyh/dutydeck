@@ -27,7 +27,7 @@ function renderWithClient(ui: React.ReactElement) {
 
 describe('DirectoryPicker', () => {
   it('支持直接手动输入路径', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onChange = vi.fn();
     renderWithClient(<DirectoryPicker value="/data" onChange={onChange} />);
 
@@ -37,7 +37,7 @@ describe('DirectoryPicker', () => {
   });
 
   it('点击浏览打开服务器目录浏览器，选择子目录并确认', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onChange = vi.fn();
     const spy = vi.spyOn(api, 'systemDirectories').mockResolvedValue(mockDirData);
 
@@ -63,7 +63,7 @@ describe('DirectoryPicker', () => {
   });
 
   it('支持返回上一级和根目录跳转', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onChange = vi.fn();
     const spy = vi.spyOn(api, 'systemDirectories').mockImplementation(async (path?: string) => {
       if (path === '/home/user') {
@@ -92,7 +92,7 @@ describe('DirectoryPicker', () => {
   });
 
   it('加载失败时展示错误提示与重试按钮', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     vi.spyOn(api, 'systemDirectories').mockRejectedValue(new Error('Permission denied'));
 
     renderWithClient(<DirectoryPicker value="/restricted" onChange={() => {}} />);
@@ -114,7 +114,7 @@ describe('DirectoryPicker', () => {
 */
 describe('DirectoryPicker 只允许选已确认的目录', () => {
   it('目录读取失败时按钮禁用，点击不会写回任何路径', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onChange = vi.fn();
     vi.spyOn(api, 'systemDirectories').mockRejectedValue(new Error('Permission denied'));
 
@@ -131,7 +131,7 @@ describe('DirectoryPicker 只允许选已确认的目录', () => {
   });
 
   it('请求还在飞的时候不能选，返回成功后才放行且用服务端确认的路径', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onChange = vi.fn();
     let release!: (value: SystemDirectoriesResult) => void;
     vi.spyOn(api, 'systemDirectories').mockImplementation(

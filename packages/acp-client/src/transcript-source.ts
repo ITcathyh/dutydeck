@@ -117,7 +117,7 @@ function clientFromExecutableOrEntry(command: string, args: string[] = []): Insi
  * 精确内置 agent id 顺位判定，不拿自由标签或模型/provider 参数（如 --model
  * claude-opus）误判方言；无法识别时返回 null 安全降级。
  */
-export function inferAcpInsightClient(agent: AgentConfig): InsightClient | null {
+export function inferAcpInsightClient(agent: Pick<AgentConfig, 'id' | 'adapterId' | 'command' | 'args'>): InsightClient | null {
   // 1. 显式 adapterId 优先（PTY/统一配置对齐）
   if (agent.adapterId) {
     const aid = agent.adapterId.toLowerCase();

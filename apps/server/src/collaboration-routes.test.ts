@@ -21,7 +21,7 @@ const scope = { appId: 'cli_one', chatId: 'oc_one' };
 type Repositories = ReturnType<typeof createRepositories>;
 async function fixture(extra: Partial<CollaborationRouteOptions> | ((repos: Repositories, directory: string) => Promise<Partial<CollaborationRouteOptions>>) = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'collaboration-routes-'));
-  const repos = createRepositories(join(directory, 'test.db'));
+  const repos = createRepositories(':memory:');
   const now = new Date().toISOString();
   const session: Session = { id: 'session', agentId: 'agent', cwd: directory, source: 'lark', sourceId: 'cli_one:oc_one:group:chat:oc_one', state: 'thinking', runId: 'run', createdAt: now, updatedAt: now };
   await repos.sessions.save(session);

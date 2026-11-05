@@ -6,6 +6,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { agentModelSettingsApi, api, ApiError, type Agent, type LarkBotConfig, type LarkConfig } from '../api';
 import { LarkConfigModal } from './LarkConfigModal';
 
+// user.type 每个字符都会让整个向导重渲染一次；这里的输入不依赖逐键行为，点击聚焦后一次粘贴写入。
+async function typeInto(user: ReturnType<typeof userEvent.setup>, element: Element, text: string) {
+  await user.click(element);
+  await user.paste(text);
+}
+
 const agents: Agent[] = [
   { id: 'codex', name: 'Codex', protocol: 'acp', permissionMode: 'ask' },
   { id: 'claude', name: 'Claude', protocol: 'acp', permissionMode: 'ask' }
@@ -65,7 +71,7 @@ describe('LarkConfigModal revision conflicts', () => {
     await screen.findByDisplayValue('/repo');
     if (stage !== 'lark') await user.click(screen.getByRole('button', { name: /选择 Agent 并启用/ }));
     const field = screen.getByRole('textbox', { name: stage === 'lark' ? '默认工作区' : /预注入 Prompt/ });
-    await user.clear(field); await user.type(field, '/my-draft');
+    await user.clear(field); await typeInto(user, field, '/my-draft');
     if (stage === 'hook') await user.selectOptions(screen.getByRole('combobox', { name: '风险控制' }), 'enforced');
     await act(async () => client.setQueryData(['lark-config'], collection({ ...initial.bots[0], revision: 2, workspace: '/new-server', preInjectPrompt: 'new server prompt' })));
     await user.click(await screen.findByRole('button', { name: stage === 'hook' ? '配置拦截 Hook' : stage === 'lark' ? '下一步' : '完成配置' }));
@@ -88,7 +94,7 @@ describe('LarkConfigModal revision conflicts', () => {
       .mockRejectedValueOnce(new ApiError('此 Bot 已被修改', 'LARK_CONFIG_REVISION_CONFLICT', 409))
       .mockResolvedValueOnce(collection({ revision: 3, workspace: '/latest', setupComplete: true }));
     const field = await screen.findByRole('textbox', { name: '默认工作区' });
-    await user.clear(field); await user.type(field, '/draft');
+    await user.clear(field); await typeInto(user, field, '/draft');
     await user.click(screen.getByRole('button', { name: '下一步' }));
     const reload = await screen.findByRole('button', { name: '加载最新配置并放弃草稿' });
     vi.mocked(api.larkConfig).mockResolvedValue(collection({ revision: 2, workspace: '/latest', setupComplete: true }));
@@ -150,8 +156,8 @@ describe('LarkConfigModal risk control', () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
     render(<QueryClientProvider client={client}><LarkConfigModal agents={agents} onClose={() => {}}/></QueryClientProvider>);
 
-    await user.type(await screen.findByPlaceholderText('cli_xxx'), 'cli_auto');
-    await user.type(screen.getByPlaceholderText('输入 App Secret'), 'secret');
+    await typeInto(user, await screen.findByPlaceholderText('cli_xxx'), 'cli_auto');
+    await typeInto(user, screen.getByPlaceholderText('输入 App Secret'), 'secret');
     await user.click(screen.getByRole('button', { name: '自动配置' }));
 
     expect(start).toHaveBeenCalledWith('cli_auto', false);
@@ -182,7 +188,7 @@ describe('LarkConfigModal risk control', () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
     render(<QueryClientProvider client={client}><LarkConfigModal agents={agents} onClose={() => {}}/></QueryClientProvider>);
 
-    await user.type(await screen.findByPlaceholderText('cli_xxx'), 'cli_auto');
+    await typeInto(user, await screen.findByPlaceholderText('cli_xxx'), 'cli_auto');
     await user.click(screen.getByRole('button', { name: '自动配置' }));
     expect(await screen.findByText('发布失败')).toBeTruthy();
 
@@ -207,8 +213,8 @@ describe('LarkConfigModal risk control', () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
     render(<QueryClientProvider client={client}><LarkConfigModal agents={agents} onClose={onClose}/></QueryClientProvider>);
 
-    await user.type(await screen.findByPlaceholderText('cli_xxx'), 'cli_test');
-    await user.type(screen.getByPlaceholderText('输入 App Secret'), 'secret');
+    await typeInto(user, await screen.findByPlaceholderText('cli_xxx'), 'cli_test');
+    await typeInto(user, screen.getByPlaceholderText('输入 App Secret'), 'secret');
     await user.click(screen.getByRole('button', { name: '下一步' }));
 
     const listeningSwitch = await screen.findByRole('switch', { name: '监听飞书消息' });
@@ -268,7 +274,7 @@ describe('LarkConfigModal risk control', () => {
     const save = vi.spyOn(api, 'saveLarkConfig');
     const install = vi.spyOn(api, 'installLarkHook').mockRejectedValue(new ApiError('工作区不可写', 'HOOK_NOT_WRITABLE', 403));
     const workspace = await screen.findByDisplayValue('/repo');
-    await user.clear(workspace); await user.type(workspace, '/unsaved-workspace');
+    await user.clear(workspace); await typeInto(user, workspace, '/unsaved-workspace');
     await user.click(await screen.findByRole('button', { name: '配置拦截 Hook' }));
     await waitFor(() => expect(install).toHaveBeenCalledWith('cli_test', 'rm\\b', 4, { workspace: '/unsaved-workspace', defaultAgentId: 'codex', fallbackAgentId: '', defaultAgentWeights: [] }));
     expect(save).not.toHaveBeenCalled();
@@ -372,8 +378,8 @@ describe('LarkConfigModal 模态外壳契约', () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
     render(<QueryClientProvider client={client}><LarkConfigModal agents={agents} onClose={onClose}/></QueryClientProvider>);
 
-    await user.type(await screen.findByPlaceholderText('cli_xxx'), 'cli_test');
-    await user.type(screen.getByPlaceholderText('输入 App Secret'), 'secret');
+    await typeInto(user, await screen.findByPlaceholderText('cli_xxx'), 'cli_test');
+    await typeInto(user, screen.getByPlaceholderText('输入 App Secret'), 'secret');
     await user.click(screen.getByRole('button', { name: '下一步' }));
     await screen.findByRole('button', { name: '验证中' });
 
@@ -419,7 +425,7 @@ describe('LarkConfigModal 模态外壳契约', () => {
     await user.click(await screen.findByRole('button', { name: /选择 Agent 并启用/ }));
     const pattern = await screen.findByRole('textbox', { name: /高危操作正则表达式/ });
     await user.clear(pattern);
-    await user.type(pattern, '(unclosed');
+    await typeInto(user, pattern, '(unclosed');
 
     await waitFor(() => expect(pattern.getAttribute('aria-invalid')).toBe('true'));
     const describedBy = pattern.getAttribute('aria-describedby');
@@ -486,8 +492,8 @@ describe('LarkConfigModal metadata-free ACP proof', () => {
     const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(collection({ defaultAgentId: 'codex', permissionMode: 'ask' }));
     const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
     render(<QueryClientProvider client={client}><LarkConfigModal agents={[{ ...agents[0]!, protocol: 'auto', remoteApproval: true }]} onClose={() => {}}/></QueryClientProvider>);
-    await user.type(await screen.findByPlaceholderText('cli_xxx'), 'cli_test');
-    await user.type(screen.getByPlaceholderText('输入 App Secret'), 'fixture-secret');
+    await typeInto(user, await screen.findByPlaceholderText('cli_xxx'), 'cli_test');
+    await typeInto(user, screen.getByPlaceholderText('输入 App Secret'), 'fixture-secret');
     await user.click(screen.getByRole('button', { name: '下一步' }));
     const submit = await screen.findByRole('button', { name: '完成配置' }) as HTMLButtonElement;
     await waitFor(() => expect(submit.disabled).toBe(false));
@@ -659,11 +665,11 @@ describe('LarkConfigModal 会话记忆', () => {
     await user.click(screen.getByRole('switch', { name: '自动提取与整理' }));
     await user.click(screen.getByRole('button', { name: /沿用机器人默认 Agent/ }));
     await user.click(await screen.findByRole('option', { name: 'Claude' }));
-    await user.type(screen.getByPlaceholderText('可选，例如 gpt-4o-mini'), 'gpt-4o-mini');
+    await typeInto(user, screen.getByPlaceholderText('可选，例如 gpt-4o-mini'), 'gpt-4o-mini');
 
     await user.click(screen.getByText('可选：分别设置群判定和回复模型'));
-    await user.type(screen.getByLabelText('群判定模型'), 'fast');
-    await user.type(screen.getByLabelText('群回复模型'), 'quality');
+    await typeInto(user, screen.getByLabelText('群判定模型'), 'fast');
+    await typeInto(user, screen.getByLabelText('群回复模型'), 'quality');
     await user.click(screen.getByText('可选：分别设置群判定和回复模型'));
     expect(screen.getByText('可选：分别设置群判定和回复模型').closest('details')?.open).toBe(false);
     const submit = screen.getByRole('button', { name: '完成配置' }) as HTMLButtonElement;
@@ -720,7 +726,7 @@ describe('LarkConfigModal explicit selection', () => {
     await screen.findByRole('heading', { name: '更新飞书 Bot：测试机器人' });
     await user.click(screen.getByRole('button', { name: '新增机器人' }));
     await user.clear(screen.getByLabelText('新机器人名称'));
-    await user.type(screen.getByLabelText('新机器人名称'), '新助手');
+    await typeInto(user, screen.getByLabelText('新机器人名称'), '新助手');
     await user.keyboard('{Enter}');
     await screen.findByRole('heading', { name: '更新飞书 Bot：新助手' });
     await screen.findByText('默认 Agent');
@@ -752,8 +758,8 @@ describe('LarkConfigModal explicit selection', () => {
     expect(screen.getByRole('button', { name: '新增机器人' }).getAttribute('aria-pressed')).toBe('true');
     expect(screen.queryByRole('button', { name: '删除配置' })).toBeNull();
     expect((screen.getByRole('button', { name: /选择 Agent 并启用/ }) as HTMLButtonElement).disabled).toBe(true);
-    await user.type(appId, 'cli_new');
-    await user.type(screen.getByPlaceholderText('输入 App Secret'), 'new-secret');
+    await typeInto(user, appId, 'cli_new');
+    await typeInto(user, screen.getByPlaceholderText('输入 App Secret'), 'new-secret');
     await user.click(screen.getByRole('button', { name: '下一步' }));
     await waitFor(() => expect(save).toHaveBeenCalledOnce());
     expect(save.mock.calls[0]?.[0]).toMatchObject({ stage: 'lark', appId: 'cli_new', appSecret: 'new-secret' });
@@ -765,8 +771,8 @@ describe('LarkConfigModal explicit selection', () => {
     const config = collection({ setupComplete: true, webBaseUrl: 'https://dutydeck.example.com' });
     const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue({ ...config, bots: [...config.bots, { ...bot, appId: 'cli_new' }] });
     renderModal(config, 'acp', 'new');
-    await user.type(await screen.findByLabelText('App ID'), 'cli_new');
-    await user.type(screen.getByPlaceholderText('输入 App Secret'), 'new-secret');
+    await typeInto(user, await screen.findByLabelText('App ID'), 'cli_new');
+    await typeInto(user, screen.getByPlaceholderText('输入 App Secret'), 'new-secret');
     await user.click(screen.getByRole('button', { name: '下一步' }));
     await waitFor(() => expect(save).toHaveBeenCalledOnce());
     expect(save.mock.calls[0]?.[0]).toMatchObject({ appId: 'cli_new', webBaseUrl: 'https://dutydeck.example.com' });
@@ -797,8 +803,8 @@ describe('LarkConfigModal explicit selection', () => {
     const user = userEvent.setup();
     renderModal(collection({ setupComplete: true }), 'acp', 'new');
     const appId = await screen.findByLabelText('App ID') as HTMLInputElement;
-    await user.type(appId, 'cli_draft');
-    await user.type(screen.getByPlaceholderText('输入 App Secret'), 'draft-secret');
+    await typeInto(user, appId, 'cli_draft');
+    await typeInto(user, screen.getByPlaceholderText('输入 App Secret'), 'draft-secret');
     await user.click(screen.getByRole('button', { name: '新增机器人' }));
     await waitFor(() => expect(document.activeElement).toBe(appId));
     expect(appId.value).toBe('cli_draft');
@@ -877,7 +883,7 @@ describe('LarkConfigModal S7 Web 出口健康提示', () => {
     const input = screen.getByLabelText('Web 访问地址（可选）') as HTMLInputElement;
     await user.clear(input);
     expect(screen.getByText(/未配置公网 Web 地址/)).toBeTruthy();
-    await user.type(input, 'https://dutydeck.example.com');
+    await typeInto(user, input, 'https://dutydeck.example.com');
     expect(screen.queryByText(/没有网页出口|内网可达/)).toBeNull();
   });
 
@@ -961,8 +967,8 @@ describe('LarkConfigModal 工作区别名与验证命令', () => {
     await openAdvanced(user);
 
     await user.click(screen.getByRole('button', { name: '添加别名' }));
-    await user.type(screen.getByLabelText('别名 2'), 'api');
-    await user.type(screen.getByLabelText('别名 2 的绝对路径'), '/srv/api');
+    await typeInto(user, screen.getByLabelText('别名 2'), 'api');
+    await typeInto(user, screen.getByLabelText('别名 2 的绝对路径'), '/srv/api');
     await user.click(screen.getByRole('button', { name: '下一步' }));
 
     await waitFor(() => expect(save).toHaveBeenCalledOnce());
@@ -994,13 +1000,13 @@ describe('LarkConfigModal 工作区别名与验证命令', () => {
     await openAdvanced(user);
 
     await user.click(screen.getByRole('button', { name: '添加别名' }));
-    await user.type(screen.getByLabelText('别名 1'), 'web');
-    await user.type(screen.getByLabelText('别名 1 的绝对路径'), 'srv/web');
+    await typeInto(user, screen.getByLabelText('别名 1'), 'web');
+    await typeInto(user, screen.getByLabelText('别名 1 的绝对路径'), 'srv/web');
     expect(screen.getByText(/别名路径必须以 \/ 开头的绝对路径/)).toBeTruthy();
     expect((screen.getByRole('button', { name: '下一步' }) as HTMLButtonElement).disabled).toBe(true);
 
     await user.clear(screen.getByLabelText('别名 1 的绝对路径'));
-    await user.type(screen.getByLabelText('别名 1 的绝对路径'), '/srv/web');
+    await typeInto(user, screen.getByLabelText('别名 1 的绝对路径'), '/srv/web');
     expect(screen.queryByText(/别名路径必须以 \/ 开头的绝对路径/)).toBeNull();
     expect((screen.getByRole('button', { name: '下一步' }) as HTMLButtonElement).disabled).toBe(false);
   });
@@ -1061,10 +1067,10 @@ describe('LarkConfigModal 加急与置顶开关', () => {
     await openAdvanced(user);
 
     await user.click(screen.getByRole('switch', { name: '长时间没人处理时发加急（默认关闭）' }));
-    await user.type(screen.getByLabelText('加急前等待（秒）'), '120');
-    await user.type(screen.getByLabelText('每群每小时最多加急'), '2');
+    await typeInto(user, screen.getByLabelText('加急前等待（秒）'), '120');
+    await typeInto(user, screen.getByLabelText('每群每小时最多加急'), '2');
     await user.click(screen.getByRole('switch', { name: '长任务进度卡置顶（默认关闭）' }));
-    await user.type(screen.getByLabelText('跑多久算长任务（秒）'), '90');
+    await typeInto(user, screen.getByLabelText('跑多久算长任务（秒）'), '90');
     await user.click(screen.getByRole('button', { name: '下一步' }));
 
     await waitFor(() => expect(save).toHaveBeenCalledOnce());
@@ -1095,12 +1101,12 @@ describe('LarkConfigModal 加急与置顶开关', () => {
     await openAdvanced(user);
 
     await user.click(screen.getByRole('switch', { name: '长时间没人处理时发加急（默认关闭）' }));
-    await user.type(screen.getByLabelText('加急前等待（秒）'), '30');
+    await typeInto(user, screen.getByLabelText('加急前等待（秒）'), '30');
     expect(screen.getByText(/加急等待时间至少 60 秒/)).toBeTruthy();
     expect((screen.getByRole('button', { name: '下一步' }) as HTMLButtonElement).disabled).toBe(true);
 
     await user.clear(screen.getByLabelText('加急前等待（秒）'));
-    await user.type(screen.getByLabelText('加急前等待（秒）'), '60');
+    await typeInto(user, screen.getByLabelText('加急前等待（秒）'), '60');
     expect(screen.queryByText(/加急等待时间至少 60 秒/)).toBeNull();
     expect((screen.getByRole('button', { name: '下一步' }) as HTMLButtonElement).disabled).toBe(false);
   });
@@ -1131,7 +1137,7 @@ describe('LarkConfigModal 加急与置顶开关', () => {
     await openAdvanced(user);
 
     await user.click(screen.getByRole('switch', { name: '完成通知 @ 发起人（默认开启）' }));
-    await user.type(screen.getByLabelText('免打扰时段（可选）'), '22:00-08:00');
+    await typeInto(user, screen.getByLabelText('免打扰时段（可选）'), '22:00-08:00');
     await user.click(screen.getByRole('button', { name: '下一步' }));
     await waitFor(() => expect(save).toHaveBeenCalledOnce());
     expect(save.mock.calls[0]![0]).toMatchObject({ stage: 'lark', notifyMentionAction: true, notifyMentionDone: false, notifyQuietHours: '22:00-08:00' });
@@ -1160,7 +1166,7 @@ describe('LarkConfigModal 加急与置顶开关', () => {
     const field = screen.getByLabelText('免打扰时段（可选）');
     for (const bad of ['22-08', '25:00-08:00', '22:00-22:00', '22:00']) {
       await user.clear(field);
-      await user.type(field, bad);
+      await typeInto(user, field, bad);
       expect(screen.getByText(/免打扰时段格式应为/)).toBeTruthy();
       expect((screen.getByRole('button', { name: '下一步' }) as HTMLButtonElement).disabled).toBe(true);
     }
@@ -1178,13 +1184,13 @@ describe('LarkConfigModal 加急与置顶开关', () => {
     await openAdvanced(user);
 
     await user.click(screen.getByRole('switch', { name: '长任务进度卡置顶（默认关闭）' }));
-    await user.type(screen.getByLabelText('跑多久算长任务（秒）'), '0');
+    await typeInto(user, screen.getByLabelText('跑多久算长任务（秒）'), '0');
     expect(screen.getByText(/置顶等待时间至少 1 秒/)).toBeTruthy();
     expect((screen.getByRole('button', { name: '下一步' }) as HTMLButtonElement).disabled).toBe(true);
 
     // 1 秒对置顶是合法的——它可撤销、终态自动撤，不需要和强提醒一样的下限。
     await user.clear(screen.getByLabelText('跑多久算长任务（秒）'));
-    await user.type(screen.getByLabelText('跑多久算长任务（秒）'), '1');
+    await typeInto(user, screen.getByLabelText('跑多久算长任务（秒）'), '1');
     expect(screen.queryByText(/置顶等待时间至少 1 秒/)).toBeNull();
     expect((screen.getByRole('button', { name: '下一步' }) as HTMLButtonElement).disabled).toBe(false);
   });
@@ -1228,14 +1234,14 @@ it('registers a Claude bot with a gateway and custom model, requiring the gatewa
   renderModal(collection({ defaultAgentId: 'claude', permissionMode: 'ask', setupComplete: false }));
   await user.click(await screen.findByRole('button', { name: /选择 Agent 并启用/ }));
   await user.click(screen.getByText('模型服务配置'));
-  await user.type(await screen.findByLabelText('服务地址'), 'https://registration.example');
-  await user.type(screen.getByLabelText('API Key'), 'REGISTRATION_KEY');
+  await typeInto(user, await screen.findByLabelText('服务地址'), 'https://registration.example');
+  await typeInto(user, screen.getByLabelText('API Key'), 'REGISTRATION_KEY');
   const finish = screen.getByRole('button', { name: '完成配置' }) as HTMLButtonElement;
   await waitFor(() => expect(finish.disabled).toBe(true));
   expect(document.querySelectorAll('form')).toHaveLength(1);
   await user.click(screen.getByRole('button', { name: '保存模型配置' }));
   await waitFor(() => expect(saveGateway).toHaveBeenCalledWith('claude', { baseUrl: 'https://registration.example', apiKey: 'REGISTRATION_KEY', clearApiKey: false }, 'cli_test'));
-  await user.type(screen.getByLabelText('默认模型'), 'gateway-custom-model');
+  await typeInto(user, screen.getByLabelText('默认模型'), 'gateway-custom-model');
   await waitFor(() => expect(finish.disabled).toBe(false));
   await user.click(finish);
   await waitFor(() => expect(saveBot).toHaveBeenCalledWith(expect.objectContaining({ stage: 'agent', originalAppId: 'cli_test', defaultAgentId: 'claude', defaultModel: 'gateway-custom-model' })));
@@ -1298,12 +1304,12 @@ describe('Lark Agent routing weights', () => {
     const codex = await screen.findByRole('spinbutton', { name: 'Codex 分流权重' });
     const claude = screen.getByRole('spinbutton', { name: 'Claude 分流权重' });
     expect((codex as HTMLInputElement).value).toBe('30');
-    await user.clear(codex); await user.type(codex, '20');
-    await user.clear(claude); await user.type(claude, '80');
+    await user.clear(codex); await typeInto(user, codex, '20');
+    await user.clear(claude); await typeInto(user, claude, '80');
     await user.click(screen.getByRole('button', { name: '完成配置' }));
     await waitFor(() => expect(save).toHaveBeenCalledOnce());
     expect(save.mock.calls[0]![0]).toMatchObject({ defaultAgentWeights: [{ agentId: 'codex', weight: 20 }, { agentId: 'claude', weight: 80 }] });
-    await user.clear(codex); await user.type(codex, '0');
+    await user.clear(codex); await typeInto(user, codex, '0');
     expect((screen.getByRole('button', { name: '完成配置' }) as HTMLButtonElement).disabled).toBe(true);
     await user.clear(codex); await user.clear(claude);
     await user.click(screen.getByRole('button', { name: '完成配置' }));
@@ -1318,7 +1324,7 @@ it('saves and clears the fallback model from the setup wizard', async () => {
   const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(collection({ defaultAgentId: 'codex', setupComplete: true }));
   renderModal(collection({ fullTrustConfirmed: true, defaultAgentId: 'codex', fallbackAgentId: 'claude' }));
   await user.click(await screen.findByRole('button', { name: /选择 Agent 并启用/ }));
-  await user.type(await screen.findByLabelText('兜底模型'), 'gpt-6.1-sol');
+  await typeInto(user, await screen.findByLabelText('兜底模型'), 'gpt-6.1-sol');
   await user.click(screen.getByRole('button', { name: '完成配置' }));
   await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ fallbackAgentId: 'claude', fallbackModel: 'gpt-6.1-sol' })));
   await user.click(await screen.findByRole('button', { name: '兜底：Claude' }));
@@ -1355,7 +1361,7 @@ it('protects an edited bot when navigation requests another destination and reta
   render(<QueryClientProvider client={client}><LarkConfigModal agents={agents} target={{ appId: 'cli_test' }} onLeaveGuardChange={register} onClose={() => {}}/></QueryClientProvider>);
   const user = userEvent.setup();
   const input = await screen.findByRole('textbox', { name: '默认工作区' });
-  await user.type(input, '/draft');
+  await typeInto(user, input, '/draft');
   const leave = vi.fn();
   act(() => { expect(guard?.(leave)).toBe(false); });
   expect(leave).not.toHaveBeenCalled();
@@ -1382,14 +1388,14 @@ it.each(['none', 'workspace', 'secret', 'saved-secret'] as const)('closes throug
   await screen.findByRole('textbox', { name: /预注入 Prompt/ });
   if (draft !== 'none') {
     await user.click(screen.getByRole('button', { name: /连接飞书应用/ }));
-    await user.type(screen.getByLabelText(draft === 'workspace' ? '默认工作区' : 'App Secret'), draft === 'workspace' ? '/unsaved' : 'new-secret');
+    await typeInto(user, screen.getByLabelText(draft === 'workspace' ? '默认工作区' : 'App Secret'), draft === 'workspace' ? '/unsaved' : 'new-secret');
     if (draft === 'saved-secret') {
       await user.click(screen.getByRole('button', { name: '下一步' }));
       await waitFor(() => expect(save).toHaveBeenCalledOnce());
       await screen.findByRole('textbox', { name: /预注入 Prompt/ });
     } else await user.click(screen.getByRole('button', { name: /选择 Agent 并启用/ }));
   }
-  await user.type(screen.getByRole('textbox', { name: /预注入 Prompt/ }), 'saved');
+  await typeInto(user, screen.getByRole('textbox', { name: /预注入 Prompt/ }), 'saved');
   await user.click(screen.getByRole('button', { name: '完成配置' }));
   await waitFor(() => expect(save).toHaveBeenCalledTimes(draft === 'saved-secret' ? 2 : 1));
   if (draft === 'none' || draft === 'saved-secret') {

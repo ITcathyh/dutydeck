@@ -8,6 +8,12 @@ import { resetDrafts, useDraftStore } from '../draft-store';
 import { LarkConfigModal } from './LarkConfigModal';
 import { BotManagement } from './BotManagement';
 
+// user.type 每个字符都会触发一次整树重渲染；这里的输入不依赖逐键行为，点击聚焦后一次粘贴写入。
+async function typeInto(user: Pick<typeof userEvent, 'click' | 'paste'>, element: Element, text: string) {
+  await user.click(element);
+  await user.paste(text);
+}
+
 // 草稿是模块级 store（切走视图也要留住），用例之间必须显式清空，否则互相串。
 beforeEach(() => resetDrafts());
 afterEach(() => { vi.restoreAllMocks(); resetDrafts(); vi.useRealTimers(); });
@@ -156,7 +162,7 @@ describe('BotManagement component', () => {
     // 找到工作目录输入框并修改
     const workspaceInput = screen.getByDisplayValue('/data/projects/bot1');
     await user.clear(workspaceInput);
-    await user.type(workspaceInput, '/new/path');
+    await typeInto(user, workspaceInput, '/new/path');
 
     expect(screen.getByText(/有未保存的修改/)).toBeTruthy();
 
@@ -201,7 +207,7 @@ describe('BotManagement component', () => {
     await waitFor(() => expect(screen.getByRole('heading', { name: '测试助手' })).toBeTruthy());
 
     const workspaceInput = screen.getByDisplayValue('/data/projects/bot1');
-    await user.type(workspaceInput, '-conflict');
+    await typeInto(user, workspaceInput, '-conflict');
 
     const saveBtn = screen.getByRole('button', { name: '保存配置' });
     await user.click(saveBtn);
@@ -269,14 +275,14 @@ describe('BotManagement 会话记忆', () => {
 
     await user.click(screen.getByRole('checkbox', { name: '自动提取与整理' }));
     await user.selectOptions(screen.getByLabelText('整理 Agent'), 'codex');
-    await user.type(screen.getByPlaceholderText('可选，例如 gpt-4o-mini'), 'gpt-4o-mini');
+    await typeInto(user, screen.getByPlaceholderText('可选，例如 gpt-4o-mini'), 'gpt-4o-mini');
     const optional = screen.getByText('可选：分别设置群判定和回复模型').closest('details')!;
     expect(optional.open).toBe(false);
     await user.click(screen.getByText('可选：分别设置群判定和回复模型'));
     await user.selectOptions(screen.getByLabelText('群判定 Agent'), 'codex');
     await user.selectOptions(screen.getByLabelText('群回复 Agent'), 'codex');
-    await user.type(screen.getByLabelText('群判定模型'), 'fast');
-    await user.type(screen.getByLabelText('群回复模型'), 'quality');
+    await typeInto(user, screen.getByLabelText('群判定模型'), 'fast');
+    await typeInto(user, screen.getByLabelText('群回复模型'), 'quality');
     await user.click(screen.getByText('可选：分别设置群判定和回复模型'));
     expect(screen.getByText('可选：分别设置群判定和回复模型').closest('details')?.open).toBe(false);
     await user.click(screen.getByRole('button', { name: '保存配置' }));
@@ -677,13 +683,13 @@ describe('BotManagement 保存期间切换对象与继续编辑', () => {
     await waitFor(() => expect(screen.getByRole('heading', { name: '测试助手' })).toBeTruthy());
 
     // 改 A 并提交，请求停在半空。
-    await user.type(screen.getByDisplayValue('/data/projects/bot1'), '-a');
+    await typeInto(user, screen.getByDisplayValue('/data/projects/bot1'), '-a');
     await user.click(screen.getByRole('button', { name: '保存配置' }));
 
     // 切到 B 并给它也留一份草稿。
     await user.click(screen.getByRole('button', { name: /第二助手/ }));
     await waitFor(() => expect(screen.getByRole('heading', { name: '第二助手' })).toBeTruthy());
-    await user.type(screen.getByDisplayValue('/data/projects/bot2'), '-b');
+    await typeInto(user, screen.getByDisplayValue('/data/projects/bot2'), '-b');
     expect(screen.getByText(/有未保存的修改/)).toBeTruthy();
 
     // A 的请求这时才回来。
@@ -702,7 +708,7 @@ describe('BotManagement 保存期间切换对象与继续编辑', () => {
 
     renderWithClient(<Harness/>);
     await waitFor(() => expect(screen.getByRole('heading', { name: '测试助手' })).toBeTruthy());
-    await user.type(screen.getByDisplayValue('/data/projects/bot1'), '-a');
+    await typeInto(user, screen.getByDisplayValue('/data/projects/bot1'), '-a');
     await user.click(screen.getByRole('button', { name: '保存配置' }));
 
     await user.click(screen.getByRole('button', { name: /第二助手/ }));
@@ -731,12 +737,12 @@ describe('BotManagement 保存期间切换对象与继续编辑', () => {
     renderWithClient(<Harness/>);
     await waitFor(() => expect(screen.getByRole('heading', { name: '测试助手' })).toBeTruthy());
 
-    await user.type(screen.getByDisplayValue('/data/projects/bot1'), '-first');
+    await typeInto(user, screen.getByDisplayValue('/data/projects/bot1'), '-first');
     await user.click(screen.getByRole('button', { name: '保存配置' }));
     await waitFor(() => expect(saveSpy).toHaveBeenCalledWith(expect.objectContaining({ workspace: '/data/projects/bot1-first', expectedRevision: 3 })));
 
     // 请求还没回来，用户继续敲。
-    await user.type(screen.getByDisplayValue('/data/projects/bot1-first'), '-more');
+    await typeInto(user, screen.getByDisplayValue('/data/projects/bot1-first'), '-more');
 
     // 服务端把 revision 推到 4。
     resolveFirst({ configured: true, bots: [{ ...mockBot, revision: 4, workspace: '/data/projects/bot1-first' }, botB], listeningDisabled: false });
@@ -920,7 +926,7 @@ it('preserves independent model drafts across unmount and submits explicit clear
   expect(screen.getByText('可选：分别设置群判定和回复模型').closest('details')?.open).toBe(true);
   await user.clear(screen.getByLabelText('群判定模型'));
   await user.clear(screen.getByLabelText('群回复模型'));
-  await user.type(screen.getByLabelText('群回复模型'), 'draft-quality');
+  await typeInto(user, screen.getByLabelText('群回复模型'), 'draft-quality');
   first.unmount();
   renderWithClient(component);
   expect((await screen.findByLabelText('群判定模型') as HTMLInputElement).value).toBe('');
@@ -941,7 +947,7 @@ it('keeps optional model overrides collapsed and empty when saving unrelated cha
   expect(optional.open).toBe(false);
   expect((screen.getByLabelText('群判定模型') as HTMLInputElement).value).toBe('');
   expect((screen.getByLabelText('群回复模型') as HTMLInputElement).value).toBe('');
-  await user.type(screen.getByDisplayValue(mockBot.workspace!), '-draft');
+  await typeInto(user, screen.getByDisplayValue(mockBot.workspace!), '-draft');
   await user.click(screen.getByRole('button', { name: '保存配置' }));
   await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ decisionAgentId: '', decisionModel: '', responseAgentId: '', responseModel: '' })));
 });
@@ -1001,7 +1007,7 @@ describe('idle context compaction configuration', () => {
     const hours = await screen.findByRole('spinbutton', { name: '空闲时长（小时）' });
     for (const value of ['', '0', '1.5', '-1']) {
       await user.clear(hours);
-      if (value) await user.type(hours, value);
+      if (value) await typeInto(user, hours, value);
       expect(hours.getAttribute('aria-invalid')).toBe('true');
       expect(screen.getByText('请输入至少 1 小时的整数。').getAttribute('role')).toBe('alert');
       expect((screen.getByRole('button', { name: '保存配置' }) as HTMLButtonElement).disabled).toBe(true);
@@ -1083,11 +1089,11 @@ describe('BotManagement 角色设置', () => {
     renderWithClient(<BotManagement selectedAppId={mockBot.appId} onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={mockAgents}/>);
     await waitFor(() => expect(screen.getByRole('heading', { name: '测试助手' })).toBeTruthy());
 
-    await user.type(screen.getByLabelText('角色名称'), '告警值班');
-    await user.type(screen.getByLabelText('负责范围'), '报警和告警排查');
+    await typeInto(user, screen.getByLabelText('角色名称'), '告警值班');
+    await typeInto(user, screen.getByLabelText('负责范围'), '报警和告警排查');
     const practice = screen.getByLabelText('做法');
     await user.clear(practice);
-    await user.type(practice, '给出确定的根因和影响');
+    await typeInto(user, practice, '给出确定的根因和影响');
 
     expect(screen.getByText(/有未保存的修改/)).toBeTruthy();
     await user.click(screen.getByRole('button', { name: '保存配置' }));
@@ -1144,10 +1150,10 @@ it('edits a custom Claude agent gateway for an existing bot and saves its model 
   const saveBot = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue({ configured: true, bots: [{ ...bot, revision: 4, defaultModel: 'custom-model' }], listeningDisabled: false });
   renderWithClient(<BotManagement selectedAppId={bot.appId} onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={[{ id: 'ccflash', name: 'ccflash', protocol: 'pty-cli', permissionMode: 'ask', remoteApproval: true, modelServiceSettings: true }]}/>);
   await user.click(await screen.findByText('模型服务配置'));
-  await user.type(await screen.findByLabelText('API Key'), 'EDIT_GATEWAY_KEY');
+  await typeInto(user, await screen.findByLabelText('API Key'), 'EDIT_GATEWAY_KEY');
   await user.click(screen.getByRole('button', { name: '保存模型配置' }));
   await waitFor(() => expect(gateway).toHaveBeenCalledWith('ccflash', { apiKey: 'EDIT_GATEWAY_KEY', clearApiKey: false }, bot.appId));
-  await user.type(screen.getByLabelText('默认模型'), 'custom-model');
+  await typeInto(user, screen.getByLabelText('默认模型'), 'custom-model');
   await user.click(screen.getByRole('button', { name: '保存配置' }));
   await waitFor(() => expect(saveBot).toHaveBeenCalledWith(expect.objectContaining({ originalAppId: bot.appId, defaultAgentId: 'ccflash', defaultModel: 'custom-model' })));
   expect(models).toHaveBeenCalledWith('ccflash', undefined, false, bot.appId);
@@ -1183,7 +1189,7 @@ it('saves and clears the fallback Agent and model with the bot draft revision', 
   });
   renderWithClient(<BotManagement selectedAppId="cli_test_1" onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={[...mockAgents, { id: 'ccflash', name: 'CCFlash', protocol: 'acp', permissionMode: 'ask' }]}/>);
   await user.selectOptions(await screen.findByLabelText('兜底 Agent'), 'ccflash');
-  await user.type(screen.getByLabelText('兜底模型'), 'gpt-6.1-sol');
+  await typeInto(user, screen.getByLabelText('兜底模型'), 'gpt-6.1-sol');
   await user.click(screen.getByRole('button', { name: '保存配置' }));
   await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ fallbackAgentId: 'ccflash', fallbackModel: 'gpt-6.1-sol', expectedRevision: 3 })));
   await user.selectOptions(screen.getByLabelText('兜底 Agent'), '');
@@ -1240,7 +1246,7 @@ describe('draft hook preparation', () => {
     setup();
     await user.selectOptions(await screen.findByLabelText('兜底 Agent'), 'codex');
     const workspace = screen.getByDisplayValue(mockBot.workspace!);
-    await user.clear(workspace); await user.type(workspace, '/draft-workspace');
+    await user.clear(workspace); await typeInto(user, workspace, '/draft-workspace');
     await user.click(screen.getByRole('button', { name: '保存配置' }));
     await waitFor(() => expect(save).toHaveBeenCalledOnce());
     expect(useDraftStore.getState().botConflicts[mockBot.appId]).toBeUndefined();
@@ -1266,7 +1272,7 @@ describe('draft hook preparation', () => {
     await user.click(screen.getByRole('button', { name: '配置拦截 Hook' }));
     await waitFor(() => expect(install).toHaveBeenCalledOnce());
     const workspace = screen.getByDisplayValue(mockBot.workspace!);
-    await user.clear(workspace); await user.type(workspace, '/later-workspace');
+    await user.clear(workspace); await typeInto(user, workspace, '/later-workspace');
     await act(async () => release({ agentId: 'codex', supported: true, installed: true, writable: true, trustRequired: false }));
     expect(useDraftStore.getState().botDrafts[mockBot.appId]).toMatchObject({ workspace: '/later-workspace', fallbackAgentId: 'codex', baseRevision: 3 });
     await waitFor(() => expect(status).toHaveBeenCalledWith(mockBot.appId, 'codex', '/later-workspace'));

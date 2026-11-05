@@ -13,6 +13,12 @@ import {
 import type { ScenarioBinding } from '@dutydeck/shared';
 import { CollaborationPanel } from './CollaborationPanel';
 
+// user.type 每个字符都会触发一次整树重渲染；这里的输入不依赖逐键行为，点击聚焦后一次粘贴写入。
+async function typeInto(user: Pick<typeof userEvent, 'click' | 'paste'>, element: Element, text: string) {
+  await user.click(element);
+  await user.paste(text);
+}
+
 const now = '2026-09-18T01:00:00.000Z';
 
 const makeSettings = (overrides: Partial<CollaborationSettings> = {}): CollaborationSettings => ({
@@ -94,7 +100,7 @@ describe('CollaborationPanel scope 隔离与参与模式文案', () => {
     const inputA = await screen.findByLabelText('长期指令');
     await waitFor(() => expect((inputA as HTMLTextAreaElement).value).toBe('群A长期指令'));
     await user.clear(inputA);
-    await user.type(inputA, '群A未保存草稿');
+    await typeInto(user, inputA, '群A未保存草稿');
 
     // 切到另一个群 + 另一个 Bot：草稿必须被丢弃，显示 B 群自己的服务端值。
     rerender(
@@ -130,7 +136,7 @@ describe('协作设置保存与版本冲突', () => {
     expect(screen.getByText('当前生效：按需参与 (selective)')).toBeTruthy();
     expect(screen.getByRole('button', { name: /按需参与/ }).getAttribute('aria-pressed')).toBe('false');
     expect((screen.getByRole('button', { name: '保存设置' }) as HTMLButtonElement).disabled).toBe(true);
-    await user.type(screen.getByLabelText('长期指令'), '简短回复');
+    await typeInto(user, screen.getByLabelText('长期指令'), '简短回复');
     await user.click(screen.getByRole('button', { name: '保存设置' }));
     await waitFor(() => expect(update).toHaveBeenCalledTimes(1));
     expect(update.mock.calls[0]![2]).toMatchObject({ inheritParticipation: true, instructions: '简短回复' });
@@ -185,7 +191,7 @@ describe('协作设置保存与版本冲突', () => {
     const input = await screen.findByLabelText('长期指令');
     await waitFor(() => expect((input as HTMLTextAreaElement).value).toBe('群A长期指令'));
     await user.clear(input);
-    await user.type(input, '只观察，不主动发言');
+    await typeInto(user, input, '只观察，不主动发言');
 
     await user.click(screen.getByRole('button', { name: '保存设置' }));
 
@@ -272,9 +278,9 @@ describe('群分工：接话人与场景包', () => {
     await user.clear(screen.getByLabelText('来源机器人 app_id'));
     expect(screen.getByText('开启时至少填一个来源')).toBeTruthy();
     expect((screen.getByRole('button', { name: '保存分工' }) as HTMLButtonElement).disabled).toBe(true);
-    await user.type(screen.getByLabelText('来源机器人 app_id'), 'cli_alarm, cli_new');
+    await typeInto(user, screen.getByLabelText('来源机器人 app_id'), 'cli_alarm, cli_new');
     await user.clear(levels);
-    await user.type(levels, 'P0，P1');
+    await typeInto(user, levels, 'P0，P1');
     await user.click(screen.getByRole('button', { name: '保存分工' }));
     await waitFor(() => expect(update).toHaveBeenCalledOnce());
     expect(update).toHaveBeenCalledWith('cli_a', 'oc_a', { expectedRevision: 2,
@@ -330,8 +336,8 @@ describe('群分工：接话人与场景包', () => {
     renderPanel();
     const topics = await screen.findByLabelText('问题关键字');
     await user.clear(topics);
-    await user.type(topics, ' on call 交接 ，release train, 部署');
-    await user.type(screen.getByLabelText('runbook 文件'), 'runbooks/On Call.md, runbooks/deploy.md');
+    await typeInto(user, topics, ' on call 交接 ，release train, 部署');
+    await typeInto(user, screen.getByLabelText('runbook 文件'), 'runbooks/On Call.md, runbooks/deploy.md');
     await user.click(screen.getByRole('button', { name: '保存分工' }));
     await waitFor(() => expect(update).toHaveBeenCalledOnce());
     expect(update).toHaveBeenCalledWith('cli_a', 'oc_a', { expectedRevision: 2, scenarios: { 'team-faq': { enabled: false, params: {
@@ -348,7 +354,7 @@ describe('群分工：接话人与场景包', () => {
     renderPanel();
     const perHour = await screen.findByLabelText('每小时最多初筛（1–30）');
     await user.clear(perHour);
-    await user.type(perHour, '5');
+    await typeInto(user, perHour, '5');
     await user.click(screen.getByRole('button', { name: '保存分工' }));
     await waitFor(() => expect(update).toHaveBeenCalledOnce());
     expect(update).toHaveBeenCalledWith('cli_a', 'oc_a', { expectedRevision: 2, scenarios: { alarm: { enabled: true, params: { maxPerHour: 5 } } } });
@@ -372,7 +378,7 @@ describe('群分工：接话人与场景包', () => {
     const checkbox = screen.getByRole('checkbox', { name: /告警初筛/ }) as HTMLInputElement;
     expect(checkbox.disabled).toBe(false);
     await user.click(checkbox);
-    await user.type(screen.getByLabelText('级别关键字'), ', LEVEL_TOO_LONG_FOR_THE_PACK_LIMIT');
+    await typeInto(user, screen.getByLabelText('级别关键字'), ', LEVEL_TOO_LONG_FOR_THE_PACK_LIMIT');
     await user.click(screen.getByRole('button', { name: '保存分工' }));
     expect(await screen.findByText(invalid)).toBeTruthy();
     expect(update).toHaveBeenLastCalledWith('cli_a', 'oc_a', { expectedRevision: 2, scenarios: { alarm: { enabled: false, params: { levels: ['P0', 'LEVEL_TOO_LONG_FOR_THE_PACK_LIMIT'] } } } });
@@ -412,8 +418,8 @@ describe('事项 (Followup) 新建、重试与进展编辑', () => {
     await user.click(await screen.findByRole('tab', { name: /待办事项/ }));
     await user.click(screen.getByRole('button', { name: '新建事项' }));
 
-    await user.type(screen.getByLabelText(/目标/), '整理接口协议');
-    await user.type(screen.getByLabelText(/初始进展/), '已阅读文档');
+    await typeInto(user, screen.getByLabelText(/目标/), '整理接口协议');
+    await typeInto(user, screen.getByLabelText(/初始进展/), '已阅读文档');
 
     // 添加一个步骤
     const stepInput = screen.getByPlaceholderText('输入步骤后回车或点添加');
@@ -478,7 +484,7 @@ describe('事项 (Followup) 新建、重试与进展编辑', () => {
     expect((textarea as HTMLTextAreaElement).value).toBe('旧进展 50%');
 
     await user.clear(textarea);
-    await user.type(textarea, '最新进展 80%');
+    await typeInto(user, textarea, '最新进展 80%');
     await user.click(screen.getByRole('button', { name: '保存进展' }));
 
     await waitFor(() =>
@@ -559,11 +565,11 @@ describe('委托任务操作 payload、重试、调频改期与时间补秒', ()
     await user.click(await screen.findByRole('tab', { name: /委托任务/ }));
     await user.click(screen.getByRole('button', { name: '新建委托' }));
 
-    await user.type(screen.getByLabelText(/委托目标/), '每周汇总风险');
+    await typeInto(user, screen.getByLabelText(/委托目标/), '每周汇总风险');
     await user.clear(screen.getByLabelText(/执行提示词/));
-    await user.type(screen.getByLabelText(/执行提示词/), '汇总本周高风险变更');
+    await typeInto(user, screen.getByLabelText(/执行提示词/), '汇总本周高风险变更');
     await user.clear(screen.getByLabelText(/间隔（分钟/));
-    await user.type(screen.getByLabelText(/间隔（分钟/), '30');
+    await typeInto(user, screen.getByLabelText(/间隔（分钟/), '30');
 
     // 第一次提交失败
     await user.click(screen.getByRole('button', { name: '创建委托' }));
@@ -651,7 +657,7 @@ describe('委托任务操作 payload、重试、调频改期与时间补秒', ()
     // 切换到单次触发时间 (at)，输入无秒的时间
     await user.selectOptions(screen.getByLabelText('触发方式'), 'at');
     const timeInput = screen.getByLabelText('触发时间');
-    await user.type(timeInput, '2026-09-20T14:30');
+    await typeInto(user, timeInput, '2026-09-20T14:30');
 
     await user.click(screen.getByRole('button', { name: '保存计划更新' }));
 
@@ -692,14 +698,14 @@ describe('委托任务操作 payload、重试、调频改期与时间补秒', ()
 
     const minInput = await screen.findByLabelText(/间隔（分钟/);
     await user.clear(minInput);
-    await user.type(minInput, '0');
+    await typeInto(user, minInput, '0');
 
     await user.click(screen.getByRole('button', { name: '保存计划更新' }));
     expect(await screen.findByText('执行间隔必须至少为 1 分钟')).toBeTruthy();
 
     // 调整为合法值后错误恢复
     await user.clear(minInput);
-    await user.type(minInput, '15');
+    await typeInto(user, minInput, '15');
     expect(screen.queryByText('执行间隔必须至少为 1 分钟')).toBeNull();
   });
 });
@@ -857,7 +863,7 @@ describe('决策回放与人工纠正', () => {
     await user.click(await screen.findByRole('tab', { name: '决策看板 (1)' }));
     await user.click(screen.getByRole('button', { name: '人工纠正' }));
 
-    await user.type(screen.getByLabelText(/纠正说明/), '这里不该回复');
+    await typeInto(user, screen.getByLabelText(/纠正说明/), '这里不该回复');
     await user.selectOptions(screen.getByLabelText('期望动作'), 'silent');
     await user.click(screen.getByRole('button', { name: '提交纠正' }));
 
@@ -895,7 +901,7 @@ describe('并发防护与 deferred 提交不可变快照重试', () => {
     await user.click(screen.getByRole('button', { name: '新建事项' }));
 
     const goalInput = screen.getByLabelText(/目标/);
-    await user.type(goalInput, '不可变目标A');
+    await typeInto(user, goalInput, '不可变目标A');
 
     // 点击提交发起 deferred 请求
     await user.click(screen.getByRole('button', { name: '创建事项' }));
@@ -966,8 +972,8 @@ describe('并发防护与 deferred 提交不可变快照重试', () => {
     await user.click(await screen.findByRole('tab', { name: /委托任务/ }));
     await user.click(screen.getByRole('button', { name: '新建委托' }));
 
-    await user.type(screen.getByLabelText(/委托目标/), '不可变巡检目标');
-    await user.type(screen.getByLabelText(/执行提示词/), '提示词不可变');
+    await typeInto(user, screen.getByLabelText(/委托目标/), '不可变巡检目标');
+    await typeInto(user, screen.getByLabelText(/执行提示词/), '提示词不可变');
 
     await user.click(screen.getByRole('button', { name: '创建委托' }));
     await waitFor(() => expect(createMandate).toHaveBeenCalledTimes(1));
@@ -1067,7 +1073,7 @@ describe('编辑草稿版本与改期请求快照', () => {
     const client = renderEditor(); await user.click(await screen.findByRole('tab', { name: /待办事项/ }));
     await user.click(screen.getByRole('button', { name: '编辑进展' }));
     const input = screen.getByPlaceholderText('填写事项最新进展情况…');
-    await user.clear(input); await user.type(input, '我的草稿');
+    await user.clear(input); await typeInto(user, input, '我的草稿');
     getOverview.mockResolvedValue(makeOverview(makeSettings(), { followups: [{ ...followup, revision: 3, progress: '其他人的新进展' }] }));
     await refresh(client);
     expect(await screen.findByText('rev 3')).toBeTruthy(); expect(screen.getByText('基于 rev 2')).toBeTruthy();
@@ -1092,7 +1098,7 @@ describe('编辑草稿版本与改期请求快照', () => {
     const client = renderEditor(); await user.click(await screen.findByRole('tab', { name: /委托任务/ }));
     await user.click(screen.getByRole('button', { name: /改期\/调频/ }));
     const minutes = screen.getByLabelText(/间隔（分钟/);
-    await user.clear(minutes); await user.type(minutes, '30');
+    await user.clear(minutes); await typeInto(user, minutes, '30');
     getOverview.mockResolvedValue(makeOverview(makeSettings(), { mandates: [{ ...mandate, revision: 5, schedule: { ...mandate.schedule!, trigger: { kind: 'cron', expression: '0 12 * * *' } } }] }));
     await refresh(client);
     await screen.findByText('rev 5');
@@ -1122,12 +1128,12 @@ describe('编辑草稿版本与改期请求快照', () => {
     await user.click(screen.getByRole('button', { name: /改期\/调频/ }));
     await user.selectOptions(screen.getByLabelText('触发方式'), 'interval');
     const minutes = screen.getByLabelText(/间隔（分钟/), timezone = screen.getByLabelText('时区');
-    await user.clear(minutes); await user.type(minutes, '30');
+    await user.clear(minutes); await typeInto(user, minutes, '30');
     await user.click(screen.getByRole('button', { name: '保存计划更新' }));
     await waitFor(() => expect(update).toHaveBeenCalledTimes(1));
     expect(minutes.matches(':disabled')).toBe(true); expect(timezone.matches(':disabled')).toBe(true);
     expect((screen.getByRole('button', { name: '取消' }) as HTMLButtonElement).disabled).toBe(true);
-    await user.type(minutes, '99'); await user.click(screen.getByRole('button', { name: '保存计划更新' }));
+    await typeInto(user, minutes, '99'); await user.click(screen.getByRole('button', { name: '保存计划更新' }));
     expect(update).toHaveBeenCalledTimes(1); expect((minutes as HTMLInputElement).value).toBe('30');
     await act(async () => { rejectFirst(new Error('请求结果未知')); });
     await screen.findByText('请求结果未知');

@@ -16,6 +16,7 @@ async function fixture() {
   const requests:any[]=[];
   const server=createServer(async(request,response)=>{
     const chunks:Buffer[]=[];for await(const chunk of request)chunks.push(Buffer.from(chunk));
+    if(request.method!=='POST'){response.statusCode=404;response.end();return;}
     requests.push({url:request.url,authorization:request.headers.authorization,body:JSON.parse(Buffer.concat(chunks).toString())});
     response.setHeader('content-type','application/json');response.end(JSON.stringify({session_name:'dutydeck-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',socket_path:socket,binary,workspace_id:'w1',root_pane_id:'w1:p1'}));
   });await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));
@@ -32,7 +33,8 @@ describe('real session herdr CLI boundary',()=>{
     expect(JSON.parse(result.stdout)).toEqual({args,herdr:{HERDR_SOCKET_PATH:h.socket},home:h.env.HOME,config:h.env.XDG_CONFIG_HOME});
     expect(h.requests).toEqual([{url:'/api/relay/sessions/self/herdr',authorization:'Bearer fixture-token',body:{action:'prepare'}}]);
   });
-  it.each([['workspace','list','--session','default'],['workspace','list','--machine=other'],['workspace','list','--remote','host'],['server','stop'],['session','stop','default'],['pane','split','--current'],['workspace','list','--','--session','default']])('rejects scope changes before HTTP %j',async(...args)=>{
+  // 完整的参数黑名单由 herdr.test.ts 直接测 validateHerdrArguments；这里只用真实 CLI 证明两类拒绝（越权参数、非法子命令）都在发 HTTP 前以退出码 2 结束。
+  it.each([['workspace','list','--','--session','default'],['server','stop']])('rejects scope changes before HTTP %j',async(...args)=>{
     const h=await fixture();let error:any;
     try{await h.invoke(args);}catch(caught){error=caught;}
     expect(error?.code).toBe(2);expect(h.requests).toEqual([]);

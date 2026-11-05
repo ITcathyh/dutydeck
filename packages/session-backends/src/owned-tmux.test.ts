@@ -218,21 +218,36 @@ describe('owned tmux physical exit proofs (real isolated server and process iden
     tmux('set-option', '-t', 'owned', '@dutydeck_owner_id', 'dutydeck:owned');
     return Number(tmux('display-message', '-p', '-t', 'owned', '#{pane_pid}'));
   }
+  // Only the exit-proof deadline reads Date.now; advance a virtual clock per read instead of waiting 10s.
+  function virtualClock(step: (elapsed: number) => number) {
+    const start = Date.now(); let elapsed = 0;
+    return vi.spyOn(Date, 'now').mockImplementation(() => { const now = start + elapsed; elapsed += step(elapsed); return now; });
+  }
   it('waits past the relay\'s worst-case exit before declaring the stop unproven', async () => {
     const pane = createHupIgnoring(), identity = (await captureOwnedTmuxIdentity(scope(), probe))!;
-    const exit = setTimeout(() => process.kill(pane, 'SIGKILL'), 7_000);
-    try { expect(await verifyOwnedTmuxExit(await stopOwnedTmux(identity, probe), probe)).toBe(true); }
-    finally { clearTimeout(exit); try { process.kill(pane, 'SIGKILL'); } catch { /* Exited. */ } }
+    let killed = false;
+    const clock = virtualClock(elapsed => {
+      if (!killed && elapsed >= 7_000) { killed = true; process.kill(pane, 'SIGKILL'); }
+      return killed ? 1 : 250;
+    });
+    try {
+      const proof = await stopOwnedTmux(identity, probe);
+      clock.mockRestore();
+      expect(killed).toBe(true);
+      expect(await verifyOwnedTmuxExit(proof, probe)).toBe(true);
+    } finally { clock.mockRestore(); try { process.kill(pane, 'SIGKILL'); } catch { /* Exited. */ } }
   }, 20_000);
   it('attaches a re-verifiable proof when exit stays unproven', async () => {
     const pane = createHupIgnoring(), identity = (await captureOwnedTmuxIdentity(scope(), probe))!;
+    const clock = virtualClock(() => 1_000);
     try {
       const error = await stopOwnedTmux(identity, probe).then(() => undefined, (failure: { code?: string; proof?: Parameters<typeof verifyOwnedTmuxExit>[0] }) => failure);
+      clock.mockRestore();
       expect(error?.code).toBe('LEGACY_TMUX_EXIT_UNPROVEN');
       expect(await verifyOwnedTmuxExit(error!.proof!, probe)).toBe(false);
       process.kill(pane, 'SIGKILL');
       await vi.waitFor(async () => expect(await verifyOwnedTmuxExit(error!.proof!, probe)).toBe(true));
-    } finally { try { process.kill(pane, 'SIGKILL'); } catch { /* Exited. */ } }
+    } finally { clock.mockRestore(); try { process.kill(pane, 'SIGKILL'); } catch { /* Exited. */ } }
   }, 20_000);
   it('does not accept a socket path replaced by an ordinary file', async () => {
     create(); const identity = (await captureOwnedTmuxIdentity(scope(), probe))!;

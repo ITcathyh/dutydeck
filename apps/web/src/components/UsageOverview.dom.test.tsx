@@ -31,7 +31,7 @@ describe('usage overview', () => {
   it('summarises this month and the last 7 days by bot, group, actor and source, marking estimates', async () => {
     vi.spyOn(api, 'usageSummary').mockResolvedValue(summary);
     vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [{ key: 'g1', chatId: 'oc_1', name: '研发群', bots: [{ appId: 'cli_a' }] as any }] });
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     mount();
     const byBot = await screen.findByRole('region', { name: '按机器人' });
     expect(within(byBot).getByText('值班 Bot')).toBeTruthy();
@@ -50,7 +50,7 @@ describe('usage overview', () => {
     vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
     const save = vi.spyOn(api, 'setUsageCap').mockResolvedValue({ scope: 'bot', appId: 'cli_a', monthlyCostUsd: 20, updatedAt: '2026-09-25T00:00:00Z' });
     const remove = vi.spyOn(api, 'deleteUsageCap').mockResolvedValue({ deleted: true });
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     mount();
     const caps = await screen.findByRole('region', { name: '月度成本上限' });
     const submit = within(caps).getByRole('button', { name: '保存上限' }) as HTMLButtonElement;
@@ -60,7 +60,7 @@ describe('usage overview', () => {
     expect(save).toHaveBeenCalledWith({ scope: 'bot', appId: 'cli_a', monthlyCostUsd: 20 });
     await user.click(within(caps).getByRole('button', { name: '删除' }));
     expect(remove.mock.calls[0]![0]).toMatchObject({ scope: 'group', appId: 'cli_a', chatId: 'oc_1' });
-    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(3));
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(3), { interval: 5 });
   });
 
   it('shows unknown costs separately from known zero and explains missing automatic limits', async () => {
@@ -127,7 +127,7 @@ describe('usage overview 会话分析 tab', () => {
     vi.spyOn(api, 'usageSummary').mockResolvedValue(summary);
     vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
     const insightSpy = vi.spyOn(insightApi, 'summary').mockResolvedValue(insightSummary as never);
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const { onViewChange } = mount();
     await user.click(screen.getByRole('tab', { name: '会话分析' }));
     expect(onViewChange).toHaveBeenCalledWith('insight');
@@ -156,7 +156,7 @@ describe('usage overview 会话分析 tab', () => {
       availability: 'none' as const, freshness: 'unknown' as const, models: [], metrics: null, metricAttributions: {}, isSharedSource: false
     };
     vi.spyOn(insightApi, 'summary').mockResolvedValue({ ...insightSummary, sessions: [sessionRow] } as never);
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const { onOpenSession } = mount({ bots, initialView: 'insight' });
     await screen.findByRole('region', { name: '会话列表' });
     await user.click(screen.getByRole('button', { name: 's9' }));

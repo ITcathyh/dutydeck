@@ -797,6 +797,38 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
     expect(patches()).toBe(2);
   });
 
+  it('心跳反复 notify：卡已画好且目标与待决请求都没变时跳过整轮，目标变化后重画，结束后清掉心跳记录', async () => {
+    const f = await fixture();
+    const { parentId, workId, card } = await startWaitingWork(f);
+    const patches = () => f.client.update.mock.calls.filter(([input]: any[]) => input.messageId === card.messageId).length;
+    const idle = () => vi.waitFor(() => expect((f.work as any).effects.size).toBe(0));
+    await f.work.tick();
+    await vi.waitFor(() => expect(patches()).toBe(1));
+    await idle();
+    const renders = vi.spyOn(f.workbench as any, 'cardInput');
+    for (let index = 0; index < 3; index++) { await f.work.tick(); await idle(); }
+    expect(renders).not.toHaveBeenCalled();
+    expect(patches()).toBe(1);
+    // 目标记录换了 revision（这里改标题）：下一轮心跳重新渲染并 PATCH。
+    const key = `work_item:${workId}`;
+    const stored = JSON.parse((await f.repos.config.get(key))!);
+    stored.item.revision++;
+    stored.item.title = '需补充资料（已改名）';
+    await f.repos.config.set(key, JSON.stringify(stored));
+    await f.work.tick(); await idle();
+    expect(renders).toHaveBeenCalled();
+    expect(patches()).toBe(2);
+    expect(JSON.stringify(f.client.update.mock.calls.at(-1))).toContain('需补充资料（已改名）');
+    expect((f.workbench as any).patchedContent.has(workId)).toBe(true);
+    expect((f.workbench as any).settledNotices.has(workId)).toBe(true);
+    // 目标结束：两份心跳记录都删掉，不随目标数量一直增长。
+    const current = await f.work.get(parentId, workId, 'ou_alice');
+    const cancelled = await f.work.cancel(parentId, workId, current.revision, 'ou_alice');
+    await f.workbench.notify(cancelled, 'ou_alice');
+    expect((f.workbench as any).patchedContent.has(workId)).toBe(false);
+    expect((f.workbench as any).settledNotices.has(workId)).toBe(false);
+  });
+
   it('心跳 PATCH 遇到永久不可更新错误（230031）：只试一次，之后不再 PATCH 也不发新卡', async () => {
     const f = await fixture();
     const { card } = await startWaitingWork(f);

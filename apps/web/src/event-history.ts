@@ -92,6 +92,33 @@ export function completeEventHistory(complete: DockEvent[] | undefined, live: Do
   return events;
 }
 
+/**
+ * Same result as completeEventHistory, but a live window that only grew past the merged tail
+ * appends that contiguous tail instead of rebuilding the whole history. The returned window
+ * carries previousEvents/changes so downstream projectors can stay incremental too.
+ */
+export function createCompleteHistoryProjector() {
+  let complete: DockEvent[] | undefined;
+  let live: DockEvent[] | undefined;
+  let result: EventWindow | undefined;
+  return (nextComplete: DockEvent[] | undefined, liveWindow: EventWindow | undefined): EventWindow | undefined => {
+    const nextLive = liveWindow?.events ?? [];
+    if (!nextComplete) { complete = live = result = undefined; return undefined; }
+    if (result && nextComplete === complete && nextLive === live) return result;
+    const tail = result?.events.at(-1)?.sequence ?? 0;
+    const appendOnly = result && nextComplete === complete && liveWindow?.previousEvents === live
+      && liveWindow?.changes?.length && liveWindow.changes.every(event => event.sequence > tail);
+    complete = nextComplete; live = nextLive;
+    if (!appendOnly) return result = { events: completeEventHistory(nextComplete, nextLive)! };
+    let start = nextLive.length;
+    while (start > 0 && nextLive[start - 1]!.sequence > tail) start--;
+    const appended: DockEvent[] = [];
+    for (let index = start, expected = tail + 1; index < nextLive.length && nextLive[index]!.sequence === expected; index++, expected++) appended.push(nextLive[index]!);
+    if (!appended.length) return result;
+    return result = { events: result!.events.concat(appended), previousEvents: result!.events, changes: appended };
+  };
+}
+
 export const loadTurnHistory = (sessionId: string, turn: HistoryTurnSummary, signal?: AbortSignal) =>
   loadHistoryRange(sessionId, turn.firstSequence - 1, turn.lastSequence, signal);
 

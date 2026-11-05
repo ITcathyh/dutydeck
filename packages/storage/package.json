@@ -108,7 +108,11 @@
     "src/matters.ts",
     "dist/matters.js",
     "dist/matters.js.map",
-    "dist/matters.d.ts"
+    "dist/matters.d.ts",
+    "src/foundation-errors.ts",
+    "dist/foundation-errors.js",
+    "dist/foundation-errors.js.map",
+    "dist/foundation-errors.d.ts"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",

@@ -77,7 +77,29 @@ function insideRoot(root: string, path: string): boolean {
     return !!rel && rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel) && statSync(path).isFile();
   } catch { return false; }
 }
+/**
+ * Positive matchesRollout results keyed by path. The active rollout is re-resolved every second, so a file
+ * already verified for this root/session is accepted again on a stat alone while it keeps the same dev/ino;
+ * a replaced file is verified from scratch. Negative results are not kept: an unfinished header can still
+ * complete. A strict (requireMeta) hit also satisfies the lenient check, never the reverse.
+ */
+const verifiedRollouts = new Map<string, { root: string; sid: string; requireMeta: boolean; dev: number; ino: number }>();
+const MAX_VERIFIED_ROLLOUTS = 512;
+const fileIdentity = (path: string) => { try { const st = statSync(path); return st.isFile() ? st : undefined; } catch { return undefined; } };
 function matchesRollout(root: string, path: string, sid: string, requireMeta = false): boolean {
+  const cached = verifiedRollouts.get(path), before = fileIdentity(path);
+  if (cached && cached.root === root && cached.sid === sid && (cached.requireMeta || !requireMeta)
+    && before && before.dev === cached.dev && before.ino === cached.ino) return true;
+  if (!before || !verifyRollout(root, path, sid, requireMeta)) return false;
+  const after = fileIdentity(path);
+  // Only remember the file that was actually read: a swap during verification is checked again next time.
+  if (after && after.dev === before.dev && after.ino === before.ino) {
+    if (verifiedRollouts.size >= MAX_VERIFIED_ROLLOUTS) verifiedRollouts.clear();
+    verifiedRollouts.set(path, { root, sid, requireMeta, dev: after.dev, ino: after.ino });
+  }
+  return true;
+}
+function verifyRollout(root: string, path: string, sid: string, requireMeta: boolean): boolean {
   if (!insideRoot(root, path)) return false;
   const name = basename(path), parsed = CODEX_GENERATION_RE.exec(name);
   if (parsed && parsed[1]!.toLowerCase() !== sid.toLowerCase()) return false;

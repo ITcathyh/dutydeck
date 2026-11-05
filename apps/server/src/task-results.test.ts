@@ -161,10 +161,16 @@ describe('readAttemptResult against the real execution ledger', () => {
   });
 
   it('reads all pages beyond 200 events in strict order', () => {
-    const { repos, x } = open();
+    const { repos, x, path } = open();
     const preparing = claimed(repos, x);
     const output = '字'.repeat(205);
-    textEvents(x, preparing, Array.from({ length: 205 }, () => '字'));
+    // 首条走真实 appendEvent，其余 204 条按同一序号规则（会话内 MAX+1）单事务批量写入；被测的分页读取路径不变。
+    textEvents(x, preparing, ['字']);
+    const sql = new Database(path);
+    try {
+      const insert = sql.prepare('INSERT INTO events (id,session_id,sequence,type,timestamp,data,task_id,attempt_id) SELECT ?,session_id,sequence+?,type,timestamp,data,task_id,attempt_id FROM events WHERE id=?');
+      sql.transaction(() => { for (let index = 1; index < 205; index++) insert.run(`out:${preparing.attemptId}:${index}`, index, `out:${preparing.attemptId}:0`); })();
+    } finally { sql.close(); }
     const settled = settleDriver(repos, x, preparing.taskId, utf8Digest(output));
     const read = readAttemptResult({ execution: repos.execution }, fence.sessionId, settled.taskId, settled.attemptId);
     expect(read.status).toBe('settled');

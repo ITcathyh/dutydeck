@@ -6,6 +6,12 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ApiError, scheduleApi, type ScheduleCapability, type ScheduleList } from '../api';
 import { ScheduleFoundationPanel } from './ScheduleFoundationPanel';
 
+// user.type 每个字符都会触发一次整树重渲染；这里的输入不依赖逐键行为，点击聚焦后一次粘贴写入。
+async function typeInto(user: Pick<typeof userEvent, 'click' | 'paste'>, element: Element, text: string) {
+  await user.click(element);
+  await user.paste(text);
+}
+
 const timestamp = '2026-08-30T00:00:00.000Z';
 const ready: ScheduleCapability = { schemaVersion: 1, repositoriesWired: true, permissionEvaluatorWired: true, writesEnabled: true, executorWired: false, uiEntryReady: false, readiness: 'offline_management_ready', blockers: [{ code: 'schedule_executor_unavailable', message: 'No executor', action: 'Keep disabled' }, { code: 'schedule_ui_entry_unwired', message: 'No UI entry', action: 'Single shell owner mounts it' }] };
 const list: ScheduleList = { capabilities: ready, schedules: [{
@@ -53,7 +59,7 @@ describe('ScheduleFoundationPanel offline-only journey', () => {
     await userEvent.click(await screen.findByRole('button', { name: '编辑禁用态定义' }));
     const name = screen.getByRole('textbox', { name: 'Schedule 名称' });
     await userEvent.clear(name);
-    await userEvent.type(name, 'Edited review');
+    await typeInto(userEvent, name, 'Edited review');
     await userEvent.click(screen.getByRole('button', { name: '保存 staged/disabled 定义' }));
     await waitFor(() => expect(update).toHaveBeenCalledWith('schedule-ui', { expectedRevision: 1, name: 'Edited review', timezone: 'Asia/Shanghai', dstPolicy: { gap: 'skip', overlap: 'first' }, state: 'staged' }));
   });
@@ -68,7 +74,7 @@ describe('ScheduleFoundationPanel offline-only journey', () => {
     await userEvent.click(await screen.findByRole('button', { name: '编辑禁用态定义' }));
     const name = screen.getByRole('textbox', { name: 'Schedule 名称' });
     await userEvent.clear(name);
-    await userEvent.type(name, 'My preserved draft');
+    await typeInto(userEvent, name, 'My preserved draft');
     await userEvent.click(screen.getByRole('button', { name: '保存 staged/disabled 定义' }));
     expect(await screen.findByText(/定义已被其他修改更新/)).toBeTruthy();
     expect((name as HTMLInputElement).value).toBe('My preserved draft');

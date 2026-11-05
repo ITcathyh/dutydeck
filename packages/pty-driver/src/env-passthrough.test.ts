@@ -81,7 +81,7 @@ afterEach(() => {
   for (const key of Object.keys(savedEnv)) delete savedEnv[key];
 });
 
-async function waitForAssert<T>(fn: () => T, timeoutMs = 20_000, intervalMs = 100): Promise<T> {
+async function waitForAssert<T>(fn: () => T, timeoutMs = 20_000, intervalMs = 20): Promise<T> {
   const start = Date.now();
   let lastError: unknown;
   for (;;) {
@@ -189,11 +189,15 @@ function textEvents(events: NormalizedDriverEvent[]): string[] {
  * and answers seconds later, so this reproduces the real ordering instead of
  * a race that only a zero-latency fake can hit.
  */
-async function awaitTranscriptLatched(cwd: string, env: CliPathEnv): Promise<void> {
+async function awaitTranscriptLatched(driver: PtyCliDriver, cwd: string, env: CliPathEnv): Promise<void> {
+  let file: string | undefined;
   await waitForAssert(() => {
-    expect(resolveClaudeTranscriptPath(cwd, env), 'CLI never created its transcript').toBeDefined();
+    file = resolveClaudeTranscriptPath(cwd, env);
+    expect(file, 'CLI never created its transcript').toBeDefined();
   });
-  await new Promise(resolve => setTimeout(resolve, 800));   // > 2 poll intervals
+  // The driver's tailer has latched once its cursor names that file.
+  const tailer = () => (driver as unknown as { transcript?: { checkpoint(): { path?: string } } }).transcript;
+  await waitForAssert(() => expect(tailer()?.checkpoint().path).toBe(file));
 }
 
 // ─── cli-paths: the helpers themselves ─────────────────────────────────────
@@ -289,7 +293,7 @@ describe('PtyCliDriver transcript tailer uses the spawned child env', () => {
     });
 
     await driver.start();
-    await awaitTranscriptLatched(cwd, { HOME: childHome });
+    await awaitTranscriptLatched(driver, cwd, { HOME: childHome });
     await driver.send('probe');
     await waitForAssert(() => {
       expect(textEvents(events)).toContain('ANSWER_FROM_TRANSCRIPT');
@@ -326,7 +330,7 @@ describe('PtyCliDriver transcript tailer uses the spawned child env', () => {
     });
 
     await driver.start();
-    await awaitTranscriptLatched(cwd, { CLAUDE_CONFIG_DIR: childDir });
+    await awaitTranscriptLatched(driver, cwd, { CLAUDE_CONFIG_DIR: childDir });
     await driver.send('probe');
     await waitForAssert(() => {
       expect(textEvents(events)).toContain('ANSWER_FROM_TRANSCRIPT');

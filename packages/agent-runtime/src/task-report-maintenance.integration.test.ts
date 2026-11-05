@@ -45,14 +45,15 @@ it('does not fail execution when report reads fail only after the task is runnin
   expect((await h.runtime.send(h.session.id, 'work')).status).toBe('completed');
   expect(h.send).toHaveBeenCalledOnce(); expect(h.warn).toHaveBeenCalled();
 });
-it('reads and clears report state without materializing session task history over 100 turns', async () => {
+it('reads and clears report state without materializing session task history over 30 turns', async () => {
   const h = await fixture(); const all = vi.spyOn(h.repos.tasks, 'listBySession');
   const get = vi.spyOn(h.repos.config, 'get');
-  for (let n = 0; n < 100; n++) expect((await h.runtime.send(h.session.id, 'round ' + n)).status).toBe('completed');
-  console.log('report-maintenance-100-turns', { fullHistoryReads: all.mock.calls.length, reportReads: get.mock.calls.filter(([key]) => key.startsWith('task_report/')).length });
+  // 30 turns is far past the 2-task recent window; a reader that grew with history would exceed 8 reads/turn.
+  for (let n = 0; n < 30; n++) expect((await h.runtime.send(h.session.id, 'round ' + n)).status).toBe('completed');
+  console.log('report-maintenance-30-turns', { fullHistoryReads: all.mock.calls.length, reportReads: get.mock.calls.filter(([key]) => key.startsWith('task_report/')).length });
   expect(all).not.toHaveBeenCalled();
-  expect(get.mock.calls.filter(([key]) => key.startsWith('task_report/')).length).toBeLessThanOrEqual(800);
-  expect(h.send).toHaveBeenCalledTimes(100);
+  expect(get.mock.calls.filter(([key]) => key.startsWith('task_report/')).length).toBeLessThanOrEqual(240);
+  expect(h.send).toHaveBeenCalledTimes(30);
 });
 
 

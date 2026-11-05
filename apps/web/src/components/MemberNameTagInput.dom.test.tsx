@@ -14,28 +14,28 @@ const setup = (value: string[] = []) => {
 
 describe('MemberNameTagInput 提交分隔符', () => {
   it('Enter 提交当前草稿', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const { onChange, input } = setup();
     await user.type(input, '张三{Enter}');
     expect(onChange).toHaveBeenCalledWith(['张三']);
   });
 
   it('英文逗号提交', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const { onChange, input } = setup();
     await user.type(input, '张三,');
     expect(onChange).toHaveBeenCalledWith(['张三']);
   });
 
   it('中文逗号提交（中文输入法下最常见的分隔键）', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const { onChange, input } = setup();
     await user.type(input, '张三，');
     expect(onChange).toHaveBeenCalledWith(['张三']);
   });
 
   it('失焦时提交未回车的草稿，避免用户输入被静默丢弃', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const { onChange, input } = setup();
     await user.type(input, '李四');
     await user.tab();
@@ -43,14 +43,14 @@ describe('MemberNameTagInput 提交分隔符', () => {
   });
 
   it('提交后清空输入框', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const { input } = setup();
     await user.type(input, '张三{Enter}');
     expect((input as HTMLInputElement).value).toBe('');
   });
 
   it('空白草稿不产生回调（不会加入空标签）', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const { onChange, input } = setup();
     await user.type(input, '   {Enter}');
     expect(onChange).not.toHaveBeenCalled();
@@ -59,21 +59,21 @@ describe('MemberNameTagInput 提交分隔符', () => {
 
 describe('MemberNameTagInput 去重与追加', () => {
   it('追加到已有列表尾部', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const { onChange, input } = setup(['张三']);
     await user.type(input, '李四{Enter}');
     expect(onChange).toHaveBeenCalledWith(['张三', '李四']);
   });
 
   it('重复姓名不会加两遍', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const { onChange, input } = setup(['张三']);
     await user.type(input, '张三{Enter}');
     expect(onChange).toHaveBeenCalledWith(['张三']);
   });
 
   it('一次输入多个（逗号分隔）拆成多个标签并去重', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const { onChange, input } = setup();
     // 逐字符输入时逗号会即时提交，这里用 paste 模拟一次性粘贴多值
     await user.click(input);
@@ -82,7 +82,7 @@ describe('MemberNameTagInput 去重与追加', () => {
   });
 
   it('粘贴多行文本拆成多个标签', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const { onChange, input } = setup();
     await user.click(input);
     await user.paste('张三\n李四\n王五');
@@ -90,7 +90,7 @@ describe('MemberNameTagInput 去重与追加', () => {
   });
 
   it('粘贴不含分隔符的单值不立即提交，留给用户继续编辑', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const { onChange, input } = setup();
     await user.click(input);
     await user.paste('张三');
@@ -107,14 +107,14 @@ describe('MemberNameTagInput 删除', () => {
   });
 
   it('点击移除按钮删掉对应标签，保留其余', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const { onChange } = setup(['张三', '李四']);
     await user.click(screen.getByRole('button', { name: '移除 张三' }));
     expect(onChange).toHaveBeenCalledWith(['李四']);
   });
 
   it('草稿为空时 Backspace 删除最后一个标签', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const { onChange, input } = setup(['张三', '李四']);
     await user.click(input);
     await user.keyboard('{Backspace}');
@@ -122,7 +122,7 @@ describe('MemberNameTagInput 删除', () => {
   });
 
   it('草稿非空时 Backspace 只删字符，不误删标签', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const { onChange, input } = setup(['张三']);
     await user.type(input, '李');
     await user.keyboard('{Backspace}');
@@ -131,7 +131,7 @@ describe('MemberNameTagInput 删除', () => {
   });
 
   it('无标签时 Backspace 不回调', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const { onChange, input } = setup();
     await user.click(input);
     await user.keyboard('{Backspace}');

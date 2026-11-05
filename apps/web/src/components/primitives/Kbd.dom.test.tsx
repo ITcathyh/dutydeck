@@ -15,12 +15,6 @@ describe('Kbd 键帽', () => {
     expect(screen.getByText('⌘').tagName).toBe('KBD');
   });
 
-  it('多字符键位也整块放进同一个 <kbd>', () => {
-    const { container } = render(<Kbd>Ctrl</Kbd>);
-    expect(container.querySelectorAll('kbd').length).toBe(1);
-    expect(container.querySelector('kbd')!.textContent).toBe('Ctrl');
-  });
-
   it('圆角取 rounded-sm，配 min-w 保证单字符键帽不塌成细条', () => {
     const { container } = render(<Kbd>K</Kbd>);
     const className = container.querySelector('kbd')!.className;

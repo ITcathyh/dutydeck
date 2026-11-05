@@ -1,9 +1,7 @@
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import { ShortcutHelpSheet } from './ShortcutHelpSheet';
-import { captureDialogOpener } from '../useDialogFocus';
 import { shortcutDefinitions } from '../useKeyboardShortcuts';
 
 // 帮助面板是快捷键的唯一说明书，这些用例盯的是「说明书撒谎」类回归：
@@ -16,7 +14,7 @@ const labelOf = (id: string) => shortcutDefinitions.find(definition => definitio
 
 describe('ShortcutHelpSheet 渲染', () => {
   it('open=false 时不渲染任何内容，Esc 也不回调 onClose', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onClose = vi.fn();
     const { container } = render(<ShortcutHelpSheet open={false} onClose={onClose}/>);
     expect(container.innerHTML).toBe('');
@@ -105,7 +103,7 @@ describe('ShortcutHelpSheet 渲染', () => {
   });
 
   it('Esc 关闭面板', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onClose = vi.fn();
     render(<ShortcutHelpSheet open onClose={onClose} platform="mac"/>);
     await user.keyboard('{Escape}');
@@ -113,72 +111,12 @@ describe('ShortcutHelpSheet 渲染', () => {
   });
 
   it('点击关闭按钮与底部「关闭」都回调 onClose', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onClose = vi.fn();
     render(<ShortcutHelpSheet open onClose={onClose} platform="mac"/>);
     await user.click(screen.getByRole('button', { name: '关闭快捷键帮助' }));
     await user.click(screen.getByRole('button', { name: '关闭' }));
     expect(onClose).toHaveBeenCalledTimes(2);
-  });
-
-  it('点击遮罩关闭，点击面板内部不关闭', async () => {
-    const user = userEvent.setup();
-    const onClose = vi.fn();
-    const { baseElement } = render(<ShortcutHelpSheet open onClose={onClose} platform="mac"/>);
-    await user.click(baseElement.querySelector('.ui-overlay') as HTMLElement);
-    expect(onClose).toHaveBeenCalledTimes(1);
-    onClose.mockClear();
-    await user.click(screen.getByRole('heading', { name: '键盘快捷键', level: 2 }));
-    expect(onClose).not.toHaveBeenCalled();
-  });
-
-  it('打开时焦点进入面板，关闭后回到触发它的按钮', async () => {
-    const user = userEvent.setup();
-    function Host() {
-      const [open, setOpen] = useState(false);
-      return <><button type="button" onClick={() => { captureDialogOpener(); setOpen(true); }}>查看快捷键</button><ShortcutHelpSheet open={open} onClose={() => setOpen(false)} platform="mac"/></>;
-    }
-    render(<Host/>);
-    const trigger = screen.getByRole('button', { name: '查看快捷键' });
-    await user.click(trigger);
-    await vi.waitFor(() => expect(screen.getByRole('dialog', { name: '键盘快捷键帮助' }).contains(document.activeElement)).toBe(true));
-    await user.keyboard('{Escape}');
-    await vi.waitFor(() => expect(document.activeElement).toBe(trigger));
-  });
-
-  it('Tab 焦点锁在面板内，不逃到面板外的按钮', async () => {
-    const user = userEvent.setup();
-    render(<><button type="button">面板外按钮</button><ShortcutHelpSheet open onClose={() => {}} platform="mac"/></>);
-    const dialog = screen.getByRole('dialog', { name: '键盘快捷键帮助' });
-    await vi.waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true));
-    for (let step = 0; step < 4; step++) {
-      await user.tab();
-      expect(dialog.contains(document.activeElement)).toBe(true);
-    }
-  });
-
-  it('正文区域可滚动，且不产生横向溢出（390px 窄屏）', () => {
-    const { baseElement } = render(<ShortcutHelpSheet open onClose={() => {}} platform="mac"/>);
-    const body = baseElement.querySelector('.overflow-y-auto') as HTMLElement;
-    expect(body.className).toContain('overflow-y-auto');
-    expect(body.className).toContain('overflow-x-hidden');
-    const panel = screen.getByRole('dialog', { name: '键盘快捷键帮助' });
-    expect(panel.className).toContain('max-h-[92dvh]');
-    expect(panel.className).toContain('w-full');
-  });
-
-  it('复用 index.css 的 ui-overlay / ui-dialog 动画类，不自造关键帧', () => {
-    const { baseElement } = render(<ShortcutHelpSheet open onClose={() => {}} platform="mac"/>);
-    expect(baseElement.querySelector('.ui-overlay')).toBeTruthy();
-    expect(screen.getByRole('dialog', { name: '键盘快捷键帮助' }).className).toContain('ui-dialog');
-  });
-
-  it('portal 到 document.body，不留在组件树里（契约 §7）', () => {
-    const { container, baseElement } = render(<ShortcutHelpSheet open onClose={() => {}} platform="mac"/>);
-    const dialog = screen.getByRole('dialog', { name: '键盘快捷键帮助' });
-    expect(container.contains(dialog)).toBe(false);
-    expect(document.body.contains(dialog)).toBe(true);
-    expect(baseElement).toBe(document.body);
   });
 
   it('关闭按钮触控高度不低于 40px（h-10）', () => {

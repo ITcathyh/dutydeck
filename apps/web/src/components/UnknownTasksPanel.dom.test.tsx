@@ -41,7 +41,7 @@ describe('result-unknown tasks in the task detail', () => {
   it('retries only after the duplicate-effects warning is confirmed', async () => {
     mount([task('reconcile_required')]);
     const resolve = vi.spyOn(api, 'resolveUnknownTask').mockResolvedValue({ replayed: false, status: 'queued', decisionId: 'manual:attempt_1:retry:web:installation_owner' });
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     await user.click(await screen.findByRole('button', { name: '重新执行' }));
     const dialog = await screen.findByRole('alertdialog', { name: '确认重新执行？' });
     expect(dialog.textContent).toContain('可能被重复执行');
@@ -60,7 +60,7 @@ describe('result-unknown tasks in the task detail', () => {
   it('marks completed or failed in one click without the duplicate-effects acknowledgement', async () => {
     const { list } = mount([task('reconcile_required')]);
     const resolve = vi.spyOn(api, 'resolveUnknownTask').mockResolvedValue({ replayed: false, status: 'failed', decisionId: 'manual:attempt_1:failed:web:installation_owner' });
-    await userEvent.setup().click(await screen.findByRole('button', { name: '标为失败' }));
+    await userEvent.setup({ delay: null }).click(await screen.findByRole('button', { name: '标为失败' }));
     expect(resolve).toHaveBeenCalledExactlyOnceWith('s1', 'task_1', { target: 'attempt_1', action: 'failed' });
     await waitFor(() => expect(list).toHaveBeenCalledTimes(2));
     expect(toastStore.getSnapshot().find(toast => toast.key === 'unknown-task-task_1')).toMatchObject({ kind: 'success', title: '已标为失败' });
@@ -69,7 +69,7 @@ describe('result-unknown tasks in the task detail', () => {
   it('says who already handled it when someone else got there first', async () => {
     mount([task('reconcile_required')]);
     vi.spyOn(api, 'resolveUnknownTask').mockRejectedValue(new ApiError('这一轮已经处理过：飞书用户 ou_alice 于 2026/10/13 08:01:00（北京时间） 已标为失败。', 'UNKNOWN_TASK_ALREADY_RESOLVED', 409));
-    await userEvent.setup().click(await screen.findByRole('button', { name: '标为已完成' }));
+    await userEvent.setup({ delay: null }).click(await screen.findByRole('button', { name: '标为已完成' }));
     await waitFor(() => expect(toastStore.getSnapshot().find(toast => toast.key === 'unknown-task-task_1')).toMatchObject({ kind: 'error', description: expect.stringContaining('飞书用户 ou_alice') }));
   });
 
@@ -93,7 +93,7 @@ describe('targeted automation recovery', () => {
     expect(panel.id).toBe('unknown-task-task_1');
     expect(screen.queryByRole('region', { name: '结果未知：other unknown' })).toBeNull();
     expect(resolve).not.toHaveBeenCalled();
-    await userEvent.click(screen.getByRole('button', { name: '标为已完成' }));
+    await userEvent.setup({ delay: null }).click(screen.getByRole('button', { name: '标为已完成' }));
     await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ['automation-run'] }));
     for (const key of ['automation', 'automation-schedules', 'automation-history', 'tasks']) expect(invalidate).toHaveBeenCalledWith({ queryKey: [key] });
   });
