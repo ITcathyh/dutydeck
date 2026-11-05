@@ -318,7 +318,8 @@ describe('飞书命令在 coordinator 重建后的会话定位', () => {
       get: vi.fn(async (id: string) => id === 'pr_1' ? { id: 'pr_1', sessionId: 'ses_pr', actorId: 'ou_alice' } : undefined),
       confirm: vi.fn(async () => ({ message: '已确认，正在推送分支并开 PR，完成后会通知。' })),
       cancel: vi.fn(async () => ({ status: 'cancelled' })),
-      answer: vi.fn(async () => '已记下：按评论修改。')
+      answer: vi.fn(async () => '已记下：按评论修改。'),
+      forcePush: vi.fn(async () => '已确认，仍然推送这一轮的改动，推送前的其余核对照做，完成后会通知。')
     };
     const coordinator = new LarkMessageCoordinator(runtime as any, cardService() as any, silentLog(), Math.random, 'ou_bot', undefined, undefined, undefined, undefined, undefined, { store: repos.config, automation: { pullRequests } as any });
     try {
@@ -332,10 +333,17 @@ describe('飞书命令在 coordinator 重建后的会话定位', () => {
       expect(await coordinator.handleAction({ dutydeck_pr: 'pr_1', op: 'cancel' }, 'ou_alice', context)).toEqual({ type: 'success', content: '已取消，没有推送任何内容。' });
       expect(await coordinator.handleAction({ dutydeck_pr: 'pr_1', op: 'answer', comment: 'issue:2', choice: 'apply' }, 'ou_alice', context)).toEqual({ type: 'success', content: '已记下：按评论修改。' });
       expect(pullRequests.answer).toHaveBeenCalledWith('pr_1', { commentId: 'issue:2', choice: 'apply', cardMessageId: 'om_pr_card' });
+      // 推送前验证没过的卡上「仍然推送」：同一道权限门，带上卡片消息 ID 核对是不是最新那张。
+      expect(await coordinator.handleAction({ dutydeck_pr: 'pr_1', op: 'force_push' }, 'ou_alice', { ...context, chatId: 'oc_other' })).toMatchObject({ type: 'warning' });
+      expect(await coordinator.handleAction({ dutydeck_pr: 'pr_1', op: 'force_push' }, 'ou_alice', context))
+        .toEqual({ type: 'success', content: '已确认，仍然推送这一轮的改动，推送前的其余核对照做，完成后会通知。' });
+      expect(pullRequests.forcePush).toHaveBeenCalledWith('pr_1', { messageId: 'om_pr_card' });
       // 白名单之外的成员点确认被拒绝。
       await repos.config.set(larkBotsConfigKey, JSON.stringify([{ ...config, allowedUsers: [{ openId: 'ou_carol', name: 'Carol' }] }]));
       expect(await coordinator.handleAction({ dutydeck_pr: 'pr_1', op: 'confirm' }, 'ou_bob', context)).toEqual({ type: 'warning', content: '当前账号没有操作此任务的权限。' });
       expect(pullRequests.confirm).toHaveBeenCalledOnce();
+      expect(await coordinator.handleAction({ dutydeck_pr: 'pr_1', op: 'force_push' }, 'ou_bob', context)).toEqual({ type: 'warning', content: '当前账号没有操作此任务的权限。' });
+      expect(pullRequests.forcePush).toHaveBeenCalledOnce();
     } finally { coordinator.stop(); repos.close(); }
   });
 

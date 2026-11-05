@@ -12,7 +12,11 @@ export type PullRequestStatus =
   | 'stopped'
   | 'cancelled' | 'expired'
   /** 推送或开 PR 失败。 */
-  | 'failed';
+  | 'failed'
+  /** 自动修复这一轮改完了，推送前正在工作区跑机器人的验证命令；只出现在对外展示里。 */
+  | 'verifying'
+  /** 推送前验证没有通过：没推送、没提交，改动留在工作区，等人选「仍然推送」或「停止跟进」；只出现在对外展示里。 */
+  | 'needs_attention';
 
 export interface PullRequestFile {
   path: string;

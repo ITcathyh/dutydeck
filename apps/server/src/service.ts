@@ -33,13 +33,13 @@ import { LeaderDelegationService } from './leader-delegation.js';
 import { renderMemoryIndex } from './lark/memory-view.js';
 import type { CollaborationExtensions } from './collaboration-extensions.js';
 import { LarkGroupManager } from './lark/group-management.js';
-import { backfillBotPromptVersions, larkMemoryEnabled, readLarkConfigs } from './lark/config.js';
+import { backfillBotPromptVersions, larkMemoryEnabled, readLarkConfig, readLarkConfigs } from './lark/config.js';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import { loadConfigWithDiagnostics, resolveDatabaseUrl, type AppConfig } from '@dutydeck/config';
 import { logDroppedAgents } from './agent-config-log.js';
 import { assertBotProcessStartup, childProcessIdentity, createRepositories, observeProcess } from '@dutydeck/storage';
 import { createPtyRetirementControl } from './pty-recovery.js';
-import { COLLABORATION_LIST_LIMIT, installationOwnerTaskActor, makeId, RuntimeError, timeLoop, workPlanConfirmationRequired, type DriverFactory, type PolicyAction, type PolicyDecision, type Session } from '@dutydeck/shared';
+import { COLLABORATION_LIST_LIMIT, installationOwnerTaskActor, makeId, parseLarkSourceId, RuntimeError, timeLoop, workPlanConfirmationRequired, type DriverFactory, type PolicyAction, type PolicyDecision, type Session } from '@dutydeck/shared';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { larkResourceRoot, pruneLarkResourceDirectories, readLarkResourceReferences } from './resource-retention.js';
@@ -613,6 +613,12 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     }
     : automationIntegration.notify;
   const pullRequests = new PullRequestService({ repositories: repos, runtime, providers: ciProviders, prepareDelivery: automationIntegration.prepareDelivery, notify: notifyCi,
+    // 修复轮推送前的验证命令取会话所属机器人的 verificationCommand；非飞书会话、没配的机器人照旧直接推送。
+    verificationCommand: async sessionId => {
+      const session = await runtime.getSession(sessionId);
+      const { appId } = parseLarkSourceId(session?.source === 'lark' ? session.sourceId : undefined);
+      return appId ? (await readLarkConfig(repos.config, appId))?.verificationCommand?.trim() || undefined : undefined;
+    },
     log: { warn: (...args: unknown[]) => app?.log.warn(...args as [unknown, string]) } });
   const ciWebhook = ciProviders.list().some(({ provider }) => provider.webhook) ? new CiWebhookService({ repositories: repos, runtime, providers: ciProviders, onEvent: (providerId, event) => pullRequests.onWebhookEvent(providerId, event),
     prepareDelivery: automationIntegration.prepareDelivery, notify: notifyCi, log: { warn: (...args: unknown[]) => app?.log.warn(...args as [unknown, string]) } }) : undefined;

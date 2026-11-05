@@ -5,7 +5,7 @@ import { api, type Session } from '../api';
 import { Banner, Button, Dialog, Field, Input } from './primitives';
 import { isSessionActionDisabled } from './ui';
 
-const statusLabels: Record<PullRequestStatus, string> = { proposed: '等待确认', pushing: '推送中', open: '跟进中', merged: '已合并', closed: '已关闭', stopped: '已停止跟进', cancelled: '已取消', expired: '确认已过期', failed: '失败' };
+const statusLabels: Record<PullRequestStatus, string> = { proposed: '等待确认', pushing: '推送中', open: '跟进中', merged: '已合并', closed: '已关闭', stopped: '已停止跟进', cancelled: '已取消', expired: '确认已过期', failed: '失败', verifying: '推送前验证中', needs_attention: '验证未通过，等人处理' };
 const excludedReasons = { not_session: '不是本会话改的', changed_after: '本会话改过，之后又被改动，无法确认' } as const;
 
 /** 把本会话的改动推到 dutydeck/ 新分支并开 PR：先出确认框，确认后才推送。 */
@@ -46,11 +46,11 @@ export function PullRequestPanel({ session }: { session: Session }) {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <strong>{statusLabels[item.status]} · {item.claimed ? '已有 PR · ' : ''}{item.title}</strong>
         {!readOnly && item.status === 'proposed' && <Button onClick={() => setProposal(item)}>查看并确认</Button>}
-        {!readOnly && item.status === 'open' && <Button disabled={cancel.isPending} onClick={() => cancel.mutate(item.id)}>停止跟进</Button>}
+        {!readOnly && (item.status === 'open' || item.status === 'verifying' || item.status === 'needs_attention') && <Button disabled={cancel.isPending} onClick={() => cancel.mutate(item.id)}>停止跟进</Button>}
       </div>
       <p className="mt-1 break-all text-secondary">{item.providerName} · {item.repository} · {item.branch} → {item.target}{item.pullRequest && <> · <a className="text-link" href={item.pullRequest.url} target="_blank" rel="noreferrer">{item.pullRequest.label}</a></>}</p>
       {(item.ciRounds > 0 || item.reviewRounds > 0) && <p className="text-subtle">已自动修 CI {item.ciRounds} 轮、处理评审意见 {item.reviewRounds} 轮</p>}
-      {item.reason && <p className={item.status === 'failed' || item.status === 'stopped' ? 'text-warning' : 'text-subtle'}>{item.reason}</p>}
+      {item.reason && <p className={item.status === 'failed' || item.status === 'stopped' || item.status === 'needs_attention' ? 'text-warning' : 'text-subtle'}>{item.reason}</p>}
     </div>)}
     {proposal && <Dialog open onClose={() => { if (!confirm.isPending && !cancel.isPending) cancel.mutate(proposal.id); }} label="确认推送并开 PR" size="md" role="alertdialog" closeOnEscape={!confirm.isPending && !cancel.isPending} closeOnScrim={!confirm.isPending && !cancel.isPending}>
       <Dialog.Header><h2 className="text-title font-semibold">确认推送并开 PR</h2></Dialog.Header>

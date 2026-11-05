@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import type { CiPipelineStatus, CiProvider, CiReviewComment, Session, TaskRecord, VerificationResponse } from '@dutydeck/shared';
+import { RuntimeError } from '@dutydeck/shared';
 import { createRepositories, executionTaskId } from '@dutydeck/storage';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import { CiProviderRegistry } from './ci-providers.js';
@@ -41,7 +42,7 @@ let cleanupTemplate: (() => Promise<void>) | undefined;
 afterAll(async () => { await cleanupTemplate?.(); });
 
 /** 本地裸仓库当 origin；工作区是它的克隆，origin/HEAD 指向 main。 */
-async function fixture(options: { withoutPullRequests?: boolean; log?: { warn: (...args: any[]) => void } } = {}) {
+async function fixture(options: { withoutPullRequests?: boolean; log?: { warn: (...args: any[]) => void }; verificationCommand?: string } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'dutydeck-pr-'));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
   const remote = join(root, 'remote.git');
@@ -65,7 +66,9 @@ async function fixture(options: { withoutPullRequests?: boolean; log?: { warn: (
       }
       return { id, status: tasks.get(id)!.status };
     }),
-    getVerifications: vi.fn(async () => state.verifications)
+    getVerifications: vi.fn(async () => state.verifications),
+    /** 推送前验证：默认通过；用例改 state.verify 控制结果。 */
+    runVerification: vi.fn(async (sessionId: string, input: { command: string }, actorId?: string) => state.verify(sessionId, input.command, actorId))
   };
   const state = {
     pipeline: { state: 'pending', runs: [] } as CiPipelineStatus,
@@ -77,7 +80,8 @@ async function fixture(options: { withoutPullRequests?: boolean; log?: { warn: (
     /** 会话的验证记录，按开始时间倒序（和 runtime.getVerifications 一致）。 */
     verifications: [] as VerificationResponse[],
     posted: [] as string[],
-    created: [] as unknown[]
+    created: [] as unknown[],
+    verify: async (sessionId: string, command: string, _actorId?: string): Promise<VerificationResponse> => verificationRecord(sessionId, command, 'passed')
   };
   const provider: CiProvider = {
     id: 'fake', displayName: 'Fake Git', changeRequestLabel: number => `PR #${number}`,
@@ -101,13 +105,20 @@ async function fixture(options: { withoutPullRequests?: boolean; log?: { warn: (
   cleanups.push(async () => database.close());
   const notices: CiNotice[] = [];
   const outputs = new Map<string, string>();
-  const service = new PullRequestService({
-    repositories: { config: database.config, tasks: { get: async (id: string) => tasks.get(id), save: async () => {}, listBySession: async () => [] }, execution: {} as any },
-    runtime, providers, readTaskOutput: (_sessionId, taskId) => outputs.get(taskId),
-    notify: async (_sessionId, _id, notice) => { notices.push(notice); return `om_${notices.length}`; },
-    clock: () => new Date(now.value), log: options.log
-  });
-  cleanups.push(() => service.close());
+  const createService = () => {
+    const created = new PullRequestService({
+      repositories: { config: database.config, tasks: { get: async (id: string) => tasks.get(id), save: async () => {}, listBySession: async () => [] }, execution: {} as any },
+      runtime, providers, readTaskOutput: (_sessionId, taskId) => outputs.get(taskId),
+      notify: async (_sessionId, _id, notice) => { notices.push(notice); return `om_${notices.length}`; },
+      ...(options.verificationCommand ? { verificationCommand: async () => options.verificationCommand } : {}),
+      clock: () => new Date(now.value), log: options.log
+    });
+    cleanups.push(() => created.close());
+    return created;
+  };
+  let service = createService();
+  /** 模拟服务重启：内存里的进行中状态全丢，存储不变。 */
+  const restart = async () => { await service.close(); service = createService(); };
   const observer = createTurnDiffObserver(database.config, { now: () => new Date(now.value) });
   /** 模拟 Agent 的一轮：前后各拍一次快照，中间改文件。 */
   const turn = async (taskId: string, edit: () => Promise<void>) => {
@@ -152,7 +163,12 @@ async function fixture(options: { withoutPullRequests?: boolean; log?: { warn: (
     state.prInfo = { headSha: head, headBranch: 'feature/login', baseBranch: 'main', headRepository: 'group/repo', title: 'Login fix', url: 'https://git.example.com/group/repo/pull/12' };
     return head;
   };
-  return { config: database.config, root, remote, cwd, git, remoteGit, now, session, tasks, dispatches, state, provider, service, notices, turn, finishLatest, poll, write, checkout, remoteBranches, open, external };
+  return { config: database.config, root, remote, cwd, git, remoteGit, now, session, tasks, dispatches, state, provider, runtime, get service() { return service; }, restart, notices, turn, finishLatest, poll, write, checkout, remoteBranches, open, external };
+}
+
+function verificationRecord(sessionId: string, command: string, status: VerificationResponse['status'], extra: Partial<VerificationResponse> = {}): VerificationResponse {
+  return { schemaVersion: 1, revision: 1, id: `ver_${Math.random().toString(36).slice(2)}`, sessionId, command, cwd: '/work', status, startedAt: '2026-10-13T08:00:00.000Z',
+    completedAt: '2026-10-13T08:01:00.000Z', output: '', outputTruncated: false, stale: false, ...(status === 'passed' ? { exitCode: 0 } : {}), ...extra };
 }
 
 describe('PR background tick failures', () => {
@@ -1039,5 +1055,172 @@ describe('认领已有的 PR（/pr follow）', () => {
     expect(() => assertClaimedPushTarget('release', 'dev', 'release')).toThrow(/拒绝推送/);
     expect(() => assertClaimedPushTarget('a..b', 'main')).toThrow(/拒绝推送/);
     expect(() => assertClaimedPushTarget('-x', 'main')).toThrow(/拒绝推送/);
+  });
+});
+
+describe('PR 跟进：修复轮推送前验证', () => {
+  const failed = (sha: string): CiPipelineStatus => ({ state: 'failed', runs: [{ id: 11, name: 'test', attempt: 1, headSha: sha, status: 'completed', result: 'failed', url: 'https://ci.example.com/11' }] });
+  /** 开出 PR，CI 失败，Agent 改完 app.ts；返回开出时的记录。 */
+  const fixRound = async (f: Awaited<ReturnType<typeof fixture>>) => {
+    const pr = await f.open();
+    f.state.pipeline = failed(pr.headSha!);
+    await f.poll();
+    await f.finishLatest(() => f.write('app.ts', 'export const a = 11;\n'), '修好了');
+    return pr;
+  };
+  const deferred = <T,>() => { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve }; };
+  const settleAgain = async (f: Awaited<ReturnType<typeof fixture>>) => { await f.service.idle(); await f.service.tick(); await f.service.idle(); };
+
+  it('机器人没配验证命令：不跑验证，照旧直接推送，通知写明未配置验证', async () => {
+    const f = await fixture();
+    const pr = await fixRound(f);
+    const after = (await f.service.get(pr.id))!;
+    expect(after).toMatchObject({ status: 'open', ciRounds: 1 });
+    expect(after.headSha).not.toBe(pr.headSha);
+    expect(await f.remoteGit('rev-parse', pr.branch)).toBe(after.headSha);
+    expect(f.runtime.runVerification).not.toHaveBeenCalled();
+    expect(f.notices.at(-1)!.markdown).toContain('未配置验证命令，推送前没有验证。');
+  });
+
+  it('验证在后台跑，期间展示为验证中、不推送；通过后才推送，通知写明验证针对工作区而不是推送的提交', async () => {
+    const f = await fixture({ verificationCommand: 'pnpm test' });
+    const gate = deferred<VerificationResponse>();
+    f.state.verify = () => gate.promise;
+    const pr = await f.open();
+    f.state.pipeline = failed(pr.headSha!);
+    await f.poll();
+    const task = f.tasks.get(f.dispatches.at(-1)!.id)!;
+    await f.turn(task.id, () => f.write('app.ts', 'export const a = 11;\n'));
+    task.status = 'completed';
+    await f.service.tick();
+    expect(f.runtime.runVerification).toHaveBeenCalledWith('ses_pr', { command: 'pnpm test' }, 'ou_owner');
+    expect((await f.service.listBySession('ses_pr'))[0]).toMatchObject({ status: 'verifying' });
+    // 验证跑着时轮询不重复起验证，也不推送。
+    await f.service.tick();
+    expect(f.runtime.runVerification).toHaveBeenCalledOnce();
+    expect(await f.remoteGit('rev-parse', pr.branch)).toBe(pr.headSha);
+    // 旧版本读得懂 PR 记录：状态仍是旧的取值，没有新字段。
+    expect(JSON.parse((await f.config.get(`pull_request/record/${pr.id}`))!)).toMatchObject({ status: 'open', task: { id: task.id } });
+
+    gate.resolve(verificationRecord('ses_pr', 'pnpm test', 'passed'));
+    await settleAgain(f);
+    const after = (await f.service.get(pr.id))!;
+    expect(after).toMatchObject({ status: 'open', ciRounds: 1 });
+    expect(after.task).toBeUndefined();
+    expect(await f.remoteGit('rev-parse', pr.branch)).toBe(after.headSha);
+    expect(await f.remoteGit('show', `${after.headSha}:app.ts`)).toBe('export const a = 11;');
+    expect(f.notices.at(-1)!.markdown).toMatch(/验证命令 `pnpm test`，通过。验证针对的是推送时的工作区，不是推送的这个提交/);
+    expect(f.runtime.runVerification).toHaveBeenCalledOnce();
+  });
+
+  it('验证失败：不推送、不提交、不计轮次、不重试；等人处理，卡片写命令、退出码和 4 KB 内脱敏输出，带仍然推送和停止跟进', async () => {
+    const f = await fixture({ verificationCommand: 'pnpm test' });
+    const output = `${'x'.repeat(10_000)}\nAuthorization: Bearer ghp_abcdefghijklmnopqrstuvwxyz0123456789\nFAIL app.test.ts`;
+    f.state.verify = async (sessionId, command) => verificationRecord(sessionId, command, 'failed', { exitCode: 1, output });
+    const pr = await fixRound(f);
+    const headBefore = await f.git('rev-parse', 'HEAD');
+    await settleAgain(f);
+    const after = (await f.service.get(pr.id))!;
+    expect(after).toMatchObject({ status: 'stopped', ciRounds: 1, headSha: pr.headSha, reason: expect.stringContaining('推送前验证没有通过') });
+    expect(after.task).toBeDefined();
+    expect((await f.service.listBySession('ses_pr'))[0]).toMatchObject({ status: 'needs_attention' });
+    expect(await f.remoteGit('rev-parse', pr.branch)).toBe(pr.headSha);
+    expect(await f.git('rev-parse', 'HEAD')).toBe(headBefore);
+    expect(await readFile(join(f.cwd, 'app.ts'), 'utf8')).toBe('export const a = 11;\n');
+    const card = f.notices.at(-1)!;
+    expect(card.title).toContain('推送前验证没通过');
+    expect(card.markdown).toContain('`pnpm test`');
+    expect(card.markdown).toContain('退出码 1');
+    expect(card.markdown).toContain('FAIL app.test.ts');
+    expect(card.markdown).not.toContain('ghp_abcdefghijklmnopqrstuvwxyz0123456789');
+    const block = /```\n([\s\S]*)\n```/.exec(card.markdown)![1]!;
+    expect(Buffer.byteLength(block)).toBeLessThanOrEqual(4_096);
+    expect(card.actions).toEqual([
+      { label: '仍然推送', value: { dutydeck_pr: pr.id, op: 'force_push' } },
+      { label: '停止跟进', value: { dutydeck_pr: pr.id, op: 'stop' }, type: 'default' }
+    ]);
+    // 不自动重试、不开新一轮修复。
+    await f.poll();
+    expect(f.runtime.runVerification).toHaveBeenCalledOnce();
+    expect(f.dispatches).toHaveLength(1);
+
+    // 只认最新那张失败卡；仍然推送后照常推送这一轮的改动，重复点只推一次。
+    const cardId = `om_${f.notices.length}`;
+    await expect(f.service.forcePush(pr.id, { messageId: 'om_other' })).rejects.toThrow('卡片已失效');
+    expect(await f.service.forcePush(pr.id, { messageId: cardId })).toContain('仍然推送');
+    await settleAgain(f);
+    expect(await f.service.forcePush(pr.id, { messageId: cardId })).toContain('已经处理过了');
+    const pushed = (await f.service.get(pr.id))!;
+    expect(pushed).toMatchObject({ status: 'open', ciRounds: 1 });
+    expect(pushed.task).toBeUndefined();
+    expect(await f.remoteGit('rev-parse', pr.branch)).toBe(pushed.headSha);
+    expect(pushed.headSha).not.toBe(pr.headSha);
+    expect(f.notices.at(-1)!.markdown).toContain('推送前验证没有通过，已按人工确认仍然推送');
+    expect(f.runtime.runVerification).toHaveBeenCalledOnce();
+  });
+
+  it('验证失败后选停止跟进：不推送，改动留在工作区，之后不再跟进', async () => {
+    const f = await fixture({ verificationCommand: 'pnpm test' });
+    f.state.verify = async (sessionId, command) => verificationRecord(sessionId, command, 'timed_out');
+    const pr = await fixRound(f);
+    await settleAgain(f);
+    expect((await f.service.listBySession('ses_pr'))[0]).toMatchObject({ status: 'needs_attention', reason: expect.stringContaining('超时') });
+    const stopped = await f.service.cancel('ses_pr', pr.id);
+    expect(stopped).toMatchObject({ status: 'stopped', reason: expect.stringContaining('手动停止') });
+    expect(await f.service.forcePush(pr.id)).toContain('已经处理过了');
+    await f.poll();
+    expect(await f.remoteGit('rev-parse', pr.branch)).toBe(pr.headSha);
+    expect(await readFile(join(f.cwd, 'app.ts'), 'utf8')).toBe('export const a = 11;\n');
+    expect(f.dispatches).toHaveLength(1);
+  });
+
+  it('会话忙（SESSION_BUSY）不算失败：不推送，下次轮询再验证，通过后推送', async () => {
+    const f = await fixture({ verificationCommand: 'pnpm test' });
+    let calls = 0;
+    f.state.verify = async (sessionId, command) => {
+      calls += 1;
+      if (calls === 1) throw new RuntimeError('SESSION_BUSY', 'Wait for Agent execution and its queue to finish before verification', 409);
+      return verificationRecord(sessionId, command, 'passed');
+    };
+    const pr = await fixRound(f);
+    expect(calls).toBe(1);
+    expect(await f.service.get(pr.id)).toMatchObject({ status: 'open', headSha: pr.headSha });
+    expect((await f.service.listBySession('ses_pr'))[0]).toMatchObject({ status: 'verifying' });
+    expect(await f.remoteGit('rev-parse', pr.branch)).toBe(pr.headSha);
+    await settleAgain(f);
+    await settleAgain(f);
+    expect(calls).toBe(2);
+    const after = (await f.service.get(pr.id))!;
+    expect(after.headSha).not.toBe(pr.headSha);
+    expect(await f.remoteGit('rev-parse', pr.branch)).toBe(after.headSha);
+  });
+
+  it('重启时验证中按被中断处理：重新验证，不直接推送', async () => {
+    const f = await fixture({ verificationCommand: 'pnpm test' });
+    const first = deferred<VerificationResponse>();
+    const second = deferred<VerificationResponse>();
+    const runs = [first, second];
+    f.state.verify = () => runs.shift()!.promise;
+    const pr = await f.open();
+    f.state.pipeline = failed(pr.headSha!);
+    await f.poll();
+    const task = f.tasks.get(f.dispatches.at(-1)!.id)!;
+    await f.turn(task.id, () => f.write('app.ts', 'export const a = 11;\n'));
+    task.status = 'completed';
+    await f.service.tick();
+    expect(f.runtime.runVerification).toHaveBeenCalledOnce();
+
+    await f.restart();
+    await f.service.tick();
+    expect(f.runtime.runVerification).toHaveBeenCalledTimes(2);
+    expect(await f.remoteGit('rev-parse', pr.branch)).toBe(pr.headSha);
+    // 重启前那次验证被运行时记为被中断，晚到也不影响新的这次。
+    first.resolve(verificationRecord('ses_pr', 'pnpm test', 'interrupted'));
+    second.resolve(verificationRecord('ses_pr', 'pnpm test', 'passed'));
+    await settleAgain(f);
+    const after = (await f.service.get(pr.id))!;
+    expect(after.headSha).not.toBe(pr.headSha);
+    expect(await f.remoteGit('rev-parse', pr.branch)).toBe(after.headSha);
+    expect(f.runtime.runVerification).toHaveBeenCalledTimes(2);
   });
 });
