@@ -326,6 +326,20 @@ function createUnboundSecretCommand(db: Database.Database): ConfigurationCommand
   };
 }
 
+function secretRefMetadata(row: SecretRefRow): SecretRefMetadata {
+  return {
+    schemaVersion: 1,
+    id: row.id,
+    revision: row.revision,
+    kind: row.kind as SecretRefKind,
+    provider: row.provider,
+    referenceKey: row.reference_key,
+    status: row.status as 'configured' | 'invalid',
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
 // ----------------------------------------------------------------------------
 // 4. rotateUnboundSecret
 // ----------------------------------------------------------------------------
@@ -367,17 +381,7 @@ function rotateUnboundSecretCommand(db: Database.Database): ConfigurationCommand
         existingSec.provider === input.prepared.provider &&
         existingSec.reference_key === input.prepared.referenceKey
       ) {
-        return {
-          schemaVersion: 1,
-          id: existingSec.id,
-          revision: existingSec.revision,
-          kind: existingSec.kind as SecretRefKind,
-          provider: existingSec.provider,
-          referenceKey: existingSec.reference_key,
-          status: existingSec.status as 'configured' | 'invalid',
-          createdAt: existingSec.created_at,
-          updatedAt: existingSec.updated_at
-        };
+        return secretRefMetadata(existingSec);
       }
 
       // Real rotation (or recovery from invalid): retain kind, bump revision
@@ -389,14 +393,11 @@ function rotateUnboundSecretCommand(db: Database.Database): ConfigurationCommand
       `).run(nextRev, input.prepared.provider, input.prepared.referenceKey, context.now, input.prepared.secretId);
 
       return {
-        schemaVersion: 1,
-        id: existingSec.id,
+        ...secretRefMetadata(existingSec),
         revision: nextRev,
-        kind: existingSec.kind as SecretRefKind,
         provider: input.prepared.provider,
         referenceKey: input.prepared.referenceKey,
         status: 'configured',
-        createdAt: existingSec.created_at,
         updatedAt: context.now
       };
     }
@@ -437,17 +438,7 @@ function removeUnboundSecretCommand(db: Database.Database): ConfigurationCommand
 
       db.prepare('DELETE FROM secret_refs WHERE id = ?').run(input.secretId);
 
-      return {
-        schemaVersion: 1,
-        id: existingSec.id,
-        revision: existingSec.revision,
-        kind: existingSec.kind as SecretRefKind,
-        provider: existingSec.provider,
-        referenceKey: existingSec.reference_key,
-        status: existingSec.status as 'configured' | 'invalid',
-        createdAt: existingSec.created_at,
-        updatedAt: existingSec.updated_at
-      };
+      return secretRefMetadata(existingSec);
     }
   };
 }

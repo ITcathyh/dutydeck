@@ -12,6 +12,7 @@ import {
   type ExecutionActor,
   type PolicyDecision,
   type RepositoryBundle,
+  isTerminalTaskStatus,
   parseLarkSourceId,
   readTaskReport,
   type AcceptedTask,
@@ -119,7 +120,6 @@ const DEFAULT_POLL_MS = 60_000;
 const runStatuses = new Set(['queued', 'running', 'completed']);
 /** 未决/阻塞来源持续挡下一次触发；其余 runStatus 为终态。 */
 const openRunStatuses = new Set(['pending', 'accepted', 'blocked']);
-const settledTaskStatuses = new Set(['completed', 'failed', 'interrupted', 'cancelled']);
 /** CI 定义本身没有代际字段；binding 中的 generation 仅用于严格记录结构，取固定值。 */
 const CI_BINDING_GENERATION = 1;
 
@@ -882,7 +882,7 @@ export class SessionAutomationService {
         && (session.source === 'schedule' ? (item.executionSessionId ?? item.sessionId) !== session.id : Boolean(item.executionSessionId) && item.executionSessionId !== session.id))
       .sort((a, b) => b.scheduledForUtc.localeCompare(a.scheduledForUtc) || b.updatedAt.localeCompare(a.updatedAt));
     if (!latest) return undefined;
-    const settled = (await this.options.repositories.tasks.listBySession(session.id)).filter(task => settledTaskStatuses.has(task.status));
+    const settled = (await this.options.repositories.tasks.listBySession(session.id)).filter(task => isTerminalTaskStatus(task.status));
     if (session.source === 'schedule' ? settled.length : settled.some(task => task.createdAt > latest.updatedAt)) return undefined;
     const schedule = await this.getRecord(scheduleKey(latest.scheduleId), readStoredSessionSchedule);
     const when = new Date(latest.scheduledForUtc).toLocaleString('zh-CN', { timeZone: schedule?.value.timezone, hour12: false });
@@ -1605,7 +1605,7 @@ export class SessionAutomationService {
       .filter(item => item.source === 'schedule' && item.sourceId === schedule.id && !item.archivedAt && item.id !== keep);
     for (const session of sessions) {
       const tasks = await this.options.repositories.tasks.listBySession(session.id);
-      if (tasks.some(task => !settledTaskStatuses.has(task.status) || this.execution.getTaskExecution(task.id)?.attempts.some(attempt => attempt.state !== 'settled'))) continue;
+      if (tasks.some(task => !isTerminalTaskStatus(task.status) || this.execution.getTaskExecution(task.id)?.attempts.some(attempt => attempt.state !== 'settled'))) continue;
       this.subscriptions.get(session.id)?.();
       this.subscriptions.delete(session.id);
       try { await this.options.runtime.archive(session.id); }

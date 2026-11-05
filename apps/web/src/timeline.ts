@@ -1,4 +1,4 @@
-import { appendEventContent } from '@dutydeck/shared';
+import { appendEventContent, isTerminalTaskStatus } from '@dutydeck/shared';
 import type { DockEvent, Task } from './api';
 
 export type TimelineEvent = DockEvent & { data: DockEvent['data'] & { role?: 'user' | 'assistant' } };
@@ -129,7 +129,6 @@ function appendTimeline(timeline: TimelineEvent[], source: DockEvent[], toolInde
   }
 }
 
-const terminalTaskStatuses = new Set(['completed', 'failed', 'interrupted', 'cancelled']);
 const assistantDescription = (event: TimelineEvent) => event.type === 'text' && event.data.role !== 'user';
 const stripPreviewLinks = (text: string) => text.replace(/\[([^\]]+)]\([^)]+\)/g, '$1');
 const stripPreviewMarkup = (text: string) => stripPreviewLinks(text).replace(/<[^>]+>/g, '');
@@ -188,7 +187,7 @@ export function buildTimelineSections(timeline: TimelineEvent[], tasks: Task[] =
     const userMessage = turn.find(event => event.type === 'text' && event.data.role === 'user');
     // 插话并入了正在执行的那一轮，这一段的状态跟着那一轮走。
     const task = tasksById.get(userMessage?.data.steering?.target?.taskId ?? userMessage?.data.taskId ?? turn.find(event => event.taskId || event.data.taskId)?.taskId ?? turn.find(event => event.data.taskId)?.data.taskId);
-    const terminal = task ? terminalTaskStatuses.has(task.status) : turnIndex < turns.length - 1 || !latestTurn;
+    const terminal = task ? isTerminalTaskStatus(task.status) : turnIndex < turns.length - 1 || !latestTurn;
     const lastActivityIndex = turn.reduce((latest, event, index) => isActivity(event) && !isChildDiagnostic(event.data) ? index : latest, -1);
     const lastAssistantTextIndex = turn.reduce((latest, event, index) => event.type === 'text' && event.data.role !== 'user' ? index : latest, -1);
     const finalIndex = terminal && lastAssistantTextIndex > lastActivityIndex ? lastAssistantTextIndex : -1;

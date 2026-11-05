@@ -1,4 +1,4 @@
-import { clearTaskReportSafely } from '@dutydeck/shared';
+import { clearTaskReportSafely, isTerminalTaskStatus } from '@dutydeck/shared';
 import { annotateDisposition, type Disposition } from './disposition.js';
 import { larkMessageAnchor } from './message-anchor.js';
 import { runAgentScheduleRequest } from '../agent-schedule-request.js';
@@ -2559,7 +2559,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
             // Stop at the next user task as well as the terminal event: an
             // incomplete old turn must not export a later user's records.
             const end = events.findIndex((item, index) => index > start && (item.type === 'text' && (item.data as any)?.role === 'user'
-              || item.type === 'task' && (item.data as any)?.task?.id === task.id && ['completed', 'failed', 'cancelled', 'interrupted'].includes((item.data as any)?.task?.status)));
+              || item.type === 'task' && (item.data as any)?.task?.id === task.id && isTerminalTaskStatus((item.data as any)?.task?.status)));
             const text = renderLarkRecordExport(events.slice(start + 1, end < 0 ? undefined : end));
             const current = await readLarkConfig(this.workflowOptions.store, config.appId);
             if (!current?.listening || !await this.currentAccess(current, saved.chat_id, saved.chat_type ?? 'group', operatorOpenId, 'task.view_result', mapping.sessionId, saved.sender_open_id)) return;

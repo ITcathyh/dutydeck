@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3';
-import { extractEventArtifactReferences, type HistoryOutline, type HistoryTurnSummary } from '@dutydeck/shared';
+import { extractEventArtifactReferences, isTerminalTaskStatus, type HistoryOutline, type HistoryTurnSummary } from '@dutydeck/shared';
 
 export const HISTORY_PROMPT_LIMIT = 1024;
 export const HISTORY_OUTPUT_LIMIT = 4096;
@@ -97,7 +97,7 @@ function projectHistoryOutline(sqlite: Database.Database, sessionId: string): Hi
     if (unprompted.first !== null && range.last >= unprompted.first) break;
     // Once an unresolved turn starts, keep its whole suffix canonical. A later
     // user prompt cannot turn an unknown execution into a completed one.
-    const terminal = ['completed', 'failed', 'cancelled', 'interrupted'].includes(range.status ?? '');
+    const terminal = isTerminalTaskStatus(range.status);
     if (!terminal && !(range.status == null && range.ended)) break;
     const prompt = text.get(sessionId, range.first, range.last, 'user', HISTORY_PROMPT_LIMIT, HISTORY_PROMPT_LIMIT, sessionId, HISTORY_PROMPT_LIMIT + 1) as { text: string; truncated: number };
     const after = (lastActivity.get(range.first - 1, sessionId, range.first, range.last) as { sequence: number }).sequence;

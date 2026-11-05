@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { AGENT_IDLE_TIMEOUT, AGENT_LOGIN_REQUIRED, unknownTaskActionLabels, unknownTaskRetryWarning, type AgentEvent, type ConfigRepository, type UnknownTaskFacts } from '@dutydeck/shared';
+import { AGENT_IDLE_TIMEOUT, AGENT_LOGIN_REQUIRED, isTerminalTaskStatus, unknownTaskActionLabels, unknownTaskRetryWarning, type AgentEvent, type ConfigRepository, type UnknownTaskFacts } from '@dutydeck/shared';
 import { unknownTaskFactLines } from '../task-resolution.js';
 import { withExplicitFinalLock } from './explicit-final.js';
 import { sendLarkResult, type DeliveryTarget } from './result-delivery.js';
@@ -85,7 +85,7 @@ export async function describeLarkTaskRecovery(runtime: LarkRuntime, sessionId: 
   const recovery = await runtime.getTaskRecovery?.(sessionId, taskId);
   status = recovery?.status ?? status;
   // 已开始或结束的任务不再用排队门禁解释；底层资源仍由 runtime 负责核对。
-  if (status === 'running' || ['completed', 'failed', 'interrupted', 'cancelled'].includes(status)) {
+  if (status === 'running' || isTerminalTaskStatus(status)) {
     const label = status === 'running' ? '执行中' : status === 'completed' ? '本轮已结束' : status === 'failed' ? '执行失败' : status === 'cancelled' ? '已取消' : '已中断';
     const detail = status === 'running' ? '之前的恢复等待已结束，任务已开始执行。'
       : status === 'completed' ? '本轮执行已结束，具体结果以本轮结果消息或 Web 执行记录为准。'

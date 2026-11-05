@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
-  RuntimeError, wrapUntrusted,
+  isTerminalTaskStatus, RuntimeError, wrapUntrusted,
   type CiFailureLog, type CiProvider, type CiReviewComment, type PublicPullRequest, type PullRequestAvailability,
   type PullRequestStatus, type RepositoryBundle, type Session, type TaskRecord
 } from '@dutydeck/shared';
@@ -35,7 +35,6 @@ export const pullRequestLimits = {
   reviewRounds: 5, commentsPerRound: 10
 } as const;
 
-const terminalTaskStatuses = new Set(['completed', 'failed', 'interrupted', 'cancelled']);
 const taskStatusLabels: Record<string, string> = { completed: '已完成', failed: '执行失败', interrupted: '被中断', cancelled: '被取消' };
 const sha = z.string().regex(/^[0-9a-f]{40,64}$/);
 const timestamp = z.string().datetime({ offset: true });
@@ -535,7 +534,7 @@ export class PullRequestService {
       if (this.clock().getTime() - Date.parse(value.updatedAt) >= REDISPATCH_AFTER_MS) await this.dispatch(value);
       return;
     }
-    if (terminalTaskStatuses.has(task.status)) await this.settle(stored, task);
+    if (isTerminalTaskStatus(task.status)) await this.settle(stored, task);
   }
 
   /** 看一次 PR：状态、CI、评审意见。同一时间只跑一个跟进任务。 */

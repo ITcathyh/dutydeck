@@ -1,4 +1,5 @@
 import { assertBotProcessApp } from './bot-process.js';
+import { isThenable, naturalKeyConflict, notFound, revisionConflict } from './foundation-errors.js';
 import type Database from 'better-sqlite3';
 import { createHash } from 'node:crypto';
 import {
@@ -94,24 +95,8 @@ function entityHash(entity: SecretRefMetadata | ChannelBotFoundation): string {
   return createHash('sha256').update(JSON.stringify(entity)).digest('hex');
 }
 
-function notFound(entityKind: FoundationEntityKind, entityId: string): RuntimeError {
-  return new RuntimeError('FOUNDATION_NOT_FOUND', `${entityKind} ${entityId} was not found`, 404);
-}
-
-function revisionConflict(entityKind: FoundationEntityKind, entityId: string, expectedRevision: number): RuntimeError {
-  return new RuntimeError('FOUNDATION_REVISION_CONFLICT', `${entityKind} ${entityId} is no longer at revision ${expectedRevision}`, 409);
-}
-
-function naturalKeyConflict(entityKind: FoundationEntityKind, identity: string): RuntimeError {
-  return new RuntimeError('FOUNDATION_NATURAL_KEY_CONFLICT', `${entityKind} already exists for ${identity}`, 409);
-}
-
 function rollbackConflict(entityKind: FoundationEntityKind, entityId: string): RuntimeError {
   return new RuntimeError('FOUNDATION_ROLLBACK_CONFLICT', `${entityKind} ${entityId} changed after the rollback point`, 409);
-}
-
-function isThenable(value: unknown): value is PromiseLike<unknown> {
-  return typeof value === 'object' && value !== null && 'then' in value && typeof (value as { then?: unknown }).then === 'function';
 }
 
 export interface FoundationRepositories {
