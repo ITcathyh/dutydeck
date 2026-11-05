@@ -7,7 +7,7 @@ import { lstat, mkdir, mkdtemp, realpath, rename, rm, writeFile } from 'node:fs/
 import { basename, extname, join, resolve } from 'node:path';
 import { supportsRemoteApproval, type ChannelMappingRepository, type Session } from '@dutydeck/shared';
 import { LEGACY_RETIREMENT_NOTICE } from '@dutydeck/storage';
-import { larkHookStatus } from './security-hooks.js';
+import { larkHookStatus, upgradeInstalledLarkHook } from './security-hooks.js';
 import type { LarkLaunchOptions } from './new-session.js';
 import { larkExecutionConfirmed, larkPermissionMode, type StoredLarkConfig } from './config.js';
 import { parseLarkMessageContent, type LarkMessageResource } from './message-content.js';
@@ -525,6 +525,8 @@ export async function resolveLarkSession(
     if (larkPermissionMode(config) !== 'full-trust' && configuredAgent?.protocol === 'pty-cli'
       && !supportsRemoteApproval({ id: configuredAgent.id, adapterId: configuredAgent.adapterId, protocol: 'pty-cli' })) throw larkApprovalUnsupported(executionConfig);
     if (config.riskControlMode === 'enforced') {
+      // 升级前装的旧版 Hook 在这里换成当前版本；升级失败不挡路，由下面的就绪检查给出原因。
+      await upgradeInstalledLarkHook(agentId, launchOptions?.cwd ?? config.workspace, configuredAgent).catch(error => log.warn({ error, agentId }, '升级工作区已安装的拦截 Hook 失败'));
       const hook = await larkHookStatus(agentId, launchOptions?.cwd ?? config.workspace, configuredAgent);
       if (!hook.supported || !hook.installed || !hook.writable || hook.nativeReady === false) throw new LarkServiceError('RISK_CONTROL_HOOK_NOT_READY', hook.reason ?? `Agent ${agentId} 尚未配置可写 Hook。`, 409);
     }

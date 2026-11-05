@@ -10,7 +10,7 @@ import { WATCH_PREFIX } from '../watch.js';
  *   · 每个 fail / warn 必须带 remedy，有可执行动作时必须带 command。
  *   · 任何字段都不得包含机密（app secret、access token）。
  */
-import { larkBotsConfigKey, larkExecutionConfirmed, larkMemoryEnabled, publicLarkConfigs, type StoredLarkConfig } from '../lark/config.js';
+import { larkBotEntryError, larkBotsConfigKey, larkExecutionConfirmed, larkMemoryEnabled, publicLarkConfigs, type StoredLarkConfig } from '../lark/config.js';
 import { AUTH_TOKEN_CONFIG_KEY } from '../auth/auth.js';
 import { larkMemoryErrorLabel } from '../lark/memory.js';
 import { larkMemoryPipelineRules } from '../lark/memory-pipeline.js';
@@ -429,8 +429,22 @@ export function checkLark(observation: LarkObservation, listenerDisabled: boolea
     };
   }
 
-  const entries = parsed as Array<Partial<StoredLarkConfig>>;
+  // 解析失败的条目：配置读取时原样保留、不加载，这里单独报出来，其余机器人照常检查。
+  const broken = (parsed as unknown[]).filter(entry => larkBotEntryError(entry) !== undefined);
+  const entries = (parsed as unknown[]).filter(entry => !broken.includes(entry)) as Array<Partial<StoredLarkConfig>>;
   const checks: DoctorCheck[] = [];
+  if (broken.length > 0) {
+    const ids = broken.map(entry => entry && typeof entry === 'object' ? (entry as { appId?: unknown }).appId : undefined).filter(id => typeof id === 'string').join('、');
+    checks.push({
+      id: 'lark.config-invalid',
+      label: '飞书配置',
+      level: 'fail',
+      detail: `${broken.length} 个机器人配置无法解析，已原样保留但不会加载${ids ? `：${ids}` : ''}（${larkBotEntryError(broken[0])}）`,
+      remedy: '其他机器人不受影响。用配置向导重新保存这个机器人（同一个 App ID）会替换掉坏条目。',
+      command: `dutydeck setup --lark-app-id ${ids.split('、')[0] || '<应用ID>'}`,
+      verify: 'dutydeck doctor --json'
+    });
+  }
 
   // 缺 appId / appSecret 的条目：normalizeStoredConfig 会静默丢弃它们，
   // 用户看到的就是「配了但没生效」，必须显式报出来。
