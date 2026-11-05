@@ -1801,7 +1801,7 @@ describe('审批卡的 @、处理结果与「本会话允许此命令」', () =>
         const { runtime, resolvePermission } = liveRuntime(permissions);
         const { service, reply } = makeService();
         const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, onlyAlice);
-        const options = { highRiskPattern: defaultHighRiskPattern, onSessionAllowed: vi.fn() };
+        const options = { highRiskPattern: defaultHighRiskPattern, onAutoApproved: vi.fn() };
         await workflow.observe(group(), agentEvent('permission_request', permissions[0]), options);
         const first = (await workflow.list('app_one'))[0]!;
         await workflow.respond(responseInput(first, { action: 'allow_session', actorId: 'ou_alice' }));
@@ -1810,7 +1810,7 @@ describe('审批卡的 @、处理结果与「本会话允许此命令」', () =>
         permissions.push(command('perm_same', 'pnpm test'));
         await workflow.observe(group({ messageId: 'om_same' }), agentEvent('permission_request', permissions[0]), options);
         expect(resolvePermission).toHaveBeenLastCalledWith('ses_one', 'perm_same', true);
-        expect(options.onSessionAllowed).toHaveBeenCalledExactlyOnceWith('perm_same');
+        expect(options.onAutoApproved).toHaveBeenCalledExactlyOnceWith('perm_same', { by: 'session_allow' });
         expect(reply).toHaveBeenCalledOnce();
         expect((await workflow.list('app_one')).some(record => record.nativeId === 'perm_same')).toBe(false);
 
@@ -1833,7 +1833,7 @@ describe('审批卡的 @、处理结果与「本会话允许此命令」', () =>
         const afterRestart = new LarkWorkflowInteractions(repositories.config, runtime, restarted.service, undefined, onlyAlice);
         await afterRestart.observe(group({ messageId: 'om_restarted' }), agentEvent('permission_request', permissions.at(-1)!), options);
         expect(restarted.reply).toHaveBeenCalledOnce();
-        expect(options.onSessionAllowed).toHaveBeenCalledOnce();
+        expect(options.onAutoApproved).toHaveBeenCalledOnce();
         expect(resolvePermission.mock.calls.filter(call => call[2] === true).map(call => call[1])).toEqual(['perm_first', 'perm_same']);
       } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
     });
@@ -1890,26 +1890,29 @@ describe('审批卡的 @、处理结果与「本会话允许此命令」', () =>
 
   describe('本工作区允许此类命令', () => {
     const workspaceButton = (card: Record<string, any>) => card.elements.find((element: any) => element.element_id === 'workflow_allow_workspace');
-    const exact = (id: string, text: string) => command(id, text, { commandExact: true });
-    /** 真实 SQLite 仓储 + 真实 WorkspaceApprovals；会话是飞书来源、ask 模式、执行目录为 cwd。 */
+    /** Agent 报给审批卡的执行目录；setup 设为传入的目录。 */
+    let execCwd = '/work/project';
+    const exact = (id: string, text: string) => command(id, text, { commandExact: true, cwd: execCwd });
+    /** 真实 SQLite 仓储 + 真实 WorkspaceApprovals；会话是飞书来源、ask 模式，之后的命令都在 cwd 里执行。 */
     const setup = async (repositories: ReturnType<typeof createRepositories>, cwd: string, overrides: { source?: string; requester?: string } = {}) => {
+      execCwd = cwd;
       const sessions = new Map([['ses_one', { id: 'ses_one', source: overrides.source ?? 'lark', cwd, permissionMode: 'ask' }]]);
       return new WorkspaceApprovals({ rules: repositories.workspaceApprovalRules!, getSession: async id => sessions.get(id) as any,
         humanRequester: () => 'requester' in overrides ? overrides.requester : 'ou_alice' });
     };
-    const options = (onSessionAllowed = vi.fn()) => ({ highRiskPattern: defaultHighRiskPattern, onSessionAllowed });
+    const options = (onAutoApproved = vi.fn()) => ({ highRiskPattern: defaultHighRiskPattern, onAutoApproved });
     const admins = { authorizeWorkspaceRule: async (_record: LarkInteraction, actor: string) => actor === 'ou_alice' };
 
     it('只在原文命令能推导出规则时给按钮，并写明范围与风险；只有所有者或管理员能点', async () => {
       const { directory, repositories } = await openDatabase();
       try {
+        const approvals = await setup(repositories, directory);
         const permissions = [
-          exact('perm_plain', 'pnpm test --filter x'), command('perm_display', 'pnpm test'), exact('perm_shell', "bash -c 'pnpm test'"),
+          exact('perm_plain', 'pnpm test src'), command('perm_display', 'pnpm test'), exact('perm_shell', "bash -c 'pnpm test'"),
           exact('perm_compound', 'pnpm test && curl x'), exact('perm_risky', 'git push origin main'), exact('perm_exec', 'pnpm exec vitest')
         ];
         const { runtime, resolvePermission } = liveRuntime(permissions);
         const { service, reply } = makeService();
-        const approvals = await setup(repositories, directory);
         const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, async (_record, actor) => ['ou_alice', 'ou_bob'].includes(actor), { workspaceApprovals: approvals, ...admins });
         for (const [index, permission] of [...permissions].entries()) await workflow.observe(group({ messageId: `om_${index}` }), agentEvent('permission_request', permission), options());
         const sent = cards(reply);
@@ -1917,7 +1920,7 @@ describe('审批卡的 @、处理结果与「本会话允许此命令」', () =>
         expect(workspaceButton(sent[0]!)).toMatchObject({ text: { content: '本工作区允许此类命令' } });
         expect(workspaceButton(sent[0]!).behaviors[0].value).toEqual({ dutydeck_workflow: 'allow_workspace', request_id: expect.any(String), generation: workflow.boot });
         const text = JSON.stringify(sent[0]);
-        expect(text).toContain('以 `pnpm test` 开头的命令都会自动允许');
+        expect(text).toContain('在上面这个目录里执行 `pnpm test`（只带允许的参数）都会自动允许');
         expect(text).toContain('Agent 改了 package.json 里的脚本，就能借这条命令执行任意代码');
         for (const card of sent.slice(1)) expect(workspaceButton(card)).toBeUndefined();
 
@@ -1932,7 +1935,7 @@ describe('审批卡的 @、处理结果与「本会话允许此命令」', () =>
         expect(repositories.workspaceApprovalRules!.list()).toEqual([]);
 
         await expect(workflow.respond(responseInput(plain, { action: 'allow_workspace', actorId: 'ou_alice' })))
-          .resolves.toBe('已允许。本工作区之后以 `pnpm test` 开头的命令会自动允许。');
+          .resolves.toBe('已允许。本工作区之后执行 `pnpm test`（只带允许的参数）会自动允许。');
         expect(resolvePermission).toHaveBeenCalledExactlyOnceWith('ses_one', 'perm_plain', true);
         expect(repositories.workspaceApprovalRules!.list()).toEqual([expect.objectContaining({ appId: 'app_one', workspace: await realpath(directory), pattern: 'pnpm test', createdBy: 'ou_alice', createdAt: expect.any(String) })]);
       } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
@@ -1941,34 +1944,35 @@ describe('审批卡的 @、处理结果与「本会话允许此命令」', () =>
     it('规则允许后同前缀命令自动批准并留痕；复合命令、高危、非原文命令照常发卡；重启后仍在，撤销后恢复发卡', async () => {
       let { directory, filename, repositories } = await openDatabase();
       try {
+        const approvals = await setup(repositories, directory);
         const permissions = [exact('perm_first', 'pnpm test')];
         const { runtime, resolvePermission } = liveRuntime(permissions);
         const { service, reply } = makeService();
-        const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, onlyAlice, { workspaceApprovals: await setup(repositories, directory), ...admins });
+        const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, onlyAlice, { workspaceApprovals: approvals, ...admins });
         const first = options();
         await workflow.observe(group(), agentEvent('permission_request', permissions[0]), first);
         await workflow.respond(responseInput((await workflow.list('app_one'))[0]!, { action: 'allow_workspace', actorId: 'ou_alice' }));
         expect(reply).toHaveBeenCalledOnce();
 
-        permissions.push(exact('perm_filter', 'pnpm test --filter x'));
+        permissions.push(exact('perm_filter', 'pnpm test src'));
         await workflow.observe(group({ messageId: 'om_filter' }), agentEvent('permission_request', permissions[0]), first);
         expect(resolvePermission).toHaveBeenLastCalledWith('ses_one', 'perm_filter', true, undefined, { workspaceRule: 'pnpm test' });
-        expect(first.onSessionAllowed).toHaveBeenCalledExactlyOnceWith('perm_filter', 'pnpm test');
+        expect(first.onAutoApproved).toHaveBeenCalledExactlyOnceWith('perm_filter', { by: 'workspace_rule', rule: 'pnpm test' });
         expect(reply).toHaveBeenCalledOnce();
 
         for (const [index, permission] of [
           exact('perm_compound', 'pnpm test && curl x'), exact('perm_pipe', 'pnpm test | sh'), exact('perm_subst', 'pnpm test $(curl x)'),
-          exact('perm_word', 'pnpm testx'), command('perm_display', 'pnpm test --filter y')
+          exact('perm_word', 'pnpm testx'), exact('perm_option', 'pnpm test --filter x'), command('perm_display', 'pnpm test lib')
         ].entries()) {
           permissions.splice(0, permissions.length, permission);
           await workflow.observe(group({ messageId: `om_other_${index}` }), agentEvent('permission_request', permission), first);
           expect(reply, permission.id).toHaveBeenCalledTimes(2 + index);
         }
         // 高危正则每次都重跑：命中的命令即使被规则覆盖也照常发卡。
-        permissions.splice(0, permissions.length, exact('perm_risky', 'pnpm test --reporter danger-word'));
-        await workflow.observe(group({ messageId: 'om_risky' }), agentEvent('permission_request', permissions[0]), { highRiskPattern: 'danger-word', onSessionAllowed: first.onSessionAllowed });
-        expect(reply).toHaveBeenCalledTimes(7);
-        expect(first.onSessionAllowed).toHaveBeenCalledOnce();
+        permissions.splice(0, permissions.length, exact('perm_risky', 'pnpm test danger-word'));
+        await workflow.observe(group({ messageId: 'om_risky' }), agentEvent('permission_request', permissions[0]), { highRiskPattern: 'danger-word', onAutoApproved: first.onAutoApproved });
+        expect(reply).toHaveBeenCalledTimes(8);
+        expect(first.onAutoApproved).toHaveBeenCalledOnce();
 
         // 重启：重新打开数据库、重建服务对象，规则仍生效。
         repositories.close();
@@ -1976,17 +1980,17 @@ describe('审批卡的 @、处理结果与「本会话允许此命令」', () =>
         const restarted = makeService();
         const afterRestart = new LarkWorkflowInteractions(repositories.config, runtime, restarted.service, undefined, onlyAlice, { workspaceApprovals: await setup(repositories, directory), ...admins });
         const second = options();
-        permissions.splice(0, permissions.length, exact('perm_restarted', 'pnpm test --filter y'));
+        permissions.splice(0, permissions.length, exact('perm_restarted', 'pnpm test lib'));
         await afterRestart.observe(group({ messageId: 'om_restarted' }), agentEvent('permission_request', permissions[0]), second);
-        expect(second.onSessionAllowed).toHaveBeenCalledExactlyOnceWith('perm_restarted', 'pnpm test');
+        expect(second.onAutoApproved).toHaveBeenCalledExactlyOnceWith('perm_restarted', { by: 'workspace_rule', rule: 'pnpm test' });
         expect(restarted.reply).not.toHaveBeenCalled();
 
         // 撤销立即生效：下一条同前缀命令照常发卡。
         expect(repositories.workspaceApprovalRules!.remove(repositories.workspaceApprovalRules!.list()[0]!.id)).toBe(true);
-        permissions.splice(0, permissions.length, exact('perm_revoked', 'pnpm test --filter z'));
+        permissions.splice(0, permissions.length, exact('perm_revoked', 'pnpm test web'));
         await afterRestart.observe(group({ messageId: 'om_revoked' }), agentEvent('permission_request', permissions[0]), second);
         expect(restarted.reply).toHaveBeenCalledOnce();
-        expect(second.onSessionAllowed).toHaveBeenCalledOnce();
+        expect(second.onAutoApproved).toHaveBeenCalledOnce();
       } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
     });
 
@@ -2007,6 +2011,10 @@ describe('审批卡的 @、处理结果与「本会话允许此命令」', () =>
         expect(await attempt(await setup(repositories, directory), onlyAlice)).toEqual({ approved: true, carded: false });
         expect(await attempt(await setup(repositories, directory), async () => false)).toEqual({ approved: false, carded: true });
         expect(await attempt(await setup(repositories, other), onlyAlice)).toEqual({ approved: false, carded: true });
+        // 会话目录就是规则的工作区，但 Agent 报的执行目录是别处：按卡上显示的执行目录判断，不放行。
+        const sameSession = await setup(repositories, directory);
+        execCwd = other;
+        expect(await attempt(sameSession, onlyAlice)).toEqual({ approved: false, carded: true });
         expect(await attempt(await setup(repositories, directory, { source: 'web' }), onlyAlice)).toEqual({ approved: false, carded: true });
         expect(await attempt(await setup(repositories, directory, { requester: undefined }), onlyAlice)).toEqual({ approved: false, carded: true });
         expect(await attempt(await setup(repositories, directory, { requester: 'ou_bob' }), onlyAlice)).toEqual({ approved: false, carded: true });

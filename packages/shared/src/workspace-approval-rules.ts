@@ -1,5 +1,5 @@
 /**
- * 按工作区记住的审批规则：飞书审批卡上点「本工作区允许此类命令」时，从这条命令推导出一条命令前缀规则，
+ * 按工作区记住的审批规则：飞书审批卡上点「本工作区允许此类命令」时，从这条命令推导出一条规则，
  * 之后同一工作区里被规则覆盖的命令不再弹卡。
  *
  * 推导和匹配只做保守的词法判断，不执行、不展开任何东西，看不懂就弹卡：
@@ -7,9 +7,10 @@
  * - 只认未加引号的 `&&` 与 `;` 两种分段，每段都必须被规则覆盖；
  * - 引号、反斜杠、`$`（含 `$(`）、反引号、`<(`、任何重定向、管道、`&`、换行、heredoc、括号、花括号、
  *   通配符、`~`、`#`、`!` 任一出现，或某段以 `NAME=value` 环境变量赋值开头，都不生成规则、也不算覆盖。
- * - 规则至少两个词，按词比较前缀：`pnpm test` 覆盖 `pnpm test --filter x`，不覆盖 `pnpm testx`。
- * - 首词是 shell、解释器或包装器（sh、bash、env、sudo、xargs、node、python、npx……），或是 `pnpm exec`、
- *   `pnpm dlx` 这类转交执行的子命令，不生成规则；匹配时同样不算覆盖，即使库里已有旧规则。
+ * - 只有白名单里的命令能建规则（见 `safeCommands`），其余一律不能；规则就是白名单那一项的命令词。
+ *   规则后面的参数也按同一项逐个检查：只认列出的选项，位置参数不能以 `-` 开头、不能含 `=`、
+ *   不能是绝对路径、不能含 `..` 路径段；`make <目标>` 不接受任何参数。
+ * - 匹配时每段按同一白名单重新推导，推导结果等于库里某条规则才算覆盖；库里不合白名单的旧规则不生效。
  * 高危正则不在这里判断：调用方在推导和每次匹配前都先跑一遍部署配置的高危正则，命中就照常弹卡。
  */
 
@@ -17,9 +18,9 @@ export interface WorkspaceApprovalRule {
   id: string;
   /** 建规则的飞书机器人；规则只对同一机器人的会话生效，不跨机器人共享。 */
   appId: string;
-  /** 工作区：建规则时会话执行目录的真实路径（realpath）。worktree 与主检出是不同的工作区。 */
+  /** 工作区：建规则时 Agent 实际执行目录（审批卡上显示的目录）的真实路径（realpath）。worktree 与主检出是不同的工作区。 */
   workspace: string;
-  /** 以单个空格连接的命令词，至少两个。 */
+  /** 白名单里的命令词，以单个空格连接（如 `pnpm test`、`pnpm run build`、`pytest`）。 */
   pattern: string;
   /** 建规则的人（飞书 open_id）。 */
   createdBy: string;
@@ -36,34 +37,54 @@ export interface WorkspaceApprovalRuleRepository {
 
 const plainCommand = /^[A-Za-z0-9._/@:+=,%^\- \t;&]*$/;
 const assignment = /^[A-Za-z_][A-Za-z0-9_]*=/;
-/** 像子命令的词（`test`、`run`、`build:web`）；路径、文件名和选项都不算。 */
-const subcommandWord = /^[A-Za-z][A-Za-z0-9:_-]*$/;
-/**
- * 不生成规则、也不按规则放行的首词：shell 与各类解释器、命令包装器、提权、远程执行、
- * 能执行任意命令的工具，以及删除、改权限、杀进程、联网下载这类破坏性或外发操作。
- */
-const deniedProgram = new RegExp('^(?:' + [
-  '(?:ba|da|z|k|c|tc|a|mk|r|yash)?sh', 'fish', 'nu', 'xonsh', 'elvish', 'pwsh', 'powershell', 'cmd(?:\\.exe)?',
-  'eval', 'exec', 'source', 'xargs', 'env', 'command', 'builtin', 'nohup', 'time', 'timeout', 'nice', 'ionice', 'stdbuf', 'unbuffer',
-  'setsid', 'chroot', 'nsenter', 'unshare', 'watch', 'parallel', 'flock', 'script', 'expect', 'strace', 'ltrace', 'gdb', 'lldb',
-  'sudo', 'su', 'doas', 'pkexec', 'runuser',
-  'node(?:js)?', 'deno', 'bun', 'bunx', 'npx', 'pnpx', 'tsx', 'ts-node', 'esno', 'vite-node',
-  'python[0-9.]*', 'pypy[0-9.]*', 'ipython[0-9.]*', 'perl[0-9.]*', 'ruby', 'irb', 'php', 'lua(?:jit)?[0-9.]*', 'tclsh', 'wish', 'r', 'rscript', 'julia', 'groovy', 'jshell', 'osascript',
-  'awk', 'gawk', 'mawk', 'nawk', 'sed', 'gsed', 'find', 'vim?', 'nvim', 'emacs', 'ed',
-  'uv', 'uvx', 'pipx', 'poetry', 'pipenv', 'pdm', 'hatch', 'conda', 'mamba', 'pixi', 'nix', 'nix-shell',
-  'ssh', 'scp', 'sftp', 'rsync', 'socat', 'nc', 'ncat', 'netcat', 'telnet', 'curl', 'wget',
-  'docker', 'podman', 'kubectl', 'helm',
-  'rm', 'rmdir', 'shred', 'dd', 'mkfs(?:\\..*)?', 'truncate', 'chmod', 'chown', 'chgrp', 'chattr',
-  'kill', 'pkill', 'killall', 'reboot', 'shutdown', 'halt', 'poweroff', 'systemctl', 'launchctl', 'crontab', 'at', 'batch'
-].join('|') + ')$', 'i');
-/** 不生成规则的子命令：转交执行任意程序的，以及发布、改写远端或工作树、改执行行为的（与默认高危正则同一口径再收紧）。 */
-const deniedSubcommand = /^(?:exec|dlx|x|create|publish|unpublish)$/i;
-const deniedGitSubcommand = /^(?:push|reset|clean|checkout|restore|switch|config|submodule|bisect|rebase|filter-branch|filter-repo|daemon|credential|remote)$/i;
-/** `<包管理器> run <脚本>`：规则连同脚本名一起记。 */
-const scriptRunners = new Set(['npm', 'pnpm', 'yarn']);
+/** 脚本名、make 目标：字母开头的普通单词。 */
+const nameWord = /^[A-Za-z][A-Za-z0-9:_-]*$/;
 
-const basename = (word: string) => word.slice(word.lastIndexOf('/') + 1);
-const denied = (program: string) => deniedProgram.test(basename(program));
+/** 位置参数：不是选项、不带 `=`（npm 把 `--x=y` 当配置、make 把 `X=y` 当变量）、不跳出工作区。 */
+const relativeArgument = (word: string) => !word.startsWith('-') && !word.includes('=') && !word.startsWith('/') && !word.split('/').includes('..');
+/** go 的包参数只认工作区内的相对写法（`.`、`./...`、`./pkg`），不认远程模块路径。 */
+const goPackage = (word: string) => relativeArgument(word) && (word === '.' || word.startsWith('./'));
+
+interface SafeCommand {
+  /** 规则的命令词；`<name>` 位置取命令里对应的那个词（脚本名或 make 目标）。 */
+  words: readonly string[];
+  /** 规则之后允许出现的选项，逐词整体匹配。 */
+  options: readonly (string | RegExp)[];
+  /** 规则之后允许出现的位置参数；不给表示不接受位置参数。 */
+  argument?: (word: string) => boolean;
+}
+
+const gitStat = ['--stat', '--shortstat', '--numstat', '--name-only', '--name-status', '--no-color', '--no-ext-diff', '--no-textconv'];
+const cargoOptions = ['--release', '--workspace', '--all-targets', '--all-features', '--no-default-features', '--lib', '--bins', '--tests',
+  '--locked', '--offline', '--frozen', '-q', '--quiet', '-v', '--verbose', '-p', '--package', '--features'];
+const goOptions = ['-v', '-race', '-short', '-cover', '-failfast', /^-count=\d+$/, /^-run=[A-Za-z0-9_./^-]+$/, /^-timeout=\d+[smh]$/];
+const packageScript = { options: [], argument: relativeArgument } as const;
+
+/**
+ * 能建规则的命令。只收跑仓库自己的测试、构建脚本和只读 git 查询；能写任意文件、改配置、
+ * 装包或转交执行任意程序的选项一律不收（如 git 的 `--output`/`--ext-diff`，go 的 `-exec`/`-o`/`-ldflags`，
+ * cargo 的 `--config`/`--manifest-path`/`--target-dir`，pytest 的 `-p`/`-c`/`--basetemp`，npm 的 `--<配置>=`）。
+ * `pnpm <脚本>` 简写不收：脚本不存在时 pnpm 会改为执行同名程序；`yarn run` 同理。
+ */
+const safeCommands: readonly SafeCommand[] = [
+  { words: ['git', 'status'], options: ['-s', '--short', '-b', '--branch', '--porcelain', '--no-color'], argument: relativeArgument },
+  { words: ['git', 'diff'], options: [...gitStat, '--cached', '--staged', '--check'], argument: relativeArgument },
+  { words: ['git', 'log'], options: [...gitStat, '--oneline', '--graph', '--decorate', '--no-decorate', '--all', '--no-merges', '--merges', '--reverse', '-p', '--patch', '-n', /^-\d+$/, /^--max-count=\d+$/], argument: relativeArgument },
+  { words: ['git', 'show'], options: [...gitStat, '--oneline', '-s', '--no-patch'], argument: relativeArgument },
+  { words: ['pnpm', 'test'], ...packageScript },
+  { words: ['pnpm', 'run', '<name>'], ...packageScript },
+  { words: ['npm', 'test'], ...packageScript },
+  { words: ['npm', 'run', '<name>'], ...packageScript },
+  { words: ['yarn', 'test'], ...packageScript },
+  { words: ['cargo', 'test'], options: cargoOptions, argument: relativeArgument },
+  { words: ['cargo', 'build'], options: cargoOptions, argument: relativeArgument },
+  { words: ['cargo', 'check'], options: cargoOptions, argument: relativeArgument },
+  { words: ['go', 'test'], options: goOptions, argument: goPackage },
+  { words: ['go', 'build'], options: ['-v', '-race'], argument: goPackage },
+  { words: ['go', 'vet'], options: ['-v'], argument: goPackage },
+  { words: ['make', '<name>'], options: [] },
+  { words: ['pytest'], options: ['-q', '-v', '-vv', '-x', '-s', '--lf', '--ff', '-k'], argument: relativeArgument }
+];
 
 /**
  * 把命令按未加引号的 `&&` 与 `;` 拆成若干段，每段是空白分隔的词。
@@ -87,29 +108,31 @@ export function splitApprovalCommand(command: string): string[][] | undefined {
   return segments.length ? segments : undefined;
 }
 
-/**
- * 从一条单段命令推导工作区规则，推导不出返回 undefined：
- * - 第二个词像子命令：记前两个词（`pnpm test --filter x` → `pnpm test`）；
- * - `npm|pnpm|yarn run <脚本>`：连同脚本名记三个词（`pnpm run build` → `pnpm run build`）；
- * - 只有一个词、第二个词是选项或路径、复合命令、首词或子命令被禁止：不生成。
- */
-export function deriveWorkspaceApprovalRule(command: string): string | undefined {
-  const segments = splitApprovalCommand(command);
-  if (segments?.length !== 1) return undefined;
-  const [program, sub, script] = segments[0]!;
-  if (!program || !sub || denied(program) || !subcommandWord.test(sub) || deniedSubcommand.test(sub)) return undefined;
-  const name = basename(program).toLowerCase();
-  if (name === 'git' && deniedGitSubcommand.test(sub)) return undefined;
-  if (/^run(?:-script)?$/i.test(sub)) {
-    if (!scriptRunners.has(name) || !script || !subcommandWord.test(script)) return undefined;
-    return [program, sub, script].join(' ');
+/** 一段命令对应的规则：命令词命中白名单某项、其后每个参数都合那一项的要求时返回规则写法。 */
+function segmentRule(words: readonly string[]): string | undefined {
+  for (const safe of safeCommands) {
+    if (words.length < safe.words.length) continue;
+    const head = words.slice(0, safe.words.length);
+    if (!safe.words.every((word, index) => word === '<name>' ? nameWord.test(head[index]!) : word === head[index])) continue;
+    const allowed = words.slice(safe.words.length).every(word =>
+      safe.options.some(option => typeof option === 'string' ? option === word : option.test(word)) || (safe.argument?.(word) ?? false));
+    return allowed ? head.join(' ') : undefined;
   }
-  return [program, sub].join(' ');
+  return undefined;
 }
 
 /**
- * 命令的每一段都被某条规则按词前缀覆盖时，返回用到的规则（去重，按段的顺序）；
- * 任一段没覆盖、看不懂，或首词被禁止，返回 undefined。
+ * 从一条单段命令推导工作区规则，推导不出返回 undefined：
+ * 命令词要在白名单里（`pnpm test --filter x` 不行：`--filter` 不是允许的选项），复合命令不生成。
+ */
+export function deriveWorkspaceApprovalRule(command: string): string | undefined {
+  const segments = splitApprovalCommand(command);
+  return segments?.length === 1 ? segmentRule(segments[0]!) : undefined;
+}
+
+/**
+ * 命令的每一段按白名单推导出的规则都在 rules 里时，返回用到的规则（去重，按段的顺序）；
+ * 任一段推导不出、或推导结果不在 rules 里，返回 undefined。库里不合白名单的规则因此永远不会被用到。
  */
 export function matchWorkspaceApprovalRules<T extends Pick<WorkspaceApprovalRule, 'pattern'>>(command: string, rules: readonly T[]): T[] | undefined {
   if (!rules.length) return undefined;
@@ -117,11 +140,8 @@ export function matchWorkspaceApprovalRules<T extends Pick<WorkspaceApprovalRule
   if (!segments) return undefined;
   const used: T[] = [];
   for (const words of segments) {
-    if (denied(words[0]!)) return undefined;
-    const rule = rules.find(item => {
-      const tokens = item.pattern.split(' ');
-      return tokens.length >= 2 && tokens.length <= words.length && tokens.every((token, index) => token === words[index]);
-    });
+    const pattern = segmentRule(words);
+    const rule = pattern === undefined ? undefined : rules.find(item => item.pattern === pattern);
     if (!rule) return undefined;
     if (!used.includes(rule)) used.push(rule);
   }

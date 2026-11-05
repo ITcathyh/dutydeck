@@ -11,7 +11,7 @@ import { buildApp } from './app.js';
 const cleanup: Array<() => Promise<void> | void> = [];
 afterEach(async () => { for (const step of cleanup.splice(0).reverse()) await step(); });
 
-const request = (command: string, exact = true, cwd = '/agent/reported'): PermissionRequestData =>
+const request = (command: string, exact = true, cwd?: string): PermissionRequestData =>
   ({ id: 'perm', title: '运行命令', status: 'pending', operation: { source: 'acp_tool_call', kind: 'execute', cwd, command, ...(exact ? { commandExact: true as const } : {}) } });
 
 async function setup(session: Record<string, unknown> = {}, requester: string | null = 'ou_alice') {
@@ -27,29 +27,53 @@ async function setup(session: Record<string, unknown> = {}, requester: string | 
 const scope = { appId: 'cli_a', sessionId: 'ses', taskId: 'task', requester: 'ou_alice' };
 
 describe('WorkspaceApprovals', () => {
-  it('keys rules by the real path of the session directory, never by the Agent-reported cwd', async () => {
-    const h = await setup();
-    expect(await h.approvals.candidate(scope, request('pnpm test --filter x'))).toEqual({ workspace: h.workspace, pattern: 'pnpm test' });
+  it('keys rules by the real path of the directory the Agent reports for the command, as shown on the card (finding 5)', async () => {
+    const h = await setup({ cwd: '/session/elsewhere' });
+    const other = await mkdtemp(join(tmpdir(), 'dutydeck-workspace-other-'));
+    cleanup.push(() => rm(other, { recursive: true, force: true }));
+    expect(await h.approvals.candidate(scope, request('pnpm test src', true, h.link))).toEqual({ workspace: h.workspace, pattern: 'pnpm test' });
     await h.approvals.remember({ appId: 'cli_a', workspace: h.workspace, pattern: 'pnpm test' }, 'ou_alice');
-    expect(await h.approvals.match(scope, request('pnpm test --filter x', true, '/somewhere/else'))).toBe('pnpm test');
+    expect(await h.approvals.match(scope, request('pnpm test src', true, h.link))).toBe('pnpm test');
+    expect(await h.approvals.match(scope, request('pnpm test', true, h.directory))).toBe('pnpm test');
+    // 同一会话里命令在别的目录执行：不放行；卡上给的是那个目录自己的规则。
+    expect(await h.approvals.match(scope, request('pnpm test', true, other))).toBeUndefined();
+    expect(await h.approvals.candidate(scope, request('pnpm test', true, other))).toEqual({ workspace: await realpath(other), pattern: 'pnpm test' });
+    // 没报目录、报的是相对路径、目录不存在：不放行，也不生成规则。
+    for (const cwd of [join(h.directory, 'missing'), 'relative/dir', undefined]) {
+      const elsewhere = request('pnpm test', true, cwd);
+      if (cwd === undefined) delete elsewhere.operation!.cwd;
+      expect(await h.approvals.match(scope, elsewhere), String(cwd)).toBeUndefined();
+      expect(await h.approvals.candidate(scope, elsewhere), String(cwd)).toBeUndefined();
+    }
     expect(await h.approvals.list({ workspace: h.link })).toEqual([expect.objectContaining({ appId: 'cli_a', workspace: h.workspace, pattern: 'pnpm test', createdBy: 'ou_alice' })]);
     expect(await h.approvals.list({ workspace: join(h.directory, 'missing') })).toEqual([]);
     // 规则按机器人隔离：另一个机器人在同一目录里照常弹卡，也能建自己的规则。
-    expect(await h.approvals.match({ ...scope, appId: 'cli_b' }, request('pnpm test'))).toBeUndefined();
-    expect(await h.approvals.candidate({ ...scope, appId: 'cli_b' }, request('pnpm test'))).toEqual({ workspace: h.workspace, pattern: 'pnpm test' });
+    expect(await h.approvals.match({ ...scope, appId: 'cli_b' }, request('pnpm test', true, h.link))).toBeUndefined();
+    expect(await h.approvals.candidate({ ...scope, appId: 'cli_b' }, request('pnpm test', true, h.link))).toEqual({ workspace: h.workspace, pattern: 'pnpm test' });
+  });
+
+  it('ignores saved rules outside the whitelist and checks the arguments (findings 1, 4)', async () => {
+    const h = await setup();
+    for (const pattern of ['pnpm exec', 'git stash', 'npm config']) h.repos.workspaceApprovalRules!.add({ appId: 'cli_a', workspace: h.workspace, pattern, createdBy: 'ou_alice' });
+    h.repos.workspaceApprovalRules!.add({ appId: 'cli_a', workspace: h.workspace, pattern: 'git log', createdBy: 'ou_alice' });
+    for (const command of ['pnpm exec bash', 'git stash clear', 'npm config set script-shell=/tmp/x.sh', 'git log --output=/tmp/x'])
+      expect(await h.approvals.match(scope, request(command, true, h.link)), command).toBeUndefined();
+    expect(await h.approvals.match(scope, request('git log --oneline', true, h.link))).toBe('git log');
+    await expect(h.approvals.remember({ appId: 'cli_a', workspace: h.workspace, pattern: 'git stash' }, 'ou_alice')).rejects.toThrow(/not derivable/);
   });
 
   it('only acts on unredacted string commands in Lark sessions that are not full-trust and were started by this requester', async () => {
     const h = await setup();
     h.repos.workspaceApprovalRules!.add({ appId: 'cli_a', workspace: h.workspace, pattern: 'pnpm test', createdBy: 'ou_alice' });
-    expect(await h.approvals.match(scope, request('pnpm test', false))).toBeUndefined();
-    expect(await h.approvals.candidate(scope, request('pnpm test', false))).toBeUndefined();
-    expect(await h.approvals.match({ ...scope, requester: 'ou_bob' }, request('pnpm test'))).toBeUndefined();
+    expect(await h.approvals.match(scope, request('pnpm test', true, h.link))).toBe('pnpm test');
+    expect(await h.approvals.match(scope, request('pnpm test', false, h.link))).toBeUndefined();
+    expect(await h.approvals.candidate(scope, request('pnpm test', false, h.link))).toBeUndefined();
+    expect(await h.approvals.match({ ...scope, requester: 'ou_bob' }, request('pnpm test', true, h.link))).toBeUndefined();
     for (const [session, requester] of [[{ source: 'web' }, 'ou_alice'], [{ permissionMode: 'full-trust' }, 'ou_alice'], [{}, null]] as const) {
       const other = await setup(session, requester);
       other.repos.workspaceApprovalRules!.add({ appId: 'cli_a', workspace: other.workspace, pattern: 'pnpm test', createdBy: 'ou_alice' });
-      expect(await other.approvals.match(scope, request('pnpm test'))).toBeUndefined();
-      expect(await other.approvals.candidate(scope, request('pnpm test'))).toBeUndefined();
+      expect(await other.approvals.match(scope, request('pnpm test', true, other.link))).toBeUndefined();
+      expect(await other.approvals.candidate(scope, request('pnpm test', true, other.link))).toBeUndefined();
     }
   });
 
@@ -63,9 +87,9 @@ describe('WorkspaceApprovals', () => {
   it('never uses the home directory or the filesystem root as a workspace', async () => {
     for (const cwd of [homedir(), '/']) {
       const h = await setup({ cwd });
-      expect(await h.approvals.candidate(scope, request('pnpm test')), cwd).toBeUndefined();
+      expect(await h.approvals.candidate(scope, request('pnpm test', true, cwd)), cwd).toBeUndefined();
       h.repos.workspaceApprovalRules!.add({ appId: 'cli_a', workspace: await realpath(cwd), pattern: 'pnpm test', createdBy: 'ou_alice' });
-      expect(await h.approvals.match(scope, request('pnpm test')), cwd).toBeUndefined();
+      expect(await h.approvals.match(scope, request('pnpm test', true, cwd)), cwd).toBeUndefined();
       await expect(h.approvals.remember({ appId: 'cli_a', workspace: await realpath(cwd), pattern: 'git status' }, 'ou_alice')).rejects.toThrow(/home directory or the filesystem root/);
     }
   });
