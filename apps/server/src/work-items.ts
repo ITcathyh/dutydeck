@@ -92,6 +92,8 @@ export class WorkItemService {
   private readonly effects = new Map<string, Promise<void>>();
   private closed = false;
   private timer?: NodeJS.Timeout;
+  /** 本实例交付失败过的目标：只对它们退避；上一个进程记下的失败，打开后立刻补发一次。 */
+  private readonly failedDeliveries = new Set<string>();
   constructor(private readonly options: WorkItemServiceOptions) {
     if (!options.repositories.config.compareAndSet || !options.repositories.config.list) throw new Error('Work items require ConfigRepository CAS and list');
   }
@@ -922,12 +924,13 @@ export class WorkItemService {
       let state = await this.read(id);
       const item = state.value.item;
       if (item.status !== 'completed' || !['pending', 'error'].includes(item.delivery.status)) return;
-      // 失败后按 1、2 分钟退避，最多 DELIVERY_MAX_ATTEMPTS 次；没到时间不发也不写库。
-      if (item.delivery.status === 'error' && (item.delivery.attempts >= DELIVERY_MAX_ATTEMPTS || item.delivery.nextAttemptAt && item.delivery.nextAttemptAt > time())) return;
+      // 最多 DELIVERY_MAX_ATTEMPTS 次；本实例失败过的按 1、2 分钟退避，没到时间不发也不写库。
+      if (item.delivery.status === 'error' && (item.delivery.attempts >= DELIVERY_MAX_ATTEMPTS
+        || this.failedDeliveries.has(id) && item.delivery.nextAttemptAt && item.delivery.nextAttemptAt > time())) return;
       try { await this.assertExecution(state.value, true); }
       catch (error) {
         if (this.closed) return;
-        item.delivery.attempts++; failDelivery(item.delivery, errorText(error)); await this.write(state); return;
+        item.delivery.attempts++; failDelivery(item.delivery, errorText(error)); await this.write(state); this.failedDeliveries.add(id); return;
       }
       item.delivery.attempts++; await this.write(state);
       let failure: string | undefined;
@@ -942,6 +945,7 @@ export class WorkItemService {
       if (failure === undefined) { current.delivery.status = 'delivered'; delete current.delivery.error; delete current.delivery.nextAttemptAt; }
       else failDelivery(current.delivery, failure);
       await this.write(state);
+      if (failure !== undefined) this.failedDeliveries.add(id);
     });
   }
   async close() {

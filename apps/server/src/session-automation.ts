@@ -425,6 +425,8 @@ export class SessionAutomationService {
   private readonly deliveries = new Map<string, { controller: AbortController; run: Promise<void> }>();
   private readonly manualRuns = new Set<Promise<PublicSessionScheduleOccurrence>>();
   private lastDeliveryKey?: string;
+  /** 本实例投递失败过的来源：只对它们退避；上一个进程（关闭、重启前）记下的失败，打开后立刻补发一次。 */
+  private readonly failedDeliveries = new Set<string>();
   private tickRequested = false;
   private readonly subscriptions = new Map<string, () => void>();
   private readonly quarantinedSchedules = new Set<string>();
@@ -2834,14 +2836,14 @@ export class SessionAutomationService {
     const candidates = [
       ...occurrences.map(item => ({ key: occurrenceKey(item.value.id), raw: item.raw, value: migrateOccurrence(item.value) })),
       ...subscriptions.map(item => ({ key: ciKey(item.value.id), raw: item.raw, value: migrateCi(item.value) }))
-    ].filter(item => this.deliverable(item.value) && deliveryRetryDue(item.value, this.clock())).sort((a, b) => a.key.localeCompare(b.key));
+    ].filter(item => this.deliverable(item.value) && deliveryRetryDue(item.value, this.clock(), this.failedDeliveries.has(item.key))).sort((a, b) => a.key.localeCompare(b.key));
     const start = candidates.findIndex(item => item.key > (this.lastDeliveryKey ?? ''));
     for (const candidate of [...candidates.slice(start < 0 ? 0 : start), ...candidates.slice(0, start < 0 ? 0 : start)]) {
       if (this.closed || this.deliveries.size >= MAX_DELIVERIES) break;
       this.lastDeliveryKey = candidate.key;
       if (this.deliveries.has(candidate.key)) continue;
       const stored = await this.readDelivery(candidate.key);
-      if (!stored || !this.deliverable(stored.value) || !deliveryRetryDue(stored.value, this.clock()) || stored.value.leaseExpiresAt && new Date(stored.value.leaseExpiresAt) > this.clock()) continue;
+      if (!stored || !this.deliverable(stored.value) || !deliveryRetryDue(stored.value, this.clock(), this.failedDeliveries.has(candidate.key)) || stored.value.leaseExpiresAt && new Date(stored.value.leaseExpiresAt) > this.clock()) continue;
       const claimed = { ...stored.value, revision: stored.value.revision + 1,
         leaseOwner: `automation_delivery_${randomUUID()}`, leaseExpiresAt: plus(this.clock(), CLAIM_TTL_MS), updatedAt: iso(this.clock()) };
       if (this.closed || !await this.replace(candidate.key, stored.raw, claimed)) continue;
@@ -2893,16 +2895,20 @@ export class SessionAutomationService {
         ...(deliveryError ? { error: attempts >= NOTICE_MAX_ATTEMPTS ? `${deliveryError}（已尝试 ${attempts} 次，不再自动重发）` : deliveryError } : {}), updatedAt: iso(this.clock()) },
       leaseOwner: undefined, leaseExpiresAt: undefined, updatedAt: iso(this.clock()) };
     if (!await this.replace(key, current.raw, updated)) return;
+    if (deliveryError) this.failedDeliveries.add(key);
     if (!deliveryError && 'scheduleId' in claimed && sent?.messageId) await this.noteResultMessage(claimed.scheduleId, claimed.id, sent.messageId);
     await this.applyScheduleStops();
   }
 
 }
 
-/** 结果投递失败后按 1、2 分钟退避（从上次失败的 updatedAt 算），最多 NOTICE_MAX_ATTEMPTS 次。 */
-function deliveryRetryDue(value: DeliveryRecord, now: Date): boolean {
+/**
+ * 结果投递最多 NOTICE_MAX_ATTEMPTS 次。backoff（本实例失败过）时按 1、2 分钟退避，从上次失败的 updatedAt 算；
+ * 上一个进程留下的失败（含关闭、重启打断的那次）不退避。
+ */
+function deliveryRetryDue(value: DeliveryRecord, now: Date, backoff: boolean): boolean {
   const { status, attempts, updatedAt } = value.delivery;
-  return status !== 'error' || attempts < NOTICE_MAX_ATTEMPTS && new Date(updatedAt).getTime() + 60_000 * attempts <= now.getTime();
+  return status !== 'error' || attempts < NOTICE_MAX_ATTEMPTS && (!backoff || new Date(updatedAt).getTime() + 60_000 * attempts <= now.getTime());
 }
 
 function canonicalRequestDigest(request: TaskRequestV1): string {

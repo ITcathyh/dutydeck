@@ -523,16 +523,12 @@ describe('WorkItemService with real Runtime and SQLite', () => {
     const item = await f.create({ ...plan, steps: [plan.steps[0]!], outputStepId: 'a' }); await f.tick(); await eventually(async () => f.calls.length === 1);
     await f.finish(f.calls[0]!, 'Ready'); await f.tick(); expect((await f.get(item.id)).delivery.status).toBe('error');
     expect(await f.repos.workItems.listScheduledIds()).toContain(item.id);
+    // 上一个实例记下的失败：重新打开后不等退避，立刻补发一次。
     await f.recreateService();
-    await f.tick(); expect((await f.get(item.id)).delivery).toMatchObject({ status: 'error', attempts: 1, nextAttemptAt: expect.any(String) }); expect(f.deliveries).toHaveBeenCalledTimes(1);
-    vi.useFakeTimers({ toFake: ['Date'] });
-    try {
-      vi.setSystemTime(Date.now() + 60_000);
-      await f.tick(); expect((await f.get(item.id)).delivery.status).toBe('delivered'); expect(f.calls).toHaveLength(1); expect(f.deliveries).toHaveBeenCalledTimes(2);
-      expect((await f.get(item.id)).delivery.nextAttemptAt).toBeUndefined();
-      expect(await f.repos.workItems.listScheduledIds()).not.toContain(item.id);
-      await f.tick(); expect(f.deliveries).toHaveBeenCalledTimes(2);
-    } finally { vi.useRealTimers(); }
+    await f.tick(); expect((await f.get(item.id)).delivery.status).toBe('delivered'); expect(f.calls).toHaveLength(1); expect(f.deliveries).toHaveBeenCalledTimes(2);
+    expect((await f.get(item.id)).delivery.nextAttemptAt).toBeUndefined();
+    expect(await f.repos.workItems.listScheduledIds()).not.toContain(item.id);
+    await f.tick(); expect(f.deliveries).toHaveBeenCalledTimes(2);
   });
   it('backs off a permanently failing delivery, stops after three attempts and keeps the failure visible', async () => {
     const f = await fixture(); f.deliveries.mockRejectedValue(new Error('origin missing'));
