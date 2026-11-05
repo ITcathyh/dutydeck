@@ -91,8 +91,11 @@ it.each(['usage_limit_exceeded', 'rate_limit'])('shows child %s in Web/Lark whil
   const card = JSON.stringify(renderLarkProcessElements(events, { traceLimit: 20, compactTrace: false, hideTraceOnComplete: false }));
   expect(card).toContain('子任务额度诊断'); expect(card).toContain('父任务继续');
   expect(card).not.toContain('do-not-display-upstream-body');
-  await new Promise(resolve => setTimeout(resolve, 2100));
-  expect((await h.runtime.getEvents(h.session.id)).filter(e => (e.data as any).diagnostic)).toHaveLength(1);
+  // Dedup after another child poll (intervalMs=2s) is code-independent (child.done); check it once.
+  if (code === 'usage_limit_exceeded') {
+    await new Promise(resolve => setTimeout(resolve, 2100));
+    expect((await h.runtime.getEvents(h.session.id)).filter(e => (e.data as any).diagnostic)).toHaveLength(1);
+  }
   appendFileSync(h.path, line(record('task_complete', h.turn(), { last_agent_message: '父任务正常完成' })));
   h.paint('父任务正常完成\n› \n100% context left');
   expect((await pending).status).toBe('completed');

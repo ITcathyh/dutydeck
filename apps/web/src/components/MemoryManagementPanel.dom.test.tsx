@@ -12,7 +12,7 @@ function mount(source?: string) {
   return render(<QueryClientProvider client={qc}><MemoryManagementPanel session={{ ...session, source }}/></QueryClientProvider>);
 }
 it('opens without turn history, searches the selected Lark pool and preserves the draft on conflicts', async () => {
-  const user = userEvent.setup();
+  const user = userEvent.setup({ delay: null });
   const read = vi.spyOn(api, 'memoryPool').mockResolvedValue(pool);
   const revise = vi.spyOn(api, 'reviseMemoryPool').mockRejectedValue(new ApiError('版本冲突，请重新加载', 'MEMORY_CONCURRENT_CHANGE', 409));
   mount('lark');
@@ -32,7 +32,7 @@ it('opens without turn history, searches the selected Lark pool and preserves th
   expect((screen.getByRole('textbox', { name: '记忆正文' }) as HTMLTextAreaElement).value).toBe('人工修订草稿');
 });
 it('requires explicit project selection and binding; creating or viewing never silently binds the session', async () => {
-  const user = userEvent.setup();
+  const user = userEvent.setup({ delay: null });
   vi.spyOn(api, 'projectMemories').mockResolvedValue({ projects: [{ id: 'proj_a', name: '项目A', enabled: true }] });
   vi.spyOn(api, 'projectMemoryBinding').mockResolvedValue({ projectId: null });
   const read = vi.spyOn(api, 'projectMemory').mockResolvedValue({ ...pool, id: 'proj_a', name: '项目A', enabled: true });

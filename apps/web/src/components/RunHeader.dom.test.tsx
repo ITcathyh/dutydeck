@@ -26,7 +26,7 @@ describe('RunHeader', () => {
   });
 
   it('任务控制保持可达', async () => {
-    const user = userEvent.setup(); const onInterrupt = vi.fn(); const onArchive = vi.fn();
+    const user = userEvent.setup({ delay: null }); const onInterrupt = vi.fn(); const onArchive = vi.fn();
     render(<RunHeader session={session} agent={agent} streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={onInterrupt} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={onArchive} onToggleRaw={() => {}} onOpenInsight={() => {}}/>);
     await user.click(screen.getByRole('button', { name: '中断当前任务' }));
     await user.click(screen.getByRole('button', { name: '归档任务' }));
@@ -36,7 +36,7 @@ describe('RunHeader', () => {
   });
 
   it('「分析」按钮始终可达（含归档只读任务），点击打开会话分析', async () => {
-    const user = userEvent.setup(); const onOpenInsight = vi.fn();
+    const user = userEvent.setup({ delay: null }); const onOpenInsight = vi.fn();
     const { rerender } = render(<RunHeader session={session} agent={agent} streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}} onOpenInsight={onOpenInsight}/>);
     const button = screen.getByRole('button', { name: /会话分析/ });
     await user.click(button);
@@ -47,7 +47,7 @@ describe('RunHeader', () => {
   });
 
   it('failed / stopped 任务可调用真实 restart 操作', async () => {
-    const user = userEvent.setup(); const onRestart = vi.fn();
+    const user = userEvent.setup({ delay: null }); const onRestart = vi.fn();
     render(<RunHeader session={{ ...session, state: 'failed' }} agent={agent} streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={onRestart} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}} onOpenInsight={() => {}}/>);
     await user.click(screen.getByRole('button', { name: '重新启动' }));
     expect(onRestart).toHaveBeenCalledTimes(1);
@@ -102,7 +102,7 @@ describe('RunHeader 归档态状态视觉与只读约束', () => {
   });
 
   it('未归档 + failed：「重新启动」按钮照旧在，别把正常恢复路径改没了', async () => {
-    const user = userEvent.setup(); const onRestart = vi.fn();
+    const user = userEvent.setup({ delay: null }); const onRestart = vi.fn();
     render(<RunHeader session={{ ...session, state: 'failed' }} agent={agent} streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={onRestart} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}} onOpenInsight={() => {}}/>);
     await user.click(screen.getByRole('button', { name: '重新启动' }));
     expect(onRestart).toHaveBeenCalledTimes(1);
@@ -148,7 +148,7 @@ describe('RunHeader 失败详情', () => {
   });
 
   it('普通会话渲染「重命名会话」按钮，点击调用 onRename；source 为 work_item 时不显示', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onRename = vi.fn();
     const { rerender } = render(<RunHeader session={session} agent={agent} onRename={onRename} streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}} onOpenInsight={() => {}}/>);
 
@@ -206,7 +206,7 @@ describe('RunDetailTabs', () => {
   });
 
   it('点击标签回传新 tab id', async () => {
-    const user = userEvent.setup(); const onChange = vi.fn();
+    const user = userEvent.setup({ delay: null }); const onChange = vi.fn();
     render(<Host onChange={onChange}/>);
     await user.click(screen.getByRole('tab', { name: '终端' }));
     expect(onChange).toHaveBeenCalledWith('terminal');

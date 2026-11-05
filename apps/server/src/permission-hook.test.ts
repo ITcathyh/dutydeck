@@ -54,6 +54,7 @@ describe('Claude PermissionRequest hook over the session relay', () => {
       'http://127.0.0.1', 'test-secret');
     // 等待窗口压到 50ms，让 hook 至少经历一次 pending → 续等。
     const permissions = new HookPermissionRequests(runtime, { waitMs: 50 });
+    const submit = vi.spyOn(permissions, 'submit');
     const app = await buildApp(runtime as any, { relay: { runtime: runtime as any, capabilities, permissions } });
     await app.listen({ port: 0, host: '127.0.0.1' });
     cleanup.push(() => app.close());
@@ -72,9 +73,11 @@ describe('Claude PermissionRequest hook over the session relay', () => {
       child.stdin!.end(input);
     });
     const approved = run(JSON.stringify({ ...payload, tool_input: { command: 'deploy --api-key fixture-key-value', description: 'Deploy' } }));
+    // 与上一个子进程并发启动，省一次冷启动；它不经过 relay，不影响审批流程。
+    const unreadable = run('not json');
     await vi.waitFor(() => expect(runtime.pending).toHaveLength(1), { timeout: 10_000 });
-    // 让 hook 至少续等一轮，再给出批准。
-    await new Promise(resolve => setTimeout(resolve, 200));
+    // 第二次提交说明首轮已拿到 pending 并续等，再给出批准。
+    await vi.waitFor(() => expect(submit.mock.calls.length).toBeGreaterThanOrEqual(2), { timeout: 10_000, interval: 10 });
     runtime.pending[0]!.resolve({ approved: true });
     const result = await approved;
     expect(result.stderr).toBe('');
@@ -83,8 +86,7 @@ describe('Claude PermissionRequest hook over the session relay', () => {
     expect(JSON.stringify(runtime.requests)).not.toContain('fixture-key-value');
 
     // stdin 读不懂也要明确拒绝，不能退回无人处理的终端确认。
-    const unreadable = await run('not json');
-    expect(decision(unreadable.stdout).behavior).toBe('deny');
+    expect(decision((await unreadable).stdout).behavior).toBe('deny');
   }, 30_000);
 
   it.each(['ask', 'approve-reads'] as const)('checks real runtime session capability and risk before hook auto-approval in %s', async permissionMode => {

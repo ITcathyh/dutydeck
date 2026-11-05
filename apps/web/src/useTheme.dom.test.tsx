@@ -51,7 +51,7 @@ describe('useTheme', () => {
   });
 
   it('显式选择浅色会压过系统深色，并写入 data-theme 与持久化存储', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     installMatchMedia(true);
     render(<Probe/>);
     await user.click(screen.getByRole('button', { name: '选择浅色' }));
@@ -62,7 +62,7 @@ describe('useTheme', () => {
   });
 
   it('从显式选择切回跟随系统时立即拿到当时的系统外观', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const media = installMatchMedia(false);
     render(<Probe/>);
     await user.click(screen.getByRole('button', { name: '选择浅色' }));

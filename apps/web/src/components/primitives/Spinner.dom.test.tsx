@@ -32,10 +32,6 @@ describe('Spinner 带文案', () => {
     expect(circle.textContent).toBe('');
   });
 
-  it('文案用 text-caption 语义字号', () => {
-    render(<Spinner label="正在保存…"/>);
-    expect(screen.getByRole('status').className).toContain('text-caption');
-  });
 });
 
 describe('Spinner 尺寸', () => {

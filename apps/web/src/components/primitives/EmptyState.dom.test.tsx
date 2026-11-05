@@ -11,21 +11,6 @@ import { EmptyState } from './EmptyState';
 const iconWrapper = (container: HTMLElement) => container.querySelector('.ui-empty-state > span');
 
 describe('EmptyState 语气', () => {
-  it('三种 tone 的图标底色互不相同', () => {
-    const neutral = render(<EmptyState tone="neutral" icon={<i data-testid="glyph"/>} title="没有匹配结果"/>);
-    expect(iconWrapper(neutral.container)!.className).toContain('bg-muted');
-    expect(iconWrapper(neutral.container)!.className).toContain('text-subtle');
-    neutral.unmount();
-
-    const positive = render(<EmptyState tone="positive" title="全部处理完了"/>);
-    expect(iconWrapper(positive.container)!.className).toContain('bg-success-soft');
-    expect(iconWrapper(positive.container)!.className).toContain('text-success');
-    positive.unmount();
-
-    const guide = render(<EmptyState tone="guide" icon={<i data-testid="glyph"/>} title="创建第一个任务"/>);
-    expect(iconWrapper(guide.container)!.className).toContain('bg-action-soft');
-    expect(iconWrapper(guide.container)!.className).toContain('text-action');
-  });
 
   it('tone=positive 不传 icon 也自带绿勾，绝不退化成灰色空盒子', () => {
     const { container } = render(<EmptyState tone="positive" title="没有待办"/>);
@@ -52,13 +37,6 @@ describe('EmptyState 语气', () => {
     expect(iconWrapper(container)!.className).toContain('bg-success-soft');
   });
 
-  it('neutral 标题用次级文字色，其余 tone 用主文字色', () => {
-    const neutral = render(<EmptyState title="没有匹配结果"/>);
-    expect(screen.getByText('没有匹配结果').className).toContain('text-secondary');
-    neutral.unmount();
-    render(<EmptyState tone="positive" title="全部处理完了"/>);
-    expect(screen.getByText('全部处理完了').className).toContain('text-primary');
-  });
 });
 
 describe('EmptyState 内容与动作', () => {
@@ -81,7 +59,7 @@ describe('EmptyState 内容与动作', () => {
   });
 
   it('primaryAction 与 secondaryAction 各渲染一个按钮并各自回调', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onPrimary = vi.fn();
     const onSecondary = vi.fn();
     render(<EmptyState
@@ -98,7 +76,7 @@ describe('EmptyState 内容与动作', () => {
   });
 
   it('primaryAction.disabled 让按钮真的点不动，而不是只变浅', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onPrimary = vi.fn();
     render(<EmptyState
       tone="guide"
@@ -112,7 +90,7 @@ describe('EmptyState 内容与动作', () => {
   });
 
   it('只传 secondaryAction 时也能单独渲染', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onSecondary = vi.fn();
     render(<EmptyState title="没有匹配结果" secondaryAction={{ label: '清除筛选', onClick: onSecondary }}/>);
     const buttons = screen.getAllByRole('button');

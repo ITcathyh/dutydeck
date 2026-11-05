@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { createRepositories } from '@dutydeck/storage';
 import { PluginHost } from './host.js';
@@ -79,7 +79,18 @@ describe('immutable plugin activation', () => {
     const lock = new Database(join(store.pluginsDir, '.config-lock.sqlite'));
     try {
       lock.exec('BEGIN IMMEDIATE');
-      await expect(load()).rejects.toMatchObject({ code: 'PLUGIN_CONFIG_BUSY' });
+      // 锁等待按 Date.now() 计 10 秒截止、真实 setTimeout 重试；只伪造 Date 并逐步拨快，免得真等 10 秒。
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        let settled = false;
+        const loading = load().finally(() => { settled = true; });
+        loading.catch(() => undefined);
+        while (!settled) {
+          await new Promise(resolve => setTimeout(resolve, 10));
+          vi.setSystemTime(Date.now() + 1_000);
+        }
+        await expect(loading).rejects.toMatchObject({ code: 'PLUGIN_CONFIG_BUSY' });
+      } finally { vi.useRealTimers(); }
       expect((await store.activationStatus('versioned')).hosts).toEqual([]);
     } finally { lock.close(); }
     expect((await load()).active.map(item => item.entry.name)).toEqual(['versioned']);

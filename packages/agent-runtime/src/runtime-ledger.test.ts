@@ -244,14 +244,18 @@ describe('Runtime uses the execution ledger', () => {
     expect(h.repos.execution.getAcceptedTask(accepted.id)?.input?.executionContext.actorId).toBe('user');
     expect(await h.runtime.getTasks(h.session.id)).toEqual([]);
   });
-  it.each<Partial<TaskRequestV1>>([
-    { sessionId: 'other-session' }, { prompt: 'different' }, { mode: 'interrupt' },
-    { key: 'other-key' }, { skills: ['other-skill'] }, { actor: { kind: 'installation_owner', id: 'installation_owner' } }
-  ])('rejects mismatched legacy dispatch arguments before acceptance: %j', async changed => {
+  it('rejects mismatched legacy dispatch arguments before acceptance', async () => {
+    // Each rejection happens before acceptance, so one Session serves every variant.
     const h = await fixture();
-    const envelope = { ...request(h.session.id, 'original'), ...changed };
-    await expect(h.runtime.dispatch(h.session.id, 'original', 'queue', 'original', undefined, undefined, 'original', [], envelope)).rejects.toMatchObject({ code: 'TASK_REQUEST_MISMATCH' });
-    expect(await h.runtime.getTasks(h.session.id)).toEqual([]); expect(h.sent).toEqual([]);
+    const variants: Array<Partial<TaskRequestV1>> = [
+      { sessionId: 'other-session' }, { prompt: 'different' }, { mode: 'interrupt' },
+      { key: 'other-key' }, { skills: ['other-skill'] }, { actor: { kind: 'installation_owner', id: 'installation_owner' } }
+    ];
+    for (const changed of variants) {
+      const envelope = { ...request(h.session.id, 'original'), ...changed };
+      await expect(h.runtime.dispatch(h.session.id, 'original', 'queue', 'original', undefined, undefined, 'original', [], envelope), JSON.stringify(changed)).rejects.toMatchObject({ code: 'TASK_REQUEST_MISMATCH' });
+      expect(await h.runtime.getTasks(h.session.id)).toEqual([]); expect(h.sent).toEqual([]);
+    }
   });
   it('does not turn a rejected submitted send into failed or advance the queue', async () => {
     const h = await fixture({}, async () => { throw new Error('response lost after submission'); });

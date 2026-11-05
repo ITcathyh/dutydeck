@@ -67,7 +67,7 @@ describe('Button 变体与尺寸', () => {
 
 describe('Button 禁用与加载态', () => {
   it('loading 同时置 aria-busy 与 disabled，点击不再触发 onClick', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onClick = vi.fn();
     render(<Button loading onClick={onClick}>保存</Button>);
     // 只置 aria-busy 而仍可点，会让用户在请求飞行途中重复提交。
@@ -89,7 +89,7 @@ describe('Button 禁用与加载态', () => {
   });
 
   it('disabled 阻止 onClick', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onClick = vi.fn();
     render(<Button disabled onClick={onClick}>保存</Button>);
     expect((button() as HTMLButtonElement).disabled).toBe(true);
@@ -100,7 +100,7 @@ describe('Button 禁用与加载态', () => {
 
 describe('Button 键盘可达', () => {
   it('聚焦后按 Enter 触发 onClick', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onClick = vi.fn();
     render(<Button onClick={onClick}>提交</Button>);
     button().focus();
@@ -109,7 +109,7 @@ describe('Button 键盘可达', () => {
   });
 
   it('聚焦后按空格触发 onClick', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onClick = vi.fn();
     render(<Button onClick={onClick}>提交</Button>);
     button().focus();
@@ -118,7 +118,7 @@ describe('Button 键盘可达', () => {
   });
 
   it('loading 时键盘同样点不动，且拿不到焦点', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onClick = vi.fn();
     render(<Button loading onClick={onClick}>提交</Button>);
     button().focus();

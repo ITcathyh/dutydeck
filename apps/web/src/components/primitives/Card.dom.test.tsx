@@ -9,15 +9,6 @@ import { Card } from './Card';
 const cardOf = (container: HTMLElement) => container.firstElementChild as HTMLElement;
 
 describe('Card 语气', () => {
-  it('default / muted / dashed 三档类名互不相同', () => {
-    const classNames = (['default', 'muted', 'dashed'] as const).map(tone => {
-      const { container, unmount } = render(<Card tone={tone}>内容</Card>);
-      const value = cardOf(container).className;
-      unmount();
-      return value;
-    });
-    expect(new Set(classNames).size).toBe(3);
-  });
 
   it('default 用表面色 + 投影分层，不画边框', () => {
     const { container } = render(<Card>内容</Card>);

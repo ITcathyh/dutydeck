@@ -29,7 +29,7 @@ describe('Dialog 原语', () => {
   });
 
   it('portal 到 document.body，不留在组件树里', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const { container } = render(<Harness/>);
     await user.click(screen.getByRole('button', { name: '打开' }));
     const dialog = screen.getByRole('dialog', { name: '测试弹层' });
@@ -39,7 +39,7 @@ describe('Dialog 原语', () => {
   });
 
   it('恒带 aria-modal 与 aria-label，role 可切到 alertdialog', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(<Harness/>);
     await user.click(screen.getByRole('button', { name: '打开' }));
     const dialog = screen.getByRole('dialog', { name: '测试弹层' });
@@ -50,7 +50,7 @@ describe('Dialog 原语', () => {
   });
 
   it('层级用 z-dialog，不再手工排 z-index', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(<Harness/>);
     await user.click(screen.getByRole('button', { name: '打开' }));
     const overlay = screen.getByRole('dialog').parentElement!;
@@ -67,7 +67,7 @@ describe('Dialog 原语', () => {
   });
 
   it('焦点进入弹层，Tab 在内部循环，关闭后回到触发器', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(<Harness/>);
     const opener = screen.getByRole('button', { name: '打开' });
     opener.focus();
@@ -87,14 +87,14 @@ describe('Dialog 原语', () => {
   });
 
   it('initialFocus 压过默认的首个可聚焦元素', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(<Harness withInitialFocus/>);
     await user.click(screen.getByRole('button', { name: '打开' }));
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: '确认' })));
   });
 
   it('Escape 关闭；closeOnEscape=false 时（busy 场景）不关', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const { unmount } = render(<Harness/>);
     await user.click(screen.getByRole('button', { name: '打开' }));
     await user.keyboard('{Escape}');
@@ -108,7 +108,7 @@ describe('Dialog 原语', () => {
   });
 
   it('点遮罩关闭；点面板内部不关；closeOnScrim=false 时点遮罩也不关', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const { unmount } = render(<Harness/>);
     await user.click(screen.getByRole('button', { name: '打开' }));
     await user.click(screen.getByText('正文'));
@@ -124,7 +124,7 @@ describe('Dialog 原语', () => {
   });
 
   it('打开时把背景 inert 并移出可访问树，关闭后原样恢复', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const { container } = render(<Harness/>);
     // portal 之后遮罩挂在 body 下，所以背景是整棵应用子树（这里是 RTL 的 container），
     // 而不是弹层的兄弟节点。inert 会向下继承，背景里的按钮同样点不到。
@@ -162,7 +162,7 @@ describe('Dialog 原语', () => {
   });
 
   it('关闭后摘掉 Escape 监听，不会替下一个浮层抢按键', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onClose = vi.fn();
     const { rerender } = render(<Dialog open onClose={onClose} label="监听">内容</Dialog>);
     rerender(<Dialog open={false} onClose={onClose} label="监听">内容</Dialog>);

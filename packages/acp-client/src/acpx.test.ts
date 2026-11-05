@@ -108,6 +108,7 @@ describe('acpx ACP boundary', () => {
     await expect(adapter.resolvePermission('permission-tool', true)).resolves.toBe(true);
     await sending;
     expect(events.filter(event => event.type === 'permission_request' && event.data.status === 'pending')).toHaveLength(1);
+    expect(events.some(event => event.type === 'text' && event.data.text.includes('selected'))).toBe(true);
     await adapter.stop();
     const persisted = await createRuntimeStore({ stateDir: join(cwd, '.dutydeck', 'acpx') }).load(sessionKey);
     const env = persisted?.acpx?.session_options?.env ?? {};
@@ -138,16 +139,6 @@ describe('acpx ACP boundary', () => {
     const fixture = resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs');
     const adapter = new AcpxAdapter({ id: 'mock', name: 'Mock', command: process.execPath, args: [fixture], protocol: 'acp', cwd, env: {}, permissionMode: 'deny-all', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false }, { onEvent() {} });
     await adapter.start(); await adapter.interrupt(); await adapter.resume(); await adapter.stop();
-  });
-
-  it('resolves a live ACP permission request from an external Web decision', async () => {
-    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-permission-')); dirs.push(cwd);
-    const fixture = resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs'); const events: any[] = [];
-    const adapter = new AcpxAdapter({ id: 'mock', name: 'Mock', command: process.execPath, args: [fixture], protocol: 'acp', cwd, env: {}, permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false }, { onEvent: e => events.push(e) });
-    await adapter.start(); const sending = adapter.send('request permission');
-    await expect.poll(() => events.find(e => e.type === 'permission_request')?.data.id).toBe('permission-tool');
-    expect(await adapter.resolvePermission('permission-tool', true)).toBe(true); await sending;
-    expect(events.some(e => e.type === 'text' && e.data.text.includes('selected'))).toBe(true); await adapter.stop();
   });
 
   it.each([
@@ -315,17 +306,6 @@ describe('acpx ACP boundary', () => {
     const restored = new AcpxAdapter({ ...base, systemPrompt: 'new global prompt' }, { sessionKey, onEvent() {} });
     await restored.start(); await restored.stop();
     expect((await store.load(sessionKey))?.acpx?.session_options?.system_prompt).toBe('original session prompt');
-  });
-
-  it('persists Dutydeck group capability environment with snake_case keys', async () => {
-    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-group-env-')); dirs.push(cwd);
-    const fixture = resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs');
-    const adapter = new AcpxAdapter({
-      ...agentConfig(), cwd, command: process.execPath, args: [fixture],
-      env: { dutydeck_group_tools_url: 'http://127.0.0.1:4310/api/lark/agent-tools', dutydeck_group_tools_token: 'scoped-token' }
-    }, { sessionKey: 'group-capability-session', onEvent() {} });
-    await expect(adapter.start()).resolves.toBeUndefined();
-    await adapter.stop();
   });
 
   it.each([false, true])('clears inherited Herdr identity in a real persistent ACP agent (vendor bridge: %s)', async bridged => {

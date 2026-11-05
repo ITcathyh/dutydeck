@@ -79,7 +79,7 @@ describe('ToastViewport 无障碍结构', () => {
 
 describe('ToastViewport 触控与操作', () => {
   it('每条通知都有带中文 aria-label 的关闭按钮，点击回调 onDismiss 对应 id', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onDismiss = vi.fn();
     render(<ToastViewport toasts={[makeToast({ id: 'toast-9', title: '已取消 1 条待执行指令' })]} onDismiss={onDismiss}/>);
     await user.click(screen.getByRole('button', { name: '关闭通知：已取消 1 条待执行指令' }));
@@ -110,7 +110,7 @@ describe('ToastViewport 触控与操作', () => {
   });
 
   it('点击操作按钮执行 run，并在完成后收起该通知', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onDismiss = vi.fn();
     const run = vi.fn();
     render(<ToastViewport toasts={[makeToast({ id: 'toast-3', title: '已取消 1 条待执行指令', action: { label: '恢复这条指令', run } })]} onDismiss={onDismiss}/>);
@@ -120,7 +120,7 @@ describe('ToastViewport 触控与操作', () => {
   });
 
   it('异步 run 执行中按钮 disabled 并显示「正在执行」，连点只触发一次', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     let release = () => {};
     const run = vi.fn(() => new Promise<void>(resolve => { release = resolve; }));
     const onDismiss = vi.fn();
@@ -136,7 +136,7 @@ describe('ToastViewport 触控与操作', () => {
   });
 
   it('run 抛错时通知留在原地并就地说明原因，按钮变为可重试，不产生 unhandled rejection', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onDismiss = vi.fn();
     const run = vi.fn(() => Promise.reject(new Error('服务端拒绝了该操作')));
     render(<ToastViewport toasts={[makeToast({ id: 'toast-7', title: '已取消 1 条待执行指令', action: { label: '恢复这条指令', run } })]} onDismiss={onDismiss}/>);
@@ -159,7 +159,7 @@ describe('ToastViewport 与 store 的接线', () => {
   });
 
   it('零 props 时点击关闭真的会从 store 移除', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(<ToastViewport/>);
     act(() => { toastStore.push({ kind: 'error', title: '刷新模型列表失败' }); });
     await user.click(screen.getByRole('button', { name: '关闭通知：刷新模型列表失败' }));

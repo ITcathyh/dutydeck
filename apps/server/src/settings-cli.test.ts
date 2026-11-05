@@ -107,9 +107,7 @@ function bridge(app: FastifyInstance) {
 }
 
 async function botRuntime() {
-  const directory = await mkdtemp(join(tmpdir(), 'dutydeck-settings-cli-'));
-  cleanups.push(() => rm(directory, { recursive: true, force: true }));
-  const repos = createRepositories(join(directory, 'test.sqlite'));
+  const repos = createRepositories(':memory:');
   cleanups.push(() => repos.close());
   await repos.config.set(larkBotsConfigKey, JSON.stringify([{ appId: 'cli_a', appSecret: 'secret-a', listening: false, permissionMode: 'ask', defaultAgentId: 'codex' }]));
   const app = await buildApp({} as any, { lark: { env: { DUTYDECK_DISABLE_LARK_LISTENER: 'true' }, config: repos.config, fetcher: vi.fn(async () => { throw new Error('Unexpected network'); }) } });
@@ -274,9 +272,9 @@ describe('settings CLI against the real bot routes', () => {
     expect((await run('bot-set', { appId: 'cli_a', pairs: ['fallbackAgentId='] })).bot).not.toHaveProperty('fallbackModel');
   });
 
-  it.each(['{}', '[null]', 'null'])('rejects malformed routing weights before enforced hook checks: %s', async weights => {
+  it('rejects malformed routing weights before enforced hook checks', async () => {
     const { run } = await botRuntime();
-    await expect(run('bot-set', { appId: 'cli_a', pairs: [`defaultAgentWeights=${weights}`, 'riskControlMode=enforced'] })).rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG' });
+    for (const weights of ['{}', '[null]', 'null']) await expect(run('bot-set', { appId: 'cli_a', pairs: [`defaultAgentWeights=${weights}`, 'riskControlMode=enforced'] }), weights).rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG' });
   });
 
   it('saves, reads and clears Agent routing weights', async () => {
@@ -288,16 +286,18 @@ describe('settings CLI against the real bot routes', () => {
     expect((await run('bot-set', { appId: 'cli_a', pairs: ['defaultAgentWeights=[]'] })).bot).not.toHaveProperty('defaultAgentWeights');
   });
 
-  it.each(['chat', 'shared', 'new-topic', 'chat-topic'])('clears the explicit %s reply mode with auto without changing omitted-field semantics', async mode => {
+  it('clears each explicit reply mode with auto without changing omitted-field semantics', async () => {
     const { repos, run, fetcher } = await botRuntime();
-    await run('bot-set', { appId: 'cli_a', pairs: [`groupReplyMode=${mode}`] });
-    await run('bot-set', { appId: 'cli_a', pairs: ['preInjectPrompt=retain reply mode'] });
-    expect((await readLarkConfig(repos.config, 'cli_a'))?.groupReplyMode).toBe(mode);
-    const result = await run('bot-set', { appId: 'cli_a', pairs: ['groupReplyMode=auto'] });
-    expect(result.bot).not.toHaveProperty('groupReplyMode');
-    expect(await readLarkConfig(repos.config, 'cli_a')).not.toHaveProperty('groupReplyMode');
-    const last = fetcher.mock.calls.filter(([, init]) => init?.method === 'PUT').at(-1)!;
-    expect(JSON.parse(String(last[1]!.body))).toMatchObject({ groupReplyMode: null });
+    for (const mode of ['chat', 'shared', 'new-topic', 'chat-topic']) {
+      await run('bot-set', { appId: 'cli_a', pairs: [`groupReplyMode=${mode}`] });
+      await run('bot-set', { appId: 'cli_a', pairs: [`preInjectPrompt=retain ${mode}`] });
+      expect((await readLarkConfig(repos.config, 'cli_a'))?.groupReplyMode, mode).toBe(mode);
+      const result = await run('bot-set', { appId: 'cli_a', pairs: ['groupReplyMode=auto'] });
+      expect(result.bot, mode).not.toHaveProperty('groupReplyMode');
+      expect(await readLarkConfig(repos.config, 'cli_a'), mode).not.toHaveProperty('groupReplyMode');
+      const last = fetcher.mock.calls.filter(([, init]) => init?.method === 'PUT').at(-1)!;
+      expect(JSON.parse(String(last[1]!.body)), mode).toMatchObject({ groupReplyMode: null });
+    }
   });
 
   it('changes bot settings with typed values and the current revision, like the dashboard', async () => {
@@ -558,7 +558,7 @@ describe('settings CLI against the real bot routes', () => {
 async function dutyRuntime() {
   const directory = await mkdtemp(join(tmpdir(), 'dutydeck-settings-duty-'));
   cleanups.push(() => rm(directory, { recursive: true, force: true }));
-  const repos = createRepositories(join(directory, 'test.sqlite'));
+  const repos = createRepositories(':memory:');
   cleanups.push(() => repos.close());
   const host = await PluginHost.load({ dataDir: directory });
   const participation = new LarkGroupParticipation({ repository: repos.collaboration, decider: {} as any, authorize: async () => true, serviceFor: () => ({}) as any,
@@ -768,6 +768,8 @@ describe('plugin bindings management parity', () => {
     const { PluginStore } = await import('./plugins/store.js');
     const { setPluginSkillRoots } = await import('./skill-catalog.js');
     const directory = await mkdtemp(join(tmpdir(), 'dutydeck-binding-cli-')); cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    // 技能解析会扫描 HOME 下的用户技能目录；指向临时目录，避免读取宿主技能。
+    vi.stubEnv('HOME', directory);
     const source = join(directory, 'package'); await mkdir(join(source, '.dutydeck-plugin'), { recursive: true });
     await mkdir(join(source, 'skills', 'answer'), { recursive: true }); await writeFile(join(source, 'skills/answer/SKILL.md'), '---\nname: answer\ndescription: SOP\n---\nREQUIRED');
     await writeFile(join(source, '.dutydeck-plugin/plugin.json'), JSON.stringify({ name: 'sample', apiVersion: 1, skills: 'skills', requiredSkills: ['sample/answer'], bindingConfig: { count: { type: 'integer', default: 2, min: 1, max: 5, description: 'Count' }, token: { type: 'secret', description: 'Credential', required: true } } }));

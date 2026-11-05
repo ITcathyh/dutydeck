@@ -45,9 +45,10 @@ async function writer(operation: string, target: string, hold = false) {
 }
 
 it('preserves both acknowledged disables from independent unmodified processes', async () => {
-  for (let round = 0; round < 8; round++) {
+  // writer 收到 start 后才读写锁文件；先并发拉起全部子进程，省掉每轮串行的 tsx 启动。
+  const pairs = await Promise.all(Array.from({ length: 8 }, () => Promise.all([writer('disable', 'one'), writer('disable', 'two')])));
+  for (const [first, second] of pairs) {
     await store.setEnabled('one', true); await store.setEnabled('two', true);
-    const first = await writer('disable', 'one'), second = await writer('disable', 'two');
     first.start(); second.start();
     expect(await first.result()).toMatchObject({ ok: true });
     expect(await second.result()).toMatchObject({ ok: true });
@@ -60,7 +61,7 @@ it('preserves both acknowledged disables from independent unmodified processes',
 
 it.each(['disable', 'install', 'update', 'uninstall'])('coordinates %s with an independent lockfile writer', async operation => {
   const target = operation === 'install' ? await plugin('three') : 'two';
-  const first = await writer('disable', 'one', true), second = await writer(operation, target, true);
+  const [first, second] = await Promise.all([writer('disable', 'one', true), writer(operation, target, true)]);
   first.start(); await first.wait('snapshot');
   second.start(); await second.wait('attempt');
   await new Promise(resolve => setTimeout(resolve, 100));
@@ -82,11 +83,11 @@ it('keeps serial and same-process changes and leaves no temporary lockfile write
 });
 
 it('releases a killed owner without deleting the persistent SQLite lock file', async () => {
-  const first = await writer('disable', 'one', true);
+  const [first, second] = await Promise.all([writer('disable', 'one', true), writer('disable', 'two')]);
   first.start(); await first.wait('snapshot');
   const exited = new Promise(resolve => first.child.once('exit', resolve));
   first.child.kill('SIGKILL'); await exited;
-  const second = await writer('disable', 'two'); second.start();
+  second.start();
   expect(await second.result()).toMatchObject({ ok: true });
   expect(store.get('one').enabled).toBe(true);
   expect(store.get('two').enabled).toBe(false);

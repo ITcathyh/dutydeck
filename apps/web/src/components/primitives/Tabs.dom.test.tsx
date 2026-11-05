@@ -66,7 +66,7 @@ describe('Tabs 渲染', () => {
 
 describe('Tabs 键盘操作', () => {
   it('ArrowRight 选中下一个，并把焦点一起搬过去', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(<Host/>);
     focusSelected();
     await user.keyboard('{ArrowRight}');
@@ -77,7 +77,7 @@ describe('Tabs 键盘操作', () => {
   });
 
   it('ArrowLeft 选中上一个，并把焦点一起搬过去', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(<Host initial="diff"/>);
     focusSelected();
     await user.keyboard('{ArrowLeft}');
@@ -87,7 +87,7 @@ describe('Tabs 键盘操作', () => {
   });
 
   it('ArrowRight 在末尾回到第一个（首尾循环）', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(<Host initial="diff"/>);
     focusSelected();
     await user.keyboard('{ArrowRight}');
@@ -97,7 +97,7 @@ describe('Tabs 键盘操作', () => {
   });
 
   it('ArrowLeft 在开头回到最后一个（首尾循环）', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(<Host initial="timeline"/>);
     focusSelected();
     await user.keyboard('{ArrowLeft}');
@@ -107,7 +107,7 @@ describe('Tabs 键盘操作', () => {
   });
 
   it('连续方向键从新位置继续走，而不是从旧位置重算', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(<Host/>);
     focusSelected();
     await user.keyboard('{ArrowRight}{ArrowRight}');
@@ -117,7 +117,7 @@ describe('Tabs 键盘操作', () => {
   });
 
   it('Home 选中第一个，End 选中最后一个', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(<Host initial="terminal"/>);
     focusSelected();
     await user.keyboard('{End}');
@@ -129,7 +129,7 @@ describe('Tabs 键盘操作', () => {
   });
 
   it('其它按键不拦截，也不改选中项', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onChange = vi.fn();
     render(<Host onChange={onChange}/>);
     focusSelected();
@@ -141,7 +141,7 @@ describe('Tabs 键盘操作', () => {
 
 describe('Tabs 鼠标操作', () => {
   it('点击标签回调 onChange，并带上被点的 id', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onChange = vi.fn();
     render(<Host onChange={onChange}/>);
     await user.click(screen.getByRole('tab', { name: '改动' }));
@@ -151,7 +151,7 @@ describe('Tabs 鼠标操作', () => {
   });
 
   it('受控用法下不自作主张：value 不变时选中项也不变', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onChange = vi.fn();
     render(<Tabs value="timeline" label="详情视图" items={items} onChange={onChange}/>);
     await user.click(screen.getByRole('tab', { name: '终端' }));

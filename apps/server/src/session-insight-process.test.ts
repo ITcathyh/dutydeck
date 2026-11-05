@@ -95,6 +95,7 @@ if (mode === 'success') {
   setInterval(() => {}, 10000);
 } else if (mode === 'hang_ignore_sigterm') {
   process.on('SIGTERM', () => {});
+  fs.writeFileSync(path.join(process.cwd(), 'sigterm-ignored'), 'ready');
   setInterval(() => {}, 10000);
 } else if (mode === 'concat_json') {
   process.stdout.write((config.resultJson || '') + (config.resultJson || ''));
@@ -257,15 +258,18 @@ if (mode === 'success') {
   it('escalates to SIGKILL when child ignores SIGTERM, without clearing escalation timer', async () => {
     await setFakeEngineConfig({ mode: 'hang_ignore_sigterm' });
 
+    // 子进程须在 deadline 前装好 SIGTERM 处理器，否则 SIGTERM 直接杀死它，测不到升级；高负载下 Node 启动可超过 100ms。
+    const deadlineMs = 600;
     const start = Date.now();
     try {
-      await runInsightProcess(baseOpts({ deadline: Date.now() + 100 }) as any);
+      await runInsightProcess(baseOpts({ deadline: Date.now() + deadlineMs }) as any);
       expect.fail('Should have timed out');
     } catch (err: unknown) {
       expect((err as SessionInsightProcessError).code).toBe('INSIGHT_TIMEOUT');
     }
+    expect(fs.existsSync(path.join(testRoot, 'sigterm-ignored')), 'child installed the SIGTERM handler before the deadline').toBe(true);
     // SIGTERM 被忽略，必须靠 2s 宽限后的 SIGKILL 才在 close 终态返回
-    expect(Date.now() - start).toBeGreaterThanOrEqual(1900);
+    expect(Date.now() - start).toBeGreaterThanOrEqual(deadlineMs + 1900);
   });
 
   it('terminates on AbortSignal and rejects INSIGHT_INTERRUPTED', async () => {

@@ -82,10 +82,11 @@ describe('persistent Lark task inbox', () => {
       const inbox = new LarkTaskInbox(repositories.config);
       await inbox.claim('app_one', message({ messageId: 'received' }));
       const at = new Date().toISOString();
-      for (let index = 0; index < 5001; index++) {
+      const writes = Array.from({ length: 5001 }, (_, index) => {
         const event = message({ messageId: `ignored_${index}` });
-        await repositories.config.set(`lark.inbox.app_one.${event.messageId}`, JSON.stringify({ appId: 'app_one', event, boot: '', state: 'ignored', receivedAt: at, receiptOrder: index }));
-      }
+        return { key: `lark.inbox.app_one.${event.messageId}`, value: JSON.stringify({ appId: 'app_one', event, boot: '', state: 'ignored', receivedAt: at, receiptOrder: index }) };
+      });
+      expect(await repositories.config.compareAndSetBatch!([], writes)).toBe(true);
       await repositories.config.set('lark.inbox.app_one.expired', JSON.stringify({ appId: 'app_one', event: message({ messageId: 'expired' }), boot: '', state: 'ignored', receivedAt: new Date(Date.now() - 30 * 86_400_000 - 1).toISOString() }));
       await inbox.pruneIgnored('app_one');
       const rows = await repositories.config.list!('lark.inbox.app_one.');

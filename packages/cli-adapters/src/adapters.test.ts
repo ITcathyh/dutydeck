@@ -835,21 +835,29 @@ describe('全适配器横切契约', () => {
   });
 
   it('writeInput 在裸 PTY 后端上把 prompt 送达且以提交收尾', async () => {
-    for (const id of EXPECTED_IDS) {
-      const adapter = createCliAdapter(id);
-      const writes: string[] = [];
-      await adapter.writeInput({ write: data => { writes.push(data); return true; },
-        readScreen: () => 'TraeX\n❯ Ask TraeCode CLI\nContext 100% left' }, 'hello');
-      const joined = writes.join('');
-      expect(joined.length, `${id} 应向裸 PTY 写入内容`).toBeGreaterThan(0);
-      // pass-through 壳（riff/mojo）由后端负责提交语义，不追加 \r。
-      if (id === 'riff' || id === 'mojo') {
-        expect(joined, `${id} 是直通壳，应原样写入`).toBe('hello');
-        continue;
+    // 适配器在写入与提交之间有固定等待；用假时钟推进，断言只看写入序列。
+    vi.useFakeTimers();
+    try {
+      for (const id of EXPECTED_IDS) {
+        const adapter = createCliAdapter(id);
+        const writes: string[] = [];
+        const pending = adapter.writeInput({ write: data => { writes.push(data); return true; },
+          readScreen: () => 'TraeX\n❯ Ask TraeCode CLI\nContext 100% left' }, 'hello');
+        await vi.runAllTimersAsync();
+        await pending;
+        const joined = writes.join('');
+        expect(joined.length, `${id} 应向裸 PTY 写入内容`).toBeGreaterThan(0);
+        // pass-through 壳（riff/mojo）由后端负责提交语义，不追加 \r。
+        if (id === 'riff' || id === 'mojo') {
+          expect(joined, `${id} 是直通壳，应原样写入`).toBe('hello');
+          continue;
+        }
+        expect(joined, `${id} 应以 CR 提交`).toContain('\r');
       }
-      expect(joined, `${id} 应以 CR 提交`).toContain('\r');
+    } finally {
+      vi.useRealTimers();
     }
-  }, 30_000);
+  });
 });
 
 describe('runner 类适配器', () => {

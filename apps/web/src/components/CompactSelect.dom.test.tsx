@@ -24,7 +24,7 @@ describe('CompactSelect 开合与选择', () => {
   });
 
   it('点击展开 listbox，再点收起', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(<CompactSelect {...baseProps}/>);
     await user.click(screen.getByRole('button', { name: /选项 A/ }));
     expect(screen.getByRole('listbox')).toBeTruthy();
@@ -34,7 +34,7 @@ describe('CompactSelect 开合与选择', () => {
   });
 
   it('选中项标记 aria-selected，其它项为 false', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(<CompactSelect {...baseProps} value="b"/>);
     await user.click(screen.getByRole('button', { name: /选项 B/ }));
     const items = screen.getAllByRole('option');
@@ -43,7 +43,7 @@ describe('CompactSelect 开合与选择', () => {
   });
 
   it('点选某项 → 回调 value 并自动收起面板', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onChange = vi.fn();
     render(<CompactSelect {...baseProps} onChange={onChange}/>);
     await user.click(screen.getByRole('button', { name: /选项 A/ }));
@@ -53,7 +53,7 @@ describe('CompactSelect 开合与选择', () => {
   });
 
   it('点击组件外部关闭面板（pointerdown 监听器生效）', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(<><div data-testid="outside">外部</div><CompactSelect {...baseProps}/></>);
     await user.click(screen.getByRole('button', { name: /选项 A/ }));
     expect(screen.getByRole('listbox')).toBeTruthy();
@@ -62,33 +62,33 @@ describe('CompactSelect 开合与选择', () => {
   });
 
   it('supports Arrow/Home/End navigation and Enter selection', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onChange = vi.fn();
     render(<CompactSelect {...baseProps} onChange={onChange}/>);
     const button = screen.getByRole('button', { name: /选项 A/ });
     button.focus();
     await user.keyboard('{ArrowDown}');
-    await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole('option', { name: /选项 A/ })));
+    await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole('option', { name: /选项 A/ })), { interval: 5 });
     await user.keyboard('{End}');
     expect(document.activeElement).toBe(screen.getByRole('option', { name: /选项 B/ }));
     await user.keyboard('{Home}{ArrowDown}{Enter}');
     expect(onChange).toHaveBeenCalledWith('b');
     expect(screen.queryByRole('listbox')).toBeNull();
-    await vi.waitFor(() => expect(document.activeElement).toBe(button));
+    await vi.waitFor(() => expect(document.activeElement).toBe(button), { interval: 5 });
   });
 
   it('Escape closes only the listbox and restores its trigger', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const parentKeyDown = vi.fn();
     render(<div onKeyDown={parentKeyDown}><CompactSelect {...baseProps}/></div>);
     const button = screen.getByRole('button', { name: /选项 A/ });
     await user.click(button);
-    await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole('option', { name: /选项 A/ })));
+    await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole('option', { name: /选项 A/ })), { interval: 5 });
     parentKeyDown.mockClear();
     await user.keyboard('{Escape}');
     expect(screen.queryByRole('listbox')).toBeNull();
     expect(parentKeyDown).not.toHaveBeenCalled();
-    await vi.waitFor(() => expect(document.activeElement).toBe(button));
+    await vi.waitFor(() => expect(document.activeElement).toBe(button), { interval: 5 });
   });
 });
 
@@ -110,10 +110,10 @@ describe('CompactSelect 嵌在 Dialog 里的 Escape 语义（契约 §8.1）', (
   }
 
   it('焦点在选项上时：Escape 只收 listbox，Dialog 不关；再按一次才关 Dialog', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(<Harness/>);
     await user.click(screen.getByRole('button', { name: /选项 A/ }));
-    await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole('option', { name: /选项 A/ })));
+    await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole('option', { name: /选项 A/ })), { interval: 5 });
 
     await user.keyboard('{Escape}');
     expect(screen.queryByRole('listbox')).toBeNull();
@@ -127,7 +127,7 @@ describe('CompactSelect 嵌在 Dialog 里的 Escape 语义（契约 §8.1）', (
   // 这时没有任何合成事件经过 CompactSelect，Escape 直接打到 document——
   // 只有 useEscapeKey 的 LIFO 栈能保住这张表单。
   it('焦点已挪到弹层内别处时：Escape 仍然先收 listbox，不丢表单', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(<Harness/>);
     await user.click(screen.getByRole('button', { name: /选项 A/ }));
     expect(screen.getByRole('listbox')).toBeTruthy();
@@ -151,7 +151,7 @@ describe('CompactSelect 与 Field 的无障碍关联', () => {
 
 describe('CompactSelect 空态与禁用', () => {
   it('无选项 → 展示 disabledText 且按钮 disabled，点击不展开', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(<CompactSelect {...baseProps} options={[]}/>);
     const button = screen.getByRole('button');
     expect(button.textContent).toContain('不可用');
@@ -166,7 +166,7 @@ describe('CompactSelect 空态与禁用', () => {
   });
 
   it('disabled=true 时即便有选项也不能展开', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(<CompactSelect {...baseProps} disabled/>);
     await user.click(screen.getByRole('button'));
     expect(screen.queryByRole('listbox')).toBeNull();
@@ -185,7 +185,7 @@ describe('AgentSelect', () => {
   ];
 
   it('用 agent.name 做标签、version 做 meta', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     render(<AgentSelect agents={agents} value="codex" onChange={() => {}}/>);
     const button = screen.getByRole('button');
     expect(button.textContent).toContain('Codex');
@@ -195,7 +195,7 @@ describe('AgentSelect', () => {
   });
 
   it('选择 agent 回调其 id（不是 name）', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onChange = vi.fn();
     render(<AgentSelect agents={agents} value="codex" onChange={onChange}/>);
     await user.click(screen.getByRole('button'));

@@ -6,7 +6,7 @@
  *
  * Run: pnpm vitest run packages/pty-driver/src/transcript/transcript.test.ts
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -19,6 +19,11 @@ import { createTranscriptTailer } from './index.js';
 import { JsonlTailer } from './tail.js';
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+/** 等轮询读到期望事件，再 flush 一次让迟到的重复事件也落进来，后面的精确断言照旧。 */
+async function settle(tailer: { flush(): Promise<void> }, ready: () => boolean): Promise<void> {
+  await vi.waitFor(() => { if (!ready()) throw new Error('transcript events not yet emitted'); }, { timeout: 5_000, interval: 10 });
+  await tailer.flush();
+}
 
 let tempRoots: string[] = [];
 
@@ -175,7 +180,7 @@ describe('ClaudeTranscriptTailer (explicit path)', () => {
         ],
       },
     }) + '\n');
-    await sleep(150);
+    await settle(tailer, () => events.length >= 3);
 
     expect(events.map(e => e.type)).toEqual(['thinking', 'text', 'tool_call']);
     expect(events[0]!.data).toEqual({ text: 'let me think about this' });
@@ -196,7 +201,7 @@ describe('ClaudeTranscriptTailer (explicit path)', () => {
         ],
       },
     }) + '\n');
-    await sleep(150);
+    await settle(tailer, () => events.length >= 4);
 
     expect(events.map(e => e.type)).toEqual(['thinking', 'text', 'tool_call', 'tool_result']);
     expect(events[3]!.data).toEqual({
@@ -229,7 +234,7 @@ describe('ClaudeTranscriptTailer (explicit path)', () => {
         }],
       },
     }) + '\n');
-    await sleep(150);
+    await settle(tailer, () => events.length >= 1);
 
     expect(events).toHaveLength(1);
     expect(events[0]!.type).toBe('tool_result');
@@ -253,7 +258,7 @@ describe('ClaudeTranscriptTailer (explicit path)', () => {
     expect(events).toHaveLength(0);
 
     appendFileSync(file, 'RITE"}]}}\n');
-    await sleep(150);
+    await settle(tailer, () => events.length >= 1);
     expect(events).toHaveLength(1);
     expect(events[0]!.type).toBe('text');
     expect(events[0]!.data.text).toBe('HALFWRITE');
@@ -286,7 +291,7 @@ describe('ClaudeTranscriptTailer (explicit path)', () => {
       type: 'assistant',
       message: { role: 'assistant', content: [{ type: 'text', text: 'real answer' }] },
     }) + '\n');
-    await sleep(150);
+    await settle(tailer, () => events.length >= 1);
 
     expect(events).toHaveLength(1);
     expect(events[0]!.data.text).toBe('real answer');
@@ -307,7 +312,7 @@ describe('ClaudeTranscriptTailer (explicit path)', () => {
       type: 'assistant',
       message: { role: 'assistant', content: [{ type: 'text', text: 'first line after creation' }] },
     }) + '\n');
-    await sleep(150);
+    await settle(tailer, () => events.length >= 1);
 
     expect(events).toHaveLength(1);
     expect(events[0]!.data.text).toBe('first line after creation');
@@ -618,7 +623,7 @@ describe('ClaudeTranscriptTailer (directory resolution + switching)', () => {
       type: 'assistant',
       message: { role: 'assistant', content: [{ type: 'text', text: 'from mid session' }] },
     }) + '\n');
-    await sleep(150);
+    await settle(tailer, () => events.some(e => e.data.text === 'from mid session'));
     expect(events.map(e => e.data.text)).toContain('from mid session');
 
     // A newer jsonl appears (session switch): the tailer follows it.
@@ -631,7 +636,7 @@ describe('ClaudeTranscriptTailer (directory resolution + switching)', () => {
       type: 'assistant',
       message: { role: 'assistant', content: [{ type: 'text', text: 'from new session' }] },
     }) + '\n');
-    await sleep(150);
+    await settle(tailer, () => events.some(e => e.data.text === 'from new session'));
     expect(events.map(e => e.data.text)).toContain('from new session');
 
     // Appending to the old file after the switch does not emit.
@@ -769,7 +774,8 @@ describe('ClaudeTranscriptTailer (同 cwd 多会话隔离)', () => {
 
     appendFileSync(mineFile, assistantEntry('MINE answer'));
     appendFileSync(siblingFile, assistantEntry('SIBLING answer'));
-    await sleep(200);
+    await settle(mineTailer, () => mineEvents.some(e => e.data.text === 'MINE answer'));
+    await settle(siblingTailer, () => siblingEvents.some(e => e.data.text === 'SIBLING answer'));
 
     const mineTexts = mineEvents.map(e => e.data.text);
     const siblingTexts = siblingEvents.map(e => e.data.text);
@@ -808,7 +814,7 @@ describe('ClaudeTranscriptTailer (同 cwd 多会话隔离)', () => {
     writeFileSync(mineFile, markerEntry(`ses_${mine}`));
     await sleep(100);
     appendFileSync(mineFile, assistantEntry('MINE answer'));
-    await sleep(200);
+    await settle(tailer, () => events.some(e => e.data.text === 'MINE answer'));
     expect(events.map(e => e.data.text)).toContain('MINE answer');
 
     tailer.stop();
@@ -853,7 +859,7 @@ describe('CodexTranscriptTailer (explicit path)', () => {
       type: 'event_msg',
       payload: { type: 'task_complete', turn_id: 'turn_1', last_agent_message: 'All done.' },
     }) + '\n');
-    await sleep(200);
+    await settle(tailer, () => events.length >= 4);
 
     expect(events.map(e => e.type)).toEqual(['thinking', 'tool_call', 'tool_result', 'text']);
     expect(events[0]!.data).toEqual({ text: 'planning the fix' });
@@ -903,7 +909,7 @@ describe('CodexTranscriptTailer (explicit path)', () => {
         content: [{ type: 'output_text', text: 'final answer text' }],
       },
     }) + '\n');
-    await sleep(200);
+    await settle(tailer, () => events.length >= 4);
 
     expect(events.map(e => e.type)).toEqual(['tool_call', 'tool_call', 'tool_call', 'text']);
     expect(events[0]!.data.name).toBe('view_image');
@@ -928,7 +934,7 @@ describe('CodexTranscriptTailer (explicit path)', () => {
     expect(events).toHaveLength(0);
 
     appendFileSync(file, 'IAL"}}\n');
-    await sleep(150);
+    await settle(tailer, () => events.length >= 1);
     expect(events).toHaveLength(1);
     expect(events[0]!.data.text).toBe('PARTIAL');
 

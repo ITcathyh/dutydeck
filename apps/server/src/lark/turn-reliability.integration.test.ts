@@ -11,6 +11,7 @@ import { LarkMessageCoordinator, type PersistedLarkCardTask } from './coordinato
 import { explicitFinalContext, sendExplicitFinal } from './explicit-final.js';
 import { larkControlPhrase } from './coordinator-inbound.js';
 import { larkAgentAvailabilityLine } from './commands.js';
+import { larkAgentUnavailableReason } from './agent-fallback.js';
 import type { LarkMessageEvent } from './listener.js';
 import { buildLarkCard } from './service.js';
 
@@ -570,7 +571,12 @@ describe('/status 的 Agent 状态行', () => {
 
 
 describe('Bot Agent fallback with real Runtime and SQLite', () => {
-  it.each(['AGENT_LOGIN_REQUIRED', 'claude_api_rate_limit', 'claude_api_overloaded', 'usage_limit_exceeded'])('switches once for %s before activity, then keeps the fallback after restart', async code => {
+  // 这几个代码都只经 larkAgentUnavailableReason 的集合判断进入同一条切换路径：逐个确认分类，端到端只跑两个代表。
+  it('classifies every provider code used here as unavailable', () => {
+    for (const code of ['AGENT_LOGIN_REQUIRED', 'claude_api_rate_limit', 'claude_api_overloaded', 'usage_limit_exceeded']) expect(larkAgentUnavailableReason({ code, message: 'Provider unavailable' })).toBe('Provider unavailable');
+  });
+
+  it.each(['AGENT_LOGIN_REQUIRED', 'usage_limit_exceeded'])('switches once for %s before activity, then keeps the fallback after restart', async code => {
     const h = await topic({ fallback: true });
     h.config.defaultModel = 'primary-model';
     h.steps.push({ kind: 'provider', code, activity: [{ type: 'raw_terminal', data: { text: 'provider status screen' } } as any] });
@@ -617,8 +623,8 @@ describe('Bot Agent fallback with real Runtime and SQLite', () => {
   });
 
   it.each([
+    // thinking 与 tool_call 走 larkFallbackHasActivity 的同一分支；text 另有 role=user 例外，单独保留。
     { type: 'text', data: { text: '已经开始处理' } },
-    { type: 'thinking', data: { text: '正在分析' } },
     push
   ] as NormalizedDriverEvent[])('does not replay after $type activity even when the final window is truncated', async activity => {
     const h = await topic({ fallback: true });

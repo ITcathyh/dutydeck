@@ -1,20 +1,27 @@
-import { execFileSync } from 'node:child_process';
-import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { execFile, execFileSync } from 'node:child_process';
+import { cp, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { promisify } from 'node:util';
 import { expect, it } from 'vitest';
+
+const execFileAsync = promisify(execFile);
 
 /** Run after build:packages: no repository source or development export conditions in this probe. */
 it('runs structured content through packed ACP/shared modules outside the checkout', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'dutydeck-content-pack-'));
   const checkout = process.cwd();
   try {
-    for (const [name, version] of [['shared', '0.1.0'], ['acp-client', '0.1.0'], ['plugin-sdk', '1.0.0']]) {
-      execFileSync('pnpm', ['--filter', `@dutydeck/${name}`, 'pack', '--pack-destination', directory], { cwd: checkout, stdio: 'pipe' });
+    // dist comes from build:packages; skipping prepack avoids rebuilding the shared checkout's dist mid-run,
+    // so refuse to pack a dist older than its sources instead of silently probing stale output.
+    await Promise.all([['shared', '0.1.0'], ['acp-client', '0.1.0'], ['plugin-sdk', '1.0.0']].map(async ([name, version]) => {
+      const newest = async (path: string) => Math.max(...await Promise.all((await readdir(path, { recursive: true, withFileTypes: true })).filter(entry => entry.isFile() && !entry.name.includes('.test.')).map(async entry => (await stat(join(entry.parentPath, entry.name))).mtimeMs)));
+      expect(await newest(resolve(checkout, 'packages', name!, 'dist')), `packages/${name}/dist is older than src; run pnpm build:packages`).toBeGreaterThanOrEqual(await newest(resolve(checkout, 'packages', name!, 'src')));
+      await execFileAsync('pnpm', ['--config.ignore-scripts=true', '--filter', `@dutydeck/${name}`, 'pack', '--pack-destination', directory], { cwd: checkout });
       const target = join(directory, 'node_modules', '@dutydeck', name!);
       await mkdir(target, { recursive: true });
-      execFileSync('tar', ['xzf', join(directory, `dutydeck-${name}-${version}.tgz`), '-C', target, '--strip-components=1']);
-    }
+      await execFileAsync('tar', ['xzf', join(directory, `dutydeck-${name}-${version}.tgz`), '-C', target, '--strip-components=1']);
+    }));
     for (const [name, target] of [['acpx', 'packages/acp-client/node_modules/acpx'], ['zod', 'packages/shared/node_modules/zod'], ['safe-regex2', 'packages/shared/node_modules/safe-regex2']]) await symlink(resolve(checkout, target!), join(directory, 'node_modules', name!), 'dir');
     await cp(resolve(checkout, 'tests/fixtures/mock-acp-agent.mjs'), join(directory, 'agent.mjs'));
     await writeFile(join(directory, 'probe.mjs'), `

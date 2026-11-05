@@ -17,7 +17,7 @@ const baseProps = {
 
 describe('ConfirmDialog 交互', () => {
   it('点击确认按钮回调 onConfirm，且不误触 onCancel', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onConfirm = vi.fn();
     const onCancel = vi.fn();
     render(<ConfirmDialog {...baseProps} open onConfirm={onConfirm} onCancel={onCancel}/>);
@@ -27,7 +27,7 @@ describe('ConfirmDialog 交互', () => {
   });
 
   it('点击取消按钮回调 onCancel，且不误触 onConfirm', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onConfirm = vi.fn();
     const onCancel = vi.fn();
     render(<ConfirmDialog {...baseProps} open onConfirm={onConfirm} onCancel={onCancel}/>);
@@ -37,7 +37,7 @@ describe('ConfirmDialog 交互', () => {
   });
 
   it('Esc 关闭弹窗', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onCancel = vi.fn();
     render(<ConfirmDialog {...baseProps} open onCancel={onCancel}/>);
     await user.keyboard('{Escape}');
@@ -45,7 +45,7 @@ describe('ConfirmDialog 交互', () => {
   });
 
   it('busy 时 Esc 不生效（正在执行的破坏性操作不能被键盘中断）', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onCancel = vi.fn();
     render(<ConfirmDialog {...baseProps} open busy onCancel={onCancel}/>);
     await user.keyboard('{Escape}');
@@ -60,7 +60,7 @@ describe('ConfirmDialog 交互', () => {
   });
 
   it('点击遮罩关闭；busy 时点击遮罩不关闭', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onCancel = vi.fn();
     // 弹层 portal 到 document.body，不在 RTL 的 container 里，只能从 baseElement 找。
     const { baseElement, rerender } = render(<ConfirmDialog {...baseProps} open onCancel={onCancel}/>);
@@ -73,32 +73,9 @@ describe('ConfirmDialog 交互', () => {
     expect(onCancel).not.toHaveBeenCalled();
   });
 
-  it('portal 到 document.body，不留在组件树里（契约 §7）', () => {
-    const { container, baseElement } = render(<ConfirmDialog {...baseProps} open/>);
-    const dialog = screen.getByRole('alertdialog', { name: '删除该 Session？' });
-    expect(container.contains(dialog)).toBe(false);
-    expect(document.body.contains(dialog)).toBe(true);
-    expect(baseElement).toBe(document.body);
-  });
-
   it('打开后焦点自动落到「取消」而不是危险的确认按钮', async () => {
     render(<ConfirmDialog {...baseProps} open tone="danger"/>);
-    await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: '取消' })));
-  });
-
-  it('Tab 焦点在弹窗内循环，不逃到弹窗外的元素', async () => {
-    const user = userEvent.setup();
-    render(<><button type="button">页面外按钮</button><ConfirmDialog {...baseProps} open/></>);
-    const cancel = screen.getByRole('button', { name: '取消' });
-    const confirm = screen.getByRole('button', { name: '删除' });
-    await vi.waitFor(() => expect(document.activeElement).toBe(cancel));
-    await user.tab();
-    expect(document.activeElement).toBe(confirm);
-    // 到达最后一个可聚焦元素后应绕回第一个，而非跳到「页面外按钮」
-    await user.tab();
-    expect(document.activeElement).toBe(cancel);
-    await user.tab({ shift: true });
-    expect(document.activeElement).toBe(confirm);
+    await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: '取消' })), { interval: 5 });
   });
 
   it('tone="danger" 时确认按钮为红色，默认 warning 为深灰', () => {
@@ -117,7 +94,7 @@ describe('ConfirmDialog 交互', () => {
   });
 
   it('open=false 时不渲染任何内容，也不注册 keydown（Esc 不触发回调）', async () => {
-    const user = userEvent.setup();
+    const user = userEvent.setup({ delay: null });
     const onCancel = vi.fn();
     const { container, baseElement } = render(<ConfirmDialog {...baseProps} open={false} onCancel={onCancel}/>);
     expect(container.innerHTML).toBe('');

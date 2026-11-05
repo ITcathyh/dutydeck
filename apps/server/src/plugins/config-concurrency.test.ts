@@ -40,7 +40,7 @@ async function writer(plugin: string, key: string, operation = 'set') {
 }
 
 it.each(['one', 'two'])('preserves acknowledged keys from independent writers targeting one and %s', async secondPlugin => {
-  const first = await writer('one', 'first'), second = await writer(secondPlugin, 'second');
+  const [first, second] = await Promise.all([writer('one', 'first'), writer(secondPlugin, 'second')]);
   first.start(); second.start();
   await vi.waitFor(() => expect([...first.messages, ...second.messages].some(message => message.type === 'read')).toBe(true));
   // Hold the first snapshot long enough for the other process to attempt the same transaction.
@@ -56,7 +56,7 @@ it.each(['one', 'two'])('preserves acknowledged keys from independent writers ta
 
 it('serializes uninstall configuration cleanup with a writer for another plugin', async () => {
   await store.setConfig('one', 'first', Buffer.from('old'));
-  const first = await writer('one', '', 'uninstall'), second = await writer('two', 'second');
+  const [first, second] = await Promise.all([writer('one', '', 'uninstall'), writer('two', 'second')]);
   first.start();
   await vi.waitFor(() => expect(first.messages.some(message => message.type === 'read')).toBe(true));
   second.start(); await new Promise(resolve => setTimeout(resolve, 100));
@@ -90,9 +90,9 @@ it('releases the lock and clears input when reading configuration fails', async 
 
 
 it('keeps four independent contenders mutually exclusive after the owner is killed', async () => {
-  const owner = await writer('one', 'first'); owner.start();
+  const [owner, ...contenders] = await Promise.all([writer('one', 'first'), ...['one', 'two'].flatMap(plugin => ['first', 'second'].map(key => writer(plugin, key)))]);
+  owner.start();
   await vi.waitFor(() => expect(owner.messages.some(message => message.type === 'read')).toBe(true));
-  const contenders = await Promise.all(['one', 'two'].flatMap(plugin => ['first', 'second'].map(key => writer(plugin, key))));
   for (const contender of contenders) contender.start();
   await vi.waitFor(() => expect(contenders.every(contender => contender.messages.some(message => message.type === 'attempt'))).toBe(true));
   await new Promise(resolve => setTimeout(resolve, 100));

@@ -27,13 +27,13 @@ import {
 const directories: string[] = [];
 afterEach(() => { for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true }); });
 
-const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8' }).trim();
+// 提交身份走环境变量，省掉每个仓库两次 git config 子进程。
+const identity = { ...process.env, GIT_AUTHOR_NAME: 'Dutydeck Test', GIT_AUTHOR_EMAIL: 'test@example.com', GIT_COMMITTER_NAME: 'Dutydeck Test', GIT_COMMITTER_EMAIL: 'test@example.com' };
+const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', env: identity }).trim();
 function repository(files: Record<string, string>) {
   const root = mkdtempSync(join(tmpdir(), 'dutydeck-auto-verify-'));
   directories.push(root);
   git(root, 'init', '-q');
-  git(root, 'config', 'user.email', 'test@example.com');
-  git(root, 'config', 'user.name', 'Dutydeck Test');
   for (const [path, content] of Object.entries({ 'README.md': 'baseline\n', ...files })) {
     mkdirSync(join(root, path, '..'), { recursive: true });
     writeFileSync(join(root, path), content);
@@ -97,8 +97,6 @@ describe('基准与「本轮改了代码」', () => {
     const clone = mkdtempSync(join(tmpdir(), 'dutydeck-auto-verify-clone-'));
     directories.push(clone);
     execFileSync('git', ['clone', '-q', origin, clone]);
-    git(clone, 'config', 'user.email', 'test@example.com');
-    git(clone, 'config', 'user.name', 'Dutydeck Test');
     writeFileSync(join(clone, 'local.txt'), 'local\n');
     git(clone, 'add', '.');
     git(clone, 'commit', '-qm', 'local commit');

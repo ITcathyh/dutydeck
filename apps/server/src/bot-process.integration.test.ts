@@ -50,8 +50,9 @@ async function task(child: ChildProcess) {
   expect((await result)[0]).toEqual({ task: 'completed', pid: child.pid });
 }
 it('isolates real runtimes and databases across SIGKILL and independent recovery', async () => {
-  const a = await shard('cli_a'), b = await shard('cli_b');
-  const processA = await boot(a), processB = await boot(b, true); const bPid = processB.pid;
+  const [a, b] = await Promise.all([shard('cli_a'), shard('cli_b')]);
+  // 两个分片互不依赖，并行冷启动以省一次 tsx 子进程启动时间。
+  const [processA, processB] = await Promise.all([boot(a), boot(b, true)]); const bPid = processB.pid;
   await task(processA);
   const runningB = task(processB);
   await expect.poll(async () => access(join(b.directory, 'gate/entered')).then(() => true, () => false), { timeout: 5_000 }).toBe(true);
