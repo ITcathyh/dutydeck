@@ -38,6 +38,13 @@ export function preconditionSummary(precondition: PublicSchedulePrecondition, ti
   return `最近一次前置命令：${result} · 连续跳过 ${precondition.skippedInARow} 次`;
 }
 
+function PreconditionDetails({ precondition, timezone }: { precondition: PublicSchedulePrecondition; timezone: string }) {
+  return <details className="mt-1 text-secondary"><summary className="cursor-pointer break-all">前置命令：<code>{precondition.command}</code>（{precondition.timeoutSeconds} 秒）</summary>
+    <p>{preconditionSummary(precondition, timezone)}</p>
+    {precondition.last?.output && <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-all text-subtle">{precondition.last.output}{precondition.last.outputTruncated ? '\n…（已截断）' : ''}</pre>}
+  </details>;
+}
+
 export function scheduleNextExecution(item: SessionSchedule): string {
   if (!item.enabled) return '未启用，暂无下一次执行';
   if (!item.nextDueAt) return '无下一次执行';
@@ -246,10 +253,7 @@ export function SessionAutomationPanel({ session, initialScheduleId, openCreateF
       <p className="mt-2 text-secondary">{scheduleRule(item)}</p>
       {scheduleFollowUp(item).map(line => <p key={line} className="break-words text-secondary">{line}</p>)}
       <details className="mt-1 text-subtle"><summary className="cursor-pointer">精确规则与执行条件</summary><p className="mt-1 break-all">{item.trigger.kind === 'cron' ? item.trigger.expression : item.trigger.kind === 'interval' ? `每 ${item.trigger.everySeconds} 秒，自 ${item.trigger.anchorAt} 起` : item.trigger.localDateTime}</p><p>{item.condition.kind === 'always' ? '每次到期执行' : `CI 新失败 · ${item.condition.provider}${item.condition.workflow ? ` · ${item.condition.workflow}` : ''}`}</p></details>
-      {data.preconditions?.[item.id] && <details className="mt-1 text-secondary"><summary className="cursor-pointer break-all">前置命令：<code>{data.preconditions[item.id]!.command}</code>（{data.preconditions[item.id]!.timeoutSeconds} 秒）</summary>
-        <p>{preconditionSummary(data.preconditions[item.id]!, item.timezone)}</p>
-        {data.preconditions[item.id]!.last?.output && <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-all text-subtle">{data.preconditions[item.id]!.last!.output}{data.preconditions[item.id]!.last!.outputTruncated ? '\n…（已截断）' : ''}</pre>}
-      </details>}
+      {data.preconditions?.[item.id] && <PreconditionDetails precondition={data.preconditions[item.id]!} timezone={item.timezone}/>}
       <p className="text-secondary">{scheduleNextExecution(item)}</p>
       <p className="text-subtle">{item.timezone} · {item.misfirePolicy === 'skip' ? '错过就跳过' : item.maxLatenessSeconds ? `错过后 ${item.maxLatenessSeconds / 60} 分钟内合并补一次` : '错过后最多补一次'}</p>
       {item.disabledReason && <p className="text-warning">停用原因：{item.disabledReason === 'Session is no longer active' ? '来源任务已结束或归档' : item.disabledReason === 'Schedule authorization is no longer available' ? '计划执行权限已失效' : item.disabledReason} · {automationTime(item.disabledAt, item.timezone)}</p>}

@@ -110,13 +110,15 @@ export const larkPermissionReminderAfterMs = 30 * 60_000;
 const timeoutHours = larkPermissionTimeoutMs / 3_600_000;
 /** 超时拒绝时交给 Agent 的原因（PTY 驱动会把它作为拒绝说明转告 CLI）。 */
 export const larkPermissionTimeoutReason = `超过 ${timeoutHours} 小时未处理，已自动拒绝`;
-/** 审批卡上说明等待与上限的那一行。 */
+/** 工作区规则在卡片上的写法：行内代码，规则里的反引号去掉。 */
+const workspaceRuleLabel = (pattern: string) => `\`${larkCommandEcho(pattern, 200).replace(/`/g, '')}\``;
 /** 「本工作区允许此类命令」的范围与风险：前缀规则覆盖的是项目脚本，脚本内容由仓库决定。 */
 const workspaceRuleNotice = (pattern: string) => {
-  const shown = `\`${larkCommandEcho(pattern, 200).replace(/`/g, '')}\``;
+  const shown = workspaceRuleLabel(pattern);
   return `「本工作区允许此类命令」由机器人所有者或管理员设置：之后这个机器人在上面这个目录里执行 ${shown}（只带允许的参数）都会自动允许（其他机器人不受影响），服务重启后仍有效，可在 Web 设置或 \`dutydeck settings approval-rules\` 撤销。`
     + `风险：规则只看命令文字，不看命令实际执行什么，例如允许 ${shown} 后，Agent 改了 package.json 里的脚本，就能借这条命令执行任意代码。`;
 };
+/** 审批卡上说明等待与上限的那一行。 */
 const permissionDeadlineNotice = (expiresAt: string) =>
   `任务会一直等待审批：${larkPermissionReminderAfterMs / 60_000} 分钟无人处理会提醒一次，超过 ${timeoutHours} 小时未处理才自动拒绝（${deadlineText(expiresAt)}）。`;
 /** 审批卡顶部的意图摘要；升级前的记录没有，不渲染。 */
@@ -200,9 +202,8 @@ const rejectReasonSummary = (reason: string) => larkCommandEcho(permissionDispla
 const withRejectReason = (message: string, reason?: string) => reason ? `${message}\n\n原因：${escapeLarkPromptEcho(reason)}` : message;
 
 /** 「其他」文字输入：选项之外的答案。表单字段名 other，与选项值 answer 分开，旧卡片没有这个字段。 */
-const otherAnswerMaxLength = freeTextInputMaxLength;
 const otherAnswerInput: LarkCardElement = {
-  tag: 'input', element_id: 'workflow_answer_other', name: 'other', input_type: 'multiline_text', max_length: otherAnswerMaxLength,
+  tag: 'input', element_id: 'workflow_answer_other', name: 'other', input_type: 'multiline_text', max_length: freeTextInputMaxLength,
   placeholder: { tag: 'plain_text', content: '其他（选填）：没有合适的选项时，在这里写下你的答案' }
 };
 
@@ -931,12 +932,9 @@ export class LarkWorkflowInteractions {
     let structuredCandidates: { parts: LarkCardElement[]; withOther: boolean }[] = [];
     if (structuredOn && kind === 'ask') {
       if (record.structured && structuredChoices) {
-        const withOther = record.adhdMode !== true;
-        structuredCandidates = record.multiple
-          ? [...(withOther ? [{ parts: [multipleChoiceForm(record, structuredChoices, true)], withOther }] : []),
-            { parts: [multipleChoiceForm(record, structuredChoices)], withOther: false }]
-          : [...(withOther ? [{ parts: [...singleChoiceElements(record, structuredChoices), otherAnswerForm(record)], withOther }] : []),
-            { parts: singleChoiceElements(record, structuredChoices), withOther: false }];
+        const plain = record.multiple ? [multipleChoiceForm(record, structuredChoices)] : singleChoiceElements(record, structuredChoices);
+        const extended = record.multiple ? [multipleChoiceForm(record, structuredChoices, true)] : [...plain, otherAnswerForm(record)];
+        structuredCandidates = [...(record.adhdMode !== true ? [{ parts: extended, withOther: true }] : []), { parts: plain, withOther: false }];
       } else if (!record.structured) {
         structuredCandidates = [{ parts: [freeTextForm(record)], withOther: false }];
       }
@@ -1368,7 +1366,7 @@ export class LarkWorkflowInteractions {
         const invalidChoice = () => new LarkServiceError('LARK_ANSWER_CHOICE_INVALID', '提交的选项已失效，请点选卡片上的最新选项，或引用本卡片直接回复答案。', 400);
         // 「其他」文字只有带输入框的普通提问卡才会提交；ADHD 提问卡只收选项，带了也不采纳。
         const other = record.adhdMode === true ? undefined : input.other?.trim();
-        if (other && freeTextInputViolation(other, otherAnswerMaxLength)) throw new LarkServiceError('LARK_ANSWER_TOO_LONG', `其他答案不能超过 ${otherAnswerMaxLength} 个字符。`, 400);
+        if (other && freeTextInputViolation(other, freeTextInputMaxLength)) throw new LarkServiceError('LARK_ANSWER_TOO_LONG', `其他答案不能超过 ${freeTextInputMaxLength} 个字符。`, 400);
         if (record.multiple) {
           const picked = Array.isArray(input.selected)
             ? [...new Set(input.selected.filter((value): value is string => typeof value === 'string'))]
@@ -1439,7 +1437,7 @@ export class LarkWorkflowInteractions {
     const actor = isGroupChat(record.event.chatType) && record.actorId ? renderGroupMention(record.actorId) : undefined;
     const outcome = [input.action === 'answer' ? answerLabel ? `已${answerLabel}` : '已回答' : input.action === 'reject' ? '已拒绝' : '已允许', actor, shanghaiClock(Date.parse(record.updatedAt))].filter(Boolean).join(' · ');
     const ruleNote = !record.workspaceRule ? '' : ruleSaved
-      ? `本工作区之后执行 \`${larkCommandEcho(record.workspaceRule.pattern, 200).replace(/`/g, '')}\`（只带允许的参数）会自动允许。`
+      ? `本工作区之后执行 ${workspaceRuleLabel(record.workspaceRule.pattern)}（只带允许的参数）会自动允许。`
       : '本次已允许，但工作区规则没有保存成功，之后仍会弹卡。';
     const rendered = await this.renderClosed(record, input.action === 'allow_session' ? `${outcome}\n\n本会话内完全相同的命令之后会自动允许。`
       : input.action === 'allow_workspace' ? `${outcome}\n\n${ruleNote}` : withRejectReason(outcome, rejectReason));

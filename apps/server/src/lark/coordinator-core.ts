@@ -24,6 +24,7 @@ import { escapeLarkPromptEcho } from './queue-summary.js';
 import type { ListenerLog, LarkMessageEvent, LarkRuntime } from './listener.js';
 import type { LarkGroup, LarkTask } from './coordinator.js';
 import { parseCardTask } from './persisted-card-task.js';
+import { larkTaskAgentAllowlistConfigured } from './task-agent.js';
 import { loadLarkTaskEvents } from './card-renderer.js';
 
 // 飞书消息协调器 · 公共层：实例状态与构造、各层共用的权限判定和工具函数。分层说明见 coordinator.ts。
@@ -394,14 +395,6 @@ export abstract class LarkCoordinatorCore {
   protected readonly taskAgentIntervalMs = 60_000;
 
   /**
-   * 修改本群授权（/grant、/revoke）的鉴权。
-   *
-   * - 托管群：先按 grant.create / grant.revoke 策略动作判定（owner 或 admin 角色）。
-   *   本部署形态下 admin 角色只能由安装管理员在 Web 授予，因此未通过时回落到与 /repair
-   *   同一道安装级门（high_risk.execute）——改「谁能使唤机器人」至少和跑一条高风险命令同级。
-   * - 非托管群：回落部署级静态白名单，与该形态下其他管理动作口径一致。
-   */
-  /**
    * 建工作区审批规则的人：规则对整个机器人生效，所以按机器人级身份判断，不看卡片所在群的群级角色。
    * 接入群管理的 Bot 只认机器人级管理员（不限定群的 admin 角色）；
    * 非托管 Bot 没有管理员角色，只认部署时配置的非空访问白名单里的人，白名单为空时谁都不能建。
@@ -411,10 +404,17 @@ export abstract class LarkCoordinatorCore {
     if (!config?.listening) return false;
     const botAdmin = await this.groupManager?.botAdmin(config.appId, actor);
     if (botAdmin !== undefined) return botAdmin;
-    const restricted = (config.allowedUsers ?? []).length > 0 || (config.allowedEmails ?? []).length > 0;
-    return restricted && await this.isStaticOperatorAllowed(config, actor, record.event.chatId);
+    return larkTaskAgentAllowlistConfigured(config) && await this.isStaticOperatorAllowed(config, actor, record.event.chatId);
   }
 
+  /**
+   * 修改本群授权（/grant、/revoke）的鉴权。
+   *
+   * - 托管群：先按 grant.create / grant.revoke 策略动作判定（owner 或 admin 角色）。
+   *   本部署形态下 admin 角色只能由安装管理员在 Web 授予，因此未通过时回落到与 /repair
+   *   同一道安装级门（high_risk.execute）——改「谁能使唤机器人」至少和跑一条高风险命令同级。
+   * - 非托管群：回落部署级静态白名单，与该形态下其他管理动作口径一致。
+   */
   protected async isGrantOperatorAllowed(config: StoredLarkConfig, operatorOpenId: string | undefined, chatId: string, action: PolicyAction): Promise<boolean> {
     if (!operatorOpenId) return false;
     const decision = await this.groupManager?.authorize(config.appId, chatId, operatorOpenId, action);

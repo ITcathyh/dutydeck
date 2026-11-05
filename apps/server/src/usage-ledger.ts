@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { executionTaskId } from '@dutydeck/storage';
-import { codexTerminalUsageRefPrefix, makeId, parseLarkSourceId, RuntimeError, type UsageBackgroundLimits, type UsageBackgroundBudget, type AttemptRef, type RepositoryBundle, type Session, type TaskRequestV1, type UsageCap, type UsageCapScope, type UsageCategory, type UsageGroup, type UsageLedgerEntry, type UsageTotals, type UsageFilter, type UsageReport, type UsageReportFilter, type UsageTaskPage, type JsonValue } from '@dutydeck/shared';
+import { isCapExcludedUsage, makeId, parseLarkSourceId, RuntimeError, type UsageBackgroundLimits, type UsageBackgroundBudget, type AttemptRef, type RepositoryBundle, type Session, type TaskRequestV1, type UsageCap, type UsageCapScope, type UsageCategory, type UsageGroup, type UsageLedgerEntry, type UsageTotals, type UsageFilter, type UsageReport, type UsageReportFilter, type UsageTaskPage, type JsonValue } from '@dutydeck/shared';
 import { isLarkPerGroupMemoryPool, larkMemoryScopeOfPool } from './lark/memory.js';
 
 const rateSchema = z.object({ inputPerMTok: z.number().nonnegative(), cachedInputPerMTok: z.number().nonnegative(), outputPerMTok: z.number().nonnegative(), cacheWritePerMTok: z.number().nonnegative().optional(), provider: z.string().trim().min(1).optional() }).strict();
@@ -399,7 +399,7 @@ export class UsageLedger {
 
   /** 用到上限的 75%、95% 各提醒一次：群上限发到该群，Bot 上限发到这次用量所在的群或私聊。 */
   private async alert(entry: UsageLedgerEntry) {
-    if (!entry.appId || !entry.costUsd || entry.usageRef?.startsWith(codexTerminalUsageRefPrefix) || !this.options.notify) return;
+    if (!entry.appId || !entry.costUsd || isCapExcludedUsage(entry.usageRef) || !this.options.notify) return;
     const now = this.now();
     const month = monthKey(now);
     for (const cap of await this.capsFor(entry.appId, entry.chatId)) {

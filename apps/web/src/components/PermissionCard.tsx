@@ -4,7 +4,6 @@ import { Check, MessageSquareX, ShieldAlert, X } from 'lucide-react';
 import type { TimelineEvent } from '../timeline';
 import { Button } from './primitives';
 
-/** 拒绝原因输入框的说明，收件箱的同类输入沿用这一句。 */
 const resolvedLabels: Record<string, string> = { approved: '已允许', rejected: '已拒绝', cancelled: '已取消', expired: '已失效' };
 
 export function PermissionCard({ event, resolving = false, onResolve }: { event: TimelineEvent; resolving?: boolean; onResolve?(permissionId: string, approved: boolean, reason?: string): void | Promise<unknown> }) {

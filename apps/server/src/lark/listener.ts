@@ -248,7 +248,7 @@ export class LarkLongConnectionListener implements LarkListener {
       this.options.executionPolicy,
       this.options.groupManager,
       { store: this.options.workflowStore, resourceRoot: this.options.resourceRoot, broker: this.options.relayBroker, automation: this.options.automation, workbench: this.options.workbench, memory: this.options.memory, participation: this.options.participation, usage: this.options.usage, loginLinks: this.options.loginLinks, saveBotConfig: this.options.saveBotConfig, scheduleRequests: this.options.scheduleRequests,
-        ...(this.options.workspaceApprovals ? { workspaceApprovals: this.options.workspaceApprovals } : {}) },
+        workspaceApprovals: this.options.workspaceApprovals },
     ) : undefined;
     this.coordinator = coordinator;
     await coordinator?.initializeWorkflows(config);

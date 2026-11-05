@@ -160,11 +160,15 @@ const verificationStatusLabels: Record<VerificationResponse['status'], string> =
 
 /** 只写脱敏后的命令、结果、时间和是否过期：不写输出、不写目录。命令可能带着环境变量里的口令，压成一行，反引号换掉，写进 PR 描述也跑不出行内代码。 */
 function verificationLine(record: VerificationResponse) {
-  const command = oneLine(redactCredentialText(record.command), 200).replaceAll('`', "'");
-  return `\`${command}\`，${verificationStatusLabels[record.status]}，${record.completedAt ?? record.startedAt}${record.stale ? '，验证早于最后改动' : ''}`;
+  return `\`${commandLabel(record.command)}\`，${verificationStatusLabels[record.status]}，${record.completedAt ?? record.startedAt}${record.stale ? '，验证早于最后改动' : ''}`;
 }
 
 const oneLine = (value: string, max: number) => value.replace(/\s+/g, ' ').trim().slice(0, max);
+/** 写进卡片、通知与 PR 描述的验证命令：脱敏、压成一行，反引号换掉。 */
+const commandLabel = (command: string) => oneLine(redactCredentialText(command), 200).replaceAll('`', "'");
+/** 两条记录跟进的是同一个 PR：同一平台、仓库（不分大小写）和编号。 */
+const samePullRequest = (value: PullRequestRecord, provider: string, slug: string, number: number) =>
+  value.provider === provider && value.repository.slug.toLowerCase() === slug.toLowerCase() && value.pullRequest?.number === number;
 const recordKey = (id: string) => `${RECORD_PREFIX}${id}`;
 const claimKeyFor = (providerId: string, slug: string, number: number) => `${CLAIM_PREFIX}${createHash('sha256').update(JSON.stringify([providerId, slug.toLowerCase(), number])).digest('hex')}`;
 /** 这条记录仍占着它的 PR：等确认、推送中、跟进中，或推送前验证没过、等人处理（stopped 且保留这一轮任务）。占着时别的会话不能认领。 */
@@ -485,8 +489,7 @@ export class PullRequestService {
       if (claimed.value.sessionId === sessionId) return this.toPublic(claimed.value);
       throw new RuntimeError('PR_ALREADY_FOLLOWED', `${label} 已在另一个会话（${claimed.value.sessionId}）里跟进，先在那里停止跟进再认领。`, 409);
     }
-    const own = (await this.list()).find(item => holdsPullRequest(item.value) && item.value.provider === provider.id
-      && item.value.repository.slug.toLowerCase() === repository.slug.toLowerCase() && item.value.pullRequest?.number === number);
+    const own = (await this.list()).find(item => holdsPullRequest(item.value) && samePullRequest(item.value, provider.id, repository.slug, number));
     if (own) {
       if (own.value.sessionId === sessionId) return this.toPublic(own.value);
       throw new RuntimeError('PR_ALREADY_FOLLOWED', `${label} 已在另一个会话（${own.value.sessionId}）里跟进，先在那里停止跟进再认领。`, 409);
@@ -1123,8 +1126,7 @@ export class PullRequestService {
     if (!value.pullRequest) return true;
     const number = value.pullRequest.number;
     if (value.claimed && await this.options.repositories.config.get(claimKeyFor(value.provider, value.repository.slug, number)) !== value.id) return false;
-    return !(await this.list()).some(({ value: other }) => other.id !== value.id && holdsPullRequest(other) && other.provider === value.provider
-      && other.repository.slug.toLowerCase() === value.repository.slug.toLowerCase() && other.pullRequest?.number === number);
+    return !(await this.list()).some(({ value: other }) => other.id !== value.id && holdsPullRequest(other) && samePullRequest(other, value.provider, value.repository.slug, number));
   }
 
   /** 验证没过之后「仍然推送」（飞书失败卡、Web PR 面板）：回到推送这一步，推送前的其余核对照做。只认最新那张失败卡，重复点只推一次。 */
@@ -1169,9 +1171,6 @@ function publicStatus(value: PullRequestRecord, verify: VerifyState | undefined)
   if (value.status === 'open' && value.task && verify?.taskId === value.task.id && verify.state === 'running') return 'verifying';
   return value.status;
 }
-
-/** 写进卡片与通知的验证命令：脱敏、压成一行，反引号换掉。 */
-const commandLabel = (command: string) => oneLine(redactCredentialText(command), 200).replaceAll('`', "'");
 
 /** 按字节取末尾，不切断 UTF-8 字符。 */
 function tailBytes(text: string, max: number) {

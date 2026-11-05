@@ -123,12 +123,11 @@ export function secretGuardFinding(event, { home = process.env.HOME || homedir()
 }
 
 /** 高危拦截的统一说明，接在拦截原因后面：不回显命令，只告诉 Agent 不要绕过、该找谁。 */
-export const highRiskBlockedSuffix = '没有执行。不要重试同一命令或换写法绕过，请让有高危授权的人确认。';
+const highRiskBlockedSuffix = '没有执行。不要重试同一命令或换写法绕过，请让有高危授权的人确认。';
 /** 高危正则没能跑完（超时、语法错误、隔离线程失败）时的说明：按拒绝处理，但不是权限问题，找授权人没用。 */
-export const highRiskCheckFailedSuffix = '已按拒绝处理，没有执行。这是风险管控的检查本身出错，不是权限不够；请让管理员检查配置的高危操作正则。';
-/** 原因本身已以句末标点结尾时不再补句号，避免拼出“。。”。生成的 Hook 脚本内联同一条正则。 */
-export const sentenceEnd = /[。！？.!?]$/;
-const sentence = text => sentenceEnd.test(text) ? text : `${text}。`;
+const highRiskCheckFailedSuffix = '已按拒绝处理，没有执行。这是风险管控的检查本身出错，不是权限不够；请让管理员检查配置的高危操作正则。';
+/** 原因本身已以句末标点结尾时不再补句号，避免拼出“。。”。 */
+const sentence = text => /[。！？.!?]$/.test(text) ? text : `${text}。`;
 export const highRiskBlockedReason = reason => sentence(reason.trim()) + highRiskBlockedSuffix;
 export const highRiskCheckFailedReason = detail => sentence(detail) + highRiskCheckFailedSuffix;
 

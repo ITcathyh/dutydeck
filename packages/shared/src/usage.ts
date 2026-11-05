@@ -71,6 +71,8 @@ export interface UsageTotals {
  * 但暂不计入月度上限、75%/95% 提醒和 /status 的已用比例（是否计入待定），上限口径与入账前一致。
  */
 export const codexTerminalUsageRefPrefix = 'codex-pty:';
+/** 这条记录不计入月度上限（按 codexTerminalUsageRefPrefix 判断）。 */
+export const isCapExcludedUsage = (usageRef: string | undefined) => usageRef?.startsWith(codexTerminalUsageRefPrefix) === true;
 /** model 筛选里表示「没有记下型号」的记录。 */
 export const usageUnknownModel = '__unknown__';
 /** since 含、until 不含（ISO 时刻）；model 可取 usageUnknownModel。 */

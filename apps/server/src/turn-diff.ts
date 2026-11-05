@@ -306,8 +306,9 @@ function parseHunks(section: string[]): TurnDiffHunk[] {
 export async function readTurnDiff(gitDir: string, before: string, after: string, limits = { file: TURN_DIFF_FILE_LIMIT_BYTES, total: TURN_DIFF_TOTAL_LIMIT_BYTES }, timeoutMs = 15_000, expand?: string): Promise<{ summary: TurnDiffSummary; files: TurnDiffFile[]; truncated: boolean }> {
   const numstat = parseNumstat(await git([...diffArgs(gitDir), '--numstat', '-z', before, after], { timeout: timeoutMs }));
   const entries = expand === undefined ? numstat : numstat.filter(entry => entry.path === expand);
-  const generated = expand === undefined ? await generatedPaths(gitDir, after, entries.filter(entry => !classifyDiffPath(entry.path).lockfile).map(entry => entry.path), timeoutMs) : new Set<string>();
-  const folds = new Map(entries.map(entry => [entry, expand !== undefined ? undefined : classifyDiffPath(entry.path).lockfile ? 'lockfile' as const : generated.has(entry.path) ? 'generated' as const : undefined]));
+  const classes = new Map(entries.map(entry => [entry.path, classifyDiffPath(entry.path)]));
+  const generated = expand === undefined ? await generatedPaths(gitDir, after, entries.filter(entry => !classes.get(entry.path)!.lockfile).map(entry => entry.path), timeoutMs) : new Set<string>();
+  const folds = new Map(expand !== undefined ? [] : entries.map(entry => [entry, classes.get(entry.path)!.lockfile ? 'lockfile' as const : generated.has(entry.path) ? 'generated' as const : undefined]));
   const sections: string[][] = [];
   let incomplete: string[] | undefined;
   let remaining = limits.total;
@@ -328,7 +329,7 @@ export async function readTurnDiff(gitDir: string, before: string, after: string
   // 改名以整次比较（numstat）为准：分批时候选文件变少，git 的改名检测（上限、最佳配对）可能和整次比较不同。
   // 没改名的文件按 --no-renames 读，不会在批内被配成改名；改名的两端放进同一批按 -M 读，批内没配成清单里那一对的再单独读这一对。
   for (const tier of [0, 1, 2]) {
-    const group = entries.filter(entry => !folds.get(entry) && classifyDiffPath(entry.path).tier === tier);
+    const group = entries.filter(entry => !folds.get(entry) && classes.get(entry.path)!.tier === tier);
     const plain = group.filter(entry => entry.oldPath === undefined);
     const renamed = group.filter(entry => entry.oldPath !== undefined);
     // 每批 200 个路径，放在命令行上。
@@ -376,7 +377,7 @@ export async function readTurnDiff(gitDir: string, before: string, after: string
     return { ...base, hunks: matching.flatMap(section => parseHunks(section)) };
   });
   const summary = { files: entries.length, additions: entries.reduce((sum, entry) => sum + entry.additions, 0), deletions: entries.reduce((sum, entry) => sum + entry.deletions, 0) };
-  const tierOf = (file: TurnDiffFile) => file.placeholder?.startsWith('folded_') ? 3 : classifyDiffPath(file.path).tier;
+  const tierOf = (file: TurnDiffFile) => file.placeholder?.startsWith('folded_') ? 3 : classes.get(file.path)!.tier;
   return { summary, files: files.sort((left, right) => tierOf(left) - tierOf(right)), truncated: files.some(file => file.placeholder === 'omitted') };
 }
 

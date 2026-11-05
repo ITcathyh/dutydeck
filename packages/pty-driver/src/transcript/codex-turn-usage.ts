@@ -53,9 +53,14 @@ export class CodexTurnUsage {
     if (entry.type === 'turn_context') { if (typeof p.model === 'string' && p.model.trim()) this.model = p.model.trim(); return; }
     if (entry.type === 'token_usage_record') {
       this.records = true;
-      const own = this.nativeId() ?? this.metaId, id = typeof p.response_id === 'string' && p.response_id ? p.response_id : undefined;
+      const id = typeof p.response_id === 'string' && p.response_id ? p.response_id : undefined;
       const usage = tokensOf(p.usage);
-      if (!id || !usage || this.seen.has(id) || own && typeof p.thread_id === 'string' && p.thread_id !== own) return;
+      if (!id || !usage || this.seen.has(id)) return;
+      // Resolving the native id may read disk: do it after the cheap checks, and only when the record names a thread.
+      if (typeof p.thread_id === 'string') {
+        const own = this.nativeId() ?? this.metaId;
+        if (own && p.thread_id !== own) return;
+      }
       this.remember(id);
       if (!baseline) this.add(usage, id);
       return;

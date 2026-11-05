@@ -19,6 +19,7 @@ import { redactTraceText } from './secret-redaction.js';
 import { readGitSnapshot } from './git-status.js';
 import { buildLarkTaskDashboard, pageLarkTaskDashboard, type LarkTaskDashboardDecision, type LarkTaskDashboardEntry } from './task-dashboard.js';
 import { collectInbox } from '../inbox.js';
+import { isRunnable } from '../ci-common.js';
 import { isLarkGroupChatMemoryPool, isLarkGroupMemoryPool, isLarkPerGroupMemoryPool, isLarkMemoryId, isLarkMemoryIgnoreRuleId, larkMemoryLimits, larkMemoryScope, renderLarkMemoryList, renderLarkMemoryStatusLine } from './memory.js';
 import { deferredConfirmationId, describeScheduleTrigger, scenarioPolicyVersion, parseLarkSourceId, resolveParticipation, normalizeSessionName, RuntimeError, SESSION_NAME_MAX_LENGTH, timeLoop, type AgentConfig, type PolicyAction, type Session, type TaskRecord } from '@dutydeck/shared';
 import { decideWake, isExplicitWake, wakeSignals, type WakeFacts } from './wake-decision.js';
@@ -1972,7 +1973,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     if (route.args.length > 1) { await fail(`**用法：\`${model ? '/model [模型]' : '/effort [档位]'}\`**`); return; }
     const session = sessionId ? await this.runtime.getSession(sessionId) : undefined;
     if (!session) { await fail(`**当前话题还没有会话。**\n\n先发一条任务开始会话；想在开始时就指定${label}，用 \`/new ${flag} -- 任务\`。`); return; }
-    if (session.archivedAt || ['stopped', 'failed'].includes(session.state)) { await fail('**当前会话已关闭，不能切换。**\n\n发送 `/resume` 恢复，或用 `/new` 开新会话。'); return; }
+    if (!isRunnable(session)) { await fail('**当前会话已关闭，不能切换。**\n\n发送 `/resume` 恢复，或用 `/new` 开新会话。'); return; }
     const agent = (await this.runtime.listAgents?.())?.find(item => item.id === session.agentId);
     const current = model ? session.model ?? agent?.model : session.reasoningEffort ?? agent?.reasoningEffort;
     const currentLine = `**当前${label}：${current ? `\`${larkCommandEcho(current, 64)}\`` : '未指定（Agent 默认）'}**`;
@@ -2038,7 +2039,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       // 与 /new 写事项边界串行：/new 已结束这条会话时不再改绑定，否则会抹掉它刚写的边界。
       return await this.withLaunchBinding(sourceId, async () => {
         const live = await this.runtime.getSession(session.id);
-        if (!live || live.archivedAt || ['stopped', 'failed'].includes(live.state)) return true;
+        if (!isRunnable(live)) return true;
         const channel = `lark-launch:${config.appId}`;
         const binding = await mappings.get(channel, sourceId);
         if (binding?.channel === channel && binding.externalId === sourceId && binding.sessionId === session.id) return true;
@@ -2062,8 +2063,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     if (!text || text.startsWith('--') && text !== '--clear') { await fail('**用法：`/rename <名称>`；`/rename --clear` 恢复默认标题。**'); return; }
     // Web 改名要求安装管理员。飞书里与之对应的是安装管理员在机器人设置里配置的操作白名单（机器人所有者），
     // 受管理的群也一样；群管理员角色只管本群，不能改全局可见的会话名。未配置白名单时不开放。
-    const restricted = (config.allowedUsers ?? []).length > 0 || (config.allowedEmails ?? []).length > 0;
-    if (!restricted) { await fail('未配置操作白名单时，飞书里不能执行 /rename，请在 Web 上改名。'); return; }
+    if (!larkTaskAgentAllowlistConfigured(config)) { await fail('未配置操作白名单时，飞书里不能执行 /rename，请在 Web 上改名。'); return; }
     if (!event.senderOpenId || !await this.isStaticOperatorAllowed(config, event.senderOpenId, event.chatId)) {
       await fail('当前账号无权改名：需要是机器人所有者（机器人设置里操作白名单中的人），群管理员不够（与 Web 改名需要安装管理员一致）。');
       return;
@@ -2090,7 +2090,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     if (!this.runtime.getMatter) throw new Error('当前运行时读不到分身关系，/fork list 不可用。');
     const forkIds = sessionId ? this.runtime.getMatter(sessionId)?.forkSessionIds ?? [] : [];
     const agentNames = new Map((await this.runtime.listAgents?.().catch(() => []) ?? []).map(agent => [agent.id, agent.name] as const));
-    const rows: Array<{ id: string; title: string; status: string; agent: string; updatedAt: string; link?: string }> = [];
+    const rows: Array<{ id: string; title: string; status: string; agent: string; updatedAt: string; topicId?: string }> = [];
     for (const id of forkIds) {
       const fork = await this.runtime.getSession(id);
       const source = parseLarkSourceId(fork?.sourceId);
@@ -2099,17 +2099,18 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       const first = [...tasks].sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0];
       if (!first || !await this.isTaskOperatorAllowed(config, event, { id: first.id, sessionId: id }, 'task.view_result')) continue;
       const last = tasks.reduce((latest, task) => (task.updatedAt || task.createdAt) > (latest.updatedAt || latest.createdAt) ? task : latest, first);
-      const closed = Boolean(fork.archivedAt) || ['stopped', 'failed'].includes(fork.state);
+      const closed = !isRunnable(fork);
       const origin = await this.larkTaskOrigin(config, event.chatId, { id: first.id, sessionId: id });
       const topicId = source.scope[0] === 'thread' ? source.scope[1] : undefined;
       rows.push({ id, title: fork.name ?? origin?.title ?? larkTaskTitle(first.prompt, config.name),
         status: closed ? '已关闭' : larkForkStatusLabels[last.status] ?? fork.state, agent: agentNames.get(fork.agentId) ?? fork.agentId,
-        updatedAt: [fork.updatedAt, last.updatedAt || last.createdAt].sort().at(-1)!,
-        ...(topicId ? { link: await this.service.getMessageLink(topicId).catch(() => undefined) } : {}) });
+        updatedAt: [fork.updatedAt, last.updatedAt || last.createdAt].sort().at(-1)!, topicId });
     }
     if (!rows.length) { await reply('分身列表', `**${forkIds.length ? '没有你可查看的分身' : '还没有分身'}。**\n\n发送 \`/fork [任务]\` 在新话题开分身。`); return; }
     rows.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-    const listed = rows.slice(0, 10).map(row => `**${escapeLarkPromptEcho(larkCommandEcho(row.title, 60))}**${row.id === sessionId ? '（当前话题）' : ''}\n\`${row.id}\` · ${row.status} · ${larkCommandEcho(row.agent, 40)} · 更新 ${clock(row.updatedAt)}\n${row.link ? `[打开话题](${row.link})` : '话题链接暂不可用'}`);
+    // 只给列出的前 10 条取话题链接，并发取。
+    const links = await Promise.all(rows.slice(0, 10).map(row => row.topicId ? this.service.getMessageLink(row.topicId).catch(() => undefined) : undefined));
+    const listed = rows.slice(0, 10).map((row, index) => `**${escapeLarkPromptEcho(larkCommandEcho(row.title, 60))}**${row.id === sessionId ? '（当前话题）' : ''}\n\`${row.id}\` · ${row.status} · ${larkCommandEcho(row.agent, 40)} · 更新 ${clock(row.updatedAt)}\n${links[index] ? `[打开话题](${links[index]})` : '话题链接暂不可用'}`);
     await reply('分身列表', `${listed.join('\n\n')}${rows.length > 10 ? `\n\n另有 ${rows.length - 10} 个分身未列出。` : ''}`);
   }
 

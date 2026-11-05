@@ -147,6 +147,8 @@ const preconditionStatusSchema = z.object({
   setAt: z.number().int().positive()
 }).strict();
 type PreconditionStatus = z.infer<typeof preconditionStatusSchema>;
+/** 一次前置命令判定的结果，不含记录时补上的序号、时间和占用字段。 */
+type PreconditionResult = Omit<PreconditionStatus, 'version' | 'skippedInARow' | 'setAt' | 'occurrenceId' | 'at'>;
 const highRiskCommand = new RegExp(defaultHighRiskPattern, 'i');
 const errorReasons: Record<string, string> = {
   OPERATION_REVOKED: '执行会话被锁住了', DRIVER_STOP_UNVERIFIED: '执行会话上次没能确认已停下', DRIVER_STOP_BLOCKED: '执行会话上次没能确认已停下',
@@ -1256,7 +1258,7 @@ export class SessionAutomationService {
       actorId ?? stored.value.actorId, { deadline: input.deadlineAt !== undefined || reenabled, template: input.workTemplate !== undefined && input.workTemplate !== null || reenabled });
     this.assertPreconditionInput(input.precondition, actorId);
     this.assertPreconditionCondition(input.condition ?? stored.value.condition, input.precondition !== undefined ? Boolean(input.precondition)
-      : Boolean((await this.getRecord(preconditionKey(id), value => preconditionSchema.parse(value)))?.value.command));
+      : Boolean((await this.readPrecondition(id))?.value.command));
     let condition = stored.value.condition;
     if (input.condition) condition = input.condition.kind === 'always' ? input.condition : await this.ciCondition(session, input.condition);
     const now = this.clock();
@@ -1936,10 +1938,7 @@ export class SessionAutomationService {
       return;
     }
     // 前置命令在开执行会话、启动工作项模板之前判定；没通过就不唤醒 Agent。
-    const gated = await this.preconditionGate(scheduleStored, { raw: stored.raw, value: occurrence });
-    if (!gated) return;
-    ({ schedule: scheduleStored, occurrence: stored } = gated);
-    occurrence = gated.occurrence.value;
+    if (!await this.preconditionGate(scheduleStored, { raw: stored.raw, value: occurrence })) return;
     if (scheduleStored.value.workTemplate) {
       await this.startWorkTemplate(scheduleStored, { raw: stored.raw, value: occurrence });
       return;
@@ -2096,25 +2095,25 @@ export class SessionAutomationService {
   }
 
   /**
-   * 前置命令判定：没设或这次已判定通过时原样返回，继续开会话或启动模板。否则在后台跑命令并返回 undefined：
+   * 前置命令判定：没设或这次已判定通过时返回 true，继续开会话或启动模板。否则在后台跑命令并返回 false：
    * 退出码 0 记下通过后由 runPrecondition 接着处理；非 0 记 skipped（不通知、不计连续没做成）；
    * 超时、无法执行或进程组没收干净记 error，计入连续没做成（连续 STREAK_PAUSE 次自动停用）。
    */
-  private async preconditionGate(scheduleStored: { raw: string; value: SessionSchedule }, stored: { raw: string; value: SessionScheduleOccurrenceV2 }): Promise<{ schedule: { raw: string; value: SessionSchedule }; occurrence: { raw: string; value: SessionScheduleOccurrenceV2 } } | undefined> {
+  private async preconditionGate(scheduleStored: { raw: string; value: SessionSchedule }, stored: { raw: string; value: SessionScheduleOccurrenceV2 }): Promise<boolean> {
     const schedule = scheduleStored.value;
     const occurrence = stored.value;
-    if (occurrence.conditionStatus !== 'pending') return { schedule: scheduleStored, occurrence: stored };
-    const precondition = (await this.getRecord(preconditionKey(schedule.id), value => preconditionSchema.parse(value)))?.value;
-    if (!precondition?.command) return { schedule: scheduleStored, occurrence: stored };
+    if (occurrence.conditionStatus !== 'pending') return true;
+    const precondition = (await this.readPrecondition(schedule.id))?.value;
+    if (!precondition?.command) return true;
     const manual = occurrence.triggerSource === 'manual';
     const timeoutSeconds = precondition.timeoutSeconds ?? SCHEDULE_PRECONDITION_DEFAULT_TIMEOUT_SECONDS;
     try { await this.requireAuthorized(schedule.sessionId, occurrenceActorId(schedule, occurrence)); }
     catch (error) {
       await this.disableSchedule(scheduleStored);
       await this.finishOccurrence(stored, { conditionStatus: 'error', runStatus: 'error', error: errorMessage(error) });
-      return undefined;
+      return false;
     }
-    const settle = async (target: { raw: string; value: SessionScheduleOccurrenceV2 }, status: Omit<PreconditionStatus, 'version' | 'skippedInARow' | 'setAt' | 'occurrenceId' | 'at'>) => {
+    const settle = async (target: { raw: string; value: SessionScheduleOccurrenceV2 }, status: PreconditionResult) => {
       const summary = preconditionSummary(status, timeoutSeconds);
       if (!await this.finishOccurrence(target, status.outcome === 'skipped' ? { conditionStatus: 'skipped', runStatus: 'skipped', error: summary } : { conditionStatus: 'error', runStatus: 'error', error: summary })) return undefined;
       await this.notePrecondition(schedule.id, precondition, { occurrenceId: occurrence.id, at: iso(this.clock()), ...status });
@@ -2125,17 +2124,17 @@ export class SessionAutomationService {
     };
     let cwd: string;
     try { cwd = await realpath(schedule.executionContext?.cwd ?? (await this.requireSession(schedule.sessionId)).cwd); }
-    catch (error) { return settle(stored, { outcome: 'error', output: '', outputTruncated: false, error: `执行目录不可用：${errorMessage(error)}` }); }
+    catch (error) { await settle(stored, { outcome: 'error', output: '', outputTruncated: false, error: `执行目录不可用：${errorMessage(error)}` }); return false; }
     // 同一实例里同一次触发只跑一份；跨实例和后续 tick 靠租约挡住。
-    if (this.preconditionRuns.has(occurrence.id)) return undefined;
+    if (this.preconditionRuns.has(occurrence.id)) return false;
     const leased = await this.renewOccurrenceLease(stored);
-    if (!leased || this.preconditionRuns.has(occurrence.id)) return undefined;
+    if (!leased || this.preconditionRuns.has(occurrence.id)) return false;
     // 命令在后台跑，不占定时器主循环；结束后接着走这次触发的后续流程。
     const run = this.runPrecondition(schedule, precondition, leased, cwd, timeoutSeconds, settle)
       .catch(error => { this.warn({ scheduleId: schedule.id, occurrenceId: occurrence.id, code: errorCode(error) }, '前置命令后续处理失败'); })
       .finally(() => { this.preconditionRuns.delete(occurrence.id); });
     this.preconditionRuns.set(occurrence.id, run);
-    return undefined;
+    return false;
   }
 
   /**
@@ -2143,7 +2142,7 @@ export class SessionAutomationService {
    * 通过后先把 conditionStatus=passed 写进这次触发，再接着处理：之后崩溃恢复直接开会话或启动模板，不重跑命令。
    */
   private async runPrecondition(schedule: SessionSchedule, precondition: StoredPrecondition, leased: { raw: string; value: SessionScheduleOccurrenceV2 }, cwd: string, timeoutSeconds: number,
-    settle: (target: { raw: string; value: SessionScheduleOccurrenceV2 }, status: Omit<PreconditionStatus, 'version' | 'skippedInARow' | 'setAt' | 'occurrenceId' | 'at'>) => Promise<undefined>) {
+    settle: (target: { raw: string; value: SessionScheduleOccurrenceV2 }, status: PreconditionResult) => Promise<undefined>) {
     const occurrence = leased.value;
     const manual = occurrence.triggerSource === 'manual';
     const controller = new AbortController();
@@ -2189,6 +2188,10 @@ export class SessionAutomationService {
     await this.processOccurrence({ raw: JSON.stringify(passed), value: passed });
   }
 
+  private readPrecondition(scheduleId: string) {
+    return this.getRecord(preconditionKey(scheduleId), value => preconditionSchema.parse(value));
+  }
+
   private async readPreconditionStatus(scheduleId: string) {
     try { return await this.getRecord(preconditionStatusKey(scheduleId), value => preconditionStatusSchema.parse(value)); }
     catch { return undefined; }
@@ -2206,7 +2209,7 @@ export class SessionAutomationService {
 
   private async publicPrecondition(scheduleId: string): Promise<PublicSchedulePrecondition | undefined> {
     let precondition: StoredPrecondition | undefined;
-    try { precondition = (await this.getRecord(preconditionKey(scheduleId), value => preconditionSchema.parse(value)))?.value; }
+    try { precondition = (await this.readPrecondition(scheduleId))?.value; }
     catch { return undefined; }
     if (!precondition?.command) return undefined;
     const status = (await this.readPreconditionStatus(scheduleId))?.value;

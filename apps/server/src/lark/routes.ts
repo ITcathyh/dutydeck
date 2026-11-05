@@ -110,7 +110,7 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
     agentCommands: options.agentTools?.commands,
     saveBotConfig: input => saveBotConfig(input),
     scheduleRequests: options.scheduleRequests,
-    ...(options.workspaceApprovals ? { workspaceApprovals: options.workspaceApprovals } : {}),
+    workspaceApprovals: options.workspaceApprovals,
     peerBotAuthorized: (appId, chatId, senderOpenId) => options.agentTools?.isConfiguredPeer(appId, chatId, senderOpenId) ?? Promise.resolve(false)
   });
   let listenerSyncTail: Promise<void> = Promise.resolve();

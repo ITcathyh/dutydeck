@@ -4,17 +4,11 @@ import { createHash } from 'node:crypto';
 import { basename, dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { isClaudeFamilyCli, shellQuote as quote, type AgentConfig } from '@dutydeck/shared';
-import { highRiskBlockedSuffix, highRiskCheckFailedSuffix, secretGuardScriptPath, sentenceEnd } from '@dutydeck/shared/secret-guard';
+import { secretGuardScriptPath } from '@dutydeck/shared/secret-guard';
 import { codexHookReadiness } from './codex-hook-readiness.js';
 import { LarkServiceError } from './service.js';
 
 const guardVersion = 'dutydeck-high-risk-guard-v6';
-
-// 生成脚本里内联的拒绝原因拼接，与 secret-guard 的 highRiskBlockedReason / highRiskCheckFailedReason 同义：
-// 高危命中接“请让有高危授权的人确认”，正则检查本身出错接各自的说明；原因已带句末标点时不再补句号。
-const reasonHelpers = `const sentence = text => ${sentenceEnd}.test(text) ? text : text + '。';
-const blockedReason = reason => sentence(String(reason).trim()) + ${JSON.stringify(highRiskBlockedSuffix)};
-const checkFailedReason = detail => sentence(detail) + ${JSON.stringify(highRiskCheckFailedSuffix)};`;
 
 type HookAgentId = 'codex' | 'claude' | 'trae' | 'cursor' | 'pi';
 type HookAdapter = {
@@ -107,8 +101,10 @@ let policy;
 try { policy = JSON.parse(readFileSync(join(root, '.dutydeck', 'security', 'sessions', sessionId + '.json'), 'utf8')); } catch { process.exit(0); }
 if (!policy.enabled || policy.authorized) process.exit(0);
 // 凭据保护：和 Agent 进程级 hook 同一套规则，Codex 走 ACP 时只有这里能拦；规则模块加载失败按拒绝处理。
+// 高危拦截的原因也用这个模块拼：模块没加载成功时 secretReason 非空，走不到那一步。
+let guard;
 const secretReason = await import(${JSON.stringify(pathToFileURL(secretGuardScriptPath()).href)})
-  .then(guard => { const finding = guard.secretGuardFinding(event); return finding ? guard.secretGuardReason(finding) : ''; })
+  .then(module => { guard = module; const finding = guard.secretGuardFinding(event); return finding ? guard.secretGuardReason(finding) : ''; })
   .catch(() => 'Dutydeck 凭据保护规则加载失败，已拦截');
 if (!secretReason && !policy.pattern) process.exit(0);
 const values = [];
@@ -130,8 +126,7 @@ const risky = secretReason ? true : await new Promise(resolve => {
   worker.once('exit', code => { if (code !== 0) { matchError = '高危正则匹配的隔离线程异常退出：' + code; finish(true); } });
 });
 if (!risky) process.exit(0);
-${reasonHelpers}
-const reason = secretReason || (matchError ? checkFailedReason(matchError) : blockedReason(policy.reason || '当前飞书发送人无权执行高危操作'));
+const reason = secretReason || (matchError ? guard.highRiskCheckFailedReason(matchError) : guard.highRiskBlockedReason(String(policy.reason || '当前飞书发送人无权执行高危操作')));
 ${deny}
 `;
 }
@@ -151,7 +146,6 @@ const matches = (pattern: string, input: string) => new Promise<{ risky: boolean
   worker.once('error', error => finish({ risky: true, error: '高危正则匹配的隔离线程失败：' + error.message }));
   worker.once('exit', code => { if (code !== 0) finish({ risky: true, error: '高危正则匹配的隔离线程异常退出：' + code }); });
 });
-${reasonHelpers}
 
 export default function (pi: any) {
   pi.on('tool_call', async (event: any, ctx: any) => {
@@ -162,14 +156,16 @@ export default function (pi: any) {
     try { policy = JSON.parse(readFileSync(join(root, '.dutydeck', 'security', 'sessions', sessionId + '.json'), 'utf8')); } catch { return undefined; }
     if (!policy.enabled || policy.authorized) return undefined;
     // 凭据保护：和命令类 Hook 同一套规则（含本会话策略文件和 Hook 配置的路径保护）；规则模块加载失败按拒绝处理。
+    // 高危拦截的原因也用这个模块拼：模块没加载成功时已在上面按凭据保护拦下。
+    let guard: any;
     const secretReason = await import(${JSON.stringify(pathToFileURL(secretGuardScriptPath()).href)})
-      .then(guard => { const finding = guard.secretGuardFinding({ tool_name: event.toolName, tool_input: event.input, cwd: ctx?.cwd || process.cwd() }); return finding ? guard.secretGuardReason(finding) : ''; })
+      .then(module => { guard = module; const finding = guard.secretGuardFinding({ tool_name: event.toolName, tool_input: event.input, cwd: ctx?.cwd || process.cwd() }); return finding ? guard.secretGuardReason(finding) : ''; })
       .catch(() => 'Dutydeck 凭据保护规则加载失败，已拦截');
     if (secretReason) return { block: true, reason: secretReason };
     if (!policy.pattern) return undefined;
     const result = await matches(policy.pattern, JSON.stringify({ tool_name: event.toolName, tool_input: event.input }));
     if (!result.risky) return undefined;
-    return { block: true, reason: result.error ? checkFailedReason(result.error) : blockedReason(policy.reason || '当前飞书发送人无权执行高危操作') };
+    return { block: true, reason: result.error ? guard.highRiskCheckFailedReason(result.error) : guard.highRiskBlockedReason(String(policy.reason || '当前飞书发送人无权执行高危操作')) };
   });
 }
 `;

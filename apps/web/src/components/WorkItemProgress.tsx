@@ -111,6 +111,7 @@ function GoalProgress({ item, session, agents, onOpen, onSelectSession }: { item
         {item.plan.steps.map(definition => {
           const step = item.steps.find(record => record.id === definition.id);
           const attempt = step?.attempts.at(-1);
+          const duration = attemptDuration(attempt, now, attemptTasks);
           return <li key={definition.id} className="min-w-0">
             <details>
               <summary className="min-h-10 cursor-pointer rounded py-2 text-caption focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring">
@@ -119,7 +120,7 @@ function GoalProgress({ item, session, agents, onOpen, onSelectSession }: { item
                   <span className={step?.status === 'failed' ? 'text-danger' : ['waiting', 'blocked'].includes(step?.status ?? '') ? 'text-warning' : 'text-secondary'}>{workStatusLabels[step?.status ?? 'pending']}</span>
                   <span className="min-w-0 break-words text-subtle [overflow-wrap:anywhere]">{definition.kind === 'wait' ? '用户回答' : agents.find(agent => agent.id === definition.agentId)?.name ?? definition.agentId}</span>
                   {attempt && attempt.number > 1 && <span className="text-secondary">第 {attempt.number} 次尝试</span>}
-                  {attemptDuration(attempt, now, attemptTasks) && <span className="text-secondary">{attemptDuration(attempt, now, attemptTasks)}</span>}
+                  {duration && <span className="text-secondary">{duration}</span>}
                 </span>
               </summary>
               <div className="space-y-2 pb-3 pl-4 text-caption">
@@ -127,7 +128,7 @@ function GoalProgress({ item, session, agents, onOpen, onSelectSession }: { item
                 <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{definition.instruction}</p>
                 {step?.answer !== undefined && <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">已保存回答：{step.answer}</p>}
                 {step?.attempts.map(record => <div key={record.id} className="space-y-1">
-                  <p className="text-secondary">第 {record.number} 次尝试 · {workStatusLabels[record.status]}{attemptDuration(record, now, attemptTasks) ? ` · ${attemptDuration(record, now, attemptTasks)}` : ''}</p>
+                  <p className="text-secondary">第 {record.number} 次尝试 · {[workStatusLabels[record.status], attemptDuration(record, now, attemptTasks)].filter(Boolean).join(' · ')}</p>
                   {record.error && <p className="whitespace-pre-wrap break-words text-danger [overflow-wrap:anywhere]">{record.error}</p>}
                   {record.output && <p className="text-secondary">已有步骤产物，可在目标详情查看。</p>}
                   {record.sessionId && <a href={sessionPath(record.sessionId)} className="inline-block text-link hover:underline" onClick={event => { if (event.button === 0 && !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey) { event.preventDefault(); onSelectSession(record.sessionId!); } }}>查看第 {record.number} 次尝试的执行记录</a>}

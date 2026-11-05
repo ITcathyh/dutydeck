@@ -2,11 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiError, workspaceApprovalRulesApi } from '../api';
 import { currentInstance } from '../instance';
 import { Banner, Button, Card, Spinner } from './primitives';
-
-const createdAt = (value: string) => {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString('zh-CN', { hour12: false });
-};
+import { formatTime } from './SessionInsightShared';
 
 /**
  * 飞书审批卡上点「本工作区允许此类命令」保存的规则。这里只能查看和撤销；新规则只能在审批卡上由机器人所有者或管理员建。
@@ -31,7 +27,7 @@ export function WorkspaceApprovalRules() {
             <code className="text-body text-primary">{rule.pattern}</code>
             <p className="break-all text-caption text-secondary">{rule.workspace}</p>
             <p className="text-caption text-subtle">机器人 {rule.appId}</p>
-            <p className="text-caption text-subtle">{rule.createdBy} 于 {createdAt(rule.createdAt)} 设置</p>
+            <p className="text-caption text-subtle">{rule.createdBy} 于 {formatTime(rule.createdAt)} 设置</p>
           </div>
           <Button variant="secondary" aria-label={`撤销 ${rule.pattern}（${rule.appId}，${rule.workspace}）`} loading={remove.isPending && remove.variables === rule.id} disabled={remove.isPending} onClick={() => remove.mutate(rule.id)}>撤销</Button>
         </li>)}

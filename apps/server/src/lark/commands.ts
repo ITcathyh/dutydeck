@@ -344,17 +344,17 @@ export function listLarkCommands(capabilities: LarkCommandCapabilities): LarkCom
   return larkCommandRegistry.filter(definition => isLarkCommandAvailable(definition, capabilities));
 }
 
+/** `/fork list`、`/resume list`（只有单词 list）只列出，不改会话：按查看类命令处理。 */
+export function larkCommandMutates(definition: LarkCommandDefinition, parsed: ParsedSlashCommand): boolean {
+  return definition.mutating && !((definition.name === 'fork' || definition.name === 'resume') && parsed.args.length === 1 && parsed.args[0] === 'list');
+}
+
 /**
  * 按命令名/别名查注册表。**不做能力门控**：调用方必须能区分「没这条命令」（透传给
  * Agent）与「有这条命令但当前运行时支撑不了」（诚实告知 unavailable）；把能力门塞进
  * 这里会把后者压成前者，恰好毁掉诚实表达能力这条要求。能力门见
  * {@link isLarkCommandAvailable}。
  */
-/** `/fork list`、`/resume list`（只有单词 list）只列出，不改会话：按查看类命令处理。 */
-export function larkCommandMutates(definition: LarkCommandDefinition, parsed: ParsedSlashCommand): boolean {
-  return definition.mutating && !((definition.name === 'fork' || definition.name === 'resume') && parsed.args.length === 1 && parsed.args[0] === 'list');
-}
-
 export function resolveLarkCommand(parsed: ParsedSlashCommand): LarkCommandDefinition | undefined {
   return commandLookup.get(parsed.name);
 }
