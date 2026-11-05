@@ -406,9 +406,25 @@ export function isLoopbackHost(host: string | undefined): boolean {
 }
 
 /**
+ * 交给 exempt 判定的路径，必须和路由实际匹配的是同一份。request.url 不解码百分号，
+ * 而路由先解码再匹配：`/%61pi/sessions` 会命中 /api/sessions，原始路径却不以 /api/ 开头。
+ * 命中路由时按路由模式拼回参数；没命中的请求只会进 404 处理，沿用原始路径。
+ */
+function matchedPathname(request: FastifyRequest): string {
+  const route = request.routeOptions.url;
+  if (route === undefined) return new URL(request.url, 'http://dutydeck.local').pathname;
+  const params = (request.params ?? {}) as Record<string, string | undefined>;
+  // 参数按路径段重新编码：解码出的 `/` 不能把一个参数拆成多段，凑出 relay、插件触发器这类豁免路径。
+  return route.replace(/:(\w+)|\*$/g, (_token, name: string | undefined) => {
+    const value = params[name ?? '*'] ?? '';
+    return name ? encodeURIComponent(value) : value.split('/').map(encodeURIComponent).join('/');
+  });
+}
+
+/**
  * 注册访问认证中间件（Fastify onRequest hook）。判定顺序：
  * 1. local/open 模式保留 Host/Origin 保护；带 share 的请求必须验证分享能力
- * 2. 无 share 时，local/open 或 exempt(method, pathname) 为 true → 放行
+ * 2. 无 share 时，local/open 或 exempt(method, pathname) 为 true → 放行；pathname 取路由实际匹配的路径
  * 3. 否则取 presented token（Authorization: Bearer 头或 HttpOnly cookie），
  *    与 getToken() 的当前 token 做 timing-safe 比对，cookie 也可以是密码登录签发的会话；未配置/缺失/不匹配 → 401
  */
@@ -441,8 +457,7 @@ export function registerAuthMiddleware(app: FastifyInstance, options: AuthMiddle
     }
     // A share-bearing request never inherits administrator or loopback authority.
     if (hasShare) return checkShare();
-    const pathname = new URL(request.url, 'http://dutydeck.local').pathname;
-    if (options.exempt?.(request.method, pathname)) return;
+    if (options.exempt?.(request.method, matchedPathname(request))) return;
     const bearer = extractBearerToken(request.headers.authorization);
     const cookie = extractCookie(request.headers.cookie);
     if (!bearer && cookie && !isSameOriginRequest(request.headers, request.protocol)) {
