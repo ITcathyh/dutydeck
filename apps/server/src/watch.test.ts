@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ConfigRepository } from '@dutydeck/shared';
-import { DutydeckWatch, WATCH_RECOVERED_RETENTION_MS, WATCH_RECOVERED_LIMIT, WATCH_FIRST_RUN_MS, WATCH_INTERVAL_MS, WATCH_NOTIFICATION_RETRY_DELAY_MS, WATCH_PREFIX, checkWatchFindings, readWatchFindings, startDutydeckWatch, watchFingerprint, watchFindingSchema, type WatchScope, type WatchSignal } from './watch.js';
+import { createRepositories } from '@dutydeck/storage';
+import { createLarkCardService, LarkServiceError } from './lark/service.js';
+import { DutydeckWatch, WatchDeliveryRejectedError, watchDeliveryRejection, WATCH_NOTIFICATION_RETRY_MS, WATCH_RECEIVER_WARN_MS, WATCH_RECOVERED_RETENTION_MS, WATCH_RECOVERED_LIMIT, WATCH_FIRST_RUN_MS, WATCH_INTERVAL_MS, WATCH_NOTIFICATION_RETRY_DELAY_MS, WATCH_PREFIX, checkWatchFindings, readWatchFindings, startDutydeckWatch, watchFingerprint, watchFindingSchema, type WatchScope, type WatchSignal } from './watch.js';
 
 const at = '2026-11-01T02:00:00.000Z';
 const signal = (objectId = 'task_1', kind = 'result_delivery'): WatchSignal => ({ kind, objectId, title: '结果投递未确认成功', since: at, location: 'https://example.test/session/1' });
@@ -72,7 +74,7 @@ describe('watch findings and notifications', () => {
     h.scope.ownerId = '6796811306012770306'; h.scope.ownerIdType = 'user_id'; await h.watch.run();
     expect(h.send).toHaveBeenCalledTimes(1);
     expect(h.send.mock.calls[0]?.[0]).toMatchObject({ ownerId: '6796811306012770306', ownerIdType: 'user_id' });
-    expect([...h.rows.keys()].some(key => key.endsWith('/unreachable'))).toBe(false);
+    expect(h.rows.get(WATCH_PREFIX + 'cli_test/unreachable')).toBe('');
     expect(checkWatchFindings(Object.fromEntries(h.rows)).detail).not.toContain('巡检无人接收');
   });
   it('keeps a silent bot without a receiver visible in doctor even when nothing is wrong', async () => {
@@ -285,5 +287,100 @@ describe('watch recovered finding retention', () => {
     expect(h.send).toHaveBeenCalledTimes(2);
     expect(h.findings().find(finding => finding.objectId === 'task_1')?.episode).toBe(1);
     expect(h.send.mock.calls[1]![0].idempotencyKey).not.toBe(firstKey);
+  });
+});
+
+const rejectedKey = WATCH_PREFIX + 'cli_test/rejected';
+const rejection = () => new WatchDeliveryRejectedError(99991672, ['contact:user.employee_id:readonly']);
+const after = (ms: number) => new Date(Date.parse(at) + ms).toISOString();
+
+describe('watch direct messages rejected by Lark', () => {
+  it('clears a stale unreachable marker on the real repository without aborting later bots', async () => {
+    const repos = createRepositories(':memory:');
+    try {
+      await repos.config.set(WATCH_PREFIX + 'cli_first/unreachable', JSON.stringify({ since: at }));
+      const send = vi.fn().mockResolvedValue({});
+      const scopes: WatchScope[] = [{ appId: 'cli_first', ownerId: 'ou_first', notify: true, signals: [signal()] },
+        { appId: 'cli_second', ownerId: 'ou_second', notify: true, signals: [signal('task_2')] }];
+      const watch = new DutydeckWatch({ store: repos.config, collect: async () => scopes, send, warn: vi.fn(), now: () => new Date(at) });
+      await expect(watch.run()).resolves.toBe(false);
+      expect(await repos.config.get(WATCH_PREFIX + 'cli_first/unreachable')).toBe('');
+      expect(send.mock.calls.map(call => call[0].appId)).toEqual(['cli_first', 'cli_second']);
+      expect(checkWatchFindings(Object.fromEntries((await repos.config.list!(WATCH_PREFIX)).map(row => [row.key, row.value]))).detail).not.toContain('巡检无人接收');
+    } finally { repos.close(); }
+  });
+
+  it('sends once per run, settles the batch without marking it unknown, and does not ask for a retry', async () => {
+    const h = fixture(); h.scope.signals = [signal()]; h.send.mockRejectedValue(rejection());
+    await expect(h.watch.run()).resolves.toBe(false);
+    expect(h.send).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(h.rows.get(WATCH_PREFIX + 'cli_test/notification')!).status).toBe('completed');
+    expect(JSON.parse(h.rows.get(rejectedKey)!)).toEqual({ since: at, attemptedAt: at, ownerId: 'ou_owner', upstreamCode: 99991672, scopes: ['contact:user.employee_id:readonly'] });
+    expect(h.findings()[0]?.notifiedAt).toBeUndefined(); expect(h.findings()[0]?.notificationUnknownAt).toBeUndefined();
+    expect(h.warn).toHaveBeenCalledWith(expect.objectContaining({ appId: 'cli_test', code: 'WATCH_DELIVERY_REJECTED', upstreamCode: 99991672 }), expect.any(String));
+  });
+
+  it('waits a day before resending, keeps the first rejection time, and clears the marker after delivery', async () => {
+    const h = fixture(); h.scope.signals = [signal()]; h.send.mockRejectedValueOnce(rejection()).mockRejectedValueOnce(rejection());
+    await h.watch.run();
+    h.setNow(after(WATCH_NOTIFICATION_RETRY_MS)); h.scope.signals.push(signal('new')); await h.watch.run();
+    h.setNow(after(WATCH_RECEIVER_WARN_MS - 1)); await h.watch.run();
+    expect(h.send).toHaveBeenCalledTimes(1);
+    h.setNow(after(WATCH_RECEIVER_WARN_MS)); await h.watch.run();
+    expect(h.send).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(h.rows.get(rejectedKey)!)).toMatchObject({ since: at, attemptedAt: after(WATCH_RECEIVER_WARN_MS) });
+    h.setNow(after(2 * WATCH_RECEIVER_WARN_MS)); await h.watch.run();
+    expect(h.send).toHaveBeenCalledTimes(3);
+    expect(h.send.mock.calls[2]?.[0].text).toContain('2 个新问题');
+    expect(h.rows.get(rejectedKey)).toBe('');
+    expect(h.findings().every(row => row.notifiedAt && !row.notificationUnknownAt)).toBe(true);
+  });
+
+  it('drops the marker and sends right away when the receiver changes', async () => {
+    const h = fixture(); h.scope.signals = [signal()]; h.send.mockRejectedValueOnce(rejection());
+    await h.watch.run();
+    h.scope.ownerId = 'ou_new'; await h.watch.run();
+    expect(h.send).toHaveBeenCalledTimes(2);
+    expect(h.send.mock.calls[1]?.[0].ownerId).toBe('ou_new');
+    expect(h.rows.get(rejectedKey)).toBe('');
+  });
+
+  it.each([
+    ['a timeout', new Error('timeout')],
+    ['a 403 without permission violations', new LarkServiceError('LARK_OPENAPI_ERROR', 'forbidden', 403, { upstreamCode: 403, upstreamHttpStatus: 403, consoleUrl: 'https://open.example/app' })]
+  ])('keeps the retry-then-unknown path for %s', async (_name, error) => {
+    expect(error instanceof LarkServiceError ? watchDeliveryRejection(error.details) : undefined).toBeUndefined();
+    const h = fixture(); h.scope.signals = [signal()]; h.send.mockRejectedValue(error);
+    await expect(h.watch.run()).resolves.toBe(true);
+    h.setNow(after(WATCH_NOTIFICATION_RETRY_MS)); await h.watch.run();
+    expect(h.send).toHaveBeenCalledTimes(1);
+    expect(h.findings()[0]?.notificationUnknownAt).toBe(after(WATCH_NOTIFICATION_RETRY_MS));
+    expect(h.rows.has(rejectedKey)).toBe(false);
+  });
+
+  it('recognizes a real card-send rejection by code or permission violations only', async () => {
+    const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+    const fetcher = vi.fn(async (url: string | URL | Request) => String(url).includes('tenant_access_token')
+      ? response({ code: 0, tenant_access_token: 'token', expire: 7200 })
+      : response({ code: 99991672, msg: 'Access denied', error: { permission_violations: [{ type: 'action_privilege_required', subject: 'contact:user.employee_id:readonly' }] } }, 400));
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_watch_rejected', LARK_API_QPS: '10000', LARK_APP_SECRET: 'secret_test', LARK_API_RETRY_MAX_ATTEMPTS: '0' }, fetcher as typeof fetch);
+    const error = await service.send({ receiveId: 'ou_owner', receiveIdType: 'open_id', markdown: 'x', state: 'completed', readOnly: true }).catch(error => error);
+    expect(error).toBeInstanceOf(LarkServiceError);
+    expect(watchDeliveryRejection(error.details)).toMatchObject({ upstreamCode: 99991672, scopes: ['contact:user.employee_id:readonly'] });
+    expect(watchDeliveryRejection({ upstreamCode: 99991672 })?.scopes).toEqual([]);
+    expect(watchDeliveryRejection({ upstreamCode: 99991400, permissionViolations: [{ subject: 'im:message' }] })?.scopes).toEqual(['im:message']);
+    expect(watchDeliveryRejection({ upstreamCode: 99991400, permissionViolations: [] })).toBeUndefined();
+  });
+
+  it('shows missing permissions in doctor and ignores cleared or malformed markers', () => {
+    const marker = JSON.stringify({ since: at, attemptedAt: at, ownerId: 'ou_owner', upstreamCode: 99991672, scopes: ['contact:user.employee_id:readonly'] });
+    const check = checkWatchFindings({ [rejectedKey]: marker });
+    expect(check.level).toBe('warn');
+    expect(check.detail).toContain('巡检私信被飞书拒绝：应用 cli_test 缺 contact:user.employee_id:readonly');
+    expect(checkWatchFindings({ [rejectedKey]: JSON.stringify({ ...JSON.parse(marker), scopes: [] }) }).detail).toContain('缺 所需权限');
+    expect(checkWatchFindings({ [rejectedKey]: '', [WATCH_PREFIX + 'cli_other/rejected']: '{"since":"bad"}', [WATCH_PREFIX + 'cli_x/unreachable']: '' }).level).toBe('ok');
+    expect(checkWatchFindings({ [WATCH_PREFIX + 'cli_x/unreachable']: JSON.stringify({ since: at }) }).detail).toContain('加入允许名单会让机器人只对名单里的人开放');
+    // 旧程序只按"键名 = 应用/指纹 且 schema 合法"读发现，被拒标记不会被当成发现。
+    expect(readWatchFindings([{ key: rejectedKey, value: marker }, { key: rejectedKey, value: '' }])).toEqual([]);
   });
 });

@@ -463,6 +463,14 @@ describe('Agent group collaboration domain service', () => {
     expect(current.sendText).toHaveBeenCalledWith(expect.objectContaining({ text: '配置里是 [REDACTED]' }));
   });
 
+  it('redacts its own group tools token in text the Agent sends, even when glued to other text', async () => {
+    const current = fakeClient();
+    const { tools, token } = await setup({ cli_current: current }, undefined, undefined, 'oc_token_echo', 'ses_token_echo');
+    // 前面紧跟字母时格式规则不匹配，只能靠 environmentFor 登记的原值抹掉。
+    await tools.send(token, { content: `令牌是 ${token}，拼接后是 Z${token}Z` });
+    expect(current.sendText).toHaveBeenCalledWith(expect.objectContaining({ text: '令牌是 [REDACTED]，拼接后是 Z[REDACTED]Z' }));
+  });
+
   it('neutralizes card tags in Agent text but keeps the real mention prefix', async () => {
     const current = fakeClient({
       listChatMembers: vi.fn(async input => ({ items: input.memberTypes?.includes('user') ? [{ memberId: 'ou_human', openId: 'ou_human', memberType: 'user' as const, name: '伟哥' }] : [], hasMore: false, securityLimited: false }))

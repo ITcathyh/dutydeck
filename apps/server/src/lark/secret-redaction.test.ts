@@ -34,6 +34,19 @@ describe('secret redaction', () => {
     expect(redactTraceText('model opaque-model-name-123')).toBe('model opaque-model-name-123');
   });
 
+  it('removes group collaboration tokens by format even before they are registered', () => {
+    const token = 'v1.' + 'Gq7Rz2KdLw9XnVb4TcYp1Hs6Jm3Uf8Ea0Oi5_-NgQrS'.slice(0, 43);
+    expect(token).toHaveLength(46);
+    expect(redactTraceText(`令牌是 ${token}。`)).toBe('令牌是 [REDACTED]。');
+    expect(redactTraceText(`"${token}"`)).toBe('"[REDACTED]"');
+    for (const text of [token.slice(0, -1), token + 'A', 'x' + token, token + '-', 'av1.' + token.slice(3)]) expect(redactTraceText(text)).toBe(text);
+  });
+
+  it('keeps redacting keyed credentials next to the token rule', () => {
+    for (const text of ['token=opaque-keyed-value-7731', 'export API_KEY=opaque-keyed-value-7732', '"secret": "opaque-keyed-value-7733"', 'Authorization: Bearer opaque-keyed-value-7734'])
+      expect(redactTraceText(text)).not.toMatch(/opaque-keyed-value/);
+  });
+
   it('keeps ordinary text', () => {
     for (const text of ['sk-learn 安装好了', 'branch feat/ghp-cleanup', 'eyJ 开头的字段', 'pnpm test 通过']) expect(redactTraceText(text)).toBe(text);
   });

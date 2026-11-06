@@ -1,5 +1,5 @@
 import { MattersService } from './matters.js';
-import { DutydeckWatch, startDutydeckWatch, watchReceiverType } from './watch.js';
+import { DutydeckWatch, startDutydeckWatch, watchDeliveryRejection, watchReceiverType } from './watch.js';
 import { collectWatchScopes, resolveWatchReceiver } from './watch-signals.js';
 import { assertDatabaseNotQuarantined } from '@dutydeck/storage';
 import { ProjectMemoryService } from './project-memory.js';
@@ -50,7 +50,7 @@ import { localLoopbackUrl } from './local-api-url.js';
 import { WorkItemService, readWorkItemStatus } from './work-items.js';
 import { WorkItemInteractions } from './work-item-interactions.js';
 import { LarkWorkbench } from './lark/workbench.js';
-import { createLarkCardService } from './lark/service.js';
+import { createLarkCardService, LarkServiceError } from './lark/service.js';
 import { deliverLarkSessionNotice } from './lark/session-notice.js';
 import { createWorkbenchFetch } from './workbench-fetch.js';
 import { authorizeWorkItemAgent, authorizeWorkItemInteraction, workItemRiskPolicy } from './work-item-policy.js';
@@ -938,10 +938,15 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
         const bot = bots.find(bot => bot.appId === input.appId);
         const receiver = bot ? await resolveWatchReceiver(repos.config, bot) : undefined;
         if (!bot || !bot.listening || receiver?.id !== input.ownerId || receiver.type !== watchReceiverType(input.ownerId, input.ownerIdType)) throw new Error('巡检机器人或接收人已变更');
-        return createLarkCardService(env, workbenchHttp.fetch, bot).send({
-          receiveId: receiver.id, receiveIdType: receiver.type,
-          markdown: input.text, taskName: '巡检发现', state: 'completed', readOnly: true, idempotencyKey: input.idempotencyKey
-        });
+        try {
+          return await createLarkCardService(env, workbenchHttp.fetch, bot).send({
+            receiveId: receiver.id, receiveIdType: receiver.type,
+            markdown: input.text, taskName: '巡检发现', state: 'completed', readOnly: true, idempotencyKey: input.idempotencyKey
+          });
+        } catch (error) {
+          // 只有飞书确定拒收才不进入"结果未知"；其他失败可能已发出，保持原有重试。
+          throw (error instanceof LarkServiceError ? watchDeliveryRejection(error.details) : undefined) ?? error;
+        }
       },
       warn: (details, message) => app?.log.warn(details, message)
     });
