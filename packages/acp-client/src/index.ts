@@ -5,13 +5,16 @@ import { accessSync, chmodSync, constants, existsSync, mkdirSync, rmSync, statSy
 import { fileURLToPath } from 'node:url';
 import { assertNativeContextRecord, createAcpRuntime, createAgentRegistry, createRuntimeStore, type AcpPermissionDecision, type AcpRuntime, type AcpRuntimeResourceScope, type AcpRuntimeHandle, type AcpRuntimeProcessEvent, type AcpRuntimeStatus, type AcpRuntimeTurn, type AcpSessionStore } from 'acpx/runtime';
 import type { AgentConfig, AgentDriver, DriverSteeringOutcome, DriverTranscriptSourceObservation, InsightClient, NormalizedDriverEvent, PermissionMode, ToolRiskPolicy, DriverSubmission, DriverSubmissionInput, NativeContextIdentity, NativeContextExpected, NativeConfigurationRequest, NativeConfigurationProof, OperationPermit, ChildPermit } from '@dutydeck/shared';
-import { agentCommandApprovalReason, isAgentCommandAutoApproval, AGENT_IDLE_TIMEOUT, claudeRateLimits, permissionDisplayText, taskExecutionSchemas, canonicalExecutionJson, type AgentIdleTimeoutData } from '@dutydeck/shared';
+import { RuntimeError, agentCommandApprovalReason, isAgentCommandAutoApproval, AGENT_IDLE_TIMEOUT, claudeRateLimits, permissionDisplayText, taskExecutionSchemas, canonicalExecutionJson, type AgentIdleTimeoutData } from '@dutydeck/shared';
 import { eventContentText, eventHasContent, normalizeEventContent, shellQuote } from '@dutydeck/shared';
 import { childEnvironment } from '@dutydeck/shared/child-environment';
 import { testRegexWithTimeout } from './regex-timeout.js';
 import { PROCESS_CPU_MIN_WINDOW_MS, ProcessTreeCpu } from './process-cpu.js';
 import { currentReleasePath } from './release-path.js';
 import { acpDataRoot, buildLaunchObservation, buildNativeObservation, inferAcpInsightClient, resolveAcpChildEnvironment } from './transcript-source.js';
+
+/** 调用 Agent 之前就判定不可用的配置值：原生配置没有任何改动，runtime 据此不把会话记成配置未知。 */
+const configurationRejected = (message: string) => new RuntimeError('CONFIGURATION_REJECTED', message, 422);
 
 // 归一化事件类型统一从 @dutydeck/shared re-export，保证 ACP driver 与 PTY driver 用同一类型。
 export type { NormalizedDriverEvent };
@@ -546,6 +549,18 @@ export class AcpxAdapter implements AgentDriver {
       if(!native||!context||!this.handle||!this.runtime.setStrictConfigOption)throw new Error('NATIVE_CONTEXT_PROOF_REQUIRED');
       const evidence: Array<{configId:string;value:string}>=[];
       const target={model:request.target.model??native.defaults.model,reasoningEffort:request.target.reasoningEffort??native.defaults.reasoningEffort};
+      // 任何写入之前先对照 Agent 公布的可选值：不在列表里就明确拒绝，原生配置确定没动。
+      const changing=(['model','reasoningEffort'] as const).filter(key=>target[key]!==undefined&&target[key]!==this.currentConfiguration?.[key]);
+      if(changing.length&&this.runtime.getStatus) {
+        const status=await this.runtime.getStatus({handle:this.handle});
+        this.assertActive();
+        const options=Array.isArray(status?.details?.configOptions)?status.details.configOptions as Array<Record<string,any>>:[];
+        for(const key of changing) {
+          const option=key==='model'?options.find(item=>item.id==='model'||item.category==='model'):options.find(item=>item.category==='thought_level'||item.id==='reasoning_effort'||item.id==='effort');
+          if(Array.isArray(option?.options)&&!option.options.some((item:any)=>item?.value===target[key]))
+            throw configurationRejected(key==='model'?`Model ${target[key]} is not supported by Agent ${this.agent.id}`:`Reasoning effort ${target[key]} is not supported by model ${target.model ?? '(default)'}`);
+        }
+      }
       for(const key of ['model','reasoningEffort'] as const) {
         const value=target[key];
         if(value===undefined) {if(this.currentConfiguration?.[key]!==undefined)throw new Error('NATIVE_DEFAULT_UNVERIFIABLE');continue;}
@@ -976,9 +991,9 @@ export class AcpxAdapter implements AgentDriver {
       this.assertActive();
       const options = Array.isArray(status?.details?.configOptions) ? status.details.configOptions as Array<Record<string, any>> : [];
       const modelOption = options.find(option => option.id === 'model' || option.category === 'model');
-      if (!modelOption || typeof modelOption.id !== 'string') throw new Error(`Agent ${this.agent.id} does not support runtime model switching`);
+      if (!modelOption || typeof modelOption.id !== 'string') throw configurationRejected(`Agent ${this.agent.id} does not support runtime model switching`);
       const allowed = Array.isArray(modelOption.options) ? modelOption.options.some((option: any) => option?.value === model) : true;
-      if (!allowed) throw new Error(`Model ${model} is not supported by Agent ${this.agent.id}`);
+      if (!allowed) throw configurationRejected(`Model ${model} is not supported by Agent ${this.agent.id}`);
       await this.runtime.setConfigOption?.({ handle: this.handle!, key: modelOption.id, value: model });
       this.assertActive();
       this.agent.model = model;
@@ -993,9 +1008,9 @@ export class AcpxAdapter implements AgentDriver {
       this.assertActive();
       const options = Array.isArray(status?.details?.configOptions) ? status.details.configOptions as Array<Record<string, any>> : [];
       const reasoning = options.find(option => option.category === 'thought_level' || option.id === 'reasoning_effort' || option.id === 'effort');
-      if (!reasoning || typeof reasoning.id !== 'string') throw new Error(`Agent ${this.agent.id} does not support runtime reasoning effort switching`);
+      if (!reasoning || typeof reasoning.id !== 'string') throw configurationRejected(`Agent ${this.agent.id} does not support runtime reasoning effort switching`);
       const allowed = Array.isArray(reasoning.options) ? reasoning.options.some((option: any) => option?.value === reasoningEffort) : true;
-      if (!allowed) throw new Error(`Reasoning effort ${reasoningEffort} is not supported by model ${this.agent.model ?? '(default)'}`);
+      if (!allowed) throw configurationRejected(`Reasoning effort ${reasoningEffort} is not supported by model ${this.agent.model ?? '(default)'}`);
       await this.runtime.setConfigOption?.({ handle: this.handle!, key: reasoning.id, value: reasoningEffort });
       this.assertActive();
       this.agent.reasoningEffort = reasoningEffort;
