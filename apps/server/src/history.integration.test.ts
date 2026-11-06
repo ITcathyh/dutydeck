@@ -53,6 +53,14 @@ it('projects real Runtime prefixes, queued successor events, canonical identity 
   expect(response.body).not.toContain('canonical-large-body');
   const detail = await app.inject({ method: 'GET', url: `/api/sessions/${session.id}/events?after=${outline.turns[0]!.firstSequence - 1}&before=${outline.turns[0]!.lastSequence + 1}&limit=200&direction=forward` });
   expect(detail.body).toContain('canonical-large-body');
+  // A tail read carries every turn's place but summarizes only the newest; a range read summarizes just that range.
+  const tail = (await app.inject({ method: 'GET', url: `/api/sessions/${session.id}/history?tail=1` })).json();
+  expect(tail).toEqual({ ...outline, turns: outline.turns.slice(1), places: outline.turns.map(turn => [turn.id, turn.firstSequence, turn.lastSequence, turn.taskId, turn.prompt.text.slice(0, 40)]) });
+  const range = (await app.inject({ method: 'GET', url: `/api/sessions/${session.id}/history/turns?from=${outline.turns[0]!.firstSequence}&through=${outline.turns[0]!.lastSequence}` })).json();
+  expect(range).toEqual({ turns: outline.turns.slice(0, 1) });
+  for (const query of ['tail=0', 'tail=1001', 'tail=x']) expect((await app.inject({ method: 'GET', url: `/api/sessions/${session.id}/history?${query}` })).statusCode).toBe(400);
+  for (const query of ['', 'from=1', 'from=-1&through=2', 'from=3&through=2']) expect((await app.inject({ method: 'GET', url: `/api/sessions/${session.id}/history/turns?${query}` })).statusCode).toBe(400);
   const denied = await buildApp(runtime, { executionPolicy: { authorize: async () => ({ allowed: false, action: 'task.view_result', code: 'forbidden', reason: 'denied', source: 'integration' }) } }); cleanup.push(() => denied.close());
   expect((await denied.inject({ method: 'GET', url: `/api/sessions/${session.id}/history` })).statusCode).toBe(403);
+  expect((await denied.inject({ method: 'GET', url: `/api/sessions/${session.id}/history/turns?from=1&through=2` })).statusCode).toBe(403);
 });

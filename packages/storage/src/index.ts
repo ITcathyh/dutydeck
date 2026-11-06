@@ -3,7 +3,7 @@ import { cachedStatement } from './database-control.js';
 import { createWorkspaceApprovalRuleRepository } from './workspace-approval-rules.js';
 export { assertDatabaseNotQuarantined, restoreQuarantinePath } from './database-control.js';
 export { backupSqlite, withOfflineDatabase, BACKUP_SCHEMA_VERSION } from './offline-backup.js';
-import { readHistoryOutline } from './event-history.js';
+import { readHistoryOutline, readHistoryTurns } from './event-history.js';
 import { listConfigByJsonField, listConfigJsonFields } from './config-query.js';
 import { createPluginResultRepository } from './plugin-results.js';
 import { createMemoryJobRepository } from './memory-jobs.js';
@@ -390,7 +390,8 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
       }
     },
     events: {
-      async listHistoryOutline(sessionId) { return readHistoryOutline(sqlite, sessionId); },
+      async listHistoryOutline(sessionId, query) { return readHistoryOutline(sqlite, sessionId, query); },
+      async listHistoryTurns(sessionId, from, through) { return readHistoryTurns(sqlite, sessionId, from, through); },
       highWaterMark(sessionId) { return (sessionHighWaterMark().get(sessionId) as { sequence: number }).sequence; },
       // Columns the event omits are written as NULL, as the unprepared insert did.
       async append(e) { legacyWrite(() => insertEvent().run({ id: e.id, sessionId: e.sessionId, sequence: e.sequence, type: e.type, timestamp: e.timestamp, data: JSON.stringify(e.data),

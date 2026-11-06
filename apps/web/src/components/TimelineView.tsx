@@ -1,5 +1,6 @@
 import { ArrowDown, MessageSquare } from 'lucide-react';
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, useContext, type ReactNode } from 'react';
+import { flushSync } from 'react-dom';
 import type { TimelineEvent, TimelineSection } from '../timeline';
 import { isNearScrollBottom, useTimelineAutoScroll } from '../useTimelineAutoScroll';
 import { Button, EmptyState, Skeleton } from './primitives';
@@ -8,8 +9,8 @@ import { TimelineDisclosureContext } from '../timeline-disclosure';
 import { getTimelineReadingState, saveTimelineReadingState, type TimelineReadingAnchor } from '../timeline-reading-state';
 import { TimelineItem } from './TimelineItem';
 import { useQuery } from '@tanstack/react-query';
-import { api, type DockEvent, type HistoryTurnSummary } from '../api';
-import { loadTurnHistory } from '../event-history';
+import { api, type DockEvent, type HistoryTurnPlace, type HistoryTurnSummary } from '../api';
+import { HISTORY_TURN_PAGE_SIZE, loadTurnHistory } from '../event-history';
 import { buildTimelineSections, createTimelineProjector } from '../timeline';
 import { useTimelineDisclosure } from '../timeline-disclosure';
 import { MarkdownContent } from '../MarkdownContent';
@@ -25,6 +26,8 @@ export type TimelineViewProps = {
   onScrollTop?(scrollTop: number): void;
   activeSessionId?: string;
   historyTurns?: HistoryTurnSummary[];
+  /** Every completed turn when `historyTurns` holds only the newest; the others read their summaries per page. */
+  historyPlaces?: HistoryTurnPlace[];
   sourceEvents?: DockEvent[];
   readingScopeKey?: string;
   visible?: boolean;
@@ -101,10 +104,12 @@ const TimelineBody = memo(function TimelineBody({ timelineSections, activeOutput
   && (!a.awaitingAnswer || a.timeline[a.latestUserIndex]?.timestamp === b.timeline[b.latestUserIndex]?.timestamp)
   && a.timelineSections.length === b.timelineSections.length && a.timelineSections.every((section, index) => section === b.timelineSections[index]));
 
-type TimelineTurn = { id: string; sections: TimelineSection[]; summary?: HistoryTurnSummary };
+type TimelineTurn = { id: string; sections: TimelineSection[]; summary?: HistoryTurnSummary; place?: HistoryTurnPlace; placeIndex?: number };
 type TimelineRow = TimelineTurn & { top: number; height: number };
+/** Summarized turns render from their summary, not sections; they share one empty list. */
+const noSections: TimelineSection[] = [];
 
-export function TimelineView({ fullWidth = false, variant, header, aside, onScrollTop, historyTurns, sourceEvents, activeSessionId, readingScopeKey = activeSessionId ?? 'empty', visible: isVisible = true, eventsLoading, onResolvePermission, resolvingPermissionId, timeline, timelineSections, awaitingAnswer, hasOngoingActivity, latestUserIndex, activeOutputLabel, footer, renderProgress, hasOlder, loadedEventCount, olderError, loadOlder }: TimelineViewProps) {
+export function TimelineView({ fullWidth = false, variant, header, aside, onScrollTop, historyTurns, historyPlaces, sourceEvents, activeSessionId, readingScopeKey = activeSessionId ?? 'empty', visible: isVisible = true, eventsLoading, onResolvePermission, resolvingPermissionId, timeline, timelineSections, awaitingAnswer, hasOngoingActivity, latestUserIndex, activeOutputLabel, footer, renderProgress, hasOlder, loadedEventCount, olderError, loadOlder }: TimelineViewProps) {
   const share = variant === 'share';
   // 分享页第一次打开从英雄区开始读，不自动滚到最底部；读者滚到底后才跟随新内容，刷新后照旧跟随。
   const reading = useMemo(() => getTimelineReadingState(readingScopeKey, !share), [readingScopeKey, share]);
@@ -130,8 +135,11 @@ export function TimelineView({ fullWidth = false, variant, header, aside, onScro
     previousScope.current = readingScopeKey;
   }
   const turnCache = useMemo(() => new WeakMap<TimelineSection, TimelineTurn>(), [readingScopeKey]);
-  const rowCache = useMemo(() => new WeakMap<TimelineTurn, TimelineRow>(), [readingScopeKey]);
-  const summaryTurns = useMemo(() => (historyTurns ?? []).map(summary => ({ id: summary.id, sections: [], summary })), [historyTurns]);
+  const summaryTurns = useMemo((): TimelineTurn[] => {
+    if (!historyPlaces) return (historyTurns ?? []).map(summary => ({ id: summary.id, sections: noSections, summary }));
+    const loaded = new Map((historyTurns ?? []).map(summary => [summary.id, summary]));
+    return historyPlaces.map((place, placeIndex) => ({ id: place[0], sections: noSections, summary: loaded.get(place[0]), place, placeIndex }));
+  }, [historyTurns, historyPlaces]);
   const turns = useMemo(() => {
     const result: TimelineTurn[] = [];
     let start = 0;
@@ -174,32 +182,40 @@ export function TimelineView({ fullWidth = false, variant, header, aside, onScro
   const earlierOpen = disclosures.get('share-earlier') ?? false;
   const setEarlierOpen = useCallback((open: boolean) => { disclosures.set('share-earlier', open); saveTimelineReadingState(); rerenderEarlier(); }, [disclosures]);
   const layoutTurns = useMemo(() => share && !earlierOpen && turns.length > 2 ? [turns[0]!, turns.at(-1)!] : turns, [share, earlierOpen, turns]);
+  // Rows are prefix sums of their heights. A long session has tens of thousands of summarized
+  // turns: only rows near the viewport become objects, and a live event re-adds numbers only.
   const layout = useMemo(() => {
-    let top = 0;
-    const rows = layoutTurns.map(turn => {
-      const height = heights.get(turn.id) ?? 180;
-      let row = rowCache.get(turn);
-      if (!row || row.top !== top || row.height !== height || row.id !== turn.id) {
-        row = { ...turn, top, height }; rowCache.set(turn, row);
-      }
-      top += height;
-      return row;
-    });
-    return { rows, height: top };
-  }, [layoutTurns, heights, measureVersion, rowCache]);
+    const tops = new Float64Array(layoutTurns.length + 1);
+    for (let index = 0; index < layoutTurns.length; index++) tops[index + 1] = tops[index]! + (heights.get(layoutTurns[index]!.id) ?? 180);
+    return { tops, height: tops[layoutTurns.length]! };
+  }, [layoutTurns, heights, measureVersion]);
+  const rowAt = (index: number): TimelineRow | undefined => {
+    const turn = layoutTurns[index];
+    return turn && { ...turn, top: layout.tops[index]!, height: layout.tops[index + 1]! - layout.tops[index]! };
+  };
+  // Summarized turns keep their index while live events arrive; only the live tail is searched.
+  const summaryIndex = useMemo(() => new Map(summaryTurns.map((turn, index) => [turn.id, index])), [summaryTurns]);
+  const rowById = (id: string | undefined) => {
+    if (id === undefined) return undefined;
+    const summarized = summaryIndex.get(id);
+    if (summarized !== undefined && layoutTurns[summarized]?.id === id) return rowAt(summarized);
+    for (let index = layoutTurns === turns ? summaryTurns.length : 0; index < layoutTurns.length; index++) if (layoutTurns[index]!.id === id) return rowAt(index);
+    return undefined;
+  };
+  const rowContaining = (sequence: number) => rowAt(layoutTurns.findIndex(turn => containsSource(turn, sequence)));
   // 分享页的英雄区在滚动容器里、列表上方：行坐标从列表起点算，和 scrollTop 比较前先扣掉这段偏移。工作台不扣（偏移按 0）。
   const listStartRef = useRef<HTMLDivElement>(null);
   const listOffset = () => {
     const container = timelineScroll.containerRef.current, start = listStartRef.current;
     return share && container && start ? start.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop : 0;
   };
-  const restoredRow = anchor.current && (layout.rows.find(row => row.id === anchor.current!.id) ?? layout.rows.find(row => row.sections.some(section => section.kind === 'event' ? section.event.id === anchor.current!.eventId : section.groups.some(group => group.events.some(event => event.id === anchor.current!.eventId)))));
+  const restoredRow = anchor.current && (rowById(anchor.current.id) ?? rowAt(layoutTurns.findIndex(turn => turn.sections.some(section => section.kind === 'event' ? section.event.id === anchor.current!.eventId : section.groups.some(group => group.events.some(event => event.id === anchor.current!.eventId))))));
   const top = !timelineScroll.isFollowing && Number.isFinite(viewport.top) ? (restoredRow ? restoredRow.top + anchor.current!.offset : viewport.top) : Math.max(0, layout.height - viewport.height);
-  const firstMatch = layout.rows.findIndex(row => row.top + row.height >= top - 800);
-  const first = firstMatch < 0 ? Math.max(0, layout.rows.length - 1) : firstMatch;
+  const firstMatch = firstRowEndingAfter(layout.tops, top - 800, true);
+  const first = firstMatch < 0 ? Math.max(0, layoutTurns.length - 1) : firstMatch;
   let last = first;
-  while (last < layout.rows.length && layout.rows[last]!.top <= top + viewport.height + 800) last++;
-  const visible = layout.rows.slice(first, last);
+  while (last < layoutTurns.length && layout.tops[last]! <= top + viewport.height + 800) last++;
+  const visible = Array.from({ length: last - first }, (_, index) => rowAt(first + index)!);
   const syncViewport = (captureAnchor = true) => {
     const container = timelineScroll.containerRef.current;
     if (!container || !isVisible) return;
@@ -211,7 +227,7 @@ export function TimelineView({ fullWidth = false, variant, header, aside, onScro
     // an overscan event still far below the visible viewport.
     const element = [...container.querySelectorAll<HTMLElement>('[data-timeline-event]')].find(element => { const rect = element.getBoundingClientRect(); return rect.bottom > containerTop && rect.top < containerTop + container.clientHeight; });
     const rowId = element?.closest<HTMLElement>('[data-timeline-turn]')?.dataset.timelineTurn;
-    const row = layout.rows.find(row => row.id === rowId) ?? layout.rows.find(row => row.top + row.height > container.scrollTop - offset);
+    const row = rowById(rowId) ?? rowAt(firstRowEndingAfter(layout.tops, container.scrollTop - offset, false));
     anchor.current = row ? { id: row.id, offset: container.scrollTop - offset - row.top,
       ...(element ? { eventId: element.dataset.timelineEvent, screenOffset: element.getBoundingClientRect().top - containerTop } : {}) } : undefined;
     reading.following = timelineScroll.isFollowing;
@@ -228,7 +244,7 @@ export function TimelineView({ fullWidth = false, variant, header, aside, onScro
       const element = [...container.querySelectorAll<HTMLElement>('[data-timeline-event]')].find(element => element.dataset.timelineEvent === anchor.current!.eventId);
       if (element && anchor.current.screenOffset !== undefined) container.scrollTop += element.getBoundingClientRect().top - container.getBoundingClientRect().top - anchor.current.screenOffset;
       else {
-        const row = layout.rows.find(row => row.id === anchor.current!.id);
+        const row = rowById(anchor.current.id);
         if (row) container.scrollTop = row.top + anchor.current.offset + listOffset();
       }
     }
@@ -252,19 +268,20 @@ export function TimelineView({ fullWidth = false, variant, header, aside, onScro
     if (container) reading.following = isNearScrollBottom(container);
   };
   const jumpToRow = (id: string) => {
-    const row = layout.rows.find(row => row.id === id);
+    const row = rowById(id);
     const container = timelineScroll.containerRef.current;
     if (!row || !container) return;
     reading.following = false; anchor.current = { id: row.id, offset: 0, eventId: row.id, screenOffset: 0 };
     container.scrollTop = row.top + listOffset(); programmedScrollTop.current = undefined;
     timelineScroll.onScroll(); syncViewport(false);
   };
+  const jumpToRowRef = useRef(jumpToRow); jumpToRowRef.current = jumpToRow;
+  const jumpToTurn = useCallback((id: string) => jumpToRowRef.current(id), []);
   useEffect(() => {
     const showSource = (event: Event) => {
       const source = (event as CustomEvent<HistorySource>).detail;
       if (!source || !Number.isSafeInteger(source.sequence)) return;
-      const row = layout.rows.find(row => containsSource(row, source.sequence));
-      if (row) setRequestedSource({ ...source, requestId: ++sourceRequestId.current });
+      if (rowContaining(source.sequence)) setRequestedSource({ ...source, requestId: ++sourceRequestId.current });
     };
     window.addEventListener('dutydeck:show-history-turn', showSource);
     return () => window.removeEventListener('dutydeck:show-history-turn', showSource);
@@ -277,7 +294,7 @@ export function TimelineView({ fullWidth = false, variant, header, aside, onScro
   }, [sourceTarget, requestedSource, isVisible]);
   useLayoutEffect(() => {
     if (!requestedSource || !isVisible) return;
-    const row = layout.rows.find(row => containsSource(row, requestedSource.sequence));
+    const row = rowContaining(requestedSource.sequence);
     if (row) jumpToRow(row.id);
   }, [requestedSource, isVisible]);
   useEffect(() => {
@@ -302,12 +319,12 @@ export function TimelineView({ fullWidth = false, variant, header, aside, onScro
       ? <TimelineSkeleton/>
       : turns.length
         ? <>
-            {turns.length > 1 && !share && <label className="mb-4 flex items-center gap-2 text-caption text-subtle">跳到轮次<select aria-label="跳到轮次" defaultValue="" onChange={event => { jumpToRow(event.target.value); event.target.value = ''; }} className="max-w-64 rounded border border-default bg-surface px-2 py-1"><option value="" disabled>选择历史轮次</option>{turns.map((turn, index) => <option key={turn.id} value={turn.id}>第 {index + 1} 轮{turn.summary ? ` · ${turn.summary.prompt.text.slice(0, 40)}` : ' · 当前记录'}</option>)}</select></label>}
+            {turns.length > 1 && !share && <TurnJumper turns={turns} onJump={jumpToTurn}/>}
             <div ref={listStartRef} aria-hidden="true" style={{ height: visible[0]?.top ?? 0 }}/>
             {visible.map(row => <MeasuredTurn key={row.id} id={row.id} onMeasure={height => {
               if (heights.get(row.id) === height) return;
               heights.set(row.id, height); setMeasureVersion(version => version + 1);
-            }}>{share && activeSessionId ? <ShareTurn id={row.id} summary={row.summary} sections={row.sections} earlier={earlierPlaces.get(row.id)}/> : row.summary && activeSessionId ? <HistoryTurn sessionId={activeSessionId} summary={row.summary} activeOutputLabel={activeOutputLabel} requestedSource={requestedSource}/> : <TimelineBody key={requestedSource && containsSource(row, requestedSource.sequence) ? requestedSource.requestId : undefined}
+            }}>{share && activeSessionId ? <ShareTurn id={row.id} summary={row.summary} sections={row.sections} earlier={earlierPlaces.get(row.id)}/> : row.summary && activeSessionId ? <HistoryTurn sessionId={activeSessionId} summary={row.summary} activeOutputLabel={activeOutputLabel} requestedSource={requestedSource}/> : row.place && historyPlaces && activeSessionId ? <PendingHistoryTurn sessionId={activeSessionId} places={historyPlaces} index={row.placeIndex!} activeOutputLabel={activeOutputLabel} requestedSource={requestedSource}/> : <TimelineBody key={requestedSource && containsSource(row, requestedSource.sequence) ? requestedSource.requestId : undefined}
               timelineSections={row.sections} activeOutputLabel={activeOutputLabel}
               onResolvePermission={onResolvePermission} resolvingPermissionId={resolvingPermissionId}
               awaitingAnswer={awaitingAnswer && row.id === turns.at(-1)?.id}
@@ -321,18 +338,44 @@ export function TimelineView({ fullWidth = false, variant, header, aside, onScro
   </>;
   return <TimelineDisclosureContext.Provider value={disclosures}><div className="relative min-h-0 flex-1 bg-canvas">
     <div ref={timelineScroll.containerRef} onScroll={onScroll}
-      style={{ overflowAnchor: 'none' }} data-timeline-scroll="true" data-history-start={historyTurns?.[0]?.firstSequence ?? timeline[0]?.sequence} data-history-loaded={loadedEventCount} data-history-complete={hasOlder === false} className="absolute inset-0 overscroll-contain overflow-y-auto">
+      style={{ overflowAnchor: 'none' }} data-timeline-scroll="true" data-history-start={historyPlaces?.[0]?.[1] ?? historyTurns?.[0]?.firstSequence ?? timeline[0]?.sequence} data-history-loaded={loadedEventCount} data-history-complete={hasOlder === false} className="absolute inset-0 overscroll-contain overflow-y-auto">
       {share
         ? <div className="share-content">{header}<div className="share-layout share-gutter"><div className="share-main">{content}</div>{aside}</div></div>
         : <div className={`mx-auto w-full py-8 sm:py-10 ${fullWidth ? 'px-3 sm:px-5' : 'max-w-[880px] px-5 sm:px-8'}`}>{content}</div>}
     </div>
     {/* 历史全部加载完后这行提示只留给读屏，不再压在第一条消息上。 */}
     {!eventsLoading && loadedEventCount !== undefined && <div className={olderError || hasOlder ? 'absolute left-5 top-1 z-sticky rounded bg-canvas px-2 py-1 text-meta text-subtle' : 'sr-only'}>
-      <span role="status">{olderError ? `已加载 ${loadedEventCount} 条，历史加载中断` : hasOlder ? `已加载 ${loadedEventCount} 条，正在加载全部历史…` : `已加载 ${historyTurns?.length ?? 0} 轮摘要、${loadedEventCount} 条原始记录`}</span>
+      <span role="status">{olderError ? `已加载 ${loadedEventCount} 条，历史加载中断` : hasOlder ? `已加载 ${loadedEventCount} 条，正在加载全部历史…` : `已加载 ${historyPlaces?.length ?? historyTurns?.length ?? 0} 轮摘要、${loadedEventCount} 条原始记录`}</span>
       {olderError && <button onClick={() => void loadOlder?.()} className="ml-2 text-caption text-danger" title={olderError}>重试加载历史</button>}
     </div>}
     {!timelineScroll.isFollowing && !share && <ScrollToBottomButton onClick={() => { reading.following = true; reading.anchor = undefined; anchor.current = undefined; timelineScroll.scrollToBottom(); saveTimelineReadingState(); }}/>}
   </div></TimelineDisclosureContext.Provider>;
+}
+
+/**
+ * A long session has one option per turn. Options exist only while the picker is in use:
+ * tens of thousands of idle options cost a full relayout of the list on every live event.
+ * They mount on pointerdown (synchronously, before the native list opens) or focus, and unmount on blur.
+ * The width is fixed (and may shrink) so the browser does not measure every option's text to size it.
+ */
+const TurnJumper = memo(function TurnJumper({ turns, onJump }: { turns: TimelineTurn[]; onJump(id: string): void }) {
+  const [active, setActive] = useState(false);
+  const activate = () => { if (!active) flushSync(() => setActive(true)); };
+  return <label className="mb-4 flex items-center gap-2 text-caption text-subtle">跳到轮次<select aria-label="跳到轮次" defaultValue="" onPointerDown={activate} onFocus={activate} onBlur={() => setActive(false)}
+    onChange={event => { onJump(event.target.value); event.target.value = ''; }} className="w-64 min-w-0 max-w-full rounded border border-default bg-surface px-2 py-1">
+    <option value="" disabled>选择历史轮次</option>
+    {active && turns.map((turn, index) => <option key={turn.id} value={turn.id}>第 {index + 1} 轮{turn.summary ? ` · ${turn.summary.prompt.text.slice(0, 40)}` : turn.place ? ` · ${turn.place[4]}` : ' · 当前记录'}</option>)}
+  </select></label>;
+});
+
+/** `tops` holds each row's top and, last, the list's end: the first row whose bottom reaches `y` (inclusive) or passes it, or -1. */
+function firstRowEndingAfter(tops: Float64Array, y: number, inclusive: boolean) {
+  let low = 0, high = tops.length - 1;
+  while (low < high) {
+    const middle = (low + high) >> 1, bottom = tops[middle + 1]!;
+    if (inclusive ? bottom >= y : bottom > y) high = middle; else low = middle + 1;
+  }
+  return low < tops.length - 1 ? low : -1;
 }
 
 function MeasuredTurn({ id, onMeasure, children }: { id: string; onMeasure(height: number): void; children: ReactNode }) {
@@ -383,9 +426,26 @@ function HistoryTurn({ sessionId, summary, activeOutputLabel, requestedSource }:
   </section>;
 }
 
+/** An earlier turn known only by its place: its page of summaries loads when it scrolls into view. */
+function PendingHistoryTurn({ sessionId, places, index, activeOutputLabel, requestedSource }: { sessionId: string; places: HistoryTurnPlace[]; index: number; activeOutputLabel: string; requestedSource?: HistorySource }) {
+  const place = places[index]!;
+  const start = index - index % HISTORY_TURN_PAGE_SIZE, end = Math.min(places.length, start + HISTORY_TURN_PAGE_SIZE) - 1;
+  const from = places[start]![1], through = places[end]![2];
+  const page = useQuery({ queryKey: ['history-page', sessionId, from, through], queryFn: ({ signal }) => api.sessionHistoryTurns(sessionId, from, through, signal), staleTime: Infinity });
+  const summary = page.data?.turns.find(turn => turn.id === place[0]);
+  if (summary) return <HistoryTurn sessionId={sessionId} summary={summary} activeOutputLabel={activeOutputLabel} requestedSource={requestedSource}/>;
+  return <section data-history-pending={place[0]} className="my-4 border-b border-default pb-4">
+    <div className="mb-2 whitespace-pre-wrap text-body text-primary">{place[4] || '历史执行记录'}</div>
+    {page.isError ? <p role="alert" className="text-caption">摘要读取失败：{page.error.message}<button onClick={() => void page.refetch()} className="ml-2 text-info">重试</button></p>
+      : page.isSuccess ? <p className="text-caption text-subtle">这一轮的记录已变化，刷新页面后再查看。</p>
+      : <p className="text-caption text-subtle">正在读取这一轮的摘要…</p>}
+  </section>;
+}
+
 type HistorySource = { eventId?: string; sequence: number; requestId?: number };
 function containsSource(row: TimelineTurn, sequence: number) {
   if (row.summary) return sequence >= row.summary.firstSequence && sequence <= row.summary.lastSequence;
+  if (row.place) return sequence >= row.place[1] && sequence <= row.place[2];
   const sequences = row.sections.flatMap(section => section.kind === 'event' ? [section.event.sequence] : section.groups.flatMap(group => group.events.map(event => event.sequence))).filter(sequence => sequence > 0);
   const range = sequences.reduce((range, value) => ({ first: Math.min(range.first, value), last: Math.max(range.last, value) }), { first: Infinity, last: -Infinity });
   return sequence >= range.first && sequence <= range.last;

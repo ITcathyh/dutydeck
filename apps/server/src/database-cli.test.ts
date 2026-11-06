@@ -164,7 +164,7 @@ describe('database-cli', () => {
       const result = await runDatabaseExecutionStatus({ database: dbPath });
       expect(result.status).toBe('legacy');
       expect(result.authority).toBe('legacy');
-      expect(schemaVersion).toBe(46);
+      expect(schemaVersion).toBe(48);
       expect(result.schemaVersion).toBe(schemaVersion);
       expect(result.counts?.tasks).toBe(1);
     });

@@ -1,6 +1,8 @@
 import { api, type DockEvent, type HistoryOutline, type HistoryTurnSummary } from './api';
 
 export const EVENT_PAGE_SIZE = 200;
+/** Completed turns summarized up front on the workbench, and per page when earlier turns scroll into view. */
+export const HISTORY_TURN_PAGE_SIZE = 50;
 export type EventWindow = {
   events: DockEvent[];
   outline?: HistoryOutline;

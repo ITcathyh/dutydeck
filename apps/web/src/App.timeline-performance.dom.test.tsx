@@ -198,3 +198,23 @@ it('keeps native commands discoverable from fully summarized history and honors 
   fireEvent.change(input, { target: { value: '/refresh' } });
   expect(await screen.findByRole('button', { name: /\/refresh.*Current native command/ })).toBeTruthy();
 });
+
+it('reads a linked session history while the session list is still loading', async () => {
+  const session: Session = { id: 's1', agentId: 'codex', state: 'idle', cwd: '/tmp/linked', runId: 'r1', permissionMode: 'ask', createdAt: '', updatedAt: '' };
+  window.history.replaceState(null, '', '/sessions/s1');
+  mockAppApi([session]);
+  let listSessions!: (sessions: Session[]) => void;
+  vi.mocked(api.sessions).mockImplementation(() => new Promise(resolve => { listSessions = resolve; }));
+  vi.mocked(api.events).mockResolvedValue([]);
+  vi.mocked(api.sessionHistory).mockResolvedValue({ turns: [{ id: 'linked-turn', taskId: 'linked-task', firstSequence: 1, lastSequence: 4, timestamp: '', status: 'completed', prompt: { text: 'linked instruction', truncated: false }, output: { text: 'linked result', truncated: false }, toolCount: 0, artifactReferences: [] }], places: [['linked-turn', 1, 4, 'linked-task', 'linked instruction']], liveAfter: 4, highWaterMark: 4 });
+  client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={client}><App/></QueryClientProvider>);
+  // The outline read does not wait for the list that confirms the session exists; the events after it do.
+  await waitFor(() => expect(api.sessionHistory).toHaveBeenCalledWith('s1', expect.anything(), { tail: 50 }));
+  expect(api.sessions).toHaveBeenCalledTimes(1);
+  expect(api.events).not.toHaveBeenCalled();
+  act(() => listSessions([session]));
+  expect(await screen.findByText('linked result')).toBeTruthy();
+  expect(api.events).toHaveBeenCalledWith('s1', expect.objectContaining({ after: 4 }), expect.anything());
+  expect(api.sessionHistory).toHaveBeenCalledTimes(1);
+});

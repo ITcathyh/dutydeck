@@ -1,7 +1,7 @@
 import { clearTaskReportSafely, isTerminalTaskStatus, readSessionTaskReportReference, readSessionTaskReport, SESSION_NAME_CONFIG_PREFIX, taskReportInputSchema, writeTaskReport, type SessionWorkspace, type TaskReport, type TaskReportInput } from '@dutydeck/shared';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
-import type { AgentCapabilities, AgentConfig, AttemptActivity, AgentDriver, AgentEvent, DriverFactory, DriverTranscriptSourceObservation, EventType, EventWindowOptions, NormalizedDriverEvent, PermissionMode, PermissionRequestData, PromptAssemblyData, PromptPart, PromptSourceDiagnostics, PublicTaskRecord, RepositoryBundle, RuntimeControlClaim, Session, SkillDeliveryMetadata, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy, TranscriptSourceObservation, VerificationCommandInput, VerificationResponse, WorkspaceCleanupBlocker, WorkspaceCleanupPreview, WorkspaceCleanupResult, WorkspaceResponse } from '@dutydeck/shared';
+import type { AgentCapabilities, AgentConfig, AttemptActivity, AgentDriver, AgentEvent, DriverFactory, DriverTranscriptSourceObservation, EventType, EventWindowOptions, HistoryOutlineQuery, NormalizedDriverEvent, PermissionMode, PermissionRequestData, PromptAssemblyData, PromptPart, PromptSourceDiagnostics, PublicTaskRecord, RepositoryBundle, RuntimeControlClaim, Session, SkillDeliveryMetadata, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy, TranscriptSourceObservation, VerificationCommandInput, VerificationResponse, WorkspaceCleanupBlocker, WorkspaceCleanupPreview, WorkspaceCleanupResult, WorkspaceResponse } from '@dutydeck/shared';
 import { timeLoop, eventHasContent, normalizeEventContent, deferredConfirmationId, agentCommandApprovalReason, isAgentCommandAutoApproval, canonicalExecutionJson, ptyRetirementRecoverySchema, steeringRecoveryDecisionSchema, executionRecoveryDecisionSchema, unknownTaskResolutionSchema, executionActorSchema, taskRequestV1Schema, steerableTaskNamespace, makeId, now, RuntimeError, permissionDisplayText, freeTextInputMaxBytes, workspaceModes, sessionNameConfigKey, normalizeSessionName, parseLarkSourceId, supportsRemoteApproval, supportsNativeFork, redactCredentialText, PROMPT_NOT_WRITTEN, unknownTaskActionLabels } from '@dutydeck/shared';
 import { listAcpxBuiltinAgents, AcpxAdapter, testRegexWithTimeout, ProcessTreeCpu, readNativeCreationRecord } from '@dutydeck/acp-client';
 import { JsonlTransport, PipeTransport, probeAgent, PtyTransport } from '@dutydeck/transports';
@@ -1301,9 +1301,13 @@ export class DutydeckRuntime {
   getDeferredConfirmationId(id: string, taskId: string) { return this.repos.events.getDeferredConfirmationId(id, taskId); }
   getLatestPermissionRequest(id: string, taskId: string, nativeId: string) { return this.repos.events.getLatestPermissionRequest(id, taskId, nativeId); }
   getRecentEvents(id: string, limit: number) { return this.repos.events.listRecent(id, limit); }
-  getHistoryOutline(id: string) {
+  getHistoryOutline(id: string, query?: HistoryOutlineQuery) {
     if (!this.repos.events.listHistoryOutline) throw new RuntimeError('HISTORY_OUTLINE_UNSUPPORTED', 'History summaries are unavailable', 501);
-    return this.repos.events.listHistoryOutline(id);
+    return this.repos.events.listHistoryOutline(id, query);
+  }
+  getHistoryTurns(id: string, from: number, through: number) {
+    if (!this.repos.events.listHistoryTurns) throw new RuntimeError('HISTORY_OUTLINE_UNSUPPORTED', 'History summaries are unavailable', 501);
+    return this.repos.events.listHistoryTurns(id, from, through);
   }
   getEventWindow(id: string, options?: EventWindowOptions) { return this.repos.events.listWindow(id, options); }
   async getTasks(id: string) { return (await this.repos.tasks.listBySession(id)).map(task => this.publicTask(task)); }

@@ -1,12 +1,14 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { api, type HistoryTurnPlace, type HistoryTurnSummary } from '../api';
 import type { TimelineEvent, TimelineSection } from '../timeline';
 import { TimelineView } from './TimelineView';
 
 const event: TimelineEvent = { id: 'e1', sequence: 1, type: 'text', timestamp: '', data: { role: 'assistant', text: '当前结果' } };
 const sections: TimelineSection[] = [{ kind: 'event', event, final: true }];
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe('TimelineView complete history', () => {
   it('renders history without a manual pagination button', () => {
@@ -119,4 +121,38 @@ it('updates an existing turn and a new live turn without mutating retained secti
   view.rerender(<TimelineView {...props} timeline={[user, changedAnswer, nextUser]} timelineSections={[...updatedSections, { kind: 'event', event: nextUser, final: false }]}/>);
   expect(screen.getByText('updated answer')).toBeTruthy();
   expect(screen.getByText('next prompt')).toBeTruthy();
+});
+
+it('lays out every completed turn from its place, reads earlier summaries by page and lists turns only while jumping', async () => {
+  const summary = (turn: number): HistoryTurnSummary => ({ id: `p${turn}`, taskId: 't', firstSequence: 2 * turn - 1, lastSequence: 2 * turn, timestamp: '', status: 'completed',
+    prompt: { text: `prompt ${turn}`, truncated: false }, output: { text: `answer ${turn}`, truncated: false }, toolCount: 0, artifactReferences: [] });
+  const places: HistoryTurnPlace[] = Array.from({ length: 120 }, (_, index) => [`p${index + 1}`, 2 * index + 1, 2 * index + 2, 't', `prompt ${index + 1}`]);
+  const pages = vi.spyOn(api, 'sessionHistoryTurns').mockImplementation(async (_id, from, through) => ({ turns: places.map((_, index) => summary(index + 1)).filter(turn => turn.firstSequence >= from && turn.lastSequence <= through) }));
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = render(<QueryClientProvider client={client}><TimelineView activeSessionId="long" historyPlaces={places} historyTurns={places.slice(-50).map((_, index) => summary(71 + index))}
+    eventsLoading={false} timeline={[]} timelineSections={[]} awaitingAnswer={false} hasOngoingActivity={false} latestUserIndex={-1} activeOutputLabel="Codex" loadedEventCount={0} hasOlder={false}/></QueryClientProvider>);
+  // The newest turns arrive summarized with the outline; nothing earlier is read up front.
+  expect(view.container.querySelector('[data-history-summary="p120"]')).toBeTruthy();
+  expect(screen.getByText('已加载 120 轮摘要、0 条原始记录')).toBeTruthy();
+  expect(pages).not.toHaveBeenCalled();
+  const container = view.container.querySelector('[data-timeline-scroll]') as HTMLElement;
+  Object.defineProperties(container, { scrollHeight: { configurable: true, value: 120 * 180 }, clientHeight: { value: 600 } });
+  container.scrollTop = 0; fireEvent.scroll(container);
+  // An earlier turn shows its prompt at once and reads its page of summaries, once for all its rows.
+  expect(view.container.querySelector('[data-history-pending="p1"]')?.textContent).toContain('prompt 1');
+  expect(await screen.findByText('answer 1')).toBeTruthy();
+  expect(pages).toHaveBeenCalledTimes(1);
+  expect(pages).toHaveBeenCalledWith('long', 1, 100, expect.any(AbortSignal));
+  // Tens of thousands of idle options would be re-laid out on every live event: they exist only while the picker is in use.
+  const picker = screen.getByRole('combobox', { name: '跳到轮次' });
+  expect(picker.querySelectorAll('option')).toHaveLength(1);
+  fireEvent.focus(picker);
+  expect(picker.querySelectorAll('option')).toHaveLength(121);
+  expect(screen.getByRole('option', { name: '第 60 轮 · prompt 60' })).toBeTruthy();
+  fireEvent.change(picker, { target: { value: 'p60' } });
+  expect(container.scrollTop).toBe(59 * 180);
+  expect(await screen.findByText('answer 60')).toBeTruthy();
+  expect(pages).toHaveBeenLastCalledWith('long', 101, 200, expect.any(AbortSignal));
+  fireEvent.blur(picker);
+  expect(picker.querySelectorAll('option')).toHaveLength(1);
 });

@@ -5,6 +5,7 @@ import { AuthGate } from './components/AuthGate';
 import { setShareToken } from './api';
 import { sharedSessionFromLocation, routeFromPath, turnDiffFromLocation } from './app-route';
 import { instanceFromPath, setInstance } from './instance';
+import { preloadTimelineView } from './timeline-view-loader';
 import './index.css';
 const client = new QueryClient();
 setInstance(instanceFromPath(window.location.pathname));
@@ -16,7 +17,7 @@ const diff = shared ? undefined : turnDiffFromLocation(window.location.pathname,
 if (diff?.token !== undefined) setShareToken(diff.token);
 // Fetch the selected route and its timeline together. Mounting an already
 // loaded route directly avoids a second Suspense fallback after authentication.
-if (shared || routeFromPath(window.location.pathname).kind === 'session') void import('./components/TimelineView');
+if (shared || routeFromPath(window.location.pathname).kind === 'session') void preloadTimelineView();
 const root = createRoot(document.getElementById('root')!);
 const page = shared
   ? import('./components/SharedSessionPage').then(({ SharedSessionPage }) => <SharedSessionPage sessionId={shared.sessionId}/>)
