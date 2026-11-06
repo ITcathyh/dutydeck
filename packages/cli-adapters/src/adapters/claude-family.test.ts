@@ -25,6 +25,12 @@ const trustScreen = (selected: 'No, exit' | 'Yes, I trust this folder', path = c
   selected === 'Yes, I trust this folder' ? '❯ Yes, I trust this folder' : '  Yes, I trust this folder',
   'Enter to confirm · Esc to cancel',
 ].join('\n');
+// Claude 2.1.318 at 120 columns hard-wraps a long cwd under "Accessing workspace:" with no separator
+// (observed with a 177-character memory-job directory); the shape below follows that capture.
+const longCwd = `/data/.dutydeck/memory/groups/oc_0123456789abcdef0123456789abcdef/workspace-${'x'.repeat(100)}/memory-job-2026-11-06/round-${'y'.repeat(80)}`;
+const wrapPath = (path: string, width: number) => path.match(new RegExp(`.{1,${width}}`, 'g'))!.join('\n');
+const wrappedTrustScreen = (selected: 'No, exit' | 'Yes, I trust this folder', path = longCwd) =>
+  trustScreen(selected, wrapPath(path, 118));
 const composer = [
   '▐▛███▛█   Claude Code v2.1.267',
   '▝▜██████▀  model_api/experimental_0812[1m] with xhigh effort · API Usage Billing',
@@ -56,7 +62,7 @@ class TrustBackend implements PtyLike {
   readScreen(): string { return this.screen; }
   sendSpecialKeys(...keys: string[]): void {
     this.writes.push(...keys);
-    if (keys[0] === 'Down') this.screen = trustScreen('Yes, I trust this folder');
+    if (keys[0] === 'Down') this.screen = this.screen.includes(longCwd.slice(0, 40)) ? wrappedTrustScreen('Yes, I trust this folder') : trustScreen('Yes, I trust this folder');
     if (keys[0] === 'Enter') this.screen = composer;
   }
 }
@@ -137,6 +143,76 @@ describe('Claude family startup trust confirmation', () => {
     await expect(prepareClaudeFamilyInput(backend, { sessionId: 'sid', cwd, permissionMode: 'ask' }))
       .rejects.toThrow('请通过终端确认目录');
     expect(backend.writes).toEqual([]);
+  });
+
+  it.each([2, 3])('ask recognizes a trust page whose cwd wraps across %i lines', async rows => {
+    const width = Math.ceil(longCwd.length / rows);
+    const screen = trustScreen('No, exit', wrapPath(longCwd, width));
+    expect(screen.split('\n').length).toBe(trustScreen('No, exit').split('\n').length + rows - 1);
+    vi.useFakeTimers();
+    try {
+      const backend = new TrustBackend(screen);
+      let error: unknown;
+      prepareClaudeFamilyInput(backend, { sessionId: 'sid', cwd: longCwd, permissionMode: 'ask' }).catch(reason => { error = reason; });
+      await vi.advanceTimersByTimeAsync(200);
+      expect(String(error)).toContain('Claude 正在确认此目录是否可信');
+      expect(backend.writes).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('full-trust trusts a wrapped cwd the same way as a one-line cwd', async () => {
+    vi.useFakeTimers();
+    try {
+      const backend = new TrustBackend(wrappedTrustScreen('No, exit'));
+      const preparing = prepareClaudeFamilyInput(backend, { sessionId: 'sid', cwd: longCwd, permissionMode: 'full-trust' });
+      await vi.advanceTimersByTimeAsync(300);
+      expect(backend.writes).toEqual(['Down', 'Enter']);
+      await preparing;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ['one extra character', wrappedTrustScreen('No, exit', `${longCwd}z`)],
+    ['one missing character', wrappedTrustScreen('No, exit', longCwd.slice(0, -1))],
+    ['a missing wrapped row', trustScreen('No, exit', wrapPath(longCwd, 118).split('\n').slice(0, -1).join('\n'))],
+    ['another directory', wrappedTrustScreen('No, exit', longCwd.replace('memory-job', 'other-job'))],
+    ['an unrelated row after the path', trustScreen('No, exit', `${wrapPath(longCwd, 118)}\nunrelated`)],
+    ['an unrelated row inside the path', trustScreen('No, exit', wrapPath(longCwd, 118).replace('\n', '\nunrelated\n'))],
+  ])('does not treat a wrapped cwd with %s as this trust page', async (_name, screen) => {
+    vi.useFakeTimers();
+    try {
+      const backend = new TrustBackend(screen);
+      const preparing = prepareClaudeFamilyInput(backend, { sessionId: 'sid', cwd: longCwd, permissionMode: 'full-trust' });
+      const assertion = expect(preparing).rejects.toThrow('启动尚未就绪（最后屏幕：目录信任页未能核对）');
+      await vi.advanceTimersByTimeAsync(30_100);
+      await assertion;
+      expect(backend.writes).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ['目录信任页未能核对', trustScreen('No, exit', '/workspace/secret-other-project')],
+    ['空白', ' \n\r\n\t\n'],
+    ['未识别', 'Unknown setup secret-token-value\n────────\n❯\n────────'],
+  ])('names the last screen as %s when startup times out, without echoing it', async (category, screen) => {
+    vi.useFakeTimers();
+    try {
+      const backend = new TrustBackend(screen);
+      let error: unknown;
+      prepareClaudeFamilyInput(backend, { sessionId: 'sid', cwd, permissionMode: 'ask' }).catch(reason => { error = reason; });
+      await vi.advanceTimersByTimeAsync(30_100);
+      expect(String(error)).toBe(`Error: Claude 启动尚未就绪（最后屏幕：${category}），请打开终端处理启动确认后再发送任务。`);
+      expect(String(error)).not.toMatch(/secret|Unknown setup|workspace/);
+      expect(backend.writes).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it.each(['ask', undefined] as const)('accepts an already trusted composer with permission mode %s', async permissionMode => {

@@ -207,10 +207,19 @@ function trustSelection(screen: string, cwd: string | undefined): 'No, exit' | '
   const prefix = lines.slice(0, workspaceIndex);
   // capture-pane retains the top separator; the local xterm viewport removes
   // box drawing, leaving no prefix. Neither path may contain other content.
-  if (!((prefix.length === 0) || (prefix.length === 1 && /^─+$/.test(prefix[0]!))) || lines[workspaceIndex + 1] !== cwd) return undefined;
+  if (!((prefix.length === 0) || (prefix.length === 1 && /^─+$/.test(prefix[0]!)))) return undefined;
+  // A cwd wider than the terminal is hard-wrapped onto consecutive rows (observed on 2.1.318 at
+  // 120 columns). Take the fewest rows whose concatenation is exactly cwd, leaving room for at
+  // least one explanation row, Security guide, both choices and the footer.
+  let pathRows = 0;
+  for (let rows = 1; workspaceIndex + 1 + rows + 5 <= lines.length; rows++) {
+    if (lines.slice(workspaceIndex + 1, workspaceIndex + 1 + rows).join('') === cwd) { pathRows = rows; break; }
+  }
+  if (pathRows === 0) return undefined;
+  const explanationStart = workspaceIndex + 1 + pathRows;
   const guideIndex = lines.indexOf('Security guide');
-  if (guideIndex < workspaceIndex + 3 || lines.lastIndexOf('Security guide') !== guideIndex) return undefined;
-  const explanation = lines.slice(workspaceIndex + 2, guideIndex).join(' ');
+  if (guideIndex < explanationStart + 1 || lines.lastIndexOf('Security guide') !== guideIndex) return undefined;
+  const explanation = lines.slice(explanationStart, guideIndex).join(' ');
   if (explanation !== 'Quick safety check: Is this a project you created or one you trust? '
     + "(Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what's in this folder first. "
     + "Claude Code'll be able to read, edit, and execute files here."
@@ -223,6 +232,13 @@ function trustSelection(screen: string, cwd: string | undefined): 'No, exit' | '
     || choices.filter(choice => choice.selected).length !== 1) return undefined;
   return choices.find(choice => choice.selected)!.label as 'No, exit' | 'Yes, I trust this folder';
 }
+/** 启动超时时最后一屏的类别，只用于报错提示处理办法，不带屏幕原文。 */
+function startupScreenCategory(screen: string, cwd: string | undefined): '目录信任页未能核对' | '空白' | '未识别' {
+  if (screenLines(screen).includes('Accessing workspace:') && trustSelection(screen, cwd) === undefined) return '目录信任页未能核对';
+  if (!screen.replace(/\s/g, '')) return '空白';
+  return '未识别';
+}
+
 /**
  * Claude 2.1.267 may ask whether a newly-entered cwd is trusted even when
  * bypass permissions is supplied. This is deliberately narrow: only the
@@ -237,8 +253,10 @@ export async function prepareClaudeFamilyInput(backend: PtyLike, ctx: AdapterSes
   const startedAt = Date.now();
   let lastDownAt = -Infinity;
   let lastEnterAt = -Infinity;
+  let lastScreen = '';
   while (Date.now() - startedAt < STARTUP_TIMEOUT_MS) {
     const screen = (await backend.readScreen());
+    lastScreen = screen;
     const selection = trustSelection(screen, ctx.cwd);
     const trustScreen = selection !== undefined;
 
@@ -271,7 +289,7 @@ export async function prepareClaudeFamilyInput(backend: PtyLike, ctx: AdapterSes
     }
     await delay(STARTUP_POLL_MS);
   }
-  throw new Error('Claude 启动尚未就绪，请打开终端处理启动确认后再发送任务。');
+  throw new Error(`Claude 启动尚未就绪（最后屏幕：${startupScreenCategory(lastScreen, ctx.cwd)}），请打开终端处理启动确认后再发送任务。`);
 }
 
 /** 建一个 Claude 家族适配器；三者只有 id 不同。 */

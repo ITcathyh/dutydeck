@@ -28,3 +28,10 @@
 **Several bots on one machine?** Yes; each has its own workspace, Agent and Lark credentials.
 
 **Claude Code / CCFlash finished, but the Lark card reports missing tool results?** Older versions could interpret historical API request snapshots in CLI logs as current tool calls. After upgrading, these snapshots neither enter the execution timeline nor acknowledge the current prompt. Actual tool calls without results still cause a failure status.
+
+**A Claude terminal session reports "Claude 启动尚未就绪（最后屏幕：X）" (startup not ready, last screen: X)?** Within 30 seconds Claude showed neither an empty composer nor a recognized confirmation page. The task was not written, so it is recorded as failed and can be resent after you deal with the cause. X is the category of the last screen:
+- **目录信任页未能核对** (trust page could not be verified): the screen is on the folder-trust page, but its folder does not match the session folder, or the page is incomplete. Open the terminal and confirm the folder; if the folder is not what you expect, check the working directory in the session or bot settings.
+- **空白** (blank): the terminal shows nothing. Check that the Claude command starts, then read the daemon log (`journalctl --user -u <unit>`).
+- **未识别** (unrecognized): the screen shows a prompt Dutydeck does not recognize. Open the terminal and handle the current prompt.
+
+A long folder that wraps onto several lines of the trust page is still recognized as the current folder: under `ask` / `approve-reads` you get "Claude 正在确认此目录是否可信" (Claude is asking whether this folder is trusted) and confirm it in the terminal; under `full-trust` the folder is trusted automatically.
