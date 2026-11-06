@@ -197,6 +197,34 @@ describe('Lark api gate retry', () => {
     expect(calls).toBe(3);
   });
 
+  it('logs the upstream code, HTTP status and error name on each retry, without the error body or request config', async () => {
+    vi.useFakeTimers();
+    const { log, entries } = recordingLog();
+    let calls = 0;
+    const promise = executeWithLarkGate('cli_reason', 'chat.members.list', async () => {
+      calls += 1;
+      if (calls === 1) throw openApiError(99991400, 429, { body: 'response body must stay out of logs' });
+      if (calls === 2) {
+        throw Object.assign(new Error('timeout of 15000ms exceeded'), {
+          name: 'AxiosError', isAxiosError: true, code: 'ECONNABORTED',
+          config: { headers: { Authorization: 'Bearer t-secret-tenant-token' } }
+        });
+      }
+      return 'ok';
+    }, { env: gateEnv(), log });
+    await vi.advanceTimersByTimeAsync(20_000);
+    await expect(promise).resolves.toBe('ok');
+
+    const retries = entries.filter(entry => entry.message === '飞书 OpenAPI 调用失败，退避重试');
+    expect(retries.map(entry => entry.details)).toEqual([
+      expect.objectContaining({ op: 'chat.members.list', attempt: 1, upstreamCode: 99991400, upstreamHttpStatus: 429, errorName: 'LarkServiceError', errorCode: 'LARK_OPENAPI_ERROR' }),
+      expect.objectContaining({ op: 'chat.members.list', attempt: 2, errorName: 'AxiosError', errorCode: 'ECONNABORTED' })
+    ]);
+    const serialized = JSON.stringify(retries);
+    expect(serialized).not.toContain('response body');
+    expect(serialized).not.toContain('t-secret-tenant-token');
+  });
+
   it('retries transient business codes 230049 / 230020 / 99991400 on HTTP 4xx', async () => {
     vi.useFakeTimers();
     for (const code of [230049, 230020, 99991400]) {

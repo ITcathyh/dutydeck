@@ -9,7 +9,7 @@ import { constants as osConstants } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { AUTOSTART_LINUX_UNIT } from '../autostart/autostart.js';
 import type { DeployCliOptions, DeployPruneCliOptions } from '../cli-program.js';
-import { pidAlive } from './daemon.js';
+import { defaultDaemonDir, pidAlive } from './daemon.js';
 import { DRAIN_INTERVAL_MS, drainRuntime, healthCheckUrl, systemdServiceControl, unitRuntime, waitForServiceHealth, type DaemonCommandDeps, type DrainResult, type RuntimeEndpoint, type ServiceControl, type UnitRuntime } from './command.js';
 
 /**
@@ -726,7 +726,7 @@ async function deployLocked(options: DeployCliOptions, deps: DeployDeps, target:
   if ('error' in build) return refused(build.error);
   if (build.dirty) warn(`${source} 有未提交的改动；发布目录按提交 ${build.commit.slice(0, 7)} 命名，内容包含这些改动。`);
 
-  const service = deps.service ?? systemdServiceControl(target.unit, deps);
+  const service = deps.service ?? systemdServiceControl(target.unit, deps, target.service?.foreground ? defaultDaemonDir(target.service.root) : undefined);
   const previousPid = restart ? await service.mainPid() : undefined;
   const recorded = readUnitRelease(target.deployments, target.unit, target.releases);
   const recordedRunning = previousPid !== undefined && recorded?.process_identity?.pid === previousPid && observeProcess(recorded.process_identity) === 'alive';

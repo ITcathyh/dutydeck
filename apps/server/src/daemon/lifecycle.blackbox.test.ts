@@ -1,5 +1,5 @@
-import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -45,6 +45,31 @@ describe('daemon detached process and CLI black box', () => {
     expect(lifecycle('stop')).toMatchObject({ ok: true, state: 'stopped', running: false, pid: restarted.pid });
     expect(lifecycle('status')).toMatchObject({ running: false, processStatus: 'stale' });
     expect(pidAlive(restarted.pid)).toBe(false);
+  }, 60_000);
+  it('rotates an oversized daemon log before the detached child opens it', () => {
+    const log = daemonPaths(defaultDaemonDir(root)).logFile;
+    mkdirSync(dirname(log), { recursive: true });
+    writeFileSync(log, Buffer.alloc(11 * 1024 * 1024, 'a'));
+    expect(lifecycle('start')).toMatchObject({ ok: true, state: 'started' });
+    expect(statSync(`${log}.1`).size).toBe(11 * 1024 * 1024);
+    expect(existsSync(log) ? statSync(log).size : 0).toBeLessThan(1024 * 1024);
+    expect(lifecycle('stop')).toMatchObject({ ok: true, state: 'stopped' });
+  }, 60_000);
+  it('two concurrent starts leave exactly one verified daemon', async () => {
+    const run = () => new Promise<{ status: number | null; stdout: string }>(resolve => {
+      const child = spawn(tsx, [fixture, 'start'], { cwd: root, env: { HOME: root, PATH: process.env.PATH, NODE_OPTIONS: '--conditions=development' } });
+      let stdout = '';
+      child.stdout.on('data', chunk => { stdout += chunk; });
+      child.once('exit', status => resolve({ status, stdout }));
+    });
+    const results = (await Promise.all([run(), run()])).map(result => JSON.parse(result.stdout.trim().split('\n').at(-1)!));
+    const started = results.filter(result => result.ok);
+    expect(started).toHaveLength(1);
+    expect(inspectDaemon(defaultDaemonDir(root)).status).toBe('verified');
+    expect(readDaemonStatus(defaultDaemonDir(root))?.pid).toBe(started[0].pid);
+    // 落败的一方不能留下第二个活着的服务进程。
+    const loserPid = results.find(result => !result.ok)?.pid;
+    if (loserPid && loserPid !== started[0].pid) expect(pidAlive(loserPid)).toBe(false);
   }, 60_000);
   it('shows unknown identity in human and JSON status without recommending start', () => {
     const legacy = { pid: process.pid, ready: true, cwd: '/legacy-fixture', startedAt: 'legacy' };

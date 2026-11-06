@@ -1173,7 +1173,7 @@ describe('默认探针（真实系统，仅限临时目录与本地端口）', (
       const partialWriter = new Database(partial);
       partialWriter.exec('CREATE TABLE unrelated (a TEXT)');
       partialWriter.close();
-      expect(defaultDatabaseProbe(partial, [], ['lark.memory.state.'])).toEqual({ exists: true, values: {} });
+      expect(defaultDatabaseProbe(partial, [], ['lark.memory.state.'])).toEqual({ exists: true, values: {}, pages: { pageSize: 4096, pageCount: 2, freelistCount: 0 } });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -1260,6 +1260,70 @@ describe('Agent 配置诊断', () => {
       expect(level(report, 'agents.detected')).toBe('skip');
       expect(report.ok).toBe(false);
     } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
+describe('开机自启 PATH', () => {
+  it('只有 PATH 不同时 doctor 只显示一行提示，不报漂移、不给 enable 命令', async () => {
+    const report = await runDoctor({ json: true }, deps({
+      autostartStatus: async () => ({ state: { platform: 'linux', supported: true, enabled: true, lingerEnabled: true, stale: false, pathDiffers: true, unitPath: '/home/tester/.config/systemd/user/dutydeck.service' } })
+    }));
+    const check = find(report, 'autostart.path')!;
+    expect(check.level).toBe('info');
+    expect(check.detail).toContain('PATH 与当前 shell 不同');
+    expect(check.command).toBeUndefined();
+    expect(find(report, 'autostart.stale')).toBeUndefined();
+    expect(report.checks.some(item => item.command === 'dutydeck autostart enable')).toBe(false);
+  });
+});
+
+describe('配置库路径与空闲页', () => {
+  it('配置库按 daemon 根目录解析，不跟着 DUTYDECK_DEFAULT_CWD（Agent 默认目录）走', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dutydeck-doctor-root-'));
+    try {
+      const probed: string[] = [];
+      const { config: _config, ...rest } = deps();
+      // .env 把 DUTYDECK_DEFAULT_CWD 设成别的目录（比如 HOME）时，loadConfig 会把库解析到那里，daemon 实际用的是根目录下的库。
+      // 坏掉的 AGENTS_JSON 让配置走兜底分支，不用真的去探测本机 Agent。
+      const report = await runDoctor({ json: true }, {
+        ...rest,
+        env: { DUTYDECK_DEFAULT_CWD: '/home/agent-default', DUTYDECK_AGENTS_JSON: '[{' },
+        envLocation: { source: 'none', cwd: '/elsewhere', daemonRoot: root },
+        daemonRecord: () => undefined,
+        databaseProbe: path => { probed.push(path); return { exists: true, appliedVersion: 14, values: {} }; }
+      });
+      expect(probed).toEqual([join(root, '.dutydeck', 'dutydeck.db')]);
+      expect(find(report, 'database.reachable')?.detail).toBe(join(root, '.dutydeck', 'dutydeck.db'));
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('空闲页占比超过 30% 时提示停机 VACUUM，体检不自动执行', async () => {
+    const pages = { pageSize: 4096, pageCount: 214_404, freelistCount: 47_895 };
+    const report = await runDoctor({ json: true }, deps({ databaseProbe: () => ({ exists: true, appliedVersion: 14, values: {}, pages: { ...pages, freelistCount: 80_000 } }) }));
+    const check = find(report, 'database.freelist')!;
+    expect(check.level).toBe('info');
+    expect(check.detail).toContain('37%');
+    expect(check.remedy).toContain('VACUUM');
+    // 只提示，不给可以直接复制执行的 VACUUM 命令。
+    expect(check.command).toBeUndefined();
+    // 22% 不提示；小库占比再高也不提示。
+    expect(find(await runDoctor({ json: true }, deps({ databaseProbe: () => ({ exists: true, appliedVersion: 14, values: {}, pages }) })), 'database.freelist')).toBeUndefined();
+    expect(find(await runDoctor({ json: true }, deps({ databaseProbe: () => ({ exists: true, appliedVersion: 14, values: {}, pages: { pageSize: 4096, pageCount: 100, freelistCount: 90 } }) })), 'database.freelist')).toBeUndefined();
+  });
+
+  it('数据库探针读出真实库的空闲页数', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dutydeck-doctor-freelist-'));
+    try {
+      const file = join(root, 'dutydeck.db');
+      const writer = new Database(file);
+      writer.exec('CREATE TABLE big (v TEXT)');
+      const insert = writer.prepare('INSERT INTO big VALUES (?)');
+      for (let index = 0; index < 200; index++) insert.run('x'.repeat(8_000));
+      writer.exec('DELETE FROM big');
+      writer.close();
+      const probe = defaultDatabaseProbe(file, []);
+      expect(probe.pages?.freelistCount).toBeGreaterThan(probe.pages!.pageCount * 0.3);
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });
 

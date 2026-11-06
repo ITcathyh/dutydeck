@@ -252,6 +252,31 @@ export function checkDatabase(path: string, probe: DatabaseProbeResult): DoctorC
   return { id: 'database.reachable', label: '本地数据库', level: 'ok', detail: path };
 }
 
+/** 空闲页占比达到这个比例、且空闲空间不小于下限时提示一次停机 VACUUM。 */
+const FREELIST_RATIO_HINT = 0.3;
+const FREELIST_MIN_BYTES = 64 * 1024 * 1024;
+
+/**
+ * 库文件里的空闲页。历史数据清理只删行不做 VACUUM，删掉的空间留给后续写入复用，文件本身不会变小，
+ * 部署前的数据库备份也按这个体积复制。占比高时提示停机窗口里手动 VACUUM；体检和服务都不会自动执行。
+ */
+export function checkDatabaseFreelist(probe: DatabaseProbeResult): DoctorCheck | undefined {
+  const pages = probe.pages;
+  if (!probe.exists || probe.error || !pages || pages.pageCount <= 0) return undefined;
+  const ratio = pages.freelistCount / pages.pageCount;
+  const freeBytes = pages.freelistCount * pages.pageSize;
+  if (ratio < FREELIST_RATIO_HINT || freeBytes < FREELIST_MIN_BYTES) return undefined;
+  const mib = (bytes: number) => `${Math.round(bytes / 1024 / 1024)}MB`;
+  return {
+    id: 'database.freelist',
+    label: '数据库空闲页',
+    level: 'info',
+    detail: `${mib(freeBytes)} 是空闲页，占库文件 ${mib(pages.pageCount * pages.pageSize)} 的 ${Math.round(ratio * 100)}%`,
+    remedy: '历史数据清理不做 VACUUM，文件不会自己变小。想缩小文件和部署备份，在停机窗口里按文档「停机 VACUUM」的步骤停服、备份后手动执行；服务运行时不要执行。',
+    link: 'docs/zh/cli.md#vacuum'
+  };
+}
+
 /**
  * 迁移漂移检查。
  *
@@ -968,6 +993,15 @@ export function checkAutostart(result: DoctorAutostartResult | undefined, userna
       remedy: '换过 node 版本或升级过 npm 包后，已登记的启动路径会静默失效——重启后服务再也起不来，且不会有任何报错。重新执行一次 enable 即可用当前路径刷新。',
       command: 'dutydeck autostart enable',
       verify: 'dutydeck autostart status'
+    });
+  }
+  if (state.pathDiffers) {
+    // 只是提示：unit 的 PATH 是 enable 时那个 shell 的。不建议重跑 enable——那会把它换成当前 shell 的 PATH。
+    checks.push({
+      id: 'autostart.path',
+      label: '开机自启 PATH',
+      level: 'info',
+      detail: `${state.platform === 'darwin' ? 'plist' : 'unit'} 的 PATH 与当前 shell 不同；服务和它启动的 Agent 用的是前者，不影响启动`
     });
   }
   if (state.platform === 'linux' && state.lingerEnabled === false) {

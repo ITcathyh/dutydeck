@@ -5,6 +5,7 @@ import { isIP } from 'node:net';
 import {
   SUPERVISOR_ENV,
   SYSTEMD_UNIT_ENV,
+  acquireStartLock,
   childMeta,
   clearGeneration,
   inspectDaemon,
@@ -19,6 +20,7 @@ import {
   readDaemonStatus,
   readLastDaemonDir,
   resolveDaemonDir,
+  rotateDaemonLog,
   tailDaemonLog,
   writeLastDaemonDir,
   writePidFile,
@@ -30,10 +32,11 @@ import {
 } from './daemon.js';
 import { environmentFromCli, type CliOptions } from '../cli-program.js';
 import { appConfigSchema, resolveDatabaseUrl } from '@dutydeck/config';
-import { AUTOSTART_LINUX_UNIT, defaultRunCommand, firstLine, type AutostartCommandOutput, type AutostartRunCommand } from '../autostart/autostart.js';
+import { AUTOSTART_LINUX_UNIT, AUTOSTART_MACOS_LABEL, defaultRunCommand, firstLine, type AutostartCommandOutput, type AutostartRunCommand } from '../autostart/autostart.js';
 import { sleep } from './time.js';
 import { existsSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { homedir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { parseEnv } from 'node:util';
 import { localLoopbackUrl } from '../local-api-url.js';
 
@@ -70,8 +73,10 @@ export interface DaemonCommandDeps {
   runCommand?: AutostartRunCommand;
   /** SQLite 驱动预检，默认 `@dutydeck/storage` 的 checkSqliteDriver。 */
   checkSqlite?: (options?: SqliteDriverCheckOptions) => SqliteDriverCheck;
-  /** 默认 `process.platform`；只有 linux 会走 systemd。 */
+  /** 默认 `process.platform`；只有 linux 会走 systemd，只有 darwin 会走 launchd。 */
   platform?: string;
+  /** launchd 域 `gui/<uid>` 用的 uid，默认 `process.getuid()`。 */
+  uid?: number;
   /** 网络请求客户端，默认 globalThis.fetch。测试可注入。 */
   fetch?: typeof fetch;
   /** 单次活动查询的超时（毫秒），默认 5000；测试可缩短。 */
@@ -401,13 +406,19 @@ export async function daemonStart(options: CliOptions, handlers: DaemonCommandHa
   if (env.DUTYDECK_DAEMON_DIR && dir !== defaultDaemonDir(resolve(dir, '../..'))) throw new Error('DUTYDECK_DAEMON_DIR must end with /.dutydeck/daemon');
   if (inBand && dir !== defaultDaemonDir(invocationCwd)) throw new Error('Daemon WorkingDirectory must match DUTYDECK_DAEMON_DIR');
   const cwd = inBand ? invocationCwd : resolve(dir, '../..');
-  const database = resolve(cwd, options.database ?? env.DUTYDECK_DATABASE_URL ?? '.dutydeck/dutydeck.db');
+  const database = daemonDatabasePath(cwd, options.database ?? env.DUTYDECK_DATABASE_URL);
   const scope = assertBotProcessStartup(database, options.botAppId ?? env.DUTYDECK_BOT_APP_ID);
   const botAppId = scope?.appId ?? options.botAppId;
+  // 服务进程先拿到目录的排他锁，再做「检查状态 → 写状态」；拿不到说明另一个进程正在这里启动或运行。
+  if (inBand && !acquireStartLock(dir)) {
+    if (inspectDaemon(dir).status === 'verified') return alreadyRunningResult(readDaemonStatus(dir));
+    return { ok: false, action: 'start', running: true, state: 'already-running',
+      error: `Cannot start: another Dutydeck process holds the start lock for ${dir} (a daemon is starting or running there). Run dutydeck status before retrying.` };
+  }
 
   // 托管声明只给前台入口自己用：读完就从 process.env 删掉。否则它派生的 Agent 会继承，Agent 在沙箱里
   // 跑 `start --foreground` 时，沙箱 daemon 会把自己登记成由生产 unit 托管。
-  const supervision = foreground ? systemdSupervisionFromEnv(env) : {};
+  const supervision = foreground ? supervisionFromEnv(env) : {};
   if (foreground) {
     delete process.env[SUPERVISOR_ENV];
     delete process.env[SYSTEMD_UNIT_ENV];
@@ -477,6 +488,14 @@ export async function daemonStart(options: CliOptions, handlers: DaemonCommandHa
   const logOffset = daemonLogSize(dir);
   const child = daemonize({ cwd, startedAt, env });
   return await waitUntilReady(dir, startedAt, child, logOffset);
+}
+
+/**
+ * daemon 实际使用的数据库：相对路径以 daemon 根目录为基准（不是 DUTYDECK_DEFAULT_CWD，后者是 Agent 的默认目录）。
+ * doctor 按同一规则显示配置库，免得在别的目录里体检时报出一个 daemon 从不打开的路径。
+ */
+export function daemonDatabasePath(root: string, configured?: string): string {
+  return resolve(root, configured ?? '.dutydeck/dutydeck.db');
 }
 
 /**
@@ -598,6 +617,10 @@ export async function daemonRestart(options: CliOptions, handlers: DaemonCommand
   const supervised = await systemdSupervisor(previousState, handlers);
   if (supervised && 'error' in supervised) return { ok: false, action: 'restart', running: true, pid: previousState?.pid, error: supervised.error };
   if (supervised) return await systemdRestart(runningDir, previousState!, supervised.unit, supervised.info, options, handlers);
+  // 受 launchd 托管（macOS LaunchAgent 前台运行）：交给 launchctl kickstart -k，新一代仍由 launchd 看护。
+  const launchd = await launchdSupervisor(previousState, handlers);
+  if (launchd && 'error' in launchd) return { ok: false, action: 'restart', running: true, pid: previousState?.pid, error: launchd.error };
+  if (launchd) return await launchdRestart(runningDir, previousState!, launchd.target, options, handlers);
   // 没有 daemon 在跑、上一代也是 unit 拉起的（或没有记录）时，restart 就是 start：交给 systemd，
   // host / port 由 unit 自己的配置（根目录 .env）决定。上一代是 detached daemon 时照旧走下面的
   // detached 重启，沿用它记录的 host / port / auth。
@@ -696,7 +719,8 @@ async function showSystemdUnit(unit: string, deps: DaemonCommandDeps): Promise<S
   };
 }
 
-function systemdSupervisionFromEnv(env: NodeJS.ProcessEnv): Pick<DaemonState, 'supervisor' | 'systemdUnit'> {
+function supervisionFromEnv(env: NodeJS.ProcessEnv): Pick<DaemonState, 'supervisor' | 'systemdUnit'> {
+  if (env[SUPERVISOR_ENV] === 'launchd') return { supervisor: 'launchd' };
   const unit = env[SYSTEMD_UNIT_ENV];
   return env[SUPERVISOR_ENV] === 'systemd' && unit ? { supervisor: 'systemd', systemdUnit: unit } : {};
 }
@@ -817,6 +841,7 @@ async function systemdStart(unit: string, info: SystemdUnitInfo, options: CliOpt
     }
   }
   const previous = readDaemonStatus(dir);
+  rotateDaemonLog(dir);
   const logOffset = daemonLogSize(dir);
   const started = await (deps.runCommand ?? defaultRunCommand)('systemctl', ['--user', 'start', unit]);
   if (started.status !== 0) return { ok: false, action: 'start', running: false, logFile, error: systemctlFailure('start', unit, started) };
@@ -868,6 +893,8 @@ async function systemdRestart(dir: string, state: DaemonState, unit: string, inf
   if (!drain.ok) {
     return { ok: false, action: 'restart', running: true, pid: state.pid, error: drain.error };
   }
+  // unit 的 StandardOutput=append: 在新进程启动时重新打开日志；旧进程停服期间的输出落进 .1。
+  rotateDaemonLog(dir);
   const logOffset = daemonLogSize(dir);
   const restarted = await (deps.runCommand ?? defaultRunCommand)('systemctl', ['--user', 'restart', unit]);
   if (restarted.status !== 0) {
@@ -875,6 +902,90 @@ async function systemdRestart(dir: string, state: DaemonState, unit: string, inf
     return { ok: false, action: 'restart', running: inspectDaemon(dir).status === 'verified', pid: state.pid, error: systemctlFailure('restart', unit, restarted) };
   }
   return await waitForSystemdGeneration('restart', unit, dir, state, logOffset);
+}
+
+// ─── launchd 托管（macOS） ───────────────────────────────────────────────────
+
+/** kickstart -k 先停旧进程再拉起：停服最长 12 秒，加上新进程启动，比 systemd 的等待（systemctl 停完才返回）多留余量。 */
+const LAUNCHD_READY_TIMEOUT_MS = 30_000;
+
+/** plist 的 ProgramArguments 前两项：新进程实际用的解释器和入口脚本。读不到时 undefined。 */
+function launchdProgram(home: string): { execPath: string; script: string } | undefined {
+  try {
+    const plist = readFileSync(join(home, 'Library', 'LaunchAgents', `${AUTOSTART_MACOS_LABEL}.plist`), 'utf8');
+    const array = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(plist)?.[1] ?? '';
+    const [execPath, script] = [...array.matchAll(/<string>([^<]*)<\/string>/g)].map(match => match[1]!
+      .replace(/&quot;/g, '"').replace(/&gt;/g, '>').replace(/&lt;/g, '<').replace(/&amp;/g, '&'));
+    return execPath && script ? { execPath, script } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * 正在运行的 daemon 是否受 launchd 托管：状态文件里有前台入口记下的 launchd、身份校验通过，且 `launchctl print`
+ * 报告该 job 的 pid 正是它。job 没有加载（比如自启已关闭）时返回 undefined，照旧 detached 重启；
+ * 记录了托管却核实不了时返回 error，调用方不做任何改动。
+ */
+async function launchdSupervisor(state: DaemonState | undefined, deps: DaemonCommandDeps): Promise<{ target: string } | { error: string } | undefined> {
+  if ((deps.platform ?? process.platform) !== 'darwin') return undefined;
+  if (state?.supervisor !== 'launchd' || inspectDaemonState(state).status !== 'verified') return undefined;
+  const target = `gui/${deps.uid ?? process.getuid?.() ?? 0}/${AUTOSTART_MACOS_LABEL}`;
+  const printed = await (deps.runCommand ?? defaultRunCommand)('launchctl', ['print', target]);
+  if (printed.status === null) {
+    return { error: `守护进程（pid ${state.pid}）由 launchd 托管，但 launchctl 无法执行，无法核实；没有做任何改动。` };
+  }
+  if (printed.status !== 0) return undefined;
+  const pid = Number(/^\s*pid = (\d+)\s*$/m.exec(printed.stdout)?.[1]);
+  if (pid !== state.pid) {
+    return { error: `状态文件记录守护进程（pid ${state.pid}）由 launchd 托管，但 launchctl print ${target} 报告的 pid 是 ${Number.isFinite(pid) ? pid : '无'}。两边对不上，为免误停其他进程，没有做任何改动；请用 launchctl print ${target} 和 dutydeck status 核对。` };
+  }
+  return { target };
+}
+
+async function launchdRestart(dir: string, state: DaemonState, target: string, options: CliOptions, deps: DaemonCommandDeps): Promise<DaemonCommandResult> {
+  const flags = explicitServerFlags(options);
+  if (flags.length > 0) {
+    return { ok: false, action: 'restart', running: true, pid: state.pid,
+      error: `Dutydeck 由 launchd（${target}）托管，新进程按 plist 的 ProgramArguments 启动，命令行参数 ${flags.join(' ')} 传不过去。请把配置写进 ${resolve(dir, '../..', '.env')}（如 DUTYDECK_PORT、DUTYDECK_HOST）后不带参数重试。` };
+  }
+  // 新一代由 plist 里的解释器拉起：检查的是它，不是当前 CLI 自己。
+  const program = launchdProgram(process.env.HOME ?? homedir());
+  if (!program) {
+    return { ok: false, action: 'restart', running: true, pid: state.pid, error: `读不到 ${AUTOSTART_MACOS_LABEL}.plist 的 ProgramArguments，无法确认新进程能否加载 SQLite；已拒绝重启，旧的守护进程仍在运行。` };
+  }
+  const sqlite = (deps.checkSqlite ?? checkSqliteDriver)({ execPath: program.execPath, resolveFrom: program.script });
+  if (!sqlite.ok) {
+    return { ok: false, action: 'restart', running: true, pid: state.pid,
+      error: `SQLite 预检失败，已拒绝重启，旧的守护进程仍在运行。${describeSqliteDriverFailure(sqlite)}。plist 用的就是这个解释器：换成能加载该驱动的 node，用它重跑 dutydeck autostart enable 改写 plist 后再重启。` };
+  }
+  // 保留策略与 detached 重启一致（默认参数），等待逻辑不变。
+  const drain = await waitForRunningTasksDrain(dir, state, options, deps);
+  if (!drain.ok) return { ok: false, action: 'restart', running: true, pid: state.pid, error: drain.error };
+  // launchd 在拉起新进程时重新打开 StandardOutPath；旧进程停服期间的输出落进 .1。
+  rotateDaemonLog(dir);
+  const logOffset = daemonLogSize(dir);
+  // -k：先停掉正在运行的实例（SIGTERM），再按 plist 拉起新的一代。
+  const kicked = await (deps.runCommand ?? defaultRunCommand)('launchctl', ['kickstart', '-k', target]);
+  if (kicked.status !== 0) {
+    await drain.release?.();
+    const detail = firstLine(kicked.stderr) || firstLine(kicked.stdout) || (kicked.status === null ? 'launchctl 无法执行' : `退出码 ${kicked.status}`);
+    return { ok: false, action: 'restart', running: inspectDaemon(dir).status === 'verified', pid: state.pid, error: `launchctl kickstart -k ${target} 失败：${detail}。查看：launchctl print ${target}` };
+  }
+  const logFile = daemonPaths(dir).logFile;
+  const deadline = Date.now() + LAUNCHD_READY_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const current = readDaemonStatus(dir);
+    if (current?.ready && current.supervisor === 'launchd' && !sameGeneration(current, state) && inspectDaemonState(current).status === 'verified') {
+      const authEnabled = current.authEnabled !== false;
+      return { ok: true, action: 'restart', running: true, pid: current.pid, address: current.address, authEnabled, authentication: authEnabled ? 'required' : 'disabled', logFile, state: 'restarted' };
+    }
+    await sleep(200);
+  }
+  const reason = tailDaemonLog(dir, 3, logOffset);
+  const running = inspectDaemon(dir).status === 'verified';
+  return { ok: false, action: 'restart', running, logFile, ...(running ? {} : { state: 'not-running' as const }),
+    error: `launchctl kickstart -k ${target} 已返回，但 ${LAUNCHD_READY_TIMEOUT_MS / 1000} 秒内没有等到新的守护进程就绪并通过身份校验。${reason.length > 0 ? `原因：${reason.join('；')}。` : ''}查看：launchctl print ${target}` };
 }
 
 /**
@@ -903,11 +1014,13 @@ export interface ServiceControl {
   killMode?: string;
 }
 
-export function systemdServiceControl(unit: string, deps: DaemonCommandDeps): ServiceControl {
+/** `daemonDir`：`start --foreground` unit 的守护目录，重启前轮转它的日志；直接 serve 的 unit 不知道日志在哪，不传。 */
+export function systemdServiceControl(unit: string, deps: DaemonCommandDeps, daemonDir?: string): ServiceControl {
   const run = deps.runCommand ?? defaultRunCommand;
   return {
     mainPid: async () => (await showSystemdUnit(unit, deps))?.mainPid,
     restart: async () => {
+      if (daemonDir) rotateDaemonLog(daemonDir);
       const restarted = await run('systemctl', ['--user', 'restart', unit]);
       return restarted.status === 0 ? undefined : systemctlFailure('restart', unit, restarted);
     },

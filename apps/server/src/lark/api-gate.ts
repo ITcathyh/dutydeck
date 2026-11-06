@@ -201,6 +201,23 @@ function larkBusinessCode(err: unknown): number | undefined {
   return captured === undefined ? undefined : Number(captured);
 }
 
+/**
+ * 重试日志里区分限流、5xx 和超时用的几个字段。只取码和名字，不带 message 和整个 error：
+ * SDK 错误身上有请求配置（含令牌）和响应体。
+ */
+function retryReason(err: unknown): { upstreamCode?: number; upstreamHttpStatus?: number; errorName?: string; errorCode?: string } {
+  const value = err as { code?: unknown; name?: unknown; cause?: { code?: unknown } } | null | undefined;
+  const upstreamCode = larkBusinessCode(err);
+  const status = upstreamHttpStatus(err);
+  const code = typeof value?.code === 'string' ? value.code : typeof value?.cause?.code === 'string' ? value.cause.code : undefined;
+  return {
+    ...(upstreamCode !== undefined ? { upstreamCode } : {}),
+    ...(status !== undefined ? { upstreamHttpStatus: status } : {}),
+    ...(typeof value?.name === 'string' ? { errorName: value.name } : {}),
+    ...(code ? { errorCode: code } : {})
+  };
+}
+
 function finiteNumber(value: unknown): number | undefined {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value === 'string' && value.trim() !== '') {
@@ -599,7 +616,7 @@ export async function executeWithLarkGate<T>(
         if (retryable && current() && attempt < config.retryMaxAttempts && (options?.canRetry?.() ?? true)) {
           previousError = error;
           const backoffMs = computeBackoffMs(config, attempt, error, options?.random ?? Math.random);
-          log.warn({ appId, op, attempt: attempt + 1, maxAttempts: config.retryMaxAttempts, backoffMs }, '飞书 OpenAPI 调用失败，退避重试');
+          log.warn({ appId, op, attempt: attempt + 1, maxAttempts: config.retryMaxAttempts, backoffMs, ...retryReason(error) }, '飞书 OpenAPI 调用失败，退避重试');
           await sleep(backoffMs, signal);
           continue;
         }

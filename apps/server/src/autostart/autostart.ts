@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
-import { dirname, join, resolve, sep } from 'node:path';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { checkSqliteDriver, describeSqliteDriverFailure, type SqliteDriverCheck, type SqliteDriverCheckOptions } from '@dutydeck/storage';
 import { SUPERVISOR_ENV, SYSTEMD_UNIT_ENV, daemonPaths, defaultDaemonDir, resolveDaemonDir } from '../daemon/daemon.js';
 import { rotateLogFileSync } from '../resource-retention.js';
@@ -10,7 +10,7 @@ import { rotateLogFileSync } from '../resource-retention.js';
  * Dutydeck 开机自启（boot hook）注册。
  *
  * macOS  —— 写入 `~/Library/LaunchAgents/com.dutydeck.server.plist`，由 launchd 在
- *           下次登录时加载并执行 `dutydeck start`。
+ *           下次登录时加载并前台运行 `dutydeck start --foreground`，非零退出后由 launchd 重拉。
  * Linux  —— 写入 `~/.config/systemd/user/dutydeck.service` 并 `systemctl --user
  *           enable`（不带 `--now`），由 user systemd 在下次开机/登录时拉起。unit 前台
  *           运行 `dutydeck start --foreground`，崩溃或被误杀后由 systemd 重拉。
@@ -23,8 +23,8 @@ import { rotateLogFileSync } from '../resource-retention.js';
  *    想登记自启却被顺手启动了服务）；Linux 上 `systemctl --user enable` 绝不带
  *    `--now`。守护进程的生命周期只由 `dutydeck start` / `dutydeck stop` 掌管，
  *    `autostartDisable()` 同理不会停掉正在跑的守护进程（systemd 不带 `--now`
- *    就不会停止 unit；launchd 的 job 进程在 `dutydeck start` 派生出脱离的
- *    daemon 后就已经退出，bootout 没有活进程可杀）。Linux 新模板 unit 还在运行时
+ *    就不会停止 unit；launchd 的 bootout 会停掉 job 进程，所以 job 还有活进程时同样拒绝）。
+ *    Linux 新模板 unit 还在运行时
  *    disable 直接拒绝、什么都不动，由用户先 `dutydeck stop`：删掉 unit 文件后 systemd
  *    会把运行中的 unit 退回 KillMode=control-group，daemon 一退出就连带清掉 cgroup
  *    里的 tmux 和所有 Agent。
@@ -55,8 +55,10 @@ export interface AutostartState {
   label: string;             // e.g. 'com.dutydeck.server' / 'dutydeck.service'
   /** Linux only: whether loginctl linger is on for this user. */
   lingerEnabled?: boolean;
-  /** True when the on-disk unit no longer matches what we would write now. */
+  /** True when the on-disk unit no longer matches what we would write now (PATH 不算在内). */
   stale?: boolean;
+  /** 磁盘上的 unit / plist 只有 PATH 与当前 shell 不同。只是提示：不影响启动，也不算漂移。 */
+  pathDiffers?: boolean;
   details?: string[];
 }
 
@@ -100,8 +102,6 @@ export interface AutostartOptions {
   root?: string;
   /** 引导钩子的工作目录，默认 `homeDir`（`dutydeck start` 会据此定位 daemon 目录）。 */
   workingDir?: string;
-  /** 自启日志目录，默认 `<homeDir>/.dutydeck/logs`。 */
-  logDir?: string;
   /** 写进 unit 的 PATH，默认取安装时 shell 的 `process.env.PATH`。 */
   pathEnv?: string;
   /** 当前用户名，用于 `loginctl` 探测与提示，默认 `os.userInfo().username`。 */
@@ -155,12 +155,11 @@ interface ResolvedAutostart {
   execPath: string;
   cliPath: string;
   workingDir: string;
-  logDir: string;
   pathEnv: string;
   username: string;
   uid: number;
   run: AutostartRunCommand;
-  /** Linux：unit 托管的 daemon 目录，WorkingDirectory 与日志路径都由它派生。 */
+  /** unit / plist 托管的 daemon 目录，WorkingDirectory 与日志路径都由它派生。 */
   daemonDir?: string;
   checkSqlite: (options: SqliteDriverCheckOptions) => SqliteDriverCheck;
 }
@@ -227,17 +226,35 @@ function resolveOptions(options: AutostartOptions = {}): ResolvedAutostart {
     label,
     unitPath,
     execPath: options.execPath ?? process.execPath,
-    cliPath: options.cliPath ?? (entry ? resolve(entry) : 'dutydeck'),
+    cliPath: releaseCurrentPath(options.cliPath ?? (entry ? resolve(entry) : 'dutydeck')),
     workingDir,
-    logDir: options.logDir ?? join(homeDir, '.dutydeck', 'logs'),
     pathEnv: options.pathEnv ?? process.env.PATH ?? (platform === 'darwin' ? DARWIN_FALLBACK_PATH : LINUX_FALLBACK_PATH),
     username: options.username ?? currentUsername(),
     uid: options.uid ?? currentUid(),
     run: options.runCommand ?? defaultRunCommand,
-    // 与 `dutydeck start` 同一套定位规则（优先 last-daemon-dir 指针），unit 因此钉在同一个根目录。
-    ...(platform === 'linux' ? { daemonDir: resolveDaemonDir(workingDir, homeDir) } : {}),
+    // 与 `dutydeck start` 同一套定位规则（优先 last-daemon-dir 指针），unit / plist 因此钉在同一个根目录。
+    ...(platform !== 'unsupported' ? { daemonDir: resolveDaemonDir(workingDir, homeDir) } : {}),
     checkSqlite: options.checkSqlite ?? checkSqliteDriver
   };
+}
+
+/**
+ * 经 `<releases>/current` 软链启动时，Node 会对 ESM 主模块做 realpath，`import.meta.url` 拿到的是
+ * `<releases>/<版本>/dist/cli.js`。把它写进 unit 会钉死在这个版本：之后 deploy 切换 current 不再生效，
+ * status 也会因为磁盘上的 unit 写的是 current 路径而永远报漂移。所以 current 正指向该版本时，
+ * 改写回 `<releases>/current/dist/cli.js`。不是发布目录布局、或 current 指向别处时原样返回。
+ */
+export function releaseCurrentPath(cliPath: string): string {
+  if (basename(dirname(cliPath)) !== 'dist') return cliPath;
+  const versionDir = resolve(cliPath, '..', '..');
+  if (basename(versionDir) === 'current') return cliPath;
+  const current = join(dirname(versionDir), 'current');
+  try {
+    if (!lstatSync(current).isSymbolicLink() || realpathSync(current) !== realpathSync(versionDir)) return cliPath;
+  } catch {
+    return cliPath;
+  }
+  return join(current, relative(versionDir, cliPath));
 }
 
 function escapeXml(value: string): string {
@@ -262,8 +279,13 @@ function renderPlist(config: ResolvedAutostart): string {
   // RunAtLoad=true 是"下次登录自动启动"的唯一开关：launchd 只在登录时加载
   // ~/Library/LaunchAgents/*.plist，没有 RunAtLoad（也没有别的触发条件）的 agent
   // 永远不会被执行，自启就形同虚设。真正会"立刻启动"的是 `launchctl bootstrap`，
-  // 所以 enable 路径绝不调用它 —— 见文件头约束 1。KeepAlive=false：`dutydeck start`
-  // 派生出脱离的 daemon 后自身即退出，KeepAlive 会被 launchd 理解为崩溃而反复重启。
+  // 所以 enable 路径绝不调用它 —— 见文件头约束 1。
+  //
+  // 与 Linux unit 一样前台运行 `start --foreground`，launchd 的 job 进程就是服务进程：
+  // KeepAlive.SuccessfulExit=false 让它在非零退出（崩溃、未捕获异常）后被重拉，`dutydeck stop`
+  // 的正常退出（0）不重拉。launchd 没有熔断，ThrottleInterval 把重拉间隔拉到 30 秒；已有实例在跑时
+  // 前台入口按成功退出（见 cli.ts），不会反复重拉。WorkingDirectory 与日志同 Linux：daemon 根目录与守护日志。
+  const logFile = unitLogFile(config);
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -275,30 +297,38 @@ function renderPlist(config: ResolvedAutostart): string {
         <string>${escapeXml(config.execPath)}</string>
         <string>${escapeXml(config.cliPath)}</string>
         <string>start</string>
+        <string>--foreground</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
-    <false/>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
     <key>WorkingDirectory</key>
-    <string>${escapeXml(config.workingDir)}</string>
+    <string>${escapeXml(unitRoot(config))}</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
         <string>${escapeXml(config.pathEnv)}</string>
+        <key>${SUPERVISOR_ENV}</key>
+        <string>launchd</string>
     </dict>
     <key>StandardOutPath</key>
-    <string>${escapeXml(join(config.logDir, 'autostart-out.log'))}</string>
+    <string>${escapeXml(logFile)}</string>
     <key>StandardErrorPath</key>
-    <string>${escapeXml(join(config.logDir, 'autostart-err.log'))}</string>
+    <string>${escapeXml(logFile)}</string>
 </dict>
 </plist>
 `;
 }
 
 /**
- * Linux unit 托管的 daemon 根目录，即 WorkingDirectory。取真实路径：daemon 按 process.cwd()
- * 记录自己的目录，拿到的总是解析过符号链接的路径（本机 /home/<user> 就是指向 /data00 的链接）。
+ * unit / plist 托管的 daemon 根目录，即 WorkingDirectory。取真实路径：daemon 按 process.cwd()
+ * 记录自己的目录，拿到的总是解析过符号链接的路径（例如 /home/<user> 是指向另一块磁盘的符号链接）。
  * unit 里若写链接路径，`dutydeck start` 比对 WorkingDirectory 时对不上，会退回 detached。
  */
 function unitRoot(config: ResolvedAutostart): string {
@@ -310,7 +340,7 @@ function unitRoot(config: ResolvedAutostart): string {
   }
 }
 
-/** Linux unit 托管的 daemon 日志：前台进程的 stdout / stderr 追加到这里，与 detached 子进程同一个文件。 */
+/** unit / plist 托管的 daemon 日志：前台进程的 stdout / stderr 追加到这里，与 detached 子进程同一个文件。 */
 function unitLogFile(config: ResolvedAutostart): string {
   return daemonPaths(defaultDaemonDir(unitRoot(config))).logFile;
 }
@@ -406,6 +436,25 @@ function renderDesired(config: ResolvedAutostart): string {
   throw unsupported(config);
 }
 
+/** 磁盘上 unit / plist 里写的 PATH；读不出时 undefined。 */
+function onDiskPath(config: ResolvedAutostart, content: string): string | undefined {
+  if (config.platform === 'linux') return /^Environment=PATH=(.*)$/m.exec(content)?.[1];
+  const raw = /<key>PATH<\/key>\s*<string>([^<]*)<\/string>/.exec(content)?.[1];
+  return raw?.replace(/&quot;/g, '"').replace(/&gt;/g, '>').replace(/&lt;/g, '<').replace(/&amp;/g, '&');
+}
+
+/**
+ * 磁盘内容与期望内容的差异。PATH 不算漂移：unit 的 PATH 是 enable 时那个 shell 的，换个 shell 跑 status /
+ * doctor 本来就会不同；按「已漂移」去重跑 enable，反而会把 unit 的 PATH 换成当前 shell 的。只有 PATH 不同时
+ * 报 pathDiffers。
+ */
+function compareOnDisk(config: ResolvedAutostart, onDisk: string): { stale: boolean; pathDiffers: boolean } {
+  if (onDisk === renderDesired(config)) return { stale: false, pathDiffers: false };
+  const path = onDiskPath(config, onDisk);
+  if (path !== undefined && path !== config.pathEnv && renderDesired({ ...config, pathEnv: path }) === onDisk) return { stale: false, pathDiffers: true };
+  return { stale: true, pathDiffers: false };
+}
+
 function unsupported(config: ResolvedAutostart): AutostartError {
   return new AutostartError(
     'unsupported-platform',
@@ -426,6 +475,12 @@ async function launchdLoaded(config: ResolvedAutostart): Promise<boolean | undef
   const printed = await config.run('launchctl', ['print', `gui/${config.uid}/${config.label}`]);
   if (printed.status === null) return undefined;
   return printed.status === 0;
+}
+
+/** job 当前是否有运行中的进程（`launchctl print` 里的 `state = running` / `pid = N`）。 */
+async function launchdJobRunning(config: ResolvedAutostart): Promise<boolean> {
+  const printed = await config.run('launchctl', ['print', `gui/${config.uid}/${config.label}`]);
+  return printed.status === 0 && /^\s*(state = running|pid = \d+)\s*$/m.test(printed.stdout);
 }
 
 async function userSystemdAvailable(config: ResolvedAutostart): Promise<boolean> {
@@ -452,7 +507,7 @@ export function firstLine(value: string): string {
 async function inspectDarwin(config: ResolvedAutostart): Promise<AutostartState> {
   const unitPath = config.unitPath!;
   const onDisk = readTextFile(unitPath);
-  const desired = renderPlist(config);
+  const drift = onDisk === undefined ? undefined : compareOnDisk(config, onDisk);
   const loaded = await launchdLoaded(config);
   const details = [
     '平台: macOS (launchd)',
@@ -460,8 +515,10 @@ async function inspectDarwin(config: ResolvedAutostart): Promise<AutostartState>
     `plist 存在: ${onDisk === undefined ? '否' : '是'}`,
     `launchd 已加载: ${loaded === undefined ? '未知（launchctl 无法执行）' : loaded ? '是' : '否'}`
   ];
-  if (onDisk !== undefined && onDisk !== desired) {
-    details.push('plist 内容与当前 node / dutydeck 路径不一致（可能换过 node 版本或升级过 npm 包）');
+  if (onDisk !== undefined && drift?.stale) {
+    details.push(onDisk.includes('<string>--foreground</string>')
+      ? 'plist 内容与当前 node / dutydeck 路径不一致（可能换过 node 版本或升级过 npm 包）'
+      : 'plist 是旧模板（后台模式，崩溃后不会被重新拉起），重新运行 dutydeck autostart enable 升级');
   }
   return {
     platform: 'darwin',
@@ -470,7 +527,7 @@ async function inspectDarwin(config: ResolvedAutostart): Promise<AutostartState>
     ...(loaded === undefined ? {} : { running: loaded }),
     unitPath,
     label: config.label,
-    ...(onDisk === undefined ? {} : { stale: onDisk !== desired }),
+    ...(drift ? { stale: drift.stale, ...(drift.pathDiffers ? { pathDiffers: true } : {}) } : {}),
     details
   };
 }
@@ -478,7 +535,7 @@ async function inspectDarwin(config: ResolvedAutostart): Promise<AutostartState>
 async function inspectLinux(config: ResolvedAutostart): Promise<AutostartState> {
   const unitPath = config.unitPath!;
   const onDisk = readTextFile(unitPath);
-  const desired = renderUnit(config);
+  const drift = onDisk === undefined ? undefined : compareOnDisk(config, onDisk);
   const details = [
     '平台: Linux (user systemd)',
     `unit 路径: ${unitPath}`,
@@ -504,7 +561,7 @@ async function inspectLinux(config: ResolvedAutostart): Promise<AutostartState> 
     linger = await lingerOn(config);
     details.push(`loginctl linger: ${linger === undefined ? '未知（loginctl 无法执行）' : linger ? '是' : '否（注销后服务会被停止）'}`);
   }
-  if (onDisk !== undefined && onDisk !== desired) {
+  if (drift?.stale) {
     details.push('unit 内容与当前 node / dutydeck 路径不一致（可能换过 node 版本或升级过 npm 包）');
   }
   return {
@@ -515,7 +572,7 @@ async function inspectLinux(config: ResolvedAutostart): Promise<AutostartState> 
     unitPath,
     label: config.label,
     ...(linger === undefined ? {} : { lingerEnabled: linger }),
-    ...(onDisk === undefined ? {} : { stale: onDisk !== desired }),
+    ...(drift ? { stale: drift.stale, ...(drift.pathDiffers ? { pathDiffers: true } : {}) } : {}),
     details
   };
 }
@@ -547,6 +604,9 @@ function statusNotices(state: AutostartState, config: ResolvedAutostart): string
   }
   if (state.stale) {
     notices.push(`磁盘上的 ${state.platform === 'darwin' ? 'plist' : 'unit'} 与当前期望内容不一致（启动路径已变），重新运行 dutydeck autostart enable 刷新。`);
+  }
+  if (state.pathDiffers) {
+    notices.push(`${state.platform === 'darwin' ? 'plist' : 'unit'} 里的 PATH 与当前 shell 不同，服务和它启动的 Agent 用的是前者。不影响启动，不是错误。`);
   }
   if (state.platform === 'linux' && state.enabled && state.lingerEnabled === false) {
     notices.push(lingerNotice(config));
@@ -587,9 +647,9 @@ function writeIfChanged(path: string, desired: string): boolean {
 async function enableDarwin(config: ResolvedAutostart): Promise<AutostartResult> {
   const unitPath = config.unitPath!;
   const loadedBefore = await launchdLoaded(config);
-  mkdirSync(config.logDir, { recursive: true });
-  rotateLogFileSync(join(config.logDir, 'autostart-out.log'));
-  rotateLogFileSync(join(config.logDir, 'autostart-err.log'));
+  // launchd 不会替我们建日志目录。
+  mkdirSync(dirname(unitLogFile(config)), { recursive: true });
+  rotateLogFileSync(unitLogFile(config));
   const changed = writeIfChanged(unitPath, renderPlist(config));
   const notices = [
     changed ? `已写入 LaunchAgent: ${unitPath}` : `LaunchAgent 已是最新，无需改动: ${unitPath}`,
@@ -734,9 +794,15 @@ async function disableDarwin(config: ResolvedAutostart): Promise<AutostartResult
   const notices: string[] = [];
   let bootedOut = false;
 
+  // 前台模板下 job 进程就是守护进程，bootout 会把它停掉：违反约束 1，先让用户 dutydeck stop。
+  if (loadedBefore && await launchdJobRunning(config)) {
+    throw new AutostartError('unit-active', `${config.label} 的守护进程还在运行，移除 launchd job 会把它一起停掉。已拒绝，没有做任何改动。`,
+      ['先运行 dutydeck stop（正常退出不会被 launchd 重拉），再运行 dutydeck autostart disable。']);
+  }
+
   if (loadedBefore) {
-    // bootout 只是把 job 从 launchd 注册表里摘掉。`dutydeck start` 起的 daemon 是
-    // detached 的，launchd 的 job 进程早已退出，这里没有活进程会被杀 —— 约束 1。
+    // bootout 只是把 job 从 launchd 注册表里摘掉。上面已确认 job 没有活进程（旧模板的 `dutydeck start`
+    // 派生出 detached daemon 后自身就退出），这里不会杀掉守护进程 —— 约束 1。
     const bootout = await config.run('launchctl', ['bootout', `gui/${config.uid}/${config.label}`]);
     if (bootout.status === 0) bootedOut = true;
     else {

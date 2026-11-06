@@ -1,7 +1,9 @@
 import { dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
-import { existsSync, mkdirSync, openSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
+import Database from 'better-sqlite3';
+import { rotateLogFileSync } from '../resource-retention.js';
 import {
   childProcessIdentity,
   currentProcessIdentity,
@@ -53,8 +55,8 @@ export interface DaemonState {
   authEnabled?: boolean;
   stoppedAt?: string;
   processIdentity?: ProcessIdentity;
-  /** 由 systemd 托管时为 'systemd'；只有前台入口在 unit 里运行时才会写。 */
-  supervisor?: 'systemd';
+  /** 由 systemd / launchd 托管时记下；只有前台入口在 unit 或 LaunchAgent 里运行时才会写。 */
+  supervisor?: 'systemd' | 'launchd';
   /** 托管它的 systemd unit 名，stop / restart 据此调用 systemctl。 */
   systemdUnit?: string;
 }
@@ -239,20 +241,77 @@ function ensureDir(dir: string): void {
   mkdirSync(dir, { recursive: true });
 }
 
+/** 先写临时文件再 rename：并发读的一方只会看到完整的旧内容或新内容，读不到截断到一半的空文件。 */
+function writeAtomic(file: string, content: string): void {
+  const temp = `${file}.${process.pid}.tmp`;
+  writeFileSync(temp, content, 'utf8');
+  renameSync(temp, file);
+}
+
 export function writeState(dir: string, state: DaemonState): void {
   ensureDir(dir);
-  writeFileSync(join(dir, STATE_FILE), `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+  writeAtomic(join(dir, STATE_FILE), `${JSON.stringify(state, null, 2)}\n`);
 }
 
 export function writePidFile(dir: string, pid: number): void {
   ensureDir(dir);
-  writeFileSync(join(dir, PID_FILE), `${pid}\n`, 'utf8');
+  writeAtomic(join(dir, PID_FILE), `${pid}\n`);
 }
 
 export function clearState(dir: string): void {
   ensureDir(dir);
-  writeFileSync(join(dir, STATE_FILE), '', 'utf8');
-  writeFileSync(join(dir, PID_FILE), '', 'utf8');
+  writeAtomic(join(dir, STATE_FILE), '');
+  writeAtomic(join(dir, PID_FILE), '');
+}
+
+const START_LOCK_FILE = '.start-lock.sqlite';
+/** 本进程已持有的启动锁，按目录记；同一进程再次进入（restart 测试、前台重入）直接复用。 */
+const heldStartLocks = new Map<string, Database.Database>();
+
+/**
+ * 服务进程（前台入口或 detached 子进程）在检查并发布状态文件之前取得的排他锁，持有到进程退出。
+ *
+ * 两个 `dutydeck start` 同时跑时，「检查状态 → 写状态」之间没有锁，会出现两边都以为自己是唯一实例、
+ * 互相覆盖状态文件的情况。锁用 SQLite 的 BEGIN IMMEDIATE（同 deploy 的发布锁）：进程退出、被 SIGKILL
+ * 时由内核释放，不留需要人工清理的锁文件；POSIX 锁不随 fork 继承，tmux 等子进程也不会占着它。
+ * 返回 false 表示另一个进程持有锁。
+ */
+export function acquireStartLock(dir: string, waitMs = 2_000): boolean {
+  const key = resolve(dir);
+  if (heldStartLocks.has(key)) return true;
+  ensureDir(key);
+  const lock = new Database(join(key, START_LOCK_FILE), { timeout: waitMs });
+  try {
+    // 锁库里从不写数据；回滚日志放内存，进程退出时不在目录里留 -journal 文件。
+    lock.pragma('journal_mode = MEMORY');
+    lock.exec('BEGIN IMMEDIATE');
+  } catch (error) {
+    lock.close();
+    if ((error as { code?: string }).code === 'SQLITE_BUSY') return false;
+    throw error;
+  }
+  heldStartLocks.set(key, lock);
+  return true;
+}
+
+/** 释放本进程持有的启动锁。只给测试和启动失败的清理用；正常运行时锁随进程退出释放。 */
+export function releaseStartLock(dir: string): void {
+  const key = resolve(dir);
+  const lock = heldStartLocks.get(key);
+  if (!lock) return;
+  heldStartLocks.delete(key);
+  try { lock.close(); } catch { /* already closed */ }
+}
+
+/**
+ * 新进程打开守护日志之前轮转一次（超过 10MB 时 → .1 … .3）。
+ *
+ * 只在「旧进程已经或即将不再写这个文件」的时刻调用：detached 启动前、systemctl start/restart 前。
+ * 还在运行的旧进程持有的是同一个 inode，rename 后它的余下输出落在 .1 里，不会丢；新进程（或 systemd
+ * 的 append:）重新打开时得到一个新文件。
+ */
+export function rotateDaemonLog(dir: string): boolean {
+  return rotateLogFileSync(daemonPaths(dir).logFile);
 }
 
 /** Whether this process is the daemonized child spawned by `dutydeck start`. */
@@ -305,8 +364,9 @@ export interface DaemonChildHandle {
  */
 export function daemonize(options: DaemonizeOptions = {}): DaemonChildHandle {
   const cwd = options.cwd ?? process.cwd();
-  const logFile = daemonPaths(cwd ? join(cwd, '.dutydeck', 'daemon') : defaultDaemonDir()).logFile;
-  const fd = openLogFd(logFile);
+  const dir = cwd ? join(cwd, '.dutydeck', 'daemon') : defaultDaemonDir();
+  rotateDaemonLog(dir);
+  const fd = openLogFd(daemonPaths(dir).logFile);
   const script = process.argv[1];
   if (script === undefined) throw new Error('无法确定 Dutydeck 自身的入口脚本，无法启动后台服务。');
 
@@ -369,9 +429,7 @@ export function daemonLogSize(dir: string): number {
  */
 export function tailDaemonLog(dir: string, lines = 3, fromByte = 0): string[] {
   try {
-    const text = readFileSync(daemonPaths(dir).logFile, 'utf8');
-    const fresh = fromByte > 0 && fromByte <= text.length ? text.slice(fromByte) : text;
-    return fresh
+    return readLogFrom(daemonPaths(dir).logFile, fromByte)
       .split('\n')
       .map(line => line.trim())
       .filter(line => line !== '')
@@ -381,6 +439,34 @@ export function tailDaemonLog(dir: string, lines = 3, fromByte = 0): string[] {
       .slice(-lines);
   } catch {
     return [];
+  }
+}
+
+/** 回放窗口上限：只需要本次启动的头几行报错，不为一次失败把整份日志读进内存。 */
+const MAX_TAIL_BYTES = 256 * 1024;
+
+/**
+ * 按字节偏移读日志。偏移来自 statSync().size（字节），不能拿它去切 JS 字符串：日志里有中文时字符数
+ * 少于字节数，会切到上一轮的旧行或越过这次的新行。偏移超过当前大小说明日志被轮转过，从头读新文件。
+ */
+function readLogFrom(file: string, fromByte: number): string {
+  const fd = openSync(file, 'r');
+  try {
+    const size = statSync(file).size;
+    const start = fromByte > 0 && fromByte <= size ? fromByte : 0;
+    const from = Math.max(start, size - MAX_TAIL_BYTES);
+    const buffer = Buffer.alloc(size - from);
+    let read = 0;
+    while (read < buffer.length) {
+      const count = readSync(fd, buffer, read, buffer.length - read, from + read);
+      if (count === 0) break;
+      read += count;
+    }
+    const text = buffer.subarray(0, read).toString('utf8');
+    // 截了头时第一行多半不完整（可能切在多字节字符中间），丢掉。
+    return from > start ? text.slice(text.indexOf('\n') + 1) : text;
+  } finally {
+    closeSync(fd);
   }
 }
 

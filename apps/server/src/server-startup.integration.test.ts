@@ -121,6 +121,9 @@ describe('Server startup integration with real SQLite file', () => {
 
     // Clean shutdown releases database claim
     await server.close();
+    // 每个停服阶段都留下耗时；没有卡住的阶段。
+    expect(server.shutdownPhases.unfinished()).toEqual([]);
+    expect(Object.keys(server.shutdownPhases.durationsMs())).toEqual(expect.arrayContaining(['insight', 'http', 'runtime', 'database', 'pluginDispose']));
     const serverIndex = servers.indexOf(server);
     if (serverIndex >= 0) servers.splice(serverIndex, 1);
 

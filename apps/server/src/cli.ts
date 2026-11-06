@@ -26,8 +26,9 @@ import { readNativeAskPayload, runNativeAskHook } from './native-ask-hook.js';
 import { runPermissionHook } from './permission-hook.js';
 import { RelayCliError } from '@dutydeck/relay';
 import { daemonRestart, daemonStart, daemonStatus, daemonStop, systemdRestartTarget, waitForRunningTasksDrain, type DaemonCommandResult, type DaemonStatusInfo } from './daemon/command.js';
-import { readDaemonStatus, resolveDaemonDir } from './daemon/daemon.js';
+import { SUPERVISOR_ENV, readDaemonStatus, resolveDaemonDir } from './daemon/daemon.js';
 import { sleep } from './daemon/time.js';
+import { armShutdownDeadline } from './shutdown-phases.js';
 import { runNpmForDutydeckUpdate, updateDutydeck } from './update.js';
 import { runDeploy, runDeployPrune, type DeployPruneResult, type DeployResult } from './daemon/deploy.js';
 import { loadConfig } from '@dutydeck/config';
@@ -79,24 +80,20 @@ async function serve(options: CliOptions, onReady?: () => void) {
   process.stdout.write(`Dutydeck UI and API listening on ${address}\n`);
   onReady?.();
   let closing = false;
-  let hardStop: NodeJS.Timeout | undefined;
   const shutdown = async (signal: NodeJS.Signals) => {
     if (closing) {
-      process.stderr.write(`Received ${signal} again; forcing exit.\n`);
+      process.stderr.write(`Received ${signal} again; forcing exit. 未完成的停服阶段：${service.shutdownPhases.unfinished().join('、')}\n`);
       process.exit(130);
     }
     closing = true;
     process.stdout.write('Shutting down Dutydeck… Press Ctrl-C again to force exit.\n');
-    hardStop = setTimeout(() => {
-      process.stderr.write('Shutdown exceeded 5 seconds; forcing exit.\n');
-      process.exit(1);
-    }, 5_000);
+    const cancelHardStop = armShutdownDeadline(() => service.shutdownPhases, line => process.stderr.write(line), code => process.exit(code));
     try {
       await service.close();
-      clearTimeout(hardStop);
+      cancelHardStop();
       process.exit(0);
     } catch (error) {
-      clearTimeout(hardStop);
+      cancelHardStop();
       process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
       process.exit(1);
     }
@@ -356,12 +353,14 @@ async function main() {
       for (const notice of result.notices) ui.hint(notice);
     },
     daemonStart: async options => {
+      // 托管声明在 daemonStart 里会被删掉，先记下。
+      const launchd = process.env[SUPERVISOR_ENV] === 'launchd';
       const result = await daemonStart(options, { serve: daemonServe });
       renderDaemonResult(result, options.json === true);
       // 起不来必须是非零退出码：脚本里 `dutydeck start && curl ...` 才不会踩空。
       // 「已经在运行」不算失败：目标状态已达成。前台入口例外：它自己没能服务就是失败，
-      // systemd 据退出码重拉或熔断。
-      if (!result.ok && (result.state !== 'already-running' || options.foreground === true)) process.exitCode = 1;
+      // systemd 据退出码重拉或熔断。launchd 的 KeepAlive 没有熔断，已有实例在跑时按成功退出，免得每隔几秒被重拉一次。
+      if (!result.ok && (result.state !== 'already-running' || (options.foreground === true && !launchd))) process.exitCode = 1;
     },
     daemonStop: async options => {
       const result = await daemonStop();
