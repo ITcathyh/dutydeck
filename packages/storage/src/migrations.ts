@@ -641,7 +641,15 @@ export const migrations: Migration[] = [
   // 计划修订把删除的步骤移到 retiredSteps；索引触发器同时投影其子会话归属，旧记录不改写。
   { version: 45, name: 'work_item_retired_step_sessions', up(db) { if (tableExistsForMigration(db, 'work_item_index')) refreshWorkItemIndexTriggers(db) } },
   // 审批卡「本工作区允许此类命令」持久化的命令规则；纯新增表，不改写已有数据。
-  { version: 46, name: 'workspace_approval_rules', up: createWorkspaceApprovalRuleSchema }
+  { version: 46, name: 'workspace_approval_rules', up: createWorkspaceApprovalRuleSchema },
+  // 历史大纲按用户消息切轮次：只索引用户消息，并带上切轮次和跳转标签要用的字段，长会话不必逐条解析事件 JSON。
+  // 表达式须与 event-history.ts 的查询逐字一致；旧行不改写，坏 JSON 的行不进索引。
+  { version: 47, name: 'history_user_text_index', up(db) {
+    if (!tableExistsForMigration(db, 'events')) return;
+    db.exec(`CREATE INDEX events_user_text ON events(session_id,sequence,json_type(data,'$.steering') IS NULL,
+      COALESCE(task_id,json_extract(data,'$.taskId')),attempt_id,substr(json_extract(data,'$.text'),1,40),id)
+      WHERE type='text' AND json_valid(data) AND json_extract(data,'$.role')='user'`);
+  } }
 ]
 
 /** v38：collaboration_duties 加 scenarios_json 列，把旧的 alarm_json 转进去。 */

@@ -649,9 +649,17 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     if (parsed !== undefined && (parsed < 1 || parsed > 1_000)) throw new RuntimeError('INVALID_EVENT_LIMIT', 'limit must be an integer between 1 and 1000', 400);
     return parsed;
   };
-  app.get<{ Params: { id: string } }>('/api/sessions/:id/history', async request => {
+  app.get<{ Params: { id: string }; Querystring: { tail?: string } }>('/api/sessions/:id/history', async request => {
     await requireSessionExecution(request, request.params.id, 'session', 'task.view_result');
-    return runtime.getHistoryOutline(request.params.id);
+    const tail = parseEventCursor(request.query.tail, 'tail');
+    if (tail !== undefined && (tail < 1 || tail > 1_000)) throw new RuntimeError('INVALID_HISTORY_TAIL', 'tail must be an integer between 1 and 1000', 400);
+    return tail === undefined ? runtime.getHistoryOutline(request.params.id) : runtime.getHistoryOutline(request.params.id, { tail });
+  });
+  app.get<{ Params: { id: string }; Querystring: { from?: string; through?: string } }>('/api/sessions/:id/history/turns', async request => {
+    await requireSessionExecution(request, request.params.id, 'session', 'task.view_result');
+    const from = parseEventCursor(request.query.from, 'from'), through = parseEventCursor(request.query.through, 'through');
+    if (from === undefined || through === undefined || from > through) throw new RuntimeError('INVALID_HISTORY_RANGE', 'from and through must be sequences with from <= through', 400);
+    return { turns: await runtime.getHistoryTurns(request.params.id, from, through) };
   });
   app.get<{ Params: { id: string }; Querystring: { after?: string; before?: string; limit?: string; direction?: string } }>('/api/sessions/:id/events', async request => {
     await requireSessionExecution(request, request.params.id, 'session', 'task.view_result');

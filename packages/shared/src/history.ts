@@ -23,8 +23,15 @@ export interface HistoryTurnActivity {
   /** Ordered by start; offsets are from the turn `timestamp`. Sampled to a bounded length, so use `toolCount` for the exact count. */
   tools: Array<[startOffsetMs: number, durationMs: number]>;
 }
+/** Where a completed turn sits, without its summary: enough to lay out, label and later fetch it. */
+export type HistoryTurnPlace = [id: string, firstSequence: number, lastSequence: number, taskId: string | null, promptPreview: string];
+/** Without `tail` every completed turn is summarized; with it only the newest `tail`, plus `places` for all. */
+export interface HistoryOutlineQuery { tail?: number }
 export interface HistoryOutline {
+  /** Oldest first; with `tail`, only the newest turns. */
   turns: HistoryTurnSummary[];
+  /** Every completed turn, oldest first; only for a `tail` query. `turns` are its newest entries. */
+  places?: HistoryTurnPlace[];
   highWaterMark: number;
   commandCatalog?: { sequence: number; commands: Array<{ name: string; description: string }>; truncated: boolean };
   /** Canonical events after this point belong to the still-active suffix. */

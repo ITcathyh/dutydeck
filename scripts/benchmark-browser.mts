@@ -104,7 +104,8 @@ async function main() {
       listSessions: () => repos.sessions.list(),
       getSession: (id: string) => repos.sessions.get(id),
       getTasks: (id: string) => repos.tasks.listBySession(id),
-      getHistoryOutline: (id: string) => repos.events.listHistoryOutline!(id),
+      getHistoryOutline: (id: string, query?: any) => repos.events.listHistoryOutline!(id, query),
+      getHistoryTurns: (id: string, from: number, through: number) => repos.events.listHistoryTurns!(id, from, through),
       // A completed fixture session has no live driver and no verification runs.
       getDriver: () => undefined,
       getVerifications: async () => [],
@@ -227,6 +228,21 @@ async function main() {
     Object.assign(progress, { liveFirstVisibleMs, eventPageRequests, maxAnchorDriftPx, maxRenderedTurns });
     if (maxAnchorDriftPx > 2) throw new Error(`live updates moved the reading anchor by ${maxAnchorDriftPx}px`);
     if (maxRenderedTurns > 40) throw new Error(`history reading mounted ${maxRenderedTurns} turns`);
+    // Jumping into the middle of the history: the chosen turn's page of summaries is read on
+    // demand, and the pages loading and measuring around it do not move the reader.
+    const jumpTarget = eventId(EVENT_COUNT / 2); // turn 12,500 is keyed by its prompt
+    const picker = page.getByRole('combobox', { name: '跳到轮次' });
+    await picker.focus();
+    const jumpStarted = performance.now();
+    await picker.selectOption(jumpTarget);
+    await waitForPaint(page, jumpTarget);
+    const jumpToTurnMs = performance.now() - jumpStarted;
+    const jumpTop = await page.locator(`[data-timeline-event="${jumpTarget}"]`).evaluate(element => element.getBoundingClientRect().top);
+    await page.waitForFunction(() => !document.querySelector('[data-history-pending]'));
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    const jumpDriftPx = Math.abs(await page.locator(`[data-timeline-event="${jumpTarget}"]`).evaluate(element => element.getBoundingClientRect().top) - jumpTop);
+    Object.assign(progress, { jumpToTurnMs, jumpDriftPx });
+    if (jumpDriftPx > 2) throw new Error(`turns loading around a jump moved the reader by ${jumpDriftPx}px`);
     await page.getByRole('button', { name: '回到最新消息' }).click();
     await waitForPaint(page, eventId(liveSequence));
     if (eventPageRequests > 2) throw new Error(`opening, reading and live updates fetched ${eventPageRequests} raw event pages`);
@@ -312,6 +328,8 @@ async function main() {
           JSON.stringify({ id: `long_tool_${sequence}`, name: `tool ${sequence}`, input: { description: `step ${sequence}` }, output: `long output ${sequence}`, status: 'completed', taskId: 'task_long' }), 'task_long');
       } })();
     } finally { longSeed.close(); }
+    // A follow-up task that is still running receives a live event after the turn is expanded.
+    await repos.tasks.save({ ...task, id: 'task_long_live', sessionId: longId, prompt: 'long follow-up', status: 'running', createdAt: new Date(1_700_000_001_000).toISOString() });
     const longPage = await newPage({ viewport: { width: 1440, height: 960 } });
     const longDetailPages: string[] = [];
     longPage.on('request', request => { if (request.url().includes(`${longId}/events?`)) longDetailPages.push(new URL(request.url()).search); });
@@ -328,6 +346,14 @@ async function main() {
     await longPage.getByText('step 1', { exact: true }).first().click();
     await longPage.locator('[data-timeline-event="long_450"] button').first().click();
     if (!await longPage.getByText(/long output 450/).count()) throw new Error('expanded long turn did not open the selected tool');
+    // The opened tool stays open while the session keeps receiving events.
+    await waitFor(() => subscribers.size === 1);
+    const longLive: AgentEvent = { ...event(601), id: 'long_live_601', sessionId: longId, data: { role: 'user', text: 'long follow-up', taskId: 'task_long_live' } };
+    for (const subscriber of subscribers) subscriber(longLive);
+    // The reader stays inside the expanded turn; the new row mounts far below, so wait for the merge.
+    await longPage.waitForFunction(() => Number(document.querySelector<HTMLElement>('[data-timeline-scroll]')?.dataset.historyLoaded) === 1);
+    await longPage.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    if (!await longPage.getByText(/long output 450/).count()) throw new Error('a live event collapsed the tool opened in the long turn');
     // The live tail (after=600) may be re-read; only bounded range reads are the expansion.
     const longTurnDetailPages = longDetailPages.filter(search => new URLSearchParams(search).get('before') === '601').length;
     Object.assign(progress, { longTurnExpandMs, longTurnDetailPages, longDetailPages });
@@ -359,7 +385,7 @@ async function main() {
     const incrementalPaintP95Ms = percentile95(incrementalSamples);
     process.stdout.write(`${JSON.stringify({
       database: 'temporary-disk-sqlite', eventCount: EVENT_COUNT, sampleCount: SAMPLE_COUNT, hostLoadAtStart, paintControlDelayMs,
-      liveFirstVisibleMs, eventPageRequests, longTurnExpandMs, longTurnDetailPages,
+      liveFirstVisibleMs, eventPageRequests, jumpToTurnMs, jumpDriftPx, longTurnExpandMs, longTurnDetailPages,
       firstVisibleP95Ms, historyScrollP95Ms, incrementalPaintP95Ms, incrementalPaintMaxMs: Math.max(...incrementalSamples), firstVisibleSamples,
       ...browserMemory, ...retainedMemory, heapControlHeldGrowthBytes, heapControlReleasedGrowthBytes, heapControlRejected,
       serverRssGrowthBytes, serverExternalGrowthBytes, maxRenderedTurns, maxAnchorDriftPx,

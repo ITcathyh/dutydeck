@@ -3,8 +3,8 @@ import type { WorkspaceApprovalRule } from '@dutydeck/shared';
 export type { TaskAuthorization } from '@dutydeck/shared';
 import type { ConfigurationExplanation } from '@dutydeck/shared';
 import type { ArtifactSnapshot, ArtifactSnapshotReference, ArtifactSnapshotPreview } from '@dutydeck/shared';
-import type { HistoryOutline } from '@dutydeck/shared';
-export type { HistoryOutline, HistoryTurnSummary } from '@dutydeck/shared';
+import type { HistoryOutline, HistoryOutlineQuery, HistoryTurnSummary } from '@dutydeck/shared';
+export type { HistoryOutline, HistoryTurnPlace, HistoryTurnSummary } from '@dutydeck/shared';
 import type { AutomationSchedulePage, AutomationRunDetail } from '@dutydeck/shared';
 import type { PluginBinding, SavePluginBinding, PluginConfigSchema, PluginBindingScope } from '@dutydeck/shared';
 import type { LarkAllowedUser, PublicLarkConfig, PublicLarkConfigCollection, RiskControlMode, SaveLarkConfigInput } from '@dutydeck/shared';
@@ -330,7 +330,8 @@ export const api = {
   passwordLogin: (password: string) => send<BrowserAuthState>('POST', '/api/auth/login', { password }),
   logout: () => json<BrowserAuthState>('/api/auth/logout', { method: 'POST' }),
   instances: () => json<{ instances: PeerInstance[] }>('/api/instances', { cache: 'no-store' }),
-  sessionHistory: (id: string, signal?: AbortSignal) => json<HistoryOutline>(`/api/sessions/${encodeURIComponent(id)}/history`, { signal }),
+  sessionHistory: (id: string, signal?: AbortSignal, query?: HistoryOutlineQuery) => json<HistoryOutline>(`/api/sessions/${encodeURIComponent(id)}/history${query?.tail ? `?tail=${query.tail}` : ''}`, { signal }),
+  sessionHistoryTurns: (id: string, from: number, through: number, signal?: AbortSignal) => json<{ turns: HistoryTurnSummary[] }>(`/api/sessions/${encodeURIComponent(id)}/history/turns?from=${from}&through=${through}`, { signal }),
   agents: () => json<Agent[]>('/api/agents'), agentModels: (id: string, model?: string, refresh = false, appId?: string) => json<AgentModelsResult>(agentModelsUrl(id, model, refresh, appId)), sessions: (signal?: AbortSignal) => json<Session[]>('/api/sessions', { signal }), session: (id: string) => json<Session>(`/api/sessions/${encodeURIComponent(id)}`), events: (id: string, query?: EventWindowQuery, signal?: AbortSignal) => json<DockEvent[]>(eventsUrl(id, query), { signal }), tasks: (id: string) => json<Task[]>(`/api/sessions/${id}/tasks`),
   // 跨任务标题的最小只读契约；服务端接入前 UI 仅使用当前已加载 tasks 的真实 prompt，不伪造摘要。
   matter: (id: string) => json<MatterDetail>(`/api/matters/${encodeURIComponent(id)}`),

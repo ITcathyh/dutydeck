@@ -433,7 +433,9 @@ export interface EventWindowOptions {
   direction?: 'forward' | 'backward';
 }
 export interface EventRepository {
-  listHistoryOutline?(sessionId: string): Promise<import('./history.js').HistoryOutline>;
+  listHistoryOutline?(sessionId: string, query?: import('./history.js').HistoryOutlineQuery): Promise<import('./history.js').HistoryOutline>;
+  /** Summaries of the completed turns inside `from..through`. */
+  listHistoryTurns?(sessionId: string, from: number, through: number): Promise<import('./history.js').HistoryTurnSummary[]>;
   highWaterMark(sessionId: string): number;
   append(event: AgentEvent): Promise<void>;
   list(sessionId: string, afterSequence?: number): Promise<AgentEvent[]>;
