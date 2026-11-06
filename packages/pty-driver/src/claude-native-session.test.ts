@@ -4,7 +4,6 @@ import { appendFileSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpa
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import * as sessionBackends from '@dutydeck/session-backends';
 import { childProcessIdentity, observeProcess } from '../../storage/src/process-identity.js';
 import { ClaudeNativeSessionResolver, claudeHasConversation, claudeResumeFromObservation } from './claude-native-session.js';
 import { parseJsonlObjects, readHead, readTail } from './session-id/fs-scan.js';
@@ -27,12 +26,13 @@ describe.skipIf(process.platform !== 'linux')('owned live Claude session', () =>
       await vi.waitFor(() => expect(JSON.parse(readFileSync(statePath, 'utf8')).sessionId).toBe(oldId));
       const identity = childProcessIdentity(child.pid!);
       const alias = join(cwd, 'config-alias'); symlinkSync(cwd, alias);
-      const scan = vi.spyOn(sessionBackends, 'descendantPids');
       const resolver = new ClaudeNativeSessionResolver(identity, cwd, { ...env, CLAUDE_CONFIG_DIR: alias }, { identify: childProcessIdentity, observe: observeProcess });
+      // statePids is the only reader of dataRoot/sessions; once the CLI is cached it must not be listed again.
+      const scan = vi.spyOn(resolver as unknown as { statePids(): number[] }, 'statePids');
       expect(resolver.resolve()?.nativeSessionId).toBe(oldId);
-      const scanCount = scan.mock.calls.length;
-      for (let i = 0; i < 20; i++) expect(resolver.resolve()?.nativeSessionId).toBe(oldId);
-      expect(scan).toHaveBeenCalledTimes(scanCount);
+      expect(scan).toHaveBeenCalledTimes(1);
+      for (let i = 0; i < 20; i++) expect(resolver.resolve(true)?.nativeSessionId).toBe(oldId);
+      expect(scan).toHaveBeenCalledTimes(1);
       scan.mockRestore();
       writeFileSync(oldPath, '');
       const events: NormalizedDriverEvent[] = [], switches = vi.fn();
