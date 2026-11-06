@@ -87,7 +87,7 @@ export function openDatabaseControl(filename: string, options: RepositoryOpenOpt
   const db = new Database(filename);
   let closed = false;
   let registered = false;
-  function state() { return db.prepare('SELECT * FROM dutydeck_control WHERE id = 1').get() as State; }
+  function state() { return cachedStatement(db, 'SELECT * FROM dutydeck_control WHERE id = 1').get() as State; }
   function update(next: State) {
     db.prepare('UPDATE dutydeck_control SET version = ?, phase = ?, maintenance = ?, runtime = ?, instance = ?, generation = ? WHERE id = 1').run(next.version + 1, next.phase, next.maintenance, next.runtime, next.instance, next.generation);
   }
