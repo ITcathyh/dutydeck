@@ -379,6 +379,27 @@ describe('watch direct messages rejected by Lark', () => {
     expect(h.rows.get(rejectedKey)).toBe('');
   });
 
+  it('clears the marker when the receiver disappears, and does not rewrite it every run', async () => {
+    const h = fixture(); h.scope.signals = [signal()]; h.send.mockRejectedValueOnce(rejection());
+    await h.watch.run();
+    h.scope.ownerId = undefined; await h.watch.run();
+    expect(h.rows.get(rejectedKey)).toBe('');
+    expect(checkWatchFindings(Object.fromEntries(h.rows)).detail).not.toContain('巡检私信被飞书拒绝');
+    const set = vi.spyOn(h.store, 'set'); await h.watch.run();
+    expect(set).not.toHaveBeenCalledWith(rejectedKey, expect.anything());
+  });
+
+  it('starts a new rejection period when the old batch is delivered and the new batch is rejected in the same run', async () => {
+    const h = fixture(); h.scope.signals = [signal()];
+    h.send.mockRejectedValueOnce(rejection()).mockRejectedValueOnce(new Error('timeout')).mockResolvedValueOnce({}).mockRejectedValueOnce(rejection());
+    await h.watch.run();
+    h.setNow(after(WATCH_RECEIVER_WARN_MS)); await expect(h.watch.run()).resolves.toBe(true);
+    const third = after(WATCH_RECEIVER_WARN_MS + WATCH_NOTIFICATION_RETRY_DELAY_MS);
+    h.scope.signals.push(signal('new')); h.setNow(third); await h.watch.run();
+    expect(h.send).toHaveBeenCalledTimes(4);
+    expect(JSON.parse(h.rows.get(rejectedKey)!)).toMatchObject({ since: third, attemptedAt: third });
+  });
+
   it('drops the marker and sends right away when the receiver changes', async () => {
     const h = fixture(); h.scope.signals = [signal()]; h.send.mockRejectedValueOnce(rejection());
     await h.watch.run();

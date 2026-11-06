@@ -27,6 +27,6 @@ export const redactTraceText = (value: string, placeholder = '[REDACTED]') => {
   let text = value;
   for (const secret of knownSecrets) if (text.includes(secret)) text = text.split(secret).join(placeholder);
   // 群协作令牌（agent-tools.ts tokenFor）：HMAC-SHA256 的 base64url 正好 43 位，按格式抹掉；左侧不设边界，紧贴其他字符时也抹。
-  text = text.replace(/v1\.[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])/g, () => placeholder);
-  return redactCredentialText(text, placeholder);
+  // 放在通用规则之后：HS256 JWT 的签名段也是 43 位，先抹令牌会截断 JWT，使 header、payload 漏抹。
+  return redactCredentialText(text, placeholder).replace(/v1\.[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])/g, () => placeholder);
 };

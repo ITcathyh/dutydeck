@@ -178,7 +178,7 @@ export class DutydeckWatch {
           await this.options.store.set(notificationKey, JSON.stringify(notification));
           await this.options.send({ appId: scope.appId, ownerId: notification.ownerId, ...(notification.ownerIdType ? { ownerIdType: notification.ownerIdType } : {}),
             text: notification.text, idempotencyKey: notification.idempotencyKey });
-          if (rawRejected) { await this.options.store.set(rejectedKey, ''); rawRejected = ''; }
+          if (rawRejected) { await this.options.store.set(rejectedKey, ''); rawRejected = ''; rejected = undefined; }
           for (const finding of live) {
             const notified = { ...finding, notifiedAt: at };
             await this.options.store.set(prefix + finding.fingerprint, JSON.stringify(notified));
@@ -195,6 +195,8 @@ export class DutydeckWatch {
         const next = JSON.stringify(warn ? { ...unreachable, warnedAt: at } : unreachable);
         if (next !== rawUnreachable) await this.options.store.set(unreachableKey, next);
         if (warn) this.options.warn({ appId: scope.appId, code: 'WATCH_RECEIVER_MISSING', count: pending.length }, '巡检发现问题，但找不到可私信的接收人，未发送私信（每天最多提示一次）');
+        // 被拒标记属于之前的接收人，接收人没了就不再报缺权限。
+        if (await this.options.store.get(prefix + 'rejected')) await this.options.store.set(prefix + 'rejected', '');
         continue;
       }
       // 只写空值：真实仓储的 remove 只允许删少数几类记录，其余抛错会中止整轮巡检。

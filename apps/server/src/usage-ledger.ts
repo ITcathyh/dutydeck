@@ -17,7 +17,7 @@ const extraPricingSchema = z.object({ version: z.string().trim().min(1).optional
     seen.add(key);
   });
 });
-/** extraMatches 只由 withExtraPricing 写入：这些 match 是部署方叠加的单价，即使基础表是内置表也记为 custom_model。 */
+/** extraMatches 只由 withExtraPricing 写入：叠加条目按同样顺序排在 models 最前面，命中它们的用量即使基础表是内置表也记为 custom_model。 */
 export type UsagePricing = z.infer<typeof pricingSchema> & { source?: 'builtin' | 'custom'; extraMatches?: string[] };
 const backgroundLimitsSchema = z.object({ defaultMonthlyTasks: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(), bots: z.record(z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)).optional() }).strict();
 export function parseUsageBackgroundLimits(json?: string): UsageBackgroundLimits {
@@ -104,7 +104,7 @@ function priceSelection(pricing: UsagePricing, model: string | undefined, provid
   const matched = pricing.models.filter(entry => matchesProvider(entry) && matchesModel(name, entry.match.toLowerCase())).sort((a, b) => b.match.length - a.match.length)[0];
   const builtin = pricing.source === 'builtin';
   const rate = matched ?? (!builtin && matchesProvider(pricing.default) ? pricing.default : undefined);
-  const pricingSource: UsageLedgerEntry['pricingSource'] = matched ? (builtin && !pricing.extraMatches?.includes(matched.match) ? 'builtin_model' : 'custom_model') : rate ? 'custom_default' : 'unmatched';
+  const pricingSource: UsageLedgerEntry['pricingSource'] = matched ? (builtin && pricing.models.indexOf(matched) >= (pricing.extraMatches?.length ?? 0) ? 'builtin_model' : 'custom_model') : rate ? 'custom_default' : 'unmatched';
   // Include the actual table in the hash: editing prices without a version bump
   // still leaves a distinct durable provenance key.
   const pricingVersion = `${pricing.version ?? (builtin ? 'builtin' : 'custom')}:${createHash('sha256').update(JSON.stringify(pricing)).digest('hex').slice(0, 32)}`;

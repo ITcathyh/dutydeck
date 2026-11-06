@@ -44,6 +44,12 @@ describe('secret redaction', () => {
     for (const text of [token.slice(0, -1), token + 'A', token + '-', token + '_']) expect(redactTraceText(text)).toBe(text);
   });
 
+  it('removes a whole HS256 JWT whose payload ends with v1, not just its signature', () => {
+    const jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyX3Yv1.' + 'dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U';
+    expect(jwt.split('.')[2]).toHaveLength(43);
+    expect(redactTraceText(`jwt ${jwt} end`)).toBe('jwt [REDACTED] end');
+  });
+
   it('keeps redacting keyed credentials next to the token rule', () => {
     for (const text of ['token=opaque-keyed-value-7731', 'export API_KEY=opaque-keyed-value-7732', '"secret": "opaque-keyed-value-7733"', 'Authorization: Bearer opaque-keyed-value-7734'])
       expect(redactTraceText(text)).not.toMatch(/opaque-keyed-value/);

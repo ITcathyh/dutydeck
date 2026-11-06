@@ -127,6 +127,8 @@ describe('claude pricing', () => {
       expect(estimateCostUsd(azure, 'gpt-5', { inputTokens: 1_000_000 }, 'openai')).toBe(builtin);
       expect(estimateCostUsd(azure, 'gpt-5', { inputTokens: 1_000_000 })).toBe(builtin);
       expect(estimateCostUsd(azure, 'gpt-5', { inputTokens: 1_000_000 }, 'Azure')).toBe(9);
+      expect(measureUsage({ reading: { usageRef: 'r', breakdown: { inputTokens: 1_000_000 } }, freshTokens: true, model: 'gpt-5', provider: 'openai', pricing: azure })).toMatchObject({ pricingSource: 'builtin_model', pricingMatch: 'gpt-5' });
+      expect(measureUsage({ reading: { usageRef: 'r', breakdown: { inputTokens: 1_000_000 } }, freshTokens: true, model: 'gpt-5', provider: 'azure', pricing: azure })).toMatchObject({ pricingSource: 'custom_model', costUsd: 9 });
       const generic = withExtraPricing(azure, JSON.stringify({ models: [{ match: 'GPT-5', inputPerMTok: 2, cachedInputPerMTok: 1, outputPerMTok: 1 }] }));
       expect(generic.models.filter(entry => entry.match.toLowerCase() === 'gpt-5').map(entry => entry.provider)).toEqual([undefined, 'azure']);
     });
