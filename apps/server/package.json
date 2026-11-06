@@ -10,6 +10,7 @@
   },
   "files": [
     "dist/cli.js",
+    "dist/lark-sdk.mjs",
     "dist/program-status-relay.js",
     "dist/agents",
     "dist/assets",

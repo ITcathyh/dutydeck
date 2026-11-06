@@ -1,4 +1,5 @@
-import { cpSync, existsSync, mkdirSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { basename, dirname, isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
@@ -47,6 +48,24 @@ const externalPackages = {
   }
 };
 
+// The Lark SDK is CommonJS. Importing it from ESM goes through Node's CJS translator, which keeps
+// extra copies of its ~12 MB source in the heap. The main bundle imports a small ESM shim instead that
+// loads it with require. The shim is a separate file so a failed load keeps rethrowing the same error,
+// as Node caches a module whose evaluation threw. Sources keep `import * as lark` so Vitest mocks apply;
+// the export list comes from the installed SDK.
+const larkSdk = '@larksuiteoapi/node-sdk';
+const larkExports = Object.keys(createRequire(resolve(serverRoot, 'package.json'))(larkSdk)).filter(key => key !== 'default' && /^[A-Za-z_$][\w$]*$/.test(key));
+for (const key of ['Client', 'EventDispatcher', 'LoggerLevel', 'WSClient']) {
+  if (!larkExports.includes(key)) throw new Error(`${larkSdk} no longer exports ${key}`);
+}
+const larkShim = 'lark-sdk.mjs';
+const larkRequirePlugin = {
+  name: 'dutydeck-lark-require',
+  setup(buildApi) {
+    buildApi.onResolve({ filter: /^@larksuiteoapi\/node-sdk$/ }, () => ({ path: `./${larkShim}`, external: true }));
+  }
+};
+
 rmSync(resolve(serverRoot, 'dist'), { recursive: true, force: true });
 if (!existsSync(resolve(webDist, 'index.html'))) throw new Error('Web UI is not built. Run pnpm --dir apps/web build first.');
 rmSync(publicDir, { recursive: true, force: true });
@@ -59,8 +78,9 @@ await build({
   platform: 'node',
   target: 'node22',
   sourcemap: false,
-  plugins: [...workspacePlugins, externalPackages]
+  plugins: [...workspacePlugins, larkRequirePlugin, externalPackages]
 });
+writeFileSync(resolve(serverRoot, 'dist', larkShim), `import { createRequire } from 'node:module';\nconst lark = createRequire(import.meta.url)(${JSON.stringify(larkSdk)});\nexport default lark;\nexport const { ${larkExports.join(', ')} } = lark;\n`);
 // Isolated plugin activation uses the same Host registries after installation, without tsx.
 await build({
   entryPoints: [resolve(serverRoot, 'src/plugins/activation-worker.ts')],
