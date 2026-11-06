@@ -26,7 +26,7 @@ export const sensitiveTraceKey = /(?:authorization|api[_-]?key|access[_-]?key|pr
 export const redactTraceText = (value: string, placeholder = '[REDACTED]') => {
   let text = value;
   for (const secret of knownSecrets) if (text.includes(secret)) text = text.split(secret).join(placeholder);
-  // 群协作令牌（agent-tools.ts tokenFor）：HMAC-SHA256 的 base64url 正好 43 位；签名密钥持久化、重启后令牌不变，未登记时按格式兜底。
-  text = text.replace(/(?<![A-Za-z0-9_-])v1\.[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])/g, () => placeholder);
+  // 群协作令牌（agent-tools.ts tokenFor）：HMAC-SHA256 的 base64url 正好 43 位，按格式抹掉；左侧不设边界，紧贴其他字符时也抹。
+  text = text.replace(/v1\.[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])/g, () => placeholder);
   return redactCredentialText(text, placeholder);
 };

@@ -5,7 +5,7 @@ import { commitLarkAgentReply } from './agent-reply-delivery.js';
 import { parseFinalCardBody } from './final-card.js';
 import { deliveryPrompt, isFrozenCollaborationSession } from '../prompt-context.js';
 import { LarkAgentCommands } from './agent-command.js';
-import { redactTraceText, rememberSecretValues } from './secret-redaction.js';
+import { redactTraceText } from './secret-redaction.js';
 import { readExplicitFinal, resolveExplicitFinalContext, sendExplicitFinal, withExplicitFinalLock, type ExplicitFinalContext, type ExplicitFinalScope, type ExplicitFinalDelivery } from './explicit-final.js';
 import { collaborationAgentPrompt } from '../collaboration-cli.js';
 import { layeredWorkbenchPrompt, workbenchAgentPrompt } from '../work-item-tools.js';
@@ -131,7 +131,6 @@ export class LarkAgentToolCapabilityRegistry {
     if (existing && existing !== capability) this.byToken.delete(existing.token);
     this.bySession.set(session.id, capability);
     this.byToken.set(capability.token, capability);
-    rememberSecretValues({ dutydeck_group_tools_token: capability.token });
     return {
       dutydeck_group_tools_url: `${this.apiBaseUrl.replace(/\/$/, '')}${groupToolPath}`,
       dutydeck_group_tools_token: capability.token,

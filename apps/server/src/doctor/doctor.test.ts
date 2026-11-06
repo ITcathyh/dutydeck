@@ -749,6 +749,18 @@ describe('usage.unpriced', () => {
     expect(check.detail).toBe('以下模型未定价，用量上限对它们无效：gemini-3.8-flash-n');
     expect(check.remedy).toContain('DUTYDECK_USAGE_PRICING_EXTRA_JSON');
   });
+
+  it('价格表变量写错时报 usage.pricing fail 并点名变量，不再判未定价', async () => {
+    for (const [env, name] of [[{ DUTYDECK_USAGE_PRICING_EXTRA_JSON: '{models:' }, 'DUTYDECK_USAGE_PRICING_EXTRA_JSON'], [{ DUTYDECK_USAGE_PRICING_JSON: '{"default":{}}' }, 'DUTYDECK_USAGE_PRICING_JSON']] as const) {
+      const report = await runDoctor({ json: true }, withBots(botsWith({ defaultModel: 'kimi-k2.5' }), env));
+      const check = find(report, 'usage.pricing')!;
+      expect(check.level).toBe('fail');
+      expect(check.detail).toMatch(new RegExp(`^${name} 无效：`));
+      expect(check.remedy).toBeTruthy();
+      expect(find(report, 'usage.unpriced')).toBeUndefined();
+    }
+    expect(find(await runDoctor({ json: true }, withBots(botsWith({ defaultModel: 'kimi-k2.5' }))), 'usage.pricing')).toBeUndefined();
+  });
 });
 
 describe('lark.memory', () => {

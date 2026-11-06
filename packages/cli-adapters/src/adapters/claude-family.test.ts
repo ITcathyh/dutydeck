@@ -215,6 +215,21 @@ describe('Claude family startup trust confirmation', () => {
     }
   });
 
+  it.each(['No, exit', 'Yes, I trust this folder'] as const)('names a recognized trust page whose keys never take effect (%s) as the trust page under full-trust', async selected => {
+    vi.useFakeTimers();
+    try {
+      const backend = new TrustBackend(trustScreen(selected));
+      backend.sendSpecialKeys = (...keys: string[]) => { backend.writes.push(...keys); };
+      let error: unknown;
+      prepareClaudeFamilyInput(backend, { sessionId: 'sid', cwd, permissionMode: 'full-trust' }).catch(reason => { error = reason; });
+      await vi.advanceTimersByTimeAsync(30_100);
+      expect(String(error)).toBe('Error: Claude 启动尚未就绪（最后屏幕：目录信任页未能核对），请打开终端处理启动确认后再发送任务。');
+      expect(backend.writes.length).toBeGreaterThan(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it.each(['ask', undefined] as const)('accepts an already trusted composer with permission mode %s', async permissionMode => {
     const backend = new TrustBackend(composer.replace(/⏵⏵[^\n]*/g, '? for shortcuts'));
     await prepareClaudeFamilyInput(backend, { sessionId: 'sid', cwd, permissionMode });

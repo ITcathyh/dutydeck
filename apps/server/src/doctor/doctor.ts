@@ -312,11 +312,19 @@ export async function runDoctor(
     new Date()
   ));
 
-  // 价格表来自环境变量覆盖或内置表；覆盖值解析失败时服务本身就起不来，这里不重复报。
-  const unpriced = databaseUnreadable ? undefined : (() => {
-    try { return checkUnpricedModels(probe.values?.[larkBotsConfigKey], withExtraPricing(parseUsagePricing(env.DUTYDECK_USAGE_PRICING_JSON), env.DUTYDECK_USAGE_PRICING_EXTRA_JSON), probe.unpricedUsageModels); } catch { return undefined; }
+  // 价格表来自环境变量覆盖或内置表；覆盖值写错时服务起不来，这里报出是哪个变量无效，不再判未定价。
+  const pricing = (() => {
+    try { return withExtraPricing(parseUsagePricing(env.DUTYDECK_USAGE_PRICING_JSON), env.DUTYDECK_USAGE_PRICING_EXTRA_JSON); } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return { error: message.startsWith('DUTYDECK_USAGE_PRICING_EXTRA_JSON 无效：') ? message : `DUTYDECK_USAGE_PRICING_JSON 无效：${message}` };
+    }
   })();
-  if (unpriced) checks.push(unpriced);
+  if ('error' in pricing) {
+    checks.push({ id: 'usage.pricing', label: '用量价格表', level: 'fail', detail: pricing.error, remedy: '修正该环境变量的 JSON（格式见文档 agents.md 的环境变量表）或删掉它，然后重启服务；写错时服务起不来。' });
+  } else if (!databaseUnreadable) {
+    const unpriced = checkUnpricedModels(probe.values?.[larkBotsConfigKey], pricing, probe.unpricedUsageModels);
+    if (unpriced) checks.push(unpriced);
+  }
 
   checks.push(checkWatchFindings(probe.values ?? {}, databaseUnreadable));
 

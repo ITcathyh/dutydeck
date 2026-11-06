@@ -466,9 +466,9 @@ describe('Agent group collaboration domain service', () => {
   it('redacts its own group tools token in text the Agent sends, even when glued to other text', async () => {
     const current = fakeClient();
     const { tools, token } = await setup({ cli_current: current }, undefined, undefined, 'oc_token_echo', 'ses_token_echo');
-    // 前面紧跟字母时格式规则不匹配，只能靠 environmentFor 登记的原值抹掉。
-    await tools.send(token, { content: `令牌是 ${token}，拼接后是 Z${token}Z` });
-    expect(current.sendText).toHaveBeenCalledWith(expect.objectContaining({ text: '令牌是 [REDACTED]，拼接后是 Z[REDACTED]Z' }));
+    // 令牌只按格式抹掉，不登记原值；前面紧贴字母也要抹。
+    await tools.send(token, { content: `令牌是 ${token}，拼接后是 Z${token}。` });
+    expect(current.sendText).toHaveBeenCalledWith(expect.objectContaining({ text: '令牌是 [REDACTED]，拼接后是 Z[REDACTED]。' }));
   });
 
   it('neutralizes card tags in Agent text but keeps the real mention prefix', async () => {

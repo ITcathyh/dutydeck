@@ -120,6 +120,25 @@ describe('claude pricing', () => {
       expect(measure('claude-opus-5-5', replaced)).toMatchObject({ pricingSource: 'custom_model', costUsd: 9 });
     });
 
+    it('replaces only the base entry with the same match and provider', () => {
+      const azure = withExtraPricing(defaultUsagePricing, JSON.stringify({ models: [{ match: 'gpt-5', provider: 'azure', inputPerMTok: 9, cachedInputPerMTok: 1, outputPerMTok: 1 }] }));
+      const builtin = estimateCostUsd(defaultUsagePricing, 'gpt-5', { inputTokens: 1_000_000 });
+      expect(builtin).toBeDefined();
+      expect(estimateCostUsd(azure, 'gpt-5', { inputTokens: 1_000_000 }, 'openai')).toBe(builtin);
+      expect(estimateCostUsd(azure, 'gpt-5', { inputTokens: 1_000_000 })).toBe(builtin);
+      expect(estimateCostUsd(azure, 'gpt-5', { inputTokens: 1_000_000 }, 'Azure')).toBe(9);
+      const generic = withExtraPricing(azure, JSON.stringify({ models: [{ match: 'GPT-5', inputPerMTok: 2, cachedInputPerMTok: 1, outputPerMTok: 1 }] }));
+      expect(generic.models.filter(entry => entry.match.toLowerCase() === 'gpt-5').map(entry => entry.provider)).toEqual([undefined, 'azure']);
+    });
+
+    it('rejects the same match and provider listed twice, but allows the same match under different providers', () => {
+      const rate = { inputPerMTok: 1, cachedInputPerMTok: 0.1, outputPerMTok: 5 };
+      for (const models of [[{ match: 'kimi-k2.5', ...rate }, { match: 'KIMI-K2.5', ...rate, inputPerMTok: 2 }], [{ match: 'gpt-5', provider: 'azure', ...rate }, { match: 'gpt-5', provider: 'AZURE', ...rate }]]) {
+        expect(() => withExtraPricing(defaultUsagePricing, JSON.stringify({ models }))).toThrow(/^DUTYDECK_USAGE_PRICING_EXTRA_JSON 无效：.*重复出现/s);
+      }
+      expect(() => withExtraPricing(defaultUsagePricing, JSON.stringify({ models: [{ match: 'gpt-5', ...rate }, { match: 'gpt-5', provider: 'azure', ...rate }] }))).not.toThrow();
+    });
+
     it.each([
       ['a default entry', JSON.stringify({ default: { inputPerMTok: 1, cachedInputPerMTok: 1, outputPerMTok: 1 }, models: [] })],
       ['invalid JSON', '{models:'],

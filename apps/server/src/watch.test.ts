@@ -336,6 +336,49 @@ describe('watch direct messages rejected by Lark', () => {
     expect(h.findings().every(row => row.notifiedAt && !row.notificationUnknownAt)).toBe(true);
   });
 
+  it('records a first-attempt rejection as not sent and resends the same batch after a day', async () => {
+    const h = fixture(); h.scope.signals = [signal()]; h.send.mockRejectedValueOnce(rejection());
+    await h.watch.run();
+    const first = JSON.parse(h.rows.get(WATCH_PREFIX + 'cli_test/notification')!);
+    expect(first).toMatchObject({ status: 'completed', attemptedAt: at });
+    expect(h.findings()[0]).not.toHaveProperty('notificationUnknownAt');
+    h.setNow(after(WATCH_RECEIVER_WARN_MS)); await h.watch.run();
+    expect(h.send).toHaveBeenCalledTimes(2);
+    expect(h.send.mock.calls[1]?.[0].idempotencyKey).toBe(first.idempotencyKey);
+    expect(h.findings()[0]?.notifiedAt).toBe(after(WATCH_RECEIVER_WARN_MS));
+  });
+
+  it('keeps an earlier timed-out attempt unknown when the retry is rejected, and never resends it', async () => {
+    const h = fixture(); h.scope.signals = [signal()]; h.send.mockRejectedValueOnce(new Error('timeout')).mockRejectedValueOnce(rejection());
+    await expect(h.watch.run()).resolves.toBe(true);
+    h.setNow(after(WATCH_NOTIFICATION_RETRY_DELAY_MS)); await expect(h.watch.run()).resolves.toBe(false);
+    expect(h.send).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(h.rows.get(WATCH_PREFIX + 'cli_test/notification')!)).toMatchObject({ status: 'unknown', attemptedAt: at });
+    expect(h.findings()[0]?.notificationUnknownAt).toBe(after(WATCH_NOTIFICATION_RETRY_DELAY_MS));
+    expect(h.findings()[0]?.notifiedAt).toBeUndefined();
+    expect(JSON.parse(h.rows.get(rejectedKey)!)).toMatchObject({ attemptedAt: after(WATCH_NOTIFICATION_RETRY_DELAY_MS), scopes: ['contact:user.employee_id:readonly'] });
+    h.setNow(after(2 * WATCH_RECEIVER_WARN_MS)); await h.watch.run();
+    expect(h.send).toHaveBeenCalledTimes(2);
+  });
+
+  it('clears the marker once the cooldown passes with nothing to send, so doctor returns to ok', async () => {
+    const h = fixture(); h.scope.signals = [signal()]; h.send.mockRejectedValueOnce(rejection());
+    await h.watch.run();
+    h.scope.signals = []; h.setNow(after(WATCH_NOTIFICATION_RETRY_MS)); await h.watch.run();
+    expect(h.rows.get(rejectedKey)).not.toBe('');
+    h.setNow(after(WATCH_RECEIVER_WARN_MS)); await h.watch.run();
+    expect(h.send).toHaveBeenCalledTimes(1);
+    expect(h.rows.get(rejectedKey)).toBe('');
+    expect(checkWatchFindings(Object.fromEntries(h.rows)).level).toBe('ok');
+  });
+
+  it('clears the marker when direct messages are turned off', async () => {
+    const h = fixture(); h.scope.signals = [signal()]; h.send.mockRejectedValueOnce(rejection());
+    await h.watch.run();
+    h.scope.notify = false; await h.watch.run();
+    expect(h.rows.get(rejectedKey)).toBe('');
+  });
+
   it('drops the marker and sends right away when the receiver changes', async () => {
     const h = fixture(); h.scope.signals = [signal()]; h.send.mockRejectedValueOnce(rejection());
     await h.watch.run();

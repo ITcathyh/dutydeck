@@ -233,8 +233,9 @@ function trustSelection(screen: string, cwd: string | undefined): 'No, exit' | '
   return choices.find(choice => choice.selected)!.label as 'No, exit' | 'Yes, I trust this folder';
 }
 /** 启动超时时最后一屏的类别，只用于报错提示处理办法，不带屏幕原文。 */
-function startupScreenCategory(screen: string, cwd: string | undefined): '目录信任页未能核对' | '空白' | '未识别' {
-  if (screenLines(screen).includes('Accessing workspace:') && trustSelection(screen, cwd) === undefined) return '目录信任页未能核对';
+function startupScreenCategory(screen: string): '目录信任页未能核对' | '空白' | '未识别' {
+  // 认不出的信任页和已认出但自动确认按键没生效的信任页，都要用户去终端确认目录。
+  if (screenLines(screen).includes('Accessing workspace:')) return '目录信任页未能核对';
   if (!screen.replace(/\s/g, '')) return '空白';
   return '未识别';
 }
@@ -289,7 +290,7 @@ export async function prepareClaudeFamilyInput(backend: PtyLike, ctx: AdapterSes
     }
     await delay(STARTUP_POLL_MS);
   }
-  throw new Error(`Claude 启动尚未就绪（最后屏幕：${startupScreenCategory(lastScreen, ctx.cwd)}），请打开终端处理启动确认后再发送任务。`);
+  throw new Error(`Claude 启动尚未就绪（最后屏幕：${startupScreenCategory(lastScreen)}），请打开终端处理启动确认后再发送任务。`);
 }
 
 /** 建一个 Claude 家族适配器；三者只有 id 不同。 */

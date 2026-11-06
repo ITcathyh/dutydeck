@@ -88,7 +88,7 @@ Web 侧栏「用量与成本」有「费用」「明细」「会话分析」三�
 - **会话洞察分析器**：随 npm 包内置，构建服务时自动生成；使用 Dutydeck 当前的 Node.js 运行时，在隔离子进程中本地分析，无需 Go 编译器、外部分析器二进制或单独构建引擎。源码开发使用工作区的 `tsx` loader。指标版本升级为 `v2`：旧快照仍可读取，不同指标版本不混算差值或分组汇总；重新分析可统一版本。Codex 同一原生输入只计一轮；fork 继承历史不计入独立会话汇总；已计价记录的金额和时间保留在洞察与导出中。刷新生成修正后的快照，已有快照保持不变。洞察刷新不会修改任务用量与计费记录。
 
 - **月度上限**：美元，按机器人或按群设置。Web，或 `dutydeck settings usage set-cap <月度美元> --app <appId> [--chat <chatId>]`。
-- **价格表**：内置表含 OpenAI 和 Claude 型号，按模型名最长前缀匹配；匹配不到的型号记为“未定价”，不会套默认价。用 `DUTYDECK_USAGE_PRICING_JSON` 可整表覆盖；只缺个别型号时用 `DUTYDECK_USAGE_PRICING_EXTRA_JSON` 按型号叠加单价（格式见 [agents.md](agents.md) 环境变量表）。设置后这些型号的花费开始计入月度上限，已设上限的实例可能比以前更早被拦；变量写错时服务起不来。Claude 型号只认日期后缀（`-YYYYMMDD`）和 `-latest`，所以 `claude-opus-5-6` 不会落到 `claude-opus-5` 的价格上。
+- **价格表**：内置表含 OpenAI 和 Claude 型号，按模型名最长前缀匹配；匹配不到的型号记为“未定价”，不会套默认价。用 `DUTYDECK_USAGE_PRICING_JSON` 可整表覆盖；只缺个别型号时用 `DUTYDECK_USAGE_PRICING_EXTRA_JSON` 按型号叠加单价（格式见 [agents.md](agents.md) 环境变量表）。设置后这些型号的花费开始计入月度上限，已设上限的实例可能比以前更早被拦；变量写错时服务起不来，`dutydeck doctor` 会报出是哪个变量无效。Claude 型号只认日期后缀（`-YYYYMMDD`）和 `-latest`，所以 `claude-opus-5-6` 不会落到 `claude-opus-5` 的价格上。
 - **用量型号**：依次取 Agent 读数、任务、会话、Agent 配置里的型号；都没有时采用 ACP Agent 自己报告的当前型号（去掉 `[推理强度]` 后缀，如 Codex），来源记为 `runtime`。
 - **用量来源**：ACP Agent 报多少算多少，不报成本的按价格表估算。终端模式 Claude 的用量来自 transcript，是估算；子代理用量来自 `<session>/subagents/` 下的文件。同一轮多个型号时各自按自己的单价算，任一型号没有单价，整轮记为未定价。终端模式 Codex 按轮记 token：取会话日志里每次模型回复的用量（旧版 Codex 日志没有逐次记录时，对累计值做差），resume、fork 和 daemon 重启后重读都不重复计；型号取日志里的实际型号，没有单价的只记 token。这部分金额出现在用量报表里，标为“不计入上限”，月度上限、75%/95% 提醒和 `/status` 的已用比例不算它（按“无用量数据”计）。Traex 终端模式没有用量。
 - **“部分用量未知，上限可能不准”**：任一轮的用量读不到时出现，位置是 Web 上限卡片、拒绝说明和告警。什么算未知：子代理文件读不到或格式不认识、daemon 重启后恢复的那一轮、未定价的型号。

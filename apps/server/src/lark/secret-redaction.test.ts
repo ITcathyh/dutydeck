@@ -34,12 +34,14 @@ describe('secret redaction', () => {
     expect(redactTraceText('model opaque-model-name-123')).toBe('model opaque-model-name-123');
   });
 
-  it('removes group collaboration tokens by format even before they are registered', () => {
+  it('removes group collaboration tokens by format, even glued to preceding text', () => {
     const token = 'v1.' + 'Gq7Rz2KdLw9XnVb4TcYp1Hs6Jm3Uf8Ea0Oi5_-NgQrS'.slice(0, 43);
     expect(token).toHaveLength(46);
     expect(redactTraceText(`令牌是 ${token}。`)).toBe('令牌是 [REDACTED]。');
     expect(redactTraceText(`"${token}"`)).toBe('"[REDACTED]"');
-    for (const text of [token.slice(0, -1), token + 'A', 'x' + token, token + '-', 'av1.' + token.slice(3)]) expect(redactTraceText(text)).toBe(text);
+    expect(redactTraceText('x' + token)).toBe('x[REDACTED]');
+    expect(redactTraceText('_-' + token + '。')).toBe('_-[REDACTED]。');
+    for (const text of [token.slice(0, -1), token + 'A', token + '-', token + '_']) expect(redactTraceText(text)).toBe(text);
   });
 
   it('keeps redacting keyed credentials next to the token rule', () => {

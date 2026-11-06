@@ -167,7 +167,7 @@ Codex ACP 的非完全信任会话在每轮原生请求（包括恢复后）使�
 | `DUTYDECK_CLEANUP_INTERVAL_MS` | `300000` | 周期清理间隔，整数毫秒，范围 1–2147483647 |
 | `DUTYDECK_DRIVER_IDLE_TIMEOUT_MS` | `21600000` | 空闲终端释放阈值，非负毫秒；`0` 禁用，不受周期定时器的 32 位上限限制；仍有原生后台任务的会话不释放 |
 | `DUTYDECK_USAGE_PRICING_JSON` | 内置价格表 | 整表覆盖用量估算的单价 |
-| `DUTYDECK_USAGE_PRICING_EXTRA_JSON` | 不设 | 在价格表上按型号叠加单价，格式 `{"version"?: "...", "models": [{"match": "...", "inputPerMTok": ..., "cachedInputPerMTok": ..., "outputPerMTok": ...}]}`，同名型号被替换，不允许 `default`。设置后这些型号的花费开始计入月度上限，已设上限的实例可能比以前更早被拦；写错时服务起不来 |
+| `DUTYDECK_USAGE_PRICING_EXTRA_JSON` | 不设 | 在价格表上按型号叠加单价，格式 `{"version"?: "...", "models": [{"match": "...", "inputPerMTok": ..., "cachedInputPerMTok": ..., "outputPerMTok": ...}]}`，条目可带可选的 `provider`；基础表里型号名和 `provider` 都相同（不分大小写）的条目被替换，其他 provider 的同名条目保留，同一型号和 `provider` 不能重复写，不允许 `default`。设置后这些型号的花费开始计入月度上限，已设上限的实例可能比以前更早被拦；写错时服务起不来，`dutydeck doctor` 会报 `usage.pricing` 失败并点名变量 |
 | `DUTYDECK_DEPLOY_WINDOW` | 不限 | `dutydeck deploy` 允许的时段，如 `10:00-11:00,16:00-17:00`（Asia/Shanghai） |
 | `LARK_APP_ID` | - | 仅 `dutydeck lark send` 等命令行发卡片的备用来源 |
 | `LARK_APP_SECRET` | - | 同上。机器人用 `dutydeck setup` 配置，Secret 存在机器人配置里，不需要它 |

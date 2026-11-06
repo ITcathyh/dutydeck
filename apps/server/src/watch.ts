@@ -148,22 +148,29 @@ export class DutydeckWatch {
         previous.set(prior.fingerprint, recovered);
       }
       await this.pruneRecovered(scope.appId, at);
-      if (!scope.notify) continue;
+      if (!scope.notify) {
+        if (await this.options.store.get(prefix + 'rejected')) await this.options.store.set(prefix + 'rejected', '');
+        continue;
+      }
       const notificationKey = prefix + 'notification';
       const rawNotification = await this.options.store.get(notificationKey);
       const oldNotification = rawNotification ? notificationSchema.parse(JSON.parse(rawNotification)) : undefined;
+      const liveMembers = (notification: z.infer<typeof notificationSchema>) => notification.members.flatMap(member => {
+        const finding = previous.get(member.fingerprint);
+        return finding && finding.episode === member.episode && !finding.recoveredAt && !finding.notifiedAt && !finding.notificationUnknownAt ? [finding] : [];
+      });
+      const markUnknown = async (notification: z.infer<typeof notificationSchema>, live: WatchFinding[]) => {
+        for (const finding of live) {
+          const unknown = { ...finding, notificationUnknownAt: at };
+          await this.options.store.set(prefix + finding.fingerprint, JSON.stringify(unknown));
+          previous.set(finding.fingerprint, unknown);
+        }
+        await this.options.store.set(notificationKey, JSON.stringify({ ...notification, status: 'unknown' }));
+      };
       const deliver = async (notification: z.infer<typeof notificationSchema>) => {
-        const live = notification.members.flatMap(member => {
-          const finding = previous.get(member.fingerprint);
-          return finding && finding.episode === member.episode && !finding.recoveredAt && !finding.notifiedAt && !finding.notificationUnknownAt ? [finding] : [];
-        });
+        const live = liveMembers(notification);
         if (live.length && notification.attemptedAt && Date.parse(at) - Date.parse(notification.attemptedAt) >= WATCH_NOTIFICATION_RETRY_MS) {
-          for (const finding of live) {
-            const unknown = { ...finding, notificationUnknownAt: at };
-            await this.options.store.set(prefix + finding.fingerprint, JSON.stringify(unknown));
-            previous.set(finding.fingerprint, unknown);
-          }
-          await this.options.store.set(notificationKey, JSON.stringify({ ...notification, status: 'unknown' }));
+          await markUnknown(notification, live);
           return;
         }
         if (live.length) {
@@ -208,7 +215,11 @@ export class DutydeckWatch {
           else await this.options.store.set(notificationKey, JSON.stringify({ ...oldNotification, status: 'completed' }));
         }
         const unsent = pending.filter(f => { const current = previous.get(f.fingerprint); return !current?.notifiedAt && !current?.notificationUnknownAt; });
-        if (!unsent.length) continue;
+        if (!unsent.length) {
+          // 门槛已过且没有要发的内容：标记留着只会让 doctor 一直报缺权限。
+          if (rawRejected) await this.options.store.set(rejectedKey, '');
+          continue;
+        }
         const idempotencyKey = 'watch_' + createHash('sha256')
           .update(JSON.stringify([scope.appId, scope.ownerId, unsent.map(f => [f.fingerprint, f.episode, f.firstSeenAt]).sort()])).digest('hex').slice(0, 40);
         const notification = notificationSchema.parse({ schemaVersion: 1, idempotencyKey,
@@ -220,9 +231,12 @@ export class DutydeckWatch {
         if (error instanceof WatchDeliveryRejectedError) {
           await this.options.store.set(rejectedKey, JSON.stringify({ since: rejected?.since ?? at, attemptedAt: at, ownerId: scope.ownerId,
             ...(scope.ownerIdType ? { ownerIdType: scope.ownerIdType } : {}), upstreamCode: error.upstreamCode, scopes: error.scopes }));
-          // 确定没发出：结掉这批，成员不记已通知也不记结果未知，过了门槛后重新成批发送。
           const rawCurrent = await this.options.store.get(notificationKey);
-          if (rawCurrent) await this.options.store.set(notificationKey, JSON.stringify({ ...notificationSchema.parse(JSON.parse(rawCurrent)), status: 'completed' }));
+          const current = rawCurrent ? notificationSchema.parse(JSON.parse(rawCurrent)) : undefined;
+          // 这批更早的尝试可能已送达：仍按结果未知结掉，不重发；只有首次尝试就被拒才算确定没发出。
+          if (current?.attemptedAt && Date.parse(current.attemptedAt) < Date.parse(at)) await markUnknown(current, liveMembers(current));
+          // 确定没发出：结掉这批，成员不记已通知也不记结果未知，过了门槛后重新成批发送。
+          else if (current) await this.options.store.set(notificationKey, JSON.stringify({ ...current, status: 'completed' }));
           this.options.warn({ appId: scope.appId, code: 'WATCH_DELIVERY_REJECTED', upstreamCode: error.upstreamCode, scopes: error.scopes },
             '巡检私信被飞书拒绝（缺权限），一天内不再重发');
           continue;
