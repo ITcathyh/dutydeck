@@ -1,58 +1,74 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 360" width="1280" height="360" role="img" aria-label="Dutydeck">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 360" width="1280" height="360" role="img" aria-label="Dutydeck: dispatch in Lark, agents work on your machine">
 <defs>
-  <linearGradient id="lg-bg" x1="8" y1="5" x2="57" y2="61" gradientUnits="userSpaceOnUse"><stop stop-color="#292b31"/><stop offset="1" stop-color="#090a0d"/></linearGradient>
-  <linearGradient id="lg-beam" x1="18" y1="45" x2="48" y2="17" gradientUnits="userSpaceOnUse"><stop stop-color="#fff"/><stop offset="1" stop-color="#b8b9c2"/></linearGradient>
-  <linearGradient id="lg-pulse" x1="38" y1="20" x2="50" y2="31" gradientUnits="userSpaceOnUse"><stop stop-color="#c4b5fd"/><stop offset="1" stop-color="#7c3aed"/></linearGradient>
-  <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#0d0b1a"/><stop offset=".55" stop-color="#161032"/><stop offset="1" stop-color="#0a1222"/></linearGradient>
-  <radialGradient id="glow-a" cx="0" cy="0" r="1" gradientTransform="translate(1010 150) scale(420 300)" gradientUnits="userSpaceOnUse"><stop stop-color="#7c3aed" stop-opacity=".55"/><stop offset="1" stop-color="#7c3aed" stop-opacity="0"/></radialGradient>
-  <radialGradient id="glow-b" cx="0" cy="0" r="1" gradientTransform="translate(170 300) scale(380 240)" gradientUnits="userSpaceOnUse"><stop stop-color="#3370ff" stop-opacity=".35"/><stop offset="1" stop-color="#3370ff" stop-opacity="0"/></radialGradient>
-  <linearGradient id="word" x1="284" y1="0" x2="760" y2="0" gradientUnits="userSpaceOnUse"><stop stop-color="#ffffff"/><stop offset="1" stop-color="#c4b5fd"/></linearGradient>
-  <pattern id="dots" width="22" height="22" patternUnits="userSpaceOnUse"><circle cx="2" cy="2" r="1.2" fill="#ffffff"/></pattern>
-  <clipPath id="frame"><rect width="1280" height="360" rx="28"/></clipPath>
-  <style>
-    .float-a { animation: float 6s ease-in-out infinite; }
-    .float-b { animation: float 6s ease-in-out -3s infinite; }
-    .pulse { transform-box: fill-box; transform-origin: center; animation: pulse 2.4s ease-in-out infinite; }
-    .bar { transform-box: fill-box; transform-origin: left; animation: grow 3.6s ease-in-out infinite; }
-    @keyframes float { 0%,100% { transform: translateY(0) } 50% { transform: translateY(-8px) } }
-    @keyframes pulse { 0%,100% { transform: scale(1); opacity: 1 } 50% { transform: scale(1.35); opacity: .75 } }
-    @keyframes grow { 0% { transform: scaleX(.15) } 70%,100% { transform: scaleX(1) } }
-  </style>
+<linearGradient id="lg-bg" x1="8" y1="5" x2="57" y2="61" gradientUnits="userSpaceOnUse"><stop stop-color="#292b31"/><stop offset="1" stop-color="#090a0d"/></linearGradient>
+<linearGradient id="lg-beam" x1="18" y1="45" x2="48" y2="17" gradientUnits="userSpaceOnUse"><stop stop-color="#fff"/><stop offset="1" stop-color="#b8b9c2"/></linearGradient>
+<linearGradient id="lg-pulse" x1="38" y1="20" x2="50" y2="31" gradientUnits="userSpaceOnUse"><stop stop-color="#c4b5fd"/><stop offset="1" stop-color="#7c3aed"/></linearGradient>
+<linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#0d0b1a"/><stop offset=".55" stop-color="#161032"/><stop offset="1" stop-color="#0a1222"/></linearGradient>
+<radialGradient id="glow-a" cx="0" cy="0" r="1" gradientTransform="translate(1060 170) scale(420 300)" gradientUnits="userSpaceOnUse"><stop stop-color="#7c3aed" stop-opacity=".55"/><stop offset="1" stop-color="#7c3aed" stop-opacity="0"/></radialGradient>
+<radialGradient id="glow-b" cx="0" cy="0" r="1" gradientTransform="translate(150 300) scale(380 240)" gradientUnits="userSpaceOnUse"><stop stop-color="#3370ff" stop-opacity=".35"/><stop offset="1" stop-color="#3370ff" stop-opacity="0"/></radialGradient>
+<linearGradient id="word" x1="244" y1="0" x2="720" y2="0" gradientUnits="userSpaceOnUse"><stop stop-color="#ffffff"/><stop offset="1" stop-color="#c4b5fd"/></linearGradient>
+<linearGradient id="sweep" x1="0" y1="0" x2="1" y2="0"><stop stop-color="#fff" stop-opacity="0"/><stop offset=".5" stop-color="#fff"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>
+<mask id="shine" maskUnits="userSpaceOnUse" x="0" y="0" width="1280" height="360"><rect class="sweep" x="0" y="70" width="160" height="130" fill="url(#sweep)" transform="skewX(-20)"/></mask>
+<pattern id="dots" width="22" height="22" patternUnits="userSpaceOnUse"><circle cx="2" cy="2" r="1.2" fill="#ffffff"/></pattern>
+<filter id="soft" x="-20%" y="-20%" width="140%" height="160%"><feDropShadow dx="0" dy="10" stdDeviation="14" flood-color="#000" flood-opacity=".45"/></filter>
+<clipPath id="frame"><rect width="1280" height="360" rx="28"/></clipPath>
+<filter id="edge-blur" x="-5%" y="-5%" width="110%" height="110%"><feGaussianBlur stdDeviation="6"/></filter>
+<style>
+text{white-space:pre}
+.s{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif}
+.m{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono','Noto Sans Mono CJK SC',monospace}
+.pulse{transform-box:fill-box;transform-origin:center;animation:pulse 2.4s ease-in-out infinite}
+@keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.3)}}
+@media (prefers-reduced-motion:reduce){*{animation:none!important}}
+.sweep{animation:sweep 5s ease-in-out infinite}
+@keyframes sweep{0%{transform:translateX(120px) skewX(-20deg)}55%,100%{transform:translateX(900px) skewX(-20deg)}}
+.float-a{animation:float 6s ease-in-out infinite}
+.float-b{animation:float 6s ease-in-out -3s infinite}
+@keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-8px)}}
+.stamp{transform-box:fill-box;transform-origin:center;transform:rotate(-8deg);animation:stamp 6s ease-out infinite}
+@keyframes stamp{0%,60%{opacity:1;transform:scale(1) rotate(-8deg)}64%{opacity:0;transform:scale(1.8) rotate(-8deg)}70%{opacity:1;transform:scale(.94) rotate(-8deg)}74%,100%{opacity:1;transform:scale(1) rotate(-8deg)}}
+.bar{transform-box:fill-box;transform-origin:left;animation:grow 3.6s ease-in-out infinite}
+@keyframes grow{0%{transform:scaleX(.15)}70%,100%{transform:scaleX(1)}}
+</style>
 </defs>
+<rect width="1280" height="360" rx="28" fill="url(#bg)"/>
 <g clip-path="url(#frame)">
-  <rect width="1280" height="360" fill="url(#bg)"/>
-  <rect width="1280" height="360" fill="url(#dots)" opacity=".07"/>
-  <rect width="1280" height="360" fill="url(#glow-a)"/>
-  <rect width="1280" height="360" fill="url(#glow-b)"/>
+<rect width="1280" height="360" fill="url(#dots)" opacity=".07"/>
+<rect width="1280" height="360" fill="url(#glow-a)"/>
+<rect width="1280" height="360" fill="url(#glow-b)"/>
 </g>
+<g clip-path="url(#frame)"><rect x="1" y="1" width="1278" height="358" rx="28" fill="none" stroke="#a78bfa" stroke-opacity=".35" stroke-width="8" filter="url(#edge-blur)"/></g>
 <rect x=".5" y=".5" width="1279" height="359" rx="27.5" fill="none" stroke="#ffffff1f"/>
-<g transform="translate(96 100) scale(2.375)">
-  <rect width="64" height="64" rx="16" fill="url(#lg-bg)" stroke="#ffffff22"/>
-  <path d="M42 17H29c-8.3 0-15 6.7-15 15s6.7 15 15 15h13" fill="none" stroke="url(#lg-beam)" stroke-width="5" stroke-linecap="round"/>
-  <path d="M42 25H30a7 7 0 0 0 0 14h12" fill="none" stroke="#71717a" stroke-width="4" stroke-linecap="round"/>
-  <circle class="pulse" cx="45" cy="25" r="5" fill="url(#lg-pulse)" stroke="#ddd6fe" stroke-width="1.5"/>
-  <circle cx="45" cy="39" r="3" fill="#f4f4f5"/>
+<g transform="translate(84 92) scale(2.25)">
+<rect width="64" height="64" rx="16" fill="url(#lg-bg)" stroke="#ffffff22"/>
+<path d="M42 17H29c-8.3 0-15 6.7-15 15s6.7 15 15 15h13" fill="none" stroke="url(#lg-beam)" stroke-width="5" stroke-linecap="round"/>
+<path d="M42 25H30a7 7 0 0 0 0 14h12" fill="none" stroke="#71717a" stroke-width="4" stroke-linecap="round"/>
+<circle class="pulse" cx="45" cy="25" r="5" fill="url(#lg-pulse)" stroke="#ddd6fe" stroke-width="1.5"/>
+<circle cx="45" cy="39" r="3" fill="#f4f4f5"/>
 </g>
-<text x="282" y="186" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="88" font-weight="800" fill="url(#word)" text-anchor="start" letter-spacing="-2">Dutydeck</text>
-<text x="286" y="236" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="28" font-weight="600" fill="#ecebff" text-anchor="start" >Your coding agents, on duty in Lark</text>
-<text x="286" y="264" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="15" font-weight="400" fill="#a9a6d6" text-anchor="start" >Local-first · Dispatch from chat · Approve on phone · Verified results</text>
-<rect x="284" y="276" width="117" height="30" rx="15" fill="#ffffff10" stroke="#ffffff2e"/><text x="342.6" y="296" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="15" font-weight="500" fill="#e4e4f7" text-anchor="middle" >Claude Code</text><rect x="411.2" y="276" width="62" height="30" rx="15" fill="#ffffff10" stroke="#ffffff2e"/><text x="442.2" y="296" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="15" font-weight="500" fill="#e4e4f7" text-anchor="middle" >Codex</text><rect x="483.2" y="276" width="108" height="30" rx="15" fill="#ffffff10" stroke="#ffffff2e"/><text x="537.2" y="296" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="15" font-weight="500" fill="#e4e4f7" text-anchor="middle" >Gemini CLI</text><rect x="601.2" y="276" width="71" height="30" rx="15" fill="#ffffff10" stroke="#ffffff2e"/><text x="636.8000000000001" y="296" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="15" font-weight="500" fill="#e4e4f7" text-anchor="middle" >Cursor</text><rect x="682.4000000000001" y="276" width="44" height="30" rx="15" fill="#ffffff10" stroke="#ffffff2e"/><text x="704.2" y="296" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="15" font-weight="500" fill="#e4e4f7" text-anchor="middle" >ACP</text><rect x="736.0000000000001" y="276" width="44" height="30" rx="15" fill="#ffffff10" stroke="#ffffff2e"/><text x="757.8000000000001" y="296" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="15" font-weight="500" fill="#e4e4f7" text-anchor="middle" >+26</text>
-<g class="float-a">
-  <rect x="902" y="70" width="290" height="132" rx="14" fill="#ffffff" />
-  <path d="M916 70h262a14 14 0 0 1 14 14v34H902V84a14 14 0 0 1 14-14z" fill="#3370ff"/>
-  <text x="920" y="99" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="16" font-weight="700" fill="#fff" text-anchor="start" >Running</text>
-  <circle cx="1170" cy="94" r="5" fill="#fff" class="pulse"/>
-  <rect x="920" y="134" width="210" height="10" rx="5" fill="#e3e6eb"/>
-  <rect x="920" y="134" width="210" height="10" rx="5" fill="#3370ff" class="bar"/>
-  <rect x="920" y="156" width="150" height="10" rx="5" fill="#eef0f3"/>
-  <rect x="920" y="176" width="180" height="10" rx="5" fill="#eef0f3"/>
-</g>
-<g class="float-b">
-  <rect x="972" y="212" width="250" height="96" rx="14" fill="#ffffff"/>
-  <path d="M986 212h222a14 14 0 0 1 14 14v28H972v-28a14 14 0 0 1 14-14z" fill="#2ea121"/>
-  <text x="990" y="238" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="15" font-weight="700" fill="#fff" text-anchor="start" >✓ Done · Verified</text>
-  <rect x="990" y="270" width="96" height="10" rx="5" fill="#d9f2d4"/>
-  <rect x="1094" y="270" width="64" height="10" rx="5" fill="#ffd9d6"/>
-  <rect x="990" y="288" width="170" height="8" rx="4" fill="#eef0f3"/>
+<text class="s" x="244" y="176" font-size="100" font-weight="800" fill="url(#word)" letter-spacing="-2.5">Dutydeck</text>
+<g mask="url(#shine)"><text class="s" x="244" y="176" font-size="100" font-weight="800" fill="#ffffff" fill-opacity=".85" letter-spacing="-2.5">Dutydeck</text></g>
+<text class="s" x="248" y="230" font-size="27" font-weight="600" fill="#ecebff">Dispatch in Lark, agents work on your machine</text>
+<text class="s" x="248" y="266" font-size="18" font-weight="400" fill="#a9a6d6">Local-first · Lark dispatch · Phone approvals · Verify gate · Web UI</text>
+<rect x="246" y="290" width="117" height="32" rx="16" fill="#ffffff10" stroke="#ffffff2e"/><text class="s" x="304.5" y="311" font-size="15" font-weight="500" fill="#e4e4f7" text-anchor="middle">Claude Code</text><rect x="373" y="290" width="74" height="32" rx="16" fill="#ffffff10" stroke="#ffffff2e"/><text class="s" x="410" y="311" font-size="15" font-weight="500" fill="#e4e4f7" text-anchor="middle">Codex</text><rect x="457" y="290" width="74" height="32" rx="16" fill="#ffffff10" stroke="#ffffff2e"/><text class="s" x="494" y="311" font-size="15" font-weight="500" fill="#e4e4f7" text-anchor="middle">Gemini</text><rect x="541" y="290" width="82" height="32" rx="16" fill="#ffffff10" stroke="#ffffff2e"/><text class="s" x="582" y="311" font-size="15" font-weight="500" fill="#e4e4f7" text-anchor="middle">Cursor</text><rect x="633" y="290" width="60" height="32" rx="16" fill="#ffffff10" stroke="#ffffff2e"/><text class="s" x="663" y="311" font-size="15" font-weight="500" fill="#e4e4f7" text-anchor="middle">ACP</text><rect x="703" y="290" width="123" height="32" rx="16" fill="#7c3aed40" stroke="#a78bfa"/><text class="s" x="764.5" y="311" font-size="15" font-weight="600" fill="#ede9fe" text-anchor="middle">30 adapters</text>
+<g class="float-b"><g filter="url(#soft)"><rect x="992" y="46" width="236" height="112" rx="14" fill="#ffffff"/></g>
+<path d="M1006 46h208a14 14 0 0 1 14 14v26H992V60a14 14 0 0 1 14-14z" fill="#3370ff"/>
+<text class="s" x="1010" y="72" font-size="14" font-weight="700" fill="#fff">Running</text>
+<circle class="pulse" cx="1208" cy="67" r="4.5" fill="#fff"/>
+<rect x="1010" y="102" width="178" height="9" rx="4.5" fill="#e3e6eb"/><rect class="bar" x="1010" y="102" width="178" height="9" rx="4.5" fill="#3370ff"/>
+<rect x="1010" y="122" width="140" height="9" rx="4.5" fill="#eef0f3"/></g>
+<g class="float-a"><g filter="url(#soft)"><rect x="930" y="118" width="300" height="190" rx="14" fill="#ffffff"/></g>
+<path d="M944 118h272a14 14 0 0 1 14 14v30H930V132a14 14 0 0 1 14-14z" fill="#2ea121"/>
+<path transform="translate(946 129) scale(0.9167)" d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18z M8 12.5l3 3 5-6" fill="none" stroke="#fff" stroke-width="2.182" stroke-linecap="round" stroke-linejoin="round"/>
+<text class="s" x="976" y="146" font-size="16" font-weight="700" fill="#fff">Done</text>
+<text class="s" x="948" y="192" font-size="16" font-weight="700" fill="#1f2329">Add bulk discount to checkout</text>
+<path transform="translate(948 210) scale(0.75)" d="M6.5 3h7.5l4.5 4.5V21h-12z M14 3v4.5h4.5" fill="none" stroke="#646a73" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+<text class="s" x="972" y="224" font-size="13" fill="#1f2329">3 files changed <tspan font-weight="700" fill="#2ea121">+86</tspan><tspan font-weight="700" fill="#f54a45"> −12</tspan><tspan fill="#3370ff"> · View changes</tspan></text>
+<path transform="translate(948 238) scale(0.75)" d="M3.5 4.5h17v15h-17z M7.5 9.5l3 2.5-3 2.5 M12.5 15h4" fill="none" stroke="#646a73" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+<text class="m" x="972" y="252" font-size="13" font-weight="400" fill="#1f2329">pnpm test · exit 0</text>
+<path transform="translate(1118.4 239) scale(0.75)" d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="#2ea121" stroke-width="3.467" stroke-linecap="round" stroke-linejoin="round"/>
+<g class="stamp"><rect x="1080" y="262" width="122" height="36" rx="8" fill="#f0fbef" stroke="#2ea121" stroke-width="2.5"/>
+<path transform="translate(1090 268) scale(1)" d="M12 3l7.5 3v5.5c0 4.7-3.2 8.2-7.5 9.5-4.3-1.3-7.5-4.8-7.5-9.5V6z M8.5 12l2.5 2.5 4.5-5" fill="none" stroke="#2ea121" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+<text class="s" x="1118" y="287" font-size="17" font-weight="800" fill="#2ea121">Verified</text></g>
 </g>
 </svg>
