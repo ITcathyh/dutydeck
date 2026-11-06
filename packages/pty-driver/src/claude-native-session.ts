@@ -1,11 +1,11 @@
 // Claude PID-state contract: botmux f54efb8b889 / 17296ac7fba (MIT); see THIRD_PARTY_NOTICES.md.
 import { createHash } from 'node:crypto';
-import { lstatSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
+import { closeSync, fstatSync, lstatSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { PhysicalProcessIdentity, ProcessProbe } from '@dutydeck/session-backends';
 import type { DriverTranscriptSourceObservation } from '@dutydeck/shared';
 import { claudeDataDir, claudeProjectDir, type CliPathEnv } from './cli-paths.js';
-import { parseJsonlObjects, readHead, readTail } from './session-id/fs-scan.js';
+import { parseJsonlObjects, readTail } from './session-id/fs-scan.js';
 
 // realpath(3): same canonical path and ENOENT as the JS walk, without its per-component lstat.
 const realpath = realpathSync.native;
@@ -24,18 +24,80 @@ function fileProof(id: string, path: string, root: string, cwd: string): string 
   const stat = regular(path);
   return stat ? CLAUDE_PROCESS_PROOF + createHash('sha256').update(JSON.stringify([id, path, root, cwd, stat.dev, stat.ino])).digest('hex') : undefined;
 }
-/** Content, not a filename or metadata-only placeholder, makes a cold resume usable. */
-export function claudeHasConversation(path: string, id: string, cwd: string): boolean {
-  if (!regular(path)) return false;
+const CONVERSATION_WINDOW = 256 * 1024;
+/** A true result whose first matching entry is a complete line inside the head
+ *  window: while bytes [0, end) are unchanged, every entry the scan visits
+ *  before it is unchanged too, so only the cwd realpaths can alter the result. */
+interface ConversationAnchor { path: string; id: string; dev: number; ino: number; end: number; prefix: Buffer; cwds: string[]; cwd?: string }
+/** Head window bytes as readHead reads them, plus the inode they came from. */
+function readHeadBytes(path: string): { bytes: Buffer; dev: number; ino: number } | undefined {
+  let size: number;
   try {
-    for (const entry of parseJsonlObjects(readHead(path, 256 * 1024) + '\n' + readTail(path, 256 * 1024))) {
+    const stat = statSync(path);
+    if (!stat.isFile()) return;
+    size = stat.size;
+  } catch { return; }
+  const length = Math.min(size, CONVERSATION_WINDOW);
+  if (length === 0) return;
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, 'r');
+    const { dev, ino } = fstatSync(fd);
+    const bytes = Buffer.alloc(length);
+    return { bytes: bytes.subarray(0, readSync(fd, bytes, 0, length, 0)), dev, ino };
+  } catch { return; } finally { if (fd !== undefined) try { closeSync(fd); } catch { /* best effort */ } }
+}
+/** parse(head + '\n' + tail) in order. Splitting the head at newline bytes
+ *  decodes exactly like splitting its UTF-8 string: 0x0a never occurs inside a
+ *  multi-byte sequence. Yields the byte end of complete head lines. */
+function* conversationEntries(head: Buffer, tail: string): Generator<{ entry: any; end?: number }> {
+  let start = 0;
+  for (;;) {
+    const newline = head.indexOf(0x0a, start);
+    const complete = newline >= 0;
+    for (const entry of parseJsonlObjects(head.toString('utf8', start, complete ? newline : head.length))) yield { entry, end: complete ? newline + 1 : undefined };
+    if (!complete) break;
+    start = newline + 1;
+  }
+  for (const entry of parseJsonlObjects(tail)) yield { entry };
+}
+function scanConversation(path: string, id: string, cwd: string): { value: boolean; anchor?: ConversationAnchor } {
+  if (!regular(path)) return { value: false };
+  try {
+    const head = readHeadBytes(path);
+    const cwds: string[] = [];
+    for (const { entry, end } of conversationEntries(head?.bytes ?? Buffer.alloc(0), readTail(path, CONVERSATION_WINDOW))) {
       if (entry.isSidechain || entry.sessionId !== id || !['user', 'assistant'].includes(entry.type)) continue;
-      if (entry.cwd && realpath(entry.cwd) !== cwd) continue;
+      if (entry.cwd && realpath(entry.cwd) !== cwd) { if (!cwds.includes(entry.cwd)) cwds.push(entry.cwd); continue; }
       const content = entry.message?.content;
-      if (typeof content === 'string' ? content.trim().length > 0 : Array.isArray(content) && content.length > 0) return true;
+      if (typeof content === 'string' ? content.trim().length > 0 : Array.isArray(content) && content.length > 0) {
+        return { value: true, anchor: head && end !== undefined
+          ? { path, id, dev: head.dev, ino: head.ino, end, prefix: Buffer.from(head.bytes.subarray(0, end)), cwds, cwd: entry.cwd || undefined }
+          : undefined };
+      }
+      if (entry.cwd && !cwds.includes(entry.cwd)) cwds.push(entry.cwd);
     }
   } catch { /* Unreadable content is not a resume target. */ }
-  return false;
+  return { value: false };
+}
+/** True only when the anchor still proves the full scan would return true. */
+function anchoredConversation(anchor: ConversationAnchor, path: string, id: string, cwd: string): boolean {
+  if (anchor.path !== path || anchor.id !== id) return false;
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, 'r');
+    const stat = fstatSync(fd);
+    if (stat.dev !== anchor.dev || stat.ino !== anchor.ino || stat.size < anchor.end) return false;
+    const bytes = Buffer.alloc(anchor.end);
+    if (readSync(fd, bytes, 0, anchor.end, 0) !== anchor.end || !bytes.equals(anchor.prefix)) return false;
+    // Earlier entries keep their realpath call: one that now throws ends the scan.
+    for (const earlier of anchor.cwds) realpath(earlier);
+    return !anchor.cwd || realpath(anchor.cwd) === cwd;
+  } catch { return false; } finally { if (fd !== undefined) try { closeSync(fd); } catch { /* best effort */ } }
+}
+/** Content, not a filename or metadata-only placeholder, makes a cold resume usable. */
+export function claudeHasConversation(path: string, id: string, cwd: string): boolean {
+  return scanConversation(path, id, cwd).value;
 }
 /** Revalidate a durable, runtime-fenced observation before a cold launch. */
 export function claudeResumeFromObservation(source: DriverTranscriptSourceObservation, cwd: string, env: CliPathEnv): string | undefined {
@@ -57,6 +119,7 @@ export class ClaudeNativeSessionResolver {
   private cli?: PhysicalProcessIdentity;
   private nextDiscoveryAt = 0;
   private conversation?: { key: string; value: boolean };
+  private conversationAnchor?: ConversationAnchor;
   private readonly cwd: string;
   private readonly dataRoot: string;
   constructor(identity: PhysicalProcessIdentity, cwd: string, env: CliPathEnv, private readonly probe: ProcessProbe) {
@@ -105,7 +168,7 @@ export class ClaudeNativeSessionResolver {
       const proof = fileProof(state.sessionId, path, this.dataRoot, this.cwd);
       const stat = regular(path);
       const key = JSON.stringify([path, stat?.dev, stat?.ino, stat?.size, stat?.mtimeMs]);
-      if (key !== this.conversation?.key) this.conversation = { key, value: !!proof && claudeHasConversation(path, state.sessionId, this.cwd) };
+      if (key !== this.conversation?.key) this.conversation = { key, value: !!proof && this.hasConversation(path, state.sessionId) };
       return { nativeSessionId: state.sessionId, path, dataRoot: this.dataRoot, cwd: this.cwd,
         resumable: this.conversation!.value,
         identityProof: proof ?? CLAUDE_PROCESS_PROOF + 'pending' };
@@ -117,5 +180,13 @@ export class ClaudeNativeSessionResolver {
       return readdirSync(join(this.dataRoot, 'sessions'))
         .filter(name => /^\d+\.json$/.test(name)).map(name => Number(name.slice(0, -5))).filter(pid => Number.isSafeInteger(pid) && pid > 0);
     } catch { return []; }
+  }
+  /** claudeHasConversation, skipping the 512KB rescan while a head anchor holds. */
+  private hasConversation(path: string, id: string): boolean {
+    if (!regular(path)) return false;
+    if (this.conversationAnchor && anchoredConversation(this.conversationAnchor, path, id, this.cwd)) return true;
+    const scan = scanConversation(path, id, this.cwd);
+    this.conversationAnchor = scan.anchor;
+    return scan.value;
   }
 }

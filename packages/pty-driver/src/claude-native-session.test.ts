@@ -1,12 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 import { spawn } from 'node:child_process';
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as sessionBackends from '@dutydeck/session-backends';
 import { childProcessIdentity, observeProcess } from '../../storage/src/process-identity.js';
-import { ClaudeNativeSessionResolver, claudeResumeFromObservation } from './claude-native-session.js';
+import { ClaudeNativeSessionResolver, claudeHasConversation, claudeResumeFromObservation } from './claude-native-session.js';
+import { parseJsonlObjects, readHead, readTail } from './session-id/fs-scan.js';
 import { ClaudeTranscriptTailer } from './transcript/claude.js';
 import { claudeProjectDir } from './cli-paths.js';
 import type { DriverTranscriptSourceObservation, NormalizedDriverEvent } from '@dutydeck/shared';
@@ -88,6 +89,127 @@ describe.skipIf(process.platform !== 'linux')('owned live Claude session', () =>
       rmSync(cwd, { recursive: true, force: true });
     }
   }, 15_000);
+});
+
+/** The pre-anchor implementation, kept verbatim as the equivalence oracle. */
+function referenceHasConversation(path: string, id: string, cwd: string): boolean {
+  try {
+    const stat = lstatSync(path);
+    if (!(stat.isFile() && stat.uid === process.getuid?.() && realpathSync(path) === path)) return false;
+  } catch { return false; }
+  try {
+    for (const entry of parseJsonlObjects(readHead(path, 256 * 1024) + '\n' + readTail(path, 256 * 1024))) {
+      if (entry.isSidechain || entry.sessionId !== id || !['user', 'assistant'].includes(entry.type)) continue;
+      if (entry.cwd && realpathSync(entry.cwd) !== cwd) continue;
+      const content = entry.message?.content;
+      if (typeof content === 'string' ? content.trim().length > 0 : Array.isArray(content) && content.length > 0) return true;
+    }
+  } catch { /* Unreadable content is not a resume target. */ }
+  return false;
+}
+type Cached = { hasConversation(path: string, id: string): boolean; conversationAnchor?: object };
+function conversationFixture() {
+  const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'dd-claude-conv-')));
+  const path = join(cwd, oldId + '.jsonl');
+  const resolver = new ClaudeNativeSessionResolver({ pid: 1, start: '0' } as never, cwd, { CLAUDE_CONFIG_DIR: cwd }, { identify: childProcessIdentity, observe: observeProcess }) as unknown as Cached;
+  const check = () => {
+    const expected = referenceHasConversation(path, oldId, cwd);
+    expect(claudeHasConversation(path, oldId, cwd)).toBe(expected);
+    expect(resolver.hasConversation(path, oldId)).toBe(expected);
+    return expected;
+  };
+  return { cwd, path, resolver, check, done: () => rmSync(cwd, { recursive: true, force: true }) };
+}
+const user = (cwd: string | undefined, content: unknown, extra: object = {}) => line({ type: 'user', sessionId: oldId, ...(cwd ? { cwd } : {}), message: { content }, ...extra });
+
+describe('anchored Claude conversation check', () => {
+  it('keeps the anchor across appends and rescans when the prefix is rewritten in place', () => {
+    const { cwd, path, resolver, check, done } = conversationFixture();
+    try {
+      writeFileSync(path, line({ type: 'system', sessionId: oldId }) + user(cwd, 'héllo ✓'));
+      expect(check()).toBe(true);
+      const anchor = resolver.conversationAnchor; expect(anchor).toBeDefined();
+      for (let i = 0; i < 5; i++) { appendFileSync(path, line({ type: 'assistant', sessionId: oldId, message: { content: 'x'.repeat(100_000) } })); expect(check()).toBe(true); }
+      expect(resolver.conversationAnchor).toBe(anchor);
+      // Same inode, first line rewritten to another session: must rescan and become false.
+      const text = readFileSync(path, 'utf8').replace(`"sessionId":"${oldId}","cwd"`, `"sessionId":"${newId}","cwd"`);
+      writeFileSync(path, text.replaceAll(`"type":"assistant","sessionId":"${oldId}"`, `"type":"assistant","sessionId":"${newId}"`));
+      expect(check()).toBe(false);
+      expect(resolver.conversationAnchor).toBeUndefined();
+    } finally { done(); }
+  });
+
+  it('rechecks the cwd realpath, earlier cwd realpaths, and truncation below the anchor', () => {
+    const { cwd, path, resolver, check, done } = conversationFixture();
+    const other = realpathSync(mkdtempSync(join(tmpdir(), 'dd-claude-other-')));
+    try {
+      const alias = join(other, 'alias'); symlinkSync(cwd, alias);
+      const earlier = join(other, 'earlier'); mkdirSync(earlier);
+      writeFileSync(path, user(earlier, 'elsewhere') + user(alias, 'here'));
+      expect(check()).toBe(true); expect(resolver.conversationAnchor).toBeDefined();
+      // An earlier entry whose cwd now fails realpath ends the original scan with false.
+      rmSync(earlier, { recursive: true }); appendFileSync(path, user(cwd, 'more'));
+      expect(check()).toBe(false);
+      mkdirSync(earlier); appendFileSync(path, user(cwd, 'more'));
+      expect(check()).toBe(true);
+      // The anchor cwd now points somewhere else.
+      rmSync(alias); symlinkSync(other, alias); appendFileSync(path, '\n');
+      expect(check()).toBe(true); // A later entry in this cwd still matches.
+      writeFileSync(path, user(earlier, 'elsewhere') + user(alias, 'here'));
+      expect(check()).toBe(false);
+      rmSync(alias); symlinkSync(cwd, alias); writeFileSync(path, user(alias, 'here') + user(alias, 'again'));
+      expect(check()).toBe(true);
+      truncateSync(path, 10); expect(check()).toBe(false);
+    } finally { done(); rmSync(other, { recursive: true, force: true }); }
+  });
+
+  it('never anchors a match found only in the tail window or in a truncated head line', () => {
+    const { cwd, path, resolver, check, done } = conversationFixture();
+    try {
+      writeFileSync(path, line({ type: 'system', pad: 'p'.repeat(300 * 1024) }) + user(cwd, 'late'));
+      expect(check()).toBe(true); expect(resolver.conversationAnchor).toBeUndefined();
+      appendFileSync(path, line({ type: 'system', pad: 'q'.repeat(300 * 1024) }));
+      expect(check()).toBe(false);
+      writeFileSync(path, user(cwd, 'no newline').trimEnd());
+      expect(check()).toBe(true); expect(resolver.conversationAnchor).toBeUndefined();
+      // A file replaced by another inode with the same prefix still answers correctly.
+      writeFileSync(path, user(cwd, 'first'));
+      expect(check()).toBe(true);
+      const replacement = path + '.new'; writeFileSync(replacement, user(cwd, 'first') + user(cwd, 'second')); renameSync(replacement, path);
+      expect(check()).toBe(true);
+    } finally { done(); }
+  });
+
+  it('matches the original scan under random appends and rewrites', () => {
+    const { cwd, path, check, done } = conversationFixture();
+    let seed = 7;
+    const random = () => (seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31;
+    const gone = join(cwd, 'gone');
+    const pick = <T,>(values: T[]) => values[Math.floor(random() * values.length)]!;
+    const record = () => pick([
+      () => user(pick([cwd, undefined, gone, '/']), pick(['', '  ', 'hi', [], [{ type: 'text' }]])),
+      () => user(cwd, 'side', { isSidechain: true }),
+      () => line({ type: 'assistant', sessionId: pick([oldId, newId]), cwd, message: { content: 'é'.repeat(Math.floor(random() * 2000)) } }),
+      () => line({ type: 'system', pad: 'z'.repeat(Math.floor(random() * 120_000)) }),
+      () => '{"type":"user","sessionId":"' + oldId + '","message":{"content":"partial',
+      () => '\u00e2\n',
+    ])();
+    try {
+      writeFileSync(path, '');
+      let trues = 0;
+      for (let step = 0; step < 300; step++) {
+        const action = random();
+        if (action < 0.75) appendFileSync(path, record());
+        else if (action < 0.85) writeFileSync(path, record() + record());
+        else if (action < 0.92) truncateSync(path, Math.floor(random() * readFileSync(path).length));
+        else if (action < 0.96) mkdirSync(gone, { recursive: true });
+        else rmSync(gone, { recursive: true, force: true });
+        if (check()) trues++;
+      }
+      expect(trues).toBeGreaterThan(30);
+      expect(trues).toBeLessThan(300);
+    } finally { done(); }
+  });
 });
 
 describe.skipIf(process.platform !== 'linux')('native session discovery from PID state files', () => {
