@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import Fastify from 'fastify';
 import { permissionRejectReasonMaxLength, type ConfigRepository, type InboxAction, type Session, type TaskRecord, type WorkItem } from '@dutydeck/shared';
 import { signSessionShareToken } from './auth/auth.js';
@@ -190,6 +190,28 @@ describe('GET /api/inbox', () => {
     expect(typeof all.generatedAt).toBe('string');
     const partial = (await app.inject({ method: 'GET', url: '/api/inbox', headers: { 'x-hide': 's2' } })).json();
     expect(partial.items.map((item: { id: string }) => item.id)).toEqual(['permission:s1:p1']);
+  });
+
+  it('执行策略批量判定可见性：复用本次会话列表、保持顺序、不逐个读会话；没有批量接口时逐个判定结果相同', async () => {
+    const listed = [session('s1'), session('hidden'), session('s2'), session('s3', { archivedAt: ago(1) })];
+    const stub = () => ({ listSessions: vi.fn(async () => listed), getTasks: async () => [], getPendingPermissions: (id: string) => [{ id: `p_${id}`, title: id, status: 'pending' }], getSession: vi.fn(async (id: string) => listed.find(item => item.id === id)) });
+    const decide = (id: string) => ({ allowed: id !== 'hidden' });
+    const ids = (response: { json(): { items: Array<{ id: string }> } }) => response.json().items.map(item => item.id);
+    const batched = stub();
+    const authorizeMany = vi.fn(async (_request: unknown, sessionIds: string[]) => sessionIds.map(decide));
+    const authorize = vi.fn(async (_request: unknown, id: string) => decide(id));
+    const batchApp = await buildApp(batched as any, { executionPolicy: { authorize, authorizeMany } as any }); apps.push(batchApp);
+    const batchedIds = ids(await batchApp.inject({ method: 'GET', url: '/api/inbox' }));
+    expect(batchedIds).toEqual(['permission:s1:p_s1', 'permission:s2:p_s2']);
+    expect(authorizeMany.mock.calls.map(call => call.slice(1, 4))).toEqual([[['s1', 'hidden', 's2'], 'session', 'task.view_result']]);
+    expect(authorizeMany.mock.calls[0]![4]).toBe(await batched.listSessions.mock.results[0]!.value);
+    expect(batched.listSessions).toHaveBeenCalledTimes(1);
+    expect(batched.getSession).not.toHaveBeenCalled();
+    expect(authorize).not.toHaveBeenCalled();
+    const single = stub();
+    const singleApp = await buildApp(single as any, { executionPolicy: { authorize } as any }); apps.push(singleApp);
+    expect(ids(await singleApp.inject({ method: 'GET', url: '/api/inbox' }))).toEqual(batchedIds);
+    expect(authorize.mock.calls.map(call => call[1])).toEqual(['s1', 'hidden', 's2']);
   });
 
   it('工作项只用工作项接口授权出的身份读取，没有身份则不列', async () => {

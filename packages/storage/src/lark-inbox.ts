@@ -2,7 +2,7 @@ import type Database from 'better-sqlite3';
 import { preparedOnce } from './config-query.js';
 import { LARK_INBOX_APP as APP, LARK_INBOX_BODY_EXPIRES as BODY_EXPIRES, LARK_INBOX_BOT as BOT, LARK_INBOX_RECEIVED as RECEIVED, LARK_INBOX_SCOPE as SCOPE, LARK_INBOX_STATE as STATE } from './lark-inbox-schema.js';
 
-// 走索引的表达式来自 lark-inbox-schema.ts，与 v47 建索引的原文逐字一致；下面这个只用于不走索引的附加条件，坏 JSON 的行按空对象看待。
+// 走索引的表达式来自 lark-inbox-schema.ts，与 v48 建索引的原文逐字一致；下面这个只用于不走索引的附加条件，坏 JSON 的行按空对象看待。
 const field = (path: string) => `json_extract(CASE WHEN json_valid(value) THEN value ELSE '{}' END,'$.${path}')`;
 
 const ignored = `${SCOPE} AND substr(key,1,length(@prefix))=@prefix AND ${APP}=@app AND ${STATE}='ignored' AND ${BOT}=@bot`;

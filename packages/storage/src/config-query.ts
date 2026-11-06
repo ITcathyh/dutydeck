@@ -35,7 +35,7 @@ export function createConfigReadIndexes(db: Database.Database): void {
   }
 }
 
-/** v47 的 lark.inbox 索引按固定原文建立；按 state / 原因过滤时用同一份表达式常量。 */
+/** v48 的 lark.inbox 索引按固定原文建立；按 state / 原因过滤时用同一份表达式常量。 */
 const frozenExpressions: Partial<Record<string, string>> = { state: LARK_INBOX_STATE, 'disposition.reason': LARK_INBOX_REASON };
 const filterExpression = (field: JsonFilter['field'] | 'disposition.reason') => frozenExpressions[field] ?? expression(field);
 

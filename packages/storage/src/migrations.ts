@@ -1,7 +1,7 @@
 import { createWorkspaceApprovalRuleSchema } from './workspace-approval-rules.js';
 import { createMatterSchema } from './matters.js';
 import { createConfigReadIndexes } from './config-query.js';
-import { LARK_INBOX_V47_INDEXES } from './lark-inbox-schema.js';
+import { LARK_INBOX_V48_INDEXES } from './lark-inbox-schema.js';
 import { createPluginResultSchema } from './plugin-results-migration.js';
 import { createMemoryConsumedTaskSchema, createMemoryJobSchema } from './memory-jobs.js';
 import { createWorkItemIndexSchema, refreshWorkItemIndexTriggers } from './work-item-index.js';
@@ -643,14 +643,18 @@ export const migrations: Migration[] = [
   { version: 45, name: 'work_item_retired_step_sessions', up(db) { if (tableExistsForMigration(db, 'work_item_index')) refreshWorkItemIndexTriggers(db) } },
   // 审批卡「本工作区允许此类命令」持久化的命令规则；纯新增表，不改写已有数据。
   { version: 46, name: 'workspace_approval_rules', up: createWorkspaceApprovalRuleSchema },
+  // 历史大纲按轮次区间扫描时只读索引、不回表；event-history.ts 用 INDEXED BY 引用它，不能删除或改名。
+  { version: 47, name: 'history_outline_index', up(db) {
+    if (tableExistsForMigration(db, 'events')) db.exec('CREATE INDEX events_session_seq_type ON events(session_id,sequence,type,timestamp)');
+  } },
   // 飞书入站记录的读取与保留期清理走索引；只建索引，不改写已有记录。
-  { version: 47, name: 'lark_inbox_indexes', up(db) {
+  { version: 48, name: 'lark_inbox_indexes', up(db) {
     if (!tableExistsForMigration(db, 'configs')) return;
-    for (const statement of LARK_INBOX_V47_INDEXES) db.exec(statement);
+    for (const statement of LARK_INBOX_V48_INDEXES) db.exec(statement);
   } },
   // 历史大纲按用户消息切轮次：只索引用户消息，并带上切轮次和跳转标签要用的字段，长会话不必逐条解析事件 JSON。
   // 表达式须与 event-history.ts 的查询逐字一致；旧行不改写，坏 JSON 的行不进索引。
-  { version: 48, name: 'history_user_text_index', up(db) {
+  { version: 49, name: 'history_user_text_index', up(db) {
     if (!tableExistsForMigration(db, 'events')) return;
     db.exec(`CREATE INDEX events_user_text ON events(session_id,sequence,json_type(data,'$.steering') IS NULL,
       COALESCE(task_id,json_extract(data,'$.taskId')),attempt_id,substr(json_extract(data,'$.text'),1,40),id)

@@ -279,6 +279,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     const workItems = options.workItems;
     registerInboxRoutes(app, runtime, {
       canView: canViewSession,
+      canViewMany: (request, items, listed) => filterViewable(request, items, session => session.id, listed),
       sources: {
         runtime, store,
         ...(options.relay?.broker ? { asks: (sessionId: string) => options.relay!.broker!.listPending(sessionId) } : {}),

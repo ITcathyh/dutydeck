@@ -294,6 +294,7 @@ describe('user-command verification evidence', () => {
     const source = repository(); const h = open(':memory:'); await h.runtime.initialize([agent]);
     const session = await h.runtime.start({ agentId: agent.id, cwd: source });
     expect(await h.runtime.getVerifications(session.id)).toEqual([]);
+    await expect(h.runtime.getVerifications('ses_missing')).rejects.toMatchObject({ code: 'SESSION_NOT_FOUND', statusCode: 404 });
     const passed = await h.runtime.runVerification(session.id, { command: 'true' });
     const storageKey = `runtime_verification:${session.id}:${passed.id}`;
     const stored = JSON.parse((await h.repos.config.get(storageKey))!);

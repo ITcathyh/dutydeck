@@ -69,7 +69,7 @@ const BUSINESS_TABLES = [
 ]
 
 const SESSION_PATCH_COLUMNS = ['reasoning_effort', 'system_prompt', 'permission_mode', 'source', 'source_id', 'archived_at']
-const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48]
+const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49]
 const temporaryDirectories: string[] = []
 const linuxIt = process.platform === 'linux' ? it : it.skip
 
@@ -191,6 +191,42 @@ describe('storage migrations', () => {
       expect(reopened.workspaceApprovalRules!.list({ appId: 'cli_a', workspace: '/repo' })).toEqual([]);
       expect(reopened.workspaceApprovalRules!.list({ appId: 'cli_b', workspace: '/repo' })).toHaveLength(1);
     } finally { reopened.close(); }
+  });
+  it('v47 indexes existing events for the history outline without touching them, and survives reopening', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dutydeck-v47-'));
+    temporaryDirectories.push(directory);
+    const filename = join(directory, 'state.sqlite');
+    const db = new Database(filename);
+    db.exec('CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,applied_at TEXT NOT NULL)');
+    withMigrationTransaction(db, () => { for (const migration of migrations.filter(item => item.version <= 46)) { migration.up(db); db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run(migration.version, '2026-11-06'); } });
+    db.prepare('INSERT INTO sessions (id, agent_id, state, cwd, run_id, created_at, updated_at) VALUES (?,?,?,?,?,?,?)').run('ses_old', 'agent', 'idle', '/work', 'run', '2026-11-06T00:00:00.000Z', '2026-11-06T00:00:00.000Z');
+    const insert = db.prepare('INSERT INTO events (id, session_id, sequence, type, timestamp, data, task_id) VALUES (?,?,?,?,?,?,?)');
+    insert.run('e1', 'ses_old', 1, 'text', '2026-11-06T00:00:01.000Z', JSON.stringify({ role: 'user', text: 'hi' }), 't1');
+    insert.run('e2', 'ses_old', 2, 'raw_terminal', '2026-11-06T00:00:02.000Z', '{not json', null);
+    insert.run('e3', 'ses_old', 3, 'completed', '2026-11-06T00:00:03.000Z', '{}', 't1');
+    const indexes = () => db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='events'").pluck().all();
+    const before = db.prepare('SELECT * FROM events ORDER BY sequence').all();
+    expect(indexes()).not.toContain('events_session_seq_type');
+    runMigrations(db);
+    expect(appliedVersions(db)).toEqual(ALL_VERSIONS);
+    expect(indexes()).toContain('events_session_seq_type');
+    expect(db.pragma('index_info(events_session_seq_type)')).toMatchObject(['session_id', 'sequence', 'type', 'timestamp'].map(name => ({ name })));
+    expect(db.prepare('SELECT * FROM events ORDER BY sequence').all()).toEqual(before);
+    expect(db.pragma('foreign_key_check')).toEqual([]);
+    expect(db.pragma('integrity_check', { simple: true })).toBe('ok');
+    runMigrations(db);
+    expect(appliedVersions(db)).toEqual(ALL_VERSIONS);
+    db.close();
+    for (let open = 0; open < 2; open++) {
+      const repos = createRepositories(filename);
+      try {
+        expect((await repos.events.listHistoryOutline!('ses_old')).turns).toMatchObject([{ id: 'e1', firstSequence: 1, lastSequence: 3, status: 'unverified' }]);
+      } finally { repos.close(); }
+    }
+    const fresh = new Database(':memory:');
+    runMigrations(fresh);
+    expect(fresh.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='events_session_seq_type'").pluck().get()).toBe('events_session_seq_type');
+    fresh.close();
   });
   it('declares migrations in ascending version order', () => {
     expect(migrations.map(migration => migration.version)).toEqual(ALL_VERSIONS)

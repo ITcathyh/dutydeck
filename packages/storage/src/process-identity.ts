@@ -143,13 +143,17 @@ function getDarwinProcessStart(pid: number): string | null {
   }
 }
 
+/** Boot id and this process's PID namespace cannot change while it runs;
+ *  a failed read is not cached. */
+let linuxBootNamespace: { boot: string; namespace: string } | undefined;
 function machineLinux() {
   if (process.platform !== 'linux') throw new Error('DATABASE_IDENTITY_UNSUPPORTED: persistent database control requires Linux process identity');
-  return {
-    host: readFileSync('/etc/machine-id', 'utf8').trim(),
+  const host = readFileSync('/etc/machine-id', 'utf8').trim();
+  linuxBootNamespace ??= {
     boot: readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim(),
     namespace: readlinkSync('/proc/self/ns/pid'),
   };
+  return { host, ...linuxBootNamespace };
 }
 
 function processStartLinux(pid: number) {

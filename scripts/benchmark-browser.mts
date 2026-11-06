@@ -357,7 +357,8 @@ async function main() {
     // The live tail (after=600) may be re-read; only bounded range reads are the expansion.
     const longTurnDetailPages = longDetailPages.filter(search => new URLSearchParams(search).get('before') === '601').length;
     Object.assign(progress, { longTurnExpandMs, longTurnDetailPages, longDetailPages });
-    if (longTurnDetailPages !== Math.ceil(600 / 200)) throw new Error(`expanding the long turn fetched ${longTurnDetailPages} pages`);
+    // Range reads use the server's largest page (HISTORY_RANGE_PAGE_SIZE in apps/web/src/event-history.ts).
+    if (longTurnDetailPages !== Math.ceil(600 / 1000)) throw new Error(`expanding the long turn fetched ${longTurnDetailPages} pages`);
     await longPage.close(); await waitFor(() => subscribers.size === 0);
 
     global.gc?.();

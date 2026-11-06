@@ -1,6 +1,28 @@
 import { describe, expect, it } from 'vitest';
 import { agentConfigSchema } from '@dutydeck/shared';
-import { agentProbeTarget, appConfigSchema, builtinAgents, describeDroppedAgent, loadConfig, loadConfigWithDiagnostics } from './index.js';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { agentProbeTarget, appConfigSchema, builtinAgents, cliVersion, describeDroppedAgent, loadConfig, loadConfigWithDiagnostics } from './index.js';
+
+describe('cliVersion', () => {
+  it('does not cache a failed probe and caches the first successful one', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dutydeck-cli-version-'));
+    try {
+      const marker = join(dir, 'ready');
+      const command = join(dir, 'fake-cli');
+      writeFileSync(command, `#!/bin/sh\n[ -f '${marker}' ] || exit 1\necho 'fake-cli 1.2.3'\n`);
+      chmodSync(command, 0o755);
+      expect(cliVersion(command)).toBeUndefined();
+      writeFileSync(marker, '');
+      expect(cliVersion(command)).toBe('fake-cli 1.2.3');
+      rmSync(command);
+      expect(cliVersion(command)).toBe('fake-cli 1.2.3');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('working directory configuration', () => {
   it('uses the server process cwd when no default is specified', () => {

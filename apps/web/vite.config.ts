@@ -7,6 +7,10 @@ export default defineConfig({
   server: { port: 4311, proxy: { '/api': apiTarget } },
   build: {
     rollupOptions: {
+      // Let Rollup drop unused @dutydeck/shared exports (module-level z.object() calls otherwise pin
+      // every schema into the first chunk). Modules in packages/shared must stay free of top-level
+      // side effects. Matches both src (development condition) and dist resolutions.
+      treeshake: { moduleSideEffects: id => !id.includes('/packages/shared/') },
       output: {
         manualChunks(id) {
           // React 单独成块：否则 Rollup 会把入口共用的 React 塞进高亮块，首页就得预加载 Prism。

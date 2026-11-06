@@ -1,4 +1,4 @@
-import * as lark from '@larksuiteoapi/node-sdk';
+import type * as Lark from '@larksuiteoapi/node-sdk';
 
 // 飞书群形态查询（话题群 vs 普通群）。Third-party attribution: see THIRD_PARTY_NOTICES.md.
 // Lark 客户端允许随时把群在「普通模式/话题模式」间切换，
@@ -18,12 +18,13 @@ const MAX_CACHE_ENTRIES = 1_000;
 const chatModeCache = new Map<string, CachedChatMode>();
 
 // 按域名和 appId 复用 SDK Client；appSecret 轮换后自动重建。
-const clients = new Map<string, { client: lark.Client; appSecret: string }>();
+const clients = new Map<string, { client: Lark.Client; appSecret: string }>();
 
-function chatModeClient(appId: string, appSecret: string, domain: string): lark.Client {
+async function chatModeClient(appId: string, appSecret: string, domain: string): Promise<Lark.Client> {
   const key = `${domain}::${appId}`;
   const existing = clients.get(key);
   if (existing && existing.appSecret === appSecret) return existing.client;
+  const lark = await import('@larksuiteoapi/node-sdk');
   const client = new lark.Client({ appId, appSecret, domain, loggerLevel: lark.LoggerLevel.warn });
   clients.set(key, { client, appSecret });
   return client;
@@ -81,7 +82,7 @@ export async function getChatMode(
     if (cached) return cached;
   }
   try {
-    const response = options.read ? await options.read() : await chatModeClient(appId, appSecret, domain).im.chat.get({
+    const response = options.read ? await options.read() : await (await chatModeClient(appId, appSecret, domain)).im.chat.get({
       path: { chat_id: chatId },
       params: { user_id_type: 'open_id' }
     }) as { code?: number; msg?: string; data?: unknown };

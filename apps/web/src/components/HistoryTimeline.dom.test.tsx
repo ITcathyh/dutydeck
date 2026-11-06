@@ -7,8 +7,8 @@ import { TimelineView } from './TimelineView';
 
 const task: Task = { id: 't', sessionId: 'history-ui', prompt: 'canonical instruction', status: 'completed', createdAt: '', updatedAt: '' };
 const event = (sequence: number, type: string, data: unknown): DockEvent => ({ id: `source-${sequence}`, taskId: 't', attemptId: 'a', sequence, type, timestamp: '', data });
-const canonical: DockEvent[] = [event(1, 'text', { role: 'user', text: 'canonical instruction', taskId: 't' }), event(2, 'tool_call', { id: 'native-tool', name: 'read', input: {} }), event(3, 'tool_result', { id: 'native-tool', status: 'completed', output: 'complete tool body canary' }), ...Array.from({ length: 298 }, (_, index) => event(index + 4, 'text', { text: index === 297 ? 'FINAL END CANARY' : 'x' }))];
-const summary: HistoryTurnSummary = { id: 'source-1', taskId: 't', attemptId: 'a', firstSequence: 1, lastSequence: 301, timestamp: '', status: 'completed', prompt: { text: 'canonical instruction', truncated: false }, output: { text: 'bounded preview', truncated: true }, toolCount: 1, artifactReferences: [] };
+const canonical: DockEvent[] = [event(1, 'text', { role: 'user', text: 'canonical instruction', taskId: 't' }), event(2, 'tool_call', { id: 'native-tool', name: 'read', input: {} }), event(3, 'tool_result', { id: 'native-tool', status: 'completed', output: 'complete tool body canary' }), ...Array.from({ length: 1_298 }, (_, index) => event(index + 4, 'text', { text: index === 1_297 ? 'FINAL END CANARY' : 'x' }))];
+const summary: HistoryTurnSummary = { id: 'source-1', taskId: 't', attemptId: 'a', firstSequence: 1, lastSequence: 1301, timestamp: '', status: 'completed', prompt: { text: 'canonical instruction', truncated: false }, output: { text: 'bounded preview', truncated: true }, toolCount: 1, artifactReferences: [] };
 const props = { activeSessionId: 'history-ui', eventsLoading: false, awaitingAnswer: false, hasOngoingActivity: false, latestUserIndex: -1, activeOutputLabel: 'Codex' };
 const originalScroll = Element.prototype.scrollIntoView;
 afterEach(() => { vi.restoreAllMocks(); Element.prototype.scrollIntoView = originalScroll; });
@@ -30,7 +30,7 @@ it('keeps old bodies unloaded, then renders a full completed final response and 
   await screen.findByText(/FINAL END CANARY/);
   expect(screen.queryByText('Agent 未返回最终输出。')).toBeNull();
   expect(loader).toHaveBeenCalledTimes(2);
-  expect(client.getQueryData(['history-detail', 'history-ui', 1, 301])).toEqual(canonical);
+  expect(client.getQueryData(['history-detail', 'history-ui', 1, 1301])).toEqual(canonical);
   act(() => window.dispatchEvent(new CustomEvent('dutydeck:show-history-turn', { detail: { taskId: 't', attemptId: 'a', eventId: 'source-3', sequence: 3 } })));
   await waitFor(() => expect(view.container.querySelector('[data-timeline-event="source-2"]')?.textContent).toContain('complete tool body canary'));
   await waitFor(() => expect(scrolled).toContain('source-2'));

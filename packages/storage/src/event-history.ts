@@ -5,7 +5,7 @@ import { extractEventArtifactReferences, isTerminalTaskStatus, type HistoryOutli
 export const HISTORY_PROMPT_LIMIT = 1024;
 export const HISTORY_OUTPUT_LIMIT = 4096;
 export const HISTORY_ACTIVITY_LIMIT = 240;
-/** Characters of the prompt kept in a turn's place; enough for a jump-to-turn label. Migration 47 indexes this exact prefix. */
+/** Characters of the prompt kept in a turn's place; enough for a jump-to-turn label. Migration 49 indexes this exact prefix. */
 export const HISTORY_PLACE_PROMPT_LIMIT = 40;
 type Turn = { first: number; last: number; id: string; timestamp: string; taskId: string | null; attemptId: string | null; status: string | null;
   toolCount: number; endedAt: string | null; artifactCandidate: number | null; promptText: string | null; promptTruncated: number | null; outputText: string | null; outputTruncated: number | null; spans: string | null };
@@ -37,7 +37,7 @@ export function readHistoryTurns(sqlite: Database.Database, sessionId: string, f
 }
 
 /**
- * The user prompts, read from the `events_user_text` index (migration 48) instead of parsing
+ * The user prompts, read from the `events_user_text` index (migration 49) instead of parsing
  * every event. The expressions must match the index's text exactly, or SQLite parses each row.
  */
 const USER_TEXT = `FROM events INDEXED BY events_user_text WHERE session_id=? AND type='text' AND json_valid(data) AND json_extract(data,'$.role')='user'`;
@@ -76,10 +76,11 @@ function completedPlaces(sqlite: Database.Database, sessionId: string, highWater
   const completed = cachedStatement(sqlite, `SELECT 1 FROM events WHERE session_id=? AND sequence BETWEEN ? AND ? AND type='completed' LIMIT 1`).pluck();
   // Preparation may settle before Runtime records a user prompt. Its terminal
   // evidence cannot belong to the preceding prompted turn (or a later prompt).
-  // Only evidence up to `end` can cut a turn read here.
+  // Only evidence up to `end` can cut a turn read here. The covering index (migration 47)
+  // filters by type without reading every event row.
   const unprompted = cachedStatement(sqlite, `
     WITH prompts AS (SELECT ${OWNER} AS taskId,attempt_id AS attemptId,MIN(sequence) AS first ${USER_TEXT} AND ${BOUNDARY} AND sequence<=? GROUP BY 1,2)
-    SELECT MIN(e.sequence) AS first FROM events e LEFT JOIN prompts p ON p.taskId=e.task_id AND p.first<=e.sequence
+    SELECT MIN(e.sequence) AS first FROM events e INDEXED BY events_session_seq_type LEFT JOIN prompts p ON p.taskId=e.task_id AND p.first<=e.sequence
       AND (e.attempt_id IS NULL OR p.attemptId IS NULL OR p.attemptId=e.attempt_id)
     WHERE e.session_id=? AND e.sequence<=? AND e.type IN ('error','completed')
       AND ((e.task_id IS NOT NULL AND p.first IS NULL) OR (e.task_id IS NULL AND e.type='error'))
@@ -181,8 +182,8 @@ function projectTurns(sqlite: Database.Database, sessionId: string, places: Hist
       substr(COALESCE(json_extract(CASE WHEN p.type='object' THEN p.value ELSE '{}' END,'$.uri'),json_extract(CASE WHEN p.type='object' THEN p.value ELSE '{}' END,'$.resource.uri')),1,2048) AS uri,
       substr(json_extract(CASE WHEN p.type='object' THEN p.value ELSE '{}' END,'$.name'),1,2048) AS name,
       substr(COALESCE(json_extract(CASE WHEN p.type='object' THEN p.value ELSE '{}' END,'$.mimeType'),json_extract(CASE WHEN p.type='object' THEN p.value ELSE '{}' END,'$.resource.mimeType')),1,2048) AS mimeType
-    FROM events e LEFT JOIN json_each(CASE WHEN json_valid(e.data) THEN json_extract(e.data,'$.parts') END) p
-    WHERE e.session_id=? AND e.sequence BETWEEN ? AND ? AND json_valid(e.data)
+    FROM events e INDEXED BY events_session_seq_type LEFT JOIN json_each(CASE WHEN json_valid(e.data) THEN json_extract(e.data,'$.parts') END) p
+    WHERE e.session_id=? AND e.sequence BETWEEN ? AND ? AND e.type IN ('tool_result','text') AND json_valid(e.data)
       AND ((e.type='tool_result' AND json_extract(e.data,'$.status')='completed') OR
         (e.type='text' AND COALESCE(json_extract(e.data,'$.role'),'assistant')!='user'))
       AND ((p.type='object' AND CAST(p.key AS INTEGER)<64 AND json_extract(CASE WHEN p.type='object' THEN p.value ELSE '{}' END,'$.type') IN ('image','resource','resource_link')) OR (e.type='tool_result' AND json_extract(e.data,'$.output.status')='delivered'))

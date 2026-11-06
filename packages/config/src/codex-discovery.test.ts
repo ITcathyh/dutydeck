@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -51,5 +51,28 @@ it('uses an explicit config CODEX_PATH for both terminal entries, their versions
     expect(toPublicAgent(acp)).toMatchObject({ remoteApproval: true });
     expect(agentProbeTarget({ ...acp, env: { CODEX_PATH: executable } })).toEqual({ command: executable, execute: true });
     expect(loadConfig({ ...env, CODEX_PATH: '/missing/codex' }, PTY_AGENT_CONTRIBUTIONS).agents.some(agent => ['codex', 'codex-cli', 'codex-acp'].includes(agent.id))).toBe(false);
+  } finally { await rm(cwd, { recursive: true, force: true }); }
+});
+
+it('runs each CLI version probe once for all agents that share the command', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-cli-version-cache-'));
+  const executable = join(cwd, 'codex');
+  const calls = join(cwd, 'calls');
+  // Fails --version so the fallback args are covered, then answers `-V` like the real probe sequence allows.
+  await writeFile(executable, `#!/bin/sh\necho "$@" >> '${calls}'\n[ "$1" = "-V" ] || exit 1\necho "Codex cache fixture 3.0"\n`, { mode: 0o755 });
+  vi.stubEnv('PATH', '');
+  vi.stubEnv('CODEX_PATH', undefined);
+  vi.resetModules();
+  try {
+    const { loadConfig } = await import('./index.js');
+    const custom = { id: 'codex-custom', name: 'Custom', command: executable, protocol: 'acp' };
+    const env = { CODEX_PATH: executable, DUTYDECK_DEFAULT_CWD: cwd, DUTYDECK_AGENTS_JSON: JSON.stringify([custom]) };
+    const first = loadConfig(env, PTY_AGENT_CONTRIBUTIONS).agents;
+    const second = loadConfig(env, PTY_AGENT_CONTRIBUTIONS).agents;
+    for (const id of ['codex', 'codex-cli', 'codex-acp', 'codex-custom']) {
+      expect(first.find(agent => agent.id === id)?.version).toBe('Codex cache fixture 3.0');
+    }
+    expect(second).toEqual(first);
+    expect((await readFile(calls, 'utf8')).trim().split('\n')).toEqual(['--version', '-V']);
   } finally { await rm(cwd, { recursive: true, force: true }); }
 });

@@ -16,7 +16,7 @@ describe('projected event history', () => {
     expect(result.highWaterMark).toBe(count);
     expect(result.hasOlder).toBe(false);
     expect(loader).toHaveBeenCalledTimes(1);
-    expect(loader).toHaveBeenNthCalledWith(1, 's1', { after: completed, limit: 200, direction: 'forward' }, undefined);
+    expect(loader).toHaveBeenNthCalledWith(1, 's1', { after: completed, limit: 1000, direction: 'forward' }, undefined);
   });
 
   it('rejects a failed active suffix instead of treating it as a complete empty history', async () => {
@@ -38,20 +38,42 @@ describe('projected event history', () => {
   });
 
   it('reads a complete cross-page range', async () => {
-    const history = Array.from({ length: 405 }, (_, index) => event(index + 1));
+    const history = Array.from({ length: 2005 }, (_, index) => event(index + 1));
     const loader = vi.spyOn(api, 'events').mockImplementation(async (_id, query) => history.filter(item => item.sequence > query!.after! && item.sequence < query!.before!).slice(0, query!.limit!));
-    expect(await loadHistoryRange('s1', 0, 405)).toEqual(history);
-    expect(loader.mock.calls.map(call => call[1]?.after)).toEqual([0, 200, 400]);
+    expect(await loadHistoryRange('s1', 0, 2005)).toEqual(history);
+    expect(loader.mock.calls.map(call => call[1]?.after)).toEqual([0, 1000, 2000]);
   });
 
   it('continues after pruned holes, including across page boundaries', async () => {
     // Pruned raw terminal output leaves holes; everything still stored is returned in order.
-    const history = Array.from({ length: 450 }, (_, index) => event(index + 1)).filter(item => item.sequence % 3 !== 0 && item.sequence !== 301);
+    const history = Array.from({ length: 2250 }, (_, index) => event(index + 1)).filter(item => item.sequence % 3 !== 0 && item.sequence !== 1501);
     const loader = vi.spyOn(api, 'events').mockImplementation(async (_id, query) => history.filter(item => item.sequence > query!.after! && (query!.before === undefined || item.sequence < query!.before)).slice(0, query!.limit!));
-    expect(await loadHistoryRange('s1', 0, 449)).toEqual(history);
-    expect(loader.mock.calls.map(call => call[1]?.after)).toEqual([0, history[199]!.sequence]);
+    expect(await loadHistoryRange('s1', 0, 2249)).toEqual(history);
+    expect(loader.mock.calls.map(call => call[1]?.after)).toEqual([0, history[999]!.sequence]);
     expect(await loadHistoryRange('s1', 2, 7)).toEqual([event(4), event(5), event(7)]);
-    expect((await loadProjectedHistory('s1', { turns: [], liveAfter: 440, highWaterMark: 449 })).events.map(item => item.sequence)).toEqual([442, 443, 445, 446, 448, 449]);
+    expect((await loadProjectedHistory('s1', { turns: [], liveAfter: 2240, highWaterMark: 2249 })).events.map(item => item.sequence)).toEqual([2242, 2243, 2245, 2246, 2248, 2249]);
+  });
+
+  it('returns every stored record in range regardless of page boundaries', async () => {
+    // Exactly two full pages, then holes: the result must equal the stored range, not depend on page size.
+    const history = Array.from({ length: 3_100 }, (_, index) => event(index + 1)).filter(item => item.sequence <= 2_000 || item.sequence % 7 !== 0);
+    const loader = vi.spyOn(api, 'events').mockImplementation(async (_id, query) => history.filter(item => item.sequence > query!.after! && (query!.before === undefined || item.sequence < query!.before)).slice(0, query!.limit!));
+    expect(await loadHistoryRange('s1', 0)).toEqual(history);
+    expect(loader.mock.calls.map(call => call[1]?.after)).toEqual([0, 1_000, 2_000]);
+    loader.mockClear();
+    // A full final page that reaches `through` stops without an extra empty request.
+    expect(await loadHistoryRange('s1', 0, 2_000)).toEqual(history.slice(0, 2_000));
+    expect(loader.mock.calls.map(call => call[1]?.after)).toEqual([0, 1_000]);
+    loader.mockClear();
+    // An unbounded read ending on an exact full page needs one empty page to confirm the end.
+    vi.spyOn(api, 'events').mockImplementation(async (_id, query) => history.slice(0, 2_000).filter(item => item.sequence > query!.after!).slice(0, query!.limit!));
+    expect(await loadHistoryRange('s1', 0)).toEqual(history.slice(0, 2_000));
+  });
+
+  it('rejects a short page that ends before the requested range end', async () => {
+    const history = Array.from({ length: 1_500 }, (_, index) => event(index + 1));
+    vi.spyOn(api, 'events').mockImplementation(async (_id, query) => history.filter(item => item.sequence > query!.after!).slice(0, Math.min(query!.limit!, 999)));
+    await expect(loadHistoryRange('s1', 0, 1_500)).rejects.toThrow('记录尚未读取完整');
   });
 
   it.each([

@@ -11,8 +11,8 @@ const card = JSON.stringify({ schema: '2.0', body: { elements: Array.from({ leng
 const inbox = (messageId: string, state: string, senderType: string, content: string, extra: Record<string, unknown> = {}) => [`lark.inbox.cli_app.${messageId}`,
   JSON.stringify({ appId: 'cli_app', event: { messageId, chatId: 'oc_chat', chatType: 'group', senderType, messageType: senderType === 'bot' ? 'interactive' : 'text', content, mentions: [] }, boot: '', state, receivedAt: '2026-11-05T00:00:00.000Z', ...extra })] as const
 
-it('v47 only adds indexes: existing receipts stay byte-for-byte, and only receipts marked after upgrade lose their body once due', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'lark-inbox-v47-'))
+it('v48 only adds indexes: existing receipts stay byte-for-byte, and only receipts marked after upgrade lose their body once due', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'lark-inbox-v48-'))
   const path = join(directory, 'db.sqlite')
   try {
     const legacy = new Database(path)
@@ -43,7 +43,7 @@ it('v47 only adds indexes: existing receipts stay byte-for-byte, and only receip
     const read = (key: string) => (db.prepare('SELECT value FROM configs WHERE key=?').get(key) as { value: string }).value
     for (const [key, value] of rows) expect(read(key)).toBe(value)
     expect(db.pragma('foreign_key_check')).toEqual([])
-    expect((db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get() as { v: number }).v).toBe(48)
+    expect((db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get() as { v: number }).v).toBe(49)
     const snapshot = db.prepare('SELECT key,value FROM configs ORDER BY key').all()
     runMigrations(db)
     db.close()
@@ -81,22 +81,22 @@ it('projects only requested inbox fields and filters by indexed state', async ()
   } finally { repos.close() }
 })
 
-// 已升级的库按这份原文建过 v47 索引：原文不能改，否则已升级的库和新建的库表达式对不上（INDEXED BY 报错、其他查询退回全表扫描）。
+// 已升级的库按这份原文建过 v48 索引：原文不能改，否则已升级的库和新建的库表达式对不上（INDEXED BY 报错、其他查询退回全表扫描）。
 // 要换表达式就追加新迁移重建索引，再更新这份快照。
-const V47_INDEX_SQL = [
+const V48_INDEX_SQL = [
   { name: "config_lark_inbox_body", sql: "CREATE INDEX config_lark_inbox_body ON configs(json_extract(CASE WHEN json_valid(value) THEN value ELSE '{}' END,'$.appId'),json_extract(CASE WHEN json_valid(value) THEN value ELSE '{}' END,'$.bodyExpiresAt')) WHERE key GLOB 'lark.inbox.*'" },
   { name: "config_lark_inbox_ignored", sql: "CREATE INDEX config_lark_inbox_ignored ON configs(json_extract(CASE WHEN json_valid(value) THEN value ELSE '{}' END,'$.appId'),json_extract(CASE WHEN json_valid(value) THEN value ELSE '{}' END,'$.state'),(IFNULL(json_extract(CASE WHEN json_valid(value) THEN value ELSE '{}' END,'$.event.senderType'),'') IN ('bot','app')),json_extract(CASE WHEN json_valid(value) THEN value ELSE '{}' END,'$.receivedAt'),key) WHERE key GLOB 'lark.inbox.*'" },
   { name: "config_lark_inbox_reason", sql: "CREATE INDEX config_lark_inbox_reason ON configs(json_extract(CASE WHEN json_valid(value) THEN value ELSE '{}' END,'$.disposition.reason'),key) WHERE key GLOB 'lark.inbox.*'" },
   { name: "config_lark_inbox_state", sql: "CREATE INDEX config_lark_inbox_state ON configs(json_extract(CASE WHEN json_valid(value) THEN value ELSE '{}' END,'$.state'),key) WHERE key GLOB 'lark.inbox.*'" }
 ]
 
-it('keeps the v47 inbox index DDL frozen and plans state and reason projections on their indexes', async () => {
+it('keeps the v48 inbox index DDL frozen and plans state and reason projections on their indexes', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'lark-inbox-plan-'))
   const path = join(directory, 'db.sqlite')
   try {
     const repos = createRepositories(path)
     const db = new Database(path)
-    expect(db.prepare("SELECT name,sql FROM sqlite_master WHERE type='index' AND name LIKE 'config_lark_inbox_%' ORDER BY name").all()).toEqual(V47_INDEX_SQL)
+    expect(db.prepare("SELECT name,sql FROM sqlite_master WHERE type='index' AND name LIKE 'config_lark_inbox_%' ORDER BY name").all()).toEqual(V48_INDEX_SQL)
     const prefix = 'lark.inbox.cli_app.'
     for (const [field, value, index] of [['state', 'received', 'config_lark_inbox_state'], ['disposition.reason', 'participation_observes', 'config_lark_inbox_reason']] as const) {
       const spy = vi.spyOn(Database.prototype, 'prepare')

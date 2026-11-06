@@ -227,6 +227,92 @@ async function runTmux(args: string[], opts: { input?: string; timeout?: number;
   catch (err) { throw classifyFailure(err, `tmux ${args[0] ?? 'client'}`); }
 }
 
+// ─── Shared pane liveness poller ───────────────────────────────────────────
+
+export type PaneObservation = { probe: SessionProbe; pid: number | null; socketMissing?: boolean };
+type PaneWatch = { close(): void };
+const PANE_FORMAT = '#{session_name}\t#{window_active}#{pane_active}\t#{pane_pid}';
+
+/**
+ * Classify one `list-panes -a` answer for an exact session name. A clean
+ * listing without the name is authoritative 'missing'; the pid comes from the
+ * session's active pane in its active window (what `display-message -t
+ * <session> '#{pane_pid}'` reports). A failed client is 'missing' only when it
+ * cleanly proved no server owns the socket; any other failure is 'unknown'.
+ */
+export function classifyPaneListing(result: { stdout: string } | { error: unknown }, sessionName: string): PaneObservation {
+  if ('error' in result) {
+    const failure = result.error as { signal?: string; status?: number; stderr?: string } | null | undefined;
+    const stderr = failure?.stderr ?? '';
+    const clean = !failure?.signal && typeof failure?.status === 'number';
+    // A missing socket file is flagged: the exit watcher cross-checks it against the last known pane process.
+    const socketMissing = clean && isSocketMissingErrorText(stderr);
+    const missing = socketMissing || clean && /no server running/i.test(stderr);
+    return { probe: missing ? 'missing' : 'unknown', pid: null, ...(socketMissing ? { socketMissing } : {}) };
+  }
+  let found = false;
+  let pid: number | null = null;
+  for (const line of result.stdout.split('\n')) {
+    // Split on the last two tabs: a foreign session name may contain tabs.
+    const pidTab = line.lastIndexOf('\t');
+    const activeTab = pidTab > 0 ? line.lastIndexOf('\t', pidTab - 1) : -1;
+    if (activeTab < 0 || line.slice(0, activeTab) !== sessionName) continue;
+    found = true;
+    if (pid === null && line.slice(activeTab + 1, pidTab) === '11') {
+      const value = Number(line.slice(pidTab + 1).trim());
+      if (Number.isSafeInteger(value) && value > 0) pid = value;
+    }
+  }
+  return found ? { probe: 'exists', pid } : { probe: 'missing', pid: null };
+}
+
+type PanePoller = {
+  env: NodeJS.ProcessEnv;
+  subscribers: Map<PaneWatch, { sessionName: string; deliver: (observation: PaneObservation) => void }>;
+  timer: NodeJS.Timeout;
+  inFlight: boolean;
+};
+const panePollers = new Map<string, PanePoller>();
+
+/** One `list-panes -a` client per second per tmux client environment, shared
+ *  by every exit watcher; at most one request is in flight per poller. Only
+ *  watchers subscribed when a request started receive its answer. */
+function subscribePanes(sessionName: string, deliver: (observation: PaneObservation) => void): PaneWatch {
+  const env = tmuxClientEnv();
+  const key = JSON.stringify(env);
+  let poller = panePollers.get(key);
+  if (!poller) {
+    const created: PanePoller = { env, subscribers: new Map(), inFlight: false, timer: setInterval(() => pollPanes(created), 1000) };
+    poller = created;
+    panePollers.set(key, poller);
+  }
+  const owner = poller;
+  const watch: PaneWatch = {
+    close: () => {
+      if (!owner.subscribers.delete(watch) || owner.subscribers.size > 0) return;
+      clearInterval(owner.timer);
+      if (panePollers.get(key) === owner) panePollers.delete(key);
+    },
+  };
+  owner.subscribers.set(watch, { sessionName, deliver });
+  return watch;
+}
+
+function pollPanes(poller: PanePoller): void {
+  if (poller.inFlight || poller.subscribers.size === 0) return;
+  poller.inFlight = true;
+  const targets = [...poller.subscribers];
+  void runCommand('tmux', ['list-panes', '-a', '-F', PANE_FORMAT], { env: poller.env, timeout: 3000 })
+    .then(stdout => ({ stdout }), (error: unknown) => ({ error }))
+    .then(result => {
+      for (const [watch, { sessionName, deliver }] of targets) {
+        if (!poller.subscribers.has(watch)) continue;
+        try { deliver(classifyPaneListing(result, sessionName)); } catch { /* One watcher cannot stall the others. */ }
+      }
+    })
+    .finally(() => { poller.inFlight = false; });
+}
+
 let tmuxAvailableCache: boolean | undefined;
 
 /** Probe whether tmux is installed and runnable (cached). */
@@ -273,7 +359,7 @@ export class TmuxBackend implements SessionBackend {
   private socketPath: string | undefined;
   private readonly output = new OutputHandoff();
   private readonly exitCbs: Array<(code: number | null, signal: string | null) => void> = [];
-  private exitTimer: NodeJS.Timeout | null = null;
+  private exitTimer: PaneWatch | null = null;
   initialScreen?: { data: string; cols: number; rows: number };
 
   constructor(sessionName: string, options: TmuxBackendOptions = {}) {
@@ -601,27 +687,6 @@ export class TmuxBackend implements SessionBackend {
     }
   }
 
-  private async probePaneAsync(): Promise<{ probe: SessionProbe; pid: number | null; socketMissing?: boolean }> {
-    try {
-      const stdout = await runCommand('tmux', [
-        'has-session', '-t', this.sessionName, ';',
-        'display-message', '-p', 'dutydeck-session-exists', ';',
-        'display-message', '-p', '-t', this.sessionName, '#{pane_pid}',
-      ], { env: tmuxClientEnv(), timeout: 3000 });
-      const pid = Number(stdout.trim().split('\n').slice(1).join('\n').trim());
-      return { probe: 'exists', pid: Number.isSafeInteger(pid) && pid > 0 ? pid : null };
-    } catch (error) {
-      const failure = error as { signal?: string; status?: number; stderr?: string; stdout?: string };
-      const stderr = failure.stderr ?? '';
-      // A pane/display failure after successful has-session is inconclusive.
-      // Only a clean answer proving the session/server absent counts as exit.
-      const clean = !failure.stdout?.includes('dutydeck-session-exists') && !failure.signal && typeof failure.status === 'number';
-      const socketMissing = clean && isSocketMissingErrorText(stderr);
-      const missing = socketMissing || clean && /no server running|can't find session:/i.test(stderr);
-      return { probe: missing ? 'missing' : 'unknown', pid: null, ...(socketMissing ? { socketMissing } : {}) };
-    }
-  }
-
   /** Kill a named tmux session (no-op if it doesn't exist). */
   static async killSession(name: string): Promise<void> {
     try { await runTmux(['kill-session', '-t', name], { timeout: 3000 }); } catch { /* already gone */ }
@@ -773,55 +838,45 @@ export class TmuxBackend implements SessionBackend {
   }
 
   /**
-   * Poll liveness once per second. `has-session` is the authoritative
-   * check: an authoritative 'missing' answer means the CLI exited (the
-   * session dies with its last pane), so fire onExit. A dead pane pid
-   * (process.kill ESRCH) is equally decisive. Server-level failures
-   * (connect refused, lost server, timeout) prove nothing and are ignored:
-   * misreading a busy-but-stalled server as "session gone" could mass-tear
-   * down live sessions, so this watcher never acts on them.
-   *
-   * NB: `display-message` alone is NOT sufficient — on tmux 3.3a it exits 0
-   * with EMPTY output for a just-destroyed session, which a throw-based
-   * classifier would miss (observed live). has-session answers reliably.
+   * Poll liveness once per second through the process-wide pane poller: an
+   * authoritative 'missing' answer means the CLI exited (the session dies
+   * with its last pane), so fire onExit. A dead pane pid (process.kill
+   * ESRCH) is equally decisive. Server-level failures (connect refused, lost
+   * server, timeout) prove nothing and are ignored: misreading a
+   * busy-but-stalled server as "session gone" could mass-tear down live
+   * sessions, so this watcher never acts on them.
    */
   private startExitWatcher(): void {
-    // Liveness checks can transiently fail under load (has-session timeout,
-    // display-message returning a stale/dead pid). A single bad reading must
-    // NOT tear down a live session — require consecutive failures before
-    // declaring the pane gone. Any successful check resets the counter.
+    // Liveness checks can transiently fail under load (list-panes timeout,
+    // a stale/dead pane pid). A single bad reading must NOT tear down a live
+    // session — require consecutive failures before declaring the pane gone.
+    // Any successful check resets the counter.
     let consecutiveFailures = 0;
     const FAILURE_THRESHOLD = 3;
-    let checking = false;
     // Last pane process seen through a live server. A deleted socket file (e.g. /tmp cleanup) makes every
     // client report "no such file" while the server and CLI keep running; that alone does not prove exit.
     let knownPane: { pid: number; start?: string } | undefined;
-    const timer = setInterval(() => {
-      if (this.exited || checking) return;
-      checking = true;
-      void (async () => {
-        const { probe, pid, socketMissing } = await this.probePaneAsync();
-        let failed = probe === 'missing';
-        if (socketMissing && knownPane && paneProcessAlive(knownPane)) failed = false;
-        // An unknown server answer must not be combined with a stale pane PID.
-        if (probe === 'exists') {
-          if (pid !== null) {
-            try { process.kill(pid, 0); if (knownPane?.pid !== pid) knownPane = { pid, start: processStart(pid) }; }
-            catch (e) { failed = (e as NodeJS.ErrnoException).code === 'ESRCH'; }
-          }
+    const timer: PaneWatch = subscribePanes(this.sessionName, ({ probe, pid, socketMissing }) => {
+      // A detached/replaced watcher must not act on an in-flight result.
+      if (this.exited || this.exitTimer !== timer) return;
+      let failed = probe === 'missing';
+      if (socketMissing && knownPane && paneProcessAlive(knownPane)) failed = false;
+      // An unknown server answer must not be combined with a stale pane PID.
+      if (probe === 'exists') {
+        if (pid !== null) {
+          try { process.kill(pid, 0); if (knownPane?.pid !== pid) knownPane = { pid, start: processStart(pid) }; }
+          catch (e) { failed = (e as NodeJS.ErrnoException).code === 'ESRCH'; }
         }
-        // A detached/replaced watcher must not act on an in-flight result.
-        if (this.exited || this.exitTimer !== timer) return;
-        consecutiveFailures = failed ? consecutiveFailures + 1 : 0;
-        if (consecutiveFailures >= FAILURE_THRESHOLD) this.handlePaneExit();
-      })().finally(() => { checking = false; });
-    }, 1000);
+      }
+      consecutiveFailures = failed ? consecutiveFailures + 1 : 0;
+      if (consecutiveFailures >= FAILURE_THRESHOLD) this.handlePaneExit();
+    });
     this.exitTimer = timer;
   }
 
   private stopExitWatcher(): void {
     if (this.exitTimer) {
-      clearInterval(this.exitTimer);
+      this.exitTimer.close();
       this.exitTimer = null;
     }
   }

@@ -481,6 +481,8 @@ export class LarkGroupManager {
     if (!config) return deny(action, '此 Bot 已删除。');
     const owner = await this.owner(appId);
     if (!owner) return undefined;
+    // Unmanaged chats have no binding to decide on; skip loading facts, roles and identity.
+    if (!await this.repos.groupBindings.getByNaturalKey(owner.channelBotId, chatId)) return undefined;
     const detail = options.readOnly ? await this.detail(config, owner, chatId) : await this.runtimeDetail(config, owner, chatId, options.propagateRefreshErrors);
     if (!detail.binding) return undefined;
     if (options.installationOwner && action === 'task.view_result') return { allowed: true, action, code: 'allowed_owner', reason: '安装管理员可查看任务记录。', source: 'owner' };
