@@ -98,7 +98,10 @@ async function main() {
   const html = await readFile(resolve('apps/web/dist/index.html'), 'utf8');
   const entry = html.match(/<script[^>]+src="([^"]+\.js)"/)?.[1];
   if (!entry) throw new Error('Web entry bundle not found; run the production build first');
-  const entryGzipBytes = gzipSync(await readFile(resolve('apps/web/dist', entry.replace(/^\//, '')))).byteLength;
+  // The entry and every chunk index.html preloads with it are one first download;
+  // moving code into a preloaded vendor chunk must not make this budget easier.
+  const preloaded = [...html.matchAll(/<link[^>]+rel="modulepreload"[^>]+href="([^"]+\.js)"/g)].map(match => match[1]!);
+  const entryGzipBytes = (await Promise.all([entry, ...preloaded].map(async path => gzipSync(await readFile(resolve('apps/web/dist', path.replace(/^\//, '')))).byteLength))).reduce((sum, bytes) => sum + bytes, 0);
 
   process.stdout.write(`${JSON.stringify({ eventCount: EVENT_COUNT, seedMs, firstScreenP95Ms, paginationP95Ms, incrementalP95Ms, retainedHeapBytes, entryGzipBytes, reconcileP95Ms, deriveP95Ms, budgets }, null, 2)}\n`);
   assertBudget('200-event reconciliation p95', reconcileP95Ms, 20, 'ms');

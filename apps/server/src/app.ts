@@ -72,6 +72,23 @@ const contentTypes: Record<string, string> = {
   '.woff2': 'font/woff2'
 };
 
+// Web 构建为文本资源生成的预压缩副本。按 Accept-Encoding 的权重选，同权重优先 br；未声明或 q=0 的编码不用。
+const precompressedEncodings = [{ name: 'br', suffix: '.br' }, { name: 'gzip', suffix: '.gz' }] as const;
+function acceptedPrecompressedEncodings(header: string | string[] | undefined) {
+  const weights = new Map<string, number>();
+  for (const part of String(header ?? '').split(',')) {
+    const [name, ...params] = part.trim().toLowerCase().split(';');
+    if (!name) continue;
+    const quality = params.map(param => param.trim()).find(param => param.startsWith('q='));
+    const weight = quality === undefined ? 1 : Number(quality.slice(2));
+    weights.set(name, Number.isFinite(weight) ? weight : 0);
+  }
+  return precompressedEncodings
+    .map(encoding => ({ ...encoding, weight: weights.get(encoding.name) ?? weights.get('*') ?? 0 }))
+    .filter(encoding => encoding.weight > 0)
+    .sort((left, right) => right.weight - left.weight);
+}
+
 async function webFileSize(file: string) {
   // Opening preserves the read-permission check without reading the HEAD body.
   const handle = await open(file, 'r');
@@ -861,26 +878,38 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
       catch { return reply.code(400).send({ error: { code: 'INVALID_PATH', message: 'Invalid URL path' } }); }
       if (requestedFile !== webRoot && !requestedFile.startsWith(`${webRoot}${sep}`)) return reply.code(404).send();
 
+      const head = request.method === 'HEAD';
+      // 本服务不实现 Range（总是回完整 200），带 Range 的请求仍回原文件，免得字节区间落在压缩数据上。
+      const encodings = request.headers.range === undefined ? acceptedPrecompressedEncodings(request.headers['accept-encoding']) : [];
+      // 可能改发压缩副本时，先只确认原文件可读，正文再从副本读，避免读两份。
+      const probeOnly = head || encodings.length > 0;
       let file = requestedFile;
       let body: Buffer | undefined;
       let size: number | undefined;
-      try {
-        if (request.method === 'HEAD') size = await webFileSize(file);
-        else body = await readFile(file);
-      }
+      const locate = async (path: string) => { if (probeOnly) size = await webFileSize(path); else body = await readFile(path); };
+      try { await locate(file); }
       catch {
         if (extname(pathname)) return reply.code(404).send();
         file = indexFile;
-        try {
-          if (request.method === 'HEAD') size = await webFileSize(file);
-          else body = await readFile(file);
-        }
+        try { await locate(file); }
         catch { return reply.code(404).send({ error: { code: 'WEB_UI_NOT_FOUND', message: 'Web UI is not installed' } }); }
       }
+      let contentEncoding: string | undefined;
+      for (const encoding of encodings) {
+        try {
+          if (head) size = await webFileSize(`${file}${encoding.suffix}`);
+          else body = await readFile(`${file}${encoding.suffix}`);
+          contentEncoding = encoding.name;
+          break;
+        } catch { /* 没有这个预压缩副本，试下一个或回退原文件 */ }
+      }
+      if (!head && body === undefined) body = await readFile(file);
       const type = contentTypes[extname(file).toLowerCase()] ?? 'application/octet-stream';
       if (pathname.startsWith('/assets/')) reply.header('Cache-Control', 'public, max-age=31536000, immutable');
-      if (request.method === 'HEAD') reply.header('Content-Length', size);
-      return reply.type(type).send(request.method === 'HEAD' ? undefined : body);
+      reply.header('Vary', 'Accept-Encoding');
+      if (contentEncoding) reply.header('Content-Encoding', contentEncoding);
+      if (head) reply.header('Content-Length', size);
+      return reply.type(type).send(head ? undefined : body);
     });
   }
   return app;

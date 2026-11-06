@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { copyToClipboard } from '../MarkdownContent';
+import { copyToClipboard } from '../clipboard';
 import { createRawLogProjector } from '../raw-log';
 import type { DockEvent } from '../api';
 import { Button } from './primitives';

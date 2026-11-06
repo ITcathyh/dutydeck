@@ -8,7 +8,7 @@ import { sessionDisplayName } from '../run-summary';
 import { sessionErrorSummary } from '../workspace-model';
 import { useSessionStream } from '../useSessionStream';
 import { useTheme } from '../useTheme';
-import { copyToClipboard } from '../MarkdownContent';
+import { copyToClipboard } from '../clipboard';
 import { push as pushToast } from '../useToasts';
 import { elapsedMilliseconds, formatElapsed } from '../tool-presentation';
 import { conclusionPlainText, finalSection, formatTurnSpan, liveTurnFacts, shareStatus, summaryTurnFacts, type ShareStatus, type TurnFacts } from '../share-view';
