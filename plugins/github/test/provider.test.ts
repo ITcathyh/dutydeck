@@ -255,6 +255,49 @@ describe('GitHub provider: pull request follow-up', () => {
   });
 });
 
+describe('GitHub provider: host time limits', () => {
+  afterEach(() => { vi.useRealTimers(); });
+  // 每页 9 秒（低于单次请求 10 秒的时限），两条评论列表各 3 页：整次调用约 27 秒，超过宿主默认的 25 秒。
+  const slowPages = () => vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input));
+    const page = Number(url.searchParams.get('page') ?? '1');
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(resolve, 9_000);
+      init?.signal?.addEventListener('abort', () => { clearTimeout(timer); reject(init.signal!.reason); }, { once: true });
+    });
+    const next = new URL(url); next.searchParams.set('page', String(page + 1)); next.searchParams.set('per_page', '100');
+    return new Response(JSON.stringify([{ id: page, user: { login: 'alice', type: 'User' }, author_association: 'MEMBER', body: `page ${page}`, created_at: `2026-10-01T00:00:0${page}Z` }]), {
+      status: 200, headers: { 'content-type': 'application/json', ...(page < 3 ? { link: `<${next}>; rel="next"` } : {}) }
+    });
+  });
+
+  it('reads a slow three-page comment set through the host registry instead of timing out at 25 seconds', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const request = slowPages();
+    const registry = new CiProviderRegistry();
+    registry.register('github', createGithubProvider({ token: 't', fetch: request as typeof fetch }));
+    const listing = registry.get('github')!.listReviewComments!(repo, 5);
+    listing.catch(() => undefined);
+    await vi.advanceTimersByTimeAsync(30_000);
+    await expect(listing).resolves.toHaveLength(6);
+    expect(request).toHaveBeenCalledTimes(6);
+  });
+
+  it('stops paging once the host aborts the call', async () => {
+    const request = slowPages();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const controller = new AbortController();
+    const listing = createGithubProvider({ token: 't', fetch: request as typeof fetch }).listReviewComments(repo, 5, { signal: controller.signal });
+    listing.catch(() => undefined);
+    await vi.advanceTimersByTimeAsync(10_000);
+    controller.abort(new Error('timeout'));
+    await vi.advanceTimersByTimeAsync(60_000);
+    await expect(listing).rejects.toMatchObject({ code: 'GITHUB_REQUEST_CANCELLED' });
+    // 两条列表各读完第 1 页、第 2 页被中止，之后不再发请求。
+    expect(request).toHaveBeenCalledTimes(4);
+  });
+});
+
 describe('GitHub provider: webhook', () => {
   const secret = 'hook-secret';
   const signed = (body: unknown, event: string, extra: Record<string, string> = {}) => {

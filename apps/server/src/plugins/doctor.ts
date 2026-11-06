@@ -1,4 +1,6 @@
+import { observeProcess } from '@dutydeck/storage';
 import type { DoctorCheck } from '../doctor/types.js';
+import { pluginHostLeases } from './activation.js';
 import { listBuiltinPlugins } from './builtin.js';
 import { resolveTrigger } from './host.js';
 import { loadPluginDirectory, type LoadedPlugin } from './manifest.js';
@@ -28,6 +30,11 @@ export async function pluginDoctorChecks(dataDir: string, builtinRoot?: string):
     } catch (error) {
       builtinChecks.push({ id, label, level: 'fail', detail: error instanceof Error ? error.message : String(error), remedy: '内置插件随 Dutydeck 发布；重新安装或升级 Dutydeck。' });
     }
+  }
+  // 插件库出错时 daemon 只加载内置插件继续运行；仍在运行的这类实例在这里报红。
+  for (const { state } of await pluginHostLeases(store.pluginsDir).catch(() => [])) {
+    if (!state?.degraded || state.stopped || observeProcess(state.identity) === 'dead') continue;
+    builtinChecks.push({ id: 'plugins.store', label: '插件库', level: 'fail', detail: `PID ${state.identity.pid} 的 daemon 启动时插件库不可用，只加载了内置插件，外部插件全部未加载：${state.degraded}`, remedy: '按原因修复插件目录（锁文件、库锁或 .hosts 写入），然后重启这个 daemon。' });
   }
   let entries;
   try { entries = store.list(); }

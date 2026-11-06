@@ -9,6 +9,7 @@ import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { z } from 'zod';
 import { changeRequestLabel, resolveCiHead, type CiProviderRegistry } from './ci-providers.js';
 import { codeBlock, errorMessage, isRunnable, iso, short, SingleFlight, withTimeout } from './ci-common.js';
+import { sleep } from './daemon/time.js';
 import { ciFixLimits, failureFingerprint, type CiNotice } from './ci-webhook.js';
 import {
   assertClaimedPushTarget, isSafeBranchName, assertPushTarget, buildCommit, defaultBranch, diffTrees, fetchBranches, git, localCommits, originPushUrl, pushBranch, remoteBranchSha, remoteUrlLabel, sameEntry, treeEntries, withTrailers,
@@ -36,6 +37,9 @@ const STALE_PUSH_MS = 10 * 60_000;
 const REDISPATCH_AFTER_MS = 2 * 60_000;
 const SNAPSHOT_TIMEOUT_MS = 15_000;
 const FAILURE_LOG_TIMEOUT_MS = 20_000;
+const UPDATE_ATTEMPTS = 5;
+/** CAS 冲突后第 n 次重试前等 base × n × [0.5, 1.5) 毫秒。 */
+const UPDATE_RETRY_BASE_MS = 10;
 /** 自己发的 PR 评论都带这个标记，读评论时跳过。 */
 export const PR_COMMENT_MARKER = '<!-- dutydeck -->';
 
@@ -202,6 +206,8 @@ export class PullRequestService {
   private readonly ticks = new SingleFlight();
   private readonly inflight = new Set<Promise<unknown>>();
   private readonly pendingSettlements = new Map<string, () => Promise<void>>();
+  /** 每条 PR 记录在本进程内排队中的 update，见 update()。 */
+  private readonly updateQueues = new Map<string, Promise<void>>();
   /** 正在后台跑的推送前验证，按 PR 记录编号。不放进 inflight：关闭服务时不等验证跑完（运行时会把它记为被中断，重启后重跑）。 */
   private readonly verifying = new Map<string, Promise<void>>();
   /** 验证失败卡没发出去时，下次补发的最早时间（按 PR 记录编号）；只在内存里，重启后马上补发一次。 */
@@ -246,17 +252,29 @@ export class PullRequestService {
     return await this.store().compareAndSet(current.key, current.raw, raw) ? { key: current.key, raw, value } : undefined;
   }
 
-  /** 读最新记录再改，CAS 冲突时重读重试。 */
-  private async update(id: string, change: (value: PullRequestRecord) => PullRequestRecord | undefined): Promise<Stored | undefined> {
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      const stored = await this.read(id);
-      if (!stored) return undefined;
-      const next = change(stored.value);
-      if (!next) return stored;
-      const saved = await this.save(stored, next);
-      if (saved) return saved;
-    }
-    throw new RuntimeError('PR_CONFLICT', 'PR 记录持续变化，请稍后重试。', 409);
+  /**
+   * 读最新记录再改，CAS 冲突时重读重试。同一条记录在本进程内的 update 排队执行：
+   * 否则 N 个并发写每轮只有一个能赢，第 6 个起就会耗尽重试（例如一次推送后同时到达的多条 pipeline webhook）。
+   * 剩下的冲突来自本进程直接 save 的单次写或别的进程，重试前随机退避，避免几方同步重撞。
+   */
+  private update(id: string, change: (value: PullRequestRecord) => PullRequestRecord | undefined): Promise<Stored | undefined> {
+    const previous = this.updateQueues.get(id) ?? Promise.resolve();
+    const run = previous.then(async () => {
+      for (let attempt = 0; attempt < UPDATE_ATTEMPTS; attempt += 1) {
+        if (attempt) await sleep(UPDATE_RETRY_BASE_MS * attempt * (0.5 + Math.random()));
+        const stored = await this.read(id);
+        if (!stored) return undefined;
+        const next = change(stored.value);
+        if (!next) return stored;
+        const saved = await this.save(stored, next);
+        if (saved) return saved;
+      }
+      throw new RuntimeError('PR_CONFLICT', 'PR 记录持续变化，请稍后重试。', 409);
+    });
+    const settled = run.then(() => undefined, () => undefined);
+    this.updateQueues.set(id, settled);
+    void settled.then(() => { if (this.updateQueues.get(id) === settled) this.updateQueues.delete(id); });
+    return run;
   }
 
   private track<T>(operation: Promise<T>) {

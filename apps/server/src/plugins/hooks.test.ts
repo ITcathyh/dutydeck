@@ -116,9 +116,17 @@ describe('PluginHookBus protocol', () => {
     const result = await bus.run('task.received', input, 'lark');
     expect(result.decision).toBeUndefined();
     expect(result.additionalContext).toEqual(['from-handler']);
-    expect(handler).toHaveBeenCalledWith(expect.objectContaining({ event: 'task.received', plugin: 'h' }));
+    expect(handler).toHaveBeenCalledWith(expect.objectContaining({ event: 'task.received', plugin: 'h' }), { signal: expect.any(AbortSignal) });
     expect(result.outcomes.map(outcome => [outcome.plugin, outcome.result])).toEqual([['h', 'allow'], ['slow', 'error']]);
     expect(bus.has('task.received')).toBe(true);
     expect(bus.has('notify')).toBe(false);
+  });
+
+  it('aborts the signal of an in-process handler that times out', async () => {
+    let signal: AbortSignal | undefined;
+    const bus = new PluginHookBus([{ kind: 'handler', plugin: 'slow', scope: 'global', event: 'task.received', handler: (_input, context) => { signal = context.signal; return new Promise(() => {}); }, timeout: 100 }]);
+    const result = await bus.run('task.received', input);
+    expect(result.outcomes[0]).toMatchObject({ plugin: 'slow', result: 'error' });
+    expect(signal?.aborted).toBe(true);
   });
 });

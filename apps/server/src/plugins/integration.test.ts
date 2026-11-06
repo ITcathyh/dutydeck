@@ -45,7 +45,7 @@ describe('PluginRuntimeHooks', () => {
     const identity = { sessionId: 's1', taskId: 't1', attemptId: 'a1', runId: 'r1', actor: { kind: 'installation_owner', id: 'installation_owner' } as const, channel: 'web' as const, cwd: '/repo', workspaceRoot: '/repo' };
     expect(await hooks.toolBeforeCall(identity, { tool: 'tickets/get', resource: 'ticket:T-1' })).toBe('allow');
     await hooks.deliveryCompleted(identity, { kind: 'tool', tool: 'tickets/get', status: 'succeeded' });
-    expect(seen).toHaveBeenCalledWith(expect.objectContaining({ event: 'delivery.completed', eventId: expect.stringMatching(/^evt_[0-9a-f]{32}$/), attemptId: 'a1', actor: identity.actor }));
+    expect(seen).toHaveBeenCalledWith(expect.objectContaining({ event: 'delivery.completed', eventId: expect.stringMatching(/^evt_[0-9a-f]{32}$/), attemptId: 'a1', actor: identity.actor }), { signal: expect.any(AbortSignal) });
   });
 
   it('derives bot and chat for bot-scoped sessions only', () => {

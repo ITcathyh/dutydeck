@@ -27,7 +27,8 @@ it('installs packed fake-ticket without its source and executes real external HT
   const archive = join(temp, JSON.parse(packed.stdout)[0].filename); await rm(source, { recursive: true });
   const external = Fastify(); cleanup.push(() => external.close());
   const seen: Array<{ actor?: string; original?: string; auth?: string }> = []; const receipts = new Map<string, string>();
-  external.addHook('onRequest', async request => { seen.push({ actor: request.headers['x-requester'] as string, original: request.headers['x-original-requester'] as string, auth: request.headers.authorization }); });
+  // 只记插件实际调用的接口：本机端口扫描之类的外来请求也会打到这个 127.0.0.1 端口。
+  external.addHook('onRequest', async request => { if (!/^\/(tickets|actions)\//.test(request.url)) return; seen.push({ actor: request.headers['x-requester'] as string, original: request.headers['x-original-requester'] as string, auth: request.headers.authorization }); });
   external.get('/tickets/:id', async () => ({ title: 'Sample ticket', privateNotes: 'PRIVATE_TICKET_CANARY' }));
   external.post('/tickets/:id/close', async (request, reply) => { const id = String(request.headers['idempotency-key']); receipts.set(id, 'closed:T-1'); if (request.headers['x-requester'] === 'alice') return reply.code(503).send({ error: 'response lost after commit' }); return { receipt: 'closed:T-1' }; });
   external.get('/actions/:id', async request => { const receipt = receipts.get((request.params as { id: string }).id); return receipt ? { status: 'succeeded', receipt } : { status: 'unknown' }; });

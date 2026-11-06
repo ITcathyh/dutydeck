@@ -6,8 +6,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
-import { createRepositories } from '@dutydeck/storage';
-import { PluginHost } from './host.js';
+import { createRepositories, currentProcessIdentity } from '@dutydeck/storage';
+import { PLUGIN_STORE_DIAGNOSTIC, PluginHost } from './host.js';
 import { pluginDoctorChecks } from './doctor.js';
 import { runPluginCli } from './cli.js';
 import { createCliUi } from '../cli-ui.js';
@@ -75,26 +75,60 @@ describe('immutable plugin activation', () => {
     expect((await store.activate('versioned')).version).toBe('2.0.0');
   });
 
-  it('fails Host startup when the store lease cannot be acquired, then succeeds after the lock is released', async () => {
+  it('starts with built-in plugins only while the store lock stays busy, reports the lock file, then loads all after the lock is released', async () => {
     const lock = new Database(join(store.pluginsDir, '.config-lock.sqlite'));
+    let degraded: PluginHost;
     try {
       lock.exec('BEGIN IMMEDIATE');
-      // 锁等待按 Date.now() 计 10 秒截止、真实 setTimeout 重试；只伪造 Date 并逐步拨快，免得真等 10 秒。
+      // 锁等待按 Date.now() 计截止、真实 setTimeout 重试；只伪造 Date 并逐步拨快，免得真等 30 秒。
       vi.useFakeTimers({ toFake: ['Date'] });
       try {
         let settled = false;
+        const started = Date.now();
         const loading = load().finally(() => { settled = true; });
-        loading.catch(() => undefined);
         while (!settled) {
           await new Promise(resolve => setTimeout(resolve, 10));
           vi.setSystemTime(Date.now() + 1_000);
         }
-        await expect(loading).rejects.toMatchObject({ code: 'PLUGIN_CONFIG_BUSY' });
+        degraded = await loading;
+        // 多等一会儿：要盖过一次 plugin activate 的隔离验证（15 秒）。
+        expect(Date.now() - started).toBeGreaterThanOrEqual(30_000);
       } finally { vi.useRealTimers(); }
+      expect(degraded.active.map(item => item.entry.name)).toEqual([]);
+      expect(degraded.degraded).toContain(join(store.pluginsDir, '.config-lock.sqlite'));
+      expect(degraded.diagnostics).toEqual([expect.objectContaining({ plugin: PLUGIN_STORE_DIAGNOSTIC, message: expect.stringContaining('只加载了内置插件') })]);
       expect((await store.activationStatus('versioned')).hosts).toEqual([]);
+      expect(await pluginDoctorChecks(store.dataDir, store.builtinRoot)).toContainEqual(expect.objectContaining({ id: 'plugins.store', level: 'fail', detail: expect.stringContaining('.config-lock.sqlite') }));
     } finally { lock.close(); }
     expect((await load()).active.map(item => item.entry.name)).toEqual(['versioned']);
+    await degraded!.dispose();
+    expect((await pluginDoctorChecks(store.dataDir, store.builtinRoot)).map(check => check.id)).not.toContain('plugins.store');
   }, 15_000);
+
+  it('starts with built-in plugins only when plugins.lock.json is corrupt and names the file', async () => {
+    const lockFile = join(store.pluginsDir, 'plugins.lock.json');
+    await writeFile(lockFile, '{"version": 1, "plugins": {');
+    const host = await load();
+    expect(host.active).toEqual([]);
+    expect(host.diagnostics).toEqual([expect.objectContaining({ plugin: PLUGIN_STORE_DIAGNOSTIC, message: expect.stringContaining(lockFile) })]);
+    const checks = await pluginDoctorChecks(store.dataDir, store.builtinRoot);
+    expect(checks).toContainEqual(expect.objectContaining({ id: 'plugins.store', level: 'fail' }));
+    expect(checks).toContainEqual(expect.objectContaining({ id: 'plugins.lock', level: 'fail', detail: expect.stringContaining(lockFile) }));
+  });
+
+  it('prunes stopped and dead leases of the same database at startup, keeping live, foreign and unreadable records', async () => {
+    const hostsDir = join(store.pluginsDir, '.hosts');
+    for (let index = 0; index < 3; index += 1) await (await load()).dispose();
+    const crashed = { identity: { ...currentProcessIdentity(), start: 'not-this-process' }, database: resolve(store.database), stopped: false, plugins: { versioned: 'legacy' } };
+    await writeFile(join(hostsDir, 'crashed.json'), JSON.stringify(crashed));
+    await writeFile(join(hostsDir, 'foreign.json'), JSON.stringify({ ...crashed, database: join(directory, 'other.db'), stopped: true }));
+    await writeFile(join(hostsDir, 'broken.json'), '{');
+    const live = await load();
+    const files = (await readdir(hostsDir)).filter(file => file.endsWith('.json')).sort();
+    expect(files).toHaveLength(3);
+    expect(files).toEqual(expect.arrayContaining(['broken.json', 'foreign.json']));
+    await live.dispose();
+  });
 
   it('refuses uninstall while a Host still references any artifact', async () => {
     const host = await load(), root = store.pluginDir('versioned');

@@ -23,6 +23,7 @@ import { createRepositories, executionTaskId } from '@dutydeck/storage';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ciProviders, ciStatus, TEST_CI_REMOTE, type StatusMock } from './ci-provider.test-helpers.js';
 import { workItemId, workItemProgressStatus } from './work-items.js';
+import { CiProviderRegistry } from './ci-providers.js';
 import { SessionAutomationService, type SessionAutomationRuntime, type AutomationDeliveryContext, type SessionAutomationServiceOptions } from './session-automation.js';
 
 const run = promisify(execFile);
@@ -1149,6 +1150,31 @@ describe('SessionAutomationService CI subscriptions', () => {
   });
 });
 
+
+describe('CI 提供方卡住', () => {
+  it('超时后这一轮 CI 轮询跳过并告警，普通定时任务照常执行', async () => {
+    const warn = vi.fn();
+    const registry = new CiProviderRegistry({ timeoutMs: 200, log: { warn } });
+    let signal: AbortSignal | undefined;
+    registry.register('stuck-plugin', {
+      id: 'stuck-ci', displayName: 'Stuck CI',
+      matchRepository: remote => remote === TEST_CI_REMOTE ? { owner: 'octo', name: 'repo', slug: 'octo/repo' } : undefined,
+      getPipelineStatus: (_query, context) => { signal = context?.signal; return new Promise(() => {}); }
+    });
+    const h = await fixture({ extra: { ciProviders: registry } });
+    await h.service.subscribeCi(h.session.id, { ttlSeconds: 600 }, 'ou_owner');
+    const created = await h.service.createSchedule(h.session.id, scheduleInput, 'ou_owner');
+    await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+    const bounded = (work: Promise<void>) => Promise.race([work.then(() => 'done'), new Promise(resolve => setTimeout(() => resolve('stuck'), 3_000))]);
+    expect(await bounded(h.service.tick())).toBe('done');
+    expect(signal?.aborted).toBe(true);
+    expect(warn).toHaveBeenCalledWith(expect.objectContaining({ plugin: 'stuck-plugin', provider: 'stuck-ci', method: 'getPipelineStatus' }), expect.any(String));
+    expect((await h.service.listBySession(h.session.id)).subscriptions[0]).toMatchObject({ status: 'waiting' });
+    h.now.value = new Date('2026-09-12T00:01:01.000Z');
+    expect(await bounded(h.service.tick())).toBe('done');
+    expect(h.dispatches).toHaveLength(1);
+  });
+});
 
 describe('CI 插件化之前保存的记录', () => {
   it('旧的 github_new_failure 条件读成 ci_new_failure，并由 github 提供方继续判断', async () => {

@@ -292,8 +292,16 @@ export class PluginTriggerService {
     const run = this.runs.get(runId);
     if (run && run.plugin === plugin && run.triggerId === triggerId) {
       // 工作项没有结算通知，每次查询按工作项当前状态给出；已取消的保持取消。
-      if (!run.workItemId || run.status === 'cancelled') return { ...run };
-      return { ...run, status: this.entryStatus(`${WORK_ENTRY}${run.workItemId}`) ?? run.status };
+      if (run.workItemId) return run.status === 'cancelled' ? { ...run } : { ...run, status: this.entryStatus(`${WORK_ENTRY}${run.workItemId}`) ?? run.status };
+      // 任务被外部取消、会话停止或恢复时结算都不发结算通知：按任务实时状态补结算，回写后参与过期清理并释放名额。
+      if (run.taskId && (run.status === 'queued' || run.status === 'running')) {
+        const live = this.options.taskStatus?.(run.taskId);
+        if (live === 'succeeded' || live === 'failed' || live === 'cancelled') {
+          this.settled(run.taskId, live);
+          return { ...this.runs.get(runId)! };
+        }
+      }
+      return { ...run };
     }
     const binding = this.options.runBindings?.listTaskBindings().find(item => {
       if (!item.subscriptionId.startsWith('dutydeck-plugin-trigger:')) return false;
