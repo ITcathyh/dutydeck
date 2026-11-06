@@ -154,6 +154,11 @@ async function topic(options: { fallback?: boolean; agentStatusCheck?: () => Pro
       const getTasks = runtime.getTasks.bind(runtime);
       const inspect = runtime.inspectExecutionRecovery.bind(runtime);
       vi.spyOn(runtime, 'getEvents').mockImplementation(async (...args) => (await getEvents(...args)).map(event => ({ ...event, timestamp: at(event.timestamp) })));
+      const getAttemptActivity = runtime.getAttemptActivity.bind(runtime);
+      vi.spyOn(runtime, 'getAttemptActivity').mockImplementation(async (...args) => {
+        const activity = await getAttemptActivity(...args);
+        return { ...activity, activityTimestamps: activity.activityTimestamps.map(at) };
+      });
       vi.spyOn(runtime, 'getTasks').mockImplementation(async (...args) => (await getTasks(...args)).map(task => ({ ...task, createdAt: at(task.createdAt) })));
       vi.spyOn(runtime, 'inspectExecutionRecovery').mockImplementation(async (...args) => {
         const result = await inspect(...args);

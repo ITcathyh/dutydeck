@@ -9,23 +9,25 @@ import { larkNotice } from './notify-tier.js';
 import { describeUnknownTaskResolution, resolveUnknownTask, type UnknownTaskRuntime } from '../task-resolution.js';
 import type { LarkInboxRecord } from './task-inbox.js';
 import type { LarkLaunchOptions } from './new-session.js';
-import { AGENT_IDLE_TIMEOUT, AGENT_LOGIN_REQUIRED, RuntimeError, unknownTaskActionLabels, unknownTaskRetryWarning, timeLoop, type AgentEvent, type ChannelMapping, type ChannelMappingRepository, type Session, type TaskRecord, type UnknownTaskAction, type UnknownTaskFacts } from '@dutydeck/shared';
+import { AGENT_IDLE_TIMEOUT, AGENT_LOGIN_REQUIRED, RuntimeError, unknownTaskActionLabels, unknownTaskRetryWarning, timeLoop, type AgentEvent, type AttemptActivity, type ChannelMapping, type ChannelMappingRepository, type Session, type TaskRecord, type UnknownTaskAction, type UnknownTaskFacts } from '@dutydeck/shared';
 import { larkPermissionMode, readLarkConfig, type StoredLarkConfig } from './config.js';
 import { larkPendingVerificationKey, parseLarkPendingVerifications } from './auto-verification.js';
 import { LarkServiceError } from './service.js';
-import { eventsForRuntimeTask, isLarkLauncherVersionChanged } from './card-renderer.js';
+import { isLarkLauncherVersionChanged, loadLarkTaskEvents } from './card-renderer.js';
 import { performLarkCardReconcile, type LarkInterruptedTurn } from './reconciler.js';
 import {
   isRestartInterruption,
   larkHeldWebNote,
   larkInterruptionSummary,
-  larkLastActivityAt,
+  larkAttemptActivity,
+  larkLastActivityFrom,
   larkRecoveryNoticeExpired,
   larkRedispatchedCardMarkdown,
   larkRedispatchLimit,
   larkRedispatchMaxAgeMs,
   larkRedispatchWebNote,
   larkReplayUnsafeReason,
+  larkToolEvents,
   type LarkHeldCause
 } from './turn-redispatch.js';
 import { isLarkCardActionAvailable, larkRelaunchLabels, larkReplayLabels, type LarkCardActionState } from './card-actions.js';
@@ -131,7 +133,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
         const restored = this.restoredCardTask(effective, mapping, saved);
         const verification = await this.verificationView(restored, effective, saved.state as LarkCardActionState);
         const events = saved.state === 'failed' && saved.runtime_task_id
-          ? eventsForRuntimeTask(await this.runtime.getEvents?.(mapping.sessionId) ?? [], saved.runtime_task_id) : [];
+          ? await this.runtimeTaskEvents(mapping.sessionId, saved.runtime_task_id) : [];
         // 旧对话启动器版本变化在旧会话重试必败：重启重建的任务没有内存里的 retryable 标记，
         // 按同一错误事件补上，补发的结果卡才不带「重试」。
         if (isLarkLauncherVersionChanged(events)) restored.retryable = false;
@@ -625,18 +627,18 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
     if (!restart && (await this.runtime.getTaskRecovery?.(mapping.sessionId, runtimeTask.id))?.blockers.some(block => block.code !== 'PREVIOUS_RESULT_UNKNOWN') !== false) return undefined;
     const count = inbox?.redispatch?.count ?? 0;
     let unsafeReason: string | undefined;
-    let own: AgentEvent[] = [];
+    let own: AttemptActivity = { eventCount: 0, activityTimestamps: [] };
     try {
-      const events = await this.runtime.getEvents(mapping.sessionId);
-      own = events.filter(event => event.attemptId === attempt.attemptId);
+      own = await this.attemptActivity(mapping.sessionId, attempt.attemptId);
       // 没有按执行记账的旧事件退回按任务切片：切不出来时整段都算进来，只会更保守。
-      unsafeReason = larkReplayUnsafeReason(own.length ? own : eventsForRuntimeTask(events, runtimeTask.id).filter(event => !event.taskId || event.taskId === runtimeTask.id));
+      unsafeReason = larkReplayUnsafeReason(own.eventCount ? await this.attemptToolEvents(mapping.sessionId, attempt.attemptId)
+        : (await this.runtimeTaskEvents(mapping.sessionId, runtimeTask.id)).filter(event => !event.taskId || event.taskId === runtimeTask.id));
     } catch (error) {
       this.log.warn({ error, taskId: mapping.externalId }, '读取被切断那一轮的执行记录失败，按可能有外部副作用处理');
       unsafeReason = '的执行记录读取失败';
     }
     const agent = await this.resolveSessionAgentName(config, mapping.sessionId);
-    const lastActivity = larkLastActivityAt(own, attempt.createdAt);
+    const lastActivity = larkLastActivityFrom(own.activityTimestamps, attempt.createdAt);
     if (!restart) {
       const quiet = this.agentQuiet(mapping.sessionId);
       const cause: LarkHeldCause = { count, ...(unsafeReason ? { unsafeReason } : {}), ...(code ? { code } : {}), agent, ...(quiet ? {} : { running: true }) };
@@ -731,6 +733,24 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
     }
   }
 
+  /** 某次执行的事件数与活动时间：按 attempt 索引只读两列；runtime 没提供时读整段会话再按同样规则过滤。 */
+  private async attemptActivity(sessionId: string, attemptId: string): Promise<AttemptActivity> {
+    if (this.runtime.getAttemptActivity) return this.runtime.getAttemptActivity(sessionId, attemptId);
+    return larkAttemptActivity((await this.runtime.getEvents?.(sessionId) ?? []).filter(event => event.attemptId === attemptId));
+  }
+
+  /** 某次执行的工具调用与结果事件（larkReplayUnsafeReason 只看这两类）。 */
+  private async attemptToolEvents(sessionId: string, attemptId: string): Promise<AgentEvent[]> {
+    if (this.runtime.getAttemptToolEvents) return this.runtime.getAttemptToolEvents(sessionId, attemptId);
+    return larkToolEvents((await this.runtime.getEvents?.(sessionId) ?? []).filter(event => event.attemptId === attemptId));
+  }
+
+  /** 某一轮 runtime 任务的事件切片：从最近的窗口往前扩到这一轮开头，不读整段会话历史。 */
+  private async runtimeTaskEvents(sessionId: string, taskId: string): Promise<AgentEvent[]> {
+    if (!this.runtime.getRecentEvents && !this.runtime.getEvents) return [];
+    return loadLarkTaskEvents(this.runtime, sessionId, taskId, 500);
+  }
+
   private agentQuiet(sessionId: string) { return larkReliability(this.runtime).inspectAgentQuiescence?.(sessionId) === 'idle'; }
 
   /**
@@ -740,8 +760,8 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
   private async staleTurn(sessionId: string, task: TaskRecord) {
     try {
       const attempt = (await this.runtime.inspectExecutionRecovery?.(sessionId, larkRecoveryOwner))?.tasks.find(item => item.taskId === task.id)?.attempt;
-      const events = attempt ? (await this.runtime.getEvents?.(sessionId) ?? []).filter(event => event.attemptId === attempt.attemptId) : [];
-      return larkRecoveryNoticeExpired(larkLastActivityAt(events, attempt?.createdAt ?? task.createdAt));
+      const timestamps = attempt ? (await this.attemptActivity(sessionId, attempt.attemptId)).activityTimestamps : [];
+      return larkRecoveryNoticeExpired(larkLastActivityFrom(timestamps, attempt?.createdAt ?? task.createdAt));
     } catch { return true; }
   }
 
@@ -798,7 +818,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
     const code = inspection.tasks.find(item => item.taskId === runtimeTaskId)?.attempt?.reconcileReason?.code;
     const { mapping, saved } = await this.cardTaskFor(config.appId, sessionId, runtimeTaskId);
     // 无进展超时没确认停下的那一轮：接续说明写上几分钟没有输出。
-    const minutes = code === AGENT_IDLE_TIMEOUT ? larkIdleTimeoutMinutes(eventsForRuntimeTask(await this.runtime.getEvents?.(sessionId) ?? [], runtimeTaskId)) : undefined;
+    const minutes = code === AGENT_IDLE_TIMEOUT ? larkIdleTimeoutMinutes(await this.runtimeTaskEvents(sessionId, runtimeTaskId)) : undefined;
     const turn = saved?.turn ?? 0;
     const settle = () => this.settleInterruptedAttempt(sessionId, runtimeTaskId, `lark_continue:${mapping?.externalId ?? runtimeTaskId}:${turn}`, 'lark_continue_in_place');
     if (!mapping || !saved) {
@@ -845,7 +865,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
   protected async runtimeTaskContinueCause(appId: string, task: TaskRecord) {
     const { mapping, saved } = await this.cardTaskFor(appId, task.sessionId, task.id);
     if (!mapping || !saved) return undefined;
-    const events = task.status === 'failed' ? eventsForRuntimeTask(await this.runtime.getEvents?.(task.sessionId) ?? [], task.id) : [];
+    const events = task.status === 'failed' ? await this.runtimeTaskEvents(task.sessionId, task.id) : [];
     return this.continueCause(appId, mapping.externalId, saved.turn ?? 0, saved.scope_id, task.status, events);
   }
 
@@ -918,7 +938,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
         if (queued) {
           for (const task of unresolved) await this.closeUnresolvedTurn(config, mapping.sessionId, task.id);
         } else {
-          const events = runtimeTask.status === 'failed' ? eventsForRuntimeTask(await this.runtime.getEvents?.(mapping.sessionId) ?? [], runtimeTask.id) : [];
+          const events = runtimeTask.status === 'failed' ? await this.runtimeTaskEvents(mapping.sessionId, runtimeTask.id) : [];
           const cause = own ? await this.closeUnresolvedTurn(config, mapping.sessionId, runtimeTask.id)
             : await this.continueCause(appId, taskId, turn, saved.scope_id, runtimeTask.status, events) ?? {};
           await this.submitContinuation(config, saved, operatorOpenId, context.messageId, `${taskId}:${turn}`, cause, mapping.sessionId);

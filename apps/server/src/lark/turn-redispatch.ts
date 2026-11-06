@@ -1,4 +1,4 @@
-import { AGENT_IDLE_TIMEOUT, AGENT_LOGIN_REQUIRED, type AgentEvent } from '@dutydeck/shared';
+import { AGENT_IDLE_TIMEOUT, AGENT_LOGIN_REQUIRED, type AgentEvent, type AttemptActivity } from '@dutydeck/shared';
 
 // 服务重启切断的一轮怎么处理：认不认得出、能不能安全重投、给 Agent / 卡片 / Web 的说明文字。
 // 本文件只放纯函数；认领、落库与派发在 coordinator（redispatchInterruptedTurn）。
@@ -49,16 +49,28 @@ export const larkInterruptionSummary = (code?: string, agent = 'Agent') =>
  * 账本在关停、启动时给这一轮补记的 task / status 事件不算活动，否则刚启动时每一轮看起来都是刚活动过。
  */
 export function larkLastActivityAt(events: AgentEvent[], startedAt?: string): number | undefined {
+  return larkLastActivityFrom(larkAttemptActivity(events).activityTimestamps, startedAt);
+}
+
+/** 同 larkLastActivityAt，输入是已去掉 task/status 的事件时间（按库里 attempt 索引直接读出的那一列）。 */
+export function larkLastActivityFrom(timestamps: string[], startedAt?: string): number | undefined {
   let last: number | undefined;
-  for (const event of events) {
-    if (event.type === 'task' || event.type === 'status') continue;
-    const at = Date.parse(event.timestamp);
+  for (const timestamp of timestamps) {
+    const at = Date.parse(timestamp);
     if (Number.isFinite(at) && (last === undefined || at > last)) last = at;
   }
   if (last !== undefined) return last;
   const started = startedAt ? Date.parse(startedAt) : NaN;
   return Number.isFinite(started) ? started : undefined;
 }
+
+/** 从这次执行的全部事件（按序号）得出与 getAttemptActivity 相同的结果；runtime 不支持按 attempt 读时用。 */
+export function larkAttemptActivity(events: AgentEvent[]): AttemptActivity {
+  return { eventCount: events.length, activityTimestamps: events.filter(event => event.type !== 'task' && event.type !== 'status').map(event => event.timestamp) };
+}
+
+/** 从这次执行的全部事件得出与 getAttemptToolEvents 相同的事件；larkReplayUnsafeReason 只看这两类。 */
+export const larkToolEvents = (events: AgentEvent[]) => events.filter(event => event.type === 'tool_call' || event.type === 'tool_result');
 
 /** 只读的工具（Claude Code 的工具名，小写比较）。子 Agent、发消息、改文件、MCP 都不在内。 */
 const readOnlyTools = new Set(['read', 'grep', 'glob', 'ls', 'notebookread', 'todowrite', 'todoread', 'taskcreate', 'taskupdate', 'tasklist', 'taskget',

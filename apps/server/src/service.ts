@@ -35,7 +35,7 @@ import type { CollaborationExtensions } from './collaboration-extensions.js';
 import { LarkGroupManager } from './lark/group-management.js';
 import { backfillBotPromptVersions, larkMemoryEnabled, readLarkConfig, readLarkConfigs } from './lark/config.js';
 import { DutydeckRuntime } from '@dutydeck/runtime';
-import { loadConfigWithDiagnostics, resolveDatabaseUrl, type AppConfig } from '@dutydeck/config';
+import { loadConfigWithDiagnosticsAsync, resolveDatabaseUrl, type AppConfig } from '@dutydeck/config';
 import { logDroppedAgents } from './agent-config-log.js';
 import { assertBotProcessStartup, childProcessIdentity, createRepositories, observeProcess } from '@dutydeck/storage';
 import { createPtyRetirementControl } from './pty-recovery.js';
@@ -243,7 +243,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   startupPhase('plugins');
   const { config, droppedAgents, repos } = await (async () => {
     try {
-      const { config, droppedAgents } = loadConfigWithDiagnostics(options.env ?? process.env, PTY_AGENT_CONTRIBUTIONS, pluginHost?.agents);
+      const { config, droppedAgents } = await loadConfigWithDiagnosticsAsync(options.env ?? process.env, PTY_AGENT_CONTRIBUTIONS, pluginHost?.agents);
       startupPhase('config');
       const refusal = unauthenticatedListenRefusal(config, options.env ?? process.env);
       if (refusal) throw new Error(refusal);
