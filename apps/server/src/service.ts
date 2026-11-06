@@ -463,9 +463,10 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     }
   }) : undefined;
   const ptyRetirement = createPtyRetirementControl({ identify: childProcessIdentity, observe: observeProcess }, session => primaryHerdrBackend(session.id));
+  const sessionAgentConfig = (agent: import('@dutydeck/shared').AgentConfig, session: Session) => agentModelSettings.resolveForSession(agent, session, async id => await workItems.parentForSession(id) ?? await delegations.parentForSession(id));
   const runtime: DutydeckRuntime = new DutydeckRuntime(repos, {
     matterTracking: matters,
-    configureAgent: (agent, session) => agentModelSettings.resolveForSession(agent, session, async id => await workItems.parentForSession(id) ?? await delegations.parentForSession(id)),
+    configureAgent: sessionAgentConfig,
     ptyRetirement,
     admitTask: pluginWiring
       ? async (session, request) => { await usageLedger.admit(session, request); await pluginWiring.hooks.taskReceived(session, request); }
@@ -805,6 +806,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       return await authorizeInstallationManagement(request) && (await authorizeSessionRequest(request, sessionId, 'session', 'task.view_result')).allowed;
     } },
     agentModelSettings,
+    sessionAgentConfig,
       ...(insightService
         ? { insight: { service: insightService, authorize: async request => Boolean(await resolveInstallationPrincipal(request)) } }
         : {}),

@@ -64,6 +64,15 @@ describe('controlled physical resources and strict native context',()=>{
   expect((await h.runtime.send(h.session.id,'configured')).status).toBe('completed');
   expect(JSON.parse(await readFile(join(h.dir,'native-state.json'),'utf8'))).toMatchObject({model:'B',effort:'high'});
  });
+ it('rejects a model the Agent does not offer before any native write and keeps the session usable',async()=>{
+  const h=await setup();
+  await expect(h.runtime.setModel(h.session.id,'typo-model')).rejects.toMatchObject({code:'MODEL_SWITCH_FAILED',message:expect.stringContaining('typo-model')});
+  await expect(h.runtime.setReasoningEffort(h.session.id,'extreme')).rejects.toMatchObject({code:'REASONING_SWITCH_FAILED'});
+  expect((await h.calls()).filter(c=>c.method==='session/set_config_option')).toHaveLength(0);
+  expect(await h.repos.config.get(`runtime_driver_configuration:${h.session.id}`)).toBeFalsy();
+  expect((await h.runtime.send(h.session.id,'after typo')).status).toBe('completed');
+  expect(JSON.parse(await readFile(join(h.dir,'native-state.json'),'utf8'))).toMatchObject({model:'A',effort:'low'});
+ });
  it('does not resend a prompt when its error contains resource not found',async()=>{
   const h=await setup();await writeFile(join(h.dir,'fail-prompt'),'1');
   const task=await h.runtime.send(h.session.id,'unknown');expect(h.repos.execution.getTaskExecution(task.id)?.attempts[0]?.state).toBe('reconcile_required');

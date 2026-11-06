@@ -107,6 +107,8 @@ export interface BuildAppOptions {
   pluginBusinessTools?: PluginBusinessToolRoutes;
   configurationExplanation?: ConfigurationExplanationOptions;
   agentModelSettings?: AgentModelSettings;
+  /** 会话实际启动用的 Agent 配置（机器人级模型设置、父会话继承），切换模型前按它探测可选值。 */
+  sessionAgentConfig?: (agent: import('@dutydeck/shared').AgentConfig, session: import('@dutydeck/shared').Session) => Promise<import('@dutydeck/shared').AgentConfig>;
   terminalSettings?: TerminalSettings;
   recovery?: RecoveryRouteOptions;
   workspaceGroups?: WorkspaceGroupRouteOptions;
@@ -567,15 +569,33 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     }
     return reply.code(202).send({ accepted: true, task: steering.task, steering: { outcome: steering.outcome, ...(steering.error ? { error: steering.error } : {}) } });
   });
+  /** 切换前对照 Agent 公布的可选值（与飞书 /model、/effort 同一份探测和缓存）；10 秒内读不到列表或 Agent 不公布时交给 runtime 判定。 */
+  const rejectUnofferedSessionConfig = async (sessionId: string, field: 'model' | 'reasoningEffort', value: string) => {
+    const session = await runtime.getSession(sessionId);
+    const agent = session && (await runtime.listAgents()).find(item => item.id === session.agentId);
+    if (!session || !agent || !['acp', 'auto'].includes(agent.protocol)) return;
+    const probeModel = session.model ?? agent.model;
+    let timer: NodeJS.Timeout | undefined;
+    const found = await Promise.race([
+      discoverAgentModels({ ...(await options.sessionAgentConfig?.(agent, session) ?? agent), ...(probeModel ? { model: probeModel } : {}), cwd: session.cwd }, probeModel).catch(() => undefined),
+      new Promise<undefined>(resolve => { timer = setTimeout(resolve, 10_000, undefined); })
+    ]).finally(() => clearTimeout(timer));
+    const offered = (field === 'model' ? found?.models : found?.reasoningEfforts)?.map(item => item.id) ?? [];
+    if (offered.length && !offered.includes(value)) throw new RuntimeError('INVALID_SESSION_CONFIG', field === 'model'
+      ? `Agent 未提供模型 ${value}，配置没有改动。请从可选模型里选择。`
+      : `当前模型未提供思考强度 ${value}，配置没有改动。请从可选档位里选择。`, 422);
+  };
   app.patch<{ Params: { id: string }; Body: { model?: string; reasoningEffort?: string } }>('/api/sessions/:id/config', async request => {
     const model = request.body?.model?.trim();
     if (model) {
       await requireSessionExecution(request, request.params.id, 'session', 'run.change_model');
+      await rejectUnofferedSessionConfig(request.params.id, 'model', model);
       return runtime.setModel(request.params.id, model);
     }
     const reasoningEffort = request.body?.reasoningEffort?.trim();
     if (reasoningEffort) {
       await requireSessionExecution(request, request.params.id, 'session', 'run.change_model');
+      await rejectUnofferedSessionConfig(request.params.id, 'reasoningEffort', reasoningEffort);
       return runtime.setReasoningEffort(request.params.id, reasoningEffort);
     }
     throw new RuntimeError('INVALID_SESSION_CONFIG', 'Model or reasoning effort is required', 400);

@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
 import type { AgentConfig, AgentDriver, BoundExecutionRepository, NormalizedDriverEvent, Session, TaskExecutionContext, TaskRequestV1 } from '@dutydeck/shared';
-import { canonicalExecutionJson, DriverRecoveryError, PromptNotWrittenError } from '@dutydeck/shared';
+import { canonicalExecutionJson, DriverRecoveryError, PromptNotWrittenError, RuntimeError } from '@dutydeck/shared';
 import { DutydeckRuntime, type RuntimeOptions } from './index.js';
 
 function deferred() { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done; }); return { promise, resolve }; }
@@ -323,6 +323,22 @@ describe('Runtime uses the execution ledger', () => {
     expect((await h.runtime.send(h.session.id, 'default')).status).toBe('failed'); expect(h.sent).toEqual([]);
     await h.runtime.stop(h.session.id);
     await expect(h.runtime.resume(h.session.id)).rejects.toMatchObject({ code: 'DRIVER_CONFIGURATION_UNKNOWN' });
+  });
+  it('a model the driver rejects before any change leaves the session usable', async () => {
+    const h = await fixture();
+    h.driver().setModel = async model => { throw new RuntimeError('CONFIGURATION_REJECTED', `Model ${model} is not supported by Agent mock`, 422); };
+    await expect(h.runtime.setModel(h.session.id, 'typo-model')).rejects.toMatchObject({ code: 'MODEL_SWITCH_FAILED', message: expect.stringContaining('typo-model') });
+    expect(await h.repos.config.get('runtime_driver_configuration:' + h.session.id)).toBeFalsy();
+    expect((await h.runtime.getSession(h.session.id))?.model).toBe('default-model');
+    expect((await h.runtime.send(h.session.id, 'after typo')).status).toBe('completed');
+    expect(h.sent).toEqual(['after typo']);
+  });
+  it('keeps configuration unknown when a rejection follows a native change that already applied', async () => {
+    const h = await fixture();
+    h.driver().setReasoningEffort = async () => { throw new RuntimeError('CONFIGURATION_REJECTED', 'Reasoning effort x is not supported', 422); };
+    const result = await h.runtime.send(h.session.id, 'special', 'special', undefined, undefined, [], request(h.session.id, 'special', { model: 'B', reasoningEffort: 'x' }));
+    expect(result.status).toBe('failed'); expect(h.models).toEqual(['B']);
+    expect(JSON.parse((await h.repos.config.get('runtime_driver_configuration:' + h.session.id))!).state).toBe('unknown');
   });
   it('allows only the original configuration RPC to finish and records defaults before clearing its gate', async () => {
     const h = await fixture(); const entered = deferred(), release = deferred();

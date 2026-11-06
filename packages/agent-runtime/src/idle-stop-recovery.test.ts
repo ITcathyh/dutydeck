@@ -132,3 +132,30 @@ it('skips only the session whose saved workspace disappeared during startup reco
   expect(warned(restarted.log, 'WORKSPACE_UNAVAILABLE')).toEqual([[expect.objectContaining({ sessionId: lost.id }), expect.any(String)]]);
   expect((await restarted.runtime.send(healthy.id, 'still works')).status).toBe('completed');
 });
+
+it('a session whose idle check throws is logged and skipped while the other idle sessions are still retired', async () => {
+  const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
+  cleanup.push(() => repos.close());
+  const h = runtimeFor(repos);
+  await h.runtime.initialize([agent]);
+  const broken = await h.runtime.start({ agentId: agent.id }), healthy = await h.runtime.start({ agentId: agent.id });
+  h.drivers[0]!.prepareForIdleRetirement = async () => { throw new Error('native check exploded'); };
+  await h.runtime.cleanupIdleDrivers(Date.now() + 100);
+  expect(h.drivers[0]!.stop).not.toHaveBeenCalled();
+  expect(h.drivers[1]!.stop).toHaveBeenCalledOnce();
+  expect(h.runtime.getDriver(healthy.id)).toBeUndefined();
+  expect(h.log.warn).toHaveBeenCalledWith(expect.objectContaining({ sessionId: broken.id, error: 'native check exploded' }), 'Idle driver check failed');
+});
+
+it('logs a maintenance loop failure instead of swallowing it', async () => {
+  const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
+  cleanup.push(() => repos.close());
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+  const log = { warn: vi.fn(), info: vi.fn() };
+  const runtime = new DutydeckRuntime(repos, { cleanupIntervalMs: 1_000, log, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: () => { throw new Error('unused'); } });
+  cleanup.push(() => runtime.shutdown());
+  await runtime.initialize([agent]);
+  vi.spyOn(repos.execution, 'getReconcileRequiredAttempts').mockImplementation(() => { throw new Error('ledger read failed'); });
+  await vi.advanceTimersByTimeAsync(1_000);
+  await vi.waitFor(() => expect(log.warn).toHaveBeenCalledWith(expect.objectContaining({ error: 'ledger read failed' }), 'Runtime maintenance loop failed'));
+});

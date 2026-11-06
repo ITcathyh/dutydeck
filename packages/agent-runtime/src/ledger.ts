@@ -157,7 +157,7 @@ export class DriverConfigurationLedger {
     } catch { /* Invalid evidence is unknown, never a reset to known options. */ }
     throw new RuntimeError(pending ? 'DRIVER_CONFIGURATION_BUSY' : 'DRIVER_CONFIGURATION_UNKNOWN', pending
       ? 'A native configuration change is awaiting confirmation'
-      : 'Native configuration is unverified; original-context configuration proof is required before reuse', 409);
+      : `这个会话上次切换模型、思考强度或权限时没能确认结果，Agent 现在用的配置未知，暂时不能接新消息。请部署者先运行 dutydeck recovery inspect ${sessionId} 查到运行 ID，再运行 dutydeck recovery restore-configuration ${sessionId} --run-id <运行 ID> 核实并恢复原配置。`, 409);
   }
   async begin(sessionId: string, driverIdentity: string, target: ExecutionOptions) {
     await this.assertClear(sessionId);
