@@ -1,93 +1,83 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 410" width="1000" height="410" role="img" aria-label="Dutydeck architecture">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 410" width="1000" height="410" role="img" aria-label="架构：飞书、Web 工作台和 CLI/HTTP 触发器连到跑在本机的 Dutydeck 守护进程，守护进程通过终端（PTY）或 ACP 驱动本机 Agent">
 <defs>
-  <linearGradient id="lg-bg" x1="8" y1="5" x2="57" y2="61" gradientUnits="userSpaceOnUse"><stop stop-color="#292b31"/><stop offset="1" stop-color="#090a0d"/></linearGradient>
-  <linearGradient id="lg-beam" x1="18" y1="45" x2="48" y2="17" gradientUnits="userSpaceOnUse"><stop stop-color="#fff"/><stop offset="1" stop-color="#b8b9c2"/></linearGradient>
-  <linearGradient id="lg-pulse" x1="38" y1="20" x2="50" y2="31" gradientUnits="userSpaceOnUse"><stop stop-color="#c4b5fd"/><stop offset="1" stop-color="#7c3aed"/></linearGradient>
-  <linearGradient id="arch-bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#120f24"/><stop offset="1" stop-color="#0a1020"/></linearGradient>
-  <linearGradient id="core" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#3b1585"/><stop offset="1" stop-color="#1e0b4b"/></linearGradient>
-  <style>
-    text { white-space: pre; }
-    .pulse { transform-box: fill-box; transform-origin: center; animation: pulse 2.4s ease-in-out infinite; }
-    .flow { animation: dash 1.4s linear infinite; }
-    @keyframes pulse { 0%,100% { transform: scale(1) } 50% { transform: scale(1.35) } }
-    @keyframes dash { to { stroke-dashoffset: -28 } }
-  </style>
+<linearGradient id="lg-bg" x1="8" y1="5" x2="57" y2="61" gradientUnits="userSpaceOnUse"><stop stop-color="#292b31"/><stop offset="1" stop-color="#090a0d"/></linearGradient>
+<linearGradient id="lg-beam" x1="18" y1="45" x2="48" y2="17" gradientUnits="userSpaceOnUse"><stop stop-color="#fff"/><stop offset="1" stop-color="#b8b9c2"/></linearGradient>
+<linearGradient id="lg-pulse" x1="38" y1="20" x2="50" y2="31" gradientUnits="userSpaceOnUse"><stop stop-color="#c4b5fd"/><stop offset="1" stop-color="#7c3aed"/></linearGradient>
+<linearGradient id="arch-bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#120f24"/><stop offset="1" stop-color="#0a1020"/></linearGradient>
+<linearGradient id="core" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#3b1585"/><stop offset="1" stop-color="#1e0b4b"/></linearGradient>
+<filter id="core-glow" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="10"/></filter>
+<clipPath id="frame"><rect width="1000" height="410" rx="24"/></clipPath>
+<filter id="edge-blur" x="-5%" y="-5%" width="110%" height="110%"><feGaussianBlur stdDeviation="6"/></filter>
+<style>
+text{white-space:pre}
+.s{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif}
+.m{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono','Noto Sans Mono CJK SC',monospace}
+.pulse{transform-box:fill-box;transform-origin:center;animation:pulse 2.4s ease-in-out infinite}
+@keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.3)}}
+@media (prefers-reduced-motion:reduce){*{animation:none!important}}
+.flow{animation:dash 1.4s linear infinite}
+@keyframes dash{to{stroke-dashoffset:-28}}
+.breathe{animation:breathe 4s ease-in-out infinite}
+@keyframes breathe{0%,100%{opacity:.25}50%{opacity:.75}}
+</style>
 </defs>
 <rect width="1000" height="410" rx="24" fill="url(#arch-bg)"/>
-<text x="40" y="52" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="13" font-weight="600" fill="#a9a6d6" text-anchor="start" >交互入口</text>
-<rect x="30" y="70" width="210" height="76" rx="12" fill="#ffffff" stroke="#3370ff55"/>
-<text x="50" y="103" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="20" font-weight="400" fill="#1f2329" text-anchor="start" >📱</text>
-<text x="84" y="103" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="15" font-weight="700" fill="#1f2329" text-anchor="start" >飞书 / Lark</text>
-<text x="84" y="126" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="12" font-weight="400" fill="#646a73" text-anchor="start" >私聊 · 群聊 · 卡片</text>
-<path d="M240 108 C 300 108, 320 230, 380 230" fill="none" stroke="#7c3aed66" stroke-width="2"/>
-<path class="flow" d="M240 108 C 300 108, 320 230, 380 230" fill="none" stroke="#c4b5fd" stroke-width="2" stroke-dasharray="4 10"/>
-<rect x="30" y="170" width="210" height="76" rx="12" fill="#ffffff" stroke="#3370ff55"/>
-<text x="50" y="203" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="20" font-weight="400" fill="#1f2329" text-anchor="start" >🖥️</text>
-<text x="84" y="203" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="15" font-weight="700" fill="#1f2329" text-anchor="start" >Web 工作台</text>
-<text x="84" y="226" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="12" font-weight="400" fill="#646a73" text-anchor="start" >任务 · 改动 · 追踪</text>
-<path d="M240 208 C 300 208, 320 230, 380 230" fill="none" stroke="#7c3aed66" stroke-width="2"/>
-<path class="flow" d="M240 208 C 300 208, 320 230, 380 230" fill="none" stroke="#c4b5fd" stroke-width="2" stroke-dasharray="4 10"/>
-<rect x="30" y="270" width="210" height="76" rx="12" fill="#ffffff" stroke="#3370ff55"/>
-<text x="50" y="303" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="20" font-weight="400" fill="#1f2329" text-anchor="start" >⌨️</text>
-<text x="84" y="303" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="15" font-weight="700" fill="#1f2329" text-anchor="start" >CLI · HTTP 触发器</text>
-<text x="84" y="326" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="12" font-weight="400" fill="#646a73" text-anchor="start" >脚本 · 监控 · CI</text>
-<path d="M240 308 C 300 308, 320 230, 380 230" fill="none" stroke="#7c3aed66" stroke-width="2"/>
-<path class="flow" d="M240 308 C 300 308, 320 230, 380 230" fill="none" stroke="#c4b5fd" stroke-width="2" stroke-dasharray="4 10"/>
-<rect x="380" y="60" width="280" height="320" rx="18" fill="url(#core)" stroke="#a78bfa" stroke-width="1.5"/>
-<g transform="translate(400 80) scale(0.625)">
-  <rect width="64" height="64" rx="16" fill="url(#lg-bg)" stroke="#ffffff22"/>
-  <path d="M42 17H29c-8.3 0-15 6.7-15 15s6.7 15 15 15h13" fill="none" stroke="url(#lg-beam)" stroke-width="5" stroke-linecap="round"/>
-  <path d="M42 25H30a7 7 0 0 0 0 14h12" fill="none" stroke="#71717a" stroke-width="4" stroke-linecap="round"/>
-  <circle class="pulse" cx="45" cy="25" r="5" fill="url(#lg-pulse)" stroke="#ddd6fe" stroke-width="1.5"/>
-  <circle cx="45" cy="39" r="3" fill="#f4f4f5"/>
+<g clip-path="url(#frame)"><rect x="1" y="1" width="998" height="408" rx="24" fill="none" stroke="#a78bfa" stroke-opacity=".35" stroke-width="8" filter="url(#edge-blur)"/></g>
+<rect x=".5" y=".5" width="999" height="409" rx="23.5" fill="none" stroke="#ffffff1f"/>
+<text class="s" x="38" y="52" font-size="13" font-weight="600" fill="#a9a6d6">交互入口</text>
+<rect x="28" y="70" width="204" height="76" rx="12" fill="#ffffff0d" stroke="#ffffff26"/>
+<path transform="translate(44 88) scale(0.9167)" d="M4 5.5A1.5 1.5 0 0 1 5.5 4h13A1.5 1.5 0 0 1 20 5.5v9a1.5 1.5 0 0 1-1.5 1.5H10l-4.5 4v-4h0A1.5 1.5 0 0 1 4 14.5z" fill="none" stroke="#c4b5fd" stroke-width="1.964" stroke-linecap="round" stroke-linejoin="round"/>
+<text class="s" x="78" y="103" font-size="14.5" font-weight="700" fill="#ecebff">飞书 / Lark</text>
+<text class="s" x="78" y="126" font-size="12" font-weight="400" fill="#a9a6d6">私聊 · 群聊 · 卡片</text>
+<path d="M232 108 C 290 108, 322 230, 376 230" fill="none" stroke="#7c3aed66" stroke-width="2"/><path class="flow" d="M232 108 C 290 108, 322 230, 376 230" fill="none" stroke="#c4b5fd" stroke-width="2" stroke-dasharray="4 10"/>
+<rect x="28" y="170" width="204" height="76" rx="12" fill="#ffffff0d" stroke="#ffffff26"/>
+<path transform="translate(44 188) scale(0.9167)" d="M3.5 4.5h17v11h-17z M8 20h8 M12 15.5V20" fill="none" stroke="#c4b5fd" stroke-width="1.964" stroke-linecap="round" stroke-linejoin="round"/>
+<text class="s" x="78" y="203" font-size="14.5" font-weight="700" fill="#ecebff">Web 工作台</text>
+<text class="s" x="78" y="226" font-size="12" font-weight="400" fill="#a9a6d6">任务 · 改动 · 追踪</text>
+<path d="M232 208 C 290 208, 322 230, 376 230" fill="none" stroke="#7c3aed66" stroke-width="2"/><path class="flow" d="M232 208 C 290 208, 322 230, 376 230" fill="none" stroke="#c4b5fd" stroke-width="2" stroke-dasharray="4 10"/>
+<rect x="28" y="270" width="204" height="76" rx="12" fill="#ffffff0d" stroke="#ffffff26"/>
+<path transform="translate(44 288) scale(0.9167)" d="M3.5 4.5h17v15h-17z M7.5 9.5l3 2.5-3 2.5 M12.5 15h4" fill="none" stroke="#c4b5fd" stroke-width="1.964" stroke-linecap="round" stroke-linejoin="round"/>
+<text class="s" x="78" y="303" font-size="14.5" font-weight="700" fill="#ecebff">CLI · HTTP 触发器</text>
+<text class="s" x="78" y="326" font-size="12" font-weight="400" fill="#a9a6d6">脚本 · 监控 · CI</text>
+<path d="M232 308 C 290 308, 322 230, 376 230" fill="none" stroke="#7c3aed66" stroke-width="2"/><path class="flow" d="M232 308 C 290 308, 322 230, 376 230" fill="none" stroke="#c4b5fd" stroke-width="2" stroke-dasharray="4 10"/>
+<rect x="256.0" y="160.0" width="99" height="18" rx="9" fill="#120f24" stroke="#7c3aed99"/><text class="s" x="305.5" y="172.5" font-size="10" font-weight="600" fill="#c4b5fd" text-anchor="middle">长连接 · Card 2.0</text>
+<rect x="268.5" y="210.0" width="74" height="18" rx="9" fill="#120f24" stroke="#7c3aed99"/><text class="s" x="305.5" y="222.5" font-size="10" font-weight="600" fill="#c4b5fd" text-anchor="middle">HTTP · SSE</text>
+<rect x="283.5" y="260.0" width="44" height="18" rx="9" fill="#120f24" stroke="#7c3aed99"/><text class="s" x="305.5" y="272.5" font-size="10" font-weight="600" fill="#c4b5fd" text-anchor="middle">HTTP</text>
+<rect class="breathe" x="376" y="60" width="296" height="320" rx="18" fill="none" stroke="#a78bfa" stroke-width="6" filter="url(#core-glow)"/>
+<rect x="376" y="60" width="296" height="320" rx="18" fill="url(#core)" stroke="#a78bfa" stroke-width="1.5"/>
+<g transform="translate(396 80) scale(0.625)">
+<rect width="64" height="64" rx="16" fill="url(#lg-bg)" stroke="#ffffff22"/>
+<path d="M42 17H29c-8.3 0-15 6.7-15 15s6.7 15 15 15h13" fill="none" stroke="url(#lg-beam)" stroke-width="5" stroke-linecap="round"/>
+<path d="M42 25H30a7 7 0 0 0 0 14h12" fill="none" stroke="#71717a" stroke-width="4" stroke-linecap="round"/>
+<circle class="pulse" cx="45" cy="25" r="5" fill="url(#lg-pulse)" stroke="#ddd6fe" stroke-width="1.5"/>
+<circle cx="45" cy="39" r="3" fill="#f4f4f5"/>
 </g>
-<text x="452" y="100" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="17" font-weight="800" fill="#ffffff" text-anchor="start" >Dutydeck 守护进程</text>
-<text x="452" y="120" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="12" font-weight="400" fill="#c4b5fd" text-anchor="start" >跑在你的机器上</text>
-<rect x="400" y="144" width="116" height="38" rx="9" fill="#ffffff14" stroke="#ffffff30"/>
-<text x="458" y="168" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="13" font-weight="600" fill="#ecebff" text-anchor="middle" >任务队列</text>
-<rect x="524" y="144" width="116" height="38" rx="9" fill="#ffffff14" stroke="#ffffff30"/>
-<text x="582" y="168" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="13" font-weight="600" fill="#ecebff" text-anchor="middle" >权限门禁</text>
-<rect x="400" y="194" width="116" height="38" rx="9" fill="#ffffff14" stroke="#ffffff30"/>
-<text x="458" y="218" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="13" font-weight="600" fill="#ecebff" text-anchor="middle" >验证门禁</text>
-<rect x="524" y="194" width="116" height="38" rx="9" fill="#ffffff14" stroke="#ffffff30"/>
-<text x="582" y="218" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="13" font-weight="600" fill="#ecebff" text-anchor="middle" >执行账本</text>
-<rect x="400" y="244" width="116" height="38" rx="9" fill="#ffffff14" stroke="#ffffff30"/>
-<text x="458" y="268" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="13" font-weight="600" fill="#ecebff" text-anchor="middle" >长期记忆</text>
-<rect x="524" y="244" width="116" height="38" rx="9" fill="#ffffff14" stroke="#ffffff30"/>
-<text x="582" y="268" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="13" font-weight="600" fill="#ecebff" text-anchor="middle" >插件 Host</text>
-<g transform="translate(480 300)"><path d="M0 8v38c0 6 18 10 40 10s40-4 40-10V8" fill="#ffffff10" stroke="#c4b5fd"/><ellipse cx="40" cy="8" rx="40" ry="10" fill="#2e1065" stroke="#c4b5fd"/></g>
-<text x="520" y="336" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="12" font-weight="600" fill="#ecebff" text-anchor="middle" >SQLite</text>
-<text x="740" y="52" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="13" font-weight="600" fill="#a9a6d6" text-anchor="start" >本机 Agent</text>
+<text class="s" x="448" y="100" font-size="17" font-weight="800" fill="#ffffff">Dutydeck 守护进程</text>
+<text class="s" x="448" y="120" font-size="12" font-weight="400" fill="#c4b5fd">跑在你的机器上</text>
+<rect x="394" y="144" width="126" height="38" rx="9" fill="#ffffff14" stroke="#ffffff30"/><text class="s" x="457" y="168" font-size="13" font-weight="600" fill="#ecebff" text-anchor="middle">任务队列</text>
+<rect x="528" y="144" width="126" height="38" rx="9" fill="#ffffff14" stroke="#ffffff30"/><text class="s" x="591" y="168" font-size="13" font-weight="600" fill="#ecebff" text-anchor="middle">权限门禁</text>
+<rect x="394" y="194" width="126" height="38" rx="9" fill="#ffffff14" stroke="#ffffff30"/><text class="s" x="457" y="218" font-size="13" font-weight="600" fill="#ecebff" text-anchor="middle">验证门禁</text>
+<rect x="528" y="194" width="126" height="38" rx="9" fill="#ffffff14" stroke="#ffffff30"/><text class="s" x="591" y="218" font-size="13" font-weight="600" fill="#ecebff" text-anchor="middle">执行账本</text>
+<rect x="394" y="244" width="126" height="38" rx="9" fill="#ffffff14" stroke="#ffffff30"/><text class="s" x="457" y="268" font-size="13" font-weight="600" fill="#ecebff" text-anchor="middle">长期记忆</text>
+<rect x="528" y="244" width="126" height="38" rx="9" fill="#ffffff14" stroke="#ffffff30"/><text class="s" x="591" y="268" font-size="13" font-weight="600" fill="#ecebff" text-anchor="middle">插件 Host</text>
+<g transform="translate(484 300)"><path d="M0 8v38c0 6 18 10 40 10s40-4 40-10V8" fill="#ffffff10" stroke="#c4b5fd"/><ellipse cx="40" cy="8" rx="40" ry="10" fill="#2e1065" stroke="#c4b5fd"/></g>
+<text class="s" x="524" y="336" font-size="12" font-weight="600" fill="#ecebff" text-anchor="middle">SQLite</text>
+<text class="s" x="740" y="52" font-size="13" font-weight="600" fill="#a9a6d6">本机 Agent</text>
 <rect x="730" y="70" width="240" height="176" rx="12" fill="#0d1117" stroke="#30363d"/>
-<text x="750" y="100" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="15" font-weight="700" fill="#e6edf3" text-anchor="start" >终端适配器</text>
-<text x="750" y="120" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="12" font-weight="400" fill="#8b949e" text-anchor="start" >tmux / Herdr · 30 种</text>
-<rect x="750" y="140" width="93" height="24" rx="12" fill="#ffffff0d" stroke="#ffffff26"/>
-<text x="796.6" y="156" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="11" font-weight="500" fill="#c9d1d9" text-anchor="middle" >Claude Code</text>
-<rect x="849" y="140" width="50" height="24" rx="12" fill="#ffffff0d" stroke="#ffffff26"/>
-<text x="874.2" y="156" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="11" font-weight="500" fill="#c9d1d9" text-anchor="middle" >Codex</text>
-<rect x="750" y="172" width="86" height="24" rx="12" fill="#ffffff0d" stroke="#ffffff26"/>
-<text x="793.0" y="188" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="11" font-weight="500" fill="#c9d1d9" text-anchor="middle" >Gemini CLI</text>
-<rect x="842" y="172" width="93" height="24" rx="12" fill="#ffffff0d" stroke="#ffffff26"/>
-<text x="888.6" y="188" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="11" font-weight="500" fill="#c9d1d9" text-anchor="middle" >Copilot CLI</text>
-<rect x="750" y="204" width="57" height="24" rx="12" fill="#ffffff0d" stroke="#ffffff26"/>
-<text x="778.6" y="220" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="11" font-weight="500" fill="#c9d1d9" text-anchor="middle" >Cursor</text>
-<rect x="813" y="204" width="72" height="24" rx="12" fill="#ffffff0d" stroke="#ffffff26"/>
-<text x="849.0" y="220" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="11" font-weight="500" fill="#c9d1d9" text-anchor="middle" >OpenCode</text>
-<rect x="891" y="204" width="36" height="24" rx="12" fill="#ffffff0d" stroke="#ffffff26"/>
-<text x="908.6" y="220" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="11" font-weight="500" fill="#c9d1d9" text-anchor="middle" >+24</text>
+<text class="s" x="750" y="100" font-size="15" font-weight="700" fill="#e6edf3">终端适配器</text>
+<text class="s" x="750" y="120" font-size="12" font-weight="400" fill="#8b949e">tmux（Herdr 可选）· 30 种</text>
+<rect x="750" y="140" width="82" height="24" rx="12" fill="#ffffff0d" stroke="#ffffff26"/><text class="s" x="791" y="156" font-size="11" font-weight="500" fill="#c9d1d9" text-anchor="middle">Claude Code</text>
+<rect x="838" y="140" width="50" height="24" rx="12" fill="#ffffff0d" stroke="#ffffff26"/><text class="s" x="863" y="156" font-size="11" font-weight="500" fill="#c9d1d9" text-anchor="middle">Codex</text>
+<rect x="750" y="172" width="75" height="24" rx="12" fill="#ffffff0d" stroke="#ffffff26"/><text class="s" x="787.5" y="188" font-size="11" font-weight="500" fill="#c9d1d9" text-anchor="middle">Gemini CLI</text>
+<rect x="831" y="172" width="81" height="24" rx="12" fill="#ffffff0d" stroke="#ffffff26"/><text class="s" x="871.5" y="188" font-size="11" font-weight="500" fill="#c9d1d9" text-anchor="middle">Copilot CLI</text>
+<rect x="750" y="204" width="56" height="24" rx="12" fill="#ffffff0d" stroke="#ffffff26"/><text class="s" x="778" y="220" font-size="11" font-weight="500" fill="#c9d1d9" text-anchor="middle">Cursor</text>
+<rect x="812" y="204" width="69" height="24" rx="12" fill="#ffffff0d" stroke="#ffffff26"/><text class="s" x="846.5" y="220" font-size="11" font-weight="500" fill="#c9d1d9" text-anchor="middle">OpenCode</text>
+<rect x="887" y="204" width="58" height="24" rx="12" fill="#7c3aed33" stroke="#a78bfa"/><text class="s" x="916" y="220" font-size="11" font-weight="500" fill="#ede9fe" text-anchor="middle">等 30 种</text>
 <rect x="730" y="270" width="240" height="76" rx="12" fill="#0d1117" stroke="#30363d"/>
-<text x="750" y="302" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="15" font-weight="700" fill="#e6edf3" text-anchor="start" >ACP Agent</text>
-<text x="750" y="324" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="12" font-weight="400" fill="#8b949e" text-anchor="start" >任意 ACP 兼容 Agent</text>
-<path d="M660 158H730" stroke="#3fb95066" stroke-width="2"/>
-<path class="flow" d="M660 158H730" stroke="#7ee787" stroke-width="2" stroke-dasharray="4 10"/>
-<rect x="673" y="136" width="44" height="18" rx="9" fill="#0d1117" stroke="#3fb95066"/><text x="695" y="149" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono','Noto Sans Mono CJK SC',monospace" font-size="10" font-weight="700" fill="#7ee787" text-anchor="middle" >PTY</text>
-<path d="M660 308H730" stroke="#3fb95066" stroke-width="2"/>
-<path class="flow" d="M660 308H730" stroke="#7ee787" stroke-width="2" stroke-dasharray="4 10"/>
-<rect x="673" y="286" width="44" height="18" rx="9" fill="#0d1117" stroke="#3fb95066"/><text x="695" y="299" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono','Noto Sans Mono CJK SC',monospace" font-size="10" font-weight="700" fill="#7ee787" text-anchor="middle" >ACP</text>
-<rect x="252" y="78" width="115" height="18" rx="9" fill="#120f24" stroke="#7c3aed66"/>
-<text x="310" y="91" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="10" font-weight="600" fill="#c4b5fd" text-anchor="middle" >长连接 · Card 2.0</text>
-<rect x="272" y="199" width="76" height="18" rx="9" fill="#120f24" stroke="#7c3aed66"/>
-<text x="310" y="212" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="10" font-weight="600" fill="#c4b5fd" text-anchor="middle" >HTTP · SSE</text>
-<rect x="291" y="320" width="39" height="18" rx="9" fill="#120f24" stroke="#7c3aed66"/>
-<text x="310" y="333" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="10" font-weight="600" fill="#c4b5fd" text-anchor="middle" >HTTP</text>
+<text class="s" x="750" y="302" font-size="15" font-weight="700" fill="#e6edf3">ACP Agent</text>
+<text class="s" x="750" y="324" font-size="12" font-weight="400" fill="#8b949e">acpx 登记 21 个 · 也可自定义</text>
+<path d="M672 158H730" fill="none" stroke="#3fb95066" stroke-width="2"/><path class="flow" d="M672 158H730" fill="none" stroke="#7ee787" stroke-width="2" stroke-dasharray="4 10"/>
+<rect x="679" y="136" width="44" height="18" rx="9" fill="#0d1117" stroke="#3fb95066"/><text class="s" x="701" y="149" font-size="10" font-weight="700" fill="#7ee787" text-anchor="middle">PTY</text>
+<path d="M672 308H730" fill="none" stroke="#3fb95066" stroke-width="2"/><path class="flow" d="M672 308H730" fill="none" stroke="#7ee787" stroke-width="2" stroke-dasharray="4 10"/>
+<rect x="679" y="286" width="44" height="18" rx="9" fill="#0d1117" stroke="#3fb95066"/><text class="s" x="701" y="299" font-size="10" font-weight="700" fill="#7ee787" text-anchor="middle">ACP</text>
 </svg>

@@ -1,128 +1,126 @@
+<a id="readme-top"></a>
+
 <div align="center">
 
-<img src="docs/assets/banner-zh.svg" alt="Dutydeck：让开发机上的编码 Agent，在飞书里随叫随到" width="100%">
+<img src="docs/assets/banner-zh.svg" alt="Dutydeck：在飞书派活，Agent 在你的机器上干活" width="100%">
 
-<p>
-  <a href="#quick-start"><img src="https://img.shields.io/badge/快速上手-3_分钟-7c3aed?style=flat-square" alt="快速上手"></a>
-  <img src="https://img.shields.io/badge/Node.js-%E2%89%A5_22.12-339933?style=flat-square&logo=nodedotjs&logoColor=white" alt="Node.js ≥ 22.12">
-  <img src="https://img.shields.io/badge/飞书_%2F_Lark-卡片_2.0-3370FF?style=flat-square" alt="飞书 / Lark">
-  <img src="https://img.shields.io/badge/终端适配器-30_种-111827?style=flat-square" alt="30 种终端适配器">
-  <img src="https://img.shields.io/badge/ACP-兼容-0EA5E9?style=flat-square" alt="ACP">
-</p>
+<h3>在飞书派活，Agent 在你的机器上干活</h3>
 
-<p>
-  <b>本地优先的 AI 编码 Agent 工作台。</b><br>
-  在飞书发一句话派活，Agent 在你自己的机器上干活；<br>
-  写文件、跑命令前在手机上点按钮审批，结果以卡片推回，Web 工作台看全过程。
-</p>
+![Node.js ≥ 22.12][node-shield] ![pnpm ≥ 11][pnpm-shield] ![tmux][tmux-shield] ![飞书卡片 2.0][lark-shield] ![ACP 兼容][acp-shield]
 
-<p>
-  <a href="#quick-start"><b>快速上手</b></a> ·
-  <a href="#features"><b>功能</b></a> ·
-  <a href="#web"><b>Web 工作台</b></a> ·
-  <a href="#docs"><b>文档</b></a> ·
-  <a href="./README.en.md"><b>English</b></a>
-</p>
+<a href="#quick-start"><b>快速&#8288;上手</b></a> • <a href="#features"><b>功&#8288;能</b></a> • <a href="#web"><b>Web&nbsp;工作&#8288;台</b></a> • <a href="#agents"><b>支持的&nbsp;Agent</b></a> • <a href="#docs"><b>文&#8288;档</b></a>
+
+<sub>简体中文 · <a href="README.en.md">English</a></sub>
 
 </div>
+<img src="docs/assets/demo-zh.svg" alt="演示：在飞书群里 @ 机器人派活，审批 pnpm test 后收到“验证通过”的结果卡；右侧是开发机上 Agent 的执行过程" width="100%">
 
-<br>
+<p align="center"><sub>示意动画：卡片字段照真实飞书卡片绘制，部分按钮按条件出现；任务内容是虚构示例</sub></p>
 
-<p align="center">
-  <img src="docs/assets/demo-zh.svg" alt="演示：在飞书群里 @ 机器人派活，审批 pnpm test 后收到“验证通过”的结果卡；右侧是开发机上 Agent 的执行过程" width="100%">
-</p>
+<a id="install"></a>
+
+```sh
+git clone https://github.com/ITcathyh/dutydeck.git && cd dutydeck
+# 安装依赖并构建
+pnpm install && pnpm build
+# 打成 npm 包，再全局安装得到 dutydeck 命令
+pnpm --filter @byted/dutydeck pack --pack-destination "$PWD"
+npm install -g ./byted-dutydeck-*.tgz
+# 向导：探测本机 Agent，可绑定飞书机器人
+dutydeck setup
+# 启动守护进程并体检
+dutydeck start && dutydeck doctor
+```
+
+`doctor` 全部通过后打开 `http://127.0.0.1:4310`。前置条件和其他安装方式见[快速上手](#quick-start)。
 
 ## 💡 为什么需要它 <a id="why"></a>
 
-编码 Agent 越来越能干，但它们都长在终端里：你得守在电脑前，SSH 一断任务就停；放手让它跑，又怕它乱改、乱执行；它说“测试通过了”，你也不知道它到底跑没跑。
-
-**Dutydeck 是跑在你开发机上的一个守护进程**，把 Claude Code、Codex 等 Agent 接到飞书和 Web 上：
+编码 Agent 大多只能在终端里用：你得守在电脑前，SSH 一断任务就停；放手让它跑，又怕它乱改、乱执行；它说“测试通过了”，你也不知道它跑没跑。**Dutydeck 是跑在你开发机上的守护进程**，把 Claude Code、Codex 等 Agent 接到飞书和 Web 上。
 
 | | 直接用终端 CLI | 用 Dutydeck |
 |---|---|---|
-| 📱 **派活** | 守在电脑前，断开 SSH 任务就中断 | 飞书发一句话，后台持续执行，结果以卡片推回 |
-| 🛡️ **高危操作** | 要么全局放行，要么频繁弹窗卡住 | 卡片上点「允许本次」或「拒绝」，在手机上放行 |
-| ✅ **交付质量** | Agent 说测试过了，可能没跑 | 服务端真跑验证命令，失败自动打回返修 |
-| 🌳 **工作区** | 直接改当前分支，搅乱未提交的改动 | 可选独立 Git Worktree，不动你的主工作区 |
-| 🧠 **上下文** | 每次新会话都要重述规范 | 跨会话长期记忆，群里按需接话、定时委托 |
+| **派&#8288;活** | <sub>守在电脑前，SSH 断了就停</sub> | ✅ 飞书一句话，后台持续跑 |
+| **高&#8288;危** | <sub>全局放行，或频繁弹窗</sub> | ✅ 手机上逐项审批 |
+| **质&#8288;量** | <sub>说测过了，可能没跑</sub> | ✅ 服务端真跑验证命令 |
+| **分&#8288;支** | <sub>直接改当前分支</sub> | ✅ 可选独立 worktree |
+| **重&#8288;启** | <sub>进程一停，活就没了</sub> | ✅ 保留可恢复的任务 |
+
+<p align="center">
+  <img src="docs/assets/flow-zh.svg" alt="流程：飞书进度卡 → 审批卡（允许本次 / 拒绝 / 本会话允许此命令 / 本工作区允许此类命令，后两项视发起人、命令类型和权限而定）→ 服务端跑 pnpm test 得到退出码 0 → 结果卡显示改动 3 个文件和验证通过" width="100%">
+</p>
+
+<p align="center"><sub>派活 → 审批 → 服务端验证（失败最多返修 2 轮）→ 结果卡<br>审批卡上“本会话允许此命令”“本工作区允许此类命令”两个按钮视发起人、命令类型和权限出现</sub></p>
+
+| [**30**](packages/cli-adapters/src/factory.ts) | [**21**](packages/acp-client/src/index.ts) | [**2 轮**](docs/zh/web-console.md#2-验证与返修) | [**14 天**](docs/zh/web-console.md#3-手机看改动) |
+|:---:|:---:|:---:|:---:|
+| <sub>内置终端适配器</sub> | <sub>acpx 登记的 ACP Agent</sub> | <sub>验证失败后最多返修</sub> | <sub>手机看改动链接有效期</sub> |
 
 ## ✨ 能做什么 <a id="features"></a>
 
 <table>
 <tr>
-<td width="33%" valign="top">
-
-### 📱 飞书派活
-私聊或群里 @ 机器人说需求。进度卡实时刷新，超长输出自动打成附件；忘了 @ 也能补。
-
+<td width="50%" valign="top">
+📱 <b>飞书派活</b><br>
+私聊或群里 @ 一句话，进度卡实时刷新。<br>
 <sub>→ <a href="docs/zh/lark.md">飞书指挥台</a></sub>
 </td>
-<td width="33%" valign="top">
-
-### 🛡️ 手机审批
-写文件、跑命令前弹出审批卡：「允许本次 / 本会话允许此命令 / 拒绝」。四档权限按需选择。
-
+<td width="50%" valign="top">
+🛡️ <b>手机审批</b><br>
+写文件、跑命令前弹卡，点按钮放行。<br>
 <sub>→ <a href="docs/zh/agents.md">Agent 与权限</a></sub>
-</td>
-<td width="33%" valign="top">
-
-### ✅ 验证门禁
-配好验证命令（如 `pnpm test`）后，飞书任务改完代码由服务端真跑一遍，留退出码和代码指纹；不过就打回返修。
-
-<sub>→ <a href="docs/zh/web-console.md#2-验证与返修">验证与返修</a></sub>
 </td>
 </tr>
 <tr>
 <td valign="top">
-
-### 🔍 手机看改动
-结果卡带「改动 N 个文件 +A −D · 查看改动」，打开就是这一轮的 diff，还能逐行评论让 Agent 接着改。
-
-<sub>→ <a href="docs/zh/web-console.md#3-手机看改动">手机看改动</a></sub>
+✅ <b>验证门禁</b><br>
+飞书任务由服务端跑验证，失败最多返修 2 轮。<br>
+<sub>→ <a href="docs/zh/web-console.md#2-验证与返修">验证与返修</a></sub>
 </td>
 <td valign="top">
-
-### ⏰ 一句话定时
-说「每天 18:00 总结本群进展」，Agent 发确认卡写明做什么、何时做、发到哪，点「启用」才开始。
-
+🔍 <b>手机看改动</b><br>
+结果卡一点就是本轮 diff，可逐行评论。<br>
+<sub>→ <a href="docs/zh/web-console.md#3-手机看改动">手机看改动</a></sub>
+</td>
+</tr>
+<tr>
+<td valign="top">
+⏰ <b>一句话定时</b><br>
+说“每天 18:00 总结本群”，点启用才开始。<br>
 <sub>→ <a href="docs/zh/features.md#5-群聊协作与定时委托">群聊协作与定时委托</a></sub>
 </td>
 <td valign="top">
-
-### 🔁 开 PR 并跟进
-`/pr` 先列出要提交的文件请你确认，再推到新的 `dutydeck/` 分支开 PR，之后自动跟进 CI 失败和评审意见（需装 GitHub 插件）。
-
+🔁 <b>开 PR 并跟进</b><br>
+<code>/pr</code> 确认文件后开 PR，跟进 CI 和评审（需 GitHub 插件）。<br>
 <sub>→ <a href="docs/zh/lark.md#pr-loop">开 PR 与跟进</a></sub>
 </td>
 </tr>
 <tr>
 <td valign="top">
-
-### 🧠 长期记忆
-`/remember` 手动记，开启后后台自动提取环境事实与偏好；私聊各自独立，群聊可共享也可按群隔离。
-
+🧠 <b>长期记忆</b><br>
+<code>/remember</code> 手动记，也可后台自动提取。<br>
 <sub>→ <a href="docs/zh/features.md#4-跨会话长期记忆">跨会话长期记忆</a></sub>
 </td>
 <td valign="top">
-
-### ♻️ 重启不丢活
-重启和部署时保留可恢复的终端任务；“不知道执行没执行”的任务不会被当作没执行而重发，发卡请你决定。
-
+♻️ <b>重启不丢活</b><br>
+结果未知的任务不会自动重发，而是发卡片让你决定。<br>
 <sub>→ <a href="docs/zh/lark.md#结果未知的任务">结果未知的任务</a></sub>
 </td>
-<td valign="top">
-
-### 🔌 插件化
-命令、Agent、skills、外部触发器、Hook、CI 提供方、群场景包都能做成插件，核心不含任何平台专用代码。
-
+</tr>
+<tr>
+<td colspan="2" valign="top">
+🔌 <b>插件化</b><br>
+CI、代码平台等外部集成以插件交付。<br>
 <sub>→ <a href="docs/zh/plugins.md">插件</a></sub>
 </td>
 </tr>
 </table>
 
+<div align="right"><sub><a href="#readme-top">↑ 回到顶部</a></sub></div>
+
 ## 🖥️ Web 工作台 <a id="web"></a>
 
-不在飞书时，打开 `http://127.0.0.1:4310`：任务看板、对话与工具调用、每轮改动、终端回放、用量与成本、定时任务都在这里，支持浅色和深色主题。
+不在飞书时，打开 `http://127.0.0.1:4310`：任务看板、对话与工具调用、每轮改动、用量与成本、定时任务都在这里，终端模式 Agent 还有终端回放；支持浅色和深色主题。
 
 <p align="center">
   <picture>
@@ -142,38 +140,59 @@
 </tr>
 </table>
 
-## 🚀 三步上手 <a id="quick-start"></a>
+## 🚀 快速上手 <a id="quick-start"></a>
 
-需要 Node.js ≥ 22.12、`tmux`，以及一个已安装并登录的 Agent CLI（Claude Code、Codex 等）。
+> [!NOTE]
+> 需要 Node.js ≥ 22.12、pnpm ≥ 11、`tmux`，以及一个已安装并登录的 Agent CLI（Claude Code、Codex 等）。
 
-```bash
-# 1. 安装
-pnpm add -g @byted/dutydeck --registry=http://bnpm.byted.org
+跑完[开头那组命令](#install)之后：
 
-# 2. 配置向导：探测本机 Agent、选默认工作目录，可顺手绑定飞书机器人
-dutydeck setup
+1. 打开 `http://127.0.0.1:4310`，本机访问免登录。
+2. 在首屏点「绑定飞书 Bot」→「一键创建飞书机器人」，按向导授权。
+3. 在飞书私聊机器人，或在群里 @ 它派活。
 
-# 3. 启动守护进程，再体检一遍（有问题会给出可直接复制的修复命令）
-dutydeck start && dutydeck doctor
+<details>
+<summary><b>其他安装方式</b></summary>
+
+- **字节内网**：`pnpm add -g @byted/dutydeck --registry=http://bnpm.byted.org`，之后同样执行 `dutydeck setup` 和 `dutydeck start`。
+- **脚本 / CI 里跳过交互**：`dutydeck setup --cwd /path/to/project --port 4310 --skip-lark --yes`，飞书绑定参数见[快速上手文档](docs/zh/getting-started.md)。
+- **源码热重载开发**：见下方[参与开发](#dev)。
+
+</details>
+
+<details>
+<summary><b>让你的 Agent 帮你装</b></summary>
+
+把下面这段发给你的编码 Agent：
+
+```text
+帮我安装并启动 Dutydeck（https://github.com/ITcathyh/dutydeck）。
+1. 确认 Node.js ≥ 22.12、pnpm ≥ 11、tmux 已安装，缺什么告诉我。
+2. 按仓库 README 开头的命令克隆、构建、打包，
+   并全局安装 dutydeck 命令。
+3. 运行 dutydeck setup --skip-lark --yes 只配本机，
+   再运行 dutydeck start。
+4. 运行 dutydeck doctor，把没通过的项和它给出的修复命令列给我。
 ```
 
-打开 `http://127.0.0.1:4310`，本机访问免登录。在首屏点「绑定飞书 Bot」→「一键创建飞书机器人」，按向导授权后就能在飞书里派活了。
-
-<sub>脚本化安装、源码开发和更多选项见 <a href="docs/zh/getting-started.md">快速上手</a>。</sub>
+</details>
 
 ## 🤖 支持的 Agent <a id="agents"></a>
 
-内置 **30 种终端适配器**，也能接任意 [ACP](https://agentclientprotocol.com) Agent；自定义 Agent 用 `DUTYDECK_AGENTS_JSON` 注册。
+内置 **30 种终端适配器**；本机没有对应终端适配器时，ACP Agent 自动出现（acpx 登记 21 个）。同一 Agent 两种方式都可用时默认走终端，比如 Gemini、Cursor 在飞书里只能用 `full-trust`；要逐项审批，需在 `DUTYDECK_AGENTS_JSON` 里显式指定 `protocol: "acp"`。自定义 Agent 也用它注册。
 
 | Agent | 接入方式 | 飞书逐项审批 |
 |---|---|:---:|
 | **Claude Code**（含经网关、自定义配置的变体） | 终端 · ACP | ✅ |
 | **Codex** | 终端（`codex`）· ACP（`codex-acp`） | ACP ✅ |
-| **Seed**、**Relay** | 终端 | ✅ |
-| **Gemini CLI**、**Copilot CLI**、**Cursor**、**OpenCode**、**Kimi**、**Grok**、**Kiro**、**TraeX**、**CodeM** 等 | 终端 | 仅完全信任模式 |
-| 任意 **ACP Agent** | ACP | ✅ |
+| **ACP Agent**（Qwen Code、Factory Droid、iFlow 等，自动发现） | ACP | ✅ |
 
-<sub>终端模式默认跑在 <code>tmux</code> 里，也可切到 Herdr。不支持逐项审批的 Agent 只能用 <code>full-trust</code>，详见 <a href="docs/zh/agents.md">Agent 与权限</a>。</sub>
+> [!WARNING]
+> `full-trust` 会跳过逐项审批，Agent 写文件、跑命令都直接放行。只在隔离环境或你信任的流水线里用。
+
+各 Agent 的审批能力与权限档位见 [Agent 与权限](docs/zh/agents.md)。
+
+<div align="right"><sub><a href="#readme-top">↑ 回到顶部</a></sub></div>
 
 ## 🏗️ 工作原理 <a id="how-it-works"></a>
 
@@ -181,25 +200,35 @@ dutydeck start && dutydeck doctor
   <img src="docs/assets/arch-zh.svg" alt="架构：飞书、Web 工作台和 CLI/HTTP 触发器连到跑在本机的 Dutydeck 守护进程，守护进程通过终端（PTY）或 ACP 驱动本机 Agent" width="100%">
 </p>
 
-- **本地优先**：Agent、代码和凭据都留在你的机器上；守护进程默认只监听 `127.0.0.1`，非本机访问需要登录。
-- **不靠猜**：每一轮任务记入执行账本；超时、断线、重启都不会被当作“没执行”而自动重发。
-- **防泄露**：可拦下读取 `~/.ssh`、`.env`、Agent 会话记录等操作；卡片和群消息里的常见密钥自动打码。
+- **触发入口**：飞书（长连接 + 卡片 2.0）、Web 工作台、CLI / HTTP 触发器。
+- **守护进程**：跑在你的机器上，负责任务队列、权限门禁、验证门禁、记忆和插件。
+- **执行账本**：每轮任务记入 SQLite，区分未提交、执行中和结果未知。
+- **驱动层**：终端模式经 PTY 驱动 CLI，ACP Agent 走 ACP 协议。
+- **会话后端**：终端模式默认用 `tmux`，已配置的 Herdr 仍可使用。
+
+**本地优先**：Agent、代码和凭据留在本机；默认只监听 `127.0.0.1`，非本机访问需要登录。<br>
+**不靠猜**：超时、断线、重启都不会被当作“没执行”而自动重发。<br>
+**防泄露**：可拦下读取 `~/.ssh`、`.env`、Agent 会话记录等操作；卡片和群消息里的常见密钥自动打码。
 
 ## 📚 文档 <a id="docs"></a>
 
 | 文档 | 内容 |
 |---|---|
-| [快速上手](docs/zh/getting-started.md) | 安装、配置向导、非交互安装、源码开发 |
-| [功能详解](docs/zh/features.md) | 七项核心能力的细节、默认值和边界 |
-| [飞书指挥台](docs/zh/lark.md) | 任务流程、命令速查、`/plan`、`/pr`、群聊协作、接入机器人 |
-| [Web 工作台](docs/zh/web-console.md) | 任务详情、验证与返修、手机看改动、用量与成本、定时任务 |
-| [Agent 与权限](docs/zh/agents.md) | 自定义 Agent、终端任务恢复、权限模式、环境变量 |
-| [插件](docs/zh/plugins.md) | 插件结构、触发器、业务工具、Hook、CI 提供方、场景包 |
-| [CLI 与运维](docs/zh/cli.md) | 守护进程、部署与回滚、备份恢复、`settings`、远程访问、巡检 |
-| [升级说明](docs/zh/upgrading.md) | 升级时需要注意的行为变化 |
-| [已知限制与 FAQ](docs/zh/troubleshooting.md) | 已知限制、常见问题排障 |
+| 🚀 [快速上手](docs/zh/getting-started.md) | 安装、配置向导、非交互安装、源码开发 |
+| ✨ [功能详解](docs/zh/features.md) | 核心能力的细节、默认值和边界 |
+| 📱 [飞书指挥台](docs/zh/lark.md) | 任务流程、命令速查、`/plan`、`/pr`、群聊协作、接入机器人 |
+| 🖥️ [Web 工作台](docs/zh/web-console.md) | 任务详情、验证与返修、手机看改动、用量与成本、定时任务 |
+| 🤖 [Agent 与权限](docs/zh/agents.md) | 自定义 Agent、终端任务恢复、权限模式、环境变量 |
+| 🔌 [插件](docs/zh/plugins.md) | 插件结构、触发器、业务工具、Hook、CI 提供方、场景包 |
+| ⌨️ [CLI 与运维](docs/zh/cli.md) | 守护进程、部署与回滚、备份恢复、`settings`、远程访问、巡检 |
+| ⬆️ [升级说明](docs/zh/upgrading.md) | 升级时需要注意的行为变化 |
+| ❓ [已知限制与 FAQ](docs/zh/troubleshooting.md) | 已知限制、常见问题排障 |
 
-## 🛠️ 参与开发
+<sub>给 AI 编码 Agent：开发约定和验证要求见 <a href="AGENTS.md">AGENTS.md</a>。</sub>
+
+<div align="right"><sub><a href="#readme-top">↑ 回到顶部</a></sub></div>
+
+## 🛠️ 参与开发 <a id="dev"></a>
 
 ```bash
 git clone https://github.com/ITcathyh/dutydeck.git
@@ -209,8 +238,21 @@ cp .env.example .env
 pnpm dev        # Web 前端 http://127.0.0.1:4311，后端 API http://127.0.0.1:4310
 ```
 
-pnpm monorepo：`apps/server`（守护进程与 CLI）、`apps/web`（Web 工作台）、`packages/*`（执行引擎、ACP/终端驱动、存储、插件 SDK 等）。开发约定和验证要求见 [AGENTS.md](AGENTS.md)，E2E 测试见 [tests/e2e/README.md](tests/e2e/README.md)。
+pnpm monorepo：`apps/server`（守护进程与 CLI）、`apps/web`（Web 工作台）、`packages/*`（执行引擎、ACP/终端驱动、存储、插件 SDK 等）；E2E 测试见 [tests/e2e/README.md](tests/e2e/README.md)。
 
-## 📄 开源许可证与协议 (License)
+## 📄 许可证
 
-Dutydeck 核心代码采用开源授权协议。完整第三方依赖与开源许可证声明请参阅 [Third-Party Notices](THIRD_PARTY_NOTICES.md)。
+本仓库尚未声明开源许可证；在添加 LICENSE 之前，代码保留所有权利。第三方代码与素材及其许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
+<div align="center">
+<br>
+<img src="docs/assets/logo.svg" alt="Dutydeck" width="48">
+<p><sub>派活在飞书，干活在本机</sub></p>
+<a href="#readme-top">↑ 回到顶部</a>
+</div>
+
+[node-shield]: https://img.shields.io/badge/Node.js-%E2%89%A5_22.12-339933?style=flat-square&logo=nodedotjs&logoColor=white
+[pnpm-shield]: https://img.shields.io/badge/pnpm-%E2%89%A5_11-F69220?style=flat-square&logo=pnpm&logoColor=white
+[tmux-shield]: https://img.shields.io/badge/tmux-%E5%BF%85%E9%9C%80-1BB91F?style=flat-square&logo=tmux&logoColor=white
+[lark-shield]: https://img.shields.io/badge/%E9%A3%9E%E4%B9%A6-%E5%8D%A1%E7%89%87_2.0-3370FF?style=flat-square
+[acp-shield]: https://img.shields.io/badge/ACP-%E5%85%BC%E5%AE%B9-0EA5E9?style=flat-square
