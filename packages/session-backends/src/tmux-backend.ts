@@ -30,7 +30,7 @@ import { runCommand } from './command.js';
 import { OutputHandoff } from './output-handoff.js';
 import { TmuxCapture, cleanAbandonedTmuxCapture } from './tmux-capture.js';
 import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { statSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -115,6 +115,17 @@ function isServerLevelErrorText(stderrText: string): boolean {
  * This is the normal first-use result for a fresh TMUX_TMPDIR. */
 function isSocketMissingErrorText(stderrText: string): boolean {
   return /error connecting to .*\(No such file or directory\)/i.test(stderrText);
+}
+
+/** Linux start time of a process (stat field 22), so a reused PID is not mistaken for the original. */
+function processStart(pid: number): string | undefined {
+  try { const stat = readFileSync(`/proc/${pid}/stat`, 'utf8'); return stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19]; }
+  catch { return undefined; }
+}
+function paneProcessAlive(pane: { pid: number; start?: string }): boolean {
+  try { process.kill(pane.pid, 0); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') return false; }
+  return pane.start === undefined || processStart(pane.pid) === pane.start;
 }
 
 /** True when a thrown exec*Sync error is the caller's own timeout deadline
@@ -590,7 +601,7 @@ export class TmuxBackend implements SessionBackend {
     }
   }
 
-  private async probePaneAsync(): Promise<{ probe: SessionProbe; pid: number | null }> {
+  private async probePaneAsync(): Promise<{ probe: SessionProbe; pid: number | null; socketMissing?: boolean }> {
     try {
       const stdout = await runCommand('tmux', [
         'has-session', '-t', this.sessionName, ';',
@@ -604,10 +615,10 @@ export class TmuxBackend implements SessionBackend {
       const stderr = failure.stderr ?? '';
       // A pane/display failure after successful has-session is inconclusive.
       // Only a clean answer proving the session/server absent counts as exit.
-      const missing = !failure.stdout?.includes('dutydeck-session-exists')
-        && !failure.signal && typeof failure.status === 'number'
-        && (isSocketMissingErrorText(stderr) || /no server running|can't find session:/i.test(stderr));
-      return { probe: missing ? 'missing' : 'unknown', pid: null };
+      const clean = !failure.stdout?.includes('dutydeck-session-exists') && !failure.signal && typeof failure.status === 'number';
+      const socketMissing = clean && isSocketMissingErrorText(stderr);
+      const missing = socketMissing || clean && /no server running|can't find session:/i.test(stderr);
+      return { probe: missing ? 'missing' : 'unknown', pid: null, ...(socketMissing ? { socketMissing } : {}) };
     }
   }
 
@@ -782,16 +793,20 @@ export class TmuxBackend implements SessionBackend {
     let consecutiveFailures = 0;
     const FAILURE_THRESHOLD = 3;
     let checking = false;
+    // Last pane process seen through a live server. A deleted socket file (e.g. /tmp cleanup) makes every
+    // client report "no such file" while the server and CLI keep running; that alone does not prove exit.
+    let knownPane: { pid: number; start?: string } | undefined;
     const timer = setInterval(() => {
       if (this.exited || checking) return;
       checking = true;
       void (async () => {
-        const { probe, pid } = await this.probePaneAsync();
+        const { probe, pid, socketMissing } = await this.probePaneAsync();
         let failed = probe === 'missing';
+        if (socketMissing && knownPane && paneProcessAlive(knownPane)) failed = false;
         // An unknown server answer must not be combined with a stale pane PID.
         if (probe === 'exists') {
           if (pid !== null) {
-            try { process.kill(pid, 0); }
+            try { process.kill(pid, 0); if (knownPane?.pid !== pid) knownPane = { pid, start: processStart(pid) }; }
             catch (e) { failed = (e as NodeJS.ErrnoException).code === 'ESRCH'; }
           }
         }

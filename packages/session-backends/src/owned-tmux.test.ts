@@ -185,11 +185,14 @@ describe('owned tmux physical exit proofs (real isolated server and process iden
     expect(saved).toBe(true);
     expect(tmux('has-session', '-t', '=owned')).toBe('');
   });
-  it('refuses children created during the durable pre-kill callback', async () => {
+  it('re-records children created during the durable pre-kill callback before killing', async () => {
     create(); const identity = (await captureOwnedTmuxIdentity(scope(), probe))!;
     let child: ReturnType<typeof childProcessIdentity> | undefined;
+    const records: number[][] = [];
     try {
-      await expect(stopOwnedTmux(identity, probe, async () => {
+      const error = await stopOwnedTmux(identity, probe, async captured => {
+        records.push(captured.identities.map(item => item.pid));
+        if (child) return;
         const pidFile = join(root, 'child-pid');
         tmux('send-keys', '-t', 'owned', `sleep 30 & echo $! > ${pidFile}; wait`, 'Enter');
         for (let tries = 0; tries < 100; tries++) {
@@ -197,10 +200,45 @@ describe('owned tmux physical exit proofs (real isolated server and process iden
           catch { await new Promise(resolve => setTimeout(resolve, 10)); }
         }
         expect(child).toBeDefined();
-      })).rejects.toThrow('PROCESS_SET_CHANGED');
-      expect(tmux('has-session', '-t', '=owned')).toBe('');
+      }).then(() => undefined, (failure: { code?: string; proof?: Parameters<typeof verifyOwnedTmuxExit>[0] }) => failure);
+      // The child joined the durable record before kill-session, not only the in-memory proof.
+      expect(records).toHaveLength(2);
+      expect(records[0]).not.toContain(child!.pid);
+      expect(records[1]).toContain(child!.pid);
+      expect(() => tmux('has-session', '-t', '=owned')).toThrow();
+      // The job-control background child survives the session hangup; the proof keeps it, so exit stays unproven until it dies.
+      expect(error?.code).toBe('LEGACY_TMUX_EXIT_UNPROVEN');
+      expect(error!.proof!.identities.map(item => item.pid)).toContain(child!.pid);
+      expect(observeProcess(child!)).toBe('alive');
+      process.kill(child!.pid, 'SIGTERM');
+      await vi.waitFor(async () => expect(await verifyOwnedTmuxExit(error!.proof!, probe)).toBe(true));
     } finally { if (child && observeProcess(child) === 'alive') process.kill(child.pid, 'SIGTERM'); }
-  });
+  }, 20_000);
+  // An agent running builds, tests or git keeps forking short-lived children:
+  // a scanned child may exit before identify, and no two scans are identical.
+  it.skipIf(process.platform !== 'linux')('captures and stops a pane that keeps forking short-lived children', async () => {
+    for (let round = 0; round < 20; round++) {
+      const name = `busy${round}`;
+      tmux('new-session', '-d', '-s', name, 'while true; do sleep 0.03 & sleep 0.01; done');
+      tmux('set-option', '-t', name, '@dutydeck_owner_id', `dutydeck:${name}`);
+      await new Promise(resolve => setTimeout(resolve, 100));
+      const identity = (await captureOwnedTmuxIdentity(scope(name), probe))!;
+      expect(identity.identities.length).toBeGreaterThan(0);
+      const proof = await stopOwnedTmux(identity, probe);
+      expect(await verifyOwnedTmuxExit(proof, probe)).toBe(true);
+      expect(() => tmux('has-session', '-t', `=${name}`)).toThrow();
+    }
+  }, 60_000);
+  it.skipIf(process.platform !== 'linux')('stops a busy pane through the durable pre-kill callback', async () => {
+    tmux('new-session', '-d', '-s', 'owned', 'while true; do sleep 0.03 & sleep 0.01; done');
+    tmux('set-option', '-t', 'owned', '@dutydeck_owner_id', 'dutydeck:owned');
+    const identity = (await captureOwnedTmuxIdentity(scope(), probe))!;
+    let recorded: Set<string> = new Set();
+    const proof = await stopOwnedTmux(identity, probe, async captured => { recorded = new Set(captured.identities.map(item => JSON.stringify(item))); });
+    expect(await verifyOwnedTmuxExit(proof, probe)).toBe(true);
+    expect(identity.identities.every(item => recorded.has(JSON.stringify(item)))).toBe(true);
+    expect(() => tmux('has-session', '-t', '=owned')).toThrow();
+  }, 30_000);
   it('does not treat an unlinked live server socket as proof of target absence', async () => {
     create(); create('other');
     const identity = (await captureOwnedTmuxIdentity(scope(), probe))!;

@@ -771,13 +771,32 @@ describe('runtime lifecycle acceptance', () => {
     await h.runtime.shutdown(); h.repos.close();
   });
 
+  it('settles an attempt interrupted before submission as cancelled and never sends it', async () => {
+    const authorizing = deferred(), release = deferred();
+    const h = harness({ authorizeTask: async (_session, _task, stage) => { if (stage === 'submit') { authorizing.resolve(); await release.promise; } } });
+    await h.runtime.initialize([agent]); const s = await h.runtime.start({ agentId: 'mock' });
+    const sending = h.runtime.send(s.id, 'work').catch(error => error);
+    await authorizing.promise;
+    const taskId = h.runtime.getActiveTaskContext(s.id)!.taskId;
+    // The interrupt lands while submission is still being authorized, before any prompt reaches the driver.
+    await expect(h.runtime.interrupt(s.id, taskId)).resolves.toMatchObject({ interrupted: true });
+    release.resolve();
+    await sending;
+    expect(h.driver.send).not.toHaveBeenCalled();
+    const attempt = h.repos.execution.getTaskExecution(taskId)!.currentAttempt!;
+    expect(attempt).toMatchObject({ state: 'settled', submissionState: 'not_submitted', settlement: { kind: 'not_submitted', outcome: 'cancelled', reason: 'interrupted_before_submission' } });
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
   it('leaves interruptedByActor unset when interrupt is called without an actor', async () => {
-    const gate = deferred();
+    const gate = deferred(), submitted = deferred();
     const h = harness();
-    h.driver.send = vi.fn(async () => { await gate.promise; });
+    h.driver.send = vi.fn(async () => { submitted.resolve(); await gate.promise; });
     await h.runtime.initialize([agent]); const s = await h.runtime.start({ agentId: 'mock' });
     const sending = h.runtime.send(s.id, 'work').catch(() => {});
-    await vi.waitFor(() => expect(h.runtime.getActiveTaskContext(s.id)).toBeTruthy());
+    // The active task context exists before submission; an interrupt then settles it as cancelled before submission.
+    // Interrupt only once the driver holds the prompt, so the attempt is a submitted one.
+    await submitted.promise;
     const taskId = h.runtime.getActiveTaskContext(s.id)!.taskId;
     // No actor on an unspecified (non-channel) session is allowed; it records no actor.
     await h.runtime.interrupt(s.id, taskId);

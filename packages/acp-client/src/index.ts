@@ -5,7 +5,7 @@ import { accessSync, chmodSync, constants, existsSync, mkdirSync, rmSync, statSy
 import { fileURLToPath } from 'node:url';
 import { assertNativeContextRecord, createAcpRuntime, createAgentRegistry, createRuntimeStore, type AcpPermissionDecision, type AcpRuntime, type AcpRuntimeResourceScope, type AcpRuntimeHandle, type AcpRuntimeProcessEvent, type AcpRuntimeStatus, type AcpRuntimeTurn, type AcpSessionStore } from 'acpx/runtime';
 import type { AgentConfig, AgentDriver, DriverSteeringOutcome, DriverTranscriptSourceObservation, InsightClient, NormalizedDriverEvent, PermissionMode, ToolRiskPolicy, DriverSubmission, DriverSubmissionInput, NativeContextIdentity, NativeContextExpected, NativeConfigurationRequest, NativeConfigurationProof, OperationPermit, ChildPermit } from '@dutydeck/shared';
-import { RuntimeError, agentCommandApprovalReason, isAgentCommandAutoApproval, AGENT_IDLE_TIMEOUT, claudeRateLimits, permissionDisplayText, taskExecutionSchemas, canonicalExecutionJson, type AgentIdleTimeoutData } from '@dutydeck/shared';
+import { RuntimeError, agentCommandApprovalReason, isAgentCommandAutoApproval, AGENT_IDLE_TIMEOUT, PromptNotWrittenError, claudeRateLimits, permissionDisplayText, taskExecutionSchemas, canonicalExecutionJson, type AgentIdleTimeoutData } from '@dutydeck/shared';
 import { eventContentText, eventHasContent, normalizeEventContent, shellQuote } from '@dutydeck/shared';
 import { childEnvironment } from '@dutydeck/shared/child-environment';
 import { testRegexWithTimeout } from './regex-timeout.js';
@@ -256,6 +256,17 @@ export class AgentIdleTimeoutError extends Error {
  * claude-agent-acp 的长工具心跳带 elapsedTimeSeconds，但 acpx 0.13.0 转发 tool_call_update 时丢掉了 _meta，这里看不到。
  */
 const IDLE_DEFER_FACTOR = 3;
+/**
+ * A timed-out turn that still has not confirmed cancellation this long after the timeout (the longer of the Agent
+ * `timeout` and this floor) has a stuck Agent: its process is ended so the session can reconnect on the next turn.
+ */
+const STUCK_AGENT_RETIRE_MIN_MS = 60_000;
+/** SIGTERM grace before SIGKILL; the env launcher itself escalates its process group after 500ms. */
+const STUCK_AGENT_KILL_GRACE_MS = 3_000;
+/** How long a waiting turn allows the ended Agent's stream to close before giving up. */
+const STUCK_AGENT_SETTLE_MS = 10_000;
+/** The timed-out turn never confirmed cancellation: the next prompt was not sent, and stays unsent. */
+export const ACP_CANCEL_UNCONFIRMED = 'ACP_CANCEL_UNCONFIRMED';
 const IDLE_CPU_WINDOW_MS = 60_000;
 
 class AcpxStoppedError extends Error {
@@ -297,6 +308,12 @@ export class AcpxAdapter implements AgentDriver {
   private compacting = false;
   private maintenanceUsage?: NormalizedDriverEvent;
   private timedOutStream?: Promise<void>;
+  private timedOutAt = 0;
+  /** Timed-out stream whose stuck Agent process was ended by retireStuckAgent. */
+  private retiredStream?: Promise<void>;
+  /** Timed-out stream that did not close even after its Agent was ended; later turns fail at once. */
+  private cancelUnconfirmed?: Promise<void>;
+  private readonly agentChildren = new Set<ChildProcess>();
   private idleWatch?: { refresh(): void; clear(): void };
   private readonly cpu = new ProcessTreeCpu();
   private stopResourcesSettled = false;
@@ -446,11 +463,12 @@ export class AcpxAdapter implements AgentDriver {
     const launcher = event.kind === 'agent' && child.spawnargs?.some(arg => arg === envLauncherPath() || arg === claudeLauncherPath());
     const exited = () => {
       if (launcher && child.signalCode) this.unconfirmedLauncherExit = true;
-      this.processes.delete(child);
+      this.processes.delete(child); this.agentChildren.delete(child);
       child.off('exit', exited); child.off('error', failed);
     };
     const failed = () => { if (child.pid == null) exited(); };
     this.processes.set(child, exited);
+    if (event.kind === 'agent') this.agentChildren.add(child);
     if (child.exitCode != null || child.signalCode != null) { exited(); return; }
     child.once('exit', exited); child.on('error', failed);
     // acpx 真实 spawn 出 agent 进程（含 env-launcher 包装层）的边界：此刻用同构
@@ -690,6 +708,7 @@ export class AcpxAdapter implements AgentDriver {
       const toolProgress = new Map<string, string>();
       let cancellationExpired = false;
       let cancellationDeadline: NodeJS.Timeout | undefined;
+      let retireTimer: NodeJS.Timeout | undefined;
       let rejectIdle!: (error: Error) => void;
       const idle = new Promise<never>((_resolve, reject) => { rejectIdle = reject; });
       const clearIdle = () => { if (timer) clearTimeout(timer); timer = undefined; };
@@ -704,6 +723,7 @@ export class AcpxAdapter implements AgentDriver {
         timedOut = true;
         this.turnCancelling = true;
         this.timedOutStream = stream;
+        this.timedOutAt = Date.now();
         const error = new AgentIdleTimeoutError(silentMs);
         // Keep consuming the same stream: ACPX finalizes resources before it
         // closes the iterator, but after it resolves turn.result.
@@ -715,6 +735,9 @@ export class AcpxAdapter implements AgentDriver {
           try { reportIdleTimeout(); } catch { /* 投递失败不影响按超时收尾 */ }
           rejectIdle(error);
         }, 2_000);
+        // An Agent that never answers the cancel keeps this stream, the session's idle state and every later
+        // message waiting. End its process instead; the next turn reconnects through the persisted session key.
+        retireTimer = setTimeout(() => this.retireStuckAgent(stream), Math.max(idleTimeoutMs, STUCK_AGENT_RETIRE_MIN_MS));
       };
       const expireUnlessBusy = () => {
         if (this.cpu.sample(this.processIds()) !== 'active' || silentMs >= deferLimitMs) { expire(); return; }
@@ -793,6 +816,7 @@ export class AcpxAdapter implements AgentDriver {
           this.pendingPermissions.clear();
           clearIdle();
           if (cancellationDeadline) clearTimeout(cancellationDeadline);
+          if (retireTimer) clearTimeout(retireTimer);
           if (this.idleWatch === idleWatch) this.idleWatch = undefined;
           if (this.turn === turn) this.turn = undefined;
         }
@@ -834,6 +858,46 @@ export class AcpxAdapter implements AgentDriver {
     if (includeMaintenance) this.maintenanceUsage = undefined;
     return { type: 'status', data: { state: 'turn_usage', ...(latest ? { usageRef: latest[0], breakdown } : {}), ...(cost !== undefined ? { cost: usage!.cost } : {}), ...(runtimeModel ? { runtimeModel } : {}) } };
   }
+  /**
+   * End this adapter's Agent processes when a timed-out turn never confirmed cancellation. Only children spawned by
+   * this adapter's own runtime are signalled. The old turn stays result-unknown and nothing is resent.
+   */
+  private retireStuckAgent(stream: Promise<void>) {
+    if (this.stopped || this.timedOutStream !== stream) return;
+    this.retiredStream = stream;
+    const children = [...this.agentChildren];
+    const signal = (name: NodeJS.Signals) => {
+      for (const child of children) if (child.exitCode == null && child.signalCode == null) { try { child.kill(name); } catch { /* Already gone. */ } }
+    };
+    signal('SIGTERM');
+    const escalation = setTimeout(() => signal('SIGKILL'), STUCK_AGENT_KILL_GRACE_MS);
+    escalation.unref?.();
+    void stream.then(() => clearTimeout(escalation), () => clearTimeout(escalation));
+  }
+  /**
+   * A timed-out public send has ended, but its SDK cleanup can still be in progress. Wait without occupying the
+   * resource lane or resending its input. The wait is bounded by retireStuckAgent, which ends a stuck Agent; a
+   * prompt that waited for that is rejected unsent, and the next one reconnects normally.
+   */
+  private async settlePreviousTurn() {
+    const previous = this.timedOutStream;
+    if (!previous) return;
+    if (this.cancelUnconfirmed !== previous) {
+      const deadline = this.timedOutAt + Math.max(Math.round(this.agent.timeout * 1_000), STUCK_AGENT_RETIRE_MIN_MS) + STUCK_AGENT_SETTLE_MS;
+      let timer: NodeJS.Timeout | undefined;
+      const settled = await this.whileActive(() => Promise.race([
+        previous.then(() => true, () => true),
+        new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), Math.max(0, deadline - Date.now())); }),
+      ])).finally(() => clearTimeout(timer));
+      if (settled && this.retiredStream !== previous) return;
+      if (settled) {
+        this.retiredStream = undefined;
+        throw Object.assign(new PromptNotWrittenError('上一轮超时后 Agent 一直没有确认取消，这条消息没有发出。系统已结束卡住的 Agent，下一条消息会自动重新连接原会话，直接重发即可。'), { detailCode: ACP_CANCEL_UNCONFIRMED });
+      }
+      this.cancelUnconfirmed = previous;
+    }
+    throw Object.assign(new PromptNotWrittenError('上一轮超时后 Agent 一直没有确认取消，系统也没能结束它，这条消息没有发出。请停止会话后再发。'), { detailCode: ACP_CANCEL_UNCONFIRMED });
+  }
   async send(input: string|DriverSubmission) {
     const submission=typeof input==='string'?undefined:input;
     const prompt=typeof input==='string'?input:input.prompt;
@@ -842,10 +906,7 @@ export class AcpxAdapter implements AgentDriver {
     if (this.sending) throw new Error('ACP turn already in progress');
     this.sending = true;
     try {
-      // A timed-out public send has ended, but its SDK cleanup can still be in
-      // progress. Wait without occupying the resource lane or resending its input.
-      const previous = this.timedOutStream;
-      if (previous) await this.whileActive(() => previous.catch(() => undefined));
+      await this.settlePreviousTurn();
       await this.sendTurn(prompt,submission);
     } finally { this.sending = false; }
   }
@@ -857,8 +918,7 @@ export class AcpxAdapter implements AgentDriver {
     this.compacting = true;
     const interruptVersion = this.interruptVersion;
     try {
-      const previous = this.timedOutStream;
-      if (previous) await this.whileActive(() => previous.catch(() => undefined));
+      await this.settlePreviousTurn();
       const supported = await this.resourceOperation(async () => {
         const handle = await this.ensureHandle();
         const status = await this.runtime.getStatus?.({ handle });

@@ -1091,6 +1091,7 @@ export class PtyCliDriver implements AgentDriver {
     await this.transcript?.flush().catch(() => {});
     this.teardownWiring();
     this.terminalSubscribers.clear();
+    let tmuxStopError: unknown;
     try {
       if (this.recoveryRejected) {
         // Nothing was attached: this is a foreign/mismatched live pane which
@@ -1104,6 +1105,11 @@ export class PtyCliDriver implements AgentDriver {
         // Clean up only our local capture; never redirect a tmux command via
         // mutable process.env or mark a failed/unknown stop as gone.
         tmuxBackend.disposeCapture();
+        // Wiring may have missed the identity (a busy pane during spawn or reattach): capture it now, or stop never touches tmux.
+        if (!this.tmuxIdentity && tmuxBackend instanceof TmuxBackend) {
+          try { this.tmuxIdentity = await this.captureTmuxIdentity(tmuxBackend); }
+          catch (error) { tmuxStopError = error; }
+        }
         if (this.tmuxIdentity) this.tmuxExitProof = await stopOwnedTmux(this.tmuxIdentity, this.processProbe);
       } else (await this.backend.kill());
     } catch (error) {
@@ -1111,10 +1117,17 @@ export class PtyCliDriver implements AgentDriver {
       // isStopped() 每次都重新核验它，之后的复核不必再停一次。
       const unproven = error as { code?: string; proof?: OwnedTmuxExitProof };
       if (unproven.code === 'LEGACY_TMUX_EXIT_UNPROVEN' && unproven.proof) this.tmuxExitProof = unproven.proof;
+      else if (!preservePersistentSession && !this.recoveryRejected && tmuxBackend instanceof TmuxBackend && this.processProbe) tmuxStopError = error;
     } finally {
       this.stoppedCallback?.();
     }
     if (!preservePersistentSession && !this.recoveryRejected && await this.isStopped()) this.claudeSettings.cleanup();
+    // A tmux stop that never killed or never captured its target is not "exit pending": report the real cause so the
+    // caller's stop block names it and a later stop() retries the kill.
+    else if (tmuxStopError !== undefined) {
+      const code = (tmuxStopError as { code?: string }).code ?? (tmuxStopError instanceof Error ? tmuxStopError.message : String(tmuxStopError));
+      throw Object.assign(new Error(`Tmux stop failed (${code}); the terminal may still be running`), { code: 'PTY_TMUX_STOP_FAILED', cause: tmuxStopError });
+    }
     // onExit 由 backend 的 exit 事件驱动（kill 会触发）；若后端已自行退出，
     // handleExit 早已回调过，exitReported 保证恰好一次。
   }
@@ -1269,6 +1282,14 @@ export class PtyCliDriver implements AgentDriver {
     return this.adapter.capabilities.programStatus === true && this.backend.kind !== 'herdr';
   }
 
+  private async captureTmuxIdentity(backend: TmuxBackend): Promise<OwnedTmuxIdentity | undefined> {
+    if (!this.processProbe || !backend.ownerId || !backend.getSocketPath()) return undefined;
+    return captureOwnedTmuxIdentity({
+      socketPath: backend.getSocketPath()!, sessionName: backend.sessionName,
+      ownerId: backend.ownerId, hostname: hostname(), uid: process.getuid!(),
+    }, this.processProbe);
+  }
+
   /** 把一个后端接线进事件流（start / reattach / respawn 共用）。 */
   private async wire(backend: SessionBackend, restoreTranscript?: DriverTurnRecovery['transcript']): Promise<void> {
     const generation = this.wiringGeneration;
@@ -1285,13 +1306,9 @@ export class PtyCliDriver implements AgentDriver {
     this.backendPid = pid ? { backend, pid } : undefined;
     this.tmuxIdentity = undefined;
     this.tmuxExitProof = undefined;
-    if (backend instanceof TmuxBackend && this.processProbe && backend.ownerId && backend.getSocketPath()) {
-      try {
-        this.tmuxIdentity = (await captureOwnedTmuxIdentity({
-          socketPath: backend.getSocketPath()!, sessionName: backend.sessionName,
-          ownerId: backend.ownerId, hostname: hostname(), uid: process.getuid!(),
-        }, this.processProbe));
-      } catch { /* Unknown physical identity must keep isStopped false. */ }
+    if (backend instanceof TmuxBackend) {
+      // Unknown physical identity keeps isStopped false; stop() captures it again.
+      try { this.tmuxIdentity = await this.captureTmuxIdentity(backend); } catch { /* Retried by stop(). */ }
     }
     check();
     const initial = backend instanceof TmuxBackend || backend instanceof HerdrBackend ? backend.initialScreen : undefined;

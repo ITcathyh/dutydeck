@@ -31,6 +31,9 @@ export function childEnvironment(inherited, configured = {}, { stripClaude = fal
     for (const key of Object.keys(env)) if (/^GIT_CONFIG_(?:COUNT|KEY_\d+|VALUE_\d+)$/.test(key)) delete env[key];
   }
   for (const key of ['GIT_ASKPASS', 'BASH_ENV', 'ZDOTDIR']) if (managed(env[key])) delete env[key];
+  // A daemon run inside the user's tmux must not hand its own pane to agents: tmux commands there would hit that pane,
+  // and the tmux backend's launch script would overwrite the values tmux set for the agent's pane.
+  delete env.TMUX; delete env.TMUX_PANE;
   for (const key of Object.keys(env)) {
     if (sessionKeys.has(key) || /^BOTMUX_IDENTITY_/.test(key)
       || /^DUTYDECK_.*(?:TOKEN|SECRET|PASSWORD|AUTH)(?:_|$)/i.test(key)

@@ -32,6 +32,8 @@ function fail(code: string): never { throw Object.assign(new Error(code), { code
  * CLI ignores SIGHUP; 10s covers that with margin for the CLI's own teardown.
  */
 const EXIT_PROOF_TIMEOUT_MS = 10_000;
+/** Pre-kill durable record rounds for descendants born while it was being written. */
+const PRE_KILL_RECORD_ROUNDS = 5;
 /** Exit not yet proven: callers may re-verify the attached proof later instead of stopping again. */
 function unproven(proof: OwnedTmuxExitProof): never {
   throw Object.assign(new Error('LEGACY_TMUX_EXIT_UNPROVEN'), { code: 'LEGACY_TMUX_EXIT_UNPROVEN', proof });
@@ -87,7 +89,32 @@ async function ownerCheck(scope: OwnedTmuxScope, id: string): Promise<void> {
 async function processes(scope: OwnedTmuxScope, id: string, probe: ProcessProbe): Promise<PhysicalProcessIdentity[]> {
   const roots = (await tmux(scope.socketPath, ['list-panes', '-s', '-t', id, '-F', '#{pane_pid}'])).split('\n').map(Number);
   if (!roots.length || roots.some(pid => !Number.isSafeInteger(pid) || pid <= 0)) fail('LEGACY_TMUX_PROCESS_IDENTITY_UNAVAILABLE');
-  return descendantPids(roots).sort((a, b) => a - b).map(pid => probe.identify(pid));
+  const scanned = new Map<string, string>();
+  const identities: PhysicalProcessIdentity[] = [];
+  for (const pid of descendantPids(roots, scanned).sort((a, b) => a - b)) {
+    // A busy pane forks short-lived children: one seen by the scan may exit
+    // (or its PID be reused) before identify. That original process is gone and
+    // needs no exit proof; any other identify failure stays fatal.
+    let identity: PhysicalProcessIdentity;
+    try { identity = probe.identify(pid); }
+    catch (error) { if (exitedSinceScan(pid, scanned.get(String(pid)))) continue; throw error; }
+    if (scanned.has(String(pid)) && statStart(scanned.get(String(pid))!) !== statStart(readStat(pid) ?? '')) continue;
+    identities.push(identity);
+  }
+  return identities;
+}
+function readStat(pid: number): string | undefined {
+  try { return readFileSync(`/proc/${pid}/stat`, 'utf8'); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT' || (error as NodeJS.ErrnoException).code === 'ESRCH') return undefined; throw error; }
+}
+/** Fields after the `(comm)` of /proc/<pid>/stat: [0] state, [19] start time. */
+function statFields(raw: string): string[] { return raw.slice(raw.lastIndexOf(')') + 2).split(' '); }
+function statStart(raw: string): string | undefined { return raw ? statFields(raw)[19] : undefined; }
+function exitedSinceScan(pid: number, scannedStat: string | undefined): boolean {
+  const current = readStat(pid);
+  if (current === undefined) return true;
+  if (scannedStat !== undefined && statStart(current) !== statStart(scannedStat)) return true;
+  return statFields(current)[0] === 'Z';
 }
 const key = (identity: PhysicalProcessIdentity) => JSON.stringify([identity.host, identity.boot, identity.namespace, identity.pid, identity.start]);
 function alive(identity: PhysicalProcessIdentity, probe: ProcessProbe): void {
@@ -133,23 +160,36 @@ export async function stopOwnedTmux(identity: OwnedTmuxIdentity, probe: ProcessP
   if (current !== targetId) fail('LEGACY_TMUX_TARGET_CHANGED');
   await ownerCheck(scope, targetId);
   const all = new Map(identity.identities.map(item => [key(item), item]));
-  // Include descendants born since capture; require a stable immediate second scan.
-  const first = (await processes(scope, targetId, probe));
-  for (const item of first) all.set(key(item), item);
-  const second = (await processes(scope, targetId, probe));
-  for (const item of second) {
-    if (!first.some(prior => key(prior) === key(item))) fail('LEGACY_TMUX_PROCESS_SET_CHANGED');
-    all.set(key(item), item);
-  }
-  for (const item of all.values()) if (probe.observe(item) === 'unknown') fail('LEGACY_TMUX_EXIT_UNKNOWN');
-  const captured = { ...identity, identities: [...all.values()] };
-  await beforeKill?.(structuredClone(captured));
-  socketCheck(scope, socket);
-  alive(server, probe);
-  if ((await target(scope)) !== targetId) fail('LEGACY_TMUX_TARGET_CHANGED');
-  await ownerCheck(scope, targetId);
-  for (const item of (await processes(scope, targetId, probe))) {
-    if (!all.has(key(item))) fail('LEGACY_TMUX_PROCESS_SET_CHANGED');
+  // A busy pane keeps forking short-lived children, so the process set is never
+  // static. Ownership rests on the target id, owner marker and server pid; every
+  // descendant seen in any scan joins the exit proof instead of aborting the stop.
+  const absorb = (scan: PhysicalProcessIdentity[]) => {
+    const added = scan.filter(item => !all.has(key(item)));
+    for (const item of added) all.set(key(item), item);
+    return added;
+  };
+  absorb(await processes(scope, targetId, probe));
+  absorb(await processes(scope, targetId, probe));
+  const unknown = () => { for (const item of all.values()) if (probe.observe(item) === 'unknown') fail('LEGACY_TMUX_EXIT_UNKNOWN'); };
+  unknown();
+  if (beforeKill) {
+    // The durable record must cover live descendants born while it was written:
+    // re-record them for a bounded number of rounds before killing.
+    for (let round = 0; ; round++) {
+      await beforeKill(structuredClone({ ...identity, identities: [...all.values()] }));
+      socketCheck(scope, socket);
+      alive(server, probe);
+      if ((await target(scope)) !== targetId) fail('LEGACY_TMUX_TARGET_CHANGED');
+      await ownerCheck(scope, targetId);
+      const added = absorb(await processes(scope, targetId, probe)).filter(item => probe.observe(item) === 'alive');
+      unknown();
+      if (!added.length || round + 1 >= PRE_KILL_RECORD_ROUNDS) break;
+    }
+  } else {
+    socketCheck(scope, socket);
+    alive(server, probe);
+    if ((await target(scope)) !== targetId) fail('LEGACY_TMUX_TARGET_CHANGED');
+    await ownerCheck(scope, targetId);
   }
   socketCheck(scope, socket);
   alive(server, probe);

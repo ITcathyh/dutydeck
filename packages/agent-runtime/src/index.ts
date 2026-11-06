@@ -3846,8 +3846,9 @@ export class DutydeckRuntime {
     this.stopRechecks.set(id, { timer, since });
   }
   /**
-   * 空闲回收退出未核实的复核：驱动证明原进程都已退出，就沿用停止重试把资源记为已退出、清掉停止受阻，再重开会话；
-   * 否则按退避继续复核。第一次复核仍未通过时在会话里提醒一次。
+   * 空闲回收退出未核实的复核：沿用停止重试再停一次驱动（上次停止可能根本没结束终端，例如忙碌的 tmux 会话），
+   * 驱动证明原进程都已退出，就把资源记为已退出、清掉停止受阻，再重开会话；否则按退避继续复核。
+   * 第一次复核仍未通过时在会话里提醒一次。
    */
   private async recheckStop(id: string, driver: AgentDriver, delay: number, since: string, cause: 'idle' | 'startup') {
     if (this.stopRechecks.get(id)?.since !== since) return;
@@ -3858,7 +3859,10 @@ export class DutydeckRuntime {
     const current = () => !this.shuttingDown && this.mutations.valid(token) && this.lifecycle(id) === lifecycle
       && this.blockedDrivers.get(id)?.driver === driver && (this.drivers.get(id) ?? driver) === driver;
     let error: unknown;
-    if (!this.stopRuns.has(id) && await driver.isStopped?.() === true && current() && !this.stopRuns.has(id)) {
+    // 先在停止流程外探测一次：探测挂起时不占用 stopRuns，显式停止或重启不会排在它后面。
+    // 不论结果，下面的停止重试都会再停一次并重新核实退出。
+    if (!this.stopRuns.has(id)) await driver.isStopped?.();
+    if (!this.stopRuns.has(id) && current()) {
       try {
         const reopened = await this.mutations.run(token, async () => {
           await this.revokeSession(id, false, 'interrupted');

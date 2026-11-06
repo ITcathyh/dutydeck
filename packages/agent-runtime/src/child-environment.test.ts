@@ -10,6 +10,7 @@ describe('default runtime child environment', () => {
   it.each(['jsonl', 'pipe'] as const)('%s filters ambient credentials and preserves explicit configuration', async protocol => {
     for (const key of ['DUTYDECK_AUTH_TOKEN', 'LARK_APP_SECRET', 'BOTMUX_SESSION_ID', 'dutydeck_group_tools_token', 'dutydeck_session_id', 'dutydeck_relay_token', 'BYTEDCLI_USER_CODE_JWT']) vi.stubEnv(key, 'fake-ambient');
     vi.stubEnv('OCR_ORDINARY', 'ordinary');
+    vi.stubEnv('TMUX', '/nonexistent/sentinel-daemon-tmux,1,0'); vi.stubEnv('TMUX_PANE', '%999');
     const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
     const runtime = new DutydeckRuntime(repos, {
       sessionEnvironment: () => ({ dutydeck_session_id: 'current-session', dutydeck_relay_token: 'fake-current-capability' })
@@ -27,7 +28,7 @@ describe('default runtime child environment', () => {
       const events = await runtime.getEvents(session.id);
       const response = events.find(event => event.type === 'text' && event.data.role !== 'user');
       expect(JSON.parse(response!.data.text as string)).toEqual({
-        daemonSecret: true, larkSecret: true, staleIdentity: true, staleCapability: true,
+        daemonSecret: true, larkSecret: true, staleIdentity: true, staleCapability: true, daemonTmuxPane: true,
         ordinary: true, configured: true, configuredAccount: true, sessionIdentity: true, sessionCapability: true
       });
     } finally {

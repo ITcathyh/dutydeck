@@ -18,7 +18,8 @@ it.each([false, true])('isolates real persisted ACP launches and resume (upperca
     DUTYDECK_WEBHOOK_SECRET: 'sentinel-webhook', dutydeck_group_tools_token: 'sentinel-old-scope',
     dutydeck_relay_token: 'sentinel-old-relay', dutydeck_session_id: 'sentinel-old-session',
     HTTP_PROXY: 'http://sentinel-proxy', NODE_EXTRA_CA_CERTS: '/nonexistent/sentinel-cert',
-    HERDR_PANE_ID: 'sentinel:p1', ANTHROPIC_API_KEY: 'sentinel-acp-account'
+    HERDR_PANE_ID: 'sentinel:p1', ANTHROPIC_API_KEY: 'sentinel-acp-account',
+    TMUX: '/nonexistent/sentinel-daemon-tmux,1,0', TMUX_PANE: '%999'
   };
   for (const [key, value] of Object.entries(inherited)) vi.stubEnv(key, value);
   const keys = [...Object.keys(inherited), 'dutydeck_herdr_session', 'dutydeck_agent_env_file', 'dutydeck_agent_env_digest'];
