@@ -8,7 +8,10 @@ const send=message=>process.stdout.write(JSON.stringify(message)+'\n');
 const reply=(id,result)=>send({jsonrpc:'2.0',id,result});
 const error=(id,message)=>send({jsonrpc:'2.0',id,error:{code:-32603,message}});
 const state=()=>JSON.parse(readFileSync(path,'utf8'));
-const config=s=>[{type:'select',id:'model',name:'Model',category:'model',currentValue:s.model,options:[{value:'A',name:'A'},{value:'B',name:'B'}]},{type:'select',id:'reasoning_effort',name:'Effort',category:'thought_level',currentValue:s.effort,options:[{value:'low',name:'low'},{value:'high',name:'high'}]}];
+// native_effort_by_model=1: model B also offers xhigh. native_grouped=1: options are published as SessionConfigSelectGroup.
+const efforts=s=>['low','high',...(process.env.native_effort_by_model==='1'&&s.model==='B'?['xhigh']:[])];
+const listed=values=>{const items=values.map(value=>({value,name:value}));return process.env.native_grouped==='1'?[{group:'first',name:'First',options:items.slice(0,1)},{group:'rest',name:'Rest',options:items.slice(1)}]:items;};
+const config=s=>[{type:'select',id:'model',name:'Model',category:'model',currentValue:s.model,options:listed(['A','B'])},{type:'select',id:'reasoning_effort',name:'Effort',category:'thought_level',currentValue:s.effort,options:listed(efforts(s))}];
 log('spawn',{pid:process.pid,env:process.env.dutydeck_group_tools_token});
 const host=new Map();
 readline.createInterface({input:process.stdin}).on('line',async line=>{

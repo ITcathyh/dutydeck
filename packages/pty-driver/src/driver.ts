@@ -20,7 +20,7 @@ import {
 } from '@dutydeck/shared';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '@dutydeck/cli-adapters';
 import { buildDutydeckRoutingBlock } from '@dutydeck/cli-adapters';
-import { ProgramStatusFramingStream, captureOwnedTmuxIdentity, stopOwnedTmux, verifyOwnedTmuxExit, PtyBackend, TmuxBackend, HerdrBackend, type SessionBackend, type ProcessProbe, type OwnedTmuxIdentity, type OwnedTmuxExitProof } from '@dutydeck/session-backends';
+import { ProgramStatusFramingStream, captureOwnedTmuxIdentity, captureOwnedTmuxAbsence, stopOwnedTmux, verifyOwnedTmuxExit, verifyOwnedTmuxAbsence, PtyBackend, TmuxBackend, HerdrBackend, type SessionBackend, type ProcessProbe, type OwnedTmuxIdentity, type OwnedTmuxExitProof, type OwnedTmuxAbsence } from '@dutydeck/session-backends';
 import { TerminalSnapshot } from '@dutydeck/terminal-renderer';
 import { IdleDetector } from './idle-detector.js';
 import { TurnCpu } from './turn-cpu.js';
@@ -114,6 +114,8 @@ export class PtyCliDriver implements AgentDriver {
   private readonly processProbe: ProcessProbe | undefined;
   private tmuxIdentity: OwnedTmuxIdentity | undefined;
   private tmuxExitProof: OwnedTmuxExitProof | undefined;
+  /** The tmux session had already ended by itself when stop() tried to capture its identity. */
+  private tmuxAbsence: OwnedTmuxAbsence | undefined;
   /** Runtime shutdown preserves active/unknown sessions; proven idle sessions
    * may be stopped when their native context can be restored. */
   private detachOnStop = false;
@@ -1106,11 +1108,22 @@ export class PtyCliDriver implements AgentDriver {
         // mutable process.env or mark a failed/unknown stop as gone.
         tmuxBackend.disposeCapture();
         // Wiring may have missed the identity (a busy pane during spawn or reattach): capture it now, or stop never touches tmux.
-        if (!this.tmuxIdentity && tmuxBackend instanceof TmuxBackend) {
+        if (!this.tmuxIdentity && !this.tmuxAbsence && tmuxBackend instanceof TmuxBackend) {
+          let captureError: unknown;
           try { this.tmuxIdentity = await this.captureTmuxIdentity(tmuxBackend); }
-          catch (error) { tmuxStopError = error; }
+          catch (error) { captureError = error; }
+          if (!this.tmuxIdentity) {
+            // The pane or session already ended by itself: nothing is left to kill, and the session's absence is the proof.
+            this.tmuxAbsence = await this.captureTmuxAbsence(tmuxBackend).catch(() => undefined);
+            if (!this.tmuxAbsence && captureError !== undefined) tmuxStopError = captureError;
+          }
         }
-        if (this.tmuxIdentity) this.tmuxExitProof = await stopOwnedTmux(this.tmuxIdentity, this.processProbe);
+        if (this.tmuxIdentity) {
+          // A repeated stop must not narrow the proof back to the wire-time processes: keep every process the earlier stop recorded.
+          const recorded = this.tmuxExitProof;
+          const identity = recorded ? { ...this.tmuxIdentity, identities: mergeIdentities(this.tmuxIdentity.identities, recorded.identities) } : this.tmuxIdentity;
+          this.tmuxExitProof = await stopOwnedTmux(identity, this.processProbe);
+        }
       } else (await this.backend.kill());
     } catch (error) {
       // best effort：后端可能已退出。已发出 kill、只是退出还没证实时留下待证明据，
@@ -1144,6 +1157,10 @@ export class PtyCliDriver implements AgentDriver {
     if (!this.stopped || this.recoveryRejected || this.detachedForShutdown) return false;
     if (this.backend instanceof HerdrBackend) return (await this.backend.isStopped());
     if (this.detachOnStop && !this.tmuxExitProof) return false;
+    if (this.backend instanceof TmuxBackend && !this.tmuxIdentity && this.tmuxAbsence) {
+      return !!this.processProbe && (await verifyOwnedTmuxAbsence(this.tmuxAbsence, this.processProbe))
+        && !processRunning(this.backendPid?.pid) && this.backend.captureDisposed();
+    }
     if (this.backend instanceof TmuxBackend) {
       return !!this.processProbe && !!this.tmuxExitProof
         && (await verifyOwnedTmuxExit(this.tmuxExitProof, this.processProbe))
@@ -1282,6 +1299,14 @@ export class PtyCliDriver implements AgentDriver {
     return this.adapter.capabilities.programStatus === true && this.backend.kind !== 'herdr';
   }
 
+  private async captureTmuxAbsence(backend: TmuxBackend): Promise<OwnedTmuxAbsence | undefined> {
+    if (!this.processProbe || !backend.ownerId || !backend.getSocketPath()) return undefined;
+    return captureOwnedTmuxAbsence({
+      socketPath: backend.getSocketPath()!, sessionName: backend.sessionName,
+      ownerId: backend.ownerId, hostname: hostname(), uid: process.getuid!(),
+    }, this.processProbe);
+  }
+
   private async captureTmuxIdentity(backend: TmuxBackend): Promise<OwnedTmuxIdentity | undefined> {
     if (!this.processProbe || !backend.ownerId || !backend.getSocketPath()) return undefined;
     return captureOwnedTmuxIdentity({
@@ -1306,6 +1331,7 @@ export class PtyCliDriver implements AgentDriver {
     this.backendPid = pid ? { backend, pid } : undefined;
     this.tmuxIdentity = undefined;
     this.tmuxExitProof = undefined;
+    this.tmuxAbsence = undefined;
     if (backend instanceof TmuxBackend) {
       // Unknown physical identity keeps isStopped false; stop() captures it again.
       try { this.tmuxIdentity = await this.captureTmuxIdentity(backend); } catch { /* Retried by stop(). */ }
@@ -2160,4 +2186,15 @@ function mergedEnv(agentEnv: Record<string, string>): Record<string, string> {
   // daemon 的运行身份，不是被桥接 CLI 的。CLI 应该用自己的配置（~/.claude/）
   // 或 agent.env 里显式声明的变量。
   return childEnvironment(process.env, agentEnv, { stripClaude: true });
+}
+
+function mergeIdentities(...lists: OwnedTmuxIdentity['identities'][]): OwnedTmuxIdentity['identities'] {
+  const merged = new Map<string, OwnedTmuxIdentity['identities'][number]>();
+  for (const item of lists.flat()) merged.set(JSON.stringify([item.host, item.boot, item.namespace, item.pid, item.start]), item);
+  return [...merged.values()];
+}
+/** False only when the PID no longer exists (ESRCH); an unknown answer counts as running. */
+function processRunning(pid: number | undefined): boolean {
+  if (!pid) return false;
+  try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH'; }
 }

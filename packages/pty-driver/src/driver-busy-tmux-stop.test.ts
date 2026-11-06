@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -45,5 +45,30 @@ tmuxDescribe('PtyCliDriver stop on a busy tmux pane (isolated TMUX_TMPDIR)', () 
     await driver.stop();
     expect(await driver.isStopped()).toBe(true);
     expect(await TmuxBackend.probeSession(name)).toBe('missing');
+  }, 30_000);
+
+  it.each([false, true])('proves exit when the session ended on its own before stop could capture its identity (server kept alive: %s)', async keepServer => {
+    const name = `dd-gone-before-stop-${keepServer ? 'kept' : 'last'}-${process.pid}`;
+    const tmux = (...args: string[]) => execFileSync('/usr/bin/tmux', args, { env: { ...process.env, TMUX: '' }, stdio: 'ignore' });
+    if (keepServer) tmux('new-session', '-d', '-s', `keeper-${process.pid}`, 'sleep 60');
+    const backend = new TmuxBackend(name, { ownerId: `dutydeck:${name}` });
+    let failIdentity = true;
+    const probe: ProcessProbe = {
+      identify: pid => { if (failIdentity) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); return childProcessIdentity(pid); },
+      observe: observeProcess,
+    };
+    const driver = new PtyCliDriver({
+      agent, adapter: { id: 'fixture', capabilities: {}, buildArgs: () => [], writeInput() {} }, backend,
+      sessionId: `ses_${name}`, processProbe: probe, onEvent() {}, onExit() {},
+    });
+    try {
+      await driver.start();
+      failIdentity = false;
+      const pane = (await backend.getPid())!;
+      tmux('kill-session', '-t', `=${name}`);
+      await vi.waitFor(() => expect(() => process.kill(pane, 0)).toThrow(), { timeout: 10_000 });
+      await driver.stop().catch(() => {});
+      expect(await driver.isStopped()).toBe(true);
+    } finally { if (keepServer) { try { tmux('kill-session', '-t', `=keeper-${process.pid}`); } catch { /* Gone. */ } } }
   }, 30_000);
 });

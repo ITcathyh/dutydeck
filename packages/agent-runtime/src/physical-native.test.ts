@@ -234,6 +234,25 @@ describe('controlled physical resources and strict native context',()=>{
   expect(JSON.parse(await readFile(join(h.dir,'native-state.json'),'utf8'))).toMatchObject({model:'A',effort:'low'});
  });
 
+ it.each([
+  ['an effort only the new model offers', { native_effort_by_model: '1' }, 'xhigh'],
+  ['options published in groups', { native_grouped: '1' }, 'high'],
+ ] as const)('switches model and reasoning effort together for %s',async(_label,env,effort)=>{
+  const h=await setup({...env});
+  const request:TaskRequestV1={version:1,namespace:'runtime',sessionId:h.session.id,key:`pair-${effort}`,actor:{kind:'unspecified'},prompt:'pair',mode:'queue',skills:[],sources:[],sourcePayload:null,options:{model:'B',reasoningEffort:effort}};
+  const outcome=await h.runtime.send(h.session.id,'pair','pair',undefined,undefined,[],request);
+  expect((await h.runtime.getEvents(h.session.id)).filter(event=>event.type==='error').map(event=>(event.data as {message?:unknown}).message)).toEqual([]);
+  expect(outcome.status).toBe('completed');
+  expect(JSON.parse(await readFile(join(h.dir,'native-state.json'),'utf8'))).toMatchObject({model:'B',effort});
+ });
+ it('still rejects an unlisted grouped value before writing anything',async()=>{
+  const h=await setup({native_grouped:'1'});
+  const request:TaskRequestV1={version:1,namespace:'runtime',sessionId:h.session.id,key:'unlisted',actor:{kind:'unspecified'},prompt:'unlisted',mode:'queue',skills:[],sources:[],sourcePayload:null,options:{model:'C'}};
+  expect((await h.runtime.send(h.session.id,'unlisted','unlisted',undefined,undefined,[],request)).status).toBe('failed');
+  expect((await h.runtime.getEvents(h.session.id)).filter(event=>event.type==='error').map(event=>String((event.data as {message?:unknown}).message))).toContain('Model C is not supported by Agent strict');
+  expect((await h.calls()).filter(c=>c.method==='session/set_config_option')).toHaveLength(0);
+ });
+
  it('closes a crashed creator and recovers its file receipt without replacing the native session',async()=>{
   const dir=await mkdtemp(join(tmpdir(),'dutydeck-native-crash-'));cleanup.push(()=>rm(dir,{recursive:true,force:true}));
   const child=spawn(process.execPath,['--conditions=development','--import','tsx',resolve('packages/agent-runtime/tests/fixtures/native-creation-crash.mts'),dir],{stdio:['ignore','ignore','pipe','ipc']});

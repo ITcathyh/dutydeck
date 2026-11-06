@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createRuntimeStore } from 'acpx/runtime';
 import { AcpxAdapter } from './index.js';
 import * as regex from './regex-timeout.js';
+import { childEnvironment } from '@dutydeck/shared/child-environment';
 
 const releases: Array<() => void> = [];
 function deferred<T = void>() {
@@ -26,7 +27,7 @@ afterEach(async () => {
     await writeFile(join(directory, 'release_cancel'), 'release');
   }
   await Promise.allSettled(adapters.splice(0).map(adapter => adapter.stop()));
-  vi.restoreAllMocks();
+  vi.restoreAllMocks(); vi.unstubAllEnvs();
   await Promise.all(dirs.splice(0).map(directory => rm(directory, { recursive: true, force: true })));
 });
 async function setup(extra = {}, options = {}) {
@@ -429,6 +430,77 @@ describe('ACP instance revocation', () => {
     const after = (await readFile(join(cwd, 'calls.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
     expect(after.filter(call => call.method === 'session/prompt')).toHaveLength(2);
     expect(after.filter(call => call.method === 'session/new')).toHaveLength(1);
+  });
+
+  it('keeps waiting for a stuck Agent with the largest configured timeout instead of overflowing the wait timer', async () => {
+    const { adapter, runtime } = await setup({ timeout: 2_147_483.647 }); fakeResources(runtime);
+    const tail = deferred();
+    vi.spyOn(runtime, 'startTurn').mockReturnValue({ events: { async *[Symbol.asyncIterator]() { await tail.promise; } }, result: Promise.resolve({ status: 'cancelled' }), cancel: vi.fn().mockResolvedValue(undefined) });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const first = adapter.send('first').catch(error => error);
+    await expect.poll(() => vi.mocked(runtime.startTurn).mock.calls.length).toBe(1);
+    await vi.advanceTimersByTimeAsync(2_147_483_647 + 2_100);
+    expect(await first).toMatchObject({ name: 'AgentIdleTimeoutError' });
+    let outcome: unknown = 'pending';
+    void adapter.send('second').then(() => { outcome = 'completed'; }, error => { outcome = error; });
+    // A delay past 2^31-1 ms would fire after 1 ms; the wait must stay bounded by the stuck-Agent retirement instead.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(outcome).toBe('pending');
+    expect(runtime.startTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['after the turn timed out', 'during the turn'] as const)('stops a session whose Agent never answers cancellation (%s) by ending its process', async phase => {
+    const { adapter, cwd } = await setup({ env: { lifecycle_cancel_gate: '1' } });
+    const calls = async () => (await readFile(join(cwd, 'calls.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+    const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+    await writeFile(join(cwd, 'release'), 'release');
+    await adapter.start(); adapter.agent.timeout = phase === 'during the turn' ? 600 : 0.05;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const sending = adapter.send('wait').catch(error => error);
+    await expect.poll(async () => (await calls()).some(call => call.method === 'session/prompt')).toBe(true);
+    const stuck = (await calls()).find(call => call.method === 'spawn')!.pid as number;
+    if (phase === 'after the turn timed out') {
+      await vi.advanceTimersByTimeAsync(50);
+      await expect.poll(() => existsSync(join(cwd, 'cancelling'))).toBe(true);
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(await sending).toMatchObject({ name: 'AgentIdleTimeoutError' });
+    }
+    let stopped = false;
+    const stopping = adapter.stop().then(() => { stopped = true; }, () => { stopped = true; });
+    await expect.poll(() => existsSync(join(cwd, 'cancelling'))).toBe(true);
+    await vi.advanceTimersByTimeAsync(20_000);
+    vi.useRealTimers();
+    await expect.poll(() => alive(stuck), { timeout: 10_000 }).toBe(false);
+    await expect.poll(() => stopped, { timeout: 10_000 }).toBe(true);
+    await stopping; await sending;
+    expect(await adapter.isStopped()).toBe(true);
+  });
+
+  it('ends an Agent started through a wrapper shell, not only the direct child, when its turn never confirms cancellation', async () => {
+    // A clean environment launches the configured argv directly (no env launcher, no own process group).
+    const clean = childEnvironment(process.env);
+    for (const [key, value] of Object.entries(process.env)) if (typeof value === 'string' && clean[key] !== value) vi.stubEnv(key, undefined);
+    const fixture = resolve('tests/fixtures/acp-lifecycle-agent.mjs');
+    const { adapter, cwd } = await setup({ command: '/bin/sh', args: ['-c', `"${process.execPath}" "${fixture}"; exit $?`], env: { lifecycle_cancel_gate: '1' } });
+    const calls = async () => (await readFile(join(cwd, 'calls.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+    const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+    await writeFile(join(cwd, 'release'), 'release');
+    await adapter.start(); adapter.agent.timeout = 0.05;
+    const [shell] = [...(adapter as any).agentChildren.keys()];
+    expect(shell.spawnargs[0]).toBe('/bin/sh');
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const sending = adapter.send('wait').catch(error => error);
+    await expect.poll(async () => (await calls()).some(call => call.method === 'session/prompt')).toBe(true);
+    const agent = (await calls()).find(call => call.method === 'spawn')!.pid as number;
+    expect(agent).not.toBe(shell.pid);
+    await vi.advanceTimersByTimeAsync(50);
+    await expect.poll(() => existsSync(join(cwd, 'cancelling'))).toBe(true);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(await sending).toMatchObject({ name: 'AgentIdleTimeoutError' });
+    await vi.advanceTimersByTimeAsync(60_000);
+    vi.useRealTimers();
+    await expect.poll(() => alive(agent), { timeout: 10_000 }).toBe(false);
+    await expect.poll(() => adapter.isIdle(), { timeout: 10_000 }).toBe(true);
   });
 
   it('ends a stuck Agent that never confirms cancellation and reconnects the persisted session on the next prompt', async () => {

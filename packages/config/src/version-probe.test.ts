@@ -1,6 +1,8 @@
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { afterEach, expect, it, vi } from 'vitest';
 import { PTY_AGENT_CONTRIBUTIONS } from '../../pty-driver/src/contributions.js';
 
@@ -78,3 +80,48 @@ it('does not execute custom terminal wrappers to read a version', async () => {
   expect(loaded.config.agents.find(agent => agent.id === 'wrapped')?.version).toBeUndefined();
   expect(await invocations(wrapper)).toEqual([]);
 });
+
+it('probes a CLI again on the next load after its version probe failed', async () => {
+  const directory = await fixtureDirectory();
+  const marker = join(directory, 'installed');
+  const command = join(directory, 'late-cli');
+  await writeFile(command, `#!/bin/sh\n[ -e "${marker}" ] || exit 1\necho "late-cli 2.0.0"\n`, { mode: 0o755 });
+  vi.stubEnv('PATH', '');
+  vi.resetModules();
+  const { loadConfig, loadConfigWithDiagnosticsAsync } = await import('./index.js');
+  const env = { DUTYDECK_DEFAULT_CWD: directory, DUTYDECK_AGENTS_JSON: JSON.stringify([{ id: 'late', name: 'Late', command, protocol: 'acp' }]) };
+  expect(loadConfig(env).agents.find(agent => agent.id === 'late')?.version).toBeUndefined();
+  expect((await loadConfigWithDiagnosticsAsync(env)).config.agents.find(agent => agent.id === 'late')?.version).toBeUndefined();
+  await writeFile(marker, '');
+  expect(loadConfig(env).agents.find(agent => agent.id === 'late')?.version).toBe('late-cli 2.0.0');
+});
+
+it('reads the same version asynchronously as synchronously from a CLI that reads stdin', async () => {
+  const directory = await fixtureDirectory();
+  const command = join(directory, 'stdin-cli');
+  // Waits for end of input before answering; an open stdin pipe would hang it until the probe timeout.
+  await writeFile(command, `#!/bin/sh\ncat >/dev/null\necho "stdin-cli 3.1.0"\n`, { mode: 0o755 });
+  // A plain Node process: inside the test worker a child's stdin pipe does not stay open, which hides the hang.
+  const script = join(directory, 'probe.mts');
+  await writeFile(script, `const config = await import(process.argv[2]);\nprocess.stdout.write(JSON.stringify({ async: await config.cliVersionAsync(process.argv[3]) ?? null, sync: config.cliVersion(process.argv[3]) ?? null }));\n`);
+  const { stdout } = await promisify(execFile)(process.execPath, ['--conditions=development', '--import', 'tsx', script, resolve('packages/config/src/index.ts'), command], { encoding: 'utf8', timeout: 20_000 });
+  expect(JSON.parse(stdout)).toEqual({ async: 'stdin-cli 3.1.0', sync: 'stdin-cli 3.1.0' });
+}, 30_000);
+
+it('runs at most four version probes at once during startup', async () => {
+  const directory = await fixtureDirectory();
+  const names = Array.from({ length: 8 }, (_, index) => `slow-${index}`);
+  const commands = await Promise.all(names.map(name => cli(directory, name, 0.3)));
+  vi.stubEnv('PATH', '');
+  vi.resetModules();
+  const { loadConfigWithDiagnosticsAsync } = await import('./index.js');
+  const loaded = await loadConfigWithDiagnosticsAsync({ DUTYDECK_DEFAULT_CWD: directory, DUTYDECK_AGENTS_JSON: JSON.stringify(commands.map((command, index) => ({ id: names[index], name: names[index], command, protocol: 'acp' }))) });
+  for (const name of names) expect(loaded.config.agents.find(agent => agent.id === name)?.version).toBe(`${name} 1.2.3`);
+  let running = 0, peak = 0;
+  for (const line of (await readFile(join(directory, 'timeline'), 'utf8')).split('\n').filter(Boolean)) {
+    running += line.startsWith('begin ') ? 1 : -1;
+    peak = Math.max(peak, running);
+  }
+  expect(peak).toBeGreaterThan(1);
+  expect(peak).toBeLessThanOrEqual(4);
+}, 30_000);

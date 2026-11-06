@@ -172,24 +172,23 @@ export async function stopOwnedTmux(identity: OwnedTmuxIdentity, probe: ProcessP
   absorb(await processes(scope, targetId, probe));
   const unknown = () => { for (const item of all.values()) if (probe.observe(item) === 'unknown') fail('LEGACY_TMUX_EXIT_UNKNOWN'); };
   unknown();
-  if (beforeKill) {
-    // The durable record must cover live descendants born while it was written:
-    // re-record them for a bounded number of rounds before killing.
-    for (let round = 0; ; round++) {
-      await beforeKill(structuredClone({ ...identity, identities: [...all.values()] }));
-      socketCheck(scope, socket);
-      alive(server, probe);
-      if ((await target(scope)) !== targetId) fail('LEGACY_TMUX_TARGET_CHANGED');
-      await ownerCheck(scope, targetId);
-      const added = absorb(await processes(scope, targetId, probe)).filter(item => probe.observe(item) === 'alive');
-      unknown();
-      if (!added.length || round + 1 >= PRE_KILL_RECORD_ROUNDS) break;
-    }
-  } else {
+  const ownership = async () => {
     socketCheck(scope, socket);
     alive(server, probe);
     if ((await target(scope)) !== targetId) fail('LEGACY_TMUX_TARGET_CHANGED');
     await ownerCheck(scope, targetId);
+  };
+  // Rescan after the ownership checks right before kill: a descendant born since the earlier scans (for example a
+  // `nohup … &` job that kill-session cannot end) must join the proof. With a durable pre-kill record, live
+  // newcomers are recorded again for a bounded number of rounds; every killed process must be in the record, so
+  // children still appearing after the last round refuse the stop.
+  for (let round = 0; ; round++) {
+    if (beforeKill) await beforeKill(structuredClone({ ...identity, identities: [...all.values()] }));
+    await ownership();
+    const added = absorb(await processes(scope, targetId, probe)).filter(item => probe.observe(item) === 'alive');
+    unknown();
+    if (!added.length || !beforeKill) break;
+    if (round + 1 >= PRE_KILL_RECORD_ROUNDS) fail('LEGACY_TMUX_PROCESS_SET_CHANGED');
   }
   socketCheck(scope, socket);
   alive(server, probe);
@@ -209,7 +208,15 @@ export async function stopOwnedTmux(identity: OwnedTmuxIdentity, probe: ProcessP
 export async function verifyOwnedTmuxExit(proof: OwnedTmuxExitProof, probe: ProcessProbe): Promise<boolean> {
   try {
     scopeCheck(proof.scope, probe);
-    if (!proof.identities.length || !proof.identities.every(item => probe.observe(item) === 'dead')) return false;
+    if (!proof.identities.length) {
+      // Nothing was alive in the panes when the identity was captured (the pane root had already exited):
+      // exit is proven only by the original session being gone.
+      const server = probe.observe(proof.server);
+      if (server === 'dead') return !socketCheck(proof.scope, undefined, true) || (await target(proof.scope)) === undefined;
+      if (server !== 'alive' || !socketCheck(proof.scope, proof.socket, true)) return false;
+      return (await target(proof.scope)) === undefined;
+    }
+    if (!proof.identities.every(item => probe.observe(item) === 'dead')) return false;
     const server = probe.observe(proof.server);
     // A replacement server may reuse the path while the last old session is
     // closing. Exact old process identities prove exit without touching it.

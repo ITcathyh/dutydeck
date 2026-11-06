@@ -1,4 +1,5 @@
 import { mkdtemp, rm } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -280,6 +281,18 @@ describe('acpx ACP boundary', () => {
     expect((await store.load('same-dutydeck-session'))?.acpSessionId).toBe(before?.acpSessionId);
     expect((await store.load('same-dutydeck-session'))?.acpx?.reset_on_next_ensure).not.toBe(true);
     await second.stop();
+  });
+
+  it('accepts grouped config option values for runtime model and reasoning effort switches with a persistent session key', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-acp-grouped-')); dirs.push(cwd);
+    const adapter = new AcpxAdapter({ ...agentConfig(), id: 'grouped', cwd, command: process.execPath, args: [resolve(process.cwd(), 'tests/fixtures/acp-strict-native-agent.mjs')], env: { native_directory: cwd, native_grouped: '1' } }, { sessionKey: 'grouped-persistent', onEvent() {} });
+    try {
+      await adapter.start();
+      await adapter.setModel('B');
+      await adapter.setReasoningEffort('high');
+      await expect(adapter.setModel('C')).rejects.toMatchObject({ code: 'CONFIGURATION_REJECTED' });
+      expect(JSON.parse(readFileSync(join(cwd, 'native-state.json'), 'utf8'))).toMatchObject({ model: 'B', effort: 'high' });
+    } finally { await adapter.stop(); }
   });
 
   it('safely renders configurable custom agent argv', () => {
