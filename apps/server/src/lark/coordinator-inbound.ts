@@ -160,6 +160,9 @@ function larkSessionConfigFailure(error: unknown, input: { command: string; labe
   }
 }
 
+/** 实时路径上清理已忽略入站记录的最小间隔。 */
+export const LARK_IGNORED_PRUNE_INTERVAL_MS = 3_600_000;
+
 export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
   async initializeWorkflows(config: StoredLarkConfig) {
     this.reconcileConfig = config;
@@ -169,7 +172,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     this.registerAgentSettingsConfirm(config.appId);
     await this.workflows?.initialize(config.appId);
     await this.recoverAutoVerifications(config).catch(error => this.log.warn({ error, appId: config.appId }, '重启后收尾自动验证失败'));
-    await this.inbox?.pruneIgnored(config.appId);
+    if (this.inbox) await this.pruneIgnoredInbox(config.appId);
     // 入站恢复仍在监听建连之前、逐条完成：上次没处理完的旧请求先排进各自会话的队列，建连后新到的消息
     // （包括 /new）排在它们后面，不会反过来插队。单条记录失败只影响这一条，不让初始化抛出、不阻止建连；
     // 瞬时失败的记录交还后在后台重试，不占着建连。
@@ -678,7 +681,8 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
   }
 
   private readonly intakeTails = new Map<string, Promise<void>>();
-  private ignoredPrunePending = false;
+  /** 每个机器人上次清理已忽略记录的时间，以及是否已排了下一次。 */
+  private readonly ignoredPrunes = new Map<string, { lastRunAt: number; pending: boolean }>();
 
   /** SDK 只等待本地接收。同群路由保持接收顺序，其他群不受慢权限查询影响。 */
   async receive(event: LarkMessageEvent, config: StoredLarkConfig) {
@@ -723,16 +727,26 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     this.scheduleIgnoredPrune(config.appId);
   }
 
+  private pruneIgnoredInbox(appId: string) {
+    const state = this.ignoredPrunes.get(appId) ?? { lastRunAt: 0, pending: false };
+    state.lastRunAt = Date.now();
+    this.ignoredPrunes.set(appId, state);
+    return timeLoop('lark.inbox.prune', this.log, () => this.inbox!.pruneIgnored(appId), undefined, appId);
+  }
+
+  /** 保留期按天计，不必每条忽略消息都清：实时路径上每个机器人每小时至多清理一次（启动时已清过一轮）。 */
   private scheduleIgnoredPrune(appId: string) {
-    if (this.ignoredPrunePending) return;
-    this.ignoredPrunePending = true;
-    const cancel = () => { clearTimeout(timer); this.ignoredPrunePending = false; this.turnCleanups.delete(cancel); };
+    const state = this.ignoredPrunes.get(appId) ?? { lastRunAt: 0, pending: false };
+    if (state.pending) return;
+    state.pending = true;
+    this.ignoredPrunes.set(appId, state);
+    const cancel = () => { clearTimeout(timer); state.pending = false; this.turnCleanups.delete(cancel); };
     const timer = setTimeout(() => {
       this.turnCleanups.delete(cancel);
-      void this.inbox!.pruneIgnored(appId)
-        .catch(error => this.log.warn({ error }, '清理已忽略的飞书入站记录失败'))
-        .finally(() => { this.ignoredPrunePending = false; });
-    }, 30_000);
+      void this.pruneIgnoredInbox(appId)
+        .catch(error => this.log.warn({ error, appId }, '清理已忽略的飞书入站记录失败'))
+        .finally(() => { state.pending = false; });
+    }, Math.max(30_000, state.lastRunAt + LARK_IGNORED_PRUNE_INTERVAL_MS - Date.now()));
     timer.unref?.();
     this.turnCleanups.add(cancel);
   }

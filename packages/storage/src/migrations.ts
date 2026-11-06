@@ -1,6 +1,7 @@
 import { createWorkspaceApprovalRuleSchema } from './workspace-approval-rules.js';
 import { createMatterSchema } from './matters.js';
-import { createConfigReadIndexes } from './config-query.js';
+import { createConfigReadIndexes, createLarkInboxStateIndex } from './config-query.js';
+import { createLarkInboxRetentionIndexes } from './lark-inbox.js';
 import { createPluginResultSchema } from './plugin-results-migration.js';
 import { createMemoryConsumedTaskSchema, createMemoryJobSchema } from './memory-jobs.js';
 import { createWorkItemIndexSchema, refreshWorkItemIndexTriggers } from './work-item-index.js';
@@ -641,7 +642,13 @@ export const migrations: Migration[] = [
   // 计划修订把删除的步骤移到 retiredSteps；索引触发器同时投影其子会话归属，旧记录不改写。
   { version: 45, name: 'work_item_retired_step_sessions', up(db) { if (tableExistsForMigration(db, 'work_item_index')) refreshWorkItemIndexTriggers(db) } },
   // 审批卡「本工作区允许此类命令」持久化的命令规则；纯新增表，不改写已有数据。
-  { version: 46, name: 'workspace_approval_rules', up: createWorkspaceApprovalRuleSchema }
+  { version: 46, name: 'workspace_approval_rules', up: createWorkspaceApprovalRuleSchema },
+  // 飞书入站记录的读取与保留期清理走索引；只建索引，不改写已有记录。
+  { version: 47, name: 'lark_inbox_indexes', up(db) {
+    if (!tableExistsForMigration(db, 'configs')) return;
+    createLarkInboxStateIndex(db);
+    createLarkInboxRetentionIndexes(db);
+  } }
 ]
 
 /** v38：collaboration_duties 加 scenarios_json 列，把旧的 alarm_json 转进去。 */

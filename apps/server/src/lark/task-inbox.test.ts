@@ -88,7 +88,7 @@ describe('persistent Lark task inbox', () => {
       });
       expect(await repositories.config.compareAndSetBatch!([], writes)).toBe(true);
       await repositories.config.set('lark.inbox.app_one.expired', JSON.stringify({ appId: 'app_one', event: message({ messageId: 'expired' }), boot: '', state: 'ignored', receivedAt: new Date(Date.now() - 30 * 86_400_000 - 1).toISOString() }));
-      await inbox.pruneIgnored('app_one');
+      await inbox.pruneIgnored('app_one', 5_000);
       const rows = await repositories.config.list!('lark.inbox.app_one.');
       expect(rows).toHaveLength(5001);
       expect(rows.filter(row => JSON.parse(row.value).state === 'ignored')).toHaveLength(5000);
@@ -408,4 +408,108 @@ it('accepts the frozen request as the confirmer once without persisting the tran
     expect(claimed?.event).toEqual({ ...event, senderOpenId: 'ou_confirmer', authorization: adoption.authorization });
     expect(await inbox.claim('app_one', event, true, adoption)).toBeUndefined();
   } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+describe('ignored receipt size and retention', () => {
+  const card = JSON.stringify({ schema: '2.0', body: { elements: Array.from({ length: 80 }, (_, index) => ({ tag: 'markdown', content: `告警第 ${index} 行 cpu_usage=95% threshold=80%` })) } });
+  const seed = async (repositories: ReturnType<typeof createRepositories>, count: number, senderType: string, at: (index: number) => string, tag: string) => {
+    const writes = Array.from({ length: count }, (_, index) => {
+      const event = message({ messageId: `${tag}_${index}`, senderType, messageType: senderType === 'bot' ? 'interactive' : 'text', content: senderType === 'bot' ? card : `{"text":"真人 ${index}"}` });
+      return { key: `lark.inbox.app_one.${event.messageId}`, value: JSON.stringify({ appId: 'app_one', event, boot: '', state: 'ignored', receivedAt: at(index), receiptOrder: index, reason: senderType === 'bot' ? 'bot_message' : 'not_addressed' }) };
+    });
+    expect(await repositories.config.compareAndSetBatch!([], writes)).toBe(true);
+  };
+
+  it('drops the card body of an ignored bot message once it can no longer be adopted, but keeps a human message verbatim for confirmation replay', async () => {
+    const { directory, repositories } = await openDatabase();
+    try {
+      const inbox = new LarkTaskInbox(repositories.config);
+      const bot = (await inbox.capture('app_one', message({ messageId: 'om_bot', senderType: 'bot', messageType: 'interactive', content: card })))!;
+      const before = Date.now();
+      await inbox.update(bot, { state: 'ignored', reason: 'bot_message' });
+      const key = 'lark.inbox.app_one.om_bot';
+      const pending = JSON.parse((await repositories.config.get(key))!);
+      expect(Date.parse(pending.bodyExpiresAt) - before).toBeGreaterThanOrEqual(3_600_000);
+      // 同一进程的场景包收养可能晚于忽略落库：宽限期内保留原文。
+      await inbox.pruneIgnored('app_one');
+      expect((await inbox.lookup('app_one', 'om_bot'))!.event.content).toBe(card);
+      await repositories.config.set(key, JSON.stringify({ ...pending, bodyExpiresAt: new Date(Date.now() - 1).toISOString() }));
+      const human = (await inbox.capture('app_one', message({ messageId: 'om_human', senderType: 'user', senderOpenId: 'ou_user' })))!;
+      await inbox.update(human, { state: 'ignored', reason: 'not_addressed' });
+      expect((await inbox.lookup('app_one', 'om_human'))!.bodyExpiresAt).toBeUndefined();
+      await inbox.pruneIgnored('app_one');
+      const stored = (await repositories.config.get(key))!;
+      expect(stored.length).toBeLessThan(1_000);
+      const slimmed = JSON.parse(stored);
+      expect(slimmed).toMatchObject({ state: 'ignored', reason: 'bot_message', snippet: card.slice(0, 160), event: { messageId: 'om_bot', chatId: 'oc_chat', senderType: 'bot', content: '' } });
+      expect(slimmed.bodyExpiresAt).toBeUndefined();
+      // 没有原文可回放，不再收养。
+      expect(await inbox.claim('app_one', bot.event, true, { senderOpenId: 'ou_admin', senderType: 'user' })).toBeUndefined();
+      const kept = (await inbox.lookup('app_one', 'om_human'))!;
+      expect(kept.event).toEqual(human.event);
+      expect(kept.snippet).toBeUndefined();
+      // 群参与确认卡回放时按落库原文校验摘要，并以原文认领。
+      const digest = larkConfirmationInputDigest({ ...human.event, senderOpenId: 'ou_confirmer' });
+      expect(await inbox.claim('app_one', human.event, true, { senderOpenId: 'ou_confirmer', senderType: 'user', confirmedInputDigest: digest })).toMatchObject({ state: 'received', event: { content: human.event.content } });
+      const { queryDispositions } = await import('./disposition.js');
+      expect((await queryDispositions(repositories.config, { appId: 'app_one', messageId: 'om_bot' }))[0]).toMatchObject({ snippet: card.slice(0, 160), reason: 'bot_message' });
+    } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('keeps ignored bot receipts written before this version verbatim until they expire', async () => {
+    const { directory, repositories } = await openDatabase();
+    try {
+      const inbox = new LarkTaskInbox(repositories.config);
+      await seed(repositories, 2, 'bot', index => new Date(Date.now() - (index ? 31 : 2) * 86_400_000).toISOString(), 'legacy');
+      const before = (await repositories.config.get('lark.inbox.app_one.legacy_0'))!;
+      await inbox.pruneIgnored('app_one');
+      expect(await repositories.config.get('lark.inbox.app_one.legacy_0')).toBe(before);
+      expect(await repositories.config.get('lark.inbox.app_one.legacy_1')).toBeUndefined();
+    } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('keeps 30 days of other bots\' messages beyond the old 5000 cap and drops only the expired ones', async () => {
+    const { directory, repositories } = await openDatabase();
+    try {
+      const inbox = new LarkTaskInbox(repositories.config);
+      await seed(repositories, 6_000, 'bot', index => new Date(Date.now() - 29 * 86_400_000 + index * 1_000).toISOString(), 'recent');
+      await seed(repositories, 3, 'bot', index => new Date(Date.now() - 31 * 86_400_000 + index).toISOString(), 'expired');
+      await inbox.pruneIgnored('app_one');
+      const keys = (await repositories.config.list!('lark.inbox.app_one.')).map(row => row.key.slice('lark.inbox.app_one.'.length));
+      expect(keys.filter(id => id.startsWith('recent_'))).toHaveLength(6_000);
+      expect(keys.filter(id => id.startsWith('expired_'))).toHaveLength(0);
+    } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('keeps 30 days of human dispositions even when other bots flood the per-bot cap', async () => {
+    const { directory, repositories } = await openDatabase();
+    try {
+      const inbox = new LarkTaskInbox(repositories.config);
+      const now = Date.now();
+      await seed(repositories, 10, 'user', index => new Date(now - 20 * 86_400_000 + index).toISOString(), 'human');
+      await seed(repositories, 60, 'bot', index => new Date(now - 60_000 + index).toISOString(), 'bot');
+      await inbox.pruneIgnored('app_one', 50);
+      const left = (await repositories.config.list!('lark.inbox.app_one.')).map(row => row.key.slice('lark.inbox.app_one.'.length));
+      expect(left.filter(id => id.startsWith('human_'))).toHaveLength(10);
+      expect(left.filter(id => id.startsWith('bot_')).sort()).toEqual(Array.from({ length: 50 }, (_, index) => `bot_${index + 10}`).sort());
+    } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('prunes and recovers from indexed fields without reading every ignored record body', async () => {
+    const { directory, repositories } = await openDatabase();
+    try {
+      const inbox = new LarkTaskInbox(repositories.config);
+      await seed(repositories, 5_001, 'bot', index => new Date(Date.now() - 5_001 + index).toISOString(), 'bot');
+      await inbox.capture('app_one', message({ messageId: 'om_pending' }));
+      await inbox.startCommand('app_one', message({ messageId: 'om_command' }));
+      const list = vi.spyOn(repositories.config, 'list');
+      await inbox.pruneIgnored('app_one', 5_000);
+      const restarted = new LarkTaskInbox(repositories.config);
+      expect((await restarted.recoverable('app_one')).map(record => record.event.messageId)).toEqual(['om_pending']);
+      expect((await restarted.orphanedCommands('app_one')).map(record => record.event.messageId)).toEqual(['om_command']);
+      expect(list).not.toHaveBeenCalled();
+      expect(await inbox.lookup('app_one', 'bot_0')).toBeUndefined();
+      expect(await inbox.lookup('app_one', 'bot_1')).toMatchObject({ state: 'ignored' });
+    } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
+  });
 });

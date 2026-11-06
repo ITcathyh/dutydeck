@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { dispositionSchema } from './lark/disposition.js';
 import { larkConfirmActionId } from './lark/confirm-cards.js';
 import { larkMessageAnchor } from './lark/message-anchor.js';
+import { listLarkInboxFields } from './lark/inbox-fields.js';
 import { readTaskReportSafely, taskReportAttentionText, botAppIdOfSession, readStoredSessionSchedule, sessionScheduleOccurrenceSchema, type ConfigRepository, type RepositoryBundle, type SessionScheduleOccurrence, type Session } from '@dutydeck/shared';
 import { larkResultDeliveryIssues } from './lark/reconciler.js';
 import { larkListenerStatusKey, type LarkListenerStatus } from './lark/listener-status.js';
@@ -26,6 +27,23 @@ const inboxProjection = z.object({
   event: z.object({ messageId: z.string().min(1), chatId: z.string().min(1), replyMessageId: z.string().optional(), senderType: z.string().optional() }).passthrough(),
   receivedAt: z.string().datetime(), taskId: z.string().optional(), disposition: dispositionSchema.optional()
 }).passthrough();
+/** 巡检只读这些字段，不把记录正文读进来；拼回投影的形状再校验。 */
+const inboxFields = ['appId', 'state', 'event.messageId', 'event.chatId', 'event.replyMessageId', 'event.senderType', 'receivedAt', 'taskId', 'disposition'] as const;
+const inboxRecord = (fields: Record<string, unknown>) => Object.fromEntries(Object.entries({ appId: fields.appId, state: fields.state,
+  event: Object.fromEntries(Object.entries({ messageId: fields['event.messageId'], chatId: fields['event.chatId'], replyMessageId: fields['event.replyMessageId'], senderType: fields['event.senderType'] }).filter(([, value]) => value !== undefined)),
+  receivedAt: fields.receivedAt, taskId: fields.taskId, disposition: fields.disposition }).filter(([, value]) => value !== undefined));
+/**
+ * 只可能报积压的记录：还没路由或已认领未受理的，以及等群参与判断或等确认的已忽略记录。有索引的存储按 state 和原因各取一次，
+ * 合并后仍按键排序；没有投影能力的存储退回整前缀读取。
+ */
+async function readInboxCandidates(config: ConfigRepository, appId: string) {
+  const prefix = `lark.inbox.${appId}.`;
+  if (!config.list) return [];
+  if (!config.listJsonFields) return listLarkInboxFields(config, prefix, inboxFields);
+  const rows = [...await config.listJsonFields(prefix, inboxFields, { field: 'state', values: ['unrouted', 'received'] }),
+    ...await config.listJsonFields(prefix, inboxFields, { field: 'disposition.reason', values: ['participation_observes', 'participation_confirmation'] })];
+  return [...new Map(rows.map(row => [row.key, row])).values()].sort((a, b) => a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
+}
 const decode = <T>(raw: string | null | undefined): T | undefined => { try { return raw ? JSON.parse(raw) as T : undefined; } catch { return undefined; } };
 const time = (value: string | undefined, fallback: string) => value && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : fallback;
 const chatLink = (chatId: string, bot?: StoredLarkConfig) => `https://applink.${bot?.brand === 'lark' ? 'larksuite.com' : 'feishu.cn'}/client/chat/open?openChatId=${encodeURIComponent(chatId)}`;
@@ -113,8 +131,8 @@ export async function collectWatchScopes(repos: RepositoryBundle, bots: StoredLa
         since: typeof started === 'number' && Number.isFinite(started) ? new Date(started).toISOString() : at,
         location: `${chatLink(issue.chatId, bot)}（会话 ${issue.sessionId}）` });
     }
-    for (const row of await repos.config.list?.(`lark.inbox.${bot.appId}.`) ?? []) {
-      const parsed = inboxProjection.safeParse(decode<unknown>(row.value));
+    for (const row of await readInboxCandidates(repos.config, bot.appId)) {
+      const parsed = inboxProjection.safeParse(row.fields && inboxRecord(row.fields));
       if (!parsed.success) continue;
       const record = parsed.data;
       if (record.appId !== bot.appId || row.key !== `lark.inbox.${bot.appId}.${record.event.messageId}`

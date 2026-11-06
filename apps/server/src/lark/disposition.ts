@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { RuntimeError, type ConfigRepository } from '@dutydeck/shared';
 import type { LarkInboxRecord } from './task-inbox.js';
+import { listLarkInboxFields } from './inbox-fields.js';
 
 export const dispositionReasons = {
   not_addressed: '没有叫本机器人，且不满足免 @ 条件', bot_message: '机器人消息未触发执行',
@@ -35,18 +36,57 @@ async function writeDisposition(store: ConfigRepository, appId: string, messageI
     if (await store.compareAndSet!(key, raw, JSON.stringify(next))) return;
   }
 }
+const dispositionFields = ['appId', 'event.messageId', 'event.chatId', 'state', 'reason', 'detail', 'receivedAt', 'event.senderOpenId', 'event.senderType',
+  'snippet', 'mergedInto', 'sessionId', 'taskId', 'disposition.decisionId', 'duplicateCount'] as const;
+type DispositionRow = { key: string; appId: string; messageId: string; chatId: string; state: LarkInboxRecord['state']; reason?: Disposition['reason']; detail?: string; receivedAt?: string;
+  senderOpenId?: string; senderType?: string; snippet?: string; mergedInto?: string; sessionId?: string; taskId?: string; decisionId?: string; duplicateCount?: number };
+/**
+ * 只读去向页要的字段；正文只为最终显示、又没有摘要的那几条读。有索引的存储按时间倒序只取最近的已忽略记录，
+ * 失败和命令被拒的记录按 state / 原因单独取；没有索引能力的存储退回整前缀投影。
+ */
 export async function queryDispositions(store: ConfigRepository, input: { appId?: string; messageId?: string; chatId?: string; since?: string }) {
   const durations: Record<string, number> = { '24h': 86400000, '7d': 7 * 86400000, '30d': 30 * 86400000 };
   if (input.since && !durations[input.since]) throw new RuntimeError('INBOX_RANGE_INVALID', '时间范围仅支持 24h、7d、30d', 400);
   const since = Date.now() - durations[input.since ?? '24h']!;
-  const rows = (await store.list!(`lark.inbox.${input.appId ? input.appId + '.' : ''}`)).map(row => JSON.parse(row.value) as LarkInboxRecord);
-  return rows.filter(row => (!input.messageId || row.event.messageId === input.messageId) && (!input.chatId || row.event.chatId === input.chatId)
+  const prefix = `lark.inbox.${input.appId ? input.appId + '.' : ''}`;
+  const limit = input.messageId ? 100 : 500;
+  let candidates: Array<{ key: string; fields: Record<string, unknown> | undefined }>;
+  if (input.messageId && input.appId) {
+    const raw = await store.get(prefix + input.messageId);
+    candidates = raw ? [{ key: prefix + input.messageId, fields: projectRecord(raw) }] : [];
+  } else if (input.messageId && store.listJsonFields) {
+    const keys = (await store.listJsonFields(prefix, ['event.messageId'])).filter(row => row.fields?.['event.messageId'] === input.messageId);
+    candidates = await Promise.all(keys.map(async ({ key }) => { const raw = await store.get(key); return { key, fields: raw === undefined ? undefined : projectRecord(raw) }; }));
+  } else if (!input.messageId && store.listRecentIgnoredLarkInbox && store.listJsonFields) {
+    const others = [...await store.listJsonFields(prefix, dispositionFields, { field: 'state', values: ['failed'] }),
+      ...await store.listJsonFields(prefix, dispositionFields, { field: 'disposition.reason', values: ['command_rejected'] })];
+    candidates = [...new Map([...others, ...await store.listRecentIgnoredLarkInbox({ ...(input.appId ? { appId: input.appId } : {}), since: new Date(since).toISOString(),
+      ...(input.chatId !== undefined ? { chatId: input.chatId } : {}), limit, paths: dispositionFields })].map(row => [row.key, row])).values()];
+  } else candidates = await listLarkInboxFields(store, prefix, dispositionFields);
+  const rows = candidates.map(({ key, fields }): DispositionRow => {
+    if (!fields) throw new SyntaxError(`Malformed Lark inbox record ${key}`);
+    const value = (path: (typeof dispositionFields)[number]) => fields[path] as never;
+    return { key, appId: value('appId'), messageId: value('event.messageId'), chatId: value('event.chatId'), state: value('state'), reason: value('reason'), detail: value('detail'),
+      receivedAt: value('receivedAt'), senderOpenId: value('event.senderOpenId'), senderType: value('event.senderType'), snippet: value('snippet'), mergedInto: value('mergedInto'),
+      sessionId: value('sessionId'), taskId: value('taskId'), decisionId: value('disposition.decisionId'), duplicateCount: value('duplicateCount') };
+  });
+  const selected = rows.filter(row => (!input.messageId || row.messageId === input.messageId) && (!input.chatId || row.chatId === input.chatId)
     && (input.messageId || (row.state === 'ignored' && !['participation_handled', 'participation_replied'].includes(row.reason ?? '') || row.state === 'failed' && !row.taskId || row.reason === 'command_rejected') && Date.parse(row.receivedAt ?? '') >= since))
     .sort((a, b) => Date.parse(b.receivedAt ?? '') - Date.parse(a.receivedAt ?? ''))
-    .slice(0, input.messageId ? 100 : 500).map(row => ({ appId: row.appId, messageId: row.event.messageId, chatId: row.event.chatId, state: row.state,
-      reason: row.reason, detail: row.detail ?? (row.reason ? dispositionReasons[row.reason] : '旧记录未记录原因'), receivedAt: row.receivedAt,
-      sender: row.event.senderOpenId ?? row.event.senderType ?? '未知发送人', snippet: messageSnippet(row.event.content), mergedInto: row.mergedInto,
-      sessionId: row.sessionId, taskId: row.taskId, decisionId: row.disposition?.decisionId, duplicateCount: row.duplicateCount, duplicateReason: row.duplicateCount ? 'duplicate_delivery' : undefined }));
+    .slice(0, limit);
+  return Promise.all(selected.map(async row => ({ appId: row.appId, messageId: row.messageId, chatId: row.chatId, state: row.state,
+    reason: row.reason, detail: row.detail ?? (row.reason ? dispositionReasons[row.reason] : '旧记录未记录原因'), receivedAt: row.receivedAt,
+    sender: row.senderOpenId ?? row.senderType ?? '未知发送人', snippet: row.snippet ?? messageSnippet(await storedContent(store, row.key)), mergedInto: row.mergedInto,
+    sessionId: row.sessionId, taskId: row.taskId, decisionId: row.decisionId, duplicateCount: row.duplicateCount, duplicateReason: row.duplicateCount ? 'duplicate_delivery' : undefined })));
 }
+const projectRecord = (raw: string) => {
+  let record: Record<string, unknown>;
+  try { record = JSON.parse(raw) as Record<string, unknown>; } catch { return undefined; }
+  return Object.fromEntries(dispositionFields.map(path => [path, path.split('.').reduce<unknown>((value, part) => (value as Record<string, unknown> | undefined)?.[part], record)]));
+};
+const storedContent = async (store: ConfigRepository, key: string) => {
+  const raw = await store.get(key);
+  return raw ? String((JSON.parse(raw) as LarkInboxRecord).event.content ?? '') : '';
+};
 
 function messageSnippet(content: string) { try { const parsed = JSON.parse(content); if (typeof parsed.text === 'string') return parsed.text.slice(0, 160); } catch {} return content.slice(0, 160); }

@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { isTerminalTaskStatus, type ConfigRepository, type TaskRepository } from '@dutydeck/shared';
 import type { LarkInboxRecord } from './lark/task-inbox.js';
+import { listLarkInboxFields } from './lark/inbox-fields.js';
 import type { LarkInteraction } from './lark/workflow-interactions.js';
 import { existsSync, realpathSync, renameSync, rmSync, statSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -77,11 +78,30 @@ export function larkResourceRoot(databaseUrl: string): string {
   return join(dirname(database), 'lark-resources', namespace);
 }
 
+type InboxHolder = Pick<LarkInboxRecord, 'appId' | 'state' | 'taskId' | 'workflowRequestId' | 'mergedInto' | 'resourceDirectories'> & { event: { messageId: string } };
+/**
+ * Only these inbox rows can hold, inherit or carry attachment directories. Ignored rows are skipped through the
+ * state index: a receipt becomes ignored only from unrouted (routeCaptured, backlog expiry), before any claim
+ * could attach a task, hand-off link or directory, so an ignored row can at most be marked held by a merge link
+ * and still contributes no directory. Rows without a readable state are still read, so a malformed row keeps
+ * failing the whole sweep. SQLite reads just these fields instead of every record body.
+ */
+const HOLDER_STATES = ['unrouted', 'received', 'accepted', 'command', 'failed', null];
+async function readInboxHolders(store: ConfigRepository): Promise<InboxHolder[]> {
+  return (await listLarkInboxFields(store, 'lark.inbox.', ['appId', 'event.messageId', 'state', 'taskId', 'workflowRequestId', 'mergedInto', 'resourceDirectories'], HOLDER_STATES))
+    .map(({ fields }) => {
+      // 读不懂的记录不能当作「不持有附件」：整轮清理放弃。
+      if (!fields) throw new Error('Invalid inbox record');
+      return { appId: fields.appId, event: { messageId: fields['event.messageId'] }, state: fields.state, taskId: fields.taskId,
+        workflowRequestId: fields.workflowRequestId, mergedInto: fields.mergedInto, resourceDirectories: fields.resourceDirectories } as InboxHolder;
+    })
+    .filter(record => record.state === 'received' || record.state === 'unrouted' || record.taskId || record.workflowRequestId || record.mergedInto || record.resourceDirectories !== undefined);
+}
+
 /** Inbox records outlive accepted tasks; only pruneIgnored removes inbox rows. */
 export async function readLarkResourceReferences(store: ConfigRepository, tasks: Pick<TaskRepository, 'get'>): Promise<Set<string>> {
   if (!store.list || !tasks.get) throw new Error('Attachment retention requires complete inbox and task reads');
-  const rows = await store.list('lark.inbox.');
-  const records = rows.map(row => JSON.parse(row.value) as LarkInboxRecord);
+  const records = await readInboxHolders(store);
   const key = (appId: string, messageId: string) => `${appId}:${messageId}`;
   const held = new Set<string>();
   for (const record of records) {
@@ -112,7 +132,7 @@ export async function readLarkResourceReferences(store: ConfigRepository, tasks:
   }
   // Approval completion publishes its child inbox before closing the interaction.
   // If that handoff changed our inbox snapshot, retry on the next sweep.
-  if (JSON.stringify(await store.list('lark.inbox.')) !== JSON.stringify(rows)) throw new Error('Attachment holders changed during collection');
+  if (JSON.stringify(await readInboxHolders(store)) !== JSON.stringify(records)) throw new Error('Attachment holders changed during collection');
   const directories = new Set<string>();
   for (const record of records) if (held.has(key(record.appId, record.event.messageId))) {
     if (record.resourceDirectories !== undefined && (!Array.isArray(record.resourceDirectories) || record.resourceDirectories.some(path => typeof path !== 'string'))) throw new Error('Invalid attachment references');

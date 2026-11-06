@@ -24,3 +24,25 @@ it.each([
    await vi.waitFor(async () => expect(await inbox.lookup(config.appId,event.messageId)).toMatchObject({reason}));
  } finally { coordinator.stop(); repos.close(); }
 });
+
+it('prunes ignored receipts at most once an hour on the live path, however many messages are ignored', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'], shouldAdvanceTime: true });
+  const repos = createRepositories(':memory:');
+  const config = {appId:'cli_test',appSecret:'test',listening:true,mentionPolicy:'always',permissionMode:'ask',allowedUsers:[],allowedEmails:[],riskControlMode:'off'} as any;
+  await repos.config.set('lark.bots',JSON.stringify([config]));
+  const coordinator = new LarkMessageCoordinator({} as any, {reply:vi.fn(async()=>({messageId:'reply'}))} as any,{info:vi.fn(),warn:vi.fn(),error:vi.fn()},Math.random,'ou_bot',undefined,undefined,async () => 'group',undefined,undefined,{store:repos.config} as any);
+  const prune = vi.spyOn(LarkTaskInbox.prototype, 'pruneIgnored');
+  const inbox = new LarkTaskInbox(repos.config);
+  const ignore = async (index: number) => {
+    const event = {messageId:`om_${index}`,chatId:'oc_1',chatType:'group',messageType:'interactive',content:'{"title":"告警"}',senderOpenId:'ou_other_bot',senderType:'bot',mentions:[]} as any;
+    await coordinator.receive(event,config);
+    await vi.waitFor(async () => expect(await inbox.lookup(config.appId,event.messageId)).toMatchObject({state:'ignored'}));
+    await vi.advanceTimersByTimeAsync(31_000);
+  };
+  try {
+    for (let index = 0; index < 5; index++) await ignore(index);
+    expect(prune).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(3_600_000);
+    expect(prune).toHaveBeenCalledTimes(2);
+  } finally { prune.mockRestore(); coordinator.stop(); repos.close(); vi.useRealTimers(); }
+});
