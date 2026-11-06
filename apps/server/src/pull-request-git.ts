@@ -163,6 +163,8 @@ export async function originPushUrl(cwd: string): Promise<string> {
   const remote = directRemote(url);
   // ls-remote --get-url 只解析地址，不连远端。
   const resolved = (await git({ cwd }, ['ls-remote', '--get-url', remote.name], { env: remote.env })).trim();
+  // Git 2.31 之前不认 GIT_CONFIG_COUNT，临时 remote 不存在，ls-remote 把 remote 名原样当地址返回。
+  if (resolved === remote.name) throw new RuntimeError('PR_PUSH_URL_UNSUPPORTED', '当前 Git 不支持 GIT_CONFIG_COUNT（需要 Git ≥ 2.31），请升级后重试', 409);
   if (resolved !== url) {
     throw new RuntimeError('PR_PUSH_URL_UNSUPPORTED', `origin 的推送地址 ${remoteUrlLabel(url)} 推送时还会被 git 的地址改写规则（url.<地址>.insteadOf）改成 ${remoteUrlLabel(resolved)}，不能确认代码会推到哪个仓库，请去掉这条改写规则`, 409);
   }

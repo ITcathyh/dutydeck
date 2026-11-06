@@ -468,6 +468,29 @@ describe('开 PR：推送目标', () => {
     expect((error as Error).message).not.toContain('secret-token');
   });
 
+  it('Git 不认 GIT_CONFIG_COUNT（低于 2.31）时说明要升级 Git，错误码不变；真的被 insteadOf 改写时仍报改写', async () => {
+    const f = await fixture();
+    const realGit = (await run('sh', ['-c', 'command -v git'])).stdout.trim();
+    const bin = join(f.root, 'old-git-bin');
+    await mkdir(bin);
+    // 模拟旧版 Git：丢掉 GIT_CONFIG_* 再调真实 git，临时 remote 不存在，ls-remote --get-url 原样输出 remote 名。
+    await writeFile(join(bin, 'git'), `#!/bin/sh\nunset GIT_CONFIG_COUNT\nexec "${realGit}" "$@"\n`, { mode: 0o755 });
+    vi.stubEnv('PATH', `${bin}:${process.env.PATH ?? ''}`);
+    try {
+      await expect(pullRequestGit.originPushUrl(f.cwd)).rejects.toMatchObject({ code: 'PR_PUSH_URL_UNSUPPORTED', message: '当前 Git 不支持 GIT_CONFIG_COUNT（需要 Git ≥ 2.31），请升级后重试' });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    await expect(pullRequestGit.originPushUrl(f.cwd)).resolves.toBe(f.remote);
+    const other = await otherRepository(f);
+    await f.git('config', `url.${other}.insteadOf`, f.remote);
+    await f.git('remote', 'set-url', 'origin', 'synthetic-alias:repo');
+    await f.git('config', `url.${f.remote}.insteadOf`, 'synthetic-alias:repo');
+    const error = await pullRequestGit.originPushUrl(f.cwd).catch((caught: Error) => caught);
+    expect(error).toMatchObject({ code: 'PR_PUSH_URL_UNSUPPORTED', message: expect.stringContaining('insteadOf') });
+    expect((error as Error).message).not.toContain('GIT_CONFIG_COUNT');
+  });
+
   it('升级前生成、没有记下推送地址的确认清单要重新发起，不推送', async () => {
     const f = await fixture();
     await f.turn('task_user_1', () => f.write('app.ts', 'export const a = 2;\n'));

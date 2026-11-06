@@ -89,7 +89,7 @@ import {
   createInstallationPrincipalResolver,
 } from './foundation-policy.js';
 import { WorkspaceOrganizationService } from './workspace-organization.js';
-import { parseUsageBackgroundLimits, parseUsagePricing, UsageLedger } from './usage-ledger.js';
+import { parseUsageBackgroundLimits, parseUsagePricing, UsageLedger, withExtraPricing } from './usage-ledger.js';
 import { SessionInsightService } from './session-insight-service.js';
 import type { SessionInsightResolver } from './session-insight-service.js';
 import { SessionInsightResolver as SessionInsightResolverImpl } from './session-insight-resolver.js';
@@ -432,7 +432,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   // 用量账本：runtime 每轮交来读数、派发新任务前查月度上限。子步骤的根任务取自下方的工作项与 Leader 委托。
   const usageLedger = new UsageLedger({
     repositories: repos,
-    pricing: parseUsagePricing(env.DUTYDECK_USAGE_PRICING_JSON),
+    pricing: withExtraPricing(parseUsagePricing(env.DUTYDECK_USAGE_PRICING_JSON), env.DUTYDECK_USAGE_PRICING_EXTRA_JSON),
     backgroundLimits: parseUsageBackgroundLimits(env.DUTYDECK_USAGE_BACKGROUND_LIMITS_JSON),
     parentOf: async session => {
       const binding = session.source === 'work_item' ? await workItems.parentForSession(session.id) : await delegations.parentForSession(session.id);

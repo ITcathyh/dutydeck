@@ -742,7 +742,7 @@ export function checkUnpricedModels(rawBots: string | undefined, pricing: UsageP
     label: '用量定价',
     level: 'warn',
     detail: `以下模型未定价，用量上限对它们无效：${[...unpriced].join('、')}`,
-    remedy: '这些型号（来自机器人配置或近 30 天的用量记录）不在价格表里，用量记为“未定价”，月度用量上限不会计入它们的花费。在 DUTYDECK_USAGE_PRICING_JSON 里补上对应型号的单价（整表覆盖，需包含原有型号）后重启；不需要限额时可忽略。'
+    remedy: '这些型号（来自机器人配置或近 30 天的用量记录）不在价格表里，用量记为“未定价”，月度用量上限不会计入它们的花费。用 DUTYDECK_USAGE_PRICING_EXTRA_JSON 只给这几个型号补上单价后重启（也可以用 DUTYDECK_USAGE_PRICING_JSON 整表覆盖，需包含原有型号）；不需要限额时可忽略。'
   };
 }
 

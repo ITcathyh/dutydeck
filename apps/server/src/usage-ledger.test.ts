@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import type { Session, TaskRequestV1 } from '@dutydeck/shared';
-import { classifyUsage, cumulativeDelta, defaultUsagePricing, estimateCostUsd, measureUsage, parseUsagePricing, resolveUsageRange, UsageLedger, type UsageLedgerOptions } from './usage-ledger.js';
+import { classifyUsage, cumulativeDelta, defaultUsagePricing, estimateCostUsd, measureUsage, parseUsagePricing, resolveUsageRange, UsageLedger, withExtraPricing, type UsageLedgerOptions } from './usage-ledger.js';
 
 const at = '2026-09-25T00:00:00.000Z';
 const session = (id: string, source: string | undefined, sourceId?: string, agentId = 'claude'): Session => ({ id, agentId, state: 'idle', cwd: '/tmp', source, sourceId, runId: `run_${id}`, createdAt: at, updatedAt: at } as Session);
@@ -87,6 +87,46 @@ describe('claude pricing', () => {
     expect(estimateCostUsd(custom, 'claude-opus-5-5', { inputTokens: 1_000_000 })).toBe(9);
     // 自定义表里 default 是明确的兜底，内置表没有。
     expect(estimateCostUsd(custom, 'claude-unknown', { inputTokens: 1_000_000 })).toBe(1);
+  });
+
+  describe('DUTYDECK_USAGE_PRICING_EXTRA_JSON', () => {
+    const measure = (model: string, pricing: typeof defaultUsagePricing) => measureUsage({ reading: { usageRef: 'r', breakdown: { inputTokens: 1_000_000 } }, freshTokens: true, model, pricing });
+    const extra = withExtraPricing(defaultUsagePricing, JSON.stringify({ models: [{ match: 'gemini-3.8-flash-n', inputPerMTok: 0.3, cachedInputPerMTok: 0.03, outputPerMTok: 2.5 }] }));
+
+    it('returns the built-in table itself when unset, so the recorded pricing version does not change', () => {
+      expect(withExtraPricing(defaultUsagePricing, undefined)).toBe(defaultUsagePricing);
+      expect(withExtraPricing(defaultUsagePricing, '  ')).toBe(defaultUsagePricing);
+      expect(measure('claude-opus-5-5', defaultUsagePricing).pricingVersion).toBe('public-2026-10-v2:c0cb100c509cc8d50e6b9d250b27c342');
+    });
+
+    it('prices only the added model as custom, keeps built-in prices and still leaves unknown models unpriced', () => {
+      expect(measure('gemini-3.8-flash-n', extra)).toMatchObject({ dataStatus: 'estimated', pricingSource: 'custom_model', pricingMatch: 'gemini-3.8-flash-n' });
+      expect(measure('gemini-3.8-flash-n', extra).costUsd).toBeCloseTo(0.3);
+      expect(measure('claude-opus-5-5', extra)).toMatchObject({ dataStatus: 'estimated', pricingSource: 'builtin_model' });
+      expect(measure('claude-opus-5-5', extra).costUsd).toBeCloseTo(4);
+      for (const name of ['gemini-3.8-flash', 'kimi-k2.5']) {
+        expect(estimateCostUsd(extra, name, { inputTokens: 1000 }), name).toBeUndefined();
+        expect(measure(name, extra), name).toMatchObject({ dataStatus: 'unpriced', pricingSource: 'unmatched' });
+      }
+      // 整表哈希：叠加后内置型号的版本号也会变，这是预期行为。
+      expect(measure('claude-opus-5-5', extra).pricingVersion).toMatch(/^public-2026-10-v2:/);
+      expect(measure('claude-opus-5-5', extra).pricingVersion).not.toBe(measure('claude-opus-5-5', defaultUsagePricing).pricingVersion);
+    });
+
+    it('replaces a base entry with the same match regardless of case and takes the extra version', () => {
+      const replaced = withExtraPricing(defaultUsagePricing, JSON.stringify({ version: 'site-1', models: [{ match: 'CLAUDE-OPUS-5-5', inputPerMTok: 9, cachedInputPerMTok: 1, outputPerMTok: 1 }] }));
+      expect(replaced).toMatchObject({ source: 'builtin', version: 'site-1', extraMatches: ['CLAUDE-OPUS-5-5'] });
+      expect(replaced.models.filter(entry => entry.match.toLowerCase() === 'claude-opus-5-5')).toHaveLength(1);
+      expect(measure('claude-opus-5-5', replaced)).toMatchObject({ pricingSource: 'custom_model', costUsd: 9 });
+    });
+
+    it.each([
+      ['a default entry', JSON.stringify({ default: { inputPerMTok: 1, cachedInputPerMTok: 1, outputPerMTok: 1 }, models: [] })],
+      ['invalid JSON', '{models:'],
+      ['a malformed model entry', JSON.stringify({ models: [{ match: 'x', inputPerMTok: 1 }] })]
+    ])('rejects %s and names the variable', (_label, json) => {
+      expect(() => withExtraPricing(defaultUsagePricing, json)).toThrow(/^DUTYDECK_USAGE_PRICING_EXTRA_JSON 无效：/);
+    });
   });
 
   it('marks claude turns as estimates and records the table provenance', () => {

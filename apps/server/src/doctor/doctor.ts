@@ -68,7 +68,7 @@ import {
   summarize,
   type DirectoryObservation
 } from './checks.js';
-import { parseUsagePricing } from '../usage-ledger.js';
+import { parseUsagePricing, withExtraPricing } from '../usage-ledger.js';
 import type {
   DatabaseProbeResult,
   DoctorAutostartResult,
@@ -314,7 +314,7 @@ export async function runDoctor(
 
   // 价格表来自环境变量覆盖或内置表；覆盖值解析失败时服务本身就起不来，这里不重复报。
   const unpriced = databaseUnreadable ? undefined : (() => {
-    try { return checkUnpricedModels(probe.values?.[larkBotsConfigKey], parseUsagePricing(env.DUTYDECK_USAGE_PRICING_JSON), probe.unpricedUsageModels); } catch { return undefined; }
+    try { return checkUnpricedModels(probe.values?.[larkBotsConfigKey], withExtraPricing(parseUsagePricing(env.DUTYDECK_USAGE_PRICING_JSON), env.DUTYDECK_USAGE_PRICING_EXTRA_JSON), probe.unpricedUsageModels); } catch { return undefined; }
   })();
   if (unpriced) checks.push(unpriced);
 

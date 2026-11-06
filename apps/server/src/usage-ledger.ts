@@ -5,8 +5,11 @@ import { isCapExcludedUsage, makeId, parseLarkSourceId, RuntimeError, type Usage
 import { isLarkPerGroupMemoryPool, larkMemoryScopeOfPool } from './lark/memory.js';
 
 const rateSchema = z.object({ inputPerMTok: z.number().nonnegative(), cachedInputPerMTok: z.number().nonnegative(), outputPerMTok: z.number().nonnegative(), cacheWritePerMTok: z.number().nonnegative().optional(), provider: z.string().trim().min(1).optional() }).strict();
-const pricingSchema = z.object({ version: z.string().trim().min(1).optional(), default: rateSchema, models: z.array(rateSchema.extend({ match: z.string().trim().min(1) }).strict()) }).strict();
-export type UsagePricing = z.infer<typeof pricingSchema> & { source?: 'builtin' | 'custom' };
+const modelRateSchema = rateSchema.extend({ match: z.string().trim().min(1) }).strict();
+const pricingSchema = z.object({ version: z.string().trim().min(1).optional(), default: rateSchema, models: z.array(modelRateSchema) }).strict();
+const extraPricingSchema = z.object({ version: z.string().trim().min(1).optional(), models: z.array(modelRateSchema) }).strict();
+/** extraMatches 只由 withExtraPricing 写入：这些 match 是部署方叠加的单价，即使基础表是内置表也记为 custom_model。 */
+export type UsagePricing = z.infer<typeof pricingSchema> & { source?: 'builtin' | 'custom'; extraMatches?: string[] };
 const backgroundLimitsSchema = z.object({ defaultMonthlyTasks: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(), bots: z.record(z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)).optional() }).strict();
 export function parseUsageBackgroundLimits(json?: string): UsageBackgroundLimits {
   return json?.trim() ? backgroundLimitsSchema.parse(JSON.parse(json)) : {};
@@ -25,7 +28,7 @@ export function parseUsageBackgroundLimits(json?: string): UsageBackgroundLimits
  * 两者分别按 input、cachedInput 计。已安装的 codex-acp 1.12.1-preview.4 在 dist/index.js 的 toTokenCount 里把
  * inputTokens 换算成 inputTokens - cachedInputTokens，toPromptUsage 再把 cachedInputTokens 报成 cachedReadTokens；
  * claude-agent-acp 沿用 Anthropic 的 input_tokens，本来就不含缓存。
- * 部署时可用 DUTYDECK_USAGE_PRICING_JSON 整表覆盖。
+ * 部署时可用 DUTYDECK_USAGE_PRICING_JSON 整表覆盖，或用 DUTYDECK_USAGE_PRICING_EXTRA_JSON 只给个别型号叠加单价（见 withExtraPricing）。
  */
 const claudeRate = (inputPerMTok: number, cacheWritePerMTok: number, cachedInputPerMTok: number, outputPerMTok: number) => ({ inputPerMTok, cachedInputPerMTok, outputPerMTok, cacheWritePerMTok });
 export const defaultUsagePricing: UsagePricing = {
@@ -55,6 +58,24 @@ export const defaultUsagePricing: UsagePricing = {
 export function parseUsagePricing(json?: string): UsagePricing {
   return json?.trim() ? { ...pricingSchema.parse(JSON.parse(json)), source: 'custom' } : defaultUsagePricing;
 }
+/**
+ * 在基础表上按型号叠加单价：叠加条目排在前面，基础表里 match 相同（不分大小写）的条目被替换，source 沿用基础表，
+ * 所以内置表叠加后仍不对未知型号套 default。没设变量时原样返回 base，pricingVersion 不变。
+ */
+export function withExtraPricing(base: UsagePricing, json?: string): UsagePricing {
+  if (!json?.trim()) return base;
+  let extra: z.infer<typeof extraPricingSchema>;
+  try { extra = extraPricingSchema.parse(JSON.parse(json)); } catch (error) {
+    throw new Error(`DUTYDECK_USAGE_PRICING_EXTRA_JSON 无效：${error instanceof Error ? error.message : String(error)}`);
+  }
+  const replaced = new Set(extra.models.map(entry => entry.match.toLowerCase()));
+  return {
+    ...base,
+    version: extra.version ?? base.version,
+    models: [...extra.models, ...base.models.filter(entry => !replaced.has(entry.match.toLowerCase()))],
+    extraMatches: extra.models.map(entry => entry.match)
+  };
+}
 
 interface Tokens { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number }
 /** Claude Code 会在型号后加 [1m]；Bedrock / Vertex 的型号带区域与厂商前缀、-v1:0 / @日期 后缀。统一成官方 API 型号名再匹配。 */
@@ -74,7 +95,7 @@ function priceSelection(pricing: UsagePricing, model: string | undefined, provid
   const matched = pricing.models.filter(entry => matchesProvider(entry) && matchesModel(name, entry.match.toLowerCase())).sort((a, b) => b.match.length - a.match.length)[0];
   const builtin = pricing.source === 'builtin';
   const rate = matched ?? (!builtin && matchesProvider(pricing.default) ? pricing.default : undefined);
-  const pricingSource: UsageLedgerEntry['pricingSource'] = matched ? (builtin ? 'builtin_model' : 'custom_model') : rate ? 'custom_default' : 'unmatched';
+  const pricingSource: UsageLedgerEntry['pricingSource'] = matched ? (builtin && !pricing.extraMatches?.includes(matched.match) ? 'builtin_model' : 'custom_model') : rate ? 'custom_default' : 'unmatched';
   // Include the actual table in the hash: editing prices without a version bump
   // still leaves a distinct durable provenance key.
   const pricingVersion = `${pricing.version ?? (builtin ? 'builtin' : 'custom')}:${createHash('sha256').update(JSON.stringify(pricing)).digest('hex').slice(0, 32)}`;

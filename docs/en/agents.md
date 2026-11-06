@@ -69,6 +69,10 @@ An exact Codex model-capacity failure without a business tool or permission call
 
 For a recognized Codex model-migration menu, Dutydeck selects only “Use existing model” and waits for the composer again. An unclear highlighted row or menu remains for manual handling. Terminal capture sockets support long and non-ASCII temporary-directory paths.
 
+Kiro 3.x is unverified: the Kiro 3.0.0 release notes say Kiro CLI is now a single standalone `kiro-cli` binary ([CLI changelog](https://kiro.dev/changelog/cli/)) and do not say whether `kiro-cli-chat` is still shipped. The built-in Kiro ACP agent is registered only when `kiro-cli-chat` is found; terminal mode (`kiro-cli chat`) is not affected.
+
+Do not enable Claude's `CLAUDE_CODE_RETRY_WATCHDOG` under Dutydeck: while it waits for a quota reset it produces no output and the process is not CPU-active, so the terminal-task idle timeout (the Agent `timeout`, default 600 seconds) ends the turn as stuck.
+
 ## 2. Permission modes
 
 Lark bots can use `ask`, `approve-reads` and `full-trust`. `deny-all` is not available for Lark bots.
@@ -124,6 +128,7 @@ The "本工作区允许此类命令" (allow this kind of command in this workspa
 | `DUTYDECK_CLEANUP_INTERVAL_MS` | `300000` | Cleanup interval: integer milliseconds from 1 to 2147483647 |
 | `DUTYDECK_DRIVER_IDLE_TIMEOUT_MS` | `21600000` | Nonnegative idle-terminal release threshold in milliseconds; `0` disables it; the periodic timer's 32-bit limit does not apply; sessions whose native background tasks are still running are not released |
 | `DUTYDECK_USAGE_PRICING_JSON` | built-in table | Override usage prices |
+| `DUTYDECK_USAGE_PRICING_EXTRA_JSON` | unset | Add per-model prices on top of the price table: `{"version"?: "...", "models": [{"match": "...", "inputPerMTok": ..., "cachedInputPerMTok": ..., "outputPerMTok": ...}]}`; an entry with the same `match` is replaced and `default` is not allowed. Once set, these models' cost counts toward monthly caps, so an instance with caps may be blocked earlier than before; an invalid value stops the service from starting |
 | `DUTYDECK_DEPLOY_WINDOW` | any time | Allowed `dutydeck deploy` windows, e.g. `10:00-11:00,16:00-17:00` (Asia/Shanghai) |
 | `LARK_APP_ID`, `LARK_APP_SECRET` | - | Fallback for `dutydeck lark send`-style commands only. Bots configured by `dutydeck setup` keep the secret in the bot configuration |
 
