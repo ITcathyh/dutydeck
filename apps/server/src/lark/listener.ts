@@ -7,7 +7,7 @@ import type { LarkScenarioAdoption } from './scenario-direct.js';
 import type { ExecutionActor, ExecutionRecoveryDecision, UnknownTaskFacts, UnknownTaskResolution } from '@dutydeck/shared';
 import type { SessionAutomationService } from '../session-automation.js';
 import type { RelayAskBroker } from '@dutydeck/relay';
-import * as lark from '@larksuiteoapi/node-sdk';
+import type * as Lark from '@larksuiteoapi/node-sdk';
 import type { AgentConfig, AgentEvent, ChannelMappingRepository, ConfigRepository, PermissionRequestData, PermissionMode, PolicyAction, PolicyDecision, Session, TaskRecord, ToolRiskPolicy, VerificationCommandInput, VerificationResponse, WorkspaceResponse } from '@dutydeck/shared';
 import type { LarkGroupManager } from './group-management.js';
 import type { StoredLarkConfig } from './config.js';
@@ -31,6 +31,14 @@ import { larkListenerStatusKey, type LarkListenerStatus } from './listener-statu
 // 消息协调见 coordinator.ts，卡片渲染见 card-renderer.ts，会话路由见 session-resolver.ts，
 // 卡片终态对账见 reconciler.ts。本文件同时 re-export 上述模块的公开符号，
 // 保持既有 import 路径（'./listener.js'）不变。
+
+// The SDK is a multi-megabyte bundle only the listener needs; load it on first connect instead of at
+// process start. Only a successfully loaded module is kept, so a failed import is retried next connect.
+let larkSdk: typeof Lark | undefined;
+async function loadLarkSdk(): Promise<typeof Lark> {
+  larkSdk = await import('@larksuiteoapi/node-sdk');
+  return larkSdk;
+}
 
 export type ListenerLog = {
   info(details: unknown, message?: string): void;
@@ -171,7 +179,7 @@ export interface LarkLongConnectionListenerOptions {
 }
 
 export class LarkLongConnectionListener implements LarkListener {
-  private client?: lark.WSClient;
+  private client?: Lark.WSClient;
   private http?: ReturnType<typeof createWorkbenchFetch>;
   private service?: LarkCardService;
   private coordinator?: LarkMessageCoordinator;
@@ -230,6 +238,7 @@ export class LarkLongConnectionListener implements LarkListener {
     let botOpenId: string;
     try { botOpenId = await service.getBotOpenId(); }
     catch (error) { http.close(); throw new LarkServiceError('LARK_LISTENER_START_FAILED', `Failed to resolve Lark bot identity: ${error instanceof Error ? error.message : String(error)}`, 502); }
+    const lark = larkSdk ?? await loadLarkSdk();
     http.fetch.signal!.throwIfAborted();
     // 话题群种子消息需要按群形态路由：默认用带缓存的 getChatMode，也允许注入（测试/自定义路由）。
     const chatModeResolver = this.options.chatModeResolver ?? ((appId: string, chatId: string) => getChatMode(appId, config.appSecret, chatId, {
