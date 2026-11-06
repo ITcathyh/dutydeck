@@ -58,7 +58,7 @@ function included(path: string): boolean {
 
 /** Hash HEAD plus every tracked and non-ignored untracked path and its current content. */
 export async function repositoryFingerprint(cwd: string): Promise<string> {
-  return fingerprintRepository(cwd, new Set());
+  return contentFingerprint(await scanRepository(cwd, new Set(), { latestChangeMs: 0 }));
 }
 
 /**
@@ -66,46 +66,55 @@ export async function repositoryFingerprint(cwd: string): Promise<string> {
  * same-size rewrite, so their stat cannot prove the content is unchanged.
  */
 const RACY_WINDOW_MS = 2_000;
+const LSTAT_CHUNK = 256;
+const LSTAT_CONCURRENCY = 16;
 const fingerprintCache = new Map<string, { stamp: string; fingerprint: string }>();
 const fingerprintRuns = new Map<string, Promise<string>>();
 
 /**
  * repositoryFingerprint for read paths (record lists, turn-boundary comparisons).
- * Reuses the last result while every repository's HEAD, path list and per-file
- * stat (inode, size, mtime, ctime) are unchanged, and lets concurrent callers
- * that observed the same state share one computation. Verification evidence
- * (before/after a command) must keep calling repositoryFingerprint directly.
+ * One walk lists every repository and stats each entry (the stamp); while that
+ * stamp matches the last cached one the content is not read again, otherwise the
+ * same listing is read for content. Only results whose entries are all older than
+ * the racy window are cached or shared with concurrent callers: their stamp
+ * proves the content each caller would read is the content already being read.
+ * Verification evidence (before/after a command) must keep calling
+ * repositoryFingerprint directly.
  */
 export async function cachedRepositoryFingerprint(cwd: string): Promise<string> {
   const startedAt = Date.now();
-  const before = await repositoryStamp(cwd);
+  const changes = { latestChangeMs: 0 };
+  const scan = await scanRepository(cwd, new Set(), changes);
   const cached = fingerprintCache.get(cwd);
-  if (cached?.stamp === before.stamp) return cached.fingerprint;
-  const runKey = `${cwd}\0${before.stamp}`;
+  if (cached?.stamp === scan.stamp) return cached.fingerprint;
+  // Racily recent entries: a rewrite may keep the same stat, so neither cache nor share.
+  if (changes.latestChangeMs >= startedAt - RACY_WINDOW_MS) return contentFingerprint(scan);
+  const runKey = `${cwd}\0${scan.stamp}`;
   const shared = fingerprintRuns.get(runKey);
   if (shared) return shared;
-  const run = (async () => {
-    const fingerprint = await repositoryFingerprint(cwd);
-    // Cache only when nothing changed while reading and no entry is racily recent.
-    if (before.latestChangeMs < startedAt - RACY_WINDOW_MS && (await repositoryStamp(cwd)).stamp === before.stamp) {
-      fingerprintCache.set(cwd, { stamp: before.stamp, fingerprint });
-    }
+  // Content is read after the stat it is keyed by. Any later change moves ctime,
+  // so this stamp cannot be observed again with different content.
+  const run = contentFingerprint(scan).then(fingerprint => {
+    fingerprintCache.set(cwd, { stamp: scan.stamp, fingerprint });
     return fingerprint;
-  })();
+  });
   fingerprintRuns.set(runKey, run);
   const forget = () => { if (fingerprintRuns.get(runKey) === run) fingerprintRuns.delete(runKey); };
   void run.then(forget, forget);
   return run;
 }
 
-/** Same walk as the fingerprint, hashing each entry's stat instead of its content. */
-async function repositoryStamp(cwd: string): Promise<{ stamp: string; latestChangeMs: number }> {
-  const stat = { latestChangeMs: 0 };
-  const stamp = await fingerprintRepository(cwd, new Set(), stat);
-  return { stamp, latestChangeMs: stat.latestChangeMs };
-}
+type ScannedEntry =
+  | { kind: 'missing' }
+  | { kind: 'file'; mode: number }
+  | { kind: 'link'; mode: number }
+  | { kind: 'uninitialized'; mode: number; commit: string }
+  | { kind: 'repository'; mode: number; scan: RepositoryScan };
 
-async function fingerprintRepository(cwd: string, seenRoots: Set<string>, stat?: { latestChangeMs: number }): Promise<string> {
+interface RepositoryScan { root: string; head: string; paths: string[]; entries: ScannedEntry[]; stamp: string }
+
+/** Lists a repository (recursing into submodules) and hashes each entry's stat instead of its content. */
+async function scanRepository(cwd: string, seenRoots: Set<string>, changes: { latestChangeMs: number }): Promise<RepositoryScan> {
   const root = (await git(cwd, ['rev-parse', '--show-toplevel'])).trim();
   const canonicalRoot = await realpath(root);
   if (seenRoots.has(canonicalRoot)) throw new RuntimeError('VERIFICATION_FINGERPRINT_FAILED', `Recursive Git repository detected: ${canonicalRoot}`, 409);
@@ -121,50 +130,78 @@ async function fingerprintRepository(cwd: string, seenRoots: Set<string>, stat?:
   });
   const untracked = (await git(canonicalRoot, ['ls-files', '--others', '--exclude-standard', '-z'])).split('\0').filter(Boolean);
   const paths = [...new Set([...tracked, ...untracked].filter(included))].sort();
-  const hash = stat
-    ? createHash('sha256').update('dutydeck-stat-v1\0').update(canonicalRoot).update('\0').update(head).update('\0')
-    : createHash('sha256').update('dutydeck-code-v1\0').update(head).update('\0');
-  // Stat-only walks prefetch every entry concurrently; sequential lstat dominates large trees.
-  const prefetched = stat ? await lstatAll(canonicalRoot, paths) : undefined;
-  for (const [index, path] of paths.entries()) {
-    const absolute = join(canonicalRoot, path);
-    let info;
-    try {
-      const entry = prefetched?.[index];
-      if (entry instanceof Error) throw entry;
-      info = entry ?? await lstat(absolute);
-    }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        hash.update(path).update('\0missing\0');
+  const stamp = createHash('sha256').update('dutydeck-stat-v2\0').update(canonicalRoot).update('\0').update(head).update('\0');
+  const entries: ScannedEntry[] = [];
+  // Stat in bounded chunks so a large tree never holds every BigIntStats at once.
+  for (let start = 0; start < paths.length; start += LSTAT_CHUNK) {
+    const chunk = paths.slice(start, start + LSTAT_CHUNK);
+    const stats = await lstatChunk(canonicalRoot, chunk);
+    for (const [offset, path] of chunk.entries()) {
+      const info = stats[offset]!;
+      if (info instanceof Error) {
+        if ((info as NodeJS.ErrnoException).code !== 'ENOENT') throw new RuntimeError('VERIFICATION_FINGERPRINT_FAILED', `Unable to fingerprint ${path}: ${info.message}`, 409);
+        stamp.update(path).update('\0missing\0');
+        entries.push({ kind: 'missing' });
         continue;
       }
-      throw new RuntimeError('VERIFICATION_FINGERPRINT_FAILED', `Unable to fingerprint ${path}: ${error instanceof Error ? error.message : String(error)}`, 409);
+      const mode = Number(info.mode) & 0o7777;
+      stamp.update(path).update('\0').update(String(mode)).update('\0');
+      if (info.isSymbolicLink() || info.isFile()) {
+        const kind = info.isFile() ? 'file' : 'link';
+        changes.latestChangeMs = Math.max(changes.latestChangeMs, Number(info.mtimeMs), Number(info.ctimeMs));
+        stamp.update(`${kind}\0${info.dev}:${info.ino}:${info.mode}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`);
+        entries.push({ kind, mode });
+      } else if (info.isDirectory()) {
+        const absolute = join(canonicalRoot, path);
+        const commit = gitlinks.get(path);
+        // An empty gitlink directory is an uninitialized submodule (plain clone
+        // or new worktree); its recorded commit is its whole code state.
+        if (commit && (await readdir(absolute)).length === 0) {
+          stamp.update('gitlink-uninitialized\0').update(commit);
+          entries.push({ kind: 'uninitialized', mode, commit });
+        } else {
+          // A tracked directory is a submodule. Recurse so dirty tracked and
+          // untracked submodule content cannot retain a false-current fingerprint.
+          const nested = await scanRepository(absolute, seenRoots, changes);
+          stamp.update('gitlink\0').update(nested.stamp);
+          entries.push({ kind: 'repository', mode, scan: nested });
+        }
+      } else throw new RuntimeError('VERIFICATION_FINGERPRINT_FAILED', `Unsupported repository entry: ${path}`, 409);
+      stamp.update('\0');
     }
-    hash.update(path).update('\0').update(String(Number(info.mode) & 0o7777)).update('\0');
-    if (stat && 'mtimeNs' in info && (info.isSymbolicLink() || info.isFile())) {
-      stat.latestChangeMs = Math.max(stat.latestChangeMs, Number(info.mtimeMs), Number(info.ctimeMs));
-      hash.update(info.isFile() ? 'file\0' : 'link\0')
-        .update(`${info.dev}:${info.ino}:${info.mode}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`);
-    }
-    else if (info.isSymbolicLink()) hash.update('link\0').update(await readlink(absolute));
-    else if (info.isFile()) hash.update('file\0').update(await readFile(absolute));
-    else if (info.isDirectory()) {
-      const commit = gitlinks.get(path);
-      // An empty gitlink directory is an uninitialized submodule (plain clone
-      // or new worktree); its recorded commit is its whole code state.
-      if (commit && (await readdir(absolute)).length === 0) hash.update('gitlink-uninitialized\0').update(commit);
-      // A tracked directory is a submodule. Recurse so dirty tracked and
-      // untracked submodule content cannot retain a false-current fingerprint.
-      else hash.update('gitlink\0').update(await fingerprintRepository(absolute, seenRoots, stat));
-    } else throw new RuntimeError('VERIFICATION_FINGERPRINT_FAILED', `Unsupported repository entry: ${path}`, 409);
-    hash.update('\0');
   }
   seenRoots.delete(canonicalRoot);
+  return { root: canonicalRoot, head, paths, entries, stamp: stamp.digest('hex') };
+}
+
+/** Reads the scanned listing for content; the hash format is unchanged from the original single walk. */
+async function contentFingerprint(scan: RepositoryScan): Promise<string> {
+  const hash = createHash('sha256').update('dutydeck-code-v1\0').update(scan.head).update('\0');
+  for (const [index, path] of scan.paths.entries()) {
+    const entry = scan.entries[index]!;
+    if (entry.kind === 'missing') {
+      hash.update(path).update('\0missing\0');
+      continue;
+    }
+    let tag: string;
+    let body: string | Buffer;
+    try {
+      if (entry.kind === 'link') { tag = 'link\0'; body = await readlink(join(scan.root, path)); }
+      else if (entry.kind === 'file') { tag = 'file\0'; body = await readFile(join(scan.root, path)); }
+      else if (entry.kind === 'uninitialized') { tag = 'gitlink-uninitialized\0'; body = entry.commit; }
+      else { tag = 'gitlink\0'; body = await contentFingerprint(entry.scan); }
+    } catch (error) {
+      // Deleted since the scan: hash it the way a walk that found it missing would.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      hash.update(path).update('\0missing\0');
+      continue;
+    }
+    hash.update(path).update('\0').update(String(entry.mode)).update('\0').update(tag).update(body).update('\0');
+  }
   return hash.digest('hex');
 }
 
-async function lstatAll(root: string, paths: string[]): Promise<(BigIntStats | Error)[]> {
+async function lstatChunk(root: string, paths: string[]): Promise<(BigIntStats | Error)[]> {
   const results = new Array<BigIntStats | Error>(paths.length);
   let next = 0;
   const worker = async () => {
@@ -174,7 +211,7 @@ async function lstatAll(root: string, paths: string[]): Promise<(BigIntStats | E
       catch (error) { results[index] = error as Error; }
     }
   };
-  await Promise.all(Array.from({ length: Math.min(64, paths.length) }, worker));
+  await Promise.all(Array.from({ length: Math.min(LSTAT_CONCURRENCY, paths.length) }, worker));
   return results;
 }
 
