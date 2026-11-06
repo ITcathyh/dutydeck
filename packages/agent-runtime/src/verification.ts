@@ -176,6 +176,8 @@ export class VerificationManager {
   async list(sessionId: string, cwd: string): Promise<VerificationResponse[]> {
     if (!this.config.list) return [];
     const records = (await this.config.list(`${VERIFICATION_KEY_PREFIX}${sessionId}:`)).map(item => parse(item.value));
+    // No records means nothing to compare; skip the full-repository fingerprint.
+    if (records.length === 0) return [];
     let current: string | undefined;
     try { current = await repositoryFingerprint(cwd); } catch { /* Unknown code state is conservatively stale. */ }
     return records
