@@ -267,6 +267,24 @@ describe('watch report and intake integration signals', () => {
     expect(h.values).toEqual(before); expect(h.mutations).not.toHaveBeenCalled();
   });
 
+  it('reads intake rows through SQLite field projection with the same findings, skipping malformed rows', async () => {
+    const h = fixture();
+    const sqlite = createRepositories(':memory:');
+    try {
+      const receipt = (id: string, state: string, extra: Record<string, unknown> = {}) => JSON.stringify({
+        appId: bot.appId, event: { messageId: id, chatId: 'oc_test', content: 'x'.repeat(15_000) }, state, boot: '', receivedAt: ago(WATCH_INBOX_MS + 1), ...extra });
+      const rows: Array<[string, string]> = [['unrouted', receipt('unrouted', 'unrouted')], ['observes', receipt('observes', 'ignored', { disposition: { schemaVersion: 1, reason: 'participation_observes' } })],
+        ['silent', receipt('silent', 'ignored', { disposition: { schemaVersion: 1, reason: 'participation_silent' } })], ['task', receipt('task', 'received', { taskId: 'accepted_task' })],
+        ['bot_observes', receipt('bot_observes', 'ignored', { event: { messageId: 'bot_observes', chatId: 'oc_test', senderType: 'bot' }, disposition: { schemaVersion: 1, reason: 'participation_observes' } })],
+        ['invalid', receipt('invalid', 'ignored', { disposition: { schemaVersion: 1, reason: 'participation_observes', unexpected: true } })], ['broken', '{not json']];
+      for (const [id, value] of rows) await sqlite.config.set(`lark.inbox.${bot.appId}.${id}`, value);
+      const list = vi.fn(h.repos.config.list!);
+      h.repos.config = { ...h.repos.config, list, listJsonFields: sqlite.config.listJsonFields };
+      expect((await h.collect())[0]?.signals.map(item => item.objectId)).toEqual(['observes', 'unrouted']);
+      expect(list.mock.calls.map(([prefix]) => prefix)).not.toContain(`lark.inbox.${bot.appId}.`);
+    } finally { sqlite.close(); }
+  });
+
   it('marks intake findings recovered once an observed message has a decided silent outcome', async () => {
     const h = fixture();
     const key = 'lark.inbox.' + bot.appId + '.om_observed';

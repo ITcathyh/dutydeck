@@ -451,7 +451,16 @@ export interface ConfigRepository {
   /** Optional synchronous lookup for consumers whose live read contract is synchronous. */
   getSync?(key: string): string | undefined;
   /** Indexed JSON discriminator lookup; source rows remain authoritative. */
-  listByJsonField?(prefix: string, filter: { field: 'status' | 'runStatus' | 'delivery.status' | 'sessionId' | 'scheduleId'; values: string[]; scheduleId?: string; sessionId?: string }): Promise<Array<{ key: string; value: string }>>;
+  listByJsonField?(prefix: string, filter: { field: 'status' | 'runStatus' | 'delivery.status' | 'sessionId' | 'scheduleId' | 'state'; values: string[]; scheduleId?: string; sessionId?: string }): Promise<Array<{ key: string; value: string }>>;
+  /** Read only the named JSON paths (dot-separated, absent → undefined) of each row, ordered by key; full values never leave SQLite. `fields` is undefined for a row that is not valid JSON; a null filter value selects rows missing the field (including invalid JSON). */
+  listJsonFields?(prefix: string, paths: readonly string[], filter?: { field: 'state' | 'disposition.reason'; values: Array<string | null> }): Promise<Array<{ key: string; fields: Record<string, unknown> | undefined }>>;
+  /** 飞书去向列表：已忽略且未被群参与处理/回复的入站记录，receivedAt 不早于 since，按时间倒序走索引取最近 limit 条，只读 paths。 */
+  listRecentIgnoredLarkInbox?(input: { appId?: string; since: string; chatId?: string; limit: number; paths: readonly string[] }): Promise<Array<{ key: string; fields: Record<string, unknown> | undefined }>>;
+  /**
+   * 一个飞书机器人的已忽略入站记录：其他机器人的消息和其余消息各自删掉 receivedAt 早于 receivedBefore 的、并各自只留最近 keep 条；
+   * bodyExpiresAt 早于 now 的记录正文换成摘要（snippet）。只动 state=ignored 的行，走索引，在存储里一次完成。
+   */
+  pruneIgnoredLarkInbox?(appId: string, options: { receivedBefore: string; keep: number; now: string }): Promise<{ removed: number; slimmed: number }>;
   get(key: string): Promise<string | undefined>;
   set(key: string, value: string): Promise<void>;
   compareAndSet?(key: string, expected: string | undefined, value: string): Promise<boolean>;

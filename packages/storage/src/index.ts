@@ -4,7 +4,7 @@ import { createWorkspaceApprovalRuleRepository } from './workspace-approval-rule
 export { assertDatabaseNotQuarantined, restoreQuarantinePath } from './database-control.js';
 export { backupSqlite, withOfflineDatabase, BACKUP_SCHEMA_VERSION } from './offline-backup.js';
 import { readHistoryOutline } from './event-history.js';
-import { listConfigByJsonField } from './config-query.js';
+import { listConfigByJsonField, listConfigJsonFields } from './config-query.js';
 import { createPluginResultRepository } from './plugin-results.js';
 import { createMemoryJobRepository } from './memory-jobs.js';
 import { createWorkItemIndexRepository } from './work-item-index.js';
@@ -20,6 +20,7 @@ import { agentConfigs, channelMappings, configs, errors, events, machines, permi
 import { deferredConfirmationId, RuntimeError, watchFindingSchema } from '@dutydeck/shared';
 import { createTaskExecutionRepository } from './task-execution.js';
 import { needsMigration, runMigrations, withMigrationTransaction } from './migrations.js';
+import { listRecentIgnoredLarkInbox, pruneIgnoredLarkInbox } from './lark-inbox.js';
 import { createFoundationRepositories } from './foundation.js';
 import { createWp1aRepositories } from './group-policy.js';
 import { createScheduleFoundationRepositories } from './schedule-foundation.js';
@@ -451,6 +452,9 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
       },
       getSync(key) { return (configValue().get(key) as { value: string } | undefined)?.value; },
       async listByJsonField(prefix, filter) { return listConfigByJsonField(sqlite, prefix, filter); },
+      async listJsonFields(prefix, paths, filter) { return listConfigJsonFields(sqlite, prefix, paths, filter); },
+      async pruneIgnoredLarkInbox(appId, options) { return pruneIgnoredLarkInbox(sqlite, appId, options); },
+      async listRecentIgnoredLarkInbox(input) { return listRecentIgnoredLarkInbox(sqlite, input); },
       async remove(key, expected) {
         const promptPending = key.startsWith('bot_prompt_version/pending/');
         let recovered: ReturnType<typeof watchFindingSchema.parse> | undefined;

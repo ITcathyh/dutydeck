@@ -140,6 +140,7 @@ it('a blocked group does not delay routing another chat, while its own messages 
 it('batches ignored cleanup outside ACK and measures local SQLite intake latency', async () => {
   const h = await harness(); vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setImmediate', 'clearImmediate'] });
   const list = vi.spyOn(h.repositories.config, 'list');
+  const prune = vi.spyOn(h.repositories.config, 'pruneIgnoredLarkInbox');
   const coordinator = h.createCoordinator();
   const durations: number[] = [];
   for (let index = 0; index < 200; index++) {
@@ -152,8 +153,11 @@ it('batches ignored cleanup outside ACK and measures local SQLite intake latency
   await vi.advanceTimersByTimeAsync(200);
   expect(await h.inbox('chatter_199')).toMatchObject({ state: 'ignored' });
   expect(list.mock.calls.filter(([prefix]) => prefix.startsWith('lark.inbox.'))).toHaveLength(0);
+  expect(prune).not.toHaveBeenCalled();
   await vi.advanceTimersByTimeAsync(30_000);
-  expect(list.mock.calls.filter(([prefix]) => prefix.startsWith('lark.inbox.'))).toHaveLength(1);
+  // 清理在存储里用一条带索引的 SQL 完成，不再整前缀读出记录正文。
+  expect(prune).toHaveBeenCalledOnce();
+  expect(list.mock.calls.filter(([prefix]) => prefix.startsWith('lark.inbox.'))).toHaveLength(0);
   durations.sort((a, b) => a - b);
   console.info(`SQLite durable intake n=${durations.length} p50_ms=${durations[99]!.toFixed(3)} p95_ms=${durations[189]!.toFixed(3)} max_ms=${durations.at(-1)!.toFixed(3)}; cleanup scans=1/200 receipts`);
   expect(durations.at(-1)).toBeLessThan(500);

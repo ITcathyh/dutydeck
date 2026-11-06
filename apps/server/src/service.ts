@@ -956,7 +956,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     pluginResultTimer.unref();
     void sweepPluginResults();
     const sweepResources = () => {
-      void pruneLarkResourceDirectories(resourceRoot, { readProtectedDirectories: () => readLarkResourceReferences(repos.config, repos.tasks) }).catch(error => app?.log.warn({ error }, '飞书附件临时目录清理失败'));
+      void pruneLarkResourceDirectories(resourceRoot, { readProtectedDirectories: () => timeLoop('lark.resource-references', loopLog, () => readLarkResourceReferences(repos.config, repos.tasks)) }).catch(error => app?.log.warn({ error }, '飞书附件临时目录清理失败'));
       // 账本保留期清理：分批让出事件循环，关闭时在批间停下；不做 VACUUM，腾出的页留给后续写入复用。
       historyRetentionRun ??= (async () => {
         const startedAt = performance.now();

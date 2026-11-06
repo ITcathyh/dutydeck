@@ -212,3 +212,20 @@ describe('persistent attachment retention', () => {
     expect(await readFile(join(outside, 'keep'))).toEqual(bytes);
   });
 });
+
+it('collects attachment holders without reading ignored inbox bodies and still follows merge links', async () => {
+  const repos = createRepositories(':memory:');
+  try {
+    const content = JSON.stringify({ elements: 'x'.repeat(15_000) });
+    expect(await repos.config.compareAndSetBatch!([], Array.from({ length: 5_000 }, (_, index) => ({ key: `lark.inbox.cli_fixture.om_bot_${index}`,
+      value: JSON.stringify({ appId: 'cli_fixture', event: { ...event, messageId: `om_bot_${index}`, senderType: 'bot', content }, boot: '', state: 'ignored', receivedAt: new Date().toISOString() }) })))).toBe(true);
+    const inbox = new LarkTaskInbox(repos.config);
+    const held = (await inbox.claim('cli_fixture', { ...event, messageId: 'om_held' }))!;
+    await inbox.update(held, { resourceDirectories: ['/tmp/held'] });
+    // 排队时被并进后一条、已取消受理的那条：靠 mergedInto 跟着后一条一起持有附件。
+    await repos.config.set('lark.inbox.cli_fixture.om_merged', JSON.stringify({ appId: 'cli_fixture', event: { ...event, messageId: 'om_merged' }, boot: '', state: 'accepted', taskId: 'task_cancelled', mergedInto: 'om_held', resourceDirectories: ['/tmp/merged'] }));
+    const list = vi.spyOn(repos.config, 'list');
+    expect([...await readLarkResourceReferences(repos.config, { get: async (id: string) => ({ id, status: 'cancelled' }) as never })].sort()).toEqual(['/tmp/held', '/tmp/merged']);
+    expect(list.mock.calls.map(([prefix]) => prefix)).not.toContain('lark.inbox.');
+  } finally { repos.close(); }
+});

@@ -6,6 +6,7 @@ import type { LarkMessageResource } from './message-content.js';
 import type { LarkContextCursor } from './task-context.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkRedispatchInfo } from './turn-redispatch.js';
+import { isBotSenderType } from './card-mentions.js';
 
 export type LarkInboxAdoption = Pick<LarkMessageEvent, 'senderOpenId' | 'senderType' | 'scenario' | 'authorization' | 'rootId' | 'threadId' | 'parentId'> & { confirmedInputDigest?: string };
 /** Bind confirmation to content, attachments and routing, independently of its confirmer and host evidence. */
@@ -50,7 +51,23 @@ export interface LarkInboxRecord {
   mergeFrom?: { messageId: string; sessionId: string; taskId: string; ownPrompt: string };
   /** 这条排队消息被并进了哪条消息（取消它之前写下）：恢复时据此确认它是被这次合并取消的。 */
   mergedInto?: string;
+  /** 已忽略的其他机器人消息过了收养宽限后不留正文（event.content 置空），去向页只用这段摘要。 */
+  snippet?: string;
+  /** 本版本起被忽略的其他机器人消息：到这个时间清理把正文换成 snippet。之前就存在的记录没有这个字段，原样保留到过期。 */
+  bodyExpiresAt?: string;
 }
+/**
+ * 其他机器人的消息被忽略后，只在同一进程的场景包收养（botDuty 同步跑完、可能晚于忽略落库）时才会回放落库原文；
+ * 宽限过后清理把正文换成摘要，之后不再接受收养。真人消息被忽略后仍可能经群参与确认卡（默认 24 小时有效）收养，
+ * 回放和确认摘要都用落库原文，所以原样保留。
+ */
+export const LARK_IGNORED_BOT_BODY_GRACE_MS = 3_600_000;
+/**
+ * 已忽略记录按时间保留 30 天。每个机器人下其他机器人的消息和其余消息各自计数，另设安全上限：
+ * 线上单机器人每天收 1,100–2,000 条入站消息（峰值 1,992），30 天峰值约 6 万条；瘦身后单条约 600B，约 36MB。
+ */
+export const LARK_IGNORED_RETENTION_LIMIT = 60_000;
+export const LARK_IGNORED_RETENTION_MS = 30 * 86_400_000;
 // 清空后重写字段会改变落库键顺序；只比较执行值，数组顺序仍有意义。
 const executionRecord = ({ reason: _reason, detail: _detail, disposition: _disposition, duplicateCount: _duplicates, ...rest }: LarkInboxRecord) => JSON.stringify(rest, (_key, value) => value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value);
 const prefix = (appId: string) => `lark.inbox.${appId}.`;
@@ -114,15 +131,14 @@ export class LarkTaskInbox {
       state: 'unrouted', boot: '', receivedAt: new Date().toISOString(), receiptOrder: ++this.receiptOrder };
     await this.mutateClaim(old, latest => ({ ...next, ...(latest.duplicateCount ? { duplicateCount: latest.duplicateCount } : {}) }));
   }
-  /** 普通群消息保留 30 天去向记录（最多 5000 条）；未路由、已受理和命令记录绝不参与清理。 */
-  async pruneIgnored(appId: string, limit = 5_000) {
-    if (!this.store.remove) return;
-    const rows = (await this.store.list!(prefix(appId))).map(row => ({ ...row, record: JSON.parse(row.value) as LarkInboxRecord }))
-      .filter(row => row.record.state === 'ignored')
-      .sort((a, b) => Date.parse(b.record.receivedAt ?? '') - Date.parse(a.record.receivedAt ?? '') || (b.record.receiptOrder ?? 0) - (a.record.receiptOrder ?? 0));
-    for (const [index, row] of rows.entries()) {
-      if (index >= limit || Date.now() - Date.parse(row.record.receivedAt ?? '') > 30 * 86_400_000) await this.store.remove(row.key, row.value);
-    }
+  /**
+   * 已忽略记录保留 30 天去向，两类各自最多 limit 条；正文到期的其他机器人消息换成摘要。
+   * 由存储用带索引的单条 SQL 完成，不把记录读进 JS；未路由、已受理和命令记录绝不参与。没有这个能力的存储不清理。
+   */
+  async pruneIgnored(appId: string, limit = LARK_IGNORED_RETENTION_LIMIT) {
+    if (!this.store.pruneIgnoredLarkInbox) return;
+    const now = Date.now();
+    await this.store.pruneIgnoredLarkInbox(appId, { receivedBefore: new Date(now - LARK_IGNORED_RETENTION_MS).toISOString(), keep: limit, now: new Date(now).toISOString() });
   }
   async claim(appId: string, event: LarkMessageEvent, allowIgnored = false, adoption?: LarkInboxAdoption): Promise<LarkInboxRecord | undefined> {
     const key = prefix(appId) + event.messageId;
@@ -133,6 +149,8 @@ export class LarkTaskInbox {
         throw new RuntimeError('LARK_CONFIRMATION_INPUT_CHANGED', '原消息已修改，请重新确认', 409);
       }
       if (old && old.state !== 'unrouted' && !(allowIgnored && old.state === 'ignored') && (old.state !== 'received' || old.boot === this.boot)) return undefined;
+      // 正文已换成摘要的已忽略记录没有可回放的原文，不再收养。
+      if (old?.snippet !== undefined) return undefined;
       // Always replay the originally persisted request, never replacement event content.
       const next: LarkInboxRecord = { ...(old ?? { appId, event, receivedAt: new Date().toISOString() }), state: 'received', boot: this.boot };
       if (adoption) {
@@ -188,7 +206,9 @@ export class LarkTaskInbox {
       const next = await this.mutateClaim(record, latest => {
         const confirmed = patch.taskId && latest.event.authorization?.via === 'participation_confirmed';
         const acceptedDisposition = confirmed ? dispositionSchema.parse({ schemaVersion: 1, reason: 'participation_handled', decisionId: latest.event.authorization?.decisionId }) : undefined;
-        return { ...latest, ...patch, ...(patch.taskId ? { reason: acceptedDisposition?.reason, detail: undefined, disposition: acceptedDisposition } : {}),
+        const bodyExpiresAt = patch.state === 'ignored' && latest.state !== 'ignored' && isBotSenderType(latest.event.senderType)
+          ? { bodyExpiresAt: new Date(Date.now() + LARK_IGNORED_BOT_BODY_GRACE_MS).toISOString() } : {};
+        return { ...latest, ...patch, ...bodyExpiresAt, ...(patch.taskId ? { reason: acceptedDisposition?.reason, detail: undefined, disposition: acceptedDisposition } : {}),
           ...(patch.reason ? { disposition: dispositionSchema.parse({ schemaVersion: 1, reason: patch.reason, ...(patch.detail ? { detail: patch.detail } : {}) }) } : {}) };
       });
       if (!next) throw new Error('Lark inbox claim was lost');
@@ -198,13 +218,16 @@ export class LarkTaskInbox {
     await operation;
   }
 
+  /** 按 state 读整条记录：有索引的存储只读命中的行，不把已忽略的记录读进来。 */
+  private async inState(appId: string, states: LarkInboxRecord['state'][]): Promise<LarkInboxRecord[]> {
+    const rows = this.store.listByJsonField ? await this.store.listByJsonField(prefix(appId), { field: 'state', values: states }) : await this.store.list!(prefix(appId));
+    return rows.map(row => JSON.parse(row.value) as LarkInboxRecord).filter(record => states.includes(record.state));
+  }
   async orphanedCommands(appId: string): Promise<LarkInboxRecord[]> {
-    return (await this.store.list!(prefix(appId))).map(row => JSON.parse(row.value) as LarkInboxRecord)
-      .filter(record => record.state === 'command' && record.boot !== this.boot);
+    return (await this.inState(appId, ['command'])).filter(record => record.boot !== this.boot);
   }
   async recoverable(appId: string): Promise<LarkInboxRecord[]> {
-    return (await this.store.list!(prefix(appId))).map(row => JSON.parse(row.value) as LarkInboxRecord)
-      .filter(record => (record.state === 'received' || record.state === 'unrouted') && record.boot !== this.boot)
+    return (await this.inState(appId, ['received', 'unrouted'])).filter(record => record.boot !== this.boot)
       .sort((a, b) => Date.parse(a.receivedAt ?? '') - Date.parse(b.receivedAt ?? '') || (a.receiptOrder ?? 0) - (b.receiptOrder ?? 0));
   }
 }
