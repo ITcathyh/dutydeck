@@ -28,6 +28,19 @@ export interface PluginServiceSnapshot {
 
 type Log = { warn(data: Record<string, unknown>, message: string): void } | undefined;
 
+/** 自动重启与错误流日志的节奏；测试可以调小。 */
+export interface PluginServiceTiming {
+  /** 第 n 次自动重启前等 base × 2^(n-1)。 */
+  restartBaseDelayMs: number;
+  /** 子进程连续运行这么久后崩溃，按新一轮故障重新计数。 */
+  stableRunMs: number;
+  /** 每个插件每个窗口最多记这么多条错误流日志，其余只计数。 */
+  stderrLogLimit: number;
+  stderrWindowMs: number;
+  now(): number;
+}
+const DEFAULT_TIMING: PluginServiceTiming = { restartBaseDelayMs: 1_000, stableRunMs: 60_000, stderrLogLimit: 20, stderrWindowMs: 60_000, now: Date.now };
+
 /**
  * Owns plugin service children without sharing the daemon's provider process.
  * The caller must pass paths from the active artifact; the supervisor never
@@ -36,7 +49,10 @@ type Log = { warn(data: Record<string, unknown>, message: string): void } | unde
 export class PluginServiceSupervisor {
   private readonly records = new Map<string, RecordState>();
 
-  constructor(private readonly log?: Log, private readonly stopTimeoutMs = 5_000) {}
+  private readonly timing: PluginServiceTiming;
+  constructor(private readonly log?: Log, private readonly stopTimeoutMs = 5_000, timing: Partial<PluginServiceTiming> = {}) {
+    this.timing = { ...DEFAULT_TIMING, ...timing };
+  }
 
   register(spec: PluginServiceSpec): void {
     const existing = this.records.get(spec.plugin);
@@ -77,8 +93,9 @@ export class PluginServiceSupervisor {
     });
     record.child = child;
     record.status = 'running';
+    record.startedAt = this.timing.now();
     child.stdout?.resume();
-    child.stderr?.on('data', chunk => this.log?.warn({ plugin, stderr: String(chunk).slice(0, 8_192) }, '插件服务输出错误流'));
+    child.stderr?.on('data', chunk => this.logStderr(record, String(chunk)));
     child.once('error', error => {
       if (record.child !== child) return;
       this.crash(record, child, error.message, undefined);
@@ -105,7 +122,13 @@ export class PluginServiceSupervisor {
     record.lastError = error;
     record.lastExitCode = code ?? child.exitCode;
     record.restarts += 1;
-    if (record.spec.mode !== 'auto' || (record.autoRestartCount ?? 0) >= AUTO_RESTART_LIMIT) return;
+    if (record.spec.mode !== 'auto') return;
+    // 稳定运行过一段时间再崩溃，是新的一次故障，不累计到之前的重试次数上。
+    if (record.startedAt !== undefined && this.timing.now() - record.startedAt >= this.timing.stableRunMs) record.autoRestartCount = 0;
+    if ((record.autoRestartCount ?? 0) >= AUTO_RESTART_LIMIT) {
+      this.log?.warn({ plugin: record.spec.plugin, restarts: record.restarts, lastExitCode: record.lastExitCode, lastError: record.lastError }, `插件服务连续崩溃 ${AUTO_RESTART_LIMIT + 1} 次，已停止自动重启；修复后手动启动`);
+      return;
+    }
     const attempt = (record.autoRestartCount ?? 0) + 1;
     record.autoRestartCount = attempt;
     record.autoRestartTimer = setTimeout(() => {
@@ -115,7 +138,20 @@ export class PluginServiceSupervisor {
         record.status = 'crashed';
         record.lastError = startError instanceof Error ? startError.message : String(startError);
       });
-    }, AUTO_RESTART_BASE_DELAY_MS * 2 ** (attempt - 1));
+    }, this.timing.restartBaseDelayMs * 2 ** (attempt - 1));
+  }
+
+  /** 错误流按插件限流：每个窗口记前若干条，之后只计数，下个窗口开头报一次省略了多少。 */
+  private logStderr(record: RecordState, text: string): void {
+    const plugin = record.spec.plugin, now = this.timing.now();
+    let window = record.stderrWindow;
+    if (!window || now - window.start >= this.timing.stderrWindowMs) {
+      if (window?.suppressed) this.log?.warn({ plugin, suppressed: window.suppressed }, '插件服务错误流输出过多，上一时段省略了部分日志');
+      window = record.stderrWindow = { start: now, logged: 0, suppressed: 0 };
+    }
+    if (window.logged >= this.timing.stderrLogLimit) { window.suppressed += 1; return; }
+    window.logged += 1;
+    this.log?.warn({ plugin, stderr: text.slice(0, 8_192), ...(window.logged === this.timing.stderrLogLimit ? { throttled: true } : {}) }, window.logged === this.timing.stderrLogLimit ? '插件服务输出错误流（本时段已达上限，后续只计数）' : '插件服务输出错误流');
   }
 
   async stop(plugin: string): Promise<PluginServiceSnapshot> {
@@ -163,10 +199,11 @@ interface RecordState {
   lastError?: string;
   autoRestartCount?: number;
   autoRestartTimer?: ReturnType<typeof setTimeout>;
+  startedAt?: number;
+  stderrWindow?: { start: number; logged: number; suppressed: number };
 }
 
 const AUTO_RESTART_LIMIT = 3;
-const AUTO_RESTART_BASE_DELAY_MS = 50;
 
 function clearAutoRestart(record: RecordState): void {
   if (record.autoRestartTimer) clearTimeout(record.autoRestartTimer);

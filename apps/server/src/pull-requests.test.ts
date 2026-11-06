@@ -794,7 +794,25 @@ describe('PR 跟进：评审意见', () => {
 });
 
 describe('PR 跟进：停止', () => {
-  it.each(['settle', 'stop', 'close', 'merge', 'replace'] as const)('推送后 5 个真实 pipeline 事件耗尽合并重试，下一 tick 只合并结果并保留 %s', async action => {
+  it('同一个 PR 并发 25 个 pipeline 事件全部落库，和停止并发时最终是 stopped', async () => {
+    const f = await fixture(); const pr = await f.open();
+    const key = `pull_request/record/${pr.id}`;
+    const event = () => f.service.onWebhookEvent('fake', { kind: 'pipeline', repository: 'group/repo', branch: pr.branch, state: 'success' });
+    for (let round = 0; round < 3; round += 1) {
+      const before = JSON.parse((await f.config.get(key))!).revision as number;
+      const results = await Promise.allSettled(Array.from({ length: 25 }, event));
+      expect(results.filter(result => result.status === 'rejected').map(result => String((result as PromiseRejectedResult).reason))).toEqual([]);
+      const after = JSON.parse((await f.config.get(key))!);
+      expect(after.status).toBe('open');
+      // 每个事件都写了一次 nextPollAt；后台 tick 可能再多写几次。
+      expect(after.revision - before).toBeGreaterThanOrEqual(25);
+    }
+    const mixed = await Promise.allSettled([...Array.from({ length: 12 }, event), f.service.cancel(f.session.id, pr.id), ...Array.from({ length: 13 }, event)]);
+    expect(mixed.filter(result => result.status === 'rejected').map(result => String((result as PromiseRejectedResult).reason))).toEqual([]);
+    expect(await f.service.get(pr.id)).toMatchObject({ status: 'stopped' });
+  });
+
+  it.each(['settle', 'stop', 'close', 'merge', 'replace'] as const)('推送后合并结果的 CAS 重试被另一进程耗尽（同时到 5 个 pipeline 事件），下一 tick 只合并结果并保留 %s', async action => {
     const f = await fixture(); const pr = await f.open();
     f.state.comments = [{ id: 'review:1', body: 'Please fix app.ts', trusted: true }, { id: 'review:2', body: 'Which behavior?', trusted: true }];
     await f.poll();
@@ -802,15 +820,28 @@ describe('PR 跟进：停止', () => {
     const push = vi.spyOn(pullRequestGit, 'pushBranch');
     cleanups.push(async () => { push.mockRestore(); });
     let events!: Promise<PromiseSettledResult<void>[]>;
+    // 另一个进程每次都抢先改写这条记录：结算的 5 次 CAS 全部落空。本进程内的并发 webhook 已排队，不会耗尽重试。
+    const key = `pull_request/record/${pr.id}`, compareAndSet = f.config.compareAndSet!.bind(f.config);
+    let stolen = 0;
+    vi.spyOn(f.config, 'compareAndSet').mockImplementation(async (target, expected, next) => {
+      if (stolen < 5 && target === key && expected && JSON.parse(expected).task?.id === taskId && !JSON.parse(next).task) {
+        stolen += 1;
+        const latest = JSON.parse(expected);
+        expect(await compareAndSet(key, expected, JSON.stringify({ ...latest, revision: latest.revision + 1 }))).toBe(true);
+        return false;
+      }
+      return compareAndSet(target, expected, next);
+    });
     vi.mocked(f.provider.postComment!).mockImplementation(async () => {
       events = Promise.allSettled(Array.from({ length: 5 }, () => f.service.onWebhookEvent('fake', { kind: 'pipeline', repository: 'group/repo', branch: pr.branch, state: 'success' })));
       return { id: 'issue:101' };
     });
     await f.finishLatest(() => f.write('app.ts', 'export const a = 3;\n'), 'DUTYDECK_REVIEW c1 DONE fixed app\nDUTYDECK_REVIEW c2 ASK Need a decision');
     expect((await events).map(result => result.status)).toEqual(Array(5).fill('fulfilled'));
+    expect(stolen).toBe(5);
     const remoteHead = await f.remoteGit('rev-parse', pr.branch);
     expect(remoteHead).not.toBe(pr.headSha);
-    // 所有 webhook 都成功，当前 tick 仍可能已耗尽有限的 CAS 重试。
+    // 所有 webhook 都成功，结算的 CAS 重试被耗尽，记录还停在推送前。
     expect(await f.service.get(pr.id)).toMatchObject({ status: 'open', headSha: pr.headSha, task: { id: taskId } });
     expect(f.provider.postComment).toHaveBeenCalledTimes(1);
     expect(push).toHaveBeenCalledTimes(1);

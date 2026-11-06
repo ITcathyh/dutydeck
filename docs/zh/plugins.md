@@ -91,7 +91,7 @@ dutydeck plugin uninstall <名字>
 ```
 
 - `<来源>`：本地目录、`git+https://…`、`git@…`、`file://…`（`#ref` 固定分支、标签或提交）、`npm:包名@版本`。git 来源按提交 SHA 固定。
-- `plugin update` 只准备不可变候选包；活动 Host 的 provider、hook 和技能路径始终指向原包，重启也不会自动激活候选。若候选包被修改，排空并停止服务后再次 `plugin update` 可从相同来源修复，再执行激活；活动或上一版本的损坏目录不会被原地覆盖。包内相对符号链接受支持；包外、绝对或无法解析的链接会拒绝安装和更新。内容摘要能识别不改版本号的变化；没有内容变化时不重复产生候选。多进程修改通过存储锁串行提交；启动时无法获取插件存储锁或租约会报错停止，待并发操作结束后重试，不会静默略过全部外部插件。
+- `plugin update` 只准备不可变候选包；活动 Host 的 provider、hook 和技能路径始终指向原包，重启也不会自动激活候选。若候选包被修改，排空并停止服务后再次 `plugin update` 可从相同来源修复，再执行激活；活动或上一版本的损坏目录不会被原地覆盖。包内相对符号链接受支持；包外、绝对或无法解析的链接会拒绝安装和更新。内容摘要能识别不改版本号的变化；没有内容变化时不重复产生候选。多进程修改通过存储锁串行提交。启动时最多等 30 秒插件存储锁（盖过一次 `plugin activate` 的隔离验证）；锁仍被占用、`plugins.lock.json` 损坏或 `.hosts/` 租约写不进去时，daemon 照常启动，但**只加载内置插件，外部插件一个都不加载**：运行日志记一条带出错文件路径的警告，插件诊断列出原因，`dutydeck doctor` 的「插件库」项报 fail；绑定了外部插件的会话会拒绝新任务。按原因修复后重启 daemon 才会重新加载外部插件。`.hosts/` 里同一数据库的已停止或进程已退出的旧租约在下次启动时清掉；无法解析的租约保留，仍会阻止激活，需要人工处理。
 - `plugin status` 区分选定包、候选、上一版本、实际加载的 Host 和切换阻塞。激活/回退使用离线检查：先在当前版本完成或取消未完成任务，并核对该插件未决动作；运行 `dutydeck stop`，systemd 托管实例用 `systemctl --user stop <unit>` 停止共用插件目录的所有实例，再执行 `plugin activate` 或 `plugin rollback`，成功后 `dutydeck start` / `systemctl --user start <unit>`。存在存活 Host、待恢复任务或该插件 unknown 操作时拒绝切换；租约会识别已退出进程，但 daemon 退出不代表 tmux 任务已完成。缺少插件依赖信息的未完成旧任务会保守阻塞，已终态历史和无关插件动作不阻塞。
 - 激活会在可终止的独立 Node 进程里验证已信任 provider 的导入/注册，使用临时数据目录和最小环境；这不是恶意代码沙箱。原活动版本保留供回退，不承诺按会话运行多版 provider，也不自动回退插件私有数据。安装与启停仍需重新启动 Host；卸载同样要求没有活动消费者。
 - `plugin validate` 也校验场景包（格式、模板变量、正则、参数），出错报文件和字段；`plugin validate --strict` 进一步检查宿主兼容范围、权限声明、技能引用和资源边界。`plugin inspect <目录|tarball|来源> --json` 输出能力、权限足迹和 digest；`plugin test <目录|tarball|来源>` 在隔离 Host fixture 中验证注册结果。`install`、`update` 不因场景包的问题失败，但会列出不会加载的包和原因。
@@ -264,6 +264,7 @@ dutydeck plugin-tool call private-export/export-report --json '{"reportId":"week
 - **环境变量**：只继承 `PATH`、`HOME`、临时目录、locale、时区等基础变量，另加 `DUTYDECK_PLUGIN_NAME`、`DUTYDECK_PLUGIN_ROOT`、`DUTYDECK_PLUGIN_DATA`、非敏感的 `DUTYDECK_PLUGIN_CONFIG_<KEY>` 和 `DUTYDECK_HOOK_EVENT`；秘密只能经 binding accessor 读取。
 - **输出**：exit 0 放行，stdout 可以是 JSON：`decision`（`allow` / `deny` / `ask`）、`reason`、`additionalContext`、`updatedPrompt`。exit 2 阻断，stderr 作为原因。其他非零退出码或超时是非阻断错误；`onFailure: block` 时改为阻断。超时会杀掉整个进程组并立即返回。stdout 上限 64 KiB，超出按“没有输出”处理；stderr 上限 8 KiB。
 - **顺序**：按插件名排序，再按声明顺序。`deny` 立即生效并结束；其余按 `ask` 优于 `allow` 合并。
+- **进程内 hook**：`api.registerHookHandler(event, handler, { timeout?, matcher? })` 注册的 handler 收到 `(input, { signal })`，超时（默认 10 秒）后宿主不再等结果并 abort `signal`；handler 应把它传给自己发起的请求，及时停下后台工作。
 
 | 事件 | 触发点 | payload | `matcher` 匹配 | 哪些输出生效 |
 |---|---|---|---|---|
@@ -289,6 +290,7 @@ dutydeck plugin-tool call private-export/export-report --json '{"reportId":"week
 - `id`、`displayName`（必填，出现在卡片、提示词和 Web 上）、可选 `changeRequestLabel(n)`；
 - `matchRepository(remoteUrl)`：远端地址归自己就返回仓库（`{owner, name, slug}`），否则返回 `undefined`；
 - `getPipelineStatus(query)`（轮询用）、`getFailureLogs(repository, runId)`（补失败日志）；
+- 宿主给每次异步调用（构建状态、失败日志、PR 各方法、`webhook.verify` / `parse`）都设总时限，默认 25 秒；provider 可以用 `callTimeoutMs: { <方法名>: 毫秒 }` 按方法申请更长时间（例如要逐页读的评论），宿主夹到 1 秒和自己的上限之间：`getPipelineStatus` 最多 25 秒（CI 等待的轮询租约是 30 秒），其余最多 120 秒（PR 跟进每 2 分钟看一次）。超时按这次调用失败处理并记一条警告日志：轮询这一轮跳过、下一轮再查，不会拖住其他定时任务。每个方法最后多一个参数 `{ signal }`，超时时 abort，请传给 `fetch` 等请求并停止后续分页。`createPullRequest`、`postComment` 超时不代表没执行，宿主不会自动重试，报错里会提示先到平台核对；
 - 可选 PR 方法，`/pr` 和 Web「开 PR」会实际用到：`createPullRequest`（开 PR）、`listReviewComments`（读评审意见）、`postComment`（回复），以及 `getPullRequest(repository, number)`，返回 `{ state: 'open' | 'closed' | 'merged', headSha?, headBranch?, baseBranch?, headRepository?, title?, url? }`，用来发现 PR 已合并或关闭。同时给出 `headBranch` 和 `headRepository` 的插件才支持 `/pr follow` 认领已有 PR；`headRepository` 与工作区仓库不一致时按来自 fork 拒绝认领，没给时无法排除 fork，也拒绝认领。没实现 `getPullRequest` 的插件只能靠 webhook 的 merge_request 事件发现合并或关闭；两者都没有时，跟进会一直轮询，直到达到轮次上限或有人手动停止。`listReviewComments` 返回的每条 `CiReviewComment` 带 `trusted`、`isBot`、`authorAssociation`：**不给 `trusted: true` 的评论不会被自动处理**，只会发“需要你决定”卡片。github 插件的判定是 `author_association` 为 OWNER、MEMBER、COLLABORATOR 之一且不是 Bot 账号。`postComment` 返回的 `id` 要和 `listReviewComments` 里同一条评论的 `id` 写法一致，否则会把自己的回复当成新评论；
 - 可选 `webhook: { verify(req), parse(req) }`：`verify` 可返回 `signedAt`（宿主据此做 5 分钟重放窗口）；`parse` 返回统一的 `CiWebhookEvent`，请求体有问题时抛出 `statusCode: 400`。事件里 `timeIsAdvisory: true` 表示 `occurredAt` 只用于排序，不做重放窗口检查。缺哪个可选方法，对应能力就不可用。
 
@@ -381,6 +383,7 @@ dutydeck restart
 ## 安全说明
 
 - 只装可信来源的插件。agents、hooks、providers 会在你的机器上执行命令，安装时的确认不是形式。
+- **providers 代码和 daemon 同进程、同信任级别**，没有沙箱。它在 `register(api)` 里留下的定时器、连接或回调如果抛出未处理的异常或拒绝，整个 daemon 会按 Node 默认行为退出（受 systemd 托管时会被重新拉起，但重启时只有满足条件的任务能保住）。崩溃日志 `Fatal …` 之后会多一行指出错误栈里出现的插件名；先停用该插件（`dutydeck plugin disable <名字>`）再排查。hook 子进程和插件服务是独立进程，崩溃不会带倒 daemon。
 - hook 子进程只继承基础环境变量；插件秘密通过 binding accessor 提供，不进入 hook 环境。
 - **触发器地址只走 HTTPS 或内网。** HMAC 请求带短时有效的时间戳和一次性 nonce；token 请求仍依赖传输层保护。外部材料会被包成不可信数据，但这不能消除提示词注入风险；不要把外部触发器指向 `full-trust` 机器人。
 - 触发器的 prompt 模板把外部数据当不可信内容包裹，但这只降低提示词注入的风险，不能保证 Agent 不被诱导。触发出来的会话沿用机器人的权限模式，别给面向外部的触发器配 `full-trust` 机器人。

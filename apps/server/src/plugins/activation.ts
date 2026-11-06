@@ -14,18 +14,30 @@ const hostStateSchema = z.object({
   database: z.string().optional(), stopped: z.boolean(),
   plugins: z.record(z.string(), z.string()),
   loaded: z.array(z.string()).optional(),
-  diagnostics: z.array(z.object({ plugin: z.string(), message: z.string() })).optional()
+  diagnostics: z.array(z.object({ plugin: z.string(), message: z.string() })).optional(),
+  /** 插件库不可用、只加载了内置插件时的原因；这类记录不引用任何外部插件。 */
+  degraded: z.string().optional()
 });
 export type PluginHostState = z.infer<typeof hostStateSchema>;
 export interface PluginActivationBlocker { kind: 'host' | 'task' | 'action' | 'result' | 'unverified'; id: string; detail: string }
 
 export async function pluginHostStates(pluginsDir: string): Promise<Array<PluginHostState & { observation: 'alive' | 'dead' | 'unknown' }>> {
+  return (await pluginHostLeases(pluginsDir)).map(({ path, state }) => {
+    if (!state) throw new Error(`Host 租约记录无法解析：${path}`);
+    return { ...state, observation: state.stopped ? 'dead' : observeProcess(state.identity) };
+  });
+}
+
+/** 每份租约文件及其解析结果；解析失败的 state 为 undefined，由调用方决定是否阻断。 */
+export async function pluginHostLeases(pluginsDir: string): Promise<Array<{ path: string; state?: PluginHostState }>> {
   const directory = join(pluginsDir, '.hosts');
   if (!existsSync(directory)) return [];
-  return Promise.all((await readdir(directory)).filter(file => file.endsWith('.json')).sort().map(async file => {
-    const state = hostStateSchema.parse(JSON.parse(await readFile(join(directory, file), 'utf8')));
-    return { ...state, observation: state.stopped ? 'dead' : observeProcess(state.identity) };
+  const leases = await Promise.all((await readdir(directory)).filter(file => file.endsWith('.json')).sort().map(async file => {
+    const path = join(directory, file);
+    try { return { path, state: hostStateSchema.parse(JSON.parse(await readFile(path, 'utf8'))) }; }
+    catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT' ? undefined : { path }; } // 读取期间被清理掉的已停止记录
   }));
+  return leases.filter((lease): lease is { path: string; state?: PluginHostState } => lease !== undefined);
 }
 
 /** Read-only: no migration, runtime attachment, or guessing that a dead daemon ended its tmux tasks. */

@@ -19,6 +19,7 @@ import { scopeApplies } from './scope.js';
 import type { ScopedPluginTrigger } from './triggers.js';
 import { pluginSecretKey, PluginStore, type LockFile, type PluginLockEntry } from './store.js';
 import { PluginServiceSupervisor } from './service-supervisor.js';
+import { registerPluginCodeRoot } from './crash-attribution.js';
 
 export interface PluginDiagnostic { plugin: string; scenario?: string; message: string }
 /** 内置插件的条目只在内存里：免信任确认，作用域恒为 global。 */
@@ -59,6 +60,9 @@ export interface PluginHostOptions {
   log?: { warn(data: Record<string, unknown>, message: string): void };
 }
 
+/** 插件库整体不可用时，诊断记在这个名字下；带下划线，不会和合法插件名（kebab-case）重名。 */
+export const PLUGIN_STORE_DIAGNOSTIC = 'plugin_store';
+
 const configEnvName = (key: string) => `DUTYDECK_PLUGIN_CONFIG_${key.toUpperCase()}`;
 /** 模块加载和 register(api) 共用启动时限；超时放弃插件，daemon 照常启动。 */
 const PROVIDER_REGISTER_TIMEOUT_MS = 15_000;
@@ -70,7 +74,7 @@ const PROVIDER_REGISTER_TIMEOUT_MS = 15_000;
 export class PluginHost {
   readonly diagnostics: PluginDiagnostic[] = [];
   readonly active: ActivePlugin[] = [];
-  readonly ciProviders = new CiProviderRegistry();
+  readonly ciProviders: CiProviderRegistry;
   readonly resultTools = new PluginResultToolRegistry();
   readonly businessTools = new PluginBusinessToolRegistry();
   readonly services: PluginServiceSupervisor;
@@ -80,6 +84,8 @@ export class PluginHost {
   hooks = new PluginHookBus([]);
   /** 有外部插件，或内置插件带了场景包以外的东西（命令、agents、skills、触发器、hooks、CI 提供方）时才需要接到 daemon。 */
   needsWiring = false;
+  /** 插件库不可用、只加载了内置插件时的原因。 */
+  degraded: string | undefined;
   private releaseHost: (() => Promise<void>) | undefined;
   async dispose(): Promise<void> {
     await this.services.stopAll();
@@ -88,6 +94,7 @@ export class PluginHost {
   readonly bindings: PluginBindings;
   private constructor(readonly store: PluginStore, private readonly builtinRoot: string, private readonly log?: PluginHostOptions['log']) {
     this.services = new PluginServiceSupervisor(this.log);
+    this.ciProviders = new CiProviderRegistry({ log: this.log });
     this.bindings = new PluginBindings(store.dataDir, reference => {
       const provider = store.secretProvider(false);
       return provider ? new LocalFilePluginSecretResolver(provider).read(reference) : undefined;
@@ -142,8 +149,19 @@ export class PluginHost {
   static async load(options: PluginHostOptions): Promise<PluginHost> {
     const builtinRoot = options.builtinRoot ?? defaultBuiltinPluginRoot();
     const host = new PluginHost(new PluginStore(options.dataDir, builtinRoot, options.database), builtinRoot, options.log);
-    // Store/lease failures invalidate the whole generation; do not silently omit external plugins.
-    const lease = await host.store.acquireHost();
+    // 插件库（锁文件、库锁、租约）不可用时不让 daemon 起不来：一个外部插件都不加载（不会用到未核实的包），
+    // 只加载内置插件，并在诊断、日志和 doctor 里明确报出。绑定了外部插件的会话会照常拒绝新任务。
+    let lease: Awaited<ReturnType<PluginStore['acquireHost']>>;
+    try { lease = await host.store.acquireHost(); }
+    catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      host.degraded = reason;
+      host.diagnostics.push({ plugin: PLUGIN_STORE_DIAGNOSTIC, message: `插件库不可用，本次只加载了内置插件，外部插件全部未加载：${reason}` });
+      host.log?.warn({ plugin: PLUGIN_STORE_DIAGNOSTIC, error: reason, degraded: true }, '插件库不可用，只加载内置插件；修复后重启 daemon');
+      host.releaseHost = await host.store.recordDegradedHost(reason);
+      try { await host.initialize([]); return host; }
+      catch (initializeError) { await host.dispose(); throw initializeError; }
+    }
     host.releaseHost = lease.release;
     try {
       await host.initialize(lease.entries);
@@ -254,6 +272,7 @@ export class PluginHost {
         const scenarioProviders = new Map<string, ScenarioProvider>();
         if (plugin.providersEntry) {
           providerCodeEvaluated = true;
+          registerPluginCodeRoot(entry.name, plugin.root);
           // 内置插件随每次启动加载，不为它们建数据目录：没装插件时数据目录下什么都不多（用到时插件自己建）。
           if (!builtin) await mkdir(dataDir, { recursive: true });
           let registering = true;

@@ -8,8 +8,8 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { promisify } from 'node:util';
 import { z } from 'zod';
 import Database from 'better-sqlite3';
-import { currentProcessIdentity } from '@dutydeck/storage';
-import { pluginActivationBlockers, pluginHostStates, validateProviderRegistration, type PluginHostState } from './activation.js';
+import { currentProcessIdentity, observeProcess } from '@dutydeck/storage';
+import { pluginActivationBlockers, pluginHostLeases, pluginHostStates, validateProviderRegistration, type PluginHostState } from './activation.js';
 import { LocalFilePluginSecretResolver, LocalFileSecretProvider, secretDirectoryForDatabase } from '@dutydeck/secret-provider';
 import { defaultBuiltinPluginRoot, listBuiltinPlugins } from './builtin.js';
 import { loadPluginDirectory, type LoadedPlugin } from './manifest.js';
@@ -20,6 +20,9 @@ const LOCK_FILE = 'plugins.lock.json';
 const TOKENS_FILE = '.trigger-tokens.json';
 const CONFIG_FILE = '.config.json';
 const STAGING_DIR = '.staging';
+const STORE_LOCK_FILE = '.config-lock.sqlite';
+/** 启动时等插件库锁的上限：要盖过一次 plugin activate 的隔离验证（最长 15 秒）。 */
+const HOST_STORE_WAIT_MS = 30_000;
 
 export class PluginStoreError extends Error {
   constructor(readonly code: string, message: string) { super(message); this.name = 'PluginStoreError'; }
@@ -132,13 +135,42 @@ export class PluginStore {
       const entries = this.list();
       const directory = join(this.pluginsDir, '.hosts');
       await mkdir(directory, { recursive: true });
+      await this.pruneHostLeases();
       const path = join(directory, `${randomUUID()}.json`);
       const state: PluginHostState = { identity: currentProcessIdentity(), ...(this.database !== ':memory:' ? { database: resolve(this.database) } : {}), stopped: false,
         plugins: Object.fromEntries(entries.filter(entry => entry.enabled).map(entry => [entry.name, this.activeArtifact(entry).id])) };
       const save = async () => { const temporary = `${path}.tmp`; await writeFile(temporary, JSON.stringify(state)); await rename(temporary, path); };
       await save();
       return { entries, record: async (loaded, diagnostics) => { state.loaded = loaded; state.diagnostics = diagnostics?.map(item => ({ plugin: item.plugin, message: '插件或场景未成功激活；请查看运行日志。' })); await save(); }, release: async () => { state.stopped = true; await save(); } };
-    });
+    }, HOST_STORE_WAIT_MS);
+  }
+
+  /**
+   * 每次启动都新建一份租约；在持锁时删掉同一数据库下已停止或进程已退出的旧记录。
+   * 激活检查靠租约找到要核对任务的数据库，新租约指向同一个数据库，删旧记录不会漏查。无法解析的记录保留，交给人处理。
+   */
+  private async pruneHostLeases() {
+    if (this.database === ':memory:') return;
+    const database = resolve(this.database);
+    for (const { path, state } of await pluginHostLeases(this.pluginsDir)) {
+      if (!state || state.database !== database) continue;
+      if (state.stopped || observeProcess(state.identity) === 'dead') await rm(path, { force: true });
+    }
+  }
+
+  /**
+   * 插件库不可用、只加载内置插件时登记一份不引用任何外部插件的记录，供 doctor 报红。尽力而为：写不进去也不影响启动。
+   */
+  async recordDegradedHost(reason: string): Promise<() => Promise<void>> {
+    try {
+      const directory = join(this.pluginsDir, '.hosts');
+      await mkdir(directory, { recursive: true });
+      const path = join(directory, `${randomUUID()}.json`);
+      const state: PluginHostState = { identity: currentProcessIdentity(), ...(this.database !== ':memory:' ? { database: resolve(this.database) } : {}), stopped: false, plugins: {}, degraded: reason };
+      const save = async () => { const temporary = `${path}.tmp`; await writeFile(temporary, JSON.stringify(state)); await rename(temporary, path); };
+      await save();
+      return async () => { state.stopped = true; await save().catch(() => undefined); };
+    } catch { return async () => {}; }
   }
 
   async activationStatus(name: string) {
@@ -221,7 +253,10 @@ export class PluginStore {
   readLock(): LockFile {
     const path = join(this.pluginsDir, LOCK_FILE);
     if (!existsSync(path)) return { version: 1, plugins: {} };
-    const parsed = lockFileSchema.safeParse(JSON.parse(readFileSync(path, 'utf8')));
+    let raw: unknown;
+    try { raw = JSON.parse(readFileSync(path, 'utf8')); }
+    catch (error) { throw new PluginStoreError('PLUGIN_LOCK_INVALID', `${path} 不是合法的 JSON：${error instanceof Error ? error.message : String(error)}`); }
+    const parsed = lockFileSchema.safeParse(raw);
     if (!parsed.success) throw new PluginStoreError('PLUGIN_LOCK_INVALID', `${path} 格式不正确：${parsed.error.issues.map(issue => `${issue.path.join('.')} ${issue.message}`).join('; ')}`);
     return parsed.data;
   }
@@ -396,16 +431,17 @@ export class PluginStore {
   // ---- userConfig：普通值存 .config.json，sensitive 值存 secret-provider ----
 
   /** 插件清单、令牌和配置共用 SQLite 互斥；连接关闭或进程退出时由系统释放，不删除锁文件。 */
-  private async withStoreLock<T>(action: () => Promise<T>): Promise<T> {
+  private async withStoreLock<T>(action: () => Promise<T>, waitMs = 10_000): Promise<T> {
     await mkdir(this.pluginsDir, { recursive: true });
-    const lock = new Database(join(this.pluginsDir, '.config-lock.sqlite'), { timeout: 0 });
+    const lockPath = join(this.pluginsDir, STORE_LOCK_FILE);
+    const lock = new Database(lockPath, { timeout: 0 });
     try {
-      const deadline = Date.now() + 10_000;
+      const deadline = Date.now() + waitMs;
       while (true) {
         try { lock.exec('BEGIN IMMEDIATE'); break; }
         catch (error) {
           if ((error as { code?: string }).code !== 'SQLITE_BUSY') throw error;
-          if (Date.now() >= deadline) throw new PluginStoreError('PLUGIN_CONFIG_BUSY', '插件状态正在被另一个进程修改，请稍后重试');
+          if (Date.now() >= deadline) throw new PluginStoreError('PLUGIN_CONFIG_BUSY', `插件状态正在被另一个进程修改（${waitMs / 1000} 秒内未拿到 ${lockPath}），请稍后重试`);
           await sleep(10);
         }
       }

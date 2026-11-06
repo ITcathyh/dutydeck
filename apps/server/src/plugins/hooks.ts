@@ -112,8 +112,8 @@ const parseOutput = (stdout: string): PluginHookOutput | undefined => {
   } catch { return undefined; }
 };
 
-export const withTimeout = <T>(work: Promise<T>, timeout: number): Promise<T> => new Promise((resolvePromise, reject) => {
-  const timer = setTimeout(() => reject(new Error(`超过 ${timeout}ms 未返回`)), timeout);
+export const withTimeout = <T>(work: Promise<T>, timeout: number, onTimeout?: () => void): Promise<T> => new Promise((resolvePromise, reject) => {
+  const timer = setTimeout(() => { onTimeout?.(); reject(new Error(`超过 ${timeout}ms 未返回`)); }, timeout);
   work.then(value => { clearTimeout(timer); resolvePromise(value); }, error => { clearTimeout(timer); reject(error); });
 });
 
@@ -165,8 +165,10 @@ export class PluginHookBus {
   private async invoke(registration: HookRegistration, input: PluginHookInput): Promise<{ outcome: HookOutcome; output?: PluginHookOutput }> {
     const base = { plugin: registration.plugin, kind: registration.kind };
     if (registration.kind === 'handler') {
+      // 超时后宿主不再等待；abort 通知 handler 停下仍在后台进行的工作。
+      const controller = new AbortController();
       try {
-        const output = await withTimeout(Promise.resolve().then(() => registration.handler(input)), registration.timeout);
+        const output = await withTimeout(Promise.resolve().then(() => registration.handler(input, { signal: controller.signal })), registration.timeout, () => controller.abort(new Error('timeout')));
         const parsed = output ? pluginHookOutputSchema.safeParse(output) : undefined;
         return { outcome: { ...base, result: 'allow' }, ...(parsed?.success ? { output: parsed.data } : {}) };
       } catch (error) {

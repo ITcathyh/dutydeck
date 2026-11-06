@@ -1,6 +1,6 @@
 import type {
   PluginHookInput, PluginHookOutput, CiRepository, CiPipelineQuery, CiPipelineStatus,
-  CiFailureLog, CiPullRequestInput, CiPullRequestState, CiReviewComment, CiWebhookVerification, CiWebhookEvent
+  CiFailureLog, CiPullRequestInput, CiPullRequestState, CiReviewComment, CiWebhookVerification, CiWebhookEvent, CiCallContext, CiProviderCall
 } from '@dutydeck/plugin-sdk';
 import type { PluginQuery, PluginAction } from './plugin-tools.js';
 import type { PluginResultTool } from './plugin-results.js';
@@ -21,6 +21,8 @@ export type {
   CiReviewComment,
   CiWebhookVerification,
   CiWebhookEvent,
+  CiCallContext,
+  CiProviderCall,
   PluginToolManual,
   PluginToolManuals,
   PluginPermissionEffect,
@@ -197,7 +199,8 @@ export const pluginHookOutputSchema = z.object({
   updatedPrompt: z.string().min(1).max(100_000).optional()
 }).passthrough();
 
-export type PluginHookHandler = (input: PluginHookInput) => PluginHookOutput | void | Promise<PluginHookOutput | void>;
+/** context.signal 在 handler 超时时 abort。 */
+export type PluginHookHandler = (input: PluginHookInput, context: { signal: AbortSignal }) => PluginHookOutput | void | Promise<PluginHookOutput | void>;
 
 export interface CiWebhookRequest { rawBody: Buffer; headers: Record<string, string | string[] | undefined>; query?: Record<string, string | undefined> }
 
@@ -212,22 +215,24 @@ export interface CiProvider {
   displayName: string;
   /** 合并请求编号的写法，默认 `#<n>`。 */
   changeRequestLabel?(number: number): string;
+  /** 各方法的总时限（毫秒），不给时宿主用 25 秒；宿主夹到 1 秒和自己的上限之间（见 ci-providers.ts）。 */
+  callTimeoutMs?: Partial<Record<CiProviderCall, number>>;
   /** 远端地址归这个提供方时返回仓库，否则 undefined。例如 git@host:org/repo.git。 */
   matchRepository(remoteUrl: string): CiRepository | undefined;
   /** 轮询用：`/ci wait`（未配 webhook 时）、Web「等待 CI」、「出现新的失败构建时执行」。 */
-  getPipelineStatus?(query: CiPipelineQuery): Promise<CiPipelineStatus>;
+  getPipelineStatus?(query: CiPipelineQuery, context?: CiCallContext): Promise<CiPipelineStatus>;
   /** 失败构建的任务与日志末尾；webhook 事件没带失败明细时宿主用它补齐修复证据。 */
-  getFailureLogs?(repository: CiRepository, runId: string): Promise<CiFailureLog[]>;
-  createPullRequest?(repository: CiRepository, input: CiPullRequestInput): Promise<{ id: string; number: number; url: string }>;
-  listReviewComments?(repository: CiRepository, pullRequest: number): Promise<CiReviewComment[]>;
+  getFailureLogs?(repository: CiRepository, runId: string, context?: CiCallContext): Promise<CiFailureLog[]>;
+  createPullRequest?(repository: CiRepository, input: CiPullRequestInput, context?: CiCallContext): Promise<{ id: string; number: number; url: string }>;
+  listReviewComments?(repository: CiRepository, pullRequest: number, context?: CiCallContext): Promise<CiReviewComment[]>;
   /** PR 当前状态；`/pr` 跟进据此在合并或关闭后停止。没有时只能靠 webhook 的 pull_request 事件得知。 */
-  getPullRequest?(repository: CiRepository, pullRequest: number): Promise<CiPullRequestState>;
-  postComment?(repository: CiRepository, pullRequest: number, body: string): Promise<{ id: string; url?: string }>;
+  getPullRequest?(repository: CiRepository, pullRequest: number, context?: CiCallContext): Promise<CiPullRequestState>;
+  postComment?(repository: CiRepository, pullRequest: number, body: string, context?: CiCallContext): Promise<{ id: string; url?: string }>;
   /** 有 webhook 时 `/ci wait`、`/ci fix` 走事件驱动的续作与修复。 */
   webhook?: {
-    verify(request: CiWebhookRequest): CiWebhookVerification | Promise<CiWebhookVerification>;
+    verify(request: CiWebhookRequest, context?: CiCallContext): CiWebhookVerification | Promise<CiWebhookVerification>;
     /** 不处理的事件返回 undefined；请求体无法解析时抛出带 statusCode 400 的错误。 */
-    parse(request: CiWebhookRequest): CiWebhookEvent | undefined | Promise<CiWebhookEvent | undefined>;
+    parse(request: CiWebhookRequest, context?: CiCallContext): CiWebhookEvent | undefined | Promise<CiWebhookEvent | undefined>;
   };
 }
 

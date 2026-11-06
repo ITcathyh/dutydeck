@@ -73,11 +73,14 @@ export function createGithubProvider(options = {}) {
   const token = options.token?.trim() || undefined;
   const baseHeaders = { Accept: 'application/vnd.github+json', 'User-Agent': 'DutyDeck', 'X-GitHub-Api-Version': '2026-03-10' };
 
-  const send = async (url, init, authenticated) => {
+  /** 单次请求自己的时限，再叠加宿主给的 signal（整次调用超出宿主时限时 abort，分页也随之停下）。 */
+  const requestSignal = signal => signal ? AbortSignal.any([AbortSignal.timeout(timeoutMs), signal]) : AbortSignal.timeout(timeoutMs);
+  const send = async (url, init, authenticated, signal) => {
     const headers = { ...baseHeaders, ...(init.headers ?? {}), ...(authenticated && token ? { Authorization: `Bearer ${token}` } : {}) };
     try {
-      return await request(url, { ...init, headers, redirect: 'manual', signal: AbortSignal.timeout(timeoutMs) });
+      return await request(url, { ...init, headers, redirect: 'manual', signal: requestSignal(signal) });
     } catch (error) {
+      if (signal?.aborted) throw new GithubError('GITHUB_REQUEST_CANCELLED', 'GitHub request was cancelled by the host');
       throw new GithubError('GITHUB_REQUEST_FAILED', error instanceof Error && error.name === 'TimeoutError' ? 'GitHub request timed out' : 'GitHub request failed');
     }
   };
@@ -134,27 +137,27 @@ export function createGithubProvider(options = {}) {
   };
 
   /** 读接口先不带令牌（公开仓库够用），401/403/404 时再带令牌重试一次。 */
-  const getPublicResponse = async url => {
-    let response = await send(url, { method: 'GET' }, false);
+  const getPublicResponse = async (url, signal) => {
+    let response = await send(url, { method: 'GET' }, false, signal);
     if (token && [401, 403, 404].includes(response.status)) {
       await response.body?.cancel();
-      response = await send(url, { method: 'GET' }, true);
+      response = await send(url, { method: 'GET' }, true, signal);
     }
     return response;
   };
-  const getPublic = async url => readJson(await getPublicResponse(url));
+  const getPublic = async (url, signal) => readJson(await getPublicResponse(url, signal));
   const requireToken = () => { if (!token) throw new GithubError('GITHUB_TOKEN_REQUIRED', 'GitHub 插件没有配置 token：dutydeck plugin config github token --value-fd 0', 400); };
-  const call = async (method, url, body) => {
+  const call = async (method, url, body, signal) => {
     requireToken();
-    return readJson(await send(url, { method, ...(body ? { body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } } : {}) }, true));
+    return readJson(await send(url, { method, ...(body ? { body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } } : {}) }, true, signal));
   };
   const repoPath = repository => `/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}`;
 
-  async function queryRuns(repository, headSha, workflow, completedOnly) {
+  async function queryRuns(repository, headSha, workflow, completedOnly, signal) {
     if (!sha40.test(headSha)) throw new GithubError('GITHUB_HEAD_INVALID', 'GitHub query requires a full commit SHA', 400);
     const base = `${repoPath(repository)}/actions`;
     const url = apiUrl(workflow ? `${base}/workflows/${encodeURIComponent(workflow)}/runs` : `${base}/runs`, { head_sha: headSha, status: completedOnly ? 'completed' : undefined, per_page: 100 });
-    const payload = await getPublic(url);
+    const payload = await getPublic(url, signal);
     if (!payload || typeof payload !== 'object' || !Array.isArray(payload.workflow_runs)) throw new GithubError('GITHUB_RESPONSE_INVALID', 'GitHub API response did not contain workflow runs');
     if (typeof payload.total_count === 'number' && payload.total_count > 100) throw new GithubError('GITHUB_RUN_SET_TOO_LARGE', 'GitHub returned more than 100 workflow runs for this commit');
     const latest = new Map();
@@ -179,33 +182,33 @@ export function createGithubProvider(options = {}) {
     return [...latest.values()].sort((left, right) => left.id - right.id);
   }
 
-  async function getPipelineStatus(query) {
-    const runs = await queryRuns(query.repository, String(query.sha).toLowerCase(), query.workflow, query.completedOnly === true);
+  async function getPipelineStatus(query, context) {
+    const runs = await queryRuns(query.repository, String(query.sha).toLowerCase(), query.workflow, query.completedOnly === true, context?.signal);
     return { state: summarizeRuns(runs), runs };
   }
 
   /** 失败 job 的日志：日志接口 302 到临时下载地址，跟一次跳转，下载时不带令牌，只留末尾。 */
-  async function jobLogTail(repository, jobId) {
-    const response = await send(apiUrl(`${repoPath(repository)}/actions/jobs/${encodeURIComponent(jobId)}/logs`), { method: 'GET' }, true);
+  async function jobLogTail(repository, jobId, signal) {
+    const response = await send(apiUrl(`${repoPath(repository)}/actions/jobs/${encodeURIComponent(jobId)}/logs`), { method: 'GET' }, true, signal);
     const location = response.status >= 300 && response.status < 400 ? response.headers.get('location') : undefined;
     await response.body?.cancel();
     if (!location) return undefined;
     let target;
     try { target = new URL(location); } catch { return undefined; }
     if (target.protocol !== 'https:') return undefined;
-    const download = await request(target, { method: 'GET', redirect: 'error', signal: AbortSignal.timeout(timeoutMs) });
+    const download = await request(target, { method: 'GET', redirect: 'error', signal: requestSignal(signal) });
     if (!download.ok) { await download.body?.cancel(); return undefined; }
     return readText(download, MAX_LOG_BYTES, LOG_TAIL_CHARS);
   }
 
-  async function getFailureLogs(repository, runId) {
+  async function getFailureLogs(repository, runId, context) {
     if (!/^\d+$/.test(String(runId))) throw new GithubError('GITHUB_RUN_INVALID', 'GitHub run id must be numeric', 400);
-    const payload = await getPublic(apiUrl(`${repoPath(repository)}/actions/runs/${runId}/jobs`, { filter: 'latest', per_page: 100 }));
+    const payload = await getPublic(apiUrl(`${repoPath(repository)}/actions/runs/${runId}/jobs`, { filter: 'latest', per_page: 100 }), context?.signal);
     const jobs = Array.isArray(payload?.jobs) ? payload.jobs : [];
     const failed = jobs.filter(job => job && failureConclusions.has(job.conclusion)).slice(0, MAX_FAILED_JOBS);
     return Promise.all(failed.map(async job => {
       const step = Array.isArray(job.steps) ? job.steps.find(item => failureConclusions.has(item?.conclusion)) : undefined;
-      const log = token && Number.isSafeInteger(job.id) ? await jobLogTail(repository, job.id).catch(() => undefined) : undefined;
+      const log = token && Number.isSafeInteger(job.id) ? await jobLogTail(repository, job.id, context?.signal).catch(() => undefined) : undefined;
       return {
         ...(typeof job.name === 'string' ? { job: job.name } : {}),
         ...(typeof step?.name === 'string' ? { stage: step.name } : {}),
@@ -215,8 +218,8 @@ export function createGithubProvider(options = {}) {
     }));
   }
 
-  async function createPullRequest(repository, input) {
-    const value = await call('POST', apiUrl(`${repoPath(repository)}/pulls`), { title: input.title, body: input.body ?? '', head: input.head, base: input.base, draft: input.draft === true });
+  async function createPullRequest(repository, input, context) {
+    const value = await call('POST', apiUrl(`${repoPath(repository)}/pulls`), { title: input.title, body: input.body ?? '', head: input.head, base: input.base, draft: input.draft === true }, context?.signal);
     if (!Number.isSafeInteger(value?.number) || typeof value.html_url !== 'string') throw new GithubError('GITHUB_RESPONSE_INVALID', 'GitHub did not return the created pull request');
     return { id: String(value.node_id ?? value.id), number: value.number, url: value.html_url };
   }
@@ -237,7 +240,7 @@ export function createGithubProvider(options = {}) {
   });
 
   /** 行内评审意见和普通评论合在一起，按时间排序；预算用尽时拒绝返回不完整集合。 */
-  async function listReviewComments(repository, pullRequest) {
+  async function listReviewComments(repository, pullRequest, context) {
     if (!Number.isSafeInteger(pullRequest) || pullRequest <= 0) throw new GithubError('GITHUB_PULL_REQUEST_INVALID', 'Pull request number is invalid', 400);
     const budget = { bytes: MAX_COMMENT_BYTES, pages: MAX_COMMENT_PAGES };
     const list = async path => {
@@ -245,7 +248,8 @@ export function createGithubProvider(options = {}) {
       const items = [];
       for (let page = 1; ; page++) {
         if (--budget.pages < 0) throw commentsTooLarge();
-        const response = await getPublicResponse(url);
+        if (context?.signal?.aborted) throw new GithubError('GITHUB_REQUEST_CANCELLED', 'GitHub request was cancelled by the host');
+        const response = await getPublicResponse(url, context?.signal);
         const values = await readJson(response, budget);
         if (!Array.isArray(values)) throw new GithubError('GITHUB_RESPONSE_INVALID', 'GitHub API response did not contain comments');
         items.push(...values);
@@ -277,9 +281,9 @@ export function createGithubProvider(options = {}) {
       .sort((left, right) => (left.createdAt ?? '').localeCompare(right.createdAt ?? ''));
   }
 
-  async function getPullRequest(repository, pullRequest) {
+  async function getPullRequest(repository, pullRequest, context) {
     if (!Number.isSafeInteger(pullRequest) || pullRequest <= 0) throw new GithubError('GITHUB_PULL_REQUEST_INVALID', 'Pull request number is invalid', 400);
-    const value = await getPublic(apiUrl(`${repoPath(repository)}/pulls/${pullRequest}`));
+    const value = await getPublic(apiUrl(`${repoPath(repository)}/pulls/${pullRequest}`), context?.signal);
     if (!value || typeof value !== 'object' || typeof value.state !== 'string') throw new GithubError('GITHUB_RESPONSE_INVALID', 'GitHub did not return the pull request');
     return {
       state: value.merged === true || typeof value.merged_at === 'string' ? 'merged' : value.state === 'closed' ? 'closed' : 'open',
@@ -293,9 +297,9 @@ export function createGithubProvider(options = {}) {
     };
   }
 
-  async function postComment(repository, pullRequest, body) {
+  async function postComment(repository, pullRequest, body, context) {
     if (!Number.isSafeInteger(pullRequest) || pullRequest <= 0) throw new GithubError('GITHUB_PULL_REQUEST_INVALID', 'Pull request number is invalid', 400);
-    const value = await call('POST', apiUrl(`${repoPath(repository)}/issues/${pullRequest}/comments`), { body });
+    const value = await call('POST', apiUrl(`${repoPath(repository)}/issues/${pullRequest}/comments`), { body }, context?.signal);
     // 与 listReviewComments 里普通评论的 id 同一写法，跟进时才能认出自己发的回复。
     return { id: `issue:${value?.id}`, ...(typeof value?.html_url === 'string' ? { url: value.html_url } : {}) };
   }
@@ -380,6 +384,10 @@ export function createGithubProvider(options = {}) {
     id: 'github',
     displayName: 'GitHub Actions',
     changeRequestLabel: number => `PR #${number}`,
+    // 单次请求最长 timeoutMs（默认 10 秒），带令牌时读接口最多两次请求（先匿名、401/403/404 再带令牌）。
+    // 除评论外每个方法只读一页，最坏 2 × 10 = 20 秒，宿主默认 25 秒够用；评论两条列表并行、各自逐页读，
+    // 最多 100 页，按最坏每页 20 秒算 25 秒只够 1 页，所以申请宿主上限 120 秒（最坏也能读完每条列表 6 页、各 600 条）。
+    callTimeoutMs: { listReviewComments: 120_000 },
     matchRepository: repositoryFromRemote,
     getPipelineStatus,
     getFailureLogs,

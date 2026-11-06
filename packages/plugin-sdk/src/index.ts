@@ -59,7 +59,8 @@ export interface PluginApi {
   registerQuery(query: PluginQuery | PluginChatQuery): void;
   registerAction(action: PluginAction): void;
   registerScenarioProvider(provider: ScenarioProvider): void;
-  registerHookHandler(event: PluginHookEvent, handler: (input: PluginHookInput) => PluginHookOutput | void | Promise<PluginHookOutput | void>, options?: { timeout?: number; matcher?: string }): void;
+  /** context.signal 在 handler 超过 timeout 时 abort；宿主不再等待结果，handler 应据此停止后台工作。 */
+  registerHookHandler(event: PluginHookEvent, handler: (input: PluginHookInput, context: { signal: AbortSignal }) => PluginHookOutput | void | Promise<PluginHookOutput | void>, options?: { timeout?: number; matcher?: string }): void;
 }
 /** An identity helper for typed, self-contained provider entrypoints. */
 export function definePlugin(register: (api: PluginApi) => void | Promise<void>) { return register; }
@@ -193,18 +194,24 @@ export interface CiWebhookEvent {
   timeIsAdvisory?: boolean;
 }
 
+/** 宿主每次调用 provider 异步方法时传入；超过宿主时限时 abort，请传给 fetch 等请求并停止后续分页。 */
+export interface CiCallContext { signal: AbortSignal }
+export type CiProviderCall = 'getPipelineStatus' | 'getFailureLogs' | 'createPullRequest' | 'listReviewComments' | 'getPullRequest' | 'postComment' | 'webhook.verify' | 'webhook.parse';
+
 export interface CiProvider {
   id: string; displayName: string; changeRequestLabel?(number: number): string;
+  /** 各方法的总时限（毫秒），不给时宿主用 25 秒；宿主会夹到 1 秒和自己的上限之间（getPipelineStatus 最多 25 秒，其余最多 120 秒）。 */
+  callTimeoutMs?: Partial<Record<CiProviderCall, number>>;
   matchRepository(remoteUrl: string): CiRepository | undefined;
-  getPipelineStatus?(query: CiPipelineQuery): Promise<CiPipelineStatus>;
-  getFailureLogs?(repository: CiRepository, runId: string): Promise<CiFailureLog[]>;
-  createPullRequest?(repository: CiRepository, input: CiPullRequestInput): Promise<{ id: string; number: number; url: string }>;
-  listReviewComments?(repository: CiRepository, pullRequest: number): Promise<CiReviewComment[]>;
-  getPullRequest?(repository: CiRepository, pullRequest: number): Promise<CiPullRequestState>;
-  postComment?(repository: CiRepository, pullRequest: number, body: string): Promise<{ id: string; url?: string }>;
+  getPipelineStatus?(query: CiPipelineQuery, context?: CiCallContext): Promise<CiPipelineStatus>;
+  getFailureLogs?(repository: CiRepository, runId: string, context?: CiCallContext): Promise<CiFailureLog[]>;
+  createPullRequest?(repository: CiRepository, input: CiPullRequestInput, context?: CiCallContext): Promise<{ id: string; number: number; url: string }>;
+  listReviewComments?(repository: CiRepository, pullRequest: number, context?: CiCallContext): Promise<CiReviewComment[]>;
+  getPullRequest?(repository: CiRepository, pullRequest: number, context?: CiCallContext): Promise<CiPullRequestState>;
+  postComment?(repository: CiRepository, pullRequest: number, body: string, context?: CiCallContext): Promise<{ id: string; url?: string }>;
   webhook?: {
-    verify(request: CiWebhookRequest): CiWebhookVerification | Promise<CiWebhookVerification>;
-    parse(request: CiWebhookRequest): CiWebhookEvent | undefined | Promise<CiWebhookEvent | undefined>;
+    verify(request: CiWebhookRequest, context?: CiCallContext): CiWebhookVerification | Promise<CiWebhookVerification>;
+    parse(request: CiWebhookRequest, context?: CiCallContext): CiWebhookEvent | undefined | Promise<CiWebhookEvent | undefined>;
   };
 }
 

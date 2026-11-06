@@ -38,6 +38,7 @@ import { LegacyImportError } from '@dutydeck/legacy-importer';
 import { LegacyImportCliError, runLegacyArchive, runLegacyDiscover, runLegacyPlan } from './legacy-import-cli.js';
 import { LocalFileSecretProvider, SecretProviderError, secretDirectoryForDatabase } from '@dutydeck/secret-provider';
 import { setPluginBindingSecret } from './plugins/binding-secret-cli.js';
+import { pluginsInStack } from './plugins/crash-attribution.js';
 import { SecretCliError, readSecretValue, runSecretList, runSecretRemove, runSecretRotate, runSecretSet, type SecretCliContext } from './secret-cli.js';
 import { SettingsCliError, runSettingsCli } from './settings-cli.js';
 import { ScheduleCliError, runScheduleCli, runScheduleRequest } from './schedule-cli.js';
@@ -108,7 +109,10 @@ async function serve(options: CliOptions, onReady?: () => void) {
   // runner/daemon supervisor can start a clean process. Unhandled rejections
   // reach this monitor through Node's default `throw` mode as well.
   process.on('uncaughtExceptionMonitor', (error, origin) => {
-    process.stderr.write(`Fatal ${origin}: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
+    const stack = error instanceof Error ? error.stack ?? error.message : String(error);
+    const plugins = pluginsInStack(stack);
+    process.stderr.write(`Fatal ${origin}: ${stack}\n`);
+    if (plugins.length) process.stderr.write(`Fatal error stack includes in-process plugin code: ${plugins.join(', ')}. Plugin providers run inside the daemon; fix or disable the plugin (dutydeck plugin disable <name>).\n`);
   });
 }
 
