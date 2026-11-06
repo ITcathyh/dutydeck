@@ -23,7 +23,7 @@ it('loads only the active suffix, keeps summaries separate and merges new live e
   expect(client.getQueryData<EventWindow>(['events', 's'])?.events).toEqual([...history.slice(1200), event(1206)]);
   expect(client.getQueryData<EventWindow>(['events', 's'])?.outline).toEqual(outline);
   expect(loader).toHaveBeenCalledTimes(1);
-  expect(loader.mock.calls[0]?.[1]).toEqual({ after: 1200, limit: 200, direction: 'forward' });
+  expect(loader.mock.calls[0]?.[1]).toEqual({ after: 1200, limit: 1000, direction: 'forward' });
   view.unmount(); client.clear();
 });
 it('aborts an active suffix read on session switch without a late cache write', async () => {
@@ -47,7 +47,7 @@ it('explicitly reads all canonical pages for raw copy/export, reports failures a
   let fail = true, inFlight = 0, maxInFlight = 0;
   const loader = vi.spyOn(api, 'events').mockImplementation(async (_id, query) => {
     inFlight++; maxInFlight = Math.max(maxInFlight, inFlight);
-    try { if (query!.after === 200 && fail) throw new Error('offline'); return history.filter(event => event.sequence > query!.after!).slice(0, query!.limit); }
+    try { if (query!.after === 1000 && fail) throw new Error('offline'); return history.filter(event => event.sequence > query!.after!).slice(0, query!.limit); }
     finally { inFlight--; }
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -63,11 +63,11 @@ it('explicitly reads all canonical pages for raw copy/export, reports failures a
 });
 
 it('freezes a full-read watermark even when the active session keeps appending events', async () => {
-  vi.spyOn(api, 'sessionHistory').mockResolvedValue({ ...outline, highWaterMark: 405, liveAfter: 405 });
-  let history = Array.from({ length: 405 }, (_, i) => event(i + 1));
+  vi.spyOn(api, 'sessionHistory').mockResolvedValue({ ...outline, highWaterMark: 2005, liveAfter: 2005 });
+  let history = Array.from({ length: 2005 }, (_, i) => event(i + 1));
   const loader = vi.spyOn(api, 'events').mockImplementation(async (_id, query) => {
     const page = history.filter(event => event.sequence > query!.after! && (query!.before === undefined || event.sequence < query!.before)).slice(0, query!.limit);
-    if (query!.after! < 405) history = [...history, ...Array.from({ length: 200 }, (_, i) => event(history.length + i + 1))];
+    if (query!.after! < 2005) history = [...history, ...Array.from({ length: 1000 }, (_, i) => event(history.length + i + 1))];
     return page;
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -75,8 +75,8 @@ it('freezes a full-read watermark even when the active session keeps appending e
   const view = render(<QueryClientProvider client={client}><Harness/></QueryClientProvider>);
   await screen.findByText('active 0');
   fireEvent.click(screen.getByText('read full'));
-  await screen.findByText('raw 405');
-  expect(loader.mock.calls.slice(1).map(call => call[1])).toEqual([0, 200, 400].map(after => ({ after, before: 406, limit: 200, direction: 'forward' })));
-  expect(history.length).toBeGreaterThan(405);
+  await screen.findByText('raw 2005');
+  expect(loader.mock.calls.slice(1).map(call => call[1])).toEqual([0, 1000, 2000].map(after => ({ after, before: 2006, limit: 1000, direction: 'forward' })));
+  expect(history.length).toBeGreaterThan(2005);
   view.unmount(); client.clear();
 });

@@ -153,8 +153,8 @@ it('loads shared summaries and reads the complete canonical range only on expans
   expect(loader).toHaveBeenCalledTimes(1);
   fireEvent.click(screen.getByRole('button', { name: /^执行过程/ }));
   await screen.findByText('已加载 1 轮摘要、0 条原始记录');
-  await waitFor(() => expect(loader).toHaveBeenCalledTimes(8));
-  expect(loader.mock.calls.slice(1).map(call => call[1]?.after)).toEqual([0, 200, 400, 600, 800, 1000, 1200]);
+  await waitFor(() => expect(loader).toHaveBeenCalledTimes(3));
+  expect(loader.mock.calls.slice(1).map(call => call[1]?.after)).toEqual([0, 1000]);
   expect(screen.queryByRole('textbox')).toBeNull();
   expect(screen.queryByRole('button', { name: /允许本次|拒绝/ })).toBeNull();
 });

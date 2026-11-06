@@ -1,6 +1,8 @@
 import { api, type DockEvent, type HistoryOutline, type HistoryTurnSummary } from './api';
 
 export const EVENT_PAGE_SIZE = 200;
+/** Range reads return only once complete, so use the server's largest page (EVENT_WINDOW_MAX_LIMIT). */
+export const HISTORY_RANGE_PAGE_SIZE = 1000;
 export type EventWindow = {
   events: DockEvent[];
   outline?: HistoryOutline;
@@ -66,7 +68,7 @@ export async function loadHistoryRange(sessionId: string, after: number, through
   let cursor = after;
   while (true) {
     signal?.throwIfAborted();
-    const page = await api.events(sessionId, { after: cursor, ...(through !== undefined ? { before: through + 1 } : {}), limit: EVENT_PAGE_SIZE, direction: 'forward' }, signal);
+    const page = await api.events(sessionId, { after: cursor, ...(through !== undefined ? { before: through + 1 } : {}), limit: HISTORY_RANGE_PAGE_SIZE, direction: 'forward' }, signal);
     signal?.throwIfAborted();
     if (!page.length) break;
     for (const event of page) {
@@ -74,7 +76,7 @@ export async function loadHistoryRange(sessionId: string, after: number, through
       events.push(event); cursor = event.sequence;
     }
     if (through !== undefined && cursor >= through) break;
-    if (page.length < EVENT_PAGE_SIZE) break;
+    if (page.length < HISTORY_RANGE_PAGE_SIZE) break;
   }
   if (through !== undefined && cursor < through) throw new Error('记录尚未读取完整，请重试');
   return events;

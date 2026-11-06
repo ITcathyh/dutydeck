@@ -1147,7 +1147,7 @@ describe('App 完整历史记录', () => {
     await userEvent.setup().click(screen.getByRole('button', { name: '展开完整记录' }));
     await screen.findByRole('button', { name: '收起完整记录' });
     await waitFor(() => expect(client.getQueryData(['history-detail', 's1', 1, 1205])).toEqual(history));
-    expect(api.events).toHaveBeenCalledTimes(8);
+    expect(api.events).toHaveBeenCalledTimes(3);
     expect(screen.queryByRole('button', { name: '加载更早记录' })).toBeNull();
     await act(() => client.invalidateQueries({ queryKey: ['events', 's1'] }));
     expect(client.getQueryData(['history-detail', 's1', 1, 1205])).toEqual(history);
@@ -1161,7 +1161,7 @@ describe('App 完整历史记录', () => {
     expect(await screen.findByText('历史记录加载失败：连接中断')).toBeTruthy();
     vi.mocked(api.events).mockImplementation(async (_id, query) => history.filter(event => event.sequence > query!.after!).slice(0, query!.limit!));
     await userEvent.setup().click(screen.getByRole('button', { name: '重试加载记录' }));
-    await waitFor(() => expect(vi.mocked(api.events)).toHaveBeenLastCalledWith('s1', { after: 1200, limit: 200, direction: 'forward' }, expect.any(AbortSignal)));
+    await waitFor(() => expect(vi.mocked(api.events)).toHaveBeenLastCalledWith('s1', { after: 1000, limit: 1000, direction: 'forward' }, expect.any(AbortSignal)));
     expect(screen.queryByText('历史记录加载失败：连接中断')).toBeNull();
   });
 
@@ -1264,7 +1264,7 @@ describe('App 会话追踪入口', () => {
     expect(action).not.toHaveBeenCalled();
     expect(screen.queryByRole('dialog', { name: '命令面板' })).toBeNull();
     expect(screen.getAllByRole('dialog')).toHaveLength(1);
-    expect(api.events).toHaveBeenCalledWith('s1', { after: 0, before: 3, limit: 200, direction: 'forward' }, expect.any(AbortSignal));
+    expect(api.events).toHaveBeenCalledWith('s1', { after: 0, before: 3, limit: 1000, direction: 'forward' }, expect.any(AbortSignal));
     await act(async () => client.setQueryData<EventWindow>(['events', 's1'], current => ({ ...current, events: [...(current?.events ?? []), { ...old, id: 'e3', sequence: 3, type: 'error', data: { message: 'live trace canary' } }] })));
     expect(await within(dialog).findByText('live trace canary')).toBeTruthy();
     await userEvent.click(within(dialog).getByRole('button', { name: '关闭会话追踪' }));
