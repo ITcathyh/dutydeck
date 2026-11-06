@@ -97,6 +97,10 @@ Codex 明确报告模型容量已满、且本次没有业务工具或权限调�
 
 Codex 显示可识别的模型迁移菜单时，Dutydeck 只选 “Use existing model”，再等待输入框；选中行或菜单不明确时留给人工处理。终端采集 socket 支持较长或非 ASCII 的临时目录路径。
 
+Kiro 3.x 未验证：Kiro 3.0.0 发布说明称 Kiro CLI 已改为单个独立的 `kiro-cli` 二进制（[CLI changelog](https://kiro.dev/changelog/cli/)），没有说明是否仍提供 `kiro-cli-chat`。内置 Kiro ACP 只在找到 `kiro-cli-chat` 时登记，终端模式（`kiro-cli chat`）不受影响。
+
+不要在 Dutydeck 里打开 Claude 的 `CLAUDE_CODE_RETRY_WATCHDOG`：它等额度重置时没有输出、进程 CPU 也不活跃，会被终端任务的空闲超时（Agent 的 `timeout`，默认 600 秒）当作卡死结束。
+
 ### 终端模式 Agent 与飞书审批
 
 - Claude Code / Seed / Relay 的终端模式支持飞书审批，`ask` 和 `approve-reads` 都可用，靠 PermissionRequest hook 实现。
@@ -163,6 +167,7 @@ Codex ACP 的非完全信任会话在每轮原生请求（包括恢复后）使�
 | `DUTYDECK_CLEANUP_INTERVAL_MS` | `300000` | 周期清理间隔，整数毫秒，范围 1–2147483647 |
 | `DUTYDECK_DRIVER_IDLE_TIMEOUT_MS` | `21600000` | 空闲终端释放阈值，非负毫秒；`0` 禁用，不受周期定时器的 32 位上限限制；仍有原生后台任务的会话不释放 |
 | `DUTYDECK_USAGE_PRICING_JSON` | 内置价格表 | 整表覆盖用量估算的单价 |
+| `DUTYDECK_USAGE_PRICING_EXTRA_JSON` | 不设 | 在价格表上按型号叠加单价，格式 `{"version"?: "...", "models": [{"match": "...", "inputPerMTok": ..., "cachedInputPerMTok": ..., "outputPerMTok": ...}]}`，同名型号被替换，不允许 `default`。设置后这些型号的花费开始计入月度上限，已设上限的实例可能比以前更早被拦；写错时服务起不来 |
 | `DUTYDECK_DEPLOY_WINDOW` | 不限 | `dutydeck deploy` 允许的时段，如 `10:00-11:00,16:00-17:00`（Asia/Shanghai） |
 | `LARK_APP_ID` | - | 仅 `dutydeck lark send` 等命令行发卡片的备用来源 |
 | `LARK_APP_SECRET` | - | 同上。机器人用 `dutydeck setup` 配置，Secret 存在机器人配置里，不需要它 |

@@ -741,6 +741,14 @@ describe('usage.unpriced', () => {
     const pricing = JSON.stringify({ default: { inputPerMTok: 1, cachedInputPerMTok: 0.1, outputPerMTok: 5 }, models: [] });
     expect(find(await runDoctor({ json: true }, withBots(botsWith({ defaultModel: 'kimi-k2.5' }), { DUTYDECK_USAGE_PRICING_JSON: pricing })), 'usage.unpriced')).toBeUndefined();
   });
+
+  it('DUTYDECK_USAGE_PRICING_EXTRA_JSON 叠加过的型号不再报未定价，其余照报', async () => {
+    const extra = JSON.stringify({ models: [{ match: 'kimi-k2.5', inputPerMTok: 1, cachedInputPerMTok: 0.1, outputPerMTok: 5 }] });
+    expect(find(await runDoctor({ json: true }, withBots(botsWith({ defaultModel: 'kimi-k2.5' }), { DUTYDECK_USAGE_PRICING_EXTRA_JSON: extra })), 'usage.unpriced')).toBeUndefined();
+    const check = find(await runDoctor({ json: true }, withBots(botsWith({ defaultModel: 'kimi-k2.5', fallbackModel: 'gemini-3.8-flash-n' }), { DUTYDECK_USAGE_PRICING_EXTRA_JSON: extra })), 'usage.unpriced')!;
+    expect(check.detail).toBe('以下模型未定价，用量上限对它们无效：gemini-3.8-flash-n');
+    expect(check.remedy).toContain('DUTYDECK_USAGE_PRICING_EXTRA_JSON');
+  });
 });
 
 describe('lark.memory', () => {
