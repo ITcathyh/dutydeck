@@ -178,6 +178,8 @@ export interface InboxRouteOptions {
   sources: InboxSources;
   /** 与会话列表同一道读权限；不可见的会话整个不出现。 */
   canView(request: FastifyRequest, sessionId: string): Promise<boolean>;
+  /** 批量版 canView：判定与逐个 canView 相同，保持顺序；listed 是本次 listSessions 的结果，避免逐个重读会话。 */
+  canViewMany?(request: FastifyRequest, sessions: Session[], listed: Session[]): Promise<Session[]>;
   /** 工作项读权限（沿用工作项接口的 task.view_result 判定），返回读身份。 */
   workItemActor?(request: FastifyRequest, sessionId: string): Promise<string | undefined>;
 }
@@ -185,8 +187,9 @@ export interface InboxRouteOptions {
 /** GET /api/inbox：只读汇总。分享链接不在分享白名单里，认证中间件对带 share 的请求一律 401。 */
 export function registerInboxRoutes(app: FastifyInstance, runtime: Pick<DutydeckRuntime, 'listSessions'>, options: InboxRouteOptions) {
   app.get('/api/inbox', async (request): Promise<InboxResponse> => {
-    const sessions = (await runtime.listSessions()).filter(session => !session.archivedAt);
-    const visible = (await Promise.all(sessions.map(async session => await options.canView(request, session.id) ? session : undefined))).filter((session): session is Session => Boolean(session));
+    const listed = await runtime.listSessions();
+    const sessions = listed.filter(session => !session.archivedAt);
+    const visible = options.canViewMany ? await options.canViewMany(request, sessions, listed) : (await Promise.all(sessions.map(async session => await options.canView(request, session.id) ? session : undefined))).filter((session): session is Session => Boolean(session));
     const now = Date.now();
     const items = await collectInbox(options.sources, visible, { now, actorFor: session => options.workItemActor?.(request, session.id).catch(() => undefined) });
     return { generatedAt: new Date(now).toISOString(), items };
