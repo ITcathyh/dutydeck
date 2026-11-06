@@ -204,9 +204,11 @@ export class LarkTaskInbox {
     // 同一认领的准备和 /new 可并发更新；串行合并字段，同时保留跨进程 CAS。
     const operation = (this.updates.get(record) ?? Promise.resolve()).then(async () => {
       const next = await this.mutateClaim(record, latest => {
+        // 只有还没认领的记录能改成 ignored：它此时不可能带任务、交接链接或附件目录，附件清理据此跳过已忽略记录。
+        if (patch.state === 'ignored' && latest.state !== 'unrouted') throw new RuntimeError('LARK_INBOX_IGNORE_REJECTED', `只有未路由的入站记录能标为已忽略，当前是 ${latest.state}`, 409);
         const confirmed = patch.taskId && latest.event.authorization?.via === 'participation_confirmed';
         const acceptedDisposition = confirmed ? dispositionSchema.parse({ schemaVersion: 1, reason: 'participation_handled', decisionId: latest.event.authorization?.decisionId }) : undefined;
-        const bodyExpiresAt = patch.state === 'ignored' && latest.state !== 'ignored' && isBotSenderType(latest.event.senderType)
+        const bodyExpiresAt = patch.state === 'ignored' && isBotSenderType(latest.event.senderType)
           ? { bodyExpiresAt: new Date(Date.now() + LARK_IGNORED_BOT_BODY_GRACE_MS).toISOString() } : {};
         return { ...latest, ...patch, ...bodyExpiresAt, ...(patch.taskId ? { reason: acceptedDisposition?.reason, detail: undefined, disposition: acceptedDisposition } : {}),
           ...(patch.reason ? { disposition: dispositionSchema.parse({ schemaVersion: 1, reason: patch.reason, ...(patch.detail ? { detail: patch.detail } : {}) }) } : {}) };

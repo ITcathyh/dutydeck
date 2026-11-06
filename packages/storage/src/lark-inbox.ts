@@ -1,22 +1,9 @@
 import type Database from 'better-sqlite3';
 import { preparedOnce } from './config-query.js';
+import { LARK_INBOX_APP as APP, LARK_INBOX_BODY_EXPIRES as BODY_EXPIRES, LARK_INBOX_BOT as BOT, LARK_INBOX_RECEIVED as RECEIVED, LARK_INBOX_SCOPE as SCOPE, LARK_INBOX_STATE as STATE } from './lark-inbox-schema.js';
 
-// 表达式必须与索引定义逐字一致，SQLite 才会选中索引；坏 JSON 的行按空对象看待。
-const safe = "CASE WHEN json_valid(value) THEN value ELSE '{}' END";
-const field = (path: string) => `json_extract(${safe},'$.${path}')`;
-const SCOPE = "key GLOB 'lark.inbox.*'";
-const APP = field('appId');
-const STATE = field('state');
-const RECEIVED = field('receivedAt');
-const BODY_EXPIRES = field('bodyExpiresAt');
-/** 发送方是其他机器人（bot/app）为 1，其余（含缺字段）为 0。 */
-const BOT = `(IFNULL(${field('event.senderType')},'') IN ('bot','app'))`;
-
-/** v47：按（机器人、类别、时间）找已忽略记录，按（机器人、正文到期时间）找待瘦身记录。 */
-export function createLarkInboxRetentionIndexes(db: Database.Database): void {
-  db.exec(`CREATE INDEX config_lark_inbox_ignored ON configs(${APP},${STATE},${BOT},${RECEIVED},key) WHERE ${SCOPE}`);
-  db.exec(`CREATE INDEX config_lark_inbox_body ON configs(${APP},${BODY_EXPIRES}) WHERE ${SCOPE}`);
-}
+// 走索引的表达式来自 lark-inbox-schema.ts，与 v47 建索引的原文逐字一致；下面这个只用于不走索引的附加条件，坏 JSON 的行按空对象看待。
+const field = (path: string) => `json_extract(CASE WHEN json_valid(value) THEN value ELSE '{}' END,'$.${path}')`;
 
 const ignored = `${SCOPE} AND substr(key,1,length(@prefix))=@prefix AND ${APP}=@app AND ${STATE}='ignored' AND ${BOT}=@bot`;
 /**

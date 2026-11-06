@@ -1,7 +1,7 @@
 import { createWorkspaceApprovalRuleSchema } from './workspace-approval-rules.js';
 import { createMatterSchema } from './matters.js';
-import { createConfigReadIndexes, createLarkInboxStateIndex } from './config-query.js';
-import { createLarkInboxRetentionIndexes } from './lark-inbox.js';
+import { createConfigReadIndexes } from './config-query.js';
+import { LARK_INBOX_V47_INDEXES } from './lark-inbox-schema.js';
 import { createPluginResultSchema } from './plugin-results-migration.js';
 import { createMemoryConsumedTaskSchema, createMemoryJobSchema } from './memory-jobs.js';
 import { createWorkItemIndexSchema, refreshWorkItemIndexTriggers } from './work-item-index.js';
@@ -646,8 +646,7 @@ export const migrations: Migration[] = [
   // 飞书入站记录的读取与保留期清理走索引；只建索引，不改写已有记录。
   { version: 47, name: 'lark_inbox_indexes', up(db) {
     if (!tableExistsForMigration(db, 'configs')) return;
-    createLarkInboxStateIndex(db);
-    createLarkInboxRetentionIndexes(db);
+    for (const statement of LARK_INBOX_V47_INDEXES) db.exec(statement);
   } }
 ]
 

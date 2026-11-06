@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
 import type { ConfigRepository } from '@dutydeck/shared';
+import { LARK_INBOX_REASON, LARK_INBOX_SCOPE, LARK_INBOX_STATE } from './lark-inbox-schema.js';
 
 // 与 database-control.ts 的 cachedStatement 相同；放在这里免得迁移模块经由它绕回自己。
 const statements = new WeakMap<Database.Database, Map<string, Database.Statement>>();
@@ -34,24 +35,22 @@ export function createConfigReadIndexes(db: Database.Database): void {
   }
 }
 
-/** v47: per-bot inbox prefixes (`lark.inbox.<appId>.`) share one partial index; the literal GLOB lets SQLite pick it. */
-const LARK_INBOX_PATTERN = 'lark.inbox.*';
-export function createLarkInboxStateIndex(db: Database.Database): void {
-  db.exec(`CREATE INDEX config_lark_inbox_state ON configs(${expression('state')},key) WHERE key GLOB '${LARK_INBOX_PATTERN}'`);
-  db.exec(`CREATE INDEX config_lark_inbox_reason ON configs(${expression('disposition.reason')},key) WHERE key GLOB '${LARK_INBOX_PATTERN}'`);
-}
+/** v47 的 lark.inbox 索引按固定原文建立；按 state / 原因过滤时用同一份表达式常量。 */
+const frozenExpressions: Partial<Record<string, string>> = { state: LARK_INBOX_STATE, 'disposition.reason': LARK_INBOX_REASON };
+const filterExpression = (field: JsonFilter['field'] | 'disposition.reason') => frozenExpressions[field] ?? expression(field);
 
 /** Literal paths/patterns match the partial expression indexes. Other prefixes keep the same semantics through a parameterized comparison. */
 function prefixScope(prefix: string): { scope: string; params: unknown[] } {
   const pattern = Object.hasOwn(patterns, prefix) ? patterns[prefix as keyof typeof patterns] : undefined;
   if (pattern) return { scope: `key GLOB '${pattern}'`, params: [] };
-  const inbox = prefix.startsWith('lark.inbox.') ? `key GLOB '${LARK_INBOX_PATTERN}' AND ` : '';
+  // per-bot inbox prefixes (`lark.inbox.<appId>.`) share one partial index; the literal GLOB lets SQLite pick it.
+  const inbox = prefix.startsWith('lark.inbox.') ? `${LARK_INBOX_SCOPE} AND ` : '';
   return { scope: `${inbox}substr(key,1,length(?))=?`, params: [prefix, prefix] };
 }
 
 export function listConfigByJsonField(db: Database.Database, prefix: string, filter: JsonFilter) {
   const { scope, params } = prefixScope(prefix);
-  const field = expression(filter.field);
+  const field = filterExpression(filter.field);
   params.push(...filter.values);
   let where = `${scope} AND ${field} IN (${filter.values.map(() => '?').join(',')})`;
   if (filter.sessionId !== undefined) { where += ` AND ${expression('sessionId')}=?`; params.push(filter.sessionId); }
@@ -73,8 +72,8 @@ export function listConfigJsonFields(db: Database.Database, prefix: string, path
   else {
     // 每个分支单独走索引：IN 和「缺字段或坏 JSON」（null）写进同一个 OR 会让 SQLite 放弃表达式索引。
     const values = filter.values.filter((value): value is string => value !== null);
-    if (values.length) branches.push({ sql: select(`${scope} AND ${expression(filter.field)} IN (${values.map(() => '?').join(',')})`), params: [...pathParams, ...scopeParams, ...values] });
-    if (filter.values.includes(null)) branches.push({ sql: select(`${scope} AND ${expression(filter.field)} IS NULL`), params: [...pathParams, ...scopeParams] });
+    if (values.length) branches.push({ sql: select(`${scope} AND ${filterExpression(filter.field)} IN (${values.map(() => '?').join(',')})`), params: [...pathParams, ...scopeParams, ...values] });
+    if (filter.values.includes(null)) branches.push({ sql: select(`${scope} AND ${filterExpression(filter.field)} IS NULL`), params: [...pathParams, ...scopeParams] });
   }
   const rows = preparedOnce(db, `${branches.map(branch => branch.sql).join(' UNION ALL ')} ORDER BY key`).raw().all(...branches.flatMap(branch => branch.params)) as Array<[string, number, ...Array<string | null>]>;
   return rows.map(([key, valid, ...values]) => ({ key, fields: valid ? Object.fromEntries(paths.map((path, index) => [path, values[index] == null ? undefined : JSON.parse(values[index]!)])) : undefined }));

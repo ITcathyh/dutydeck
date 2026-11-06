@@ -2,7 +2,7 @@ import Database from 'better-sqlite3'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { expect, it } from 'vitest'
+import { expect, it, vi } from 'vitest'
 import { createRepositories } from './index.js'
 import { migrations, runMigrations, withMigrationTransaction } from './migrations.js'
 import { PRUNE_IGNORED_SQL, SLIM_IGNORED_SQL } from './lark-inbox.js'
@@ -79,4 +79,39 @@ it('projects only requested inbox fields and filters by indexed state', async ()
     expect((await repos.config.listByJsonField!('lark.inbox.cli_app.', { field: 'state', values: ['received'] })).map(row => row.key)).toEqual(['lark.inbox.cli_app.om_b'])
     await expect(repos.config.listJsonFields!('lark.inbox.', ["state') OR 1=1 --"])).rejects.toThrow('Invalid JSON field paths')
   } finally { repos.close() }
+})
+
+// 已升级的库按这份原文建过 v47 索引：原文不能改，否则已升级的库和新建的库表达式对不上（INDEXED BY 报错、其他查询退回全表扫描）。
+// 要换表达式就追加新迁移重建索引，再更新这份快照。
+const V47_INDEX_SQL = [
+  { name: "config_lark_inbox_body", sql: "CREATE INDEX config_lark_inbox_body ON configs(json_extract(CASE WHEN json_valid(value) THEN value ELSE '{}' END,'$.appId'),json_extract(CASE WHEN json_valid(value) THEN value ELSE '{}' END,'$.bodyExpiresAt')) WHERE key GLOB 'lark.inbox.*'" },
+  { name: "config_lark_inbox_ignored", sql: "CREATE INDEX config_lark_inbox_ignored ON configs(json_extract(CASE WHEN json_valid(value) THEN value ELSE '{}' END,'$.appId'),json_extract(CASE WHEN json_valid(value) THEN value ELSE '{}' END,'$.state'),(IFNULL(json_extract(CASE WHEN json_valid(value) THEN value ELSE '{}' END,'$.event.senderType'),'') IN ('bot','app')),json_extract(CASE WHEN json_valid(value) THEN value ELSE '{}' END,'$.receivedAt'),key) WHERE key GLOB 'lark.inbox.*'" },
+  { name: "config_lark_inbox_reason", sql: "CREATE INDEX config_lark_inbox_reason ON configs(json_extract(CASE WHEN json_valid(value) THEN value ELSE '{}' END,'$.disposition.reason'),key) WHERE key GLOB 'lark.inbox.*'" },
+  { name: "config_lark_inbox_state", sql: "CREATE INDEX config_lark_inbox_state ON configs(json_extract(CASE WHEN json_valid(value) THEN value ELSE '{}' END,'$.state'),key) WHERE key GLOB 'lark.inbox.*'" }
+]
+
+it('keeps the v47 inbox index DDL frozen and plans state and reason projections on their indexes', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'lark-inbox-plan-'))
+  const path = join(directory, 'db.sqlite')
+  try {
+    const repos = createRepositories(path)
+    const db = new Database(path)
+    expect(db.prepare("SELECT name,sql FROM sqlite_master WHERE type='index' AND name LIKE 'config_lark_inbox_%' ORDER BY name").all()).toEqual(V47_INDEX_SQL)
+    const prefix = 'lark.inbox.cli_app.'
+    for (const [field, value, index] of [['state', 'received', 'config_lark_inbox_state'], ['disposition.reason', 'participation_observes', 'config_lark_inbox_reason']] as const) {
+      const spy = vi.spyOn(Database.prototype, 'prepare')
+      await repos.config.listJsonFields!(prefix, ['appId', 'receivedAt'], { field, values: [value] })
+      const sql = spy.mock.calls.map(([text]) => text).find(text => text.includes('json_valid(value) AS valid'))!
+      spy.mockRestore()
+      const plan = JSON.stringify(db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all('$.appId', '$.receivedAt', prefix, prefix, value))
+      expect(plan).toContain(`SEARCH configs USING INDEX ${index} (<expr>=? AND key>? AND key<?)`)
+      expect(plan).not.toContain('SCAN configs')
+    }
+    const spy = vi.spyOn(Database.prototype, 'prepare')
+    await repos.config.listJsonFields!(prefix, ['appId'], { field: 'state', values: [null] })
+    const sql = spy.mock.calls.map(([text]) => text).find(text => text.includes('IS NULL'))!
+    spy.mockRestore()
+    expect(JSON.stringify(db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all('$.appId', prefix, prefix))).toContain('INDEX config_lark_inbox_state (<expr>=?')
+    db.close(); repos.close()
+  } finally { rmSync(directory, { recursive: true, force: true }) }
 })
