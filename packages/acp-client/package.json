@@ -35,7 +35,11 @@
     "src/transcript-source.ts",
     "dist/transcript-source.js",
     "dist/transcript-source.js.map",
-    "dist/transcript-source.d.ts"
+    "dist/transcript-source.d.ts",
+    "src/agent-process-tree.ts",
+    "dist/agent-process-tree.js",
+    "dist/agent-process-tree.js.map",
+    "dist/agent-process-tree.d.ts"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",

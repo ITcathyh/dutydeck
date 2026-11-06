@@ -47,8 +47,7 @@ describe('PluginServiceSupervisor', () => {
     const supervisor = new PluginServiceSupervisor(undefined, 1_000);
     supervisor.register({ plugin: 'crash', root: f.root, entry: f.entry, dataDir: f.dataDir });
     expect((await supervisor.start('crash')).entry).toBe(f.entry);
-    await new Promise(resolve => setTimeout(resolve, 100));
-    expect(supervisor.status('crash')).toMatchObject({ status: 'crashed', lastExitCode: 7, restarts: 1, entry: f.entry });
+    await vi.waitFor(() => expect(supervisor.status('crash')).toMatchObject({ status: 'crashed', lastExitCode: 7, restarts: 1, entry: f.entry }), { timeout: 10_000 });
     expect((await supervisor.start('crash')).status).toBe('running');
     await supervisor.stop('crash');
   });
