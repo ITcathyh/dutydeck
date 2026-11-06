@@ -16,15 +16,15 @@ export const WATCH_RECEIVER_WARN_MS = 24 * 60 * 60_000;
 const receiverTypes = ['open_id', 'union_id', 'user_id'] as const;
 /** 机器人没有可私信的接收人：since 起记在这里给 doctor 看，告警每天最多一条。 */
 const unreachableSchema = z.object({ since: z.string().datetime(), warnedAt: z.string().datetime().optional() }).strict();
-const readUnreachable = (raw: string | undefined | null) => {
-  try { const parsed = raw ? unreachableSchema.safeParse(JSON.parse(raw)) : undefined; return parsed?.success ? parsed.data : undefined; } catch { return undefined; }
+/** 读取按 schema 存的 JSON 标记；空值、坏 JSON 或不符 schema 都当作没有。 */
+const storedReader = <T extends z.ZodTypeAny>(schema: T) => (raw: string | undefined | null): z.infer<T> | undefined => {
+  try { const parsed = raw ? schema.safeParse(JSON.parse(raw)) : undefined; return parsed?.success ? parsed.data : undefined; } catch { return undefined; }
 };
+const readUnreachable = storedReader(unreachableSchema);
 /** 飞书确定拒收了私信（缺权限）：attemptedAt 起 WATCH_RECEIVER_WARN_MS 内不再发，doctor 显示缺的权限。清除只写空值。 */
 const rejectedSchema = z.object({ since: z.string().datetime(), attemptedAt: z.string().datetime(), ownerId: z.string().min(1),
   ownerIdType: z.enum(receiverTypes).optional(), upstreamCode: z.number().int(), scopes: z.array(z.string()) }).strict();
-const readRejected = (raw: string | undefined | null) => {
-  try { const parsed = raw ? rejectedSchema.safeParse(JSON.parse(raw)) : undefined; return parsed?.success ? parsed.data : undefined; } catch { return undefined; }
-};
+const readRejected = storedReader(rejectedSchema);
 const LARK_PERMISSION_DENIED_CODE = 99991672;
 /** 发送方确认消息没有发出（飞书按缺权限拒收），与超时等"可能已发出"的失败区分开。 */
 export class WatchDeliveryRejectedError extends Error {
@@ -271,16 +271,17 @@ export function checkWatchFindings(values: Readonly<Record<string, string | unde
   if (unavailable) return { ...base, level: 'skip', detail: '数据库不可读，无法读取巡检发现' };
   const rows = Object.entries(values).flatMap(([key, value]) => key.startsWith(WATCH_PREFIX) && value ? [{ key, value }] : []);
   const findings = readWatchFindings(rows).filter(f => !f.recoveredAt).sort((a, b) => a.firstSeenAt.localeCompare(b.firstSeenAt));
-  const unreachable = rows.flatMap(row => {
-    const appId = row.key.slice(WATCH_PREFIX.length, -'/unreachable'.length);
-    if (!row.key.endsWith('/unreachable') || !appId || appId.includes('/')) return [];
-    return readUnreachable(row.value) ? [`巡检无人接收：${appId} 没有可私信的接收人（允许名单和应用创建人都没有），发现只记在这里；加入允许名单会让机器人只对名单里的人开放`] : [];
+  /** 每个应用一条的标记记录（watch_findings/<appId>/<suffix>）。 */
+  const appMarkers = (suffix: string, describe: (appId: string, value: string) => string | undefined) => rows.flatMap(row => {
+    const appId = row.key.slice(WATCH_PREFIX.length, -suffix.length);
+    if (!row.key.endsWith(suffix) || !appId || appId.includes('/')) return [];
+    const line = describe(appId, row.value);
+    return line ? [line] : [];
   });
-  const rejected = rows.flatMap(row => {
-    const appId = row.key.slice(WATCH_PREFIX.length, -'/rejected'.length);
-    if (!row.key.endsWith('/rejected') || !appId || appId.includes('/')) return [];
-    const value = readRejected(row.value);
-    return value ? [`巡检私信被飞书拒绝：应用 ${appId} 缺 ${value.scopes.length ? value.scopes.join('，') : '所需权限'}；在开放平台开通后最多 24 小时内会重发`] : [];
+  const unreachable = appMarkers('/unreachable', (appId, raw) => readUnreachable(raw) ? `巡检无人接收：${appId} 没有可私信的接收人（允许名单和应用创建人都没有），发现只记在这里；加入允许名单会让机器人只对名单里的人开放` : undefined);
+  const rejected = appMarkers('/rejected', (appId, raw) => {
+    const value = readRejected(raw);
+    return value ? `巡检私信被飞书拒绝：应用 ${appId} 缺 ${value.scopes.length ? value.scopes.join('，') : '所需权限'}；在开放平台开通后最多 24 小时内会重发` : undefined;
   });
   if (!findings.length && !unreachable.length && !rejected.length) return { ...base, level: 'ok', detail: '没有未恢复的巡检问题（启动约 5 分钟后首次检查）' };
   return { ...base, level: 'warn', detail: [...unreachable, ...rejected, ...findings.map(f => `${f.title}；首次发现 ${f.firstSeenAt}；${f.location}${f.notificationUnknownAt ? '；巡检通知发送结果未知，不重复私信' : ''}`)].join('\n'),
