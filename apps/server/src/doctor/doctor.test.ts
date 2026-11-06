@@ -1440,3 +1440,13 @@ it('doctor renders unresolved watch findings and reads their prefix without runn
   expect(output.stdout.text()).toContain('首次发现 ' + firstSeenAt);
   expect(output.stdout.text()).toContain('https://example.test/sessions/watch');
 });
+
+it('doctor keeps one watch item and names the permission Lark rejected the direct message for', async () => {
+  const at = '2026-11-01T02:00:00.000Z';
+  const values = { [WATCH_PREFIX + 'cli_watch/rejected']: JSON.stringify({ since: at, attemptedAt: at, ownerId: 'ou_owner', upstreamCode: 99991672, scopes: ['contact:user.employee_id:readonly'] }),
+    [WATCH_PREFIX + 'cli_cleared/rejected']: '' };
+  const report = await runDoctor({ json: true }, deps({ databaseProbe: () => ({ exists: true, appliedVersion: 14, values }) }));
+  const watch = report.checks.filter(check => check.id === 'watch.findings');
+  expect(watch).toHaveLength(1);
+  expect(watch[0]).toMatchObject({ level: 'warn', detail: '巡检私信被飞书拒绝：应用 cli_watch 缺 contact:user.employee_id:readonly；在开放平台开通后最多 24 小时内会重发' });
+});

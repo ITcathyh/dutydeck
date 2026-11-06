@@ -19,6 +19,31 @@ const unreachableSchema = z.object({ since: z.string().datetime(), warnedAt: z.s
 const readUnreachable = (raw: string | undefined | null) => {
   try { const parsed = raw ? unreachableSchema.safeParse(JSON.parse(raw)) : undefined; return parsed?.success ? parsed.data : undefined; } catch { return undefined; }
 };
+/** 飞书确定拒收了私信（缺权限）：attemptedAt 起 WATCH_RECEIVER_WARN_MS 内不再发，doctor 显示缺的权限。清除只写空值。 */
+const rejectedSchema = z.object({ since: z.string().datetime(), attemptedAt: z.string().datetime(), ownerId: z.string().min(1),
+  ownerIdType: z.enum(receiverTypes).optional(), upstreamCode: z.number().int(), scopes: z.array(z.string()) }).strict();
+const readRejected = (raw: string | undefined | null) => {
+  try { const parsed = raw ? rejectedSchema.safeParse(JSON.parse(raw)) : undefined; return parsed?.success ? parsed.data : undefined; } catch { return undefined; }
+};
+const LARK_PERMISSION_DENIED_CODE = 99991672;
+/** 发送方确认消息没有发出（飞书按缺权限拒收），与超时等"可能已发出"的失败区分开。 */
+export class WatchDeliveryRejectedError extends Error {
+  constructor(readonly upstreamCode: number, readonly scopes: string[]) {
+    super(`巡检私信被飞书拒绝（code: ${upstreamCode}）`); this.name = 'WatchDeliveryRejectedError';
+  }
+}
+/**
+ * 只认飞书业务码 99991672 或带 permission_violations 的响应；403 或报错文字不算，
+ * 误判会把"可能已发出"当成"确定没发"，一天后重复私信。传入 LarkServiceError.details。
+ */
+export function watchDeliveryRejection(details: Readonly<Record<string, unknown>> | undefined): WatchDeliveryRejectedError | undefined {
+  const violations = Array.isArray(details?.permissionViolations) ? details.permissionViolations : [];
+  const code = Number(details?.upstreamCode);
+  if (code !== LARK_PERMISSION_DENIED_CODE && !violations.length) return undefined;
+  const scopes = violations.flatMap(item => typeof item === 'string' ? [item]
+    : item && typeof item === 'object' && typeof (item as { subject?: unknown }).subject === 'string' ? [(item as { subject: string }).subject] : []);
+  return new WatchDeliveryRejectedError(Number.isInteger(code) ? code : 0, [...new Set(scopes)]);
+}
 const notificationSchema = z.object({
   schemaVersion: z.literal(1), idempotencyKey: z.string().min(1), ownerId: z.string().min(1), ownerIdType: z.enum(receiverTypes).optional(),
   text: z.string().min(1), status: z.enum(['pending', 'completed', 'unknown']),
@@ -146,6 +171,7 @@ export class DutydeckWatch {
           await this.options.store.set(notificationKey, JSON.stringify(notification));
           await this.options.send({ appId: scope.appId, ownerId: notification.ownerId, ...(notification.ownerIdType ? { ownerIdType: notification.ownerIdType } : {}),
             text: notification.text, idempotencyKey: notification.idempotencyKey });
+          if (rawRejected) { await this.options.store.set(rejectedKey, ''); rawRejected = ''; }
           for (const finding of live) {
             const notified = { ...finding, notifiedAt: at };
             await this.options.store.set(prefix + finding.fingerprint, JSON.stringify(notified));
@@ -164,7 +190,16 @@ export class DutydeckWatch {
         if (warn) this.options.warn({ appId: scope.appId, code: 'WATCH_RECEIVER_MISSING', count: pending.length }, '巡检发现问题，但找不到可私信的接收人，未发送私信（每天最多提示一次）');
         continue;
       }
-      if (rawUnreachable) await (this.options.store.remove ? this.options.store.remove(unreachableKey, rawUnreachable) : this.options.store.set(unreachableKey, ''));
+      // 只写空值：真实仓储的 remove 只允许删少数几类记录，其余抛错会中止整轮巡检。
+      if (rawUnreachable) await this.options.store.set(unreachableKey, '');
+      const rejectedKey = prefix + 'rejected';
+      let rawRejected = await this.options.store.get(rejectedKey);
+      let rejected = readRejected(rawRejected);
+      if (rejected && (rejected.ownerId !== scope.ownerId || watchReceiverType(rejected.ownerId, rejected.ownerIdType) !== watchReceiverType(scope.ownerId, scope.ownerIdType))) {
+        await this.options.store.set(rejectedKey, ''); rawRejected = ''; rejected = undefined;
+      }
+      // 旧批补发和新批发送都在这里挡住，权限开通后最多一天恢复。
+      if (rejected && Date.parse(at) - Date.parse(rejected.attemptedAt) < WATCH_RECEIVER_WARN_MS) continue;
       try {
         // Freeze both UUID and payload before any provider write. A partial receipt-save failure
         // or newly found issue cannot change an uncertain notification's identity.
@@ -182,6 +217,16 @@ export class DutydeckWatch {
         await this.options.store.set(notificationKey, JSON.stringify(notification));
         await deliver(notification);
       } catch (error) {
+        if (error instanceof WatchDeliveryRejectedError) {
+          await this.options.store.set(rejectedKey, JSON.stringify({ since: rejected?.since ?? at, attemptedAt: at, ownerId: scope.ownerId,
+            ...(scope.ownerIdType ? { ownerIdType: scope.ownerIdType } : {}), upstreamCode: error.upstreamCode, scopes: error.scopes }));
+          // 确定没发出：结掉这批，成员不记已通知也不记结果未知，过了门槛后重新成批发送。
+          const rawCurrent = await this.options.store.get(notificationKey);
+          if (rawCurrent) await this.options.store.set(notificationKey, JSON.stringify({ ...notificationSchema.parse(JSON.parse(rawCurrent)), status: 'completed' }));
+          this.options.warn({ appId: scope.appId, code: 'WATCH_DELIVERY_REJECTED', upstreamCode: error.upstreamCode, scopes: error.scopes },
+            '巡检私信被飞书拒绝（缺权限），一天内不再重发');
+          continue;
+        }
         retry = true;
         this.options.warn({ appId: scope.appId, error }, '巡检私信未确认成功，几分钟后重试');
       }
@@ -215,9 +260,15 @@ export function checkWatchFindings(values: Readonly<Record<string, string | unde
   const unreachable = rows.flatMap(row => {
     const appId = row.key.slice(WATCH_PREFIX.length, -'/unreachable'.length);
     if (!row.key.endsWith('/unreachable') || !appId || appId.includes('/')) return [];
-    return readUnreachable(row.value) ? [`巡检无人接收：${appId} 没有可私信的接收人（允许名单和应用创建人都没有），发现只记在这里`] : [];
+    return readUnreachable(row.value) ? [`巡检无人接收：${appId} 没有可私信的接收人（允许名单和应用创建人都没有），发现只记在这里；加入允许名单会让机器人只对名单里的人开放`] : [];
   });
-  if (!findings.length && !unreachable.length) return { ...base, level: 'ok', detail: '没有未恢复的巡检问题（启动约 5 分钟后首次检查）' };
-  return { ...base, level: 'warn', detail: [...unreachable, ...findings.map(f => `${f.title}；首次发现 ${f.firstSeenAt}；${f.location}${f.notificationUnknownAt ? '；巡检通知发送结果未知，不重复私信' : ''}`)].join('\n'),
+  const rejected = rows.flatMap(row => {
+    const appId = row.key.slice(WATCH_PREFIX.length, -'/rejected'.length);
+    if (!row.key.endsWith('/rejected') || !appId || appId.includes('/')) return [];
+    const value = readRejected(row.value);
+    return value ? [`巡检私信被飞书拒绝：应用 ${appId} 缺 ${value.scopes.length ? value.scopes.join('，') : '所需权限'}；在开放平台开通后最多 24 小时内会重发`] : [];
+  });
+  if (!findings.length && !unreachable.length && !rejected.length) return { ...base, level: 'ok', detail: '没有未恢复的巡检问题（启动约 5 分钟后首次检查）' };
+  return { ...base, level: 'warn', detail: [...unreachable, ...rejected, ...findings.map(f => `${f.title}；首次发现 ${f.firstSeenAt}；${f.location}${f.notificationUnknownAt ? '；巡检通知发送结果未知，不重复私信' : ''}`)].join('\n'),
     remedy: '按每项位置查看会话或守护进程日志，处理后等待下一轮巡检确认恢复。', verify: 'dutydeck doctor --json' };
 }
