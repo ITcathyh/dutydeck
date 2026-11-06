@@ -14,29 +14,31 @@ export function readHistoryOutline(sqlite: Database.Database, sessionId: string)
 
 function projectHistoryOutline(sqlite: Database.Database, sessionId: string): HistoryOutline {
   const highWaterMark = (cachedStatement(sqlite, 'SELECT COALESCE(MAX(sequence),0) AS value FROM events WHERE session_id=?').get(sessionId) as { value: number }).value;
+  // Each turn spans from its prompt to the next one; the first turn also takes the session prefix.
+  // Per-range lookups read only events_session_seq_type (migration 47) instead of every event row.
   const boundaries = cachedStatement(sqlite, `
-    WITH marked AS (
-      SELECT id,sequence,timestamp,task_id,attempt_id,type,
-        COALESCE(task_id,CASE WHEN json_valid(data) THEN json_extract(data,'$.taskId') END) AS owner,
-        CASE WHEN type='text' AND json_valid(data) AND json_extract(data,'$.role')='user'
-          AND json_type(data,'$.steering') IS NULL THEN 1 ELSE 0 END AS boundary
-      FROM events WHERE session_id=?
-    ), grouped AS (
-      SELECT *,MAX(1,SUM(boundary) OVER (ORDER BY sequence)) AS turn FROM marked
+    WITH b AS (
+      SELECT sequence,id,COALESCE(task_id,json_extract(data,'$.taskId')) AS owner FROM events INDEXED BY events_session_seq_type
+      WHERE session_id=@s AND type='text' AND json_valid(data) AND json_extract(data,'$.role')='user' AND json_type(data,'$.steering') IS NULL
+    ), edges AS (
+      SELECT CASE WHEN ROW_NUMBER() OVER (ORDER BY sequence)=1 THEN -9223372036854775808 ELSE sequence END AS lo,
+        COALESCE(LEAD(sequence) OVER (ORDER BY sequence),9223372036854775807) AS hi,id AS bid,owner FROM b
+      UNION ALL SELECT -9223372036854775808,9223372036854775807,NULL,NULL WHERE NOT EXISTS (SELECT 1 FROM b)
     ), ranges AS (
-      SELECT turn,MIN(sequence) AS first,MAX(sequence) AS last,MIN(timestamp) AS timestamp,
-        MAX(type='completed') AS ended FROM grouped GROUP BY turn
-    ), owned AS (
-      SELECT r.*,
-        COALESCE((SELECT owner FROM grouped g WHERE g.turn=r.turn AND boundary=1 ORDER BY sequence LIMIT 1),
-          (SELECT task_id FROM grouped g WHERE g.turn=r.turn AND type IN ('text','thinking','tool_call','tool_result') AND task_id IS NOT NULL ORDER BY sequence LIMIT 1)) AS taskId,
-        (SELECT attempt_id FROM grouped g WHERE g.turn=r.turn AND type!='task' AND attempt_id IS NOT NULL ORDER BY sequence LIMIT 1) AS attemptId,
-        COALESCE((SELECT id FROM grouped g WHERE g.turn=r.turn AND boundary=1 ORDER BY sequence LIMIT 1),
-          (SELECT id FROM grouped g WHERE g.turn=r.turn ORDER BY sequence LIMIT 1)) AS id
-      FROM ranges r
+      SELECT x.*,
+        (SELECT MIN(sequence) FROM events WHERE session_id=@s AND sequence>=x.lo AND sequence<x.hi) AS first,
+        (SELECT MAX(sequence) FROM events WHERE session_id=@s AND sequence>=x.lo AND sequence<x.hi) AS last,
+        (SELECT MIN(timestamp) FROM events WHERE session_id=@s AND sequence>=x.lo AND sequence<x.hi) AS timestamp,
+        EXISTS (SELECT 1 FROM events WHERE session_id=@s AND sequence>=x.lo AND sequence<x.hi AND type='completed') AS ended,
+        COALESCE(x.owner,(SELECT task_id FROM events WHERE session_id=@s AND sequence>=x.lo AND sequence<x.hi
+          AND type IN ('text','thinking','tool_call','tool_result') AND task_id IS NOT NULL ORDER BY sequence LIMIT 1)) AS taskId,
+        (SELECT attempt_id FROM events WHERE session_id=@s AND sequence>=x.lo AND sequence<x.hi AND type!='task' AND attempt_id IS NOT NULL ORDER BY sequence LIMIT 1) AS attemptId,
+        COALESCE(x.bid,(SELECT id FROM events WHERE session_id=@s AND sequence>=x.lo AND sequence<x.hi ORDER BY sequence LIMIT 1)) AS id
+      FROM edges x
     )
-    SELECT r.*,t.status FROM owned r LEFT JOIN tasks t ON t.id=r.taskId AND t.session_id=? ORDER BY r.first
-  `).all(sessionId, sessionId) as Boundary[];
+    SELECT r.first,r.last,r.timestamp,r.ended,r.taskId,r.attemptId,r.id,t.status FROM ranges r LEFT JOIN tasks t ON t.id=r.taskId AND t.session_id=@s
+    WHERE r.first IS NOT NULL ORDER BY r.first
+  `).all({ s: sessionId }) as Boundary[];
   const text = cachedStatement(sqlite, `
     WITH pieces AS (
       SELECT sequence,length(json_extract(data,'$.text')) AS size
@@ -63,8 +65,8 @@ function projectHistoryOutline(sqlite: Database.Database, sessionId: string): Hi
       substr(COALESCE(json_extract(CASE WHEN p.type='object' THEN p.value ELSE '{}' END,'$.uri'),json_extract(CASE WHEN p.type='object' THEN p.value ELSE '{}' END,'$.resource.uri')),1,2048) AS uri,
       substr(json_extract(CASE WHEN p.type='object' THEN p.value ELSE '{}' END,'$.name'),1,2048) AS name,
       substr(COALESCE(json_extract(CASE WHEN p.type='object' THEN p.value ELSE '{}' END,'$.mimeType'),json_extract(CASE WHEN p.type='object' THEN p.value ELSE '{}' END,'$.resource.mimeType')),1,2048) AS mimeType
-    FROM events e LEFT JOIN json_each(CASE WHEN json_valid(e.data) THEN json_extract(e.data,'$.parts') END) p
-    WHERE e.session_id=? AND e.sequence BETWEEN ? AND ? AND json_valid(e.data)
+    FROM events e INDEXED BY events_session_seq_type LEFT JOIN json_each(CASE WHEN json_valid(e.data) THEN json_extract(e.data,'$.parts') END) p
+    WHERE e.session_id=? AND e.sequence BETWEEN ? AND ? AND e.type IN ('tool_result','text') AND json_valid(e.data)
       AND ((e.type='tool_result' AND json_extract(e.data,'$.status')='completed') OR
         (e.type='text' AND COALESCE(json_extract(e.data,'$.role'),'assistant')!='user'))
       AND ((p.type='object' AND CAST(p.key AS INTEGER)<64 AND json_extract(CASE WHEN p.type='object' THEN p.value ELSE '{}' END,'$.type') IN ('image','resource','resource_link')) OR (e.type='tool_result' AND json_extract(e.data,'$.output.status')='delivered'))
@@ -75,10 +77,10 @@ function projectHistoryOutline(sqlite: Database.Database, sessionId: string): Hi
   const unprompted = cachedStatement(sqlite, `
     WITH prompts AS (
       SELECT COALESCE(task_id,json_extract(data,'$.taskId')) AS taskId,attempt_id AS attemptId,MIN(sequence) AS first
-      FROM events WHERE session_id=? AND type='text' AND json_valid(data) AND json_extract(data,'$.role')='user'
+      FROM events INDEXED BY events_session_seq_type WHERE session_id=? AND type='text' AND json_valid(data) AND json_extract(data,'$.role')='user'
         AND json_type(data,'$.steering') IS NULL GROUP BY 1,2
     )
-    SELECT MIN(e.sequence) AS first FROM events e LEFT JOIN prompts p ON p.taskId=e.task_id AND p.first<=e.sequence
+    SELECT MIN(e.sequence) AS first FROM events e INDEXED BY events_session_seq_type LEFT JOIN prompts p ON p.taskId=e.task_id AND p.first<=e.sequence
       AND (e.attempt_id IS NULL OR p.attemptId IS NULL OR p.attemptId=e.attempt_id)
     WHERE e.session_id=? AND e.type IN ('error','completed')
       AND ((e.task_id IS NOT NULL AND p.first IS NULL) OR (e.task_id IS NULL AND e.type='error'))

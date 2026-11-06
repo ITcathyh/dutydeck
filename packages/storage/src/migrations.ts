@@ -641,7 +641,11 @@ export const migrations: Migration[] = [
   // 计划修订把删除的步骤移到 retiredSteps；索引触发器同时投影其子会话归属，旧记录不改写。
   { version: 45, name: 'work_item_retired_step_sessions', up(db) { if (tableExistsForMigration(db, 'work_item_index')) refreshWorkItemIndexTriggers(db) } },
   // 审批卡「本工作区允许此类命令」持久化的命令规则；纯新增表，不改写已有数据。
-  { version: 46, name: 'workspace_approval_rules', up: createWorkspaceApprovalRuleSchema }
+  { version: 46, name: 'workspace_approval_rules', up: createWorkspaceApprovalRuleSchema },
+  // 历史大纲按轮次区间扫描时只读索引、不回表；event-history.ts 用 INDEXED BY 引用它，不能删除或改名。
+  { version: 47, name: 'history_outline_index', up(db) {
+    if (tableExistsForMigration(db, 'events')) db.exec('CREATE INDEX events_session_seq_type ON events(session_id,sequence,type,timestamp)');
+  } }
 ]
 
 /** v38：collaboration_duties 加 scenarios_json 列，把旧的 alarm_json 转进去。 */
