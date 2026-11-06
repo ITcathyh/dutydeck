@@ -45,7 +45,7 @@ dutydeck deploy prune --releases /path/to/releases
 
 - **停机窗口**：新进程初始化完成即开始监听 HTTP，飞书长连接随后在后台并行建立，健康检查不等待飞书握手；连接失败按原有退避重连。Web 断线后最长每 5 秒重试一次；Agent 调用群协作工具遇到连接被拒时最长等待 90 秒，连接中途断开等可能已送达的请求不重试。开始监听后写一条「启动各阶段耗时」日志（`startupMs`，毫秒）：`boot` 进程与模块加载、`plugins`、`config`、`database` 打开库、`migrate` 迁移、`wiring`、`insight`、`integrations`、`relay`、`agentDefaults`、`agents` 登记 Agent、`sessions` 恢复会话与对账、`routes`、`listen`，以及 `total`。
 - **部署窗口**：环境变量 `DUTYDECK_DEPLOY_WINDOW`（如 `10:00-11:00,16:00-17:00`）限制部署时段，窗口外加 `--now` 才部署。
-- **Web 静态资源**：HEAD 请求检查文件可读性与大小，返回与 GET 相同的 `Content-Length`，不读取文件正文。
+- **Web 静态资源**：构建时为 JS、CSS、HTML 等文本文件生成 `.br` 与 `.gz` 压缩副本；浏览器声明支持时直接返回压缩副本（带 `Content-Encoding` 与 `Vary: Accept-Encoding`），否则、或请求带 `Range` 时返回原文件。HEAD 请求检查文件可读性与大小，返回与 GET 相同的响应头，不读取文件正文。
 - **失败与中断**：部署失败、中途出错或被 Ctrl-C / kill / ssh 断开打断时，都会写 `status: failed` 的部署记录（被信号打断的另记 `aborted_by`），先等已发出的排空续期请求结束，再让旧服务退出排空、恢复执行新任务，不再等租约到期，避免迟到的续期再次暂停服务；被打断后不再切换版本、重启或回滚。
 - **并发部署与清理**：共用同一个实际发布根目录的操作互斥，包括不同 unit 的部署、`--no-restart` 和手动 `deploy prune`（含 `--dry-run`）。已有操作进行时，后来的命令会明确报忙并拒绝执行，待前一操作结束后重试；不同发布根目录可独立操作。
 - **备份期间保持暂停接单**：排空后先备份数据库再切换版本，备份期间每 5 秒续一次排空。续期失败，或备份结束时又有任务在执行，部署不切换版本、不重启，旧服务继续运行，记为失败并写明原因；等任务结束后重新部署，确认可以中断任务时加 `--force`。

@@ -1,4 +1,4 @@
-import { beforeEach, afterEach, expect, it, vi } from 'vitest';
+import { beforeAll, beforeEach, afterEach, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -25,6 +25,9 @@ vi.mock('./components/TimelineView', async importOriginal => {
 });
 
 let client: QueryClient;
+// main.tsx starts loading the lazy timeline (and its Markdown renderer) at boot
+// for session routes; do the same so the first test does not wait on that import.
+beforeAll(async () => { await import('./components/TimelineView'); });
 afterEach(() => {
   cleanup();
   client?.clear();

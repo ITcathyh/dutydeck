@@ -45,27 +45,32 @@ function event(sequence: number): AgentEvent {
   };
 }
 
-async function waitForPaint(page: import('@playwright/test').Page, text: string) {
+const eventId = (sequence: number) => `evt_browser_${sequence}`;
+
+async function waitForPaint(page: import('@playwright/test').Page, id: string, timeoutMs = 5_000) {
   // Observe DOM insertion directly. Locator polling adds its own retry delays
-  // before the two paints, which is not incremental rendering latency.
-  await page.evaluate(text => new Promise<void>((resolve, reject) => {
+  // before the two paints, which is not incremental rendering latency. Rows are
+  // matched by event id: completed turns render as history summaries whose
+  // text also carries status and counts, so their text is not the event text.
+  await page.evaluate(({ id, timeoutMs }) => new Promise<void>((resolve, reject) => {
     let timeout: ReturnType<typeof setTimeout>;
+    // No named helper here: tsx's keepNames would wrap it in an undefined page-side __name.
     const observer = new MutationObserver((_records, observer) => {
-      const element = [...document.querySelectorAll<HTMLElement>('[data-timeline-event]')].find(element => element.textContent?.trim() === text && element.getClientRects().length > 0);
+      const element = [...document.querySelectorAll<HTMLElement>('[data-timeline-event]')].find(element => element.dataset.timelineEvent === id && element.getClientRects().length > 0);
       if (!element) return;
       observer.disconnect(); clearTimeout(timeout);
       void element.offsetHeight;
       requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
     });
-    const existing = [...document.querySelectorAll<HTMLElement>('[data-timeline-event]')].find(element => element.textContent?.trim() === text && element.getClientRects().length > 0);
+    const existing = [...document.querySelectorAll<HTMLElement>('[data-timeline-event]')].find(element => element.dataset.timelineEvent === id && element.getClientRects().length > 0);
     if (existing) {
       void existing.offsetHeight;
       requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
       return;
     }
-    timeout = setTimeout(() => { observer.disconnect(); reject(new Error(`Timed out rendering ${text}`)); }, 5_000);
-    observer.observe(document.body, { childList: true, characterData: true, subtree: true });
-  }), text);
+    timeout = setTimeout(() => { observer.disconnect(); reject(new Error(`Timed out rendering ${id}`)); }, timeoutMs);
+    observer.observe(document.body, { childList: true, characterData: true, subtree: true, attributes: true, attributeFilter: ['data-timeline-event'] });
+  }), { id, timeoutMs });
 }
 
 async function main() {
@@ -99,6 +104,10 @@ async function main() {
       listSessions: () => repos.sessions.list(),
       getSession: (id: string) => repos.sessions.get(id),
       getTasks: (id: string) => repos.tasks.listBySession(id),
+      getHistoryOutline: (id: string) => repos.events.listHistoryOutline!(id),
+      // A completed fixture session has no live driver and no verification runs.
+      getDriver: () => undefined,
+      getVerifications: async () => [],
       getEventWindow: (id: string, options: any) => repos.events.listWindow(id, options),
       getEvents: (id: string, after: number) => repos.events.list(id, after),
       subscribe: (_id: string, listener: (next: AgentEvent) => void) => { subscribers.add(listener); return () => subscribers.delete(listener); }
@@ -118,16 +127,21 @@ async function main() {
 
     browser = await chromium.launch({ headless: true, args: ['--enable-precise-memory-info'] });
     const pageErrors: string[] = [];
+    // A fake-runtime gap answers 5xx and the page silently renders nothing to
+    // measure; any server error therefore fails the benchmark, not a timeout.
+    const serverErrors: string[] = [];
+    const assertNoServerErrors = () => { if (serverErrors.length) throw new Error(`API server errors during benchmark:\n${serverErrors.join('\n')}`); };
     const newPage = async (options?: Parameters<NonNullable<typeof browser>['newPage']>[0]) => {
       const page = await browser!.newPage(options);
       page.on('pageerror', error => { pageErrors.push(error.stack ?? error.message); });
+      page.on('response', response => { if (response.status() >= 500 && new URL(response.url()).pathname.startsWith('/api/')) serverErrors.push(`${response.status()} ${response.request().method()} ${response.url()}`); });
       return page;
     };
-    Object.assign(progress, { pageErrors });
+    Object.assign(progress, { pageErrors, serverErrors });
     const controlPage = await newPage();
     await controlPage.setContent('<main></main>');
     const controlStarted = performance.now();
-    const controlPaint = waitForPaint(controlPage, 'delayed fixture');
+    const controlPaint = waitForPaint(controlPage, 'control');
     void controlPaint.catch(() => {}); // Await below after scheduling the delayed DOM write.
     await controlPage.evaluate(() => { setTimeout(() => {
       const element = document.createElement('div'); element.dataset.timelineEvent = 'control'; element.textContent = 'delayed fixture'; document.body.append(element);
@@ -149,26 +163,24 @@ async function main() {
       page.on('request', request => { if (request.url().includes('/events?')) initialPages++; });
       const started = performance.now();
       await page.goto(`${baseUrl}/sessions/${SESSION_ID}`, { waitUntil: 'domcontentloaded' });
-      try { await waitForPaint(page, `event ${EVENT_COUNT}`); }
+      try { await waitForPaint(page, eventId(EVENT_COUNT), 30_000); }
       catch (error) {
+        assertNoServerErrors();
         process.stderr.write(`[browser body] ${(await page.locator('body').innerText()).slice(0, 4_000)}\n`);
         throw error;
       }
+      assertNoServerErrors();
       firstVisibleSamples.push(performance.now() - started);
       if (initialPages > 2) throw new Error(`first screen fetched ${initialPages} pages`);
 
-      const scrollStarted = performance.now();
       if (await page.getByRole('button', { name: '加载更早记录' }).count()) throw new Error('history still requires manual pagination');
-      const previousCount = await page.locator('[data-timeline-scroll]').evaluate(element => Number((element as HTMLElement).dataset.historyLoaded));
-      await page.waitForFunction(count => Number(document.querySelector<HTMLElement>('[data-timeline-scroll]')?.dataset.historyLoaded) > count, previousCount);
-      // Automatic prepends can advance between Playwright calls. Read the
-      // target and scroll in one browser task so they refer to the same page.
-      const targetSequence = await page.locator('[data-timeline-scroll]').evaluate(element => {
-        const target = Number((element as HTMLElement).dataset.historyStart) + 1;
-        element.scrollTop = 0; element.dispatchEvent(new Event('scroll'));
-        return target;
-      });
-      await waitForPaint(page, `event ${targetSequence}`);
+      if (!await page.locator(`[data-history-summary="${eventId(EVENT_COUNT)}"]`).count()) throw new Error('first screen did not render the completed history outline');
+      // Completed turns come from the history outline; the first screen reads
+      // only the live tail after it, never every raw event.
+      const scrollStarted = performance.now();
+      await page.locator('[data-timeline-scroll]').evaluate(element => { element.scrollTop = 0; element.dispatchEvent(new Event('scroll')); });
+      // Turn 1 is keyed by its prompt (event 2); event 1 is its preamble.
+      await waitForPaint(page, eventId(2));
       if (await page.locator('[data-timeline-turn]').count() > 40) throw new Error('timeline DOM grew beyond the viewport');
       scrollSamples.push(performance.now() - scrollStarted);
       await page.close();
@@ -176,62 +188,48 @@ async function main() {
     await waitFor(() => subscribers.size === 0);
 
     const page = await newPage({ viewport: { width: 1440, height: 960 } });
-    let automaticHistoryPages = 0;
-    page.on('request', request => { if (request.url().includes('/events?') && request.url().includes('direction=backward')) automaticHistoryPages++; });
-    const automaticLoadStarted = performance.now();
+    // Completed turns are outline summaries read on demand; opening, reading
+    // older turns and receiving live events must not page through raw events.
+    let eventPageRequests = 0;
+    page.on('request', request => { if (request.url().includes('/events?')) eventPageRequests++; });
+    // Live updates belong to a new running task. Each is a prompt, so each
+    // paints its own visible row: an unfinished turn folds assistant text into
+    // a collapsed stage, which would leave nothing new on screen to time.
+    await repos.tasks.save({ ...task, id: 'task_live', prompt: 'live follow-up', status: 'running', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+    let liveSequence = EVENT_COUNT;
+    const publishLive = () => {
+      const next = event(++liveSequence);
+      next.data = { role: 'user', text: `event ${liveSequence}`, taskId: 'task_live' };
+      for (const subscriber of subscribers) subscriber(next);
+      return next.id;
+    };
+    const liveLoadStarted = performance.now();
     await page.goto(`${baseUrl}/sessions/${SESSION_ID}`, { waitUntil: 'domcontentloaded' });
-    await waitForPaint(page, `event ${EVENT_COUNT}`);
-    const automaticFirstVisibleMs = performance.now() - automaticLoadStarted;
+    await waitForPaint(page, eventId(EVENT_COUNT), 30_000);
+    const liveFirstVisibleMs = performance.now() - liveLoadStarted;
     await waitFor(() => subscribers.size === 1);
-    // Publish while older pages are loading: the automatic merge must retain
-    // this unique live event, and no navigation gesture starts any page.
-    const automaticLiveInjectedAtLoaded = await page.locator('[data-timeline-scroll]').evaluate(element => Number((element as HTMLElement).dataset.historyLoaded));
-    if (automaticLiveInjectedAtLoaded >= EVENT_COUNT) throw new Error('live injection missed the automatic history loading phase');
-    const liveBase = EVENT_COUNT + 1;
-    for (const subscriber of subscribers) subscriber(event(liveBase));
-    await waitForPaint(page, `event ${liveBase}`);
-    await page.evaluate(sequence => {
-      const container = document.querySelector<HTMLElement>('[data-timeline-scroll]')!;
-      const anchorId = `evt_browser_${sequence}`;
-      const top = document.querySelector<HTMLElement>(`[data-timeline-event="${anchorId}"]`)!.getBoundingClientRect().top;
-      const state = { maxAnchorDriftPx: 0, maxRenderedTurns: 0, observedPrependPaints: 0, failure: '', initialGoal: { text: document.querySelector('[aria-label="目标进度"]')?.textContent, height: document.querySelector('[aria-label="目标进度"]')?.getBoundingClientRect().height }, driftDetails: [] as unknown[], startCount: Number(container.dataset.historyLoaded) };
-      (window as any).__automaticHistory = state;
-      const observer = new MutationObserver(records => {
-        if (!records.some(record => record.attributeName === 'data-history-loaded')) return;
-        requestAnimationFrame(() => requestAnimationFrame(() => {
-          const anchors = document.querySelectorAll<HTMLElement>(`[data-timeline-event="${anchorId}"]`);
-          state.observedPrependPaints++;
-          if (anchors.length !== 1) { state.failure = `automatic prepend lost anchor ${anchorId}`; return; }
-          const drift = Math.abs(anchors[0]!.getBoundingClientRect().top - top);
-          if (drift > state.maxAnchorDriftPx && drift > 2) state.driftDetails.push({ count: container.dataset.historyLoaded, targetTop: top, top: anchors[0]!.getBoundingClientRect().top, scrollTop: container.scrollTop, scrollHeight: container.scrollHeight, clientHeight: container.clientHeight, goal: { text: document.querySelector('[aria-label="目标进度"]')?.textContent, height: document.querySelector('[aria-label="目标进度"]')?.getBoundingClientRect().height } });
-          state.maxAnchorDriftPx = Math.max(state.maxAnchorDriftPx, drift);
-          state.maxRenderedTurns = Math.max(state.maxRenderedTurns, document.querySelectorAll('[data-timeline-turn]').length);
-        }));
-      });
-      observer.observe(container, { attributes: true, attributeFilter: ['data-history-loaded'] });
-      (window as any).__automaticHistoryObserver = observer;
-    }, liveBase);
-    await page.waitForFunction(count => {
-      const container = document.querySelector<HTMLElement>('[data-timeline-scroll]');
-      return container?.dataset.historyComplete === 'true' && Number(container.dataset.historyLoaded) === count;
-    }, EVENT_COUNT + 1, { timeout: 120_000 });
-    const automaticFullLoadMs = performance.now() - automaticLoadStarted;
-    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
-    const automaticHistory = await page.evaluate(() => {
-      (window as any).__automaticHistoryObserver.disconnect();
-      return (window as any).__automaticHistory as { maxAnchorDriftPx: number; maxRenderedTurns: number; observedPrependPaints: number; failure: string; startCount: number };
-    });
-    const { maxRenderedTurns, maxAnchorDriftPx } = automaticHistory;
-    Object.assign(progress, { automaticFirstVisibleMs, automaticFullLoadMs, automaticHistoryPages, automaticLiveInjectedAtLoaded, automaticHistory });
-    if (automaticHistory.failure) throw new Error(automaticHistory.failure);
-    if (automaticHistory.observedPrependPaints < Math.max(1, Math.floor((EVENT_COUNT - automaticHistory.startCount) / 200) - 1)) throw new Error('automatic-history anchor observation missed pages');
-    if (automaticHistoryPages !== Math.floor(EVENT_COUNT / 200) + 1) throw new Error(`automatic history fetched ${automaticHistoryPages} pages`);
-    if (maxAnchorDriftPx > 2) throw new Error(`automatic prepend moved its anchor by ${maxAnchorDriftPx}px`);
-    if (maxRenderedTurns > 40) throw new Error(`retained history mounted ${maxRenderedTurns} turns`);
+    await waitForPaint(page, publishLive());
+    // Reading the oldest turn while live events arrive: the reader stays put.
     await page.locator('[data-timeline-scroll]').evaluate(element => { element.scrollTop = 0; element.dispatchEvent(new Event('scroll')); });
-    await waitForPaint(page, 'event 2');
+    await waitForPaint(page, eventId(2));
+    const readingTop = await page.locator(`[data-timeline-event="${eventId(2)}"]`).evaluate(element => element.getBoundingClientRect().top);
+    let maxAnchorDriftPx = 0, maxRenderedTurns = 0;
+    for (let index = 0; index < 5; index++) {
+      publishLive();
+      // The new row mounts far below the viewport; the live-tail count shows it merged.
+      await page.waitForFunction(count => Number(document.querySelector<HTMLElement>('[data-timeline-scroll]')?.dataset.historyLoaded) === count, liveSequence - EVENT_COUNT);
+      await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+      const measured = await page.evaluate(id => ({ top: document.querySelector<HTMLElement>(`[data-timeline-event="${id}"]`)?.getBoundingClientRect().top, turns: document.querySelectorAll('[data-timeline-turn]').length }), eventId(2));
+      if (measured.top === undefined) throw new Error('live update unmounted the turn being read');
+      maxAnchorDriftPx = Math.max(maxAnchorDriftPx, Math.abs(measured.top - readingTop));
+      maxRenderedTurns = Math.max(maxRenderedTurns, measured.turns);
+    }
+    Object.assign(progress, { liveFirstVisibleMs, eventPageRequests, maxAnchorDriftPx, maxRenderedTurns });
+    if (maxAnchorDriftPx > 2) throw new Error(`live updates moved the reading anchor by ${maxAnchorDriftPx}px`);
+    if (maxRenderedTurns > 40) throw new Error(`history reading mounted ${maxRenderedTurns} turns`);
     await page.getByRole('button', { name: '回到最新消息' }).click();
-    await waitForPaint(page, `event ${liveBase}`);
+    await waitForPaint(page, eventId(liveSequence));
+    if (eventPageRequests > 2) throw new Error(`opening, reading and live updates fetched ${eventPageRequests} raw event pages`);
     const cdp = await page.context().newCDPSession(page);
     // Keep latency and raw heap diagnostics under natural GC. The former raw
     // endpoint-growth <=32MiB gate was GC-phase dependent; it is not a hard
@@ -241,10 +239,8 @@ async function main() {
     const incrementalSamples: number[] = [];
     Object.assign(progress, { incrementalSamples, browserRawHeapSamples });
     for (let index = 1; index <= 50; index++) {
-      const next = event(liveBase + index);
       const started = performance.now();
-      for (const subscriber of subscribers) subscriber(next);
-      await waitForPaint(page, `event ${liveBase + index}`);
+      await waitForPaint(page, publishLive());
       incrementalSamples.push(performance.now() - started);
       // Sampling happens after the latency timer stops, with no forced GC.
       browserRawHeapSamples.push(await page.evaluate(() => (performance as any).memory.usedJSHeapSize as number));
@@ -265,11 +261,7 @@ async function main() {
     // one collection at each boundary; no collections within the 50 updates.
     await cdp.send('HeapProfiler.collectGarbage');
     const browserRetainedHeapBeforeBytes = (await cdp.send('Runtime.getHeapUsage')).usedSize;
-    for (let index = 51; index <= 100; index++) {
-      const next = event(liveBase + index);
-      for (const subscriber of subscribers) subscriber(next);
-      await waitForPaint(page, `event ${liveBase + index}`);
-    }
+    for (let index = 51; index <= 100; index++) await waitForPaint(page, publishLive());
     await cdp.send('HeapProfiler.collectGarbage');
     const browserRetainedHeapAfterBytes = (await cdp.send('Runtime.getHeapUsage')).usedSize;
     const browserRetainedHeapGrowthBytes = Math.max(0, browserRetainedHeapAfterBytes - browserRetainedHeapBeforeBytes);
@@ -306,8 +298,9 @@ async function main() {
       await memoryControlPage.close();
     }
 
-    // A real long turn has no alternating user messages. Its expanded tool
-    // survives a prepend that changes both the first turn and first group ids.
+    // A real long turn has no alternating user messages. Once completed it is
+    // one outline summary; expanding it reads exactly its own range in pages
+    // and keeps a tool the reader opened inside it.
     const longId = 'ses_browser_long_turn';
     await repos.sessions.save({ ...session, id: longId });
     await repos.tasks.save({ ...task, id: 'task_long', sessionId: longId, createdAt: new Date(1_700_000_000_000).toISOString() });
@@ -320,31 +313,25 @@ async function main() {
       } })();
     } finally { longSeed.close(); }
     const longPage = await newPage({ viewport: { width: 1440, height: 960 } });
-    let releaseOlder!: () => void, releaseLast!: () => void;
-    const longOlderGate = new Promise<void>(resolve => { releaseOlder = resolve; });
-    const longLastGate = new Promise<void>(resolve => { releaseLast = resolve; });
-    await longPage.route(`**/api/sessions/${longId}/events?before=401&**`, async route => { await longOlderGate; await route.continue(); });
-    await longPage.route(`**/api/sessions/${longId}/events?before=201&**`, async route => { await longLastGate; await route.continue(); });
+    const longDetailPages: string[] = [];
+    longPage.on('request', request => { if (request.url().includes(`${longId}/events?`)) longDetailPages.push(new URL(request.url()).search); });
     await longPage.goto(`${baseUrl}/sessions/${longId}`, { waitUntil: 'domcontentloaded' });
-    await longPage.locator('[data-timeline-scroll] details > summary').click();
-    await longPage.getByText('step 401', { exact: true }).first().click();
-    await longPage.locator('[data-timeline-event="long_450"] button').click();
-    const older = longPage.waitForResponse(response => response.url().includes(`${longId}/events?before=401&`));
-    await longPage.locator('[data-timeline-scroll]').evaluate(element => { element.scrollTop = 0; element.dispatchEvent(new Event('scroll')); });
+    await waitForPaint(longPage, 'long_1', 30_000);
+    const expandStarted = performance.now();
+    await longPage.locator('[data-history-summary="long_1"]').getByRole('button', { name: '展开完整记录' }).click();
+    const longActivity = longPage.locator('[data-history-summary="long_1"] details > summary').first();
+    await longActivity.waitFor({ timeout: 30_000 });
     await longPage.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
-    const anchorTop = await longPage.locator('[data-timeline-event="long_401"]').evaluate(element => element.getBoundingClientRect().top);
-    releaseOlder(); await older;
-    await longPage.waitForFunction(() => document.querySelector<HTMLElement>('[data-timeline-scroll]')?.dataset.historyStart === '201');
-    await longPage.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
-    let longTurnAnchorDriftPx = Math.abs(await longPage.locator('[data-timeline-event="long_401"]').evaluate(element => element.getBoundingClientRect().top) - anchorTop);
-    if (longTurnAnchorDriftPx > 2) throw new Error(`long-turn prepend moved its anchor by ${longTurnAnchorDriftPx}px`);
-    if (!await longPage.getByText(/long output 450/).count()) throw new Error('prepend collapsed the expanded tool');
-    releaseLast();
-    await longPage.waitForFunction(() => document.querySelector<HTMLElement>('[data-timeline-scroll]')?.dataset.historyComplete === 'true');
-    await longPage.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
-    longTurnAnchorDriftPx = Math.max(longTurnAnchorDriftPx, Math.abs(await longPage.locator('[data-timeline-event="long_401"]').evaluate(element => element.getBoundingClientRect().top) - anchorTop));
-    if (longTurnAnchorDriftPx > 2) throw new Error(`long-turn completion moved its anchor by ${longTurnAnchorDriftPx}px`);
-    if (!await longPage.getByText(/long output 450/).count()) throw new Error('automatic completion collapsed the expanded tool');
+    const longTurnExpandMs = performance.now() - expandStarted;
+    await longActivity.click();
+    // The activity's tool group is labelled by its first step; open it, then the tool.
+    await longPage.getByText('step 1', { exact: true }).first().click();
+    await longPage.locator('[data-timeline-event="long_450"] button').first().click();
+    if (!await longPage.getByText(/long output 450/).count()) throw new Error('expanded long turn did not open the selected tool');
+    // The live tail (after=600) may be re-read; only bounded range reads are the expansion.
+    const longTurnDetailPages = longDetailPages.filter(search => new URLSearchParams(search).get('before') === '601').length;
+    Object.assign(progress, { longTurnExpandMs, longTurnDetailPages, longDetailPages });
+    if (longTurnDetailPages !== Math.ceil(600 / 200)) throw new Error(`expanding the long turn fetched ${longTurnDetailPages} pages`);
     await longPage.close(); await waitFor(() => subscribers.size === 0);
 
     global.gc?.();
@@ -372,10 +359,10 @@ async function main() {
     const incrementalPaintP95Ms = percentile95(incrementalSamples);
     process.stdout.write(`${JSON.stringify({
       database: 'temporary-disk-sqlite', eventCount: EVENT_COUNT, sampleCount: SAMPLE_COUNT, hostLoadAtStart, paintControlDelayMs,
-      automaticFirstVisibleMs, automaticFullLoadMs, automaticHistoryPages, automaticLiveInjectedAtLoaded, automaticHistory,
+      liveFirstVisibleMs, eventPageRequests, longTurnExpandMs, longTurnDetailPages,
       firstVisibleP95Ms, historyScrollP95Ms, incrementalPaintP95Ms, incrementalPaintMaxMs: Math.max(...incrementalSamples), firstVisibleSamples,
       ...browserMemory, ...retainedMemory, heapControlHeldGrowthBytes, heapControlReleasedGrowthBytes, heapControlRejected,
-      serverRssGrowthBytes, serverExternalGrowthBytes, maxRenderedTurns, maxAnchorDriftPx, longTurnAnchorDriftPx,
+      serverRssGrowthBytes, serverExternalGrowthBytes, maxRenderedTurns, maxAnchorDriftPx,
       sseReconnects: 100, peakSubscribers, leakedSubscribers: subscribers.size, budgets
     }, null, 2)}\n`);
     assertBudget('browser first-visible p95', firstVisibleP95Ms, budgets.firstVisibleP95Ms, 'ms');
@@ -384,6 +371,7 @@ async function main() {
     assertBudget('browser retained JS heap growth', browserRetainedHeapGrowthBytes, budgets.browserRetainedHeapGrowthBytes, 'B');
     assertBudget('server RSS growth after SSE soak', serverRssGrowthBytes, budgets.serverRssGrowthBytes, 'B');
     assertBudget('server external growth after SSE soak', serverExternalGrowthBytes, budgets.serverExternalGrowthBytes, 'B');
+    assertNoServerErrors();
     if (pageErrors.length) throw new Error(`Browser page errors: ${pageErrors.join('\n')}`);
     if (subscribers.size !== 0) throw new Error(`${subscribers.size} SSE subscribers leaked after soak`);
 

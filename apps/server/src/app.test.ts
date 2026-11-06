@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import * as fs from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { brotliCompressSync, brotliDecompressSync, gunzipSync, gzipSync } from 'node:zlib';
 import { get as httpGet, type IncomingMessage } from 'node:http';
 import { buildApp } from './app.js';
 import { createRepositories } from '@dutydeck/storage';
@@ -557,36 +558,55 @@ describe('HTTP API boundary', () => {
     expect(api.statusCode).toBe(404); expect(api.json().error.code).toBe('NOT_FOUND');
   });
 
-  it('serves static HEAD metadata without reading bodies or changing GET encoding behavior', async () => {
+  it('serves precompressed static sidecars by Accept-Encoding and keeps HEAD metadata identical to GET', async () => {
     const webRoot = await mkdtemp(join(tmpdir(), 'dutydeck-web-')); tempDirectories.push(webRoot);
     await mkdir(join(webRoot, 'assets'));
     const source = '/* static asset 中文 */'.repeat(4096);
     await writeFile(join(webRoot, 'index.html'), '<main>UI</main>');
+    await writeFile(join(webRoot, 'index.html.gz'), gzipSync('<main>UI</main>'));
     await writeFile(join(webRoot, 'assets/app.js'), source);
-    await writeFile(join(webRoot, 'assets/app.js.gz'), 'unused sidecar');
+    await writeFile(join(webRoot, 'assets/app.js.gz'), gzipSync(source));
+    await writeFile(join(webRoot, 'assets/app.js.br'), brotliCompressSync(source));
+    await writeFile(join(webRoot, 'assets/plain.js'), source);
     const app = await buildApp({} as any, { webRoot }); apps.push(app);
-    const read = vi.spyOn(fs, 'readFile'); const open = vi.spyOn(fs, 'open');
+    const decode = (payload: Buffer, encoding: unknown) => (encoding === 'br' ? brotliDecompressSync(payload) : encoding === 'gzip' ? gunzipSync(payload) : payload).toString();
+    // [Accept-Encoding, 两种副本都有的资源, 只有 gzip 副本的 index.html]；plain.js 没有副本，始终回原文件。
+    const cases: Array<[Record<string, string>, string | undefined, string | undefined]> = [
+      [{}, undefined, undefined],
+      [{ 'accept-encoding': 'gzip' }, 'gzip', 'gzip'],
+      [{ 'accept-encoding': 'gzip, deflate, br' }, 'br', 'gzip'],
+      [{ 'accept-encoding': 'gzip;q=1, br;q=0.5' }, 'gzip', 'gzip'],
+      [{ 'accept-encoding': '*' }, 'br', 'gzip'],
+      [{ 'accept-encoding': 'gzip;q=0' }, undefined, undefined],
+      [{ 'accept-encoding': '*;q=0' }, undefined, undefined],
+      [{ 'accept-encoding': 'br, identity;q=0' }, 'br', undefined],
+      // 不实现 Range：照旧回完整 200，并且回原文件，字节区间不会落在压缩数据上。
+      [{ 'accept-encoding': 'gzip, br', range: 'bytes=0-9' }, undefined, undefined]
+    ];
+    const read = vi.spyOn(fs, 'readFile');
     try {
-      for (const url of ['/assets/app.js', '/', '/sessions/s1']) {
-        for (const encoding of [undefined, 'gzip', 'gzip;q=0', '*;q=0', 'br, identity;q=0']) {
-          const headers = encoding === undefined ? {} : { 'accept-encoding': encoding };
-          read.mockClear(); open.mockClear();
+      for (const [headers, assetEncoding, indexEncoding] of cases) {
+        for (const url of ['/assets/app.js', '/assets/plain.js', '/', '/sessions/s1']) {
+          const expected = url === '/assets/app.js' ? assetEncoding : url === '/assets/plain.js' ? undefined : indexEncoding;
+          read.mockClear();
           const get = await app.inject({ method: 'GET', url, headers });
           expect(get.statusCode).toBe(200);
-          expect(get.body).toBe(url.startsWith('/assets/') ? source : '<main>UI</main>');
-          expect(get.headers['content-encoding']).toBeUndefined(); expect(get.headers.vary).toBeUndefined();
-          expect(open).not.toHaveBeenCalled();
-          if (url.startsWith('/assets/')) expect(read).toHaveBeenCalledOnce();
-          read.mockClear(); open.mockClear();
+          expect(get.headers['content-encoding'], `${url} ${JSON.stringify(headers)}`).toBe(expected);
+          expect(get.headers.vary).toBe('Accept-Encoding');
+          expect(decode(get.rawPayload, get.headers['content-encoding'])).toBe(url.startsWith('/assets/') ? source : '<main>UI</main>');
+          expect(get.headers['content-type']).toContain(url.startsWith('/assets/') ? 'text/javascript' : 'text/html');
+          // 发压缩副本时不再读原文件正文；回原文件时只读一次。
+          const original = join(webRoot, url.startsWith('/assets/') ? url : 'index.html');
+          expect(read.mock.calls.filter(([file]) => String(file) === original)).toHaveLength(expected ? 0 : 1);
+          read.mockClear();
           const head = await app.inject({ method: 'HEAD', url, headers });
           expect(head.statusCode).toBe(200); expect(head.rawPayload.length).toBe(0);
           for (const name of ['content-type', 'content-length', 'cache-control', 'content-encoding', 'vary']) expect(head.headers[name]).toBe(get.headers[name]);
-          expect(Number(head.headers['content-length'])).toBe(Buffer.byteLength(get.body));
+          expect(Number(head.headers['content-length'])).toBe(get.rawPayload.length);
           expect(read).not.toHaveBeenCalled();
-          expect(open.mock.calls.every(([file]) => !String(file).endsWith('.gz'))).toBe(true);
         }
       }
-    } finally { read.mockRestore(); open.mockRestore(); }
+    } finally { read.mockRestore(); }
   });
 
   it('preserves static HEAD symlinks, directory rejection, SPA errors, and path boundaries', async () => {
