@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { executionTaskId } from '@dutydeck/storage';
-import { isCapExcludedUsage, makeId, parseLarkSourceId, RuntimeError, type UsageBackgroundLimits, type UsageBackgroundBudget, type AttemptRef, type RepositoryBundle, type Session, type TaskRequestV1, type UsageCap, type UsageCapScope, type UsageCategory, type UsageGroup, type UsageLedgerEntry, type UsageTotals, type UsageFilter, type UsageReport, type UsageReportFilter, type UsageTaskPage, type JsonValue } from '@dutydeck/shared';
+import { errorMessage, isCapExcludedUsage, makeId, parseLarkSourceId, RuntimeError, type UsageBackgroundLimits, type UsageBackgroundBudget, type AttemptRef, type RepositoryBundle, type Session, type TaskRequestV1, type UsageCap, type UsageCapScope, type UsageCategory, type UsageGroup, type UsageLedgerEntry, type UsageTotals, type UsageFilter, type UsageReport, type UsageReportFilter, type UsageTaskPage, type JsonValue } from '@dutydeck/shared';
 import { isLarkPerGroupMemoryPool, larkMemoryScopeOfPool } from './lark/memory.js';
 
 const rateSchema = z.object({ inputPerMTok: z.number().nonnegative(), cachedInputPerMTok: z.number().nonnegative(), outputPerMTok: z.number().nonnegative(), cacheWritePerMTok: z.number().nonnegative().optional(), provider: z.string().trim().min(1).optional() }).strict();
@@ -17,8 +17,9 @@ const extraPricingSchema = z.object({ version: z.string().trim().min(1).optional
     seen.add(key);
   });
 });
-/** extraMatches 只由 withExtraPricing 写入：叠加条目按同样顺序排在 models 最前面，命中它们的用量即使基础表是内置表也记为 custom_model。 */
-export type UsagePricing = z.infer<typeof pricingSchema> & { source?: 'builtin' | 'custom'; extraMatches?: string[] };
+export type UsagePricing = z.infer<typeof pricingSchema> & { source?: 'builtin' | 'custom' };
+/** withExtraPricing 叠加进来的条目：命中它们的用量即使基础表是内置表也记为 custom_model。不写进价格表对象，pricingVersion 的哈希不受影响。 */
+const overlayEntries = new WeakSet<object>();
 const backgroundLimitsSchema = z.object({ defaultMonthlyTasks: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(), bots: z.record(z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)).optional() }).strict();
 export function parseUsageBackgroundLimits(json?: string): UsageBackgroundLimits {
   return json?.trim() ? backgroundLimitsSchema.parse(JSON.parse(json)) : {};
@@ -75,14 +76,14 @@ export function withExtraPricing(base: UsagePricing, json?: string): UsagePricin
   if (!json?.trim()) return base;
   let extra: z.infer<typeof extraPricingSchema>;
   try { extra = extraPricingSchema.parse(JSON.parse(json)); } catch (error) {
-    throw new Error(`DUTYDECK_USAGE_PRICING_EXTRA_JSON 无效：${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(`DUTYDECK_USAGE_PRICING_EXTRA_JSON 无效：${errorMessage(error)}`);
   }
   const replaced = new Set(extra.models.map(pricingEntryKey));
+  for (const entry of extra.models) overlayEntries.add(entry);
   return {
     ...base,
     version: extra.version ?? base.version,
-    models: [...extra.models, ...base.models.filter(entry => !replaced.has(pricingEntryKey(entry)))],
-    extraMatches: extra.models.map(entry => entry.match)
+    models: [...extra.models, ...base.models.filter(entry => !replaced.has(pricingEntryKey(entry)))]
   };
 }
 
@@ -104,7 +105,7 @@ function priceSelection(pricing: UsagePricing, model: string | undefined, provid
   const matched = pricing.models.filter(entry => matchesProvider(entry) && matchesModel(name, entry.match.toLowerCase())).sort((a, b) => b.match.length - a.match.length)[0];
   const builtin = pricing.source === 'builtin';
   const rate = matched ?? (!builtin && matchesProvider(pricing.default) ? pricing.default : undefined);
-  const pricingSource: UsageLedgerEntry['pricingSource'] = matched ? (builtin && pricing.models.indexOf(matched) >= (pricing.extraMatches?.length ?? 0) ? 'builtin_model' : 'custom_model') : rate ? 'custom_default' : 'unmatched';
+  const pricingSource: UsageLedgerEntry['pricingSource'] = matched ? (builtin && !overlayEntries.has(matched) ? 'builtin_model' : 'custom_model') : rate ? 'custom_default' : 'unmatched';
   // Include the actual table in the hash: editing prices without a version bump
   // still leaves a distinct durable provenance key.
   const pricingVersion = `${pricing.version ?? (builtin ? 'builtin' : 'custom')}:${createHash('sha256').update(JSON.stringify(pricing)).digest('hex').slice(0, 32)}`;

@@ -30,6 +30,7 @@ import { userInfo } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { parseEnv } from 'node:util';
 import { loadConfigWithDiagnostics } from '@dutydeck/config';
+import { errorMessage } from '@dutydeck/shared';
 import { PTY_AGENT_CONTRIBUTIONS } from '@dutydeck/pty-driver';
 import { daemonStatus } from '../daemon/command.js';
 import { daemonPaths, readDaemonStatus, resolveDaemonDir } from '../daemon/daemon.js';
@@ -68,7 +69,7 @@ import {
   summarize,
   type DirectoryObservation
 } from './checks.js';
-import { parseUsagePricing, withExtraPricing } from '../usage-ledger.js';
+import { parseUsagePricing, withExtraPricing, type UsagePricing } from '../usage-ledger.js';
 import type {
   DatabaseProbeResult,
   DoctorAutostartResult,
@@ -314,10 +315,10 @@ export async function runDoctor(
 
   // 价格表来自环境变量覆盖或内置表；覆盖值写错时服务起不来，这里报出是哪个变量无效，不再判未定价。
   const pricing = (() => {
-    try { return withExtraPricing(parseUsagePricing(env.DUTYDECK_USAGE_PRICING_JSON), env.DUTYDECK_USAGE_PRICING_EXTRA_JSON); } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return { error: message.startsWith('DUTYDECK_USAGE_PRICING_EXTRA_JSON 无效：') ? message : `DUTYDECK_USAGE_PRICING_JSON 无效：${message}` };
-    }
+    let base: UsagePricing;
+    try { base = parseUsagePricing(env.DUTYDECK_USAGE_PRICING_JSON); } catch (error) { return { error: `DUTYDECK_USAGE_PRICING_JSON 无效：${errorMessage(error)}` }; }
+    // withExtraPricing 的报错已带变量名，原样使用。
+    try { return withExtraPricing(base, env.DUTYDECK_USAGE_PRICING_EXTRA_JSON); } catch (error) { return { error: errorMessage(error) }; }
   })();
   if ('error' in pricing) {
     checks.push({ id: 'usage.pricing', label: '用量价格表', level: 'fail', detail: pricing.error, remedy: '修正该环境变量的 JSON（格式见文档 agents.md 的环境变量表）或删掉它，然后重启服务；写错时服务起不来。' });

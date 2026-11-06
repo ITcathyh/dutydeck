@@ -209,11 +209,14 @@ function trustSelection(screen: string, cwd: string | undefined): 'No, exit' | '
   // box drawing, leaving no prefix. Neither path may contain other content.
   if (!((prefix.length === 0) || (prefix.length === 1 && /^─+$/.test(prefix[0]!)))) return undefined;
   // A cwd wider than the terminal is hard-wrapped onto consecutive rows (observed on 2.1.318 at
-  // 120 columns). Take the fewest rows whose concatenation is exactly cwd, leaving room for at
-  // least one explanation row, Security guide, both choices and the footer.
+  // 120 columns). Take the fewest rows whose concatenation is exactly cwd, leaving room for the
+  // rows after the path: at least one explanation row, Security guide, both choices and the footer.
+  const rowsAfterPath = 5;
   let pathRows = 0;
-  for (let rows = 1; workspaceIndex + 1 + rows + 5 <= lines.length; rows++) {
-    if (lines.slice(workspaceIndex + 1, workspaceIndex + 1 + rows).join('') === cwd) { pathRows = rows; break; }
+  let joined = '';
+  for (let rows = 1; workspaceIndex + 1 + rows + rowsAfterPath <= lines.length && joined.length <= cwd.length; rows++) {
+    joined += lines[workspaceIndex + rows]!;
+    if (joined === cwd) { pathRows = rows; break; }
   }
   if (pathRows === 0) return undefined;
   const explanationStart = workspaceIndex + 1 + pathRows;
@@ -254,10 +257,9 @@ export async function prepareClaudeFamilyInput(backend: PtyLike, ctx: AdapterSes
   const startedAt = Date.now();
   let lastDownAt = -Infinity;
   let lastEnterAt = -Infinity;
-  let lastScreen = '';
+  let screen = '';
   while (Date.now() - startedAt < STARTUP_TIMEOUT_MS) {
-    const screen = (await backend.readScreen());
-    lastScreen = screen;
+    screen = (await backend.readScreen());
     const selection = trustSelection(screen, ctx.cwd);
     const trustScreen = selection !== undefined;
 
@@ -290,7 +292,7 @@ export async function prepareClaudeFamilyInput(backend: PtyLike, ctx: AdapterSes
     }
     await delay(STARTUP_POLL_MS);
   }
-  throw new Error(`Claude 启动尚未就绪（最后屏幕：${startupScreenCategory(lastScreen)}），请打开终端处理启动确认后再发送任务。`);
+  throw new Error(`Claude 启动尚未就绪（最后屏幕：${startupScreenCategory(screen)}），请打开终端处理启动确认后再发送任务。`);
 }
 
 /** 建一个 Claude 家族适配器；三者只有 id 不同。 */

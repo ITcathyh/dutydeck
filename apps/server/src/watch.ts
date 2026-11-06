@@ -122,6 +122,13 @@ export class DutydeckWatch {
     const at = (this.options.now?.() ?? new Date()).toISOString();
     for (const scope of scopes) {
       const prefix = `${WATCH_PREFIX}${scope.appId}/`;
+      const rejectedKey = prefix + 'rejected';
+      // 被拒标记的原始值，读不出内容的坏值也算有值；清除只写空值。
+      let rejected: string | undefined;
+      const clearRejected = async () => {
+        if (!rejected) return;
+        await this.options.store.set(rejectedKey, ''); rejected = undefined;
+      };
       const previous = new Map(readWatchFindings(await this.options.store.list?.(prefix) ?? []).map(f => [f.fingerprint, f]));
       const active = new Set<string>();
       const pending: WatchFinding[] = [];
@@ -149,7 +156,8 @@ export class DutydeckWatch {
       }
       await this.pruneRecovered(scope.appId, at);
       if (!scope.notify) {
-        if (await this.options.store.get(prefix + 'rejected')) await this.options.store.set(prefix + 'rejected', '');
+        rejected = await this.options.store.get(rejectedKey);
+        await clearRejected();
         continue;
       }
       const notificationKey = prefix + 'notification';
@@ -178,7 +186,7 @@ export class DutydeckWatch {
           await this.options.store.set(notificationKey, JSON.stringify(notification));
           await this.options.send({ appId: scope.appId, ownerId: notification.ownerId, ...(notification.ownerIdType ? { ownerIdType: notification.ownerIdType } : {}),
             text: notification.text, idempotencyKey: notification.idempotencyKey });
-          if (rawRejected) { await this.options.store.set(rejectedKey, ''); rawRejected = ''; rejected = undefined; }
+          await clearRejected();
           for (const finding of live) {
             const notified = { ...finding, notifiedAt: at };
             await this.options.store.set(prefix + finding.fingerprint, JSON.stringify(notified));
@@ -196,19 +204,18 @@ export class DutydeckWatch {
         if (next !== rawUnreachable) await this.options.store.set(unreachableKey, next);
         if (warn) this.options.warn({ appId: scope.appId, code: 'WATCH_RECEIVER_MISSING', count: pending.length }, '巡检发现问题，但找不到可私信的接收人，未发送私信（每天最多提示一次）');
         // 被拒标记属于之前的接收人，接收人没了就不再报缺权限。
-        if (await this.options.store.get(prefix + 'rejected')) await this.options.store.set(prefix + 'rejected', '');
+        rejected = await this.options.store.get(rejectedKey);
+        await clearRejected();
         continue;
       }
       // 只写空值：真实仓储的 remove 只允许删少数几类记录，其余抛错会中止整轮巡检。
       if (rawUnreachable) await this.options.store.set(unreachableKey, '');
-      const rejectedKey = prefix + 'rejected';
-      let rawRejected = await this.options.store.get(rejectedKey);
-      let rejected = readRejected(rawRejected);
-      if (rejected && (rejected.ownerId !== scope.ownerId || watchReceiverType(rejected.ownerId, rejected.ownerIdType) !== watchReceiverType(scope.ownerId, scope.ownerIdType))) {
-        await this.options.store.set(rejectedKey, ''); rawRejected = ''; rejected = undefined;
-      }
+      rejected = await this.options.store.get(rejectedKey);
+      const priorOwner = readRejected(rejected);
+      if (priorOwner && (priorOwner.ownerId !== scope.ownerId || watchReceiverType(priorOwner.ownerId, priorOwner.ownerIdType) !== watchReceiverType(scope.ownerId, scope.ownerIdType))) await clearRejected();
       // 旧批补发和新批发送都在这里挡住，权限开通后最多一天恢复。
-      if (rejected && Date.parse(at) - Date.parse(rejected.attemptedAt) < WATCH_RECEIVER_WARN_MS) continue;
+      const marker = readRejected(rejected);
+      if (marker && Date.parse(at) - Date.parse(marker.attemptedAt) < WATCH_RECEIVER_WARN_MS) continue;
       try {
         // Freeze both UUID and payload before any provider write. A partial receipt-save failure
         // or newly found issue cannot change an uncertain notification's identity.
@@ -219,7 +226,7 @@ export class DutydeckWatch {
         const unsent = pending.filter(f => { const current = previous.get(f.fingerprint); return !current?.notifiedAt && !current?.notificationUnknownAt; });
         if (!unsent.length) {
           // 门槛已过且没有要发的内容：标记留着只会让 doctor 一直报缺权限。
-          if (rawRejected) await this.options.store.set(rejectedKey, '');
+          await clearRejected();
           continue;
         }
         const idempotencyKey = 'watch_' + createHash('sha256')
@@ -231,7 +238,7 @@ export class DutydeckWatch {
         await deliver(notification);
       } catch (error) {
         if (error instanceof WatchDeliveryRejectedError) {
-          await this.options.store.set(rejectedKey, JSON.stringify({ since: rejected?.since ?? at, attemptedAt: at, ownerId: scope.ownerId,
+          await this.options.store.set(rejectedKey, JSON.stringify({ since: readRejected(rejected)?.since ?? at, attemptedAt: at, ownerId: scope.ownerId,
             ...(scope.ownerIdType ? { ownerIdType: scope.ownerIdType } : {}), upstreamCode: error.upstreamCode, scopes: error.scopes }));
           const rawCurrent = await this.options.store.get(notificationKey);
           const current = rawCurrent ? notificationSchema.parse(JSON.parse(rawCurrent)) : undefined;

@@ -115,7 +115,7 @@ describe('claude pricing', () => {
 
     it('replaces a base entry with the same match regardless of case and takes the extra version', () => {
       const replaced = withExtraPricing(defaultUsagePricing, JSON.stringify({ version: 'site-1', models: [{ match: 'CLAUDE-OPUS-5-5', inputPerMTok: 9, cachedInputPerMTok: 1, outputPerMTok: 1 }] }));
-      expect(replaced).toMatchObject({ source: 'builtin', version: 'site-1', extraMatches: ['CLAUDE-OPUS-5-5'] });
+      expect(replaced).toMatchObject({ source: 'builtin', version: 'site-1' });
       expect(replaced.models.filter(entry => entry.match.toLowerCase() === 'claude-opus-5-5')).toHaveLength(1);
       expect(measure('claude-opus-5-5', replaced)).toMatchObject({ pricingSource: 'custom_model', costUsd: 9 });
     });

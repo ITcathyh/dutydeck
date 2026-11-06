@@ -945,7 +945,8 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
           });
         } catch (error) {
           // 只有飞书确定拒收才不进入"结果未知"；其他失败可能已发出，保持原有重试。
-          throw (error instanceof LarkServiceError ? watchDeliveryRejection(error.details) : undefined) ?? error;
+          const rejection = error instanceof LarkServiceError ? watchDeliveryRejection(error.details) : undefined;
+          throw rejection ?? error;
         }
       },
       warn: (details, message) => app?.log.warn(details, message)
