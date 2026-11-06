@@ -418,6 +418,36 @@ it('routes a subscribed bot alarm through real group participation and its trust
   expect(decide).not.toHaveBeenCalled();
 });
 
+const deniedAlarm = async () => {
+  const h = await harness(); const scope = { appId: config.appId, chatId: 'oc_group' };
+  const original = message({ senderOpenId: 'cli_alarm', senderType: 'app', mentions: [], content: '{"text":"P0 original alarm"}' });
+  const alarmService = { ...h.service, replyText: vi.fn(async () => ({ messageId: 'om_intro' })), getMessage: vi.fn(async () => ({ threadId: 'omt_alarm' })) };
+  const participation = new LarkGroupParticipation({ repository: h.repositories.collaboration, decider: { decide: vi.fn(), respond: async () => '' },
+    authorize: async () => true, readConfig: async () => config, serviceFor: () => alarmService,
+    listScopes: async () => [scope], readGroupDescription: async () => '', log: h.log, scenarios: await builtinScenarioRegistry() });
+  cleanups.push(() => participation.close());
+  // 确认人后来失去了任务权限：收养后被拒绝，应收到「请求未执行」卡。
+  const groupManager = { resolved: vi.fn(async () => config), authorize: vi.fn(async () => ({ allowed: false, code: 'talk_required', reason: 'no access' })) };
+  const coordinator = h.createCoordinator({ participation, groupManager });
+  participation.setDispatcher(config.appId, (event, current) => coordinator.adopt(event, current));
+  await h.repositories.collaboration.updateDuty(scope, { expectedRevision: 0, scenarios: { alarm: { enabled: true,
+    params: { sources: [{ appId: 'cli_alarm', name: '监控' }], levels: ['P0'], dedupeHours: 6, maxPerHour: 3 }, requesterId: 'ou_admin', packVersion: '1.0.0' } } }, 'ou_admin');
+  return { h, original, coordinator };
+};
+const rejectionCards = (h: Awaited<ReturnType<typeof harness>>) => h.service.reply.mock.calls.filter(call => JSON.stringify(call).includes('请求未执行'));
+
+it('sends the rejection card when a bot alarm adopted by its scenario is denied: adoption runs before the receipt can be ignored and slimmed', async () => {
+  const { h, original, coordinator } = await deniedAlarm();
+  const ignored = vi.spyOn(LarkTaskInbox.prototype, 'update');
+  await coordinator.receive(original, config);
+  await vi.waitFor(async () => expect(await h.inbox()).toMatchObject({ state: 'failed' }));
+  expect(rejectionCards(h)).toHaveLength(1);
+  // 场景包收养在原消息自己的 handle 里同步完成：这条记录从没变成 ignored，也就不会被换成摘要。
+  expect(ignored.mock.calls.filter(([, patch]) => patch.state === 'ignored')).toHaveLength(0);
+  expect((await h.inbox())?.snippet).toBeUndefined();
+  expect(h.runtime.dispatch).not.toHaveBeenCalled();
+});
+
 it('stalled welcome and reaction requests do not delay ACK or start the agent before the reaction settles', async () => {
   const h = await harness();
   let release!: () => void; const stalled = new Promise<void>(resolve => { release = resolve; });

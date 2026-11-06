@@ -456,6 +456,24 @@ describe('ignored receipt size and retention', () => {
     } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
   });
 
+  it('refuses to mark a claimed receipt ignored so its attachment directories stay protected', async () => {
+    const { directory, repositories } = await openDatabase();
+    try {
+      const inbox = new LarkTaskInbox(repositories.config);
+      const claimed = (await inbox.claim('app_one', message({ messageId: 'om_claimed' })))!;
+      await inbox.update(claimed, { resourceDirectories: ['/tmp/held'] });
+      const before = await repositories.config.get('lark.inbox.app_one.om_claimed');
+      await expect(inbox.update(claimed, { state: 'ignored', reason: 'not_addressed' })).rejects.toMatchObject({ code: 'LARK_INBOX_IGNORE_REJECTED' });
+      expect(await repositories.config.get('lark.inbox.app_one.om_claimed')).toBe(before);
+      const { readLarkResourceReferences } = await import('../resource-retention.js');
+      expect([...await readLarkResourceReferences(repositories.config, { get: async () => undefined })]).toEqual(['/tmp/held']);
+      const unrouted = (await inbox.capture('app_one', message({ messageId: 'om_unrouted' })))!;
+      await inbox.update(unrouted, { state: 'ignored' });
+      expect(await inbox.lookup('app_one', 'om_unrouted')).toMatchObject({ state: 'ignored' });
+      await expect(inbox.update(unrouted, { state: 'ignored' })).rejects.toMatchObject({ code: 'LARK_INBOX_IGNORE_REJECTED' });
+    } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
   it('keeps ignored bot receipts written before this version verbatim until they expire', async () => {
     const { directory, repositories } = await openDatabase();
     try {

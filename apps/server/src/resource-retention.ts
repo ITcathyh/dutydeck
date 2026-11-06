@@ -81,7 +81,7 @@ export function larkResourceRoot(databaseUrl: string): string {
 type InboxHolder = Pick<LarkInboxRecord, 'appId' | 'state' | 'taskId' | 'workflowRequestId' | 'mergedInto' | 'resourceDirectories'> & { event: { messageId: string } };
 /**
  * Only these inbox rows can hold, inherit or carry attachment directories. Ignored rows are skipped through the
- * state index: a receipt becomes ignored only from unrouted (routeCaptured, backlog expiry), before any claim
+ * state index: LarkTaskInbox.update only lets an unrouted receipt become ignored (routeCaptured, backlog expiry), before any claim
  * could attach a task, hand-off link or directory, so an ignored row can at most be marked held by a merge link
  * and still contributes no directory. Rows without a readable state are still read, so a malformed row keeps
  * failing the whole sweep. SQLite reads just these fields instead of every record body.
