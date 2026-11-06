@@ -114,6 +114,8 @@ describe('history retention', () => {
     // 旧版本的会话状态快照。
     const snapshot = (id: string, payload: object, days: number) => sql.prepare('INSERT INTO task_execution_commands VALUES (?,?,?)')
       .run(`session_state:${id}`, JSON.stringify(payload), JSON.stringify({ session: { updatedAt: ago(days) }, events: [{ text: 'x'.repeat(1000) }] }));
+    // 快照写在执行期间：40 天前的快照所属的执行也开始于 40 天前。
+    sql.prepare("UPDATE task_attempts SET json=json_set(json,'$.createdAt',?) WHERE id=?").run(ago(41), settled.attemptId);
     snapshot('done-old', { sessionId: 's', runId: 'r', taskId: settled.taskId, attemptId: settled.attemptId, input: { state: 'thinking' } }, 40);
     snapshot('done-recent', { sessionId: 's', runId: 'r', taskId: settled.taskId, attemptId: settled.attemptId, input: { state: 'thinking' } }, 5);
     snapshot('unknown-old', { sessionId: 's', runId: 'r', taskId: unknown.taskId, attemptId: unknown.attemptId, input: { state: 'thinking' } }, 40);
@@ -149,6 +151,20 @@ describe('history retention', () => {
     expect(sql.pragma('foreign_key_check')).toEqual([]);
 
     expect(await repos.retention.prune()).toEqual({ terminalFrames: 0, sessionStateCommands: 0, toolCalls: 0, entityVersions: 0 });
+  });
+
+  it('skips session snapshots of attempts that began inside the retention window without reading the snapshot', async () => {
+    const { repos, x, sql } = ready();
+    x.createSession(session('s'));
+    const settled = complete(x, activeAttempt(x, 's', 'done'), 'send-done');
+    // 执行在保留期内才开始：快照里的时间即使看起来已过期，也不该据此删除（也就不必解析快照）。
+    sql.prepare('INSERT INTO task_execution_commands VALUES (?,?,?)').run('session_state:recent-attempt',
+      JSON.stringify({ sessionId: 's', runId: 'r', taskId: settled.taskId, attemptId: settled.attemptId, input: { state: 'thinking' } }),
+      JSON.stringify({ session: { updatedAt: ago(40) }, events: [{ text: 'x'.repeat(1000) }] }));
+    expect(await repos.retention.prune()).toMatchObject({ sessionStateCommands: 0 });
+    expect(sql.prepare("SELECT COUNT(*) FROM task_execution_commands WHERE id='session_state:recent-attempt'").pluck().get()).toBe(1);
+    // 过了保留期之后照常删除。
+    expect(await repos.retention.prune({ now: Date.now() + 31 * DAY })).toMatchObject({ sessionStateCommands: 1 });
   });
 
   it('stops between batches once aborted', async () => {

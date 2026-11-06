@@ -157,6 +157,11 @@ async function interruptedTopic({ tools = [] as NormalizedDriverEvent[] } = {}) 
     const getEvents = runtime.getEvents.bind(runtime);
     const inspect = runtime.inspectExecutionRecovery.bind(runtime);
     vi.spyOn(runtime, 'getEvents').mockImplementation(async (...args) => (await getEvents(...args)).map(event => ({ ...event, timestamp: at(event.timestamp) })));
+    const getAttemptActivity = runtime.getAttemptActivity.bind(runtime);
+    vi.spyOn(runtime, 'getAttemptActivity').mockImplementation(async (...args) => {
+      const activity = await getAttemptActivity(...args);
+      return { ...activity, activityTimestamps: activity.activityTimestamps.map(at) };
+    });
     vi.spyOn(runtime, 'inspectExecutionRecovery').mockImplementation(async (...args) => {
       const result = await inspect(...args);
       return { ...result, tasks: result.tasks.map(task => task.attempt ? { ...task, attempt: { ...task.attempt, createdAt: at(task.attempt.createdAt) } } : task) };
@@ -218,6 +223,27 @@ describe('服务重启切断的一轮自动重投（真实 Runtime + SQLite）',
     await h.restart();
     await new Promise(resolve => setTimeout(resolve, 100));
     expect(h.prompts).toHaveLength(2);
+  });
+
+  it('重投判定按这一轮的执行记录读事件，不把整段会话历史读进来', async () => {
+    const h = await interruptedTopic({ tools: [{ type: 'tool_call', data: { id: 'call_push', name: 'Bash', status: 'running',
+      input: { command: 'git push origin master', description: 'Push' } } }] });
+    h.agentState.hang = false;
+    let fullReads = 0;
+    let attemptReads = 0;
+    const daemon = await h.restart(async daemon => {
+      const getEvents = daemon.runtime.getEvents.bind(daemon.runtime);
+      vi.spyOn(daemon.runtime, 'getEvents').mockImplementation(async (...args) => { fullReads++; return getEvents(...args); });
+      const getAttemptToolEvents = daemon.runtime.getAttemptToolEvents.bind(daemon.runtime);
+      vi.spyOn(daemon.runtime, 'getAttemptToolEvents').mockImplementation(async (...args) => { attemptReads++; return getAttemptToolEvents(...args); });
+    });
+    const { saved } = await h.mapping();
+    await until(() => h.lastUpdate(saved.card_message_id!)?.statusLabel === '结果未知');
+    // 只读这一轮的事件也照样认出 git push，不自动重投。
+    expect(JSON.parse(await daemon.repos.config.get('lark.redispatch.app.om_first.1') ?? '{}')).toMatchObject({ redispatch: { unsafeReason: '执行过 git push' } });
+    expect(h.prompts).toHaveLength(1);
+    expect(attemptReads).toBeGreaterThan(0);
+    expect(fullReads).toBe(0);
   });
 
   it('旧一轮核对失败时保留可操作状态，人工重试核对后在原会话执行一次', async () => {

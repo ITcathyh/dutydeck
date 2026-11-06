@@ -2,7 +2,7 @@ import { agentConfigSchema, errorMessage as describeError, type AgentConfig } fr
 import { listAcpxBuiltinAgents } from '@dutydeck/acp-client';
 import { commandExists } from '@dutydeck/transports';
 import { z } from 'zod';
-import { spawnSync } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
 
 export const appConfigSchema = z.object({
@@ -26,16 +26,60 @@ const agentDetails: Record<string, { name: string; cli: string }> = {
   pool: { name: 'Poolside', cli: 'pool' }, qoder: { name: 'Qoder', cli: 'qodercli' }, qwen: { name: 'Qwen Code', cli: 'qwen' }, trae: { name: 'Trae', cli: 'traecli' }, zeroclaw: { name: 'ZeroClaw', cli: 'zeroclaw' }
 };
 
+const VERSION_ARGS = [['--version'], ['-V'], ['version']];
+const versionLine = (stdout: string, stderr: string) => `${stdout}\n${stderr}`.split(/\r?\n/).map(value => value.trim()).find(Boolean)?.slice(0, 100);
+// 同一进程里同一个命令（按当时的 PATH 解析）只探测一次：ACP 与 PTY 两边、插件与环境变量里的同一 CLI 共用结果。
+const probedVersions = new Map<string, string | undefined>();
+const probingVersions = new Map<string, Promise<string | undefined>>();
+const versionKey = (command: string) => `${command}\0${process.env.PATH ?? ''}`;
+
 export function cliVersion(command: string): string | undefined {
-  for (const args of [['--version'], ['-V'], ['version']]) {
+  const key = versionKey(command);
+  if (probedVersions.has(key)) return probedVersions.get(key);
+  let version: string | undefined;
+  for (const args of VERSION_ARGS) {
     const result = spawnSync(command, args, { encoding: 'utf8', timeout: 1500, env: { ...process.env, NO_COLOR: '1' } });
-    const line = `${result.stdout ?? ''}\n${result.stderr ?? ''}`.split(/\r?\n/).map(value => value.trim()).find(Boolean);
-    if (result.status === 0 && line) return line.slice(0, 100);
+    const line = versionLine(result.stdout ?? '', result.stderr ?? '');
+    if (result.status === 0 && line) { version = line; break; }
   }
-  return undefined;
+  probedVersions.set(key, version);
+  return version;
+}
+
+/** cliVersion 的异步版：同样的参数顺序、超时与取值，不阻塞事件循环；并发探测同一命令共用一次。 */
+export function cliVersionAsync(command: string): Promise<string | undefined> {
+  const key = versionKey(command);
+  if (probedVersions.has(key)) return Promise.resolve(probedVersions.get(key));
+  const running = probingVersions.get(key);
+  if (running) return running;
+  const probe = (async () => {
+    let version: string | undefined;
+    for (const args of VERSION_ARGS) {
+      const result = await new Promise<{ ok: boolean; stdout: string; stderr: string }>(done => {
+        execFile(command, args, { encoding: 'utf8', timeout: 1500, env: { ...process.env, NO_COLOR: '1' } },
+          (error, stdout, stderr) => done({ ok: !error, stdout: stdout ?? '', stderr: stderr ?? '' }));
+      });
+      const line = versionLine(result.stdout, result.stderr);
+      if (result.ok && line) { version = line; break; }
+    }
+    probedVersions.set(key, version);
+    probingVersions.delete(key);
+    return version;
+  })();
+  probingVersions.set(key, probe);
+  return probe;
 }
 
 const builtinCli = (id: string, env: Record<string, string | undefined> = process.env) => (id === 'codex' || id === 'codex-acp') ? env.CODEX_PATH || agentDetails[id]!.cli : agentDetails[id]!.cli;
+
+/** 本机装了这个 ACP 内置 Agent 的 CLI 时返回要探测版本的命令。 */
+const builtinProbeCommand = (id: string, env: NodeJS.ProcessEnv) => {
+  if (!agentDetails[id]) return undefined;
+  const command = builtinCli(id, env);
+  return commandExists(command) ? command : undefined;
+};
+const ptyCommand = (contribution: PtyAgentContribution, env: NodeJS.ProcessEnv) =>
+  (contribution.id === 'codex' || contribution.id === 'codex-cli') ? env.CODEX_PATH || contribution.command : contribution.command;
 
 const scannedBuiltinAgents = new Map<string, Array<Omit<AgentConfig, 'cwd'>>>();
 const scanBuiltinAgents = (env: NodeJS.ProcessEnv) => {
@@ -44,9 +88,8 @@ const scanBuiltinAgents = (env: NodeJS.ProcessEnv) => {
   if (cached) return cached;
   const agents = listAcpxBuiltinAgents().flatMap(({ id, argv }) => {
     const detail = agentDetails[id];
-    if (!detail) return [];
-    const command = builtinCli(id, env);
-    if (!commandExists(command)) return [];
+    const command = builtinProbeCommand(id, env);
+    if (!detail || !command) return [];
     const agent = { id, name: detail.name, command: argv[0]!, args: argv.slice(1), protocol: 'acp' as const, env: {}, permissionMode: 'ask' as const, timeout: 600, capabilities: { pause: false, resume: true }, builtin: true, version: cliVersion(command) };
     return id === 'codex' ? [agent, { ...agent, id: 'codex-acp', name: agentDetails['codex-acp']!.name }] : [agent];
   });
@@ -78,7 +121,7 @@ const scanPtyAgents = (contributions: PtyAgentContribution[], env: NodeJS.Proces
   const cached = scannedPtyAgents.get(cacheKey);
   if (cached) return cached;
   const agents = contributions.flatMap(contribution => {
-    const command = (contribution.id === 'codex' || contribution.id === 'codex-cli') ? env.CODEX_PATH || contribution.command : contribution.command;
+    const command = ptyCommand(contribution, env);
     if (!commandExists(command)) return [];
     return [{ id: contribution.id, name: contribution.name, command, args: contribution.args ?? [], protocol: 'pty-cli' as const, ...(contribution.adapterId && contribution.adapterId !== contribution.id ? { adapterId: contribution.adapterId } : {}), env: {}, permissionMode: 'ask' as const, timeout: 600, capabilities: contribution.capabilities ?? DEFAULT_PTY_CAPABILITIES, builtin: contribution.builtin ?? true, version: cliVersion(command) }];
   });
@@ -151,16 +194,18 @@ export function resolveDatabaseUrl(env: NodeJS.ProcessEnv = process.env): string
  * pluginAgents：已启用插件 agents/*.json 的内容，先于 DUTYDECK_AGENTS_JSON 合并，同 id 以环境变量为准；
  * 插件不能替换内置 Agent（同 id 的插件 Agent 被忽略）。命令找不到的插件 Agent 不进 droppedAgents（那份诊断针对环境变量）。
  */
+// A custom CLI wrapper may change local settings even for --version.
+const probesConfiguredVersion = (configured: AgentConfig) => configured.version === undefined && !(configured.protocol === 'pty-cli' && configured.adapterId);
+const configuredBuiltinIds = (ptyContributions: PtyAgentContribution[]) => new Set(['codex-acp', ...listAcpxBuiltinAgents().map(agent => agent.id), ...ptyContributions.map(agent => agent.id)]);
+
 export function loadConfigWithDiagnostics(env: NodeJS.ProcessEnv = process.env, ptyContributions: PtyAgentContribution[] = [], pluginAgents: AgentConfig[] = []): LoadedConfig {
   const extra = parseAgentsJson(env.DUTYDECK_AGENTS_JSON);
   const defaultCwd = env.DUTYDECK_DEFAULT_CWD ?? process.cwd();
   const agents = new Map(builtinAgents(defaultCwd, ptyContributions, { ...process.env, ...env }).map(agent => [agent.id, agent]));
-  const builtinIds = new Set(['codex-acp', ...listAcpxBuiltinAgents().map(agent => agent.id), ...ptyContributions.map(agent => agent.id)]);
+  const builtinIds = configuredBuiltinIds(ptyContributions);
   const register = (configured: AgentConfig, plugin = false) => {
-    // A custom CLI wrapper may change local settings even for --version.
-    const customCli = configured.protocol === 'pty-cli' && configured.adapterId;
     if (!commandExists(configured.command)) return false;
-    agents.set(configured.id, { ...configured, ...(plugin ? {} : { origin: undefined }), cwd: configured.cwd ?? defaultCwd, version: configured.version ?? (customCli ? undefined : cliVersion(configured.command)) });
+    agents.set(configured.id, { ...configured, ...(plugin ? {} : { origin: undefined }), cwd: configured.cwd ?? defaultCwd, version: probesConfiguredVersion(configured) ? cliVersion(configured.command) : configured.version });
     return true;
   };
   for (const agent of pluginAgents) if (!builtinIds.has(agent.id)) register(agentConfigSchema.parse(agent), true);
@@ -181,6 +226,23 @@ export function loadConfigWithDiagnostics(env: NodeJS.ProcessEnv = process.env, 
     agents: [...agents.values()]
   });
   return { config, droppedAgents };
+}
+
+/**
+ * 与 loadConfigWithDiagnostics 结果相同；先把它要探测版本的命令去重后异步并行探测完，
+ * 同步装配时直接取缓存，启动时不再用 spawnSync 逐个卡住事件循环。
+ */
+export async function loadConfigWithDiagnosticsAsync(env: NodeJS.ProcessEnv = process.env, ptyContributions: PtyAgentContribution[] = [], pluginAgents: AgentConfig[] = []): Promise<LoadedConfig> {
+  const merged = { ...process.env, ...env };
+  const builtinIds = configuredBuiltinIds(ptyContributions);
+  const configured = [...pluginAgents.filter(agent => !builtinIds.has(agent.id)).map(agent => agentConfigSchema.parse(agent)), ...parseAgentsJson(env.DUTYDECK_AGENTS_JSON)];
+  const commands = new Set([
+    ...listAcpxBuiltinAgents().map(({ id }) => builtinProbeCommand(id, merged)),
+    ...ptyContributions.map(contribution => ptyCommand(contribution, merged)).filter(command => commandExists(command)),
+    ...configured.filter(agent => probesConfiguredVersion(agent) && commandExists(agent.command)).map(agent => agent.command)
+  ].filter((command): command is string => Boolean(command)));
+  await Promise.all([...commands].map(cliVersionAsync));
+  return loadConfigWithDiagnostics(env, ptyContributions, pluginAgents);
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env, ptyContributions: PtyAgentContribution[] = [], pluginAgents: AgentConfig[] = []): AppConfig {

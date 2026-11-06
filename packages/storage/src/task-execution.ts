@@ -765,6 +765,15 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
       const rows = cached(`SELECT * FROM events WHERE attempt_id=? AND sequence>? AND sequence<? ORDER BY sequence ${backwards ? 'DESC' : 'ASC'} LIMIT ?`).all(attemptId, window.afterSequence ?? 0, window.beforeSequence ?? Number.MAX_SAFE_INTEGER, limit);
       return (backwards ? rows.reverse() : rows).map(decodeEvent);
     },
+    getAttemptActivity(sessionId, attemptId) {
+      id.parse(sessionId); id.parse(attemptId);
+      const rows = cached('SELECT type, timestamp FROM events WHERE attempt_id=? AND session_id=? ORDER BY sequence').all(attemptId, sessionId) as Array<{ type: string; timestamp: string }>;
+      return { eventCount: rows.length, activityTimestamps: rows.filter(row => row.type !== 'task' && row.type !== 'status').map(row => row.timestamp) };
+    },
+    getAttemptToolEvents(sessionId, attemptId) {
+      id.parse(sessionId); id.parse(attemptId);
+      return cached("SELECT * FROM events WHERE attempt_id=? AND session_id=? AND type IN ('tool_call','tool_result') ORDER BY sequence").all(attemptId, sessionId).map(decodeEvent);
+    },
     bind(claim) {
       db.transaction(() => control.validateClaim(db, claim)).immediate();
       const write = <T>(work: (owner: ExecutionController) => T): T => db.transaction(() => {

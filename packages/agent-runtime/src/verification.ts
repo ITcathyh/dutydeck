@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { lstat, readFile, readdir, readlink, realpath } from 'node:fs/promises';
+import type { BigIntStats } from 'node:fs';
 import { join } from 'node:path';
 import type { ConfigRepository, VerificationCommandInput, VerificationRecord, VerificationResponse } from '@dutydeck/shared';
 import { makeId, now, RuntimeError } from '@dutydeck/shared';
@@ -60,7 +61,51 @@ export async function repositoryFingerprint(cwd: string): Promise<string> {
   return fingerprintRepository(cwd, new Set());
 }
 
-async function fingerprintRepository(cwd: string, seenRoots: Set<string>): Promise<string> {
+/**
+ * Files changed this close to a fingerprint may share a timestamp with a later
+ * same-size rewrite, so their stat cannot prove the content is unchanged.
+ */
+const RACY_WINDOW_MS = 2_000;
+const fingerprintCache = new Map<string, { stamp: string; fingerprint: string }>();
+const fingerprintRuns = new Map<string, Promise<string>>();
+
+/**
+ * repositoryFingerprint for read paths (record lists, turn-boundary comparisons).
+ * Reuses the last result while every repository's HEAD, path list and per-file
+ * stat (inode, size, mtime, ctime) are unchanged, and lets concurrent callers
+ * that observed the same state share one computation. Verification evidence
+ * (before/after a command) must keep calling repositoryFingerprint directly.
+ */
+export async function cachedRepositoryFingerprint(cwd: string): Promise<string> {
+  const startedAt = Date.now();
+  const before = await repositoryStamp(cwd);
+  const cached = fingerprintCache.get(cwd);
+  if (cached?.stamp === before.stamp) return cached.fingerprint;
+  const runKey = `${cwd}\0${before.stamp}`;
+  const shared = fingerprintRuns.get(runKey);
+  if (shared) return shared;
+  const run = (async () => {
+    const fingerprint = await repositoryFingerprint(cwd);
+    // Cache only when nothing changed while reading and no entry is racily recent.
+    if (before.latestChangeMs < startedAt - RACY_WINDOW_MS && (await repositoryStamp(cwd)).stamp === before.stamp) {
+      fingerprintCache.set(cwd, { stamp: before.stamp, fingerprint });
+    }
+    return fingerprint;
+  })();
+  fingerprintRuns.set(runKey, run);
+  const forget = () => { if (fingerprintRuns.get(runKey) === run) fingerprintRuns.delete(runKey); };
+  void run.then(forget, forget);
+  return run;
+}
+
+/** Same walk as the fingerprint, hashing each entry's stat instead of its content. */
+async function repositoryStamp(cwd: string): Promise<{ stamp: string; latestChangeMs: number }> {
+  const stat = { latestChangeMs: 0 };
+  const stamp = await fingerprintRepository(cwd, new Set(), stat);
+  return { stamp, latestChangeMs: stat.latestChangeMs };
+}
+
+async function fingerprintRepository(cwd: string, seenRoots: Set<string>, stat?: { latestChangeMs: number }): Promise<string> {
   const root = (await git(cwd, ['rev-parse', '--show-toplevel'])).trim();
   const canonicalRoot = await realpath(root);
   if (seenRoots.has(canonicalRoot)) throw new RuntimeError('VERIFICATION_FINGERPRINT_FAILED', `Recursive Git repository detected: ${canonicalRoot}`, 409);
@@ -76,11 +121,19 @@ async function fingerprintRepository(cwd: string, seenRoots: Set<string>): Promi
   });
   const untracked = (await git(canonicalRoot, ['ls-files', '--others', '--exclude-standard', '-z'])).split('\0').filter(Boolean);
   const paths = [...new Set([...tracked, ...untracked].filter(included))].sort();
-  const hash = createHash('sha256').update('dutydeck-code-v1\0').update(head).update('\0');
-  for (const path of paths) {
+  const hash = stat
+    ? createHash('sha256').update('dutydeck-stat-v1\0').update(canonicalRoot).update('\0').update(head).update('\0')
+    : createHash('sha256').update('dutydeck-code-v1\0').update(head).update('\0');
+  // Stat-only walks prefetch every entry concurrently; sequential lstat dominates large trees.
+  const prefetched = stat ? await lstatAll(canonicalRoot, paths) : undefined;
+  for (const [index, path] of paths.entries()) {
     const absolute = join(canonicalRoot, path);
     let info;
-    try { info = await lstat(absolute); }
+    try {
+      const entry = prefetched?.[index];
+      if (entry instanceof Error) throw entry;
+      info = entry ?? await lstat(absolute);
+    }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         hash.update(path).update('\0missing\0');
@@ -88,8 +141,13 @@ async function fingerprintRepository(cwd: string, seenRoots: Set<string>): Promi
       }
       throw new RuntimeError('VERIFICATION_FINGERPRINT_FAILED', `Unable to fingerprint ${path}: ${error instanceof Error ? error.message : String(error)}`, 409);
     }
-    hash.update(path).update('\0').update(String(info.mode & 0o7777)).update('\0');
-    if (info.isSymbolicLink()) hash.update('link\0').update(await readlink(absolute));
+    hash.update(path).update('\0').update(String(Number(info.mode) & 0o7777)).update('\0');
+    if (stat && 'mtimeNs' in info && (info.isSymbolicLink() || info.isFile())) {
+      stat.latestChangeMs = Math.max(stat.latestChangeMs, Number(info.mtimeMs), Number(info.ctimeMs));
+      hash.update(info.isFile() ? 'file\0' : 'link\0')
+        .update(`${info.dev}:${info.ino}:${info.mode}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`);
+    }
+    else if (info.isSymbolicLink()) hash.update('link\0').update(await readlink(absolute));
     else if (info.isFile()) hash.update('file\0').update(await readFile(absolute));
     else if (info.isDirectory()) {
       const commit = gitlinks.get(path);
@@ -98,12 +156,26 @@ async function fingerprintRepository(cwd: string, seenRoots: Set<string>): Promi
       if (commit && (await readdir(absolute)).length === 0) hash.update('gitlink-uninitialized\0').update(commit);
       // A tracked directory is a submodule. Recurse so dirty tracked and
       // untracked submodule content cannot retain a false-current fingerprint.
-      else hash.update('gitlink\0').update(await fingerprintRepository(absolute, seenRoots));
+      else hash.update('gitlink\0').update(await fingerprintRepository(absolute, seenRoots, stat));
     } else throw new RuntimeError('VERIFICATION_FINGERPRINT_FAILED', `Unsupported repository entry: ${path}`, 409);
     hash.update('\0');
   }
   seenRoots.delete(canonicalRoot);
   return hash.digest('hex');
+}
+
+async function lstatAll(root: string, paths: string[]): Promise<(BigIntStats | Error)[]> {
+  const results = new Array<BigIntStats | Error>(paths.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < paths.length) {
+      const index = next++;
+      try { results[index] = await lstat(join(root, paths[index]!), { bigint: true }); }
+      catch (error) { results[index] = error as Error; }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(64, paths.length) }, worker));
+  return results;
 }
 
 function key(sessionId: string, verificationId: string) {
@@ -176,8 +248,9 @@ export class VerificationManager {
   async list(sessionId: string, cwd: string): Promise<VerificationResponse[]> {
     if (!this.config.list) return [];
     const records = (await this.config.list(`${VERIFICATION_KEY_PREFIX}${sessionId}:`)).map(item => parse(item.value));
+    if (records.length === 0) return [];
     let current: string | undefined;
-    try { current = await repositoryFingerprint(cwd); } catch { /* Unknown code state is conservatively stale. */ }
+    try { current = await cachedRepositoryFingerprint(cwd); } catch { /* Unknown code state is conservatively stale. */ }
     return records
       .sort((left, right) => right.startedAt.localeCompare(left.startedAt))
       .map(record => {

@@ -94,16 +94,24 @@ export function createRetentionRepository(db: Database.Database, ledgerAuthority
         return changed;
       };
 
-      /** 旧版本给每次会话状态变化存的完整快照（键 session_state:*）；现在已不再写，也没有读方。 */
+      /**
+       * 旧版本给每次会话状态变化存的完整快照（键 session_state:*）；现在已不再写，也没有读方。
+       * 快照（result）单条几十 KB，先用小的 payload 和 attempt 筛：快照是在这次执行里写的，
+       * 执行在保留期内才开始的，它的快照不可能过期，不必读 result。
+       * 两段条件写在同一个 CASE 里：分开写成 AND 的几项时，SQLite 会把含子查询的项挪到后面算，result 照样每行都读。
+       */
       const sessionStateCommands = () => {
+        const attemptId = "json_extract(c.payload,'$.attemptId')";
         const page = db.prepare(`SELECT c.id FROM task_execution_commands c WHERE c.id>? AND c.id<'session_state;'
-          AND json_valid(c.payload) AND json_valid(c.result) AND json_extract(c.result,'$.session.updatedAt')<?
-          AND CASE WHEN json_extract(c.payload,'$.attemptId') IS NOT NULL
-            THEN ${settledAttempt("json_extract(c.payload,'$.attemptId')")} AND NOT ${legacySession("json_extract(c.payload,'$.sessionId')")}
-            ELSE json_extract(c.payload,'$.sessionId') IS NOT NULL AND ${quietSession("json_extract(c.payload,'$.sessionId')")} END
+          AND json_valid(c.payload)
+          AND CASE WHEN CASE WHEN ${attemptId} IS NOT NULL
+              THEN EXISTS (SELECT 1 FROM task_attempts o WHERE o.id=${attemptId} AND json_extract(o.json,'$.createdAt')<?)
+                AND ${settledAttempt(attemptId)} AND NOT ${legacySession("json_extract(c.payload,'$.sessionId')")}
+              ELSE json_extract(c.payload,'$.sessionId') IS NOT NULL AND ${quietSession("json_extract(c.payload,'$.sessionId')")} END
+            THEN json_valid(c.result) AND json_extract(c.result,'$.session.updatedAt')<? END
           ORDER BY c.id LIMIT ?`);
         const remove = cachedStatement(db, 'DELETE FROM task_execution_commands WHERE id=?');
-        return pages(after => (page.all(after, cutoff, BATCH) as Array<{ id: string }>).map(row => row.id), 'session_state:', id => remove.run(id).changes);
+        return pages(after => (page.all(after, cutoff, cutoff, BATCH) as Array<{ id: string }>).map(row => row.id), 'session_state:', id => remove.run(id).changes);
       };
 
       /** tool_calls 是工具事件的镜像（事件本身保留），会话没有未结任务时删超过保留期的。 */

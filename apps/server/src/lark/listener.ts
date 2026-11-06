@@ -59,6 +59,10 @@ export interface LarkRuntime {
   getTasks?(id: string): Promise<TaskRecord[]>;
   getTaskRecovery?(id: string, taskId: string): Promise<{ status: string; blockers: Array<{ code: string; external?: boolean }>; activeTaskId?: string; resolvedUnknown?: boolean; verifiedOutput?: { eventId: string; digest: string } }>;
   getEvents?(id: string, afterSequence?: number): Promise<AgentEvent[]>;
+  /** 某一次执行（attempt）的事件数与活动时间，按 attempt 索引读，不读整段会话历史。 */
+  getAttemptActivity?(id: string, attemptId: string): Promise<import('@dutydeck/shared').AttemptActivity>;
+  /** 某一次执行（attempt）的工具调用与结果事件，按 attempt 索引读。 */
+  getAttemptToolEvents?(id: string, attemptId: string): Promise<AgentEvent[]>;
   getDeferredConfirmationId?(id: string, taskId: string): Promise<string | undefined>;
   getLatestPermissionRequest?(id: string, taskId: string, nativeId: string): Promise<AgentEvent | undefined>;
   getRecentEvents?(id: string, limit: number): Promise<AgentEvent[]>;

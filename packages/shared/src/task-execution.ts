@@ -318,6 +318,13 @@ export interface LegacyRetirementMaintenance {
   retireSession(receipt: LegacyRetirementReceipt): LegacyRetirementResult;
   close(): void;
 }
+/** getAttemptActivity 的结果；与「读出这次执行的全部事件再过滤」得到的事件数、事件时间逐项相同。 */
+export interface AttemptActivity {
+  eventCount: number;
+  /** 非 task/status 事件的时间，原样字符串，按序号排列。 */
+  activityTimestamps: string[];
+}
+
 export interface ExecutionRepository {
   authority(): 'legacy' | 'ledger_v1';
   upgradeLegacy(): ExecutionUpgradeSnapshot;
@@ -335,6 +342,10 @@ export interface ExecutionRepository {
   /** 所有会话里停在结果未知、等人处理的当前执行（任务与执行都是 reconcile_required）。 */
   getReconcileRequiredAttempts(): TaskAttempt[];
   getAttemptEvents(attemptId: string, window?: EventWindowOptions): AgentEvent[];
+  /** 一次执行的事件数与活动时间，按 attempt 索引只读 type、timestamp 两列。 */
+  getAttemptActivity(sessionId: string, attemptId: string): AttemptActivity;
+  /** 一次执行的工具调用与结果事件（按序号），按 attempt 索引读，不解析其他事件。 */
+  getAttemptToolEvents(sessionId: string, attemptId: string): AgentEvent[];
   getSessionResourceBlockers(sessionId: string): ExecutionBlocker[];
   getResources(sessionId: string): DriverResource[];
   getNativeContext(sessionId: string): { selection: NativeContextSelection; resource: DriverResource } | undefined;

@@ -1,7 +1,7 @@
 import { clearTaskReportSafely, isTerminalTaskStatus, readSessionTaskReportReference, readSessionTaskReport, SESSION_NAME_CONFIG_PREFIX, taskReportInputSchema, writeTaskReport, type SessionWorkspace, type TaskReport, type TaskReportInput } from '@dutydeck/shared';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
-import type { AgentCapabilities, AgentConfig, AgentDriver, AgentEvent, DriverFactory, DriverTranscriptSourceObservation, EventType, EventWindowOptions, NormalizedDriverEvent, PermissionMode, PermissionRequestData, PromptAssemblyData, PromptPart, PromptSourceDiagnostics, PublicTaskRecord, RepositoryBundle, RuntimeControlClaim, Session, SkillDeliveryMetadata, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy, TranscriptSourceObservation, VerificationCommandInput, VerificationResponse, WorkspaceCleanupBlocker, WorkspaceCleanupPreview, WorkspaceCleanupResult, WorkspaceResponse } from '@dutydeck/shared';
+import type { AgentCapabilities, AgentConfig, AttemptActivity, AgentDriver, AgentEvent, DriverFactory, DriverTranscriptSourceObservation, EventType, EventWindowOptions, NormalizedDriverEvent, PermissionMode, PermissionRequestData, PromptAssemblyData, PromptPart, PromptSourceDiagnostics, PublicTaskRecord, RepositoryBundle, RuntimeControlClaim, Session, SkillDeliveryMetadata, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy, TranscriptSourceObservation, VerificationCommandInput, VerificationResponse, WorkspaceCleanupBlocker, WorkspaceCleanupPreview, WorkspaceCleanupResult, WorkspaceResponse } from '@dutydeck/shared';
 import { timeLoop, eventHasContent, normalizeEventContent, deferredConfirmationId, agentCommandApprovalReason, isAgentCommandAutoApproval, canonicalExecutionJson, ptyRetirementRecoverySchema, steeringRecoveryDecisionSchema, executionRecoveryDecisionSchema, unknownTaskResolutionSchema, executionActorSchema, taskRequestV1Schema, steerableTaskNamespace, makeId, now, RuntimeError, permissionDisplayText, freeTextInputMaxBytes, workspaceModes, sessionNameConfigKey, normalizeSessionName, parseLarkSourceId, supportsRemoteApproval, supportsNativeFork, redactCredentialText, PROMPT_NOT_WRITTEN, unknownTaskActionLabels } from '@dutydeck/shared';
 import { listAcpxBuiltinAgents, AcpxAdapter, testRegexWithTimeout, ProcessTreeCpu, readNativeCreationRecord } from '@dutydeck/acp-client';
 import { JsonlTransport, PipeTransport, probeAgent, PtyTransport } from '@dutydeck/transports';
@@ -14,7 +14,7 @@ import { digest, eventJson, DriverConfigurationLedger, LocalDriverLedger, type E
 import { localOnlyDriverContext } from './driver-context.js';
 import { agentAuthFailure, agentLoginProblem, defaultAgentStatusCheck, type AgentStatusCheck, type AgentUnavailable } from './agent-availability.js';
 import { WorkspaceManager } from './workspace.js';
-import { repositoryFingerprint, VerificationManager } from './verification.js';
+import { cachedRepositoryFingerprint, VerificationManager } from './verification.js';
 import { owner, RevokedOperation, SessionMutations, type Owner } from './ownership.js';
 import {
   INSIGHT_INSTANCE_ID_CONFIG_KEY,
@@ -1222,7 +1222,7 @@ export class DutydeckRuntime {
   async getCodeFingerprint(id: string): Promise<string> {
     const session = await this.repos.sessions.get(id);
     if (!session) throw new RuntimeError('SESSION_NOT_FOUND', `Unknown session: ${id}`, 404);
-    return repositoryFingerprint(session.cwd);
+    return cachedRepositoryFingerprint(session.cwd);
   }
 
   /** 列表用：一次读出全部工作区记录与会话名，代替逐会话读取；配置仓库不支持前缀列举时返回 undefined。 */
@@ -1285,6 +1285,10 @@ export class DutydeckRuntime {
     await this.mutations.write(id, async () => this.localResources.gone(driver, 'terminal-attach-found-no-pane'));
   }
   getEvents(id: string, after = 0) { return this.repos.events.list(id, after); }
+  /** Event count and activity times of one execution attempt of this Session, read through the attempt index. */
+  async getAttemptActivity(id: string, attemptId: string): Promise<AttemptActivity> { return this.repos.execution.getAttemptActivity(id, attemptId); }
+  /** Tool call and result events of one execution attempt of this Session, read through the attempt index. */
+  async getAttemptToolEvents(id: string, attemptId: string): Promise<AgentEvent[]> { return this.repos.execution.getAttemptToolEvents(id, attemptId); }
   getDeferredConfirmationId(id: string, taskId: string) { return this.repos.events.getDeferredConfirmationId(id, taskId); }
   getLatestPermissionRequest(id: string, taskId: string, nativeId: string) { return this.repos.events.getLatestPermissionRequest(id, taskId, nativeId); }
   getRecentEvents(id: string, limit: number) { return this.repos.events.listRecent(id, limit); }

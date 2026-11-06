@@ -3,10 +3,11 @@ import { ShieldCheck } from 'lucide-react';
 import { api, type Session } from '../api';
 import { Button } from './primitives';
 import { verificationLabel } from './verification-presentation';
+import { useVerifications } from './useVerifications';
 
 export function VerificationSummary({ session, onOpenEvidence }: { session: Session; onOpenEvidence(): void }) {
   const capabilities = useQuery({ queryKey: ['sessionCapabilities', session.id], queryFn: () => api.sessionCapabilities(session.id) });
-  const evidence = useQuery({ queryKey: ['verifications', session.id], queryFn: () => api.verifications(session.id), refetchInterval: 5_000 });
+  const evidence = useVerifications(session.id);
   const latest = evidence.data?.[0];
   const unavailable = capabilities.data?.verification === 'unavailable';
   const label = evidence.isLoading ? '正在读取验证状态'

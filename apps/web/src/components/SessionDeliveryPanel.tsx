@@ -11,6 +11,7 @@ import { TaskAuthorizationPanel } from './TaskAuthorizationPanel';
 import { SessionArtifacts } from './SessionArtifacts';
 
 import { verificationLabel } from './verification-presentation';
+import { useVerifications } from './useVerifications';
 import { usageLabel } from './RunHeader';
 import { effectiveStatus, isSessionActionDisabled, permissionLabels } from './ui';
 
@@ -22,10 +23,11 @@ export function SessionDeliveryPanel({ session, tasks, onClose, presentation = '
 
   const capabilities = useQuery({ queryKey: ['sessionCapabilities', session.id], queryFn: () => api.sessionCapabilities(session.id) });
   const workspace = useQuery({ queryKey: ['workspace', session.id], queryFn: () => api.workspace(session.id) });
-  const evidence = useQuery({ queryKey: ['verifications', session.id], queryFn: () => api.verifications(session.id), refetchInterval: 5_000 });
+  const verify = useMutation({ mutationFn: () => api.verify(session.id, { command: command.trim() }), onSettled: () => { void qc.invalidateQueries({ queryKey: ['verifications', session.id] }); } });
+  // 本页发起的验证在服务端记下「运行中」之前，也按运行中的节奏读，进度尽快出现。
+  const evidence = useVerifications(session.id, { active: verify.isPending });
   const usage = useQuery({ queryKey: ['sessionUsage', session.id], queryFn: () => api.sessionUsage(session.id) });
   const turnDiffs = useQuery({ queryKey: ['turnDiffs', session.id], queryFn: () => api.turnDiffs(session.id), refetchInterval: 10_000 });
-  const verify = useMutation({ mutationFn: () => api.verify(session.id, { command: command.trim() }), onSettled: () => { void qc.invalidateQueries({ queryKey: ['verifications', session.id] }); } });
 
   const checkCleanup = useMutation({
     mutationFn: () => api.workspaceCleanupPreview(session.id),
