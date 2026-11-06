@@ -12,6 +12,22 @@ import { LarkMemoryPipeline } from './memory-pipeline.js';
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); });
 const scope = { appId: 'app', chatId: 'groups', pool: 'groups' };
+/**
+ * 接管管线的运行截止计时器：只在测试调用 fire() 时到点。
+ * 真实的短截止会在机器负载高时提前落在启动阶段，使用例偶发走错分支。
+ */
+const heldDeadlineMs = 987_654;
+function holdDeadline() {
+  const realSetTimeout = globalThis.setTimeout;
+  let expire: (() => void) | undefined;
+  const spy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((callback: (...args: unknown[]) => void, delay?: number, ...args: unknown[]) => {
+    if (delay !== heldDeadlineMs) return realSetTimeout(callback, delay, ...args);
+    expire = () => callback(...args);
+    return realSetTimeout(() => {}, heldDeadlineMs).unref();
+  }) as typeof setTimeout);
+  cleanups.push(async () => { spy.mockRestore(); });
+  return { fire: () => { if (!expire) throw new Error('运行截止计时器尚未设置'); expire(); }, restore: () => spy.mockRestore() };
+}
 async function harness(mode: 'legacy' | 'optimized' = 'optimized', maxInputChars = 1000000, timeoutMs?: number) {
   const dir = await mkdtemp(join(tmpdir(), 'memory-jobs-'));
   const repos = createRepositories(join(dir, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
@@ -386,7 +402,8 @@ it('recognizes the recovered receipt claim after settling crashes before releasi
 });
 
 it('bounds a late accepted dispatch, retains the original job, and confirms timeout cleanup through the runtime', async () => {
-  const h = await harness('legacy', 1000000, 100);
+  const h = await harness('legacy', 1000000, heldDeadlineMs);
+  const deadline = holdDeadline();
   const original = (await h.store.list(scope))[0]!;
   h.setReply(() => ({ actions: [{ op: 'retire', id: original.id }] } as any));
   let releaseReply!: () => void;
@@ -398,6 +415,8 @@ it('bounds a late accepted dispatch, retains the original job, and confirms time
   const dispatch = h.runtime.dispatchRequest.bind(h.runtime);
   const delayed = vi.spyOn(h.runtime, 'dispatchRequest').mockImplementation(async (...args) => {
     const accepted = await dispatch(...args);
+    // 请求已被运行时接受、回执还没回来时到期，这正是要覆盖的迟到派发。
+    deadline.fire();
     await dispatchReply;
     return accepted;
   });
@@ -408,14 +427,15 @@ it('bounds a late accepted dispatch, retains the original job, and confirms time
     expect(job).toMatchObject({ state: 'running', requests: [expect.any(Object)] });
     expect((await h.store.getState(scope)).running).toBeDefined();
     expect(await h.pipeline.requestConsolidation(scope)).toBe('running');
+    deadline.restore();
     releaseDispatch();
-    await vi.waitFor(async () => expect((await h.store.getState(scope)).running).toBeUndefined());
+    await vi.waitFor(async () => expect((await h.store.getState(scope)).running).toBeUndefined(), { timeout: 10_000 });
     expect(delayed).toHaveBeenCalledOnce();
     const accepted = h.runtime.lookupAcceptedTask(job!.requests[0]!)!;
     expect(interrupt).toHaveBeenCalledExactlyOnceWith(job!.sessionId, accepted.task.id, 'installation_owner');
-    await vi.waitFor(async () => expect((await h.runtime.getTasks(job!.sessionId))[0]!.status).toBe('interrupted'));
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(job!.sessionId))[0]!.status).toBe('interrupted'), { timeout: 10_000 });
     releaseReply();
-    await vi.waitFor(() => expect(h.prompts).toHaveLength(1));
+    await vi.waitFor(() => expect(h.prompts).toHaveLength(1), { timeout: 10_000 });
     expect((await h.store.list(scope)).map(entry => entry.id)).toContain(original.id);
     expect((await h.repos.memoryJobs.listScope(scope))[0]!.receipt).toBeUndefined();
     // A retry settles the same interrupted request instead of dispatching another turn.
@@ -429,20 +449,22 @@ it('bounds a late accepted dispatch, retains the original job, and confirms time
 });
 
 it('keeps a timed out preparation job and resumes its stable session without a second job', async () => {
-  const h = await harness('legacy', 1000000, 100);
+  const h = await harness('legacy', 1000000, heldDeadlineMs);
+  const deadline = holdDeadline();
   const write = h.projection.write.bind(h.projection);
   let release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
-  vi.spyOn(h.projection, 'write').mockImplementationOnce(async target => { await gate; return write(target); });
+  vi.spyOn(h.projection, 'write').mockImplementationOnce(async target => { deadline.fire(); await gate; return write(target); });
   try {
     expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ error: 'MEMORY_RUN_TIMEOUT' });
     const [job] = await h.repos.memoryJobs.listScope(scope);
     expect(job).toMatchObject({ state: 'prepared', requests: [] });
     expect(await h.pipeline.requestConsolidation(scope)).toBe('running');
+    deadline.restore();
     release();
-    await vi.waitFor(async () => expect((await h.store.getState(scope)).running).toBeUndefined());
+    await vi.waitFor(async () => expect((await h.store.getState(scope)).running).toBeUndefined(), { timeout: 10_000 });
     expect(h.prompts).toEqual([]);
-    // Recreate the pipeline with its normal deadline, as after restart; 100ms only forces the held preparation timeout.
+    // Recreate the pipeline with its normal deadline, as after restart; the held deadline only forces the preparation timeout.
     expect(await h.createPipeline().runConsolidation(scope)).toMatchObject({ ok: true });
     const jobs = await h.repos.memoryJobs.listScope(scope);
     expect(jobs).toHaveLength(1);

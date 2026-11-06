@@ -218,6 +218,9 @@ export class IdleDetector {
     return true;
   }
 
+  /** Whether PTY bytes in this cycle already showed readyPattern; reset() clears it. */
+  hasReadyEvidence(): boolean { return this.readySeen; }
+
   feed(data: string): void {
     // A programmatic submit calls reset() before writing input, but adopted
     // panes can also receive local terminal input while we are already idle.
