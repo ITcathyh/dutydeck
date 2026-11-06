@@ -1,12 +1,14 @@
 // Claude PID-state contract: botmux f54efb8b889 / 17296ac7fba (MIT); see THIRD_PARTY_NOTICES.md.
 import { createHash } from 'node:crypto';
-import { lstatSync, readFileSync, realpathSync } from 'node:fs';
+import { lstatSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
-import { descendantPids, type PhysicalProcessIdentity, type ProcessProbe } from '@dutydeck/session-backends';
+import type { PhysicalProcessIdentity, ProcessProbe } from '@dutydeck/session-backends';
 import type { DriverTranscriptSourceObservation } from '@dutydeck/shared';
 import { claudeDataDir, claudeProjectDir, type CliPathEnv } from './cli-paths.js';
 import { parseJsonlObjects, readHead, readTail } from './session-id/fs-scan.js';
 
+// realpath(3): same canonical path and ENOENT as the JS walk, without its per-component lstat.
+const realpath = realpathSync.native;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 export const CLAUDE_PROCESS_PROOF = 'pty-claude-process-v1:';
 export interface ClaudeNativeSession {
@@ -15,7 +17,7 @@ export interface ClaudeNativeSession {
 function regular(path: string): ReturnType<typeof lstatSync> | undefined {
   try {
     const stat = lstatSync(path);
-    return stat.isFile() && stat.uid === process.getuid?.() && realpathSync(path) === path ? stat : undefined;
+    return stat.isFile() && stat.uid === process.getuid?.() && realpath(path) === path ? stat : undefined;
   } catch { return undefined; }
 }
 function fileProof(id: string, path: string, root: string, cwd: string): string | undefined {
@@ -28,7 +30,7 @@ export function claudeHasConversation(path: string, id: string, cwd: string): bo
   try {
     for (const entry of parseJsonlObjects(readHead(path, 256 * 1024) + '\n' + readTail(path, 256 * 1024))) {
       if (entry.isSidechain || entry.sessionId !== id || !['user', 'assistant'].includes(entry.type)) continue;
-      if (entry.cwd && realpathSync(entry.cwd) !== cwd) continue;
+      if (entry.cwd && realpath(entry.cwd) !== cwd) continue;
       const content = entry.message?.content;
       if (typeof content === 'string' ? content.trim().length > 0 : Array.isArray(content) && content.length > 0) return true;
     }
@@ -40,7 +42,7 @@ export function claudeResumeFromObservation(source: DriverTranscriptSourceObserv
   try {
     const id = source.nativeSessionId;
     if (source.client !== 'claude' || source.proofKind !== 'launch_observed' || !id || !UUID.test(id)) return;
-    const root = realpathSync(claudeDataDir(env)), realCwd = realpathSync(cwd);
+    const root = realpath(claudeDataDir(env)), realCwd = realpath(cwd);
     const path = join(claudeProjectDir(realCwd, { CLAUDE_CONFIG_DIR: root }), `${id}.jsonl`);
     if (source.dataRoot !== root || source.cwd !== realCwd || source.verifiedPath !== path
       || source.identityProof !== fileProof(id, path, root, realCwd)) return;
@@ -59,15 +61,15 @@ export class ClaudeNativeSessionResolver {
   private readonly dataRoot: string;
   constructor(identity: PhysicalProcessIdentity, cwd: string, env: CliPathEnv, private readonly probe: ProcessProbe) {
     this.root = identity;
-    this.cwd = realpathSync(cwd);
-    this.dataRoot = realpathSync(claudeDataDir(env));
+    this.cwd = realpath(cwd);
+    this.dataRoot = realpath(claudeDataDir(env));
   }
   resolve(forceDiscovery = false): ClaudeNativeSession | undefined {
     if (process.platform !== 'linux' || this.probe.observe(this.root) !== 'alive') return;
     try {
       if (!this.cli && !forceDiscovery && Date.now() < this.nextDiscoveryAt) return;
       if (!this.cli) this.nextDiscoveryAt = Date.now() + 5_000;
-      const pids = this.cli ? [this.cli.pid] : descendantPids([this.root.pid]);
+      const pids = this.cli ? [this.cli.pid] : this.statePids();
       const matches: Array<{ identity: PhysicalProcessIdentity; state: any }> = [];
       for (const pid of pids) {
         try {
@@ -80,19 +82,19 @@ export class ClaudeNativeSessionResolver {
             ancestor = Number(raw.slice(raw.lastIndexOf(')') + 2).split(' ')[1]);
             if (ancestor <= 1) break;
           }
-          if (ancestor !== this.root.pid || realpathSync(`/proc/${pid}/cwd`) !== this.cwd) continue;
+          if (ancestor !== this.root.pid || realpath(`/proc/${pid}/cwd`) !== this.cwd) continue;
           const childEnv: CliPathEnv = {};
           for (const pair of readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0')) {
             const split = pair.indexOf('=');
             if (split > 0 && ['HOME', 'CLAUDE_CONFIG_DIR'].includes(pair.slice(0, split))) childEnv[pair.slice(0, split)] = pair.slice(split + 1);
           }
-          if (realpathSync(claudeDataDir(childEnv)) !== this.dataRoot) continue;
+          if (realpath(claudeDataDir(childEnv)) !== this.dataRoot) continue;
           const statePath = join(this.dataRoot, 'sessions', `${pid}.json`);
           const stat = regular(statePath);
           if (!stat || stat.size > 16 * 1024) continue;
           const state = JSON.parse(readFileSync(statePath, 'utf8'));
           if (state.pid !== pid || state.procStart !== identity.start || !UUID.test(state.sessionId ?? '')
-            || realpathSync(state.cwd) !== this.cwd || this.probe.observe(identity) !== 'alive') continue;
+            || realpath(state.cwd) !== this.cwd || this.probe.observe(identity) !== 'alive') continue;
           matches.push({ identity, state });
         } catch { /* Partial native rewrites retry on the next poll. */ }
       }
@@ -108,5 +110,12 @@ export class ClaudeNativeSessionResolver {
         resumable: this.conversation!.value,
         identityProof: proof ?? CLAUDE_PROCESS_PROOF + 'pending' };
     } catch { return undefined; }
+  }
+  /** Only a PID with a native state file can match; the ancestor walk proves descent. */
+  private statePids(): number[] {
+    try {
+      return readdirSync(join(this.dataRoot, 'sessions'))
+        .filter(name => /^\d+\.json$/.test(name)).map(name => Number(name.slice(0, -5))).filter(pid => Number.isSafeInteger(pid) && pid > 0);
+    } catch { return []; }
   }
 }

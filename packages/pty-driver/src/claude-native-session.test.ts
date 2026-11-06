@@ -89,3 +89,57 @@ describe.skipIf(process.platform !== 'linux')('owned live Claude session', () =>
     }
   }, 15_000);
 });
+
+describe.skipIf(process.platform !== 'linux')('native session discovery from PID state files', () => {
+  const spawnFixture = (cwd: string, env: NodeJS.ProcessEnv, id: string) => spawn(process.execPath, [fixture, '--session-id', id], { cwd, env });
+  const stop = async (...children: Array<ReturnType<typeof spawn>>) => {
+    for (const child of children) child.kill('SIGKILL');
+    await Promise.all(children.map(child => new Promise<void>(resolve => child.exitCode !== null || child.signalCode !== null ? resolve() : child.once('exit', () => resolve()))));
+  };
+  it('rejects stale and foreign state files, ambiguous descendants and a missing sessions directory', async () => {
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'dd-native-disc-'))), env = { ...process.env, HOME: cwd, CLAUDE_CONFIG_DIR: cwd };
+    const probe = { identify: childProcessIdentity, observe: observeProcess };
+    const self = childProcessIdentity(process.pid);
+    try {
+      // No sessions directory yet.
+      expect(new ClaudeNativeSessionResolver(self, cwd, env, probe).resolve()).toBeUndefined();
+      // A shell root with two CLI descendants is ambiguous.
+      const shell = spawn('/bin/sh', ['-c', `exec 3<&0; "${process.execPath}" "${fixture}" --session-id ${oldId} <&3 & "${process.execPath}" "${fixture}" --session-id ${newId} <&3 & wait`], { cwd, env });
+      try {
+        await vi.waitFor(() => expect(readFileSync(join(cwd, 'launches.jsonl'), 'utf8').trim().split('\n')).toHaveLength(2));
+        const states = () => readFileSync(join(cwd, 'launches.jsonl'), 'utf8').trim().split('\n').map(row => JSON.parse(row).pid as number);
+        await vi.waitFor(() => { for (const pid of states()) expect(JSON.parse(readFileSync(join(cwd, 'sessions', pid + '.json'), 'utf8')).pid).toBe(pid); });
+        const shellIdentity = childProcessIdentity(shell.pid!);
+        expect(new ClaudeNativeSessionResolver(shellIdentity, cwd, env, probe).resolve(true)).toBeUndefined();
+        // Kill one descendant: its state file goes stale, the remaining one matches.
+        const launches = readFileSync(join(cwd, 'launches.jsonl'), 'utf8').trim().split('\n').map(row => JSON.parse(row) as { sid: string; pid: number });
+        const first = launches.find(launch => launch.sid === oldId)!.pid, second = launches.find(launch => launch.sid === newId)!.pid;
+        process.kill(first, 'SIGKILL');
+        await vi.waitFor(() => expect(observeProcess(childProcessIdentity(second))).toBe('alive'));
+        await vi.waitFor(() => expect(() => childProcessIdentity(first)).toThrow());
+        expect(new ClaudeNativeSessionResolver(shellIdentity, cwd, env, probe).resolve(true)?.nativeSessionId).toBe(newId);
+        // The test runner is not a descendant of the shell even with a forged state file.
+        writeFileSync(join(cwd, 'sessions', process.pid + '.json'), JSON.stringify({ pid: process.pid, procStart: self.start, sessionId: oldId, cwd }));
+        expect(new ClaudeNativeSessionResolver(shellIdentity, cwd, env, probe).resolve(true)?.nativeSessionId).toBe(newId);
+        writeFileSync(join(cwd, 'sessions', 'junk.json'), '{}'); writeFileSync(join(cwd, 'sessions', '0.json'), '{}');
+        expect(new ClaudeNativeSessionResolver(shellIdentity, cwd, env, probe).resolve(true)?.nativeSessionId).toBe(newId);
+      } finally { await stop(shell); for (const pid of (() => { try { return readFileSync(join(cwd, 'launches.jsonl'), 'utf8').trim().split('\n').map(row => JSON.parse(row).pid as number); } catch { return []; } })()) try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } }
+    } finally { rmSync(cwd, { recursive: true, force: true }); }
+  }, 15_000);
+
+  it('drops a CLI whose working directory was deleted, as the JS realpath did', async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'dd-native-root-')));
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'dd-native-cwd-'))), env = { ...process.env, HOME: root, CLAUDE_CONFIG_DIR: root };
+    const child = spawnFixture(cwd, env, oldId);
+    try {
+      await vi.waitFor(() => expect(JSON.parse(readFileSync(join(root, 'sessions', child.pid + '.json'), 'utf8')).sessionId).toBe(oldId));
+      const resolver = new ClaudeNativeSessionResolver(childProcessIdentity(child.pid!), cwd, env, { identify: childProcessIdentity, observe: observeProcess });
+      expect(resolver.resolve()?.nativeSessionId).toBe(oldId);
+      rmSync(cwd, { recursive: true, force: true });
+      const proc = `/proc/${child.pid}/cwd`;
+      expect(() => realpathSync(proc)).toThrow(expect.objectContaining({ code: 'ENOENT' }));
+      expect(() => realpathSync.native(proc)).toThrow(expect.objectContaining({ code: 'ENOENT' }));
+      expect(resolver.resolve()).toBeUndefined();
+    } finally { await stop(child); rmSync(root, { recursive: true, force: true }); rmSync(cwd, { recursive: true, force: true }); }
+  });
+});
