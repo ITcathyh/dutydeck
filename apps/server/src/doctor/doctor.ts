@@ -32,7 +32,7 @@ import { parseEnv } from 'node:util';
 import { loadConfigWithDiagnostics } from '@dutydeck/config';
 import { errorMessage } from '@dutydeck/shared';
 import { PTY_AGENT_CONTRIBUTIONS } from '@dutydeck/pty-driver';
-import { daemonStatus } from '../daemon/command.js';
+import { daemonDatabasePath, daemonStatus } from '../daemon/command.js';
 import { daemonPaths, readDaemonStatus, resolveDaemonDir } from '../daemon/daemon.js';
 import { accessMode } from '../service.js';
 import { createCliUi, type CliUi } from '../cli-ui.js';
@@ -52,6 +52,7 @@ import {
   checkConfig,
   checkDaemon,
   checkDatabase,
+  checkDatabaseFreelist,
   checkDutydeckDir,
   checkEnvFile,
   checkLark,
@@ -235,21 +236,23 @@ export async function runDoctor(
   }
   if (envLocation) checks.push(checkEnvFile(envLocation, envReadError));
 
+  const daemonRoot = () => envLocation?.daemonRoot ?? resolve(resolveDaemonDir(dependencies.cwd ?? process.cwd(), process.env.HOME), '../..');
   progress('解析配置（首次会探测各 Agent CLI 版本，可能需要几秒）');
   let config: DoctorConfig;
   let configError: string | undefined;
   try {
-    config = dependencies.config ?? (() => { const loaded = loadConfigWithDiagnostics(env, PTY_AGENT_CONTRIBUTIONS); return { ...loaded.config, droppedAgents: loaded.droppedAgents }; })();
+    // 配置库按 daemon 的取法以根目录为基准：loadConfig 以 DUTYDECK_DEFAULT_CWD（Agent 默认目录）为基准，
+    // 两者不同时（比如 DEFAULT_CWD 设成 HOME）会报出一个 daemon 从不打开的路径。
+    config = dependencies.config ?? (() => { const loaded = loadConfigWithDiagnostics(env, PTY_AGENT_CONTRIBUTIONS); return { ...loaded.config, databaseUrl: daemonDatabasePath(daemonRoot(), env.DUTYDECK_DATABASE_URL), droppedAgents: loaded.droppedAgents }; })();
     checks.push(checkConfig(config));
   } catch (error) {
     // 配置坏了也要把体检跑完：这正是用户最需要诊断的时候。
     configError = error instanceof Error ? error.message : String(error);
-    const defaultCwd = env.DUTYDECK_DEFAULT_CWD ?? process.cwd();
     config = {
       host: env.DUTYDECK_HOST ?? '127.0.0.1',
       port: Number(env.DUTYDECK_PORT) || 4310,
       authEnabled: env.DUTYDECK_AUTH !== 'false',
-      databaseUrl: resolve(defaultCwd, env.DUTYDECK_DATABASE_URL ?? './.dutydeck/dutydeck.db'),
+      databaseUrl: daemonDatabasePath(daemonRoot(), env.DUTYDECK_DATABASE_URL),
       agents: []
     };
     const envFile = envLocation?.file ?? resolve(dependencies.cwd ?? process.cwd(), '.env');
@@ -270,6 +273,8 @@ export async function runDoctor(
   progress(`只读探测数据库 ${databaseUrl}`);
   const probe: DatabaseProbeResult = await databaseProbe(databaseUrl, DOCTOR_CONFIG_KEYS, DOCTOR_CONFIG_PREFIXES);
   checks.push(checkDatabase(databaseUrl, probe));
+  const freelist = checkDatabaseFreelist(probe);
+  if (freelist) checks.push(freelist);
   const expectedSchemaVersion = dependencies.expectedSchemaVersion ?? await resolveExpectedSchemaVersion();
   checks.push(checkSchema(probe, expectedSchemaVersion));
 

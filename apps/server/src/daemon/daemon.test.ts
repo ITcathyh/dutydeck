@@ -1,6 +1,7 @@
 import { createRepositories, childProcessIdentity, currentProcessIdentity } from '@dutydeck/storage';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdtempSync, mkdirSync, openSync, readdirSync, readSync, rmSync, statSync, writeFileSync, readFileSync } from 'node:fs';
+import Database from 'better-sqlite3';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -17,9 +18,10 @@ import {
   daemonPaths,
   tailDaemonLog,
   writeLastDaemonDir,
-  lastDaemonDirPointerFile
+  lastDaemonDirPointerFile,
+  releaseStartLock
 } from './daemon.js';
-import { daemonRestart, daemonRestartOptions, daemonStart, daemonStop, daemonStatus, markDaemonReady } from './command.js';
+import { daemonRestart, daemonRestartOptions, daemonStart, daemonStop, daemonStatus, markDaemonReady, systemdServiceControl } from './command.js';
 
 describe('Dutydeck daemon session', () => {
   let tmp: string;
@@ -350,9 +352,91 @@ describe('Dutydeck daemon session', () => {
       expect(line!.endsWith('…')).toBe(true);
     });
 
+    it('旧日志含中文时按字节偏移切分：既不回放上一轮的报错，也不漏掉这次的', () => {
+      // 中文一个字符 3 字节：按字符位置切会落在旧内容中间（回放旧报错），或越过新内容（漏报）。
+      const stale = '启动失败：旧的报错 listen EADDRINUSE: address already in use 127.0.0.1:9999\n'.repeat(3);
+      const dir = write(`${stale}listen EACCES: permission denied 127.0.0.1:80\n`);
+      expect(tailDaemonLog(dir, 3, Buffer.byteLength(stale))).toEqual(['listen EACCES: permission denied 127.0.0.1:80']);
+      // 旧内容字节数大于字符数：按字符切会把这次开头的报错整行跳过。
+      const shortStale = '收到飞书消息事件\n';
+      const second = write(`${shortStale}listen EACCES: permission denied\n${'Server listening\n'.repeat(5)}`);
+      expect(tailDaemonLog(second, 3, Buffer.byteLength(shortStale))).toEqual(['listen EACCES: permission denied']);
+    });
+
+    it('偏移超过当前大小（日志被轮转过）时从新文件开头读', () => {
+      const dir = write('Error: 轮转后的新报错\n');
+      expect(tailDaemonLog(dir, 3, 50 * 1024 * 1024)).toEqual(['Error: 轮转后的新报错']);
+    });
+
     it('日志不存在时返回空，绝不因为取日志而让启动流程崩掉', () => {
       expect(tailDaemonLog(join(tmp, 'nope'))).toEqual([]);
       expect(daemonLogSize(join(tmp, 'nope'))).toBe(0);
     });
+  });
+
+  /** 状态文件原子写：并发读的一方（status / resolveDaemonDir）不能读到截断到一半的文件。 */
+  it('writeState 先写临时文件再 rename：已打开旧文件的读者读到的仍是完整旧内容，目录里不留临时文件', () => {
+    const dir = defaultDaemonDir(tmp);
+    const first = { pid: 101, ready: true, startedAt: 'gen-1', cwd: tmp };
+    writeState(dir, first);
+    const file = daemonPaths(dir).stateFile;
+    const reader = openSync(file, 'r');
+    try {
+      writeState(dir, { pid: 202, ready: false, startedAt: 'gen-2', cwd: tmp, address: 'http://127.0.0.1:4310' });
+      const buffer = Buffer.alloc(4096);
+      const read = readSync(reader, buffer, 0, buffer.length, 0);
+      // 原地覆盖写会先把文件截成 0 再写新内容，同一个句柄读到的是新内容或空文件。
+      expect(JSON.parse(buffer.subarray(0, read).toString('utf8'))).toEqual(first);
+    } finally {
+      closeSync(reader);
+    }
+    expect(readDaemonStatus(dir)).toMatchObject({ pid: 202, startedAt: 'gen-2' });
+    clearState(dir);
+    expect(readFileSync(file, 'utf8')).toBe('');
+    expect(readFileSync(daemonPaths(dir).pidFile, 'utf8')).toBe('');
+    expect(readdirSync(dir).filter(name => name.endsWith('.tmp'))).toEqual([]);
+  });
+
+  /**
+   * 并发 start：服务进程在「检查状态 → 写状态」之前取得目录排他锁。这里用另一条 SQLite 连接持锁，
+   * 模拟另一个 `dutydeck start` 正处在检查和写状态之间。
+   */
+  it('另一个进程持有启动锁时，前台 start 拒绝：不服务、不写状态', async () => {
+    const dir = defaultDaemonDir(tmp);
+    mkdirSync(dir, { recursive: true });
+    const holder = new Database(join(dir, '.start-lock.sqlite'));
+    holder.exec('BEGIN IMMEDIATE');
+    const serve = vi.fn();
+    try {
+      const result = await daemonStart({ foreground: true }, { serve }, { HOME: tmp });
+      expect(result).toMatchObject({ ok: false, action: 'start', state: 'already-running' });
+      expect(result.error).toContain('start lock');
+      expect(serve).not.toHaveBeenCalled();
+      expect(existsSync(daemonPaths(dir).stateFile)).toBe(false);
+    } finally {
+      holder.close();
+    }
+    // 锁释放后照常启动。
+    const started = await daemonStart({ foreground: true }, { serve }, { HOME: tmp });
+    expect(started).toMatchObject({ ok: true, running: true });
+    expect(serve).toHaveBeenCalledTimes(1);
+    releaseStartLock(dir);
+  });
+
+  it('deploy / restart --unit 的 systemctl restart 之前轮转超过 10MB 的守护日志', async () => {
+    const dir = defaultDaemonDir(tmp);
+    mkdirSync(dir, { recursive: true });
+    const log = daemonPaths(dir).logFile;
+    writeFileSync(log, Buffer.alloc(11 * 1024 * 1024, 'a'));
+    const seen: Array<{ args: string; rotated: boolean }> = [];
+    const control = systemdServiceControl('dutydeck.service', {
+      runCommand: async (_command, args) => {
+        seen.push({ args: args.join(' '), rotated: existsSync(`${log}.1`) && !existsSync(log) });
+        return { status: 0, stdout: '', stderr: '' };
+      }
+    }, dir);
+    expect(await control.restart()).toBeUndefined();
+    expect(seen).toEqual([{ args: '--user restart dutydeck.service', rotated: true }]);
+    expect(statSync(`${log}.1`).size).toBe(11 * 1024 * 1024);
   });
 });

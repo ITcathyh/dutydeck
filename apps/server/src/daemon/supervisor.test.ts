@@ -1,6 +1,6 @@
 import { childProcessIdentity, currentProcessIdentity, type SqliteDriverCheck, type SqliteDriverCheckOptions } from '@dutydeck/storage';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -261,6 +261,29 @@ describe('systemd 托管下的 stop / restart / start 路由', () => {
     expect(signals.mock.calls.filter(([, signal]) => signal === 'SIGTERM' || signal === 'SIGKILL')).toEqual([]);
   });
 
+  it('restart：systemctl restart 之前轮转超过 10MB 的守护日志，失败原因只从新文件里取', async () => {
+    const old = idleProcess();
+    writeState(dir, daemonState(old, 'gen-1'));
+    const log = join(dir, 'dutydeck.log');
+    writeFileSync(log, Buffer.alloc(11 * 1024 * 1024, 'a'));
+    let rotatedBeforeRestart = false;
+    let next: ChildProcess | undefined;
+    const world = systemctl({
+      mainPid: old.pid, workingDirectory: tmp,
+      on: {
+        restart: async () => {
+          rotatedBeforeRestart = existsSync(`${log}.1`) && !existsSync(log);
+          await kill(old);
+          next = idleProcess();
+          writeState(dir, daemonState(next, 'gen-2'));
+        }
+      }
+    });
+    const result = await daemonRestart({}, { serve: vi.fn(), runCommand: world.run, platform: 'linux', checkSqlite: passingSqlite });
+    expect(result).toMatchObject({ ok: true, state: 'restarted', pid: next?.pid });
+    expect(rotatedBeforeRestart).toBe(true);
+  });
+
   it('restart：systemctl restart 返回后状态文件里仍是旧一代时不报成功', async () => {
     // 比如 unit 起来了却没能发布状态：不能把仍在的旧一代当成「新 pid 就绪」。
     const old = idleProcess();
@@ -400,6 +423,121 @@ describe('systemd 托管下的 stop / restart / start 路由', () => {
     expect(world.calls.some(call => call.includes(' start '))).toBe(false);
   });
 
+  // ─── launchd（macOS） ─────────────────────────────────────────────────────
+
+  const LAUNCHD_TARGET = 'gui/501/com.dutydeck.server';
+  const PLIST_NODE = '/opt/homebrew/bin/node';
+  const PLIST_CLI = '/opt/dutydeck/releases/current/dist/cli.js';
+
+  /** 假的 launchctl：print 按 job 状态回答，kickstart 时执行注入的副作用。 */
+  function launchctl(world: { loaded?: boolean; pid?: number; onKickstart?: () => Promise<void> }) {
+    const calls: string[] = [];
+    const run = async (command: string, args: readonly string[]): Promise<AutostartCommandOutput> => {
+      calls.push([command, ...args].join(' '));
+      if (command === 'launchctl' && args[0] === 'print') {
+        return world.loaded === false
+          ? { status: 113, stdout: '', stderr: 'Could not find service' }
+          : { status: 0, stdout: `${LAUNCHD_TARGET} = {\n\tstate = running\n\tpid = ${world.pid ?? 0}\n}\n`, stderr: '' };
+      }
+      if (command === 'launchctl' && args[0] === 'kickstart') await world.onKickstart?.();
+      return { status: 0, stdout: '', stderr: '' };
+    };
+    return { calls, run };
+  }
+
+  function writePlist() {
+    const file = join(tmp, 'Library', 'LaunchAgents', 'com.dutydeck.server.plist');
+    mkdirSync(join(tmp, 'Library', 'LaunchAgents'), { recursive: true });
+    writeFileSync(file, `<plist><dict><key>ProgramArguments</key>\n<array>\n<string>${PLIST_NODE}</string>\n<string>${PLIST_CLI}</string>\n<string>start</string>\n<string>--foreground</string>\n</array></dict></plist>\n`);
+  }
+
+  const launchdState = (child: ChildProcess, startedAt: string): DaemonState => ({ ...daemonState(child, startedAt, false), supervisor: 'launchd' });
+
+  it('restart（launchd 托管）：先预检 plist 的解释器，再 launchctl kickstart -k，等到 launchd 拉起的新一代就绪', async () => {
+    writePlist();
+    const old = idleProcess();
+    writeState(dir, launchdState(old, 'gen-1'));
+    const log = join(dir, 'dutydeck.log');
+    writeFileSync(log, Buffer.alloc(11 * 1024 * 1024, 'a'));
+    const checked: Array<SqliteDriverCheckOptions | undefined> = [];
+    const signals = vi.spyOn(process, 'kill');
+    let next: ChildProcess | undefined;
+    let rotatedBeforeKickstart = false;
+    const world = launchctl({
+      pid: old.pid,
+      onKickstart: async () => {
+        rotatedBeforeKickstart = existsSync(`${log}.1`) && !existsSync(log);
+        await kill(old);
+        next = idleProcess();
+        writeState(dir, launchdState(next, 'gen-2'));
+      }
+    });
+
+    const result = await daemonRestart({}, {
+      serve: vi.fn(), runCommand: world.run, platform: 'darwin', uid: 501,
+      checkSqlite: options => { checked.push(options); return passingSqlite(options); }
+    });
+
+    expect(result).toMatchObject({ ok: true, action: 'restart', running: true, state: 'restarted', pid: next?.pid });
+    expect(world.calls).toEqual([`launchctl print ${LAUNCHD_TARGET}`, `launchctl kickstart -k ${LAUNCHD_TARGET}`]);
+    expect(checked).toEqual([{ execPath: PLIST_NODE, resolveFrom: PLIST_CLI }]);
+    expect(rotatedBeforeKickstart).toBe(true);
+    // 旧进程由 launchd 停，CLI 自己不发信号。
+    expect(signals.mock.calls.filter(([, signal]) => signal === 'SIGTERM' || signal === 'SIGKILL')).toEqual([]);
+    expect(readDaemonStatus(dir)).toMatchObject({ pid: next?.pid, supervisor: 'launchd' });
+  });
+
+  it('restart（launchd 托管）：plist 的解释器加载不了 SQLite 时在 kickstart 之前拒绝，旧进程不被停', async () => {
+    writePlist();
+    const old = idleProcess();
+    const state = launchdState(old, 'gen-1');
+    writeState(dir, state);
+    const world = launchctl({ pid: old.pid });
+    const result = await daemonRestart({}, { serve: vi.fn(), runCommand: world.run, platform: 'darwin', uid: 501, checkSqlite: failingSqlite });
+    expect(result).toMatchObject({ ok: false, action: 'restart', running: true, pid: old.pid });
+    expect(world.calls).toEqual([`launchctl print ${LAUNCHD_TARGET}`]);
+    expect(pidAlive(old.pid!)).toBe(true);
+    expect(readDaemonStatus(dir)).toEqual(state);
+  });
+
+  it('restart（launchd 托管）：launchctl 报告的 pid 与状态文件对不上时不做任何改动', async () => {
+    writePlist();
+    const old = idleProcess();
+    const state = launchdState(old, 'gen-1');
+    writeState(dir, state);
+    const world = launchctl({ pid: old.pid! + 1 });
+    const result = await daemonRestart({}, { serve: vi.fn(), runCommand: world.run, platform: 'darwin', uid: 501, checkSqlite: passingSqlite });
+    expect(result).toMatchObject({ ok: false, action: 'restart', running: true, pid: old.pid });
+    expect(result.error).toContain('对不上');
+    expect(world.calls.some(call => call.includes('kickstart'))).toBe(false);
+    expect(readDaemonStatus(dir)).toEqual(state);
+  });
+
+  it.each([
+    ['状态文件没有 launchd 托管记录', false, true],
+    ['记录了 launchd，但 job 已不在 launchd 里（自启已关闭）', true, false]
+  ])('restart：%s 时退回原来的 detached 重启，不调用 kickstart', async (_name, managed, loaded) => {
+    writePlist();
+    const old = idleProcess();
+    const state = managed ? launchdState(old, 'gen-1') : daemonState(old, 'gen-1', false);
+    writeState(dir, state);
+    const world = launchctl({ pid: old.pid, loaded });
+    // detached 路径用当前解释器预检；让它失败，停在 daemonStop 之前，证明走的是 detached 分支。
+    const result = await daemonRestart({}, { serve: vi.fn(), runCommand: world.run, platform: 'darwin', uid: 501, checkSqlite: failingSqlite });
+    expect(result).toMatchObject({ ok: false, action: 'restart', running: true, pid: old.pid });
+    expect(result.error).toContain('换一个能加载该驱动的 node');
+    expect(world.calls.some(call => call.includes('kickstart'))).toBe(false);
+    expect(pidAlive(old.pid!)).toBe(true);
+  });
+
+  it('restart：Linux 上即使状态文件写着 launchd 也不调用 launchctl', async () => {
+    const old = idleProcess();
+    writeState(dir, launchdState(old, 'gen-1'));
+    const world = launchctl({ pid: old.pid });
+    await daemonRestart({}, { serve: vi.fn(), runCommand: world.run, platform: 'linux', checkSqlite: failingSqlite });
+    expect(world.calls.some(call => call.startsWith('launchctl'))).toBe(false);
+  });
+
   it('update 用的 systemdRestartTarget：受托管时给出 unit 的 ExecStart，不受托管时为空', async () => {
     const daemon = idleProcess();
     writeState(dir, daemonState(daemon, 'gen-1'));
@@ -530,6 +668,16 @@ describe('systemd 托管下的 stop / restart / start 路由', () => {
     expect(seen).not.toHaveProperty('DUTYDECK_SYSTEMD_UNIT');
     expect(process.env).not.toHaveProperty('DUTYDECK_SUPERVISOR');
     expect(process.env).not.toHaveProperty('DUTYDECK_SYSTEMD_UNIT');
+  });
+
+  it('start --foreground：launchd 拉起时记下 supervisor=launchd，并从 process.env 删掉托管声明', async () => {
+    vi.stubEnv('DUTYDECK_SUPERVISOR', 'launchd');
+    const serve = vi.fn((_options: unknown, ready?: () => void) => { ready?.(); });
+    const result = await daemonStart({ foreground: true }, { serve, platform: 'darwin' }, { HOME: tmp, DUTYDECK_SUPERVISOR: 'launchd', DUTYDECK_PORT: '4391', DUTYDECK_AUTH: 'false' });
+    expect(result).toMatchObject({ ok: true, running: true });
+    expect(readDaemonStatus(dir)).toMatchObject({ pid: process.pid, supervisor: 'launchd' });
+    expect(readDaemonStatus(dir)).not.toHaveProperty('systemdUnit');
+    expect(process.env.DUTYDECK_SUPERVISOR).toBeUndefined();
   });
 
   it('start --foreground：没有托管声明时不记录 supervisor', async () => {

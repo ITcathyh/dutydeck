@@ -75,6 +75,17 @@ export const defaultDatabaseProbe: DatabaseProbe = (path, keys, prefixes = []) =
       }
       result.values = values;
     }
+    // 空闲页：只读 pragma，读不到就不报。
+    try {
+      const pageSize = db.pragma('page_size', { simple: true });
+      const pageCount = db.pragma('page_count', { simple: true });
+      const freelistCount = db.pragma('freelist_count', { simple: true });
+      if ([pageSize, pageCount, freelistCount].every(value => typeof value === 'number')) {
+        result.pages = { pageSize: pageSize as number, pageCount: pageCount as number, freelistCount: freelistCount as number };
+      }
+    } catch {
+      // 读不到页统计不影响其他检查。
+    }
     // 账本实际计价失败的型号；表不存在（旧库）时不报这一项，库仍算可读。
     try {
       const since = new Date(Date.now() - UNPRICED_USAGE_WINDOW_MS).toISOString();

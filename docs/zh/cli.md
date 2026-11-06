@@ -22,13 +22,19 @@ dutydeck stop
 # 更新全局 Dutydeck 包并自动重启
 dutydeck update
 
-# 一键诊断（端口、SQLite、Agent 可执行性与默认 Agent、飞书监听、守护进程是否以 root 运行、型号是否缺价格（机器人配置的非别名型号，以及近 30 天用量记录里没能计价的型号）等）
+# 一键诊断（端口、SQLite、Agent 可执行性与默认 Agent、飞书监听、守护进程是否以 root 运行、型号是否缺价格（机器人配置的非别名型号，以及近 30 天用量记录里没能计价的型号）、库文件空闲页等）
 dutydeck doctor
 ```
 
 `restart` 先暂停领取新任务。已提交成功、恢复日志与原轮身份可验证的 `full-trust` tmux 任务继续在原 CLI 进程里运行，新服务接回同一轮，不重发输入；其余任务继续等待结束。ACP、普通 PTY、Herdr、提交中、缺少恢复日志或身份，以及待审批或高危权限门禁未授权的任务都不会跳过等待。systemd 只在当前 `KillMode=process` 时保留任务；其他值或读不到时全量等待。旧服务不支持恢复计数、排空失败或租约续期失败时也全量等待。`--drain-timeout` 控制等待上限，`--force` 保留原来的强制重启行为，当前 Agent 自己的会话仍自动排除。`deploy` 使用同一保留策略，ACP 等不可保留的任务仍等待结束。
 
 Codex 的 `codex` 入口默认使用终端模式，`codex-cli` 入口继续兼容。已有 ACP 会话继续通过 ACP 续跑，新会话使用当前默认协议；机器人权限不会自动提升。Codex 等不支持飞书逐项审批的终端 Agent，在 `ask` / `approve-reads` 下新开飞书会话会被拒绝；需要逐项审批时，选择内置「Codex (ACP)」（`codex-acp`），或选择 Claude Code / Seed / Relay 等支持审批的终端 Agent。只有原本已获 `full-trust` 权限、且恢复证据完整的 tmux 任务能跨服务重启继续运行；首次提交尚无日志位置的任务仍会等待结束。接回后跑完的任务和普通任务一样，触发一次插件 `task.completed` hook、触发器结果回投和触发器运行状态更新；接回后被停止或结果仍未知的不触发。主轮结束后仍有原生后台任务时，安全重启和部署的排空也会等待它们结束；直接终止进程或 `--force` 不提供此保证。
+
+**停服**：收到停止信号后依次关闭各模块，正常停完写一条「停服各阶段耗时」日志（`shutdownMs`，毫秒，如 `runtime`、`http`、`database`）。超过 12 秒仍没停完就强制退出（退出码 1），日志写明还没结束的阶段（含已运行时长）、没开始的阶段和已完成阶段的耗时；12 秒低于 unit 的 `TimeoutStopSec=15`，进程会在被 systemd 强杀之前自己带着这些信息退出。
+
+**并发启动**：服务进程在写状态文件之前先取得守护目录（`.dutydeck/daemon`）的排他锁并持有到退出。同一目录同时执行两次 `start` 时只有一个起来，另一个报已在运行；锁随进程退出（包括被强杀）释放，不需要手动清理。状态文件先写临时文件再改名，`status` 等命令不会读到写了一半的内容。
+
+**守护日志轮转**：`.dutydeck/daemon/dutydeck.log` 超过 10MB 时，在新进程打开它之前轮转成 `.1`（最多保留 `.1`–`.3`）：detached 启动前，以及 `start` / `restart` / `restart --unit` / `deploy` 调用 `systemctl start` 或 `restart` 之前。旧进程停服期间的最后几行写进 `.1`。systemd 因崩溃自动重拉时不轮转，下一次 restart 或 deploy 时补上。
 
 `GET /api/system/activity` 的 `runningTasks` 包含正在执行主轮的会话，以及主轮已结束但仍有原生后台任务的会话；同一会话只计一次。显式加 `?restart=true` 才检查恢复证据并返回 `restartBlockers` 和 `recoverableTasks`；未进入排空时不减去可恢复任务，`excludeSessionId` 同时适用于这三个计数。
 
@@ -52,11 +58,29 @@ dutydeck deploy prune --releases /path/to/releases
 - **回滚**：健康检查不过时先停服务。多个 unit 共用同一个 `current` 时，以目标 unit 实际运行的版本为回滚目标；无法核实运行版本时拒绝切换。目标已停服时，历史上部署成功的版本只有在数据库 schema 与当前匹配才作为回滚候选；确认 schema 没变才自动切回，schema 变了就停止自动回滚，保护数据，不会恢复旧数据库快照。
 - **缺地址或数据库时拒绝**：目标 unit 没记录可用的健康检查地址或数据库路径（例如被 `dutydeck stop` 停过）时，deploy 直接拒绝，不切换版本也不重启。先启动该 unit 让它记下地址，或用 `--runtime` 指向写有 `address`、`databasePath` 的 `deployment.json`。
 - **自动清理**：每次部署成功后保留最新 5 个发布目录；部署记录按 unit 分别保留最新 5 个，每个 unit 只有最新 2 份记录留着数据库备份（含本次），同一发布根下依次部署多个 unit 时互不挤占。更早的记录只删备份文件、保留 `manifest.json`；`manifest.json` 里没记 unit 的旧记录不按份数删备份。deploy 建的记录超过 24 小时仍没有 `manifest.json`（部署进程被强制杀掉留下的），不占保留个数，直接删除。`current`、它的上一版和仍被运行中进程引用的版本永远保留；自动清理和手动 `deploy prune` 都会额外保留各 unit 最近一次成功部署的版本。清理失败只告警，不影响部署结果。
-- **历史数据保留**：服务每小时分批清理一次数据库里的历史数据，只动已结束的任务，未结束、结果未知和旧版待退役会话的数据不动：终端模式超过 30 天的轮次只留最后一屏的内容；旧版本存的会话状态快照和工具调用镜像超过 30 天删除；群策略、群绑定、群信息和角色的修订记录每项只留最近 20 条。事件记录本身不删，Web 历史仍然完整连续。已有旧库的终端输出存在缺口时，网页仍可展开历史轮次、原始日志和执行追踪，显示剩余记录；读取未到达请求终点或分页异常仍会报错，可重试。清理不做 VACUUM，数据库文件不会变小，腾出的空间留给后续写入复用；要缩小文件，停服后对数据库执行 `VACUUM`。
+- **历史数据保留**：服务每小时分批清理一次数据库里的历史数据，只动已结束的任务，未结束、结果未知和旧版待退役会话的数据不动：终端模式超过 30 天的轮次只留最后一屏的内容；旧版本存的会话状态快照和工具调用镜像超过 30 天删除；群策略、群绑定、群信息和角色的修订记录每项只留最近 20 条。事件记录本身不删，Web 历史仍然完整连续。已有旧库的终端输出存在缺口时，网页仍可展开历史轮次、原始日志和执行追踪，显示剩余记录；读取未到达请求终点或分页异常仍会报错，可重试。清理不做 VACUUM，数据库文件不会变小，腾出的空间留给后续写入复用；要缩小文件，按下面的[停机 VACUUM](#vacuum)步骤操作。`dutydeck doctor` 在空闲页占库文件三成以上且不少于 64MB 时提示一次，不会自动执行。
 - **手动清理** `deploy prune`：选项 `--releases/--runtime/--unit`、`--keep N`（默认 5）、`--dry-run`、`--include-unmarked`、`--json`。手工部署留下的记录（没有 `created_by: dutydeck deploy` 标记）默认不动，只有加 `--include-unmarked` 才会清，并且仍被进程引用或 1 小时内改过的会跳过。最近 1 小时内改过的 `.partial` 目录同样跳过（可能是正在进行的部署）。
 - **单 Bot 独立进程**：`dutydeck start --foreground --database /path/to/bot.db --bot-app-id cli_xxx`。
 - **拆分机器人数据**：`scripts/split-bot-runtimes.mts` 会把空闲终端状态、排队受阻和结果未知提醒、计划逾期提醒随所属会话迁入对应机器人的库；未知或无法确认归属的记录仍会阻止拆分。
 - **systemd 服务与数据库解析**：对直接以 `node cli.js` 启动的 unit，管理命令（`restart`、`status`、`deploy` 等）按 ExecStart 显式参数 > unit 环境变量 > `WorkingDirectory/.env` 解析目标数据库和监听地址；相对工作目录以 `WorkingDirectory` 为基准。缺少 `.env` 可继续，不可读或关键配置无效时拒绝操作；数据库未配置时回落到 `<cwd>/.dutydeck/dutydeck.db`。部署备份和 schema 回滚检查使用同一实际数据库。`start --foreground` 仍读取守护状态，`deploy --runtime` 显式元数据继续优先。
+
+### 停机 VACUUM <a id="vacuum"></a>
+
+VACUUM 会重写整个库文件，期间独占数据库，必须先停服。在部署窗口里按下面的顺序做，命令都在 daemon 根目录（unit 的 `WorkingDirectory`）里执行：
+
+1. 确认网页上没有正在执行的任务。`dutydeck stop` 不等任务结束。
+2. `dutydeck stop`，再用 `dutydeck status` 确认已停止。受 systemd 托管时它会调用 `systemctl --user stop`，unit 不会被重拉。
+3. 备份：`dutydeck backup create --database <库文件> --data-dir <库所在目录> --output <数据目录之外的新目录>`。
+4. 确认磁盘剩余空间不小于库文件大小，VACUUM 需要临时写一份完整副本。
+5. 执行 VACUUM。本机没有 `sqlite3` 时用发布目录自带的驱动：
+
+   ```bash
+   node -e "const D=require(process.argv[1]); const db=new D(process.argv[2]); db.pragma('wal_checkpoint(TRUNCATE)'); db.exec('VACUUM'); db.close()" \
+     "$PWD/.dutydeck/releases/current/node_modules/better-sqlite3" "$PWD/.dutydeck/dutydeck.db"
+   ```
+
+   有 `sqlite3` 时等价于 `sqlite3 .dutydeck/dutydeck.db 'PRAGMA wal_checkpoint(TRUNCATE); VACUUM;'`。
+6. `dutydeck start` 启动，`dutydeck doctor` 里的空闲页提示消失。出问题时停服，用第 3 步的备份按「离线备份与隔离恢复」恢复到新目录核对。
 
 ### 离线备份与隔离恢复
 
@@ -79,6 +103,11 @@ dutydeck autostart enable   # 注册开机自启（Linux systemd --user / macOS 
 dutydeck autostart status   # 查看自启状态
 dutydeck autostart disable  # 关闭自启
 ```
+
+- Linux unit 与 macOS LaunchAgent 都前台运行 `dutydeck start --foreground`，工作目录是 daemon 根目录，输出追加到 `.dutydeck/daemon/dutydeck.log`。服务崩溃或非零退出后，systemd 按 `Restart=always` 重拉；launchd 按 `KeepAlive.SuccessfulExit=false` 重拉，间隔至少 30 秒，`dutydeck stop` 的正常退出不重拉，已有实例在跑时也不会反复重拉。macOS 上以前注册过的 LaunchAgent 是后台模式，崩溃后没人拉起，`autostart status` 会报漂移，重跑 `dutydeck autostart enable` 后重新登录生效。受 launchd 托管时，`dutydeck restart` 照常排空、等任务结束，再执行 `launchctl kickstart -k gui/<uid>/com.dutydeck.server`：launchd 先停旧进程再按 plist 拉起新的，新进程仍受它看护；命令行上的服务参数传不过去，要写进根目录 `.env`。job 没加载（比如自启已关闭）时照旧由 CLI 起后台进程。
+- 守护进程还在运行时，`autostart disable` 拒绝执行（macOS 移除 job 会连带停掉它），先 `dutydeck stop`。
+- 漂移判断不比较 PATH：unit / plist 里的 PATH 是 enable 时那个 shell 的，与当前 shell 不同时 `autostart status` 和 `doctor` 只提示一行，不报漂移，也不建议重跑 enable（重跑会把 PATH 换成当前 shell 的）。
+- 通过 `<releases>/current` 软链运行时，`enable` 和 `status` 都按 `current` 路径比较和写入，不会把 unit 钉在当时的具体版本上；`current` 已指向别的版本、unit 却还写着旧版本路径时，照常报漂移。
 
 ## 4. 命令行管理配置 (`dutydeck settings`)
 

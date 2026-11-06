@@ -14,6 +14,7 @@ import {
   type AutostartCommandOutput,
   type AutostartOptions
 } from './autostart.js';
+import { SHUTDOWN_DEADLINE_MS } from '../shutdown-phases.js';
 
 /** 记录每一次外部命令调用，用于断言"enable 没有顺手启动服务"。 */
 interface CommandLog {
@@ -158,11 +159,36 @@ describe('Dutydeck 开机自启', () => {
     expect(plist).toContain(`<string>${AUTOSTART_MACOS_LABEL}</string>`);
     expect(plist).toContain('<string>/usr/local/node/v22.12.0/bin/node</string>');
     expect(plist).toContain('<string>/usr/local/lib/node_modules/dutydeck/dist/cli.js</string>');
-    expect(plist).toContain('<string>start</string>');
-    expect(plist).toContain('<key>KeepAlive</key>\n    <false/>');
+    // 前台运行，launchd 的 job 进程就是服务进程：非零退出（崩溃）后重拉，正常停止不重拉。
+    expect(plist).toContain('<string>start</string>\n        <string>--foreground</string>');
+    expect(plist).toContain('<key>KeepAlive</key>\n    <dict>\n        <key>SuccessfulExit</key>\n        <false/>\n    </dict>');
+    expect(plist).toContain('<key>ThrottleInterval</key>\n    <integer>30</integer>');
+    expect(plist).toContain('<key>DUTYDECK_SUPERVISOR</key>\n        <string>launchd</string>');
     expect(plist).toContain('<string>/usr/local/bin:/usr/bin:/bin</string>');
+    // 与 Linux unit 一样钉在 daemon 根目录，日志写守护日志。
+    expect(plist).toContain(`<key>WorkingDirectory</key>\n    <string>${join(tmp, HOME)}</string>`);
+    expect(plist).toContain(`<string>${join(tmp, HOME, '.dutydeck', 'daemon', 'dutydeck.log')}</string>`);
     // 日志目录必须提前建好，否则 launchd 会因为 StandardOutPath 不可写而起不来
-    expect(existsSync(join(tmp, HOME, '.dutydeck', 'logs'))).toBe(true);
+    expect(existsSync(join(tmp, HOME, '.dutydeck', 'daemon'))).toBe(true);
+  });
+
+  it('macOS: 旧模板（后台 start、KeepAlive=false）的 plist 报漂移并提示升级', async () => {
+    mkdirSync(dirname(macPlist()), { recursive: true });
+    writeFileSync(macPlist(), '<plist><dict><key>KeepAlive</key><false/><string>start</string></dict></plist>\n');
+    const result = await autostartStatus(options('darwin', commandLog(macNotLoaded)));
+    expect(result.state.stale).toBe(true);
+    expect(result.state.details?.some(detail => detail.includes('旧模板'))).toBe(true);
+  });
+
+  it('macOS: job 进程还在运行时 disable 拒绝，不 bootout、不删 plist', async () => {
+    await autostartEnable(options('darwin', commandLog(macNotLoaded)));
+    const running: Responder = (command, args) => (command === 'launchctl' && args[0] === 'print' ? { status: 0, stdout: 'gui/501/com.dutydeck.server = {\n\tstate = running\n\tpid = 4242\n}\n' } : undefined);
+    const log = commandLog(running);
+    const error = await rejection(autostartDisable(options('darwin', log)));
+    expect(error.code).toBe('unit-active');
+    expect(error.notices.join('\n')).toContain('dutydeck stop');
+    expect(log.calls.some(call => call.includes('bootout') || call.includes('unload'))).toBe(false);
+    expect(existsSync(macPlist())).toBe(true);
   });
 
   it('macOS: enable 只注册引导钩子，绝不 bootstrap / start 服务', async () => {
@@ -290,7 +316,7 @@ describe('Dutydeck 开机自启', () => {
   });
 
   it('Linux: HOME 是符号链接时 WorkingDirectory 写真实路径，与 daemon 记录的 process.cwd() 一致', async () => {
-    const realHome = join(tmp, 'data00', 'home', 'tester');
+    const realHome = join(tmp, 'disk2', 'home', 'tester');
     const linkHome = join(tmp, 'home-link');
     mkdirSync(realHome, { recursive: true });
     symlinkSync(realHome, linkHome);
@@ -604,5 +630,71 @@ describe('Dutydeck 开机自启', () => {
 
     await autostartEnable(options('linux', commandLog(linuxResponder())));
     expect(readFileSync(linuxUnit(), 'utf8')).toBe(autostartUnitContent(options('linux', commandLog())));
+  });
+
+  // ─── PATH 不算漂移 ───────────────────────────────────────────────────────
+
+  it.each(['linux', 'darwin'])('%s: 只有 PATH 与当前 shell 不同时不报漂移、不建议 enable，只提示一行', async platform => {
+    const responder = platform === 'linux' ? linuxResponder({ isEnabled: true, isActive: true }) : macLoaded;
+    await autostartEnable(options(platform, commandLog(responder)));
+    const result = await autostartStatus(options(platform, commandLog(responder), { pathEnv: '/opt/other/bin:/usr/bin:/bin' }));
+    expect(result.state.stale).toBe(false);
+    expect(result.state.pathDiffers).toBe(true);
+    expect(result.notices.some(notice => notice.includes('PATH 与当前 shell 不同'))).toBe(true);
+    expect(result.notices.some(notice => notice.includes('autostart enable'))).toBe(false);
+  });
+
+  it('PATH 之外还有变化时照常报漂移', async () => {
+    await autostartEnable(options('linux', commandLog(linuxResponder())));
+    const result = await autostartStatus(options('linux', commandLog(linuxResponder()), { pathEnv: '/opt/other/bin', execPath: '/opt/node24/bin/node' }));
+    expect(result.state.stale).toBe(true);
+    expect(result.state.pathDiffers).toBeUndefined();
+  });
+
+  it('plist 里含 XML 转义字符的 PATH 也能识别为只有 PATH 不同', async () => {
+    await autostartEnable(options('darwin', commandLog(macNotLoaded), { pathEnv: '/opt/a&b/bin:/usr/bin' }));
+    const result = await autostartStatus(options('darwin', commandLog(macNotLoaded)));
+    expect(result.state).toMatchObject({ stale: false, pathDiffers: true });
+  });
+
+  // ─── 发布目录（releases/current 软链） ──────────────────────────────────
+
+  /** 建一个 `<releases>/<版本>/dist/cli.js` 加 `current -> <版本>` 的发布目录，返回真实入口与 current 入口。 */
+  function releaseLayout() {
+    const releases = join(tmp, 'releases');
+    mkdirSync(join(releases, '20260101T000000Z-abc1234', 'dist'), { recursive: true });
+    writeFileSync(join(releases, '20260101T000000Z-abc1234', 'dist', 'cli.js'), '');
+    symlinkSync('20260101T000000Z-abc1234', join(releases, 'current'));
+    return { real: join(releases, '20260101T000000Z-abc1234', 'dist', 'cli.js'), current: join(releases, 'current', 'dist', 'cli.js') };
+  }
+
+  it('经 current 软链运行时（入口被 realpath 成具体版本），enable 写 current 路径，status 不报漂移', async () => {
+    const { real, current } = releaseLayout();
+    // 按 deploy 要求，unit 写的是 current 路径；Node 对 ESM 主模块 realpath 后，cli.ts 传进来的是具体版本目录。
+    await autostartEnable(options('linux', commandLog(linuxResponder()), { cliPath: current }));
+    const status = await autostartStatus(options('linux', commandLog(linuxResponder()), { cliPath: real }));
+    expect(autostartUnitContent(options('linux', commandLog(), { cliPath: real }))).toBe(readFileSync(linuxUnit(), 'utf8'));
+    expect(status.state.stale).toBe(false);
+    const before = readFileSync(linuxUnit(), 'utf8');
+    await autostartEnable(options('linux', commandLog(linuxResponder()), { cliPath: real }));
+    expect(readFileSync(linuxUnit(), 'utf8')).toBe(before);
+    expect(readFileSync(linuxUnit(), 'utf8')).toContain(`ExecStart=/usr/local/node/v22.12.0/bin/node ${current} start --foreground`);
+    expect(readFileSync(linuxUnit(), 'utf8')).not.toContain('20260101T000000Z-abc1234');
+  });
+
+  it('current 指向别的版本时不改写：被钉在旧版本的 unit 照样报漂移', async () => {
+    const { real } = releaseLayout();
+    const other = join(tmp, 'releases', '20251201T000000Z-def5678', 'dist');
+    mkdirSync(other, { recursive: true });
+    writeFileSync(join(other, 'cli.js'), '');
+    await autostartEnable(options('linux', commandLog(linuxResponder()), { cliPath: join(other, 'cli.js') }));
+    expect(readFileSync(linuxUnit(), 'utf8')).toContain(join(other, 'cli.js'));
+    expect((await autostartStatus(options('linux', commandLog(linuxResponder()), { cliPath: real }))).state.stale).toBe(true);
+  });
+
+  it('systemd 停止超时高于服务自己的强制退出上限：进程能带着阶段信息自己退出，而不是被 SIGKILL', () => {
+    const unit = autostartUnitContent(options('linux', commandLog()));
+    const timeoutStopSec = Number(/^TimeoutStopSec=(\d+)$/m.exec(unit)?.[1]);
+    expect(timeoutStopSec * 1000).toBeGreaterThan(SHUTDOWN_DEADLINE_MS);
   });
 });

@@ -98,6 +98,7 @@ import { loadDaemonPlugins, wirePlugins } from './plugins/service-wiring.js';
 import { createPluginManagementAuthorizer } from './plugins/management-auth.js';
 import { sessionHookContext } from './plugins/integration.js';
 import type { StoredLarkConfig } from './lark/config.js';
+import { ShutdownPhases } from './shutdown-phases.js';
 
 export interface StartLocalServerOptions {
   pluginResultIdentity?: PluginResultIdentityOptions;
@@ -117,6 +118,8 @@ export interface LocalServer {
   config: AppConfig;
   runtime: DutydeckRuntime;
   close(): Promise<void>;
+  /** 停服各阶段的进度；close() 开始后才有记录，强制退出时据此报出卡住的阶段。 */
+  shutdownPhases: ShutdownPhases;
 }
 
 export function listenOptions(config: Pick<AppConfig, 'host' | 'port'>) {
@@ -135,6 +138,9 @@ export function accessMode(config: Pick<AppConfig, 'host' | 'authEnabled'>): 'lo
 
 /** 显式确认在非回环地址上免认证运行：--unsafe-no-auth 或这个环境变量 */
 export const UNSAFE_NO_AUTH_ENV = 'DUTYDECK_UNSAFE_NO_AUTH';
+/** 停服步骤，按执行顺序；强制退出时据此列出还没开始的步骤。 */
+const SHUTDOWN_PHASES = ['insight', 'historyRetention', 'watch', 'pluginResults', 'workbench', 'workbenchHttp', 'workItems', 'delegations', 'automation', 'ciWebhook', 'pullRequests',
+  'relayClose', 'collaboration', 'relayFlush', 'http', 'runtime', 'capabilities', 'database', 'pluginDispose'] as const;
 
 /**
  * 监听地址不是回环、认证又关着（open 模式）时返回拒绝启动的说明，显式确认 unsafe 时放行。
@@ -228,6 +234,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   // 插件在加载配置之前加载：插件 agents 要与 DUTYDECK_AGENTS_JSON 一起合并。没有启用的插件（或只有内置场景包）时为 undefined，下面不接线。
   // 启动各阶段耗时（毫秒），开始监听后汇总成一条日志；boot 是进程启动到这里（Node 启动与模块加载）。
   const startupMs: Record<string, number> = { boot: Math.round(process.uptime() * 1000) };
+  const shutdownPhases = new ShutdownPhases(SHUTDOWN_PHASES);
   let startupMark = performance.now();
   const startupPhase = (name: string) => { const now = performance.now(); startupMs[name] = Math.round(now - startupMark); startupMark = now; };
   const startupEnvironment = options.env ?? process.env;
@@ -710,9 +717,10 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   const workInteractions = new WorkItemInteractions(workItems, runtime, relayBroker, (sessionId, actorId, action) => authorizeWorkItemInteraction(repos, groupManager, sessionId, actorId, action, env, workbenchHttp.fetch));
   closeResources = () => {
     if (!closeRun) closeRun = (async () => {
+      const phase = (name: string, operation: () => unknown) => shutdownPhases.run(name, operation);
       // 分析服务必须在任何并行关闭组之前显式 await：先拒新刷新、取消 queued/running
       // 作业并等待 runner 退出与临时目录清理，再关闭 HTTP/runtime/repos。
-      await closeInsightService();
+      await phase('insight', closeInsightService);
       if (tokenRefresh) clearInterval(tokenRefresh);
       clearInterval(shareSecretRefresh);
       disposeShareSigner();
@@ -721,21 +729,22 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       if (collaborationTimer) clearInterval(collaborationTimer);
       if (resourceRetentionTimer) clearInterval(resourceRetentionTimer);
       historyRetention.abort();
-      await historyRetentionRun;
+      await phase('historyRetention', () => historyRetentionRun);
       const errors: unknown[] = [...insightCloseErrors];
-      const settle = async (operations: Array<() => unknown>) => {
-        const results = await Promise.allSettled(operations.map(operation => Promise.resolve().then(operation)));
+      const settle = async (operations: Array<[string, () => unknown]>) => {
+        const results = await Promise.allSettled(operations.map(([name, operation]) => phase(name, operation)));
         errors.push(...results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => result.reason));
       };
-      await settle([() => closeWatch?.()]);
-      await settle([closePluginResults]);
-      await settle([() => workbench.close(), () => workbenchHttp.close(), () => workItems.close(), () => delegations.close(), () => automation.close(), () => ciWebhook?.close(), () => pullRequests.close()]);
+      await settle([['watch', () => closeWatch?.()]]);
+      await settle([['pluginResults', closePluginResults]]);
+      await settle([['workbench', () => workbench.close()], ['workbenchHttp', () => workbenchHttp.close()], ['workItems', () => workItems.close()], ['delegations', () => delegations.close()], ['automation', () => automation.close()], ['ciWebhook', () => ciWebhook?.close()], ['pullRequests', () => pullRequests.close()]]);
       // Wake blocked asks before waiting for HTTP shutdown.
-      await settle([() => relayBroker.close()]);
-      await settle([() => collaboration?.close(), () => relayBroker.flush(), () => app?.close(), () => runtime.shutdown()]);
-      await settle([() => capabilities.close()]);
-      await settle([() => repos.close()]);
-      await settle([() => pluginWiring?.dispose()]);
+      await settle([['relayClose', () => relayBroker.close()]]);
+      await settle([['collaboration', () => collaboration?.close()], ['relayFlush', () => relayBroker.flush()], ['http', () => app?.close()], ['runtime', () => runtime.shutdown()]]);
+      await settle([['capabilities', () => capabilities.close()]]);
+      await settle([['database', () => repos.close()]]);
+      await settle([['pluginDispose', () => pluginWiring?.dispose()]]);
+      app?.log.info({ shutdownMs: shutdownPhases.durationsMs() }, '停服各阶段耗时');
       if (errors.length) throw new AggregateError(errors, 'Dutydeck did not shut down cleanly');
     })();
     return closeRun;
@@ -983,7 +992,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       void timeLoop('collaboration.tick', loopLog, () => collaboration!.scheduler.tick()).catch(error => app?.log.warn({ error }, '群委托轮询失败')); };
     collaborationTimer = setInterval(tickCollaboration, 5_000);
     collaborationTimer.unref(); tickCollaboration();
-  return { config, runtime, close: closeResources };
+  return { config, runtime, close: closeResources, shutdownPhases };
   } catch (error) {
     try { await closeResources(); } catch (cleanupError) { throw new AggregateError([error, cleanupError], 'Dutydeck startup and cleanup failed'); }
     throw error;

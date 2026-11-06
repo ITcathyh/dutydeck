@@ -106,6 +106,8 @@ export interface DatabaseProbeResult {
   values?: Readonly<Record<string, string | undefined>>;
   /** 近 30 天用量记录里因型号未知而记为未定价的型号（去重）；usage_ledger 表不存在时缺席。 */
   unpricedUsageModels?: readonly string[];
+  /** 页统计（PRAGMA page_size / page_count / freelist_count）；读不到时缺席。 */
+  pages?: { pageSize: number; pageCount: number; freelistCount: number };
 }
 
 /**
@@ -132,6 +134,7 @@ export interface DoctorAutostartState {
   unitPath?: string;
   lingerEnabled?: boolean;
   stale?: boolean;
+  pathDiffers?: boolean;
 }
 export interface DoctorAutostartResult {
   state: DoctorAutostartState;
