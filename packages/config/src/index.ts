@@ -27,19 +27,23 @@ const agentDetails: Record<string, { name: string; cli: string }> = {
 };
 
 // Several agents share one CLI (claude/claude-code, codex/codex-cli/codex-acp), and ACPX and PTY discovery
-// both probe it; like the scan caches below, keep one result per command for the process lifetime.
-const cliVersions = new Map<string, string | undefined>();
+// both probe it; keep each successfully probed version for the process lifetime. Failures and timeouts
+// are not cached so a later call can still pick the version up.
+const cliVersions = new Map<string, string>();
 
 export function cliVersion(command: string): string | undefined {
-  if (cliVersions.has(command)) return cliVersions.get(command);
-  let version: string | undefined;
+  const cached = cliVersions.get(command);
+  if (cached !== undefined) return cached;
   for (const args of [['--version'], ['-V'], ['version']]) {
     const result = spawnSync(command, args, { encoding: 'utf8', timeout: 1500, env: { ...process.env, NO_COLOR: '1' } });
     const line = `${result.stdout ?? ''}\n${result.stderr ?? ''}`.split(/\r?\n/).map(value => value.trim()).find(Boolean);
-    if (result.status === 0 && line) { version = line.slice(0, 100); break; }
+    if (result.status === 0 && line) {
+      const version = line.slice(0, 100);
+      cliVersions.set(command, version);
+      return version;
+    }
   }
-  cliVersions.set(command, version);
-  return version;
+  return undefined;
 }
 
 const builtinCli = (id: string, env: Record<string, string | undefined> = process.env) => (id === 'codex' || id === 'codex-acp') ? env.CODEX_PATH || agentDetails[id]!.cli : agentDetails[id]!.cli;
