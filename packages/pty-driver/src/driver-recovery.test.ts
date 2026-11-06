@@ -197,6 +197,52 @@ tmuxDescribe('PtyCliDriver in-flight tmux turn recovery', () => {
     await recovered.stop();
   }, 45_000);
 
+  it('keeps a reattached turn open while replay ends at an unanswered tool_use and the pane stays still', async () => {
+    const f = fixture();
+    const firstBackend = new TmuxBackend(f.name, { ownerId: f.ownerId });
+    const first = new PtyCliDriver({
+      agent: config(f.cwd), adapter: shellAdapter([]), backend: firstBackend,
+      onEvent() {}, onExit() {}, sessionId,
+    });
+    await first.start();
+    const checkpoint = (await first.checkpoint())!;
+    // The still pane keeps an earlier turn's completion line above an empty composer,
+    // the strongest stale screen evidence a long tool call can leave behind.
+    const pending = first.send("clear; printf '%s\\n' '✻ Worked for 3s' '────────' '❯' '────────' '? for shortcuts'; sleep 60");
+    void pending.catch(() => {});
+    await waitFor(async () => expect((await firstBackend.getDutydeckMetadata('turn_id'))).toBe(checkpoint.turnId));
+    await first.prepareForDaemonShutdown();
+    await first.stop();
+    await expect(pending).rejects.toBeInstanceOf(DriverDetachedError);
+    await waitFor(() => expect(execFileSync('tmux', ['capture-pane', '-p', '-t', f.name], { encoding: 'utf8' })).toContain('? for shortcuts'));
+    appendFileSync(f.transcript, JSON.stringify({
+      type: 'assistant',
+      message: { role: 'assistant', stop_reason: 'tool_use', content: [
+        { type: 'text', text: 'running the long command' },
+        { type: 'tool_use', id: 'toolu_long', name: 'Bash', input: { command: 'sleep 600' } },
+      ] },
+    }) + '\n');
+
+    const events: NormalizedDriverEvent[] = [];
+    const recovered = new PtyCliDriver({
+      agent: config(f.cwd), adapter: { ...createCliAdapter('claude-code')!, buildArgs: () => [], prepareInput: undefined },
+      backend: new TmuxBackend(f.name, { ownerId: f.ownerId }),
+      onEvent: event => events.push(event), onExit() {}, sessionId,
+    });
+    let settled = false;
+    const recovering = recovered.recover(checkpoint).then(() => { settled = true; }, error => error);
+    try {
+      await waitFor(() => expect(events.some(event => event.type === 'tool_call')).toBe(true));
+      await new Promise(resolve => setTimeout(resolve, 10_500));
+      expect(events.filter(event => event.type === 'completed')).toEqual([]);
+      expect(settled).toBe(false);
+    } finally {
+      await recovered.prepareForDaemonShutdown();
+      await recovered.stop();
+      await recovering;
+    }
+  }, 45_000);
+
   it('settles an offline-completed pane from capture-pane plus transcript replay', async () => {
     const f = fixture();
     const firstBackend = new TmuxBackend(f.name, { ownerId: f.ownerId });
