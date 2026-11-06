@@ -369,6 +369,23 @@ describe('live group configuration', () => {
     expect((await manager.groups()).groups).toHaveLength(2);
   });
 
+  it('returns no group decision for unbound chats without reading facts, roles or identity', async () => {
+    const reads = [
+      vi.spyOn(repos.remoteChatFacts, 'getByNaturalKey'), vi.spyOn(repos.remoteIdentityFacts, 'getByChannelBot'),
+      vi.spyOn(repos.roleAssignments, 'listByChannelBot'), vi.spyOn(repos.channelBots, 'get')
+    ];
+    const sync = vi.spyOn(manager, 'sync');
+    time = new Date(time.getTime() + 3_600_001);
+    for (const readOnly of [true, false]) expect(await manager.authorize('cli_one', 'oc_one', 'ou_alice', 'task.create', undefined, { readOnly })).toBeUndefined();
+    for (const read of reads) expect(read).not.toHaveBeenCalled();
+    expect(sync).not.toHaveBeenCalled();
+    time = new Date(time.getTime() - 3_600_001);
+    await save();
+    expect((await manager.authorize('cli_one', 'oc_one', 'ou_alice', 'task.create', undefined, { readOnly: true }))?.allowed).toBe(true);
+    expect((await manager.authorize('cli_one', 'oc_one', 'ou_alice', 'task.create'))?.allowed).toBe(true);
+    expect(reads[0]).toHaveBeenCalled();
+  });
+
   it('invalidates runtime use when credentials rotate, evidence expires or membership is revoked', async () => {
     await save();
     expect((await manager.authorize('cli_one', 'oc_one', 'ou_alice', 'task.create'))?.allowed).toBe(true);
