@@ -1644,12 +1644,7 @@ export class PtyCliDriver implements AgentDriver {
         // no additional PTY redraw is required and the original turn owns it.
         if (this.turnActive && this.awaitingTranscriptResult && this.turnHasTranscriptResult) {
           this.awaitingTranscriptResult = false;
-          this.idleDetector?.reset();
-          this.checkRenderedCompletion();
-          if (this.idleDetector?.programStatusTerminal()) this.idleDetector.fireIdle();
-          if (!this.adapter.completionPattern && this.adapter.readyPattern?.test(this.snapshot?.viewportText() ?? '')) {
-            this.idleDetector?.seedReadyEvidence();
-          }
+          this.retryIdleFromTranscript();
         }
       });
       this.transcript.onProgress?.(() => {
@@ -1660,14 +1655,23 @@ export class PtyCliDriver implements AgentDriver {
         if (this.completeInputError() || (!this.awaitingTranscriptResult && !nativeTerminal && !this.idleDetector?.programStatusTerminal())) return;
         // Claude's API errors are held until completion rather than emitted
         // as model output. A newly read error must retry the same idle guard.
-        this.idleDetector?.reset();
-        this.checkRenderedCompletion();
-        if (this.idleDetector?.programStatusTerminal()) this.idleDetector.fireIdle();
-        if (!this.adapter.completionPattern && this.adapter.readyPattern?.test(this.snapshot?.viewportText() ?? '')) {
-          this.idleDetector?.seedReadyEvidence();
-        }
+        this.retryIdleFromTranscript();
       });
       this.transcript.start();
+    }
+  }
+
+  /** Re-run the idle guard after new transcript evidence, keeping a prompt the PTY already showed. */
+  private retryIdleFromTranscript(): void {
+    // The renderer parses asynchronously, so the viewport can still lag the
+    // final prompt the idle detector has seen. Dropping that evidence would
+    // leave a CLI that prints nothing more stuck in this turn forever.
+    const ready = this.idleDetector?.hasReadyEvidence() === true;
+    this.idleDetector?.reset();
+    this.checkRenderedCompletion();
+    if (this.idleDetector?.programStatusTerminal()) this.idleDetector.fireIdle();
+    if (!this.adapter.completionPattern && (ready || this.adapter.readyPattern?.test(this.snapshot?.viewportText() ?? ''))) {
+      this.idleDetector?.seedReadyEvidence();
     }
   }
 

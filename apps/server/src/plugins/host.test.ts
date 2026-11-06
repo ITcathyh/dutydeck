@@ -122,12 +122,17 @@ describe('PluginHost', () => {
     await writePlugin(join(temp, 'valid'), { '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'b-valid', providers: 'index.mjs' }), 'index.mjs': 'await Promise.resolve(); export default async api => { await Promise.resolve(); api.registerHookHandler("notify", () => ({})); };' });
     await store.install(join(temp, 'stalled'), { yes: true }); await store.install(join(temp, 'valid'), { yes: true });
     const setTimer = globalThis.setTimeout;
-    let firstDeadline = true;
+    // 接管卡住插件的加载截止，由测试在它开始等待后亲手触发；不按墙钟计时，机器负载高也不会误判。
+    let expireStalled: (() => void) | undefined;
     vi.spyOn(globalThis, 'setTimeout').mockImplementation(((callback, delay, ...args) => {
-      if (delay === 15_000 && firstDeadline) { firstDeadline = false; return setTimer(callback, 40, ...args); }
+      if (delay === 15_000 && !expireStalled) { expireStalled = () => callback(...args); return setTimer(() => {}, 15_000).unref(); }
       return setTimer(callback, delay, ...args);
     }) as typeof setTimeout);
-    const host = await Promise.race([PluginHost.load({ dataDir, builtinRoot: join(temp, 'empty') }), new Promise<never>((_, reject) => setTimer(() => reject(new Error('provider startup remained blocked')), 500))]);
+    const loading = PluginHost.load({ dataDir, builtinRoot: join(temp, 'empty') });
+    await vi.waitFor(() => expect(expireStalled).toBeDefined(), { timeout: 10_000 });
+    expireStalled!();
+    // 截止到点后加载必须继续；仍卡住时由用例超时报出。
+    const host = await loading;
     expect(host.active.map(item => item.entry.name)).toEqual(['b-valid']);
     expect(host.hooks.has('notify')).toBe(true);
     expect(host.diagnostics).toEqual([{ plugin: 'a-stalled', message: expect.stringContaining('PLUGIN_PROVIDER_REGISTRATION_FAILED') }]);

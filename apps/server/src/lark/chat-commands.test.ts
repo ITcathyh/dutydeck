@@ -217,8 +217,9 @@ describe('/queue 查看与操作待执行指令', () => {
     expect(listed).toContain('第二件事');
     expect(listed).toContain('第三件事');
 
-    await h.coordinator.handle(event('om_q2', '/queue top 2'), h.config);
+    // 编号对应提升前的队列：提到队首会中断当前这一轮，被提的那条随即开跑、离开排队列表，提升后再读编号就对不上了。
     const queuedIds = (await h.runtime.getTasks(session)).filter(task => task.status === 'queued').map(task => task.id);
+    await h.coordinator.handle(event('om_q2', '/queue top 2'), h.config);
     expect(h.steerQueued).toHaveBeenCalledWith(session, queuedIds[1], 'ou_alice');
 
     await h.coordinator.handle(event('om_q3', '/queue cancel 1'), h.config);
