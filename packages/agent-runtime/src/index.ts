@@ -200,6 +200,8 @@ export interface SessionNotice {
 /** 空闲回收没能核实终端进程已退出时，隔这么久后台复核一次，之后每次加倍，最长隔 30 分钟。 */
 const STOP_RECHECK_MS = 45_000;
 const STOP_RECHECK_MAX_MS = 30 * 60_000;
+/** 一次复核里等驱动探测或再停一次的上限；超时按「还没证明退出」处理，照常排下一次复核。 */
+const STOP_RECHECK_PROBE_MS = 30_000;
 /** 空闲回收前确认不了原生会话的终端（比如卡在启动确认框），闲置超过回收时限再加这么久，就不再保留、照常回收。 */
 const IDLE_RETIREMENT_UNPREPARED_MS = 18 * 60 * 60_000;
 /** 结果未知的一轮开始超过这么久还没人处理，在原话题提醒一次怎么处理。 */
@@ -317,6 +319,8 @@ export class DutydeckRuntime {
   private readonly exitedDriverGenerations = new Map<string, number>();
   private readonly driverEventChains = new Map<string, Promise<void>>();
   private readonly driverEventErrors = new Map<string, unknown>();
+  /** Attempts whose last in-turn event flush has run: a later event error can no longer fail them, nor the next turn. */
+  private readonly eventFlushedAttempts = new Set<string>();
   private readonly driverStopReasons = new Map<string, string>();
   private readonly turnErrors = new Map<string, string>();
   private readonly capacityTimers = new Map<string, { taskId: string; timer: ReturnType<typeof setTimeout> }>();
@@ -540,7 +544,7 @@ export class DutydeckRuntime {
     })).catch(error => {
       if (!this.mutations.valid(token) || this.sessionGenerations.get(session.id) !== generation) return;
       // 只有轮次内的事件错误留给当轮结算；两轮之间的事件与下一条消息无关，记日志后丢弃。
-      if (isAttemptRef(ref)) { if (!this.driverEventErrors.has(session.id)) this.driverEventErrors.set(session.id, error); return; }
+      if (isAttemptRef(ref) && !this.eventFlushedAttempts.has(ref.attemptId)) { if (!this.driverEventErrors.has(session.id)) this.driverEventErrors.set(session.id, error); return; }
       this.options.log?.warn({ sessionId: session.id, eventType: event.type, code: error instanceof RuntimeError ? error.code : 'DRIVER_EVENT_FAILED', error: error instanceof Error ? error.message : String(error) }, 'Idle driver event could not be recorded');
     });
     this.driverEventChains.set(session.id, next);
@@ -2497,8 +2501,10 @@ export class DutydeckRuntime {
       }
       // reconnect may reject before its caller receives the original driver handle.
       // 启动失败的驱动当场核实退出：核实了就清掉阻塞，下一条消息重新拉起；核实不了交给后台复核，不让会话一直挡着。
+      // 显式停止或重启撤销了这次启动时，驱动归那次停止处理，不排启动失败复核。
+      const revoked = error instanceof RevokedOperation || !this.mutations.valid();
       await this.mutations.run(undefined,()=>this.stopDriver(session.id,driver,discardOnFailure)).catch(()=>{
-        if(!discardOnFailure&&!this.shuttingDown&&this.blockedDrivers.get(session.id)?.driver===driver&&!this.stopRechecks.has(session.id))this.scheduleStopRecheck(session.id,driver,STOP_RECHECK_MS,new Date().toISOString(),'startup');
+        if(!revoked&&!this.shuttingDown&&this.blockedDrivers.get(session.id)?.driver===driver&&!this.stopRechecks.has(session.id))this.scheduleStopRecheck(session.id,driver,STOP_RECHECK_MS,new Date().toISOString(),'startup');
       });
       throw error;
     }
@@ -2712,6 +2718,10 @@ export class DutydeckRuntime {
       this.blockedDrivers.set(id, { driver, reason }); await this.retainStopBlock(id, reason);
       throw new RuntimeError('DRIVER_STOP_UNVERIFIED', reason, 409);
     }
+    await this.retireStoppedDriver(id, driver);
+  }
+  /** 驱动已证明原进程都已退出：资源记为已退出，清掉停止受阻。 */
+  private async retireStoppedDriver(id: string, driver: AgentDriver) {
     await this.mutations.write(id, async () => this.localResources.gone(driver));
     this.localResources.retire(driver);
     for (const [operationId, reply] of this.steeringReplies) if (reply.driver === driver) this.steeringReplies.delete(operationId);
@@ -2916,6 +2926,7 @@ export class DutydeckRuntime {
         });
       } else await this.driverOperation(driver, async () => { if (await compact()) await driver.send(prompt); });
       await this.flushDriverEvents(id);
+      this.eventFlushedAttempts.add(ref.attemptId);
       // 结束快照在结算之前：结算事件一到，飞书结果卡就要读这一轮的改动摘要。
       await this.mutations.wait(observeEnd);
       if (!this.completedTurns.has(ref.attemptId)) throw new RuntimeError('DRIVER_RESULT_INCOMPLETE', 'Driver returned without a completed result', 409);
@@ -2934,6 +2945,7 @@ export class DutydeckRuntime {
       // Stop owns revoked attempts and retains its claim until this cleanup finishes.
       if (this.mutations.valid(token)) {
         await this.flushDriverEvents(id).catch(() => {});
+        this.eventFlushedAttempts.add(ref.attemptId);
         await observeEnd();
         // 提交前失败时 Agent 没产生任何事件，原因只记在结算上；先补一条错误事件，结果卡和 Web 才写得出为什么失败。
         const unsubmitted = this.repos.execution.getTaskExecution(task.id)?.attempts.find(item => item.attemptId === ref.attemptId);
@@ -2961,7 +2973,7 @@ export class DutydeckRuntime {
         this.attempts.delete(id); this.activeTurns.delete(id); this.activeTasks.delete(id);
         token.revoke(); this.touch(id);
       }
-      this.completedTurns.delete(ref.attemptId); this.driverStopReasons.delete(ref.attemptId); this.turnErrors.delete(ref.attemptId);
+      this.completedTurns.delete(ref.attemptId); this.driverStopReasons.delete(ref.attemptId); this.turnErrors.delete(ref.attemptId); this.eventFlushedAttempts.delete(ref.attemptId);
       this.attemptTools.delete(ref.attemptId); this.oscPermissionWaits.delete(ref.attemptId); this.wakeResourceQueues();
     }
     const settled = this.publicTask(this.repos.execution.getTaskExecution(task.id)?.task ?? task);
@@ -3063,8 +3075,8 @@ export class DutydeckRuntime {
     return this.scoped(id, async () => {
       const { session } = await this.active(id);
       // 空闲回收或启动失败后没核实进程已退出、正等后台复核：排进队列也要等复核，直接告诉调用方这个会话暂不可用。
-      // 其余停止受阻由恢复流程（核对结果未知、终端回收）解除，解除后照常执行排队的消息，所以仍收进队列。
-      const stopBlock = this.stopRechecks.has(id) ? this.getDriverStopBlock(id) : undefined;
+      // 其余停止受阻（包括驱动报告退出永远无法核实的）由恢复流程（核对结果未知、终端回收）解除，解除后照常执行排队的消息，所以仍收进队列。
+      const stopBlock = this.stopRechecks.has(id) && this.blockedDrivers.get(id)?.driver.stopUnverifiable?.() !== true ? this.getDriverStopBlock(id) : undefined;
       if (stopBlock) throw new RuntimeError('DRIVER_STOP_UNVERIFIED', `这个会话的 Agent 进程还没确认已经退出，暂时不能接新消息。后台会定时复核，确认退出后自动恢复，之后重新发送即可。（${stopBlock}）`, 409);
       await this.authorize(id, actorId);
       await this.mutations.wait(() => this.options.admitTask?.(session, request) ?? Promise.resolve());
@@ -3850,45 +3862,62 @@ export class DutydeckRuntime {
     this.stopRechecks.set(id, { timer, since });
   }
   /**
-   * 空闲回收退出未核实的复核：沿用停止重试再停一次驱动（上次停止可能根本没结束终端，例如忙碌的 tmux 会话），
-   * 驱动证明原进程都已退出，就把资源记为已退出、清掉停止受阻，再重开会话；否则按退避继续复核。
-   * 第一次复核仍未通过时在会话里提醒一次。
+   * 空闲回收或启动失败后退出未核实的复核：先用驱动已有的退出证明核实，核实不了才沿用停止重试再停一次
+   * （上次停止可能根本没结束终端，例如忙碌的 tmux 会话）。证明原进程都已退出，就把资源记为已退出、清掉停止受阻，
+   * 再重开会话；否则按退避继续复核。复核不撤销会话、不取消排队任务、不中止验证。
+   * 第一次复核仍未通过时在会话里提醒一次；驱动报告退出永远无法核实时提醒需要人工核对，不再复核。
    */
   private async recheckStop(id: string, driver: AgentDriver, delay: number, since: string, cause: 'idle' | 'startup') {
-    if (this.stopRechecks.get(id)?.since !== since) return;
-    this.stopRechecks.delete(id);
-    if (this.shuttingDown || this.blockedDrivers.get(id)?.driver !== driver) return;
+    const entry = this.stopRechecks.get(id);
+    if (entry?.since !== since) return;
+    // 复核结束前一直保留条目：新消息照常收到 DRIVER_STOP_UNVERIFIED，探测挂住也不会让复核链断掉。
+    const finish = () => { if (this.stopRechecks.get(id) === entry) this.stopRechecks.delete(id); };
+    if (this.shuttingDown || this.blockedDrivers.get(id)?.driver !== driver) { finish(); return; }
     // 每个 await 之后都可能已有显式停止、重启换了 transition、会话锁或驱动；只用探测前取得的 owner，失效就不再动这个会话。
     const token = this.ownerOf(id), lifecycle = this.lifecycle(id);
-    const current = () => !this.shuttingDown && this.mutations.valid(token) && this.lifecycle(id) === lifecycle
+    const current = () => !this.shuttingDown && this.mutations.valid(token) && this.lifecycle(id) === lifecycle && !this.stopRuns.has(id)
       && this.blockedDrivers.get(id)?.driver === driver && (this.drivers.get(id) ?? driver) === driver;
+    const bounded = <T>(operation: () => Promise<T>) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const expired = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new RuntimeError('DRIVER_STOP_UNVERIFIED', 'Driver exit check timed out', 409)), STOP_RECHECK_PROBE_MS);
+        timer.unref?.();
+      });
+      return Promise.race([operation(), expired]).finally(() => clearTimeout(timer));
+    };
     let error: unknown;
-    // 先在停止流程外探测一次：探测挂起时不占用 stopRuns，显式停止或重启不会排在它后面。
-    // 不论结果，下面的停止重试都会再停一次并重新核实退出。
-    if (!this.stopRuns.has(id)) await driver.isStopped?.();
-    if (!this.stopRuns.has(id) && current()) {
-      try {
-        const reopened = await this.mutations.run(token, async () => {
-          await this.revokeSession(id, false, 'interrupted');
-          if (!this.mutations.valid(token) || this.lifecycle(id) !== lifecycle) return false;
+    try {
+      // 探测在停止流程外：挂起时不占用 stopRuns，显式停止或重启不会排在它后面。
+      const proven = await bounded(async () => await driver.isStopped?.() === true).catch(() => false);
+      if (current()) {
+        // 再停一次时驱动合并已有的退出证明，不会退回启动时的进程身份。
+        await this.mutations.run(token, () => proven ? this.retireStoppedDriver(id, driver) : bounded(() => this.stopDriver(id, driver)));
+        await this.mutations.run(token, async () => {
+          const session = await this.repos.sessions.get(id);
+          if (cause === 'idle' && session && !this.repos.execution.getUnresolvedTasks(id).length) await this.saveState(session, 'interrupted');
           await this.reopenQueue(id);
-          return true;
         });
-        if (reopened) this.options.log?.info?.({ sessionId: id, cause, blockedSince: since }, 'Driver exit verified on recheck; session reopened');
+        finish();
+        this.options.log?.info?.({ sessionId: id, cause, blockedSince: since }, 'Driver exit verified on recheck; session reopened');
         return;
-      } catch (failure) { error = failure; }
-    }
-    if (this.shuttingDown || this.blockedDrivers.get(id)?.driver !== driver) return;
-    if (current() && lifecycle.revoked && !this.stopRuns.has(id)) this.lifecycles.set(id, owner(id, token));
-    if (delay === STOP_RECHECK_MS) {
-      this.options.log?.warn({ sessionId: id, code: error instanceof RuntimeError ? error.code : 'DRIVER_STOP_UNVERIFIED', cause, blockedSince: since }, 'Driver exit is still unverified');
+      }
+    } catch (failure) { error = failure; }
+    if (this.shuttingDown || this.blockedDrivers.get(id)?.driver !== driver) { finish(); return; }
+    // 退出永远无法核实（例如看不到进程表）：不再承诺自动恢复。新消息照常排队，等恢复流程解除停止受阻后执行。
+    const unverifiable = driver.stopUnverifiable?.() === true;
+    if (delay === STOP_RECHECK_MS || unverifiable) {
+      this.options.log?.warn({ sessionId: id, code: error instanceof RuntimeError ? error.code : 'DRIVER_STOP_UNVERIFIED', cause, blockedSince: since, unverifiable }, 'Driver exit is still unverified');
       const session = await this.repos.sessions.get(id);
-      if (session && this.blockedDrivers.get(id)?.driver === driver) await this.mutations.run(undefined, () => this.sessionNotice(session, { id: `notice_${digest(['stop_unverified', id, since])}`, kind: 'stop_unverified', taskId: '', sessionIds: [id],
-        message: cause === 'startup' ? '这个会话启动 Agent 失败后，没能确认启动到一半的进程已经退出，暂时不能接新消息。后台会定时复核，确认退出后自动恢复。'
+      const kind = unverifiable ? 'stop_unverifiable' : 'stop_unverified';
+      if (session && this.blockedDrivers.get(id)?.driver === driver) await this.mutations.run(undefined, () => this.sessionNotice(session, { id: `notice_${digest([kind, id, since])}`, kind: 'stop_unverified', taskId: '', sessionIds: [id],
+        message: unverifiable ? '这个会话的 Agent 进程没法确认是否已经退出，后台不会再自动复核。新消息会先排队，请管理员核对进程后在执行恢复里解除。'
+          : cause === 'startup' ? '这个会话启动 Agent 失败后，没能确认启动到一半的进程已经退出，暂时不能接新消息。后台会定时复核，确认退出后自动恢复。'
           : '这个会话闲置关闭时，没能确认它的终端进程已经退出，暂时不能接新消息。后台会定时复核，确认退出后自动恢复。' },
-        { key: `runtime_notice:stop_unverified:${id}`, value: since })).catch(() => {});
+        { key: `runtime_notice:${kind}:${id}`, value: since })).catch(() => {});
     }
+    if (unverifiable) { finish(); return; }
     if (!this.shuttingDown && this.blockedDrivers.get(id)?.driver === driver) this.scheduleStopRecheck(id, driver, Math.min(delay * 2, STOP_RECHECK_MAX_MS), since, cause);
+    else finish();
   }
 
   /**

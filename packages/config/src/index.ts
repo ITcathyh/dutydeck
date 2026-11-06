@@ -28,8 +28,11 @@ const agentDetails: Record<string, { name: string; cli: string }> = {
 
 const VERSION_ARGS = [['--version'], ['-V'], ['version']];
 const versionLine = (stdout: string, stderr: string) => `${stdout}\n${stderr}`.split(/\r?\n/).map(value => value.trim()).find(Boolean)?.slice(0, 100);
-// 同一进程里同一个命令（按当时的 PATH 解析）只探测一次：ACP 与 PTY 两边、插件与环境变量里的同一 CLI 共用结果。
-const probedVersions = new Map<string, string | undefined>();
+// 同一进程里同一个命令（按当时的 PATH 解析）探测成功一次就复用：ACP 与 PTY 两边、插件与环境变量里的同一 CLI 共用结果。
+// 失败不缓存：CLI 稍后装好或临时出错时，下次装配配置会重新探测。
+const probedVersions = new Map<string, string>();
+/** 启动时并行探测版本的命令数上限。 */
+const VERSION_PROBE_CONCURRENCY = 4;
 const probingVersions = new Map<string, Promise<string | undefined>>();
 const versionKey = (command: string) => `${command}\0${process.env.PATH ?? ''}`;
 
@@ -42,7 +45,7 @@ export function cliVersion(command: string): string | undefined {
     const line = versionLine(result.stdout ?? '', result.stderr ?? '');
     if (result.status === 0 && line) { version = line; break; }
   }
-  probedVersions.set(key, version);
+  if (version !== undefined) probedVersions.set(key, version);
   return version;
 }
 
@@ -56,13 +59,14 @@ export function cliVersionAsync(command: string): Promise<string | undefined> {
     let version: string | undefined;
     for (const args of VERSION_ARGS) {
       const result = await new Promise<{ ok: boolean; stdout: string; stderr: string }>(done => {
+        // 与 spawnSync 一样立即给 stdin 结束符：读 stdin 的 CLI 不会一直等到超时。
         execFile(command, args, { encoding: 'utf8', timeout: 1500, env: { ...process.env, NO_COLOR: '1' } },
-          (error, stdout, stderr) => done({ ok: !error, stdout: stdout ?? '', stderr: stderr ?? '' }));
+          (error, stdout, stderr) => done({ ok: !error, stdout: stdout ?? '', stderr: stderr ?? '' })).stdin?.end();
       });
       const line = versionLine(result.stdout, result.stderr);
       if (result.ok && line) { version = line; break; }
     }
-    probedVersions.set(key, version);
+    if (version !== undefined) probedVersions.set(key, version);
     probingVersions.delete(key);
     return version;
   })();
@@ -229,7 +233,7 @@ export function loadConfigWithDiagnostics(env: NodeJS.ProcessEnv = process.env, 
 }
 
 /**
- * 与 loadConfigWithDiagnostics 结果相同；先把它要探测版本的命令去重后异步并行探测完，
+ * 与 loadConfigWithDiagnostics 结果相同；先把它要探测版本的命令去重后异步并行探测完（最多同时 4 个），
  * 同步装配时直接取缓存，启动时不再用 spawnSync 逐个卡住事件循环。
  */
 export async function loadConfigWithDiagnosticsAsync(env: NodeJS.ProcessEnv = process.env, ptyContributions: PtyAgentContribution[] = [], pluginAgents: AgentConfig[] = []): Promise<LoadedConfig> {
@@ -241,7 +245,10 @@ export async function loadConfigWithDiagnosticsAsync(env: NodeJS.ProcessEnv = pr
     ...ptyContributions.map(contribution => ptyCommand(contribution, merged)).filter(command => commandExists(command)),
     ...configured.filter(agent => probesConfiguredVersion(agent) && commandExists(agent.command)).map(agent => agent.command)
   ].filter((command): command is string => Boolean(command)));
-  await Promise.all([...commands].map(cliVersionAsync));
+  const pending = [...commands];
+  await Promise.all(Array.from({ length: Math.min(VERSION_PROBE_CONCURRENCY, pending.length) }, async () => {
+    for (let command = pending.shift(); command; command = pending.shift()) await cliVersionAsync(command);
+  }));
   return loadConfigWithDiagnostics(env, ptyContributions, pluginAgents);
 }
 

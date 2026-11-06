@@ -10,11 +10,23 @@ import { eventContentText, eventHasContent, normalizeEventContent, shellQuote } 
 import { childEnvironment } from '@dutydeck/shared/child-environment';
 import { testRegexWithTimeout } from './regex-timeout.js';
 import { PROCESS_CPU_MIN_WINDOW_MS, ProcessTreeCpu } from './process-cpu.js';
+import { AgentProcessTree } from './agent-process-tree.js';
 import { currentReleasePath } from './release-path.js';
 import { acpDataRoot, buildLaunchObservation, buildNativeObservation, inferAcpInsightClient, resolveAcpChildEnvironment } from './transcript-source.js';
 
 /** 调用 Agent 之前就判定不可用的配置值：原生配置没有任何改动，runtime 据此不把会话记成配置未知。 */
 const configurationRejected = (message: string) => new RuntimeError('CONFIGURATION_REJECTED', message, 422);
+/** The advertised select option for a model or reasoning-effort setting, if the Agent publishes one. */
+function configOption(status: AcpRuntimeStatus | undefined, key: 'model' | 'reasoningEffort'): Record<string, any> | undefined {
+  const options = Array.isArray(status?.details?.configOptions) ? status.details.configOptions as Array<Record<string, any>> : [];
+  return key === 'model' ? options.find(option => option.id === 'model' || option.category === 'model')
+    : options.find(option => option.category === 'thought_level' || option.id === 'reasoning_effort' || option.id === 'effort');
+}
+/** Whether the option offers this value. ACP lists values flat or in groups (SessionConfigSelectGroup); no list means no constraint. */
+function offersValue(option: Record<string, any> | undefined, value: string): boolean {
+  if (!Array.isArray(option?.options)) return true;
+  return (option.options as any[]).flatMap(item => Array.isArray(item?.options) ? item.options : [item]).some(item => item?.value === value);
+}
 
 // 归一化事件类型统一从 @dutydeck/shared re-export，保证 ACP driver 与 PTY driver 用同一类型。
 export type { NormalizedDriverEvent };
@@ -265,6 +277,12 @@ const STUCK_AGENT_RETIRE_MIN_MS = 60_000;
 const STUCK_AGENT_KILL_GRACE_MS = 3_000;
 /** How long a waiting turn allows the ended Agent's stream to close before giving up. */
 const STUCK_AGENT_SETTLE_MS = 10_000;
+/** setTimeout fires after 1ms for any delay above this. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+/** Delay from a turn's timeout until its stuck Agent is ended; the waiting turn's deadline adds STUCK_AGENT_SETTLE_MS. */
+const stuckRetireDelay = (idleTimeoutMs: number) => Math.min(Math.max(idleTimeoutMs, STUCK_AGENT_RETIRE_MIN_MS), MAX_TIMER_MS - STUCK_AGENT_SETTLE_MS);
+/** stop() waits this long for cancellation and cleanup before ending the Agent processes itself. */
+const STOP_CANCEL_TIMEOUT_MS = 10_000;
 /** The timed-out turn never confirmed cancellation: the next prompt was not sent, and stays unsent. */
 export const ACP_CANCEL_UNCONFIRMED = 'ACP_CANCEL_UNCONFIRMED';
 const IDLE_CPU_WINDOW_MS = 60_000;
@@ -308,17 +326,19 @@ export class AcpxAdapter implements AgentDriver {
   private compacting = false;
   private maintenanceUsage?: NormalizedDriverEvent;
   private timedOutStream?: Promise<void>;
-  private timedOutAt = 0;
+  /** performance.now() at which retireStuckAgent fires for the current timed-out stream. */
+  private retireAt = 0;
   /** Timed-out stream whose stuck Agent process was ended by retireStuckAgent. */
   private retiredStream?: Promise<void>;
   /** Timed-out stream that did not close even after its Agent was ended; later turns fail at once. */
   private cancelUnconfirmed?: Promise<void>;
-  private readonly agentChildren = new Set<ChildProcess>();
+  private readonly agentChildren = new Map<ChildProcess, AgentProcessTree>();
+  /** Trees of launchers killed by a signal: their detached Agent may outlive them until proven gone. */
+  private readonly unconfirmedTrees = new Set<AgentProcessTree>();
   private idleWatch?: { refresh(): void; clear(): void };
   private readonly cpu = new ProcessTreeCpu();
   private stopResourcesSettled = false;
   private readonly processes = new Map<ChildProcess, () => void>();
-  private unconfirmedLauncherExit = false;
   private nativeIdentity?: NativeContextIdentity;
   private currentConfiguration?: {model?: string; reasoningEffort?: string};
   // 会话分析来源采集（设计 §3.1）：只在内存中向订阅者发非密钥元信息，不写库、
@@ -461,16 +481,26 @@ export class AcpxAdapter implements AgentDriver {
     const child = event.child;
     if (this.processes.has(child)) return;
     const launcher = event.kind === 'agent' && child.spawnargs?.some(arg => arg === envLauncherPath() || arg === claudeLauncherPath());
+    const tree = event.kind === 'agent' ? new AgentProcessTree(child.pid) : undefined;
+    let sampling: NodeJS.Timeout | undefined;
     const exited = () => {
-      if (launcher && child.signalCode) this.unconfirmedLauncherExit = true;
+      clearInterval(sampling);
+      if (launcher && child.signalCode && tree) this.unconfirmedTrees.add(tree);
       this.processes.delete(child); this.agentChildren.delete(child);
       child.off('exit', exited); child.off('error', failed);
     };
     const failed = () => { if (child.pid == null) exited(); };
     this.processes.set(child, exited);
-    if (event.kind === 'agent') this.agentChildren.add(child);
+    if (tree) this.agentChildren.set(child, tree);
     if (child.exitCode != null || child.signalCode != null) { exited(); return; }
     child.once('exit', exited); child.on('error', failed);
+    if (launcher && tree) {
+      // Record the Agent the launcher detaches into its own process group, so its exit can still be proven if the
+      // launcher itself is killed (ACPX SIGKILLs it on a failed start).
+      let samples = 0;
+      sampling = setInterval(() => { if (tree.refresh() === false || tree.hasGroups() || ++samples >= 50) clearInterval(sampling); }, 100);
+      sampling.unref?.();
+    }
     // acpx 真实 spawn 出 agent 进程（含 env-launcher 包装层）的边界：此刻用同构
     // 最终环境冻结非密钥 dataRoot。该事件先于 strict onPrepared 触发。
     if (event.kind === 'agent') {
@@ -481,8 +511,11 @@ export class AcpxAdapter implements AgentDriver {
     // Only SDK-direct agent/probe and host-terminal children are covered. This
     // does not establish containment of arbitrary detached agent descendants.
     for (const [child, exited] of this.processes) if (child.exitCode != null || child.signalCode != null) exited();
-    return this.stopped && !this.unconfirmedLauncherExit && this.stopResourcesSettled && this.resourceOperations.size === 0 && this.streams.size === 0 && this.sdkCreations.size === 0 && this.processes.size === 0;
+    for (const tree of this.unconfirmedTrees) if (tree.exited() === true) this.unconfirmedTrees.delete(tree);
+    return this.stopped && !this.unconfirmedTrees.size && this.stopResourcesSettled && this.resourceOperations.size === 0 && this.streams.size === 0 && this.sdkCreations.size === 0 && this.processes.size === 0;
   }
+  /** A killed launcher's Agent can never be proven gone here: no /proc, or its Agent was never observed. */
+  stopUnverifiable() { return [...this.unconfirmedTrees].some(tree => tree.exited() === undefined); }
   private assertActive() { if (this.stopped) throw new AcpxStoppedError(); }
   private async whileActive<T>(operation: () => Promise<T>): Promise<T> {
     this.assertActive();
@@ -535,11 +568,9 @@ export class AcpxAdapter implements AgentDriver {
     if (!this.handle || !this.agent.reasoningEffort) return;
     const status = await this.runtime.getStatus?.({ handle: this.handle });
     this.assertActive();
-    const options = Array.isArray(status?.details?.configOptions) ? status.details.configOptions as Array<Record<string, any>> : [];
-    const reasoning = options.find(option => option.category === 'thought_level' || option.id === 'reasoning_effort' || option.id === 'effort');
+    const reasoning = configOption(status, 'reasoningEffort');
     if (!reasoning || typeof reasoning.id !== 'string') throw new Error(`Agent ${this.agent.id} does not support reasoning effort configuration`);
-    const allowed = Array.isArray(reasoning.options) ? reasoning.options.some((option: any) => option?.value === this.agent.reasoningEffort) : true;
-    if (!allowed) throw new Error(`Reasoning effort ${this.agent.reasoningEffort} is not supported by model ${this.agent.model ?? '(default)'}`);
+    if (!offersValue(reasoning, this.agent.reasoningEffort)) throw new Error(`Reasoning effort ${this.agent.reasoningEffort} is not supported by model ${this.agent.model ?? '(default)'}`);
     await this.runtime.setConfigOption?.({ handle: this.handle, key: reasoning.id, value: this.agent.reasoningEffort });
   }
   private scope(operation: OperationPermit): AcpRuntimeResourceScope {
@@ -568,14 +599,14 @@ export class AcpxAdapter implements AgentDriver {
       const evidence: Array<{configId:string;value:string}>=[];
       const target={model:request.target.model??native.defaults.model,reasoningEffort:request.target.reasoningEffort??native.defaults.reasoningEffort};
       // 任何写入之前先对照 Agent 公布的可选值：不在列表里就明确拒绝，原生配置确定没动。
+      // 模型一起变时，思考强度的可选值随新模型而变，不能对照旧模型的列表预检，交给写入后的回执判定。
       const changing=(['model','reasoningEffort'] as const).filter(key=>target[key]!==undefined&&target[key]!==this.currentConfiguration?.[key]);
-      if(changing.length&&this.runtime.getStatus) {
+      const prechecked=changing.includes('model')?(['model'] as const):changing;
+      if(prechecked.length&&this.runtime.getStatus) {
         const status=await this.runtime.getStatus({handle:this.handle});
         this.assertActive();
-        const options=Array.isArray(status?.details?.configOptions)?status.details.configOptions as Array<Record<string,any>>:[];
-        for(const key of changing) {
-          const option=key==='model'?options.find(item=>item.id==='model'||item.category==='model'):options.find(item=>item.category==='thought_level'||item.id==='reasoning_effort'||item.id==='effort');
-          if(Array.isArray(option?.options)&&!option.options.some((item:any)=>item?.value===target[key]))
+        for(const key of prechecked) {
+          if(!offersValue(configOption(status,key),target[key]!))
             throw configurationRejected(key==='model'?`Model ${target[key]} is not supported by Agent ${this.agent.id}`:`Reasoning effort ${target[key]} is not supported by model ${target.model ?? '(default)'}`);
         }
       }
@@ -723,7 +754,6 @@ export class AcpxAdapter implements AgentDriver {
         timedOut = true;
         this.turnCancelling = true;
         this.timedOutStream = stream;
-        this.timedOutAt = Date.now();
         const error = new AgentIdleTimeoutError(silentMs);
         // Keep consuming the same stream: ACPX finalizes resources before it
         // closes the iterator, but after it resolves turn.result.
@@ -737,7 +767,9 @@ export class AcpxAdapter implements AgentDriver {
         }, 2_000);
         // An Agent that never answers the cancel keeps this stream, the session's idle state and every later
         // message waiting. End its process instead; the next turn reconnects through the persisted session key.
-        retireTimer = setTimeout(() => this.retireStuckAgent(stream), Math.max(idleTimeoutMs, STUCK_AGENT_RETIRE_MIN_MS));
+        const retireDelay = stuckRetireDelay(idleTimeoutMs);
+        this.retireAt = performance.now() + retireDelay;
+        retireTimer = setTimeout(() => this.retireStuckAgent(stream), retireDelay);
       };
       const expireUnlessBusy = () => {
         if (this.cpu.sample(this.processIds()) !== 'active' || silentMs >= deferLimitMs) { expire(); return; }
@@ -863,16 +895,24 @@ export class AcpxAdapter implements AgentDriver {
    * this adapter's own runtime are signalled. The old turn stays result-unknown and nothing is resent.
    */
   private retireStuckAgent(stream: Promise<void>) {
+    // stop() ends the processes itself once its own cancellation wait expires.
     if (this.stopped || this.timedOutStream !== stream) return;
     this.retiredStream = stream;
-    const children = [...this.agentChildren];
+    this.endAgentProcesses();
+  }
+  /**
+   * SIGTERM this adapter's Agent processes, then SIGKILL what still runs after a grace period. An Agent child that
+   * leads its own process group is signalled as a group; otherwise its descendants are signalled one by one, so an
+   * Agent started through a wrapper (npx, a shell) cannot survive as an orphan holding the stream open.
+   */
+  private endAgentProcesses() {
+    const children = [...this.agentChildren], orphaned = [...this.unconfirmedTrees];
     const signal = (name: NodeJS.Signals) => {
-      for (const child of children) if (child.exitCode == null && child.signalCode == null) { try { child.kill(name); } catch { /* Already gone. */ } }
+      for (const [child, tree] of children) tree.signal(name, () => { if (child.exitCode == null && child.signalCode == null) { try { child.kill(name); } catch { /* Already gone. */ } } });
+      for (const tree of orphaned) tree.signal(name, () => {});
     };
     signal('SIGTERM');
-    const escalation = setTimeout(() => signal('SIGKILL'), STUCK_AGENT_KILL_GRACE_MS);
-    escalation.unref?.();
-    void stream.then(() => clearTimeout(escalation), () => clearTimeout(escalation));
+    setTimeout(() => signal('SIGKILL'), STUCK_AGENT_KILL_GRACE_MS).unref?.();
   }
   /**
    * A timed-out public send has ended, but its SDK cleanup can still be in progress. Wait without occupying the
@@ -883,11 +923,11 @@ export class AcpxAdapter implements AgentDriver {
     const previous = this.timedOutStream;
     if (!previous) return;
     if (this.cancelUnconfirmed !== previous) {
-      const deadline = this.timedOutAt + Math.max(Math.round(this.agent.timeout * 1_000), STUCK_AGENT_RETIRE_MIN_MS) + STUCK_AGENT_SETTLE_MS;
+      const remaining = Math.min(MAX_TIMER_MS, Math.max(0, this.retireAt + STUCK_AGENT_SETTLE_MS - performance.now()));
       let timer: NodeJS.Timeout | undefined;
       const settled = await this.whileActive(() => Promise.race([
         previous.then(() => true, () => true),
-        new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), Math.max(0, deadline - Date.now())); }),
+        new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), remaining); }),
       ])).finally(() => clearTimeout(timer));
       if (settled && this.retiredStream !== previous) return;
       if (settled) {
@@ -1003,6 +1043,9 @@ export class AcpxAdapter implements AgentDriver {
     this.stopping = new Promise<void>((resolve, reject) => { resolveStop = resolve; rejectStop = reject; });
     // This task continues after a public stop rejection. It owns late resources
     // and SDK cleanup; the public promise only reports their success or first error.
+    // An Agent that never answers the cancel keeps cancel, close and its streams pending: end it after a bound.
+    const forced = setTimeout(() => this.endAgentProcesses(), STOP_CANCEL_TIMEOUT_MS);
+    forced.unref?.();
     void (async () => {
       const errors: unknown[] = [];
       const observe = async (operation: () => Promise<unknown>) => {
@@ -1038,7 +1081,7 @@ export class AcpxAdapter implements AgentDriver {
       if (errors.length) return;
       this.handles.clear();
       if (this.processes.size === 0) this.launch.cleanup();
-    })().finally(() => { this.stopResourcesSettled = true; }).then(resolveStop, rejectStop);
+    })().finally(() => { clearTimeout(forced); this.stopResourcesSettled = true; }).then(resolveStop, rejectStop);
     return this.stopping;
   }
   async resolvePermission(id: string, approved: boolean) { const resolve = this.pendingPermissions.get(id); if (this.stopped || !resolve) return false; this.pendingPermissions.delete(id); this.idleWatch?.refresh(); resolve({ outcome: approved ? 'allow_once' : 'reject_once' }); return true; }
@@ -1049,11 +1092,9 @@ export class AcpxAdapter implements AgentDriver {
       this.assertActive();
       const status = await this.runtime.getStatus?.({ handle: this.handle! });
       this.assertActive();
-      const options = Array.isArray(status?.details?.configOptions) ? status.details.configOptions as Array<Record<string, any>> : [];
-      const modelOption = options.find(option => option.id === 'model' || option.category === 'model');
+      const modelOption = configOption(status, 'model');
       if (!modelOption || typeof modelOption.id !== 'string') throw configurationRejected(`Agent ${this.agent.id} does not support runtime model switching`);
-      const allowed = Array.isArray(modelOption.options) ? modelOption.options.some((option: any) => option?.value === model) : true;
-      if (!allowed) throw configurationRejected(`Model ${model} is not supported by Agent ${this.agent.id}`);
+      if (!offersValue(modelOption, model)) throw configurationRejected(`Model ${model} is not supported by Agent ${this.agent.id}`);
       await this.runtime.setConfigOption?.({ handle: this.handle!, key: modelOption.id, value: model });
       this.assertActive();
       this.agent.model = model;
@@ -1066,11 +1107,9 @@ export class AcpxAdapter implements AgentDriver {
       this.assertActive();
       const status = await this.runtime.getStatus?.({ handle: this.handle! });
       this.assertActive();
-      const options = Array.isArray(status?.details?.configOptions) ? status.details.configOptions as Array<Record<string, any>> : [];
-      const reasoning = options.find(option => option.category === 'thought_level' || option.id === 'reasoning_effort' || option.id === 'effort');
+      const reasoning = configOption(status, 'reasoningEffort');
       if (!reasoning || typeof reasoning.id !== 'string') throw configurationRejected(`Agent ${this.agent.id} does not support runtime reasoning effort switching`);
-      const allowed = Array.isArray(reasoning.options) ? reasoning.options.some((option: any) => option?.value === reasoningEffort) : true;
-      if (!allowed) throw configurationRejected(`Reasoning effort ${reasoningEffort} is not supported by model ${this.agent.model ?? '(default)'}`);
+      if (!offersValue(reasoning, reasoningEffort)) throw configurationRejected(`Reasoning effort ${reasoningEffort} is not supported by model ${this.agent.model ?? '(default)'}`);
       await this.runtime.setConfigOption?.({ handle: this.handle!, key: reasoning.id, value: reasoningEffort });
       this.assertActive();
       this.agent.reasoningEffort = reasoningEffort;

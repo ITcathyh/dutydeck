@@ -45,7 +45,11 @@ it.each(['environment', 'claude', 'nested', 'forced-exit'])('checks real Agent c
       launcher.kill('SIGKILL');
       await expect.poll(() => launcher.signalCode).toBe('SIGKILL');
       await adapter.stop();
+      // The detached Agent survives its killed launcher; its exit is proven once it really ends.
       expect(await adapter.isStopped()).toBe(false);
+      expect(adapter.stopUnverifiable()).toBe(false);
+      process.kill(pid!, 'SIGKILL');
+      await expect.poll(() => adapter.isStopped()).toBe(true);
       return;
     }
     await adapter.stop();

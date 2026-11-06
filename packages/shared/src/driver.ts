@@ -169,6 +169,8 @@ export interface AgentDriver {
    * execution resource is gone; a resolved stop(), detach, or rejected adoption
    * alone is not proof. Unsupported drivers must omit this or return false. */
   isStopped?(): Promise<boolean>;
+  /** True when isStopped() can never become true without a person checking the processes (exit cannot be observed). */
+  stopUnverifiable?(): boolean;
   /** 裁决一个挂起的权限请求。返回是否成功兑现。reason 是拒绝时交给 Agent 的原因（如超时），支持的驱动会转告。 */
   resolvePermission?(id: string, approved: boolean, reason?: string): Promise<boolean>;
   /**
