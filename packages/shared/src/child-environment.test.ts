@@ -45,6 +45,13 @@ describe('child environment policy', () => {
     expect(childEnvironment(env)).toEqual(env);
   });
 
+  it('drops the daemon\'s inherited tmux pane but keeps explicitly configured values', () => {
+    const inherited = { TMUX: '/tmp/tmux-1000/default,123,0', TMUX_PANE: '%7', TMUX_TMPDIR: '/run/tmux', PATH: '/usr/bin' };
+    expect(childEnvironment(inherited)).toEqual({ TMUX_TMPDIR: '/run/tmux', PATH: '/usr/bin' });
+    expect(childEnvironment(inherited, { TMUX_PANE: '%1' })).toEqual({ TMUX_TMPDIR: '/run/tmux', PATH: '/usr/bin', TMUX_PANE: '%1' });
+    expect(inherited.TMUX).toBe('/tmp/tmux-1000/default,123,0');
+  });
+
   it('recognizes the exact identity bin even outside the conventional identity directory', () => {
     expect(childEnvironment({ BOTMUX_IDENTITY_BIN: '/runtime/wrapper/', PATH: '/usr/bin:/runtime/wrapper/:/runtime/wrapper-ordinary', GIT_ASKPASS: '/runtime/wrapper/askpass', GIT_CONFIG_COUNT: '0' })).toEqual({ PATH: '/usr/bin:/runtime/wrapper-ordinary' });
   });

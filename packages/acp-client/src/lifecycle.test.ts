@@ -431,6 +431,45 @@ describe('ACP instance revocation', () => {
     expect(after.filter(call => call.method === 'session/new')).toHaveLength(1);
   });
 
+  it('ends a stuck Agent that never confirms cancellation and reconnects the persisted session on the next prompt', async () => {
+    const { adapter, cwd, events } = await setup({ env: { lifecycle_cancel_gate: '1' } });
+    const calls = async () => (await readFile(join(cwd, 'calls.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+    const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+    await writeFile(join(cwd, 'release'), 'release');
+    await adapter.start(); adapter.agent.timeout = 0.05;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const sending = adapter.send('wait').catch(error => error);
+    await expect.poll(async () => (await calls()).some(call => call.method === 'session/prompt')).toBe(true);
+    const stuck = (await calls()).find(call => call.method === 'spawn')!.pid as number;
+    await vi.advanceTimersByTimeAsync(50);
+    await expect.poll(() => existsSync(join(cwd, 'cancelling'))).toBe(true);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(await sending).toMatchObject({ name: 'AgentIdleTimeoutError' });
+    // The Agent never answers the cancel (release_cancel is never written); a prompt sent meanwhile waits.
+    let outcome: unknown = 'pending';
+    const next = adapter.send('next').then(() => { outcome = 'completed'; }, error => { outcome = error; });
+    await vi.advanceTimersByTimeAsync(57_000);
+    expect(outcome).toBe('pending'); expect(alive(stuck)).toBe(true); expect(adapter.isIdle()).toBe(false);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect.poll(() => alive(stuck)).toBe(false);
+    await next;
+    vi.useRealTimers();
+    expect(outcome).toMatchObject({ code: 'PROMPT_NOT_WRITTEN', detailCode: 'ACP_CANCEL_UNCONFIRMED', message: expect.stringContaining('直接重发') });
+    expect(adapter.isIdle()).toBe(true);
+    expect((await calls()).filter(call => call.method === 'session/prompt')).toHaveLength(1);
+    // The next prompt reconnects: a new Agent process loads the same persisted native session; nothing old is resent.
+    adapter.agent.timeout = 10;
+    await adapter.send('again');
+    const after = await calls();
+    const spawns = after.filter(call => call.method === 'spawn').map(call => call.pid);
+    expect(spawns).toHaveLength(2); expect(spawns[1]).not.toBe(stuck);
+    expect(after.filter(call => call.method === 'session/new')).toHaveLength(1);
+    expect(after.filter(call => call.method === 'session/load')).toHaveLength(1);
+    expect(after.filter(call => call.method === 'session/prompt')).toHaveLength(2);
+    expect(events.filter(event => event.type === 'text').map(event => event.data.text)).toContain('lifecycle-native-session');
+    expect(events.at(-1)).toMatchObject({ type: 'completed' });
+  });
+
   it('still closes a late-created handle after reporting an earlier close failure', async () => {
     const { adapter, runtime } = await setup(); fakeResources(runtime); await adapter.start();
     const creating = deferred<any>(); const entered = deferred();

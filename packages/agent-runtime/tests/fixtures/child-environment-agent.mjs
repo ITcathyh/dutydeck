@@ -8,6 +8,7 @@ readline.createInterface({ input: process.stdin }).on('line', () => {
     larkSecret: env.LARK_APP_SECRET === undefined,
     staleIdentity: env.BOTMUX_SESSION_ID === undefined,
     staleCapability: env.dutydeck_group_tools_token === undefined,
+    daemonTmuxPane: env.TMUX === undefined && env.TMUX_PANE === undefined,
     ordinary: env.OCR_ORDINARY === 'ordinary',
     configured: env.OCR_CONFIGURED === 'configured',
     configuredAccount: env.BYTEDCLI_USER_CODE_JWT === 'fake-configured-account',

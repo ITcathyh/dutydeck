@@ -50,17 +50,18 @@ describe('Linux descendant PID scan', () => {
     expect(descendantPids([20, 10, 20])).toEqual([20, 30, 10]);
   });
 
-  it('ignores only vanished stat files and retains missing roots for caller identity checks', () => {
+  // A process exiting between readdir and read yields ENOENT, or ESRCH while its /proc entry is torn down (seen on a loaded host).
+  it.each(['ENOENT', 'ESRCH'])('ignores only vanished stat files (%s) and retains missing roots for caller identity checks', code => {
     proc([[10, 1], [20, 10], [30, 10]]);
     const original = read.getMockImplementation()!;
     read.mockImplementation((...args: Parameters<typeof readFileSync>) => {
-      if (args[0] === '/proc/20/stat') throw errno('ENOENT');
+      if (args[0] === '/proc/20/stat') throw errno(code);
       return original(...args);
     });
     expect(descendantPids([10, 99])).toEqual([99, 10, 30]);
   });
 
-  it.each(['EACCES', 'EPERM', 'ESRCH'])('propagates a stat %s error', code => {
+  it.each(['EACCES', 'EPERM'])('propagates a stat %s error', code => {
     proc([[10, 1]]);
     const failure = errno(code);
     read.mockImplementation(() => { throw failure; });

@@ -11,7 +11,11 @@ export function descendantPids(roots: number[], stats?: Map<string, string>): nu
       const siblings = children.get(parent);
       if (siblings) siblings.push(Number(entry));
       else children.set(parent, [Number(entry)]);
-    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    } catch (error) {
+      // Any process on the host may exit between readdir and read: ENOENT, or ESRCH once its entry is being torn down.
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ESRCH') throw error;
+    }
   }
   const pids = new Set<number>();
   const pending = [...roots];

@@ -17,9 +17,10 @@ it.each(cases)('isolates real %s children, including stale tmux server values (e
   const herdrSession = `dutydeck-${randomBytes(16).toString('hex')}`;
   vi.stubEnv('HOME', cwd);
   vi.stubEnv('TMUX_TMPDIR', cwd);
-  // An inherited TMUX would point this test's own tmux calls at the host server.
-  vi.stubEnv('TMUX', undefined);
-  vi.stubEnv('TMUX_PANE', undefined);
+  // The daemon's own pane (it may run inside the user's tmux). The sentinel socket does not exist, so a leak
+  // cannot reach a real server; this test's own tmux calls drop it explicitly.
+  const daemonTmux = `${join(cwd, 'sentinel-daemon-tmux')},1,0`;
+  const tmuxEnv = () => { const env = { ...process.env }; delete env.TMUX; delete env.TMUX_PANE; return env; };
   const identityBin = join(cwd, 'cli-identity', 'old.bin');
   const inherited = {
     BOTMUX_SESSION_ID: 'sentinel-old-session', BOTMUX_OWNER_OPEN_ID: 'sentinel-owner',
@@ -31,7 +32,8 @@ it.each(cases)('isolates real %s children, including stale tmux server values (e
     HTTP_PROXY: 'http://sentinel-proxy', NODE_EXTRA_CA_CERTS: '/nonexistent/sentinel-cert',
     PATH: `${process.env.PATH}:${join(cwd, "tool path with 'quote'")}:${identityBin}`,
     GIT_ASKPASS: `${identityBin}/askpass`, BASH_ENV: `${identityBin}/bash`, ZDOTDIR: identityBin,
-    GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'credential.helper', GIT_CONFIG_VALUE_0: 'sentinel-wrapper'
+    GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'credential.helper', GIT_CONFIG_VALUE_0: 'sentinel-wrapper',
+    TMUX: daemonTmux, TMUX_PANE: '%999'
   };
   for (const [key, value] of Object.entries(inherited)) vi.stubEnv(key, value);
   let driver: PtyCliDriver | undefined;
@@ -39,8 +41,8 @@ it.each(cases)('isolates real %s children, including stale tmux server values (e
     if (kind === 'tmux') {
       // Seed a server before sanitizing the child snapshot. These values must
       // stay absent even if the spawning daemon no longer carries them.
-      execFileSync('tmux', ['new-session', '-d', '-s', 'env-seed', 'sleep 60']);
-      execFileSync('tmux', ['set-environment', '-g', 'DUTYDECK_SERVER_ONLY_SECRET', 'sentinel-tmux-only']);
+      execFileSync('tmux', ['new-session', '-d', '-s', 'env-seed', 'sleep 60'], { env: tmuxEnv() });
+      execFileSync('tmux', ['set-environment', '-g', 'DUTYDECK_SERVER_ONLY_SECRET', 'sentinel-tmux-only'], { env: tmuxEnv() });
     }
     const output = join(cwd, 'env.json'), script = join(cwd, 'cli.mjs');
     const keys = [...Object.keys(inherited), 'DUTYDECK_SERVER_ONLY_SECRET', 'dutydeck_herdr_session'];
@@ -61,13 +63,15 @@ it.each(cases)('isolates real %s children, including stale tmux server values (e
       dutydeck_group_tools_token: 'current-scope', dutydeck_relay_token: 'current-relay', dutydeck_herdr_session: 'current-herdr',
       HTTP_PROXY: inherited.HTTP_PROXY, NODE_EXTRA_CA_CERTS: inherited.NODE_EXTRA_CA_CERTS,
       PATH: emptyPath ? '' : inherited.PATH.split(':').filter(value => value !== identityBin).join(':'),
-      ...(kind === 'herdr' ? { HERDR_PANE_ID: expect.not.stringMatching(/^sentinel:/) } : {})
+      ...(kind === 'herdr' ? { HERDR_PANE_ID: expect.not.stringMatching(/^sentinel:/) } : {}),
+      // Inside tmux the agent sees only the values tmux set for its own pane.
+      ...(kind === 'tmux' ? { TMUX: expect.stringMatching(new RegExp(`^${cwd}/tmux-\\d+/default,`)), TMUX_PANE: expect.stringMatching(/^%(?!999$)\d+$/) } : {})
     });
     expect(await backend.getPid()).toBe(Number(readFileSync(pidFile, 'utf8')));
     for (const [key, value] of Object.entries(inherited)) expect(process.env[key]).toBe(value);
   } finally {
     await driver?.stop();
-    if (kind === 'tmux') execFileSync('tmux', ['kill-server']);
+    if (kind === 'tmux') execFileSync('tmux', ['kill-server'], { env: tmuxEnv() });
     if (kind === 'herdr') {
       try { execFileSync('herdr', ['session', 'delete', herdrSession, '--json'], { env: herdrControlEnvironment(process.env), stdio: 'pipe' }); } catch { /* owned fixture cleanup */ }
     }

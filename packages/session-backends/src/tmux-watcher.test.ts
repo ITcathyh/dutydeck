@@ -94,7 +94,8 @@ it.each([
 ] as const)('classifies queue failure %s after stage %j', async (stderr, stdout, status, probe) => {
   const backend = new TmuxBackend('isolated-fixture') as unknown as Watcher;
   vi.mocked(runCommand).mockRejectedValueOnce({ stderr, stdout, status });
-  expect(await backend.probePaneAsync()).toEqual({ probe, pid: null });
+  // Only a missing socket file is flagged: the exit watcher cross-checks it against the known pane process.
+  expect(await backend.probePaneAsync()).toEqual({ probe, pid: null, ...(stderr.includes('No such file or directory') ? { socketMissing: true } : {}) });
 });
 it.each(['', 'invalid', '-12', '1.5'])('treats invalid display PID %j as inconclusive', async pid => {
   const backend = new TmuxBackend('isolated-fixture') as unknown as Watcher;

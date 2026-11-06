@@ -70,6 +70,21 @@ it('rechecks a stop block in the background, notices once while it persists, and
   expect(h.drivers).toHaveLength(2);
 });
 
+it('a recheck stops the driver again when the first stop never ended its terminal', async () => {
+  const h = await fixture();
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  // The first stop fails without killing anything (a busy tmux pane); only a repeated stop ends the terminal.
+  h.drivers[0]!.stop = vi.fn(async () => { if (vi.mocked(h.drivers[0]!.stop).mock.calls.length >= 2) h.state.exited = true; });
+  await h.runtime.cleanupIdleDrivers(Date.now() + 100);
+  expect(h.drivers[0]!.stop).toHaveBeenCalledOnce();
+  await expect(h.runtime.send(h.session.id, 'blocked')).rejects.toMatchObject({ code: 'DRIVER_STOP_UNVERIFIED' });
+  await vi.advanceTimersByTimeAsync(45_000);
+  vi.useRealTimers();
+  expect(h.drivers[0]!.stop).toHaveBeenCalledTimes(2);
+  expect(h.runtime.getDriverStopBlock(h.session.id)).toBeUndefined();
+  expect((await h.runtime.send(h.session.id, 'after recheck')).status).toBe('completed');
+});
+
 it('a recheck whose probe outlives an explicit restart leaves the new driver and its task alone', async () => {
   const h = await fixture();
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
