@@ -8,16 +8,17 @@
 | 飞书与插件宿主 | `apps/server/src/lark/` 管消息、卡片和机器人；`apps/server/src/plugins/` 管插件加载、绑定和工具 |
 | Web 工作台 | `apps/web/src/`；API 客户端在 `api.ts`，实时流在 `sse.ts`、`useSessionStream.ts` |
 | 执行与恢复 | `packages/agent-runtime/`（包名 `@dutydeck/runtime`）管任务调度、执行账本、权限和恢复 |
-| Agent 与终端 | `packages/acp-client/` 管 ACP/ACPX；`cli-adapters/` 管 CLI 差异；`pty-driver/` 管终端驱动；`session-backends/` 管 tmux/Herdr |
-| 契约与持久化 | `packages/shared/` 管跨端类型与校验；`config/` 管环境配置与 Agent 发现；`storage/` 管 SQLite、仓储和迁移；`secret-provider/` 管密钥 |
+| Agent 与终端 | `packages/acp-client/` 管 ACP/ACPX；`transports/` 管子进程与 PTY 驱动（JSONL/Pipe/Pty）和 Agent 探测；`cli-adapters/` 管 CLI 差异；`pty-driver/` 管终端驱动，`terminal-renderer/` 把终端输出渲染成快照；`session-backends/` 管 tmux/Herdr；`relay/` 是与 IM 无关的会话回传（send/ask） |
+| 契约与持久化 | `packages/shared/` 管跨端类型与校验；`config/` 管环境配置与 Agent 发现；`storage/` 管 SQLite、仓储和迁移；`secret-provider/` 管密钥；`legacy-importer/` 支撑 `dutydeck migrate` 从旧 botmux 导入 |
 | 插件交付 | `builtin-plugins/` 随包发布；`plugins/` 是需安装的仓库自带插件；`examples/plugins/` 是示例；`packages/plugin-sdk/` 是公开作者接口 |
 
-项目是通用产品，不写公司或个人环境的定制逻辑；新增平台专用集成放插件。修改对外插件接口时保持 SDK 可独立安装，不引入 server 或私有 shared 包依赖。
+项目是通用产品，不写公司或个人环境的定制逻辑；新增平台专用集成放插件。修改对外插件接口时保持 SDK 可独立安装，不引入 server 或私有 shared 包依赖。仓库公开托管，代码、测试夹具、文档和提交信息里不写内部域名与路径、真实凭据、账号或个人信息，示例一律用占位值。
 
 ## 工作目录与本地运行
 
-- 主检出是部署源，不在里面切分支。多轮功能或修复用独立 worktree：`git worktree add ../dutydeck-<主题>-<日期> -b <type>/<主题>-<日期>`；不要把主检出的 `.env` 复制进去。
-- Node 要满足根 `package.json` 的 `engines`，pnpm 用 `packageManager` 指定版本。新 worktree 执行 `pnpm install --frozen-lockfile`，再 `pnpm build:packages`；共享包的类型声明与普通运行入口依赖 `dist`，根 Vitest 则通过 alias 读取源码。
+- 主检出是部署源，不在里面切分支。多轮功能或修复用独立 worktree：`git worktree add ../dutydeck-<主题>-<日期> -b <type>/<主题>-<日期>`；不要把主检出的 `.env` 复制进去。其他 worktree 可能属于并行中的 Agent，不改动、不清理。
+- 合入：在 worktree 提交后先 `git merge master` 带上最新主线并重跑验证。解决冲突时对照双方原改动逐处核对，git 自动合并的相邻代码也要看，合并丢逻辑在本仓库发生过。再到主检出（保持在 `master`）执行 `git merge <分支>`；要推送时 `git push origin master`。pre-push 钩子拒绝基于已改写旧历史的提交时，按它提示的 `rebase --onto` 迁移，不用 `--no-verify`。合入后删除自己的 worktree 和分支。
+- Node 要满足根 `package.json` 的 `engines`，pnpm 用 `packageManager` 指定版本。新 worktree 执行 `pnpm install --frozen-lockfile`，再 `pnpm build:packages`；共享包的类型声明与普通运行入口依赖 `dist`，根 Vitest 则通过 alias 读取源码。所以改了某个包的导出后要重跑 `pnpm build:packages`，否则依赖方的 typecheck 读的还是旧声明。
 - 本机仓库根 `.env` 指向线上 runtime，CLI 会读取实际 shell cwd 的 `.env`。`--cwd` 只改 Agent 默认目录；只覆盖数据库和端口仍不能隔离 daemon 管理命令，它们可能通过 `~/.dutydeck/last-daemon-dir` 找到已有实例。
 - 手动调试用临时数据目录、空闲端口和前台根命令。以下从检出根执行，`14310` 先确认空闲；退出用该前台进程的 Ctrl-C，不用无目标的 `dutydeck stop/restart`：
 
@@ -40,11 +41,11 @@ pnpm exec tsx apps/server/src/cli.ts --local-only --port 14310 --no-lark-listen
 - **任务与恢复**：沿用执行账本和原生回执区分未提交、执行中与结果未知。超时、断线或重启不能当作“没有执行”自动重发；改生命周期时覆盖停止、迟到回执和恢复后的轮次归属，不能仅凭终端出现文本判完成。入口在 `packages/agent-runtime/`，跨层回归在 `tests/`。
 - **数据库升级**：结构变化同步 `packages/storage/src/schema.ts` 与 `migrations.ts`，追加迁移版本；测试已有数据升级、重复打开和外键完整性。旧程序会拒绝更高 schema，不能把切回旧代码当作数据库回滚。
 - **打包入口**：新增共享包、子路径导出或运行时资源时，核对包 `exports/files`、根与 Web 的 Vitest alias、`apps/server/scripts/build.mjs` 的打包映射和资源复制；源码测试通过不能证明发布产物可运行。
-- 用户可见的行为、命令或配置变化，同一个改动里更新 `docs/zh/` 与 `docs/en/` 下对应的文档；`README.md` / `README.en.md` 只放概览，功能卖点、上手步骤或支持的 Agent 变化时同步两份 README。`CLAUDE.md` 只引用本文件，项目执行规则集中维护在这里。
+- 用户可见的行为、命令或配置变化，同一个改动里更新 `docs/zh/` 与 `docs/en/` 下同名的主题文档（`getting-started`、`cli`、`agents`、`lark`、`plugins`、`web-console`、`features`、`troubleshooting`、`upgrading`）；`README.md` / `README.en.md` 只放概览，功能卖点、上手步骤或支持的 Agent 变化时同步两份 README。`CLAUDE.md` 只引用本文件，项目执行规则集中维护在这里。
 
 ## 验证
 
-代码改动均须通过 `pnpm typecheck` 和受影响测试的 `pnpm exec vitest run <测试路径>`。从仓库根运行，Node 与 Web/jsdom 由根配置分流；需要限定时用 `--project=node` 或 `--project=web`。
+代码改动均须通过 `pnpm typecheck` 和受影响测试的 `pnpm exec vitest run <测试路径>`。从仓库根运行，Node 与 Web/jsdom 由根配置分流；需要限定时用 `--project=node` 或 `--project=web`。`pnpm typecheck` 不检查 `*.test.ts`（tsconfig 已排除），Vitest 运行时也不做类型检查，测试代码里的类型错误两边都发现不了。全量测试并行执行、机器负载高，涉及时间的断言要留足余量或改用假时钟，不能只调到在本机刚好通过。
 
 | 额外影响范围 | 追加检查 |
 |---|---|
