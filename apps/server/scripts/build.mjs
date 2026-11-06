@@ -37,6 +37,16 @@ const workspacePlugins = [{
   }
 }];
 
+// Keep npm packages external, except drizzle-orm: loaded as an external ESM package, Node re-reads its
+// 443-entry exports map for each of its ~110 files (~350 ms per process). Bundling it resolves through the
+// default import condition (the ESM build); native packages such as better-sqlite3 stay external.
+const externalPackages = {
+  name: 'dutydeck-external-packages',
+  setup(buildApi) {
+    buildApi.onResolve({ filter: /^[^./]/ }, args => /^drizzle-orm(\/|$)/.test(args.path) ? undefined : { path: args.path, external: true });
+  }
+};
+
 rmSync(resolve(serverRoot, 'dist'), { recursive: true, force: true });
 if (!existsSync(resolve(webDist, 'index.html'))) throw new Error('Web UI is not built. Run pnpm --dir apps/web build first.');
 rmSync(publicDir, { recursive: true, force: true });
@@ -48,15 +58,14 @@ await build({
   format: 'esm',
   platform: 'node',
   target: 'node22',
-  packages: 'external',
   sourcemap: false,
-  plugins: workspacePlugins
+  plugins: [...workspacePlugins, externalPackages]
 });
 // Isolated plugin activation uses the same Host registries after installation, without tsx.
 await build({
   entryPoints: [resolve(serverRoot, 'src/plugins/activation-worker.ts')],
   outfile: resolve(serverRoot, 'dist/assets/plugin-validation/cli.js'),
-  bundle: true, format: 'esm', platform: 'node', target: 'node22', packages: 'external', plugins: workspacePlugins
+  bundle: true, format: 'esm', platform: 'node', target: 'node22', plugins: [...workspacePlugins, externalPackages]
 });
 // Pane-resident OSC handshake relay must survive bundling and npm packaging.
 await build({
