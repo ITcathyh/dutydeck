@@ -2,7 +2,7 @@ import { isChildDiagnostic, terminalTaskStatuses, type AgentEvent, type Verifica
 import type { StoredLarkConfig } from './config.js';
 import { boundLarkCardElements, LarkServiceError } from './service.js';
 import { redactTraceText, sensitiveTraceKey } from './secret-redaction.js';
-import { collapsiblePanel, escapeCardInline, neutralizeCardTags } from './card-elements.js';
+import { collapsiblePanel, escapeCardInline, neutralizeCardTags, textFence } from './card-elements.js';
 import { repairCardStrongPunctuation } from './card-strong-punctuation.js';
 import { maxLarkVerificationRepairRounds, type LarkAutoVerificationNote } from './auto-verification.js';
 
@@ -145,7 +145,8 @@ export function eventsForRuntimeTask(events: AgentEvent[], taskId: string) {
   // 不能退回整段会话：过程卡会数上以前所有轮次的步骤，结果卡会把上一轮的答案当成这一轮的结果。
   // 提交后、回答结束时还会再记「运行中」，所以只有窗口取到受理事件或原话为止（loadLarkTaskWindow）时这条退路才可靠。
   if (start < 0) start = events.findIndex(event => isTaskRunningEvent(event, taskId));
-  if (start < 0) return events;
+  // 两条边界都没有（排队中就被取消）：这一轮从没开始，窗口里没有属于它的事件。
+  if (start < 0) return [];
   const endOffset = events.slice(start + 1).findIndex(event => {
     if (event.type !== 'task') return false;
     const task = (event.data as any)?.task;
@@ -161,6 +162,8 @@ export async function loadLarkTaskEvents(
   return eventsForRuntimeTask(await loadLarkTaskWindow(runtime, sessionId, taskId, limit), taskId);
 }
 
+const larkTaskWindowMaxEvents = 20_000;
+
 /** 含这一轮起止边界事件的窗口：插话结果就记在边界事件上。 */
 export async function loadLarkTaskWindow(
   runtime: { getEvents?(id: string): Promise<AgentEvent[]>; getRecentEvents?(id: string, limit: number): Promise<AgentEvent[]> },
@@ -171,11 +174,13 @@ export async function loadLarkTaskWindow(
   // until the task boundary is present so the result cannot lose its beginning:
   // the acceptance event precedes every other event of the task, which also covers
   // a task that failed before its prompt was written.
+  // A task with neither boundary in the session (legacy data) would otherwise read
+  // the whole session on every lookup; past the cap a very long task loses its start.
   for (;;) {
     const events = await runtime.getRecentEvents(sessionId, limit);
-    if (events.length < limit || events.some(event => event.id === `accepted:${taskId}`
+    if (events.length < limit || limit >= larkTaskWindowMaxEvents || events.some(event => event.id === `accepted:${taskId}`
       || (event.type === 'text' && (event.data as any)?.role === 'user' && (event.data as any)?.taskId === taskId))) return events;
-    limit *= 2;
+    limit = Math.min(limit * 2, larkTaskWindowMaxEvents);
   }
 }
 
@@ -194,7 +199,6 @@ export const steeringOutcomeText = (outcome: string) => ({
   incompatible: '这条内容的执行设置（权限模式、模型或高危操作策略）与正在执行的那一轮不同，不能插话。'
 } as Record<string, string>)[outcome] ?? 'Agent 没有接受插话。';
 
-const textFence = (text: string) => `\`\`\`text\n${text.replaceAll('```', '``\\`')}\n\`\`\``;
 const fenced = (value: unknown) => {
   if (value === undefined) return '';
   return `\n\n${textFence(typeof value === 'string' ? value : JSON.stringify(value, null, 2))}`;
@@ -241,8 +245,8 @@ const readableInput = (value: unknown): string => {
     : `${key}: ${JSON.stringify(item)}`).join('\n');
 };
 const truncateInline = (value: string, limit = 64) => {
-  const text = value.replace(/\s+/g, ' ').trim();
-  return text.length <= limit ? text : `${text.slice(0, Math.max(1, limit - 1)).trimEnd()}…`;
+  const chars = Array.from(value.replace(/\s+/g, ' ').trim());
+  return chars.length <= limit ? chars.join('') : `${chars.slice(0, Math.max(1, limit - 1)).join('').trimEnd()}…`;
 };
 
 // CLI 命令常以一串环境变量赋值开头（`FOO=1 BAR=2 真正的命令 …`）。标题只有 64 个字符，
@@ -504,13 +508,13 @@ const toolKindLabel: Record<TraceToolKind, string> = {
 // 标题整行加粗；文本自带 * 时不包，免得和它自己的 Markdown 拼出一串字面星号。
 const strong = (markdown: string) => markdown.includes('*') ? markdown : `**${markdown}**`;
 
-/** 与过程卡共用脱敏后的旁白和工具摘要，不暴露 thinking 或终端原文。 */
+/** 与过程卡共用脱敏后的旁白和工具摘要，不暴露 thinking 或终端原文；返回值已转义，可直接拼进卡片 markdown。 */
 export function busyProgressSummary(events: AgentEvent[]): { phase: string; latest: string } {
   const entries = compactTraceEntries(events);
   const narrative = entries.filter(entry => entry.type === 'text' && entry.data.role !== 'user').at(-1);
   const tool = entries.filter(entry => entry.type === 'tool_call' || entry.type === 'tool_result').at(-1);
-  return { phase: narrative?.data.text ? redactTraceText(String(narrative.data.text)).slice(0, 200) : '正在执行',
-    latest: tool ? toolHeadline(toolPresentation(tool)).slice(0, 200) : '暂无可见步骤' };
+  return { phase: narrative?.data.text ? escapeCardInline(truncateInline(redactTraceText(String(narrative.data.text)), 200)) : '正在执行',
+    latest: tool ? escapeCardInline(truncateInline(toolHeadline(toolPresentation(tool)), 200)) : '暂无可见步骤' };
 }
 
 // 「执行中」即 statusLabel 的判定：没失败且状态像在跑。
@@ -1041,7 +1045,7 @@ const errorAlert = (entry: TraceEntry, index: number): LarkCardElement => ({
   // 启动器版本变化只给人话说明和 /new 指引。
   content: String(entry.data.message ?? '').startsWith(LARK_LAUNCHER_VERSION_CHANGED_CODE)
     ? larkLauncherVersionChangedHint
-    : truncateTrace(entry.data.message, 1_500) || 'Agent 执行未完全成功',
+    : escapeCardInline(truncateTrace(entry.data.message, 1_500)) || 'Agent 执行未完全成功',
   text_size: 'normal', margin: '6px 0px 8px 0px',
   icon: { tag: 'standard_icon', token: 'warning_outlined', color: 'red' }
 });

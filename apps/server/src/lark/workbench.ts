@@ -9,7 +9,8 @@ import type { WorkItemInteractions, WorkItemRequest } from '../work-item-interac
 import { readLarkConfig, type StoredLarkConfig } from './config.js';
 import { createLarkCardService, type LarkCardService } from './service.js';
 import { patchLarkCard, sendLarkResult } from './result-delivery.js';
-import { neutralizeCardTags } from './card-elements.js';
+import { neutralizeCardTags, textFence } from './card-elements.js';
+import { redactTraceText } from './secret-redaction.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { PersistedLarkCardTask } from './coordinator.js';
 
@@ -665,11 +666,12 @@ export class LarkWorkbench {
       item = await this.work().runTemplate(sessionId, id, version, rest.slice(1).join(' '), event.messageId, actorId, false);
     } else if (action === 'templates') {
       const templates = await this.work().listTemplates(sessionId, actorId);
-      text = templates.map(value => `**${value.name} · v${value.version}**\n\`/work run ${value.id} ${value.version} 新目标\``).join('\n\n') || '尚无流程。完成一个目标后，可用 /work save 目标编号 流程名称 保存。';
+      text = templates.map(value => `**${neutralizeCardTags(value.name)} · v${value.version}**\n\`/work run ${value.id} ${value.version} 新目标\``).join('\n\n') || '尚无流程。完成一个目标后，可用 /work save 目标编号 流程名称 保存。';
     } else if (id && ['terminal', 'input', 'key'].includes(action!)) {
       if (action === 'terminal') {
         const view = await this.interactions().terminal(sessionId, id, rest[0] ?? '', actorId);
-        text = `**步骤终端 · ${view.stepId}**\n\n${view.screen.replace(/`/g, 'ˋ')}\n\n发送一行文字：\n\`/work input ${id} ${view.stepId} ${view.taskId} 你的回答\`\n\n发送按键：\n\`/work key ${id} ${view.stepId} ${view.taskId} enter\`\n支持 enter / up / down / left / right / tab / escape / ctrl_c。`;
+        // 屏幕会进群：凭据先抹掉；围栏挡住 markdown，围栏内仍中和卡片标签，不赌平台不解析代码块里的标签。
+        text = `**步骤终端 · ${view.stepId}**\n\n${textFence(neutralizeCardTags(redactTraceText(view.screen)))}\n\n发送一行文字：\n\`/work input ${id} ${view.stepId} ${view.taskId} 你的回答\`\n\n发送按键：\n\`/work key ${id} ${view.stepId} ${view.taskId} enter\`\n支持 enter / up / down / left / right / tab / escape / ctrl_c。`;
       } else {
         await this.interactions().terminalInput(sessionId, id, { stepId: rest[0], taskId: rest[1], ...(action === 'input' ? { text: rest.slice(2).join(' ') } : { key: rest[2] }) }, actorId);
         text = `已向当前步骤发送${action === 'input' ? '文字' : '按键'}。\n\n\`/work terminal ${id} ${rest[0]}\``;
@@ -690,7 +692,7 @@ export class LarkWorkbench {
       if (action === 'answer') item = await this.work().answer(sessionId, id, rest[0] ?? '', rest.slice(1).join(' '), item.revision, actorId);
       if (action === 'save') {
         const template = await this.work().saveTemplate(sessionId, id, rest.join(' '), actorId);
-        text = `已保存「${template.name}」v${template.version}。\n\n\`/work run ${template.id} ${template.version} 新目标\``;
+        text = `已保存「${neutralizeCardTags(template.name)}」v${template.version}。\n\n\`/work run ${template.id} ${template.version} 新目标\``;
       }
       if (action === 'respond') {
         const request = (await this.interactions().list(sessionId, id, actorId)).find(request => request.stepId === rest[0] && request.requestId === rest[1]);

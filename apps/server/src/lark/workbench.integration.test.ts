@@ -33,6 +33,7 @@ async function fixture(mode: 'normal' | 'permission' | 'held' | 'terminal' = 'no
   const busy = new Set<string>();
   const permissionCalls = vi.fn();
   const terminalWrites = vi.fn();
+  const terminalScreen = { data: '\x1b[31mAllow tool? [y/n]\x1b[0m' };
   const approval = vi.fn(async () => true);
   let work!: WorkItemService;
   let tools!: LarkAgentToolsService;
@@ -66,7 +67,7 @@ async function fixture(mode: 'normal' | 'permission' | 'held' | 'terminal' = 'no
         busy.delete(sessionId);
         emit({ type: 'completed', data: { stopReason: 'end_turn' } });
       },
-      createTerminalStream: () => ({ onData: (_data, snapshot) => snapshot?.({ data: '\x1b[31mAllow tool? [y/n]\x1b[0m', cols: 80, rows: 24 }), write: terminalWrites, resize: () => {}, dispose: () => {} }),
+      createTerminalStream: () => ({ onData: (_data, snapshot) => snapshot?.({ data: terminalScreen.data, cols: 80, rows: 24 }), write: terminalWrites, resize: () => {}, dispose: () => {} }),
       resolvePermission: async (id, allowed) => { permissionCalls(id, allowed); releases.get(sessionId)?.(); return true; }
     } satisfies AgentDriver)
   });
@@ -102,7 +103,7 @@ async function fixture(mode: 'normal' | 'permission' | 'held' | 'terminal' = 'no
   const item = async () => (await work.listBySession((await parent()).id, 'ou_alice'))[0]!;
   const childTasks = async () => (await Promise.all((await runtime.listSessions()).filter(session => session.source === 'work_item').map(session => runtime.getTasks(session.id)))).flat();
   const settle = async () => { await vi.waitFor(async () => { const children = (await runtime.listSessions()).filter(session => session.source === 'work_item'); const tasks = (await Promise.all(children.map(s => runtime.getTasks(s.id)))).flat(); expect(tasks.length).toBeGreaterThan(0); expect(tasks.every(t => ['completed','failed','cancelled','interrupted'].includes(t.status))).toBe(true); }); };
-  return { directory, repos, runtime, work, broker, approval, terminalWrites, tools, capabilities, interactions, workbench, coordinator, app, client, config, cards, prompts, permissionCalls, releases, parent, item, childTasks, settle };
+  return { directory, repos, runtime, work, broker, approval, terminalWrites, terminalScreen, tools, capabilities, interactions, workbench, coordinator, app, client, config, cards, prompts, permissionCalls, releases, parent, item, childTasks, settle };
 }
 
 describe('亮屏指纹与卡片元素（纯函数）', () => {
@@ -612,6 +613,15 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
     expect(view.screen).toBe('Allow tool? [y/n]');
     await f.workbench.command(item.parentSessionId, `terminal ${item.id} research`, message('om_terminal', ''), f.config);
     expect(JSON.stringify(f.cards.at(-1))).toContain(`/work input ${item.id} research ${view.taskId}`);
+    const secret = 'sk-' + 'x'.repeat(32);
+    f.terminalScreen.data = `export OPENAI_API_KEY=${secret}\n<at id=all></at> **bold** \`\`\` tail`;
+    await f.workbench.command(item.parentSessionId, `terminal ${item.id} research`, message('om_terminal_secret', ''), f.config);
+    const screenCard = JSON.stringify(f.cards.at(-1));
+    expect(screenCard).not.toContain(secret);
+    expect(screenCard).toContain('[REDACTED]');
+    expect(screenCard).toContain('```text');
+    expect(screenCard).not.toMatch(/<\s*\/?\s*at\b/iu);
+    expect(screenCard).toContain(`/work input ${item.id} research ${view.taskId}`);
     await expect(f.interactions.terminalInput(item.parentSessionId, item.id, { stepId: 'research', taskId: 'old', text: 'y' }, 'ou_alice')).rejects.toMatchObject({ statusCode: 409 });
     f.approval.mockResolvedValue(false);
     await expect(f.interactions.terminalInput(item.parentSessionId, item.id, { stepId: 'research', taskId: view.taskId, text: 'y' }, 'ou_alice')).rejects.toMatchObject({ statusCode: 403 });
