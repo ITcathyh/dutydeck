@@ -13,7 +13,7 @@ import type { LarkCardService, LarkChatMessage } from './service.js';
 import { parseLarkMessageContent } from './message-content.js';
 import { LarkContextBootstrap, observationTime } from './context-bootstrap.js';
 import { decisionInput, participationInput, parseParticipationResult, parseParticipationResponse, scenarioObservations, type ParticipationDecider, type ParticipationFacts, type ParticipationResult } from './readonly-decider.js';
-import { botNameTokens, callsBotName, compactText, intrusionPattern, ownedItems, participationIntentOf, participationRuleReasons, stripMentionPlaceholders, type ParticipationRule, type RuleFacts, type RuleVerdict } from './participation-rules.js';
+import { botNameTokens, callsBotName, compactText, evaluateParticipationRules, intrusionPattern, ownedItems, participationIntentOf, participationRuleReasons, ruleContextOf, stripMentionPlaceholders, type ParticipationRule, type RuleFacts, type RuleVerdict } from './participation-rules.js';
 import { responderAnnouncementOf, responderClaimText, responderIntentOf, responderReleaseText } from './group-responder.js';
 import { LarkScenarios, type ScenarioMatch, type ScenarioPhrase } from './group-scenarios.js';
 import { runDirectScenario, type LarkScenarioAdoption } from './scenario-direct.js';
@@ -63,7 +63,8 @@ export interface GroupParticipationOptions {
 }
 type Pending = { event: LarkMessageEvent; config: StoredLarkConfig; observation: CollaborationObservation; botOpenId?: string };
 type ObserveInput = { explicit: boolean; botOpenId?: string; addressed?: boolean; ownedTopic?: boolean };
-type Slot = { pending?: Pending; timer?: NodeJS.Timeout; running?: Promise<void>; stopped: boolean };
+/** merged：去抖时被后一条并掉的消息，按到达顺序排队，只跑早期规则。 */
+type Slot = { pending?: Pending; merged?: Pending[]; timer?: NodeJS.Timeout; running?: Promise<void>; stopped: boolean };
 /** 把一条人类消息按显式 @ 交给执行路径；授权、领取与执行由 coordinator 负责。 */
 export type ParticipationDispatcher = (event: LarkMessageEvent, config: StoredLarkConfig) => Promise<void>;
 /** 一次回合门禁的结论：放行返回 undefined，拦下返回可直接落日志的理由。 */
@@ -97,6 +98,11 @@ const deafLevelText = (level: ParticipationLevel) => level === 'mention' ? '我�
 const clock = (at: string) => { const date = new Date(at); return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`; };
 const snippet = (text: string | undefined) => { const plain = stripMentionPlaceholders(text ?? ''); return plain.length > 20 ? `${plain.slice(0, 20)}…` : plain; };
 const botName = (config: StoredLarkConfig) => config.name ?? config.displayName ?? config.appId;
+const botNamesOf = (config: StoredLarkConfig) => [config.name, config.displayName].filter((name): name is string => Boolean(name));
+/** 被并掉的消息仍照常交给执行的规则：明确在叫本机器人的，不含积极档、单真人群这类默认接话。 */
+const explicitRules = new Set<ParticipationRule>(['calls_name', 'reply_to_self', 'owned_topic', 'owned_item']);
+/** 一个群最多留几条被并掉、待看规则的消息。 */
+const MERGED_LIMIT = 20;
 const isSelfMessage = (message: Pick<LarkChatMessage, 'sender'>, appId: string, botOpenId?: string) =>
   ['app', 'bot'].includes(message.sender.type ?? '') && Boolean(message.sender.id) && (message.sender.id === appId || message.sender.id === botOpenId);
 const isBotMessage = (message: Pick<LarkChatMessage, 'sender'>) => ['app', 'bot'].includes(message.sender.type ?? '');
@@ -114,6 +120,8 @@ const jsonRecord = (value: unknown): Record<string, unknown> | undefined => {
 /** 确认卡模板的变量：{summary} 和各个参数。 */
 const confirmValues = (pack: ScenarioPack, params: Readonly<Record<string, unknown>>): TemplateValues => ({ ...scenarioParamValues(pack, params), summary: templateText(scenarioSummary(pack, params)) });
 const defaultExplain = { acted: '{time} 那条消息已经起了任务，结果在它的话题里。', skipped: '{time} 那条消息我没处理：{reason}。', note: '另外，{time} 那条「{snippet}」我没处理：{reason}。' };
+/** 判定 id 含触发消息：前一条还在判定时后一条已经入库，两条判定看到的快照版本相同。 */
+const decisionIdOf = (scope: CollaborationScope, triggerId: string, snapshot: CollaborationSnapshot) => `decision_${digest([scope, triggerId, snapshot.contextRevision, snapshot.settings.policyVersion])}`;
 const triggerMeta = (trigger: CollaborationObservation): NonNullable<CollaborationDeciderMeta['trigger']> => ({ id: trigger.id,
   ...(trigger.messageId ? { messageId: trigger.messageId } : {}), ...(trigger.senderId ? { senderId: trigger.senderId } : {}), ...(trigger.threadId ? { threadId: trigger.threadId } : {}), text: trigger.text.slice(0, 200) });
 /** 存进判定记录的事实去掉未填项（JSON 本来也不存 undefined）。 */
@@ -440,7 +448,7 @@ export class LarkGroupParticipation {
     this.dispatchAuthorizers.delete(appId);
     for (const [key, slot] of this.slots) {
       if ((JSON.parse(key) as [string, string])[0] !== appId) continue;
-      slot.stopped = true; slot.pending = undefined;
+      slot.stopped = true; slot.pending = undefined; slot.merged = undefined;
       if (slot.timer) clearTimeout(slot.timer);
       slot.timer = undefined;
     }
@@ -537,6 +545,10 @@ export class LarkGroupParticipation {
     if (!slot || slot.stopped && !slot.running) { slot = { stopped: false }; this.slots.set(key, slot); }
     if (slot.stopped) return;
     if (slot.pending && this.options.inboxStore) void annotateDisposition(this.options.inboxStore, scope.appId, slot.pending.event.messageId, { schemaVersion: 1, reason: 'participation_merged', mergedInto: pending.event.messageId }, this.options.log).catch(error => this.options.log?.warn({ error }, '记录消息合并失败'));
+    if (slot.pending) {
+      (slot.merged ??= []).push(slot.pending);
+      if (slot.merged.length > MERGED_LIMIT) slot.merged.shift();
+    }
     slot.pending = pending;
     if (slot.timer) clearTimeout(slot.timer);
     if (!slot.running) {
@@ -554,8 +566,14 @@ export class LarkGroupParticipation {
   private async drain(scope: CollaborationScope, slot: Slot): Promise<void> {
     if (slot.running) return slot.running;
     const run = (async () => {
-      while (slot.pending && !slot.stopped) {
+      while ((slot.pending || slot.merged?.length) && !slot.stopped) {
+        for (const merged of slot.merged?.splice(0) ?? []) {
+          if (slot.stopped) break;
+          try { await this.decideMerged(scope, merged, slot); }
+          catch (error) { this.options.log?.warn({ error, scope, messageId: merged.event.messageId }, '被合并消息的规则判定失败'); }
+        }
         const pending = slot.pending; slot.pending = undefined;
+        if (!pending || slot.stopped) continue;
         try { await this.decide(scope, pending, slot); }
         catch (error) {
           if (this.options.inboxStore) await annotateDisposition(this.options.inboxStore, scope.appId, pending.event.messageId, { schemaVersion: 1, reason: 'participation_failed' }, this.options.log);
@@ -671,7 +689,7 @@ export class LarkGroupParticipation {
     // 要翻最近消息的规则放到闸门之后，免得预算用满时每条消息还去读一次群历史。
     const facts = await this.ruleFacts(scope, pending, config, resolveParticipation({ mentionPolicy: config.mentionPolicy, participation: settings.participation }).level);
     const outcome = await evaluateParticipation<CollaborationSnapshot, void>({
-      botNames: [config.name, config.displayName].filter((name): name is string => Boolean(name)), roleScope: config.roleScope,
+      botNames: botNamesOf(config), roleScope: config.roleScope,
       early: { trigger: pending.observation, owned: ownedItems(await repo.listMandates(scope), []), facts },
       gate: () => this.decisionGate(scope, pending, settings),
       enrich: async () => {
@@ -690,6 +708,17 @@ export class LarkGroupParticipation {
       model: (round, full) => this.decideByModel(scope, pending, slot, config, round!.trigger, round!.facts, full!)
     });
     if (outcome.kind === 'rule') await this.decideByRule(scope, pending, slot, outcome.verdict, outcome.facts, outcome.context, config);
+  }
+  /** 去抖时被后一条并掉的消息：只跑早期规则，不调模型；明确在叫我的照常交给执行，其余不记判定，去向仍是已合并。 */
+  private async decideMerged(scope: CollaborationScope, pending: Pending, slot: Slot) {
+    const repo = this.options.repository;
+    const settings = await repo.getSettings(scope);
+    if (this.closed || slot.stopped || settings.participation === 'off') return;
+    const config = await this.options.readConfig(scope.appId, scope.chatId);
+    if (!config?.listening) return;
+    const facts = await this.ruleFacts(scope, pending, config, resolveParticipation({ mentionPolicy: config.mentionPolicy, participation: settings.participation }).level);
+    const verdict = evaluateParticipationRules(ruleContextOf(pending.observation, ownedItems(await repo.listMandates(scope), []), botNamesOf(config), facts, config.roleScope));
+    if (verdict?.action === 'addressed' && explicitRules.has(verdict.rule)) await this.decideByRule(scope, pending, slot, verdict, facts, undefined, config);
   }
   /** 命中的 model 包的冻结内容：调上下文来源（截止时间和字数按包声明封顶），失败时返回 abstained。包已经关掉时返回 undefined。 */
   private async scenarioSnapshot(scope: CollaborationScope, config: StoredLarkConfig, pending: Pending, packId: string): Promise<CollaborationScenarioSnapshot | undefined> {
@@ -743,7 +772,7 @@ export class LarkGroupParticipation {
     const repo = this.options.repository;
     // 交给模型的材料只留当前消息、最近 20 条、本机器人最近的发言和事项标题，控制在 8000 字以内。
     let snapshot = decisionInput(full, trigger.id);
-    const id = `decision_${digest([scope, snapshot.contextRevision, snapshot.settings.policyVersion])}`;
+    const id = decisionIdOf(scope, trigger.id, snapshot);
     if (await repo.getDecision(scope, id)) return;
     const modelFacts = memberFacts(facts);
     const meta: CollaborationDeciderMeta = {
@@ -1289,7 +1318,7 @@ export class LarkGroupParticipation {
     const trigger = full.observations.find(item => item.messageId === larkMessageAnchor(pending.event) && item.origin === 'live' && item.senderKind === 'human');
     if (!trigger) return;
     const snapshot = decisionInput(full, trigger.id);
-    const id = `decision_${digest([scope, snapshot.contextRevision, snapshot.settings.policyVersion])}`;
+    const id = decisionIdOf(scope, trigger.id, snapshot);
     if (await repo.getDecision(scope, id)) return;
     const meta: CollaborationDeciderMeta = {
       kind: 'rule',

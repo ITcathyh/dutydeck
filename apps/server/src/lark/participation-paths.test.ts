@@ -202,3 +202,33 @@ describe('没接话时说明原因和怎么配', () => {
     expect(status).not.toContain('**负责范围**');
   });
 });
+
+describe('相邻的两条消息各自判定', () => {
+  it('前一条判定还在查成员时后一条到达：两条各有判定记录，都交给执行，后一条不被同一个判定 id 吞掉', async () => {
+    const h = await harness();
+    let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; });
+    let entered!: () => void; const inMembers = new Promise<void>(resolve => { entered = resolve; });
+    let first = true;
+    Object.assign(h.service, { listChatMembers: vi.fn(async () => { if (first) { first = false; entered(); await gate; } return members(1, [self])(); }) });
+    await h.handle(message('om_A', '帮我看下 A 的报错'));
+    const flushing = h.participation.flush(scope);
+    await inMembers;
+    await h.handle(message('om_B', '帮我看下 B 的报错', { createTime: '1789707601000' }));
+    release(); await flushing; await h.participation.flush(scope);
+    expect(h.dispatch.mock.calls.map(call => (call as unknown as [{ messageId: string }])[0].messageId)).toEqual(['om_A', 'om_B']);
+    expect(ruleOf(await h.decisionOf('om_A'))).toBe('single_human');
+    expect(ruleOf(await h.decisionOf('om_B'))).toBe('single_human');
+  });
+
+  it('去抖合并：被合并的前一条明确在叫我（叫名字、回复我）时照常交给执行；只是默认接话的仍并入后一条', async () => {
+    const h = await harness({ readConfig: async () => ({ ...config, name: 'bdev-flash' }) });
+    Object.assign(h.service, { listChatMembers: members(1, [self]) });
+    await h.handle(message('om_A', 'bdev-flash 帮我看下 A 的报错'));
+    await h.handle(message('om_B', '顺便说下今天下午发版', { createTime: '1789707601000' }));
+    await h.handle(message('om_C', '还有个事', { createTime: '1789707602000' }));
+    await h.participation.flush(scope);
+    expect(h.dispatch.mock.calls.map(call => (call as unknown as [{ messageId: string }])[0].messageId)).toEqual(['om_A', 'om_C']);
+    expect(ruleOf(await h.decisionOf('om_A'))).toBe('calls_name');
+    expect(await h.decisionOf('om_B')).toBeUndefined();
+  });
+});
