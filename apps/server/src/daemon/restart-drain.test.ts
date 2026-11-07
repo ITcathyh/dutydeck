@@ -607,7 +607,7 @@ describe('restart 前等待正在执行的任务结束（drain）', () => {
     expect(readToken).toHaveBeenCalledWith(join(tmp, 'bot.db'));
     expect(api.drains).toEqual([true, true]);
     expect(api.paths.filter(path => path === '/api/system/activity')).toHaveLength(2);
-    expect(api.paths.at(-1)).toBe('/health');
+    expect(api.paths.slice(-2)).toEqual(['/health', '/health/ready']);
     expect(sys.calls.filter(call => !call.includes(' show '))).toEqual(['systemctl --user restart dutydeck-tag.service']);
     await api.close();
   });

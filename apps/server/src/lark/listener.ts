@@ -239,10 +239,16 @@ export class LarkLongConnectionListener implements LarkListener {
   private async connect(config: StoredLarkConfig, domain: string, credentials: string, http: ReturnType<typeof createWorkbenchFetch>) {
     const service = createLarkCardService(this.options.env ?? process.env, http.fetch, { ...config, resolveShowAgentName: () => (this.config ?? config).showAgentName === true });
     this.service = service;
+    const startedAt = Date.now();
+    // SDK 加载与机器人身份查询并行：重启后第一次建连两者都要等，串行会拉长收不到事件的窗口。
+    // 加载失败留到下面 await 时再抛，先处理身份查询的错误。
+    const sdk = larkSdk ? Promise.resolve(larkSdk) : loadLarkSdk();
+    sdk.catch(() => {});
     let botOpenId: string;
     try { botOpenId = await service.getBotOpenId(); }
     catch (error) { http.close(); throw new LarkServiceError('LARK_LISTENER_START_FAILED', `Failed to resolve Lark bot identity: ${error instanceof Error ? error.message : String(error)}`, 502); }
-    const lark = larkSdk ?? await loadLarkSdk();
+    const lark = await sdk;
+    const identityMs = Date.now() - startedAt;
     http.fetch.signal!.throwIfAborted();
     // 话题群种子消息需要按群形态路由：默认用带缓存的 getChatMode，也允许注入（测试/自定义路由）。
     const chatModeResolver = this.options.chatModeResolver ?? ((appId: string, chatId: string) => getChatMode(appId, config.appSecret, chatId, {
@@ -265,6 +271,7 @@ export class LarkLongConnectionListener implements LarkListener {
     ) : undefined;
     this.coordinator = coordinator;
     await coordinator?.initializeWorkflows(config);
+    const recoveryMs = Date.now() - startedAt - identityMs;
     http.fetch.signal!.throwIfAborted();
     if (coordinator) this.options.participation?.setDispatcher(config.appId, (event, current) => coordinator.adopt(event, current), (scope, actor) => coordinator.canConfirmParticipation(scope, actor));
     if (coordinator && this.options.agentCommands) {
@@ -274,6 +281,7 @@ export class LarkLongConnectionListener implements LarkListener {
     void this.options.participation?.recover(config.appId).catch(error => this.log.warn({ error, appId: config.appId }, '群观察恢复失败'));
     try { await coordinator?.startReconciliation(config); }
     catch (error) { this.log.warn({ error, appId: config.appId }, '飞书卡片终态对账启动失败，继续建立消息监听'); }
+    const reconcileMs = Date.now() - startedAt - identityMs - recoveryMs;
     http.fetch.signal!.throwIfAborted();
     // 欢迎语：kv 必须是持久化存储，重启后才能靠标记不重发；无存储则不启用。
     const welcomeKv = this.options.welcomeStore ?? this.options.workflowStore;
@@ -450,7 +458,8 @@ export class LarkLongConnectionListener implements LarkListener {
       // 存活检测：超过该时长未收到任何入站帧（含 pong）则主动断开并触发重连，
       // 防止连接半开（TCP 看起来正常但实际已不通）时监听静默失效。
       wsConfig: { pingTimeout: 120 },
-      onReady: () => { connected(); this.log.info({ appId: config.appId }, '飞书消息监听已连接'); },
+      // 各阶段耗时：重启后收不到事件的窗口主要落在这里，记下来供部署后核对。
+      onReady: () => { connected(); this.log.info({ appId: config.appId, connectMs: { identity: identityMs, recovery: recoveryMs, reconcile: reconcileMs, total: Date.now() - startedAt } }, '飞书消息监听已连接'); },
       onReconnecting: () => {
         this.log.warn({ appId: config.appId }, '飞书消息监听正在重连');
         if (this.client !== client) return;

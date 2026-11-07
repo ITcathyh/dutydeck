@@ -53,3 +53,50 @@ process.stdout.write(String(Date.now()));`;
   expect(Number(stdout)).toBeGreaterThan(0);
   expect(exitedAt - Number(stdout)).toBeLessThan(500);
 }, 30_000);
+
+it('waits for a restarting service when the connection is refused, then delivers once', async () => {
+  // 先占一个端口再释放，得到当前没人监听的地址；服务稍后在同一端口起来，模拟部署重启。
+  const probe = createServer();
+  await new Promise<void>(resolve => probe.listen(0, '127.0.0.1', resolve));
+  const { port } = probe.address() as { port: number };
+  await new Promise<void>(resolve => probe.close(() => resolve()));
+  const received: string[] = [];
+  let restarted: (() => Promise<void>) | undefined;
+  const sleeps: number[] = [];
+  const client = new RelayHttpClient({
+    env: { dutydeck_relay_url: `http://127.0.0.1:${port}/api/relay`, dutydeck_relay_token: 't' },
+    sleep: async ms => {
+      sleeps.push(ms);
+      if (sleeps.length === 2) await restarted?.();
+    }
+  });
+  restarted = async () => {
+    const server = createServer((request, response) => {
+      let text = '';
+      request.on('data', chunk => { text += chunk; });
+      request.on('end', () => { if (request.url === '/api/relay/sessions/self/send') received.push(text); response.setHeader('content-type', 'application/json'); response.end('{"ok":true}'); });
+    });
+    await new Promise<void>(resolve => server.listen(port, '127.0.0.1', resolve));
+    cleanup.push(() => new Promise<void>(resolve => { server.closeAllConnections(); server.close(() => resolve()); }));
+  };
+  expect(await client.post('/sessions/self/send', { text: 'x' })).toEqual({ ok: true });
+  expect(received).toEqual([JSON.stringify({ text: 'x' })]);
+  expect(sleeps).toEqual([1_000, 1_000]);
+});
+
+it('does not retry errors other than a refused connection', async () => {
+  const fetcher = vi.fn(async () => { throw Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }); }) as unknown as typeof fetch;
+  const sleep = vi.fn(async () => {});
+  const client = new RelayHttpClient({ env: { dutydeck_relay_url: 'http://127.0.0.1:1/api/relay', dutydeck_relay_token: 't' }, fetcher, sleep });
+  await expect(client.post('/sessions/self/send', { text: 'x' })).rejects.toMatchObject({ code: 'RELAY_UNAVAILABLE' });
+  expect(fetcher).toHaveBeenCalledTimes(1);
+  expect(sleep).not.toHaveBeenCalled();
+});
+
+it('stops retrying a refused connection at the caller deadline', async () => {
+  const fetcher = vi.fn(async () => { throw Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }); }) as unknown as typeof fetch;
+  const client = new RelayHttpClient({ env: { dutydeck_relay_url: 'http://127.0.0.1:1/api/relay', dutydeck_relay_token: 't' }, fetcher, sleep: async () => {} });
+  // 期限不足一次重试间隔：只尝试一次就报不可用。
+  await expect(client.post('/sessions/self/send', { text: 'x' }, 500)).rejects.toMatchObject({ code: 'RELAY_UNAVAILABLE', exitCode: 3 });
+  expect(fetcher).toHaveBeenCalledTimes(1);
+});

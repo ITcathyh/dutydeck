@@ -145,7 +145,10 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
   };
 
   // 不等长连接握手：服务先开始监听 HTTP，重启/部署的不可用窗口不随机器人数量拉长。
-  if (!listeningDisabled) void syncListeners();
+  // 就绪检查（/health/ready）等这次启动同步结束：每个要监听的机器人要么已连上，要么已失败并排了退避重连。
+  // 连不上飞书不算未就绪：平台故障时旧版本同样连不上，回滚没有意义。
+  let listenerStartupSettled = listeningDisabled;
+  if (!listeningDisabled) void syncListeners().finally(() => { listenerStartupSettled = true; });
   app.addHook('onClose', async () => listener.stop());
   await registerLarkAgentToolRoutes(app, options.agentTools);
   await registerLarkGroupManagementRoutes(app, options.groupManager);
@@ -446,4 +449,8 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
       return larkError(reply, error);
     }
   });
+  return {
+    /** 启动时的飞书长连接同步还没结束时返回未就绪原因。 */
+    readiness: () => listenerStartupSettled ? undefined : '飞书长连接还在建立'
+  };
 }

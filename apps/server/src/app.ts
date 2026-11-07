@@ -231,6 +231,13 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   });
 
   app.get('/health', async () => ({ ok: true }));
+  // 就绪：启动时要建立的外部入口（飞书长连接）都已有结果。部署与重启等它再认定新进程接管了服务。
+  // 路由在 lark 路由注册前声明，只在请求时读取检查函数。
+  let readinessChecks: Array<() => string | undefined> = [];
+  app.get('/health/ready', async () => {
+    const pending = readinessChecks.map(check => check()).filter((reason): reason is string => reason !== undefined);
+    return { ok: true, ready: pending.length === 0, pending };
+  });
   if (options.auth) {
     registerBrowserAuthRoutes(app, options.auth);
     // 中央豁免规则（所有调用方一致）：
@@ -315,7 +322,8 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   if (options.turnDiffs) registerTurnDiffRoutes(app, runtime, { ...options.turnDiffs, getShareSecret: options.auth?.getShareSecret,
     authorize: (request, sessionId, action) => requireSessionExecution(request, sessionId, 'session', action) });
   await registerSystemRoutes(app, options.system);
-  await registerLarkRoutes(app, { ...options.lark, clearBotModelSettings: appId => options.agentModelSettings?.clearBot(appId) ?? Promise.resolve(), renameBotModelSettings: (oldAppId, newAppId) => options.agentModelSettings?.renameBot(oldAppId, newAppId) ?? Promise.resolve(), runtime: options.lark?.runtime ?? runtime });
+  const lark = await registerLarkRoutes(app, { ...options.lark, clearBotModelSettings: appId => options.agentModelSettings?.clearBot(appId) ?? Promise.resolve(), renameBotModelSettings: (oldAppId, newAppId) => options.agentModelSettings?.renameBot(oldAppId, newAppId) ?? Promise.resolve(), runtime: options.lark?.runtime ?? runtime });
+  readinessChecks = [lark.readiness];
   app.get<{ Querystring: { excludeSessionId?: string; restart?: string } }>('/api/system/activity', async request => {
     const excludeSessionId = request.query.excludeSessionId?.trim() || undefined;
     return request.query.restart === 'true' ? runtime.getRestartActivity(excludeSessionId)

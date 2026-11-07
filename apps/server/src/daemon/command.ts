@@ -1050,7 +1050,23 @@ export function healthCheckUrl(address: string | undefined, deps: DaemonCommandD
   return resolveLocalUrl(address, deps.localAddresses ?? (() => Object.values(networkInterfaces()).flatMap(entries => entries?.map(entry => entry.address) ?? [])));
 }
 
-/** 重启后等到换上新的主进程，并且它的 /health 返回 ok。服务在 runtime 初始化完成后才开始监听。 */
+/**
+ * 新进程的 /health/ready：返回未就绪原因，就绪或服务版本没有这个接口时返回 undefined。
+ * 旧版本把未知路径回退到网页壳（200 + HTML）或4xx，都按「不支持」放行，只看 /health。
+ */
+async function readinessPending(fetcher: typeof fetch, origin: string, requestTimeoutMs: number): Promise<string | undefined> {
+  const response = await fetcher(new URL('/health/ready', origin).toString(), { signal: AbortSignal.timeout(requestTimeoutMs) });
+  if (response.status >= 400 && response.status < 500) return undefined;
+  if (!response.ok) return `/health/ready 返回 HTTP ${response.status}`;
+  const body = await response.json().catch(() => undefined) as { ready?: unknown; pending?: unknown } | undefined;
+  if (typeof body?.ready !== 'boolean' || body.ready) return undefined;
+  return Array.isArray(body.pending) && body.pending.length ? body.pending.map(String).join('、') : '服务尚未就绪';
+}
+
+/**
+ * 重启后等到换上新的主进程，它的 /health 返回 ok，并且 /health/ready 确认启动时的外部入口（飞书长连接）已有结果。
+ * 服务在 runtime 初始化完成后才开始监听；只看 /health 会在飞书还没连上时就认定重启完成，接着去停下一个实例。
+ */
 export async function waitForServiceHealth(service: ServiceControl, previousPid: number | undefined, address: string | undefined, deps: DaemonCommandDeps, timeoutMs = HEALTH_TIMEOUT_MS): Promise<{ ok: true; pid: number } | { ok: false; error: string }> {
   const url = healthCheckUrl(address, deps);
   if (!url) return { ok: false, error: `监听地址（${address ?? '未记录'}）不可用于本机健康检查。` };
@@ -1065,8 +1081,13 @@ export async function waitForServiceHealth(service: ServiceControl, previousPid:
     if (pid !== undefined && pid !== previousPid) {
       try {
         const response = await fetcher(new URL('/health', url.origin).toString(), { signal: AbortSignal.timeout(requestTimeoutMs) });
-        if (response.ok && (await response.json() as any)?.ok === true) return { ok: true, pid };
-        last = `新进程（pid ${pid}）的 /health 返回 HTTP ${response.status}`;
+        if (response.ok && (await response.json() as any)?.ok === true) {
+          const pending = await readinessPending(fetcher, url.origin, requestTimeoutMs);
+          if (pending === undefined) return { ok: true, pid };
+          last = `新进程（pid ${pid}）还没就绪：${pending}`;
+        } else {
+          last = `新进程（pid ${pid}）的 /health 返回 HTTP ${response.status}`;
+        }
       } catch (error: any) {
         last = `新进程（pid ${pid}）的 /health 请求失败：${error?.message || String(error)}`;
       }
