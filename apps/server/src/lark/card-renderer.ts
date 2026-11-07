@@ -145,7 +145,8 @@ export function eventsForRuntimeTask(events: AgentEvent[], taskId: string) {
   // 不能退回整段会话：过程卡会数上以前所有轮次的步骤，结果卡会把上一轮的答案当成这一轮的结果。
   // 提交后、回答结束时还会再记「运行中」，所以只有窗口取到受理事件或原话为止（loadLarkTaskWindow）时这条退路才可靠。
   if (start < 0) start = events.findIndex(event => isTaskRunningEvent(event, taskId));
-  if (start < 0) return events;
+  // 两条边界都没有（排队中就被取消）：这一轮从没开始，窗口里没有属于它的事件。
+  if (start < 0) return [];
   const endOffset = events.slice(start + 1).findIndex(event => {
     if (event.type !== 'task') return false;
     const task = (event.data as any)?.task;
