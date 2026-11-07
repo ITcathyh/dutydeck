@@ -299,6 +299,7 @@ export class DutydeckRuntime {
   private readonly queueBlocked = new Set<string>();
   private readonly resourceQueueBlocked = new Set<string>();
   private resourceQueueRevision = 0;
+  private resourceQueueRetryPending = false;
   /** 受阻期：排头任务被同仓库挡住后记下，认领成功或队列清空时删掉；noticed 表示这一期已留过会话提醒。 */
   private readonly workspaceBlocks = new Map<string, { taskId: string; noticed: boolean }>();
   /** 自动结案没做成的结果未知执行，每个进程只记一次日志。 */
@@ -394,8 +395,17 @@ export class DutydeckRuntime {
   private wake<T extends CommitResult>(result: T): T { this.publisher.wake(result.session.id); this.wakeResourceQueues(); return result; }
   private wakeResourceQueues() {
     this.resourceQueueRevision++;
-    const waiting = [...this.resourceQueueBlocked]; this.resourceQueueBlocked.clear();
-    if (waiting.length) queueMicrotask(() => { if (!this.shuttingDown && this.binding) for (const id of waiting) this.mutations.run(undefined, () => this.scheduleQueue(id)); });
+    this.retryResourceQueues();
+  }
+  /** One pending pass per burst: each pass re-runs full workspace admission for every blocked session. */
+  private retryResourceQueues() {
+    if (this.resourceQueueRetryPending || !this.resourceQueueBlocked.size) return;
+    this.resourceQueueRetryPending = true;
+    queueMicrotask(() => {
+      this.resourceQueueRetryPending = false;
+      const waiting = [...this.resourceQueueBlocked]; this.resourceQueueBlocked.clear();
+      if (!this.shuttingDown && this.binding) for (const id of waiting) this.mutations.run(undefined, () => this.scheduleQueue(id));
+    });
   }
   private fence(session: Session): SessionFence { return { sessionId: session.id, runId: session.runId }; }
   private attemptFence(ref: AttemptRef & SessionFence): AttemptFence {
@@ -460,7 +470,7 @@ export class DutydeckRuntime {
   private observeDriverOperation<T>(driver: AgentDriver, pending: Promise<T>) {
     const operations = this.driverOperations.get(driver) ?? new Set<Promise<unknown>>();
     operations.add(pending); this.driverOperations.set(driver, operations);
-    const cleanup = () => { operations.delete(pending); if (!operations.size) this.driverOperations.delete(driver); };
+    const cleanup = () => { operations.delete(pending); if (!operations.size) { this.driverOperations.delete(driver); this.wakeResourceQueues(); } };
     void pending.then(cleanup, cleanup);
     return this.mutations.wait(pending);
   }
@@ -496,7 +506,7 @@ export class DutydeckRuntime {
     await this.mutations.write(id, async () => {
       if (this.stopBlocks.has(id)) await this.repos.config.set(STOP_BLOCK_PREFIX + id, '');
       this.stopBlockVersions.set(id, (this.stopBlockVersions.get(id) ?? 0) + 1);
-      this.stopBlocks.delete(id);
+      this.stopBlocks.delete(id); this.wakeResourceQueues();
     });
   }
   private async patchSession(id: string, patch: Partial<Session>) {
@@ -507,8 +517,13 @@ export class DutydeckRuntime {
       let result = current;
       if (patch.state !== undefined || Object.hasOwn(patch, 'error')) {
         const scope = this.currentRef(id);
+        const turnProgress = !!scope && isAttemptRef(scope);
         const fence = scope && isAttemptRef(scope) ? this.attemptFence(scope) : this.fence(current);
-        result = this.wake(this.bound().patchSessionState(fence, makeId('session_state'), { state: patch.state ?? current.state, ...(Object.hasOwn(patch, 'error') ? { error: patch.error ?? null } : {}) })).session;
+        const committed = this.bound().patchSessionState(fence, makeId('session_state'), { state: patch.state ?? current.state, ...(Object.hasOwn(patch, 'error') ? { error: patch.error ?? null } : {}) });
+        // Admission never reads Session state, and turn progress follows every driver event; only a real lifecycle change retries blocked queues.
+        this.publisher.wake(id);
+        if (committed.events.length && !turnProgress) this.wakeResourceQueues();
+        result = committed.session;
       }
       if (patch.archivedAt !== undefined) result = this.bound().patchSession(this.fence(result), { archivedAt: patch.archivedAt });
       const config = { ...result, updatedAt: now(),
@@ -550,7 +565,8 @@ export class DutydeckRuntime {
       this.options.log?.warn({ sessionId: session.id, eventType: event.type, code: error instanceof RuntimeError ? error.code : 'DRIVER_EVENT_FAILED', error }, 'Idle driver event could not be recorded');
     });
     this.driverEventChains.set(session.id, next);
-    void next.finally(() => { if (this.driverEventChains.get(session.id) === next) this.driverEventChains.delete(session.id); if (event.type === 'status' || event.type === 'completed') this.wakeResourceQueues(); });
+    // A held session gives no idle proof; releasing the hold wakes the queues itself.
+    void next.finally(() => { if (this.driverEventChains.get(session.id) === next) this.driverEventChains.delete(session.id); if ((event.type === 'status' || event.type === 'completed') && !this.sessionHeld(session.id)) this.wakeResourceQueues(); });
   }
   private async recordUsage(session: Session, ref: AttemptRef, event: NormalizedDriverEvent) {
     const usage = event.type === 'status' && event.data?.state === 'turn_usage';
@@ -934,7 +950,7 @@ export class DutydeckRuntime {
         }
         token.revoke(); this.completedTurns.delete(attempt.attemptId); this.driverStopReasons.delete(attempt.attemptId);
         this.turnErrors.delete(attempt.attemptId); this.attemptTools.delete(attempt.attemptId); this.oscPermissionWaits.delete(attempt.attemptId);
-        this.dropAttemptPermissions(attempt.attemptId);
+        this.dropAttemptPermissions(attempt.attemptId); this.wakeResourceQueues();
         if (attached && !this.shuttingDown) await this.scoped(session.id, async () => {
           await this.projectQueue(session.id); this.queueBlocked.delete(session.id); this.scheduleQueue(session.id);
         });
@@ -1419,7 +1435,7 @@ export class DutydeckRuntime {
       if (cleared) {
         this.stopBlockVersions.set(session.id, (this.stopBlockVersions.get(session.id) ?? 0) + 1);
         this.stopBlocks.delete(session.id);
-        this.drivers.delete(session.id); this.blockedDrivers.delete(session.id);
+        this.drivers.delete(session.id); this.blockedDrivers.delete(session.id); this.wakeResourceQueues();
       }
       return cleared;
     } catch (error) {
@@ -3265,14 +3281,14 @@ export class DutydeckRuntime {
       } catch (error) {
         if (error instanceof RuntimeError && error.code === 'WORK_ITEM_CAPACITY_BLOCKED') {
           // A release may race the rejected claim's promise continuation. Recheck that wake once.
-          if (resourceRevision === this.resourceQueueRevision) this.resourceQueueBlocked.add(id);
+          this.blockOnResources(id, resourceRevision);
           return;
         }
         if (error instanceof RuntimeError && error.code === 'WORKSPACE_RESOURCE_BLOCKED') {
           if (next && await this.closeUnprovenIdleCompetitors(id,next.id,!admissionRechecked)) { admissionRechecked = true; continue; }
           if (next) await this.noteWorkspaceBlocked(session, next.id, error.message)
             .catch(noteError => this.options.log?.warn({ sessionId: id, taskId: next.id, error: String(noteError) }, 'Workspace blocked notice failed'));
-          if (resourceRevision === this.resourceQueueRevision) this.resourceQueueBlocked.add(id);
+          this.blockOnResources(id, resourceRevision);
           return;
         }
         this.queueBlocked.add(id); return;
@@ -3288,6 +3304,11 @@ export class DutydeckRuntime {
     }
   }
   private wakeOptional(result: CommitResult | undefined) { return result ? this.wake(result) : undefined; }
+  /** A wake that landed while this claim was failing goes through the shared retry pass instead of an immediate re-drain. */
+  private blockOnResources(id: string, revision: number) {
+    this.resourceQueueBlocked.add(id);
+    if (revision !== this.resourceQueueRevision) this.retryResourceQueues();
+  }
   /**
    * 排头任务从未开始、已排队超过 24 小时，又不是同会话上一条任务刚由 Agent 跑完、按顺序轮到它：多半是被挡了很久的旧消息，
    * 现在执行会出乎发送者意料。以安装所有者身份取消，并提醒需要时重发。
@@ -3518,7 +3539,7 @@ export class DutydeckRuntime {
         throw error;
       } finally {
         if (this.steeringSessions.get(id) === taskId) this.steeringSessions.delete(id);
-        this.scheduleQueue(id);
+        this.wakeResourceQueues(); this.scheduleQueue(id);
       }
     });
   }
@@ -3687,7 +3708,7 @@ export class DutydeckRuntime {
       if (actorRequired) throw new RuntimeError('ACTOR_REQUIRED', 'Execution stopped; queued tasks remain until a named actor cancels them', 403);
     });
     this.stopRuns.set(id, run);
-    const finish = () => { if (this.stopRuns.get(id) === run) this.stopRuns.delete(id); this.drains.delete(id); };
+    const finish = () => { if (this.stopRuns.get(id) === run) this.stopRuns.delete(id); this.drains.delete(id); this.wakeResourceQueues(); };
     void run.then(finish, finish); return run;
   }
   private async stopTransition(id: string, token: Owner, actor?: ExecutionActor) {
