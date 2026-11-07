@@ -607,15 +607,20 @@ export function evaluatePolicyAction(input: PolicyEvaluationInput): PolicyDecisi
       ? { allowed: true, action: input.action, code: 'allowed_admin', reason: 'Owner/admin management authority', source: input.principal.isOwner ? 'owner' : 'admin' }
       : { allowed: false, action: input.action, code: 'admin_required', reason: 'This action requires owner/admin authority', source: 'default_deny' };
   }
+  // Below owner/admin authority the gate must sit on the same can_operate assignment whose scope covers the target;
+  // a gate on one assignment never combines with the scope of another.
+  const scopedGate = (gate: 'terminalWrite' | 'highRisk') => isAdmin || operateAssignments.some(assignment => assignment.actionGates[gate]);
   if (input.action === 'terminal.write') {
     const gate = assignments.some(assignment => assignment.actionGates.terminalWrite);
     if (!gate) return deny('terminal_write_gate_required', 'terminal.write requires its independent action gate');
     if (!isAdmin && !hasOperate) return deny('operate_scope_required', 'terminal.write requires scoped operate authority');
+    if (!scopedGate('terminalWrite')) return deny('terminal_write_gate_required', 'terminal.write requires its gate on the can_operate assignment that covers the target');
   }
   if (input.action === 'high_risk.execute') {
     const gate = assignments.some(assignment => assignment.actionGates.highRisk);
     if (!gate) return deny('high_risk_gate_required', 'High-risk execution requires its independent action gate');
     if (!isAdmin && !hasOperate) return deny('operate_scope_required', 'High-risk execution requires scoped operate authority');
+    if (!scopedGate('highRisk')) return deny('high_risk_gate_required', 'High-risk execution requires its gate on the can_operate assignment that covers the target');
   }
   if (input.action.startsWith('group_tools.')) {
     const tool = input.action.slice('group_tools.'.length) as 'read' | 'discover' | 'send';

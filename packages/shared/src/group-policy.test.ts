@@ -210,6 +210,26 @@ describe('WP1a group policy and action evaluator', () => {
     expect(evaluatePolicyAction(input('group_tools.send', { binding: groupBinding, effectiveConfig: effective, assignments: [send] })).allowed).toBe(true);
   });
 
+  it('never combines a gate from one assignment with the operate scope of another', () => {
+    const bobRun = { target: { channelBotId: 'bot-1', groupBindingId: 'binding-1', runOwnerPrincipalId: 'principal_bob' } };
+    const gates = { terminalWrite: true, highRisk: true, groupToolsSend: false };
+    const gatedOwn = assignment({ id: 'role-own', operateScope: 'own_runs', actionGates: gates });
+    const ungatedGroup = assignment({ id: 'role-group', role: 'can_operate', operateScope: 'group_runs' });
+    const gatedTalk = assignment({ id: 'role-talk', role: 'can_talk', operateScope: 'none', actionGates: gates });
+    for (const assignments of [[gatedOwn, ungatedGroup], [gatedTalk, ungatedGroup]]) {
+      expect(evaluatePolicyAction(input('terminal.write', { assignments, ...bobRun }))).toMatchObject({ allowed: false, code: 'terminal_write_gate_required' });
+      expect(evaluatePolicyAction(input('high_risk.execute', { assignments, ...bobRun }))).toMatchObject({ allowed: false, code: 'high_risk_gate_required' });
+    }
+    // 闸门和范围落在同一条角色上时放行；自己的任务仍由 own_runs 那条角色覆盖。
+    const gatedGroup = assignment({ id: 'role-group', role: 'can_operate', operateScope: 'group_runs', actionGates: gates });
+    expect(evaluatePolicyAction(input('terminal.write', { assignments: [gatedOwn, ungatedGroup] })).allowed).toBe(true);
+    expect(evaluatePolicyAction(input('terminal.write', { assignments: [gatedGroup], ...bobRun })).allowed).toBe(true);
+    expect(evaluatePolicyAction(input('high_risk.execute', { assignments: [gatedGroup], ...bobRun })).allowed).toBe(true);
+    // 管理员不靠 can_operate 的范围，闸门仍可来自其任意一条有效角色。
+    const admin = assignment({ id: 'role-admin', role: 'admin', operateScope: 'none' });
+    expect(evaluatePolicyAction(input('terminal.write', { assignments: [admin, gatedTalk], ...bobRun })).allowed).toBe(true);
+  });
+
   it('fails closed when used as an unwired execution adapter and covers every declared action', () => {
     const failClosed = createFailClosedPolicyEvaluator();
     expect(failClosed(input('task.create'))).toMatchObject({ allowed: false, code: 'permission_evaluator_unwired', source: 'integration' });
