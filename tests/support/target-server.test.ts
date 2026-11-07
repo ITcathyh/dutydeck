@@ -12,7 +12,9 @@ async function fixture() {
   const server = createServer(async (request, response) => {
     if (!guard.accept(request, response)) return;
     let raw = ''; for await (const chunk of request) raw += chunk;
-    received.push(JSON.parse(raw));
+    let body: unknown;
+    try { body = JSON.parse(raw); } catch { request.socket.destroy(); return; }
+    received.push(body);
     response.setHeader('content-type', 'application/json'); response.end('{"ok":true}');
   });
   servers.push(server); await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
