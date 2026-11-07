@@ -5,6 +5,15 @@ import { buildTraceRows, filterTraceRows, groupTraceRows, traceDuration } from '
 const event = (sequence: number, type: string, data: unknown = {}, extra: Partial<DockEvent> = {}): DockEvent => ({ id: `e${sequence}`, sequence, type, timestamp: `2026-10-28T00:00:${String(sequence).padStart(2, '0')}Z`, data, ...extra });
 
 describe('live trace projection', () => {
+  it('labels a background-task result and keeps it out of the turn it arrives in', () => {
+    const rows = buildTraceRows([
+      event(1, 'text', { role: 'user', text: 'next question' }, { taskId: 't2' }),
+      event(2, 'text', { text: 'earlier background answer', origin: 'background_followup' }),
+      event(3, 'text', { text: 'answer' }, { taskId: 't2' })
+    ]);
+    expect(rows.map(row => [row.turn, row.label])).toEqual([['task:t2', '用户输入'], ['unassigned', '后台任务结果'], ['task:t2', '消息']]);
+  });
+
   it('keeps canonical sequence order, replaces duplicates and tolerates missing payload/time', () => {
     const rows = buildTraceRows([event(3, 'thinking', null, { timestamp: '' }), event(1, 'status'), event(2, 'text', { text: 'stale' }), event(2, 'text', { text: 'corrected' })]);
     expect(rows.map(row => row.event.sequence)).toEqual([1, 2, 3]);
