@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { once } from 'node:events';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
@@ -62,4 +63,33 @@ it('keeps the default crash exit, names the plugin and quarantines it when its a
   expect(stderr).toContain('in-process plugin code: crashy');
   expect(stderr).toContain('Quarantined plugins: crashy');
   expect(readPluginQuarantine(join(data, 'plugins'), 'crashy')).toMatchObject({ plugin: 'crashy', reason: 'crash' });
+}, 90_000);
+
+it('does not quarantine a plugin whose provider load is interrupted by a normal stop signal', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dutydeck-plugin-stop-'));
+  cleanups.push(() => rm(dir, { recursive: true, force: true }));
+  const data = join(dir, 'data'), entered = join(dir, 'registering');
+  await writePlugin(join(dir, 'src'), {
+    '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'slow', providers: 'index.mjs' }),
+    // register 异步等待，模拟注册较慢的插件；进入后放下标记，测试据此在加载中途发 SIGTERM。
+    'index.mjs': `import { writeFileSync } from 'node:fs';\nexport default async () => { writeFileSync(${JSON.stringify(entered)}, '1'); await new Promise(done => setTimeout(done, 10_000)); };\n`
+  });
+  await new PluginStore(data).install(join(dir, 'src'), { yes: true });
+  const port = await freePort();
+  const child = spawn(process.execPath, ['--conditions=development', '--import', createRequire(import.meta.url).resolve('tsx'), cli, '--local-only', '--port', String(port), '--no-lark-listen'], {
+    cwd: dir,
+    env: { PATH: process.env.PATH ?? '', HOME: dir, DUTYDECK_DATABASE_URL: join(data, 'dutydeck.db'), DUTYDECK_DEFAULT_CWD: dir, DUTYDECK_DAEMON_DIR: join(dir, '.dutydeck', 'daemon') },
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  cleanups.push(async () => { if (child.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await once(child, 'exit'); } });
+  let stderr = '';
+  child.stderr.on('data', chunk => { stderr += chunk; });
+  const exited = once(child, 'exit') as Promise<[number | null, NodeJS.Signals | null]>;
+  const deadline = Date.now() + 60_000;
+  while (!existsSync(entered) && child.exitCode === null && Date.now() < deadline) await new Promise(done => setTimeout(done, 50));
+  expect(existsSync(entered), stderr).toBe(true);
+  child.kill('SIGTERM');
+  const [code] = await exited;
+  expect(code).toBe(143);
+  expect(readPluginQuarantine(join(data, 'plugins'), 'slow')).toBeUndefined();
 }, 90_000);

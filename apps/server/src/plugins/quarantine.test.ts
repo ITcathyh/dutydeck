@@ -6,7 +6,7 @@ import { currentProcessIdentity } from '@dutydeck/storage';
 import { quarantineCrashedPlugins, registerPluginCodeRoot } from './crash-attribution.js';
 import { pluginDoctorChecks } from './doctor.js';
 import { PluginHost } from './host.js';
-import { quarantinePlugin, readPluginQuarantine } from './quarantine.js';
+import { markProviderLoading, quarantinePlugin, readPluginQuarantine, releaseProviderLoadingMarkers } from './quarantine.js';
 import { writePlugin } from './scenario-fixtures.test-helpers.js';
 import { PluginStore } from './store.js';
 
@@ -76,4 +76,15 @@ it('quarantines only plugins the daemon registered for quarantine', () => {
   expect(quarantineCrashedPlugins(['daemon-loaded', 'validation-only', 'unknown'], 'uncaughtException')).toEqual(['daemon-loaded']);
   expect(readPluginQuarantine(store.pluginsDir, 'daemon-loaded')).toMatchObject({ reason: 'crash', origin: 'uncaughtException' });
   expect(readPluginQuarantine(store.pluginsDir, 'validation-only')).toBeUndefined();
+});
+
+it('releases loading markers when startup is stopped by a signal, so an interrupted load is not quarantined', async () => {
+  const dir = join(store.pluginsDir, '.quarantine');
+  const done = markProviderLoading(store.pluginsDir, 'flaky');
+  expect((await readdir(dir)).some(name => name.startsWith('flaky.loading-'))).toBe(true);
+  releaseProviderLoadingMarkers();
+  expect((await readdir(dir)).some(name => name.startsWith('flaky.loading-'))).toBe(false);
+  // 加载完成后的清理对已删除的标记无害。
+  done();
+  expect(readPluginQuarantine(store.pluginsDir, 'flaky')).toBeUndefined();
 });
