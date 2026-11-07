@@ -214,6 +214,7 @@ const QUEUED_TASK_EXPIRE_MS = 24 * 60 * 60_000;
 const QUEUE_HANDOFF_MS = 15 * 60_000;
 /** 轮次结束时执行端已自行拒掉、却没发终态事件的审批，补记的拒绝说明。 */
 const TURN_ENDED_PERMISSION_REASON = '本轮任务已结束，这次操作没有执行。';
+type PendingPermission = { request: PermissionRequestData; nativeId: string; fence: AttemptRef & SessionFence; generation: number; owner?: Owner };
 const workspaceBlockerStates: Record<string, string> = {
   WORKSPACE_PHYSICAL_RESOURCE_UNSAFE: '它的终端或执行进程还没确认已退出（残留终端）',
   DRIVER_STOP_BLOCKED: '它上次停止时没能确认进程已退出（残留终端）',
@@ -314,7 +315,7 @@ export class DutydeckRuntime {
   private readonly activeTasks = new Map<string, TaskRecord>();
   private readonly queues = new Map<string, TaskRecord[]>();
   private readonly queueRuns = new Map<string, Promise<void>>();
-  private readonly permissions = new Map<string, { request: PermissionRequestData; nativeId: string; fence: AttemptRef & SessionFence; generation: number; owner?: Owner }>();
+  private readonly permissions = new Map<string, PendingPermission>();
   private readonly permissionResolutions = new Map<string, string>();
   /** 正在提交的拒绝说明（已脱敏）；驱动在裁决时同步发出的终态事件据此补上 reason。 */
   private readonly permissionRejectReasons = new Map<string, string>();
@@ -959,7 +960,7 @@ export class DutydeckRuntime {
         }
         token.revoke(); this.completedTurns.delete(attempt.attemptId); this.driverStopReasons.delete(attempt.attemptId);
         this.turnErrors.delete(attempt.attemptId); this.attemptTools.delete(attempt.attemptId); this.oscPermissionWaits.delete(attempt.attemptId);
-        this.dropAttemptPermissions(attempt.attemptId); this.wakeResourceQueues();
+        await this.dropAttemptPermissions(attempt.attemptId); this.wakeResourceQueues();
         if (attached && !this.shuttingDown) await this.scoped(session.id, async () => {
           await this.projectQueue(session.id); this.queueBlocked.delete(session.id); this.scheduleQueue(session.id);
         });
@@ -2875,8 +2876,28 @@ export class DutydeckRuntime {
     return existing;
   }
   private permissionsForSession(id: string) { return [...this.permissions.values()].filter(permission => permission.fence.sessionId === id && this.mutations.valid(permission.owner)); }
-  private dropAttemptPermissions(attemptId: string) {
-    for (const [key, permission] of this.permissions) if (permission.fence.attemptId === attemptId) { this.permissions.delete(key); this.permissionResolutions.delete(key); }
+  /**
+   * 轮次退出（失败、停止、握手失败）时仍登记着的审批：移出内存并补记终态，否则时间线和 permission_requests 会一直停在 pending。
+   * 关机时只删内存：保留的 tmux 任务重启后可能重新识别同一审批。
+   */
+  private async dropAttemptPermissions(attemptId: string) {
+    const leftover: Array<[string, PendingPermission]> = [];
+    for (const [key, permission] of this.permissions) if (permission.fence.attemptId === attemptId) {
+      this.permissions.delete(key); this.permissionResolutions.delete(key); leftover.push([key, permission]);
+    }
+    if (!this.shuttingDown) await this.closeLeftoverPermissions(leftover);
+  }
+  /** 轮次已经结算或被撤销，审批事件按会话级 fence 写入；不持有已撤销的轮次令牌，也不能在会话写锁内调用。 */
+  private async closeLeftoverPermissions(leftover: Array<[string, PendingPermission]>) {
+    for (const [, permission] of leftover) {
+      const { sessionId, runId } = permission.fence;
+      const request = { ...permission.request, status: 'rejected' as const, reason: TURN_ENDED_PERMISSION_REASON };
+      await this.mutations.run(undefined, async () => {
+        await this.eventScope.run({ sessionId, runId }, () => this.emit(sessionId, 'permission_request', request)).catch(error =>
+          this.options.log?.warn({ sessionId, permissionId: request.id, error }, 'Permission left by the ended turn could not be recorded'));
+        await this.artifact('savePermission', sessionId, request).catch(() => {});
+      });
+    }
   }
   /**
    * 驱动报告本轮结束后仍登记着的审批已不可能再被采纳（ACP 在中断、停止和轮次收尾时自行 reject_once，不发终态事件）。
@@ -3038,7 +3059,7 @@ export class DutydeckRuntime {
         token.revoke(); this.touch(id);
       }
       this.completedTurns.delete(ref.attemptId); this.driverStopReasons.delete(ref.attemptId); this.turnErrors.delete(ref.attemptId); this.eventFlushedAttempts.delete(ref.attemptId);
-      this.attemptTools.delete(ref.attemptId); this.oscPermissionWaits.delete(ref.attemptId); this.dropAttemptPermissions(ref.attemptId); this.wakeResourceQueues();
+      this.attemptTools.delete(ref.attemptId); this.oscPermissionWaits.delete(ref.attemptId); await this.dropAttemptPermissions(ref.attemptId); this.wakeResourceQueues();
     }
     const settled = this.publicTask(this.repos.execution.getTaskExecution(task.id)?.task ?? task);
     if (settledSession) this.notifyTaskSettled(settledSession, settled);
@@ -3693,6 +3714,7 @@ export class DutydeckRuntime {
       void stopping.catch(() => {});
       let factError: unknown;
       let actorRequired = false;
+      const stoppedPermissions: Array<[string, PendingPermission]> = [];
       try {
       await this.verifications.stopSession(id);
       await this.mutations.write(id, async () => {
@@ -3711,7 +3733,7 @@ export class DutydeckRuntime {
         }
         if (intent.cancelQueue) actorRequired = !await this.cancelSessionQueue(id, intent.actor);
         for (const [key, permission] of this.permissions) if (permission.fence.sessionId === id) {
-          this.permissions.delete(key); this.permissionResolutions.delete(key);
+          this.permissions.delete(key); this.permissionResolutions.delete(key); stoppedPermissions.push([key, permission]);
         }
       });
       } catch (error) { factError = error; }
@@ -3719,6 +3741,7 @@ export class DutydeckRuntime {
       try { await stopping; } catch (error) { stopError = error; }
       while (this.driverEventChains.has(id)) await this.driverEventChains.get(id);
       if (!factError && intent.cancelQueue) actorRequired = !await this.mutations.write(id, () => this.cancelSessionQueue(id, intent.actor));
+      if (!shutdown && !discardSession) await this.closeLeftoverPermissions(stoppedPermissions);
       await this.mutations.barrier(id);
       if (!shutdown && !stopError && !factError) {
         const session = await this.repos.sessions.get(id);
