@@ -1642,8 +1642,12 @@ export class PtyCliDriver implements AgentDriver {
       const snapshot = this.snapshot;
       if (snapshot) {
         parsingBytes += bytes;
-        void snapshot.writeAndFlush(data).then(() => {
-          if (this.snapshot === snapshot && this.backend === backend) { this.noteTurnOutput(); this.noteScreenProgress(); }
+        // 输出判定要在这一块刚解析完时做：promise 兑现时同批后面的块已经解析，CLI 很快重绘回输入框就看不到这块输出了。
+        let output = false;
+        void snapshot.writeAndFlush(data, () => {
+          if (this.snapshot === snapshot && this.backend === backend) output = this.detectTurnOutput();
+        }).then(() => {
+          if (this.snapshot === snapshot && this.backend === backend) { if (output) this.checkRenderedCompletion(); this.noteScreenProgress(); }
         }).catch(() => { /* A disposed renderer belongs to an old attachment. */ }).finally(() => { parsingBytes -= bytes; });
       }
       for (const cb of this.terminalSubscribers) cb(data);
@@ -1836,13 +1840,17 @@ export class PtyCliDriver implements AgentDriver {
     this.screenProgressTimer.unref();
   }
 
-  /** 逐块判定而不节流：转瞬即逝的状态行也算输出；找到输出后不再判定。 */
   private noteTurnOutput(): void {
+    if (this.detectTurnOutput()) this.checkRenderedCompletion();
+  }
+
+  /** 逐块判定而不节流：转瞬即逝的状态行也算输出；找到输出后不再判定。 */
+  private detectTurnOutput(): boolean {
     const echo = this.turnEcho;
-    if (!this.turnActive || this.turnHasOutput || !echo) return;
-    if (!(this.snapshot?.viewportText().split('\n') ?? []).some(line => isTurnOutputLine(line, echo, this.adapter.readyPattern))) return;
+    if (!this.turnActive || this.turnHasOutput || !echo) return false;
+    if (!(this.snapshot?.viewportText().split('\n') ?? []).some(line => isTurnOutputLine(line, echo, this.adapter.readyPattern))) return false;
     this.turnHasOutput = true;
-    this.checkRenderedCompletion();
+    return true;
   }
 
   private checkScreenProgress(): void {
