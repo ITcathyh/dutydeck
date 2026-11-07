@@ -791,15 +791,15 @@ export class DutydeckRuntime {
       || resource.runId !== session.runId || resource.identity?.identityId !== receipt.identityId || resource.observations.at(-1)?.state === 'gone'
       || this.resourceBlockers(session.id).some(block => block.code !== 'DRIVER_RESOURCE_UNSAFE' || block.resourceId !== resource.resourceId)) return false;
     const agent = await this.mutations.wait(() => this.repos.agents.get(session.agentId)); if (!agent) return false;
-    const configured = await this.configureAgentForSession(agent, session);
-    const options: ExecutionOptions = executionOptionsOf(configured);
-    if (canonicalExecutionJson(receipt.options) !== canonicalExecutionJson(options)) return false;
-    const workspace = await this.mutations.wait(() => this.workspaces.get(session.id));
-    if (workspace) await this.mutations.wait(() => this.workspaces.validate(workspace));
-    const generation = this.nextSessionGeneration(session.id), lifecycle = this.lifecycle(session.id);
-    let driver: AgentDriver | undefined;
+    let driver: AgentDriver | undefined, generation: number | undefined;
     let attached = false;
     try {
+      const configured = await this.configureAgentForSession(agent, session);
+      const options: ExecutionOptions = executionOptionsOf(configured);
+      if (canonicalExecutionJson(receipt.options) !== canonicalExecutionJson(options)) return false;
+      const workspace = await this.mutations.wait(() => this.workspaces.get(session.id));
+      if (workspace) await this.mutations.wait(() => this.workspaces.validate(workspace));
+      generation = this.nextSessionGeneration(session.id); const lifecycle = this.lifecycle(session.id);
       driver = this.factory(configured, session.protocol, this.onDriverEvent(session, generation),
         code => { if (this.mutations.valid(lifecycle) && this.sessionGenerations.get(session.id) === generation) this.notifyDriverExit(session.id, code); },
         session.id, localOnlyDriverContext(this.fence(session), resource.resourceId));
@@ -827,13 +827,19 @@ export class DutydeckRuntime {
       this.flushInsightSources(driver);
       return true;
     } catch (error) {
-      await this.emit(session.id, 'status', { state: 'terminal_recovery_deferred', message: 'Original idle terminal identity could not be verified; resource remains blocked' });
+      // 工作目录不见了由外层按会话跳过；其余失败只推迟这个终端，资源保持阻塞，不能让整个实例起不来。
+      if (error instanceof RevokedOperation || error instanceof RuntimeError && error.code === 'WORKSPACE_UNAVAILABLE') throw error;
+      this.options.log?.warn({ sessionId: session.id, code: error instanceof RuntimeError ? error.code : 'TERMINAL_RECOVERY_FAILED', error: String(error) }, 'Idle terminal recovery deferred');
+      await this.emit(session.id, 'status', { state: 'terminal_recovery_deferred', message: 'Original idle terminal identity could not be verified; resource remains blocked' })
+        .catch(emitError => { if (emitError instanceof RevokedOperation) throw emitError; });
       return false;
     } finally {
       if (driver && this.drivers.get(session.id) !== driver) {
         this.unsubscribeInsightSources(driver);
-        await driver.prepareForDaemonShutdown?.(true);
-        await driver.stop();
+        // 未采纳的临时 driver 不代表会话；放不掉时，它迟到的事件和退出回调也不能记到会话上。
+        if (this.sessionGenerations.get(session.id) === generation) this.nextSessionGeneration(session.id);
+        try { await driver.prepareForDaemonShutdown?.(true); await driver.stop(); }
+        catch (error) { this.options.log?.warn({ sessionId: session.id, error: String(error) }, 'Unadopted idle terminal driver could not be released; resource remains blocked'); }
       }
     }
   }
