@@ -195,7 +195,7 @@ export function isEditableTarget(target: EventTarget | null): boolean {
   页面上只要有模态弹窗，快捷键整体让位。弹窗初始焦点多在关闭按钮、勾选框上，isEditableTarget 拦不住单键，
   调用方的 enabled 又未必列全所有弹窗（面板内部自己开的 Dialog 就不在 App 的视野里），按 `.` 会中断背后的任务。
 */
-const modalDialogSelector = '[role="dialog"][aria-modal="true"], [role="alertdialog"][aria-modal="true"]';
+const modalDialogSelector = '[aria-modal="true"]:is([role="dialog"], [role="alertdialog"])';
 const modalDialogOpen = () => typeof document !== 'undefined' && document.querySelector(modalDialogSelector) !== null;
 
 type CompiledShortcut = { definition: ShortcutDefinition; sequences: Step[][] };

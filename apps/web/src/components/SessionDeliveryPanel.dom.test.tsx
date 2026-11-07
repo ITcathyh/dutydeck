@@ -26,6 +26,7 @@ function mount(state = session.state, options: {
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
     requests.push({ url: String(url), init });
     const strUrl = String(url);
+    const historyRequest = /\/history(?:\?|$)/.test(strUrl);
     const body = strUrl.endsWith('/capabilities') ? { structuredApproval: 'available', terminal: 'unavailable', verification: 'available', localFileDelivery: 'available' }
       : strUrl.endsWith('/workspace/cleanup') ? (init?.method === 'POST' ? (options.cleanupHandler?.(init) ?? { ok: true, sessionId: 's1', path: '/project/worktree', cleanedAt: '2026-09-14T00:00:00Z' }) : (options.cleanupPreview ?? { sessionId: 's1', path: '/project/worktree', branch: 'dutydeck/session/s1', canClean: true, blockers: [], fingerprint: 'fp_test_123' }))
       : strUrl.endsWith('/workspace') ? (options.workspace ?? { cwd: session.cwd, mode: 'worktree', state: 'ready', branch: 'dutydeck/session/s1' })
@@ -33,12 +34,12 @@ function mount(state = session.state, options: {
       : strUrl.endsWith('/diffs') ? (options.turnDiffs ?? [])
       : strUrl.endsWith('/task-authorizations') ? []
       : strUrl.endsWith('/artifact-snapshots') ? { snapshots: [] }
-      : strUrl.endsWith('/history') ? options.historyFailure ? { error: { code: 'HISTORY_UNAVAILABLE', message: 'History unavailable' } } : (options.history ?? { turns: [], highWaterMark: 0, liveAfter: 0 })
+      : historyRequest ? options.historyFailure ? { error: { code: 'HISTORY_UNAVAILABLE', message: 'History unavailable' } } : (options.history ?? { turns: [], highWaterMark: 0, liveAfter: 0 })
       : strUrl.endsWith('/pull-requests') ? { available: false, hint: '没有安装支持开 PR 的 CI 插件。', items: [] }
       : strUrl.endsWith('/automation/ci-providers') ? { providers: [{ id: 'test-ci', displayName: 'Test CI', polling: true, webhook: false }] }
       : strUrl.endsWith('/verifications') ? init?.method === 'POST' ? { id: 'v2', status: 'passed' } : [{ id: 'v1', command: 'pnpm test', status: 'passed', stale: true, staleReason: options.missingFingerprint ? 'current_fingerprint_unavailable' : 'code_changed', exitCode: 0, beforeFingerprint: 'code-version-1', afterFingerprint: 'code-version-1', taskId: 't1', output: 'old evidence', startedAt: session.createdAt, completedAt: '2026-09-12T00:00:03Z' }]
       : { subscription: { id: 'ci1', status: 'waiting', provider: 'test-ci' } };
-    return new Response(JSON.stringify(body), { status: (options.evidenceFailure && strUrl.endsWith('/verifications') || options.historyFailure && strUrl.endsWith('/history')) ? 503 : 200, headers: { 'content-type': 'application/json' } });
+    return new Response(JSON.stringify(body), { status: (options.evidenceFailure && strUrl.endsWith('/verifications') || options.historyFailure && historyRequest) ? 503 : 200, headers: { 'content-type': 'application/json' } });
   });
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   render(<QueryClientProvider client={qc}><SessionDeliveryPanel session={{ ...session, state, ...(options.archivedAt ? { archivedAt: options.archivedAt } : {}), ...options.sessionOverrides }} tasks={options.tasks ?? []} onClose={() => {}} presentation={options.presentation}/></QueryClientProvider>);
@@ -76,7 +77,7 @@ describe('work item delivery panel', () => {
       await user.click(artifacts.getAllByRole('button', { name: '查看来源记录' })[0]!);
       expect(source).toHaveBeenCalledOnce();
       expect((source.mock.calls[0]![0] as CustomEvent).detail).toEqual({ taskId: reference.taskId, attemptId: reference.attemptId, eventId: reference.eventId, sequence: reference.sequence });
-      expect(requests.some(request => request.url === '/api/sessions/s1/history')).toBe(true);
+      expect(requests.some(request => request.url.startsWith('/api/sessions/s1/history?'))).toBe(true);
       expect(await screen.findByText('验证通过 · 代码已变化')).toBeTruthy();
     } finally { window.removeEventListener('dutydeck:show-history-turn', source); }
   });
