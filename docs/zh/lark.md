@@ -231,7 +231,7 @@ dutydeck agent --turn "$TURN" group send '可检索摘要' --final --card-file /
   - `@机器人 提醒我明天下午 17:00 提交发布单。`
   - `@机器人 每个工作日 18:00 汇总今天群内的开发进展并发在群里。`
   - `@机器人 每半小时看一下这个 PR，一直跟到合并，周五 18:00 前没合就别跟了。`：Agent 用 `schedule create --until 'PR 已合并' --deadline <北京时间>` 建计划，确认卡上写明「直到」和「截止」；达成后 Agent 用 stop-self 停用，到截止仍未完成则自动停用并在原话题说明。见 [Web 控制台的定时任务](web-console.md#5-通用定时任务)。
-- **分层协作（Leader-Worker）**：接待的 Agent 整理任务简报交给 Leader；Leader 拆只读方案并指派 Worker 改代码，最终由 Leader 验收回传原话题。前提：开启群工具；Leader 若是终端模式 Agent，机器人和该 Agent 都要是 `full-trust`，否则保存配置时会报错。
+- **分层协作（Leader-Worker）**：接待的 Agent 整理任务简报交给 Leader；Leader 拆只读方案并指派 Worker 改代码，最终由 Leader 验收回传原话题。前提：开启群工具；Leader 若是终端模式 Agent，机器人和该 Agent 都要是 `full-trust`，否则保存配置时会报错。服务重启后：规划请求可能已送到 Leader 但结果未知的，委派标为失败并在原话题提示，不会自动重跑；重启前 Leader 已答完的直接沿用；从未发出的才重新规划。
 
 ---
 
