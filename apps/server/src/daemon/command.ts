@@ -499,6 +499,21 @@ export function daemonDatabasePath(root: string, configured?: string): string {
 }
 
 /**
+ * 直接改库的 CLI 命令（auth、secret、lark create）选库：显式 --database 优先，其次
+ * DUTYDECK_DATABASE_URL（与 start 一样按 daemon 根目录解析）。都没有时只采用身份核验通过的
+ * 运行中 daemon 记录的库；崩溃或 SIGKILL 留下的状态文件不作数，落到 daemon 根目录的默认库。
+ */
+export function resolveCliDatabase(explicit: string | undefined, env: NodeJS.ProcessEnv = process.env, cwd = process.cwd()): string {
+  if (explicit) return resolveDatabaseUrl({ ...env, DUTYDECK_DATABASE_URL: explicit });
+  const dir = resolveDaemonDir(cwd, env.HOME);
+  const root = resolve(dir, '../..');
+  if (env.DUTYDECK_DATABASE_URL) return daemonDatabasePath(root, env.DUTYDECK_DATABASE_URL);
+  const state = readDaemonStatus(dir);
+  if (state?.database && inspectDaemonState(state).status === 'verified') return state.database;
+  return daemonDatabasePath(root);
+}
+
+/**
  * 等到子进程「就绪」或「死掉」，两者以先到者为准。
  *
  * 早前这里只轮询就绪标记，且父进程其实已被 daemonize-process 提前 exit(0)，于是

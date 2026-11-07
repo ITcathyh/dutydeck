@@ -21,7 +21,7 @@ import {
   lastDaemonDirPointerFile,
   releaseStartLock
 } from './daemon.js';
-import { daemonRestart, daemonRestartOptions, daemonStart, daemonStop, daemonStatus, markDaemonReady, systemdServiceControl } from './command.js';
+import { daemonRestart, daemonRestartOptions, daemonStart, daemonStop, daemonStatus, markDaemonReady, resolveCliDatabase, systemdServiceControl } from './command.js';
 
 describe('Dutydeck daemon session', () => {
   let tmp: string;
@@ -77,6 +77,21 @@ describe('Dutydeck daemon session', () => {
     expect(runCommand).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled(); expect(serve).not.toHaveBeenCalled();
     expect(readDaemonStatus(mainDir)).toEqual(main);
     expect(readFileSync(lastDaemonDirPointerFile(tmp), 'utf8')).toBe(pointer);
+  });
+
+  it('picks the CLI database from explicit input first and trusts daemon state only while the daemon is verified', () => {
+    const root = join(tmp, 'live');
+    const dir = defaultDaemonDir(root);
+    const other = join(tmp, 'project-b'); mkdirSync(other, { recursive: true });
+    const live = { pid: process.pid, processIdentity: currentProcessIdentity(), ready: true, startedAt: 'live', cwd: root, database: join(root, 'custom.db') };
+    writeState(dir, live); writeLastDaemonDir(dir, tmp);
+    expect(resolveCliDatabase(undefined, { HOME: tmp }, other)).toBe(live.database);
+    expect(resolveCliDatabase(undefined, { HOME: tmp, DUTYDECK_DATABASE_URL: join(tmp, 'x.db') }, other)).toBe(join(tmp, 'x.db'));
+    expect(resolveCliDatabase(undefined, { HOME: tmp, DUTYDECK_DATABASE_URL: 'data/x.db' }, other)).toBe(join(root, 'data/x.db'));
+    expect(resolveCliDatabase(join(tmp, 'flag.db'), { HOME: tmp, DUTYDECK_DATABASE_URL: join(tmp, 'x.db') }, other)).toBe(join(tmp, 'flag.db'));
+    writeState(dir, { ...live, processIdentity: { ...live.processIdentity, start: 'reused-pid' } });
+    expect(inspectDaemon(dir).status).toBe('stale');
+    expect(resolveCliDatabase(undefined, { HOME: tmp }, other)).toBe(join(root, '.dutydeck', 'dutydeck.db'));
   });
 
   it('keeps an explicitly selected stop directory instead of resolving the main pointer again', async () => {
