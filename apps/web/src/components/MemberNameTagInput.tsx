@@ -1,5 +1,6 @@
 import { useRef, useState, type KeyboardEvent } from 'react';
 import { X } from 'lucide-react';
+import { isImeComposing } from '../ime';
 import { parseMemberNames } from './ui';
 
 export function MemberNameTagInput({ value, placeholder, onChange }: { value: string[]; placeholder: string; onChange(value: string[]): void }) {
@@ -12,7 +13,7 @@ export function MemberNameTagInput({ value, placeholder, onChange }: { value: st
   };
   const remove = (name: string) => onChange(value.filter(item => item !== name));
   const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
-    if (event.nativeEvent.isComposing) return;
+    if (isImeComposing(event)) return;
     if (event.key === 'Enter' || event.key === ',' || event.key === '，') { event.preventDefault(); commit(); }
     else if (event.key === 'Backspace' && !draft && value.length) remove(value[value.length - 1]!);
   };

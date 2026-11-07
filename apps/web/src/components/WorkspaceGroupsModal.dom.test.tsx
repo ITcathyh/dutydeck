@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
@@ -79,6 +79,34 @@ describe('WorkspaceGroupsModal 自定义组管理', () => {
     expect((screen.getByLabelText('重命名分组 前端组') as HTMLInputElement).value).toBe('新名字');
 
     await user.click(screen.getByRole('button', { name: '保存' }));
+    await waitFor(() => expect(rename).toHaveBeenCalledWith('wg_1', '新名字'));
+  });
+
+  it('输入法组字中按回车选词不创建分组，组字结束后的回车才创建', async () => {
+    const create = vi.spyOn(api, 'createWorkspaceGroup').mockResolvedValue(snapshot());
+    renderModal();
+
+    const input = screen.getByLabelText('新分组名称');
+    fireEvent.change(input, { target: { value: '前端组' } });
+    fireEvent.keyDown(input, { key: 'Enter', isComposing: true });
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
+    expect(create).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(input, { key: 'Enter' });
+    await waitFor(() => expect(create).toHaveBeenCalledWith('前端组'));
+  });
+
+  it('输入法组字中按回车选词不提交改名，组字结束后的回车才提交', async () => {
+    const rename = vi.spyOn(api, 'renameWorkspaceGroup').mockResolvedValue(snapshot({ groups: [{ id: 'wg_1', name: '新名字' }] }));
+    renderModal({ snapshot: snapshot({ groups: [{ id: 'wg_1', name: '前端组' }] }) });
+
+    const input = screen.getByLabelText('重命名分组 前端组');
+    fireEvent.change(input, { target: { value: '新名字' } });
+    fireEvent.keyDown(input, { key: 'Enter', isComposing: true });
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
+    expect(rename).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(input, { key: 'Enter' });
     await waitFor(() => expect(rename).toHaveBeenCalledWith('wg_1', '新名字'));
   });
 

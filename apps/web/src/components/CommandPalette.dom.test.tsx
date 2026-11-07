@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
@@ -228,6 +228,26 @@ describe('CommandPalette 键盘导航', () => {
     await user.keyboard('{ArrowDown}{Enter}');
     expect(run).not.toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('输入法组字中的回车用来确认候选词，不执行高亮项', () => {
+    const run = vi.fn();
+    const onClose = vi.fn();
+    render(<CommandPalette {...keyboardProps} actions={[action({ run })]} onClose={onClose}/>);
+    fireEvent.keyDown(input(), { key: 'Enter', isComposing: true });
+    expect(run).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+    fireEvent.keyDown(input(), { key: 'Enter' });
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it('输入法组字中的方向键用来选候选词，不移动高亮也不被拦下', () => {
+    render(<CommandPalette {...keyboardProps}/>);
+    const options = screen.getAllByRole('option');
+    expect(fireEvent.keyDown(input(), { key: 'ArrowDown', isComposing: true })).toBe(true);
+    expect(selected()).toBe(options[0]);
+    fireEvent.keyDown(input(), { key: 'ArrowDown' });
+    expect(selected()).toBe(options[1]);
   });
 });
 

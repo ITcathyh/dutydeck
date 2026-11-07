@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import {
@@ -441,6 +441,23 @@ describe('事项 (Followup) 新建、重试与进展编辑', () => {
     const secondCallPayload = createFollowup.mock.calls[1]![2];
     // 两次 payload 必须深等，保证同 id 同 payload 重试不 409、不重复新建
     expect(secondCallPayload).toEqual(firstCallPayload);
+  });
+
+  it('步骤输入框里输入法组字中的回车不添加步骤，组字结束后的回车才添加', async () => {
+    const user = userEvent.setup();
+    renderPanel();
+    await user.click(await screen.findByRole('tab', { name: /待办事项/ }));
+    await user.click(screen.getByRole('button', { name: '新建事项' }));
+
+    const stepInput = screen.getByPlaceholderText('输入步骤后回车或点添加') as HTMLInputElement;
+    fireEvent.change(stepInput, { target: { value: '核对接口' } });
+    fireEvent.keyDown(stepInput, { key: 'Enter', isComposing: true });
+    expect(screen.queryByRole('button', { name: '移除步骤 核对接口' })).toBeNull();
+    expect(stepInput.value).toBe('核对接口');
+
+    fireEvent.keyDown(stepInput, { key: 'Enter' });
+    expect(screen.getByRole('button', { name: '移除步骤 核对接口' })).toBeTruthy();
+    expect(stepInput.value).toBe('');
   });
 
   it('编辑已有事项进展并处理 409 冲突保留草稿与重载', async () => {
