@@ -34,9 +34,10 @@ import { environmentFromCli, type CliOptions } from '../cli-program.js';
 import { appConfigSchema, resolveDatabaseUrl } from '@dutydeck/config';
 import { AUTOSTART_LINUX_UNIT, AUTOSTART_MACOS_LABEL, defaultRunCommand, firstLine, readLaunchdProgram, type AutostartCommandOutput, type AutostartRunCommand } from '../autostart/autostart.js';
 import { sleep } from './time.js';
+import { parseSystemdEnvironmentFile, splitSystemdShowStrings } from './systemd-environment.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { resolve } from 'node:path';
+import { isAbsolute, resolve } from 'node:path';
 import { parseEnv } from 'node:util';
 import { localLoopbackUrl } from '../local-api-url.js';
 
@@ -698,6 +699,8 @@ interface SystemdUnitInfo {
   killMode?: string;
   mainPid?: number;
   environment: string[];
+  /** 每个 EnvironmentFile= 一项，形如 `/path/to/file (ignore_errors=no)`；`-` 前缀的文件是 ignore_errors=yes。 */
+  environmentFiles: string[];
   workingDirectory?: string;
   /** ExecStart 的解释器与入口脚本：新 daemon 实际由它们运行。 */
   execPath?: string;
@@ -710,12 +713,16 @@ interface SystemdUnitInfo {
 
 /** unit 不存在时 LoadState=not-found；systemctl 不可用或连不上 user systemd 时返回 undefined。 */
 async function showSystemdUnit(unit: string, deps: DaemonCommandDeps): Promise<SystemdUnitInfo | undefined> {
-  const shown = await (deps.runCommand ?? defaultRunCommand)('systemctl', ['--user', 'show', unit, '--property=LoadState,SubState,MainPID,Environment,WorkingDirectory,ExecStart,FragmentPath,KillMode']);
+  const shown = await (deps.runCommand ?? defaultRunCommand)('systemctl', ['--user', 'show', unit, '--property=LoadState,SubState,MainPID,Environment,EnvironmentFiles,WorkingDirectory,ExecStart,FragmentPath,KillMode']);
   if (shown.status !== 0) return undefined;
   const props = new Map<string, string>();
+  const environmentFiles: string[] = [];
   for (const line of shown.stdout.split('\n')) {
     const at = line.indexOf('=');
-    if (at > 0) props.set(line.slice(0, at), line.slice(at + 1));
+    if (at <= 0) continue;
+    // EnvironmentFiles 每个文件单独一行，不能后行覆盖前行。
+    if (line.slice(0, at) === 'EnvironmentFiles') { if (line.slice(at + 1)) environmentFiles.push(line.slice(at + 1)); }
+    else props.set(line.slice(0, at), line.slice(at + 1));
   }
   // ExecStart={ path=/usr/bin/node ; argv[]=/usr/bin/node /x/dist/cli.js start --foreground ; ignore_errors=no ; ... }
   const exec = /path=(.*?) ; argv\[\]=(.*?) ; /.exec(props.get('ExecStart') ?? '');
@@ -725,7 +732,8 @@ async function showSystemdUnit(unit: string, deps: DaemonCommandDeps): Promise<S
     subState: props.get('SubState'),
     killMode: props.get('KillMode'),
     mainPid: Number.isSafeInteger(mainPid) && mainPid > 0 ? mainPid : undefined,
-    environment: (props.get('Environment') ?? '').split(/\s+/).filter(Boolean),
+    environment: splitSystemdShowStrings(props.get('Environment') ?? ''),
+    environmentFiles,
     workingDirectory: props.get('WorkingDirectory') || undefined,
     execPath: exec?.[1],
     script: exec?.[2]?.split(' ')[1],
@@ -1115,7 +1123,24 @@ export async function unitRuntime(unit: string, deps: DaemonCommandDeps): Promis
     const code = (error as NodeJS.ErrnoException).code;
     if (code !== 'ENOENT') return { error: `无法读取或解析 unit ${unit} 的 ${envFile}（${code ?? '解析失败'}），无法核实运行时配置，已拒绝操作。` };
   }
-  const unitEnv = Object.fromEntries(info.environment.map(item => [item.slice(0, item.indexOf('=')), item.slice(item.indexOf('=') + 1)]));
+  // 旧版 systemctl 把含空白的值打印成 [unprintable]，读不出变量名就无法核实。
+  if (info.environment.some(item => item.indexOf('=') <= 0)) return { error: `unit ${unit} 的 Environment= 有无法解析的项，无法核实运行时配置，已拒绝操作。` };
+  const unitEnv: NodeJS.ProcessEnv = Object.fromEntries(info.environment.map(item => [item.slice(0, item.indexOf('=')), item.slice(item.indexOf('=') + 1)]));
+  const sources = [envFile];
+  // EnvironmentFile= 在 Environment= 之后按顺序加载并覆盖它；文件不存在且没有 `-` 前缀时 systemd 也起不来。
+  for (const entry of info.environmentFiles) {
+    const match = /^(.*) \(ignore_errors=(yes|no)\)$/.exec(entry);
+    const file = match?.[1];
+    if (!file || !isAbsolute(file) || /[*?[]/.test(file)) return { error: `unit ${unit} 的 EnvironmentFile=（${file ?? entry}）不是可直接读取的绝对路径，无法核实运行时配置，已拒绝操作。` };
+    try {
+      Object.assign(unitEnv, parseSystemdEnvironmentFile(readFileSync(file, 'utf8')));
+      sources.push(file);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (match![2] === 'yes' && code === 'ENOENT') continue;
+      return { error: `无法读取 unit ${unit} 的 EnvironmentFile=${file}（${code ?? '读取失败'}），无法核实运行时配置，已拒绝操作。` };
+    }
+  }
   const authFlag = [...info.args].reverse().find(arg => arg === '--auth' || arg === '--no-auth');
   const env = environmentFromCli({
     host: flagValue(info.args, '--host'),
@@ -1131,9 +1156,9 @@ export async function unitRuntime(unit: string, deps: DaemonCommandDeps): Promis
     port: env.DUTYDECK_PORT ? Number(env.DUTYDECK_PORT) : undefined,
     authEnabled: env.DUTYDECK_AUTH === undefined ? undefined : env.DUTYDECK_AUTH === 'true' ? true : env.DUTYDECK_AUTH === 'false' ? false : env.DUTYDECK_AUTH
   });
-  if (!config.success) return { error: `unit ${unit} 的运行时配置无效（${config.error.issues.map(issue => issue.path.join('.')).join('、')}；配置文件 ${envFile}），已拒绝操作。` };
+  if (!config.success) return { error: `unit ${unit} 的运行时配置无效（${config.error.issues.map(issue => issue.path.join('.')).join('、')}；配置文件 ${sources.join('、')}），已拒绝操作。` };
   if ([env.DUTYDECK_DEFAULT_CWD, env.DUTYDECK_DATABASE_URL].some(value => value?.includes('\0'))) {
-    return { error: `unit ${unit} 的 DUTYDECK_DEFAULT_CWD 或 DUTYDECK_DATABASE_URL 含无效路径字符（配置文件 ${envFile}），已拒绝操作。` };
+    return { error: `unit ${unit} 的 DUTYDECK_DEFAULT_CWD 或 DUTYDECK_DATABASE_URL 含无效路径字符（配置文件 ${sources.join('、')}），已拒绝操作。` };
   }
   const database = resolveDatabaseUrl({ ...env, DUTYDECK_DEFAULT_CWD: resolve(root, env.DUTYDECK_DEFAULT_CWD ?? '.') });
   const address = localLoopbackUrl(config.data.host, config.data.port);
