@@ -3,7 +3,7 @@ import type { ChildProcess } from 'node:child_process';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { accessSync, chmodSync, constants, existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { assertNativeContextRecord, createAcpRuntime, createAgentRegistry, createRuntimeStore, type AcpPermissionDecision, type AcpRuntime, type AcpRuntimeResourceScope, type AcpRuntimeHandle, type AcpRuntimeProcessEvent, type AcpRuntimeStatus, type AcpRuntimeTurn, type AcpSessionStore } from 'acpx/runtime';
+import { assertNativeContextRecord, createAcpRuntime, createAgentRegistry, createRuntimeStore, type AcpPermissionDecision, type AcpPermissionRequest, type AcpRuntime, type AcpRuntimeResourceScope, type AcpRuntimeHandle, type AcpRuntimeProcessEvent, type AcpRuntimeStatus, type AcpRuntimeTurn, type AcpSessionStore } from 'acpx/runtime';
 import type { AgentConfig, AgentDriver, DriverSteeringOutcome, DriverTranscriptSourceObservation, InsightClient, NormalizedDriverEvent, PermissionMode, ToolRiskPolicy, DriverSubmission, DriverSubmissionInput, NativeContextIdentity, NativeContextExpected, NativeConfigurationRequest, NativeConfigurationProof, OperationPermit, ChildPermit } from '@dutydeck/shared';
 import { RuntimeError, agentCommandApprovalReason, isAgentCommandAutoApproval, AGENT_IDLE_TIMEOUT, PromptNotWrittenError, claudeRateLimits, permissionDisplayText, taskExecutionSchemas, canonicalExecutionJson, type AgentIdleTimeoutData } from '@dutydeck/shared';
 import { eventContentText, eventHasContent, normalizeEventContent, shellQuote } from '@dutydeck/shared';
@@ -202,12 +202,26 @@ function privateSessionStore(cwd: string): AcpSessionStore {
   };
 }
 
-const flattenRiskText = (value: unknown, output: string[] = []): string[] => {
-  if (typeof value === 'string') output.push(value);
-  else if (Array.isArray(value)) for (const item of value) flattenRiskText(item, output);
-  else if (value && typeof value === 'object') for (const item of Object.values(value)) flattenRiskText(item, output);
-  return output;
-};
+const RISK_TEXT_MAX_DEPTH = 64;
+const RISK_TEXT_MAX_SIZE = 1_000_000;
+/** Tool-call strings for the high-risk pattern. `undefined` when the input is nested or sized beyond what is checked. */
+function flattenRiskText(value: unknown): string | undefined {
+  const output: string[] = [];
+  const pending: Array<[unknown, number]> = [[value, 0]];
+  let size = 0;
+  while (pending.length) {
+    const [item, depth] = pending.pop()!;
+    size += typeof item === 'string' ? item.length + 1 : 1;
+    if (size > RISK_TEXT_MAX_SIZE) return undefined;
+    if (typeof item === 'string') { output.push(item); continue; }
+    if (!item || typeof item !== 'object') continue;
+    if (depth >= RISK_TEXT_MAX_DEPTH) return undefined;
+    const children = Array.isArray(item) ? item : Object.values(item);
+    if (size + children.length > RISK_TEXT_MAX_SIZE) return undefined;
+    for (let index = children.length - 1; index >= 0; index--) pending.push([children[index], depth + 1]);
+  }
+  return output.join('\n');
+}
 export function listAcpxBuiltinAgents(): AcpxBuiltinAgent[] {
   const registry = createAgentRegistry();
   return registry.list().map(id => {
@@ -412,55 +426,74 @@ export class AcpxAdapter implements AgentDriver {
       // capabilities the host cannot intercept fail closed.
       permissionMode: acpxPermissionMode(agent.permissionMode),
       nonInteractivePermissions: 'fail', timeoutMs: Math.round(agent.timeout * 1000),
-      onPermissionRequest: async request => {
+      onPermissionRequest: request => this.permissionDecision(request)
+    });
+  }
+
+  /** acpx answers a throwing host callback from the permission mode, which approves everything in full-trust: any failure rejects. */
+  private async permissionDecision(request: AcpPermissionRequest): Promise<AcpPermissionDecision> {
+    try { return await this.decidePermission(request); }
+    catch (error) {
+      if (!this.stopped && !this.turnCancelling) {
+        try {
+          const toolCallId = (request.raw as any)?.toolCall?.toolCallId;
+          this.options.onEvent({ type: 'permission_request', data: { id: toolCallId ?? `permission-${Date.now()}`, toolCallId, title: `权限检查异常，已拒绝操作：${error instanceof Error ? error.message : String(error)}`, options: [], status: 'rejected' } });
+        } catch { /* The decision stays a rejection. */ }
+      }
+      return { outcome: 'reject_once' };
+    }
+  }
+  private async decidePermission(request: AcpPermissionRequest): Promise<AcpPermissionDecision> {
+    if (this.stopped || this.turnCancelling) return { outcome: 'reject_once' };
+    const raw = request.raw as any; const id = raw.toolCall?.toolCallId ?? `permission-${Date.now()}`;
+    const secrets = Object.entries({ ...process.env, ...this.agent.env }).filter(([key]) => /token|secret|password|api[_-]?key|authorization|cookie/i.test(key)).map(([, value]) => value).filter((value): value is string => Boolean(value));
+    const facts = permissionFacts(raw.toolCall, secrets);
+    const candidate = flattenRiskText({ title: raw.toolCall?.title, input: raw.toolCall?.rawInput ?? raw.toolCall?.input ?? raw });
+    let riskPolicy = this.riskPolicy;
+    if (this.options.resolveRiskPolicy) {
+      try { riskPolicy = await this.whileActive(() => this.options.resolveRiskPolicy!(riskPolicy)); }
+      catch { return { outcome: 'reject_once' }; }
+    }
+    if (this.stopped || this.turnCancelling) return { outcome: 'reject_once' };
+    if (riskPolicy?.enabled && !riskPolicy.authorized) {
+      if (candidate === undefined) {
+        this.options.onEvent({ type: 'permission_request', data: { id, toolCallId: raw.toolCall?.toolCallId, title: `操作参数嵌套过深或过大，无法做高危检查，已拒绝：${facts.title}`, options: [], status: 'rejected' } });
+        return { outcome: 'reject_once' };
+      }
+      try {
+        const matches = await this.whileActive(() => testRegexWithTimeout(riskPolicy!.pattern, candidate));
         if (this.stopped || this.turnCancelling) return { outcome: 'reject_once' };
-        const raw = request.raw as any; const id = raw.toolCall?.toolCallId ?? `permission-${Date.now()}`;
-        const secrets = Object.entries({ ...process.env, ...this.agent.env }).filter(([key]) => /token|secret|password|api[_-]?key|authorization|cookie/i.test(key)).map(([, value]) => value).filter((value): value is string => Boolean(value));
-        const facts = permissionFacts(raw.toolCall, secrets);
-        const candidate = flattenRiskText({ title: raw.toolCall?.title, input: raw.toolCall?.rawInput ?? raw.toolCall?.input ?? raw }).join('\n');
-        let riskPolicy = this.riskPolicy;
-        if (this.options.resolveRiskPolicy) {
-          try { riskPolicy = await this.whileActive(() => this.options.resolveRiskPolicy!(riskPolicy)); }
-          catch { return { outcome: 'reject_once' }; }
+        if (matches) {
+          this.options.onEvent({ type: 'permission_request', data: { id, toolCallId: raw.toolCall?.toolCallId, title: `高危操作已被 Dutydeck 拦截：${facts.title}`, options: [], status: 'rejected' } });
+          return { outcome: 'reject_once' };
         }
+      } catch (error) {
         if (this.stopped || this.turnCancelling) return { outcome: 'reject_once' };
-        if (riskPolicy?.enabled && !riskPolicy.authorized) {
-          try {
-            const matches = await this.whileActive(() => testRegexWithTimeout(riskPolicy!.pattern, candidate));
-            if (this.stopped || this.turnCancelling) return { outcome: 'reject_once' };
-            if (matches) {
-              this.options.onEvent({ type: 'permission_request', data: { id, toolCallId: raw.toolCall?.toolCallId, title: `高危操作已被 Dutydeck 拦截：${facts.title}`, options: [], status: 'rejected' } });
-              return { outcome: 'reject_once' };
-            }
-          } catch (error) {
-            if (this.stopped || this.turnCancelling) return { outcome: 'reject_once' };
-            this.options.onEvent({ type: 'permission_request', data: { id, toolCallId: raw.toolCall?.toolCallId, title: `安全正则匹配异常，已拒绝操作：${error instanceof Error ? error.message : String(error)}`, options: [], status: 'rejected' } });
-            return { outcome: 'reject_once' };
-          }
-        }
-        if (this.permissionMode === 'full-trust') return { outcome: 'allow_once' };
-        if (this.permissionMode === 'deny-all') return { outcome: 'reject_once' };
-        const input = raw.toolCall?.rawInput ?? raw.toolCall?.input;
-        if (isAgentCommandAutoApproval({ permissionMode: this.permissionMode, kind: raw.toolCall?.kind,
-          command: input?.command ?? input?.cmd, env: this.agent.env })) {
-          this.options.onEvent({ type: 'permission_request', data: { id, toolCallId: raw.toolCall?.toolCallId,
-            ...facts, title: `${agentCommandApprovalReason}：${facts.title}`, options: [], status: 'approved' } });
-          return { outcome: 'allow_once' };
-        }
-        // 只读判定从严，只认执行端自己声明的 read / search：acpx 在缺 kind 时按标题首词猜（「Read and delete」也会猜成 read），
-        // fetch 会把内容带到外部地址，都不算只读，照常审批。
-        if (this.permissionMode === 'approve-reads' && ['read', 'search'].includes(String(raw.toolCall?.kind ?? ''))) return { outcome: 'allow_once' };
-        return new Promise<AcpPermissionDecision>(resolve => {
-          this.pendingPermissions.set(id, resolve);
-          this.idleWatch?.refresh();
-          try {
-            this.options.onEvent({ type: 'permission_request', data: { id, toolCallId: raw.toolCall?.toolCallId, ...facts, options: (raw.options ?? []).map((option: any) => ({ id: option.optionId, label: permissionDisplayText(option.name, secrets, 100), kind: option.kind })), status: 'pending' } });
-          } catch {
-            this.pendingPermissions.delete(id);
-            this.idleWatch?.refresh();
-            resolve({ outcome: 'reject_once' });
-          }
-        });
+        this.options.onEvent({ type: 'permission_request', data: { id, toolCallId: raw.toolCall?.toolCallId, title: `安全正则匹配异常，已拒绝操作：${error instanceof Error ? error.message : String(error)}`, options: [], status: 'rejected' } });
+        return { outcome: 'reject_once' };
+      }
+    }
+    if (this.permissionMode === 'full-trust') return { outcome: 'allow_once' };
+    if (this.permissionMode === 'deny-all') return { outcome: 'reject_once' };
+    const input = raw.toolCall?.rawInput ?? raw.toolCall?.input;
+    if (isAgentCommandAutoApproval({ permissionMode: this.permissionMode, kind: raw.toolCall?.kind,
+      command: input?.command ?? input?.cmd, env: this.agent.env })) {
+      this.options.onEvent({ type: 'permission_request', data: { id, toolCallId: raw.toolCall?.toolCallId,
+        ...facts, title: `${agentCommandApprovalReason}：${facts.title}`, options: [], status: 'approved' } });
+      return { outcome: 'allow_once' };
+    }
+    // 只读判定从严，只认执行端自己声明的 read / search：acpx 在缺 kind 时按标题首词猜（「Read and delete」也会猜成 read），
+    // fetch 会把内容带到外部地址，都不算只读，照常审批。
+    if (this.permissionMode === 'approve-reads' && ['read', 'search'].includes(String(raw.toolCall?.kind ?? ''))) return { outcome: 'allow_once' };
+    return new Promise<AcpPermissionDecision>(resolve => {
+      this.pendingPermissions.set(id, resolve);
+      this.idleWatch?.refresh();
+      try {
+        this.options.onEvent({ type: 'permission_request', data: { id, toolCallId: raw.toolCall?.toolCallId, ...facts, options: (raw.options ?? []).map((option: any) => ({ id: option.optionId, label: permissionDisplayText(option.name, secrets, 100), kind: option.kind })), status: 'pending' } });
+      } catch {
+        this.pendingPermissions.delete(id);
+        this.idleWatch?.refresh();
+        resolve({ outcome: 'reject_once' });
       }
     });
   }

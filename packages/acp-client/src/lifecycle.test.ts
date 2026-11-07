@@ -604,3 +604,27 @@ describe('approve-reads 只读判定', () => {
     expect(events).toEqual([expect.objectContaining({ type: 'permission_request', data: expect.objectContaining({ id: 'ask_read', status: 'pending' }) })]);
   });
 });
+
+describe('权限检查失败时拒绝', () => {
+  const nested = (depth: number, leaf: unknown) => { let value = leaf; for (let level = 0; level < depth; level++) value = [value]; return value; };
+  const riskPolicy = { enabled: true, authorized: false, pattern: 'rm -rf' };
+
+  it('full-trust 下参数嵌套过深时按高危命中拒绝，不抛给 acpx 走 approve-all', async () => {
+    const { adapter, runtime, events } = await setup({ permissionMode: 'full-trust' });
+    adapter.setRiskPolicy(riskPolicy);
+    const deep = { raw: { toolCall: { toolCallId: 'deep', title: 'mcp tool', rawInput: nested(100_000, 'rm -rf /') } } };
+    expect(await runtime.options.onPermissionRequest(deep)).toEqual({ outcome: 'reject_once' });
+    expect(events).toEqual([expect.objectContaining({ type: 'permission_request', data: expect.objectContaining({ id: 'deep', status: 'rejected' }) })]);
+    // 上限以内照常展开检查：命中的拒绝，未命中的按 full-trust 放行。
+    expect(await runtime.options.onPermissionRequest({ raw: { toolCall: { toolCallId: 'shallow', rawInput: nested(20, 'rm -rf /') } } })).toEqual({ outcome: 'reject_once' });
+    expect(await runtime.options.onPermissionRequest({ raw: { toolCall: { toolCallId: 'safe', rawInput: nested(20, 'ls') } } })).toEqual({ outcome: 'allow_once' });
+  });
+
+  it('权限检查任何一步抛错都拒绝，并记一条已拒绝的权限事件', async () => {
+    const { adapter, runtime, events } = await setup({ permissionMode: 'full-trust' });
+    adapter.setRiskPolicy(riskPolicy);
+    const toolCall = { toolCallId: 'broken', get title(): string { throw new Error('malformed tool call'); } };
+    expect(await runtime.options.onPermissionRequest({ raw: { toolCall } })).toEqual({ outcome: 'reject_once' });
+    expect(events).toEqual([expect.objectContaining({ type: 'permission_request', data: expect.objectContaining({ id: 'broken', status: 'rejected', title: expect.stringContaining('malformed tool call') }) })]);
+  });
+});
