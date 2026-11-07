@@ -831,8 +831,11 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
     await vi.waitFor(() => expect(patches()).toBe(1));
     await idle();
     const renders = vi.spyOn(f.workbench as any, 'cardInput');
+    // 授权会去飞书查群成员：已处理完的心跳不该每秒走一遍。
+    const authorizations = vi.spyOn(f.workbench as any, 'authorize');
     for (let index = 0; index < 3; index++) { await f.work.tick(); await idle(); }
     expect(renders).not.toHaveBeenCalled();
+    expect(authorizations).not.toHaveBeenCalled();
     expect(patches()).toBe(1);
     // 目标记录换了 revision（这里改标题）：下一轮心跳重新渲染并 PATCH。
     const key = `work_item:${workId}`;

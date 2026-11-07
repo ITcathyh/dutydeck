@@ -15,6 +15,8 @@ import type { LarkMessageEvent } from './listener.js';
 import type { PersistedLarkCardTask } from './coordinator.js';
 
 const originKey = (sessionId: string, key: string) => `workbench.origin.${digest(`${sessionId}\0${key}`)}`;
+/** 心跳已处理完的标记：目标 revision 加待决请求摘要，两者都没变就不必再走一轮 notify。 */
+const settledNoticeKey = (item: WorkItem, requests: WorkItemRequest[]) => `${item.revision}\0${digest(JSON.stringify(requests))}`;
 interface Target { appId: string; chatId: string; replyMessageId: string; replyInThread: boolean }
 const labels: Record<string, string> = { awaiting_confirmation: '待确认', pending: '待执行', running: '执行中', waiting: '待你补充', completed: '已完成', failed: '执行失败', blocked: '需要处理', cancelling: '正在停止', cancelled: '已取消', skipped: '已跳过' };
 
@@ -568,6 +570,11 @@ export class LarkWorkbench {
 
   async notify(item: WorkItem, actorId: string) {
     this.assertOpen();
+    // 停在受阻、失败、等待的目标每秒都会走到这里。上一轮已处理完、目标与待决请求都没变时，这一轮什么也不会做；
+    // 先用本地记录判断，免得下面的授权每秒去飞书查一遍群成员。
+    const snapshot = await this.work().peek(item.id);
+    if (snapshot && !['cancelling', 'cancelled', 'completed'].includes(snapshot.status)
+      && this.settledNotices.get(snapshot.id) === settledNoticeKey(snapshot, this.interactions().pending(snapshot))) return;
     if (!await this.authorize(item.parentSessionId, actorId)) return;
     this.assertOpen();
     const current = await this.work().get(item.parentSessionId, item.id, actorId);
@@ -579,8 +586,7 @@ export class LarkWorkbench {
     // current 刚按同一身份 get 过（含授权），直接复用，不再重复授权和读库。
     const requests = this.interactions().pending(current);
     if (item.status === 'running' && !item.steps.some(step => step.status === 'waiting') && !requests.length && !current.pendingRevision) return;
-    // 停在受阻、失败、等待的目标每秒都会走到这里：上一轮已处理完且目标与待决请求都没变时，不再读配置、渲染整卡。
-    const settledKey = `${current.revision}\0${digest(JSON.stringify(requests))}`;
+    const settledKey = settledNoticeKey(current, requests);
     if (this.settledNotices.get(current.id) === settledKey) return;
     const encoded = await this.repos.config.get(`workbench.target.${item.id}`);
     if (!encoded) return;
