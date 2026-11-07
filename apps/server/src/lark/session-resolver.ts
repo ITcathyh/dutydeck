@@ -315,24 +315,10 @@ export async function resolveLarkScopeId(
   }
 }
 
-const workspaceCacheMs = 5_000;
-const workspaceCacheLimit = 256;
-const workspaceCache = new Map<string, { value: string; expiresAt: number }>();
-
-/**
- * 路径不存在或读不到时退回 resolve 的结果，不抛错。
- * 它在入站消息的会话匹配上，每个候选会话都要比一次：结果缓存几秒，避免同步 realpath 反复碰盘。
- */
+/** 路径不存在或读不到时退回 resolve 的结果，不抛错。 */
 export const comparableWorkspace = (path: string) => {
   const resolved = resolve(path);
-  const now = Date.now();
-  const cached = workspaceCache.get(resolved);
-  if (cached && cached.expiresAt > now) return cached.value;
-  let value = resolved;
-  try { value = realpathSync(resolved); } catch { /* 退回 resolve 的结果 */ }
-  if (workspaceCache.size >= workspaceCacheLimit) workspaceCache.clear();
-  workspaceCache.set(resolved, { value, expiresAt: now + workspaceCacheMs });
-  return value;
+  try { return realpathSync(resolved); } catch { return resolved; }
 };
 
 /**

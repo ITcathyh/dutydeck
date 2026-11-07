@@ -22,15 +22,6 @@ import {
 } from './session-resolver.js';
 import type { LarkMessageEvent } from './listener.js';
 
-// 包一层真实实现，只为数出工作区比较调了几次同步 realpath。
-const fsSpies = vi.hoisted(() => ({ realpathSync: undefined as undefined | ReturnType<typeof import('vitest').vi.fn> }));
-vi.mock('node:fs', async importOriginal => {
-  const actual = await importOriginal<typeof import('node:fs')>();
-  const realpathSync = Object.assign(vi.fn((...args: Parameters<typeof actual.realpathSync>) => actual.realpathSync(...args)), { native: actual.realpathSync.native });
-  fsSpies.realpathSync = realpathSync;
-  return { ...actual, default: { ...actual, realpathSync }, realpathSync };
-});
-
 const resourceRoot = join(tmpdir(), `dutydeck-materializer-test-${crypto.randomUUID()}`);
 const directories = new Map<string, string>();
 afterAll(() => rm(resourceRoot, { recursive: true, force: true }));
@@ -369,20 +360,6 @@ describe('larkSessionMatchesScope 工作区路径写法', () => {
   it('配置指向另一个目录时不匹配', () => {
     expect(matches(stored(link), other)).toBe(false);
     expect(matches(stored(real), other)).toBe(false);
-  });
-
-  it('短时间内重复比较同一路径只解析一次，过期后重新解析', () => {
-    vi.useFakeTimers({ toFake: ['Date'] });
-    try {
-      const spy = fsSpies.realpathSync!;
-      const stored = join(root, 'fresh-stored'), configured = join(root, 'fresh-configured');
-      spy.mockClear();
-      for (let i = 0; i < 5; i++) expect(sameWorkspace(stored, configured)).toBe(false);
-      expect(spy).toHaveBeenCalledTimes(2);
-      vi.setSystemTime(Date.now() + 60_000);
-      expect(sameWorkspace(stored, configured)).toBe(false);
-      expect(spy).toHaveBeenCalledTimes(4);
-    } finally { vi.useRealTimers(); }
   });
 
   it('配置路径不存在时退回 resolve 的结果比较', () => {
