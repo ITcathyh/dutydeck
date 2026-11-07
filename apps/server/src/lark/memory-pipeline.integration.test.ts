@@ -304,7 +304,7 @@ describe('Lark memory pipeline through the coordinator', () => {
       expect((await h.store.getState(scope)).lastRun).toMatchObject({ kind: 'extraction', ok: true, added: 1, rejected: 1 });
     }, { timeout: 10_000 });
     await h.waitIdle();
-    expect(h.memoryPrompts.find(prompt => prompt.includes('后台提取'))).toContain(`- ${rule.id}：不要记任何人的薪资`);
+    expect(h.memoryPrompts.find(prompt => prompt.includes('后台提取'))).toContain(JSON.stringify([{ id: rule.id, text: '不要记任何人的薪资' }]));
     const saved = await h.store.list(scope);
     expect(saved.map(entry => entry.content)).toEqual(['部署脚本在 scripts/deploy.sh']);
     // 持久作业记录拒绝计数，被拒的内容不进日志。
