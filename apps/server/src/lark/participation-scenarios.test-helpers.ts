@@ -17,6 +17,8 @@ export type ModelAction = 'reply' | 'act' | 'silent';
 export interface ScenarioGroup {
   /** 本机器人的名称，规则层按它认「叫名字」。 */
   botName: string;
+  /** 本机器人的显示名，和名称一样算叫名字。 */
+  displayName?: string;
   mentionPolicy: 'always' | 'topic' | 'never' | 'ambient';
   participation: 'observe' | 'selective' | 'eager';
   roleTitle?: string;
@@ -116,10 +118,15 @@ const human = (text: string, patch: Partial<ScenarioMessage> = {}): ScenarioMess
 
 export const participationScenarios: ParticipationScenario[] = [
   // 目标求助
-  { id: 'help_calls_name', category: '目标求助', title: '开头叫名字求助', group: single, message: human('flash 帮我看下这个报错'), expected: rule(1, 'addressed', 'calls_name') },
+  { id: 'help_calls_name', category: '目标求助', title: '开头叫名字求助', group: single, message: human('bdev-flash 帮我看下这个报错'), expected: rule(1, 'addressed', 'calls_name') },
+  { id: 'help_calls_name_fragment', category: '目标求助', title: '只叫了名字片段「flash」', group: single, message: human('flash 帮我看下这个报错'),
+    expected: model('act', '片段不算叫名字，规则层不认定在叫我；内容是求助，交给模型判断', ['reply']) },
+  { id: 'help_calls_common_word_fragment', category: '目标求助', title: '名字片段是普通词：「Code Review」群里说「review 一下」', group: { ...single, botName: 'Code Review' },
+    message: human('review 一下这个 PR @_user_1', { mentionsOther: true }), expected: rule(1, 'silent', 'mentions_other') },
   { id: 'help_calls_name_other_responder', category: '目标求助', title: '接话人是别的机器人，叫我名字照常接', group: { ...crowded, responder: 'other' },
-    message: human('flash，查一下今天的发布单'), expected: rule(1, 'addressed', 'calls_name') },
-  { id: 'help_calls_ccflash', category: '目标求助', title: '多工具机器人群里叫「ccflash」', group: tools, message: human('ccflash 帮我看下这个告警'), expected: rule(1, 'addressed', 'calls_name') },
+    message: human('bdev-flash，查一下今天的发布单'), expected: rule(1, 'addressed', 'calls_name') },
+  { id: 'help_calls_ccflash', category: '目标求助', title: '多工具机器人群里叫显示名「CCFlash」', group: { ...tools, displayName: 'CCFlash' }, message: human('ccflash 帮我看下这个告警'), expected: rule(1, 'addressed', 'calls_name') },
+  { id: 'help_calls_ccflash_fragment', category: '目标求助', title: '多工具机器人群里只叫名字片段「ccflash」', group: tools, message: human('ccflash 帮我看下这个告警'), expected: rule(1, 'silent', 'no_responder') },
   { id: 'help_calls_generic_tag', category: '目标求助', title: '多工具机器人群里叫「Tag」', group: tools, message: human('Tag 帮我看下这个告警'), expected: rule(1, 'silent', 'no_responder'),
     note: '有争议：「tag」被当成泛称，不算叫名字；本群又是没指定接话人的多机器人群，所以不接。10-12 评估认为用户期望接。' },
   { id: 'help_reply_to_self', category: '目标求助', title: '引用回复我的消息追问', group: single, message: human('这个结论的依据是什么', { parent: 'self' }), expected: rule(1, 'addressed', 'reply_to_self') },
@@ -192,7 +199,7 @@ export const participationScenarios: ParticipationScenario[] = [
   { id: 'out_of_scope_single', category: '范围外提问', title: '配了告警负责范围，问需求文档', group: { ...single, ...alarmRole }, message: human('这个需求文档谁写的？'),
     expected: model('silent', '不在负责范围，问的是群友') },
   { id: 'out_of_scope_calls_name', category: '范围外提问', title: '配了告警负责范围，叫名字问范围外的事', group: { ...single, ...alarmRole },
-    message: human('flash 帮我查下明天的会议室'), expected: rule(1, 'addressed', 'calls_name') },
+    message: human('bdev-flash 帮我查下明天的会议室'), expected: rule(1, 'addressed', 'calls_name') },
 
   // @别人
   { id: 'mentions_other', category: '@别人', title: '@ 同事', group: single, message: human('@_user_1 你看下这个报错', { mentionsOther: true }), expected: rule(1, 'silent', 'mentions_other') },

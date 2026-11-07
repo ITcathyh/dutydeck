@@ -14,7 +14,7 @@ export function responderIntentOf(text: string): { name: string } | undefined {
     ?? plain.match(/^(?:这个群|本群|群里)?的?接话人(?:改成|改为|设为|设成|换成|是|用)\s*(.{1,20}?)(?:吧|就行|就好|了)?[。.!！]?$/);
   if (!match) return undefined;
   const name = match[1]!.trim();
-  return name === '我' || /^(谁|哪个)/.test(name) ? undefined : { name: name === '你' ? '' : name };
+  return name === '我' || /^(谁|哪个|为什么|为啥|怎么)/.test(name) ? undefined : { name: name === '你' ? '' : name };
 }
 
 const ANNOUNCEMENT = '【接话人】';

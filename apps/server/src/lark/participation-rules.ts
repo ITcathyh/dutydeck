@@ -2,14 +2,14 @@
 //
 // 「在叫我」的消息按一次显式 @ 交给执行路径；明显不是对本机器人说的直接沉默；其余拿不准的才交给模型。
 // 本模块是纯函数：外部事实（父消息是谁发的、最近谁说过话、群里几个人）由调用方查好放进上下文，
-// 查不到就留空，对应的规则不触发。规则只决定接不接话，不改变任何授权：交出去的消息仍按发送者本人重新鉴权。
+// 查不到就留空，对应的规则不触发；群成员读不全例外，按可能有多个机器人处理。规则只决定接不接话，不改变任何授权：交出去的消息仍按发送者本人重新鉴权。
 
 import { escapeRegExp, type CollaborationFollowup, type CollaborationMandate, type CollaborationObservation, type ParticipationLevel } from '@dutydeck/shared';
 
 export type ParticipationRule =
   | 'calls_name' | 'reply_to_self' | 'owned_topic' | 'owned_item' | 'follow_up' | 'single_human' | 'eager_default'
   | 'mentions_other' | 'reply_to_other' | 'emoji_only' | 'short_thanks' | 'bot_sender'
-  | 'calls_other' | 'topic_of_other' | 'not_responder' | 'no_responder';
+  | 'calls_other' | 'topic_of_other' | 'not_responder' | 'no_responder' | 'members_unknown';
 
 export interface RuleVerdict { action: 'addressed' | 'silent'; rule: ParticipationRule; reason: string }
 
@@ -30,7 +30,8 @@ export const participationRuleReasons: Record<ParticipationRule, string> = {
   calls_other: '那条消息叫的是群里另一个机器人',
   topic_of_other: '那个话题是发给别人或别的机器人的',
   not_responder: '本群指定了别的机器人接没 @ 的消息，我只接 @ 和自己接手的话题',
-  no_responder: '本群有多个机器人、还没指定接话人，没 @ 的消息我先不接'
+  no_responder: '本群有多个机器人、还没指定接话人，没 @ 的消息我先不接',
+  members_unknown: '读不到完整的群成员名单，按群里有多个机器人处理；还没指定接话人，没 @ 的消息我先不接'
 };
 
 export interface RuleRecentActivity {
@@ -65,7 +66,7 @@ export interface RuleContext {
   threadRootOther?: boolean;
   /** 场景来源开的话题（不记 threadRootOther）里有别的机器人发过言，或话题没读全、读失败。只在多机器人群里查。 */
   threadClaimedByOther?: boolean;
-  /** 消息开头叫的是群里另一个机器人的名字。只在多机器人群里查。 */
+  /** 消息开头叫的是群里另一个机器人的名字或名字片段。只在多机器人群里查。 */
   callsOther?: boolean;
   /** 本群的接话人是谁；没指定时不填。 */
   responder?: 'self' | 'other';
@@ -76,6 +77,8 @@ export interface RuleContext {
   /** 以下两项要查飞书接口，没查或查不到时不填。 */
   recent?: RuleRecentActivity;
   members?: { humans: number; bots: number };
+  /** 查了群成员但没读全（读失败、没权限、被安全策略截断）：按可能有多个机器人处理，多机器人群的规则照常生效。 */
+  membersUnknown?: boolean;
 }
 
 const FOLLOW_UP_WINDOW_MS = 5 * 60_000;
@@ -86,7 +89,16 @@ export const stripMentionPlaceholders = (text: string) => text.replace(/@_user_\
 /** 只留文字和数字，用于短语比对。 */
 export const compactText = (text: string) => text.toLowerCase().replace(/[\s\p{P}\p{S}]/gu, '');
 
-/** 机器人的称呼：完整名称，加上按分隔符拆出来的、不是泛称的片段（「bdev-flash」也叫得出「flash」）。 */
+/** 机器人的完整称呼（名称、显示名）：只有这些才算在叫本机器人。 */
+export function botFullNames(names: Array<string | undefined>): string[] {
+  const full = names.map(name => name?.trim().toLowerCase()).filter((name): name is string => Boolean(name && name.length >= 2));
+  return [...new Set(full)].sort((a, b) => b.length - a.length);
+}
+
+/**
+ * 机器人的称呼：完整名称，加上按分隔符拆出来的、不是泛称的片段（「bdev-flash」也叫得出「flash」）。
+ * 片段容易撞上普通词（「Code Review」的 review），只用来给别的机器人让路和解析接话人，不用来认定在叫本机器人。
+ */
 export function botNameTokens(names: Array<string | undefined>): string[] {
   const tokens = new Set<string>();
   for (const name of names) {
@@ -137,20 +149,21 @@ export function evaluateParticipationRules(ctx: RuleContext): RuleVerdict | unde
   const verdict = (action: RuleVerdict['action'], rule: ParticipationRule): RuleVerdict => ({ action, rule, reason: participationRuleReasons[rule] });
   if (ctx.senderKind !== 'human') return verdict('silent', 'bot_sender');
   const text = stripMentionPlaceholders(ctx.text);
-  if (callsBotName(text, botNameTokens(ctx.botNames))) return verdict('addressed', 'calls_name');
-  if (ctx.callsOther) return verdict('silent', 'calls_other');
   if (ctx.mentionsOther) return verdict('silent', 'mentions_other');
+  if (callsBotName(text, botFullNames(ctx.botNames))) return verdict('addressed', 'calls_name');
+  if (ctx.callsOther) return verdict('silent', 'calls_other');
   if (onlyEmoji(text, ctx.messageType)) return verdict('silent', 'emoji_only');
   if (shortThanks(text)) return verdict('silent', 'short_thanks');
   if (ctx.parent === 'self' || !ctx.parent && ctx.threadRootSelf) return verdict('addressed', 'reply_to_self');
   if (!ctx.parent && ctx.ownedTopic) return verdict('addressed', 'owned_topic');
   if (ctx.parent === 'other') return verdict('silent', 'reply_to_other');
   // 多机器人群：每条没 @ 的消息最多一个机器人接。别人的话题不接；不是接话人的只接上面这些明确叫自己的。
-  const crowded = (ctx.members?.bots ?? 0) > 1;
+  const knownCrowded = (ctx.members?.bots ?? 0) > 1;
+  const crowded = knownCrowded || Boolean(ctx.membersUnknown);
   if (crowded && !ctx.parent && (ctx.threadRootOther || ctx.threadClaimedByOther)) return verdict('silent', 'topic_of_other');
   const hasScope = Boolean(ctx.roleScope?.trim()) || Boolean(ctx.scenarioMatched);
   if (!hasScope && ctx.responder === 'other') return verdict('silent', 'not_responder');
-  if (!hasScope && crowded && ctx.responder !== 'self') return verdict('silent', 'no_responder');
+  if (!hasScope && crowded && ctx.responder !== 'self') return verdict('silent', knownCrowded ? 'no_responder' : 'members_unknown');
   if (mentionsOwnedName(text, ctx.ownedNames)) return verdict('addressed', 'owned_item');
   if (!hasScope && ctx.level === 'eager') return verdict('addressed', 'eager_default');
   const recent = ctx.recent;
@@ -177,6 +190,8 @@ export type RuleFacts = {
   partner?: boolean;
   humans?: number;
   bots?: number;
+  /** 群成员读失败或被截断：不填 humans/bots，按可能有多个机器人处理。 */
+  membersUnknown?: boolean;
   ownedTopic?: boolean;
   threadRootOther?: boolean;
   /** 场景来源开的话题有没有被别的机器人接过；evidence 说明是读全了（complete）、读到上限（capped）还是读失败（unavailable）。 */
@@ -210,7 +225,8 @@ export function ruleContextOf(trigger: CollaborationObservation, owned: { names:
     ...(facts.threadClaimedByOther ? { threadClaimedByOther: true } : {}), ...(facts.scenarioMatched ? { scenarioMatched: facts.scenarioMatched } : {}),
     ...(facts.callsOther ? { callsOther: true } : {}), ...(facts.responder ? { responder: facts.responder } : {}),
     ...(facts.lastSelfAgoMs !== undefined ? { recent: { lastSelfAt: at - facts.lastSelfAgoMs, humanBetween: Boolean(facts.humanBetween), partners: facts.partner ? [senderId] : [] } } : {}),
-    ...(facts.humans !== undefined ? { members: { humans: facts.humans, bots: facts.bots ?? 0 } } : {})
+    ...(facts.humans !== undefined ? { members: { humans: facts.humans, bots: facts.bots ?? 0 } } : {}),
+    ...(facts.membersUnknown ? { membersUnknown: true } : {})
   };
 }
 
@@ -222,23 +238,30 @@ const levelPhrases: Array<[ParticipationLevel, RegExp]> = [
   ['selective', /(按需参与|按需回复?|按需)/],
   ['eager', /(积极点|积极一点|积极些|主动点|主动一点|主动些|多参与|每条都回)/]
 ];
-// 改档的话除了关键短语只剩这些虚词时才算数，避免「按需求改一下」这类句子被误认。
-const intentFillers = /(这个群|本群|群里|以后|之后|改成|切到|换成|调成|就行|就好|模式|档位|一下|麻烦|请|你|就|吧|呢|啊|呀|哈|了|档)/g;
+// 改档的话除了关键短语只剩这些虚词时才算数，避免「按需求改一下」「为什么没回滚」这类句子被误认。
+const intentFillers = /(这个群|本群|群里|以后|之后|改成|切到|换成|调成|就行|就好|模式|档位|一下|麻烦|请|你|就|吧|呢|啊|呀|哈|哦|嘛|啦|了|档)/g;
 const remainder = (text: string, phrase: string) => text.replace(phrase, '').replace(intentFillers, '').replace(/[\p{P}\p{S}]/gu, '');
 
-/** 在叫机器人的短消息（去掉 @ 后不超过 20 字）里的固定短语：改参与强度、问刚才为什么没回。 */
+/** 在叫机器人的短消息（去掉 @ 后不超过 20 字）里的固定短语：改参与强度、问刚才为什么没回。整句基本就是短语本身才算。 */
 export function participationIntentOf(text: string): ParticipationIntent | undefined {
   const plain = stripMentionPlaceholders(text);
   if (!plain || plain.length > 20) return undefined;
   const compact = plain.toLowerCase().replace(/\s+/g, '').replace(/＠/g, '@');
-  const why = compact.match(/(为什么|为啥|怎么)(没|不)(回|理|接|说话)/);
-  if (why && remainder(compact, why[0]).replace(/(刚才|刚刚|我|的|消息|那条)/g, '').length <= 2) return { kind: 'why_silent' };
+  const why = compact.match(/(为什么|为啥|怎么)(没有|没|不)(回复|回应|回|理|接话|接|说话)/);
+  if (why && !remainder(compact, why[0]).replace(/(刚才|刚刚|我|的|消息|那条|这条)/g, '')) return { kind: 'why_silent' };
   for (const [level, pattern] of levelPhrases) {
     const match = compact.match(pattern);
-    if (match && remainder(compact, match[0]).length <= 2) return { kind: 'level', level };
+    if (match && !remainder(compact, match[0])) return { kind: 'level', level };
   }
   return undefined;
 }
 
 /** 回复本机器人主动消息时表示「插话了」的说法。 */
-export const intrusionPattern = /(别插话|不要插话|不用你|没问你|不是问你|没叫你|没在叫你|不需要你)/;
+const intrusionPattern = /(别插话|不要插话|不用你|没问你|不是问你|没叫你|没在叫你|不需要你)/;
+const intrusionFillers = /(回复|回|管|说话|说|插嘴|这个|这里|了|啊|呀|哈|吧|呢|哦|啦|的)/g;
+/** 整句基本就是「没问你」这类说法才算误插纠正；「不用你重跑了，直接给结论」是新的请求。 */
+export function intrusionCorrection(text: string): boolean {
+  const compact = compactText(stripMentionPlaceholders(text));
+  const match = compact.length <= 12 ? compact.match(intrusionPattern) : null;
+  return Boolean(match) && !compact.replace(match![0], '').replace(intrusionFillers, '');
+}

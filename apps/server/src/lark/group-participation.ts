@@ -13,7 +13,7 @@ import type { LarkCardService, LarkChatMessage } from './service.js';
 import { parseLarkMessageContent } from './message-content.js';
 import { LarkContextBootstrap, observationTime } from './context-bootstrap.js';
 import { decisionInput, participationInput, parseParticipationResult, parseParticipationResponse, scenarioObservations, type ParticipationDecider, type ParticipationFacts, type ParticipationResult } from './readonly-decider.js';
-import { botNameTokens, callsBotName, compactText, intrusionPattern, ownedItems, participationIntentOf, participationRuleReasons, stripMentionPlaceholders, type ParticipationRule, type RuleFacts, type RuleVerdict } from './participation-rules.js';
+import { botNameTokens, callsBotName, compactText, evaluateParticipationRules, intrusionCorrection, ownedItems, participationIntentOf, participationRuleReasons, ruleContextOf, stripMentionPlaceholders, type ParticipationRule, type RuleFacts, type RuleVerdict } from './participation-rules.js';
 import { responderAnnouncementOf, responderClaimText, responderIntentOf, responderReleaseText } from './group-responder.js';
 import { LarkScenarios, type ScenarioMatch, type ScenarioPhrase } from './group-scenarios.js';
 import { runDirectScenario, type LarkScenarioAdoption } from './scenario-direct.js';
@@ -63,7 +63,8 @@ export interface GroupParticipationOptions {
 }
 type Pending = { event: LarkMessageEvent; config: StoredLarkConfig; observation: CollaborationObservation; botOpenId?: string };
 type ObserveInput = { explicit: boolean; botOpenId?: string; addressed?: boolean; ownedTopic?: boolean };
-type Slot = { pending?: Pending; timer?: NodeJS.Timeout; running?: Promise<void>; stopped: boolean };
+/** merged：去抖时被后一条并掉的消息，按到达顺序排队，只跑早期规则。 */
+type Slot = { pending?: Pending; merged?: Pending[]; timer?: NodeJS.Timeout; running?: Promise<void>; stopped: boolean };
 /** 把一条人类消息按显式 @ 交给执行路径；授权、领取与执行由 coordinator 负责。 */
 export type ParticipationDispatcher = (event: LarkMessageEvent, config: StoredLarkConfig) => Promise<void>;
 /** 一次回合门禁的结论：放行返回 undefined，拦下返回可直接落日志的理由。 */
@@ -88,7 +89,8 @@ const RESPONDER_CONFIRM_KIND = 'group_responder';
 /** 观察 refs 里的标记：这条消息在本机器人接手的话题里（coordinator 按话题会话判断）。 */
 const OWNED_TOPIC_REF = 'dutydeck:owned-topic';
 type BotMember = { name: string; appId?: string; openId?: string };
-type Members = { humans: number; bots: number; botList: BotMember[] };
+/** complete 为 false：读失败、没权限或被安全策略截断，没有人数；名单是截断前读到的或上次读全的，可能缺机器人。 */
+type Members = { complete: true; humans: number; botList: BotMember[] } | { complete: false; botList: BotMember[] };
 const activeModes = new Set(['selective', 'eager']);
 /** 多机器人群里没接时，除了指定接话人，配负责范围也能让本机器人按范围接没 @ 的消息。 */
 const scopeSetupHint = '也可以在 Dutydeck Web「机器人管理」的「负责范围」里写清我负责的事，范围内没 @ 的消息我会判断后接。';
@@ -97,6 +99,11 @@ const deafLevelText = (level: ParticipationLevel) => level === 'mention' ? '我�
 const clock = (at: string) => { const date = new Date(at); return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`; };
 const snippet = (text: string | undefined) => { const plain = stripMentionPlaceholders(text ?? ''); return plain.length > 20 ? `${plain.slice(0, 20)}…` : plain; };
 const botName = (config: StoredLarkConfig) => config.name ?? config.displayName ?? config.appId;
+const botNamesOf = (config: StoredLarkConfig) => [config.name, config.displayName].filter((name): name is string => Boolean(name));
+/** 被并掉的消息仍照常交给执行的规则：明确在叫本机器人的，不含积极档、单真人群这类默认接话。 */
+const explicitRules = new Set<ParticipationRule>(['calls_name', 'reply_to_self', 'owned_topic', 'owned_item']);
+/** 一个群最多留几条被并掉、待看规则的消息。 */
+const MERGED_LIMIT = 20;
 const isSelfMessage = (message: Pick<LarkChatMessage, 'sender'>, appId: string, botOpenId?: string) =>
   ['app', 'bot'].includes(message.sender.type ?? '') && Boolean(message.sender.id) && (message.sender.id === appId || message.sender.id === botOpenId);
 const isBotMessage = (message: Pick<LarkChatMessage, 'sender'>) => ['app', 'bot'].includes(message.sender.type ?? '');
@@ -114,6 +121,8 @@ const jsonRecord = (value: unknown): Record<string, unknown> | undefined => {
 /** 确认卡模板的变量：{summary} 和各个参数。 */
 const confirmValues = (pack: ScenarioPack, params: Readonly<Record<string, unknown>>): TemplateValues => ({ ...scenarioParamValues(pack, params), summary: templateText(scenarioSummary(pack, params)) });
 const defaultExplain = { acted: '{time} 那条消息已经起了任务，结果在它的话题里。', skipped: '{time} 那条消息我没处理：{reason}。', note: '另外，{time} 那条「{snippet}」我没处理：{reason}。' };
+/** 判定 id 含触发消息：前一条还在判定时后一条已经入库，两条判定看到的快照版本相同。 */
+const decisionIdOf = (scope: CollaborationScope, triggerId: string, snapshot: CollaborationSnapshot) => `decision_${digest([scope, triggerId, snapshot.contextRevision, snapshot.settings.policyVersion])}`;
 const triggerMeta = (trigger: CollaborationObservation): NonNullable<CollaborationDeciderMeta['trigger']> => ({ id: trigger.id,
   ...(trigger.messageId ? { messageId: trigger.messageId } : {}), ...(trigger.senderId ? { senderId: trigger.senderId } : {}), ...(trigger.threadId ? { threadId: trigger.threadId } : {}), text: trigger.text.slice(0, 200) });
 /** 存进判定记录的事实去掉未填项（JSON 本来也不存 undefined）。 */
@@ -370,6 +379,10 @@ export class LarkGroupParticipation {
       } else {
         lines.push(`**接话人**：${duty.responder.name ?? duty.responder.appId}，没 @ 机器人的消息由它接，我只接 @ 和自己接手的话题`);
       }
+    } else if (members && !members.complete) {
+      lines.push(hasActiveScope
+        ? '**接话人**：未指定。读不到完整的群成员名单，按多机器人群处理；我仍按负责范围判断未明确叫我的消息，明确叫我照常处理；要将接话人设为我，@我 说「你负责接话」，或在 Dutydeck Web 的群设置里指定（我负责的范围不变）'
+        : '**接话人**：未指定。读不到完整的群成员名单，按多机器人群处理，没 @ 的消息我先不接；要我接，@我 说「你负责接话」，或在 Dutydeck Web 的群设置里指定；也可以给机器人开通读取群成员的权限');
     } else if (bots > 1) {
       if (hasActiveScope) {
         lines.push(`**接话人**：未指定。本群有 ${bots} 个机器人；我仍按负责范围判断未明确叫我的消息，明确叫我照常处理；要将接话人设为我，@我 说「你负责接话」，或在 Dutydeck Web 的群设置里指定（我负责的范围不变）`);
@@ -440,7 +453,7 @@ export class LarkGroupParticipation {
     this.dispatchAuthorizers.delete(appId);
     for (const [key, slot] of this.slots) {
       if ((JSON.parse(key) as [string, string])[0] !== appId) continue;
-      slot.stopped = true; slot.pending = undefined;
+      slot.stopped = true; slot.pending = undefined; slot.merged = undefined;
       if (slot.timer) clearTimeout(slot.timer);
       slot.timer = undefined;
     }
@@ -537,6 +550,10 @@ export class LarkGroupParticipation {
     if (!slot || slot.stopped && !slot.running) { slot = { stopped: false }; this.slots.set(key, slot); }
     if (slot.stopped) return;
     if (slot.pending && this.options.inboxStore) void annotateDisposition(this.options.inboxStore, scope.appId, slot.pending.event.messageId, { schemaVersion: 1, reason: 'participation_merged', mergedInto: pending.event.messageId }, this.options.log).catch(error => this.options.log?.warn({ error }, '记录消息合并失败'));
+    if (slot.pending) {
+      (slot.merged ??= []).push(slot.pending);
+      if (slot.merged.length > MERGED_LIMIT) slot.merged.shift();
+    }
     slot.pending = pending;
     if (slot.timer) clearTimeout(slot.timer);
     if (!slot.running) {
@@ -554,8 +571,14 @@ export class LarkGroupParticipation {
   private async drain(scope: CollaborationScope, slot: Slot): Promise<void> {
     if (slot.running) return slot.running;
     const run = (async () => {
-      while (slot.pending && !slot.stopped) {
+      while ((slot.pending || slot.merged?.length) && !slot.stopped) {
+        for (const merged of slot.merged?.splice(0) ?? []) {
+          if (slot.stopped) break;
+          try { await this.decideMerged(scope, merged, slot); }
+          catch (error) { this.options.log?.warn({ error, scope, messageId: merged.event.messageId }, '被合并消息的规则判定失败'); }
+        }
         const pending = slot.pending; slot.pending = undefined;
+        if (!pending || slot.stopped) continue;
         try { await this.decide(scope, pending, slot); }
         catch (error) {
           if (this.options.inboxStore) await annotateDisposition(this.options.inboxStore, scope.appId, pending.event.messageId, { schemaVersion: 1, reason: 'participation_failed' }, this.options.log);
@@ -671,7 +694,7 @@ export class LarkGroupParticipation {
     // 要翻最近消息的规则放到闸门之后，免得预算用满时每条消息还去读一次群历史。
     const facts = await this.ruleFacts(scope, pending, config, resolveParticipation({ mentionPolicy: config.mentionPolicy, participation: settings.participation }).level);
     const outcome = await evaluateParticipation<CollaborationSnapshot, void>({
-      botNames: [config.name, config.displayName].filter((name): name is string => Boolean(name)), roleScope: config.roleScope,
+      botNames: botNamesOf(config), roleScope: config.roleScope,
       early: { trigger: pending.observation, owned: ownedItems(await repo.listMandates(scope), []), facts },
       gate: () => this.decisionGate(scope, pending, settings),
       enrich: async () => {
@@ -690,6 +713,17 @@ export class LarkGroupParticipation {
       model: (round, full) => this.decideByModel(scope, pending, slot, config, round!.trigger, round!.facts, full!)
     });
     if (outcome.kind === 'rule') await this.decideByRule(scope, pending, slot, outcome.verdict, outcome.facts, outcome.context, config);
+  }
+  /** 去抖时被后一条并掉的消息：只跑早期规则，不调模型；明确在叫我的照常交给执行，其余不记判定，去向仍是已合并。 */
+  private async decideMerged(scope: CollaborationScope, pending: Pending, slot: Slot) {
+    const repo = this.options.repository;
+    const settings = await repo.getSettings(scope);
+    if (this.closed || slot.stopped || settings.participation === 'off') return;
+    const config = await this.options.readConfig(scope.appId, scope.chatId);
+    if (!config?.listening) return;
+    const facts = await this.ruleFacts(scope, pending, config, resolveParticipation({ mentionPolicy: config.mentionPolicy, participation: settings.participation }).level);
+    const verdict = evaluateParticipationRules(ruleContextOf(pending.observation, ownedItems(await repo.listMandates(scope), []), botNamesOf(config), facts, config.roleScope));
+    if (verdict?.action === 'addressed' && explicitRules.has(verdict.rule)) await this.decideByRule(scope, pending, slot, verdict, facts, undefined, config);
   }
   /** 命中的 model 包的冻结内容：调上下文来源（截止时间和字数按包声明封顶），失败时返回 abstained。包已经关掉时返回 undefined。 */
   private async scenarioSnapshot(scope: CollaborationScope, config: StoredLarkConfig, pending: Pending, packId: string): Promise<CollaborationScenarioSnapshot | undefined> {
@@ -743,7 +777,7 @@ export class LarkGroupParticipation {
     const repo = this.options.repository;
     // 交给模型的材料只留当前消息、最近 20 条、本机器人最近的发言和事项标题，控制在 8000 字以内。
     let snapshot = decisionInput(full, trigger.id);
-    const id = `decision_${digest([scope, snapshot.contextRevision, snapshot.settings.policyVersion])}`;
+    const id = decisionIdOf(scope, trigger.id, snapshot);
     if (await repo.getDecision(scope, id)) return;
     const modelFacts = memberFacts(facts);
     const meta: CollaborationDeciderMeta = {
@@ -1182,8 +1216,9 @@ export class LarkGroupParticipation {
     const members = await this.memberCounts(config, event.chatId);
     const duty = await this.options.repository.getDuty(scope);
     const bots = members && talkingBots(members, this.scenarios.sourceAppIds(duty));
-    if (members) { facts.humans = members.humans; facts.bots = bots!.length; }
-    const crowded = (bots?.length ?? 0) > 1;
+    if (members?.complete) { facts.humans = members.humans; facts.bots = bots!.length; }
+    else if (members) facts.membersUnknown = true;
+    const crowded = Boolean(members) && (!members!.complete || bots!.length > 1);
     let sourceTopic = false;
     if (event.threadId && event.rootId && event.rootId !== event.messageId) {
       const root = await read(event.rootId);
@@ -1195,8 +1230,9 @@ export class LarkGroupParticipation {
       else if (root && crowded && (isBotMessage(root) || root.mentions.some(mention => mention.id !== pending.botOpenId && mention.id !== config.appId))) facts.threadRootOther = true;
     }
     if (pending.observation.refs.includes(OWNED_TOPIC_REF)) facts.ownedTopic = true;
-    // 叫自己名字的消息先由 calls_name 接走，这里列表里含不含自己都一样。
-    if (crowded && callsBotName(stripMentionPlaceholders(pending.observation.text), botNameTokens(bots!.map(item => item.name)))) facts.callsOther = true;
+    // 名字片段也算叫别人：「bdev」同时是两个机器人的片段时两边都让路。自己的片段不算；名单里认不出自己时宁可让路。
+    const others = bots?.filter(item => item.appId !== config.appId && !(item.openId && item.openId === pending.botOpenId)) ?? [];
+    if (crowded && callsBotName(stripMentionPlaceholders(pending.observation.text), botNameTokens(others.map(item => item.name)))) facts.callsOther = true;
     if (duty.responder) facts.responder = duty.responder.appId === config.appId ? 'self' : 'other';
     const scenario = pending.observation.refs.find(ref => ref.startsWith(SCENARIO_REF_PREFIX))?.slice(SCENARIO_REF_PREFIX.length);
     if (scenario && activeModes.has(level) && this.scenarios.model(config, duty).some(item => item.entry.pack.id === scenario)) facts.scenarioMatched = scenario;
@@ -1230,23 +1266,31 @@ export class LarkGroupParticipation {
     }
     return { threadClaimedByOther: true, threadClaimEvidence: 'capped' };
   }
-  /** 群里真人和机器人的数量和机器人名单，按群缓存 10 分钟；查不到（没权限、被安全策略截断）时不填，「只有一个真人」「多机器人群」规则不触发。 */
+  /**
+   * 群里真人数和机器人名单，读全时按群缓存 10 分钟；没有读成员的能力时返回 undefined，「只有一个真人」「多机器人群」规则不触发。
+   * 读失败、没权限或被安全策略截断时返回 complete: false，规则按可能有多个机器人处理，不当作「没有别的机器人」。
+   */
   private async memberCounts(config: StoredLarkConfig, chatId: string): Promise<Members | undefined> {
     const key = keyFor({ appId: config.appId, chatId });
     const now = this.now().getTime();
     const cached = this.members.get(key);
     if (cached && cached.until > now) return cached.value;
     const service = this.options.serviceFor(config);
-    let value: Members | undefined;
-    if (service.listChatMembers) {
-      try {
-        const page = await service.listChatMembers({ chatId, memberTypes: ['user', 'bot'], pageSize: 100 });
-        const botList = page.items.filter(item => item.memberType === 'bot').map(item => ({ name: item.name, ...(item.appId ? { appId: item.appId } : {}), ...(item.openId ? { openId: item.openId } : {}) }));
-        if (!page.securityLimited) value = { humans: page.items.filter(item => item.memberType === 'user').length + (page.hasMore ? 1 : 0), bots: botList.length, botList };
-      } catch (error) { this.options.log?.warn({ error, chatId }, '读取群成员数失败'); }
+    if (!service.listChatMembers) return undefined;
+    const lastKnown = cached?.value?.botList ?? [];
+    let value: Members;
+    try {
+      const page = await service.listChatMembers({ chatId, memberTypes: ['user', 'bot'], pageSize: 100 });
+      const botList = page.items.filter(item => item.memberType === 'bot').map(item => ({ name: item.name, ...(item.appId ? { appId: item.appId } : {}), ...(item.openId ? { openId: item.openId } : {}) }));
+      if (page.securityLimited) this.options.log?.warn({ chatId }, '群成员名单被安全策略截断，按可能有多个机器人处理');
+      value = page.securityLimited ? { complete: false, botList: botList.length ? botList : lastKnown }
+        : { complete: true, humans: page.items.filter(item => item.memberType === 'user').length + (page.hasMore ? 1 : 0), botList };
+    } catch (error) {
+      this.options.log?.warn({ error, chatId }, '读取群成员失败，按可能有多个机器人处理');
+      value = { complete: false, botList: lastKnown };
     }
-    // 读失败只缓存 1 分钟，免得一次抖动让规则失效 10 分钟。
-    this.members.set(key, { until: now + (value ? MEMBER_CACHE_MS : 60_000), ...(value ? { value } : {}) });
+    // 读不全只缓存 1 分钟，恢复后尽快按实际成员判断。
+    this.members.set(key, { until: now + (value.complete ? MEMBER_CACHE_MS : 60_000), value });
     if (this.members.size > 1_000) this.members.delete(this.members.keys().next().value!);
     return value;
   }
@@ -1288,7 +1332,7 @@ export class LarkGroupParticipation {
     const trigger = full.observations.find(item => item.messageId === larkMessageAnchor(pending.event) && item.origin === 'live' && item.senderKind === 'human');
     if (!trigger) return;
     const snapshot = decisionInput(full, trigger.id);
-    const id = `decision_${digest([scope, snapshot.contextRevision, snapshot.settings.policyVersion])}`;
+    const id = decisionIdOf(scope, trigger.id, snapshot);
     if (await repo.getDecision(scope, id)) return;
     const meta: CollaborationDeciderMeta = {
       kind: 'rule',
@@ -1305,13 +1349,14 @@ export class LarkGroupParticipation {
     if (verdict.action === 'addressed' && activeModes.has(snapshot.settings.participation)) await this.dispatch(scope, pending, trigger, snapshot, [trigger.id], id, slot, true);
   }
   /**
-   * 人类消息的即时处理：@ 本机器人时记漏接；回复本机器人主动发言说「没问你」记误插；在叫本机器人的短消息里
+   * 人类消息的即时处理：@ 本机器人时记漏接；没 @ 它、回复它的主动发言只说「没问你」记误插；在叫本机器人的短消息里
    * 有改档或「为什么没回」时直接回应。handled 表示已回应，intrusive 表示这是误插纠正，都不再交给判定或 Agent。
    */
   private async corrections(scope: CollaborationScope, event: LarkMessageEvent, config: StoredLarkConfig, text: string, input: { botOpenId?: string; addressed?: boolean }) {
     const warn = (message: string) => (error: unknown) => { this.options.log?.warn({ error, scope, messageId: event.messageId }, message); return false; };
-    if (input.botOpenId && event.mentions.some(mention => mention.openId === input.botOpenId)) await this.markMissed(scope, event).catch(warn('记录漏接失败'));
-    const intrusive = intrusionPattern.test(text) && await this.markIntrusive(scope, event, text).catch(warn('记录误插失败'));
+    const mentioned = Boolean(input.botOpenId && event.mentions.some(mention => mention.openId === input.botOpenId));
+    if (mentioned) await this.markMissed(scope, event).catch(warn('记录漏接失败'));
+    const intrusive = !mentioned && intrusionCorrection(text) && await this.markIntrusive(scope, event, text).catch(warn('记录误插失败'));
     const handled = await this.handleResponderIntent(scope, event, config, text, input).catch(warn('处理接话人短语失败'))
       || Boolean(input.addressed) && await this.handleIntent(scope, event, config, text).catch(warn('处理参与强度短语失败'));
     return { handled, intrusive };
@@ -1336,9 +1381,9 @@ export class LarkGroupParticipation {
     const duty = await this.options.repository.getDuty(scope);
     const active = activeModes.has(intent.level);
     const members = active && !duty.responder ? await this.memberCounts(config, scope.chatId) : undefined;
-    const claim = Boolean(members && talkingBots(members, this.scenarios.sourceAppIds(duty)).length > 1);
+    const claim = Boolean(members && (!members.complete || talkingBots(members, this.scenarios.sourceAppIds(duty)).length > 1));
     const hasScope = Boolean(config.roleScope?.trim());
-    const note = claim ? '本群有多个机器人，确认后由我负责接没 @ 的消息，并在群里发接话人声明。'
+    const note = claim ? `${members!.complete ? '本群有多个机器人' : '读不到完整的群成员名单，按多机器人群处理'}，确认后由我负责接没 @ 的消息，并在群里发接话人声明。`
       : active && duty.responder && duty.responder.appId !== scope.appId ? (
         hasScope
           ? `本群接话人是「${duty.responder.name ?? duty.responder.appId}」，没 @ 的消息仍由它接，但我仍按负责范围接话；要将接话人设为我，@我 说「你负责接话」（我负责的范围不变）。`
@@ -1360,10 +1405,10 @@ export class LarkGroupParticipation {
     const sender = event.senderOpenId;
     if (!intent || !sender || !this.options.canOperate) return false;
     const target = await this.responderTarget(config, event, intent.name, input.botOpenId);
-    if (!target && !input.addressed || !await this.options.canOperate(scope, sender, sender)) return false;
+    if (!target && (intent.name || !input.addressed) || !await this.options.canOperate(scope, sender, sender)) return false;
     const key = `responder_${digest([scope, event.messageId])}`.slice(0, 50);
     if (!target) {
-      await this.replyText(config, event, intent.name ? `群里没找到叫「${intent.name}」的机器人。` : '没看出要让哪个机器人接话，请 @ 它说「你负责接话」。', key);
+      await this.replyText(config, event, '没看出要让哪个机器人接话，请 @ 它说「你负责接话」。', key);
       return true;
     }
     if (target !== 'self') {
@@ -1488,6 +1533,7 @@ export class LarkGroupParticipation {
       const why = rule ?? (silent.status === 'failed' ? '那次判断没跑成，按规定不出声' : `我判断不是在叫我（${silent.reason.slice(0, 200)}）`);
       // 对别人说的话不该接，就不再提示调档；多机器人群里没接的，提示指定接话人或配负责范围；别人的话题提示在话题里 @。
       const ruleHint = meta?.rule === 'no_responder' ? `要我接，@我 说「你负责接话」，或在 Dutydeck Web 的群设置里指定接话人；${scopeSetupHint}`
+        : meta?.rule === 'members_unknown' ? '要我接，@我 说「你负责接话」，或在 Dutydeck Web 的群设置里指定接话人；也可以给机器人开通读取群成员的权限，读得到名单后按实际成员判断。'
         : meta?.rule === 'not_responder' ? `要改由我接，@我 说「你负责接话」；${scopeSetupHint}`
         : meta?.rule === 'topic_of_other' ? '要我接这个话题，在话题里 @我；我接手后，话题里的追问不用再 @。'
         : ['mentions_other', 'reply_to_other', 'calls_other'].includes(meta?.rule ?? '') ? '' : hint;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { botNameTokens, callsBotName, evaluateParticipationRules, participationIntentOf, ruleContextOf, type RuleContext } from './participation-rules.js';
+import { botFullNames, botNameTokens, callsBotName, evaluateParticipationRules, intrusionCorrection, participationIntentOf, ruleContextOf, type RuleContext } from './participation-rules.js';
 
 const at = Date.parse('2026-10-06T10:00:00.000Z');
 const ctx = (patch: Partial<RuleContext> = {}): RuleContext => ({
@@ -38,7 +38,21 @@ describe('participation rules', () => {
     expect(callsBotName('flashback 是什么', tokens)).toBe(false);
     expect(callsBotName('这个 flash 卡顿问题谁在跟', tokens)).toBe(false);
     expect(botNameTokens(['Tag 机器人'])).toEqual(['tag 机器人']);
-    expect(rule({ text: 'flash 帮我看下', mentionsOther: true })).toMatchObject({ action: 'addressed', rule: 'calls_name' });
+    expect(botFullNames(['bdev-flash', ' CCFlash ', undefined, 'x'])).toEqual(['bdev-flash', 'ccflash']);
+    expect(rule({ text: 'bdev-flash 帮我看下' })).toMatchObject({ action: 'addressed', rule: 'calls_name' });
+    expect(rule({ text: 'BDEV-FLASH，查一下发布单', botNames: ['bdev-flash', 'CCFlash'] })).toMatchObject({ action: 'addressed', rule: 'calls_name' });
+    expect(rule({ text: 'ccflash 帮我看下', botNames: ['bdev-flash', 'CCFlash'] })).toMatchObject({ action: 'addressed', rule: 'calls_name' });
+  });
+
+  it('名字片段不算叫本机器人；@ 了别人时叫名字也不接', () => {
+    // 「Code Review」拆出的 review、「运维-值班」拆出的运维都是普通词，片段只用来给别的机器人让路。
+    expect(rule({ text: 'review 一下这个 PR', botNames: ['Code Review'] })).toBeUndefined();
+    expect(rule({ text: 'review 一下这个 PR @_user_1', botNames: ['Code Review'], mentionsOther: true })).toMatchObject({ action: 'silent', rule: 'mentions_other' });
+    expect(rule({ text: 'test 环境今天谁在用', botNames: ['test-runner'] })).toBeUndefined();
+    expect(rule({ text: '运维 这边今天谁值班', botNames: ['运维-值班'] })).toBeUndefined();
+    expect(rule({ text: 'flash 帮我看下这个报错' })).toBeUndefined();
+    expect(rule({ text: 'bdev 帮我看下', level: 'eager', members: { humans: 3, bots: 2 }, responder: 'self', callsOther: true })).toMatchObject({ action: 'silent', rule: 'calls_other' });
+    expect(rule({ text: 'bdev-flash 帮我看下', mentionsOther: true })).toMatchObject({ action: 'silent', rule: 'mentions_other' });
   });
 
   it('明显不是对它说的直接沉默：@ 别人、回复别人、只有表情、致谢、机器人发的', () => {
@@ -81,7 +95,7 @@ describe('多机器人群的接话人', () => {
   it('接话人是自己时照常接，是别人时只接叫自己的', () => {
     expect(rule({ ...crowded, level: 'eager', responder: 'self' })).toMatchObject({ action: 'addressed', rule: 'eager_default' });
     expect(rule({ ...crowded, level: 'eager', responder: 'other' })).toMatchObject({ action: 'silent', rule: 'not_responder' });
-    expect(rule({ ...crowded, responder: 'other', text: 'flash 帮我看下' })).toMatchObject({ action: 'addressed', rule: 'calls_name' });
+    expect(rule({ ...crowded, responder: 'other', text: 'bdev-flash 帮我看下' })).toMatchObject({ action: 'addressed', rule: 'calls_name' });
     expect(rule({ ...crowded, responder: 'other', parent: 'self' })).toMatchObject({ action: 'addressed', rule: 'reply_to_self' });
     expect(rule({ ...crowded, responder: 'other', ownedTopic: true })).toMatchObject({ action: 'addressed', rule: 'owned_topic' });
   });
@@ -91,6 +105,29 @@ describe('多机器人群的接话人', () => {
     expect(rule({ ...crowded, level: 'eager', responder: 'self', threadRootOther: true })).toMatchObject({ action: 'silent', rule: 'topic_of_other' });
     expect(rule({ level: 'eager', threadRootOther: true })).toMatchObject({ action: 'addressed', rule: 'eager_default' });
     expect(rule({ ...crowded, level: 'eager', responder: 'self', threadRootOther: true, ownedTopic: true })).toMatchObject({ action: 'addressed', rule: 'owned_topic' });
+  });
+
+  it('读不到完整的群成员名单：按可能有多个机器人处理，没指定接话人时只接明确叫自己的', () => {
+    const unknown = { membersUnknown: true };
+    expect(rule({ ...unknown, level: 'eager' })).toMatchObject({ action: 'silent', rule: 'members_unknown' });
+    expect(rule({ ...unknown, level: 'selective' })).toMatchObject({ action: 'silent', rule: 'members_unknown' });
+    expect(rule({ ...unknown, level: 'eager', responder: 'other' })).toMatchObject({ action: 'silent', rule: 'not_responder' });
+    expect(rule({ ...unknown, level: 'eager', responder: 'self' })).toMatchObject({ action: 'addressed', rule: 'eager_default' });
+    expect(rule({ ...unknown, level: 'eager', responder: 'self', threadRootOther: true })).toMatchObject({ action: 'silent', rule: 'topic_of_other' });
+    expect(rule({ ...unknown, callsOther: true })).toMatchObject({ action: 'silent', rule: 'calls_other' });
+    expect(rule({ ...unknown, text: 'bdev-flash 帮我看下' })).toMatchObject({ action: 'addressed', rule: 'calls_name' });
+    expect(rule({ ...unknown, parent: 'self' })).toMatchObject({ action: 'addressed', rule: 'reply_to_self' });
+    expect(rule({ ...unknown, ownedTopic: true })).toMatchObject({ action: 'addressed', rule: 'owned_topic' });
+    // 负责范围照常绕过，交给模型按范围判断。
+    expect(rule({ ...unknown, roleScope: '告警排查' })).toBeUndefined();
+  });
+
+  it('ruleContextOf 透传 membersUnknown，回放和实时一样按多机器人群处理', () => {
+    const trigger = { id: 'obs_1', scope: { appId: 'cli_a', chatId: 'oc_1' }, sequence: 1, source: 'lark.message', eventId: 'om_1', occurredAt: '2026-10-09T00:00:00Z', receivedAt: '2026-10-09T00:00:00Z', senderId: 'ou_1', senderKind: 'human' as const, text: '今天发版', refs: [], origin: 'live' as const, missing: [], revision: 1 };
+    const context = ruleContextOf(trigger, { names: [], hasActiveMandates: false }, ['flash'], { level: 'eager', membersUnknown: true });
+    expect(context).toMatchObject({ membersUnknown: true });
+    expect(context).not.toHaveProperty('members');
+    expect(evaluateParticipationRules(context)).toMatchObject({ action: 'silent', rule: 'members_unknown' });
   });
 });
 
@@ -113,6 +150,19 @@ describe('participation intents', () => {
     expect(participationIntentOf('积极点评估一下这三个方案的风险和成本好吗')).toBeUndefined();
     expect(participationIntentOf('为什么没回滚这次发布')).toBeUndefined();
     expect(participationIntentOf('帮我看看为什么这个服务不回包，日志在群公告里')).toBeUndefined();
+  });
+
+  it('去掉 @ 后整句基本就是短语本身才算，多出实词就交给 Agent', () => {
+    for (const text of ['按需求改一下', '积极点评估', '按需排查', '安静点处理下告警']) expect(participationIntentOf(`@_user_1 ${text}`)).toBeUndefined();
+    for (const text of ['为啥不回退', '为什么没回滚', '为什么不回包', '怎么不接口']) expect(participationIntentOf(`@_user_1 ${text}`)).toBeUndefined();
+    expect(participationIntentOf('@_user_1 为什么不接话')).toEqual({ kind: 'why_silent' });
+    expect(participationIntentOf('@_user_1 刚才那条怎么没有回复')).toEqual({ kind: 'why_silent' });
+    expect(participationIntentOf('@_user_1 改成按需吧')).toEqual({ kind: 'level', level: 'selective' });
+  });
+
+  it('误插纠正只认整句就是「没问你」这类说法的短句', () => {
+    for (const text of ['没问你', '不用你管了', '别插话啊', '没叫你。', '不是问你的']) expect(intrusionCorrection(text)).toBe(true);
+    for (const text of ['不用你重跑了，直接给结论', '没问你但你也看看', '不需要你改代码，解释下原因就行']) expect(intrusionCorrection(text)).toBe(false);
   });
 });
 
@@ -140,7 +190,7 @@ describe('roleScope 负责范围绕过规则与兼容', () => {
 
   it('有 roleScope 时仍严格保留其余明确规则', () => {
     // 叫名字：仍直接接
-    expect(rule({ text: 'flash 帮我看下报警', roleScope: scope })).toMatchObject({ action: 'addressed', rule: 'calls_name' });
+    expect(rule({ text: 'bdev-flash 帮我看下报警', roleScope: scope })).toMatchObject({ action: 'addressed', rule: 'calls_name' });
     // 别人的话题：仍直接沉默
     expect(rule({ ...crowded, threadRootOther: true, roleScope: scope })).toMatchObject({ action: 'silent', rule: 'topic_of_other' });
     // @ 别人：仍直接沉默
@@ -187,7 +237,7 @@ describe('model 场景包命中（scenarioMatched）和来源话题（threadClai
   });
 
   it('排在前面的规则不受影响：叫名字、叫别的机器人、@ 别人、别人的话题、回复别人照旧', () => {
-    expect(rule({ text: 'flash 帮我看下', scenarioMatched: 'team-faq' })).toMatchObject({ action: 'addressed', rule: 'calls_name' });
+    expect(rule({ text: 'bdev-flash 帮我看下', scenarioMatched: 'team-faq' })).toMatchObject({ action: 'addressed', rule: 'calls_name' });
     expect(rule({ ...crowded, callsOther: true, scenarioMatched: 'team-faq' })).toMatchObject({ action: 'silent', rule: 'calls_other' });
     expect(rule({ mentionsOther: true, scenarioMatched: 'team-faq' })).toMatchObject({ action: 'silent', rule: 'mentions_other' });
     expect(rule({ ...crowded, threadRootOther: true, scenarioMatched: 'team-faq' })).toMatchObject({ action: 'silent', rule: 'topic_of_other' });
