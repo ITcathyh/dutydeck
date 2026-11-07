@@ -294,7 +294,7 @@ export function Composer({ planFirst = false, onPlanFirstChange, state, session,
   const openPicker = async () => { const path = await onPickFile(); if (path) setFilePath(path); };
   const confirmFile = () => addReference('file', filePath.split('/').at(-1) || filePath, filePath);
 
-  return <div className="bg-gradient-to-t from-canvas via-canvas to-transparent px-4 pb-5 pt-7 sm:px-8"><div className="mx-auto max-w-[880px]">
+  return <div className="bg-gradient-to-t from-canvas via-canvas to-transparent ui-composer-dock px-4 pt-7 sm:px-8"><div className="mx-auto max-w-[880px]">
     {blockedPlan && <div role="alert" className="mb-2 text-caption text-secondary">这份草稿选择了先出计划。飞书会话请在飞书发送 /plan；如需直接执行，<button type="button" className="text-action underline" onClick={() => onPlanFirstChange?.(false)}>改为普通消息</button>。</div>}
     <QueuedTasks tasks={queuedTasks} cancellingTaskId={cancellingTaskId} steeringTaskId={steeringTaskId} injectingTaskId={injectingTaskId} blockingPermissionId={blockingPermissionId} rejectingPermission={rejectingPermission} onCancel={onCancelQueued} onSteer={onSteerQueued} onInject={steerable && busy ? onInjectQueued : undefined} onRejectPermission={onRejectPermission}/>
 

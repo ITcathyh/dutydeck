@@ -50,6 +50,7 @@ import { CommandPalette, type CommandAction } from './components/CommandPalette'
 import { ToastViewport } from './components/ToastViewport';
 import { toastStore } from './useToasts';
 import { TopBar } from './components/TopBar';
+import { MobileTabBar } from './components/MobileTabBar';
 import { useTheme } from './useTheme';
 import { acknowledgeComposerDraft, useComposerDraft } from './composer-draft';
 import { taskReadingScopeKey, useViewPreference } from './view-preferences';
@@ -587,6 +588,7 @@ export default function App() {
    * 顺带解决了浮动汉堡的老问题——它压在滚动内容上，得靠不透明底 + 边框 + 阴影
    * 才不至于和任务卡片正文糊在一起。挪进顶栏后它在自己的行里，不再需要这些补丁。
    */
+  const showTabBar = mobile && !mobileNavigationOpen && route.kind !== 'not-found' && (route.kind === 'overview' || primaryNav === 'automation' || primaryNav === 'bots' || primaryNav === 'groups');
   const renderNotFound = (kind: 'page' | 'session') => <div className="relative grid min-h-0 flex-1 place-items-center overflow-auto p-6">
     <Card as="section" padding="lg" className="w-full max-w-md text-center">
       <p className="text-meta font-semibold uppercase tracking-[.12em] text-warning">{kind === 'page' ? '页面不存在' : '任务不存在'}</p>
@@ -625,7 +627,7 @@ export default function App() {
         if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); setSidebarWidth(Math.min(320, Math.max(208, sidebarWidth + (event.key === 'ArrowRight' ? 8 : -8)))); }
         if (event.key === 'Home' || event.key === 'End') { event.preventDefault(); setSidebarWidth(event.key === 'Home' ? 208 : 320); }
       }} style={{ left: `${sidebarWidth}px` }} className="fixed inset-y-0 z-sticky hidden w-2 -translate-x-1/2 cursor-col-resize touch-none rounded-sm hover:bg-action-soft focus-visible:bg-action-soft md:block"/>}
-      <main aria-hidden={mobileNavigationOpen || undefined} inert={mobileNavigationOpen || undefined} className="flex min-w-0 flex-1 flex-col bg-canvas md:mb-2 md:mr-2 md:ml-main-inset md:overflow-hidden md:rounded-b-lg md:border md:border-t-0 md:border-default">
+      <main aria-hidden={mobileNavigationOpen || undefined} inert={mobileNavigationOpen || undefined} className={`flex min-w-0 flex-1 flex-col bg-canvas ${showTabBar ? 'ui-tabbar-space' : ''} md:mb-2 md:mr-2 md:ml-main-inset md:overflow-hidden md:rounded-b-lg md:border md:border-t-0 md:border-default`}>
       {route.kind !== 'not-found' && !blockingMainQueryFailures.length && staleMainQueryFailures.length > 0 && <div className="shrink-0 px-4 py-2"><Banner tone="warning" action={{ label: retryingMainQueries ? '重试中…' : '重试', busy: retryingMainQueries, onClick: () => void Promise.all(staleMainQueryFailures.map(failure => failure.retry())) }}><span className="block min-w-0 truncate" title={staleMainQueryFailures.map(failure => `${failure.label}：${failure.message}`).join('\n')}>部分数据可能不是最新：{staleMainQueryFailures.map(failure => failure.label).join('、')}</span></Banner></div>}
       {/*
         主区分派。机器人 / 群聊排在最前面：它们是用户刚点过的一级视图，
@@ -657,6 +659,7 @@ export default function App() {
       }} onOpenChanges={(id: string) => { selectSession(id); setTaskViews(current => ({ ...current, [id]: { ...current[id], tab: 'changes', changesVisited: true, inspector: false } })); }} sessions={visibleSessions} summaries={runSummaries} agents={agents.data ?? []} loading={sessions.isLoading} agentsLoading={agents.isLoading} larkBots={larkConfig.data?.bots ?? []} larkBotsLoading={larkConfig.isLoading} larkListeningDisabled={larkConfig.data?.listeningDisabled ?? false} larkBotsFailed={larkConfig.isError} larkBotsRetrying={larkConfig.isFetching} onRetryLarkBots={() => void larkConfig.refetch()} view={primaryNav === 'home' ? 'all' : workbenchView} onViewChange={view => { setWorkbenchView(view); setPrimaryNav('tasks'); }} onSelect={selectSession} onBulkArchive={ids => { captureDialogOpener(); bulkArchive.reset(); setBulkArchiveIds(ids); }} onCreate={openCreateTask} onOpenAgentSetup={() => openSettings('agents')} onOpenLarkSetup={() => openLarkSetup('new')} onManageBots={() => setPrimaryNav('bots')}/>}
     </main>
     </div>
+    {showTabBar && <MobileTabBar current={primaryNav} onNavigate={setPrimaryNav} onCreateTask={openCreateTask} createDisabled={agents.isLoading}/>}
     {newOpen && <NewSessionModal open initialAgentId={newAgentId} onClose={() => setNewOpen(false)} onOpenAgentSetup={() => { setNewOpen(false); openSettings('agents'); }} onCreated={(session, task) => { setRunSummaries(current => ({ ...current, [session.id]: { sessionId: session.id, taskId: task.id, prompt: task.prompt, status: task.status, queuedCount: task.status === 'queued' ? 1 : 0, updatedAt: task.updatedAt || task.createdAt } })); void qc.invalidateQueries({ queryKey: ['sessions'] }); selectSession(session.id); setNewOpen(false); setActionError(undefined); }} agents={agents.data ?? []} capabilities={systemCapabilities.data}/>}
     {overlay?.kind === 'lark-setup' && <Suspense fallback={overlayFallback('正在打开 Bot 绑定向导…')}><LarkConfigModal key={overlay.target === 'new' ? 'new' : overlay.target?.appId ?? 'manage'} target={overlay.target} field={overlay.field} onLeaveGuardChange={registerSettingsLeaveGuard} agents={agents.data ?? []} onClose={() => { closeOverlay(); void qc.invalidateQueries({ queryKey: ['lark-config'] }); }}/></Suspense>}
     {overlay?.kind === 'settings' && <Suspense fallback={overlayFallback('正在打开设置与接入…')}><ControlCenterModal open onLeaveGuardChange={registerSettingsLeaveGuard} initialSection={overlay.section} field={overlay.field} agents={agents.data ?? []} legacyBots={larkConfig.data?.bots ?? []} larkListeningDisabled={larkConfig.data?.listeningDisabled ?? false} larkBotsLoading={larkConfig.isLoading} larkBotsFailed={larkConfig.isError} larkBotsRetrying={larkConfig.isFetching} onRetryLarkBots={() => void larkConfig.refetch()} authRequired={authStatus.data?.required} onClose={closeOverlay} onCreateTask={agentId => { closeOverlay(); openCreateTaskForAgent(agentId); }} onOpenLarkSetup={openLarkSetup} onOpenGroups={() => openOverlay({ kind: 'groups' })} onOpenSchedules={() => openOverlay({ kind: 'automation' })}/></Suspense>}

@@ -89,13 +89,18 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 @media (max-width: 767px) {
   .ui-sidebar { width: 268px; }
   /* 命中区直接占布局尺寸，避免相邻图标的外扩热区重叠；桌面保留原密度。 */
-  button, button[class], [role="tab"], [role="menuitem"], summary, summary[class],
+  button, button[class], [role="tab"], [role="menuitem"], [role="menuitemcheckbox"], summary, summary[class],
   select, input:not([type="checkbox"]):not([type="radio"]), label:has(> input[type="checkbox"]) {
     min-height: 44px;
     min-width: 44px;
   }
   [role="tablist"] { max-width: 100%; overflow-x: auto; padding: 2px; }
 }
+/* 窄屏底部浮动标签栏：离底边让出系统手势区；列表页主区给它留出同样的高度，内容不会被盖住。 */
+.ui-tabbar { bottom: calc(var(--safe-bottom) + 10px); }
+.ui-tabbar-space { padding-bottom: calc(var(--safe-bottom) + 84px); }
+/* 任务页输入框贴底：在带手势条的手机上把它抬到安全区之上。 */
+.ui-composer-dock { padding-bottom: calc(var(--safe-bottom) + 20px); }
 
 /*
   只读分享页（SharedSessionPage 与 TimelineView variant="share"）。工作台不使用这些类。
