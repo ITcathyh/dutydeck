@@ -607,15 +607,20 @@ export function evaluatePolicyAction(input: PolicyEvaluationInput): PolicyDecisi
       ? { allowed: true, action: input.action, code: 'allowed_admin', reason: 'Owner/admin management authority', source: input.principal.isOwner ? 'owner' : 'admin' }
       : { allowed: false, action: input.action, code: 'admin_required', reason: 'This action requires owner/admin authority', source: 'default_deny' };
   }
+  // Below owner/admin authority the gate must sit on the same can_operate assignment whose scope covers the target;
+  // a gate on one assignment never combines with the scope of another.
+  const scopedGate = (gate: 'terminalWrite' | 'highRisk') => isAdmin || operateAssignments.some(assignment => assignment.actionGates[gate]);
   if (input.action === 'terminal.write') {
     const gate = assignments.some(assignment => assignment.actionGates.terminalWrite);
     if (!gate) return deny('terminal_write_gate_required', 'terminal.write requires its independent action gate');
     if (!isAdmin && !hasOperate) return deny('operate_scope_required', 'terminal.write requires scoped operate authority');
+    if (!scopedGate('terminalWrite')) return deny('terminal_write_gate_required', 'terminal.write requires its gate on the can_operate assignment that covers the target');
   }
   if (input.action === 'high_risk.execute') {
     const gate = assignments.some(assignment => assignment.actionGates.highRisk);
     if (!gate) return deny('high_risk_gate_required', 'High-risk execution requires its independent action gate');
     if (!isAdmin && !hasOperate) return deny('operate_scope_required', 'High-risk execution requires scoped operate authority');
+    if (!scopedGate('highRisk')) return deny('high_risk_gate_required', 'High-risk execution requires its gate on the can_operate assignment that covers the target');
   }
   if (input.action.startsWith('group_tools.')) {
     const tool = input.action.slice('group_tools.'.length) as 'read' | 'discover' | 'send';
@@ -636,7 +641,8 @@ export function createFailClosedPolicyEvaluator(evaluator?: PolicyEvaluator): Po
 }
 
 export interface GroupBindingRepository {
-  listByChannelBot(channelBotId: string, limit?: number): Promise<GroupBinding[]>;
+  /** 该 Bot 的全部群绑定，不截断：调用方据此遍历每个群。 */
+  listByChannelBot(channelBotId: string): Promise<GroupBinding[]>;
   get(id: string): Promise<GroupBinding | undefined>;
   getByNaturalKey(channelBotId: string, externalChatId: string): Promise<GroupBinding | undefined>;
   create(input: CreateGroupBindingInput): Promise<GroupBinding>;
@@ -650,7 +656,8 @@ export interface ChannelBotGroupPolicyRepository {
   update(id: string, input: UpdateChannelBotGroupPolicyInput): Promise<ChannelBotGroupPolicy>;
 }
 export interface RemoteChatFactRepository {
-  listByChannelBot(channelBotId: string, limit?: number): Promise<RemoteChatFact[]>;
+  /** 该 Bot 的全部群事实，不截断。 */
+  listByChannelBot(channelBotId: string): Promise<RemoteChatFact[]>;
   /** 仍记为在群的全部事实，不分页：群同步据此找出已退的群。 */
   listMembersByChannelBot(channelBotId: string): Promise<RemoteChatFact[]>;
   get(id: string): Promise<RemoteChatFact | undefined>;
@@ -670,7 +677,10 @@ export interface RemoteIdentityFactRepository {
   invalidate(id: string, input: InvalidateRemoteFactInput): Promise<RemoteIdentityFact>;
 }
 export interface RoleAssignmentRepository {
-  listByChannelBot(channelBotId: string, limit?: number): Promise<RoleAssignment[]>;
+  /** 该 Bot 的全部角色记录（含已撤销），不截断。 */
+  listByChannelBot(channelBotId: string): Promise<RoleAssignment[]>;
+  /** 某一作用域的全部角色记录；不传 groupBindingId 即 Bot 级。 */
+  listByScope(channelBotId: string, groupBindingId?: string): Promise<RoleAssignment[]>;
   get(id: string): Promise<RoleAssignment | undefined>;
   create(input: CreateRoleAssignmentInput): Promise<RoleAssignment>;
   update(id: string, input: UpdateRoleAssignmentInput): Promise<RoleAssignment>;

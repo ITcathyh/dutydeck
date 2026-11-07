@@ -80,6 +80,31 @@ describe('WP1a group policy repositories', () => {
     repositories.close();
   });
 
+  it('lists every binding, fact and role of a Bot without a row window', async () => {
+    const repositories = createRepositories(':memory:');
+    await createBot(repositories);
+    await createBot(repositories, 'bot-2');
+    await repositories.groupPolicy.transact(transaction => {
+      for (let index = 0; index < 600; index++) {
+        const suffix = index.toString().padStart(4, '0');
+        transaction.groupBindings.create({ id: `binding-${suffix}`, channelBotId: 'bot-1', externalChatId: `chat-${suffix}` });
+        transaction.remoteChatFacts.create({ id: `fact-${suffix}`, channelBotId: 'bot-1', externalChatId: `chat-${suffix}`, membershipState: 'member', chatType: 'group', observedAt: '2026-08-30T00:00:00.000Z' });
+        transaction.roleAssignments.create({ id: `role-${suffix}`, channelBotId: 'bot-1', groupBindingId: `binding-${suffix}`, principalId: `principal_${suffix}`, role: 'can_talk', operateScope: 'none' });
+      }
+      transaction.roleAssignments.create({ id: 'role-bot-admin', channelBotId: 'bot-1', principalId: 'principal_late', role: 'admin', operateScope: 'none' });
+      transaction.roleAssignments.create({ id: 'role-other-bot', channelBotId: 'bot-2', principalId: 'principal_late', role: 'admin', operateScope: 'none' });
+    });
+
+    expect(await repositories.groupBindings.listByChannelBot('bot-1')).toHaveLength(600);
+    expect(await repositories.remoteChatFacts.listByChannelBot('bot-1')).toHaveLength(600);
+    const roles = await repositories.roleAssignments.listByChannelBot('bot-1');
+    expect(roles).toHaveLength(601);
+    expect(roles.at(-1)!.id).toBe('role-bot-admin');
+    expect((await repositories.roleAssignments.listByScope('bot-1')).map(role => role.id)).toEqual(['role-bot-admin']);
+    expect((await repositories.roleAssignments.listByScope('bot-1', 'binding-0599')).map(role => role.id)).toEqual(['role-0599']);
+    repositories.close();
+  });
+
   it('rolls policy, binding, fact and role writes back as one same-connection transaction', async () => {
     const repositories = createRepositories(':memory:');
     await createBot(repositories);

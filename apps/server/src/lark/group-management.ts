@@ -158,7 +158,7 @@ export class LarkGroupManager {
     const [binding, fact, identity, roles, bot] = await Promise.all([
       this.repos.groupBindings.getByNaturalKey(owner.channelBotId, chatId), this.repos.remoteChatFacts.getByNaturalKey(owner.channelBotId, chatId),
       botState ? botState.identity : this.repos.remoteIdentityFacts.getByChannelBot(owner.channelBotId),
-      botState ? botState.roles : this.repos.roleAssignments.listByChannelBot(owner.channelBotId, 500),
+      botState ? botState.roles : this.repos.roleAssignments.listByChannelBot(owner.channelBotId),
       botState ? botState.bot : this.repos.channelBots.get(owner.channelBotId)
     ]);
     const validity = owner.fingerprint !== fingerprint(config) ? 'credential_mismatch' : fact ? remoteChatFactValidity(fact, identity, this.now()) : 'unknown';
@@ -183,9 +183,9 @@ export class LarkGroupManager {
       const owner = await this.owner(config.appId);
       if (!owner) continue;
       const identity = await this.repos.remoteIdentityFacts.getByChannelBot(owner.channelBotId);
-      const facts = await this.repos.remoteChatFacts.listByChannelBot(owner.channelBotId, 500);
-      const bindings = await this.repos.groupBindings.listByChannelBot(owner.channelBotId, 500);
-      const [roles, bot] = await Promise.all([this.repos.roleAssignments.listByChannelBot(owner.channelBotId, 500), this.repos.channelBots.get(owner.channelBotId)]);
+      const facts = await this.repos.remoteChatFacts.listByChannelBot(owner.channelBotId);
+      const bindings = await this.repos.groupBindings.listByChannelBot(owner.channelBotId);
+      const [roles, bot] = await Promise.all([this.repos.roleAssignments.listByChannelBot(owner.channelBotId), this.repos.channelBots.get(owner.channelBotId)]);
       for (const chatId of new Set([...facts.map(fact => fact.externalChatId), ...bindings.map(binding => binding.externalChatId)])) {
         const fact = facts.find(item => item.externalChatId === chatId);
         const key = `${config.brand ?? 'feishu'}:${identity?.tenantRef ?? config.appId}:${chatId}`;
@@ -410,8 +410,8 @@ export class LarkGroupManager {
     if ((await this.repos.channelBots.get(owner.channelBotId))?.state === 'disabled') return false;
     const id = principalId(appId, openId);
     const now = this.now().toISOString();
-    return (await this.repos.roleAssignments.listByChannelBot(owner.channelBotId, 500)).some(role =>
-      role.role === 'admin' && !role.groupBindingId && role.principalId === id && role.state === 'active' && (!role.expiresAt || role.expiresAt > now));
+    return (await this.repos.roleAssignments.listByScope(owner.channelBotId)).some(role =>
+      role.role === 'admin' && role.principalId === id && role.state === 'active' && (!role.expiresAt || role.expiresAt > now));
   }
 
   /**

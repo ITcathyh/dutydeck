@@ -191,7 +191,7 @@ export function createFoundationExecutionAuthorizer(
 
     const [policy, assignments, resolvedInstallationPrincipal] = await Promise.all([
       repositories.channelBotPolicies.getByChannelBot(channelBot.id),
-      repositories.roleAssignments.listByChannelBot(channelBot.id, 500),
+      repositories.roleAssignments.listByChannelBot(channelBot.id),
       request.principal || !request.request ? Promise.resolve(undefined) : resolvePrincipal(request.request),
     ]);
     const principal = request.principal ?? resolvedInstallationPrincipal;

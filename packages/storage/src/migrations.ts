@@ -19,6 +19,8 @@ import { migrateLegacyDutyScenarios } from './scenario-legacy.js'
 export interface Migration {
   version: number
   name: string
+  /** 只补建可重建的派生结构（索引），重复执行无副作用；旧库补记迁移名时重跑一次，修复分支间版本号错位留下的缺口。 */
+  repeatable?: true
   up(db: Database.Database): void
 }
 
@@ -644,19 +646,19 @@ export const migrations: Migration[] = [
   // 审批卡「本工作区允许此类命令」持久化的命令规则；纯新增表，不改写已有数据。
   { version: 46, name: 'workspace_approval_rules', up: createWorkspaceApprovalRuleSchema },
   // 历史大纲按轮次区间扫描时只读索引、不回表；event-history.ts 用 INDEXED BY 引用它，不能删除或改名。
-  { version: 47, name: 'history_outline_index', up(db) {
-    if (tableExistsForMigration(db, 'events')) db.exec('CREATE INDEX events_session_seq_type ON events(session_id,sequence,type,timestamp)');
+  { version: 47, name: 'history_outline_index', repeatable: true, up(db) {
+    if (tableExistsForMigration(db, 'events')) db.exec('CREATE INDEX IF NOT EXISTS events_session_seq_type ON events(session_id,sequence,type,timestamp)');
   } },
   // 飞书入站记录的读取与保留期清理走索引；只建索引，不改写已有记录。
-  { version: 48, name: 'lark_inbox_indexes', up(db) {
+  { version: 48, name: 'lark_inbox_indexes', repeatable: true, up(db) {
     if (!tableExistsForMigration(db, 'configs')) return;
     for (const statement of LARK_INBOX_V48_INDEXES) db.exec(statement);
   } },
   // 历史大纲按用户消息切轮次：只索引用户消息，并带上切轮次和跳转标签要用的字段，长会话不必逐条解析事件 JSON。
   // 表达式须与 event-history.ts 的查询逐字一致；旧行不改写，坏 JSON 的行不进索引。
-  { version: 49, name: 'history_user_text_index', up(db) {
+  { version: 49, name: 'history_user_text_index', repeatable: true, up(db) {
     if (!tableExistsForMigration(db, 'events')) return;
-    db.exec(`CREATE INDEX events_user_text ON events(session_id,sequence,json_type(data,'$.steering') IS NULL,
+    db.exec(`CREATE INDEX IF NOT EXISTS events_user_text ON events(session_id,sequence,json_type(data,'$.steering') IS NULL,
       COALESCE(task_id,json_extract(data,'$.taskId')),attempt_id,substr(json_extract(data,'$.text'),1,40),id)
       WHERE type='text' AND json_valid(data) AND json_extract(data,'$.role')='user'`);
   } }
@@ -759,23 +761,46 @@ export function runMigrations(db: Database.Database): void {
     return
   }
   if (db.pragma('foreign_keys', { simple: true }) !== 0) throw new Error('DATABASE_MIGRATION_REQUIRES_FOREIGN_KEYS_DISABLED')
-  db.exec('CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)')
-  const appliedVersions = new Set(
-    (db.prepare('SELECT version FROM schema_migrations').all() as Array<{ version: number }>).map(row => row.version)
-  )
-  const recordApplied = db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+  db.exec('CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL, name TEXT)')
+  ensureColumn(db, 'schema_migrations', 'name', 'name TEXT')
+  const recorded = recordedMigrations(db)
+  const recordApplied = db.prepare('INSERT INTO schema_migrations (version, applied_at, name) VALUES (?, ?, ?)')
+  const recordName = db.prepare('UPDATE schema_migrations SET name = ? WHERE version = ? AND name IS NULL')
   for (const migration of migrations) {
-    if (appliedVersions.has(migration.version)) continue
+    if (recorded.has(migration.version)) {
+      if (recorded.get(migration.version) !== null) continue
+      db.transaction(() => {
+        if (migration.repeatable) migration.up(db)
+        recordName.run(migration.name, migration.version)
+      })()
+      continue
+    }
     db.transaction(() => {
       migration.up(db)
-      recordApplied.run(migration.version, new Date().toISOString())
+      recordApplied.run(migration.version, new Date().toISOString(), migration.name)
     })()
   }
 }
 
+/**
+ * 版本号到迁移名的已记录映射；name 为 null 的行早于迁移名记录，无法核对，只能按版本号认定。
+ * 迁移名不一致说明库由另一条分支的迁移序列升级过，同一版本号已执行的是别的迁移，必须拒绝继续。
+ */
+function recordedMigrations(db: Database.Database): Map<number, string | null> {
+  const named = (db.pragma('table_info(schema_migrations)') as Array<{ name: string }>).some(column => column.name === 'name')
+  const rows = db.prepare(`SELECT version, ${named ? 'name' : 'NULL'} AS name FROM schema_migrations`).all() as Array<{ version: number; name: string | null }>
+  for (const row of rows) {
+    const expected = migrations.find(migration => migration.version === row.version)
+    if (!expected) throw new Error('DATABASE_SCHEMA_TOO_NEW')
+    if (row.name !== null && row.name !== expected.name) {
+      throw new Error(`DATABASE_SCHEMA_LINEAGE_MISMATCH: migration ${row.version} was recorded as "${row.name}" but this build expects "${expected.name}"`)
+    }
+  }
+  return new Map(rows.map(row => [row.version, row.name]))
+}
+
 export function needsMigration(db: Database.Database): boolean {
   if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'").get()) return true;
-  const applied = new Set((db.prepare('SELECT version FROM schema_migrations').all() as Array<{ version: number }>).map(row => row.version));
-  if ([...applied].some(version => !migrations.some(migration => migration.version === version))) throw new Error('DATABASE_SCHEMA_TOO_NEW');
-  return migrations.some(migration => !applied.has(migration.version));
+  const recorded = recordedMigrations(db);
+  return migrations.some(migration => (recorded.get(migration.version) ?? null) === null);
 }

@@ -377,4 +377,44 @@ describe('Botmux read-only importer', () => {
     const exportedNames = Object.keys(publicApi);
     expect(exportedNames.some(name => /apply|activate|cutover|resume/i.test(name))).toBe(false);
   });
+
+  it('follows a umask-default data breadcrumb and resolves stale ones like Botmux', async () => {
+    const fixture = await createFixture();
+    const customData = join(fixture.root, 'custom-data');
+    await privateJson(join(customData, `sessions-${FIXTURE.appA}.json`), {
+      fixture_custom: { sessionId: 'fixture_custom', larkAppId: FIXTURE.appA, status: 'closed', scope: 'thread' }
+    });
+    const breadcrumb = join(fixture.sourceHome, '.data-dir');
+    const sessionsWith = async (value: string) => {
+      await writeFile(breadcrumb, value);
+      if (process.platform !== 'win32') await chmod(breadcrumb, 0o644);
+      const handle = await planLegacyImport({ source_home: fixture.sourceHome, fingerprint_key: fingerprintKey });
+      return handle.private_plan.summary.legacy_session_records;
+    };
+    expect(await sessionsWith(`${customData}\n`)).toBe(1);
+    expect(await sessionsWith('../custom-data\n')).toBe(3);
+    expect(await sessionsWith(`${join(fixture.root, 'missing')}\n`)).toBe(3);
+    expect(await sessionsWith('\n')).toBe(3);
+  });
+
+  it('reads workflow drafts, usage and plugins from the Botmux home when the data directory is elsewhere', async () => {
+    const fixture = await createFixture();
+    const customData = join(fixture.root, 'custom-data');
+    await privateJson(join(customData, 'teams.json'), { version: 1, teams: [] });
+    await privateJson(join(fixture.sourceHome, 'plugins', 'fixture-plugin', 'plugin.json'), { id: 'fixture-plugin' });
+    const plan = async (env: Record<string, string> = {}) => (await planLegacyImport({
+      source_home: fixture.sourceHome, data_dir: customData, env, fingerprint_key: fingerprintKey
+    })).private_plan;
+    const usageCount = (value: Awaited<ReturnType<typeof plan>>) => value.artifacts.filter(item => item.kind === 'usage_history').length;
+
+    const relocated = await plan();
+    expect(relocated.summary).toMatchObject({ workflow_drafts: 1, plugins: 1 });
+    expect(usageCount(relocated)).toBe(1);
+    expect(relocated.blockers.map(item => item.code)).toContain('plugins_unsupported');
+
+    const usageDir = join(fixture.root, 'usage-override');
+    await privateText(join(usageDir, 'usage-2026-01-02.jsonl'), '{"fixture":true}\n');
+    await privateText(join(usageDir, 'usage-2026-01-03.jsonl'), '{"fixture":true}\n');
+    expect(usageCount(await plan({ BOTMUX_USAGE_DIR: usageDir }))).toBe(2);
+  });
 });

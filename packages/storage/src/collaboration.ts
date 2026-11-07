@@ -58,6 +58,7 @@ import {
   type UpdateMandateInput,
   type ScenarioBinding,
   type ScheduleActionFence,
+  SCENARIO_LIMITS,
   SCENARIO_WINDOW_LIMIT,
   SCENARIO_RECORD,
   now
@@ -514,6 +515,33 @@ function defaultSettings(scope: CollaborationScope): CollaborationSettings {
   });
 }
 
+/** direct 场景包去重窗口的契约上限（小时）；窗口内的场景记录留着计数和去重，只去掉消息摘录。 */
+const SCENARIO_DEDUPE_MAX_MS = SCENARIO_LIMITS.dedupeWindowHours.max * 3_600_000;
+const SCENARIO_GATES = `('${SCENARIO_RECORD}','alarm_triage')`;
+
+/**
+ * 群参与保留期到期后清掉判定、反馈和参与动作里留下的群消息原文。
+ * 仍被未结束（intent/sending/unknown）动作引用的判定保留：去重要读它的快照，删了会把结果未知的发送当成没发过而重发；
+ * 已过期没点的确认卡不再算引用，连同卡片动作一起删。定时委托和执行类动作不在这里清理。
+ */
+function pruneExpiredDecisions(sqlite: Database.Database, before: string, scoped: string, scopeArgs: string[]): void {
+  const held = `WITH held(id) AS (
+      SELECT json_extract(payload_json,'$.decisionId') FROM collaboration_actions WHERE status IN ('intent','sending','unknown')${scoped}
+        AND NOT (kind LIKE 'confirm.%' AND status = 'intent' AND json_extract(payload_json,'$.expiresAt') < ?)
+      UNION SELECT json_extract(payload_json,'$.payload.decisionId') FROM collaboration_actions WHERE status IN ('intent','sending','unknown')${scoped}
+        AND NOT (kind LIKE 'confirm.%' AND status = 'intent' AND json_extract(payload_json,'$.expiresAt') < ?))`;
+  const heldArgs = [...scopeArgs, before, ...scopeArgs, before];
+  const dedupeSince = new Date(Date.now() - SCENARIO_DEDUPE_MAX_MS).toISOString();
+  cachedStatement(sqlite, `${held} DELETE FROM collaboration_decisions WHERE created_at < ?${scoped}
+    AND id NOT IN (SELECT id FROM held WHERE id IS NOT NULL)
+    AND NOT (IFNULL(json_extract(input_snapshot_json,'$.gate'),'') IN ${SCENARIO_GATES} AND created_at >= ?)`).run(...heldArgs, before, ...scopeArgs, dedupeSince);
+  cachedStatement(sqlite, `UPDATE collaboration_decisions SET input_snapshot_json = json_remove(input_snapshot_json,'$.decider.trigger.text')
+    WHERE created_at < ?${scoped} AND json_extract(input_snapshot_json,'$.gate') IN ${SCENARIO_GATES}
+      AND json_extract(input_snapshot_json,'$.decider.trigger.text') IS NOT NULL`).run(before, ...scopeArgs);
+  cachedStatement(sqlite, `DELETE FROM collaboration_actions WHERE created_at < ?${scoped} AND (kind LIKE 'participation.%' OR kind LIKE 'confirm.%')
+    AND (status IN ('succeeded','failed','suppressed') OR kind LIKE 'confirm.%' AND status = 'intent' AND json_extract(payload_json,'$.expiresAt') < ?)`).run(before, ...scopeArgs, before);
+}
+
 function clampLimit(limit: number | undefined, fallback: number): number {
   return limit !== undefined && Number.isFinite(limit) && limit > 0 ? Math.min(COLLABORATION_LIST_LIMIT, Math.trunc(limit)) : fallback;
 }
@@ -908,14 +936,13 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
     },
 
     async pruneObservations(before: string, scope?: CollaborationScope): Promise<number> {
-      if (scope) {
-        const result = sqlite
-          .prepare('DELETE FROM collaboration_observations WHERE occurred_at < ? AND app_id = ? AND chat_id = ?')
-          .run(before, scope.appId, scope.chatId);
-        return result.changes;
-      }
-      const result = cachedStatement(sqlite, 'DELETE FROM collaboration_observations WHERE occurred_at < ?').run(before);
-      return result.changes;
+      const scoped = scope ? ' AND app_id = ? AND chat_id = ?' : '';
+      const scopeArgs = scope ? [scope.appId, scope.chatId] : [];
+      return sqlite.transaction(() => {
+        const pruned = cachedStatement(sqlite, `DELETE FROM collaboration_observations WHERE occurred_at < ?${scoped}`).run(before, ...scopeArgs).changes;
+        pruneExpiredDecisions(sqlite, before, scoped, scopeArgs);
+        return pruned;
+      }).immediate();
     },
 
     async createFollowup(input: CreateFollowupInput): Promise<CollaborationFollowup> {

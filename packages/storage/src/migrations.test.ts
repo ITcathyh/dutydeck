@@ -228,6 +228,48 @@ describe('storage migrations', () => {
     expect(fresh.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='events_session_seq_type'").pluck().get()).toBe('events_session_seq_type');
     fresh.close();
   });
+  it('repairs a database whose index-only migrations were numbered differently on another branch', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dutydeck-lineage-'));
+    temporaryDirectories.push(directory);
+    const filename = join(directory, 'state.sqlite');
+    const db = new Database(filename);
+    // 合入前的分支把 lark_inbox_indexes 记为 v47、history_user_text_index 记为 v48，且当时只记版本号。
+    db.exec('CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,applied_at TEXT NOT NULL)');
+    const byName = (name: string) => migrations.find(migration => migration.name === name)!;
+    const branchLineage = [...migrations.filter(item => item.version <= 46), { ...byName('lark_inbox_indexes'), version: 47 }, { ...byName('history_user_text_index'), version: 48 }];
+    withMigrationTransaction(db, () => { for (const migration of branchLineage) { migration.up(db); db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run(migration.version, '2026-11-05'); } });
+    db.close();
+    const repos = createRepositories(filename);
+    try {
+      expect((await repos.events.listHistoryOutline!('ses_missing')).turns).toEqual([]);
+    } finally { repos.close(); }
+    const upgraded = new Database(filename);
+    const fresh = new Database(':memory:');
+    runMigrations(fresh);
+    const indexes = (target: Database.Database) => target.prepare("SELECT name FROM sqlite_master WHERE type='index' AND sql IS NOT NULL ORDER BY name").pluck().all();
+    const names = (target: Database.Database) => target.prepare('SELECT version, name FROM schema_migrations ORDER BY version').all();
+    expect(indexes(upgraded)).toEqual(indexes(fresh));
+    expect(names(upgraded)).toEqual(names(fresh));
+    expect(names(fresh)).toEqual(migrations.map(({ version, name }) => ({ version, name })));
+    expect(upgraded.pragma('integrity_check', { simple: true })).toBe('ok');
+    upgraded.close();
+    fresh.close();
+  });
+  it('refuses a database whose recorded migration name differs from this build', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dutydeck-lineage-'));
+    temporaryDirectories.push(directory);
+    const filename = join(directory, 'state.sqlite');
+    createRepositories(filename).close();
+    const db = new Database(filename);
+    db.prepare("UPDATE schema_migrations SET name = 'branch_only_change' WHERE version = 46").run();
+    const before = db.prepare('SELECT * FROM schema_migrations ORDER BY version').all();
+    db.close();
+    expect(() => createRepositories(filename)).toThrow(/DATABASE_SCHEMA_LINEAGE_MISMATCH: migration 46 was recorded as "branch_only_change" but this build expects "workspace_approval_rules"/);
+    const reopened = new Database(filename);
+    expect(() => runMigrations(reopened)).toThrow(/DATABASE_SCHEMA_LINEAGE_MISMATCH/);
+    expect(reopened.prepare('SELECT * FROM schema_migrations ORDER BY version').all()).toEqual(before);
+    reopened.close();
+  });
   it('declares migrations in ascending version order', () => {
     expect(migrations.map(migration => migration.version)).toEqual(ALL_VERSIONS)
   })
