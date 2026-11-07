@@ -214,5 +214,6 @@ const entry = process.argv[1];
 if (entry && basename(fileURLToPath(import.meta.url)) === 'secret-guard.mjs') {
   let main = false;
   try { main = realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url)); } catch {}
-  if (main) await runHook();
+  // 不用顶层 await：打包后它让每个导入方都变成异步初始化，落在循环导入里时 esbuild 会生成非法代码。
+  if (main) void runHook();
 }

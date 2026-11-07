@@ -2026,7 +2026,7 @@ describe('Lark message coordinator', () => {
       id: 'lark-card:cli_test:om_result_retry', channel: 'lark-card:cli_test', externalId: 'om_result_retry', sessionId: session.id, createdAt: new Date(startedAt).toISOString(),
       extra: JSON.stringify({ app_id: 'cli_test', chat_id: 'oc_p2p', card_message_id: 'om_frozen_process', runtime_task_id: runtimeTask.id, task_name: '执行任务', prompt: '执行任务', state: 'completed', started_at: startedAt, progress_frozen: true })
     };
-    const runtime = { getTasks: vi.fn(async () => [runtimeTask]), getEvents: vi.fn(async () => [agentEvent(1, 'text', { text: '恢复后应补发的结果' })]) };
+    const runtime = { getTasks: vi.fn(async () => [runtimeTask]), getEvents: vi.fn(async () => [agentEvent(1, 'text', { role: 'user', text: '执行任务', taskId: runtimeTask.id }), agentEvent(2, 'text', { text: '恢复后应补发的结果' })]) };
     const service = {
       update: vi.fn(async () => ({ messageId: 'om_frozen_process' })),
       send: vi.fn()
@@ -2179,7 +2179,7 @@ describe('Lark message coordinator', () => {
       id: 'lark-card:cli_test:om_input_2', channel: 'lark-card:cli_test', externalId: 'om_input_2', sessionId: session.id, createdAt: new Date(startedAt).toISOString(),
       extra: JSON.stringify({ app_id: 'cli_test', chat_id: 'oc_group', card_message_id: 'om_stuck', runtime_task_id: runtimeTask.id, task_name: '执行任务', prompt: '执行任务', state: 'running', started_at: startedAt })
     };
-    const runtime = { getTasks: vi.fn(async () => [runtimeTask]), getEvents: vi.fn(async () => [agentEvent(1, 'text', { text: '真实最终结果' })]) };
+    const runtime = { getTasks: vi.fn(async () => [runtimeTask]), getEvents: vi.fn(async () => [agentEvent(1, 'text', { role: 'user', text: '执行任务', taskId: runtimeTask.id }), agentEvent(2, 'text', { text: '真实最终结果' })]) };
     const service = { update: vi.fn(async () => { throw messageMissingError(); }), send: vi.fn(async () => ({ messageId: 'om_completed_replacement' })) };
     const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(async (channel: string, externalId: string) => channel === mapping.channel && externalId === mapping.externalId ? mapping : undefined), save: vi.fn(async () => {}), compareAndSetExtra: vi.fn(async (_id: string, expectedExtra: string | null | undefined, extra: string) => { if ((mapping.extra ?? null) !== (expectedExtra ?? null)) return false; mapping.extra = extra; return true; }) };
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, undefined, undefined, mappings as any);
@@ -2202,7 +2202,7 @@ describe('Lark message coordinator', () => {
       extra: JSON.stringify({ app_id: 'cli_test', chat_id: 'oc_group', card_message_id: 'om_rejected', runtime_task_id: runtimeTask.id, task_name: '可能包含敏感内容', prompt: '执行任务', state: 'running', started_at: startedAt, last_successful_elements: [{ tag: 'markdown', element_id: 'stable', content: '上次成功的进度' }] })
     };
     const contentError = new LarkServiceError('LARK_OPENAPI_ERROR', 'card content rejected', 502, { upstreamCode: 230099 });
-    const runtime = { getTasks: vi.fn(async () => [runtimeTask]), getEvents: vi.fn(async () => [agentEvent(1, 'text', { text: '过长或未通过审核的结果' })]) };
+    const runtime = { getTasks: vi.fn(async () => [runtimeTask]), getEvents: vi.fn(async () => [agentEvent(1, 'text', { role: 'user', text: '执行任务', taskId: runtimeTask.id }), agentEvent(2, 'text', { text: '过长或未通过审核的结果' })]) };
     const service = {
       update: vi.fn().mockRejectedValueOnce(contentError).mockResolvedValueOnce({ messageId: 'om_rejected' }),
       send: vi.fn(async () => ({ messageId: 'om_safe_final' }))
@@ -2283,7 +2283,7 @@ describe('Lark message coordinator', () => {
       id: 'lark-card:cli_test:om_input_thread', channel: 'lark-card:cli_test', externalId: 'om_input_thread', sessionId: session.id, createdAt: new Date(startedAt).toISOString(),
       extra: JSON.stringify({ app_id: 'cli_test', chat_id: 'oc_group', reply_message_id: 'om_trigger_thread', reply_in_thread: true, card_message_id: 'om_expired_thread', runtime_task_id: runtimeTask.id, task_name: '执行任务', prompt: '执行任务', state: 'running', started_at: startedAt })
     };
-    const runtime = { getTasks: vi.fn(async () => [runtimeTask]), getEvents: vi.fn(async () => [agentEvent(1, 'text', { text: '真实最终结果' })]) };
+    const runtime = { getTasks: vi.fn(async () => [runtimeTask]), getEvents: vi.fn(async () => [agentEvent(1, 'text', { role: 'user', text: '执行任务', taskId: runtimeTask.id }), agentEvent(2, 'text', { text: '真实最终结果' })]) };
     const service = { update: vi.fn(async () => { throw messageMissingError(); }), send: vi.fn(), reply: vi.fn(async () => ({ messageId: 'om_thread_replacement' })) };
     const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(async (channel: string, externalId: string) => channel === mapping.channel && externalId === mapping.externalId ? mapping : undefined), save: vi.fn(async () => {}), compareAndSetExtra: vi.fn(async (_id: string, expectedExtra: string | null | undefined, extra: string) => { if ((mapping.extra ?? null) !== (expectedExtra ?? null)) return false; mapping.extra = extra; return true; }) };
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, undefined, undefined, mappings as any);

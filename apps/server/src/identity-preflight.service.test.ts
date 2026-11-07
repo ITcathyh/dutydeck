@@ -40,7 +40,8 @@ async function fakeLark() {
   const server = createHttpServer(async (request, response) => {
     let body = '';
     for await (const chunk of request) body += chunk;
-    requests.push({ method: request.method, url: request.url, body });
+    // Parallel test files reuse freed ports; a request outside the Lark API is a stray from another test, not a remote call.
+    if (request.url?.startsWith('/open-apis/')) requests.push({ method: request.method, url: request.url, body });
     const send = (status: number, payload: unknown) => {
       response.writeHead(status, { 'content-type': 'application/json' });
       response.end(JSON.stringify(payload));

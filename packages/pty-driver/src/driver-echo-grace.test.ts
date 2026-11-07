@@ -49,6 +49,18 @@ it('keeps the turn open through a pause after the bare prompt echo and completes
   await next;
 });
 
+it('counts output that the CLI redraws away before the renderer parses it', async () => {
+  const f = await fixture();
+  const pending = driver.send('summarize the repository layout');
+  await vi.advanceTimersByTimeAsync(250);
+  // Both chunks are queued before xterm parses either; only the first one shows the answer.
+  f.output('\r\x1b[KThe repository has three packages.');
+  f.output('\x1b[2J\x1b[H❯ ');
+  await vi.advanceTimersByTimeAsync(4_000);
+  expect(f.completed()).toBe(1);
+  await pending;
+});
+
 it('still completes a quiet echo-only screen once the grace period ends', async () => {
   const f = await fixture();
   const pending = driver.send('summarize the repository layout');

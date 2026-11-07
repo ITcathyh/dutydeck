@@ -6,7 +6,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { it, type TestContext } from 'vitest';
 import Database from 'better-sqlite3';
-import { createRepositories } from '@dutydeck/storage';
+import { createRepositories, currentProcessIdentity } from '@dutydeck/storage';
 import { agentConfigSchema } from '@dutydeck/shared';
 import { defaultDaemonDir, writeLastDaemonDir, writeState } from '../daemon/daemon.js';
 
@@ -45,7 +45,7 @@ it.concurrent('finds the daemon database from another cwd and prints exactly one
   await repositories.config.set('lark.bots', JSON.stringify([{ appId: 'cli_created', appSecret: 'SECRET_CANARY', listening: false, riskControlMode: 'off' }]));
   repositories.close();
   const daemon = defaultDaemonDir(join(root, 'server'));
-  writeState(daemon, { pid: process.pid, ready: true, cwd: join(root, 'server'), database, startedAt: 'now' });
+  writeState(daemon, { pid: process.pid, processIdentity: currentProcessIdentity(), ready: true, cwd: join(root, 'server'), database, startedAt: 'now' });
   writeLastDaemonDir(daemon, root);
   const [result, wrongDatabase] = await Promise.all([
     invoke(root, cwd, ['lark', 'create', '--resume', uuid, '--status', '--json']),

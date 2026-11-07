@@ -124,12 +124,17 @@ export class TerminalSnapshot {
   /**
    * Feed raw PTY data and wait until xterm has parsed every queued byte
    * through this write. Callers that inspect the buffer immediately
-   * afterwards must use this barrier.
+   * afterwards must use this barrier. The promise settles only after xterm
+   * finishes its whole batch, so later queued writes may already be parsed;
+   * onParsed runs synchronously at this write's own parse boundary.
    */
-  writeAndFlush(data: string): Promise<void> {
+  writeAndFlush(data: string, onParsed?: () => void): Promise<void> {
     return new Promise((resolve, reject) => {
       try {
-        this.terminal.write(data, () => { this.invalidate(); resolve(); });
+        this.terminal.write(data, () => {
+          this.invalidate();
+          try { onParsed?.(); resolve(); } catch (error) { reject(error); }
+        });
       } catch (error) {
         reject(error);
       }
