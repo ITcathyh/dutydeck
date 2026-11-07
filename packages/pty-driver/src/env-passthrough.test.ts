@@ -37,7 +37,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentConfig, NormalizedDriverEvent } from '@dutydeck/shared';
 import type { CliAdapter, PtyLike } from '@dutydeck/cli-adapters';
-import { PtyBackend } from '@dutydeck/session-backends';
+import { PtyBackend, type SessionBackend } from '@dutydeck/session-backends';
 import { PtyCliDriver } from './driver.js';
 import { buildSessionMarker, resolveCliSessionId } from './session-id/index.js';
 import { readOpenCodeSessionId } from './session-id/opencode.js';
@@ -623,5 +623,46 @@ describe('omitting env keeps the previous behaviour', () => {
     writeFileSync(file, '', 'utf8');
 
     expect(resolveClaudeTranscriptPath(cwd)).toBe(file);
+  });
+});
+
+// ─── Claude-family child env defaults ──────────────────────────────────────
+
+describe('Claude-family terminals get child-only env defaults', () => {
+  const MCP_TASK_BACKGROUND = 'CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND';
+
+  async function launch(adapterId: string, env: Record<string, string> = {}) {
+    setEnv('HOME', makeTempDir('home'));
+    const cwd = makeTempDir('cwd');
+    const spawned: { args: string[]; env: Record<string, string> } = { args: [], env: {} };
+    const backend: SessionBackend = {
+      kind: 'pty', spawn(_command, args, opts) { spawned.args = args; spawned.env = opts.env; },
+      write() {}, resize() {}, kill() {}, interrupt() {}, onData() {}, onExit() {},
+    };
+    const driver = new PtyCliDriver({
+      agent: agentConfig({ cwd, env }), adapter: claudeLikeAdapter(join(cwd, 'cli.mjs'), adapterId), backend,
+      onEvent: () => {}, onExit: () => {}, sessionId: SESSION_ID,
+    });
+    try { await driver.start(); } finally {
+      await driver.stop();
+      (driver as unknown as { claudeSettings: { cleanup(): void } }).claudeSettings.cleanup();
+    }
+    return spawned;
+  }
+
+  it.each(['claude-code', 'seed', 'relay', 'genius'])('%s starts with MCP tasks kept in the turn', async adapterId => {
+    expect((await launch(adapterId)).env[MCP_TASK_BACKGROUND]).toBe('1');
+  });
+
+  it('keeps an Agent env value over the default', async () => {
+    expect((await launch('claude-code', { [MCP_TASK_BACKGROUND]: '0' })).env[MCP_TASK_BACKGROUND]).toBe('0');
+  });
+
+  it('leaves non-Claude terminals without the default', async () => {
+    expect((await launch('gemini')).env[MCP_TASK_BACKGROUND]).toBeUndefined();
+  });
+
+  it('does not make the Claude launch generate a --settings file', async () => {
+    expect((await launch('claude-code')).args).not.toContain('--settings');
   });
 });
