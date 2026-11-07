@@ -39,6 +39,7 @@ import type { AgentConfig, NormalizedDriverEvent } from '@dutydeck/shared';
 import type { CliAdapter, PtyLike } from '@dutydeck/cli-adapters';
 import { PtyBackend, type SessionBackend } from '@dutydeck/session-backends';
 import { PtyCliDriver } from './driver.js';
+import { claudeAdapters } from './claude-settings.js';
 import { buildSessionMarker, resolveCliSessionId } from './session-id/index.js';
 import { readOpenCodeSessionId } from './session-id/opencode.js';
 import { claudeDataDir, claudeProjectDir, codexHome, opencodeDbPath, type CliPathEnv } from './cli-paths.js';
@@ -650,7 +651,12 @@ describe('Claude-family terminals get child-only env defaults', () => {
     return spawned;
   }
 
-  it.each(['claude-code', 'seed', 'relay', 'genius'])('%s starts with MCP tasks kept in the turn', async adapterId => {
+  // 跟 claude-settings 的同一组适配器走：那边加了新 fork，这里也要带上默认值；文档写明的四个必须在里面。
+  it('covers the four documented Claude-family adapters', () => {
+    expect([...claudeAdapters]).toEqual(expect.arrayContaining(['claude-code', 'seed', 'relay', 'genius']));
+  });
+
+  it.each([...claudeAdapters])('%s starts with MCP tasks kept in the turn', async adapterId => {
     expect((await launch(adapterId)).env[MCP_TASK_BACKGROUND]).toBe('1');
   });
 

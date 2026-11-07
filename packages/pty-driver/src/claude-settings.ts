@@ -5,7 +5,8 @@ import { join, resolve } from 'node:path';
 import { shellQuote as quote } from '@dutydeck/shared';
 import { planGuardScript } from './plan-guard.js';
 
-const claudeAdapters = new Set(['claude-code', 'seed', 'relay', 'genius']);
+/** Claude 家族终端适配器：生成 --settings 的是这一组，driver.ts 的子进程默认环境也用这一组。 */
+export const claudeAdapters: ReadonlySet<string> = new Set(['claude-code', 'seed', 'relay', 'genius']);
 const planGuardFile = 'plan-guard.mjs';
 
 function settingsArgs(args: string[]): { rest: string[]; value?: string } {

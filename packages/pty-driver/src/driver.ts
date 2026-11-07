@@ -31,7 +31,7 @@ import { hostname } from 'node:os';
 import { isDeepStrictEqual } from 'node:util';
 import { statSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
-import { ClaudeSettings } from './claude-settings.js';
+import { ClaudeSettings, claudeAdapters } from './claude-settings.js';
 import { ClaudeNativeSessionResolver, claudeResumeFromObservation } from './claude-native-session.js';
 import { TranscriptSourceTracker, freezeTranscriptSource, verifyLaunchedTranscriptAsync } from './transcript-source.js';
 
@@ -95,7 +95,6 @@ const RAW_TERMINAL_THROTTLE_MS = 200;
 /** Claude 家族终端（claude-settings.ts 的 claudeAdapters 那一组）子进程的默认环境，Agent env 里的同名值优先。
  *  不能并进 agent.env：显式 env 非空时 ClaudeSettings 会给每个会话生成 --settings、改写启动参数。
  *  MCP task 转到后台后结果不归本轮，所以默认让它留在工具调用里。 */
-const claudeEnvDefaultAdapters = new Set(['claude-code', 'seed', 'relay', 'genius']);
 const claudeChildEnvDefaults: Record<string, string> = { CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND: '1' };
 
 /**
@@ -499,7 +498,7 @@ export class PtyCliDriver implements AgentDriver {
 
   /** spawn 环境，首次调用时算好并缓存。resume-without-start 也走这里。 */
   private spawnEnv(): Record<string, string> {
-    return (this.lastSpawnEnv ??= mergedEnv(claudeEnvDefaultAdapters.has(this.adapter.id) ? { ...claudeChildEnvDefaults, ...this.agent.env } : this.agent.env));
+    return (this.lastSpawnEnv ??= mergedEnv(claudeAdapters.has(this.adapter.id) ? { ...claudeChildEnvDefaults, ...this.agent.env } : this.agent.env));
   }
 
   async send(prompt: string): Promise<void> {
