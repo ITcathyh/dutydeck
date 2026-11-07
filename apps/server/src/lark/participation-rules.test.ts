@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { botFullNames, botNameTokens, callsBotName, evaluateParticipationRules, participationIntentOf, ruleContextOf, type RuleContext } from './participation-rules.js';
+import { botFullNames, botNameTokens, callsBotName, evaluateParticipationRules, intrusionCorrection, participationIntentOf, ruleContextOf, type RuleContext } from './participation-rules.js';
 
 const at = Date.parse('2026-10-06T10:00:00.000Z');
 const ctx = (patch: Partial<RuleContext> = {}): RuleContext => ({
@@ -127,6 +127,19 @@ describe('participation intents', () => {
     expect(participationIntentOf('积极点评估一下这三个方案的风险和成本好吗')).toBeUndefined();
     expect(participationIntentOf('为什么没回滚这次发布')).toBeUndefined();
     expect(participationIntentOf('帮我看看为什么这个服务不回包，日志在群公告里')).toBeUndefined();
+  });
+
+  it('去掉 @ 后整句基本就是短语本身才算，多出实词就交给 Agent', () => {
+    for (const text of ['按需求改一下', '积极点评估', '按需排查', '安静点处理下告警']) expect(participationIntentOf(`@_user_1 ${text}`)).toBeUndefined();
+    for (const text of ['为啥不回退', '为什么没回滚', '为什么不回包', '怎么不接口']) expect(participationIntentOf(`@_user_1 ${text}`)).toBeUndefined();
+    expect(participationIntentOf('@_user_1 为什么不接话')).toEqual({ kind: 'why_silent' });
+    expect(participationIntentOf('@_user_1 刚才那条怎么没有回复')).toEqual({ kind: 'why_silent' });
+    expect(participationIntentOf('@_user_1 改成按需吧')).toEqual({ kind: 'level', level: 'selective' });
+  });
+
+  it('误插纠正只认整句就是「没问你」这类说法的短句', () => {
+    for (const text of ['没问你', '不用你管了', '别插话啊', '没叫你。', '不是问你的']) expect(intrusionCorrection(text)).toBe(true);
+    for (const text of ['不用你重跑了，直接给结论', '没问你但你也看看', '不需要你改代码，解释下原因就行']) expect(intrusionCorrection(text)).toBe(false);
   });
 });
 

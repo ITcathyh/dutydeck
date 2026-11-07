@@ -231,23 +231,30 @@ const levelPhrases: Array<[ParticipationLevel, RegExp]> = [
   ['selective', /(按需参与|按需回复?|按需)/],
   ['eager', /(积极点|积极一点|积极些|主动点|主动一点|主动些|多参与|每条都回)/]
 ];
-// 改档的话除了关键短语只剩这些虚词时才算数，避免「按需求改一下」这类句子被误认。
-const intentFillers = /(这个群|本群|群里|以后|之后|改成|切到|换成|调成|就行|就好|模式|档位|一下|麻烦|请|你|就|吧|呢|啊|呀|哈|了|档)/g;
+// 改档的话除了关键短语只剩这些虚词时才算数，避免「按需求改一下」「为什么没回滚」这类句子被误认。
+const intentFillers = /(这个群|本群|群里|以后|之后|改成|切到|换成|调成|就行|就好|模式|档位|一下|麻烦|请|你|就|吧|呢|啊|呀|哈|哦|嘛|啦|了|档)/g;
 const remainder = (text: string, phrase: string) => text.replace(phrase, '').replace(intentFillers, '').replace(/[\p{P}\p{S}]/gu, '');
 
-/** 在叫机器人的短消息（去掉 @ 后不超过 20 字）里的固定短语：改参与强度、问刚才为什么没回。 */
+/** 在叫机器人的短消息（去掉 @ 后不超过 20 字）里的固定短语：改参与强度、问刚才为什么没回。整句基本就是短语本身才算。 */
 export function participationIntentOf(text: string): ParticipationIntent | undefined {
   const plain = stripMentionPlaceholders(text);
   if (!plain || plain.length > 20) return undefined;
   const compact = plain.toLowerCase().replace(/\s+/g, '').replace(/＠/g, '@');
-  const why = compact.match(/(为什么|为啥|怎么)(没|不)(回|理|接|说话)/);
-  if (why && remainder(compact, why[0]).replace(/(刚才|刚刚|我|的|消息|那条)/g, '').length <= 2) return { kind: 'why_silent' };
+  const why = compact.match(/(为什么|为啥|怎么)(没有|没|不)(回复|回应|回|理|接话|接|说话)/);
+  if (why && !remainder(compact, why[0]).replace(/(刚才|刚刚|我|的|消息|那条|这条)/g, '')) return { kind: 'why_silent' };
   for (const [level, pattern] of levelPhrases) {
     const match = compact.match(pattern);
-    if (match && remainder(compact, match[0]).length <= 2) return { kind: 'level', level };
+    if (match && !remainder(compact, match[0])) return { kind: 'level', level };
   }
   return undefined;
 }
 
 /** 回复本机器人主动消息时表示「插话了」的说法。 */
-export const intrusionPattern = /(别插话|不要插话|不用你|没问你|不是问你|没叫你|没在叫你|不需要你)/;
+const intrusionPattern = /(别插话|不要插话|不用你|没问你|不是问你|没叫你|没在叫你|不需要你)/;
+const intrusionFillers = /(回复|回|管|说话|说|插嘴|这个|这里|了|啊|呀|哈|吧|呢|哦|啦|的)/g;
+/** 整句基本就是「没问你」这类说法才算误插纠正；「不用你重跑了，直接给结论」是新的请求。 */
+export function intrusionCorrection(text: string): boolean {
+  const compact = compactText(stripMentionPlaceholders(text));
+  const match = compact.length <= 12 ? compact.match(intrusionPattern) : null;
+  return Boolean(match) && !compact.replace(match![0], '').replace(intrusionFillers, '');
+}

@@ -1192,6 +1192,37 @@ describe('rule layer, participation levels and corrections (pilot sentences)', (
     expect(await h.repository.listFeedback(scope, replied.id)).toEqual([expect.objectContaining({ actorId: 'ou_a', expectedAction: 'silent', correction: '[误插] 主动回复后被回「没问你」。' })]);
   });
 
+  it('回复主动发言时带了新要求，或 @ 它说「不用你…」：不算误插，照常处理', async () => {
+    const h = await harness('selective');
+    Object.assign(h.service, { listChatMembers: members(2) });
+    h.decide.mockImplementation(async (_config, snapshot) => reply(snapshot));
+    await h.coordinator.handle(message('om_q', '这个报错大家见过吗'), config); await h.participation.flush(scope);
+    await h.coordinator.handle(message('om_more', '不用你重跑了，直接给结论', { parentId: 'om_sent', rootId: 'om_q' }), config); await h.participation.flush(scope);
+    await h.coordinator.handle(message('om_at', '@_user_1 不用你了', { parentId: 'om_sent', rootId: 'om_q', mentions: [{ key: '@_user_1', name: 'Bot', openId: 'ou_bot' }] }), config);
+    await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalled());
+    const replied = (await h.repository.listDecisions(scope)).find(item => item.action === 'reply')!;
+    expect(await h.repository.listFeedback(scope, replied.id)).toEqual([]);
+  });
+
+  it.each(['按需求改一下', '为啥不回退', '帮我看看谁负责接话'])('@ 它说「%s」：不当成改档、为什么没回或指定接话人，照常交给 Agent', async text => {
+    const h = await harness('selective', { applyLevel: vi.fn(async () => {}), canOperate: async () => true });
+    Object.assign(h.service, { listChatMembers: members(2) });
+    await h.coordinator.initializeWorkflows(config);
+    await h.coordinator.handle(atBot('om_req', text), config);
+    await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
+    expect(h.service.replyText).not.toHaveBeenCalled();
+    expect(h.service.reply).not.toHaveBeenCalledWith(expect.objectContaining({ statusLabel: '待确认' }));
+  });
+
+  it('@ 它问「为什么不接话」：说明没接的原因，不当成指定叫「为什么不」的接话人', async () => {
+    const h = await harness('selective', { canOperate: async () => true });
+    Object.assign(h.service, { listChatMembers: members(2) });
+    await h.coordinator.handle(atBot('om_why', '为什么不接话'), config);
+    await vi.waitFor(() => expect(h.service.replyText).toHaveBeenCalledOnce());
+    expect(h.service.replyText).not.toHaveBeenCalledWith(expect.objectContaining({ text: expect.stringContaining('群里没找到') }));
+    expect(h.runtime.send).not.toHaveBeenCalled();
+  });
+
   it('/status 的参与行：档位、今天的规则与模型判定次数、回复次数、耗时中位数和花费', async () => {
     const readParticipationUsage = vi.fn(async () => ({ entries: 2, costUsd: 0, unknown: 2 }));
     const h = await harness('selective', { readParticipationUsage });

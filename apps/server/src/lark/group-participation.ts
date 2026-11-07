@@ -13,7 +13,7 @@ import type { LarkCardService, LarkChatMessage } from './service.js';
 import { parseLarkMessageContent } from './message-content.js';
 import { LarkContextBootstrap, observationTime } from './context-bootstrap.js';
 import { decisionInput, participationInput, parseParticipationResult, parseParticipationResponse, scenarioObservations, type ParticipationDecider, type ParticipationFacts, type ParticipationResult } from './readonly-decider.js';
-import { botNameTokens, callsBotName, compactText, evaluateParticipationRules, intrusionPattern, ownedItems, participationIntentOf, participationRuleReasons, ruleContextOf, stripMentionPlaceholders, type ParticipationRule, type RuleFacts, type RuleVerdict } from './participation-rules.js';
+import { botNameTokens, callsBotName, compactText, evaluateParticipationRules, intrusionCorrection, ownedItems, participationIntentOf, participationRuleReasons, ruleContextOf, stripMentionPlaceholders, type ParticipationRule, type RuleFacts, type RuleVerdict } from './participation-rules.js';
 import { responderAnnouncementOf, responderClaimText, responderIntentOf, responderReleaseText } from './group-responder.js';
 import { LarkScenarios, type ScenarioMatch, type ScenarioPhrase } from './group-scenarios.js';
 import { runDirectScenario, type LarkScenarioAdoption } from './scenario-direct.js';
@@ -1335,13 +1335,14 @@ export class LarkGroupParticipation {
     if (verdict.action === 'addressed' && activeModes.has(snapshot.settings.participation)) await this.dispatch(scope, pending, trigger, snapshot, [trigger.id], id, slot, true);
   }
   /**
-   * 人类消息的即时处理：@ 本机器人时记漏接；回复本机器人主动发言说「没问你」记误插；在叫本机器人的短消息里
+   * 人类消息的即时处理：@ 本机器人时记漏接；没 @ 它、回复它的主动发言只说「没问你」记误插；在叫本机器人的短消息里
    * 有改档或「为什么没回」时直接回应。handled 表示已回应，intrusive 表示这是误插纠正，都不再交给判定或 Agent。
    */
   private async corrections(scope: CollaborationScope, event: LarkMessageEvent, config: StoredLarkConfig, text: string, input: { botOpenId?: string; addressed?: boolean }) {
     const warn = (message: string) => (error: unknown) => { this.options.log?.warn({ error, scope, messageId: event.messageId }, message); return false; };
-    if (input.botOpenId && event.mentions.some(mention => mention.openId === input.botOpenId)) await this.markMissed(scope, event).catch(warn('记录漏接失败'));
-    const intrusive = intrusionPattern.test(text) && await this.markIntrusive(scope, event, text).catch(warn('记录误插失败'));
+    const mentioned = Boolean(input.botOpenId && event.mentions.some(mention => mention.openId === input.botOpenId));
+    if (mentioned) await this.markMissed(scope, event).catch(warn('记录漏接失败'));
+    const intrusive = !mentioned && intrusionCorrection(text) && await this.markIntrusive(scope, event, text).catch(warn('记录误插失败'));
     const handled = await this.handleResponderIntent(scope, event, config, text, input).catch(warn('处理接话人短语失败'))
       || Boolean(input.addressed) && await this.handleIntent(scope, event, config, text).catch(warn('处理参与强度短语失败'));
     return { handled, intrusive };
@@ -1390,10 +1391,10 @@ export class LarkGroupParticipation {
     const sender = event.senderOpenId;
     if (!intent || !sender || !this.options.canOperate) return false;
     const target = await this.responderTarget(config, event, intent.name, input.botOpenId);
-    if (!target && !input.addressed || !await this.options.canOperate(scope, sender, sender)) return false;
+    if (!target && (intent.name || !input.addressed) || !await this.options.canOperate(scope, sender, sender)) return false;
     const key = `responder_${digest([scope, event.messageId])}`.slice(0, 50);
     if (!target) {
-      await this.replyText(config, event, intent.name ? `群里没找到叫「${intent.name}」的机器人。` : '没看出要让哪个机器人接话，请 @ 它说「你负责接话」。', key);
+      await this.replyText(config, event, '没看出要让哪个机器人接话，请 @ 它说「你负责接话」。', key);
       return true;
     }
     if (target !== 'self') {
