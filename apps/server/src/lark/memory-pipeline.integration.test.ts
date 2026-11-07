@@ -304,7 +304,7 @@ describe('Lark memory pipeline through the coordinator', () => {
       expect((await h.store.getState(scope)).lastRun).toMatchObject({ kind: 'extraction', ok: true, added: 1, rejected: 1 });
     }, { timeout: 10_000 });
     await h.waitIdle();
-    expect(h.memoryPrompts.find(prompt => prompt.includes('后台提取'))).toContain(`- ${rule.id}：不要记任何人的薪资`);
+    expect(h.memoryPrompts.find(prompt => prompt.includes('后台提取'))).toContain(JSON.stringify([{ id: rule.id, text: '不要记任何人的薪资' }]));
     const saved = await h.store.list(scope);
     expect(saved.map(entry => entry.content)).toEqual(['部署脚本在 scripts/deploy.sh']);
     // 持久作业记录拒绝计数，被拒的内容不进日志。
@@ -390,7 +390,8 @@ describe('Lark memory pipeline through the coordinator', () => {
     expect(await h.store.listAll(scope)).toEqual(before);
     expect(h.startCalls).toHaveLength(1);
     const failed = (await h.repos.memoryJobs.listScope(scope)).find(job => job.error === 'MEMORY_GATE_REJECTED')!;
-    expect(failed).toMatchObject({ mode: 'compatible', sessionId: initialJob.sessionId, input: { retiredContents: [original.content] } });
+    expect(failed).toMatchObject({ mode: 'compatible', sessionId: initialJob.sessionId });
+    expect(JSON.stringify(failed)).not.toContain(original.content);
     expect(failed.id).not.toBe(initialJob.id);
     h.setResponder(() => ({ text: jsonBlock({ actions: [{ ...action, content: '合法整理后的部署说明' }] }) }));
     expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok: true, added: 1 }); await h.waitIdle();

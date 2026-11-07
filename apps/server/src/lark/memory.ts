@@ -17,6 +17,7 @@
  */
 import { createHash, randomBytes } from 'node:crypto';
 import { RuntimeError, type MemoryJob, type MemoryJobRepository, type MemoryJobVersion, type JsonValue, type ConfigRepository, type LarkGroupMemoryScope } from '@dutydeck/shared';
+import { memoryJobVersionDigest } from '@dutydeck/storage';
 import { relevance } from './text-relevance.js';
 import { redactTraceText } from './secret-redaction.js';
 
@@ -307,6 +308,10 @@ export function normalizeLarkMemoryIgnoreRule(value: unknown): string {
   if (looksLikeLarkMemoryCredential(text)) {
     throw new LarkMemoryError('MEMORY_CREDENTIAL_REJECTED', '规则内容疑似包含凭据（密钥、令牌或密码），不保存。', 400);
   }
+  // 规则原文会进后台提取的输入，共享池里一个群写的规则会作用到其他群的轮次上。
+  if (looksLikeLarkMemoryInjection(text)) {
+    throw new LarkMemoryError('MEMORY_INJECTION_REJECTED', '规则内容疑似包含注入指令（例如要求忽略之前的指令、改变 Agent 身份），不保存。', 400);
+  }
   return text;
 }
 
@@ -542,7 +547,7 @@ export class LarkMemoryStore {
 
   async jobVersions(scope: LarkMemoryScope): Promise<MemoryJobVersion[]> {
     await this.migrateLegacy(scope);
-    return Promise.all([larkMemoryKey(scope), larkMemoryIgnoreKey(scope), 'lark.bots', 'lark.credentials'].map(async key => ({ key, value: await this.configs.get(key) })));
+    return Promise.all([larkMemoryKey(scope), larkMemoryIgnoreKey(scope), 'lark.bots', 'lark.credentials'].map(async key => ({ key, digest: memoryJobVersionDigest(await this.configs.get(key)) })));
   }
 
   async applyJob(scope: LarkMemoryScope, jobs: MemoryJobRepository, job: MemoryJob, steps: LarkMemoryBatchStep[], patch: (state: LarkMemoryState, result: LarkMemoryBatchResult) => Partial<LarkMemoryState>, consumedTaskIds: string[]): Promise<MemoryJob> {
@@ -689,17 +694,21 @@ export class LarkMemoryStore {
       .map(item => item.entry);
   }
 
-  /** 本池的「不许记」规则，按添加先后排列。 */
-  async listIgnoreRules(scope: LarkMemoryScope): Promise<LarkMemoryIgnoreRule[]> {
-    return parseLarkMemoryIgnoreRules(await this.configs.get(larkMemoryIgnoreKey(scope)));
+  /** 本池的「不许记」规则，按添加先后排列；给出 `options.chatId` 时只列该聊天设置的规则。 */
+  async listIgnoreRules(scope: LarkMemoryScope, options: { chatId?: string } = {}): Promise<LarkMemoryIgnoreRule[]> {
+    const rules = parseLarkMemoryIgnoreRules(await this.configs.get(larkMemoryIgnoreKey(scope)));
+    return options.chatId === undefined ? rules : rules.filter(rule => rule.chatId === options.chatId);
   }
 
-  /** 加一条「不许记」规则；与已有规则归一化后相同时返回已有的那条，不重复添加。 */
+  /**
+   * 加一条「不许记」规则；与已有规则归一化后相同时返回已有的那条，不重复添加。
+   * 带来源聊天时只与同一聊天的规则查重：共享池里各群只能查看和删除自己设置的规则。
+   */
   async addIgnoreRule(scope: LarkMemoryScope, input: { text: string; createdBy?: string; chatId?: string }): Promise<LarkMemoryIgnoreRule> {
     const text = normalizeLarkMemoryIgnoreRule(input.text);
     let rule!: LarkMemoryIgnoreRule;
     await this.mutateIgnoreRules(scope, rules => {
-      const existing = rules.find(item => larkMemoryDedupeKey(item.text) === larkMemoryDedupeKey(text));
+      const existing = rules.find(item => larkMemoryDedupeKey(item.text) === larkMemoryDedupeKey(text) && (!input.chatId || item.chatId === input.chatId));
       if (existing) { rule = existing; return undefined; }
       if (rules.length >= larkMemoryLimits.ignoreRules) {
         throw new LarkMemoryError('MEMORY_IGNORE_LIMIT_REACHED', `「不许记」规则最多 ${larkMemoryLimits.ignoreRules} 条，请先删除不再需要的规则。`, 409);
@@ -713,11 +722,11 @@ export class LarkMemoryStore {
     return rule;
   }
 
-  /** 删除一条「不许记」规则；不存在时返回 undefined。 */
-  async removeIgnoreRule(scope: LarkMemoryScope, id: string): Promise<LarkMemoryIgnoreRule | undefined> {
+  /** 删除一条「不许记」规则；不存在或不是 `options.chatId` 设置的时返回 undefined。 */
+  async removeIgnoreRule(scope: LarkMemoryScope, id: string, options: { chatId?: string } = {}): Promise<LarkMemoryIgnoreRule | undefined> {
     let removed: LarkMemoryIgnoreRule | undefined;
     await this.mutateIgnoreRules(scope, rules => {
-      removed = rules.find(item => item.id === id);
+      removed = rules.find(item => item.id === id && (options.chatId === undefined || item.chatId === options.chatId));
       return removed ? rules.filter(item => item.id !== id) : undefined;
     });
     return removed;

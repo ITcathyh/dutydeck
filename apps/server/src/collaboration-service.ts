@@ -165,15 +165,32 @@ export class CollaborationService {
       return { mandate, schedule: await this.reconcileMandate(mandate, schedule, nextDueAt) };
     });
   }
+  private async updatable(scope: CollaborationScope, actorId: string, id: string, input: z.infer<typeof updateMandateSchema>) {
+    const mandate = await this.repositories.collaboration.getMandate(scope, id); if (!mandate) throw missing();
+    if (mandate.requesterId !== actorId) await this.require(scope, actorId, 'manage');
+    if (mandate.revision !== input.expectedRevision) throw conflict();
+    if (['cancelled','completed'].includes(mandate.status)) throw new RuntimeError('COLLABORATION_MANDATE_TERMINAL', 'Create a new delegation after termination', 409);
+    if (input.condition && input.condition !== 'always' && !mandate.followupId) throw new RuntimeError('COLLABORATION_CONDITION_INVALID', 'This condition requires a follow-up', 400);
+    return mandate;
+  }
+  /** 只校验、不落库：Agent 发起的修改先发确认卡，用户确认后才以同一 expectedRevision 调用 updateMandate。 */
+  async prepareMandateUpdate(scope: CollaborationScope, actorId: string, id: string, body: unknown) {
+    await this.require(scope, actorId, 'write');
+    const input = updateMandateSchema.parse(body);
+    const mandate = await this.updatable(scope, actorId, id, input);
+    const schedule = await this.repositories.scheduleDefinitions.get(mandate.scheduleDefinitionId); if (!schedule) throw missing();
+    const rescheduled = { ...schedule, trigger: input.trigger ?? schedule.trigger, timezone: input.timezone ?? schedule.timezone };
+    if (input.trigger !== undefined || input.timezone !== undefined) {
+      if (rescheduled.trigger.kind === 'at' && (input.status ?? mandate.status) === 'active') await this.require(scope, mandate.requesterId, 'execute');
+      this.nextOneOff(rescheduled, '改期');
+    }
+    return { mandate, schedule: rescheduled, input };
+  }
   async updateMandate(scope: CollaborationScope, actorId: string, id: string, body: unknown) {
     await this.require(scope, actorId, 'write');
     const input = updateMandateSchema.parse(body);
     return this.serial(idFor(scope, id), async () => {
-      const mandate = await this.repositories.collaboration.getMandate(scope, id); if (!mandate) throw missing();
-      if (mandate.requesterId !== actorId) await this.require(scope, actorId, 'manage');
-      if (mandate.revision !== input.expectedRevision) throw conflict();
-      if (['cancelled','completed'].includes(mandate.status)) throw new RuntimeError('COLLABORATION_MANDATE_TERMINAL', 'Create a new delegation after termination', 409);
-      if (input.condition && input.condition !== 'always' && !mandate.followupId) throw new RuntimeError('COLLABORATION_CONDITION_INVALID', 'This condition requires a follow-up', 400);
+      const mandate = await this.updatable(scope, actorId, id, input);
       if (Object.keys(input).every(key => key === 'expectedRevision' || key === 'deliveryPaused')) {
         const schedule = await this.repositories.scheduleDefinitions.get(mandate.scheduleDefinitionId); if (!schedule) throw missing();
         // Old definitions lack the execution digest. Upgrade those through the

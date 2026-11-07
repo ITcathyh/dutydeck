@@ -96,7 +96,7 @@ Matches `/help` (6 per page by default; plugin commands are listed on the last p
 | `/retry` | `/retry` | Re-run the last failed or cancelled task |
 | `/queue` | `/queue top 2` | List queued items; `cancel`, `top`, `steer` by number |
 | `/steer` | `/steer skip migrations/` | Inject a message into the running turn (or queue it first and interrupt if the agent cannot take it) |
-| `/remember`, `/memory`, `/forget` | `/remember Never push to master` | Save, list (`consolidate`, `ignore …`) and delete memories |
+| `/remember`, `/memory`, `/forget` | `/remember Never push to master` | Save, list (`consolidate`, `ignore …`) and delete memories. Do-not-remember rules (`/memory ignore <text>`, `list`, `remove <id>`) in the shared group pool apply to every group, but each group can only list and remove the rules it set; rules that look like injected instructions are refused |
 | `/schedule` | `/schedule every 30 check the build` | List/create/enable/disable schedules of this topic; `every` takes minutes; new ones start disabled |
 | `/ci` | `/ci wait build.yml`, `/ci fix`, `/ci cancel <id>` | Wait for CI, hand failures to the agent, cancel a wait. Needs a CI plugin |
 | `/work` | `/work research <goal>` | Goals, agent assignment, reusable workflows; revised goals show 计划已修订（vN） on the card, and pending Agent revisions are handled with 确认修订 / 放弃修订; a text confirmation (of a new plan or of a revision) must carry the digest shown on the card, `/work confirm <goal id> <digest>` (the card shows the first 12 characters; at least 12 are required), and is refused if it no longer matches the pending content; the error does not show the digest, so copy the command from the latest card; when an Agent edits an unconfirmed plan, a new confirmation card is posted |

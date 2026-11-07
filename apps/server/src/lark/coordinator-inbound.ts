@@ -1676,13 +1676,14 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
           }
           if (route.args[0] === 'ignore') {
             // 「不许记」规则跟记忆池走：群聊里对本机器人所在各群都生效。增删改写的是约束，与 consolidate 一样挡住机器人发送者。
+            // 共享池里规则原文常带敏感话题，各群只能查看和删除本群设置的规则。
             const [, action, id, ...extra] = route.args;
-            const where = shared ? '本机器人所在各群共享' : chatLabel;
+            const ownRules = shared ? { chatId: event.chatId } : {};
             if (!action || (action === 'list' && !id)) {
-              const rules = await memory.listIgnoreRules(scope);
+              const rules = await memory.listIgnoreRules(scope, ownRules);
               await replyCard('不许记规则', rules.length
-                ? `**${where}的「不许记」规则（${rules.length} 条）**\n\n${rules.map(rule => `- \`${rule.id}\` · ${larkCommandEcho(rule.text, 200)}`).join('\n')}\n\n新增：\`/memory ignore <一句话描述>\`；删除：\`/memory ignore remove <编号>\``
-                : '**还没有「不许记」规则。**\n\n发送 `/memory ignore <一句话描述>` 添加，例如 `/memory ignore 不要记任何人的薪资`。后台提取会把规则当作约束，写入前再按规则过滤一次。');
+                ? `**${shared ? `本群设置的「不许记」规则（${rules.length} 条，对本机器人所在各群都生效）` : `${chatLabel}的「不许记」规则（${rules.length} 条）`}**\n\n${rules.map(rule => `- \`${rule.id}\` · ${larkCommandEcho(rule.text, 200)}`).join('\n')}\n\n新增：\`/memory ignore <一句话描述>\`；删除：\`/memory ignore remove <编号>\``
+                : `**${shared ? '本群' : ''}还没有「不许记」规则。**\n\n发送 \`/memory ignore <一句话描述>\` 添加，例如 \`/memory ignore 不要记任何人的薪资\`。后台提取会把规则当作约束，写入前再按规则过滤一次。`);
               return 'handled';
             }
             if (isBotSenderType(event.senderType)) {
@@ -1694,9 +1695,9 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
                 await replyCard('/memory ignore 未执行', '**用法：`/memory ignore remove <规则编号>`**\n\n编号形如 `ign_1a2b3c4d`，发送 `/memory ignore list` 查看。', { failed: true });
                 return 'handled';
               }
-              const removed = await memory.removeIgnoreRule(scope, id);
+              const removed = await memory.removeIgnoreRule(scope, id, ownRules);
               if (!removed) {
-                await replyCard('/memory ignore 未执行', `**${where}没有编号为 \`${id}\` 的「不许记」规则。**\n\n发送 \`/memory ignore list\` 查看。`, { failed: true });
+                await replyCard('/memory ignore 未执行', `**${shared ? '本群设置的规则里' : chatLabel}没有编号为 \`${id}\` 的「不许记」规则。**\n\n发送 \`/memory ignore list\` 查看。`, { failed: true });
                 return 'handled';
               }
               await replyCard('已删除不许记规则', `**已删除规则 \`${removed.id}\`。**\n\n${larkCommandEcho(removed.text, 200)}\n\n之后的后台提取不再受这条规则约束。`);

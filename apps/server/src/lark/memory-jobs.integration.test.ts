@@ -3,12 +3,12 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createRepositories } from '@dutydeck/storage';
+import { createRepositories, currentProcessIdentity } from '@dutydeck/storage';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import { agentConfigSchema, canonicalExecutionJson, type BoundExecutionRepository } from '@dutydeck/shared';
-import { LarkMemoryStore } from './memory.js';
+import { LarkMemoryError, LarkMemoryStore } from './memory.js';
 import { LarkMemoryProjection } from './memory-view.js';
-import { LarkMemoryPipeline } from './memory-pipeline.js';
+import { LarkMemoryPipeline, larkMemoryPipelineRules } from './memory-pipeline.js';
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); });
 const scope = { appId: 'app', chatId: 'groups', pool: 'groups' };
@@ -212,6 +212,41 @@ it('archives an isolated failed job using only the known session lookup', async 
   expect(get.mock.calls).toEqual([[job.sessionId], [job.sessionId]]);
   expect((await h.repos.sessions.get(job.sessionId))?.archivedAt).toBeTruthy();
 });
+it('fails a frozen job whose memory Agent was deleted so the pool can admit a new job', async () => {
+  const h = await harness();
+  const create = h.repos.memoryJobs.create.bind(h.repos.memoryJobs);
+  const listAgents = vi.spyOn(h.runtime, 'listAgents');
+  vi.spyOn(h.repos.memoryJobs, 'create').mockImplementationOnce(async job => { await create(job); listAgents.mockResolvedValue([]); });
+  expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok:false, error:'MEMORY_AGENT_NOT_FOUND' });
+  expect(await h.repos.memoryJobs.listScope(scope)).toMatchObject([{ state:'failed', error:'MEMORY_AGENT_NOT_FOUND' }]);
+  expect(h.prompts).toHaveLength(0);
+  listAgents.mockRestore();
+  expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok:true });
+  expect((await h.repos.memoryJobs.listScope(scope)).map(job => job.state).sort()).toEqual(['failed','settled']);
+});
+it('gives up a frozen job after repeated unreadable results without resubmitting it', async () => {
+  const h = await harness();
+  vi.spyOn(h.pipeline as any, 'readOutput').mockRejectedValue(new LarkMemoryError('MEMORY_RESULT_UNAVAILABLE', 'unreadable', 502));
+  for (let run = 1; run < larkMemoryPipelineRules.jobRetryLimit; run++) {
+    expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok:false, error:'MEMORY_RESULT_UNAVAILABLE' });
+    expect(await h.repos.memoryJobs.listScope(scope)).toMatchObject([{ state:'running', failures:run }]);
+  }
+  expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok:false, error:'MEMORY_RESULT_UNAVAILABLE' });
+  const [job] = await h.repos.memoryJobs.listScope(scope);
+  expect(job).toMatchObject({ state:'failed', error:'MEMORY_RESULT_UNAVAILABLE' });
+  expect(job.requests).toHaveLength(1);
+  expect(h.prompts).toHaveLength(1);
+  expect((await h.repos.sessions.get(job.sessionId))?.archivedAt).toBeTruthy();
+});
+it('keeps a recovery hold on the frozen job no matter how often it is retried', async () => {
+  const h = await harness();
+  vi.spyOn(h.pipeline as any, 'readOutput').mockRejectedValue(new LarkMemoryError('MEMORY_RECOVERY_REQUIRED', 'held', 409));
+  for (let run = 0; run <= larkMemoryPipelineRules.jobRetryLimit; run++) expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok:false, error:'MEMORY_RECOVERY_REQUIRED' });
+  const [job] = await h.repos.memoryJobs.listScope(scope);
+  expect(job.state).toBe('running');
+  expect(job.failures).toBeUndefined();
+  expect(h.prompts).toHaveLength(1);
+});
 it('refuses a missing frozen compatible session without scanning or starting another session', async () => {
   const h = await harness('legacy');
   // Older frozen compatible jobs may refer to a non-stable session id.
@@ -375,6 +410,25 @@ it.each([true,false])('handles old completed extraction with an unreconciled run
     expect(h.prompts).toHaveLength(1);
     expect((await h.repos.memoryJobs.listScope(scope))[0].receipt?.consumedTaskIds).toEqual([source.id]);
   }
+});
+
+it('replaces a dead owner claim that exited before freezing its job', async () => {
+  const h = await harness();
+  const userSession = await h.runtime.start({ agentId:'agent' });
+  const source = await h.runtime.send(userSession.id,'团队固定使用中文。');
+  h.setReply(() => ({ facts:[{ content:'团队用中文交流。',topic:'general',evidence:source.id }] } as any));
+  const dead = { ...currentProcessIdentity(), boot: 'previous-boot' };
+  await h.store.updateState(scope,{ pendingTurns:[{ sessionId:userSession.id,taskId:source.id,completedAt:new Date().toISOString(),senderKind:'human' }],turnsSinceExtraction:1,
+    running:{ kind:'extraction',token:'orphan-claim',owner:dead,startedAt:new Date().toISOString() } });
+  h.prompts.length=0;
+  expect(await h.pipeline.runExtraction(scope)).toMatchObject({ ok:true });
+  expect((await h.store.getState(scope)).running).toBeUndefined();
+  expect((await h.store.getState(scope)).pendingTurns).toEqual([]);
+  expect(h.prompts).toHaveLength(1);
+  const jobs = await h.repos.memoryJobs.listScope(scope);
+  expect(jobs).toHaveLength(1);
+  expect(jobs[0]).toMatchObject({ state:'settled' });
+  expect(jobs[0].claimToken).not.toBe('orphan-claim');
 });
 
 it('recognizes the recovered receipt claim after settling crashes before releasing running', async () => {
@@ -552,4 +606,15 @@ it('keeps a new memory request queued behind a foreign unconfirmed stop until re
     expect(await pending).toMatchObject({ ok: true });
     expect(h.prompts).toHaveLength(3);
   } finally { release(); h.setStopConfirmed(true); await foreignRun; }
+});
+it('freezes no credential values and keeps only recent finished jobs, stripped of their prompts', async () => {
+  const h = await harness();
+  const bots = JSON.parse((await h.repos.config.get('lark.bots'))!) as Array<Record<string, unknown>>;
+  await h.repos.config.set('lark.bots', JSON.stringify(bots.map(bot => ({ ...bot, appSecret: 'placeholder-secret' }))));
+  for (let run = 0; run < 4; run++) expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok: true });
+  expect(h.prompts).toHaveLength(4);
+  const jobs = await h.repos.memoryJobs.listScope(scope);
+  expect(jobs.map(job => job.state)).toEqual(['settled', 'settled']);
+  expect(JSON.stringify(jobs)).not.toMatch(/placeholder-secret|保留完整来源和日期/);
+  expect(jobs.flatMap(job => job.requests.map(request => request.prompt))).toEqual(['', '']);
 });

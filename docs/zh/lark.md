@@ -131,7 +131,7 @@ dutydeck agent --turn "$TURN" group send '可检索摘要' --final --card-file /
 | `/queue` | `/queue top 2` | 查看待执行指令；`cancel <编号>` 取消、`top <编号>` 提到队首、`steer <编号>` 立即插话 |
 | `/steer` | `/steer 先别动 migrations 目录` | 把一条内容插进正在执行的这一轮；Agent 不支持插话时排到队首并中断这一轮 |
 | `/remember` | `/remember 严禁直接 push 到 master 分支` | 保存一条长期记忆，之后每轮任务都带给 Agent |
-| `/memory` | `/memory`、`/memory consolidate`、`/memory ignore <描述>`、`/memory ignore list` | 查看当前可见的记忆及后台提取、整理状态；`consolidate` 立即整理；`ignore` 管理“不要记”的规则 |
+| `/memory` | `/memory`、`/memory consolidate`、`/memory ignore <描述>`、`/memory ignore list` | 查看当前可见的记忆及后台提取、整理状态；`consolidate` 立即整理；`ignore` 管理“不要记”的规则（`ignore remove <编号>` 删除）。群共享记忆池的规则对各群都生效，但每个群只能查看和删除本群设置的；疑似注入指令的规则不保存 |
 | `/forget` | `/forget <记忆编号>` | 删除一条记忆 |
 | `/schedule` | `/schedule every 30 巡检构建` | 查看、创建、启用或停用此话题的定时任务；`every` 后是分钟数，创建后默认停用，用 `/schedule enable <编号>` 启用 |
 | `/ci` | `/ci wait build.yml`、`/ci fix`、`/ci cancel <等待编号>` | 等当前提交的 CI、失败时交给 Agent 修复、取消等待。需先装 CI 插件 |

@@ -155,7 +155,7 @@ describe('memory of each turn', () => {
 });
 
 describe('/memory ignore', () => {
-  it('adds, lists and removes the rules of the shared pool, and keeps bot senders from changing them', async () => {
+  it('adds, lists and removes the rules of the shared pool, scopes them to the setting group, and keeps bot senders from changing them', async () => {
     const h = await harness();
     await h.coordinator.handle(event('om_i0', '/memory ignore'), h.config);
     await h.waitCards(1);
@@ -168,27 +168,36 @@ describe('/memory ignore', () => {
     const [rule] = await h.memoryStore.listIgnoreRules(groupPool);
     expect(rule).toMatchObject({ text: '不要记任何人的薪资', createdBy: 'ou_alice', chatId: 'oc_group' });
 
-    // 其他群看到的是同一份规则；私聊是另一个池。
-    await h.coordinator.handle(event('om_i2', '/memory ignore list', { chatId: 'oc_group_b', threadId: undefined, rootId: undefined }), h.config);
+    // 共享池里的规则对各群都生效，但其他群看不到、也删不掉；私聊是另一个池。
+    const groupB = { chatId: 'oc_group_b', threadId: undefined, rootId: undefined };
+    await h.coordinator.handle(event('om_i2', '/memory ignore list', groupB), h.config);
     await h.waitCards(3);
-    expect(h.lastCardText()).toContain(rule!.id);
-    await h.coordinator.handle(event('om_i3', '/memory ignore list', { chatId: 'oc_p2p', chatType: 'p2p', threadId: undefined, rootId: undefined, mentions: [] }), h.config);
+    expect(h.lastCardText()).toContain('本群还没有「不许记」规则');
+    expect(h.lastCardText()).not.toContain(rule!.id);
+    await h.coordinator.handle(event('om_i2b', `/memory ignore remove ${rule!.id}`, groupB), h.config);
     await h.waitCards(4);
+    expect(h.lastCardText()).toContain('本群设置的规则里没有编号为');
+    expect(await h.memoryStore.listIgnoreRules(groupPool)).toHaveLength(1);
+    await h.coordinator.handle(event('om_i3', '/memory ignore list', { chatId: 'oc_p2p', chatType: 'p2p', threadId: undefined, rootId: undefined, mentions: [] }), h.config);
+    await h.waitCards(5);
     expect(h.lastCardText()).toContain('还没有「不许记」规则');
+    await h.coordinator.handle(event('om_i3b', '/memory ignore list'), h.config);
+    await h.waitCards(6);
+    expect(h.lastCardText()).toContain(rule!.id);
 
     await h.coordinator.handle(event('om_i4', `/memory ignore remove ${rule!.id}`, { senderType: 'app', senderOpenId: 'ou_peer' }), h.config);
-    await h.waitCards(5);
+    await h.waitCards(7);
     expect(h.lastCardText()).toContain('机器人发送者不能修改');
     await h.coordinator.handle(event('om_i5', '/memory ignore remove nope'), h.config);
-    await h.waitCards(6);
+    await h.waitCards(8);
     expect(h.lastCardText()).toContain('用法');
     await h.coordinator.handle(event('om_i6', '/memory ignore remove ign_00000000'), h.config);
-    await h.waitCards(7);
+    await h.waitCards(9);
     expect(h.lastCardText()).toContain('没有编号为');
     expect(await h.memoryStore.listIgnoreRules(groupPool)).toHaveLength(1);
 
     await h.coordinator.handle(event('om_i7', `/memory ignore remove ${rule!.id}`), h.config);
-    await h.waitCards(8);
+    await h.waitCards(10);
     expect(h.lastCardText()).toContain('已删除不许记规则');
     expect(await h.memoryStore.listIgnoreRules(groupPool)).toEqual([]);
     // 规则命令不进入 Agent。
