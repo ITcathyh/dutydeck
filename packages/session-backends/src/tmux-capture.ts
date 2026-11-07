@@ -3,7 +3,7 @@ import { chmodSync, lstatSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { join, basename, dirname } from 'node:path';
 import { tmpdir, hostname } from 'node:os';
 import { StringDecoder } from 'node:string_decoder';
-import { parseProcStat } from '@dutydeck/shared';
+import { statStart } from './proc-stat.js';
 
 export const TMUX_CAPTURE_BUFFER_BYTES = 256 * 1024;
 const MAX_FRAME_BYTES = 128 * 1024;
@@ -11,7 +11,7 @@ const MAX_FRAME_BYTES = 128 * 1024;
 const SOCKET_PATH_BYTES = 100;
 const captureRoot = () => Buffer.byteLength(join(tmpdir(), 'dutydeck-tmux-capture-XXXXXX', 'out.sock')) <= SOCKET_PATH_BYTES ? tmpdir() : '/tmp';
 const quote = (text: string) => `'${text.replaceAll("'", "'\\''")}'`;
-const start = (pid: number) => parseProcStat(readFileSync(`/proc/${pid}/stat`, 'utf8')).start;
+const start = (pid: number) => statStart(readFileSync(`/proc/${pid}/stat`, 'utf8'));
 
 /** The pipe child always drains tmux input. A slow reader drops bytes within a
  * fixed write budget, then reports a gap before any later bytes. No output log. */

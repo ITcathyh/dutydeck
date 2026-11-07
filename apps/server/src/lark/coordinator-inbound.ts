@@ -1,4 +1,4 @@
-import { clearTaskReportSafely, isTerminalTaskStatus } from '@dutydeck/shared';
+import { clearTaskReportSafely, errorMessage, isTerminalTaskStatus } from '@dutydeck/shared';
 import { annotateDisposition, type Disposition } from './disposition.js';
 import { larkMessageAnchor } from './message-anchor.js';
 import { runAgentScheduleRequest } from '../agent-schedule-request.js';
@@ -159,7 +159,7 @@ function larkSessionConfigFailure(error: unknown, input: { command: string; labe
 }
 
 /** 实时路径上清理已忽略入站记录的最小间隔。 */
-export const LARK_IGNORED_PRUNE_INTERVAL_MS = 3_600_000;
+const LARK_IGNORED_PRUNE_INTERVAL_MS = 3_600_000;
 
 export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
   async initializeWorkflows(config: StoredLarkConfig) {
@@ -755,19 +755,22 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     this.scheduleIgnoredPrune(config.appId);
   }
 
+  private ignoredPruneState(appId: string) {
+    let state = this.ignoredPrunes.get(appId);
+    if (!state) this.ignoredPrunes.set(appId, state = { lastRunAt: 0, pending: false });
+    return state;
+  }
+
   private pruneIgnoredInbox(appId: string) {
-    const state = this.ignoredPrunes.get(appId) ?? { lastRunAt: 0, pending: false };
-    state.lastRunAt = Date.now();
-    this.ignoredPrunes.set(appId, state);
+    this.ignoredPruneState(appId).lastRunAt = Date.now();
     return timeLoop('lark.inbox.prune', this.log, () => this.inbox!.pruneIgnored(appId), undefined, appId);
   }
 
   /** 保留期按天计，不必每条忽略消息都清：实时路径上每个机器人每小时至多清理一次（启动时已清过一轮）。 */
   private scheduleIgnoredPrune(appId: string) {
-    const state = this.ignoredPrunes.get(appId) ?? { lastRunAt: 0, pending: false };
+    const state = this.ignoredPruneState(appId);
     if (state.pending) return;
     state.pending = true;
-    this.ignoredPrunes.set(appId, state);
     const cancel = () => { clearTimeout(timer); state.pending = false; this.turnCleanups.delete(cancel); };
     const timer = setTimeout(() => {
       this.turnCleanups.delete(cancel);
@@ -3466,7 +3469,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         // 过程更新或结果发送把旧消息 ID 写进新一轮。
         task.group.tail = task.group.tail.then(() => this.runTurn(task)).catch(error => {
           this.log.error({ error, chatId: task.event.chatId, messageId: task.event.messageId }, '重试飞书任务失败');
-          this.pushTaskError(task, `重试任务失败：${error instanceof Error ? error.message : String(error)}`);
+          this.pushTaskError(task, `重试任务失败：${errorMessage(error)}`);
           task.state = 'failed';
           task.requestUpdate?.('failed', false).catch(() => undefined);
         });

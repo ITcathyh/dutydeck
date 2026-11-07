@@ -1,5 +1,6 @@
 import { runCommand } from './command.js';
 import { descendantPids } from './descendant-pids.js';
+import { statStart } from './proc-stat.js';
 import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { isAbsolute } from 'node:path';
@@ -116,23 +117,23 @@ function readStat(pid: number): string | undefined {
   try { return readFileSync(`/proc/${pid}/stat`, 'utf8'); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT' || (error as NodeJS.ErrnoException).code === 'ESRCH') return undefined; throw error; }
 }
-function statStart(raw: string): string | undefined { return raw ? parseProcStat(raw).start : undefined; }
 function exitedSinceScan(pid: number, scannedStat: string | undefined): boolean {
   const current = readStat(pid);
   if (current === undefined) return true;
   if (scannedStat !== undefined && statStart(current) !== statStart(scannedStat)) return true;
   return procStatExited(parseProcStat(current));
 }
-const key = (identity: PhysicalProcessIdentity) => JSON.stringify([identity.host, identity.boot, identity.namespace, identity.pid, identity.start]);
+/** Two identities with the same key are the same physical process. */
+export const processIdentityKey = (identity: PhysicalProcessIdentity) => JSON.stringify([identity.host, identity.boot, identity.namespace, identity.pid, identity.start]);
 function alive(identity: PhysicalProcessIdentity, probe: ProcessProbe): void {
   if (probe.observe(identity) !== 'alive') fail('LEGACY_TMUX_PROCESS_STATE_CHANGED');
 }
-async function exitedWithin(items: PhysicalProcessIdentity[], probe: ProcessProbe, ms: number): Promise<boolean> {
+export async function exitedWithin(items: PhysicalProcessIdentity[], probe: ProcessProbe, ms: number, pollMs = 50): Promise<boolean> {
   const deadline = Date.now() + ms;
   for (;;) {
     if (items.every(item => probe.observe(item) === 'dead')) return true;
     if (Date.now() >= deadline) return false;
-    await new Promise(resolve => setTimeout(resolve, 50));
+    await new Promise(resolve => setTimeout(resolve, pollMs));
   }
 }
 
@@ -174,13 +175,13 @@ export async function stopOwnedTmux(identity: OwnedTmuxIdentity, probe: ProcessP
   }
   if (current !== targetId) fail('LEGACY_TMUX_TARGET_CHANGED');
   await ownerCheck(scope, targetId);
-  const all = new Map(identity.identities.map(item => [key(item), item]));
+  const all = new Map(identity.identities.map(item => [processIdentityKey(item), item]));
   // A busy pane keeps forking short-lived children, so the process set is never
   // static. Ownership rests on the target id, owner marker and server pid; every
   // descendant seen in any scan joins the exit proof instead of aborting the stop.
   const absorb = (scan: PhysicalProcessIdentity[]) => {
-    const added = scan.filter(item => !all.has(key(item)));
-    for (const item of added) all.set(key(item), item);
+    const added = scan.filter(item => !all.has(processIdentityKey(item)));
+    for (const item of added) all.set(processIdentityKey(item), item);
     return added;
   };
   absorb(await processes(scope, targetId, probe));

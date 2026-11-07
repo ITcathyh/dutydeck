@@ -6,6 +6,7 @@ import {
 } from '../inbox-model';
 import { hasRisk, riskSegments } from '../permission-risk';
 import { Badge, Banner, Button, Card, Skeleton } from './primitives';
+import { RiskText } from './RiskText';
 
 type InboxPanelProps = {
   items: InboxItem[];
@@ -128,9 +129,7 @@ export function InboxPanel({ items, loading, failed = false, onRetry, call, onOp
               : <span className="w-4 shrink-0" aria-hidden="true"/>}
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-2"><Badge tone="warning">{inboxKindLabels[item.kind]}</Badge><strong className="min-w-0 break-words text-body font-medium text-primary">{item.title}</strong></div>
-              {command ? <p className="mt-1 break-all font-mono text-caption text-secondary">{command.map((segment, part) => segment.risky
-                ? <mark key={part} className="rounded-sm bg-danger-soft px-0.5 font-semibold text-danger">{segment.text}</mark>
-                : segment.text)}</p>
+              {command ? <p className="mt-1 break-all font-mono text-caption text-secondary"><RiskText segments={command}/></p>
                 : item.detail && <p className="mt-1 break-words text-caption text-secondary">{item.detail}</p>}
               {risky && <p className="mt-1 text-caption text-danger">命令里有可能造成破坏的片段，请打开任务核对后再允许。</p>}
               <p className="mt-1 text-caption text-subtle">{item.sessionTitle} · {item.workspace} · 已等待 {formatWaiting(item.waitingMs)}{item.revision !== undefined && typeof item.revision === 'number' ? ` · 版本 ${item.revision}` : ''}</p>

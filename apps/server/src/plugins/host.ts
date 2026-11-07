@@ -1,6 +1,6 @@
 import { PluginBusinessToolRegistry } from './business-tools.js';
 import { PluginBindings } from './bindings.js';
-import { RuntimeError, type PluginBinding, type PluginBindingScope, type PluginBindingContext } from '@dutydeck/shared';
+import { errorMessage, RuntimeError, type PluginBinding, type PluginBindingScope, type PluginBindingContext } from '@dutydeck/shared';
 import { PluginResultToolRegistry } from './result-tools.js';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -155,7 +155,7 @@ export class PluginHost {
     let lease: Awaited<ReturnType<PluginStore['acquireHost']>>;
     try { lease = await host.store.acquireHost(); }
     catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
+      const reason = errorMessage(error);
       host.degraded = reason;
       host.diagnostics.push({ plugin: PLUGIN_STORE_DIAGNOSTIC, message: `插件库不可用，本次只加载了内置插件，外部插件全部未加载：${reason}` });
       host.log?.warn({ plugin: PLUGIN_STORE_DIAGNOSTIC, error: reason, degraded: true }, '插件库不可用，只加载内置插件；修复后重启 daemon');
@@ -235,9 +235,11 @@ export class PluginHost {
     for (const { entry: candidate, root, builtin } of candidates) {
       let entry = candidate;
       let providerCodeEvaluated = false;
+      // Quarantine tracks crashes of installed plugin code; builtins and validation runs are outside it.
+      const quarantinable = !builtin && !validation;
       try {
         if (!builtin && builtinNames.has(entry.name)) throw new Error(`和内置插件 ${entry.name} 同名，没有加载；卸载后改名重新安装`);
-        const quarantine = builtin || validation ? undefined : readPluginQuarantine(this.store.pluginsDir, entry.name);
+        const quarantine = quarantinable ? readPluginQuarantine(this.store.pluginsDir, entry.name) : undefined;
         if (quarantine) throw new Error(`${quarantineDetail(quarantine)}；${quarantineRemedy(entry.name)}`);
         const plugin = await loadPluginDirectory(root);
         if (plugin.manifest.name !== entry.name) throw new Error(builtin ? `内置插件目录 ${entry.name} 里的插件名是 ${plugin.manifest.name}，两者必须一致` : `目录里的插件名是 ${plugin.manifest.name}，与锁文件记录的 ${entry.name} 不一致`);
@@ -277,7 +279,7 @@ export class PluginHost {
         const scenarioProviders = new Map<string, ScenarioProvider>();
         if (plugin.providersEntry) {
           providerCodeEvaluated = true;
-          registerPluginCodeRoot(entry.name, plugin.root, builtin || validation ? undefined : this.store.pluginsDir);
+          registerPluginCodeRoot(entry.name, plugin.root, quarantinable ? this.store.pluginsDir : undefined);
           // 内置插件随每次启动加载，不为它们建数据目录：没装插件时数据目录下什么都不多（用到时插件自己建）。
           if (!builtin) await mkdir(dataDir, { recursive: true });
           let registering = true;
@@ -301,7 +303,7 @@ export class PluginHost {
             }
           };
           // 同步死循环拦不住；标记留到下次启动、写标记的进程已退出时，这个插件按隔离处理。
-          const loaded = builtin || validation ? undefined : markProviderLoading(this.store.pluginsDir, entry.name);
+          const loaded = quarantinable ? markProviderLoading(this.store.pluginsDir, entry.name) : undefined;
           try {
             await withTimeout((async () => {
               const module = await import(pathToFileURL(plugin.providersEntry!).href) as { default?: unknown; register?: unknown };

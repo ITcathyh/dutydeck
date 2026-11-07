@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { RuntimeError, collaborationScopeSchema, parseLarkSourceId, updateCollaborationSettingsInputSchema, updateFollowupInputSchema, type CollaborationScope } from '@dutydeck/shared';
+import { RuntimeError, isRecord, collaborationScopeSchema, parseLarkSourceId, updateCollaborationSettingsInputSchema, updateFollowupInputSchema, type CollaborationScope } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import type { CollaborationService } from './collaboration-service.js';
 import type { CollaborationEvaluation } from './collaboration-evaluation.js';
@@ -38,7 +38,7 @@ const dutyPatchSchema = z.object({
 }).strict();
 const feedbackSchema = z.object({ correction: z.string().trim().min(1).max(4000), expectedAction: z.enum(['silent', 'reply', 'act']).optional() }).strict();
 const replaySchema = z.object({ decisionIds: z.array(z.string().min(1)).min(1).max(50), policyVersion: z.string().min(1).max(64).optional() }).strict();
-const tighteningOnly = (body: unknown) => !!body && typeof body === 'object' && !Array.isArray(body) && Object.entries(body).every(([key, value]) =>
+const tighteningOnly = (body: unknown) => isRecord(body) && Object.entries(body).every(([key, value]) =>
   key === 'expectedRevision' || key === 'deliveryPaused' && value === true || key === 'status' && ['paused', 'cancelled', 'completed'].includes(value as string));
 function parse<S extends z.ZodTypeAny>(schema: S, value: unknown): z.output<S> {
   const result = schema.safeParse(value);

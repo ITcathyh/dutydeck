@@ -2,6 +2,7 @@ import { mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { currentProcessIdentity, observeProcess } from '@dutydeck/storage';
 import { z } from 'zod';
+import { processIdentitySchema } from './activation.js';
 import { writeFileAtomicSync } from '../atomic-file.js';
 
 /**
@@ -9,9 +10,8 @@ import { writeFileAtomicSync } from '../atomic-file.js';
  * 外部插件被隔离后整包不加载，直到 plugin enable / activate / rollback / uninstall 清除；内置插件不受隔离。
  */
 const QUARANTINE_DIR = '.quarantine';
-const identitySchema = z.object({ host: z.string(), boot: z.string(), namespace: z.string(), pid: z.number().int().positive(), start: z.string() });
 const recordSchema = z.object({ plugin: z.string(), reason: z.enum(['crash', 'startup']), at: z.string(), origin: z.string().optional() });
-const loadingSchema = z.object({ plugin: z.string(), at: z.string(), identity: identitySchema });
+const loadingSchema = z.object({ plugin: z.string(), at: z.string(), identity: processIdentitySchema });
 export type PluginQuarantine = z.infer<typeof recordSchema>;
 
 const directory = (pluginsDir: string) => join(pluginsDir, QUARANTINE_DIR);

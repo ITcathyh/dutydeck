@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { RuntimeError } from '@dutydeck/shared';
+import { errorMessage, RuntimeError, shellQuote } from '@dutydeck/shared';
 import { SAFE_GIT_CONFIG, safeGitConfigFor, safeGitEnvironment } from '@dutydeck/shared/safe-git';
 
 /**
@@ -39,7 +39,7 @@ export async function git(repo: GitRepo, args: string[], options: { env?: NodeJS
   const prefix = 'cwd' in repo ? ['-C', repo.cwd] : ['--git-dir', repo.gitDir];
   const env = safeGitEnvironment(process.env, { GIT_OPTIONAL_LOCKS: '0', ...options.env });
   const config = REMOTE_COMMANDS.has(args[0]!)
-    ? await safeGitConfigFor(prefix, { env }).catch(error => { throw new RuntimeError('PR_GIT_FAILED', `git config 失败：${redactGitOutput(String(error instanceof Error ? error.message : error))}`, 500); })
+    ? await safeGitConfigFor(prefix, { env }).catch(error => { throw new RuntimeError('PR_GIT_FAILED', `git config 失败：${redactGitOutput(errorMessage(error))}`, 500); })
     : SAFE_GIT_CONFIG;
   return new Promise((resolve, reject) => {
     const child = execFile('git', [...prefix, ...config, ...args], {
@@ -218,7 +218,7 @@ export async function pushBranch(cwd: string, url: string, commit: string, branc
   const remote = directRemote(url);
   // 推到本机路径时 receive-pack 在本机按目标仓库的配置跑（hooks、checkout 等），命令行 -c 传不过去，要写进 receive-pack 命令本身（经 sh 执行）。
   const receivePack = isLocalRemote(url)
-    ? [`--receive-pack=git ${[...SAFE_GIT_CONFIG, '-c', 'receive.denyCurrentBranch=refuse'].map(arg => `'${arg.replaceAll("'", `'\\''`)}'`).join(' ')} receive-pack`]
+    ? [`--receive-pack=git ${[...SAFE_GIT_CONFIG, '-c', 'receive.denyCurrentBranch=refuse'].map(shellQuote).join(' ')} receive-pack`]
     : [];
   await git({ cwd }, ['push', '--porcelain', '--no-verify', ...receivePack, remote.name, `${commit}:refs/heads/${branch}`], { env: remote.env, timeout: PUSH_TIMEOUT_MS });
 }
