@@ -14,7 +14,7 @@ const cleanup: Array<() => Promise<unknown> | unknown> = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
 const event = (sequence: number, text = `output-${sequence}`) => ({ id: `e${sequence}`, sessionId: 's1', sequence, type: 'text', timestamp: '2026-10-06T00:00:00.000Z', data: { text } });
 
-async function server(options: { mode?: 'local' | 'open' | 'token'; getShareSecret?: AuthMiddlewareOptions['getShareSecret']; replay?: (id: string, options: any) => Promise<any[]>; instances?: any[] } = {}) {
+async function server(options: { mode?: 'local' | 'open' | 'token'; getToken?: AuthMiddlewareOptions['getToken']; getShareSecret?: AuthMiddlewareOptions['getShareSecret']; replay?: (id: string, options: any) => Promise<any[]>; instances?: any[] } = {}) {
   let secret = 'before';
   let listener = (_event: any) => {};
   const unsubscribe = vi.fn();
@@ -24,7 +24,7 @@ async function server(options: { mode?: 'local' | 'open' | 'token'; getShareSecr
     subscribe: vi.fn((_id: string, next: typeof listener) => { listener = next; return unsubscribe; })
   };
   const mode = options.mode ?? 'token';
-  const app = await buildApp(runtime, { instances: options.instances, auth: { mode, localOnly: mode === 'local', getToken: async () => 'admin', getShareSecret } });
+  const app = await buildApp(runtime, { instances: options.instances, auth: { mode, localOnly: mode === 'local', getToken: options.getToken ?? (async () => 'admin'), getShareSecret } });
   await app.listen({ host: '127.0.0.1', port: 0 });
   cleanup.push(() => app.close());
   return { app, runtime, unsubscribe, getShareSecret, url: `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`, emit: (next: any) => listener(next), rotate: () => { secret = 'after'; }, token: () => signSessionShareToken(secret, 's1') };
@@ -222,5 +222,33 @@ describe('share stream revocation', () => {
     const next = await stream(`${main.url}/api/instances/peer/sessions/s1/stream?share=${peer.token()}`);
     peer.emit(event(3));
     await vi.waitFor(() => expect(next.text()).toContain('output-3'));
+  });
+});
+
+describe('administrator stream revocation', () => {
+  it.each(['rotated', 'failed', 'stalled'] as const)('closes an open administrator stream once its access credential is %s', async outcome => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    cleanup.push(() => vi.useRealTimers());
+    let token = 'admin';
+    const peer = await server({ getToken: async () => {
+      if (token === 'failed') throw new Error('storage unavailable');
+      if (token === 'stalled') return new Promise<string>(() => {});
+      return token;
+    } });
+    const s = await stream(`${peer.url}/api/sessions/s1/stream`);
+    vi.advanceTimersByTime(5_000);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    peer.emit(event(1));
+    await vi.waitFor(() => expect(s.text()).toContain('output-1'));
+    expect(s.closed()).toBe(false);
+
+    token = outcome;
+    vi.advanceTimersByTime(5_000);
+    if (outcome === 'stalled') {
+      await new Promise(resolve => setTimeout(resolve, 50));
+      expect(s.closed()).toBe(false);
+      vi.advanceTimersByTime(5_000);
+    }
+    await expectRevoked(s, peer.unsubscribe);
   });
 });

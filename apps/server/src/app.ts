@@ -32,7 +32,7 @@ import { registerLarkRoutes, type LarkRoutesOptions } from './lark/routes.js';
 import { discoverAgentModels } from './agent-models.js';
 import { discoverSessionAgentModels } from './session-model-probe.js';
 import { registerSystemRoutes, type SystemRoutesOptions } from './system-routes.js';
-import { isValidSessionShareCredential, SHARE_TOKEN_QUERY_KEY, registerAuthMiddleware, registerBrowserAuthRoutes, type AuthMiddlewareOptions } from './auth/auth.js';
+import { accessMode, extractBearerToken, extractCookie, isValidAccessCredential, isValidSessionShareCredential, SHARE_TOKEN_QUERY_KEY, registerAuthMiddleware, registerBrowserAuthRoutes, type AuthMiddlewareOptions } from './auth/auth.js';
 import { registerTerminalRoutes, type TerminalRouteAuth, type TerminalStreamProvider } from './terminal/terminal-ws.js';
 import { isSharedInstanceRead, registerInstanceProxy, rewriteSharedSessionProxyUrl, type PeerInstance } from './instance-proxy.js';
 import { isRelayCapabilityRequest, registerRelayRoutes, type RelayRoutesOptions } from './relay-routes.js';
@@ -75,6 +75,7 @@ const contentTypes: Record<string, string> = {
 
 // Web 构建为文本资源生成的预压缩副本。按 Accept-Encoding 的权重选，同权重优先 br；未声明或 q=0 的编码不用。
 const precompressedEncodings = [{ name: 'br', suffix: '.br' }, { name: 'gzip', suffix: '.gz' }] as const;
+const SESSION_STREAM_ACCESS_RECHECK_MS = 5_000;
 function acceptedPrecompressedEncodings(header: string | string[] | undefined) {
   const weights = new Map<string, number>();
   for (const part of String(header ?? '').split(',')) {
@@ -727,6 +728,12 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     let cancelShareCheck: (() => void) | undefined;
     const shared = Boolean(options.auth) && Object.prototype.hasOwnProperty.call(request.query, SHARE_TOKEN_QUERY_KEY);
     const shareToken = (request.query as Record<string, unknown>)[SHARE_TOKEN_QUERY_KEY];
+    // The access credential was checked once at connect; a token rotation or
+    // password reset must also end streams that are already open.
+    const accessAuth = !shared && options.auth && accessMode(options.auth) === 'token' ? options.auth : undefined;
+    const accessCredential = extractBearerToken(request.headers.authorization) ?? extractCookie(request.headers.cookie);
+    let accessPoll: ReturnType<typeof setInterval> | undefined;
+    let accessChecking = false;
     const sharedSessionId = request.params.id;
     let delivered = after;
     let replaying = true;
@@ -742,6 +749,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
       pendingLive.length = 0;
       if (heartbeat) clearInterval(heartbeat);
       if (sharePoll) clearInterval(sharePoll);
+      if (accessPoll) clearInterval(accessPoll);
       if (shareDeadline) clearTimeout(shareDeadline);
       cancelShareCheck?.();
       cancelShareCheck = undefined;
@@ -832,6 +840,15 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     // storage is still reading, and Node will not replay an already-fired close.
     request.raw.once('close', cleanup);
     if (shared) sharePoll = setInterval(() => { if (!closed && !shareCheck) void checkShare(); }, 1_000);
+    if (accessAuth) accessPoll = setInterval(() => {
+      if (closed) return;
+      // A check still unresolved a whole period later cannot prove access.
+      if (accessChecking) return disconnect();
+      accessChecking = true;
+      void isValidAccessCredential(accessCredential, accessAuth.getToken, accessAuth.getPasswordHash)
+        .then(valid => { if (!valid) disconnect(); }, disconnect)
+        .finally(() => { accessChecking = false; });
+    }, SESSION_STREAM_ACCESS_RECHECK_MS);
     try {
       if (!await writeChunk(': connected\n\n')) return;
       // A fresh stream only needs the latest visible window; reconnects page

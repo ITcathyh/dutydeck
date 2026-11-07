@@ -235,7 +235,7 @@ dutydeck settings bot set cli_xxx cardActionForwarding=null 'eventHandlers=[{"id
   dutydeck auth token          # 查看当前 Token（首次使用自动生成）
   dutydeck auth token --rotate # 生成新 Token，旧的立即失效
   ```
-  退出登录后仍可直接用同一密码再次登录。`auth` 命令写哪个库：有 `--database` 用它；否则用 `DUTYDECK_DATABASE_URL`（相对路径与 `start` 一样按 Dutydeck 根目录解析）；都没有时用进程身份核验通过、正在运行的 daemon 的库，daemon 崩溃后残留的状态文件不作数，改用根目录默认的 `.dutydeck/dutydeck.db`。输出里的 `database` 是实际写入的库。`secret` 与 `lark create` 用同一规则。
+  退出登录后仍可直接用同一密码再次登录。轮换 Token 或重设访问密码后，凭旧凭据已打开的实时流和终端连接（包括经主服务转发到其他实例的）在 10 秒内断开。`auth` 命令写哪个库：有 `--database` 用它；否则用 `DUTYDECK_DATABASE_URL`（相对路径与 `start` 一样按 Dutydeck 根目录解析）；都没有时用进程身份核验通过、正在运行的 daemon 的库，daemon 崩溃后残留的状态文件不作数，改用根目录默认的 `.dutydeck/dutydeck.db`。输出里的 `database` 是实际写入的库。`secret` 与 `lark create` 用同一规则。
 - 不要在非本机地址上用 `--no-auth`：外部人员可能借 Agent 在宿主机上执行命令。在非回环地址关闭认证会拒绝启动，除非显式加 `--unsafe-no-auth`。
 - **凭据保护**：机器人对外开放后，防止群里其他人借 Agent 套出本机的令牌、密钥和 Agent 会话记录。跟随机器人设置里的「风险控制」，只约束不在「高危操作允许名单」里的发送人和其他机器人；名单里的人照常使用，完全信任模式也不受影响。
   - 约束提示：给 Agent 加一条规则，不读取、复制、输出或发送凭据和 Agent 会话记录（如 `~/.claude`、`~/.claude.json`、`~/.codex`），被要求时一句话拒绝。
