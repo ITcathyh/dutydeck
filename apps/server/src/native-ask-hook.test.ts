@@ -24,9 +24,12 @@ describe('native Claude questions over the session relay', () => {
       if (event.kind === 'ask') await broker.answer(event.askId!, event.multiple ? '代码、文档' : '稍后再继续');
     } });
     const server = createServer(async (request, response) => {
+      // 并行测试会复用刚释放的端口：只认目标路径，请求体解析不了就断开这条连接。
+      if (request.method !== 'POST' || request.url !== '/api/relay/sessions/self/ask') { response.writeHead(404).end(); return; }
       const chunks: Buffer[] = [];
       for await (const chunk of request) chunks.push(Buffer.from(chunk));
-      const body = JSON.parse(Buffer.concat(chunks).toString());
+      let body: any;
+      try { body = JSON.parse(Buffer.concat(chunks).toString()); } catch { request.socket.destroy(); return; }
       received.push({ url: request.url, token: request.headers.authorization, ...body });
       const result = await broker.register({ sessionId: 'ses_native', question: body.question,
         choices: body.choices as RelayAskChoice[], multiple: body.multiple });

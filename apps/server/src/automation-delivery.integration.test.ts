@@ -26,7 +26,10 @@ async function fixture() {
     const path = request.url!;
     if (path.includes('/auth/')) { json(response, { code: 0, tenant_access_token: 'synthetic', expire: 3600 }); return; }
     if (path === '/open-apis/im/v1/files') { provider.uploads++; json(response, { code: 0, data: { file_key: `file_${provider.uploads}` } }); return; }
-    const body = JSON.parse(Buffer.concat(chunks).toString());
+    // 并行测试会复用刚释放的端口：只把发消息的请求计入，请求体解析不了就断开这条连接。
+    if (request.method !== 'POST' || !/^\/open-apis\/im\/v1\/messages(\?|\/[^/]+\/reply)/.test(path)) { response.writeHead(404).end(); return; }
+    let body: { msg_type?: string; uuid: string };
+    try { body = JSON.parse(Buffer.concat(chunks).toString()); } catch { request.socket.destroy(); return; }
     if (body.msg_type === 'file') {
       provider.files.push(body.uuid);
       await provider.afterFile?.();
