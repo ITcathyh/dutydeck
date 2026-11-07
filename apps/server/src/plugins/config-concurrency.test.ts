@@ -3,8 +3,14 @@ import { fork, type ChildProcess } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { lazyBundleForTest } from '../../../../tests/support/bundle-for-test.js';
+import { fileURLToPath } from 'node:url';
 import { PluginStore } from './store.js';
+
+// The helper runs as a bundle: through the TypeScript loader each fork paid a cold start of a second or more.
+const configWriter = lazyBundleForTest('config-writer', fileURLToPath(new URL('./config-writer.test-helper.mjs', import.meta.url)));
+afterAll(() => configWriter.cleanup());
 
 let directory: string;
 let store: PluginStore;
@@ -26,8 +32,8 @@ afterEach(async () => {
 
 async function writer(plugin: string, key: string, operation = 'set') {
   const messages: Array<{ type: string; ok?: boolean; message?: string }> = [];
-  const child = fork(new URL('./config-writer.test-helper.mjs', import.meta.url), [store.dataDir, operation, plugin, key], {
-    execArgv: ['--conditions=development', '--import', 'tsx'], stdio: ['ignore', 'ignore', 'pipe', 'ipc']
+  const child = fork(await configWriter.path(), [store.dataDir, operation, plugin, key], {
+    stdio: ['ignore', 'ignore', 'pipe', 'ipc']
   });
   children.push(child);
   let stderr = ''; child.stderr!.on('data', chunk => { stderr += chunk; });

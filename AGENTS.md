@@ -45,7 +45,7 @@ pnpm exec tsx apps/server/src/cli.ts --local-only --port 14310 --no-lark-listen
 
 ## 验证
 
-代码改动均须通过 `pnpm typecheck` 和受影响测试的 `pnpm exec vitest run <测试路径>`。从仓库根运行，Node 与 Web/jsdom 由根配置分流；需要限定时用 `--project=node` 或 `--project=web`。node project 由 `tests/setup/node-env.ts` 在每个测试文件前清掉服务实例变量（`child-environment.mjs` 的 `inheritedServiceKeys`、`DUTYDECK_DATABASE_URL`、`DUTYDECK_SUPERVISOR`、`DUTYDECK_SYSTEMD_UNIT` 和 `DUTYDECK_DAEMON_RESTART_*`），需要这些变量的用例要显式设置。`pnpm typecheck` 不检查 `*.test.ts`（tsconfig 已排除），Vitest 运行时也不做类型检查，测试代码里的类型错误两边都发现不了。全量测试并行执行、机器负载高，涉及时间的断言要留足余量或改用假时钟，不能只调到在本机刚好通过。未设置 `CI` 时根 `vitest.config.ts` 把 worker 数限制为可用核数的四分之一（至少 1、至多 16），需要别的并发时在命令行加 `--maxWorkers`。测试里的本地 HTTP 桩按目标路径过滤后再计数或断言，并行测试会复用刚释放的端口打进无关请求；请求体解析失败时断开该连接并返回，不抛成未处理 rejection。把失败归为既有问题要有依据：在 master 的 detached worktree 复跑同一测试，或对照更早的全量日志。
+代码改动均须通过 `pnpm typecheck` 和受影响测试的 `pnpm exec vitest run <测试路径>`。从仓库根运行，Node 与 Web/jsdom 由根配置分流；需要限定时用 `--project=node` 或 `--project=web`。node project 由 `tests/setup/node-env.ts` 在每个测试文件前清掉服务实例变量（`child-environment.mjs` 的 `inheritedServiceKeys`、`DUTYDECK_DATABASE_URL`、`DUTYDECK_SUPERVISOR`、`DUTYDECK_SYSTEMD_UNIT` 和 `DUTYDECK_DAEMON_RESTART_*`），需要这些变量的用例要显式设置。`pnpm typecheck` 不检查 `*.test.ts`（tsconfig 已排除），Vitest 运行时也不做类型检查，测试代码里的类型错误两边都发现不了。全量测试并行执行、机器负载高，涉及时间的断言要留足余量或改用假时钟，不能只调到在本机刚好通过。未设置 `CI` 时根 `vitest.config.ts` 把 worker 数限制为可用核数的四分之一（至少 1、至多 16），需要别的并发时在命令行加 `--maxWorkers`；web project 另用最多 3 个线程与 node 同时跑。测试要反复起 TypeScript 入口的子进程（CLI、fixture）时，用 `tests/support/bundle-for-test.ts` 先打包一次再用 `node` 启动，不要每次 `--import tsx`：后者每次冷启动要 1～3 秒，负载高时是超时的主要来源。测试里的本地 HTTP 桩按目标路径过滤后再计数或断言，并行测试会复用刚释放的端口打进无关请求；请求体解析失败时断开该连接并返回，不抛成未处理 rejection。把失败归为既有问题要有依据：在 master 的 detached worktree 复跑同一测试，或对照更早的全量日志。
 
 | 额外影响范围 | 追加检查 |
 |---|---|

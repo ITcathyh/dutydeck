@@ -8,12 +8,17 @@ import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
 import { constants as osConstants, tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { Worker, WorkerOptions } from 'node:worker_threads';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { lazyBundleForTest } from '../../../../tests/support/bundle-for-test.js';
 import type { AutostartCommandOutput } from '../autostart/autostart.js';
 import { DRAIN_INTERVAL_MS } from './command.js';
 import { parseDeployWindows, runDeploy, runDeployPrune, shanghaiMinuteOfDay, withinDeployWindow, type DeployDeps, type DeployResult } from './deploy.js';
+
+// The helper runs as a bundle: through the TypeScript loader each fork paid a cold start of a second or more.
+const deployOwner = lazyBundleForTest('deploy-owner', fileURLToPath(new URL('./deploy-owner.test-helper.mjs', import.meta.url)));
+afterAll(() => deployOwner.cleanup());
 
 /** 装上后，下一个创建的工作线程（即数据库备份线程）改用 workerData 加载探针驱动；用一次就卸下。 */
 const backupProbe = vi.hoisted(() => ({ next: undefined as undefined | { workerData(original: any): unknown; attach(worker: Worker): void } }));
@@ -245,8 +250,8 @@ describe('dutydeck deploy', () => {
 
   async function owner(stage: string) {
     const messages: Array<{ type: string; result?: DeployResult; message?: string }> = [];
-    const child = fork(new URL('./deploy-owner.test-helper.mjs', import.meta.url), [source, bot, releases, stage], {
-      execArgv: ['--conditions=development', '--import', 'tsx'], stdio: ['ignore', 'ignore', 'pipe', 'ipc']
+    const child = fork(await deployOwner.path(), [source, bot, releases, stage], {
+      stdio: ['ignore', 'ignore', 'pipe', 'ipc']
     });
     children.push(child);
     let stderr = ''; child.stderr!.on('data', chunk => { stderr += chunk; });

@@ -2,9 +2,15 @@ import { fork, type ChildProcess } from 'node:child_process';
 import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { lazyBundleForTest } from '../../../../tests/support/bundle-for-test.js';
+import { fileURLToPath } from 'node:url';
 import { PluginStore } from './store.js';
 import { PluginHost } from './host.js';
+
+// The helper runs as a bundle: through the TypeScript loader each fork paid a cold start of a second or more.
+const lockWriter = lazyBundleForTest('lock-writer', fileURLToPath(new URL('./lock-writer.test-helper.mjs', import.meta.url)));
+afterAll(() => lockWriter.cleanup());
 
 let directory: string;
 let store: PluginStore;
@@ -30,8 +36,8 @@ afterEach(async () => {
 
 async function writer(operation: string, target: string, hold = false) {
   const messages: Array<{ type: string; ok?: boolean; code?: string; message?: string }> = [];
-  const child = fork(new URL('./lock-writer.test-helper.mjs', import.meta.url), [store.dataDir, operation, target, ...(hold ? ['hold'] : [])], {
-    execArgv: ['--conditions=development', '--import', 'tsx'], stdio: ['ignore', 'ignore', 'pipe', 'ipc']
+  const child = fork(await lockWriter.path(), [store.dataDir, operation, target, ...(hold ? ['hold'] : [])], {
+    stdio: ['ignore', 'ignore', 'pipe', 'ipc']
   });
   children.push(child);
   let stderr = ''; child.stderr!.on('data', chunk => { stderr += chunk; });

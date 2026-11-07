@@ -23,6 +23,10 @@ export default defineConfig({
   test: {
     // 本地机器常被多人或多个 Agent 共用：默认只占四分之一的核（上限 16），CI 沿用 Vitest 默认；命令行 --maxWorkers 可覆盖。
     maxWorkers: process.env.CI ? undefined : Math.max(1, Math.min(16, Math.floor(availableParallelism() / 4))),
+    // The forks pool queues every node-environment file before any jsdom file, so in one pool the web tests only started
+    // after the node tests and their slowest files ran alone at the end. The web project uses the threads pool instead
+    // (see apps/web/vitest.config.ts); pools run side by side, and this small cap keeps it from competing with node.
+    poolOptions: { threads: { maxThreads: 3, minThreads: 1 } },
     projects: [
       {
         resolve: { alias },

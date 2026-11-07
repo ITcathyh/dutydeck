@@ -16,6 +16,8 @@ export default defineConfig({
   test: {
     name: 'web',
     environment: 'jsdom',
+    // Runs beside the node project's forks pool instead of queueing behind it; its size is set in the root config.
+    pool: 'threads',
     globals: false,
     setupFiles: [fileURLToPath(new URL('./vitest.setup.ts', import.meta.url))],
     include: ['src/**/*.test.{ts,tsx}'],

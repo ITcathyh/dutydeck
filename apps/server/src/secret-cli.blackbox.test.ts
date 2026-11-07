@@ -3,7 +3,7 @@ import { chmod, lstat, mkdtemp, readFile, readdir, rm, symlink, writeFile } from
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { bundleCliForTest } from './cli-bundle.test-helpers.js';
+import { bundleCliForTest } from '../../../tests/support/bundle-for-test.js';
 import { createRepositories } from '@dutydeck/storage';
 
 let bundledCliPath: string;

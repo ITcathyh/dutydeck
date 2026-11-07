@@ -1,4 +1,4 @@
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync, symlinkSync, linkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,6 +8,11 @@ import Database from 'better-sqlite3';
 import { createRepositories } from './index.js';
 import { openDatabaseControl } from './database-control.js';
 import { currentProcessIdentity, observeProcess } from './process-identity.js';
+import { lazyBundleForTest } from '../../../tests/support/bundle-for-test.js';
+
+// The fixture runs as a bundle: through the TypeScript loader each spawn paid a cold start of a second or more.
+const databaseControlWorker = lazyBundleForTest('database-control-worker', fileURLToPath(new URL('../tests/fixtures/database-control-worker.mts', import.meta.url)));
+afterAll(() => databaseControlWorker.cleanup());
 
 const directories: string[] = [];
 const children: Array<{ child: ChildProcess; exit: Promise<unknown> }> = [];
@@ -17,7 +22,7 @@ afterEach(async () => {
 });
 function file() { const dir = mkdtempSync(join(tmpdir(), 'dutydeck-control-')); directories.push(dir); return join(dir, 'state.sqlite'); }
 async function worker(path: string) {
-  const child = spawn(process.execPath, ['--conditions=development', '--import', 'tsx', fileURLToPath(new URL('../tests/fixtures/database-control-worker.mts', import.meta.url)), path, join(path, '..')], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+  const child = spawn(process.execPath, [await databaseControlWorker.path(), path, join(path, '..')], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
   const exit = new Promise(resolve => child.once('exit', resolve)); children.push({ child, exit });
   let errorText = ''; child.stderr!.on('data', data => { errorText += data; });
   let ready!: () => void;
