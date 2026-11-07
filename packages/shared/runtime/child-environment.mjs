@@ -17,6 +17,13 @@ const sessionKeys = new Set([
   'LARK_APP_SECRET'
 ]);
 
+// Service configuration (agent accounts, peer instances, database, plugin secrets) never crosses into agents.
+// Only these non-secret keys may be inherited: launcher overrides read by agents/claude-acp.mjs, and the
+// instance address that keeps an agent's own `dutydeck` commands on its daemon instead of last-daemon-dir.
+const inheritedServiceKeys = new Set([
+  'DUTYDECK_CLAUDE_ACP_COMMAND', 'DUTYDECK_CLAUDE_ACP_ARGS_JSON', 'DUTYDECK_DAEMON_DIR', 'DUTYDECK_BOT_APP_ID'
+]);
+
 /** Build a child-only snapshot; explicit CLI accounts and current scopes win. */
 export function childEnvironment(inherited, configured = {}, { stripClaude = false } = {}) {
   const env = Object.fromEntries(Object.entries(inherited).filter(([, value]) => typeof value === 'string'));
@@ -36,8 +43,10 @@ export function childEnvironment(inherited, configured = {}, { stripClaude = fal
   delete env.TMUX; delete env.TMUX_PANE;
   for (const key of Object.keys(env)) {
     if (sessionKeys.has(key) || /^BOTMUX_IDENTITY_/.test(key)
+      || /^DUTYDECK_/.test(key) && !inheritedServiceKeys.has(key)
       || /^DUTYDECK_.*(?:TOKEN|SECRET|PASSWORD|AUTH)(?:_|$)/i.test(key)
-      || /^dutydeck_(?:group_tools_|relay_|herdr_|agent_env_|session_id$|terminal_backend$|launcher_group$|terminal_launch_id$)/i.test(key)
+      || /^(?:LARK|FEISHU)_.*(?:SECRET|TOKEN|PASSWORD|ENCRYPT_KEY)(?:_|$)/i.test(key)
+      || /^dutydeck_(?:group_tools_|relay_|herdr_|agent_env_|session_id$|terminal_backend$|launcher_group$|launcher_report$|terminal_launch_id$)/i.test(key)
       || stripClaude && /^(?:ANTHROPIC_|CLAUDE_)/i.test(key)) delete env[key];
   }
   Object.assign(env, configured);

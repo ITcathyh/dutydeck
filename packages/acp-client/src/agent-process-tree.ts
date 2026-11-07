@@ -1,4 +1,5 @@
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
 
 /**
  * Process tree of one Agent child spawned by ACPX, read from Linux /proc. Other platforms see only the root.
@@ -56,12 +57,30 @@ export class AgentProcessTree {
   /** Process groups led by a member (for example the Agent the env launcher detaches); they outlive a killed parent. */
   private readonly groups = new Set<number>();
   private readonly ownGroup: boolean;
+  /** Where a Dutydeck launcher root records the Agent it detached, read even after the launcher died before any sample. */
+  private readonly report?: string;
 
-  constructor(pid: number | undefined) {
+  constructor(pid: number | undefined, reports?: string) {
     const stat = pid ? readStat(pid) : undefined;
     if (pid && stat) this.root = { pid, start: stat.start };
     this.ownGroup = !!pid && stat?.pgid === pid;
     if (this.ownGroup) this.groups.add(pid!);
+    if (reports && this.root) this.report = join(reports, `${this.root.pid}.${this.root.start}`);
+  }
+  /** Drop the launcher's report file; whatever it named stays recorded. */
+  discardReport() { if (this.report) rmSync(this.report, { force: true }); }
+  private adoptReported(table: ProcessTable) {
+    let raw: string;
+    try { raw = readFileSync(this.report!, 'utf8'); } catch { return; }
+    const match = /^(\d+) (\d+)\n$/.exec(raw);
+    if (!match) return;
+    const member = { pid: Number(match[1]), start: match[2]! };
+    // The report lives in the workspace: only a process the launcher could have started is accepted.
+    if (member.pid === this.root!.pid || Number(member.start) < Number(this.root!.start)) return;
+    const stat = table.get(member.pid);
+    this.members.set(key(member), member);
+    // A leader PID cannot be reused while its group has members, so a gone leader still names its live group.
+    if (stat ? stat.start === member.start : groupAlive(member.pid, table)) this.groups.add(member.pid);
   }
   /** Whether a process group led by a descendant (not the root's own group) has been recorded. */
   hasGroups() { return [...this.groups].some(group => group !== this.root?.pid); }
@@ -74,6 +93,7 @@ export class AgentProcessTree {
       this.members.set(key({ pid, start: stat.start }), { pid, start: stat.start });
       if (stat.pgid === pid) this.groups.add(pid);
     }
+    if (this.report) this.adoptReported(table);
     return true;
   }
   /** Signal the root's process group when it leads one, every recorded descendant, and every recorded group. */

@@ -10,7 +10,7 @@ describe('child environment policy', () => {
       LARK_APP_SECRET: 'host-secret', DUTYDECK_WEBHOOK_SECRET: 'host-webhook',
       DUTYDECK_SERVICE_TOKEN: 'host-github', dutydeck_group_tools_token: 'old-scope',
       dutydeck_relay_token: 'old-relay', dutydeck_session_id: 'old-dutydeck',
-      dutydeck_launcher_group: '1', dutydeck_terminal_launch_id: 'old-launch',
+      dutydeck_launcher_group: '1', dutydeck_launcher_report: '/old/launchers', dutydeck_terminal_launch_id: 'old-launch',
       HERDR_PANE_ID: 'old:p1', ANTHROPIC_API_KEY: 'daemon-account',
       HTTP_PROXY: 'http://proxy', NODE_EXTRA_CA_CERTS: '/cert.pem',
       CODEX_HOME: '/cli/config', ORDINARY_TOKEN: 'cli-owned',
@@ -33,6 +33,23 @@ describe('child environment policy', () => {
       dutydeck_relay_token: 'current-relay', dutydeck_herdr_session: 'current-herdr'
     });
     expect(inherited).toEqual(before);
+  });
+
+  it('drops inherited service configuration and Lark/Feishu app secrets but keeps provider keys and explicit values', () => {
+    const inherited = {
+      DUTYDECK_AGENTS_JSON: '[{"env":{"ANTHROPIC_AUTH_TOKEN":"other-agent"}}]', DUTYDECK_INSTANCES_JSON: '[]',
+      DUTYDECK_DATABASE_URL: '/srv/dutydeck.db', DUTYDECK_PLUGIN_SECRETS: 'plugin', DUTYDECK_DAEMON_RESTART_HOST: '0.0.0.0',
+      FEISHU_APP_SECRET: 'feishu', LARK_ENCRYPT_KEY: 'lark-encrypt', FEISHU_VERIFICATION_TOKEN: 'feishu-verify',
+      DUTYDECK_DAEMON_DIR: '/srv/.dutydeck/daemon', DUTYDECK_BOT_APP_ID: 'cli_placeholder',
+      DUTYDECK_CLAUDE_ACP_COMMAND: '/usr/bin/node', DUTYDECK_CLAUDE_ACP_ARGS_JSON: '[]',
+      LARK_APP_ID: 'cli_placeholder', OPENAI_API_KEY: 'provider', PATH: '/usr/bin'
+    };
+    expect(childEnvironment(inherited, { DUTYDECK_PLUGIN_NAME: 'explicit', FEISHU_APP_SECRET: 'explicit-feishu' })).toEqual({
+      DUTYDECK_DAEMON_DIR: '/srv/.dutydeck/daemon', DUTYDECK_BOT_APP_ID: 'cli_placeholder',
+      DUTYDECK_CLAUDE_ACP_COMMAND: '/usr/bin/node', DUTYDECK_CLAUDE_ACP_ARGS_JSON: '[]',
+      LARK_APP_ID: 'cli_placeholder', OPENAI_API_KEY: 'provider', PATH: '/usr/bin',
+      DUTYDECK_PLUGIN_NAME: 'explicit', FEISHU_APP_SECRET: 'explicit-feishu'
+    });
   });
 
   it('preserves ordinary shell/git configuration and similarly named tool directories', () => {

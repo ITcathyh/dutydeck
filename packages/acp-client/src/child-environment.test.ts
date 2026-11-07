@@ -158,3 +158,32 @@ it('preserves clean direct ACP argv on resume and refuses a dirty upgrade withou
     expect(process.env.LARK_APP_SECRET).toBe('sentinel-dirty-host');
   } finally { await adapter?.stop(); await rm(cwd, { recursive: true, force: true }); }
 });
+
+it('keeps clean direct ACP argv while hiding inherited service configuration from the agent', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'dd-service-env-acp-'));
+  const clean = childEnvironment(process.env);
+  for (const [key, value] of Object.entries(process.env)) if (clean[key] !== value) vi.stubEnv(key, clean[key]);
+  const service = {
+    DUTYDECK_AGENTS_JSON: '[{"env":{"ANTHROPIC_AUTH_TOKEN":"sentinel-other-agent"}}]',
+    DUTYDECK_DATABASE_URL: '/nonexistent/sentinel.db', DUTYDECK_INSTANCES_JSON: '[]'
+  };
+  for (const [key, value] of Object.entries(service)) vi.stubEnv(key, value);
+  vi.stubEnv('DUTYDECK_BOT_APP_ID', 'cli_sentinel');
+  const output = join(cwd, 'env.jsonl');
+  const fixture = join(cwd, 'agent.mjs');
+  const keys = [...Object.keys(service), 'DUTYDECK_BOT_APP_ID'];
+  await writeFile(fixture, `import {appendFileSync} from 'node:fs';appendFileSync(process.env.env_report_output,JSON.stringify(Object.fromEntries(${JSON.stringify(keys)}.filter(key=>process.env[key]!==undefined).map(key=>[key,process.env[key]])))+'\\n');await import(${JSON.stringify(resolve('tests/fixtures/mock-acp-agent.mjs'))});`);
+  const config = { id: 'service-env-fixture', name: 'Fixture', command: process.execPath, args: [fixture], protocol: 'acp' as const, cwd, env: { env_report_output: output }, permissionMode: 'deny-all' as const, timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
+  const sessionKey = 'service-env-persistent';
+  let adapter: AcpxAdapter | undefined;
+  try {
+    adapter = new AcpxAdapter(config, { sessionKey, onEvent() {} });
+    await adapter.start(); await adapter.send('hello'); await adapter.stop();
+    const record = await createRuntimeStore({ stateDir: join(cwd, '.dutydeck', 'acpx') }).load(sessionKey);
+    expect(record!.agentArgv).toEqual([config.command, ...config.args]);
+    const reports = (await readFile(output, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+    expect(reports.length).toBeGreaterThanOrEqual(1);
+    for (const report of reports) expect(report).toEqual({ DUTYDECK_BOT_APP_ID: 'cli_sentinel' });
+    expect(process.env.DUTYDECK_AGENTS_JSON).toBe(service.DUTYDECK_AGENTS_JSON);
+  } finally { await adapter?.stop(); await rm(cwd, { recursive: true, force: true }); }
+});

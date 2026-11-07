@@ -3,7 +3,7 @@ import type { ChildProcess } from 'node:child_process';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { accessSync, chmodSync, constants, existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { assertNativeContextRecord, createAcpRuntime, createAgentRegistry, createRuntimeStore, type AcpPermissionDecision, type AcpRuntime, type AcpRuntimeResourceScope, type AcpRuntimeHandle, type AcpRuntimeProcessEvent, type AcpRuntimeStatus, type AcpRuntimeTurn, type AcpSessionStore } from 'acpx/runtime';
+import { assertNativeContextRecord, createAcpRuntime, createAgentRegistry, createRuntimeStore, type AcpPermissionDecision, type AcpPermissionRequest, type AcpRuntime, type AcpRuntimeResourceScope, type AcpRuntimeHandle, type AcpRuntimeProcessEvent, type AcpRuntimeStatus, type AcpRuntimeTurn, type AcpSessionStore } from 'acpx/runtime';
 import type { AgentConfig, AgentDriver, DriverSteeringOutcome, DriverTranscriptSourceObservation, InsightClient, NormalizedDriverEvent, PermissionMode, ToolRiskPolicy, DriverSubmission, DriverSubmissionInput, NativeContextIdentity, NativeContextExpected, NativeConfigurationRequest, NativeConfigurationProof, OperationPermit, ChildPermit } from '@dutydeck/shared';
 import { RuntimeError, agentCommandApprovalReason, isAgentCommandAutoApproval, AGENT_IDLE_TIMEOUT, PromptNotWrittenError, claudeRateLimits, permissionDisplayText, taskExecutionSchemas, canonicalExecutionJson, type AgentIdleTimeoutData } from '@dutydeck/shared';
 import { eventContentText, eventHasContent, normalizeEventContent, shellQuote } from '@dutydeck/shared';
@@ -55,9 +55,18 @@ function envLauncherPath() { return agentsFile('env-launcher.mjs'); }
 
 const isCodexAcpAgent = (agent: AgentConfig) => Boolean(agent.builtin && ['codex', 'codex-acp'].includes(agent.id)) || inferAcpInsightClient(agent) === 'codex';
 
+/** Uppercase DUTYDECK_* service configuration the child policy drops from the daemon environment. */
+function inheritedServiceKeys() {
+  const clean = childEnvironment(process.env);
+  return Object.keys(process.env).filter(key => /^DUTYDECK_/.test(key) && typeof process.env[key] === 'string' && !(key in clean));
+}
+
 /** Resolve before npx prepends its bundled Codex to PATH; never persist this override. */
 export function acpxAgentEnvironment(agent: AgentConfig): Record<string, string> {
-  if (!isCodexAcpAgent(agent)) return {};
+  // ACPX spawns from the daemon's process.env plus this overlay; spawn omits undefined entries, which removes
+  // service configuration from direct launches without changing their persisted argv.
+  const omitted = Object.fromEntries(inheritedServiceKeys().map(key => [key, undefined])) as unknown as Record<string, string>;
+  if (!isCodexAcpAgent(agent)) return omitted;
   const env = childEnvironment(process.env, agent.env);
   let executable = env.CODEX_PATH;
   const extensions = process.platform === 'win32'
@@ -77,6 +86,7 @@ export function acpxAgentEnvironment(agent: AgentConfig): Record<string, string>
   }
   if (!executable) throw new Error('CODEX_CLI_NOT_FOUND: Install Codex in the Dutydeck process PATH, or set CODEX_PATH to its executable.');
   return {
+    ...omitted,
     CODEX_PATH: agentsFile('codex-permission-bridge.mjs'),
     PATH: `${dirname(process.execPath)}${delimiter}${env.PATH ?? ''}`,
     INITIAL_AGENT_MODE: agent.permissionMode === 'full-trust' ? 'agent-full-access' : 'read-only',
@@ -92,7 +102,8 @@ const environmentBoundaryError = () => new Error('ACP_ENVIRONMENT_BOUNDARY_CHANG
 
 function inheritedEnvironmentNeedsCleanup() {
   const clean = childEnvironment(process.env);
-  return Object.entries(process.env).some(([key, value]) => typeof value === 'string' && clean[key] !== value);
+  const omitted = new Set(inheritedServiceKeys());
+  return Object.entries(process.env).some(([key, value]) => typeof value === 'string' && clean[key] !== value && !omitted.has(key));
 }
 /**
  * Agents known to honour `_meta.steering.idleBehavior: 'promptRequired'`, by initialize `agentInfo.name`.
@@ -126,7 +137,7 @@ export interface AcpxAgentLaunch {
 }
 
 /** Prepare the ACPX boundary without persisting vendor env names or values. */
-export function prepareAcpxAgentLaunch(agent: AgentConfig, options: { runtimeDirectory: string; sessionKey: string; forceLauncher?: boolean }): AcpxAgentLaunch {
+export function prepareAcpxAgentLaunch(agent: AgentConfig, options: ({ runtimeDirectory: string } | { workspace: string }) & { sessionKey: string; forceLauncher?: boolean }): AcpxAgentLaunch {
   const { persisted, bridged } = splitAgentEnvironment(agent.env);
   // Preserve the native argv of clean direct launches. Dirty environments and
   // uppercase accounts need the launcher; never mutate the daemon snapshot.
@@ -134,14 +145,15 @@ export function prepareAcpxAgentLaunch(agent: AgentConfig, options: { runtimeDir
     return { command: [agent.command, ...agent.args], sessionOptions: buildAcpxSessionOptions(agent), cleanup() {} };
   }
   // Carry all explicit values so current scopes/accounts can survive ambient cleanup.
-  mkdirSync(options.runtimeDirectory, { recursive: true, mode: 0o700 });
-  chmodSync(options.runtimeDirectory, 0o700);
+  const runtimeDirectory = 'workspace' in options ? privateWorkspaceDirectory(options.workspace, 'runtime-env') : options.runtimeDirectory;
+  mkdirSync(runtimeDirectory, { recursive: true, mode: 0o700 });
+  chmodSync(runtimeDirectory, 0o700);
   const identity = createHash('sha256').update(options.sessionKey).digest('hex');
   const launchEnvironment = { ...persisted, ...bridged };
   // The late-bound native bridge must win over persisted account overrides.
   if (isCodexAcpAgent(agent)) for (const key of ['CODEX_PATH', 'INITIAL_AGENT_MODE', 'PATH', 'dutydeck_codex_executable', 'dutydeck_codex_permission_mode']) delete launchEnvironment[key];
   const payload = JSON.stringify(launchEnvironment);
-  const environmentFile = join(options.runtimeDirectory, `${identity}.json`);
+  const environmentFile = join(runtimeDirectory, `${identity}.json`);
   writeFileSync(environmentFile, payload, { encoding: 'utf8', mode: 0o600 });
   chmodSync(environmentFile, 0o600);
   return {
@@ -160,12 +172,56 @@ export function prepareAcpxAgentLaunch(agent: AgentConfig, options: { runtimeDir
   };
 }
 
-const flattenRiskText = (value: unknown, output: string[] = []): string[] => {
-  if (typeof value === 'string') output.push(value);
-  else if (Array.isArray(value)) for (const item of value) flattenRiskText(item, output);
-  else if (value && typeof value === 'object') for (const item of Object.values(value)) flattenRiskText(item, output);
-  return output;
-};
+/** `<cwd>/.dutydeck` holds session credentials inside the Agent's workspace: private directories, never in the repository. */
+function privateWorkspaceDirectory(cwd: string, ...segments: string[]) {
+  const root = join(cwd, '.dutydeck');
+  const directory = join(root, ...segments);
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  for (let current = directory; ; current = dirname(current)) { chmodSync(current, 0o700); if (current === root) break; }
+  try { writeFileSync(join(root, '.gitignore'), '*\n', { flag: 'wx' }); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+  return directory;
+}
+
+/** acpx writes records with the process umask; they carry relay and group-tool tokens. */
+function privateSessionStore(cwd: string): AcpSessionStore {
+  const store = createRuntimeStore({ stateDir: join(cwd, '.dutydeck', 'acpx') });
+  const sessionFile = (id: string) => join(privateWorkspaceDirectory(cwd, 'acpx', 'sessions'), `${encodeURIComponent(id)}.json`);
+  return {
+    async load(sessionId) {
+      const file = sessionFile(sessionId);
+      const record = await store.load(sessionId);
+      if (record) chmodSync(file, 0o600);
+      return record;
+    },
+    async save(record) {
+      const file = sessionFile(record.acpxRecordId);
+      await store.save(record);
+      chmodSync(file, 0o600);
+    }
+  };
+}
+
+const RISK_TEXT_MAX_DEPTH = 64;
+const RISK_TEXT_MAX_SIZE = 1_000_000;
+/** Tool-call strings for the high-risk pattern. `undefined` when the input is nested or sized beyond what is checked. */
+function flattenRiskText(value: unknown): string | undefined {
+  const output: string[] = [];
+  const pending: Array<[unknown, number]> = [[value, 0]];
+  let size = 0;
+  while (pending.length) {
+    const [item, depth] = pending.pop()!;
+    size += typeof item === 'string' ? item.length + 1 : 1;
+    if (size > RISK_TEXT_MAX_SIZE) return undefined;
+    if (typeof item === 'string') { output.push(item); continue; }
+    if (!item || typeof item !== 'object') continue;
+    if (depth >= RISK_TEXT_MAX_DEPTH) return undefined;
+    const children = Array.isArray(item) ? item : Object.values(item);
+    if (size + children.length > RISK_TEXT_MAX_SIZE) return undefined;
+    for (let index = children.length - 1; index >= 0; index--) pending.push([children[index], depth + 1]);
+  }
+  return output.join('\n');
+}
 export function listAcpxBuiltinAgents(): AcpxBuiltinAgent[] {
   const registry = createAgentRegistry();
   return registry.list().map(id => {
@@ -295,7 +351,7 @@ class AcpxStoppedError extends Error {
 
 /** Read the first durable creation receipt without creating or connecting a client. */
 export async function readNativeCreationRecord(expected: NativeContextExpected): Promise<NativeContextIdentity | undefined> {
-  const store=createRuntimeStore({stateDir:join(expected.cwd,'.dutydeck','acpx')});
+  const store=privateSessionStore(expected.cwd);
   const record=await store.load(expected.sessionKey);if(!record)return;
   const raw=record.acpx?.dutydeck_native_identity;if(!raw)return;
   const identity=taskExecutionSchemas.nativeIdentitySchema.parse(JSON.parse(raw));
@@ -355,13 +411,13 @@ export class AcpxAdapter implements AgentDriver {
   constructor(readonly agent: SessionAgentConfig, private readonly options: AcpxAdapterOptions) {
     const cwd = agent.cwd ?? process.cwd(); this.sessionKey = options.context?.native?.sessionKey ?? options.sessionKey ?? `dutydeck-${agent.id}`;
     this.permissionMode = agent.permissionMode;
-    this.sessionStore = createRuntimeStore({ stateDir: join(cwd, '.dutydeck', 'acpx') });
-    this.launch = prepareAcpxAgentLaunch(agent, { runtimeDirectory: join(cwd, '.dutydeck', 'runtime-env'), sessionKey: this.sessionKey });
+    this.sessionStore = privateSessionStore(cwd);
+    this.launch = prepareAcpxAgentLaunch(agent, { workspace: cwd, sessionKey: this.sessionKey });
     this.insightClient = inferAcpInsightClient(agent);
     const registry = createAgentRegistry({ overrides: { [agent.id]: this.launch.command } });
     this.runtime = createAcpRuntime({
       cwd,
-      agentEnvironment: () => acpxAgentEnvironment(agent),
+      agentEnvironment: () => ({ ...acpxAgentEnvironment(agent), ...this.launcherReportEnvironment() }),
       onProcess: event => this.observeProcess(event),
       sessionStore: this.sessionStore,
       agentRegistry: { ...registry, resolve: name => name === agent.id ? this.launch.command : registry.resolve(name) },
@@ -370,55 +426,74 @@ export class AcpxAdapter implements AgentDriver {
       // capabilities the host cannot intercept fail closed.
       permissionMode: acpxPermissionMode(agent.permissionMode),
       nonInteractivePermissions: 'fail', timeoutMs: Math.round(agent.timeout * 1000),
-      onPermissionRequest: async request => {
+      onPermissionRequest: request => this.permissionDecision(request)
+    });
+  }
+
+  /** acpx answers a throwing host callback from the permission mode, which approves everything in full-trust: any failure rejects. */
+  private async permissionDecision(request: AcpPermissionRequest): Promise<AcpPermissionDecision> {
+    try { return await this.decidePermission(request); }
+    catch (error) {
+      if (!this.stopped && !this.turnCancelling) {
+        try {
+          const toolCallId = (request.raw as any)?.toolCall?.toolCallId;
+          this.options.onEvent({ type: 'permission_request', data: { id: toolCallId ?? `permission-${Date.now()}`, toolCallId, title: `权限检查异常，已拒绝操作：${error instanceof Error ? error.message : String(error)}`, options: [], status: 'rejected' } });
+        } catch { /* The decision stays a rejection. */ }
+      }
+      return { outcome: 'reject_once' };
+    }
+  }
+  private async decidePermission(request: AcpPermissionRequest): Promise<AcpPermissionDecision> {
+    if (this.stopped || this.turnCancelling) return { outcome: 'reject_once' };
+    const raw = request.raw as any; const id = raw.toolCall?.toolCallId ?? `permission-${Date.now()}`;
+    const secrets = Object.entries({ ...process.env, ...this.agent.env }).filter(([key]) => /token|secret|password|api[_-]?key|authorization|cookie/i.test(key)).map(([, value]) => value).filter((value): value is string => Boolean(value));
+    const facts = permissionFacts(raw.toolCall, secrets);
+    const candidate = flattenRiskText({ title: raw.toolCall?.title, input: raw.toolCall?.rawInput ?? raw.toolCall?.input ?? raw });
+    let riskPolicy = this.riskPolicy;
+    if (this.options.resolveRiskPolicy) {
+      try { riskPolicy = await this.whileActive(() => this.options.resolveRiskPolicy!(riskPolicy)); }
+      catch { return { outcome: 'reject_once' }; }
+    }
+    if (this.stopped || this.turnCancelling) return { outcome: 'reject_once' };
+    if (riskPolicy?.enabled && !riskPolicy.authorized) {
+      if (candidate === undefined) {
+        this.options.onEvent({ type: 'permission_request', data: { id, toolCallId: raw.toolCall?.toolCallId, title: `操作参数嵌套过深或过大，无法做高危检查，已拒绝：${facts.title}`, options: [], status: 'rejected' } });
+        return { outcome: 'reject_once' };
+      }
+      try {
+        const matches = await this.whileActive(() => testRegexWithTimeout(riskPolicy!.pattern, candidate));
         if (this.stopped || this.turnCancelling) return { outcome: 'reject_once' };
-        const raw = request.raw as any; const id = raw.toolCall?.toolCallId ?? `permission-${Date.now()}`;
-        const secrets = Object.entries({ ...process.env, ...this.agent.env }).filter(([key]) => /token|secret|password|api[_-]?key|authorization|cookie/i.test(key)).map(([, value]) => value).filter((value): value is string => Boolean(value));
-        const facts = permissionFacts(raw.toolCall, secrets);
-        const candidate = flattenRiskText({ title: raw.toolCall?.title, input: raw.toolCall?.rawInput ?? raw.toolCall?.input ?? raw }).join('\n');
-        let riskPolicy = this.riskPolicy;
-        if (this.options.resolveRiskPolicy) {
-          try { riskPolicy = await this.whileActive(() => this.options.resolveRiskPolicy!(riskPolicy)); }
-          catch { return { outcome: 'reject_once' }; }
+        if (matches) {
+          this.options.onEvent({ type: 'permission_request', data: { id, toolCallId: raw.toolCall?.toolCallId, title: `高危操作已被 Dutydeck 拦截：${facts.title}`, options: [], status: 'rejected' } });
+          return { outcome: 'reject_once' };
         }
+      } catch (error) {
         if (this.stopped || this.turnCancelling) return { outcome: 'reject_once' };
-        if (riskPolicy?.enabled && !riskPolicy.authorized) {
-          try {
-            const matches = await this.whileActive(() => testRegexWithTimeout(riskPolicy!.pattern, candidate));
-            if (this.stopped || this.turnCancelling) return { outcome: 'reject_once' };
-            if (matches) {
-              this.options.onEvent({ type: 'permission_request', data: { id, toolCallId: raw.toolCall?.toolCallId, title: `高危操作已被 Dutydeck 拦截：${facts.title}`, options: [], status: 'rejected' } });
-              return { outcome: 'reject_once' };
-            }
-          } catch (error) {
-            if (this.stopped || this.turnCancelling) return { outcome: 'reject_once' };
-            this.options.onEvent({ type: 'permission_request', data: { id, toolCallId: raw.toolCall?.toolCallId, title: `安全正则匹配异常，已拒绝操作：${error instanceof Error ? error.message : String(error)}`, options: [], status: 'rejected' } });
-            return { outcome: 'reject_once' };
-          }
-        }
-        if (this.permissionMode === 'full-trust') return { outcome: 'allow_once' };
-        if (this.permissionMode === 'deny-all') return { outcome: 'reject_once' };
-        const input = raw.toolCall?.rawInput ?? raw.toolCall?.input;
-        if (isAgentCommandAutoApproval({ permissionMode: this.permissionMode, kind: raw.toolCall?.kind,
-          command: input?.command ?? input?.cmd, env: this.agent.env })) {
-          this.options.onEvent({ type: 'permission_request', data: { id, toolCallId: raw.toolCall?.toolCallId,
-            ...facts, title: `${agentCommandApprovalReason}：${facts.title}`, options: [], status: 'approved' } });
-          return { outcome: 'allow_once' };
-        }
-        // 只读判定从严，只认执行端自己声明的 read / search：acpx 在缺 kind 时按标题首词猜（「Read and delete」也会猜成 read），
-        // fetch 会把内容带到外部地址，都不算只读，照常审批。
-        if (this.permissionMode === 'approve-reads' && ['read', 'search'].includes(String(raw.toolCall?.kind ?? ''))) return { outcome: 'allow_once' };
-        return new Promise<AcpPermissionDecision>(resolve => {
-          this.pendingPermissions.set(id, resolve);
-          this.idleWatch?.refresh();
-          try {
-            this.options.onEvent({ type: 'permission_request', data: { id, toolCallId: raw.toolCall?.toolCallId, ...facts, options: (raw.options ?? []).map((option: any) => ({ id: option.optionId, label: permissionDisplayText(option.name, secrets, 100), kind: option.kind })), status: 'pending' } });
-          } catch {
-            this.pendingPermissions.delete(id);
-            this.idleWatch?.refresh();
-            resolve({ outcome: 'reject_once' });
-          }
-        });
+        this.options.onEvent({ type: 'permission_request', data: { id, toolCallId: raw.toolCall?.toolCallId, title: `安全正则匹配异常，已拒绝操作：${error instanceof Error ? error.message : String(error)}`, options: [], status: 'rejected' } });
+        return { outcome: 'reject_once' };
+      }
+    }
+    if (this.permissionMode === 'full-trust') return { outcome: 'allow_once' };
+    if (this.permissionMode === 'deny-all') return { outcome: 'reject_once' };
+    const input = raw.toolCall?.rawInput ?? raw.toolCall?.input;
+    if (isAgentCommandAutoApproval({ permissionMode: this.permissionMode, kind: raw.toolCall?.kind,
+      command: input?.command ?? input?.cmd, env: this.agent.env })) {
+      this.options.onEvent({ type: 'permission_request', data: { id, toolCallId: raw.toolCall?.toolCallId,
+        ...facts, title: `${agentCommandApprovalReason}：${facts.title}`, options: [], status: 'approved' } });
+      return { outcome: 'allow_once' };
+    }
+    // 只读判定从严，只认执行端自己声明的 read / search：acpx 在缺 kind 时按标题首词猜（「Read and delete」也会猜成 read），
+    // fetch 会把内容带到外部地址，都不算只读，照常审批。
+    if (this.permissionMode === 'approve-reads' && ['read', 'search'].includes(String(raw.toolCall?.kind ?? ''))) return { outcome: 'allow_once' };
+    return new Promise<AcpPermissionDecision>(resolve => {
+      this.pendingPermissions.set(id, resolve);
+      this.idleWatch?.refresh();
+      try {
+        this.options.onEvent({ type: 'permission_request', data: { id, toolCallId: raw.toolCall?.toolCallId, ...facts, options: (raw.options ?? []).map((option: any) => ({ id: option.optionId, label: permissionDisplayText(option.name, secrets, 100), kind: option.kind })), status: 'pending' } });
+      } catch {
+        this.pendingPermissions.delete(id);
+        this.idleWatch?.refresh();
+        resolve({ outcome: 'reject_once' });
       }
     });
   }
@@ -466,6 +541,14 @@ export class AcpxAdapter implements AgentDriver {
     } catch { /* 来源采集失败只静默降级，不改变启动/任务结算 */ }
   }
 
+  /**
+   * A Dutydeck launcher writes the Agent group it detaches into this directory, so the group stays provable and
+   * signalable when ACPX kills the launcher before the first process-tree sample. Never persisted in session options.
+   */
+  private launcherReportEnvironment(): Record<string, string> {
+    if (!this.launch.command.some(arg => arg === envLauncherPath() || arg === claudeLauncherPath())) return {};
+    return { dutydeck_launcher_report: privateWorkspaceDirectory(this.agent.cwd ?? process.cwd(), 'launchers') };
+  }
   private observeProcess(event: AcpRuntimeProcessEvent) {
     if (event.phase === 'creation-started') {
       let resolve!: () => void;
@@ -481,11 +564,12 @@ export class AcpxAdapter implements AgentDriver {
     const child = event.child;
     if (this.processes.has(child)) return;
     const launcher = event.kind === 'agent' && child.spawnargs?.some(arg => arg === envLauncherPath() || arg === claudeLauncherPath());
-    const tree = event.kind === 'agent' ? new AgentProcessTree(child.pid) : undefined;
+    const tree = event.kind === 'agent' ? new AgentProcessTree(child.pid, launcher ? join(this.agent.cwd ?? process.cwd(), '.dutydeck', 'launchers') : undefined) : undefined;
     let sampling: NodeJS.Timeout | undefined;
     const exited = () => {
       clearInterval(sampling);
-      if (launcher && child.signalCode && tree) this.unconfirmedTrees.add(tree);
+      if (launcher && child.signalCode && tree) { tree.refresh(); this.unconfirmedTrees.add(tree); }
+      tree?.discardReport();
       this.processes.delete(child); this.agentChildren.delete(child);
       child.off('exit', exited); child.off('error', failed);
     };
@@ -655,7 +739,7 @@ export class AcpxAdapter implements AgentDriver {
       if (this.launch.command[1] !== envLauncherPath() && JSON.stringify(record?.agentArgv) === JSON.stringify(wrapped)
         && record?.acpx?.session_options?.env?.[bridgedAgentEnvDigestKey] === digest) {
         this.launch.cleanup();
-        this.launch = prepareAcpxAgentLaunch(this.agent, { runtimeDirectory: join(this.agent.cwd ?? process.cwd(), '.dutydeck', 'runtime-env'), sessionKey: this.sessionKey, forceLauncher: true });
+        this.launch = prepareAcpxAgentLaunch(this.agent, { workspace: this.agent.cwd ?? process.cwd(), sessionKey: this.sessionKey, forceLauncher: true });
       }
     }
     // ACPX reads process.env at spawn time. Recheck direct launches before each

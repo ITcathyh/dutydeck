@@ -1,4 +1,5 @@
 import { agentConfigSchema, errorMessage as describeError, type AgentConfig } from '@dutydeck/shared';
+import { childEnvironment } from '@dutydeck/shared/child-environment';
 import { listAcpxBuiltinAgents } from '@dutydeck/acp-client';
 import { commandExists } from '@dutydeck/transports';
 import { z } from 'zod';
@@ -35,6 +36,8 @@ const probedVersions = new Map<string, string>();
 const VERSION_PROBE_CONCURRENCY = 4;
 const probingVersions = new Map<string, Promise<string | undefined>>();
 const versionKey = (command: string) => `${command}\0${process.env.PATH ?? ''}`;
+/** 探测执行的是 Agent 与插件命令，和 Agent 子进程走同一道环境边界：服务配置与飞书密钥不带过去。 */
+const probeEnvironment = () => ({ ...childEnvironment(process.env), NO_COLOR: '1' });
 /** loadConfigWithDiagnosticsAsync 刚异步探测的结果（含失败），只在它紧接着的同步装配期间有效，失败的命令不再用 spawnSync 重探。 */
 let prefetchedVersions: Map<string, string | undefined> | undefined;
 
@@ -44,7 +47,7 @@ export function cliVersion(command: string): string | undefined {
   if (prefetchedVersions?.has(key)) return prefetchedVersions.get(key);
   let version: string | undefined;
   for (const args of VERSION_ARGS) {
-    const result = spawnSync(command, args, { encoding: 'utf8', timeout: 1500, env: { ...process.env, NO_COLOR: '1' } });
+    const result = spawnSync(command, args, { encoding: 'utf8', timeout: 1500, env: probeEnvironment() });
     const line = versionLine(result.stdout ?? '', result.stderr ?? '');
     if (result.status === 0 && line) { version = line; break; }
   }
@@ -63,7 +66,7 @@ export function cliVersionAsync(command: string): Promise<string | undefined> {
     for (const args of VERSION_ARGS) {
       const result = await new Promise<{ ok: boolean; stdout: string; stderr: string }>(done => {
         // 与 spawnSync 一样立即给 stdin 结束符：读 stdin 的 CLI 不会一直等到超时。
-        execFile(command, args, { encoding: 'utf8', timeout: 1500, env: { ...process.env, NO_COLOR: '1' } },
+        execFile(command, args, { encoding: 'utf8', timeout: 1500, env: probeEnvironment() },
           (error, stdout, stderr) => done({ ok: !error, stdout: stdout ?? '', stderr: stderr ?? '' })).stdin?.end();
       });
       const line = versionLine(result.stdout, result.stderr);

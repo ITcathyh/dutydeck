@@ -128,3 +128,25 @@ it('runs at most four version probes at once during startup', async () => {
   expect(peak).toBeGreaterThan(1);
   expect(peak).toBeLessThanOrEqual(4);
 }, 30_000);
+
+it('runs version probes with the agent child environment, without service configuration or Lark secrets', async () => {
+  const directory = await fixtureDirectory();
+  const probe = async (name: string) => {
+    const path = join(directory, name);
+    await writeFile(path, `#!/bin/sh\necho "agents=$DUTYDECK_AGENTS_JSON database=$DUTYDECK_DATABASE_URL lark=$LARK_APP_SECRET feishu=$FEISHU_APP_SECRET provider=$OPENAI_API_KEY color=$NO_COLOR" > "${path}.env"\necho "${name} 1.0.0"\n`, { mode: 0o755 });
+    return path;
+  };
+  vi.stubEnv('DUTYDECK_AGENTS_JSON', '[{"id":"x","env":{"API_KEY":"agent-account-placeholder"}}]');
+  vi.stubEnv('DUTYDECK_DATABASE_URL', 'postgres://user:password-placeholder@db.example.invalid/dutydeck');
+  vi.stubEnv('LARK_APP_SECRET', 'lark-secret-placeholder');
+  vi.stubEnv('FEISHU_APP_SECRET', 'feishu-secret-placeholder');
+  vi.stubEnv('OPENAI_API_KEY', 'provider-key-placeholder');
+  vi.resetModules();
+  const { cliVersion, cliVersionAsync } = await import('./index.js');
+  const sync = await probe('sync-cli'), async = await probe('async-cli');
+  expect(cliVersion(sync)).toBe('sync-cli 1.0.0');
+  expect(await cliVersionAsync(async)).toBe('async-cli 1.0.0');
+  for (const path of [sync, async]) {
+    expect((await readFile(`${path}.env`, 'utf8')).trim()).toBe('agents= database= lark= feishu= provider=provider-key-placeholder color=1');
+  }
+});
