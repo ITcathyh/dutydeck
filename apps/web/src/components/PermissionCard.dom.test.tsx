@@ -17,14 +17,14 @@ describe('PermissionCard', () => {
     expect(onResolve).toHaveBeenCalledTimes(1);
   });
 
-  it('shows source facts, redacts commands, and makes unknown details explicit', async () => {
+  it('shows source facts, redacts commands, and makes unknown details explicit', () => {
     const event = permission('pending');
     event.data.operation = { source: 'acp_tool_call', cwd: '/work/project', resource: '/work/project/file.ts', command: 'pnpm test --token=synthetic-secret' };
     const view = render(<PermissionCard event={event}/>);
     expect(screen.getByText('来源：执行端工具请求')).toBeTruthy();
     expect(screen.getByText('目录：/work/project')).toBeTruthy();
     expect(screen.getByText('资源：/work/project/file.ts')).toBeTruthy();
-    await userEvent.setup({ delay: null }).click(screen.getByText('查看命令（已脱敏）'));
+    expect(screen.getByText('命令（已脱敏）')).toBeTruthy();
     expect(screen.getByText('pnpm test --token=[REDACTED]')).toBeTruthy();
     expect(view.container.textContent).not.toContain('synthetic-secret');
     expect(screen.getByText('本次选择只处理这一条请求，不改变后续授权方式。')).toBeTruthy();
@@ -53,6 +53,31 @@ describe('PermissionCard', () => {
     pending.data.operation = { source: 'acp_tool_call', command: 'pnpm test', commandExact: true };
     view.rerender(<PermissionCard event={pending} onResolve={vi.fn()}/>);
     expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['允许本次', '拒绝', '拒绝并说明']);
+  });
+
+  it('命令直接可见；常见破坏性片段被标出，勾选核对后才能允许，拒绝不受影响', async () => {
+    const user = userEvent.setup({ delay: null }); const onResolve = vi.fn();
+    const event = permission('pending');
+    event.data.operation = { source: 'acp_tool_call', command: 'rm -rf node_modules && pnpm install --token=synthetic-secret' };
+    const view = render(<PermissionCard event={event} onResolve={onResolve}/>);
+    expect([...view.container.querySelectorAll('mark')].map(mark => mark.textContent)).toEqual(['rm -rf']);
+    expect(view.container.querySelector('code')!.textContent).toBe('rm -rf node_modules && pnpm install --token=[REDACTED]');
+    expect(screen.getByText(/可能造成破坏的片段/)).toBeTruthy();
+    const approve = screen.getByRole('button', { name: '允许本次' }) as HTMLButtonElement;
+    expect(approve.disabled).toBe(true);
+    expect((screen.getByRole('button', { name: '拒绝' }) as HTMLButtonElement).disabled).toBe(false);
+    await user.click(screen.getByRole('checkbox', { name: '我已核对标出的片段' }));
+    await user.click(approve);
+    expect(onResolve).toHaveBeenCalledExactlyOnceWith('permission-1', true);
+  });
+
+  it('没有风险片段的命令不加核对步骤', () => {
+    const event = permission('pending');
+    event.data.operation = { source: 'acp_tool_call', command: 'pnpm test -- auth' };
+    const view = render(<PermissionCard event={event} onResolve={vi.fn()}/>);
+    expect(view.container.querySelector('mark')).toBeNull();
+    expect(screen.queryByRole('checkbox')).toBeNull();
+    expect((screen.getByRole('button', { name: '允许本次' }) as HTMLButtonElement).disabled).toBe(false);
   });
 
   // 全站风险最高的两个决策按钮曾是 h-8（32px），低于契约 §9 的 40px 触控目标。

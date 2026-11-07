@@ -168,7 +168,6 @@ test('permission facts and platform verification open evidence with focus restor
   await page.goto('/sessions/audit');
   const permission = page.getByRole('complementary', { name: '权限审批', exact: true });
   await expect(permission.getByRole('button', { name: '允许本次', exact: true })).toBeVisible();
-  await permission.getByText('查看命令（已脱敏）', { exact: true }).click();
   await expect(permission.getByText('pnpm test', { exact: true })).toBeVisible();
   await expect(permission.getByText('目录：/repo/audit', { exact: true })).toBeVisible();
   const verification = page.getByRole('complementary', { name: '平台验证', exact: true });
