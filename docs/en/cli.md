@@ -24,8 +24,15 @@ dutydeck autostart enable | status | disable
 #   launchd stops the old process and starts a new one from the plist, which it keeps watching. Server flags on the command line cannot be
 #   passed through; put them in the root `.env`. If the job is not loaded (for example autostart was disabled), the CLI starts a background
 #   process as before.
-#   Drift checks ignore PATH: the unit/plist keeps the PATH of the shell that ran enable. When it differs from the current shell, status and
-#   doctor show one note instead of reporting drift, and do not suggest rerunning enable (that would replace it with the current shell's PATH).
+#   PATH is merged, not replaced: rerunning enable writes the current shell's PATH (in order) followed by entries of the old unit/plist PATH
+#   that are missing from it and still exist; duplicates keep their first position, Agent-session temp dirs containing `/tmp/arg0/` are
+#   dropped from both sides, and the node binary's directory is appended when absent. A first enable also dedupes, drops `/tmp/arg0/`
+#   entries and appends the node directory, otherwise keeping the shell's order. Drift checks ignore PATH: when the current shell has
+#   directories the unit/plist lacks, status and doctor show one note; rerunning enable merges them in.
+#   Merging only adds, so rerunning enable from a narrower PATH does not narrow it. To narrow, edit `Environment=PATH=` in the unit (Linux:
+#   then run `systemctl --user daemon-reload` and `dutydeck restart`) or `PATH` in the plist (macOS: takes effect at next login), or run
+#   `dutydeck stop` and `dutydeck autostart disable` (on Linux this deletes the unit file), then `dutydeck autostart enable` from the shell
+#   you want. A later enable from a wider shell merges the extra directories back in.
 #   `autostart disable` refuses while the daemon is running (removing the macOS job would stop it); run `dutydeck stop` first.
 #   When run through the `<releases>/current` symlink, enable and status compare and write the `current` path instead of pinning the unit to
 #   that release; a unit still naming an older release while `current` points elsewhere is reported as drifted.

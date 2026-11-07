@@ -106,7 +106,8 @@ dutydeck autostart disable  # 关闭自启
 
 - Linux unit 与 macOS LaunchAgent 都前台运行 `dutydeck start --foreground`，工作目录是 daemon 根目录，输出追加到 `.dutydeck/daemon/dutydeck.log`。服务崩溃或非零退出后，systemd 按 `Restart=always` 重拉；launchd 按 `KeepAlive.SuccessfulExit=false` 重拉，间隔至少 30 秒，`dutydeck stop` 的正常退出不重拉，已有实例在跑时也不会反复重拉。macOS 上以前注册过的 LaunchAgent 是后台模式，崩溃后没人拉起，`autostart status` 会报漂移，重跑 `dutydeck autostart enable` 后重新登录生效。受 launchd 托管时，`dutydeck restart` 照常排空、等任务结束，再执行 `launchctl kickstart -k gui/<uid>/com.dutydeck.server`：launchd 先停旧进程再按 plist 拉起新的，新进程仍受它看护；命令行上的服务参数传不过去，要写进根目录 `.env`。job 没加载（比如自启已关闭）时照旧由 CLI 起后台进程。
 - 守护进程还在运行时，`autostart disable` 拒绝执行（macOS 移除 job 会连带停掉它），先 `dutydeck stop`。
-- 漂移判断不比较 PATH：unit / plist 里的 PATH 是 enable 时那个 shell 的，与当前 shell 不同时 `autostart status` 和 `doctor` 只提示一行，不报漂移，也不建议重跑 enable（重跑会把 PATH 换成当前 shell 的）。
+- PATH 是合并而不是覆盖：重跑 `enable` 时，写进 unit / plist 的 PATH 是当前 shell 的 PATH（保持原顺序）加上原 PATH 里多出来、且目录仍存在的项；重复项只保留第一次出现的位置，含 `/tmp/arg0/` 的 Agent 会话临时目录两边都丢掉，node 所在目录不在其中时追加到末尾。首次 `enable` 同样会去重、去掉 `/tmp/arg0/` 项、补上 node 目录，其余保持当前 shell 的顺序。漂移判断不比较 PATH：当前 shell 的 PATH 里有 unit / plist 没有的目录时，`autostart status` 和 `doctor` 只提示一行，重跑 enable 会把它们并进去。
+- 合并只增不减，用更窄的 PATH 重跑 `enable` 不会让它变窄。要收窄，直接编辑 unit 里的 `Environment=PATH=`（Linux，改完运行 `systemctl --user daemon-reload` 再 `dutydeck restart`）或 plist 里的 `PATH`（macOS，重新登录后生效）；也可以先 `dutydeck stop`、`dutydeck autostart disable`（Linux 上会删除 unit 文件），再在想要的 shell 里运行 `dutydeck autostart enable`。之后在更宽的 shell 里重跑 `enable`，多出来的目录会再并进去。
 - 通过 `<releases>/current` 软链运行时，`enable` 和 `status` 都按 `current` 路径比较和写入，不会把 unit 钉在当时的具体版本上；`current` 已指向别的版本、unit 却还写着旧版本路径时，照常报漂移。
 
 ## 4. 命令行管理配置 (`dutydeck settings`)
