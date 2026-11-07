@@ -3,7 +3,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { closeSync, existsSync, mkdtempSync, mkdirSync, openSync, readdirSync, readSync, rmSync, statSync, writeFileSync, readFileSync } from 'node:fs';
 import Database from 'better-sqlite3';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import {
   pidAlive,
   readDaemonStatus,
@@ -39,6 +39,12 @@ describe('Dutydeck daemon session', () => {
     rmSync(tmp, { recursive: true, force: true });
   });
 
+  // A no-arg daemonStop() resolves its target from process.env and signals whatever it finds there.
+  const expectOwnDaemonDir = () => {
+    const dir = resolveDaemonDir();
+    expect(dir.startsWith(`${tmp}${sep}`), `daemon dir ${dir} is outside this test's temp dir; refusing to stop it`).toBe(true);
+  };
+
   it.each(['cli_a', null])('keeps bot/Web process %s state local without changing the global pointer', async appId => {
     const database = join(tmp, 'bot.db');
     const repos = createRepositories(database, { newDatabaseAuthority: 'ledger_v1' });
@@ -60,6 +66,7 @@ describe('Dutydeck daemon session', () => {
     vi.stubEnv('DUTYDECK_DAEMON_DIR', dir);
     writeState(dir, { pid: 0, ready: false, startedAt: 'old', cwd: join(tmp, 'bot-b'), botAppId: 'cli_b', botProcess: true });
     expect(resolveDaemonDir()).toBe(dir);
+    expectOwnDaemonDir();
     const runCommand = vi.fn();
     const result = await daemonRestart({ botAppId: 'cli_a' }, { serve: vi.fn(), runCommand });
     expect(result).toMatchObject({ ok: false, error: expect.stringContaining('BOT_PROCESS_SCOPE') });
@@ -236,6 +243,7 @@ describe('Dutydeck daemon session', () => {
   });
 
   it('daemonStop SIGTERMs an alive daemon and clears state', async () => {
+    expectOwnDaemonDir();
     const { spawn } = await import('node:child_process');
     const child = spawn(process.execPath, ['-e', 'setTimeout(()=>{},10000)'], { stdio: 'ignore' });
     const dir = defaultDaemonDir();
@@ -253,6 +261,7 @@ describe('Dutydeck daemon session', () => {
     // Mirror that contract in the child: handle SIGTERM, record a marker, exit 0.
     // daemonStop must observe the graceful exit and clear state without escalating
     // to SIGKILL (which would surface as a timeout error on the result).
+    expectOwnDaemonDir();
     const { spawn } = await import('node:child_process');
     const marker = join(tmp, 'graceful-stop-marker');
     const child = spawn(process.execPath, [
@@ -275,6 +284,7 @@ describe('Dutydeck daemon session', () => {
   });
 
   it('does not signal a real unrelated PID occupant referenced by a stale birth identity', async () => {
+    expectOwnDaemonDir();
     const { spawn } = await import('node:child_process');
     const child = spawn(process.execPath, ['-e', 'setTimeout(()=>{},10000)'], { stdio: 'ignore' });
     const exited = new Promise(resolve => child.once('exit', resolve));
@@ -291,6 +301,7 @@ describe('Dutydeck daemon session', () => {
   });
 
   it('daemonStop reports not-running when nothing is recorded', async () => {
+    expectOwnDaemonDir();
     const result = await daemonStop();
     expect(result).toMatchObject({ ok: true, action: 'stop', running: false, state: 'not-running' });
   });

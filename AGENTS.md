@@ -45,7 +45,7 @@ pnpm exec tsx apps/server/src/cli.ts --local-only --port 14310 --no-lark-listen
 
 ## 验证
 
-代码改动均须通过 `pnpm typecheck` 和受影响测试的 `pnpm exec vitest run <测试路径>`。从仓库根运行，Node 与 Web/jsdom 由根配置分流；需要限定时用 `--project=node` 或 `--project=web`。`pnpm typecheck` 不检查 `*.test.ts`（tsconfig 已排除），Vitest 运行时也不做类型检查，测试代码里的类型错误两边都发现不了。全量测试并行执行、机器负载高，涉及时间的断言要留足余量或改用假时钟，不能只调到在本机刚好通过。
+代码改动均须通过 `pnpm typecheck` 和受影响测试的 `pnpm exec vitest run <测试路径>`。从仓库根运行，Node 与 Web/jsdom 由根配置分流；需要限定时用 `--project=node` 或 `--project=web`。node project 由 `tests/setup/node-env.ts` 在每个测试文件前清掉服务实例变量（`child-environment.mjs` 的 `inheritedServiceKeys`、`DUTYDECK_DATABASE_URL`、`DUTYDECK_SUPERVISOR`、`DUTYDECK_SYSTEMD_UNIT` 和 `DUTYDECK_DAEMON_RESTART_*`），需要这些变量的用例要显式设置。`pnpm typecheck` 不检查 `*.test.ts`（tsconfig 已排除），Vitest 运行时也不做类型检查，测试代码里的类型错误两边都发现不了。全量测试并行执行、机器负载高，涉及时间的断言要留足余量或改用假时钟，不能只调到在本机刚好通过。
 
 | 额外影响范围 | 追加检查 |
 |---|---|

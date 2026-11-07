@@ -20,7 +20,7 @@ const sessionKeys = new Set([
 // Service configuration (agent accounts, peer instances, database, plugin secrets) never crosses into agents.
 // Only these non-secret keys may be inherited: launcher overrides read by agents/claude-acp.mjs, and the
 // instance address that keeps an agent's own `dutydeck` commands on its daemon instead of last-daemon-dir.
-const inheritedServiceKeys = new Set([
+export const inheritedServiceKeys = new Set([
   'DUTYDECK_CLAUDE_ACP_COMMAND', 'DUTYDECK_CLAUDE_ACP_ARGS_JSON', 'DUTYDECK_DAEMON_DIR', 'DUTYDECK_BOT_APP_ID'
 ]);
 
