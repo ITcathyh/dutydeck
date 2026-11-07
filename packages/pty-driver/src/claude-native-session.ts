@@ -6,6 +6,7 @@ import type { PhysicalProcessIdentity, ProcessProbe } from '@dutydeck/session-ba
 import type { DriverTranscriptSourceObservation } from '@dutydeck/shared';
 import { claudeDataDir, claudeProjectDir, type CliPathEnv } from './cli-paths.js';
 import { parseJsonlObjects, readHeadBytes, readTail } from './session-id/fs-scan.js';
+import { parseProcStat } from '@dutydeck/shared';
 
 // realpath(3): same canonical path and ENOENT as the JS walk, without its per-component lstat.
 const realpath = realpathSync.native;
@@ -123,8 +124,7 @@ export class ClaudeNativeSessionResolver {
           // A cached PID must still descend from the backend, not merely live.
           let ancestor = pid;
           for (let depth = 0; ancestor !== this.root.pid && depth < 64; depth++) {
-            const raw = readFileSync(`/proc/${ancestor}/stat`, 'utf8');
-            ancestor = Number(raw.slice(raw.lastIndexOf(')') + 2).split(' ')[1]);
+            ancestor = parseProcStat(readFileSync(`/proc/${ancestor}/stat`, 'utf8')).ppid;
             if (ancestor <= 1) break;
           }
           if (ancestor !== this.root.pid || realpath(`/proc/${pid}/cwd`) !== this.cwd) continue;

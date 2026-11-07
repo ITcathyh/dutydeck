@@ -4,7 +4,7 @@ import { promisify } from 'node:util';
 import { lstat, readFile, readdir, readlink, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ConfigRepository, VerificationCommandInput, VerificationRecord, VerificationResponse } from '@dutydeck/shared';
-import { makeId, now, RuntimeError } from '@dutydeck/shared';
+import { makeId, now, RuntimeError, parseProcStat, procStatExited } from '@dutydeck/shared';
 import { SAFE_GIT_CONFIG } from '@dutydeck/shared/safe-git';
 import { minimalToolEnvironment } from './process-environment.js';
 
@@ -438,9 +438,7 @@ async function readLinuxProcessIdentity(pid: number, marker: string): Promise<Ve
       readFile(`/proc/${pid}/stat`, 'utf8'),
       readFile(`/proc/${pid}/cmdline`)
     ]);
-    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
-    const processGroupId = Number(fields[2]);
-    const startTimeTicks = fields[19];
+    const { pgid: processGroupId, start: startTimeTicks } = parseProcStat(stat);
     if (!Number.isSafeInteger(processGroupId) || !startTimeTicks || !cmdline.includes(Buffer.from(marker))) return undefined;
     return { platform: 'linux', pid, processGroupId, startTimeTicks, marker };
   } catch (error) {
@@ -456,9 +454,8 @@ async function processGroupExists(processGroupId: number): Promise<boolean> {
   const entries = (await readdir('/proc')).filter(entry => /^\d+$/.test(entry));
   const live = await Promise.all(entries.map(async pid => {
     try {
-      const stat = await readFile(`/proc/${pid}/stat`, 'utf8');
-      const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
-      return Number(fields[2]) === processGroupId && fields[0] !== 'Z' && fields[0] !== 'X';
+      const stat = parseProcStat(await readFile(`/proc/${pid}/stat`, 'utf8'));
+      return stat.pgid === processGroupId && !procStatExited(stat);
     } catch (error) {
       if (['ENOENT', 'ESRCH'].includes((error as NodeJS.ErrnoException).code ?? '')) return false;
       throw error;

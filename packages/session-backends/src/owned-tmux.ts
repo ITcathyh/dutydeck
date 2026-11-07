@@ -3,6 +3,7 @@ import { descendantPids } from './descendant-pids.js';
 import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { isAbsolute } from 'node:path';
+import { parseProcStat, procStatExited } from '@dutydeck/shared';
 
 export interface PhysicalProcessIdentity {
   host: string; boot: string; namespace: string; pid: number; start: string;
@@ -115,14 +116,12 @@ function readStat(pid: number): string | undefined {
   try { return readFileSync(`/proc/${pid}/stat`, 'utf8'); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT' || (error as NodeJS.ErrnoException).code === 'ESRCH') return undefined; throw error; }
 }
-/** Fields after the `(comm)` of /proc/<pid>/stat: [0] state, [19] start time. */
-function statFields(raw: string): string[] { return raw.slice(raw.lastIndexOf(')') + 2).split(' '); }
-function statStart(raw: string): string | undefined { return raw ? statFields(raw)[19] : undefined; }
+function statStart(raw: string): string | undefined { return raw ? parseProcStat(raw).start : undefined; }
 function exitedSinceScan(pid: number, scannedStat: string | undefined): boolean {
   const current = readStat(pid);
   if (current === undefined) return true;
   if (scannedStat !== undefined && statStart(current) !== statStart(scannedStat)) return true;
-  return statFields(current)[0] === 'Z';
+  return procStatExited(parseProcStat(current));
 }
 const key = (identity: PhysicalProcessIdentity) => JSON.stringify([identity.host, identity.boot, identity.namespace, identity.pid, identity.start]);
 function alive(identity: PhysicalProcessIdentity, probe: ProcessProbe): void {

@@ -35,6 +35,7 @@ import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { SessionBackend, SessionProbe, SpawnOptions } from './types.js';
+import { parseProcStat } from '@dutydeck/shared';
 
 // ─── Typed errors ──────────────────────────────────────────────────────────
 
@@ -119,7 +120,7 @@ function isSocketMissingErrorText(stderrText: string): boolean {
 
 /** Linux start time of a process (stat field 22), so a reused PID is not mistaken for the original. */
 function processStart(pid: number): string | undefined {
-  try { const stat = readFileSync(`/proc/${pid}/stat`, 'utf8'); return stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19]; }
+  try { return parseProcStat(readFileSync(`/proc/${pid}/stat`, 'utf8')).start; }
   catch { return undefined; }
 }
 function paneProcessAlive(pane: { pid: number; start?: string }): boolean {

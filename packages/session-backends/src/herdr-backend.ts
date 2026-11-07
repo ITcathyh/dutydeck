@@ -11,6 +11,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSy
 import { dirname, isAbsolute } from 'node:path';
 import type { SessionBackend, SpawnOptions } from './types.js';
 import type { PhysicalProcessIdentity, ProcessProbe } from './owned-tmux.js';
+import { parseProcStat, procStatExited, type ProcStat } from '@dutydeck/shared';
 
 type Pane = { pane_id: string; terminal_id: string };
 interface State {
@@ -33,9 +34,8 @@ export function herdrControlEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessE
  * environment range moves and the process is classified again; a setuid change exposes or hides those
  * fields and changes the key too. Older kernels without the fields get no cache.
  */
-function processVerdictKey(pid: string, stat: string[]): string | undefined {
-  const envStart = stat[47], envEnd = stat[48];
-  return envStart && envEnd ? `${pid}:${stat[19]}:${envStart}:${envEnd}` : undefined;
+function processVerdictKey(pid: string, stat: ProcStat): string | undefined {
+  return stat.envStart && stat.envEnd ? `${pid}:${stat.start}:${stat.envStart}:${stat.envEnd}` : undefined;
 }
 
 /** A dedicated named server and an argv-launched primary pane. Never uses default or focused targets. */
@@ -285,7 +285,7 @@ export class HerdrBackend implements SessionBackend {
     if (!pane) throw new Error('Herdr did not return the launched primary pane');
     const info = JSON.parse((await this.cli(['pane', 'process-info', '--pane', pane.pane_id]))).result.process_info;
     const root = this.options.processProbe.identify(info.shell_pid);
-    this.state = { launch_id: launchId, owner: this.ownerId, name: this.sessionName, socket: path, ...stat, server: serverIdentity, pane, root, process_session: Number(readFileSync(`/proc/${root.pid}/stat`, 'utf8').split(') ').at(-1)!.split(' ')[3]), process_cgroup: readFileSync(`/proc/${root.pid}/cgroup`, 'utf8'), identities: [root] };
+    this.state = { launch_id: launchId, owner: this.ownerId, name: this.sessionName, socket: path, ...stat, server: serverIdentity, pane, root, process_session: parseProcStat(readFileSync(`/proc/${root.pid}/stat`, 'utf8')).session, process_cgroup: readFileSync(`/proc/${root.pid}/cgroup`, 'utf8'), identities: [root] };
     this.persist();
     check();
     await this.attach(opts);
@@ -465,11 +465,13 @@ export class HerdrBackend implements SessionBackend {
     for (const entry of stats ? stats.keys() : readdirSync('/proc').filter(name => /^\d+$/.test(name))) {
       let stage = 'stat', originalStart: string | undefined;
       try {
-        const stat = (stats?.get(entry) ?? readFileSync(`/proc/${entry}/stat`, 'utf8')).split(') ').at(-1)!.split(' ');
-        originalStart = stat[19];
-        if (stat[0] === 'Z' || stat[0] === 'X') continue;
+        const stat = parseProcStat(stats?.get(entry) ?? readFileSync(`/proc/${entry}/stat`, 'utf8'));
+        originalStart = stat.start;
+        if (procStatExited(stat)) continue;
+        // An unreadable start cannot be compared; leave the census unknown rather than skip it.
+        if (!/^\d+$/.test(originalStart)) throw new Error('PROCESS_STAT_INVALID');
         // A process born before this immutable root cannot inherit this launch's private marker.
-        if (BigInt(originalStart!) < BigInt(state.root.start)) continue;
+        if (BigInt(originalStart) < BigInt(state.root.start)) continue;
         const key = processVerdictKey(entry, stat), known = key ? this.processVerdicts.get(key) : undefined;
         if (key && known) {
           verdicts.set(key, known);
@@ -497,10 +499,10 @@ export class HerdrBackend implements SessionBackend {
         // Reobserve the same identity; only actual death/disappearance clears that uncertainty.
         let observed = 'unknown', sameLiveIdentity = false, retryErrno: string | undefined, cgroup = 'unknown', comm = 'unknown';
         try {
-          const after = readFileSync(`/proc/${entry}/stat`, 'utf8').split(') ').at(-1)!.split(' ');
-          observed = `${after[0]}:${after[19]}`;
-          if (after[19] === originalStart && (after[0] === 'Z' || after[0] === 'X')) continue;
-          sameLiveIdentity = after[19] === originalStart;
+          const after = parseProcStat(readFileSync(`/proc/${entry}/stat`, 'utf8'));
+          observed = `${after.state}:${after.start}`;
+          if (after.start === originalStart && procStatExited(after)) continue;
+          sameLiveIdentity = after.start === originalStart;
         } catch (second) {
           if (['ENOENT', 'ESRCH'].includes((second as NodeJS.ErrnoException).code ?? '')) continue;
         }
@@ -509,10 +511,10 @@ export class HerdrBackend implements SessionBackend {
             try {
               // exec/exit transitions can temporarily revoke environ access. Classify actual contents once readable.
               const environment = readFileSync(`/proc/${entry}/environ`, 'utf8').split('\0');
-              const after = readFileSync(`/proc/${entry}/stat`, 'utf8').split(') ').at(-1)!.split(' ');
-              observed = `${after[0]}:${after[19]}`;
-              if (after[19] !== originalStart) throw new Error('PROCESS_IDENTITY_CHANGED');
-              if (after[0] === 'Z' || after[0] === 'X') continue;
+              const after = parseProcStat(readFileSync(`/proc/${entry}/stat`, 'utf8'));
+              observed = `${after.state}:${after.start}`;
+              if (after.start !== originalStart) throw new Error('PROCESS_IDENTITY_CHANGED');
+              if (procStatExited(after)) continue;
               if (environment.includes(marker)) {
                 stage = 'identity';
                 const identity = this.options.processProbe.identify(Number(entry));
@@ -533,10 +535,10 @@ export class HerdrBackend implements SessionBackend {
               cgroup = readFileSync(`/proc/${entry}/cgroup`, 'utf8').trim();
               const original = systemdPath(state.process_cgroup), candidate = systemdPath(cgroup);
               const login = candidate?.match(/^(\/user\.slice\/user-\d+\.slice\/)(session-\d+\.scope)(?:\/|$)/);
-              const after = readFileSync(`/proc/${entry}/stat`, 'utf8').split(') ').at(-1)!.split(' ');
-              observed = `${after[0]}:${after[19]}`;
-              if (after[19] === originalStart && (after[0] === 'Z' || after[0] === 'X')) continue;
-              if (after[19] === originalStart && login && original?.startsWith(login[1]!)
+              const after = parseProcStat(readFileSync(`/proc/${entry}/stat`, 'utf8'));
+              observed = `${after.state}:${after.start}`;
+              if (after.start === originalStart && procStatExited(after)) continue;
+              if (after.start === originalStart && login && original?.startsWith(login[1]!)
                 && original !== login[1]! + login[2]! && !original.startsWith(login[1]! + login[2]! + '/')) continue;
             } catch { /* Unknown membership or identity remains unresolved. */ }
           }
@@ -572,8 +574,8 @@ export class HerdrBackend implements SessionBackend {
     if (state.process_session !== undefined) {
       for (const entry of readdirSync('/proc').filter(name => /^\d+$/.test(name))) {
         try {
-          const fields = readFileSync(`/proc/${entry}/stat`, 'utf8').split(') ').at(-1)!.split(' ');
-          if (Number(fields[3]) === state.process_session && fields[0] !== 'Z' && fields[0] !== 'X') {
+          const stat = parseProcStat(readFileSync(`/proc/${entry}/stat`, 'utf8'));
+          if (stat.session === state.process_session && !procStatExited(stat)) {
             const identity = this.options.processProbe.identify(Number(entry));
             if (!captured.identities.some(item => isDeepStrictEqual(item, identity))) captured.identities.push(identity);
           }
@@ -614,7 +616,7 @@ export class HerdrBackend implements SessionBackend {
       const descendants = descendantPids([current.root.pid], stats).map(pid => {
         const identity = this.options.processProbe.identify(pid), raw = stats.get(String(pid));
         if (pid === current.root.pid && !isDeepStrictEqual(identity, current.root)) throw new Error('HERDR_PROCESS_IDENTITY_CHANGED');
-        if (raw && raw.split(') ').at(-1)!.split(' ')[19] !== identity.start) throw new Error('HERDR_PROCESS_IDENTITY_CHANGED');
+        if (raw && parseProcStat(raw).start !== identity.start) throw new Error('HERDR_PROCESS_IDENTITY_CHANGED');
         return identity;
       });
       state.identities = [...new Map([...state.identities, ...descendants, ...this.ownedProcesses(stats)].map(item => [JSON.stringify(item), item])).values()];

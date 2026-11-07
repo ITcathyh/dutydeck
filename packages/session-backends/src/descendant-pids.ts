@@ -1,4 +1,5 @@
 import { readFileSync, readdirSync } from 'node:fs';
+import { parseProcStat } from '@dutydeck/shared';
 
 /** Includes roots; callers validate ownership and resolve physical identities. */
 export function descendantPids(roots: number[], stats?: Map<string, string>): number[] {
@@ -7,7 +8,7 @@ export function descendantPids(roots: number[], stats?: Map<string, string>): nu
     try {
       const raw = readFileSync(`/proc/${entry}/stat`, 'utf8');
       stats?.set(entry, raw);
-      const parent = Number(raw.slice(raw.lastIndexOf(')') + 2).split(' ')[1]);
+      const parent = parseProcStat(raw).ppid;
       const siblings = children.get(parent);
       if (siblings) siblings.push(Number(entry));
       else children.set(parent, [Number(entry)]);

@@ -1,6 +1,7 @@
 import { readFileSync, readlinkSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { parseProcStat } from '@dutydeck/shared';
 
 export interface ProcessIdentity {
   host: string;
@@ -157,10 +158,9 @@ function machineLinux() {
 }
 
 function processStartLinux(pid: number) {
-  const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
-  const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
-  if (!/^\d+$/.test(fields[19] ?? '')) throw new Error('Invalid process start identity');
-  return fields[19]!;
+  const { start } = parseProcStat(readFileSync(`/proc/${pid}/stat`, 'utf8'));
+  if (!/^\d+$/.test(start)) throw new Error('Invalid process start identity');
+  return start;
 }
 
 /** Capture a child identity without authorizing signals to a future PID occupant. */
