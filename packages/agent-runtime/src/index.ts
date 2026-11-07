@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { AgentCapabilities, AgentConfig, AttemptActivity, AgentDriver, AgentEvent, DriverFactory, DriverTranscriptSourceObservation, EventType, EventWindowOptions, HistoryOutlineQuery, NormalizedDriverEvent, PermissionMode, PermissionRequestData, PromptAssemblyData, PromptPart, PromptSourceDiagnostics, PublicTaskRecord, RepositoryBundle, RuntimeControlClaim, Session, SkillDeliveryMetadata, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy, TranscriptSourceObservation, VerificationCommandInput, VerificationResponse, WorkspaceCleanupBlocker, WorkspaceCleanupPreview, WorkspaceCleanupResult, WorkspaceResponse } from '@dutydeck/shared';
 import { timeLoop, eventHasContent, normalizeEventContent, deferredConfirmationId, agentCommandApprovalReason, isAgentCommandAutoApproval, canonicalExecutionJson, ptyRetirementRecoverySchema, steeringRecoveryDecisionSchema, executionRecoveryDecisionSchema, unknownTaskResolutionSchema, executionActorSchema, taskRequestV1Schema, steerableTaskNamespace, makeId, now, RuntimeError, permissionDisplayText, freeTextInputMaxBytes, workspaceModes, sessionNameConfigKey, normalizeSessionName, parseLarkSourceId, supportsRemoteApproval, supportsNativeFork, redactCredentialText, PROMPT_NOT_WRITTEN, unknownTaskActionLabels } from '@dutydeck/shared';
 import { listAcpxBuiltinAgents, AcpxAdapter, testRegexWithTimeout, ProcessTreeCpu, readNativeCreationRecord } from '@dutydeck/acp-client';
-import { JsonlTransport, PipeTransport, probeAgent, PtyTransport } from '@dutydeck/transports';
+import { commandExists, JsonlTransport, PipeTransport, probeAgent, PtyTransport } from '@dutydeck/transports';
 import { mkdir, realpath, rename, unlink, writeFile } from 'node:fs/promises';
 import { join, sep } from 'node:path';
 import type { UnknownTaskFacts, UnknownTaskResolution, SteeringRecoveryDecision, SteeringOperation, PtyRetirementRecovery, ExecutionRecoveryDecision, AcceptedTask, AcceptedTaskInputV2, AttemptFence, AttemptRef, BoundExecutionRepository, CommitResult, DriverSteeringOutcome, ExecutionActor, ExecutionBlocker, ResourceCheckRef, SessionFence, TaskAttempt, TaskExecutionProjection, TaskRequestV1 } from '@dutydeck/shared';
@@ -212,6 +212,8 @@ const UNKNOWN_TASK_ABANDON_MS = 7 * 24 * 60 * 60_000;
 const QUEUED_TASK_EXPIRE_MS = 24 * 60 * 60_000;
 /** 同会话上一条任务由 Agent 跑完不到这么久，视为按顺序轮到排头，不按过期处理。 */
 const QUEUE_HANDOFF_MS = 15 * 60_000;
+/** 自更新的 CLI 原地替换可执行文件期间命令短暂不存在；找不到命令时等这么久再看一次。 */
+const COMMAND_SWAP_WAIT_MS = 3_000;
 /** 轮次结束时执行端已自行拒掉、却没发终态事件的审批，补记的拒绝说明。 */
 const TURN_ENDED_PERMISSION_REASON = '本轮任务已结束，这次操作没有执行。';
 const workspaceBlockerStates: Record<string, string> = {
@@ -701,7 +703,11 @@ export class DutydeckRuntime {
     // Configuration is the source of truth on every boot and removes built-ins
     // that are no longer discovered from the ACPX registry, and Agents of plugins that are gone.
     const configuredIds = new Set(agents.map(agent => agent.id));
-    for (const existing of await this.mutations.wait(() => this.repos.agents.list())) if ((existing.builtin || existing.origin) && !configuredIds.has(existing.id)) await this.mutations.write('runtime_initialize', () => this.repos.agents.delete(existing.id));
+    const removed = (await this.mutations.wait(() => this.repos.agents.list())).filter(existing => (existing.builtin || existing.origin) && !configuredIds.has(existing.id));
+    // A built-in terminal CLI that is replacing itself drops out of the boot scan; keep its record when the command is back.
+    const swapping = new Set(removed.filter(existing => existing.builtin && existing.protocol === 'pty-cli' && !commandExists(existing.command)));
+    if (swapping.size) await this.commandSwapWindow();
+    for (const existing of removed) if (!swapping.has(existing) || !commandExists(existing.command)) await this.mutations.write('runtime_initialize', () => this.repos.agents.delete(existing.id));
     for (const agent of agents) await this.mutations.write('runtime_initialize', () => this.repos.agents.save(agent));
     onAgentsRegistered?.();
     for (const session of await this.mutations.wait(() => this.repos.sessions.list())) {
@@ -2167,9 +2173,31 @@ export class DutydeckRuntime {
     try { return await start; } finally { if (this.backgroundStarts.get(stableSessionId) === start) this.backgroundStarts.delete(stableSessionId); }
   }
 
+  private probe(agent: AgentConfig) {
+    return (this.options.probe ?? probeAgent)(agent, this.options.acpxCommand);
+  }
+
   private sessionCapability(agent: AgentConfig, input: StartSessionInput) {
     const configured = { ...agent, ...sessionConfigOf(agent, input) };
-    return { configured, capability: (this.options.probe ?? probeAgent)(configured, this.options.acpxCommand) };
+    return { configured, capability: this.probe(configured) };
+  }
+
+  /** For a new session a missing command gets one more probe after the swap window. */
+  private async newSessionCapability(agent: AgentConfig, input: StartSessionInput) {
+    const result = this.sessionCapability(agent, input);
+    if (result.capability.available || commandExists(result.configured.command) || !await this.waitForCommand(result.configured.command)) return result;
+    return this.sessionCapability(agent, input);
+  }
+
+  private commandSwapWindow() {
+    return this.mutations.wait(() => new Promise<void>(resolve => setTimeout(resolve, COMMAND_SWAP_WAIT_MS)));
+  }
+
+  /** Waits at most once, so a CLI that is really gone costs one swap window. */
+  private async waitForCommand(command: string): Promise<boolean> {
+    if (commandExists(command)) return true;
+    await this.commandSwapWindow();
+    return commandExists(command);
   }
 
   /** Resolve auto transport before the memory job freezes its permission posture. */
@@ -2178,7 +2206,7 @@ export class DutydeckRuntime {
     if (input.source !== 'lark-memory' || !/^[A-Za-z0-9_-]+:[A-Za-z0-9_-]+:memory$/.test(input.sourceId ?? '')) throw new RuntimeError('INVALID_MEMORY_SESSION', 'Invalid memory session scope', 400);
     const agent = await this.repos.agents.get(input.agentId);
     if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', 'Memory Agent not found', 404);
-    const { configured, capability } = this.sessionCapability(agent, input);
+    const { configured, capability } = await this.newSessionCapability(agent, input);
     if (!capability.available) throw new RuntimeError('AGENT_UNAVAILABLE', capability.detail ?? 'Agent unavailable', 503);
     if (capability.protocol === 'pty') throw new RuntimeError('MEMORY_AGENT_UNSUPPORTED', 'Legacy PTY cannot enforce memory permissions', 422);
     return { ...input, protocol: capability.protocol, cwd: configured.cwd, model: configured.model, reasoningEffort: configured.reasoningEffort, permissionMode: capability.protocol === 'pty-cli' ? 'ask' : 'deny-all' };
@@ -2285,7 +2313,7 @@ export class DutydeckRuntime {
     if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', `Unknown agent: ${input.agentId}`, 404);
     const sourceCwd = input.cwd ?? agent.cwd ?? process.cwd();
     const workspaceMode = input.workspaceMode ?? 'shared';
-    const { configured: initialConfigured, capability } = this.sessionCapability(agent, input);
+    const { configured: initialConfigured, capability } = await this.newSessionCapability(agent, input);
     if (!capability.available) throw new RuntimeError('AGENT_UNAVAILABLE', capability.detail ?? 'Agent unavailable', 503);
     if (capability.protocol === 'pty') {
       throw new RuntimeError('PERMISSION_MODE_UNSUPPORTED', 'Legacy PTY transport cannot enforce a permission posture or expose interactive approval; use an ACP or PTY CLI Agent', 422);
@@ -2494,6 +2522,11 @@ export class DutydeckRuntime {
     const configured = await this.configureAgentForSession(agent, session);
     this.assertReplaceable(session.id); this.assertResources(session.id, true);
     const resolved = this.drivers.get(session.id); if (resolved) return resolved;
+    if (start && session.protocol === 'pty-cli' && !this.probe(configured).available) {
+      await this.waitForCommand(configured.command);
+      this.assertReplaceable(session.id); this.assertResources(session.id, true);
+      const raced = this.drivers.get(session.id); if (raced) return raced;
+    }
     const options: ExecutionOptions = executionOptions ?? executionOptionsOf(configured);
     const generation = this.nextSessionGeneration(session.id), lifecycle = this.lifecycle(session.id),startupOwner=this.mutations.current();
     const resource = this.localResources.begin(this.fence(session), options, this.factory.controlledResources?.(session.protocol!) ? {startupValid:()=>this.mutations.valid(startupOwner),valid:()=>this.mutations.valid(lifecycle)&&this.sessionGenerations.get(session.id)===generation,repairConfiguration,executionDomain:`${session.source ?? 'local'}:${session.sourceId ?? ''}`} : undefined);

@@ -125,6 +125,7 @@ export interface PtyAgentContribution {
 const DEFAULT_PTY_CAPABILITIES = { pause: false, resume: true } as const;
 
 // PTY 扫描结果按贡献列表和 CODEX_PATH 缓存：commandExists/cliVersion 都是 spawnSync 重操作，相同配置不重复探测
+// 有命令找不到时不写缓存：CLI 自更新替换可执行文件期间命令会短暂缺失，下次扫描要重新探测
 const scannedPtyAgents = new Map<string, Array<Omit<AgentConfig, 'cwd'>>>();
 const scanPtyAgents = (contributions: PtyAgentContribution[], env: NodeJS.ProcessEnv): Array<Omit<AgentConfig, 'cwd'>> => {
   const cacheKey = JSON.stringify([contributions, env.CODEX_PATH]);
@@ -135,7 +136,7 @@ const scanPtyAgents = (contributions: PtyAgentContribution[], env: NodeJS.Proces
     if (!commandExists(command)) return [];
     return [{ id: contribution.id, name: contribution.name, command, args: contribution.args ?? [], protocol: 'pty-cli' as const, ...(contribution.adapterId && contribution.adapterId !== contribution.id ? { adapterId: contribution.adapterId } : {}), env: {}, permissionMode: 'ask' as const, timeout: 600, capabilities: contribution.capabilities ?? DEFAULT_PTY_CAPABILITIES, builtin: contribution.builtin ?? true, version: cliVersion(command) }];
   });
-  scannedPtyAgents.set(cacheKey, agents);
+  if (agents.length === contributions.length) scannedPtyAgents.set(cacheKey, agents);
   return agents;
 };
 

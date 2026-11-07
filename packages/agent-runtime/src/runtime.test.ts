@@ -1667,6 +1667,124 @@ describe('driver exit subscription', () => {
   });
 });
 
+describe('CLI self-update window', () => {
+  const executable = (path: string) => writeFile(path, '#!/bin/sh\n', { mode: 0o755 });
+  const fakeTimers = () => vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  // Lets work before the swap wait finish, so the clock is advanced from the armed timer.
+  const armed = async () => { while (!vi.getTimerCount()) await new Promise(resolve => setImmediate(resolve)); };
+  const terminal = (command: string, builtin = false): AgentConfig => ({ ...agent, id: 'swap-cli', name: 'Swap CLI', command, protocol: 'pty-cli', builtin });
+
+  it('starts a new session when its command reappears within the swap window', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dutydeck-cli-swap-'));
+    const command = join(directory, 'cli');
+    const h = harness();
+    const runtime = new DutydeckRuntime(h.repos, { driverFactory: () => h.driver });
+    try {
+      await runtime.initialize([terminal(command)]);
+      fakeTimers();
+      const starting = runtime.start({ agentId: 'swap-cli' });
+      await armed();
+      await vi.advanceTimersByTimeAsync(2_900);
+      await executable(command);
+      await vi.advanceTimersByTimeAsync(100);
+      vi.useRealTimers();
+      expect((await starting).state).toBe('idle');
+      expect(h.driver.start).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers(); await runtime.shutdown(); h.repos.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('reports the original error after one swap window when the command stays missing', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dutydeck-cli-swap-'));
+    const command = join(directory, 'cli');
+    const h = harness();
+    const runtime = new DutydeckRuntime(h.repos, { driverFactory: () => h.driver });
+    try {
+      await runtime.initialize([terminal(command)]);
+      fakeTimers();
+      let settled = false;
+      const starting = runtime.start({ agentId: 'swap-cli' });
+      void starting.then(() => { settled = true; }, () => { settled = true; });
+      await armed();
+      await vi.advanceTimersByTimeAsync(2_999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(starting).rejects.toMatchObject({ code: 'AGENT_UNAVAILABLE', message: `Command not found: ${command}` });
+      expect(h.driver.start).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers(); await runtime.shutdown(); h.repos.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('reports a missing acpx at once because the Agent command itself exists', async () => {
+    const h = harness();
+    const runtime = new DutydeckRuntime(h.repos, { acpxCommand: join(tmpdir(), 'dutydeck-missing-acpx', 'acpx'), driverFactory: () => h.driver });
+    try {
+      await runtime.initialize([agent]);
+      fakeTimers();
+      await expect(runtime.start({ agentId: agent.id })).rejects.toMatchObject({ code: 'AGENT_UNAVAILABLE', message: expect.stringContaining('acpx is unavailable') });
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); await runtime.shutdown(); h.repos.close(); }
+  });
+
+  it.each([true, false])('rechecks a removed built-in terminal Agent at boot before deleting it (command returns=%s)', async returns => {
+    const directory = await mkdtemp(join(tmpdir(), 'dutydeck-cli-swap-'));
+    const builtin = terminal(join(directory, 'cli'), true);
+    const h = harness();
+    try {
+      await h.repos.agents.save(builtin);
+      fakeTimers();
+      const initializing = h.runtime.initialize([agent]);
+      await armed();
+      await vi.advanceTimersByTimeAsync(2_900);
+      if (returns) await executable(builtin.command);
+      await vi.advanceTimersByTimeAsync(100);
+      vi.useRealTimers();
+      await initializing;
+      expect((await h.repos.agents.list()).some(existing => existing.id === builtin.id)).toBe(returns);
+    } finally {
+      vi.useRealTimers(); await h.runtime.shutdown(); h.repos.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('attaches an existing terminal without waiting for its missing command', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dutydeck-cli-swap-'));
+    const command = join(directory, 'cli');
+    const file = join(directory, 'dutydeck.db');
+    await executable(command);
+    let emit!: (event: any) => void;
+    const first: AgentDriver = { start: vi.fn(async () => {}), resume: vi.fn(async () => {}), interrupt: vi.fn(async () => {}), isStopped: async () => true, stop: vi.fn(async () => {}),
+      send: vi.fn(async () => { emit({ type: 'text', data: { text: 'done' } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } }); }) };
+    const firstRepos = createRepositories(file, { newDatabaseAuthority: 'ledger_v1' });
+    const firstRuntime = new DutydeckRuntime(firstRepos, { driverFactory: (_agent, _protocol, onEvent) => { emit = onEvent; return first; } });
+    const attached: AgentDriver = { start: vi.fn(async () => {}), resume: vi.fn(async () => {}), send: vi.fn(async () => {}), interrupt: vi.fn(async () => {}), isStopped: async () => true, stop: vi.fn(async () => {}), attachTerminal: vi.fn(() => true) };
+    let repos: ReturnType<typeof createRepositories> | undefined, runtime: DutydeckRuntime | undefined;
+    try {
+      await firstRuntime.initialize([terminal(command)]);
+      const session = await firstRuntime.start({ agentId: 'swap-cli' });
+      await firstRuntime.send(session.id, 'work');
+      await firstRuntime.shutdown(); firstRepos.close();
+      await rm(command);
+
+      repos = createRepositories(file, { newDatabaseAuthority: 'ledger_v1' });
+      runtime = new DutydeckRuntime(repos, { driverFactory: () => attached });
+      await runtime.initialize([terminal(command)]);
+      fakeTimers();
+      await expect(runtime.getTerminalDriver(session.id)).resolves.toBe(attached);
+      expect(attached.attachTerminal).toHaveBeenCalledOnce();
+      expect(attached.start).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      await runtime?.shutdown(); repos?.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('publishSessionEvent — 带外事件入口（@dutydeck/relay 的落点）', () => {
   // 这个入口存在的**唯一理由**就是「不能直接调 repos.events.append()」：
   // 那样只落库，既不通知在线 SSE 订阅者，也不推进 runtime 的序号计数器。
