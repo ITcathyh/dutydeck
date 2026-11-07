@@ -187,6 +187,8 @@ export interface AutomationDeliveryContext {
 }
 
 type DeliveryRecord = SessionScheduleOccurrenceV2 | CiSubscriptionV2;
+/** 一轮扫描的时刻与迟到宽限：同一轮里排在后面的计划，不因前面开会话、派发花的时间被判迟到。 */
+type ScanTiming = { observedAt: Date; graceMs: number };
 type TickParseCache = {
   occurrences: Map<string, SessionScheduleOccurrence>;
   subscriptions: Map<string, CiSubscription>;
@@ -509,6 +511,8 @@ export class SessionAutomationService {
   /** 本实例投递失败过的来源：只对它们退避；上一个进程（关闭、重启前）记下的失败，打开后立刻补发一次。 */
   private readonly failedDeliveries = new Set<string>();
   private tickRequested = false;
+  /** 上一轮扫描的耗时：扫描拖长时，下一轮判定计划时点是否迟到要放宽同样的时间。 */
+  private lastTickMs = 0;
   private readonly subscriptions = new Map<string, () => void>();
   private readonly quarantinedSchedules = new Set<string>();
   /** 关闭时终止正在跑的前置命令；那次触发留在待执行，租约过期后由下次启动重新判定。 */
@@ -1491,7 +1495,9 @@ export class SessionAutomationService {
     const operation = (async () => {
       while (this.tickRequested && !this.closed) {
         this.tickRequested = false;
-        await this.runTick();
+        const startedAt = this.clock();
+        const timing = { observedAt: startedAt, graceMs: DEFAULT_POLL_MS + this.lastTickMs };
+        await this.runTick(timing).finally(() => { this.lastTickMs = Math.max(0, this.clock().getTime() - startedAt.getTime()); });
       }
     })().finally(() => {
       if (this.currentTick === operation) this.currentTick = undefined;
@@ -1697,7 +1703,7 @@ export class SessionAutomationService {
     }
   }
 
-  private async runTick() {
+  private async runTick(timing: ScanTiming) {
     this.requireStore();
     this.quarantinedSchedules.clear();
     // Re-read storage at each phase; only reuse decoding for byte-identical rows within this tick.
@@ -1725,7 +1731,7 @@ export class SessionAutomationService {
       }
       await this.isolate(() => this.synchronizeLifecycle(item));
       await this.isolate(() => this.enforceDeadline(item.value));
-      await this.isolate(() => this.planSchedule(item.value));
+      await this.isolate(() => this.planSchedule(item.value, timing));
       await this.isolate(() => this.followUpOccurrence(item.value.id));
       await this.isolate(() => this.remindOverdue(item.value));
       await this.isolate(() => this.sendRunNotice(item.value));
@@ -1885,7 +1891,7 @@ export class SessionAutomationService {
     return { ...(await this.getRecord(occurrenceKey(occurrence.id), value => sessionScheduleOccurrenceSchema.parse(value)))!, created: false };
   }
 
-  private async planSchedule(snapshot: SessionSchedule) {
+  private async planSchedule(snapshot: SessionSchedule, timing: ScanTiming) {
     const stored = await this.getRecord(scheduleKey(snapshot.id), readStoredSessionSchedule);
     if (!stored) return;
     let schedule = stored.value;
@@ -1910,13 +1916,15 @@ export class SessionAutomationService {
       if (!openRunStatuses.has(already.value.runStatus)) await this.advanceSchedule(schedule, schedule.nextDueAt);
       return;
     }
-    const lateBy = this.clock().getTime() - new Date(schedule.nextDueAt).getTime();
-    const skip = schedule.misfirePolicy === 'skip' && lateBy > DEFAULT_POLL_MS
-      || schedule.maxLatenessSeconds !== undefined && lateBy > schedule.maxLatenessSeconds * 1_000;
-    const misfire = skip || lateBy > DEFAULT_POLL_MS ? {
+    const lateBy = timing.observedAt.getTime() - new Date(schedule.nextDueAt).getTime();
+    // 有效期短于扫描宽限时按宽限算：扫描本身就可能晚这么久才看到这个时点，否则准点的触发也会被判过期。
+    const validMs = schedule.maxLatenessSeconds === undefined ? undefined : Math.max(schedule.maxLatenessSeconds * 1_000, timing.graceMs);
+    const expired = validMs !== undefined && lateBy > validMs;
+    const skip = schedule.misfirePolicy === 'skip' && lateBy > timing.graceMs || expired;
+    const misfire = skip || lateBy > timing.graceMs ? {
       policy: schedule.misfirePolicy ?? 'coalesce',
       from: schedule.nextDueAt, to: iso(this.clock()),
-      reason: skip ? schedule.maxLatenessSeconds !== undefined && lateBy > schedule.maxLatenessSeconds * 1000 ? 'lateness_window_expired' : 'missed_time_skipped' : 'missed_times_coalesced'
+      reason: skip ? expired ? 'lateness_window_expired' : 'missed_time_skipped' : 'missed_times_coalesced'
     } : undefined;
     const restored = await this.restoreAfterFreshRetry(schedule);
     schedule = sessionScheduleSchema.parse({ ...schedule, ...restored ?? this.freshReservation(schedule, id), pendingOccurrence: {

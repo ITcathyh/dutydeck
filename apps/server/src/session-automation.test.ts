@@ -1628,8 +1628,9 @@ describe('schedule management and recovery contracts', () => {
     { policy: 'skip' as const, at: '00:02:00.000', count: 1, status: 'accepted' },
     { policy: 'skip' as const, at: '00:02:00.001', count: 0, status: 'skipped' },
     { policy: 'coalesce' as const, at: '00:10:00.000', count: 1, status: 'accepted' },
-    { policy: 'coalesce' as const, at: '00:01:30.000', max: 30, count: 1, status: 'accepted' },
-    { policy: 'coalesce' as const, at: '00:01:30.001', max: 30, count: 0, status: 'skipped' }
+    { policy: 'coalesce' as const, at: '00:01:30.001', max: 30, count: 1, status: 'accepted' },
+    { policy: 'coalesce' as const, at: '00:03:00.000', max: 120, count: 1, status: 'accepted' },
+    { policy: 'coalesce' as const, at: '00:03:00.001', max: 120, count: 0, status: 'skipped' }
   ])('makes one bounded misfire decision at $at for $policy', async test => {
     const h = await fixture();
     const created = await h.service.createSchedule(h.session.id, { ...scheduleInput, misfirePolicy: test.policy, ...(test.max ? { maxLatenessSeconds: test.max } : {}) }, 'ou_owner');
@@ -1911,6 +1912,35 @@ it.each([
     await h.service.tick();
     expect(h.dispatches).toHaveLength(1);
     expect((await h.service.getScheduleHistory(h.session.id, created.id))).toEqual([expect.objectContaining({ runStatus: 'blocked', blockReason: 'reconcile_required' })]);
+  }
+});
+
+it('judges lateness from the start of the scan, so a slow dispatch earlier in the tick does not skip on-time runs', async () => {
+  const h = await fixture();
+  const daily = { ...scheduleInput, timezone: 'UTC', trigger: { kind: 'cron' as const, expression: '0 9 * * *' }, misfirePolicy: 'skip' as const, additional: true };
+  const ids: string[] = [];
+  for (const [index, extra] of [{}, {}, { maxLatenessSeconds: 1 }].entries()) {
+    const created = await h.service.createSchedule(h.session.id, { ...daily, name: `Daily ${index}`, ...extra }, 'ou_owner');
+    await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: created.revision, enabled: true }, 'ou_owner');
+    ids.push(created.id);
+  }
+  const push = h.dispatches.push.bind(h.dispatches);
+  let slow = true;
+  // 本轮第一次派发花了 65 秒（开会话、排队）；之后的计划仍是本轮扫描准点看到的。
+  const spy = vi.spyOn(h.dispatches, 'push').mockImplementation((...tasks) => {
+    if (slow) { slow = false; h.now.value = new Date(h.now.value.getTime() + 65_000); }
+    return push(...tasks);
+  });
+  try {
+    h.now.value = new Date('2026-09-12T09:00:30.000Z');
+    await h.service.tick();
+  } finally { spy.mockRestore(); }
+  expect(slow).toBe(false);
+  expect(h.dispatches).toHaveLength(3);
+  for (const id of ids) {
+    const [latest] = await h.service.getScheduleHistory(h.session.id, id, 'ou_owner');
+    expect(latest).toMatchObject({ runStatus: 'accepted', scheduledForUtc: '2026-09-12T09:00:00.000Z' });
+    expect(latest!.misfire).toBeUndefined();
   }
 });
 
