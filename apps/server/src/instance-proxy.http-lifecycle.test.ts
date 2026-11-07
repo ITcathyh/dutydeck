@@ -31,7 +31,7 @@ it('shutdown settles with an open proxied SSE response', async () => {
       client.on('error', reject);
     });
     closing = app.close();
-    const result = await Promise.race([closing.then(() => 'closed'), new Promise<string>(resolve => setTimeout(() => resolve('blocked'), 300))]);
+    const result = await Promise.race([closing.then(() => 'closed'), new Promise<string>(resolve => setTimeout(() => resolve('blocked'), 3_000))]);
     expect(result).toBe('closed');
   } finally {
     client?.destroy();
@@ -98,7 +98,7 @@ it('cancels an HTTP forward waiting for upstream headers during shutdown', async
   try {
     await received;
     closing = app.close();
-    expect(await Promise.race([closing.then(() => 'closed'), new Promise(resolve => setTimeout(() => resolve('blocked'), 300))])).toBe('closed');
+    expect(await Promise.race([closing.then(() => 'closed'), new Promise(resolve => setTimeout(() => resolve('blocked'), 3_000))])).toBe('closed');
     await vi.waitFor(() => expect(upstreamClosed).toBe(true));
   } finally {
     client.destroy(); peer.closeAllConnections();

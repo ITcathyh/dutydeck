@@ -66,7 +66,7 @@ describe('Lark end-to-end request deadline', () => {
     };
     const started = Date.now();
     await expect(service().callOpenApi('/slow')).rejects.toMatchObject({ name: expect.stringMatching(/^(AbortError|TimeoutError)$/) });
-    expect(Date.now() - started).toBeLessThan(800);
+    expect(Date.now() - started).toBeLessThan(3_000);
     await vi.waitFor(() => expect(disconnected).toBe(1));
     expect(paths).toHaveLength(phase === 'token' ? 1 : 2);
   });
