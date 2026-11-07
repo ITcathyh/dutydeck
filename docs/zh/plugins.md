@@ -271,7 +271,7 @@ dutydeck plugin-tool call private-export/export-report --json '{"reportId":"week
 | `task.received` | 任务进入（Web、飞书、自动化、触发器都经过） | source, namespace, key, prompt, mode, actor | 会话 source | `deny` 拒收任务（403 `PLUGIN_HOOK_DENIED`） |
 | `task.beforeRun` | 任务开始前，skills 处理之后、prompt 冻结之前 | source, prompt, skills | 会话 source | `deny` 拒收；`additionalContext` 追加；`updatedPrompt` 替换 |
 | `tool.beforeCall` | 业务工具授权通过、实际调用前 | tool, input, resource, actor | 工具名 | `deny` 阻断；身份由宿主盖章 |
-| `permission.request` | 审批发出之前 | 完整的权限请求 | 请求标题 | `allow` / `deny` 直接代为决定、不再出人工审批；其他结果照常走人工审批 |
+| `permission.request` | 审批发出之前 | 完整的权限请求 | 请求标题 | `allow` / `deny` 直接代为决定、不再出人工审批；其他结果，或代为决定的审批记录写入失败时，照常走人工审批 |
 | `task.completed` | 任务结算后，异步 | status, prompt, source；顶层带 taskId | status | 无 |
 | `verification.completed` | 验证跑完后，异步 | 验证结果，加 source | status | 无 |
 | `notify` | CI 通知和触发器结果发出之前 | `ci_notice`（title, text, failed）或 `trigger_result`（taskId, status, text） | kind | `deny` 时不发 |

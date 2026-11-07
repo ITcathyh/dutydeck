@@ -98,6 +98,60 @@ describe('runtime host hooks', () => {
     await h.runtime.shutdown(); h.repos.close();
   });
 
+  it('does not hold the session write lock while a host review is still deciding', async () => {
+    let decide!: (decision: 'allow') => void;
+    const slow = new Promise<'allow'>(resolve => { decide = resolve; });
+    const reviewPermission = vi.fn(async (_session, request: { title?: string }) => request.title === 'Slow?' ? slow : undefined);
+    const h = harness({ reviewPermission });
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    h.driver.send = vi.fn(async () => {
+      h.emit({ type: 'permission_request', data: { id: 'p1', title: 'Write?', status: 'pending' } });
+      h.emit({ type: 'permission_request', data: { id: 'p2', title: 'Slow?', status: 'pending' } });
+      await gate;
+      h.emit({ type: 'text', data: { text: 'done' } });
+      h.emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+    });
+    await h.runtime.initialize([agent]);
+    const session = await h.runtime.start({ agentId: 'mock' });
+    const turn = h.runtime.send(session.id, 'work');
+    await vi.waitFor(() => expect(reviewPermission).toHaveBeenCalledTimes(2));
+    const writeId = h.runtime.getPendingPermissions(session.id).find(item => (item as { title?: string }).title === 'Write?')!.id;
+    const resolved = h.runtime.resolvePermission(session.id, writeId, true).then(request => request.status);
+    expect(await Promise.race([resolved, new Promise(resolve => setTimeout(() => resolve('still waiting'), 3_000))])).toBe('approved');
+    decide('allow');
+    await vi.waitFor(() => expect(h.driver.resolvePermission).toHaveBeenCalledWith('p2', true));
+    release();
+    const settled = await turn; expect(settled.status).toBe('completed');
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
+  it('hands a host decision to people when its approval record cannot be written', async () => {
+    const h = harness({ reviewPermission: async () => 'allow' });
+    vi.spyOn(h.repos.artifacts, 'savePermission').mockRejectedValueOnce(new Error('approval store unavailable'));
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    h.driver.send = vi.fn(async () => {
+      h.emit({ type: 'permission_request', data: { id: 'p1', title: 'Read?', status: 'pending' } });
+      await gate;
+      h.emit({ type: 'text', data: { text: 'done' } });
+      h.emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+    });
+    await h.runtime.initialize([agent]);
+    const session = await h.runtime.start({ agentId: 'mock' });
+    const turn = h.runtime.send(session.id, 'work');
+    await vi.waitFor(async () => expect((await h.runtime.getEvents(session.id)).filter(event => event.type === 'permission_request').map(event => (event.data as any).status)).toEqual(['pending']));
+    expect(h.driver.resolvePermission).not.toHaveBeenCalled();
+    expect((await h.runtime.getSession(session.id))?.state).toBe('waiting_for_permission');
+    const pending = h.runtime.getPendingPermissions(session.id);
+    expect(pending).toHaveLength(1);
+    expect((await h.runtime.resolvePermission(session.id, pending[0]!.id, true)).status).toBe('approved');
+    expect(h.driver.resolvePermission).toHaveBeenCalledWith('p1', true);
+    release();
+    const settled = await turn; expect(settled.status).toBe('completed');
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
   it('notifies the host once per settled task without delaying the result', async () => {
     const onTaskSettled = vi.fn();
     const h = harness({ onTaskSettled });

@@ -556,7 +556,10 @@ export class DutydeckRuntime {
     const previous = this.driverEventChains.get(session.id) ?? Promise.resolve();
     const next = previous.then(() => this.mutations.run(token, async () => {
       if (this.sessionGenerations.get(session.id) !== generation || !this.mutations.valid(token)) return;
-      await this.eventScope.run(ref, () => this.mutations.write(session.id, () => this.consume(session, event, eventId)));
+      // 插件审批钩子可能一直等到超时，不能占着会话写锁；同一会话之后的驱动事件仍按顺序排在它后面。
+      const hostDecision = await this.reviewHostPermission(session, ref, event);
+      if (this.sessionGenerations.get(session.id) !== generation) return;
+      await this.eventScope.run(ref, () => this.mutations.write(session.id, () => this.consume(session, event, eventId, hostDecision)));
       if (isAttemptRef(ref)) await this.recordUsage(session, ref, event);
     })).catch(error => {
       if (!this.mutations.valid(token) || this.sessionGenerations.get(session.id) !== generation) return;
@@ -1839,7 +1842,21 @@ export class DutydeckRuntime {
     }
   }
 
-  private async consume(session: Session, event: NormalizedDriverEvent, eventId: string) {
+  /** 驱动事件写入账本前的形态：内容归一化，轮次内的原生 id 加上轮次前缀。 */
+  private driverEventData(scope: SessionFence | undefined, event: NormalizedDriverEvent) {
+    let data = event.data;
+    if (data && Array.isArray(data.parts)) data = { ...data, parts: normalizeEventContent(data.parts) };
+    if (event.type !== 'permission_request' && event.type !== 'tool_call' && event.type !== 'tool_result') return data;
+    const scopedId = (nativeId: string) => scope && isAttemptRef(scope) ? `turn_${digest([scope.taskId, scope.attemptId, nativeId])}` : nativeId;
+    return { ...data, id: scopedId(String(data.id)), ...(data.toolCallId ? { toolCallId: scopedId(String(data.toolCallId)) } : {}) };
+  }
+  private async reviewHostPermission(session: Session, scope: SessionFence, event: NormalizedDriverEvent) {
+    if (!this.options.reviewPermission || event.type !== 'permission_request' || (event.data?.status ?? 'pending') !== 'pending' || !isAttemptRef(scope)) return undefined;
+    const request = this.driverEventData(scope, event) as PermissionRequestData;
+    const decision = await this.mutations.wait(() => this.options.reviewPermission!(session, request).catch(() => undefined));
+    return decision === 'allow' || decision === 'deny' ? decision : undefined;
+  }
+  private async consume(session: Session, event: NormalizedDriverEvent, eventId: string, hostDecision?: 'allow' | 'deny') {
     const scope = this.currentRef(session.id);
     if (event.type === 'status' && event.data?.state === 'prompt_assembly') {
       // Diagnostic persistence must neither refresh idleness nor fail the turn.
@@ -1855,14 +1872,9 @@ export class DutydeckRuntime {
       }
       return;
     }
-    let data = event.data;
-    if (data && Array.isArray(data.parts)) data = { ...data, parts: normalizeEventContent(data.parts) };
-    const scopedId = (nativeId: string) => scope && isAttemptRef(scope) ? `turn_${digest([scope.taskId, scope.attemptId, nativeId])}` : nativeId;
-    if (event.type === 'permission_request' || event.type === 'tool_call' || event.type === 'tool_result') {
-      data = { ...data, id: scopedId(String(data.id)), ...(data.toolCallId ? { toolCallId: scopedId(String(data.toolCallId)) } : {}) };
-      const rejectReason = event.type === 'permission_request' && data.status === 'rejected' && !data.reason ? this.permissionRejectReasons.get(this.permissionKey(session.id, data.id)) : undefined;
-      if (rejectReason) data = { ...data, reason: rejectReason };
-    }
+    let data = this.driverEventData(scope, event);
+    const rejectReason = event.type === 'permission_request' && data.status === 'rejected' && !data.reason ? this.permissionRejectReasons.get(this.permissionKey(session.id, data.id)) : undefined;
+    if (rejectReason) data = { ...data, reason: rejectReason };
     let tools: AttemptTools | undefined;
     if ((event.type === 'tool_call' || event.type === 'tool_result') && scope && isAttemptRef(scope)) {
       tools = this.attemptTools.get(scope.attemptId);
@@ -1884,16 +1896,20 @@ export class DutydeckRuntime {
       if (!previous || previous.sequence < stored.sequence) tools.calls.set(saved.id, { sequence: stored.sequence, data: saved, projected: false });
       return true;
     };
-    if (event.type === 'permission_request' && (data.status ?? 'pending') === 'pending' && scope && isAttemptRef(scope) && this.options.reviewPermission) {
-      const decision = await this.options.reviewPermission(session, data as PermissionRequestData).catch(() => undefined);
-      if (decision === 'allow' || decision === 'deny') {
-        // 不发待审批事件（没有人工审批卡片）；登记后走与人工审批相同的 resolvePermission，由它写入最终的审批记录。
-        const key = this.permissionKey(session.id, data.id);
-        this.permissions.set(key, { request: data, nativeId: String(event.data.id), fence: scope, generation: this.sessionGenerations.get(session.id) ?? 0, owner: this.mutations.current() });
-        setImmediate(() => void this.resolvePermission(session.id, data.id, decision === 'allow')
-          .catch(error => this.options.log?.warn({ sessionId: session.id, permissionId: data.id, error }, 'Host permission decision could not be applied')));
-        return;
-      }
+    if (hostDecision && event.type === 'permission_request' && scope && isAttemptRef(scope)) {
+      // 不发待审批事件（没有人工审批卡片）；登记后走与人工审批相同的 resolvePermission，由它写入最终的审批记录。
+      const key = this.permissionKey(session.id, data.id);
+      const entry = { request: data, nativeId: String(event.data.id), fence: scope, generation: this.sessionGenerations.get(session.id) ?? 0, owner: this.mutations.current() };
+      this.permissions.set(key, entry);
+      setImmediate(() => void this.resolvePermission(session.id, data.id, hostDecision === 'allow').catch(async error => {
+        this.options.log?.warn({ sessionId: session.id, permissionId: data.id, error }, 'Host permission decision could not be applied; asking a person');
+        // 宿主的决定没落地而原生审批还挂着：照常发待审批事件交给人处理，不能悄悄等到超时。
+        await this.mutations.run(entry.owner, () => this.eventScope.run(scope, () => this.mutations.write(session.id, async () => {
+          if (this.permissions.get(key) !== entry || this.permissionResolutions.has(key) || entry.generation !== (this.sessionGenerations.get(session.id) ?? 0)) return;
+          await this.consume(session, event, eventId);
+        })));
+      }).catch(error => { if (!(error instanceof RevokedOperation)) this.options.log?.warn({ sessionId: session.id, permissionId: data.id, error }, 'Host permission fallback could not be recorded'); }));
+      return;
     }
     let stored: AgentEvent;
     try { stored = await this.emit(session.id, event.type, data, event.raw, eventId, event.sourceId); }
