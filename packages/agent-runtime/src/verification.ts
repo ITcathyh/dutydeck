@@ -70,8 +70,16 @@ const RACY_WINDOW_MS = 2_000;
 /** Entries are statted ENTRY_CHUNK at a time and their content read ENTRY_CONCURRENCY at a time, so a large tree is never held in memory at once. */
 const ENTRY_CHUNK = 256;
 const ENTRY_CONCURRENCY = 16;
+/** Per-directory cache, least recently used first: worktrees and scratch directories come and go for the daemon's lifetime. */
+const FINGERPRINT_CACHE_LIMIT = 256;
 const fingerprintCache = new Map<string, { stamp: string; fingerprint: string }>();
+function rememberFingerprint(cwd: string, entry: { stamp: string; fingerprint: string }) {
+  fingerprintCache.delete(cwd); fingerprintCache.set(cwd, entry);
+  while (fingerprintCache.size > FINGERPRINT_CACHE_LIMIT) fingerprintCache.delete(fingerprintCache.keys().next().value!);
+}
 const fingerprintRuns = new Map<string, Promise<string>>();
+/** Test hook: how many directories the read-path cache currently holds. */
+export const fingerprintCacheSizeForTest = () => fingerprintCache.size;
 
 /**
  * repositoryFingerprint for read paths (record lists, turn-boundary comparisons).
@@ -86,9 +94,11 @@ const fingerprintRuns = new Map<string, Promise<string>>();
 export async function cachedRepositoryFingerprint(cwd: string): Promise<string> {
   const startedAt = Date.now();
   const changes = { latestChangeMs: 0 };
-  const scan = await scanRepository(cwd, new Set(), changes);
+  let scan: Awaited<ReturnType<typeof scanRepository>>;
+  try { scan = await scanRepository(cwd, new Set(), changes); }
+  catch (error) { fingerprintCache.delete(cwd); throw error; }
   const cached = fingerprintCache.get(cwd);
-  if (cached?.stamp === scan.stamp) return cached.fingerprint;
+  if (cached?.stamp === scan.stamp) { rememberFingerprint(cwd, cached); return cached.fingerprint; }
   // Racily recent entries: a rewrite may keep the same stat, so neither cache nor share.
   if (changes.latestChangeMs >= startedAt - RACY_WINDOW_MS) return contentFingerprint(scan);
   const runKey = `${cwd}\0${scan.stamp}`;
@@ -97,7 +107,7 @@ export async function cachedRepositoryFingerprint(cwd: string): Promise<string> 
   // Content is read after the stat it is keyed by. Any later change moves ctime,
   // so this stamp cannot be observed again with different content.
   const run = contentFingerprint(scan).then(fingerprint => {
-    fingerprintCache.set(cwd, { stamp: scan.stamp, fingerprint });
+    rememberFingerprint(cwd, { stamp: scan.stamp, fingerprint });
     return fingerprint;
   });
   fingerprintRuns.set(runKey, run);
