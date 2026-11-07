@@ -37,7 +37,9 @@ const reply = (response: ServerResponse, body: unknown, status = 200) => {
 async function stub(handle: (request: IncomingMessage, response: ServerResponse, body: any) => void) {
   const server = createServer(async (request, response) => {
     let raw = ''; for await (const chunk of request) raw += chunk;
-    handle(request, response, JSON.parse(raw));
+    let body: unknown;
+    try { body = JSON.parse(raw); } catch { response.destroy(); return; }
+    handle(request, response, body);
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   cleanups.push(() => new Promise<void>((resolve, reject) => { server.close(error => error ? reject(error) : resolve()); server.closeAllConnections(); }));
