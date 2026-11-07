@@ -115,8 +115,10 @@ function completedPlaces(sqlite: Database.Database, sessionId: string, highWater
 function projectTurns(sqlite: Database.Database, sessionId: string, places: HistoryTurnPlace[], statuses: Map<string, string>): HistoryTurnSummary[] {
   const from = places[0]![1], through = places.at(-1)![2];
   const rows = cachedStatement(sqlite, `
+    -- Only text and tool events feed the JSON-derived columns and the turn boundaries; they are the only payloads read.
+    -- The other events (mostly terminal repaints) only widen a turn's range and times, read from the covering index per turn.
     WITH marked AS MATERIALIZED (
-      SELECT id,sequence,timestamp,task_id,attempt_id,type,valid,
+      SELECT sequence,timestamp,type,valid,
         CASE WHEN valid THEN json_extract(data,'$.role') END AS role,
         CASE WHEN type='text' AND valid AND json_extract(data,'$.role')='user'
           AND json_type(data,'$.steering') IS NULL THEN 1 ELSE 0 END AS boundary,
@@ -128,19 +130,32 @@ function projectTurns(sqlite: Database.Database, sessionId: string, places: Hist
         -- Turns without a structured part or delivery receipt skip the artifact read below.
         CASE WHEN valid AND ((type='tool_result' AND json_extract(data,'$.status')='completed') OR (type='text' AND COALESCE(json_extract(data,'$.role'),'assistant')!='user'))
           AND (json_type(data,'$.parts') IS NOT NULL OR (type='tool_result' AND json_extract(data,'$.output.status')='delivered')) THEN 1 END AS artifactCandidate
-      FROM (SELECT *,json_valid(data) AS valid FROM events WHERE session_id=@session AND sequence BETWEEN @from AND @through)
+      FROM (SELECT id,sequence,timestamp,type,data,json_valid(data) AS valid FROM events INDEXED BY events_session_seq_type
+        WHERE session_id=@session AND sequence BETWEEN @from AND @through AND type IN ('text','tool_call','tool_result'))
     ), grouped AS MATERIALIZED (
+      -- Every boundary is a marked event, so counting them among marked events numbers turns as over all events.
       SELECT *,MAX(1,SUM(boundary) OVER (ORDER BY sequence)) AS turn FROM marked
+    ), heads AS MATERIALIZED (
+      -- Turn k starts at the k-th boundary; the first turn also takes everything before it.
+      SELECT 1 AS turn,@from AS low
+      UNION ALL SELECT turn,sequence FROM (SELECT sequence,ROW_NUMBER() OVER (ORDER BY sequence) AS turn FROM marked WHERE boundary) WHERE turn>1
+    ), bounds AS MATERIALIZED (
+      SELECT turn,low,COALESCE(LEAD(low) OVER (ORDER BY turn)-1,@through) AS high FROM heads
+    ), extents AS MATERIALIZED (
+      SELECT h.turn,MIN(e.sequence) AS first,MAX(e.sequence) AS last,MIN(e.timestamp) AS timestamp,
+        MAX(CASE WHEN e.type IN ('tool_call','tool_result','thinking') THEN e.sequence END) AS activity,
+        COALESCE(MAX(CASE WHEN e.type='completed' THEN e.timestamp END),MAX(CASE WHEN e.type NOT IN ('raw_terminal','status') THEN e.timestamp END)) AS endedAt
+      FROM bounds h JOIN events e INDEXED BY events_session_seq_type ON e.session_id=@session AND e.sequence BETWEEN h.low AND h.high
+      GROUP BY h.turn
     ), ranges AS MATERIALIZED (
-      SELECT turn,MIN(sequence) AS first,MAX(sequence) AS last,MIN(timestamp) AS timestamp,
-        MIN(CASE WHEN type!='task' AND attempt_id IS NOT NULL THEN sequence END) AS attemptSequence,
+      SELECT x.turn,x.first,x.last,x.timestamp,
         -- The final output follows the turn's last tool, thinking or user activity.
-        COALESCE(MAX(CASE WHEN type IN ('tool_call','tool_result','thinking') OR (type='text' AND valid AND role='user') THEN sequence END),MIN(sequence)-1) AS outputAfter,
-        COUNT(DISTINCT toolKey) AS toolCount,
+        COALESCE(MAX(COALESCE(x.activity,g.prompted),COALESCE(g.prompted,x.activity)),x.first-1) AS outputAfter,
+        COALESCE(g.toolCount,0) AS toolCount,
         -- The turn ends at its completion receipt; terminal repaints and status pings can trail it by minutes.
-        COALESCE(MAX(CASE WHEN type='completed' THEN timestamp END),MAX(CASE WHEN type NOT IN ('raw_terminal','status') THEN timestamp END)) AS endedAt,
-        MAX(artifactCandidate) AS artifactCandidate
-      FROM grouped GROUP BY turn
+        x.endedAt,g.artifactCandidate
+      FROM extents x LEFT JOIN (SELECT turn,MAX(CASE WHEN type='text' AND valid AND role='user' THEN sequence END) AS prompted,
+          COUNT(DISTINCT toolKey) AS toolCount,MAX(artifactCandidate) AS artifactCandidate FROM grouped GROUP BY turn) g ON g.turn=x.turn
     ), pieces AS (
       SELECT g.turn,g.sequence,g.piece,g.size,COALESCE(g.role,'assistant')='assistant' AS output
       FROM grouped g JOIN ranges r ON r.turn=g.turn
@@ -159,10 +174,12 @@ function projectTurns(sqlite: Database.Database, sessionId: string, places: Hist
     ), spans AS MATERIALIZED (
       SELECT turn,json_group_array(json_array(started,ended) ORDER BY started,toolKey) AS spans FROM tools GROUP BY turn
     )
-    SELECT r.first,r.last,r.timestamp,r.toolCount,r.endedAt,r.artifactCandidate,a.attempt_id AS attemptId,
+    -- A turn's attempt is the one on its first non-task event that carries one; the scan stops at that event.
+    SELECT r.first,r.last,r.timestamp,r.toolCount,r.endedAt,r.artifactCandidate,
+      (SELECT a.attempt_id FROM events a INDEXED BY events_session_seq WHERE a.session_id=@session AND a.sequence BETWEEN r.first AND r.last
+        AND a.type!='task' AND a.attempt_id IS NOT NULL ORDER BY a.sequence LIMIT 1) AS attemptId,
       p.text AS promptText,p.truncated AS promptTruncated,q.text AS outputText,q.truncated AS outputTruncated,s.spans
     FROM ranges r
-      LEFT JOIN events a ON a.session_id=@session AND a.sequence=r.attemptSequence
       LEFT JOIN texts p ON p.turn=r.turn AND NOT p.output
       LEFT JOIN texts q ON q.turn=r.turn AND q.output
       LEFT JOIN spans s ON s.turn=r.turn
