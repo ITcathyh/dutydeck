@@ -500,7 +500,6 @@ export class LarkLongConnectionListener implements LarkListener {
       await Promise.all([client.start({ eventDispatcher: dispatcher }), ready]);
       http.fetch.signal!.throwIfAborted();
       this.client = client;
-      this.clientAbort = controller;
       this.dispatcher = dispatcher;
       this.domain = domain;
       this.coordinator = coordinator;

@@ -2185,19 +2185,14 @@ export class DutydeckRuntime {
   /** For a new session a missing command gets one more probe after the swap window. */
   private async newSessionCapability(agent: AgentConfig, input: StartSessionInput) {
     const result = this.sessionCapability(agent, input);
-    if (result.capability.available || commandExists(result.configured.command) || !await this.waitForCommand(result.configured.command)) return result;
-    return this.sessionCapability(agent, input);
+    if (result.capability.available || commandExists(result.configured.command)) return result;
+    await this.commandSwapWindow();
+    return commandExists(result.configured.command) ? this.sessionCapability(agent, input) : result;
   }
 
+  /** Waits once, so a CLI that is really gone costs one swap window. */
   private commandSwapWindow() {
     return this.mutations.wait(() => new Promise<void>(resolve => setTimeout(resolve, COMMAND_SWAP_WAIT_MS)));
-  }
-
-  /** Waits at most once, so a CLI that is really gone costs one swap window. */
-  private async waitForCommand(command: string): Promise<boolean> {
-    if (commandExists(command)) return true;
-    await this.commandSwapWindow();
-    return commandExists(command);
   }
 
   /** Resolve auto transport before the memory job freezes its permission posture. */
@@ -2523,7 +2518,7 @@ export class DutydeckRuntime {
     this.assertReplaceable(session.id); this.assertResources(session.id, true);
     const resolved = this.drivers.get(session.id); if (resolved) return resolved;
     if (start && session.protocol === 'pty-cli' && !this.probe(configured).available) {
-      await this.waitForCommand(configured.command);
+      if (!commandExists(configured.command)) await this.commandSwapWindow();
       this.assertReplaceable(session.id); this.assertResources(session.id, true);
       const raced = this.drivers.get(session.id); if (raced) return raced;
     }
