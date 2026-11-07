@@ -62,7 +62,7 @@ dutydeck deploy prune --releases /path/to/releases
 - **手动清理** `deploy prune`：选项 `--releases/--runtime/--unit`、`--keep N`（默认 5）、`--dry-run`、`--include-unmarked`、`--json`。手工部署留下的记录（没有 `created_by: dutydeck deploy` 标记）默认不动，只有加 `--include-unmarked` 才会清，并且仍被进程引用或 1 小时内改过的会跳过。最近 1 小时内改过的 `.partial` 目录同样跳过（可能是正在进行的部署）。
 - **单 Bot 独立进程**：`dutydeck start --foreground --database /path/to/bot.db --bot-app-id cli_xxx`。
 - **拆分机器人数据**：`scripts/split-bot-runtimes.mts` 会把空闲终端状态、排队受阻和结果未知提醒、计划逾期提醒随所属会话迁入对应机器人的库；未知或无法确认归属的记录仍会阻止拆分。
-- **systemd 服务与数据库解析**：对直接以 `node cli.js` 启动的 unit，管理命令（`restart`、`status`、`deploy` 等）按 ExecStart 显式参数 > unit 环境变量 > `WorkingDirectory/.env` 解析目标数据库和监听地址；相对工作目录以 `WorkingDirectory` 为基准。缺少 `.env` 可继续，不可读或关键配置无效时拒绝操作；数据库未配置时回落到 `<cwd>/.dutydeck/dutydeck.db`。部署备份和 schema 回滚检查使用同一实际数据库。`start --foreground` 仍读取守护状态，`deploy --runtime` 显式元数据继续优先。
+- **systemd 服务与数据库解析**：对直接以 `node cli.js` 启动的 unit，管理命令（`restart`、`status`、`deploy` 等）按 ExecStart 显式参数 > unit 环境变量 > `WorkingDirectory/.env` 解析目标数据库和监听地址；相对工作目录以 `WorkingDirectory` 为基准。unit 环境变量包括 `Environment=` 和 `EnvironmentFile=`，后者按 systemd 的引号与注释规则解析，并按顺序覆盖前者。缺少 `.env` 可继续，不可读或关键配置无效时拒绝操作；`EnvironmentFile=` 只有带 `-` 前缀且文件不存在时跳过，其他读不到的文件、相对路径或通配路径，以及无法解析的 `Environment=` 项，都会拒绝操作；数据库未配置时回落到 `<cwd>/.dutydeck/dutydeck.db`。部署备份和 schema 回滚检查使用同一实际数据库。`start --foreground` 仍读取守护状态，`deploy --runtime` 显式元数据继续优先。
 
 ### 停机 VACUUM <a id="vacuum"></a>
 
@@ -235,7 +235,7 @@ dutydeck settings bot set cli_xxx cardActionForwarding=null 'eventHandlers=[{"id
   dutydeck auth token          # 查看当前 Token（首次使用自动生成）
   dutydeck auth token --rotate # 生成新 Token，旧的立即失效
   ```
-  退出登录后仍可直接用同一密码再次登录。
+  退出登录后仍可直接用同一密码再次登录。轮换 Token 或重设访问密码后，凭旧凭据已打开的实时流和终端连接（包括经主服务转发到其他实例的）在 10 秒内断开。`auth` 命令写哪个库：有 `--database` 用它；否则用 `DUTYDECK_DATABASE_URL`（相对路径与 `start` 一样按 Dutydeck 根目录解析）；都没有时用进程身份核验通过、正在运行的 daemon 的库，daemon 崩溃后残留的状态文件不作数，改用根目录默认的 `.dutydeck/dutydeck.db`。输出里的 `database` 是实际写入的库。`secret` 与 `lark create` 用同一规则。
 - 不要在非本机地址上用 `--no-auth`：外部人员可能借 Agent 在宿主机上执行命令。在非回环地址关闭认证会拒绝启动，除非显式加 `--unsafe-no-auth`。
 - **凭据保护**：机器人对外开放后，防止群里其他人借 Agent 套出本机的令牌、密钥和 Agent 会话记录。跟随机器人设置里的「风险控制」，只约束不在「高危操作允许名单」里的发送人和其他机器人；名单里的人照常使用，完全信任模式也不受影响。
   - 约束提示：给 Agent 加一条规则，不读取、复制、输出或发送凭据和 Agent 会话记录（如 `~/.claude`、`~/.claude.json`、`~/.codex`），被要求时一句话拒绝。

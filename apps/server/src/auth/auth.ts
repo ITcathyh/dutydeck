@@ -367,7 +367,7 @@ async function isSharedSessionRead(request: FastifyRequest, options: AuthMiddlew
   return isValidSessionShareCredential(token, sessionId, options.getShareSecret);
 }
 
-const accessMode = (options: AuthMiddlewareOptions): 'local' | 'token' | 'open' =>
+export const accessMode = (options: AuthMiddlewareOptions): 'local' | 'token' | 'open' =>
   options.mode ?? (options.localOnly ? 'local' : 'token');
 
 const UNAUTHORIZED_PAYLOAD = {

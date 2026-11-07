@@ -78,6 +78,18 @@ describe('Dutydeck CLI', () => {
     expect(authShareKeyRotate).toHaveBeenCalledTimes(1);
   });
 
+  it('passes an explicit --database to every auth command', async () => {
+    const authToken = vi.fn(), authPasswordSet = vi.fn(), authShareKeyRotate = vi.fn();
+    const run = (...args: string[]) => createCliProgram('0.0.5', { authToken, authPasswordSet, authShareKeyRotate }).parseAsync(['node', 'dutydeck', ...args]);
+    await run('auth', 'token', '--rotate', '--database', '/tmp/target.db');
+    await run('auth', 'password', 'set', '--database', '/tmp/target.db');
+    await run('auth', 'share-key', 'rotate', '--database', '/tmp/target.db');
+    await run('auth', 'token');
+    expect(authToken.mock.calls.map(([options]) => options)).toEqual([{ rotate: true, database: '/tmp/target.db' }, {}]);
+    expect(authPasswordSet).toHaveBeenCalledWith({ database: '/tmp/target.db' });
+    expect(authShareKeyRotate).toHaveBeenCalledWith({ database: '/tmp/target.db' });
+  });
+
   it('prints the installed version', () => {
     let output = '';
     const program = createCliProgram('0.0.5').exitOverride().configureOutput({ writeOut: value => { output += value; } });

@@ -36,6 +36,15 @@ export interface TerminalRouteOptions {
   auth?: TerminalRouteAuth;
   /** Unified GroupBinding execution gate; legacy sessions return legacy_unmanaged. */
   authorize?: (request: IncomingMessage, sessionId: string, action: 'terminal.read' | 'terminal.write') => Promise<PolicyDecision>;
+  /** 升级握手（权限判定 + 终端查找）的最长等待时间。 */
+  handshakeTimeoutMs?: number;
+  /** 已建立连接复核握手凭据的周期；token 轮换、密码重设或会话过期后按此周期断开。 */
+  credentialRecheckMs?: number;
+}
+
+export interface UpgradeRoute {
+  matches(request: IncomingMessage): boolean;
+  handle(request: IncomingMessage, socket: Socket, head: Buffer): void | Promise<void>;
 }
 
 export const terminalConnectionLimits = {
@@ -49,6 +58,41 @@ export const terminalConnectionLimits = {
 type SendBudget = { bytes: number };
 
 const TERMINAL_PATH_PREFIX = '/api/terminal/';
+const TERMINAL_HANDSHAKE_TIMEOUT_MS = 30_000;
+const TERMINAL_CREDENTIAL_RECHECK_MS = 5_000;
+const CREDENTIAL_REVOKED_CLOSE_CODE = 4401;
+const CREDENTIAL_REVOKED: PolicyDecision = { allowed: false, action: 'terminal.write', code: 'credential_revoked', reason: 'Access credential is no longer valid', source: 'integration' };
+
+const upgradeRoutes = new WeakMap<object, UpgradeRoute[]>();
+
+/**
+ * 同一 HTTP 服务器上的 WS 升级统一在这里分发。服务器一旦有 upgrade 监听器，Node 就不再替
+ * 没人认领的升级请求收尾，也不受请求超时约束，所以无人认领的升级必须当场回 404 断开，
+ * 否则未认证的客户端可以无限占住连接，并拖住停服。
+ */
+export function registerUpgradeRoute(app: FastifyInstance, route: UpgradeRoute): void {
+  const existing = upgradeRoutes.get(app.server);
+  if (existing) { existing.push(route); return; }
+  const routes = [route];
+  upgradeRoutes.set(app.server, routes);
+  // 被动 onReady，不能调 app.ready()，原因见 registerTerminalRoutes。
+  app.addHook('onReady', async () => {
+    app.server.on('upgrade', (request: IncomingMessage, socket: Socket, head: Buffer) => {
+      const matched = routes.find(candidate => candidate.matches(request));
+      if (!matched) { rejectUpgrade(socket, 404, 'Not Found', 'not found'); return; }
+      Promise.resolve().then(() => matched.handle(request, socket, head)).catch(() => socket.destroy());
+    });
+  });
+}
+
+function terminalPathname(request: IncomingMessage): string | undefined {
+  try {
+    const { pathname } = new URL(request.url ?? '/', 'http://terminal.local');
+    return pathname.startsWith(TERMINAL_PATH_PREFIX) ? pathname : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * WS 升级的访问认证，终端与转发到其他实例的升级共用。不传 auth = 不认证（loopback 场景）。
@@ -96,7 +140,7 @@ function bindConnection(
   handle: TerminalStreamHandle,
   onClosed: () => void,
   sendBudget: SendBudget,
-  authorizeWrite?: () => Promise<PolicyDecision>,
+  authorizeWrite?: () => Promise<PolicyDecision | undefined>,
 ): void {
   const { stream } = handle;
   let closed = false;
@@ -246,36 +290,43 @@ function bindConnection(
  *  - 服务端→客户端：{"type":"data","data":...} / {"type":"exit","code":n} / {"type":"error","message":...}
  *  - 客户端→服务端：{"type":"input","data":...} / {"type":"resize","cols":n,"rows":n}
  *
- * 只拦截 pathname 以 /api/terminal/ 开头的 upgrade，其它路径直接放行，不影响未来其它 WS。
+ * 只认领 pathname 以 /api/terminal/ 开头的 upgrade；其它路径由 registerUpgradeRoute 的分发器处理。
  */
 export function registerTerminalRoutes(app: FastifyInstance, options: TerminalRouteOptions): void {
   const wss = new WebSocketServer({ noServer: true, autoPong: false, maxPayload: terminalConnectionLimits.maxPayloadBytes });
   const active = new Set<WebSocket>();
   const sendBudget: SendBudget = { bytes: 0 };
   const pending = new Set<Socket>();
+  // 凭据只在握手时提交一次，之后按服务端缓存的 token / 密码哈希复核，撤销后不能再读写。
+  const credentials = new Map<WebSocket, () => boolean>();
+  let credentialSweep: ReturnType<typeof setInterval> | undefined;
   let closing = false;
   let closeRun: Promise<void> | undefined;
+  const stopCredentialSweep = () => {
+    if (credentialSweep) clearInterval(credentialSweep);
+    credentialSweep = undefined;
+  };
+  const sweepCredentials = () => {
+    for (const [ws, valid] of credentials) {
+      if (valid()) continue;
+      credentials.delete(ws);
+      try { ws.close(CREDENTIAL_REVOKED_CLOSE_CODE, 'credential revoked'); } catch { ws.terminate(); }
+    }
+    if (!credentials.size) stopCredentialSweep();
+  };
 
   /*
-   * 必须用被动的 onReady 钩子，不能调 app.ready(cb)：
+   * upgrade 监听器必须挂在被动的 onReady 钩子上（registerUpgradeRoute 内），不能调 app.ready(cb)：
    * app.ready() 会**主动触发** Fastify 的 boot。buildApp 里终端路由注册在前，
    * 之后还有 await registerLarkRoutes 等异步注册；真实启动时 Lark 那步要等网络
    * （读取并同步 Bot 配置），boot 就在这个 await 期间跑完了，随后的 addHook /
    * 路由注册直接抛 "Fastify instance is already listening. Cannot call addHook!"。
-   * onReady 只登记回调，由 listen 时统一触发，时机与原来一致，WS 行为不变。
+   * onReady 只登记回调，由 listen 时统一触发。
    */
-  app.addHook('onReady', async () => {
-    const server = app.server;
-    // 防御：app.server 在 listen 后才存在（ready 后理论上必有）
-    if (!server) return;
-    server.on('upgrade', async (request: IncomingMessage, socket: Socket, head: Buffer) => {
-      let url: URL;
-      try {
-        url = new URL(request.url ?? '/', 'http://terminal.local');
-      } catch {
-        return; // 非法 URL 不属本路由，交给其它 upgrade 处理者
-      }
-      if (!url.pathname.startsWith(TERMINAL_PATH_PREFIX)) return; // 非本路由，放行
+  registerUpgradeRoute(app, {
+    matches: request => terminalPathname(request) !== undefined,
+    handle: async (request, socket, head) => {
+      const pathname = terminalPathname(request)!;
       const onSocketError = () => {
         pending.delete(socket);
         socket.destroy();
@@ -283,7 +334,12 @@ export function registerTerminalRoutes(app: FastifyInstance, options: TerminalRo
       socket.on('error', onSocketError);
       if (closing) { socket.destroy(); return; }
       pending.add(socket);
-      socket.once('close', () => pending.delete(socket));
+      // 权限判定与终端查找都可能卡住；握手不能无限占着连接。
+      const deadline = setTimeout(
+        () => rejectUpgrade(socket, 504, 'Gateway Timeout', 'terminal handshake timed out'),
+        options.handshakeTimeoutMs ?? TERMINAL_HANDSHAKE_TIMEOUT_MS,
+      );
+      socket.once('close', () => { pending.delete(socket); clearTimeout(deadline); });
 
       const rejection = upgradeRejection(request, options.auth);
       if (rejection) {
@@ -292,7 +348,7 @@ export function registerTerminalRoutes(app: FastifyInstance, options: TerminalRo
       }
 
       // 解析 sessionId：只取第一段，decodeURIComponent
-      const firstSegment = url.pathname.slice(TERMINAL_PATH_PREFIX.length).split('/')[0] ?? '';
+      const firstSegment = pathname.slice(TERMINAL_PATH_PREFIX.length).split('/')[0] ?? '';
       let sessionId: string;
       try {
         sessionId = decodeURIComponent(firstSegment);
@@ -335,25 +391,40 @@ export function registerTerminalRoutes(app: FastifyInstance, options: TerminalRo
       }
       if (closing || socket.destroyed) { lookup.handle.stream.dispose(); socket.destroy(); return; }
 
+      clearTimeout(deadline);
+      const credentialValid = () => upgradeRejection(request, options.auth) === undefined;
       wss.handleUpgrade(request, socket, head, ws => {
         socket.removeListener('error', onSocketError);
         pending.delete(socket);
         active.add(ws);
+        if (options.auth) {
+          credentials.set(ws, credentialValid);
+          credentialSweep ??= setInterval(sweepCredentials, options.credentialRecheckMs ?? TERMINAL_CREDENTIAL_RECHECK_MS);
+          credentialSweep.unref();
+        }
         bindConnection(
           ws,
           lookup.handle,
-          () => active.delete(ws),
+          () => {
+            active.delete(ws);
+            credentials.delete(ws);
+            if (!credentials.size) stopCredentialSweep();
+          },
           sendBudget,
-          options.authorize ? () => options.authorize!(request, sessionId, 'terminal.write') : undefined,
+          options.auth || options.authorize
+            ? async () => credentialValid() ? options.authorize?.(request, sessionId, 'terminal.write') : CREDENTIAL_REVOKED
+            : undefined,
         );
       });
-    });
+    },
   });
 
   // HTTP server.close 等升级连接退出；必须在它之前关闭终端，不能等 onClose。
   app.addHook('preClose', async () => {
     if (closeRun) return closeRun;
     closing = true;
+    stopCredentialSweep();
+    credentials.clear();
     for (const socket of pending) socket.destroy();
     pending.clear();
     for (const ws of active) {

@@ -15,14 +15,16 @@ let root: string;
 beforeEach(() => { root = mkdtempSync(join(tmpdir(), 'dutydeck-unit-runtime-')); });
 afterEach(() => { rmSync(root, { recursive: true, force: true }); vi.restoreAllMocks(); });
 
-function unit(args: string[] = [], environment: NodeJS.ProcessEnv = {}) {
+/** `environmentFiles` 按 systemctl show 的格式各占一行；`rawEnvironment` 原样作为 Environment= 的值。 */
+function unit(args: string[] = [], environment: NodeJS.ProcessEnv = {}, extra: { environmentFiles?: string[]; rawEnvironment?: string } = {}) {
   let pid = 1001;
   const runCommand = vi.fn(async (_command: string, commandArgs: readonly string[]) => {
     if (commandArgs[1] === 'restart') { pid = 1002; return { status: 0, stderr: '', stdout: '' }; }
     expect(commandArgs[1]).toBe('show');
     return { status: 0, stderr: '', stdout: [
       'LoadState=loaded', 'SubState=running', `MainPID=${pid}`, `WorkingDirectory=${root}`,
-      `Environment=${Object.entries(environment).map(([key, value]) => `${key}=${value}`).join(' ')}`,
+      `Environment=${extra.rawEnvironment ?? Object.entries(environment).map(([key, value]) => `${key}=${value}`).join(' ')}`,
+      ...(extra.environmentFiles ?? []).map(file => `EnvironmentFiles=${file}`),
       `ExecStart={ path=${process.execPath} ; argv[]=${process.execPath} ${root}/dist/cli.js ${args.join(' ')} ; ignore_errors=no ; }`
     ].join('\n') };
   });
@@ -136,4 +138,56 @@ it.each(['unit-env', 'env-file'])('authenticates drain and activity against the 
     expect(statuses.every(status => status === 200)).toBe(true);
     expect(world.runCommand.mock.calls.filter(([, args]) => args[1] === 'restart')).toHaveLength(1);
   } finally { await app.close(); }
+});
+
+it('applies EnvironmentFile= after Environment= and .env, skipping only optional missing files', async () => {
+  writeFileSync(join(root, '.env'), 'DUTYDECK_PORT=4310\nDUTYDECK_DATABASE_URL=main.db\n');
+  const dropIn = join(root, 'tag.env');
+  writeFileSync(dropIn, '# drop-in for the tag runtime\nDUTYDECK_PORT=4311\nDUTYDECK_DATABASE_URL="tag runtime/tag.db"\n');
+  const target = await unitRuntime('dutydeck-fixture.service', unit([], { DUTYDECK_PORT: '4399', DUTYDECK_AUTH: 'false' }, {
+    environmentFiles: [`${join(root, 'missing.env')} (ignore_errors=yes)`, `${dropIn} (ignore_errors=no)`]
+  }));
+  expect(target).toMatchObject({ endpoint: { address: 'http://127.0.0.1:4311', database: join(root, 'tag runtime/tag.db'), authEnabled: false } });
+});
+
+it('keeps quoted Environment= values with spaces whole and refuses entries it cannot read', async () => {
+  const target = await unitRuntime('dutydeck-fixture.service', unit([], {}, { rawEnvironment: 'PATH=/usr/bin "DUTYDECK_DEFAULT_CWD=tag workspace" DUTYDECK_PORT=4311' }));
+  expect(target).toMatchObject({ endpoint: { address: 'http://127.0.0.1:4311', database: join(root, 'tag workspace/.dutydeck/dutydeck.db') } });
+  const unprintable = await unitRuntime('dutydeck-fixture.service', unit([], {}, { rawEnvironment: 'PATH=/usr/bin [unprintable]' }));
+  expect(unprintable).toMatchObject({ error: expect.stringContaining('Environment=') });
+});
+
+it.each([
+  ['a required file is missing', () => `${join(root, 'missing.env')} (ignore_errors=no)`, 'ENOENT'],
+  ['a required file is unreadable', () => { mkdirSync(join(root, 'dir.env')); return `${join(root, 'dir.env')} (ignore_errors=yes)`; }, 'EISDIR'],
+  ['the path is relative', () => 'relative.env (ignore_errors=no)', 'relative.env'],
+  ['the path is a glob', () => `${join(root, '*.env')} (ignore_errors=no)`, '*.env']
+])('refuses to restart when %s instead of falling back to .env or defaults', async (_case, entry, detail) => {
+  writeFileSync(join(root, '.env'), 'DUTYDECK_PORT=4310\n');
+  const world = unit([], {}, { environmentFiles: [entry()] });
+  const result = await daemonRestart({ unit: 'dutydeck-fixture.service' }, { ...world, serve: vi.fn(), checkSqlite: vi.fn(), fetch: vi.fn() });
+  expect(result).toMatchObject({ ok: false, error: expect.stringContaining('EnvironmentFile=') });
+  expect(result.error).toContain(detail);
+  expect(world.runCommand.mock.calls.filter(([, args]) => args[1] === 'restart')).toHaveLength(0);
+});
+
+it('drains and health-checks the port set by EnvironmentFile=, not the .env or default instance', async () => {
+  writeFileSync(join(root, '.env'), 'DUTYDECK_HOST=0.0.0.0\n');
+  const dropIn = join(root, 'tag.env');
+  writeFileSync(dropIn, 'DUTYDECK_PORT=4311\n');
+  const urls: string[] = [];
+  const fetcher: typeof fetch = async input => {
+    const url = new URL(String(input));
+    urls.push(url.origin);
+    const body = url.pathname === '/api/system/drain' ? { draining: true } : url.pathname === '/api/system/activity' ? { runningTasks: 0 } : { ok: true };
+    return new Response(JSON.stringify(body), { status: 200 });
+  };
+  const world = unit([], {}, { environmentFiles: [`${dropIn} (ignore_errors=no)`] });
+  const result = await daemonRestart({ unit: 'dutydeck-fixture.service' }, {
+    ...world, serve: vi.fn(), checkSqlite: () => ({ ok: true, execPath: process.execPath }), readToken: () => undefined,
+    fetch: fetcher, sleep: async () => {}, info: vi.fn(), warn: vi.fn()
+  });
+  expect(result).toMatchObject({ ok: true, state: 'restarted', address: 'http://127.0.0.1:4311' });
+  expect(urls.length).toBeGreaterThanOrEqual(3);
+  expect(new Set(urls)).toEqual(new Set(['http://127.0.0.1:4311']));
 });

@@ -2,10 +2,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import WebSocket from 'ws';
 import type { IncomingMessage } from 'node:http';
+import type { Socket } from 'node:net';
 import type { PolicyDecision, TerminalStream } from '@dutydeck/shared';
 import {
   registerTerminalRoutes,
+  registerUpgradeRoute,
+  rejectUpgrade,
   type TerminalRouteAuth,
+  type TerminalRouteOptions,
   type TerminalStreamHandle,
   type TerminalStreamProvider
 } from './terminal-ws.js';
@@ -71,9 +75,10 @@ async function startServer(
   provider: TerminalStreamProvider,
   auth?: TerminalRouteAuth,
   authorize?: (request: IncomingMessage, sessionId: string, action: 'terminal.read' | 'terminal.write') => Promise<PolicyDecision>,
+  extra: Partial<TerminalRouteOptions> = {},
 ): Promise<{ app: FastifyInstance; port: number }> {
   const app = Fastify({ logger: false });
-  registerTerminalRoutes(app, { provider, auth, authorize });
+  registerTerminalRoutes(app, { provider, auth, authorize, ...extra });
   await app.listen({ host: '127.0.0.1', port: 0 });
   apps.push(app);
   const address = app.server.address();
@@ -402,6 +407,41 @@ describe('terminal WS proxy', () => {
     ws.close();
   });
 
+  it('token 轮换后已建立的终端连接不能再写入', async () => {
+    const fake = createFakeStream();
+    let current = 'good-token';
+    const auth: TerminalRouteAuth = { check: token => token === current };
+    const { port } = await startServer(providerFrom({ s1: fake.handle }), auth, undefined, { credentialRecheckMs: 60_000 });
+    const ws = await connect(port, '/api/terminal/s1', { authorization: 'Bearer good-token' });
+    ws.send(JSON.stringify({ type: 'input', data: 'before\n' }));
+    await vi.waitFor(() => expect(fake.writeCalls).toEqual(['before\n']));
+
+    current = 'rotated-token';
+    const denied = nextMessage(ws);
+    const done = closed(ws);
+    ws.send(JSON.stringify({ type: 'input', data: 'after\n' }));
+    ws.send(JSON.stringify({ type: 'resize', cols: 80, rows: 24 }));
+    await expect(denied).resolves.toEqual({ type: 'error', message: 'Access credential is no longer valid', code: 'credential_revoked' });
+    await done;
+    expect(fake.writeCalls).toEqual(['before\n']);
+    expect(fake.resizeCalls).toEqual([]);
+  });
+
+  it('凭据失效后按复核周期主动断开终端连接', async () => {
+    const fake = createFakeStream();
+    let current = 'good-token';
+    const auth: TerminalRouteAuth = { check: token => token === current };
+    const { port } = await startServer(providerFrom({ s1: fake.handle }), auth, undefined, { credentialRecheckMs: 20 });
+    const ws = await connect(port, '/api/terminal/s1', { cookie: 'dutydeck_access=good-token' });
+    const closeCode = new Promise<number>(resolve => ws.once('close', code => resolve(code)));
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect(ws.readyState).toBe(WebSocket.OPEN);
+
+    current = 'reset';
+    expect(await closeCode).toBe(4401);
+    await vi.waitFor(() => expect(fake.disposeCount).toBe(1));
+  });
+
   it('浏览器 cookie 的 WS 必须来自相同 Origin', async () => {
     const auth: TerminalRouteAuth = { check: token => token === 'good-token' };
     const { port } = await startServer(providerFrom({ s1: createFakeStream().handle }), auth);
@@ -438,18 +478,14 @@ describe('terminal WS proxy', () => {
     ws.close();
   });
 
-  it('不拦截其它 pathname 的 upgrade 请求', async () => {
+  it('其它 pathname 的 upgrade 交给登记过的路由，无人认领的直接 404 断开', async () => {
     const { app, port } = await startServer(providerFrom({}));
-    const otherUpgrade = vi.fn((request: IncomingMessage, socket: { write(chunk: string): void; destroy(): void }) => {
-      const pathname = new URL(request.url ?? '/', 'http://x').pathname;
-      if (pathname.startsWith('/api/terminal/')) return;
-      socket.write('HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
-      socket.destroy();
-    });
-    app.server.on('upgrade', otherUpgrade);
+    const otherUpgrade = vi.fn((_request: IncomingMessage, socket: Socket) => rejectUpgrade(socket, 409, 'Conflict', 'other route'));
+    registerUpgradeRoute(app, { matches: request => request.url === '/api/other/thing', handle: otherUpgrade });
 
-    const rejected = await expectUpgradeRejected(port, '/api/other/thing');
-    expect(rejected.status).toBe(404);
+    expect((await expectUpgradeRejected(port, '/api/other/thing')).status).toBe(409);
+    expect(otherUpgrade).toHaveBeenCalledOnce();
+    expect((await expectUpgradeRejected(port, '/api/unclaimed')).status).toBe(404);
     expect(otherUpgrade).toHaveBeenCalledOnce();
   });
 });

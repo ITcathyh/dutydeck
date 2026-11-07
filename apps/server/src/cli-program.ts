@@ -139,11 +139,15 @@ export interface SessionRelayCliOptions {
   multiple?: boolean;
 }
 
-export interface AuthTokenCliOptions {
+export interface AuthDatabaseCliOptions {
+  database?: string;
+}
+
+export interface AuthTokenCliOptions extends AuthDatabaseCliOptions {
   rotate?: boolean;
 }
 
-export interface AuthPasswordSetCliOptions {
+export interface AuthPasswordSetCliOptions extends AuthDatabaseCliOptions {
   generate?: boolean;
 }
 
@@ -233,7 +237,7 @@ export interface CliHandlers {
   deployPrune?(options: DeployPruneCliOptions): void | Promise<void>;
   authToken?(options: AuthTokenCliOptions): void | Promise<void>;
   authPasswordSet?(options: AuthPasswordSetCliOptions): void | Promise<void>;
-  authShareKeyRotate?(): void | Promise<void>;
+  authShareKeyRotate?(options: AuthDatabaseCliOptions): void | Promise<void>;
   legacyDiscover?(options: LegacySourceCliOptions): void | Promise<void>;
   legacyPlan?(options: LegacySourceCliOptions): void | Promise<void>;
   legacyArchive?(options: LegacyArchiveCliOptions): void | Promise<void>;
@@ -394,6 +398,11 @@ const databaseRetirementOptionsFrom = (options: { database?: string; hostname?: 
 
 const collectDirectories = (val: string, prev: string[] = []): string[] => [...prev, val];
 
+/** 根命令也有 --database，写在子命令后面时可能被根命令截走。 */
+const authOptionsFrom = <T extends AuthDatabaseCliOptions>(options: T, command: Command): T => {
+  const database = command.optsWithGlobals().database ?? options.database;
+  return typeof database === 'string' && database ? { ...options, database } : options;
+};
 const localRuntimeOptionsFrom = (options: SessionNamesCommandOptions, command: Command): SessionNamesCommandOptions => {
   const merged = { ...command.optsWithGlobals(), ...options } as Record<string, unknown>;
   const result: SessionNamesCommandOptions = { ...options };
@@ -1169,19 +1178,23 @@ Examples:
     });
 
   const auth = program.command('auth').description('Manage access authentication');
+  const authDatabase = 'Target database; defaults to DUTYDECK_DATABASE_URL, then the verified running daemon';
   auth.command('token')
     .description('Print the access token for remote API access (generates one on first use)')
     .option('--rotate', 'Generate a new token, invalidating the previous one')
-    .action(options => handlers.authToken?.(options));
+    .option('--database <path>', authDatabase)
+    .action((options, command) => handlers.authToken?.(authOptionsFrom(options, command)));
   auth.command('password').description('Manage the dashboard password used by browsers')
     .command('set')
     .description('Set or reset the dashboard password (reads stdin, or prompts twice on a terminal); only a scrypt hash is stored')
     .option('--generate', 'Generate a random password and print it once')
-    .action(options => handlers.authPasswordSet?.(options));
+    .option('--database <path>', authDatabase)
+    .action((options, command) => handlers.authPasswordSet?.(authOptionsFrom(options, command)));
   auth.command('share-key').description('Manage the key that signs Feishu card share links')
     .command('rotate')
     .description('Rotate the share-link signing key; every previously sent share link stops working')
-    .action(() => handlers.authShareKeyRotate?.());
+    .option('--database <path>', authDatabase)
+    .action((options, command) => handlers.authShareKeyRotate?.(authOptionsFrom(options, command)));
 
   const database = program.command('database').description('Inspect and upgrade Dutydeck execution database ledger');
   database.command('execution-status')

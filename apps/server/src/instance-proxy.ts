@@ -4,7 +4,8 @@ import type { Readable } from 'node:stream';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { RuntimeError, type ConfigRepository } from '@dutydeck/shared';
-import { rejectUpgrade, upgradeRejection, type TerminalRouteAuth } from './terminal/terminal-ws.js';
+import { extractBearerToken, extractCookie } from './auth/auth.js';
+import { registerUpgradeRoute, rejectUpgrade, upgradeRejection, type TerminalRouteAuth } from './terminal/terminal-ws.js';
 
 /**
  * 同机另起的 Dutydeck 实例（例如独立运行的 Tag bot 服务）。主服务的 dashboard 通过
@@ -78,6 +79,7 @@ const DROPPED_UPGRADE_HEADERS = new Set(PRIVATE_REQUEST_HEADERS);
 // 对方的 Set-Cookie 会覆盖主服务同名的登录 cookie。
 const DROPPED_RESPONSE_HEADERS = new Set([...HOP_BY_HOP, 'set-cookie']);
 const UPSTREAM_TIMEOUT_MS = 30_000;
+const CREDENTIAL_RECHECK_MS = 5_000;
 
 const withoutHeaders = (headers: IncomingHttpHeaders, dropped: Set<string>) =>
   Object.fromEntries(Object.entries(headers).filter(([name, value]) => value !== undefined && !dropped.has(name)));
@@ -105,8 +107,30 @@ export async function registerInstanceProxy(app: FastifyInstance, peers: PeerIns
   let closing = false;
   const upgrades = new Set<() => void>();
   const forwards = new Set<() => void>();
+  // 对方按本机请求放行，主服务的凭据只在建立连接时校验过；token 轮换或密码重设后，已转发的长连接按周期断开。
+  const credentialBound = new Map<() => void, () => boolean>();
+  let credentialSweep: ReturnType<typeof setInterval> | undefined;
+  const stopCredentialSweep = () => {
+    if (credentialSweep) clearInterval(credentialSweep);
+    credentialSweep = undefined;
+  };
+  const bindCredential = (close: () => void, request: IncomingMessage) => {
+    if (!auth || (auth.mode ?? (auth.allowUnauthenticated ? 'local' : 'token')) !== 'token') return;
+    const presented = extractBearerToken(request.headers.authorization) ?? extractCookie(request.headers.cookie);
+    credentialBound.set(close, () => auth.check(presented));
+    credentialSweep ??= setInterval(() => {
+      for (const [closeRevoked, valid] of credentialBound) if (!valid()) closeRevoked();
+      if (!credentialBound.size) stopCredentialSweep();
+    }, CREDENTIAL_RECHECK_MS);
+    credentialSweep.unref();
+  };
+  const unbindCredential = (close: () => void) => {
+    credentialBound.delete(close);
+    if (!credentialBound.size) stopCredentialSweep();
+  };
   app.addHook('preClose', async () => {
     closing = true;
+    stopCredentialSweep();
     for (const close of upgrades) close();
     for (const close of forwards) close();
   });
@@ -131,13 +155,15 @@ export async function registerInstanceProxy(app: FastifyInstance, peers: PeerIns
         if (closed) return;
         closed = true;
         forwards.delete(close);
+        unbindCredential(close);
         upstream.destroy();
         upstreamResponse?.destroy();
         if (!reply.raw.writableFinished) reply.raw.destroy();
       };
       forwards.add(close);
+      if (!sharedRead) bindCredential(close, request.raw);
       reply.raw.once('close', close).once('error', close);
-      reply.raw.once('finish', () => forwards.delete(close));
+      reply.raw.once('finish', () => { forwards.delete(close); unbindCredential(close); });
       request.raw.once('aborted', close);
       body?.once('error', close);
       upstream.setTimeout(UPSTREAM_TIMEOUT_MS, close);
@@ -162,10 +188,10 @@ export async function registerInstanceProxy(app: FastifyInstance, peers: PeerIns
     });
   });
 
-  // 终端 WebSocket 不经过 Fastify 路由，与 registerTerminalRoutes 一样在 upgrade 事件上处理。
-  app.addHook('onReady', async () => {
-    app.server.on('upgrade', (request: IncomingMessage, socket: Socket, head: Buffer) => {
-      if (!request.url?.startsWith('/api/instances/')) return;
+  // 终端 WebSocket 不经过 Fastify 路由，与 registerTerminalRoutes 共用 upgrade 分发器。
+  registerUpgradeRoute(app, {
+    matches: request => Boolean(request.url?.startsWith('/api/instances/')),
+    handle: (request: IncomingMessage, socket: Socket, head: Buffer) => {
       const upstreamTarget = target(request.url);
       const rejection: [number, string, string] | undefined = upstreamTarget ? upgradeRejection(request, auth) : [404, 'Not Found', 'instance not found'];
       if (rejection) { rejectUpgrade(socket, ...rejection); return; }
@@ -177,11 +203,13 @@ export async function registerInstanceProxy(app: FastifyInstance, peers: PeerIns
         if (closed) return;
         closed = true;
         upgrades.delete(close);
+        unbindCredential(close);
         upstream?.destroy();
         socket.destroy();
         peerSocket?.destroy();
       };
       upgrades.add(close);
+      bindCredential(close, request);
       socket.on('error', close).once('close', close);
       try {
         upstream = httpRequest(upstreamTarget!.url, { method: 'GET', headers: withoutHeaders(request.headers, DROPPED_UPGRADE_HEADERS) });
@@ -215,6 +243,6 @@ export async function registerInstanceProxy(app: FastifyInstance, peers: PeerIns
         close();
       });
       upstream.end();
-    });
+    },
   });
 }

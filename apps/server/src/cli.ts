@@ -25,7 +25,7 @@ import { acknowledgeDeferredAsk, askOutput, runSessionAsk, runSessionSend, runSe
 import { readNativeAskPayload, runNativeAskHook } from './native-ask-hook.js';
 import { runPermissionHook } from './permission-hook.js';
 import { RelayCliError } from '@dutydeck/relay';
-import { daemonRestart, daemonStart, daemonStatus, daemonStop, systemdRestartTarget, waitForRunningTasksDrain, type DaemonCommandResult, type DaemonStatusInfo } from './daemon/command.js';
+import { daemonRestart, daemonStart, daemonStatus, daemonStop, resolveCliDatabase, systemdRestartTarget, waitForRunningTasksDrain, type DaemonCommandResult, type DaemonStatusInfo } from './daemon/command.js';
 import { SUPERVISOR_ENV, readDaemonStatus, resolveDaemonDir } from './daemon/daemon.js';
 import { sleep } from './daemon/time.js';
 import { armShutdownDeadline } from './shutdown-phases.js';
@@ -292,9 +292,7 @@ async function main() {
   const output = (result: unknown) => process.stdout.write(`${JSON.stringify({ ok: true, ...result as object })}\n`);
   const daemonServe: (options: CliOptions, onReady?: () => void) => Promise<void> = (options, onReady) => serve(options, onReady);
   const withSecretContext = async <T>(database: string | undefined, work: (context: SecretCliContext) => Promise<T>): Promise<T> => {
-    const configured = database
-      ? loadConfig({ ...process.env, DUTYDECK_DATABASE_URL: database }).databaseUrl
-      : readDaemonStatus(resolveDaemonDir())?.database ?? loadConfig(process.env).databaseUrl;
+    const configured = resolveCliDatabase(database);
     const repositories = createRepositories(configured);
     try {
       const provider = new LocalFileSecretProvider(secretDirectoryForDatabase(configured), { createDirectory: true });
@@ -401,29 +399,29 @@ async function main() {
       if (!result.ok) process.exitCode = 1;
     },
     authToken: async options => {
-      // 优先用运行中/上次 daemon 记录的数据库路径，保证查看/轮换的是同一个 token；
-      // daemon 从未运行过时回退到 loadConfig 的默认解析（<cwd>/.dutydeck/dutydeck.db）。
-      const databaseUrl = readDaemonStatus(resolveDaemonDir())?.database ?? loadConfig(process.env).databaseUrl;
-      const repos = createRepositories(databaseUrl);
+      // 输出带上目标库，写错库时一眼能看出来。服务每次请求直读，改完即生效。
+      const database = resolveCliDatabase(options.database);
+      const repos = createRepositories(database);
       try {
-        output(await runAuthTokenCommand(repos.config, { rotate: options.rotate === true }));
+        output({ ...await runAuthTokenCommand(repos.config, { rotate: options.rotate === true }), database });
       } finally {
         repos.close();
       }
     },
     authPasswordSet: async options => {
-      // 与 auth token 同一个库：运行中/上次 daemon 记录的数据库优先。服务每次请求直读，改完即生效。
-      const repos = createRepositories(readDaemonStatus(resolveDaemonDir())?.database ?? loadConfig(process.env).databaseUrl);
+      const database = resolveCliDatabase(options.database);
+      const repos = createRepositories(database);
       try {
-        output(await runAuthPasswordSetCommand(repos.config, { generate: options.generate === true, readPassword: () => readPasswordInput() }));
+        output({ ...await runAuthPasswordSetCommand(repos.config, { generate: options.generate === true, readPassword: () => readPasswordInput() }), database });
       } finally {
         repos.close();
       }
     },
-    authShareKeyRotate: async () => {
-      const repos = createRepositories(readDaemonStatus(resolveDaemonDir())?.database ?? loadConfig(process.env).databaseUrl);
+    authShareKeyRotate: async options => {
+      const database = resolveCliDatabase(options.database);
+      const repos = createRepositories(database);
       try {
-        output(await runShareKeyRotateCommand(repos.config));
+        output({ ...await runShareKeyRotateCommand(repos.config), database });
       } finally {
         repos.close();
       }
@@ -439,9 +437,7 @@ async function main() {
     larkDisposition: async input => { output(await runLarkDisposition(input)); },
     larkSend: async (markdown, options) => { output(await runLarkSend(markdown, options)); },
     larkCreate: async (name, options) => {
-      const configured = options.database
-        ? loadConfig({ ...process.env, DUTYDECK_DATABASE_URL: options.database }).databaseUrl
-        : readDaemonStatus(resolveDaemonDir())?.database ?? loadConfig(process.env).databaseUrl;
+      const configured = resolveCliDatabase(options.database);
       const repositories = createRepositories(configured);
       try {
         // Persisted profiles match the daemon; first-run profiles also include DUTYDECK_AGENTS_JSON.
