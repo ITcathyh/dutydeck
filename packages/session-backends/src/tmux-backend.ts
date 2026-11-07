@@ -142,6 +142,12 @@ const SHELL_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
  *  that `;`; a trailing `\;` is kept as a literal semicolon. */
 const tmuxLiteralArg = (value: string): string => value.endsWith(';') ? `${value.slice(0, -1)}\\;` : value;
 
+/** tmux format-expands new-session `-s`, `-c` and the pipe-pane command, so
+ *  `#(...)` would run and `#S` would be replaced; `##` is a literal `#`.
+ *  pipe-pane also applies strftime, where `%%` is a literal `%`. */
+const tmuxFormatLiteral = (value: string): string => value.replaceAll('#', '##');
+const tmuxTimeFormatLiteral = (value: string): string => tmuxFormatLiteral(value).replaceAll('%', '%%');
+
 /** Single-quote-escape a string for /bin/sh (replaces ' with '\'' ). */
 function shellescape(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`;
@@ -408,10 +414,10 @@ export class TmuxBackend implements SessionBackend {
     try {
       (await runTmux([
         'new-session', '-d',
-        '-s', this.sessionName,
+        '-s', tmuxFormatLiteral(this.sessionName),
         '-x', String(opts.cols),
         '-y', String(opts.rows),
-        '-c', opts.cwd,
+        '-c', tmuxLiteralArg(tmuxFormatLiteral(opts.cwd)),
       ], { cwd: opts.cwd }));
     } catch (err) {
       throw classifyFailure(err, 'tmux new-session');
@@ -443,7 +449,7 @@ export class TmuxBackend implements SessionBackend {
       // immediately afterwards. The script unlinks itself before exec.
       const launch = await writeLaunchScript(bin, args, scripted, opts.programStatus);
       try {
-        (await runTmux(['respawn-pane', '-k', '-t', this.sessionName, '-c', opts.cwd, '/bin/sh', launch.path]));
+        (await runTmux(['respawn-pane', '-k', '-t', this.sessionName, '-c', tmuxLiteralArg(tmuxFormatLiteral(opts.cwd)), '/bin/sh', launch.path]));
       } catch (error) {
         await rm(launch.directory, { recursive: true, force: true });
         throw error;
@@ -731,7 +737,7 @@ export class TmuxBackend implements SessionBackend {
     };
     await capture.listen(); check();
     await runTmux(['set-option', '-t', this.sessionName, '@dutydeck_capture_directory', capture.directory]); check();
-    const pipe = ['pipe-pane', '-o', '-t', this.sessionName, capture.command()];
+    const pipe = ['pipe-pane', '-o', '-t', this.sessionName, tmuxTimeFormatLiteral(capture.command())];
     if (!restoreScreen) { await runTmux(pipe); check(); return; }
 
     // One tmux command queue captures the existing screen/history and then
