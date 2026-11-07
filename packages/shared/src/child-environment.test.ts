@@ -10,7 +10,7 @@ describe('child environment policy', () => {
       LARK_APP_SECRET: 'host-secret', DUTYDECK_WEBHOOK_SECRET: 'host-webhook',
       DUTYDECK_SERVICE_TOKEN: 'host-github', dutydeck_group_tools_token: 'old-scope',
       dutydeck_relay_token: 'old-relay', dutydeck_session_id: 'old-dutydeck',
-      dutydeck_launcher_group: '1', dutydeck_terminal_launch_id: 'old-launch',
+      dutydeck_launcher_group: '1', dutydeck_launcher_report: '/old/launchers', dutydeck_terminal_launch_id: 'old-launch',
       HERDR_PANE_ID: 'old:p1', ANTHROPIC_API_KEY: 'daemon-account',
       HTTP_PROXY: 'http://proxy', NODE_EXTRA_CA_CERTS: '/cert.pem',
       CODEX_HOME: '/cli/config', ORDINARY_TOKEN: 'cli-owned',

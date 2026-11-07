@@ -1,12 +1,12 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createRuntimeStore } from 'acpx/runtime';
 import { AcpxAdapter } from './index.js';
 
-afterEach(() => vi.unstubAllEnvs());
+afterEach(() => { vi.unstubAllEnvs(); vi.useRealTimers(); });
 const alive = (pid: number) => {
   try {
     process.kill(pid, 0);
@@ -35,6 +35,8 @@ it.each(['environment', 'claude', 'nested', 'forced-exit'])('checks real Agent c
     env: { lifecycle_directory: cwd, dutydeck_group_tools_token: 'fixture-token', ...(kind !== 'claude' ? { VENDOR_FIXTURE: 'synthetic' } : {}) }
   }, { sessionKey, onEvent() {} });
   let pid: number | undefined;
+  // The periodic process-tree sampler never runs, as when ACPX kills the launcher before its first sample.
+  if (kind === 'forced-exit') vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
   try {
     await adapter.start();
     const calls = (await readFile(join(cwd, 'calls.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
@@ -42,8 +44,9 @@ it.each(['environment', 'claude', 'nested', 'forced-exit'])('checks real Agent c
     expect(alive(pid!)).toBe(true);
     if (kind === 'forced-exit') {
       const launcher = [...(adapter as any).processes.keys()][0];
-      // Exit can only be proven for an Agent the launcher sampling recorded before the launcher died.
-      await expect.poll(() => (adapter as any).agentChildren.get(launcher).hasGroups()).toBe(true);
+      expect((adapter as any).agentChildren.get(launcher).hasGroups()).toBe(false);
+      // Only the launcher's own report names the detached Agent.
+      expect(readdirSync(join(cwd, '.dutydeck', 'launchers'))).toHaveLength(1);
       launcher.kill('SIGKILL');
       await expect.poll(() => launcher.signalCode).toBe('SIGKILL');
       await adapter.stop();
@@ -57,6 +60,7 @@ it.each(['environment', 'claude', 'nested', 'forced-exit'])('checks real Agent c
     await adapter.stop();
     expect(await adapter.isStopped()).toBe(true);
     expect(alive(pid!)).toBe(false);
+    expect(readdirSync(join(cwd, '.dutydeck', 'launchers'))).toEqual([]);
     const stored = await createRuntimeStore({ stateDir: join(cwd, '.dutydeck', 'acpx') }).load(sessionKey);
     const env = stored?.acpx?.session_options?.env ?? {};
     expect(Object.keys(env).every(key => /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/.test(key))).toBe(true);

@@ -46,7 +46,7 @@ export function childEnvironment(inherited, configured = {}, { stripClaude = fal
       || /^DUTYDECK_/.test(key) && !inheritedServiceKeys.has(key)
       || /^DUTYDECK_.*(?:TOKEN|SECRET|PASSWORD|AUTH)(?:_|$)/i.test(key)
       || /^(?:LARK|FEISHU)_.*(?:SECRET|TOKEN|PASSWORD|ENCRYPT_KEY)(?:_|$)/i.test(key)
-      || /^dutydeck_(?:group_tools_|relay_|herdr_|agent_env_|session_id$|terminal_backend$|launcher_group$|terminal_launch_id$)/i.test(key)
+      || /^dutydeck_(?:group_tools_|relay_|herdr_|agent_env_|session_id$|terminal_backend$|launcher_group$|launcher_report$|terminal_launch_id$)/i.test(key)
       || stripClaude && /^(?:ANTHROPIC_|CLAUDE_)/i.test(key)) delete env[key];
   }
   Object.assign(env, configured);

@@ -417,7 +417,7 @@ export class AcpxAdapter implements AgentDriver {
     const registry = createAgentRegistry({ overrides: { [agent.id]: this.launch.command } });
     this.runtime = createAcpRuntime({
       cwd,
-      agentEnvironment: () => acpxAgentEnvironment(agent),
+      agentEnvironment: () => ({ ...acpxAgentEnvironment(agent), ...this.launcherReportEnvironment() }),
       onProcess: event => this.observeProcess(event),
       sessionStore: this.sessionStore,
       agentRegistry: { ...registry, resolve: name => name === agent.id ? this.launch.command : registry.resolve(name) },
@@ -541,6 +541,14 @@ export class AcpxAdapter implements AgentDriver {
     } catch { /* 来源采集失败只静默降级，不改变启动/任务结算 */ }
   }
 
+  /**
+   * A Dutydeck launcher writes the Agent group it detaches into this directory, so the group stays provable and
+   * signalable when ACPX kills the launcher before the first process-tree sample. Never persisted in session options.
+   */
+  private launcherReportEnvironment(): Record<string, string> {
+    if (!this.launch.command.some(arg => arg === envLauncherPath() || arg === claudeLauncherPath())) return {};
+    return { dutydeck_launcher_report: privateWorkspaceDirectory(this.agent.cwd ?? process.cwd(), 'launchers') };
+  }
   private observeProcess(event: AcpRuntimeProcessEvent) {
     if (event.phase === 'creation-started') {
       let resolve!: () => void;
@@ -556,11 +564,12 @@ export class AcpxAdapter implements AgentDriver {
     const child = event.child;
     if (this.processes.has(child)) return;
     const launcher = event.kind === 'agent' && child.spawnargs?.some(arg => arg === envLauncherPath() || arg === claudeLauncherPath());
-    const tree = event.kind === 'agent' ? new AgentProcessTree(child.pid) : undefined;
+    const tree = event.kind === 'agent' ? new AgentProcessTree(child.pid, launcher ? join(this.agent.cwd ?? process.cwd(), '.dutydeck', 'launchers') : undefined) : undefined;
     let sampling: NodeJS.Timeout | undefined;
     const exited = () => {
       clearInterval(sampling);
-      if (launcher && child.signalCode && tree) this.unconfirmedTrees.add(tree);
+      if (launcher && child.signalCode && tree) { tree.refresh(); this.unconfirmedTrees.add(tree); }
+      tree?.discardReport();
       this.processes.delete(child); this.agentChildren.delete(child);
       child.off('exit', exited); child.off('error', failed);
     };

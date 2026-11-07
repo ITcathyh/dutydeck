@@ -1,15 +1,20 @@
 import { spawn } from 'node:child_process';
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { constants } from 'node:os';
+import { join } from 'node:path';
+
+const reportKey = 'dutydeck_launcher_report';
 
 // Nested launchers stay in the outer launcher's group so escalation cannot
 // kill an intermediate wrapper while leaving the actual Agent alive.
 export function launchAgent(command, args, env, options = {}) {
   const ownGroup = process.platform !== 'win32' && env.dutydeck_launcher_group !== '1';
+  const childEnv = { ...env, dutydeck_launcher_group: '1' };
+  delete childEnv[reportKey];
   const child = spawn(command, args, {
-    cwd: process.cwd(), stdio: options.stdio ?? 'inherit', detached: ownGroup,
-    env: { ...env, dutydeck_launcher_group: '1' }
+    cwd: process.cwd(), stdio: options.stdio ?? 'inherit', detached: ownGroup, env: childEnv
   });
+  const report = ownGroup && child.pid ? reportGroup(process.env[reportKey], child.pid) : undefined;
   let escalation;
   const signalChild = signal => {
     if (!child.pid) return;
@@ -33,9 +38,30 @@ export function launchAgent(command, args, env, options = {}) {
       // provable, ACPX may kill the launcher; the adapter treats that as unknown.
       while (groupAlive(child.pid)) await new Promise(resolve => setTimeout(resolve, 10));
     }
+    if (report) rmSync(report, { force: true });
     process.exit(signal ? 128 + (constants.signals[signal] ?? 1) : code ?? 1);
   });
   return child;
+}
+
+// The adapter samples this launcher's children only periodically. If ACPX kills
+// the launcher first, this file is the only record of the detached Agent group.
+// It is keyed by the launcher's PID and start time so a reused PID never reads it.
+function reportGroup(directory, pid) {
+  const self = startTime('self'), agent = startTime(pid);
+  if (!directory || !self || !agent) return;
+  const file = join(directory, `${process.pid}.${self}`);
+  try {
+    writeFileSync(file, `${pid} ${agent}\n`, { mode: 0o600 });
+    return file;
+  } catch (error) { process.stderr.write(`Agent process report failed: ${error.code}\n`); }
+}
+
+function startTime(pid) {
+  try {
+    const raw = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    return raw.slice(raw.lastIndexOf(')') + 2).split(' ')[19];
+  } catch { return undefined; }
 }
 
 function groupAlive(group) {
