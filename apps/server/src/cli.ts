@@ -39,7 +39,7 @@ import { LegacyImportError } from '@dutydeck/legacy-importer';
 import { LegacyImportCliError, runLegacyArchive, runLegacyDiscover, runLegacyPlan } from './legacy-import-cli.js';
 import { LocalFileSecretProvider, SecretProviderError, secretDirectoryForDatabase } from '@dutydeck/secret-provider';
 import { setPluginBindingSecret } from './plugins/binding-secret-cli.js';
-import { pluginsInStack } from './plugins/crash-attribution.js';
+import { pluginsInStack, quarantineCrashedPlugins } from './plugins/crash-attribution.js';
 import { SecretCliError, readSecretValue, runSecretList, runSecretRemove, runSecretRotate, runSecretSet, type SecretCliContext } from './secret-cli.js';
 import { SettingsCliError, runSettingsCli } from './settings-cli.js';
 import { ScheduleCliError, runScheduleCli, runScheduleRequest } from './schedule-cli.js';
@@ -71,6 +71,20 @@ for (const dir of legacyState.skipped) {
 if (!isolatedBackupCommand) adoptLegacyEnv();
 
 async function serve(options: CliOptions, onReady?: () => void) {
+  // Observe fatal errors without installing a recovery handler. Continuing
+  // after an uncaught exception can leave the DB, PTY, and session queues in an
+  // unknown state; Node must retain its default non-zero exit behavior so the
+  // runner/daemon supervisor can start a clean process. Unhandled rejections
+  // reach this monitor through Node's default `throw` mode as well. Installed
+  // before startup so provider timers firing while the service starts count too.
+  process.on('uncaughtExceptionMonitor', (error, origin) => {
+    const stack = error instanceof Error ? error.stack ?? error.message : String(error);
+    const plugins = pluginsInStack(stack);
+    process.stderr.write(`Fatal ${origin}: ${stack}\n`);
+    if (plugins.length) process.stderr.write(`Fatal error stack includes in-process plugin code: ${plugins.join(', ')}. Plugin providers run inside the daemon; fix or disable the plugin (dutydeck plugin disable <name>).\n`);
+    const quarantined = quarantineCrashedPlugins(plugins, origin);
+    if (quarantined.length) process.stderr.write(`Quarantined plugins: ${quarantined.join(', ')}. They will not load on the next start; after fixing, run dutydeck plugin enable <name> and restart.\n`);
+  });
   const { startLocalServer } = await import('./service.js');
   const { dutydeckGroupToolsCommand } = await import('./lark/agent-tools.js');
   const service = await startLocalServer({ env: environmentFromCli(options), groupToolsCommand: dutydeckGroupToolsCommand(fileURLToPath(import.meta.url)) });
@@ -100,17 +114,6 @@ async function serve(options: CliOptions, onReady?: () => void) {
   };
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
-  // Observe fatal errors without installing a recovery handler. Continuing
-  // after an uncaught exception can leave the DB, PTY, and session queues in an
-  // unknown state; Node must retain its default non-zero exit behavior so the
-  // runner/daemon supervisor can start a clean process. Unhandled rejections
-  // reach this monitor through Node's default `throw` mode as well.
-  process.on('uncaughtExceptionMonitor', (error, origin) => {
-    const stack = error instanceof Error ? error.stack ?? error.message : String(error);
-    const plugins = pluginsInStack(stack);
-    process.stderr.write(`Fatal ${origin}: ${stack}\n`);
-    if (plugins.length) process.stderr.write(`Fatal error stack includes in-process plugin code: ${plugins.join(', ')}. Plugin providers run inside the daemon; fix or disable the plugin (dutydeck plugin disable <name>).\n`);
-  });
 }
 
 async function restartWithInstalledCli(entrypoint: string, options: { force?: boolean; drainTimeout?: string } = {}) {

@@ -383,7 +383,7 @@ dutydeck restart
 ## 安全说明
 
 - 只装可信来源的插件。agents、hooks、providers 会在你的机器上执行命令，安装时的确认不是形式。
-- **providers 代码和 daemon 同进程、同信任级别**，没有沙箱。它在 `register(api)` 里留下的定时器、连接或回调如果抛出未处理的异常或拒绝，整个 daemon 会按 Node 默认行为退出（受 systemd 托管时会被重新拉起，但重启时只有满足条件的任务能保住）。崩溃日志 `Fatal …` 之后会多一行指出错误栈里出现的插件名；先停用该插件（`dutydeck plugin disable <名字>`）再排查。hook 子进程和插件服务是独立进程，崩溃不会带倒 daemon。
+- **providers 代码和 daemon 同进程、同信任级别**，没有沙箱。它在 `register(api)` 里留下的定时器、连接或回调如果抛出未处理的异常或拒绝，整个 daemon 会按 Node 默认行为退出（受 systemd 托管时会被重新拉起，但重启时只有满足条件的任务能保住）。崩溃日志 `Fatal …` 之后会多一行指出错误栈里出现的插件名，这些外部插件同时被**隔离**：下次启动整包不加载；daemon 在加载某个插件的 providers 时卡死后被杀或重启，下次启动也会隔离它。被隔离的插件在插件诊断、`dutydeck plugin status/list` 和 `dutydeck doctor`（fail）里标出；修复或确认后运行 `dutydeck plugin enable <名字>` 解除隔离再重启（`activate`、`rollback`、`uninstall` 也会清除）。内置插件不隔离。hook 子进程和插件服务是独立进程，崩溃不会带倒 daemon。
 - hook 子进程只继承基础环境变量；插件秘密通过 binding accessor 提供，不进入 hook 环境。
 - **触发器地址只走 HTTPS 或内网。** HMAC 请求带短时有效的时间戳和一次性 nonce；token 请求仍依赖传输层保护。外部材料会被包成不可信数据，但这不能消除提示词注入风险；不要把外部触发器指向 `full-trust` 机器人。
 - 触发器的 prompt 模板把外部数据当不可信内容包裹，但这只降低提示词注入的风险，不能保证 Agent 不被诱导。触发出来的会话沿用机器人的权限模式，别给面向外部的触发器配 `full-trust` 机器人。

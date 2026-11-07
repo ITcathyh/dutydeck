@@ -14,6 +14,7 @@ import { LocalFilePluginSecretResolver, LocalFileSecretProvider, secretDirectory
 import { defaultBuiltinPluginRoot, listBuiltinPlugins } from './builtin.js';
 import { loadPluginDirectory, type LoadedPlugin } from './manifest.js';
 import { parsePluginScope } from './scope.js';
+import { clearPluginQuarantine, readPluginQuarantine } from './quarantine.js';
 
 const run = promisify(execFile);
 const LOCK_FILE = 'plugins.lock.json';
@@ -176,7 +177,7 @@ export class PluginStore {
     const hosts = await pluginHostStates(this.pluginsDir);
     return { selected: this.activeArtifact(entry), candidate: entry.candidate, previous: entry.previous,
       hosts: hosts.filter(host => name in host.plugins && host.observation !== 'dead').map(host => ({ pid: host.identity.pid, observation: host.observation, artifact: host.plugins[name], activated: host.loaded?.includes(name) ?? false, diagnostics: host.diagnostics?.filter(item => item.plugin === name) ?? [] })),
-      blockers: await pluginActivationBlockers(this.pluginsDir, name, this.database) };
+      blockers: await pluginActivationBlockers(this.pluginsDir, name, this.database), quarantine: readPluginQuarantine(this.pluginsDir, name) };
   }
 
   private async assertSwitchSafe(name: string) {
@@ -242,7 +243,7 @@ export class PluginStore {
       const next: PluginLockEntry = { ...rest, active: artifact, previous: old,
         ...(selection === 'previous' && entry.candidate ? { candidate: entry.candidate } : {}),
         ...(artifact.version ? { version: artifact.version } : {}), resolved: artifact.resolved, trustedCapabilities: artifact.trustedCapabilities, updatedAt: new Date().toISOString() };
-      lock.plugins[name] = next; await this.writeLock(lock); return next;
+      lock.plugins[name] = next; await this.writeLock(lock); clearPluginQuarantine(this.pluginsDir, name); return next;
     });
   }
   /** 插件自己的可写目录（hook 与 providers 可用来放状态）。 */
@@ -360,6 +361,7 @@ export class PluginStore {
       const lock = this.readLock();
       delete lock.plugins[name];
       await this.writeLock(lock);
+      clearPluginQuarantine(this.pluginsDir, name);
       const tokens = await this.readTokens();
       for (const key of Object.keys(tokens)) if (key.startsWith(`${name}/`)) delete tokens[key];
       await this.writeTokens(tokens);
@@ -381,6 +383,8 @@ export class PluginStore {
       entry.enabled = enabled;
       entry.updatedAt = new Date().toISOString();
       await this.writeLock(lock);
+      // enable 是解除隔离的显式确认；disable 保留隔离记录，之后 enable 时一并清除。
+      if (enabled) clearPluginQuarantine(this.pluginsDir, name);
       return entry;
     });
   }

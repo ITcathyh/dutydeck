@@ -20,6 +20,7 @@ import type { ScopedPluginTrigger } from './triggers.js';
 import { pluginSecretKey, PluginStore, type LockFile, type PluginLockEntry } from './store.js';
 import { PluginServiceSupervisor } from './service-supervisor.js';
 import { registerPluginCodeRoot } from './crash-attribution.js';
+import { markProviderLoading, quarantineDetail, quarantineRemedy, readPluginQuarantine } from './quarantine.js';
 
 export interface PluginDiagnostic { plugin: string; scenario?: string; message: string }
 /** 内置插件的条目只在内存里：免信任确认，作用域恒为 global。 */
@@ -236,6 +237,8 @@ export class PluginHost {
       let providerCodeEvaluated = false;
       try {
         if (!builtin && builtinNames.has(entry.name)) throw new Error(`和内置插件 ${entry.name} 同名，没有加载；卸载后改名重新安装`);
+        const quarantine = builtin || validation ? undefined : readPluginQuarantine(this.store.pluginsDir, entry.name);
+        if (quarantine) throw new Error(`${quarantineDetail(quarantine)}；${quarantineRemedy(entry.name)}`);
         const plugin = await loadPluginDirectory(root);
         if (plugin.manifest.name !== entry.name) throw new Error(builtin ? `内置插件目录 ${entry.name} 里的插件名是 ${plugin.manifest.name}，两者必须一致` : `目录里的插件名是 ${plugin.manifest.name}，与锁文件记录的 ${entry.name} 不一致`);
         if (plugin.manifest.host?.api && !isHostApiCompatible(plugin.manifest.host.api)) throw new Error(`宿主 API ${plugin.manifest.host.api} 不兼容当前版本`);
@@ -274,7 +277,7 @@ export class PluginHost {
         const scenarioProviders = new Map<string, ScenarioProvider>();
         if (plugin.providersEntry) {
           providerCodeEvaluated = true;
-          registerPluginCodeRoot(entry.name, plugin.root);
+          registerPluginCodeRoot(entry.name, plugin.root, builtin || validation ? undefined : this.store.pluginsDir);
           // 内置插件随每次启动加载，不为它们建数据目录：没装插件时数据目录下什么都不多（用到时插件自己建）。
           if (!builtin) await mkdir(dataDir, { recursive: true });
           let registering = true;
@@ -297,6 +300,8 @@ export class PluginHost {
               scenarioProviders.set(provider.id, provider);
             }
           };
+          // 同步死循环拦不住；标记留到下次启动、写标记的进程已退出时，这个插件按隔离处理。
+          const loaded = builtin || validation ? undefined : markProviderLoading(this.store.pluginsDir, entry.name);
           try {
             await withTimeout((async () => {
               const module = await import(pathToFileURL(plugin.providersEntry!).href) as { default?: unknown; register?: unknown };
@@ -305,7 +310,7 @@ export class PluginHost {
               if (typeof register !== 'function') throw new Error(`${plugin.manifest.providers} 没有默认导出 register(api) 函数`);
               await register(api);
             })(), PROVIDER_REGISTER_TIMEOUT_MS);
-          } finally { registering = false; }
+          } finally { registering = false; loaded?.(); }
         }
         // 先登记到临时表做完检查，失败的插件不留下一部分提供方。
         const checked = new CiProviderRegistry();
