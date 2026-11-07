@@ -71,6 +71,7 @@ function initialDraft(bot: LarkBotConfig): BotDraft {
     memoryEnabled: bot.memoryEnabled ?? (bot.defaultGroupParticipation === 'selective'),
     memoryAutoExtract: bot.memoryAutoExtract ?? true,
     groupMemoryScope: bot.groupMemoryScope ?? 'shared',
+    claudeAutoMemory: bot.claudeAutoMemory ?? 'inherit',
     memoryAgentId: bot.memoryAgentId ?? '',
     memoryModel: bot.memoryModel ?? '',
     decisionAgentId: bot.decisionAgentId ?? '',
@@ -285,6 +286,7 @@ export function BotManagement({
       memoryEnabled: draft.memoryEnabled,
       memoryAutoExtract: draft.memoryAutoExtract,
       groupMemoryScope: draft.groupMemoryScope,
+      claudeAutoMemory: draft.claudeAutoMemory,
       memoryAgentId: draft.memoryAgentId,
       memoryModel: draft.memoryModel,
       decisionAgentId: draft.decisionAgentId,
@@ -754,7 +756,7 @@ export function BotManagement({
                         value={currentDraft.defaultGroupParticipation}
                         onChange={e => updateCurrentDraft({ defaultGroupParticipation: e.target.value as BotDraft['defaultGroupParticipation'] })}
                       >
-                        <option value="off">关闭</option>
+                        <option value="off">在群聊里关闭</option>
                         <option value="observe">仅观察</option>
                         <option value="selective">Tag 按需参与</option>
                         <option value="eager">积极参与</option>
@@ -912,6 +914,14 @@ export function BotManagement({
                         <Select aria-label="群记忆范围" value={currentDraft.groupMemoryScope} onChange={e => updateCurrentDraft({ groupMemoryScope: e.target.value === 'per-group' ? 'per-group' : 'shared' })}>
                           <option value="shared">各群共用一份（默认）</option>
                           <option value="per-group">每个群各自一份（各群记忆互不可见）</option>
+                        </Select>
+                      </Field>
+                      <Field label="Claude 自带记忆（群聊）" hint={currentDraft.claudeAutoMemory === 'off'
+                        ? '只在群聊里的 Claude Code 会话（终端或内置 ACP）关掉 Claude 按工作目录保存的自带记忆，群 A 的内容不会再经它出现在群 B。新拉起的 Claude 进程生效；私聊、定时任务和子会话不受影响，用户在 Agent 环境变量或 Claude 设置里显式设的值优先。'
+                        : 'Claude Code 默认按工作目录保存自带记忆，不受上面的群记忆范围约束：同一工作目录下各群和你自己的 Claude 共用一份。选「关闭」后只在群聊里的 Claude Code 会话关掉它。'}>
+                        <Select aria-label="Claude 自带记忆（群聊）" value={currentDraft.claudeAutoMemory} onChange={e => updateCurrentDraft({ claudeAutoMemory: e.target.value === 'off' ? 'off' : 'inherit' })}>
+                          <option value="inherit">继承 Claude 自己的设置（默认）</option>
+                          <option value="off">在群聊里关闭</option>
                         </Select>
                       </Field>
                       <div className="grid gap-4 sm:grid-cols-2">

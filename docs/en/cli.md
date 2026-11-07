@@ -227,6 +227,7 @@ Every key accepted by `dutydeck settings bot set <app-id> key=value ...` is list
 | `memoryEnabled` | Session memory; `false` injects no memory and disables the related commands and tools | On when `defaultGroupParticipation` is `selective` / `eager`, otherwise off |
 | `memoryAutoExtract` | Extract and consolidate memory in the background; `false` leaves only manual `/memory consolidate` | `true` |
 | `groupMemoryScope` | Group memory scope: `shared` is one pool for all groups, `per-group` one pool per group; switching does not migrate data | `shared` |
+| `claudeAutoMemory` | Claude's own auto memory in group chats: `inherit` follows Claude's own settings, `off` turns it off for Claude-family sessions in group chats of a bot with session memory on (see [features.md](features.md)) | `inherit` |
 | `memoryAgentId` | Agent that extracts and consolidates memory | Same as `defaultAgentId` |
 | `memoryModel` | Model that extracts and consolidates memory | Same as `defaultModel` |
 | `busyTriage` | Triage while busy: progress questions are answered by the host and additions to the current task try to interject; off queues as usual | `false` |

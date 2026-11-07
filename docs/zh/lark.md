@@ -139,6 +139,8 @@ dutydeck agent --turn "$TURN" group send '可检索摘要' --final --card-file /
 | `/grant` / `/revoke` | `/grant @成员` | 把本群对话权限开放给全部成员或加入名单 / 收回 |
 | `/repair` | `/repair` | 诊断并补齐飞书应用权限、事件订阅和卡片回调（执行前二次确认，不会自动发布） |
 
+`/remember` 和 `/memory` 管的是 Dutydeck 的会话记忆，按 `groupMemoryScope` 分池。Claude Code 自带的 auto memory 按工作目录保存、不分群；不想让它在各群之间串用，就在机器人设置的记忆分区把「Claude 自带记忆（群聊）」设为关闭（`dutydeck settings bot set <appId> claudeAutoMemory=off`）。它只作用于群聊里的 Claude Code 会话，范围和优先级见 [features.md](features.md)。
+
 恢复和分身也可以直接用大白话告诉 Agent，由它运行 `dutydeck agent --turn "$TURN" session resume [--id 编号]` 或 `dutydeck agent --turn "$TURN" session fork [--task 任务]`；它会先发确认卡，点确认后才执行。恢复失败会说明原因，并提示 `/new --handoff`。恢复尚未启动的任务时，创建会话前会按发起人的当前权限重新校验启动参数。
 
 分身只允许源会话第一条任务的发起人操作，沿用原会话的 Agent、模型和推理强度，权限按机器人当前设置执行。Claude Code 终端模式用 `--resume 编号 --fork-session`，Codex 终端模式用 `fork 编号` 复制已落盘的上下文；ACP、其他 Agent、换 Agent 或找不到已落盘上下文时，改用 `/new --handoff` 的最近结果、git 状态和备注交接。交接还包含早期任务的来源索引、已知状态和命令回执，可按 task/attempt 在历史中查证；缺失或截断的材料会标明。原生分身已复制上下文时只补来源说明和 git 状态，不重复注入完整交接摘要。Codex 显式使用相同共享目录时走交接，避免后续把复制出来的记录误认成源会话。独立 worktree 从已提交的代码开始，不含原会话未提交的改动；首条消息会说明。分身回执能跳转到新话题。整段私聊共用一个会话时不能开分身，请先把机器人设置中的私聊模式改成“每条消息一个话题”。

@@ -96,6 +96,10 @@ const RAW_TERMINAL_THROTTLE_MS = 200;
  *  不能并进 agent.env：显式 env 非空时 ClaudeSettings 会给每个会话生成 --settings、改写启动参数。
  *  MCP task 转到后台后结果不归本轮，所以默认让它留在工具调用里。 */
 const claudeChildEnvDefaults: Record<string, string> = { CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND: '1' };
+/** 机器人设了 claudeAutoMemory=off 的群聊会话（服务端在 Agent env 里放小写标记）再加这一项，与上面的默认值同层：
+ *  Agent env 里的同名值、用户 ~/.claude/settings.json env 里的同名值都压过它。 */
+const claudeAutoMemoryOffDefaults = (env: Record<string, string>): Record<string, string> =>
+  env.dutydeck_claude_auto_memory === 'off' ? { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' } : {};
 
 /**
  * PtyCliDriver = cli-adapters + session-backends + idle-detector + transcript
@@ -498,7 +502,7 @@ export class PtyCliDriver implements AgentDriver {
 
   /** spawn 环境，首次调用时算好并缓存。resume-without-start 也走这里。 */
   private spawnEnv(): Record<string, string> {
-    return (this.lastSpawnEnv ??= mergedEnv(claudeAdapters.has(this.adapter.id) ? { ...claudeChildEnvDefaults, ...this.agent.env } : this.agent.env));
+    return (this.lastSpawnEnv ??= mergedEnv(claudeAdapters.has(this.adapter.id) ? { ...claudeChildEnvDefaults, ...claudeAutoMemoryOffDefaults(this.agent.env), ...this.agent.env } : this.agent.env));
   }
 
   async send(prompt: string): Promise<void> {

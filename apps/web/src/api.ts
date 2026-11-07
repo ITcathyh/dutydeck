@@ -47,7 +47,7 @@ export type { LarkAllowedUser, RiskControlMode };
  * 旧服务端可能不返回的字段：读取方按各自默认处理（记忆、自动提取、精简过程卡、问答卡、群内 @ 与提醒两档缺省开启，
  * 其余开关缺省关闭；群记忆范围按 shared、执行方式按 single）。
  */
-type LarkBotConfigLegacyOptional = 'welcomeEnabled' | 'revision' | 'memoryEnabled' | 'memoryAutoExtract' | 'groupMemoryScope' | 'botLoopGuard'
+type LarkBotConfigLegacyOptional = 'welcomeEnabled' | 'revision' | 'memoryEnabled' | 'memoryAutoExtract' | 'groupMemoryScope' | 'claudeAutoMemory' | 'botLoopGuard'
   | 'executionMode' | 'workerAgentIds' | 'structuredAskCards' | 'groupCardMention' | 'completionReactionOnly' | 'silentProgress' | 'adhdMode'
   | 'urgentEnabled' | 'notifyMentionAction' | 'notifyMentionDone' | 'pinLongTasks' | 'compactTrace' | 'showAgentName';
 export type LarkBotConfig = Omit<PublicLarkConfig, LarkBotConfigLegacyOptional> & Partial<Pick<PublicLarkConfig, LarkBotConfigLegacyOptional>>;
@@ -85,6 +85,7 @@ export type LarkMemoryStatusResult = {
   enabled: boolean;
   /** 当前群记忆范围；旧服务端缺省按 shared 处理。groups 始终是各群共享池（per-group 时不再被读写，数据保留）。 */
   groupMemoryScope?: 'shared' | 'per-group';
+  claudeAutoMemory?: 'inherit' | 'off';
   groups: LarkMemoryGroupStatus;
 };
 

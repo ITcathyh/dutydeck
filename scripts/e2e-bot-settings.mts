@@ -129,7 +129,7 @@ async function configurationMatrix() {
     defaultAgentId: { value: 'codex' }, fallbackAgentId: { value: 'codex-acp' }, fallbackModel: { value: ' gpt-6.1-sol ', expected: 'gpt-6.1-sol' }, defaultAgentWeights: { value: [{ agentId: 'codex', weight: 3 }, { agentId: 'claude', weight: 7 }] }, defaultModel: { value: 'project-model' }, defaultReasoningEffort: { value: 'high' },
     permissionMode: { value: 'approve-reads' }, fullTrustConfirmed: { value: true }, roleTitle: { value: ' 值班 ', expected: '值班' }, roleScope: { value: ' 配置验收 ', expected: '配置验收' }, preInjectPrompt: { value: ' 先核对证据 ', expected: '先核对证据' }, verificationCommand: { value: ' node --version ', expected: 'node --version' }, listening: { value: true },
     mentionPolicy: { value: 'always' }, defaultGroupParticipation: { value: 'observe' }, p2pMode: { value: 'thread' }, groupReplyMode: { value: 'chat-topic' }, idleCompactEnabled: { value: false }, idleCompactHours: { value: 48 }, groupToolsEnabled: { value: true }, groupToolsAllowSend: { value: true },
-    memoryEnabled: { value: true }, memoryAutoExtract: { value: false }, groupMemoryScope: { value: 'per-group' }, memoryAgentId: { value: 'agent_two' }, memoryModel: { value: 'review-model' }, busyTriage: { value: true }, botLoopGuard: { value: true }, decisionAgentId: { value: 'agent_two' }, decisionModel: { value: 'review-model' }, responseAgentId: { value: 'agent_one' }, responseModel: { value: 'project-model' },
+    memoryEnabled: { value: true }, memoryAutoExtract: { value: false }, groupMemoryScope: { value: 'per-group' }, claudeAutoMemory: { value: 'off' }, memoryAgentId: { value: 'agent_two' }, memoryModel: { value: 'review-model' }, busyTriage: { value: true }, botLoopGuard: { value: true }, decisionAgentId: { value: 'agent_two' }, decisionModel: { value: 'review-model' }, responseAgentId: { value: 'agent_one' }, responseModel: { value: 'project-model' },
     leaderAgentId: { value: 'agent_two' }, workerAgentIds: { value: ['agent_one'] }, executionMode: { value: 'layered' },
     structuredAskCards: { value: false }, groupCardMention: { value: false }, pushIntervalMs: { value: 1700 }, traceLimit: { value: 17 }, hideTraceOnComplete: { value: false }, compactTrace: { value: false }, showAgentName: { value: true }, completionReactionOnly: { value: true }, silentProgress: { value: true }, adhdMode: { value: true },
     urgentEnabled: { value: true }, urgentThresholdMs: { value: 120000 }, urgentMaxPerHourPerChat: { value: 2 }, notifyMentionAction: { value: false }, notifyMentionDone: { value: false }, notifyQuietHours: { value: '23:00-07:00' }, pinLongTasks: { value: true }, pinAfterMs: { value: 90000 },
@@ -199,6 +199,7 @@ async function configurationMatrix() {
   await rejected({ highRiskPattern: '[' }, 'INVALID_HIGH_RISK_PATTERN', 400);
   await rejected({ permissionMode: 'full-trust', fullTrustConfirmed: false }, 'LARK_FULL_TRUST_CONFIRMATION_REQUIRED', 409);
   await rejected({ permissionMode: 'sudo' }, 'INVALID_LARK_CONFIG', 400);
+  await rejected({ claudeAutoMemory: 'on' }, 'INVALID_LARK_CONFIG', 400);
   await rejected({ riskControlMode: 'off', fallbackAgentId: 'terminal' }, 'LARK_APPROVAL_UNSUPPORTED', 422);
   await rejected({ executionMode: 'layered', workerAgentIds: [] }, 'INVALID_LARK_CONFIG', 400);
   await rejected({ executionMode: 'layered', groupToolsEnabled: false }, 'INVALID_LARK_CONFIG', 400);
@@ -256,6 +257,7 @@ async function browserChecks() {
   await page.getByRole('checkbox', { name: '忙时先判断', exact: true }).check();
   await page.getByRole('checkbox', { name: '启用会话记忆', exact: true }).check();
   await page.getByLabel('群记忆范围', { exact: true }).selectOption('shared');
+  await page.getByLabel('Claude 自带记忆（群聊）', { exact: true }).selectOption('inherit');
   await page.locator('#bot-memory-agent').selectOption('agent_two');
   await page.getByLabel('整理模型', { exact: true }).fill('review-model');
   await page.getByRole('checkbox', { name: '空闲后自动压缩上下文', exact: true }).check();
@@ -265,7 +267,7 @@ async function browserChecks() {
   await expect(page.locator('#bot-fallback-model')).toHaveValue('gpt-6.1-sol');
   await saveToApi();
   const saved = await bot();
-  const expected = { roleTitle: '浏览器角色', roleScope: '浏览器负责范围', preInjectPrompt: '浏览器证据要求', workspace: harness!.workspaces[0], fallbackAgentId: 'codex-acp', fallbackModel: 'gpt-6.1-sol', p2pMode: 'chat', adhdMode: true, busyTriage: true, idleCompactEnabled: true, idleCompactHours: 72, memoryEnabled: true, groupMemoryScope: 'shared', memoryAgentId: 'agent_two', memoryModel: 'review-model' };
+  const expected = { roleTitle: '浏览器角色', roleScope: '浏览器负责范围', preInjectPrompt: '浏览器证据要求', workspace: harness!.workspaces[0], fallbackAgentId: 'codex-acp', fallbackModel: 'gpt-6.1-sol', p2pMode: 'chat', adhdMode: true, busyTriage: true, idleCompactEnabled: true, idleCompactHours: 72, memoryEnabled: true, groupMemoryScope: 'shared', claudeAutoMemory: 'inherit', memoryAgentId: 'agent_two', memoryModel: 'review-model' };
   assert.deepEqual(Object.fromEntries(Object.keys(expected).map(key => [key, saved[key]])), expected);
   passed('browser detail saves role, workspace, fallback, routing and presentation drafts through real HTTP');
 

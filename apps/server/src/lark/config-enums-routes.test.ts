@@ -12,7 +12,7 @@ it('rejects invalid reply/routing enums over HTTP without changing the saved val
   const app = await buildApp({} as any, { lark: { config: repos.config, listeningDisabled: true, fetcher: vi.fn(async () => { throw new Error('Unexpected network'); }) } });
   cleanups.push(() => app.close());
   const before = await readLarkConfig(repos.config, 'cli_modes');
-  for (const field of ['p2pMode', 'groupReplyMode', 'groupMemoryScope', 'brand']) for (const value of ['invalid', '', 1, {}, ...(field === 'groupReplyMode' ? [] : [null])]) {
+  for (const field of ['p2pMode', 'groupReplyMode', 'groupMemoryScope', 'claudeAutoMemory', 'brand']) for (const value of ['invalid', '', 1, {}, ...(field === 'groupReplyMode' ? [] : [null])]) {
     const response = await app.inject({ method: 'PUT', url: '/api/lark/config', payload: { stage: 'agent', originalAppId: 'cli_modes', expectedRevision: 4, [field]: value } });
     expect(response.statusCode, `${field}=${JSON.stringify(value)}`).toBe(400);
     expect(response.json().error.code).toBe('INVALID_LARK_CONFIG');
@@ -23,5 +23,19 @@ it('rejects invalid reply/routing enums over HTTP without changing the saved val
     expect(response.statusCode).toBe(200);
     if (groupReplyMode === null) expect(response.json().bots[0]).not.toHaveProperty('groupReplyMode');
     else expect(response.json().bots[0]).toMatchObject({ groupReplyMode });
+  }
+});
+
+it('round-trips claudeAutoMemory over HTTP and reports inherit by default', async () => {
+  const repos = createRepositories(':memory:'); cleanups.push(() => repos.close());
+  await repos.config.set(larkBotsConfigKey, JSON.stringify([{ appId: 'cli_auto_memory', appSecret: 'fixture', defaultAgentId: 'codex', permissionMode: 'ask', revision: 2 }]));
+  const app = await buildApp({} as any, { lark: { config: repos.config, listeningDisabled: true, fetcher: vi.fn(async () => { throw new Error('Unexpected network'); }) } });
+  cleanups.push(() => app.close());
+  expect((await app.inject({ method: 'GET', url: '/api/lark/config' })).json().bots[0]).toMatchObject({ appId: 'cli_auto_memory', claudeAutoMemory: 'inherit' });
+  for (const claudeAutoMemory of ['off', 'inherit'] as const) {
+    const response = await app.inject({ method: 'PUT', url: '/api/lark/config', payload: { stage: 'agent', originalAppId: 'cli_auto_memory', claudeAutoMemory } });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().bots[0]).toMatchObject({ claudeAutoMemory });
+    expect((await readLarkConfig(repos.config, 'cli_auto_memory'))?.claudeAutoMemory).toBe(claudeAutoMemory === 'off' ? 'off' : undefined);
   }
 });

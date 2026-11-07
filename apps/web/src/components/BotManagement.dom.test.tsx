@@ -316,6 +316,42 @@ describe('BotManagement 会话记忆', () => {
     await waitFor(() => expect(saveSpy).toHaveBeenCalledWith(expect.objectContaining({ memoryEnabled: true, groupMemoryScope: 'per-group' })));
   });
 
+  it('Claude 自带记忆（群聊）：默认继承，仅开启记忆时显示；切到关闭会说明范围并随保存提交', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [{ ...mockBot, memoryEnabled: false }], listeningDisabled: false });
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    const saveSpy = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue({ configured: true, bots: [{ ...mockBot, memoryEnabled: true, claudeAutoMemory: 'off', revision: 4 }], listeningDisabled: false });
+    renderWithClient(
+      <BotManagement selectedAppId="cli_test_1" onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={mockAgents}/>
+    );
+    await waitFor(() => expect(screen.getByRole('heading', { name: '测试助手' })).toBeTruthy());
+    expect(screen.queryByLabelText('Claude 自带记忆（群聊）')).toBeNull();
+
+    await user.click(screen.getByRole('checkbox', { name: '启用会话记忆' }));
+    const select = screen.getByLabelText('Claude 自带记忆（群聊）') as HTMLSelectElement;
+    expect(select.value).toBe('inherit');
+    expect(screen.getByText(/不受上面的群记忆范围约束/)).toBeTruthy();
+    await user.selectOptions(select, 'off');
+    expect(screen.getByText(/私聊、定时任务和子会话不受影响/)).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: '保存配置' }));
+    await waitFor(() => expect(saveSpy).toHaveBeenCalledWith(expect.objectContaining({ memoryEnabled: true, claudeAutoMemory: 'off' })));
+  });
+
+  it('已保存为关闭时回显 Claude 自带记忆设置', async () => {
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [{ ...memoryBot, claudeAutoMemory: 'off' }], listeningDisabled: false });
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    vi.spyOn(api, 'larkMemoryStatus').mockResolvedValue({
+      appId: 'cli_test_1', enabled: true, groupMemoryScope: 'shared',
+      groups: { appId: 'cli_test_1', pool: 'groups', shared: true, liveEntries: 0, topics: 0, pendingTurns: 0 }
+    });
+    renderWithClient(
+      <BotManagement selectedAppId="cli_test_1" onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={mockAgents}/>
+    );
+    expect((await screen.findByLabelText('Claude 自带记忆（群聊）') as HTMLSelectElement).value).toBe('off');
+  });
+
   it('已保存为每个群各自一份时回显范围，并说明原共享记忆保留不动', async () => {
     vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [{ ...memoryBot, groupMemoryScope: 'per-group' }], listeningDisabled: false });
     vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });

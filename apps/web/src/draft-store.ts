@@ -53,6 +53,7 @@ export type BotDraft = {
   memoryEnabled: boolean;
   memoryAutoExtract: boolean;
   groupMemoryScope: 'shared' | 'per-group';
+  claudeAutoMemory: 'inherit' | 'off';
   memoryAgentId: string;
   memoryModel: string;
   decisionAgentId: string;

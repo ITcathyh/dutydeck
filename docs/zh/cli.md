@@ -175,7 +175,7 @@ dutydeck settings group set oc_xxx 'scenarios={"alarm":{"enabled":true,"params":
 
 强制风控下更换工作区、默认 Agent、兜底或分流 Agent 时，先在机器人设置点「配置拦截 Hook」，再保存。Hook 检查和安装使用当前草稿的工作区及所有候选 Agent；安装只写 Hook 文件，不保存其他草稿，也不降低现有强制风控。CLI 的 `install-hook --prepare [key=value...]` 同样只准备文件，支持 `workspace`、`defaultAgentId`、`fallbackAgentId` 和 `defaultAgentWeights`；准备后再用 `bot set` 保存。省略 `--prepare` 且不传草稿参数时，沿用安装并保存高危正则/提醒模式的行为，已开启强制风控的机器人保持强制模式。保存失败会保留草稿，只有版本冲突才提示并发修改。
 
-保存接口对私聊模式、群回复模式、群记忆范围和应用品牌使用严格枚举校验；非法值返回 `400 INVALID_LARK_CONFIG`，不会清除已保存值。`groupReplyMode=null` 仍用于清除覆盖，CLI 用 `groupReplyMode=auto`。
+保存接口对私聊模式、群回复模式、群记忆范围、Claude 自带记忆和应用品牌使用严格枚举校验；非法值返回 `400 INVALID_LARK_CONFIG`，不会清除已保存值。`groupReplyMode=null` 仍用于清除覆盖，CLI 用 `groupReplyMode=auto`。
 
 群里的场景包用 `scenarios={"<包 id>":{"enabled":true|false,"params":{...}}}` 改，`params` 只写要改的键，`{"<包 id>":null}` 删掉这个包的绑定；`group show` 列出本群可用的包、参数和当前绑定。`direct` 模式的包（如告警初筛）要先在群里点确认卡开启过一次，之后才能用命令行或 Web 改。旧的 `alarm=<JSON>`（平铺的告警订阅）作为弃用别名保留一个版本，会转成 `scenarios.alarm`，输出里带弃用提示。
 
@@ -292,6 +292,7 @@ dutydeck settings bot set cli_xxx cardActionForwarding=null 'eventHandlers=[{"id
 | `memoryEnabled` | 会话记忆；`false` 时不注入记忆，相关命令和工具不可用 | `defaultGroupParticipation` 为 `selective` / `eager` 时开启，否则关闭 |
 | `memoryAutoExtract` | 后台自动提取和整理记忆；`false` 时只能用 `/memory consolidate` 手动触发 | `true` |
 | `groupMemoryScope` | 群聊记忆范围：`shared` 各群共用一个池，`per-group` 每群一个池；切换不迁移数据 | `shared` |
+| `claudeAutoMemory` | 群聊里 Claude 自带的 auto memory：`inherit` 沿用 Claude 自己的设置，`off` 在开着会话记忆的机器人的群聊 Claude 家族会话里关闭（见 [features.md](features.md)） | `inherit` |
 | `memoryAgentId` | 跑记忆提取和整理的 Agent | 沿用 `defaultAgentId` |
 | `memoryModel` | 跑记忆提取和整理的模型 | 沿用 `defaultModel` |
 | `busyTriage` | 忙时先判断：执行中问进度由宿主直接回复，补充当前任务会尝试插话；关闭时照常排队 | `false` |

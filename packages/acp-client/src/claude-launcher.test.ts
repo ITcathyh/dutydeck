@@ -81,6 +81,28 @@ describe('Claude ACP launcher', () => {
     expect(await readFile(file, 'utf8')).toBe(original);
   });
 
+  it.each([
+    ['marked session', { marker: 'off' }, '1'],
+    ['unmarked session', {}, null],
+    ['inherit marker', { marker: 'inherit' }, null],
+    ['user settings value', { marker: 'off', settings: '0' }, '0'],
+    ['explicit process value', { marker: 'off', explicit: '0' }, '0'],
+  ] as const)('applies the Claude auto memory default only below user values: %s', async (_name, input, expected) => {
+    const root = await mkdtemp(join(tmpdir(), 'dutydeck-claude-auto-memory-')); dirs.push(root);
+    const configDir = join(root, 'config'); await mkdir(configDir);
+    if ('settings' in input) await writeFile(join(configDir, 'settings.json'), JSON.stringify({ env: { CLAUDE_CODE_DISABLE_AUTO_MEMORY: input.settings } }));
+    const inspect = `process.stdout.write(JSON.stringify(process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY ?? null))`;
+    const inherited = { ...process.env };
+    delete inherited.CLAUDE_CODE_DISABLE_AUTO_MEMORY; delete inherited.dutydeck_claude_auto_memory;
+    const result = spawnSync(process.execPath, [resolve('packages/acp-client/agents/claude-acp.mjs')], { cwd: root, env: {
+      ...inherited, PATH: join(root, 'bin'), CLAUDE_CONFIG_DIR: configDir, DUTYDECK_CLAUDE_ACP_COMMAND: process.execPath, DUTYDECK_CLAUDE_ACP_ARGS_JSON: JSON.stringify(['-e', inspect]),
+      ...('marker' in input ? { dutydeck_claude_auto_memory: input.marker } : {}),
+      ...('explicit' in input ? { CLAUDE_CODE_DISABLE_AUTO_MEMORY: input.explicit } : {})
+    }, encoding: 'utf8' });
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout)).toBe(expected);
+  });
+
   it('ignores the workspace .env and loader or executable keys from project settings', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dutydeck-claude-dotenv-')); dirs.push(root);
     const bin = join(root, 'bin'); await mkdir(bin); await mkdir(join(root, '.claude'));
