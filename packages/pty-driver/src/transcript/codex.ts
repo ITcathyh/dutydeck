@@ -23,9 +23,9 @@
  */
 import { existsSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
-import { createRequire } from 'node:module';
 import { codexRateLimits, contextUsage, type NormalizedDriverEvent, type SessionUsageSnapshot } from '@dutydeck/shared';
 import { codexHistoryPath, codexSessionsRoot, type CliPathEnv } from '../cli-paths.js';
+import { requireNodeSqlite, type NodeSqliteDatabase } from '../node-sqlite.js';
 import { readFirstLine, walkFiles } from '../session-id/fs-scan.js';
 import { resolveCliSessionId } from '../session-id/index.js';
 import { CodexSessionIdLocator } from '../session-id/codex.js';
@@ -113,11 +113,11 @@ function verifyRollout(root: string, path: string, sid: string, requireMeta: boo
 function indexedRollout(root: string, sid: string): string | undefined {
   const path = join(dirname(root), 'state_5.sqlite');
   if (!existsSync(path)) return undefined;
-  let db: { prepare(sql: string): { get(id: string): unknown }; close(): void } | undefined;
+  let db: NodeSqliteDatabase | undefined;
   try {
-    const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite');
+    const { DatabaseSync } = requireNodeSqlite();
     db = new DatabaseSync(path, { readOnly: true });
-    const row = db!.prepare('SELECT rollout_path FROM threads WHERE id = ?').get(sid) as { rollout_path?: unknown } | undefined;
+    const row = db.prepare('SELECT rollout_path FROM threads WHERE id = ?').get(sid) as { rollout_path?: unknown } | undefined;
     return typeof row?.rollout_path === 'string' && isAbsolute(row.rollout_path) && matchesRollout(root, row.rollout_path, sid, true) ? row.rollout_path : undefined;
   } catch { return undefined; }
   finally { db?.close(); }
