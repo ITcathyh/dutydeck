@@ -342,7 +342,7 @@ export function TimelineView({ fullWidth = false, variant, header, aside, onScro
       style={{ overflowAnchor: 'none' }} data-timeline-scroll="true" data-history-start={historyPlaces?.[0]?.[1] ?? historyTurns?.[0]?.firstSequence ?? timeline[0]?.sequence} data-history-loaded={loadedEventCount} data-history-complete={hasOlder === false} className="absolute inset-0 overscroll-contain overflow-y-auto">
       {share
         ? <div className="share-content">{header}<div className="share-layout share-gutter"><div className="share-main">{content}</div>{aside}</div></div>
-        : <div className={`mx-auto w-full py-8 sm:py-10 ${fullWidth ? 'px-3 sm:px-5' : 'max-w-[880px] px-5 sm:px-8'}`}>{content}</div>}
+        : <div className={`mx-auto w-full py-8 sm:py-10 ${fullWidth ? 'px-3 sm:px-5' : 'ui-thread'}`}>{content}</div>}
     </div>
     {/* 历史全部加载完后这行提示只留给读屏，不再压在第一条消息上。 */}
     {!eventsLoading && loadedEventCount !== undefined && <div className={olderError || hasOlder ? 'absolute left-5 top-1 z-sticky rounded bg-canvas px-2 py-1 text-meta text-subtle' : 'sr-only'}>

@@ -11,8 +11,8 @@ export function SessionChangesPanel({ session, onBack }: { session: Session; onB
   const [selected, setSelected] = useState('');
   const items = [...turns.data ?? []].reverse();
   const taskId = items.some(item => item.taskId === selected) ? selected : items[0]?.taskId;
-  return <section className="min-w-0" aria-label="任务改动">
-    <div className="flex flex-wrap items-center gap-3 border-b border-default bg-surface px-3 py-3 sm:px-5">
+  return <section className="ui-thread min-w-0 pb-8" aria-label="任务改动">
+    <div className="flex flex-wrap items-center gap-3 border-b border-default py-3">
       <label className="flex min-w-0 flex-1 flex-wrap items-center gap-2 text-caption text-secondary">改动范围
         <select aria-label="改动轮次" className="min-h-11 max-w-full rounded-md border border-default bg-surface px-2 text-primary" value={taskId ?? ''} onChange={event => setSelected(event.target.value)} disabled={!items.length}>
           {!items.length && <option value="">尚无改动记录</option>}

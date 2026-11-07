@@ -1681,6 +1681,32 @@ it('remembers closing the result inspector and does not reopen it for session up
 });
 
 
+it.each([
+  { width: 1920, state: 'thinking' as const, open: true },
+  { width: 1700, state: 'completed' as const, open: true },
+  { width: 1700, state: 'thinking' as const, open: false },
+  { width: 1440, state: 'completed' as const, open: false }
+])('opens the result inspector by default on wide screens ($width px, $state) until the user closes it', async ({ width, state, open }) => {
+  vi.stubGlobal('matchMedia', vi.fn((query: string) => {
+    const min = Number(/min-width: (\d+)px/.exec(query)?.[1] ?? NaN);
+    return { matches: Number.isFinite(min) && width >= min, addEventListener: vi.fn(), removeEventListener: vi.fn() };
+  }));
+  window.history.replaceState(null, '', '/sessions/s1');
+  mockAppApi({ sessions: [session('s1', state)], summaries: [summary('s1', 'wide inspector task')] });
+  vi.spyOn(api, 'workspace').mockResolvedValue({ schemaVersion: 1, revision: 1, sessionId: 's1', mode: 'shared', sourceCwd: '/repo/s1', cwd: '/repo/s1', state: 'ready', createdAt: session('s1').createdAt, updatedAt: session('s1').updatedAt });
+  const { client } = renderApp();
+  await screen.findByRole('heading', { level: 1, name: 'wide inspector task' });
+  if (!open) { expect(screen.queryByRole('complementary', { name: '结果检视' })).toBeNull(); return; }
+  const inspector = await screen.findByRole('complementary', { name: '结果检视' });
+  // 切到「改动」后检视栏仍在：它属于任务而不是某个标签页。
+  await userEvent.click(screen.getByRole('tab', { name: '改动' }));
+  expect(screen.getByRole('complementary', { name: '结果检视' })).toBeTruthy();
+  await userEvent.click(within(inspector).getByRole('button', { name: '关闭结果检视' }));
+  await waitFor(() => expect(screen.queryByRole('complementary', { name: '结果检视' })).toBeNull());
+  act(() => client.setQueryData(['sessions'], [session('s1', state === 'completed' ? 'completed' : 'idle')]));
+  expect(screen.queryByRole('complementary', { name: '结果检视' })).toBeNull();
+});
+
 it('restores each list entry view, search and project independently across multiple task visits', async () => {
   window.history.replaceState(null, '', '/?nav=tasks');
   mockAppApi({ sessions: [session('s1', 'completed'), session('s2', 'completed'), session('s3', 'thinking')], summaries: [summary('s1', 'first scoped task'), summary('s2', 'second scoped task'), summary('s3', 'running outside scope')] });

@@ -221,7 +221,7 @@ export function WorkspaceOverview({ sessions: rawSessions, summaries, agents, lo
   const botsOverview = <LarkBotsOverview bots={larkBots} agents={agents} loading={larkBotsLoading} agentsLoading={agentsLoading} listeningDisabled={larkListeningDisabled} failed={larkBotsFailed} retrying={larkBotsRetrying} onRetry={() => onRetryLarkBots?.()} onOpenLarkSetup={onOpenLarkSetup} onOpenAgentSetup={onOpenAgentSetup} onManageBots={onManageBots}/>;
 
   return <div className="min-h-0 flex-1 overflow-y-auto bg-canvas">
-    <section aria-labelledby="workspace-overview-title" className="mx-auto w-full max-w-[1440px] px-4 pb-12 pt-6 sm:px-8 sm:pt-8 lg:px-10">
+    <section aria-labelledby="workspace-overview-title" className="ui-page pb-12 pt-6 sm:pt-8">
       <header className="mb-7 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <p className="text-caption text-subtle">{home ? new Intl.DateTimeFormat('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' }).format(new Date()) : 'WORKSPACE'}</p>

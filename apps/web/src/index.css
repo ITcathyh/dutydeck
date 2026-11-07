@@ -100,6 +100,16 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .ui-tabbar { bottom: calc(var(--safe-bottom) + 10px); }
 .ui-tabbar-space { padding-bottom: calc(var(--safe-bottom) + 84px); }
 body:has(.ui-tabbar) .ui-toast-viewport { padding-bottom: calc(var(--safe-bottom) + 84px); }
+/*
+  内容列。顶栏、任务标题、标签页、对话、改动、终端和输入框共用同一条左右边缘：
+  宽度取「上限」与「容器宽减去两侧留白」的较小者，居中。正文段落再受 --prose-max 限制，
+  表格、代码和工具卡片不受限。
+*/
+.ui-page { width: min(var(--page-max), calc(100% - var(--page-pad) * 2)); margin-inline: auto; }
+.ui-thread { width: min(var(--thread-max), calc(100% - var(--thread-gutter) * 2)); margin-inline: auto; }
+.ui-thread .markdown > :is(p, ul, ol, blockquote, h1, h2, h3, h4, h5, h6) { max-width: var(--prose-max); }
+/* 任务详情右侧有结果检视或原始日志时，顶栏把这部分宽度让出来，和对话列对齐。 */
+.ui-topbar-track { width: 100%; padding-right: var(--detail-rail, 0px); }
 /* 任务页输入框贴底：在带手势条的手机上把它抬到安全区之上。 */
 .ui-composer-dock { padding-bottom: calc(var(--safe-bottom) + 20px); }
 

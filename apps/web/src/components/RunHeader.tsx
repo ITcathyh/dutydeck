@@ -91,7 +91,7 @@ export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTask
     ...(!status.archived && !managed ? [{ id: 'archive-separator', separator: true as const }, { id: 'archive', label: '归档任务', icon: <Archive size={14}/>, tone: 'danger' as const, onSelect: onArchive }] : [])
   ];
   return <header className="shrink-0 bg-canvas">
-    <div className="flex min-h-12 items-center gap-2 pl-3 pr-2 pt-1 sm:pl-5 sm:pr-3">
+    <div className="ui-thread flex min-h-12 items-center gap-2 pt-1">
       <div className="flex min-w-0 flex-1 items-center gap-1.5">
         <span className="max-w-24 shrink-0 truncate text-body text-subtle sm:max-w-44" title={workspace}>{workspace}</span>
         <ChevronRight aria-hidden="true" size={13} className="shrink-0 text-subtle"/>
@@ -113,7 +113,7 @@ export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTask
         <MenuButton label="更多操作" icon={<MoreHorizontal size={16}/>} items={menu}/>
       </div>
     </div>
-    <div className="flex min-h-8 min-w-0 items-center gap-2 px-3 pb-2 text-caption text-subtle sm:px-5">
+    <div className="ui-thread flex min-h-8 min-w-0 items-center gap-2 pb-2 text-caption text-subtle">
       <span className="shrink-0 truncate">{agent?.name ?? session.agentId}</span>
       {/* 完全信任是飞书 Bot 的默认姿态，用提醒色标出即可，红字留给真正的失败。 */}
       {session.permissionMode && <><span aria-hidden="true" className="shrink-0">·</span><span title="本任务的权限姿态" className={`shrink-0 ${session.permissionMode === 'full-trust' ? 'text-warning' : 'text-subtle'}`}>{permissionLabels[session.permissionMode]}</span></>}
@@ -123,6 +123,6 @@ export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTask
       {queuedTasks.length > 0 && <Badge tone="queued">待执行指令 {queuedTasks.length} 条</Badge>}
       <ConnectionState status={streamStatus}/>
     </div>
-    {errorSummary && <div className="px-3 pb-3 sm:px-5"><Banner tone="danger" title="失败详情">{errorSummary}</Banner></div>}
+    {errorSummary && <div className="ui-thread pb-3"><Banner tone="danger" title="失败详情">{errorSummary}</Banner></div>}
   </header>;
 }

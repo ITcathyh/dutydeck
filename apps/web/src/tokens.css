@@ -41,6 +41,18 @@
   --main-inset: calc(var(--sidebar-w) + var(--shell-gap) * 2);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
   --safe-top: env(safe-area-inset-top, 0px);
+
+  /* 内容列宽度：列表页用 page，任务详情用 thread；两侧留白随视口变化，宽屏不再把内容锁在中间一小列。
+     正文段落另有 prose 上限，避免中文行宽过长。 */
+  --page-max: 1360px;
+  --page-pad: clamp(32px, 4vw, 56px);
+  --thread-max: 1200px;
+  --thread-gutter: clamp(32px, 4vw, 72px);
+  --prose-max: 880px;
+}
+
+@media (min-width: 2200px) {
+  :root { --page-max: 1600px; --thread-max: 1400px; }
 }
 
 :root {
@@ -327,5 +339,5 @@
 }
 
 @media (max-width: 767px) {
-  :root { --topbar-h: 54px; }
+  :root { --topbar-h: 54px; --page-pad: 16px; --thread-gutter: 16px; }
 }
