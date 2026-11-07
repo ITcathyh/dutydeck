@@ -194,17 +194,20 @@ const scheduleInput = {
   condition: { kind: 'always' as const }
 };
 
-it('parses unchanged occurrence history once per tick and batches schedule lookup for recovery', async () => {
+it('does not reread settled occurrence history on each tick', async () => {
   const deliver = vi.fn(async () => {});
   const h = await fixture({ deliver });
   const timestamp = h.now.value.toISOString();
   const raws = new Set<string>();
+  const settled = ['skipped', 'invalidated', 'completed', 'failed', 'interrupted'] as const;
   for (let i = 0; i < 100; i++) {
     const id = `history_${i}`;
+    const runStatus = settled[i % settled.length];
     const raw = JSON.stringify(sessionScheduleOccurrenceSchema.parse({
-      schemaVersion: 2, id, revision: 1, scheduleId: `removed_${i}`, sessionId: h.session.id, generation: 1,
-      scheduledForUtc: timestamp, conditionStatus: 'skipped', runStatus: 'skipped',
-      delivery: { status: 'not_requested', attempts: 0, updatedAt: timestamp }, createdAt: timestamp, updatedAt: timestamp
+      schemaVersion: 2, id, revision: 1, scheduleId: `removed_${i}`, sessionId: h.session.id, generation: 1, scheduledForUtc: timestamp,
+      conditionStatus: runStatus === 'skipped' || runStatus === 'invalidated' ? runStatus : 'passed', runStatus,
+      delivery: { status: runStatus === 'completed' ? 'delivered' : 'not_requested', attempts: runStatus === 'completed' ? 1 : 0, updatedAt: timestamp },
+      createdAt: timestamp, updatedAt: timestamp
     }));
     raws.add(raw);
     await h.repositories.config.set(`session_automation/occurrence/${id}`, raw);
@@ -213,21 +216,18 @@ it('parses unchanged occurrence history once per tick and batches schedule looku
   const schemaParse = vi.spyOn(sessionScheduleOccurrenceSchema, 'parse');
   const get = vi.spyOn(h.repositories.config, 'get');
   const list = vi.spyOn(h.repositories.config, 'list');
-  const candidates = vi.spyOn(h.repositories.config, 'listByJsonField');
   try {
-    await h.service.tick();
-    expect(parse.mock.calls.filter(([raw]) => raws.has(raw))).toHaveLength(100);
-    expect(schemaParse).toHaveBeenCalledTimes(100);
-    expect(list.mock.calls.filter(([prefix]) => prefix === 'session_automation/occurrence/')).toHaveLength(1);
-    expect(candidates.mock.calls.filter(([prefix]) => prefix === 'session_automation/occurrence/')).toHaveLength(2);
-    expect(get.mock.calls.filter(([key]) => key.startsWith('session_automation/schedule/'))).toHaveLength(0);
+    for (let round = 0; round < 2; round++) {
+      await h.service.tick();
+      expect(parse.mock.calls.filter(([raw]) => raws.has(raw))).toHaveLength(0);
+    }
+    expect(schemaParse).not.toHaveBeenCalled();
+    expect(list.mock.calls.filter(([prefix]) => prefix === 'session_automation/occurrence/' || prefix === 'session_automation/ci/')).toHaveLength(0);
+    expect(get.mock.calls.filter(([key]) => key.startsWith('session_automation/schedule/') || key.startsWith('session_automation/task/'))).toHaveLength(0);
     expect(h.dispatches).toHaveLength(0);
     expect(deliver).not.toHaveBeenCalled();
-    parse.mockClear();
-    await h.service.tick();
-    expect(parse.mock.calls.filter(([raw]) => raws.has(raw))).toHaveLength(100);
   } finally {
-    parse.mockRestore(); schemaParse.mockRestore(); get.mockRestore(); list.mockRestore(); candidates.mockRestore();
+    parse.mockRestore(); schemaParse.mockRestore(); get.mockRestore(); list.mockRestore();
   }
 });
 

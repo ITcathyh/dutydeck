@@ -629,7 +629,7 @@ export class SessionAutomationService {
 
   /** 幂等补齐同一授权 binding：来源 CAS 之后、dispatch 之前；崩溃重开补同一映射。 */
   private async ensureTaskBinding(taskId: string, binding: TaskBinding) {
-    // Every tick re-checks the bindings of all recorded occurrences; they almost always exist,
+    // Every tick re-checks the bindings of all open occurrences; they almost always exist,
     // so read first instead of paying for a failing insert CAS each time.
     let existing = await this.getRecord(taskBindingKey(taskId), value => taskBindingSchema.parse(value));
     if (!existing) {
@@ -1707,8 +1707,10 @@ export class SessionAutomationService {
     }
     for (const item of schedules) {
       if (this.closed) return;
-      this.watchSession(item.value.sessionId);
-      if (item.value.executionSessionId) this.watchSession(item.value.executionSessionId);
+      if (!item.value.deletedAt) {
+        this.watchSession(item.value.sessionId);
+        if (item.value.executionSessionId) this.watchSession(item.value.executionSessionId);
+      }
       await this.isolate(() => this.synchronizeLifecycle(item));
       await this.isolate(() => this.enforceDeadline(item.value));
       await this.isolate(() => this.planSchedule(item.value));
@@ -2921,9 +2923,10 @@ export class SessionAutomationService {
   }
 
   private async refreshAcceptedWork(parsed: TickParseCache) {
+    // 已结算的历史不再变化（结果投递另按投递状态扫描）：每个 tick 只读还可能推进的记录，开销不随历史增长。
     const [occurrences, subscriptions, records] = await Promise.all([
-      this.listRecords(OCCURRENCE_PREFIX, value => sessionScheduleOccurrenceSchema.parse(value), parsed.occurrences),
-      this.listRecords(CI_PREFIX, value => ciSubscriptionSchema.parse(value), parsed.subscriptions),
+      this.listRecords(OCCURRENCE_PREFIX, value => sessionScheduleOccurrenceSchema.parse(value), parsed.occurrences, { field: 'runStatus', values: [...openRunStatuses, 'error'] }),
+      this.listRecords(CI_PREFIX, value => ciSubscriptionSchema.parse(value), parsed.subscriptions, { field: 'status', values: ['waiting', 'dispatching', 'accepted', 'blocked', 'error'] }),
       this.listRecords(SCHEDULE_PREFIX, readStoredSessionSchedule)
     ]);
     const schedules = new Map(records.map(item => [item.value.id, item]));
@@ -3322,7 +3325,8 @@ export class SessionAutomationService {
         ...(deliveryError ? { error: attempts >= NOTICE_MAX_ATTEMPTS ? `${deliveryError}（已尝试 ${attempts} 次，不再自动重发）` : deliveryError } : {}), updatedAt: iso(this.clock()) },
       leaseOwner: undefined, leaseExpiresAt: undefined, updatedAt: iso(this.clock()) };
     if (!await this.replace(key, current.raw, updated)) return;
-    if (deliveryError) this.failedDeliveries.add(key);
+    if (deliveryError && attempts < NOTICE_MAX_ATTEMPTS) this.failedDeliveries.add(key);
+    else this.failedDeliveries.delete(key);
     if (!deliveryError && 'scheduleId' in claimed && sent?.messageId) await this.noteResultMessage(claimed.scheduleId, claimed.id, sent.messageId);
     await this.applyScheduleStops();
   }
