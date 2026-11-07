@@ -1,4 +1,5 @@
 import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -47,7 +48,7 @@ describe('Claude ACP launcher', () => {
     });
     expect(result.status).toBe(0);
     const { real, guard, ...launched } = JSON.parse(result.stdout);
-    expect(launched).toEqual({ token: 'explicit-token', base: 'https://project.example', model: 'local-model', bedrock: '1', awsProfile: 'dutydeck-test',
+    expect(launched).toEqual({ token: 'explicit-token', base: 'https://project.example', model: 'local-model', bedrock: undefined, awsProfile: undefined,
       executable: process.platform === 'win32' ? claude : expect.stringMatching(/\/dutydeck-claude-guard-[^/]+\/claude-[0-9a-f]{16}\.sh$/) });
     if (process.platform === 'win32') return;
     // SDK 拿到的是转发脚本：凭据保护 hook 并进 SDK 自己传的 --settings（Claude Code 只认最后一个），再启动真正的 CLI。
@@ -80,15 +81,25 @@ describe('Claude ACP launcher', () => {
     expect(await readFile(file, 'utf8')).toBe(original);
   });
 
-  it('strips service secrets and other session identities that a workspace .env brings in', async () => {
+  it('ignores the workspace .env and loader or executable keys from project settings', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dutydeck-claude-dotenv-')); dirs.push(root);
-    await mkdir(join(root, '.claude'));
-    await writeFile(join(root, '.env'), 'LARK_APP_SECRET=svc-secret\nDUTYDECK_ACCESS_TOKEN=svc-token\nBOTMUX_SESSION_ID=other-session\ndutydeck_relay_token=other-relay\nANTHROPIC_BASE_URL=https://dotenv.example\n');
-    const inspect = `process.stdout.write(JSON.stringify(Object.fromEntries(['LARK_APP_SECRET', 'DUTYDECK_ACCESS_TOKEN', 'BOTMUX_SESSION_ID', 'dutydeck_relay_token', 'ANTHROPIC_BASE_URL'].map(key => [key, process.env[key] ?? null]))))`;
+    const bin = join(root, 'bin'); await mkdir(bin); await mkdir(join(root, '.claude'));
+    const preload = join(root, 'preload.cjs'); const marker = join(root, 'preloaded');
+    await writeFile(preload, `require('node:fs').writeFileSync(${JSON.stringify(marker)}, '1');\n`);
+    await writeFile(join(root, '.env'), `NODE_OPTIONS=--require=${preload}\nLARK_APP_SECRET=svc-secret\nANTHROPIC_BASE_URL=https://dotenv.example\n`);
+    await writeFile(join(root, '.env.local'), 'AWS_PROFILE=dotenv-profile\n');
+    await writeFile(join(root, '.claude', 'settings.local.json'), JSON.stringify({ env: {
+      NODE_OPTIONS: `--require=${preload}`, LD_PRELOAD: join(root, 'missing.so'), CLAUDE_CODE_EXECUTABLE: join(root, 'evil'),
+      DUTYDECK_DAEMON_DIR: join(root, 'elsewhere'), dutydeck_relay_token: 'other-relay', ANTHROPIC_MODEL: 'project-model'
+    } }));
+    const keys = ['NODE_OPTIONS', 'LD_PRELOAD', 'CLAUDE_CODE_EXECUTABLE', 'DUTYDECK_DAEMON_DIR', 'dutydeck_relay_token', 'LARK_APP_SECRET', 'ANTHROPIC_BASE_URL', 'AWS_PROFILE', 'ANTHROPIC_MODEL'];
+    const inspect = `process.stdout.write(JSON.stringify(Object.fromEntries(${JSON.stringify(keys)}.map(key => [key, process.env[key] ?? null]))))`;
     const inherited = { ...process.env };
-    for (const key of ['LARK_APP_SECRET', 'DUTYDECK_ACCESS_TOKEN', 'BOTMUX_SESSION_ID', 'dutydeck_relay_token', 'ANTHROPIC_BASE_URL']) delete inherited[key];
-    const result = spawnSync(process.execPath, [resolve('packages/acp-client/agents/claude-acp.mjs')], { cwd: root, env: { ...inherited, CLAUDE_CONFIG_DIR: join(root, '.claude'), DUTYDECK_CLAUDE_ACP_COMMAND: process.execPath, DUTYDECK_CLAUDE_ACP_ARGS_JSON: JSON.stringify(['-e', inspect]) }, encoding: 'utf8' });
+    for (const key of keys) delete inherited[key];
+    // No Claude CLI on PATH, so the launcher does not replace CLAUDE_CODE_EXECUTABLE itself.
+    const result = spawnSync(process.execPath, [resolve('packages/acp-client/agents/claude-acp.mjs')], { cwd: root, env: { ...inherited, PATH: bin, CLAUDE_CONFIG_DIR: join(root, 'config'), DUTYDECK_CLAUDE_ACP_COMMAND: process.execPath, DUTYDECK_CLAUDE_ACP_ARGS_JSON: JSON.stringify(['-e', inspect]) }, encoding: 'utf8' });
     expect(result.status).toBe(0);
-    expect(JSON.parse(result.stdout)).toEqual({ LARK_APP_SECRET: null, DUTYDECK_ACCESS_TOKEN: null, BOTMUX_SESSION_ID: null, dutydeck_relay_token: null, ANTHROPIC_BASE_URL: 'https://dotenv.example' });
+    expect(JSON.parse(result.stdout)).toEqual({ ...Object.fromEntries(keys.map(key => [key, null])), ANTHROPIC_MODEL: 'project-model' });
+    expect(existsSync(marker)).toBe(false);
   });
 });

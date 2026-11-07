@@ -5,7 +5,6 @@ import { homedir, tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { launchAgent } from './launcher-process.mjs';
 import { fileURLToPath } from 'node:url';
-import { parseEnv } from 'node:util';
 
 const policyUrl = new URL('./child-environment.mjs', import.meta.url);
 const { childEnvironment } = await import(existsSync(policyUrl) ? policyUrl.href : '@dutydeck/shared/child-environment');
@@ -18,10 +17,9 @@ async function settingsEnvironment(file) {
   } catch { return {}; }
 }
 
-async function fileEnvironment(file) {
-  try { return parseEnv(await readFile(file, 'utf8')); }
-  catch { return {}; }
-}
+// 项目设置来自正在处理的仓库：能在 exec 之前改变加载、执行目标或 Dutydeck 自身配置的变量一律不取。
+const workspaceDenied = /^(?:NODE_OPTIONS|NODE_PATH|PATH|SHELL|BASH_ENV|ENV|CLAUDE_CONFIG_DIR|LD_\w*|DYLD_\w*|\w*_EXECUTABLE|DUTYDECK_\w*)$/i;
+const workspaceEnvironment = env => Object.fromEntries(Object.entries(env).filter(([key]) => !workspaceDenied.test(key)));
 
 async function findClaudeExecutable(pathValue) {
   if (process.env.CLAUDE_CODE_EXECUTABLE) return process.env.CLAUDE_CODE_EXECUTABLE;
@@ -56,15 +54,14 @@ async function guardedExecutable() {
 }
 
 const configDir = process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude');
+// 不读工作区 .env / .env.local：那是仓库或 Dutydeck 自己的服务配置，不是 Claude 的设置。
 const settingsEnv = Object.assign(
   {},
   await settingsEnvironment(join(configDir, 'settings.json')),
-  await fileEnvironment(join(process.cwd(), '.env')),
-  await fileEnvironment(join(process.cwd(), '.env.local')),
-  await settingsEnvironment(join(process.cwd(), '.claude', 'settings.json')),
-  await settingsEnvironment(join(process.cwd(), '.claude', 'settings.local.json'))
+  workspaceEnvironment(await settingsEnvironment(join(process.cwd(), '.claude', 'settings.json'))),
+  workspaceEnvironment(await settingsEnvironment(join(process.cwd(), '.claude', 'settings.local.json')))
 );
-// 工作目录 .env 可能是 dutydeck 自己的服务配置：并进来的变量同样过一遍子进程清洗，不把服务密钥和别的会话身份带给 Claude。
+// 设置里的变量同样过一遍子进程清洗，不把服务密钥和别的会话身份带给 Claude。
 const env = { ...childEnvironment(settingsEnv), ...process.env };
 const installedClaude = await findClaudeExecutable(env.PATH);
 if (installedClaude && process.platform !== 'win32') {
