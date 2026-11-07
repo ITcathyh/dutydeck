@@ -32,11 +32,11 @@ import {
 } from './daemon.js';
 import { environmentFromCli, type CliOptions } from '../cli-program.js';
 import { appConfigSchema, resolveDatabaseUrl } from '@dutydeck/config';
-import { AUTOSTART_LINUX_UNIT, AUTOSTART_MACOS_LABEL, defaultRunCommand, firstLine, type AutostartCommandOutput, type AutostartRunCommand } from '../autostart/autostart.js';
+import { AUTOSTART_LINUX_UNIT, AUTOSTART_MACOS_LABEL, defaultRunCommand, firstLine, readLaunchdProgram, type AutostartCommandOutput, type AutostartRunCommand } from '../autostart/autostart.js';
 import { sleep } from './time.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { parseEnv } from 'node:util';
 import { localLoopbackUrl } from '../local-api-url.js';
 
@@ -909,19 +909,6 @@ async function systemdRestart(dir: string, state: DaemonState, unit: string, inf
 /** kickstart -k 先停旧进程再拉起：停服最长 12 秒，加上新进程启动，比 systemd 的等待（systemctl 停完才返回）多留余量。 */
 const LAUNCHD_READY_TIMEOUT_MS = 30_000;
 
-/** plist 的 ProgramArguments 前两项：新进程实际用的解释器和入口脚本。读不到时 undefined。 */
-function launchdProgram(home: string): { execPath: string; script: string } | undefined {
-  try {
-    const plist = readFileSync(join(home, 'Library', 'LaunchAgents', `${AUTOSTART_MACOS_LABEL}.plist`), 'utf8');
-    const array = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(plist)?.[1] ?? '';
-    const [execPath, script] = [...array.matchAll(/<string>([^<]*)<\/string>/g)].map(match => match[1]!
-      .replace(/&quot;/g, '"').replace(/&gt;/g, '>').replace(/&lt;/g, '<').replace(/&amp;/g, '&'));
-    return execPath && script ? { execPath, script } : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 /**
  * 正在运行的 daemon 是否受 launchd 托管：状态文件里有前台入口记下的 launchd、身份校验通过，且 `launchctl print`
  * 报告该 job 的 pid 正是它。job 没有加载（比如自启已关闭）时返回 undefined，照旧 detached 重启；
@@ -950,7 +937,7 @@ async function launchdRestart(dir: string, state: DaemonState, target: string, o
       error: `Dutydeck 由 launchd（${target}）托管，新进程按 plist 的 ProgramArguments 启动，命令行参数 ${flags.join(' ')} 传不过去。请把配置写进 ${resolve(dir, '../..', '.env')}（如 DUTYDECK_PORT、DUTYDECK_HOST）后不带参数重试。` };
   }
   // 新一代由 plist 里的解释器拉起：检查的是它，不是当前 CLI 自己。
-  const program = launchdProgram(process.env.HOME ?? homedir());
+  const program = readLaunchdProgram(process.env.HOME ?? homedir());
   if (!program) {
     return { ok: false, action: 'restart', running: true, pid: state.pid, error: `读不到 ${AUTOSTART_MACOS_LABEL}.plist 的 ProgramArguments，无法确认新进程能否加载 SQLite；已拒绝重启，旧的守护进程仍在运行。` };
   }

@@ -6,7 +6,7 @@
  * CLI's data directory looks unexpected — the driver degrades to treating
  * the dutydeck session id as the CLI session id.
  */
-import { closeSync, existsSync, openSync, opendirSync, readSync, statSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, openSync, opendirSync, readSync, statSync } from 'node:fs';
 import type { Dirent } from 'node:fs';
 import { StringDecoder } from 'node:string_decoder';
 import { join } from 'node:path';
@@ -15,24 +15,29 @@ import { join } from 'node:path';
  *  first user prompt both live near the head, so a head window keeps the scan
  *  O(window) on multi-MB rollout files. */
 export function readHead(path: string, maxBytes: number): string {
+  return readHeadBytes(path, maxBytes)?.bytes.toString('utf8') ?? '';
+}
+
+/** The bytes readHead decodes, plus the inode they were read from. */
+export function readHeadBytes(path: string, maxBytes: number): { bytes: Buffer; dev: number; ino: number } | undefined {
   let size: number;
   try {
     const st = statSync(path);
-    if (!st.isFile()) return '';
+    if (!st.isFile()) return undefined;
     size = st.size;
   } catch {
-    return '';
+    return undefined;
   }
   const len = Math.min(size, Math.max(0, maxBytes));
-  if (len === 0) return '';
+  if (len === 0) return undefined;
   const buf = Buffer.alloc(len);
   let fd: number | undefined;
   try {
     fd = openSync(path, 'r');
-    const read = readSync(fd, buf, 0, len, 0);
-    return buf.subarray(0, read).toString('utf8');
+    const { dev, ino } = fstatSync(fd);
+    return { bytes: buf.subarray(0, readSync(fd, buf, 0, len, 0)), dev, ino };
   } catch {
-    return '';
+    return undefined;
   } finally {
     if (fd !== undefined) {
       try { closeSync(fd); } catch { /* already closed */ }

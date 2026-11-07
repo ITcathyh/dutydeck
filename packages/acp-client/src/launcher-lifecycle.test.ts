@@ -42,6 +42,8 @@ it.each(['environment', 'claude', 'nested', 'forced-exit'])('checks real Agent c
     expect(alive(pid!)).toBe(true);
     if (kind === 'forced-exit') {
       const launcher = [...(adapter as any).processes.keys()][0];
+      // Exit can only be proven for an Agent the launcher sampling recorded before the launcher died.
+      await expect.poll(() => (adapter as any).agentChildren.get(launcher).hasGroups()).toBe(true);
       launcher.kill('SIGKILL');
       await expect.poll(() => launcher.signalCode).toBe('SIGKILL');
       await adapter.stop();

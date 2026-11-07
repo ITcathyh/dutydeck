@@ -133,14 +133,8 @@ export class PluginStore {
     if (!snapshot.some(entry => entry.enabled)) return { entries: snapshot, record: async () => {}, release: async () => {} };
     return this.withStoreLock(async () => {
       const entries = this.list();
-      const directory = join(this.pluginsDir, '.hosts');
-      await mkdir(directory, { recursive: true });
       await this.pruneHostLeases();
-      const path = join(directory, `${randomUUID()}.json`);
-      const state: PluginHostState = { identity: currentProcessIdentity(), ...(this.database !== ':memory:' ? { database: resolve(this.database) } : {}), stopped: false,
-        plugins: Object.fromEntries(entries.filter(entry => entry.enabled).map(entry => [entry.name, this.activeArtifact(entry).id])) };
-      const save = async () => { const temporary = `${path}.tmp`; await writeFile(temporary, JSON.stringify(state)); await rename(temporary, path); };
-      await save();
+      const { state, save } = await this.writeHostLease({ plugins: Object.fromEntries(entries.filter(entry => entry.enabled).map(entry => [entry.name, this.activeArtifact(entry).id])) });
       return { entries, record: async (loaded, diagnostics) => { state.loaded = loaded; state.diagnostics = diagnostics?.map(item => ({ plugin: item.plugin, message: '插件或场景未成功激活；请查看运行日志。' })); await save(); }, release: async () => { state.stopped = true; await save(); } };
     }, HOST_STORE_WAIT_MS);
   }
@@ -163,14 +157,18 @@ export class PluginStore {
    */
   async recordDegradedHost(reason: string): Promise<() => Promise<void>> {
     try {
-      const directory = join(this.pluginsDir, '.hosts');
-      await mkdir(directory, { recursive: true });
-      const path = join(directory, `${randomUUID()}.json`);
-      const state: PluginHostState = { identity: currentProcessIdentity(), ...(this.database !== ':memory:' ? { database: resolve(this.database) } : {}), stopped: false, plugins: {}, degraded: reason };
-      const save = async () => { const temporary = `${path}.tmp`; await writeFile(temporary, JSON.stringify(state)); await rename(temporary, path); };
-      await save();
+      const { state, save } = await this.writeHostLease({ plugins: {}, degraded: reason });
       return async () => { state.stopped = true; await save().catch(() => undefined); };
     } catch { return async () => {}; }
+  }
+
+  private async writeHostLease(fields: Pick<PluginHostState, 'plugins'> & Partial<PluginHostState>): Promise<{ state: PluginHostState; save(): Promise<void> }> {
+    await mkdir(join(this.pluginsDir, '.hosts'), { recursive: true });
+    const name = join('.hosts', `${randomUUID()}.json`);
+    const state: PluginHostState = { identity: currentProcessIdentity(), ...(this.database !== ':memory:' ? { database: resolve(this.database) } : {}), stopped: false, ...fields };
+    const save = () => this.writePrivateJson(name, state);
+    await save();
+    return { state, save };
   }
 
   async activationStatus(name: string) {

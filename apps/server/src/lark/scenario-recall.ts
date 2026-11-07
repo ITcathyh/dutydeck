@@ -110,7 +110,7 @@ export async function findScenarioRecall(input: {
       return { packId: pack.id, prompt: renderScenarioTemplate(correlation.prompt, { date: templateText(date) }), conclusion: found.headline.replace(/[。.]$/u, ''),
         line: renderScenarioTemplate(correlation.cardLine, { date: templateText(date), headline: templateText(sanitizeCardText(found.headline)), url: templateText(url ?? '') }) };
     } catch (error) {
-      input.log?.warn({ scenario: pack.id, error: error instanceof Error ? error.message : String(error) }, '场景关联没算完，本轮不带上一轮结论');
+      input.log?.warn({ scenario: pack.id, error }, '场景关联没算完，本轮不带上一轮结论');
       return undefined;
     }
   }

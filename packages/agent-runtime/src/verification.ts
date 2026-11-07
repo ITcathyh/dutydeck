@@ -2,7 +2,6 @@ import { createHash } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { lstat, readFile, readdir, readlink, realpath } from 'node:fs/promises';
-import type { BigIntStats } from 'node:fs';
 import { join } from 'node:path';
 import type { ConfigRepository, VerificationCommandInput, VerificationRecord, VerificationResponse } from '@dutydeck/shared';
 import { makeId, now, RuntimeError } from '@dutydeck/shared';
@@ -66,8 +65,9 @@ export async function repositoryFingerprint(cwd: string): Promise<string> {
  * same-size rewrite, so their stat cannot prove the content is unchanged.
  */
 const RACY_WINDOW_MS = 2_000;
-const LSTAT_CHUNK = 256;
-const LSTAT_CONCURRENCY = 16;
+/** Entries are statted ENTRY_CHUNK at a time and their content read ENTRY_CONCURRENCY at a time, so a large tree is never held in memory at once. */
+const ENTRY_CHUNK = 256;
+const ENTRY_CONCURRENCY = 16;
 const fingerprintCache = new Map<string, { stamp: string; fingerprint: string }>();
 const fingerprintRuns = new Map<string, Promise<string>>();
 
@@ -119,23 +119,27 @@ async function scanRepository(cwd: string, seenRoots: Set<string>, changes: { la
   const canonicalRoot = await realpath(root);
   if (seenRoots.has(canonicalRoot)) throw new RuntimeError('VERIFICATION_FINGERPRINT_FAILED', `Recursive Git repository detected: ${canonicalRoot}`, 409);
   seenRoots.add(canonicalRoot);
-  const head = (await git(canonicalRoot, ['rev-parse', '--verify', 'HEAD^{commit}'])).trim();
+  const [headOutput, staged, others] = await Promise.all([
+    git(canonicalRoot, ['rev-parse', '--verify', 'HEAD^{commit}']),
+    git(canonicalRoot, ['ls-files', '-s', '-z']),
+    git(canonicalRoot, ['ls-files', '--others', '--exclude-standard', '-z'])
+  ]);
+  const head = headOutput.trim();
   const gitlinks = new Map<string, string>();
-  const tracked = (await git(canonicalRoot, ['ls-files', '-s', '-z'])).split('\0').filter(Boolean).map(entry => {
+  const tracked = staged.split('\0').filter(Boolean).map(entry => {
     const separator = entry.indexOf('\t');
     const [mode, object] = entry.slice(0, separator).split(' ');
     const path = entry.slice(separator + 1);
     if (mode === '160000') gitlinks.set(path, object!);
     return path;
   });
-  const untracked = (await git(canonicalRoot, ['ls-files', '--others', '--exclude-standard', '-z'])).split('\0').filter(Boolean);
+  const untracked = others.split('\0').filter(Boolean);
   const paths = [...new Set([...tracked, ...untracked].filter(included))].sort();
   const stamp = createHash('sha256').update('dutydeck-stat-v2\0').update(canonicalRoot).update('\0').update(head).update('\0');
   const entries: ScannedEntry[] = [];
-  // Stat in bounded chunks so a large tree never holds every BigIntStats at once.
-  for (let start = 0; start < paths.length; start += LSTAT_CHUNK) {
-    const chunk = paths.slice(start, start + LSTAT_CHUNK);
-    const stats = await lstatChunk(canonicalRoot, chunk);
+  for (let start = 0; start < paths.length; start += ENTRY_CHUNK) {
+    const chunk = paths.slice(start, start + ENTRY_CHUNK);
+    const stats = await mapSettled(chunk, path => lstat(join(canonicalRoot, path), { bigint: true }));
     for (const [offset, path] of chunk.entries()) {
       const info = stats[offset]!;
       if (info instanceof Error) {
@@ -177,41 +181,40 @@ async function scanRepository(cwd: string, seenRoots: Set<string>, changes: { la
 /** Reads the scanned listing for content; the hash format is unchanged from the original single walk. */
 async function contentFingerprint(scan: RepositoryScan): Promise<string> {
   const hash = createHash('sha256').update('dutydeck-code-v1\0').update(scan.head).update('\0');
-  for (const [index, path] of scan.paths.entries()) {
-    const entry = scan.entries[index]!;
-    if (entry.kind === 'missing') {
-      hash.update(path).update('\0missing\0');
-      continue;
+  const read = async (entry: ScannedEntry, path: string): Promise<[mode: number, tag: string, body: string | Buffer] | undefined> => {
+    switch (entry.kind) {
+      case 'missing': return undefined;
+      case 'link': return [entry.mode, 'link\0', await readlink(join(scan.root, path))];
+      case 'file': return [entry.mode, 'file\0', await readFile(join(scan.root, path))];
+      case 'uninitialized': return [entry.mode, 'gitlink-uninitialized\0', entry.commit];
+      case 'repository': return [entry.mode, 'gitlink\0', await contentFingerprint(entry.scan)];
     }
-    let tag: string;
-    let body: string | Buffer;
-    try {
-      if (entry.kind === 'link') { tag = 'link\0'; body = await readlink(join(scan.root, path)); }
-      else if (entry.kind === 'file') { tag = 'file\0'; body = await readFile(join(scan.root, path)); }
-      else if (entry.kind === 'uninitialized') { tag = 'gitlink-uninitialized\0'; body = entry.commit; }
-      else { tag = 'gitlink\0'; body = await contentFingerprint(entry.scan); }
-    } catch (error) {
+  };
+  for (let start = 0; start < scan.paths.length; start += ENTRY_CONCURRENCY) {
+    const chunk = scan.paths.slice(start, start + ENTRY_CONCURRENCY);
+    const bodies = await mapSettled(chunk, (path, offset) => read(scan.entries[start + offset]!, path));
+    for (const [offset, path] of chunk.entries()) {
+      const body = bodies[offset];
       // Deleted since the scan: hash it the way a walk that found it missing would.
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      hash.update(path).update('\0missing\0');
-      continue;
+      if (body instanceof Error && (body as NodeJS.ErrnoException).code !== 'ENOENT') throw body;
+      if (!body || body instanceof Error) hash.update(path).update('\0missing\0');
+      else hash.update(path).update('\0').update(String(body[0])).update('\0').update(body[1]).update(body[2]).update('\0');
     }
-    hash.update(path).update('\0').update(String(entry.mode)).update('\0').update(tag).update(body).update('\0');
   }
   return hash.digest('hex');
 }
 
-async function lstatChunk(root: string, paths: string[]): Promise<(BigIntStats | Error)[]> {
-  const results = new Array<BigIntStats | Error>(paths.length);
+async function mapSettled<T>(items: readonly string[], task: (item: string, index: number) => Promise<T>): Promise<(T | Error)[]> {
+  const results = new Array<T | Error>(items.length);
   let next = 0;
   const worker = async () => {
-    while (next < paths.length) {
+    while (next < items.length) {
       const index = next++;
-      try { results[index] = await lstat(join(root, paths[index]!), { bigint: true }); }
+      try { results[index] = await task(items[index]!, index); }
       catch (error) { results[index] = error as Error; }
     }
   };
-  await Promise.all(Array.from({ length: Math.min(LSTAT_CONCURRENCY, paths.length) }, worker));
+  await Promise.all(Array.from({ length: Math.min(ENTRY_CONCURRENCY, items.length) }, worker));
   return results;
 }
 

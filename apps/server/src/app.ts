@@ -30,6 +30,7 @@ import { installationOwnerTaskActor, permissionModes, supportsCodexProfiles, Run
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { registerLarkRoutes, type LarkRoutesOptions } from './lark/routes.js';
 import { discoverAgentModels } from './agent-models.js';
+import { discoverSessionAgentModels } from './session-model-probe.js';
 import { registerSystemRoutes, type SystemRoutesOptions } from './system-routes.js';
 import { isValidSessionShareCredential, SHARE_TOKEN_QUERY_KEY, registerAuthMiddleware, registerBrowserAuthRoutes, type AuthMiddlewareOptions } from './auth/auth.js';
 import { registerTerminalRoutes, type TerminalRouteAuth, type TerminalStreamProvider } from './terminal/terminal-ws.js';
@@ -602,11 +603,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     const agent = session && (await runtime.listAgents()).find(item => item.id === session.agentId);
     if (!session || !agent || !['acp', 'auto'].includes(agent.protocol)) return;
     const probeModel = session.model ?? agent.model;
-    let timer: NodeJS.Timeout | undefined;
-    const found = await Promise.race([
-      discoverAgentModels({ ...(await options.sessionAgentConfig?.(agent, session) ?? agent), ...(probeModel ? { model: probeModel } : {}), cwd: session.cwd }, probeModel).catch(() => undefined),
-      new Promise<undefined>(resolve => { timer = setTimeout(resolve, 10_000, undefined); })
-    ]).finally(() => clearTimeout(timer));
+    const found = await discoverSessionAgentModels({ ...(await options.sessionAgentConfig?.(agent, session) ?? agent), ...(probeModel ? { model: probeModel } : {}), cwd: session.cwd }, probeModel).catch(() => undefined);
     const offered = (field === 'model' ? found?.models : found?.reasoningEfforts)?.map(item => item.id) ?? [];
     if (offered.length && !offered.includes(value)) throw new RuntimeError('INVALID_SESSION_CONFIG', field === 'model'
       ? `Agent 未提供模型 ${value}，配置没有改动。请从可选模型里选择。`

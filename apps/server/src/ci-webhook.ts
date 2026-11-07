@@ -4,7 +4,7 @@ import { executionTaskId } from '@dutydeck/storage';
 import { z } from 'zod';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { changeRequestLabel, ciProviderLabel, git, resolveCiBranchHead, type CiProviderRegistry } from './ci-providers.js';
-import { codeBlock, errorMessage, isRunnable, iso, short, SingleFlight, withTimeout } from './ci-common.js';
+import { codeBlock, errorMessage, isRunnable, iso, short, SingleFlight } from './ci-common.js';
 import { readTaskOutput } from './task-results.js';
 
 const SUBSCRIPTION_PREFIX = 'ci_webhook/subscription/';
@@ -17,7 +17,6 @@ const REDISPATCH_AFTER_MS = 2 * 60_000;
 const LOG_TAIL_CHARS = 3_000;
 const MAX_FAILURES = 10;
 const MAX_PENDING_PIPELINES = 16;
-const FAILURE_LOG_TIMEOUT_MS = 20_000;
 
 export const ciFixLimits = { rounds: 3, sameError: 2, files: 10, lines: 300 } as const;
 export const webhookTimestampToleranceMs = 5 * 60_000;
@@ -497,7 +496,7 @@ export class CiWebhookService {
     const parts = value.repository.split('/');
     const repository = { owner: parts[0]!, name: parts.at(-1)!, slug: value.repository };
     try {
-      const logs = await withTimeout(provider.getFailureLogs(repository, event.pipelineId), FAILURE_LOG_TIMEOUT_MS);
+      const logs = await provider.getFailureLogs(repository, event.pipelineId);
       event.failures = normalizeFailures(logs);
     } catch (error) { this.options.log?.warn({ error, subscriptionId: value.id }, '读取 CI 失败日志失败'); }
   }

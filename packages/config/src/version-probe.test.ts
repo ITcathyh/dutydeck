@@ -85,13 +85,16 @@ it('probes a CLI again on the next load after its version probe failed', async (
   const directory = await fixtureDirectory();
   const marker = join(directory, 'installed');
   const command = join(directory, 'late-cli');
-  await writeFile(command, `#!/bin/sh\n[ -e "${marker}" ] || exit 1\necho "late-cli 2.0.0"\n`, { mode: 0o755 });
+  await writeFile(command, `#!/bin/sh\necho "$*" >> "${command}.log"\n[ -e "${marker}" ] || exit 1\necho "late-cli 2.0.0"\n`, { mode: 0o755 });
   vi.stubEnv('PATH', '');
   vi.resetModules();
   const { loadConfig, loadConfigWithDiagnosticsAsync } = await import('./index.js');
   const env = { DUTYDECK_DEFAULT_CWD: directory, DUTYDECK_AGENTS_JSON: JSON.stringify([{ id: 'late', name: 'Late', command, protocol: 'acp' }]) };
   expect(loadConfig(env).agents.find(agent => agent.id === 'late')?.version).toBeUndefined();
+  await writeFile(`${command}.log`, '');
   expect((await loadConfigWithDiagnosticsAsync(env)).config.agents.find(agent => agent.id === 'late')?.version).toBeUndefined();
+  // The startup assembly reuses the asynchronous failure instead of blocking on spawnSync for the same command.
+  expect(await invocations(command)).toEqual(['--version', '-V', 'version']);
   await writeFile(marker, '');
   expect(loadConfig(env).agents.find(agent => agent.id === 'late')?.version).toBe('late-cli 2.0.0');
 });

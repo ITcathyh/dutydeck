@@ -382,7 +382,7 @@ export class DutydeckRuntime {
     // 空闲驱动回收（driverIdleTimeoutMs 为 0 时跳过）和结果未知任务的提醒、老化结案共用这个维护循环。
     if (interval > 0) {
       this.cleanupTimer = setInterval(() => { if (this.initialized && !this.shuttingDown) void timeLoop('runtime.cleanup-idle-drivers', options.log, () => this.cleanupIdleDrivers()).catch(error => {
-        options.log?.warn({ code: error instanceof RuntimeError ? error.code : 'RUNTIME_MAINTENANCE_FAILED', error: error instanceof Error ? error.message : String(error) }, 'Runtime maintenance loop failed');
+        options.log?.warn({ code: error instanceof RuntimeError ? error.code : 'RUNTIME_MAINTENANCE_FAILED', error }, 'Runtime maintenance loop failed');
       }); }, interval);
       this.cleanupTimer.unref();
     }
@@ -545,7 +545,7 @@ export class DutydeckRuntime {
       if (!this.mutations.valid(token) || this.sessionGenerations.get(session.id) !== generation) return;
       // 只有轮次内的事件错误留给当轮结算；两轮之间的事件与下一条消息无关，记日志后丢弃。
       if (isAttemptRef(ref) && !this.eventFlushedAttempts.has(ref.attemptId)) { if (!this.driverEventErrors.has(session.id)) this.driverEventErrors.set(session.id, error); return; }
-      this.options.log?.warn({ sessionId: session.id, eventType: event.type, code: error instanceof RuntimeError ? error.code : 'DRIVER_EVENT_FAILED', error: error instanceof Error ? error.message : String(error) }, 'Idle driver event could not be recorded');
+      this.options.log?.warn({ sessionId: session.id, eventType: event.type, code: error instanceof RuntimeError ? error.code : 'DRIVER_EVENT_FAILED', error }, 'Idle driver event could not be recorded');
     });
     this.driverEventChains.set(session.id, next);
     void next.finally(() => { if (this.driverEventChains.get(session.id) === next) this.driverEventChains.delete(session.id); if (event.type === 'status' || event.type === 'completed') this.wakeResourceQueues(); });
@@ -1865,7 +1865,7 @@ export class DutydeckRuntime {
         const key = this.permissionKey(session.id, data.id);
         this.permissions.set(key, { request: data, nativeId: String(event.data.id), fence: scope, generation: this.sessionGenerations.get(session.id) ?? 0, owner: this.mutations.current() });
         setImmediate(() => void this.resolvePermission(session.id, data.id, decision === 'allow')
-          .catch(error => this.options.log?.warn({ sessionId: session.id, permissionId: data.id, error: error instanceof Error ? error.message : String(error) }, 'Host permission decision could not be applied')));
+          .catch(error => this.options.log?.warn({ sessionId: session.id, permissionId: data.id, error }, 'Host permission decision could not be applied')));
         return;
       }
     }
@@ -3223,7 +3223,7 @@ export class DutydeckRuntime {
       try { expired = !!next && await this.expireStaleQueued(session, next); }
       catch (error) {
         // 取消没成功也不能把旧消息交给 Agent。
-        this.options.log?.warn({ sessionId: id, taskId: next!.id, error: String(error) }, 'Expiring a stale queued task failed');
+        this.options.log?.warn({ sessionId: id, taskId: next!.id, error }, 'Expiring a stale queued task failed');
         this.queueBlocked.add(id); return;
       }
       if (expired) continue;
@@ -3339,7 +3339,7 @@ export class DutydeckRuntime {
     if (once) await this.mutations.wait(() => this.repos.config.set(once.key, once.value));
     const deliver = this.options.onSessionNotice;
     if (deliver) void Promise.resolve().then(() => deliver(session, notice))
-      .catch(error => this.options.log?.warn({ sessionId: session.id, taskId: notice.taskId, kind: notice.kind, error: String(error) }, 'Session notice delivery failed'));
+      .catch(error => this.options.log?.warn({ sessionId: session.id, taskId: notice.taskId, kind: notice.kind, error }, 'Session notice delivery failed'));
   }
   private async applyQueueActions(session: Session) {
     for (const action of this.bound().getPendingQueueActions(this.fence(session))) {
@@ -3828,7 +3828,7 @@ export class DutydeckRuntime {
     // 单个会话出错只跳过它自己：其余会话照常回收，结果未知提醒照常检查。
     if (timeout > 0) for (const [sessionId, driver] of this.drivers) {
       try { await this.retireIdleDriver(sessionId, driver, at, timeout); }
-      catch (error) { this.options.log?.warn({ sessionId, code: error instanceof RuntimeError ? error.code : 'IDLE_RETIREMENT_ERROR', error: error instanceof Error ? error.message : String(error) }, 'Idle driver check failed'); }
+      catch (error) { this.options.log?.warn({ sessionId, code: error instanceof RuntimeError ? error.code : 'IDLE_RETIREMENT_ERROR', error }, 'Idle driver check failed'); }
     }
     await this.reviewUnknownTasks(at);
   }
@@ -3854,7 +3854,7 @@ export class DutydeckRuntime {
     catch (error) {
       // Retain the resource block, but reopen the session: dispatch then reports DRIVER_STOP_UNVERIFIED instead of OPERATION_REVOKED.
       if (!this.shuttingDown && this.mutations.valid(transition) && this.lifecycle(sessionId) === lifecycle) this.lifecycles.set(sessionId, owner(sessionId, transition));
-      this.options.log?.warn({ sessionId, code: error instanceof RuntimeError ? error.code : 'IDLE_RETIREMENT_FAILED', reason: error instanceof Error ? error.message : String(error), elapsedMs: Date.now() - startedAt },
+      this.options.log?.warn({ sessionId, code: error instanceof RuntimeError ? error.code : 'IDLE_RETIREMENT_FAILED', error, elapsedMs: Date.now() - startedAt },
         'Idle driver retirement could not verify process exit');
       if (!this.shuttingDown && this.blockedDrivers.get(sessionId)?.driver === driver) this.scheduleStopRecheck(sessionId, driver, STOP_RECHECK_MS, new Date().toISOString());
     }
@@ -3875,8 +3875,12 @@ export class DutydeckRuntime {
     const entry = this.stopRechecks.get(id);
     if (entry?.since !== since) return;
     // 复核结束前一直保留条目：新消息照常收到 DRIVER_STOP_UNVERIFIED，探测挂住也不会让复核链断掉。
-    const finish = () => { if (this.stopRechecks.get(id) === entry) this.stopRechecks.delete(id); };
-    if (this.shuttingDown || this.blockedDrivers.get(id)?.driver !== driver) { finish(); return; }
+    // 改排下一次复核时条目已换成新的，结束时不会误删。
+    try { await this.recheckStopOnce(id, driver, delay, since, cause); }
+    finally { if (this.stopRechecks.get(id) === entry) this.stopRechecks.delete(id); }
+  }
+  private async recheckStopOnce(id: string, driver: AgentDriver, delay: number, since: string, cause: 'idle' | 'startup') {
+    if (this.shuttingDown || this.blockedDrivers.get(id)?.driver !== driver) return;
     // 每个 await 之后都可能已有显式停止、重启换了 transition、会话锁或驱动；只用探测前取得的 owner，失效就不再动这个会话。
     const token = this.ownerOf(id), lifecycle = this.lifecycle(id);
     const current = () => !this.shuttingDown && this.mutations.valid(token) && this.lifecycle(id) === lifecycle && !this.stopRuns.has(id)
@@ -3901,12 +3905,11 @@ export class DutydeckRuntime {
           if (cause === 'idle' && session && !this.repos.execution.getUnresolvedTasks(id).length) await this.saveState(session, 'interrupted');
           await this.reopenQueue(id);
         });
-        finish();
         this.options.log?.info?.({ sessionId: id, cause, blockedSince: since }, 'Driver exit verified on recheck; session reopened');
         return;
       }
     } catch (failure) { error = failure; }
-    if (this.shuttingDown || this.blockedDrivers.get(id)?.driver !== driver) { finish(); return; }
+    if (this.shuttingDown || this.blockedDrivers.get(id)?.driver !== driver) return;
     // 退出永远无法核实（例如看不到进程表）：不再承诺自动恢复。新消息照常排队，等恢复流程解除停止受阻后执行。
     const unverifiable = driver.stopUnverifiable?.() === true;
     if (delay === STOP_RECHECK_MS || unverifiable) {
@@ -3919,9 +3922,8 @@ export class DutydeckRuntime {
           : '这个会话闲置关闭时，没能确认它的终端进程已经退出，暂时不能接新消息。后台会定时复核，确认退出后自动恢复。' },
         { key: `runtime_notice:${kind}:${id}`, value: since })).catch(() => {});
     }
-    if (unverifiable) { finish(); return; }
+    if (unverifiable) return;
     if (!this.shuttingDown && this.blockedDrivers.get(id)?.driver === driver) this.scheduleStopRecheck(id, driver, Math.min(delay * 2, STOP_RECHECK_MAX_MS), since, cause);
-    else finish();
   }
 
   /**
@@ -3957,7 +3959,7 @@ export class DutydeckRuntime {
         this.unknownTaskRecheckAt.set(attempt.attemptId, at + 60 * 60_000);
         if (this.unknownTaskFailures.has(attempt.attemptId)) continue;
         this.unknownTaskFailures.add(attempt.attemptId);
-        this.options.log?.warn({ sessionId: attempt.sessionId, taskId: attempt.taskId, attemptId: attempt.attemptId, error: String(error) }, 'Result-unknown task review failed');
+        this.options.log?.warn({ sessionId: attempt.sessionId, taskId: attempt.taskId, attemptId: attempt.attemptId, error }, 'Result-unknown task review failed');
       }
     }
   }

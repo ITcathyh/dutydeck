@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { RuntimeError, type ConfigRepository } from '@dutydeck/shared';
 import type { LarkInboxRecord } from './task-inbox.js';
-import { listLarkInboxFields } from './inbox-fields.js';
+import { listLarkInboxFields, pickInboxFields } from './inbox-fields.js';
 
 export const dispositionReasons = {
   not_addressed: '没有叫本机器人，且不满足免 @ 条件', bot_message: '机器人消息未触发执行',
@@ -80,9 +80,9 @@ export async function queryDispositions(store: ConfigRepository, input: { appId?
     sessionId: row.sessionId, taskId: row.taskId, decisionId: row.decisionId, duplicateCount: row.duplicateCount, duplicateReason: row.duplicateCount ? 'duplicate_delivery' : undefined })));
 }
 const projectRecord = (raw: string) => {
-  let record: Record<string, unknown>;
-  try { record = JSON.parse(raw) as Record<string, unknown>; } catch { return undefined; }
-  return Object.fromEntries(dispositionFields.map(path => [path, path.split('.').reduce<unknown>((value, part) => (value as Record<string, unknown> | undefined)?.[part], record)]));
+  let record: unknown;
+  try { record = JSON.parse(raw); } catch { return undefined; }
+  return pickInboxFields(record, dispositionFields);
 };
 const storedContent = async (store: ConfigRepository, key: string) => {
   const raw = await store.get(key);

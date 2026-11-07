@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { RuntimeError, type CiCallContext, type CiProvider, type CiProviderCall, type CiRepository, type PublicCiProvider } from '@dutydeck/shared';
+import { withTimeout } from './plugins/hooks.js';
 
 const run = promisify(execFile);
 
@@ -32,15 +33,11 @@ function guardProvider(plugin: string, provider: CiProvider, defaultTimeoutMs: n
     const timeoutMs = limit(method);
     let work: Promise<T>;
     try { work = Promise.resolve(invoke({ signal: controller.signal })); } catch (error) { return Promise.reject(error); }
-    return new Promise<T>((resolvePromise, reject) => {
-      const timer = setTimeout(() => {
-        const write = method === 'createPullRequest' || method === 'postComment';
-        log?.warn({ plugin, provider: provider.id, method, timeoutMs }, 'CI 提供方调用超时，本次跳过');
-        controller.abort(new Error('timeout'));
-        reject(new RuntimeError('CI_PROVIDER_TIMEOUT', `${provider.displayName} 的 ${method} 超过 ${timeoutMs / 1000} 秒未返回${write ? '；平台上可能已经生效，请先核对再重试' : ''}`, 504));
-      }, timeoutMs);
-      timer.unref?.();
-      work.then(value => { clearTimeout(timer); resolvePromise(value); }, error => { clearTimeout(timer); reject(error); });
+    return withTimeout(work, timeoutMs, () => {
+      const write = method === 'createPullRequest' || method === 'postComment';
+      log?.warn({ plugin, provider: provider.id, method, timeoutMs }, 'CI 提供方调用超时，本次跳过');
+      controller.abort(new Error('timeout'));
+      return new RuntimeError('CI_PROVIDER_TIMEOUT', `${provider.displayName} 的 ${method} 超过 ${timeoutMs / 1000} 秒未返回${write ? '；平台上可能已经生效，请先核对再重试' : ''}`, 504);
     });
   };
   const guarded: CiProvider = {

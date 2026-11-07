@@ -8,7 +8,7 @@ import { executionTaskId } from '@dutydeck/storage';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { z } from 'zod';
 import { changeRequestLabel, resolveCiHead, type CiProviderRegistry } from './ci-providers.js';
-import { codeBlock, errorMessage, isRunnable, iso, short, SingleFlight, withTimeout } from './ci-common.js';
+import { codeBlock, errorMessage, isRunnable, iso, short, SingleFlight } from './ci-common.js';
 import { sleep } from './daemon/time.js';
 import { ciFixLimits, failureFingerprint, type CiNotice } from './ci-webhook.js';
 import {
@@ -36,7 +36,6 @@ const POLL_INTERVAL_MS = 2 * 60_000;
 const STALE_PUSH_MS = 10 * 60_000;
 const REDISPATCH_AFTER_MS = 2 * 60_000;
 const SNAPSHOT_TIMEOUT_MS = 15_000;
-const FAILURE_LOG_TIMEOUT_MS = 20_000;
 const UPDATE_ATTEMPTS = 5;
 /** CAS 冲突后第 n 次重试前等 base × n × [0.5, 1.5) 毫秒。 */
 const UPDATE_RETRY_BASE_MS = 10;
@@ -848,7 +847,7 @@ export class PullRequestService {
     }
     const failures: CiFailureLog[] = [];
     for (const run of failedRuns.slice(0, 3)) {
-      const logs = provider.getFailureLogs ? await withTimeout(provider.getFailureLogs(value.repository, String(run.id)), FAILURE_LOG_TIMEOUT_MS).catch(() => undefined) : undefined;
+      const logs = provider.getFailureLogs ? await provider.getFailureLogs(value.repository, String(run.id)).catch(() => undefined) : undefined;
       failures.push(...(logs?.length ? logs : [{ job: run.name, reason: run.conclusion ?? 'failed' }]));
     }
     const fingerprint = failureFingerprint(failures);

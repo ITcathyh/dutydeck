@@ -186,7 +186,7 @@ export class PluginServiceSupervisor {
   }
 
   async stopAll(): Promise<void> {
-    await Promise.all([...this.records.keys()].map(plugin => this.stop(plugin).catch(error => this.log?.warn({ plugin, error: String(error) }, '插件服务停止失败'))));
+    await Promise.all([...this.records.keys()].map(plugin => this.stop(plugin).catch(error => this.log?.warn({ plugin, error }, '插件服务停止失败'))));
   }
 }
 

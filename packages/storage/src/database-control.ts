@@ -5,6 +5,9 @@ import { RuntimeError } from '@dutydeck/shared';
 import type { DatabaseControl, RepositoryOpenOptions, RuntimeControlClaim } from '@dutydeck/shared';
 import { needsMigration } from './migrations.js';
 import { currentProcessIdentity, observeProcess, type ProcessIdentity } from './process-identity.js';
+import { cachedStatement } from './statement-cache.js';
+
+export { cachedStatement };
 
 export const restoreQuarantinePath = (database: string) => `${database}.restore-quarantine.json`;
 export function assertDatabaseNotQuarantined(database: string): void {
@@ -18,15 +21,6 @@ const PROTOCOL_VERSION = 1;
 interface State { version: number; protocol: number; phase: string; maintenance: string | null; runtime: string | null; instance: string | null; generation: number; entity: string }
 interface Access { id: string; identity: string }
 function fail(code: string): never { throw new RuntimeError(code.split(':')[0]!, code, 409); }
-const statements = new WeakMap<Database.Database, Map<string, Database.Statement>>();
-/** Reuses one prepared statement per connection and SQL text for checks run inside every write. */
-export function cachedStatement(db: Database.Database, sql: string): Database.Statement {
-  let byText = statements.get(db);
-  if (!byText) statements.set(db, byText = new Map());
-  let statement = byText.get(sql);
-  if (!statement) byText.set(sql, statement = db.prepare(sql));
-  return statement;
-}
 export function canonicalDatabase(filename: string): string {
   const canonical = realpathSync(filename);
   const stat = statSync(canonical);

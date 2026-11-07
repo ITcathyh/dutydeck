@@ -35,6 +35,21 @@ it('长回答把用户原话挤出最近窗口时继续往前取，不把回答�
   expect((await loadLarkTaskEvents(runtime, 'ses_long', 'task_long', 10)).filter(event => event.type === 'text')).toHaveLength(30);
 });
 
+it('提交前就失败的轮次取到它的受理事件即止，不把整段会话读完', async () => {
+  const older = Array.from({ length: 40 }, (_, index) => ({ type: 'text', data: { text: `旧 ${index}` }, timestamp: at }));
+  const events = [
+    ...older,
+    { ...task('task_failed', 'queued'), id: 'accepted:task_failed' },
+    task('task_failed', 'running'),
+    { type: 'error', data: { message: 'ACP_LAUNCHER_VERSION_CHANGED' }, timestamp: at },
+    task('task_failed', 'failed')
+  ] as AgentEvent[];
+  const limits: number[] = [];
+  const runtime = { getRecentEvents: async (_id: string, limit: number) => { limits.push(limit); return events.slice(-limit); } };
+  expect(await loadLarkTaskEvents(runtime, 'ses_failed', 'task_failed', 10)).toEqual([events[42]]);
+  expect(limits).toEqual([10]);
+});
+
 
 it('ignores incomplete diagnostic statuses and keeps ordinary tool results blocking a final answer', () => {
   const events = [

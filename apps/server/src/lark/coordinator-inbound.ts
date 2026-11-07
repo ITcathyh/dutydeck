@@ -12,7 +12,8 @@ import type { LarkInboxAdoption, LarkInboxRecord } from './task-inbox.js';
 import { larkConfirmationInputDigest, isLarkFirstCardUndelivered } from './task-inbox.js';
 import { larkForkWorkspaceMode, larkNativeForkId, larkResumeUnavailable } from './session-branches.js';
 import { parseLarkNewSession, validateLarkLaunchOptions } from './new-session.js';
-import { discoverAgentModels, type AgentModelsResult } from '../agent-models.js';
+import type { AgentModelsResult } from '../agent-models.js';
+import { discoverSessionAgentModels } from '../session-model-probe.js';
 import { formatLarkHandoff, larkHandoffAck, larkHandoffTitle, larkHandoffEventLimit, larkHandoffIndexLimit } from './handoff.js';
 import { explicitFinalContext, readExplicitFinal } from './explicit-final.js';
 import { redactTraceText } from './secret-redaction.js';
@@ -137,13 +138,10 @@ async function larkSessionConfigProbe(agent: LarkProbeAgent | undefined, session
   const probeAgent: LarkProbeAgent = { ...agent, ...(model ? { model } : {}), cwd: session.cwd, permissionMode };
   // 校验会先拒绝这些情况，不需要探测。
   if (!['acp', 'auto'].includes(probeAgent.protocol ?? '') || !probeAgent.command || !probeAgent.args || !probeAgent.env) return { agent: probeAgent, result: { models: [], reasoningEfforts: [] } };
-  let timer: NodeJS.Timeout | undefined;
   try {
-    const result = await Promise.race([discoverAgentModels(probeAgent as AgentConfig, model),
-      new Promise<undefined>(resolve => { timer = setTimeout(resolve, 10_000, undefined); })]);
+    const result = await discoverSessionAgentModels(probeAgent as AgentConfig, model);
     return { agent: probeAgent, ...(result ? { result } : {}) };
   } catch { return { agent: probeAgent, result: { models: [], reasoningEfforts: [] } }; }
-  finally { clearTimeout(timer); }
 }
 
 /** 运行时拒绝切换的已知原因翻成人话；返回 undefined 表示不是已知原因，交给通用失败回执。 */

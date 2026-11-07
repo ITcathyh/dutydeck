@@ -241,30 +241,40 @@ const PANE_FORMAT = '#{session_name}\t#{window_active}#{pane_active}\t#{pane_pid
  * cleanly proved no server owns the socket; any other failure is 'unknown'.
  */
 export function classifyPaneListing(result: { stdout: string } | { error: unknown }, sessionName: string): PaneObservation {
-  if ('error' in result) {
-    const failure = result.error as { signal?: string; status?: number; stderr?: string } | null | undefined;
-    const stderr = failure?.stderr ?? '';
-    const clean = !failure?.signal && typeof failure?.status === 'number';
-    // A missing socket file is flagged: the exit watcher cross-checks it against the last known pane process.
-    const socketMissing = clean && isSocketMissingErrorText(stderr);
-    const missing = socketMissing || clean && /no server running/i.test(stderr);
-    return { probe: missing ? 'missing' : 'unknown', pid: null, ...(socketMissing ? { socketMissing } : {}) };
-  }
-  let found = false;
-  let pid: number | null = null;
-  for (const line of result.stdout.split('\n')) {
+  return 'error' in result ? classifyPaneFailure(result.error) : paneObservation(paneSessions(result.stdout), sessionName);
+}
+
+function classifyPaneFailure(error: unknown): PaneObservation {
+  const failure = error as { signal?: string; status?: number; stderr?: string } | null | undefined;
+  const stderr = failure?.stderr ?? '';
+  const clean = !failure?.signal && typeof failure?.status === 'number';
+  // A missing socket file is flagged: the exit watcher cross-checks it against the last known pane process.
+  const socketMissing = clean && isSocketMissingErrorText(stderr);
+  const missing = socketMissing || clean && /no server running/i.test(stderr);
+  return { probe: missing ? 'missing' : 'unknown', pid: null, ...(socketMissing ? { socketMissing } : {}) };
+}
+
+/** Every listed session name with the pid of its first valid active pane in its active window (null when none). */
+function paneSessions(stdout: string): Map<string, number | null> {
+  const sessions = new Map<string, number | null>();
+  for (const line of stdout.split('\n')) {
     // Split on the last two tabs: a foreign session name may contain tabs.
     const pidTab = line.lastIndexOf('\t');
     const activeTab = pidTab > 0 ? line.lastIndexOf('\t', pidTab - 1) : -1;
-    if (activeTab < 0 || line.slice(0, activeTab) !== sessionName) continue;
-    found = true;
+    if (activeTab < 0) continue;
+    const name = line.slice(0, activeTab);
+    let pid = sessions.get(name) ?? null;
     if (pid === null && line.slice(activeTab + 1, pidTab) === '11') {
       const value = Number(line.slice(pidTab + 1).trim());
       if (Number.isSafeInteger(value) && value > 0) pid = value;
     }
+    sessions.set(name, pid);
   }
-  return found ? { probe: 'exists', pid } : { probe: 'missing', pid: null };
+  return sessions;
 }
+
+const paneObservation = (sessions: Map<string, number | null>, sessionName: string): PaneObservation =>
+  sessions.has(sessionName) ? { probe: 'exists', pid: sessions.get(sessionName)! } : { probe: 'missing', pid: null };
 
 type PanePoller = {
   env: NodeJS.ProcessEnv;
@@ -303,11 +313,11 @@ function pollPanes(poller: PanePoller): void {
   poller.inFlight = true;
   const targets = [...poller.subscribers];
   void runCommand('tmux', ['list-panes', '-a', '-F', PANE_FORMAT], { env: poller.env, timeout: 3000 })
-    .then(stdout => ({ stdout }), (error: unknown) => ({ error }))
+    .then(stdout => paneSessions(stdout), (error: unknown) => classifyPaneFailure(error))
     .then(result => {
       for (const [watch, { sessionName, deliver }] of targets) {
         if (!poller.subscribers.has(watch)) continue;
-        try { deliver(classifyPaneListing(result, sessionName)); } catch { /* One watcher cannot stall the others. */ }
+        try { deliver(result instanceof Map ? paneObservation(result, sessionName) : result); } catch { /* One watcher cannot stall the others. */ }
       }
     })
     .finally(() => { poller.inFlight = false; });

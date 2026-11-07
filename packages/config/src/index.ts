@@ -35,10 +35,13 @@ const probedVersions = new Map<string, string>();
 const VERSION_PROBE_CONCURRENCY = 4;
 const probingVersions = new Map<string, Promise<string | undefined>>();
 const versionKey = (command: string) => `${command}\0${process.env.PATH ?? ''}`;
+/** loadConfigWithDiagnosticsAsync 刚异步探测的结果（含失败），只在它紧接着的同步装配期间有效，失败的命令不再用 spawnSync 重探。 */
+let prefetchedVersions: Map<string, string | undefined> | undefined;
 
 export function cliVersion(command: string): string | undefined {
   const key = versionKey(command);
   if (probedVersions.has(key)) return probedVersions.get(key);
+  if (prefetchedVersions?.has(key)) return prefetchedVersions.get(key);
   let version: string | undefined;
   for (const args of VERSION_ARGS) {
     const result = spawnSync(command, args, { encoding: 'utf8', timeout: 1500, env: { ...process.env, NO_COLOR: '1' } });
@@ -234,7 +237,7 @@ export function loadConfigWithDiagnostics(env: NodeJS.ProcessEnv = process.env, 
 
 /**
  * 与 loadConfigWithDiagnostics 结果相同；先把它要探测版本的命令去重后异步并行探测完（最多同时 4 个），
- * 同步装配时直接取缓存，启动时不再用 spawnSync 逐个卡住事件循环。
+ * 同步装配时直接用这批结果（失败也算），启动时不再用 spawnSync 逐个卡住事件循环。
  */
 export async function loadConfigWithDiagnosticsAsync(env: NodeJS.ProcessEnv = process.env, ptyContributions: PtyAgentContribution[] = [], pluginAgents: AgentConfig[] = []): Promise<LoadedConfig> {
   const merged = { ...process.env, ...env };
@@ -246,10 +249,13 @@ export async function loadConfigWithDiagnosticsAsync(env: NodeJS.ProcessEnv = pr
     ...configured.filter(agent => probesConfiguredVersion(agent) && commandExists(agent.command)).map(agent => agent.command)
   ].filter((command): command is string => Boolean(command)));
   const pending = [...commands];
+  const prefetched = new Map<string, string | undefined>();
   await Promise.all(Array.from({ length: Math.min(VERSION_PROBE_CONCURRENCY, pending.length) }, async () => {
-    for (let command = pending.shift(); command; command = pending.shift()) await cliVersionAsync(command);
+    for (let command = pending.shift(); command; command = pending.shift()) prefetched.set(versionKey(command), await cliVersionAsync(command));
   }));
-  return loadConfigWithDiagnostics(env, ptyContributions, pluginAgents);
+  prefetchedVersions = prefetched;
+  try { return loadConfigWithDiagnostics(env, ptyContributions, pluginAgents); }
+  finally { prefetchedVersions = undefined; }
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env, ptyContributions: PtyAgentContribution[] = [], pluginAgents: AgentConfig[] = []): AppConfig {

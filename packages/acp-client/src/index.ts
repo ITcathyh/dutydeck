@@ -10,7 +10,7 @@ import { eventContentText, eventHasContent, normalizeEventContent, shellQuote } 
 import { childEnvironment } from '@dutydeck/shared/child-environment';
 import { testRegexWithTimeout } from './regex-timeout.js';
 import { PROCESS_CPU_MIN_WINDOW_MS, ProcessTreeCpu } from './process-cpu.js';
-import { AgentProcessTree } from './agent-process-tree.js';
+import { AgentProcessTree, scanProcesses } from './agent-process-tree.js';
 import { currentReleasePath } from './release-path.js';
 import { acpDataRoot, buildLaunchObservation, buildNativeObservation, inferAcpInsightClient, resolveAcpChildEnvironment } from './transcript-source.js';
 
@@ -27,6 +27,8 @@ function offersValue(option: Record<string, any> | undefined, value: string): bo
   if (!Array.isArray(option?.options)) return true;
   return (option.options as any[]).flatMap(item => Array.isArray(item?.options) ? item.options : [item]).some(item => item?.value === value);
 }
+const unofferedMessage = (key: 'model' | 'reasoningEffort', value: string, agentId: string, model: string | undefined) =>
+  key === 'model' ? `Model ${value} is not supported by Agent ${agentId}` : `Reasoning effort ${value} is not supported by model ${model ?? '(default)'}`;
 
 // 归一化事件类型统一从 @dutydeck/shared re-export，保证 ACP driver 与 PTY driver 用同一类型。
 export type { NormalizedDriverEvent };
@@ -325,13 +327,11 @@ export class AcpxAdapter implements AgentDriver {
   private interruptVersion = 0;
   private compacting = false;
   private maintenanceUsage?: NormalizedDriverEvent;
-  private timedOutStream?: Promise<void>;
-  /** performance.now() at which retireStuckAgent fires for the current timed-out stream. */
-  private retireAt = 0;
-  /** Timed-out stream whose stuck Agent process was ended by retireStuckAgent. */
-  private retiredStream?: Promise<void>;
-  /** Timed-out stream that did not close even after its Agent was ended; later turns fail at once. */
-  private cancelUnconfirmed?: Promise<void>;
+  /**
+   * The timed-out stream that has not closed yet. `retireAt` is the performance.now() at which retireStuckAgent fires;
+   * `retired` marks that its stuck Agent was ended; `unconfirmed` marks that it did not close even then, so later turns fail at once.
+   */
+  private timedOut?: { stream: Promise<void>; retireAt: number; retired?: true; unconfirmed?: true };
   private readonly agentChildren = new Map<ChildProcess, AgentProcessTree>();
   /** Trees of launchers killed by a signal: their detached Agent may outlive them until proven gone. */
   private readonly unconfirmedTrees = new Set<AgentProcessTree>();
@@ -511,11 +511,18 @@ export class AcpxAdapter implements AgentDriver {
     // Only SDK-direct agent/probe and host-terminal children are covered. This
     // does not establish containment of arbitrary detached agent descendants.
     for (const [child, exited] of this.processes) if (child.exitCode != null || child.signalCode != null) exited();
-    for (const tree of this.unconfirmedTrees) if (tree.exited() === true) this.unconfirmedTrees.delete(tree);
+    if (this.unconfirmedTrees.size) {
+      const table = scanProcesses();
+      for (const tree of this.unconfirmedTrees) if (tree.exited(table) === true) this.unconfirmedTrees.delete(tree);
+    }
     return this.stopped && !this.unconfirmedTrees.size && this.stopResourcesSettled && this.resourceOperations.size === 0 && this.streams.size === 0 && this.sdkCreations.size === 0 && this.processes.size === 0;
   }
   /** A killed launcher's Agent can never be proven gone here: no /proc, or its Agent was never observed. */
-  stopUnverifiable() { return [...this.unconfirmedTrees].some(tree => tree.exited() === undefined); }
+  stopUnverifiable() {
+    if (!this.unconfirmedTrees.size) return false;
+    const table = scanProcesses();
+    return [...this.unconfirmedTrees].some(tree => tree.exited(table) === undefined);
+  }
   private assertActive() { if (this.stopped) throw new AcpxStoppedError(); }
   private async whileActive<T>(operation: () => Promise<T>): Promise<T> {
     this.assertActive();
@@ -566,12 +573,16 @@ export class AcpxAdapter implements AgentDriver {
   }
   private async applyReasoningEffort() {
     if (!this.handle || !this.agent.reasoningEffort) return;
-    const status = await this.runtime.getStatus?.({ handle: this.handle });
+    await this.applyOption('reasoningEffort', this.agent.reasoningEffort, `Agent ${this.agent.id} does not support reasoning effort configuration`, message => new Error(message));
+  }
+  /** Check `value` against the option the Agent advertises for `key` and write it; `reject` builds the error when the option is missing or does not offer the value. */
+  private async applyOption(key: 'model' | 'reasoningEffort', value: string, missing: string, reject: (message: string) => Error) {
+    const status = await this.runtime.getStatus?.({ handle: this.handle! });
     this.assertActive();
-    const reasoning = configOption(status, 'reasoningEffort');
-    if (!reasoning || typeof reasoning.id !== 'string') throw new Error(`Agent ${this.agent.id} does not support reasoning effort configuration`);
-    if (!offersValue(reasoning, this.agent.reasoningEffort)) throw new Error(`Reasoning effort ${this.agent.reasoningEffort} is not supported by model ${this.agent.model ?? '(default)'}`);
-    await this.runtime.setConfigOption?.({ handle: this.handle, key: reasoning.id, value: this.agent.reasoningEffort });
+    const option = configOption(status, key);
+    if (!option || typeof option.id !== 'string') throw reject(missing);
+    if (!offersValue(option, value)) throw reject(unofferedMessage(key, value, this.agent.id, this.agent.model));
+    await this.runtime.setConfigOption?.({ handle: this.handle!, key: option.id, value });
   }
   private scope(operation: OperationPermit): AcpRuntimeResourceScope {
     const context=this.options.context!;
@@ -607,7 +618,7 @@ export class AcpxAdapter implements AgentDriver {
         this.assertActive();
         for(const key of prechecked) {
           if(!offersValue(configOption(status,key),target[key]!))
-            throw configurationRejected(key==='model'?`Model ${target[key]} is not supported by Agent ${this.agent.id}`:`Reasoning effort ${target[key]} is not supported by model ${target.model ?? '(default)'}`);
+            throw configurationRejected(unofferedMessage(key,target[key]!,this.agent.id,target.model));
         }
       }
       for(const key of ['model','reasoningEffort'] as const) {
@@ -753,7 +764,8 @@ export class AcpxAdapter implements AgentDriver {
       const expire = () => {
         timedOut = true;
         this.turnCancelling = true;
-        this.timedOutStream = stream;
+        const retireDelay = stuckRetireDelay(idleTimeoutMs);
+        this.timedOut = { stream, retireAt: performance.now() + retireDelay };
         const error = new AgentIdleTimeoutError(silentMs);
         // Keep consuming the same stream: ACPX finalizes resources before it
         // closes the iterator, but after it resolves turn.result.
@@ -767,8 +779,6 @@ export class AcpxAdapter implements AgentDriver {
         }, 2_000);
         // An Agent that never answers the cancel keeps this stream, the session's idle state and every later
         // message waiting. End its process instead; the next turn reconnects through the persisted session key.
-        const retireDelay = stuckRetireDelay(idleTimeoutMs);
-        this.retireAt = performance.now() + retireDelay;
         retireTimer = setTimeout(() => this.retireStuckAgent(stream), retireDelay);
       };
       const expireUnlessBusy = () => {
@@ -856,7 +866,7 @@ export class AcpxAdapter implements AgentDriver {
       this.streams.add(stream);
       const releaseStream = () => {
         this.streams.delete(stream);
-        if (this.timedOutStream === stream) this.timedOutStream = undefined;
+        if (this.timedOut?.stream === stream) this.timedOut = undefined;
       };
       void stream.then(releaseStream, releaseStream);
       return { completion: Promise.race([stream, idle]) };
@@ -896,8 +906,9 @@ export class AcpxAdapter implements AgentDriver {
    */
   private retireStuckAgent(stream: Promise<void>) {
     // stop() ends the processes itself once its own cancellation wait expires.
-    if (this.stopped || this.timedOutStream !== stream) return;
-    this.retiredStream = stream;
+    const timedOut = this.timedOut;
+    if (this.stopped || timedOut?.stream !== stream) return;
+    timedOut.retired = true;
     this.endAgentProcesses();
   }
   /**
@@ -908,8 +919,10 @@ export class AcpxAdapter implements AgentDriver {
   private endAgentProcesses() {
     const children = [...this.agentChildren], orphaned = [...this.unconfirmedTrees];
     const signal = (name: NodeJS.Signals) => {
-      for (const [child, tree] of children) tree.signal(name, () => { if (child.exitCode == null && child.signalCode == null) { try { child.kill(name); } catch { /* Already gone. */ } } });
-      for (const tree of orphaned) tree.signal(name, () => {});
+      if (!children.length && !orphaned.length) return;
+      const table = scanProcesses();
+      for (const [child, tree] of children) tree.signal(name, () => { if (child.exitCode == null && child.signalCode == null) { try { child.kill(name); } catch { /* Already gone. */ } } }, table);
+      for (const tree of orphaned) tree.signal(name, () => {}, table);
     };
     signal('SIGTERM');
     setTimeout(() => signal('SIGKILL'), STUCK_AGENT_KILL_GRACE_MS).unref?.();
@@ -920,23 +933,21 @@ export class AcpxAdapter implements AgentDriver {
    * prompt that waited for that is rejected unsent, and the next one reconnects normally.
    */
   private async settlePreviousTurn() {
-    const previous = this.timedOutStream;
+    const previous = this.timedOut;
     if (!previous) return;
-    if (this.cancelUnconfirmed !== previous) {
-      const remaining = Math.min(MAX_TIMER_MS, Math.max(0, this.retireAt + STUCK_AGENT_SETTLE_MS - performance.now()));
+    const unconfirmed = (message: string) => Object.assign(new PromptNotWrittenError(message), { detailCode: ACP_CANCEL_UNCONFIRMED });
+    if (!previous.unconfirmed) {
+      const remaining = Math.min(MAX_TIMER_MS, Math.max(0, previous.retireAt + STUCK_AGENT_SETTLE_MS - performance.now()));
       let timer: NodeJS.Timeout | undefined;
       const settled = await this.whileActive(() => Promise.race([
-        previous.then(() => true, () => true),
+        previous.stream.then(() => true, () => true),
         new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), remaining); }),
       ])).finally(() => clearTimeout(timer));
-      if (settled && this.retiredStream !== previous) return;
-      if (settled) {
-        this.retiredStream = undefined;
-        throw Object.assign(new PromptNotWrittenError('上一轮超时后 Agent 一直没有确认取消，这条消息没有发出。系统已结束卡住的 Agent，下一条消息会自动重新连接原会话，直接重发即可。'), { detailCode: ACP_CANCEL_UNCONFIRMED });
-      }
-      this.cancelUnconfirmed = previous;
+      if (settled && !previous.retired) return;
+      if (settled) throw unconfirmed('上一轮超时后 Agent 一直没有确认取消，这条消息没有发出。系统已结束卡住的 Agent，下一条消息会自动重新连接原会话，直接重发即可。');
+      previous.unconfirmed = true;
     }
-    throw Object.assign(new PromptNotWrittenError('上一轮超时后 Agent 一直没有确认取消，系统也没能结束它，这条消息没有发出。请停止会话后再发。'), { detailCode: ACP_CANCEL_UNCONFIRMED });
+    throw unconfirmed('上一轮超时后 Agent 一直没有确认取消，系统也没能结束它，这条消息没有发出。请停止会话后再发。');
   }
   async send(input: string|DriverSubmission) {
     const submission=typeof input==='string'?undefined:input;
@@ -1012,7 +1023,7 @@ export class AcpxAdapter implements AgentDriver {
     throw new Error(`Agent ${this.agent.id} did not accept the steering message (${String(outcome)})`);
   }
   /** 没有在途、在收尾或在压缩的 prompt。 */
-  isIdle() { return !this.stopped && !this.sending && !this.turn && !this.timedOutStream && !this.compacting; }
+  isIdle() { return !this.stopped && !this.sending && !this.turn && !this.timedOut && !this.compacting; }
   async interrupt() {
     this.interruptVersion++;
     this.turnCancelling = true;
@@ -1085,34 +1096,16 @@ export class AcpxAdapter implements AgentDriver {
     return this.stopping;
   }
   async resolvePermission(id: string, approved: boolean) { const resolve = this.pendingPermissions.get(id); if (this.stopped || !resolve) return false; this.pendingPermissions.delete(id); this.idleWatch?.refresh(); resolve({ outcome: approved ? 'allow_once' : 'reject_once' }); return true; }
-  async setModel(model: string) {
+  async setModel(model: string) { await this.setRuntimeOption('model', model, `Agent ${this.agent.id} does not support runtime model switching`); }
+  async setReasoningEffort(reasoningEffort: string) { await this.setRuntimeOption('reasoningEffort', reasoningEffort, `Agent ${this.agent.id} does not support runtime reasoning effort switching`); }
+  private async setRuntimeOption(key: 'model' | 'reasoningEffort', value: string, missing: string) {
     if(this.options.context?.protocol==='controlled-v1')throw new Error('NATIVE_CONFIGURATION_INTENT_REQUIRED');
     await this.resourceOperation(async () => {
       await this.ensureHandle();
       this.assertActive();
-      const status = await this.runtime.getStatus?.({ handle: this.handle! });
+      await this.applyOption(key, value, missing, configurationRejected);
       this.assertActive();
-      const modelOption = configOption(status, 'model');
-      if (!modelOption || typeof modelOption.id !== 'string') throw configurationRejected(`Agent ${this.agent.id} does not support runtime model switching`);
-      if (!offersValue(modelOption, model)) throw configurationRejected(`Model ${model} is not supported by Agent ${this.agent.id}`);
-      await this.runtime.setConfigOption?.({ handle: this.handle!, key: modelOption.id, value: model });
-      this.assertActive();
-      this.agent.model = model;
-    });
-  }
-  async setReasoningEffort(reasoningEffort: string) {
-    if(this.options.context?.protocol==='controlled-v1')throw new Error('NATIVE_CONFIGURATION_INTENT_REQUIRED');
-    await this.resourceOperation(async () => {
-      await this.ensureHandle();
-      this.assertActive();
-      const status = await this.runtime.getStatus?.({ handle: this.handle! });
-      this.assertActive();
-      const reasoning = configOption(status, 'reasoningEffort');
-      if (!reasoning || typeof reasoning.id !== 'string') throw configurationRejected(`Agent ${this.agent.id} does not support runtime reasoning effort switching`);
-      if (!offersValue(reasoning, reasoningEffort)) throw configurationRejected(`Reasoning effort ${reasoningEffort} is not supported by model ${this.agent.model ?? '(default)'}`);
-      await this.runtime.setConfigOption?.({ handle: this.handle!, key: reasoning.id, value: reasoningEffort });
-      this.assertActive();
-      this.agent.reasoningEffort = reasoningEffort;
+      this.agent[key] = value;
     });
   }
   setRiskPolicy(policy?: ToolRiskPolicy) { this.riskPolicy = policy; }

@@ -1,16 +1,7 @@
 import type Database from 'better-sqlite3';
 import type { ConfigRepository } from '@dutydeck/shared';
+import { cachedStatement } from './statement-cache.js';
 import { LARK_INBOX_REASON, LARK_INBOX_SCOPE, LARK_INBOX_STATE } from './lark-inbox-schema.js';
-
-// 与 database-control.ts 的 cachedStatement 相同；放在这里免得迁移模块经由它绕回自己。
-const statements = new WeakMap<Database.Database, Map<string, Database.Statement>>();
-export function preparedOnce(db: Database.Database, sql: string): Database.Statement {
-  let byText = statements.get(db);
-  if (!byText) statements.set(db, byText = new Map());
-  let statement = byText.get(sql);
-  if (!statement) byText.set(sql, statement = db.prepare(sql));
-  return statement;
-}
 
 const patterns = {
   'session_automation/schedule/': 'session_automation/schedule/*',
@@ -19,7 +10,8 @@ const patterns = {
   'relay.ask.': 'relay.ask.*'
 } as const;
 type JsonFilter = Parameters<NonNullable<ConfigRepository['listByJsonField']>>[1];
-const expression = (field: JsonFilter['field'] | 'scheduleId' | 'disposition.reason') => `json_extract(CASE WHEN json_valid(value) THEN value ELSE '{}' END,'$.${field}')`;
+/** 坏 JSON 的行按空对象看待。path 会拼进 SQL 原文，调用方先用 assertJsonPaths 校验外部传入的路径。 */
+export const expression = (field: string) => `json_extract(CASE WHEN json_valid(value) THEN value ELSE '{}' END,'$.${field}')`;
 
 /** SQLite maintains these expressions in the same write as each source config CAS. */
 export function createConfigReadIndexes(db: Database.Database): void {
@@ -59,9 +51,16 @@ export function listConfigByJsonField(db: Database.Database, prefix: string, fil
 }
 
 const jsonPath = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$/;
+export function assertJsonPaths(paths: readonly string[]): void {
+  if (!paths.length || paths.some(path => !jsonPath.test(path))) throw new Error('Invalid JSON field paths');
+}
+/** SQLite 以 JSON 文本返回所选路径（`value -> path`），这里按路径解码；缺失的字段为 undefined。 */
+export const decodeJsonFields = (paths: readonly string[], values: ReadonlyArray<string | null | undefined>): Record<string, unknown> =>
+  Object.fromEntries(paths.map((path, index) => [path, values[index] == null ? undefined : JSON.parse(values[index]!)]));
+
 /** Selected paths come back as SQLite JSON text and are decoded here; a malformed row comes back with `fields: undefined` for the caller to judge. */
 export function listConfigJsonFields(db: Database.Database, prefix: string, paths: readonly string[], filter?: { field: 'state' | 'disposition.reason'; values: Array<string | null> }) {
-  if (!paths.length || paths.some(path => !jsonPath.test(path))) throw new Error('Invalid JSON field paths');
+  assertJsonPaths(paths);
   if (filter && !filter.values.length) return [];
   const { scope, params: scopeParams } = prefixScope(prefix);
   const columns = paths.map((_, index) => `CASE WHEN valid THEN value -> ? END AS f${index}`).join(',');
@@ -75,6 +74,6 @@ export function listConfigJsonFields(db: Database.Database, prefix: string, path
     if (values.length) branches.push({ sql: select(`${scope} AND ${filterExpression(filter.field)} IN (${values.map(() => '?').join(',')})`), params: [...pathParams, ...scopeParams, ...values] });
     if (filter.values.includes(null)) branches.push({ sql: select(`${scope} AND ${filterExpression(filter.field)} IS NULL`), params: [...pathParams, ...scopeParams] });
   }
-  const rows = preparedOnce(db, `${branches.map(branch => branch.sql).join(' UNION ALL ')} ORDER BY key`).raw().all(...branches.flatMap(branch => branch.params)) as Array<[string, number, ...Array<string | null>]>;
-  return rows.map(([key, valid, ...values]) => ({ key, fields: valid ? Object.fromEntries(paths.map((path, index) => [path, values[index] == null ? undefined : JSON.parse(values[index]!)])) : undefined }));
+  const rows = cachedStatement(db, `${branches.map(branch => branch.sql).join(' UNION ALL ')} ORDER BY key`).raw().all(...branches.flatMap(branch => branch.params)) as Array<[string, number, ...Array<string | null>]>;
+  return rows.map(([key, valid, ...values]) => ({ key, fields: valid ? decodeJsonFields(paths, values) : undefined }));
 }

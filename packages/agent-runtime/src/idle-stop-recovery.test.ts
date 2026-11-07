@@ -159,7 +159,7 @@ it('a session whose idle check throws is logged and skipped while the other idle
   expect(h.drivers[0]!.stop).not.toHaveBeenCalled();
   expect(h.drivers[1]!.stop).toHaveBeenCalledOnce();
   expect(h.runtime.getDriver(healthy.id)).toBeUndefined();
-  expect(h.log.warn).toHaveBeenCalledWith(expect.objectContaining({ sessionId: broken.id, error: 'native check exploded' }), 'Idle driver check failed');
+  expect(h.log.warn).toHaveBeenCalledWith(expect.objectContaining({ sessionId: broken.id, error: expect.objectContaining({ message: 'native check exploded' }) }), 'Idle driver check failed');
 });
 
 it('logs a maintenance loop failure instead of swallowing it', async () => {
@@ -172,5 +172,5 @@ it('logs a maintenance loop failure instead of swallowing it', async () => {
   await runtime.initialize([agent]);
   vi.spyOn(repos.execution, 'getReconcileRequiredAttempts').mockImplementation(() => { throw new Error('ledger read failed'); });
   await vi.advanceTimersByTimeAsync(1_000);
-  await vi.waitFor(() => expect(log.warn).toHaveBeenCalledWith(expect.objectContaining({ error: 'ledger read failed' }), 'Runtime maintenance loop failed'));
+  await vi.waitFor(() => expect(log.warn).toHaveBeenCalledWith(expect.objectContaining({ error: expect.objectContaining({ message: 'ledger read failed' }) }), 'Runtime maintenance loop failed'));
 });

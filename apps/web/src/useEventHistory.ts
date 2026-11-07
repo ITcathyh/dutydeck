@@ -33,7 +33,7 @@ export function useEventHistory(sessionId: string | undefined, enabled: boolean,
     const controller = new AbortController(); rawRequest.current = controller;
     setLoadingRaw(true); setRawError(undefined);
     try {
-      const { highWaterMark } = await api.sessionHistory(sessionId, controller.signal);
+      const { highWaterMark } = await api.sessionHistory(sessionId, controller.signal, { tail: 1 });
       const all = highWaterMark > 0 ? await loadHistoryRange(sessionId, 0, highWaterMark, controller.signal) : [];
       if (!controller.signal.aborted) { setRawEvents(all); return all; }
     } catch (error) {

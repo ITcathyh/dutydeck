@@ -215,7 +215,7 @@ function resolveOptions(options: AutostartOptions = {}): ResolvedAutostart {
   const entry = process.argv[1];
   const label = platform === 'linux' ? AUTOSTART_LINUX_UNIT : platform === 'darwin' ? AUTOSTART_MACOS_LABEL : 'dutydeck';
   const unitPath = platform === 'darwin'
-    ? join(homeDir, 'Library', 'LaunchAgents', `${AUTOSTART_MACOS_LABEL}.plist`)
+    ? launchdPlistPath(homeDir)
     : platform === 'linux'
       ? join(homeDir, '.config', 'systemd', 'user', AUTOSTART_LINUX_UNIT)
       : undefined;
@@ -259,6 +259,16 @@ export function releaseCurrentPath(cliPath: string): string {
 
 function escapeXml(value: string): string {
   return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+const unescapeXml = (value: string) => value.replace(/&quot;/g, '"').replace(/&gt;/g, '>').replace(/&lt;/g, '<').replace(/&amp;/g, '&');
+const launchdPlistPath = (homeDir: string) => join(homeDir, 'Library', 'LaunchAgents', `${AUTOSTART_MACOS_LABEL}.plist`);
+
+/** 磁盘上 plist 的 ProgramArguments 前两项：launchd 拉起新进程实际用的解释器和入口脚本。读不到时 undefined。 */
+export function readLaunchdProgram(homeDir: string): { execPath: string; script: string } | undefined {
+  const plist = readTextFile(launchdPlistPath(homeDir));
+  const array = plist && /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(plist)?.[1];
+  const [execPath, script] = [...(array ?? '').matchAll(/<string>([^<]*)<\/string>/g)].map(match => unescapeXml(match[1]!));
+  return execPath && script ? { execPath, script } : undefined;
 }
 
 /** systemd 支持 shell 风格引号；只在含空白/引号时才加，避免无谓地改变已有 unit 内容。 */
@@ -440,7 +450,7 @@ function renderDesired(config: ResolvedAutostart): string {
 function onDiskPath(config: ResolvedAutostart, content: string): string | undefined {
   if (config.platform === 'linux') return /^Environment=PATH=(.*)$/m.exec(content)?.[1];
   const raw = /<key>PATH<\/key>\s*<string>([^<]*)<\/string>/.exec(content)?.[1];
-  return raw?.replace(/&quot;/g, '"').replace(/&gt;/g, '>').replace(/&lt;/g, '<').replace(/&amp;/g, '&');
+  return raw === undefined ? undefined : unescapeXml(raw);
 }
 
 /**
@@ -448,11 +458,12 @@ function onDiskPath(config: ResolvedAutostart, content: string): string | undefi
  * doctor 本来就会不同；按「已漂移」去重跑 enable，反而会把 unit 的 PATH 换成当前 shell 的。只有 PATH 不同时
  * 报 pathDiffers。
  */
-function compareOnDisk(config: ResolvedAutostart, onDisk: string): { stale: boolean; pathDiffers: boolean } {
-  if (onDisk === renderDesired(config)) return { stale: false, pathDiffers: false };
+function compareOnDisk(config: ResolvedAutostart, onDisk: string | undefined): { stale?: boolean; pathDiffers?: true } {
+  if (onDisk === undefined) return {};
+  if (onDisk === renderDesired(config)) return { stale: false };
   const path = onDiskPath(config, onDisk);
   if (path !== undefined && path !== config.pathEnv && renderDesired({ ...config, pathEnv: path }) === onDisk) return { stale: false, pathDiffers: true };
-  return { stale: true, pathDiffers: false };
+  return { stale: true };
 }
 
 function unsupported(config: ResolvedAutostart): AutostartError {
@@ -470,17 +481,16 @@ export function autostartUnitContent(options: AutostartOptions = {}): string {
 
 // ─── 平台探测 ────────────────────────────────────────────────────────────────
 
-/** `undefined` 表示"探测不出来"，绝不冒充 false —— 见文件头约束 3。 */
-async function launchdLoaded(config: ResolvedAutostart): Promise<boolean | undefined> {
+/**
+ * `loaded` 为 `undefined` 表示"探测不出来"，绝不冒充 false —— 见文件头约束 3。`running` 指 job 当前有运行中的进程
+ * （`launchctl print` 里的 `state = running` / `pid = N`）。
+ */
+async function launchdJob(config: ResolvedAutostart): Promise<{ loaded: boolean | undefined; running: boolean }> {
   const printed = await config.run('launchctl', ['print', `gui/${config.uid}/${config.label}`]);
-  if (printed.status === null) return undefined;
-  return printed.status === 0;
-}
-
-/** job 当前是否有运行中的进程（`launchctl print` 里的 `state = running` / `pid = N`）。 */
-async function launchdJobRunning(config: ResolvedAutostart): Promise<boolean> {
-  const printed = await config.run('launchctl', ['print', `gui/${config.uid}/${config.label}`]);
-  return printed.status === 0 && /^\s*(state = running|pid = \d+)\s*$/m.test(printed.stdout);
+  return {
+    loaded: printed.status === null ? undefined : printed.status === 0,
+    running: printed.status === 0 && /^\s*(state = running|pid = \d+)\s*$/m.test(printed.stdout)
+  };
 }
 
 async function userSystemdAvailable(config: ResolvedAutostart): Promise<boolean> {
@@ -507,15 +517,15 @@ export function firstLine(value: string): string {
 async function inspectDarwin(config: ResolvedAutostart): Promise<AutostartState> {
   const unitPath = config.unitPath!;
   const onDisk = readTextFile(unitPath);
-  const drift = onDisk === undefined ? undefined : compareOnDisk(config, onDisk);
-  const loaded = await launchdLoaded(config);
+  const drift = compareOnDisk(config, onDisk);
+  const { loaded } = await launchdJob(config);
   const details = [
     '平台: macOS (launchd)',
     `plist 路径: ${unitPath}`,
     `plist 存在: ${onDisk === undefined ? '否' : '是'}`,
     `launchd 已加载: ${loaded === undefined ? '未知（launchctl 无法执行）' : loaded ? '是' : '否'}`
   ];
-  if (onDisk !== undefined && drift?.stale) {
+  if (onDisk !== undefined && drift.stale) {
     details.push(onDisk.includes('<string>--foreground</string>')
       ? 'plist 内容与当前 node / dutydeck 路径不一致（可能换过 node 版本或升级过 npm 包）'
       : 'plist 是旧模板（后台模式，崩溃后不会被重新拉起），重新运行 dutydeck autostart enable 升级');
@@ -527,7 +537,7 @@ async function inspectDarwin(config: ResolvedAutostart): Promise<AutostartState>
     ...(loaded === undefined ? {} : { running: loaded }),
     unitPath,
     label: config.label,
-    ...(drift ? { stale: drift.stale, ...(drift.pathDiffers ? { pathDiffers: true } : {}) } : {}),
+    ...drift,
     details
   };
 }
@@ -535,7 +545,7 @@ async function inspectDarwin(config: ResolvedAutostart): Promise<AutostartState>
 async function inspectLinux(config: ResolvedAutostart): Promise<AutostartState> {
   const unitPath = config.unitPath!;
   const onDisk = readTextFile(unitPath);
-  const drift = onDisk === undefined ? undefined : compareOnDisk(config, onDisk);
+  const drift = compareOnDisk(config, onDisk);
   const details = [
     '平台: Linux (user systemd)',
     `unit 路径: ${unitPath}`,
@@ -561,7 +571,7 @@ async function inspectLinux(config: ResolvedAutostart): Promise<AutostartState> 
     linger = await lingerOn(config);
     details.push(`loginctl linger: ${linger === undefined ? '未知（loginctl 无法执行）' : linger ? '是' : '否（注销后服务会被停止）'}`);
   }
-  if (drift?.stale) {
+  if (drift.stale) {
     details.push('unit 内容与当前 node / dutydeck 路径不一致（可能换过 node 版本或升级过 npm 包）');
   }
   return {
@@ -572,7 +582,7 @@ async function inspectLinux(config: ResolvedAutostart): Promise<AutostartState> 
     unitPath,
     label: config.label,
     ...(linger === undefined ? {} : { lingerEnabled: linger }),
-    ...(drift ? { stale: drift.stale, ...(drift.pathDiffers ? { pathDiffers: true } : {}) } : {}),
+    ...drift,
     details
   };
 }
@@ -646,7 +656,7 @@ function writeIfChanged(path: string, desired: string): boolean {
 
 async function enableDarwin(config: ResolvedAutostart): Promise<AutostartResult> {
   const unitPath = config.unitPath!;
-  const loadedBefore = await launchdLoaded(config);
+  const { loaded: loadedBefore } = await launchdJob(config);
   // launchd 不会替我们建日志目录。
   mkdirSync(dirname(unitLogFile(config)), { recursive: true });
   rotateLogFileSync(unitLogFile(config));
@@ -790,12 +800,13 @@ function removeIfPresent(path: string): boolean {
 
 async function disableDarwin(config: ResolvedAutostart): Promise<AutostartResult> {
   const unitPath = config.unitPath!;
-  const loadedBefore = await launchdLoaded(config);
+  const job = await launchdJob(config);
+  const loadedBefore = job.loaded;
   const notices: string[] = [];
   let bootedOut = false;
 
   // 前台模板下 job 进程就是守护进程，bootout 会把它停掉：违反约束 1，先让用户 dutydeck stop。
-  if (loadedBefore && await launchdJobRunning(config)) {
+  if (job.running) {
     throw new AutostartError('unit-active', `${config.label} 的守护进程还在运行，移除 launchd job 会把它一起停掉。已拒绝，没有做任何改动。`,
       ['先运行 dutydeck stop（正常退出不会被 launchd 重拉），再运行 dutydeck autostart disable。']);
   }

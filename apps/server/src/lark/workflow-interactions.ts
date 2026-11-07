@@ -662,7 +662,7 @@ export class LarkWorkflowInteractions {
   private async rememberWorkspaceRule(record: LarkInteraction, actorId: string) {
     if (!record.workspaceRule || !this.workspaceApprovals) return false;
     try { await this.workspaceApprovals.remember({ ...record.workspaceRule, appId: record.appId }, actorId); return true; }
-    catch (error) { this.log?.warn({ error: error instanceof Error ? error.message : String(error), requestId: record.id }, '工作区审批规则保存失败'); return false; }
+    catch (error) { this.log?.warn({ error, requestId: record.id }, '工作区审批规则保存失败'); return false; }
   }
   private allowForSession(record: LarkInteraction) {
     if (!record.sessionAllowKey) return;

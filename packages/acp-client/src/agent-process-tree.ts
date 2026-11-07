@@ -4,18 +4,24 @@ import { readdirSync, readFileSync } from 'node:fs';
  * Process tree of one Agent child spawned by ACPX, read from Linux /proc. Other platforms see only the root.
  * Members are identified by PID plus start time so a reused PID is never signalled or counted as alive.
  */
-interface Stat { ppid: number; pgid: number; start: string; zombie: boolean }
+export interface ProcessStat { ppid: number; pgid: number; start: string; zombie: boolean; /** utime + stime + cutime + cstime, in USER_HZ ticks. */ ticks: number }
+export type ProcessTable = Map<number, ProcessStat>;
 export interface TreeMember { pid: number; start: string }
 
-function readStat(pid: number): Stat | undefined {
+function readStat(pid: number): ProcessStat | undefined {
   try {
     const raw = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    // The command name may contain spaces and parentheses, so fields are counted from the last ')'.
     const fields = raw.slice(raw.lastIndexOf(')') + 2).split(' ');
-    return { ppid: Number(fields[1]), pgid: Number(fields[2]), start: fields[19]!, zombie: fields[0] === 'Z' || fields[0] === 'X' };
+    return {
+      ppid: Number(fields[1]), pgid: Number(fields[2]), start: fields[19]!, zombie: fields[0] === 'Z' || fields[0] === 'X',
+      ticks: Number(fields[11]) + Number(fields[12]) + Number(fields[13]) + Number(fields[14])
+    };
   } catch { return undefined; }
 }
-function scan(): Map<number, Stat> {
-  const table = new Map<number, Stat>();
+/** Every readable process; empty off Linux or when /proc cannot be listed. One synchronous pass over /proc, so share it. */
+export function scanProcesses(): ProcessTable {
+  const table: ProcessTable = new Map();
   if (process.platform !== 'linux') return table;
   let names: string[];
   try { names = readdirSync('/proc'); } catch { return table; }
@@ -26,9 +32,23 @@ function scan(): Map<number, Stat> {
   }
   return table;
 }
+/** The roots present in the table and all their descendants. */
+export function processTreePids(table: ProcessTable, roots: number[]): number[] {
+  const children = new Map<number, number[]>();
+  for (const [pid, stat] of table) { const list = children.get(stat.ppid); if (list) list.push(pid); else children.set(stat.ppid, [pid]); }
+  const pending = roots.filter(pid => table.has(pid));
+  const seen = new Set<number>();
+  while (pending.length) {
+    const pid = pending.pop()!;
+    if (seen.has(pid)) continue;
+    seen.add(pid);
+    pending.push(...children.get(pid) ?? []);
+  }
+  return [...seen];
+}
 const key = (member: TreeMember) => `${member.pid}:${member.start}`;
-const alive = (member: TreeMember, table: Map<number, Stat>) => { const stat = table.get(member.pid); return !!stat && !stat.zombie && stat.start === member.start; };
-const groupAlive = (pgid: number, table: Map<number, Stat>) => [...table.values()].some(stat => stat.pgid === pgid && !stat.zombie);
+const alive = (member: TreeMember, table: ProcessTable) => { const stat = table.get(member.pid); return !!stat && !stat.zombie && stat.start === member.start; };
+const groupAlive = (pgid: number, table: ProcessTable) => [...table.values()].some(stat => stat.pgid === pgid && !stat.zombie);
 
 export class AgentProcessTree {
   private readonly root?: TreeMember;
@@ -46,28 +66,19 @@ export class AgentProcessTree {
   /** Whether a process group led by a descendant (not the root's own group) has been recorded. */
   hasGroups() { return [...this.groups].some(group => group !== this.root?.pid); }
   /** Record the root's current descendants; returns false when /proc cannot be read. */
-  refresh(): boolean {
-    const table = scan();
+  refresh(table = scanProcesses()): boolean {
     if (!table.size || !this.root) return false;
-    const children = new Map<number, number[]>();
-    for (const [pid, stat] of table) { const list = children.get(stat.ppid); if (list) list.push(pid); else children.set(stat.ppid, [pid]); }
-    const pending = alive(this.root, table) ? [...children.get(this.root.pid) ?? []] : [];
-    const seen = new Set<number>();
-    while (pending.length) {
-      const pid = pending.pop()!;
-      if (seen.has(pid)) continue;
-      seen.add(pid);
+    for (const pid of alive(this.root, table) ? processTreePids(table, [this.root.pid]) : []) {
+      if (pid === this.root.pid) continue;
       const stat = table.get(pid)!;
       this.members.set(key({ pid, start: stat.start }), { pid, start: stat.start });
       if (stat.pgid === pid) this.groups.add(pid);
-      pending.push(...children.get(pid) ?? []);
     }
     return true;
   }
   /** Signal the root's process group when it leads one, every recorded descendant, and every recorded group. */
-  signal(name: NodeJS.Signals, signalRoot: () => void) {
-    this.refresh();
-    const table = scan();
+  signal(name: NodeJS.Signals, signalRoot: () => void, table = scanProcesses()) {
+    this.refresh(table);
     if (this.ownGroup) { try { process.kill(-this.root!.pid, name); } catch { /* Gone. */ } }
     else signalRoot();
     for (const member of this.members.values()) if (alive(member, table)) { try { process.kill(member.pid, name); } catch { /* Gone. */ } }
@@ -77,8 +88,7 @@ export class AgentProcessTree {
    * True once every recorded descendant and every recorded process group is gone. Undefined when it cannot be
    * proven: no /proc, or no descendant was ever recorded, so a detached Agent may survive unseen.
    */
-  exited(): boolean | undefined {
-    const table = scan();
+  exited(table = scanProcesses()): boolean | undefined {
     if (!table.size || !this.members.size) return undefined;
     return ![...this.members.values()].some(member => alive(member, table)) && ![...this.groups].some(group => groupAlive(group, table));
   }

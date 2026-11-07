@@ -112,8 +112,10 @@ const parseOutput = (stdout: string): PluginHookOutput | undefined => {
   } catch { return undefined; }
 };
 
-export const withTimeout = <T>(work: Promise<T>, timeout: number, onTimeout?: () => void): Promise<T> => new Promise((resolvePromise, reject) => {
-  const timer = setTimeout(() => { onTimeout?.(); reject(new Error(`超过 ${timeout}ms 未返回`)); }, timeout);
+/** `onTimeout` 返回值作为拒绝原因，不返回时用默认的超时错误；计时器不阻止进程退出。 */
+export const withTimeout = <T>(work: Promise<T>, timeout: number, onTimeout?: () => unknown): Promise<T> => new Promise((resolvePromise, reject) => {
+  const timer = setTimeout(() => { reject(onTimeout?.() ?? new Error(`超过 ${timeout}ms 未返回`)); }, timeout);
+  timer.unref?.();
   work.then(value => { clearTimeout(timer); resolvePromise(value); }, error => { clearTimeout(timer); reject(error); });
 });
 

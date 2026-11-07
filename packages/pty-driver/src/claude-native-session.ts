@@ -1,11 +1,11 @@
 // Claude PID-state contract: botmux f54efb8b889 / 17296ac7fba (MIT); see THIRD_PARTY_NOTICES.md.
 import { createHash } from 'node:crypto';
-import { closeSync, fstatSync, lstatSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs';
+import { closeSync, fstatSync, lstatSync, openSync, readdirSync, readFileSync, readSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import type { PhysicalProcessIdentity, ProcessProbe } from '@dutydeck/session-backends';
 import type { DriverTranscriptSourceObservation } from '@dutydeck/shared';
 import { claudeDataDir, claudeProjectDir, type CliPathEnv } from './cli-paths.js';
-import { parseJsonlObjects, readTail } from './session-id/fs-scan.js';
+import { parseJsonlObjects, readHeadBytes, readTail } from './session-id/fs-scan.js';
 
 // realpath(3): same canonical path and ENOENT as the JS walk, without its per-component lstat.
 const realpath = realpathSync.native;
@@ -29,24 +29,6 @@ const CONVERSATION_WINDOW = 256 * 1024;
  *  window: while bytes [0, end) are unchanged, every entry the scan visits
  *  before it is unchanged too, so only the cwd realpaths can alter the result. */
 interface ConversationAnchor { path: string; id: string; dev: number; ino: number; end: number; prefix: Buffer; cwds: string[]; cwd?: string }
-/** Head window bytes as readHead reads them, plus the inode they came from. */
-function readHeadBytes(path: string): { bytes: Buffer; dev: number; ino: number } | undefined {
-  let size: number;
-  try {
-    const stat = statSync(path);
-    if (!stat.isFile()) return;
-    size = stat.size;
-  } catch { return; }
-  const length = Math.min(size, CONVERSATION_WINDOW);
-  if (length === 0) return;
-  let fd: number | undefined;
-  try {
-    fd = openSync(path, 'r');
-    const { dev, ino } = fstatSync(fd);
-    const bytes = Buffer.alloc(length);
-    return { bytes: bytes.subarray(0, readSync(fd, bytes, 0, length, 0)), dev, ino };
-  } catch { return; } finally { if (fd !== undefined) try { closeSync(fd); } catch { /* best effort */ } }
-}
 /** parse(head + '\n' + tail) in order. Splitting the head at newline bytes
  *  decodes exactly like splitting its UTF-8 string: 0x0a never occurs inside a
  *  multi-byte sequence. Yields the byte end of complete head lines. */
@@ -64,7 +46,7 @@ function* conversationEntries(head: Buffer, tail: string): Generator<{ entry: an
 function scanConversation(path: string, id: string, cwd: string): { value: boolean; anchor?: ConversationAnchor } {
   if (!regular(path)) return { value: false };
   try {
-    const head = readHeadBytes(path);
+    const head = readHeadBytes(path, CONVERSATION_WINDOW);
     const cwds: string[] = [];
     for (const { entry, end } of conversationEntries(head?.bytes ?? Buffer.alloc(0), readTail(path, CONVERSATION_WINDOW))) {
       if (entry.isSidechain || entry.sessionId !== id || !['user', 'assistant'].includes(entry.type)) continue;

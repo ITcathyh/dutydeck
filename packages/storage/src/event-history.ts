@@ -7,7 +7,7 @@ export const HISTORY_OUTPUT_LIMIT = 4096;
 export const HISTORY_ACTIVITY_LIMIT = 240;
 /** Characters of the prompt kept in a turn's place; enough for a jump-to-turn label. Migration 49 indexes this exact prefix. */
 export const HISTORY_PLACE_PROMPT_LIMIT = 40;
-type Turn = { first: number; last: number; id: string; timestamp: string; taskId: string | null; attemptId: string | null; status: string | null;
+type Turn = { first: number; last: number; timestamp: string; attemptId: string | null;
   toolCount: number; endedAt: string | null; artifactCandidate: number | null; promptText: string | null; promptTruncated: number | null; outputText: string | null; outputTruncated: number | null; spans: string | null };
 
 /**
@@ -18,10 +18,10 @@ type Turn = { first: number; last: number; id: string; timestamp: string; taskId
 export function readHistoryOutline(sqlite: Database.Database, sessionId: string, query: HistoryOutlineQuery = {}): HistoryOutline {
   return sqlite.transaction(() => {
     const highWaterMark = (cachedStatement(sqlite, 'SELECT COALESCE(MAX(sequence),0) AS value FROM events WHERE session_id=?').get(sessionId) as { value: number }).value;
-    const places = completedPlaces(sqlite, sessionId, highWaterMark, highWaterMark);
+    const { places, statuses } = completedPlaces(sqlite, sessionId, highWaterMark, highWaterMark);
     const selected = query.tail !== undefined ? places.slice(Math.max(0, places.length - query.tail)) : places;
     const commandCatalog = readCommandCatalog(sqlite, sessionId);
-    return { turns: selected.length ? projectTurns(sqlite, sessionId, selected) : [], highWaterMark, liveAfter: places.at(-1)?.[2] ?? 0,
+    return { turns: selected.length ? projectTurns(sqlite, sessionId, selected, statuses) : [], highWaterMark, liveAfter: places.at(-1)?.[2] ?? 0,
       ...(query.tail !== undefined ? { places } : {}),
       ...(commandCatalog ? { commandCatalog } : {}) };
   })();
@@ -31,8 +31,9 @@ export function readHistoryOutline(sqlite: Database.Database, sessionId: string,
 export function readHistoryTurns(sqlite: Database.Database, sessionId: string, from: number, through: number): HistoryTurnSummary[] {
   return sqlite.transaction(() => {
     const highWaterMark = (cachedStatement(sqlite, 'SELECT COALESCE(MAX(sequence),0) AS value FROM events WHERE session_id=?').get(sessionId) as { value: number }).value;
-    const selected = completedPlaces(sqlite, sessionId, highWaterMark, Math.min(through, highWaterMark)).filter(place => place[1] >= from && place[2] <= through);
-    return selected.length ? projectTurns(sqlite, sessionId, selected) : [];
+    const { places, statuses } = completedPlaces(sqlite, sessionId, highWaterMark, Math.min(through, highWaterMark));
+    const selected = places.filter(place => place[1] >= from && place[2] <= through);
+    return selected.length ? projectTurns(sqlite, sessionId, selected, statuses) : [];
   })();
 }
 
@@ -47,10 +48,10 @@ const BOUNDARY = `json_type(data,'$.steering') IS NULL`;
 /**
  * Turn boundaries are the non-steering user prompts; events before the first one join
  * the first turn. Only prompts are read, from an index, so this stays cheap on long sessions.
- * Returns the completed prefix: it ends before the first unresolved turn.
+ * Returns the completed prefix, which ends before the first unresolved turn, and the task statuses that decided it.
  */
-function completedPlaces(sqlite: Database.Database, sessionId: string, highWaterMark: number, through: number): HistoryTurnPlace[] {
-  if (!highWaterMark) return [];
+function completedPlaces(sqlite: Database.Database, sessionId: string, highWaterMark: number, through: number): { places: HistoryTurnPlace[]; statuses: Map<string, string> } {
+  if (!highWaterMark) return { places: [], statuses: new Map() };
   // Whether a turn is in the completed prefix depends only on the turns before it, so
   // turns ending after `through` need not be read; the last one read may extend past it.
   // Rows stay arrays: long sessions have tens of thousands of prompts.
@@ -66,7 +67,7 @@ function completedPlaces(sqlite: Database.Database, sessionId: string, highWater
   // A turn ends at the last stored event before the next prompt. Sequences are usually
   // contiguous, so that is the next prompt's predecessor; pruned holes need the real list.
   const span = cachedStatement(sqlite, 'SELECT MIN(sequence) AS start,COUNT(*) AS count FROM events WHERE session_id=? AND sequence<=?').get(sessionId, end) as { start: number; count: number };
-  if (!span.count) return [];
+  if (!span.count) return { places: [], statuses: new Map() };
   const sequences = span.count === end - span.start + 1 ? undefined
     : cachedStatement(sqlite, 'SELECT sequence FROM events WHERE session_id=? AND sequence<=? ORDER BY sequence').pluck().all(sessionId, end) as number[];
   const lastBefore = (next: number) => sequences ? sequences[lowerBound(sequences, next) - 1]! : next - 1;
@@ -104,11 +105,11 @@ function completedPlaces(sqlite: Database.Database, sessionId: string, highWater
     places.push([head ? head[1] : cachedStatement(sqlite, 'SELECT id FROM events WHERE session_id=? AND sequence=?').pluck().get(sessionId, first) as string,
       first, last, taskId, prompt.slice(0, HISTORY_PLACE_PROMPT_LIMIT)]);
   }
-  return places;
+  return { places, statuses };
 }
 
-/** Summaries for consecutive completed places, in one pass over exactly their events. */
-function projectTurns(sqlite: Database.Database, sessionId: string, places: HistoryTurnPlace[]): HistoryTurnSummary[] {
+/** Summaries for consecutive completed places, in one pass over exactly their events; ids and owners come from the places. */
+function projectTurns(sqlite: Database.Database, sessionId: string, places: HistoryTurnPlace[], statuses: Map<string, string>): HistoryTurnSummary[] {
   const from = places[0]![1], through = places.at(-1)![2];
   const rows = cachedStatement(sqlite, `
     WITH marked AS MATERIALIZED (
@@ -129,8 +130,6 @@ function projectTurns(sqlite: Database.Database, sessionId: string, places: Hist
       SELECT *,MAX(1,SUM(boundary) OVER (ORDER BY sequence)) AS turn FROM marked
     ), ranges AS MATERIALIZED (
       SELECT turn,MIN(sequence) AS first,MAX(sequence) AS last,MIN(timestamp) AS timestamp,
-        MIN(CASE WHEN boundary=1 THEN sequence END) AS boundarySequence,
-        MIN(CASE WHEN type IN ('text','thinking','tool_call','tool_result') AND task_id IS NOT NULL THEN sequence END) AS taskSequence,
         MIN(CASE WHEN type!='task' AND attempt_id IS NOT NULL THEN sequence END) AS attemptSequence,
         -- The final output follows the turn's last tool, thinking or user activity.
         COALESCE(MAX(CASE WHEN type IN ('tool_call','tool_result','thinking') OR (type='text' AND valid AND role='user') THEN sequence END),MIN(sequence)-1) AS outputAfter,
@@ -157,19 +156,13 @@ function projectTurns(sqlite: Database.Database, sessionId: string, places: Hist
     ), spans AS MATERIALIZED (
       SELECT turn,json_group_array(json_array(started,ended) ORDER BY started,toolKey) AS spans FROM tools GROUP BY turn
     )
-    SELECT r.first,r.last,r.timestamp,r.toolCount,r.endedAt,r.artifactCandidate,
-      COALESCE(b.id,(SELECT id FROM events WHERE session_id=@session AND sequence=r.first)) AS id,
-      COALESCE(b.task_id,CASE WHEN json_valid(b.data) THEN json_extract(b.data,'$.taskId') END,o.task_id) AS taskId,
-      a.attempt_id AS attemptId,t.status,
+    SELECT r.first,r.last,r.timestamp,r.toolCount,r.endedAt,r.artifactCandidate,a.attempt_id AS attemptId,
       p.text AS promptText,p.truncated AS promptTruncated,q.text AS outputText,q.truncated AS outputTruncated,s.spans
     FROM ranges r
-      LEFT JOIN events b ON b.session_id=@session AND b.sequence=r.boundarySequence
-      LEFT JOIN events o ON o.session_id=@session AND o.sequence=r.taskSequence
       LEFT JOIN events a ON a.session_id=@session AND a.sequence=r.attemptSequence
       LEFT JOIN texts p ON p.turn=r.turn AND NOT p.output
       LEFT JOIN texts q ON q.turn=r.turn AND q.output
       LEFT JOIN spans s ON s.turn=r.turn
-      LEFT JOIN tasks t ON t.id=COALESCE(b.task_id,CASE WHEN json_valid(b.data) THEN json_extract(b.data,'$.taskId') END,o.task_id) AND t.session_id=@session
     ORDER BY r.first
   `).all({ session: sessionId, from, through }) as Turn[];
   const parts = cachedStatement(sqlite, `
@@ -190,8 +183,9 @@ function projectTurns(sqlite: Database.Database, sessionId: string, places: Hist
     ORDER BY e.sequence,CAST(p.key AS INTEGER) LIMIT 129
   `);
   // Projection boundaries equal the places' boundaries; anything else is not a completed turn.
-  const wanted = new Set(places.map(place => place[1]));
-  return rows.filter(row => wanted.has(row.first)).map(range => {
+  const byFirst = new Map(places.map(place => [place[1], place]));
+  return rows.filter(row => byFirst.has(row.first)).map(range => {
+    const [id, , , taskId] = byFirst.get(range.first)!;
     const artifacts: HistoryTurnSummary['artifactReferences'] = [];
     const seen = new Set<string>();
     const references = range.artifactCandidate ? parts.all(sessionId, range.first, range.last) as Array<any> : [];
@@ -209,8 +203,8 @@ function projectTurns(sqlite: Database.Database, sessionId: string, places: Hist
     }
     const spans = range.spans ? (JSON.parse(range.spans) as Array<[string, string]>).map(([started, ended]) => ({ started, ended })) : [];
     const activity = turnActivity(range.timestamp, range.endedAt, spans);
-    return { id: range.id, ...(range.taskId ? { taskId: range.taskId } : {}), ...(range.attemptId ? { attemptId: range.attemptId } : {}),
-      firstSequence: range.first, lastSequence: range.last, timestamp: range.timestamp, status: range.status ?? 'unverified',
+    return { id, ...(taskId ? { taskId } : {}), ...(range.attemptId ? { attemptId: range.attemptId } : {}),
+      firstSequence: range.first, lastSequence: range.last, timestamp: range.timestamp, status: (taskId ? statuses.get(taskId) : undefined) ?? 'unverified',
       prompt: { text: range.promptText ?? '', truncated: Boolean(range.promptTruncated) }, output: { text: range.outputText ?? '', truncated: Boolean(range.outputTruncated) }, toolCount: range.toolCount, artifactReferences: artifacts, artifactReferencesTruncated: references.length > 128,
       ...(activity ? { activity } : {}) };
   });

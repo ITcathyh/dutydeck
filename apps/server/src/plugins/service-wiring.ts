@@ -101,8 +101,8 @@ export function wirePlugins(host: PluginHost, deps: PluginWiringDeps) {
     ...(hooks.has('permission.request') ? { reviewPermission: (session: Session, request: Parameters<PluginRuntimeHooks['reviewPermission']>[1]) => hooks.reviewPermission(session, request) } : {}),
     onTaskSettled: async (session: Session, task: PublicTaskRecord) => {
       triggers.settled(task.id, task.status === 'completed' ? 'succeeded' : task.status === 'failed' ? 'failed' : task.status === 'cancelled' || task.status === 'interrupted' ? 'cancelled' : 'unknown');
-      await hooks.taskCompleted(session, task).catch(error => deps.log.warn({ error: String(error) }, '插件 task.completed hook 失败'));
-      if (session.source === PLUGIN_TRIGGER_SOURCE) await deliverTriggerResult(session, task).catch(error => deps.log.warn({ taskId: task.id, error: error instanceof Error ? error.message : String(error) }, '插件触发器结果回投失败'));
+      await hooks.taskCompleted(session, task).catch(error => deps.log.warn({ error }, '插件 task.completed hook 失败'));
+      if (session.source === PLUGIN_TRIGGER_SOURCE) await deliverTriggerResult(session, task).catch(error => deps.log.warn({ taskId: task.id, error }, '插件触发器结果回投失败'));
     },
     ...(hooks.has('verification.completed') ? { onVerificationCompleted: (session: Session, result: Parameters<PluginRuntimeHooks['verificationCompleted']>[1]) => hooks.verificationCompleted(session, result) } : {})
   };
