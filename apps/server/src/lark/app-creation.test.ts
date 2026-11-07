@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 import type { ConfigRepository } from '@dutydeck/shared';
+import { currentProcessIdentity } from '@dutydeck/storage';
 import { LarkAppCreationJobManager } from './app-creation.js';
 import { LarkOpenPlatformConfigurationError } from './open-platform-configurator.js';
 import { OpenPlatformRequestError, OpenPlatformSessionError, OpenPlatformSessionExpiredError, type ConnectedOpenPlatformSession, type ConnectOpenPlatformSessionOptions } from './open-platform-session.js';
@@ -308,6 +309,52 @@ it('recognizes a live foreign process, then CAS-claims one safe retry after that
   } finally {
     child.kill();
   }
+});
+
+it('treats a runner recorded under this same PID by an earlier process as exited (containers reuse PIDs)', async () => {
+  const h = harness();
+  const record = (status: string, runner: object) => h.records.set(`lark.app_creation.${id}`, JSON.stringify({ id, name: 'Bot', status, retryable: false, createdAt: 'now', updatedAt: 'now', runner }));
+  // 旧版本写的记录只有 PID 和实例编号。
+  record('creating', { pid: process.pid, instanceId: 'previous-daemon' });
+  expect(await h.manager.get(id)).toMatchObject({ status: 'failed', retryable: false });
+  // 新记录：PID 相同，但进程启动时间不同，租约也还没过期。
+  record('waiting_for_scan', { pid: process.pid, instanceId: 'previous-daemon', process: 'previous-process', identity: { ...currentProcessIdentity(), start: '1' }, heartbeatAt: new Date().toISOString() });
+  expect(await h.manager.get(id)).toMatchObject({ status: 'failed', retryable: true });
+  await h.manager.retry(id); await h.manager.wait(id);
+  expect(await h.manager.get(id)).toMatchObject({ status: 'completed' });
+});
+
+it('falls back to the heartbeat lease when the recorded process cannot be observed', async () => {
+  const h = harness();
+  let now = Date.parse('2026-11-07T00:00:00.000Z');
+  const manager = new LarkAppCreationJobManager({ ...h.options, now: () => new Date(now) });
+  h.records.set(`lark.app_creation.${id}`, JSON.stringify({
+    id, name: 'Bot', status: 'configuring', retryable: false, createdAt: 'now', updatedAt: 'now',
+    runner: { pid: 4242, instanceId: 'remote', process: 'remote-process', identity: { ...currentProcessIdentity(), host: 'another-host' }, heartbeatAt: '2026-11-07T00:00:00.000Z' },
+  }));
+  now += 60_000;
+  expect(await manager.get(id)).toMatchObject({ status: 'configuring' });
+  now += 61_000;
+  expect(await manager.get(id)).toMatchObject({ status: 'failed', retryable: false });
+});
+
+it('renews the runner lease while a run is in progress', async () => {
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+  try {
+    const h = harness(); const gate = deferred<void>();
+    let now = Date.parse('2026-11-07T00:00:00.000Z');
+    const manager = new LarkAppCreationJobManager({ ...h.options, now: () => new Date(now) });
+    h.connect.mockImplementation(async () => { await gate.promise; return h.connected; });
+    await manager.start(id, 'Bot');
+    await vi.waitFor(() => expect(h.connect).toHaveBeenCalledOnce());
+    const lease = () => JSON.parse(h.records.get(`lark.app_creation.${id}`)!).runner?.heartbeatAt;
+    expect(lease()).toBe('2026-11-07T00:00:00.000Z');
+    now += 30_000;
+    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.waitFor(() => expect(lease()).toBe('2026-11-07T00:00:30.000Z'));
+    gate.resolve(); await manager.wait(id);
+    expect(await manager.get(id)).toMatchObject({ status: 'completed' });
+  } finally { vi.useRealTimers(); }
 });
 
 it('honors cancellation from another instance before the original run creates an app', async () => {
