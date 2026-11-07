@@ -2590,6 +2590,32 @@ describe('follow-up until done: completion condition, deadline and run state', (
     expect(deliver).toHaveBeenCalledTimes(3);
   });
 
+  it('does not start the next run while a stop-self result is still being delivered', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const deliver = vi.fn(async () => { await gate; });
+    const h = await fixture({ deliver });
+    const schedule = await enable(h);
+    const current = () => h.service.getScheduleDefinition(h.session.id, schedule.id, 'ou_owner');
+    h.now.value = new Date('2026-09-12T00:01:01.000Z'); await h.service.tick();
+    const task = h.dispatches[0]!;
+    const attempt = bound(h.repositories).claimNext({ sessionId: h.session.id, runId: h.session.runId })!.attempt!;
+    await h.service.requestScheduleStop(h.session.id, task.id, attempt.attemptId, 'ou_owner');
+    h.settleTask(task.id);
+    h.now.value = new Date('2026-09-12T00:02:01.000Z');
+    try {
+      await h.service.tick();
+      await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
+      await h.service.tick();
+      expect(h.dispatches).toHaveLength(1);
+      expect(await current()).toMatchObject({ enabled: true });
+      await expect(h.service.runSchedule(h.session.id, schedule.id, { expectedRevision: (await current()).revision, idempotencyKey: 'during-stop' }, 'ou_owner')).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_SCHEDULE_BUSY' });
+    } finally { release(); }
+    await vi.waitFor(async () => expect(await current()).toMatchObject({ enabled: false, outcome: { kind: 'completed' } }));
+    h.now.value = new Date('2026-09-12T00:05:01.000Z'); await h.service.tick(); await h.service.tick();
+    expect(h.dispatches).toHaveLength(1);
+  });
+
   it.each(['failed', 'report_blocked'] as const)('does not treat a %s run as completed even when it requested stop-self', async kind => {
     const h = await fixture({ deliver: async () => {} });
     const schedule = await enable(h);

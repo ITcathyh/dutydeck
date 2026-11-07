@@ -1846,6 +1846,11 @@ export class SessionAutomationService {
     if (schedule.pendingOccurrence) {
       const stored = await this.getRecord(occurrenceKey(schedule.pendingOccurrence.id), value => sessionScheduleOccurrenceSchema.parse(value));
       if (!stored || openRunStatuses.has(stored.value.runStatus)) return true;
+      // 这一轮成功并请求了 stop-self、结果还在投递：停用要等投递有结论，期间不开下一轮。
+      const occurrence = migrateOccurrence(stored.value);
+      const taskId = occurrence.runStatus === 'completed' && !deliverySettled(occurrence.delivery) ? occurrence.admission?.taskId : undefined;
+      const stop = taskId ? (await this.getRecord(`${STOP_REQUEST_PREFIX}${taskId}`, value => stopRequestSchema.parse(value)))?.value : undefined;
+      if (stop?.status === 'pending' && stop.scheduleId === schedule.id && stop.generation === schedule.generation) return true;
     }
     // Legacy sources have no reservation, and blocked/unknown work must continue to hold the slot.
     return (await this.listRecords(OCCURRENCE_PREFIX, value => sessionScheduleOccurrenceSchema.parse(value), undefined, { field: 'runStatus', values: [...openRunStatuses], scheduleId: schedule.id }))
