@@ -3130,7 +3130,8 @@ export class SessionAutomationService {
     if (!fixed || !fixed.value.admission) return;
     // 仍在派发阶段（dispatching，acceptance 在途或响应丢失）时不做结果对账；
     // 交由 recoverDispatchingCi 用原冻结 prompt 重投，避免误判为 blocked。
-    if (fixed.value.status === 'dispatching' && !this.execution.getAcceptedTask(fixed.value.admission.taskId)) return;
+    // 派发时就被拒（error，例如会话停止或月度成本上限）同样没有接受事实：保留原因，不对账成 blocked。
+    if (['dispatching', 'error'].includes(fixed.value.status) && !this.execution.getAcceptedTask(fixed.value.admission.taskId)) return;
     let working = fixed;
     let value = working.value;
 

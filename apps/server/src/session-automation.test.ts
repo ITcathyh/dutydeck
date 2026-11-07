@@ -1141,6 +1141,30 @@ describe('SessionAutomationService CI subscriptions', () => {
     expect(h.dispatches).toHaveLength(1);
   });
 
+  it('keeps the real reason of a rejected CI dispatch instead of reconciling it into an admission conflict', async () => {
+    let head = '';
+    const status = vi.fn(async () => ciStatus(head, [{ id: 9, conclusion: 'success' }])) as StatusMock;
+    const h = await fixture({ status });
+    head = (await run('git', ['-C', h.cwd, 'rev-parse', 'HEAD'])).stdout.trim();
+    const subscription = await h.service.subscribeCi(h.session.id, { ttlSeconds: 600 }, 'ou_owner');
+    const rejecting: SessionAutomationRuntime = {
+      getSession: id => h.repositories.sessions.get(id),
+      async dispatchRequest() { throw new RuntimeError('MONTHLY_COST_LIMIT', 'Monthly cost limit reached', 409); }
+    };
+    const service = new SessionAutomationService({ repositories: h.repositories, runtime: rejecting, authorize: async () => true, ciProviders: ciProviders(status), clock: () => new Date(h.now.value) });
+    cleanups.push(() => service.close());
+    await service.tick();
+    const rejected = (await service.listBySession(h.session.id)).subscriptions.find(item => item.id === subscription.id)!;
+    expect(rejected).toMatchObject({ status: 'error', error: 'Monthly cost limit reached' });
+    for (const minutes of [1, 2]) {
+      h.now.value = new Date(Date.parse('2026-09-12T00:00:01.000Z') + minutes * 60_000);
+      await service.tick();
+    }
+    const later = (await service.listBySession(h.session.id)).subscriptions.find(item => item.id === subscription.id)!;
+    expect(later).toMatchObject({ status: 'error', error: 'Monthly cost limit reached', revision: rejected.revision });
+    expect(later).not.toHaveProperty('blockReason');
+  });
+
   it('rejects protected reads and writes when no service authorizer is wired', async () => {
     const h = await fixture();
     const service = new SessionAutomationService({ repositories: h.repositories, runtime: h });
