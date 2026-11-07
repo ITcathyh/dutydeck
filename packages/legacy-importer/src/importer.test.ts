@@ -377,4 +377,23 @@ describe('Botmux read-only importer', () => {
     const exportedNames = Object.keys(publicApi);
     expect(exportedNames.some(name => /apply|activate|cutover|resume/i.test(name))).toBe(false);
   });
+
+  it('follows a umask-default data breadcrumb and resolves stale ones like Botmux', async () => {
+    const fixture = await createFixture();
+    const customData = join(fixture.root, 'custom-data');
+    await privateJson(join(customData, `sessions-${FIXTURE.appA}.json`), {
+      fixture_custom: { sessionId: 'fixture_custom', larkAppId: FIXTURE.appA, status: 'closed', scope: 'thread' }
+    });
+    const breadcrumb = join(fixture.sourceHome, '.data-dir');
+    const sessionsWith = async (value: string) => {
+      await writeFile(breadcrumb, value);
+      if (process.platform !== 'win32') await chmod(breadcrumb, 0o644);
+      const handle = await planLegacyImport({ source_home: fixture.sourceHome, fingerprint_key: fingerprintKey });
+      return handle.private_plan.summary.legacy_session_records;
+    };
+    expect(await sessionsWith(`${customData}\n`)).toBe(1);
+    expect(await sessionsWith('../custom-data\n')).toBe(3);
+    expect(await sessionsWith(`${join(fixture.root, 'missing')}\n`)).toBe(3);
+    expect(await sessionsWith('\n')).toBe(3);
+  });
 });

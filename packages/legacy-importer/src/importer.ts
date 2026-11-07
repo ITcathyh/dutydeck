@@ -1,5 +1,5 @@
 import { homedir } from 'node:os';
-import { lstat, open, readdir } from 'node:fs/promises';
+import { lstat, open, readdir, stat } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { writePrivateArchive, type ArchiveSourceFile } from './archive.js';
 import { hmacSha256, opaqueRef, stableFingerprint, stableJson } from './fingerprint.js';
@@ -379,11 +379,10 @@ export async function discoverLegacySource(options: DiscoverLegacyOptions): Prom
   let dataPathInput = options.data_dir ?? env.SESSION_DATA_DIR;
   const breadcrumbPath = join(sourceHome, '.data-dir');
   if (!dataPathInput && await pathExists(breadcrumbPath)) {
-    const breadcrumbRef = opaqueRef('artifact', key, breadcrumbPath);
-    const breadcrumb = await stableReadFile(breadcrumbPath, breadcrumbRef, { secret: true });
+    // Botmux 按默认 umask 写这个指针文件（通常 0644）；与 Botmux 一致，只跟随指向已存在目录的绝对路径，其余回落到 <home>/data。
+    const breadcrumb = await stableReadFile(breadcrumbPath, opaqueRef('artifact', key, breadcrumbPath));
     const value = Buffer.from(breadcrumb.bytes).toString('utf8').trim();
-    if (!value) throw new LegacyImportError('DATA_BREADCRUMB_INVALID', 'Botmux data breadcrumb is empty', breadcrumbRef);
-    dataPathInput = isAbsolute(value) ? value : resolve(sourceHome, value);
+    if (breadcrumb.size <= 4096 && value && isAbsolute(value) && (await stat(value).catch(() => undefined))?.isDirectory()) dataPathInput = value;
   }
   dataPathInput ??= join(sourceHome, 'data');
   const dataPathRef = opaqueRef('path', key, resolve(dataPathInput));
