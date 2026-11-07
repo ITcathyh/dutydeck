@@ -1042,7 +1042,7 @@ const errorAlert = (entry: TraceEntry, index: number): LarkCardElement => ({
   // 启动器版本变化只给人话说明和 /new 指引。
   content: String(entry.data.message ?? '').startsWith(LARK_LAUNCHER_VERSION_CHANGED_CODE)
     ? larkLauncherVersionChangedHint
-    : truncateTrace(entry.data.message, 1_500) || 'Agent 执行未完全成功',
+    : escapeCardInline(truncateTrace(entry.data.message, 1_500)) || 'Agent 执行未完全成功',
   text_size: 'normal', margin: '6px 0px 8px 0px',
   icon: { tag: 'standard_icon', token: 'warning_outlined', color: 'red' }
 });

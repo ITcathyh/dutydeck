@@ -67,6 +67,16 @@ describe('Agent text cannot forge Lark card tags', () => {
     expect(alert!.content).toContain('rm -rf /');
   });
 
+  it('escapes the error message so a failed run cannot mention everyone or show a fake approval tag', () => {
+    const events = [event('error', { message: "上游报错 <at id=all></at> <text_tag color='green'>已授权</text_tag> a & b" })];
+    for (const elements of [renderLarkResultElements(events, { state: 'failed' }), renderLarkProcessElements(events, {}, false)]) {
+      const alert = elements.find(element => String(element.element_id).startsWith('execution_alert_'));
+      expect(alert!.content).not.toMatch(/<\/?\s*(?:at|text_tag)\b/i);
+      expect(alert!.content).toContain('上游报错 &lt;at id=all&gt;');
+      expect(alert!.content).toContain('a &amp; b');
+    }
+  });
+
   it('marks a request approved by a workspace rule with the rule it matched', () => {
     const elements = renderLarkProcessElements([event('permission_request', { title: '运行命令', status: 'approved', workspaceRule: 'pnpm test' })], {}, false);
     expect(elements.find(element => String(element.element_id).startsWith('risk_alert_resolved'))!.content)
