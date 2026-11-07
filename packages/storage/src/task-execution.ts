@@ -96,23 +96,23 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     if(r.nativeBindings?.some(binding=>r.purpose!=='acp_native_context'||binding.sessionId!==r.sessionId||binding.context.resourceId!==r.resourceId||binding.context.identityId!==r.identity?.identityId||binding.context.originRunId!==r.runId))fail('NATIVE_CONTEXT_BINDING_INVALID');
     return r;
   };
-  // Admission rereads every competing session's resources on each pass. Validation depends only on the stored
-  // text, so a row whose text is unchanged reuses the validated result. Callers mutate what they read, so each
-  // read decodes a fresh copy of it (JSON, like the stored row, and cheaper than structuredClone).
-  const validatedResources = new Map<string, { stored: string; validated: string }>();
+  // Admission rereads every competing session's resources on each pass. Validation is a pure function of the
+  // stored text, so identical text reuses the validated result. Callers mutate what they read, so each read
+  // decodes a fresh copy of it (JSON, like the stored row, and cheaper than structuredClone).
+  const validatedResources = new Map<string, string>();
   const readResource = (row: unknown): DriverResource | undefined => {
     if (!row) return;
-    const { id: resourceId, json: stored } = row as { id: string; json: string };
-    const known = validatedResources.get(resourceId);
-    if (known?.stored === stored) return JSON.parse(known.validated) as DriverResource;
+    const stored = (row as { json: string }).json;
+    const known = validatedResources.get(stored);
+    if (known !== undefined) return JSON.parse(known) as DriverResource;
     const value = validateResource(JSON.parse(stored));
     if (validatedResources.size >= 4096) validatedResources.clear();
     const validated = json(value);
-    validatedResources.set(resourceId, { stored, validated: validated === stored ? stored : validated });
+    validatedResources.set(stored, validated === stored ? stored : validated);
     return value;
   };
-  const resourceById = cached('SELECT id,json FROM driver_resources WHERE id=?');
-  const resourcesBySession = cached('SELECT id,json FROM driver_resources WHERE session_id=? ORDER BY rowid');
+  const resourceById = cached('SELECT json FROM driver_resources WHERE id=?');
+  const resourcesBySession = cached('SELECT json FROM driver_resources WHERE session_id=? ORDER BY rowid');
   const resource = (resourceId: string) => readResource(resourceById.get(resourceId));
   const resources = (sessionId: string) => resourcesBySession.all(sessionId).map(row => readResource(row)!);
   const assertChecks = (sessionId: string, checks: ResourceCheckRef[]) => {
