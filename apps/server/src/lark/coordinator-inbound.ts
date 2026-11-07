@@ -2433,8 +2433,12 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         return { type: 'warning', content: '找不到这张卡片对应的任务记录，无法打开详情。' };
       }
       // 登录链接兑换后等同登录，与 /repair 同一道安装级门；谁能拿到链接完全由这道门决定。
-      if (links && !await this.isInstallationOperatorAllowed(config, operatorOpenId, context.chatId)) {
-        return { type: 'warning', content: 'Web 详情仅机器人管理员可打开；完整执行记录可点「导出执行记录」获取' };
+      // 未配置操作白名单时没有可认定的管理员，一律不发。
+      const loginAuth = links ? await this.isRepairOperatorAllowed(config, operatorOpenId, context.chatId) : undefined;
+      if (loginAuth && !loginAuth.allowed) {
+        return { type: 'warning', content: loginAuth.reason === 'unconfigured'
+          ? '未配置操作白名单，飞书里不发 Web 登录链接；请管理员在机器人设置里配置操作白名单，或直接在 Web 上查看。完整执行记录可点「导出执行记录」获取'
+          : 'Web 详情仅机器人管理员可打开；完整执行记录可点「导出执行记录」获取' };
       }
       const elements = links
         ? larkDetailLoginElements(`${webBaseUrl}/api/auth/link?code=${links.issue(card.sessionId)}`)
