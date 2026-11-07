@@ -36,7 +36,7 @@ import {
 import { pinnedSessionUuid } from '@dutydeck/cli-adapters';
 import {
   claudeDataDir,
-  claudeProjectDir,
+  claudeProjectDirCandidates,
   codexHistoryPath,
   codexHome,
   codexSessionsRoot,
@@ -147,21 +147,22 @@ function verifyClaude(
   // Pin every lookup to the FROZEN root: an env var pointing straight at it
   // makes later daemon HOME/CLAUDE_CONFIG_DIR changes unable to move us.
   const env: CliPathEnv = { CLAUDE_CONFIG_DIR: dataRoot };
-  const projectDir = claudeProjectDir(cwd, env);
 
   // 1) Enumerate candidates with truncation reported. Never treat a truncated
   // set as exhaustive: an unvisited 41st file could carry a conflicting id.
-  const enumeration = enumerateCandidates(projectDir, 0, name => name.endsWith('.jsonl'));
-  if (enumeration.truncated) return undefined;
-
-  const candidatePaths = enumeration.paths;
+  // A long cwd has two project dirs (current and legacy key): both are one
+  // candidate set under one budget, so a copy in either is a conflict.
+  const candidatePaths: string[] = [];
   const pinned = pinnedSessionUuid(sessionId);
-  if (pinned) {
-    const direct = join(projectDir, `${pinned}.jsonl`);
-    if (existsSync(direct) && !candidatePaths.includes(direct)) {
-      candidatePaths.push(direct);
-      if (candidatePaths.length > MAX_MARKER_CANDIDATES) return undefined;
+  for (const projectDir of claudeProjectDirCandidates(cwd, env)) {
+    const enumeration = enumerateCandidates(projectDir, 0, name => name.endsWith('.jsonl'));
+    if (enumeration.truncated) return undefined;
+    candidatePaths.push(...enumeration.paths);
+    if (pinned) {
+      const direct = join(projectDir, `${pinned}.jsonl`);
+      if (existsSync(direct) && !candidatePaths.includes(direct)) candidatePaths.push(direct);
     }
+    if (candidatePaths.length > MAX_MARKER_CANDIDATES) return undefined;
   }
 
   // Distinct content-verified (file, nativeId) hits.

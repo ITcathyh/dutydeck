@@ -33,7 +33,7 @@ import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, rea
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { BACKGROUND_FOLLOWUP, type NormalizedDriverEvent } from '@dutydeck/shared';
 import { pinnedSessionUuid } from '@dutydeck/cli-adapters';
-import { claudeProjectDir, type CliPathEnv } from '../cli-paths.js';
+import { claudeProjectDir, claudeProjectDirCandidates, type CliPathEnv } from '../cli-paths.js';
 import { byMtimeDesc, parseJsonlObjects, readHead, walkFiles } from '../session-id/fs-scan.js';
 import { buildSessionMarker, isUsableMarker } from '../session-id/marker.js';
 import { JsonlTailer, type TranscriptCursor, type TranscriptEventSource, type TranscriptPosition } from './tail.js';
@@ -46,7 +46,7 @@ import { ClaudeBackgroundTasks } from './claude-background.js';
  *  user prompt, so a small window suffices and a long conversation is never
  *  read in full. Matches session-id/claude.ts. */
 const MARKER_HEAD_BYTES = 256 * 1024;
-/** Newest-first cap on candidates scanned in one project dir. */
+/** Newest-first cap on candidates scanned across a cwd's project dirs. */
 const MAX_MARKER_CANDIDATES = 40;
 /** A live tailer whose transcript is missing scans for the marker on every poll for this long after
  *  start or a new input, then at 1 s doubling to 30 s. Missing means Claude has not taken the prompt
@@ -58,34 +58,36 @@ const MARKER_SCAN_MAX_INTERVAL_MS = 30_000;
 /** Marker head result per candidate, valid while its mtime and size are unchanged. */
 type MarkerHeads = Map<string, { mtimeMs: number; size: number; match: boolean }>;
 
-/** Newest *.jsonl (by mtime) in a Claude project dir, or undefined.
+/** Newest *.jsonl (by mtime) across a cwd's Claude project dirs, or undefined.
  *
  *  DANGEROUS on its own: the project dir is keyed by cwd ALONE, so every
  *  dutydeck session started in the same repo lands here, and "newest" is then
  *  a sibling's transcript as often as it is ours. Only reachable now when the
  *  caller supplies no session id (tooling / tests). Session-scoped callers go
  *  through resolveClaudeTranscriptPath with a sessionId. */
-function findLatestJsonl(dir: string): string | undefined {
-  if (!existsSync(dir)) return undefined;
-  let entries: string[];
-  try {
-    entries = readdirSync(dir);
-  } catch {
-    return undefined;
-  }
+function findLatestJsonl(dirs: readonly string[]): string | undefined {
   let latest: string | undefined;
   let latestMtime = -Infinity;
-  for (const name of entries) {
-    if (!name.endsWith('.jsonl')) continue;
-    const full = join(dir, name);
+  for (const dir of dirs) {
+    if (!existsSync(dir)) continue;
+    let entries: string[];
     try {
-      const st = statSync(full);
-      if (st.isFile() && st.mtimeMs > latestMtime) {
-        latestMtime = st.mtimeMs;
-        latest = full;
-      }
+      entries = readdirSync(dir);
     } catch {
-      // File disappeared between readdir and stat — ignore.
+      continue;
+    }
+    for (const name of entries) {
+      if (!name.endsWith('.jsonl')) continue;
+      const full = join(dir, name);
+      try {
+        const st = statSync(full);
+        if (st.isFile() && st.mtimeMs > latestMtime) {
+          latestMtime = st.mtimeMs;
+          latest = full;
+        }
+      } catch {
+        // File disappeared between readdir and stat — ignore.
+      }
     }
   }
   return latest;
@@ -123,38 +125,44 @@ export function resolveClaudeTranscriptPath(
   env?: CliPathEnv,
   sessionId?: string,
 ): string | undefined {
-  const projectDir = claudeProjectDir(cwd, env);
-  if (sessionId) return resolveClaudeSessionTranscript(projectDir, sessionId);
+  // A long cwd has two project dirs (current and legacy key); see
+  // claudeProjectDirCandidates. Short paths have exactly one.
+  const projectDirs = claudeProjectDirCandidates(cwd, env);
+  if (sessionId) return resolveClaudeSessionTranscript(projectDirs, sessionId);
   // No session id (tooling, tests): the historical mtime pick, which is only
   // unambiguous when a single session owns the cwd.
-  return findLatestJsonl(projectDir);
+  return findLatestJsonl(projectDirs);
 }
 
-/** The session's own jsonl inside an already-resolved project dir: pinned id
- *  first, marker scan second, undefined when neither identifies it. */
-function resolveClaudeSessionTranscript(projectDir: string, sessionId: string): string | undefined {
+/** The session's own jsonl inside a cwd's project dirs: pinned id first,
+ *  marker scan second, undefined when neither identifies it. */
+function resolveClaudeSessionTranscript(projectDirs: readonly string[], sessionId: string): string | undefined {
   // Pinned id first. Scan path: find the transcript whose first user prompt
   // carries our marker. Newest-first only bounds the work — the marker decides
   // which is ours. Same contract as the session-id lookup; see marker.ts.
-  return pinnedClaudeTranscript(projectDir, sessionId) ?? findJsonlByMarker(projectDir, sessionId);
+  const pinned = pinnedClaudeTranscript(projectDirs, sessionId);
+  return pinned === null ? undefined : pinned ?? findJsonlByMarker(projectDirs, sessionId);
 }
 
 /** Fast path: dutydeck pinned the id via `--session-id <uuid>` (see
  *  cli-adapters/adapters/claude-family.ts buildArgs) and Claude accepted it,
- *  so the filename is the pinned uuid. */
-function pinnedClaudeTranscript(projectDir: string, sessionId: string): string | undefined {
+ *  so the filename is the pinned uuid. `null` when the pinned file exists in
+ *  BOTH the current and the legacy project dir: nothing here can tell which
+ *  copy is live, so the caller must not guess (or fall back to a scan that
+ *  would pick one by mtime). */
+function pinnedClaudeTranscript(projectDirs: readonly string[], sessionId: string): string | null | undefined {
   const pinned = pinnedSessionUuid(sessionId);
   if (!pinned) return undefined;
-  const direct = join(projectDir, `${pinned}.jsonl`);
-  return existsSync(direct) ? direct : undefined;
+  const found = projectDirs.map(dir => join(dir, `${pinned}.jsonl`)).filter(path => existsSync(path));
+  return found.length > 1 ? null : found[0];
 }
 
-/** The jsonl in `dir` whose head carries `marker`, or undefined. With `heads`,
+/** The jsonl in `dirs` whose head carries `marker`, or undefined. With `heads`,
  *  a candidate whose mtime and size are unchanged is not read again. */
-function findJsonlByMarker(dir: string, sessionId: string, heads?: MarkerHeads): string | undefined {
+function findJsonlByMarker(dirs: readonly string[], sessionId: string, heads?: MarkerHeads): string | undefined {
   if (!isUsableMarker(sessionId)) return undefined;
   const marker = buildSessionMarker(sessionId);
-  const candidates = walkFiles(dir, { maxDepth: 0, accept: name => name.endsWith('.jsonl') })
+  const candidates = dirs.flatMap(dir => walkFiles(dir, { maxDepth: 0, accept: name => name.endsWith('.jsonl') }))
     .sort(byMtimeDesc)
     .slice(0, MAX_MARKER_CANDIDATES);
   for (const { path, mtimeMs, size } of candidates) {
@@ -186,16 +194,17 @@ class ClaudeSessionTranscriptLocator {
   }
 
   resolve(): string | undefined {
-    const projectDir = claudeProjectDir(this.cwd, this.env);
-    const pinned = pinnedClaudeTranscript(projectDir, this.sessionId);
+    const projectDirs = claudeProjectDirCandidates(this.cwd, this.env);
+    const pinned = pinnedClaudeTranscript(projectDirs, this.sessionId);
     if (pinned) return pinned;
+    if (pinned === null) return undefined;
     const now = Date.now();
     if (now < this.nextScanAt) return undefined;
     if (now >= this.fastUntil) {
       this.nextScanAt = now + this.interval;
       this.interval = Math.min(this.interval * 2, MARKER_SCAN_MAX_INTERVAL_MS);
     }
-    return findJsonlByMarker(projectDir, this.sessionId, this.heads);
+    return findJsonlByMarker(projectDirs, this.sessionId, this.heads);
   }
 }
 

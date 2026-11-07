@@ -5,7 +5,7 @@ import { createRequire } from 'node:module';
 import { afterEach, expect, it, vi } from 'vitest';
 import { createRuntimeStore } from 'acpx/runtime';
 import { AcpxAdapter } from '@dutydeck/acp-client';
-import { buildSessionMarker } from '@dutydeck/pty-driver';
+import { buildSessionMarker, claudeProjectDirCandidates } from '@dutydeck/pty-driver';
 import { createRepositories } from '@dutydeck/storage';
 import { sessionUsageSnapshot } from './session-usage.js';
 import { UsageLedger } from './usage-ledger.js';
@@ -215,5 +215,30 @@ it.each(['source', 'checkpoint'] as const)('retains the %s Codex verified-path f
       await writeFile(path, codexUsageLines(sessionId, 'other-native', cwd, 999));
       expect(await sessionUsageSnapshot(repos, sessionId)).toEqual({});
     }
+  } finally { repos.close(); }
+});
+
+it.each([['legacy untruncated', ['legacy']], ['current truncated', ['current']], ['both', ['legacy', 'current']]] as const)('finds a long-cwd Claude transcript under the %s project dir', async (_label, layout) => {
+  const base = await mkdtemp(join(tmpdir(), 'dutydeck-usage-long-')); dirs.push(base);
+  // Encoded cwd past 200 units; the legacy key still fits one directory name.
+  const cwd = join(base, 'l'.repeat(225 - base.length - 1)); await mkdir(cwd, { recursive: true });
+  const root = join(base, 'claude-home');
+  const [current, legacy] = claudeProjectDirCandidates(cwd, { CLAUDE_CONFIG_DIR: root });
+  expect(legacy).toBeDefined();
+  const fixture = await readFile(new URL('../../../packages/pty-driver/src/transcript/fixtures/usage-claude-2.1.295.jsonl', import.meta.url), 'utf8');
+  for (const dir of layout.map(which => which === 'legacy' ? legacy! : current!)) {
+    await mkdir(dir, { recursive: true }); await writeFile(join(dir, 'native-claude.jsonl'), fixture.replaceAll('/workspace/usage', cwd));
+  }
+  const repos = createRepositories(':memory:');
+  try {
+    await repos.agents.save({ id: 'claude-code', adapterId: 'claude-code', name: 'Claude', command: 'claude', args: [], protocol: 'pty-cli', env: {}, permissionMode: 'deny-all', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false });
+    await repos.sessions.save({ id: 'long', runId: 'run-long', agentId: 'claude-code', protocol: 'pty-cli', cwd, state: 'completed', createdAt: '2026-10-13T00:00:00Z', updatedAt: '2026-10-13T00:00:00Z' });
+    // An observation without verifiedPath falls back to the cwd's candidate dirs.
+    vi.spyOn(repos.insight, 'listSources').mockReturnValue([{ observationId: 'long', sessionId: 'long', activeRunId: 'run-long', driverInstanceId: 'driver', client: 'claude', launchKind: 'created', proofKind: 'launch_observed', capturedAt: '2026-10-13T08:00:00Z', dataRoot: root, cwd, nativeSessionId: 'native-claude', verifiedPath: null, streamIdentity: { kind: 'main', nativeAgentId: null } }] as any);
+    vi.spyOn(repos.execution, 'getResources').mockReturnValue([{ runId: 'run-long', stage: 'created', kind: 'local_only', resourceId: 'driver', identity: { identityId: 'identity' } }] as any);
+    const snapshot = await sessionUsageSnapshot(repos, 'long');
+    // Two copies of one session cannot be told apart, so neither is read.
+    if (layout.length === 2) expect(snapshot.nativeTokens).toBeUndefined();
+    else expect(snapshot).toMatchObject({ nativeTokens: { source: 'claude_transcript', totalTokens: 117160 } });
   } finally { repos.close(); }
 });

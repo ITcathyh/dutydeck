@@ -1,7 +1,8 @@
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { createRuntimeStore } from 'acpx/runtime';
 import { inferAcpInsightClient } from '@dutydeck/acp-client';
-import { readCodexSessionUsage, readNativeTranscriptUsage, verifyTranscriptCheckpoint, realCwd, claudeProjectDir, claudeDataDir, codexHome, type NativeUsageSource } from '@dutydeck/pty-driver';
+import { readCodexSessionUsage, readNativeTranscriptUsage, verifyTranscriptCheckpoint, realCwd, claudeProjectDirCandidates, claudeDataDir, codexHome, type NativeUsageSource } from '@dutydeck/pty-driver';
 import { childEnvironment } from '@dutydeck/shared/child-environment';
 import { contextUsage, rateLimitWindow, taskExecutionSchemas, transcriptClientForAdapter, type RepositoryBundle, type SessionUsageSnapshot } from '@dutydeck/shared';
 
@@ -54,7 +55,7 @@ export async function sessionUsageSnapshot(repos: RepositoryBundle, sessionId: s
     const source = [...distinct.values()][0];
     let native: SessionUsageSnapshot | undefined;
     if (source) {
-      const path = source.verifiedPath ?? (client === 'claude' ? join(claudeProjectDir(session.cwd, { CLAUDE_CONFIG_DIR: source.dataRoot }), `${source.nativeSessionId}.jsonl`) : undefined);
+      const path = source.verifiedPath ?? (client === 'claude' ? claudeTranscriptPath(session.cwd, { CLAUDE_CONFIG_DIR: source.dataRoot }, source.nativeSessionId!) : undefined);
       native = await readNativeUsage(client, source.nativeSessionId!, { CODEX_HOME: source.dataRoot }, session.cwd,
         path ? { client, path, dataRoot: source.dataRoot, nativeSessionId: source.nativeSessionId!, cwd: session.cwd } : undefined);
     } else {
@@ -63,8 +64,9 @@ export async function sessionUsageSnapshot(repos: RepositoryBundle, sessionId: s
         if (record?.cwd === session.cwd && record.name === session.id) nativeId = record.agentSessionId ?? (client === 'codex' ? record.acpSessionId : undefined);
       }
       if (nativeId) {
+        const path = client === 'codex' ? undefined : claudeTranscriptPath(session.cwd, env, nativeId);
         native = await readNativeUsage(client, nativeId, env, session.cwd,
-          client === 'codex' ? undefined : { client, path: join(claudeProjectDir(session.cwd, env), `${nativeId}.jsonl`), dataRoot: claudeDataDir(env), nativeSessionId: nativeId, cwd: session.cwd });
+          path ? { client, path, dataRoot: claudeDataDir(env), nativeSessionId: nativeId, cwd: session.cwd } : undefined);
       } else if (!selected && session.protocol === 'pty-cli' && repos.execution.authority() === 'ledger_v1') {
         const dataRoot = client === 'claude' ? claudeDataDir(env) : codexHome(env);
         const paths = new Set(repos.execution.getSessionExecutions(sessionId).flatMap(execution => execution.attempts.flatMap(attempt => attempt.recoveryControllers.flatMap(recovered => recovered.evidence.kind === 'original_turn' && recovered.evidence.recovery?.transcript?.path ? [recovered.evidence.recovery.transcript.path] : []))));
@@ -95,6 +97,15 @@ export async function sessionUsageSnapshot(repos: RepositoryBundle, sessionId: s
   return snapshot;
 }
 const checkpointSources = new Map<string, NativeUsageSource>();
+
+/** A Claude session's transcript among the cwd's project dirs (current key, then
+ *  the legacy untruncated one for long paths): the copy that exists, else the
+ *  current key's path. Undefined when both exist — nothing here proves which is live. */
+function claudeTranscriptPath(cwd: string, env: Record<string, string | undefined>, nativeId: string): string | undefined {
+  const paths = claudeProjectDirCandidates(cwd, env).map(dir => join(dir, `${nativeId}.jsonl`));
+  const present = paths.filter(path => existsSync(path));
+  return present.length > 1 ? undefined : present[0] ?? paths[0];
+}
 
 /** codex 先读它自己的会话用量；读不到或不是 codex 时再读给定的原生 transcript（没给就不读）。 */
 async function readNativeUsage(client: NativeUsageSource['client'], nativeSessionId: string, codexEnv: Parameters<typeof readCodexSessionUsage>[1], cwd: string, transcript?: NativeUsageSource) {
