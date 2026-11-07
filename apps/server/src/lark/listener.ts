@@ -67,7 +67,7 @@ function readReconnectStallMs(env: NodeJS.ProcessEnv, log: ListenerLog) {
 
 // WSClient 只在拉取长连接配置时调用 request。不要对 defaultHttpInstance 加拦截器或改 defaults：
 // 它是进程内所有机器人和 lark.Client 共用的单例。它的响应拦截器返回 resp.data，SDK 按这个形状解构结果。
-// 其他成员（post、get、defaults……）原样转给 defaultHttpInstance：以后的 SDK 版本改调它们时不会抛 TypeError。
+// 其他成员（post、get、defaults……）原样转给 defaultHttpInstance，但不带撤销和总时限；SDK 升级时要确认拉配置仍走 request。
 // 只在用到时读取 defaultHttpInstance：不少测试的 SDK mock 没有这个导出。
 function abortableWsHttp(lark: typeof Lark, clientSignal: AbortSignal) {
   const request = async (config: Parameters<typeof Lark.defaultHttpInstance.request>[0]) => {
