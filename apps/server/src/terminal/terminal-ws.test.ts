@@ -2,9 +2,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import WebSocket from 'ws';
 import type { IncomingMessage } from 'node:http';
+import type { Socket } from 'node:net';
 import type { PolicyDecision, TerminalStream } from '@dutydeck/shared';
 import {
   registerTerminalRoutes,
+  registerUpgradeRoute,
+  rejectUpgrade,
   type TerminalRouteAuth,
   type TerminalStreamHandle,
   type TerminalStreamProvider
@@ -438,18 +441,14 @@ describe('terminal WS proxy', () => {
     ws.close();
   });
 
-  it('不拦截其它 pathname 的 upgrade 请求', async () => {
+  it('其它 pathname 的 upgrade 交给登记过的路由，无人认领的直接 404 断开', async () => {
     const { app, port } = await startServer(providerFrom({}));
-    const otherUpgrade = vi.fn((request: IncomingMessage, socket: { write(chunk: string): void; destroy(): void }) => {
-      const pathname = new URL(request.url ?? '/', 'http://x').pathname;
-      if (pathname.startsWith('/api/terminal/')) return;
-      socket.write('HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
-      socket.destroy();
-    });
-    app.server.on('upgrade', otherUpgrade);
+    const otherUpgrade = vi.fn((_request: IncomingMessage, socket: Socket) => rejectUpgrade(socket, 409, 'Conflict', 'other route'));
+    registerUpgradeRoute(app, { matches: request => request.url === '/api/other/thing', handle: otherUpgrade });
 
-    const rejected = await expectUpgradeRejected(port, '/api/other/thing');
-    expect(rejected.status).toBe(404);
+    expect((await expectUpgradeRejected(port, '/api/other/thing')).status).toBe(409);
+    expect(otherUpgrade).toHaveBeenCalledOnce();
+    expect((await expectUpgradeRejected(port, '/api/unclaimed')).status).toBe(404);
     expect(otherUpgrade).toHaveBeenCalledOnce();
   });
 });

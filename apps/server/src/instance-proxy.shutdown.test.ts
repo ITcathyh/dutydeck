@@ -78,3 +78,24 @@ it('preserves an upstream handshake rejection before cleaning up its sockets', a
     client.terminate(); await app.close(); await new Promise<void>(resolve => peer.close(() => resolve()));
   }
 });
+
+it('rejects an upgrade outside /api/instances/ instead of holding it through shutdown', async () => {
+  const app = Fastify(); await registerInstanceProxy(app, [{ id: 'peer', name: 'Peer', url: 'http://127.0.0.1:9' }], undefined);
+  await app.listen({ host: '127.0.0.1', port: 0 });
+  const client = connect((app.server.address() as AddressInfo).port, '127.0.0.1');
+  client.on('error', () => {});
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const response = new Promise<string>(resolve => {
+      let received = '';
+      client.on('data', chunk => { received += chunk.toString(); });
+      client.once('close', () => resolve(received));
+    });
+    client.write(['GET / HTTP/1.1', 'Host: localhost', 'Upgrade: websocket', 'Connection: Upgrade',
+      'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==', 'Sec-WebSocket-Version: 13', '', ''].join('\r\n'));
+    expect(await Promise.race([response, new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), 3_000); })])).toMatch(/^HTTP\/1\.1 404 /);
+    await closedWithin(app.close());
+  } finally {
+    clearTimeout(timer); client.destroy(); await app.close();
+  }
+});

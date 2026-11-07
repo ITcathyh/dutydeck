@@ -4,7 +4,7 @@ import type { Readable } from 'node:stream';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { RuntimeError, type ConfigRepository } from '@dutydeck/shared';
-import { rejectUpgrade, upgradeRejection, type TerminalRouteAuth } from './terminal/terminal-ws.js';
+import { registerUpgradeRoute, rejectUpgrade, upgradeRejection, type TerminalRouteAuth } from './terminal/terminal-ws.js';
 
 /**
  * 同机另起的 Dutydeck 实例（例如独立运行的 Tag bot 服务）。主服务的 dashboard 通过
@@ -162,10 +162,10 @@ export async function registerInstanceProxy(app: FastifyInstance, peers: PeerIns
     });
   });
 
-  // 终端 WebSocket 不经过 Fastify 路由，与 registerTerminalRoutes 一样在 upgrade 事件上处理。
-  app.addHook('onReady', async () => {
-    app.server.on('upgrade', (request: IncomingMessage, socket: Socket, head: Buffer) => {
-      if (!request.url?.startsWith('/api/instances/')) return;
+  // 终端 WebSocket 不经过 Fastify 路由，与 registerTerminalRoutes 共用 upgrade 分发器。
+  registerUpgradeRoute(app, {
+    matches: request => Boolean(request.url?.startsWith('/api/instances/')),
+    handle: (request: IncomingMessage, socket: Socket, head: Buffer) => {
       const upstreamTarget = target(request.url);
       const rejection: [number, string, string] | undefined = upstreamTarget ? upgradeRejection(request, auth) : [404, 'Not Found', 'instance not found'];
       if (rejection) { rejectUpgrade(socket, ...rejection); return; }
@@ -215,6 +215,6 @@ export async function registerInstanceProxy(app: FastifyInstance, peers: PeerIns
         close();
       });
       upstream.end();
-    });
+    },
   });
 }
