@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AutostartCommandOutput } from '../autostart/autostart.js';
 import { daemonRestart, daemonStart, daemonStatus, daemonStop, systemdRestartTarget } from './command.js';
 import { defaultDaemonDir, lastDaemonDirPointerFile, pidAlive, readDaemonStatus, writeLastDaemonDir, writeState, type DaemonState } from './daemon.js';
+import { expectOwnDaemonDir } from './daemon-dir.test-helpers.js';
 
 const UNIT = 'dutydeck-test.service';
 const UNIT_EXEC = '/opt/node22/bin/node';
@@ -91,6 +92,7 @@ describe('systemd 托管下的 stop / restart / start 路由', () => {
     dir = defaultDaemonDir(tmp);
     cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(tmp);
     vi.stubEnv('HOME', tmp);
+    expectOwnDaemonDir(tmp);
     // 这些用例不关心 drain：默认活动接口报告 0 个任务，且不发起真实网络请求。
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ runningTasks: 0 }) })));
   });
