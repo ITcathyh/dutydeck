@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { createRepositories } from './index.js';
-import type { AgentEvent } from '@dutydeck/shared';
+import { BACKGROUND_FOLLOWUP, type AgentEvent } from '@dutydeck/shared';
 
 const repositories: ReturnType<typeof createRepositories>[] = [];
 afterEach(() => { for (const repos of repositories.splice(0)) repos.close(); });
@@ -109,4 +109,14 @@ it('omits the tool rhythm when the recorded timestamps cannot be read', async ()
   const [turn] = (await repos.events.listHistoryOutline!('s')).turns;
   expect(turn?.output.text).toBe('final');
   expect(turn).not.toHaveProperty('activity');
+});
+
+it('keeps the turn answer as the output when a background follow-up arrives after it', async () => {
+  const repos = await fixture();
+  await repos.events.append(event(1, 'text', { role: 'user', text: 'instruction' }, 'a', 'attempt-a'));
+  await repos.events.append(event(2, 'tool_call', { id: 'bg', status: 'completed' }, 'a', 'attempt-a'));
+  await repos.events.append(event(3, 'text', { text: 'turn answer' }, 'a', 'attempt-a'));
+  await repos.events.append(event(4, 'text', { text: ' background follow-up', origin: BACKGROUND_FOLLOWUP }));
+  const [turn] = (await repos.events.listHistoryOutline!('s')).turns;
+  expect(turn).toMatchObject({ lastSequence: 4, output: { text: 'turn answer', truncated: false }, toolCount: 1 });
 });

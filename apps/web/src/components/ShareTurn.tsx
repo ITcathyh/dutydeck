@@ -7,7 +7,7 @@ import { buildTimelineSections, createTimelineProjector, type TimelineSection } 
 import { useTimelineDisclosure } from '../timeline-disclosure';
 import { elapsedMilliseconds, formatElapsed } from '../tool-presentation';
 import { MarkdownContent } from '../MarkdownContent';
-import { finalSection, formatTurnMoment, liveTurnFacts, recordSections, rhythmBarHeight, rhythmBucketCount, rhythmBuckets, displayCommand, rhythmLiveSpan, shareNowLine, summaryTurnFacts, turnStatusLabels, turnTone, type ShareStatus, type MomentWidth, type ToolSpan, type TurnFacts } from '../share-view';
+import { finalSection, formatTurnMoment, liveTurnFacts, recordSections, rhythmBarHeight, rhythmBucketCount, rhythmBuckets, displayCommand, rhythmLiveSpan, shareableEvents, shareNowLine, summaryTurnFacts, turnStatusLabels, turnTone, type ShareStatus, type MomentWidth, type ToolSpan, type TurnFacts } from '../share-view';
 import { EventContent } from './EventContent';
 import { ActivityGroupPanel, ToolDetailFormat } from './ToolCard';
 import { TimelineItem } from './TimelineItem';
@@ -50,7 +50,7 @@ export function useHistoryTurnDetail(sessionId: string, summary: HistoryTurnSumm
   const query = useQuery({ queryKey: ['history-detail', sessionId, summary?.firstSequence, summary?.lastSequence],
     queryFn: ({ signal }) => loadTurnHistory(sessionId, summary!, signal), enabled: enabled && Boolean(summary), staleTime: Infinity });
   const projector = useMemo(() => createTimelineProjector(), [summary?.id]);
-  const sections = useMemo(() => query.data ? buildTimelineSections(projector(query.data, []).timeline, tasks ?? [], false) : undefined, [projector, query.data, tasks]);
+  const sections = useMemo(() => query.data ? buildTimelineSections(projector(shareableEvents(query.data), []).timeline, tasks ?? [], false) : undefined, [projector, query.data, tasks]);
   return { query, sections };
 }
 

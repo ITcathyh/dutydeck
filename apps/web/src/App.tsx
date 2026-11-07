@@ -18,7 +18,7 @@ import { useIsMutating, useMutation, useQuery, useQueryClient } from '@tanstack/
 import { PanelRightClose, PanelRightOpen, Terminal, X } from 'lucide-react';
 import { api, type RunSummary, type Session, type SteeringResult, type Task } from './api';
 import { useDockStore } from './store';
-import { createTimelineProjector, pendingPermissionId } from './timeline';
+import { createTimelineProjector, hasAnswerSince, pendingPermissionId } from './timeline';
 import { createRawLogProjector, hasRawText } from './raw-log';
 import { Composer, type SendMode } from './components/Composer';
 import { busyStates, effectiveStatus } from './components/ui';
@@ -444,11 +444,9 @@ export default function App() {
     for (let index = timeline.length - 1; index >= 0; index--) if (timeline[index].type === 'text' && timeline[index].data.role === 'user') return index;
     return -1;
   }, [timeline]);
-  // Same as "no assistant text after the latest user message", without copying the running turn.
   const awaitingAnswer = useMemo(() => {
     if (!busyStates.has(active?.state ?? '') || latestUserIndex < 0) return false;
-    for (let index = timeline.length - 1; index > latestUserIndex; index--) if (timeline[index].type === 'text' && timeline[index].data.role !== 'user') return false;
-    return true;
+    return !hasAnswerSince(timeline, latestUserIndex);
   }, [active?.state, latestUserIndex, timeline]);
   const hasOngoingActivity = useMemo(() => timelineSections.some(section => section.kind === 'activity' && section.isLatestTurn && awaitingAnswer), [timelineSections, awaitingAnswer]);
   const isPtyCli = activeAgent?.protocol === 'pty-cli';

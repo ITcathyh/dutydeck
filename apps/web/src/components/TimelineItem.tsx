@@ -1,4 +1,5 @@
 import { useLayoutEffect, useRef, useState } from 'react';
+import { isBackgroundFollowup } from '@dutydeck/shared';
 import { useTimelineDisclosure } from '../timeline-disclosure';
 import type { TimelineEvent } from '../timeline';
 import { MarkdownContent } from '../MarkdownContent';
@@ -58,6 +59,11 @@ export function TimelineItem({ event, final = false, assistantLabel = 'Agent', o
   if (event.type === 'thinking') return null;
   const user = event.data.role === 'user';
   if (user) return <UserMessage id={event.id} text={event.data.text ?? ''} steered={Boolean(event.data.steering)}/>;
+  // 后台任务结束后的回答按到达时间插在时间线上，不属于任何一轮，也不显示来源任务 id。
+  if (isBackgroundFollowup(event)) return <article aria-label="后台任务结果" className="assistant-output markdown ui-timeline-item my-5 max-w-[78ch] border-l-2 border-default pl-4 text-body text-primary">
+    <div className="mb-1 text-caption text-subtle">后台任务结果</div>
+    <EventContent data={event.data}/>
+  </article>;
   if (final) return <article aria-label={`${assistantLabel} 最终输出`} className="assistant-output markdown ui-timeline-item my-4 max-w-[78ch] text-body text-primary"><EventContent data={event.data}/></article>;
   return <article className="assistant-output markdown ui-timeline-item my-5 max-w-[78ch] text-body text-primary"><EventContent data={event.data}/></article>;
 }

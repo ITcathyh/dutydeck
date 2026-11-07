@@ -1,3 +1,4 @@
+import { isBackgroundFollowup } from '@dutydeck/shared';
 import type { HistoryTurnSummary, Session, Task } from './api';
 import { isChildDiagnostic, toolCommand, toolDescription, type TimelineEvent, type TimelineSection } from './timeline';
 import { toolActionLabel, toolPresentation } from './tool-presentation';
@@ -60,9 +61,14 @@ export function finalSection(sections: TimelineSection[]) {
 }
 
 /** 一轮的展开记录：提问已在英雄区或引语里，最终输出在结论卡里，这里不再重复。 */
+/** 分享页不显示后台任务结束后的回答：它不属于任何一轮，已发出的链接内容也不因它变化。 */
+export function shareableEvents<T extends { data?: unknown }>(events: T[]) {
+  return events.filter(event => !isBackgroundFollowup(event));
+}
+
 export function recordSections(sections: TimelineSection[]) {
   const final = finalSection(sections);
-  return sections.filter(section => section !== final && !isPrompt(section));
+  return sections.filter(section => section !== final && !isPrompt(section) && !(section.kind === 'event' && isBackgroundFollowup(section.event)));
 }
 
 export function liveTurnFacts(sections: TimelineSection[], running: boolean): TurnFacts {

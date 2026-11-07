@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { useQuery } from '@tanstack/react-query';
 import { ArrowUpRight, Link2Off, MessageSquareText, UserRound, Users } from 'lucide-react';
 import { api, ApiError, type Session } from '../api';
-import { createTimelineProjector, type TimelineSection } from '../timeline';
+import { createTimelineProjector, hasAnswerSince, type TimelineSection } from '../timeline';
 import { useEventHistory } from '../useEventHistory';
 import { sessionDisplayName } from '../run-summary';
 import { sessionErrorSummary } from '../workspace-model';
@@ -44,7 +44,7 @@ export function SharedSessionPage({ sessionId }: { sessionId: string }) {
     for (let index = timeline.length - 1; index >= 0; index--) if (timeline[index].type === 'text' && timeline[index].data.role === 'user') return index;
     return -1;
   }, [timeline]);
-  const awaitingAnswer = busyStates.has(session?.state ?? '') && latestUserIndex >= 0 && !timeline.slice(latestUserIndex + 1).some(event => event.type === 'text' && event.data.role !== 'user');
+  const awaitingAnswer = busyStates.has(session?.state ?? '') && latestUserIndex >= 0 && !hasAnswerSince(timeline, latestUserIndex);
   const hasOngoingActivity = timelineSections.some(section => section.kind === 'activity' && section.isLatestTurn && awaitingAnswer);
   const running = Boolean(session && !session.archivedAt && busyStates.has(session.state));
 

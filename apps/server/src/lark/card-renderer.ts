@@ -1,4 +1,4 @@
-import { isChildDiagnostic, terminalTaskStatuses, type AgentEvent, type VerificationResponse, type VerificationStatus } from '@dutydeck/shared';
+import { isBackgroundFollowup, isChildDiagnostic, terminalTaskStatuses, type AgentEvent, type VerificationResponse, type VerificationStatus } from '@dutydeck/shared';
 import type { StoredLarkConfig } from './config.js';
 import { boundLarkCardElements, LarkServiceError } from './service.js';
 import { redactTraceText, sensitiveTraceKey } from './secret-redaction.js';
@@ -152,7 +152,8 @@ export function eventsForRuntimeTask(events: AgentEvent[], taskId: string) {
     const task = (event.data as any)?.task;
     return task?.id === taskId && terminalTaskStates.has(task.status);
   });
-  return events.slice(start + 1, endOffset < 0 ? undefined : start + 1 + endOffset);
+  // Background follow-ups are run-level: they never count as this turn's progress or result.
+  return events.slice(start + 1, endOffset < 0 ? undefined : start + 1 + endOffset).filter(event => !isBackgroundFollowup(event));
 }
 
 export async function loadLarkTaskEvents(
@@ -1323,7 +1324,7 @@ export function renderLarkTrace(events: AgentEvent[], config: Pick<StoredLarkCon
 /** Full public execution record: do not export internal analysis or opaque PTY
  * screens, which may contain a CLI's private reasoning. No visual trace limits. */
 export function renderLarkRecordExport(events: AgentEvent[]): string {
-  const sections = compactTraceEntries(events).flatMap(entry => {
+  const sections = compactTraceEntries(events.filter(event => !isBackgroundFollowup(event))).flatMap(entry => {
     const data = entry.data;
     const time = entry.timestamp;
     if (entry.type === 'text') return [`## ${time} · Agent\n\n${redactTraceText(String(data.text ?? ''))}`];

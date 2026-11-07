@@ -25,7 +25,7 @@ import { isLarkGroupMemoryPool, larkMemoryScope, type LarkMemoryEntry, type Lark
 import { relevantMemoryBudget, renderLarkMemoryInjection, renderMemoryIndex } from './memory-view.js';
 import { larkAdhdModePrompt } from './adhd-mode.js';
 import type { AgentEvent, PolicyAction, Session, TaskRecord, ToolRiskPolicy } from '@dutydeck/shared';
-import { deferredConfirmationId, RuntimeError, supportsRemoteApproval } from '@dutydeck/shared';
+import { deferredConfirmationId, isBackgroundFollowup, RuntimeError, supportsRemoteApproval } from '@dutydeck/shared';
 import { executionTaskId } from '@dutydeck/storage';
 import { isBotSenderType } from './card-mentions.js';
 import { defaultHighRiskPattern, defaultLarkIdleCompactHours, defaultLarkTraceLimit, larkMemoryEnabled, larkPermissionMode, readLarkConfigs, type StoredLarkConfig } from './config.js';
@@ -1828,6 +1828,8 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     if (this.stopped || task.turn !== currentTurn || await closePreparedTurn()) return;
 
     const appendEvent = (agentEvent: AgentEvent) => {
+      // A background task's later answer belongs to no turn, so the live card never shows it.
+      if (isBackgroundFollowup(agentEvent)) return;
       if (larkFallbackHasActivity(agentEvent)) task.fallbackHasActivity = true;
       const previous = task.events.at(-1);
       const data = agentEvent.data as any;
