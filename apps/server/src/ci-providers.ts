@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { RuntimeError, type CiCallContext, type CiProvider, type CiProviderCall, type CiRepository, type PublicCiProvider } from '@dutydeck/shared';
+import { SAFE_GIT_CONFIG, safeGitEnvironment } from '@dutydeck/shared/safe-git';
 import { withTimeout } from './plugins/hooks.js';
 
 const run = promisify(execFile);
@@ -97,7 +98,7 @@ export const ciProviderLabel = (registry: CiProviderRegistry | undefined, id: st
 export const changeRequestLabel = (provider: CiProvider | undefined, number: number) => provider?.changeRequestLabel?.(number) ?? `#${number}`;
 
 export async function git(cwd: string, args: string[]) {
-  const { stdout } = await run('git', ['-C', cwd, ...args], { timeout: 10_000, maxBuffer: 4 * 1024 * 1024 });
+  const { stdout } = await run('git', ['-C', cwd, ...SAFE_GIT_CONFIG, ...args], { env: safeGitEnvironment(process.env), timeout: 10_000, maxBuffer: 4 * 1024 * 1024 });
   return stdout.trim();
 }
 

@@ -5,6 +5,7 @@ import { lstat, readFile, readdir, readlink, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ConfigRepository, VerificationCommandInput, VerificationRecord, VerificationResponse } from '@dutydeck/shared';
 import { makeId, now, RuntimeError } from '@dutydeck/shared';
+import { SAFE_GIT_CONFIG } from '@dutydeck/shared/safe-git';
 import { minimalToolEnvironment } from './process-environment.js';
 
 const runFile = promisify(execFile);
@@ -41,7 +42,8 @@ interface CommandResult {
 
 async function git(cwd: string, args: string[]): Promise<string> {
   try {
-    const { stdout } = await runFile('git', ['-C', cwd, ...args], {
+    // ls-files and rev-parse never run filter drivers; a command reading work tree content would need safeGitConfigFor.
+    const { stdout } = await runFile('git', ['-C', cwd, ...SAFE_GIT_CONFIG, ...args], {
       encoding: 'utf8', maxBuffer: 16 * 1024 * 1024,
       env: { ...minimalToolEnvironment(), GIT_TERMINAL_PROMPT: '0' }
     });

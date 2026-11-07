@@ -83,6 +83,8 @@ const REDACTION_VERSION = 'redaction-v1';
 /** 固定范围口径版本，与 T4d summary.scopeVersion 默认值一致。 */
 const SCOPE_VERSION = 'primary_verified_v1';
 const SCHEMA_VERSION = 1;
+/** details 现场计算的 host 投影（过期判断用的 digest、无快照时的宿主证据）复用时长：反复打开或刷新面板不再每次全仓扫描、重算全部任务的脱敏投影。 */
+const HOST_PROJECTION_TTL_MS = 15_000;
 
 /**
  * 允许写入刷新状态 errorCode 的受控白名单（固定安全字面，不含路径/token/stderr）。
@@ -239,6 +241,7 @@ export class SessionInsightService {
   private closing = false;
   private initialized = false;
   private runnerPump: Promise<void> | undefined;
+  private readonly hostProjections = new Map<string, { key: string; at: number; value: Promise<unknown> }>();
 
   constructor(options: SessionInsightServiceOptions) {
     this.repos = options.insightRepository;
@@ -702,7 +705,8 @@ export class SessionInsightService {
 
     if (!snapshot) {
       // 无缓存：现场只读冻结宿主执行信息（summary=null + hostEvidence + fallback），200 非 404。
-      const hostEvidence = this.projectCurrentHostEvidence(sessionId);
+      const hostEvidence = await this.cachedHostProjection(`evidence\0${sessionId}`, `${status.requestId ?? ''}\0${status.refreshState}`,
+        async () => this.projectCurrentHostEvidence(sessionId));
       return {
         status: { ...status, availability: 'none', freshness: 'unknown', currentSnapshotId: null },
         summary: null,
@@ -719,8 +723,10 @@ export class SessionInsightService {
     let freshness: InsightFreshness = 'unknown';
     if (this.repos.getState(sessionId).bindingRevision > snapshot.manifest.bindingRevision) {
       freshness = 'stale';
-    } else {
-      const currentDigest = await this.safeCurrentHostDigest(sessionId);
+    } else if (status.refreshState !== 'queued' && status.refreshState !== 'running') {
+      // 刷新进行中面板每 2 秒轮询，结果以新快照为准：期间不扫仓库、不重算 digest。
+      const currentDigest = await this.cachedHostProjection(`digest\0${sessionId}`, `${snapshot.snapshotId}\0${status.requestId ?? ''}`,
+        () => this.safeCurrentHostDigest(sessionId));
       freshness = currentDigest && currentDigest !== snapshot.hostEvidence.digest ? 'stale' : 'unknown';
     }
 
@@ -873,6 +879,20 @@ export class SessionInsightService {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * details 现场计算的 host 投影在同一 key（快照、刷新请求）下短时复用，并发请求共用一次计算；刷新换 key 即重算。
+   * 复用期内的代码或执行变化最多晚 HOST_PROJECTION_TTL_MS 才显示（stale 或新执行记录），不会因此标成 current。
+   */
+  private cachedHostProjection<T>(slot: string, key: string, compute: () => Promise<T>): Promise<T> {
+    const now = Date.now();
+    const cached = this.hostProjections.get(slot);
+    if (cached?.key === key && cached.at <= now && now - cached.at < HOST_PROJECTION_TTL_MS) return cached.value as Promise<T>;
+    for (const [id, entry] of this.hostProjections) if (now - entry.at >= HOST_PROJECTION_TTL_MS) this.hostProjections.delete(id);
+    const value = compute();
+    this.hostProjections.set(slot, { key, at: now, value });
+    return value;
   }
 
   private async safeCurrentHostDigest(sessionId: string): Promise<string | undefined> {

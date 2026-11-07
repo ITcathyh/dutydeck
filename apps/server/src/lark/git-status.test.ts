@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest';
+import { existsSync } from 'node:fs';
 import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readGitStatusLine } from './git-status.js';
+import { readGitCodeSignature, readGitSnapshot, readGitStatusLine } from './git-status.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -92,6 +93,39 @@ describe('readGitStatusLine', () => {
     } finally {
       await rm(remoteDir, { recursive: true, force: true });
       await rm(localDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('git 状态读取不执行工作区里的程序', () => {
+  it('仓库和子模块自己配置的 fsmonitor、过滤器都不会被执行', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'git-planted-'));
+    try {
+      const git = (cwd: string, ...args: string[]) => execFileAsync('git', args, { cwd });
+      const inner = join(root, 'inner'), outer = join(root, 'outer'), marker = join(root, 'ran'), program = join(root, 'program.sh');
+      await writeFile(program, `#!/bin/sh\necho "$0 $*" >> ${JSON.stringify(marker)}\ncat\n`, { mode: 0o755 });
+      for (const dir of [inner, outer]) {
+        await mkdir(dir);
+        await git(dir, 'init', '-q', '-b', 'main');
+        await git(dir, 'config', 'user.email', 'test@example.com'); await git(dir, 'config', 'user.name', 'Test');
+        await writeFile(join(dir, '.gitattributes'), '*.txt filter=planted\n');
+        await writeFile(join(dir, 'a.txt'), 'one\n');
+        await git(dir, 'add', '.'); await git(dir, 'commit', '-qm', 'initial');
+      }
+      await git(outer, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', inner, 'sub');
+      await git(outer, 'commit', '-qm', 'add submodule');
+      for (const dir of [outer, join(outer, 'sub')]) {
+        await git(dir, 'config', 'core.fsmonitor', program);
+        await git(dir, 'config', 'filter.planted.clean', program);
+        await writeFile(join(dir, 'a.txt'), 'two\n');
+      }
+
+      expect(await readGitCodeSignature(outer)).toMatch(/^[0-9a-f]{64}$/);
+      expect(await readGitStatusLine(outer)).toContain('未提交 1 个文件');
+      expect((await readGitSnapshot(outer))?.statusTotal).toBe(1);
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
     }
   });
 });

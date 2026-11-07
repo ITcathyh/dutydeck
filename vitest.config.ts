@@ -5,6 +5,7 @@ import { vitestAliases } from './vitest.aliases';
 const alias = {
   '@dutydeck/shared/child-environment': fileURLToPath(new URL('./packages/shared/runtime/child-environment.mjs', import.meta.url)),
   '@dutydeck/shared/secret-guard': fileURLToPath(new URL('./packages/shared/runtime/secret-guard.mjs', import.meta.url)),
+  '@dutydeck/shared/safe-git': fileURLToPath(new URL('./packages/shared/runtime/safe-git.mjs', import.meta.url)),
   ...vitestAliases,
   '@dutydeck/secret-provider': fileURLToPath(new URL('./packages/secret-provider/src/index.ts', import.meta.url))
 };

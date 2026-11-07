@@ -6,6 +6,7 @@ import { mkdir, realpath, stat } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { ConfigRepository, SessionWorkspaceProof, SessionWorkspace, WorkspaceCleanupBlocker, WorkspaceMode } from '@dutydeck/shared';
 import { now, RuntimeError } from '@dutydeck/shared';
+import { SAFE_GIT_CONFIG, safeGitConfigFor } from '@dutydeck/shared/safe-git';
 import { minimalToolEnvironment } from './process-environment.js';
 
 const runFile = promisify(execFile);
@@ -15,12 +16,19 @@ async function git(cwd: string, args: string[], timeoutMs = 15_000): Promise<str
   return (await gitRaw(cwd, args, timeoutMs)).trim();
 }
 
+/** Commands that read or check out work tree content; the repository's own filter drivers must not run for them. */
+const WORK_TREE_COMMANDS = new Set(['status', 'worktree', 'submodule']);
+
 async function gitRaw(cwd: string, args: string[], timeoutMs = 15_000): Promise<string> {
   try {
-    const { stdout } = await runFile('git', ['-C', cwd, ...args], {
+    const env = { ...minimalToolEnvironment(), GIT_TERMINAL_PROMPT: '0' };
+    // `worktree remove` runs status inside the target work tree, which can carry its own per-worktree config.
+    const location = args[0] === 'worktree' && args[1] === 'remove' ? args.at(-1)! : cwd;
+    const config = WORK_TREE_COMMANDS.has(args[0]!) ? await safeGitConfigFor(['-C', location], { env, timeout: timeoutMs }) : SAFE_GIT_CONFIG;
+    const { stdout } = await runFile('git', ['-C', cwd, ...config, ...args], {
       encoding: 'utf8', maxBuffer: 4 * 1024 * 1024,
       timeout: timeoutMs,
-      env: { ...minimalToolEnvironment(), GIT_TERMINAL_PROMPT: '0' }
+      env
     });
     return stdout;
   } catch (error) {
@@ -503,7 +511,7 @@ export class WorkspaceManager {
     // Tracked / untracked / ignored 检查
     let rawStatus = '';
     try {
-      rawStatus = await gitRaw(repoRootCanonical, ['status', '--porcelain=v1', '-z', '--ignored=matching', '--untracked-files=all']);
+      rawStatus = await gitRaw(repoRootCanonical, ['status', '--porcelain=v1', '-z', '--ignored=matching', '--untracked-files=all', '--ignore-submodules=dirty']);
       const { trackedFiles, untrackedFiles, ignoredFiles } = parseGitStatusZ(rawStatus);
       if (trackedFiles.length) {
         blockers.push({ code: 'DIRTY_TRACKED', message: '存在未提交的代码改动', details: trackedFiles.slice(0, 20) });

@@ -1,9 +1,20 @@
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { safeGitConfigFor, safeGitEnvironment } from '@dutydeck/shared/safe-git';
 import { larkInsideGitRepository } from './auto-verification.js';
 
 const execFileAsync = promisify(execFile);
+
+/**
+ * 工作区归 Agent 写：status、diff 不能跑仓库配置里的 fsmonitor、过滤器，环境里也不带 daemon 的密钥。
+ * 子模块有自己的配置，这里只按父仓库停掉过滤器，所以 status、diff 都带 --ignore-submodules=dirty，不进子模块工作区。
+ */
+async function workTreeGit(cwd: string, timeout: number, maxBuffer?: number) {
+  const env = safeGitEnvironment(process.env);
+  const config = await safeGitConfigFor(['-C', cwd], { env, timeout });
+  return async (args: string[]) => (await execFileAsync('git', [...config, ...args], { cwd, env, timeout, ...(maxBuffer ? { maxBuffer } : {}) })).stdout;
+}
 
 export interface LarkGitSnapshot { branch: string; head: string; status: string[]; statusTotal: number }
 
@@ -14,10 +25,10 @@ export interface LarkGitSnapshot { branch: string; head: string; status: string[
 export async function readGitSnapshot(cwd: string): Promise<LarkGitSnapshot | undefined> {
   if (!cwd || typeof cwd !== 'string') return undefined;
   try {
-    const git = async (args: string[]) => (await execFileAsync('git', args, { cwd, timeout: 2000 })).stdout;
+    const git = await workTreeGit(cwd, 2000);
     const branch = (await git(['rev-parse', '--abbrev-ref', 'HEAD'])).trim();
     const head = (await git(['rev-parse', '--short', 'HEAD'])).trim();
-    const lines = (await git(['status', '--short'])).split('\n').filter(line => line.trim().length > 0);
+    const lines = (await git(['status', '--short', '--ignore-submodules=dirty'])).split('\n').filter(line => line.trim().length > 0);
     return { branch, head, status: lines.slice(0, 10), statusTotal: lines.length };
   } catch {
     return undefined;
@@ -34,11 +45,11 @@ export async function readGitCodeSignature(cwd: string | undefined): Promise<str
   // 不是仓库就不必起 git 进程：每一轮都会问到这里。
   if (!cwd || !larkInsideGitRepository(cwd)) return undefined;
   try {
-    const git = async (args: string[]) => (await execFileAsync('git', args, { cwd, timeout: 5000, maxBuffer: 16 * 1024 * 1024 })).stdout;
+    const git = await workTreeGit(cwd, 5000, 16 * 1024 * 1024);
     const platformData = /(?:^|[\s/])\.dutydeck(?:\/|$)/;
     const head = (await git(['rev-parse', '--verify', 'HEAD'])).trim();
-    const status = (await git(['status', '--porcelain=v1', '-z'])).split('\0').filter(entry => entry && !platformData.test(entry));
-    const numstat = (await git(['diff', 'HEAD', '--numstat', '-z'])).split('\0').filter(entry => entry && !platformData.test(entry));
+    const status = (await git(['status', '--porcelain=v1', '-z', '--ignore-submodules=dirty'])).split('\0').filter(entry => entry && !platformData.test(entry));
+    const numstat = (await git(['diff', 'HEAD', '--numstat', '-z', '--ignore-submodules=dirty'])).split('\0').filter(entry => entry && !platformData.test(entry));
     return createHash('sha256').update(JSON.stringify([head, status, numstat])).digest('hex');
   } catch {
     return undefined;
@@ -55,31 +66,20 @@ export async function readGitStatusLine(cwd: string): Promise<string | undefined
   if (!cwd || typeof cwd !== 'string') return undefined;
 
   try {
+    const git = await workTreeGit(cwd, 2000);
     // 1. 读取当前分支
-    const branchRes = await execFileAsync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
-      cwd,
-      timeout: 2000
-    });
-    const branch = branchRes.stdout.trim();
+    const branch = (await git(['rev-parse', '--abbrev-ref', 'HEAD'])).trim();
     if (!branch) return undefined;
 
     // 2. 未提交文件数（git status --porcelain 的行数）
-    const statusRes = await execFileAsync('git', ['status', '--porcelain'], {
-      cwd,
-      timeout: 2000
-    });
-    const uncommittedLines = statusRes.stdout.split('\n').filter(line => line.trim().length > 0);
+    const uncommittedLines = (await git(['status', '--porcelain', '--ignore-submodules=dirty'])).split('\n').filter(line => line.trim().length > 0);
     const uncommittedCount = uncommittedLines.length;
     const uncommittedText = uncommittedCount === 0 ? '已全部提交' : `未提交 ${uncommittedCount} 个文件`;
 
     // 3. 未推送提交数（没有 upstream 时省略该项）
     let unpushedText: string | undefined;
     try {
-      const revListRes = await execFileAsync('git', ['rev-list', '--count', '@{upstream}..HEAD'], {
-        cwd,
-        timeout: 2000
-      });
-      const unpushedCount = parseInt(revListRes.stdout.trim(), 10);
+      const unpushedCount = parseInt((await git(['rev-list', '--count', '@{upstream}..HEAD'])).trim(), 10);
       if (!Number.isNaN(unpushedCount)) {
         unpushedText = unpushedCount === 0 ? '已全部推送' : `未推送 ${unpushedCount} 个提交`;
       }

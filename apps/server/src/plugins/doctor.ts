@@ -4,6 +4,7 @@ import { pluginHostLeases } from './activation.js';
 import { listBuiltinPlugins } from './builtin.js';
 import { resolveTrigger } from './host.js';
 import { loadPluginDirectory, type LoadedPlugin } from './manifest.js';
+import { quarantineDetail, quarantineRemedy, readPluginQuarantine } from './quarantine.js';
 import { pluginSecretKey, PluginStore } from './store.js';
 
 const scenarioProblems = (plugin: LoadedPlugin) => plugin.scenarioIssues.map(issue => ({ text: `场景包未加载：${issue.file}${issue.field ? ` ${issue.field}` : ''}：${issue.message}`, command: `dutydeck plugin validate ${plugin.root}` }));
@@ -46,6 +47,8 @@ export async function pluginDoctorChecks(dataDir: string, builtinRoot?: string):
     const id = `plugins.${entry.name}`;
     const label = `插件 ${entry.name}`;
     if (!entry.enabled) { checks.push({ id, label, level: 'skip', detail: '已停用' }); continue; }
+    const quarantine = readPluginQuarantine(store.pluginsDir, entry.name);
+    if (quarantine) { checks.push({ id, label, level: 'fail', detail: quarantineDetail(quarantine), remedy: quarantineRemedy(entry.name), command: `dutydeck plugin enable ${entry.name}` }); continue; }
     if (builtinNames.has(entry.name)) { checks.push({ id: `${id}.external`, label, level: 'warn', detail: `和内置插件 ${entry.name} 同名，不会加载`, remedy: '卸载后改名重新安装。', command: `dutydeck plugin uninstall ${entry.name}` }); continue; }
     try {
       const plugin = await loadPluginDirectory(store.pluginDir(entry.name));

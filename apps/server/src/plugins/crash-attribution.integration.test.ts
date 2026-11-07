@@ -8,6 +8,7 @@ import { join, resolve } from 'node:path';
 import { afterEach, expect, it } from 'vitest';
 import { pluginsInStack, registerPluginCodeRoot } from './crash-attribution.js';
 import { writePlugin } from './scenario-fixtures.test-helpers.js';
+import { readPluginQuarantine } from './quarantine.js';
 import { PluginStore } from './store.js';
 
 const cli = resolve(import.meta.dirname, '../cli.ts');
@@ -30,7 +31,7 @@ it('names the plugin whose code directory appears in a stack', () => {
   expect(pluginsInStack(`Error: x\n    at f (${root}-other/a.js:1:1)`)).toEqual([]);
 });
 
-it('keeps the default crash exit and names the plugin when its async code throws after startup', async () => {
+it('keeps the default crash exit, names the plugin and quarantines it when its async code throws after startup', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'dutydeck-plugin-crash-'));
   cleanups.push(() => rm(dir, { recursive: true, force: true }));
   const data = join(dir, 'data'), flag = join(dir, 'crash-now');
@@ -59,4 +60,6 @@ it('keeps the default crash exit and names the plugin when its async code throws
   expect(code).not.toBe(0);
   expect(stderr).toContain('plugin boom');
   expect(stderr).toContain('in-process plugin code: crashy');
+  expect(stderr).toContain('Quarantined plugins: crashy');
+  expect(readPluginQuarantine(join(data, 'plugins'), 'crashy')).toMatchObject({ plugin: 'crashy', reason: 'crash' });
 }, 90_000);

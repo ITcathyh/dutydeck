@@ -11,6 +11,7 @@ import { readSecretValue } from '../secret-cli.js';
 import { listBuiltinPlugins } from './builtin.js';
 import { PluginHost } from './host.js';
 import { loadPluginDirectory, pluginDeclaredCapabilities, pluginPermissionFootprint, PluginValidationError, strictPluginIssues, type LoadedPlugin } from './manifest.js';
+import { quarantineDetail, quarantineRemedy } from './quarantine.js';
 import { PluginStore, PluginStoreError, treeDigest, withPluginSourceRoot, type PluginLockEntry, type PluginTrustPrompt } from './store.js';
 
 export type PluginCliAction = 'install' | 'uninstall' | 'enable' | 'disable' | 'list' | 'update' | 'activate' | 'rollback' | 'status' | 'validate' | 'inspect' | 'test' | 'init' | 'trigger-token' | 'config';
@@ -216,6 +217,7 @@ export async function runPluginCli(action: PluginCliAction, args: string[], opti
     else {
       ui.keyValues([['选定版本', `${status.selected.version ?? '(无版本)'} · ${status.selected.id}`], ['候选', status.candidate?.version ?? status.candidate?.id ?? '无'], ['上一版本', status.previous?.version ?? status.previous?.id ?? '无']]);
       for (const host of status.hosts) ui.status(host.activated ? 'ok' : 'warn', `Host PID ${host.pid}`, `${host.artifact} · ${host.activated ? '已激活' : '加载失败或未完成'}`);
+      if (status.quarantine) ui.status('fail', '已隔离', `${quarantineDetail(status.quarantine)}；${quarantineRemedy(args[0]!)}`);
       for (const blocker of status.blockers) ui.status('warn', blocker.id, blocker.detail);
       if (!status.blockers.length) ui.hint('当前可离线切换；这不代表静态校验已证明 provider 能加载。');
       else ui.hint('先在当前版本完成/取消任务并核对动作，再 dutydeck stop；systemd 实例用 systemctl --user stop <unit> 停止所有共用此目录的实例。切换后 dutydeck start / systemctl --user start <unit>。');
@@ -247,8 +249,9 @@ export async function runPluginCli(action: PluginCliAction, args: string[], opti
       try {
         const loaded = await loadPluginDirectory(plugins.pluginDir(entry.name));
         const untrusted = loaded.capabilities.filter(capability => !entry.trustedCapabilities.includes(capability));
-        const problem = untrusted.length ? `能力未经确认：${untrusted.join('、')}` : scenarioProblem(loaded);
-        return { entry, activation: await plugins.activationStatus(entry.name), ...(problem ? { problem } : {}) };
+        const activation = await plugins.activationStatus(entry.name);
+        const problem = activation.quarantine ? quarantineDetail(activation.quarantine) : untrusted.length ? `能力未经确认：${untrusted.join('、')}` : scenarioProblem(loaded);
+        return { entry, activation, ...(problem ? { problem } : {}) };
       } catch (error) { return { entry, activation: undefined, problem: error instanceof Error ? error.message : String(error) }; }
     }));
     if (json) { emit({ plugins: [...builtins.map(item => ({ ...item, builtin: true, scope: 'global', enabled: true })), ...checked.map(({ entry, problem, activation }) => ({ ...entry, ...(activation ? { activation } : {}), ...(problem ? { problem } : {}) }))] }); return { ok: true }; }
