@@ -249,6 +249,16 @@ describe('CommandPalette 键盘导航', () => {
     fireEvent.keyDown(input(), { key: 'ArrowDown' });
     expect(selected()).toBe(options[1]);
   });
+
+  it('输入法组字中的 Escape 只取消组字：不关面板，也不冒泡给下层', () => {
+    const onClose = vi.fn();
+    const underlyingClose = vi.fn();
+    function Underlying() { useEscapeKey(true, underlyingClose); return <div>下层浮层</div>; }
+    render(<><Underlying/><CommandPalette {...keyboardProps} onClose={onClose}/></>);
+    fireEvent.keyDown(input(), { key: 'Escape', keyCode: 229 });
+    expect(onClose).not.toHaveBeenCalled();
+    expect(underlyingClose).not.toHaveBeenCalled();
+  });
 });
 
 describe('CommandPalette 任务行信息与全量性', () => {

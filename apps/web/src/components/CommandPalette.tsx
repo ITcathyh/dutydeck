@@ -136,7 +136,8 @@ export function CommandPalette({ open, onClose, sessions, summaries, agents, act
   */
   const onKeyDown = (event: KeyboardEvent<HTMLElement>) => {
     // 组字期间方向键、Home/End 选候选词，Escape 取消组字，都归输入法处理。
-    if (isImeComposing(event)) return;
+    // 组字时的 Escape 同样不能冒泡到下层弹层的 document 监听。
+    if (isImeComposing(event)) { if (event.key === 'Escape') event.stopPropagation(); return; }
     if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onClose(); return; }
     if (event.key === 'ArrowDown') { event.preventDefault(); move(activeIndex + 1, 1); return; }
     if (event.key === 'ArrowUp') { event.preventDefault(); move(activeIndex - 1, -1); return; }
