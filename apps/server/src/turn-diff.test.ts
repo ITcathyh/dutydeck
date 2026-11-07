@@ -9,7 +9,7 @@ import { buildTurnDiffReviewPrompt, createTurnDiffObserver, listTurnDiffRecords,
 
 const run = promisify(execFile);
 const dirs: string[] = [];
-afterEach(async () => { for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }); });
+afterEach(async () => { vi.unstubAllEnvs(); for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }); });
 
 async function repo() {
   const dir = await mkdtemp(join(tmpdir(), 'turn-diff-'));
@@ -308,8 +308,12 @@ describe('turn diff snapshots', () => {
     // 快照的 git add 卡在过滤器里然后失败；这期间别的 git 进程写了松散对象的临时文件，还有下面真实的 index-pack 在写包。
     await writeFile(join(dir, '.gitattributes'), 'slow.txt filter=slow\n');
     await writeFile(join(dir, 'slow.txt'), 'modified\n');
-    await git('config', 'filter.slow.clean', `mkdir -p '${join(objects, 'ab')}' && echo other > '${looseTemp}' && touch '${ready}' && sleep 1; exit 1`);
-    await git('config', 'filter.slow.required', 'true');
+    // 仓库自己配置的过滤器快照不会跑，这里用运维侧（命令行范围）的配置。
+    vi.stubEnv('GIT_CONFIG_COUNT', '2');
+    vi.stubEnv('GIT_CONFIG_KEY_0', 'filter.slow.clean');
+    vi.stubEnv('GIT_CONFIG_VALUE_0', `mkdir -p '${join(objects, 'ab')}' && echo other > '${looseTemp}' && touch '${ready}' && sleep 1; exit 1`);
+    vi.stubEnv('GIT_CONFIG_KEY_1', 'filter.slow.required');
+    vi.stubEnv('GIT_CONFIG_VALUE_1', 'true');
     const reasons: string[] = [];
     const snapshot = snapshotWorkingTree(dir, 4_000, { onSkip: skip => reasons.push(skip.message) });
     const waitFor = async <T>(probe: () => Promise<T | undefined>) => {
@@ -505,6 +509,25 @@ describe('turn diff snapshots', () => {
     ]);
     expect(diff.files[0]).toMatchObject({ status: 'renamed', oldPath: 'old-name.txt' });
     expect(diff.truncated).toBe(true);
+  });
+
+  it('snapshots an agent-writable repository without running its fsmonitor, filter drivers or hooks', async () => {
+    const { dir, git } = await repo();
+    const base = join(dir, '..', dir.split('/').pop()!);
+    const marker = `${base}-ran`, filter = `${base}-filter.sh`, monitor = `${base}-monitor.sh`;
+    dirs.push(marker, filter, monitor);
+    await writeFile(filter, `#!/bin/sh\necho filter >> ${JSON.stringify(marker)}\ncat\n`, { mode: 0o755 });
+    await writeFile(monitor, `#!/bin/sh\necho fsmonitor >> ${JSON.stringify(marker)}\n`, { mode: 0o755 });
+    await writeFile(join(dir, '.gitattributes'), '*.txt filter=planted\n');
+    for (const [key, value] of [['core.fsmonitor', monitor], ['filter.planted.clean', filter]]) await git('config', key, value);
+    await mkdir(join(dir, '.git', 'hooks'), { recursive: true });
+    await writeFile(join(dir, '.git', 'hooks', 'post-index-change'), `#!/bin/sh\necho hook >> ${JSON.stringify(marker)}\n`, { mode: 0o755 });
+    const before = await snapshotWorkingTree(dir);
+    await writeFile(join(dir, 'edit.txt'), 'one\ntwo\nthree\nfour\n');
+    const after = await snapshotWorkingTree(dir);
+    expect(before && after).toBeTruthy();
+    expect(await readTurnDiff(before!.gitDir, before!.tree, after!.tree)).toMatchObject({ files: [expect.objectContaining({ path: 'edit.txt', additions: 1 })] });
+    await expect(readFile(marker, 'utf8')).rejects.toThrow();
   });
 
   it('records the start tree and the end summary for the turn and lists turns that changed something', async () => {

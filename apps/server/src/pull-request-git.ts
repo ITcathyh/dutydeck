@@ -4,6 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { RuntimeError } from '@dutydeck/shared';
+import { SAFE_GIT_CONFIG, safeGitConfigFor, safeGitEnvironment } from '@dutydeck/shared/safe-git';
 
 /**
  * `/pr` 用到的 git 操作。全部不动用户的检出：不切分支、不改 index、不写工作区、不建本地分支，
@@ -31,11 +32,18 @@ export function redactGitOutput(text: string) {
     .replace(/\s+/g, ' ').trim().slice(0, 300);
 }
 
-export function git(repo: GitRepo, args: string[], options: { env?: NodeJS.ProcessEnv; input?: string; timeout?: number } = {}): Promise<string> {
+/** 连远端的命令要用系统、全局配置里的凭据与 ssh 设置；仓库自己的配置归 Agent 写，其中会起程序的键一律不认。 */
+const REMOTE_COMMANDS = new Set(['push', 'fetch', 'ls-remote']);
+
+export async function git(repo: GitRepo, args: string[], options: { env?: NodeJS.ProcessEnv; input?: string; timeout?: number } = {}): Promise<string> {
   const prefix = 'cwd' in repo ? ['-C', repo.cwd] : ['--git-dir', repo.gitDir];
+  const env = safeGitEnvironment(process.env, { GIT_OPTIONAL_LOCKS: '0', ...options.env });
+  const config = REMOTE_COMMANDS.has(args[0]!)
+    ? await safeGitConfigFor(prefix, { env }).catch(error => { throw new RuntimeError('PR_GIT_FAILED', `git config 失败：${redactGitOutput(String(error instanceof Error ? error.message : error))}`, 500); })
+    : SAFE_GIT_CONFIG;
   return new Promise((resolve, reject) => {
-    const child = execFile('git', [...prefix, ...args], {
-      env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0', ...options.env },
+    const child = execFile('git', [...prefix, ...config, ...args], {
+      env,
       timeout: options.timeout ?? GIT_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024, killSignal: 'SIGKILL'
     }, (error, stdout, stderr) => {
       if (!error) return resolve(stdout);
@@ -116,7 +124,7 @@ export async function buildCommit(cwd: string, parent: string, contents: PathCon
 export async function defaultBranch(cwd: string): Promise<string | undefined> {
   const local = await git({ cwd }, ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD']).catch(() => '');
   if (local.trim().startsWith('origin/')) return local.trim().slice('origin/'.length);
-  const remote = await git({ cwd }, ['ls-remote', '--symref', 'origin', 'HEAD'], { timeout: PUSH_TIMEOUT_MS }).catch(() => '');
+  const remote = await git({ cwd }, ['ls-remote', '--upload-pack=git-upload-pack', '--symref', 'origin', 'HEAD'], { timeout: PUSH_TIMEOUT_MS }).catch(() => '');
   return /^ref: refs\/heads\/(\S+)\tHEAD$/m.exec(remote)?.[1];
 }
 
@@ -142,7 +150,7 @@ export async function localCommits(cwd: string, target: string): Promise<{ commi
  */
 function directRemote(url: string) {
   const name = `dutydeck-${randomUUID()}`;
-  const base = Number(process.env.GIT_CONFIG_COUNT) || 0;
+  const base = Number(safeGitEnvironment(process.env).GIT_CONFIG_COUNT) || 0;
   const env: NodeJS.ProcessEnv = { GIT_CONFIG_COUNT: String(base + 2) };
   ['url', 'pushurl'].forEach((key, index) => { env[`GIT_CONFIG_KEY_${base + index}`] = `remote.${name}.${key}`; env[`GIT_CONFIG_VALUE_${base + index}`] = url; });
   return { name, env };
@@ -208,5 +216,12 @@ export async function pushBranch(cwd: string, url: string, commit: string, branc
   if (claimed) assertClaimedPushTarget(branch, target);
   else assertPushTarget(branch, target);
   const remote = directRemote(url);
-  await git({ cwd }, ['push', '--porcelain', remote.name, `${commit}:refs/heads/${branch}`], { env: remote.env, timeout: PUSH_TIMEOUT_MS });
+  // 推到本机路径时 receive-pack 在本机按目标仓库的配置跑（hooks、checkout 等），命令行 -c 传不过去，要写进 receive-pack 命令本身（经 sh 执行）。
+  const receivePack = isLocalRemote(url)
+    ? [`--receive-pack=git ${[...SAFE_GIT_CONFIG, '-c', 'receive.denyCurrentBranch=refuse'].map(arg => `'${arg.replaceAll("'", `'\\''`)}'`).join(' ')} receive-pack`]
+    : [];
+  await git({ cwd }, ['push', '--porcelain', '--no-verify', ...receivePack, remote.name, `${commit}:refs/heads/${branch}`], { env: remote.env, timeout: PUSH_TIMEOUT_MS });
 }
+
+/** 本机路径或 file:// 地址；带协议的地址和 scp 写法（host:path）都不是。 */
+const isLocalRemote = (url: string) => /^file:\/\//i.test(url) || (!/^[a-z][a-z0-9+.-]*:\/\//i.test(url) && !/^[^/]*:/.test(url));

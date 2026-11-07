@@ -24,7 +24,7 @@ beforeAll(async () => {
     plugins: [{ name: 'workspace-sources', setup(builder) {
       builder.onResolve({ filter: /^@dutydeck\// }, ({ path }) => {
         const name = path.slice('@dutydeck/'.length);
-        const source = name === 'shared/child-environment' || name === 'shared/secret-guard'
+        const source = name === 'shared/child-environment' || name === 'shared/secret-guard' || name === 'shared/safe-git'
           ? `packages/shared/runtime/${name.slice('shared/'.length)}.mjs`
           : `packages/${name === 'runtime' ? 'agent-runtime' : name}/src/index.ts`;
         return { path: join(workspaceRoot, source) };

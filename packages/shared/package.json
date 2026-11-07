@@ -14,6 +14,10 @@
       "types": "./runtime/secret-guard.d.mts",
       "import": "./runtime/secret-guard.mjs"
     },
+    "./safe-git": {
+      "types": "./runtime/safe-git.d.mts",
+      "import": "./runtime/safe-git.mjs"
+    },
     ".": {
       "types": "./dist/index.d.ts",
       "development": "./src/index.ts",

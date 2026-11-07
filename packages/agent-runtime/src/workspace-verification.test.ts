@@ -107,7 +107,7 @@ describe('managed Session workspaces', () => {
     expect((await runtime.getSession(first.id))?.workspaceSourceCwd).toBe(join(source, 'nested'));
   });
 
-  it('does not expose service credentials to Git worktree checkout hooks', async () => {
+  it('runs no repository hooks, so none sees service credentials, during Git worktree checkout', async () => {
     const source = repository(); const workspaceRoot = temporary('dutydeck-workspaces-');
     const markerFile = join(temporary('dutydeck-hook-'), 'observed.txt');
     const hook = join(source, '.git', 'hooks', 'post-checkout');
@@ -118,8 +118,9 @@ describe('managed Session workspaces', () => {
     process.env.DUTYDECK_SERVICE_TOKEN = 'service-hook-secret-0123456789';
     const h = open(':memory:', { workspaceRoot }); await h.runtime.initialize([agent]);
     try {
-      await h.runtime.start({ agentId: agent.id, cwd: source, workspaceMode: 'worktree' });
-      expect(readFileSync(markerFile, 'utf8')).toBe('unset');
+      const session = await h.runtime.start({ agentId: agent.id, cwd: source, workspaceMode: 'worktree' });
+      expect(readFileSync(join(session.cwd, 'tracked.txt'), 'utf8')).toBe('baseline\n');
+      expect(existsSync(markerFile)).toBe(false);
     } finally {
       if (previous === undefined) delete process.env.DUTYDECK_SERVICE_TOKEN;
       else process.env.DUTYDECK_SERVICE_TOKEN = previous;

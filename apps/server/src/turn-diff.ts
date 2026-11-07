@@ -5,6 +5,7 @@ import { chmod, copyFile, lstat, mkdir, mkdtemp, readdir, rename, rm, stat, utim
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ConfigRepository, Session } from '@dutydeck/shared';
+import { SAFE_GIT_CONFIG, safeGitConfigFor, safeGitEnvironment } from '@dutydeck/shared/safe-git';
 
 /**
  * 一轮任务的改动范围（手机上「查看改动」）。
@@ -55,9 +56,10 @@ export type TurnDiffView = { sessionId: string; taskId: string; summary: TurnDif
 
 const turnDiffKey = (sessionId: string, taskId: string) => `turn_diff.${sessionId}.${taskId}`;
 
-function git(args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; timeout: number; input?: string }): Promise<string> {
+/** 工作区归 Agent 写，仓库自己的配置和 hooks 都不可信：config 默认只钉住会起程序的键，读写工作区内容时还要按仓库配置停掉过滤器。 */
+function git(args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; timeout: number; input?: string; config?: readonly string[] }): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = execFile('git', args, { cwd: options.cwd, env: options.env, timeout: Math.max(1, options.timeout), maxBuffer: 16 * 1024 * 1024, killSignal: 'SIGKILL' },
+    const child = execFile('git', [...(options.config ?? SAFE_GIT_CONFIG), ...args], { cwd: options.cwd, env: options.env ?? safeGitEnvironment(process.env), timeout: Math.max(1, options.timeout), maxBuffer: 16 * 1024 * 1024, killSignal: 'SIGKILL' },
       (error, stdout) => error ? reject(error) : resolve(stdout));
     if (options.input !== undefined) child.stdin?.end(options.input);
   });
@@ -73,8 +75,8 @@ const snapshotPathspec = ['--', '.', ':(exclude,glob)**/.dutydeck/**'];
 /** 快照没拍的原因：kind 供调用方分支，message 是给人看的中文说明。 */
 export type SnapshotSkip = { kind: 'untracked_count' | 'untracked_file_size' | 'untracked_total_size' | 'timeout' | 'error'; file?: string; message: string };
 
-async function untrackedOverLimit(top: string, timeout: number, limits: typeof TURN_SNAPSHOT_UNTRACKED_LIMITS): Promise<SnapshotSkip | undefined> {
-  const paths = (await git(['ls-files', '-o', '--exclude-standard', '-z', ...snapshotPathspec], { cwd: top, timeout })).split('\0').filter(Boolean);
+async function untrackedOverLimit(top: string, timeout: number, limits: typeof TURN_SNAPSHOT_UNTRACKED_LIMITS, config: readonly string[]): Promise<SnapshotSkip | undefined> {
+  const paths = (await git(['ls-files', '-o', '--exclude-standard', '-z', ...snapshotPathspec], { cwd: top, timeout, config })).split('\0').filter(Boolean);
   if (paths.length > limits.files) return { kind: 'untracked_count', message: `未跟踪文件 ${paths.length} 个，超过 ${limits.files} 个` };
   let total = 0;
   for (const path of paths) {
@@ -128,8 +130,10 @@ export async function snapshotWorkingTree(cwd: string, timeoutMs = TURN_SNAPSHOT
   try {
     const [top, index, gitDir] = (await git(['rev-parse', '--path-format=absolute', '--show-toplevel', '--git-path', 'index', '--git-common-dir'], { cwd, timeout: remaining() })).trim().split('\n');
     if (!top || !index || !gitDir) return undefined;
+    stage = '读取 git 配置';
+    const config = await safeGitConfigFor(['-C', top], { env: safeGitEnvironment(process.env), timeout: remaining() });
     stage = '检查未跟踪文件';
-    const overLimit = await untrackedOverLimit(top, remaining(), options.limits ?? TURN_SNAPSHOT_UNTRACKED_LIMITS);
+    const overLimit = await untrackedOverLimit(top, remaining(), options.limits ?? TURN_SNAPSHOT_UNTRACKED_LIMITS, config);
     if (overLimit) { options.onSkip?.(overLimit); return undefined; }
     scratch = await mkdtemp(join(tmpdir(), 'dutydeck-turn-diff-'));
     const tempIndex = join(scratch, 'index');
@@ -143,10 +147,10 @@ export async function snapshotWorkingTree(cwd: string, timeoutMs = TURN_SNAPSHOT
     const ownObjects = join(scratch, 'objects');
     await mkdir(join(ownObjects, 'info'), { recursive: true });
     await writeFile(join(ownObjects, 'info', 'alternates'), `${objects}\n`);
-    const env = { ...process.env, GIT_INDEX_FILE: tempIndex, GIT_OBJECT_DIRECTORY: ownObjects, GIT_OPTIONAL_LOCKS: '0' };
+    const env = safeGitEnvironment(process.env, { GIT_INDEX_FILE: tempIndex, GIT_OBJECT_DIRECTORY: ownObjects, GIT_OPTIONAL_LOCKS: '0' });
     stage = '写入快照';
-    await git(['add', '-A', ...snapshotPathspec], { cwd: top, env, timeout: remaining() });
-    const tree = (await git(['write-tree'], { cwd: top, env, timeout: remaining() })).trim();
+    await git(['add', '-A', ...snapshotPathspec], { cwd: top, env, timeout: remaining(), config });
+    const tree = (await git(['write-tree'], { cwd: top, env, timeout: remaining(), config })).trim();
     if (!/^[0-9a-f]{40,64}$/.test(tree)) return undefined;
     await adoptObjects(ownObjects, objects);
     return { gitDir, tree };
@@ -189,7 +193,7 @@ export async function readTurnDiffSummary(gitDir: string, before: string, after:
 /** 读补丁正文，最多 limit 字节；超出时停掉 git，返回已读到的部分并标记截断。 */
 function readPatch(args: string[], limit: number, timeoutMs: number): Promise<{ text: string; cut: boolean }> {
   return new Promise((resolve, reject) => {
-    const child = spawn('git', args, { stdio: ['ignore', 'pipe', 'ignore'] });
+    const child = spawn('git', [...SAFE_GIT_CONFIG, ...args], { env: safeGitEnvironment(process.env), stdio: ['ignore', 'pipe', 'ignore'] });
     const chunks: Buffer[] = [];
     let size = 0;
     let cut = false;
@@ -248,7 +252,7 @@ async function generatedPaths(gitDir: string, tree: string, paths: string[], tim
     }
     if (!found.length) return generated;
     scratch = await mkdtemp(join(tmpdir(), 'dutydeck-turn-attr-'));
-    const env = { ...process.env, GIT_INDEX_FILE: join(scratch, 'index'), GIT_WORK_TREE: scratch };
+    const env = safeGitEnvironment(process.env, { GIT_INDEX_FILE: join(scratch, 'index'), GIT_WORK_TREE: scratch });
     await git(['--git-dir', gitDir, 'update-index', '--add', '-z', '--index-info'], { cwd: scratch, env, timeout, input: found.join('') });
     const attrs = (await git(['--git-dir', gitDir, 'check-attr', '--cached', '-z', '--stdin', 'linguist-generated'], { cwd: scratch, env, timeout, input: paths.map(path => `${path}\0`).join('') })).split('\0');
     for (let index = 0; index + 2 < attrs.length; index += 3) if (['set', 'true'].includes(attrs[index + 2]!)) generated.add(attrs[index]!);

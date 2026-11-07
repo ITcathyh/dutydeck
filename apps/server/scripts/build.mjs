@@ -23,6 +23,7 @@ const aliases = new Map([
   ['@dutydeck/shared', 'packages/shared/src/index.ts'],
   ['@dutydeck/shared/child-environment', 'packages/shared/runtime/child-environment.mjs'],
   ['@dutydeck/shared/secret-guard', 'packages/shared/runtime/secret-guard.mjs'],
+  ['@dutydeck/shared/safe-git', 'packages/shared/runtime/safe-git.mjs'],
   ['@dutydeck/storage', 'packages/storage/src/index.ts'],
   ['@dutydeck/terminal-renderer', 'packages/terminal-renderer/src/index.ts'],
   ['@dutydeck/transports', 'packages/transports/src/index.ts']

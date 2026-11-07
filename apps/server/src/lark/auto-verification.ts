@@ -10,6 +10,7 @@ import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import type { ConfigRepository, VerificationResponse, WorkspaceResponse } from '@dutydeck/shared';
+import { SAFE_GIT_CONFIG, safeGitConfigFor, safeGitEnvironment } from '@dutydeck/shared/safe-git';
 
 const run = promisify(execFile);
 
@@ -37,9 +38,12 @@ export interface LarkAutoVerificationNote {
  */
 export type LarkAutoVerificationProgress = LarkAutoVerificationNote & { turn: number; record_id?: string };
 
+/** 工作区归 Agent 写：仓库配置里会起程序的键不认；和工作区比较的 diff 还要停掉过滤器。 */
 async function git(cwd: string, args: string[]): Promise<string> {
-  const { stdout } = await run('git', ['-C', cwd, ...args], {
-    encoding: 'utf8', timeout: 15_000, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }
+  const env = safeGitEnvironment(process.env);
+  const config = args[0] === 'diff' ? await safeGitConfigFor(['-C', cwd], { env }) : SAFE_GIT_CONFIG;
+  const { stdout } = await run('git', ['-C', cwd, ...config, ...args], {
+    encoding: 'utf8', timeout: 15_000, maxBuffer: 16 * 1024 * 1024, env
   });
   return stdout;
 }
@@ -99,7 +103,7 @@ export async function inferLarkVerificationCommand(cwd: string, base: string): P
 export async function larkWorkspaceChanged(cwd: string, base: string): Promise<boolean> {
   const root = (await git(cwd, ['rev-parse', '--show-toplevel'])).trim();
   const paths = [
-    ...(await git(root, ['diff', '--name-only', '-z', base, '--'])).split('\0'),
+    ...(await git(root, ['diff', '--name-only', '-z', '--ignore-submodules=dirty', base, '--'])).split('\0'),
     ...(await git(root, ['ls-files', '--others', '--exclude-standard', '-z'])).split('\0')
   ];
   return paths.some(path => path && path.split('/').every(segment => segment !== '.dutydeck'));
