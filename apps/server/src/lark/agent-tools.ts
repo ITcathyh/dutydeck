@@ -205,6 +205,8 @@ export interface LarkAgentToolsOptions {
   clientFactory?: (config: StoredLarkConfig) => LarkGroupToolClient;
   pollIntervalMs?: number;
   groupToolsCommand?: string;
+  /** send-file 不能发的实例内部目录（数据库所在的数据目录）。 */
+  artifactPrivatePaths?: readonly string[];
   /** history list/show：只读会话、任务、执行账本和结果卡映射（显式最终答复的路由）。 */
   history?: TaskResultRepositories & { sessions: Pick<SessionRepository, 'list'>; tasks: Pick<TaskRepository, 'listBySession'>; channelMappings: Pick<ChannelMappingRepository, 'list'> };
   /** group team-search；群协作集成尚未就绪时返回 undefined。 */
@@ -1302,7 +1304,7 @@ export class LarkAgentToolsService {
       sendFile: value => value.replyTo ? this.authorized(context, 'reply', () => client.replyFile!({ messageId: value.replyTo!, replyInThread: value.inThread, fileKey: value.fileKey, idempotencyKey: value.idempotencyKey })) : this.authorized(context, 'send', () => client.sendFile!({ chatId: value.chatId, fileKey: value.fileKey, idempotencyKey: value.idempotencyKey })),
       sendImage: value => value.replyTo ? this.authorized(context, 'reply', () => client.replyImage!({ messageId: value.replyTo!, replyInThread: value.inThread, imageKey: value.imageKey, idempotencyKey: value.idempotencyKey })) : this.authorized(context, 'send', () => client.sendImage!({ chatId: value.chatId, imageKey: value.imageKey, idempotencyKey: value.idempotencyKey }))
     };
-    return deliverArtifact({ configs: this.configs, sessionId: context.sessionId, cwd: session.cwd, client: artifactClient, path, target, image: input.image === true, idempotencyKey: input.idempotencyKey });
+    return deliverArtifact({ configs: this.configs, sessionId: context.sessionId, cwd: session.cwd, client: artifactClient, path, target, image: input.image === true, idempotencyKey: input.idempotencyKey, privatePaths: this.options.artifactPrivatePaths });
   }
 
   private async resolveHandoffScope(token: string | undefined, turn?: string): Promise<{

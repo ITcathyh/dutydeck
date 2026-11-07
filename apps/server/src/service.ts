@@ -5,6 +5,7 @@ import { assertDatabaseNotQuarantined } from '@dutydeck/storage';
 import { ProjectMemoryService } from './project-memory.js';
 import { larkAgentSessionBinding } from './lark/agent-tools.js';
 import { ArtifactSnapshots } from './artifact-snapshots.js';
+import { instancePrivatePaths } from './lark/artifact-delivery.js';
 import { PluginBusinessToolService } from './plugins/tool-service.js';
 import { PluginToolLedger } from './plugins/tool-ledger.js';
 import { PluginToolGrants } from './plugins/tool-grants.js';
@@ -390,6 +391,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   const agentTools = new LarkAgentToolsService(capabilities, repos.config, {
     env,
     groupToolsCommand: options.groupToolsCommand,
+    artifactPrivatePaths: instancePrivatePaths(config.databaseUrl),
     workbenchTask: sessionId => runtime.getActiveTaskContext(sessionId),
     scheduleRequests: true,
     automatedTask: taskId => isAutomatedTask(taskId),

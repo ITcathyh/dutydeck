@@ -52,6 +52,16 @@ describe('session-scoped agent command auto-approval', () => {
   ])('keeps other capabilities and modes unchanged: %j', patch => {
     expect(isAgentCommandAutoApproval({ ...input, command: 'dutydeck agent status', ...patch })).toBe(false);
   });
+  it.each([
+    'dutydeck agent group send-file .env', 'dutydeck agent group send-file report.md --image',
+    'dutydeck agent --turn immutable-attempt-token group send-file report.md', "dutydeck agent group 'send-file' report.md",
+  ])('always asks a human before uploading local file bytes: %s', command => {
+    expect(isAgentCommandAutoApproval({ ...input, command })).toBe(false);
+    expect(isAgentCommandAutoApproval({ ...input, command, permissionMode: 'approve-reads' })).toBe(false);
+  });
+  it('still approves other group tools', () => {
+    expect(isAgentCommandAutoApproval({ ...input, command: "dutydeck agent group send '报告见附件 send-file-report'" })).toBe(true);
+  });
   it('also works in approve-reads', () => {
     expect(isAgentCommandAutoApproval({ ...input, command: 'dutydeck agent status', permissionMode: 'approve-reads' })).toBe(true);
   });
