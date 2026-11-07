@@ -804,4 +804,48 @@ describe('Agent Handoff & Reply-Agent integration suite', () => {
       statusCode: 400
     });
   });
+
+  it('redacts credentials in handoff and reply-agent bodies before they reach the group', async () => {
+    const repos = createRepositories(':memory:');
+    repositories.push(repos);
+    const session = makeSession();
+    await repos.sessions.save(session);
+    await repos.config.set(larkBotsConfigKey, JSON.stringify([
+      { appId: 'cli_a', appSecret: 'sec', name: 'Bot A', defaultAgentId: 'codex', groupToolsEnabled: true, groupToolsAllowSend: true },
+      { appId: 'cli_b', appSecret: 'sec', name: 'Bot B', defaultAgentId: 'claude', groupToolsEnabled: true, groupToolsAllowSend: true }
+    ]));
+    const capabilities = new LarkAgentToolCapabilityRegistry(repos.sessions, 'http://127.0.0.1:4310');
+    const token = capabilities.environmentFor(session).dutydeck_group_tools_token!;
+    const client = fakeClient({ appName: 'Bot A', openId: 'ou_a' });
+    const tools = new LarkAgentToolsService(capabilities, repos.config, {
+      workbenchTask: () => ({ taskId: 't1', attemptId: 'a1' }),
+      finalTaskContext: async () => ({
+        taskName: 'Task',
+        scope: {
+          app_id: 'cli_a', session_id: 'ses_a', runtime_task_id: 't1', attempt_id: 'a1',
+          origin_message_id: 'om_orig', turn: 1, chat_id: 'oc_group', chat_type: 'group',
+          reply_message_id: 'om_orig', reply_in_thread: true
+        }
+      }),
+      clientFactory: () => client
+    });
+    const turn = capabilities.finalTurnToken('ses_a', 't1', 'a1');
+    const secret = 'ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789';
+
+    await tools.handoff(token, { to: 'cli_b', content: `用这个令牌拉仓库：${secret}`, turn });
+    client.getMessage = vi.fn(async () => makeMessage('om_orig', 'task', { id: 'cli_b', type: 'app', name: 'Bot B' }));
+    await tools.replyAgent(token, { content: `已完成，GITHUB_TOKEN=${secret}`, turn });
+
+    const sent = vi.mocked(client.replyText).mock.calls.map(([input]) => input.text);
+    expect(sent).toHaveLength(2);
+    for (const text of sent) {
+      expect(text).not.toContain(secret);
+      expect(text).toContain('[REDACTED]');
+    }
+
+    await expect(tools.handoff(token, { to: 'cli_b', content: null as unknown as string, turn })).rejects.toMatchObject({
+      code: 'INVALID_GROUP_MESSAGE',
+      statusCode: 400
+    });
+  });
 });

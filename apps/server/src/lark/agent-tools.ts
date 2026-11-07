@@ -435,9 +435,9 @@ function teamSearchLine(item: CollaborationObservation) {
   return { sender: `${item.senderId ?? '未知'}(${item.senderKind})`, body: flat(item.text) };
 }
 
-/** handoff / reply-agent 的正文校验：去首尾空白后非空且不超过 20000 字符。 */
+/** handoff / reply-agent 的正文：与 send 同一套凭据脱敏，去首尾空白后非空且不超过 20000 字符。 */
 function agentMessageContent(value?: string) {
-  const content = value?.trim();
+  const content = typeof value === 'string' ? redactTraceText(value).trim() : undefined;
   if (!content) throw new AgentGroupToolError('INVALID_GROUP_MESSAGE', 'content 不能为空。', 400);
   if (content.length > 20_000) throw new AgentGroupToolError('INVALID_GROUP_MESSAGE', 'content 不能超过 20000 个字符。', 400);
   return content;
