@@ -84,7 +84,7 @@ export function ToastViewport({ toasts, onDismiss }: ToastViewportProps = {}) {
   // 但 role 会把这两个常驻空容器登记进无障碍树的 status/alert 角色里，
   // 与页面自身的错误条、过期数据条抢同一个角色查询——读屏用户会听到两个竞争的 alert，
   // 测试里 getByRole('alert') 也会命中这个空容器。用 aria-live 保留播报、不占角色。
-  return <div className="pointer-events-none fixed inset-x-0 bottom-0 z-toast flex flex-col px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:inset-x-auto sm:right-4 sm:items-end">
+  return <div className="ui-toast-viewport pointer-events-none fixed inset-x-0 bottom-0 z-toast flex flex-col px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:inset-x-auto sm:right-4 sm:items-end">
     <div aria-live="polite" aria-atomic="false" aria-label="操作结果通知" className="flex w-full flex-col gap-2 sm:w-auto sm:items-end">
       {polite.map(toast => <ToastCard key={toast.id} toast={toast} onDismiss={handleDismiss}/>)}
     </div>

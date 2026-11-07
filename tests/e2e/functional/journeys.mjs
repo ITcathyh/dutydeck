@@ -443,8 +443,9 @@ async function main() {
 
     assert(await page.getByRole('textbox', { name: UI.composer }).isVisible(), '归档前 Composer 可用（可以继续下指令）');
 
-    // exact:true 是必须的，理由见本节开头。
-    await page.getByRole('button', { name: UI.archive, exact: true }).click();
+    // exact:true 是必须的，理由见本节开头。归档收在任务标题栏的「更多操作」菜单里。
+    await page.getByRole('button', { name: UI.moreActions, exact: true }).click();
+    await page.getByRole('menuitem', { name: UI.archive, exact: true }).click();
     // 二次确认必须是 alertdialog（不可逆操作），不是普通 dialog。
     const confirm = page.getByRole('alertdialog', { name: UI.archiveDialog });
     await confirm.waitFor({ state: 'visible', timeout: 15_000 });
@@ -456,7 +457,8 @@ async function main() {
     assert((await request('GET', `/api/sessions/${target}`)).json?.archivedAt == null,
       '点「取消」后任务确实没有被归档（二次确认真的拦得住）');
 
-    await page.getByRole('button', { name: UI.archive, exact: true }).click();
+    await page.getByRole('button', { name: UI.moreActions, exact: true }).click();
+    await page.getByRole('menuitem', { name: UI.archive, exact: true }).click();
     await confirm.waitFor({ state: 'visible', timeout: 15_000 });
     await confirm.getByRole('button', { name: UI.archiveConfirm }).click();
 
@@ -476,8 +478,11 @@ async function main() {
     ok('重新打开已归档任务时，Composer 被只读提示条取代');
     assert((await page.getByRole('textbox', { name: UI.composer }).count()) === 0,
       '已归档任务上没有输入框（真的不能再下指令，不只是提示一句）');
-    assert((await page.getByRole('button', { name: UI.archive, exact: true }).count()) === 0,
+    await page.getByRole('button', { name: UI.moreActions, exact: true }).click();
+    await page.getByRole('menu', { name: UI.moreActions }).waitFor({ state: 'visible', timeout: 10_000 });
+    assert((await page.getByRole('menuitem', { name: UI.archive, exact: true }).count()) === 0,
       '已归档任务上不再提供「归档任务」按钮（不提供无效操作）');
+    await page.keyboard.press('Escape');
     await waitForMainText(page, '已归档', { label: '状态显示为已归档' });
     ok('状态口径显示为「已归档」');
     await page.close();

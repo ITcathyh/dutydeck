@@ -14,6 +14,21 @@ const result: InboxItem = { ...base, id: 'result_acceptance:s1:t1', kind: 'resul
 const props = { loading: false, call: vi.fn(async () => ({})), onOpen: vi.fn() };
 
 describe('InboxPanel', () => {
+  it('权限命令脱敏后显示；含风险片段的命令标出片段、不在这里一键批准，拒绝与查看仍在', () => {
+    const safe = { ...permission(1), detail: 'pnpm test --token=synthetic-secret' };
+    const risky = { ...permission(2), detail: 'git reset --hard origin/main' };
+    const view = render(<InboxPanel {...props} items={[safe, risky]}/>);
+    expect(view.container.textContent).not.toContain('synthetic-secret');
+    expect(screen.getByText('pnpm test --token=[REDACTED]')).toBeTruthy();
+    const rows = [...view.container.querySelectorAll('[data-inbox-kind="permission"]')] as HTMLElement[];
+    expect(within(rows[0]!).getByRole('button', { name: '批准' })).toBeTruthy();
+    expect(within(rows[1]!).queryByRole('button', { name: '批准' })).toBeNull();
+    expect([...rows[1]!.querySelectorAll('mark')].map(mark => mark.textContent)).toEqual(['git reset --hard']);
+    expect(within(rows[1]!).getByText(/请打开任务核对后再允许/)).toBeTruthy();
+    expect(within(rows[1]!).getByRole('button', { name: '拒绝' })).toBeTruthy();
+    expect(within(rows[1]!).getByRole('button', { name: '查看' })).toBeTruthy();
+  });
+
   it('没有条目时不占位；读取失败时给重试并说明任务列表仍可用', async () => {
     const { container, rerender } = render(<InboxPanel {...props} items={[]}/>);
     expect(container.textContent).toBe('');

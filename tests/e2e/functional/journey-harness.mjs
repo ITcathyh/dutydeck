@@ -54,6 +54,7 @@ export const UI = {
   composer: '消息',
   send: '发送消息',
   interrupt: '中断当前任务',
+  moreActions: '更多操作',
   archive: '归档任务',
   archiveDialog: '归档此任务？',
   archiveConfirm: '确认归档',

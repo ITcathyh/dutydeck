@@ -1,9 +1,10 @@
 import { Fragment, useEffect, useId, useMemo, useState } from 'react';
-import { inboxKindLabels, permissionRejectReasonHint } from '@dutydeck/shared';
+import { inboxKindLabels, permissionDisplayText, permissionRejectReasonHint } from '@dutydeck/shared';
 import type { InboxAction, InboxItem } from '../api';
 import {
   formatWaiting, inboxBatchActions, inboxKindCounts, isInboxSelectable, runInboxAction, runInboxBatch, type InboxResult
 } from '../inbox-model';
+import { hasRisk, riskSegments } from '../permission-risk';
 import { Badge, Banner, Button, Card, Skeleton } from './primitives';
 
 type InboxPanelProps = {
@@ -110,6 +111,10 @@ export function InboxPanel({ items, loading, failed = false, onRetry, call, onOp
         const reasonAction = item.actions.find(action => action.type === 'api' && action.reasonMaxLength);
         const reasonOpen = reasonAction && explaining?.itemId === item.id;
         const reasonId = `${reasonIdPrefix}-${index}`;
+        // 权限条目的详情是命令；标出风险片段，且风险命令不在这里一键批准，要回任务里看完整审批卡。
+        const command = item.kind === 'permission' && item.detail ? riskSegments(permissionDisplayText(item.detail)) : undefined;
+        const risky = command ? hasRisk(command) : false;
+        const actions = risky ? item.actions.filter(action => action.id !== 'approve') : item.actions;
         return <div key={item.id}>
           {first && <div className="flex items-center gap-2 border-t border-default bg-muted px-4 py-1.5 first:border-t-0">
             {groupIds.length > 1 && <label className="flex min-h-8 cursor-pointer items-center gap-2 text-caption text-secondary">
@@ -123,7 +128,11 @@ export function InboxPanel({ items, loading, failed = false, onRetry, call, onOp
               : <span className="w-4 shrink-0" aria-hidden="true"/>}
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-2"><Badge tone="warning">{inboxKindLabels[item.kind]}</Badge><strong className="min-w-0 break-words text-body font-medium text-primary">{item.title}</strong></div>
-              {item.detail && <p className="mt-1 break-words text-caption text-secondary">{item.detail}</p>}
+              {command ? <p className="mt-1 break-all font-mono text-caption text-secondary">{command.map((segment, part) => segment.risky
+                ? <mark key={part} className="rounded-sm bg-danger-soft px-0.5 font-semibold text-danger">{segment.text}</mark>
+                : segment.text)}</p>
+                : item.detail && <p className="mt-1 break-words text-caption text-secondary">{item.detail}</p>}
+              {risky && <p className="mt-1 text-caption text-danger">命令里有可能造成破坏的片段，请打开任务核对后再允许。</p>}
               <p className="mt-1 text-caption text-subtle">{item.sessionTitle} · {item.workspace} · 已等待 {formatWaiting(item.waitingMs)}{item.revision !== undefined && typeof item.revision === 'number' ? ` · 版本 ${item.revision}` : ''}</p>
               {result && <p className="mt-1" role="status"><ResultText result={result}/></p>}
               {reasonOpen && <div className="mt-2">
@@ -134,7 +143,7 @@ export function InboxPanel({ items, loading, failed = false, onRetry, call, onOp
               </div>}
             </div>
             <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
-              {item.actions.map(action => action.type === 'lark_card'
+              {actions.map(action => action.type === 'lark_card'
                 ? <span key={action.id} className="text-caption text-subtle">{action.label}</span>
                 : action.type === 'open'
                   ? <Button key={action.id} size="sm" variant="ghost" onClick={() => onOpen(item.sessionId)}>{action.label}</Button>
