@@ -137,7 +137,7 @@ export interface AcpxAgentLaunch {
 }
 
 /** Prepare the ACPX boundary without persisting vendor env names or values. */
-export function prepareAcpxAgentLaunch(agent: AgentConfig, options: { runtimeDirectory: string; sessionKey: string; forceLauncher?: boolean }): AcpxAgentLaunch {
+export function prepareAcpxAgentLaunch(agent: AgentConfig, options: ({ runtimeDirectory: string } | { workspace: string }) & { sessionKey: string; forceLauncher?: boolean }): AcpxAgentLaunch {
   const { persisted, bridged } = splitAgentEnvironment(agent.env);
   // Preserve the native argv of clean direct launches. Dirty environments and
   // uppercase accounts need the launcher; never mutate the daemon snapshot.
@@ -145,14 +145,15 @@ export function prepareAcpxAgentLaunch(agent: AgentConfig, options: { runtimeDir
     return { command: [agent.command, ...agent.args], sessionOptions: buildAcpxSessionOptions(agent), cleanup() {} };
   }
   // Carry all explicit values so current scopes/accounts can survive ambient cleanup.
-  mkdirSync(options.runtimeDirectory, { recursive: true, mode: 0o700 });
-  chmodSync(options.runtimeDirectory, 0o700);
+  const runtimeDirectory = 'workspace' in options ? privateWorkspaceDirectory(options.workspace, 'runtime-env') : options.runtimeDirectory;
+  mkdirSync(runtimeDirectory, { recursive: true, mode: 0o700 });
+  chmodSync(runtimeDirectory, 0o700);
   const identity = createHash('sha256').update(options.sessionKey).digest('hex');
   const launchEnvironment = { ...persisted, ...bridged };
   // The late-bound native bridge must win over persisted account overrides.
   if (isCodexAcpAgent(agent)) for (const key of ['CODEX_PATH', 'INITIAL_AGENT_MODE', 'PATH', 'dutydeck_codex_executable', 'dutydeck_codex_permission_mode']) delete launchEnvironment[key];
   const payload = JSON.stringify(launchEnvironment);
-  const environmentFile = join(options.runtimeDirectory, `${identity}.json`);
+  const environmentFile = join(runtimeDirectory, `${identity}.json`);
   writeFileSync(environmentFile, payload, { encoding: 'utf8', mode: 0o600 });
   chmodSync(environmentFile, 0o600);
   return {
@@ -168,6 +169,36 @@ export function prepareAcpxAgentLaunch(agent: AgentConfig, options: { runtimeDir
       }
     },
     cleanup() { rmSync(environmentFile, { force: true }); }
+  };
+}
+
+/** `<cwd>/.dutydeck` holds session credentials inside the Agent's workspace: private directories, never in the repository. */
+function privateWorkspaceDirectory(cwd: string, ...segments: string[]) {
+  const root = join(cwd, '.dutydeck');
+  const directory = join(root, ...segments);
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  for (let current = directory; ; current = dirname(current)) { chmodSync(current, 0o700); if (current === root) break; }
+  try { writeFileSync(join(root, '.gitignore'), '*\n', { flag: 'wx' }); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+  return directory;
+}
+
+/** acpx writes records with the process umask; they carry relay and group-tool tokens. */
+function privateSessionStore(cwd: string): AcpSessionStore {
+  const store = createRuntimeStore({ stateDir: join(cwd, '.dutydeck', 'acpx') });
+  const sessionFile = (id: string) => join(privateWorkspaceDirectory(cwd, 'acpx', 'sessions'), `${encodeURIComponent(id)}.json`);
+  return {
+    async load(sessionId) {
+      const file = sessionFile(sessionId);
+      const record = await store.load(sessionId);
+      if (record) chmodSync(file, 0o600);
+      return record;
+    },
+    async save(record) {
+      const file = sessionFile(record.acpxRecordId);
+      await store.save(record);
+      chmodSync(file, 0o600);
+    }
   };
 }
 
@@ -306,7 +337,7 @@ class AcpxStoppedError extends Error {
 
 /** Read the first durable creation receipt without creating or connecting a client. */
 export async function readNativeCreationRecord(expected: NativeContextExpected): Promise<NativeContextIdentity | undefined> {
-  const store=createRuntimeStore({stateDir:join(expected.cwd,'.dutydeck','acpx')});
+  const store=privateSessionStore(expected.cwd);
   const record=await store.load(expected.sessionKey);if(!record)return;
   const raw=record.acpx?.dutydeck_native_identity;if(!raw)return;
   const identity=taskExecutionSchemas.nativeIdentitySchema.parse(JSON.parse(raw));
@@ -366,8 +397,8 @@ export class AcpxAdapter implements AgentDriver {
   constructor(readonly agent: SessionAgentConfig, private readonly options: AcpxAdapterOptions) {
     const cwd = agent.cwd ?? process.cwd(); this.sessionKey = options.context?.native?.sessionKey ?? options.sessionKey ?? `dutydeck-${agent.id}`;
     this.permissionMode = agent.permissionMode;
-    this.sessionStore = createRuntimeStore({ stateDir: join(cwd, '.dutydeck', 'acpx') });
-    this.launch = prepareAcpxAgentLaunch(agent, { runtimeDirectory: join(cwd, '.dutydeck', 'runtime-env'), sessionKey: this.sessionKey });
+    this.sessionStore = privateSessionStore(cwd);
+    this.launch = prepareAcpxAgentLaunch(agent, { workspace: cwd, sessionKey: this.sessionKey });
     this.insightClient = inferAcpInsightClient(agent);
     const registry = createAgentRegistry({ overrides: { [agent.id]: this.launch.command } });
     this.runtime = createAcpRuntime({
@@ -666,7 +697,7 @@ export class AcpxAdapter implements AgentDriver {
       if (this.launch.command[1] !== envLauncherPath() && JSON.stringify(record?.agentArgv) === JSON.stringify(wrapped)
         && record?.acpx?.session_options?.env?.[bridgedAgentEnvDigestKey] === digest) {
         this.launch.cleanup();
-        this.launch = prepareAcpxAgentLaunch(this.agent, { runtimeDirectory: join(this.agent.cwd ?? process.cwd(), '.dutydeck', 'runtime-env'), sessionKey: this.sessionKey, forceLauncher: true });
+        this.launch = prepareAcpxAgentLaunch(this.agent, { workspace: this.agent.cwd ?? process.cwd(), sessionKey: this.sessionKey, forceLauncher: true });
       }
     }
     // ACPX reads process.env at spawn time. Recheck direct launches before each

@@ -1,5 +1,6 @@
 import { mkdtemp, rm } from 'node:fs/promises';
-import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { chmodSync, readFileSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -418,6 +419,28 @@ describe('acpx ACP boundary', () => {
     // 普通回复文本不应被误判为压缩横幅。
     expect(normalizeAcpxEvent(chunk('Compacting the workspace is done.'))).toMatchObject({ type: 'text', data: { text: 'Compacting the workspace is done.' } });
   });
+});
+
+it('keeps workspace session state private and out of the workspace repository', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-acp-private-state-')); dirs.push(cwd);
+  execFileSync('git', ['init', '-q'], { cwd });
+  const sessionKey = 'private-state-session';
+  const config = { ...agentConfig(), cwd, command: process.execPath, args: [resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs')],
+    env: { dutydeck_relay_token: 'synthetic-relay-token', VENDOR_API_TOKEN: 'synthetic-vendor-token' } };
+  const state = (path: string) => join(cwd, '.dutydeck', path);
+  const sessionFile = `acpx/sessions/${sessionKey}.json`;
+  const modes = (paths: string[]) => paths.map(path => statSync(state(path)).mode & 0o777);
+  const first = new AcpxAdapter(config, { sessionKey, onEvent() {} });
+  await first.start(); await first.stop();
+  expect(readFileSync(state(sessionFile), 'utf8')).toContain('synthetic-relay-token');
+  expect(modes(['.', 'acpx', 'acpx/sessions', 'runtime-env', sessionFile])).toEqual([0o700, 0o700, 0o700, 0o700, 0o600]);
+  expect(execFileSync('git', ['status', '--porcelain', '--untracked-files=all'], { cwd, encoding: 'utf8' })).toBe('');
+
+  for (const path of ['.', 'acpx', 'acpx/sessions']) chmodSync(state(path), 0o755);
+  chmodSync(state(sessionFile), 0o644);
+  const second = new AcpxAdapter({ ...config, env: {} }, { sessionKey, onEvent() {} });
+  await second.start(); await second.stop();
+  expect(modes(['.', 'acpx', 'acpx/sessions', sessionFile])).toEqual([0o700, 0o700, 0o700, 0o600]);
 });
 
 function agentConfig() {
