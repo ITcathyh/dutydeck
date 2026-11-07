@@ -629,13 +629,16 @@ export function checkLarkListener(botCount: number, daemonRunning: boolean, list
   }
   const active = new Set(Array.isArray(status.active) ? status.active : []);
   const retrying = new Map((Array.isArray(status.retrying) ? status.retrying : []).map(item => [item.appId, item]));
-  const reconnecting = new Map((Array.isArray(status.reconnecting) ? status.reconnecting : []).map(item => [item.appId, item.since]));
+  const reconnecting = new Map((Array.isArray(status.reconnecting) ? status.reconnecting : []).map(item => [item.appId, item]));
   const missing = expected.filter(bot => !active.has(bot.appId));
   if (!missing.length) return { id: 'lark.listener', label: '飞书监听', level: 'ok', detail: `守护进程在运行，${expected.length} 个机器人的监听已连上` };
   const lines = missing.map(bot => {
     const name = `${bot.name?.trim() || bot.displayName?.trim() || '机器人'}（${bot.appId}）`;
-    const since = reconnecting.get(bot.appId);
-    if (since) return `${name}连接已断开约 ${Math.max(0, Math.floor((observation.now.getTime() - Date.parse(since)) / 1000))} 秒，正在自动重连`;
+    const reconnect = reconnecting.get(bot.appId);
+    if (reconnect?.since) {
+      const disconnected = `${name}连接已断开约 ${Math.max(0, Math.floor((observation.now.getTime() - Date.parse(reconnect.since)) / 1000))} 秒`;
+      return reconnect.rebuiltAt ? `${disconnected}；Dutydeck 已在 ${reconnect.rebuiltAt} 重建长连接，仍未恢复` : `${disconnected}，正在自动重连`;
+    }
     const retry = retrying.get(bot.appId);
     if (!retry) return `${name}没连上，守护进程还没有记录到连接结果`;
     const seconds = Math.ceil((Date.parse(retry.nextRetryAt) - observation.now.getTime()) / 1000);
