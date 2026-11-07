@@ -254,7 +254,9 @@ describe('ClaudeTranscriptTailer (explicit path)', () => {
     tailer.start();
 
     appendFileSync(file, '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"HALFW');
-    await sleep(150);
+    // flush() drains through the current end of file, so the partial line has
+    // definitely been read (and must have been held back) before asserting.
+    await tailer.flush();
     expect(events).toHaveLength(0);
 
     appendFileSync(file, 'RITE"}]}}\n');
@@ -325,17 +327,25 @@ describe('ClaudeTranscriptTailer (explicit path)', () => {
     const file = join(dir, 'session.jsonl');
     writeFileSync(file, '');
 
-    const tailer = new ClaudeTranscriptTailer({ cwd: dir, transcriptPath: file, pollIntervalMs: 25 });
-    const events = collect(tailer);
-    tailer.start();
-    tailer.stop();
+    // Stop must end polling itself: flush() would read the file on demand and
+    // prove nothing, so a fake clock crosses poll periods instead.
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] });
+    try {
+      const tailer = new ClaudeTranscriptTailer({ cwd: dir, transcriptPath: file, pollIntervalMs: 25 });
+      const events = collect(tailer);
+      tailer.start();
+      tailer.stop();
 
-    appendFileSync(file, JSON.stringify({
-      type: 'assistant',
-      message: { role: 'assistant', content: [{ type: 'text', text: 'after stop' }] },
-    }) + '\n');
-    await sleep(150);
-    expect(events).toHaveLength(0);
+      appendFileSync(file, JSON.stringify({
+        type: 'assistant',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'after stop' }] },
+      }) + '\n');
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(events).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
