@@ -1,3 +1,5 @@
+export const inheritedServiceKeys: ReadonlySet<string>;
+
 export function childEnvironment(
   inherited: Record<string, string | undefined>,
   configured?: Record<string, string>,

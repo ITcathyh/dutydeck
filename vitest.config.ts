@@ -1,4 +1,5 @@
 import { defineConfig } from 'vitest/config';
+import { availableParallelism } from 'node:os';
 import { fileURLToPath, URL } from 'node:url';
 import { vitestAliases } from './vitest.aliases';
 
@@ -20,6 +21,8 @@ const alias = {
 export default defineConfig({
   resolve: { alias },
   test: {
+    // 本地机器常被多人或多个 Agent 共用：默认只占四分之一的核（上限 16），CI 沿用 Vitest 默认；命令行 --maxWorkers 可覆盖。
+    maxWorkers: process.env.CI ? undefined : Math.max(1, Math.min(16, Math.floor(availableParallelism() / 4))),
     projects: [
       {
         resolve: { alias },
@@ -29,6 +32,7 @@ export default defineConfig({
           // 注意 apps/** 收窄到 apps/server/**：apps/web 的测试归 web project（jsdom），
           // 否则同一份文件会被两个 project 各跑一遍。
           include: ['packages/**/*.test.ts', 'apps/server/**/*.test.ts', 'plugins/**/*.test.ts', 'builtin-plugins/**/*.test.ts', 'tests/**/*.test.ts'],
+          setupFiles: [fileURLToPath(new URL('./tests/setup/node-env.ts', import.meta.url))],
           testTimeout: 15_000,
           hookTimeout: 15_000
         }
