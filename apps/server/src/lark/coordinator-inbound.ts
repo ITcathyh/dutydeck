@@ -226,6 +226,9 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
   /** 启动恢复里瞬时失败、正在等待重试的入站消息，按消息记已重试次数。 */
   private readonly inboundRecoveryRetries = new Map<string, number>();
 
+  /** 卡片「重试」正在认领的任务（task.id）。 */
+  private readonly retryInFlight = new Set<string>();
+
   /**
    * 恢复一条上次没处理完的入站消息。handle 会重新检查当前配置和成员身份，凭据从不重放。
    * - 超过恢复年龄上限：unrouted 静默 ignored；已 received 标 failed，给仍有权限的发送人
@@ -3384,46 +3387,53 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     }
 
     if (action === 'retry') {
-      if (deferredConfirmationId(task.events, task.runtimeTaskId ?? task.id) || task.sessionId && task.runtimeTaskId && await this.isDeferredTask(task.sessionId, task.runtimeTaskId)) return { type: 'warning', content: '确认已登记，请使用原确认卡。' };
-      if (task.state !== 'failed' && task.state !== 'interrupted' && task.state !== 'cancelled') return { type: 'warning', content: '只有失败、已中断或已取消的任务可以重试' };
-      // 与渲染端同一张表：标记为不可重试（例如旧对话启动器版本变化）时卡上没有「重试」，
-      // 回调端同样拒绝，不在旧会话上再跑一遍注定失败的请求。
-      if (!isLarkCardActionAvailable('retry', {
-        state: task.state, taskId: task.id, turn: task.turn,
-        ...(task.retryable !== undefined ? { retryable: task.retryable } : {}),
-        capabilities: this.capabilitiesForTask(task)
-      })) return { type: 'warning', content: '这个任务不能在当前对话重试，请按卡片上的说明处理' };
-      if (!operatorOpenId) return { type: 'warning', content: '缺少操作人身份，无法重试' };
-      // runtime 已接收过这一轮：只有它确认停在失败、中断或取消才重试；已执行、仍在跑或读不到都不重发。
-      if (task.sessionId && task.runtimeTaskId && this.runtime.getTasks) {
-        const runtimeTaskId = task.runtimeTaskId;
-        const status = (await this.runtime.getTasks(task.sessionId).catch(() => undefined))?.find(item => item.id === runtimeTaskId)?.status;
-        if (actionStale()) return { type: 'warning', content: '任务已开始新一轮，请在最新的卡片上操作' };
-        if (!status || !['failed', 'interrupted', 'cancelled'].includes(status)) return { type: 'warning', content: '这一轮在 Agent 那边已执行或结果未知，不能直接重试，请发送 /status 查看' };
-      }
-      const retryEvent = { ...task.event, senderOpenId: operatorOpenId, senderType: 'user', senderAppId: undefined };
-      const previousState = task.state;
-      task.state = 'queued';
+      // 检查与 task.state = 'queued' 之间隔着 await：同步占位，第一次点击挂上 runTurn 或放弃之前，同一任务的其他点击一律拒绝。
+      if (this.retryInFlight.has(task.id)) return { type: 'warning', content: '正在重试，请勿重复点击' };
+      this.retryInFlight.add(task.id);
       try {
-        if (task.inbox) await this.inbox!.update(task.inbox, { event: retryEvent, state: 'received', turn: task.turn + 1, cardId: undefined, taskId: undefined, materials: undefined,
-          ...(task.inbox.request ? { request: { ...task.inbox.request, materialPrompt: task.retryMaterialPrompt ?? task.prompt } } : {}) });
-      } catch (error) {
-        if (!actionStale()) task.state = previousState;
-        return { type: 'warning', content: error instanceof Error ? error.message : '重试记录保存失败，请稍后重试' };
+        if (deferredConfirmationId(task.events, task.runtimeTaskId ?? task.id) || task.sessionId && task.runtimeTaskId && await this.isDeferredTask(task.sessionId, task.runtimeTaskId)) return { type: 'warning', content: '确认已登记，请使用原确认卡。' };
+        if (task.state !== 'failed' && task.state !== 'interrupted' && task.state !== 'cancelled') return { type: 'warning', content: '只有失败、已中断或已取消的任务可以重试' };
+        // 与渲染端同一张表：标记为不可重试（例如旧对话启动器版本变化）时卡上没有「重试」，
+        // 回调端同样拒绝，不在旧会话上再跑一遍注定失败的请求。
+        if (!isLarkCardActionAvailable('retry', {
+          state: task.state, taskId: task.id, turn: task.turn,
+          ...(task.retryable !== undefined ? { retryable: task.retryable } : {}),
+          capabilities: this.capabilitiesForTask(task)
+        })) return { type: 'warning', content: '这个任务不能在当前对话重试，请按卡片上的说明处理' };
+        if (!operatorOpenId) return { type: 'warning', content: '缺少操作人身份，无法重试' };
+        // runtime 已接收过这一轮：只有它确认停在失败、中断或取消才重试；已执行、仍在跑或读不到都不重发。
+        if (task.sessionId && task.runtimeTaskId && this.runtime.getTasks) {
+          const runtimeTaskId = task.runtimeTaskId;
+          const status = (await this.runtime.getTasks(task.sessionId).catch(() => undefined))?.find(item => item.id === runtimeTaskId)?.status;
+          if (actionStale()) return { type: 'warning', content: '任务已开始新一轮，请在最新的卡片上操作' };
+          if (!status || !['failed', 'interrupted', 'cancelled'].includes(status)) return { type: 'warning', content: '这一轮在 Agent 那边已执行或结果未知，不能直接重试，请发送 /status 查看' };
+        }
+        const retryEvent = { ...task.event, senderOpenId: operatorOpenId, senderType: 'user', senderAppId: undefined };
+        const previousState = task.state;
+        task.state = 'queued';
+        try {
+          if (task.inbox) await this.inbox!.update(task.inbox, { event: retryEvent, state: 'received', turn: task.turn + 1, cardId: undefined, taskId: undefined, materials: undefined,
+            ...(task.inbox.request ? { request: { ...task.inbox.request, materialPrompt: task.retryMaterialPrompt ?? task.prompt } } : {}) });
+        } catch (error) {
+          if (!actionStale()) task.state = previousState;
+          return { type: 'warning', content: error instanceof Error ? error.message : '重试记录保存失败，请稍后重试' };
+        }
+        if (actionStale()) return { type: 'warning', content: '任务已开始新一轮，请在最新的卡片上操作' };
+        if (task.runtimeTaskId && this.workflowOptions.store) await clearTaskReportSafely(this.workflowOptions.store, task.runtimeTaskId);
+        task.event = retryEvent;
+        task.config = effectiveConfig;
+        // 生命周期字段在 runTurn 递增 turn 后再重置，避免上一轮在途的
+        // 过程更新或结果发送把旧消息 ID 写进新一轮。
+        task.group.tail = task.group.tail.then(() => this.runTurn(task)).catch(error => {
+          this.log.error({ error, chatId: task.event.chatId, messageId: task.event.messageId }, '重试飞书任务失败');
+          this.pushTaskError(task, `重试任务失败：${error instanceof Error ? error.message : String(error)}`);
+          task.state = 'failed';
+          task.requestUpdate?.('failed', false).catch(() => undefined);
+        });
+        return { type: 'success', content: '已开始重试' };
+      } finally {
+        this.retryInFlight.delete(task.id);
       }
-      if (actionStale()) return { type: 'warning', content: '任务已开始新一轮，请在最新的卡片上操作' };
-      if (task.runtimeTaskId && this.workflowOptions.store) await clearTaskReportSafely(this.workflowOptions.store, task.runtimeTaskId);
-      task.event = retryEvent;
-      task.config = effectiveConfig;
-      // 生命周期字段在 runTurn 递增 turn 后再重置，避免上一轮在途的
-      // 过程更新或结果发送把旧消息 ID 写进新一轮。
-      task.group.tail = task.group.tail.then(() => this.runTurn(task)).catch(error => {
-        this.log.error({ error, chatId: task.event.chatId, messageId: task.event.messageId }, '重试飞书任务失败');
-        this.pushTaskError(task, `重试任务失败：${error instanceof Error ? error.message : String(error)}`);
-        task.state = 'failed';
-        task.requestUpdate?.('failed', false).catch(() => undefined);
-      });
-      return { type: 'success', content: '已开始重试' };
     }
 
     return { type: 'error', content: '不支持的卡片操作' };

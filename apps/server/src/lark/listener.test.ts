@@ -1339,6 +1339,26 @@ describe('Lark message coordinator', () => {
     coordinator.stop();
   });
 
+  it('dispatch 模式：失败卡上的「重试」连点两次只重试一次', async () => {
+    const f = dispatchFixture();
+    const { runtime, service, coordinator, emit, start, parsedMapping } = f;
+    start();
+    await vi.waitFor(() => expect(runtime.dispatch).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(parsedMapping().runtime_task_id).toBe('runtime-1'));
+    // runtime 确认这一轮停在失败：每次点击都要读它，状态检查与改状态之间隔着 await。
+    Object.assign(runtime, { getTasks: vi.fn(async () => [{ id: 'runtime-1', status: 'failed' }]) });
+    emit(agentEvent(11, 'task', { task: { id: 'runtime-1', status: 'failed' } }));
+    await vi.waitFor(() => expect(service.update).toHaveBeenCalledWith(expect.objectContaining({ state: 'failed' })));
+
+    const results = await Promise.all([1, 2].map(() => coordinator.handleAction({ action: 'retry', task_id: 'om_task' }, 'ou_operator')));
+    expect(results.filter(result => result?.type === 'success')).toHaveLength(1);
+    expect(results.filter(result => result?.type === 'warning')).toHaveLength(1);
+    await vi.waitFor(() => expect(runtime.dispatch).toHaveBeenCalledTimes(2));
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(runtime.dispatch).toHaveBeenCalledTimes(2);
+    coordinator.stop();
+  });
+
   // handleAction 的取消/中断都是 detached 的：await runtime.interrupt / cancelQueued
   // 期间用户可能已经 /retry 开了新一轮。旧点击的续跑不得改写新一轮状态，
   // 也不得把旧错误推进新卡。两个动作 × 成功/失败四种组合都要覆盖。
