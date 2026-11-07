@@ -566,7 +566,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       return result;
     },
     awaitingAnswer: sessionId => relayBroker.listPending(sessionId).length > 0,
-    onSessionNotice: (session, notice) => deliverLarkSessionNotice(repos, bot => createLarkCardService(env, workbenchHttp.fetch, bot), session, notice),
+    onSessionNotice: (session, notice) => deliverLarkSessionNotice(repos, bot => createLarkCardService(env, workbenchHttp.fetch, bot), session, notice, log),
     log: { warn: (...args: unknown[]) => log.warn(...args as [unknown, string]), info: (data, message) => log.info(data, message) },
     ...pluginWiring?.runtimeOptions
   });
