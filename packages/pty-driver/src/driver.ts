@@ -308,6 +308,13 @@ export class PtyCliDriver implements AgentDriver {
     throw new RuntimeError('PLAN_GUARD_UNAVAILABLE', '这个终端会话启动时还没有计划阶段拦截，没法保证计划阶段不改文件。请开新会话（飞书里发 /new）后再用先出计划。', 409);
   }
 
+  /** resume 会拆掉接线（截止计时、原生回执、转录跟踪）：轮次或提交进行中时拒绝，交给运行时等本轮结束。 */
+  private assertNoActiveTurn() {
+    if (this.turnActive || this.activeSubmission) {
+      throw new RuntimeError('TURN_IN_PROGRESS', 'Wait for the current response before resuming this session', 409);
+    }
+  }
+
   private assertPermissionModeSupported() {
     if (this.planGuardActive && !this.planGuardSupported) throw new Error(`PTY Agent ${this.agent.id} does not support permission mode deny-all`);
     const mode = this.spawnPermissionMode;
@@ -809,9 +816,11 @@ export class PtyCliDriver implements AgentDriver {
     const backend = this.backend;
     const generation = this.wiringGeneration;
     this.assertPermissionModeSupported();
+    this.assertNoActiveTurn();
     if (this.backend instanceof HerdrBackend && this.backend.hasState() && !(await this.backend.isStopped())) {
       await this.transcript?.flush();
       if (this.superseded(backend, generation)) return;
+      this.assertNoActiveTurn();
       await this.reattachHerdr();
       (await this.markTmuxReattached());
       return;
@@ -822,6 +831,7 @@ export class PtyCliDriver implements AgentDriver {
     if (tmuxName !== undefined && tmuxProbe === 'exists') {
       await this.transcript?.flush();
       if (this.superseded(backend, generation)) return;
+      this.assertNoActiveTurn();
       (await this.reattachTmux(tmuxName, this.started));
       // daemon 重启后的典型形态：新 driver 直接 resume()，从没调过 start()。
       // 必须置 started，否则接下来的 send() 会走 start() 再 spawn 一次，
@@ -841,6 +851,7 @@ export class PtyCliDriver implements AgentDriver {
     const plan = this.planResume();
     await this.transcript?.flush();
     if (this.superseded(backend, generation)) return;
+    this.assertNoActiveTurn();
     await this.respawn(plan.args);
     if (plan.kind === 'resume') {
       (await this.markResumed());
