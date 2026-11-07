@@ -70,6 +70,23 @@ const sessionPermissionMode = (env: Record<string, string>): PermissionMode =>
 const terminalSafePrompt = (text: string): string =>
   text.replace(/\r\n?/g, '\n').replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '');
 
+/** 屏幕行和提示词按同一口径比较：框线当空白，连续空白折成一个。 */
+const screenText = (text: string): string =>
+  text.replace(/[─━│┌┐└┘├┤┬┴┼╭╮╯╰]/g, ' ').replace(/\s+/g, ' ').trim();
+
+/** seen：本轮开始时已在屏上的行，以及已判定为输入框或回显的行；prompt：写入的提示词。 */
+interface TurnEcho { seen: Set<string>; prompt: string }
+
+/** 本轮新出现的 CLI 输出行：已在屏上的行、输入框和提示词回显（含折行片段）都不算。 */
+function isTurnOutputLine(line: string, echo: TurnEcho, readyPattern?: RegExp): boolean {
+  const text = screenText(line);
+  if (echo.seen.has(text)) return false;
+  const body = text.replace(/^[❯›»>$#]+\s*/, '');
+  if (body !== '' && !readyPattern?.test(line) && !echo.prompt.includes(body)) return true;
+  echo.seen.add(text);
+  return false;
+}
+
 const DEFAULT_COLS = 120;
 const DEFAULT_ROWS = 30;
 /** raw_terminal 节流窗口：窗口内屏幕文本没变就不发。 */
@@ -132,6 +149,8 @@ export class PtyCliDriver implements AgentDriver {
    *  idle 检测在 CLI 启动期（splash 屏静止）会误判为空闲，必须等至少
    *  一条实质事件后才允许 completed。 */
   private turnHasOutput = false;
+  /** 判定提示词回显的依据；恢复接管的轮次不知道提示词、原生回执的 CLI 由转录结果把关，均为 undefined。 */
+  private turnEcho: TurnEcho | undefined;
   private turnHasTranscriptResult = false;
   private turnInputConfirmed = false;
   private awaitingTranscriptResult = false;
@@ -158,6 +177,7 @@ export class PtyCliDriver implements AgentDriver {
   private static readonly SCREEN_PROGRESS_INTERVAL_MS = 200;
   private refreshingScreen = false;
   private static readonly TURN_GRACE_MS = 15_000;
+  private graceRetryTimer: ReturnType<typeof setTimeout> | undefined;
   /** 后台子 agent 在飞时最多推迟 completed 这么久（见 holdForBackgroundWork）。
    *  开发机 416 次真实后台 agent 从派发到回报：p90 约 49 分钟、p95 约 64 分钟。 */
   private static readonly BACKGROUND_HOLD_MS = 60 * 60_000;
@@ -540,6 +560,10 @@ export class PtyCliDriver implements AgentDriver {
       this.turnActive = true;
       this.interruptPending = false;
       this.turnHasOutput = false;
+      // 原生回执的 CLI 完成前必须等到转录结果，回显不会让它提前完成。
+      this.turnEcho = this.adapter.capabilities.nativeInputReceipt ? undefined
+        : { seen: new Set(this.snapshot?.viewportText().split('\n').map(screenText)), prompt: screenText(finalPrompt) };
+      this.clearGraceRetry();
       this.turnHasTranscriptResult = false;
       this.turnInputConfirmed = false;
       this.awaitingTranscriptResult = false;
@@ -719,6 +743,7 @@ export class PtyCliDriver implements AgentDriver {
 
     this.turnActive = true;
     this.turnHasOutput = false;
+    this.turnEcho = undefined;
     this.turnHasTranscriptResult = false;
     this.awaitingTranscriptResult = false;
     this.transcriptTerminalWaitAt = undefined;
@@ -1391,9 +1416,10 @@ export class PtyCliDriver implements AgentDriver {
           return;
         }
         // 已有实质输出（CLI 在干活）→ 不受宽限期限制，idle 即完成。
-        // 尚无实质输出 → 可能还在启动期（splash 屏静止），宽限期内禁止 completed。
+        // 尚无实质输出 → 可能还在启动期（splash 屏静止），宽限期内禁止 completed，期满再判一次。
         if (source !== 'program-status' && !this.turnHasOutput) {
-          if (Date.now() - this.turnStartedAt < PtyCliDriver.TURN_GRACE_MS) return;
+          const graceLeft = this.turnStartedAt + PtyCliDriver.TURN_GRACE_MS - Date.now();
+          if (graceLeft > 0) { this.retryIdleAfterGrace(graceLeft); return; }
         }
         // Publish the final JSONL record before Runtime closes the turn, even
         // when it was written between the tailer's polling ticks.
@@ -1617,12 +1643,13 @@ export class PtyCliDriver implements AgentDriver {
       if (snapshot) {
         parsingBytes += bytes;
         void snapshot.writeAndFlush(data).then(() => {
-          if (this.snapshot === snapshot && this.backend === backend) this.noteScreenProgress();
+          if (this.snapshot === snapshot && this.backend === backend) { this.noteTurnOutput(); this.noteScreenProgress(); }
         }).catch(() => { /* A disposed renderer belongs to an old attachment. */ }).finally(() => { parsingBytes -= bytes; });
       }
       for (const cb of this.terminalSubscribers) cb(data);
       this.scheduleRawTerminal();
-      if (this.turnActive) this.turnHasOutput = true;
+      // 自己提交的轮次由 noteTurnOutput 按渲染后的屏幕判定：提示词回显和重绘不算输出。
+      if (this.turnActive && !this.turnEcho) this.turnHasOutput = true;
     });
     backend.onExit(code => { void this.handleExit(code, backend); });
     if (backend instanceof HerdrBackend) backend.onDisconnect(error => {
@@ -1809,6 +1836,15 @@ export class PtyCliDriver implements AgentDriver {
     this.screenProgressTimer.unref();
   }
 
+  /** 逐块判定而不节流：转瞬即逝的状态行也算输出；找到输出后不再判定。 */
+  private noteTurnOutput(): void {
+    const echo = this.turnEcho;
+    if (!this.turnActive || this.turnHasOutput || !echo) return;
+    if (!(this.snapshot?.viewportText().split('\n') ?? []).some(line => isTurnOutputLine(line, echo, this.adapter.readyPattern))) return;
+    this.turnHasOutput = true;
+    this.checkRenderedCompletion();
+  }
+
   private checkScreenProgress(): void {
     this.screenProgressCheckedAt = Date.now();
     if (!this.turnActive) return;
@@ -1858,6 +1894,7 @@ export class PtyCliDriver implements AgentDriver {
     }
     this.clearRenderedCompletion();
     this.clearBackgroundHold();
+    this.clearGraceRetry();
   }
 
   private async handleExit(code: number | null, source?: SessionBackend): Promise<void> {
@@ -1910,6 +1947,25 @@ export class PtyCliDriver implements AgentDriver {
     }, RAW_TERMINAL_THROTTLE_MS);
     timer.unref();
     this.rawTerminalTimer = timer;
+  }
+
+  private clearGraceRetry(): void {
+    if (this.graceRetryTimer) clearTimeout(this.graceRetryTimer);
+    this.graceRetryTimer = undefined;
+  }
+
+  /** 宽限期内压下的空闲：之后没有新输出时空闲检测不会再触发，期满按同一屏幕再判一次。 */
+  private retryIdleAfterGrace(delay: number): void {
+    this.clearGraceRetry();
+    const detector = this.idleDetector, resolve = this.turnResolve, outputAt = this.lastOutputAt;
+    this.graceRetryTimer = setTimeout(() => {
+      this.graceRetryTimer = undefined;
+      // 期间有新输出时由空闲检测自己重新判定。
+      if (this.stopped || !this.turnActive || this.turnResolve !== resolve || this.idleDetector !== detector || this.lastOutputAt !== outputAt) return;
+      detector?.reset();
+      detector?.fireIdle();
+    }, delay);
+    this.graceRetryTimer.unref();
   }
 
   private clearProgramStatusDrain(): void {
@@ -2064,6 +2120,7 @@ export class PtyCliDriver implements AgentDriver {
     for (const cb of this.terminalSubscribers) cb(screen);
     await snapshot?.writeAndFlush(screen);
     if (this.snapshot !== snapshot || this.stopped) return;
+    this.noteTurnOutput();
     this.noteScreenProgress();
     this.scheduleRawTerminal();
   }
