@@ -40,11 +40,13 @@ const PRE_KILL_SETTLE_MS = 3_000;
 function unproven(proof: OwnedTmuxExitProof): never {
   throw Object.assign(new Error('LEGACY_TMUX_EXIT_UNPROVEN'), { code: 'LEGACY_TMUX_EXIT_UNPROVEN', proof });
 }
+/** The PATH-resolved client TmuxBackend started the server with; another
+ *  install may be missing or speak a different client/server protocol. */
 async function tmux(path: string, args: string[]): Promise<string> {
   const env = { ...process.env, LC_ALL: 'C' };
   delete (env as NodeJS.ProcessEnv).TMUX;
   delete (env as NodeJS.ProcessEnv).TMUX_TMPDIR;
-  return (await runCommand('/usr/bin/tmux', ['-S', path, ...args], {
+  return (await runCommand('tmux', ['-S', path, ...args], {
     timeout: 3_000, env,
   })).trim();
 }
@@ -89,6 +91,8 @@ async function ownerCheck(scope: OwnedTmuxScope, id: string): Promise<void> {
   if ((await tmux(scope.socketPath, ['show-options', '-v', '-t', id, '@dutydeck_owner_id'])) !== scope.ownerId) fail('LEGACY_TMUX_OWNER_MISMATCH');
 }
 async function processes(scope: OwnedTmuxScope, id: string, probe: ProcessProbe): Promise<PhysicalProcessIdentity[]> {
+  // The descendant scan and its exit checks read /proc; elsewhere the process set cannot be proven.
+  if (process.platform !== 'linux') fail('LEGACY_TMUX_PLATFORM_UNSUPPORTED');
   const roots = (await tmux(scope.socketPath, ['list-panes', '-s', '-t', id, '-F', '#{pane_pid}'])).split('\n').map(Number);
   if (!roots.length || roots.some(pid => !Number.isSafeInteger(pid) || pid <= 0)) fail('LEGACY_TMUX_PROCESS_IDENTITY_UNAVAILABLE');
   const scanned = new Map<string, string>();

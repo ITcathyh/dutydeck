@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync, readFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync, readFileSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { childProcessIdentity, observeProcess } from '../../storage/src/process-identity.js';
@@ -10,7 +10,7 @@ const probe: ProcessProbe = { identify: childProcessIdentity, observe: observePr
 let root: string;
 let socket: string;
 const env = { ...process.env, TMUX: '', TMUX_TMPDIR: '' };
-function tmux(...args: string[]) { return execFileSync('/usr/bin/tmux', ['-S', socket, ...args], { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] }).trim(); }
+function tmux(...args: string[]) { return execFileSync('tmux', ['-S', socket, ...args], { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] }).trim(); }
 function scope(name = 'owned'): OwnedTmuxScope { return { socketPath: socket, sessionName: name, ownerId: `dutydeck:${name}`, hostname: hostname(), uid: process.getuid!() }; }
 function create(name = 'owned') {
   tmux('new-session', '-d', '-s', name, '/bin/sh');
@@ -101,6 +101,28 @@ describe('owned tmux physical exit proofs (real isolated server and process iden
     create(); // replacement is not covered by the old proof
     expect((await verifyOwnedTmuxExit(proof, probe))).toBe(false);
     await stopOwnedTmux((await captureOwnedTmuxIdentity(scope(), probe))!, probe);
+  });
+  it('drives the server through the tmux found on PATH, not a fixed install path', async () => {
+    create();
+    const bin = join(root, 'bin'), log = join(root, 'client.log');
+    const real = execFileSync('/bin/sh', ['-c', 'command -v tmux'], { encoding: 'utf8' }).trim();
+    mkdirSync(bin);
+    writeFileSync(join(bin, 'tmux'), `#!/bin/sh\necho "$3" >> '${log}'\nexec '${real}' "$@"\n`, { mode: 0o755 });
+    vi.stubEnv('PATH', `${bin}:${process.env.PATH}`);
+    try {
+      const proof = await stopOwnedTmux((await captureOwnedTmuxIdentity(scope(), probe))!, probe);
+      expect(await verifyOwnedTmuxExit(proof, probe)).toBe(true);
+      expect(readFileSync(log, 'utf8').split('\n')).toEqual(expect.arrayContaining(['has-session', 'if-shell']));
+    } finally { vi.unstubAllEnvs(); }
+  });
+  it('refuses to capture a process set where /proc is unavailable, leaving the session alone', async () => {
+    create();
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    const fake: ProcessProbe = { identify: pid => ({ host: 'host', boot: 'boot', namespace: 'pid', pid, start: '1' }), observe: () => 'alive' };
+    Object.defineProperty(process, 'platform', { ...platform, value: 'darwin' });
+    try { await expect(captureOwnedTmuxIdentity(scope(), fake)).rejects.toThrow('LEGACY_TMUX_PLATFORM_UNSUPPORTED'); }
+    finally { Object.defineProperty(process, 'platform', platform); }
+    expect(tmux('has-session', '-t', '=owned')).toBe('');
   });
   it('rejects a missing initial socket and permits a batch missing target after the last verified stop', async () => {
     await expect(captureOwnedTmuxIdentity(scope(), probe)).rejects.toThrow('PATH_UNAVAILABLE');
