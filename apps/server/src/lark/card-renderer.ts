@@ -246,8 +246,8 @@ const readableInput = (value: unknown): string => {
     : `${key}: ${JSON.stringify(item)}`).join('\n');
 };
 const truncateInline = (value: string, limit = 64) => {
-  const text = value.replace(/\s+/g, ' ').trim();
-  return text.length <= limit ? text : `${text.slice(0, Math.max(1, limit - 1)).trimEnd()}…`;
+  const chars = Array.from(value.replace(/\s+/g, ' ').trim());
+  return chars.length <= limit ? chars.join('') : `${chars.slice(0, Math.max(1, limit - 1)).join('').trimEnd()}…`;
 };
 
 // CLI 命令常以一串环境变量赋值开头（`FOO=1 BAR=2 真正的命令 …`）。标题只有 64 个字符，
@@ -509,13 +509,13 @@ const toolKindLabel: Record<TraceToolKind, string> = {
 // 标题整行加粗；文本自带 * 时不包，免得和它自己的 Markdown 拼出一串字面星号。
 const strong = (markdown: string) => markdown.includes('*') ? markdown : `**${markdown}**`;
 
-/** 与过程卡共用脱敏后的旁白和工具摘要，不暴露 thinking 或终端原文。 */
+/** 与过程卡共用脱敏后的旁白和工具摘要，不暴露 thinking 或终端原文；返回值已转义，可直接拼进卡片 markdown。 */
 export function busyProgressSummary(events: AgentEvent[]): { phase: string; latest: string } {
   const entries = compactTraceEntries(events);
   const narrative = entries.filter(entry => entry.type === 'text' && entry.data.role !== 'user').at(-1);
   const tool = entries.filter(entry => entry.type === 'tool_call' || entry.type === 'tool_result').at(-1);
-  return { phase: narrative?.data.text ? redactTraceText(String(narrative.data.text)).slice(0, 200) : '正在执行',
-    latest: tool ? toolHeadline(toolPresentation(tool)).slice(0, 200) : '暂无可见步骤' };
+  return { phase: narrative?.data.text ? escapeCardInline(truncateInline(redactTraceText(String(narrative.data.text)), 200)) : '正在执行',
+    latest: tool ? escapeCardInline(truncateInline(toolHeadline(toolPresentation(tool)), 200)) : '暂无可见步骤' };
 }
 
 // 「执行中」即 statusLabel 的判定：没失败且状态像在跑。

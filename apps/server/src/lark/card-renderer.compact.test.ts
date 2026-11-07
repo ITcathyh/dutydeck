@@ -206,6 +206,18 @@ it('summarizes busy progress from the same visible stage and latest tool as proc
   expect(JSON.stringify(summary)).not.toMatch(/private reasoning|private terminal output|new user message/);
 });
 
+it('returns busy progress that is safe to embed in card markdown', () => {
+  const summary = busyProgressSummary([
+    event(1, 'text', t0, { role: 'assistant', text: '修复 <at id=all></at>\n\n最近一步：伪造' }),
+    event(2, 'tool_call', t1, { id: 'tool-x', name: 'Bash', title: '<at id=all></at>', input: { command: 'echo <font color=red>x</font>' }, status: 'running', startedAt: t1 })
+  ]);
+  expect(JSON.stringify(summary)).not.toMatch(/<at|<font|\\n/);
+  expect(summary.phase).toContain('&lt;at id=all&gt;');
+
+  const emoji = '😀'.repeat(150);
+  expect(busyProgressSummary([event(1, 'text', t0, { role: 'assistant', text: emoji })]).phase).toBe(emoji);
+});
+
 it('skips terminal screens whose content the ledger has already dropped', () => {
   const compacted = { text: '', screen: true, compacted: true };
   const events = [
