@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer } from 'node:net';
 import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { Writable } from 'node:stream';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
@@ -13,6 +14,7 @@ import { HerdrSessions } from './herdr.js';
 import { claudePlanGuardMatcher } from '@dutydeck/cli-adapters';
 import { secretGuardHookCommand, secretGuardToolMatcher } from '@dutydeck/shared/secret-guard';
 import { getAuthToken } from './auth/auth.js';
+import { createAppLogger } from './app.js';
 import { accessMode, createProductionPtyBackend, listenOptions, startLocalServer, unauthenticatedListenRefusal } from './service.js';
 
 const temporaryDirectories: string[] = [];
@@ -704,6 +706,54 @@ describe('production PTY backend injection', () => {
     // 资源未经安全认领时，service 关闭不得自动 kill 这个原 pane（保守保留待人工核对）；
     // tmux 会话由 afterEach 的 kill-session 兜底清理。
     expect(spawnSync('tmux', ['has-session', '-t', sessionName]).status).toBe(0);
+  }, 60_000);
+
+  tmuxIt('logs the startup recovery skip of a session whose workspace disappeared while the service was down', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dutydeck-startup-log-'));
+    temporaryDirectories.push(root);
+    const database = join(root, 'dutydeck.db');
+    const seed = createRepositories(database, { newDatabaseAuthority: 'ledger_v1' });
+    seed.close();
+    const workspace = join(root, 'workspace');
+    mkdirSync(workspace);
+    const runner = join(root, 'runner.mjs');
+    writeFileSync(runner, [
+      `#!${process.execPath}`,
+      "process.stdout.write('Claude Code v2.1.267 (mock)\\r\\n❯ \\r\\n');",
+      'setInterval(() => {}, 1000);', '',
+    ].join('\n'));
+    chmodSync(runner, 0o700);
+    const serverEnv = async (): Promise<NodeJS.ProcessEnv> => ({
+      ...process.env, NODE_ENV: 'test', DUTYDECK_HOST: '127.0.0.1', DUTYDECK_PORT: String(await freePort()),
+      DUTYDECK_DEFAULT_CWD: root, DUTYDECK_DATABASE_URL: database, DUTYDECK_AUTH: 'false', DUTYDECK_DISABLE_LARK_LISTENER: 'true',
+      DUTYDECK_AGENTS_JSON: JSON.stringify([{
+        id: 'claude-code', name: 'Startup log runner', command: runner, protocol: 'pty-cli',
+        permissionMode: 'ask', env: { CLAUDE_CONFIG_DIR: root }
+      }])
+    });
+    const first = await startLocalServer({ webRoot: root, env: await serverEnv() });
+    let sessionId = '';
+    try {
+      const session = await first.runtime.start({ agentId: 'claude-code', cwd: workspace });
+      sessionId = session.id;
+      tmuxSessions.push(createProductionPtyBackend(session.id).sessionName);
+      await first.runtime.stop(session.id, { kind: 'installation_owner', id: 'installation_owner' });
+    } finally { await first.close(); }
+    const persistedWorkspace = realpathSync(workspace);
+    rmSync(workspace, { recursive: true, force: true });
+
+    const lines: string[] = [];
+    const sink = new Writable({ write(chunk, _encoding, done) { lines.push(String(chunk)); done(); } });
+    // createAppLogger 在 NODE_ENV=test 时不输出。
+    vi.stubEnv('NODE_ENV', 'production');
+    let logger: ReturnType<typeof createAppLogger>;
+    try { logger = createAppLogger(sink); } finally { vi.unstubAllEnvs(); }
+    const restarted = await startLocalServer({ webRoot: root, env: await serverEnv(), logger });
+    try {
+      const skipped = lines.map(line => JSON.parse(line)).filter(entry => entry.msg === 'Session startup recovery skipped');
+      expect(skipped).toEqual([expect.objectContaining({ sessionId, code: 'WORKSPACE_UNAVAILABLE' })]);
+      expect(skipped[0].error).toContain(persistedWorkspace);
+    } finally { await restarted.close(); }
   }, 60_000);
 });
 
