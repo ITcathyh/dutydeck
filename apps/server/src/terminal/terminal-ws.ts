@@ -3,7 +3,7 @@ import type { FastifyInstance } from 'fastify';
 import type { IncomingMessage } from 'node:http';
 import type { Socket } from 'node:net';
 import { WebSocket, WebSocketServer, type RawData } from 'ws';
-import { extractBearerToken, extractCookie, isLoopbackHost, isSameOriginRequest, SHARE_TOKEN_QUERY_KEY } from '../auth/auth.js';
+import { isLoopbackHost, isSameOriginRequest, presentedCredential, SHARE_TOKEN_QUERY_KEY } from '../auth/auth.js';
 
 /** 终端流句柄：stream + 进程退出订阅（runtime 侧从 driver onExit 合成） */
 export interface TerminalStreamHandle {
@@ -94,6 +94,41 @@ function terminalPathname(request: IncomingMessage): string | undefined {
   }
 }
 
+export const terminalAccessMode = (auth: TerminalRouteAuth) => auth.mode ?? (auth.allowUnauthenticated ? 'local' : 'token');
+
+/**
+ * Long-lived connections present their credential once, at connect time. This re-checks each one periodically
+ * against the server's current token / password hash and revokes those no longer valid. The timer runs only while
+ * something is bound.
+ */
+export class CredentialSweep<K> {
+  private readonly bound = new Map<K, { valid: () => boolean; revoke: () => void }>();
+  private timer: ReturnType<typeof setInterval> | undefined;
+  constructor(private readonly intervalMs: number) {}
+  bind(key: K, valid: () => boolean, revoke: () => void) {
+    this.bound.set(key, { valid, revoke });
+    this.timer ??= setInterval(() => this.sweep(), this.intervalMs);
+    this.timer.unref();
+  }
+  unbind(key: K) {
+    this.bound.delete(key);
+    if (!this.bound.size) this.stop();
+  }
+  stop() {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = undefined;
+    this.bound.clear();
+  }
+  private sweep() {
+    for (const [key, { valid, revoke }] of this.bound) {
+      if (valid()) continue;
+      this.bound.delete(key);
+      revoke();
+    }
+    if (!this.bound.size) this.stop();
+  }
+}
+
 /**
  * WS 升级的访问认证，终端与转发到其他实例的升级共用。不传 auth = 不认证（loopback 场景）。
  * 拒绝时返回 rejectUpgrade 的参数，放行时返回 undefined。
@@ -101,7 +136,7 @@ function terminalPathname(request: IncomingMessage): string | undefined {
 export function upgradeRejection(request: IncomingMessage, auth: TerminalRouteAuth | undefined): [statusCode: number, statusText: string, message: string] | undefined {
   if (new URLSearchParams(request.url?.split('?').slice(1).join('?')).has(SHARE_TOKEN_QUERY_KEY)) return [401, 'Unauthorized', 'share links cannot access terminals'];
   if (!auth) return undefined;
-  const authMode = auth.mode ?? (auth.allowUnauthenticated ? 'local' : 'token');
+  const authMode = terminalAccessMode(auth);
   const protocol = 'encrypted' in request.socket && request.socket.encrypted === true ? 'https' : 'http';
   // Explicit open mode accepts remote hosts without a token, while browser
   // upgrades still have to originate from the exact public Dutydeck origin.
@@ -115,7 +150,7 @@ export function upgradeRejection(request: IncomingMessage, auth: TerminalRouteAu
     return request.headers.origin && !isSameOriginRequest({ origin: request.headers.origin, host: request.headers.host }, protocol) ? [403, 'Forbidden', 'origin not allowed'] : undefined;
   }
   if (request.headers.origin && !isSameOriginRequest(request.headers, protocol)) return [403, 'Forbidden', 'origin not allowed'];
-  if (!auth.check(extractBearerToken(request.headers.authorization) ?? extractCookie(request.headers.cookie))) return [401, 'Unauthorized', 'unauthorized'];
+  if (!auth.check(presentedCredential(request.headers))) return [401, 'Unauthorized', 'unauthorized'];
   return undefined;
 }
 
@@ -298,22 +333,9 @@ export function registerTerminalRoutes(app: FastifyInstance, options: TerminalRo
   const sendBudget: SendBudget = { bytes: 0 };
   const pending = new Set<Socket>();
   // 凭据只在握手时提交一次，之后按服务端缓存的 token / 密码哈希复核，撤销后不能再读写。
-  const credentials = new Map<WebSocket, () => boolean>();
-  let credentialSweep: ReturnType<typeof setInterval> | undefined;
+  const credentials = new CredentialSweep<WebSocket>(options.credentialRecheckMs ?? TERMINAL_CREDENTIAL_RECHECK_MS);
   let closing = false;
   let closeRun: Promise<void> | undefined;
-  const stopCredentialSweep = () => {
-    if (credentialSweep) clearInterval(credentialSweep);
-    credentialSweep = undefined;
-  };
-  const sweepCredentials = () => {
-    for (const [ws, valid] of credentials) {
-      if (valid()) continue;
-      credentials.delete(ws);
-      try { ws.close(CREDENTIAL_REVOKED_CLOSE_CODE, 'credential revoked'); } catch { ws.terminate(); }
-    }
-    if (!credentials.size) stopCredentialSweep();
-  };
 
   /*
    * upgrade 监听器必须挂在被动的 onReady 钩子上（registerUpgradeRoute 内），不能调 app.ready(cb)：
@@ -392,23 +414,21 @@ export function registerTerminalRoutes(app: FastifyInstance, options: TerminalRo
       if (closing || socket.destroyed) { lookup.handle.stream.dispose(); socket.destroy(); return; }
 
       clearTimeout(deadline);
-      const credentialValid = () => upgradeRejection(request, options.auth) === undefined;
+      // The handshake passed upgradeRejection; of its checks only the token comparison can change afterwards.
+      const auth = options.auth && terminalAccessMode(options.auth) === 'token' ? options.auth : undefined;
+      const presented = presentedCredential(request.headers);
+      const credentialValid = () => !auth || auth.check(presented);
       wss.handleUpgrade(request, socket, head, ws => {
         socket.removeListener('error', onSocketError);
         pending.delete(socket);
         active.add(ws);
-        if (options.auth) {
-          credentials.set(ws, credentialValid);
-          credentialSweep ??= setInterval(sweepCredentials, options.credentialRecheckMs ?? TERMINAL_CREDENTIAL_RECHECK_MS);
-          credentialSweep.unref();
-        }
+        if (auth) credentials.bind(ws, credentialValid, () => { try { ws.close(CREDENTIAL_REVOKED_CLOSE_CODE, 'credential revoked'); } catch { ws.terminate(); } });
         bindConnection(
           ws,
           lookup.handle,
           () => {
             active.delete(ws);
-            credentials.delete(ws);
-            if (!credentials.size) stopCredentialSweep();
+            credentials.unbind(ws);
           },
           sendBudget,
           options.auth || options.authorize
@@ -423,8 +443,7 @@ export function registerTerminalRoutes(app: FastifyInstance, options: TerminalRo
   app.addHook('preClose', async () => {
     if (closeRun) return closeRun;
     closing = true;
-    stopCredentialSweep();
-    credentials.clear();
+    credentials.stop();
     for (const socket of pending) socket.destroy();
     pending.clear();
     for (const ws of active) {

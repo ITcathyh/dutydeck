@@ -957,9 +957,7 @@ export class DutydeckRuntime {
         if (this.attempts.get(session.id) === token) {
           this.attempts.delete(session.id); this.activeTasks.delete(session.id); this.activeTurns.delete(session.id);
         }
-        token.revoke(); this.completedTurns.delete(attempt.attemptId); this.driverStopReasons.delete(attempt.attemptId);
-        this.turnErrors.delete(attempt.attemptId); this.attemptTools.delete(attempt.attemptId); this.oscPermissionWaits.delete(attempt.attemptId);
-        this.dropAttemptPermissions(attempt.attemptId); this.wakeResourceQueues();
+        token.revoke(); this.forgetAttempt(attempt.attemptId);
         if (attached && !this.shuttingDown) await this.scoped(session.id, async () => {
           await this.projectQueue(session.id); this.queueBlocked.delete(session.id); this.scheduleQueue(session.id);
         });
@@ -3037,12 +3035,16 @@ export class DutydeckRuntime {
         this.attempts.delete(id); this.activeTurns.delete(id); this.activeTasks.delete(id);
         token.revoke(); this.touch(id);
       }
-      this.completedTurns.delete(ref.attemptId); this.driverStopReasons.delete(ref.attemptId); this.turnErrors.delete(ref.attemptId); this.eventFlushedAttempts.delete(ref.attemptId);
-      this.attemptTools.delete(ref.attemptId); this.oscPermissionWaits.delete(ref.attemptId); this.dropAttemptPermissions(ref.attemptId); this.wakeResourceQueues();
+      this.forgetAttempt(ref.attemptId);
     }
     const settled = this.publicTask(this.repos.execution.getTaskExecution(task.id)?.task ?? task);
     if (settledSession) this.notifyTaskSettled(settledSession, settled);
     return settled;
+  }
+  /** Drop every per-attempt record once its turn has ended, normally or after recovery. */
+  private forgetAttempt(attemptId: string) {
+    this.completedTurns.delete(attemptId); this.driverStopReasons.delete(attemptId); this.turnErrors.delete(attemptId); this.eventFlushedAttempts.delete(attemptId);
+    this.attemptTools.delete(attemptId); this.oscPermissionWaits.delete(attemptId); this.dropAttemptPermissions(attemptId); this.wakeResourceQueues();
   }
   private notifyTaskSettled(session: Session, settled: PublicTaskRecord) {
     if (this.options.onTaskSettled && isTerminalTaskStatus(settled.status)) {

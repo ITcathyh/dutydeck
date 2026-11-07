@@ -10,7 +10,7 @@ import { createInterface } from 'node:readline';
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute } from 'node:path';
 import type { SessionBackend, SpawnOptions } from './types.js';
-import type { PhysicalProcessIdentity, ProcessProbe } from './owned-tmux.js';
+import { exitedWithin, type PhysicalProcessIdentity, type ProcessProbe } from './owned-tmux.js';
 
 type Pane = { pane_id: string; terminal_id: string };
 interface State {
@@ -661,8 +661,7 @@ export class HerdrBackend implements SessionBackend {
       if (probe.observe(state.server) === 'alive') {
         try { process.kill(state.server.pid, signal); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
       }
-      for (const deadline = Date.now() + 5000; probe.observe(state.server) !== 'dead' && Date.now() < deadline;) await new Promise(resolve => setTimeout(resolve, 25));
-      if (probe.observe(state.server) === 'dead') return true;
+      if (await exitedWithin([state.server], probe, 5000, 25)) return true;
     }
     return false;
   }

@@ -10,7 +10,7 @@ import {
   type RepositoryBundle,
   type Session,
 } from '@dutydeck/shared';
-import { extractBearerToken, extractCookie, isLoopbackHost, tokensEqual, verifyBrowserSession } from './auth/auth.js';
+import { isLoopbackHost, presentedCredential, tokensEqual, verifyBrowserSession } from './auth/auth.js';
 
 export const installationOwnerPrincipalId = 'principal_installation_owner';
 export const foundationGroupBindingSessionSource = 'foundation_group_binding';
@@ -65,7 +65,7 @@ export function createInstallationPrincipalResolver(options: InstallationPrincip
       return isLoopbackHost(request.headers.host) ? installationOwner('trusted_loopback') : undefined;
     }
     if (options.mode !== 'token') return undefined;
-    const presented = extractBearerToken(request.headers.authorization) ?? extractCookie(request.headers.cookie);
+    const presented = presentedCredential(request.headers);
     if (!presented) return undefined;
     const expected = await options.getToken();
     if (expected && tokensEqual(presented, expected)) return installationOwner('verified_access_token');

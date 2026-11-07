@@ -4,8 +4,8 @@ import type { Readable } from 'node:stream';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { RuntimeError, type ConfigRepository } from '@dutydeck/shared';
-import { extractBearerToken, extractCookie } from './auth/auth.js';
-import { registerUpgradeRoute, rejectUpgrade, upgradeRejection, type TerminalRouteAuth } from './terminal/terminal-ws.js';
+import { presentedCredential } from './auth/auth.js';
+import { CredentialSweep, registerUpgradeRoute, rejectUpgrade, terminalAccessMode, upgradeRejection, type TerminalRouteAuth } from './terminal/terminal-ws.js';
 
 /**
  * 同机另起的 Dutydeck 实例（例如独立运行的 Tag bot 服务）。主服务的 dashboard 通过
@@ -108,29 +108,16 @@ export async function registerInstanceProxy(app: FastifyInstance, peers: PeerIns
   const upgrades = new Set<() => void>();
   const forwards = new Set<() => void>();
   // 对方按本机请求放行，主服务的凭据只在建立连接时校验过；token 轮换或密码重设后，已转发的长连接按周期断开。
-  const credentialBound = new Map<() => void, () => boolean>();
-  let credentialSweep: ReturnType<typeof setInterval> | undefined;
-  const stopCredentialSweep = () => {
-    if (credentialSweep) clearInterval(credentialSweep);
-    credentialSweep = undefined;
-  };
+  const credentials = new CredentialSweep<() => void>(CREDENTIAL_RECHECK_MS);
   const bindCredential = (close: () => void, request: IncomingMessage) => {
-    if (!auth || (auth.mode ?? (auth.allowUnauthenticated ? 'local' : 'token')) !== 'token') return;
-    const presented = extractBearerToken(request.headers.authorization) ?? extractCookie(request.headers.cookie);
-    credentialBound.set(close, () => auth.check(presented));
-    credentialSweep ??= setInterval(() => {
-      for (const [closeRevoked, valid] of credentialBound) if (!valid()) closeRevoked();
-      if (!credentialBound.size) stopCredentialSweep();
-    }, CREDENTIAL_RECHECK_MS);
-    credentialSweep.unref();
+    if (!auth || terminalAccessMode(auth) !== 'token') return;
+    const presented = presentedCredential(request.headers);
+    credentials.bind(close, () => auth.check(presented), close);
   };
-  const unbindCredential = (close: () => void) => {
-    credentialBound.delete(close);
-    if (!credentialBound.size) stopCredentialSweep();
-  };
+  const unbindCredential = (close: () => void) => credentials.unbind(close);
   app.addHook('preClose', async () => {
     closing = true;
-    stopCredentialSweep();
+    credentials.stop();
     for (const close of upgrades) close();
     for (const close of forwards) close();
   });

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { api, type DockEvent } from './api';
-import { loadHistoryRange, loadProjectedHistory, mergeReconciledEvents, type EventWindow } from './event-history';
+import { api, type DockEvent, type HistoryTurnPlace } from './api';
+import { HISTORY_TURN_PAGE_SIZE, loadHistoryRange, loadProjectedHistory, mergeReconciledEvents, type EventWindow } from './event-history';
 
 /** The outline query shared by the timeline read and a session link that starts it early. */
 export const historyOutlineQuery = (sessionId: string | undefined, tail?: number) => ({
@@ -9,6 +9,13 @@ export const historyOutlineQuery = (sessionId: string | undefined, tail?: number
   queryFn: ({ signal }: { signal: AbortSignal }) => api.sessionHistory(sessionId!, signal, tail ? { tail } : undefined),
   staleTime: 30_000
 });
+
+/** One page of earlier turn summaries, aligned to HISTORY_TURN_PAGE_SIZE so every reader shares the cached read. */
+export const historyPageQuery = (sessionId: string, places: HistoryTurnPlace[], page: number) => {
+  const start = page * HISTORY_TURN_PAGE_SIZE, end = Math.min(places.length, start + HISTORY_TURN_PAGE_SIZE) - 1;
+  const from = places[start]![1], through = places[end]![2];
+  return { queryKey: ['history-page', sessionId, from, through], queryFn: ({ signal }: { signal: AbortSignal }) => api.sessionHistoryTurns(sessionId, from, through, signal), staleTime: Infinity };
+};
 
 /** `tail` reads summaries of only the newest completed turns plus every turn's place; earlier summaries load per page. */
 export function useEventHistory(sessionId: string | undefined, enabled: boolean, tail?: number) {

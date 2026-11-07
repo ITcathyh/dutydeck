@@ -29,6 +29,7 @@ import { programStatusCommand } from './program-status-launch.js';
 import { runCommand } from './command.js';
 import { OutputHandoff } from './output-handoff.js';
 import { TmuxCapture, cleanAbandonedTmuxCapture } from './tmux-capture.js';
+import { statStart } from './proc-stat.js';
 import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { readFileSync, statSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
@@ -117,9 +118,8 @@ function isSocketMissingErrorText(stderrText: string): boolean {
   return /error connecting to .*\(No such file or directory\)/i.test(stderrText);
 }
 
-/** Linux start time of a process (stat field 22), so a reused PID is not mistaken for the original. */
 function processStart(pid: number): string | undefined {
-  try { const stat = readFileSync(`/proc/${pid}/stat`, 'utf8'); return stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19]; }
+  try { return statStart(readFileSync(`/proc/${pid}/stat`, 'utf8')); }
   catch { return undefined; }
 }
 function paneProcessAlive(pane: { pid: number; start?: string }): boolean {
