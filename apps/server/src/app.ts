@@ -33,7 +33,7 @@ import { registerLarkRoutes, type LarkRoutesOptions } from './lark/routes.js';
 import { discoverAgentModels } from './agent-models.js';
 import { discoverSessionAgentModels } from './session-model-probe.js';
 import { registerSystemRoutes, type SystemRoutesOptions } from './system-routes.js';
-import { accessMode, extractBearerToken, extractCookie, isValidAccessCredential, isValidSessionShareCredential, SHARE_TOKEN_QUERY_KEY, registerAuthMiddleware, registerBrowserAuthRoutes, type AuthMiddlewareOptions } from './auth/auth.js';
+import { accessMode, isValidAccessCredential, presentedCredential, isValidSessionShareCredential, SHARE_TOKEN_QUERY_KEY, registerAuthMiddleware, registerBrowserAuthRoutes, type AuthMiddlewareOptions } from './auth/auth.js';
 import { registerTerminalRoutes, type TerminalRouteAuth, type TerminalStreamProvider } from './terminal/terminal-ws.js';
 import { isSharedInstanceRead, registerInstanceProxy, rewriteSharedSessionProxyUrl, type PeerInstance } from './instance-proxy.js';
 import { isRelayCapabilityRequest, registerRelayRoutes, type RelayRoutesOptions } from './relay-routes.js';
@@ -79,6 +79,8 @@ const webContentSecurityPolicy = "img-src 'self' data: blob:";
 // Web 构建为文本资源生成的预压缩副本。按 Accept-Encoding 的权重选，同权重优先 br；未声明或 q=0 的编码不用。
 const precompressedEncodings = [{ name: 'br', suffix: '.br' }, { name: 'gzip', suffix: '.gz' }] as const;
 const SESSION_STREAM_ACCESS_RECHECK_MS = 5_000;
+/** Same extensions apps/web/vite-precompress.ts writes .br/.gz copies for; other files are served as is. */
+const PRECOMPRESSED_FILE = /\.(?:css|html|js|json|map|svg)$/;
 function acceptedPrecompressedEncodings(header: string | string[] | undefined) {
   const weights = new Map<string, number>();
   for (const part of String(header ?? '').split(',')) {
@@ -743,7 +745,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     // The access credential was checked once at connect; a token rotation or
     // password reset must also end streams that are already open.
     const accessAuth = !shared && options.auth && accessMode(options.auth) === 'token' ? options.auth : undefined;
-    const accessCredential = extractBearerToken(request.headers.authorization) ?? extractCookie(request.headers.cookie);
+    const accessCredential = presentedCredential(request.headers);
     let accessPoll: ReturnType<typeof setInterval> | undefined;
     let accessChecking = false;
     const sharedSessionId = request.params.id;
@@ -915,7 +917,9 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
 
       const head = request.method === 'HEAD';
       // 本服务不实现 Range（总是回完整 200），带 Range 的请求仍回原文件，免得字节区间落在压缩数据上。
-      const encodings = request.headers.range === undefined ? acceptedPrecompressedEncodings(request.headers['accept-encoding']) : [];
+      // 只有 vite-precompress 处理过的类型才可能有副本；没有扩展名的路径会回退到 index.html。
+      const mayHaveCopies = !extname(pathname) || PRECOMPRESSED_FILE.test(requestedFile);
+      const encodings = request.headers.range === undefined && mayHaveCopies ? acceptedPrecompressedEncodings(request.headers['accept-encoding']) : [];
       // 可能改发压缩副本时，先只确认原文件可读，正文再从副本读，避免读两份。
       const probeOnly = head || encodings.length > 0;
       let file = requestedFile;

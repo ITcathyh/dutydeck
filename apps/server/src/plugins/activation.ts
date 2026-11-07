@@ -9,8 +9,10 @@ import Database from 'better-sqlite3';
 import { observeProcess, type ProcessIdentity } from '@dutydeck/storage';
 import { z } from 'zod';
 
+/** A `ProcessIdentity` as written to plugin host and loading records. */
+export const processIdentitySchema = z.object({ host: z.string(), boot: z.string(), namespace: z.string(), pid: z.number().int().positive(), start: z.string() });
 const hostStateSchema = z.object({
-  identity: z.object({ host: z.string(), boot: z.string(), namespace: z.string(), pid: z.number().int().positive(), start: z.string() }),
+  identity: processIdentitySchema,
   database: z.string().optional(), stopped: z.boolean(),
   plugins: z.record(z.string(), z.string()),
   loaded: z.array(z.string()).optional(),

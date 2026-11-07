@@ -21,7 +21,7 @@ import {
 } from '@dutydeck/shared';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '@dutydeck/cli-adapters';
 import { buildDutydeckRoutingBlock } from '@dutydeck/cli-adapters';
-import { ProgramStatusFramingStream, captureOwnedTmuxIdentity, captureOwnedTmuxAbsence, stopOwnedTmux, verifyOwnedTmuxExit, verifyOwnedTmuxAbsence, PtyBackend, TmuxBackend, HerdrBackend, type SessionBackend, type ProcessProbe, type OwnedTmuxIdentity, type OwnedTmuxExitProof, type OwnedTmuxAbsence } from '@dutydeck/session-backends';
+import { ProgramStatusFramingStream, captureOwnedTmuxIdentity, captureOwnedTmuxAbsence, stopOwnedTmux, processIdentityKey, verifyOwnedTmuxExit, verifyOwnedTmuxAbsence, PtyBackend, TmuxBackend, HerdrBackend, type SessionBackend, type ProcessProbe, type OwnedTmuxIdentity, type OwnedTmuxExitProof, type OwnedTmuxAbsence } from '@dutydeck/session-backends';
 import { TerminalSnapshot } from '@dutydeck/terminal-renderer';
 import { IdleDetector } from './idle-detector.js';
 import { TurnCpu } from './turn-cpu.js';
@@ -1341,20 +1341,20 @@ export class PtyCliDriver implements AgentDriver {
     return this.adapter.capabilities.programStatus === true && this.backend.kind !== 'herdr';
   }
 
+  private ownedTmuxScope(backend: TmuxBackend) {
+    const socketPath = backend.getSocketPath();
+    if (!this.processProbe || !backend.ownerId || !socketPath) return undefined;
+    return { socketPath, sessionName: backend.sessionName, ownerId: backend.ownerId, hostname: hostname(), uid: process.getuid!() };
+  }
+
   private async captureTmuxAbsence(backend: TmuxBackend): Promise<OwnedTmuxAbsence | undefined> {
-    if (!this.processProbe || !backend.ownerId || !backend.getSocketPath()) return undefined;
-    return captureOwnedTmuxAbsence({
-      socketPath: backend.getSocketPath()!, sessionName: backend.sessionName,
-      ownerId: backend.ownerId, hostname: hostname(), uid: process.getuid!(),
-    }, this.processProbe);
+    const scope = this.ownedTmuxScope(backend);
+    return scope && captureOwnedTmuxAbsence(scope, this.processProbe!);
   }
 
   private async captureTmuxIdentity(backend: TmuxBackend): Promise<OwnedTmuxIdentity | undefined> {
-    if (!this.processProbe || !backend.ownerId || !backend.getSocketPath()) return undefined;
-    return captureOwnedTmuxIdentity({
-      socketPath: backend.getSocketPath()!, sessionName: backend.sessionName,
-      ownerId: backend.ownerId, hostname: hostname(), uid: process.getuid!(),
-    }, this.processProbe);
+    const scope = this.ownedTmuxScope(backend);
+    return scope && captureOwnedTmuxIdentity(scope, this.processProbe!);
   }
 
   /** 把一个后端接线进事件流（start / reattach / respawn 共用）。 */
@@ -2279,7 +2279,7 @@ function mergedEnv(agentEnv: Record<string, string>): Record<string, string> {
 
 function mergeIdentities(...lists: OwnedTmuxIdentity['identities'][]): OwnedTmuxIdentity['identities'] {
   const merged = new Map<string, OwnedTmuxIdentity['identities'][number]>();
-  for (const item of lists.flat()) merged.set(JSON.stringify([item.host, item.boot, item.namespace, item.pid, item.start]), item);
+  for (const item of lists.flat()) merged.set(processIdentityKey(item), item);
   return [...merged.values()];
 }
 /** False only when the PID no longer exists (ESRCH); an unknown answer counts as running. */

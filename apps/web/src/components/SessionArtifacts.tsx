@@ -1,9 +1,9 @@
 import { useState } from 'react';
 import type { ArtifactSnapshot, EventArtifactReference } from '@dutydeck/shared';
 import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
-import { api, artifactSnapshotsApi, hasShareToken, type HistoryTurnSummary } from '../api';
+import { artifactSnapshotsApi, hasShareToken, type HistoryTurnSummary } from '../api';
 import { HISTORY_TURN_PAGE_SIZE } from '../event-history';
-import { historyOutlineQuery } from '../useEventHistory';
+import { historyOutlineQuery, historyPageQuery } from '../useEventHistory';
 import { Banner, Button, Spinner } from './primitives';
 
 function SnapshotCard({ snapshot }: { snapshot: ArtifactSnapshot }) {
@@ -44,10 +44,7 @@ export function SessionArtifacts({ sessionId }: { sessionId: string }) {
   const summarizedFrom = Math.max(0, places.length - HISTORY_TURN_PAGE_SIZE);
   const newestOlderPage = Math.ceil(summarizedFrom / HISTORY_TURN_PAGE_SIZE) - 1;
   const firstPage = Math.min(oldestPage ?? Infinity, newestOlderPage + 1);
-  const pages = useQueries({ queries: Array.from({ length: newestOlderPage + 1 - firstPage }, (_, offset) => {
-    const start = (firstPage + offset) * HISTORY_TURN_PAGE_SIZE, from = places[start]![1], through = places[start + HISTORY_TURN_PAGE_SIZE - 1]![2];
-    return { queryKey: ['history-page', sessionId, from, through], queryFn: ({ signal }: { signal: AbortSignal }) => api.sessionHistoryTurns(sessionId, from, through, signal), staleTime: Infinity };
-  }) });
+  const pages = useQueries({ queries: Array.from({ length: newestOlderPage + 1 - firstPage }, (_, offset) => historyPageQuery(sessionId, places, firstPage + offset)) });
   const unread = Math.min(firstPage * HISTORY_TURN_PAGE_SIZE, summarizedFrom);
   const loadingOlder = pages.some(page => page.isPending);
   const olderError = pages.find(page => page.error)?.error;

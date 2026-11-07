@@ -10,6 +10,9 @@ export const HISTORY_PLACE_PROMPT_LIMIT = 40;
 type Turn = { first: number; last: number; timestamp: string; attemptId: string | null;
   toolCount: number; endedAt: string | null; artifactCandidate: number | null; promptText: string | null; promptTruncated: number | null; outputText: string | null; outputTruncated: number | null; spans: string | null };
 
+const readHighWaterMark = (sqlite: Database.Database, sessionId: string) =>
+  (cachedStatement(sqlite, 'SELECT COALESCE(MAX(sequence),0) AS value FROM events WHERE session_id=?').get(sessionId) as { value: number }).value;
+
 /**
  * SQLite projects bounded fields; neither raw nor tool input/output blobs enter JS.
  * Without `tail` every completed turn is summarized. With `tail` only the newest turns are,
@@ -17,7 +20,7 @@ type Turn = { first: number; last: number; timestamp: string; attemptId: string 
  */
 export function readHistoryOutline(sqlite: Database.Database, sessionId: string, query: HistoryOutlineQuery = {}): HistoryOutline {
   return sqlite.transaction(() => {
-    const highWaterMark = (cachedStatement(sqlite, 'SELECT COALESCE(MAX(sequence),0) AS value FROM events WHERE session_id=?').get(sessionId) as { value: number }).value;
+    const highWaterMark = readHighWaterMark(sqlite, sessionId);
     const { places, statuses } = completedPlaces(sqlite, sessionId, highWaterMark, highWaterMark);
     const selected = query.tail !== undefined ? places.slice(Math.max(0, places.length - query.tail)) : places;
     const commandCatalog = readCommandCatalog(sqlite, sessionId);
@@ -30,7 +33,7 @@ export function readHistoryOutline(sqlite: Database.Database, sessionId: string,
 /** Summaries of the completed turns lying inside `from..through`; reads nothing after the range. */
 export function readHistoryTurns(sqlite: Database.Database, sessionId: string, from: number, through: number): HistoryTurnSummary[] {
   return sqlite.transaction(() => {
-    const highWaterMark = (cachedStatement(sqlite, 'SELECT COALESCE(MAX(sequence),0) AS value FROM events WHERE session_id=?').get(sessionId) as { value: number }).value;
+    const highWaterMark = readHighWaterMark(sqlite, sessionId);
     const { places, statuses } = completedPlaces(sqlite, sessionId, highWaterMark, Math.min(through, highWaterMark));
     const selected = places.filter(place => place[1] >= from && place[2] <= through);
     return selected.length ? projectTurns(sqlite, sessionId, selected, statuses) : [];

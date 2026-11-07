@@ -8,7 +8,3 @@ export function safeGitConfigFor(
   location: readonly string[],
   options: { env: Record<string, string | undefined>; timeout?: number }
 ): Promise<string[]>;
-export function inspectGitConfig(
-  location: readonly string[],
-  options: { env: Record<string, string | undefined>; timeout?: number }
-): Promise<{ config: string[]; repositoryFilters: string[] }>;

@@ -26,9 +26,10 @@ export async function readGitSnapshot(cwd: string): Promise<LarkGitSnapshot | un
   if (!cwd || typeof cwd !== 'string') return undefined;
   try {
     const git = await workTreeGit(cwd, 2000);
-    const branch = (await git(['rev-parse', '--abbrev-ref', 'HEAD'])).trim();
-    const head = (await git(['rev-parse', '--short', 'HEAD'])).trim();
-    const lines = (await git(['status', '--short', '--ignore-submodules=dirty'])).split('\n').filter(line => line.trim().length > 0);
+    const [branch, head, status] = await Promise.all([
+      git(['rev-parse', '--abbrev-ref', 'HEAD']), git(['rev-parse', '--short', 'HEAD']), git(['status', '--short', '--ignore-submodules=dirty'])
+    ]);
+    const lines = status.split('\n').filter(line => line.trim().length > 0);
     return { branch, head, status: lines.slice(0, 10), statusTotal: lines.length };
   } catch {
     return undefined;
@@ -47,10 +48,14 @@ export async function readGitCodeSignature(cwd: string | undefined): Promise<str
   try {
     const git = await workTreeGit(cwd, 5000, 16 * 1024 * 1024);
     const platformData = /(?:^|[\s/])\.dutydeck(?:\/|$)/;
-    const head = (await git(['rev-parse', '--verify', 'HEAD'])).trim();
-    const status = (await git(['status', '--porcelain=v1', '-z', '--ignore-submodules=dirty'])).split('\0').filter(entry => entry && !platformData.test(entry));
-    const numstat = (await git(['diff', 'HEAD', '--numstat', '-z', '--ignore-submodules=dirty'])).split('\0').filter(entry => entry && !platformData.test(entry));
-    return createHash('sha256').update(JSON.stringify([head, status, numstat])).digest('hex');
+    // 三条命令互不依赖，并行跑：每一轮结束都要等它们。
+    const [head, status, numstat] = await Promise.all([
+      git(['rev-parse', '--verify', 'HEAD']),
+      git(['status', '--porcelain=v1', '-z', '--ignore-submodules=dirty']),
+      git(['diff', 'HEAD', '--numstat', '-z', '--ignore-submodules=dirty'])
+    ]);
+    const entries = (output: string) => output.split('\0').filter(entry => entry && !platformData.test(entry));
+    return createHash('sha256').update(JSON.stringify([head.trim(), entries(status), entries(numstat)])).digest('hex');
   } catch {
     return undefined;
   }
@@ -67,25 +72,21 @@ export async function readGitStatusLine(cwd: string): Promise<string | undefined
 
   try {
     const git = await workTreeGit(cwd, 2000);
-    // 1. 读取当前分支
-    const branch = (await git(['rev-parse', '--abbrev-ref', 'HEAD'])).trim();
+    // 分支、未提交文件（git status --porcelain 的行数）、未推送提交数互不依赖，并行读；没有 upstream 时 rev-list 失败，省略该项。
+    const [branchOutput, statusOutput, unpushedOutput] = await Promise.all([
+      git(['rev-parse', '--abbrev-ref', 'HEAD']),
+      git(['status', '--porcelain', '--ignore-submodules=dirty']),
+      git(['rev-list', '--count', '@{upstream}..HEAD']).catch(() => undefined)
+    ]);
+    const branch = branchOutput.trim();
     if (!branch) return undefined;
 
-    // 2. 未提交文件数（git status --porcelain 的行数）
-    const uncommittedLines = (await git(['status', '--porcelain', '--ignore-submodules=dirty'])).split('\n').filter(line => line.trim().length > 0);
+    const uncommittedLines = statusOutput.split('\n').filter(line => line.trim().length > 0);
     const uncommittedCount = uncommittedLines.length;
     const uncommittedText = uncommittedCount === 0 ? '已全部提交' : `未提交 ${uncommittedCount} 个文件`;
 
-    // 3. 未推送提交数（没有 upstream 时省略该项）
-    let unpushedText: string | undefined;
-    try {
-      const unpushedCount = parseInt((await git(['rev-list', '--count', '@{upstream}..HEAD'])).trim(), 10);
-      if (!Number.isNaN(unpushedCount)) {
-        unpushedText = unpushedCount === 0 ? '已全部推送' : `未推送 ${unpushedCount} 个提交`;
-      }
-    } catch {
-      // 没有 upstream 或读取失败时省略
-    }
+    const unpushedCount = unpushedOutput === undefined ? NaN : parseInt(unpushedOutput.trim(), 10);
+    const unpushedText = Number.isNaN(unpushedCount) ? undefined : unpushedCount === 0 ? '已全部推送' : `未推送 ${unpushedCount} 个提交`;
 
     const parts = [`分支 ${branch}`, uncommittedText];
     if (unpushedText) parts.push(unpushedText);
