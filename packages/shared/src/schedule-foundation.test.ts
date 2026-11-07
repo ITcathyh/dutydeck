@@ -52,6 +52,14 @@ describe('Schedule foundation time semantics', () => {
     expect(previewNextSchedule(friday, new Date('2026-08-28T09:00:00.000Z'))?.scheduledForUtc).toBe('2026-09-04T09:00:00.000Z');
     expect(previewNextSchedule(base({ kind: 'cron', expression: '* * * * *' }, { timezone: 'UTC' }), new Date('2026-08-28T23:59:00.000Z'))?.scheduledForUtc).toBe('2026-08-29T00:00:00.000Z');
   });
+  it('treats a single start value with a step as start-to-maximum, like standard cron', () => {
+    const quarter = base({ kind: 'cron', expression: '0/15 * * * *' }, { timezone: 'UTC' });
+    expect(previewNextSchedule(quarter, new Date('2026-08-28T11:00:00.000Z'))?.scheduledForUtc).toBe('2026-08-28T11:15:00.000Z');
+    expect(previewNextSchedule(quarter, new Date('2026-08-28T11:45:00.000Z'))?.scheduledForUtc).toBe('2026-08-28T12:00:00.000Z');
+    const offset = base({ kind: 'cron', expression: '5/20 9/12 * * *' }, { timezone: 'UTC' });
+    expect(previewNextSchedule(offset, new Date('2026-08-28T09:05:00.000Z'))?.scheduledForUtc).toBe('2026-08-28T09:25:00.000Z');
+    expect(previewNextSchedule(offset, new Date('2026-08-28T09:45:00.000Z'))?.scheduledForUtc).toBe('2026-08-28T21:05:00.000Z');
+  });
   it('models DST gaps explicitly instead of silently changing timezone semantics', () => {
     const skipped = base({ kind: 'at', localDateTime: '2026-03-08T02:30:00' });
     expect(previewNextSchedule(skipped, new Date('2026-03-01T00:00:00.000Z'))).toBeUndefined();
