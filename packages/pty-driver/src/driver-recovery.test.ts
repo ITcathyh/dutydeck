@@ -138,9 +138,12 @@ tmuxDescribe('PtyCliDriver in-flight tmux turn recovery', () => {
         await driver.start();
         if (adapterId === 'traex') await waitFor(async () => expect(await backend.captureCurrentScreen()).toContain('Context 100% left'));
         await driver.checkpoint();
+        // Paste-capable adapters submit through pasteText; either is the literal input transport.
         const writes = vi.spyOn(backend, 'write');
+        const pastes = vi.spyOn(backend, 'pasteText');
         const enters = vi.spyOn(backend, 'sendSpecialKeys');
-        (method === 'write' ? writes : enters).mockReturnValue(false);
+        if (method === 'write') { writes.mockResolvedValue(false); pastes.mockResolvedValue(false); }
+        else enters.mockResolvedValue(false);
         const metadata = vi.spyOn(backend, 'setDutydeckMetadata');
         const sent = driver.send('fixture prompt').then(() => undefined, error => error);
         let timer: NodeJS.Timeout | undefined;
@@ -149,7 +152,7 @@ tmuxDescribe('PtyCliDriver in-flight tmux turn recovery', () => {
         finally { clearTimeout(timer); }
         expect(metadata).not.toHaveBeenCalled();
         expect(events.filter(event => event.data?.state === 'prompt_assembly')).toEqual([]);
-        if (method === 'write') { expect(writes).toHaveBeenCalledOnce(); expect(enters).not.toHaveBeenCalled(); }
+        if (method === 'write') { expect(writes.mock.calls.length + pastes.mock.calls.length).toBe(1); expect(enters).not.toHaveBeenCalled(); }
         else expect(enters).toHaveBeenCalledOnce();
       } finally { await driver.stop(); vi.restoreAllMocks(); }
     }

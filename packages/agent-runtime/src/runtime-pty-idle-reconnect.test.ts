@@ -45,6 +45,7 @@ it.each([false, true, 'exited'] as const)('Codex continues the same verified nat
     const pane = panes.get(this.sessionName)!; pane.prompt = prompt;
     pane.paint('\x1bcCodex\r\n› ' + prompt.replaceAll('\n', '\r\n') + '\r\n100% left'); return true;
   });
+  vi.spyOn(TmuxBackend.prototype, 'pasteText').mockImplementation(function (text) { return TmuxBackend.prototype.write.call(this, text); });
   vi.spyOn(TmuxBackend.prototype, 'sendSpecialKeys').mockImplementation(async function (...keys) {
     expect(keys).toEqual(['Enter']);
     const pane = panes.get(this.sessionName)!, turn = randomUUID();
