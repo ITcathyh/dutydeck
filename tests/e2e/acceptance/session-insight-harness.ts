@@ -84,6 +84,10 @@ const appendLine = (file, obj) => { fs.mkdirSync(path.dirname(file), { recursive
 const sessionArgIndex = process.argv.indexOf('--session-id');
 const pinnedSessionId = sessionArgIndex >= 0 ? process.argv[sessionArgIndex + 1] : undefined;
 
+// 像真 CLI 一样先开启 bracketed paste（Claude/Codex/TraeX 启动都会发 ?2004h）：tmux paste-buffer -p
+// 只在应用开启后才包 paste 标记，没开时多行 prompt 会按行拆成几次提交。
+process.stdout.write('\u001b[?2004h');
+
 // 启动就绪横幅：必须匹配各适配器 pollScreenReady / readyPattern。
 // Claude 同时画完整空 composer（claude-family.test.ts 实采底部结构），
 // 让同目录的后续客户端通过真实 idle 检查，而非依赖杀掉旧 pane。
