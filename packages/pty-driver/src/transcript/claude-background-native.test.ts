@@ -2,11 +2,16 @@ import { afterEach, expect, it } from 'vitest';
 import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import type { NormalizedDriverEvent } from '@dutydeck/shared';
+import { BACKGROUND_FOLLOWUP, isBackgroundFollowup, type NormalizedDriverEvent } from '@dutydeck/shared';
 import { ClaudeTranscriptTailer } from './claude.js';
 import { ClaudeBackgroundTasks } from './claude-background.js';
 // Captured native Claude JSONL, adapted from Botmux f89419093 (MIT).
 const records = readFileSync(new URL('../fixtures/claude-background-tasks/before-clear.jsonl', import.meta.url), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+const turnTexts = (events: NormalizedDriverEvent[]) => events.filter(event => event.type === 'text' && !isBackgroundFollowup(event)).map(event => event.data.text);
+const followups = (events: NormalizedDriverEvent[]) => events.filter(event => event.type === 'text' && isBackgroundFollowup(event)).map(event => ({ data: event.data, sourceId: event.sourceId }));
+const followup = (text: string, uuid: string) => ({ data: { text, origin: BACKGROUND_FOLLOWUP }, sourceId: `claude-background-followup:${uuid}:0` });
+// Fixture lines 14 and 19 answer the Bash and Agent notices after the launching turn ended.
+const wakeReplies = [followup(records[13].message.content[0].text, records[13].uuid), followup(records[18].message.content[0].text, records[18].uuid)];
 let root: string, tailer: ClaudeTranscriptTailer;
 afterEach(() => { tailer?.stop(); if (root) rmSync(root, { recursive: true, force: true }); });
 it('tracks real Agent and Bash launches independently of a completed main turn and isolates late results', async () => {
@@ -19,7 +24,8 @@ it('tracks real Agent and Bash launches independently of a completed main turn a
   expect(events.filter(event => event.type === 'status').at(-1)?.data).toMatchObject({ state: 'background_work', count: 2, mainTurnEnded: true });
   await append(records.slice(7, 10)); expect(events.filter(event => event.type === 'text').at(-1)?.data.text).toBe('hi');
   await append(records.slice(10, 20)); expect(tailer.pendingBackgroundWork()).toBe(0);
-  expect(events.filter(event => event.type === 'text').map(event => event.data.text)).toEqual(['launched', 'hi']);
+  expect(turnTexts(events)).toEqual(['launched', 'hi']);
+  expect(followups(events)).toEqual(wakeReplies);
 });
 it('rebuilds live task identities after restart without replaying old replies', async () => {
   root = mkdtempSync(join(tmpdir(), 'dd-bg-restore-')); const path = join(root, 'session.jsonl');
@@ -29,7 +35,8 @@ it('rebuilds live task identities after restart without replaying old replies', 
   expect(tailer.pendingBackgroundWork()).toBe(2); expect(events.map(event => event.type)).toEqual(['status']);
   expect(events[0]?.data).toMatchObject({ state: 'background_work', count: 2 });
   appendFileSync(path, records.slice(10, 20).map(entry => JSON.stringify(entry) + '\n').join('')); await tailer.flush();
-  expect(tailer.pendingBackgroundWork()).toBe(0); expect(events.some(event => event.type === 'text')).toBe(false);
+  expect(tailer.pendingBackgroundWork()).toBe(0); expect(turnTexts(events)).toEqual([]);
+  expect(followups(events)).toEqual(wakeReplies);
 });
 it('keeps a single accepted next input and its ancestry alive across late background notice chains', async () => {
   root = mkdtempSync(join(tmpdir(), 'dd-bg-interleaved-')); const path = join(root, 'session.jsonl'); writeFileSync(path, '');
@@ -45,7 +52,8 @@ it('keeps a single accepted next input and its ancestry alive across late backgr
   await append(notice, { type: 'assistant', uuid: 'old-note', parentUuid: notice.uuid, message: { stop_reason: 'end_turn', content: [{ type: 'text', text: 'Old background postscript' }] } });
   await append({ type: 'assistant', uuid: 'next-answer', parentUuid: 'next-step', message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: 'Fresh independent answer' }] } },
     { type: 'system', subtype: 'turn_duration', uuid: 'next-terminal', parentUuid: 'next-answer' });
-  expect(events.filter(event => event.type === 'text').map(event => event.data.text)).toEqual(['launched', 'Fresh progress', 'Fresh independent answer']);
+  expect(turnTexts(events)).toEqual(['launched', 'Fresh progress', 'Fresh independent answer']);
+  expect(followups(events)).toEqual([wakeReplies[0], followup('Old background postscript', 'old-note')]);
   expect(tailer.hasTurnTerminal()).toBe(true);
 });
 it('restores legacy pending counters as required waiting, alongside native identities', async () => {

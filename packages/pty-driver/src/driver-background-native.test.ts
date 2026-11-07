@@ -3,7 +3,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmS
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCliAdapter, pinnedSessionUuid } from '@dutydeck/cli-adapters';
-import type { NormalizedDriverEvent } from '@dutydeck/shared';
+import { isBackgroundFollowup, type NormalizedDriverEvent } from '@dutydeck/shared';
 import type { SessionBackend } from '@dutydeck/session-backends';
 import { PtyCliDriver } from './driver.js';
 
@@ -12,7 +12,7 @@ const screen = readFileSync(new URL('./fixtures/claude-background-agent/turn1-sc
 const repaint = (text: string) => `\x1b[2J\x1b[H${text.replaceAll('\n', '\r\n')}`;
 let root: string, driver: PtyCliDriver;
 afterEach(async () => { await driver?.stop(); vi.useRealTimers(); if (root) rmSync(root, { recursive: true, force: true }); });
-it('completes an explicitly answered main turn promptly, retains background status, and excludes a late old result from the next turn', async () => {
+async function startAfterBackgroundLaunch() {
   vi.useFakeTimers(); root = mkdtempSync(join(tmpdir(), 'dd-driver-bg-native-'));
   const project = join(root, 'projects', realpathSync(root).replace(/[^A-Za-z0-9-]/g, '-')); mkdirSync(project, { recursive: true });
   const path = join(project, `${pinnedSessionUuid('ses_background_native')}.jsonl`); writeFileSync(path, '');
@@ -29,13 +29,32 @@ it('completes an explicitly answered main turn promptly, retains background stat
   await vi.waitFor(() => expect(submitted).toBe(1)); append(records.slice(1, 7)); output(repaint(screen)); await vi.advanceTimersByTimeAsync(5_000); await first;
   expect(events.filter(event => event.type === 'completed')).toHaveLength(1);
   expect(events.filter(event => event.type === 'status' && event.data.state === 'background_work').at(-1)?.data).toMatchObject({ count: 2, mainTurnEnded: true });
-  const boundary = events.length, second = driver.send('A separate request'); await vi.waitFor(() => expect(submitted).toBe(2));
+  return { events, append, output, submitted: () => submitted };
+}
+it('completes an explicitly answered main turn promptly, retains background status, and excludes a late old result from the next turn', async () => {
+  const { events, append, output, submitted } = await startAfterBackgroundLaunch();
+  const boundary = events.length, second = driver.send('A separate request'); await vi.waitFor(() => expect(submitted()).toBe(2));
   void second.catch(() => {});
   append(records.slice(10, 15));
   append([{ type: 'assistant', uuid: 'next-answer', parentUuid: 'next-input', message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: 'Fresh independent answer' }] } },
     { type: 'system', subtype: 'turn_duration', uuid: 'next-terminal', parentUuid: 'next-answer' }]);
   output(repaint(screen)); await vi.advanceTimersByTimeAsync(5_000);
-  expect(events.slice(boundary).filter(event => event.type === 'text').map(event => event.data.text)).toEqual(['Fresh independent answer']);
+  expect(events.slice(boundary).filter(event => event.type === 'text' && !isBackgroundFollowup(event)).map(event => event.data.text)).toEqual(['Fresh independent answer']);
+  expect(events.filter(event => event.type === 'completed')).toHaveLength(2);
+  await second;
+});
+it('forwards a background follow-up that arrives mid-turn without completing that turn', async () => {
+  const { events, append, output, submitted } = await startAfterBackgroundLaunch();
+  const boundary = events.length, second = driver.send('A separate request'); await vi.waitFor(() => expect(submitted()).toBe(2));
+  void second.catch(() => {});
+  // The new input's own terminal arrives before its answer; the follow-up must not stand in for that answer.
+  append([...records.slice(10, 20), { type: 'system', subtype: 'turn_duration', uuid: 'next-early-terminal', parentUuid: 'next-input' }]);
+  output(repaint(screen)); await vi.advanceTimersByTimeAsync(5_000);
+  expect(events.slice(boundary).filter(isBackgroundFollowup).map(event => event.data.text)).toEqual([records[13].message.content[0].text, records[18].message.content[0].text]);
+  expect(events.filter(event => event.type === 'completed')).toHaveLength(1);
+  append([{ type: 'assistant', uuid: 'next-answer', parentUuid: 'next-input', message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: 'Fresh independent answer' }] } },
+    { type: 'system', subtype: 'turn_duration', uuid: 'next-terminal', parentUuid: 'next-answer' }]);
+  output(repaint(screen)); await vi.advanceTimersByTimeAsync(5_000);
   expect(events.filter(event => event.type === 'completed')).toHaveLength(2);
   await second;
 });

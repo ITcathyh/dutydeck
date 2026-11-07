@@ -1957,3 +1957,49 @@ it('exposes only the matching active attempt and preserves currentAttemptId thro
     expect(restarted.getActiveTaskContext(session.id)).toBeUndefined();
   } finally { await restarted.shutdown(); h.repos.close(); }
 });
+
+describe('background follow-ups', () => {
+  const followup = (text: string, sourceId = 'claude-background-followup:entry:0') => ({ type: 'text', sourceId, data: { text, origin: 'background_followup' } });
+  const digest = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex');
+
+  it('records a follow-up during an active Attempt as a run-level event and leaves that Attempt unchanged', async () => {
+    const h = harness({ onSend: emit => { emit({ type: 'text', data: { text: 'current answer' } }); emit(followup('background answer')); } });
+    await h.runtime.initialize([agent]); const session = await h.runtime.start({ agentId: agent.id });
+    try {
+      const task = await h.runtime.send(session.id, 'work');
+      expect(task.status).toBe('completed');
+      const attempt = h.repos.execution.getTaskExecution(task.id)!.currentAttempt!;
+      expect(h.repos.execution.getAttemptEvents(attempt.attemptId, { limit: 200 }).filter(event => event.type === 'text' && (event.data as { role?: string }).role !== 'user').map(event => event.data)).toEqual([{ text: 'current answer' }]);
+      expect(attempt.settlement).toMatchObject({ kind: 'driver_result', outcome: 'completed', outputDigest: digest('current answer'), stopReason: 'end_turn' });
+      const stored = (await h.runtime.getEvents(session.id)).filter(event => (event.data as { origin?: string }).origin === 'background_followup');
+      expect(stored).toHaveLength(1);
+      expect(stored[0]).toMatchObject({ type: 'text', data: { text: 'background answer' } });
+      expect(stored[0]!.attemptId ?? null).toBeNull(); expect(stored[0]!.taskId ?? null).toBeNull();
+    } finally { await h.runtime.shutdown(); h.repos.close(); }
+  });
+
+  it('still records a follow-up that arrives after the Attempt settled', async () => {
+    const h = harness({ onSend: emit => emit({ type: 'text', data: { text: 'current answer' } }) });
+    await h.runtime.initialize([agent]); const session = await h.runtime.start({ agentId: agent.id });
+    try {
+      const task = await h.runtime.send(session.id, 'work');
+      expect(task.status).toBe('completed');
+      h.emit(followup('late background answer'));
+      await vi.waitFor(async () => expect((await h.runtime.getEvents(session.id)).filter(event => (event.data as { origin?: string }).origin === 'background_followup')
+        .map(event => ({ text: (event.data as { text: string }).text, attemptId: event.attemptId ?? null }))).toEqual([{ text: 'late background answer', attemptId: null }]));
+      expect(h.repos.execution.getTaskExecution(task.id)!.currentAttempt!.settlement).toMatchObject({ outcome: 'completed', outputDigest: digest('current answer') });
+    } finally { await h.runtime.shutdown(); h.repos.close(); }
+  });
+
+  it('stores one event for a follow-up source replayed twice', async () => {
+    const h = harness({ onSend: emit => { emit(followup('background answer', 'claude-background-followup:replayed:0')); emit({ type: 'text', data: { text: 'current answer' } }); } });
+    await h.runtime.initialize([agent]); const session = await h.runtime.start({ agentId: agent.id });
+    try {
+      expect((await h.runtime.send(session.id, 'work')).status).toBe('completed');
+      h.emit(followup('background answer', 'claude-background-followup:replayed:0'));
+      h.emit({ type: 'status', data: { state: 'probe_after_replay' } });
+      await vi.waitFor(async () => expect((await h.runtime.getEvents(session.id)).some(event => (event.data as { state?: string }).state === 'probe_after_replay')).toBe(true));
+      expect((await h.runtime.getEvents(session.id)).filter(event => (event.data as { origin?: string }).origin === 'background_followup')).toHaveLength(1);
+    } finally { await h.runtime.shutdown(); h.repos.close(); }
+  });
+});

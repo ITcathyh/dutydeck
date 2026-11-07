@@ -1,4 +1,4 @@
-import { appendEventContent, isChildDiagnostic, isTerminalTaskStatus } from '@dutydeck/shared';
+import { appendEventContent, isBackgroundFollowup, isChildDiagnostic, isTerminalTaskStatus } from '@dutydeck/shared';
 export { isChildDiagnostic };
 import type { DockEvent, Task } from './api';
 
@@ -90,7 +90,7 @@ function appendTimeline(timeline: TimelineEvent[], source: DockEvent[], toolInde
     // 插话并入正在执行的那一轮：不切断这一轮里的工具调用，也不和前后的消息拼成一条。
     if (current.type === 'text' && current.data.role === 'user' && !current.data.steering) toolIndexes.clear();
 
-    if ((current.type === 'text' || current.type === 'thinking') && previous?.type === current.type && (previous.data.role ?? 'assistant') === role && !current.data.steering && !previous.data.steering && current.taskId === previous.taskId && current.attemptId === previous.attemptId) {
+    if ((current.type === 'text' || current.type === 'thinking') && previous?.type === current.type && (previous.data.role ?? 'assistant') === role && !current.data.steering && !previous.data.steering && current.taskId === previous.taskId && current.attemptId === previous.attemptId && current.data.origin === previous.data.origin) {
       timeline[timeline.length - 1] = { ...previous, data: { ...previous.data, text: `${previous.data.text ?? ''}${current.data.text ?? ''}`, ...((previous.data.parts || current.data.parts) ? { parts: appendEventContent(previous.data.parts ?? [{ type: 'text', text: previous.data.text ?? '' }], current.data.parts ?? [{ type: 'text', text: current.data.text ?? '' }]) } : {}) }, sequence: current.sequence, timestamp: current.timestamp };
       continue;
     }
@@ -199,7 +199,8 @@ export function buildTimelineSections(timeline: TimelineEvent[], tasks: Task[] =
     const task = tasksById.get(userMessage?.data.steering?.target?.taskId ?? userMessage?.data.taskId ?? turn.find(event => event.taskId || event.data.taskId)?.taskId ?? turn.find(event => event.data.taskId)?.data.taskId);
     const terminal = task ? isTerminalTaskStatus(task.status) : turnIndex < turns.length - 1 || !latestTurn;
     const lastActivityIndex = turn.reduce((latest, event, index) => isActivity(event) && !isChildDiagnostic(event.data) ? index : latest, -1);
-    const lastAssistantTextIndex = turn.reduce((latest, event, index) => event.type === 'text' && event.data.role !== 'user' ? index : latest, -1);
+    // 后台任务结束后的回答按到达时间留在时间线上，不算这一轮的结论。
+    const lastAssistantTextIndex = turn.reduce((latest, event, index) => event.type === 'text' && event.data.role !== 'user' && !isBackgroundFollowup(event) ? index : latest, -1);
     const finalIndex = terminal && lastAssistantTextIndex > lastActivityIndex ? lastAssistantTextIndex : -1;
     const hasAnswer = finalIndex >= 0;
     type Piece = { kind: 'event'; event: TimelineEvent; final: boolean } | { kind: 'group'; group: TimelineActivityGroup };
@@ -221,7 +222,7 @@ export function buildTimelineSections(timeline: TimelineEvent[], tasks: Task[] =
     };
     for (const [eventIndex, event] of turn.entries()) {
       if (eventIndex === finalIndex) { appendPendingThinking(); flushActivity(); pieces.push({ kind: 'event', event, final: true }); continue; }
-      if (assistantDescription(event)) {
+      if (assistantDescription(event) && !isBackgroundFollowup(event)) {
         flushActivity();
         currentEvents = [...pendingThinking, event];
         pendingThinking = [];

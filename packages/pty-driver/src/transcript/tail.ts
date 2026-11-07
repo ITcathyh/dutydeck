@@ -555,7 +555,8 @@ export class JsonlTailer implements TranscriptEventSource {
         this.toolEvents.add(key);
       }
       if (baseline) continue;
-      const sourceId = createHash('sha256')
+      // A mapper-chosen identity survives transcript moves; the rest derive theirs from the record.
+      const sourceId = ev.sourceId ?? createHash('sha256')
         .update(recordIdentity ?? `${this.currentPath ?? ''}\0${lineOffset}\0${rawLine}`)
         .update('\0')
         .update(String(eventIndex))

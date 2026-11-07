@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest';
-import type { AgentEvent } from '@dutydeck/shared';
-import { eventsForRuntimeTask, loadLarkTaskEvents, renderLarkProcessElements, renderLarkResultElements } from './card-renderer.js';
+import { BACKGROUND_FOLLOWUP, type AgentEvent } from '@dutydeck/shared';
+import { eventsForRuntimeTask, loadLarkTaskEvents, renderLarkProcessElements, renderLarkRecordExport, renderLarkResultElements } from './card-renderer.js';
 
 const at = '2026-10-08T07:44:07.000Z';
 const task = (id: string, status: string): AgentEvent => ({ type: 'task', data: { task: { id, status } }, timestamp: at } as AgentEvent);
@@ -89,4 +89,24 @@ it('ignores incomplete diagnostic statuses and keeps ordinary tool results block
   const result = renderLarkResultElements(events);
   expect(result.some(e => e.element_id === 'final_output')).toBe(false);
   expect(result.some(e => e.element_id === 'result_missing')).toBe(true);
+});
+
+it('后台任务结束后的回答不算这一轮的进展、结论或导出内容', () => {
+  const followup = { type: 'text', data: { text: '后台任务的后续回答', origin: BACKGROUND_FOLLOWUP }, timestamp: at } as AgentEvent;
+  const turn = (extra: AgentEvent[]) => [
+    task('task_bg', 'running'),
+    { type: 'text', data: { text: '问题', role: 'user', taskId: 'task_bg' }, timestamp: at },
+    { type: 'tool_call', data: { id: 'call_bg', name: 'Bash', status: 'completed', input: { command: 'sleep 20' } }, timestamp: at },
+    { type: 'text', data: { text: '本轮回答' }, timestamp: at },
+    ...extra,
+    task('task_bg', 'completed')
+  ] as AgentEvent[];
+  const scoped = eventsForRuntimeTask(turn([followup]), 'task_bg');
+  expect(scoped).toEqual(eventsForRuntimeTask(turn([]), 'task_bg'));
+  const finalOutput = (events: AgentEvent[]) => renderLarkResultElements(events).find(element => element.element_id === 'final_output');
+  expect(finalOutput(scoped)).toEqual(finalOutput(eventsForRuntimeTask(turn([]), 'task_bg')));
+  expect(JSON.stringify(finalOutput(scoped))).toContain('本轮回答');
+  const exported = renderLarkRecordExport(turn([followup]));
+  expect(exported).toContain('本轮回答');
+  expect(exported).not.toContain('后台任务的后续回答');
 });

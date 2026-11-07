@@ -1,5 +1,6 @@
 import type { DockEvent, Task } from './api';
 import { describe, expect, it } from 'vitest';
+import { BACKGROUND_FOLLOWUP } from '@dutydeck/shared';
 import { buildTimeline, buildTimelineSections, createTimelineProjector, pendingPermissionId, toolDisplayName } from './timeline';
 import { createEventWindow, mergeReconciledEvents } from './event-history';
 
@@ -99,6 +100,21 @@ describe('conversation timeline', () => {
     expect(sections[1]).toMatchObject({ kind: 'activity', hasAnswer: true, taskStatus: 'completed', isLatestTurn: true });
     expect(sections[2]).toMatchObject({ kind: 'event', final: true });
     if (sections[1].kind === 'activity') expect(sections[1].groups.map(group => group.events.map(item => item.type))).toEqual([['thinking', 'tool_result', 'thinking']]);
+  });
+
+  it('keeps a background follow-up on the timeline without making it the turn conclusion', () => {
+    const tasks = [{ id: 'task-1', sessionId: 's1', prompt: '检查一下', status: 'completed', createdAt: '', updatedAt: '' }];
+    const timeline = buildTimeline([
+      event(1, 'text', { text: '检查一下', role: 'user', taskId: 'task-1' }),
+      event(2, 'tool_call', { id: 't1', name: 'Bash', status: 'completed' }),
+      event(3, 'text', { text: '本轮回答', role: 'assistant' }),
+      event(4, 'text', { text: '后台任务结果', origin: BACKGROUND_FOLLOWUP })
+    ]);
+    expect(timeline.filter(item => item.type === 'text').map(item => item.data.text)).toEqual(['检查一下', '本轮回答', '后台任务结果']);
+    const sections = buildTimelineSections(timeline, tasks);
+    expect(sections.filter(section => section.kind === 'event' && section.final)).toMatchObject([{ event: { data: { text: '本轮回答' } } }]);
+    expect(sections.at(-1)).toMatchObject({ kind: 'event', final: false, event: { data: { text: '后台任务结果', origin: BACKGROUND_FOLLOWUP } } });
+    expect(sections[1]).toMatchObject({ kind: 'activity', hasAnswer: true });
   });
 
   it('marks only the newest turn activity as current', () => {

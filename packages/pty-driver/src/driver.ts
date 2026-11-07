@@ -5,6 +5,7 @@ import {
   DriverDetachedError,
   DriverRecoveryError,
   PromptNotWrittenError,
+  isBackgroundFollowup,
   isClaudeFamilyCli,
   RuntimeError,
   type AgentConfig,
@@ -1675,6 +1676,8 @@ export class PtyCliDriver implements AgentDriver {
 
     if (this.transcript) {
       this.transcript.onEvent(e => {
+        // A background follow-up neither proves nor answers the active turn.
+        if (isBackgroundFollowup(e)) { this.emitEvent(e); return; }
         this.noteTurnProgress(e);
         // 标记本轮已有实质输出或结构化失败，解除 idle 闸门。
         if (e.type === 'text' || e.type === 'thinking' || e.type === 'tool_call' || e.type === 'tool_result' || e.type === 'error') {
