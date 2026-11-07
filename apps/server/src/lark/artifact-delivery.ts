@@ -19,9 +19,13 @@ export interface ArtifactClient {
   sendImage(input: ArtifactTarget & { imageKey: string; idempotencyKey: string }): Promise<{ messageId: string; chatId?: string }>;
 }
 
+export interface ArtifactTurn { taskId: string; attemptId?: string }
+
 interface Record { fingerprint: string; target: ArtifactTarget; image: boolean; providerUuid: string; providerKey?: string; messageId?: string; chatId?: string; leaseUntil?: number; state: 'uploading' | 'uploaded' | 'sending' | 'sent' }
 const keyFor = (sessionId: string, key: string) => `lark.artifact_delivery.${sessionId}.${createHash('sha256').update(key).digest('hex')}`;
-const stableKey = (sessionId: string, source: string, target: ArtifactTarget, image: boolean) => `artifact-${createHash('sha256').update(JSON.stringify({ sessionId, source, target, image })).digest('hex').slice(0, 40)}`;
+// 默认键只在同一轮任务尝试内去重：sent 记录长期保留，不带轮次时之后每一轮发同一文件都会被当成重放吞掉。
+const stableKey = (sessionId: string, source: string, target: ArtifactTarget, image: boolean, turn?: ArtifactTurn) =>
+  `artifact-${createHash('sha256').update(JSON.stringify({ sessionId, ...(turn ? { task: turn.taskId, attempt: turn.attemptId ?? '' } : {}), source, target, image })).digest('hex').slice(0, 40)}`;
 const providerUuidFor = (sessionId: string, key: string) => `dutydeck-${createHash('sha256').update(`${sessionId}\0${key}`).digest('hex').slice(0, 40)}`;
 
 const insideRoot = (root: string, path: string) => {
@@ -87,12 +91,12 @@ export async function readArtifact(cwd: string, input: string, image: boolean, s
   } finally { await handle.close(); }
 }
 
-export async function deliverArtifact(input: { configs: ConfigRepository; sessionId: string; cwd: string; client: ArtifactClient; path: string; target: ArtifactTarget; image: boolean; idempotencyKey?: string; privatePaths?: readonly string[] }) {
+export async function deliverArtifact(input: { configs: ConfigRepository; sessionId: string; cwd: string; client: ArtifactClient; path: string; target: ArtifactTarget; image: boolean; idempotencyKey?: string; turn?: ArtifactTurn; privatePaths?: readonly string[] }) {
   if (!input.configs.compareAndSet) throw new AgentGroupToolError('ARTIFACT_CAS_REQUIRED', '当前存储不支持交付幂等所需的 CAS。', 503);
   const artifact = await readArtifact(input.cwd, input.path, input.image, { sessionId: input.sessionId, privatePaths: input.privatePaths });
   const suppliedKey = input.idempotencyKey?.trim();
   if (suppliedKey && suppliedKey.length > 80) throw new AgentGroupToolError('INVALID_IDEMPOTENCY_KEY', 'idempotencyKey 不能超过 80 个字符。', 400);
-  const idempotencyKey = suppliedKey || stableKey(input.sessionId, artifact.fingerprint, input.target, input.image);
+  const idempotencyKey = suppliedKey || stableKey(input.sessionId, artifact.fingerprint, input.target, input.image, input.turn);
   const storageKey = keyFor(input.sessionId, idempotencyKey);
   let expected = await input.configs.get(storageKey);
   let existing = expected ? JSON.parse(expected) as Record : undefined;

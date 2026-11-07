@@ -117,6 +117,19 @@ describe('artifact delivery', () => {
     await expect(deliverArtifact({ ...input, path: 'other.txt' })).rejects.toMatchObject({ code: 'ARTIFACT_IDEMPOTENCY_CONFLICT' });
   });
 
+  it('dedupes an unkeyed delivery within one task attempt but sends the same file again in a later attempt or task', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-artifact-')); await writeFile(join(cwd, 'daily.md'), 'no new alerts'); const config = configs();
+    let sequence = 0;
+    const client = { uploadFile: vi.fn(async (_input: { idempotencyKey: string }) => 'file_key'), uploadImage: vi.fn(), sendImage: vi.fn(), sendFile: vi.fn(async () => ({ messageId: `om_${++sequence}`, chatId: 'oc_group' })) };
+    const input = { configs: config, sessionId: 'ses_turns', cwd, client, path: 'daily.md', target: { chatId: 'oc_group' }, image: false };
+    const first = await deliverArtifact({ ...input, turn: { taskId: 'task-one', attemptId: 'attempt-one' } });
+    await expect(deliverArtifact({ ...input, turn: { taskId: 'task-one', attemptId: 'attempt-one' } })).resolves.toMatchObject({ messageId: first.messageId, replayed: true });
+    await expect(deliverArtifact({ ...input, turn: { taskId: 'task-one', attemptId: 'attempt-two' } })).resolves.toMatchObject({ messageId: 'om_2', replayed: false });
+    await expect(deliverArtifact({ ...input, turn: { taskId: 'task-two', attemptId: 'attempt-one' } })).resolves.toMatchObject({ messageId: 'om_3', replayed: false });
+    expect(client.sendFile).toHaveBeenCalledTimes(3);
+    expect(new Set(client.uploadFile.mock.calls.map(([call]) => call.idempotencyKey)).size).toBe(3);
+  });
+
   it('rejects directories, FIFOs and an over-limit image without blocking or reading it all', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-artifact-')); await mkdir(join(cwd, 'directory')); await execFile('mkfifo', [join(cwd, 'pipe')]);
     await writeFile(join(cwd, 'image.bin'), new Uint8Array(10 * 1024 * 1024 + 1));

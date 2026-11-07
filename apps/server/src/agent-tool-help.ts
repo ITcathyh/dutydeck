@@ -62,7 +62,7 @@ export const groupToolsHelp = (allowSend: boolean, command = 'dutydeck') => `${b
 - ${command} group message <om_* message_id>
 - ${command} history list [--since <时间>] [--until <时间>] [--query '<关键词>'] [--limit 20]、${command} history show <taskId>：本聊天以前的任务请求与最终回答
 - （仅群聊）${command} group team-search '<关键词>'：检索同一机器人所在其他群的相关消息
-${allowSend ? `- ${command} group send-file <path> [--reply-to <message_id> [--in-thread]] [--idempotency-key <key>] [--image]` : ''}
+${allowSend ? `- ${command} group send-file <path> [--reply-to <message_id> [--in-thread]] [--idempotency-key <key>] [--image]：文件须在本会话工作目录内，或 $TMPDIR/dutydeck-artifacts/<会话 ID>/ 下（会话 ID 见 group self）；不带 key 时只在本轮内去重` : ''}
 - ${command} group wait --after <cursor> [--timeout-ms 15000]
 ${allowSend ? `- ${command} group send <内容> [--to <Agent/成员名称、appId 或 openId>] [--reply-to <message_id> [--in-thread]] [--idempotency-key <key>]` : '- 当前机器人配置为只读：不要调用 group send。'}
 - （仅群聊）${command} group peers / members / bots：发现群内可协作 Agent 与人类成员。

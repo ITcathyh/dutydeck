@@ -1304,7 +1304,8 @@ export class LarkAgentToolsService {
       sendFile: value => value.replyTo ? this.authorized(context, 'reply', () => client.replyFile!({ messageId: value.replyTo!, replyInThread: value.inThread, fileKey: value.fileKey, idempotencyKey: value.idempotencyKey })) : this.authorized(context, 'send', () => client.sendFile!({ chatId: value.chatId, fileKey: value.fileKey, idempotencyKey: value.idempotencyKey })),
       sendImage: value => value.replyTo ? this.authorized(context, 'reply', () => client.replyImage!({ messageId: value.replyTo!, replyInThread: value.inThread, imageKey: value.imageKey, idempotencyKey: value.idempotencyKey })) : this.authorized(context, 'send', () => client.sendImage!({ chatId: value.chatId, imageKey: value.imageKey, idempotencyKey: value.idempotencyKey }))
     };
-    return deliverArtifact({ configs: this.configs, sessionId: context.sessionId, cwd: session.cwd, client: artifactClient, path, target, image: input.image === true, idempotencyKey: input.idempotencyKey, privatePaths: this.options.artifactPrivatePaths });
+    const turn = this.requestTurn(context.sessionId) ?? this.options.workbenchTask?.(context.sessionId);
+    return deliverArtifact({ configs: this.configs, sessionId: context.sessionId, cwd: session.cwd, client: artifactClient, path, target, image: input.image === true, idempotencyKey: input.idempotencyKey, turn, privatePaths: this.options.artifactPrivatePaths });
   }
 
   private async resolveHandoffScope(token: string | undefined, turn?: string): Promise<{
