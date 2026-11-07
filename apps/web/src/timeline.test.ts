@@ -1,7 +1,7 @@
 import type { DockEvent, Task } from './api';
 import { describe, expect, it } from 'vitest';
 import { BACKGROUND_FOLLOWUP } from '@dutydeck/shared';
-import { buildTimeline, buildTimelineSections, createTimelineProjector, pendingPermissionId, toolDisplayName } from './timeline';
+import { buildTimeline, buildTimelineSections, createTimelineProjector, hasAnswerSince, pendingPermissionId, toolDisplayName } from './timeline';
 import { createEventWindow, mergeReconciledEvents } from './event-history';
 
 const event = (sequence: number, type: string, data: any) => ({ id: `e${sequence}`, sequence, type, timestamp: '', data });
@@ -115,6 +115,17 @@ describe('conversation timeline', () => {
     expect(sections.filter(section => section.kind === 'event' && section.final)).toMatchObject([{ event: { data: { text: '本轮回答' } } }]);
     expect(sections.at(-1)).toMatchObject({ kind: 'event', final: false, event: { data: { text: '后台任务结果', origin: BACKGROUND_FOLLOWUP } } });
     expect(sections[1]).toMatchObject({ kind: 'activity', hasAnswer: true });
+  });
+
+  it('does not count a background-task result as the running turn answer', () => {
+    const running = buildTimeline([
+      event(1, 'text', { text: '检查一下', role: 'user' }),
+      event(2, 'tool_call', { id: 't1', name: 'Bash', status: 'running' }),
+      event(3, 'text', { text: '后台任务结果', origin: BACKGROUND_FOLLOWUP })
+    ]);
+    expect(hasAnswerSince(running, 0)).toBe(false);
+    const answered = buildTimeline([...running.map(item => ({ ...item })), event(4, 'text', { text: '本轮回答', role: 'assistant' })]);
+    expect(hasAnswerSince(answered, 0)).toBe(true);
   });
 
   it('marks only the newest turn activity as current', () => {

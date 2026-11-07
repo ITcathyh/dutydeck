@@ -182,6 +182,15 @@ export function pendingPermissionId(timeline: TimelineEvent[]) {
   return undefined;
 }
 
+/** 最新用户消息之后是否已有本轮回答；后台任务结果是独立的运行级事件，不算回答。 */
+export function hasAnswerSince(timeline: TimelineEvent[], latestUserIndex: number) {
+  for (let index = timeline.length - 1; index > latestUserIndex; index--) {
+    const event = timeline[index]!;
+    if (event.type === 'text' && event.data.role !== 'user' && !isBackgroundFollowup(event)) return true;
+  }
+  return false;
+}
+
 export function buildTimelineSections(timeline: TimelineEvent[], tasks: Task[] = [], latestTurn = true): TimelineSection[] {
   if (!timeline.length) return [];
   const turns: TimelineEvent[][] = [];

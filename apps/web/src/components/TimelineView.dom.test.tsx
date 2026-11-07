@@ -2,7 +2,8 @@ import { act, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { api, type HistoryTurnPlace, type HistoryTurnSummary } from '../api';
-import type { TimelineEvent, TimelineSection } from '../timeline';
+import { BACKGROUND_FOLLOWUP } from '@dutydeck/shared';
+import { buildTimeline, buildTimelineSections, hasAnswerSince, type TimelineEvent, type TimelineSection } from '../timeline';
 import { TimelineView } from './TimelineView';
 
 const event: TimelineEvent = { id: 'e1', sequence: 1, type: 'text', timestamp: '', data: { role: 'assistant', text: '当前结果' } };
@@ -102,6 +103,21 @@ it('shows progress and retries failed background history only on explicit retry'
   expect(loadOlder).toHaveBeenCalledTimes(1);
 });
 
+
+it('keeps the running turn in progress when a background-task result arrives mid-turn', () => {
+  const timeline = buildTimeline([
+    { id: 'u', sequence: 1, type: 'text', timestamp: '', data: { role: 'user', text: '检查一下' } },
+    { id: 't', sequence: 2, type: 'tool_call', timestamp: '', data: { id: 't1', name: 'Bash', status: 'running' } },
+    { id: 'f', sequence: 3, type: 'text', timestamp: '', data: { text: '后台任务结果', origin: BACKGROUND_FOLLOWUP } }
+  ]);
+  const timelineSections = buildTimelineSections(timeline, [{ id: 'task-1', sessionId: 's1', prompt: '检查一下', status: 'running', createdAt: '', updatedAt: '' }]);
+  const awaitingAnswer = !hasAnswerSince(timeline, 0);
+  const hasOngoingActivity = timelineSections.some(section => section.kind === 'activity' && section.isLatestTurn && awaitingAnswer);
+  expect(awaitingAnswer).toBe(true);
+  render(<TimelineView activeSessionId="mid-turn" eventsLoading={false} timeline={timeline} timelineSections={timelineSections} awaitingAnswer={awaitingAnswer} hasOngoingActivity={hasOngoingActivity} latestUserIndex={0} activeOutputLabel="Claude"/>);
+  expect(screen.getByRole('article', { name: '后台任务结果' })).toBeTruthy();
+  expect(screen.getByLabelText('Claude 执行过程').textContent).toContain('执行中');
+});
 
 it('updates an existing turn and a new live turn without mutating retained sections', () => {
   const user: TimelineEvent = { id: 'user', sequence: 1, type: 'text', timestamp: '', data: { role: 'user', text: 'prompt' } };
