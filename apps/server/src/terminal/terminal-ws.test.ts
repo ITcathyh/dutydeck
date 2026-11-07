@@ -9,6 +9,7 @@ import {
   registerUpgradeRoute,
   rejectUpgrade,
   type TerminalRouteAuth,
+  type TerminalRouteOptions,
   type TerminalStreamHandle,
   type TerminalStreamProvider
 } from './terminal-ws.js';
@@ -74,9 +75,10 @@ async function startServer(
   provider: TerminalStreamProvider,
   auth?: TerminalRouteAuth,
   authorize?: (request: IncomingMessage, sessionId: string, action: 'terminal.read' | 'terminal.write') => Promise<PolicyDecision>,
+  extra: Partial<TerminalRouteOptions> = {},
 ): Promise<{ app: FastifyInstance; port: number }> {
   const app = Fastify({ logger: false });
-  registerTerminalRoutes(app, { provider, auth, authorize });
+  registerTerminalRoutes(app, { provider, auth, authorize, ...extra });
   await app.listen({ host: '127.0.0.1', port: 0 });
   apps.push(app);
   const address = app.server.address();
@@ -403,6 +405,41 @@ describe('terminal WS proxy', () => {
     fake.emitData('cookie-ok');
     expect(await frame).toEqual({ type: 'data', data: 'cookie-ok' });
     ws.close();
+  });
+
+  it('token 轮换后已建立的终端连接不能再写入', async () => {
+    const fake = createFakeStream();
+    let current = 'good-token';
+    const auth: TerminalRouteAuth = { check: token => token === current };
+    const { port } = await startServer(providerFrom({ s1: fake.handle }), auth, undefined, { credentialRecheckMs: 60_000 });
+    const ws = await connect(port, '/api/terminal/s1', { authorization: 'Bearer good-token' });
+    ws.send(JSON.stringify({ type: 'input', data: 'before\n' }));
+    await vi.waitFor(() => expect(fake.writeCalls).toEqual(['before\n']));
+
+    current = 'rotated-token';
+    const denied = nextMessage(ws);
+    const done = closed(ws);
+    ws.send(JSON.stringify({ type: 'input', data: 'after\n' }));
+    ws.send(JSON.stringify({ type: 'resize', cols: 80, rows: 24 }));
+    await expect(denied).resolves.toEqual({ type: 'error', message: 'Access credential is no longer valid', code: 'credential_revoked' });
+    await done;
+    expect(fake.writeCalls).toEqual(['before\n']);
+    expect(fake.resizeCalls).toEqual([]);
+  });
+
+  it('凭据失效后按复核周期主动断开终端连接', async () => {
+    const fake = createFakeStream();
+    let current = 'good-token';
+    const auth: TerminalRouteAuth = { check: token => token === current };
+    const { port } = await startServer(providerFrom({ s1: fake.handle }), auth, undefined, { credentialRecheckMs: 20 });
+    const ws = await connect(port, '/api/terminal/s1', { cookie: 'dutydeck_access=good-token' });
+    const closeCode = new Promise<number>(resolve => ws.once('close', code => resolve(code)));
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect(ws.readyState).toBe(WebSocket.OPEN);
+
+    current = 'reset';
+    expect(await closeCode).toBe(4401);
+    await vi.waitFor(() => expect(fake.disposeCount).toBe(1));
   });
 
   it('浏览器 cookie 的 WS 必须来自相同 Origin', async () => {

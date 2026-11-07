@@ -38,6 +38,8 @@ export interface TerminalRouteOptions {
   authorize?: (request: IncomingMessage, sessionId: string, action: 'terminal.read' | 'terminal.write') => Promise<PolicyDecision>;
   /** 升级握手（权限判定 + 终端查找）的最长等待时间。 */
   handshakeTimeoutMs?: number;
+  /** 已建立连接复核握手凭据的周期；token 轮换、密码重设或会话过期后按此周期断开。 */
+  credentialRecheckMs?: number;
 }
 
 export interface UpgradeRoute {
@@ -57,6 +59,9 @@ type SendBudget = { bytes: number };
 
 const TERMINAL_PATH_PREFIX = '/api/terminal/';
 const TERMINAL_HANDSHAKE_TIMEOUT_MS = 30_000;
+const TERMINAL_CREDENTIAL_RECHECK_MS = 5_000;
+const CREDENTIAL_REVOKED_CLOSE_CODE = 4401;
+const CREDENTIAL_REVOKED: PolicyDecision = { allowed: false, action: 'terminal.write', code: 'credential_revoked', reason: 'Access credential is no longer valid', source: 'integration' };
 
 const upgradeRoutes = new WeakMap<object, UpgradeRoute[]>();
 
@@ -135,7 +140,7 @@ function bindConnection(
   handle: TerminalStreamHandle,
   onClosed: () => void,
   sendBudget: SendBudget,
-  authorizeWrite?: () => Promise<PolicyDecision>,
+  authorizeWrite?: () => Promise<PolicyDecision | undefined>,
 ): void {
   const { stream } = handle;
   let closed = false;
@@ -292,8 +297,23 @@ export function registerTerminalRoutes(app: FastifyInstance, options: TerminalRo
   const active = new Set<WebSocket>();
   const sendBudget: SendBudget = { bytes: 0 };
   const pending = new Set<Socket>();
+  // 凭据只在握手时提交一次，之后按服务端缓存的 token / 密码哈希复核，撤销后不能再读写。
+  const credentials = new Map<WebSocket, () => boolean>();
+  let credentialSweep: ReturnType<typeof setInterval> | undefined;
   let closing = false;
   let closeRun: Promise<void> | undefined;
+  const stopCredentialSweep = () => {
+    if (credentialSweep) clearInterval(credentialSweep);
+    credentialSweep = undefined;
+  };
+  const sweepCredentials = () => {
+    for (const [ws, valid] of credentials) {
+      if (valid()) continue;
+      credentials.delete(ws);
+      try { ws.close(CREDENTIAL_REVOKED_CLOSE_CODE, 'credential revoked'); } catch { ws.terminate(); }
+    }
+    if (!credentials.size) stopCredentialSweep();
+  };
 
   /*
    * upgrade 监听器必须挂在被动的 onReady 钩子上（registerUpgradeRoute 内），不能调 app.ready(cb)：
@@ -372,16 +392,28 @@ export function registerTerminalRoutes(app: FastifyInstance, options: TerminalRo
       if (closing || socket.destroyed) { lookup.handle.stream.dispose(); socket.destroy(); return; }
 
       clearTimeout(deadline);
+      const credentialValid = () => upgradeRejection(request, options.auth) === undefined;
       wss.handleUpgrade(request, socket, head, ws => {
         socket.removeListener('error', onSocketError);
         pending.delete(socket);
         active.add(ws);
+        if (options.auth) {
+          credentials.set(ws, credentialValid);
+          credentialSweep ??= setInterval(sweepCredentials, options.credentialRecheckMs ?? TERMINAL_CREDENTIAL_RECHECK_MS);
+          credentialSweep.unref();
+        }
         bindConnection(
           ws,
           lookup.handle,
-          () => active.delete(ws),
+          () => {
+            active.delete(ws);
+            credentials.delete(ws);
+            if (!credentials.size) stopCredentialSweep();
+          },
           sendBudget,
-          options.authorize ? () => options.authorize!(request, sessionId, 'terminal.write') : undefined,
+          options.auth || options.authorize
+            ? async () => credentialValid() ? options.authorize?.(request, sessionId, 'terminal.write') : CREDENTIAL_REVOKED
+            : undefined,
         );
       });
     },
@@ -391,6 +423,8 @@ export function registerTerminalRoutes(app: FastifyInstance, options: TerminalRo
   app.addHook('preClose', async () => {
     if (closeRun) return closeRun;
     closing = true;
+    stopCredentialSweep();
+    credentials.clear();
     for (const socket of pending) socket.destroy();
     pending.clear();
     for (const ws of active) {
