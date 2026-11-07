@@ -2,10 +2,11 @@ import { execFile } from 'node:child_process';
 import { sha256Hex as hash } from './hash.js';
 import { promisify } from 'node:util';
 import { z } from 'zod';
-import { errorMessage as errorText, now as time, parseLarkSourceId, RuntimeError, timeLoop, workPlanSchema, type AgentConfig, type RepositoryBundle, type WorkPlan } from '@dutydeck/shared';
+import { errorMessage as errorText, isTerminalTaskStatus, now as time, parseLarkSourceId, RuntimeError, timeLoop, workPlanSchema, type AgentConfig, type RepositoryBundle, type Session, type TaskAttempt, type WorkPlan } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { larkPermissionMode, readLarkConfig } from './lark/config.js';
 import { runReadonlyPrompt } from './lark/readonly-decider.js';
+import { readTaskAttemptResult } from './task-results.js';
 import { workItemId, type WorkItemService } from './work-items.js';
 
 const PREFIX = 'leader_delegation:';
@@ -119,6 +120,8 @@ export class LeaderDelegationService {
   private readonly running = new Map<string, Promise<void>>();
   private readonly queue: string[] = [];
   private readonly cleaning = new Map<string, Promise<void>>();
+  /** 重启前上一轮 Leader 已经答完的原文，规划时直接沿用，不再问一次。 */
+  private readonly adopted = new Map<string, string>();
   private readonly shutdown = new AbortController();
   private closed = false;
   private timer?: NodeJS.Timeout;
@@ -146,15 +149,37 @@ export class LeaderDelegationService {
     return view(existing);
   }
 
-  /** 重启打断的规划从头再来，已落盘的计划直接建目标；停机太久的不再替用户执行；未送达的通知补发。 */
+  /**
+   * 重启打断的规划按账本处理：上一轮已有结果就沿用；提示词可能已送到 Leader 却没有结果的不再重发，记为失败并告知原话题；
+   * 确认从未提交的才重新规划。已落盘的计划直接建目标；停机太久的不再替用户执行；未送达的通知补发。
+   */
   async start() {
     if (this.closed || this.timer) return;
+    let leaderSessions: Session[] | undefined;
     for (const row of await this.config.list!(PREFIX)) {
       const record = JSON.parse(row.value) as Delegation;
       if (record.status !== 'planning') continue;
+      const warn = (error: unknown) => this.options.log?.warn({ error, delegationId: record.id }, 'Leader 规划记录更新失败');
+      // 过期的记录也要先核对：从未提交的旧规划会话得先停掉，否则它会在没人等结果时自己跑起来。
+      let prior: Awaited<ReturnType<LeaderDelegationService['priorPlanning']>> | undefined;
+      if (!record.plan) {
+        leaderSessions ??= (await this.options.repositories.sessions.list()).filter(session => session.source === 'lark-leader');
+        prior = await this.priorPlanning(leaderSessions.filter(session => session.sourceId === record.id)).catch(error => {
+          this.options.log?.warn({ error, delegationId: record.id }, '上一轮 Leader 规划核对失败，按结果未知处理');
+          return { kind: 'unknown' } as const;
+        });
+      }
       // 目标已经建好的照常补记状态；还没建的，提交超过 30 分钟就不再执行。
-      if (Date.now() - Date.parse(record.createdAt) <= RESUME_LIMIT_MS || record.plan && await this.options.work.exists(record.workId)) this.schedule(record.id);
-      else await this.fail(record, '服务重启前没来得及开始，已超过 30 分钟，不再自动执行').catch(error => this.options.log?.warn({ error, delegationId: record.id }, 'Leader 规划记录更新失败'));
+      if (Date.now() - Date.parse(record.createdAt) > RESUME_LIMIT_MS && !(record.plan && await this.options.work.exists(record.workId))) {
+        await this.fail(record, '服务重启前没来得及开始，已超过 30 分钟，不再自动执行').catch(warn);
+        continue;
+      }
+      if (prior?.kind === 'unknown') {
+        await this.fail(record, '服务重启前已交给 Leader 的规划结果未知，为避免重复执行不再自动重跑').catch(warn);
+        continue;
+      }
+      if (prior?.kind === 'result') this.adopted.set(record.id, prior.text);
+      this.schedule(record.id);
     }
     this.timer = setInterval(() => { void timeLoop('leader-delegation.flush', this.options.log, () => this.flushPending()).catch(() => {}); }, 60_000);
     this.timer.unref();
@@ -165,7 +190,7 @@ export class LeaderDelegationService {
     this.closed = true;
     this.shutdown.abort();
     clearInterval(this.timer);
-    // Runtime 关闭会打断 Leader 会话；未完成的记录保持 planning，下次启动继续。
+    // Runtime 关闭会打断 Leader 会话；未完成的记录保持 planning，下次启动按账本决定沿用、重跑还是记为失败。
     await Promise.race([Promise.allSettled(this.running.values()), new Promise(resolve => setTimeout(resolve, 1000).unref())]);
   }
 
@@ -178,6 +203,33 @@ export class LeaderDelegationService {
     const next = { ...record, ...patch, updatedAt: time() };
     if (!await this.config.compareAndSet!(PREFIX + record.id, JSON.stringify(record), JSON.stringify(next))) throw new RuntimeError('LEADER_DELEGATION_CONFLICT', 'Delegation changed concurrently', 409);
     return next;
+  }
+
+  /**
+   * 重启前同一委派的 Leader 会话。从未提交、还在排队的先停掉，免得重启后没人等结果时自己跑起来；
+   * 提示词可能已送到 Leader 的不动，留给人工核对，只有已结算的完成结果可以沿用。
+   */
+  private async priorPlanning(sessions: Session[]): Promise<{ kind: 'none' } | { kind: 'result'; text: string } | { kind: 'unknown' }> {
+    const { execution } = this.options.repositories;
+    const unsent = (attempt: TaskAttempt) => attempt.submissionState === 'not_submitted' || attempt.state === 'settled' && attempt.settlement?.kind === 'not_submitted';
+    let text: string | undefined;
+    for (const session of sessions) {
+      const before = execution.getSessionExecutions(session.id);
+      if (before.every(item => item.attempts.every(unsent)) && before.some(item => !isTerminalTaskStatus(item.task.status))) {
+        await this.options.runtime.stop(session.id, { kind: 'installation_owner', id: 'installation_owner' });
+      }
+      for (const { task, attempts } of execution.getSessionExecutions(session.id)) {
+        if (attempts.every(unsent)) {
+          if (isTerminalTaskStatus(task.status)) continue;
+          return { kind: 'unknown' };
+        }
+        const first = attempts.find(attempt => attempt.number === 1);
+        const result = task.status === 'completed' && first ? readTaskAttemptResult({ execution }, session.id, task.id, first.attemptId) : undefined;
+        if (result?.status !== 'settled' || result.result.outcome !== 'completed') return { kind: 'unknown' };
+        text = result.result.output.text;
+      }
+    }
+    return text === undefined ? { kind: 'none' } : { kind: 'result', text };
   }
 
   /** 按当前 Bot 配置和操作者权限取 Leader 与可用 Worker。 */
@@ -258,7 +310,9 @@ export class LeaderDelegationService {
         const { session, leader, workers } = await this.team(record.parentSessionId, record.actorId);
         const worktree = await gitRepository(session.cwd);
         const timeoutMs = this.options.timeoutMs ?? PLANNING_TIMEOUT_MS;
-        const text = await runReadonlyPrompt(this.options.runtime, { execution: this.options.repositories.execution }, {
+        const adopted = this.adopted.get(id);
+        this.adopted.delete(id);
+        const text = adopted ?? await runReadonlyPrompt(this.options.runtime, { execution: this.options.repositories.execution }, {
           // 终端模式 Leader 以完全信任规划（team() 已核对），「不改文件」只靠提示词约束。
           agentId: leader.id, cwd: session.cwd, permissionMode: leader.protocol === 'pty-cli' ? 'full-trust' : 'deny-all', source: 'lark-leader', sourceId: record.id,
           prompt: leaderPrompt(record, workers, worktree), timeoutMs, signal: this.shutdown.signal,

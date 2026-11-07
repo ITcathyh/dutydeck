@@ -256,39 +256,62 @@ describe('分层协作：PMO 交接、Leader 规划、Worker 执行、Leader 验
     expect(new Set(f.replyText.mock.calls.map(([input]) => input.idempotencyKey)).size).toBe(2);
   });
 
-  it('resumes interrupted planning only after the prior unknown execution is explicitly resolved', async () => {
+  it('fails interrupted planning whose Leader prompt may have been sent instead of re-running it, and replans only never-sent requests', async () => {
     const f = await fixture();
     const turn = await f.pmoTurn('om_resume', '修复登录');
-    const delegated = await turn.run('delegate', { goal: '修复登录', idempotencyKey: 'resume' }) as { id: string; workId: string };
+    const first = await turn.run('delegate', { goal: '修复登录', idempotencyKey: 'resume' }) as { id: string; workId: string };
+    const second = await turn.run('delegate', { goal: '修复注册', idempotencyKey: 'resume-queued' }) as { id: string; workId: string };
     await turn.finish();
+    const leaderSessions = async () => (await f.runtime.listSessions()).filter(session => session.source === 'lark-leader');
+    await vi.waitFor(async () => expect(await leaderSessions()).toHaveLength(2));
     await vi.waitFor(() => expect(f.leader.waiting).toHaveLength(1));
+    const sentSession = (await leaderSessions()).find(session => session.id === f.leaderPrompts()[0]!.sessionId)!;
+    const [sent, unsent] = sentSession.sourceId === first.id ? [first, second] : [second, first];
+    const unsentSession = (await leaderSessions()).find(session => session.sourceId === unsent.id)!;
     await f.delegations.close();
-    const resumed = f.resumed();
-    await resumed.start();
-    await vi.waitFor(async () => expect((await f.runtime.listSessions()).filter(session => session.source === 'lark-leader')).toHaveLength(2));
-    const oldSession = (await f.runtime.listSessions()).find(session => session.source === 'lark-leader' && session.state === 'interrupted')!;
-    const old = f.repos.execution.getSessionExecutions(oldSession.id)[0]!;
-    expect(old.currentAttempt).toMatchObject({ state: 'reconcile_required', reconcileReason: { code: 'STOP_RESULT_UNKNOWN' } });
-    const replacement = (await f.runtime.listSessions()).find(session => session.source === 'lark-leader' && session.id !== oldSession.id)!;
-    await vi.waitFor(() => expect(f.repos.execution.getSessionExecutions(replacement.id)[0]).toMatchObject({
-      task: { status: 'queued' }, attempts: [],
-      blockers: expect.arrayContaining([expect.objectContaining({ code: 'WORKSPACE_EXECUTION_BUSY', sessionId: oldSession.id })])
-    }));
+    await vi.waitFor(() => expect(f.repos.execution.getSessionExecutions(sentSession.id)[0]!.currentAttempt).toMatchObject({ state: 'reconcile_required' }));
+    expect(f.repos.execution.getSessionExecutions(unsentSession.id)[0]).toMatchObject({ task: { status: 'queued' }, attempts: [] });
+
+    await f.resumed().start();
+    // 提示词可能已送到 Leader、结果未知：不再自动重跑，告知原话题。
+    expect(await f.record(sent.id)).toMatchObject({ status: 'failed', error: expect.stringContaining('结果未知') });
+    expect(f.replyText).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_resume', text: expect.stringContaining('结果未知') }));
+    // 从未提交的旧规划会话先停掉，再换新会话重新规划；新会话要等旧的未知执行处理完才能跑。
+    expect(f.repos.execution.getSessionExecutions(unsentSession.id)[0]!.task.status).toBe('cancelled');
+    await vi.waitFor(async () => expect((await leaderSessions()).filter(session => session.sourceId === unsent.id)).toHaveLength(2));
     expect(f.leaderPrompts()).toHaveLength(1);
-    const facts = await f.runtime.inspectUnknownTask(oldSession.id, old.task.id);
-    await f.runtime.resolveUnknownTask(oldSession.id, {
+
+    const old = f.repos.execution.getSessionExecutions(sentSession.id)[0]!;
+    const facts = await f.runtime.inspectUnknownTask(sentSession.id, old.task.id);
+    await f.runtime.resolveUnknownTask(sentSession.id, {
       taskId: old.task.id, target: facts.target!, decisionId: 'test:verified-interrupted-planning', action: 'failed',
       evidenceRefs: ['fixture:original-driver-stopped-and-result-reviewed']
     }, { kind: 'installation_owner', id: 'installation_owner' });
-    await vi.waitFor(() => expect(f.leader.waiting).toHaveLength(2));
     f.openLeader();
-    await vi.waitFor(async () => expect((await f.work.listBySession(turn.parent.id, 'ou_alice')).map(item => item.id)).toEqual([delegated.workId]));
-    // 已关闭的旧服务拿到迟到的 Leader 结果后不再写记录。
-    const leaderSessions = (await f.runtime.listSessions()).filter(session => session.source === 'lark-leader');
-    await vi.waitFor(() => expect(leaderSessions.every(session => f.stopped.has(session.id))).toBe(true));
-    await new Promise(resolve => setTimeout(resolve, 50));
-    expect(await f.record(delegated.id)).toMatchObject({ status: 'started' });
+    await vi.waitFor(async () => expect((await f.work.listBySession(turn.parent.id, 'ou_alice')).map(item => item.id)).toEqual([unsent.workId]));
+    expect(f.leaderPrompts()).toHaveLength(2);
+    expect(f.leaderPrompts().filter(value => value.sessionId === sentSession.id)).toHaveLength(1);
+    expect(await f.record(sent.id)).toMatchObject({ status: 'failed' });
+    expect(await f.record(unsent.id)).toMatchObject({ status: 'started' });
     expect(f.log.warn).not.toHaveBeenCalledWith(expect.anything(), 'Leader 规划记录更新失败');
+  });
+
+  it('adopts a Leader answer that settled before the restart instead of asking again', async () => {
+    const f = await fixture();
+    f.openLeader();
+    const turn = await f.pmoTurn('om_adopt', '修复登录');
+    const delegated = await turn.run('delegate', { goal: '修复登录', idempotencyKey: 'adopt' }) as { id: string; workId: string };
+    await turn.finish();
+    await vi.waitFor(async () => expect(await f.record(delegated.id)).toMatchObject({ status: 'started' }));
+    expect(f.leaderPrompts()).toHaveLength(1);
+    // 模拟 Leader 已答完、计划还没落盘时中断。
+    const { plan: _plan, ...rest } = await f.record(delegated.id);
+    await f.setRecord(delegated.id, { ...rest, status: 'planning' });
+    await f.delegations.close();
+    await f.resumed().start();
+    await vi.waitFor(async () => expect(await f.record(delegated.id)).toMatchObject({ status: 'started', plan: { outputStepId: 'leader_review' } }));
+    expect(f.leaderPrompts()).toHaveLength(1);
+    expect((await f.work.listBySession(turn.parent.id, 'ou_alice')).map(item => item.id)).toEqual([delegated.workId]);
   });
 
   it('keeps the single-Agent prompt and refuses delegation when the Bot is not layered', async () => {
