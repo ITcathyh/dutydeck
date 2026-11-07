@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { ArrowUpRight, Link2Off, MessageSquareText, UserRound, Users } from 'lucide-react';
-import { api, ApiError, type Session } from '../api';
+import { api, ApiError, type DockEvent, type Session } from '../api';
 import { createTimelineProjector, hasAnswerSince, type TimelineSection } from '../timeline';
 import { useEventHistory } from '../useEventHistory';
 import { sessionDisplayName } from '../run-summary';
@@ -11,7 +11,7 @@ import { useTheme } from '../useTheme';
 import { copyToClipboard } from '../clipboard';
 import { push as pushToast } from '../useToasts';
 import { elapsedMilliseconds, formatElapsed } from '../tool-presentation';
-import { conclusionPlainText, finalSection, formatTurnSpan, liveTurnFacts, shareStatus, summaryTurnFacts, type ShareStatus, type TurnFacts } from '../share-view';
+import { conclusionPlainText, finalSection, formatTurnSpan, liveTurnFacts, shareableEvents, shareStatus, summaryTurnFacts, type ShareStatus, type TurnFacts } from '../share-view';
 import { busyStates, DutydeckIcon } from './ui';
 import { Banner, Card, EmptyState, Spinner } from './primitives';
 import { TimelineView } from './TimelineView';
@@ -35,11 +35,13 @@ export function SharedSessionPage({ sessionId }: { sessionId: string }) {
   const events = useEventHistory(sessionId, Boolean(session));
   const tasks = useQuery({ queryKey: ['tasks', sessionId], queryFn: () => api.tasks(sessionId), enabled: Boolean(session) });
   const streamStatus = useSessionStream(session ? sessionId : undefined, session?.runId, events.isSuccess);
-  const eventList = events.data?.events ?? [];
+  // 后台任务结束后的回答不属于任何一轮：投影前就去掉，否则只有它一条实时事件时会被当成「最新一轮」，盖掉历史结论和状态。
+  const eventList = useMemo(() => shareableList(events.data?.events ?? noEvents), [events.data?.events]);
+  const eventDelta = useMemo(() => events.data && { previousEvents: events.data.previousEvents && shareableList(events.data.previousEvents), changes: events.data.changes && shareableEvents(events.data.changes) }, [events.data]);
   const projectTimeline = useMemo(() => createTimelineProjector(), [sessionId]);
   const historyTurns = events.data?.outline?.turns;
   const visibleTasks = useMemo(() => { const summarized = new Set(historyTurns?.map(turn => turn.taskId)); return tasks.data?.filter(task => !summarized.has(task.id)); }, [tasks.data, historyTurns]);
-  const { timeline, timelineSections } = useMemo(() => projectTimeline(eventList, visibleTasks, events.data?.hasOlder, events.data), [projectTimeline, eventList, visibleTasks, events.data?.hasOlder]);
+  const { timeline, timelineSections } = useMemo(() => projectTimeline(eventList, visibleTasks, events.data?.hasOlder, eventDelta), [projectTimeline, eventList, visibleTasks, events.data?.hasOlder]);
   const latestUserIndex = useMemo(() => {
     for (let index = timeline.length - 1; index >= 0; index--) if (timeline[index].type === 'text' && timeline[index].data.role === 'user') return index;
     return -1;
@@ -171,6 +173,15 @@ export function SharedSessionPage({ sessionId }: { sessionId: string }) {
       renderProgress={emptyState => emptyState ? errorSummary ? <ShareFailureCard reason={errorSummary}/> : <p className="py-10 text-center text-caption text-subtle">这个任务还没有执行记录。</p> : null}/>
     <ToastViewport/>
   </div></ShareContext.Provider>;
+}
+
+const noEvents: DockEvent[] = [];
+// 同一份原始事件数组只过滤一次并复用结果：投影器靠 previousEvents 与上一次输入是同一个数组来走增量路径。
+const shareableCache = new WeakMap<DockEvent[], DockEvent[]>();
+function shareableList(events: DockEvent[]) {
+  let filtered = shareableCache.get(events);
+  if (!filtered) { filtered = shareableEvents(events); shareableCache.set(events, filtered); }
+  return filtered;
 }
 
 /** 最后一轮的实时记录：从最后一条（非插话的）提问开始。 */

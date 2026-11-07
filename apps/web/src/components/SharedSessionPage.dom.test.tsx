@@ -2,6 +2,7 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { BACKGROUND_FOLLOWUP } from '@dutydeck/shared';
 import { api, ApiError, type DockEvent, type HistoryTurnSummary, type Session, type Task } from '../api';
 import { SharedSessionPage } from './SharedSessionPage';
 import { ToolCard } from './ToolCard';
@@ -480,6 +481,21 @@ describe('分享页结论呈现', () => {
     expect(copied.trimEnd().split('\n').at(-1)).toBe(`详情：${window.location.href}`);
     expect(await screen.findByText('结论已复制')).toBeTruthy();
     Reflect.deleteProperty(navigator, 'clipboard');
+  });
+
+  it('已完成的会话之后只来了一条后台任务结果：页头仍是「已完成」，结论和复制按钮还在，不显示那条结果', async () => {
+    vi.spyOn(api, 'session').mockResolvedValue({ ...session, state: 'idle', sourceContext });
+    vi.spyOn(api, 'tasks').mockResolvedValue([completedTask('bg', '跑一下构建', '2026-11-04T06:37:00.000Z')]);
+    vi.spyOn(api, 'events').mockResolvedValue([
+      { id: 'bg-f', sequence: 11, type: 'text', timestamp: '2026-11-04T06:50:00.000Z', data: { role: 'assistant', text: 'Build finished in the background.', origin: BACKGROUND_FOLLOWUP } }
+    ]);
+    vi.mocked(api.sessionHistory).mockResolvedValue({ turns: [summaryTurn('bg', '跑一下构建', '构建已启动', '2026-11-04T06:37:00.000Z')], highWaterMark: 10, liveAfter: 10 });
+    const { container } = renderPage();
+    await screen.findByText('构建已启动');
+    await waitFor(() => expect(container.querySelector('.share-hero .share-status-label')?.textContent).toBe('已完成'));
+    expect(screen.getAllByRole('button', { name: '复制结论' }).length).toBeGreaterThan(0);
+    expect(document.body.textContent).not.toContain('Build finished in the background.');
+    expect(container.querySelectorAll('[data-timeline-turn]')).toHaveLength(1);
   });
 
   it('失败时把结论区换成失败详情卡，不再用顶部横幅', async () => {
