@@ -23,7 +23,8 @@ import {
   type InsightEngineRunner,
   type ResolvedInsightSource,
   type ResolveSessionInsightSourcesResult,
-  type SessionInsightResolver
+  type SessionInsightResolver,
+  type SessionInsightServiceOptions
 } from './session-insight-service.js';
 import { SessionInsightProcessError } from './session-insight-process.js';
 import type { ResolvedEngine } from './session-insight-engine.js';
@@ -151,7 +152,7 @@ function makeFileResult(args: {
   }));
 }
 
-function makeHarness(): Harness {
+function makeHarness(options: Pick<SessionInsightServiceOptions, 'getCurrentFingerprint'> = {}): Harness {
   const dataDir = newTempDir();
   const sourceRoot = join(dataDir, 'approved-roots');
   mkdirSync(sourceRoot, { recursive: true, mode: 0o700 });
@@ -198,7 +199,8 @@ function makeHarness(): Harness {
       readTransaction: work => repos.insight.readTransaction(work)
     },
     resolveEngine: async () => engine,
-    engineRunner: { runInsightProcess: opts => runnerImpl(opts) }
+    engineRunner: { runInsightProcess: opts => runnerImpl(opts) },
+    ...options
   });
   openServices.push(service);
 
@@ -589,6 +591,57 @@ describe('SessionInsightService cache and binding', () => {
     expect(details.manifest).toBeNull();
     expect(details.status.availability).toBe('none');
     expect(details.hostExecutionFallback?.hasExecutionRecords).toBe(true);
+  });
+
+  it('reuses one current host digest across repeated details reads and skips it while a refresh is in flight', async () => {
+    let scans = 0;
+    const h = makeHarness({ getCurrentFingerprint: async () => { scans++; return 'fp-1'; } });
+    h.createSession('s1');
+    h.setResolverResult(() => ({ sources: [h._matchedSource('k1', h.writeLog('poll.jsonl', '{"line":1}'), 'primary')], primarySourceKey: 'k1' }));
+    await h.refreshAndWait('s1');
+    const before = scans;
+    const reads = await Promise.all([h.service.details('s1'), h.service.details('s1')]);
+    await h.service.details('s1');
+    expect(scans - before).toBe(1);
+    expect(reads.map(read => read.status.freshness)).toEqual(['unknown', 'unknown']);
+
+    // 刷新进行中面板每 2 秒轮询：只返回作业状态，不扫仓库。
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    h.setResolverResult(() => ({ sources: [h._matchedSource('k1', h.writeLog('poll.jsonl', '{"line":2}'), 'primary')], primarySourceKey: 'k1' }));
+    h.setRunner(async ({ request }) => {
+      entered();
+      await gate;
+      return {
+        schemaVersion: 1, requestId: request.requestId,
+        engineVersion: VERSIONS.engineVersion, parserVersion: VERSIONS.parserVersion, metricVersion: VERSIONS.metricVersion,
+        files: makeFileResult({ request, status: 'ok' }), warnings: []
+      };
+    });
+    await h.service.refresh('s1');
+    await started;
+    const during = scans;
+    expect((await h.service.details('s1')).status.refreshState).toBe('running');
+    await h.service.details('s1');
+    expect(scans).toBe(during);
+    release();
+    await h.settled();
+
+    // 刷新结束换了快照和请求：下一次 details 重新计算。
+    const after = scans;
+    await h.service.details('s1');
+    expect(scans - after).toBe(1);
+  });
+
+  it('reuses the live host evidence for repeated details reads before any snapshot exists', async () => {
+    const h = makeHarness();
+    h.createSession('s1');
+    const reads = vi.spyOn(h.repos.insight, 'readHostEvidenceRaw');
+    const first = await h.service.details('s1');
+    const second = await h.service.details('s1');
+    expect(reads).toHaveBeenCalledTimes(1);
+    expect(second.hostEvidence).toEqual(first.hostEvidence);
   });
 
   it('excludes error-file traces from publication while keeping a valid partial snapshot', async () => {
