@@ -1,4 +1,5 @@
 import { defineConfig } from 'vitest/config';
+import { availableParallelism } from 'node:os';
 import { fileURLToPath, URL } from 'node:url';
 import { vitestAliases } from './vitest.aliases';
 
@@ -20,6 +21,8 @@ const alias = {
 export default defineConfig({
   resolve: { alias },
   test: {
+    // 本地机器常被多人或多个 Agent 共用：默认只占四分之一的核（上限 16），CI 沿用 Vitest 默认；命令行 --maxWorkers 可覆盖。
+    maxWorkers: process.env.CI ? undefined : Math.max(1, Math.min(16, Math.floor(availableParallelism() / 4))),
     projects: [
       {
         resolve: { alias },
