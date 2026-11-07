@@ -155,7 +155,7 @@ describe('Agent schedule requests', () => {
     const f = await setup();
     await f.request(f.group, { every: 15, prompt: '盯结论', name: 'A' });
     await f.request(f.group, { cron: '0 9 * * *', prompt: '汇总', name: 'B', mode: 'session' });
-    await f.request(f.group, { at: '2026-10-17T10:00', prompt: '提醒我', name: 'C' });
+    await f.request(f.group, { at: '2099-10-17T10:00', prompt: '提醒我', name: 'C' });
     const [fresh, session, once] = f.requestSchedule.mock.calls;
     expect(fresh![1].mode).toBeUndefined();
     expect(fresh![3]).toMatchObject({ newMode: 'fresh' });
@@ -168,10 +168,10 @@ describe('Agent schedule requests', () => {
 
   it('works in p2p chats and for one-off times', async () => {
     const f = await setup();
-    const response = await f.request(f.p2p, { at: '2026-10-17T10:00', prompt: '提醒我看发布结果' });
+    const response = await f.request(f.p2p, { at: '2099-10-17T10:00', prompt: '提醒我看发布结果' });
     expect(response.statusCode).toBe(200);
     expect(f.requestSchedule.mock.calls[0]![0]).toBe('ses_p2p');
-    expect(f.requestSchedule.mock.calls[0]![1].trigger).toEqual({ kind: 'at', localDateTime: '2026-10-17T10:00' });
+    expect(f.requestSchedule.mock.calls[0]![1].trigger).toEqual({ kind: 'at', localDateTime: '2099-10-17T10:00' });
   });
 
   it('reports a saved, disabled schedule when confirmation delivery fails and retries the same schedule', async () => {
@@ -236,6 +236,9 @@ describe('Agent schedule requests', () => {
     expect(both.json().error).toMatchObject({ code: 'INVALID_ARGUMENT', params: [{ name: '--every/--cron/--at' }], hint: expect.stringContaining('schedule create --help') });
     expect((await f.request(f.group, { every: 0, prompt: 'x' })).json().error.params).toEqual([{ name: '--every', reason: expect.any(String) }]);
     expect((await f.request(f.group, { cron: 'not a cron', prompt: 'x' })).json().error).toMatchObject({ code: 'SCHEDULE_REQUEST_INVALID', params: [{ name: '--cron' }] });
+    for (const [param, when] of [['--at', { at: '2020-01-01T09:00' }], ['--cron', { cron: '0 0 30 2 *' }]] as const) {
+      expect((await f.request(f.group, { ...when, prompt: 'x' })).json().error).toMatchObject({ code: 'SCHEDULE_REQUEST_INVALID', params: [{ name: param, reason: expect.stringContaining('不会再触发') }] });
+    }
   });
 });
 

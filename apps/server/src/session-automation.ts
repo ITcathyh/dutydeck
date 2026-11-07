@@ -187,6 +187,8 @@ export interface AutomationDeliveryContext {
 }
 
 type DeliveryRecord = SessionScheduleOccurrenceV2 | CiSubscriptionV2;
+/** 一轮扫描的时刻与迟到宽限：同一轮里排在后面的计划，不因前面开会话、派发花的时间被判迟到。 */
+type ScanTiming = { observedAt: Date; graceMs: number };
 type TickParseCache = {
   occurrences: Map<string, SessionScheduleOccurrence>;
   subscriptions: Map<string, CiSubscription>;
@@ -312,6 +314,12 @@ function isSessionRunnable(session: Session | undefined) {
   return Boolean(session && !session.archivedAt && !['stopped', 'failed'].includes(session.state));
 }
 function isAllowed(result: AuthorizationResult) { return result === true || typeof result === 'object' && result.allowed; }
+/** 时间规则往后再没有触发时点（单次时间已过或落在按策略跳过的夏令时空档、cron 永远不匹配）：存成启用也永远不会执行，创建和启用时直接拒绝。 */
+function requireNextRun(schedule: Parameters<typeof previewSessionSchedule>[0], after: Date) {
+  const next = previewSessionSchedule(schedule, after);
+  if (!next) throw new RuntimeError('SESSION_AUTOMATION_NO_NEXT_RUN', 'This schedule has no upcoming run time (the one-time time has passed or falls in a skipped DST gap, or the cron never matches); change the time rule', 409);
+  return next;
+}
 
 /** 安装者只能映射到 installation_owner；平台用户必须带原 appId 域，域缺失即无法核对（undefined）。 */
 function resolveAutomationActor(session: Session | undefined, actorId?: string): ExecutionActor | undefined {
@@ -503,6 +511,8 @@ export class SessionAutomationService {
   /** 本实例投递失败过的来源：只对它们退避；上一个进程（关闭、重启前）记下的失败，打开后立刻补发一次。 */
   private readonly failedDeliveries = new Set<string>();
   private tickRequested = false;
+  /** 上一轮扫描的耗时：扫描拖长时，下一轮判定计划时点是否迟到要放宽同样的时间。 */
+  private lastTickMs = 0;
   private readonly subscriptions = new Map<string, () => void>();
   private readonly quarantinedSchedules = new Set<string>();
   /** 关闭时终止正在跑的前置命令；那次触发留在待执行，租约过期后由下次启动重新判定。 */
@@ -629,7 +639,7 @@ export class SessionAutomationService {
 
   /** 幂等补齐同一授权 binding：来源 CAS 之后、dispatch 之前；崩溃重开补同一映射。 */
   private async ensureTaskBinding(taskId: string, binding: TaskBinding) {
-    // Every tick re-checks the bindings of all recorded occurrences; they almost always exist,
+    // Every tick re-checks the bindings of all open occurrences; they almost always exist,
     // so read first instead of paying for a failing insert CAS each time.
     let existing = await this.getRecord(taskBindingKey(taskId), value => taskBindingSchema.parse(value));
     if (!existing) {
@@ -905,7 +915,7 @@ export class SessionAutomationService {
       createdAt: now,
       updatedAt: now
     });
-    previewSessionSchedule(schedule, this.clock());
+    requireNextRun(schedule, this.clock());
     if (!await (input.precondition ? this.saveWithPrecondition(schedule.id, undefined, schedule, input.precondition) : this.createRecord(scheduleKey(schedule.id), schedule))) {
       if (receipt) {
         const saved = await this.getRecord(scheduleKey(id), readStoredSessionSchedule);
@@ -1287,7 +1297,7 @@ export class SessionAutomationService {
     };
     const schedule = sessionScheduleSchema.parse({
       ...candidate,
-      nextDueAt: executionChanged ? candidate.enabled ? previewSessionSchedule(candidate, now)?.scheduledForUtc : undefined : stored.value.nextDueAt
+      nextDueAt: executionChanged ? candidate.enabled ? requireNextRun(candidate, now).scheduledForUtc : undefined : stored.value.nextDueAt
     });
     if (!await (input.precondition !== undefined ? this.saveWithPrecondition(id, stored.raw, schedule, input.precondition) : this.replace(scheduleKey(id), stored.raw, schedule))) throw new RuntimeError('SESSION_AUTOMATION_REVISION_CONFLICT', 'Session schedule revision changed', 409);
     if (modeChanged) await this.retireFreshSessions(schedule);
@@ -1456,7 +1466,7 @@ export class SessionAutomationService {
         if (!occurrence || occurrence.sessionId !== request.sessionId || occurrence.scheduleId !== request.scheduleId || occurrence.generation !== request.generation || occurrence.admission?.taskId !== request.taskId) { await finish('rejected', 'binding_changed'); return; }
         // Agent 收尾报了受阻或等人决定时计划层记为没做成（runStatus=failed），同样不算完成。
         if (['failed', 'interrupted', 'cancelled'].includes(task?.status ?? '') || occurrence.result && (occurrence.result.outcome !== 'completed' || occurrence.runStatus !== 'completed')) { await finish('rejected', 'task_not_successful'); return; }
-        if (!task || task.status !== 'completed' || task.currentAttemptId !== request.attemptId || occurrence.runtimeAttemptId !== request.attemptId || occurrence.result?.outcome !== 'completed' || occurrence.delivery.status !== 'delivered') return;
+        if (!task || task.status !== 'completed' || task.currentAttemptId !== request.attemptId || occurrence.runtimeAttemptId !== request.attemptId || occurrence.result?.outcome !== 'completed' || !deliverySettled(occurrence.delivery)) return;
         const accepted = this.execution.getAcceptedTask(request.taskId);
         const session = await this.options.runtime.getSession(request.sessionId);
         try {
@@ -1466,7 +1476,13 @@ export class SessionAutomationService {
         }
         catch { await finish('rejected', 'authorization_revoked'); return; }
         const stopped = sessionScheduleSchema.parse({ ...schedule.value, revision: schedule.value.revision + 1, generation: schedule.value.generation + 1,
-          enabled: false, nextDueAt: undefined, stopRequestId: request.taskId, outcome: { kind: 'completed', at: iso(this.clock()) }, updatedAt: iso(this.clock()) });
+          enabled: false, nextDueAt: undefined, stopRequestId: request.taskId, outcome: { kind: 'completed', at: iso(this.clock()) }, updatedAt: iso(this.clock()),
+          // 结果没送到也照样停用，否则计划会一直跑下去；停用原因和停用告知要说明这一点。
+          ...occurrence.delivery.status !== 'delivered' ? {
+            disabledReason: occurrence.delivery.status === 'error' ? `已确认完成，但结果投递 ${occurrence.delivery.attempts} 次都失败` : '已确认完成，但这一轮的结果没有投递',
+            disabledAt: iso(this.clock()),
+            ...this.options.onScheduleDisabled ? { disableNotification: { status: 'pending', attempts: 0, name: schedule.value.name, updatedAt: iso(this.clock()) } } : {}
+          } : {} });
         if (await this.replace(scheduleKey(request.scheduleId), schedule.raw, stopped)) await finish('applied');
       });
     }
@@ -1479,7 +1495,9 @@ export class SessionAutomationService {
     const operation = (async () => {
       while (this.tickRequested && !this.closed) {
         this.tickRequested = false;
-        await this.runTick();
+        const startedAt = this.clock();
+        const timing = { observedAt: startedAt, graceMs: DEFAULT_POLL_MS + this.lastTickMs };
+        await this.runTick(timing).finally(() => { this.lastTickMs = Math.max(0, this.clock().getTime() - startedAt.getTime()); });
       }
     })().finally(() => {
       if (this.currentTick === operation) this.currentTick = undefined;
@@ -1685,7 +1703,7 @@ export class SessionAutomationService {
     }
   }
 
-  private async runTick() {
+  private async runTick(timing: ScanTiming) {
     this.requireStore();
     this.quarantinedSchedules.clear();
     // Re-read storage at each phase; only reuse decoding for byte-identical rows within this tick.
@@ -1707,11 +1725,13 @@ export class SessionAutomationService {
     }
     for (const item of schedules) {
       if (this.closed) return;
-      this.watchSession(item.value.sessionId);
-      if (item.value.executionSessionId) this.watchSession(item.value.executionSessionId);
+      if (!item.value.deletedAt) {
+        this.watchSession(item.value.sessionId);
+        if (item.value.executionSessionId) this.watchSession(item.value.executionSessionId);
+      }
       await this.isolate(() => this.synchronizeLifecycle(item));
       await this.isolate(() => this.enforceDeadline(item.value));
-      await this.isolate(() => this.planSchedule(item.value));
+      await this.isolate(() => this.planSchedule(item.value, timing));
       await this.isolate(() => this.followUpOccurrence(item.value.id));
       await this.isolate(() => this.remindOverdue(item.value));
       await this.isolate(() => this.sendRunNotice(item.value));
@@ -1832,6 +1852,11 @@ export class SessionAutomationService {
     if (schedule.pendingOccurrence) {
       const stored = await this.getRecord(occurrenceKey(schedule.pendingOccurrence.id), value => sessionScheduleOccurrenceSchema.parse(value));
       if (!stored || openRunStatuses.has(stored.value.runStatus)) return true;
+      // 这一轮成功并请求了 stop-self、结果还在投递：停用要等投递有结论，期间不开下一轮。
+      const occurrence = migrateOccurrence(stored.value);
+      const taskId = occurrence.runStatus === 'completed' && !deliverySettled(occurrence.delivery) ? occurrence.admission?.taskId : undefined;
+      const stop = taskId ? (await this.getRecord(`${STOP_REQUEST_PREFIX}${taskId}`, value => stopRequestSchema.parse(value)))?.value : undefined;
+      if (stop?.status === 'pending' && stop.scheduleId === schedule.id && stop.generation === schedule.generation) return true;
     }
     // Legacy sources have no reservation, and blocked/unknown work must continue to hold the slot.
     return (await this.listRecords(OCCURRENCE_PREFIX, value => sessionScheduleOccurrenceSchema.parse(value), undefined, { field: 'runStatus', values: [...openRunStatuses], scheduleId: schedule.id }))
@@ -1866,7 +1891,7 @@ export class SessionAutomationService {
     return { ...(await this.getRecord(occurrenceKey(occurrence.id), value => sessionScheduleOccurrenceSchema.parse(value)))!, created: false };
   }
 
-  private async planSchedule(snapshot: SessionSchedule) {
+  private async planSchedule(snapshot: SessionSchedule, timing: ScanTiming) {
     const stored = await this.getRecord(scheduleKey(snapshot.id), readStoredSessionSchedule);
     if (!stored) return;
     let schedule = stored.value;
@@ -1891,13 +1916,15 @@ export class SessionAutomationService {
       if (!openRunStatuses.has(already.value.runStatus)) await this.advanceSchedule(schedule, schedule.nextDueAt);
       return;
     }
-    const lateBy = this.clock().getTime() - new Date(schedule.nextDueAt).getTime();
-    const skip = schedule.misfirePolicy === 'skip' && lateBy > DEFAULT_POLL_MS
-      || schedule.maxLatenessSeconds !== undefined && lateBy > schedule.maxLatenessSeconds * 1_000;
-    const misfire = skip || lateBy > DEFAULT_POLL_MS ? {
+    const lateBy = timing.observedAt.getTime() - new Date(schedule.nextDueAt).getTime();
+    // 有效期短于扫描宽限时按宽限算：扫描本身就可能晚这么久才看到这个时点，否则准点的触发也会被判过期。
+    const validMs = schedule.maxLatenessSeconds === undefined ? undefined : Math.max(schedule.maxLatenessSeconds * 1_000, timing.graceMs);
+    const expired = validMs !== undefined && lateBy > validMs;
+    const skip = schedule.misfirePolicy === 'skip' && lateBy > timing.graceMs || expired;
+    const misfire = skip || lateBy > timing.graceMs ? {
       policy: schedule.misfirePolicy ?? 'coalesce',
       from: schedule.nextDueAt, to: iso(this.clock()),
-      reason: skip ? schedule.maxLatenessSeconds !== undefined && lateBy > schedule.maxLatenessSeconds * 1000 ? 'lateness_window_expired' : 'missed_time_skipped' : 'missed_times_coalesced'
+      reason: skip ? expired ? 'lateness_window_expired' : 'missed_time_skipped' : 'missed_times_coalesced'
     } : undefined;
     const restored = await this.restoreAfterFreshRetry(schedule);
     schedule = sessionScheduleSchema.parse({ ...schedule, ...restored ?? this.freshReservation(schedule, id), pendingOccurrence: {
@@ -1921,6 +1948,26 @@ export class SessionAutomationService {
 
   private async processOccurrence(stored: { raw: string; value: SessionScheduleOccurrence }) {
     let occurrence = migrateOccurrence(stored.value);
+    // 账本已接受（派发后崩溃、关闭或补记 CAS 落败）时先认接受事实，再做计划、会话和授权检查：作废会丢结果，下一轮还会重叠执行。
+    const admission = occurrence.admission;
+    const acceptedTask = admission && this.execution.getAcceptedTask(admission.taskId);
+    if (admission && acceptedTask) {
+      if (acceptedTask.request && admission.request && canonicalExecutionJson(acceptedTask.request) !== canonicalExecutionJson(admission.request)) {
+        await this.finishOccurrence(stored, { runStatus: 'blocked', blockReason: 'admission_conflict', error: 'Accepted task request conflicts with source admission' });
+        return;
+      }
+      try {
+        await this.ensureTaskBinding(admission.taskId, {
+          schemaVersion: 2, kind: 'schedule', sessionId: occurrence.executionSessionId ?? occurrence.sessionId, occurrenceId: occurrence.id,
+          scheduleId: occurrence.scheduleId, taskId: admission.taskId, taskIdVersion: admission.taskIdVersion, generation: occurrence.generation
+        });
+      } catch (error) {
+        await this.finishOccurrence(stored, { runStatus: 'blocked', blockReason: 'admission_conflict', error: errorMessage(error) });
+        return;
+      }
+      await this.markOccurrenceAccepted(stored, admission.taskId);
+      return;
+    }
     let scheduleStored = await this.getRecord(scheduleKey(occurrence.scheduleId), readStoredSessionSchedule);
     if (scheduleStored && !occurrence.admission && !occurrence.taskId) {
       scheduleStored = await this.fallbackToFresh(scheduleStored, occurrence.id);
@@ -2381,16 +2428,19 @@ export class SessionAutomationService {
   }
 
   private async markOccurrenceAccepted(stored: { raw: string; value: SessionScheduleOccurrence }, taskId: string) {
-    const current = await this.getRecord(occurrenceKey(stored.value.id), input => sessionScheduleOccurrenceSchema.parse(input));
-    if (!current) return;
-    const currentValue = migrateOccurrence(current.value);
-    if (currentValue.runStatus !== 'pending') return;
-    if (currentValue.scheduleId !== stored.value.scheduleId || currentValue.generation !== stored.value.generation) return;
-    // CAS 核原来源身份/代际：冻结 admission 的 taskId 必须与实际接受 Task 一致，不借最新 pending 绑定不同请求。
-    const frozenTaskId = currentValue.admission?.taskId ?? migrateOccurrence(stored.value).admission?.taskId;
-    if (frozenTaskId && frozenTaskId !== taskId) return;
-    const updated = sessionScheduleOccurrenceV2Schema.parse({ ...currentValue, revision: currentValue.revision + 1, runStatus: 'accepted', taskId, acceptedAt: currentValue.acceptedAt ?? iso(this.clock()), leaseOwner: undefined, leaseExpiresAt: undefined, updatedAt: iso(this.clock()) });
-    await this.replace(occurrenceKey(stored.value.id), current.raw, updated);
+    // 并发写入（如 submit 写 taskStartedAt）让 CAS 落败时重读重试；仍未写成的由下次 processOccurrence 按账本补记。
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const current = await this.getRecord(occurrenceKey(stored.value.id), input => sessionScheduleOccurrenceSchema.parse(input));
+      if (!current) return;
+      const currentValue = migrateOccurrence(current.value);
+      if (currentValue.runStatus !== 'pending') return;
+      if (currentValue.scheduleId !== stored.value.scheduleId || currentValue.generation !== stored.value.generation) return;
+      // CAS 核原来源身份/代际：冻结 admission 的 taskId 必须与实际接受 Task 一致，不借最新 pending 绑定不同请求。
+      const frozenTaskId = currentValue.admission?.taskId ?? migrateOccurrence(stored.value).admission?.taskId;
+      if (frozenTaskId && frozenTaskId !== taskId) return;
+      const updated = sessionScheduleOccurrenceV2Schema.parse({ ...currentValue, revision: currentValue.revision + 1, runStatus: 'accepted', taskId, acceptedAt: currentValue.acceptedAt ?? iso(this.clock()), leaseOwner: undefined, leaseExpiresAt: undefined, updatedAt: iso(this.clock()) });
+      if (await this.replace(occurrenceKey(stored.value.id), current.raw, updated)) return;
+    }
   }
 
   private async finishOccurrence(stored: { raw: string; value: SessionScheduleOccurrence }, patch: Partial<SessionScheduleOccurrenceV2>): Promise<boolean> {
@@ -2898,9 +2948,10 @@ export class SessionAutomationService {
   }
 
   private async refreshAcceptedWork(parsed: TickParseCache) {
+    // 已结算的历史不再变化（结果投递另按投递状态扫描）：每个 tick 只读还可能推进的记录，开销不随历史增长。
     const [occurrences, subscriptions, records] = await Promise.all([
-      this.listRecords(OCCURRENCE_PREFIX, value => sessionScheduleOccurrenceSchema.parse(value), parsed.occurrences),
-      this.listRecords(CI_PREFIX, value => ciSubscriptionSchema.parse(value), parsed.subscriptions),
+      this.listRecords(OCCURRENCE_PREFIX, value => sessionScheduleOccurrenceSchema.parse(value), parsed.occurrences, { field: 'runStatus', values: [...openRunStatuses, 'error'] }),
+      this.listRecords(CI_PREFIX, value => ciSubscriptionSchema.parse(value), parsed.subscriptions, { field: 'status', values: ['waiting', 'dispatching', 'accepted', 'blocked', 'error'] }),
       this.listRecords(SCHEDULE_PREFIX, readStoredSessionSchedule)
     ]);
     const schedules = new Map(records.map(item => [item.value.id, item]));
@@ -3130,7 +3181,8 @@ export class SessionAutomationService {
     if (!fixed || !fixed.value.admission) return;
     // 仍在派发阶段（dispatching，acceptance 在途或响应丢失）时不做结果对账；
     // 交由 recoverDispatchingCi 用原冻结 prompt 重投，避免误判为 blocked。
-    if (fixed.value.status === 'dispatching' && !this.execution.getAcceptedTask(fixed.value.admission.taskId)) return;
+    // 派发时就被拒（error，例如会话停止或月度成本上限）同样没有接受事实：保留原因，不对账成 blocked。
+    if (['dispatching', 'error'].includes(fixed.value.status) && !this.execution.getAcceptedTask(fixed.value.admission.taskId)) return;
     let working = fixed;
     let value = working.value;
 
@@ -3298,11 +3350,17 @@ export class SessionAutomationService {
         ...(deliveryError ? { error: attempts >= NOTICE_MAX_ATTEMPTS ? `${deliveryError}（已尝试 ${attempts} 次，不再自动重发）` : deliveryError } : {}), updatedAt: iso(this.clock()) },
       leaseOwner: undefined, leaseExpiresAt: undefined, updatedAt: iso(this.clock()) };
     if (!await this.replace(key, current.raw, updated)) return;
-    if (deliveryError) this.failedDeliveries.add(key);
+    if (deliveryError && attempts < NOTICE_MAX_ATTEMPTS) this.failedDeliveries.add(key);
+    else this.failedDeliveries.delete(key);
     if (!deliveryError && 'scheduleId' in claimed && sent?.messageId) await this.noteResultMessage(claimed.scheduleId, claimed.id, sent.messageId);
     await this.applyScheduleStops();
   }
 
+}
+
+/** 结果投递已有结论：送达、本就不投递，或已用完重试次数仍失败（不会再自动重发）。 */
+function deliverySettled(delivery: DeliveryRecord['delivery']): boolean {
+  return delivery.status === 'delivered' || delivery.status === 'not_requested' || delivery.status === 'error' && delivery.attempts >= NOTICE_MAX_ATTEMPTS;
 }
 
 /**

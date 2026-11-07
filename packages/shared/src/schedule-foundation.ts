@@ -366,7 +366,8 @@ function cronField(raw: string, minimum: number, maximum: number, sunday = false
     const [rangeRaw = '', stepRaw] = item.split('/');
     const step = stepRaw === undefined ? 1 : Number(stepRaw);
     if (!Number.isSafeInteger(step) || step < 1) throw new Error('Invalid cron step');
-    const [start, end] = rangeRaw === '*' ? [minimum, maximum] : rangeRaw.includes('-') ? rangeRaw.split('-').map(Number) : [Number(rangeRaw), Number(rangeRaw)];
+    // 与 cronie 一致：单个起点带步长（如 0/15）表示从起点到上限。
+    const [start, end] = rangeRaw === '*' ? [minimum, maximum] : rangeRaw.includes('-') ? rangeRaw.split('-').map(Number) : [Number(rangeRaw), stepRaw === undefined ? Number(rangeRaw) : maximum];
     if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start! < minimum || end! > maximum || start! > end!) throw new Error('Invalid cron range');
     for (let value = start!; value <= end!; value += step) values.add(sunday && value === 7 ? 0 : value);
   }

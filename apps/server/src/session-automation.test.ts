@@ -194,17 +194,20 @@ const scheduleInput = {
   condition: { kind: 'always' as const }
 };
 
-it('parses unchanged occurrence history once per tick and batches schedule lookup for recovery', async () => {
+it('does not reread settled occurrence history on each tick', async () => {
   const deliver = vi.fn(async () => {});
   const h = await fixture({ deliver });
   const timestamp = h.now.value.toISOString();
   const raws = new Set<string>();
+  const settled = ['skipped', 'invalidated', 'completed', 'failed', 'interrupted'] as const;
   for (let i = 0; i < 100; i++) {
     const id = `history_${i}`;
+    const runStatus = settled[i % settled.length];
     const raw = JSON.stringify(sessionScheduleOccurrenceSchema.parse({
-      schemaVersion: 2, id, revision: 1, scheduleId: `removed_${i}`, sessionId: h.session.id, generation: 1,
-      scheduledForUtc: timestamp, conditionStatus: 'skipped', runStatus: 'skipped',
-      delivery: { status: 'not_requested', attempts: 0, updatedAt: timestamp }, createdAt: timestamp, updatedAt: timestamp
+      schemaVersion: 2, id, revision: 1, scheduleId: `removed_${i}`, sessionId: h.session.id, generation: 1, scheduledForUtc: timestamp,
+      conditionStatus: runStatus === 'skipped' || runStatus === 'invalidated' ? runStatus : 'passed', runStatus,
+      delivery: { status: runStatus === 'completed' ? 'delivered' : 'not_requested', attempts: runStatus === 'completed' ? 1 : 0, updatedAt: timestamp },
+      createdAt: timestamp, updatedAt: timestamp
     }));
     raws.add(raw);
     await h.repositories.config.set(`session_automation/occurrence/${id}`, raw);
@@ -213,21 +216,18 @@ it('parses unchanged occurrence history once per tick and batches schedule looku
   const schemaParse = vi.spyOn(sessionScheduleOccurrenceSchema, 'parse');
   const get = vi.spyOn(h.repositories.config, 'get');
   const list = vi.spyOn(h.repositories.config, 'list');
-  const candidates = vi.spyOn(h.repositories.config, 'listByJsonField');
   try {
-    await h.service.tick();
-    expect(parse.mock.calls.filter(([raw]) => raws.has(raw))).toHaveLength(100);
-    expect(schemaParse).toHaveBeenCalledTimes(100);
-    expect(list.mock.calls.filter(([prefix]) => prefix === 'session_automation/occurrence/')).toHaveLength(1);
-    expect(candidates.mock.calls.filter(([prefix]) => prefix === 'session_automation/occurrence/')).toHaveLength(2);
-    expect(get.mock.calls.filter(([key]) => key.startsWith('session_automation/schedule/'))).toHaveLength(0);
+    for (let round = 0; round < 2; round++) {
+      await h.service.tick();
+      expect(parse.mock.calls.filter(([raw]) => raws.has(raw))).toHaveLength(0);
+    }
+    expect(schemaParse).not.toHaveBeenCalled();
+    expect(list.mock.calls.filter(([prefix]) => prefix === 'session_automation/occurrence/' || prefix === 'session_automation/ci/')).toHaveLength(0);
+    expect(get.mock.calls.filter(([key]) => key.startsWith('session_automation/schedule/') || key.startsWith('session_automation/task/'))).toHaveLength(0);
     expect(h.dispatches).toHaveLength(0);
     expect(deliver).not.toHaveBeenCalled();
-    parse.mockClear();
-    await h.service.tick();
-    expect(parse.mock.calls.filter(([raw]) => raws.has(raw))).toHaveLength(100);
   } finally {
-    parse.mockRestore(); schemaParse.mockRestore(); get.mockRestore(); list.mockRestore(); candidates.mockRestore();
+    parse.mockRestore(); schemaParse.mockRestore(); get.mockRestore(); list.mockRestore();
   }
 });
 
@@ -599,6 +599,37 @@ describe('SessionAutomationService schedules', () => {
     const list = await h.service.listBySession(h.session.id);
     expect(list.occurrences[0]).toMatchObject({ conditionStatus: 'passed', runStatus: 'accepted' });
     expect(await h.repositories.tasks.listBySession(h.session.id)).toHaveLength(1);
+  });
+
+  it('keeps a ledger-accepted occurrence left pending when the schedule is edited before recovery', async () => {
+    const h = await fixture();
+    const created = await h.service.createSchedule(h.session.id, scheduleInput, 'ou_owner');
+    await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+    const compare = h.repositories.config.compareAndSet!.bind(h.repositories.config);
+    const cas = vi.spyOn(h.repositories.config, 'compareAndSet').mockImplementation(async (key, expected, value) => {
+      if (key.startsWith('session_automation/occurrence/') && value && JSON.parse(value).runStatus === 'accepted') return false;
+      return compare(key, expected, value);
+    });
+    h.now.value = new Date('2026-09-12T00:01:01.000Z');
+    await h.service.tick();
+    cas.mockRestore();
+    const [task] = await h.repositories.tasks.listBySession(h.session.id);
+    expect((await h.service.listBySession(h.session.id)).occurrences[0]).toMatchObject({ runStatus: 'pending' });
+    await h.service.authorizeTask(task!, 'submit');
+    const current = await h.service.getScheduleDefinition(h.session.id, created.id, 'ou_owner');
+    await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: current.revision, prompt: 'Edited after submission' }, 'ou_owner');
+    h.now.value = new Date('2026-09-12T00:01:40.000Z');
+    await h.service.tick();
+    const [recovered] = (await h.service.listBySession(h.session.id)).occurrences;
+    expect(recovered).toMatchObject({ runStatus: 'accepted', taskId: task!.id });
+    h.now.value = new Date('2026-09-12T00:02:01.000Z');
+    await h.service.tick();
+    expect(h.dispatches).toHaveLength(1);
+    h.settleTask(task!.id);
+    await h.service.tick();
+    expect((await h.service.listBySession(h.session.id)).occurrences.find(item => item.id === recovered!.id)).toMatchObject({
+      runStatus: 'completed', result: expect.objectContaining({ taskId: task!.id })
+    });
   });
 
   it('fences a slow condition evaluator after another service takes over its expired lease', async () => {
@@ -1141,6 +1172,30 @@ describe('SessionAutomationService CI subscriptions', () => {
     expect(h.dispatches).toHaveLength(1);
   });
 
+  it('keeps the real reason of a rejected CI dispatch instead of reconciling it into an admission conflict', async () => {
+    let head = '';
+    const status = vi.fn(async () => ciStatus(head, [{ id: 9, conclusion: 'success' }])) as StatusMock;
+    const h = await fixture({ status });
+    head = (await run('git', ['-C', h.cwd, 'rev-parse', 'HEAD'])).stdout.trim();
+    const subscription = await h.service.subscribeCi(h.session.id, { ttlSeconds: 600 }, 'ou_owner');
+    const rejecting: SessionAutomationRuntime = {
+      getSession: id => h.repositories.sessions.get(id),
+      async dispatchRequest() { throw new RuntimeError('MONTHLY_COST_LIMIT', 'Monthly cost limit reached', 409); }
+    };
+    const service = new SessionAutomationService({ repositories: h.repositories, runtime: rejecting, authorize: async () => true, ciProviders: ciProviders(status), clock: () => new Date(h.now.value) });
+    cleanups.push(() => service.close());
+    await service.tick();
+    const rejected = (await service.listBySession(h.session.id)).subscriptions.find(item => item.id === subscription.id)!;
+    expect(rejected).toMatchObject({ status: 'error', error: 'Monthly cost limit reached' });
+    for (const minutes of [1, 2]) {
+      h.now.value = new Date(Date.parse('2026-09-12T00:00:01.000Z') + minutes * 60_000);
+      await service.tick();
+    }
+    const later = (await service.listBySession(h.session.id)).subscriptions.find(item => item.id === subscription.id)!;
+    expect(later).toMatchObject({ status: 'error', error: 'Monthly cost limit reached', revision: rejected.revision });
+    expect(later).not.toHaveProperty('blockReason');
+  });
+
   it('rejects protected reads and writes when no service authorizer is wired', async () => {
     const h = await fixture();
     const service = new SessionAutomationService({ repositories: h.repositories, runtime: h });
@@ -1452,6 +1507,27 @@ describe('schedule calendar validation and legacy reads', () => {
     expect(repaired).toMatchObject({ enabled: false, revision: 2 });
     expect((await h.service.updateSchedule(h.session.id, bad.id, { expectedRevision: 2, enabled: true }, 'ou_owner')).nextDueAt).toBe('2026-10-20T01:00:00.000Z');
   });
+  it('rejects creating or enabling a schedule that has no upcoming run time', async () => {
+    const h = await fixture();
+    const noNextRun = { code: 'SESSION_AUTOMATION_NO_NEXT_RUN', statusCode: 409 };
+    for (const [index, patch] of [
+      { trigger: { kind: 'at' as const, localDateTime: '2026-09-12T07:00' } },
+      { trigger: { kind: 'cron' as const, expression: '0 0 30 2 *' } },
+      { trigger: { kind: 'at' as const, localDateTime: '2027-03-14T02:30' }, timezone: 'America/New_York' }
+    ].entries()) {
+      await expect(h.service.createSchedule(h.session.id, { ...scheduleInput, name: `Never ${index}`, additional: true, ...patch }, 'ou_owner')).rejects.toMatchObject(noNextRun);
+    }
+    const once = await h.service.createSchedule(h.session.id, { ...scheduleInput, name: 'Once', trigger: { kind: 'at', localDateTime: '2026-09-12T09:00' } }, 'ou_owner');
+    h.now.value = new Date('2026-09-12T02:00:00.000Z');
+    await expect(h.service.updateSchedule(h.session.id, once.id, { expectedRevision: once.revision, enabled: true }, 'ou_owner')).rejects.toMatchObject(noNextRun);
+    expect(await h.service.getScheduleDefinition(h.session.id, once.id, 'ou_owner')).toMatchObject({ enabled: false, revision: once.revision });
+    const recurring = await h.service.createSchedule(h.session.id, { ...scheduleInput, name: 'Recurring', additional: true }, 'ou_owner');
+    const enabled = await h.service.updateSchedule(h.session.id, recurring.id, { expectedRevision: recurring.revision, enabled: true }, 'ou_owner');
+    await expect(h.service.updateSchedule(h.session.id, recurring.id, { expectedRevision: enabled.revision, trigger: { kind: 'cron', expression: '0 0 30 2 *' } }, 'ou_owner')).rejects.toMatchObject(noNextRun);
+    expect(await h.service.getScheduleDefinition(h.session.id, recurring.id, 'ou_owner')).toMatchObject({ enabled: true, revision: enabled.revision, trigger: scheduleInput.trigger });
+    expect(await h.service.updateSchedule(h.session.id, once.id, { expectedRevision: once.revision, trigger: { kind: 'at', localDateTime: '2026-09-12T11:00' }, enabled: true }, 'ou_owner'))
+      .toMatchObject({ enabled: true, nextDueAt: '2026-09-12T03:00:00.000Z' });
+  });
 });
 
 describe('schedule frozen delivery projection', () => {
@@ -1552,8 +1628,9 @@ describe('schedule management and recovery contracts', () => {
     { policy: 'skip' as const, at: '00:02:00.000', count: 1, status: 'accepted' },
     { policy: 'skip' as const, at: '00:02:00.001', count: 0, status: 'skipped' },
     { policy: 'coalesce' as const, at: '00:10:00.000', count: 1, status: 'accepted' },
-    { policy: 'coalesce' as const, at: '00:01:30.000', max: 30, count: 1, status: 'accepted' },
-    { policy: 'coalesce' as const, at: '00:01:30.001', max: 30, count: 0, status: 'skipped' }
+    { policy: 'coalesce' as const, at: '00:01:30.001', max: 30, count: 1, status: 'accepted' },
+    { policy: 'coalesce' as const, at: '00:03:00.000', max: 120, count: 1, status: 'accepted' },
+    { policy: 'coalesce' as const, at: '00:03:00.001', max: 120, count: 0, status: 'skipped' }
   ])('makes one bounded misfire decision at $at for $policy', async test => {
     const h = await fixture();
     const created = await h.service.createSchedule(h.session.id, { ...scheduleInput, misfirePolicy: test.policy, ...(test.max ? { maxLatenessSeconds: test.max } : {}) }, 'ou_owner');
@@ -1835,6 +1912,35 @@ it.each([
     await h.service.tick();
     expect(h.dispatches).toHaveLength(1);
     expect((await h.service.getScheduleHistory(h.session.id, created.id))).toEqual([expect.objectContaining({ runStatus: 'blocked', blockReason: 'reconcile_required' })]);
+  }
+});
+
+it('judges lateness from the start of the scan, so a slow dispatch earlier in the tick does not skip on-time runs', async () => {
+  const h = await fixture();
+  const daily = { ...scheduleInput, timezone: 'UTC', trigger: { kind: 'cron' as const, expression: '0 9 * * *' }, misfirePolicy: 'skip' as const, additional: true };
+  const ids: string[] = [];
+  for (const [index, extra] of [{}, {}, { maxLatenessSeconds: 1 }].entries()) {
+    const created = await h.service.createSchedule(h.session.id, { ...daily, name: `Daily ${index}`, ...extra }, 'ou_owner');
+    await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: created.revision, enabled: true }, 'ou_owner');
+    ids.push(created.id);
+  }
+  const push = h.dispatches.push.bind(h.dispatches);
+  let slow = true;
+  // 本轮第一次派发花了 65 秒（开会话、排队）；之后的计划仍是本轮扫描准点看到的。
+  const spy = vi.spyOn(h.dispatches, 'push').mockImplementation((...tasks) => {
+    if (slow) { slow = false; h.now.value = new Date(h.now.value.getTime() + 65_000); }
+    return push(...tasks);
+  });
+  try {
+    h.now.value = new Date('2026-09-12T09:00:30.000Z');
+    await h.service.tick();
+  } finally { spy.mockRestore(); }
+  expect(slow).toBe(false);
+  expect(h.dispatches).toHaveLength(3);
+  for (const id of ids) {
+    const [latest] = await h.service.getScheduleHistory(h.session.id, id, 'ou_owner');
+    expect(latest).toMatchObject({ runStatus: 'accepted', scheduledForUtc: '2026-09-12T09:00:00.000Z' });
+    expect(latest!.misfire).toBeUndefined();
   }
 });
 
@@ -2481,6 +2587,61 @@ describe('follow-up until done: completion condition, deadline and run state', (
     expect(stopped.outcome).toMatchObject({ kind: 'completed' });
     expect(stopped.disabledReason).toBeUndefined();
     expect(await runState(h, schedule.id)).toBe('completed');
+    h.now.value = new Date('2026-09-12T00:05:01.000Z'); await h.service.tick(); await h.service.tick();
+    expect(h.dispatches).toHaveLength(1);
+  });
+
+  it('still stops after the result delivery gives up, and says the result was not delivered', async () => {
+    const deliver = vi.fn(async () => { throw new Error('bot was removed from the chat'); });
+    const onScheduleDisabled = vi.fn(async () => {});
+    const h = await fixture({ deliver, onScheduleDisabled });
+    const schedule = await enable(h, { ...followUp, trigger: { kind: 'interval', everySeconds: 3600, anchorAt: '2026-09-12T00:00:00.000Z' } });
+    h.now.value = new Date('2026-09-12T01:00:01.000Z'); await h.service.tick();
+    const task = h.dispatches[0]!;
+    const attempt = bound(h.repositories).claimNext({ sessionId: h.session.id, runId: h.session.runId })!.attempt!;
+    await h.service.requestScheduleStop(h.session.id, task.id, attempt.attemptId, 'ou_owner');
+    h.settleTask(task.id);
+    const delivery = async () => (await h.service.listBySession(h.session.id)).occurrences[0]!.delivery;
+    const current = () => h.service.getScheduleDefinition(h.session.id, schedule.id, 'ou_owner');
+    await vi.waitFor(async () => { await h.service.tick(); expect(await delivery()).toMatchObject({ status: 'error', attempts: 1 }); });
+    for (const attempts of [2, 3]) {
+      expect(await current()).toMatchObject({ enabled: true });
+      h.now.value = new Date(h.now.value.getTime() + 60_000 * (attempts - 1));
+      await vi.waitFor(async () => { await h.service.tick(); expect(await delivery()).toMatchObject({ status: 'error', attempts }); });
+    }
+    await vi.waitFor(async () => expect((await current()).enabled).toBe(false));
+    expect(await current()).toMatchObject({ outcome: { kind: 'completed' }, disabledReason: expect.stringContaining('结果投递 3 次都失败') });
+    expect(JSON.parse((await h.repositories.config.get(`session_automation/stop_request/${task.id}`))!).status).toBe('applied');
+    await h.service.tick();
+    expect(onScheduleDisabled).toHaveBeenCalledOnce();
+    expect(await runState(h, schedule.id)).toBe('completed');
+    h.now.value = new Date('2026-09-12T03:00:01.000Z'); await h.service.tick(); await h.service.tick();
+    expect(h.dispatches).toHaveLength(1);
+    expect(deliver).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not start the next run while a stop-self result is still being delivered', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const deliver = vi.fn(async () => { await gate; });
+    const h = await fixture({ deliver });
+    const schedule = await enable(h);
+    const current = () => h.service.getScheduleDefinition(h.session.id, schedule.id, 'ou_owner');
+    h.now.value = new Date('2026-09-12T00:01:01.000Z'); await h.service.tick();
+    const task = h.dispatches[0]!;
+    const attempt = bound(h.repositories).claimNext({ sessionId: h.session.id, runId: h.session.runId })!.attempt!;
+    await h.service.requestScheduleStop(h.session.id, task.id, attempt.attemptId, 'ou_owner');
+    h.settleTask(task.id);
+    h.now.value = new Date('2026-09-12T00:02:01.000Z');
+    try {
+      await h.service.tick();
+      await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
+      await h.service.tick();
+      expect(h.dispatches).toHaveLength(1);
+      expect(await current()).toMatchObject({ enabled: true });
+      await expect(h.service.runSchedule(h.session.id, schedule.id, { expectedRevision: (await current()).revision, idempotencyKey: 'during-stop' }, 'ou_owner')).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_SCHEDULE_BUSY' });
+    } finally { release(); }
+    await vi.waitFor(async () => expect(await current()).toMatchObject({ enabled: false, outcome: { kind: 'completed' } }));
     h.now.value = new Date('2026-09-12T00:05:01.000Z'); await h.service.tick(); await h.service.tick();
     expect(h.dispatches).toHaveLength(1);
   });

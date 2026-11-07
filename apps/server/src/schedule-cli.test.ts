@@ -84,6 +84,9 @@ describe('schedule CLI', () => {
     const count = f.requests.length;
     await expect(f.run('create', { session: 'ses_1', name: 'Bad', prompt: 'x', every: '5', template: 'template_abc' })).rejects.toMatchObject({ code: 'SCHEDULE_ARGUMENT_INVALID' });
     await expect(f.run('create', { session: 'ses_1', name: 'Bad', prompt: 'x', every: '5', deadline: 'soon' })).rejects.toMatchObject({ code: 'SCHEDULE_ARGUMENT_INVALID' });
+    for (const when of [{ at: '2020-01-01T09:00' }, { cron: '0 0 30 2 *' }]) {
+      await expect(f.run('create', { session: 'ses_1', name: 'Never', prompt: 'x', timezone: 'UTC', ...when })).rejects.toMatchObject({ code: 'SCHEDULE_ARGUMENT_INVALID', message: expect.stringContaining('no upcoming run time') });
+    }
     expect(f.requests).toHaveLength(count);
     const handler = vi.fn();
     await createCliProgram('test', { schedule: handler }).parseAsync(['node', 'dutydeck', 'schedule', 'create', '--session', 'ses_1', '--until', 'done', '--deadline', '2026-12-01T18:00', '--template', 't@1']);
