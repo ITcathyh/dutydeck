@@ -47,6 +47,7 @@ Codex 终端 Agent 会从 `CODEX_HOME/config.toml` 读取 `[profiles.<name>]` �
 > - `command` 必须是二进制的绝对路径或 `PATH` 里的可执行程序，不能用 shell alias。
 > - `command` 找不到的 Agent **不会被登记**。`dutydeck doctor` 会报 fail 并点名这个 Agent 和命令，daemon 启动日志也会告警。
 > - 默认的 tmux 后端下，Agent 配置里的 `env.PATH`（包括空串）会原样作为 Agent 进程的 `PATH`，`command` 只写命令名时也在这个 `PATH` 里查找；是否登记仍按 Dutydeck 服务自己的 `PATH` 判断。自定义 `PATH` 时要包含 `command` 所在目录，或把 `command` 写成绝对路径，否则 Agent 能登记却启动失败。
+> - Agent 进程不继承 Dutydeck 自己的服务配置：大写 `DUTYDECK_*` 变量（如 `DUTYDECK_AGENTS_JSON`、`DUTYDECK_DATABASE_URL`、`DUTYDECK_INSTANCES_JSON`）和飞书应用密钥都会被去掉，只保留 `DUTYDECK_DAEMON_DIR`、`DUTYDECK_BOT_APP_ID`，让 Agent 里执行的 `dutydeck` 命令仍指向所在实例。服务环境里的通用供应商变量（如 `OPENAI_API_KEY`）照常继承；要给各 Agent 分开账号，写在各自的 `env` 里，它始终生效。
 > - `DUTYDECK_AGENTS_JSON` 写错（JSON 语法或字段）时，报错会点名这个变量。
 
 ### 示例：接入标准 ACP Agent

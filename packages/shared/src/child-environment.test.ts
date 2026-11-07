@@ -35,6 +35,23 @@ describe('child environment policy', () => {
     expect(inherited).toEqual(before);
   });
 
+  it('drops inherited service configuration and Lark/Feishu app secrets but keeps provider keys and explicit values', () => {
+    const inherited = {
+      DUTYDECK_AGENTS_JSON: '[{"env":{"ANTHROPIC_AUTH_TOKEN":"other-agent"}}]', DUTYDECK_INSTANCES_JSON: '[]',
+      DUTYDECK_DATABASE_URL: '/srv/dutydeck.db', DUTYDECK_PLUGIN_SECRETS: 'plugin', DUTYDECK_DAEMON_RESTART_HOST: '0.0.0.0',
+      FEISHU_APP_SECRET: 'feishu', LARK_ENCRYPT_KEY: 'lark-encrypt', FEISHU_VERIFICATION_TOKEN: 'feishu-verify',
+      DUTYDECK_DAEMON_DIR: '/srv/.dutydeck/daemon', DUTYDECK_BOT_APP_ID: 'cli_placeholder',
+      DUTYDECK_CLAUDE_ACP_COMMAND: '/usr/bin/node', DUTYDECK_CLAUDE_ACP_ARGS_JSON: '[]',
+      LARK_APP_ID: 'cli_placeholder', OPENAI_API_KEY: 'provider', PATH: '/usr/bin'
+    };
+    expect(childEnvironment(inherited, { DUTYDECK_PLUGIN_NAME: 'explicit', FEISHU_APP_SECRET: 'explicit-feishu' })).toEqual({
+      DUTYDECK_DAEMON_DIR: '/srv/.dutydeck/daemon', DUTYDECK_BOT_APP_ID: 'cli_placeholder',
+      DUTYDECK_CLAUDE_ACP_COMMAND: '/usr/bin/node', DUTYDECK_CLAUDE_ACP_ARGS_JSON: '[]',
+      LARK_APP_ID: 'cli_placeholder', OPENAI_API_KEY: 'provider', PATH: '/usr/bin',
+      DUTYDECK_PLUGIN_NAME: 'explicit', FEISHU_APP_SECRET: 'explicit-feishu'
+    });
+  });
+
   it('preserves ordinary shell/git configuration and similarly named tool directories', () => {
     const env = {
       PATH: '/usr/bin:/tools/cli-identity-helper:/tools/cli-identity/normal/bin',

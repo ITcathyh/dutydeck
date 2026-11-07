@@ -55,9 +55,18 @@ function envLauncherPath() { return agentsFile('env-launcher.mjs'); }
 
 const isCodexAcpAgent = (agent: AgentConfig) => Boolean(agent.builtin && ['codex', 'codex-acp'].includes(agent.id)) || inferAcpInsightClient(agent) === 'codex';
 
+/** Uppercase DUTYDECK_* service configuration the child policy drops from the daemon environment. */
+function inheritedServiceKeys() {
+  const clean = childEnvironment(process.env);
+  return Object.keys(process.env).filter(key => /^DUTYDECK_/.test(key) && typeof process.env[key] === 'string' && !(key in clean));
+}
+
 /** Resolve before npx prepends its bundled Codex to PATH; never persist this override. */
 export function acpxAgentEnvironment(agent: AgentConfig): Record<string, string> {
-  if (!isCodexAcpAgent(agent)) return {};
+  // ACPX spawns from the daemon's process.env plus this overlay; spawn omits undefined entries, which removes
+  // service configuration from direct launches without changing their persisted argv.
+  const omitted = Object.fromEntries(inheritedServiceKeys().map(key => [key, undefined])) as unknown as Record<string, string>;
+  if (!isCodexAcpAgent(agent)) return omitted;
   const env = childEnvironment(process.env, agent.env);
   let executable = env.CODEX_PATH;
   const extensions = process.platform === 'win32'
@@ -77,6 +86,7 @@ export function acpxAgentEnvironment(agent: AgentConfig): Record<string, string>
   }
   if (!executable) throw new Error('CODEX_CLI_NOT_FOUND: Install Codex in the Dutydeck process PATH, or set CODEX_PATH to its executable.');
   return {
+    ...omitted,
     CODEX_PATH: agentsFile('codex-permission-bridge.mjs'),
     PATH: `${dirname(process.execPath)}${delimiter}${env.PATH ?? ''}`,
     INITIAL_AGENT_MODE: agent.permissionMode === 'full-trust' ? 'agent-full-access' : 'read-only',
@@ -92,7 +102,8 @@ const environmentBoundaryError = () => new Error('ACP_ENVIRONMENT_BOUNDARY_CHANG
 
 function inheritedEnvironmentNeedsCleanup() {
   const clean = childEnvironment(process.env);
-  return Object.entries(process.env).some(([key, value]) => typeof value === 'string' && clean[key] !== value);
+  const omitted = new Set(inheritedServiceKeys());
+  return Object.entries(process.env).some(([key, value]) => typeof value === 'string' && clean[key] !== value && !omitted.has(key));
 }
 /**
  * Agents known to honour `_meta.steering.idleBehavior: 'promptRequired'`, by initialize `agentInfo.name`.
