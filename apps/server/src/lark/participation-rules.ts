@@ -65,7 +65,7 @@ export interface RuleContext {
   threadRootOther?: boolean;
   /** 场景来源开的话题（不记 threadRootOther）里有别的机器人发过言，或话题没读全、读失败。只在多机器人群里查。 */
   threadClaimedByOther?: boolean;
-  /** 消息开头叫的是群里另一个机器人的名字。只在多机器人群里查。 */
+  /** 消息开头叫的是群里另一个机器人的名字或名字片段。只在多机器人群里查。 */
   callsOther?: boolean;
   /** 本群的接话人是谁；没指定时不填。 */
   responder?: 'self' | 'other';
@@ -86,7 +86,16 @@ export const stripMentionPlaceholders = (text: string) => text.replace(/@_user_\
 /** 只留文字和数字，用于短语比对。 */
 export const compactText = (text: string) => text.toLowerCase().replace(/[\s\p{P}\p{S}]/gu, '');
 
-/** 机器人的称呼：完整名称，加上按分隔符拆出来的、不是泛称的片段（「bdev-flash」也叫得出「flash」）。 */
+/** 机器人的完整称呼（名称、显示名）：只有这些才算在叫本机器人。 */
+export function botFullNames(names: Array<string | undefined>): string[] {
+  const full = names.map(name => name?.trim().toLowerCase()).filter((name): name is string => Boolean(name && name.length >= 2));
+  return [...new Set(full)].sort((a, b) => b.length - a.length);
+}
+
+/**
+ * 机器人的称呼：完整名称，加上按分隔符拆出来的、不是泛称的片段（「bdev-flash」也叫得出「flash」）。
+ * 片段容易撞上普通词（「Code Review」的 review），只用来给别的机器人让路和解析接话人，不用来认定在叫本机器人。
+ */
 export function botNameTokens(names: Array<string | undefined>): string[] {
   const tokens = new Set<string>();
   for (const name of names) {
@@ -137,9 +146,9 @@ export function evaluateParticipationRules(ctx: RuleContext): RuleVerdict | unde
   const verdict = (action: RuleVerdict['action'], rule: ParticipationRule): RuleVerdict => ({ action, rule, reason: participationRuleReasons[rule] });
   if (ctx.senderKind !== 'human') return verdict('silent', 'bot_sender');
   const text = stripMentionPlaceholders(ctx.text);
-  if (callsBotName(text, botNameTokens(ctx.botNames))) return verdict('addressed', 'calls_name');
-  if (ctx.callsOther) return verdict('silent', 'calls_other');
   if (ctx.mentionsOther) return verdict('silent', 'mentions_other');
+  if (callsBotName(text, botFullNames(ctx.botNames))) return verdict('addressed', 'calls_name');
+  if (ctx.callsOther) return verdict('silent', 'calls_other');
   if (onlyEmoji(text, ctx.messageType)) return verdict('silent', 'emoji_only');
   if (shortThanks(text)) return verdict('silent', 'short_thanks');
   if (ctx.parent === 'self' || !ctx.parent && ctx.threadRootSelf) return verdict('addressed', 'reply_to_self');

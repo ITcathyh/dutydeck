@@ -1195,8 +1195,9 @@ export class LarkGroupParticipation {
       else if (root && crowded && (isBotMessage(root) || root.mentions.some(mention => mention.id !== pending.botOpenId && mention.id !== config.appId))) facts.threadRootOther = true;
     }
     if (pending.observation.refs.includes(OWNED_TOPIC_REF)) facts.ownedTopic = true;
-    // 叫自己名字的消息先由 calls_name 接走，这里列表里含不含自己都一样。
-    if (crowded && callsBotName(stripMentionPlaceholders(pending.observation.text), botNameTokens(bots!.map(item => item.name)))) facts.callsOther = true;
+    // 名字片段也算叫别人：「bdev」同时是两个机器人的片段时两边都让路。自己的片段不算；名单里认不出自己时宁可让路。
+    const others = bots?.filter(item => item.appId !== config.appId && !(item.openId && item.openId === pending.botOpenId)) ?? [];
+    if (crowded && callsBotName(stripMentionPlaceholders(pending.observation.text), botNameTokens(others.map(item => item.name)))) facts.callsOther = true;
     if (duty.responder) facts.responder = duty.responder.appId === config.appId ? 'self' : 'other';
     const scenario = pending.observation.refs.find(ref => ref.startsWith(SCENARIO_REF_PREFIX))?.slice(SCENARIO_REF_PREFIX.length);
     if (scenario && activeModes.has(level) && this.scenarios.model(config, duty).some(item => item.entry.pack.id === scenario)) facts.scenarioMatched = scenario;

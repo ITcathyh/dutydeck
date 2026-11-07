@@ -8,7 +8,7 @@ import { participationScenarios, scenarioCategories, scenarioFacts, scenarioLeve
 function runRules(scenario: ParticipationScenario) {
   const { trigger } = scenarioSnapshot(scenario);
   const { group } = scenario;
-  const round = (n: 1 | 2) => evaluateParticipationRules(ruleContextOf(trigger, scenarioOwned(scenario), [group.botName], scenarioFacts(scenario, n), group.roleScope));
+  const round = (n: 1 | 2) => evaluateParticipationRules(ruleContextOf(trigger, scenarioOwned(scenario), [group.botName, ...(group.displayName ? [group.displayName] : [])], scenarioFacts(scenario, n), group.roleScope));
   return { first: round(1), second: round(2) };
 }
 

@@ -104,6 +104,16 @@ describe('叫群里另一个机器人的名字', () => {
     expect(deciderMetaOf(decision!)?.facts).toMatchObject({ callsOther: true, bots: 2 });
     expect(h.decide).not.toHaveBeenCalled();
   });
+
+  it('开头只是本机器人名字里的一段：不算叫别人，也不算叫自己', async () => {
+    const h = await harness();
+    Object.assign(h.service, { listChatMembers: members(3, [flash, { name: 'ops-helper', appId: scope.appId }]) });
+    await h.handle(message('om_1', 'helper 帮我看下'));
+    await h.participation.flush(scope);
+    const decision = await h.decisionOf('om_1');
+    expect(ruleOf(decision)).toBe('no_responder');
+    expect(deciderMetaOf(decision!)?.facts?.callsOther).toBeUndefined();
+  });
 });
 
 describe('机器人计数排除本群订阅的告警来源', () => {
