@@ -4,7 +4,7 @@ import { createRepositories } from '@dutydeck/storage';
 import type { AgentConfig, Session, ToolRiskPolicy } from '@dutydeck/shared';
 import { readTaskReport, RuntimeError } from '@dutydeck/shared';
 import { DutydeckRuntime, type AgentDriver, type DriverFactory } from './index.js';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -604,6 +604,55 @@ describe('runtime lifecycle acceptance', () => {
     expect(h.driver.setRiskPolicy).toHaveBeenNthCalledWith(1, policy);
     expect(h.driver.setRiskPolicy).toHaveBeenNthCalledWith(2, undefined);
     await h.runtime.shutdown(); h.repos.close();
+  });
+
+  it('replaces the session risk policy file with owner-only permissions and leaves no temporary files', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dutydeck-risk-atomic-'));
+    const h = harness();
+    const policy: ToolRiskPolicy = { enabled: true, authorized: true, pattern: 'rm\\s' };
+    try {
+      await h.runtime.initialize([agent]);
+      const session = await h.runtime.start({ agentId: 'mock', cwd: directory });
+      const sessions = join(session.cwd, '.dutydeck', 'security', 'sessions');
+      const target = join(sessions, `${session.id}.json`);
+      await mkdir(sessions, { recursive: true });
+      await writeFile(target, '{}', { mode: 0o644 });
+
+      await h.runtime.setRiskPolicy(session.id, policy);
+      expect(JSON.parse(await readFile(target, 'utf8'))).toEqual(policy);
+      if (process.platform !== 'win32') expect((await stat(target)).mode & 0o777).toBe(0o600);
+      await h.runtime.setRiskPolicy(session.id);
+      expect(JSON.parse(await readFile(target, 'utf8'))).toEqual({ enabled: false });
+      expect((await readdir(sessions)).filter(name => name.endsWith('.tmp'))).toEqual([]);
+      await h.runtime.shutdown(); h.repos.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('replaces a symlinked session risk policy file instead of writing through the link', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dutydeck-risk-link-'));
+    const outside = await mkdtemp(join(tmpdir(), 'dutydeck-risk-outside-'));
+    const h = harness();
+    try {
+      await h.runtime.initialize([agent]);
+      const session = await h.runtime.start({ agentId: 'mock', cwd: directory });
+      const sessions = join(session.cwd, '.dutydeck', 'security', 'sessions');
+      const target = join(sessions, `${session.id}.json`);
+      const external = join(outside, 'external.json');
+      await writeFile(external, 'external contents');
+      await mkdir(sessions, { recursive: true });
+      await symlink(external, target);
+
+      await h.runtime.setRiskPolicy(session.id, { enabled: true, authorized: true, pattern: 'rm\\s' });
+      expect(await readFile(external, 'utf8')).toBe('external contents');
+      expect((await lstat(target)).isFile()).toBe(true);
+      expect(JSON.parse(await readFile(target, 'utf8'))).toMatchObject({ enabled: true, pattern: 'rm\\s' });
+      await h.runtime.shutdown(); h.repos.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
   });
 
   it('paginates across more than 1,000 events (the storage page cap) in the current turn without an unbounded history read', async () => {

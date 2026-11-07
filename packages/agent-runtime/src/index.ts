@@ -5,7 +5,7 @@ import type { AgentCapabilities, AgentConfig, AttemptActivity, AgentDriver, Agen
 import { timeLoop, eventHasContent, normalizeEventContent, deferredConfirmationId, agentCommandApprovalReason, isAgentCommandAutoApproval, canonicalExecutionJson, ptyRetirementRecoverySchema, steeringRecoveryDecisionSchema, executionRecoveryDecisionSchema, unknownTaskResolutionSchema, executionActorSchema, taskRequestV1Schema, steerableTaskNamespace, makeId, now, RuntimeError, permissionDisplayText, freeTextInputMaxBytes, workspaceModes, sessionNameConfigKey, normalizeSessionName, parseLarkSourceId, supportsRemoteApproval, supportsNativeFork, redactCredentialText, PROMPT_NOT_WRITTEN, unknownTaskActionLabels } from '@dutydeck/shared';
 import { listAcpxBuiltinAgents, AcpxAdapter, testRegexWithTimeout, ProcessTreeCpu, readNativeCreationRecord } from '@dutydeck/acp-client';
 import { JsonlTransport, PipeTransport, probeAgent, PtyTransport } from '@dutydeck/transports';
-import { mkdir, realpath, writeFile } from 'node:fs/promises';
+import { mkdir, realpath, rename, unlink, writeFile } from 'node:fs/promises';
 import { join, sep } from 'node:path';
 import type { UnknownTaskFacts, UnknownTaskResolution, SteeringRecoveryDecision, SteeringOperation, PtyRetirementRecovery, ExecutionRecoveryDecision, AcceptedTask, AcceptedTaskInputV2, AttemptFence, AttemptRef, BoundExecutionRepository, CommitResult, DriverSteeringOutcome, ExecutionActor, ExecutionBlocker, ResourceCheckRef, SessionFence, TaskAttempt, TaskExecutionProjection, TaskRequestV1 } from '@dutydeck/shared';
 import { executionTaskId } from '@dutydeck/storage';
@@ -2782,7 +2782,13 @@ export class DutydeckRuntime {
     const directory = join(session.cwd, '.dutydeck', 'security', 'sessions');
     await this.mutations.wait(() => mkdir(directory, { recursive: true }));
     await this.mutations.write(session.id, async () => {
-      await writeFile(join(directory, `${session.id}.json`), JSON.stringify(policy ?? { enabled: false }), { mode: 0o600 });
+      // Hooks read this file concurrently: never expose a partial write, and replace a symlink rather than follow it.
+      const target = join(directory, `${session.id}.json`);
+      const temp = `${target}.${process.pid}.${randomUUID()}.tmp`;
+      try {
+        await writeFile(temp, JSON.stringify(policy ?? { enabled: false }), { mode: 0o600, flag: 'wx' });
+        await rename(temp, target);
+      } catch (error) { await unlink(temp).catch(() => {}); throw error; }
     });
   }
 
