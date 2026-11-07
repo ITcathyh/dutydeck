@@ -34,6 +34,8 @@ function fail(code: string): never { throw Object.assign(new Error(code), { code
 const EXIT_PROOF_TIMEOUT_MS = 10_000;
 /** Pre-kill durable record rounds for descendants born while it was being written. */
 const PRE_KILL_RECORD_ROUNDS = 5;
+/** After the last round, unrecorded newcomers must exit within this window (a busy pane's short-lived children). */
+const PRE_KILL_SETTLE_MS = 3_000;
 /** Exit not yet proven: callers may re-verify the attached proof later instead of stopping again. */
 function unproven(proof: OwnedTmuxExitProof): never {
   throw Object.assign(new Error('LEGACY_TMUX_EXIT_UNPROVEN'), { code: 'LEGACY_TMUX_EXIT_UNPROVEN', proof });
@@ -120,6 +122,14 @@ const key = (identity: PhysicalProcessIdentity) => JSON.stringify([identity.host
 function alive(identity: PhysicalProcessIdentity, probe: ProcessProbe): void {
   if (probe.observe(identity) !== 'alive') fail('LEGACY_TMUX_PROCESS_STATE_CHANGED');
 }
+async function exitedWithin(items: PhysicalProcessIdentity[], probe: ProcessProbe, ms: number): Promise<boolean> {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    if (items.every(item => probe.observe(item) === 'dead')) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+}
 
 /** Only call with a server-derived scope. Missing initially is not an exit proof. */
 export async function captureOwnedTmuxIdentity(scope: OwnedTmuxScope, probe: ProcessProbe, previousProof?: OwnedTmuxExitProof): Promise<OwnedTmuxIdentity | undefined> {
@@ -180,15 +190,25 @@ export async function stopOwnedTmux(identity: OwnedTmuxIdentity, probe: ProcessP
   };
   // Rescan after the ownership checks right before kill: a descendant born since the earlier scans (for example a
   // `nohup … &` job that kill-session cannot end) must join the proof. With a durable pre-kill record, live
-  // newcomers are recorded again for a bounded number of rounds; every killed process must be in the record, so
-  // children still appearing after the last round refuse the stop.
+  // newcomers are recorded again for a bounded number of rounds. A busy pane forks short-lived children faster than
+  // any record round, so newcomers after the last round only refuse the stop when they outlive the settle window;
+  // children born during that wait are recorded once more, and a final rescan joins the in-memory proof.
+  const record = () => beforeKill!(structuredClone({ ...identity, identities: [...all.values()] }));
   for (let round = 0; ; round++) {
-    if (beforeKill) await beforeKill(structuredClone({ ...identity, identities: [...all.values()] }));
+    if (beforeKill) await record();
     await ownership();
     const added = absorb(await processes(scope, targetId, probe)).filter(item => probe.observe(item) === 'alive');
     unknown();
     if (!added.length || !beforeKill) break;
-    if (round + 1 >= PRE_KILL_RECORD_ROUNDS) fail('LEGACY_TMUX_PROCESS_SET_CHANGED');
+    if (round + 1 < PRE_KILL_RECORD_ROUNDS) continue;
+    if (!(await exitedWithin(added, probe, PRE_KILL_SETTLE_MS))) fail('LEGACY_TMUX_PROCESS_SET_CHANGED');
+    absorb(await processes(scope, targetId, probe));
+    unknown();
+    await record();
+    await ownership();
+    absorb(await processes(scope, targetId, probe));
+    unknown();
+    break;
   }
   socketCheck(scope, socket);
   alive(server, probe);

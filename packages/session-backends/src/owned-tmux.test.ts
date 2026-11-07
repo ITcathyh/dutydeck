@@ -239,6 +239,19 @@ describe('owned tmux physical exit proofs (real isolated server and process iden
     expect(identity.identities.every(item => recorded.has(JSON.stringify(item)))).toBe(true);
     expect(() => tmux('has-session', '-t', '=owned')).toThrow();
   }, 30_000);
+  it.skipIf(process.platform !== 'linux')('stops a pane whose children outlive every pre-kill record round but then exit on their own', async () => {
+    tmux('new-session', '-d', '-s', 'owned', 'while true; do sleep 1 & sleep 0.02; done');
+    tmux('set-option', '-t', 'owned', '@dutydeck_owner_id', 'dutydeck:owned');
+    await new Promise(resolve => setTimeout(resolve, 200));
+    const identity = (await captureOwnedTmuxIdentity(scope(), probe))!;
+    const records: Array<Set<string>> = [];
+    const proof = await stopOwnedTmux(identity, probe, async captured => { records.push(new Set(captured.identities.map(item => JSON.stringify(item)))); });
+    // Every record round saw live newcomers; the stop went through the settle path instead of refusing.
+    expect(records.length).toBeGreaterThan(5);
+    expect(identity.identities.every(item => records.at(-1)!.has(JSON.stringify(item)))).toBe(true);
+    expect(await verifyOwnedTmuxExit(proof, probe)).toBe(true);
+    expect(() => tmux('has-session', '-t', '=owned')).toThrow();
+  }, 60_000);
   it('proves exit by session absence when the pane root had already exited at capture', async () => {
     create('other');
     tmux('set-option', '-g', 'remain-on-exit', 'on');
