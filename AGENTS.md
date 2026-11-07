@@ -40,12 +40,12 @@ pnpm exec tsx apps/server/src/cli.ts --local-only --port 14310 --no-lark-listen
 - **子进程环境**：复用 `packages/shared/runtime/child-environment.mjs` 清洗继承环境，再合并显式 Agent 配置与当前会话凭证；不要修改 daemon 的全局 `process.env` 来切账号或会话。改动同时检查 ACP、PTY 和恢复路径的 `child-environment.test.ts`。
 - **任务与恢复**：沿用执行账本和原生回执区分未提交、执行中与结果未知。超时、断线或重启不能当作“没有执行”自动重发；改生命周期时覆盖停止、迟到回执和恢复后的轮次归属，不能仅凭终端出现文本判完成。入口在 `packages/agent-runtime/`，跨层回归在 `tests/`。
 - **数据库升级**：结构变化同步 `packages/storage/src/schema.ts` 与 `migrations.ts`，追加迁移版本；测试已有数据升级、重复打开和外键完整性。旧程序会拒绝更高 schema，不能把切回旧代码当作数据库回滚。
-- **打包入口**：新增共享包、子路径导出或运行时资源时，核对包 `exports/files`、根与 Web 的 Vitest alias、`apps/server/scripts/build.mjs` 的打包映射和资源复制；源码测试通过不能证明发布产物可运行。
+- **打包入口**：新增共享包、子路径导出或运行时资源时，核对包 `exports/files`、根与 Web 的 Vitest alias、`apps/server/scripts/build.mjs` 的打包映射和资源复制；源码测试通过不能证明发布产物可运行。进入打包映射的模块（含 `packages/shared/runtime/*.mjs`）不写顶层 `await`：它会让导入方变成异步初始化，落在循环导入里时 esbuild 生成非法代码，打包后的 CLI 无法启动；只复制、不被导入的启动脚本（如 `packages/acp-client/agents/*.mjs`）不受此限。
 - 用户可见的行为、命令或配置变化，同一个改动里更新 `docs/zh/` 与 `docs/en/` 下同名的主题文档（`getting-started`、`cli`、`agents`、`lark`、`plugins`、`web-console`、`features`、`troubleshooting`、`upgrading`）；`README.md` / `README.en.md` 只放概览，功能卖点、上手步骤或支持的 Agent 变化时同步两份 README。`CLAUDE.md` 只引用本文件，项目执行规则集中维护在这里。
 
 ## 验证
 
-代码改动均须通过 `pnpm typecheck` 和受影响测试的 `pnpm exec vitest run <测试路径>`。从仓库根运行，Node 与 Web/jsdom 由根配置分流；需要限定时用 `--project=node` 或 `--project=web`。node project 由 `tests/setup/node-env.ts` 在每个测试文件前清掉服务实例变量（`child-environment.mjs` 的 `inheritedServiceKeys`、`DUTYDECK_DATABASE_URL`、`DUTYDECK_SUPERVISOR`、`DUTYDECK_SYSTEMD_UNIT` 和 `DUTYDECK_DAEMON_RESTART_*`），需要这些变量的用例要显式设置。`pnpm typecheck` 不检查 `*.test.ts`（tsconfig 已排除），Vitest 运行时也不做类型检查，测试代码里的类型错误两边都发现不了。全量测试并行执行、机器负载高，涉及时间的断言要留足余量或改用假时钟，不能只调到在本机刚好通过。未设置 `CI` 时根 `vitest.config.ts` 把 worker 数限制为可用核数的四分之一（至少 1、至多 16），需要别的并发时在命令行加 `--maxWorkers`。
+代码改动均须通过 `pnpm typecheck` 和受影响测试的 `pnpm exec vitest run <测试路径>`。从仓库根运行，Node 与 Web/jsdom 由根配置分流；需要限定时用 `--project=node` 或 `--project=web`。node project 由 `tests/setup/node-env.ts` 在每个测试文件前清掉服务实例变量（`child-environment.mjs` 的 `inheritedServiceKeys`、`DUTYDECK_DATABASE_URL`、`DUTYDECK_SUPERVISOR`、`DUTYDECK_SYSTEMD_UNIT` 和 `DUTYDECK_DAEMON_RESTART_*`），需要这些变量的用例要显式设置。`pnpm typecheck` 不检查 `*.test.ts`（tsconfig 已排除），Vitest 运行时也不做类型检查，测试代码里的类型错误两边都发现不了。全量测试并行执行、机器负载高，涉及时间的断言要留足余量或改用假时钟，不能只调到在本机刚好通过。未设置 `CI` 时根 `vitest.config.ts` 把 worker 数限制为可用核数的四分之一（至少 1、至多 16），需要别的并发时在命令行加 `--maxWorkers`。测试里的本地 HTTP 桩按目标路径过滤后再计数或断言，并行测试会复用刚释放的端口打进无关请求；请求体解析失败时断开该连接并返回，不抛成未处理 rejection。把失败归为既有问题要有依据：在 master 的 detached worktree 复跑同一测试，或对照更早的全量日志。
 
 | 额外影响范围 | 追加检查 |
 |---|---|
