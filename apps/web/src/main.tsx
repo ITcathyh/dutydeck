@@ -1,7 +1,8 @@
-import { StrictMode } from 'react';
+import { StrictMode, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { AuthGate } from './components/AuthGate';
+import { ErrorBoundary, ErrorFallback } from './components/ErrorBoundary';
 import { setShareToken } from './api';
 import { sharedSessionFromLocation, routeFromPath, turnDiffFromLocation } from './app-route';
 import { instanceFromPath, setInstance } from './instance';
@@ -26,4 +27,5 @@ const page = shared
       ? <TurnDiffPage sessionId={diff.sessionId} taskId={diff.taskId} shared/>
       : <AuthGate><TurnDiffPage sessionId={diff.sessionId} taskId={diff.taskId} shared={false}/></AuthGate>)
     : import('./App').then(({ default: App }) => <AuthGate><App/></AuthGate>);
-void page.then(content => root.render(<StrictMode><QueryClientProvider client={client}>{content}</QueryClientProvider></StrictMode>));
+const renderPage = (content: ReactNode) => root.render(<StrictMode><QueryClientProvider client={client}><ErrorBoundary variant="page">{content}</ErrorBoundary></QueryClientProvider></StrictMode>);
+void page.then(renderPage, (error: unknown) => renderPage(<ErrorFallback error={error} variant="page"/>));
