@@ -60,12 +60,12 @@ export function finalSection(sections: TimelineSection[]) {
   return sections.find((section): section is Extract<TimelineSection, { kind: 'event' }> => section.kind === 'event' && section.final);
 }
 
-/** 一轮的展开记录：提问已在英雄区或引语里，最终输出在结论卡里，这里不再重复。 */
 /** 分享页不显示后台任务结束后的回答：它不属于任何一轮，已发出的链接内容也不因它变化。 */
 export function shareableEvents<T extends { data?: unknown }>(events: T[]) {
   return events.filter(event => !isBackgroundFollowup(event));
 }
 
+/** 一轮的展开记录：提问已在英雄区或引语里，最终输出在结论卡里，这里不再重复。 */
 export function recordSections(sections: TimelineSection[]) {
   const final = finalSection(sections);
   return sections.filter(section => section !== final && !isPrompt(section) && !(section.kind === 'event' && isBackgroundFollowup(section.event)));
@@ -127,7 +127,7 @@ export type ShareNowLine = { action: string; detail?: string; command: boolean }
 export function shareNowLine(tool?: TimelineEvent): ShareNowLine {
   if (!tool) return { action: '正在', detail: '等待模型输出', command: false };
   const presentation = toolPresentation(tool.data);
-  const action = toolActionLabel(presentation, tool.data.status === 'completed' || tool.data.status === 'failed').replace(/(?<=[\u4e00-\u9fff])(?=[A-Za-z0-9])/g, ' ');
+  const action = toolActionLabel(presentation, tool.data.status === 'completed' || tool.data.status === 'failed').replace(/(?<=[一-鿿])(?=[A-Za-z0-9])/g, ' ');
   const description = toolDescription(tool.data);
   let detail = description ?? presentation.detail ?? presentation.label;
   const command = !description && detail === toolCommand(tool.data.input);
@@ -171,7 +171,7 @@ export function turnTone(status: string): ShareTone {
 }
 
 /** 表格列按「中文 2、拉丁 1」估算显示宽度；单元格内换行时取最长的一行。 */
-const wide = /[\u1100-\u115f\u2e80-\u303e\u3041-\u33ff\u3400-\u4dbf\u4e00-\u9fff\ua000-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe4f\uff00-\uff60\uffe0-\uffe6\u{20000}-\u{3fffd}]/u;
+const wide = /[ᄀ-ᅟ⺀-〾ぁ-㏿㐀-䶿一-鿿ꀀ-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦\u{20000}-\u{3fffd}]/u;
 export function displayWidth(text: string) {
   return Math.max(0, ...text.split('\n').map(line => Array.from(line.trim()).reduce((width, char) => width + (wide.test(char) ? 2 : 1), 0)));
 }
