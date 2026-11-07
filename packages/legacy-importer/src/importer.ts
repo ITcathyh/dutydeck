@@ -387,6 +387,7 @@ export async function discoverLegacySource(options: DiscoverLegacyOptions): Prom
   dataPathInput ??= join(sourceHome, 'data');
   const dataPathRef = opaqueRef('path', key, resolve(dataPathInput));
   const dataPath = await canonicalDirectory(resolve(dataPathInput), dataPathRef);
+  // 与 Botmux 一致：每个 Bot 的 schedules.json 跟着数据目录走；v3-runs、usage、plugins 固定在 Botmux 主目录（usage 可由 BOTMUX_USAGE_DIR 覆盖）。
   const botmuxHome = dirname(dataPath);
 
   const sourceInstanceRef = opaqueRef('source', key, `${configPath}\0${dataPath}`);
@@ -851,7 +852,7 @@ export async function discoverLegacySource(options: DiscoverLegacyOptions): Prom
   }
 
   let workflowDrafts = 0;
-  const workflowRoot = join(botmuxHome, 'v3-runs');
+  const workflowRoot = join(sourceHome, 'v3-runs');
   if (await pathExists(workflowRoot)) {
     for (const run of await safeDirectoryEntries(workflowRoot, opaqueRef('path', key, workflowRoot))) {
       const runPath = join(workflowRoot, run.name);
@@ -876,7 +877,7 @@ export async function discoverLegacySource(options: DiscoverLegacyOptions): Prom
     }
   }
 
-  const usageRoot = join(botmuxHome, 'usage');
+  const usageRoot = env.BOTMUX_USAGE_DIR ? resolve(env.BOTMUX_USAGE_DIR) : join(sourceHome, 'usage');
   if (await pathExists(usageRoot)) {
     for (const file of await recursiveFiles(usageRoot, key, 'usage')) {
       await readArtifact(file.path, {
@@ -929,7 +930,7 @@ export async function discoverLegacySource(options: DiscoverLegacyOptions): Prom
   }
 
   let plugins = 0;
-  const pluginPath = join(botmuxHome, 'plugins');
+  const pluginPath = join(sourceHome, 'plugins');
   if (await pathExists(pluginPath)) {
     const entries = await safeDirectoryEntries(pluginPath, opaqueRef('path', key, pluginPath));
     plugins = entries.length;
