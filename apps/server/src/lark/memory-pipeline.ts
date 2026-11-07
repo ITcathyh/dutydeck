@@ -77,7 +77,9 @@ export const larkMemoryPipelineRules = {
   drainPasses: 3,
   /** 终态事件到结果落盘之间可能有延迟，重读次数与间隔。 */
   resultReads: 3,
-  resultRetryMs: 500
+  resultRetryMs: 500,
+  /** 冻结作业连续可重试失败到这个次数就放弃，让出记忆池；等待恢复核对的失败不计数。 */
+  jobRetryLimit: 5
 } as const;
 
 const recoveryTaskStatuses = ['reconcile_required', 'legacy_unresolved'];
@@ -760,14 +762,25 @@ export class LarkMemoryPipeline {
       }, consumed);
       return await this.finishJob(scope, job);
     } catch (error) {
-      if (job && !job.receipt) {
+      if (job && !job.receipt && !this.runContext.getStore()?.signal.aborted) {
         const code = errorCode(error);
         // Unknown startup/submission and unread results retain the same frozen job and requests.
-        const terminal = ['MEMORY_DISABLED','MEMORY_CONCURRENT_CHANGE','MEMORY_GATE_REJECTED',indexOverBudgetViolation,'MEMORY_INPUT_CAPACITY','MEMORY_AGENT_OUTPUT_INVALID','MEMORY_RUN_FAILED','MEMORY_RUN_TIMEOUT'].includes(code);
-        if (terminal && !this.runContext.getStore()?.signal.aborted) {
+        const terminal = ['MEMORY_DISABLED','MEMORY_CONCURRENT_CHANGE','MEMORY_AGENT_NOT_FOUND','MEMORY_GATE_REJECTED',indexOverBudgetViolation,'MEMORY_INPUT_CAPACITY','MEMORY_AGENT_OUTPUT_INVALID','MEMORY_RUN_FAILED','MEMORY_RUN_TIMEOUT'].includes(code);
+        // 未知执行只能等人核对，认领或版本被接管说明另有持有者，这些都不能靠次数放弃。
+        const counted = !['MEMORY_RECOVERY_REQUIRED','MEMORY_CLAIM_LOST','MEMORY_JOB_CONFLICT'].includes(code);
+        const failures = (job.failures ?? 0) + (counted ? 1 : 0);
+        const exhausted = counted && failures >= larkMemoryPipelineRules.jobRetryLimit;
+        if (!terminal && !exhausted && counted) {
+          const current = job;
+          job = await jobs.update({ ...current, failures }, current.revision).catch(updateError => {
+            this.options.log.warn({ error: updateError, jobId: current.id }, '记忆作业失败次数未能记录');
+            return current;
+          });
+        }
+        if (terminal || exhausted) {
           try {
             // A run that did not finish leaves no reusable context, and its terminal may still hold a startup dialog.
-            if (job.mode === 'isolated' || code === 'MEMORY_RUN_FAILED' || code === 'MEMORY_RUN_TIMEOUT') {
+            if (job.mode === 'isolated' || exhausted || code === 'MEMORY_RUN_FAILED' || code === 'MEMORY_RUN_TIMEOUT') {
               const session = await this.options.runtime.getSession(job.sessionId);
               if (session && !session.archivedAt) {
                 await this.assertMemorySessionReady(session);

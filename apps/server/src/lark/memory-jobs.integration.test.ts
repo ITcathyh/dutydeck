@@ -6,9 +6,9 @@ import { join } from 'node:path';
 import { createRepositories, currentProcessIdentity } from '@dutydeck/storage';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import { agentConfigSchema, canonicalExecutionJson, type BoundExecutionRepository } from '@dutydeck/shared';
-import { LarkMemoryStore } from './memory.js';
+import { LarkMemoryError, LarkMemoryStore } from './memory.js';
 import { LarkMemoryProjection } from './memory-view.js';
-import { LarkMemoryPipeline } from './memory-pipeline.js';
+import { LarkMemoryPipeline, larkMemoryPipelineRules } from './memory-pipeline.js';
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); });
 const scope = { appId: 'app', chatId: 'groups', pool: 'groups' };
@@ -211,6 +211,41 @@ it('archives an isolated failed job using only the known session lookup', async 
   expect(list).toHaveBeenCalledOnce();
   expect(get.mock.calls).toEqual([[job.sessionId], [job.sessionId]]);
   expect((await h.repos.sessions.get(job.sessionId))?.archivedAt).toBeTruthy();
+});
+it('fails a frozen job whose memory Agent was deleted so the pool can admit a new job', async () => {
+  const h = await harness();
+  const create = h.repos.memoryJobs.create.bind(h.repos.memoryJobs);
+  const listAgents = vi.spyOn(h.runtime, 'listAgents');
+  vi.spyOn(h.repos.memoryJobs, 'create').mockImplementationOnce(async job => { await create(job); listAgents.mockResolvedValue([]); });
+  expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok:false, error:'MEMORY_AGENT_NOT_FOUND' });
+  expect(await h.repos.memoryJobs.listScope(scope)).toMatchObject([{ state:'failed', error:'MEMORY_AGENT_NOT_FOUND' }]);
+  expect(h.prompts).toHaveLength(0);
+  listAgents.mockRestore();
+  expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok:true });
+  expect((await h.repos.memoryJobs.listScope(scope)).map(job => job.state).sort()).toEqual(['failed','settled']);
+});
+it('gives up a frozen job after repeated unreadable results without resubmitting it', async () => {
+  const h = await harness();
+  vi.spyOn(h.pipeline as any, 'readOutput').mockRejectedValue(new LarkMemoryError('MEMORY_RESULT_UNAVAILABLE', 'unreadable', 502));
+  for (let run = 1; run < larkMemoryPipelineRules.jobRetryLimit; run++) {
+    expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok:false, error:'MEMORY_RESULT_UNAVAILABLE' });
+    expect(await h.repos.memoryJobs.listScope(scope)).toMatchObject([{ state:'running', failures:run }]);
+  }
+  expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok:false, error:'MEMORY_RESULT_UNAVAILABLE' });
+  const [job] = await h.repos.memoryJobs.listScope(scope);
+  expect(job).toMatchObject({ state:'failed', error:'MEMORY_RESULT_UNAVAILABLE' });
+  expect(job.requests).toHaveLength(1);
+  expect(h.prompts).toHaveLength(1);
+  expect((await h.repos.sessions.get(job.sessionId))?.archivedAt).toBeTruthy();
+});
+it('keeps a recovery hold on the frozen job no matter how often it is retried', async () => {
+  const h = await harness();
+  vi.spyOn(h.pipeline as any, 'readOutput').mockRejectedValue(new LarkMemoryError('MEMORY_RECOVERY_REQUIRED', 'held', 409));
+  for (let run = 0; run <= larkMemoryPipelineRules.jobRetryLimit; run++) expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok:false, error:'MEMORY_RECOVERY_REQUIRED' });
+  const [job] = await h.repos.memoryJobs.listScope(scope);
+  expect(job.state).toBe('running');
+  expect(job.failures).toBeUndefined();
+  expect(h.prompts).toHaveLength(1);
 });
 it('refuses a missing frozen compatible session without scanning or starting another session', async () => {
   const h = await harness('legacy');

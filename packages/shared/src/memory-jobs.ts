@@ -20,6 +20,8 @@ export interface MemoryJob {
   state: 'prepared' | 'running' | 'applied' | 'settled' | 'failed';
   receipt?: { appliedJobId: string; consumedTaskIds: string[]; result: JsonValue; appliedAt: string };
   error?: string;
+  /** Consecutive retryable failures of this frozen job; recovery holds are never counted. */
+  failures?: number;
   createdAt: string;
 }
 export interface MemoryJobRepository {
