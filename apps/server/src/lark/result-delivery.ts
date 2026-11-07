@@ -165,7 +165,7 @@ async function deliverLarkStatusReactionOnce(
 }
 
 export type DeliveryTarget = { chatId: string; replyMessageId?: string; replyInThread?: boolean; allowReplyFallback?: boolean };
-type DeliveryLog = { warn: (...args: any[]) => void };
+export type DeliveryLog = { warn: (...args: any[]) => void };
 
 // Save only successful provider responses. Each leg has its own UUID and durable
 // receipt, so a restart after the file send retries only the missing summary.
@@ -262,6 +262,24 @@ export async function sendLarkBoundMessage(store: ConfigRepository, input: LarkB
   }, result => matchesBoundReceipt(result, input));
   if (!matchesBoundReceipt(receipt, input)) throw new Error('Lark delivery receipt identity conflict');
   return receipt;
+}
+
+/**
+ * 文本消息：有回复目标就回复，平台明确表示原消息不能再回复（已撤回、不可见等）时改为在会话里新发，幂等键不变。
+ * `allowReplyFallback === false`（定时投递）不改发；超时、断连这类结果未知的失败可能已经送达，原样抛出，由调用方用同一 UUID 重发。
+ * 新发前会再调用一次 `beforeSend`。传入 `log` 时，改发记一条 warn。
+ */
+export async function replyTextOrSend(service: Pick<LarkCardService, 'sendText' | 'replyText'>, target: DeliveryTarget,
+  input: { text: string; idempotencyKey: string; beforeSend?: LarkWriteGuard }, log?: DeliveryLog, fallbackMessage = '回复文本失败，回退为会话内发送') {
+  if (target.replyMessageId) {
+    try { return await service.replyText({ ...input, messageId: target.replyMessageId, replyInThread: target.replyInThread }); }
+    catch (error) {
+      if (target.allowReplyFallback === false || !isLarkReplyTargetUnavailable(error)) throw error;
+      log?.warn({ error, messageId: target.replyMessageId, chatId: target.chatId }, fallbackMessage);
+    }
+  }
+  await input.beforeSend?.();
+  return service.sendText({ ...input, chatId: target.chatId });
 }
 
 /** A fixed host delivery-status receipt; it never contains the result body or changes its target. */
@@ -411,13 +429,7 @@ async function notifyContentAudit(service: LarkCardService, target: DeliveryTarg
   try {
     await delivered(store, `lark.delivery.${key}.audit_notice`, async () => {
       await beforeSend?.();
-      const input = { text: contentAuditNotice, idempotencyKey: uuid, ...(beforeSend ? { beforeSend } : {}) };
-      if (target.replyMessageId) {
-        try { return await service.replyText({ ...input, messageId: target.replyMessageId, replyInThread: target.replyInThread }); }
-        catch (error) { if (target.allowReplyFallback === false || !isLarkReplyTargetUnavailable(error)) throw error; }
-      }
-      await beforeSend?.();
-      return service.sendText({ ...input, chatId: target.chatId });
+      return replyTextOrSend(service, target, { text: contentAuditNotice, idempotencyKey: uuid, ...(beforeSend ? { beforeSend } : {}) });
     }, result => typeof result?.messageId === 'string' && Boolean(result.messageId.trim()));
   } catch (error) {
     // The original result stays failed even if the separate fixed notice cannot be delivered.
