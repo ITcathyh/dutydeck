@@ -39,7 +39,7 @@ pnpm exec tsx apps/server/src/cli.ts --local-only --port 14310 --no-lark-listen
 - **ACPX 持久化**：`session_options` 递归要求小写 `snake_case`；群工具用 `dutydeck_group_tools_url`、`dutydeck_group_tools_token`。供应商的大写环境变量经 `prepareAcpxAgentLaunch` 的 launcher 传递，不直接塞进持久化 `env`。修改此链路须用真实 `AcpxAdapter` 和持久化 session key 回归，参照 `packages/acp-client/src/acpx.test.ts`。
 - **子进程环境**：复用 `packages/shared/runtime/child-environment.mjs` 清洗继承环境，再合并显式 Agent 配置与当前会话凭证；不要修改 daemon 的全局 `process.env` 来切账号或会话。改动同时检查 ACP、PTY 和恢复路径的 `child-environment.test.ts`。
 - **任务与恢复**：沿用执行账本和原生回执区分未提交、执行中与结果未知。超时、断线或重启不能当作“没有执行”自动重发；改生命周期时覆盖停止、迟到回执和恢复后的轮次归属，不能仅凭终端出现文本判完成。入口在 `packages/agent-runtime/`，跨层回归在 `tests/`。
-- **数据库升级**：结构变化同步 `packages/storage/src/schema.ts` 与 `migrations.ts`，追加迁移版本；测试已有数据升级、重复打开和外键完整性。旧程序会拒绝更高 schema，不能把切回旧代码当作数据库回滚。
+- **数据库升级**：结构变化同步 `packages/storage/src/schema.ts` 与 `migrations.ts`，追加迁移版本；测试已有数据升级、重复打开和外键完整性。旧程序会拒绝更高 schema，不能把切回旧代码当作数据库回滚。根 Vitest 设置了 `DUTYDECK_TEST_FRESH_SCHEMA_TEMPLATE`，空库直接复制本进程首次真实迁移得到的结构；要观察迁移在空库上逐个执行的用例，先在用例里删掉这个变量。
 - **打包入口**：新增共享包、子路径导出或运行时资源时，核对包 `exports/files`、根与 Web 的 Vitest alias、`apps/server/scripts/build.mjs` 的打包映射和资源复制；源码测试通过不能证明发布产物可运行。进入打包映射的模块（含 `packages/shared/runtime/*.mjs`）不写顶层 `await`：它会让导入方变成异步初始化，落在循环导入里时 esbuild 生成非法代码，打包后的 CLI 无法启动；只复制、不被导入的启动脚本（如 `packages/acp-client/agents/*.mjs`）不受此限。
 - 用户可见的行为、命令或配置变化，同一个改动里更新 `docs/zh/` 与 `docs/en/` 下同名的主题文档（`getting-started`、`cli`、`agents`、`lark`、`plugins`、`web-console`、`features`、`troubleshooting`、`upgrading`）；`README.md` / `README.en.md` 只放概览，功能卖点、上手步骤或支持的 Agent 变化时同步两份 README。`CLAUDE.md` 只引用本文件，项目执行规则集中维护在这里。
 
@@ -50,9 +50,11 @@ pnpm exec tsx apps/server/src/cli.ts --local-only --port 14310 --no-lark-listen
 | 额外影响范围 | 追加检查 |
 |---|---|
 | 会话生命周期、ACP/PTY、终端连接 | `pnpm build` 后 `pnpm smoke --port 0`；smoke 直接读构建产物，不自动构建 |
-| Web 主流程、跨端状态流转 | `pnpm e2e`（构建并跑 core） |
+| Web 主流程、跨端状态流转 | `pnpm e2e`（core，已包含 smoke） |
 | 飞书卡片、机器人接入与设置 | 对应 `apps/server/src/lark/` 测试，加 `pnpm e2e:full`（core + 合成飞书 extended）；普通 smoke 不覆盖飞书投递与回调 |
-| 发布、launcher 或插件 SDK/资源 | `pnpm verify:package`（构建后跑全部打包/安装验证，确认脱离源码目录后仍能使用）；新增打包验证脚本要挂进 `verify:package:run` |
+| 发布、launcher 或插件 SDK/资源 | `pnpm verify:package`（全部打包/安装验证，确认脱离源码目录后仍能使用）；新增打包验证脚本要挂进 `verify:package:run` |
+
+`pnpm e2e`、`pnpm e2e:full`、`pnpm verify:package` 先跑 `pnpm build:if-changed`：构建输入（`apps/`、`packages/`、锁文件等，含测试文件）与上次构建相同就复用，否则重新构建；`pnpm build` 总是重建。要一次跑完所有检查用 `pnpm verify:all`（按需构建、全量测试、`e2e:full`、`verify:package`），不必再单独跑 smoke。E2E 按文件并行，默认 worker 数为 CPU 数的一半、最多 4 个，`DUTYDECK_E2E_WORKERS` 可覆盖；用例必须自带服务、数据库、HOME、tmux socket 和端口。
 
 E2E 需要 `git`、`tmux` 和 Playwright Chromium；命令、场景及产物位置见 [tests/e2e/README.md](tests/e2e/README.md)。默认使用假 CLI/合成飞书，不能据此宣称真实模型、飞书发送或卡片点击已验证。纯文档改动核对命令、路径、全文一致性及 `git diff --check`，不要求跑无关产品测试。
 

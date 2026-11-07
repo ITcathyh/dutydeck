@@ -27,7 +27,8 @@ if (action === 'show') {
   ].join('\n'));
 } else if (action === 'start') {
   const log = openSync(join(root, 'fixture-server.log'), 'a');
-  const child = spawn(process.execPath, ['--conditions=development', '--import', process.env.TEST_TSX_LOADER, process.env.TEST_RUNTIME_CLI, ...serverArgs], {
+  const loader = process.env.TEST_TSX_LOADER ? ['--conditions=development', '--import', process.env.TEST_TSX_LOADER] : [];
+  const child = spawn(process.execPath, [...loader, process.env.TEST_RUNTIME_CLI, ...serverArgs], {
     cwd: root,
     env: { ...process.env, DUTYDECK_SUPERVISOR: 'systemd' },
     detached: true,

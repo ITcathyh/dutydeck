@@ -3,6 +3,9 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { launchIsolatedTestServer, type TestServerInstance } from './harness.js';
 
+// Every test launches its own server, so the tests of this file can run on separate workers.
+test.describe.configure({ mode: 'parallel' });
+
 async function expectCompletedTask(instance: TestServerInstance, sessionId: string, prompt: string, timeout = 60_000) {
   const tasksPath = `/api/sessions/${sessionId}/tasks`;
   await expect.poll(async () => {

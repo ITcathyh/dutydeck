@@ -5,19 +5,24 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:net';
 import { once } from 'node:events';
-import { afterEach, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, expect, it } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import { renderBotProcessEnv } from '../../../../scripts/split-bot-runtimes.mts';
+import { bundleCliForTest } from '../cli-bundle.test-helpers.js';
 import { defaultDaemonDir, inspectDaemon, lastDaemonDirPointerFile, readDaemonStatus, writeLastDaemonDir } from './daemon.js';
 
 const workspace = resolve(dirname(fileURLToPath(import.meta.url)), '../../../..');
-const cli = join(workspace, 'apps/server/src/cli.ts');
-const loader = join(workspace, 'node_modules/tsx/dist/loader.mjs');
+// The CLI and the daemon the fake systemctl starts both run this bundle: through the TypeScript loader every
+// start, status and stop paid a multi-second cold start.
+let cli: string;
+let cleanupCli: (() => Promise<void>) | undefined;
+beforeAll(async () => { ({ path: cli, cleanup: cleanupCli } = await bundleCliForTest('bot-process-env')); });
+afterAll(async () => { await cleanupCli?.(); });
 let root: string | undefined;
 let env: NodeJS.ProcessEnv;
 let shard: string;
 function invoke(action: string, args: string[] = []) {
-  return spawnSync(process.execPath, ['--conditions=development', '--import', loader, cli, action, ...args, '--json'], {
+  return spawnSync(process.execPath, [cli, action, ...args, '--json'], {
     cwd: shard, env, encoding: 'utf8', timeout: 25_000
   });
 }
@@ -48,7 +53,7 @@ it.each([false, true])('starts a partition with explicit production argv=%s with
   const fakeSystemctl = readFileSync(join(workspace, 'apps/server/src/daemon/fixtures/bot-process-systemctl.mjs'), 'utf8');
   writeFileSync(join(bin, 'systemctl'), `#!${process.execPath}\n${fakeSystemctl}`, { mode: 0o755 });
   const calls = join(root, 'systemctl-calls.jsonl');
-  env = { HOME: root, PATH: `${bin}:${process.env.PATH ?? ''}`, TEST_RUNTIME_ROOT: shard, TEST_RUNTIME_UNIT: unit, TEST_RUNTIME_CLI: cli, TEST_TSX_LOADER: loader, TEST_SYSTEMCTL_CALLS: calls, TEST_RUNTIME_EXPLICIT_ARGS: String(explicitArgs) };
+  env = { HOME: root, PATH: `${bin}:${process.env.PATH ?? ''}`, TEST_RUNTIME_ROOT: shard, TEST_RUNTIME_UNIT: unit, TEST_RUNTIME_CLI: cli, TEST_SYSTEMCTL_CALLS: calls, TEST_RUNTIME_EXPLICIT_ARGS: String(explicitArgs) };
   for (let i = 0; i < 2; i++) {
     expect(readDaemonStatus(defaultDaemonDir(shard))).toBeUndefined();
     const started = invoke('start');

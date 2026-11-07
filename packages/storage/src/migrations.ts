@@ -6,7 +6,7 @@ import { createPluginResultSchema } from './plugin-results-migration.js';
 import { createMemoryConsumedTaskSchema, createMemoryJobSchema } from './memory-jobs.js';
 import { createWorkItemIndexSchema, refreshWorkItemIndexTriggers } from './work-item-index.js';
 import { createScheduleExecutionSchema } from './schedule-execution-migration.js'
-import type Database from 'better-sqlite3'
+import Database from 'better-sqlite3'
 import { createTaskExecutionSchema } from './task-execution-migration.js'
 import { createBotConfigurationSchema } from './bot-configuration-migration.js'
 import { createCollaborationDutySchema, createCollaborationSchema } from './collaboration-migration.js'
@@ -761,6 +761,11 @@ export function runMigrations(db: Database.Database): void {
     return
   }
   if (db.pragma('foreign_keys', { simple: true }) !== 0) throw new Error('DATABASE_MIGRATION_REQUIRES_FOREIGN_KEYS_DISABLED')
+  if (process.env[FRESH_SCHEMA_TEMPLATE_ENV] === '1' && applyFreshSchemaTemplate(db)) return
+  applyMigrations(db)
+}
+
+function applyMigrations(db: Database.Database): void {
   db.exec('CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL, name TEXT)')
   ensureColumn(db, 'schema_migrations', 'name', 'name TEXT')
   const recorded = recordedMigrations(db)
@@ -780,6 +785,53 @@ export function runMigrations(db: Database.Database): void {
       recordApplied.run(migration.version, new Date().toISOString(), migration.name)
     })()
   }
+}
+
+/**
+ * 测试专用：设置后，空库不再逐个重放迁移，而是复制本进程第一次真实迁移出的最终结构与种子行。
+ * 全量测试新建几千个库，逐个重放迁移让内存库约 50ms、文件库约 85ms 一次，复制后约 9ms / 38ms；
+ * fresh-schema-template.test.ts 校验模板与真实迁移逐项一致。生产进程不设置这个变量。
+ */
+export const FRESH_SCHEMA_TEMPLATE_ENV = 'DUTYDECK_TEST_FRESH_SCHEMA_TEMPLATE'
+
+interface FreshSchemaTemplate { tables: string[]; statements: string[]; rows: Array<{ table: string; columns: string[]; values: unknown[][] }> }
+let freshSchemaTemplate: FreshSchemaTemplate | null | undefined
+
+/** 迁移在这个连接上的最终结果：建表语句、迁移写入的行，以及视图、索引、触发器（各按创建顺序）。 */
+export function captureSchema(db: Database.Database): FreshSchemaTemplate | null {
+  const objects = db.prepare(`SELECT type, name, sql FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT GLOB 'sqlite_*'
+    ORDER BY CASE type WHEN 'table' THEN 0 WHEN 'view' THEN 1 WHEN 'index' THEN 2 ELSE 3 END, rowid`).all() as Array<{ type: string; name: string; sql: string }>
+  // 虚拟表会自带影子表，按语句重放会重复建表；遇到就退回真实迁移。
+  if (objects.some(object => /^\s*CREATE\s+VIRTUAL\b/i.test(object.sql))) return null
+  const tables = [...objects.filter(object => object.type === 'table').map(object => object.name), ...(db.prepare("SELECT 1 FROM sqlite_schema WHERE name = 'sqlite_sequence'").get() ? ['sqlite_sequence'] : [])]
+  const rows = tables.map(table => {
+    const statement = db.prepare(`SELECT * FROM "${table.replaceAll('"', '""')}"`).raw()
+    return { table, columns: statement.columns().map(column => column.name), values: statement.all() as unknown[][] }
+  }).filter(entry => entry.values.length)
+  return { tables: objects.filter(object => object.type === 'table').map(object => object.sql), statements: objects.filter(object => object.type !== 'table').map(object => object.sql), rows }
+}
+
+function applyFreshSchemaTemplate(db: Database.Database): boolean {
+  const occupied = db.prepare(`SELECT 1 FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' AND NOT (type = 'table' AND name IN ('dutydeck_control', 'dutydeck_access')) LIMIT 1`).get()
+  if (occupied) return false
+  if (freshSchemaTemplate === undefined) {
+    const scratch = new Database(':memory:')
+    try {
+      withMigrationTransaction(scratch, () => applyMigrations(scratch))
+      freshSchemaTemplate = captureSchema(scratch)
+    } finally { scratch.close() }
+  }
+  if (!freshSchemaTemplate) return false
+  for (const statement of freshSchemaTemplate.tables) db.exec(statement)
+  // 种子行在触发器建好之前写入，触发器不会改写或拒绝它们。
+  for (const { table, columns, values } of freshSchemaTemplate.rows) {
+    // 种子行插入时 SQLite 已自动记了自增序号，按模板覆盖而不是追加。
+    if (table === 'sqlite_sequence') db.exec('DELETE FROM sqlite_sequence')
+    const insert = db.prepare(`INSERT INTO "${table.replaceAll('"', '""')}" (${columns.map(column => `"${column.replaceAll('"', '""')}"`).join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`)
+    for (const row of values) insert.run(row)
+  }
+  for (const statement of freshSchemaTemplate.statements) db.exec(statement)
+  return true
 }
 
 /**

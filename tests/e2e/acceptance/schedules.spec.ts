@@ -4,6 +4,9 @@ import { join } from 'node:path';
 import { createRealShareToken, readAuthContextFromDb } from './session-insight-security-harness.js';
 import { REPO_ROOT, launchIsolatedTestServer, type TestServerInstance } from './harness.js';
 
+// Every test launches its own server, so the tests of this file can run on separate workers.
+test.describe.configure({ mode: 'parallel' });
+
 async function api(instance: TestServerInstance, method: string, path: string, body?: unknown) {
   const response = await instance.request(method, path, body);
   expect(response.status, `${method} ${path}: ${response.text}`).toBe(200);
@@ -96,7 +99,7 @@ test('plan listing is complete and name-only edits preserve execution timing', a
 });
 
 test('old per-plan history opens its exact result after reload and tables scroll locally', async ({ page, context }) => {
-  test.setTimeout(300_000);
+  test.setTimeout(180_000);
   const instance = await launchIsolatedTestServer('dutydeck-acc-plan-history-');
   try {
     const origin = await session(instance);
@@ -105,14 +108,16 @@ test('old per-plan history opens its exact result after reload and tables scroll
     const markdown = `SCHEDULE_EXACT_OLD_RESULT\n\n${redactedReport}\n\n| Item | Evidence |\n| --- | --- |\n| Weekly | ${longCell} |\n\n[Safe link](https://example.com/report)\n\n<script>window.scheduleXss=true</script>\n\n\`\`\`text\nCOPY_CODE\n\`\`\``;
     const saved = await plan(instance, origin.id, 'History A', markdown);
     const second = await plan(instance, origin.id, 'History B', 'OTHER_PLAN_RESULT');
+    // Three real runs with a page of two put the oldest run on the second page. The detail view reads a run by id
+    // (AutomationRunDetail), so a full 20-row first page adds only runtime, not coverage.
     const oldest = await run(instance, origin.id, saved, 'history-a-0');
-    for (let i = 1; i < 21; i++) await run(instance, origin.id, saved, `history-a-${i}`);
+    for (let i = 1; i < 3; i++) await run(instance, origin.id, saved, `history-a-${i}`);
     const otherRun = await run(instance, origin.id, second, 'history-b-0');
     const path = pathFor(origin.id, saved.id);
-    const newestPage = await api(instance, 'GET', `${path}/history?offset=0&limit=20`);
-    const olderPage = await api(instance, 'GET', `${path}/history?offset=20&limit=20`);
-    expect(newestPage.total).toBe(21);
-    expect(newestPage.occurrences).toHaveLength(20);
+    const newestPage = await api(instance, 'GET', `${path}/history?offset=0&limit=2`);
+    const olderPage = await api(instance, 'GET', `${path}/history?offset=2&limit=2`);
+    expect(newestPage.total).toBe(3);
+    expect(newestPage.occurrences).toHaveLength(2);
     expect(olderPage.occurrences.map((item: any) => item.id)).toEqual([oldest.occurrence.id]);
     expect([...newestPage.occurrences, ...olderPage.occurrences].every(item => item.scheduleId === saved.id)).toBe(true);
     const wrongPlan = await instance.request('GET', `${path}/runs/${otherRun.occurrence.id}`);

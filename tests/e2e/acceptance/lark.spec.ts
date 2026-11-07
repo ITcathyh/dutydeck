@@ -1,6 +1,9 @@
 import { test } from './lark-fixture';
 
 test.describe('synthetic lark extended suite', () => {
+  // Each scenario runs its own script, temp HOME and server, so the scenarios can run on separate workers.
+  test.describe.configure({ mode: 'parallel' });
+
   test('e2e-bot-settings: all settings persist and browser drafts save through both editors', async ({ runLarkScenario }) => {
     await runLarkScenario({ scriptName: 'e2e-bot-settings.mts' });
   });

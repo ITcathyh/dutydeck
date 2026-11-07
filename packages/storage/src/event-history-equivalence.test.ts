@@ -93,13 +93,13 @@ const directories: string[] = [];
 afterAll(() => { for (const directory of directories) rmSync(directory, { recursive: true, force: true }); });
 
 /** Random prompts, steering, roles, tools, receipts, malformed rows, task states and pruned holes. */
-async function seedRandomSession(file: string, round: number) {
-  const repos = createRepositories(file);
+function seedRandomSession(round: number) {
+  // An in-memory database per session: the projections read the same tables, without a file and repository per round.
+  const db = database();
   const tasks = ['ta', 'tb', 'tc', 'td', 'te'];
   // Odd rounds settle every task, so long completed prefixes and ranges inside them occur too.
-  for (const id of tasks) await repos.tasks.save({ id, sessionId: 's', prompt: 'p', status: round % 2 ? pick(['completed', 'failed', 'cancelled', 'interrupted']) : pick(['completed', 'completed', 'completed', 'failed', 'cancelled', 'interrupted', 'running', 'queued', 'reconcile_required']), createdAt: '', updatedAt: '' } as any);
-  repos.close();
-  const db = new Database(file);
+  const insertTask = db.prepare("INSERT INTO tasks (id,session_id,prompt,status,created_at,updated_at) VALUES (?,'s','p',?,'','')");
+  for (const id of tasks) insertTask.run(id, round % 2 ? pick(['completed', 'failed', 'cancelled', 'interrupted']) : pick(['completed', 'completed', 'completed', 'failed', 'cancelled', 'interrupted', 'running', 'queued', 'reconcile_required']));
   const insert = db.prepare('INSERT INTO events(id,session_id,sequence,type,timestamp,data,task_id,attempt_id) VALUES(?,?,?,?,?,?,?,?)');
   let sequence = 0;
   const count = 1 + Math.floor(random() * (round % 2 ? 150 : 60));
@@ -135,11 +135,10 @@ async function seedRandomSession(file: string, round: number) {
 }
 
 it('reads the same outline, tail, places and ranges as the schema-46 projection on random sessions', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'history-equivalence-')); directories.push(directory);
   let turns = 0;
   for (let round = 0; round < 200; round++) {
     seed = round + 7;
-    const db = await seedRandomSession(join(directory, `${round}.db`), round);
+    const db = seedRandomSession(round);
     try {
       const expected = sortedTools(readLegacyHistoryOutline(db, 's'));
       expect(sortedTools(readHistoryOutline(db, 's'))).toEqual(expected);

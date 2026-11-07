@@ -1,38 +1,18 @@
 import { spawnSync } from 'node:child_process';
 import { chmod, lstat, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { build } from 'esbuild';
+import { bundleCliForTest } from './cli-bundle.test-helpers.js';
 import { createRepositories } from '@dutydeck/storage';
 
-const workspaceRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
-const cliPath = join(workspaceRoot, 'apps/server/src/cli.ts');
-let cliDirectory: string;
 let bundledCliPath: string;
 
 // Compile this checkout once: repeated TypeScript loader + dependency cold starts
 // otherwise consume most of the test budget before secret operations begin.
-beforeAll(async () => {
-  cliDirectory = await mkdtemp(join(workspaceRoot, 'apps/server/.test-secret-cli-'));
-  bundledCliPath = join(cliDirectory, 'cli.js');
-  await build({
-    entryPoints: [cliPath], outfile: bundledCliPath, bundle: true, format: 'esm', platform: 'node', target: 'node22',
-    external: ['better-sqlite3', 'node-pty', 'acpx/runtime'],
-    banner: { js: "import { createRequire as __ddCreateRequire } from 'node:module'; const require = __ddCreateRequire(import.meta.url);" },
-    plugins: [{ name: 'workspace-sources', setup(builder) {
-      builder.onResolve({ filter: /^@dutydeck\// }, ({ path }) => {
-        const name = path.slice('@dutydeck/'.length);
-        const source = name === 'shared/child-environment' || name === 'shared/secret-guard' || name === 'shared/safe-git'
-          ? `packages/shared/runtime/${name.slice('shared/'.length)}.mjs`
-          : `packages/${name === 'runtime' ? 'agent-runtime' : name}/src/index.ts`;
-        return { path: join(workspaceRoot, source) };
-      });
-    } }]
-  });
-});
-afterAll(async () => { if (cliDirectory) await rm(cliDirectory, { recursive: true, force: true }); });
+let cleanupCli: (() => Promise<void>) | undefined;
+beforeAll(async () => { ({ path: bundledCliPath, cleanup: cleanupCli } = await bundleCliForTest('secret-cli')); });
+afterAll(async () => { await cleanupCli?.(); });
 const roots: string[] = [];
 const INITIAL_SECRET = 'INITIAL_SECRET_VALUE_NEVER_PRINT';
 const ROTATED_SECRET = 'ROTATED_SECRET_VALUE_NEVER_PRINT';

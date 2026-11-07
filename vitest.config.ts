@@ -30,7 +30,10 @@ export default defineConfig({
           // 否则同一份文件会被两个 project 各跑一遍。
           include: ['packages/**/*.test.ts', 'apps/server/**/*.test.ts', 'plugins/**/*.test.ts', 'builtin-plugins/**/*.test.ts', 'tests/**/*.test.ts'],
           testTimeout: 15_000,
-          hookTimeout: 15_000
+          hookTimeout: 15_000,
+          // New test databases copy the schema the real migrations produced once per worker instead of replaying every
+          // migration (about a third of the suite's time); see FRESH_SCHEMA_TEMPLATE_ENV in packages/storage/src/migrations.ts.
+          env: { DUTYDECK_TEST_FRESH_SCHEMA_TEMPLATE: '1' }
         }
       },
       './apps/web/vitest.config.ts'

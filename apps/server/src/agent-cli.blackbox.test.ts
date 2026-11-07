@@ -3,21 +3,23 @@ import { createServer } from 'node:http';
 import { promisify } from 'node:util';
 import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
+import { join } from 'node:path';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { bundleCliForTest } from './cli-bundle.test-helpers.js';
 
-const workspaceRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
-const cliPath = join(workspaceRoot, 'apps/server/src/cli.ts');
-const tsxPath = join(workspaceRoot, 'node_modules/.bin/tsx');
 const roots: string[] = [];
+let cliPath: string;
+let cleanupCli: (() => Promise<void>) | undefined;
+// Each case spawns the CLI several times; the bundle avoids a multi-second TypeScript loader start per process.
+beforeAll(async () => { ({ path: cliPath, cleanup: cleanupCli } = await bundleCliForTest('agent-cli')); });
+afterAll(async () => { await cleanupCli?.(); });
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
 
 // 没有服务、没有会话凭证的干净环境。
 async function invoke(args: string[]) {
   const root = await mkdtemp(join(tmpdir(), 'dutydeck-agent-cli-')); roots.push(root);
-  const result = spawnSync(tsxPath, [cliPath, 'agent', ...args], {
-    cwd: root, env: { HOME: root, PATH: process.env.PATH, TMPDIR: tmpdir(), NODE_OPTIONS: '--conditions=development' }, encoding: 'utf8', timeout: 30_000
+  const result = spawnSync(process.execPath, [cliPath, 'agent', ...args], {
+    cwd: root, env: { HOME: root, PATH: process.env.PATH, TMPDIR: tmpdir() }, encoding: 'utf8', timeout: 30_000
   });
   return { ...result, files: await readdir(root) };
 }
@@ -73,12 +75,12 @@ it('real CLI forwards immutable attempt credentials for legacy group, history, m
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   try {
     const address = server.address() as { port: number };
-    const env = { HOME: root, PATH: process.env.PATH, TMPDIR: tmpdir(), NODE_OPTIONS: '--conditions=development',
+    const env = { HOME: root, PATH: process.env.PATH, TMPDIR: tmpdir(),
       dutydeck_group_tools_url: `http://127.0.0.1:${address.port}/api/lark/agent-tools`, dutydeck_group_tools_token: 'session-capability' };
     for (const args of [['--agent-turn', 'immutable-attempt', 'group', 'messages'], ['--agent-turn', 'immutable-attempt', 'history', 'list'],
       ['--agent-turn', 'immutable-attempt', 'memory', 'add', 'User requested note'], ['--agent-turn', 'immutable-attempt', 'group', 'send', 'progress'],
       ['agent', '--turn', 'immutable-attempt', 'group', 'send', 'final answer', '--final']]) {
-      const result = await promisify(execFile)(tsxPath, [cliPath, ...args], { cwd: root, env, timeout: 15_000 });
+      const result = await promisify(execFile)(process.execPath, [cliPath, ...args], { cwd: root, env, timeout: 15_000 });
       expect(result.stderr).toBe('');
     }
     expect(requests.map(request => request.turn)).toEqual(Array(5).fill('immutable-attempt'));

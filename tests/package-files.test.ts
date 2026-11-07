@@ -39,7 +39,7 @@ describe('工作区包发布清单', () => {
 describe('发布产物验证入口', () => {
   it('verify:package 先构建，再运行每个打包验证脚本', () => {
     const { scripts } = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8')) as { scripts: Record<string, string> };
-    expect(scripts['verify:package']).toMatch(/^pnpm build && pnpm verify:package:run$/);
+    expect(scripts['verify:package']).toMatch(/^pnpm build(:if-changed)? && pnpm verify:package:run$/);
     const verifiers = [
       ...readdirSync(join(process.cwd(), 'tests')).filter(file => /^package.*\.test\.ts$/.test(file)).map(file => `tests/${file}`),
       ...readdirSync(join(process.cwd(), 'scripts')).filter(file => /^verify-.*package.*\.test\.mjs$/.test(file)).map(file => `scripts/${file}`),

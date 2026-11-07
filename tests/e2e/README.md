@@ -18,11 +18,14 @@ pnpm exec playwright install --with-deps chromium
 
 | 命令 | 适用阶段 | 行为说明 |
 |---|---|---|
-| `pnpm e2e` | 本地核心验证 | 构建当前源码并在 Chromium 下执行核心 Playwright 套件 |
+| `pnpm e2e` | 本地核心验证 | 按需构建当前源码（输入未变时复用上次构建），在 Chromium 下执行核心 Playwright 套件 |
 | `pnpm e2e:core:run` | CI 门禁 | PR 与 master push 步骤，直接运行已构建的核心套件 |
-| `pnpm e2e:full` | 本地扩展验证 | 构建当前源码并执行核心套件与合成飞书场景 |
+| `pnpm e2e:full` | 本地扩展验证 | 按需构建当前源码，执行核心套件与合成飞书场景 |
 | `pnpm e2e:full:run` | CI 定时与手动 | Daily Schedule 与 workflow_dispatch，运行已构建扩展全量套件 |
-| `pnpm smoke` | 轻量快速冒烟 | 使用隔离假 CLI 运行基础链路，用于手动排障 |
+| `pnpm smoke` | 轻量快速冒烟 | 使用隔离假 CLI 运行基础链路，用于手动排障；核心套件的 `smoke.spec.ts` 跑的是同一脚本 |
+| `pnpm verify:all` | 全量验收 | 按需构建、全量单测、`e2e:full`、`verify:package` 依次执行 |
+
+用例按文件分配到多个 worker 并行（默认 CPU 数的一半、最多 4 个，`DUTYDECK_E2E_WORKERS=1` 可退回串行排查）；`lark.spec.ts`、`schedules.spec.ts`、`scheduling.spec.ts` 的用例彼此独立，文件内也并行。新用例必须自带服务、数据库、HOME、tmux socket 和端口，不能依赖其他文件的状态。
 
 ## 2. 测试产物与定位排查
 

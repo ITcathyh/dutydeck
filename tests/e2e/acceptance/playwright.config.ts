@@ -1,6 +1,7 @@
 import { defineConfig, devices } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
+import { availableParallelism } from 'node:os';
 import { join, resolve } from 'node:path';
 
 const REPO_ROOT = resolve(__dirname, '../../..');
@@ -14,6 +15,13 @@ if (!process.env.DUTYDECK_E2E_ARTIFACT_DIR) {
   process.env.DUTYDECK_E2E_ARTIFACT_DIR = join(REPO_ROOT, 'artifacts/e2e', runId);
 }
 const artifactDir = process.env.DUTYDECK_E2E_ARTIFACT_DIR;
+
+// Each test owns its server, database, HOME, tmux socket and ports (harness.ts / lark-fixture.ts), so files run on
+// parallel workers. Half the CPUs, capped at 4: more workers mostly add load-induced timeouts on shared machines.
+const requestedWorkers = Number(process.env.DUTYDECK_E2E_WORKERS);
+const workers = Number.isInteger(requestedWorkers) && requestedWorkers > 0
+  ? requestedWorkers
+  : Math.max(1, Math.min(4, Math.floor(availableParallelism() / 2)));
 mkdirSync(artifactDir, { recursive: true });
 
 let gitSha = 'unknown';
@@ -31,7 +39,7 @@ export default defineConfig({
   expect: { timeout: 15_000 },
   forbidOnly: Boolean(process.env.CI),
   retries: 0,
-  workers: 1,
+  workers,
   outputDir: join(artifactDir, 'test-results'),
   metadata: {
     runId,

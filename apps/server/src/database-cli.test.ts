@@ -2,10 +2,9 @@ import Database from 'better-sqlite3';
 import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { build } from 'esbuild';
+import { bundleCliForTest } from './cli-bundle.test-helpers.js';
 import { createRepositories } from '@dutydeck/storage';
 import { dutydeckPtySessionName } from '@dutydeck/pty-driver';
 import {
@@ -48,31 +47,9 @@ describe('database-cli', () => {
   }
 
   // 黑盒子进程用一次性打包的 CLI，避免每次冷启动 TypeScript 加载器（同 secret-cli 黑盒）。
-  let bundledCliPath: string | undefined;
-  async function bundledCli(): Promise<string> {
-    if (bundledCliPath) return bundledCliPath;
-    const workspaceRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
-    const outDir = mkdtempSync(join(workspaceRoot, 'apps/server/.test-database-cli-'));
-    bundleDirectories.push(outDir);
-    const outfile = join(outDir, 'cli.js');
-    await build({
-      entryPoints: [fileURLToPath(new URL('./cli.ts', import.meta.url))], outfile, bundle: true, format: 'esm', platform: 'node', target: 'node22',
-      external: ['better-sqlite3', 'node-pty', 'acpx/runtime'],
-      banner: { js: "import { createRequire as __ddCreateRequire } from 'node:module'; const require = __ddCreateRequire(import.meta.url);" },
-      plugins: [{ name: 'workspace-sources', setup(builder) {
-        builder.onResolve({ filter: /^@dutydeck\// }, ({ path }) => {
-          const name = path.slice('@dutydeck/'.length);
-          const source = name === 'shared/child-environment' || name === 'shared/secret-guard' || name === 'shared/safe-git'
-            ? `packages/shared/runtime/${name.slice('shared/'.length)}.mjs`
-            : `packages/${name === 'runtime' ? 'agent-runtime' : name}/src/index.ts`;
-          return { path: join(workspaceRoot, source) };
-        });
-      } }]
-    });
-    return bundledCliPath = outfile;
-  }
-  const bundleDirectories: string[] = [];
-  afterAll(() => { for (const dir of bundleDirectories.splice(0)) rmSync(dir, { recursive: true, force: true }); });
+  let bundled: Promise<{ path: string; cleanup: () => Promise<void> }> | undefined;
+  const bundledCli = async () => (await (bundled ??= bundleCliForTest('database-cli'))).path;
+  afterAll(async () => { await (await bundled)?.cleanup(); });
 
   async function spawnCli(args: string[]): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
     const child = spawn(
