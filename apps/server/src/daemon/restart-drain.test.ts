@@ -7,7 +7,7 @@ import { createServer, type Server, type IncomingMessage, type ServerResponse } 
 import type { AddressInfo } from 'node:net';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AutostartCommandOutput } from '../autostart/autostart.js';
-import { daemonRestart, daemonStart, drainRuntime, waitForRunningTasksDrain } from './command.js';
+import { daemonRestart, daemonStart, drainRuntime, systemdServiceControl, waitForRunningTasksDrain } from './command.js';
 import { localLoopbackUrl } from '../local-api-url.js';
 import { defaultDaemonDir, pidAlive, readDaemonStatus, writeState, type DaemonState } from './daemon.js';
 import { expectOwnDaemonDir } from './daemon-dir.test-helpers.js';
@@ -27,6 +27,8 @@ interface World {
   workingDirectory?: string;
   /** ExecStart 里入口脚本之后的参数，默认 `start --foreground`。 */
   args?: string;
+  /** TriggeredBy：socket 激活时是配套的 .socket unit。 */
+  triggeredBy?: string;
   fail?: Partial<Record<Verb, AutostartCommandOutput>>;
   on?: Partial<Record<Exclude<Verb, 'show'>, () => Promise<void>>>;
 }
@@ -47,6 +49,7 @@ function systemctl(world: World) {
           `SubState=${world.subState ?? 'running'}`,
           `MainPID=${world.mainPid ?? 0}`,
           ...(world.killMode ? [`KillMode=${world.killMode}`] : []),
+          ...(world.triggeredBy ? [`TriggeredBy=${world.triggeredBy}`] : []),
           `Environment=${world.environment ?? `PATH=/usr/bin DUTYDECK_SUPERVISOR=systemd DUTYDECK_SYSTEMD_UNIT=${UNIT}`}`,
           `WorkingDirectory=${world.workingDirectory ?? ''}`,
           `ExecStart={ path=${UNIT_EXEC} ; argv[]=${UNIT_EXEC} ${UNIT_SCRIPT} ${world.args ?? 'start --foreground'} ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }`
@@ -609,9 +612,35 @@ describe('restart 前等待正在执行的任务结束（drain）', () => {
     expect(readToken).toHaveBeenCalledWith(join(tmp, 'bot.db'));
     expect(api.drains).toEqual([true, true]);
     expect(api.paths.filter(path => path === '/api/system/activity')).toHaveLength(2);
-    expect(api.paths.at(-1)).toBe('/health');
+    expect(api.paths.slice(-2)).toEqual(['/health', '/health/ready']);
     expect(sys.calls.filter(call => !call.includes(' show '))).toEqual(['systemctl --user restart dutydeck-tag.service']);
     await api.close();
+  });
+
+  it('restart --unit：socket 激活的 unit 只重启服务，不动 .socket（端口一直开着）', async () => {
+    const api = await runtimeApi([0]);
+    const world: World = {
+      mainPid: 4001, workingDirectory: tmp, environment: 'PATH=/usr/bin', triggeredBy: 'dutydeck-tag.socket',
+      args: `--database ${join(tmp, 'bot.db')} --cwd ${tmp} --local-only --port ${api.port}`
+    };
+    world.on = { restart: async () => { world.mainPid = 4002; } };
+    const sys = systemctl(world);
+    const result = await daemonRestart({ unit: 'dutydeck-tag.service' }, {
+      serve: vi.fn(), runCommand: sys.run, platform: 'linux', checkSqlite: passingSqlite,
+      fetch, sleep: async () => {}, readToken: () => undefined, info: vi.fn(), warn: vi.fn()
+    });
+    expect(result).toMatchObject({ ok: true, state: 'restarted', pid: 4002 });
+    expect(sys.calls.filter(call => !call.includes(' show '))).toEqual(['systemctl --user restart dutydeck-tag.service']);
+    await api.close();
+  });
+
+  it('systemdServiceControl：停服时连同 .socket 一起停，免得新连接把服务重新拉起', async () => {
+    const sys = systemctl({ mainPid: 4001, triggeredBy: 'dutydeck-tag.socket' });
+    expect(await systemdServiceControl('dutydeck-tag.service', { runCommand: sys.run }).stop()).toBeUndefined();
+    expect(sys.calls.filter(call => !call.includes(' show '))).toEqual(['systemctl --user stop dutydeck-tag.socket dutydeck-tag.service']);
+    const plain = systemctl({ mainPid: 4001 });
+    await systemdServiceControl('dutydeck-tag.service', { runCommand: plain.run }).stop();
+    expect(plain.calls.filter(call => !call.includes(' show '))).toEqual(['systemctl --user stop dutydeck-tag.service']);
   });
 
   it('restart --unit：查询任务数失败时拒绝重启，不调用 systemctl restart', async () => {

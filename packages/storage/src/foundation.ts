@@ -1,5 +1,5 @@
 import { assertBotProcessApp } from './bot-process.js';
-import { cachedStatement } from './database-control.js';
+import { cachedStatement } from './statement-cache.js';
 import { isThenable, naturalKeyConflict, notFound, revisionConflict } from './foundation-errors.js';
 import type Database from 'better-sqlite3';
 import { createHash } from 'node:crypto';

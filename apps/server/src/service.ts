@@ -1,3 +1,4 @@
+import { inheritedListenOptions, inheritedSocketMismatch, takeInheritedListenSocket } from './socket-activation.js';
 import { MattersService } from './matters.js';
 import { DutydeckWatch, startDutydeckWatch, watchDeliveryRejection, watchReceiverType } from './watch.js';
 import { collectWatchScopes, resolveWatchReceiver } from './watch-signals.js';
@@ -145,6 +146,7 @@ export const UNSAFE_NO_AUTH_ENV = 'DUTYDECK_UNSAFE_NO_AUTH';
 /** 停服步骤，按执行顺序；强制退出时据此列出还没开始的步骤。 */
 const SHUTDOWN_PHASES = ['insight', 'historyRetention', 'watch', 'pluginResults', 'workbench', 'workbenchHttp', 'workItems', 'delegations', 'automation', 'ciWebhook', 'pullRequests',
   'relayClose', 'collaboration', 'relayFlush', 'http', 'runtime', 'capabilities', 'database', 'pluginDispose'] as const;
+type ShutdownPhase = typeof SHUTDOWN_PHASES[number];
 
 /**
  * 监听地址不是回环、认证又关着（open 模式）时返回拒绝启动的说明，显式确认 unsafe 时放行。
@@ -240,6 +242,9 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   // 插件在加载配置之前加载：插件 agents 要与 DUTYDECK_AGENTS_JSON 一起合并。没有启用的插件（或只有内置场景包）时为 undefined，下面不接线。
   // 启动各阶段耗时（毫秒），开始监听后汇总成一条日志；boot 是进程启动到这里（Node 启动与模块加载）。
   const startupMs: Record<string, number> = { boot: Math.round(process.uptime() * 1000) };
+  // systemd socket 激活传入的监听 socket：启动一开始就取走并清掉 LISTEN_* 变量，启动恢复期间派生的子进程看不到它们。
+  const inherited = takeInheritedListenSocket();
+  if (inherited && 'error' in inherited) throw new Error(inherited.error);
   const shutdownPhases = new ShutdownPhases(SHUTDOWN_PHASES);
   let startupMark = performance.now();
   const startupPhase = (name: string) => { const now = performance.now(); startupMs[name] = Math.round(now - startupMark); startupMark = now; };
@@ -725,7 +730,8 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   const workInteractions = new WorkItemInteractions(workItems, runtime, relayBroker, (sessionId, actorId, action) => authorizeWorkItemInteraction(repos, groupManager, sessionId, actorId, action, env, workbenchHttp.fetch));
   closeResources = () => {
     if (!closeRun) closeRun = (async () => {
-      const phase = (name: string, operation: () => unknown) => shutdownPhases.run(name, operation);
+      // 名字限定在 SHUTDOWN_PHASES 里，增删步骤时两边对不上会在编译期报错。
+      const phase = (name: ShutdownPhase, operation: () => unknown) => shutdownPhases.run(name, operation);
       // 分析服务必须在任何并行关闭组之前显式 await：先拒新刷新、取消 queued/running
       // 作业并等待 runner 退出与临时目录清理，再关闭 HTTP/runtime/repos。
       await phase('insight', closeInsightService);
@@ -739,7 +745,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       historyRetention.abort();
       await phase('historyRetention', () => historyRetentionRun);
       const errors: unknown[] = [...insightCloseErrors];
-      const settle = async (operations: Array<[string, () => unknown]>) => {
+      const settle = async (operations: Array<[ShutdownPhase, () => unknown]>) => {
         const results = await Promise.allSettled(operations.map(([name, operation]) => phase(name, operation)));
         errors.push(...results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => result.reason));
       };
@@ -943,7 +949,13 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     });
     startupPhase('routes');
     logDroppedAgents(log, droppedAgents);
-    await app.listen(listenOptions(config));
+    // systemd socket 激活时用它传入的监听 socket：重启期间端口由 .socket unit 持有，连接排队而不是被拒。
+    await app.listen(inherited ? inheritedListenOptions(inherited.fd) : listenOptions(config));
+    if (inherited) {
+      const mismatch = inheritedSocketMismatch(app.server.address(), config);
+      if (mismatch) throw new Error(mismatch);
+      log.info({ fd: inherited.fd }, '使用 systemd socket 激活传入的监听 socket');
+    }
     startupPhase('listen');
     log.info({ startupMs: { ...startupMs, total: Math.round(process.uptime() * 1000) } }, '启动各阶段耗时');
     const watch = new DutydeckWatch({

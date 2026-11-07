@@ -116,10 +116,12 @@ it.each(['unit-env', 'env-file'])('authenticates drain and activity against the 
   db.prepare('INSERT INTO configs VALUES (?, ?)').run('auth.accessToken', 'fixture-token');
   db.close();
   const app = Fastify();
-  registerAuthMiddleware(app, { localOnly: false, mode: 'token', getToken: async () => 'fixture-token', exempt: (_method, path) => path === '/health' });
+  // 与真实服务一致：非 /api/ 路径（含 /health、/health/ready）免认证。
+  registerAuthMiddleware(app, { localOnly: false, mode: 'token', getToken: async () => 'fixture-token', exempt: (_method, path) => !path.startsWith('/api/') });
   app.post('/api/system/drain', async () => ({ draining: true }));
   app.get('/api/system/activity', async () => ({ runningTasks: 0 }));
   app.get('/health', async () => ({ ok: true }));
+  app.get('/health/ready', async () => ({ ok: true, ready: true, pending: [] }));
   const statuses: number[] = [];
   const fetcher: typeof fetch = async (input, init) => {
     const response = await app.inject({ method: init?.method === 'POST' ? 'POST' : 'GET', url: new URL(String(input)).pathname, headers: Object.fromEntries(new Headers(init?.headers)), ...(init?.body ? { payload: String(init.body) } : {}) });

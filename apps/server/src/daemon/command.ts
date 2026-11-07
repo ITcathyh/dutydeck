@@ -709,11 +709,16 @@ interface SystemdUnitInfo {
   args: string[];
   /** unit 文件路径（FragmentPath）。 */
   fragmentPath?: string;
+  /**
+   * 激活它的 .socket unit（TriggeredBy）。socket 激活时端口由它们持有：只停服务的话，下一个连接会把服务重新拉起，
+   * 所以停止要连同它们一起停，启动和重启前要确保它们在监听。
+   */
+  sockets: string[];
 }
 
 /** unit 不存在时 LoadState=not-found；systemctl 不可用或连不上 user systemd 时返回 undefined。 */
 async function showSystemdUnit(unit: string, deps: DaemonCommandDeps): Promise<SystemdUnitInfo | undefined> {
-  const shown = await (deps.runCommand ?? defaultRunCommand)('systemctl', ['--user', 'show', unit, '--property=LoadState,SubState,MainPID,Environment,EnvironmentFiles,WorkingDirectory,ExecStart,FragmentPath,KillMode']);
+  const shown = await (deps.runCommand ?? defaultRunCommand)('systemctl', ['--user', 'show', unit, '--property=LoadState,SubState,MainPID,Environment,EnvironmentFiles,WorkingDirectory,ExecStart,FragmentPath,KillMode,TriggeredBy']);
   if (shown.status !== 0) return undefined;
   const props = new Map<string, string>();
   const environmentFiles: string[] = [];
@@ -738,7 +743,8 @@ async function showSystemdUnit(unit: string, deps: DaemonCommandDeps): Promise<S
     execPath: exec?.[1],
     script: exec?.[2]?.split(' ')[1],
     args: exec?.[2]?.split(' ').slice(2) ?? [],
-    fragmentPath: props.get('FragmentPath') || undefined
+    fragmentPath: props.get('FragmentPath') || undefined,
+    sockets: (props.get('TriggeredBy') ?? '').split(/\s+/).filter(name => name.endsWith('.socket'))
   };
 }
 
@@ -820,20 +826,24 @@ function explicitServerFlags(options: CliOptions): string[] {
         : `--${key.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`)}`);
 }
 
-function refuseExplicitFlags(action: 'start' | 'restart', unit: string, options: CliOptions, dir: string, pid?: number): DaemonCommandResult | undefined {
+/** `supervisor` 写托管方与新进程的启动依据，如「systemd unit x，新进程按 unit 的 ExecStart 启动」。 */
+function refuseExplicitFlags(action: 'start' | 'restart', supervisor: string, options: CliOptions, dir: string, pid?: number): DaemonCommandResult | undefined {
   const flags = explicitServerFlags(options);
   if (flags.length === 0) return undefined;
   return { ok: false, action, running: action === 'restart', pid,
-    error: `Dutydeck 由 systemd unit ${unit} 托管，新进程按 unit 的 ExecStart 启动，命令行参数 ${flags.join(' ')} 传不过去。请把配置写进 ${resolve(dir, '../..', '.env')}（如 DUTYDECK_PORT、DUTYDECK_HOST）后不带参数重试。` };
+    error: `Dutydeck 由 ${supervisor}，命令行参数 ${flags.join(' ')} 传不过去。请把配置写进 ${resolve(dir, '../..', '.env')}（如 DUTYDECK_PORT、DUTYDECK_HOST）后不带参数重试。` };
 }
+const systemdManagedBy = (unit: string) => `systemd unit ${unit} 托管，新进程按 unit 的 ExecStart 启动`;
 
-/** systemctl start / restart 返回后，等到新一代由 systemd 托管的 daemon 就绪并通过身份校验。 */
-async function waitForSystemdGeneration(action: 'start' | 'restart', unit: string, dir: string, previous: DaemonState | undefined, logOffset: number): Promise<DaemonCommandResult> {
+/** 托管方的启动 / 重启命令返回后，等到新一代 daemon 就绪并通过身份校验。 */
+async function waitForSupervisedGeneration(action: 'start' | 'restart', dir: string, previous: DaemonState | undefined, logOffset: number, wait: {
+  ownedBySupervisor(state: DaemonState): boolean; timeoutMs: number; command: string; statusHint: string;
+}): Promise<DaemonCommandResult> {
   const logFile = daemonPaths(dir).logFile;
-  const deadline = Date.now() + READY_TIMEOUT_MS;
+  const deadline = Date.now() + wait.timeoutMs;
   while (Date.now() < deadline) {
     const state = readDaemonStatus(dir);
-    if (state?.ready && state.supervisor === 'systemd' && state.systemdUnit === unit && !sameGeneration(state, previous) && inspectDaemonState(state).status === 'verified') {
+    if (state?.ready && wait.ownedBySupervisor(state) && !sameGeneration(state, previous) && inspectDaemonState(state).status === 'verified') {
       const authEnabled = state.authEnabled !== false;
       return { ok: true, action, running: true, pid: state.pid, address: state.address, authEnabled, authentication: authEnabled ? 'required' : 'disabled', logFile, state: action === 'restart' ? 'restarted' : 'started' };
     }
@@ -843,11 +853,17 @@ async function waitForSystemdGeneration(action: 'start' | 'restart', unit: strin
   const running = inspectDaemon(dir).status === 'verified';
   return { ok: false, action, running, logFile,
     ...(action === 'restart' && !running ? { state: 'not-running' as const } : {}),
-    error: `systemctl --user ${action} ${unit} 已返回，但 ${READY_TIMEOUT_MS / 1000} 秒内没有等到新的守护进程就绪并通过身份校验。${reason.length > 0 ? `原因：${reason.join('；')}。` : ''}查看：systemctl --user status ${unit}` };
+    error: `${wait.command} 已返回，但 ${wait.timeoutMs / 1000} 秒内没有等到新的守护进程就绪并通过身份校验。${reason.length > 0 ? `原因：${reason.join('；')}。` : ''}查看：${wait.statusHint}` };
 }
 
+const waitForSystemdGeneration = (action: 'start' | 'restart', unit: string, dir: string, previous: DaemonState | undefined, logOffset: number) =>
+  waitForSupervisedGeneration(action, dir, previous, logOffset, {
+    ownedBySupervisor: state => state.supervisor === 'systemd' && state.systemdUnit === unit,
+    timeoutMs: READY_TIMEOUT_MS, command: `systemctl --user ${action} ${unit}`, statusHint: `systemctl --user status ${unit}`
+  });
+
 async function systemdStart(unit: string, info: SystemdUnitInfo, options: CliOptions, dir: string, deps: DaemonCommandDeps): Promise<DaemonCommandResult> {
-  const refused = refuseExplicitFlags('start', unit, options, dir);
+  const refused = refuseExplicitFlags('start', systemdManagedBy(unit), options, dir);
   if (refused) return refused;
   const logFile = daemonPaths(dir).logFile;
   // 旧 oneshot unit 被改写并 daemon-reload 后仍停在 active (exited)：systemctl start 对它是空操作。
@@ -866,13 +882,16 @@ async function systemdStart(unit: string, info: SystemdUnitInfo, options: CliOpt
   const previous = readDaemonStatus(dir);
   rotateDaemonLog(dir);
   const logOffset = daemonLogSize(dir);
-  const started = await (deps.runCommand ?? defaultRunCommand)('systemctl', ['--user', 'start', unit]);
+  // socket 激活的 unit：连同 .socket 一起启动，端口先开始监听。
+  const started = await (deps.runCommand ?? defaultRunCommand)('systemctl', ['--user', 'start', ...info.sockets, unit]);
   if (started.status !== 0) return { ok: false, action: 'start', running: false, logFile, error: systemctlFailure('start', unit, started) };
   return await waitForSystemdGeneration('start', unit, dir, previous, logOffset);
 }
 
 async function systemdStop(dir: string, state: DaemonState, unit: string, deps: DaemonCommandDeps): Promise<DaemonCommandResult> {
-  const stopped = await (deps.runCommand ?? defaultRunCommand)('systemctl', ['--user', 'stop', unit]);
+  // 只停服务的话，socket 激活会在下一个连接到来时把它重新拉起。
+  const sockets = (await showSystemdUnit(unit, deps))?.sockets ?? [];
+  const stopped = await (deps.runCommand ?? defaultRunCommand)('systemctl', ['--user', 'stop', ...sockets, unit]);
   if (stopped.status !== 0) {
     return { ok: false, action: 'stop', running: inspectDaemon(dir).status === 'verified', pid: state.pid, error: systemctlFailure('stop', unit, stopped) };
   }
@@ -894,7 +913,7 @@ async function systemdStop(dir: string, state: DaemonState, unit: string, deps: 
 }
 
 async function systemdRestart(dir: string, state: DaemonState, unit: string, info: SystemdUnitInfo, options: CliOptions, deps: DaemonCommandDeps): Promise<DaemonCommandResult> {
-  const refused = refuseExplicitFlags('restart', unit, options, dir, state.pid);
+  const refused = refuseExplicitFlags('restart', systemdManagedBy(unit), options, dir, state.pid);
   if (refused) return refused;
   // unit 被 autostart enable 改写到别的根目录后，restart 会在那边拉起新进程，这里只会空等。
   const root = resolve(dir, '../..');
@@ -919,6 +938,8 @@ async function systemdRestart(dir: string, state: DaemonState, unit: string, inf
   // unit 的 StandardOutput=append: 在新进程启动时重新打开日志；旧进程停服期间的输出落进 .1。
   rotateDaemonLog(dir);
   const logOffset = daemonLogSize(dir);
+  // socket 激活的 unit 只重启服务：服务 Requires= 配套的 .socket，systemd 会先把它拉起（包括刚从自己绑端口切换过来时），
+  // .socket 不重启，端口一直开着。
   const restarted = await (deps.runCommand ?? defaultRunCommand)('systemctl', ['--user', 'restart', unit]);
   if (restarted.status !== 0) {
     await drain.release?.();
@@ -954,11 +975,8 @@ async function launchdSupervisor(state: DaemonState | undefined, deps: DaemonCom
 }
 
 async function launchdRestart(dir: string, state: DaemonState, target: string, options: CliOptions, deps: DaemonCommandDeps): Promise<DaemonCommandResult> {
-  const flags = explicitServerFlags(options);
-  if (flags.length > 0) {
-    return { ok: false, action: 'restart', running: true, pid: state.pid,
-      error: `Dutydeck 由 launchd（${target}）托管，新进程按 plist 的 ProgramArguments 启动，命令行参数 ${flags.join(' ')} 传不过去。请把配置写进 ${resolve(dir, '../..', '.env')}（如 DUTYDECK_PORT、DUTYDECK_HOST）后不带参数重试。` };
-  }
+  const refused = refuseExplicitFlags('restart', `launchd（${target}）托管，新进程按 plist 的 ProgramArguments 启动`, options, dir, state.pid);
+  if (refused) return refused;
   // 新一代由 plist 里的解释器拉起：检查的是它，不是当前 CLI 自己。
   const program = readLaunchdProgram(process.env.HOME ?? homedir());
   if (!program) {
@@ -982,20 +1000,10 @@ async function launchdRestart(dir: string, state: DaemonState, target: string, o
     const detail = firstLine(kicked.stderr) || firstLine(kicked.stdout) || (kicked.status === null ? 'launchctl 无法执行' : `退出码 ${kicked.status}`);
     return { ok: false, action: 'restart', running: inspectDaemon(dir).status === 'verified', pid: state.pid, error: `launchctl kickstart -k ${target} 失败：${detail}。查看：launchctl print ${target}` };
   }
-  const logFile = daemonPaths(dir).logFile;
-  const deadline = Date.now() + LAUNCHD_READY_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    const current = readDaemonStatus(dir);
-    if (current?.ready && current.supervisor === 'launchd' && !sameGeneration(current, state) && inspectDaemonState(current).status === 'verified') {
-      const authEnabled = current.authEnabled !== false;
-      return { ok: true, action: 'restart', running: true, pid: current.pid, address: current.address, authEnabled, authentication: authEnabled ? 'required' : 'disabled', logFile, state: 'restarted' };
-    }
-    await sleep(200);
-  }
-  const reason = tailDaemonLog(dir, 3, logOffset);
-  const running = inspectDaemon(dir).status === 'verified';
-  return { ok: false, action: 'restart', running, logFile, ...(running ? {} : { state: 'not-running' as const }),
-    error: `launchctl kickstart -k ${target} 已返回，但 ${LAUNCHD_READY_TIMEOUT_MS / 1000} 秒内没有等到新的守护进程就绪并通过身份校验。${reason.length > 0 ? `原因：${reason.join('；')}。` : ''}查看：launchctl print ${target}` };
+  return await waitForSupervisedGeneration('restart', dir, state, logOffset, {
+    ownedBySupervisor: current => current.supervisor === 'launchd',
+    timeoutMs: LAUNCHD_READY_TIMEOUT_MS, command: `launchctl kickstart -k ${target}`, statusHint: `launchctl print ${target}`
+  });
 }
 
 /**
@@ -1027,6 +1035,7 @@ export interface ServiceControl {
 /** `daemonDir`：`start --foreground` unit 的守护目录，重启前轮转它的日志；直接 serve 的 unit 不知道日志在哪，不传。 */
 export function systemdServiceControl(unit: string, deps: DaemonCommandDeps, daemonDir?: string): ServiceControl {
   const run = deps.runCommand ?? defaultRunCommand;
+  const sockets = async () => (await showSystemdUnit(unit, deps))?.sockets ?? [];
   return {
     mainPid: async () => (await showSystemdUnit(unit, deps))?.mainPid,
     restart: async () => {
@@ -1034,8 +1043,9 @@ export function systemdServiceControl(unit: string, deps: DaemonCommandDeps, dae
       const restarted = await run('systemctl', ['--user', 'restart', unit]);
       return restarted.status === 0 ? undefined : systemctlFailure('restart', unit, restarted);
     },
+    // 回滚等步骤要求停服后一直停着：socket 激活时连同 .socket 一起停，否则新连接会把服务重新拉起。
     stop: async () => {
-      const stopped = await run('systemctl', ['--user', 'stop', unit]);
+      const stopped = await run('systemctl', ['--user', 'stop', ...await sockets(), unit]);
       return stopped.status === 0 ? undefined : systemctlFailure('stop', unit, stopped);
     },
     resetFailed: async () => { await run('systemctl', ['--user', 'reset-failed', unit]); }
@@ -1050,7 +1060,23 @@ export function healthCheckUrl(address: string | undefined, deps: DaemonCommandD
   return resolveLocalUrl(address, deps.localAddresses ?? (() => Object.values(networkInterfaces()).flatMap(entries => entries?.map(entry => entry.address) ?? [])));
 }
 
-/** 重启后等到换上新的主进程，并且它的 /health 返回 ok。服务在 runtime 初始化完成后才开始监听。 */
+/**
+ * 新进程的 /health/ready：返回未就绪原因，就绪或服务版本没有这个接口时返回 undefined。
+ * 旧版本把未知路径回退到网页壳（200 + HTML）或4xx，都按「不支持」放行，只看 /health。
+ */
+async function readinessPending(fetcher: typeof fetch, origin: string, requestTimeoutMs: number): Promise<string | undefined> {
+  const response = await fetcher(new URL('/health/ready', origin).toString(), { signal: AbortSignal.timeout(requestTimeoutMs) });
+  if (response.status >= 400 && response.status < 500) return undefined;
+  if (!response.ok) return `/health/ready 返回 HTTP ${response.status}`;
+  const body = await response.json().catch(() => undefined) as { ready?: unknown; pending?: unknown } | undefined;
+  if (typeof body?.ready !== 'boolean' || body.ready) return undefined;
+  return Array.isArray(body.pending) && body.pending.length ? body.pending.map(String).join('、') : '服务尚未就绪';
+}
+
+/**
+ * 重启后等到换上新的主进程，它的 /health 返回 ok，并且 /health/ready 确认启动时的外部入口（飞书长连接）已有结果。
+ * 服务在 runtime 初始化完成后才开始监听；只看 /health 会在飞书还没连上时就认定重启完成，接着去停下一个实例。
+ */
 export async function waitForServiceHealth(service: ServiceControl, previousPid: number | undefined, address: string | undefined, deps: DaemonCommandDeps, timeoutMs = HEALTH_TIMEOUT_MS): Promise<{ ok: true; pid: number } | { ok: false; error: string }> {
   const url = healthCheckUrl(address, deps);
   if (!url) return { ok: false, error: `监听地址（${address ?? '未记录'}）不可用于本机健康检查。` };
@@ -1065,8 +1091,13 @@ export async function waitForServiceHealth(service: ServiceControl, previousPid:
     if (pid !== undefined && pid !== previousPid) {
       try {
         const response = await fetcher(new URL('/health', url.origin).toString(), { signal: AbortSignal.timeout(requestTimeoutMs) });
-        if (response.ok && (await response.json() as any)?.ok === true) return { ok: true, pid };
-        last = `新进程（pid ${pid}）的 /health 返回 HTTP ${response.status}`;
+        if (response.ok && (await response.json() as any)?.ok === true) {
+          const pending = await readinessPending(fetcher, url.origin, requestTimeoutMs);
+          if (pending === undefined) return { ok: true, pid };
+          last = `新进程（pid ${pid}）还没就绪：${pending}`;
+        } else {
+          last = `新进程（pid ${pid}）的 /health 返回 HTTP ${response.status}`;
+        }
       } catch (error: any) {
         last = `新进程（pid ${pid}）的 /health 请求失败：${error?.message || String(error)}`;
       }

@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3';
-import { cachedStatement } from './database-control.js';
+import { cachedStatement } from './statement-cache.js';
 import { Buffer } from 'node:buffer';
 import {
   RuntimeError,

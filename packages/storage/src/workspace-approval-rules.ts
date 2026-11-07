@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 import { makeId, type WorkspaceApprovalRule, type WorkspaceApprovalRuleRepository } from '@dutydeck/shared';
-import { cachedStatement } from './database-control.js';
+import { cachedStatement } from './statement-cache.js';
 
 /** v46：按工作区记住的审批规则，按机器人（app_id）隔离。工作区是目录的真实路径、机器人可能已删除，都不是表里的实体，所以没有外键。
  * pattern 只约束 shared 白名单规则的形状：字母开头、由 `[A-Za-z0-9:_-]` 词以单个空格连接，可以是单个词（如 `pytest`）。 */

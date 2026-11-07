@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3';
-import { cachedStatement } from './database-control.js';
+import { cachedStatement } from './statement-cache.js';
 import type { CiWebhookRepository } from '@dutydeck/shared';
 
 export function createCiWebhookSchema(db: Database.Database): void {

@@ -2,6 +2,7 @@ import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { relayAskExitCodes } from './cli-contract.js';
 import { relayTokenEnvKey, relayUrlEnvKey } from './capability.js';
+import { defaultRetrySleep, retryWhileRefused, UNAVAILABLE_RETRY_MS } from './retry.js';
 
 /** CLI 侧错误：携带要用的退出码，由 cli.ts 顶层统一 exit */
 export class RelayCliError extends Error {
@@ -18,6 +19,8 @@ export class RelayCliError extends Error {
 export interface RelayClientOptions {
   env?: NodeJS.ProcessEnv;
   fetcher?: typeof globalThis.fetch;
+  /** 连接被拒后的等待，默认 setTimeout；测试可注入。 */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 interface RelayErrorBody { code?: string; message?: string }
@@ -58,12 +61,14 @@ export class RelayHttpClient {
   private readonly baseUrl: string;
   private readonly token: string;
   private readonly fetcher: typeof globalThis.fetch;
+  private readonly sleep: (ms: number) => Promise<void>;
 
   constructor(options: RelayClientOptions = {}) {
     const env = options.env ?? process.env;
     this.baseUrl = (env[relayUrlEnvKey] ?? env.DUTYDECK_RELAY_URL)?.trim().replace(/\/$/, '') ?? '';
     this.token = (env[relayTokenEnvKey] ?? env.DUTYDECK_RELAY_TOKEN)?.trim() ?? '';
     this.fetcher = options.fetcher ?? nodeHttpFetch;
+    this.sleep = options.sleep ?? defaultRetrySleep;
     if (!this.baseUrl || !this.token) {
       throw new RelayCliError(
         '回传命令只能在 Dutydeck 会话内的 Agent 进程中调用；当前进程没有会话凭证。',
@@ -77,15 +82,18 @@ export class RelayHttpClient {
   async post(path: string, body: unknown, timeoutMs = defaultRequestTimeoutMs): Promise<Record<string, unknown>> {
     let response: Response;
     try {
-      response = await this.fetcher(`${this.baseUrl}${path}`, {
+      // 期限从第一次尝试算起，等待重启的时间也计入，长轮询不会因此多等。
+      const signal = AbortSignal.timeout(timeoutMs);
+      // 服务重启的等待不超过本次请求的期限。
+      response = await retryWhileRefused(() => this.fetcher(`${this.baseUrl}${path}`, {
         method: 'POST',
         headers: {
           authorization: `Bearer ${this.token}`,
           'content-type': 'application/json; charset=utf-8'
         },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(timeoutMs)
-      });
+        signal
+      }), { sleep: this.sleep, budgetMs: Math.min(UNAVAILABLE_RETRY_MS, timeoutMs), signal });
     } catch (error) {
       throw new RelayCliError(
         `无法连接 Dutydeck 回传服务：${error instanceof Error ? error.message : String(error)}`,

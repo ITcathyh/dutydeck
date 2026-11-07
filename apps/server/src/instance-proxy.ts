@@ -114,7 +114,6 @@ export async function registerInstanceProxy(app: FastifyInstance, peers: PeerIns
     const presented = presentedCredential(request.headers);
     credentials.bind(close, () => auth.check(presented), close);
   };
-  const unbindCredential = (close: () => void) => credentials.unbind(close);
   app.addHook('preClose', async () => {
     closing = true;
     credentials.stop();
@@ -142,7 +141,7 @@ export async function registerInstanceProxy(app: FastifyInstance, peers: PeerIns
         if (closed) return;
         closed = true;
         forwards.delete(close);
-        unbindCredential(close);
+        credentials.unbind(close);
         upstream.destroy();
         upstreamResponse?.destroy();
         if (!reply.raw.writableFinished) reply.raw.destroy();
@@ -150,7 +149,7 @@ export async function registerInstanceProxy(app: FastifyInstance, peers: PeerIns
       forwards.add(close);
       if (!sharedRead) bindCredential(close, request.raw);
       reply.raw.once('close', close).once('error', close);
-      reply.raw.once('finish', () => { forwards.delete(close); unbindCredential(close); });
+      reply.raw.once('finish', () => { forwards.delete(close); credentials.unbind(close); });
       request.raw.once('aborted', close);
       body?.once('error', close);
       upstream.setTimeout(UPSTREAM_TIMEOUT_MS, close);
@@ -190,7 +189,7 @@ export async function registerInstanceProxy(app: FastifyInstance, peers: PeerIns
         if (closed) return;
         closed = true;
         upgrades.delete(close);
-        unbindCredential(close);
+        credentials.unbind(close);
         upstream?.destroy();
         socket.destroy();
         peerSocket?.destroy();

@@ -1,4 +1,4 @@
-import { agentConfigSchema, errorMessage as describeError, type AgentConfig } from '@dutydeck/shared';
+import { agentConfigSchema, errorMessage as describeError, mapLimit, type AgentConfig } from '@dutydeck/shared';
 import { childEnvironment } from '@dutydeck/shared/child-environment';
 import { listAcpxBuiltinAgents } from '@dutydeck/acp-client';
 import { commandExists } from '@dutydeck/transports';
@@ -254,11 +254,8 @@ export async function loadConfigWithDiagnosticsAsync(env: NodeJS.ProcessEnv = pr
     ...ptyContributions.map(contribution => ptyCommand(contribution, merged)).filter(command => commandExists(command)),
     ...configured.filter(agent => probesConfiguredVersion(agent) && commandExists(agent.command)).map(agent => agent.command)
   ].filter((command): command is string => Boolean(command)));
-  const pending = [...commands];
   const prefetched = new Map<string, string | undefined>();
-  await Promise.all(Array.from({ length: Math.min(VERSION_PROBE_CONCURRENCY, pending.length) }, async () => {
-    for (let command = pending.shift(); command; command = pending.shift()) prefetched.set(versionKey(command), await cliVersionAsync(command));
-  }));
+  await mapLimit([...commands], VERSION_PROBE_CONCURRENCY, async command => { prefetched.set(versionKey(command), await cliVersionAsync(command)); });
   prefetchedVersions = prefetched;
   try { return loadConfigWithDiagnostics(env, ptyContributions, pluginAgents); }
   finally { prefetchedVersions = undefined; }

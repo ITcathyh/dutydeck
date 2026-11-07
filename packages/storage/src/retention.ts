@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 import type { HistoryRetentionResult } from '@dutydeck/shared';
-import { cachedStatement } from './database-control.js';
+import { cachedStatement } from './statement-cache.js';
 
 /**
  * 历史数据保留：只动已结束任务的数据，未结、"结果未知"、旧版待退役会话的数据一律不碰。

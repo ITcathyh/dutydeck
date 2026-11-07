@@ -13,9 +13,9 @@
 <sub>简体中文 · <a href="README.en.md">English</a></sub>
 
 </div>
-<img src="docs/assets/demo-zh.svg" alt="演示：在飞书群里 @ 机器人派活，审批 pnpm test 后收到“验证通过”的结果卡；右侧是开发机上 Agent 的执行过程" width="100%">
+<a href="docs/assets/promo-zh.mp4"><img src="docs/assets/promo-zh.webp" alt="宣传短片：飞书里一句话派活，Agent 跑命令前在手机上审批，服务端跑测试验证通过，结果卡一点就能看本轮 diff；还有定时、重启不丢活、长期记忆、开 PR，支持 30 种终端适配器和 21 个 ACP Agent" width="100%"></a>
 
-<p align="center"><sub>示意动画：卡片字段照真实飞书卡片绘制，部分按钮按条件出现；任务内容是虚构示例</sub></p>
+<p align="center"><sub>38 秒宣传短片 · <a href="docs/assets/promo-zh.mp4">高清 MP4</a> · 界面为示意，任务内容是虚构示例</sub></p>
 
 <a id="install"></a>
 
@@ -57,6 +57,10 @@ dutydeck start && dutydeck doctor
 | <sub>内置终端适配器</sub> | <sub>acpx 登记的 ACP Agent</sub> | <sub>验证失败后最多返修</sub> | <sub>手机看改动链接有效期</sub> |
 
 ## ✨ 能做什么 <a id="features"></a>
+
+<img src="docs/assets/demo-zh.svg" alt="演示：在飞书群里 @ 机器人派活，审批 pnpm test 后收到“验证通过”的结果卡；右侧是开发机上 Agent 的执行过程" width="100%">
+
+<p align="center"><sub>示意动画：卡片字段照真实飞书卡片绘制，部分按钮按条件出现；任务内容是虚构示例</sub></p>
 
 <table>
 <tr>

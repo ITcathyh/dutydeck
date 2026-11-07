@@ -71,3 +71,4 @@ export {
 } from './prompt.js';
 
 export { RelayCliError, RelayHttpClient, type RelayClientOptions } from './client.js';
+export { retryWhileRefused } from './retry.js';

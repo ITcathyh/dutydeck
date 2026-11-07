@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import {
   pluginHookOutputSchema,
+  withTimeout,
   type PluginHookEvent,
   type PluginHookHandler,
   type PluginHookInput,
@@ -111,13 +112,6 @@ const parseOutput = (stdout: string): PluginHookOutput | undefined => {
     return parsed.success ? parsed.data : undefined;
   } catch { return undefined; }
 };
-
-/** `onTimeout` 返回值作为拒绝原因，不返回时用默认的超时错误；计时器不阻止进程退出。 */
-export const withTimeout = <T>(work: Promise<T>, timeout: number, onTimeout?: () => unknown): Promise<T> => new Promise((resolvePromise, reject) => {
-  const timer = setTimeout(() => { reject(onTimeout?.() ?? new Error(`超过 ${timeout}ms 未返回`)); }, timeout);
-  timer.unref?.();
-  work.then(value => { clearTimeout(timer); resolvePromise(value); }, error => { clearTimeout(timer); reject(error); });
-});
 
 /**
  * 插件 hook 总线。同一事件的 hook 按插件名、声明顺序依次执行；deny 立即结束并胜出，

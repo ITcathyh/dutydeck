@@ -50,7 +50,8 @@ const deps = {
       if (draining === false && stage === 'abort-after-backup') await new Promise(resolve => setTimeout(resolve, 300));
       return Response.json(path === '/api/system/activity' ? { runningTasks: 0 } : { draining: true });
     }
-    if (stage === 'health') await hold();
+    // 只在 /health 上停一次；随后的 /health/ready 不再等测试放行。
+    if (stage === 'health' && path === '/health') await hold();
     return Response.json({ ok: stage !== 'rollback' }, { status: stage === 'rollback' ? 503 : 200 });
   }
 };

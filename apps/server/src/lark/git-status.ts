@@ -1,8 +1,8 @@
-import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { safeGitConfigFor, safeGitEnvironment } from '@dutydeck/shared/safe-git';
 import { larkInsideGitRepository } from './auto-verification.js';
+import { jsonSha256 } from '../hash.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -55,7 +55,7 @@ export async function readGitCodeSignature(cwd: string | undefined): Promise<str
       git(['diff', 'HEAD', '--numstat', '-z', '--ignore-submodules=dirty'])
     ]);
     const entries = (output: string) => output.split('\0').filter(entry => entry && !platformData.test(entry));
-    return createHash('sha256').update(JSON.stringify([head.trim(), entries(status), entries(numstat)])).digest('hex');
+    return jsonSha256([head.trim(), entries(status), entries(numstat)]);
   } catch {
     return undefined;
   }

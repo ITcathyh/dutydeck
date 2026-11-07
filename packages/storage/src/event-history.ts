@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3';
-import { cachedStatement } from './database-control.js';
+import { cachedStatement } from './statement-cache.js';
 import { BACKGROUND_FOLLOWUP, extractEventArtifactReferences, isTerminalTaskStatus, type HistoryOutline, type HistoryOutlineQuery, type HistoryTurnPlace, type HistoryTurnSummary } from '@dutydeck/shared';
 
 export const HISTORY_PROMPT_LIMIT = 1024;
