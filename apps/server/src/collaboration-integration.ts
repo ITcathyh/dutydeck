@@ -156,7 +156,7 @@ export function createCollaborationIntegration(options: CollaborationIntegration
       if (!owner) return [];
       const bindings = await repos.groupBindings.listByChannelBot(owner.channelBotId);
       const discovered = config?.defaultGroupParticipation && config.defaultGroupParticipation !== 'off'
-        ? await repos.remoteChatFacts.listByChannelBot(owner.channelBotId, 500) : [];
+        ? await repos.remoteChatFacts.listByChannelBot(owner.channelBotId) : [];
       return [...new Set([...bindings.map(binding => binding.externalChatId), ...discovered.filter(fact => fact.membershipState === 'member').map(fact => fact.externalChatId)])].map(chatId => ({ appId, chatId }));
     },
     readGroupDescription: async (scope, config) => {

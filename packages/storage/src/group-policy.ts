@@ -420,13 +420,13 @@ export function createWp1aRepositories(sqlite: Database.Database): Wp1aRepositor
       async update(id, input) { return transact(repositories => repositories.channelBotPolicies.update(id, input)); }
     },
     groupBindings: {
-      async listByChannelBot(id, limit) { return (cachedStatement(sqlite, 'SELECT * FROM group_bindings WHERE channel_bot_id = ? ORDER BY created_at, id LIMIT ?').all(id, boundedLimit(limit)) as GroupBindingRow[]).map(decodeGroupBinding); },
+      async listByChannelBot(id) { return (cachedStatement(sqlite, 'SELECT * FROM group_bindings WHERE channel_bot_id = ? ORDER BY created_at, id').all(id) as GroupBindingRow[]).map(decodeGroupBinding); },
       async get(id) { return getBinding(id); }, async getByNaturalKey(botId, chatId) { return getBindingByNaturalKey(botId, chatId); },
       async create(input) { return transact(repositories => repositories.groupBindings.create(input)); },
       async update(id, input) { return transact(repositories => repositories.groupBindings.update(id, input)); }
     },
     remoteChatFacts: {
-      async listByChannelBot(id, limit) { return (cachedStatement(sqlite, 'SELECT * FROM remote_chat_facts WHERE channel_bot_id = ? ORDER BY observed_at DESC, id LIMIT ?').all(id, boundedLimit(limit)) as RemoteChatFactRow[]).map(decodeRemoteChatFact); },
+      async listByChannelBot(id) { return (cachedStatement(sqlite, 'SELECT * FROM remote_chat_facts WHERE channel_bot_id = ? ORDER BY observed_at DESC, id').all(id) as RemoteChatFactRow[]).map(decodeRemoteChatFact); },
       async listMembersByChannelBot(id) { return (cachedStatement(sqlite, "SELECT * FROM remote_chat_facts WHERE channel_bot_id = ? AND membership_state = 'member' ORDER BY id").all(id) as RemoteChatFactRow[]).map(decodeRemoteChatFact); },
       async get(id) { return getFact(id); }, async getByNaturalKey(botId, chatId) { return getFactByNaturalKey(botId, chatId); },
       async getCurrentByNaturalKey(botId, chatId, now) { return getCurrentFactByNaturalKey(botId, chatId, now); },
@@ -443,7 +443,8 @@ export function createWp1aRepositories(sqlite: Database.Database): Wp1aRepositor
       async invalidate(id, input) { return transact(repositories => repositories.remoteIdentityFacts.invalidate(id, input)); }
     },
     roleAssignments: {
-      async listByChannelBot(id, limit) { return (cachedStatement(sqlite, 'SELECT * FROM role_assignments WHERE channel_bot_id = ? ORDER BY created_at, id LIMIT ?').all(id, boundedLimit(limit)) as RoleAssignmentRow[]).map(decodeRoleAssignment); },
+      async listByChannelBot(id) { return (cachedStatement(sqlite, 'SELECT * FROM role_assignments WHERE channel_bot_id = ? ORDER BY created_at, id').all(id) as RoleAssignmentRow[]).map(decodeRoleAssignment); },
+      async listByScope(id, groupBindingId) { return (cachedStatement(sqlite, 'SELECT * FROM role_assignments WHERE channel_bot_id = ? AND scope_key = ? ORDER BY created_at, id').all(id, groupBindingId ?? 'bot') as RoleAssignmentRow[]).map(decodeRoleAssignment); },
       async get(id) { return getRole(id); }, async create(input) { return transact(repositories => repositories.roleAssignments.create(input)); },
       async update(id, input) { return transact(repositories => repositories.roleAssignments.update(id, input)); }
     },

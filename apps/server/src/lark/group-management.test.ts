@@ -129,6 +129,20 @@ describe('live group configuration', () => {
     expect(await manager.botAdmin('cli_unknown', 'ou_alice')).toBeUndefined();
   });
 
+  it('recognizes a bot-level admin granted after more than 500 other role records', async () => {
+    const owner = (await manager.owner('cli_one'))!;
+    const alice = (await manager.members('cli_one', 'oc_one')).members[0]!;
+    await repos.groupPolicy.transact(tx => {
+      for (let index = 0; index < 600; index++) {
+        const suffix = index.toString().padStart(4, '0');
+        tx.roleAssignments.create({ id: `a_filler_${suffix}`, channelBotId: owner.channelBotId, principalId: `principal_filler_${suffix}`, role: 'can_talk', operateScope: 'none' });
+      }
+    });
+    await repos.roleAssignments.create({ id: 'bot_admin_late', channelBotId: owner.channelBotId, principalId: alice.principalId, role: 'admin', operateScope: 'none' });
+    expect(await manager.botAdmin('cli_one', 'ou_alice')).toBe(true);
+    expect(await manager.botAdmin('cli_one', 'ou_bob')).toBe(false);
+  });
+
   it('discovers two Bots in two groups with valid evidence, without activating configuration', async () => {
     const { groups } = await manager.groups();
     expect(groups).toHaveLength(2);
@@ -173,7 +187,7 @@ describe('live group configuration', () => {
     expect(bots).toHaveBeenCalledTimes(2);
     expect(facts).toHaveBeenCalledTimes(4);
     expect(bindings).toHaveBeenCalledTimes(4);
-    for (const detail of expected.values()) expect(roles).toHaveBeenCalledWith(detail.channelBotId, 500);
+    for (const detail of expected.values()) expect(roles).toHaveBeenCalledWith(detail.channelBotId);
 
     const owner = (await manager.owner('cli_one'))!;
     const bot = (await repos.channelBots.get(owner.channelBotId))!;
@@ -194,7 +208,7 @@ describe('live group configuration', () => {
     ]);
   });
 
-  it('looks up both sides of groups from disjoint truncated fact and binding windows', async () => {
+  it('lists every group of a Bot past the old 500-row window', async () => {
     await deleteLarkConfig(repos.config, 'cli_two');
     const owner = (await manager.owner('cli_one'))!;
     const identity = (await repos.remoteIdentityFacts.getByChannelBot(owner.channelBotId))!;
@@ -208,26 +222,25 @@ describe('live group configuration', () => {
           identityFactId: identity.id, identityRevision: identity.revision, expiresAt: identity.expiresAt });
       }
     });
-    const factWindow = await repos.remoteChatFacts.listByChannelBot(owner.channelBotId, 500);
-    const bindingWindow = await repos.groupBindings.listByChannelBot(owner.channelBotId, 500);
-    expect(factWindow).toHaveLength(500); expect(bindingWindow).toHaveLength(500);
-    const factIds = new Set(factWindow.map(fact => fact.externalChatId));
-    expect(bindingWindow.every(binding => !factIds.has(binding.externalChatId))).toBe(true);
     const facts = vi.spyOn(repos.remoteChatFacts, 'getByNaturalKey');
     const bindings = vi.spyOn(repos.groupBindings, 'getByNaturalKey');
     const factList = vi.spyOn(repos.remoteChatFacts, 'listByChannelBot');
     const bindingList = vi.spyOn(repos.groupBindings, 'listByChannelBot');
     const roles = vi.spyOn(repos.roleAssignments, 'listByChannelBot');
     const { groups } = await manager.groups();
-    expect(groups).toHaveLength(1000);
-    expect(groups.every(group => group.bots.length === 1 && group.bots[0]!.binding?.externalChatId === group.chatId
+    // 同步来的 oc_one / oc_two 只有事实没有绑定，也要列出来。
+    expect(groups).toHaveLength(1002);
+    expect(groups.filter(group => !group.bots[0]!.binding).map(group => group.chatId).sort()).toEqual(['oc_one', 'oc_two']);
+    const windowGroups = groups.filter(group => group.chatId.startsWith('oc_window_'));
+    expect(windowGroups).toHaveLength(1000);
+    expect(windowGroups.every(group => group.bots.length === 1 && group.bots[0]!.binding?.externalChatId === group.chatId
       && group.bots[0]!.validity === 'valid' && group.bots[0]!.membership === 'member')).toBe(true);
-    expect(groups.find(group => group.chatId === 'oc_window_0000')!.name).toBe('oc_window_0000');
+    expect(groups.find(group => group.chatId === 'oc_window_0000')!.name).toBe('Group 0');
     expect(groups.find(group => group.chatId === 'oc_window_0999')!.name).toBe('Group 999');
-    expect(facts).toHaveBeenCalledTimes(1000); expect(bindings).toHaveBeenCalledTimes(1000);
-    expect(factList).toHaveBeenCalledExactlyOnceWith(owner.channelBotId, 500);
-    expect(bindingList).toHaveBeenCalledExactlyOnceWith(owner.channelBotId, 500);
-    expect(roles).toHaveBeenCalledExactlyOnceWith(owner.channelBotId, 500);
+    expect(facts).toHaveBeenCalledTimes(1002); expect(bindings).toHaveBeenCalledTimes(1002);
+    expect(factList).toHaveBeenCalledExactlyOnceWith(owner.channelBotId);
+    expect(bindingList).toHaveBeenCalledExactlyOnceWith(owner.channelBotId);
+    expect(roles).toHaveBeenCalledExactlyOnceWith(owner.channelBotId);
   });
 
   it('re-syncing unchanged group names writes no fact versions; a rename writes one', async () => {

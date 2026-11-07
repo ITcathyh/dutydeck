@@ -636,7 +636,8 @@ export function createFailClosedPolicyEvaluator(evaluator?: PolicyEvaluator): Po
 }
 
 export interface GroupBindingRepository {
-  listByChannelBot(channelBotId: string, limit?: number): Promise<GroupBinding[]>;
+  /** 该 Bot 的全部群绑定，不截断：调用方据此遍历每个群。 */
+  listByChannelBot(channelBotId: string): Promise<GroupBinding[]>;
   get(id: string): Promise<GroupBinding | undefined>;
   getByNaturalKey(channelBotId: string, externalChatId: string): Promise<GroupBinding | undefined>;
   create(input: CreateGroupBindingInput): Promise<GroupBinding>;
@@ -650,7 +651,8 @@ export interface ChannelBotGroupPolicyRepository {
   update(id: string, input: UpdateChannelBotGroupPolicyInput): Promise<ChannelBotGroupPolicy>;
 }
 export interface RemoteChatFactRepository {
-  listByChannelBot(channelBotId: string, limit?: number): Promise<RemoteChatFact[]>;
+  /** 该 Bot 的全部群事实，不截断。 */
+  listByChannelBot(channelBotId: string): Promise<RemoteChatFact[]>;
   /** 仍记为在群的全部事实，不分页：群同步据此找出已退的群。 */
   listMembersByChannelBot(channelBotId: string): Promise<RemoteChatFact[]>;
   get(id: string): Promise<RemoteChatFact | undefined>;
@@ -670,7 +672,10 @@ export interface RemoteIdentityFactRepository {
   invalidate(id: string, input: InvalidateRemoteFactInput): Promise<RemoteIdentityFact>;
 }
 export interface RoleAssignmentRepository {
-  listByChannelBot(channelBotId: string, limit?: number): Promise<RoleAssignment[]>;
+  /** 该 Bot 的全部角色记录（含已撤销），不截断。 */
+  listByChannelBot(channelBotId: string): Promise<RoleAssignment[]>;
+  /** 某一作用域的全部角色记录；不传 groupBindingId 即 Bot 级。 */
+  listByScope(channelBotId: string, groupBindingId?: string): Promise<RoleAssignment[]>;
   get(id: string): Promise<RoleAssignment | undefined>;
   create(input: CreateRoleAssignmentInput): Promise<RoleAssignment>;
   update(id: string, input: UpdateRoleAssignmentInput): Promise<RoleAssignment>;

@@ -47,8 +47,8 @@ function isAllowed(decision: boolean | PolicyDecision): boolean {
 async function currentPublicState(repositories: IdentityPreflightRepositories, channelBotId: string, now: Date) {
   const [identity, facts, bindings] = await Promise.all([
     repositories.remoteIdentityFacts.getByChannelBot(channelBotId),
-    repositories.remoteChatFacts.listByChannelBot(channelBotId, 500),
-    repositories.groupBindings.listByChannelBot(channelBotId, 500),
+    repositories.remoteChatFacts.listByChannelBot(channelBotId),
+    repositories.groupBindings.listByChannelBot(channelBotId),
   ]);
   const bindingByChat = new Map(bindings.map(binding => [binding.externalChatId, binding.id]));
   const publicIdentity = identity ? toPublicRemoteIdentityFact(identity, now) : undefined;
@@ -179,7 +179,7 @@ export async function registerIdentityPreflightRoutes(app: FastifyInstance, opti
     const bot = await repo.channelBots.get(request.params.id);
     if (!bot) throw new RuntimeError('FOUNDATION_NOT_FOUND', 'ChannelBot was not found', 404);
     const secretRef = bot.credentialRef ? await repo.secretRefs.get(bot.credentialRef) : undefined;
-    const allBindings = await repo.groupBindings.listByChannelBot(bot.id, 500);
+    const allBindings = await repo.groupBindings.listByChannelBot(bot.id);
     // Capture the identity revision before the remote round trip. A concurrent
     // preflight must win explicitly; this request may not silently overwrite
     // its newer evidence after returning from Lark.

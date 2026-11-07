@@ -168,9 +168,9 @@ export async function registerFoundationManagementRoutes(app: FastifyInstance, o
       bots: await Promise.all(bots.map(async bot => {
         const [policy, bindings, facts, roles, secretRef] = await Promise.all([
           repos.channelBotPolicies.getByChannelBot(bot.id),
-          repos.groupBindings.listByChannelBot(bot.id, 500),
-          repos.remoteChatFacts.listByChannelBot(bot.id, 500),
-          repos.roleAssignments.listByChannelBot(bot.id, 500),
+          repos.groupBindings.listByChannelBot(bot.id),
+          repos.remoteChatFacts.listByChannelBot(bot.id),
+          repos.roleAssignments.listByChannelBot(bot.id),
           bot.credentialRef ? repos.secretRefs.get(bot.credentialRef) : Promise.resolve(undefined)
         ]);
         const bindingByChat = new Map(bindings.map(binding => [binding.externalChatId, binding]));
