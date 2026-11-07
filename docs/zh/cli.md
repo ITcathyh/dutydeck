@@ -223,6 +223,98 @@ dutydeck settings bot set cli_xxx cardActionForwarding=null 'eventHandlers=[{"id
 
 旧客户端忽略增加的 decision 字段；旧配置损坏时仍显示 `cardActionForwardingError`，需明确修复或清除旧字段。
 
+### 机器人设置键
+
+`dutydeck settings bot set <app-id> key=value ...` 能改的全部键如下，`dutydeck settings bot show` 显示当前值。省略的键保持原值；布尔值写 `true` / `false`，名单可写逗号分隔或 JSON 数组。默认值指已保存的配置里没有这个键时服务端按什么处理。
+
+| 键 | 作用 | 默认值 |
+|---|---|---|
+| `eventHandlers` | 飞书事件的外部 HTTP 处理器（卡片点击、消息接收），按数组顺序调用，见上文；`null` 或 `[]` 关闭 | 无 |
+| `cardActionForwarding` | 旧版卡片回调转发，仍兼容；不能与非空 `eventHandlers` 同时启用 | 无 |
+| `welcomeEnabled` | 入群和首次私聊时发欢迎 | `true` |
+| `workspace` | 新会话的默认工作目录，须是绝对路径 | 无 |
+| `workspaceAliases` | `/new --cwd <别名>` 的别名表，JSON 对象 `{"别名":"/绝对路径"}` | 无 |
+| `webBaseUrl` | 控制台地址，卡片「查看详情」等 Web 入口从它生成 | 新建时沿用已有机器人的地址 |
+| `webMobileReachable` | 手机能否打开 `webBaseUrl`；`false` 时不保存地址，卡片不显示「查看详情」 | `true` |
+| `displayName` | 自定义展示名，只用于展示 | 无 |
+| `brand` | `feishu` / `lark`，决定开放平台域名；与 App Secret、成员名单同一步提交 | `feishu` |
+| `defaultAgentId` | 默认 Agent；Agent 设置步骤必填 | 无 |
+| `fallbackAgentId` | 兜底 Agent：主 Agent 起不来、限流或额度耗尽且本轮还没有输出时，自动切换一次；须与默认 Agent 不同，留空关闭 | 无 |
+| `fallbackModel` | 兜底 Agent 切换时用的模型 | 兜底 Agent 的默认模型 |
+| `defaultAgentWeights` | 新会话按权重在多个 Agent 间分流，JSON 数组；`[]` 关闭 | 不分流 |
+| `defaultModel` | 默认模型 | Agent 自身的默认模型 |
+| `defaultReasoningEffort` | 默认推理强度 | Agent 自身的默认值 |
+| `permissionMode` | 飞书任务的确认方式：`ask` 逐项确认、`approve-reads` 只读操作自动放行、`full-trust` 完全信任 | 已存配置缺这个键时按 `approve-reads` 处理（`fullTrustConfirmed=true` 的按 `full-trust`）；Web 新建表单在选 Agent 前预填 `full-trust`；新建时不传则按默认 Agent 决定，能在飞书逐项审批的为 `ask`，否则为 `full-trust` |
+| `fullTrustConfirmed` | 确认飞书任务以完全信任无人值守运行；`full-trust` 下改 Agent 或开监听前必须为 `true` | `false` |
+| `roleTitle` | 角色名称，用于展示和提示词 | 无 |
+| `roleScope` | 负责范围，用于展示和提示词 | 无 |
+| `preInjectPrompt` | 机器人级预置指令，随每轮飞书任务交给 Agent | 空 |
+| `verificationCommand` | 平台验证命令，在会话工作目录执行；未设置时结果卡不提验证、不给「运行验证」按钮 | 无 |
+| `listening` | 是否连接飞书、接收消息 | `false` |
+| `mentionPolicy` | 群里的唤醒方式：`always` / `topic` / `never` / `ambient` | 新建机器人为 `topic`；已存配置缺这个键时按 `always` |
+| `defaultGroupParticipation` | 群里不 @ 时的默认参与模式：`off` / `observe` / `selective` / `eager` | `off` |
+| `p2pMode` | 私聊路由：`chat` 整段私聊一个会话，`thread` 每条顶层私聊一个话题 | `chat` |
+| `groupReplyMode` | 普通群回复模式：`chat` / `shared` / `new-topic` / `chat-topic`；`auto` 清除覆盖 | 自动路由 |
+| `idleCompactEnabled` | 会话空闲后自动压缩上下文 | `true`（Web 新建表单的默认值里没有这一项，由服务端补上） |
+| `idleCompactHours` | 空闲多少小时后压缩，至少 1 | `24` |
+| `groupToolsEnabled` | 允许 Agent 使用群工具；分层协作需要开启 | `false` |
+| `groupToolsAllowSend` | 群工具可以发消息；要先开 `groupToolsEnabled` | `false` |
+| `memoryEnabled` | 会话记忆；`false` 时不注入记忆，相关命令和工具不可用 | `defaultGroupParticipation` 为 `selective` / `eager` 时开启，否则关闭 |
+| `memoryAutoExtract` | 后台自动提取和整理记忆；`false` 时只能用 `/memory consolidate` 手动触发 | `true` |
+| `groupMemoryScope` | 群聊记忆范围：`shared` 各群共用一个池，`per-group` 每群一个池；切换不迁移数据 | `shared` |
+| `memoryAgentId` | 跑记忆提取和整理的 Agent | 沿用 `defaultAgentId` |
+| `memoryModel` | 跑记忆提取和整理的模型 | 沿用 `defaultModel` |
+| `busyTriage` | 忙时先判断：执行中问进度由宿主直接回复，补充当前任务会尝试插话；关闭时照常排队 | `false` |
+| `botLoopGuard` | 机器人互聊门禁，防止机器人之间来回对话 | `false` |
+| `decisionAgentId` | 群里判断要不要接话的 Agent | 沿用 `memoryAgentId`，再回落 `defaultAgentId` |
+| `decisionModel` | 群里判断要不要接话的模型 | 同上，沿用对应模型 |
+| `responseAgentId` | 群里直接回复用的 Agent | 沿用 `memoryAgentId`，再回落 `defaultAgentId` |
+| `responseModel` | 群里直接回复用的模型 | 同上，沿用对应模型 |
+| `executionMode` | `single` 或 `layered`（分层协作：Leader 拆解、Worker 执行；需开群工具） | `single` |
+| `leaderAgentId` | 分层协作的 Leader Agent | 无 |
+| `workerAgentIds` | 分层协作的 Worker Agent，1 到 8 个 | 无 |
+| `structuredAskCards` | 提问用结构化卡片；`false` 时改用文字选项和引用回复 | `true` |
+| `groupCardMention` | 群里的卡片 @ 发起人：结果卡卡尾、审批和提问卡卡首 | `true` |
+| `pushIntervalMs` | 进度卡刷新间隔，500–20000 毫秒 | `1000` |
+| `traceLimit` | 过程卡最多保留的记录条数；`null` 恢复默认 | `50` |
+| `hideTraceOnComplete` | 任务完成后收起过程卡的记录；精简过程卡开启时对过程卡不生效 | `true`（Web 新建表单的默认值里没有这一项，由服务端补上） |
+| `compactTrace` | 精简过程卡，各阶段只显示一行 | `true` |
+| `showAgentName` | 卡片标题栏显示 Agent 简称 | `false` |
+| `completionReactionOnly` | 完成时只对触发消息贴表情，不发结果卡；可被群设置覆盖 | `false` |
+| `silentProgress` | 中间进展完全静默，只保留最终结果；可被群设置覆盖 | `false` |
+| `adhdMode` | ADHD 友好输出，每轮飞书任务附加对应的输出要求 | `false` |
+| `urgentEnabled` | 审批或提问卡长时间无人处理时发飞书应用内加急，收件人手机上会出现强提醒 | `false` |
+| `urgentThresholdMs` | 卡片发出多久仍无人处理才加急，至少 60000；`null` 恢复默认 | 10 分钟 |
+| `urgentMaxPerHourPerChat` | 每个群每小时最多加急几次；`null` 恢复默认 | `3` |
+| `notifyMentionAction` | 「需要你操作」一档 @ 发起人；要先开 `groupCardMention` | `true` |
+| `notifyMentionDone` | 「完成」一档 @ 发起人；要先开 `groupCardMention` | `true` |
+| `notifyQuietHours` | 免打扰时段 `HH:MM-HH:MM`（daemon 本地时区，可跨零点）；时段内只有「需要你操作」仍 @，加急推迟到时段结束；留空清除 | 无 |
+| `pinLongTasks` | 长任务的进度卡自动置顶；置顶会改写群成员的会话列表 | `false` |
+| `pinAfterMs` | 任务跑多久算长任务，至少 1000；`null` 恢复默认 | 10 分钟 |
+| `allowedUsers` | 发起人名单，JSON 数组 `[{"openId":"ou_…","name":"…"}]`；与 `allowedEmails` 都为空时不限制 | 空 |
+| `allowedUserNames` | 按姓名指定发起人名单，保存时解析成 `allowedUsers` | 空 |
+| `allowedEmails` | 按邮箱指定发起人名单 | 空 |
+| `allowedBots` | 发起人名单受限时仍放行的其他机器人，格式同 `allowedUsers` | 空 |
+| `allowedBotNames` | 按名字指定 `allowedBots`，保存时解析 | 空 |
+| `peerBotsAllowed` | 发起人名单受限时，是否放行同群里已授权的其他机器人（需开群工具） | `true` |
+| `highRiskAllowedUsers` | 强制风控下可以执行高危命令的人，格式同 `allowedUsers`；与 `highRiskAllowedEmails` 都为空时不额外限制 | 空 |
+| `highRiskAllowedUserNames` | 按姓名指定 `highRiskAllowedUsers`，保存时解析 | 空 |
+| `highRiskAllowedEmails` | 按邮箱指定高危命令执行人 | 空 |
+| `highRiskPattern` | 高危命令正则；留空恢复内置规则 | 内置规则 |
+| `riskControlMode` | 高危命令风控：`off` 关闭、`guidance` 只提醒、`enforced` 强制拦截 | `off` |
+
+### 改定时计划的频率
+
+`dutydeck schedule update` 用 `--every`、`--cron` 或 `--at` 改触发时间，三者一次只能用一个，其余设置不变；完整用法见[通用定时任务](web-console.md)。
+
+```bash
+dutydeck schedule update schedule_xxx --session ses_xxx --every 60                    # 改成每 60 分钟一次，从现在开始计
+dutydeck schedule update schedule_xxx --session ses_xxx --cron '30 8 * * 1-5'         # 改成工作日 08:30
+dutydeck schedule update schedule_xxx --session ses_xxx --at 2026-12-01T09:00          # 改成一次性，按计划时区
+```
+
+改成一次性前，先清掉完成条件和截止时间（`--input '{"completionCondition":null,"deadlineAt":null}'`），一次性计划不能带这两项。
+
 ## 5. 终端后端与 Herdr 侧边子任务空间
 
 - **主终端后端**：在 `tmux`（默认）与 `Herdr`（Linux，>= 0.9.0）之间选择，设置后新建的 `pty-cli` 会话生效。选择 Herdr 时异步检查版本，等待期间服务可继续处理其他请求。

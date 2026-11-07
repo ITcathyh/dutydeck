@@ -767,6 +767,14 @@ describe('settings commands', () => {
     await createCliProgram('0.0.7', { settings }).parseAsync(['node', 'dutydeck', 'settings', 'approval-rules', 'remove', 'war_1']);
     expect(settings).toHaveBeenLastCalledWith('approval-rule-remove', expect.objectContaining({ ruleId: 'war_1' }));
   });
+
+  it('documents every bot key in the Chinese and English CLI references', async () => {
+    for (const language of ['zh', 'en']) {
+      const doc = await readFile(resolve(__dirname, '../../../docs', language, 'cli.md'), 'utf8');
+      const missing = Object.keys(botFields).filter(key => !doc.includes(`| \`${key}\` |`));
+      expect(missing, `docs/${language}/cli.md`).toEqual([]);
+    }
+  });
 });
 
 it('passes a bot scope and a secret descriptor for Claude service settings without accepting an API key in argv', async () => {

@@ -168,6 +168,98 @@ Old clients ignore the additional decision field. Corrupt legacy forwarding stil
   - For Claude Code terminal agents (including custom agents whose adapter is `claude-code`, such as ccflash) and ACP Claude launched by Dutydeck, the same check also enforces the high-risk pattern, so enforced mode needs no workspace hook. A custom ACP Claude must launch with the released `dist/agents/claude-acp.mjs`; an old copy made elsewhere does not include the check.
   - In every mode, Lark cards, results and group tool messages replace common secret formats (such as `sk-ant-`, `ghp_`, JWTs) and secret values from the service and agent environments with `[REDACTED]`. Lark card tags written by the agent in replies or approval requests (such as `<at id=all></at>`, `<text_tag>`, `<font>`) are shown as text; they do not mention anyone or render as colored tags.
 
+## Bot setting keys
+
+Every key accepted by `dutydeck settings bot set <app-id> key=value ...` is listed below; `dutydeck settings bot show` prints the current values. Omitted keys keep their values. Booleans are `true` / `false`; lists accept comma-separated values or a JSON array. The default is what the server uses when a saved configuration lacks the key.
+
+| Key | Effect | Default |
+|---|---|---|
+| `eventHandlers` | External HTTP handlers for Lark events (card clicks, incoming messages), called in array order; see above. `null` or `[]` disables | None |
+| `cardActionForwarding` | Legacy card-callback forwarding, still supported; cannot be enabled together with a non-empty `eventHandlers` | None |
+| `welcomeEnabled` | Send a welcome when joining a group and on the first direct message | `true` |
+| `workspace` | Default working directory for new sessions; must be absolute | None |
+| `workspaceAliases` | Alias table for `/new --cwd <alias>`, a JSON object `{"alias":"/absolute/path"}` | None |
+| `webBaseUrl` | Console address used for “查看详情” and other Web links on cards | A new bot reuses an existing bot's address |
+| `webMobileReachable` | Whether phones can open `webBaseUrl`; `false` stores no address and cards show no “查看详情” | `true` |
+| `displayName` | Custom display name, display only | None |
+| `brand` | `feishu` / `lark`, selects the open platform domain; submitted in the same step as the App Secret and member lists | `feishu` |
+| `defaultAgentId` | Default Agent; required in the Agent settings step | None |
+| `fallbackAgentId` | Fallback Agent: when the main Agent cannot start, is rate-limited or out of quota and the turn has no output yet, switches once; must differ from the default Agent; empty disables | None |
+| `fallbackModel` | Model used after switching to the fallback Agent | The fallback Agent's default model |
+| `defaultAgentWeights` | Split new sessions across Agents by weight, a JSON array; `[]` disables | No split |
+| `defaultModel` | Default model | The Agent's own default |
+| `defaultReasoningEffort` | Default reasoning effort | The Agent's own default |
+| `permissionMode` | How Lark tasks confirm actions: `ask` confirms each one, `approve-reads` auto-approves read-only actions, `full-trust` runs unattended | A saved configuration without this key is treated as `approve-reads` (`full-trust` when `fullTrustConfirmed=true`); the Web form for a new bot prefills `full-trust` before an Agent is chosen; a new bot saved without it gets `ask` if the default Agent supports per-action approval in Lark, otherwise `full-trust` |
+| `fullTrustConfirmed` | Confirms that Lark tasks run unattended in full trust; must be `true` before changing Agents or enabling listening under `full-trust` | `false` |
+| `roleTitle` | Role name, used for display and prompts | None |
+| `roleScope` | Area of responsibility, used for display and prompts | None |
+| `preInjectPrompt` | Bot-level instructions passed to the Agent with every Lark task | Empty |
+| `verificationCommand` | Platform verification command run in the session directory; when unset, result cards neither mention verification nor offer “运行验证” | None |
+| `listening` | Whether the bot connects to Lark and receives messages | `false` |
+| `mentionPolicy` | How the bot is woken in groups: `always` / `topic` / `never` / `ambient` | `topic` for new bots; `always` when a saved configuration lacks the key |
+| `defaultGroupParticipation` | Default participation when not mentioned in a group: `off` / `observe` / `selective` / `eager` | `off` |
+| `p2pMode` | Direct-message routing: `chat` uses one session for the whole DM, `thread` opens a topic per top-level message | `chat` |
+| `groupReplyMode` | Reply mode in ordinary groups: `chat` / `shared` / `new-topic` / `chat-topic`; `auto` clears the override | Automatic routing |
+| `idleCompactEnabled` | Compact the context after a session has been idle | `true` (not among the Web new-bot form defaults; the server fills it in) |
+| `idleCompactHours` | Idle hours before compaction, at least 1 | `24` |
+| `groupToolsEnabled` | Let the Agent use group tools; required for layered execution | `false` |
+| `groupToolsAllowSend` | Let group tools send messages; requires `groupToolsEnabled` | `false` |
+| `memoryEnabled` | Session memory; `false` injects no memory and disables the related commands and tools | On when `defaultGroupParticipation` is `selective` / `eager`, otherwise off |
+| `memoryAutoExtract` | Extract and consolidate memory in the background; `false` leaves only manual `/memory consolidate` | `true` |
+| `groupMemoryScope` | Group memory scope: `shared` is one pool for all groups, `per-group` one pool per group; switching does not migrate data | `shared` |
+| `memoryAgentId` | Agent that extracts and consolidates memory | Same as `defaultAgentId` |
+| `memoryModel` | Model that extracts and consolidates memory | Same as `defaultModel` |
+| `busyTriage` | Triage while busy: progress questions are answered by the host and additions to the current task try to interject; off queues as usual | `false` |
+| `botLoopGuard` | Bot loop guard that stops bots from talking to each other indefinitely | `false` |
+| `decisionAgentId` | Agent that decides whether to respond in a group | `memoryAgentId`, then `defaultAgentId` |
+| `decisionModel` | Model that decides whether to respond in a group | Same chain, using the matching model |
+| `responseAgentId` | Agent for direct replies in groups | `memoryAgentId`, then `defaultAgentId` |
+| `responseModel` | Model for direct replies in groups | Same chain, using the matching model |
+| `executionMode` | `single` or `layered` (a Leader plans and Workers execute; requires group tools) | `single` |
+| `leaderAgentId` | Leader Agent for layered execution | None |
+| `workerAgentIds` | Worker Agents for layered execution, 1 to 8 | None |
+| `structuredAskCards` | Ask questions with structured cards; `false` uses text options and quoted replies | `true` |
+| `groupCardMention` | Mention the requester on group cards: at the end of result cards, at the top of approval and question cards | `true` |
+| `pushIntervalMs` | Progress card refresh interval, 500–20000 ms | `1000` |
+| `traceLimit` | Maximum entries kept on the trace card; `null` restores the default | `50` |
+| `hideTraceOnComplete` | Collapse the trace card entries when the task finishes; has no effect on the trace card when compact traces are on | `true` (not among the Web new-bot form defaults; the server fills it in) |
+| `compactTrace` | Compact trace card, one line per phase | `true` |
+| `showAgentName` | Show the Agent's short name in the card header | `false` |
+| `completionReactionOnly` | On completion only react to the triggering message instead of sending a result card; group settings can override | `false` |
+| `silentProgress` | Suppress intermediate progress and keep only the final result; group settings can override | `false` |
+| `adhdMode` | ADHD-friendly output; adds the matching output instructions to every Lark task | `false` |
+| `urgentEnabled` | Send an in-app urgent notice for approval or question cards left unhandled, which shows as a strong alert on the recipient's phone | `false` |
+| `urgentThresholdMs` | How long a card stays unhandled before the urgent notice, at least 60000; `null` restores the default | 10 minutes |
+| `urgentMaxPerHourPerChat` | Maximum urgent notices per group per hour; `null` restores the default | `3` |
+| `notifyMentionAction` | Mention the requester for the “需要你操作” tier; requires `groupCardMention` | `true` |
+| `notifyMentionDone` | Mention the requester for the “完成” tier; requires `groupCardMention` | `true` |
+| `notifyQuietHours` | Quiet hours `HH:MM-HH:MM` (daemon local time, may cross midnight); only “需要你操作” still mentions and urgent notices wait until the end; empty clears | None |
+| `pinLongTasks` | Pin the progress card of long tasks; pinning changes the conversation list of group members | `false` |
+| `pinAfterMs` | How long a task runs before it counts as long, at least 1000; `null` restores the default | 10 minutes |
+| `allowedUsers` | Requester list, a JSON array `[{"openId":"ou_…","name":"…"}]`; no restriction when this and `allowedEmails` are both empty | Empty |
+| `allowedUserNames` | Requester list by name, resolved into `allowedUsers` when saved | Empty |
+| `allowedEmails` | Requester list by email | Empty |
+| `allowedBots` | Other bots still allowed when the requester list is restricted, same format as `allowedUsers` | Empty |
+| `allowedBotNames` | `allowedBots` by name, resolved when saved | Empty |
+| `peerBotsAllowed` | When the requester list is restricted, whether authorized peer bots in the same group are allowed (requires group tools) | `true` |
+| `highRiskAllowedUsers` | People who may run high-risk commands under enforced risk control, same format as `allowedUsers`; no extra restriction when this and `highRiskAllowedEmails` are both empty | Empty |
+| `highRiskAllowedUserNames` | `highRiskAllowedUsers` by name, resolved when saved | Empty |
+| `highRiskAllowedEmails` | People who may run high-risk commands, by email | Empty |
+| `highRiskPattern` | High-risk command regex; empty restores the built-in rule | Built-in rule |
+| `riskControlMode` | High-risk command control: `off`, `guidance` (warn only), `enforced` (block) | `off` |
+
+## Changing a schedule's frequency
+
+`dutydeck schedule update` changes the trigger with `--every`, `--cron` or `--at`, one at a time; other settings stay as they are. See [Scheduled tasks](web-console.md) for the full usage.
+
+```bash
+dutydeck schedule update schedule_xxx --session ses_xxx --every 60                    # every 60 minutes, counted from now
+dutydeck schedule update schedule_xxx --session ses_xxx --cron '30 8 * * 1-5'         # weekdays at 08:30
+dutydeck schedule update schedule_xxx --session ses_xxx --at 2026-12-01T09:00          # once, in the schedule's timezone
+```
+
+Before switching to a one-off time, clear the completion condition and deadline (`--input '{"completionCondition":null,"deadlineAt":null}'`); one-off schedules cannot have either.
+
 ## VACUUM during downtime <a id="vacuum"></a>
 
 VACUUM rewrites the whole database file and holds it exclusively, so the service must be stopped first. Do it inside a deploy window, running every command from the daemon root (the unit's `WorkingDirectory`):
