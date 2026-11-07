@@ -351,7 +351,7 @@ describe('HTTP API boundary', () => {
     expect(await post({ approved: true, reason: '不该有' })).toMatchObject({ statusCode: 400 });
     expect(await post({ approved: false, reason: '长'.repeat(1001) })).toMatchObject({ statusCode: 400 });
     // 伪造请求：1 个字素但超过 64 KB 字节上限。
-    const forged = await post({ approved: false, reason: `e${'\u0301'.repeat(40000)}` });
+    const forged = await post({ approved: false, reason: `e${'́'.repeat(40000)}` });
     expect(forged.statusCode).toBe(400);
     expect(forged.json().error.message).toContain('bytes');
     expect(await post({ approved: false, reason: 42 })).toMatchObject({ statusCode: 400 });
@@ -364,7 +364,7 @@ describe('HTTP API boundary', () => {
     expect((await post({ approved: false })).statusCode).toBe(200);
     expect(runtime.resolvePermission).toHaveBeenLastCalledWith('s1', 'p1', false, undefined);
     // 按字素计数：1000 个组合 emoji（11000 个 UTF-16 码元）照常接受。
-    const emoji = '\u{1F468}\u200D\u{1F469}\u200D\u{1F467}\u200D\u{1F466}'.repeat(1000);
+    const emoji = '\u{1F468}‍\u{1F469}‍\u{1F467}‍\u{1F466}'.repeat(1000);
     expect((await post({ approved: false, reason: emoji })).statusCode).toBe(200);
     expect(runtime.resolvePermission).toHaveBeenLastCalledWith('s1', 'p1', false, emoji);
     // 去首尾空白与控制字符（保留换行）；恰好 1000 字可以通过。
@@ -554,6 +554,10 @@ describe('HTTP API boundary', () => {
     const asset = await app.inject({ method: 'GET', url: '/assets/app.js' });
     expect(asset.statusCode).toBe(200); expect(asset.headers['cache-control']).toContain('immutable');
     expect((await app.inject({ method: 'GET', url: '/sessions/s1' })).body).toContain('Dutydeck UI');
+    // Agent 输出里的外部图片不能在页面打开时被加载；SPA 壳（含分享页）都带同一份 img-src 限制。
+    for (const url of ['/', '/sessions/s1', '/share/ses_1']) {
+      for (const method of ['GET', 'HEAD'] as const) expect((await app.inject({ method, url })).headers['content-security-policy'], `${method} ${url}`).toBe("img-src 'self' data: blob:");
+    }
     const api = await app.inject({ method: 'GET', url: '/api/not-real' });
     expect(api.statusCode).toBe(404); expect(api.json().error.code).toBe('NOT_FOUND');
   });

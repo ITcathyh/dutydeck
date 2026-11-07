@@ -72,6 +72,8 @@ const contentTypes: Record<string, string> = {
   '.woff': 'font/woff',
   '.woff2': 'font/woff2'
 };
+// 页面上的 Agent 输出可能被注入，图片只许来自本站、data: 与 blob:，外部图片地址不能被用来带出数据。
+const webContentSecurityPolicy = "img-src 'self' data: blob:";
 
 // Web 构建为文本资源生成的预压缩副本。按 Accept-Encoding 的权重选，同权重优先 br；未声明或 q=0 的编码不用。
 const precompressedEncodings = [{ name: 'br', suffix: '.br' }, { name: 'gzip', suffix: '.gz' }] as const;
@@ -912,6 +914,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
       if (!head && body === undefined) body = await readFile(file);
       const type = contentTypes[extname(file).toLowerCase()] ?? 'application/octet-stream';
       if (pathname.startsWith('/assets/')) reply.header('Cache-Control', 'public, max-age=31536000, immutable');
+      if (type.startsWith('text/html')) reply.header('Content-Security-Policy', webContentSecurityPolicy);
       reply.header('Vary', 'Accept-Encoding');
       if (contentEncoding) reply.header('Content-Encoding', contentEncoding);
       if (head) reply.header('Content-Length', size);

