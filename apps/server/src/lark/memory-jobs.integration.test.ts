@@ -3,7 +3,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createRepositories } from '@dutydeck/storage';
+import { createRepositories, currentProcessIdentity } from '@dutydeck/storage';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import { agentConfigSchema, canonicalExecutionJson, type BoundExecutionRepository } from '@dutydeck/shared';
 import { LarkMemoryStore } from './memory.js';
@@ -375,6 +375,25 @@ it.each([true,false])('handles old completed extraction with an unreconciled run
     expect(h.prompts).toHaveLength(1);
     expect((await h.repos.memoryJobs.listScope(scope))[0].receipt?.consumedTaskIds).toEqual([source.id]);
   }
+});
+
+it('replaces a dead owner claim that exited before freezing its job', async () => {
+  const h = await harness();
+  const userSession = await h.runtime.start({ agentId:'agent' });
+  const source = await h.runtime.send(userSession.id,'团队固定使用中文。');
+  h.setReply(() => ({ facts:[{ content:'团队用中文交流。',topic:'general',evidence:source.id }] } as any));
+  const dead = { ...currentProcessIdentity(), boot: 'previous-boot' };
+  await h.store.updateState(scope,{ pendingTurns:[{ sessionId:userSession.id,taskId:source.id,completedAt:new Date().toISOString(),senderKind:'human' }],turnsSinceExtraction:1,
+    running:{ kind:'extraction',token:'orphan-claim',owner:dead,startedAt:new Date().toISOString() } });
+  h.prompts.length=0;
+  expect(await h.pipeline.runExtraction(scope)).toMatchObject({ ok:true });
+  expect((await h.store.getState(scope)).running).toBeUndefined();
+  expect((await h.store.getState(scope)).pendingTurns).toEqual([]);
+  expect(h.prompts).toHaveLength(1);
+  const jobs = await h.repos.memoryJobs.listScope(scope);
+  expect(jobs).toHaveLength(1);
+  expect(jobs[0]).toMatchObject({ state:'settled' });
+  expect(jobs[0].claimToken).not.toBe('orphan-claim');
 });
 
 it('recognizes the recovered receipt claim after settling crashes before releasing running', async () => {

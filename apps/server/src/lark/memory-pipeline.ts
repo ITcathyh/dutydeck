@@ -514,7 +514,10 @@ export class LarkMemoryPipeline {
     return Number.isFinite(startedAt) && this.now().getTime() - startedAt < this.staleRunningMs;
   }
 
-  /** 认领绑定进程出生身份；长任务仍在运行时，其他实例不能按时间覆盖。 */
+  /**
+   * 认领绑定进程出生身份；长任务仍在运行时，其他实例不能按时间覆盖。
+   * 带身份的认领在建作业行之前只做只读预检，持有者已死且没有作业行时可直接换新认领。
+   */
   private async claim(scope: LarkMemoryScope, kind: 'extraction' | 'consolidation'): Promise<string | undefined> {
     const startedAt = this.now().toISOString();
     const token = randomUUID();
@@ -523,7 +526,7 @@ export class LarkMemoryPipeline {
     const knownJob = !before.running || await this.options.jobs.hasClaim(scope, before.running.token);
     const written = await this.options.store.mutateState(scope, current => {
       if (this.isRunning(current) || current.running?.token !== before.running?.token) return undefined;
-      if (current.running && !knownJob) throw this.recoveryRequired(current.running.sessionId ?? `${scope.appId}:${scope.pool}`, undefined, '旧记忆运行缺少原子作业回执，保留认领和待处理轮次等待核对。');
+      if (current.running && !current.running.owner && !knownJob) throw this.recoveryRequired(current.running.sessionId ?? `${scope.appId}:${scope.pool}`, undefined, '旧记忆运行缺少原子作业回执，保留认领和待处理轮次等待核对。');
       return { running: { kind, startedAt, token, owner } };
     });
     return written ? token : undefined;
