@@ -56,26 +56,26 @@ describe('分享页状态', () => {
 const toolEvent = (data: Record<string, unknown>) => ({ id: String(data.id), type: 'tool_call', timestamp: '2026-11-04T06:45:23.545Z', data }) as unknown as TimelineEvent;
 
 describe('执行中字幕', () => {
-  // 三条输入取自 2026-11-04 抽样会话里的原始工具事件。
+  // 三条输入保持 Agent 原始工具事件的形状。
   it('命令去掉引号、绝对路径只留最后一段，用等宽显示', () => {
     const line = shareNowLine(toolEvent({ id: 'node', name: 'exec_command', status: 'running', input: {
-      cmd: "'/data00/home/huangyuhang.edu/.nvm/versions/node/v22.22.2/bin/node' '/data00/home/huangyuhang.edu/dutydeck/.dutydeck/releases/20261103T075056Z-79cb31d-vfkGD5/dist/cli.js' session send '我会用 lark-cli 和公开网页分别检索，核对数据日期、统计口径和来源，区分抖音整体 DAU 与 IM DAU。'",
-      cwd: 'file:///data00/home/huangyuhang.edu/go/src/code.byted.org/larkim/im_workspace' } }));
+      cmd: "'/home/user/.nvm/versions/node/v22.0.0/bin/node' '/home/user/dutydeck/.dutydeck/releases/20260101T000000Z-0000000-example/dist/cli.js' session send '我会用 lark-cli 和公开网页分别检索，核对数据日期、统计口径和来源，区分抖音整体 DAU 与 IM DAU。'",
+      cwd: 'file:///home/user/src/git.example.com/team/workspace' } }));
     expect(line).toEqual({ action: '正在运行命令', command: true,
       detail: 'node cli.js session send 我会用 lark-cli 和公开网页分别检索，核对数据日期、统计口径和来源，区分抖音整体 DAU 与 IM DAU。' });
   });
 
   it('工具名已在动作里时详情不再重复，中文和工具名之间留空格', () => {
     const line = shareNowLine(toolEvent({ id: 'spawn', name: 'spawn_agent', status: 'completed',
-      input: { task_name: 'public_douyin_dau', agent_type: 'sol_worker', fork_turns: 'none', message: 'gAAAAABq6tTq' } }));
+      input: { task_name: 'public_douyin_dau', agent_type: 'sol_worker', fork_turns: 'none', message: 'encrypted-message' } }));
     expect(line).toEqual({ action: '已调用 spawn_agent', detail: undefined, command: false });
   });
 
   it('网页类命令保留完整网址，只去掉两侧引号', () => {
     const line = shareNowLine(toolEvent({ id: 'fetch', name: 'exec_command', status: 'completed', input: {
-      cmd: "lark-cli docs +fetch --as user --doc 'https://bytedance.larkoffice.com/wiki/wikcnIRn3NDCvtVzVsiyhxVTfHc' --doc-format markdown" } }));
+      cmd: "lark-cli docs +fetch --as user --doc 'https://docs.example.com/wiki/wikExampleDocToken0000' --doc-format markdown" } }));
     expect(line).toEqual({ action: '已访问网页', command: true,
-      detail: 'lark-cli docs +fetch --as user --doc https://bytedance.larkoffice.com/wiki/wikcnIRn3NDCvtVzVsiyhxVTfHc --doc-format markdown' });
+      detail: 'lark-cli docs +fetch --as user --doc https://docs.example.com/wiki/wikExampleDocToken0000 --doc-format markdown' });
   });
 
   it('有说明时用说明原文；还没有调用时等待模型输出', () => {
@@ -84,7 +84,7 @@ describe('执行中字幕', () => {
   });
 
   it('displayCommand 只处理整段引号和绝对路径，网址、相对路径和普通参数原样保留', () => {
-    expect(displayCommand('cat /data00/a/SKILL.md > /tmp/out/ && ls ./src "~/x y" ~/notes/todo.md /')).toBe('cat SKILL.md > out && ls ./src ~/x y todo.md /');
+    expect(displayCommand('cat /srv/a/SKILL.md > /tmp/out/ && ls ./src "~/x y" ~/notes/todo.md /')).toBe('cat SKILL.md > out && ls ./src ~/x y todo.md /');
     expect(displayCommand('curl "https://example.com/a/b"')).toBe('curl https://example.com/a/b');
   });
 });
@@ -179,14 +179,14 @@ describe('复制结论', () => {
       '| 1 | 抖音 DAU | **7.14 亿** | **2026 年 7 月**，新浪财经转引野村月报。[报道](https://finance.sina.com.cn/a) |',
       '| 2 | 群发消息渗透 | **6.50%** | 同一内部周报 |', '',
       '**如果是为了算比例：**', '', '- **3 亿 ÷ 7.14 亿约为 42%**，只是跨期数字相除。', '- 这部分 **unverified**。', '',
-      '最新内部依据在[《周报》](https://bytedance.larkoffice.com/wiki/x)，看 `即时通讯`。'
+      '最新内部依据在[《周报》](https://docs.example.com/wiki/x)，看 `即时通讯`。'
     ].join('\n');
     expect(conclusionPlainText(markdown, 'https://dutydeck.example/share/ses_1#token')).toBe([
       '【结论】有更新数据：lark-cli 找到 11 月 3 日内部周报。', '', '截至今天（2026-11-04），查到的主要结果：', '',
       '1. 抖音 DAU：7.14 亿（2026 年 7 月，新浪财经转引野村月报。报道（https://finance.sina.com.cn/a））',
       '2. 群发消息渗透：6.50%（同一内部周报）', '',
       '如果是为了算比例：', '', '• 3 亿 ÷ 7.14 亿约为 42%，只是跨期数字相除。', '• 这部分 unverified。', '',
-      '最新内部依据在《周报》（https://bytedance.larkoffice.com/wiki/x），看 即时通讯。', '',
+      '最新内部依据在《周报》（https://docs.example.com/wiki/x），看 即时通讯。', '',
       '详情：https://dutydeck.example/share/ses_1#token'
     ].join('\n'));
   });
