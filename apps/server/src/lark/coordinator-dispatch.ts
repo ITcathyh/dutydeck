@@ -26,6 +26,7 @@ import { relevantMemoryBudget, renderLarkMemoryInjection, renderMemoryIndex } fr
 import { larkAdhdModePrompt } from './adhd-mode.js';
 import type { AgentEvent, PolicyAction, Session, TaskRecord, ToolRiskPolicy } from '@dutydeck/shared';
 import { deferredConfirmationId, RuntimeError, supportsRemoteApproval } from '@dutydeck/shared';
+import { executionTaskId } from '@dutydeck/storage';
 import { isBotSenderType } from './card-mentions.js';
 import { defaultHighRiskPattern, defaultLarkIdleCompactHours, defaultLarkTraceLimit, larkMemoryEnabled, larkPermissionMode, readLarkConfigs, type StoredLarkConfig } from './config.js';
 import { formatRolePrompt } from './role-format.js';
@@ -68,6 +69,12 @@ import { type LarkCommandPrompt, larkCardChannel, relaunchRetainedPrefix, relaun
 import { LarkCoordinatorRecovery } from './coordinator-recovery.js';
 
 // 飞书消息协调器 · 派发：为一条请求找到或新建会话、交给 runtime 执行，并跟随这一轮直到终态交付。
+
+/** 入站消息某一轮派发给 runtime 的幂等键；重放同一轮必须用同一个键。 */
+export const larkTurnRequestKey = (appId: string, messageId: string, turn: number) => `lark:${appId}:${messageId}:${turn}`;
+/** 这一轮被 runtime 接收后在执行账本里的任务 id（dispatch 的旧参数形式落在 runtime 命名空间）。 */
+export const larkTurnRuntimeTaskId = (sessionId: string, appId: string, messageId: string, turn: number) =>
+  executionTaskId('runtime', sessionId, larkTurnRequestKey(appId, messageId, turn));
 
 /** 空 @ 沿用同一用户上一条请求的时间窗：超过它就不再假定两条消息是同一次求助。 */
 const ownRequestAdoptionWindowMs = 10 * 60 * 1000;
@@ -1921,13 +1928,23 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         if (this.stopped || task.turn !== currentTurn) { cleanup(); return; }
         if (task.epoch !== (group.epoch ?? 0)) { await closeSupersededPreparedTurn(); cleanup(); return; }
         task.submissionStarted = true;
+        const requestKey = task.inbox ? larkTurnRequestKey(config.appId, event.messageId, currentTurn) : undefined;
         const runtimeTask = resumeTask
           ? { ...((await this.runtime.getTasks!(session.id)).find(item => item.id === resumeTask!.id) ?? resumeTask), replayed: true, queuedAhead: 0 }
           : await this.runtime.dispatch(session.id, prompt, 'queue', agentPrompt, riskPolicy,
             task.inbox || config.managedGroup ? event.senderOpenId : undefined,
-            task.inbox ? `lark:${config.appId}:${event.messageId}:${currentTurn}` : undefined, undefined, undefined,
+            requestKey, undefined, undefined,
             config.idleCompactEnabled !== false ? config.idleCompactHours ?? defaultLarkIdleCompactHours : undefined, promptParts,
-            planTask !== undefined ? 'deny-all' : undefined);
+            planTask !== undefined ? 'deny-all' : undefined).catch(async (error: unknown) => {
+            // 这一轮的键早已被接收（重启前派发过，重放时重建的群上下文、记忆等与当时不同）：执行以那次接收为准，接回原任务。
+            // 读不到原任务也不算没有执行：带着任务 id 交给下面的已接收分支，不判失败、不给重试。
+            if (!requestKey || !(error instanceof RuntimeError && error.code === 'TASK_IDEMPOTENCY_CONFLICT')) throw error;
+            const acceptedId = larkTurnRuntimeTaskId(session.id, config.appId, event.messageId, currentTurn);
+            const accepted = await this.runtime.getTasks?.(session.id).then(tasks => tasks.find(item => item.id === acceptedId), () => undefined);
+            if (accepted) return { ...accepted, replayed: true, queuedAhead: 0 };
+            runtimeTaskId = acceptedId;
+            throw error;
+          });
         runtimeTaskId = runtimeTask.id;
         // 重放只能补原准备快照；pending 已清理时保留已有 usage，不能拿当前配置补旧轮。
         const usedPromptUsage = runtimeTask.replayed ? (frozenUsage && !frozenUsage.created ? frozenUsage.usage : undefined) : promptUsage;

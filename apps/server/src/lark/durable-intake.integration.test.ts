@@ -5,10 +5,11 @@ import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { afterAll, afterEach, beforeAll, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
-import type { ConfigRepository } from '@dutydeck/shared';
+import { RuntimeError, type ConfigRepository } from '@dutydeck/shared';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import { LarkLongConnectionListener, type LarkMessageEvent } from './listener.js';
 import { LarkMessageCoordinator } from './coordinator.js';
+import { larkTurnRuntimeTaskId } from './coordinator-dispatch.js';
 import { LarkTaskInbox } from './task-inbox.js';
 import { LarkGroupParticipation } from './group-participation.js';
 import type { LarkScenarioAdoption } from './scenario-direct.js';
@@ -272,6 +273,67 @@ it('silently terminates expired unrouted observations while received expiry reta
   expect(await h.inbox('received_expired')).toMatchObject({ state: 'failed' });
   expect(groupManager.authorize).toHaveBeenCalledOnce();
   expect(h.service.reply).toHaveBeenCalledOnce(); expect(h.service.reply.mock.calls[0]?.[0]).toMatchObject({ messageId: 'received_expired', taskName: '请求未执行' });
+  expect(h.runtime.dispatch).not.toHaveBeenCalled();
+});
+
+/** 上一个进程已写下会话与轮次（可能已派发）、还没来得及写 accepted 的入站记录。 */
+const seedSubmittedReceived = async (h: Awaited<ReturnType<typeof harness>>, messageId: string, receivedAt = new Date().toISOString()) => {
+  const claimed = (await new LarkTaskInbox(h.repositories.config).claim(config.appId, message({ messageId })))!;
+  await h.repositories.config.set(`lark.inbox.${config.appId}.${messageId}`, JSON.stringify({ ...claimed, receivedAt, sessionId: 'ses_durable', cardId: 'om_card', turn: 1 }));
+  return larkTurnRuntimeTaskId('ses_durable', config.appId, messageId, 1);
+};
+const acceptedTask = (id: string, status: string) => ({ id, sessionId: 'ses_durable', prompt: 'original', status, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+const allowAll = () => ({ resolved: vi.fn(async () => config), authorize: vi.fn(async () => ({ allowed: true })) });
+const sentCards = (h: Awaited<ReturnType<typeof harness>>) => JSON.stringify([...h.service.send.mock.calls, ...h.service.reply.mock.calls, ...h.service.update.mock.calls]);
+
+it('reattaches the accepted task when a restart replay of the same turn hits TASK_IDEMPOTENCY_CONFLICT, never failing it or offering retry', async () => {
+  const h = await harness();
+  const taskId = await seedSubmittedReceived(h, 'om_replayed');
+  h.runtime.dispatch.mockRejectedValueOnce(new RuntimeError('TASK_IDEMPOTENCY_CONFLICT', 'same key carries a different request', 409));
+  Object.assign(h.runtime, { getTasks: vi.fn(async () => [acceptedTask(taskId, 'queued')]) });
+  const coordinator = h.createCoordinator({ groupManager: allowAll() }); await coordinator.initializeWorkflows(config);
+  await vi.waitFor(async () => expect(await h.inbox('om_replayed')).toMatchObject({ state: 'accepted', taskId }));
+  expect(h.runtime.dispatch).toHaveBeenCalledOnce();
+  expect(h.runtime.dispatch.mock.calls[0]?.[6]).toBe(`lark:${config.appId}:om_replayed:1`);
+  expect(sentCards(h)).not.toContain('"state":"failed"');
+});
+
+it('a TASK_IDEMPOTENCY_CONFLICT whose accepted task cannot be read is handed to reconciliation, not failed', async () => {
+  const h = await harness();
+  await seedSubmittedReceived(h, 'om_replayed');
+  h.runtime.dispatch.mockRejectedValueOnce(new RuntimeError('TASK_IDEMPOTENCY_CONFLICT', 'same key carries a different request', 409));
+  Object.assign(h.runtime, { getTasks: vi.fn(async () => { throw new Error('database is locked'); }) });
+  const coordinator = h.createCoordinator({ groupManager: allowAll() }); await coordinator.initializeWorkflows(config);
+  await vi.waitFor(() => expect(h.log.warn).toHaveBeenCalledWith(expect.anything(), '任务已接收，后续步骤失败，结果交给订阅与对账'));
+  expect(await h.inbox('om_replayed')).toMatchObject({ state: 'received' });
+  expect(sentCards(h)).not.toContain('"state":"failed"');
+});
+
+it('expired received record whose turn the ledger accepted replays under the same key instead of claiming it never ran', async () => {
+  const h = await harness();
+  const taskId = await seedSubmittedReceived(h, 'om_expired_accepted', new Date(Date.now() - 90 * 60_000).toISOString());
+  h.runtime.dispatch.mockResolvedValueOnce({ id: taskId, sessionId: 'ses_durable', status: 'queued', queuedAhead: 0, replayed: true } as any);
+  Object.assign(h.runtime, { getTasks: vi.fn(async () => [acceptedTask(taskId, 'queued')]) });
+  const coordinator = h.createCoordinator({ groupManager: allowAll() }); await coordinator.initializeWorkflows(config);
+  await vi.waitFor(async () => expect(await h.inbox('om_expired_accepted')).toMatchObject({ state: 'accepted', taskId }));
+  expect(h.runtime.dispatch).toHaveBeenCalledOnce();
+  expect(h.runtime.dispatch.mock.calls[0]?.[6]).toBe(`lark:${config.appId}:om_expired_accepted:1`);
+  expect(sentCards(h)).not.toContain('请求未执行');
+});
+
+it.each([
+  ['absent from the ledger', async () => [], '请求未执行', '没有执行'],
+  ['unreadable', async () => { throw new Error('database is locked'); }, '请求结果未知', '无法确认这条请求是否已经执行']
+] as const)('expired received record whose turn is %s is closed without dispatch and says so', async (_case, getTasks, taskName, wording) => {
+  const h = await harness();
+  await seedSubmittedReceived(h, 'om_expired', new Date(Date.now() - 90 * 60_000).toISOString());
+  Object.assign(h.runtime, { getTasks: vi.fn(getTasks) });
+  const coordinator = h.createCoordinator({ groupManager: allowAll() }); await coordinator.initializeWorkflows(config);
+  expect(await h.inbox('om_expired')).toMatchObject({ state: 'failed', reason: 'backlog_expired' });
+  expect(h.service.reply).toHaveBeenCalledOnce();
+  expect(h.service.reply.mock.calls[0]?.[0]).toMatchObject({ messageId: 'om_expired', taskName });
+  expect(JSON.stringify(h.service.reply.mock.calls[0])).toContain(wording);
+  if (taskName === '请求结果未知') expect(JSON.stringify(h.service.reply.mock.calls[0])).not.toContain('没有执行');
   expect(h.runtime.dispatch).not.toHaveBeenCalled();
 });
 

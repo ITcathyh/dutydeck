@@ -63,7 +63,7 @@ import type { LarkMessageEvent } from './listener.js';
 import type { LarkGroup, LarkTask, PersistedLarkCardTask } from './coordinator.js';
 import { parseCardTask, parseOptionalCardTask } from './persisted-card-task.js';
 import { type LarkCommandPrompt, larkCardChannel, type LarkRelaunchClaim, larkTaskTitle, sendTaskCard } from './coordinator-core.js';
-import { LarkCoordinatorDispatch } from './coordinator-dispatch.js';
+import { LarkCoordinatorDispatch, larkTurnRuntimeTaskId } from './coordinator-dispatch.js';
 import { planPrompt } from '../plan-mode.js';
 import { planReplyAction } from './plan-flow.js';
 import { AgentCommandParamError, agentCommandConfirmSummary, agentCommandPlan, larkAgentCommandKind, type LarkAgentCommandRequest, type LarkAgentViewRequest, type LarkAgentSettingsRequest } from './agent-command.js';
@@ -231,8 +231,9 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
 
   /**
    * 恢复一条上次没处理完的入站消息。handle 会重新检查当前配置和成员身份，凭据从不重放。
-   * - 超过恢复年龄上限：unrouted 静默 ignored；已 received 标 failed，给仍有权限的发送人
-   *   提示重新发送；旧消息（larkRecoveryNoticeExpired）不回。
+   * - 超过恢复年龄上限：unrouted 静默 ignored；received 先按幂等键查执行账本（inboundTurnAccepted），
+   *   已接收的照常重放接回结果；确认没接收的标 failed，给仍有权限的发送人提示重新发送；查不到的标 failed，
+   *   只说结果未知，不说没有执行。旧消息（larkRecoveryNoticeExpired）不回。
    * - 平台明确拒绝（机器人不在群里、群已解散、没有权限）：标 failed 并写原因，重试也不会成功。
    * - 网络、5xx、超时这类瞬时失败：交还记录，退避后在后台重试，不丢；过了年龄上限按上一条收口。
    */
@@ -249,16 +250,24 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
           this.scheduleIgnoredPrune(config.appId);
           return;
         }
-        await this.inbox!.update(record, { state: 'failed', reason: 'backlog_expired', error: `重启后超过 ${hours} 小时仍未执行，不再自动执行。` });
-        const actor = record.event.senderOpenId;
-        if (actor && !larkRecoveryNoticeExpired(receivedAt) && await this.currentAccess(config, record.event.chatId, record.event.chatType, actor, 'task.view_result')) {
-          await this.workflowReply(record.event, config, `服务重启后，这条请求已超过 ${hours} 小时没有执行，不会再自动执行。如仍需要，请重新发送。`,
-            { failed: true, taskName: '请求未执行' });
+        const accepted = await this.inboundTurnAccepted(record, config);
+        if (accepted !== true) {
+          const unknown = accepted === undefined;
+          await this.inbox!.update(record, { state: 'failed', reason: 'backlog_expired',
+            error: unknown ? `重启后超过 ${hours} 小时，无法确认是否已执行，不再自动执行。` : `重启后超过 ${hours} 小时仍未执行，不再自动执行。` });
+          const actor = record.event.senderOpenId;
+          if (actor && !larkRecoveryNoticeExpired(receivedAt) && await this.currentAccess(config, record.event.chatId, record.event.chatType, actor, 'task.view_result')) {
+            await this.workflowReply(record.event, config, unknown
+              ? `服务重启后无法确认这条请求是否已经执行，且已超过 ${hours} 小时，不会自动重发。请先核对结果，如仍需要再重新发送。`
+              : `服务重启后，这条请求已超过 ${hours} 小时没有执行，不会再自动执行。如仍需要，请重新发送。`,
+              { failed: true, taskName: unknown ? '请求结果未知' : '请求未执行' });
+          }
+          return;
         }
       } catch (error) {
         this.log.warn({ error, messageId }, '过期的入站记录收尾失败');
+        return;
       }
-      return;
     }
     try {
       if (record.state === 'unrouted') await this.routeCaptured(record, config);
@@ -300,6 +309,24 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       } catch (settleError) {
         this.log.error({ error: settleError, cause: error, messageId }, '重启恢复入站消息失败后收口出错');
       }
+    }
+  }
+
+  /**
+   * 入站记录当前这一轮有没有被 runtime 接收。派发前一定先写会话和轮次，没写过就没有派发；
+   * 写过时按这一轮的幂等键查执行账本。没有账本、会话或读取失败时返回 undefined（结果未知）。
+   */
+  private async inboundTurnAccepted(record: LarkInboxRecord, config: StoredLarkConfig): Promise<boolean | undefined> {
+    const { sessionId, turn } = record;
+    if (!sessionId || !turn) return false;
+    if (!this.runtime.dispatch || !this.runtime.getTasks) return undefined;
+    try {
+      if (!await this.runtime.getSession(sessionId)) return undefined;
+      const taskId = larkTurnRuntimeTaskId(sessionId, config.appId, record.event.messageId, turn);
+      return (await this.runtime.getTasks(sessionId)).some(task => task.id === taskId);
+    } catch (error) {
+      this.log.warn({ error, messageId: record.event.messageId }, '重启后查询入站请求的执行记录失败，按结果未知处理');
+      return undefined;
     }
   }
 
