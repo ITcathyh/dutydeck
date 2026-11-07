@@ -472,6 +472,8 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
   private lastActivity: NormalizedDriverEvent['type'] | undefined;
   private inputUuid: string | undefined;
   private readonly inputEntries = new Set<string>();
+  /** Records of turns Claude started itself from a session scheduled task (CronCreate). */
+  private readonly scheduledEntries = new Set<string>();
   private inputError: NormalizedDriverEvent | undefined;
   private terminalScope = false;
   private turnTerminal = false;
@@ -544,6 +546,19 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
         const nativeInput = claudeInputText(entry) !== undefined && entry.isSidechain !== true;
         const notification = entry.turnOrigin === 'task_notification' || entry.origin?.kind === 'task-notification';
         if (nativeInput && !notification) { this.observedInputId = entry.uuid; this.memoryCalls.clear(); this.backgroundReported = false; }
+        // A scheduled-task turn answers no business input: its prose is a
+        // run-level follow-up, and it neither confirms, scopes nor ends a receipt.
+        if (this.observeScheduledTurn(entry, nativeInput && !notification)) {
+          if (baseline) return undefined;
+          this.tallyUsage(entry);
+          const events: NormalizedDriverEvent[] = backgroundFollowupText(entry);
+          if (backgroundChanged) {
+            const data = this.backgroundTasks.snapshot();
+            this.backgroundSnapshot = JSON.stringify(data);
+            events.unshift({ type: 'status', data });
+          }
+          return events.length > 0 ? events : undefined;
+        }
         const reportedBackground = claudePendingBackgroundWork(entry);
         if (reportedBackground !== undefined) {
           this.durationMarkerSeen = true;
@@ -648,8 +663,27 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
         this.terminalScope = false; this.turnTerminal = false; this.terminalUuids.clear();
         this.terminalPosition = undefined; this.recoveredInput = false;
         this.inputUuid = undefined; this.inputEntries.clear(); this.receiptEntry = undefined; this.restoringTurn = false;
+        this.scheduledEntries.clear();
       },
     });
+  }
+
+  /**
+   * Whether `entry` belongs to a turn Claude started from a session scheduled
+   * task. Claude Code 2.1.318 writes such a turn's prompt as a meta `user`
+   * record with `turnOrigin: 'scheduled'` (after a `system/scheduled_task_fire`
+   * record), and the turn's own records descend from it by `parentUuid`. Only
+   * that measured shape is recognised; a business input ends the chain even
+   * when Claude parents it on the scheduled turn's last record.
+   */
+  private observeScheduledTurn(entry: any, businessInput: boolean): boolean {
+    if (entry?.isSidechain === true || businessInput || typeof entry?.uuid !== 'string') return false;
+    const scheduled = (entry.type === 'user' && entry.turnOrigin === 'scheduled')
+      || (typeof entry.parentUuid === 'string' && this.scheduledEntries.has(entry.parentUuid));
+    if (!scheduled) return false;
+    this.scheduledEntries.add(entry.uuid);
+    while (this.scheduledEntries.size > 20_000) this.scheduledEntries.delete(this.scheduledEntries.values().next().value!);
+    return true;
   }
 
   start(): void {
