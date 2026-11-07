@@ -66,6 +66,15 @@ it('提交前就失败的轮次取到它的受理事件即止，不把整段会�
   expect(limits).toEqual([10]);
 });
 
+it('账本里找不到这一轮起点时窗口有上限，不把很长的会话整段读完', async () => {
+  const older = Array.from({ length: 30_000 }, (_, index) => ({ type: 'text', data: { text: `旧 ${index}` }, timestamp: at }));
+  const events = [...older, task('task_legacy', 'queued'), task('task_legacy', 'cancelled')] as AgentEvent[];
+  const limits: number[] = [];
+  const runtime = { getRecentEvents: async (_id: string, limit: number) => { limits.push(limit); return events.slice(-limit); } };
+  expect(await loadLarkTaskEvents(runtime, 'ses_long', 'task_legacy', 500)).toEqual([]);
+  expect(limits).toEqual([500, 1000, 2000, 4000, 8000, 16000, 20000]);
+});
+
 
 it('ignores incomplete diagnostic statuses and keeps ordinary tool results blocking a final answer', () => {
   const events = [

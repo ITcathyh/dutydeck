@@ -162,6 +162,8 @@ export async function loadLarkTaskEvents(
   return eventsForRuntimeTask(await loadLarkTaskWindow(runtime, sessionId, taskId, limit), taskId);
 }
 
+const larkTaskWindowMaxEvents = 20_000;
+
 /** 含这一轮起止边界事件的窗口：插话结果就记在边界事件上。 */
 export async function loadLarkTaskWindow(
   runtime: { getEvents?(id: string): Promise<AgentEvent[]>; getRecentEvents?(id: string, limit: number): Promise<AgentEvent[]> },
@@ -172,11 +174,13 @@ export async function loadLarkTaskWindow(
   // until the task boundary is present so the result cannot lose its beginning:
   // the acceptance event precedes every other event of the task, which also covers
   // a task that failed before its prompt was written.
+  // A task with neither boundary in the session (legacy data) would otherwise read
+  // the whole session on every lookup; past the cap a very long task loses its start.
   for (;;) {
     const events = await runtime.getRecentEvents(sessionId, limit);
-    if (events.length < limit || events.some(event => event.id === `accepted:${taskId}`
+    if (events.length < limit || limit >= larkTaskWindowMaxEvents || events.some(event => event.id === `accepted:${taskId}`
       || (event.type === 'text' && (event.data as any)?.role === 'user' && (event.data as any)?.taskId === taskId))) return events;
-    limit *= 2;
+    limit = Math.min(limit * 2, larkTaskWindowMaxEvents);
   }
 }
 
