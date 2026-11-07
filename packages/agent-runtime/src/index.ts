@@ -212,6 +212,8 @@ const UNKNOWN_TASK_ABANDON_MS = 7 * 24 * 60 * 60_000;
 const QUEUED_TASK_EXPIRE_MS = 24 * 60 * 60_000;
 /** 同会话上一条任务由 Agent 跑完不到这么久，视为按顺序轮到排头，不按过期处理。 */
 const QUEUE_HANDOFF_MS = 15 * 60_000;
+/** 轮次结束时执行端已自行拒掉、却没发终态事件的审批，补记的拒绝说明。 */
+const TURN_ENDED_PERMISSION_REASON = '本轮任务已结束，这次操作没有执行。';
 const workspaceBlockerStates: Record<string, string> = {
   WORKSPACE_PHYSICAL_RESOURCE_UNSAFE: '它的终端或执行进程还没确认已退出（残留终端）',
   DRIVER_STOP_BLOCKED: '它上次停止时没能确认进程已退出（残留终端）',
@@ -910,6 +912,7 @@ export class DutydeckRuntime {
         this.flushInsightSources(driver);
         await this.flushDriverEvents(session.id);
         if (!this.completedTurns.has(attempt.attemptId)) throw new RuntimeError('DRIVER_RESULT_INCOMPLETE', 'Recovered turn has no completed result', 409);
+        await this.closeTurnPermissions(ref);
         const result = this.turnOutput(ref);
         await this.mutations.write(session.id, async () => this.wake(this.bound().settleAttempt(this.attemptFence(ref), `settlement:${submission.submissionId}`, {
           kind: 'driver_result', submissionId: submission.submissionId, outcome: result.status,
@@ -931,6 +934,7 @@ export class DutydeckRuntime {
         }
         token.revoke(); this.completedTurns.delete(attempt.attemptId); this.driverStopReasons.delete(attempt.attemptId);
         this.turnErrors.delete(attempt.attemptId); this.attemptTools.delete(attempt.attemptId); this.oscPermissionWaits.delete(attempt.attemptId);
+        this.dropAttemptPermissions(attempt.attemptId);
         if (attached && !this.shuttingDown) await this.scoped(session.id, async () => {
           await this.projectQueue(session.id); this.queueBlocked.delete(session.id); this.scheduleQueue(session.id);
         });
@@ -2832,7 +2836,24 @@ export class DutydeckRuntime {
     await this.changeDriverConfiguration(session, existing, () => options);
     return existing;
   }
-  private permissionsForSession(id: string) { return [...this.permissions.values()].filter(permission => permission.fence.sessionId === id); }
+  private permissionsForSession(id: string) { return [...this.permissions.values()].filter(permission => permission.fence.sessionId === id && this.mutations.valid(permission.owner)); }
+  private dropAttemptPermissions(attemptId: string) {
+    for (const [key, permission] of this.permissions) if (permission.fence.attemptId === attemptId) { this.permissions.delete(key); this.permissionResolutions.delete(key); }
+  }
+  /**
+   * 驱动报告本轮结束后仍登记着的审批已不可能再被采纳（ACP 在中断、停止和轮次收尾时自行 reject_once，不发终态事件）。
+   * 补记拒绝，审批卡和时间线才会收起；正在提交的人工决议由 resolvePermission 自己收尾。
+   */
+  private async closeTurnPermissions(ref: AttemptRef & SessionFence) {
+    for (const [key, permission] of [...this.permissions]) {
+      if (permission.fence.attemptId !== ref.attemptId || this.permissionResolutions.has(key)) continue;
+      this.permissions.delete(key);
+      const request = { ...permission.request, status: 'rejected' as const, reason: TURN_ENDED_PERMISSION_REASON };
+      await this.eventScope.run(permission.fence, () => this.emit(ref.sessionId, 'permission_request', request)).catch(error =>
+        this.options.log?.warn({ sessionId: ref.sessionId, permissionId: request.id, error }, 'Permission closed by the ended turn could not be recorded'));
+      await this.artifact('savePermission', ref.sessionId, request).catch(() => {});
+    }
+  }
   private async recordPrompt(sessionId: string, prompt: string, stage: 'accepted_input' | 'session_context', mode: 'send' | 'steer', inputTaskId: string, operationId?: string, sources?: PromptSourceDiagnostics) {
     const data: PromptAssemblyData = {
       state: 'prompt_assembly', version: 1, stage,
@@ -2934,6 +2955,7 @@ export class DutydeckRuntime {
       // 结束快照在结算之前：结算事件一到，飞书结果卡就要读这一轮的改动摘要。
       await this.mutations.wait(observeEnd);
       if (!this.completedTurns.has(ref.attemptId)) throw new RuntimeError('DRIVER_RESULT_INCOMPLETE', 'Driver returned without a completed result', 409);
+      await this.closeTurnPermissions(ref);
       const result = this.turnOutput(ref);
       await this.mutations.write(id, async () => {
         const evidence = { kind: 'driver_result' as const, submissionId, outcome: result.status, outputDigest: result.outputDigest, stopReason: result.stopReason, complete: true as const };
@@ -2978,7 +3000,7 @@ export class DutydeckRuntime {
         token.revoke(); this.touch(id);
       }
       this.completedTurns.delete(ref.attemptId); this.driverStopReasons.delete(ref.attemptId); this.turnErrors.delete(ref.attemptId); this.eventFlushedAttempts.delete(ref.attemptId);
-      this.attemptTools.delete(ref.attemptId); this.oscPermissionWaits.delete(ref.attemptId); this.wakeResourceQueues();
+      this.attemptTools.delete(ref.attemptId); this.oscPermissionWaits.delete(ref.attemptId); this.dropAttemptPermissions(ref.attemptId); this.wakeResourceQueues();
     }
     const settled = this.publicTask(this.repos.execution.getTaskExecution(task.id)?.task ?? task);
     if (settledSession) this.notifyTaskSettled(settledSession, settled);
@@ -3785,7 +3807,10 @@ export class DutydeckRuntime {
     if (!driver?.resolvePermission) throw new RuntimeError('PERMISSION_EXPIRED', 'The original approval driver is unavailable', 409);
     const claim = makeId('permission_claim'); this.permissionResolutions.set(key, claim);
     try {
-      if (!this.mutations.valid(pending.owner) || pending.generation !== (this.sessionGenerations.get(sessionId) ?? 0) || this.permissions.get(key) !== pending) throw new RuntimeError('PERMISSION_EXPIRED', 'Permission request is no longer active', 409);
+      if (!this.mutations.valid(pending.owner) || pending.generation !== (this.sessionGenerations.get(sessionId) ?? 0) || this.permissions.get(key) !== pending) {
+        if (this.permissions.get(key) === pending) this.permissions.delete(key);
+        throw new RuntimeError('PERMISSION_EXPIRED', 'Permission request is no longer active', 409);
+      }
       // 记录里的说明脱敏后保存；交给执行端的仍是用户原文。
       const shownReason = !approved && reason ? permissionDisplayText(reason, [], freeTextInputMaxBytes) : '';
       const request = { ...pending.request, status: approved ? 'approved' as const : 'rejected' as const, ...(shownReason ? { reason: shownReason } : {}),

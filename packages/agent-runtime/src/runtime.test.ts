@@ -1181,6 +1181,34 @@ describe('runtime lifecycle acceptance', () => {
     await h.runtime.shutdown(); h.repos.close();
   });
 
+  it('closes a permission the driver dropped without a terminal event so later messages still run', async () => {
+    // ACP rejects pending approvals itself on interrupt and emits no terminal permission event.
+    const h = harness(); const turnGate = deferred(); let first = true;
+    h.driver.send = vi.fn(async () => {
+      if (first) {
+        first = false;
+        h.emit({ type: 'permission_request', data: { id: 'dropped', title: 'Write?', status: 'pending' } });
+        await turnGate.promise;
+        h.emit({ type: 'completed', data: { stopReason: 'cancelled' } });
+        return;
+      }
+      h.emit({ type: 'text', data: { text: 'ok' } }); h.emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+    });
+    h.driver.interrupt = vi.fn(async () => { turnGate.resolve(); });
+    await h.runtime.initialize([agent]); const s = await h.runtime.start({ agentId: 'mock' });
+    const turn = h.runtime.send(s.id, 'write');
+    await vi.waitFor(() => expect(h.runtime.getPendingPermissions(s.id)).toHaveLength(1));
+    await h.runtime.interrupt(s.id, undefined, 'installation_owner');
+    expect((await turn).status).toBe('interrupted');
+    const permissions = (await h.runtime.getEvents(s.id)).filter(event => event.type === 'permission_request').map(event => event.data as { status: string; reason?: string });
+    expect(permissions.map(item => item.status)).toEqual(['pending', 'rejected']);
+    expect(permissions[1]!.reason).toBeTruthy();
+    expect((await h.runtime.send(s.id, 'next')).status).toBe('completed');
+    expect((await h.runtime.send(s.id, 'again')).status).toBe('completed');
+    expect(h.driver.send).toHaveBeenCalledTimes(3);
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
   it('drops callbacks from a stopped driver after restart even when the permission id repeats', async () => {
     const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
     const callbacks: Array<(event: any) => void> = [];
