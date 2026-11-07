@@ -32,6 +32,8 @@ function fail(code: string): never { throw Object.assign(new Error(code), { code
  * CLI ignores SIGHUP; 10s covers that with margin for the CLI's own teardown.
  */
 const EXIT_PROOF_TIMEOUT_MS = 10_000;
+/** Wait after each escalation signal to recorded survivors (SIGTERM, then SIGKILL). */
+const ESCALATION_GRACE_MS = 2_000;
 /** Pre-kill durable record rounds for descendants born while it was being written. */
 const PRE_KILL_RECORD_ROUNDS = 5;
 /** After the last round, unrecorded newcomers must exit within this window (a busy pane's short-lived children). */
@@ -169,7 +171,7 @@ export async function stopOwnedTmux(identity: OwnedTmuxIdentity, probe: ProcessP
   if (!current) {
     const proof = { ...identity, stoppedAt: new Date().toISOString() };
     if ((await verifyOwnedTmuxExit(proof, probe))) return proof;
-    unproven(proof);
+    return escalate(proof, probe);
   }
   if (current !== targetId) fail('LEGACY_TMUX_TARGET_CHANGED');
   await ownerCheck(scope, targetId);
@@ -220,12 +222,42 @@ export async function stopOwnedTmux(identity: OwnedTmuxIdentity, probe: ProcessP
   const condition = `#{&&:#{==:#{pid},${server.pid}},#{&&:#{==:#{session_name},${scope.sessionName}},#{==:#{@dutydeck_owner_id},${scope.ownerId}}}}`;
   (await tmux(scope.socketPath, ['if-shell', '-F', '-t', targetId, condition, `kill-session -t ${targetId}`, '']));
   const proof: OwnedTmuxExitProof = { ...identity, identities: [...all.values()], stoppedAt: new Date().toISOString() };
-  const deadline = Date.now() + EXIT_PROOF_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    if ((await verifyOwnedTmuxExit(proof, probe))) return proof;
-    await new Promise(resolve => setTimeout(resolve, 50));
+  if ((await provenWithin(proof, probe, EXIT_PROOF_TIMEOUT_MS))) return proof;
+  return escalate(proof, probe);
+}
+/**
+ * kill-session only hangs up the panes; recorded processes that ignore SIGHUP or left the pane (nohup, setsid)
+ * outlive it. Signal exactly those identities, and only while the targeted session is verifiably gone: a session
+ * that is still there (the guarded kill did not run) or an uncertain observation leaves the stop unproven.
+ */
+async function escalate(proof: OwnedTmuxExitProof, probe: ProcessProbe): Promise<OwnedTmuxExitProof> {
+  const { scope, socket, targetId, server } = proof;
+  const sessionGone = async () => {
+    try {
+      if (probe.observe(server) === 'dead') return true;
+      return socketCheck(scope, socket, true) && (await target(scope)) !== targetId;
+    } catch { return false; }
+  };
+  for (const signal of ['SIGTERM', 'SIGKILL'] as const) {
+    if (!(await sessionGone())) break;
+    const observed = proof.identities.map(item => ({ item, state: probe.observe(item) }));
+    if (observed.some(({ state }) => state === 'unknown')) break;
+    const survivors = observed.filter(({ state }) => state === 'alive');
+    if (!survivors.length) break;
+    for (const { item } of survivors) {
+      try { process.kill(item.pid, signal); } catch { /* Exited meanwhile, or not signalable: the proof decides. */ }
+    }
+    if ((await provenWithin(proof, probe, ESCALATION_GRACE_MS))) return proof;
   }
   unproven(proof);
+}
+async function provenWithin(proof: OwnedTmuxExitProof, probe: ProcessProbe, ms: number): Promise<boolean> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if ((await verifyOwnedTmuxExit(proof, probe))) return true;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  return false;
 }
 
 /** Recheck before releasing a runtime resource; a cached successful stop is insufficient. */
