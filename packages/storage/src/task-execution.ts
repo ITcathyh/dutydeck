@@ -79,9 +79,8 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     return { task: t, currentAttempt: t.currentAttemptId ? attempt(t.currentAttemptId) : undefined, attempts: taskAttempts(t.id), steering: taskSteering(t.id) };
   };
   const attempts = (sessionId: string) => cached('SELECT json FROM task_attempts WHERE session_id=? ORDER BY number,id').all(sessionId).map(row => rowJson<TaskAttempt>(row)!);
-  const readResource = (row: unknown): DriverResource | undefined => {
-    if (!row) return;
-    const r = parseStored(taskExecutionSchemas.resource, rowJson<unknown>(row));
+  const validateResource = (value: unknown): DriverResource => {
+    const r = parseStored(taskExecutionSchemas.resource, value);
     const provenance = r.creationProvenance;
     const closure = r.creationClosure;
     if (provenance && (r.kind !== 'operation' || !same(provenance.controller, r.controller))) fail('RESOURCE_CREATION_PROVENANCE_INVALID');
@@ -97,8 +96,22 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     if(r.nativeBindings?.some(binding=>r.purpose!=='acp_native_context'||binding.sessionId!==r.sessionId||binding.context.resourceId!==r.resourceId||binding.context.identityId!==r.identity?.identityId||binding.context.originRunId!==r.runId))fail('NATIVE_CONTEXT_BINDING_INVALID');
     return r;
   };
-  const resourceById = cached('SELECT json FROM driver_resources WHERE id=?');
-  const resourcesBySession = cached('SELECT json FROM driver_resources WHERE session_id=? ORDER BY rowid');
+  // Admission rereads every competing session's resources on each pass. Validation depends only on the stored
+  // text, so a row whose text is unchanged reuses the validated result. Callers mutate what they read, so each
+  // read decodes a fresh copy of it (JSON, like the stored row, and cheaper than structuredClone).
+  const validatedResources = new Map<string, { stored: string; validated: string }>();
+  const readResource = (row: unknown): DriverResource | undefined => {
+    if (!row) return;
+    const { id: resourceId, json: stored } = row as { id: string; json: string };
+    const known = validatedResources.get(resourceId);
+    if (known?.stored === stored) return JSON.parse(known.validated) as DriverResource;
+    const value = validateResource(JSON.parse(stored));
+    if (validatedResources.size >= 4096) validatedResources.clear();
+    validatedResources.set(resourceId, { stored, validated: json(value) });
+    return value;
+  };
+  const resourceById = cached('SELECT id,json FROM driver_resources WHERE id=?');
+  const resourcesBySession = cached('SELECT id,json FROM driver_resources WHERE session_id=? ORDER BY rowid');
   const resource = (resourceId: string) => readResource(resourceById.get(resourceId));
   const resources = (sessionId: string) => resourcesBySession.all(sessionId).map(row => readResource(row)!);
   const assertChecks = (sessionId: string, checks: ResourceCheckRef[]) => {

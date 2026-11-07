@@ -3241,20 +3241,23 @@ export class DutydeckRuntime {
   private async closeUnprovenIdleCompetitors(id: string, taskId: string, allowProofRetry: boolean): Promise<boolean> {
     const blockers = this.repos.execution.getTaskExecution(taskId)?.blockers ?? [];
     let closed = false;
+    // Idle proof covers every driver, so one pass serves all competitors until the next await lets driver state move.
+    let fresh: ResourceCheckRef[] | undefined;
     for (const otherId of new Set(blockers.filter(value => value.code === 'WORKSPACE_PHYSICAL_RESOURCE_UNSAFE').map(value => value.sessionId))) {
       if (otherId === id || this.repos.execution.getUnresolvedTasks(otherId).length || this.sessionHeld(otherId)
         || blockers.some(value => value.sessionId === otherId && value.code !== 'WORKSPACE_PHYSICAL_RESOURCE_UNSAFE')) continue;
       const driver = this.drivers.get(otherId);
       if (!driver || driver.hasBackgroundWork?.() === true || this.driverOperations.get(driver)?.size || this.permissionsForSession(otherId).length) continue;
-      const fresh = this.idleResourceChecks();
+      const proof = fresh ??= this.idleResourceChecks();
       const resources = this.repos.execution.getResources(otherId);
       const disputed = blockers.filter(value => value.sessionId === otherId && value.code === 'WORKSPACE_PHYSICAL_RESOURCE_UNSAFE');
       if (disputed.every(block => {
         const r = resources.find(value => value.resourceId === block.resourceId);
         const parent = resources.find(value => value.resourceId === r?.parentResourceId);
-        return r && fresh.some(check => check.resourceId === r.resourceId)
+        return r && proof.some(check => check.resourceId === r.resourceId)
           && (r.kind === 'local_only' || r.kind === 'process' && parent?.stage === 'created' && ['lifecycle','strict-context-restore'].includes(parent.operationScope?.kind ?? ''));
       })) { if (allowProofRetry) closed = true; continue; }
+      fresh = undefined;
       // Adapters without a reliable background-empty proof must prove physical stop on contention.
       if (driver.prepareForIdleRetirement && !await driver.prepareForIdleRetirement()) continue;
       try { await this.mutations.run(undefined, () => this.stopDriver(otherId,driver)); closed = true; }

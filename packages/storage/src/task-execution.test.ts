@@ -378,6 +378,9 @@ describe('task execution ledger',()=>{
       x.observed(f,name,finished.revision,{observationId:`gone-${name}`,state:'gone',identityId:`identity-${name}`,evidenceRef:'original-child-close',observedAt:session().createdAt});
     }
     expect(repos.execution.getResources('s')).toHaveLength(3);expect(repos.execution.getSessionResourceBlockers('s').map(b=>b.resourceId)).toEqual(['op']);
+    // Repeated reads reuse validation; a caller mutating its copy must not change what the next read returns.
+    const before=repos.execution.getResources('s'),copy=repos.execution.getResources('s')[1]!;copy.revision=999;copy.observations.length=0;
+    expect(repos.execution.getResources('s')).toEqual(before);
     accepted(x);expect(()=>x.claimNext(f)).toThrow(expect.objectContaining({code:'SESSION_RESOURCE_BLOCKED'}));
     x.creationFinished(f,'op',op.revision,'created');expect(repos.execution.getSessionResourceBlockers('s')).toEqual([]);
     expect(()=>x.beforeCreate(f,{resourceId:'late',kind:'process',parentResourceId:'op'})).toThrow(/RESOURCE_PARENT_CLOSED/);
