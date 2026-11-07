@@ -2,7 +2,7 @@ import { clearTaskReportSafely, isTerminalTaskStatus, readSessionTaskReportRefer
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import type { AgentCapabilities, AgentConfig, AttemptActivity, AgentDriver, AgentEvent, DriverFactory, DriverTranscriptSourceObservation, EventType, EventWindowOptions, HistoryOutlineQuery, NormalizedDriverEvent, PermissionMode, PermissionRequestData, PromptAssemblyData, PromptPart, PromptSourceDiagnostics, PublicTaskRecord, RepositoryBundle, RuntimeControlClaim, Session, SkillDeliveryMetadata, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy, TranscriptSourceObservation, VerificationCommandInput, VerificationResponse, WorkspaceCleanupBlocker, WorkspaceCleanupPreview, WorkspaceCleanupResult, WorkspaceResponse } from '@dutydeck/shared';
-import { timeLoop, eventHasContent, normalizeEventContent, deferredConfirmationId, agentCommandApprovalReason, isAgentCommandAutoApproval, canonicalExecutionJson, ptyRetirementRecoverySchema, steeringRecoveryDecisionSchema, executionRecoveryDecisionSchema, unknownTaskResolutionSchema, executionActorSchema, taskRequestV1Schema, steerableTaskNamespace, makeId, now, RuntimeError, permissionDisplayText, freeTextInputMaxBytes, workspaceModes, sessionNameConfigKey, normalizeSessionName, parseLarkSourceId, supportsRemoteApproval, supportsNativeFork, redactCredentialText, PROMPT_NOT_WRITTEN, unknownTaskActionLabels } from '@dutydeck/shared';
+import { timeLoop, eventHasContent, normalizeEventContent, deferredConfirmationId, agentCommandApprovalReason, isAgentCommandAutoApproval, canonicalExecutionJson, ptyRetirementRecoverySchema, steeringRecoveryDecisionSchema, executionRecoveryDecisionSchema, unknownTaskResolutionSchema, executionActorSchema, taskRequestV1Schema, steerableTaskNamespace, makeId, now, errorMessage, withTimeout, RuntimeError, permissionDisplayText, freeTextInputMaxBytes, workspaceModes, sessionNameConfigKey, normalizeSessionName, parseLarkSourceId, supportsRemoteApproval, supportsNativeFork, redactCredentialText, PROMPT_NOT_WRITTEN, unknownTaskActionLabels } from '@dutydeck/shared';
 import { listAcpxBuiltinAgents, AcpxAdapter, testRegexWithTimeout, ProcessTreeCpu, readNativeCreationRecord } from '@dutydeck/acp-client';
 import { JsonlTransport, PipeTransport, probeAgent, PtyTransport } from '@dutydeck/transports';
 import { mkdir, realpath, writeFile } from 'node:fs/promises';
@@ -833,7 +833,7 @@ export class DutydeckRuntime {
     } catch (error) {
       // 工作目录不见了由外层按会话跳过；其余失败只推迟这个终端，资源保持阻塞，不能让整个实例起不来。
       if (error instanceof RevokedOperation || error instanceof RuntimeError && error.code === 'WORKSPACE_UNAVAILABLE') throw error;
-      this.options.log?.warn({ sessionId: session.id, code: error instanceof RuntimeError ? error.code : 'TERMINAL_RECOVERY_FAILED', error: String(error) }, 'Idle terminal recovery deferred');
+      this.options.log?.warn({ sessionId: session.id, code: error instanceof RuntimeError ? error.code : 'TERMINAL_RECOVERY_FAILED', error }, 'Idle terminal recovery deferred');
       await this.emit(session.id, 'status', { state: 'terminal_recovery_deferred', message: 'Original idle terminal identity could not be verified; resource remains blocked' })
         .catch(emitError => { if (emitError instanceof RevokedOperation) throw emitError; });
       return false;
@@ -843,7 +843,7 @@ export class DutydeckRuntime {
         // 未采纳的临时 driver 不代表会话；放不掉时，它迟到的事件和退出回调也不能记到会话上。
         if (this.sessionGenerations.get(session.id) === generation) this.nextSessionGeneration(session.id);
         try { await driver.prepareForDaemonShutdown?.(true); await driver.stop(); }
-        catch (error) { this.options.log?.warn({ sessionId: session.id, error: String(error) }, 'Unadopted idle terminal driver could not be released; resource remains blocked'); }
+        catch (error) { this.options.log?.warn({ sessionId: session.id, error }, 'Unadopted idle terminal driver could not be released; resource remains blocked'); }
       }
     }
   }
@@ -2310,7 +2310,7 @@ export class DutydeckRuntime {
 
     } catch (error) {
       if (error instanceof RevokedOperation || error instanceof RuntimeError && error.code === 'WORKSPACE_CONFLICT') throw error;
-      const message = error instanceof Error ? error.message : String(error);
+      const message = errorMessage(error);
       session.state = 'failed'; session.error = message; session.updatedAt = now();
       await this.saveState(session, 'failed', message);
       await this.artifact('saveError', session.id, message);
@@ -2324,7 +2324,7 @@ export class DutydeckRuntime {
       await this.saveState(session, 'idle'); return this.withSessionMetadata(session);
     } catch (error) {
       if (error instanceof RevokedOperation) throw error;
-      const message = error instanceof Error ? error.message : String(error);
+      const message = errorMessage(error);
       const driver = this.drivers.get(session.id);
       try { if (driver) await this.stopDriver(session.id, driver, true); } catch { /* Retain resource block and original failure. */ }
       await this.artifact('saveError', session.id, message);
@@ -2470,7 +2470,7 @@ export class DutydeckRuntime {
         const current=await this.repos.sessions.get(id);
         if(current?.runId===original.runId&&!current.archivedAt&&!this.repos.execution.getUnresolvedTasks(id).length) {
           await this.patchSession(id,{state:original.state==='starting'?'failed':original.state,
-            error:original.state==='starting'?(error instanceof Error?error.message:String(error)):original.error});
+            error:original.state==='starting'?(errorMessage(error)):original.error});
         }
       }));
       throw error;
@@ -2879,22 +2879,26 @@ export class DutydeckRuntime {
    * 关机时只删内存：保留的 tmux 任务重启后可能重新识别同一审批。
    */
   private async dropAttemptPermissions(attemptId: string) {
-    const leftover: Array<[string, PendingPermission]> = [];
+    const leftover: PendingPermission[] = [];
     for (const [key, permission] of this.permissions) if (permission.fence.attemptId === attemptId) {
-      this.permissions.delete(key); this.permissionResolutions.delete(key); leftover.push([key, permission]);
+      this.permissions.delete(key); this.permissionResolutions.delete(key); leftover.push(permission);
     }
     if (!this.shuttingDown) await this.closeLeftoverPermissions(leftover);
   }
+  /** 把轮次结束后仍登记着的审批补记为拒绝：事件按 `scope` 的 fence 写入，再落到 permission_requests。 */
+  private async recordTurnEndedRejection(permission: PendingPermission, scope: AttemptRef & SessionFence | SessionFence, logMessage: string) {
+    const { sessionId } = scope;
+    const request = { ...permission.request, status: 'rejected' as const, reason: TURN_ENDED_PERMISSION_REASON };
+    await this.eventScope.run(scope, () => this.emit(sessionId, 'permission_request', request)).catch(error =>
+      this.options.log?.warn({ sessionId, permissionId: request.id, error }, logMessage));
+    await this.artifact('savePermission', sessionId, request).catch(() => {});
+  }
   /** 轮次已经结算或被撤销，审批事件按会话级 fence 写入；不持有已撤销的轮次令牌，也不能在会话写锁内调用。 */
-  private async closeLeftoverPermissions(leftover: Array<[string, PendingPermission]>) {
-    for (const [, permission] of leftover) {
+  private async closeLeftoverPermissions(leftover: PendingPermission[]) {
+    for (const permission of leftover) {
       const { sessionId, runId } = permission.fence;
-      const request = { ...permission.request, status: 'rejected' as const, reason: TURN_ENDED_PERMISSION_REASON };
-      await this.mutations.run(undefined, async () => {
-        await this.eventScope.run({ sessionId, runId }, () => this.emit(sessionId, 'permission_request', request)).catch(error =>
-          this.options.log?.warn({ sessionId, permissionId: request.id, error }, 'Permission left by the ended turn could not be recorded'));
-        await this.artifact('savePermission', sessionId, request).catch(() => {});
-      });
+      await this.mutations.run(undefined, () =>
+        this.recordTurnEndedRejection(permission, { sessionId, runId }, 'Permission left by the ended turn could not be recorded'));
     }
   }
   /**
@@ -2905,10 +2909,7 @@ export class DutydeckRuntime {
     for (const [key, permission] of [...this.permissions]) {
       if (permission.fence.attemptId !== ref.attemptId || this.permissionResolutions.has(key)) continue;
       this.permissions.delete(key);
-      const request = { ...permission.request, status: 'rejected' as const, reason: TURN_ENDED_PERMISSION_REASON };
-      await this.eventScope.run(permission.fence, () => this.emit(ref.sessionId, 'permission_request', request)).catch(error =>
-        this.options.log?.warn({ sessionId: ref.sessionId, permissionId: request.id, error }, 'Permission closed by the ended turn could not be recorded'));
-      await this.artifact('savePermission', ref.sessionId, request).catch(() => {});
+      await this.recordTurnEndedRejection(permission, permission.fence, 'Permission closed by the ended turn could not be recorded');
     }
   }
   private async recordPrompt(sessionId: string, prompt: string, stage: 'accepted_input' | 'session_context', mode: 'send' | 'steer', inputTaskId: string, operationId?: string, sources?: PromptSourceDiagnostics) {
@@ -3024,7 +3025,7 @@ export class DutydeckRuntime {
       });
       if (result.status === 'completed') this.agentUnavailable.delete(session.agentId);
     } catch (error) {
-      if (agentId) await this.noteAgentFailure(agentId, { message: error instanceof Error ? error.message : String(error), code: (error as { code?: unknown } | undefined)?.code });
+      if (agentId) await this.noteAgentFailure(agentId, { message: errorMessage(error), code: (error as { code?: unknown } | undefined)?.code });
       // Stop owns revoked attempts and retains its claim until this cleanup finishes.
       if (this.mutations.valid(token)) {
         await this.flushDriverEvents(id).catch(() => {});
@@ -3034,20 +3035,20 @@ export class DutydeckRuntime {
         const unsubmitted = this.repos.execution.getTaskExecution(task.id)?.attempts.find(item => item.attemptId === ref.attemptId);
         const failureCode = (error as { code?: unknown } | undefined)?.code;
         this.options.log?.warn({ sessionId: id, taskId: task.id, attemptId: ref.attemptId,
-          submissionState: unsubmitted?.submissionState, error: redactCredentialText(error instanceof Error ? error.message : String(error)),
+          submissionState: unsubmitted?.submissionState, error: redactCredentialText(errorMessage(error)),
           ...(error instanceof Error && error.stack ? { stack: redactCredentialText(error.stack) } : {}),
           ...(typeof failureCode === 'string' && /^[A-Z0-9_]+$/.test(failureCode) ? { code: failureCode } : {}),
         }, 'Agent task execution failed');
         // 驱动确认 prompt 没写入（PROMPT_NOT_WRITTEN）时，记过的提交意图不算提交：同样按未提交、可重试结算。
         const notWritten = failureCode === PROMPT_NOT_WRITTEN;
         if (unsubmitted && unsubmitted.state !== 'settled' && (unsubmitted.submissionState === 'not_submitted' || notWritten && unsubmitted.submissionState === 'intent_recorded') && !isTaskFenceRevocation(error)) {
-          await this.emit(id, 'error', { message: error instanceof Error ? error.message : String(error) }).catch(() => {});
+          await this.emit(id, 'error', { message: errorMessage(error) }).catch(() => {});
         }
         await this.mutations.write(id, async () => {
           const attempt = this.repos.execution.getTaskExecution(task.id)?.attempts.find(item => item.attemptId === ref.attemptId);
           if (!attempt || attempt.state === 'settled') return;
-          if (attempt.submissionState === 'not_submitted') this.wake(this.bound().settleAttempt(this.attemptFence(ref), `preparation:${ref.attemptId}`, { kind: 'not_submitted', outcome: isTaskFenceRevocation(error) ? 'cancelled' : 'failed', reason: error instanceof Error ? error.message : String(error) }));
-          else if (notWritten && attempt.submissionState === 'intent_recorded' && attempt.submission) this.wake(this.bound().settleAttempt(this.attemptFence(ref), `preparation:${ref.attemptId}`, { kind: 'not_submitted', outcome: 'failed', reason: error instanceof Error ? error.message : String(error), submissionId: attempt.submission.submissionId }));
+          if (attempt.submissionState === 'not_submitted') this.wake(this.bound().settleAttempt(this.attemptFence(ref), `preparation:${ref.attemptId}`, { kind: 'not_submitted', outcome: isTaskFenceRevocation(error) ? 'cancelled' : 'failed', reason: errorMessage(error) }));
+          else if (notWritten && attempt.submissionState === 'intent_recorded' && attempt.submission) this.wake(this.bound().settleAttempt(this.attemptFence(ref), `preparation:${ref.attemptId}`, { kind: 'not_submitted', outcome: 'failed', reason: errorMessage(error), submissionId: attempt.submission.submissionId }));
           else this.wake(this.bound().markReconcileRequired(this.attemptFence(ref), { reasonId: `unknown:${ref.attemptId}`, code: error instanceof RuntimeError || error instanceof Error && 'code' in error && typeof error.code === 'string' && /^[A-Z0-9_]+$/.test(error.code) ? String(error.code) : 'DRIVER_RESULT_UNKNOWN', evidenceRefs: [] }));
         });
       }
@@ -3581,7 +3582,7 @@ export class DutydeckRuntime {
           return skipped(outcome);
         } catch (error) {
           await record('unknown');
-          return skipped('failed',error instanceof Error ? error.message : String(error));
+          return skipped('failed',errorMessage(error));
         } finally { finishObservation?.(); clearTimeout(timer); }
       } catch (error) {
         if (operation) await record('unknown');
@@ -3645,7 +3646,7 @@ export class DutydeckRuntime {
     const driver = await this.reconnect(session);
     if (!driver.setModel) throw new RuntimeError('MODEL_SWITCH_UNSUPPORTED', `Agent ${session.agentId} does not support runtime model switching`, 422);
     try { await this.changeDriverConfiguration(session, driver, current => ({ ...current, model: normalized }), { model: normalized }); }
-    catch (error) { throw switchRejection(error) ?? new RuntimeError('MODEL_SWITCH_FAILED', error instanceof Error ? error.message : String(error), 422); }
+    catch (error) { throw switchRejection(error) ?? new RuntimeError('MODEL_SWITCH_FAILED', errorMessage(error), 422); }
     await this.emit(id, 'status', { state: session.state, model: normalized });
     return this.withSessionMetadata(session);
     });
@@ -3659,7 +3660,7 @@ export class DutydeckRuntime {
     const driver = await this.reconnect(session);
     if (!driver.setReasoningEffort) throw new RuntimeError('REASONING_SWITCH_UNSUPPORTED', `Agent ${session.agentId} does not support runtime reasoning effort switching`, 422);
     try { await this.changeDriverConfiguration(session, driver, current => ({ ...current, reasoningEffort: normalized }), { reasoningEffort: normalized }); }
-    catch (error) { throw switchRejection(error) ?? new RuntimeError('REASONING_SWITCH_FAILED', error instanceof Error ? error.message : String(error), 422); }
+    catch (error) { throw switchRejection(error) ?? new RuntimeError('REASONING_SWITCH_FAILED', errorMessage(error), 422); }
     await this.emit(id, 'status', { state: session.state, reasoningEffort: normalized });
     return this.withSessionMetadata(session);
     });
@@ -3720,7 +3721,7 @@ export class DutydeckRuntime {
       void stopping.catch(() => {});
       let factError: unknown;
       let actorRequired = false;
-      const stoppedPermissions: Array<[string, PendingPermission]> = [];
+      const stoppedPermissions: PendingPermission[] = [];
       try {
       await this.verifications.stopSession(id);
       await this.mutations.write(id, async () => {
@@ -3739,7 +3740,7 @@ export class DutydeckRuntime {
         }
         if (intent.cancelQueue) actorRequired = !await this.cancelSessionQueue(id, intent.actor);
         for (const [key, permission] of this.permissions) if (permission.fence.sessionId === id) {
-          this.permissions.delete(key); this.permissionResolutions.delete(key); stoppedPermissions.push([key, permission]);
+          this.permissions.delete(key); this.permissionResolutions.delete(key); stoppedPermissions.push(permission);
         }
       });
       } catch (error) { factError = error; }
@@ -3912,7 +3913,7 @@ export class DutydeckRuntime {
           await this.artifact('savePermission', sessionId, request).catch(() => {});
         });
       } catch (error) {
-        throw new RuntimeError('PERMISSION_ACCEPTED_AUDIT_FAILED', `Permission accepted but audit delivery failed: ${error instanceof Error ? error.message : String(error)}`, 503);
+        throw new RuntimeError('PERMISSION_ACCEPTED_AUDIT_FAILED', `Permission accepted but audit delivery failed: ${errorMessage(error)}`, 503);
       }
       // Subsequent driver events own the session state; an approval must not overwrite a completed turn.
       return request;
@@ -3982,14 +3983,8 @@ export class DutydeckRuntime {
     const token = this.ownerOf(id), lifecycle = this.lifecycle(id);
     const current = () => !this.shuttingDown && this.mutations.valid(token) && this.lifecycle(id) === lifecycle && !this.stopRuns.has(id)
       && this.blockedDrivers.get(id)?.driver === driver && (this.drivers.get(id) ?? driver) === driver;
-    const bounded = <T>(operation: () => Promise<T>) => {
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const expired = new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new RuntimeError('DRIVER_STOP_UNVERIFIED', 'Driver exit check timed out', 409)), STOP_RECHECK_PROBE_MS);
-        timer.unref?.();
-      });
-      return Promise.race([operation(), expired]).finally(() => clearTimeout(timer));
-    };
+    const bounded = <T>(operation: () => Promise<T>) =>
+      withTimeout(operation(), STOP_RECHECK_PROBE_MS, () => new RuntimeError('DRIVER_STOP_UNVERIFIED', 'Driver exit check timed out', 409));
     let error: unknown;
     try {
       // 探测在停止流程外：挂起时不占用 stopRuns，显式停止或重启不会排在它后面。

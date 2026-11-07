@@ -291,7 +291,6 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     const store = options.plan?.store ?? options.lark?.config;
     const workItems = options.workItems;
     registerInboxRoutes(app, runtime, {
-      canView: canViewSession,
       canViewMany: (request, items, listed) => filterViewable(request, items, session => session.id, listed),
       sources: {
         runtime, store,

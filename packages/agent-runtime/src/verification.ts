@@ -4,7 +4,7 @@ import { promisify } from 'node:util';
 import { lstat, readFile, readdir, readlink, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ConfigRepository, VerificationCommandInput, VerificationRecord, VerificationResponse } from '@dutydeck/shared';
-import { makeId, now, RuntimeError, parseProcStat, procStatExited } from '@dutydeck/shared';
+import { makeId, mapLimit, now, RuntimeError, parseProcStat, procStatExited } from '@dutydeck/shared';
 import { SAFE_GIT_CONFIG } from '@dutydeck/shared/safe-git';
 import { minimalToolEnvironment } from './process-environment.js';
 
@@ -216,19 +216,8 @@ async function contentFingerprint(scan: RepositoryScan): Promise<string> {
   return hash.digest('hex');
 }
 
-async function mapSettled<T>(items: readonly string[], task: (item: string, index: number) => Promise<T>): Promise<(T | Error)[]> {
-  const results = new Array<T | Error>(items.length);
-  let next = 0;
-  const worker = async () => {
-    while (next < items.length) {
-      const index = next++;
-      try { results[index] = await task(items[index]!, index); }
-      catch (error) { results[index] = error as Error; }
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(ENTRY_CONCURRENCY, items.length) }, worker));
-  return results;
-}
+const mapSettled = <T>(items: readonly string[], task: (item: string, index: number) => Promise<T>): Promise<(T | Error)[]> =>
+  mapLimit(items, ENTRY_CONCURRENCY, (item, index) => task(item, index).catch(error => error as Error));
 
 function key(sessionId: string, verificationId: string) {
   return `${VERIFICATION_KEY_PREFIX}${sessionId}:${verificationId}`;

@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3';
-import { cachedStatement } from './database-control.js';
+import { cachedStatement } from './statement-cache.js';
 import type { RepositoryBundle } from '@dutydeck/shared';
 
 /** Derived from the existing config JSON; triggers keep CAS and scheduling atomic. */

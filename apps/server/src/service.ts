@@ -143,6 +143,7 @@ export const UNSAFE_NO_AUTH_ENV = 'DUTYDECK_UNSAFE_NO_AUTH';
 /** 停服步骤，按执行顺序；强制退出时据此列出还没开始的步骤。 */
 const SHUTDOWN_PHASES = ['insight', 'historyRetention', 'watch', 'pluginResults', 'workbench', 'workbenchHttp', 'workItems', 'delegations', 'automation', 'ciWebhook', 'pullRequests',
   'relayClose', 'collaboration', 'relayFlush', 'http', 'runtime', 'capabilities', 'database', 'pluginDispose'] as const;
+type ShutdownPhase = typeof SHUTDOWN_PHASES[number];
 
 /**
  * 监听地址不是回环、认证又关着（open 模式）时返回拒绝启动的说明，显式确认 unsafe 时放行。
@@ -724,7 +725,8 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   const workInteractions = new WorkItemInteractions(workItems, runtime, relayBroker, (sessionId, actorId, action) => authorizeWorkItemInteraction(repos, groupManager, sessionId, actorId, action, env, workbenchHttp.fetch));
   closeResources = () => {
     if (!closeRun) closeRun = (async () => {
-      const phase = (name: string, operation: () => unknown) => shutdownPhases.run(name, operation);
+      // 名字限定在 SHUTDOWN_PHASES 里，增删步骤时两边对不上会在编译期报错。
+      const phase = (name: ShutdownPhase, operation: () => unknown) => shutdownPhases.run(name, operation);
       // 分析服务必须在任何并行关闭组之前显式 await：先拒新刷新、取消 queued/running
       // 作业并等待 runner 退出与临时目录清理，再关闭 HTTP/runtime/repos。
       await phase('insight', closeInsightService);
@@ -738,7 +740,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       historyRetention.abort();
       await phase('historyRetention', () => historyRetentionRun);
       const errors: unknown[] = [...insightCloseErrors];
-      const settle = async (operations: Array<[string, () => unknown]>) => {
+      const settle = async (operations: Array<[ShutdownPhase, () => unknown]>) => {
         const results = await Promise.allSettled(operations.map(([name, operation]) => phase(name, operation)));
         errors.push(...results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => result.reason));
       };

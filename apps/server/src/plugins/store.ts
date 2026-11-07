@@ -8,6 +8,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { promisify } from 'node:util';
 import { z } from 'zod';
 import Database from 'better-sqlite3';
+import { errorMessage } from '@dutydeck/shared';
 import { currentProcessIdentity, observeProcess } from '@dutydeck/storage';
 import { pluginActivationBlockers, pluginHostLeases, pluginHostStates, validateProviderRegistration, type PluginHostState } from './activation.js';
 import { LocalFilePluginSecretResolver, LocalFileSecretProvider, secretDirectoryForDatabase } from '@dutydeck/secret-provider';
@@ -255,7 +256,7 @@ export class PluginStore {
     if (!existsSync(path)) return { version: 1, plugins: {} };
     let raw: unknown;
     try { raw = JSON.parse(readFileSync(path, 'utf8')); }
-    catch (error) { throw new PluginStoreError('PLUGIN_LOCK_INVALID', `${path} 不是合法的 JSON：${error instanceof Error ? error.message : String(error)}`); }
+    catch (error) { throw new PluginStoreError('PLUGIN_LOCK_INVALID', `${path} 不是合法的 JSON：${errorMessage(error)}`); }
     const parsed = lockFileSchema.safeParse(raw);
     if (!parsed.success) throw new PluginStoreError('PLUGIN_LOCK_INVALID', `${path} 格式不正确：${parsed.error.issues.map(issue => `${issue.path.join('.')} ${issue.message}`).join('; ')}`);
     return parsed.data;

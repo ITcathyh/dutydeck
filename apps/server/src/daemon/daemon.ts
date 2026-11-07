@@ -243,22 +243,20 @@ function ensureDir(dir: string): void {
 }
 
 /** 并发读的一方只会看到完整的旧内容或新内容，读不到截断到一半的空文件。 */
-const writeAtomic = (file: string, content: string) => writeFileAtomicSync(file, content);
-
 export function writeState(dir: string, state: DaemonState): void {
   ensureDir(dir);
-  writeAtomic(join(dir, STATE_FILE), `${JSON.stringify(state, null, 2)}\n`);
+  writeFileAtomicSync(join(dir, STATE_FILE), `${JSON.stringify(state, null, 2)}\n`);
 }
 
 export function writePidFile(dir: string, pid: number): void {
   ensureDir(dir);
-  writeAtomic(join(dir, PID_FILE), `${pid}\n`);
+  writeFileAtomicSync(join(dir, PID_FILE), `${pid}\n`);
 }
 
 export function clearState(dir: string): void {
   ensureDir(dir);
-  writeAtomic(join(dir, STATE_FILE), '');
-  writeAtomic(join(dir, PID_FILE), '');
+  writeFileAtomicSync(join(dir, STATE_FILE), '');
+  writeFileAtomicSync(join(dir, PID_FILE), '');
 }
 
 const START_LOCK_FILE = '.start-lock.sqlite';

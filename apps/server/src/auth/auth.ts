@@ -476,9 +476,6 @@ export function registerAuthMiddleware(app: FastifyInstance, options: AuthMiddle
 const browserAuthRequired = (request: FastifyRequest, options: AuthMiddlewareOptions) =>
   accessMode(options) === 'token';
 
-const requestToken = (request: FastifyRequest) => extractBearerToken(request.headers.authorization)
-  ?? extractCookie(request.headers.cookie);
-
 const cookieAttributes = (request: FastifyRequest, clear = false) => {
   const forwarded = request.headers['x-forwarded-proto'];
   const protocol = (Array.isArray(forwarded) ? forwarded[0] : forwarded)?.split(',')[0]?.trim();
@@ -508,7 +505,7 @@ export function registerBrowserAuthRoutes(app: FastifyInstance, options: AuthMid
     const required = browserAuthRequired(request, options);
     if (!required) return { authenticated: true, required: false };
     const passwordHash = await options.getPasswordHash?.() ?? null;
-    const authenticated = await isValidAccessCredential(requestToken(request), options.getToken, async () => passwordHash);
+    const authenticated = await isValidAccessCredential(presentedCredential(request.headers), options.getToken, async () => passwordHash);
     return { authenticated, required: true, ...passwordFlag(passwordHash) };
   });
 

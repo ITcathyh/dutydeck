@@ -7,8 +7,6 @@ import { needsMigration } from './migrations.js';
 import { currentProcessIdentity, observeProcess, type ProcessIdentity } from './process-identity.js';
 import { cachedStatement } from './statement-cache.js';
 
-export { cachedStatement };
-
 export const restoreQuarantinePath = (database: string) => `${database}.restore-quarantine.json`;
 export function assertDatabaseNotQuarantined(database: string): void {
   if (database !== ':memory:' && existsSync(database)) database = realpathSync(database);

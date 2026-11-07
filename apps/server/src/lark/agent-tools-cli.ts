@@ -1,5 +1,6 @@
 import { open } from 'node:fs/promises';
 import { sleep } from '../daemon/time.js';
+import { retryWhileRefused } from '@dutydeck/relay';
 import type { AgentGroupCliOptions, HistoryShowCliOptions } from '../cli-program.js';
 
 interface GroupToolErrorBody {
@@ -24,12 +25,6 @@ interface GroupToolClientOptions {
   fetcher?: typeof globalThis.fetch;
   sleep?: (ms: number) => Promise<void>;
 }
-
-/** 服务重启或部署期间端口暂时没人监听；与部署健康检查的上限一致。 */
-const UNAVAILABLE_RETRY_MS = 90_000;
-const UNAVAILABLE_RETRY_INTERVAL_MS = 1_000;
-// 只有连接被拒能证明请求没送达服务端，重试不会重复执行；其他网络错误照常报错。
-const connectionRefused = (error: unknown) => (error as { cause?: { code?: unknown } } | undefined)?.cause?.code === 'ECONNREFUSED';
 
 export class AgentGroupToolHttpClient {
   private readonly baseUrl: string;
@@ -60,15 +55,7 @@ export class AgentGroupToolHttpClient {
       headers.set('authorization', `Bearer ${this.token}`);
       if (this.turn && !headers.has('x-dutydeck-work-turn')) headers.set('x-dutydeck-work-turn', this.turn);
       if (init.body !== undefined) headers.set('content-type', 'application/json; charset=utf-8');
-      for (let waited = 0; ; waited += UNAVAILABLE_RETRY_INTERVAL_MS) {
-        try {
-          response = await this.fetcher(`${this.baseUrl}${path}`, { ...init, headers });
-          break;
-        } catch (error) {
-          if (!connectionRefused(error) || waited >= UNAVAILABLE_RETRY_MS) throw error;
-          await this.sleep(UNAVAILABLE_RETRY_INTERVAL_MS);
-        }
-      }
+      response = await retryWhileRefused(() => this.fetcher(`${this.baseUrl}${path}`, { ...init, headers }), { sleep: this.sleep });
     } catch (error) {
       throw new AgentGroupToolCliError({
         code: 'GROUP_TOOL_UNAVAILABLE',

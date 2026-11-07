@@ -1,19 +1,18 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { RuntimeError, type CiCallContext, type CiProvider, type CiProviderCall, type CiRepository, type PublicCiProvider } from '@dutydeck/shared';
+import { RuntimeError, withTimeout, type CiCallContext, type CiProvider, type CiProviderCall, type CiRepository, type PublicCiProvider } from '@dutydeck/shared';
 import { SAFE_GIT_CONFIG, safeGitEnvironment } from '@dutydeck/shared/safe-git';
-import { withTimeout } from './plugins/hooks.js';
 
 const run = promisify(execFile);
 
 /** provider 没声明 callTimeoutMs 时，宿主给每次异步调用的时限。 */
-export const CI_PROVIDER_CALL_TIMEOUT_MS = 25_000;
+const CI_PROVIDER_CALL_TIMEOUT_MS = 25_000;
 /**
  * 宿主兜底上限，provider 声明得再长也不超过：
  * - getPipelineStatus：CI 订阅轮询持 30 秒租约，调用必须在租约内结束，否则另一实例会重复领取；
  * - 其余：PR 跟进每 2 分钟看一次，单次调用不超过一个轮询间隔。
  */
-export const CI_PROVIDER_CALL_LIMIT_MS: Readonly<Record<CiProviderCall, number>> = {
+const CI_PROVIDER_CALL_LIMIT_MS: Readonly<Record<CiProviderCall, number>> = {
   getPipelineStatus: 25_000, getFailureLogs: 120_000, createPullRequest: 120_000, listReviewComments: 120_000,
   getPullRequest: 120_000, postComment: 120_000, 'webhook.verify': 120_000, 'webhook.parse': 120_000
 };
@@ -41,7 +40,7 @@ function guardProvider(plugin: string, provider: CiProvider, defaultTimeoutMs: n
       return new RuntimeError('CI_PROVIDER_TIMEOUT', `${provider.displayName} 的 ${method} 超过 ${timeoutMs / 1000} 秒未返回${write ? '；平台上可能已经生效，请先核对再重试' : ''}`, 504);
     });
   };
-  const guarded: CiProvider = {
+  return {
     id: provider.id, displayName: provider.displayName,
     matchRepository: remoteUrl => provider.matchRepository(remoteUrl),
     ...(provider.changeRequestLabel ? { changeRequestLabel: (number: number) => provider.changeRequestLabel!(number) } : {}),
@@ -56,7 +55,6 @@ function guardProvider(plugin: string, provider: CiProvider, defaultTimeoutMs: n
       parse: request => call('webhook.parse', context => provider.webhook!.parse(request, context))
     } } : {})
   };
-  return guarded;
 }
 
 /** 已加载插件注册的 CI 提供方。没有 CI 插件时为空，/ci 等入口据此回「未安装 CI 插件」。 */

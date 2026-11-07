@@ -183,7 +183,7 @@ describe('GET /api/inbox', () => {
     const app = Fastify(); apps.push(app);
     registerInboxRoutes(app, runtime as never, {
       sources: sources({ permissions: { s1: [{ id: 'p1', title: 'a', status: 'pending' }], s2: [{ id: 'p2', title: 'b', status: 'pending' }], s3: [{ id: 'p3', title: 'c', status: 'pending' }] } }),
-      canView: async (request, sessionId) => !String(request.headers['x-hide'] ?? '').split(',').includes(sessionId)
+      canViewMany: async (request, sessions) => sessions.filter(session => !String(request.headers['x-hide'] ?? '').split(',').includes(session.id))
     });
     const all = (await app.inject({ method: 'GET', url: '/api/inbox' })).json();
     expect(all.items.map((item: { id: string }) => item.id).sort()).toEqual(['permission:s1:p1', 'permission:s2:p2']);
@@ -219,7 +219,7 @@ describe('GET /api/inbox', () => {
     const seen: string[] = [];
     registerInboxRoutes(app, runtime as never, {
       sources: sources({ workItems: { list: async (_sid, actor) => { seen.push(actor); return [workItem('w1', { status: 'awaiting_confirmation' })]; } } }),
-      canView: async () => true,
+      canViewMany: async (_request, sessions) => sessions,
       workItemActor: async (_request, sessionId) => sessionId === 's1' ? 'actor-1' : undefined
     });
     const items = (await app.inject({ method: 'GET', url: '/api/inbox' })).json().items;

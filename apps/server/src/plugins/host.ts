@@ -1,6 +1,6 @@
 import { PluginBusinessToolRegistry } from './business-tools.js';
 import { PluginBindings } from './bindings.js';
-import { errorMessage, RuntimeError, type PluginBinding, type PluginBindingScope, type PluginBindingContext } from '@dutydeck/shared';
+import { errorMessage, RuntimeError, withTimeout, type PluginBinding, type PluginBindingScope, type PluginBindingContext } from '@dutydeck/shared';
 import { PluginResultToolRegistry } from './result-tools.js';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -11,7 +11,7 @@ import { LocalFilePluginSecretResolver } from '@dutydeck/secret-provider';
 import { prepareSkillPrompt } from '../skill-delivery.js';
 import { defaultBuiltinPluginRoot, listBuiltinPlugins, reservedBuiltinScenarioIds } from './builtin.js';
 import { PluginCommandRegistry } from './commands.js';
-import { inProcessHookTimeout, PluginHookBus, withTimeout, type HookRegistration } from './hooks.js';
+import { inProcessHookTimeout, PluginHookBus, type HookRegistration } from './hooks.js';
 import { isHostApiCompatible, loadPluginDirectory, satisfiesVersionRange, strictPluginIssues, type LoadedPlugin, type PluginIssue } from './manifest.js';
 import { ScenarioProviderCaller } from './scenario-providers.js';
 import { scenarioPackDigest, ScenarioRegistry, type RegisteredScenarioPack } from './scenario-registry.js';

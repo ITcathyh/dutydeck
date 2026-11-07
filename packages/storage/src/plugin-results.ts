@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { cachedStatement } from './database-control.js';
+import { cachedStatement } from './statement-cache.js';
 import type Database from 'better-sqlite3';
 import { pluginResultLimits as limits, type PluginResultDelivery, type PluginResultRepository, type PluginResultOAuthState } from '@dutydeck/shared';
 const token = () => randomBytes(32).toString('base64url');
