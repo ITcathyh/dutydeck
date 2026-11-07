@@ -380,6 +380,62 @@ describe('daemon.status —— 状态不许说谎', () => {
   });
 });
 
+describe('daemon.status —— 上一次异常退出', () => {
+  const hour = 60 * 60_000;
+  function scenario(record: Record<string, unknown> | undefined, options: { database?: string; ready?: boolean; startedAgoMs?: number } = {}) {
+    const dir = mkdtempSync(join(tmpdir(), 'dutydeck-doctor-abnormal-'));
+    const database = join(dir, 'dutydeck.db');
+    if (record) writeFileSync(join(dir, 'last-abnormal-exit.json'), JSON.stringify({ kind: 'startup', exitCode: 1, error: 'DUTYDECK_AGENTS_JSON is invalid', version: '1.0.0', database, ...record }));
+    const startedAt = new Date(Date.now() - (options.startedAgoMs ?? 0.5 * hour)).toISOString();
+    const dependencies = deps({
+      config: { ...baseConfig, databaseUrl: options.database ?? database },
+      daemonStatus: () => ({ running: true, pid: 4242, ready: options.ready ?? true, startedAt, address: 'http://127.0.0.1:4310', authEnabled: true }),
+      daemonRecord: () => ({ pid: 4242, ready: options.ready ?? true, startedAt, host: '127.0.0.1', port: 4310, authEnabled: true, database: options.database ?? database })
+    });
+    return { dir, dependencies };
+  }
+  async function daemonCheck(record: Record<string, unknown> | undefined, options: Parameters<typeof scenario>[1] = {}) {
+    const { dir, dependencies } = scenario(record, options);
+    try { return find(await runDoctor({ json: true }, dependencies), 'daemon.status')!; } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
+  const healthy = async () => find(await runDoctor({ json: true }, deps()), 'daemon.status')!;
+
+  it('没有记录时输出逐字不变', async () => {
+    const check = await daemonCheck(undefined);
+    expect(check).toEqual(await healthy());
+  });
+
+  it('7 天内、当前实例已就绪且启动晚于异常时间：detail 接一句「已自动恢复」，级别和项数不变', async () => {
+    const { dir, dependencies } = scenario({ at: new Date(Date.now() - 2 * hour).toISOString() });
+    try {
+      const report = await runDoctor({ json: true }, dependencies);
+      const check = find(report, 'daemon.status')!;
+      expect(check.level).toBe('ok');
+      expect(check.detail).toBe(`${(await healthy()).detail}；2 小时前异常退出（启动失败：DUTYDECK_AGENTS_JSON is invalid），已自动恢复`);
+      const clean = scenario(undefined);
+      try { expect(report.checks.map(item => [item.id, item.level])).toEqual((await runDoctor({ json: true }, clean.dependencies)).checks.map(item => [item.id, item.level])); }
+      finally { rmSync(clean.dir, { recursive: true, force: true }); }
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('7 天内但未就绪、或启动早于异常时间：不说已恢复，指向 journalctl', async () => {
+    const notReady = await daemonCheck({ at: new Date(Date.now() - 2 * hour).toISOString() }, { ready: false });
+    expect(notReady.level).toBe('warn');
+    expect(notReady.detail).toContain('；2 小时前异常退出（启动失败：DUTYDECK_AGENTS_JSON is invalid），详情看 journalctl');
+    const olderProcess = await daemonCheck({ at: new Date(Date.now() - 2 * hour).toISOString(), kind: 'fatal' }, { startedAgoMs: 3 * hour });
+    expect(olderProcess.level).toBe('ok');
+    expect(olderProcess.detail).toContain('；2 小时前异常退出（运行中崩溃：DUTYDECK_AGENTS_JSON is invalid），详情看 journalctl');
+  });
+
+  it('超过 7 天的记录不显示', async () => {
+    expect(await daemonCheck({ at: new Date(Date.now() - 8 * 24 * hour).toISOString() })).toEqual(await healthy());
+  });
+
+  it('记录里的数据库与本次解析出的库不同时不显示', async () => {
+    expect(await daemonCheck({ at: new Date(Date.now() - hour).toISOString(), database: '/srv/other-instance/.dutydeck/dutydeck.db' })).toEqual(await healthy());
+  });
+});
+
 describe('database.reachable / schema.migrations', () => {
   it('库不存在时报「尚未初始化」而不是去把它建出来', async () => {
     let probed = 0;
