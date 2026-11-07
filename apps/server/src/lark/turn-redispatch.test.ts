@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { toAcpNotifications } from '@agentclientprotocol/claude-agent-acp';
 import { normalizeAcpxEvent } from '@dutydeck/acp-client';
 import type { AgentEvent } from '@dutydeck/shared';
-import { isRestartInterruption, larkHeldReason, larkInterruptionSummary, larkLastActivityAt, larkRedispatchAgentNote, larkRedispatchCardNote, larkRedispatchedCardMarkdown, larkReplayUnsafeReason } from './turn-redispatch.js';
+import { isRestartInterruption, larkHeldReason, larkInterruptionSummary, larkLastActivityAt, larkRedispatchAgentNote, larkRedispatchCardNote, larkRedispatchedCardMarkdown, larkReplayEvidenceGap, larkReplayUnsafeReason } from './turn-redispatch.js';
 
 let calls = 0;
 const tool = (name: string, input?: unknown, type: 'tool_call' | 'tool_result' = 'tool_call', id = `call_${++calls}`): AgentEvent => ({
@@ -145,6 +145,17 @@ describe('被重启切断的一轮能不能安全重投', () => {
     const reason = larkReplayUnsafeReason([bash('TOKEN=secret-value curl -H "Authorization: Bearer secret-value" -d x https://example.com')]);
     expect(reason).toBe('执行过 curl');
     expect(reason).not.toContain('secret');
+  });
+
+  it('只有协议确实记下工具调用时，「没有危险工具」才算只读：终端模式没转写或这一轮没有工具事件都停下', () => {
+    const gap = '的终端操作没有可核对的工具记录';
+    const read = [tool('Read', { file_path: '/a' })];
+    expect(larkReplayEvidenceGap({ protocol: 'acp', transcript: false }, [])).toBeUndefined();
+    expect(larkReplayEvidenceGap({ protocol: 'pty-cli', transcript: true }, read)).toBeUndefined();
+    expect(larkReplayEvidenceGap({ protocol: 'pty-cli', transcript: true }, [])).toBe(gap);
+    expect(larkReplayEvidenceGap({ protocol: 'pty-cli', transcript: false }, read)).toBe(gap);
+    for (const protocol of ['jsonl', 'pipe', 'pty', 'auto', undefined]) expect(larkReplayEvidenceGap({ protocol, transcript: true }, read)).toBe(gap);
+    expect(larkReplayEvidenceGap(undefined, read)).toBe(gap);
   });
 
   it('最后一次活动取这一轮最后一个事件，账本补记的 task / status 事件不算；没有事件用开始时间，都取不到返回 undefined', () => {

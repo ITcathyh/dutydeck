@@ -69,11 +69,11 @@ const callbackValueOf = (card: any, elementId: string) => {
 };
 const callbackButtonCount = (card: any) => (JSON.stringify(buildLarkCard(card)).match(/"type":"callback"/g) ?? []).length;
 
-/** tools：第一轮在挂起前记下的工具调用。 */
-async function interruptedTopic({ tools = [] as NormalizedDriverEvent[] } = {}) {
+/** tools：第一轮在挂起前记下的工具调用；protocol / adapterId：终端模式的 Agent 与它的适配器。 */
+async function interruptedTopic({ tools = [] as NormalizedDriverEvent[], protocol = 'acp' as 'acp' | 'pty-cli', adapterId = undefined as string | undefined } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-redispatch-'));
   const path = join(cwd, 'state.db');
-  const agent: AgentConfig = { id: 'redispatch-fixture', name: 'Fixture', command: 'unused', args: [], protocol: 'acp', cwd, env: {},
+  const agent: AgentConfig = { id: 'redispatch-fixture', name: 'Fixture', command: 'unused', args: [], protocol, ...(adapterId ? { adapterId } : {}), cwd, env: {},
     permissionMode: 'full-trust', timeout: 60, capabilities: { pause: false, resume: true }, builtin: false };
   const config: StoredLarkConfig = { appId: 'app', appSecret: 'fixture', workspace: cwd, defaultAgentId: agent.id,
     fullTrustConfirmed: true, listening: true, preInjectPrompt: '', structuredAskCards: false, groupCardMention: false,
@@ -99,7 +99,7 @@ async function interruptedTopic({ tools = [] as NormalizedDriverEvent[] } = {}) 
       emit({ type: 'completed', data: { stopReason: 'end_turn' } });
     }
   }) as any;
-  const probe = () => ({ protocol: 'acp' as const, available: true, pause: false, resume: true });
+  const probe = () => ({ protocol, available: true, pause: false, resume: true });
   type Daemon = { repos: ReturnType<typeof createRepositories>; runtime: DutydeckRuntime; coordinator: LarkMessageCoordinator; service: ReturnType<typeof cardService> };
   let daemon: Daemon | undefined;
   let boots = 0;
@@ -402,5 +402,35 @@ describe('服务重启切断的一轮自动重投（真实 Runtime + SQLite）',
     expect(await daemon.coordinator.handleAction(value, 'ou_bob', context)).toMatchObject({ type: 'warning' });
     await new Promise(resolve => setTimeout(resolve, 100));
     expect(h.prompts).toHaveLength(2);
+  });
+
+  // 终端里执行的命令只有带转写的适配器才会记成工具事件；没有工具事件不能说明这一轮只读。
+  it.each([
+    ['没有转写的终端适配器，这一轮只读过文件', 'gemini', [{ type: 'tool_call', data: { id: 'call_read', name: 'Read', status: 'running', input: { file_path: '/work/a.md' } } }]],
+    ['带转写的终端适配器，这一轮没有任何工具事件', 'codex', []]
+  ] as Array<[string, string, NormalizedDriverEvent[]]>)('终端模式拿不出工具记录时不自动重投，停在结果未知等人选择：%s', async (_name, adapterId, tools) => {
+    const h = await interruptedTopic({ protocol: 'pty-cli', adapterId, tools });
+    h.agentState.hang = false;
+    const daemon = await h.restart();
+    const { sessionId, saved } = await h.mapping();
+    const cardId = saved.card_message_id!;
+    await until(() => h.lastUpdate(cardId)?.statusLabel === '结果未知');
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect(h.prompts).toHaveLength(1);
+    const card = h.lastUpdate(cardId);
+    expect(card.markdown).toContain('这一轮的终端操作没有可核对的工具记录，可能已经对外生效，所以没有自动继续');
+    expect(card.capabilities).toMatchObject({ canReplay: true });
+    expect(await daemon.runtime.getTaskRecovery(sessionId, saved.runtime_task_id!)).toMatchObject({ status: 'reconcile_required', resolvedUnknown: false });
+    expect(JSON.parse(await daemon.repos.config.get('lark.redispatch.app.om_first.1') ?? '{}'))
+      .toMatchObject({ phase: 'held', redispatch: { count: 0, unsafeReason: '的终端操作没有可核对的工具记录' } });
+  });
+
+  it('带转写的终端适配器，这一轮只有只读工具事件：照常自动重投', async () => {
+    const h = await interruptedTopic({ protocol: 'pty-cli', adapterId: 'codex',
+      tools: [{ type: 'tool_call', data: { id: 'call_read', name: 'Read', status: 'running', input: { file_path: '/work/a.md' } } }] });
+    h.agentState.hang = false;
+    await h.restart();
+    await until(() => h.prompts.length === 2);
+    expect(h.prompts[1]!.prompt).toContain('服务刚才重启，请从中断处继续');
   });
 });
