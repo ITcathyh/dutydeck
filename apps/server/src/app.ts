@@ -22,7 +22,8 @@ import { AgentGroupToolError } from './lark/agent-tools.js';
 import { registerLarkAgentToolTurnGuard } from './lark/agent-tools-routes.js';
 import { AgentCommandParamError } from './lark/agent-command.js';
 import { LarkServiceError } from './lark/service.js';
-import Fastify, { type FastifyRequest } from 'fastify';
+import Fastify, { type FastifyBaseLogger, type FastifyRequest } from 'fastify';
+import { pino, type DestinationStream } from 'pino';
 import { open, readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { extname, resolve, sep } from 'node:path';
@@ -179,6 +180,8 @@ export interface BuildAppOptions {
   executionPolicy?: SessionExecutionPolicy;
   /** 每一轮的改动（「查看改动」页与行评论）；不传 = 不注册。 */
   turnDiffs?: TurnDiffRouteOptions;
+  /** 已建好的日志实例，请求日志从它派生；不传 = 按 NODE_ENV 自建。 */
+  loggerInstance?: FastifyBaseLogger;
 }
 
 /**
@@ -192,9 +195,16 @@ export const appLoggerOptions = { serializers: {
   error: serializeLogError
 } };
 
+/** 带上面序列化器的服务日志实例；NODE_ENV=test 时不输出。 */
+export function createAppLogger(destination?: DestinationStream) {
+  return pino({ ...appLoggerOptions, enabled: process.env.NODE_ENV !== 'test' }, destination);
+}
+
 export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOptions = {}) {
   const sessionSource = createLarkSessionSourceResolver(options.lark ?? {});
-  const app = Fastify({ rewriteUrl: rewriteSharedSessionProxyUrl, logger: process.env.NODE_ENV !== 'test' && appLoggerOptions });
+  // Fastify 同时收到 logger 与 loggerInstance 会抛错，只能二选一。
+  const app = Fastify({ rewriteUrl: rewriteSharedSessionProxyUrl,
+    ...options.loggerInstance ? { loggerInstance: options.loggerInstance } : { logger: process.env.NODE_ENV !== 'test' && appLoggerOptions } });
   const streams = new Set<import('node:http').ServerResponse>();
   const requireSessionExecution = async (request: FastifyRequest, sessionId: string, boundary: 'session' | 'high_risk', action: PolicyAction) => {
     if (!options.executionPolicy) return;

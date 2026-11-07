@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { brotliCompressSync, brotliDecompressSync, gunzipSync, gzipSync } from 'node:zlib';
 import { get as httpGet, type IncomingMessage } from 'node:http';
-import { buildApp } from './app.js';
+import { Writable } from 'node:stream';
+import { buildApp, createAppLogger } from './app.js';
 import { createRepositories } from '@dutydeck/storage';
 import { larkBotsConfigKey } from './lark/config.js';
 import { LoginLinkStore, signSessionShareToken } from './auth/auth.js';
@@ -20,6 +21,36 @@ afterEach(async () => {
   await Promise.all(apps.splice(0).map(app => app.close()));
   for (const repository of repositories.splice(0)) repository.close();
   await Promise.all(tempDirectories.splice(0).map(directory => rm(directory, { recursive: true, force: true })));
+});
+
+/** 写进内存的服务日志实例；createAppLogger 按建实例时的 NODE_ENV 决定是否输出。 */
+function memoryLogger(nodeEnv: string) {
+  const lines: string[] = [];
+  const sink = new Writable({ write(chunk, _encoding, done) { lines.push(String(chunk)); done(); } });
+  vi.stubEnv('NODE_ENV', nodeEnv);
+  try { return { logger: createAppLogger(sink), lines }; }
+  finally { vi.unstubAllEnvs(); }
+}
+
+describe('injected service logger', () => {
+  it('derives request logs from the injected instance and still redacts share tokens', async () => {
+    const { logger, lines } = memoryLogger('production');
+    const app = await buildApp({} as any, { loggerInstance: logger }); apps.push(app);
+    expect((await app.inject({ method: 'GET', url: '/health?share=secret-share-token' })).statusCode).toBe(200);
+    const entries = lines.map(line => JSON.parse(line));
+    expect(entries.filter(entry => entry.req).map(entry => entry.req.url)).toEqual(['/health?share=[redacted]']);
+    expect(entries.some(entry => entry.res?.statusCode === 200)).toBe(true);
+    expect(lines.join('')).not.toContain('secret-share-token');
+  });
+
+  it('keeps the default instance silent under NODE_ENV=test', async () => {
+    const { logger, lines } = memoryLogger('test');
+    const app = await buildApp({} as any, { loggerInstance: logger }); apps.push(app);
+    expect((await app.inject({ method: 'GET', url: '/health?share=secret-share-token' })).statusCode).toBe(200);
+    app.log.warn({ code: 'FIXTURE' }, 'must not be written');
+    logger.warn({ code: 'FIXTURE' }, 'must not be written');
+    expect(lines).toEqual([]);
+  });
 });
 
 describe('HTTP API boundary', () => {
