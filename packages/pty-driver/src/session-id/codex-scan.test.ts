@@ -3,13 +3,15 @@ import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildSessionMarker, resolveCliSessionId } from './index.js';
+import { CodexSessionIdLocator } from './codex.js';
+import { CodexTranscriptTailer } from '../transcript/codex.js';
 import * as scan from './fs-scan.js';
 vi.mock('./fs-scan.js', async original => {
   const actual = await original<typeof import('./fs-scan.js')>();
   return { ...actual, walkFiles: vi.fn(actual.walkFiles), nativeTranscriptObjects: vi.fn(actual.nativeTranscriptObjects), readTail: vi.fn(actual.readTail) };
 });
 const roots: string[] = [];
-afterEach(() => { vi.clearAllMocks(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { vi.useRealTimers(); vi.clearAllMocks(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 const sessionId = 'ses_scan_priority_regression';
 const modern = buildSessionMarker(sessionId);
 const legacy = `[dutydeck-session:${sessionId}]`;
@@ -18,6 +20,7 @@ function fixture() {
   const sessions = join(home, 'sessions'); mkdirSync(sessions);
   const write = (path: string, rows: unknown[]) => writeFileSync(path, rows.map(row => JSON.stringify(row)).join('\n') + '\n');
   return {
+    home,
     resolve: () => resolveCliSessionId('codex', { sessionId, cwd: home, env: { CODEX_HOME: home } }),
     history: (rows: unknown[]) => write(join(home, 'history.jsonl'), rows),
     rollout: (id: string, texts: string[], mtime: number) => {
@@ -67,4 +70,68 @@ it.each([[modern, legacy], [modern + '\n' + legacy]])('retains modern priority w
   const f = fixture(); f.rollout('native', texts, 1);
   f.history([{ session_id: 'legacy-history', text: legacy }]);
   expect(f.resolve()).toBe('native');
+});
+
+const counts = () => ({
+  walks: vi.mocked(scan.walkFiles).mock.calls.length,
+  traversals: vi.mocked(scan.nativeTranscriptObjects).mock.calls.length,
+  historyReads: vi.mocked(scan.readTail).mock.calls.length,
+});
+it('a live tailer neither rereads history nor reparses unchanged rollouts per poll while its native id is unresolved', async () => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  const f = fixture(); for (let i = 0; i < 60; i++) f.rollout(`native-${i}`, ['unrelated input'], i + 1);
+  f.history([{ session_id: 'other', text: 'unrelated input' }]);
+  const tailer = new CodexTranscriptTailer({ cwd: f.home, sessionId, env: { CODEX_HOME: f.home } });
+  for (let poll = 0; poll < 200; poll++) { vi.advanceTimersByTime(300); await tailer.flush(); }
+  const { walks, ...reads } = counts();
+  expect(reads).toEqual({ traversals: 60, historyReads: 1 });
+  // 10 s of fast scans, then backoff; one walk per 300 ms poll would be 200.
+  expect(walks).toBeLessThan(50);
+});
+it('backs off rollout scans, takes a new history receipt at once, and wakes for new input', () => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  const f = fixture(); f.rollout('native-0', ['unrelated'], 1);
+  f.history([{ session_id: 'other', text: 'unrelated' }]);
+  const locator = new CodexSessionIdLocator('codex', { sessionId, cwd: f.home, env: { CODEX_HOME: f.home } });
+  expect(locator.resolve()).toBeUndefined();
+  expect(locator.resolve()).toBeUndefined();
+  expect(counts()).toEqual({ walks: 1, traversals: 1, historyReads: 1 });
+  vi.advanceTimersByTime(60_000);
+  expect(locator.resolve()).toBeUndefined();
+  vi.advanceTimersByTime(500);
+  f.rollout('late', [modern], 2);
+  expect(locator.resolve()).toBeUndefined();
+  expect(counts().walks).toBe(2);
+  vi.advanceTimersByTime(500);
+  expect(locator.resolve()).toBe('late');
+
+  const g = new CodexSessionIdLocator('codex', { sessionId, cwd: f.home, env: { CODEX_HOME: f.home } });
+  f.rollout('late', ['unrelated'], 2);
+  vi.advanceTimersByTime(60_000);
+  for (let gap = 1_000; gap <= 8_000; gap *= 2) {
+    const before = counts().walks;
+    expect(g.resolve()).toBeUndefined();
+    vi.advanceTimersByTime(gap - 1);
+    expect(g.resolve()).toBeUndefined();
+    expect(counts().walks).toBe(before + 1);
+    vi.advanceTimersByTime(1);
+  }
+  expect(g.resolve()).toBeUndefined();
+  const walks = counts().walks;
+  f.history([{ session_id: 'other', text: 'unrelated' }, { session_id: 'owned', ts: 1, text: `${modern} hello` }]);
+  expect(g.resolve()).toBe('owned');
+  expect(counts().walks).toBe(walks);
+  g.wake();
+  f.history([]);
+  expect(g.resolve()).toBeUndefined();
+  expect(counts().walks).toBe(walks + 1);
+});
+it('between timed scans a legacy history receipt brings the rollout scan forward without outranking a modern rollout', () => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  const f = fixture(); f.rollout('native-0', ['unrelated'], 1);
+  const locator = new CodexSessionIdLocator('codex', { sessionId, cwd: f.home, env: { CODEX_HOME: f.home } });
+  expect(locator.resolve()).toBeUndefined();
+  f.rollout('modern-rollout', [modern], 2);
+  f.history([{ session_id: 'legacy-history', ts: 1, text: legacy }]);
+  expect(locator.resolve()).toBe('modern-rollout');
 });

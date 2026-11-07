@@ -2,6 +2,7 @@
 import type { NormalizedDriverEvent } from '@dutydeck/shared';
 import { traeHistoryPath, traeSessionsRoot, type CliPathEnv } from '../cli-paths.js';
 import { resolveCliSessionId } from '../session-id/index.js';
+import { CodexSessionIdLocator } from '../session-id/codex.js';
 import { JsonlTailer, type TranscriptCursor, type TranscriptEventSource } from './tail.js';
 import { resolveNewestRollout } from './codex.js';
 import { CodexInputReceipt } from './codex-input-receipt.js';
@@ -41,11 +42,13 @@ export class TraexTranscriptTailer implements TranscriptEventSource {
   readonly requiresTurnTerminal = true;
   private readonly tailer: JsonlTailer;
   private readonly inputReceipt?: CodexInputReceipt;
+  private readonly locator?: CodexSessionIdLocator;
   private readonly turn = new NativeTurn();
 
   constructor(opts: TraexTranscriptTailerOptions) {
     let threadId: string | undefined;
-    const nativeId = () => threadId ??= opts.sessionId ? resolveCliSessionId('traex', { sessionId: opts.sessionId, cwd: opts.cwd, env: opts.env }) : undefined;
+    const locator = this.locator = opts.sessionId ? new CodexSessionIdLocator('traex', { sessionId: opts.sessionId, cwd: opts.cwd, env: opts.env }) : undefined;
+    const nativeId = () => threadId ??= locator?.resolve();
     if (opts.sessionId) this.inputReceipt = new CodexInputReceipt(traeHistoryPath(opts.env), nativeId, text => this.turn.bindHistory(text));
     const messages = new TraexMessageProjection();
     const projection = new CodexToolProjection(entry => messages.map(entry));
@@ -94,6 +97,7 @@ export class TraexTranscriptTailer implements TranscriptEventSource {
   takeInputError(): NormalizedDriverEvent | undefined { return this.turn.takeError(); }
   takeInputCancellation(): boolean { return this.turn.takeCancellation(); }
   waitForInput(prompt: string, signal: AbortSignal): Promise<void> {
+    this.locator?.wake();
     this.turn.arm(signal);
     return this.inputReceipt ? this.inputReceipt.waitForInput(this.tailer, prompt, signal) : this.tailer.waitForInput(prompt, signal);
   }
