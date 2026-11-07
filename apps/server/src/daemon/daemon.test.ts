@@ -451,7 +451,8 @@ describe('Dutydeck daemon session', () => {
       }
     }, dir);
     expect(await control.restart()).toBeUndefined();
-    expect(seen).toEqual([{ args: '--user restart dutydeck.service', rotated: true }]);
+    // 先 show 查配套的 .socket（这里没有），再 restart。
+    expect(seen.filter(call => !call.args.includes(' show '))).toEqual([{ args: '--user restart dutydeck.service', rotated: true }]);
     expect(statSync(`${log}.1`).size).toBe(11 * 1024 * 1024);
   });
 });

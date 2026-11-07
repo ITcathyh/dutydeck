@@ -49,7 +49,7 @@ dutydeck deploy prune --releases /path/to/releases --dry-run
 dutydeck deploy prune --releases /path/to/releases
 ```
 
-- **停机窗口**：新进程初始化完成即开始监听 HTTP，飞书长连接随后在后台并行建立，健康检查不等待飞书握手；连接失败按原有退避重连。Web 断线后最长每 5 秒重试一次；Agent 调用群协作工具遇到连接被拒时最长等待 90 秒，连接中途断开等可能已送达的请求不重试。开始监听后写一条「启动各阶段耗时」日志（`startupMs`，毫秒）：`boot` 进程与模块加载、`plugins`、`config`、`database` 打开库、`migrate` 迁移、`wiring`、`insight`、`integrations`、`relay`、`agentDefaults`、`agents` 登记 Agent、`sessions` 恢复会话与对账、`routes`、`listen`，以及 `total`。
+- **停机窗口**：新进程初始化完成即开始监听 HTTP，飞书长连接随后在后台并行建立。`deploy` 和 `restart` 在 `/health` 通过后还要等 `/health/ready` 报告就绪，即启动时的飞书长连接同步已有结果（已连上，或已失败并排了退避重连），才算重启完成、轮到下一个 unit；飞书平台故障导致连不上不会触发回滚。旧版本没有 `/health/ready` 时只看 `/health`。飞书「消息监听已连接」日志带 `connectMs`（毫秒）：`identity` 查询机器人身份并加载 SDK、`recovery` 恢复上个进程留下的入站记录、`reconcile` 卡片对账，以及 `total`。Web 断线后最长每 5 秒重试一次；Agent 调用群协作工具和回传命令（`dutydeck send`、`ask`、`report` 等）遇到连接被拒时最长等待 90 秒（不超过该次请求的期限），连接中途断开等可能已送达的请求不重试。配上下面的 [systemd socket 激活](#socket-activation) 后，重启期间的 HTTP 连接排队等待，不再被拒。开始监听后写一条「启动各阶段耗时」日志（`startupMs`，毫秒）：`boot` 进程与模块加载、`plugins`、`config`、`database` 打开库、`migrate` 迁移、`wiring`、`insight`、`integrations`、`relay`、`agentDefaults`、`agents` 登记 Agent、`sessions` 恢复会话与对账、`routes`、`listen`，以及 `total`。
 - **部署窗口**：环境变量 `DUTYDECK_DEPLOY_WINDOW`（如 `10:00-11:00,16:00-17:00`）限制部署时段，窗口外加 `--now` 才部署。
 - **Web 静态资源**：构建时为 JS、CSS、HTML 等文本文件生成 `.br` 与 `.gz` 压缩副本；浏览器声明支持时直接返回压缩副本（带 `Content-Encoding` 与 `Vary: Accept-Encoding`），否则、或请求带 `Range` 时返回原文件。HEAD 请求检查文件可读性与大小，返回与 GET 相同的响应头，不读取文件正文。
 - **失败与中断**：部署失败、中途出错或被 Ctrl-C / kill / ssh 断开打断时，都会写 `status: failed` 的部署记录（被信号打断的另记 `aborted_by`），先等已发出的排空续期请求结束，再让旧服务退出排空、恢复执行新任务，不再等租约到期，避免迟到的续期再次暂停服务；被打断后不再切换版本、重启或回滚。
@@ -63,6 +63,36 @@ dutydeck deploy prune --releases /path/to/releases
 - **单 Bot 独立进程**：`dutydeck start --foreground --database /path/to/bot.db --bot-app-id cli_xxx`。
 - **拆分机器人数据**：`scripts/split-bot-runtimes.mts` 会把空闲终端状态、排队受阻和结果未知提醒、计划逾期提醒随所属会话迁入对应机器人的库；未知或无法确认归属的记录仍会阻止拆分。
 - **systemd 服务与数据库解析**：对直接以 `node cli.js` 启动的 unit，管理命令（`restart`、`status`、`deploy` 等）按 ExecStart 显式参数 > unit 环境变量 > `WorkingDirectory/.env` 解析目标数据库和监听地址；相对工作目录以 `WorkingDirectory` 为基准。unit 环境变量包括 `Environment=` 和 `EnvironmentFile=`，后者按 systemd 的引号与注释规则解析，并按顺序覆盖前者。缺少 `.env` 可继续，不可读或关键配置无效时拒绝操作；`EnvironmentFile=` 只有带 `-` 前缀且文件不存在时跳过，其他读不到的文件、相对路径或通配路径，以及无法解析的 `Environment=` 项，都会拒绝操作；数据库未配置时回落到 `<cwd>/.dutydeck/dutydeck.db`。部署备份和 schema 回滚检查使用同一实际数据库。`start --foreground` 仍读取守护状态，`deploy --runtime` 显式元数据继续优先。
+
+### systemd socket 激活（重启不拒绝连接）<a id="socket-activation"></a>
+
+服务重启时，旧进程关闭端口到新进程开始监听之间有一段空档，这段时间的 Web 请求和 Agent 回传会被拒绝。给 unit 配一个同名的 `.socket` 后，端口由 systemd 持有，重启期间的连接在内核里排队，等新进程接手。服务启动时识别 systemd 传入的监听 socket（`LISTEN_FDS`）并直接使用；没有传入时照旧自己绑定端口。
+
+```ini
+# ~/.config/systemd/user/<unit>.socket：地址与端口必须和服务的 --host/--port 一致，只写一行 ListenStream=
+[Socket]
+ListenStream=127.0.0.1:4310
+FreeBind=true
+
+[Install]
+WantedBy=sockets.target
+```
+
+```ini
+# ~/.config/systemd/user/<unit>.service.d/socket-activation.conf
+[Unit]
+Requires=<unit>.socket
+After=<unit>.socket
+```
+
+写好后执行 `systemctl --user daemon-reload && systemctl --user enable <unit>.socket`，再用 `dutydeck restart --unit <unit>` 切换：systemd 停掉旧进程、拉起 `.socket`，再把它交给新进程。切换前先部署包含本功能的版本，旧版本会忽略传入的 socket、自己再绑同一端口而启动失败。启用后：
+
+- `restart`、`deploy` 只重启服务，不动 `.socket`；`dutydeck stop` 和部署回滚时的停服会连同 `.socket` 一起停，否则下一个连接会把服务重新拉起；`dutydeck start` 连同 `.socket` 一起启动。
+- systemd 传入多个 socket，或传入的端口与配置的 `--port` 不一致时，服务拒绝启动。
+- 传入的 socket 只由服务进程持有，不会被 tmux、Agent 等子进程继承。
+- 回退：`systemctl --user disable --now <unit>.socket`，删掉 `.socket` 文件和上面的 drop-in，`daemon-reload` 后 `systemctl --user start <unit>`，服务恢复自己绑端口。
+
+要让已验证可恢复的 tmux 任务跨重启保留，unit 还需要 `KillMode=process`（`dutydeck autostart` 生成的 unit 已包含）；其他取值会在停服时把 unit cgroup 里的 tmux 和 Agent 一起杀掉，重启只能等所有任务结束。
 
 ### 停机 VACUUM <a id="vacuum"></a>
 

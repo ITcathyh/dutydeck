@@ -1,3 +1,4 @@
+import { inheritedListenOptions, inheritedSocketMismatch, takeInheritedListenSocket } from './socket-activation.js';
 import { MattersService } from './matters.js';
 import { DutydeckWatch, startDutydeckWatch, watchDeliveryRejection, watchReceiverType } from './watch.js';
 import { collectWatchScopes, resolveWatchReceiver } from './watch-signals.js';
@@ -235,6 +236,9 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   // 插件在加载配置之前加载：插件 agents 要与 DUTYDECK_AGENTS_JSON 一起合并。没有启用的插件（或只有内置场景包）时为 undefined，下面不接线。
   // 启动各阶段耗时（毫秒），开始监听后汇总成一条日志；boot 是进程启动到这里（Node 启动与模块加载）。
   const startupMs: Record<string, number> = { boot: Math.round(process.uptime() * 1000) };
+  // systemd socket 激活传入的监听 socket：启动一开始就取走并清掉 LISTEN_* 变量，启动恢复期间派生的子进程看不到它们。
+  const inherited = takeInheritedListenSocket();
+  if (inherited && 'error' in inherited) throw new Error(inherited.error);
   const shutdownPhases = new ShutdownPhases(SHUTDOWN_PHASES);
   let startupMark = performance.now();
   const startupPhase = (name: string) => { const now = performance.now(); startupMs[name] = Math.round(now - startupMark); startupMark = now; };
@@ -937,7 +941,13 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     });
     startupPhase('routes');
     logDroppedAgents(app.log, droppedAgents);
-    await app.listen(listenOptions(config));
+    // systemd socket 激活时用它传入的监听 socket：重启期间端口由 .socket unit 持有，连接排队而不是被拒。
+    await app.listen(inherited ? inheritedListenOptions(inherited.fd) : listenOptions(config));
+    if (inherited) {
+      const mismatch = inheritedSocketMismatch(app.server.address(), config);
+      if (mismatch) throw new Error(mismatch);
+      app.log.info({ fd: inherited.fd }, '使用 systemd socket 激活传入的监听 socket');
+    }
     startupPhase('listen');
     app.log.info({ startupMs: { ...startupMs, total: Math.round(process.uptime() * 1000) } }, '启动各阶段耗时');
     const watch = new DutydeckWatch({

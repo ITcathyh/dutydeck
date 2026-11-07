@@ -709,11 +709,16 @@ interface SystemdUnitInfo {
   args: string[];
   /** unit 文件路径（FragmentPath）。 */
   fragmentPath?: string;
+  /**
+   * 激活它的 .socket unit（TriggeredBy）。socket 激活时端口由它们持有：只停服务的话，下一个连接会把服务重新拉起，
+   * 所以停止要连同它们一起停，启动和重启前要确保它们在监听。
+   */
+  sockets: string[];
 }
 
 /** unit 不存在时 LoadState=not-found；systemctl 不可用或连不上 user systemd 时返回 undefined。 */
 async function showSystemdUnit(unit: string, deps: DaemonCommandDeps): Promise<SystemdUnitInfo | undefined> {
-  const shown = await (deps.runCommand ?? defaultRunCommand)('systemctl', ['--user', 'show', unit, '--property=LoadState,SubState,MainPID,Environment,EnvironmentFiles,WorkingDirectory,ExecStart,FragmentPath,KillMode']);
+  const shown = await (deps.runCommand ?? defaultRunCommand)('systemctl', ['--user', 'show', unit, '--property=LoadState,SubState,MainPID,Environment,EnvironmentFiles,WorkingDirectory,ExecStart,FragmentPath,KillMode,TriggeredBy']);
   if (shown.status !== 0) return undefined;
   const props = new Map<string, string>();
   const environmentFiles: string[] = [];
@@ -738,7 +743,8 @@ async function showSystemdUnit(unit: string, deps: DaemonCommandDeps): Promise<S
     execPath: exec?.[1],
     script: exec?.[2]?.split(' ')[1],
     args: exec?.[2]?.split(' ').slice(2) ?? [],
-    fragmentPath: props.get('FragmentPath') || undefined
+    fragmentPath: props.get('FragmentPath') || undefined,
+    sockets: (props.get('TriggeredBy') ?? '').split(/\s+/).filter(name => name.endsWith('.socket'))
   };
 }
 
@@ -866,13 +872,16 @@ async function systemdStart(unit: string, info: SystemdUnitInfo, options: CliOpt
   const previous = readDaemonStatus(dir);
   rotateDaemonLog(dir);
   const logOffset = daemonLogSize(dir);
-  const started = await (deps.runCommand ?? defaultRunCommand)('systemctl', ['--user', 'start', unit]);
+  // socket 激活的 unit：连同 .socket 一起启动，端口先开始监听。
+  const started = await (deps.runCommand ?? defaultRunCommand)('systemctl', ['--user', 'start', ...info.sockets, unit]);
   if (started.status !== 0) return { ok: false, action: 'start', running: false, logFile, error: systemctlFailure('start', unit, started) };
   return await waitForSystemdGeneration('start', unit, dir, previous, logOffset);
 }
 
 async function systemdStop(dir: string, state: DaemonState, unit: string, deps: DaemonCommandDeps): Promise<DaemonCommandResult> {
-  const stopped = await (deps.runCommand ?? defaultRunCommand)('systemctl', ['--user', 'stop', unit]);
+  // 只停服务的话，socket 激活会在下一个连接到来时把它重新拉起。
+  const sockets = (await showSystemdUnit(unit, deps))?.sockets ?? [];
+  const stopped = await (deps.runCommand ?? defaultRunCommand)('systemctl', ['--user', 'stop', ...sockets, unit]);
   if (stopped.status !== 0) {
     return { ok: false, action: 'stop', running: inspectDaemon(dir).status === 'verified', pid: state.pid, error: systemctlFailure('stop', unit, stopped) };
   }
@@ -919,6 +928,8 @@ async function systemdRestart(dir: string, state: DaemonState, unit: string, inf
   // unit 的 StandardOutput=append: 在新进程启动时重新打开日志；旧进程停服期间的输出落进 .1。
   rotateDaemonLog(dir);
   const logOffset = daemonLogSize(dir);
+  // socket 激活的 unit 只重启服务：服务 Requires= 配套的 .socket，systemd 会先把它拉起（包括刚从自己绑端口切换过来时），
+  // .socket 不重启，端口一直开着。
   const restarted = await (deps.runCommand ?? defaultRunCommand)('systemctl', ['--user', 'restart', unit]);
   if (restarted.status !== 0) {
     await drain.release?.();
@@ -1027,6 +1038,7 @@ export interface ServiceControl {
 /** `daemonDir`：`start --foreground` unit 的守护目录，重启前轮转它的日志；直接 serve 的 unit 不知道日志在哪，不传。 */
 export function systemdServiceControl(unit: string, deps: DaemonCommandDeps, daemonDir?: string): ServiceControl {
   const run = deps.runCommand ?? defaultRunCommand;
+  const sockets = async () => (await showSystemdUnit(unit, deps))?.sockets ?? [];
   return {
     mainPid: async () => (await showSystemdUnit(unit, deps))?.mainPid,
     restart: async () => {
@@ -1034,8 +1046,9 @@ export function systemdServiceControl(unit: string, deps: DaemonCommandDeps, dae
       const restarted = await run('systemctl', ['--user', 'restart', unit]);
       return restarted.status === 0 ? undefined : systemctlFailure('restart', unit, restarted);
     },
+    // 回滚等步骤要求停服后一直停着：socket 激活时连同 .socket 一起停，否则新连接会把服务重新拉起。
     stop: async () => {
-      const stopped = await run('systemctl', ['--user', 'stop', unit]);
+      const stopped = await run('systemctl', ['--user', 'stop', ...await sockets(), unit]);
       return stopped.status === 0 ? undefined : systemctlFailure('stop', unit, stopped);
     },
     resetFailed: async () => { await run('systemctl', ['--user', 'reset-failed', unit]); }
