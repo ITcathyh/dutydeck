@@ -76,6 +76,24 @@ it('rechecks a workspace release that arrives while the rejected claim awaits co
   expect(h.repos.execution.getTaskExecution(queued.id)?.attempts).toHaveLength(1);
   expect(h.sent).toEqual(['original-workspace-turn','after-workspace-release']);expect(h.stopped).toEqual([]);
 });
+it('does not rerun blocked same-workspace admission for each event of the running turn',async()=>{
+  const h=await fixture(),runtime=h.runtime as any,one=await h.runtime.start({agentId:'fixture',cwd:h.cwd});
+  const waiting=[await h.runtime.start({agentId:'fixture',cwd:h.cwd}),await h.runtime.start({agentId:'fixture',cwd:h.cwd})];
+  const gate=deferred();h.gates.set('long-turn',gate);
+  const first=h.runtime.send(one.id,'long-turn');
+  await vi.waitFor(()=>expect(h.sent).toEqual(['long-turn']));
+  let claims=0;h.onClaim(()=>{claims++;});
+  const queued=[];for(const session of waiting)queued.push(await h.runtime.dispatch(session.id,`behind-${session.id}`));
+  await vi.waitFor(()=>{for(const session of waiting){expect(runtime.resourceQueueBlocked.has(session.id)).toBe(true);expect(runtime.drains.has(session.id)).toBe(false);}});
+  const before=claims;
+  for(let i=0;i<40;i++)h.emitters.get(one.id)!({type:'thinking',data:{text:`step ${i}`}});
+  await vi.waitFor(async()=>expect((await h.runtime.getEvents(one.id)).filter(event=>event.type==='thinking')).toHaveLength(40));
+  await new Promise(resolve=>setTimeout(resolve,50));
+  expect(claims-before).toBe(0);
+  gate.resolve();expect((await first).status).toBe('completed');
+  for(const task of queued)await vi.waitFor(()=>expect(h.repos.execution.getTaskExecution(task.id)?.task.status).toBe('completed'));
+  expect(h.sent.slice(1).sort()).toEqual(waiting.map(session=>`behind-${session.id}`).sort());expect(h.stopped).toEqual([]);
+});
 it('reports a proven idle sibling consistently with admission in task and session recovery',async()=>{
   const h=await fixture(),one=await h.runtime.start({agentId:'fixture',cwd:h.cwd});
   expect((await h.runtime.send(one.id,'completed-sibling')).status).toBe('completed');

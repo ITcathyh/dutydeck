@@ -212,6 +212,8 @@ const UNKNOWN_TASK_ABANDON_MS = 7 * 24 * 60 * 60_000;
 const QUEUED_TASK_EXPIRE_MS = 24 * 60 * 60_000;
 /** 同会话上一条任务由 Agent 跑完不到这么久，视为按顺序轮到排头，不按过期处理。 */
 const QUEUE_HANDOFF_MS = 15 * 60_000;
+/** 轮次结束时执行端已自行拒掉、却没发终态事件的审批，补记的拒绝说明。 */
+const TURN_ENDED_PERMISSION_REASON = '本轮任务已结束，这次操作没有执行。';
 const workspaceBlockerStates: Record<string, string> = {
   WORKSPACE_PHYSICAL_RESOURCE_UNSAFE: '它的终端或执行进程还没确认已退出（残留终端）',
   DRIVER_STOP_BLOCKED: '它上次停止时没能确认进程已退出（残留终端）',
@@ -297,6 +299,7 @@ export class DutydeckRuntime {
   private readonly queueBlocked = new Set<string>();
   private readonly resourceQueueBlocked = new Set<string>();
   private resourceQueueRevision = 0;
+  private resourceQueueRetryPending = false;
   /** 受阻期：排头任务被同仓库挡住后记下，认领成功或队列清空时删掉；noticed 表示这一期已留过会话提醒。 */
   private readonly workspaceBlocks = new Map<string, { taskId: string; noticed: boolean }>();
   /** 自动结案没做成的结果未知执行，每个进程只记一次日志。 */
@@ -392,8 +395,17 @@ export class DutydeckRuntime {
   private wake<T extends CommitResult>(result: T): T { this.publisher.wake(result.session.id); this.wakeResourceQueues(); return result; }
   private wakeResourceQueues() {
     this.resourceQueueRevision++;
-    const waiting = [...this.resourceQueueBlocked]; this.resourceQueueBlocked.clear();
-    if (waiting.length) queueMicrotask(() => { if (!this.shuttingDown && this.binding) for (const id of waiting) this.mutations.run(undefined, () => this.scheduleQueue(id)); });
+    this.retryResourceQueues();
+  }
+  /** One pending pass per burst: each pass re-runs full workspace admission for every blocked session. */
+  private retryResourceQueues() {
+    if (this.resourceQueueRetryPending || !this.resourceQueueBlocked.size) return;
+    this.resourceQueueRetryPending = true;
+    queueMicrotask(() => {
+      this.resourceQueueRetryPending = false;
+      const waiting = [...this.resourceQueueBlocked]; this.resourceQueueBlocked.clear();
+      if (!this.shuttingDown && this.binding) for (const id of waiting) this.mutations.run(undefined, () => this.scheduleQueue(id));
+    });
   }
   private fence(session: Session): SessionFence { return { sessionId: session.id, runId: session.runId }; }
   private attemptFence(ref: AttemptRef & SessionFence): AttemptFence {
@@ -458,7 +470,7 @@ export class DutydeckRuntime {
   private observeDriverOperation<T>(driver: AgentDriver, pending: Promise<T>) {
     const operations = this.driverOperations.get(driver) ?? new Set<Promise<unknown>>();
     operations.add(pending); this.driverOperations.set(driver, operations);
-    const cleanup = () => { operations.delete(pending); if (!operations.size) this.driverOperations.delete(driver); };
+    const cleanup = () => { operations.delete(pending); if (!operations.size) { this.driverOperations.delete(driver); this.wakeResourceQueues(); } };
     void pending.then(cleanup, cleanup);
     return this.mutations.wait(pending);
   }
@@ -494,7 +506,7 @@ export class DutydeckRuntime {
     await this.mutations.write(id, async () => {
       if (this.stopBlocks.has(id)) await this.repos.config.set(STOP_BLOCK_PREFIX + id, '');
       this.stopBlockVersions.set(id, (this.stopBlockVersions.get(id) ?? 0) + 1);
-      this.stopBlocks.delete(id);
+      this.stopBlocks.delete(id); this.wakeResourceQueues();
     });
   }
   private async patchSession(id: string, patch: Partial<Session>) {
@@ -505,8 +517,13 @@ export class DutydeckRuntime {
       let result = current;
       if (patch.state !== undefined || Object.hasOwn(patch, 'error')) {
         const scope = this.currentRef(id);
+        const turnProgress = !!scope && isAttemptRef(scope);
         const fence = scope && isAttemptRef(scope) ? this.attemptFence(scope) : this.fence(current);
-        result = this.wake(this.bound().patchSessionState(fence, makeId('session_state'), { state: patch.state ?? current.state, ...(Object.hasOwn(patch, 'error') ? { error: patch.error ?? null } : {}) })).session;
+        const committed = this.bound().patchSessionState(fence, makeId('session_state'), { state: patch.state ?? current.state, ...(Object.hasOwn(patch, 'error') ? { error: patch.error ?? null } : {}) });
+        // Admission never reads Session state, and turn progress follows every driver event; only a real lifecycle change retries blocked queues.
+        this.publisher.wake(id);
+        if (committed.events.length && !turnProgress) this.wakeResourceQueues();
+        result = committed.session;
       }
       if (patch.archivedAt !== undefined) result = this.bound().patchSession(this.fence(result), { archivedAt: patch.archivedAt });
       const config = { ...result, updatedAt: now(),
@@ -539,7 +556,10 @@ export class DutydeckRuntime {
     const previous = this.driverEventChains.get(session.id) ?? Promise.resolve();
     const next = previous.then(() => this.mutations.run(token, async () => {
       if (this.sessionGenerations.get(session.id) !== generation || !this.mutations.valid(token)) return;
-      await this.eventScope.run(ref, () => this.mutations.write(session.id, () => this.consume(session, event, eventId)));
+      // 插件审批钩子可能一直等到超时，不能占着会话写锁；同一会话之后的驱动事件仍按顺序排在它后面。
+      const hostDecision = await this.reviewHostPermission(session, ref, event);
+      if (this.sessionGenerations.get(session.id) !== generation) return;
+      await this.eventScope.run(ref, () => this.mutations.write(session.id, () => this.consume(session, event, eventId, hostDecision)));
       if (isAttemptRef(ref)) await this.recordUsage(session, ref, event);
     })).catch(error => {
       if (!this.mutations.valid(token) || this.sessionGenerations.get(session.id) !== generation) return;
@@ -548,7 +568,8 @@ export class DutydeckRuntime {
       this.options.log?.warn({ sessionId: session.id, eventType: event.type, code: error instanceof RuntimeError ? error.code : 'DRIVER_EVENT_FAILED', error }, 'Idle driver event could not be recorded');
     });
     this.driverEventChains.set(session.id, next);
-    void next.finally(() => { if (this.driverEventChains.get(session.id) === next) this.driverEventChains.delete(session.id); if (event.type === 'status' || event.type === 'completed') this.wakeResourceQueues(); });
+    // A held session gives no idle proof; releasing the hold wakes the queues itself.
+    void next.finally(() => { if (this.driverEventChains.get(session.id) === next) this.driverEventChains.delete(session.id); if ((event.type === 'status' || event.type === 'completed') && !this.sessionHeld(session.id)) this.wakeResourceQueues(); });
   }
   private async recordUsage(session: Session, ref: AttemptRef, event: NormalizedDriverEvent) {
     const usage = event.type === 'status' && event.data?.state === 'turn_usage';
@@ -773,15 +794,15 @@ export class DutydeckRuntime {
       || resource.runId !== session.runId || resource.identity?.identityId !== receipt.identityId || resource.observations.at(-1)?.state === 'gone'
       || this.resourceBlockers(session.id).some(block => block.code !== 'DRIVER_RESOURCE_UNSAFE' || block.resourceId !== resource.resourceId)) return false;
     const agent = await this.mutations.wait(() => this.repos.agents.get(session.agentId)); if (!agent) return false;
-    const configured = await this.configureAgentForSession(agent, session);
-    const options: ExecutionOptions = executionOptionsOf(configured);
-    if (canonicalExecutionJson(receipt.options) !== canonicalExecutionJson(options)) return false;
-    const workspace = await this.mutations.wait(() => this.workspaces.get(session.id));
-    if (workspace) await this.mutations.wait(() => this.workspaces.validate(workspace));
-    const generation = this.nextSessionGeneration(session.id), lifecycle = this.lifecycle(session.id);
-    let driver: AgentDriver | undefined;
+    let driver: AgentDriver | undefined, generation: number | undefined;
     let attached = false;
     try {
+      const configured = await this.configureAgentForSession(agent, session);
+      const options: ExecutionOptions = executionOptionsOf(configured);
+      if (canonicalExecutionJson(receipt.options) !== canonicalExecutionJson(options)) return false;
+      const workspace = await this.mutations.wait(() => this.workspaces.get(session.id));
+      if (workspace) await this.mutations.wait(() => this.workspaces.validate(workspace));
+      generation = this.nextSessionGeneration(session.id); const lifecycle = this.lifecycle(session.id);
       driver = this.factory(configured, session.protocol, this.onDriverEvent(session, generation),
         code => { if (this.mutations.valid(lifecycle) && this.sessionGenerations.get(session.id) === generation) this.notifyDriverExit(session.id, code); },
         session.id, localOnlyDriverContext(this.fence(session), resource.resourceId));
@@ -809,13 +830,19 @@ export class DutydeckRuntime {
       this.flushInsightSources(driver);
       return true;
     } catch (error) {
-      await this.emit(session.id, 'status', { state: 'terminal_recovery_deferred', message: 'Original idle terminal identity could not be verified; resource remains blocked' });
+      // 工作目录不见了由外层按会话跳过；其余失败只推迟这个终端，资源保持阻塞，不能让整个实例起不来。
+      if (error instanceof RevokedOperation || error instanceof RuntimeError && error.code === 'WORKSPACE_UNAVAILABLE') throw error;
+      this.options.log?.warn({ sessionId: session.id, code: error instanceof RuntimeError ? error.code : 'TERMINAL_RECOVERY_FAILED', error: String(error) }, 'Idle terminal recovery deferred');
+      await this.emit(session.id, 'status', { state: 'terminal_recovery_deferred', message: 'Original idle terminal identity could not be verified; resource remains blocked' })
+        .catch(emitError => { if (emitError instanceof RevokedOperation) throw emitError; });
       return false;
     } finally {
       if (driver && this.drivers.get(session.id) !== driver) {
         this.unsubscribeInsightSources(driver);
-        await driver.prepareForDaemonShutdown?.(true);
-        await driver.stop();
+        // 未采纳的临时 driver 不代表会话；放不掉时，它迟到的事件和退出回调也不能记到会话上。
+        if (this.sessionGenerations.get(session.id) === generation) this.nextSessionGeneration(session.id);
+        try { await driver.prepareForDaemonShutdown?.(true); await driver.stop(); }
+        catch (error) { this.options.log?.warn({ sessionId: session.id, error: String(error) }, 'Unadopted idle terminal driver could not be released; resource remains blocked'); }
       }
     }
   }
@@ -910,6 +937,7 @@ export class DutydeckRuntime {
         this.flushInsightSources(driver);
         await this.flushDriverEvents(session.id);
         if (!this.completedTurns.has(attempt.attemptId)) throw new RuntimeError('DRIVER_RESULT_INCOMPLETE', 'Recovered turn has no completed result', 409);
+        await this.closeTurnPermissions(ref);
         const result = this.turnOutput(ref);
         await this.mutations.write(session.id, async () => this.wake(this.bound().settleAttempt(this.attemptFence(ref), `settlement:${submission.submissionId}`, {
           kind: 'driver_result', submissionId: submission.submissionId, outcome: result.status,
@@ -931,6 +959,7 @@ export class DutydeckRuntime {
         }
         token.revoke(); this.completedTurns.delete(attempt.attemptId); this.driverStopReasons.delete(attempt.attemptId);
         this.turnErrors.delete(attempt.attemptId); this.attemptTools.delete(attempt.attemptId); this.oscPermissionWaits.delete(attempt.attemptId);
+        this.dropAttemptPermissions(attempt.attemptId); this.wakeResourceQueues();
         if (attached && !this.shuttingDown) await this.scoped(session.id, async () => {
           await this.projectQueue(session.id); this.queueBlocked.delete(session.id); this.scheduleQueue(session.id);
         });
@@ -1415,7 +1444,7 @@ export class DutydeckRuntime {
       if (cleared) {
         this.stopBlockVersions.set(session.id, (this.stopBlockVersions.get(session.id) ?? 0) + 1);
         this.stopBlocks.delete(session.id);
-        this.drivers.delete(session.id); this.blockedDrivers.delete(session.id);
+        this.drivers.delete(session.id); this.blockedDrivers.delete(session.id); this.wakeResourceQueues();
       }
       return cleared;
     } catch (error) {
@@ -1813,7 +1842,21 @@ export class DutydeckRuntime {
     }
   }
 
-  private async consume(session: Session, event: NormalizedDriverEvent, eventId: string) {
+  /** 驱动事件写入账本前的形态：内容归一化，轮次内的原生 id 加上轮次前缀。 */
+  private driverEventData(scope: SessionFence | undefined, event: NormalizedDriverEvent) {
+    let data = event.data;
+    if (data && Array.isArray(data.parts)) data = { ...data, parts: normalizeEventContent(data.parts) };
+    if (event.type !== 'permission_request' && event.type !== 'tool_call' && event.type !== 'tool_result') return data;
+    const scopedId = (nativeId: string) => scope && isAttemptRef(scope) ? `turn_${digest([scope.taskId, scope.attemptId, nativeId])}` : nativeId;
+    return { ...data, id: scopedId(String(data.id)), ...(data.toolCallId ? { toolCallId: scopedId(String(data.toolCallId)) } : {}) };
+  }
+  private async reviewHostPermission(session: Session, scope: SessionFence, event: NormalizedDriverEvent) {
+    if (!this.options.reviewPermission || event.type !== 'permission_request' || (event.data?.status ?? 'pending') !== 'pending' || !isAttemptRef(scope)) return undefined;
+    const request = this.driverEventData(scope, event) as PermissionRequestData;
+    const decision = await this.mutations.wait(() => this.options.reviewPermission!(session, request).catch(() => undefined));
+    return decision === 'allow' || decision === 'deny' ? decision : undefined;
+  }
+  private async consume(session: Session, event: NormalizedDriverEvent, eventId: string, hostDecision?: 'allow' | 'deny') {
     const scope = this.currentRef(session.id);
     if (event.type === 'status' && event.data?.state === 'prompt_assembly') {
       // Diagnostic persistence must neither refresh idleness nor fail the turn.
@@ -1829,14 +1872,9 @@ export class DutydeckRuntime {
       }
       return;
     }
-    let data = event.data;
-    if (data && Array.isArray(data.parts)) data = { ...data, parts: normalizeEventContent(data.parts) };
-    const scopedId = (nativeId: string) => scope && isAttemptRef(scope) ? `turn_${digest([scope.taskId, scope.attemptId, nativeId])}` : nativeId;
-    if (event.type === 'permission_request' || event.type === 'tool_call' || event.type === 'tool_result') {
-      data = { ...data, id: scopedId(String(data.id)), ...(data.toolCallId ? { toolCallId: scopedId(String(data.toolCallId)) } : {}) };
-      const rejectReason = event.type === 'permission_request' && data.status === 'rejected' && !data.reason ? this.permissionRejectReasons.get(this.permissionKey(session.id, data.id)) : undefined;
-      if (rejectReason) data = { ...data, reason: rejectReason };
-    }
+    let data = this.driverEventData(scope, event);
+    const rejectReason = event.type === 'permission_request' && data.status === 'rejected' && !data.reason ? this.permissionRejectReasons.get(this.permissionKey(session.id, data.id)) : undefined;
+    if (rejectReason) data = { ...data, reason: rejectReason };
     let tools: AttemptTools | undefined;
     if ((event.type === 'tool_call' || event.type === 'tool_result') && scope && isAttemptRef(scope)) {
       tools = this.attemptTools.get(scope.attemptId);
@@ -1858,16 +1896,20 @@ export class DutydeckRuntime {
       if (!previous || previous.sequence < stored.sequence) tools.calls.set(saved.id, { sequence: stored.sequence, data: saved, projected: false });
       return true;
     };
-    if (event.type === 'permission_request' && (data.status ?? 'pending') === 'pending' && scope && isAttemptRef(scope) && this.options.reviewPermission) {
-      const decision = await this.options.reviewPermission(session, data as PermissionRequestData).catch(() => undefined);
-      if (decision === 'allow' || decision === 'deny') {
-        // 不发待审批事件（没有人工审批卡片）；登记后走与人工审批相同的 resolvePermission，由它写入最终的审批记录。
-        const key = this.permissionKey(session.id, data.id);
-        this.permissions.set(key, { request: data, nativeId: String(event.data.id), fence: scope, generation: this.sessionGenerations.get(session.id) ?? 0, owner: this.mutations.current() });
-        setImmediate(() => void this.resolvePermission(session.id, data.id, decision === 'allow')
-          .catch(error => this.options.log?.warn({ sessionId: session.id, permissionId: data.id, error }, 'Host permission decision could not be applied')));
-        return;
-      }
+    if (hostDecision && event.type === 'permission_request' && scope && isAttemptRef(scope)) {
+      // 不发待审批事件（没有人工审批卡片）；登记后走与人工审批相同的 resolvePermission，由它写入最终的审批记录。
+      const key = this.permissionKey(session.id, data.id);
+      const entry = { request: data, nativeId: String(event.data.id), fence: scope, generation: this.sessionGenerations.get(session.id) ?? 0, owner: this.mutations.current() };
+      this.permissions.set(key, entry);
+      setImmediate(() => void this.resolvePermission(session.id, data.id, hostDecision === 'allow').catch(async error => {
+        this.options.log?.warn({ sessionId: session.id, permissionId: data.id, error }, 'Host permission decision could not be applied; asking a person');
+        // 宿主的决定没落地而原生审批还挂着：照常发待审批事件交给人处理，不能悄悄等到超时。
+        await this.mutations.run(entry.owner, () => this.eventScope.run(scope, () => this.mutations.write(session.id, async () => {
+          if (this.permissions.get(key) !== entry || this.permissionResolutions.has(key) || entry.generation !== (this.sessionGenerations.get(session.id) ?? 0)) return;
+          await this.consume(session, event, eventId);
+        })));
+      }).catch(error => { if (!(error instanceof RevokedOperation)) this.options.log?.warn({ sessionId: session.id, permissionId: data.id, error }, 'Host permission fallback could not be recorded'); }));
+      return;
     }
     let stored: AgentEvent;
     try { stored = await this.emit(session.id, event.type, data, event.raw, eventId, event.sourceId); }
@@ -2832,7 +2874,24 @@ export class DutydeckRuntime {
     await this.changeDriverConfiguration(session, existing, () => options);
     return existing;
   }
-  private permissionsForSession(id: string) { return [...this.permissions.values()].filter(permission => permission.fence.sessionId === id); }
+  private permissionsForSession(id: string) { return [...this.permissions.values()].filter(permission => permission.fence.sessionId === id && this.mutations.valid(permission.owner)); }
+  private dropAttemptPermissions(attemptId: string) {
+    for (const [key, permission] of this.permissions) if (permission.fence.attemptId === attemptId) { this.permissions.delete(key); this.permissionResolutions.delete(key); }
+  }
+  /**
+   * 驱动报告本轮结束后仍登记着的审批已不可能再被采纳（ACP 在中断、停止和轮次收尾时自行 reject_once，不发终态事件）。
+   * 补记拒绝，审批卡和时间线才会收起；正在提交的人工决议由 resolvePermission 自己收尾。
+   */
+  private async closeTurnPermissions(ref: AttemptRef & SessionFence) {
+    for (const [key, permission] of [...this.permissions]) {
+      if (permission.fence.attemptId !== ref.attemptId || this.permissionResolutions.has(key)) continue;
+      this.permissions.delete(key);
+      const request = { ...permission.request, status: 'rejected' as const, reason: TURN_ENDED_PERMISSION_REASON };
+      await this.eventScope.run(permission.fence, () => this.emit(ref.sessionId, 'permission_request', request)).catch(error =>
+        this.options.log?.warn({ sessionId: ref.sessionId, permissionId: request.id, error }, 'Permission closed by the ended turn could not be recorded'));
+      await this.artifact('savePermission', ref.sessionId, request).catch(() => {});
+    }
+  }
   private async recordPrompt(sessionId: string, prompt: string, stage: 'accepted_input' | 'session_context', mode: 'send' | 'steer', inputTaskId: string, operationId?: string, sources?: PromptSourceDiagnostics) {
     const data: PromptAssemblyData = {
       state: 'prompt_assembly', version: 1, stage,
@@ -2934,6 +2993,7 @@ export class DutydeckRuntime {
       // 结束快照在结算之前：结算事件一到，飞书结果卡就要读这一轮的改动摘要。
       await this.mutations.wait(observeEnd);
       if (!this.completedTurns.has(ref.attemptId)) throw new RuntimeError('DRIVER_RESULT_INCOMPLETE', 'Driver returned without a completed result', 409);
+      await this.closeTurnPermissions(ref);
       const result = this.turnOutput(ref);
       await this.mutations.write(id, async () => {
         const evidence = { kind: 'driver_result' as const, submissionId, outcome: result.status, outputDigest: result.outputDigest, stopReason: result.stopReason, complete: true as const };
@@ -2978,7 +3038,7 @@ export class DutydeckRuntime {
         token.revoke(); this.touch(id);
       }
       this.completedTurns.delete(ref.attemptId); this.driverStopReasons.delete(ref.attemptId); this.turnErrors.delete(ref.attemptId); this.eventFlushedAttempts.delete(ref.attemptId);
-      this.attemptTools.delete(ref.attemptId); this.oscPermissionWaits.delete(ref.attemptId); this.wakeResourceQueues();
+      this.attemptTools.delete(ref.attemptId); this.oscPermissionWaits.delete(ref.attemptId); this.dropAttemptPermissions(ref.attemptId); this.wakeResourceQueues();
     }
     const settled = this.publicTask(this.repos.execution.getTaskExecution(task.id)?.task ?? task);
     if (settledSession) this.notifyTaskSettled(settledSession, settled);
@@ -3243,14 +3303,14 @@ export class DutydeckRuntime {
       } catch (error) {
         if (error instanceof RuntimeError && error.code === 'WORK_ITEM_CAPACITY_BLOCKED') {
           // A release may race the rejected claim's promise continuation. Recheck that wake once.
-          if (resourceRevision === this.resourceQueueRevision) this.resourceQueueBlocked.add(id);
+          this.blockOnResources(id, resourceRevision);
           return;
         }
         if (error instanceof RuntimeError && error.code === 'WORKSPACE_RESOURCE_BLOCKED') {
           if (next && await this.closeUnprovenIdleCompetitors(id,next.id,!admissionRechecked)) { admissionRechecked = true; continue; }
           if (next) await this.noteWorkspaceBlocked(session, next.id, error.message)
             .catch(noteError => this.options.log?.warn({ sessionId: id, taskId: next.id, error: String(noteError) }, 'Workspace blocked notice failed'));
-          if (resourceRevision === this.resourceQueueRevision) this.resourceQueueBlocked.add(id);
+          this.blockOnResources(id, resourceRevision);
           return;
         }
         this.queueBlocked.add(id); return;
@@ -3266,6 +3326,11 @@ export class DutydeckRuntime {
     }
   }
   private wakeOptional(result: CommitResult | undefined) { return result ? this.wake(result) : undefined; }
+  /** A wake that landed while this claim was failing goes through the shared retry pass instead of an immediate re-drain. */
+  private blockOnResources(id: string, revision: number) {
+    this.resourceQueueBlocked.add(id);
+    if (revision !== this.resourceQueueRevision) this.retryResourceQueues();
+  }
   /**
    * 排头任务从未开始、已排队超过 24 小时，又不是同会话上一条任务刚由 Agent 跑完、按顺序轮到它：多半是被挡了很久的旧消息，
    * 现在执行会出乎发送者意料。以安装所有者身份取消，并提醒需要时重发。
@@ -3496,7 +3561,7 @@ export class DutydeckRuntime {
         throw error;
       } finally {
         if (this.steeringSessions.get(id) === taskId) this.steeringSessions.delete(id);
-        this.scheduleQueue(id);
+        this.wakeResourceQueues(); this.scheduleQueue(id);
       }
     });
   }
@@ -3665,7 +3730,7 @@ export class DutydeckRuntime {
       if (actorRequired) throw new RuntimeError('ACTOR_REQUIRED', 'Execution stopped; queued tasks remain until a named actor cancels them', 403);
     });
     this.stopRuns.set(id, run);
-    const finish = () => { if (this.stopRuns.get(id) === run) this.stopRuns.delete(id); this.drains.delete(id); };
+    const finish = () => { if (this.stopRuns.get(id) === run) this.stopRuns.delete(id); this.drains.delete(id); this.wakeResourceQueues(); };
     void run.then(finish, finish); return run;
   }
   private async stopTransition(id: string, token: Owner, actor?: ExecutionActor) {
@@ -3785,7 +3850,10 @@ export class DutydeckRuntime {
     if (!driver?.resolvePermission) throw new RuntimeError('PERMISSION_EXPIRED', 'The original approval driver is unavailable', 409);
     const claim = makeId('permission_claim'); this.permissionResolutions.set(key, claim);
     try {
-      if (!this.mutations.valid(pending.owner) || pending.generation !== (this.sessionGenerations.get(sessionId) ?? 0) || this.permissions.get(key) !== pending) throw new RuntimeError('PERMISSION_EXPIRED', 'Permission request is no longer active', 409);
+      if (!this.mutations.valid(pending.owner) || pending.generation !== (this.sessionGenerations.get(sessionId) ?? 0) || this.permissions.get(key) !== pending) {
+        if (this.permissions.get(key) === pending) this.permissions.delete(key);
+        throw new RuntimeError('PERMISSION_EXPIRED', 'Permission request is no longer active', 409);
+      }
       // 记录里的说明脱敏后保存；交给执行端的仍是用户原文。
       const shownReason = !approved && reason ? permissionDisplayText(reason, [], freeTextInputMaxBytes) : '';
       const request = { ...pending.request, status: approved ? 'approved' as const : 'rejected' as const, ...(shownReason ? { reason: shownReason } : {}),

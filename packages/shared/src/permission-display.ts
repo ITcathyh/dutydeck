@@ -1,15 +1,72 @@
 import { redactCredentialText } from './credential-redaction.js';
 
-/** Redact before truncating so a clipped credential cannot escape the matching rule. */
+/** Text past the display limit that still goes through redaction, so a credential crossing the limit keeps its context. */
+const redactionMargin = 4096;
+const credentialKey = /token|secret|password|passwd|api[_-]?key|authorization|cookie/i;
+const space = /\s/;
+const valueStop = /[\s;&]/;
+
+/**
+ * Redact before truncating so a clipped credential cannot escape the matching rule.
+ * Agent-supplied text is unbounded; only limit + margin reaches the regexes, and the run cut by that bound is hidden whole.
+ */
 export function permissionDisplayText(value: unknown, secrets: string[] = [], limit = 1200): string {
   if (typeof value !== 'string') return '';
   let text = value;
   for (const secret of secrets.filter(Boolean).sort((a, b) => b.length - a.length)) text = text.split(secret).join('[REDACTED]');
-  text = redactCredentialText(text, '[REDACTED]', '[REDACTED]')
-    .replace(/((?:[\w-]*(?:token|secret|password|passwd|api[_-]?key|authorization|cookie)[\w-]*)["']?\s*(?:[:=]\s*|\s+))(?:("[^"\n]*"|'[^'\n]*')|[^\s;&]+)/gi, '$1[REDACTED]')
+  const clipped = text.length > limit + redactionMargin;
+  if (clipped) {
+    text = text.slice(0, limit + redactionMargin);
+    let cut = text.length;
+    while (cut > 0 && !space.test(text[cut - 1]!)) cut--;
+    text = `${text.slice(0, cut)}[REDACTED]`;
+  }
+  text = redactCredentialAssignments(redactCredentialText(text, '[REDACTED]', '[REDACTED]'))
     .replace(/\b(?:sk-[a-z0-9_-]{12,}|gh[pousr]_[a-z0-9]{12,}|github_pat_[a-z0-9_]{12,})\b/gi, '[REDACTED]')
     .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '').trim();
-  return text.length > limit ? `${text.slice(0, limit)}…` : text;
+  return text.length > limit ? `${text.slice(0, limit)}…` : clipped ? `${text}…` : text;
+}
+
+/**
+ * Hides the value after any `[\w-]+` word containing a credential keyword, followed by `:`/`=` or whitespace.
+ * Same matches as `([\w-]*keyword[\w-]*["']?\s*(?:[:=]\s*|\s+))("[^"\n]*"|'[^'\n]*'|[^\s;&]+)`, scanned once:
+ * that regex backtracks quadratically on long words and cubically on repeated keywords.
+ */
+function redactCredentialAssignments(text: string) {
+  const words = /[\w-]+/g;
+  let shown = '', from = 0;
+  for (let word = words.exec(text); word; word = words.exec(text)) {
+    if (!credentialKey.test(word[0])) continue;
+    const start = assignedValueStart(text, words.lastIndex);
+    if (start === undefined) continue;
+    shown += `${text.slice(from, start)}[REDACTED]`;
+    from = words.lastIndex = assignedValueEnd(text, start);
+  }
+  return shown + text.slice(from);
+}
+
+function assignedValueStart(text: string, keyEnd: number) {
+  const isValue = (index: number) => index < text.length && !valueStop.test(text[index]!);
+  const afterQuote = text[keyEnd] === '"' || text[keyEnd] === "'" ? keyEnd + 1 : keyEnd;
+  let gap = afterQuote;
+  while (gap < text.length && space.test(text[gap]!)) gap++;
+  if (text[gap] === ':' || text[gap] === '=') {
+    let start = gap + 1;
+    while (start < text.length && space.test(text[start]!)) start++;
+    if (isValue(start)) return start;
+  }
+  return gap > afterQuote && isValue(gap) ? gap : undefined;
+}
+
+function assignedValueEnd(text: string, start: number) {
+  const quote = text[start];
+  if (quote === '"' || quote === "'") {
+    // No quote char lies between a failed opening quote and its newline, so later scans never revisit it.
+    for (let index = start + 1; index < text.length && text[index] !== '\n'; index++) if (text[index] === quote) return index + 1;
+  }
+  let end = start;
+  while (end < text.length && !valueStop.test(text[end]!)) end++;
+  return end;
 }
 
 /** 卡片与 Web 自由文本输入框的上限：飞书 input 的 max_length、Web 输入框的 maxLength 都用这个值。 */

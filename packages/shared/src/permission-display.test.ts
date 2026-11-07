@@ -26,6 +26,29 @@ describe('permission display redaction', () => {
     expect(permissionDisplayText('pnpm test')).toBe('pnpm test');
     expect(permissionDisplayText('x'.repeat(5000)).length).toBe(1201);
   });
+
+  it('keeps the keyword assignment rule for spaced, quoted and unterminated values', () => {
+    expect(permissionDisplayText('my-api-key  "a b" next')).toBe('my-api-key  [REDACTED] next');
+    expect(permissionDisplayText("x_cookie_y = 'a b'tail")).toBe("x_cookie_y = [REDACTED]tail");
+    expect(permissionDisplayText('session-token "open quote; rest')).toBe('session-token [REDACTED] quote; rest');
+    expect(permissionDisplayText('mytoken :;after')).toBe('mytoken [REDACTED];after');
+    expect(permissionDisplayText('token= ;')).toBe('token= ;');
+  });
+
+  it('scans agent text in linear time', () => {
+    for (const input of ['access_token_'.repeat(400), 'token'.repeat(1000), `echo ${'aB3-_'.repeat(6400)} | base64 -d`, 'token="open '.repeat(5000)]) {
+      const started = performance.now();
+      permissionDisplayText(input);
+      // 原实现在这些输入上要数秒到数十秒；线性扫描在毫秒级，上限只防负载抖动。
+      expect(performance.now() - started).toBeLessThan(1000);
+    }
+  });
+
+  it('hides the run cut by the redaction bound instead of showing a clipped credential', () => {
+    const shown = permissionDisplayText(`${'safe '.repeat(1100)}ghp_${'a'.repeat(40)}`, [], 100);
+    expect(shown).toBe(`${'safe '.repeat(20).slice(0, 100)}…`);
+    expect(permissionDisplayText(`run ${'z'.repeat(20000)}`)).toBe('run [REDACTED]…');
+  });
 });
 
 describe('free text input limit', () => {
