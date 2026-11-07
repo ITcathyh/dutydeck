@@ -939,7 +939,9 @@ describe('performLarkCardReconcile 遵守群级呈现开关', () => {
     const cardMappings = createMemoryChannelMappingRepo(mappings);
     const runtime = {
       getTasks: vi.fn(async (sessionId: string) => tasks[sessionId] ?? []),
-      getEvents: vi.fn(async () => [{ id: 1, type: 'text', data: { text: '结果内容' } }])
+      getEvents: vi.fn(async (sessionId: string) => [
+        { id: 0, type: 'text', data: { role: 'user', text: `Prompt ${sessionId}`, taskId: `task-${sessionId}` } },
+        { id: 1, type: 'text', data: { text: '结果内容' } }])
     };
     const service = {
       update: vi.fn(async (input: any) => ({ messageId: input.messageId })),
@@ -1328,7 +1330,7 @@ describe('恢复异常通知与人工核验结果', () => {
       const text = '经原始记录核验的最终答案';
       const event = { id: 'verified', type: 'text', data: { text, recovery: { actor: 'installation_owner' } } };
       const runtime = { getTasks: async () => [{ id: 'task', status: 'completed', updatedAt: new Date().toISOString() }],
-        getEvents: async () => [{ id: 'tool', type: 'tool_call', data: { id: 'open_tool', name: 'shell' } }, event],
+        getEvents: async () => [{ id: 'prompt', type: 'text', data: { role: 'user', text: 'Prompt', taskId: 'task' } }, { id: 'tool', type: 'tool_call', data: { id: 'open_tool', name: 'shell' } }, event],
         getTaskRecovery: async () => ({ status: 'completed', blockers: [], ...(verified ? { verifiedOutput: { eventId: 'verified', digest: createHash('sha256').update(text).digest('hex') } } : {}) }) };
       const service = { update: vi.fn(), reply: vi.fn(async (_input: any) => ({ messageId: 'om_result' })), send: vi.fn() };
       await performLarkCardReconcile({ runtime: runtime as any, service: service as any, cardMappings: cardMappings as any,
