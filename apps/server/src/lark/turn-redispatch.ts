@@ -413,6 +413,17 @@ export function larkReplayUnsafeReason(events: AgentEvent[]): string | undefined
   return undefined;
 }
 
+/**
+ * 「没有危险的工具事件」只在协议确实为每次工具调用记事件时才说明只读：记不下来时返回写进说明的原因。
+ * ACP 每次工具调用都有事件。pty-cli 只有带转写的适配器（transcript：TRANSCRIPT_ADAPTER_IDS）从转写解析出工具事件，
+ * 转写没附着时终端里执行的命令不留任何事件，所以这一轮还要至少有一条工具事件。jsonl / pipe / pty 从不产出工具事件。
+ */
+export function larkReplayEvidenceGap(session: { protocol?: string; transcript: boolean } | undefined, toolEvents: AgentEvent[]): string | undefined {
+  if (session?.protocol === 'acp') return undefined;
+  if (session?.protocol === 'pty-cli' && session.transcript && toolEvents.length) return undefined;
+  return '的终端操作没有可核对的工具记录';
+}
+
 const redone = (info: LarkRedispatchInfo) => info.auto ? `服务更新中断，已自动继续（第 ${info.count}/${larkRedispatchLimit} 次）` : '已按「重新执行」重新执行';
 
 /** 注入 Agent prompt 的说明，排在用户请求之前。在原会话续做时就是那句「请从中断处继续」。 */

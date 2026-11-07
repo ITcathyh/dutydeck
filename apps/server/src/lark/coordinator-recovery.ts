@@ -1,4 +1,5 @@
 import { clearTaskReportSafely } from '@dutydeck/shared';
+import { TRANSCRIPT_ADAPTER_IDS } from '@dutydeck/pty-driver';
 import { readTaskAuthorization, recordTaskAuthorization } from '../task-authorization.js';
 import { randomUUID } from 'node:crypto';
 import { explicitFinalTextReceiptReader } from './explicit-final.js';
@@ -26,6 +27,7 @@ import {
   larkRedispatchLimit,
   larkRedispatchMaxAgeMs,
   larkRedispatchWebNote,
+  larkReplayEvidenceGap,
   larkReplayUnsafeReason,
   larkToolEvents,
   type LarkHeldCause
@@ -522,7 +524,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
       await clearTaskReportSafely(store, claim.runtimeTaskId);
       await this.markRelaunchedCard(config, moved).catch(error => this.log.warn({ error, taskId: claim.taskId }, '旧任务卡未能更新为已转到新会话，下次点击时收尾'));
       const task: LarkTask = { id: claim.taskId, group, event: inbox.event, prompt: saved.prompt, resources: inbox.request?.resources ?? [], inbox,
-        config: effective, state: 'queued', events: [], turn: claim.turn, scopeId, epoch: group.epoch ?? 0,
+        config: effective, state: 'queued', events: [], turn: claim.turn, scopeId, epoch: group.epoch ?? 0, recovered: true,
         ...(inbox.redispatch ? { redispatch: inbox.redispatch } : {}), ...(materialPrompt ? { retryMaterialPrompt: materialPrompt } : {}) };
       this.tasks.delete(task.id);
       this.tasks.set(task.id, task);
@@ -631,8 +633,10 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
     try {
       own = await this.attemptActivity(mapping.sessionId, attempt.attemptId);
       // 没有按执行记账的旧事件退回按任务切片：切不出来时整段都算进来，只会更保守。
-      unsafeReason = larkReplayUnsafeReason(own.eventCount ? await this.attemptToolEvents(mapping.sessionId, attempt.attemptId)
-        : (await this.runtimeTaskEvents(mapping.sessionId, runtimeTask.id)).filter(event => !event.taskId || event.taskId === runtimeTask.id));
+      const toolEvents = own.eventCount ? await this.attemptToolEvents(mapping.sessionId, attempt.attemptId)
+        : larkToolEvents((await this.runtimeTaskEvents(mapping.sessionId, runtimeTask.id)).filter(event => !event.taskId || event.taskId === runtimeTask.id));
+      unsafeReason = larkReplayUnsafeReason(toolEvents);
+      if (restart && !unsafeReason) unsafeReason = larkReplayEvidenceGap(await this.toolEventSource(mapping.sessionId), toolEvents);
     } catch (error) {
       this.log.warn({ error, taskId: mapping.externalId }, '读取被切断那一轮的执行记录失败，按可能有外部副作用处理');
       unsafeReason = '的执行记录读取失败';
@@ -743,6 +747,14 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
   private async attemptToolEvents(sessionId: string, attemptId: string): Promise<AgentEvent[]> {
     if (this.runtime.getAttemptToolEvents) return this.runtime.getAttemptToolEvents(sessionId, attemptId);
     return larkToolEvents((await this.runtime.getEvents?.(sessionId) ?? []).filter(event => event.attemptId === attemptId));
+  }
+
+  /** 会话的协议，以及终端模式的适配器有没有转写（larkReplayEvidenceGap）。会话不存在时返回 undefined。 */
+  private async toolEventSource(sessionId: string) {
+    const session = await this.runtime.getSession(sessionId);
+    if (!session) return undefined;
+    const agent = session.protocol === 'pty-cli' ? (await this.runtime.listAgents?.())?.find(item => item.id === session.agentId) : undefined;
+    return { protocol: session.protocol, transcript: Boolean(agent && TRANSCRIPT_ADAPTER_IDS.includes(agent.adapterId ?? agent.id)) };
   }
 
   /** 某一轮 runtime 任务的事件切片：从最近的窗口往前扩到这一轮开头，不读整段会话历史。 */

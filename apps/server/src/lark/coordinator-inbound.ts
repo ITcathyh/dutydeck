@@ -63,7 +63,7 @@ import type { LarkMessageEvent } from './listener.js';
 import type { LarkGroup, LarkTask, PersistedLarkCardTask } from './coordinator.js';
 import { parseCardTask, parseOptionalCardTask } from './persisted-card-task.js';
 import { type LarkCommandPrompt, larkCardChannel, type LarkRelaunchClaim, larkTaskTitle, sendTaskCard } from './coordinator-core.js';
-import { LarkCoordinatorDispatch } from './coordinator-dispatch.js';
+import { LarkCoordinatorDispatch, larkCancelledBeforeSubmit, larkTurnRuntimeTaskId } from './coordinator-dispatch.js';
 import { planPrompt } from '../plan-mode.js';
 import { planReplyAction } from './plan-flow.js';
 import { AgentCommandParamError, agentCommandConfirmSummary, agentCommandPlan, larkAgentCommandKind, type LarkAgentCommandRequest, type LarkAgentViewRequest, type LarkAgentSettingsRequest } from './agent-command.js';
@@ -226,10 +226,14 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
   /** 启动恢复里瞬时失败、正在等待重试的入站消息，按消息记已重试次数。 */
   private readonly inboundRecoveryRetries = new Map<string, number>();
 
+  /** 卡片「重试」正在认领的任务（task.id）。 */
+  private readonly retryInFlight = new Set<string>();
+
   /**
    * 恢复一条上次没处理完的入站消息。handle 会重新检查当前配置和成员身份，凭据从不重放。
-   * - 超过恢复年龄上限：unrouted 静默 ignored；已 received 标 failed，给仍有权限的发送人
-   *   提示重新发送；旧消息（larkRecoveryNoticeExpired）不回。
+   * - 超过恢复年龄上限：unrouted 静默 ignored；received 先按幂等键查执行账本（inboundTurnAccepted），
+   *   已接收的照常重放接回结果；确认没接收的标 failed，给仍有权限的发送人提示重新发送；查不到的标 failed，
+   *   只说结果未知，不说没有执行。旧消息（larkRecoveryNoticeExpired）不回。
    * - 平台明确拒绝（机器人不在群里、群已解散、没有权限）：标 failed 并写原因，重试也不会成功。
    * - 网络、5xx、超时这类瞬时失败：交还记录，退避后在后台重试，不丢；过了年龄上限按上一条收口。
    */
@@ -246,16 +250,24 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
           this.scheduleIgnoredPrune(config.appId);
           return;
         }
-        await this.inbox!.update(record, { state: 'failed', reason: 'backlog_expired', error: `重启后超过 ${hours} 小时仍未执行，不再自动执行。` });
-        const actor = record.event.senderOpenId;
-        if (actor && !larkRecoveryNoticeExpired(receivedAt) && await this.currentAccess(config, record.event.chatId, record.event.chatType, actor, 'task.view_result')) {
-          await this.workflowReply(record.event, config, `服务重启后，这条请求已超过 ${hours} 小时没有执行，不会再自动执行。如仍需要，请重新发送。`,
-            { failed: true, taskName: '请求未执行' });
+        const accepted = await this.inboundTurnAccepted(record, config);
+        if (accepted !== true) {
+          const unknown = accepted === undefined;
+          await this.inbox!.update(record, { state: 'failed', reason: 'backlog_expired',
+            error: unknown ? `重启后超过 ${hours} 小时，无法确认是否已执行，不再自动执行。` : `重启后超过 ${hours} 小时仍未执行，不再自动执行。` });
+          const actor = record.event.senderOpenId;
+          if (actor && !larkRecoveryNoticeExpired(receivedAt) && await this.currentAccess(config, record.event.chatId, record.event.chatType, actor, 'task.view_result')) {
+            await this.workflowReply(record.event, config, unknown
+              ? `服务重启后无法确认这条请求是否已经执行，且已超过 ${hours} 小时，不会自动重发。请先核对结果，如仍需要再重新发送。`
+              : `服务重启后，这条请求已超过 ${hours} 小时没有执行，不会再自动执行。如仍需要，请重新发送。`,
+              { failed: true, taskName: unknown ? '请求结果未知' : '请求未执行' });
+          }
+          return;
         }
       } catch (error) {
         this.log.warn({ error, messageId }, '过期的入站记录收尾失败');
+        return;
       }
-      return;
     }
     try {
       if (record.state === 'unrouted') await this.routeCaptured(record, config);
@@ -297,6 +309,24 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       } catch (settleError) {
         this.log.error({ error: settleError, cause: error, messageId }, '重启恢复入站消息失败后收口出错');
       }
+    }
+  }
+
+  /**
+   * 入站记录当前这一轮有没有被 runtime 接收。派发前一定先写会话和轮次，没写过就没有派发；
+   * 写过时按这一轮的幂等键查执行账本。没有账本、会话或读取失败时返回 undefined（结果未知）。
+   */
+  private async inboundTurnAccepted(record: LarkInboxRecord, config: StoredLarkConfig): Promise<boolean | undefined> {
+    const { sessionId, turn } = record;
+    if (!sessionId || !turn) return false;
+    if (!this.runtime.dispatch || !this.runtime.getTasks) return undefined;
+    try {
+      if (!await this.runtime.getSession(sessionId)) return undefined;
+      const taskId = larkTurnRuntimeTaskId(sessionId, config.appId, record.event.messageId, turn);
+      return (await this.runtime.getTasks(sessionId)).some(task => task.id === taskId);
+    } catch (error) {
+      this.log.warn({ error, messageId: record.event.messageId }, '重启后查询入站请求的执行记录失败，按结果未知处理');
+      return undefined;
     }
   }
 
@@ -968,14 +998,14 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       else if (commandRoute) { prompt = commandRoute.prompt; retryMaterialPrompt = commandRoute.materialPrompt; launchOptions = commandRoute.launchOptions; commandEpoch = commandRoute.epoch; }
       if (inbox && commandRoute && typeof commandRoute !== 'string' && commandRoute.lineage) await this.inbox!.update(inbox, { lineage: commandRoute.lineage });
       if (inbox && !inbox.request) await this.inbox!.update(inbox, { state: 'received', request: { prompt, scopeId, resources, ...(retryMaterialPrompt ? { materialPrompt: retryMaterialPrompt } : {}), ...(launchOptions ? { launchOptions } : {}) } });
-      // 首卡重试从触发到这里有多步异步操作，期间用户可能发了 /new。
-      if (retrying && (retrying.epoch !== (group.epoch ?? 0) || (inbox?.sessionId && group.retiredSessionIds?.has(inbox.sessionId)))) {
-        if (inbox?.state === 'received') await this.inbox!.update(inbox, { state: 'failed', error: '请求在执行前被 /new 作废' });
+      // 首卡重试从触发到这里有多步异步操作，期间用户可能发了 /new 或 /cancel。
+      if (retrying && (retrying.cancelRequested || retrying.epoch !== (group.epoch ?? 0) || (inbox?.sessionId && group.retiredSessionIds?.has(inbox.sessionId)))) {
+        if (inbox?.state === 'received') await this.inbox!.update(inbox, { state: 'failed', error: retrying.cancelRequested ? larkCancelledBeforeSubmit : '请求在执行前被 /new 作废' });
         await clearAcknowledgement();
         return;
       }
       // 空 @ 消息（仅 @ 机器人无文字）仍需创建任务，由 runTurn 拉取聊天记录做兜底意图判断。
-      const task: LarkTask = { ...(commandRoute && typeof commandRoute !== 'string' && commandRoute.lineage ? { matterLineage: commandRoute.lineage } : {}), id: event.messageId, group, event, prompt, resources, inbox, retryMaterialPrompt, launchOptions, ...(inbox?.cardId ? { cardMessageId: inbox.cardId } : {}), ...(inbox?.redispatch ? { redispatch: inbox.redispatch } : {}), ...(commandRoute && typeof commandRoute !== 'string' && commandRoute.suggestion ? { commandSuggestion: commandRoute.suggestion } : {}), ...(commandRoute && typeof commandRoute !== 'string' && commandRoute.steer ? { steer: true } : {}), config, ...(busy ? { busySupplement: busy } : {}), state: 'queued', events: [], restoring: recovering, turn: (inbox?.turn ?? 1) - 1, scopeId, epoch: commandEpoch ?? retrying?.epoch ?? group.epoch ?? 0, acknowledgement };
+      const task: LarkTask = { ...(commandRoute && typeof commandRoute !== 'string' && commandRoute.lineage ? { matterLineage: commandRoute.lineage } : {}), id: event.messageId, group, event, prompt, resources, inbox, retryMaterialPrompt, launchOptions, ...(inbox?.cardId ? { cardMessageId: inbox.cardId } : {}), ...(inbox?.redispatch ? { redispatch: inbox.redispatch } : {}), ...(commandRoute && typeof commandRoute !== 'string' && commandRoute.suggestion ? { commandSuggestion: commandRoute.suggestion } : {}), ...(commandRoute && typeof commandRoute !== 'string' && commandRoute.steer ? { steer: true } : {}), config, ...(busy ? { busySupplement: busy } : {}), state: 'queued', events: [], restoring: recovering, ...(recovering ? { recovered: true } : {}), turn: (inbox?.turn ?? 1) - 1, scopeId, epoch: commandEpoch ?? retrying?.epoch ?? group.epoch ?? 0, acknowledgement };
       this.tasks.set(task.id, task);
       handedOff = true;
       if (this.tasks.size > 5_000) this.tasks.delete(this.tasks.keys().next().value!);
@@ -990,7 +1020,8 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
           return;
         }
         if (inbox?.state === 'received') await this.inbox!.update(inbox, { state: 'failed', error: error instanceof Error ? error.message : String(error) });
-      });
+        // group.tail 是同一会话的排队链，收尾再抛出会让下一条消息跳过 runTurn。
+      }).catch(error => this.log.error({ error, messageId: event.messageId }, '收尾失败的飞书请求出错'));
     } finally {
       if (!handedOff) await clearAcknowledgement();
     }
@@ -1127,11 +1158,12 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
   private async runUndeliveredRetry(task: LarkTask, released: LarkInboxRecord, config: StoredLarkConfig, recovering: boolean, adopted: boolean, failedAt: number) {
     if (this.stopped) return;
     const key = `${task.id}:${task.turn}`;
-    // 等待期间会话被 /new 作废：旧请求不再执行。
+    // 等待期间会话被 /new 作废，或请求被 /cancel 取消：旧请求不再执行。
     const sessionId = released.sessionId;
-    if (task.epoch !== (task.group.epoch ?? 0) || (sessionId && task.group.retiredSessionIds?.has(sessionId))) {
+    const superseded = task.epoch !== (task.group.epoch ?? 0) || Boolean(sessionId && task.group.retiredSessionIds?.has(sessionId));
+    if (superseded || task.cancelRequested) {
       this.undeliveredRetries.delete(key);
-      if (await this.inbox!.unclaimed(released)) await this.inbox!.update(released, { state: 'failed', error: '请求在执行前被 /new 作废' });
+      if (await this.inbox!.unclaimed(released)) await this.inbox!.update(released, { state: 'failed', error: superseded ? '请求在执行前被 /new 作废' : larkCancelledBeforeSubmit });
       return;
     }
     // 等待期间已被别的路径接手（例如重启恢复，或同一条消息被再次推送），或已不是 received，不再重试。
@@ -1296,8 +1328,11 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     group: LarkGroup, scopeId: string, acknowledgement?: LarkTask['acknowledgement']): Promise<'handled' | LarkCommandPrompt | undefined> {
     const boundSessionId = group.sessionId && !group.retiredSessionIds?.has(group.sessionId) ? group.sessionId : undefined;
     const sessionId = boundSessionId ?? (await this.findScopeSession(config, event, scopeId, group).catch(() => undefined))?.id;
+    // 首轮还没建出会话时，准备中的请求只能靠「停」叫住：有这样的请求就按 /cancel 处理，不把「停」建成一条新请求。
+    if (kind === 'stop' && (sessionId && this.runtime.getTasks || [...this.tasks.values()].some(task => task.group === group && !task.cancelRequested && this.preparingTurn(task)))) {
+      return await this.routeChatCommand(event, config, '/cancel', group, scopeId, acknowledgement) === 'handled' ? 'handled' : undefined;
+    }
     if (!sessionId || !this.runtime.getTasks) return undefined;
-    if (kind === 'stop') return await this.routeChatCommand(event, config, '/cancel', group, scopeId, acknowledgement) === 'handled' ? 'handled' : undefined;
     const confirm = (text: string) => this.service.replyText({ messageId: larkMessageAnchor(event), ...(event.threadId?.trim() ? { replyInThread: true } : {}),
       text, idempotencyKey: `control_${event.messageId}`.slice(0, 50) }).catch(error => this.log.warn({ error, messageId: event.messageId }, '控制语回执发送失败'));
     try {
@@ -1725,7 +1760,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         const runtimeTasks = sessionId && this.runtime.getTasks ? await this.runtime.getTasks(sessionId) : undefined;
         const running = runtimeTasks?.find(task => task.status === 'running');
         // 内存里的这一轮持有 requestUpdate，能把进度卡就地收敛成取消收据；runtime 没有任务记录时只能靠它。
-        const liveTurn = [...this.tasks.values()].reverse().find(task => task.group === group && task.state === 'running'
+        const liveTurn = [...this.tasks.values()].reverse().find(task => task.group === group && task.state === 'running' && !this.preparingTurn(task)
           && (runtimeTasks ? Boolean(running) && (!task.runtimeTaskId || task.runtimeTaskId === running!.id) : true));
         // 私聊里只有这一个人能发消息：找不到记录的任务也是他发起的。
         const requesterOf = async (id: string) => (await this.larkTaskOrigin(config, event.chatId, { id, sessionId: sessionId! }))?.requester
@@ -1737,7 +1772,8 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
             .map(task => ({ id: task.runtimeTaskId!, sessionId: task.sessionId! }));
         // 先取消排队、再中断：先中断的话，下一条排队可能立刻开跑，就取消不掉了。
         // 内存里的排队卡就地改成已取消，不再另发一张「已取消」结果卡：这张回执已经说了。
-        let cancelled = 0;
+        // 还在准备、runtime 还没有记录的自己的请求（下载附件、读上下文）也算排队，一并取消。
+        let cancelled = await this.cancelPreparingTurns(group, event.senderOpenId);
         for (const item of this.runtime.cancelQueued ? ownQueued : []) {
           const live = [...this.tasks.values()].find(task => task.runtimeTaskId === item.id && task.state === 'queued');
           if (live ? await this.absorbQueuedTask(live, '**已取消**\n\n这条请求不会再执行。', '已取消', event.senderOpenId)
@@ -3384,46 +3420,55 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     }
 
     if (action === 'retry') {
-      if (deferredConfirmationId(task.events, task.runtimeTaskId ?? task.id) || task.sessionId && task.runtimeTaskId && await this.isDeferredTask(task.sessionId, task.runtimeTaskId)) return { type: 'warning', content: '确认已登记，请使用原确认卡。' };
-      if (task.state !== 'failed' && task.state !== 'interrupted' && task.state !== 'cancelled') return { type: 'warning', content: '只有失败、已中断或已取消的任务可以重试' };
-      // 与渲染端同一张表：标记为不可重试（例如旧对话启动器版本变化）时卡上没有「重试」，
-      // 回调端同样拒绝，不在旧会话上再跑一遍注定失败的请求。
-      if (!isLarkCardActionAvailable('retry', {
-        state: task.state, taskId: task.id, turn: task.turn,
-        ...(task.retryable !== undefined ? { retryable: task.retryable } : {}),
-        capabilities: this.capabilitiesForTask(task)
-      })) return { type: 'warning', content: '这个任务不能在当前对话重试，请按卡片上的说明处理' };
-      if (!operatorOpenId) return { type: 'warning', content: '缺少操作人身份，无法重试' };
-      // runtime 已接收过这一轮：只有它确认停在失败、中断或取消才重试；已执行、仍在跑或读不到都不重发。
-      if (task.sessionId && task.runtimeTaskId && this.runtime.getTasks) {
-        const runtimeTaskId = task.runtimeTaskId;
-        const status = (await this.runtime.getTasks(task.sessionId).catch(() => undefined))?.find(item => item.id === runtimeTaskId)?.status;
-        if (actionStale()) return { type: 'warning', content: '任务已开始新一轮，请在最新的卡片上操作' };
-        if (!status || !['failed', 'interrupted', 'cancelled'].includes(status)) return { type: 'warning', content: '这一轮在 Agent 那边已执行或结果未知，不能直接重试，请发送 /status 查看' };
-      }
-      const retryEvent = { ...task.event, senderOpenId: operatorOpenId, senderType: 'user', senderAppId: undefined };
-      const previousState = task.state;
-      task.state = 'queued';
+      // 检查与 task.state = 'queued' 之间隔着 await：同步占位，第一次点击挂上 runTurn 或放弃之前，同一任务的其他点击一律拒绝。
+      if (this.retryInFlight.has(task.id)) return { type: 'warning', content: '正在重试，请勿重复点击' };
+      this.retryInFlight.add(task.id);
       try {
-        if (task.inbox) await this.inbox!.update(task.inbox, { event: retryEvent, state: 'received', turn: task.turn + 1, cardId: undefined, taskId: undefined, materials: undefined,
-          ...(task.inbox.request ? { request: { ...task.inbox.request, materialPrompt: task.retryMaterialPrompt ?? task.prompt } } : {}) });
-      } catch (error) {
-        if (!actionStale()) task.state = previousState;
-        return { type: 'warning', content: error instanceof Error ? error.message : '重试记录保存失败，请稍后重试' };
+        if (deferredConfirmationId(task.events, task.runtimeTaskId ?? task.id) || task.sessionId && task.runtimeTaskId && await this.isDeferredTask(task.sessionId, task.runtimeTaskId)) return { type: 'warning', content: '确认已登记，请使用原确认卡。' };
+        if (task.state !== 'failed' && task.state !== 'interrupted' && task.state !== 'cancelled') return { type: 'warning', content: '只有失败、已中断或已取消的任务可以重试' };
+        // 与渲染端同一张表：标记为不可重试（例如旧对话启动器版本变化）时卡上没有「重试」，
+        // 回调端同样拒绝，不在旧会话上再跑一遍注定失败的请求。
+        if (!isLarkCardActionAvailable('retry', {
+          state: task.state, taskId: task.id, turn: task.turn,
+          ...(task.retryable !== undefined ? { retryable: task.retryable } : {}),
+          capabilities: this.capabilitiesForTask(task)
+        })) return { type: 'warning', content: '这个任务不能在当前对话重试，请按卡片上的说明处理' };
+        if (!operatorOpenId) return { type: 'warning', content: '缺少操作人身份，无法重试' };
+        // runtime 已接收过这一轮：只有它确认停在失败、中断或取消才重试；已执行、仍在跑或读不到都不重发。
+        if (task.sessionId && task.runtimeTaskId && this.runtime.getTasks) {
+          const runtimeTaskId = task.runtimeTaskId;
+          const status = (await this.runtime.getTasks(task.sessionId).catch(() => undefined))?.find(item => item.id === runtimeTaskId)?.status;
+          if (actionStale()) return { type: 'warning', content: '任务已开始新一轮，请在最新的卡片上操作' };
+          if (!status || !['failed', 'interrupted', 'cancelled'].includes(status)) return { type: 'warning', content: '这一轮在 Agent 那边已执行或结果未知，不能直接重试，请发送 /status 查看' };
+        }
+        const retryEvent = { ...task.event, senderOpenId: operatorOpenId, senderType: 'user', senderAppId: undefined };
+        const previousState = task.state;
+        task.state = 'queued';
+        try {
+          if (task.inbox) await this.inbox!.update(task.inbox, { event: retryEvent, state: 'received', turn: task.turn + 1, cardId: undefined, taskId: undefined, materials: undefined,
+            ...(task.inbox.request ? { request: { ...task.inbox.request, materialPrompt: task.retryMaterialPrompt ?? task.prompt } } : {}) });
+        } catch (error) {
+          if (!actionStale()) task.state = previousState;
+          return { type: 'warning', content: error instanceof Error ? error.message : '重试记录保存失败，请稍后重试' };
+        }
+        if (actionStale()) return { type: 'warning', content: '任务已开始新一轮，请在最新的卡片上操作' };
+        if (task.runtimeTaskId && this.workflowOptions.store) await clearTaskReportSafely(this.workflowOptions.store, task.runtimeTaskId);
+        task.event = retryEvent;
+        task.config = effectiveConfig;
+        task.cancelRequested = undefined;
+        task.recovered = undefined;
+        // 生命周期字段在 runTurn 递增 turn 后再重置，避免上一轮在途的
+        // 过程更新或结果发送把旧消息 ID 写进新一轮。
+        task.group.tail = task.group.tail.then(() => this.runTurn(task)).catch(error => {
+          this.log.error({ error, chatId: task.event.chatId, messageId: task.event.messageId }, '重试飞书任务失败');
+          this.pushTaskError(task, `重试任务失败：${error instanceof Error ? error.message : String(error)}`);
+          task.state = 'failed';
+          task.requestUpdate?.('failed', false).catch(() => undefined);
+        });
+        return { type: 'success', content: '已开始重试' };
+      } finally {
+        this.retryInFlight.delete(task.id);
       }
-      if (actionStale()) return { type: 'warning', content: '任务已开始新一轮，请在最新的卡片上操作' };
-      if (task.runtimeTaskId && this.workflowOptions.store) await clearTaskReportSafely(this.workflowOptions.store, task.runtimeTaskId);
-      task.event = retryEvent;
-      task.config = effectiveConfig;
-      // 生命周期字段在 runTurn 递增 turn 后再重置，避免上一轮在途的
-      // 过程更新或结果发送把旧消息 ID 写进新一轮。
-      task.group.tail = task.group.tail.then(() => this.runTurn(task)).catch(error => {
-        this.log.error({ error, chatId: task.event.chatId, messageId: task.event.messageId }, '重试飞书任务失败');
-        this.pushTaskError(task, `重试任务失败：${error instanceof Error ? error.message : String(error)}`);
-        task.state = 'failed';
-        task.requestUpdate?.('failed', false).catch(() => undefined);
-      });
-      return { type: 'success', content: '已开始重试' };
     }
 
     return { type: 'error', content: '不支持的卡片操作' };

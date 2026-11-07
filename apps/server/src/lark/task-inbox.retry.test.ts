@@ -325,3 +325,36 @@ it('still retries an image request after the same user sends a different image',
     expect(await h.inbox(first)).toMatchObject({ state: 'accepted' });
   });
 }, 30_000);
+
+it('keeps the chat queue alive when marking a failed request also hits a write error', async () => {
+  const h = await harness(0);
+  const get = h.store.get.bind(h.store);
+  let contextReads = 0;
+  vi.spyOn(h.store, 'get').mockImplementation(async key => {
+    if (key.startsWith('lark.context.') && contextReads++ === 0) throw new Error('context read failed');
+    return get(key);
+  });
+  const compareAndSet = h.store.compareAndSet!.bind(h.store);
+  vi.spyOn(h.store, 'compareAndSet').mockImplementation(async (key, expected, value) => {
+    if (key.endsWith('.om_request') && JSON.parse(value).state === 'failed') throw new Error('database is locked');
+    return compareAndSet(key, expected, value);
+  });
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => unhandled.push(reason);
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    const coordinator = h.createCoordinator();
+    await coordinator.handle(message(), config);
+    await settle();
+    await coordinator.handle(message('om_next', '再看一下'), config);
+    await settle();
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+  }
+
+  expect(unhandled).toEqual([]);
+  expect(await h.inbox()).toMatchObject({ state: 'received' });
+  // 同一会话的下一条消息照常执行，不被上一条的错误顶替
+  expect(h.runtime.dispatch).toHaveBeenCalledOnce();
+  expect(await h.inbox('om_next')).toMatchObject({ state: 'accepted', taskId: 'task_runtime' });
+});

@@ -1230,6 +1230,73 @@ describe('执行前上下文读取超时', () => {
     }
   });
 
+  const cardNamed = (h: Awaited<ReturnType<typeof harness>>, taskName: string) =>
+    [...h.service.reply.mock.calls, ...h.service.send.mock.calls].some(([input]) => (input as { taskName?: string }).taskName === taskName);
+  const inboxOf = async (h: Awaited<ReturnType<typeof harness>>, messageId: string) => JSON.parse((await h.repos.config.get(`lark.inbox.cli_uxp0.${messageId}`))!);
+
+  it('/cancel stops the sender\'s own turn while it is still preparing, before any session or card exists', async () => {
+    const h = await harness();
+    h.service.getMessage.mockImplementationOnce(() => new Promise(() => {}));
+    await h.coordinator.handle(event('om_preparing', '@_user_1', { parentId: 'om_parent' }), h.config);
+    await vi.waitFor(() => expect(h.service.getMessage).toHaveBeenCalledOnce());
+    await h.coordinator.handle(event('om_cancel_preparing', '/cancel'), h.config);
+    await vi.waitFor(() => expect(cardNamed(h, '/cancel 已受理')).toBe(true));
+    await vi.waitFor(async () => expect(await inboxOf(h, 'om_preparing')).toMatchObject({ state: 'failed', error: '请求在执行前被 /cancel 取消' }));
+    expect(cardNamed(h, '/cancel 未执行')).toBe(false);
+    expect(cardNamed(h, '上下文读取失败')).toBe(false);
+    expect(await h.runtime.listSessions()).toHaveLength(0);
+    expect(h.send).not.toHaveBeenCalled();
+  });
+
+  it('「停」 cancels a preparing first turn instead of becoming a new request when no session exists yet', async () => {
+    const h = await harness();
+    h.service.getMessage.mockImplementationOnce(() => new Promise(() => {}));
+    await h.coordinator.handle(event('om_preparing_stop', '@_user_1', { parentId: 'om_parent' }), h.config);
+    await vi.waitFor(() => expect(h.service.getMessage).toHaveBeenCalledOnce());
+    await h.coordinator.handle(event('om_stop_word', '@_user_1 停'), h.config);
+    await vi.waitFor(() => expect(cardNamed(h, '/cancel 已受理')).toBe(true));
+    await vi.waitFor(async () => expect(await inboxOf(h, 'om_preparing_stop')).toMatchObject({ state: 'failed', error: '请求在执行前被 /cancel 取消' }));
+    expect(await inboxOf(h, 'om_stop_word')).toMatchObject({ state: 'accepted' });
+    expect(await h.runtime.listSessions()).toHaveLength(0);
+    expect(h.send).not.toHaveBeenCalled();
+  });
+
+  it('/cancel does not claim a restart-replayed preparing turn was never submitted', async () => {
+    const h = await harness();
+    h.service.getMessage.mockImplementationOnce(() => new Promise(() => {}));
+    void h.coordinator.handle(event('om_replayed', '@_user_1', { parentId: 'om_parent' }), h.config, true);
+    await vi.waitFor(() => expect(h.service.getMessage).toHaveBeenCalledOnce());
+    await h.coordinator.handle(event('om_cancel_replayed', '/cancel'), h.config);
+    await vi.waitFor(() => expect(cardNamed(h, '/cancel 未执行')).toBe(true));
+    expect(cardNamed(h, '/cancel 已受理')).toBe(false);
+    expect((await inboxOf(h, 'om_replayed')).error).toBeUndefined();
+  });
+
+  it('/cancel closes the process card of a turn stalled in group context reading and never submits it', async () => {
+    let release!: () => void;
+    const taskContext = vi.fn().mockImplementationOnce(() => new Promise<string>(resolve => { release = () => resolve(''); }))
+      .mockResolvedValue('');
+    const participation = { handle: async () => ({ enabled: false }), guardBotTurn: async () => undefined,
+      taskContext, instructions: async () => '' } as unknown as LarkGroupParticipation;
+    const h = await harness('normal', { participation });
+    await h.coordinator.handle(event('om_prepared_cancel', '@_user_1 旧请求'), h.config);
+    try {
+      await vi.waitFor(() => expect(taskContext).toHaveBeenCalledOnce());
+      expect(h.service.reply).toHaveBeenCalledWith(expect.objectContaining({ taskId: 'om_prepared_cancel', cardKind: 'process' }));
+      await h.coordinator.handle(event('om_cancel_prepared', '/cancel'), h.config);
+      await vi.waitFor(() => expect(cardNamed(h, '/cancel 已受理')).toBe(true));
+      release();
+      await vi.waitFor(() => expect(h.service.update).toHaveBeenCalledWith(expect.objectContaining({ taskId: 'om_prepared_cancel', state: 'cancelled' })));
+      expect(await inboxOf(h, 'om_prepared_cancel')).toMatchObject({ state: 'failed', error: '请求在执行前被 /cancel 取消' });
+      expect(h.send).not.toHaveBeenCalled();
+      await h.coordinator.handle(event('om_after_cancel', '@_user_1 新请求'), h.config);
+      await vi.waitFor(() => expect(h.send).toHaveBeenCalledOnce());
+      expect(h.send.mock.calls[0]?.[0]).toContain('新请求');
+    } finally {
+      release?.();
+    }
+  });
+
   it('does not send a context failure after coordinator shutdown', async () => {
     const h = await harness();
     h.service.listChatMessages.mockImplementationOnce(() => new Promise(() => {}));

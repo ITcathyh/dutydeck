@@ -58,6 +58,10 @@ export type LarkTask = {
   restoring?: boolean;
   /** dispatch/send 已开始后，交由运行时核对，不能按未执行请求作废。 */
   submissionStarted?: boolean;
+  /** /cancel（或「停」）在提交前取消了这一轮；与 submissionStarted 在同一同步段内判定，派发前每个检查点都认它。 */
+  cancelRequested?: boolean;
+  /** 重启恢复重放的一轮：重启前可能已经提交过，不能按「还没提交」取消。 */
+  recovered?: boolean;
   config: StoredLarkConfig;
   state: LarkTaskState;
   events: AgentEvent[];
