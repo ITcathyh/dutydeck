@@ -44,9 +44,9 @@ const sizeClass: Record<ButtonSize, string> = {
 };
 
 const variantClass: Record<ButtonVariant, string> = {
-  primary: 'bg-action text-on-action hover:bg-action-hover',
+  primary: 'bg-action text-on-action shadow-card hover:bg-action-hover',
   // 次要按钮是契约 §5 白名单第 2 类：输入类控件的可点击边界，允许画线。
-  secondary: 'border border-default bg-surface text-secondary shadow-card hover:bg-hover',
+  secondary: 'border border-default bg-surface text-primary hover:border-strong hover:bg-muted',
   ghost: 'bg-transparent text-secondary hover:bg-muted hover:text-primary',
   danger: 'bg-danger-solid text-on-action hover:bg-danger'
 };
@@ -71,7 +71,7 @@ export function Button({ variant = 'secondary', size = 'md', tone = 'default', l
     disabled={inactive}
     aria-busy={loading || undefined}
     className={cn(
-      'inline-flex shrink-0 items-center justify-center font-medium transition-colors duration-fast ease-out',
+      'inline-flex shrink-0 items-center justify-center font-medium transition-[color,background-color,border-color,transform] duration-fast ease-out active:scale-[.98]',
       'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring focus-visible:ring-offset-1',
       'disabled:cursor-not-allowed disabled:opacity-50',
       sizeClass[size],

@@ -8,7 +8,7 @@ const themeMatrix: { theme: ThemeMode; path: ThemePath }[] = [
 ];
 
 for (const { theme, path } of themeMatrix) {
-  test(`[红→绿] ${theme}/${path}：真实主操作使用橙棕强调色`, async ({ dock }) => {
+  test(`[红→绿] ${theme}/${path}：主操作是墨色，陶土品牌色只留给品牌位与焦点`, async ({ dock }) => {
     await dock.setViewportSize(VIEWPORTS.desktop);
     await dock.goto(BASE_URL, { waitUntil: 'domcontentloaded' });
     await settle(dock);
@@ -16,17 +16,16 @@ for (const { theme, path } of themeMatrix) {
     const primary = dock.locator('main').getByRole('button', { name: /^(绑定|管理)飞书 Bot$/ }).first();
     await expect(primary).toBeVisible();
     const bg = await computed(primary, 'background-color');
-    const { h, s } = hslOf(bg);
-    expect(hueWithin(h, BRAND_HUE.min, BRAND_HUE.max), describeColor(bg)).toBe(true);
-    expect(s, describeColor(bg)).toBeGreaterThanOrEqual(BRAND_MIN_SATURATION);
+    expect(isCalmNeutral(bg), describeColor(bg)).toBe(true);
     expect(contrastRatio(await computed(primary, 'color'), bg), '主操作文本对比度').toBeGreaterThanOrEqual(4.5);
-    for (const name of ['--action-primary', '--sidebar-accent']) {
+    for (const name of ['--brand', '--focus-ring']) {
       const token = await cssVar(dock, name);
       const rgb = await dock.evaluate(color => {
         const probe = document.createElement('span'); probe.style.color = color; document.body.append(probe);
         const resolved = getComputedStyle(probe).color; probe.remove(); return resolved;
       }, token);
       expect(hueWithin(hslOf(rgb).h, BRAND_HUE.min, BRAND_HUE.max), `${name}: ${describeColor(rgb)}`).toBe(true);
+      expect(hslOf(rgb).s, `${name}: ${describeColor(rgb)}`).toBeGreaterThanOrEqual(BRAND_MIN_SATURATION);
     }
   });
 

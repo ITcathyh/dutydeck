@@ -77,12 +77,14 @@ export function TopBar({ onOpenNavigation, onGoHome, onOpenSearch, onOpenShortcu
 
       无障碍名不能直接叫「回到任务中心」——404 与「数据未就绪」两张卡片里已经有
       同名按钮，而那两种状态下顶栏同时在场，重名会让读屏用户和测试都分不清哪个是哪个。
+
+      桌面端侧栏顶部已有品牌、导航里有「工作台」，这里只在窄屏出现。
     */}
     <button
       type="button"
       onClick={onGoHome}
       aria-label="Dutydeck 首页，回到任务中心"
-      className="flex min-h-10 shrink-0 items-center gap-2 rounded-md px-1.5 transition-colors duration-fast ease-out hover:bg-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring"
+      className="flex min-h-10 shrink-0 items-center gap-2 rounded-md px-1.5 transition-colors duration-fast ease-out hover:bg-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring md:hidden"
     >
       <DutydeckIcon className="h-7 w-7 shrink-0"/>
       <span className="hidden text-body font-semibold tracking-[-.025em] text-primary sm:inline">Dutydeck</span>

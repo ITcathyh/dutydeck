@@ -35,11 +35,19 @@ export function writeStoredTheme(preference: ThemePreference): void {
 export const resolveTheme = (preference: ThemePreference, systemDark: boolean): ResolvedTheme =>
   preference === 'system' ? (systemDark ? 'dark' : 'light') : preference;
 
+/** 浏览器地址栏与状态栏的底色，与 tokens.css 的 --surface-canvas 一致（meta 读不到 CSS 变量）。 */
+const browserChromeColor: Record<ResolvedTheme, string> = { light: '#fbfaf8', dark: '#1b1b19' };
+
 /** 把偏好落到 documentElement：跟随系统时移除属性，显式选择时写入具体值。 */
 export function applyThemePreference(preference: ThemePreference): void {
   const root = document.documentElement;
   if (preference === 'system') root.removeAttribute('data-theme');
   else root.setAttribute('data-theme', preference);
+  // index.html 按系统外观各放一枚 theme-color；显式选择时两枚都改成所选主题的颜色。
+  for (const meta of document.querySelectorAll<HTMLMetaElement>('meta[name="theme-color"]')) {
+    const scheme: ResolvedTheme = meta.media.includes('dark') ? 'dark' : 'light';
+    meta.content = browserChromeColor[preference === 'system' ? scheme : preference];
+  }
 }
 
 /** 供 xterm.js 等无法消费 CSS 变量的运行时读取真实颜色值；jsdom 返回空串时用兜底值。 */

@@ -1,6 +1,6 @@
 import { test, expect, BASE_URL, VIEWPORTS, applyTheme, settle, firstSessionId, effectiveBackground, computed, type ThemeMode } from './fixtures';
 import { describeColor, hslOf, hueWithin, isCalmNeutral, luminanceOf } from './color';
-import { BRAND_HUE, FORBIDDEN_TEAL_HUE, TOPBAR_HEIGHT } from './redesign-contract';
+import { FORBIDDEN_TEAL_HUE, SHELL_INSET, TOPBAR_HEIGHT } from './redesign-contract';
 
 
 async function openSession(dock: import('@playwright/test').Page): Promise<string> {
@@ -34,7 +34,7 @@ test.describe('任务详情页 /sessions/:id', () => {
         const r = el.getBoundingClientRect();
         return { y: Math.round(r.y), h: Math.round(r.height), w: Math.round(r.width) };
       }));
-    const topbar = bars.find(b => b.y <= 2 && b.w >= VIEWPORTS.desktop.width * 0.5);
+    const topbar = bars.find(b => b.y <= SHELL_INSET + 1 && b.w >= VIEWPORTS.desktop.width * 0.5);
     expect(topbar, `详情页没有贴顶的应用顶栏。候选：${JSON.stringify(bars)}`).toBeTruthy();
     expect(Math.abs((topbar?.h ?? 0) - TOPBAR_HEIGHT.desktop),
       `详情页顶栏高 ${topbar?.h}px，应为 ${TOPBAR_HEIGHT.desktop}px`).toBeLessThanOrEqual(TOPBAR_HEIGHT.tolerance);
@@ -76,7 +76,7 @@ test.describe('设置浮层 /?panel=settings&section=agents', () => {
     });
   }
 
-    test('[红→绿] 设置浮层里的主操作按钮是橙棕', async ({ dock }) => {
+    test('[红→绿] 设置浮层里的主操作按钮是墨色', async ({ dock }) => {
     await dock.setViewportSize(VIEWPORTS.desktop);
     await openSettings(dock);
     await applyTheme(dock, 'light', 'attr');
@@ -98,8 +98,8 @@ test.describe('设置浮层 /?panel=settings&section=agents', () => {
     const { h } = hslOf(target.bg!);
     expect(hueWithin(h, FORBIDDEN_TEAL_HUE.min, FORBIDDEN_TEAL_HUE.max),
       `浮层主操作「${target.text}」仍是青绿：${describeColor(target.bg!)}`).toBe(false);
-    expect(hueWithin(h, BRAND_HUE.min, BRAND_HUE.max),
-      `浮层主操作「${target.text}」色相应在橙棕区间，实际 ${describeColor(target.bg!)}`).toBe(true);
+    expect(isCalmNeutral(target.bg!),
+      `浮层主操作「${target.text}」应为低彩度墨色，实际 ${describeColor(target.bg!)}`).toBe(true);
   });
 
   test('[绿] 设置浮层是命名的 dialog，且 Escape 可关闭', async ({ dock }) => {

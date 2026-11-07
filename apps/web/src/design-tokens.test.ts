@@ -105,7 +105,7 @@ describe('设计 token 与契约一致', () => {
 
   it('布局骨架默认尺寸与可调侧栏一致（契约 §6）', () => {
     // 宽度的默认值来自原型；用户调整时覆盖同一个布局 token。
-    expect(declared('--topbar-h')).toBe('61px');
+    expect(declared('--topbar-h')).toBe('52px');
     expect(declared('--sidebar-w')).toBe('234px');
   });
 
@@ -143,18 +143,21 @@ describe('设计 token 与契约一致', () => {
   });
 
   it('颜色 token 只在 tokens.css 定义，index.css 不再自带调色板', () => {
-    expect(tokens).toContain('--surface-canvas: #faf9f6;');
+    expect(tokens).toContain('--surface-canvas: #fbfaf8;');
     expect(indexCss).toContain("@import './tokens.css';");
     expect(indexCss).not.toContain('--surface-canvas:');
     expect(indexCss).not.toContain('--status-danger:');
   });
 
-  it('暖白、石墨与橙棕按同一语义覆盖三个主题', () => {
-    expect(lightLayer['--surface-canvas']).toBe('#faf9f6');
-    expect(lightLayer['--surface-default']).toBe('#fffefa');
-    expect(lightLayer['--text-primary']).toBe('#292b27');
-    expect(lightLayer['--action-primary']).toBe('#a65535');
-    expect(darkLayer['--action-primary']).toBe('#e0a080');
+  it('颜色只表达含义：墨色主操作、陶土只留给品牌与焦点，三个主题同一语义', () => {
+    expect(lightLayer['--surface-canvas']).toBe('#fbfaf8');
+    expect(lightLayer['--surface-default']).toBe('#ffffff');
+    expect(lightLayer['--text-primary']).toBe('#1f1e1b');
+    expect(lightLayer['--action-primary']).toBe(lightLayer['--text-primary']);
+    expect(lightLayer['--brand']).toBe('#c0582f');
+    expect(lightLayer['--focus-ring']).toBe(lightLayer['--brand']);
+    expect(darkLayer['--action-primary']).toBe(darkLayer['--text-primary']);
+    expect(darkLayer['--focus-ring']).toBe(darkLayer['--brand']);
     for (const token of Object.keys(darkLayer)) expect(mediaLayer[token], token).toBe(darkLayer[token]);
   });
 

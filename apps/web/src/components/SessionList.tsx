@@ -104,9 +104,9 @@ export function SessionList({ open, collapsed = false, onToggleCollapsed, onClos
     aria-label="Dutydeck 工作台导航"
     aria-hidden={hiddenOnMobile || undefined}
     inert={hiddenOnMobile || undefined}
-    className={`ui-sidebar fixed inset-y-0 left-0 z-drawer flex w-sidebar flex-col overflow-hidden border-r border-sidebar-border bg-sidebar-surface text-sidebar-text transition-transform duration-normal ease-emphasized md:bottom-shell-gap md:left-shell-gap md:top-0 md:translate-x-0 md:border-r ${open ? 'translate-x-0' : '-translate-x-full'}`}
+    className={`ui-sidebar fixed inset-y-0 left-0 z-drawer flex w-sidebar flex-col overflow-hidden border-r border-sidebar-border bg-sidebar-surface text-sidebar-text transition-transform duration-normal ease-emphasized md:bottom-shell-gap md:left-shell-gap md:top-0 md:translate-x-0 md:border-r-0 ${open ? 'translate-x-0' : '-translate-x-full'}`}
   >
-    <div className={`flex shrink-0 items-center gap-2 ${compact ? 'h-auto flex-col px-0 pt-3 pb-1' : 'h-14 px-3'}`}>
+    <div className={`flex shrink-0 items-center gap-2 ${compact ? 'h-auto flex-col px-0 pt-3 pb-1 md:mt-2' : 'h-14 px-3 md:mt-2 md:h-topbar'}`}>
       <DutydeckIcon className="h-7 w-7 shrink-0"/><strong className={`min-w-0 flex-1 text-title font-semibold tracking-[-.025em] text-sidebar-text-strong ${compact ? 'hidden' : ''}`}>dutydeck</strong>
       {onToggleCollapsed && <span className="hidden md:block"><IconButton label={collapsed ? '展开侧栏' : '收起侧栏'} onClick={onToggleCollapsed}>{collapsed ? <PanelLeftOpen size={16}/> : <PanelLeftClose size={16}/>}</IconButton></span>}
     </div>

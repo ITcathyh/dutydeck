@@ -11,15 +11,15 @@ export type BadgeProps = {
   children: ReactNode;
 };
 
-/* soft = 语义色软底 + 同色描边（契约 §5 白名单第 5 类）；outline = 只留描边，用于密集列表里避免整行发花。 */
+/* soft = 语义色软底，描边透明只占位（与 outline 同高）；outline = 只留描边，用于密集列表里避免整行发花。 */
 const softClass: Record<BadgeTone, string> = {
-  neutral: 'border-subtle bg-muted text-subtle',
-  success: 'border-success-border bg-success-soft text-success',
-  warning: 'border-warning-border bg-warning-soft text-warning',
-  danger: 'border-danger-border bg-danger-soft text-danger',
-  info: 'border-info-border bg-info-soft text-info',
-  queued: 'border-queued-border bg-queued-soft text-queued',
-  accent: 'border-action-soft bg-action-soft text-action'
+  neutral: 'border-transparent bg-muted text-subtle',
+  success: 'border-transparent bg-success-soft text-success',
+  warning: 'border-transparent bg-warning-soft text-warning',
+  danger: 'border-transparent bg-danger-soft text-danger',
+  info: 'border-transparent bg-info-soft text-info',
+  queued: 'border-transparent bg-queued-soft text-queued',
+  accent: 'border-transparent bg-action-soft text-action'
 };
 
 const outlineClass: Record<BadgeTone, string> = {
@@ -63,5 +63,5 @@ const stateBadgeTone: Record<string, BadgeTone> = {
 export function StatusBadge({ session }: StatusBadgeProps) {
   const status = effectiveStatus(session);
   const tone: BadgeTone = status.archived ? 'neutral' : stateBadgeTone[session.state] ?? 'info';
-  return <Badge tone={tone}>{status.label}</Badge>;
+  return <Badge tone={tone}><span aria-hidden="true" className="h-1.5 w-1.5 shrink-0 rounded-full bg-current"/>{status.label}</Badge>;
 }

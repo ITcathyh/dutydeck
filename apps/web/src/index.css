@@ -10,10 +10,10 @@
 
 * { box-sizing: border-box; }
 html, body, #root { min-height: 100%; }
-body { margin: 0; background: var(--surface-canvas); color: var(--text-primary); font-family: Inter, "PingFang SC", "Microsoft YaHei", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: var(--font-size-body); line-height: var(--line-height-body); -webkit-font-smoothing: antialiased; }
+body { margin: 0; background: var(--surface-canvas); color: var(--text-primary); font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Microsoft YaHei", system-ui, sans-serif; font-feature-settings: "cv11", "ss01"; text-rendering: optimizeLegibility; font-size: var(--font-size-body); line-height: var(--line-height-body); -webkit-font-smoothing: antialiased; }
 button, input, textarea, select { font: inherit; }
 button:not(:disabled) { cursor: pointer; }
-::selection { background: var(--action-soft); color: var(--text-primary); }
+::selection { background: color-mix(in srgb, var(--brand) 24%, transparent); color: var(--text-primary); }
 * { scrollbar-color: var(--scrollbar-thumb) transparent; scrollbar-width: thin; }
 button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, a:focus-visible, summary:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 .markdown { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
@@ -125,7 +125,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .share-agent { margin-left: 2px; border: 1px solid var(--border-subtle); border-radius: var(--radius-full); background: color-mix(in srgb, var(--surface-default) 70%, transparent); padding: 1px 9px; color: var(--text-secondary); font-size: var(--font-size-caption); font-weight: 500; }
 .share-hero { padding-block: 26px 30px; }
 .share-eyebrow { display: flex; min-width: 0; align-items: center; gap: 8px; margin: 0 0 10px; color: var(--text-secondary); font-size: 13px; }
-.share-eyebrow-tag { flex: none; border-radius: var(--radius-sm); background: color-mix(in srgb, var(--action-soft) 85%, transparent); padding: 3px 7px; color: var(--action-primary); font-size: var(--font-size-meta); font-weight: 650; letter-spacing: .08em; }
+.share-eyebrow-tag { flex: none; border-radius: var(--radius-sm); background: color-mix(in srgb, var(--brand-soft) 85%, transparent); padding: 3px 7px; color: var(--brand); font-size: var(--font-size-meta); font-weight: 650; letter-spacing: .08em; }
 .share-eyebrow-who { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .share-title { margin: 0; max-width: 46em; font-size: 22px; font-weight: 600; line-height: 1.55; letter-spacing: -.005em; overflow-wrap: anywhere; text-wrap: pretty; }
 .share-title[data-quoted]::before { content: "“" / ""; color: var(--text-muted); font-weight: 400; }
@@ -141,7 +141,7 @@ a.share-chip:hover { border-color: var(--border-strong); background: var(--surfa
 
 /* 状态胶囊：已完成安静的绿点；执行中品牌色光点外扩；等待授权琥珀；失败收敛的红；其余中性。 */
 [data-tone="done"] { --share-tone-text: var(--status-success); --share-tone-soft: var(--status-success-soft); --share-tone-border: var(--status-success-border); --share-tone-solid: var(--status-success-solid); }
-[data-tone="live"] { --share-tone-text: var(--action-primary); --share-tone-soft: var(--action-soft); --share-tone-border: color-mix(in srgb, var(--action-primary) 32%, transparent); --share-tone-solid: var(--action-primary); }
+[data-tone="live"] { --share-tone-text: var(--brand); --share-tone-soft: var(--brand-soft); --share-tone-border: color-mix(in srgb, var(--brand) 32%, transparent); --share-tone-solid: var(--brand); }
 [data-tone="waiting"] { --share-tone-text: var(--status-warning); --share-tone-soft: var(--status-warning-soft); --share-tone-border: var(--status-warning-border); --share-tone-solid: var(--status-warning-solid); }
 [data-tone="failed"] { --share-tone-text: var(--status-danger); --share-tone-soft: var(--status-danger-soft); --share-tone-border: var(--status-danger-border); --share-tone-solid: var(--status-danger-solid); }
 [data-tone="neutral"] { --share-tone-text: var(--text-secondary); --share-tone-soft: var(--status-neutral-soft); --share-tone-border: var(--border-default); --share-tone-solid: var(--status-neutral-solid); }
@@ -166,7 +166,7 @@ a.share-chip:hover { border-color: var(--border-strong); background: var(--surfa
 .share-card { position: relative; border-radius: var(--radius-xl); background: var(--surface-default); padding: 30px clamp(20px, 3vw, 40px) 32px; box-shadow: var(--share-card-shadow); }
 .share-card::before { content: ""; position: absolute; top: 0; left: 24px; right: 24px; height: 1px; background: var(--share-edge); }
 .share-card-label { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; color: var(--text-muted); font-size: var(--font-size-caption); font-weight: 600; letter-spacing: .06em; }
-.share-card-label > svg { color: var(--action-primary); }
+.share-card-label > svg { color: var(--brand); }
 .share-quote { margin: 0 0 14px; border-left: 2px solid var(--border-strong); padding: 2px 0 2px 12px; color: var(--text-secondary); font-size: 13px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
 .share-prose { min-width: 0; color: var(--text-secondary); font-size: 15px; line-height: 1.75; overflow-wrap: anywhere; }
 .share-prose > :first-child { margin-top: 0; }
@@ -179,7 +179,7 @@ a.share-chip:hover { border-color: var(--border-strong); background: var(--surfa
 .share-prose h3, .share-prose h4 { font-size: 15px; }
 .share-prose ul { list-style: none; padding: 0; }
 .share-prose ul > li { position: relative; margin: 0 0 8px; padding-left: 20px; }
-.share-prose ul > li::before { content: ""; position: absolute; top: .78em; left: 5px; width: 6px; height: 6px; border-radius: 50%; background: var(--action-primary); opacity: .6; }
+.share-prose ul > li::before { content: ""; position: absolute; top: .78em; left: 5px; width: 6px; height: 6px; border-radius: 50%; background: var(--brand); opacity: .6; }
 .share-prose ol { list-style: decimal; padding-left: 1.5em; }
 .share-prose ol > li { margin: 0 0 8px; padding-left: 2px; }
 .share-prose ol > li::marker { color: var(--text-muted); font-variant-numeric: tabular-nums; }
@@ -214,7 +214,7 @@ a.share-chip:hover { border-color: var(--border-strong); background: var(--surfa
 .share-live[data-tone="waiting"] { background: linear-gradient(var(--surface-default), var(--surface-default)) padding-box, linear-gradient(var(--status-warning-border), var(--status-warning-border)) border-box; }
 .share-now { display: flex; min-height: 46px; align-items: center; gap: 12px; overflow: hidden; border-radius: var(--radius-md); background: var(--surface-muted); padding: 10px 16px; }
 .share-now-line { min-width: 0; flex: 1; margin: 0; overflow: hidden; color: var(--text-primary); text-overflow: ellipsis; white-space: nowrap; }
-.share-now-key { margin-right: 2px; color: var(--action-primary); font-size: var(--font-size-caption); font-weight: 600; }
+.share-now-key { margin-right: 2px; color: var(--brand); font-size: var(--font-size-caption); font-weight: 600; }
 .share-now-code { color: var(--text-secondary); font-size: 13px; }
 .share-skeleton { display: grid; gap: 12px; margin-top: 24px; }
 .share-skeleton i { display: block; height: 12px; border-radius: var(--radius-sm); background: linear-gradient(90deg, var(--surface-muted) 0%, var(--surface-hover) 50%, var(--surface-muted) 100%); background-size: 200% 100%; }
@@ -242,11 +242,11 @@ a.share-chip:hover { border-color: var(--border-strong); background: var(--surfa
 /* 节律直方图：空桶是淡色短桩，整条读作连续的时间轴。 */
 .share-rhythm { margin: 6px 20px 14px; }
 .share-rhythm-bars { position: relative; display: flex; height: 30px; align-items: flex-end; justify-content: space-between; }
-.share-rhythm-bars i { position: relative; flex: none; width: 6px; height: 3px; border-radius: 2px 2px 1px 1px; background: linear-gradient(to top, color-mix(in srgb, var(--action-primary) 58%, transparent), var(--action-primary)); transform-origin: bottom; }
-.share-rhythm-bars i[data-empty] { background: color-mix(in srgb, var(--action-primary) 14%, transparent); }
+.share-rhythm-bars i { position: relative; flex: none; width: 6px; height: 3px; border-radius: 2px 2px 1px 1px; background: linear-gradient(to top, color-mix(in srgb, var(--brand) 58%, transparent), var(--brand)); transform-origin: bottom; }
+.share-rhythm-bars i[data-empty] { background: color-mix(in srgb, var(--brand) 14%, transparent); }
 /* 执行中：最后一个有调用的桶柱身发光；带光晕的圆点停在横轴上标出此刻。 */
-.share-rhythm-bars i[data-live] { background: var(--action-primary); box-shadow: 0 0 10px 1px var(--share-live-glow); }
-.share-rhythm-head { position: absolute; bottom: -3px; width: 8px; height: 8px; margin-left: -4px; border-radius: 50%; background: var(--action-primary); box-shadow: 0 0 0 3px var(--share-live-glow), 0 0 12px var(--share-live-glow); }
+.share-rhythm-bars i[data-live] { background: var(--brand); box-shadow: 0 0 10px 1px var(--share-live-glow); }
+.share-rhythm-head { position: absolute; bottom: -3px; width: 8px; height: 8px; margin-left: -4px; border-radius: 50%; background: var(--brand); box-shadow: 0 0 0 3px var(--share-live-glow), 0 0 12px var(--share-live-glow); }
 .share-rhythm-axis { display: flex; justify-content: space-between; margin-top: 6px; color: var(--text-muted); font-size: var(--font-size-meta); line-height: 14px; font-variant-numeric: tabular-nums; }
 .share-trace-body { border-top: 1px solid var(--border-subtle); padding: 6px 20px 16px; }
 .share-record-note { margin: 12px 0 0; color: var(--text-muted); font-size: 13px; }
@@ -293,8 +293,8 @@ a.share-source:hover b { color: var(--text-link); }
 .share-side-actions { display: grid; gap: 8px; margin-top: 14px; }
 .share-button { display: inline-flex; height: 40px; align-items: center; justify-content: center; gap: 7px; border: 1px solid var(--border-default); border-radius: var(--radius-md); background: var(--surface-default); padding: 0 14px; color: var(--text-primary); font-size: 13px; font-weight: 500; text-decoration: none; white-space: nowrap; transition: background-color var(--duration-fast), border-color var(--duration-fast), color var(--duration-fast); }
 .share-button:hover { border-color: var(--border-strong); }
-.share-button[data-primary] { border-color: color-mix(in srgb, var(--action-primary) 24%, transparent); background: var(--action-soft); color: var(--action-primary); }
-.share-button[data-primary]:hover { background: var(--action-soft-hover); }
+.share-button[data-primary] { border-color: color-mix(in srgb, var(--brand) 24%, transparent); background: var(--brand-soft); color: var(--brand); }
+.share-button[data-primary]:hover { background: color-mix(in srgb, var(--brand) 14%, var(--brand-soft)); }
 .share-button[data-copied] { border-color: var(--status-success-border); background: var(--status-success-soft); color: var(--status-success); }
 .share-button-compact { height: 32px; padding: 0 12px; font-size: var(--font-size-caption); }
 /* 细条里的复制是幽灵按钮，不和侧栏的主按钮抢视线。 */

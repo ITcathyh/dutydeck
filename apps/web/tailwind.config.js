@@ -14,6 +14,7 @@ export default {
     extend: {
       colors: {
         // 表面（契约 §6，四层亮度阶梯）
+        chrome: 'var(--surface-chrome)',
         canvas: 'var(--surface-canvas)',
         surface: 'var(--surface-default)',
         muted: 'var(--surface-muted)',
@@ -33,6 +34,10 @@ export default {
         'action-hover': 'var(--action-primary-hover)',
         'action-soft': 'var(--action-soft)',
         'action-soft-hover': 'var(--action-soft-hover)',
+        // 品牌色只用于品牌位与焦点，不上按钮（主操作是墨色的 action）
+        brand: 'var(--brand)',
+        'brand-soft': 'var(--brand-soft)',
+        glass: 'var(--glass)',
         // 状态语义色（契约 §5.5：soft 底配 border 外圈）
         warning: 'var(--status-warning)',
         'warning-soft': 'var(--status-warning-soft)',
@@ -125,6 +130,8 @@ export default {
         panel: 'var(--shadow-panel)',
         dialog: 'var(--shadow-dialog)',
         overlay: 'var(--shadow-overlay)',
+        // 桌面主面板浮在窗口底色上的发丝环
+        shell: 'var(--shadow-shell)',
         sidebar: 'var(--sidebar-shadow)',
         // 侧栏选中行的左侧色条。它是「选中」的唯一视觉承载（配 aria-current），
         // 不是分层阴影，所以单列一档而不是复用上面五档。
@@ -137,11 +144,13 @@ export default {
       },
       transitionTimingFunction: {
         out: 'var(--ease-out)',
-        emphasized: 'var(--ease-emphasized)'
+        emphasized: 'var(--ease-emphasized)',
+        spring: 'var(--ease-spring)'
       },
       fontFamily: {
-        sans: ['Inter', 'ui-sans-serif', 'system-ui'],
-        mono: ['SFMono-Regular', 'ui-monospace', 'monospace']
+        // 系统字体优先（SF / Segoe / Roboto），中文落到苹方、思源黑体或微软雅黑
+        sans: ['-apple-system', 'BlinkMacSystemFont', '"SF Pro Text"', '"Segoe UI"', 'Roboto', '"PingFang SC"', '"Hiragino Sans GB"', '"Noto Sans CJK SC"', '"Microsoft YaHei"', 'system-ui', 'sans-serif'],
+        mono: ['"SF Mono"', 'ui-monospace', 'SFMono-Regular', 'Menlo', '"JetBrains Mono"', '"Cascadia Code"', 'Consolas', '"Roboto Mono"', 'monospace']
       },
       /*
         布局骨架尺寸（2026-09-03 补）。侧栏宽度此前在 SessionList.tsx 里硬编码
