@@ -2,14 +2,14 @@
 //
 // 「在叫我」的消息按一次显式 @ 交给执行路径；明显不是对本机器人说的直接沉默；其余拿不准的才交给模型。
 // 本模块是纯函数：外部事实（父消息是谁发的、最近谁说过话、群里几个人）由调用方查好放进上下文，
-// 查不到就留空，对应的规则不触发。规则只决定接不接话，不改变任何授权：交出去的消息仍按发送者本人重新鉴权。
+// 查不到就留空，对应的规则不触发；群成员读不全例外，按可能有多个机器人处理。规则只决定接不接话，不改变任何授权：交出去的消息仍按发送者本人重新鉴权。
 
 import { escapeRegExp, type CollaborationFollowup, type CollaborationMandate, type CollaborationObservation, type ParticipationLevel } from '@dutydeck/shared';
 
 export type ParticipationRule =
   | 'calls_name' | 'reply_to_self' | 'owned_topic' | 'owned_item' | 'follow_up' | 'single_human' | 'eager_default'
   | 'mentions_other' | 'reply_to_other' | 'emoji_only' | 'short_thanks' | 'bot_sender'
-  | 'calls_other' | 'topic_of_other' | 'not_responder' | 'no_responder';
+  | 'calls_other' | 'topic_of_other' | 'not_responder' | 'no_responder' | 'members_unknown';
 
 export interface RuleVerdict { action: 'addressed' | 'silent'; rule: ParticipationRule; reason: string }
 
@@ -30,7 +30,8 @@ export const participationRuleReasons: Record<ParticipationRule, string> = {
   calls_other: '那条消息叫的是群里另一个机器人',
   topic_of_other: '那个话题是发给别人或别的机器人的',
   not_responder: '本群指定了别的机器人接没 @ 的消息，我只接 @ 和自己接手的话题',
-  no_responder: '本群有多个机器人、还没指定接话人，没 @ 的消息我先不接'
+  no_responder: '本群有多个机器人、还没指定接话人，没 @ 的消息我先不接',
+  members_unknown: '读不到完整的群成员名单，按群里有多个机器人处理；还没指定接话人，没 @ 的消息我先不接'
 };
 
 export interface RuleRecentActivity {
@@ -76,6 +77,8 @@ export interface RuleContext {
   /** 以下两项要查飞书接口，没查或查不到时不填。 */
   recent?: RuleRecentActivity;
   members?: { humans: number; bots: number };
+  /** 查了群成员但没读全（读失败、没权限、被安全策略截断）：按可能有多个机器人处理，多机器人群的规则照常生效。 */
+  membersUnknown?: boolean;
 }
 
 const FOLLOW_UP_WINDOW_MS = 5 * 60_000;
@@ -155,11 +158,12 @@ export function evaluateParticipationRules(ctx: RuleContext): RuleVerdict | unde
   if (!ctx.parent && ctx.ownedTopic) return verdict('addressed', 'owned_topic');
   if (ctx.parent === 'other') return verdict('silent', 'reply_to_other');
   // 多机器人群：每条没 @ 的消息最多一个机器人接。别人的话题不接；不是接话人的只接上面这些明确叫自己的。
-  const crowded = (ctx.members?.bots ?? 0) > 1;
+  const knownCrowded = (ctx.members?.bots ?? 0) > 1;
+  const crowded = knownCrowded || Boolean(ctx.membersUnknown);
   if (crowded && !ctx.parent && (ctx.threadRootOther || ctx.threadClaimedByOther)) return verdict('silent', 'topic_of_other');
   const hasScope = Boolean(ctx.roleScope?.trim()) || Boolean(ctx.scenarioMatched);
   if (!hasScope && ctx.responder === 'other') return verdict('silent', 'not_responder');
-  if (!hasScope && crowded && ctx.responder !== 'self') return verdict('silent', 'no_responder');
+  if (!hasScope && crowded && ctx.responder !== 'self') return verdict('silent', knownCrowded ? 'no_responder' : 'members_unknown');
   if (mentionsOwnedName(text, ctx.ownedNames)) return verdict('addressed', 'owned_item');
   if (!hasScope && ctx.level === 'eager') return verdict('addressed', 'eager_default');
   const recent = ctx.recent;
@@ -186,6 +190,8 @@ export type RuleFacts = {
   partner?: boolean;
   humans?: number;
   bots?: number;
+  /** 群成员读失败或被截断：不填 humans/bots，按可能有多个机器人处理。 */
+  membersUnknown?: boolean;
   ownedTopic?: boolean;
   threadRootOther?: boolean;
   /** 场景来源开的话题有没有被别的机器人接过；evidence 说明是读全了（complete）、读到上限（capped）还是读失败（unavailable）。 */
@@ -219,7 +225,8 @@ export function ruleContextOf(trigger: CollaborationObservation, owned: { names:
     ...(facts.threadClaimedByOther ? { threadClaimedByOther: true } : {}), ...(facts.scenarioMatched ? { scenarioMatched: facts.scenarioMatched } : {}),
     ...(facts.callsOther ? { callsOther: true } : {}), ...(facts.responder ? { responder: facts.responder } : {}),
     ...(facts.lastSelfAgoMs !== undefined ? { recent: { lastSelfAt: at - facts.lastSelfAgoMs, humanBetween: Boolean(facts.humanBetween), partners: facts.partner ? [senderId] : [] } } : {}),
-    ...(facts.humans !== undefined ? { members: { humans: facts.humans, bots: facts.bots ?? 0 } } : {})
+    ...(facts.humans !== undefined ? { members: { humans: facts.humans, bots: facts.bots ?? 0 } } : {}),
+    ...(facts.membersUnknown ? { membersUnknown: true } : {})
   };
 }
 

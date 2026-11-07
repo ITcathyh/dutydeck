@@ -89,7 +89,8 @@ const RESPONDER_CONFIRM_KIND = 'group_responder';
 /** 观察 refs 里的标记：这条消息在本机器人接手的话题里（coordinator 按话题会话判断）。 */
 const OWNED_TOPIC_REF = 'dutydeck:owned-topic';
 type BotMember = { name: string; appId?: string; openId?: string };
-type Members = { humans: number; bots: number; botList: BotMember[] };
+/** complete 为 false：读失败、没权限或被安全策略截断，没有人数；名单是截断前读到的或上次读全的，可能缺机器人。 */
+type Members = { complete: true; humans: number; botList: BotMember[] } | { complete: false; botList: BotMember[] };
 const activeModes = new Set(['selective', 'eager']);
 /** 多机器人群里没接时，除了指定接话人，配负责范围也能让本机器人按范围接没 @ 的消息。 */
 const scopeSetupHint = '也可以在 Dutydeck Web「机器人管理」的「负责范围」里写清我负责的事，范围内没 @ 的消息我会判断后接。';
@@ -378,6 +379,10 @@ export class LarkGroupParticipation {
       } else {
         lines.push(`**接话人**：${duty.responder.name ?? duty.responder.appId}，没 @ 机器人的消息由它接，我只接 @ 和自己接手的话题`);
       }
+    } else if (members && !members.complete) {
+      lines.push(hasActiveScope
+        ? '**接话人**：未指定。读不到完整的群成员名单，按多机器人群处理；我仍按负责范围判断未明确叫我的消息，明确叫我照常处理；要将接话人设为我，@我 说「你负责接话」，或在 Dutydeck Web 的群设置里指定（我负责的范围不变）'
+        : '**接话人**：未指定。读不到完整的群成员名单，按多机器人群处理，没 @ 的消息我先不接；要我接，@我 说「你负责接话」，或在 Dutydeck Web 的群设置里指定；也可以给机器人开通读取群成员的权限');
     } else if (bots > 1) {
       if (hasActiveScope) {
         lines.push(`**接话人**：未指定。本群有 ${bots} 个机器人；我仍按负责范围判断未明确叫我的消息，明确叫我照常处理；要将接话人设为我，@我 说「你负责接话」，或在 Dutydeck Web 的群设置里指定（我负责的范围不变）`);
@@ -1211,8 +1216,9 @@ export class LarkGroupParticipation {
     const members = await this.memberCounts(config, event.chatId);
     const duty = await this.options.repository.getDuty(scope);
     const bots = members && talkingBots(members, this.scenarios.sourceAppIds(duty));
-    if (members) { facts.humans = members.humans; facts.bots = bots!.length; }
-    const crowded = (bots?.length ?? 0) > 1;
+    if (members?.complete) { facts.humans = members.humans; facts.bots = bots!.length; }
+    else if (members) facts.membersUnknown = true;
+    const crowded = Boolean(members) && (!members!.complete || bots!.length > 1);
     let sourceTopic = false;
     if (event.threadId && event.rootId && event.rootId !== event.messageId) {
       const root = await read(event.rootId);
@@ -1260,23 +1266,31 @@ export class LarkGroupParticipation {
     }
     return { threadClaimedByOther: true, threadClaimEvidence: 'capped' };
   }
-  /** 群里真人和机器人的数量和机器人名单，按群缓存 10 分钟；查不到（没权限、被安全策略截断）时不填，「只有一个真人」「多机器人群」规则不触发。 */
+  /**
+   * 群里真人数和机器人名单，读全时按群缓存 10 分钟；没有读成员的能力时返回 undefined，「只有一个真人」「多机器人群」规则不触发。
+   * 读失败、没权限或被安全策略截断时返回 complete: false，规则按可能有多个机器人处理，不当作「没有别的机器人」。
+   */
   private async memberCounts(config: StoredLarkConfig, chatId: string): Promise<Members | undefined> {
     const key = keyFor({ appId: config.appId, chatId });
     const now = this.now().getTime();
     const cached = this.members.get(key);
     if (cached && cached.until > now) return cached.value;
     const service = this.options.serviceFor(config);
-    let value: Members | undefined;
-    if (service.listChatMembers) {
-      try {
-        const page = await service.listChatMembers({ chatId, memberTypes: ['user', 'bot'], pageSize: 100 });
-        const botList = page.items.filter(item => item.memberType === 'bot').map(item => ({ name: item.name, ...(item.appId ? { appId: item.appId } : {}), ...(item.openId ? { openId: item.openId } : {}) }));
-        if (!page.securityLimited) value = { humans: page.items.filter(item => item.memberType === 'user').length + (page.hasMore ? 1 : 0), bots: botList.length, botList };
-      } catch (error) { this.options.log?.warn({ error, chatId }, '读取群成员数失败'); }
+    if (!service.listChatMembers) return undefined;
+    const lastKnown = cached?.value?.botList ?? [];
+    let value: Members;
+    try {
+      const page = await service.listChatMembers({ chatId, memberTypes: ['user', 'bot'], pageSize: 100 });
+      const botList = page.items.filter(item => item.memberType === 'bot').map(item => ({ name: item.name, ...(item.appId ? { appId: item.appId } : {}), ...(item.openId ? { openId: item.openId } : {}) }));
+      if (page.securityLimited) this.options.log?.warn({ chatId }, '群成员名单被安全策略截断，按可能有多个机器人处理');
+      value = page.securityLimited ? { complete: false, botList: botList.length ? botList : lastKnown }
+        : { complete: true, humans: page.items.filter(item => item.memberType === 'user').length + (page.hasMore ? 1 : 0), botList };
+    } catch (error) {
+      this.options.log?.warn({ error, chatId }, '读取群成员失败，按可能有多个机器人处理');
+      value = { complete: false, botList: lastKnown };
     }
-    // 读失败只缓存 1 分钟，免得一次抖动让规则失效 10 分钟。
-    this.members.set(key, { until: now + (value ? MEMBER_CACHE_MS : 60_000), ...(value ? { value } : {}) });
+    // 读不全只缓存 1 分钟，恢复后尽快按实际成员判断。
+    this.members.set(key, { until: now + (value.complete ? MEMBER_CACHE_MS : 60_000), value });
     if (this.members.size > 1_000) this.members.delete(this.members.keys().next().value!);
     return value;
   }
@@ -1367,9 +1381,9 @@ export class LarkGroupParticipation {
     const duty = await this.options.repository.getDuty(scope);
     const active = activeModes.has(intent.level);
     const members = active && !duty.responder ? await this.memberCounts(config, scope.chatId) : undefined;
-    const claim = Boolean(members && talkingBots(members, this.scenarios.sourceAppIds(duty)).length > 1);
+    const claim = Boolean(members && (!members.complete || talkingBots(members, this.scenarios.sourceAppIds(duty)).length > 1));
     const hasScope = Boolean(config.roleScope?.trim());
-    const note = claim ? '本群有多个机器人，确认后由我负责接没 @ 的消息，并在群里发接话人声明。'
+    const note = claim ? `${members!.complete ? '本群有多个机器人' : '读不到完整的群成员名单，按多机器人群处理'}，确认后由我负责接没 @ 的消息，并在群里发接话人声明。`
       : active && duty.responder && duty.responder.appId !== scope.appId ? (
         hasScope
           ? `本群接话人是「${duty.responder.name ?? duty.responder.appId}」，没 @ 的消息仍由它接，但我仍按负责范围接话；要将接话人设为我，@我 说「你负责接话」（我负责的范围不变）。`
@@ -1519,6 +1533,7 @@ export class LarkGroupParticipation {
       const why = rule ?? (silent.status === 'failed' ? '那次判断没跑成，按规定不出声' : `我判断不是在叫我（${silent.reason.slice(0, 200)}）`);
       // 对别人说的话不该接，就不再提示调档；多机器人群里没接的，提示指定接话人或配负责范围；别人的话题提示在话题里 @。
       const ruleHint = meta?.rule === 'no_responder' ? `要我接，@我 说「你负责接话」，或在 Dutydeck Web 的群设置里指定接话人；${scopeSetupHint}`
+        : meta?.rule === 'members_unknown' ? '要我接，@我 说「你负责接话」，或在 Dutydeck Web 的群设置里指定接话人；也可以给机器人开通读取群成员的权限，读得到名单后按实际成员判断。'
         : meta?.rule === 'not_responder' ? `要改由我接，@我 说「你负责接话」；${scopeSetupHint}`
         : meta?.rule === 'topic_of_other' ? '要我接这个话题，在话题里 @我；我接手后，话题里的追问不用再 @。'
         : ['mentions_other', 'reply_to_other', 'calls_other'].includes(meta?.rule ?? '') ? '' : hint;

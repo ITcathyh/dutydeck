@@ -106,6 +106,29 @@ describe('多机器人群的接话人', () => {
     expect(rule({ level: 'eager', threadRootOther: true })).toMatchObject({ action: 'addressed', rule: 'eager_default' });
     expect(rule({ ...crowded, level: 'eager', responder: 'self', threadRootOther: true, ownedTopic: true })).toMatchObject({ action: 'addressed', rule: 'owned_topic' });
   });
+
+  it('读不到完整的群成员名单：按可能有多个机器人处理，没指定接话人时只接明确叫自己的', () => {
+    const unknown = { membersUnknown: true };
+    expect(rule({ ...unknown, level: 'eager' })).toMatchObject({ action: 'silent', rule: 'members_unknown' });
+    expect(rule({ ...unknown, level: 'selective' })).toMatchObject({ action: 'silent', rule: 'members_unknown' });
+    expect(rule({ ...unknown, level: 'eager', responder: 'other' })).toMatchObject({ action: 'silent', rule: 'not_responder' });
+    expect(rule({ ...unknown, level: 'eager', responder: 'self' })).toMatchObject({ action: 'addressed', rule: 'eager_default' });
+    expect(rule({ ...unknown, level: 'eager', responder: 'self', threadRootOther: true })).toMatchObject({ action: 'silent', rule: 'topic_of_other' });
+    expect(rule({ ...unknown, callsOther: true })).toMatchObject({ action: 'silent', rule: 'calls_other' });
+    expect(rule({ ...unknown, text: 'bdev-flash 帮我看下' })).toMatchObject({ action: 'addressed', rule: 'calls_name' });
+    expect(rule({ ...unknown, parent: 'self' })).toMatchObject({ action: 'addressed', rule: 'reply_to_self' });
+    expect(rule({ ...unknown, ownedTopic: true })).toMatchObject({ action: 'addressed', rule: 'owned_topic' });
+    // 负责范围照常绕过，交给模型按范围判断。
+    expect(rule({ ...unknown, roleScope: '告警排查' })).toBeUndefined();
+  });
+
+  it('ruleContextOf 透传 membersUnknown，回放和实时一样按多机器人群处理', () => {
+    const trigger = { id: 'obs_1', scope: { appId: 'cli_a', chatId: 'oc_1' }, sequence: 1, source: 'lark.message', eventId: 'om_1', occurredAt: '2026-10-09T00:00:00Z', receivedAt: '2026-10-09T00:00:00Z', senderId: 'ou_1', senderKind: 'human' as const, text: '今天发版', refs: [], origin: 'live' as const, missing: [], revision: 1 };
+    const context = ruleContextOf(trigger, { names: [], hasActiveMandates: false }, ['flash'], { level: 'eager', membersUnknown: true });
+    expect(context).toMatchObject({ membersUnknown: true });
+    expect(context).not.toHaveProperty('members');
+    expect(evaluateParticipationRules(context)).toMatchObject({ action: 'silent', rule: 'members_unknown' });
+  });
 });
 
 describe('participation intents', () => {

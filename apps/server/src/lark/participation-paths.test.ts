@@ -2,6 +2,7 @@
 // 1. 模型判定期间群里来了新消息（同话题、跨话题、机器人消息），判定结果作废：current() 要求整个群的 contextRevision 不变。
 // 2. 规则层的机器人计数排除本群订阅的告警来源。
 // 3. 没接话时「为什么没回」和 /status 说明原因和怎么配。
+// 4. 读不到群成员名单时按可能有多个机器人处理，多机器人群的规则照常生效。
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { createCollaborationSchema } from '../../../../packages/storage/src/collaboration-migration.js';
@@ -230,5 +231,68 @@ describe('相邻的两条消息各自判定', () => {
     expect(h.dispatch.mock.calls.map(call => (call as unknown as [{ messageId: string }])[0].messageId)).toEqual(['om_A', 'om_C']);
     expect(ruleOf(await h.decisionOf('om_A'))).toBe('calls_name');
     expect(await h.decisionOf('om_B')).toBeUndefined();
+  });
+});
+
+describe('读不到群成员名单时多机器人保护照常生效', () => {
+  const unreadable = () => vi.fn(async () => { throw new Error('Access denied'); });
+
+  it.each(['eager', 'selective'] as const)('读成员失败、%s 档、没指定接话人：不按「没有别的机器人」处理，判 members_unknown，不交给执行也不调模型', async level => {
+    const h = await harness();
+    if (level === 'eager') await h.repository.updateSettings(scope, { expectedRevision: 1, participation: 'eager' }, 'owner');
+    Object.assign(h.service, { listChatMembers: unreadable() });
+    await h.handle(message('om_1', '今天的发布单在哪看'));
+    await h.participation.flush(scope);
+    const decision = await h.decisionOf('om_1');
+    expect(decision).toMatchObject({ action: 'silent' });
+    expect(ruleOf(decision)).toBe('members_unknown');
+    expect(deciderMetaOf(decision!)?.facts).toMatchObject({ membersUnknown: true });
+    expect(deciderMetaOf(decision!)?.facts).not.toHaveProperty('bots');
+    expect(h.dispatch).not.toHaveBeenCalled();
+    expect(h.decide).not.toHaveBeenCalled();
+  });
+
+  it('名单被安全策略截断：用读到的机器人认出叫别人的名字；明确叫自己名字的照常接', async () => {
+    const h = await harness({ readConfig: async () => ({ ...config, name: 'ops-bot' }) });
+    Object.assign(h.service, { listChatMembers: vi.fn(async () => ({ items: [
+      { memberId: 'ou_0', memberType: 'user' as const, name: '用户0' },
+      { memberId: flash.appId, memberType: 'bot' as const, name: flash.name, appId: flash.appId }], hasMore: true, securityLimited: true })) });
+    await h.handle(message('om_1', 'flash 帮我看下')); await h.participation.flush(scope);
+    const yielded = await h.decisionOf('om_1');
+    expect(ruleOf(yielded)).toBe('calls_other');
+    expect(deciderMetaOf(yielded!)?.facts).toMatchObject({ membersUnknown: true, callsOther: true });
+    await h.handle(message('om_2', 'ops-bot 帮我看下这个报错', { createTime: '1789707601000' })); await h.participation.flush(scope);
+    expect(ruleOf(await h.decisionOf('om_2'))).toBe('calls_name');
+    expect(h.dispatch.mock.calls.map(call => (call as unknown as [{ messageId: string }])[0].messageId)).toEqual(['om_2']);
+    expect(h.decide).not.toHaveBeenCalled();
+  });
+
+  it('名单读全过一次、缓存过期后读失败：沿用上次的机器人名单，仍认出叫别人的名字', async () => {
+    let now = Date.parse('2026-10-15T08:00:00.000Z');
+    const h = await harness({ now: () => new Date(now) });
+    const list = members(3, [flash, self]);
+    Object.assign(h.service, { listChatMembers: list });
+    await h.handle(message('om_1', '今天的发布单在哪看')); await h.participation.flush(scope);
+    expect(ruleOf(await h.decisionOf('om_1'))).toBe('no_responder');
+    now += 11 * 60_000;
+    list.mockRejectedValue(new Error('timeout'));
+    await h.handle(message('om_2', 'flash 帮我看下', { createTime: '1789707601000' })); await h.participation.flush(scope);
+    const decision = await h.decisionOf('om_2');
+    expect(ruleOf(decision)).toBe('calls_other');
+    expect(deciderMetaOf(decision!)?.facts).toMatchObject({ membersUnknown: true, callsOther: true });
+    expect(h.decide).not.toHaveBeenCalled();
+  });
+
+  it('「为什么没回」和 /status 说明读不到群成员名单以及怎么让我接；改成积极档时一并认领接话人', async () => {
+    const applyLevel = vi.fn(async () => {});
+    const h = await harness({ applyLevel });
+    Object.assign(h.service, { listChatMembers: unreadable() });
+    await h.handle(message('om_1', '今天的发布单在哪看')); await h.participation.flush(scope);
+    await h.handle(atBot('om_why', '刚才为什么没回'), true);
+    expect(String((h.service.replyText.mock.calls.at(-1) as unknown as [{ text: string }])[0].text)).toContain(
+      '那条「今天的发布单在哪看」我没接：读不到完整的群成员名单，按群里有多个机器人处理；还没指定接话人，没 @ 的消息我先不接。要我接，@我 说「你负责接话」');
+    expect(await h.participation.describe(scope)).toContain('**接话人**：未指定。读不到完整的群成员名单，按多机器人群处理，没 @ 的消息我先不接');
+    await h.handle(atBot('om_level', '积极点'), true);
+    expect(JSON.stringify(h.service.reply.mock.calls.at(-1))).toContain('读不到完整的群成员名单，按多机器人群处理，确认后由我负责接没 @ 的消息');
   });
 });
