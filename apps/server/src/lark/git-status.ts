@@ -30,7 +30,7 @@ export async function readGitSnapshot(cwd: string): Promise<LarkGitSnapshot | un
       git(['rev-parse', '--abbrev-ref', 'HEAD']), git(['rev-parse', '--short', 'HEAD']), git(['status', '--short', '--ignore-submodules=dirty'])
     ]);
     const lines = status.split('\n').filter(line => line.trim().length > 0);
-    return { branch, head, status: lines.slice(0, 10), statusTotal: lines.length };
+    return { branch: branch.trim(), head: head.trim(), status: lines.slice(0, 10), statusTotal: lines.length };
   } catch {
     return undefined;
   }

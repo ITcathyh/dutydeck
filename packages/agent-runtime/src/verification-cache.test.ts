@@ -33,7 +33,7 @@ vi.mock('node:fs/promises', async original => {
   };
 });
 
-const { cachedRepositoryFingerprint, repositoryFingerprint, VerificationManager } = await import('./verification.js');
+const { cachedRepositoryFingerprint, fingerprintCacheSizeForTest, repositoryFingerprint, VerificationManager } = await import('./verification.js');
 
 const cleanup: string[] = [];
 afterEach(() => {
@@ -121,6 +121,17 @@ describe('verification list fingerprint cost', () => {
     git(root, 'commit', '-qam', 'next');
     expect(await cachedRepositoryFingerprint(root)).toBe(await repositoryFingerprint(root));
     expect(await cachedRepositoryFingerprint(root)).not.toBe(fingerprint);
+  }, 20_000);
+
+  it('forgets a cached directory once it can no longer be scanned', async () => {
+    const root = repository();
+    await ageFiles();
+    const before = fingerprintCacheSizeForTest();
+    await cachedRepositoryFingerprint(root);
+    expect(fingerprintCacheSizeForTest()).toBe(before + 1);
+    rmSync(root, { recursive: true, force: true });
+    await expect(cachedRepositoryFingerprint(root)).rejects.toThrow();
+    expect(fingerprintCacheSizeForTest()).toBe(before);
   }, 20_000);
 
   it('does not cache a result whose files changed while it was being read', async () => {

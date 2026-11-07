@@ -641,3 +641,4 @@ export type { ConfigurationField, ConfigurationSection, ConfigurationExplanation
 export type { ArtifactSnapshot, ArtifactSnapshotReference, ArtifactSnapshotPreview } from './history.js';
 
 export * from './matters.js';
+export * from './proc-stat.js';

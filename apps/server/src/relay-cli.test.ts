@@ -22,8 +22,10 @@ async function harness() {
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
     // CLI 子进程启动时会对同端口发一次 GET /（与 relay 无关）；不计入 relay 请求，也不让空 body 触发未处理异常。
-    if (request.method !== 'POST') { response.statusCode = 404; response.end(); return; }
-    const body = JSON.parse(Buffer.concat(chunks).toString());
+    // 并行测试也会复用刚释放的端口：只认 relay 提问路径，请求体解析不了就断开这条连接。
+    if (request.method !== 'POST' || request.url !== '/api/relay/sessions/self/ask') { response.statusCode = 404; response.end(); return; }
+    let body: any;
+    try { body = JSON.parse(Buffer.concat(chunks).toString()); } catch { request.socket.destroy(); return; }
     requests.push({ url: request.url, authorization: request.headers.authorization, body });
     response.setHeader('content-type', 'application/json');
     try {

@@ -216,6 +216,7 @@ const QUEUE_HANDOFF_MS = 15 * 60_000;
 const COMMAND_SWAP_WAIT_MS = 3_000;
 /** 轮次结束时执行端已自行拒掉、却没发终态事件的审批，补记的拒绝说明。 */
 const TURN_ENDED_PERMISSION_REASON = '本轮任务已结束，这次操作没有执行。';
+type PendingPermission = { request: PermissionRequestData; nativeId: string; fence: AttemptRef & SessionFence; generation: number; owner?: Owner };
 const workspaceBlockerStates: Record<string, string> = {
   WORKSPACE_PHYSICAL_RESOURCE_UNSAFE: '它的终端或执行进程还没确认已退出（残留终端）',
   DRIVER_STOP_BLOCKED: '它上次停止时没能确认进程已退出（残留终端）',
@@ -316,7 +317,7 @@ export class DutydeckRuntime {
   private readonly activeTasks = new Map<string, TaskRecord>();
   private readonly queues = new Map<string, TaskRecord[]>();
   private readonly queueRuns = new Map<string, Promise<void>>();
-  private readonly permissions = new Map<string, { request: PermissionRequestData; nativeId: string; fence: AttemptRef & SessionFence; generation: number; owner?: Owner }>();
+  private readonly permissions = new Map<string, PendingPermission>();
   private readonly permissionResolutions = new Map<string, string>();
   /** 正在提交的拒绝说明（已脱敏）；驱动在裁决时同步发出的终态事件据此补上 reason。 */
   private readonly permissionRejectReasons = new Map<string, string>();
@@ -964,7 +965,7 @@ export class DutydeckRuntime {
         if (this.attempts.get(session.id) === token) {
           this.attempts.delete(session.id); this.activeTasks.delete(session.id); this.activeTurns.delete(session.id);
         }
-        token.revoke(); this.forgetAttempt(attempt.attemptId);
+        token.revoke(); await this.forgetAttempt(attempt.attemptId);
         if (attached && !this.shuttingDown) await this.scoped(session.id, async () => {
           await this.projectQueue(session.id); this.queueBlocked.delete(session.id); this.scheduleQueue(session.id);
         });
@@ -2913,8 +2914,28 @@ export class DutydeckRuntime {
     return existing;
   }
   private permissionsForSession(id: string) { return [...this.permissions.values()].filter(permission => permission.fence.sessionId === id && this.mutations.valid(permission.owner)); }
-  private dropAttemptPermissions(attemptId: string) {
-    for (const [key, permission] of this.permissions) if (permission.fence.attemptId === attemptId) { this.permissions.delete(key); this.permissionResolutions.delete(key); }
+  /**
+   * 轮次退出（失败、停止、握手失败）时仍登记着的审批：移出内存并补记终态，否则时间线和 permission_requests 会一直停在 pending。
+   * 关机时只删内存：保留的 tmux 任务重启后可能重新识别同一审批。
+   */
+  private async dropAttemptPermissions(attemptId: string) {
+    const leftover: Array<[string, PendingPermission]> = [];
+    for (const [key, permission] of this.permissions) if (permission.fence.attemptId === attemptId) {
+      this.permissions.delete(key); this.permissionResolutions.delete(key); leftover.push([key, permission]);
+    }
+    if (!this.shuttingDown) await this.closeLeftoverPermissions(leftover);
+  }
+  /** 轮次已经结算或被撤销，审批事件按会话级 fence 写入；不持有已撤销的轮次令牌，也不能在会话写锁内调用。 */
+  private async closeLeftoverPermissions(leftover: Array<[string, PendingPermission]>) {
+    for (const [, permission] of leftover) {
+      const { sessionId, runId } = permission.fence;
+      const request = { ...permission.request, status: 'rejected' as const, reason: TURN_ENDED_PERMISSION_REASON };
+      await this.mutations.run(undefined, async () => {
+        await this.eventScope.run({ sessionId, runId }, () => this.emit(sessionId, 'permission_request', request)).catch(error =>
+          this.options.log?.warn({ sessionId, permissionId: request.id, error }, 'Permission left by the ended turn could not be recorded'));
+        await this.artifact('savePermission', sessionId, request).catch(() => {});
+      });
+    }
   }
   /**
    * 驱动报告本轮结束后仍登记着的审批已不可能再被采纳（ACP 在中断、停止和轮次收尾时自行 reject_once，不发终态事件）。
@@ -3075,16 +3096,17 @@ export class DutydeckRuntime {
         this.attempts.delete(id); this.activeTurns.delete(id); this.activeTasks.delete(id);
         token.revoke(); this.touch(id);
       }
-      this.forgetAttempt(ref.attemptId);
+      await this.forgetAttempt(ref.attemptId);
     }
     const settled = this.publicTask(this.repos.execution.getTaskExecution(task.id)?.task ?? task);
     if (settledSession) this.notifyTaskSettled(settledSession, settled);
     return settled;
   }
-  /** Drop every per-attempt record once its turn has ended, normally or after recovery. */
-  private forgetAttempt(attemptId: string) {
+  /** Drop every per-attempt record once its turn has ended, normally or after recovery; leftover approvals are recorded as rejected. */
+  private async forgetAttempt(attemptId: string) {
     this.completedTurns.delete(attemptId); this.driverStopReasons.delete(attemptId); this.turnErrors.delete(attemptId); this.eventFlushedAttempts.delete(attemptId);
-    this.attemptTools.delete(attemptId); this.oscPermissionWaits.delete(attemptId); this.dropAttemptPermissions(attemptId); this.wakeResourceQueues();
+    this.attemptTools.delete(attemptId); this.oscPermissionWaits.delete(attemptId);
+    try { await this.dropAttemptPermissions(attemptId); } finally { this.wakeResourceQueues(); }
   }
   private notifyTaskSettled(session: Session, settled: PublicTaskRecord) {
     if (this.options.onTaskSettled && isTerminalTaskStatus(settled.status)) {
@@ -3283,20 +3305,23 @@ export class DutydeckRuntime {
   private async closeUnprovenIdleCompetitors(id: string, taskId: string, allowProofRetry: boolean): Promise<boolean> {
     const blockers = this.repos.execution.getTaskExecution(taskId)?.blockers ?? [];
     let closed = false;
+    // Idle proof covers every driver, so one pass serves all competitors until the next await lets driver state move.
+    let fresh: ResourceCheckRef[] | undefined;
     for (const otherId of new Set(blockers.filter(value => value.code === 'WORKSPACE_PHYSICAL_RESOURCE_UNSAFE').map(value => value.sessionId))) {
       if (otherId === id || this.repos.execution.getUnresolvedTasks(otherId).length || this.sessionHeld(otherId)
         || blockers.some(value => value.sessionId === otherId && value.code !== 'WORKSPACE_PHYSICAL_RESOURCE_UNSAFE')) continue;
       const driver = this.drivers.get(otherId);
       if (!driver || driver.hasBackgroundWork?.() === true || this.driverOperations.get(driver)?.size || this.permissionsForSession(otherId).length) continue;
-      const fresh = this.idleResourceChecks();
+      const proof = fresh ??= this.idleResourceChecks();
       const resources = this.repos.execution.getResources(otherId);
       const disputed = blockers.filter(value => value.sessionId === otherId && value.code === 'WORKSPACE_PHYSICAL_RESOURCE_UNSAFE');
       if (disputed.every(block => {
         const r = resources.find(value => value.resourceId === block.resourceId);
         const parent = resources.find(value => value.resourceId === r?.parentResourceId);
-        return r && fresh.some(check => check.resourceId === r.resourceId)
+        return r && proof.some(check => check.resourceId === r.resourceId)
           && (r.kind === 'local_only' || r.kind === 'process' && parent?.stage === 'created' && ['lifecycle','strict-context-restore'].includes(parent.operationScope?.kind ?? ''));
       })) { if (allowProofRetry) closed = true; continue; }
+      fresh = undefined;
       // Adapters without a reliable background-empty proof must prove physical stop on contention.
       if (driver.prepareForIdleRetirement && !await driver.prepareForIdleRetirement()) continue;
       try { await this.mutations.run(undefined, () => this.stopDriver(otherId,driver)); closed = true; }
@@ -3735,6 +3760,7 @@ export class DutydeckRuntime {
       void stopping.catch(() => {});
       let factError: unknown;
       let actorRequired = false;
+      const stoppedPermissions: Array<[string, PendingPermission]> = [];
       try {
       await this.verifications.stopSession(id);
       await this.mutations.write(id, async () => {
@@ -3753,7 +3779,7 @@ export class DutydeckRuntime {
         }
         if (intent.cancelQueue) actorRequired = !await this.cancelSessionQueue(id, intent.actor);
         for (const [key, permission] of this.permissions) if (permission.fence.sessionId === id) {
-          this.permissions.delete(key); this.permissionResolutions.delete(key);
+          this.permissions.delete(key); this.permissionResolutions.delete(key); stoppedPermissions.push([key, permission]);
         }
       });
       } catch (error) { factError = error; }
@@ -3761,6 +3787,7 @@ export class DutydeckRuntime {
       try { await stopping; } catch (error) { stopError = error; }
       while (this.driverEventChains.has(id)) await this.driverEventChains.get(id);
       if (!factError && intent.cancelQueue) actorRequired = !await this.mutations.write(id, () => this.cancelSessionQueue(id, intent.actor));
+      if (!shutdown && !discardSession) await this.closeLeftoverPermissions(stoppedPermissions);
       await this.mutations.barrier(id);
       if (!shutdown && !stopError && !factError) {
         const session = await this.repos.sessions.get(id);

@@ -1,8 +1,9 @@
-import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { currentProcessIdentity, observeProcess } from '@dutydeck/storage';
 import { z } from 'zod';
 import { processIdentitySchema } from './activation.js';
+import { writeFileAtomicSync } from '../atomic-file.js';
 
 /**
  * 进程内 provider 让 daemon 崩溃或启动卡死后的隔离记录。全部同步读写：崩溃记录在 uncaughtExceptionMonitor 里、进程退出前写下。
@@ -16,11 +17,7 @@ export type PluginQuarantine = z.infer<typeof recordSchema>;
 const directory = (pluginsDir: string) => join(pluginsDir, QUARANTINE_DIR);
 const loadingPrefix = (plugin: string) => `${plugin}.loading-`;
 
-function writePrivateJsonSync(path: string, value: unknown) {
-  const temporary = `${path}.${process.pid}.tmp`;
-  writeFileSync(temporary, JSON.stringify(value), { mode: 0o600 });
-  renameSync(temporary, path);
-}
+const writePrivateJsonSync = (path: string, value: unknown) => writeFileAtomicSync(path, JSON.stringify(value));
 
 function readJson<T>(path: string, schema: z.ZodType<T>): T | undefined {
   try { return schema.parse(JSON.parse(readFileSync(path, 'utf8'))); } catch { return undefined; }
@@ -58,6 +55,8 @@ export function clearPluginQuarantine(pluginsDir: string, plugin: string): void 
   for (const file of files) if (file === `${plugin}.json` || file.startsWith(loadingPrefix(plugin))) rmSync(join(dir, file), { force: true });
 }
 
+const activeLoadingMarkers = new Set<string>();
+
 /** provider 导入和 register 期间留下的标记；返回的函数在加载结束（成功、失败或超时）时删除它。写不进去不阻止启动。 */
 export function markProviderLoading(pluginsDir: string, plugin: string): () => void {
   const path = join(directory(pluginsDir), `${loadingPrefix(plugin)}${process.pid}.json`);
@@ -65,5 +64,15 @@ export function markProviderLoading(pluginsDir: string, plugin: string): () => v
     mkdirSync(directory(pluginsDir), { recursive: true, mode: 0o700 });
     writePrivateJsonSync(path, { plugin, at: new Date().toISOString(), identity: currentProcessIdentity() });
   } catch { return () => {}; }
-  return () => { try { rmSync(path, { force: true }); } catch { /* 删不掉的标记只在本进程退出后才会生效为隔离 */ } };
+  activeLoadingMarkers.add(path);
+  return () => { activeLoadingMarkers.delete(path); try { rmSync(path, { force: true }); } catch { /* 删不掉的标记只在本进程退出后才会生效为隔离 */ } };
+}
+
+/**
+ * 启动期间收到正常停止信号时调用：加载被打断不是插件卡死，删掉本进程的加载标记，下次启动不误判隔离。
+ * 同步死循环会堵住事件循环，信号处理器跑不到，进程最终被 SIGKILL，标记照常留下。
+ */
+export function releaseProviderLoadingMarkers(): void {
+  for (const path of activeLoadingMarkers) { try { rmSync(path, { force: true }); } catch { /* 同上 */ } }
+  activeLoadingMarkers.clear();
 }

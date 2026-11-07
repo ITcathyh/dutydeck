@@ -1,8 +1,10 @@
 import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { basename, dirname, isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
+import { asciiBundle } from './ascii-bundle.mjs';
 
 const serverRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const workspaceRoot = resolve(serverRoot, '../..');
@@ -67,6 +69,35 @@ const larkRequirePlugin = {
   }
 };
 
+// acpx imports the ACP protocol SDK at the top of its client module, and the SDK builds its whole zod schema
+// set on load (~20 MB of heap, ~200 ms). Hosts that never start an ACP session don't need it, so the bundle
+// loads it when the first agent launches: the static import becomes bindings that launch-support fills in,
+// which every launch awaits before it creates a connection.
+const acpSdk = '@agentclientprotocol/sdk';
+const lazyAcpSdkPlugin = {
+  name: 'dutydeck-lazy-acp-sdk',
+  setup(buildApi) {
+    buildApi.onLoad({ filter: /[\\/]acpx[\\/]dist[\\/][^\\/]+\.js$/ }, async args => {
+      const source = await readFile(args.path, 'utf8');
+      if (!source.includes(`"${acpSdk}"`)) return undefined;
+      const imports = [...source.matchAll(new RegExp(`^import \\{([^}]+)\\} from "${acpSdk.replace('/', '\\/')}";$`, 'gm'))];
+      const launches = source.split('\n\tasync ensureLaunchSupport(plan, resourceScope) {\n').length - 1;
+      if (imports.length !== 1 || launches !== 1 || source.split(`"${acpSdk}"`).length !== 2) {
+        throw new Error(`${args.path}: expected one ${acpSdk} import and one ensureLaunchSupport; update the lazy ACP SDK rewrite in build.mjs`);
+      }
+      const bindings = imports[0][1].split(',').map(name => name.trim()).filter(Boolean).map(name => name.split(/\s+as\s+/));
+      const local = bindings.map(([imported, alias]) => alias ?? imported);
+      const pattern = bindings.map(([imported, alias]) => alias ? `${imported}: ${alias}` : imported).join(', ');
+      return {
+        loader: 'js',
+        contents: source
+          .replace(imports[0][0], `let ${local.join(', ')};\nconst loadAcpSdk = async () => { ({ ${pattern} } = await import("${acpSdk}")); };`)
+          .replace('\n\tasync ensureLaunchSupport(plan, resourceScope) {\n', '\n\tasync ensureLaunchSupport(plan, resourceScope) {\n\t\tawait loadAcpSdk();\n')
+      };
+    });
+  }
+};
+
 rmSync(resolve(serverRoot, 'dist'), { recursive: true, force: true });
 if (!existsSync(resolve(webDist, 'index.html'))) throw new Error('Web UI is not built. Run pnpm --dir apps/web build first.');
 rmSync(publicDir, { recursive: true, force: true });
@@ -79,14 +110,15 @@ await build({
   platform: 'node',
   target: 'node22',
   sourcemap: false,
-  plugins: [...workspacePlugins, larkRequirePlugin, externalPackages]
+  plugins: [...workspacePlugins, larkRequirePlugin, lazyAcpSdkPlugin, externalPackages]
 });
+if ((await readFile(resolve(serverRoot, 'dist/cli.js'), 'utf8')).includes(`from "${acpSdk}"`)) throw new Error(`dist/cli.js still imports ${acpSdk} at startup`);
 writeFileSync(resolve(serverRoot, 'dist', larkShim), `import { createRequire } from 'node:module';\nconst lark = createRequire(import.meta.url)(${JSON.stringify(larkSdk)});\nexport default lark;\nexport const { ${larkExports.join(', ')} } = lark;\n`);
 // Isolated plugin activation uses the same Host registries after installation, without tsx.
 await build({
   entryPoints: [resolve(serverRoot, 'src/plugins/activation-worker.ts')],
   outfile: resolve(serverRoot, 'dist/assets/plugin-validation/cli.js'),
-  bundle: true, format: 'esm', platform: 'node', target: 'node22', plugins: [...workspacePlugins, externalPackages]
+  bundle: true, format: 'esm', platform: 'node', target: 'node22', plugins: [...workspacePlugins, lazyAcpSdkPlugin, externalPackages]
 });
 // Pane-resident OSC handshake relay must survive bundling and npm packaging.
 await build({
@@ -110,6 +142,8 @@ await build({
   sourcemap: false,
   plugins: workspacePlugins
 });
+// Each process keeps its bundle's source in memory; ASCII-only source is stored at one byte per character.
+for (const bundle of ['dist/cli.js', 'dist/assets/plugin-validation/cli.js', 'dist/assets/session-insight/cli.js', 'dist/program-status-relay.js']) asciiBundle(resolve(serverRoot, bundle));
 const agentsDir = resolve(serverRoot, 'dist/agents');
 mkdirSync(agentsDir, { recursive: true });
 cpSync(resolve(workspaceRoot, 'packages/acp-client/agents/claude-acp.mjs'), resolve(agentsDir, 'claude-acp.mjs'));

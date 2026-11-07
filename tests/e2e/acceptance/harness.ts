@@ -15,6 +15,16 @@ const POLLUTING_ENV = [
   'CLAUDE_CODE_OAUTH_TOKEN'
 ];
 
+// 去掉继承来的 GIT_*（git bisect run、hook 里会带 GIT_DIR），否则针对临时仓库的 git 会落到外层开发仓库。
+const withoutGitEnv = (env: NodeJS.ProcessEnv): NodeJS.ProcessEnv =>
+  Object.fromEntries(Object.entries(env).filter(([key]) => !key.startsWith('GIT_')));
+const ISOLATED_GIT_ENV = withoutGitEnv(process.env);
+
+/** 在指定临时仓库里跑 git，不受外层 GIT_* 环境影响。 */
+export function gitIn(repo: string, args: string[]): string {
+  return execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', env: ISOLATED_GIT_ENV, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+}
+
 export async function getAvailablePort(): Promise<number> {
   return new Promise((resolvePort, rejectPort) => {
     const srv = net.createServer();
@@ -214,9 +224,7 @@ export async function launchIsolatedTestServer(
     }
 
     // 初始化真实 Git 源码仓库，包含 baseline 提交
-    // 去掉继承来的 GIT_*（git bisect run、hook 里会带 GIT_DIR），否则 init/commit 会落到外层开发仓库。
-    const gitEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
-    const git = (args: string[]) => execFileSync('git', ['-C', sourceRepo, ...args], { encoding: 'utf8', env: gitEnv, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    const git = (args: string[]) => gitIn(sourceRepo, args);
     git(['init', '-q']);
     git(['config', 'user.name', 'AcceptanceTest']);
     git(['config', 'user.email', 'acceptance@example.invalid']);
@@ -233,7 +241,7 @@ export async function launchIsolatedTestServer(
     // 生成 mock CLI
     const mockCliPath = writeMockCli(binDir, claudeDataDir);
 
-    const serverEnv: NodeJS.ProcessEnv = { ...process.env };
+    const serverEnv = withoutGitEnv(process.env);
     for (const k of POLLUTING_ENV) delete serverEnv[k];
     serverEnv.NODE_ENV = 'production';
     serverEnv.PATH = `${binDir}:${process.env.PATH || ''}`;

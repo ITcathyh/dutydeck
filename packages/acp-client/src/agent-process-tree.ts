@@ -1,5 +1,6 @@
 import { readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { parseProcStat, procStatExited } from '@dutydeck/shared';
 
 /**
  * Process tree of one Agent child spawned by ACPX, read from Linux /proc. Other platforms see only the root.
@@ -11,13 +12,8 @@ export interface TreeMember { pid: number; start: string }
 
 function readStat(pid: number): ProcessStat | undefined {
   try {
-    const raw = readFileSync(`/proc/${pid}/stat`, 'utf8');
-    // The command name may contain spaces and parentheses, so fields are counted from the last ')'.
-    const fields = raw.slice(raw.lastIndexOf(')') + 2).split(' ');
-    return {
-      ppid: Number(fields[1]), pgid: Number(fields[2]), start: fields[19]!, zombie: fields[0] === 'Z' || fields[0] === 'X',
-      ticks: Number(fields[11]) + Number(fields[12]) + Number(fields[13]) + Number(fields[14])
-    };
+    const stat = parseProcStat(readFileSync(`/proc/${pid}/stat`, 'utf8'));
+    return { ppid: stat.ppid, pgid: stat.pgid, start: stat.start, zombie: procStatExited(stat), ticks: stat.cpuTicks };
   } catch { return undefined; }
 }
 /** Every readable process; empty off Linux or when /proc cannot be listed. One synchronous pass over /proc, so share it. */

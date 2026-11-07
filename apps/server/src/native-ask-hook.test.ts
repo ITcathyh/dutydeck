@@ -34,7 +34,8 @@ describe('native Claude questions over the session relay', () => {
       if (!guard.accept(request, response)) return;
       const chunks: Buffer[] = [];
       for await (const chunk of request) chunks.push(Buffer.from(chunk));
-      const body = JSON.parse(Buffer.concat(chunks).toString());
+      let body: any;
+      try { body = JSON.parse(Buffer.concat(chunks).toString()); } catch { request.socket.destroy(); return; }
       received.push({ url: request.url, token: request.headers.authorization, ...body });
       const result = await broker.register({ sessionId: 'ses_native', question: body.question,
         choices: body.choices as RelayAskChoice[], multiple: body.multiple });

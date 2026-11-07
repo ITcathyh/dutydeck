@@ -304,6 +304,11 @@ export class WorkItemService {
     return (await this.records(parentSessionId)).filter(record => record.actorId === actorId || actorId === installationOwnerTaskActor).map(record => this.view(record));
   }
   async get(parentSessionId: string, id: string, actorId?: string): Promise<WorkItem> { return this.view((await this.owned(parentSessionId, id, actorId)).value); }
+  /** Local snapshot without authorization, for callers that only compare it with state they already verified. */
+  async peek(id: string): Promise<WorkItem | undefined> {
+    const raw = await this.repos.config.get(PREFIX + id);
+    return raw ? this.view(JSON.parse(raw) as StoredWork) : undefined;
+  }
   /** Existence only, without authorization: recovery bookkeeping for a caller that derived the id itself. */
   async exists(id: string): Promise<boolean> { return Boolean(await this.repos.config.get(PREFIX + id)); }
 

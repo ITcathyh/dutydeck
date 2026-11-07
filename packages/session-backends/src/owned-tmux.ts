@@ -1,9 +1,10 @@
 import { runCommand } from './command.js';
 import { descendantPids } from './descendant-pids.js';
-import { statFields, statStart } from './proc-stat.js';
+import { statStart } from './proc-stat.js';
 import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { isAbsolute } from 'node:path';
+import { parseProcStat, procStatExited } from '@dutydeck/shared';
 
 export interface PhysicalProcessIdentity {
   host: string; boot: string; namespace: string; pid: number; start: string;
@@ -120,7 +121,7 @@ function exitedSinceScan(pid: number, scannedStat: string | undefined): boolean 
   const current = readStat(pid);
   if (current === undefined) return true;
   if (scannedStat !== undefined && statStart(current) !== statStart(scannedStat)) return true;
-  return statFields(current)[0] === 'Z';
+  return procStatExited(parseProcStat(current));
 }
 /** Two identities with the same key are the same physical process. */
 export const processIdentityKey = (identity: PhysicalProcessIdentity) => JSON.stringify([identity.host, identity.boot, identity.namespace, identity.pid, identity.start]);

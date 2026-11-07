@@ -40,6 +40,7 @@ import { LegacyImportCliError, runLegacyArchive, runLegacyDiscover, runLegacyPla
 import { LocalFileSecretProvider, SecretProviderError, secretDirectoryForDatabase } from '@dutydeck/secret-provider';
 import { setPluginBindingSecret } from './plugins/binding-secret-cli.js';
 import { pluginsInStack, quarantineCrashedPlugins } from './plugins/crash-attribution.js';
+import { releaseProviderLoadingMarkers } from './plugins/quarantine.js';
 import { SecretCliError, readSecretValue, runSecretList, runSecretRemove, runSecretRotate, runSecretSet, type SecretCliContext } from './secret-cli.js';
 import { SettingsCliError, runSettingsCli } from './settings-cli.js';
 import { ScheduleCliError, runScheduleCli, runScheduleRequest } from './schedule-cli.js';
@@ -85,9 +86,13 @@ async function serve(options: CliOptions, onReady?: () => void) {
     const quarantined = quarantineCrashedPlugins(plugins, origin);
     if (quarantined.length) process.stderr.write(`Quarantined plugins: ${quarantined.join(', ')}. They will not load on the next start; after fixing, run dutydeck plugin enable <name> and restart.\n`);
   });
+  // 启动完成前没有可关闭的服务；停止信号照常立即退出，但先删掉正在加载的插件标记，免得被当成插件卡死而隔离。
+  const startupSignal = (signal: NodeJS.Signals) => { releaseProviderLoadingMarkers(); process.exit(128 + (signal === 'SIGINT' ? 2 : 15)); };
+  process.on('SIGINT', startupSignal); process.on('SIGTERM', startupSignal);
   const { startLocalServer } = await import('./service.js');
   const { dutydeckGroupToolsCommand } = await import('./lark/agent-tools.js');
   const service = await startLocalServer({ env: environmentFromCli(options), groupToolsCommand: dutydeckGroupToolsCommand(fileURLToPath(import.meta.url)) });
+  process.off('SIGINT', startupSignal); process.off('SIGTERM', startupSignal);
   const address = service.config.host === '0.0.0.0'
     ? `http://127.0.0.1:${service.config.port} (LAN access enabled; other devices can use this computer's LAN IP)`
     : `http://${service.config.host.includes(':') ? `[${service.config.host}]` : service.config.host}:${service.config.port}`;

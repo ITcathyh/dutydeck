@@ -1,4 +1,5 @@
 import { readFile, readdir } from 'node:fs/promises';
+import { parseProcStat } from '@dutydeck/shared';
 
 /** Linux process-tree CPU evidence. Unknown readings never prove activity. */
 export class TurnCpu {
@@ -12,9 +13,8 @@ export class TurnCpu {
         if (seen.has(pid)) continue;
         seen.add(pid);
         try {
-          const raw = await readFile(`/proc/${pid}/stat`, 'utf8');
-          const fields = raw.slice(raw.lastIndexOf(')') + 2).split(' ');
-          ticks.set(`${pid}:${fields[19]}`, Number(fields[11]) + Number(fields[12]) + Number(fields[13]) + Number(fields[14]));
+          const stat = parseProcStat(await readFile(`/proc/${pid}/stat`, 'utf8'));
+          ticks.set(`${pid}:${stat.start}`, stat.cpuTicks);
           for (const tid of await readdir(`/proc/${pid}/task`)) {
             const children = await readFile(`/proc/${pid}/task/${tid}/children`, 'utf8').catch(() => '');
             pending.push(...children.trim().split(/\s+/).map(Number).filter(pid => pid > 0));

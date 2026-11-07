@@ -992,6 +992,32 @@ describe('runtime lifecycle acceptance', () => {
     await h.runtime.shutdown(); h.repos.close();
   });
 
+  it.each(['failed turn', 'stopped session'] as const)('records a permission left pending by a %s as rejected', async exit => {
+    const h = harness(); const permissionTurn = deferred();
+    const saved: Array<{ id: string; status?: string }> = [];
+    const save = h.repos.artifacts.savePermission.bind(h.repos.artifacts);
+    h.repos.artifacts.savePermission = vi.fn(async (...args: Parameters<typeof save>) => { saved.push(args[1] as any); return save(...args); });
+    h.driver.send = vi.fn(async () => {
+      h.emit({ type: 'permission_request', data: { id: 'p_left', title: 'Write?', status: 'pending' } });
+      await permissionTurn.promise;
+      throw new Error('agent crashed');
+    });
+    h.driver.stop = vi.fn(async () => { permissionTurn.resolve(); });
+    await h.runtime.initialize([agent]); const s = await h.runtime.start({ agentId: 'mock' });
+    const turn = h.runtime.send(s.id, 'write').catch(error => error);
+    await vi.waitFor(() => expect(h.runtime.getPendingPermissions(s.id)).toHaveLength(1));
+    const [pending] = h.runtime.getPendingPermissions(s.id);
+    if (exit === 'stopped session') await h.runtime.stop(s.id);
+    permissionTurn.resolve(); await turn;
+    await vi.waitFor(async () => {
+      const closed = (await h.runtime.getEvents(s.id)).filter(event => event.type === 'permission_request' && (event.data as any).id === pending!.id).at(-1);
+      expect(closed?.data).toMatchObject({ status: 'rejected', reason: '本轮任务已结束，这次操作没有执行。' });
+      expect(saved.filter(item => item.id === pending!.id).at(-1)).toMatchObject({ status: 'rejected' });
+    });
+    expect(h.runtime.getPendingPermissions(s.id)).toEqual([]);
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
   it('forwards the user rejection reason verbatim to the driver and records a redacted copy in the permission record', async () => {
     const h = harness(); const permissionTurn = deferred();
     h.driver.requestPermission = vi.fn(input => { h.emit({ type: 'permission_request', data: { ...input, id: 'hook_r', status: 'pending' } }); return { id: 'hook_r', decision: new Promise(() => {}) }; });
