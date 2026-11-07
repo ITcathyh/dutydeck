@@ -202,9 +202,9 @@ export function createAppLogger(destination?: DestinationStream) {
 
 export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOptions = {}) {
   const sessionSource = createLarkSessionSourceResolver(options.lark ?? {});
-  // Fastify 同时收到 logger 与 loggerInstance 会抛错，只能二选一。
+  // Fastify 同时收到 logger 与 loggerInstance 会抛错，只能二选一；注入实例未必带上面的序列化器，在子实例上补齐。
   const app = Fastify({ rewriteUrl: rewriteSharedSessionProxyUrl,
-    ...options.loggerInstance ? { loggerInstance: options.loggerInstance } : { logger: process.env.NODE_ENV !== 'test' && appLoggerOptions } });
+    ...options.loggerInstance ? { loggerInstance: options.loggerInstance.child({}, appLoggerOptions) } : { logger: process.env.NODE_ENV !== 'test' && appLoggerOptions } });
   const streams = new Set<import('node:http').ServerResponse>();
   const requireSessionExecution = async (request: FastifyRequest, sessionId: string, boundary: 'session' | 'high_risk', action: PolicyAction) => {
     if (!options.executionPolicy) return;

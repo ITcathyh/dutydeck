@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { brotliCompressSync, brotliDecompressSync, gunzipSync, gzipSync } from 'node:zlib';
 import { get as httpGet, type IncomingMessage } from 'node:http';
 import { Writable } from 'node:stream';
+import { pino } from 'pino';
 import { buildApp, createAppLogger } from './app.js';
 import { createRepositories } from '@dutydeck/storage';
 import { larkBotsConfigKey } from './lark/config.js';
@@ -40,6 +41,16 @@ describe('injected service logger', () => {
     const entries = lines.map(line => JSON.parse(line));
     expect(entries.filter(entry => entry.req).map(entry => entry.req.url)).toEqual(['/health?share=[redacted]']);
     expect(entries.some(entry => entry.res?.statusCode === 200)).toBe(true);
+    expect(lines.join('')).not.toContain('secret-share-token');
+  });
+
+  it('redacts share tokens even when the injected instance has no serializers of its own', async () => {
+    const lines: string[] = [];
+    const logger = pino(new Writable({ write(chunk, _encoding, done) { lines.push(String(chunk)); done(); } }));
+    const app = await buildApp({} as any, { loggerInstance: logger }); apps.push(app);
+    expect((await app.inject({ method: 'GET', url: '/health?share=secret-share-token' })).statusCode).toBe(200);
+    const entries = lines.map(line => JSON.parse(line));
+    expect(entries.filter(entry => entry.req).map(entry => entry.req.url)).toEqual(['/health?share=[redacted]']);
     expect(lines.join('')).not.toContain('secret-share-token');
   });
 
