@@ -88,7 +88,7 @@ Matches `/help` (6 per page by default; plugin commands are listed on the last p
 | `/agents` | `/agents` | Available agents and the bot's default |
 | `/approve`, `/reject` | quote the approval card and reply `/approve` | Same as the buttons. Cards no longer show an id, so use "quote the card + command" if buttons fail |
 | `/answer` | quote the question card and reply with the answer | Also `/answer <question id> <answer>` |
-| `/cancel` (alias `/stop`) | `/cancel` | Cancel the running or queued turn |
+| `/cancel` (alias `/stop`) | `/cancel` | Cancel the running or queued turn; your own requests still being prepared (downloading attachments, reading context) and not yet submitted are cancelled too and never run. Saying "停" does the same even before the first turn has created a session |
 | `/retry` | `/retry` | Re-run the last failed or cancelled task |
 | `/queue` | `/queue top 2` | List queued items; `cancel`, `top`, `steer` by number |
 | `/steer` | `/steer skip migrations/` | Inject a message into the running turn (or queue it first and interrupt if the agent cannot take it) |

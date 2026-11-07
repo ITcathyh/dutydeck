@@ -524,7 +524,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
       await clearTaskReportSafely(store, claim.runtimeTaskId);
       await this.markRelaunchedCard(config, moved).catch(error => this.log.warn({ error, taskId: claim.taskId }, '旧任务卡未能更新为已转到新会话，下次点击时收尾'));
       const task: LarkTask = { id: claim.taskId, group, event: inbox.event, prompt: saved.prompt, resources: inbox.request?.resources ?? [], inbox,
-        config: effective, state: 'queued', events: [], turn: claim.turn, scopeId, epoch: group.epoch ?? 0,
+        config: effective, state: 'queued', events: [], turn: claim.turn, scopeId, epoch: group.epoch ?? 0, recovered: true,
         ...(inbox.redispatch ? { redispatch: inbox.redispatch } : {}), ...(materialPrompt ? { retryMaterialPrompt: materialPrompt } : {}) };
       this.tasks.delete(task.id);
       this.tasks.set(task.id, task);
