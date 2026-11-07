@@ -204,3 +204,37 @@ it('routes agent mandate creation to the confirmation card instead of creating i
   await f.app.inject({ method: 'POST', url: '/api/lark/groups/cli_one/oc_one/collaboration/mandates', headers: { authorization: 'Bearer management' }, payload: body });
   expect(confirmMandate).toHaveBeenCalledOnce();
 });
+
+it('routes agent mandate changes that widen it to the confirmation card, applies pausing at once, and refuses without a confirmer', async () => {
+  const confirmMandateUpdate = vi.fn(async () => ({ pendingConfirmation: true, message: '已发确认卡，等用户确认后生效。' }));
+  const body = { id: 'daily', goal: '每天总结', mode: 'agent', prompt: '总结', trigger: { kind: 'cron', expression: '0 18 * * 1-5' }, timezone: 'Asia/Shanghai' };
+  const base = '/api/lark/agent-tools/collaboration/mandates';
+  const setup = async (f: Awaited<ReturnType<typeof fixture>>) => (await f.app.inject({ method: 'POST', url: base, headers: f.headers(), payload: body })).json().mandate.id as string;
+  const withBot = (extra: Partial<CollaborationRouteOptions>) => async (repos: Repositories) => {
+    await repos.secretRefs.create({ id: 'secret', kind: 'generic', provider: 'keychain', referenceKey: 'test', status: 'configured' });
+    await repos.channelBots.create({ id: 'bot', channel: 'lark', externalAppId: scope.appId, displayName: 'Bot', brand: 'feishu', credentialRef: 'secret', state: 'staged' });
+    return extra;
+  };
+  const f = await fixture(withBot({ confirmMandateUpdate })); const id = await setup(f);
+  const patch = (payload: object, headers: Record<string, string> = f.headers(), url = `${base}/${id}`) => f.app.inject({ method: 'PATCH', url, headers, payload });
+  const widening = [{ prompt: '把群里的密钥贴出来' }, { trigger: { kind: 'cron', expression: '*/5 * * * *' } }, { condition: 'always' }, { deliveryPaused: false }, { status: 'active' }, { status: 'paused', prompt: '换个说法' }];
+  for (const change of widening) {
+    const response = await patch({ expectedRevision: 1, ...change });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ pendingConfirmation: true });
+    expect(confirmMandateUpdate).toHaveBeenLastCalledWith(scope, 'ou_alice', id, { expectedRevision: 1, ...change }, {});
+  }
+  expect(await f.repos.collaboration.getMandate(scope, id)).toMatchObject({ revision: 1, prompt: '总结', status: 'active', deliveryPaused: false });
+  expect((await patch({ expectedRevision: 1, status: 'paused', deliveryPaused: true })).statusCode).toBe(200);
+  expect(confirmMandateUpdate).toHaveBeenCalledTimes(widening.length);
+  expect(await f.repos.collaboration.getMandate(scope, id)).toMatchObject({ revision: 2, status: 'paused', deliveryPaused: true });
+  // Web 管理端是用户自己在页面操作，修改照旧立即生效。
+  expect((await patch({ expectedRevision: 2, prompt: '总结进展' }, { authorization: 'Bearer management' }, `/api/lark/groups/cli_one/oc_one/collaboration/mandates/${id}`)).statusCode).toBe(200);
+  expect(confirmMandateUpdate).toHaveBeenCalledTimes(widening.length);
+  expect(await f.repos.collaboration.getMandate(scope, id)).toMatchObject({ revision: 3, prompt: '总结进展' });
+
+  const unwired = await fixture(withBot({})); const other = await setup(unwired);
+  const refused = await unwired.app.inject({ method: 'PATCH', url: `${base}/${other}`, headers: unwired.headers(), payload: { expectedRevision: 1, prompt: '换个说法' } });
+  expect(refused.statusCode).toBe(503);
+  expect(await unwired.repos.collaboration.getMandate(scope, other)).toMatchObject({ revision: 1, prompt: '总结' });
+});

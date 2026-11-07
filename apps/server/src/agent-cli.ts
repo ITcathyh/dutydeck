@@ -169,7 +169,7 @@ const operations: Record<string, Operation> = {
   'collaborate.followup-create': collaborate('POST', () => '/followups', 'write', true),
   'collaborate.followup-update': collaborate('PATCH', ([recordId]) => `/followups/${id(recordId)}`),
   'collaborate.mandate-create': collaborate('POST', () => '/mandates', 'write-confirm', true),
-  'collaborate.mandate-update': collaborate('PATCH', ([recordId]) => `/mandates/${id(recordId)}`),
+  'collaborate.mandate-update': collaborate('PATCH', ([recordId]) => `/mandates/${id(recordId)}`, 'write-confirm'),
   'collaborate.feedback': collaborate('POST', ([decisionId]) => `/decisions/${id(decisionId)}/feedback`)
 };
 
@@ -414,7 +414,7 @@ export function addAgentCommands(program: Command, run: AgentCliRunner) {
   jsonOptions(sub(collaboration, 'followup-create', 'Record a follow-up', 'collaborate.followup-create', 'write', [`collaborate followup-create --json '{"id":"本轮稳定请求键","goal":"跟进目标"}'`]));
   jsonOptions(sub(collaboration, 'followup-update', 'Update a follow-up', 'collaborate.followup-update', 'write', [`collaborate followup-update <编号> --json '{"expectedRevision":1,"progress":"新进展"}'`])).argument('<id>', 'Follow-up id');
   jsonOptions(sub(collaboration, 'mandate-create', 'Propose an ongoing mandate; it is created after the user confirms on the card', 'collaborate.mandate-create', 'write-confirm', ['collaborate mandate-create --file mandate.json']));
-  jsonOptions(sub(collaboration, 'mandate-update', 'Change, pause or cancel a mandate', 'collaborate.mandate-update', 'write', [`collaborate mandate-update <编号> --json '{"expectedRevision":1,"status":"paused"}'`])).argument('<id>', 'Mandate id');
+  jsonOptions(sub(collaboration, 'mandate-update', 'Change, pause or cancel a mandate; pausing or cancelling applies at once, other changes after the user confirms on the card', 'collaborate.mandate-update', 'write-confirm', [`collaborate mandate-update <编号> --json '{"expectedRevision":1,"status":"paused"}'`])).argument('<id>', 'Mandate id');
   jsonOptions(sub(collaboration, 'feedback', 'Record a correction to a decision', 'collaborate.feedback', 'write', [`collaborate feedback <决策编号> --json '{"correction":"用户修订"}'`])).argument('<id>', 'Decision id');
   return agent;
 }
