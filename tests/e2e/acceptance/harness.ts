@@ -214,7 +214,9 @@ export async function launchIsolatedTestServer(
     }
 
     // 初始化真实 Git 源码仓库，包含 baseline 提交
-    const git = (args: string[]) => execFileSync('git', ['-C', sourceRepo, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    // 去掉继承来的 GIT_*（git bisect run、hook 里会带 GIT_DIR），否则 init/commit 会落到外层开发仓库。
+    const gitEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
+    const git = (args: string[]) => execFileSync('git', ['-C', sourceRepo, ...args], { encoding: 'utf8', env: gitEnv, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
     git(['init', '-q']);
     git(['config', 'user.name', 'AcceptanceTest']);
     git(['config', 'user.email', 'acceptance@example.invalid']);
