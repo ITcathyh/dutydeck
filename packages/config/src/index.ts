@@ -125,19 +125,21 @@ export interface PtyAgentContribution {
 const DEFAULT_PTY_CAPABILITIES = { pause: false, resume: true } as const;
 
 // PTY 扫描结果按贡献列表和 CODEX_PATH 缓存：commandExists/cliVersion 都是 spawnSync 重操作，相同配置不重复探测
-// 有命令找不到时不写缓存：CLI 自更新替换可执行文件期间命令会短暂缺失，下次扫描要重新探测
-const scannedPtyAgents = new Map<string, Array<Omit<AgentConfig, 'cwd'>>>();
+// 缓存按贡献逐项记录；命中缓存时只对当时找不到的命令重新查一次 PATH（只是 stat）：
+// CLI 自更新替换可执行文件期间命令会短暂缺失，回来后下次扫描能找到，已找到的不再重复探测版本
+type PtyScanEntry = Omit<AgentConfig, 'cwd'> | undefined;
+const scannedPtyAgents = new Map<string, PtyScanEntry[]>();
+const scanPtyContribution = (contribution: PtyAgentContribution, env: NodeJS.ProcessEnv): PtyScanEntry => {
+  const command = ptyCommand(contribution, env);
+  if (!commandExists(command)) return undefined;
+  return { id: contribution.id, name: contribution.name, command, args: contribution.args ?? [], protocol: 'pty-cli' as const, ...(contribution.adapterId && contribution.adapterId !== contribution.id ? { adapterId: contribution.adapterId } : {}), env: {}, permissionMode: 'ask' as const, timeout: 600, capabilities: contribution.capabilities ?? DEFAULT_PTY_CAPABILITIES, builtin: contribution.builtin ?? true, version: cliVersion(command) };
+};
 const scanPtyAgents = (contributions: PtyAgentContribution[], env: NodeJS.ProcessEnv): Array<Omit<AgentConfig, 'cwd'>> => {
   const cacheKey = JSON.stringify([contributions, env.CODEX_PATH]);
   const cached = scannedPtyAgents.get(cacheKey);
-  if (cached) return cached;
-  const agents = contributions.flatMap(contribution => {
-    const command = ptyCommand(contribution, env);
-    if (!commandExists(command)) return [];
-    return [{ id: contribution.id, name: contribution.name, command, args: contribution.args ?? [], protocol: 'pty-cli' as const, ...(contribution.adapterId && contribution.adapterId !== contribution.id ? { adapterId: contribution.adapterId } : {}), env: {}, permissionMode: 'ask' as const, timeout: 600, capabilities: contribution.capabilities ?? DEFAULT_PTY_CAPABILITIES, builtin: contribution.builtin ?? true, version: cliVersion(command) }];
-  });
-  if (agents.length === contributions.length) scannedPtyAgents.set(cacheKey, agents);
-  return agents;
+  const entries = contributions.map((contribution, index) => cached?.[index] ?? scanPtyContribution(contribution, env));
+  scannedPtyAgents.set(cacheKey, entries);
+  return entries.filter((entry): entry is Omit<AgentConfig, 'cwd'> => entry !== undefined);
 };
 
 export const builtinAgents = (cwd = process.cwd(), ptyContributions: PtyAgentContribution[] = [], env: NodeJS.ProcessEnv = process.env): AgentConfig[] => {

@@ -129,6 +129,18 @@ describe('builtinAgents PTY contributions', () => {
       expect(builtinAgents('/tmp/dutydeck-pty-test', [contribution]).find(agent => agent.id === 'swapping')).toMatchObject({ protocol: 'pty-cli', command: contribution.command });
     } finally { mockCommandExists.mockImplementation(original); }
   });
+
+  it('keeps the commands it found cached while another contribution is missing', () => {
+    const found: PtyAgentContribution = { id: 'partial-found', name: 'Found', command: process.execPath };
+    const missing: PtyAgentContribution = { id: 'partial-missing', name: 'Missing', command: '/bin/partial-missing-cli' };
+    mockCommandExists.mockClear();
+    builtinAgents('/tmp/dutydeck-pty-test', [found, missing]);
+    const agents = builtinAgents('/tmp/dutydeck-pty-test', [found, missing]);
+    expect(agents.filter(agent => agent.protocol === 'pty-cli').map(agent => agent.id)).toEqual(['partial-found']);
+    const calls = (command: string) => mockCommandExists.mock.calls.filter(([probed]) => probed === command).length;
+    expect(calls(found.command)).toBe(1);
+    expect(calls(missing.command)).toBe(2);
+  });
 });
 
 describe('loadConfig PTY contribution passthrough', () => {
