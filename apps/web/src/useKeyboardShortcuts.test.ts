@@ -348,6 +348,31 @@ describe('useKeyboardShortcuts', () => {
     expect(create).toHaveBeenCalledTimes(1);
   });
 
+  it('页面上有模态弹窗时整套快捷键让位，焦点在弹窗按钮或勾选框上也不触发', () => {
+    const interrupt = vi.fn();
+    const goTaskCenter = vi.fn();
+    const viewAttention = vi.fn();
+    renderShortcuts({ handlers: { 'interrupt-run': interrupt, 'go-task-center': goTaskCenter, 'view-attention': viewAttention }, options: sessionMac });
+    press('g');
+    const dialog = mountEditable('<div role="dialog" aria-modal="true" aria-label="目标、步骤与成果"><button type="button">关闭</button><input type="checkbox"/></div>');
+    const close = dialog.querySelector('button')!;
+    expect(press('.', { target: close }).defaultPrevented).toBe(false);
+    press('t', { target: close });
+    press('2', { target: dialog.querySelector('input')! });
+    expect(interrupt).not.toHaveBeenCalled();
+    expect(goTaskCenter).not.toHaveBeenCalled();
+    expect(viewAttention).not.toHaveBeenCalled();
+    dialog.parentElement!.remove();
+    mountEditable('<div role="alertdialog" aria-modal="true"><button type="button">取消</button></div>');
+    press('.');
+    expect(interrupt).not.toHaveBeenCalled();
+    document.body.innerHTML = '';
+    // 非模态的 role=dialog（如侧栏）不拦截；弹窗关闭后恢复。
+    mountEditable('<div role="dialog" aria-label="侧栏"></div>');
+    press('.');
+    expect(interrupt).toHaveBeenCalledTimes(1);
+  });
+
   it('enabled 转 false 会清空未完成的和弦缓冲', () => {
     const goTaskCenter = vi.fn();
     const { rerender } = renderShortcuts({ handlers: { 'go-task-center': goTaskCenter }, options: macOptions });

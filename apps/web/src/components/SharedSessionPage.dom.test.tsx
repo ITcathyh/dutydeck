@@ -97,7 +97,7 @@ describe('SharedSessionPage', () => {
   });
 
   it('名称读不到、只剩飞书 ID 时：眉标不写 ID，侧栏中间省略并把全文放进 title，头像用人形图标', async () => {
-    const bot = 'ou_52924837a6481b6915b9433c85eac00e', chat = 'oc_71d458e4cd3ab9da8eb14f81ffbf371e';
+    const bot = 'ou_0123456789abcdef0123456789abcdef', chat = 'oc_fedcba9876543210fedcba9876543210';
     vi.spyOn(api, 'session').mockResolvedValue({ ...session, sourceContext: {
       channel: 'lark', originAvailable: true,
       chat: { id: chat, name: chat, type: 'group', url: `https://applink.feishu.cn/client/chat/open?openChatId=${chat}` },
@@ -108,8 +108,8 @@ describe('SharedSessionPage', () => {
     const { container } = renderPage();
     await screen.findByLabelText('会话来源');
     expect(container.querySelector('.share-eyebrow')?.textContent).toBe('提问机器人发起');
-    expect(screen.getByText('ou_5292…c00e（机器人）').closest('[title]')?.getAttribute('title')).toBe(bot);
-    expect(screen.getByText('oc_71d4…371e').closest('[title]')?.getAttribute('title')).toBe(chat);
+    expect(screen.getByText('ou_0123…cdef（机器人）').closest('[title]')?.getAttribute('title')).toBe(bot);
+    expect(screen.getByText('oc_fedc…3210').closest('[title]')?.getAttribute('title')).toBe(chat);
     expect(screen.getByRole('link', { name: '群聊' }).getAttribute('title')).toBe(chat);
     expect(container.querySelector('.share-avatar svg')).toBeTruthy();
     expect(document.body.textContent).not.toContain(bot);
@@ -444,7 +444,7 @@ describe('分享页结论呈现', () => {
   });
 
   it('完整记录里的工具卡标题用缩写的命令，悬停仍是原文；工作台的工具卡不变', async () => {
-    const cmd = "cat '/data00/home/someone/.agents/skills/lark-im/SKILL.md'";
+    const cmd = "cat '/home/user/.agents/skills/lark-im/SKILL.md'";
     vi.spyOn(api, 'session').mockResolvedValue({ ...session, state: 'idle' });
     vi.spyOn(api, 'tasks').mockResolvedValue([{ ...tasks[0]!, prompt: '查数据', status: 'completed' }]);
     vi.spyOn(api, 'events').mockResolvedValue([
