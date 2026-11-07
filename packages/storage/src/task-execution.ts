@@ -107,7 +107,8 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     if (known?.stored === stored) return JSON.parse(known.validated) as DriverResource;
     const value = validateResource(JSON.parse(stored));
     if (validatedResources.size >= 4096) validatedResources.clear();
-    validatedResources.set(resourceId, { stored, validated: json(value) });
+    const validated = json(value);
+    validatedResources.set(resourceId, { stored, validated: validated === stored ? stored : validated });
     return value;
   };
   const resourceById = cached('SELECT id,json FROM driver_resources WHERE id=?');

@@ -64,7 +64,9 @@ export function asciiSource(text, file = 'bundle.js') {
     if (!range) throw new Error(`${where(index)}: non-ASCII character outside a comment or literal`);
     const [start, end, kind] = range;
     if (kind === 'comment') {
-      output += text.slice(copied, index) + '?'; copied = index + 1;
+      // U+2028/2029 are line terminators: inside a block comment they can trigger semicolon insertion.
+      const code = text.charCodeAt(index);
+      output += text.slice(copied, index) + (code === 0x2028 || code === 0x2029 ? '\n' : '?'); copied = index + 1;
       continue;
     }
     if (kind !== 'regexp') throw new Error(`${where(index)}: non-ASCII character in a ${kind} literal; esbuild should have escaped it`);

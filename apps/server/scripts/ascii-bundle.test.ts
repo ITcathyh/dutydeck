@@ -34,6 +34,11 @@ describe('asciiSource', () => {
     expect(run(asciiSource('return /(?<=中)a/.test("\\u4e2da");'))).toBe(true);
   });
 
+  it('keeps line terminators inside block comments', () => {
+    const code = 'return (function () { return /* \u2028 */ 1 })();';
+    expect(run(asciiSource(code))).toBe(run(code));
+  });
+
   it('leaves ASCII input untouched', () => {
     const code = 'const a = /x/; // plain\n';
     expect(asciiSource(code)).toBe(code);
