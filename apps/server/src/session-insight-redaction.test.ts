@@ -15,7 +15,7 @@ import {
 const GOLDEN_PATH = fileURLToPath(
   new URL('../../../tests/fixtures/session-insight/golden/analyze-result.golden.json', import.meta.url)
 );
-const PRIVATE_ROOT = '/home/huangyuhang.edu/.dutydeck/private-data';
+const PRIVATE_ROOT = '/home/example-user/.dutydeck/private-data';
 const context: RedactionContext = { canaryPaths: [PRIVATE_ROOT] };
 
 function loadGolden(): AnalyzeFilesResult {
@@ -87,7 +87,7 @@ describe('redactText 凭据与路径脱敏', () => {
     const text = `workspace ${PRIVATE_ROOT}/logs/a.jsonl and /tmp/public.txt`;
     const out = redactText(text, context);
     expect(out).not.toContain(PRIVATE_ROOT);
-    expect(out).not.toContain('huangyuhang');
+    expect(out).not.toContain('example-user');
     expect(out).toContain('/tmp/public.txt');
   });
 
