@@ -801,6 +801,9 @@ describe('lark.memory', () => {
     expect(check.detail).toContain('MEMORY_RECOVERY_REQUIRED（记忆会话需要恢复）');
     expect(check.detail).not.toContain('oc_private');
     expect(check.remedy).toContain('/memory consolidate');
+    // 不用记命令：在群里说一句话就会在下一轮结束后自动补跑；日志关键字与 memory-pipeline 实际写的一致。
+    expect(check.remedy).toContain('在对应群里 @ 机器人说任意一句，下一轮结束后会自动补跑提取');
+    expect(check.remedy).toContain('记忆作业等待恢复或退避');
     expect(JSON.stringify(check)).not.toMatch(/ou_sender_|om_source_|ses_fixture|task_0/);
   });
 

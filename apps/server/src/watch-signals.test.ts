@@ -126,7 +126,8 @@ describe('watch existing health signals', () => {
   });
   it('reuses doctor memory backlog criteria, skipping manual extraction and migrated pools', async () => {
     const h=fixture(); h.values.set('lark.memory.state.cli_test.groups',JSON.stringify({v:1,pendingTurns:Array.from({length:20},()=>({senderKind:'human'}))}));
-    expect((await h.collect())[0]?.signals.some(f=>f.kind==='memory_stalled')).toBe(true);
+    const stalled = (await h.collect())[0]?.signals.find(f=>f.kind==='memory_stalled');
+    expect(stalled?.location).toBe('在对应群里 @ 机器人（会自动补跑），或让它整理记忆');
     expect((await h.collect([{...bot,memoryAutoExtract:false}]))[0]?.signals).toEqual([]);
     h.values.set('lark.memory.state.cli_test.groups',JSON.stringify({migratedTo:'other',pendingTurns:Array.from({length:20},()=>({senderKind:'human'}))}));
     expect((await h.collect())[0]?.signals).toEqual([]);
