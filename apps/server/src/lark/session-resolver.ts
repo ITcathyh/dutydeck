@@ -3,6 +3,7 @@ import { larkAgentUnavailableReason } from './agent-fallback.js';
 import { larkReliability } from './task-recovery.js';
 import { larkMessageAnchor } from './message-anchor.js';
 import { createHash, randomUUID } from 'node:crypto';
+import { realpathSync } from 'node:fs';
 import { lstat, mkdir, mkdtemp, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, extname, join, resolve } from 'node:path';
 import { escapeRegExp, supportsRemoteApproval, type ChannelMappingRepository, type Session } from '@dutydeck/shared';
@@ -314,6 +315,19 @@ export async function resolveLarkScopeId(
   }
 }
 
+/** 路径不存在或读不到时退回 resolve 的结果，不抛错。 */
+export const comparableWorkspace = (path: string) => {
+  const resolved = resolve(path);
+  try { return realpathSync(resolved); } catch { return resolved; }
+};
+
+/**
+ * 会话记下的工作区与机器人配置的工作区是否是同一个目录。
+ * 原样相等先直接算匹配，只在不等时才把两侧都规范化，所以只会比原样比较多匹配、不会少匹配。
+ */
+export const sameWorkspace = (stored: string, configured: string) =>
+  stored === configured || comparableWorkspace(stored) === comparableWorkspace(configured);
+
 /**
  * 一条持久化会话是否属于「当前 App + 聊天 + scope」。
  *
@@ -326,7 +340,7 @@ export const larkSessionMatchesScope = (session: Session, config: StoredLarkConf
   && session.sourceId === sourceId
   && (session.id === launchSessionId || config.managedGroup || session.agentId === config.defaultAgentId)
   && !session.archivedAt
-  && (session.id === launchSessionId || config.managedGroup || !config.workspace || (session.workspaceSourceCwd ?? session.cwd) === config.workspace)
+  && (session.id === launchSessionId || config.managedGroup || !config.workspace || sameWorkspace(session.workspaceSourceCwd ?? session.cwd, config.workspace))
   && (session.id === launchSessionId || config.managedGroup || !config.defaultModel || session.model === config.defaultModel)
   && Boolean(session.id === launchSessionId || config.managedGroup || !config.defaultReasoningEffort || session.reasoningEffort === config.defaultReasoningEffort);
 

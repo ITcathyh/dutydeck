@@ -49,7 +49,7 @@ const mentioning = (id: string, text: string, member: { openId?: string; name: s
     { key: '@_user_2', name: member.name, ...(member.openId ? { openId: member.openId } : {}), mentionedType: 'user' }
   ] });
 
-async function harness(options: { native?: boolean; answer?: boolean; managedGroup?: boolean; configPatch?: Partial<StoredLarkConfig>; steer?: AgentDriver['steer']; hold?: (prompt: string) => Promise<void> | undefined; reportIdle?: boolean; switching?: { model?: boolean; effort?: boolean } } = {}) {
+async function harness(options: { native?: boolean; answer?: boolean; managedGroup?: boolean; configPatch?: Partial<StoredLarkConfig>; steer?: AgentDriver['steer']; hold?: (prompt: string) => Promise<void> | undefined; reportIdle?: boolean; switching?: { model?: boolean; effort?: boolean }; workspaceRoot?: string } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-commands-'));
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   let release: (() => void) | undefined;
@@ -59,6 +59,7 @@ async function harness(options: { native?: boolean; answer?: boolean; managedGro
   const switched: string[] = [];
   const runtime = new DutydeckRuntime(repos, {
     matterTracking: new MattersService(repos),
+    ...(options.workspaceRoot ? { workspaceRoot: options.workspaceRoot } : {}),
     probe: () => ({ protocol: options.native ? 'pty-cli' : 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit, _exit, _id, context) => {
       forks.push(context.nativeForkSessionId);
@@ -198,6 +199,24 @@ describe('/status 写明以谁的身份执行', () => {
     expect(text).toContain('执行身份');
     expect(text).toContain(userInfo().username);
     expect(text).toContain('凭据');
+  });
+
+  it('独立 worktree 会话写明基于哪个工作区，不把 worktree 目录当成和配置不一致', async () => {
+    const worktrees = await mkdtemp(join(tmpdir(), 'dutydeck-lark-worktrees-'));
+    cleanups.push(() => rm(worktrees, { recursive: true, force: true }));
+    const h = await harness({ workspaceRoot: worktrees });
+    execFileSync('git', ['init', '-q', h.cwd]);
+    execFileSync('git', ['-C', h.cwd, '-c', 'user.name=Test', '-c', 'user.email=test@example.test', 'commit', '--allow-empty', '-qm', 'initial']);
+    await h.coordinator.handle(event('om_task', '/new --workspace worktree -- 独立任务'), h.config);
+    // 新建 worktree 要跑 git，比普通任务入队慢。
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(await h.sessionId())).some(task => task.prompt.includes('独立任务'))).toBe(true), { timeout: 10_000 });
+    const session = (await h.runtime.getSession(await h.sessionId()))!;
+    expect(session.workspaceMode).toBe('worktree');
+    expect(session.cwd).not.toBe(h.cwd);
+    await h.coordinator.handle(event('om_status', '/status'), h.config);
+    const text = h.markdownOf(h.receiptNamed('任务状态'));
+    expect(text).toContain(`**工作区**：${session.cwd}（独立 worktree，基于 ${h.cwd}）`);
+    expect(text).not.toContain('配置的工作区');
   });
 });
 
