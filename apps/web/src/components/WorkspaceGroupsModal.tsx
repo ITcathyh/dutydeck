@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { sessionWorkspaceDirectory, workspaceName, WORKSPACE_GROUP_NAME_MAX_LENGTH } from '@dutydeck/shared';
 import { api, type RunSummary, type Session, type WorkspaceOrganizationSnapshot } from '../api';
+import { isImeComposing } from '../ime';
 import { sessionDisplayName } from '../run-summary';
 import { Banner, Button, Dialog, IconButton, Input, Select, Spinner } from './primitives';
 import { Trash2, X } from 'lucide-react';
@@ -41,7 +42,7 @@ function GroupRenameRow({ groupId, name, busy, onRename, onDelete }: {
         maxLength={WORKSPACE_GROUP_NAME_MAX_LENGTH}
         disabled={busy}
         onChange={event => setDraft(event.target.value)}
-        onKeyDown={event => { if (event.key === 'Enter' && changed) onRename(groupId, trimmed); }}
+        onKeyDown={event => { if (event.key === 'Enter' && !isImeComposing(event) && changed) onRename(groupId, trimmed); }}
         className="h-9 min-w-0 flex-1"
       />
       <Button size="sm" variant="secondary" disabled={!changed || busy} onClick={() => onRename(groupId, trimmed)}>保存</Button>
@@ -163,7 +164,7 @@ export function WorkspaceGroupsModal({ open, onClose, snapshot, loading, error, 
               maxLength={WORKSPACE_GROUP_NAME_MAX_LENGTH}
               disabled={busy}
               onChange={event => setNewName(event.target.value)}
-              onKeyDown={event => { if (event.key === 'Enter') createGroup(); }}
+              onKeyDown={event => { if (event.key === 'Enter' && !isImeComposing(event)) createGroup(); }}
               className="h-9 min-w-0 flex-1"
             />
             <Button size="sm" variant="secondary" disabled={!newName.trim() || busy} onClick={createGroup}>创建分组</Button>

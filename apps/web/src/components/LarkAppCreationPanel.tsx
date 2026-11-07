@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ExternalLink, QrCode } from 'lucide-react';
 import { api, ApiError, type LarkAppCreationJob } from '../api';
+import { isImeComposing } from '../ime';
 import { currentInstance, instanceHomePath } from '../instance';
 import { requestId } from '../request-id';
 import { Banner, Button, Field, Input, Spinner } from './primitives';
@@ -107,7 +108,7 @@ export function LarkAppCreationPanel({ onCreated, onBusyChange }: {
       <p className="mt-1 text-caption text-secondary">优先使用本机已登录的飞书账号创建应用，自动配置消息权限并发布，再选择执行 Agent。登录失效时会提示扫码。</p>
     </div>
     {!request ? <>
-      <Field label="新机器人名称"><Input name="newAppName" value={name} maxLength={50} onChange={event => setName(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.nativeEvent.isComposing && event.keyCode !== 229) { event.preventDefault(); if (name.trim()) create(); } }} placeholder="例如：研发助手"/></Field>
+      <Field label="新机器人名称"><Input name="newAppName" value={name} maxLength={50} onChange={event => setName(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !isImeComposing(event)) { event.preventDefault(); if (name.trim()) create(); } }} placeholder="例如：研发助手"/></Field>
       <label className="flex items-center gap-2 text-caption text-secondary"><input type="checkbox" checked={forceLogin} onChange={event => setForceLogin(event.target.checked)}/>使用其他账号，重新扫码登录</label>
       <Button variant="primary" icon={<QrCode size={15}/>} disabled={!name.trim()} onClick={create}>创建机器人</Button>
     </> : <>

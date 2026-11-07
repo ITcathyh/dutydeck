@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { MemberNameTagInput } from './MemberNameTagInput';
@@ -17,6 +17,17 @@ describe('MemberNameTagInput 提交分隔符', () => {
     const user = userEvent.setup({ delay: null });
     const { onChange, input } = setup();
     await user.type(input, '张三{Enter}');
+    expect(onChange).toHaveBeenCalledWith(['张三']);
+  });
+
+  it('输入法组字中的回车（含 Safari 确认候选词时的 keyCode 229）不提交，组字结束后的回车才提交', () => {
+    const { onChange, input } = setup();
+    fireEvent.change(input, { target: { value: '张三' } });
+    fireEvent.keyDown(input, { key: 'Enter', isComposing: true });
+    fireEvent.keyDown(input, { key: 'Enter', keyCode: 229 });
+    expect(onChange).not.toHaveBeenCalled();
+    expect((input as HTMLInputElement).value).toBe('张三');
+    fireEvent.keyDown(input, { key: 'Enter' });
     expect(onChange).toHaveBeenCalledWith(['张三']);
   });
 

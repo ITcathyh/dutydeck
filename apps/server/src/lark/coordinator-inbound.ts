@@ -58,7 +58,7 @@ import { claimLarkTaskDispatches, larkTaskAgentAllowlistConfigured, larkTaskAgen
 import { buildRepairConfirmCard, parseRepairCardActionValue, renderRepairResultCard, runOpenPlatformRepair } from './repair.js';
 import { buildPullRequestConfirmCard, buildPullRequestFollowCard } from './pull-request-card.js';
 import { connectLarkOpenPlatformSession } from './open-platform-session.js';
-import { findLarkThreadContinuation, listPersistedLarkSessions, larkSessionMatchesScope, larkSourceId, larkGroupKey, larkSessionConfigKey, parsePrompt, resolveLarkScopeId } from './session-resolver.js';
+import { findLarkThreadContinuation, listPersistedLarkSessions, larkSessionMatchesScope, larkSourceId, larkGroupKey, larkSessionConfigKey, parsePrompt, resolveLarkScopeId, sameWorkspace } from './session-resolver.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkGroup, LarkTask, PersistedLarkCardTask } from './coordinator.js';
 import { parseCardTask, parseOptionalCardTask } from './persisted-card-task.js';
@@ -2359,10 +2359,13 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       lines.push(`**配置的 Agent**：${larkCommandEcho(configuredAgent, 64)}（下一个新会话生效）`);
     }
     const workspace = session?.cwd ?? config.workspace;
-    if (workspace) lines.push(`**工作区**：${larkCommandEcho(workspace, 160)}`);
+    const worktree = session?.workspaceMode === 'worktree';
+    const worktreeSource = worktree && session?.workspaceSourceCwd ? `，基于 ${larkCommandEcho(session.workspaceSourceCwd, 160)}` : '';
+    if (workspace) lines.push(`**工作区**：${larkCommandEcho(workspace, 160)}${worktree ? `（独立 worktree${worktreeSource}）` : ''}`);
     if (session?.model) lines.push(`**模型**：${larkCommandEcho(session.model, 128)}`);
     if (session?.reasoningEffort) lines.push(`**推理强度**：${larkCommandEcho(session.reasoningEffort, 32)}`);
-    if (session && config.workspace && session.cwd !== config.workspace) {
+    // worktree 会话的 cwd 是另建的目录，和配置比较只会误报。
+    if (session && !worktree && config.workspace && !sameWorkspace(session.cwd, config.workspace)) {
       lines.push(`**配置的工作区**：${larkCommandEcho(config.workspace, 160)}（下一个新会话生效）`);
     }
     lines.push(`**会话**：\`${larkCommandEcho(sessionId, 64)}\``);
