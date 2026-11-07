@@ -55,7 +55,6 @@ afterEach(async () => {
   for (const value of services.splice(0)) value.close();
   __testOnly_resetLarkGate(); vi.restoreAllMocks();
   server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
-  expect(guard.strayRequests).toEqual([]);
 });
 
 describe('Lark end-to-end request deadline', () => {

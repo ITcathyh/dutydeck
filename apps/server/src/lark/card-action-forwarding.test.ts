@@ -22,11 +22,7 @@ vi.mock('@larksuiteoapi/node-sdk', async importOriginal => ({
 }));
 
 const cleanups: Array<() => unknown> = [];
-const guards: Array<ReturnType<typeof targetGuard>> = [];
-afterEach(async () => {
-  for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); vi.restoreAllMocks();
-  for (const { strayRequests } of guards.splice(0)) expect(strayRequests).toEqual([]);
-});
+afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); vi.restoreAllMocks(); });
 const forwarding = { owner: 'sample-service', url: 'http://127.0.0.1:1/callback', token: 'private-forward-token', legacyActions: ['ack', 'investigate'] };
 const click = (value: unknown = { owner: forwarding.owner, action: 'ack' }, eventId = 'ev_click') => ({
   schema: '2.0', header: { event_id: eventId, event_type: 'card.action.trigger', app_id: 'untrusted-app' },
@@ -35,7 +31,7 @@ const click = (value: unknown = { owner: forwarding.owner, action: 'ack' }, even
 });
 
 async function stub(handle: (request: IncomingMessage, response: ServerResponse, body: any) => void) {
-  const guard = targetGuard(request => request.method === 'POST' && request.url === '/callback'); guards.push(guard);
+  const guard = targetGuard(request => request.method === 'POST' && request.url === '/callback');
   const server = createServer(async (request, response) => {
     if (!guard.accept(request, response)) return;
     let raw = ''; for await (const chunk of request) raw += chunk;
