@@ -625,6 +625,9 @@ describe('Dutydeck 开机自启', () => {
 
     const unit = autostartUnitContent(options('linux', commandLog(), nasty));
     expect(unit).toContain('ExecStart="/opt/no de/bin/node" /opt/a&b/<cli>.js start');
+    // Environment=PATH= 不加引号，带空格的 node 目录会被 systemd 拆开，所以不追加；plist 里照常追加。
+    expect(/^Environment=PATH=(.*)$/m.exec(unit)?.[1]).not.toContain('no de');
+    expect(plist).toContain(':/opt/no de/bin</string>');
   });
 
   it('autostartUnitContent 与实际写入磁盘的内容完全一致', async () => {
@@ -653,7 +656,7 @@ describe('Dutydeck 开机自启', () => {
     expect(result.notices.some(notice => notice.includes('启动路径已变'))).toBe(false);
     const mentionsEnable = result.notices.filter(notice => notice.includes('autostart enable'));
     expect(mentionsEnable).toHaveLength(1);
-    expect(mentionsEnable[0]).toContain(`当前 shell 的 PATH 里有 ${kind} 没有的目录`);
+    expect(mentionsEnable[0]).toContain(`${kind} 的 PATH 缺少当前 shell PATH 或 node 所在的目录`);
     expect(mentionsEnable[0]).toContain(`${kind} 里已有且仍存在的目录会保留`);
   });
 

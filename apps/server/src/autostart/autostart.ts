@@ -459,23 +459,26 @@ function onDiskPath(config: ResolvedAutostart, content: string): string | undefi
 
 /**
  * 写进 unit / plist 的 PATH：调用者的 PATH 按原顺序在前，磁盘上已有 PATH 里多出来且目录仍存在的项追加在后，
- * 去重时保留第一次出现的位置，`execDir` 不在其中时追加到末尾。从 Agent 会话、cron 或 ssh 这类较窄的环境重跑
+ * 去重时保留第一次出现的位置，`execDir`（给了的话）不在其中时追加到末尾。从 Agent 会话、cron 或 ssh 这类较窄的环境重跑
  * enable 时，PATH 只增不减，开机拉起的服务仍能找到 node。含 `/tmp/arg0/` 的是 Agent 会话期的临时目录，两侧都丢掉。
  */
-export function mergeAutostartPath(callerPath: string, diskPath: string | undefined, execDir: string, exists: (dir: string) => boolean): string {
+export function mergeAutostartPath(callerPath: string, diskPath: string | undefined, execDir: string | undefined, exists: (dir: string) => boolean): string {
   const durable = (dir: string) => dir !== '' && !dir.includes('/tmp/arg0/');
   const merged = new Set(callerPath.split(':').filter(durable));
   for (const dir of (diskPath ?? '').split(':').filter(durable)) {
     if (!merged.has(dir) && exists(dir)) merged.add(dir);
   }
-  merged.add(execDir);
+  if (execDir) merged.add(execDir);
   return [...merged].join(':');
 }
 
 /** PATH 与磁盘上已有的合并后的配置，enable 写入、status 比较都按它来。 */
 function withMergedPath(config: ResolvedAutostart, onDisk: string | undefined): ResolvedAutostart {
   const existing = onDisk === undefined ? undefined : onDiskPath(config, onDisk);
-  return { ...config, pathEnv: mergeAutostartPath(config.pathEnv, existing, dirname(config.execPath), config.dirExists) };
+  // unit 的 Environment=PATH= 不加引号，带空白的目录会被 systemd 拆开；这种 node 目录不追加。
+  const execDir = dirname(config.execPath);
+  const appendable = config.platform === 'linux' && /\s/.test(execDir) ? undefined : execDir;
+  return { ...config, pathEnv: mergeAutostartPath(config.pathEnv, existing, appendable, config.dirExists) };
 }
 
 /**
@@ -646,7 +649,7 @@ function statusNotices(state: AutostartState, config: ResolvedAutostart): string
   }
   if (state.pathDiffers) {
     const kind = state.platform === 'darwin' ? 'plist' : 'unit';
-    notices.push(`当前 shell 的 PATH 里有 ${kind} 没有的目录，不影响启动。重跑 dutydeck autostart enable 会把它们并进去，${kind} 里已有且仍存在的目录会保留。`);
+    notices.push(`${kind} 的 PATH 缺少当前 shell PATH 或 node 所在的目录，不影响启动。重跑 dutydeck autostart enable 会把它们并进去，${kind} 里已有且仍存在的目录会保留。`);
   }
   if (state.platform === 'linux' && state.enabled && state.lingerEnabled === false) {
     notices.push(lingerNotice(config));

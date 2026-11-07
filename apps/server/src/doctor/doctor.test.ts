@@ -1284,7 +1284,7 @@ describe('开机自启 PATH', () => {
     }));
     const check = find(report, 'autostart.path')!;
     expect(check.level).toBe('info');
-    expect(check.detail).toContain('当前 shell 的 PATH 里有 unit 没有的目录');
+    expect(check.detail).toContain('unit 的 PATH 缺少当前 shell PATH 或 node 所在的目录');
     expect(check.detail).toContain('unit 里已有且仍存在的目录会保留');
     expect(check.command).toBeUndefined();
     expect(find(report, 'autostart.stale')).toBeUndefined();

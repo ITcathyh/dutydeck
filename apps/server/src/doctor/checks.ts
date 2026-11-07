@@ -999,13 +999,13 @@ export function checkAutostart(result: DoctorAutostartResult | undefined, userna
     });
   }
   if (state.pathDiffers) {
-    // 只是提示，不算漂移：重跑 enable 只会把当前 shell 多出来的目录并进去，不会去掉 unit 里已有且仍存在的目录。
+    // 只是提示，不算漂移：重跑 enable 只会把缺少的目录并进去，不会去掉 unit 里已有且仍存在的目录。
     const kind = state.platform === 'darwin' ? 'plist' : 'unit';
     checks.push({
       id: 'autostart.path',
       label: '开机自启 PATH',
       level: 'info',
-      detail: `当前 shell 的 PATH 里有 ${kind} 没有的目录，不影响启动；重跑 dutydeck autostart enable 会把它们并进去，${kind} 里已有且仍存在的目录会保留`
+      detail: `${kind} 的 PATH 缺少当前 shell PATH 或 node 所在的目录，不影响启动；重跑 dutydeck autostart enable 会把它们并进去，${kind} 里已有且仍存在的目录会保留`
     });
   }
   if (state.platform === 'linux' && state.lingerEnabled === false) {
