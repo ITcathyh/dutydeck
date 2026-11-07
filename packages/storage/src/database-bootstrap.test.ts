@@ -129,7 +129,7 @@ describe('atomic new database authority', () => {
     const current = open(path, {}); inspect(path, db => db.prepare('DELETE FROM schema_migrations WHERE version=18').run());
     expect(() => createRepositories(path, ledger)).toThrow(/DATABASE_UPGRADE_BUSY/);
     expect(current.execution.authority()).toBe('legacy');
-    inspect(path, db => db.prepare('INSERT INTO schema_migrations VALUES (18, ?)').run('2026-09-14T00:00:00.000Z'));
+    inspect(path, db => db.prepare("INSERT INTO schema_migrations (version, applied_at, name) VALUES (18, ?, 'task_execution_schema_only')").run('2026-09-14T00:00:00.000Z'));
   });
 
   it.each(['schema', 'marker'])('recovers a real child SIGKILL during %s with no partial business schema', async point => {

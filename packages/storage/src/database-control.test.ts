@@ -169,7 +169,7 @@ it('never upgrades on request and rejects incompatible control or future busines
   raw.prepare('UPDATE dutydeck_control SET protocol = 999').run();
   expect(() => createRepositories(path)).toThrow('DATABASE_CONTROL_VERSION_UNSUPPORTED');
   raw.prepare('UPDATE dutydeck_control SET protocol = 1').run();
-  raw.prepare('INSERT INTO schema_migrations VALUES (999, ?)').run(new Date().toISOString());
+  raw.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (999, ?)').run(new Date().toISOString());
   expect(() => createRepositories(path)).toThrow('DATABASE_SCHEMA_TOO_NEW');
   raw.close();
 });

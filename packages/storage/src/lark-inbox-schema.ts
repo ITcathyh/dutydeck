@@ -12,8 +12,8 @@ export const LARK_INBOX_BODY_EXPIRES = "json_extract(CASE WHEN json_valid(value)
 export const LARK_INBOX_BOT = "(IFNULL(json_extract(CASE WHEN json_valid(value) THEN value ELSE '{}' END,'$.event.senderType'),'') IN ('bot','app'))";
 
 export const LARK_INBOX_V48_INDEXES: readonly string[] = [
-  `CREATE INDEX config_lark_inbox_state ON configs(${LARK_INBOX_STATE},key) WHERE ${LARK_INBOX_SCOPE}`,
-  `CREATE INDEX config_lark_inbox_reason ON configs(${LARK_INBOX_REASON},key) WHERE ${LARK_INBOX_SCOPE}`,
-  `CREATE INDEX config_lark_inbox_ignored ON configs(${LARK_INBOX_APP},${LARK_INBOX_STATE},${LARK_INBOX_BOT},${LARK_INBOX_RECEIVED},key) WHERE ${LARK_INBOX_SCOPE}`,
-  `CREATE INDEX config_lark_inbox_body ON configs(${LARK_INBOX_APP},${LARK_INBOX_BODY_EXPIRES}) WHERE ${LARK_INBOX_SCOPE}`
+  `CREATE INDEX IF NOT EXISTS config_lark_inbox_state ON configs(${LARK_INBOX_STATE},key) WHERE ${LARK_INBOX_SCOPE}`,
+  `CREATE INDEX IF NOT EXISTS config_lark_inbox_reason ON configs(${LARK_INBOX_REASON},key) WHERE ${LARK_INBOX_SCOPE}`,
+  `CREATE INDEX IF NOT EXISTS config_lark_inbox_ignored ON configs(${LARK_INBOX_APP},${LARK_INBOX_STATE},${LARK_INBOX_BOT},${LARK_INBOX_RECEIVED},key) WHERE ${LARK_INBOX_SCOPE}`,
+  `CREATE INDEX IF NOT EXISTS config_lark_inbox_body ON configs(${LARK_INBOX_APP},${LARK_INBOX_BODY_EXPIRES}) WHERE ${LARK_INBOX_SCOPE}`
 ];
