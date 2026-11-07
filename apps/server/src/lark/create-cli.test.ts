@@ -232,7 +232,7 @@ it('does not retry an unknown creation outcome', async () => {
 
 it('reports a live foreign job without claiming completion or starting another run', async () => {
   const h = await harness();
-  await h.context.config.set(`lark.app_creation.${uuid}`, JSON.stringify({ id: uuid, name: 'Bot', status: 'waiting_for_scan', retryable: false, createdAt: 'now', updatedAt: 'now', runner: { pid: process.pid, instanceId: 'foreign' } }));
+  await h.context.config.set(`lark.app_creation.${uuid}`, JSON.stringify({ id: uuid, name: 'Bot', status: 'waiting_for_scan', retryable: false, createdAt: 'now', updatedAt: 'now', runner: { pid: process.ppid, instanceId: 'foreign' } }));
   const result = await runLarkCreate(undefined, { resume: uuid }, h.context);
   expect(result).toMatchObject({ ok: false, job: { status: 'waiting_for_scan' }, next: expect.stringContaining('原进程运行') });
   expect(result.job).not.toHaveProperty('runner');

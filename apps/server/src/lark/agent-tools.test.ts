@@ -1,3 +1,6 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import type { Session } from '@dutydeck/shared';
@@ -631,6 +634,27 @@ describe('Agent group collaboration domain service', () => {
     await tools.send(token, { content: '今日无新增告警' });
     expect(sendKey(3)).not.toBe(sendKey(2));
     expect(sendKey(3)).not.toBe(sendKey(0));
+  });
+
+  it('sends the same file again in a later turn instead of replaying the earlier delivery', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-agent-tools-file-'));
+    try {
+      await writeFile(join(cwd, 'daily.md'), '今日无新增告警');
+      let sequence = 0;
+      const current = fakeClient({
+        uploadFile: vi.fn(async () => 'file_key'),
+        sendFile: vi.fn(async input => ({ messageId: `om_file_${++sequence}`, chatId: input.chatId }))
+      });
+      const active = { taskId: 'task-one', attemptId: 'attempt-one' };
+      const { repos, activeSession, tools, token } = await setup({ cli_current: current }, undefined, undefined, 'oc_group', 'ses_lark', { workbenchTask: () => active });
+      await repos.sessions.save({ ...activeSession, cwd });
+      await expect(tools.sendFile(token, { path: 'daily.md' })).resolves.toMatchObject({ messageId: 'om_file_1', replayed: false });
+      // 同一轮重试仍去重。
+      await expect(tools.sendFile(token, { path: 'daily.md' })).resolves.toMatchObject({ messageId: 'om_file_1', replayed: true });
+      active.taskId = 'task-two'; active.attemptId = 'attempt-one';
+      await expect(tools.sendFile(token, { path: 'daily.md' })).resolves.toMatchObject({ messageId: 'om_file_2', replayed: false });
+      expect(current.sendFile).toHaveBeenCalledTimes(2);
+    } finally { await rm(cwd, { recursive: true, force: true }); }
   });
 
   describe('group messages with time window and query filtering', () => {

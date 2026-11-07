@@ -205,6 +205,8 @@ export interface LarkAgentToolsOptions {
   clientFactory?: (config: StoredLarkConfig) => LarkGroupToolClient;
   pollIntervalMs?: number;
   groupToolsCommand?: string;
+  /** send-file 不能发的实例内部目录（数据库所在的数据目录）。 */
+  artifactPrivatePaths?: readonly string[];
   /** history list/show：只读会话、任务、执行账本和结果卡映射（显式最终答复的路由）。 */
   history?: TaskResultRepositories & { sessions: Pick<SessionRepository, 'list'>; tasks: Pick<TaskRepository, 'listBySession'>; channelMappings: Pick<ChannelMappingRepository, 'list'> };
   /** group team-search；群协作集成尚未就绪时返回 undefined。 */
@@ -433,9 +435,9 @@ function teamSearchLine(item: CollaborationObservation) {
   return { sender: `${item.senderId ?? '未知'}(${item.senderKind})`, body: flat(item.text) };
 }
 
-/** handoff / reply-agent 的正文校验：去首尾空白后非空且不超过 20000 字符。 */
+/** handoff / reply-agent 的正文：与 send 同一套凭据脱敏，去首尾空白后非空且不超过 20000 字符。 */
 function agentMessageContent(value?: string) {
-  const content = value?.trim();
+  const content = typeof value === 'string' ? redactTraceText(value).trim() : undefined;
   if (!content) throw new AgentGroupToolError('INVALID_GROUP_MESSAGE', 'content 不能为空。', 400);
   if (content.length > 20_000) throw new AgentGroupToolError('INVALID_GROUP_MESSAGE', 'content 不能超过 20000 个字符。', 400);
   return content;
@@ -1302,7 +1304,8 @@ export class LarkAgentToolsService {
       sendFile: value => value.replyTo ? this.authorized(context, 'reply', () => client.replyFile!({ messageId: value.replyTo!, replyInThread: value.inThread, fileKey: value.fileKey, idempotencyKey: value.idempotencyKey })) : this.authorized(context, 'send', () => client.sendFile!({ chatId: value.chatId, fileKey: value.fileKey, idempotencyKey: value.idempotencyKey })),
       sendImage: value => value.replyTo ? this.authorized(context, 'reply', () => client.replyImage!({ messageId: value.replyTo!, replyInThread: value.inThread, imageKey: value.imageKey, idempotencyKey: value.idempotencyKey })) : this.authorized(context, 'send', () => client.sendImage!({ chatId: value.chatId, imageKey: value.imageKey, idempotencyKey: value.idempotencyKey }))
     };
-    return deliverArtifact({ configs: this.configs, sessionId: context.sessionId, cwd: session.cwd, client: artifactClient, path, target, image: input.image === true, idempotencyKey: input.idempotencyKey });
+    const turn = this.requestTurn(context.sessionId) ?? this.options.workbenchTask?.(context.sessionId);
+    return deliverArtifact({ configs: this.configs, sessionId: context.sessionId, cwd: session.cwd, client: artifactClient, path, target, image: input.image === true, idempotencyKey: input.idempotencyKey, turn, privatePaths: this.options.artifactPrivatePaths });
   }
 
   private async resolveHandoffScope(token: string | undefined, turn?: string): Promise<{

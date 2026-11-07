@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { AgentRepository, ConfigRepository, LarkAppCreationJob } from '@dutydeck/shared';
+import { currentProcessIdentity, observeProcess, type ProcessIdentity } from '@dutydeck/storage';
 import QRCode from 'qrcode';
 import { LARK_APP_ICON_BASE64 } from './app-icon.js';
 import { readLarkConfig, saveLarkConfig } from './config.js';
@@ -32,11 +33,20 @@ interface Options {
 const key = (id: string) => `lark.app_creation.${id}`;
 const ownerKey = (id: string) => `lark.app_creation_owner.${id}`;
 const canCancel = (job: LarkAppCreationJob) => job.status === 'preparing' || job.status === 'waiting_for_scan';
-interface StoredJob extends LarkAppCreationJob { runner?: { pid: number; instanceId: string } }
+interface Runner { pid: number; instanceId: string; process?: string; identity?: ProcessIdentity; heartbeatAt?: string }
+interface StoredJob extends LarkAppCreationJob { runner?: Runner }
 const isActive = (job: LarkAppCreationJob) => canCancel(job) || job.status === 'creating' || job.status === 'configuring';
+/** 同一进程里的多个管理器共用这个标记，用来认出记录里的执行进程就是本进程。 */
+const processToken = randomUUID();
+// 执行中每 30 秒续一次租约；看不到原执行进程（另一个 PID 命名空间或主机）时，租约 2 分钟没续就判定它已退出。
+const runnerHeartbeatMs = 30_000;
+const runnerLeaseMs = 120_000;
 function processIsAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; }
   catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH'; }
+}
+function ownProcessIdentity(): ProcessIdentity | undefined {
+  try { return currentProcessIdentity(); } catch { return undefined; }
 }
 
 const isUuid = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
@@ -44,12 +54,24 @@ const isUuid = (value: unknown): value is string => typeof value === 'string' &&
 /** Persistent request IDs are tombstones: a lost creation response must never create a second app. */
 export class LarkAppCreationJobManager {
   private readonly jobs = new Map<string, StoredJob>();
-  private readonly runner = { pid: process.pid, instanceId: randomUUID() };
+  private readonly runner = { pid: process.pid, instanceId: randomUUID(), process: processToken, identity: ownProcessIdentity() };
   private readonly runs = new Map<string, Promise<void>>();
   private readonly locks = new Map<string, Promise<unknown>>();
   constructor(private readonly options: Options) {}
 
   private timestamp() { return (this.options.now?.() ?? new Date()).toISOString(); }
+  private claim(): Runner { return { ...this.runner, heartbeatAt: this.timestamp() }; }
+  /** PID 会被复用（容器每次启动拿到同一个 PID），只看 PID 会让任务永远停在进行中。 */
+  private runnerAlive(runner: Runner) {
+    if (runner.process === processToken) return true;
+    if (runner.identity) {
+      const observed = observeProcess(runner.identity);
+      if (observed !== 'unknown') return observed === 'alive';
+    } else if (runner.pid === process.pid || !processIsAlive(runner.pid)) return false;
+    // 旧版本写的记录没有租约，只能沿用 PID 判断。
+    if (!runner.heartbeatAt) return true;
+    return Date.parse(runner.heartbeatAt) + runnerLeaseMs > (this.options.now?.() ?? new Date()).getTime();
+  }
   private async locked<T>(id: string, action: () => Promise<T>): Promise<T> {
     const previous = this.locks.get(id) ?? Promise.resolve();
     const next = previous.catch(() => {}).then(action);
@@ -79,7 +101,7 @@ export class LarkAppCreationJobManager {
       const raw = await this.options.config.get(key(id));
       if (!raw) return undefined;
       const job = JSON.parse(raw) as StoredJob;
-      if (!isActive(job) || (job.runner && processIsAlive(job.runner.pid))) return { job, raw };
+      if (!isActive(job) || (job.runner && this.runnerAlive(job.runner))) return { job, raw };
       const safe = canCancel(job);
       job.status = 'failed';
       job.retryable = safe;
@@ -103,7 +125,7 @@ export class LarkAppCreationJobManager {
     return this.locked(requestId, async () => {
       const existing = await this.load(requestId);
       if (existing) return this.publicJob(existing.job);
-      const job: StoredJob = { id: requestId, name: name.trim(), status: 'preparing', retryable: false, createdAt: this.timestamp(), updatedAt: this.timestamp(), runner: this.runner };
+      const job: StoredJob = { id: requestId, name: name.trim(), status: 'preparing', retryable: false, createdAt: this.timestamp(), updatedAt: this.timestamp(), runner: this.claim() };
       if (!await this.compareAndSet(requestId, undefined, job)) {
         return this.publicJob((await this.load(requestId))!.job);
       }
@@ -132,7 +154,7 @@ export class LarkAppCreationJobManager {
       if (!state) throw new LarkAppCreationError(404, '创建任务不存在');
       const { job, raw } = state;
       if (job.status !== 'failed' || !job.retryable || this.runs.has(id)) throw new LarkAppCreationError(409, '当前任务无法安全重试，请核对飞书开放平台状态');
-      Object.assign(job, { status: 'preparing', retryable: false, updatedAt: this.timestamp(), runner: this.runner });
+      Object.assign(job, { status: 'preparing', retryable: false, updatedAt: this.timestamp(), runner: this.claim() });
       delete job.error;
       delete job.scanConfirmed;
       if (!await this.compareAndSet(id, raw, job)) throw new LarkAppCreationError(409, '任务已被其他服务实例认领，请刷新状态');
@@ -144,8 +166,20 @@ export class LarkAppCreationJobManager {
   async wait(id: string): Promise<void> { await this.runs.get(id); }
   private launch(id: string, options: { forceLogin?: boolean }) {
     // Defer until the caller's state transaction has released its lock.
-    const run = Promise.resolve().then(() => this.run(id, options)).finally(() => this.runs.delete(id));
+    const heartbeat = setInterval(() => { void this.renew(id).catch(() => {}); }, runnerHeartbeatMs);
+    heartbeat.unref?.();
+    const run = Promise.resolve().then(() => this.run(id, options)).finally(() => { clearInterval(heartbeat); this.runs.delete(id); });
     this.runs.set(id, run);
+  }
+  private async renew(id: string) {
+    await this.locked(id, async () => {
+      const raw = await this.options.config.get(key(id));
+      if (!raw) return;
+      const job = JSON.parse(raw) as StoredJob;
+      if (!isActive(job) || job.runner?.instanceId !== this.runner.instanceId) return;
+      job.runner = this.claim();
+      await this.compareAndSet(id, raw, job);
+    });
   }
   private async cancelled(id: string) {
     const raw = await this.options.config.get(key(id));
@@ -163,6 +197,7 @@ export class LarkAppCreationJobManager {
         if (canCancel(job) && qrDataUrl) job.qrDataUrl = qrDataUrl;
         else delete job.qrDataUrl;
         if (!isActive(job)) delete job.runner;
+        else job.runner = this.claim();
         if (await this.compareAndSet(id, raw, job)) {
           this.jobs.set(id, job);
           return true;

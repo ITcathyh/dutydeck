@@ -416,14 +416,16 @@ describe('coordinator：查看详情私信一次性登录链接', () => {
     expect(h.groupMessages()).toBe(groupBefore);
   });
 
-  it('没设成员名单时按安装级门原有口径：能用机器人的人都能拿到链接，且只发给点击人本人', async () => {
+  it('没设操作白名单时与 /repair 同口径：谁点都不发登录链接，并说明怎么配置', async () => {
     const h = await harness({ allowedUsers: [] });
     const { extra } = await h.runTask();
     const value = { action: 'detail', task_id: 'om_task', turn: String(extra.turn) };
     const groupBefore = h.groupMessages();
-    expect(await h.coordinator.handleAction(value, 'ou_bob', { messageId: extra.final_message_id, chatId: 'oc_group' }))
-      .toEqual({ type: 'success', content: '已私信你一个 10 分钟内有效的登录链接' });
-    expect(h.privateMessages()).toMatchObject([{ receiveId: 'ou_bob', receiveIdType: 'open_id' }]);
+    for (const operator of ['ou_alice', 'ou_bob']) {
+      expect(await h.coordinator.handleAction(value, operator, { messageId: extra.final_message_id, chatId: 'oc_group' }))
+        .toMatchObject({ type: 'warning', content: expect.stringContaining('未配置操作白名单') });
+    }
+    expect(h.privateMessages()).toHaveLength(0);
     expect(h.groupMessages()).toBe(groupBefore);
   });
 
