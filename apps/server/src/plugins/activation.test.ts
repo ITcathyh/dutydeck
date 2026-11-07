@@ -267,6 +267,23 @@ describe('immutable plugin activation', () => {
     } finally { repos.close(); }
   });
 
+  it('validates a candidate with an auto service without starting that service', async () => {
+    const marker = join(directory, 'service-pid');
+    await writePlugin(source, {
+      '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'versioned', version: '2.0.0', providers: 'provider.mjs', service: { entry: 'service.mjs', mode: 'auto' } }),
+      'provider.mjs': 'export default () => {};',
+      'service.mjs': `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(marker)}, String(process.pid)); setInterval(() => {}, 1000);`
+    });
+    await store.update('versioned', { yes: true });
+    try {
+      expect((await store.activate('versioned')).version).toBe('2.0.0');
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      if (existsSync(marker)) try { process.kill(-Number(await readFile(marker, 'utf8')), 'SIGKILL'); } catch {}
+    }
+  });
+
   it('bounds isolated provider registration even for a synchronous infinite loop', async () => {
     await writeFile(join(source, 'provider.mjs'), 'while (true) {}');
     await expect(validateProviderRegistration({ root: source, dataDir: join(directory, 'validate'), entry: store.get('versioned'), config: {} }, 1500)).rejects.toThrow('超时');

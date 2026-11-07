@@ -174,8 +174,10 @@ export class PluginHost {
   static async validatePlugin(input: { root: string; dataDir: string; entry: PluginLockEntry; config: Record<string, string> }): Promise<boolean> {
     const builtinRoot = join(input.dataDir, 'no-builtins');
     const host = new PluginHost(new PluginStore(input.dataDir, builtinRoot), builtinRoot);
-    await host.initialize([input.entry], input);
-    return host.active.length === 1 && host.diagnostics.length === 0;
+    try {
+      await host.initialize([input.entry], input);
+      return host.active.length === 1 && host.diagnostics.length === 0;
+    } finally { await host.dispose(); }
   }
 
   /** 使用真实 Host 注册表、命令展开和技能投递管线执行作者自检，不写正式插件库。 */
@@ -331,7 +333,8 @@ export class PluginHost {
         if (plugin.service) {
           const serviceConfig = Object.fromEntries(Object.entries(config).filter(([key]) => !plugin.manifest.userConfig?.[key]?.sensitive));
           this.services.register({ plugin: entry.name, root: plugin.root, entry: plugin.service.entry, dataDir, mode: plugin.service.spec.mode, args: plugin.service.spec.args, config: serviceConfig });
-          if (plugin.service.spec.mode === 'auto') await this.services.start(entry.name);
+          // 校验和自检只登记服务：服务进程自成进程组，校验 worker 退出时回收不到它。
+          if (plugin.service.spec.mode === 'auto' && !validation) await this.services.start(entry.name);
         }
         if (!builtin || plugin.commands.length || plugin.agents.length || plugin.skillsDir || plugin.triggers.size || pluginRegistrations.length || providers.length || resultTools.length || businessTools.length || plugin.service || slots.length) this.needsWiring = true;
       } catch (error) {
