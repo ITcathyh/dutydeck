@@ -56,7 +56,7 @@ const externalPackages = {
 // the export list comes from the installed SDK.
 const larkSdk = '@larksuiteoapi/node-sdk';
 const larkExports = Object.keys(createRequire(resolve(serverRoot, 'package.json'))(larkSdk)).filter(key => key !== 'default' && /^[A-Za-z_$][\w$]*$/.test(key));
-for (const key of ['Client', 'EventDispatcher', 'LoggerLevel', 'WSClient']) {
+for (const key of ['Client', 'EventDispatcher', 'LoggerLevel', 'WSClient', 'defaultHttpInstance']) {
   if (!larkExports.includes(key)) throw new Error(`${larkSdk} no longer exports ${key}`);
 }
 const larkShim = 'lark-sdk.mjs';

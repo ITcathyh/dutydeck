@@ -674,6 +674,20 @@ describe('lark', () => {
       expect(check.remedy).toContain('飞书 SDK 自己重连');
     });
 
+    it('长连接被重建过时写明重建时间；没有 rebuiltAt 的旧状态文案不变，JSON 字段集不变', async () => {
+      const since = new Date(Date.now() - 900_000).toISOString();
+      const rebuiltAt = new Date(Date.now() - 300_000).toISOString();
+      const legacy = find(await observe([bot()], listenerStatus({ reconnecting: [{ appId: 'cli_ok', since }] })), 'lark.listener')!;
+      const rebuilt = find(await observe([bot()], listenerStatus({ reconnecting: [{ appId: 'cli_ok', since, rebuiltAt }] })), 'lark.listener')!;
+      expect(legacy.detail).toMatch(/机器人甲（cli_ok）连接已断开约 90[01] 秒，正在自动重连/);
+      expect(legacy.detail).not.toContain('重建');
+      expect(rebuilt.level).toBe('fail');
+      expect(rebuilt.detail).toMatch(new RegExp(`机器人甲（cli_ok）连接已断开约 90[01] 秒；Dutydeck 已在 ${rebuiltAt.replace(/[.]/g, '\\.')} 重建长连接，仍未恢复`));
+      expect(rebuilt.detail).not.toContain('正在自动重连');
+      expect(rebuilt.remedy).toBe(legacy.remedy);
+      expect(Object.keys(rebuilt).sort()).toEqual(Object.keys(legacy).sort());
+    });
+
     it('配置里开了监听、守护进程却没有这个机器人的连接记录也为 fail', async () => {
       const check = find(await observe([bot()], listenerStatus()), 'lark.listener')!;
       expect(check.level).toBe('fail');

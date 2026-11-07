@@ -13,6 +13,6 @@ export interface LarkListenerStatus {
   active: string[];
   /** 连接失败、等待重连的机器人：最近一次错误（已脱敏）与下一次重连时间。 */
   retrying: Array<{ appId: string; error: string; failedAt: string; nextRetryAt: string }>;
-  /** 连上之后断线、SDK 正在自己重连的机器人，不计入 active。 */
-  reconnecting: Array<{ appId: string; since: string }>;
+  /** 连上之后断线、SDK 正在自己重连的机器人，不计入 active。重连卡住、长连接被重建过时带上最近一次重建的时间。 */
+  reconnecting: Array<{ appId: string; since: string; rebuiltAt?: string }>;
 }
