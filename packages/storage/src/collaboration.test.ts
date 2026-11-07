@@ -561,6 +561,57 @@ describe('Collaboration Storage Repository', () => {
       }
     });
 
+    it('retention also drops expired decisions and settled participation actions that carry group message text', async () => {
+      const repos = createRepositories(':memory:');
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        const collab = repos.collaboration;
+        const twoDaysAgo = '2026-09-18T00:00:00.000Z';
+        const decision = (id: string, inputSnapshot: Record<string, unknown>, scope = scopeA, createdAt = twoDaysAgo) => collab.recordDecision({
+          id, scope, contextRevision: 1, policyVersion: 'v1', action: 'act', reason: 'r', evidenceIds: ['obs_1'], status: 'sent', inputSnapshot, createdAt });
+        const modelSnapshot = { observations: [{ id: 'obs_1', messageId: 'om_1', text: 'secret group text' }], decider: { kind: 'model', trigger: { id: 'obs_1', messageId: 'om_1', text: 'secret group text' } } };
+        const settle = async (scope: typeof scopeA, id: string, status: 'succeeded' | 'unknown') => {
+          await collab.updateAction(scope, id, { expectedRevision: 1, status: 'sending' });
+          await collab.updateAction(scope, id, { expectedRevision: 2, status });
+        };
+        vi.setSystemTime(twoDaysAgo);
+        await decision('dec_expired', modelSnapshot);
+        await collab.addFeedback({ id: 'fb_expired', scope: scopeA, decisionId: 'dec_expired', actorId: 'u1', correction: 'quoted secret group text', createdAt: twoDaysAgo });
+        await decision('dec_unknown_reply', modelSnapshot);
+        await collab.beginAction({ id: 'reply_unknown', scope: scopeA, kind: 'participation.reply', requesterId: 'policy', inputDigest: 'd1', payload: { decisionId: 'dec_unknown_reply', messageId: 'om_1' } });
+        await settle(scopeA, 'reply_unknown', 'unknown');
+        await decision('dec_reply_done', modelSnapshot);
+        await collab.beginAction({ id: 'reply_done', scope: scopeA, kind: 'participation.reply', requesterId: 'policy', inputDigest: 'd2', payload: { decisionId: 'dec_reply_done', messageId: 'om_1' } });
+        await settle(scopeA, 'reply_done', 'succeeded');
+        await decision('dec_open_card', modelSnapshot);
+        await collab.beginAction({ id: 'confirm_open', scope: scopeA, kind: 'confirm.participation_act', requesterId: 'u1', inputDigest: 'd3',
+          payload: { kind: 'participation_act', expiresAt: '2026-09-30T00:00:00.000Z', payload: { decisionId: 'dec_open_card' } } });
+        await decision('dec_expired_card', modelSnapshot);
+        await collab.beginAction({ id: 'confirm_expired', scope: scopeA, kind: 'confirm.participation_act', requesterId: 'u1', inputDigest: 'd4',
+          payload: { kind: 'participation_act', expiresAt: '2026-09-18T01:00:00.000Z', payload: { decisionId: 'dec_expired_card' } } });
+        await decision('dec_scenario_window', { gate: 'scenario', scenario: { packId: 'alarm', dedupeKey: 'k' }, decider: { kind: 'rule', trigger: { id: 'om_2', messageId: 'om_2', text: 'alert text' } } });
+        await decision('dec_scenario_old', { gate: 'scenario', scenario: { packId: 'alarm', dedupeKey: 'k' } }, scopeA, '2026-09-10T00:00:00.000Z');
+        await decision('dec_other_group', modelSnapshot, scopeB);
+
+        vi.setSystemTime('2026-09-20T00:00:00.000Z');
+        await decision('dec_recent', modelSnapshot, scopeA, '2026-09-19T12:00:00.000Z');
+        // retention_days = 1
+        await collab.pruneObservations('2026-09-19T00:00:00.000Z', scopeA);
+
+        const remaining = (await collab.listDecisions(scopeA, 100)).map(item => item.id).sort();
+        expect(remaining).toEqual(['dec_open_card', 'dec_recent', 'dec_scenario_window', 'dec_unknown_reply']);
+        expect(await collab.listFeedback(scopeA, 'dec_expired')).toEqual([]);
+        const scenario = await collab.getDecision(scopeA, 'dec_scenario_window');
+        expect(scenario?.inputSnapshot).toEqual({ gate: 'scenario', scenario: { packId: 'alarm', dedupeKey: 'k' }, decider: { kind: 'rule', trigger: { id: 'om_2', messageId: 'om_2' } } });
+        const actions = (await collab.listActions(scopeA, 100)).map(item => item.id).sort();
+        expect(actions).toEqual(['confirm_open', 'reply_unknown']);
+        expect((await collab.listDecisions(scopeB, 100)).map(item => item.id)).toEqual(['dec_other_group']);
+      } finally {
+        vi.useRealTimers();
+        repos.close();
+      }
+    });
+
     it('snapshot read window stays available when a group accumulates more than 1MiB of material', async () => {
       const repos = createRepositories(':memory:');
       try {
