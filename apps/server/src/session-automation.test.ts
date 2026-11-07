@@ -1507,6 +1507,27 @@ describe('schedule calendar validation and legacy reads', () => {
     expect(repaired).toMatchObject({ enabled: false, revision: 2 });
     expect((await h.service.updateSchedule(h.session.id, bad.id, { expectedRevision: 2, enabled: true }, 'ou_owner')).nextDueAt).toBe('2026-10-20T01:00:00.000Z');
   });
+  it('rejects creating or enabling a schedule that has no upcoming run time', async () => {
+    const h = await fixture();
+    const noNextRun = { code: 'SESSION_AUTOMATION_NO_NEXT_RUN', statusCode: 409 };
+    for (const [index, patch] of [
+      { trigger: { kind: 'at' as const, localDateTime: '2026-09-12T07:00' } },
+      { trigger: { kind: 'cron' as const, expression: '0 0 30 2 *' } },
+      { trigger: { kind: 'at' as const, localDateTime: '2027-03-14T02:30' }, timezone: 'America/New_York' }
+    ].entries()) {
+      await expect(h.service.createSchedule(h.session.id, { ...scheduleInput, name: `Never ${index}`, additional: true, ...patch }, 'ou_owner')).rejects.toMatchObject(noNextRun);
+    }
+    const once = await h.service.createSchedule(h.session.id, { ...scheduleInput, name: 'Once', trigger: { kind: 'at', localDateTime: '2026-09-12T09:00' } }, 'ou_owner');
+    h.now.value = new Date('2026-09-12T02:00:00.000Z');
+    await expect(h.service.updateSchedule(h.session.id, once.id, { expectedRevision: once.revision, enabled: true }, 'ou_owner')).rejects.toMatchObject(noNextRun);
+    expect(await h.service.getScheduleDefinition(h.session.id, once.id, 'ou_owner')).toMatchObject({ enabled: false, revision: once.revision });
+    const recurring = await h.service.createSchedule(h.session.id, { ...scheduleInput, name: 'Recurring', additional: true }, 'ou_owner');
+    const enabled = await h.service.updateSchedule(h.session.id, recurring.id, { expectedRevision: recurring.revision, enabled: true }, 'ou_owner');
+    await expect(h.service.updateSchedule(h.session.id, recurring.id, { expectedRevision: enabled.revision, trigger: { kind: 'cron', expression: '0 0 30 2 *' } }, 'ou_owner')).rejects.toMatchObject(noNextRun);
+    expect(await h.service.getScheduleDefinition(h.session.id, recurring.id, 'ou_owner')).toMatchObject({ enabled: true, revision: enabled.revision, trigger: scheduleInput.trigger });
+    expect(await h.service.updateSchedule(h.session.id, once.id, { expectedRevision: once.revision, trigger: { kind: 'at', localDateTime: '2026-09-12T11:00' }, enabled: true }, 'ou_owner'))
+      .toMatchObject({ enabled: true, nextDueAt: '2026-09-12T03:00:00.000Z' });
+  });
 });
 
 describe('schedule frozen delivery projection', () => {

@@ -312,6 +312,12 @@ function isSessionRunnable(session: Session | undefined) {
   return Boolean(session && !session.archivedAt && !['stopped', 'failed'].includes(session.state));
 }
 function isAllowed(result: AuthorizationResult) { return result === true || typeof result === 'object' && result.allowed; }
+/** 时间规则往后再没有触发时点（单次时间已过或落在按策略跳过的夏令时空档、cron 永远不匹配）：存成启用也永远不会执行，创建和启用时直接拒绝。 */
+function requireNextRun(schedule: Parameters<typeof previewSessionSchedule>[0], after: Date) {
+  const next = previewSessionSchedule(schedule, after);
+  if (!next) throw new RuntimeError('SESSION_AUTOMATION_NO_NEXT_RUN', 'This schedule has no upcoming run time (the one-time time has passed or falls in a skipped DST gap, or the cron never matches); change the time rule', 409);
+  return next;
+}
 
 /** 安装者只能映射到 installation_owner；平台用户必须带原 appId 域，域缺失即无法核对（undefined）。 */
 function resolveAutomationActor(session: Session | undefined, actorId?: string): ExecutionActor | undefined {
@@ -905,7 +911,7 @@ export class SessionAutomationService {
       createdAt: now,
       updatedAt: now
     });
-    previewSessionSchedule(schedule, this.clock());
+    requireNextRun(schedule, this.clock());
     if (!await (input.precondition ? this.saveWithPrecondition(schedule.id, undefined, schedule, input.precondition) : this.createRecord(scheduleKey(schedule.id), schedule))) {
       if (receipt) {
         const saved = await this.getRecord(scheduleKey(id), readStoredSessionSchedule);
@@ -1287,7 +1293,7 @@ export class SessionAutomationService {
     };
     const schedule = sessionScheduleSchema.parse({
       ...candidate,
-      nextDueAt: executionChanged ? candidate.enabled ? previewSessionSchedule(candidate, now)?.scheduledForUtc : undefined : stored.value.nextDueAt
+      nextDueAt: executionChanged ? candidate.enabled ? requireNextRun(candidate, now).scheduledForUtc : undefined : stored.value.nextDueAt
     });
     if (!await (input.precondition !== undefined ? this.saveWithPrecondition(id, stored.raw, schedule, input.precondition) : this.replace(scheduleKey(id), stored.raw, schedule))) throw new RuntimeError('SESSION_AUTOMATION_REVISION_CONFLICT', 'Session schedule revision changed', 409);
     if (modeChanged) await this.retireFreshSessions(schedule);

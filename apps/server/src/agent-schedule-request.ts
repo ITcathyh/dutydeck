@@ -43,6 +43,7 @@ export function parseAgentScheduleRequest(raw: unknown) {
       timezone: 'Asia/Shanghai', dstPolicy: { gap: 'skip', overlap: 'first' }, condition: { kind: 'always' }, ...(body.mode ? { mode: body.mode } : {}),
       ...(body.until ? { completionCondition: body.until } : {}), ...(deadlineAt ? { deadlineAt } : {}) });
     next = previewSessionSchedule({ id: 'preview', ...input }, new Date());
+    if (!next) throw new Error('这个时间规则之后不会再触发（一次性时间已过或落在夏令时跳过的时段，或 cron 永远不匹配），请换一个时间');
   }
   catch (error) { throw invalid(scheduleParam(body.every !== undefined ? 'every' : body.cron !== undefined ? 'cron' : 'at'), error); }
   return { body, dryRun, input, next };

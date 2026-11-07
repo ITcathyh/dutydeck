@@ -56,7 +56,7 @@ async function configuration(input: ScheduleCliInput, create: boolean) {
     values.timezone ??= Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
     if (input.deadline !== undefined) values.deadlineAt = deadline(input.deadline, String(values.timezone));
     const parsed = createSessionScheduleInputSchema.parse({ dstPolicy: { gap: 'skip', overlap: 'first' }, condition: { kind: 'always' }, ...values });
-    previewSessionSchedule({ id: 'preview', ...parsed }, new Date());
+    if (!previewSessionSchedule({ id: 'preview', ...parsed }, new Date())) argument('The time rule has no upcoming run time: the --at time has passed or falls in a skipped DST gap, or the --cron never matches');
     return parsed;
   }
   // Validate before any request; the actual revision is captured from the server below. A local deadline is resolved in the schedule's timezone once it is read.
