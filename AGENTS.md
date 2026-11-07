@@ -52,7 +52,7 @@ pnpm exec tsx apps/server/src/cli.ts --local-only --port 14310 --no-lark-listen
 | 会话生命周期、ACP/PTY、终端连接 | `pnpm build` 后 `pnpm smoke --port 0`；smoke 直接读构建产物，不自动构建 |
 | Web 主流程、跨端状态流转 | `pnpm e2e`（构建并跑 core） |
 | 飞书卡片、机器人接入与设置 | 对应 `apps/server/src/lark/` 测试，加 `pnpm e2e:full`（core + 合成飞书 extended）；普通 smoke 不覆盖飞书投递与回调 |
-| 发布、launcher 或插件 SDK/资源 | `pnpm build`，再跑对应打包/安装测试，验证脱离源码目录后仍能使用 |
+| 发布、launcher 或插件 SDK/资源 | `pnpm verify:package`（构建后跑全部打包/安装验证，确认脱离源码目录后仍能使用）；新增打包验证脚本要挂进 `verify:package:run` |
 
 E2E 需要 `git`、`tmux` 和 Playwright Chromium；命令、场景及产物位置见 [tests/e2e/README.md](tests/e2e/README.md)。默认使用假 CLI/合成飞书，不能据此宣称真实模型、飞书发送或卡片点击已验证。纯文档改动核对命令、路径、全文一致性及 `git diff --check`，不要求跑无关产品测试。
 

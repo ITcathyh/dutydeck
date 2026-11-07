@@ -34,3 +34,18 @@ describe('工作区包发布清单', () => {
     expect([...packed].filter(path => path.includes('.test.'))).toEqual([]);
   }, 60_000);
 });
+
+// 打包产物验证依赖构建产物，不在默认 vitest 范围内；新增的验证脚本必须挂到 verify:package，否则没人会跑。
+describe('发布产物验证入口', () => {
+  it('verify:package 先构建，再运行每个打包验证脚本', () => {
+    const { scripts } = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8')) as { scripts: Record<string, string> };
+    expect(scripts['verify:package']).toMatch(/^pnpm build && pnpm verify:package:run$/);
+    const verifiers = [
+      ...readdirSync(join(process.cwd(), 'tests')).filter(file => /^package.*\.test\.ts$/.test(file)).map(file => `tests/${file}`),
+      ...readdirSync(join(process.cwd(), 'scripts')).filter(file => /^verify-.*package.*\.test\.mjs$/.test(file)).map(file => `scripts/${file}`),
+      ...readdirSync(join(process.cwd(), 'apps/server/scripts')).filter(file => /^verify-.*\.mjs$/.test(file)).map(file => `apps/server/scripts/${file}`)
+    ];
+    expect(verifiers.length).toBeGreaterThanOrEqual(4);
+    expect(verifiers.filter(path => !scripts['verify:package:run']?.split(/\s+/).includes(path))).toEqual([]);
+  });
+});
