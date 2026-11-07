@@ -28,6 +28,7 @@ import { codexRateLimits, contextUsage, type NormalizedDriverEvent, type Session
 import { codexHistoryPath, codexSessionsRoot, type CliPathEnv } from '../cli-paths.js';
 import { readFirstLine, walkFiles } from '../session-id/fs-scan.js';
 import { resolveCliSessionId } from '../session-id/index.js';
+import { CodexSessionIdLocator } from '../session-id/codex.js';
 import { JsonlTailer, type TranscriptCursor, type TranscriptEventSource } from './tail.js';
 import { readNativeTranscriptUsage } from './session-usage.js';
 import { codexInputText } from './input-receipt.js';
@@ -355,6 +356,7 @@ export class CodexTranscriptTailer implements TranscriptEventSource {
   private readonly inputReceipt?: CodexInputReceipt;
   private readonly children: CodexChildLimits;
   private readonly usage: CodexTurnUsage;
+  private readonly locator?: CodexSessionIdLocator;
   private childTimer?: NodeJS.Timeout;
   private readonly childCallbacks = new Set<(event: NormalizedDriverEvent) => void>();
 
@@ -362,7 +364,8 @@ export class CodexTranscriptTailer implements TranscriptEventSource {
     const root = codexSessionsRoot(opts.env);
     this.children = new CodexChildLimits(root);
     let cliSessionId: string | undefined;
-    const nativeId = () => cliSessionId ??= opts.sessionId ? resolveCliSessionId('codex', { sessionId: opts.sessionId, cwd: opts.cwd, env: opts.env }) : undefined;
+    const locator = this.locator = opts.sessionId ? new CodexSessionIdLocator('codex', { sessionId: opts.sessionId, cwd: opts.cwd, env: opts.env }) : undefined;
+    const nativeId = () => cliSessionId ??= locator?.resolve();
     this.usage = new CodexTurnUsage(nativeId);
     if (opts.sessionId) this.inputReceipt = new CodexInputReceipt(codexHistoryPath(opts.env), nativeId, text => this.turn.bindHistory(text));
     const explicit = opts.transcriptPath;
@@ -438,6 +441,7 @@ export class CodexTranscriptTailer implements TranscriptEventSource {
   takeInputError(): NormalizedDriverEvent | undefined { return this.turn.takeError(); }
   takeInputCancellation(): boolean { return this.turn.takeCancellation(); }
   waitForInput(prompt: string, signal: AbortSignal): Promise<void> {
+    this.locator?.wake();
     this.children.newInput();
     this.turn.arm(signal);
     return this.inputReceipt ? this.inputReceipt.waitForInput(this.tailer, prompt, signal) : this.tailer.waitForInput(prompt, signal);
