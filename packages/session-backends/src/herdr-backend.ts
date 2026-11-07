@@ -7,7 +7,7 @@ import { randomBytes } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { createConnection } from 'node:net';
 import { createInterface } from 'node:readline';
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute } from 'node:path';
 import type { SessionBackend, SpawnOptions } from './types.js';
 import type { PhysicalProcessIdentity, ProcessProbe } from './owned-tmux.js';
@@ -199,11 +199,11 @@ export class HerdrBackend implements SessionBackend {
     check();
     const existing = listing.find((item: { name: string }) => item.name === this.sessionName);
     if (existing && !previous) throw new Error('Unclaimed Herdr session exists; refusing adoption or replacement');
-    let path!: string, serverIdentity!: PhysicalProcessIdentity;
+    let path!: string, serverIdentity!: PhysicalProcessIdentity, stat!: { dev: string; ino: string };
     if (existing?.running) {
       if (!previous || this.options.processProbe.observe(previous.server) !== 'alive') throw new Error('HERDR_SERVER_IDENTITY_CHANGED');
       path = realpathSync(existing.socket_path);
-      const stat = this.socketStat(path);
+      stat = this.socketStat(path);
       if (path !== previous.socket || stat.dev !== previous.dev || stat.ino !== previous.ino) throw new Error('HERDR_SERVER_IDENTITY_CHANGED');
       serverIdentity = previous.server;
       // Pane env is an overlay on the server's ambient environment. A legacy
@@ -229,25 +229,47 @@ export class HerdrBackend implements SessionBackend {
       const server = spawn(this.options.binary, ['--session', this.sessionName, 'server'], {
         cwd: opts.cwd, env: Object.fromEntries(Object.entries(childEnvironment(this.environment, {}, { stripClaude: true })).filter(([key]) => !/^dutydeck_/i.test(key))), detached: true, stdio: 'ignore',
       });
-      let launchError: Error | undefined;
+      let launchError: Error | undefined, processCgroup: string;
       server.on('error', error => { launchError = error; });
       server.unref();
-      const deadline = Date.now() + 10000;
-      let entry: { socket_path: string } | undefined;
-      while (!entry) {
-        if (launchError) throw launchError;
-        const sessions = JSON.parse((await this.cli(['session', 'list', '--json']))).sessions;
-        entry = sessions.find((item: { name: string; default: boolean; running: boolean }) => item.name === this.sessionName && !item.default && item.running);
-        if (!entry) {
-          if (Date.now() >= deadline || server.exitCode !== null) throw new Error('Herdr dedicated server did not become ready');
-          await new Promise(resolve => setTimeout(resolve, 100));
+      try {
+        if (server.pid === undefined) {
+          await new Promise(resolve => setImmediate(resolve));
+          throw launchError ?? new Error('Herdr dedicated server did not start');
         }
+        serverIdentity = this.options.processProbe.identify(server.pid);
+        processCgroup = readFileSync(`/proc/${server.pid}/cgroup`, 'utf8');
+      } catch (error) {
+        server.kill('SIGKILL');
+        // Nothing identifiable was recorded: hand the name back to the proven-stopped generation, if any.
+        if (JSON.parse(readFileSync(this.options.stateFile, 'utf8')).launch_id === launchId) {
+          if (previous) writeFileSync(this.options.stateFile, JSON.stringify(previous), { mode: 0o600 });
+          else rmSync(this.options.stateFile);
+        }
+        throw error;
       }
-      // Preserve a reservation containing the dedicated server identity before cancellation.
-      path = realpathSync(entry.socket_path);
-      serverIdentity = this.options.processProbe.identify(server.pid!);
+      // The server is recorded before readiness so a slow start stays stoppable by identity.
+      this.state = { launch_id: launchId, owner: this.ownerId, name: this.sessionName, socket: '', dev: '', ino: '', server: serverIdentity, root: serverIdentity, pane: null, launching: true, process_cgroup: processCgroup, identities: [serverIdentity] };
+      this.persist();
+      try {
+        const deadline = Date.now() + 10000;
+        let entry: { socket_path: string } | undefined;
+        while (!entry) {
+          if (launchError) throw launchError;
+          const sessions = JSON.parse((await this.cli(['session', 'list', '--json']))).sessions;
+          entry = sessions.find((item: { name: string; default: boolean; running: boolean }) => item.name === this.sessionName && !item.default && item.running);
+          if (!entry) {
+            if (Date.now() >= deadline || server.exitCode !== null) throw new Error('Herdr dedicated server did not become ready');
+            await new Promise(resolve => setTimeout(resolve, 100));
+          }
+        }
+        path = realpathSync(entry.socket_path);
+        stat = this.socketStat(path);
+      } catch (error) {
+        if (!(await this.retireUnreadyServer())) throw new Error(`${(error as Error).message}; HERDR_EXIT_UNPROVEN: the unready dedicated server is still running`);
+        throw error;
+      }
     }
-    const stat = this.socketStat(path);
     this.state = { launch_id: launchId, owner: this.ownerId, name: this.sessionName, socket: path, ...stat, server: serverIdentity, root: serverIdentity, pane: null, launching: true, process_cgroup: readFileSync(`/proc/${serverIdentity.pid}/cgroup`, 'utf8'), identities: [serverIdentity] };
     this.persist();
     check();
@@ -631,8 +653,25 @@ export class HerdrBackend implements SessionBackend {
       } catch { return this.options.processProbe.observe(snapshot.server) === 'dead'; }
     } catch { return false; }
   }
+  /** A server that never published its socket has no panes yet; retire it by its recorded process identity. */
+  private async retireUnreadyServer(): Promise<boolean> {
+    const state = this.state!, probe = this.options.processProbe;
+    state.close_intent = true; this.persist();
+    for (const signal of ['SIGTERM', 'SIGKILL'] as const) {
+      if (probe.observe(state.server) === 'alive') {
+        try { process.kill(state.server.pid, signal); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
+      }
+      for (const deadline = Date.now() + 5000; probe.observe(state.server) !== 'dead' && Date.now() < deadline;) await new Promise(resolve => setTimeout(resolve, 25));
+      if (probe.observe(state.server) === 'dead') return true;
+    }
+    return false;
+  }
   async stopOwnedIdentity(raw: unknown = this.state, beforeKill?: (snapshot: unknown) => Promise<void>): Promise<unknown> {
     this.validateIdentity(raw);
+    if (this.state!.launching && !this.state!.socket) {
+      if (!(await this.retireUnreadyServer()) || !(await this.isStopped())) throw new Error('HERDR_EXIT_UNPROVEN');
+      return structuredClone(this.state);
+    }
     const deadline = Date.now() + 5000;
     const census = async <T>(read: () => T | Promise<T>): Promise<T> => {
       for (;;) {
