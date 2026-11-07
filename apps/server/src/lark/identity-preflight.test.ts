@@ -6,9 +6,11 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { LocalFileSecretProvider } from '@dutydeck/secret-provider';
 import { inheritPresentationOverride, type ChannelBotFoundation, type GroupBinding, type SecretRefMetadata } from '@dutydeck/shared';
 import { IdentityPreflightError, LarkIdentityPreflightProbe } from './identity-preflight.js';
+import { targetGuard } from '../../../../tests/support/target-server.js';
 
 const roots: string[] = [];
 const servers: Array<{ close(): Promise<void> }> = [];
+const guards: Array<ReturnType<typeof targetGuard>> = [];
 const checkedAt = new Date('2026-08-30T08:00:00.000Z');
 const secretCanary = 'SECRET_CANARY_DO_NOT_LEAK';
 const piiCanaries = ['cli_remote_private', 'ou_private_open_id', 'tenant_private_key', 'Private Bot Name', 'Private Chat Name', 'alice@example.com'];
@@ -89,7 +91,10 @@ interface FakeLarkOptions {
 
 async function fakeLarkServer(options: FakeLarkOptions = {}) {
   const requests: Array<{ method?: string; url?: string; authorization?: string; body: string }> = [];
+  const guard = targetGuard(request => request.url!.startsWith('/open-apis/'));
+  guards.push(guard);
   const server = createServer(async (request: IncomingMessage, response: ServerResponse) => {
+    if (!guard.accept(request, response)) return;
     let body = '';
     for await (const chunk of request) body += chunk;
     requests.push({ method: request.method, url: request.url, authorization: request.headers.authorization, body });
@@ -128,6 +133,7 @@ async function fakeLarkServer(options: FakeLarkOptions = {}) {
 afterEach(async () => {
   await Promise.all(servers.splice(0).map(server => server.close()));
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })));
+  for (const { strayRequests } of guards.splice(0)) expect(strayRequests).toEqual([]);
 });
 
 describe('Lark App×Chat identity preflight', () => {

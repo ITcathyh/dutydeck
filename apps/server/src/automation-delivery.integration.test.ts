@@ -10,9 +10,15 @@ import type { AgentConfig } from '@dutydeck/shared';
 import { createAutomationIntegration } from './automation-integration.js';
 import { SessionAutomationService } from './session-automation.js';
 import { __testOnly_resetLarkGate } from './lark/api-gate.js';
+import { targetGuard } from '../../../tests/support/target-server.js';
 
 const cleanups: Array<() => Promise<void> | void> = [];
-afterEach(async () => { while (cleanups.length) await cleanups.pop()!(); __testOnly_resetLarkGate(); });
+const guards: Array<ReturnType<typeof targetGuard>> = [];
+afterEach(async () => {
+  while (cleanups.length) await cleanups.pop()!();
+  __testOnly_resetLarkGate();
+  for (const { strayRequests } of guards.splice(0)) expect(strayRequests).toEqual([]);
+});
 const json = (response: ServerResponse, body: unknown) => { response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify(body)); };
 
 async function fixture() {
@@ -20,7 +26,9 @@ async function fixture() {
   cleanups.push(() => rm(directory, { recursive: true, force: true }));
   const provider = { uploads: 0, files: [] as string[], summaries: [] as string[], mode: 'ok' as 'ok' | 'fail_summary' | 'hold_summary', held: [] as ServerResponse[], disconnected: 0,
     afterFile: undefined as (() => Promise<void>) | undefined };
+  const guard = targetGuard(request => request.url!.startsWith('/open-apis/')); guards.push(guard);
   const server = createServer(async (request, response) => {
+    if (!guard.accept(request, response)) return;
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
     const path = request.url!;

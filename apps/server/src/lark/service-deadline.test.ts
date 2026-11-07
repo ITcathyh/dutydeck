@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createWorkbenchFetch } from '../workbench-fetch.js';
 import { __testOnly_resetLarkGate } from './api-gate.js';
 import { createLarkCardService, type LarkCardService } from './service.js';
+import { targetGuard } from '../../../../tests/support/target-server.js';
 
 const ws = vi.hoisted(() => ({ handlers: {} as Record<string, (event: unknown) => unknown> }));
 vi.mock('@larksuiteoapi/node-sdk', () => ({
@@ -27,6 +28,7 @@ let baseUrl: string;
 let route: (path: string, response: ServerResponse) => void;
 let paths: string[];
 let disconnected: number;
+let guard: ReturnType<typeof targetGuard>;
 const services: LarkCardService[] = [];
 const json = (response: ServerResponse, body: unknown, status = 200) => { response.writeHead(status, { 'content-type': 'application/json' }); response.end(JSON.stringify(body)); };
 const token = (response: ServerResponse) => json(response, { code: 0, tenant_access_token: 'synthetic', expire: 3600 });
@@ -38,7 +40,9 @@ const service = (env: NodeJS.ProcessEnv = {}, fetcher = globalThis.fetch) => {
 beforeEach(async () => {
   paths = []; disconnected = 0;
   route = (path, response) => path.includes('/auth/') ? token(response) : json(response, { code: 0 });
+  guard = targetGuard(request => /^\/(open-apis\/|slow|queued|limited)/.test(request.url!));
   server = createServer((request, response) => {
+    if (!guard.accept(request, response)) return;
     paths.push(request.url!);
     response.on('close', () => { if (!response.writableEnded) disconnected++; });
     request.resume();
@@ -51,6 +55,7 @@ afterEach(async () => {
   for (const value of services.splice(0)) value.close();
   __testOnly_resetLarkGate(); vi.restoreAllMocks();
   server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
+  expect(guard.strayRequests).toEqual([]);
 });
 
 describe('Lark end-to-end request deadline', () => {

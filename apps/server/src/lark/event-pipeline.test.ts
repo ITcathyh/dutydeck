@@ -8,6 +8,7 @@ import { createRepositories } from '@dutydeck/storage';
 import { LarkLongConnectionListener, LarkMessageCoordinator } from './listener.js';
 import { parseLarkEventHandlers, type LarkEventHandler } from './event-pipeline.js';
 import { readLarkConfig, saveLarkConfig, type StoredLarkConfig } from './config.js';
+import { targetGuard } from '../../../../tests/support/target-server.js';
 
 const sdk = vi.hoisted(() => ({ dispatcher: undefined as LarkSdk.EventDispatcher | undefined }));
 vi.mock('@larksuiteoapi/node-sdk', async importOriginal => ({
@@ -19,7 +20,11 @@ vi.mock('@larksuiteoapi/node-sdk', async importOriginal => ({
   }
 }));
 const cleanups: Array<() => unknown> = [];
-afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); vi.restoreAllMocks(); });
+const guards: Array<ReturnType<typeof targetGuard>> = [];
+afterEach(async () => {
+  for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); vi.restoreAllMocks();
+  for (const { strayRequests } of guards.splice(0)) expect(strayRequests).toEqual([]);
+});
 const click = (value: unknown = { owner: 'sample-service', action: 'ack' }, id = 'ev_card') => ({
   schema: '2.0', header: { event_id: id, event_type: 'card.action.trigger', app_id: 'untrusted-app' },
   event: { token: 'callback-token', operator: { open_id: 'ou_operator' }, context: { open_message_id: 'om_card', open_chat_id: 'oc_chat' },
@@ -35,7 +40,9 @@ const reply = (response: ServerResponse, body: unknown, status = 200) => {
   response.writeHead(status, { 'Content-Type': 'application/json' }); response.end(JSON.stringify(body));
 };
 async function stub(handle: (request: IncomingMessage, response: ServerResponse, body: any) => void) {
+  const guard = targetGuard(request => request.method === 'POST' && request.url === '/events'); guards.push(guard);
   const server = createServer(async (request, response) => {
+    if (!guard.accept(request, response)) return;
     let raw = ''; for await (const chunk of request) raw += chunk;
     let body: unknown;
     try { body = JSON.parse(raw); } catch { response.destroy(); return; }
