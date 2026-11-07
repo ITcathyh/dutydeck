@@ -1020,7 +1020,8 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
           return;
         }
         if (inbox?.state === 'received') await this.inbox!.update(inbox, { state: 'failed', error: error instanceof Error ? error.message : String(error) });
-      });
+        // group.tail 是同一会话的排队链，收尾再抛出会让下一条消息跳过 runTurn。
+      }).catch(error => this.log.error({ error, messageId: event.messageId }, '收尾失败的飞书请求出错'));
     } finally {
       if (!handedOff) await clearAcknowledgement();
     }
