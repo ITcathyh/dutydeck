@@ -142,6 +142,12 @@ const SHELL_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
  *  that `;`; a trailing `\;` is kept as a literal semicolon. */
 const tmuxLiteralArg = (value: string): string => value.endsWith(';') ? `${value.slice(0, -1)}\\;` : value;
 
+/** tmux format-expands new-session `-s`, `-c` and the pipe-pane command, so
+ *  `#(...)` would run and `#S` would be replaced; `##` is a literal `#`.
+ *  pipe-pane also applies strftime, where `%%` is a literal `%`. */
+const tmuxFormatLiteral = (value: string): string => value.replaceAll('#', '##');
+const tmuxTimeFormatLiteral = (value: string): string => tmuxFormatLiteral(value).replaceAll('%', '%%');
+
 /** Single-quote-escape a string for /bin/sh (replaces ' with '\'' ). */
 function shellescape(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`;
@@ -337,6 +343,7 @@ export async function isTmuxAvailable(): Promise<boolean> {
 /** send-keys -l payloads longer than this risk hitting the tty canonical
  *  input limit (MAX_CANON, 4096 bytes on Linux) — route through paste-buffer. */
 const LITERAL_SEND_LIMIT = 4096;
+const BRACKETED_PASTE_START = '\x1b[200~';
 const OWNER_OPTION = '@dutydeck_owner_id';
 const METADATA_OPTIONS = {
   first_prompt_sent: '@dutydeck_first_prompt_sent',
@@ -408,10 +415,10 @@ export class TmuxBackend implements SessionBackend {
     try {
       (await runTmux([
         'new-session', '-d',
-        '-s', this.sessionName,
+        '-s', tmuxFormatLiteral(this.sessionName),
         '-x', String(opts.cols),
         '-y', String(opts.rows),
-        '-c', opts.cwd,
+        '-c', tmuxLiteralArg(tmuxFormatLiteral(opts.cwd)),
       ], { cwd: opts.cwd }));
     } catch (err) {
       throw classifyFailure(err, 'tmux new-session');
@@ -443,7 +450,7 @@ export class TmuxBackend implements SessionBackend {
       // immediately afterwards. The script unlinks itself before exec.
       const launch = await writeLaunchScript(bin, args, scripted, opts.programStatus);
       try {
-        (await runTmux(['respawn-pane', '-k', '-t', this.sessionName, '-c', opts.cwd, '/bin/sh', launch.path]));
+        (await runTmux(['respawn-pane', '-k', '-t', this.sessionName, '-c', tmuxLiteralArg(tmuxFormatLiteral(opts.cwd)), '/bin/sh', launch.path]));
       } catch (error) {
         await rm(launch.directory, { recursive: true, force: true });
         throw error;
@@ -466,10 +473,21 @@ export class TmuxBackend implements SessionBackend {
    * session-missing answer is converted to onExit (guarded send) — the CLI exited and the pane is gone.
    */
   async write(data: string): Promise<boolean> {
+    return this.sendInput(generation => this.sendLiteral(data, generation));
+  }
+
+  /** Paste through tmux: bracketed-paste markers only when the application
+   *  requested bracketed paste, so callers must not add their own. Same
+   *  refusal semantics as write(). */
+  async pasteText(text: string): Promise<boolean> {
+    return this.sendInput(generation => this.pasteLiteral(text, generation, true));
+  }
+
+  private async sendInput(send: (generation: number) => Promise<void>): Promise<boolean> {
     if (this.exited || !this.started) return false;
     const generation = this.inputGeneration;
     try {
-      await this.sendLiteral(data, generation);
+      await send(generation);
       return this.inputValid(generation);
     } catch (err) {
       if (err instanceof TmuxSessionMissingError) this.handlePaneExit();
@@ -731,7 +749,7 @@ export class TmuxBackend implements SessionBackend {
     };
     await capture.listen(); check();
     await runTmux(['set-option', '-t', this.sessionName, '@dutydeck_capture_directory', capture.directory]); check();
-    const pipe = ['pipe-pane', '-o', '-t', this.sessionName, capture.command()];
+    const pipe = ['pipe-pane', '-o', '-t', this.sessionName, tmuxTimeFormatLiteral(capture.command())];
     if (!restoreScreen) { await runTmux(pipe); check(); return; }
 
     // One tmux command queue captures the existing screen/history and then
@@ -816,29 +834,32 @@ export class TmuxBackend implements SessionBackend {
     }
   }
 
-  /** Send text literally: send-keys -l for short single-line payloads,
-   *  load-buffer + paste-buffer for long or multiline text (avoids the 4KB
-   *  tty canonical-input limit and handles newlines via bracketed paste). */
   private inputValid(generation: number): boolean { return generation === this.inputGeneration && !this.exited && this.started; }
 
+  /** Send text literally: send-keys -l for short single-line payloads,
+   *  load-buffer + paste-buffer for long or multiline text (avoids the 4KB
+   *  tty canonical-input limit and handles newlines via bracketed paste).
+   *  A payload carrying its own paste markers is pasted byte-exact without
+   *  tmux markers, which would otherwise nest and end the paste early. */
   private async sendLiteral(text: string, generation: number): Promise<void> {
     if (text.length > LITERAL_SEND_LIMIT || text.includes('\n')) {
-      (await this.pasteLiteral(text, generation));
+      (await this.pasteLiteral(text, generation, !text.includes(BRACKETED_PASTE_START)));
       return;
     }
     (await runTmux(['send-keys', '-t', this.sessionName, '-l', '--', tmuxLiteralArg(text)]));
   }
 
-  private async pasteLiteral(text: string, generation: number): Promise<void> {
+  private async pasteLiteral(text: string, generation: number, bracketed: boolean): Promise<void> {
     const bufferName = `dutydeck-${randomBytes(8).toString('hex')}`;
     let loaded = false;
     try {
       (await runTmux(['load-buffer', '-b', bufferName, '-'], { input: text }));
       loaded = true;
       if (!this.inputValid(generation)) throw new TmuxError('tmux input cancelled before paste');
-      // -d deletes the buffer after pasting; -p wraps in bracketed-paste
-      // markers when the application requested bracketed paste.
-      (await runTmux(['paste-buffer', '-b', bufferName, '-t', this.sessionName, '-d', '-p']));
+      // -d deletes the buffer after pasting; -r keeps LF (tmux otherwise sends
+      // CR, a separate Enter for an application without bracketed paste); -p
+      // wraps in markers only when the application requested bracketed paste.
+      (await runTmux(['paste-buffer', '-b', bufferName, '-t', this.sessionName, '-d', '-r', ...(bracketed ? ['-p'] : [])]));
       loaded = false;
     } finally {
       if (loaded) {
