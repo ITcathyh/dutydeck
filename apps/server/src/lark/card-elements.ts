@@ -8,6 +8,8 @@ export const markdownElement = (elementId: string, content: string): CardElement
 
 export const escapeCardInline = (value: string) => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
 
+export const textFence = (text: string) => `\`\`\`text\n${text.replaceAll('```', '``\\`')}\n\`\`\``;
+
 /**
  * Agent 产出的卡片 markdown 正文：保留 markdown 写法，只把能拼出飞书卡片标签（@ 人、彩色标签、字体、链接等）的 < 换成全角，
  * 平台就不会把 Agent 写的 <at id=all></at> 渲染成 @所有人。系统要 @ 的人由 renderGroupMention 另行拼在正文外。

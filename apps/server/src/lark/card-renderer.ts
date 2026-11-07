@@ -2,7 +2,7 @@ import { isChildDiagnostic, terminalTaskStatuses, type AgentEvent, type Verifica
 import type { StoredLarkConfig } from './config.js';
 import { boundLarkCardElements, LarkServiceError } from './service.js';
 import { redactTraceText, sensitiveTraceKey } from './secret-redaction.js';
-import { collapsiblePanel, escapeCardInline, neutralizeCardTags } from './card-elements.js';
+import { collapsiblePanel, escapeCardInline, neutralizeCardTags, textFence } from './card-elements.js';
 import { repairCardStrongPunctuation } from './card-strong-punctuation.js';
 import { maxLarkVerificationRepairRounds, type LarkAutoVerificationNote } from './auto-verification.js';
 
@@ -199,7 +199,6 @@ export const steeringOutcomeText = (outcome: string) => ({
   incompatible: '这条内容的执行设置（权限模式、模型或高危操作策略）与正在执行的那一轮不同，不能插话。'
 } as Record<string, string>)[outcome] ?? 'Agent 没有接受插话。';
 
-const textFence = (text: string) => `\`\`\`text\n${text.replaceAll('```', '``\\`')}\n\`\`\``;
 const fenced = (value: unknown) => {
   if (value === undefined) return '';
   return `\n\n${textFence(typeof value === 'string' ? value : JSON.stringify(value, null, 2))}`;
