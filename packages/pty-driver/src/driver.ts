@@ -1486,7 +1486,7 @@ export class PtyCliDriver implements AgentDriver {
     const refreshPending: string[] = [];
     const notice = '\r\n[DutyDeck: terminal output exceeded its buffer; restoring the current screen.]\r\n';
     const refreshAfterGap = (droppedBytes: number) => {
-      if (backend !== this.backend || this.stopped) return;
+      if (this.superseded(backend, generation)) return;
       this.idleDetector?.fallbackProgramStatus('terminal output gap may have lost status frames');
       this.emitEvent({ type: 'status', data: { state: 'terminal_output_gap', droppedBytes, message: 'At least this many terminal bytes were dropped; restoring the current screen.' } });
       if (this.refreshingScreen) { retryRefresh = true; return; }
@@ -1496,23 +1496,23 @@ export class PtyCliDriver implements AgentDriver {
         do {
           retryRefresh = false; refreshPending.length = 0; refreshPendingBytes = 0;
           const screen = await (backend.resyncOutput ? backend.resyncOutput(() => { refreshPending.length = 0; refreshPendingBytes = 0; retryRefresh = false; }) : backend.captureCurrentScreen?.());
-          if (this.stopped || this.backend !== backend) return;
+          if (this.superseded(backend, generation)) return;
           if (retryRefresh) continue;
           if (screen === undefined || screen === null) return;
           // Keep the refresh single-flight through xterm parsing. Only one
           // bounded snapshot and one delta batch can be queued at a time.
           await this.feedRecoveredScreen('\x1bc' + screen);
-          while (!retryRefresh && refreshPending.length && !this.stopped && this.backend === backend) {
+          while (!retryRefresh && refreshPending.length && !this.superseded(backend, generation)) {
             const delta = refreshPending.join('');
             refreshPending.length = 0; refreshPendingBytes = 0;
             await this.feedRecoveredScreen(delta);
           }
           if (retryRefresh) continue;
           return;
-        } while (this.backend === backend && !this.stopped);
+        } while (!this.superseded(backend, generation));
       };
       void capture().catch(() => { /* The visible notice remains if recovery fails. */ }).finally(() => {
-        if (this.backend === backend) this.refreshingScreen = false;
+        if (!this.superseded(backend, generation)) this.refreshingScreen = false;
         refreshPending.length = 0; refreshPendingBytes = 0;
       });
     };
@@ -1843,6 +1843,7 @@ export class PtyCliDriver implements AgentDriver {
     this.clearProgramStatusDrain();
     this.clearTurnDeadline();
     this.wiringGeneration++;
+    this.refreshingScreen = false;
     if (this.idleDetector) {
       this.idleDetector.dispose();
       this.idleDetector = undefined;
