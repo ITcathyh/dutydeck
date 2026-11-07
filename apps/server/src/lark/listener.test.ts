@@ -14,7 +14,7 @@ import { larkListenerStatusKey } from './listener-status.js';
 // 仅「监听接入层」用例需要截获 SDK 的事件注册；其余协调器用例直接构造 coordinator，
 // 不受此 mock 影响（它们传入的是手写 service 替身，永不实例化 lark.Client）。
 type MockWsClient = {
-  options: { onReady: () => void; onError: (error: Error) => void; onReconnecting: () => void; onReconnected: () => void; httpInstance: { request(config: Record<string, unknown>): Promise<unknown> } };
+  options: { onReady: () => void; onError: (error: Error) => void; onReconnecting: () => void; onReconnected: () => void; httpInstance: { request(config: Record<string, unknown>): Promise<unknown>; post(url: string, data?: unknown): Promise<unknown>; defaults: unknown } };
 };
 const larkSdkHarness = vi.hoisted(() => {
   const handlers: Record<string, (event: any) => unknown> = {};
@@ -24,9 +24,10 @@ const larkSdkHarness = vi.hoisted(() => {
   // 未配置时 start 立即报 onReady、close 什么也不做。
   const behavior: { start?: (client: MockWsClient) => Promise<void> | void; close?: (client: MockWsClient) => void } = {};
   const httpRequest = vi.fn();
+  const httpPost = vi.fn();
   const interceptorUse = { request: vi.fn(), response: vi.fn() };
   return {
-    handlers, wsStart, wsClose, wsClients, behavior, httpRequest, interceptorUse,
+    handlers, wsStart, wsClose, wsClients, behavior, httpRequest, httpPost, interceptorUse,
     reset: () => {
       for (const key of Object.keys(handlers)) delete handlers[key];
       wsStart.mockClear();
@@ -35,6 +36,7 @@ const larkSdkHarness = vi.hoisted(() => {
       delete behavior.start;
       delete behavior.close;
       httpRequest.mockReset();
+      httpPost.mockReset();
       interceptorUse.request.mockClear();
       interceptorUse.response.mockClear();
     }
@@ -59,6 +61,8 @@ vi.mock('@larksuiteoapi/node-sdk', () => ({
   },
   defaultHttpInstance: {
     request: (config: unknown) => larkSdkHarness.httpRequest(config),
+    post(this: unknown, url: string, data?: unknown) { return larkSdkHarness.httpPost(this, url, data); },
+    defaults: { timeout: 15_000 },
     interceptors: { request: { use: larkSdkHarness.interceptorUse.request }, response: { use: larkSdkHarness.interceptorUse.response } }
   }
 }));
@@ -2966,6 +2970,19 @@ describe('长连接重连卡住后的重建', () => {
       await expect(clients[1]!.options.httpInstance.request({})).resolves.toEqual({ code: 0, data: { URL: 'wss://example.invalid' } });
       expect(larkSdkHarness.interceptorUse.request).not.toHaveBeenCalled();
       expect(larkSdkHarness.interceptorUse.response).not.toHaveBeenCalled();
+    } finally { listener.stop(); }
+  });
+
+  it('传给 WSClient 的 httpInstance 除 request 外的成员都转给 defaultHttpInstance', async () => {
+    const { listener, clients } = await startStalled();
+    try {
+      larkSdkHarness.httpPost.mockResolvedValueOnce({ code: 0 });
+      const http = clients[0]!.options.httpInstance;
+      await expect(http.post('/callback/ws/endpoint', { AppID: 'cli' })).resolves.toEqual({ code: 0 });
+      const [self, url, data] = larkSdkHarness.httpPost.mock.calls[0]!;
+      expect(self).toBe((await import('@larksuiteoapi/node-sdk')).defaultHttpInstance);
+      expect([url, data]).toEqual(['/callback/ws/endpoint', { AppID: 'cli' }]);
+      expect(http.defaults).toEqual({ timeout: 15_000 });
     } finally { listener.stop(); }
   });
 

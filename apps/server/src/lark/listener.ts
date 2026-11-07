@@ -67,19 +67,26 @@ function readReconnectStallMs(env: NodeJS.ProcessEnv, log: ListenerLog) {
 
 // WSClient 只在拉取长连接配置时调用 request。不要对 defaultHttpInstance 加拦截器或改 defaults：
 // 它是进程内所有机器人和 lark.Client 共用的单例。它的响应拦截器返回 resp.data，SDK 按这个形状解构结果。
-// 只在 request 被调用时读取 defaultHttpInstance：不少测试的 SDK mock 没有这个导出。
+// 其他成员（post、get、defaults……）原样转给 defaultHttpInstance：以后的 SDK 版本改调它们时不会抛 TypeError。
+// 只在用到时读取 defaultHttpInstance：不少测试的 SDK mock 没有这个导出。
 function abortableWsHttp(lark: typeof Lark, clientSignal: AbortSignal) {
-  return {
-    async request(config: Parameters<typeof Lark.defaultHttpInstance.request>[0]) {
-      const controller = new AbortController();
-      const abort = () => controller.abort(clientSignal.reason);
-      if (clientSignal.aborted) abort(); else clientSignal.addEventListener('abort', abort, { once: true });
-      const timer = setTimeout(() => controller.abort(new Error('Lark WebSocket config request timed out')), wsConfigRequestTimeoutMs);
-      timer.unref?.();
-      try { return await lark.defaultHttpInstance.request({ ...config, signal: controller.signal }); }
-      finally { clearTimeout(timer); clientSignal.removeEventListener('abort', abort); }
+  const request = async (config: Parameters<typeof Lark.defaultHttpInstance.request>[0]) => {
+    const controller = new AbortController();
+    const abort = () => controller.abort(clientSignal.reason);
+    if (clientSignal.aborted) abort(); else clientSignal.addEventListener('abort', abort, { once: true });
+    const timer = setTimeout(() => controller.abort(new Error('Lark WebSocket config request timed out')), wsConfigRequestTimeoutMs);
+    timer.unref?.();
+    try { return await lark.defaultHttpInstance.request({ ...config, signal: controller.signal }); }
+    finally { clearTimeout(timer); clientSignal.removeEventListener('abort', abort); }
+  };
+  return new Proxy({ request }, {
+    get(target, property) {
+      if (property === 'request') return target.request;
+      const shared = lark.defaultHttpInstance;
+      const value: unknown = Reflect.get(shared, property);
+      return typeof value === 'function' ? value.bind(shared) : value;
     }
-  } as unknown as Lark.HttpInstance;
+  }) as unknown as Lark.HttpInstance;
 }
 
 export interface LarkRuntime {
