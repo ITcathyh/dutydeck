@@ -601,6 +601,37 @@ describe('SessionAutomationService schedules', () => {
     expect(await h.repositories.tasks.listBySession(h.session.id)).toHaveLength(1);
   });
 
+  it('keeps a ledger-accepted occurrence left pending when the schedule is edited before recovery', async () => {
+    const h = await fixture();
+    const created = await h.service.createSchedule(h.session.id, scheduleInput, 'ou_owner');
+    await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+    const compare = h.repositories.config.compareAndSet!.bind(h.repositories.config);
+    const cas = vi.spyOn(h.repositories.config, 'compareAndSet').mockImplementation(async (key, expected, value) => {
+      if (key.startsWith('session_automation/occurrence/') && value && JSON.parse(value).runStatus === 'accepted') return false;
+      return compare(key, expected, value);
+    });
+    h.now.value = new Date('2026-09-12T00:01:01.000Z');
+    await h.service.tick();
+    cas.mockRestore();
+    const [task] = await h.repositories.tasks.listBySession(h.session.id);
+    expect((await h.service.listBySession(h.session.id)).occurrences[0]).toMatchObject({ runStatus: 'pending' });
+    await h.service.authorizeTask(task!, 'submit');
+    const current = await h.service.getScheduleDefinition(h.session.id, created.id, 'ou_owner');
+    await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: current.revision, prompt: 'Edited after submission' }, 'ou_owner');
+    h.now.value = new Date('2026-09-12T00:01:40.000Z');
+    await h.service.tick();
+    const [recovered] = (await h.service.listBySession(h.session.id)).occurrences;
+    expect(recovered).toMatchObject({ runStatus: 'accepted', taskId: task!.id });
+    h.now.value = new Date('2026-09-12T00:02:01.000Z');
+    await h.service.tick();
+    expect(h.dispatches).toHaveLength(1);
+    h.settleTask(task!.id);
+    await h.service.tick();
+    expect((await h.service.listBySession(h.session.id)).occurrences.find(item => item.id === recovered!.id)).toMatchObject({
+      runStatus: 'completed', result: expect.objectContaining({ taskId: task!.id })
+    });
+  });
+
   it('fences a slow condition evaluator after another service takes over its expired lease', async () => {
     let resolveSlow!: (response: CiPipelineStatus) => void;
     const slow = new Promise<CiPipelineStatus>(resolve => { resolveSlow = resolve; });

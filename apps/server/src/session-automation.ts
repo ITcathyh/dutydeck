@@ -1921,6 +1921,26 @@ export class SessionAutomationService {
 
   private async processOccurrence(stored: { raw: string; value: SessionScheduleOccurrence }) {
     let occurrence = migrateOccurrence(stored.value);
+    // 账本已接受（派发后崩溃、关闭或补记 CAS 落败）时先认接受事实，再做计划、会话和授权检查：作废会丢结果，下一轮还会重叠执行。
+    const admission = occurrence.admission;
+    const acceptedTask = admission && this.execution.getAcceptedTask(admission.taskId);
+    if (admission && acceptedTask) {
+      if (acceptedTask.request && admission.request && canonicalExecutionJson(acceptedTask.request) !== canonicalExecutionJson(admission.request)) {
+        await this.finishOccurrence(stored, { runStatus: 'blocked', blockReason: 'admission_conflict', error: 'Accepted task request conflicts with source admission' });
+        return;
+      }
+      try {
+        await this.ensureTaskBinding(admission.taskId, {
+          schemaVersion: 2, kind: 'schedule', sessionId: occurrence.executionSessionId ?? occurrence.sessionId, occurrenceId: occurrence.id,
+          scheduleId: occurrence.scheduleId, taskId: admission.taskId, taskIdVersion: admission.taskIdVersion, generation: occurrence.generation
+        });
+      } catch (error) {
+        await this.finishOccurrence(stored, { runStatus: 'blocked', blockReason: 'admission_conflict', error: errorMessage(error) });
+        return;
+      }
+      await this.markOccurrenceAccepted(stored, admission.taskId);
+      return;
+    }
     let scheduleStored = await this.getRecord(scheduleKey(occurrence.scheduleId), readStoredSessionSchedule);
     if (scheduleStored && !occurrence.admission && !occurrence.taskId) {
       scheduleStored = await this.fallbackToFresh(scheduleStored, occurrence.id);
@@ -2381,16 +2401,19 @@ export class SessionAutomationService {
   }
 
   private async markOccurrenceAccepted(stored: { raw: string; value: SessionScheduleOccurrence }, taskId: string) {
-    const current = await this.getRecord(occurrenceKey(stored.value.id), input => sessionScheduleOccurrenceSchema.parse(input));
-    if (!current) return;
-    const currentValue = migrateOccurrence(current.value);
-    if (currentValue.runStatus !== 'pending') return;
-    if (currentValue.scheduleId !== stored.value.scheduleId || currentValue.generation !== stored.value.generation) return;
-    // CAS 核原来源身份/代际：冻结 admission 的 taskId 必须与实际接受 Task 一致，不借最新 pending 绑定不同请求。
-    const frozenTaskId = currentValue.admission?.taskId ?? migrateOccurrence(stored.value).admission?.taskId;
-    if (frozenTaskId && frozenTaskId !== taskId) return;
-    const updated = sessionScheduleOccurrenceV2Schema.parse({ ...currentValue, revision: currentValue.revision + 1, runStatus: 'accepted', taskId, acceptedAt: currentValue.acceptedAt ?? iso(this.clock()), leaseOwner: undefined, leaseExpiresAt: undefined, updatedAt: iso(this.clock()) });
-    await this.replace(occurrenceKey(stored.value.id), current.raw, updated);
+    // 并发写入（如 submit 写 taskStartedAt）让 CAS 落败时重读重试；仍未写成的由下次 processOccurrence 按账本补记。
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const current = await this.getRecord(occurrenceKey(stored.value.id), input => sessionScheduleOccurrenceSchema.parse(input));
+      if (!current) return;
+      const currentValue = migrateOccurrence(current.value);
+      if (currentValue.runStatus !== 'pending') return;
+      if (currentValue.scheduleId !== stored.value.scheduleId || currentValue.generation !== stored.value.generation) return;
+      // CAS 核原来源身份/代际：冻结 admission 的 taskId 必须与实际接受 Task 一致，不借最新 pending 绑定不同请求。
+      const frozenTaskId = currentValue.admission?.taskId ?? migrateOccurrence(stored.value).admission?.taskId;
+      if (frozenTaskId && frozenTaskId !== taskId) return;
+      const updated = sessionScheduleOccurrenceV2Schema.parse({ ...currentValue, revision: currentValue.revision + 1, runStatus: 'accepted', taskId, acceptedAt: currentValue.acceptedAt ?? iso(this.clock()), leaseOwner: undefined, leaseExpiresAt: undefined, updatedAt: iso(this.clock()) });
+      if (await this.replace(occurrenceKey(stored.value.id), current.raw, updated)) return;
+    }
   }
 
   private async finishOccurrence(stored: { raw: string; value: SessionScheduleOccurrence }, patch: Partial<SessionScheduleOccurrenceV2>): Promise<boolean> {
