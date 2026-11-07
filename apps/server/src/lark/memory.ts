@@ -17,6 +17,7 @@
  */
 import { createHash, randomBytes } from 'node:crypto';
 import { RuntimeError, type MemoryJob, type MemoryJobRepository, type MemoryJobVersion, type JsonValue, type ConfigRepository, type LarkGroupMemoryScope } from '@dutydeck/shared';
+import { memoryJobVersionDigest } from '@dutydeck/storage';
 import { relevance } from './text-relevance.js';
 import { redactTraceText } from './secret-redaction.js';
 
@@ -546,7 +547,7 @@ export class LarkMemoryStore {
 
   async jobVersions(scope: LarkMemoryScope): Promise<MemoryJobVersion[]> {
     await this.migrateLegacy(scope);
-    return Promise.all([larkMemoryKey(scope), larkMemoryIgnoreKey(scope), 'lark.bots', 'lark.credentials'].map(async key => ({ key, value: await this.configs.get(key) })));
+    return Promise.all([larkMemoryKey(scope), larkMemoryIgnoreKey(scope), 'lark.bots', 'lark.credentials'].map(async key => ({ key, digest: memoryJobVersionDigest(await this.configs.get(key)) })));
   }
 
   async applyJob(scope: LarkMemoryScope, jobs: MemoryJobRepository, job: MemoryJob, steps: LarkMemoryBatchStep[], patch: (state: LarkMemoryState, result: LarkMemoryBatchResult) => Partial<LarkMemoryState>, consumedTaskIds: string[]): Promise<MemoryJob> {

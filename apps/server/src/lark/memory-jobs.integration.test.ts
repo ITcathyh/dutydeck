@@ -607,3 +607,14 @@ it('keeps a new memory request queued behind a foreign unconfirmed stop until re
     expect(h.prompts).toHaveLength(3);
   } finally { release(); h.setStopConfirmed(true); await foreignRun; }
 });
+it('freezes no credential values and keeps only recent finished jobs, stripped of their prompts', async () => {
+  const h = await harness();
+  const bots = JSON.parse((await h.repos.config.get('lark.bots'))!) as Array<Record<string, unknown>>;
+  await h.repos.config.set('lark.bots', JSON.stringify(bots.map(bot => ({ ...bot, appSecret: 'placeholder-secret' }))));
+  for (let run = 0; run < 4; run++) expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok: true });
+  expect(h.prompts).toHaveLength(4);
+  const jobs = await h.repos.memoryJobs.listScope(scope);
+  expect(jobs.map(job => job.state)).toEqual(['settled', 'settled']);
+  expect(JSON.stringify(jobs)).not.toMatch(/placeholder-secret|保留完整来源和日期/);
+  expect(jobs.flatMap(job => job.requests.map(request => request.prompt))).toEqual(['', '']);
+});

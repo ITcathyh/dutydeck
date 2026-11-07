@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { migrations, runMigrations, withMigrationTransaction } from './migrations.js';
 import { createRepositories } from './index.js';
+import { memoryJobVersionDigest } from './memory-jobs.js';
 import type { MemoryJob, RepositoryBundle } from '@dutydeck/shared';
 const open: Array<RepositoryBundle | Database.Database> = [];
 const directories: string[] = [];
@@ -207,4 +208,49 @@ it('uses a scoped task seek for a new turn amid large settled receipt history', 
   const plan = db.prepare(`EXPLAIN QUERY PLAN ${query}`).all(scope.appId, scope.pool, 'new-turn');
   expect(plan).toEqual([expect.objectContaining({ detail: expect.stringMatching(/SEARCH memory_consumed_tasks USING PRIMARY KEY \(app_id=\? AND pool=\? AND task_id=\?\)/) })]);
   expect(query).not.toContain('json_each');
+});
+it('keeps credential values out of frozen jobs and still rejects a rotated secret', async () => {
+  const { job: template } = await harness();
+  const repos = createRepositories(':memory:'); open.push(repos);
+  await repos.config.set('lark.credentials', '{"app":"secret-v1"}');
+  await repos.config.set(stateKey, JSON.stringify({ v: 1, running: { token: 'claim' } }));
+  const values = await Promise.all(template.versions.map(async ({ key }) => ({ key, value: await repos.config.get(key) })));
+  await expect(repos.memoryJobs.create({ ...template, versions: values })).rejects.toMatchObject({ code: 'MEMORY_JOB_INVALID' });
+  const job = { ...template, versions: values.map(({ key, value }) => ({ key, digest: memoryJobVersionDigest(value) })) };
+  await repos.memoryJobs.create(job);
+  expect(JSON.stringify(await repos.memoryJobs.get(scope, job.id))).not.toContain('secret-v1');
+  const input = { job, claimToken: 'claim', versions: job.versions, writes: [], consumedTaskIds: [], result: {}, appliedAt: job.createdAt };
+  await repos.config.set('lark.credentials', '{"app":"secret-v2"}');
+  await expect(repos.memoryJobs.apply(input)).rejects.toMatchObject({ code: 'MEMORY_CONCURRENT_CHANGE' });
+  await repos.config.set('lark.credentials', '{"app":"secret-v1"}');
+  expect((await repos.memoryJobs.apply(input)).state).toBe('applied');
+});
+it('keeps only the newest finished jobs per pool and kind, without their conversation or credentials', async () => {
+  const filename = databasePath();
+  const { repos, job } = await harness(filename);
+  const db = new Database(filename); open.push(db);
+  const request = { version: 1, namespace: 'runtime', key: 'k', sessionId: job.sessionId, actor: { kind: 'installation_owner', id: 'installation_owner' }, prompt: 'raw conversation', mode: 'queue', skills: [], options: {}, sources: [], sourcePayload: null };
+  const insert = (id: string, appId: string, pool: string, kind: string, state: string) => db.prepare('INSERT INTO memory_jobs VALUES (?,?,?,?,?,?)').run(id, appId, pool, state, 1, JSON.stringify({
+    ...job, id, scope: { appId, pool }, kind, state, versions: [{ key: 'lark.credentials', value: 'legacy-secret' }], requests: [request],
+    input: { turns: [{ taskId: `${id}-turn`, text: 'raw conversation' }], materials: ['raw conversation'], prompt: 'raw conversation', promptPolicyVersion: 'optimized-v1' },
+    ...(state === 'settled' ? { receipt: { appliedJobId: id, consumedTaskIds: [`${id}-turn`], result: { added: [{ id: 'entry', content: 'raw conversation' }], removed: 1, lastRun: { ok: true } }, appliedAt: job.createdAt } } : {})
+  }));
+  for (const [index, state] of ['settled', 'failed', 'settled', 'failed'].entries()) {
+    insert(`x${index}`, 'app', 'groups', 'extraction', state);
+    insert(`c${index}`, 'app', 'groups', 'consolidation', state);
+    insert(`p${index}`, 'app', 'personal', 'extraction', state);
+    insert(`o${index}`, 'other', 'groups', 'extraction', state);
+  }
+  expect(await repos.memoryJobs.pruneFinished('app', 2)).toBe(6);
+  const kept = await repos.memoryJobs.listScope(scope);
+  expect(kept.map(item => item.id)).toEqual([job.id, 'x2', 'c2', 'x3', 'c3']);
+  expect((await repos.memoryJobs.listScope({ appId: 'app', pool: 'personal' })).map(item => item.id)).toEqual(['p2', 'p3']);
+  expect(kept[0]).toEqual(job);
+  expect(JSON.stringify(kept.slice(1))).not.toMatch(/raw conversation|legacy-secret/);
+  expect(kept[1]).toMatchObject({ input: { turns: [{ taskId: 'x2-turn' }], promptPolicyVersion: 'optimized-v1' }, versions: [{ key: 'lark.credentials', digest: memoryJobVersionDigest('legacy-secret') }],
+    requests: [{ key: 'k', prompt: '' }], receipt: { consumedTaskIds: ['x2-turn'], result: { added: [{ id: 'entry' }], removed: 1, lastRun: { ok: true } } } });
+  expect(db.prepare("SELECT count(*) AS n FROM memory_jobs WHERE app_id='other'").get()).toEqual({ n: 4 });
+  const compacted = db.prepare('SELECT json FROM memory_jobs ORDER BY id').all();
+  expect(await repos.memoryJobs.pruneFinished('app', 2)).toBe(0);
+  expect(db.prepare('SELECT json FROM memory_jobs ORDER BY id').all()).toEqual(compacted);
 });

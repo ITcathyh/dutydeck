@@ -10,6 +10,7 @@ import { createMemoryJobRepository } from './memory-jobs.js';
 import { createWorkItemIndexRepository } from './work-item-index.js';
 import { assertBotProcessConfigWrite } from './bot-process.js';
 export { assertBotProcessStartup, botProcessKey, botProcessMigrationKey, type BotProcessBinding } from './bot-process.js';
+export { memoryJobVersionDigest } from './memory-jobs.js';
 import Database from 'better-sqlite3';
 import { and, asc, desc, eq, gt, lt, sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/better-sqlite3';

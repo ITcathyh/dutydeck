@@ -79,7 +79,9 @@ export const larkMemoryPipelineRules = {
   resultReads: 3,
   resultRetryMs: 500,
   /** 冻结作业连续可重试失败到这个次数就放弃，让出记忆池；等待恢复核对的失败不计数。 */
-  jobRetryLimit: 5
+  jobRetryLimit: 5,
+  /** 每个池每类只留最近几条已结束作业（巡检要看最近两次是否都失败），只保留任务编号和结果计数；更早的删除。 */
+  finishedJobsKept: 2
 } as const;
 
 const recoveryTaskStatuses = ['reconcile_required', 'legacy_unresolved'];
@@ -397,6 +399,7 @@ export class LarkMemoryPipeline {
   }
 
   async recoverJobs(appId: string): Promise<void> {
+    await this.pruneFinishedJobs(appId);
     for (const job of await this.options.jobs.listUnsettled(appId)) {
       const scope = larkMemoryScopeOfPool(job.scope);
       const config = await this.options.readConfig(appId);
@@ -789,6 +792,7 @@ export class LarkMemoryPipeline {
               }
             }
             job = await jobs.update({ ...job, state: 'failed', error: code }, job.revision);
+            await this.pruneFinishedJobs(scope.appId);
           } catch (cleanupError) {
             this.options.log.warn({ error: cleanupError, jobId: job.id }, '失败记忆作业的归档未确认，保留原作业');
             error = this.recoveryRequired(job.sessionId);
@@ -814,7 +818,13 @@ export class LarkMemoryPipeline {
       }
     }
     await this.options.jobs.update({ ...job, state: 'settled' }, job.revision);
+    await this.pruneFinishedJobs(scope.appId);
     return (job.receipt!.result as unknown as { lastRun: RunOutcome }).lastRun;
+  }
+
+  private async pruneFinishedJobs(appId: string): Promise<void> {
+    await this.options.jobs.pruneFinished(appId, larkMemoryPipelineRules.finishedJobsKept)
+      .catch(error => this.options.log.warn({ error, appId }, '清理已结束的记忆作业失败，下次结束时重试'));
   }
 
   // -------------------------------------------------------------------------
