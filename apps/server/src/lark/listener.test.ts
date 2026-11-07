@@ -2911,6 +2911,17 @@ describe('长连接重连卡住后的重建', () => {
     } finally { listener.stop(); }
   });
 
+  it('DUTYDECK_LARK_RECONNECT_STALL_MS 超过计时器上限时按上限处理，不会变成立即重建', async () => {
+    const { listener, clients } = await startStalled({ DUTYDECK_LARK_RECONNECT_STALL_MS: '9999999999' });
+    try {
+      clients[0]!.options.onReconnecting();
+      await vi.advanceTimersByTimeAsync(stallMs * 6);
+      expect(clients).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(2_147_483_647 - stallMs * 6);
+      expect(clients).toHaveLength(2);
+    } finally { listener.stop(); }
+  });
+
   it('DUTYDECK_LARK_RECONNECT_STALL_MS 非法时告警并用默认值', async () => {
     const { listener, log, clients } = await startStalled({ DUTYDECK_LARK_RECONNECT_STALL_MS: '10m' });
     try {

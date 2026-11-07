@@ -48,10 +48,12 @@ export type ListenerLog = {
 
 const defaultReconnectStallMs = 600_000;
 const minReconnectStallMs = 60_000;
+/** 计时器按 stallMs + 1 设置；超过 2^31-1 毫秒时 Node 会改成 1 毫秒触发，变成不停重建。 */
+const maxReconnectStallMs = 2_147_483_646;
 /** 拉取长连接配置的总时限，比 SDK 自带的 15 秒请求超时长，健康时不会先到。 */
 const wsConfigRequestTimeoutMs = 30_000;
 
-/** SDK 自己重连卡住多久后重建长连接：未设置时 10 分钟，`0` 关闭，小于 1 分钟按 1 分钟。 */
+/** SDK 自己重连卡住多久后重建长连接：未设置时 10 分钟，`0` 关闭，小于 1 分钟按 1 分钟，超过计时器上限（约 24.8 天）按上限。 */
 function readReconnectStallMs(env: NodeJS.ProcessEnv, log: ListenerLog) {
   const raw = env.DUTYDECK_LARK_RECONNECT_STALL_MS?.trim();
   if (!raw) return defaultReconnectStallMs;
@@ -60,7 +62,7 @@ function readReconnectStallMs(env: NodeJS.ProcessEnv, log: ListenerLog) {
     log.warn({ value: raw, stallMs: defaultReconnectStallMs }, 'DUTYDECK_LARK_RECONNECT_STALL_MS 不是非负整数毫秒，按默认值处理');
     return defaultReconnectStallMs;
   }
-  return value === 0 ? 0 : Math.max(value, minReconnectStallMs);
+  return value === 0 ? 0 : Math.min(Math.max(value, minReconnectStallMs), maxReconnectStallMs);
 }
 
 // WSClient 只在拉取长连接配置时调用 request。不要对 defaultHttpInstance 加拦截器或改 defaults：
