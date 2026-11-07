@@ -1,7 +1,8 @@
-import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { currentProcessIdentity, observeProcess } from '@dutydeck/storage';
 import { z } from 'zod';
+import { writeFileAtomicSync } from '../atomic-file.js';
 
 /**
  * 进程内 provider 让 daemon 崩溃或启动卡死后的隔离记录。全部同步读写：崩溃记录在 uncaughtExceptionMonitor 里、进程退出前写下。
@@ -16,11 +17,7 @@ export type PluginQuarantine = z.infer<typeof recordSchema>;
 const directory = (pluginsDir: string) => join(pluginsDir, QUARANTINE_DIR);
 const loadingPrefix = (plugin: string) => `${plugin}.loading-`;
 
-function writePrivateJsonSync(path: string, value: unknown) {
-  const temporary = `${path}.${process.pid}.tmp`;
-  writeFileSync(temporary, JSON.stringify(value), { mode: 0o600 });
-  renameSync(temporary, path);
-}
+const writePrivateJsonSync = (path: string, value: unknown) => writeFileAtomicSync(path, JSON.stringify(value));
 
 function readJson<T>(path: string, schema: z.ZodType<T>): T | undefined {
   try { return schema.parse(JSON.parse(readFileSync(path, 'utf8'))); } catch { return undefined; }

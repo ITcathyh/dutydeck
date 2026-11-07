@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { sleep } from '../daemon/time.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
-import { cp, mkdir, mkdtemp, readdir, readFile, readlink, realpath, lstat, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readdir, readFile, readlink, realpath, lstat, rename, rm, stat } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
@@ -15,6 +15,7 @@ import { defaultBuiltinPluginRoot, listBuiltinPlugins } from './builtin.js';
 import { loadPluginDirectory, type LoadedPlugin } from './manifest.js';
 import { parsePluginScope } from './scope.js';
 import { clearPluginQuarantine, readPluginQuarantine } from './quarantine.js';
+import { writeFileAtomic } from '../atomic-file.js';
 
 const run = promisify(execFile);
 const LOCK_FILE = 'plugins.lock.json';
@@ -262,13 +263,9 @@ export class PluginStore {
 
   private async writeLock(lock: LockFile) {
     await mkdir(this.pluginsDir, { recursive: true });
-    const path = join(this.pluginsDir, LOCK_FILE);
-    const temporary = `${path}.${process.pid}.${randomBytes(12).toString('hex')}.tmp`;
     const sorted = Object.fromEntries(Object.entries(lock.plugins).sort(([left], [right]) => left.localeCompare(right)));
-    try {
-      await writeFile(temporary, `${JSON.stringify({ version: 1, plugins: sorted }, null, 2)}\n`, { flag: 'wx' });
-      await rename(temporary, path);
-    } finally { await rm(temporary, { force: true }); }
+    // lock 不含密钥，保持原来的可读权限。
+    await writeFileAtomic(join(this.pluginsDir, LOCK_FILE), `${JSON.stringify({ version: 1, plugins: sorted }, null, 2)}\n`, { mode: 0o644 });
   }
 
   list(): PluginLockEntry[] { return Object.values(this.readLock().plugins); }
@@ -401,12 +398,7 @@ export class PluginStore {
 
   private async writePrivateJson(filename: string, value: unknown): Promise<void> {
     await mkdir(this.pluginsDir, { recursive: true });
-    const path = join(this.pluginsDir, filename);
-    const temporary = `${path}.${process.pid}.${randomBytes(12).toString('hex')}.tmp`;
-    try {
-      await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
-      await rename(temporary, path);
-    } finally { await rm(temporary, { force: true }); }
+    await writeFileAtomic(join(this.pluginsDir, filename), `${JSON.stringify(value, null, 2)}\n`);
   }
 
   /** 同步读，触发器请求路径上用；文件不存在即没有令牌。 */

@@ -11,6 +11,7 @@ import { AUTOSTART_LINUX_UNIT } from '../autostart/autostart.js';
 import type { DeployCliOptions, DeployPruneCliOptions } from '../cli-program.js';
 import { defaultDaemonDir, pidAlive } from './daemon.js';
 import { DRAIN_INTERVAL_MS, drainRuntime, healthCheckUrl, systemdServiceControl, unitRuntime, waitForServiceHealth, type DaemonCommandDeps, type DrainResult, type RuntimeEndpoint, type ServiceControl, type UnitRuntime } from './command.js';
+import { writeFileAtomicSync } from '../atomic-file.js';
 
 /**
  * `dutydeck deploy`：把一个已构建好的检出目录做成不可变的发布目录，排空后切换 `current` 并重启，
@@ -257,10 +258,9 @@ function readUnitRelease(deployments: string, unit: string, releases: string): U
 function writeUnitRelease(deployments: string, unit: string, release: string, pid: number | undefined, schema: string | undefined): void {
   let identity: ProcessIdentity | undefined;
   try { if (pid !== undefined) identity = childProcessIdentity(pid); } catch { /* 已退出的成功版本仍可供停服后的恢复使用 */ }
-  const file = unitReleaseFile(deployments, unit), temp = `${file}.${process.pid}.tmp`;
+  const file = unitReleaseFile(deployments, unit);
   mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
-  writeFileSync(temp, `${JSON.stringify({ unit, release, process_identity: identity, schema_fingerprint: schema })}\n`, { mode: 0o600 });
-  renameSync(temp, file);
+  writeFileAtomicSync(file, `${JSON.stringify({ unit, release, process_identity: identity, schema_fingerprint: schema })}\n`);
 }
 
 /** 旧版没有自报 release：本 PID 映射的原生依赖路径仍指向启动时的真实 release，不受 current 切换影响。 */
@@ -583,12 +583,10 @@ function updateDeploymentFile(target: DeployTarget, release: string, commit: str
   const file = join(target.runtime, 'deployment.json');
   let previous: Record<string, unknown> = {};
   try { previous = JSON.parse(readFileSync(file, 'utf8')); } catch { /* 首次部署 */ }
-  const temp = `${file}.${process.pid}.tmp`;
-  writeFileSync(temp, `${JSON.stringify({
+  writeFileAtomicSync(file, `${JSON.stringify({
     ...previous, commit, deployedAt: at.toISOString(), runtimePath: join(target.releases, 'current'), release,
     databasePath: target.endpoint.database, address: target.endpoint.address, deploymentRecord: manifest, unit: target.unit
-  }, null, 2)}\n`, { mode: 0o600 });
-  renameSync(temp, file);
+  }, null, 2)}\n`);
 }
 
 // ─── 部署 ────────────────────────────────────────────────────────────────────

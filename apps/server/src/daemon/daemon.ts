@@ -1,9 +1,10 @@
 import { dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import Database from 'better-sqlite3';
 import { rotateLogFileSync } from '../resource-retention.js';
+import { writeFileAtomicSync } from '../atomic-file.js';
 import {
   childProcessIdentity,
   currentProcessIdentity,
@@ -241,12 +242,8 @@ function ensureDir(dir: string): void {
   mkdirSync(dir, { recursive: true });
 }
 
-/** 先写临时文件再 rename：并发读的一方只会看到完整的旧内容或新内容，读不到截断到一半的空文件。 */
-function writeAtomic(file: string, content: string): void {
-  const temp = `${file}.${process.pid}.tmp`;
-  writeFileSync(temp, content, 'utf8');
-  renameSync(temp, file);
-}
+/** 并发读的一方只会看到完整的旧内容或新内容，读不到截断到一半的空文件。 */
+const writeAtomic = (file: string, content: string) => writeFileAtomicSync(file, content);
 
 export function writeState(dir: string, state: DaemonState): void {
   ensureDir(dir);
