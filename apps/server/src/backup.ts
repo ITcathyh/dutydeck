@@ -53,10 +53,24 @@ function publish(stage: string, target: string): void {
   mkdirSync(target, { mode: 0o700 });
   try { renameSync(stage, target); } catch (error) { try { rmdirSync(target); } catch { /* Preserve anything another process placed here. */ } throw error; }
 }
+const integrityLinesShown = 5;
 function validateSqlite(file: string, expectedSchema: number): void {
   const db = new Database(readFileSync(file), { readonly: true });
   try {
-    if (db.pragma('integrity_check', { simple: true }) !== 'ok' || (db.pragma('foreign_key_check') as unknown[]).length) throw new Error('SQLite integrity or foreign key check failed');
+    const integrity = (db.pragma('integrity_check') as Array<{ integrity_check: string }>).map(row => row.integrity_check);
+    const violations = db.pragma('foreign_key_check') as Array<{ table: string }>;
+    const intact = integrity.length === 1 && integrity[0] === 'ok';
+    if (!intact || violations.length) {
+      // 保留原前缀；只附 integrity_check 的前几行和违反外键的表名、条数，不输出行内容。
+      const details: string[] = [];
+      if (!intact) details.push(`integrity_check: ${integrity.slice(0, integrityLinesShown).join('; ')}${integrity.length > integrityLinesShown ? ` (+${integrity.length - integrityLinesShown} more)` : ''}`);
+      if (violations.length) {
+        const counts = new Map<string, number>();
+        for (const { table } of violations) counts.set(table, (counts.get(table) ?? 0) + 1);
+        details.push(`foreign_key_check: ${[...counts].map(([table, count]) => `${table} ${count}`).join(', ')}`);
+      }
+      throw new Error(`SQLite integrity or foreign key check failed: ${details.join('; ')}`);
+    }
     const version = (db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get() as { version: number }).version;
     if (version !== expectedSchema || version !== BACKUP_SCHEMA_VERSION) throw new Error('Unsupported or mismatched database schema');
   } finally { db.close(); }

@@ -228,6 +228,22 @@ describe('offline portable backup', () => {
     expect(() => restoreBackup({ archive: f.output, target })).toThrow(); expect(existsSync(target)).toBe(false);
   });
 
+  it('reports foreign key violations by table and count without row data', async () => {
+    const f = fixture(); await createBackup(f);
+    const file = join(f.output, 'dutydeck.db');
+    const db = new Database(file); db.pragma('journal_mode=DELETE'); db.pragma('foreign_keys=OFF');
+    db.exec("CREATE TABLE backup_parent(id PRIMARY KEY); CREATE TABLE backup_child(id REFERENCES backup_parent(id), note TEXT); CREATE TABLE backup_other(id REFERENCES backup_parent(id)); INSERT INTO backup_child VALUES(9917,'row-secret-content'),(9918,'row-secret-content'); INSERT INTO backup_other VALUES(9919)");
+    db.close(); rehashDatabase(f.output);
+    let message = '';
+    try { inspectBackup(f.output); } catch (error) { message = (error as Error).message; }
+    expect(message).toMatch(/^SQLite integrity or foreign key check failed: /);
+    expect(message).toContain('foreign_key_check: ');
+    expect(message).toContain('backup_child 2');
+    expect(message).toContain('backup_other 1');
+    expect(message).not.toContain('integrity_check');
+    expect(message).not.toMatch(/9917|9918|9919|row-secret-content/);
+  });
+
   it('refuses existing targets and source symlinks', async () => {
     const f = fixture(); await createBackup(f);
     expect(() => restoreBackup({ archive: f.output, target: f.dataDir })).toThrow(/already exists/);
