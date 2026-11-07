@@ -117,6 +117,16 @@ describe('conversation timeline', () => {
     expect(sections[1]).toMatchObject({ kind: 'activity', hasAnswer: true });
   });
 
+  it('keeps adjacent background-task results as separate blocks instead of joining their text', () => {
+    const timeline = buildTimeline([
+      event(1, 'text', { text: 'hi', role: 'user' }),
+      event(2, 'text', { text: 'ok', role: 'assistant' }),
+      event(3, 'text', { text: 'Build finished. Let me check the logs.', origin: BACKGROUND_FOLLOWUP }),
+      event(4, 'text', { text: 'Logs look clean.', origin: BACKGROUND_FOLLOWUP })
+    ]);
+    expect(timeline.filter(item => item.data.origin === BACKGROUND_FOLLOWUP).map(item => item.data.text)).toEqual(['Build finished. Let me check the logs.', 'Logs look clean.']);
+  });
+
   it('does not count a background-task result as the running turn answer', () => {
     const running = buildTimeline([
       event(1, 'text', { text: '检查一下', role: 'user' }),
