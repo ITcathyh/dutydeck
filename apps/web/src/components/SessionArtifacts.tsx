@@ -1,7 +1,9 @@
 import { useState } from 'react';
 import type { ArtifactSnapshot, EventArtifactReference } from '@dutydeck/shared';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { api, artifactSnapshotsApi, hasShareToken } from '../api';
+import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
+import { api, artifactSnapshotsApi, hasShareToken, type HistoryTurnSummary } from '../api';
+import { HISTORY_TURN_PAGE_SIZE } from '../event-history';
+import { historyOutlineQuery } from '../useEventHistory';
 import { Banner, Button, Spinner } from './primitives';
 
 function SnapshotCard({ snapshot }: { snapshot: ArtifactSnapshot }) {
@@ -34,17 +36,33 @@ export function SessionArtifacts({ sessionId }: { sessionId: string }) {
   const shared = hasShareToken();
   const snapshots = useQuery({ queryKey: ['artifact-snapshots', sessionId], queryFn: () => artifactSnapshotsApi.list(sessionId), enabled: !shared });
   const capture = useMutation({ mutationFn: (ref: EventArtifactReference) => artifactSnapshotsApi.capture(sessionId, { taskId: ref.taskId, attemptId: ref.attemptId, eventId: ref.eventId, sequence: ref.sequence, partIndex: ref.partIndex, revision: ref.revision }), onSuccess: () => client.invalidateQueries({ queryKey: ['artifact-snapshots', sessionId] }) });
-  const history = useQuery({ queryKey: ['history-outline', sessionId], queryFn: ({ signal }) => api.sessionHistory(sessionId, signal), refetchInterval: 10_000 });
-  const turns = history.data?.turns.filter(turn => turn.artifactReferences.length) ?? [];
+  const history = useQuery({ ...historyOutlineQuery(sessionId, HISTORY_TURN_PAGE_SIZE), refetchInterval: 10_000 });
+  // The outline summarizes only the newest page of turns. Earlier turns load a page per request,
+  // aligned like the timeline's pages so both share the cached reads; once requested, a page stays loaded.
+  const [oldestPage, setOldestPage] = useState<number>();
+  const places = history.data?.places ?? [];
+  const summarizedFrom = Math.max(0, places.length - HISTORY_TURN_PAGE_SIZE);
+  const newestOlderPage = Math.ceil(summarizedFrom / HISTORY_TURN_PAGE_SIZE) - 1;
+  const firstPage = Math.min(oldestPage ?? Infinity, newestOlderPage + 1);
+  const pages = useQueries({ queries: Array.from({ length: newestOlderPage + 1 - firstPage }, (_, offset) => {
+    const start = (firstPage + offset) * HISTORY_TURN_PAGE_SIZE, from = places[start]![1], through = places[start + HISTORY_TURN_PAGE_SIZE - 1]![2];
+    return { queryKey: ['history-page', sessionId, from, through], queryFn: ({ signal }: { signal: AbortSignal }) => api.sessionHistoryTurns(sessionId, from, through, signal), staleTime: Infinity };
+  }) });
+  const unread = Math.min(firstPage * HISTORY_TURN_PAGE_SIZE, summarizedFrom);
+  const loadingOlder = pages.some(page => page.isPending);
+  const olderError = pages.find(page => page.error)?.error;
+  const summaries = new Map<string, HistoryTurnSummary>();
+  for (const turn of [...pages.flatMap(page => page.data?.turns ?? []), ...history.data?.turns ?? []]) summaries.set(turn.id, turn);
+  const turns = [...summaries.values()].filter(turn => turn.artifactReferences.length).sort((left, right) => right.firstSequence - left.firstSequence);
   return <section className="space-y-2" aria-label="每轮产物引用">
     <h3 className="text-body font-semibold">每轮产物引用</h3>
     <p className="text-caption text-secondary">从成功工具结果或 Agent 的结构化附件记录引用。引用对应当时的记录，不证明路径当前内容相同，也不授予下载权限。</p>
     {history.isPending && <Spinner label="读取产物引用"/>}
     {history.error && <Banner tone="danger">产物引用读取失败：{history.error.message}</Banner>}
-    {!history.isPending && !history.error && !turns.length && <p className="text-caption text-subtle">尚无已记录的结构化产物；普通文本中的文件名不作为交付证据。</p>}
+    {!history.isPending && !history.error && !loadingOlder && !turns.length && <p className="text-caption text-subtle">{unread ? `最近 ${places.length - unread} 轮` : ''}尚无已记录的结构化产物；普通文本中的文件名不作为交付证据。</p>}
     {!shared && <p className="text-caption text-secondary">点击“保存当前文件快照”只读取此会话工作目录内当前文件（最多 20 MiB）；保存后内容固定，后续查看和下载仍需会话权限。</p>}
     {capture.error && <Banner tone="danger">快照保存失败：{capture.error.message}</Banner>}
-    {[...turns].reverse().map(turn => <details key={turn.id} className="rounded-lg border border-default p-3">
+    {turns.map(turn => <details key={turn.id} className="rounded-lg border border-default p-3">
       <summary className="cursor-pointer text-caption">{turn.prompt.text || '这一轮'} · {turn.artifactReferences.length} 项</summary>
       {turn.artifactReferencesTruncated && <p className="mt-2 text-caption text-warning">这里只列出部分产物引用；查看来源记录可读取这一轮的完整事件。</p>}
       {turn.artifactReferences.map(ref => <div key={`${ref.eventId}:${ref.partIndex}`} className="mt-3 space-y-1 break-all text-caption">
@@ -55,6 +73,9 @@ export function SessionArtifacts({ sessionId }: { sessionId: string }) {
         <div className="flex flex-wrap gap-2"><SourceButton reference={ref}/>{!shared && ref.uri && ref.source !== 'attachment_receipt' && (!/^[a-z][a-z0-9+.-]*:/i.test(ref.uri) || ref.uri.startsWith('file:')) && <Button variant="ghost" onClick={() => capture.mutate(ref)} disabled={capture.isPending}>保存当前文件快照</Button>}</div>
       </div>)}
     </details>)}
+    {olderError && <Banner tone="danger" action={{ label: '重试', onClick: () => { for (const page of pages) if (page.error) void page.refetch(); } }}>更早轮次的产物引用读取失败：{olderError.message}</Banner>}
+    {loadingOlder && <Spinner label="读取更早轮次的产物引用"/>}
+    {unread > 0 && !loadingOlder && <div className="flex flex-wrap items-center gap-2 text-caption text-subtle"><span>已检查最近 {places.length - unread} 轮，更早还有 {unread} 轮。</span><Button variant="ghost" onClick={() => setOldestPage(firstPage - 1)}>检查更早的轮次</Button></div>}
     {!shared && snapshots.error && <Banner tone="danger">快照列表读取失败：{snapshots.error.message}</Banner>}
     {!shared && Boolean(snapshots.data?.snapshots.length) && <section aria-label="已保存产物快照" className="space-y-2"><h4 className="text-body font-semibold">已保存产物快照</h4>{snapshots.data?.snapshots.map(snapshot => <SnapshotCard key={snapshot.id} snapshot={snapshot}/>)}</section>}
   </section>;
