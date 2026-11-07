@@ -1462,7 +1462,7 @@ export class SessionAutomationService {
         if (!occurrence || occurrence.sessionId !== request.sessionId || occurrence.scheduleId !== request.scheduleId || occurrence.generation !== request.generation || occurrence.admission?.taskId !== request.taskId) { await finish('rejected', 'binding_changed'); return; }
         // Agent 收尾报了受阻或等人决定时计划层记为没做成（runStatus=failed），同样不算完成。
         if (['failed', 'interrupted', 'cancelled'].includes(task?.status ?? '') || occurrence.result && (occurrence.result.outcome !== 'completed' || occurrence.runStatus !== 'completed')) { await finish('rejected', 'task_not_successful'); return; }
-        if (!task || task.status !== 'completed' || task.currentAttemptId !== request.attemptId || occurrence.runtimeAttemptId !== request.attemptId || occurrence.result?.outcome !== 'completed' || occurrence.delivery.status !== 'delivered') return;
+        if (!task || task.status !== 'completed' || task.currentAttemptId !== request.attemptId || occurrence.runtimeAttemptId !== request.attemptId || occurrence.result?.outcome !== 'completed' || !deliverySettled(occurrence.delivery)) return;
         const accepted = this.execution.getAcceptedTask(request.taskId);
         const session = await this.options.runtime.getSession(request.sessionId);
         try {
@@ -1472,7 +1472,13 @@ export class SessionAutomationService {
         }
         catch { await finish('rejected', 'authorization_revoked'); return; }
         const stopped = sessionScheduleSchema.parse({ ...schedule.value, revision: schedule.value.revision + 1, generation: schedule.value.generation + 1,
-          enabled: false, nextDueAt: undefined, stopRequestId: request.taskId, outcome: { kind: 'completed', at: iso(this.clock()) }, updatedAt: iso(this.clock()) });
+          enabled: false, nextDueAt: undefined, stopRequestId: request.taskId, outcome: { kind: 'completed', at: iso(this.clock()) }, updatedAt: iso(this.clock()),
+          // 结果没送到也照样停用，否则计划会一直跑下去；停用原因和停用告知要说明这一点。
+          ...occurrence.delivery.status !== 'delivered' ? {
+            disabledReason: occurrence.delivery.status === 'error' ? `已确认完成，但结果投递 ${occurrence.delivery.attempts} 次都失败` : '已确认完成，但这一轮的结果没有投递',
+            disabledAt: iso(this.clock()),
+            ...this.options.onScheduleDisabled ? { disableNotification: { status: 'pending', attempts: 0, name: schedule.value.name, updatedAt: iso(this.clock()) } } : {}
+          } : {} });
         if (await this.replace(scheduleKey(request.scheduleId), schedule.raw, stopped)) await finish('applied');
       });
     }
@@ -3337,6 +3343,11 @@ export class SessionAutomationService {
     await this.applyScheduleStops();
   }
 
+}
+
+/** 结果投递已有结论：送达、本就不投递，或已用完重试次数仍失败（不会再自动重发）。 */
+function deliverySettled(delivery: DeliveryRecord['delivery']): boolean {
+  return delivery.status === 'delivered' || delivery.status === 'not_requested' || delivery.status === 'error' && delivery.attempts >= NOTICE_MAX_ATTEMPTS;
 }
 
 /**

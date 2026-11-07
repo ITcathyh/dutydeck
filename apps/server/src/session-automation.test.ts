@@ -2561,6 +2561,35 @@ describe('follow-up until done: completion condition, deadline and run state', (
     expect(h.dispatches).toHaveLength(1);
   });
 
+  it('still stops after the result delivery gives up, and says the result was not delivered', async () => {
+    const deliver = vi.fn(async () => { throw new Error('bot was removed from the chat'); });
+    const onScheduleDisabled = vi.fn(async () => {});
+    const h = await fixture({ deliver, onScheduleDisabled });
+    const schedule = await enable(h, { ...followUp, trigger: { kind: 'interval', everySeconds: 3600, anchorAt: '2026-09-12T00:00:00.000Z' } });
+    h.now.value = new Date('2026-09-12T01:00:01.000Z'); await h.service.tick();
+    const task = h.dispatches[0]!;
+    const attempt = bound(h.repositories).claimNext({ sessionId: h.session.id, runId: h.session.runId })!.attempt!;
+    await h.service.requestScheduleStop(h.session.id, task.id, attempt.attemptId, 'ou_owner');
+    h.settleTask(task.id);
+    const delivery = async () => (await h.service.listBySession(h.session.id)).occurrences[0]!.delivery;
+    const current = () => h.service.getScheduleDefinition(h.session.id, schedule.id, 'ou_owner');
+    await vi.waitFor(async () => { await h.service.tick(); expect(await delivery()).toMatchObject({ status: 'error', attempts: 1 }); });
+    for (const attempts of [2, 3]) {
+      expect(await current()).toMatchObject({ enabled: true });
+      h.now.value = new Date(h.now.value.getTime() + 60_000 * (attempts - 1));
+      await vi.waitFor(async () => { await h.service.tick(); expect(await delivery()).toMatchObject({ status: 'error', attempts }); });
+    }
+    await vi.waitFor(async () => expect((await current()).enabled).toBe(false));
+    expect(await current()).toMatchObject({ outcome: { kind: 'completed' }, disabledReason: expect.stringContaining('结果投递 3 次都失败') });
+    expect(JSON.parse((await h.repositories.config.get(`session_automation/stop_request/${task.id}`))!).status).toBe('applied');
+    await h.service.tick();
+    expect(onScheduleDisabled).toHaveBeenCalledOnce();
+    expect(await runState(h, schedule.id)).toBe('completed');
+    h.now.value = new Date('2026-09-12T03:00:01.000Z'); await h.service.tick(); await h.service.tick();
+    expect(h.dispatches).toHaveLength(1);
+    expect(deliver).toHaveBeenCalledTimes(3);
+  });
+
   it.each(['failed', 'report_blocked'] as const)('does not treat a %s run as completed even when it requested stop-self', async kind => {
     const h = await fixture({ deliver: async () => {} });
     const schedule = await enable(h);
