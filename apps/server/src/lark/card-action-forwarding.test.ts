@@ -8,6 +8,7 @@ import type * as LarkSdk from '@larksuiteoapi/node-sdk';
 import { LarkLongConnectionListener, LarkMessageCoordinator } from './listener.js';
 import { cardActionRoute, parseCardActionForwarding } from './card-action-forwarding.js';
 import { readLarkConfig, saveLarkConfig, type StoredLarkConfig } from './config.js';
+import { targetGuard } from '../../../../tests/support/target-server.js';
 
 // Keep the real SDK parser and dispatcher; only the network connection is isolated.
 const sdk = vi.hoisted(() => ({ dispatcher: undefined as LarkSdk.EventDispatcher | undefined }));
@@ -30,7 +31,9 @@ const click = (value: unknown = { owner: forwarding.owner, action: 'ack' }, even
 });
 
 async function stub(handle: (request: IncomingMessage, response: ServerResponse, body: any) => void) {
+  const guard = targetGuard(request => request.method === 'POST' && request.url === '/callback');
   const server = createServer(async (request, response) => {
+    if (!guard.accept(request, response)) return;
     let raw = ''; for await (const chunk of request) raw += chunk;
     let body: unknown;
     try { body = JSON.parse(raw); } catch { response.destroy(); return; }

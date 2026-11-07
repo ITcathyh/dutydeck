@@ -4,11 +4,16 @@ import type { AddressInfo } from 'node:net';
 import WebSocket, { WebSocketServer } from 'ws';
 import { buildApp } from './app.js';
 import { parsePeerInstances } from './instance-proxy.js';
+import { targetGuard } from '../../../tests/support/target-server.js';
 
 type Seen = { method?: string; url?: string; headers: IncomingHttpHeaders; body: string };
 
 const closers: Array<() => Promise<unknown>> = [];
-afterEach(async () => { for (const close of closers.splice(0).reverse()) await close(); });
+const guards: Array<ReturnType<typeof targetGuard>> = [];
+afterEach(async () => {
+  for (const close of closers.splice(0).reverse()) await close();
+  for (const { strayRequests } of guards.splice(0)) expect(strayRequests).toEqual([]);
+});
 
 const listen = async (server: Server) => {
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -20,7 +25,10 @@ async function startPeer() {
   const seen: Seen[] = [];
   const streams: ServerResponse[] = [];
   let closedStreams = 0;
+  const guard = targetGuard(request => /^\/api\/(sessions\/s1\/|needs-login$)/.test(request.url!));
+  guards.push(guard);
   const server = createServer((request, response) => {
+    if (!guard.accept(request, response)) return;
     let body = '';
     request.on('data', chunk => { body += chunk; });
     request.on('end', () => {

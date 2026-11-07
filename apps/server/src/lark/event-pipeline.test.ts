@@ -8,6 +8,7 @@ import { createRepositories } from '@dutydeck/storage';
 import { LarkLongConnectionListener, LarkMessageCoordinator } from './listener.js';
 import { parseLarkEventHandlers, type LarkEventHandler } from './event-pipeline.js';
 import { readLarkConfig, saveLarkConfig, type StoredLarkConfig } from './config.js';
+import { targetGuard } from '../../../../tests/support/target-server.js';
 
 const sdk = vi.hoisted(() => ({ dispatcher: undefined as LarkSdk.EventDispatcher | undefined }));
 vi.mock('@larksuiteoapi/node-sdk', async importOriginal => ({
@@ -35,7 +36,9 @@ const reply = (response: ServerResponse, body: unknown, status = 200) => {
   response.writeHead(status, { 'Content-Type': 'application/json' }); response.end(JSON.stringify(body));
 };
 async function stub(handle: (request: IncomingMessage, response: ServerResponse, body: any) => void) {
+  const guard = targetGuard(request => request.method === 'POST' && request.url === '/events');
   const server = createServer(async (request, response) => {
+    if (!guard.accept(request, response)) return;
     let raw = ''; for await (const chunk of request) raw += chunk;
     let body: unknown;
     try { body = JSON.parse(raw); } catch { response.destroy(); return; }

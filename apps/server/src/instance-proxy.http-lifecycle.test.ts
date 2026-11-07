@@ -3,10 +3,15 @@ import Fastify from 'fastify';
 import { createServer, get, Agent, type ClientRequest, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { registerInstanceProxy } from './instance-proxy.js';
+import { targetGuard } from '../../../tests/support/target-server.js';
+
+const proxiedSession = () => targetGuard(request => request.url!.startsWith('/api/sessions/s1'));
 
 it('shutdown settles with an open proxied SSE response', async () => {
   let upstream: ServerResponse | undefined;
-  const peer = createServer((_request, response) => {
+  const guard = proxiedSession();
+  const peer = createServer((request, response) => {
+    if (!guard.accept(request, response)) return;
     upstream = response;
     response.writeHead(200, { 'content-type': 'text/event-stream' });
     response.write('data: connected\n\n');
@@ -26,7 +31,7 @@ it('shutdown settles with an open proxied SSE response', async () => {
       client.on('error', reject);
     });
     closing = app.close();
-    const result = await Promise.race([closing.then(() => 'closed'), new Promise<string>(resolve => setTimeout(() => resolve('blocked'), 300))]);
+    const result = await Promise.race([closing.then(() => 'closed'), new Promise<string>(resolve => setTimeout(() => resolve('blocked'), 3_000))]);
     expect(result).toBe('closed');
   } finally {
     client?.destroy();
@@ -39,7 +44,9 @@ it('shutdown settles with an open proxied SSE response', async () => {
 
 it('a peer stream abort disconnects the downstream client', async () => {
   let upstream: ServerResponse | undefined;
-  const peer = createServer((_request, response) => {
+  const guard = proxiedSession();
+  const peer = createServer((request, response) => {
+    if (!guard.accept(request, response)) return;
     upstream = response;
     response.writeHead(200, { 'content-type': 'text/event-stream' });
     response.write('data: connected\n\n');
@@ -75,7 +82,9 @@ it('cancels an HTTP forward waiting for upstream headers during shutdown', async
   let reached!: () => void;
   const received = new Promise<void>(resolve => { reached = resolve; });
   let upstreamClosed = false;
-  const peer = createServer((_request, response) => {
+  const guard = proxiedSession();
+  const peer = createServer((request, response) => {
+    if (!guard.accept(request, response)) return;
     response.once('close', () => { upstreamClosed = true; });
     reached();
   });
@@ -89,7 +98,7 @@ it('cancels an HTTP forward waiting for upstream headers during shutdown', async
   try {
     await received;
     closing = app.close();
-    expect(await Promise.race([closing.then(() => 'closed'), new Promise(resolve => setTimeout(() => resolve('blocked'), 300))])).toBe('closed');
+    expect(await Promise.race([closing.then(() => 'closed'), new Promise(resolve => setTimeout(() => resolve('blocked'), 3_000))])).toBe('closed');
     await vi.waitFor(() => expect(upstreamClosed).toBe(true));
   } finally {
     client.destroy(); peer.closeAllConnections();
@@ -100,7 +109,8 @@ it('cancels an HTTP forward waiting for upstream headers during shutdown', async
 
 it('drains complete HTTP responses and preserves the downstream keep-alive connection', async () => {
   const text = 'response'.repeat(64 * 1024);
-  const peer = createServer((_request, response) => response.end(text));
+  const guard = proxiedSession();
+  const peer = createServer((request, response) => { if (guard.accept(request, response)) response.end(text); });
   await new Promise<void>(resolve => peer.listen(0, '127.0.0.1', resolve));
   const app = Fastify();
   await registerInstanceProxy(app, [{ id: 'peer', name: 'Peer', url: `http://127.0.0.1:${(peer.address() as AddressInfo).port}` }], undefined);

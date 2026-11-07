@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RelayAskBroker, type RelayAskChoice } from '@dutydeck/relay';
 import { createCliAdapter } from '@dutydeck/cli-adapters';
 import { readNativeAskPayload, runNativeAskHook } from './native-ask-hook.js';
+import { targetGuard } from '../../../tests/support/target-server.js';
 
 const env = { dutydeck_relay_url: 'http://127.0.0.1/api/relay', dutydeck_relay_token: 'fixture-token' };
 const payload = { hook_event_name: 'PreToolUse', tool_name: 'AskUserQuestion', tool_input: { questions: [
@@ -15,7 +16,11 @@ const payload = { hook_event_name: 'PreToolUse', tool_name: 'AskUserQuestion', t
   { question: '下一步？', multiSelect: false, options: [{ label: '继续' }, { label: '暂停' }] },
 ] } };
 const cleanup: Array<() => Promise<void>> = [];
-afterEach(async () => { for (const close of cleanup.splice(0)) await close(); });
+const guards: Array<ReturnType<typeof targetGuard>> = [];
+afterEach(async () => {
+  for (const close of cleanup.splice(0)) await close();
+  for (const { strayRequests } of guards.splice(0)) expect(strayRequests).toEqual([]);
+});
 
 describe('native Claude questions over the session relay', () => {
   it('executes the generated native hook as a real subprocess and returns exact answers to Claude', async () => {
@@ -23,7 +28,10 @@ describe('native Claude questions over the session relay', () => {
     const broker = new RelayAskBroker({ publish: async (_session, event) => {
       if (event.kind === 'ask') await broker.answer(event.askId!, event.multiple ? '代码、文档' : '稍后再继续');
     } });
+    const guard = targetGuard(request => request.method === 'POST' && request.url === '/api/relay/sessions/self/ask');
+    guards.push(guard);
     const server = createServer(async (request, response) => {
+      if (!guard.accept(request, response)) return;
       const chunks: Buffer[] = [];
       for await (const chunk of request) chunks.push(Buffer.from(chunk));
       const body = JSON.parse(Buffer.concat(chunks).toString());
