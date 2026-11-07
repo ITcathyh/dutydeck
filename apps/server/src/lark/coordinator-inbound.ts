@@ -2367,8 +2367,8 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     if (workspace) lines.push(`**工作区**：${larkCommandEcho(workspace, 160)}${worktree ? `（独立 worktree${worktreeSource}）` : ''}`);
     if (session?.model) lines.push(`**模型**：${larkCommandEcho(session.model, 128)}`);
     if (session?.reasoningEffort) lines.push(`**推理强度**：${larkCommandEcho(session.reasoningEffort, 32)}`);
-    // worktree 会话的 cwd 是另建的目录，和配置比较只会误报。
-    if (session && !worktree && config.workspace && !sameWorkspace(session.cwd, config.workspace)) {
+    // worktree 会话的 cwd 是另建的目录，拿它的源目录比较；与会话复用（larkSessionMatchesScope）用同一个口径。
+    if (session && config.workspace && !sameWorkspace(session.workspaceSourceCwd ?? session.cwd, config.workspace)) {
       lines.push(`**配置的工作区**：${larkCommandEcho(config.workspace, 160)}（下一个新会话生效）`);
     }
     lines.push(`**会话**：\`${larkCommandEcho(sessionId, 64)}\``);

@@ -217,6 +217,16 @@ describe('/status 写明以谁的身份执行', () => {
     const text = h.markdownOf(h.receiptNamed('任务状态'));
     expect(text).toContain(`**工作区**：${session.cwd}（独立 worktree，基于 ${h.cwd}）`);
     expect(text).not.toContain('配置的工作区');
+
+    // 机器人工作区之后真的改了，按 worktree 的源目录比较，照样提示下一个新会话用哪个目录。
+    const moved = await mkdtemp(join(tmpdir(), 'dutydeck-lark-moved-'));
+    cleanups.push(() => rm(moved, { recursive: true, force: true }));
+    const movedConfig = { ...h.config, workspace: moved };
+    await h.repos.config.set(larkBotsConfigKey, JSON.stringify([movedConfig]));
+    await h.coordinator.handle(event('om_status_moved', '/status'), movedConfig);
+    const movedText = h.markdownOf(h.receiptNamed('任务状态'));
+    expect(movedText).toContain(`**工作区**：${session.cwd}（独立 worktree，基于 ${h.cwd}）`);
+    expect(movedText).toContain(`**配置的工作区**：${moved}（下一个新会话生效）`);
   });
 });
 
