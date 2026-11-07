@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { conclusionPlainText, displayCommand, displayWidth, formatTurnSpan, isIndexColumn, isSequenceColumn, liveTurnFacts, nowrapColumns, rhythmBarHeight, rhythmBucketCount, rhythmBuckets, rhythmLiveSpan, shareNowLine, shareStatus, summaryTurnFacts, turnMomentWidth } from './share-view';
+import { BACKGROUND_FOLLOWUP } from '@dutydeck/shared';
+import { conclusionPlainText, finalSection, displayCommand, displayWidth, formatTurnSpan, isIndexColumn, isSequenceColumn, liveTurnFacts, nowrapColumns, rhythmBarHeight, rhythmBucketCount, rhythmBuckets, rhythmLiveSpan, shareableEvents, shareNowLine, shareStatus, summaryTurnFacts, turnMomentWidth } from './share-view';
 import { buildTimeline, buildTimelineSections, type TimelineEvent } from './timeline';
 import type { DockEvent, HistoryTurnSummary, Task } from './api';
 
@@ -150,6 +151,23 @@ describe('一轮的事实', () => {
     expect(facts.spans).toEqual([[Date.parse('2026-11-04T06:37:05.000Z'), Date.parse('2026-11-04T06:37:09.000Z')], [Date.parse('2026-11-04T06:38:00.000Z'), undefined]]);
     expect(facts.lastTool?.data.id).toBe('two');
     expect(facts.record.some(section => section.kind === 'event' && section.event.data.role === 'user')).toBe(false);
+  });
+
+  it('后台任务结束后的回答不进分享页：结论不变，执行过程里也没有它', () => {
+    const events: DockEvent[] = [
+      { id: 'p', sequence: 1, type: 'text', timestamp: '2026-11-04T06:37:00.000Z', taskId: 't', data: { role: 'user', text: '问', taskId: 't' } },
+      { id: 'c1', sequence: 2, type: 'tool_call', timestamp: '2026-11-04T06:37:05.000Z', taskId: 't', data: { id: 'one', name: 'exec', status: 'completed', input: { command: 'sleep 20' } } },
+      { id: 'a', sequence: 3, type: 'text', timestamp: '2026-11-04T06:37:10.000Z', taskId: 't', data: { text: '本轮回答' } },
+      { id: 'f', sequence: 4, type: 'text', timestamp: '2026-11-04T06:37:40.000Z', data: { text: '后台任务结果', origin: BACKGROUND_FOLLOWUP } }
+    ];
+    const tasks: Task[] = [{ id: 't', sessionId: 's', prompt: '问', status: 'completed', createdAt: '2026-11-04T06:37:00.000Z', updatedAt: '2026-11-04T06:37:10.000Z' }];
+    expect(shareableEvents(events).map(event => event.id)).toEqual(['p', 'c1', 'a']);
+    const sections = (input: DockEvent[]) => buildTimelineSections(buildTimeline(input, tasks), tasks);
+    expect(finalSection(sections(shareableEvents(events)))).toEqual(finalSection(sections(events.slice(0, 3))));
+    expect(finalSection(sections(events))?.event.data.text).toBe('本轮回答');
+    const facts = liveTurnFacts(sections(events), false);
+    expect(facts.output?.text).toBe('本轮回答');
+    expect(JSON.stringify(facts.record)).not.toContain('后台任务结果');
   });
 
   it('子任务的限流、额度诊断不计入工具调用、节律和字幕', () => {

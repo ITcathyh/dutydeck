@@ -11,6 +11,7 @@ import {
   autostartEnable,
   autostartStatus,
   autostartUnitContent,
+  mergeAutostartPath,
   type AutostartCommandOutput,
   type AutostartOptions
 } from './autostart.js';
@@ -95,6 +96,8 @@ describe('Dutydeck 开机自启', () => {
       username: 'tester',
       uid: 501,
       pathEnv: '/usr/local/bin:/usr/bin:/bin',
+      // 合并 PATH 时不去查宿主机的真实目录。
+      dirExists: () => true,
       // 默认让 SQLite 预检通过：不真的去执行这些假解释器路径。
       checkSqlite: ({ execPath = '' }) => ({ ok: true, execPath }),
       ...overrides
@@ -164,7 +167,7 @@ describe('Dutydeck 开机自启', () => {
     expect(plist).toContain('<key>KeepAlive</key>\n    <dict>\n        <key>SuccessfulExit</key>\n        <false/>\n    </dict>');
     expect(plist).toContain('<key>ThrottleInterval</key>\n    <integer>30</integer>');
     expect(plist).toContain('<key>DUTYDECK_SUPERVISOR</key>\n        <string>launchd</string>');
-    expect(plist).toContain('<string>/usr/local/bin:/usr/bin:/bin</string>');
+    expect(plist).toContain('<string>/usr/local/bin:/usr/bin:/bin:/usr/local/node/v22.12.0/bin</string>');
     // 与 Linux unit 一样钉在 daemon 根目录，日志写守护日志。
     expect(plist).toContain(`<key>WorkingDirectory</key>\n    <string>${join(tmp, HOME)}</string>`);
     expect(plist).toContain(`<string>${join(tmp, HOME, '.dutydeck', 'daemon', 'dutydeck.log')}</string>`);
@@ -312,7 +315,7 @@ describe('Dutydeck 开机自启', () => {
     expect(unit).toContain(`StandardError=append:${daemonLog}\n`);
     expect(existsSync(dirname(daemonLog))).toBe(true);
     expect(unit).toContain('WantedBy=default.target');
-    expect(unit).toContain('Environment=PATH=/usr/local/bin:/usr/bin:/bin');
+    expect(unit).toContain('Environment=PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/node/v22.12.0/bin\n');
   });
 
   it('Linux: HOME 是符号链接时 WorkingDirectory 写真实路径，与 daemon 记录的 process.cwd() 一致', async () => {
@@ -622,6 +625,9 @@ describe('Dutydeck 开机自启', () => {
 
     const unit = autostartUnitContent(options('linux', commandLog(), nasty));
     expect(unit).toContain('ExecStart="/opt/no de/bin/node" /opt/a&b/<cli>.js start');
+    // Environment=PATH= 不加引号，带空格的 node 目录会被 systemd 拆开，所以不追加；plist 里照常追加。
+    expect(/^Environment=PATH=(.*)$/m.exec(unit)?.[1]).not.toContain('no de');
+    expect(plist).toContain(':/opt/no de/bin</string>');
   });
 
   it('autostartUnitContent 与实际写入磁盘的内容完全一致', async () => {
@@ -634,14 +640,71 @@ describe('Dutydeck 开机自启', () => {
 
   // ─── PATH 不算漂移 ───────────────────────────────────────────────────────
 
-  it.each(['linux', 'darwin'])('%s: 只有 PATH 与当前 shell 不同时不报漂移、不建议 enable，只提示一行', async platform => {
+  /** 磁盘上 unit / plist 里写的 PATH（plist 里未经 XML 反转义）。 */
+  function writtenPath(platform: string): string | undefined {
+    const content = readFileSync(platform === 'darwin' ? macPlist() : linuxUnit(), 'utf8');
+    return platform === 'darwin' ? /<key>PATH<\/key>\s*<string>([^<]*)<\/string>/.exec(content)?.[1] : /^Environment=PATH=(.*)$/m.exec(content)?.[1];
+  }
+
+  it.each(['linux', 'darwin'])('%s: 当前 shell 的 PATH 里有 unit 没有的目录时不报漂移，只提示一行重跑 enable 会并进去', async platform => {
     const responder = platform === 'linux' ? linuxResponder({ isEnabled: true, isActive: true }) : macLoaded;
+    const kind = platform === 'darwin' ? 'plist' : 'unit';
     await autostartEnable(options(platform, commandLog(responder)));
     const result = await autostartStatus(options(platform, commandLog(responder), { pathEnv: '/opt/other/bin:/usr/bin:/bin' }));
     expect(result.state.stale).toBe(false);
     expect(result.state.pathDiffers).toBe(true);
-    expect(result.notices.some(notice => notice.includes('PATH 与当前 shell 不同'))).toBe(true);
-    expect(result.notices.some(notice => notice.includes('autostart enable'))).toBe(false);
+    expect(result.notices.some(notice => notice.includes('启动路径已变'))).toBe(false);
+    const mentionsEnable = result.notices.filter(notice => notice.includes('autostart enable'));
+    expect(mentionsEnable).toHaveLength(1);
+    expect(mentionsEnable[0]).toContain(`${kind} 的 PATH 缺少当前 shell PATH 或 node 所在的目录`);
+    expect(mentionsEnable[0]).toContain(`${kind} 里已有且仍存在的目录会保留`);
+  });
+
+  it('mergeAutostartPath: 调用者在前，磁盘上仍存在的目录追加在后，去重，两侧都丢掉 /tmp/arg0/，node 目录只补一次', () => {
+    const exists = (dir: string) => dir !== '/gone/bin';
+    expect(mergeAutostartPath('/b:/a:/b', '/a:/c:/gone/bin:/x/tmp/arg0/1:/n', '/n', exists)).toBe('/b:/a:/c:/n');
+    expect(mergeAutostartPath('/x/tmp/arg0/2:/a::/a', undefined, '/n', exists)).toBe('/a:/n');
+    expect(mergeAutostartPath('/n:/a', '/a:/n', '/n', exists)).toBe('/n:/a');
+  });
+
+  it.each(['linux', 'darwin'])('%s: 首次 enable 去掉重复项和 /tmp/arg0/ 临时目录，保持原顺序，末尾补上 node 所在目录', async platform => {
+    const responder = platform === 'linux' ? linuxResponder() : macNotLoaded;
+    const pathEnv = '/usr/local/bin:/home/tester/.codex/tmp/arg0/abc:/usr/bin:/usr/local/bin:/bin:/usr/bin';
+    await autostartEnable(options(platform, commandLog(responder), { pathEnv }));
+    expect(writtenPath(platform)).toBe('/usr/local/bin:/usr/bin:/bin:/usr/local/node/v22.12.0/bin');
+  });
+
+  it.each(['linux', 'darwin'])('%s: 用更窄的 PATH 重跑 enable 只增不减，已不存在的目录不带回，再跑一次不改动', async platform => {
+    const responder = platform === 'linux' ? linuxResponder({ isEnabled: true }) : macNotLoaded;
+    const removed = '/home/tester/.nvm/versions/node/v20.0.0/bin';
+    const dirExists = (dir: string) => dir !== removed;
+    const wide = `/home/tester/.local/bin:${removed}:/usr/local/bin:/usr/bin:/bin`;
+    await autostartEnable(options(platform, commandLog(responder), { pathEnv: wide }));
+    expect(writtenPath(platform)).toBe(`${wide}:/usr/local/node/v22.12.0/bin`);
+
+    const narrow = (log: CommandLog) => options(platform, log, { pathEnv: '/usr/bin:/bin', dirExists });
+    expect((await autostartEnable(narrow(commandLog(responder)))).changed).toBe(true);
+    expect(writtenPath(platform)).toBe('/usr/bin:/bin:/home/tester/.local/bin:/usr/local/bin:/usr/local/node/v22.12.0/bin');
+
+    const again = commandLog(responder);
+    expect((await autostartEnable(narrow(again))).changed).toBe(false);
+    expect(again.calls).not.toContain('systemctl --user daemon-reload');
+    const status = await autostartStatus(narrow(commandLog(responder)));
+    expect(status.state.stale).toBe(false);
+    expect(status.state.pathDiffers).toBeUndefined();
+  });
+
+  it('node 换了目录、窄 PATH 里也没有它时，重跑 enable 写出的 PATH 仍能找到 node', async () => {
+    const oldNodeDir = join(tmp, 'nvm', 'v20.0.0', 'bin');
+    const newNodeDir = join(tmp, 'nvm', 'v22.12.0', 'bin');
+    mkdirSync(newNodeDir, { recursive: true });
+    writeFileSync(join(newNodeDir, 'node'), '');
+    await autostartEnable(options('linux', commandLog(linuxResponder()), { execPath: join(oldNodeDir, 'node'), pathEnv: `${oldNodeDir}:/usr/bin:/bin`, dirExists: existsSync }));
+    await autostartEnable(options('linux', commandLog(linuxResponder()), { execPath: join(newNodeDir, 'node'), pathEnv: '/usr/bin:/bin', dirExists: existsSync }));
+    const dirs = writtenPath('linux')!.split(':');
+    expect(dirs).not.toContain(oldNodeDir);
+    expect(dirs).toContain(newNodeDir);
+    expect(dirs.some(dir => existsSync(join(dir, 'node')))).toBe(true);
   });
 
   it('PATH 之外还有变化时照常报漂移', async () => {

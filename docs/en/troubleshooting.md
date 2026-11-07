@@ -7,6 +7,7 @@
 - **Allow rules in your local `~/.claude/settings.json` bypass Lark per-action approval.** Claude terminal sessions from Lark start in `default` mode, but `permissions.allow` rules still apply, and matching actions never produce an approval card. Clear those rules if you need strict per-action approval.
 - **With `/plan`, pre-approved writes on the ACP side cannot be blocked.** Planning blocks writes by rejecting every permission request the agent sends. If Claude ACP has its own allow rules (e.g. in settings) or runs in bypass mode, those actions never ask Dutydeck. Don't pre-approve writes on the ACP side when you use `/plan`.
 - **Credential protection matches rules; it is not isolation.** Rewriting a command (encoding, building the path, writing a script and running it) may get past it, and in full-trust mode senders outside the allowlist can still make the agent run any command as the local user. For bots open to others, use enforced mode or don't give them full trust.
+- **The high-risk command pattern matches raw text; it is not a sandbox.** Quoting, backslashes, path prefixes or subshells (e.g. `"rm" -rf`, `\rm`, `/bin/rm`, `$(rm …)`, `git 'push'`) may get past it, and so does an option in between such as `git -C . push`. It narrows exposure, like credential protection.
 - Cursor terminal sessions with raw-screen output only may show an answer in playback but still be recorded as failed because normalized final text is unavailable.
 - The verification gate only applies to Lark tasks and needs a command configured.
 - Traex terminal mode reports no usage; Codex terminal mode records per-turn tokens and estimated cost but is not yet counted against caps. Caps don't apply to either; cost figures are estimates.
@@ -18,6 +19,8 @@
 ## FAQ <a id="faq"></a>
 
 **The bot doesn't react in Lark?** Run `dutydeck doctor` (it checks the Lark listener and each default Agent's `--version`); make sure the app has the Bot capability and a long-connection event subscription (`im.message.receive_v1`); in groups, `@` the bot unless the topic is already owned (levels above "mention only").
+
+**The long connection dropped and never came back?** The Lark SDK reconnects on its own first. If a reconnect stays stuck (e.g. a proxy accepts the connection but never answers) for more than 10 minutes, Dutydeck rebuilds just that long connection without touching running sessions, and rebuilds it again after the same interval if it is still stuck. Set the interval with the daemon environment variable `DUTYDECK_LARK_RECONNECT_STALL_MS` (milliseconds, minimum 60 seconds, `0` turns it off). When `doctor` says "Dutydeck 已在 … 重建长连接，仍未恢复" (the long connection was rebuilt at … and has not recovered yet), check the network and proxy path to the Lark Open Platform.
 
 **`Persisted key policy violation`?** ACPX persists session options and requires `snake_case` keys. Don't write uppercase env names into session options.
 

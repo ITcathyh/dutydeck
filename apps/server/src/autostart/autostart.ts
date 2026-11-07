@@ -57,7 +57,7 @@ export interface AutostartState {
   lingerEnabled?: boolean;
   /** True when the on-disk unit no longer matches what we would write now (PATH 不算在内). */
   stale?: boolean;
-  /** 磁盘上的 unit / plist 只有 PATH 与当前 shell 不同。只是提示：不影响启动，也不算漂移。 */
+  /** 当前 shell 的 PATH 里有磁盘上 unit / plist 没有的目录，其余内容一致。只是提示：不影响启动，也不算漂移。 */
   pathDiffers?: boolean;
   details?: string[];
 }
@@ -102,8 +102,10 @@ export interface AutostartOptions {
   root?: string;
   /** 引导钩子的工作目录，默认 `homeDir`（`dutydeck start` 会据此定位 daemon 目录）。 */
   workingDir?: string;
-  /** 写进 unit 的 PATH，默认取安装时 shell 的 `process.env.PATH`。 */
+  /** 调用者的 PATH，默认 `process.env.PATH`。写进 unit 前与磁盘上已有的 PATH 合并，见 {@link mergeAutostartPath}。 */
   pathEnv?: string;
+  /** 合并 PATH 时判断磁盘上 unit 里的目录是否还在，默认 `existsSync`。测试注入。 */
+  dirExists?: (dir: string) => boolean;
   /** 当前用户名，用于 `loginctl` 探测与提示，默认 `os.userInfo().username`。 */
   username?: string;
   /** launchd 域 `gui/<uid>` 用的 uid，默认 `process.getuid()`。 */
@@ -156,6 +158,7 @@ interface ResolvedAutostart {
   cliPath: string;
   workingDir: string;
   pathEnv: string;
+  dirExists: (dir: string) => boolean;
   username: string;
   uid: number;
   run: AutostartRunCommand;
@@ -229,6 +232,7 @@ function resolveOptions(options: AutostartOptions = {}): ResolvedAutostart {
     cliPath: releaseCurrentPath(options.cliPath ?? (entry ? resolve(entry) : 'dutydeck')),
     workingDir,
     pathEnv: options.pathEnv ?? process.env.PATH ?? (platform === 'darwin' ? DARWIN_FALLBACK_PATH : LINUX_FALLBACK_PATH),
+    dirExists: options.dirExists ?? existsSync,
     username: options.username ?? currentUsername(),
     uid: options.uid ?? currentUid(),
     run: options.runCommand ?? defaultRunCommand,
@@ -454,15 +458,42 @@ function onDiskPath(config: ResolvedAutostart, content: string): string | undefi
 }
 
 /**
- * 磁盘内容与期望内容的差异。PATH 不算漂移：unit 的 PATH 是 enable 时那个 shell 的，换个 shell 跑 status /
- * doctor 本来就会不同；按「已漂移」去重跑 enable，反而会把 unit 的 PATH 换成当前 shell 的。只有 PATH 不同时
- * 报 pathDiffers。
+ * 写进 unit / plist 的 PATH：调用者的 PATH 按原顺序在前，磁盘上已有 PATH 里多出来且目录仍存在的项追加在后，
+ * 去重时保留第一次出现的位置，`execDir`（给了的话）不在其中时追加到末尾。从 Agent 会话、cron 或 ssh 这类较窄的环境重跑
+ * enable 时，PATH 只增不减，开机拉起的服务仍能找到 node。含 `/tmp/arg0/` 的是 Agent 会话期的临时目录，两侧都丢掉。
+ */
+export function mergeAutostartPath(callerPath: string, diskPath: string | undefined, execDir: string | undefined, exists: (dir: string) => boolean): string {
+  const durable = (dir: string) => dir !== '' && !dir.includes('/tmp/arg0/');
+  const merged = new Set(callerPath.split(':').filter(durable));
+  for (const dir of (diskPath ?? '').split(':').filter(durable)) {
+    if (!merged.has(dir) && exists(dir)) merged.add(dir);
+  }
+  if (execDir) merged.add(execDir);
+  return [...merged].join(':');
+}
+
+/** PATH 与磁盘上已有的合并后的配置，enable 写入、status 比较都按它来。 */
+function withMergedPath(config: ResolvedAutostart, onDisk: string | undefined): ResolvedAutostart {
+  const existing = onDisk === undefined ? undefined : onDiskPath(config, onDisk);
+  // unit 的 Environment=PATH= 不加引号，带空白的目录会被 systemd 拆开；这种 node 目录不追加。
+  const execDir = dirname(config.execPath);
+  const appendable = config.platform === 'linux' && /\s/.test(execDir) ? undefined : execDir;
+  return { ...config, pathEnv: mergeAutostartPath(config.pathEnv, existing, appendable, config.dirExists) };
+}
+
+/**
+ * 磁盘内容与期望内容（PATH 已合并）的差异。PATH 不算漂移：换个 shell 跑 status / doctor，PATH 本来就会不同。
+ * 只有 PATH 不同、且合并结果里有磁盘上没有的目录时报 pathDiffers，重跑 enable 会把它们并进去；只是顺序不同或
+ * 磁盘上有已不存在的目录时不提示。
  */
 function compareOnDisk(config: ResolvedAutostart, onDisk: string | undefined): { stale?: boolean; pathDiffers?: true } {
   if (onDisk === undefined) return {};
   if (onDisk === renderDesired(config)) return { stale: false };
   const path = onDiskPath(config, onDisk);
-  if (path !== undefined && path !== config.pathEnv && renderDesired({ ...config, pathEnv: path }) === onDisk) return { stale: false, pathDiffers: true };
+  if (path !== undefined && path !== config.pathEnv && renderDesired({ ...config, pathEnv: path }) === onDisk) {
+    const present = new Set(path.split(':'));
+    return config.pathEnv.split(':').some(dir => !present.has(dir)) ? { stale: false, pathDiffers: true } : { stale: false };
+  }
   return { stale: true };
 }
 
@@ -476,7 +507,8 @@ function unsupported(config: ResolvedAutostart): AutostartError {
 
 /** 期望写入磁盘的 plist / unit 文本（unsupported 平台抛错）。 */
 export function autostartUnitContent(options: AutostartOptions = {}): string {
-  return renderDesired(resolveOptions(options));
+  const config = resolveOptions(options);
+  return renderDesired(withMergedPath(config, config.unitPath === undefined ? undefined : readTextFile(config.unitPath)));
 }
 
 // ─── 平台探测 ────────────────────────────────────────────────────────────────
@@ -517,7 +549,7 @@ export function firstLine(value: string): string {
 async function inspectDarwin(config: ResolvedAutostart): Promise<AutostartState> {
   const unitPath = config.unitPath!;
   const onDisk = readTextFile(unitPath);
-  const drift = compareOnDisk(config, onDisk);
+  const drift = compareOnDisk(withMergedPath(config, onDisk), onDisk);
   const { loaded } = await launchdJob(config);
   const details = [
     '平台: macOS (launchd)',
@@ -545,7 +577,7 @@ async function inspectDarwin(config: ResolvedAutostart): Promise<AutostartState>
 async function inspectLinux(config: ResolvedAutostart): Promise<AutostartState> {
   const unitPath = config.unitPath!;
   const onDisk = readTextFile(unitPath);
-  const drift = compareOnDisk(config, onDisk);
+  const drift = compareOnDisk(withMergedPath(config, onDisk), onDisk);
   const details = [
     '平台: Linux (user systemd)',
     `unit 路径: ${unitPath}`,
@@ -616,7 +648,8 @@ function statusNotices(state: AutostartState, config: ResolvedAutostart): string
     notices.push(`磁盘上的 ${state.platform === 'darwin' ? 'plist' : 'unit'} 与当前期望内容不一致（启动路径已变），重新运行 dutydeck autostart enable 刷新。`);
   }
   if (state.pathDiffers) {
-    notices.push(`${state.platform === 'darwin' ? 'plist' : 'unit'} 里的 PATH 与当前 shell 不同，服务和它启动的 Agent 用的是前者。不影响启动，不是错误。`);
+    const kind = state.platform === 'darwin' ? 'plist' : 'unit';
+    notices.push(`${kind} 的 PATH 缺少当前 shell PATH 或 node 所在的目录，不影响启动。重跑 dutydeck autostart enable 会把它们并进去，${kind} 里已有且仍存在的目录会保留。`);
   }
   if (state.platform === 'linux' && state.enabled && state.lingerEnabled === false) {
     notices.push(lingerNotice(config));
@@ -660,7 +693,7 @@ async function enableDarwin(config: ResolvedAutostart): Promise<AutostartResult>
   // launchd 不会替我们建日志目录。
   mkdirSync(dirname(unitLogFile(config)), { recursive: true });
   rotateLogFileSync(unitLogFile(config));
-  const changed = writeIfChanged(unitPath, renderPlist(config));
+  const changed = writeIfChanged(unitPath, renderPlist(withMergedPath(config, readTextFile(unitPath))));
   const notices = [
     changed ? `已写入 LaunchAgent: ${unitPath}` : `LaunchAgent 已是最新，无需改动: ${unitPath}`,
     '开机自启已注册，将在下次登录时生效。',
@@ -714,8 +747,8 @@ async function enableLinux(config: ResolvedAutostart): Promise<AutostartResult> 
   // unit 会把 execPath 钉进 ExecStart：写之前用它真的加载一次 SQLite 驱动，别把起不来的解释器固化成配置。
   const sqlite = config.checkSqlite({ execPath: config.execPath, resolveFrom: config.cliPath });
   if (!sqlite.ok) throw sqliteUnavailable(config, sqlite);
-  const desired = renderUnit(config);
   const onDisk = readTextFile(unitPath);
+  const desired = renderUnit(withMergedPath(config, onDisk));
   if (onDisk !== undefined && onDisk !== desired) {
     const directives = customUnitDirectives(onDisk);
     if (directives.length > 0) throw unitCustomized(config, directives);

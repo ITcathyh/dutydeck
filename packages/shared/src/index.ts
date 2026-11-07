@@ -25,6 +25,10 @@ export const sessionStates = ['created', 'starting', 'idle', 'thinking', 'runnin
 export type SessionState = (typeof sessionStates)[number];
 export const eventTypes = ['text', 'thinking', 'tool_call', 'tool_result', 'permission_request', 'status', 'error', 'completed', 'task', 'raw_terminal'] as const;
 export type EventType = (typeof eventTypes)[number];
+/** A native background task's later answer: a run-level event outside any turn's result. */
+export const BACKGROUND_FOLLOWUP = 'background_followup';
+export const isBackgroundFollowup = (event: { data?: unknown }) =>
+  (event.data as { origin?: unknown } | undefined)?.origin === BACKGROUND_FOLLOWUP;
 
 export const agentConfigSchema = z.object({
   id: z.string().min(1),

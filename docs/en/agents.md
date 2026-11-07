@@ -82,6 +82,10 @@ Kiro 3.x is unverified: the Kiro 3.0.0 release notes say Kiro CLI is now a singl
 
 Do not enable Claude's `CLAUDE_CODE_RETRY_WATCHDOG` under Dutydeck: while it waits for a quota reset it produces no output and the process is not CPU-active, so the terminal-task idle timeout (the Agent `timeout`, default 600 seconds) ends the turn as stuck.
 
+Claude Code / Seed / Relay / Genius terminals start with `CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND=1` by default. From Claude 2.1.319, tool calls that an MCP server runs as tasks are moved to the background and their results no longer belong to the current turn; with this variable the MCP tool result stays in the turn, and a long MCP call keeps the turn busy. To restore backgrounding, set `CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND=0` in the Agent env; the same key in the `env` of `~/.claude/settings.json` also takes precedence over this default. Older Claude versions ignore the variable; terminals that are already running pick it up only after they are relaunched.
+
+Do not enable `CLAUDE_CODE_RESUME_INTERRUPTED_TURN` for the Claude used by Dutydeck: Claude may rerun the interrupted turn itself when the session is resumed, which conflicts with Dutydeck never automatically resending work whose result is unknown.
+
 ## 2. Permission modes
 
 Lark bots can use `ask`, `approve-reads` and `full-trust`. `deny-all` is not available for Lark bots.

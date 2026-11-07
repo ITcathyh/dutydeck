@@ -3,6 +3,7 @@ import { BrainCircuit, Check, ChevronDown, ClipboardList, File, FolderOpen, Gaug
 import type { AgentModel, Session, SkillReference, Task } from '../api';
 import { replaceSlashQuery, slashQuery, type ComposerReference, type ModelReadiness } from '../composer-utils';
 import { composerCapabilities, mergeComposerCommands, type ComposerCommandAction } from '../composer-commands';
+import { isImeComposing } from '../ime';
 import { Badge, Banner, Button, IconButton, Input, Popover, Spinner, usePopoverTrigger } from './primitives';
 import { busyStates } from './ui';
 
@@ -113,7 +114,7 @@ function FilePanel({ filePath, filePicker, onFilePathChange, onPickFile, onConfi
         aria-label="本地文件路径"
         value={filePath}
         onChange={event => onFilePathChange(event.target.value)}
-        onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); onConfirm(); } }}
+        onKeyDown={event => { if (event.key === 'Enter' && !isImeComposing(event)) { event.preventDefault(); onConfirm(); } }}
         placeholder="/Users/name/project/file.ts"
         className="min-w-0 flex-1 font-mono"
       />
@@ -278,8 +279,8 @@ export function Composer({ planFirst = false, onPlanFirstChange, state, session,
     requestAnimationFrame(() => textarea.current?.focus());
   };
   const keyboard = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    // IME 组字保护：中文输入法确认候选词时也会发 Enter，keyCode 229 是老版本浏览器的同一信号。
-    if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+    // IME 组字保护：中文输入法确认候选词时也会发 Enter。
+    if (isImeComposing(event)) return;
     if (event.key === 'Escape' && (panel || query !== undefined)) { event.preventDefault(); closePanel(); return; }
     // Enter 落到第一个**可用**命令上：落到禁用项会让人以为按键失灵。
     if (event.key === 'Enter' && !event.shiftKey && commandPanel && (visibleCommands.some(command => command.available) || visibleSkills[0])) {

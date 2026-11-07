@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 import { createHash } from 'node:crypto';
-import { cachedStatement } from './database-control.js';
+import { cachedStatement } from './statement-cache.js';
 import { RuntimeError, type JsonValue, type MemoryJob, type MemoryJobRepository, type MemoryJobScope, type MemoryJobVersion } from '@dutydeck/shared';
 import { assertBotProcessApp, assertBotProcessConfigWrite } from './bot-process.js';
 

@@ -31,7 +31,7 @@
  */
 import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
-import type { NormalizedDriverEvent } from '@dutydeck/shared';
+import { BACKGROUND_FOLLOWUP, type NormalizedDriverEvent } from '@dutydeck/shared';
 import { pinnedSessionUuid } from '@dutydeck/cli-adapters';
 import { claudeProjectDir, type CliPathEnv } from '../cli-paths.js';
 import { byMtimeDesc, parseJsonlObjects, readHead, walkFiles } from '../session-id/fs-scan.js';
@@ -291,6 +291,16 @@ export function mapClaudeEntry(entry: any): NormalizedDriverEvent[] | undefined 
   return undefined;
 }
 
+/** Assistant prose of a background-task continuation; its tool activity stays private. */
+function backgroundFollowupText(entry: any): NormalizedDriverEvent[] {
+  const uuid = typeof entry.uuid === 'string' && entry.uuid ? entry.uuid : undefined;
+  return (mapClaudeEntry(entry) ?? []).filter(event => event.type === 'text').map((event, index) => ({
+    ...event,
+    data: { ...event.data, origin: BACKGROUND_FOLLOWUP },
+    ...(uuid ? { sourceId: `claude-background-followup:${uuid}:${index}` } : {}),
+  }));
+}
+
 const API_ERROR_RAW_LIMIT = 300;
 
 /** First non-empty line of an API error, with credentials masked and capped at
@@ -542,7 +552,11 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
         if (backgroundChanged) this.backgroundSnapshot = JSON.stringify(backgroundEvent.data);
         // Native background follow-ups belong to their launch, never to the
         // business input that happens to be active when the notice arrives.
-        if (this.backgroundTasks.isNotificationContinuation() && this.backgroundWork === 0 && (!this.terminalScope || !!this.inputUuid)) return backgroundChanged ? [backgroundEvent] : undefined;
+        // Their answers surface as run-level events outside every turn result.
+        if (this.backgroundTasks.isNotificationContinuation() && this.backgroundWork === 0 && (!this.terminalScope || !!this.inputUuid)) {
+          const events = [...(backgroundChanged ? [backgroundEvent] : []), ...backgroundFollowupText(entry)];
+          return events.length > 0 ? events : undefined;
+        }
         // A recovery cursor is captured before submission. Its first fresh
         // business input supplies the same boundary as an exact live receipt.
         if (this.restoringTurn && nativeInput && !notification) {

@@ -1,4 +1,4 @@
-import { agentConfigSchema, errorMessage as describeError, type AgentConfig } from '@dutydeck/shared';
+import { agentConfigSchema, errorMessage as describeError, mapLimit, type AgentConfig } from '@dutydeck/shared';
 import { childEnvironment } from '@dutydeck/shared/child-environment';
 import { listAcpxBuiltinAgents } from '@dutydeck/acp-client';
 import { commandExists } from '@dutydeck/transports';
@@ -125,18 +125,21 @@ export interface PtyAgentContribution {
 const DEFAULT_PTY_CAPABILITIES = { pause: false, resume: true } as const;
 
 // PTY 扫描结果按贡献列表和 CODEX_PATH 缓存：commandExists/cliVersion 都是 spawnSync 重操作，相同配置不重复探测
-const scannedPtyAgents = new Map<string, Array<Omit<AgentConfig, 'cwd'>>>();
+// 缓存按贡献逐项记录；命中缓存时只对当时找不到的命令重新查一次 PATH（只是 stat）：
+// CLI 自更新替换可执行文件期间命令会短暂缺失，回来后下次扫描能找到，已找到的不再重复探测版本
+type PtyScanEntry = Omit<AgentConfig, 'cwd'> | undefined;
+const scannedPtyAgents = new Map<string, PtyScanEntry[]>();
+const scanPtyContribution = (contribution: PtyAgentContribution, env: NodeJS.ProcessEnv): PtyScanEntry => {
+  const command = ptyCommand(contribution, env);
+  if (!commandExists(command)) return undefined;
+  return { id: contribution.id, name: contribution.name, command, args: contribution.args ?? [], protocol: 'pty-cli' as const, ...(contribution.adapterId && contribution.adapterId !== contribution.id ? { adapterId: contribution.adapterId } : {}), env: {}, permissionMode: 'ask' as const, timeout: 600, capabilities: contribution.capabilities ?? DEFAULT_PTY_CAPABILITIES, builtin: contribution.builtin ?? true, version: cliVersion(command) };
+};
 const scanPtyAgents = (contributions: PtyAgentContribution[], env: NodeJS.ProcessEnv): Array<Omit<AgentConfig, 'cwd'>> => {
   const cacheKey = JSON.stringify([contributions, env.CODEX_PATH]);
   const cached = scannedPtyAgents.get(cacheKey);
-  if (cached) return cached;
-  const agents = contributions.flatMap(contribution => {
-    const command = ptyCommand(contribution, env);
-    if (!commandExists(command)) return [];
-    return [{ id: contribution.id, name: contribution.name, command, args: contribution.args ?? [], protocol: 'pty-cli' as const, ...(contribution.adapterId && contribution.adapterId !== contribution.id ? { adapterId: contribution.adapterId } : {}), env: {}, permissionMode: 'ask' as const, timeout: 600, capabilities: contribution.capabilities ?? DEFAULT_PTY_CAPABILITIES, builtin: contribution.builtin ?? true, version: cliVersion(command) }];
-  });
-  scannedPtyAgents.set(cacheKey, agents);
-  return agents;
+  const entries = contributions.map((contribution, index) => cached?.[index] ?? scanPtyContribution(contribution, env));
+  scannedPtyAgents.set(cacheKey, entries);
+  return entries.filter((entry): entry is Omit<AgentConfig, 'cwd'> => entry !== undefined);
 };
 
 export const builtinAgents = (cwd = process.cwd(), ptyContributions: PtyAgentContribution[] = [], env: NodeJS.ProcessEnv = process.env): AgentConfig[] => {
@@ -251,11 +254,8 @@ export async function loadConfigWithDiagnosticsAsync(env: NodeJS.ProcessEnv = pr
     ...ptyContributions.map(contribution => ptyCommand(contribution, merged)).filter(command => commandExists(command)),
     ...configured.filter(agent => probesConfiguredVersion(agent) && commandExists(agent.command)).map(agent => agent.command)
   ].filter((command): command is string => Boolean(command)));
-  const pending = [...commands];
   const prefetched = new Map<string, string | undefined>();
-  await Promise.all(Array.from({ length: Math.min(VERSION_PROBE_CONCURRENCY, pending.length) }, async () => {
-    for (let command = pending.shift(); command; command = pending.shift()) prefetched.set(versionKey(command), await cliVersionAsync(command));
-  }));
+  await mapLimit([...commands], VERSION_PROBE_CONCURRENCY, async command => { prefetched.set(versionKey(command), await cliVersionAsync(command)); });
   prefetchedVersions = prefetched;
   try { return loadConfigWithDiagnostics(env, ptyContributions, pluginAgents); }
   finally { prefetchedVersions = undefined; }

@@ -13,9 +13,9 @@
 <sub><a href="README.md">简体中文</a> · English</sub>
 
 </div>
-<img src="docs/assets/demo-en.svg" alt="Demo: a teammate @-mentions the bot in a Lark group, approves pnpm test, and gets a verified result card; the right side shows the agent running on the dev box" width="100%">
+<a href="docs/assets/promo-en.mp4"><img src="docs/assets/promo-en.webp" alt="Promo: dispatch a task with one Lark message, approve commands from your phone, let the server verify tests, and open this run's diff from the result card; plus schedules, restart safety, long-term memory and PR follow-up, with 30 terminal adapters and 21 ACP agents" width="100%"></a>
 
-<p align="center"><sub><i>Illustration: card fields follow the real Lark cards (labels translated from Chinese) and some buttons only appear under conditions; the task is a made-up example</i></sub></p>
+<p align="center"><sub><i>38-second promo · <a href="docs/assets/promo-en.mp4">HD MP4</a> · UI is illustrative and the task is a made-up example</i></sub></p>
 
 <a id="install"></a>
 
@@ -57,6 +57,10 @@ Most coding agents only run in a terminal: you have to sit at your desk and a dr
 | <sub>built-in terminal adapters</sub> | <sub>ACP agents in the acpx registry</sub> | <sub>max repair rounds after a failed check</sub> | <sub>lifetime of a mobile diff link</sub> |
 
 ## ✨ Features <a id="features"></a>
+
+<img src="docs/assets/demo-en.svg" alt="Demo: a teammate @-mentions the bot in a Lark group, approves pnpm test, and gets a verified result card; the right side shows the agent running on the dev box" width="100%">
+
+<p align="center"><sub><i>Illustration: card fields follow the real Lark cards (labels translated from Chinese) and some buttons only appear under conditions; the task is a made-up example</i></sub></p>
 
 <table>
 <tr>

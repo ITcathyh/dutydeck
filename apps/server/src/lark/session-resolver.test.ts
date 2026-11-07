@@ -1,20 +1,23 @@
-import { afterAll, describe, expect, it, vi } from 'vitest';
-import { readFile, rm } from 'node:fs/promises';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink } from 'node:fs/promises';
 import { createLarkCardService } from './service.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Session } from '@dutydeck/shared';
 import type { StoredLarkConfig } from './config.js';
 import {
+  comparableWorkspace,
   larkGroupKey,
   larkGroupScopeId,
   larkReplyContext,
   larkSessionConfigKey,
+  larkSessionMatchesScope,
   larkSourceId,
   materializeLarkResources as materializeResources,
   parsePrompt,
   resolveLarkSession,
   resolveLarkScopeId,
+  sameWorkspace,
   type LarkChatModeResolver
 } from './session-resolver.js';
 import type { LarkMessageEvent } from './listener.js';
@@ -329,6 +332,42 @@ describe('larkReplyContext / larkSourceId / larkGroupKey', () => {
   it('groupKey = appId:chatId:scopeId，带 appId 隔离同一聊天里的两个机器人', () => {
     expect(larkGroupKey(groupEvent(), 'thread:omt_topic', 'cli_test')).toBe('cli_test:oc_group:thread:omt_topic');
     expect(larkGroupKey(groupEvent(), 'thread:omt_topic', 'cli_other')).not.toBe(larkGroupKey(groupEvent(), 'thread:omt_topic', 'cli_test'));
+  });
+});
+
+describe('larkSessionMatchesScope 工作区路径写法', () => {
+  const sourceId = 'cli_test:oc_group:group:user:ou_user';
+  // 会话只存了原样的 cwd，没有工作区记录。
+  const stored = (cwd: string): Session => ({
+    id: 'ses_link', agentId: 'codex', state: 'idle', cwd, permissionMode: 'full-trust', source: 'lark', sourceId,
+    runId: 'run_link', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z'
+  });
+  const matches = (session: Session, workspace: string) => larkSessionMatchesScope(session, { ...baseConfig, workspace }, sourceId);
+  let root = '', real = '', link = '', other = '';
+  beforeAll(async () => {
+    root = await realpath(await mkdtemp(join(tmpdir(), 'dutydeck-workspace-match-')));
+    real = join(root, 'real'); link = join(root, 'link'); other = join(root, 'other');
+    await mkdir(real); await mkdir(other); await symlink(real, link);
+  });
+  afterAll(() => rm(root, { recursive: true, force: true }));
+
+  it('会话存的是符号链接路径时，配置写同一个链接或它指向的规范路径都匹配', () => {
+    expect(matches(stored(link), link)).toBe(true);
+    expect(matches(stored(link), real)).toBe(true);
+    expect(matches(stored(link), `${real}/`)).toBe(true);
+  });
+
+  it('配置指向另一个目录时不匹配', () => {
+    expect(matches(stored(link), other)).toBe(false);
+    expect(matches(stored(real), other)).toBe(false);
+  });
+
+  it('配置路径不存在时退回 resolve 的结果比较', () => {
+    const missing = join(root, 'missing');
+    expect(comparableWorkspace(`${missing}/`)).toBe(missing);
+    expect(sameWorkspace(missing, `${root}/real/../missing/`)).toBe(true);
+    expect(matches(stored(missing), `${missing}/`)).toBe(true);
+    expect(matches(stored(link), missing)).toBe(false);
   });
 });
 

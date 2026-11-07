@@ -1,5 +1,6 @@
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
+import { BACKGROUND_FOLLOWUP } from '@dutydeck/shared';
 import { TimelineItem } from './TimelineItem';
 import type { TimelineEvent } from '../timeline';
 
@@ -100,5 +101,20 @@ describe('TimelineItem 事件分发', () => {
     expect(screen.queryByLabelText('Claude 最终输出')).toBeNull();
     expect(container.querySelector('article')).toBeTruthy();
     expect(screen.getByText('中间输出')).toBeTruthy();
+  });
+  it('后台任务结果 → 带标签的独立 article，不标成最终输出，也不显示来源任务 id', () => {
+    const { container } = render(<TimelineItem event={event('text', { role: 'assistant', text: '后台构建已完成', origin: BACKGROUND_FOLLOWUP })} assistantLabel="Claude"/>);
+    const article = screen.getByLabelText('后台任务结果');
+    expect(article.tagName).toBe('ARTICLE');
+    expect(article.textContent).toContain('后台任务结果');
+    expect(article.textContent).toContain('后台构建已完成');
+    expect(screen.queryByLabelText('Claude 最终输出')).toBeNull();
+    expect(container.querySelectorAll('article')).toHaveLength(1);
+  });
+
+  it('普通 assistant 文本不带后台任务结果标签', () => {
+    render(<TimelineItem event={event('text', { role: 'assistant', text: '中间输出' })}/>);
+    expect(screen.queryByLabelText('后台任务结果')).toBeNull();
+    expect(screen.queryByText('后台任务结果')).toBeNull();
   });
 });

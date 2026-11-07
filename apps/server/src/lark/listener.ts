@@ -46,6 +46,49 @@ export type ListenerLog = {
   error(details: unknown, message?: string): void;
 };
 
+const defaultReconnectStallMs = 600_000;
+const minReconnectStallMs = 60_000;
+/** 计时器按 stallMs + 1 设置；超过 2^31-1 毫秒时 Node 会改成 1 毫秒触发，变成不停重建。 */
+const maxReconnectStallMs = 2_147_483_646;
+/** 拉取长连接配置的总时限，比 SDK 自带的 15 秒请求超时长，健康时不会先到。 */
+const wsConfigRequestTimeoutMs = 30_000;
+
+/** SDK 自己重连卡住多久后重建长连接：未设置时 10 分钟，`0` 关闭，小于 1 分钟按 1 分钟，超过计时器上限（约 24.8 天）按上限。 */
+function readReconnectStallMs(env: NodeJS.ProcessEnv, log: ListenerLog) {
+  const raw = env.DUTYDECK_LARK_RECONNECT_STALL_MS?.trim();
+  if (!raw) return defaultReconnectStallMs;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 0) {
+    log.warn({ value: raw, stallMs: defaultReconnectStallMs }, 'DUTYDECK_LARK_RECONNECT_STALL_MS 不是非负整数毫秒，按默认值处理');
+    return defaultReconnectStallMs;
+  }
+  return value === 0 ? 0 : Math.min(Math.max(value, minReconnectStallMs), maxReconnectStallMs);
+}
+
+// WSClient 只在拉取长连接配置时调用 request。不要对 defaultHttpInstance 加拦截器或改 defaults：
+// 它是进程内所有机器人和 lark.Client 共用的单例。它的响应拦截器返回 resp.data，SDK 按这个形状解构结果。
+// 其他成员（post、get、defaults……）原样转给 defaultHttpInstance，但不带撤销和总时限；SDK 升级时要确认拉配置仍走 request。
+// 只在用到时读取 defaultHttpInstance：不少测试的 SDK mock 没有这个导出。
+function abortableWsHttp(lark: typeof Lark, clientSignal: AbortSignal) {
+  const request = async (config: Parameters<typeof Lark.defaultHttpInstance.request>[0]) => {
+    const controller = new AbortController();
+    const abort = () => controller.abort(clientSignal.reason);
+    if (clientSignal.aborted) abort(); else clientSignal.addEventListener('abort', abort, { once: true });
+    const timer = setTimeout(() => controller.abort(new Error('Lark WebSocket config request timed out')), wsConfigRequestTimeoutMs);
+    timer.unref?.();
+    try { return await lark.defaultHttpInstance.request({ ...config, signal: controller.signal }); }
+    finally { clearTimeout(timer); clientSignal.removeEventListener('abort', abort); }
+  };
+  return new Proxy({ request }, {
+    get(target, property) {
+      if (property === 'request') return target.request;
+      const shared = lark.defaultHttpInstance;
+      const value: unknown = Reflect.get(shared, property);
+      return typeof value === 'function' ? value.bind(shared) : value;
+    }
+  }) as unknown as Lark.HttpInstance;
+}
+
 export interface LarkRuntime {
   trackMatterSession?(sessionId: string, input: import('@dutydeck/shared').MatterSessionInput): Promise<void>;
   getMatter?(sessionId: string): import('@dutydeck/shared').MatterSummary | undefined;
@@ -193,10 +236,19 @@ export class LarkLongConnectionListener implements LarkListener {
   private config?: StoredLarkConfig;
   private readonly cardCallbacks = new LarkCardCallbackDeduper();
   listening = false;
-  /** 连上之后断线、SDK 正在自己重连的起始时间；重连成功或停止后清空。 */
+  /** 连上之后断线、SDK 正在自己重连的起始时间；重连成功或停止后清空，重建长连接时保留。 */
   reconnectingSince?: string;
+  /** 重连卡住后最近一次重建长连接的时间；恢复或停止后清空。 */
+  rebuiltAt?: string;
+  private readonly stallMs: number;
+  private stallTimer?: NodeJS.Timeout;
+  private clientAbort?: AbortController;
+  private dispatcher?: Lark.EventDispatcher;
+  private domain?: string;
 
-  constructor(private readonly log: ListenerLog, private readonly options: LarkLongConnectionListenerOptions = {}, private readonly connectionLost?: (error: unknown) => void, private readonly connectionChanged?: () => void) {}
+  constructor(private readonly log: ListenerLog, private readonly options: LarkLongConnectionListenerOptions = {}, private readonly connectionLost?: (error: unknown) => void, private readonly connectionChanged?: () => void) {
+    this.stallMs = readReconnectStallMs(options.env ?? process.env, log);
+  }
 
   async start(config: StoredLarkConfig) {
     const blockingError = larkConfigBlockingError(config);
@@ -444,42 +496,9 @@ export class LarkLongConnectionListener implements LarkListener {
         })();
       }
     });
-    let connected!: () => void;
-    let connectionFailed!: (error: unknown) => void;
-    const ready = new Promise<void>((resolve, reject) => { connected = resolve; connectionFailed = reject; });
-    const client = new lark.WSClient({
-      appId: config.appId,
-      appSecret: config.appSecret,
-      domain,
-      loggerLevel: lark.LoggerLevel.warn,
-      autoReconnect: true,
-      // 握手超时：避免 TCP 已建立但 WebSocket 升级无响应时，重连循环的 connect() 永远挂起。
-      handshakeTimeoutMs: 15_000,
-      // 存活检测：超过该时长未收到任何入站帧（含 pong）则主动断开并触发重连，
-      // 防止连接半开（TCP 看起来正常但实际已不通）时监听静默失效。
-      wsConfig: { pingTimeout: 120 },
-      // 各阶段耗时：重启后收不到事件的窗口主要落在这里，记下来供部署后核对。
-      onReady: () => { connected(); this.log.info({ appId: config.appId, connectMs: { identity: identityMs, recovery: recoveryMs, reconcile: reconcileMs, total: Date.now() - startedAt } }, '飞书消息监听已连接'); },
-      onReconnecting: () => {
-        this.log.warn({ appId: config.appId }, '飞书消息监听正在重连');
-        if (this.client !== client) return;
-        this.reconnectingSince ??= new Date().toISOString();
-        this.connectionChanged?.();
-      },
-      onReconnected: () => {
-        this.log.info({ appId: config.appId }, '飞书消息监听已恢复');
-        if (this.client !== client) return;
-        this.reconnectingSince = undefined;
-        this.connectionChanged?.();
-      },
-      onError: error => {
-        connectionFailed(error);
-        this.log.error({ error, appId: config.appId }, '飞书消息监听异常');
-        // 连上之后断线由 SDK 自己重连，它只在放弃重连（次数用尽或不可重试的错误）时才报 onError，交回连接池退避重连。
-        if (this.client === client) this.connectionLost?.(error);
-      }
-    });
+    const { client, controller, ready, connectionFailed } = this.createClient(lark, config, domain, () => ({ identity: identityMs, recovery: recoveryMs, reconcile: reconcileMs, total: Date.now() - startedAt }));
     this.client = client;
+    this.clientAbort = controller;
     const abortStart = () => connectionFailed(http.fetch.signal!.reason);
     http.fetch.signal!.addEventListener('abort', abortStart, { once: true });
     const connectionTimeout = setTimeout(() => connectionFailed(new Error('WebSocket connection readiness timed out')), 20_000);
@@ -489,6 +508,8 @@ export class LarkLongConnectionListener implements LarkListener {
       await Promise.all([client.start({ eventDispatcher: dispatcher }), ready]);
       http.fetch.signal!.throwIfAborted();
       this.client = client;
+      this.dispatcher = dispatcher;
+      this.domain = domain;
       this.coordinator = coordinator;
       this.credentials = credentials;
       this.config = config;
@@ -499,6 +520,95 @@ export class LarkLongConnectionListener implements LarkListener {
       clearTimeout(connectionTimeout);
       http.fetch.signal!.removeEventListener('abort', abortStart);
     }
+  }
+
+  /** 每个 WSClient 有自己的就绪信号和撤销句柄；回调只在它仍是当前连接时改动监听状态。 */
+  private createClient(lark: typeof Lark, config: StoredLarkConfig, domain: string, connectMs?: () => Record<string, number>) {
+    const controller = new AbortController();
+    let connected!: () => void;
+    let connectionFailed!: (error: unknown) => void;
+    const ready = new Promise<void>((resolve, reject) => { connected = resolve; connectionFailed = reject; });
+    const client: Lark.WSClient = new lark.WSClient({
+      appId: config.appId,
+      appSecret: config.appSecret,
+      domain,
+      httpInstance: abortableWsHttp(lark, controller.signal),
+      loggerLevel: lark.LoggerLevel.warn,
+      autoReconnect: true,
+      // 握手超时：避免 TCP 已建立但 WebSocket 升级无响应时，重连循环的 connect() 永远挂起。
+      handshakeTimeoutMs: 15_000,
+      // 存活检测：超过该时长未收到任何入站帧（含 pong）则主动断开并触发重连，
+      // 防止连接半开（TCP 看起来正常但实际已不通）时监听静默失效。
+      wsConfig: { pingTimeout: 120 },
+      onReady: () => {
+        connected();
+        // 各阶段耗时：重启后收不到事件的窗口主要落在这里，记下来供部署后核对。重建出来的连接不带。
+        this.log.info({ appId: config.appId, ...(connectMs ? { connectMs: connectMs() } : {}) }, '飞书消息监听已连接');
+        // 重建出来的连接第一次连上报的是 onReady，不是 onReconnected。
+        this.clientRecovered(client);
+      },
+      onReconnecting: () => {
+        this.log.warn({ appId: config.appId }, '飞书消息监听正在重连');
+        if (this.client !== client) return;
+        this.reconnectingSince ??= new Date().toISOString();
+        this.connectionChanged?.();
+        this.armStallTimer(client);
+      },
+      onReconnected: () => {
+        this.log.info({ appId: config.appId }, '飞书消息监听已恢复');
+        if (this.client !== client) return;
+        this.clientRecovered(client);
+      },
+      onError: error => {
+        connectionFailed(error);
+        this.log.error({ error, appId: config.appId }, '飞书消息监听异常');
+        // 连上之后断线由 SDK 自己重连，它只在放弃重连（次数用尽或不可重试的错误）时才报 onError，交回连接池退避重连。
+        if (this.client === client) this.connectionLost?.(error);
+      }
+    });
+    return { client, controller, ready, connectionFailed };
+  }
+
+  private clientRecovered(client: Lark.WSClient) {
+    if (this.client !== client || !this.reconnectingSince) return;
+    clearTimeout(this.stallTimer);
+    this.stallTimer = undefined;
+    this.reconnectingSince = undefined;
+    this.rebuiltAt = undefined;
+    this.connectionChanged?.();
+  }
+
+  private armStallTimer(client: Lark.WSClient) {
+    if (!this.stallMs || this.stallTimer) return;
+    // 卡住超过阈值才重建，正好满阈值时还不算。
+    this.stallTimer = setTimeout(() => this.rebuildClient(client), this.stallMs + 1);
+    this.stallTimer.unref?.();
+  }
+
+  /**
+   * SDK 的重连可能卡在拉取配置上不返回（代理不回包），既不恢复也不报 onError。这里只换掉 WSClient，
+   * 协调器、事件分发器和进行中的会话都不动；不走 connectionLost，那条路径会拆掉整个监听。
+   */
+  private rebuildClient(stale: Lark.WSClient) {
+    this.stallTimer = undefined;
+    const config = this.config, dispatcher = this.dispatcher, domain = this.domain, since = this.reconnectingSince;
+    // 停用、换配置或已经恢复之后，迟到的计时器什么也不做。
+    if (!this.listening || this.client !== stale || !since || !config || !dispatcher || !domain || !larkSdk) return;
+    const previous = { client: stale, abort: this.clientAbort };
+    // 先换成新连接再关旧的：旧连接关闭时同步或异步报出的回调都按「不是当前连接」早退。
+    const next = this.createClient(larkSdk, config, domain);
+    this.client = next.client;
+    this.clientAbort = next.controller;
+    this.rebuiltAt = new Date().toISOString();
+    previous.abort?.abort(new Error('Lark WebSocket client replaced after a stalled reconnect'));
+    try { previous.client.close(); }
+    catch (error) { this.log.warn({ error, appId: config.appId }, '关闭卡住的飞书长连接失败'); }
+    this.log.warn({ appId: config.appId, since, stallMs: this.stallMs }, '飞书消息监听重连卡住，已重建长连接');
+    this.connectionChanged?.();
+    // 新连接第一次连不上时 SDK 不报 onReconnecting，这里直接计时，仍然卡住就按同一阈值再重建。
+    this.armStallTimer(next.client);
+    next.ready.catch(() => {});
+    next.client.start({ eventDispatcher: dispatcher }).catch(error => this.log.warn({ error, appId: config.appId }, '重建的飞书长连接启动失败'));
   }
 
   private cardRepair?: { coordinator: LarkMessageCoordinator; http: NonNullable<LarkLongConnectionListener['http']>; done: Promise<void> };
@@ -527,15 +637,22 @@ export class LarkLongConnectionListener implements LarkListener {
     if (this.config) this.options.participation?.closeApp(this.config.appId);
     if (this.config && this.agentCommand) this.options.agentCommands?.delete(this.config.appId, this.agentCommand);
     this.agentCommand = undefined;
+    clearTimeout(this.stallTimer);
+    this.stallTimer = undefined;
+    this.clientAbort?.abort();
+    this.clientAbort = undefined;
     this.client?.close();
     this.coordinator?.stop();
     this.client = undefined;
     this.coordinator = undefined;
+    this.dispatcher = undefined;
+    this.domain = undefined;
     this.welcome = undefined;
     this.credentials = undefined;
     this.config = undefined;
     this.listening = false;
     this.reconnectingSince = undefined;
+    this.rebuiltAt = undefined;
   }
 }
 
@@ -671,7 +788,8 @@ export class LarkLongConnectionListenerPool implements LarkListenerPool {
       // SDK 正在重连的连接实例还在，但收不到消息，不算已连上。
       active: [...this.listeners].filter(([, listener]) => !listener.reconnectingSince).map(([appId]) => appId),
       retrying: [...this.retries].map(([appId, retry]) => ({ appId, error: retry.error, failedAt: retry.failedAt, nextRetryAt: new Date(retry.nextRetryAt).toISOString() })),
-      reconnecting: [...this.listeners].flatMap(([appId, listener]) => listener.reconnectingSince ? [{ appId, since: listener.reconnectingSince }] : [])
+      reconnecting: [...this.listeners].flatMap(([appId, listener]) => listener.reconnectingSince
+        ? [{ appId, since: listener.reconnectingSince, ...(listener.rebuiltAt ? { rebuiltAt: listener.rebuiltAt } : {}) }] : [])
     };
     try { await this.options.workflowStore?.set(larkListenerStatusKey, JSON.stringify(status)); }
     catch (error) { this.log.warn({ error }, '记录飞书监听状态失败'); }

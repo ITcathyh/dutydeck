@@ -6,6 +6,7 @@ import * as storage from '@dutydeck/storage';
 import * as daemon from './daemon.js';
 import { daemonRestart, daemonStart, daemonStatus, daemonStop, markDaemonReady } from './command.js';
 import { sleep } from './time.js';
+import { expectOwnDaemonDir } from './daemon-dir.test-helpers.js';
 
 vi.mock('./time.js', () => ({ sleep: vi.fn() }));
 const identity: storage.ProcessIdentity = { host: 'machine', boot: 'boot', namespace: 'pid:[123]', pid: 12345678, start: '100' };
@@ -24,6 +25,7 @@ describe('daemon identity and generation protection', () => {
     dir = daemon.defaultDaemonDir(root);
     vi.stubEnv('HOME', root);
     vi.spyOn(process, 'cwd').mockReturnValue(root);
+    expectOwnDaemonDir(root);
     now = 0;
     alive = true;
     target = { ...identity };

@@ -274,7 +274,9 @@ async function main() {
   const claudeDataDir = join(dataDir, 'claude');
   const workspace = join(dataDir, 'workspace');
   for (const dir of [binDir, claudeDataDir, workspace]) mkdirSync(dir, { recursive: true });
-  const git = args => execFileSync('git', ['-C', workspace, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  // 去掉继承来的 GIT_*（git bisect run、hook 里会带 GIT_DIR），否则 init/commit 会落到外层开发仓库。
+  const gitEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
+  const git = args => execFileSync('git', ['-C', workspace, ...args], { encoding: 'utf8', env: gitEnv, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   git(['init']);
   const skillRelativePath = '.agents/skills/smoke-evidence/SKILL.md';
   mkdirSync(dirname(join(workspace, skillRelativePath)), { recursive: true });

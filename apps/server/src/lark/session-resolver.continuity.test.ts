@@ -1,7 +1,13 @@
-import { describe, expect, it, vi } from 'vitest';
-import type { ChannelMapping, Session } from '@dutydeck/shared';
-import type { StoredLarkConfig } from './config.js';
-import type { LarkGroup, PersistedLarkCardTask } from './coordinator.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import { mkdir, mkdtemp, realpath, rm, symlink } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createRepositories } from '@dutydeck/storage';
+import { DutydeckRuntime } from '@dutydeck/runtime';
+import type { AgentConfig, ChannelMapping, Session } from '@dutydeck/shared';
+import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
+import { LarkMessageCoordinator, type LarkGroup, type PersistedLarkCardTask } from './coordinator.js';
 import type { LarkMessageEvent } from './listener.js';
 import { findLarkThreadContinuation, larkSessionConfigKey, resolveLarkSession, takeLarkNewSessionNote } from './session-resolver.js';
 
@@ -125,5 +131,78 @@ describe('resolveLarkSession restored launch validation', () => {
       { cwd: '/saved/workspace', model: 'saved-model' }, beforeStart)).resolves.toBe(fresh);
     expect(beforeStart).toHaveBeenCalledOnce();
     expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({ cwd: '/canonical/workspace', model: 'validated-model' }));
+  });
+});
+
+describe('重启后按配置的工作区续接会话', () => {
+  const cleanups: Array<() => Promise<void> | void> = [];
+  afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
+
+  const message = (messageId: string): LarkMessageEvent => ({
+    messageId, chatId: 'oc_group', chatType: 'group', senderOpenId: 'ou_alice', senderType: 'user', messageType: 'text',
+    content: JSON.stringify({ text: '@_user_1 继续' }), mentions: [{ key: '@_user_1', name: 'Dock', openId: 'ou_bot' }]
+  });
+
+  it.each([
+    ['规范路径', (root: string) => join(root, 'repo')],
+    ['符号链接路径', (root: string) => join(root, 'link')],
+    ['末尾带 / 的路径', (root: string) => `${join(root, 'repo')}/`],
+    ['含 .. 的路径', (root: string) => `${join(root, 'repo')}/sub/..`]
+  ] as const)('工作区配成%s时，重建 coordinator 后复用同一个会话', async (_name, workspaceOf) => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'dutydeck-lark-workspace-')));
+    const repo = join(root, 'repo');
+    await mkdir(join(repo, 'sub'), { recursive: true });
+    await symlink(repo, join(root, 'link'));
+    execFileSync('git', ['init', '-q', repo]);
+    const repos = createRepositories(join(root, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
+    const runtime = new DutydeckRuntime(repos, {
+      probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
+      driverFactory: (_config, _protocol, emit) => ({
+        start: async () => {}, resume: async () => {}, stop: async () => {}, isStopped: async () => true, interrupt: async () => {},
+        send: async () => { emit({ type: 'text', data: { text: '已完成' } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } }); },
+        resolvePermission: async () => true
+      })
+    });
+    const agent: AgentConfig = { id: 'mock', name: 'Mock', command: process.execPath, args: [], protocol: 'acp', cwd: repo, env: {}, permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
+    await runtime.initialize([agent]);
+    const config: StoredLarkConfig = { appId: 'cli_workspace', appSecret: 'fake-secret', workspace: workspaceOf(root), defaultAgentId: 'mock', permissionMode: 'ask', listening: true,
+      fullTrustConfirmed: true, preInjectPrompt: '', structuredAskCards: false, groupCardMention: false, groupToolsEnabled: false, groupToolsAllowSend: false, pushIntervalMs: 1000, hideTraceOnComplete: false,
+      allowedUsers: [], allowedEmails: [], allowedBots: [], peerBotsAllowed: false, highRiskAllowedUsers: [], highRiskAllowedEmails: [], highRiskPattern: 'dangerous', riskControlMode: 'off' };
+    await repos.config.set(larkBotsConfigKey, JSON.stringify([config]));
+    let nextCard = 0;
+    const createCard = async (_input: any) => ({ messageId: `om_card_${++nextCard}` });
+    const service = {
+      send: vi.fn(createCard), reply: vi.fn(createCard), replyFile: vi.fn(createCard), sendFile: vi.fn(createCard),
+      uploadFile: vi.fn(async () => 'file_1'),
+      update: vi.fn(async (input: any) => ({ messageId: input.messageId })),
+      addReaction: vi.fn(async (messageId: string) => ({ reactionId: `reaction_${messageId}` })),
+      deleteReaction: vi.fn(async () => {}), getUserEmails: vi.fn(async () => []),
+      listChatMembers: vi.fn(async () => ({ items: [{ memberId: 'ou_alice' }], hasMore: false })),
+      listChatMessages: vi.fn(async () => ({ items: [], hasMore: false })),
+      getMessage: vi.fn(async (id: string) => ({ messageId: id, chatId: 'oc_group', messageType: 'text', rawContent: '{"text":""}', sender: { type: 'user' }, mentions: [] })),
+      getMessageItems: vi.fn(async () => []),
+      downloadMessageResource: vi.fn(async () => ({ data: new Uint8Array(), contentType: 'text/plain' })),
+      readDocument: vi.fn(async (url: string) => ({ url, title: '', text: '' }))
+    };
+    const coordinators: LarkMessageCoordinator[] = [];
+    cleanups.push(async () => { for (const item of coordinators) item.stop(); await runtime.shutdown(); repos.close(); await rm(root, { recursive: true, force: true }); });
+    /** 新建 coordinator 等于服务重启：内存里的 group 绑定全部丢失，只剩持久化数据。 */
+    const restart = async () => {
+      const coordinator = new LarkMessageCoordinator(runtime, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot', undefined, repos.channelMappings, async () => 'group', undefined, undefined, { store: repos.config });
+      coordinators.push(coordinator);
+      await coordinator.initializeWorkflows(config);
+      return coordinator;
+    };
+    const delivered = (taskId: string) => vi.waitFor(async () => {
+      const mapping = (await repos.channelMappings.list(`lark-card:${config.appId}`)).find(item => item.externalId === taskId);
+      expect(JSON.parse(mapping?.extra ?? '{}').final_delivery_state).toBe('delivered');
+      return mapping!.sessionId;
+    }, { timeout: 5_000 });
+
+    await (await restart()).handle(message('om_first'), config);
+    const first = await delivered('om_first');
+    await (await restart()).handle(message('om_after_restart'), config);
+    expect(await delivered('om_after_restart')).toBe(first);
+    expect((await runtime.listSessions()).filter(session => session.source === 'lark')).toHaveLength(1);
   });
 });

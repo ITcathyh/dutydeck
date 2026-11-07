@@ -2,6 +2,7 @@ import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { relayAskExitCodes } from './cli-contract.js';
 import { relayTokenEnvKey, relayUrlEnvKey } from './capability.js';
+import { defaultRetrySleep, retryWhileRefused, UNAVAILABLE_RETRY_MS } from './retry.js';
 
 /** CLI 侧错误：携带要用的退出码，由 cli.ts 顶层统一 exit */
 export class RelayCliError extends Error {
@@ -26,15 +27,6 @@ interface RelayErrorBody { code?: string; message?: string }
 
 /** 未指定等待上限的请求（send/report/permission 等短请求）沿用旧的 300 秒。 */
 const defaultRequestTimeoutMs = 300_000;
-/** 服务重启或部署期间端口暂时没人监听；与部署健康检查的上限一致，且不超过本次请求的期限。 */
-const unavailableRetryMs = 90_000;
-const unavailableRetryIntervalMs = 1_000;
-/** 只有连接被拒能证明请求没送达服务端，重试不会重复执行；其他网络错误照常报错。 */
-const connectionRefused = (error: unknown): boolean => {
-  const value = error as { code?: unknown; cause?: { code?: unknown } } | undefined;
-  return value?.code === 'ECONNREFUSED' || value?.cause?.code === 'ECONNREFUSED';
-};
-const defaultSleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
 /**
  * 默认传输走 node:http 而不是全局 fetch：Node 内置 fetch 最多等 300 秒响应头，
@@ -76,7 +68,7 @@ export class RelayHttpClient {
     this.baseUrl = (env[relayUrlEnvKey] ?? env.DUTYDECK_RELAY_URL)?.trim().replace(/\/$/, '') ?? '';
     this.token = (env[relayTokenEnvKey] ?? env.DUTYDECK_RELAY_TOKEN)?.trim() ?? '';
     this.fetcher = options.fetcher ?? nodeHttpFetch;
-    this.sleep = options.sleep ?? defaultSleep;
+    this.sleep = options.sleep ?? defaultRetrySleep;
     if (!this.baseUrl || !this.token) {
       throw new RelayCliError(
         '回传命令只能在 Dutydeck 会话内的 Agent 进程中调用；当前进程没有会话凭证。',
@@ -92,24 +84,16 @@ export class RelayHttpClient {
     try {
       // 期限从第一次尝试算起，等待重启的时间也计入，长轮询不会因此多等。
       const signal = AbortSignal.timeout(timeoutMs);
-      const retryUntil = Date.now() + Math.min(unavailableRetryMs, timeoutMs);
-      for (;;) {
-        try {
-          response = await this.fetcher(`${this.baseUrl}${path}`, {
-            method: 'POST',
-            headers: {
-              authorization: `Bearer ${this.token}`,
-              'content-type': 'application/json; charset=utf-8'
-            },
-            body: JSON.stringify(body),
-            signal
-          });
-          break;
-        } catch (error) {
-          if (!connectionRefused(error) || signal.aborted || Date.now() + unavailableRetryIntervalMs > retryUntil) throw error;
-          await this.sleep(unavailableRetryIntervalMs);
-        }
-      }
+      // 服务重启的等待不超过本次请求的期限。
+      response = await retryWhileRefused(() => this.fetcher(`${this.baseUrl}${path}`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${this.token}`,
+          'content-type': 'application/json; charset=utf-8'
+        },
+        body: JSON.stringify(body),
+        signal
+      }), { sleep: this.sleep, budgetMs: Math.min(UNAVAILABLE_RETRY_MS, timeoutMs), signal });
     } catch (error) {
       throw new RelayCliError(
         `无法连接 Dutydeck 回传服务：${error instanceof Error ? error.message : String(error)}`,

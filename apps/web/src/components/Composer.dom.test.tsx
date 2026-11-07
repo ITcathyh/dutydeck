@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { Composer } from './Composer';
@@ -151,6 +151,20 @@ describe('Composer 键盘语义', () => {
     await user.click(screen.getByLabelText('消息'));
     await user.keyboard('{Enter}');
     expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('文件路径框里输入法组字中的回车不引用文件，组字结束后的回车才引用', async () => {
+    const user = userEvent.setup();
+    const onReferencesChange = vi.fn();
+    render(<Composer {...baseProps} value="你好" onReferencesChange={onReferencesChange}/>);
+    await user.click(screen.getByRole('button', { name: '打开斜杠菜单' }));
+    await user.click(screen.getByText('/file'));
+    const path = screen.getByLabelText('本地文件路径');
+    fireEvent.change(path, { target: { value: '/tmp/a.ts' } });
+    fireEvent.keyDown(path, { key: 'Enter', isComposing: true });
+    expect(onReferencesChange).not.toHaveBeenCalled();
+    fireEvent.keyDown(path, { key: 'Enter' });
+    expect(onReferencesChange).toHaveBeenCalledWith([{ id: 'file-/tmp/a.ts', kind: 'file', label: 'a.ts', value: '/tmp/a.ts' }]);
   });
 });
 

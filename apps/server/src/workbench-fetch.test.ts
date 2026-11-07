@@ -2,6 +2,7 @@ import { createServer, type Server } from 'node:http';
 import { getEventListeners, once } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createWorkbenchFetch, requestSignal } from './workbench-fetch.js';
+import { targetGuard } from '../../../tests/support/target-server.js';
 
 const deferred = () => {
   let resolve!: () => void;
@@ -15,12 +16,15 @@ let client: ReturnType<typeof createWorkbenchFetch>;
 let received: ReturnType<typeof deferred>;
 let disconnected: ReturnType<typeof deferred>;
 let requestCount: number;
+let guard: ReturnType<typeof targetGuard>;
 
 beforeEach(async () => {
   received = deferred();
   disconnected = deferred();
   requestCount = 0;
+  guard = targetGuard(request => ['/ok', '/body', '/headers'].includes(request.url!));
   server = createServer((request, response) => {
+    if (!guard.accept(request, response)) return;
     requestCount++;
     request.on('close', disconnected.resolve);
     received.resolve();

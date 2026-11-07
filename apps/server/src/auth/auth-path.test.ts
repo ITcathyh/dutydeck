@@ -9,14 +9,17 @@ import { buildApp } from '../app.js';
 import { isPluginTriggerRequest } from '../plugins/routes.js';
 import { isRelayCapabilityRequest } from '../relay-routes.js';
 import { registerAuthMiddleware, signSessionShareToken } from './auth.js';
+import { targetGuard } from '../../../../tests/support/target-server.js';
 
 const apps: Array<Awaited<ReturnType<typeof buildApp>>> = [];
 const servers: Server[] = [];
 const tempDirectories: string[] = [];
+const guards: Array<ReturnType<typeof targetGuard>> = [];
 afterEach(async () => {
   await Promise.all(apps.splice(0).map(app => app.close()));
   await Promise.all(servers.splice(0).map(server => new Promise(resolve => server.close(resolve))));
   await Promise.all(tempDirectories.splice(0).map(directory => rm(directory, { recursive: true, force: true })));
+  for (const { strayRequests } of guards.splice(0)) expect(strayRequests).toEqual([]);
 });
 
 /** 任何 runtime 方法被调到都记下来：未认证的请求一次都不该走到业务层。 */
@@ -34,7 +37,11 @@ function recordingRuntime() {
 /** 被代理的对端实例：只记下收到过哪些请求。 */
 async function recordingPeer() {
   const hits: string[] = [];
-  const server = createServer((request, response) => { hits.push(`${request.method} ${request.url}`); response.end('[]'); });
+  const guard = targetGuard(request => request.url!.startsWith('/api/sessions')); guards.push(guard);
+  const server = createServer((request, response) => {
+    if (!guard.accept(request, response)) return;
+    hits.push(`${request.method} ${request.url}`); response.end('[]');
+  });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   servers.push(server);
   return { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, hits };

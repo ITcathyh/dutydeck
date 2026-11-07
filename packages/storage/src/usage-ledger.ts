@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3';
-import { cachedStatement } from './database-control.js';
+import { cachedStatement } from './statement-cache.js';
 import { codexTerminalUsageRefPrefix, usageCategories, usageUnknownModel, type UsageCap, type UsageCapScope, type UsageDimension, type UsageFilter, type UsageGroup, type UsageLedgerEntry, type UsageLedgerRepository, type UsageTaskPage, type UsageTaskRow, type UsageTotals } from '@dutydeck/shared';
 
 export function createUsageLedgerSchema(db: Database.Database): void {

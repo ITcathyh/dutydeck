@@ -46,7 +46,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { larkResourceRoot, pruneLarkResourceDirectories, readLarkResourceReferences } from './resource-retention.js';
 import { fileURLToPath } from 'node:url';
-import { buildApp } from './app.js';
+import { buildApp, createAppLogger } from './app.js';
 import { parsePeerInstances } from './instance-proxy.js';
 import { localLoopbackUrl } from './local-api-url.js';
 import { WorkItemService, readWorkItemStatus } from './work-items.js';
@@ -101,6 +101,7 @@ import { createPluginManagementAuthorizer } from './plugins/management-auth.js';
 import { sessionHookContext } from './plugins/integration.js';
 import type { StoredLarkConfig } from './lark/config.js';
 import { ShutdownPhases } from './shutdown-phases.js';
+import type { FastifyBaseLogger } from 'fastify';
 
 export interface StartLocalServerOptions {
   pluginResultIdentity?: PluginResultIdentityOptions;
@@ -115,6 +116,8 @@ export interface StartLocalServerOptions {
     now?: () => Date;
     evidenceTtlMs?: number;
   };
+  /** Test/operator injection only. */
+  logger?: FastifyBaseLogger;
 }
 export interface LocalServer {
   config: AppConfig;
@@ -143,6 +146,7 @@ export const UNSAFE_NO_AUTH_ENV = 'DUTYDECK_UNSAFE_NO_AUTH';
 /** 停服步骤，按执行顺序；强制退出时据此列出还没开始的步骤。 */
 const SHUTDOWN_PHASES = ['insight', 'historyRetention', 'watch', 'pluginResults', 'workbench', 'workbenchHttp', 'workItems', 'delegations', 'automation', 'ciWebhook', 'pullRequests',
   'relayClose', 'collaboration', 'relayFlush', 'http', 'runtime', 'capabilities', 'database', 'pluginDispose'] as const;
+type ShutdownPhase = typeof SHUTDOWN_PHASES[number];
 
 /**
  * 监听地址不是回环、认证又关着（open 模式）时返回拒绝启动的说明，显式确认 unsafe 时放行。
@@ -231,6 +235,8 @@ export function createProductionPtyBackend(sessionId: string) {
 }
 
 export async function startLocalServer(options: StartLocalServerOptions = {}): Promise<LocalServer> {
+  // buildApp 之前的阶段（含会话恢复）也要记日志，不能等 app.log。
+  const log = options.logger ?? createAppLogger();
   // pty-cli agent 发现：PTY_AGENT_CONTRIBUTIONS 经 loadConfig 合并进 config.agents
   // （builtinAgents 内部按 commandExists 过滤，只暴露本机已安装的 CLI；可用的终端适配器优先，同 id 覆盖 ACPX）。
   // 插件在加载配置之前加载：插件 agents 要与 DUTYDECK_AGENTS_JSON 一起合并。没有启用的插件（或只有内置场景包）时为 undefined，下面不接线。
@@ -439,7 +445,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     fallbackAgentId: () => config.agents[0]?.id,
     sendText: (bot, input) => createLarkCardService(env, workbenchHttp.fetch, bot as StoredLarkConfig).sendText(input),
     workItems: () => workItems,
-    log: { warn: (details, message) => app?.log.warn(details, message) }
+    log: { warn: (details, message) => log.warn(details, message) }
   }) : undefined;
   if (pluginWiring) setupCleanup.push(() => pluginWiring.dispose());
   // 用量账本：runtime 每轮交来读数、派发新任务前查月度上限。子步骤的根任务取自下方的工作项与 Leader 委托。
@@ -458,7 +464,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       if (!bot?.appSecret) throw new Error('机器人凭证缺失，无法发送用量提醒');
       await createLarkCardService(env, workbenchHttp.fetch, bot).sendText({ chatId: target.chatId, text, idempotencyKey });
     },
-    log: { warn: (details, message) => app?.log.warn(details, message) }
+    log: { warn: (details, message) => log.warn(details, message) }
   });
   const projectMemory = new ProjectMemoryService(repos.config, async id => {
     const session = await repos.sessions.get(id);
@@ -485,7 +491,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       ? async (session, request) => { await usageLedger.admit(session, request); await pluginWiring.hooks.taskReceived(session, request); }
       : (session, request) => usageLedger.admit(session, request),
     recordUsage: (session, attempt, reading) => usageLedger.record(session, attempt, reading),
-    observeTurn: createTurnDiffObserver(repos.config, { log: { warn: (details, message) => app?.log.warn(details, message) } }),
+    observeTurn: createTurnDiffObserver(repos.config, { log: { warn: (details, message) => log.warn(details, message) } }),
     authorizeTask: async (session, task, phase) => { await collaboration?.background.authorizeTask(session, task); await automation.authorizeTask(task, phase); await ciWebhook?.authorizeTask(task, phase); await pullRequests.authorizeTask(task, phase); await workItems.authorizeTask(session, task, phase); },
     authorizeControl: async (sessionId, actor, _action) => {
       if (await workItems.authorizeControl(sessionId, actor)) return;
@@ -561,7 +567,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     },
     awaitingAnswer: sessionId => relayBroker.listPending(sessionId).length > 0,
     onSessionNotice: (session, notice) => deliverLarkSessionNotice(repos, bot => createLarkCardService(env, workbenchHttp.fetch, bot), session, notice),
-    log: { warn: (...args: unknown[]) => app?.log.warn(...args as [unknown, string]), info: (data, message) => app?.log.info(data, message) },
+    log: { warn: (...args: unknown[]) => log.warn(...args as [unknown, string]), info: (data, message) => log.info(data, message) },
     ...pluginWiring?.runtimeOptions
   });
   setupCleanup.push(() => runtime.shutdown());
@@ -587,7 +593,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       },
       loadWorkspaceOrganization: async () => (await workspaceOrganizationService.getSnapshot()).organization,
       getCurrentFingerprint: async (sessionId) => runtime.getCodeFingerprint(sessionId),
-      log: (details, message) => app?.log.warn(details, message)
+      log: (details, message) => log.warn(details, message)
     });
     startupPhase('wiring');
     await insightService.initialize();
@@ -607,15 +613,15 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   const pluginResultService = new PluginResultService(repos.pluginResults, pluginResultRegistry, pluginResultAdapter);
   let pluginResultSweep: Promise<void> | undefined;
   let pluginResultTimer: ReturnType<typeof setInterval> | undefined;
-  const loopLog = { warn: (details: Record<string, unknown>, message: string) => app?.log.warn(details, message) };
+  const loopLog = { warn: (details: Record<string, unknown>, message: string) => log.warn(details, message) };
   const sweepPluginResults = () => pluginResultSweep ??= timeLoop('plugin-result-sweep', loopLog, async () => {
     try { await pluginResultService.sweep(env.DUTYDECK_DISABLE_LARK_LISTENER === 'true' ? [] : env.DUTYDECK_BOT_APP_ID ? [env.DUTYDECK_BOT_APP_ID] : (await readLarkConfigs(repos.config)).filter(bot => bot.listening).map(bot => bot.appId)); }
-    catch { app?.log.warn({ code: 'RESULT_RECOVERY_FAILED' }, '受控结果恢复失败'); }
+    catch { log.warn({ code: 'RESULT_RECOVERY_FAILED' }, '受控结果恢复失败'); }
     finally { pluginResultSweep = undefined; }
   });
   const closePluginResults = async () => { if (pluginResultTimer) clearInterval(pluginResultTimer); await pluginResultSweep; };
   setupCleanup.push(closePluginResults);
-  const automationIntegration = createAutomationIntegration(repos, runtime, groupManager, { env, client: config => createLarkCardService(env, workbenchHttp.fetch, config), log: { warn: (...args: unknown[]) => app?.log.warn(...args as [unknown, string]) } });
+  const automationIntegration = createAutomationIntegration(repos, runtime, groupManager, { env, client: config => createLarkCardService(env, workbenchHttp.fetch, config), log: { warn: (...args: unknown[]) => log.warn(...args as [unknown, string]) } });
   // CI 平台全部来自插件；没有 CI 插件时注册表为空，/ci 与 Web 提示「未安装 CI 插件」。
   const ciProviders = pluginHost?.ciProviders ?? new CiProviderRegistry();
   // 插件 notify hook 拒绝时不发这条 CI 通知。
@@ -633,9 +639,9 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       const { appId } = parseLarkSourceId(session?.source === 'lark' ? session.sourceId : undefined);
       return appId ? (await readLarkConfig(repos.config, appId))?.verificationCommand?.trim() || undefined : undefined;
     },
-    log: { warn: (...args: unknown[]) => app?.log.warn(...args as [unknown, string]) } });
+    log: { warn: (...args: unknown[]) => log.warn(...args as [unknown, string]) } });
   const ciWebhook = ciProviders.list().some(({ provider }) => provider.webhook) ? new CiWebhookService({ repositories: repos, runtime, providers: ciProviders, onEvent: (providerId, event) => pullRequests.onWebhookEvent(providerId, event),
-    prepareDelivery: automationIntegration.prepareDelivery, notify: notifyCi, log: { warn: (...args: unknown[]) => app?.log.warn(...args as [unknown, string]) } }) : undefined;
+    prepareDelivery: automationIntegration.prepareDelivery, notify: notifyCi, log: { warn: (...args: unknown[]) => log.warn(...args as [unknown, string]) } }) : undefined;
   const automation = new SessionAutomationService({ repositories: repos, runtime, ...automationIntegration, ciProviders, pullRequests, ...(ciWebhook ? { ciWebhook } : {}),
     // 工作项服务与提问代理在下方创建；这里只在运行时调用。
     awaitingHuman: sessionId => runtime.getPendingPermissions(sessionId).length > 0 || relayBroker.listPending(sessionId).length > 0,
@@ -646,12 +652,12 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       // 失败但带待确认修订的工作项还没结束，上一次没结束时不启动新的。
       progress: async id => await workItems.exists(id) ? readWorkItemStatus(repos.config, id) ?? 'unknown' : undefined
     },
-    log: { warn: (details, message) => app?.log.warn(details, message) } });
+    log: { warn: (details, message) => log.warn(details, message) } });
   setupCleanup.push(() => automation.close());
   if (ciWebhook) setupCleanup.push(() => ciWebhook.close());
   setupCleanup.push(() => pullRequests.close());
   const authorizeWorkAgent = (sessionId: string, actorId: string, agentId: string) => authorizeWorkItemAgent(repos, groupManager, automationIntegration.authorize, sessionId, actorId, agentId);
-  const workbench = new LarkWorkbench(repos, runtime, () => workItems, () => workInteractions, automationIntegration.authorize, { env, authorizeAgent: authorizeWorkAgent, log: { warn: (...args: any[]) => app?.log.warn(...args as [unknown, string]) } });
+  const workbench = new LarkWorkbench(repos, runtime, () => workItems, () => workInteractions, automationIntegration.authorize, { env, authorizeAgent: authorizeWorkAgent, log: { warn: (...args: any[]) => log.warn(...args as [unknown, string]) } });
   setupCleanup.push(() => workbench.close());
   const workItems: WorkItemService = new WorkItemService({ repositories: repos, runtime, authorize: automationIntegration.authorize, authorizeAgent: authorizeWorkAgent,
     requireConfirmation: workPlanConfirmationRequired, log: loopLog,
@@ -659,7 +665,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   setupCleanup.push(() => workItems.close());
   const delegations = new LeaderDelegationService({ repositories: repos, runtime, work: workItems, authorizeAgent: authorizeWorkAgent,
     prepareDelivery: (sessionId, id, key) => workbench.prepareDelivery(sessionId, id, key), notice: (workId, text, key) => workbench.notice(workId, text, key),
-    log: { warn: (details, message) => app?.log.warn(details, message) } });
+    log: { warn: (details, message) => log.warn(details, message) } });
   setupCleanup.push(() => delegations.close());
   const authorizeSessionRequest = async (request: import('fastify').FastifyRequest | import('node:http').IncomingMessage, sessionId: string, boundary: 'session' | 'high_risk' | 'terminal', action: PolicyAction): Promise<PolicyDecision> =>
     authorizeLoadedSession(request, sessionId, await runtime.getSession(sessionId), boundary, action);
@@ -724,7 +730,8 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   const workInteractions = new WorkItemInteractions(workItems, runtime, relayBroker, (sessionId, actorId, action) => authorizeWorkItemInteraction(repos, groupManager, sessionId, actorId, action, env, workbenchHttp.fetch));
   closeResources = () => {
     if (!closeRun) closeRun = (async () => {
-      const phase = (name: string, operation: () => unknown) => shutdownPhases.run(name, operation);
+      // 名字限定在 SHUTDOWN_PHASES 里，增删步骤时两边对不上会在编译期报错。
+      const phase = (name: ShutdownPhase, operation: () => unknown) => shutdownPhases.run(name, operation);
       // 分析服务必须在任何并行关闭组之前显式 await：先拒新刷新、取消 queued/running
       // 作业并等待 runner 退出与临时目录清理，再关闭 HTTP/runtime/repos。
       await phase('insight', closeInsightService);
@@ -738,7 +745,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       historyRetention.abort();
       await phase('historyRetention', () => historyRetentionRun);
       const errors: unknown[] = [...insightCloseErrors];
-      const settle = async (operations: Array<[string, () => unknown]>) => {
+      const settle = async (operations: Array<[ShutdownPhase, () => unknown]>) => {
         const results = await Promise.allSettled(operations.map(([name, operation]) => phase(name, operation)));
         errors.push(...results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => result.reason));
       };
@@ -751,7 +758,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       await settle([['capabilities', () => capabilities.close()]]);
       await settle([['database', () => repos.close()]]);
       await settle([['pluginDispose', () => pluginWiring?.dispose()]]);
-      app?.log.info({ shutdownMs: shutdownPhases.durationsMs() }, '停服各阶段耗时');
+      log.info({ shutdownMs: shutdownPhases.durationsMs() }, '停服各阶段耗时');
       if (errors.length) throw new AggregateError(errors, 'Dutydeck did not shut down cleanly');
     })();
     return closeRun;
@@ -763,7 +770,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       usageRefusal: async scope => await usageLedger.refusal(scope.appId, scope.chatId)
         ?? await usageLedger.automaticRefusal(scope.appId),
       listeningDisabled: env.DUTYDECK_DISABLE_LARK_LISTENER === 'true', scenarios,
-      log: { warn: (details, message) => app?.log.warn(details, message) } });
+      log: { warn: (details, message) => log.warn(details, message) } });
     setupCleanup.push(() => collaboration?.close());
     automation.mandateCards = collaboration.mandateCards;
     startupPhase('integrations');
@@ -785,7 +792,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     memoryProjection = new LarkMemoryProjection(
       memoryStore,
       memoryRoot,
-      { warn: (obj, msg) => app?.log.warn(obj, msg) }
+      { warn: (obj, msg) => log.warn(obj, msg) }
     );
     const memoryPipeline = new LarkMemoryPipeline({
       runtime,
@@ -797,12 +804,12 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       projection: memoryProjection,
       readConfig: async appId => (await readLarkConfigs(repos.config)).find(bot => bot.appId === appId),
       log: {
-        info: (obj, msg) => app?.log.info(obj, msg),
-        warn: (obj, msg) => app?.log.warn(obj, msg),
-        error: (obj, msg) => app?.log.error(obj, msg)
+        info: (obj, msg) => log.info(obj, msg),
+        warn: (obj, msg) => log.warn(obj, msg),
+        error: (obj, msg) => log.error(obj, msg)
       }
     });
-    for (const bot of await readLarkConfigs(repos.config)) void memoryPipeline.recoverJobs(bot.appId).catch(error => app?.log.error({ error, appId: bot.appId }, '恢复后台记忆作业失败'));
+    for (const bot of await readLarkConfigs(repos.config)) void memoryPipeline.recoverJobs(bot.appId).catch(error => log.error({ error, appId: bot.appId }, '恢复后台记忆作业失败'));
     // 协作作用域都是群：读本机器人的群记忆池（shared 时是各群共享池，来源是别的群的条目标「其他群」；per-group 时是本群的池）。
     readCollaborationMemory = async scope => {
       const bot = (await readLarkConfigs(repos.config)).find(entry => entry.appId === scope.appId);
@@ -811,6 +818,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     };
     const resourceRoot = larkResourceRoot(config.databaseUrl);
     app = await buildApp(runtime, {
+      loggerInstance: log,
       matters: repos.matters,
       artifactSnapshots: { service: new ArtifactSnapshots(repos, config.databaseUrl), authorize: async (request, sessionId) => {
         return await authorizeInstallationManagement(request) && (await authorizeSessionRequest(request, sessionId, 'session', 'task.view_result')).allowed;
@@ -940,16 +948,16 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
         requestLarkReview: review => requestLarkTurnDiffReview({ configs: repos.config, mappings: repos.channelMappings, confirmations: collaboration?.participation.confirmations }, review) },
     });
     startupPhase('routes');
-    logDroppedAgents(app.log, droppedAgents);
+    logDroppedAgents(log, droppedAgents);
     // systemd socket 激活时用它传入的监听 socket：重启期间端口由 .socket unit 持有，连接排队而不是被拒。
     await app.listen(inherited ? inheritedListenOptions(inherited.fd) : listenOptions(config));
     if (inherited) {
       const mismatch = inheritedSocketMismatch(app.server.address(), config);
       if (mismatch) throw new Error(mismatch);
-      app.log.info({ fd: inherited.fd }, '使用 systemd socket 激活传入的监听 socket');
+      log.info({ fd: inherited.fd }, '使用 systemd socket 激活传入的监听 socket');
     }
     startupPhase('listen');
-    app.log.info({ startupMs: { ...startupMs, total: Math.round(process.uptime() * 1000) } }, '启动各阶段耗时');
+    log.info({ startupMs: { ...startupMs, total: Math.round(process.uptime() * 1000) } }, '启动各阶段耗时');
     const watch = new DutydeckWatch({
       store: repos.config,
       collect: async () => collectWatchScopes(repos,
@@ -973,38 +981,38 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
           throw rejection ?? error;
         }
       },
-      warn: (details, message) => app?.log.warn(details, message)
+      warn: (details, message) => log.warn(details, message)
     });
-    closeWatch = startDutydeckWatch(watch, error => app?.log.warn({ error }, '只读巡检失败'));
+    closeWatch = startDutydeckWatch(watch, error => log.warn({ error }, '只读巡检失败'));
     pluginResultTimer = setInterval(() => { void sweepPluginResults(); }, 30_000);
     pluginResultTimer.unref();
     void sweepPluginResults();
     const sweepResources = () => {
-      void pruneLarkResourceDirectories(resourceRoot, { readProtectedDirectories: () => timeLoop('lark.resource-references', loopLog, () => readLarkResourceReferences(repos.config, repos.tasks)) }).catch(error => app?.log.warn({ error }, '飞书附件临时目录清理失败'));
+      void pruneLarkResourceDirectories(resourceRoot, { readProtectedDirectories: () => timeLoop('lark.resource-references', loopLog, () => readLarkResourceReferences(repos.config, repos.tasks)) }).catch(error => log.warn({ error }, '飞书附件临时目录清理失败'));
       // 账本保留期清理：分批让出事件循环，关闭时在批间停下；不做 VACUUM，腾出的页留给后续写入复用。
       historyRetentionRun ??= (async () => {
         const startedAt = performance.now();
         const pruned = await repos.retention.prune({ signal: historyRetention.signal });
-        if (Object.values(pruned).some(Boolean)) app?.log.info({ retention: pruned, durationMs: Math.round(performance.now() - startedAt) }, '历史数据保留期清理');
-      })().catch(error => app?.log.warn({ error }, '历史数据保留期清理失败')).finally(() => { historyRetentionRun = undefined; });
+        if (Object.values(pruned).some(Boolean)) log.info({ retention: pruned, durationMs: Math.round(performance.now() - startedAt) }, '历史数据保留期清理');
+      })().catch(error => log.warn({ error }, '历史数据保留期清理失败')).finally(() => { historyRetentionRun = undefined; });
     };
     resourceRetentionTimer = setInterval(sweepResources, 60 * 60_000);
     resourceRetentionTimer.unref();
     sweepResources();
     workItems.start();
-    void delegations.start().catch(error => app?.log.warn({ error }, '分层协作规划恢复失败'));
+    void delegations.start().catch(error => log.warn({ error }, '分层协作规划恢复失败'));
     const tick = () => {
-      void timeLoop('automation.tick', loopLog, () => automation.tick()).catch(error => app?.log.warn({ error }, '自动任务轮询失败'));
-      if (ciWebhook) void timeLoop('ci-webhook.tick', loopLog, () => ciWebhook.tick()).catch(error => app?.log.warn({ error }, 'CI webhook 续作轮询失败'));
-      void timeLoop('pull-requests.tick', loopLog, () => pullRequests.tick()).catch(error => app?.log.warn({ error }, 'PR 跟进轮询失败'));
+      void timeLoop('automation.tick', loopLog, () => automation.tick()).catch(error => log.warn({ error }, '自动任务轮询失败'));
+      if (ciWebhook) void timeLoop('ci-webhook.tick', loopLog, () => ciWebhook.tick()).catch(error => log.warn({ error }, 'CI webhook 续作轮询失败'));
+      void timeLoop('pull-requests.tick', loopLog, () => pullRequests.tick()).catch(error => log.warn({ error }, 'PR 跟进轮询失败'));
     };
     automationTimer = setInterval(tick, 60_000);
     automationTimer.unref();
     tick();
     let lastCollaborationPrune = 0;
     const tickCollaboration = () => {
-      if (Date.now() - lastCollaborationPrune > 3_600_000) { lastCollaborationPrune = Date.now(); void timeLoop('collaboration.prune', loopLog, () => collaboration!.prune()).catch(error => app?.log.warn({ error }, '群上下文保留期清理失败')); }
-      void timeLoop('collaboration.tick', loopLog, () => collaboration!.scheduler.tick()).catch(error => app?.log.warn({ error }, '群委托轮询失败')); };
+      if (Date.now() - lastCollaborationPrune > 3_600_000) { lastCollaborationPrune = Date.now(); void timeLoop('collaboration.prune', loopLog, () => collaboration!.prune()).catch(error => log.warn({ error }, '群上下文保留期清理失败')); }
+      void timeLoop('collaboration.tick', loopLog, () => collaboration!.scheduler.tick()).catch(error => log.warn({ error }, '群委托轮询失败')); };
     collaborationTimer = setInterval(tickCollaboration, 5_000);
     collaborationTimer.unref(); tickCollaboration();
   return { config, runtime, close: closeResources, shutdownPhases };

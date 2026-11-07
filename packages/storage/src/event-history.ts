@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
-import { cachedStatement } from './database-control.js';
-import { extractEventArtifactReferences, isTerminalTaskStatus, type HistoryOutline, type HistoryOutlineQuery, type HistoryTurnPlace, type HistoryTurnSummary } from '@dutydeck/shared';
+import { cachedStatement } from './statement-cache.js';
+import { BACKGROUND_FOLLOWUP, extractEventArtifactReferences, isTerminalTaskStatus, type HistoryOutline, type HistoryOutlineQuery, type HistoryTurnPlace, type HistoryTurnSummary } from '@dutydeck/shared';
 
 export const HISTORY_PROMPT_LIMIT = 1024;
 export const HISTORY_OUTPUT_LIMIT = 4096;
@@ -124,6 +124,7 @@ function projectTurns(sqlite: Database.Database, sessionId: string, places: Hist
           AND json_type(data,'$.steering') IS NULL THEN 1 ELSE 0 END AS boundary,
         CASE WHEN type='text' AND valid THEN substr(json_extract(data,'$.text'),1,${HISTORY_OUTPUT_LIMIT}) END AS piece,
         CASE WHEN type='text' AND valid THEN length(json_extract(data,'$.text')) END AS size,
+        CASE WHEN type='text' AND valid THEN json_extract(data,'$.origin') END AS origin,
         CASE WHEN type IN ('tool_call','tool_result') AND valid THEN COALESCE(json_extract(data,'$.id'),id) END AS toolKey,
         CASE WHEN type IN ('tool_call','tool_result') AND valid THEN json_extract(data,'$.startedAt') END AS startedAt,
         CASE WHEN type IN ('tool_call','tool_result') AND valid THEN json_extract(data,'$.completedAt') END AS completedAt,
@@ -160,6 +161,8 @@ function projectTurns(sqlite: Database.Database, sessionId: string, places: Hist
       SELECT g.turn,g.sequence,g.piece,g.size,COALESCE(g.role,'assistant')='assistant' AS output
       FROM grouped g JOIN ranges r ON r.turn=g.turn
       WHERE g.type='text' AND g.valid AND (COALESCE(g.role,'assistant')='user' OR (COALESCE(g.role,'assistant')='assistant' AND g.sequence>r.outputAfter))
+        -- A background task's later answer is run-level and never a turn's output.
+        AND COALESCE(g.origin,'') <> '${BACKGROUND_FOLLOWUP}'
     ), budgeted AS (
       SELECT *,CASE WHEN output THEN ${HISTORY_OUTPUT_LIMIT} ELSE ${HISTORY_PROMPT_LIMIT} END AS budget,
         COALESCE(SUM(size) OVER (PARTITION BY turn,output ORDER BY sequence ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING),0) AS used,

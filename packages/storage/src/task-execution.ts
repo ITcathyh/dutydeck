@@ -8,7 +8,8 @@ import {
   type SessionFence, type TaskAttempt, type TaskRequestV1, type NativeContextSelection, type NativeContextRef, type NativeContextBinding,
   type SteeringOperation, type LegacyRetirementCandidate, type LegacyRetirementReceipt, type LegacyRetirementResult, type TaskExecutionReadContext
 } from '@dutydeck/shared';
-import { cachedStatement, type OpenControl } from './database-control.js';
+import { cachedStatement } from './statement-cache.js';
+import type { OpenControl } from './database-control.js';
 import { listConfigByJsonField } from './config-query.js';
 import { currentProcessIdentity, observeProcess } from './process-identity.js';
 import { resolveExecutionWorkspace, type ExecutionWorkspaceIdentity } from './execution-workspace.js';

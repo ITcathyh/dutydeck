@@ -1,4 +1,4 @@
-import { asRecord as record } from '@dutydeck/shared';
+import { asRecord as record, isBackgroundFollowup } from '@dutydeck/shared';
 import type { DockEvent } from './api';
 import { stateLabels } from './components/ui';
 import { createEventWindow } from './event-history';
@@ -45,6 +45,7 @@ function describe(event: DockEvent): Pick<TraceRow, 'category' | 'label' | 'summ
     return { category: 'system', label: '任务状态', summary: [status ? stateLabels[status] ?? status : '', preview(task.prompt)].filter(Boolean).join(' · ') || '任务状态', failed };
   }
   const summary = preview(data.text) || preview(data.message) || preview(data.prompt) || preview(data.parts) || preview(data.output) || preview(data.state) || preview(data.status) || event.type;
+  if (event.type === 'text' && isBackgroundFollowup(event)) return { category: 'assistant', label: '后台任务结果', summary, failed };
   if (event.type === 'text') return { category: data.role === 'user' ? 'user' : data.role === 'system' ? 'system' : 'assistant', label: data.role === 'user' ? data.steering ? '插话' : '用户输入' : '消息', summary, failed };
   if (event.type === 'thinking') return { category: 'assistant', label: '思考', summary, failed };
   if (event.type === 'error') return { category: 'error', label: '错误', summary, failed };
@@ -65,7 +66,8 @@ export function buildTraceRows(events: DockEvent[]): TraceRow[] {
     const steeringTask = string(record(record(data.steering).target).taskId);
     const user = event.type === 'text' && data.role === 'user' && !data.steering;
     if (user) currentTurn = explicitTask ? `task:${explicitTask}` : `input:${event.sequence}`;
-    const turn = steeringTask ? `task:${steeringTask}` : explicitTask ? `task:${explicitTask}` : currentTurn;
+    // 后台任务结束后的回答不属于任何一轮，不归到它到达时正在进行的那一轮。
+    const turn = steeringTask ? `task:${steeringTask}` : explicitTask ? `task:${explicitTask}` : isBackgroundFollowup(event) ? 'unassigned' : currentTurn;
     const row: TraceRow = { event, ...describe(event), turn, at: traceTime(event.timestamp) };
     if (event.type === 'tool_call' || event.type === 'tool_result') {
       const id = string(data.id);

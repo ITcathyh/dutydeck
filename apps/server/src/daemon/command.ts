@@ -826,20 +826,24 @@ function explicitServerFlags(options: CliOptions): string[] {
         : `--${key.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`)}`);
 }
 
-function refuseExplicitFlags(action: 'start' | 'restart', unit: string, options: CliOptions, dir: string, pid?: number): DaemonCommandResult | undefined {
+/** `supervisor` 写托管方与新进程的启动依据，如「systemd unit x，新进程按 unit 的 ExecStart 启动」。 */
+function refuseExplicitFlags(action: 'start' | 'restart', supervisor: string, options: CliOptions, dir: string, pid?: number): DaemonCommandResult | undefined {
   const flags = explicitServerFlags(options);
   if (flags.length === 0) return undefined;
   return { ok: false, action, running: action === 'restart', pid,
-    error: `Dutydeck 由 systemd unit ${unit} 托管，新进程按 unit 的 ExecStart 启动，命令行参数 ${flags.join(' ')} 传不过去。请把配置写进 ${resolve(dir, '../..', '.env')}（如 DUTYDECK_PORT、DUTYDECK_HOST）后不带参数重试。` };
+    error: `Dutydeck 由 ${supervisor}，命令行参数 ${flags.join(' ')} 传不过去。请把配置写进 ${resolve(dir, '../..', '.env')}（如 DUTYDECK_PORT、DUTYDECK_HOST）后不带参数重试。` };
 }
+const systemdManagedBy = (unit: string) => `systemd unit ${unit} 托管，新进程按 unit 的 ExecStart 启动`;
 
-/** systemctl start / restart 返回后，等到新一代由 systemd 托管的 daemon 就绪并通过身份校验。 */
-async function waitForSystemdGeneration(action: 'start' | 'restart', unit: string, dir: string, previous: DaemonState | undefined, logOffset: number): Promise<DaemonCommandResult> {
+/** 托管方的启动 / 重启命令返回后，等到新一代 daemon 就绪并通过身份校验。 */
+async function waitForSupervisedGeneration(action: 'start' | 'restart', dir: string, previous: DaemonState | undefined, logOffset: number, wait: {
+  ownedBySupervisor(state: DaemonState): boolean; timeoutMs: number; command: string; statusHint: string;
+}): Promise<DaemonCommandResult> {
   const logFile = daemonPaths(dir).logFile;
-  const deadline = Date.now() + READY_TIMEOUT_MS;
+  const deadline = Date.now() + wait.timeoutMs;
   while (Date.now() < deadline) {
     const state = readDaemonStatus(dir);
-    if (state?.ready && state.supervisor === 'systemd' && state.systemdUnit === unit && !sameGeneration(state, previous) && inspectDaemonState(state).status === 'verified') {
+    if (state?.ready && wait.ownedBySupervisor(state) && !sameGeneration(state, previous) && inspectDaemonState(state).status === 'verified') {
       const authEnabled = state.authEnabled !== false;
       return { ok: true, action, running: true, pid: state.pid, address: state.address, authEnabled, authentication: authEnabled ? 'required' : 'disabled', logFile, state: action === 'restart' ? 'restarted' : 'started' };
     }
@@ -849,11 +853,17 @@ async function waitForSystemdGeneration(action: 'start' | 'restart', unit: strin
   const running = inspectDaemon(dir).status === 'verified';
   return { ok: false, action, running, logFile,
     ...(action === 'restart' && !running ? { state: 'not-running' as const } : {}),
-    error: `systemctl --user ${action} ${unit} 已返回，但 ${READY_TIMEOUT_MS / 1000} 秒内没有等到新的守护进程就绪并通过身份校验。${reason.length > 0 ? `原因：${reason.join('；')}。` : ''}查看：systemctl --user status ${unit}` };
+    error: `${wait.command} 已返回，但 ${wait.timeoutMs / 1000} 秒内没有等到新的守护进程就绪并通过身份校验。${reason.length > 0 ? `原因：${reason.join('；')}。` : ''}查看：${wait.statusHint}` };
 }
 
+const waitForSystemdGeneration = (action: 'start' | 'restart', unit: string, dir: string, previous: DaemonState | undefined, logOffset: number) =>
+  waitForSupervisedGeneration(action, dir, previous, logOffset, {
+    ownedBySupervisor: state => state.supervisor === 'systemd' && state.systemdUnit === unit,
+    timeoutMs: READY_TIMEOUT_MS, command: `systemctl --user ${action} ${unit}`, statusHint: `systemctl --user status ${unit}`
+  });
+
 async function systemdStart(unit: string, info: SystemdUnitInfo, options: CliOptions, dir: string, deps: DaemonCommandDeps): Promise<DaemonCommandResult> {
-  const refused = refuseExplicitFlags('start', unit, options, dir);
+  const refused = refuseExplicitFlags('start', systemdManagedBy(unit), options, dir);
   if (refused) return refused;
   const logFile = daemonPaths(dir).logFile;
   // 旧 oneshot unit 被改写并 daemon-reload 后仍停在 active (exited)：systemctl start 对它是空操作。
@@ -903,7 +913,7 @@ async function systemdStop(dir: string, state: DaemonState, unit: string, deps: 
 }
 
 async function systemdRestart(dir: string, state: DaemonState, unit: string, info: SystemdUnitInfo, options: CliOptions, deps: DaemonCommandDeps): Promise<DaemonCommandResult> {
-  const refused = refuseExplicitFlags('restart', unit, options, dir, state.pid);
+  const refused = refuseExplicitFlags('restart', systemdManagedBy(unit), options, dir, state.pid);
   if (refused) return refused;
   // unit 被 autostart enable 改写到别的根目录后，restart 会在那边拉起新进程，这里只会空等。
   const root = resolve(dir, '../..');
@@ -965,11 +975,8 @@ async function launchdSupervisor(state: DaemonState | undefined, deps: DaemonCom
 }
 
 async function launchdRestart(dir: string, state: DaemonState, target: string, options: CliOptions, deps: DaemonCommandDeps): Promise<DaemonCommandResult> {
-  const flags = explicitServerFlags(options);
-  if (flags.length > 0) {
-    return { ok: false, action: 'restart', running: true, pid: state.pid,
-      error: `Dutydeck 由 launchd（${target}）托管，新进程按 plist 的 ProgramArguments 启动，命令行参数 ${flags.join(' ')} 传不过去。请把配置写进 ${resolve(dir, '../..', '.env')}（如 DUTYDECK_PORT、DUTYDECK_HOST）后不带参数重试。` };
-  }
+  const refused = refuseExplicitFlags('restart', `launchd（${target}）托管，新进程按 plist 的 ProgramArguments 启动`, options, dir, state.pid);
+  if (refused) return refused;
   // 新一代由 plist 里的解释器拉起：检查的是它，不是当前 CLI 自己。
   const program = readLaunchdProgram(process.env.HOME ?? homedir());
   if (!program) {
@@ -993,20 +1000,10 @@ async function launchdRestart(dir: string, state: DaemonState, target: string, o
     const detail = firstLine(kicked.stderr) || firstLine(kicked.stdout) || (kicked.status === null ? 'launchctl 无法执行' : `退出码 ${kicked.status}`);
     return { ok: false, action: 'restart', running: inspectDaemon(dir).status === 'verified', pid: state.pid, error: `launchctl kickstart -k ${target} 失败：${detail}。查看：launchctl print ${target}` };
   }
-  const logFile = daemonPaths(dir).logFile;
-  const deadline = Date.now() + LAUNCHD_READY_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    const current = readDaemonStatus(dir);
-    if (current?.ready && current.supervisor === 'launchd' && !sameGeneration(current, state) && inspectDaemonState(current).status === 'verified') {
-      const authEnabled = current.authEnabled !== false;
-      return { ok: true, action: 'restart', running: true, pid: current.pid, address: current.address, authEnabled, authentication: authEnabled ? 'required' : 'disabled', logFile, state: 'restarted' };
-    }
-    await sleep(200);
-  }
-  const reason = tailDaemonLog(dir, 3, logOffset);
-  const running = inspectDaemon(dir).status === 'verified';
-  return { ok: false, action: 'restart', running, logFile, ...(running ? {} : { state: 'not-running' as const }),
-    error: `launchctl kickstart -k ${target} 已返回，但 ${LAUNCHD_READY_TIMEOUT_MS / 1000} 秒内没有等到新的守护进程就绪并通过身份校验。${reason.length > 0 ? `原因：${reason.join('；')}。` : ''}查看：launchctl print ${target}` };
+  return await waitForSupervisedGeneration('restart', dir, state, logOffset, {
+    ownedBySupervisor: current => current.supervisor === 'launchd',
+    timeoutMs: LAUNCHD_READY_TIMEOUT_MS, command: `launchctl kickstart -k ${target}`, statusHint: `launchctl print ${target}`
+  });
 }
 
 /**

@@ -4,7 +4,7 @@ import { createRepositories } from '@dutydeck/storage';
 import type { AgentConfig, Session, ToolRiskPolicy } from '@dutydeck/shared';
 import { readTaskReport, RuntimeError } from '@dutydeck/shared';
 import { DutydeckRuntime, type AgentDriver, type DriverFactory } from './index.js';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -604,6 +604,55 @@ describe('runtime lifecycle acceptance', () => {
     expect(h.driver.setRiskPolicy).toHaveBeenNthCalledWith(1, policy);
     expect(h.driver.setRiskPolicy).toHaveBeenNthCalledWith(2, undefined);
     await h.runtime.shutdown(); h.repos.close();
+  });
+
+  it('replaces the session risk policy file with owner-only permissions and leaves no temporary files', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dutydeck-risk-atomic-'));
+    const h = harness();
+    const policy: ToolRiskPolicy = { enabled: true, authorized: true, pattern: 'rm\\s' };
+    try {
+      await h.runtime.initialize([agent]);
+      const session = await h.runtime.start({ agentId: 'mock', cwd: directory });
+      const sessions = join(session.cwd, '.dutydeck', 'security', 'sessions');
+      const target = join(sessions, `${session.id}.json`);
+      await mkdir(sessions, { recursive: true });
+      await writeFile(target, '{}', { mode: 0o644 });
+
+      await h.runtime.setRiskPolicy(session.id, policy);
+      expect(JSON.parse(await readFile(target, 'utf8'))).toEqual(policy);
+      if (process.platform !== 'win32') expect((await stat(target)).mode & 0o777).toBe(0o600);
+      await h.runtime.setRiskPolicy(session.id);
+      expect(JSON.parse(await readFile(target, 'utf8'))).toEqual({ enabled: false });
+      expect((await readdir(sessions)).filter(name => name.endsWith('.tmp'))).toEqual([]);
+      await h.runtime.shutdown(); h.repos.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('replaces a symlinked session risk policy file instead of writing through the link', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dutydeck-risk-link-'));
+    const outside = await mkdtemp(join(tmpdir(), 'dutydeck-risk-outside-'));
+    const h = harness();
+    try {
+      await h.runtime.initialize([agent]);
+      const session = await h.runtime.start({ agentId: 'mock', cwd: directory });
+      const sessions = join(session.cwd, '.dutydeck', 'security', 'sessions');
+      const target = join(sessions, `${session.id}.json`);
+      const external = join(outside, 'external.json');
+      await writeFile(external, 'external contents');
+      await mkdir(sessions, { recursive: true });
+      await symlink(external, target);
+
+      await h.runtime.setRiskPolicy(session.id, { enabled: true, authorized: true, pattern: 'rm\\s' });
+      expect(await readFile(external, 'utf8')).toBe('external contents');
+      expect((await lstat(target)).isFile()).toBe(true);
+      expect(JSON.parse(await readFile(target, 'utf8'))).toMatchObject({ enabled: true, pattern: 'rm\\s' });
+      await h.runtime.shutdown(); h.repos.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
   });
 
   it('paginates across more than 1,000 events (the storage page cap) in the current turn without an unbounded history read', async () => {
@@ -1644,6 +1693,124 @@ describe('driver exit subscription', () => {
   });
 });
 
+describe('CLI self-update window', () => {
+  const executable = (path: string) => writeFile(path, '#!/bin/sh\n', { mode: 0o755 });
+  const fakeTimers = () => vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  // Lets work before the swap wait finish, so the clock is advanced from the armed timer.
+  const armed = async () => { while (!vi.getTimerCount()) await new Promise(resolve => setImmediate(resolve)); };
+  const terminal = (command: string, builtin = false): AgentConfig => ({ ...agent, id: 'swap-cli', name: 'Swap CLI', command, protocol: 'pty-cli', builtin });
+
+  it('starts a new session when its command reappears within the swap window', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dutydeck-cli-swap-'));
+    const command = join(directory, 'cli');
+    const h = harness();
+    const runtime = new DutydeckRuntime(h.repos, { driverFactory: () => h.driver });
+    try {
+      await runtime.initialize([terminal(command)]);
+      fakeTimers();
+      const starting = runtime.start({ agentId: 'swap-cli' });
+      await armed();
+      await vi.advanceTimersByTimeAsync(2_900);
+      await executable(command);
+      await vi.advanceTimersByTimeAsync(100);
+      vi.useRealTimers();
+      expect((await starting).state).toBe('idle');
+      expect(h.driver.start).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers(); await runtime.shutdown(); h.repos.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('reports the original error after one swap window when the command stays missing', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dutydeck-cli-swap-'));
+    const command = join(directory, 'cli');
+    const h = harness();
+    const runtime = new DutydeckRuntime(h.repos, { driverFactory: () => h.driver });
+    try {
+      await runtime.initialize([terminal(command)]);
+      fakeTimers();
+      let settled = false;
+      const starting = runtime.start({ agentId: 'swap-cli' });
+      void starting.then(() => { settled = true; }, () => { settled = true; });
+      await armed();
+      await vi.advanceTimersByTimeAsync(2_999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(starting).rejects.toMatchObject({ code: 'AGENT_UNAVAILABLE', message: `Command not found: ${command}` });
+      expect(h.driver.start).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers(); await runtime.shutdown(); h.repos.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('reports a missing acpx at once because the Agent command itself exists', async () => {
+    const h = harness();
+    const runtime = new DutydeckRuntime(h.repos, { acpxCommand: join(tmpdir(), 'dutydeck-missing-acpx', 'acpx'), driverFactory: () => h.driver });
+    try {
+      await runtime.initialize([agent]);
+      fakeTimers();
+      await expect(runtime.start({ agentId: agent.id })).rejects.toMatchObject({ code: 'AGENT_UNAVAILABLE', message: expect.stringContaining('acpx is unavailable') });
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); await runtime.shutdown(); h.repos.close(); }
+  });
+
+  it.each([true, false])('rechecks a removed built-in terminal Agent at boot before deleting it (command returns=%s)', async returns => {
+    const directory = await mkdtemp(join(tmpdir(), 'dutydeck-cli-swap-'));
+    const builtin = terminal(join(directory, 'cli'), true);
+    const h = harness();
+    try {
+      await h.repos.agents.save(builtin);
+      fakeTimers();
+      const initializing = h.runtime.initialize([agent]);
+      await armed();
+      await vi.advanceTimersByTimeAsync(2_900);
+      if (returns) await executable(builtin.command);
+      await vi.advanceTimersByTimeAsync(100);
+      vi.useRealTimers();
+      await initializing;
+      expect((await h.repos.agents.list()).some(existing => existing.id === builtin.id)).toBe(returns);
+    } finally {
+      vi.useRealTimers(); await h.runtime.shutdown(); h.repos.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('attaches an existing terminal without waiting for its missing command', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dutydeck-cli-swap-'));
+    const command = join(directory, 'cli');
+    const file = join(directory, 'dutydeck.db');
+    await executable(command);
+    let emit!: (event: any) => void;
+    const first: AgentDriver = { start: vi.fn(async () => {}), resume: vi.fn(async () => {}), interrupt: vi.fn(async () => {}), isStopped: async () => true, stop: vi.fn(async () => {}),
+      send: vi.fn(async () => { emit({ type: 'text', data: { text: 'done' } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } }); }) };
+    const firstRepos = createRepositories(file, { newDatabaseAuthority: 'ledger_v1' });
+    const firstRuntime = new DutydeckRuntime(firstRepos, { driverFactory: (_agent, _protocol, onEvent) => { emit = onEvent; return first; } });
+    const attached: AgentDriver = { start: vi.fn(async () => {}), resume: vi.fn(async () => {}), send: vi.fn(async () => {}), interrupt: vi.fn(async () => {}), isStopped: async () => true, stop: vi.fn(async () => {}), attachTerminal: vi.fn(() => true) };
+    let repos: ReturnType<typeof createRepositories> | undefined, runtime: DutydeckRuntime | undefined;
+    try {
+      await firstRuntime.initialize([terminal(command)]);
+      const session = await firstRuntime.start({ agentId: 'swap-cli' });
+      await firstRuntime.send(session.id, 'work');
+      await firstRuntime.shutdown(); firstRepos.close();
+      await rm(command);
+
+      repos = createRepositories(file, { newDatabaseAuthority: 'ledger_v1' });
+      runtime = new DutydeckRuntime(repos, { driverFactory: () => attached });
+      await runtime.initialize([terminal(command)]);
+      fakeTimers();
+      await expect(runtime.getTerminalDriver(session.id)).resolves.toBe(attached);
+      expect(attached.attachTerminal).toHaveBeenCalledOnce();
+      expect(attached.start).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      await runtime?.shutdown(); repos?.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('publishSessionEvent — 带外事件入口（@dutydeck/relay 的落点）', () => {
   // 这个入口存在的**唯一理由**就是「不能直接调 repos.events.append()」：
   // 那样只落库，既不通知在线 SSE 订阅者，也不推进 runtime 的序号计数器。
@@ -1815,4 +1982,50 @@ it('exposes only the matching active attempt and preserves currentAttemptId thro
     expect((await restarted.getTasks(session.id))[0]).toMatchObject({ id: active.taskId, currentAttemptId: active.attemptId, status: 'completed' });
     expect(restarted.getActiveTaskContext(session.id)).toBeUndefined();
   } finally { await restarted.shutdown(); h.repos.close(); }
+});
+
+describe('background follow-ups', () => {
+  const followup = (text: string, sourceId = 'claude-background-followup:entry:0') => ({ type: 'text', sourceId, data: { text, origin: 'background_followup' } });
+  const digest = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex');
+
+  it('records a follow-up during an active Attempt as a run-level event and leaves that Attempt unchanged', async () => {
+    const h = harness({ onSend: emit => { emit({ type: 'text', data: { text: 'current answer' } }); emit(followup('background answer')); } });
+    await h.runtime.initialize([agent]); const session = await h.runtime.start({ agentId: agent.id });
+    try {
+      const task = await h.runtime.send(session.id, 'work');
+      expect(task.status).toBe('completed');
+      const attempt = h.repos.execution.getTaskExecution(task.id)!.currentAttempt!;
+      expect(h.repos.execution.getAttemptEvents(attempt.attemptId, { limit: 200 }).filter(event => event.type === 'text' && (event.data as { role?: string }).role !== 'user').map(event => event.data)).toEqual([{ text: 'current answer' }]);
+      expect(attempt.settlement).toMatchObject({ kind: 'driver_result', outcome: 'completed', outputDigest: digest('current answer'), stopReason: 'end_turn' });
+      const stored = (await h.runtime.getEvents(session.id)).filter(event => (event.data as { origin?: string }).origin === 'background_followup');
+      expect(stored).toHaveLength(1);
+      expect(stored[0]).toMatchObject({ type: 'text', data: { text: 'background answer' } });
+      expect(stored[0]!.attemptId ?? null).toBeNull(); expect(stored[0]!.taskId ?? null).toBeNull();
+    } finally { await h.runtime.shutdown(); h.repos.close(); }
+  });
+
+  it('still records a follow-up that arrives after the Attempt settled', async () => {
+    const h = harness({ onSend: emit => emit({ type: 'text', data: { text: 'current answer' } }) });
+    await h.runtime.initialize([agent]); const session = await h.runtime.start({ agentId: agent.id });
+    try {
+      const task = await h.runtime.send(session.id, 'work');
+      expect(task.status).toBe('completed');
+      h.emit(followup('late background answer'));
+      await vi.waitFor(async () => expect((await h.runtime.getEvents(session.id)).filter(event => (event.data as { origin?: string }).origin === 'background_followup')
+        .map(event => ({ text: (event.data as { text: string }).text, attemptId: event.attemptId ?? null }))).toEqual([{ text: 'late background answer', attemptId: null }]));
+      expect(h.repos.execution.getTaskExecution(task.id)!.currentAttempt!.settlement).toMatchObject({ outcome: 'completed', outputDigest: digest('current answer') });
+    } finally { await h.runtime.shutdown(); h.repos.close(); }
+  });
+
+  it('stores one event for a follow-up source replayed twice', async () => {
+    const h = harness({ onSend: emit => { emit(followup('background answer', 'claude-background-followup:replayed:0')); emit({ type: 'text', data: { text: 'current answer' } }); } });
+    await h.runtime.initialize([agent]); const session = await h.runtime.start({ agentId: agent.id });
+    try {
+      expect((await h.runtime.send(session.id, 'work')).status).toBe('completed');
+      h.emit(followup('background answer', 'claude-background-followup:replayed:0'));
+      h.emit({ type: 'status', data: { state: 'probe_after_replay' } });
+      await vi.waitFor(async () => expect((await h.runtime.getEvents(session.id)).some(event => (event.data as { state?: string }).state === 'probe_after_replay')).toBe(true));
+      expect((await h.runtime.getEvents(session.id)).filter(event => (event.data as { origin?: string }).origin === 'background_followup')).toHaveLength(1);
+    } finally { await h.runtime.shutdown(); h.repos.close(); }
+  });
 });

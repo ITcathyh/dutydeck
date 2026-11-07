@@ -9,19 +9,36 @@ import type { LarkLongConnectionListenerOptions } from './listener.js';
 import { isLarkMessageRateLimit, larkRateLimitBackoffMs, LarkLongConnectionListener, LarkLongConnectionListenerPool, LarkMessageCoordinator, patchRejectedCardDelta } from './listener.js';
 import { buildLarkCard, LarkServiceError } from './service.js';
 import { larkAdhdModePrompt } from './adhd-mode.js';
+import { larkListenerStatusKey } from './listener-status.js';
 
 // 仅「监听接入层」用例需要截获 SDK 的事件注册；其余协调器用例直接构造 coordinator，
 // 不受此 mock 影响（它们传入的是手写 service 替身，永不实例化 lark.Client）。
+type MockWsClient = {
+  options: { onReady: () => void; onError: (error: Error) => void; onReconnecting: () => void; onReconnected: () => void; httpInstance: { request(config: Record<string, unknown>): Promise<unknown>; post(url: string, data?: unknown): Promise<unknown>; defaults: unknown } };
+};
 const larkSdkHarness = vi.hoisted(() => {
   const handlers: Record<string, (event: any) => unknown> = {};
   const wsStart = vi.fn();
   const wsClose = vi.fn();
+  const wsClients: MockWsClient[] = [];
+  // 未配置时 start 立即报 onReady、close 什么也不做。
+  const behavior: { start?: (client: MockWsClient) => Promise<void> | void; close?: (client: MockWsClient) => void } = {};
+  const httpRequest = vi.fn();
+  const httpPost = vi.fn();
+  const interceptorUse = { request: vi.fn(), response: vi.fn() };
   return {
-    handlers, wsStart, wsClose,
+    handlers, wsStart, wsClose, wsClients, behavior, httpRequest, httpPost, interceptorUse,
     reset: () => {
       for (const key of Object.keys(handlers)) delete handlers[key];
       wsStart.mockClear();
       wsClose.mockClear();
+      wsClients.length = 0;
+      delete behavior.start;
+      delete behavior.close;
+      httpRequest.mockReset();
+      httpPost.mockReset();
+      interceptorUse.request.mockClear();
+      interceptorUse.response.mockClear();
     }
   };
 });
@@ -34,9 +51,19 @@ vi.mock('@larksuiteoapi/node-sdk', () => ({
     }
   },
   WSClient: class {
-    constructor(private readonly options: { onReady: () => void }) {}
-    async start() { larkSdkHarness.wsStart(); this.options.onReady(); }
-    close() { larkSdkHarness.wsClose(); }
+    constructor(readonly options: MockWsClient['options']) { larkSdkHarness.wsClients.push(this); }
+    async start(params: unknown) {
+      larkSdkHarness.wsStart(params);
+      if (larkSdkHarness.behavior.start) return larkSdkHarness.behavior.start(this);
+      this.options.onReady();
+    }
+    close() { larkSdkHarness.wsClose(); larkSdkHarness.behavior.close?.(this); }
+  },
+  defaultHttpInstance: {
+    request: (config: unknown) => larkSdkHarness.httpRequest(config),
+    post(this: unknown, url: string, data?: unknown) { return larkSdkHarness.httpPost(this, url, data); },
+    defaults: { timeout: 15_000 },
+    interceptors: { request: { use: larkSdkHarness.interceptorUse.request }, response: { use: larkSdkHarness.interceptorUse.response } }
   }
 }));
 
@@ -2746,5 +2773,242 @@ describe('Lark long connection listener 欢迎语', () => {
     const card = welcomeTitles(posts)[0]!;
     expect(JSON.stringify(card)).toContain("Dutydeck 机器人已入群");
     listener.stop();
+  });
+});
+
+describe('长连接重连卡住后的重建', () => {
+  const stallMs = 600_000;
+  // 卡住超过阈值才重建，正好满阈值时不算。
+  const pastStall = stallMs + 1;
+  const larkFetcher = vi.fn(async (url: string | URL) => {
+    const target = String(url);
+    const data = target.includes('/tenant_access_token/') ? { tenant_access_token: 't', expire: 7200 }
+      : target.includes('/bot/v3/info') ? { bot: { open_id: 'ou_bot', app_name: 'Dutydeck' } } : {};
+    return { ok: true, json: async () => ({ code: 0, ...data }), headers: new Map() };
+  });
+  const coordinatorStop = vi.spyOn(LarkMessageCoordinator.prototype, 'stop');
+  afterEach(() => { vi.useRealTimers(); });
+  // 飞书接口闸门按 appId 和时钟限流：每个用例用自己的 appId，假时钟下不会被前面用例的请求挡住。
+  let appSeq = 0;
+  const stallConfig = () => ({ ...config, appId: `cli_stall_${++appSeq}` });
+
+  const startStalled = async (env: NodeJS.ProcessEnv = {}) => {
+    larkSdkHarness.reset();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const participation = { recover: vi.fn(async () => {}), refresh: vi.fn(async () => {}), closeApp: vi.fn() };
+    const connectionLost = vi.fn();
+    const connectionChanged = vi.fn();
+    const listener = new LarkLongConnectionListener(log, {
+      env, fetcher: larkFetcher as any, chatModeResolver: async () => 'group',
+      participation: participation as unknown as LarkLongConnectionListenerOptions['participation']
+    }, connectionLost, connectionChanged);
+    const botConfig = stallConfig();
+    await listener.start(botConfig);
+    // 之后新建的连接都连不上：start 返回但不报 onReady。
+    larkSdkHarness.behavior.start = () => {};
+    coordinatorStop.mockClear();
+    return { listener, log, participation, connectionLost, connectionChanged, appId: botConfig.appId, clients: larkSdkHarness.wsClients };
+  };
+
+  it('只换掉卡住的 WSClient，复用事件分发器，不拆监听、不清断线起点', async () => {
+    const { listener, participation, connectionLost, connectionChanged, appId, clients } = await startStalled();
+    try {
+      clients[0]!.options.onReconnecting();
+      const since = listener.reconnectingSince;
+      expect(since).toBeDefined();
+      await vi.advanceTimersByTimeAsync(pastStall);
+      expect(clients).toHaveLength(2);
+      expect(larkSdkHarness.wsClose).toHaveBeenCalledOnce();
+      expect(larkSdkHarness.wsStart).toHaveBeenCalledTimes(2);
+      const [first, second] = larkSdkHarness.wsStart.mock.calls.map(call => (call[0] as { eventDispatcher: unknown }).eventDispatcher);
+      expect(second).toBe(first);
+      expect(coordinatorStop).not.toHaveBeenCalled();
+      expect(participation.closeApp).not.toHaveBeenCalled();
+      expect(connectionLost).not.toHaveBeenCalled();
+      expect(listener.listening).toBe(true);
+      expect(listener.reconnectingSince).toBe(since);
+      expect(listener.rebuiltAt).toBe(new Date().toISOString());
+      expect(connectionChanged).toHaveBeenCalledTimes(2);
+
+      const values = new Map<string, string>();
+      const pool = new LarkLongConnectionListenerPool({ info: vi.fn(), warn: vi.fn(), error: vi.fn() }, {
+        workflowStore: { get: async (key: string) => values.get(key), set: async (key: string, value: string) => { values.set(key, value); } } as any
+      });
+      (pool as any).listeners.set(appId, listener);
+      await (pool as any).publishStatus();
+      expect(JSON.parse(values.get(larkListenerStatusKey)!)).toMatchObject({
+        active: [], reconnecting: [{ appId, since, rebuiltAt: listener.rebuiltAt }]
+      });
+    } finally { listener.stop(); }
+  });
+
+  it('旧连接在 close() 里同步报 onError、onReconnecting 时不触发 connectionLost', async () => {
+    const { listener, connectionLost, clients } = await startStalled();
+    try {
+      clients[0]!.options.onReconnecting();
+      const since = listener.reconnectingSince;
+      larkSdkHarness.behavior.close = client => { client.options.onError(new Error('socket closed')); client.options.onReconnecting(); };
+      await vi.advanceTimersByTimeAsync(pastStall);
+      expect(clients).toHaveLength(2);
+      expect(larkSdkHarness.wsClose).toHaveBeenCalledOnce();
+      expect(connectionLost).not.toHaveBeenCalled();
+      expect(listener.listening).toBe(true);
+      expect(listener.reconnectingSince).toBe(since);
+    } finally {
+      delete larkSdkHarness.behavior.close;
+      listener.stop();
+    }
+  });
+
+  it.each(['stop', 'disable'] as const)('%s() 之后迟到的计时器不再新建连接', async method => {
+    const { listener, clients } = await startStalled();
+    clients[0]!.options.onReconnecting();
+    if (method === 'stop') listener.stop(); else await listener.disable();
+    await vi.advanceTimersByTimeAsync(pastStall * 2);
+    expect(clients).toHaveLength(1);
+    expect(listener.rebuiltAt).toBeUndefined();
+    expect(listener.reconnectingSince).toBeUndefined();
+  });
+
+  it('新连接连上后清空状态并停止计时；仍然卡住时按同一阈值再重建', async () => {
+    const { listener, connectionChanged, clients } = await startStalled();
+    try {
+      clients[0]!.options.onReconnecting();
+      await vi.advanceTimersByTimeAsync(pastStall);
+      expect(clients).toHaveLength(2);
+      await vi.advanceTimersByTimeAsync(pastStall);
+      expect(clients).toHaveLength(3);
+      expect(larkSdkHarness.wsClose).toHaveBeenCalledTimes(2);
+      // 已被替换的连接迟到的 onReady 不算恢复。
+      clients[1]!.options.onReady();
+      expect(listener.reconnectingSince).toBeDefined();
+      connectionChanged.mockClear();
+      clients[2]!.options.onReady();
+      expect(listener.reconnectingSince).toBeUndefined();
+      expect(listener.rebuiltAt).toBeUndefined();
+      expect(connectionChanged).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(pastStall * 2);
+      expect(clients).toHaveLength(3);
+    } finally { listener.stop(); }
+  });
+
+  it('DUTYDECK_LARK_RECONNECT_STALL_MS 为 0 时关闭重建', async () => {
+    const { listener, clients } = await startStalled({ DUTYDECK_LARK_RECONNECT_STALL_MS: '0' });
+    try {
+      clients[0]!.options.onReconnecting();
+      await vi.advanceTimersByTimeAsync(stallMs * 6);
+      expect(clients).toHaveLength(1);
+    } finally { listener.stop(); }
+  });
+
+  it('DUTYDECK_LARK_RECONNECT_STALL_MS 小于 60 秒按 60 秒处理', async () => {
+    const { listener, clients } = await startStalled({ DUTYDECK_LARK_RECONNECT_STALL_MS: '1000' });
+    try {
+      clients[0]!.options.onReconnecting();
+      await vi.advanceTimersByTimeAsync(59_000);
+      expect(clients).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(clients).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(clients).toHaveLength(2);
+    } finally { listener.stop(); }
+  });
+
+  it('DUTYDECK_LARK_RECONNECT_STALL_MS 超过计时器上限时按上限处理，不会变成立即重建', async () => {
+    const { listener, clients } = await startStalled({ DUTYDECK_LARK_RECONNECT_STALL_MS: '9999999999' });
+    try {
+      clients[0]!.options.onReconnecting();
+      await vi.advanceTimersByTimeAsync(stallMs * 6);
+      expect(clients).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(2_147_483_647 - stallMs * 6);
+      expect(clients).toHaveLength(2);
+    } finally { listener.stop(); }
+  });
+
+  it('DUTYDECK_LARK_RECONNECT_STALL_MS 非法时告警并用默认值', async () => {
+    const { listener, log, clients } = await startStalled({ DUTYDECK_LARK_RECONNECT_STALL_MS: '10m' });
+    try {
+      expect(log.warn).toHaveBeenCalledWith({ value: '10m', stallMs }, expect.stringContaining('DUTYDECK_LARK_RECONNECT_STALL_MS'));
+      clients[0]!.options.onReconnecting();
+      await vi.advanceTimersByTimeAsync(stallMs);
+      expect(clients).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(clients).toHaveLength(2);
+    } finally { listener.stop(); }
+  });
+
+  it('拉配置请求可被重建撤销，且有 30 秒总时限，不改共享的 defaultHttpInstance', async () => {
+    const { listener, clients } = await startStalled();
+    try {
+      larkSdkHarness.httpRequest.mockImplementation((request: { signal: AbortSignal }) => new Promise((_resolve, reject) => {
+        request.signal.addEventListener('abort', () => reject(request.signal.reason), { once: true });
+      }));
+      clients[0]!.options.onReconnecting();
+      await vi.advanceTimersByTimeAsync(pastStall - 1_000);
+      const stalled = clients[0]!.options.httpInstance.request({ method: 'post', url: '/callback/ws/endpoint' });
+      const stalledResult = stalled.then(() => 'resolved', (error: Error) => error.message);
+      const firstRequest = larkSdkHarness.httpRequest.mock.calls[0]![0] as { method: string; url: string; signal: AbortSignal };
+      expect(firstRequest).toMatchObject({ method: 'post', url: '/callback/ws/endpoint' });
+      expect(firstRequest.signal.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(clients).toHaveLength(2);
+      expect(firstRequest.signal.aborted).toBe(true);
+      await expect(stalledResult).resolves.toMatch(/replaced/);
+
+      const fresh = clients[1]!.options.httpInstance.request({});
+      const freshResult = fresh.then(() => 'resolved', (error: Error) => error.message);
+      const secondRequest = larkSdkHarness.httpRequest.mock.calls[1]![0] as { signal: AbortSignal };
+      expect(secondRequest.signal.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(secondRequest.signal.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(secondRequest.signal.aborted).toBe(true);
+      await expect(freshResult).resolves.toMatch(/timed out/);
+
+      larkSdkHarness.httpRequest.mockResolvedValueOnce({ code: 0, data: { URL: 'wss://example.invalid' } });
+      await expect(clients[1]!.options.httpInstance.request({})).resolves.toEqual({ code: 0, data: { URL: 'wss://example.invalid' } });
+      expect(larkSdkHarness.interceptorUse.request).not.toHaveBeenCalled();
+      expect(larkSdkHarness.interceptorUse.response).not.toHaveBeenCalled();
+    } finally { listener.stop(); }
+  });
+
+  it('传给 WSClient 的 httpInstance 除 request 外的成员都转给 defaultHttpInstance', async () => {
+    const { listener, clients } = await startStalled();
+    try {
+      larkSdkHarness.httpPost.mockResolvedValueOnce({ code: 0 });
+      const http = clients[0]!.options.httpInstance;
+      await expect(http.post('/callback/ws/endpoint', { AppID: 'cli' })).resolves.toEqual({ code: 0 });
+      const [self, url, data] = larkSdkHarness.httpPost.mock.calls[0]!;
+      expect(self).toBe((await import('@larksuiteoapi/node-sdk')).defaultHttpInstance);
+      expect([url, data]).toEqual(['/callback/ws/endpoint', { AppID: 'cli' }]);
+      expect(http.defaults).toEqual({ timeout: 15_000 });
+    } finally { listener.stop(); }
+  });
+
+  it('重建出的连接 start() 失败时只记日志，不留下未处理的 rejection', async () => {
+    const { listener, log, appId, clients } = await startStalled();
+    try {
+      larkSdkHarness.behavior.start = async () => { throw new Error('connect refused'); };
+      clients[0]!.options.onReconnecting();
+      await vi.advanceTimersByTimeAsync(pastStall);
+      expect(clients).toHaveLength(2);
+      expect(log.warn).toHaveBeenCalledWith(expect.objectContaining({ appId, error: expect.objectContaining({ message: 'connect refused' }) }), expect.any(String));
+      expect(log.warn).toHaveBeenCalledWith(expect.objectContaining({ appId, stallMs }), expect.any(String));
+      expect(listener.listening).toBe(true);
+    } finally { listener.stop(); }
+  });
+
+  it('启动时一直等不到 onReady，20 秒后以 LARK_LISTENER_START_FAILED 失败', async () => {
+    larkSdkHarness.reset();
+    larkSdkHarness.behavior.start = () => {};
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const listener = new LarkLongConnectionListener({ info: vi.fn(), warn: vi.fn(), error: vi.fn() }, { env: {}, fetcher: larkFetcher as any, chatModeResolver: async () => 'group' });
+    try {
+      const started = expect(listener.start(stallConfig())).rejects.toMatchObject({ code: 'LARK_LISTENER_START_FAILED' });
+      await vi.advanceTimersByTimeAsync(20_000);
+      await started;
+      expect(listener.listening).toBe(false);
+    } finally { listener.stop(); }
   });
 });

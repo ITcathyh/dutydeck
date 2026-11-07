@@ -3,13 +3,17 @@ import { createServer, type ServerResponse } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { afterEach, expect, it, vi } from 'vitest';
 import { RelayHttpClient } from './client.js';
+import { targetGuard } from '../../../tests/support/target-server.js';
+
+const relayCall = () => targetGuard(request => request.method === 'POST' && request.url!.startsWith('/api/relay/sessions/self/'));
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { vi.useRealTimers(); for (const close of cleanup.splice(0)) await close(); });
 
 async function slowServer() {
   let held: ServerResponse | undefined;
-  const server = createServer((_request, response) => { held = response; });
+  const guard = relayCall();
+  const server = createServer((request, response) => { if (guard.accept(request, response)) held = response; });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   cleanup.push(() => new Promise<void>(resolve => { server.closeAllConnections(); server.close(() => resolve()); }));
   const { port } = server.address() as { port: number };
@@ -39,7 +43,11 @@ it('still bounds a request by the caller deadline', async () => {
 });
 
 it('lets the CLI process exit right after the response instead of holding a keep-alive socket', async () => {
-  const server = createServer((request, response) => { request.resume(); request.on('end', () => { response.setHeader('content-type', 'application/json'); response.end('{"ok":true}'); }); });
+  const guard = relayCall();
+  const server = createServer((request, response) => {
+    if (!guard.accept(request, response)) return;
+    request.resume(); request.on('end', () => { response.setHeader('content-type', 'application/json'); response.end('{"ok":true}'); });
+  });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   cleanup.push(() => new Promise<void>(resolve => { server.closeAllConnections(); server.close(() => resolve()); }));
   const { port } = server.address() as { port: number };

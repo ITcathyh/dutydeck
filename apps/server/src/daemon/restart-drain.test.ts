@@ -10,6 +10,7 @@ import type { AutostartCommandOutput } from '../autostart/autostart.js';
 import { daemonRestart, daemonStart, drainRuntime, systemdServiceControl, waitForRunningTasksDrain } from './command.js';
 import { localLoopbackUrl } from '../local-api-url.js';
 import { defaultDaemonDir, pidAlive, readDaemonStatus, writeState, type DaemonState } from './daemon.js';
+import { expectOwnDaemonDir } from './daemon-dir.test-helpers.js';
 
 const UNIT = 'dutydeck-test.service';
 const UNIT_EXEC = '/opt/node22/bin/node';
@@ -131,6 +132,7 @@ describe('restart 前等待正在执行的任务结束（drain）', () => {
     dir = defaultDaemonDir(tmp);
     cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(tmp);
     vi.stubEnv('HOME', tmp);
+    expectOwnDaemonDir(tmp);
   });
 
   afterEach(async () => {

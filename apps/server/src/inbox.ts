@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import {
-  permissionRejectReasonMaxLength, readSessionTaskReport, sessionWorkspaceDirectory, workspaceName,
+  mapLimit, permissionRejectReasonMaxLength, readSessionTaskReport, sessionWorkspaceDirectory, workspaceName,
   type ConfigRepository, type InboxAction, type InboxItem, type InboxItemKind, type InboxResponse,
   type PermissionRequestData, type Session, type TaskRecord, type WorkItem
 } from '@dutydeck/shared';
@@ -43,15 +43,6 @@ const terminalWork = new Set(['completed', 'cancelled', 'cancelling', 'failed', 
 const open: InboxAction = { id: 'open', label: '查看', type: 'open' };
 const larkCard: InboxAction = { id: 'lark_card', label: '请在飞书卡片上处理', type: 'lark_card' };
 const post = (id: InboxAction['id'], label: string, path: string, body: Record<string, unknown>, tone?: InboxAction['tone']): InboxAction => ({ id, label, type: 'api', method: 'POST', path, body, ...(tone ? { tone } : {}) });
-
-async function mapLimit<T, R>(values: T[], limit: number, run: (value: T) => Promise<R>): Promise<R[]> {
-  const out: R[] = new Array(values.length);
-  let next = 0;
-  await Promise.all(Array.from({ length: Math.min(limit, values.length) }, async () => {
-    while (next < values.length) { const index = next++; out[index] = await run(values[index]!); }
-  }));
-  return out;
-}
 
 export async function collectInbox(sources: InboxSources, sessions: Session[], options: InboxOptions): Promise<InboxItem[]> {
   const now = options.now ?? Date.now();
@@ -176,10 +167,8 @@ export async function collectInbox(sources: InboxSources, sessions: Session[], o
 
 export interface InboxRouteOptions {
   sources: InboxSources;
-  /** 与会话列表同一道读权限；不可见的会话整个不出现。 */
-  canView(request: FastifyRequest, sessionId: string): Promise<boolean>;
-  /** 批量版 canView：判定与逐个 canView 相同，保持顺序；listed 是本次 listSessions 的结果，避免逐个重读会话。 */
-  canViewMany?(request: FastifyRequest, sessions: Session[], listed: Session[]): Promise<Session[]>;
+  /** 与会话列表同一道读权限，不可见的会话整个不出现；保持顺序。listed 是本次 listSessions 的结果，避免逐个重读会话。 */
+  canViewMany(request: FastifyRequest, sessions: Session[], listed: Session[]): Promise<Session[]>;
   /** 工作项读权限（沿用工作项接口的 task.view_result 判定），返回读身份。 */
   workItemActor?(request: FastifyRequest, sessionId: string): Promise<string | undefined>;
 }
@@ -189,7 +178,7 @@ export function registerInboxRoutes(app: FastifyInstance, runtime: Pick<Dutydeck
   app.get('/api/inbox', async (request): Promise<InboxResponse> => {
     const listed = await runtime.listSessions();
     const sessions = listed.filter(session => !session.archivedAt);
-    const visible = options.canViewMany ? await options.canViewMany(request, sessions, listed) : (await Promise.all(sessions.map(async session => await options.canView(request, session.id) ? session : undefined))).filter((session): session is Session => Boolean(session));
+    const visible = await options.canViewMany(request, sessions, listed);
     const now = Date.now();
     const items = await collectInbox(options.sources, visible, { now, actorFor: session => options.workItemActor?.(request, session.id).catch(() => undefined) });
     return { generatedAt: new Date(now).toISOString(), items };

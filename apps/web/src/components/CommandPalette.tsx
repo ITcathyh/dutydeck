@@ -1,6 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { CornerDownLeft, Search } from 'lucide-react';
 import type { Agent, RunSummary, Session } from '../api';
+import { isImeComposing } from '../ime';
 import { fallbackRunTitle, sessionDisplayName } from '../run-summary';
 import { searchTasks, taskSearchTerms, type TaskSearchField, type TaskSearchMatch } from '../task-search';
 import { useDialogFocus } from '../useDialogFocus';
@@ -134,6 +135,9 @@ export function CommandPalette({ open, onClose, sessions, summaries, agents, act
     根本不触发，由栈顶那层响应。
   */
   const onKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+    // 组字期间方向键、Home/End 选候选词，Escape 取消组字，都归输入法处理。
+    // 组字时的 Escape 同样不能冒泡到下层弹层的 document 监听。
+    if (isImeComposing(event)) { if (event.key === 'Escape') event.stopPropagation(); return; }
     if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onClose(); return; }
     if (event.key === 'ArrowDown') { event.preventDefault(); move(activeIndex + 1, 1); return; }
     if (event.key === 'ArrowUp') { event.preventDefault(); move(activeIndex - 1, -1); return; }

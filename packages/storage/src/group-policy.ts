@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3';
-import { cachedStatement } from './database-control.js';
+import { cachedStatement } from './statement-cache.js';
 import { createHash } from 'node:crypto';
 import { isThenable, naturalKeyConflict as conflict, notFound, revisionConflict } from './foundation-errors.js';
 import {
