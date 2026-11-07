@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { buildEditedMessageEvent, unwrapEditedTextContent } from './edited-message.js';
 import type { LarkChatMessage } from './service.js';
+import { parsePrompt } from './session-resolver.js';
 
 const baseDetail = (patch: Partial<LarkChatMessage> = {}): LarkChatMessage => ({
   messageId: 'om_edit',
@@ -147,10 +148,26 @@ describe('buildEditedMessageEvent', () => {
     })).resolves.toBeUndefined();
   });
 
-  it('没有显式 @ 当前 bot 时拒绝（@ 别人或 mention 身份域非 open_id 都不算）', async () => {
+  it('与真实消息读取接口一致：被 @ 的本 bot 以 app_id 返回时照常触发，映射成 open_id 并从正文去掉', async () => {
+    const event = await buildEditedMessageEvent({ eventMessageId: 'om_edit', detail: baseDetail({ mentions: [
+      { id: 'cli_test', idType: 'app_id', key: '@_user_1', name: 'Dutydeck' },
+      { id: 'ou_other', idType: 'open_id', key: '@_user_2', name: 'Other' }
+    ], rawContent: '{"text":"<p>@_user_1 @_user_2 执行任务</p>"}' }), botOpenId: 'ou_bot', resolveChatType: resolveGroup, appId: 'cli_test' });
+    expect(event?.mentions).toEqual([
+      { key: '@_user_1', name: 'Dutydeck', openId: 'ou_bot', mentionedType: 'bot' },
+      { key: '@_user_2', name: 'Other', openId: 'ou_other' }
+    ]);
+    expect((await parsePrompt(event!, 'ou_bot')).prompt).toBe('@Other 执行任务');
+  });
+
+  it('没有显式 @ 当前 bot 时拒绝（@ 别人、别的 app_id 或其它身份域都不算）', async () => {
     const mentionOther = baseDetail({ mentions: [{ id: 'ou_other', idType: 'open_id', key: '@_user_1', name: 'Other' }] });
     await expect(buildEditedMessageEvent({
       eventMessageId: 'om_edit', detail: mentionOther, botOpenId: 'ou_bot', resolveChatType: resolveGroup, appId: 'cli_test'
+    })).resolves.toBeUndefined();
+    const mentionOtherApp = baseDetail({ mentions: [{ id: 'cli_other', idType: 'app_id', key: '@_user_1', name: 'Other Bot' }] });
+    await expect(buildEditedMessageEvent({
+      eventMessageId: 'om_edit', detail: mentionOtherApp, botOpenId: 'ou_bot', resolveChatType: resolveGroup, appId: 'cli_test'
     })).resolves.toBeUndefined();
     const mentionUserIdDomain = baseDetail({ mentions: [{ id: 'ou_bot', idType: 'user_id', key: '@_user_1', name: 'Dutydeck' }] });
     await expect(buildEditedMessageEvent({

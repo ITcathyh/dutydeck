@@ -52,9 +52,10 @@ export async function buildEditedMessageEvent(input: BuildEditedMessageEventInpu
   if (!chatId) return undefined;
   // 编辑补 @ 只处理人类原消息：bot/app 消息（含卡片刷新）不触发任务。
   if (detail.sender.type !== 'user' || detail.sender.idType !== 'open_id' || !detail.sender.id) return undefined;
-  // 必须显式 @ 当前 bot，且 mention 身份域必须是 open_id（与 receive 路径同判据）。
-  const mentionsBot = detail.mentions.some(mention => mention.idType === 'open_id' && mention.id === botOpenId);
-  if (!mentionsBot) return undefined;
+  // 必须显式 @ 当前 bot。消息读取接口把被 @ 的机器人报成 app_id，实时事件里才是 open_id，两种都认；其它身份域不算。
+  const isSelf = (mention: LarkChatMessage['mentions'][number]) => Boolean(mention.id)
+    && (mention.idType === 'open_id' && mention.id === botOpenId || mention.idType === 'app_id' && mention.id === appId);
+  if (!detail.mentions.some(isSelf)) return undefined;
   const chatMode = await resolveChatType(appId, chatId);
   return {
     messageId: detail.messageId,
@@ -71,8 +72,9 @@ export async function buildEditedMessageEvent(input: BuildEditedMessageEventInpu
     mentions: detail.mentions.map(mention => ({
       key: mention.key ?? '',
       name: mention.name ?? '',
-      // REST 详情只给 id/id_type，没有 WS 的 mentioned_type；匹配只靠 open_id，不猜类型。
-      ...(mention.idType === 'open_id' && mention.id ? { openId: mention.id } : {})
+      // REST 详情只给 id/id_type，没有 WS 的 mentioned_type。以 app_id 报出的本 bot 换成 open_id，与 receive 路径同形；别人不猜类型。
+      ...(mention.idType === 'app_id' && isSelf(mention) ? { ...(botOpenId ? { openId: botOpenId } : {}), mentionedType: 'bot' }
+        : mention.idType === 'open_id' && mention.id ? { openId: mention.id } : {})
     }))
   };
 }
