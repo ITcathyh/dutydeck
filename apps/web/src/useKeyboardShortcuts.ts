@@ -191,6 +191,13 @@ export function isEditableTarget(target: EventTarget | null): boolean {
   return editable.getAttribute('role') === 'textbox' || editable.getAttribute('role') === 'searchbox';
 }
 
+/*
+  页面上只要有模态弹窗，快捷键整体让位。弹窗初始焦点多在关闭按钮、勾选框上，isEditableTarget 拦不住单键，
+  调用方的 enabled 又未必列全所有弹窗（面板内部自己开的 Dialog 就不在 App 的视野里），按 `.` 会中断背后的任务。
+*/
+const modalDialogSelector = '[role="dialog"][aria-modal="true"], [role="alertdialog"][aria-modal="true"]';
+const modalDialogOpen = () => typeof document !== 'undefined' && document.querySelector(modalDialogSelector) !== null;
+
 type CompiledShortcut = { definition: ShortcutDefinition; sequences: Step[][] };
 
 const compiled: CompiledShortcut[] = shortcutDefinitions.map(definition => ({
@@ -230,6 +237,10 @@ export function useKeyboardShortcuts(handlers: ShortcutHandlers, options: UseKey
       // 中文输入法组字期间浏览器仍会派发 keydown，此时任何劫持都会吃掉候选词操作。
       if (event.isComposing || event.keyCode === 229) return;
       if (event.key === 'Dead' || event.key === 'Unidentified' || event.key === 'Process') return;
+      if (modalDialogOpen()) {
+        clearChord();
+        return;
+      }
       const { sessionOpen: runOpen, platform: injectedPlatform, chordTimeoutMs: timeout } = configRef.current;
       const resolvedPlatform = injectedPlatform ?? detectPlatform();
       const editable = isEditableTarget(event.target);
