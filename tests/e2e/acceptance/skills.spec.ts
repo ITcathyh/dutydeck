@@ -47,7 +47,7 @@ test('selecting a Claude skill in the browser delivers its body to the PTY and r
       digest: createHash('sha256').update(skillBody).digest('hex')
     }]);
 
-    await page.getByRole('button', { name: '工作目录、验证与自动化' }).click();
+    await page.getByRole('button', { name: '结果检视', exact: true }).click();
     const inspector = page.getByRole('complementary', { name: '结果检视', exact: true });
     await expect(inspector.getByText('Skill 投递记录')).toBeVisible();
     await inspector.getByText('VERIFY_CLAUDE_SKILL_DELIVERY · 1 项').click();

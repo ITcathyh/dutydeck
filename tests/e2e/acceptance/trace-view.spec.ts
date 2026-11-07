@@ -23,7 +23,8 @@ test.describe('Session trace browser acceptance', () => {
     await expect.poll(async () => (await instance.request('GET', `/api/sessions/${id}/tasks`)).json[0]?.status, { timeout: 30_000 }).toBe('completed');
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.goto(`${instance.baseUrl}/sessions/${id}`);
-    await page.getByRole('button', { name: '会话追踪', exact: true }).click();
+    await page.getByRole('button', { name: '更多操作', exact: true }).click();
+    await page.getByRole('menuitem', { name: '会话追踪', exact: true }).click();
     const dialog = page.getByRole('dialog', { name: '会话追踪', exact: true });
     const table = dialog.getByRole('table', { name: '追踪事件' });
     await expect(dialog.getByText('历史快照已读取；新事件随会话同步')).toBeVisible();
@@ -73,8 +74,9 @@ test.describe('Session trace browser acceptance', () => {
     await page.screenshot({ path: info.outputPath('trace-narrow.png') });
     await dialog.getByRole('button', { name: '关闭会话追踪' }).click();
     await expect(dialog).toBeHidden();
-    await expect(page.getByRole('button', { name: '会话追踪', exact: true })).toBeFocused();
-    await expect(page.getByRole('button', { name: '会话分析', exact: true })).toBeVisible();
-    await expect(page.getByRole('button', { name: '原始日志', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: '更多操作', exact: true })).toBeFocused();
+    await page.getByRole('button', { name: '更多操作', exact: true }).click();
+    await expect(page.getByRole('menuitem', { name: '会话分析', exact: true })).toBeVisible();
+    await expect(page.getByRole('menuitemcheckbox', { name: '原始日志', exact: true })).toBeVisible();
   });
 });

@@ -388,7 +388,7 @@ describe('App browser navigation and shell states', () => {
     await userEvent.click(await within(navigation).findByRole('button', { name: /任务一/ }));
     expect(pushState).toHaveBeenCalledWith({ sessionId: 's1', dutydeckHistoryPosition: 1, dutydeckTaskFilters: { view: 'all', query: '', project: '' } }, '', '/sessions/s1');
     expect(window.location.pathname).toBe('/sessions/s1');
-    await screen.findByRole('button', { name: '归档任务' });
+    await screen.findByRole('button', { name: '更多操作' });
 
     act(() => {
       window.history.replaceState(null, '', '/');
@@ -400,7 +400,7 @@ describe('App browser navigation and shell states', () => {
       window.history.replaceState({ sessionId: 's1' }, '', '/sessions/s1');
       window.dispatchEvent(new PopStateEvent('popstate'));
     });
-    await screen.findByRole('button', { name: '归档任务' });
+    await screen.findByRole('button', { name: '更多操作' });
   });
 
   it('restores a deep link and shows an explicit not-found state only after sessions load', async () => {
@@ -442,14 +442,14 @@ describe('App browser navigation and shell states', () => {
     window.history.replaceState(null, '', '/sessions/s1');
     mockAppApi({ sessions: [session('s1')], summaries: [summary('s1', '任务一')] });
     const { client } = renderApp();
-    await screen.findByRole('button', { name: '归档任务' });
+    await screen.findByRole('button', { name: '更多操作' });
 
     vi.mocked(api.sessions).mockRejectedValueOnce(new Error('temporary sessions failure'));
     await act(async () => { await client.refetchQueries({ queryKey: ['sessions'], exact: true }); });
 
     const staleStatus = await screen.findByText(/部分数据可能不是最新：任务列表/);
     expect(staleStatus.closest('[role="status"]')).toBeTruthy();
-    expect(screen.getByRole('button', { name: '归档任务' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '更多操作' })).toBeTruthy();
     expect(screen.queryByRole('alert')).toBeNull();
 
     act(() => {
@@ -531,9 +531,11 @@ describe('App browser navigation and shell states', () => {
     window.history.replaceState(null, '', '/sessions/s1');
     mockAppApi({ sessions: [session('s1')], summaries: [summary('s1', '任务一')], events: [{ id: 'raw-1', sequence: 1, type: 'raw_terminal', timestamp: '2026-08-30T00:00:00Z', data: { text: 'raw output' }, raw: 'raw output' }] });
     const { container } = renderApp();
-    const rawButton = await screen.findByRole('button', { name: '原始日志' });
-    await waitFor(() => expect(rawButton.hasAttribute('disabled')).toBe(false));
+    const rawButton = await screen.findByRole('button', { name: '更多操作' });
     await userEvent.click(rawButton);
+    const rawItem = await screen.findByRole('menuitemcheckbox', { name: '原始日志' });
+    await waitFor(() => expect(rawItem.hasAttribute('disabled')).toBe(false));
+    await userEvent.click(rawItem);
     if (wide) {
       expect(screen.getByRole('complementary', { name: '原始日志' })).toBeTruthy();
       expect(screen.queryByRole('dialog', { name: '原始日志' })).toBeNull();
@@ -1174,8 +1176,8 @@ describe('App 完整历史记录', () => {
     renderApp();
 
     expect(await screen.findByRole('heading', { name: '原始任务目标' })).toBeTruthy();
-    const renameButton = screen.getByRole('button', { name: '重命名会话' });
-    await user.click(renameButton);
+    await user.click(screen.getByRole('button', { name: '更多操作' }));
+    await user.click(screen.getByRole('menuitem', { name: '重命名会话' }));
 
     expect(screen.getByRole('dialog', { name: '重命名会话' })).toBeTruthy();
     const input = screen.getByRole('textbox', { name: '会话名称' });
@@ -1254,8 +1256,9 @@ describe('App 会话追踪入口', () => {
     vi.mocked(api.sessionHistory).mockResolvedValue({ turns: [], highWaterMark: 2, liveAfter: 1 });
     vi.mocked(api.events).mockImplementation(async (_id, query) => [old, current].filter(event => event.sequence > (query?.after ?? 0)));
     const { client } = renderApp();
-    const opener = await screen.findByRole('button', { name: '会话追踪' });
+    const opener = await screen.findByRole('button', { name: '更多操作' });
     await userEvent.click(opener);
+    await userEvent.click(screen.getByRole('menuitem', { name: '会话追踪' }));
     const dialog = await screen.findByRole('dialog', { name: '会话追踪' });
     await within(dialog).findByText('older trace input');
     expect(within(dialog).getByText('已加载序列 1–2')).toBeTruthy();
@@ -1270,8 +1273,9 @@ describe('App 会话追踪入口', () => {
     await userEvent.click(within(dialog).getByRole('button', { name: '关闭会话追踪' }));
     await waitFor(() => expect(screen.queryByRole('dialog', { name: '会话追踪' })).toBeNull());
     await waitFor(() => expect(document.activeElement).toBe(opener));
-    expect(screen.getByRole('button', { name: '会话分析' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: '原始日志' })).toBeTruthy();
+    await userEvent.click(opener);
+    expect(screen.getByRole('menuitem', { name: '会话分析' })).toBeTruthy();
+    expect(screen.getByRole('menuitemcheckbox', { name: '原始日志' })).toBeTruthy();
   });
 });
 
@@ -1296,7 +1300,8 @@ describe('App 会话分析深链与导航', () => {
     renderApp();
     await screen.findByRole('heading', { name: '任务一' });
 
-    await user.click(screen.getByRole('button', { name: '会话分析' }));
+    await user.click(screen.getByRole('button', { name: '更多操作' }));
+    await user.click(screen.getByRole('menuitem', { name: '会话分析' }));
     const dialog = await screen.findByRole('dialog', { name: '会话分析' });
     expect(dialog).toBeTruthy();
     expect(pushState).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 's1' }), '', '/sessions/s1?panel=insight');

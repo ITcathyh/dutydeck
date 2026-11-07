@@ -139,8 +139,9 @@ test.describe('Session Insight E2E Browser Acceptance', () => {
     // 2. 验证 Claude 会话（主流 + 子流）的 UI 交互与数据呈现
     await page.goto(`${serverInstance.baseUrl}/sessions/${claudeSession.sessionId}`);
 
-    // 点击 RunHeader 上的「会话分析」按钮
-    const insightButton = page.getByRole('button', { name: '会话分析' });
+    // RunHeader「更多操作」里的「会话分析」
+    await page.getByRole('button', { name: '更多操作', exact: true }).click();
+    const insightButton = page.getByRole('menuitem', { name: '会话分析' });
     await expect(insightButton).toBeVisible();
     await insightButton.click();
 

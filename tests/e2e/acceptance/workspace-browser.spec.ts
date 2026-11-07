@@ -197,7 +197,8 @@ test.describe('Managed workspace browser acceptance', () => {
     await expect(timeline.getByRole('article', { name: /最终输出/ })).toBeVisible({ timeout: 20_000 });
 
     // 1. UI 点击“归档任务”并在 alertdialog 确认
-    await page.getByRole('button', { name: '归档任务', exact: true }).click();
+    await page.getByRole('button', { name: '更多操作', exact: true }).click();
+    await page.getByRole('menuitem', { name: '归档任务', exact: true }).click();
     const confirmArchiveDialog = page.getByRole('alertdialog', { name: '归档此任务？' });
     await expect(confirmArchiveDialog).toBeVisible();
     await confirmArchiveDialog.getByRole('button', { name: '确认归档', exact: true }).click();

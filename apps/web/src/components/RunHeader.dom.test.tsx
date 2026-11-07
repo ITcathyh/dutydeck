@@ -29,21 +29,23 @@ describe('RunHeader', () => {
     const user = userEvent.setup({ delay: null }); const onInterrupt = vi.fn(); const onArchive = vi.fn();
     render(<RunHeader session={session} agent={agent} streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={onInterrupt} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={onArchive} onToggleRaw={() => {}} onOpenInsight={() => {}}/>);
     await user.click(screen.getByRole('button', { name: '中断当前任务' }));
-    await user.click(screen.getByRole('button', { name: '归档任务' }));
+    await user.click(screen.getByRole('button', { name: '更多操作' }));
+    expect((screen.getByRole('menuitemcheckbox', { name: '原始日志' }) as HTMLButtonElement).disabled).toBe(true);
+    await user.click(screen.getByRole('menuitem', { name: '归档任务' }));
     expect(onInterrupt).toHaveBeenCalledTimes(1);
     expect(onArchive).toHaveBeenCalledTimes(1);
-    expect((screen.getByRole('button', { name: '原始日志' }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it('「分析」按钮始终可达（含归档只读任务），点击打开会话分析', async () => {
     const user = userEvent.setup({ delay: null }); const onOpenInsight = vi.fn();
     const { rerender } = render(<RunHeader session={session} agent={agent} streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}} onOpenInsight={onOpenInsight}/>);
-    const button = screen.getByRole('button', { name: /会话分析/ });
-    await user.click(button);
+    await user.click(screen.getByRole('button', { name: '更多操作' }));
+    await user.click(screen.getByRole('menuitem', { name: /会话分析/ }));
     expect(onOpenInsight).toHaveBeenCalledTimes(1);
     // 归档只读任务也允许查看分析（只读能力，不改变任务）。
     rerender(<RunHeader session={{ ...session, archivedAt: '2026-08-30T00:00:00.000Z' }} agent={agent} streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}} onOpenInsight={onOpenInsight}/>);
-    expect(screen.getByRole('button', { name: /会话分析/ })).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: '更多操作' }));
+    expect(screen.getByRole('menuitem', { name: /会话分析/ })).toBeTruthy();
   });
 
   it('failed / stopped 任务可调用真实 restart 操作', async () => {
@@ -86,13 +88,14 @@ describe('RunHeader 归档态状态视觉与只读约束', () => {
     expect(screen.queryByText('进行中')).toBeNull();
   });
 
-  it('归档 + failed：不再给出「重新启动」按钮，归档是只读终态', () => {
+  it('归档 + failed：不再给出「重新启动」按钮，归档是只读终态', async () => {
     const { statusText } = renderHeader({ state: 'failed', archivedAt });
     expect(statusText.textContent).toBe('已归档');
     expect(screen.queryByRole('button', { name: '重新启动' })).toBeNull();
     // 中断与归档按钮同属写操作，归档后也不该出现。
     expect(screen.queryByRole('button', { name: '中断当前任务' })).toBeNull();
-    expect(screen.queryByRole('button', { name: '归档任务' })).toBeNull();
+    await userEvent.setup({ delay: null }).click(screen.getByRole('button', { name: '更多操作' }));
+    expect(screen.queryByRole('menuitem', { name: '归档任务' })).toBeNull();
   });
 
   it('归档任务的下一步提示说明只读，不再谎报 Agent 在推进', () => {
@@ -147,18 +150,18 @@ describe('RunHeader 失败详情', () => {
     expect(screen.queryByText('失败详情')).toBeNull();
   });
 
-  it('普通会话渲染「重命名会话」按钮，点击调用 onRename；source 为 work_item 时不显示', async () => {
+  it('普通会话在「更多操作」里提供「重命名会话」，点击调用 onRename；source 为 work_item 时不显示', async () => {
     const user = userEvent.setup({ delay: null });
     const onRename = vi.fn();
     const { rerender } = render(<RunHeader session={session} agent={agent} onRename={onRename} streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}} onOpenInsight={() => {}}/>);
 
-    const renameBtn = screen.getByRole('button', { name: '重命名会话' });
-    expect(renameBtn).toBeTruthy();
-    await user.click(renameBtn);
+    await user.click(screen.getByRole('button', { name: '更多操作' }));
+    await user.click(screen.getByRole('menuitem', { name: '重命名会话' }));
     expect(onRename).toHaveBeenCalledTimes(1);
 
     rerender(<RunHeader session={{ ...session, source: 'work_item' }} agent={agent} onRename={onRename} streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}} onOpenInsight={() => {}}/>);
-    expect(screen.queryByRole('button', { name: '重命名会话' })).toBeNull();
+    await user.click(screen.getByRole('button', { name: '更多操作' }));
+    expect(screen.queryByRole('menuitem', { name: '重命名会话' })).toBeNull();
   });
 
   it('标题优先展示 session.name，无 name 时回退到 taskPrompt 或未命名任务', () => {

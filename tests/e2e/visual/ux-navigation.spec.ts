@@ -123,8 +123,9 @@ test('mobile raw logs isolate focus, Escape restores opener, wide screens show a
   const fixture = await mockWorkspace(page);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/sessions/audit');
-  const opener = page.getByRole('button', { name: '原始日志', exact: true });
+  const opener = page.getByRole('button', { name: '更多操作', exact: true });
   await opener.click();
+  await page.getByRole('menuitemcheckbox', { name: '原始日志', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: '原始日志', exact: true });
   await expect(dialog).toHaveAttribute('aria-modal', 'true');
   await expect.poll(() => dialog.evaluate(node => node.contains(document.activeElement))).toBe(true);
@@ -136,6 +137,7 @@ test('mobile raw logs isolate focus, Escape restores opener, wide screens show a
   await expect(opener).toBeFocused();
   await page.setViewportSize({ width: 1920, height: 1080 });
   await opener.click();
+  await page.getByRole('menuitemcheckbox', { name: '原始日志', exact: true }).click();
   await expect(page.getByRole('complementary', { name: '原始日志', exact: true })).toBeVisible();
   await expect(dialog).toHaveCount(0);
   expect(await page.locator('main').evaluate(node => Boolean(node.closest('[inert]')))).toBe(false);

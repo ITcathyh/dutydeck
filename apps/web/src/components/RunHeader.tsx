@@ -1,4 +1,4 @@
-import { Activity, Archive, BookOpen, ChevronRight, FileDiff, LineChart, MessageSquare, PanelRightOpen, Pencil, RotateCcw, Square, Terminal } from 'lucide-react';
+import { Activity, Archive, BookOpen, ChevronRight, FileDiff, LineChart, MessageSquare, MoreHorizontal, Pencil, RotateCcw, Square, Terminal } from 'lucide-react';
 import type { ReactNode } from 'react';
 import type { Agent, Session, SessionUsage, Task } from '../api';
 import type { StreamStatus } from '../sse';
@@ -6,6 +6,7 @@ import type { SessionSyncState } from '../useSessionStream';
 import { sessionDisplayName } from '../run-summary';
 import { nextActionForState, sessionErrorSummary, sessionWorkspaceName } from '../workspace-model';
 import { Badge, Banner, Button, IconButton, Tabs } from './primitives';
+import { MenuButton, type MenuEntry } from './MenuButton';
 import { effectiveStatus, permissionLabels, stateTone } from './ui';
 import { count, usd } from './usageFormat';
 
@@ -18,7 +19,7 @@ function ConnectionState({ status }: { status: SessionSyncState | StreamStatus }
   const label = connectionLabel(status);
   const ready = typeof status === 'string' ? status === 'open' : status.transport === 'open' && status.content === 'ready';
   const calibrated = typeof status !== 'string' && status.lastCalibratedAt ? `；最近校准 ${new Date(status.lastCalibratedAt).toLocaleTimeString()}` : '';
-  return <span title={label + calibrated} className="inline-flex shrink-0 items-center gap-1.5 text-meta text-subtle"><span className={`h-1.5 w-1.5 rounded-full ${ready ? 'bg-action' : 'ui-status-pulse bg-warning-solid'}`}/><span className="hidden sm:inline">{label}</span>{typeof status !== 'string' && status.content === 'failed' && !status.retrying && <button className="text-info" onClick={status.retry}>重试同步</button>}</span>;
+  return <span title={label + calibrated} className="inline-flex shrink-0 items-center gap-1.5 text-meta text-subtle"><span className={`h-1.5 w-1.5 rounded-full ${ready ? 'bg-neutral-solid' : 'ui-status-pulse bg-warning-solid'}`}/><span className="hidden sm:inline">{label}</span>{typeof status !== 'string' && status.content === 'failed' && !status.retrying && <button className="text-info" onClick={status.retry}>重试同步</button>}</span>;
 }
 
 export type RunDetailTab = 'timeline' | 'changes' | 'terminal';
@@ -53,7 +54,7 @@ export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTask
   streamStatus: SessionSyncState | StreamStatus;
   queuedTasks: Task[];
   usage?: SessionUsage;
-  /** 目标、工作目录等面板入口，排在「分析」前面。 */
+  /** 目标等面板入口，排在「更多操作」前面。 */
   tools?: ReactNode;
   rawVisible: boolean;
   rawAvailable: boolean;
@@ -81,43 +82,43 @@ export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTask
   // 脱敏管线在 workspace-model:sessionErrorSummary，这里只读不改。
   // 归档任务同样要能看到：历史失败原因是只读信息，不是可操作项。
   const errorSummary = sessionErrorSummary(session.error);
-  return <header className="shrink-0 bg-surface">
-    <div className="flex flex-wrap items-center gap-x-2 px-3 pt-2 sm:px-5">
-      <div className="min-w-0 grow basis-48">
-        <div className="flex min-w-0 items-center gap-1.5">
-          <span className="max-w-28 shrink-0 truncate text-body font-medium text-subtle sm:max-w-44" title={workspace}>{workspace}</span>
-          <ChevronRight size={13} className="shrink-0 text-subtle"/>
-          <h1 className="min-w-0 flex-1 truncate text-title font-semibold text-primary" title={taskGoal}>{taskGoal}</h1>
-          {!managed && <IconButton label="重命名会话" onClick={() => onRename?.()}><Pencil size={13}/></IconButton>}
-        </div>
-        <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-caption text-subtle">
-          <span className="shrink-0 truncate">{agent?.name ?? session.agentId}</span>
-          {/* 完全信任是飞书 Bot 的默认姿态，用提醒色标出即可，红字留给真正的失败。 */}
-          {session.permissionMode && <><span className="shrink-0">·</span><span title="本任务的权限姿态" className={`shrink-0 ${session.permissionMode === 'full-trust' ? 'text-warning' : 'text-subtle'}`}>{permissionLabels[session.permissionMode]}</span></>}
-        </div>
+  const menu: MenuEntry[] = [
+    ...(!managed ? [{ id: 'rename', label: '重命名会话', icon: <Pencil size={14}/>, onSelect: () => onRename?.() }] : []),
+    ...(session.systemPrompt ? [{ id: 'prompt', label: '查看系统提示词', icon: <BookOpen size={14}/>, onSelect: onOpenPrompt }] : []),
+    { id: 'insight', label: '会话分析', icon: <LineChart size={14}/>, onSelect: onOpenInsight },
+    ...(onOpenTrace ? [{ id: 'trace', label: '会话追踪', icon: <Activity size={14}/>, onSelect: onOpenTrace }] : []),
+    { id: 'raw', label: '原始日志', icon: <Terminal size={14}/>, checked: rawVisible, disabled: !rawAvailable, onSelect: onToggleRaw },
+    ...(!status.archived && !managed ? [{ id: 'archive-separator', separator: true as const }, { id: 'archive', label: '归档任务', icon: <Archive size={14}/>, tone: 'danger' as const, onSelect: onArchive }] : [])
+  ];
+  return <header className="shrink-0 bg-canvas">
+    <div className="flex min-h-12 items-center gap-2 pl-3 pr-2 pt-1 sm:pl-5 sm:pr-3">
+      <div className="flex min-w-0 flex-1 items-center gap-1.5">
+        <span className="max-w-24 shrink-0 truncate text-body text-subtle sm:max-w-44" title={workspace}>{workspace}</span>
+        <ChevronRight aria-hidden="true" size={13} className="shrink-0 text-subtle"/>
+        <h1 className="min-w-0 truncate text-title font-semibold tracking-tight text-primary" title={taskGoal}>{taskGoal}</h1>
+        {/*
+          状态胶囊。圆点是这里唯一带 aria-label 的 span，状态文案在它右边的 <strong> 里——
+          RunHeader.dom.test.tsx 用这两个结构做选择器，别给别的 span 加 aria-label。
+          运行态圆点的配色来自 ui.tsx:stateTone，那是全站唯一的 state→色 映射，不在调用点
+          另抄一份。归档与兜底这两支是 RunHeader 自己写的，与 stateTone 同用语义类。
+        */}
+        <span className="ml-1 inline-flex shrink-0 items-center gap-1.5 rounded-full bg-muted py-0.5 pl-2 pr-2.5">
+          <span aria-label={status.label} className={`h-2 w-2 shrink-0 rounded-full ${status.archived ? 'bg-neutral-solid' : stateTone[session.state] ?? 'bg-neutral-solid'}`}/>
+          <strong className="text-caption font-semibold text-primary">{status.label}</strong>
+        </span>
       </div>
       <div className="ml-auto flex shrink-0 items-center gap-0.5">
         {status.busy && !managed && <IconButton label="中断当前任务" onClick={onInterrupt}><Square size={14}/></IconButton>}
-        {session.systemPrompt && <IconButton label="查看系统提示词" onClick={onOpenPrompt}><BookOpen size={14}/></IconButton>}
         {tools}
-        {onOpenTrace && <Button aria-label="会话追踪" variant="ghost" onClick={onOpenTrace} icon={<Activity size={14}/>}><span className="hidden lg:inline">追踪</span></Button>}
-        <Button aria-label="会话分析" variant="ghost" onClick={onOpenInsight} icon={<LineChart size={14}/>}><span className="hidden lg:inline">分析</span></Button>
-        <Button aria-label="原始日志" variant="ghost" tone={rawVisible ? 'inverse' : 'default'} disabled={!rawAvailable} onClick={onToggleRaw} icon={rawVisible ? <PanelRightOpen size={14}/> : <Terminal size={14}/>}><span className="hidden lg:inline">日志</span></Button>
-        {!status.archived && !managed && <IconButton label="归档任务" onClick={onArchive}><Archive size={15}/></IconButton>}
+        <MenuButton label="更多操作" icon={<MoreHorizontal size={16}/>} items={menu}/>
       </div>
     </div>
-    {/*
-      状态条。圆点是这里唯一带 aria-label 的 span，状态文案在它右边的 <strong> 里——
-      RunHeader.dom.test.tsx 用这两个结构做选择器，别给别的 span 加 aria-label。
-      运行态圆点的配色来自 ui.tsx:stateTone，那是全站唯一的 state→色 映射，不在调用点
-      另抄一份。归档与兜底这两支是 RunHeader 自己写的，与 stateTone 同用语义类。
-    */}
-    <div className="flex min-h-10 items-center gap-2.5 px-3 pb-2 pt-1 sm:px-5">
-      <span className="inline-flex shrink-0 items-center gap-1.5 rounded-sm bg-muted px-2 py-0.5">
-        <span aria-label={status.label} className={`h-2 w-2 shrink-0 rounded-full ${status.archived ? 'bg-neutral-solid' : stateTone[session.state] ?? 'bg-neutral-solid'}`}/>
-        <strong className="text-caption font-semibold text-primary">{status.label}</strong>
-      </span>
-      <span className="min-w-0 flex-1 truncate text-caption text-secondary">{nextAction}</span>
+    <div className="flex min-h-8 min-w-0 items-center gap-2 px-3 pb-2 text-caption text-subtle sm:px-5">
+      <span className="shrink-0 truncate">{agent?.name ?? session.agentId}</span>
+      {/* 完全信任是飞书 Bot 的默认姿态，用提醒色标出即可，红字留给真正的失败。 */}
+      {session.permissionMode && <><span aria-hidden="true" className="shrink-0">·</span><span title="本任务的权限姿态" className={`shrink-0 ${session.permissionMode === 'full-trust' ? 'text-warning' : 'text-subtle'}`}>{permissionLabels[session.permissionMode]}</span></>}
+      <span aria-hidden="true" className="shrink-0">·</span>
+      <span className="min-w-0 flex-1 truncate text-secondary">{nextAction}</span>
       {status.recoverable && !managed && <Button variant="secondary" size="sm" loading={restarting} onClick={onRestart} icon={<RotateCcw size={13}/>}>重新启动</Button>}
       {queuedTasks.length > 0 && <Badge tone="queued">待执行指令 {queuedTasks.length} 条</Badge>}
       <ConnectionState status={streamStatus}/>

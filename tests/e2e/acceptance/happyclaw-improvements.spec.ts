@@ -16,6 +16,15 @@ test.describe('Configuration evidence, explicit project memory and artifact snap
     expect(response.status, response.text).toBe(200);
     return response.json as { id: string; cwd: string };
   };
+  // 记忆管理与配置来源在「结果检视」里；检视栏开合按任务记住，所以只在没开时才点。
+  const openInspector = async (page: Page) => {
+    const toggle = page.getByRole('button', { name: '结果检视', exact: true });
+    await expect(toggle).toBeVisible();
+    const inspector = page.getByRole('complementary', { name: '结果检视', exact: true });
+    if (!await inspector.isVisible()) await toggle.click();
+    await expect(inspector).toBeVisible();
+    return inspector;
+  };
   const openSession = async (page: Page, id: string) => {
     await page.goto(`${instance.baseUrl}/sessions/${id}`, { waitUntil: 'domcontentloaded' });
     await expect(page.getByRole('textbox', { name: '消息', exact: true })).toBeVisible();
@@ -56,7 +65,7 @@ test.describe('Configuration evidence, explicit project memory and artifact snap
     const changed = await instance.request('PATCH', `/api/sessions/${session.id}/config`, { model: 'fixture-after' });
     expect(changed.status, changed.text).toBe(200);
     await page.reload();
-    await page.getByRole('button', { name: '配置来源', exact: true }).click();
+    await (await openInspector(page)).getByRole('button', { name: '配置来源', exact: true }).click();
     const explanation = page.getByRole('complementary', { name: '配置来源', exact: true });
     await expect(explanation.getByRole('region', { name: '当前会话', exact: true }).getByText('fixture-after', { exact: true })).toBeVisible();
     await expect(explanation.getByRole('region', { name: '已保存 · 后续启动', exact: true }).getByText('fixture-before', { exact: true })).toBeVisible();
@@ -76,7 +85,7 @@ test.describe('Configuration evidence, explicit project memory and artifact snap
     const first = await createSession(), second = await createSession();
     expect(first.cwd).toBe(second.cwd);
     await openSession(page, first.id);
-    await page.getByRole('button', { name: '管理记忆', exact: true }).click();
+    await (await openInspector(page)).getByRole('button', { name: '管理记忆', exact: true }).click();
     let memory = page.getByRole('complementary', { name: '记忆管理', exact: true });
     await memory.getByRole('textbox', { name: '新项目记忆名称', exact: true }).fill('浏览器验收项目');
     await memory.getByRole('button', { name: '创建项目记忆', exact: true }).click();
@@ -102,7 +111,7 @@ test.describe('Configuration evidence, explicit project memory and artifact snap
     const projectId = await memory.getByRole('combobox', { name: '查看项目记忆', exact: true }).inputValue();
 
     await openSession(page, second.id);
-    await page.getByRole('button', { name: '管理记忆', exact: true }).click();
+    await (await openInspector(page)).getByRole('button', { name: '管理记忆', exact: true }).click();
     memory = page.getByRole('complementary', { name: '记忆管理', exact: true });
     await expect(memory).toContainText('本会话绑定：无');
     await sendTurn(page, second.id, 'HAPPYCLAW_MEMORY_SECOND_UNBOUND');
@@ -117,7 +126,7 @@ test.describe('Configuration evidence, explicit project memory and artifact snap
     await sendTurn(page, second.id, 'HAPPYCLAW_MEMORY_DISABLED');
     expect(receivedPrompt('HAPPYCLAW_MEMORY_DISABLED')).not.toContain(newFact);
     await page.reload();
-    await page.getByRole('button', { name: '管理记忆', exact: true }).click();
+    await (await openInspector(page)).getByRole('button', { name: '管理记忆', exact: true }).click();
     await expect(page.getByRole('complementary', { name: '记忆管理', exact: true }).getByRole('button', { name: '开启项目记忆', exact: true })).toBeVisible();
   });
 
