@@ -5,7 +5,7 @@ import { accessSync, chmodSync, constants, existsSync, mkdirSync, rmSync, statSy
 import { fileURLToPath } from 'node:url';
 import { assertNativeContextRecord, createAcpRuntime, createAgentRegistry, createRuntimeStore, type AcpPermissionDecision, type AcpPermissionRequest, type AcpRuntime, type AcpRuntimeResourceScope, type AcpRuntimeHandle, type AcpRuntimeProcessEvent, type AcpRuntimeStatus, type AcpRuntimeTurn, type AcpSessionStore } from 'acpx/runtime';
 import type { AgentConfig, AgentDriver, DriverSteeringOutcome, DriverTranscriptSourceObservation, InsightClient, NormalizedDriverEvent, PermissionMode, ToolRiskPolicy, DriverSubmission, DriverSubmissionInput, NativeContextIdentity, NativeContextExpected, NativeConfigurationRequest, NativeConfigurationProof, OperationPermit, ChildPermit } from '@dutydeck/shared';
-import { RuntimeError, agentCommandApprovalReason, isAgentCommandAutoApproval, AGENT_IDLE_TIMEOUT, PromptNotWrittenError, claudeRateLimits, permissionDisplayText, taskExecutionSchemas, canonicalExecutionJson, type AgentIdleTimeoutData } from '@dutydeck/shared';
+import { RuntimeError, errorMessage, agentCommandApprovalReason, isAgentCommandAutoApproval, AGENT_IDLE_TIMEOUT, PromptNotWrittenError, claudeRateLimits, permissionDisplayText, taskExecutionSchemas, canonicalExecutionJson, type AgentIdleTimeoutData } from '@dutydeck/shared';
 import { eventContentText, eventHasContent, normalizeEventContent, shellQuote } from '@dutydeck/shared';
 import { childEnvironment } from '@dutydeck/shared/child-environment';
 import { testRegexWithTimeout } from './regex-timeout.js';
@@ -182,6 +182,10 @@ function privateWorkspaceDirectory(cwd: string, ...segments: string[]) {
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
   return directory;
 }
+
+/** Under `<cwd>/.dutydeck`: where a Dutydeck launcher reports the Agent group it detached. */
+const LAUNCHER_REPORTS = 'launchers';
+const usesDutydeckLauncher = (args: readonly string[]) => args.some(arg => arg === envLauncherPath() || arg === claudeLauncherPath());
 
 /** acpx writes records with the process umask; they carry relay and group-tool tokens. */
 function privateSessionStore(cwd: string): AcpSessionStore {
@@ -437,7 +441,7 @@ export class AcpxAdapter implements AgentDriver {
       if (!this.stopped && !this.turnCancelling) {
         try {
           const toolCallId = (request.raw as any)?.toolCall?.toolCallId;
-          this.options.onEvent({ type: 'permission_request', data: { id: toolCallId ?? `permission-${Date.now()}`, toolCallId, title: `权限检查异常，已拒绝操作：${error instanceof Error ? error.message : String(error)}`, options: [], status: 'rejected' } });
+          this.options.onEvent({ type: 'permission_request', data: { id: toolCallId ?? `permission-${Date.now()}`, toolCallId, title: `权限检查异常，已拒绝操作：${errorMessage(error)}`, options: [], status: 'rejected' } });
         } catch { /* The decision stays a rejection. */ }
       }
       return { outcome: 'reject_once' };
@@ -469,7 +473,7 @@ export class AcpxAdapter implements AgentDriver {
         }
       } catch (error) {
         if (this.stopped || this.turnCancelling) return { outcome: 'reject_once' };
-        this.options.onEvent({ type: 'permission_request', data: { id, toolCallId: raw.toolCall?.toolCallId, title: `安全正则匹配异常，已拒绝操作：${error instanceof Error ? error.message : String(error)}`, options: [], status: 'rejected' } });
+        this.options.onEvent({ type: 'permission_request', data: { id, toolCallId: raw.toolCall?.toolCallId, title: `安全正则匹配异常，已拒绝操作：${errorMessage(error)}`, options: [], status: 'rejected' } });
         return { outcome: 'reject_once' };
       }
     }
@@ -546,8 +550,8 @@ export class AcpxAdapter implements AgentDriver {
    * signalable when ACPX kills the launcher before the first process-tree sample. Never persisted in session options.
    */
   private launcherReportEnvironment(): Record<string, string> {
-    if (!this.launch.command.some(arg => arg === envLauncherPath() || arg === claudeLauncherPath())) return {};
-    return { dutydeck_launcher_report: privateWorkspaceDirectory(this.agent.cwd ?? process.cwd(), 'launchers') };
+    if (!usesDutydeckLauncher(this.launch.command)) return {};
+    return { dutydeck_launcher_report: privateWorkspaceDirectory(this.agent.cwd ?? process.cwd(), LAUNCHER_REPORTS) };
   }
   private observeProcess(event: AcpRuntimeProcessEvent) {
     if (event.phase === 'creation-started') {
@@ -563,8 +567,8 @@ export class AcpxAdapter implements AgentDriver {
     }
     const child = event.child;
     if (this.processes.has(child)) return;
-    const launcher = event.kind === 'agent' && child.spawnargs?.some(arg => arg === envLauncherPath() || arg === claudeLauncherPath());
-    const tree = event.kind === 'agent' ? new AgentProcessTree(child.pid, launcher ? join(this.agent.cwd ?? process.cwd(), '.dutydeck', 'launchers') : undefined) : undefined;
+    const launcher = event.kind === 'agent' && !!child.spawnargs && usesDutydeckLauncher(child.spawnargs);
+    const tree = event.kind === 'agent' ? new AgentProcessTree(child.pid, launcher ? join(this.agent.cwd ?? process.cwd(), '.dutydeck', LAUNCHER_REPORTS) : undefined) : undefined;
     let sampling: NodeJS.Timeout | undefined;
     const exited = () => {
       clearInterval(sampling);

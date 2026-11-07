@@ -246,6 +246,10 @@ export function extractBearerToken(authorization: string | undefined): string | 
   return token || undefined;
 }
 
+/** The access credential a request presents: Bearer for non-browser clients, else the HttpOnly cookie. */
+export const presentedCredential = (headers: { authorization?: string; cookie?: string }) =>
+  extractBearerToken(headers.authorization) ?? extractCookie(headers.cookie);
+
 /** Read one exact cookie without decoding arbitrary user-controlled values. */
 export function extractCookie(cookieHeader: string | undefined, name = AUTH_COOKIE_NAME): string | undefined {
   if (!cookieHeader) return undefined;

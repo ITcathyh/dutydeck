@@ -1,8 +1,7 @@
 import { test, expect, type Locator } from '@playwright/test';
-import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, rmdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { launchIsolatedTestServer, type TestServerInstance } from './harness.js';
+import { gitIn, launchIsolatedTestServer, type TestServerInstance } from './harness.js';
 
 test.describe('Managed workspace browser acceptance', () => {
   let instance: TestServerInstance;
@@ -320,7 +319,7 @@ test.describe('Managed workspace browser acceptance', () => {
 
     // 磁盘验证：真实 worktree 目录已消失，且 git worktree list 中精确包含 source 与 B 的条目，已排除 A
     expect(existsSync(sessionA.cwd)).toBe(false);
-    const worktreeList = execFileSync('git', ['-C', instance.sourceRepo, 'worktree', 'list', '--porcelain'], { encoding: 'utf8' });
+    const worktreeList = gitIn(instance.sourceRepo, ['worktree', 'list', '--porcelain']);
     expect(worktreeList).toContain(`worktree ${instance.sourceRepo}`);
     expect(worktreeList).toContain(`worktree ${sessionB.cwd}`);
     expect(worktreeList).not.toContain(sessionA.cwd);
@@ -334,8 +333,8 @@ test.describe('Managed workspace browser acceptance', () => {
     expect(existsSync(join(sessionB.cwd, 'tracked.txt'))).toBe(true);
     expect(readFileSync(join(sessionB.cwd, 'tracked.txt'), 'utf8')).toBe('baseline content\n');
 
-    const branchCommit = execFileSync('git', ['-C', instance.sourceRepo, 'rev-parse', '--verify', `refs/heads/${sessionA.branch}^{commit}`], { encoding: 'utf8' }).trim();
-    const baselineCommit = execFileSync('git', ['-C', instance.sourceRepo, 'rev-parse', '--verify', 'HEAD^{commit}'], { encoding: 'utf8' }).trim();
+    const branchCommit = gitIn(instance.sourceRepo, ['rev-parse', '--verify', `refs/heads/${sessionA.branch}^{commit}`]);
+    const baselineCommit = gitIn(instance.sourceRepo, ['rev-parse', '--verify', 'HEAD^{commit}']);
     expect(branchCommit).toBe(baselineCommit);
 
     // 6. 页面刷新后核对历史仍然可读，且只读与已清理状态持久有效，输入框彻底卸载不可用

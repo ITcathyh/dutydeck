@@ -4,6 +4,7 @@ import { Check, MessageSquareX, ShieldAlert, TriangleAlert, X } from 'lucide-rea
 import type { TimelineEvent } from '../timeline';
 import { hasRisk, riskSegments } from '../permission-risk';
 import { Button } from './primitives';
+import { RiskText } from './RiskText';
 
 const resolvedLabels: Record<string, string> = { approved: '已允许', rejected: '已拒绝', cancelled: '已取消', expired: '已失效' };
 
@@ -57,9 +58,7 @@ export function PermissionCard({ event, resolving = false, onResolve }: { event:
         </div>
         {command && <figure className="mt-2.5 overflow-hidden rounded-md border border-subtle bg-muted">
           <figcaption className="px-3 pt-2 text-meta text-subtle">命令（已脱敏）</figcaption>
-          <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-all px-3 pb-2.5 pt-1 font-mono text-caption leading-5 text-primary"><code>{segments.map((segment, index) => segment.risky
-            ? <mark key={index} className="rounded-sm bg-danger-soft px-0.5 font-semibold text-danger">{segment.text}</mark>
-            : segment.text)}</code></pre>
+          <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-all px-3 pb-2.5 pt-1 font-mono text-caption leading-5 text-primary"><code><RiskText segments={segments}/></code></pre>
         </figure>}
         {risky && <p className="mt-2 flex items-start gap-1.5 text-caption text-danger"><TriangleAlert size={14} aria-hidden="true" className="mt-0.5 shrink-0"/><span>命令里有可能造成破坏的片段（已标出）。这只是界面提醒，请自己核对后再决定。</span></p>}
       </> : <p className="mt-2 text-caption text-subtle">执行端未提供详细操作。</p>}

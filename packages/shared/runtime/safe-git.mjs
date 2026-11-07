@@ -38,10 +38,6 @@ export function safeGitEnvironment(inherited, configured = {}) {
 
 /** From `git config --show-scope -z --list`: program keys keep only their system, global and command values; filter keys set only by the repository are disabled. */
 export function safeGitConfigFromListing(listing) {
-  return inspectListing(listing).config;
-}
-
-function inspectListing(listing) {
   const trusted = [];
   const trustedKeys = new Set();
   const repositoryFilters = new Map();
@@ -60,26 +56,15 @@ function inspectListing(listing) {
     }
   }
   const disabled = [...repositoryFilters].filter(([key]) => !trustedKeys.has(key));
-  return {
-    config: [...disabled.flatMap(([key, value]) => ['-c', `${key}=${value}`]), ...trusted],
-    repositoryFilters: [...new Set(disabled.map(([key]) => key.slice('filter.'.length, key.lastIndexOf('.'))))]
-  };
+  return [...disabled.flatMap(([key, value]) => ['-c', `${key}=${value}`]), ...trusted];
 }
 
-/**
- * Config arguments for git that reads or writes work tree content, or talks to a remote, plus the filter drivers
- * only the repository defines (disabled in config). Rejects when the config cannot be listed.
- */
-export function inspectGitConfig(location, { env, timeout = 10_000 }) {
+/** Config arguments for git that reads or writes work tree content, or talks to a remote. Rejects when the config cannot be listed. */
+export function safeGitConfigFor(location, { env, timeout = 10_000 }) {
   return new Promise((resolve, reject) => {
     execFile('git', [...location, 'config', '--show-scope', '-z', '--list'], { env, timeout, maxBuffer: 4 * 1024 * 1024, killSignal: 'SIGKILL' }, (error, stdout) => {
       if (error) return reject(error);
-      const inspected = inspectListing(stdout);
-      resolve({ config: [...SAFE_GIT_CONFIG, ...inspected.config], repositoryFilters: inspected.repositoryFilters });
+      resolve([...SAFE_GIT_CONFIG, ...safeGitConfigFromListing(stdout)]);
     });
   });
-}
-
-export function safeGitConfigFor(location, options) {
-  return inspectGitConfig(location, options).then(inspected => inspected.config);
 }

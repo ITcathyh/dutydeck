@@ -14,6 +14,7 @@ import { HISTORY_TURN_PAGE_SIZE, loadTurnHistory } from '../event-history';
 import { buildTimelineSections, createTimelineProjector } from '../timeline';
 import { useTimelineDisclosure } from '../timeline-disclosure';
 import { MarkdownContent } from '../MarkdownContent';
+import { historyPageQuery } from '../useEventHistory';
 import { ShareTurn, type EarlierPlace } from './ShareTurn';
 import { liveTurnFacts, turnMomentWidth } from '../share-view';
 
@@ -429,9 +430,7 @@ function HistoryTurn({ sessionId, summary, activeOutputLabel, requestedSource }:
 /** An earlier turn known only by its place: its page of summaries loads when it scrolls into view. */
 function PendingHistoryTurn({ sessionId, places, index, activeOutputLabel, requestedSource }: { sessionId: string; places: HistoryTurnPlace[]; index: number; activeOutputLabel: string; requestedSource?: HistorySource }) {
   const place = places[index]!;
-  const start = index - index % HISTORY_TURN_PAGE_SIZE, end = Math.min(places.length, start + HISTORY_TURN_PAGE_SIZE) - 1;
-  const from = places[start]![1], through = places[end]![2];
-  const page = useQuery({ queryKey: ['history-page', sessionId, from, through], queryFn: ({ signal }) => api.sessionHistoryTurns(sessionId, from, through, signal), staleTime: Infinity });
+  const page = useQuery(historyPageQuery(sessionId, places, Math.floor(index / HISTORY_TURN_PAGE_SIZE)));
   const summary = page.data?.turns.find(turn => turn.id === place[0]);
   if (summary) return <HistoryTurn sessionId={sessionId} summary={summary} activeOutputLabel={activeOutputLabel} requestedSource={requestedSource}/>;
   return <section data-history-pending={place[0]} className="my-4 border-b border-default pb-4">
