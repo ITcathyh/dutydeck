@@ -117,6 +117,18 @@ describe('builtinAgents PTY contributions', () => {
     const probeCalls = mockCommandExists.mock.calls.filter(([command]) => command === contribution.command).length;
     expect(probeCalls).toBe(1);
   });
+
+  it('does not cache a scan that missed a command, so the command is found once it is back', () => {
+    const contribution: PtyAgentContribution = { id: 'swapping', name: 'Swapping', command: '/tmp/dutydeck-swapping-cli' };
+    const original = mockCommandExists.getMockImplementation()!;
+    let present = false;
+    mockCommandExists.mockImplementation(command => command === contribution.command ? present : original(command));
+    try {
+      expect(builtinAgents('/tmp/dutydeck-pty-test', [contribution]).some(agent => agent.id === 'swapping')).toBe(false);
+      present = true;
+      expect(builtinAgents('/tmp/dutydeck-pty-test', [contribution]).find(agent => agent.id === 'swapping')).toMatchObject({ protocol: 'pty-cli', command: contribution.command });
+    } finally { mockCommandExists.mockImplementation(original); }
+  });
 });
 
 describe('loadConfig PTY contribution passthrough', () => {

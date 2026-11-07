@@ -110,6 +110,10 @@ Kiro 3.x 未验证：Kiro 3.0.0 发布说明称 Kiro CLI 已改为单个独立�
 
 不要在 Dutydeck 里打开 Claude 的 `CLAUDE_CODE_RETRY_WATCHDOG`：它等额度重置时没有输出、进程 CPU 也不活跃，会被终端任务的空闲超时（Agent 的 `timeout`，默认 600 秒）当作卡死结束。
 
+Claude Code / Seed / Relay / Genius 的终端默认带 `CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND=1`：Claude 2.1.319 起会把 MCP 服务以 task 方式运行的工具调用转到后台，结果不再归本轮；设了这个变量，MCP 工具结果留在本轮里，长时间的 MCP 调用会一直占着这一轮。要恢复转后台，在 Agent env 里设 `CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND=0`；`~/.claude/settings.json` 的 `env` 里的同名值也优先于这个默认值。旧版 Claude 不认这个变量；已经在跑的终端要重新拉起才会带上。
+
+不要在给 Dutydeck 用的 Claude 里打开 `CLAUDE_CODE_RESUME_INTERRUPTED_TURN`：Claude 恢复会话时可能自己重跑中断的那一轮，和 Dutydeck「结果未知不自动重发」冲突。
+
 ### 终端模式 Agent 与飞书审批
 
 - Claude Code / Seed / Relay 的终端模式支持飞书审批，`ask` 和 `approve-reads` 都可用，靠 PermissionRequest hook 实现。
