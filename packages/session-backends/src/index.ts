@@ -8,6 +8,7 @@ export {
   TmuxSessionExistsError,
   TmuxOwnershipError,
   isTmuxAvailable,
+  orphanedTmuxSocketMessage,
   type TmuxBackendOptions,
   type TmuxDutydeckMetadataKey,
 } from './tmux-backend.js';

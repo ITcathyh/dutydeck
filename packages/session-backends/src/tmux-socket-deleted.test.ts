@@ -1,16 +1,19 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { TmuxBackend, isTmuxAvailable } from './tmux-backend.js';
+import { TmuxBackend, TmuxServerError, isTmuxAvailable } from './tmux-backend.js';
 
 // /tmp cleanup (systemd-tmpfiles, macOS periodic) can delete a long-lived
 // server's socket file while the server and its CLI keep running.
 const tmuxDescribe = (await isTmuxAvailable()) && process.platform === 'linux' ? describe : describe.skip;
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+/** Listening sockets (SO_ACCEPTCON) bound to this path: one per tmux server. */
+const listeners = (path: string) => readFileSync('/proc/net/unix', 'utf8').split('\n')
+  .filter(line => line.endsWith(` ${path}`) && line.split(/\s+/)[3] === '00010000').length;
 
-tmuxDescribe('TmuxBackend exit watcher after its socket file is deleted', () => {
+tmuxDescribe('TmuxBackend after its socket file is deleted', () => {
   let root: string, socket: string;
   beforeAll(() => {
     root = mkdtempSync(join(tmpdir(), 'dd-tmux-socket-gone-'));
@@ -37,8 +40,19 @@ tmuxDescribe('TmuxBackend exit watcher after its socket file is deleted', () => 
     try {
       // Let the watcher see the pane through the live server at least once.
       await new Promise(resolve => setTimeout(resolve, 1_500));
+      expect(listeners(socket)).toBe(1);
       rmSync(socket);
-      expect(await TmuxBackend.probeSession(backend.sessionName)).toBe('missing');
+      // The kernel still has the old server bound to the deleted path.
+      expect(await TmuxBackend.probeSession(backend.sessionName)).toBe('unknown');
+      expect(await TmuxBackend.orphanedServerSocket(backend.sessionName)).toBe(socket);
+      // A same-name launch must not start a second server and CLI next to it.
+      const duplicate = new TmuxBackend(backend.sessionName);
+      const refused = await duplicate.spawn('/bin/sleep', ['1000'], { cwd: root, cols: 80, rows: 24, env: { HOME: root, PATH: process.env.PATH! } }).catch(error => error);
+      expect(refused).toBeInstanceOf(TmuxServerError);
+      expect(refused.message).toContain(socket);
+      expect(refused.message).toContain('SIGUSR1');
+      expect(existsSync(socket)).toBe(false);
+      expect(listeners(socket)).toBe(1);
       await new Promise(resolve => setTimeout(resolve, 5_000));
       expect(exit).not.toHaveBeenCalled();
       expect(alive(pid)).toBe(true);

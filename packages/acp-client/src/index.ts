@@ -313,7 +313,7 @@ export function buildAcpxSessionOptions(agent: AgentConfig) {
   };
 }
 
-export interface AcpxAdapterOptions { context?: import('@dutydeck/shared').DriverContext; resolveRiskPolicy?: (fallback?: ToolRiskPolicy) => Promise<ToolRiskPolicy | undefined>; sessionKey?: string; onEvent(event: NormalizedDriverEvent): void; onExit?(code: number | null, signal: NodeJS.Signals | null): void }
+export interface AcpxAdapterOptions { context?: import('@dutydeck/shared').DriverContext; resolveRiskPolicy?: (fallback?: ToolRiskPolicy) => Promise<ToolRiskPolicy | undefined>; sessionKey?: string; /** True while this session's Agent is waiting for a user's answer. */ awaitingAnswer?: () => boolean; onEvent(event: NormalizedDriverEvent): void; onExit?(code: number | null, signal: NodeJS.Signals | null): void }
 type SessionAgentConfig = AgentConfig & { reasoningEffort?: string };
 
 export class AgentIdleTimeoutError extends Error {
@@ -869,7 +869,17 @@ export class AcpxAdapter implements AgentDriver {
         // message waiting. End its process instead; the next turn reconnects through the persisted session key.
         retireTimer = setTimeout(() => this.retireStuckAgent(stream), retireDelay);
       };
+      const deferWhileAwaitingAnswer = () => {
+        if (!this.options.awaitingAnswer?.()) return false;
+        resetIdle();
+        return true;
+      };
+      const expireUnlessWaiting = () => {
+        if (deferWhileAwaitingAnswer()) return;
+        expire();
+      };
       const expireUnlessBusy = () => {
+        if (deferWhileAwaitingAnswer()) return;
         if (this.cpu.sample(this.processIds()) !== 'active' || silentMs >= deferLimitMs) { expire(); return; }
         const next = Math.min(cpuWindowMs, deferLimitMs - silentMs);
         silentMs += next;
@@ -879,7 +889,7 @@ export class AcpxAdapter implements AgentDriver {
         clearIdle();
         if (timedOut || finished || interrupting || this.stopped || this.pendingPermissions.size) return;
         silentMs = idleTimeoutMs;
-        if (cpuWindowMs < PROCESS_CPU_MIN_WINDOW_MS) { timer = setTimeout(expire, idleTimeoutMs); return; }
+        if (cpuWindowMs < PROCESS_CPU_MIN_WINDOW_MS) { timer = setTimeout(expireUnlessWaiting, idleTimeoutMs); return; }
         // 提前一个窗口取对照样本，到点时才看得出这段时间有没有在用 CPU。
         this.cpu.reset();
         timer = setTimeout(() => { this.cpu.sample(this.processIds()); timer = setTimeout(expireUnlessBusy, cpuWindowMs); }, idleTimeoutMs - cpuWindowMs);

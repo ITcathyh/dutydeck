@@ -708,10 +708,8 @@ process.stdout.write(marker.slice(4));
       await vi.waitFor(() => expect(existsSync(marker) && readFileSync(marker).length > 0).toBe(true));
       child.kill('SIGKILL');
       await new Promise(resolve => child.once('exit', resolve));
-      await new Promise(resolve => setTimeout(resolve, 80));
-      const growingSize = readFileSync(marker).length;
-      await new Promise(resolve => setTimeout(resolve, 120));
-      expect(readFileSync(marker).length).toBeGreaterThan(growingSize);
+      const sizeAfterKill = readFileSync(marker).length;
+      await vi.waitFor(() => expect(readFileSync(marker).length).toBeGreaterThan(sizeAfterKill), { timeout: 5_000, interval: 20 });
 
       const recovered = open(database); await recovered.runtime.initialize([agent]);
       const stoppedSize = readFileSync(marker).length;

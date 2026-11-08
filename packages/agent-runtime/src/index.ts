@@ -374,7 +374,7 @@ export class DutydeckRuntime {
     this.verifications = new VerificationManager(repos.config, (id, commit) => this.mutations.run(undefined, () => this.mutations.write(id, commit)));
     const ptyDriverFactory = options.ptyDriverFactory;
     this.factory = options.driverFactory ?? ((agent, protocol, onEvent, onExit, sessionId, context) => {
-      if (protocol === 'acp') return new AcpxAdapter({ ...agent, env: { ...agent.env, dutydeck_session_id: sessionId } }, { sessionKey: sessionId, context, onEvent, ...(this.options.resolveRiskPolicy ? { resolveRiskPolicy: (fallback?: ToolRiskPolicy) => this.options.resolveRiskPolicy!(sessionId, fallback) } : {}) });
+      if (protocol === 'acp') return new AcpxAdapter({ ...agent, env: { ...agent.env, dutydeck_session_id: sessionId } }, { sessionKey: sessionId, context, onEvent, ...(this.options.resolveRiskPolicy ? { resolveRiskPolicy: (fallback?: ToolRiskPolicy) => this.options.resolveRiskPolicy!(sessionId, fallback) } : {}), ...(this.options.awaitingAnswer ? { awaitingAnswer: () => this.options.awaitingAnswer!(sessionId) } : {}) });
       if (protocol === 'pty-cli') {
         if (!ptyDriverFactory) throw new RuntimeError('DRIVER_UNAVAILABLE', 'protocol 为 pty-cli 的 agent 需要注入 ptyDriverFactory（@dutydeck/pty-driver）', 503);
         // 高风险拦截钩子按 dutydeck_session_id 找会话策略，和 ACP 一样由宿主注入。
@@ -776,6 +776,9 @@ export class DutydeckRuntime {
         // 一个会话的工作目录不见了（比如 worktree 被删）只影响它自己：记下来、跳过它，别让整个实例起不来。
         if (this.shuttingDown || !(error instanceof RuntimeError && error.code === 'WORKSPACE_UNAVAILABLE')) throw error;
         this.options.log?.warn({ sessionId: session.id, code: error.code, error: error.message }, 'Session startup recovery skipped');
+        const latest = (await this.repos.events.listRecent(session.id, 1))[0];
+        const latestData = latest?.type === 'error' ? latest.data as { code?: unknown; message?: unknown } : undefined;
+        if (latestData?.code === error.code && latestData.message === error.message) continue;
         await this.emit(session.id, 'error', { code: error.code, message: error.message });
       }
     }

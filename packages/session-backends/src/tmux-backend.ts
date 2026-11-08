@@ -30,6 +30,7 @@ import { runCommand } from './command.js';
 import { OutputHandoff } from './output-handoff.js';
 import { TmuxCapture, cleanAbandonedTmuxCapture } from './tmux-capture.js';
 import { statStart } from './proc-stat.js';
+import { unixSocketState } from './unix-socket.js';
 import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { readFileSync, statSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
@@ -116,6 +117,25 @@ function isServerLevelErrorText(stderrText: string): boolean {
  * This is the normal first-use result for a fresh TMUX_TMPDIR. */
 function isSocketMissingErrorText(stderrText: string): boolean {
   return /error connecting to .*\(No such file or directory\)/i.test(stderrText);
+}
+
+/**
+ * The socket file is gone, yet the kernel still has a socket bound to that
+ * path: the original server (and its panes) usually survives /tmp cleanup.
+ * Starting a client command that creates a server there would put a second
+ * CLI on the same conversation, so callers treat this as "state unknown".
+ * Returns the orphaned path only on a definite `bound` answer; non-Linux or an
+ * unreadable kernel table keeps the historical "no server" reading.
+ */
+function orphanedSocketPath(stderrText: string): string | undefined {
+  const path = /error connecting to (.+) \(No such file or directory\)/i.exec(stderrText)?.[1];
+  return path !== undefined && unixSocketState(path) === 'bound' ? path : undefined;
+}
+
+/** User-facing explanation for a launch refused because of an orphaned tmux socket. */
+export function orphanedTmuxSocketMessage(path: string): string {
+  return `tmux socket ${path} 已被删除，但原 tmux server 仍在运行；为避免同一会话起两个 CLI，已拒绝启动。`
+    + '处理办法：按 tmux 手册向原 tmux server 进程发送 SIGUSR1 让它重建 socket，或结束原 tmux server 后重新发送消息。';
 }
 
 function processStart(pid: number): string | undefined {
@@ -409,6 +429,14 @@ export class TmuxBackend implements SessionBackend {
     }
     this.started = true;
 
+    // 0. Never create a server next to one whose socket file was deleted, and
+    //    clear a dead session this owner left behind (remain-on-exit) so the
+    //    name is free again.
+    const existing = await TmuxBackend.hasSession(this.sessionName);
+    if (existing.orphanedSocket !== undefined) throw new TmuxServerError(orphanedTmuxSocketMessage(existing.orphanedSocket));
+    if (existing.probe === 'exists') await TmuxBackend.reapDeadOwnedSession(this.sessionName, this.ownerId);
+    check();
+
     // 1. Detached session running a bare shell. The CLI is launched by
     //    send-keys (step 4) so session-specific env never touches the tmux
     //    server's global environment.
@@ -421,6 +449,7 @@ export class TmuxBackend implements SessionBackend {
         '-c', tmuxLiteralArg(tmuxFormatLiteral(opts.cwd)),
       ], { cwd: opts.cwd }));
     } catch (err) {
+      if (err instanceof TmuxError) throw err;
       throw classifyFailure(err, 'tmux new-session');
     }
 
@@ -703,15 +732,59 @@ export class TmuxBackend implements SessionBackend {
 
   /** Async probe for the high-frequency watcher; unknown never proves exit. */
   static async probeSessionAsync(name: string): Promise<SessionProbe> {
+    return (await this.hasSession(name)).probe;
+  }
+
+  /**
+   * Path of a deleted tmux socket whose server is still bound to it (Linux
+   * only), for diagnostics after a probe answered 'unknown'.
+   */
+  static async orphanedServerSocket(name: string): Promise<string | undefined> {
+    return (await this.hasSession(name)).orphanedSocket;
+  }
+
+  /** A missing socket file is 'missing' unless the kernel proves the old server still listens on that path. */
+  private static async hasSession(name: string): Promise<{ probe: SessionProbe; orphanedSocket?: string }> {
     try {
       await runCommand('tmux', ['has-session', '-t', name], { env: tmuxClientEnv(), timeout: 3000 });
-      return 'exists';
+      return { probe: 'exists' };
     } catch (error) {
       const failure = error as { signal?: string; status?: number; stderr?: string };
-      if (failure.signal || typeof failure.status !== 'number') return 'unknown';
+      if (failure.signal || typeof failure.status !== 'number') return { probe: 'unknown' };
       const stderr = failure.stderr ?? '';
-      if (isSocketMissingErrorText(stderr)) return 'missing';
-      return isServerLevelErrorText(stderr) ? 'unknown' : 'missing';
+      if (isSocketMissingErrorText(stderr)) {
+        const orphanedSocket = orphanedSocketPath(stderr);
+        return orphanedSocket === undefined ? { probe: 'missing' } : { probe: 'unknown', orphanedSocket };
+      }
+      return { probe: isServerLevelErrorText(stderr) ? 'unknown' : 'missing' };
+    }
+  }
+
+  /**
+   * Remove a dead session this owner left behind, typically kept by the
+   * user's `remain-on-exit`. Only an exact-name session carrying `ownerId`
+   * whose every pane in every window reports dead is killed; the session id,
+   * owner and pane states are read again right before kill-session. Missing
+   * owner, a live pane, an unreadable state or any tmux error leaves the
+   * session untouched. Returns whether a session was removed.
+   */
+  static async reapDeadOwnedSession(name: string, ownerId: string | undefined): Promise<boolean> {
+    if (ownerId === undefined) return false;
+    const sessionId = async () => (await runTmux(['display-message', '-p', '-t', name, '#{session_id}'], { timeout: 2000 })).trim();
+    try {
+      const id = await sessionId();
+      if (!/^\$\d+$/.test(id)) return false;
+      const reapable = async () => {
+        if ((await sessionId()) !== id) return false;
+        if ((await runTmux(['show-options', '-v', '-t', id, OWNER_OPTION], { timeout: 2000 })).trim() !== ownerId) return false;
+        const panes = (await runTmux(['list-panes', '-s', '-t', id, '-F', '#{pane_dead}'], { timeout: 2000 })).split('\n').map(line => line.trim()).filter(Boolean);
+        return panes.length > 0 && panes.every(dead => dead === '1');
+      };
+      if (!(await reapable()) || !(await reapable())) return false;
+      await runTmux(['kill-session', '-t', id], { timeout: 3000 });
+      return true;
+    } catch {
+      return false;
     }
   }
 

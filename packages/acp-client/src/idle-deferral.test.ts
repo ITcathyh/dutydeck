@@ -18,9 +18,9 @@ function deferred<T>() {
   return { promise, resolve };
 }
 /** 与 turn-progress.test.ts 相同的假 turn：事件由测试逐条推入，CPU 采样结果由测试指定。 */
-async function setup(timeout: number, cpu: 'active' | 'inactive' | 'unknown') {
+async function setup(timeout: number, cpu: 'active' | 'inactive' | 'unknown', awaitingAnswer?: () => boolean) {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-idle-deferral-')); dirs.push(cwd);
-  const adapter = new AcpxAdapter({ id: 'fixture', name: 'Fixture', command: 'unused', args: [], env: {}, cwd, protocol: 'acp', permissionMode: 'ask', timeout, capabilities: { pause: false, resume: true }, builtin: false }, { onEvent() {} });
+  const adapter = new AcpxAdapter({ id: 'fixture', name: 'Fixture', command: 'unused', args: [], env: {}, cwd, protocol: 'acp', permissionMode: 'ask', timeout, capabilities: { pause: false, resume: true }, builtin: false }, { onEvent() {}, awaitingAnswer });
   const runtime = (adapter as any).runtime;
   vi.spyOn(runtime, 'ensureSession').mockResolvedValue({ sessionKey: 'fixture' });
   vi.spyOn(runtime, 'close').mockResolvedValue(undefined);
@@ -52,6 +52,28 @@ async function setup(timeout: number, cpu: 'active' | 'inactive' | 'unknown') {
 const heartbeat = { type: 'tool_call', text: 'tool call (in_progress)', tag: 'tool_call_update', title: 'tool call', toolCallId: 'long-tool', status: 'in_progress' };
 
 describe('ACP idle cancellation while the process tree is busy', () => {
+  it('defers both the CPU-sampled timeout and the final cancellation while awaiting an answer', async () => {
+    let waiting = true;
+    const h = await setup(10, 'inactive', () => waiting);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(h.turn.cancel).not.toHaveBeenCalled();
+    waiting = false;
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(h.turn.cancel).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.turn.cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it('defers the short-timeout path while awaiting an answer', async () => {
+    let waiting = true;
+    const h = await setup(1, 'inactive', () => waiting);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(h.turn.cancel).not.toHaveBeenCalled();
+    waiting = false;
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(h.turn.cancel).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps a turn whose tree uses CPU past the timeout and cancels it at three times the timeout', async () => {
     const h = await setup(10, 'active');
     h.push({ type: 'tool_call', tag: 'tool_call', title: 'Run tests', toolCallId: 'long-tool', status: 'in_progress', rawInput: { command: 'pnpm test' } });
