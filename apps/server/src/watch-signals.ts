@@ -158,7 +158,7 @@ export async function collectWatchScopes(repos: RepositoryBundle, bots: StoredLa
     const memoryCheck = checkLarkMemory({ raw: JSON.stringify([bot]), values: Object.fromEntries(rows.map(row => [row.key, row.value])) }, now);
     if (memoryCheck.level === 'warn') add(scope, {
       kind: 'memory_stalled', objectId: bot.appId, title: '后台记忆提取积压',
-      since: at, location: 'dutydeck doctor；对应聊天 /memory'
+      since: at, location: '在对应群里 @ 机器人（会自动补跑），或让它整理记忆'
     });
     for (const row of rows) {
       const state = decode<LarkMemoryState & { migratedTo?: string }>(row.value);

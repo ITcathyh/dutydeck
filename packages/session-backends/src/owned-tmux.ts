@@ -1,6 +1,7 @@
 import { runCommand } from './command.js';
 import { descendantPids } from './descendant-pids.js';
 import { statStart } from './proc-stat.js';
+import { unixSocketState } from './unix-socket.js';
 import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { isAbsolute } from 'node:path';
@@ -283,15 +284,9 @@ export async function verifyOwnedTmuxExit(proof: OwnedTmuxExitProof, probe: Proc
 }
 
 function requireUnboundSocket(path: string): void {
-  if (process.platform !== 'linux') fail('LEGACY_TMUX_SOCKET_STATE_UNKNOWN');
-  const [header, ...lines] = readFileSync('/proc/net/unix', 'utf8').split('\n');
-  if (header?.trim().split(/\s+/).join(' ') !== 'Num RefCount Protocol Flags Type St Inode Path') fail('LEGACY_TMUX_SOCKET_STATE_UNKNOWN');
-  for (const line of lines) {
-    if (!line) continue;
-    const match = /^[0-9a-f]+:\s+(?:[0-9a-f]+\s+){5}\d+(?:[ \t]+(.*))?$/i.exec(line);
-    if (!match) fail('LEGACY_TMUX_SOCKET_STATE_UNKNOWN');
-    if (match[1] === path) fail('LEGACY_TMUX_SOCKET_STILL_BOUND');
-  }
+  const state = unixSocketState(path);
+  if (state === 'bound') fail('LEGACY_TMUX_SOCKET_STILL_BOUND');
+  if (state !== 'unbound') fail('LEGACY_TMUX_SOCKET_STATE_UNKNOWN');
 }
 
 async function tmuxAbsence(scope: OwnedTmuxScope): Promise<{ socket?: OwnedTmuxIdentity['socket'] } | undefined> {

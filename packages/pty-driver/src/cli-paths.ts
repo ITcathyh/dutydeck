@@ -101,10 +101,52 @@ export function realCwd(cwd: string, env: CliPathEnv = process.env): string {
   try { return realpathSync(expanded); } catch { return resolve(expanded); }
 }
 
-/** `<claudeDataDir>/projects/<projectKey>` for a working directory. */
+/** Longest project key Claude Code writes verbatim, in UTF-16 code units. */
+const CLAUDE_PROJECT_KEY_MAX = 200;
+
+/**
+ * The project-directory name Claude Code derives from a real path.
+ *
+ * Every UTF-16 code unit outside `[A-Za-z0-9]` becomes `-` (an astral
+ * character therefore yields two). A key longer than 200 units is cut to its
+ * first 200 and suffixed with `-` plus the base-36 magnitude of a signed 32-bit
+ * `h * 31 + unit` hash over the ORIGINAL path. Verified against a real
+ * Claude Code 2.1.318 run; the suffix first appeared in 2.1.224. Paths of 200
+ * units or fewer produce the same key as before the suffix existed.
+ */
+export function claudeProjectKey(realPath: string): string {
+  const sanitized = realPath.replace(/[^A-Za-z0-9]/g, '-');
+  if (sanitized.length <= CLAUDE_PROJECT_KEY_MAX) return sanitized;
+  let hash = 0;
+  for (let index = 0; index < realPath.length; index++) hash = ((hash << 5) - hash + realPath.charCodeAt(index)) | 0;
+  return `${sanitized.slice(0, CLAUDE_PROJECT_KEY_MAX)}-${Math.abs(hash).toString(36)}`;
+}
+
+/** The pre-2.1.224 key: no truncation. Old sessions still live under it, and
+ *  `claude --resume <id>` keeps appending to them there. */
+function legacyClaudeProjectKey(realPath: string): string {
+  return realPath.replace(/[^A-Za-z0-9-]/g, '-');
+}
+
+/** `<claudeDataDir>/projects/<projectKey>` — where Claude writes NEW sessions
+ *  for a working directory. Readers of an existing session must also consult
+ *  {@link claudeProjectDirCandidates}. */
 export function claudeProjectDir(cwd: string, env: CliPathEnv = process.env): string {
-  const projectKey = realCwd(cwd, env).replace(/[^A-Za-z0-9-]/g, '-');
-  return join(claudeDataDir(env), 'projects', projectKey);
+  return join(claudeDataDir(env), 'projects', claudeProjectKey(realCwd(cwd, env)));
+}
+
+/**
+ * Every project directory a session for `cwd` may live in: the current key
+ * first, then the untruncated legacy key. The two coincide (one entry) unless
+ * the key exceeds 200 units. Callers must pick by the specific session file and
+ * its content proof, never by which directory merely exists.
+ */
+export function claudeProjectDirCandidates(cwd: string, env: CliPathEnv = process.env): string[] {
+  const real = realCwd(cwd, env);
+  const projects = join(claudeDataDir(env), 'projects');
+  const current = join(projects, claudeProjectKey(real));
+  const legacy = join(projects, legacyClaudeProjectKey(real));
+  return current === legacy ? [current] : [current, legacy];
 }
 
 /** `<codexHome>/sessions` — the YYYY/MM/DD rollout tree. */

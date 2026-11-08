@@ -134,18 +134,25 @@ it('retires an idle driver that never confirms its native session once it has be
 it('skips only the session whose saved workspace disappeared during startup recovery', async () => {
   const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
   cleanup.push(() => repos.close());
-  const gone = mkdtempSync(join(tmpdir(), 'dd-gone-workspace-')), kept = mkdtempSync(join(tmpdir(), 'dd-kept-workspace-'));
-  cleanup.push(() => { rmSync(gone, { recursive: true, force: true }); rmSync(kept, { recursive: true, force: true }); });
+  const gone = mkdtempSync(join(tmpdir(), 'dd-gone-workspace-')), goneAgain = mkdtempSync(join(tmpdir(), 'dd-gone-workspace-again-')), kept = mkdtempSync(join(tmpdir(), 'dd-kept-workspace-'));
+  cleanup.push(() => { rmSync(gone, { recursive: true, force: true }); rmSync(goneAgain, { recursive: true, force: true }); rmSync(kept, { recursive: true, force: true }); });
   const first = runtimeFor(repos);
   await first.runtime.initialize([agent]);
   const lost = await first.runtime.start({ agentId: agent.id, cwd: gone });
+  const lostAgain = await first.runtime.start({ agentId: agent.id, cwd: goneAgain });
   const healthy = await first.runtime.start({ agentId: agent.id, cwd: kept });
   await first.runtime.shutdown();
   rmSync(gone, { recursive: true, force: true });
+  rmSync(goneAgain, { recursive: true, force: true });
   const restarted = runtimeFor(repos);
   await restarted.runtime.initialize([agent]);
-  expect(warned(restarted.log, 'WORKSPACE_UNAVAILABLE')).toEqual([[expect.objectContaining({ sessionId: lost.id }), expect.any(String)]]);
-  expect((await restarted.runtime.send(healthy.id, 'still works')).status).toBe('completed');
+  expect(warned(restarted.log, 'WORKSPACE_UNAVAILABLE')).toHaveLength(2);
+  expect(warned(restarted.log, 'WORKSPACE_UNAVAILABLE').map(([data]) => data.sessionId)).toEqual(expect.arrayContaining([lost.id, lostAgain.id]));
+  await restarted.runtime.shutdown();
+  const restartedAgain = runtimeFor(repos);
+  await restartedAgain.runtime.initialize([agent]);
+  expect(warned(restartedAgain.log, 'WORKSPACE_UNAVAILABLE')).toHaveLength(2);
+  expect((await restartedAgain.runtime.send(healthy.id, 'still works')).status).toBe('completed');
 });
 
 it('a session whose idle check throws is logged and skipped while the other idle sessions are still retired', async () => {

@@ -38,7 +38,8 @@
 
 ### 4. 跨会话长期记忆
 - **默认关闭**：`memoryEnabled` 未设置时，只有群默认参与强度为「按需」或「积极」才开启。
-- **范围**：私聊各自独立。群聊默认同一机器人的所有群共享一个记忆池；把 `groupMemoryScope` 设为 `per-group` 后，各群记忆互不可见（Web「群记忆范围」，或 `dutydeck settings bot set <appId> groupMemoryScope=per-group`）。切换不迁移也不删除：`per-group` 下原共享池保留但不读取，切回共享即恢复。
+- **范围**：私聊各自独立。群聊默认同一机器人的所有群共享一个记忆池；把 `groupMemoryScope` 设为 `per-group` 后，各群的 Dutydeck 群记忆互不可见（Web「群记忆范围」，或 `dutydeck settings bot set <appId> groupMemoryScope=per-group`）。切换不迁移也不删除：`per-group` 下原共享池保留但不读取，切回共享即恢复。
+- **Agent 自带的记忆不受范围约束**：`per-group` 只管 Dutydeck 的群记忆。Claude Code 默认开着 auto memory，按工作目录保存在 `~/.claude/projects/<目录>/memory/`，同一工作目录下各群和机器人所有者自己的 Claude 共用一份。需要隔离时，把机器人的 `claudeAutoMemory` 设为 `off`（Web「Claude 自带记忆（群聊）」，或 `dutydeck settings bot set <appId> claudeAutoMemory=off`），或给机器人用独立工作区。`off` 只在开着会话记忆的机器人的群聊里、对 Claude 家族会话生效（Claude Code / Seed / Relay / Genius 终端，和内置的 ACP Claude），新拉起的 Claude 进程才带上；私聊、Web、定时任务、工作项和委托子会话、自定义 ACP Claude 不受影响。用户在 Agent env 或 Claude 设置的 `env` 里显式设了 `CLAUDE_CODE_DISABLE_AUTO_MEMORY` 时以用户的值为准，见 [agents.md](agents.md)。
 - **记录与提取**：`/remember` 手动记录；后台每 3 轮提取环境事实与偏好，每 8 轮合并去重。后台作业连续 5 次可重试失败或记忆 Agent 已被删除时放弃该作业、让出记忆池；结果未知、等待恢复核对的作业不在此列。作业记录不保存凭据原文；结束的作业每个记忆池每类只留最近 2 条，且只留任务编号和结果计数（不含对话原文），更早的删除。
 - **注入**：新任务注入精简记忆索引（`MEMORY.md`，≤ 3000 字符），执行中 Agent 可检索完整细节。
 - **管理**：任务详情的「管理记忆」可搜索、修订和删除实际记忆池；普通 Web 会话可显式创建和绑定项目记忆，目录相同不自动共享。见[配置来源与记忆管理](web-console.md#configuration-and-memory)。

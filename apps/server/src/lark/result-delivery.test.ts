@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
 import type { AgentEvent } from '@dutydeck/shared';
 import { loadLarkTaskEvents, renderLarkProcessElements, renderLarkResultElements } from './card-renderer.js';
-import { prepareLarkResult, deliverLarkStatusReaction, larkResultKey, patchLarkCard, sendLarkDeliveryText, sendLarkFile, sendLarkResult, sendLarkBoundMessage, readConfirmedLarkBoundMessage } from './result-delivery.js';
+import { prepareLarkResult, deliverLarkStatusReaction, larkResultKey, patchLarkCard, recordLarkResultAuditRejection, replyTextOrSend, sendLarkDeliveryText, sendLarkFile, sendLarkResult, sendLarkBoundMessage, readConfirmedLarkBoundMessage } from './result-delivery.js';
 import { COMPLETION_REACTION_EMOJI, FAILURE_REACTION_EMOJI, reactionDedupeKey } from './reaction-records.js';
 import { buildLarkCard, LarkCardService, LarkServiceError } from './service.js';
 import { sendTaskCard } from './coordinator-core.js';
@@ -526,4 +526,52 @@ it('keeps a reported question first when the result is downgraded to an attachme
   expect(prepared.attachmentMessageId).toBe('om_file');
   expect(prepared.input.elements[0]).toEqual(report);
   expect(prepared.input.elements[1]?.element_id).toBe('final_output');
+});
+
+describe('text reply with conversation fallback', () => {
+  const textService = (replyError?: unknown) => ({
+    replyText: vi.fn(async () => { if (replyError) throw replyError; return { messageId: 'om_reply' }; }),
+    sendText: vi.fn(async () => ({ messageId: 'om_sent' }))
+  });
+
+  it('posts in the conversation with the same idempotency key only when the reply target is unavailable, and logs the fallback', async () => {
+    const service = textService(recalled()), warn = vi.fn(), beforeSend = vi.fn(async () => {});
+    await expect(replyTextOrSend(service, { chatId: 'oc_group', replyMessageId: 'om_gone', replyInThread: true }, { text: '提醒', idempotencyKey: 'k1', beforeSend }, { warn }, '回退了'))
+      .resolves.toEqual({ messageId: 'om_sent' });
+    expect(service.sendText).toHaveBeenCalledWith({ text: '提醒', idempotencyKey: 'k1', beforeSend, chatId: 'oc_group' });
+    expect(beforeSend).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_gone', chatId: 'oc_group' }), '回退了');
+  });
+
+  it.each(unknownOutcomes())('rethrows %s without switching endpoints', async (_name, error) => {
+    const service = textService(error), warn = vi.fn();
+    await expect(replyTextOrSend(service, { chatId: 'oc_group', replyMessageId: 'om_req' }, { text: '提醒', idempotencyKey: 'k1' }, { warn })).rejects.toBe(error);
+    expect(service.sendText).not.toHaveBeenCalled(); expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('keeps allowReplyFallback=false targets on the reply endpoint', async () => {
+    const error = recalled(), service = textService(error);
+    await expect(replyTextOrSend(service, { chatId: 'oc_group', replyMessageId: 'om_gone', allowReplyFallback: false }, { text: '提醒', idempotencyKey: 'k1' })).rejects.toBe(error);
+    expect(service.sendText).not.toHaveBeenCalled();
+  });
+
+  it('keeps the content-audit notice fallback unchanged: recalled reply falls back silently, scheduled targets do not', async () => {
+    const repos = createRepositories(':memory:');
+    try {
+      const auditLog = { warn: vi.fn() };
+      const service = textService(recalled());
+      await recordLarkResultAuditRejection(service as unknown as LarkCardService, { chatId: 'oc_group', replyMessageId: 'om_gone', replyInThread: true }, 'audit-1', openApiError(230028), auditLog, repos.config);
+      expect(service.replyText).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_gone', replyInThread: true }));
+      expect(service.sendText).toHaveBeenCalledWith(expect.objectContaining({ chatId: 'oc_group', idempotencyKey: expect.stringMatching(/^audit_/) }));
+      expect(service.sendText.mock.calls[0]![0].idempotencyKey).toBe(service.replyText.mock.calls[0]![0].idempotencyKey);
+      expect(auditLog.warn).not.toHaveBeenCalled();
+      expect(await repos.config.get('lark.delivery.audit-1.audit_rejected')).toBe('230028');
+
+      const scheduled = textService(recalled());
+      await recordLarkResultAuditRejection(scheduled as unknown as LarkCardService, { chatId: 'oc_group', replyMessageId: 'om_gone', allowReplyFallback: false }, 'audit-2', openApiError(230028), auditLog, repos.config);
+      expect(scheduled.sendText).not.toHaveBeenCalled();
+      expect(await repos.config.get('lark.delivery.audit-2.audit_notice_error')).toContain('230011');
+      expect(auditLog.warn).toHaveBeenCalledWith(expect.anything(), '内容审核拒收提示投递失败，原结果仍未送达');
+    } finally { repos.close(); }
+  });
 });

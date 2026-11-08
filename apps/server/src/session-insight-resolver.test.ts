@@ -13,7 +13,7 @@ import {
   type TaskRequestV1,
 } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
-import { buildSessionMarker } from '@dutydeck/pty-driver';
+import { buildSessionMarker, claudeProjectDirCandidates } from '@dutydeck/pty-driver';
 import {
   INSIGHT_INSTANCE_ID_CONFIG_KEY,
   SessionInsightResolver,
@@ -1515,5 +1515,39 @@ describe('session insight resolver — 幂等、安全投影、取消、稳定 i
     expect(mains).toHaveLength(2);
     expect(result.primarySourceKey).toBeNull();
     expect(mains.every(m => m.role === 'additional')).toBe(true);
+  });
+});
+
+describe('session insight resolver — Claude 长路径项目目录', () => {
+  // 编码后超过 200 字符：Claude 2.1.224 起写截断加哈希的新目录，旧会话仍在不截断的旧目录。
+  const LONG_CWD = `/workspace/${'l'.repeat(220)}`;
+  const legacyKey = LONG_CWD.replace(/[^A-Za-z0-9-]/g, '-');
+  const [currentDir] = claudeProjectDirCandidates(LONG_CWD, { CLAUDE_CONFIG_DIR: '/' });
+  const currentKey = currentDir!.split('/').at(-1)!;
+
+  it.each([
+    ['旧的不截断目录', [legacyKey], 'matched'],
+    ['新的截断目录', [currentKey], 'matched'],
+    ['新旧目录都有同 ID 文件', [legacyKey, currentKey], 'ambiguous'],
+  ] as const)('转写只在%s时按内容身份发现', async (_label, keys, status) => {
+    expect(currentKey).not.toBe(legacyKey);
+    const h = harness();
+    const sessionId = `ses_long_${keys.length}_${keys[0]!.length}`;
+    const runId = `run_${sessionId}`;
+    await saveAgent(h, { id: 'claude-code' });
+    createSession(h, sessionId, 'claude-code', LONG_CWD, runId);
+    lifecycleDriver(h, sessionId, runId);
+    const home = join(h.root, '.claude');
+    const content = readFileSync(CLAUDE_MAIN_FIXTURE, 'utf8').replaceAll(FIXTURE_CWD, LONG_CWD);
+    for (const key of keys) {
+      mkdirSync(join(home, 'projects', key), { recursive: true });
+      writeFileSync(join(home, 'projects', key, `${CLAUDE_NATIVE_ID}.jsonl`), content);
+    }
+    appendLaunchObserved(h, { sessionId, runId, client: 'claude', dataRoot: home, nativeSessionId: CLAUDE_NATIVE_ID, cwd: LONG_CWD });
+
+    const result = await h.resolve(sessionId, { configuredRoots: [{ client: 'claude', path: home }] });
+    const main = result.sources.find(s => s.expectedStream.kind === 'main')!;
+    expect(main.status).toBe(status);
+    expect(result.primarySourceKey).toBe(status === 'matched' ? main.sourceKey : null);
   });
 });

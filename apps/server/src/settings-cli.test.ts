@@ -456,6 +456,24 @@ describe('settings CLI against the real bot routes', () => {
     expect(fieldsHelp(botFields)).toContain('groupMemoryScope=<shared|per-group>');
   });
 
+  it('reads and writes claudeAutoMemory, defaulting to inherit and rejecting unknown values', async () => {
+    const { repos, run } = await botRuntime();
+    expect((await run('bot-show', { appId: 'cli_a' })).bot).toMatchObject({ claudeAutoMemory: 'inherit' });
+    // inherit 是默认值：保存别的设置后，存储里仍然没有这个键。
+    await run('bot-set', { appId: 'cli_a', pairs: ['preInjectPrompt=别的设置'] });
+    expect(JSON.parse((await repos.config.get(larkBotsConfigKey))!)[0]).not.toHaveProperty('claudeAutoMemory');
+    const set = await run('bot-set', { appId: 'cli_a', pairs: ['claudeAutoMemory=off'] });
+    expect(set.bot).toMatchObject({ appId: 'cli_a', claudeAutoMemory: 'off' });
+    expect(await readLarkConfig(repos.config, 'cli_a')).toMatchObject({ claudeAutoMemory: 'off' });
+    await run('bot-set', { appId: 'cli_a', pairs: ['groupMemoryScope=per-group'] });
+    expect((await run('bot-show', { appId: 'cli_a' })).bot).toMatchObject({ claudeAutoMemory: 'off' });
+    for (const value of ['on', 'OFF', 'true', 'null']) await expect(run('bot-set', { appId: 'cli_a', pairs: [`claudeAutoMemory=${value}`] })).rejects.toMatchObject({ code: 'SETTINGS_VALUE_INVALID' });
+    expect(await readLarkConfig(repos.config, 'cli_a')).toMatchObject({ claudeAutoMemory: 'off' });
+    expect(await run('bot-set', { appId: 'cli_a', pairs: ['claudeAutoMemory=inherit'] })).toMatchObject({ bot: { claudeAutoMemory: 'inherit' } });
+    expect(await readLarkConfig(repos.config, 'cli_a')).not.toHaveProperty('claudeAutoMemory');
+    expect(fieldsHelp(botFields)).toContain('claudeAutoMemory=<inherit|off>');
+  });
+
   it('reads, writes, partially preserves, and clears roleTitle and roleScope', async () => {
     const { repos, run } = await botRuntime();
     // 写入 roleTitle 和 roleScope

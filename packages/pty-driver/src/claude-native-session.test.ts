@@ -8,7 +8,7 @@ import { childProcessIdentity, observeProcess } from '../../storage/src/process-
 import { ClaudeNativeSessionResolver, claudeHasConversation, claudeResumeFromObservation } from './claude-native-session.js';
 import { parseJsonlObjects, readHead, readTail } from './session-id/fs-scan.js';
 import { ClaudeTranscriptTailer } from './transcript/claude.js';
-import { claudeProjectDir } from './cli-paths.js';
+import { claudeProjectDir, claudeProjectDirCandidates } from './cli-paths.js';
 import type { DriverTranscriptSourceObservation, NormalizedDriverEvent } from '@dutydeck/shared';
 const fixture = fileURLToPath(new URL('./fixtures/claude-native-session.mjs', import.meta.url));
 const oldId = '11111111-1111-4111-8111-111111111111', newId = '22222222-2222-4222-8222-222222222222';
@@ -263,5 +263,25 @@ describe.skipIf(process.platform !== 'linux')('native session discovery from PID
       expect(() => realpathSync.native(proc)).toThrow(expect.objectContaining({ code: 'ENOENT' }));
       expect(resolver.resolve()).toBeUndefined();
     } finally { await stop(child); rmSync(root, { recursive: true, force: true }); rmSync(cwd, { recursive: true, force: true }); }
+  });
+  it.each([['legacy untruncated', '1'], ['current truncated', '0']] as const)('cold-resumes a long-cwd observation recorded under the %s key', async (_layout, legacyFlag) => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'dd-native-long-')));
+    // Encoded cwd past 200 units, legacy key still within NAME_MAX.
+    const cwd = join(root, 'x'.repeat(110), 'y'.repeat(225 - root.length - 112)); mkdirSync(cwd, { recursive: true });
+    const env = { ...process.env, HOME: root, CLAUDE_CONFIG_DIR: root, FIXTURE_LEGACY_PROJECT_KEY: legacyFlag };
+    const [current, legacy] = claudeProjectDirCandidates(cwd, env);
+    const expected = join(legacyFlag === '1' ? legacy! : current!, oldId + '.jsonl');
+    const child = spawnFixture(cwd, env, oldId);
+    try {
+      await vi.waitFor(() => expect(JSON.parse(readFileSync(join(root, 'sessions', child.pid + '.json'), 'utf8')).sessionId).toBe(oldId));
+      child.stdin.write(JSON.stringify({ prompt: 'long path' }) + '\n');
+      await vi.waitFor(() => expect(readFileSync(expected, 'utf8')).toContain('ANSWER:long path'));
+      const source = new ClaudeNativeSessionResolver(childProcessIdentity(child.pid!), cwd, env, { identify: childProcessIdentity, observe: observeProcess }).resolve(true);
+      expect(source).toMatchObject({ nativeSessionId: oldId, path: expected, resumable: true });
+      const observation: DriverTranscriptSourceObservation = { observationId: 'long', client: 'claude', launchKind: 'created', proofKind: 'launch_observed', capturedAt: new Date().toISOString(),
+        dataRoot: root, cwd, nativeSessionId: oldId, verifiedPath: expected, identityProof: source!.identityProof };
+      expect(claudeResumeFromObservation(observation, cwd, env)).toBe(oldId);
+      expect(claudeResumeFromObservation({ ...observation, verifiedPath: join(legacyFlag === '1' ? current! : legacy!, oldId + '.jsonl') }, cwd, env)).toBeUndefined();
+    } finally { await stop(child); rmSync(root, { recursive: true, force: true }); }
   });
 });

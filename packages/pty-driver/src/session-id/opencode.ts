@@ -25,17 +25,16 @@
  * breaks ties among repeated submits of the same marker.
  *
  * RUNTIME NOTE — this uses `node:sqlite` (Node 22+, currently flagged
- * experimental) via a lazy `createRequire`, deliberately NOT a static import:
- *   - a static import would make the whole pty-driver package fail to load on
- *     a runtime without `node:sqlite`, breaking every other CLI;
- *   - `node:sqlite` prints an ExperimentalWarning on first load, which should
- *     only be paid by someone actually resuming an OpenCode session.
+ * experimental) via a lazy require (`requireNodeSqlite`), deliberately NOT a
+ * static import: a static import would make the whole pty-driver package fail
+ * to load on a runtime without `node:sqlite`, breaking every other CLI. The
+ * loader also drops the one-time SQLite ExperimentalWarning; see node-sqlite.ts.
  * Any failure (module absent, DB missing, schema drift, locked file) returns
  * undefined and the caller degrades.
  */
 import { existsSync } from 'node:fs';
-import { createRequire } from 'node:module';
 import { opencodeDbPath } from '../cli-paths.js';
+import { requireNodeSqlite, type NodeSqliteDatabase } from '../node-sqlite.js';
 import { buildSessionMarker, isUsableMarker } from './marker.js';
 import type { SessionIdLookup, SessionIdLookupContext } from './types.js';
 
@@ -59,14 +58,7 @@ const OPENCODE_SESSION_ID_RE = /^ses_[0-9A-Za-z]+$/;
  */
 export type OpenCodeDbKind = 'v1' | 'v2';
 
-interface StatementLike {
-  get(...params: unknown[]): unknown;
-  all(...params: unknown[]): unknown[];
-}
-interface DatabaseLike {
-  prepare(sql: string): StatementLike;
-  close(): void;
-}
+type DatabaseLike = NodeSqliteDatabase;
 
 /** Locate the user text carrying the marker and return its session id.
  *  V1: part JOIN message, role read out of the message JSON blob.
@@ -94,10 +86,7 @@ function withDb<T>(dbPath: string, fn: (db: DatabaseLike) => T | undefined): T |
   let db: DatabaseLike | undefined;
   try {
     // Lazy require: see the runtime note in the module header.
-    const require = createRequire(import.meta.url);
-    const { DatabaseSync } = require('node:sqlite') as {
-      DatabaseSync: new (path: string, opts?: { readOnly?: boolean }) => DatabaseLike;
-    };
+    const { DatabaseSync } = requireNodeSqlite();
     db = new DatabaseSync(dbPath, { readOnly: true });
     return fn(db);
   } catch {

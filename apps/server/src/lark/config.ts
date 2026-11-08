@@ -1,12 +1,15 @@
 import { preparePromptVersions, type PromptSaveOrigin } from './prompt-versions.js';
 import { parseLarkEventHandlers, validateLarkEventConfiguration, type LarkEventHandler } from './event-pipeline.js';
 import { parseCardActionForwarding, type CardActionForwarding } from './card-action-forwarding.js';
-import { NEW_BOT_MENTION_POLICY, agentWeightsSchema, type AgentWeight, collaborationParticipationModes, mentionPolicies, resolveParticipation, riskControlModes, supportsRemoteApproval, validateHighRiskPattern, type AgentRepository, type ConfigRepository, type LarkAllowedUser, type PublicLarkConfig, type PublicLarkConfigCollection, type RiskControlMode, type SaveLarkConfigInput, type StoredLarkConfig } from '@dutydeck/shared';
+import { NEW_BOT_MENTION_POLICY, agentWeightsSchema, type AgentWeight, collaborationParticipationModes, mentionPolicies, resolveParticipation, riskControlModes, supportsRemoteApproval, validateHighRiskPattern, type AgentRepository, type ConfigRepository, type LarkAllowedUser, type LarkClaudeAutoMemory, type PublicLarkConfig, type PublicLarkConfigCollection, type RiskControlMode, type SaveLarkConfigInput, type StoredLarkConfig } from '@dutydeck/shared';
 import { isAbsolute } from 'node:path';
 import { hostname, userInfo } from 'node:os';
 import { LarkServiceError } from './service.js';
 import { parseLarkQuietHours } from './notify-tier.js';
 import { isLarkGroupMemoryScope, normalizeLarkGroupMemoryScope, type LarkGroupMemoryScope } from './memory.js';
+
+export const isLarkClaudeAutoMemory = (value: unknown): value is LarkClaudeAutoMemory => value === 'inherit' || value === 'off';
+export const normalizeLarkClaudeAutoMemory = (value: unknown): LarkClaudeAutoMemory => value === 'off' ? 'off' : 'inherit';
 
 export const larkBotsConfigKey = 'lark.bots';
 export const larkCredentialsConfigKey = 'lark.credentials';
@@ -293,6 +296,8 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
     busyTriage: parsed.busyTriage === true,
     botLoopGuard: parsed.botLoopGuard === true,
     groupMemoryScope: normalizeLarkGroupMemoryScope(parsed.groupMemoryScope),
+    // inherit 不落盘：默认机器人的配置与引入这个设置前逐字节相同。
+    ...(parsed.claudeAutoMemory === 'off' ? { claudeAutoMemory: 'off' as const } : {}),
     ...(parsed.memoryAgentId?.trim() ? { memoryAgentId: parsed.memoryAgentId.trim() } : {}),
     ...(parsed.memoryModel?.trim() ? { memoryModel: parsed.memoryModel.trim() } : {}),
     ...(parsed.decisionAgentId?.trim() ? { decisionAgentId: parsed.decisionAgentId.trim() } : {}),
@@ -428,6 +433,7 @@ export const publicLarkConfig = (config: StoredLarkConfig, activeAppIds: Readonl
   busyTriage: config.busyTriage === true,
   botLoopGuard: config.botLoopGuard === true,
   groupMemoryScope: normalizeLarkGroupMemoryScope(config.groupMemoryScope),
+  claudeAutoMemory: normalizeLarkClaudeAutoMemory(config.claudeAutoMemory),
   ...(config.memoryAgentId ? { memoryAgentId: config.memoryAgentId } : {}),
   ...(config.memoryModel ? { memoryModel: config.memoryModel } : {}),
   ...(config.decisionAgentId ? { decisionAgentId: config.decisionAgentId } : {}),
@@ -510,6 +516,9 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   if (input.groupMemoryScope !== undefined && !isLarkGroupMemoryScope(input.groupMemoryScope)) {
     throw new LarkServiceError('INVALID_LARK_CONFIG', '群记忆范围必须为 shared 或 per-group。', 400);
   }
+  if (input.claudeAutoMemory !== undefined && !isLarkClaudeAutoMemory(input.claudeAutoMemory)) {
+    throw new LarkServiceError('INVALID_LARK_CONFIG', 'Claude 自带记忆必须为 inherit 或 off。', 400);
+  }
   if (input.brand !== undefined && !['feishu', 'lark'].includes(input.brand)) {
     throw new LarkServiceError('INVALID_LARK_CONFIG', '飞书应用品牌必须为 feishu 或 lark。', 400);
   }
@@ -550,6 +559,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   const memoryAutoExtract = input.memoryAutoExtract ?? current?.memoryAutoExtract ?? true;
   const botLoopGuard = input.botLoopGuard ?? current?.botLoopGuard ?? false;
   const groupMemoryScope = isLarkGroupMemoryScope(input.groupMemoryScope) ? input.groupMemoryScope : normalizeLarkGroupMemoryScope(current?.groupMemoryScope);
+  const claudeAutoMemory = isLarkClaudeAutoMemory(input.claudeAutoMemory) ? input.claudeAutoMemory : normalizeLarkClaudeAutoMemory(current?.claudeAutoMemory);
   const memoryAgentId = input.memoryAgentId === undefined ? current?.memoryAgentId : input.memoryAgentId.trim() || undefined;
   const memoryModel = input.memoryModel === undefined ? current?.memoryModel : input.memoryModel.trim() || undefined;
   const decisionAgentId = input.decisionAgentId === undefined ? current?.decisionAgentId : input.decisionAgentId.trim() || undefined;
@@ -683,6 +693,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
     busyTriage: input.busyTriage ?? current?.busyTriage ?? false,
     botLoopGuard,
     groupMemoryScope,
+    ...(claudeAutoMemory === 'off' ? { claudeAutoMemory } : {}),
     ...(memoryAgentId ? { memoryAgentId } : {}),
     ...(memoryModel ? { memoryModel } : {}),
     ...(decisionAgentId ? { decisionAgentId } : {}),

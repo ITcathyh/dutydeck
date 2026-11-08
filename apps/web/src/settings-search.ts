@@ -35,6 +35,7 @@ export const botSettingFields = {
   responseAgentId: {label: '群回复 Agent', step: 2, anchor: 'bot-setting-responseAgentId', keywords: '回复方式'},
   responseModel: {label: '群回复模型', step: 2, anchor: 'bot-setting-responseModel', keywords: '回复方式'},
   groupMemoryScope: {label: '群记忆范围', step: 2, anchor: 'bot-setting-groupMemoryScope', parent: 'memoryEnabled'},
+  claudeAutoMemory: {label: 'Claude 自带记忆（群聊）', step: 2, anchor: 'bot-setting-claudeAutoMemory', parent: 'memoryEnabled', keywords: 'auto memory'},
   memoryAgentId: {label: '整理 Agent', step: 2, anchor: 'bot-setting-memoryAgentId', parent: 'memoryEnabled'},
   memoryModel: {label: '整理模型', step: 2, anchor: 'bot-setting-memoryModel', parent: 'memoryEnabled'},
   riskControlMode: {label: '风险控制', step: 2, anchor: 'bot-setting-riskControlMode'},

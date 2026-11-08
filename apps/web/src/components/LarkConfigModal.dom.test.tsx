@@ -654,6 +654,38 @@ describe('LarkConfigModal 会话记忆', () => {
     await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ memoryEnabled: true, groupMemoryScope: 'per-group' })));
   });
 
+  it('Claude 自带记忆（群聊）：开启记忆后可选，默认继承，选关闭会随保存提交', async () => {
+    const user = userEvent.setup();
+    const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(collection({ defaultAgentId: 'codex', setupComplete: true }));
+    renderModal(collection({ fullTrustConfirmed: true, defaultAgentId: 'codex' }));
+    await user.click(await screen.findByRole('button', { name: /选择 Agent 并启用/ }));
+    await screen.findByText('操作确认方式');
+    expect(screen.queryByText('Claude 自带记忆（群聊）')).toBeNull();
+    await user.click(screen.getByRole('switch', { name: '启用会话记忆' }));
+    expect(screen.getByText('Claude 自带记忆（群聊）')).toBeTruthy();
+    expect(screen.getByText(/不受上面的群记忆范围约束/)).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: /继承 Claude 自己的设置（默认）/ }));
+    await user.click(await screen.findByRole('option', { name: '在群聊里关闭' }));
+    expect(screen.getByText(/私聊、定时任务和子会话不受影响/)).toBeTruthy();
+    const submit = screen.getByRole('button', { name: '完成配置' }) as HTMLButtonElement;
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    await user.click(submit);
+    await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ memoryEnabled: true, claudeAutoMemory: 'off' })));
+  });
+
+  it('Claude 自带记忆：未改动时按已保存的值提交', async () => {
+    const user = userEvent.setup();
+    const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(collection({ defaultAgentId: 'codex', setupComplete: true }));
+    renderModal(collection({ fullTrustConfirmed: true, defaultAgentId: 'codex', memoryEnabled: true, claudeAutoMemory: 'off' }));
+    await user.click(await screen.findByRole('button', { name: /选择 Agent 并启用/ }));
+    await screen.findByText('操作确认方式');
+    expect(screen.getByRole('button', { name: /在群聊里关闭/ })).toBeTruthy();
+    const submit = screen.getByRole('button', { name: '完成配置' }) as HTMLButtonElement;
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    await user.click(submit);
+    await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ claudeAutoMemory: 'off' })));
+  });
+
   it('保存时带上四个记忆字段', async () => {
     const user = userEvent.setup();
     const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(collection({ defaultAgentId: 'codex', setupComplete: true }));

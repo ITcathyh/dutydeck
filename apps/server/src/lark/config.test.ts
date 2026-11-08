@@ -72,6 +72,33 @@ describe('Lark group memory scope config', () => {
   });
 });
 
+describe('Lark Claude auto memory config', () => {
+  it('defaults to inherit without storing the key, and keeps off across unrelated saves', async () => {
+    const repository = seedBots([{ appId: 'cli_auto', appSecret: 'secret', riskControlMode: 'off' }]);
+    const [config] = await readLarkConfigs(repository);
+    expect(config).not.toHaveProperty('claudeAutoMemory');
+    expect(publicLarkConfig(config).claudeAutoMemory).toBe('inherit');
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_auto', preInjectPrompt: 'updated' });
+    expect(JSON.parse((await repository.get(larkBotsConfigKey))!)[0]).not.toHaveProperty('claudeAutoMemory');
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_auto', claudeAutoMemory: 'off' });
+    expect((await readLarkConfigs(repository))[0].claudeAutoMemory).toBe('off');
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_auto', groupMemoryScope: 'per-group', memoryEnabled: false });
+    expect((await readLarkConfigs(repository))[0].claudeAutoMemory).toBe('off');
+    for (const value of ['on', '', null, 1]) {
+      await expect(saveLarkConfig(repository, undefined, { originalAppId: 'cli_auto', claudeAutoMemory: value as never })).rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG' });
+    }
+    expect((await readLarkConfigs(repository))[0].claudeAutoMemory).toBe('off');
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_auto', claudeAutoMemory: 'inherit' });
+    expect(JSON.parse((await repository.get(larkBotsConfigKey))!)[0]).not.toHaveProperty('claudeAutoMemory');
+    expect(publicLarkConfig((await readLarkConfigs(repository))[0]).claudeAutoMemory).toBe('inherit');
+  });
+
+  it('reads an unknown stored value as inherit', async () => {
+    const repository = seedBots([{ appId: 'cli_bad', appSecret: 'secret', claudeAutoMemory: 'disabled', riskControlMode: 'off' }]);
+    expect(publicLarkConfig((await readLarkConfigs(repository))[0]).claudeAutoMemory).toBe('inherit');
+  });
+});
+
 describe('Lark config new-field normalization', () => {
   it('keeps valid enum values and sanitizes env / startupCommands / displayName', async () => {
     const repository = seedBots([{

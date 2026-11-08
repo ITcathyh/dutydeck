@@ -61,8 +61,10 @@ const settingsEnv = Object.assign(
   workspaceEnvironment(await settingsEnvironment(join(process.cwd(), '.claude', 'settings.json'))),
   workspaceEnvironment(await settingsEnvironment(join(process.cwd(), '.claude', 'settings.local.json')))
 );
+// 机器人设了 claudeAutoMemory=off 的群聊会话带小写标记；放在最底层，用户设置和显式环境里的同名值都压过它，与终端模式一致。
+const autoMemoryDefault = process.env.dutydeck_claude_auto_memory === 'off' ? { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' } : {};
 // 设置里的变量同样过一遍子进程清洗，不把服务密钥和别的会话身份带给 Claude。
-const env = { ...childEnvironment(settingsEnv), ...process.env };
+const env = { ...autoMemoryDefault, ...childEnvironment(settingsEnv), ...process.env };
 const installedClaude = await findClaudeExecutable(env.PATH);
 if (installedClaude && process.platform !== 'win32') {
   const guarded = await guardedExecutable();

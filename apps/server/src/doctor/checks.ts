@@ -731,7 +731,7 @@ export function checkLarkMemory(observation: LarkMemoryObservation, now: Date): 
       ...base,
       level: 'warn',
       detail: stalled.join('；'),
-      remedy: '在对应群里发送 /memory 查看后台状态；/memory consolidate 会立即补一次提取再整理。持续失败时查看守护进程日志里的「会话记忆提取失败」。',
+      remedy: '在对应群里 @ 机器人说任意一句，下一轮结束后会自动补跑提取；也可以直接让它整理记忆（或发送 /memory consolidate）。持续失败时，查看守护进程日志里的『记忆作业等待恢复或退避』。',
       verify: 'dutydeck doctor --json'
     };
   }

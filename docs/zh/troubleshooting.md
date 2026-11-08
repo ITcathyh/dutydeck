@@ -51,3 +51,7 @@
   - **空白**：终端里没有任何内容。检查 Claude 命令能否启动，再看守护进程日志（`journalctl --user -u <unit>`）。
   - **未识别**：屏幕上是 Dutydeck 不认识的提示。打开终端查看并处理当前提示。
 - 目录很长、在信任页上从字符中间折成多行时，也能认出是当前目录：`ask` / `approve-reads` 下提示“Claude 正在确认此目录是否可信”，请在终端确认；`full-trust` 下自动选择信任该目录。目录含空格且恰好在空格处折行时可能认不出，超时后报“目录信任页未能核对”，在终端手动确认一次信任即可。
+
+### Q8: 报 tmux socket 被删、原终端仍在运行，无法启动会话？
+- **原因**：Linux 上 `/tmp` 清理了 tmux socket 文件，但原 tmux server 和 pane 仍在；Dutydeck 会拒绝再启动一个同名 server，避免同一会话同时跑两个 CLI。
+- **处理**：按 tmux 手册向原 server 进程发送 `SIGUSR1` 重建 socket，或结束原 tmux server 后重新发送消息。可把 `TMUX_TMPDIR` 指到不会被清理的目录，或让 `systemd-tmpfiles` 排除 tmux 目录。非 Linux 不做这项内核检查，行为保持原样。开启 `remain-on-exit` 时，Dutydeck 下次启动会回收自己留下且所有 pane 都已退出的死会话；仍有运行中 pane 的会话会保留。

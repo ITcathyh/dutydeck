@@ -5,6 +5,7 @@ import { collectWatchScopes, resolveWatchReceiver } from './watch-signals.js';
 import { assertDatabaseNotQuarantined } from '@dutydeck/storage';
 import { ProjectMemoryService } from './project-memory.js';
 import { larkAgentSessionBinding } from './lark/agent-tools.js';
+import { withClaudeAutoMemoryMarker } from './lark/claude-auto-memory.js';
 import { ArtifactSnapshots } from './artifact-snapshots.js';
 import { instancePrivatePaths } from './lark/artifact-delivery.js';
 import { PluginBusinessToolService } from './plugins/tool-service.js';
@@ -482,7 +483,10 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     }
   }) : undefined;
   const ptyRetirement = createPtyRetirementControl({ identify: childProcessIdentity, observe: observeProcess }, session => primaryHerdrBackend(session.id));
-  const sessionAgentConfig = (agent: import('@dutydeck/shared').AgentConfig, session: Session) => agentModelSettings.resolveForSession(agent, session, async id => await workItems.parentForSession(id) ?? await delegations.parentForSession(id));
+  // claudeAutoMemory 的会话标记要读机器人配置（异步），所以放在这里而不是同步的 sessionEnvironment。
+  const sessionAgentConfig = async (agent: import('@dutydeck/shared').AgentConfig, session: Session) => withClaudeAutoMemoryMarker(
+    await agentModelSettings.resolveForSession(agent, session, async id => await workItems.parentForSession(id) ?? await delegations.parentForSession(id)),
+    session, appId => readLarkConfig(repos.config, appId, { readOnly: true }));
   const runtime: DutydeckRuntime = new DutydeckRuntime(repos, {
     matterTracking: matters,
     configureAgent: sessionAgentConfig,
@@ -566,7 +570,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       return result;
     },
     awaitingAnswer: sessionId => relayBroker.listPending(sessionId).length > 0,
-    onSessionNotice: (session, notice) => deliverLarkSessionNotice(repos, bot => createLarkCardService(env, workbenchHttp.fetch, bot), session, notice),
+    onSessionNotice: (session, notice) => deliverLarkSessionNotice(repos, bot => createLarkCardService(env, workbenchHttp.fetch, bot), session, notice, log),
     log: { warn: (...args: unknown[]) => log.warn(...args as [unknown, string]), info: (data, message) => log.info(data, message) },
     ...pluginWiring?.runtimeOptions
   });
