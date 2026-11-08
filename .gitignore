@@ -13,6 +13,8 @@ packages/*/dist/
 .dockmux/
 apps/server/public
 *.tsbuildinfo
+# 测试按需打包的 CLI / fixture（tests/support/bundle-for-test.ts），正常结束会删除
+.test-*/
 
 # 端到端验收产物
 artifacts/

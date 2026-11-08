@@ -2,9 +2,15 @@ import { fork, type ChildProcess } from 'node:child_process';
 import { mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { lazyBundleForTest } from '../../../../tests/support/bundle-for-test.js';
+import { fileURLToPath } from 'node:url';
 import { writePlugin } from './scenario-fixtures.test-helpers.js';
 import { PluginStore } from './store.js';
+
+// The helper runs as a bundle: through the TypeScript loader each fork paid a cold start of a second or more.
+const tokenWriter = lazyBundleForTest('token-writer', fileURLToPath(new URL('./token-writer.test-helper.mjs', import.meta.url)));
+afterAll(() => tokenWriter.cleanup());
 
 let directory: string;
 let store: PluginStore;
@@ -29,8 +35,8 @@ afterEach(async () => {
 
 async function writer(operation: string, trigger: string, hold = false) {
   const messages: Array<{ type: string; ok?: boolean; code?: string; token?: string; created?: boolean }> = [];
-  const child = fork(new URL('./token-writer.test-helper.mjs', import.meta.url), [store.dataDir, operation, 'tokens', trigger, ...(hold ? ['hold'] : [])], {
-    execArgv: ['--conditions=development', '--import', 'tsx'], stdio: ['ignore', 'ignore', 'pipe', 'ipc']
+  const child = fork(await tokenWriter.path(), [store.dataDir, operation, 'tokens', trigger, ...(hold ? ['hold'] : [])], {
+    stdio: ['ignore', 'ignore', 'pipe', 'ipc']
   });
   children.push(child);
   let stderr = ''; child.stderr!.on('data', chunk => { stderr += chunk; });

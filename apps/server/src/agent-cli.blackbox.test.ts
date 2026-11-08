@@ -5,7 +5,7 @@ import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { bundleCliForTest } from './cli-bundle.test-helpers.js';
+import { bundleCliForTest } from '../../../tests/support/bundle-for-test.js';
 
 const roots: string[] = [];
 let cliPath: string;

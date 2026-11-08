@@ -8,7 +8,7 @@ import { once } from 'node:events';
 import { afterAll, afterEach, beforeAll, expect, it } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import { renderBotProcessEnv } from '../../../../scripts/split-bot-runtimes.mts';
-import { bundleCliForTest } from '../cli-bundle.test-helpers.js';
+import { bundleCliForTest } from '../../../../tests/support/bundle-for-test.js';
 import { defaultDaemonDir, inspectDaemon, lastDaemonDirPointerFile, readDaemonStatus, writeLastDaemonDir } from './daemon.js';
 
 const workspace = resolve(dirname(fileURLToPath(import.meta.url)), '../../../..');

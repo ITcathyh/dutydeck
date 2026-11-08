@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { bundleCliForTest } from './cli-bundle.test-helpers.js';
+import { bundleCliForTest } from '../../../tests/support/bundle-for-test.js';
 
 const roots: string[] = [];
 let bundledCliPath: string;

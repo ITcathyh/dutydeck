@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -8,6 +8,11 @@ import { fileURLToPath } from 'node:url';
 import { taskExecutionSchemas, type DriverResource, type RuntimeControlClaim } from '@dutydeck/shared';
 import { createRepositories } from './index.js';
 import * as processIdentity from './process-identity.js';
+import { lazyBundleForTest } from '../../../tests/support/bundle-for-test.js';
+
+// The fixture runs as a bundle: through the TypeScript loader each spawn paid a cold start of a second or more.
+const resourceCreator = lazyBundleForTest('resource-creator', fileURLToPath(new URL('../tests/fixtures/resource-creator.mts', import.meta.url)));
+afterAll(() => resourceCreator.cleanup());
 
 const fence = { sessionId: 'creation-session', runId: 'creation-run' };
 const directories: string[] = [];
@@ -26,8 +31,7 @@ afterEach(async () => {
 async function creator(mode = 'operation') {
   const directory = mkdtempSync(join(tmpdir(), 'dutydeck-resource-creator-')); directories.push(directory);
   const filename = join(directory, 'execution.sqlite');
-  const fixture = fileURLToPath(new URL('../tests/fixtures/resource-creator.mts', import.meta.url));
-  const child = spawn(process.execPath, ['--conditions=development', '--import', 'tsx', fixture, filename, mode], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+  const child = spawn(process.execPath, [await resourceCreator.path(), filename, mode], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
   const closed = new Promise<void>(resolve => child.once('close', () => resolve()));
   children.push({ child, closed });
   let stderr = '';

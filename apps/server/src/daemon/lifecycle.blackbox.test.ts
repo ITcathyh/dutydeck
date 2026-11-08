@@ -3,17 +3,29 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, wri
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { childProcessIdentity } from '@dutydeck/storage';
+import { bundleCliForTest } from '../../../../tests/support/bundle-for-test.js';
 import { daemonPaths, defaultDaemonDir, inspectDaemon, pidAlive, readDaemonStatus, writeState } from './daemon.js';
 
 const workspace = resolve(dirname(fileURLToPath(import.meta.url)), '../../../..');
-const tsx = join(workspace, 'node_modules/.bin/tsx');
-const fixture = join(workspace, 'apps/server/src/daemon/fixtures/lifecycle.ts');
-const cli = join(workspace, 'apps/server/src/cli.ts');
+// The fixture, the daemon it detaches (a re-exec of the same file) and the CLI run as bundles: through the
+// TypeScript loader every start, restart, status and stop paid a multi-second cold start.
+let fixture: string;
+let cli: string;
+const cleanups: Array<() => Promise<void>> = [];
+beforeAll(async () => {
+  const bundles = await Promise.all([
+    bundleCliForTest('daemon-lifecycle', join(workspace, 'apps/server/src/daemon/fixtures/lifecycle.ts')),
+    bundleCliForTest('daemon-lifecycle-cli')
+  ]);
+  cleanups.push(...bundles.map(bundle => bundle.cleanup));
+  [fixture, cli] = bundles.map(bundle => bundle.path) as [string, string];
+});
+afterAll(async () => { await Promise.all(cleanups.splice(0).map(cleanup => cleanup())); });
 let root: string;
 function invoke(file: string, args: string[]) {
-  return spawnSync(tsx, [file, ...args], { cwd: root, env: { HOME: root, PATH: process.env.PATH, NODE_OPTIONS: '--conditions=development' }, encoding: 'utf8', timeout: 25_000 });
+  return spawnSync(process.execPath, [file, ...args], { cwd: root, env: { HOME: root, PATH: process.env.PATH }, encoding: 'utf8', timeout: 25_000 });
 }
 function lifecycle(action: string) {
   const result = invoke(fixture, [action]);
@@ -57,7 +69,7 @@ describe('daemon detached process and CLI black box', () => {
   }, 60_000);
   it('two concurrent starts leave exactly one verified daemon', async () => {
     const run = () => new Promise<{ status: number | null; stdout: string }>(resolve => {
-      const child = spawn(tsx, [fixture, 'start'], { cwd: root, env: { HOME: root, PATH: process.env.PATH, NODE_OPTIONS: '--conditions=development' } });
+      const child = spawn(process.execPath, [fixture, 'start'], { cwd: root, env: { HOME: root, PATH: process.env.PATH } });
       let stdout = '';
       child.stdout.on('data', chunk => { stdout += chunk; });
       child.once('exit', status => resolve({ status, stdout }));
