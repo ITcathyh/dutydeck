@@ -289,7 +289,7 @@ dutydeck settings bot set cli_xxx cardActionForwarding=null 'eventHandlers=[{"id
 | `groupReplyMode` | 普通群回复模式：`chat` / `shared` / `new-topic` / `chat-topic`；`auto` 清除覆盖 | 自动路由 |
 | `idleCompactEnabled` | 会话空闲后自动压缩上下文 | `true`（Web 新建表单的默认值里没有这一项，由服务端补上） |
 | `idleCompactHours` | 空闲多少小时后压缩，至少 1 | `24` |
-| `groupToolsEnabled` | 允许 Agent 使用群工具；分层协作需要开启 | `false` |
+| `groupToolsEnabled` | 允许 Agent 使用群工具；Leader 模式需要开启 | `false` |
 | `groupToolsAllowSend` | 群工具可以发消息；要先开 `groupToolsEnabled` | `false` |
 | `memoryEnabled` | 会话记忆；`false` 时不注入记忆，相关命令和工具不可用 | `defaultGroupParticipation` 为 `selective` / `eager` 时开启，否则关闭 |
 | `memoryAutoExtract` | 后台自动提取和整理记忆；`false` 时只能用 `/memory consolidate` 手动触发 | `true` |
@@ -303,9 +303,10 @@ dutydeck settings bot set cli_xxx cardActionForwarding=null 'eventHandlers=[{"id
 | `decisionModel` | 群里判断要不要接话的模型 | 同上，沿用对应模型 |
 | `responseAgentId` | 群里直接回复用的 Agent | 沿用 `memoryAgentId`，再回落 `defaultAgentId` |
 | `responseModel` | 群里直接回复用的模型 | 同上，沿用对应模型 |
-| `executionMode` | `single` 或 `layered`（分层协作：Leader 拆解、Worker 执行；需开群工具） | `single` |
-| `leaderAgentId` | 分层协作的 Leader Agent | 无 |
-| `workerAgentIds` | 分层协作的 Worker Agent，1 到 8 个 | 无 |
+| `executionMode` | `single` 或 `layered`（Leader 模式：接待 + Leader + Worker；需开群工具，见[Leader 模式](lark.md#leader-mode)） | `single` |
+| `leaderAgentId` | Leader 模式的 Leader Agent | 无 |
+| `workerAgentIds` | Leader 模式的 Worker Agent，1 到 8 个 | 无 |
+| `leaderSkill` | Leader 指引：技能名、`插件名/技能名`，或 `SKILL.md`（或其所在目录）的绝对路径。查找顺序：插件引用、路径、技能名（重名报错）；绝对路径不要求在技能目录里，只带 `SKILL.md`，同目录引用文件由 Leader 按需自己读；技能目录会跳过指向目录外的软链接，放在别处的指引请填绝对路径。`leaderSkill=` 清空，改回内置规则 | 空（内置规则） |
 | `structuredAskCards` | 提问用结构化卡片；`false` 时改用文字选项和引用回复 | `true` |
 | `groupCardMention` | 群里的卡片 @ 发起人：结果卡卡尾、审批和提问卡卡首 | `true` |
 | `pushIntervalMs` | 进度卡刷新间隔，500–20000 毫秒 | `1000` |

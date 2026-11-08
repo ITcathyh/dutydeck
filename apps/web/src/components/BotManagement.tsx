@@ -83,6 +83,7 @@ function initialDraft(bot: LarkBotConfig): BotDraft {
     executionMode: bot.executionMode ?? 'single',
     leaderAgentId: bot.leaderAgentId ?? '',
     workerAgentIds: bot.workerAgentIds ?? [],
+    leaderSkill: bot.leaderSkill ?? '',
     riskControlMode: bot.riskControlMode ?? 'off',
     highRiskPattern: bot.highRiskPattern ?? ''
   };
@@ -298,6 +299,7 @@ export function BotManagement({
       executionMode: draft.executionMode,
       leaderAgentId: draft.leaderAgentId,
       workerAgentIds: draft.workerAgentIds,
+      leaderSkill: draft.leaderSkill,
       riskControlMode: draft.riskControlMode,
       highRiskPattern: draft.highRiskPattern,
       fullTrustConfirmed,
@@ -356,6 +358,14 @@ export function BotManagement({
 
   /** 只有「正在保存的就是当前这个对象」时才显示忙碌态，否则切过去的 B 会跟着转圈。 */
   const savingThisBot = saveMutation.isPending && saveMutation.variables?.appId === activeAppId;
+
+  const leaderSkills = useQuery({
+    queryKey: ['bot-leader-skills', activeAppId, activeBot?.workspace],
+    queryFn: () => api.skills(activeBot?.workspace || undefined, activeAppId!),
+    enabled: Boolean(activeAppId && currentDraft?.executionMode === 'layered'),
+    staleTime: 60_000
+  });
+  const leaderSkillOptions = (leaderSkills.data ?? []).map(skill => ({ value: skill.ref ?? skill.path, name: skill.name }));
 
   const hookDraft: LarkHookDraft = { workspace: currentDraft?.workspace, defaultAgentId: currentDraft?.defaultAgentId, fallbackAgentId: currentDraft?.fallbackAgentId, defaultAgentWeights: activeBot?.defaultAgentWeights ?? [] };
   const routingAgentIds = [...new Set([currentDraft?.defaultAgentId, currentDraft?.fallbackAgentId, ...(activeBot?.defaultAgentWeights ?? []).map(row => row.agentId)].filter((id): id is string => Boolean(id)))];
@@ -786,10 +796,10 @@ export function BotManagement({
                       onChange={e => updateCurrentDraft({ executionMode: e.target.value as BotDraft['executionMode'] })}
                     >
                       <option value="single">单 Agent：默认 Agent 直接完成</option>
-                      <option value="layered">分层协作：PMO + Leader + Worker</option>
+                      <option value="layered">Leader 模式：接待 + Leader + Worker</option>
                     </Select>
                     <p className="mt-1.5 text-caption text-subtle">
-                      分层协作只在群聊生效，单聊仍由默认 Agent 直接处理。群聊里默认 Agent 当 PMO 负责接待和答复；改代码、跑测试这类任务写成简报交给 Leader，Leader 只读拆解并指派 Worker，最后由 Leader 验收。计划要点「开始执行」才派发，每个 Worker 完成后自动停止它的会话。
+                      Leader 模式在群聊和私聊都生效。默认 Agent 当「接待」，负责接话和答复；改代码、跑测试这类任务交给 Leader，Leader 按「Leader 指引」拆解并指派 Worker，Worker 中途的提问和工具授权先由 Leader 判断，只有该你定的才推给你，最后由 Leader 验收。群聊里计划要点「开始执行」才派发，私聊直接开始；每个 Worker 完成后自动停止它的会话。
                     </p>
                   </div>
                   {currentDraft.executionMode === 'layered' && (
@@ -833,9 +843,23 @@ export function BotManagement({
                           ))}
                         </div>
                       </fieldset>
+                      <Field htmlFor={botDetailFields.leaderSkill.anchor} label={botDetailFields.leaderSkill.label} hint="技能名、「插件名/技能名」，或 SKILL.md（或它所在目录）的绝对路径；候选来自技能目录，放在别处的指引直接填绝对路径。留空使用内置规则。找不到或重名时 Leader 不会运行，并在话题里说明。">
+                        <Input
+                          list="bot-leader-skill-options"
+                          value={currentDraft.leaderSkill}
+                          onChange={e => updateCurrentDraft({ leaderSkill: e.target.value })}
+                          placeholder="可选，例如：leader"
+                          autoComplete="off"
+                        />
+                        <datalist id="bot-leader-skill-options">
+                          {leaderSkillOptions.map(skill => (
+                            <option key={skill.value} value={skill.value}>{skill.name}</option>
+                          ))}
+                        </datalist>
+                      </Field>
                       {(!currentDraft.groupToolsEnabled || !currentDraft.leaderAgentId || !currentDraft.workerAgentIds.length) && (
                         <p className="text-caption text-warning">
-                          分层协作需要选择 Leader 和至少一个 Worker，并在高级设置开启「允许它读取群聊内容」。
+                          Leader 模式需要选择 Leader 和至少一个 Worker，并在高级设置开启「允许它读取群聊内容」。
                         </p>
                       )}
                     </>

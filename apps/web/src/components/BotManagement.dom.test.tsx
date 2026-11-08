@@ -879,7 +879,7 @@ describe('Bot 执行方式', () => {
     { id: 'claude-trusted', name: 'Claude 完全信任', protocol: 'pty-cli', permissionMode: 'full-trust' }
   ];
 
-  it('旧配置按单 Agent 展示，切到分层协作后带上 Leader 与 Worker 保存', async () => {
+  it('旧配置按单 Agent 展示，切到 Leader 模式后带上 Leader 与 Worker 保存', async () => {
     const user = userEvent.setup();
     let bot: LarkBotConfig = { ...mockBot, groupToolsEnabled: true };
     vi.spyOn(api, 'larkConfig').mockImplementation(async () => ({ configured: true, bots: [bot], listeningDisabled: false }));
@@ -894,13 +894,13 @@ describe('Bot 执行方式', () => {
     expect((mode as HTMLSelectElement).value).toBe('single');
     expect(screen.queryByRole('combobox', { name: 'Leader Agent' })).toBeNull();
     await user.selectOptions(mode, 'layered');
-    expect(screen.getByText(/分层协作需要选择 Leader 和至少一个 Worker/)).toBeTruthy();
+    expect(screen.getByText(/Leader 模式需要选择 Leader 和至少一个 Worker/)).toBeTruthy();
     // 终端模式 Agent 只有设为完全信任（且机器人是完全信任）才能当 Leader；其余仍可当 Worker。
     expect([...(screen.getByRole('combobox', { name: 'Leader Agent' }) as HTMLSelectElement).options].map(option => option.textContent)).toEqual(['选择 Leader Agent', 'Codex', 'Claude', 'Claude 完全信任']);
     expect(screen.getByRole('checkbox', { name: 'Claude CLI' })).toBeTruthy();
     await user.selectOptions(screen.getByRole('combobox', { name: 'Leader Agent' }), 'claude');
     await user.click(screen.getByRole('checkbox', { name: 'Codex' }));
-    expect(screen.queryByText(/分层协作需要选择 Leader 和至少一个 Worker/)).toBeNull();
+    expect(screen.queryByText(/Leader 模式需要选择 Leader 和至少一个 Worker/)).toBeNull();
     await user.click(screen.getByRole('button', { name: '保存配置' }));
     await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({
       executionMode: 'layered', leaderAgentId: 'claude', workerAgentIds: ['codex'], expectedRevision: 3
@@ -908,7 +908,7 @@ describe('Bot 执行方式', () => {
     await waitFor(() => expect(screen.queryByText(/有未保存的修改/)).toBeNull());
   });
 
-  it('未开启群工具时提示分层协作的前提', async () => {
+  it('未开启群工具时提示 Leader 模式的前提', async () => {
     const user = userEvent.setup();
     vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [{ ...mockBot, executionMode: 'layered', leaderAgentId: 'claude', workerAgentIds: ['codex'] }], listeningDisabled: false });
     vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
@@ -916,7 +916,7 @@ describe('Bot 执行方式', () => {
     renderWithClient(<BotManagement selectedAppId={mockBot.appId} onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={agents}/>);
     expect(((await screen.findByRole('combobox', { name: '执行方式' })) as HTMLSelectElement).value).toBe('layered');
     expect((screen.getByRole('checkbox', { name: 'Codex' }) as HTMLInputElement).checked).toBe(true);
-    expect(screen.getByText(/分层协作需要选择 Leader 和至少一个 Worker/)).toBeTruthy();
+    expect(screen.getByText(/Leader 模式需要选择 Leader 和至少一个 Worker/)).toBeTruthy();
     await user.selectOptions(screen.getByRole('combobox', { name: '执行方式' }), 'single');
     expect(screen.queryByRole('combobox', { name: 'Leader Agent' })).toBeNull();
   });

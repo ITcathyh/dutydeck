@@ -1,0 +1,12 @@
+{
+  "name": "leader-guide",
+  "version": "0.1.0",
+  "description": "Leader 模式示例：一份通用的 Leader 指引，教 Leader 怎么替发起人拆活、答 Worker、验收和上报。",
+  "skills": "skills",
+  "skillResources": {
+    "leader": [
+      { "path": "references/decide-or-escalate.md", "maxBytes": 8192 },
+      { "path": "references/acceptance.md", "maxBytes": 8192 }
+    ]
+  }
+}

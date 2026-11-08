@@ -224,7 +224,7 @@ Every key accepted by `dutydeck settings bot set <app-id> key=value ...` is list
 | `groupReplyMode` | Reply mode in ordinary groups: `chat` / `shared` / `new-topic` / `chat-topic`; `auto` clears the override | Automatic routing |
 | `idleCompactEnabled` | Compact the context after a session has been idle | `true` (not among the Web new-bot form defaults; the server fills it in) |
 | `idleCompactHours` | Idle hours before compaction, at least 1 | `24` |
-| `groupToolsEnabled` | Let the Agent use group tools; required for layered execution | `false` |
+| `groupToolsEnabled` | Let the Agent use group tools; required for Leader mode | `false` |
 | `groupToolsAllowSend` | Let group tools send messages; requires `groupToolsEnabled` | `false` |
 | `memoryEnabled` | Session memory; `false` injects no memory and disables the related commands and tools | On when `defaultGroupParticipation` is `selective` / `eager`, otherwise off |
 | `memoryAutoExtract` | Extract and consolidate memory in the background; `false` leaves only manual `/memory consolidate` | `true` |
@@ -238,9 +238,10 @@ Every key accepted by `dutydeck settings bot set <app-id> key=value ...` is list
 | `decisionModel` | Model that decides whether to respond in a group | Same chain, using the matching model |
 | `responseAgentId` | Agent for direct replies in groups | `memoryAgentId`, then `defaultAgentId` |
 | `responseModel` | Model for direct replies in groups | Same chain, using the matching model |
-| `executionMode` | `single` or `layered` (a Leader plans and Workers execute; requires group tools) | `single` |
-| `leaderAgentId` | Leader Agent for layered execution | None |
-| `workerAgentIds` | Worker Agents for layered execution, 1 to 8 | None |
+| `executionMode` | `single` or `layered` (Leader mode: front agent + Leader + Workers; requires group tools, see [Leader mode](lark.md#leader-mode)) | `single` |
+| `leaderAgentId` | Leader Agent for Leader mode | None |
+| `workerAgentIds` | Worker Agents for Leader mode, 1 to 8 | None |
+| `leaderSkill` | Leader guide: a skill name, `plugin-name/skill-name`, or the absolute path of a `SKILL.md` (or its directory). Lookup order: plugin reference, path, skill name (duplicate names are an error). An absolute path need not be in a skill directory; only the `SKILL.md` is delivered and the Leader reads sibling reference files itself when needed. Skill directories skip symlinks that point outside them, so give a guide kept elsewhere by absolute path. `leaderSkill=` clears it and goes back to the built-in rules | Empty (built-in rules) |
 | `structuredAskCards` | Ask questions with structured cards; `false` uses text options and quoted replies | `true` |
 | `groupCardMention` | Mention the requester on group cards: at the end of result cards, at the top of approval and question cards | `true` |
 | `pushIntervalMs` | Progress card refresh interval, 500–20000 ms | `1000` |

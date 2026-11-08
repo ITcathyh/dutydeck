@@ -88,6 +88,7 @@ export const botDetailFields = {
   executionMode: { label: '执行方式', anchor: 'bot-execution-mode' },
   leaderAgentId: { label: 'Leader Agent', anchor: 'bot-leader-agent', parent: 'executionMode' },
   workerAgentIds: { label: 'Worker Agent（最多 8 个）', anchor: 'bot-worker-agents', parent: 'executionMode' },
+  leaderSkill: { label: 'Leader 指引', anchor: 'bot-leader-skill', parent: 'executionMode', keywords: 'leaderSkill 技能 skill' },
   adhdMode: { label: 'ADHD 友好输出', anchor: 'bot-adhd-mode', keywords: '回复方式' },
   roleTitle: { label: '角色名称', anchor: 'bot-role-title' },
   roleScope: { label: '负责范围', anchor: 'bot-role-scope' }
