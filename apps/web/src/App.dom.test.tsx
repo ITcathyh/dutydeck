@@ -1711,6 +1711,54 @@ it.each([
   expect(screen.queryByRole('complementary', { name: '结果检视' })).toBeNull();
 });
 
+it('手机端在待办页（primaryNav === "inbox"）显示底部导航栏', async () => {
+  vi.stubGlobal('matchMedia', vi.fn((query: string) => ({
+    matches: query === '(min-width: 768px)' ? false : false,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn()
+  })));
+  window.history.replaceState(null, '', '/?nav=inbox');
+  mockAppApi();
+  renderApp();
+  await screen.findByRole('heading', { level: 1, name: '待办' });
+  const tabBar = screen.getByRole('navigation', { name: '主要页面' });
+  expect(tabBar).toBeTruthy();
+  expect(within(tabBar).getByRole('button', { name: '待办' }).getAttribute('aria-current')).toBe('page');
+});
+
+it('宽屏下从待办/提醒或改动链接进入任务时，程序性关闭结果检视记为明确选择，不自动弹开结果检视', async () => {
+  vi.stubGlobal('matchMedia', vi.fn((query: string) => {
+    const min = Number(/min-width: (\d+)px/.exec(query)?.[1] ?? NaN);
+    return { matches: Number.isFinite(min) && 1920 >= min, addEventListener: vi.fn(), removeEventListener: vi.fn() };
+  }));
+  window.history.replaceState(null, '', '/');
+  mockAppApi({
+    sessions: [session('s1', 'waiting_for_permission')],
+    summaries: [summary('s1', '需要授权的任务')]
+  });
+  vi.spyOn(api, 'inbox').mockResolvedValue({
+    generatedAt: '2026-11-08T00:00:00Z',
+    items: [{
+      id: 'item-1',
+      kind: 'permission',
+      sessionId: 's1',
+      sessionTitle: '需要授权的任务',
+      workspace: 'repo',
+      title: '执行危险命令',
+      createdAt: '2026-11-08T00:00:00Z',
+      waitingMs: 1000,
+      actions: [{ id: 'open', type: 'open', label: '打开任务' }]
+    }]
+  });
+  renderApp();
+  await screen.findByRole('heading', { level: 1, name: '总览' });
+  const attentionBtn = await screen.findByRole('button', { name: '打开任务' });
+  await userEvent.click(attentionBtn);
+  await screen.findByRole('heading', { level: 1, name: '需要授权的任务' });
+  // 即使在 1920px 宽屏下，结果检视也不自动弹开挡住对话/终端
+  expect(screen.queryByRole('complementary', { name: '结果检视' })).toBeNull();
+});
+
 it('restores each list entry view, search and project independently across multiple task visits', async () => {
   window.history.replaceState(null, '', '/?nav=tasks');
   mockAppApi({ sessions: [session('s1', 'completed'), session('s2', 'completed'), session('s3', 'thinking')], summaries: [summary('s1', 'first scoped task'), summary('s2', 'second scoped task'), summary('s3', 'running outside scope')] });

@@ -126,6 +126,24 @@ describe('RunHeader 归档态状态视觉与只读约束', () => {
     expect(dot.className).not.toContain('ui-status-pulse');
     expect(dot.className).toContain('bg-info-solid');
   });
+
+  it('传入 summary 为 reconcile_required 时，即使 session.state 是 idle 也显示「等你核对」和琥珀色圆点', () => {
+    const { container } = render(<RunHeader session={{ ...session, state: 'idle' }} summary={{ sessionId: session.id, taskId: 't1', prompt: '任务', status: 'reconcile_required', queuedCount: 0, updatedAt: '' }} agent={agent} streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}} onOpenInsight={() => {}}/>);
+    const dot = container.querySelector('span[aria-label]')!;
+    const statusText = container.querySelector('strong')!;
+    expect(statusText.textContent).toBe('等你核对');
+    expect(dot.getAttribute('aria-label')).toBe('等你核对');
+    expect(dot.className).toContain('bg-attention-solid');
+  });
+
+  it('传入 summary 的 taskReport 处于 waiting 时，即使 session.state 是 completed 也显示「等你回答」和琥珀色圆点', () => {
+    const { container } = render(<RunHeader session={{ ...session, state: 'completed' }} summary={{ sessionId: session.id, taskId: 't1', prompt: '任务', status: 'completed', taskReport: { status: 'waiting', schemaVersion: 1, taskId: 't1', sessionId: session.id, reportedAt: '2026-11-08T00:00:00Z' }, queuedCount: 0, updatedAt: '' }} agent={agent} streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}} onOpenInsight={() => {}}/>);
+    const dot = container.querySelector('span[aria-label]')!;
+    const statusText = container.querySelector('strong')!;
+    expect(statusText.textContent).toBe('等你回答');
+    expect(dot.getAttribute('aria-label')).toBe('等你回答');
+    expect(dot.className).toContain('bg-attention-solid');
+  });
 });
 
 // 缺陷 5：状态条让用户「查看失败详情，修正后重新启动」，但详情页原先根本没有失败详情，

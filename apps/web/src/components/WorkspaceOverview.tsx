@@ -231,8 +231,6 @@ export function WorkspaceOverview({ sessions: rawSessions, summaries, agents, lo
         <Button variant="secondary" tone="inverse" disabled={createTask.disabled} onClick={createTask.onClick} icon={<Plus size={17}/>}>{createTask.label}</Button>
       </header>
 
-      {botStatusNeedsAttention && <div className="mb-6">{botsOverview}</div>}
-
       {!home && <>
         <div className="flex flex-wrap gap-3">
           <label className="flex min-h-10 min-w-0 flex-1 items-center gap-2 rounded-md border border-default bg-surface px-3 text-secondary"><Search aria-hidden="true" size={16}/><input aria-label="筛选当前任务列表" placeholder="搜索标题、项目或 Agent" value={query} onChange={event => updateFilters({ query: event.target.value, project })} className="min-w-0 flex-1 bg-transparent text-body text-primary outline-none"/></label>
@@ -270,6 +268,7 @@ export function WorkspaceOverview({ sessions: rawSessions, summaries, agents, lo
               </div>
             </section>;
           })}</div> : <Card padding="none"><EmptyState tone={!search && view === 'attention' ? 'positive' : 'neutral'} title={search || project ? '没有找到符合条件的任务' : '当前视图没有任务'} description={search ? `关键词“${query}” · ${workbenchViewLabels[view]}${project ? ` · ${project}` : ''}` : '选择其他状态，或创建一个新任务。'}/><div className="flex flex-wrap justify-center gap-2 pb-5"><Button variant="secondary" onClick={() => { updateFilters({ query, project: '' }); onViewChange('all'); }}>清除筛选</Button>{query && <Button variant="ghost" onClick={() => updateFilters({ query: '', project })}>清除搜索</Button>}</div></Card>}
+          {home && botStatusNeedsAttention && <div className="mt-8">{botsOverview}</div>}
         </section>
         {home && !selecting && <aside aria-label="最近交付" className="ui-workbench-rail">
           <h2 className="mb-4 text-caption font-medium text-subtle">最近交付</h2>
@@ -280,7 +279,7 @@ export function WorkspaceOverview({ sessions: rawSessions, summaries, agents, lo
           </div>) : <p className="text-caption text-secondary">新的交付会出现在这里。</p>}
         </aside>}
       </div>
-      {!home && !botStatusNeedsAttention && <div className="mt-8 border-t border-default pt-5">{botsOverview}</div>}
+      {!home && <div className="mt-8 border-t border-default pt-5">{botsOverview}</div>}
     </section>
   </div>;
 }

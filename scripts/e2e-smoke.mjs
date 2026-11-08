@@ -510,7 +510,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   await page.goto(BASE, { waitUntil: 'domcontentloaded' });
   await page.getByRole('heading', { name: '总览', level: 1, exact: true }).waitFor({ state: 'visible', timeout: 20_000 });
 
-  // 首屏上段是飞书 Bot 概览：飞书 Bot 是 agent 交互核心，dashboard 先回答「Bot 能不能收到我的话」。
+  // 未配置飞书 Bot 时在主列底部提供协作入口：未配置 Bot 时必须给出可执行的飞书使用指引。
   const botOverview = page.getByRole('complementary', { name: '协作入口' });
   await botOverview.waitFor({ state: 'visible', timeout: 20_000 });
   // 未配置 Bot 时必须给出可执行的飞书使用指引，而不是只说「尚未配置」。

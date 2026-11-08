@@ -612,4 +612,41 @@ describe('总览首屏顺序与飞书接入面板异常感知', () => {
     expect(screen.getByRole('complementary', { name: '协作入口' })).toBeTruthy();
     expect(screen.getByText(/无法读取飞书接入状态/)).toBeTruthy();
   });
+
+  it('未配置机器人时，协作入口位于主列底部，排在待你决定和正在推进之后', () => {
+    const sessions = [session('1', '/repo/a', 'thinking')];
+    const inbox = {
+      items: [{
+        id: 'i1',
+        sessionId: '1',
+        sessionTitle: '任务',
+        workspace: 'repo',
+        title: '需要决定',
+        kind: 'permission' as const,
+        createdAt: '2026-11-08T00:00:00Z',
+        waitingMs: 1000,
+        actions: [{ id: 'open' as const, label: '打开任务', type: 'open' as const }]
+      }],
+      loading: false,
+      failed: false,
+      onRetry: () => {},
+      call: async () => {},
+      onSettled: () => {}
+    };
+    render(
+      <WorkspaceOverview {...baseProps} mode="home" sessions={sessions} larkBots={[]} inbox={inbox}/>
+    );
+    const inboxHeading = screen.getByRole('heading', { level: 2, name: '待你决定' });
+    const taskList = screen.getByRole('region', { name: '任务列表' });
+    const botAside = screen.getByRole('complementary', { name: '协作入口' });
+
+    // 协作入口位于主列（任务列表）内部底部
+    expect(taskList.contains(botAside)).toBe(true);
+
+    // 待办卡片在任务列表主列之前
+    expect(inboxHeading.compareDocumentPosition(taskList) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    // 协作入口在任务列表项之后
+    expect(inboxHeading.compareDocumentPosition(botAside) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
 });

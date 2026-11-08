@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTimelineDisclosure } from '../timeline-disclosure';
 import { ChevronRight, CircleStop, CircleX, Layers, MessageSquare } from 'lucide-react';
 import type { TimelineActivityGroup } from '../timeline';
@@ -31,6 +31,22 @@ export function ActivityPanel({
   const initialOpen = density === 'detail' ? true : density === 'summary' ? false : (ongoing && !hasAnswer);
   const [open, setOpen] = useTimelineDisclosure(`activity:${groups[0]?.id ?? startedAt}:${hasAnswer}`, initialOpen);
   const [showAllGroups, setShowAllGroups] = useState(density === 'detail');
+  const previousDensity = useRef(density);
+  useEffect(() => {
+    if (previousDensity.current !== density) {
+      previousDensity.current = density;
+      if (density === 'summary') {
+        setOpen(false);
+        setShowAllGroups(false);
+      } else if (density === 'detail') {
+        setOpen(true);
+        setShowAllGroups(true);
+      } else {
+        setOpen(ongoing && !hasAnswer);
+        setShowAllGroups(false);
+      }
+    }
+  }, [density, ongoing, hasAnswer, setOpen]);
   const previousGroups = useRef(new Map<string, string>());
   const groupKeys = useMemo(() => {
     if (!open) return [];

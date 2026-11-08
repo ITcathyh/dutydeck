@@ -1,6 +1,6 @@
 import { Activity, Archive, ArrowLeft, BookOpen, ChevronRight, FileDiff, LineChart, MessageSquare, MoreHorizontal, PanelRightOpen, Pencil, RotateCcw, Square, Terminal } from 'lucide-react';
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import type { Agent, Session, SessionUsage, Task } from '../api';
+import type { Agent, RunSummary, Session, SessionUsage, Task } from '../api';
 import type { StreamStatus } from '../sse';
 import type { SessionSyncState } from '../useSessionStream';
 import { sessionDisplayName } from '../run-summary';
@@ -51,6 +51,7 @@ export function usageLabel(usage?: SessionUsage) {
 
 export function RunHeader({
   session,
+  summary,
   agent,
   taskPrompt,
   streamStatus,
@@ -81,6 +82,7 @@ export function RunHeader({
   startedAt
 }: {
   session: Session;
+  summary?: RunSummary;
   agent?: Agent;
   taskPrompt?: string;
   streamStatus: SessionSyncState | StreamStatus;
@@ -117,7 +119,15 @@ export function RunHeader({
   const taskGoal = sessionDisplayName(session, taskPrompt, '未命名任务');
   // 状态文案、是否呼吸、能否重新启动全部来自同一个判断，见 ui.tsx:effectiveStatus。
   // 归档任务显示「已归档」，仅在执行中且有当前轮开始时间时计算并刷新耗时。
-  const status = effectiveStatus(session);
+  const status = effectiveStatus(session, summary);
+  const isAttention = status.label === '等你审批' || status.label === '等你回答' || status.label === '等你核对';
+  const dotClass = status.archived
+    ? 'bg-neutral-solid'
+    : isAttention
+    ? 'bg-attention-solid'
+    : status.label === '执行中'
+    ? 'bg-info-solid'
+    : stateTone[session.state] ?? 'bg-neutral-solid';
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!status.busy || !startedAt) return;
@@ -157,7 +167,7 @@ export function RunHeader({
           RunHeader.dom.test.tsx 用这两个结构做选择器，保持无障碍和测试一致。
         */}
         <span className="ml-1 inline-flex shrink-0 items-center gap-1.5 rounded-full bg-muted py-0.5 pl-2 pr-2.5">
-          <span aria-label={status.label} className={`h-2 w-2 shrink-0 rounded-full ${status.archived ? 'bg-neutral-solid' : stateTone[session.state] ?? 'bg-neutral-solid'}`}/>
+          <span aria-label={status.label} className={`h-2 w-2 shrink-0 rounded-full ${dotClass}`}/>
           <strong className="text-caption font-semibold text-primary">{status.label}</strong>
           {status.busy && elapsed && <span className="text-caption text-subtle tabular-nums">{elapsed}</span>}
         </span>
