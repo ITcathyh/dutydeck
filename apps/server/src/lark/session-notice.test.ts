@@ -3,6 +3,7 @@ import { createRepositories } from '@dutydeck/storage';
 import type { Session } from '@dutydeck/shared';
 import type { SessionNotice } from '@dutydeck/runtime';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
+import { createLarkCardService, LarkServiceError } from './service.js';
 import { deliverLarkSessionNotice } from './session-notice.js';
 import { larkUnknownTaskNoticeKey, larkUnknownTaskNoticeRecordKey } from './task-recovery.js';
 
@@ -18,9 +19,12 @@ async function fixture() {
   const client = { sendText: vi.fn(async () => ({ messageId: 'om_sent' })), replyText: vi.fn(async () => ({ messageId: 'om_reply' })) };
   const card = (id: string, sessionId: string, extra: Record<string, unknown>, createdAt: string) => repos.channelMappings.save({ id, channel: 'lark-card:app', externalId: `om_${id}`, sessionId, createdAt,
     extra: JSON.stringify({ app_id: 'app', chat_id: 'oc_chat', chat_type: 'group', turn: 1, state: 'completed', ...extra }) });
-  return { repos, client, card, deliver: (session: Session, notice: SessionNotice) => deliverLarkSessionNotice(repos, () => client, session, notice) };
+  const log = { warn: vi.fn() };
+  return { repos, client, card, log, deliver: (session: Session, notice: SessionNotice) => deliverLarkSessionNotice(repos, () => client, session, notice, log) };
 }
 const session = (input: Partial<Session>): Session => ({ id: 'ses_one', agentId: 'fixture', state: 'idle', cwd: '/tmp', runId: 'run', createdAt: '', updatedAt: '', ...input } as Session);
+// 与 service.ts request() 抛出的真实形态一致：业务码和上游 HTTP 状态都在 details 里。
+const withdrawn = () => new LarkServiceError('LARK_OPENAPI_ERROR', 'Lark OpenAPI request failed: The message was withdrawn. (code: 230011)', 502, { upstreamCode: 230011, upstreamHttpStatus: 400 });
 const notice = (input: Partial<SessionNotice>): SessionNotice => ({ id: 'notice_1', kind: 'unknown_task_overdue', taskId: 'task_unknown', message: '这一轮的结果未知。', sessionIds: ['ses_one'], ...input });
 
 describe('runtime session notices in Lark', () => {
@@ -63,5 +67,61 @@ describe('runtime session notices in Lark', () => {
     await h.deliver(session({ id: 'ses_web' }), notice({ id: 'notice_4' }));
     await h.deliver(session({ id: 'ses_unbound_schedule', source: 'schedule', sourceId: 'schedule-unknown' }), notice({ id: 'notice_5' }));
     expect(h.client.replyText).toHaveBeenCalledTimes(1); expect(h.client.sendText).not.toHaveBeenCalled();
+  });
+  it('posts in the group when the reply target was withdrawn, keeping the idempotency key and logging the fallback', async () => {
+    const h = await fixture(), lark = session({ source: 'lark', sourceId: 'app:oc_chat:group:thread:om_root' });
+    await h.card('own', lark.id, { runtime_task_id: 'task_unknown', reply_message_id: 'om_withdrawn', reply_in_thread: true }, '2026-09-01T00:00:00.000Z');
+    h.client.replyText.mockRejectedValueOnce(withdrawn());
+    await h.deliver(lark, notice({ kind: 'queue_expired' }));
+    expect(h.client.replyText).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_withdrawn', replyInThread: true, idempotencyKey: 'session_notice_notice_1' }));
+    expect(h.client.sendText).toHaveBeenCalledWith({ chatId: 'oc_chat', idempotencyKey: 'session_notice_notice_1',
+      text: '这一轮的结果未知。\n\nWeb 处理入口：https://dutydeck.example/sessions/ses_one' });
+    expect(h.log.warn).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_withdrawn', chatId: 'oc_chat' }), '回复会话提醒失败，回退为会话内发送');
+  });
+
+  it('falls back to the private chat of a p2p anchor', async () => {
+    const h = await fixture(), p2p = session({ source: 'lark', sourceId: 'app:oc_p2p:p2p' });
+    // 私聊卡片记录不写 reply_message_id，externalId 就是那条请求消息。
+    await h.repos.channelMappings.save({ id: 'p2p', channel: 'lark-card:app', externalId: 'om_p2p_request', sessionId: p2p.id, createdAt: '2026-09-01T00:00:00.000Z',
+      extra: JSON.stringify({ app_id: 'app', chat_id: 'oc_p2p', chat_type: 'p2p', turn: 1, state: 'completed', runtime_task_id: 'task_unknown' }) });
+    h.client.replyText.mockRejectedValueOnce(withdrawn());
+    await h.deliver(p2p, notice({}));
+    expect(h.client.replyText).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_p2p_request' }));
+    expect(h.client.replyText.mock.calls[0]![0]).not.toHaveProperty('replyInThread', true);
+    expect(h.client.sendText).toHaveBeenCalledWith(expect.objectContaining({ chatId: 'oc_p2p', idempotencyKey: 'session_notice_notice_1' }));
+  });
+
+  it('rethrows timeouts without posting a second copy', async () => {
+    const h = await fixture(), lark = session({ source: 'lark', sourceId: 'app:oc_chat:group:thread:om_root' });
+    await h.card('own', lark.id, { runtime_task_id: 'task_unknown', reply_message_id: 'om_request' }, '2026-09-01T00:00:00.000Z');
+    const timeout = new DOMException('The operation timed out.', 'TimeoutError');
+    h.client.replyText.mockRejectedValueOnce(timeout);
+    await expect(h.deliver(lark, notice({}))).rejects.toBe(timeout);
+    expect(h.client.sendText).not.toHaveBeenCalled(); expect(h.log.warn).not.toHaveBeenCalled();
+  });
+
+  it('keeps schedule session notices on the frozen report target when it was withdrawn', async () => {
+    const h = await fixture();
+    await h.repos.config.set('automation.delivery-target.schedule-1', JSON.stringify({ appId: 'app', chatId: 'oc_report', replyMessageId: 'om_schedule', replyInThread: true }));
+    const error = withdrawn();
+    h.client.replyText.mockRejectedValueOnce(error);
+    await expect(h.deliver(session({ id: 'ses_schedule', source: 'schedule', sourceId: 'schedule-1' }), notice({ kind: 'queue_expired' }))).rejects.toBe(error);
+    expect(h.client.sendText).not.toHaveBeenCalled(); expect(h.log.warn).not.toHaveBeenCalled();
+  });
+  it('recognises the withdrawn reply returned by the Lark HTTP client and posts once to the chat', async () => {
+    const h = await fixture(), lark = session({ source: 'lark', sourceId: 'app:oc_chat:group:thread:om_root' });
+    await h.card('own', lark.id, { runtime_task_id: 'task_unknown', reply_message_id: 'om_withdrawn', reply_in_thread: true }, '2026-09-01T00:00:00.000Z');
+    const writes: Array<{ path: string; body: any }> = [];
+    const service = createLarkCardService({ LARK_APP_ID: 'app', LARK_APP_SECRET: 'synthetic' }, (async (url, init) => {
+      if (String(url).includes('tenant_access_token')) return Response.json({ code: 0, tenant_access_token: 'fake', expire: 7200 });
+      const path = new URL(String(url)).pathname, body = JSON.parse(String(init?.body)); writes.push({ path, body });
+      return path.endsWith('/reply') ? Response.json({ code: 230011, msg: 'The message was withdrawn.' }, { status: 400 })
+        : Response.json({ code: 0, data: { message_id: 'om_posted' } });
+    }) as typeof fetch);
+    cleanups.push(() => service.close());
+    await deliverLarkSessionNotice(h.repos, () => service, lark, notice({ kind: 'queue_expired' }), h.log);
+    expect(writes.map(write => write.path)).toEqual(['/open-apis/im/v1/messages/om_withdrawn/reply', '/open-apis/im/v1/messages']);
+    expect(writes[1]!.body).toMatchObject({ receive_id: 'oc_chat', msg_type: 'text', uuid: writes[0]!.body.uuid });
+    expect(h.log.warn).toHaveBeenCalledTimes(1);
   });
 });
