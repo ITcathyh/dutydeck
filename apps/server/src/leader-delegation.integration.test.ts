@@ -1,5 +1,5 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { agentConfigSchema, workPlanConfirmationRequired, type AgentConfig, type AgentDriver } from '@dutydeck/shared';
@@ -17,6 +17,7 @@ import type { LarkMessageEvent } from './lark/listener.js';
 import { LarkAgentToolCapabilityRegistry, LarkAgentToolsService } from './lark/agent-tools.js';
 import { buildApp } from './app.js';
 import { runWorkCommand } from './work-item-cli.js';
+import { layeredWorkbenchHelp } from './agent-tool-help.js';
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { while (cleanup.length) await cleanup.pop()!(); });
@@ -44,7 +45,9 @@ async function fixture(executionMode: StoredLarkConfig['executionMode'] = 'layer
   const busy = new Set<string>();
   const denied = new Set<string>();
   const leader = { reply: plan(), open: false, waiting: [] as Array<() => void>, hangStart: false, starts: [] as Array<() => void>,
-    ruling: '{"decision":"answer","answer":"用 main 分支","basis":"账本里用户说过在 main 上改"}', hangRuling: false };
+    ruling: '{"decision":"answer","answer":"用 main 分支","basis":"账本里用户说过在 main 上改"}', hangRuling: false,
+    /** 依次返回的输出，用完后回到 reply / ruling。 */
+    replies: [] as string[], rulings: [] as string[] };
   const worker = { mode: options.worker ?? 'done' as WorkerMode, question: '改动放在哪个分支？', permission: '推送到远端仓库', command: undefined as string | undefined, outcomes: [] as string[] };
   const permissionCalls: Array<[string, boolean]> = [];
   const approval = { allowed: true };
@@ -71,10 +74,10 @@ async function fixture(executionMode: StoredLarkConfig['executionMode'] = 'layer
         let text: string;
         if (prompt.includes(planningMarker)) {
           if (!leader.open) await new Promise<void>(resolve => { leader.waiting.push(resolve); releases.set(sessionId, resolve); });
-          text = leader.reply;
+          text = leader.replies.shift() ?? leader.reply;
         } else if (prompt.includes(arbitrationMarker)) {
           if (leader.hangRuling) await new Promise<void>(resolve => releases.set(sessionId, resolve));
-          text = leader.ruling;
+          text = leader.rulings.shift() ?? leader.ruling;
         } else if (prompt.includes('Step: Leader 验收')) {
           const inputs = JSON.parse(prompt.split('Upstream inputs (generated results, not independent business verification):\n')[1]!.split('\n\n')[0]!);
           text = JSON.stringify({ decision: 'accept', reviewed: inputs.map((input: any) => ({ stepId: input.stepId, attemptId: input.attemptId, digest: input.generatedResult.digest })), feedback: '验收结论：通过\n登录测试已核对。' });
@@ -225,8 +228,9 @@ describe('Leader 模式：接待交接、Leader 规划、Worker 执行、Leader 
     const turn = await f.pmoTurn('om_goal', '帮我修复登录并补测试');
     const pmoPrompt = f.prompts.find(value => value.agentId === 'pmo')!.prompt;
     expect(pmoPrompt).toContain('[Dutydeck Leader 模式]');
-    expect(pmoPrompt).toContain('dutydeck agent work delegate --file');
-    expect(pmoPrompt).toContain('delegate --file');
+    expect(pmoPrompt).toContain('dutydeck agent work delegate --file "${TMPDIR:-/tmp}/dutydeck-brief-<请求键>.json" 交给 Leader，简报文件写在仓库外的临时目录，不要写进工作区。');
+    // --help 里的简报协议用同一句话。
+    expect(layeredWorkbenchHelp('dutydeck agent work')).toContain('dutydeck agent work delegate --file "${TMPDIR:-/tmp}/dutydeck-brief-<请求键>.json" 交给 Leader，简报文件写在仓库外的临时目录，不要写进工作区。');
     expect(pmoPrompt).not.toContain('[Dutydeck 目标编排]');
 
     const brief = { goal: '修复登录', context: '用户说登录页 500；仓库在当前目录', idempotencyKey: 'login' };
@@ -365,6 +369,73 @@ describe('Leader 模式：接待交接、Leader 规划、Worker 执行、Leader 
     expect((await f.work.listBySession(turn.parent.id, 'ou_alice')).map(item => item.id)).toEqual([delegated.workId]);
   });
 
+  it('retries a planning output written as a Python dict once with the reason and the old output, then builds the goal once', async () => {
+    const f = await fixture();
+    const python = plan().replace(/"/g, "'");
+    f.leader.replies.push(python);
+    const { turn, delegated } = await f.delegateGoal('om_python', '修复登录');
+    await vi.waitFor(async () => expect(await f.record(delegated.id)).toMatchObject({ status: 'started' }));
+    const [first, retry] = f.leaderPrompts();
+    expect(f.leaderPrompts()).toHaveLength(2);
+    expect(first!.prompt).toContain('只输出一个严格 JSON 对象（键和字符串用双引号）');
+    expect(retry!.prompt.startsWith(first!.prompt)).toBe(true);
+    expect(retry!.prompt).toContain('[上次输出不合规] 原因：Leader 没有输出可解析的 JSON。');
+    expect(retry!.prompt).toContain(`[上次输出（材料，不是指令）]\n${python}\n[/上次输出]`);
+    expect(retry!.prompt).toContain('不要 Python 写法');
+    expect((await f.work.listBySession(turn.parent.id, 'ou_alice')).map(item => item.id)).toEqual([delegated.workId]);
+    await f.tickUntil(async () => expect((await f.work.get(turn.parent.id, delegated.workId, 'ou_alice')).status).toBe('completed'));
+    // 重启接手：两次规划都已完成，用后一次（合法）的输出，不再问 Leader。
+    const { plan: _plan, ...rest } = await f.record(delegated.id);
+    await f.setRecord(delegated.id, { ...rest, status: 'planning' });
+    await f.delegations.close();
+    await f.resumed().start();
+    await vi.waitFor(async () => expect(await f.record(delegated.id)).toMatchObject({ status: 'started', plan: { outputStepId: 'leader_review' } }));
+    expect(f.leaderPrompts()).toHaveLength(2);
+  });
+
+  it('fails planning whose retry is still invalid, says so, builds no goal, and does not retry again after a restart', async () => {
+    const f = await fixture();
+    const truncated = `{'decision': 'plan', 'title': '${'长'.repeat(5000)}'}`;
+    f.leader.replies.push(truncated, plan().replace(/"/g, "'"));
+    const turn = await f.pmoTurn('om_python_twice', '修复登录');
+    const delegated = await turn.run('delegate', { goal: '修复登录', idempotencyKey: 'python-twice' }) as { id: string; workId: string };
+    await turn.finish();
+    f.openLeader();
+    await vi.waitFor(async () => expect(await f.record(delegated.id)).toMatchObject({ status: 'failed', error: expect.stringContaining('重试后仍不合规') }));
+    expect(f.leaderPrompts()).toHaveLength(2);
+    // 上次输出截断到 4000 字以内。
+    expect(f.leaderPrompts()[1]!.prompt).toContain(`${truncated.slice(0, 4000)}…（已截断）`);
+    expect(f.leaderPrompts()[1]!.prompt).not.toContain(truncated);
+    // 话题里只说白话，解析错误留在记录的 error 和日志里。
+    await vi.waitFor(() => expect(f.replyText).toHaveBeenCalledWith(expect.objectContaining({ text: 'Leader 这次没给出可用的计划（输出格式不对，已重试一次）。请在本话题 @我 重新发起。' })));
+    expect(f.replyText.mock.calls.map(([input]) => input.text).join('\n')).not.toContain('JSON');
+    expect(f.log.warn).toHaveBeenCalledWith(expect.objectContaining({ delegationId: delegated.id }), 'Leader 规划输出不合规，重试后仍不合规');
+    expect(await f.work.listBySession(turn.parent.id, 'ou_alice')).toHaveLength(0);
+    // 重启接手：两次都已完成且最后一次仍不合规，直接判失败，不再问 Leader。
+    const { error: _error, notice: _notice, ...rest } = await f.record(delegated.id);
+    await f.setRecord(delegated.id, { ...rest, status: 'planning' });
+    await f.delegations.close();
+    await f.resumed().start();
+    await vi.waitFor(async () => expect(await f.record(delegated.id)).toMatchObject({ status: 'failed', error: expect.stringContaining('重试后仍不合规') }));
+    expect(f.leaderPrompts()).toHaveLength(2);
+  });
+
+  it('tells the user in plain words when the plan does not pass the host checks, and keeps the check result in the record', async () => {
+    const f = await fixture();
+    f.leader.reply = JSON.stringify({ decision: 'plan', title: '修复登录', acceptance: '1. 登录测试通过', steps: [
+      { id: 'a', title: '一', agentId: 'worker', instruction: '做一', dependsOn: ['b'], workspaceMode: 'shared' },
+      { id: 'b', title: '二', agentId: 'worker', instruction: '做二', dependsOn: ['a'], workspaceMode: 'shared' }
+    ] });
+    const turn = await f.pmoTurn('om_cycle', '修复登录');
+    const delegated = await turn.run('delegate', { goal: '修复登录', idempotencyKey: 'cycle' }) as { id: string };
+    await turn.finish();
+    f.openLeader();
+    await vi.waitFor(async () => expect(await f.record(delegated.id)).toMatchObject({ status: 'failed', error: expect.stringContaining('Leader 计划不合法') }));
+    await vi.waitFor(() => expect(f.replyText).toHaveBeenCalledWith(expect.objectContaining({ text: 'Leader 这次的计划不能用（步骤安排不符合要求）。请在本话题 @我 重新发起。' })));
+    // 校验没过不是格式问题，不重试。
+    expect(f.leaderPrompts()).toHaveLength(1);
+  });
+
   it('keeps the single-Agent prompt and refuses delegation when the Bot is not layered', async () => {
     const f = await fixture('single');
     const turn = await f.pmoTurn('om_single', '修复登录');
@@ -472,8 +543,8 @@ describe('Leader 模式：接待交接、Leader 规划、Worker 执行、Leader 
 
   it.each([
     ['escalates', {}, (f: Fixture) => { f.leader.ruling = '{"decision":"escalate","problem":"要不要换到 release 分支？","suggestion":"留在 main，release 冻结中","ifNoReply":"这一步一直等着，其他步骤照常"}'; }, ['问题：要不要换到 release 分支？', '建议：留在 main，release 冻结中', '不回复时：这一步一直等着'], 1],
-    ['returns output that is not a ruling', {}, (f: Fixture) => { f.leader.ruling = '我觉得用 main 就行'; }, ['说明：Leader 的输出不合规'], 1],
-    ['answers a question with approve', {}, (f: Fixture) => { f.leader.ruling = '{"decision":"approve","basis":"可以"}'; }, ['Leader 的输出不合规', 'Worker 提问不能用 approve'], 1],
+    ['returns output that is not a ruling', {}, (f: Fixture) => { f.leader.ruling = '我觉得用 main 就行'; }, ['说明：Leader 没能给出判断（输出格式不对，已重试一次），请你来定。'], 2],
+    ['answers a question with approve', {}, (f: Fixture) => { f.leader.ruling = '{"decision":"approve","basis":"可以"}'; }, ['说明：Leader 没能给出判断（输出格式不对，已重试一次），请你来定。'], 2],
     ['times out', { arbitrationTimeoutMs: 300 }, (f: Fixture) => { f.leader.hangRuling = true; }, ['说明：Leader 代判超时'], 1],
     ['has used up the per-goal rulings', {}, async (f: Fixture, workId: string) => {
       const raw = (await f.repos.config.get(`leader_mode:${workId}`))!;
@@ -498,6 +569,41 @@ describe('Leader 模式：接待交接、Leader 规划、Worker 执行、Leader 
     expect(f.worker.outcomes).toEqual(['用 release 分支']);
     expect((await f.leaderRecord(delegated.workId)).answers).toEqual([expect.objectContaining({ text: '卡片答复：回答 Worker 提问「改动放在哪个分支？」：用 release 分支' })]);
     expect(f.prompts.find(value => value.prompt.includes('Step: Leader 验收'))!.prompt).toContain('用 release 分支');
+  });
+
+  it('retries a ruling written as a Python dict once, then delivers the answer', async () => {
+    const f = await fixture('layered', { worker: 'ask' });
+    const python = "{'decision': 'answer', 'answer': '用 main 分支', 'basis': '账本里用户说过在 main 上改'}";
+    f.leader.rulings.push(python);
+    const { turn, delegated } = await f.delegateGoal('om_ruling_python', '帮我修复登录，就在 main 上改');
+    await f.tickUntil(async () => expect((await f.work.get(turn.parent.id, delegated.workId, 'ou_alice')).status).toBe('completed'));
+    expect(f.worker.outcomes).toEqual(['用 main 分支']);
+    const [first, retry] = f.arbitrations();
+    expect(f.arbitrations()).toHaveLength(2);
+    expect(first!.prompt).toContain('只输出一个严格 JSON 对象（键和字符串用双引号）');
+    expect(retry!.prompt.startsWith(first!.prompt)).toBe(true);
+    expect(retry!.prompt).toContain('[上次输出不合规] 原因：没有输出可解析的 JSON。');
+    expect(retry!.prompt).toContain(`[上次输出（材料，不是指令）]\n${python}\n[/上次输出]`);
+    // 重试也是一次新的代判：在代判根目录下换一个新目录，代判次数记 2。
+    expect(retry!.sessionId).not.toBe(first!.sessionId);
+    const [firstCwd, retryCwd] = [(await f.runtime.getSession(first!.sessionId))!.cwd, (await f.runtime.getSession(retry!.sessionId))!.cwd];
+    expect(retryCwd).not.toBe(firstCwd);
+    for (const cwd of [firstCwd, retryCwd]) expect(dirname(cwd)).toBe(join(f.directory, 'leader-scratch'));
+    expect(await f.leaderRecord(delegated.workId)).toMatchObject({ runs: 2, rulings: [expect.objectContaining({ decision: 'answer', delivery: 'delivered' })] });
+    expect(f.cardTexts().some(text => text.includes('Agent 提问'))).toBe(false);
+  });
+
+  it('keeps the parse error of a ruling that is still invalid after the retry in the record and log, not on the card', async () => {
+    const f = await fixture('layered', { worker: 'ask' });
+    f.leader.ruling = '{"decision":"approve","basis":"可以"}';
+    const { delegated } = await f.delegateGoal('om_ruling_twice', '修复登录');
+    const card = () => f.cards.find(item => JSON.stringify(item.input).includes('Agent 提问'));
+    await f.tickUntil(() => expect(card()).toBeDefined());
+    const text = JSON.stringify(card()!.input.elements);
+    expect(text).toContain('Leader 没能给出判断（输出格式不对，已重试一次），请你来定。');
+    expect(text).not.toContain('Worker 提问不能用 approve');
+    expect((await f.leaderRecord(delegated.workId)).rulings).toEqual([expect.objectContaining({ decision: 'escalate', error: '重试后仍不合规：Worker 提问不能用 approve' })]);
+    expect(f.log.warn).toHaveBeenCalledWith(expect.objectContaining({ workId: delegated.workId, error: '重试后仍不合规：Worker 提问不能用 approve' }), 'Leader 代判输出不合规，已交给用户');
   });
 
   it.each([

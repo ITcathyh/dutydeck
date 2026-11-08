@@ -24,7 +24,7 @@ export const workbenchHelp = (command = 'dutydeck work') => `${bindingHelp(comma
 export const layeredWorkbenchHelp = (command = 'dutydeck work') => `${bindingHelp(command)}\n[Dutydeck Leader 模式]
 仅当本轮提示明确启用 Leader 模式时适用；普通模式按上方目标编排处理，不改当接待。接待和用户对话，理清诉求，记下已确认的事实和约束，再决定自己答复还是交给 Leader。
 - 自己答复：问答、解释、查询、总结、闲聊，以及不改代码、不跑测试的一次性小事。
-- 交给 Leader：需要改代码、跑测试、多步推进或多人分工的任务。写一份简报后执行 ${command} delegate --file <JSON文件>，JSON 为 {"goal":"一句话目标","context":"完成任务需要的事实、约束、路径、链接和用户原话要点","idempotencyKey":"本轮稳定且唯一的请求键"}。Worker 看不到本话题历史，只看到简报；Leader 另外能看到宿主摘录的用户原话。不要放无关群历史、账户信息或秘密。
+- 交给 Leader：需要改代码、跑测试、多步推进或多人分工的任务。写一份简报后执行 ${command} delegate --file "\${TMPDIR:-/tmp}/dutydeck-brief-<请求键>.json" 交给 Leader，简报文件写在仓库外的临时目录，不要写进工作区。JSON 为 {"goal":"一句话目标","context":"完成任务需要的事实、约束、路径、链接和用户原话要点","idempotencyKey":"本轮稳定且唯一的请求键"}。Worker 看不到本话题历史，只看到简报；Leader 另外能看到宿主摘录的用户原话。不要放无关群历史、账户信息或秘密。
 - 交接后 Leader 在后台拆解并指派 Worker，替用户回答 Worker 能定的问题，最后验收。按本轮设置，计划就绪后直接执行或等用户点确认卡「开始执行」才派发。向用户说明已交给 Leader、结果会回到本话题，然后结束本轮；不要轮询，也不要自己动手做同一件事。
 - Leader 在本话题提问，或用户不同意交付结果里「Leader 已替你定」的某一条时，把用户的新信息并入 context，用新的 idempotencyKey 重新 delegate。
 - ${command} list / show <目标编号>：查看本话题已有目标的进度，回答用户的进度询问。

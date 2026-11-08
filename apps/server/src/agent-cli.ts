@@ -400,7 +400,7 @@ export function addAgentCommands(program: Command, run: AgentCliRunner) {
   sub(work, 'show', 'Show a goal', 'work.show', 'read', ['work show <目标编号>']).argument('<id>', 'Goal id');
   sub(work, 'create', 'Accept a goal plan; may wait for the user to click 开始执行 depending on settings', 'work.create', 'write', ['work create --file plan.json'])
     .requiredOption('--file <path>', 'JSON plan with goal and a stable idempotencyKey');
-  sub(work, 'delegate', 'Hand a brief to the Leader (layered mode)', 'work.delegate', 'write', ['work delegate --file brief.json'])
+  sub(work, 'delegate', 'Hand a brief to the Leader (layered mode)', 'work.delegate', 'write', ['work delegate --file "${TMPDIR:-/tmp}/dutydeck-brief-<key>.json"'])
     .requiredOption('--file <path>', 'JSON brief with goal, context and a stable idempotencyKey');
   sub(work, 'revise', 'Revise the plan of an unfinished goal; --dry-run previews the impact', 'work.revise', 'write', ['work revise <目标编号> --file revision.json --dry-run', 'work revise <目标编号> --file revision.json'])
     .argument('<id>', 'Goal id').requiredOption('--file <path>', 'JSON with expectedRevision, the complete new plan and an optional reason');

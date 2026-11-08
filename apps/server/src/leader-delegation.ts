@@ -7,7 +7,7 @@ import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { larkPermissionMode, readLarkConfig } from './lark/config.js';
 import { runReadonlyPrompt } from './lark/readonly-decider.js';
 import { readTaskAttemptResult } from './task-results.js';
-import { createLeaderModeRecord, leaderLedger, leaderRules, resolveLeaderGuide } from './leader-mode.js';
+import { createLeaderModeRecord, leaderFormatRetryPrompt, leaderLedger, leaderRules, resolveLeaderGuide } from './leader-mode.js';
 import { workItemId, type WorkItemService } from './work-items.js';
 
 const PREFIX = 'leader_delegation:';
@@ -83,7 +83,7 @@ export function leaderPrompt(brief: { goal: string; context: string }, workers: 
     '- 最多 11 步；dependsOn 只引用本计划内的步骤 id，不能成环。agentId 只能从 Worker 名单里选。',
     '宿主会在最后追加独立验收，最多自动返修两轮；只能返修没有其他 Worker 依赖的末端步骤，上游问题会停止并交给用户。acceptance 要写成可核对的条目。',
     '信息不足以拆解、或者有该用户定的事没定时不要猜，输出 needs_context，提一个用户能直接回答的问题。',
-    '只输出一个 JSON 对象，不要其他文字：',
+    '只输出一个严格 JSON 对象（键和字符串用双引号），不要其他文字：',
     '{"decision":"plan","title":"流程名称","acceptance":"1. …\\n2. …","steps":[{"id":"impl","title":"步骤名","agentId":"Worker 的 id","instruction":"完整任务说明","dependsOn":[],"workspaceMode":"shared"}]}',
     '或 {"decision":"needs_context","question":"需要用户补充的具体问题"}',
     '[Worker 名单 JSON]', JSON.stringify(workers.map(agent => ({ id: agent.id, name: agent.name, ...(agent.model ? { model: agent.model } : {}) }))), '[/Worker 名单]',
@@ -114,7 +114,7 @@ export function layeredPlan(result: Extract<LeaderResult, { decision: 'plan' }>,
     reviewPolicy: { maxReworkRounds: 2, allowedTargetStepIds: targets.map(step => step.id) },
     instruction: `你是本目标的 Leader，现在验收。对照下面的验收标准逐条核对上游各步骤的产物；需要时只读查看文件，不修改文件，不重做实现。\n验收标准：\n${result.acceptance}\n按宿主的结构化审查格式输出 accept/rework/stop，不能把 Worker 执行完成当作验收通过。feedback 会直接发给用户：第一行写「验收结论：通过」「验收结论：需返修」或「验收结论：缺少信息」之一；然后说明交付物、实际核对的验证证据和遗留问题。需返修时写清目标步骤和修改要求。stop 时接着分三行写「问题：要用户定的事」「建议：你的建议和理由」「不回复时：用户不回复会怎样」。`
   }] });
-  if (!parsed.success) throw new RuntimeError('LEADER_PLAN_INVALID', `Leader 计划不合法：${parsed.error.issues.map(issue => issue.message).join('; ')}`, 422);
+  if (!parsed.success) throw new RuntimeError('LEADER_PLAN_UNUSABLE', `Leader 计划不合法：${parsed.error.issues.map(issue => issue.message).join('; ')}`, 422);
   return parsed.data;
 }
 
@@ -126,7 +126,8 @@ export class LeaderDelegationService {
   private readonly queue: string[] = [];
   private readonly cleaning = new Map<string, Promise<void>>();
   /** 重启前上一轮 Leader 已经答完的原文，规划时直接沿用，不再问一次。 */
-  private readonly adopted = new Map<string, string>();
+  /** 重启前已完成的规划输出；retried 表示那已经是格式重试的输出，解析失败不再重试。 */
+  private readonly adopted = new Map<string, { text: string; retried: boolean }>();
   private readonly shutdown = new AbortController();
   private closed = false;
   private timer?: NodeJS.Timeout;
@@ -184,7 +185,7 @@ export class LeaderDelegationService {
         await this.fail(record, '服务重启前已交给 Leader 的规划结果未知，为避免重复执行不再自动重跑').catch(warn);
         continue;
       }
-      if (prior?.kind === 'result') this.adopted.set(record.id, prior.text);
+      if (prior?.kind === 'result') this.adopted.set(record.id, { text: prior.text, retried: prior.runs > 1 });
       this.schedule(record.id);
     }
     this.timer = setInterval(() => { void timeLoop('leader-delegation.flush', this.options.log, () => this.flushPending()).catch(() => {}); }, 60_000);
@@ -215,11 +216,13 @@ export class LeaderDelegationService {
    * 重启前同一委派的 Leader 会话。从未提交、还在排队的先停掉，免得重启后没人等结果时自己跑起来；
    * 提示词可能已送到 Leader 的不动，留给人工核对，只有已结算的完成结果可以沿用。
    */
-  private async priorPlanning(sessions: Session[]): Promise<{ kind: 'none' } | { kind: 'result'; text: string } | { kind: 'unknown' }> {
+  private async priorPlanning(sessions: Session[]): Promise<{ kind: 'none' } | { kind: 'result'; text: string; runs: number } | { kind: 'unknown' }> {
     const { execution } = this.options.repositories;
     const unsent = (attempt: TaskAttempt) => attempt.submissionState === 'not_submitted' || attempt.state === 'settled' && attempt.settlement?.kind === 'not_submitted';
     let text: string | undefined;
-    for (const session of sessions) {
+    let runs = 0;
+    // 按创建先后看：格式重试的会话在后，最后一份完成的输出才是要用的。
+    for (const session of [...sessions].sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
       const before = execution.getSessionExecutions(session.id);
       if (before.every(item => item.attempts.every(unsent)) && before.some(item => !isTerminalTaskStatus(item.task.status))) {
         await this.options.runtime.stop(session.id, { kind: 'installation_owner', id: 'installation_owner' });
@@ -233,9 +236,10 @@ export class LeaderDelegationService {
         const result = task.status === 'completed' && first ? readTaskAttemptResult({ execution }, session.id, task.id, first.attemptId) : undefined;
         if (result?.status !== 'settled' || result.result.outcome !== 'completed') return { kind: 'unknown' };
         text = result.result.output.text;
+        runs++;
       }
     }
-    return text === undefined ? { kind: 'none' } : { kind: 'result', text };
+    return text === undefined ? { kind: 'none' } : { kind: 'result', text, runs };
   }
 
   /** 按当前 Bot 配置和操作者权限取 Leader 与可用 Worker。 */
@@ -269,6 +273,15 @@ export class LeaderDelegationService {
     this.pump();
   }
 
+  /** 规划会话清退前一直占着并发名额；格式重试的会话和前一次的一起算，都清退后才放开。 */
+  private holdCleanup(id: string, cleanup: Promise<void>) {
+    const held = Promise.all([this.cleaning.get(id), cleanup]).then(() => undefined);
+    this.cleaning.set(id, held);
+    void held.then(() => { if (this.cleaning.get(id) === held) this.cleaning.delete(id); this.pump(); }, error => {
+      this.options.log?.warn({ error, delegationId: id }, 'Leader 规划会话未确认清退，保留并发名额');
+    });
+  }
+
   private pump() {
     while (!this.closed && new Set([...this.running.keys(), ...this.cleaning.keys()]).size < MAX_PLANNING && this.queue.length) {
       const id = this.queue.shift()!;
@@ -284,8 +297,9 @@ export class LeaderDelegationService {
     if (stale) throw new RuntimeError('LEADER_DELEGATION_STALE', `规划期间 Leader 模式配置改了，步骤 ${stale.id} 的 Agent ${stale.agentId} 已不在名单里`, 409);
   }
 
-  private async fail(record: Delegation, message: string) {
-    record = await this.update(record, { status: 'failed', error: message, notice: { kind: 'failed', text: `Leader 规划失败：${message}\n可以让我直接处理，或补充信息后再交给 Leader。` } });
+  /** message 记进 error；notice 是话题里给用户看的话，默认带上 message。 */
+  private async fail(record: Delegation, message: string, notice = `Leader 规划失败：${message}\n可以让我直接处理，或补充信息后再交给 Leader。`) {
+    record = await this.update(record, { status: 'failed', error: message, notice: { kind: 'failed', text: notice } });
     await this.flush(record);
   }
 
@@ -317,22 +331,29 @@ export class LeaderDelegationService {
         const worktree = await gitRepository(session.cwd);
         const adopted = this.adopted.get(id);
         this.adopted.delete(id);
-        // 指引取不到时这次规划失败并告知原话题，不退回内置规则。
-        const judgement = adopted === undefined ? { rules: leaderRules(await resolveLeaderGuide(session, config.leaderSkill, this.options.homeDirectory)), ledger: await leaderLedger(this.options.repositories, record) } : undefined;
+        // 指引取不到时这次规划失败并告知原话题，不退回内置规则。接手重启前的输出时只在要重试时才取。
+        let judgement: { rules: string; ledger: string } | undefined;
+        const current = record;
+        const prompt = async () => leaderPrompt(current, workers, worktree, judgement ??= { rules: leaderRules(await resolveLeaderGuide(session, config.leaderSkill, this.options.homeDirectory)), ledger: await leaderLedger(this.options.repositories, current) });
         const timeoutMs = this.options.timeoutMs ?? PLANNING_TIMEOUT_MS;
-        const text = adopted ?? await runReadonlyPrompt(this.options.runtime, { execution: this.options.repositories.execution }, {
+        const run = (input: string) => runReadonlyPrompt(this.options.runtime, { execution: this.options.repositories.execution }, {
           // 终端模式 Leader 以完全信任规划（team() 已核对），「不改文件」只靠提示词约束。
-          agentId: leader.id, cwd: session.cwd, permissionMode: leader.protocol === 'pty-cli' ? 'full-trust' : 'deny-all', source: 'lark-leader', sourceId: record.id,
-          prompt: leaderPrompt(record, workers, worktree, judgement), timeoutMs, signal: this.shutdown.signal,
-          onCleanup: cleanup => {
-            this.cleaning.set(id, cleanup);
-            void cleanup.then(() => { this.cleaning.delete(id); this.pump(); }, error => {
-              this.options.log?.warn({ error, delegationId: id }, 'Leader 规划会话未确认清退，保留并发名额');
-            });
-          }
+          agentId: leader.id, cwd: session.cwd, permissionMode: leader.protocol === 'pty-cli' ? 'full-trust' : 'deny-all', source: 'lark-leader', sourceId: current.id,
+          prompt: input, timeoutMs, signal: this.shutdown.signal, onCleanup: cleanup => this.holdCleanup(id, cleanup)
         });
+        let text = adopted?.text ?? await run(await prompt());
         if (this.closed) return;
-        const result = parseLeaderResult(text);
+        let result: LeaderResult;
+        try { result = parseLeaderResult(text); }
+        catch (error) {
+          // 输出不合规只重试一次，按同样的结论改格式；目标在解析成功后才建，重试不会重复建。
+          const retried = (again: unknown) => new RuntimeError('LEADER_PLAN_FORMAT', `重试后仍不合规：${errorText(again)}`, 422);
+          if (adopted?.retried) throw retried(error);
+          text = await run(leaderFormatRetryPrompt(await prompt(), error, text));
+          if (this.closed) return;
+          try { result = parseLeaderResult(text); }
+          catch (again) { throw retried(again); }
+        }
         if (result.decision === 'needs_context') {
           record = await this.update(record, { status: 'needs_context', question: result.question, notice: { kind: 'needs_context', text: `Leader 需要补充信息：${result.question}\n补充后在本话题 @我，我会带上新信息重新交给 Leader。` } });
           await this.flush(record);
@@ -348,7 +369,18 @@ export class LeaderDelegationService {
       }
     } catch (error) {
       if (this.closed) return;
-      await this.fail(record, error instanceof RuntimeError && error.code === 'COLLABORATION_DECISION_TIMEOUT' ? 'Leader 规划超时' : errorText(error).slice(0, 500));
+      const code = error instanceof RuntimeError ? error.code : undefined;
+      if (code === 'COLLABORATION_DECISION_TIMEOUT') { await this.fail(record, 'Leader 规划超时'); return; }
+      // 解析错误、计划校验和运行错误用户看不懂：话题里说白话，技术原因留在日志和记录的 error。
+      const plain = code === 'LEADER_PLAN_FORMAT' ? 'Leader 这次没给出可用的计划（输出格式不对，已重试一次）。'
+        : code === 'LEADER_PLAN_UNUSABLE' ? 'Leader 这次的计划不能用（步骤安排不符合要求）。'
+        : code === undefined || code.startsWith('COLLABORATION_DECISION_') ? 'Leader 这次没能完成规划（运行出错）。' : undefined;
+      if (plain) {
+        this.options.log?.warn({ error, delegationId: record.id }, code === 'LEADER_PLAN_FORMAT' ? 'Leader 规划输出不合规，重试后仍不合规' : 'Leader 规划失败');
+        await this.fail(record, errorText(error).slice(0, 500), `${plain}请在本话题 @我 重新发起。`);
+        return;
+      }
+      await this.fail(record, errorText(error).slice(0, 500));
       return;
     }
     // 目标已经建好（群聊里等人点「开始执行」），这里写失败只记日志、记录留在 planning，下次启动补记，不报成规划失败。
