@@ -31,7 +31,8 @@ import { sleep } from './daemon/time.js';
 import { armShutdownDeadline } from './shutdown-phases.js';
 import { runNpmForDutydeckUpdate, updateDutydeck } from './update.js';
 import { runDeploy, runDeployPrune, type DeployPruneResult, type DeployResult } from './daemon/deploy.js';
-import { loadConfig } from '@dutydeck/config';
+import { loadConfig, resolveDatabaseUrl } from '@dutydeck/config';
+import { recordAbnormalExit } from './abnormal-exit.js';
 import { createRepositories } from '@dutydeck/storage';
 import { runAuthPasswordSetCommand, runAuthTokenCommand, runShareKeyRotateCommand } from './auth/auth.js';
 import { readPasswordInput } from './auth/password-input.js';
@@ -72,6 +73,9 @@ for (const dir of legacyState.skipped) {
 if (!isolatedBackupCommand) adoptLegacyEnv();
 
 async function serve(options: CliOptions, onReady?: () => void) {
+  // 异常退出记录只写到本次 serve 的数据库目录（与 startLocalServer 同一取法），不走 daemon 目录的 last-daemon-dir 回退。
+  let databaseUrl: string | undefined;
+  try { databaseUrl = resolveDatabaseUrl(environmentFromCli(options)); } catch { databaseUrl = undefined; }
   // Observe fatal errors without installing a recovery handler. Continuing
   // after an uncaught exception can leave the DB, PTY, and session queues in an
   // unknown state; Node must retain its default non-zero exit behavior so the
@@ -85,13 +89,21 @@ async function serve(options: CliOptions, onReady?: () => void) {
     if (plugins.length) process.stderr.write(`Fatal error stack includes in-process plugin code: ${plugins.join(', ')}. Plugin providers run inside the daemon; fix or disable the plugin (dutydeck plugin disable <name>).\n`);
     const quarantined = quarantineCrashedPlugins(plugins, origin);
     if (quarantined.length) process.stderr.write(`Quarantined plugins: ${quarantined.join(', ')}. They will not load on the next start; after fixing, run dutydeck plugin enable <name> and restart.\n`);
+    recordAbnormalExit(databaseUrl, { kind: 'fatal', exitCode: 1, error, version: packageJson.version });
   });
   // 启动完成前没有可关闭的服务；停止信号照常立即退出，但先删掉正在加载的插件标记，免得被当成插件卡死而隔离。
   const startupSignal = (signal: NodeJS.Signals) => { releaseProviderLoadingMarkers(); process.exit(128 + (signal === 'SIGINT' ? 2 : 15)); };
   process.on('SIGINT', startupSignal); process.on('SIGTERM', startupSignal);
   const { startLocalServer } = await import('./service.js');
   const { dutydeckGroupToolsCommand } = await import('./lark/agent-tools.js');
-  const service = await startLocalServer({ env: environmentFromCli(options), groupToolsCommand: dutydeckGroupToolsCommand(fileURLToPath(import.meta.url)) });
+  let service: Awaited<ReturnType<typeof startLocalServer>>;
+  try {
+    service = await startLocalServer({ env: environmentFromCli(options), groupToolsCommand: dutydeckGroupToolsCommand(fileURLToPath(import.meta.url)) });
+  } catch (error) {
+    recordAbnormalExit(databaseUrl, { kind: 'startup', exitCode: 1, error, version: packageJson.version });
+    throw error;
+  }
+  databaseUrl = service.config.databaseUrl;
   process.off('SIGINT', startupSignal); process.off('SIGTERM', startupSignal);
   const address = service.config.host === '0.0.0.0'
     ? `http://127.0.0.1:${service.config.port} (LAN access enabled; other devices can use this computer's LAN IP)`

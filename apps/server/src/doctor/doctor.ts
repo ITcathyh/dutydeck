@@ -34,6 +34,7 @@ import { errorMessage } from '@dutydeck/shared';
 import { PTY_AGENT_CONTRIBUTIONS } from '@dutydeck/pty-driver';
 import { daemonDatabasePath, daemonStatus } from '../daemon/command.js';
 import { daemonPaths, readDaemonStatus, resolveDaemonDir } from '../daemon/daemon.js';
+import { abnormalExitNote, readAbnormalExit } from '../abnormal-exit.js';
 import { accessMode } from '../service.js';
 import { createCliUi, type CliUi } from '../cli-ui.js';
 import { locateEnvFile } from '../env-location.js';
@@ -270,6 +271,12 @@ export async function runDoctor(
   // ---- 4. 数据库 + 迁移 ----
   // 库路径以守护进程记录为准，与 cli.ts 的取法一致（它才是真正在用的那个库）。
   const databaseUrl = record?.database ?? config.databaseUrl;
+  // 上一次异常退出：只认同一个库目录里、记录的就是这个库的文件；不新增检查项，只在 daemon.status 的 detail 后面接一句，级别不变。
+  const abnormalExit = abnormalExitNote(readAbnormalExit(databaseUrl), { running: status.running, ...(status.ready !== undefined ? { ready: status.ready } : {}), ...(status.startedAt ?? record?.startedAt ? { startedAt: status.startedAt ?? record?.startedAt } : {}) });
+  if (abnormalExit) {
+    const index = checks.findIndex(check => check.id === 'daemon.status');
+    if (index >= 0) checks[index] = { ...checks[index]!, detail: `${checks[index]!.detail}；${abnormalExit}` };
+  }
   progress(`只读探测数据库 ${databaseUrl}`);
   const probe: DatabaseProbeResult = await databaseProbe(databaseUrl, DOCTOR_CONFIG_KEYS, DOCTOR_CONFIG_PREFIXES);
   checks.push(checkDatabase(databaseUrl, probe));

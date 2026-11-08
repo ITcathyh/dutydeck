@@ -1,12 +1,13 @@
 // 提取与整理管线的确定性部分：JSON 代码块解析、两个门禁的逐条规则、批量写入的原子性。
 // 这里不起 runtime，也不跑 Agent——管线与运行时的接线由 memory-pipeline.integration.test.ts 覆盖。
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import {
   buildExtractionPrompt,
   gateConsolidationActions,
   gateExtractionFacts,
   indexOverBudgetViolation,
+  LarkMemoryPipeline,
   larkMemoryPipelineRules,
   parseLastJsonBlock
 } from './memory-pipeline.js';
@@ -434,5 +435,38 @@ describe('整理结果的来源群', () => {
     expect(inputs.find(input => input.content === 'A 群约定合并')?.chatId).toBe('oc_a');
     expect(inputs.find(input => input.content === '跨来源合并')?.chatId).toBeUndefined();
     expect(inputs.find(input => input.content === 'B 群另一条（更新）')?.chatId).toBe('oc_b');
+  });
+});
+
+describe('失败后的自动补跑', () => {
+  // doctor / 巡检提示「在群里 @ 机器人就会自动补跑」依赖这条现有行为：退避期内不重跑，过了退避期下一个已完成轮次就开跑提取。
+  it('失败的池在退避期过后收到新的已完成轮次，会开跑提取；退避期内不会', async () => {
+    const repos = createRepositories(':memory:');
+    try {
+      const store = new LarkMemoryStore(repos.config);
+      const group = larkMemoryScope('cli_bot', 'oc_group', 'group');
+      const failedAt = new Date('2026-11-08T01:00:00.000Z');
+      let now = new Date(failedAt.getTime() + larkMemoryPipelineRules.failureBackoffMs - 60_000);
+      const pipeline = new LarkMemoryPipeline({
+        runtime: {} as never, repos: {} as never, jobs: repos.memoryJobs, policyConfig: repos.config, store, projection: {} as never,
+        readConfig: async () => ({ appId: 'cli_bot', appSecret: 'fixture', preInjectPrompt: '', listening: false, groupToolsEnabled: false, groupToolsAllowSend: false, memoryEnabled: true }),
+        log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never, now: () => now
+      });
+      const drain = vi.spyOn(pipeline as unknown as { drain: (scope: unknown) => Promise<void> }, 'drain').mockResolvedValue(undefined);
+      await store.mutateState(group, () => ({
+        turnsSinceExtraction: larkMemoryPipelineRules.extractionTurns, turnsSinceConsolidation: larkMemoryPipelineRules.extractionTurns,
+        pendingTurns: Array.from({ length: larkMemoryPipelineRules.extractionTurns }, (_, index) => ({ sessionId: 'ses_group', taskId: `task_old_${index}`, senderKind: 'human' as const, chatId: 'oc_group', completedAt: failedAt.toISOString() })),
+        lastRun: { kind: 'extraction', at: failedAt.toISOString(), ok: false, added: 0, superseded: 0, retired: 0, retopiced: 0, rejected: 0, error: 'MEMORY_RUN_FAILED' },
+        lastFailureAt: { extraction: failedAt.toISOString() }
+      }));
+
+      await pipeline.onTurnCompleted(group, { sessionId: 'ses_group', taskId: 'task_in_backoff', senderKind: 'human' });
+      expect(drain).not.toHaveBeenCalled();
+
+      now = new Date(failedAt.getTime() + larkMemoryPipelineRules.failureBackoffMs + 60_000);
+      await pipeline.onTurnCompleted(group, { sessionId: 'ses_group', taskId: 'task_after_backoff', senderKind: 'human' });
+      expect(drain).toHaveBeenCalledTimes(1);
+      expect(drain).toHaveBeenCalledWith(group);
+    } finally { repos.close(); }
   });
 });

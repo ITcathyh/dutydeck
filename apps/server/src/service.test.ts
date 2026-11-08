@@ -87,6 +87,50 @@ it('composes frozen collaboration prompts without tool, plugin-result or Herdr d
   } finally { await service.close(); }
 });
 
+it('marks only group Claude sessions of a memory-enabled bot that turned claudeAutoMemory off', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dutydeck-claude-auto-memory-'));
+  temporaryDirectories.push(root);
+  const database = join(root, 'dutydeck.db');
+  const seed = createRepositories(database, { newDatabaseAuthority: 'ledger_v1' });
+  await seed.config.set('lark.bots', JSON.stringify([
+    { appId: 'cli_off', appSecret: 'synthetic', memoryEnabled: true, claudeAutoMemory: 'off' },
+    { appId: 'cli_inherit', appSecret: 'synthetic', memoryEnabled: true },
+    { appId: 'cli_memory_off', appSecret: 'synthetic', memoryEnabled: false, claudeAutoMemory: 'off' }
+  ]));
+  seed.close();
+  const service = await startLocalServer({ webRoot: root, env: {
+    ...process.env, NODE_ENV: 'test', DUTYDECK_HOST: '127.0.0.1', DUTYDECK_PORT: String(await freePort()),
+    DUTYDECK_DEFAULT_CWD: root, DUTYDECK_DATABASE_URL: database, DUTYDECK_AUTH: 'false',
+    DUTYDECK_DISABLE_LARK_LISTENER: 'true', DUTYDECK_AGENTS_JSON: '[]'
+  } });
+  const options = (service.runtime as unknown as { options: RuntimeOptions }).options;
+  const terminal = { id: 'claude-code', name: 'Claude Code', command: 'claude', args: [], protocol: 'pty-cli' as const, adapterId: 'claude-code', cwd: root, env: { USER_KEY: 'kept' },
+    permissionMode: 'ask' as const, timeout: 60, capabilities: { pause: false, resume: true }, builtin: true };
+  const builtinAcp = { ...terminal, id: 'claude', protocol: 'acp' as const, adapterId: undefined, command: process.execPath, args: [join(root, 'agents', 'claude-acp.mjs')] };
+  const customAcp = { ...builtinAcp, id: 'custom-claude', command: 'claude-code-acp', args: [] };
+  const session = (patch: Partial<Session>): Session => ({ id: 'auto-memory', agentId: 'claude-code', cwd: root, state: 'idle', runId: 'run', createdAt: '', updatedAt: '',
+    source: 'lark', sourceId: 'cli_off:oc_group:group', protocol: 'pty-cli', ...patch });
+  const marker = async (agent: typeof terminal | typeof builtinAcp, patch: Partial<Session> = {}) => (await options.configureAgent!(agent, session(patch))).env.dutydeck_claude_auto_memory;
+  try {
+    expect(await marker(terminal)).toBe('off');
+    expect(await marker(terminal, { sourceId: 'cli_off:oc_group:group:thread:om_root' })).toBe('off');
+    expect(await marker(builtinAcp, { protocol: 'acp' })).toBe('off');
+    expect((await options.configureAgent!(terminal, session({}))).env.USER_KEY).toBe('kept');
+    for (const [agent, patch] of [
+      [customAcp, { protocol: 'acp' }],
+      [terminal, { sourceId: 'cli_inherit:oc_group:group' }],
+      [terminal, { sourceId: 'cli_memory_off:oc_group:group' }],
+      [terminal, { sourceId: 'cli_off:oc_p2p:p2p' }],
+      [terminal, { source: 'web', sourceId: undefined }],
+      [terminal, { source: 'schedule', sourceId: 'schedule_1' }],
+      [terminal, { source: 'work_item', sourceId: 'cli_off:oc_group:group' }],
+      [terminal, { sourceId: 'cli_missing:oc_group:group' }]
+    ] as const) expect(await marker(agent, patch as Partial<Session>), JSON.stringify(patch)).toBeUndefined();
+    // 开关只有机器人设置：Agent env 里手写的小写键不会把范围外的会话切成 off。
+    expect(await marker({ ...terminal, env: { dutydeck_claude_auto_memory: 'off' } }, { sourceId: 'cli_off:oc_p2p:p2p' })).toBeUndefined();
+  } finally { await service.close(); }
+});
+
 it('starts normally when prompt version backfill encounters a damaged history record', async () => {
   const root = mkdtempSync(join(tmpdir(), 'dutydeck-prompt-backfill-warning-'));
   temporaryDirectories.push(root);

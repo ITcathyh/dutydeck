@@ -112,6 +112,8 @@ Kiro 3.x 未验证：Kiro 3.0.0 发布说明称 Kiro CLI 已改为单个独立�
 
 Claude Code / Seed / Relay / Genius 的终端默认带 `CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND=1`：Claude 2.1.319 起会把 MCP 服务以 task 方式运行的工具调用转到后台，结果不再归本轮；设了这个变量，MCP 工具结果留在本轮里，长时间的 MCP 调用会一直占着这一轮。要恢复转后台，在 Agent env 里设 `CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND=0`；`~/.claude/settings.json` 的 `env` 里的同名值也优先于这个默认值。旧版 Claude 不认这个变量；已经在跑的终端要重新拉起才会带上。
 
+机器人把 `claudeAutoMemory` 设为 `off` 后，它的群聊会话里新拉起的 Claude 进程带 `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`（Claude Code / Seed / Relay / Genius 终端和内置的 ACP Claude；范围见 [features.md](features.md)）。它和上面的默认值在同一层：Agent env、`~/.claude/settings.json` 或项目 `.claude/settings.json` 的 `env` 里显式设了同名变量时以用户的值为准（`0` / `false` 会强制打开 auto memory）。Claude 设置里的 `autoMemoryEnabled: true` 压不过这个变量，要在某个 Agent 上保留 auto memory，请把机器人设置改回 `inherit`。开关只有这一个设置，不要靠给 Agent 加大写 env 来切换：ACP Agent 原本没有大写 env 时，加上后启动方式会从直接启动改为 launcher，该 Agent 已有的持久化 ACP 会话恢复时会报身份冲突。切换设置不会重建已有会话：终端和 ACP（受控与本地会话都一样）都在下次拉起 Claude 进程时生效并续接原会话，已经在跑的进程不受影响。
+
 不要在给 Dutydeck 用的 Claude 里打开 `CLAUDE_CODE_RESUME_INTERRUPTED_TURN`：Claude 恢复会话时可能自己重跑中断的那一轮，和 Dutydeck「结果未知不自动重发」冲突。
 
 ### 终端模式 Agent 与飞书审批

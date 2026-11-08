@@ -24,6 +24,8 @@ export interface LarkAllowedUser {
   name: string;
 }
 export type LarkGroupMemoryScope = 'shared' | 'per-group';
+/** 群聊里 Claude 自带的 auto memory：'inherit' 沿用 Claude 自己的设置（默认，即历史行为）；'off' 在群聊的 Claude 家族会话里关闭。 */
+export type LarkClaudeAutoMemory = 'inherit' | 'off';
 
 export interface StoredLarkConfig {
   eventHandlers?: LarkEventHandler[];
@@ -103,6 +105,8 @@ export interface StoredLarkConfig {
   memoryAutoExtract?: boolean;
   /** 群聊记忆范围：'shared' 本机器人所在各群共用一个池（默认，历史行为）；'per-group' 每个群各自一个池。切换不迁移数据。 */
   groupMemoryScope?: LarkGroupMemoryScope;
+  /** Claude 自带的 auto memory 按工作目录保存，不受 groupMemoryScope 约束。缺省 'inherit'；'off' 只作用于开启会话记忆的机器人的群聊 Claude 家族会话。 */
+  claudeAutoMemory?: LarkClaudeAutoMemory;
   /** 跑提取与整理的 Agent；缺省沿用 defaultAgentId。 */
   memoryAgentId?: string;
   /** 跑提取与整理的模型；缺省沿用 defaultModel。 */
@@ -254,6 +258,7 @@ export interface PublicLarkConfig {
   memoryEnabled: boolean;
   memoryAutoExtract: boolean;
   groupMemoryScope: LarkGroupMemoryScope;
+  claudeAutoMemory: LarkClaudeAutoMemory;
   memoryAgentId?: string;
   memoryModel?: string;
   decisionAgentId?: string;

@@ -31,7 +31,7 @@
  * Run: npx vitest run packages/pty-driver/src/env-passthrough.test.ts
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -635,9 +635,13 @@ describe('Claude-family terminals get child-only env defaults', () => {
   async function launch(adapterId: string, env: Record<string, string> = {}) {
     setEnv('HOME', makeTempDir('home'));
     const cwd = makeTempDir('cwd');
-    const spawned: { args: string[]; env: Record<string, string> } = { args: [], env: {} };
+    const spawned: { args: string[]; env: Record<string, string>; settings?: string } = { args: [], env: {} };
     const backend: SessionBackend = {
-      kind: 'pty', spawn(_command, args, opts) { spawned.args = args; spawned.env = opts.env; },
+      kind: 'pty', spawn(_command, args, opts) {
+        spawned.args = args; spawned.env = opts.env;
+        const index = args.indexOf('--settings');
+        if (index >= 0) spawned.settings = readFileSync(args[index + 1]!, 'utf8');
+      },
       write() {}, resize() {}, kill() {}, interrupt() {}, onData() {}, onExit() {},
     };
     const driver = new PtyCliDriver({
@@ -670,5 +674,41 @@ describe('Claude-family terminals get child-only env defaults', () => {
 
   it('does not make the Claude launch generate a --settings file', async () => {
     expect((await launch('claude-code')).args).not.toContain('--settings');
+  });
+
+  // claudeAutoMemory=off：服务端只在 Agent env 里放小写标记，驱动把它换成 Claude 认的变量，放在和 MCP 默认值同一层。
+  const AUTO_MEMORY = 'CLAUDE_CODE_DISABLE_AUTO_MEMORY';
+  const off = { dutydeck_claude_auto_memory: 'off' };
+
+  it.each([...claudeAdapters])('%s turns Claude auto memory off for a marked session', async adapterId => {
+    expect((await launch(adapterId, off)).env[AUTO_MEMORY]).toBe('1');
+  });
+
+  it('keeps an Agent env value over the auto memory default', async () => {
+    expect((await launch('claude-code', { ...off, [AUTO_MEMORY]: '0' })).env[AUTO_MEMORY]).toBe('0');
+  });
+
+  it('leaves non-Claude terminals without the auto memory default', async () => {
+    expect((await launch('gemini', off)).env[AUTO_MEMORY]).toBeUndefined();
+  });
+
+  it.each([{}, { dutydeck_claude_auto_memory: 'inherit' }])('adds nothing without the off marker (%j)', async env => {
+    const spawned = await launch('claude-code', env);
+    expect(spawned.env[AUTO_MEMORY]).toBeUndefined();
+  });
+
+  it('keeps an unmarked launch byte-identical to before the setting existed', async () => {
+    const spawned = await launch('claude-code', { dutydeck_group_tools_url: 'http://127.0.0.1:1/tools' });
+    const keys = Object.keys(spawned.env).filter(key => /^CLAUDE_/.test(key));
+    expect(keys).toEqual([MCP_TASK_BACKGROUND]);
+  });
+
+  it('does not write the auto memory variable into the generated --settings env', async () => {
+    const spawned = await launch('claude-code', { ...off, dutydeck_group_tools_url: 'http://127.0.0.1:1/tools' });
+    expect(spawned.settings).toBeDefined();
+    const settings = JSON.parse(spawned.settings!) as { env?: Record<string, string> };
+    // 用户 ~/.claude/settings.json env 里的同名值要能压过默认值，所以它只进进程环境，不进 --settings。
+    expect(settings.env?.[AUTO_MEMORY]).toBeUndefined();
+    expect(spawned.env[AUTO_MEMORY]).toBe('1');
   });
 });

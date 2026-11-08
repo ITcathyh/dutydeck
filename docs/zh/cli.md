@@ -26,6 +26,8 @@ dutydeck update
 dutydeck doctor
 ```
 
+服务启动失败或运行中崩溃时，会在数据库所在目录写一份 `last-abnormal-exit.json`（时间、类型、退出码、脱敏后的错误首行、版本和数据库路径）；数据库目录还不存在时不写，也不会写到 `last-daemon-dir` 指向的其他实例。`dutydeck doctor` 读到 7 天内、且属于同一个数据库的记录时，在「守护进程」一项后面接一句「X 小时前异常退出（…）」：当前实例已就绪且是之后启动的，写「已自动恢复」，否则提示去看 journalctl。这一项的级别不变，没有记录时输出和以前一样。
+
 `restart` 先暂停领取新任务。已提交成功、恢复日志与原轮身份可验证的 `full-trust` tmux 任务继续在原 CLI 进程里运行，新服务接回同一轮，不重发输入；其余任务继续等待结束。ACP、普通 PTY、Herdr、提交中、缺少恢复日志或身份，以及待审批或高危权限门禁未授权的任务都不会跳过等待。systemd 只在当前 `KillMode=process` 时保留任务；其他值或读不到时全量等待。旧服务不支持恢复计数、排空失败或租约续期失败时也全量等待。`--drain-timeout` 控制等待上限，`--force` 保留原来的强制重启行为，当前 Agent 自己的会话仍自动排除。`deploy` 使用同一保留策略，ACP 等不可保留的任务仍等待结束。
 
 Codex 的 `codex` 入口默认使用终端模式，`codex-cli` 入口继续兼容。已有 ACP 会话继续通过 ACP 续跑，新会话使用当前默认协议；机器人权限不会自动提升。Codex 等不支持飞书逐项审批的终端 Agent，在 `ask` / `approve-reads` 下新开飞书会话会被拒绝；需要逐项审批时，选择内置「Codex (ACP)」（`codex-acp`），或选择 Claude Code / Seed / Relay 等支持审批的终端 Agent。只有原本已获 `full-trust` 权限、且恢复证据完整的 tmux 任务能跨服务重启继续运行；首次提交尚无日志位置的任务仍会等待结束。接回后跑完的任务和普通任务一样，触发一次插件 `task.completed` hook、触发器结果回投和触发器运行状态更新；接回后被停止或结果仍未知的不触发。主轮结束后仍有原生后台任务时，安全重启和部署的排空也会等待它们结束；直接终止进程或 `--force` 不提供此保证。
@@ -175,7 +177,7 @@ dutydeck settings group set oc_xxx 'scenarios={"alarm":{"enabled":true,"params":
 
 强制风控下更换工作区、默认 Agent、兜底或分流 Agent 时，先在机器人设置点「配置拦截 Hook」，再保存。Hook 检查和安装使用当前草稿的工作区及所有候选 Agent；安装只写 Hook 文件，不保存其他草稿，也不降低现有强制风控。CLI 的 `install-hook --prepare [key=value...]` 同样只准备文件，支持 `workspace`、`defaultAgentId`、`fallbackAgentId` 和 `defaultAgentWeights`；准备后再用 `bot set` 保存。省略 `--prepare` 且不传草稿参数时，沿用安装并保存高危正则/提醒模式的行为，已开启强制风控的机器人保持强制模式。保存失败会保留草稿，只有版本冲突才提示并发修改。
 
-保存接口对私聊模式、群回复模式、群记忆范围和应用品牌使用严格枚举校验；非法值返回 `400 INVALID_LARK_CONFIG`，不会清除已保存值。`groupReplyMode=null` 仍用于清除覆盖，CLI 用 `groupReplyMode=auto`。
+保存接口对私聊模式、群回复模式、群记忆范围、Claude 自带记忆和应用品牌使用严格枚举校验；非法值返回 `400 INVALID_LARK_CONFIG`，不会清除已保存值。`groupReplyMode=null` 仍用于清除覆盖，CLI 用 `groupReplyMode=auto`。
 
 群里的场景包用 `scenarios={"<包 id>":{"enabled":true|false,"params":{...}}}` 改，`params` 只写要改的键，`{"<包 id>":null}` 删掉这个包的绑定；`group show` 列出本群可用的包、参数和当前绑定。`direct` 模式的包（如告警初筛）要先在群里点确认卡开启过一次，之后才能用命令行或 Web 改。旧的 `alarm=<JSON>`（平铺的告警订阅）作为弃用别名保留一个版本，会转成 `scenarios.alarm`，输出里带弃用提示。
 
@@ -292,6 +294,7 @@ dutydeck settings bot set cli_xxx cardActionForwarding=null 'eventHandlers=[{"id
 | `memoryEnabled` | 会话记忆；`false` 时不注入记忆，相关命令和工具不可用 | `defaultGroupParticipation` 为 `selective` / `eager` 时开启，否则关闭 |
 | `memoryAutoExtract` | 后台自动提取和整理记忆；`false` 时只能用 `/memory consolidate` 手动触发 | `true` |
 | `groupMemoryScope` | 群聊记忆范围：`shared` 各群共用一个池，`per-group` 每群一个池；切换不迁移数据 | `shared` |
+| `claudeAutoMemory` | 群聊里 Claude 自带的 auto memory：`inherit` 沿用 Claude 自己的设置，`off` 在开着会话记忆的机器人的群聊 Claude 家族会话里关闭（见 [features.md](features.md)） | `inherit` |
 | `memoryAgentId` | 跑记忆提取和整理的 Agent | 沿用 `defaultAgentId` |
 | `memoryModel` | 跑记忆提取和整理的模型 | 沿用 `defaultModel` |
 | `busyTriage` | 忙时先判断：执行中问进度由宿主直接回复，补充当前任务会尝试插话；关闭时照常排队 | `false` |
