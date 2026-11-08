@@ -790,7 +790,7 @@ export class LarkAgentToolsService {
       work = await this.options.previewWork?.(session.id, task.actorId).catch(() => false) ?? false;
       collaboration = binding.chatType === 'group' && !collaborationSession && (await this.options.previewCollaboration?.(binding, task.actorId).catch(() => false) ?? false);
       if (work) {
-        const workbench = config.executionMode === 'layered' && binding.chatType === 'group' && !collaborationSession ? layeredWorkbenchPrompt : workbenchAgentPrompt;
+        const workbench = config.executionMode === 'layered' && !collaborationSession ? layeredWorkbenchPrompt : workbenchAgentPrompt;
         abilities.push(workbench('dutydeck agent work', workPlanConfirmationRequired(session)));
       }
       if (collaboration) abilities.push(collaborationAgentPrompt('dutydeck agent collaborate'));

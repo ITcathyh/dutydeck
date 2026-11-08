@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { stripVTControlCharacters } from 'node:util';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import type { RelayAskBroker } from '@dutydeck/relay';
-import { RuntimeError, type WorkItem } from '@dutydeck/shared';
+import { RuntimeError, type PermissionRequestData, type WorkItem } from '@dutydeck/shared';
 import type { WorkItemService } from './work-items.js';
 import { workInput } from './work-item-routes.js';
 
@@ -13,6 +13,16 @@ export interface WorkItemRequest {
   requestId: string;
   kind: 'permission' | 'question';
   text: string;
+  /** 工具授权的操作摘要（已脱敏、有长度上限），给代判的 Leader 看。 */
+  operation?: PermissionRequestData['operation'];
+  /** Leader 模式里交给用户的请求：Leader 写的问题、建议、不回复时会怎样，或没能代判的原因。 */
+  leader?: { problem?: string; suggestion?: string; ifNoReply?: string; reason?: string };
+}
+
+/** Leader 模式挂在请求上的钩子：决定卡片上看得到哪些请求，记下发起人的答复。 */
+export interface WorkItemRequestHooks {
+  visible(item: WorkItem, requests: WorkItemRequest[]): WorkItemRequest[];
+  answered(workId: string, entry: { kind: 'question' | 'permission' | 'wait'; question: string; answer: string }): Promise<void>;
 }
 
 const responseInput = z.object({
@@ -22,14 +32,21 @@ const responseInput = z.object({
 
 export class WorkItemInteractions {
   constructor(private readonly work: WorkItemService, private readonly runtime: DutydeckRuntime, private readonly broker: RelayAskBroker,
-    private readonly authorizeInteraction: (parentSessionId: string, actorId: string, action: 'high_risk.execute' | 'terminal.write' | 'terminal.read') => Promise<boolean>) {}
+    private readonly authorizeInteraction: (parentSessionId: string, actorId: string, action: 'high_risk.execute' | 'terminal.write' | 'terminal.read') => Promise<boolean>,
+    private readonly hooks: () => WorkItemRequestHooks | undefined = () => undefined) {}
 
   async list(parentSessionId: string, workId: string, actorId?: string): Promise<WorkItemRequest[]> {
     return this.pending(await this.work.get(parentSessionId, workId, actorId));
   }
 
-  /** 调用方须已用 work.get 按同一身份取到 item（即已完成授权）。 */
+  /** 调用方须已用 work.get 按同一身份取到 item（即已完成授权）。Leader 代判中的请求不在其中。 */
   pending(item: WorkItem): WorkItemRequest[] {
+    const requests = this.requests(item);
+    return this.hooks()?.visible(item, requests) ?? requests;
+  }
+
+  /** 运行中步骤的全部待决请求，含 Leader 代判中的。 */
+  requests(item: WorkItem): WorkItemRequest[] {
     if (['cancelling', 'cancelled', 'completed'].includes(item.status)) return [];
     const requests: WorkItemRequest[] = [];
     for (const step of item.steps) {
@@ -39,7 +56,7 @@ export class WorkItemInteractions {
       if (active?.taskId !== attempt.taskId) continue;
       const binding = { stepId: step.id, sessionId: attempt.sessionId, taskId: attempt.taskId };
       for (const request of this.runtime.getPendingPermissions(attempt.sessionId)) {
-        requests.push({ ...binding, requestId: request.id, kind: 'permission', text: request.title });
+        requests.push({ ...binding, requestId: request.id, kind: 'permission', text: request.title, ...(request.operation ? { operation: request.operation } : {}) });
       }
       for (const request of this.broker.listPending(attempt.sessionId)) {
         requests.push({ ...binding, requestId: request.id, kind: 'question', text: request.question });
@@ -59,6 +76,7 @@ export class WorkItemInteractions {
         if (input.answer === 'approve') await this.authorizeHuman(parentSessionId, actorId, 'high_risk.execute');
         await this.runtime.resolvePermission(request.sessionId, request.requestId, input.answer === 'approve');
       } else await this.broker.answer(request.requestId, input.answer, { sessionId: request.sessionId });
+      await this.hooks()?.answered(workId, { kind: input.kind, question: request.text, answer: input.answer });
       return { ok: true };
     });
   }

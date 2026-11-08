@@ -859,7 +859,7 @@ describe('Bot default group participation', () => {
   });
 });
 
-describe('分层协作执行方式', () => {
+describe('Leader 模式执行方式', () => {
   const terminal: Record<string, object> = { 'cli-leader': { protocol: 'pty-cli', permissionMode: 'ask' }, 'trusted-cli': { protocol: 'pty-cli', permissionMode: 'full-trust' }, 'legacy-pty': { protocol: 'pty', permissionMode: 'full-trust' } };
   const agents = { get: vi.fn(async (id: string) => ['pmo', 'leader', 'worker'].includes(id) ? { id, protocol: 'acp' } : terminal[id] ? { id, ...terminal[id] } : undefined) } as any;
   const base = { appId: 'cli_layered', appSecret: 'secret', groupToolsEnabled: true };
@@ -890,6 +890,20 @@ describe('分层协作执行方式', () => {
   ])('rejects layered mode with %s', async (_name, input, message) => {
     await expect(saveLarkConfig(createRepository(), agents, { ...base, executionMode: 'layered', ...input } as any))
       .rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG', statusCode: 400, message: expect.stringContaining(message) });
+  });
+
+  it('trims, projects, preserves and clears the Leader guide, and rejects overlong values', async () => {
+    const repository = createRepository();
+    await saveLarkConfig(repository, agents, { ...base, leaderSkill: '  /skills/leader/SKILL.md  ' });
+    expect((await readLarkConfigs(repository))[0]).toMatchObject({ leaderSkill: '/skills/leader/SKILL.md' });
+    expect(publicLarkConfig((await readLarkConfigs(repository))[0]!)).toMatchObject({ leaderSkill: '/skills/leader/SKILL.md' });
+    await saveLarkConfig(repository, agents, { originalAppId: 'cli_layered', pushIntervalMs: 2000 });
+    expect((await readLarkConfigs(repository))[0]).toMatchObject({ leaderSkill: '/skills/leader/SKILL.md' });
+    await expect(saveLarkConfig(repository, agents, { originalAppId: 'cli_layered', leaderSkill: 'x'.repeat(301) }))
+      .rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG', statusCode: 400, message: expect.stringContaining('Leader 指引') });
+    await saveLarkConfig(repository, agents, { originalAppId: 'cli_layered', leaderSkill: '   ' });
+    expect((await readLarkConfigs(repository))[0]).not.toHaveProperty('leaderSkill');
+    expect(publicLarkConfig((await readLarkConfigs(repository))[0]!)).not.toHaveProperty('leaderSkill');
   });
 
   it('accepts a terminal Leader when the Bot and the Agent are both full trust', async () => {

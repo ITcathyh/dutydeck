@@ -514,6 +514,20 @@ describe('settings CLI against the real bot routes', () => {
     expect(showCleared.bot).not.toHaveProperty('roleScope');
   });
 
+  it('sets, keeps across other edits, rejects overlong values and clears leaderSkill', async () => {
+    const { repos, run } = await botRuntime();
+    expect((await run('bot-set', { appId: 'cli_a', pairs: ['leaderSkill= team/leader '] })).bot).toMatchObject({ leaderSkill: 'team/leader' });
+    expect(await readLarkConfig(repos.config, 'cli_a')).toMatchObject({ leaderSkill: 'team/leader' });
+    await run('bot-set', { appId: 'cli_a', pairs: ['preInjectPrompt=别的设置'] });
+    expect((await run('bot-show', { appId: 'cli_a' })).bot).toMatchObject({ leaderSkill: 'team/leader' });
+    await expect(run('bot-set', { appId: 'cli_a', pairs: [`leaderSkill=${'x'.repeat(301)}`] })).rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG', message: expect.stringContaining('Leader 指引') });
+    expect(await readLarkConfig(repos.config, 'cli_a')).toMatchObject({ leaderSkill: 'team/leader' });
+    await run('bot-set', { appId: 'cli_a', pairs: ['leaderSkill='] });
+    expect((await run('bot-show', { appId: 'cli_a' })).bot).not.toHaveProperty('leaderSkill');
+    expect(await readLarkConfig(repos.config, 'cli_a')).not.toHaveProperty('leaderSkill');
+    expect(fieldsHelp(botFields)).toContain('leaderSkill=<text>');
+  });
+
   it('sets notification tiers and quiet hours, keeps them across other edits, and rejects bad values', async () => {
     const { repos, run } = await botRuntime();
     expect((await run('bot-show', { appId: 'cli_a' })).bot).toMatchObject({ notifyMentionAction: true, notifyMentionDone: true });
@@ -557,7 +571,7 @@ describe('settings CLI against the real bot routes', () => {
 
   it('passes the server reason through when the server refuses a change', async () => {
     const { repos, run } = await botRuntime();
-    await expect(run('bot-set', { appId: 'cli_a', pairs: ['executionMode=layered'] })).rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG', message: '分层协作需要开启群工具。' });
+    await expect(run('bot-set', { appId: 'cli_a', pairs: ['executionMode=layered'] })).rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG', message: 'Leader 模式需要开启群工具。' });
     await expect(run('bot-set', { appId: 'cli_a', pairs: ['permissionMode=full-trust'] })).rejects.toMatchObject({ code: 'LARK_FULL_TRUST_CONFIRMATION_REQUIRED' });
     expect((await run('bot-set', { appId: 'cli_a', pairs: ['permissionMode=full-trust', 'fullTrustConfirmed=true'] })).bot).toMatchObject({ permissionMode: 'full-trust' });
     await expect(run('bot-show', { appId: 'cli_missing' })).rejects.toMatchObject({ code: 'SETTINGS_BOT_NOT_FOUND' });

@@ -11,7 +11,7 @@ describe('offline Agent tool help', () => {
   it.concurrent.for([
     [['work', '--help'], ['"steps"', 'reviewPolicy', 'kind:wait', 'workspaceMode:worktree', 'awaiting_confirmation', '不能据名称宣称工具已授权']],
     [['work', 'create', '--help'], ['idempotencyKey', 'outputStepId', 'allowedTargetStepIds', '不要轮询']],
-    [['work', 'delegate', '--help'], ['"context"', 'Leader 和 Worker 看不到本话题历史', '仅当本轮提示明确启用分层协作时适用']],
+    [['work', 'delegate', '--help'], ['"context"', 'Worker 看不到本话题历史', '仅当本轮提示明确启用 Leader 模式时适用']],
     [['collaborate', '--help'], ['followup-create', 'expectedRevision', 'localDateTime', 'everySeconds', 'deliveryPaused', 'feedback']],
     [['group', '--help'], ['--since', '500 条', 'omt_*', '幂等', 'GROUP_TOOL_AUTHORIZATION_REQUIRED', 'group handoff']],
     [['memory', '--help'], ['memory search', 'memory remove', '只在用户明确要求记住/忘记时写入', '不保存凭据']],

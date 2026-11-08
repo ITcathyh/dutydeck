@@ -101,6 +101,10 @@ export interface WorkItemServiceOptions {
   prepareDelivery?: (parentSessionId: string, workId: string, idempotencyKey: string) => Promise<void>;
   deliver?: (item: WorkItem) => Promise<void>;
   notify?: (item: WorkItem, actorId: string) => Promise<void>;
+  /** 带审查策略的步骤启动时追加在提示词末尾的材料（Leader 模式的验收补充）；抛错时这一步记为失败。 */
+  stepContext?: (item: WorkItem, definition: WorkPlan['steps'][number]) => Promise<string | undefined>;
+  /** 发起人回答了等待步骤。 */
+  answered?: (workId: string, entry: { kind: 'wait'; question: string; answer: string }) => Promise<void>;
   log?: LoopTimingLog;
 }
 
@@ -425,7 +429,9 @@ export class WorkItemService {
       if (!step || step.status !== 'waiting' || !['waiting', 'running'].includes(state.value.item.status)) throw new RuntimeError('WORK_ITEM_NOT_WAITING', 'This step is not awaiting an answer', 409);
       await this.assertExecution(state.value);
       step.answer = answer; step.status = 'completed'; state.value.item.status = 'running';
-      await this.write(state); return this.view(state.value);
+      await this.write(state);
+      await this.options.answered?.(id, { kind: 'wait', question: state.value.item.plan.steps.find(definition => definition.id === stepId)?.instruction ?? stepId, answer });
+      return this.view(state.value);
     });
   }
   /** 只计算修订影响和授权，不写记录、不停止任何步骤。 */
@@ -623,7 +629,12 @@ export class WorkItemService {
     const review = definition.reviewPolicy ? `\nIndependent review: inspect the actual upstream workspace paths. Process completion is not acceptance. End with exactly one fenced block labelled dutydeck-review containing the verdict JSON (on its own lines), with no non-whitespace text after its closing fence. Tool commentary may precede it. A bare JSON object is also accepted: {"decision":"accept|rework|stop","reviewed":[{"stepId":"...","attemptId":"...","digest":"..."}],"targetStepId":"only for rework","feedback":"user-readable conclusion, evidence and remaining issues"}. Copy stepId, attemptId and generatedResult.digest for EVERY completed Agent input. These identify generated artifacts, not proof of code correctness. Use accept only after checking the acceptance criteria; rework requires one allowed target; stop for missing context or issues outside those targets. Policy: ${JSON.stringify(definition.reviewPolicy)}` : '';
     const upstream = record.promptPolicyVersion === 'optimized-v1' ? renderWorkUpstream(inputs) : JSON.stringify(inputs);
     const receipt = record.promptPolicyVersion === 'optimized-v1' ? 'Return completion status, complete artifacts, executed checks and results, unverified items, applicability and blockers. ' : '';
-    return `Goal: ${record.item.goal}\n\nStep: ${definition.title}\n${definition.instruction}${feedback}\n\nUpstream inputs (generated results, not independent business verification):\n${upstream}\n\n${receipt}Return the complete generated result for this step. Do not create nested Dutydeck work items.${review}`;
+    let context: string | undefined;
+    if (definition.reviewPolicy && this.options.stepContext) {
+      try { context = await this.options.stepContext(this.view(record), definition); }
+      catch (error) { throw new RuntimeError('WORK_ITEM_STEP_CONTEXT_UNAVAILABLE', errorText(error), 409); }
+    }
+    return `Goal: ${record.item.goal}\n\nStep: ${definition.title}\n${definition.instruction}${feedback}\n\nUpstream inputs (generated results, not independent business verification):\n${upstream}\n\n${receipt}Return the complete generated result for this step. Do not create nested Dutydeck work items.${review}${context ? `\n\n${context}` : ''}`;
   }
   /** 构造固定 TaskRequestV1；显式选项与原 prompt/skills/actor 全部冻结，重投不重读默认值。 */
   private buildRequest(record: StoredWork, definition: WorkPlan['steps'][number], sessionId: string, attemptId: string, prompt: string): TaskRequestV1 {
@@ -775,7 +786,14 @@ export class WorkItemService {
       const number = step.attempts.length + 1;
       const attemptId = `${id}:${step.id}:${number}`;
       const sessionId = 'ses_work_' + hash(attemptId);
-      const prompt = await this.prompt(record, definition);
+      let prompt: string;
+      try { prompt = await this.prompt(record, definition); }
+      catch (error) {
+        if (!(error instanceof RuntimeError && error.code === 'WORK_ITEM_STEP_CONTEXT_UNAVAILABLE')) throw error;
+        // 补充材料取不到（例如 Leader 指引被删）：这一步没有启动，记一次失败尝试，修好后可以重试。
+        step.attempts.push({ id: attemptId, number, status: 'failed', error: error.message, createdAt: time(), updatedAt: time() });
+        step.status = 'failed'; record.item.status = 'failed'; await this.write(state); return record;
+      }
       const request = this.buildRequest(record, definition, sessionId, attemptId, prompt);
       const taskId = executionTaskId('work_item', sessionId, attemptId);
       step.attempts.push({ id: attemptId, number, sessionId, taskId, status: 'preparing', createdAt: time(), updatedAt: time() });

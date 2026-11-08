@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -9,6 +9,7 @@ import { RelayAskBroker, RelayCapabilityRegistry } from '@dutydeck/relay';
 import { WorkItemService } from './work-items.js';
 import { WorkItemInteractions } from './work-item-interactions.js';
 import { LeaderDelegationService, layeredPlan, parseLeaderResult } from './leader-delegation.js';
+import { LeaderModeService } from './leader-mode.js';
 import { LarkWorkbench, reviewStatusLabel, workItemElements } from './lark/workbench.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from './lark/config.js';
 import { LarkMessageCoordinator } from './lark/coordinator.js';
@@ -25,7 +26,15 @@ const plan = (agentId = 'worker') => JSON.stringify({ decision: 'plan', title: '
   { id: 'impl', title: '修复并补测试', agentId, instruction: '修复登录并补测试，列出改动文件和验证命令。', dependsOn: [], workspaceMode: 'worktree' }
 ] });
 
-async function fixture(executionMode: StoredLarkConfig['executionMode'] = 'layered', options: { planningTimeoutMs?: number; permissionMode?: 'ask' | 'full-trust'; leaderAgent?: Pick<AgentConfig, 'protocol' | 'permissionMode'> } = {}) {
+async function writeSkill(directory: string, name: string, body: string) {
+  await mkdir(directory, { recursive: true });
+  await writeFile(join(directory, 'SKILL.md'), `---\nname: ${name}\ndescription: Leader 指引\n---\n${body}\n`);
+}
+type Fixture = Awaited<ReturnType<typeof fixture>>;
+const planningMarker = '负责把接待转来的目标拆成步骤';
+const arbitrationMarker = '替用户判断 Worker 的一个请求';
+type WorkerMode = 'done' | 'ask' | 'permission';
+async function fixture(executionMode: StoredLarkConfig['executionMode'] = 'layered', options: { planningTimeoutMs?: number; arbitrationTimeoutMs?: number; permissionMode?: 'ask' | 'full-trust'; leaderAgent?: Pick<AgentConfig, 'protocol' | 'permissionMode'>; leaderSkill?: string; worker?: WorkerMode } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'dutydeck-delegation-'));
   const repos = createRepositories(join(directory, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   const cards: Array<{ messageId: string; input: any }> = [];
@@ -34,7 +43,11 @@ async function fixture(executionMode: StoredLarkConfig['executionMode'] = 'layer
   const stopped = new Set<string>();
   const busy = new Set<string>();
   const denied = new Set<string>();
-  const leader = { reply: plan(), open: false, waiting: [] as Array<() => void>, hangStart: false, starts: [] as Array<() => void> };
+  const leader = { reply: plan(), open: false, waiting: [] as Array<() => void>, hangStart: false, starts: [] as Array<() => void>,
+    ruling: '{"decision":"answer","answer":"用 main 分支","basis":"账本里用户说过在 main 上改"}', hangRuling: false };
+  const worker = { mode: options.worker ?? 'done' as WorkerMode, question: '改动放在哪个分支？', permission: '推送到远端仓库', outcomes: [] as string[] };
+  const permissionCalls: Array<[string, boolean]> = [];
+  const approval = { allowed: true };
   const revoked = new Set<string>();
   let work!: WorkItemService;
   let tools!: LarkAgentToolsService;
@@ -56,19 +69,33 @@ async function fixture(executionMode: StoredLarkConfig['executionMode'] = 'layer
         const prompt = typeof promptOrSubmission === 'string' ? promptOrSubmission : promptOrSubmission.prompt;
         prompts.push({ sessionId, agentId: agent.id, prompt });
         let text: string;
-        if (prompt.includes('你是分层协作里的 Leader')) {
+        if (prompt.includes(planningMarker)) {
           if (!leader.open) await new Promise<void>(resolve => { leader.waiting.push(resolve); releases.set(sessionId, resolve); });
           text = leader.reply;
+        } else if (prompt.includes(arbitrationMarker)) {
+          if (leader.hangRuling) await new Promise<void>(resolve => releases.set(sessionId, resolve));
+          text = leader.ruling;
         } else if (prompt.includes('Step: Leader 验收')) {
           const inputs = JSON.parse(prompt.split('Upstream inputs (generated results, not independent business verification):\n')[1]!.split('\n\n')[0]!);
           text = JSON.stringify({ decision: 'accept', reviewed: inputs.map((input: any) => ({ stepId: input.stepId, attemptId: input.attemptId, digest: input.generatedResult.digest })), feedback: '验收结论：通过\n登录测试已核对。' });
+        }
+        else if (sessionId.startsWith('ses_work_') && worker.mode === 'ask') {
+          const outcome = await broker.register({ sessionId, question: worker.question });
+          worker.outcomes.push(outcome.status === 'answered' ? outcome.answer : outcome.status);
+          text = `已修复：改动 src/login.ts，pnpm test 通过。分支：${outcome.status === 'answered' ? outcome.answer : outcome.status}`;
+        } else if (sessionId.startsWith('ses_work_') && worker.mode === 'permission') {
+          const wait = new Promise<void>(resolve => releases.set(sessionId, resolve));
+          emit({ type: 'permission_request', data: { id: `permit_${sessionId}`, title: worker.permission, status: 'pending' } });
+          await wait;
+          text = '已修复：改动 src/login.ts，pnpm test 通过。';
         }
         else if (sessionId.startsWith('ses_work_')) text = '已修复：改动 src/login.ts，pnpm test 通过。';
         else { await new Promise<void>(resolve => releases.set(sessionId, resolve)); text = '已交给 Leader。'; }
         emit({ type: 'text', data: { text } });
         busy.delete(sessionId);
         emit({ type: 'completed', data: { stopReason: 'end_turn' } });
-      }
+      },
+      resolvePermission: async (id, allowed) => { permissionCalls.push([id, allowed]); releases.get(sessionId)?.(); return true; }
     } satisfies AgentDriver)
   });
   const capabilities = new LarkAgentToolCapabilityRegistry(repos.sessions, 'http://localhost', 'fixture-signing-key');
@@ -86,10 +113,18 @@ async function fixture(executionMode: StoredLarkConfig['executionMode'] = 'layer
   const log = { warn: vi.fn(), info: vi.fn(), error: vi.fn() };
   let interactions!: WorkItemInteractions;
   const authorize = async (_id: string, actor?: string) => !revoked.has(actor ?? '') && ['ou_alice', 'installation_owner'].includes(actor ?? '');
-  const workbench = new LarkWorkbench(repos, runtime, () => work, () => interactions, authorize, { client: () => client as any, log });
-  work = new WorkItemService({ repositories: repos, runtime, authorize, requireConfirmation: workPlanConfirmationRequired, prepareDelivery: (sid, id, key) => workbench.prepareDelivery(sid, id, key), deliver: item => workbench.deliver(item), notify: (item, actor) => workbench.notify(item, actor) });
-  interactions = new WorkItemInteractions(work, runtime, broker, async () => true);
-  const delegationOptions = { repositories: repos, runtime, work, authorizeAgent: async (_session: string, _actor: string, agentId: string) => !denied.has(agentId), prepareDelivery: (sid: string, id: string, key: string) => workbench.prepareDelivery(sid, id, key), notice: (id: string, text: string, key: string) => workbench.notice(id, text, key), log,
+  let leaderMode!: LeaderModeService;
+  const home = join(directory, 'home');
+  const workbench = new LarkWorkbench(repos, runtime, () => work, () => interactions, authorize, { client: () => client as any, log, leaderDecisions: id => leaderMode.decisions(id) });
+  work = new WorkItemService({ repositories: repos, runtime, authorize, requireConfirmation: workPlanConfirmationRequired, prepareDelivery: (sid, id, key) => workbench.prepareDelivery(sid, id, key), deliver: item => workbench.deliver(item),
+    notify: (item, actor) => { leaderMode.observe(item); return workbench.notify(item, actor); }, stepContext: (item, definition) => leaderMode.reviewContext(item, definition), answered: (id, entry) => leaderMode.answered(id, entry) });
+  const authorizeInteraction = vi.fn(async (_session: string, _actor: string, action: string) => action !== 'high_risk.execute' || approval.allowed);
+  interactions = new WorkItemInteractions(work, runtime, broker, authorizeInteraction, () => leaderMode);
+  const authorizeAgent = async (_session: string, _actor: string, agentId: string) => !denied.has(agentId);
+  const leaderModeOptions = { repositories: repos, runtime, work: () => work, interactions: () => interactions, broker, authorizeAgent, authorizeInteraction, workspaceRoot: join(directory, 'leader-scratch'), homeDirectory: home, log,
+    ...(options.arbitrationTimeoutMs ? { timeoutMs: options.arbitrationTimeoutMs } : {}) };
+  leaderMode = new LeaderModeService(leaderModeOptions);
+  const delegationOptions = { repositories: repos, runtime, work, authorizeAgent, prepareDelivery: (sid: string, id: string, key: string) => workbench.prepareDelivery(sid, id, key), notice: (id: string, text: string, key: string) => workbench.notice(id, text, key), log, homeDirectory: home,
     ...(options.planningTimeoutMs ? { timeoutMs: options.planningTimeoutMs } : {}) };
   const delegations = new LeaderDelegationService(delegationOptions);
   const agents = ['pmo', 'leader', 'worker'].map(id => agentConfigSchema.parse({ id, name: id, command: 'fixture', protocol: 'acp', permissionMode: 'ask', cwd: directory, ...(id === 'leader' ? options.leaderAgent : {}) }));
@@ -97,14 +132,14 @@ async function fixture(executionMode: StoredLarkConfig['executionMode'] = 'layer
   const config: StoredLarkConfig = { appId: 'cli_layered', appSecret: 'fixture-secret', workspace: directory, defaultAgentId: 'pmo', permissionMode: options.permissionMode ?? 'ask', listening: true,
     fullTrustConfirmed: true, preInjectPrompt: '', structuredAskCards: false, groupCardMention: false, groupToolsEnabled: true, groupToolsAllowSend: false, pushIntervalMs: 1000, hideTraceOnComplete: false,
     allowedUsers: [], allowedEmails: [], allowedBots: [], peerBotsAllowed: false, highRiskAllowedUsers: [], highRiskAllowedEmails: [], highRiskPattern: 'dangerous', riskControlMode: 'off',
-    ...(executionMode === 'layered' ? { executionMode, leaderAgentId: 'leader', workerAgentIds: ['worker'] } : {}) };
+    ...(executionMode === 'layered' ? { executionMode, leaderAgentId: 'leader', workerAgentIds: ['worker'] } : {}), ...(options.leaderSkill ? { leaderSkill: options.leaderSkill } : {}) };
   await repos.config.set(larkBotsConfigKey, JSON.stringify([config]));
   const coordinator = new LarkMessageCoordinator(runtime, client as any, log, Math.random, 'ou_bot', undefined, repos.channelMappings, async () => 'group', undefined, undefined, { store: repos.config, broker, workbench });
   await coordinator.initializeWorkflows(config);
   await coordinator.startReconciliation(config);
   const app = await buildApp(runtime, { relay: { runtime, broker, capabilities: new RelayCapabilityRegistry(repos.sessions, 'http://localhost', 'fixture-relay') }, workItems: { service: work, interactions, authorize: async () => ({ allowed: true, actorId: 'installation_owner' }) }, workItemTools: { runtime, work, tools, delegations }, lark: { listeningDisabled: true } });
-  const extra: LeaderDelegationService[] = [];
-  cleanup.push(async () => { leader.open = true; leader.waiting.forEach(release => release()); leader.hangStart = false; leader.starts.splice(0).forEach(release => release()); coordinator.stop(); workbench.close(); await delegations.close(); for (const service of extra) await service.close(); await work.close(); broker.close(); for (const release of releases.values()) release(); await app.close(); await runtime.shutdown(); capabilities.close(); repos.close(); await rm(directory, { recursive: true, force: true }); });
+  const extra: Array<LeaderDelegationService | LeaderModeService> = [];
+  cleanup.push(async () => { leader.open = true; leader.waiting.forEach(release => release()); leader.hangStart = false; leader.starts.splice(0).forEach(release => release()); coordinator.stop(); workbench.close(); await delegations.close(); await leaderMode.close(); for (const service of extra) await service.close(); await work.close(); broker.close(); for (const release of releases.values()) release(); await app.close(); await runtime.shutdown(); capabilities.close(); repos.close(); await rm(directory, { recursive: true, force: true }); });
   const fetcher = async (url: string | URL | Request, init?: RequestInit) => {
     const response = await app.inject({ method: init?.method as any ?? 'GET', url: new URL(String(url)).pathname, headers: Object.fromEntries(new Headers(init?.headers)), ...(init?.body ? { payload: String(init.body) } : {}) });
     return new Response(response.body, { status: response.statusCode, headers: { 'content-type': 'application/json' } });
@@ -127,11 +162,27 @@ async function fixture(executionMode: StoredLarkConfig['executionMode'] = 'layer
   };
   const openLeader = () => { leader.open = true; leader.waiting.splice(0).forEach(release => release()); };
   const resumed = () => { const service = new LeaderDelegationService(delegationOptions); extra.push(service); return service; };
-  const leaderPrompts = () => prompts.filter(value => value.prompt.includes('你是分层协作里的 Leader'));
+  /** 模拟重启：换一个 Leader 模式服务，旧的不再处理请求。 */
+  const restartLeaderMode = async () => { await leaderMode.close(); leaderMode = new LeaderModeService(leaderModeOptions); extra.push(leaderMode); return leaderMode; };
+  const leaderPrompts = () => prompts.filter(value => value.prompt.includes(planningMarker));
+  const arbitrations = () => prompts.filter(value => value.prompt.includes(arbitrationMarker));
+  const leaderRecord = async (workId: string) => JSON.parse((await repos.config.get(`leader_mode:${workId}`))!);
+  /** 卡片上出现过的全部文字（新发的卡和 PATCH）。 */
+  const cardTexts = () => [...cards.map(card => card.input), ...client.update.mock.calls.map(([input]: any[]) => input)].map(input => JSON.stringify(input));
   const record = async (id: string) => JSON.parse((await repos.config.get(`leader_delegation:${id}`))!);
   const setRecord = (id: string, value: unknown) => repos.config.set(`leader_delegation:${id}`, JSON.stringify(value));
   const setConfig = (patch: Partial<StoredLarkConfig>) => repos.config.set(larkBotsConfigKey, JSON.stringify([{ ...config, ...patch }]));
-  return { repos, runtime, work, delegations, coordinator, cards, prompts, stopped, denied, revoked, leader, replyText, log, pmoTurn, openLeader, resumed, leaderPrompts, record, setRecord, setConfig };
+  /** 私聊里交给 Leader 并等目标建好；私聊不需要确认，计划直接执行。 */
+  const delegateGoal = async (messageId: string, text: string, chatType: 'group' | 'p2p' = 'p2p') => {
+    const turn = await pmoTurn(messageId, text, chatType);
+    const delegated = await turn.run('delegate', { goal: '修复登录', context: '仓库在当前目录', idempotencyKey: messageId }) as { id: string; workId: string };
+    await turn.finish();
+    openLeader();
+    await vi.waitFor(async () => expect(await work.exists(delegated.workId)).toBe(true));
+    return { turn, delegated };
+  };
+  const tickUntil = async (check: () => Promise<void> | void, timeout = 10_000) => vi.waitFor(async () => { await work.tick(); await check(); }, { timeout });
+  return { directory, home, repos, runtime, work, broker, delegations, coordinator, config, client, cards, prompts, stopped, denied, revoked, leader, worker, approval, permissionCalls, authorizeInteraction, replyText, log, pmoTurn, openLeader, resumed, restartLeaderMode, leaderPrompts, arbitrations, record, setRecord, setConfig, leaderRecord, cardTexts, delegateGoal, tickUntil };
 }
 
 describe('Leader 计划解析', () => {
@@ -168,12 +219,12 @@ describe('Leader 计划解析', () => {
   });
 });
 
-describe('分层协作：PMO 交接、Leader 规划、Worker 执行、Leader 验收', () => {
+describe('Leader 模式：接待交接、Leader 规划、Worker 执行、Leader 验收', () => {
   it('runs a group goal end to end after human confirmation and stops each child once it settles', async () => {
     const f = await fixture();
     const turn = await f.pmoTurn('om_goal', '帮我修复登录并补测试');
     const pmoPrompt = f.prompts.find(value => value.agentId === 'pmo')!.prompt;
-    expect(pmoPrompt).toContain('[Dutydeck 分层协作]');
+    expect(pmoPrompt).toContain('[Dutydeck Leader 模式]');
     expect(pmoPrompt).toContain('dutydeck agent work delegate --file');
     expect(pmoPrompt).toContain('delegate --file');
     expect(pmoPrompt).not.toContain('[Dutydeck 目标编排]');
@@ -201,8 +252,8 @@ describe('分层协作：PMO 交接、Leader 规划、Worker 执行、Leader 验
     const leaderSessions = (await f.runtime.listSessions()).filter(session => session.source === 'lark-leader');
     expect(leaderSessions).toHaveLength(1);
     expect(leaderSessions[0]).toMatchObject({ agentId: 'leader', permissionMode: 'deny-all', sourceId: delegated.id });
-    expect(f.prompts.filter(value => value.prompt.includes('你是分层协作里的 Leader'))).toHaveLength(1);
-    const leaderPromptText = f.prompts.find(value => value.prompt.includes('你是分层协作里的 Leader'))!.prompt;
+    expect(f.prompts.filter(value => value.prompt.includes(planningMarker))).toHaveLength(1);
+    const leaderPromptText = f.prompts.find(value => value.prompt.includes(planningMarker))!.prompt;
     expect(leaderPromptText).toContain('用户说登录页 500');
     expect(leaderPromptText).toContain('不是 git 仓库');
 
@@ -319,18 +370,174 @@ describe('分层协作：PMO 交接、Leader 规划、Worker 执行、Leader 验
     const turn = await f.pmoTurn('om_single', '修复登录');
     const prompt = f.prompts.find(value => value.agentId === 'pmo')!.prompt;
     expect(prompt).toContain('[Dutydeck 目标编排]');
-    expect(prompt).not.toContain('[Dutydeck 分层协作]');
+    expect(prompt).not.toContain('[Dutydeck Leader 模式]');
     await expect(turn.run('delegate', { goal: '修复登录', idempotencyKey: 'single' })).rejects.toMatchObject({ statusCode: 409, error: { code: 'LEADER_DELEGATION_DISABLED' } });
   });
 
-  it('keeps the single-Agent prompt in direct messages, where goals have no pinned delivery', async () => {
-    const f = await fixture();
-    const turn = await f.pmoTurn('om_p2p', '修复登录', 'p2p');
-    const prompt = f.prompts.find(value => value.agentId === 'pmo')!.prompt;
-    expect(prompt).toContain('[Dutydeck 目标编排]');
-    expect(prompt).not.toContain('[Dutydeck 分层协作]');
-    await expect(turn.run('delegate', { goal: '修复登录', idempotencyKey: 'p2p' })).rejects.toMatchObject({ statusCode: 409, error: { code: 'WORK_ITEM_ORIGIN_MISSING' } });
+  it('runs a direct-message goal without confirmation, answers the Worker from the Leader guide and replies to the trigger message', async () => {
+    const f = await fixture('layered', { leaderSkill: 'leader-guide', worker: 'ask' });
+    await writeSkill(join(f.directory, '.claude', 'skills', 'leader-guide'), 'leader-guide', '分支一律用 main；上线前要问用户。');
+    const { turn, delegated } = await f.delegateGoal('om_p2p', '帮我修复登录，就在 main 上改');
+    expect(f.prompts.find(value => value.agentId === 'pmo')!.prompt).toContain('[Dutydeck Leader 模式]');
+    const planning = f.leaderPrompts()[0]!.prompt;
+    expect(planning).toContain('分支一律用 main');
+    expect(planning).toContain(`Path: ${join(f.directory, '.claude', 'skills', 'leader-guide', 'SKILL.md')}`);
+    expect(planning).toContain('[授权账本');
+    expect(planning).toContain('消息：帮我修复登录，就在 main 上改');
+    // 私聊不需要「开始执行」确认，计划直接执行。
+    expect((await f.work.get(turn.parent.id, delegated.workId, 'ou_alice')).status).toBe('running');
+
+    await f.tickUntil(async () => expect((await f.work.get(turn.parent.id, delegated.workId, 'ou_alice')).status).toBe('completed'));
+    expect(f.worker.outcomes).toEqual(['用 main 分支']);
+    const [arbitration] = f.arbitrations();
+    expect(f.arbitrations()).toHaveLength(1);
+    expect(arbitration!.prompt).toContain('分支一律用 main');
+    expect(arbitration!.prompt).toContain('改动放在哪个分支？');
+    expect(arbitration!.prompt).toContain('消息：帮我修复登录，就在 main 上改');
+    expect((await f.runtime.getSession(arbitration!.sessionId))).toMatchObject({ source: 'lark-leader', sourceId: delegated.id, permissionMode: 'deny-all' });
+    // 代判中的提问从没出现在卡片上。
+    expect(f.cardTexts().some(text => text.includes('Agent 提问'))).toBe(false);
+    const review = f.prompts.find(value => value.prompt.includes('Step: Leader 验收'))!.prompt;
+    expect(review).toContain('[Leader 模式：验收补充（宿主追加）]');
+    expect(review).toContain('分支一律用 main');
+    expect(review).toContain('消息：帮我修复登录，就在 main 上改');
+    expect(review).toMatch(/Worker 提问「改动放在哪个分支？」→ 回答：用 main 分支 · 依据：账本里用户说过在 main 上改/);
+    expect((await f.leaderRecord(delegated.workId)).rulings).toEqual([expect.objectContaining({ decision: 'answer', answer: '用 main 分支', delivery: 'delivered' })]);
+    const final = () => f.cards.find(card => card.input.taskId === delegated.workId && card.input.elements?.some((element: any) => element.element_id === 'final_output'));
+    await vi.waitFor(() => expect(final()?.input).toMatchObject({ messageId: 'om_p2p', state: 'completed' }));
+    expect(final()!.input.replyInThread).toBeUndefined();
+    expect(JSON.stringify(final()!.input.elements)).toContain('Leader 已替你定');
+    expect(JSON.stringify(final()!.input.elements)).toContain('改动放在哪个分支？ → 用 main 分支 · 账本里用户说过在 main 上改');
+  });
+
+  it('lets the Leader approve a tool call only when the requester could approve it, and records the requester\'s own card answer', async () => {
+    const f = await fixture('layered', { worker: 'permission' });
+    f.leader.ruling = '{"decision":"approve","basis":"用户要求修好后推送"}';
+    f.approval.allowed = false;
+    const { turn, delegated } = await f.delegateGoal('om_perm', '修好后推送到远端');
+    const escalated = () => f.cards.find(card => JSON.stringify(card.input).includes('发起人本人没有批准'));
+    await f.tickUntil(() => expect(escalated()).toBeDefined());
+    expect(f.permissionCalls).toEqual([]);
+    expect(f.authorizeInteraction).toHaveBeenCalledWith(turn.parent.id, 'ou_alice', 'high_risk.execute');
+    const text = JSON.stringify(escalated()!.input.elements);
+    expect(text).toContain('工具授权');
+    expect(text).toContain('推送到远端仓库');
+    expect(text).toContain('Leader 倾向批准');
+    expect(escalated()!.input).toMatchObject({ messageId: 'om_perm', taskId: delegated.workId });
+    expect(escalated()!.input.replyInThread).toBeUndefined();
+    // 有权限的人在卡片上批准：照常回给 Worker，并记进授权账本。
+    f.approval.allowed = true;
+    const button = escalated()!.input.elements.find((element: any) => element.behaviors?.[0]?.value?.answer === 'approve').behaviors[0].value;
+    await f.coordinator.handleAction(button, 'ou_alice', { messageId: escalated()!.messageId, chatId: 'oc_p2p' });
+    expect(f.permissionCalls).toEqual([[expect.stringMatching(/^permit_ses_work_/), true]]);
+    expect((await f.leaderRecord(delegated.workId)).answers).toEqual([expect.objectContaining({ text: '卡片答复：批准工具调用「推送到远端仓库」' })]);
+    await f.tickUntil(async () => expect((await f.work.get(turn.parent.id, delegated.workId, 'ou_alice')).status).toBe('completed'));
+    expect(f.prompts.find(value => value.prompt.includes('Step: Leader 验收'))!.prompt).toContain('卡片答复：批准工具调用「推送到远端仓库」');
+  });
+
+  it('approves a tool call for the Worker without a card when the requester may approve it', async () => {
+    const f = await fixture('layered', { worker: 'permission' });
+    f.leader.ruling = '{"decision":"approve","basis":"用户要求修好后推送"}';
+    const { turn, delegated } = await f.delegateGoal('om_perm_ok', '修好后推送到远端');
+    await f.tickUntil(async () => expect((await f.work.get(turn.parent.id, delegated.workId, 'ou_alice')).status).toBe('completed'));
+    expect(f.permissionCalls).toEqual([[expect.stringMatching(/^permit_ses_work_/), true]]);
+    expect(f.cardTexts().some(text => text.includes('工具授权'))).toBe(false);
+    expect((await f.leaderRecord(delegated.workId)).rulings).toEqual([expect.objectContaining({ decision: 'approve', delivery: 'delivered' })]);
+  });
+
+  it.each([
+    ['escalates', {}, (f: Fixture) => { f.leader.ruling = '{"decision":"escalate","problem":"要不要换到 release 分支？","suggestion":"留在 main，release 冻结中","ifNoReply":"这一步一直等着，其他步骤照常"}'; }, ['问题：要不要换到 release 分支？', '建议：留在 main，release 冻结中', '不回复时：这一步一直等着'], 1],
+    ['returns output that is not a ruling', {}, (f: Fixture) => { f.leader.ruling = '我觉得用 main 就行'; }, ['说明：Leader 的输出不合规'], 1],
+    ['answers a question with approve', {}, (f: Fixture) => { f.leader.ruling = '{"decision":"approve","basis":"可以"}'; }, ['Leader 的输出不合规', 'Worker 提问不能用 approve'], 1],
+    ['times out', { arbitrationTimeoutMs: 300 }, (f: Fixture) => { f.leader.hangRuling = true; }, ['说明：Leader 代判超时'], 1],
+    ['has used up the per-goal rulings', {}, async (f: Fixture, workId: string) => {
+      const raw = (await f.repos.config.get(`leader_mode:${workId}`))!;
+      await f.repos.config.set(`leader_mode:${workId}`, JSON.stringify({ ...JSON.parse(raw), runs: 30 }));
+    }, ['本目标已代判 30 次'], 0]
+  ] as const)('leaves the question to the user with the reason when the Leader %s', async (_name, options, arrange, expected, runs) => {
+    const f = await fixture('layered', { worker: 'ask', ...options });
+    const { turn, delegated } = await f.delegateGoal('om_escalate', '修复登录');
+    await arrange(f, delegated.workId);
+    const card = () => f.cards.find(item => JSON.stringify(item.input).includes('Agent 提问'));
+    await f.tickUntil(() => expect(card()).toBeDefined());
+    const text = JSON.stringify(card()!.input.elements);
+    expect(text).toContain('改动放在哪个分支？');
+    for (const value of expected) expect(text).toContain(value);
+    expect(f.arbitrations()).toHaveLength(runs);
+    expect(f.worker.outcomes).toEqual([]);
+    // 用户在卡片上作答：回给 Worker，记进授权账本。
+    const form = card()!.input.elements.find((element: any) => element.tag === 'form');
+    const value = form.elements.find((element: any) => element.tag === 'button').behaviors[0].value;
+    await f.coordinator.handleAction({ ...value, form_value: { answer: '用 release 分支' } }, 'ou_alice', { messageId: card()!.messageId, chatId: 'oc_p2p' });
+    await f.tickUntil(async () => expect((await f.work.get(turn.parent.id, delegated.workId, 'ou_alice')).status).toBe('completed'));
+    expect(f.worker.outcomes).toEqual(['用 release 分支']);
+    expect((await f.leaderRecord(delegated.workId)).answers).toEqual([expect.objectContaining({ text: '卡片答复：回答 Worker 提问「改动放在哪个分支？」：用 release 分支' })]);
+    expect(f.prompts.find(value => value.prompt.includes('Step: Leader 验收'))!.prompt).toContain('用 release 分支');
+  });
+
+  it('keeps decisions across a restart: a lost ruling is judged again, a saved one is delivered once and never re-judged', async () => {
+    const f = await fixture('layered', { worker: 'ask' });
+    f.leader.hangRuling = true;
+    const { turn, delegated } = await f.delegateGoal('om_restart', '修复登录');
+    await f.tickUntil(() => expect(f.arbitrations()).toHaveLength(1));
+    // 代判进行中重启：这次代判丢了，重启后重新判。
+    await f.restartLeaderMode();
+    f.leader.hangRuling = true;
+    await f.tickUntil(() => expect(f.arbitrations()).toHaveLength(2));
+    // 第二次判完、决定已落盘但还没回给 Worker 时又重启：重启后只补送，不再判。
+    const [ask] = f.broker.listPending();
+    const raw = (await f.repos.config.get(`leader_mode:${delegated.workId}`))!;
+    const record = JSON.parse(raw);
+    await f.repos.config.set(`leader_mode:${delegated.workId}`, JSON.stringify({ ...record, rulings: [{ key: `${ask!.sessionId}\u0000${ask!.id}`, stepId: 'impl', kind: 'question', question: ask!.question, at: new Date().toISOString(), decision: 'answer', answer: '用 hotfix 分支', basis: '账本', delivery: 'pending' }] }));
+    await f.restartLeaderMode();
+    f.leader.hangRuling = false;
+    await f.tickUntil(async () => expect((await f.work.get(turn.parent.id, delegated.workId, 'ou_alice')).status).toBe('completed'));
+    expect(f.worker.outcomes).toEqual(['用 hotfix 分支']);
+    expect(f.arbitrations()).toHaveLength(2);
+    expect((await f.leaderRecord(delegated.workId)).rulings).toEqual([expect.objectContaining({ answer: '用 hotfix 分支', delivery: 'delivered' })]);
+    await f.restartLeaderMode();
+    await f.work.tick();
+    expect(f.worker.outcomes).toHaveLength(1);
+  });
+
+  it('fails planning in the origin chat when the Leader guide cannot be found, instead of falling back to the built-in rules', async () => {
+    const f = await fixture('layered', { leaderSkill: 'missing-guide' });
+    const turn = await f.pmoTurn('om_guide', '修复登录', 'p2p');
+    const delegated = await turn.run('delegate', { goal: '修复登录', idempotencyKey: 'guide' }) as { id: string };
+    await turn.finish();
+    f.openLeader();
+    await vi.waitFor(async () => expect(await f.record(delegated.id)).toMatchObject({ status: 'failed', error: expect.stringContaining('Leader 指引「missing-guide」不可用') }));
+    expect(f.replyText).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_guide', replyInThread: false, text: expect.stringContaining('Leader 规划失败：Leader 指引「missing-guide」不可用') }));
     expect(f.leaderPrompts()).toHaveLength(0);
+  });
+
+  it('fails the review step with the reason when the Leader guide disappears before review, and runs it after a retry', async () => {
+    const f = await fixture('layered', { leaderSkill: 'leader-guide' });
+    const skill = join(f.directory, '.claude', 'skills', 'leader-guide');
+    await writeSkill(skill, 'leader-guide', '验收看测试。');
+    const { turn, delegated } = await f.delegateGoal('om_review_guide', '修复登录');
+    await rm(skill, { recursive: true, force: true });
+    await f.tickUntil(async () => expect((await f.work.get(turn.parent.id, delegated.workId, 'ou_alice')).status).toBe('failed'));
+    const failed = await f.work.get(turn.parent.id, delegated.workId, 'ou_alice');
+    const review = failed.steps.find(step => step.id === 'leader_review')!;
+    expect(review).toMatchObject({ status: 'failed', attempts: [expect.objectContaining({ status: 'failed', error: expect.stringContaining('Leader 指引「leader-guide」不可用') })] });
+    expect(f.prompts.some(value => value.prompt.includes('Step: Leader 验收'))).toBe(false);
+    await vi.waitFor(() => expect(f.cardTexts().some(text => text.includes('Leader 指引「leader-guide」不可用'))).toBe(true));
+    await writeSkill(skill, 'leader-guide', '验收看测试。');
+    await f.work.retryStep(turn.parent.id, delegated.workId, 'leader_review', failed.revision, 'ou_alice');
+    await f.tickUntil(async () => expect((await f.work.get(turn.parent.id, delegated.workId, 'ou_alice')).status).toBe('completed'));
+    expect(f.prompts.find(value => value.prompt.includes('Step: Leader 验收'))!.prompt).toContain('验收看测试。');
+  });
+
+  it('gives a Tag-dispatched turn in the same reception session the Leader mode prompt', async () => {
+    const f = await fixture();
+    await f.coordinator.adopt({ ...message('om_tag', '登录页一直 500，帮忙修一下'), mentions: [],
+      authorization: { strength: 'inferred', via: 'participation_act', decisionId: 'decision_tag', policyVersion: 'v1', evidenceIds: ['obs_tag'] } } as LarkMessageEvent, f.config);
+    await vi.waitFor(() => expect(f.prompts.some(value => value.agentId === 'pmo' && value.prompt.includes('登录页一直 500'))).toBe(true));
+    const prompt = f.prompts.find(value => value.agentId === 'pmo')!;
+    expect(prompt.prompt).toContain('[Dutydeck Leader 模式]');
+    expect(prompt.prompt).toContain('delegate --file');
+    expect(await f.runtime.getSession(prompt.sessionId)).toMatchObject({ source: 'lark', agentId: 'pmo' });
   });
 
   it('runs at most three Leader plannings at a time and queues the rest', async () => {

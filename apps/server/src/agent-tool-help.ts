@@ -20,13 +20,13 @@ export const workbenchHelp = (command = 'dutydeck work') => `${bindingHelp(comma
 - ${command} run <模板编号> <版本> <新目标> --key <稳定请求键>：复用指定版本。
 收到目标编号只表示计划持久接收。需确认的话题状态为 awaiting_confirmation：用户点卡片「开始执行」前一个步骤都不派发，点「取消计划」即作废；无需确认时直接入队。按本轮提示和实际返回状态向用户简述分工与编号、必要时说明等待确认，然后结束本轮，不轮询确认结果。Dutydeck 会回传等待和最终成果，不要轮询占住父任务或另行重复发送最终报告。失败或结果未知时不要自动创建替代目标，先报告并由用户决定重试。工具不提供代替用户回答等待、批准权限或确认计划的入口。`;
 
-/** 分层协作下替换上面的编排提示：默认 Agent 当 PMO，执行类任务交给 Leader 拆解、Worker 执行、Leader 验收。 */
-export const layeredWorkbenchHelp = (command = 'dutydeck work') => `${bindingHelp(command)}\n[Dutydeck 分层协作]
-仅当本轮提示明确启用分层协作时适用；普通模式按上方目标编排处理，不改变为 PMO。分层模式的 PMO 接待用户，理清诉求，记下已确认的事实和约束，再决定自己答复还是交给 Leader。
+/** Leader 模式下替换上面的编排提示：默认 Agent 当接待，执行类任务交给 Leader 拆解、Worker 执行、Leader 验收。 */
+export const layeredWorkbenchHelp = (command = 'dutydeck work') => `${bindingHelp(command)}\n[Dutydeck Leader 模式]
+仅当本轮提示明确启用 Leader 模式时适用；普通模式按上方目标编排处理，不改当接待。接待和用户对话，理清诉求，记下已确认的事实和约束，再决定自己答复还是交给 Leader。
 - 自己答复：问答、解释、查询、总结、闲聊，以及不改代码、不跑测试的一次性小事。
-- 交给 Leader：需要改代码、跑测试、多步推进或多人分工的任务。写一份简报后执行 ${command} delegate --file <JSON文件>，JSON 为 {"goal":"一句话目标","context":"完成任务需要的事实、约束、路径、链接和用户原话要点","idempotencyKey":"本轮稳定且唯一的请求键"}。Leader 和 Worker 看不到本话题历史，只看到简报；不要放无关群历史、账户信息或秘密。
-- 交接后 Leader 在后台拆解并指派 Worker，最后由 Leader 验收。按本轮设置，计划就绪后直接执行或等用户点确认卡「开始执行」才派发。向用户说明已交给 Leader、结果会回到本话题，然后结束本轮；不要轮询，也不要自己动手做同一件事。
-- Leader 在本话题提问时，等用户补充后把新信息并入 context，用新的 idempotencyKey 重新 delegate。
+- 交给 Leader：需要改代码、跑测试、多步推进或多人分工的任务。写一份简报后执行 ${command} delegate --file <JSON文件>，JSON 为 {"goal":"一句话目标","context":"完成任务需要的事实、约束、路径、链接和用户原话要点","idempotencyKey":"本轮稳定且唯一的请求键"}。Worker 看不到本话题历史，只看到简报；Leader 另外能看到宿主摘录的用户原话。不要放无关群历史、账户信息或秘密。
+- 交接后 Leader 在后台拆解并指派 Worker，替用户回答 Worker 能定的问题，最后验收。按本轮设置，计划就绪后直接执行或等用户点确认卡「开始执行」才派发。向用户说明已交给 Leader、结果会回到本话题，然后结束本轮；不要轮询，也不要自己动手做同一件事。
+- Leader 在本话题提问，或用户不同意交付结果里「Leader 已替你定」的某一条时，把用户的新信息并入 context，用新的 idempotencyKey 重新 delegate。
 - ${command} list / show <目标编号>：查看本话题已有目标的进度，回答用户的进度询问。
 工具不提供代替用户确认计划、回答等待或批准权限的入口。`;
 

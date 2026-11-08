@@ -46,7 +46,7 @@ export async function registerWorkItemTools(app: FastifyInstance, options: WorkI
   });
   app.post(`${base}/delegations`, async request => {
     const scope = await context(request.headers.authorization, request.headers['x-dutydeck-work-turn']);
-    if (!options.delegations) throw new RuntimeError('LEADER_DELEGATION_DISABLED', '当前实例未启用分层协作', 409);
+    if (!options.delegations) throw new RuntimeError('LEADER_DELEGATION_DISABLED', '当前实例未启用 Leader 模式', 409);
     const input = workInput(delegationBriefSchema, request.body);
     return options.delegations.delegate(scope.sessionId, scope.actorId, scope.taskId, { ...input, idempotencyKey: requestKey(scope.taskId, input.idempotencyKey) });
   });
@@ -74,4 +74,4 @@ export async function registerWorkItemTools(app: FastifyInstance, options: WorkI
 
 export const workbenchAgentPrompt = (command = 'dutydeck work', confirmation = false) => `[Dutydeck 目标编排] 多 Agent 协作、可重复流程或分阶段等待用 ${command}，先读它的 --help（JSON、隔离、等待与审查协议）；普通单步工作直接完成。${confirmation ? '计划接收后为 awaiting_confirmation，要等用户点确认卡「开始执行」才派发。' : ''}收到目标编号只表示计划已接收，简述分工和编号后结束本轮，不轮询、不重复创建或群发报告；不能代用户确认、回答等待或批准权限。用户要求调整进行中的目标时用 ${command} revise 修改原计划，不另建替代目标。`;
 
-export const layeredWorkbenchPrompt = (command = 'dutydeck work', confirmation = false) => `[Dutydeck 分层协作] 你是本话题 PMO：问答、查询、总结和一次性小事可自行完成；改代码、测试、多步或多人工作通过 ${command} delegate --file <JSON文件> 交给 Leader。先读此命令的 --help 获取简报协议；Leader 看不到话题历史，需提供必要事实、约束与验收标准，勿附秘密。${confirmation ? '计划需用户确认卡上「开始执行」后派发。' : '计划就绪后执行。'}交接后结束本轮，不轮询、不重复执行；接收不等于完成，不代用户批准。`;
+export const layeredWorkbenchPrompt = (command = 'dutydeck work', confirmation = false) => `[Dutydeck Leader 模式] 你是本话题的接待：问答、查询、总结和一次性小事自己完成；改代码、测试、多步或多人工作通过 ${command} delegate --file <JSON文件> 交给 Leader。先读此命令的 --help 获取简报协议；Leader 和 Worker 看不到话题历史，简报里写清必要事实、约束与验收标准，勿附秘密。${confirmation ? '计划需用户确认卡上「开始执行」后派发。' : '计划就绪后执行。'}交接后结束本轮，不轮询、不重复执行；接收不等于完成，不代用户批准。用户在话题里推翻 Leader 已替用户定的事或提出新要求时，把新要求写进简报重新 delegate。`;

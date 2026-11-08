@@ -42,6 +42,8 @@ export const larkExecutionConfirmed = (config: Pick<StoredLarkConfig, 'permissio
 export const defaultLarkPushIntervalMs = 1_000;
 export const defaultLarkTraceLimit = 50;
 export const defaultLarkIdleCompactHours = 24;
+/** Leader 指引设置的长度上限：技能名、`插件名/技能名` 或 SKILL.md 绝对路径都放得下。 */
+export const maxLeaderSkillLength = 300;
 export const defaultHighRiskPattern = String.raw`(?:^|[\s;&|])(?:sudo|rm|shred|dd|mkfs|diskutil|launchctl|kill|pkill|lark-?cli|larkcli|bits-?cli|bitscli|bytedcli|ssh|scp|rsync|osascript)\b|\bgit\s+(?:push|reset|clean|checkout)\b|\b(?:npm|pnpm|yarn)\s+(?:publish|unpublish)\b|\bcurl\b[^\n]*(?:-X|--request)\s*(?:POST|PUT|PATCH|DELETE)\b`;
 
 const normalizeEmails = (value: unknown) => [...new Set((Array.isArray(value) ? value : [])
@@ -307,6 +309,7 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
     ...(parsed.executionMode === 'layered' ? { executionMode: 'layered' as const } : {}),
     ...(parsed.leaderAgentId?.trim() ? { leaderAgentId: parsed.leaderAgentId.trim() } : {}),
     ...(normalizeAgentIds(parsed.workerAgentIds).length ? { workerAgentIds: normalizeAgentIds(parsed.workerAgentIds) } : {}),
+    ...(typeof parsed.leaderSkill === 'string' && parsed.leaderSkill.trim() ? { leaderSkill: parsed.leaderSkill.trim() } : {}),
     structuredAskCards: parsed.structuredAskCards === undefined || parsed.structuredAskCards === true,
     groupCardMention: parsed.groupCardMention === undefined || parsed.groupCardMention === true,
     ...(parsed.verificationCommand?.trim() ? { verificationCommand: parsed.verificationCommand.trim() } : {}),
@@ -443,6 +446,7 @@ export const publicLarkConfig = (config: StoredLarkConfig, activeAppIds: Readonl
   executionMode: config.executionMode === 'layered' ? 'layered' : 'single',
   ...(config.leaderAgentId ? { leaderAgentId: config.leaderAgentId } : {}),
   workerAgentIds: config.workerAgentIds ?? [],
+  ...(config.leaderSkill ? { leaderSkill: config.leaderSkill } : {}),
   structuredAskCards: config.structuredAskCards !== false,
   groupCardMention: config.groupCardMention === true,
   pushIntervalMs: config.pushIntervalMs,
@@ -525,6 +529,9 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   if (input.executionMode !== undefined && !['single', 'layered'].includes(input.executionMode)) {
     throw new LarkServiceError('INVALID_LARK_CONFIG', '执行方式无效。', 400);
   }
+  if (input.leaderSkill !== undefined && (typeof input.leaderSkill !== 'string' || input.leaderSkill.trim().length > maxLeaderSkillLength)) {
+    throw new LarkServiceError('INVALID_LARK_CONFIG', `Leader 指引必须是不超过 ${maxLeaderSkillLength} 字的技能名、插件技能引用或 SKILL.md 路径。`, 400);
+  }
   if (input.idleCompactEnabled !== undefined && typeof input.idleCompactEnabled !== 'boolean') {
     throw new LarkServiceError('INVALID_LARK_CONFIG', '空闲后自动压缩上下文开关必须为布尔值。', 400);
   }
@@ -569,6 +576,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   const executionMode = input.executionMode ?? current?.executionMode ?? 'single';
   const leaderAgentId = input.leaderAgentId === undefined ? current?.leaderAgentId : input.leaderAgentId.trim() || undefined;
   const workerAgentIds = input.workerAgentIds === undefined ? current?.workerAgentIds ?? [] : normalizeAgentIds(input.workerAgentIds);
+  const leaderSkill = input.leaderSkill === undefined ? current?.leaderSkill : input.leaderSkill.trim() || undefined;
   const structuredAskCards = input.structuredAskCards ?? current?.structuredAskCards ?? true;
   const groupCardMention = input.groupCardMention ?? current?.groupCardMention ?? true;
   const pushIntervalMs = input.pushIntervalMs ?? current?.pushIntervalMs ?? defaultLarkPushIntervalMs;
@@ -632,10 +640,10 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
     if (agent && permissionMode !== 'full-trust' && !supportsRemoteApproval(agent)) throw new LarkServiceError('LARK_APPROVAL_UNSUPPORTED', `Agent ${row.agentId} does not support Lark approval.`, 422);
   }
   if (executionMode === 'layered') {
-    // PMO 通过群工具里的 work delegate 把任务交给 Leader，没有群工具就没有交接入口。
-    if (!groupToolsEnabled) throw new LarkServiceError('INVALID_LARK_CONFIG', '分层协作需要开启群工具。', 400);
-    if (!leaderAgentId) throw new LarkServiceError('INVALID_LARK_CONFIG', '分层协作需要选择 Leader Agent。', 400);
-    if (!workerAgentIds.length || workerAgentIds.length > 8) throw new LarkServiceError('INVALID_LARK_CONFIG', '分层协作需要选择 1 到 8 个 Worker Agent。', 400);
+    // 接待通过群工具里的 work delegate 把任务交给 Leader，没有群工具就没有交接入口。
+    if (!groupToolsEnabled) throw new LarkServiceError('INVALID_LARK_CONFIG', 'Leader 模式需要开启群工具。', 400);
+    if (!leaderAgentId) throw new LarkServiceError('INVALID_LARK_CONFIG', 'Leader 模式需要选择 Leader Agent。', 400);
+    if (!workerAgentIds.length || workerAgentIds.length > 8) throw new LarkServiceError('INVALID_LARK_CONFIG', 'Leader 模式需要选择 1 到 8 个 Worker Agent。', 400);
     // 只在提交分层设置时校验名单：已选的 Agent 后来被删，不拦只改其他字段的保存；运行时跳过缺失的 Worker，缺 Leader 则拒绝委派。
     const rosterSubmitted = input.executionMode !== undefined || input.leaderAgentId !== undefined || input.workerAgentIds !== undefined;
     for (const id of agents && rosterSubmitted ? [leaderAgentId, ...workerAgentIds] : []) {
@@ -703,6 +711,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
     ...(executionMode === 'layered' ? { executionMode } : {}),
     ...(leaderAgentId ? { leaderAgentId } : {}),
     ...(workerAgentIds.length ? { workerAgentIds } : {}),
+    ...(leaderSkill ? { leaderSkill } : {}),
     structuredAskCards,
     groupCardMention,
     ...(verificationCommand ? { verificationCommand } : {}),

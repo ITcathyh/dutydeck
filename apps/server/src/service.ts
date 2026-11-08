@@ -33,6 +33,8 @@ import { createCollaborationIntegration } from './collaboration-integration.js';
 import { isAutomatedRequest } from './agent-request-tools.js';
 import { WorkspaceApprovals } from './workspace-approvals.js';
 import { LeaderDelegationService } from './leader-delegation.js';
+import { LeaderModeService } from './leader-mode.js';
+import { sha256Hex } from './hash.js';
 import { renderMemoryIndex } from './lark/memory-view.js';
 import type { CollaborationExtensions } from './collaboration-extensions.js';
 import { LarkGroupManager } from './lark/group-management.js';
@@ -145,7 +147,7 @@ export function accessMode(config: Pick<AppConfig, 'host' | 'authEnabled'>): 'lo
 /** 显式确认在非回环地址上免认证运行：--unsafe-no-auth 或这个环境变量 */
 export const UNSAFE_NO_AUTH_ENV = 'DUTYDECK_UNSAFE_NO_AUTH';
 /** 停服步骤，按执行顺序；强制退出时据此列出还没开始的步骤。 */
-const SHUTDOWN_PHASES = ['insight', 'historyRetention', 'watch', 'pluginResults', 'workbench', 'workbenchHttp', 'workItems', 'delegations', 'automation', 'ciWebhook', 'pullRequests',
+const SHUTDOWN_PHASES = ['insight', 'historyRetention', 'watch', 'pluginResults', 'workbench', 'workbenchHttp', 'workItems', 'delegations', 'leaderMode', 'automation', 'ciWebhook', 'pullRequests',
   'relayClose', 'collaboration', 'relayFlush', 'http', 'runtime', 'capabilities', 'database', 'pluginDispose'] as const;
 type ShutdownPhase = typeof SHUTDOWN_PHASES[number];
 
@@ -661,11 +663,15 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   if (ciWebhook) setupCleanup.push(() => ciWebhook.close());
   setupCleanup.push(() => pullRequests.close());
   const authorizeWorkAgent = (sessionId: string, actorId: string, agentId: string) => authorizeWorkItemAgent(repos, groupManager, automationIntegration.authorize, sessionId, actorId, agentId);
-  const workbench = new LarkWorkbench(repos, runtime, () => workItems, () => workInteractions, automationIntegration.authorize, { env, authorizeAgent: authorizeWorkAgent, log: { warn: (...args: any[]) => log.warn(...args as [unknown, string]) } });
+  const workbench = new LarkWorkbench(repos, runtime, () => workItems, () => workInteractions, automationIntegration.authorize, { env, authorizeAgent: authorizeWorkAgent,
+    leaderDecisions: workId => leaderMode.decisions(workId), log: { warn: (...args: any[]) => log.warn(...args as [unknown, string]) } });
   setupCleanup.push(() => workbench.close());
   const workItems: WorkItemService = new WorkItemService({ repositories: repos, runtime, authorize: automationIntegration.authorize, authorizeAgent: authorizeWorkAgent,
     requireConfirmation: workPlanConfirmationRequired, log: loopLog,
-    prepareDelivery: (sessionId, id, key) => workbench.prepareDelivery(sessionId, id, key), deliver: item => workbench.deliver(item), notify: (item, actorId) => workbench.notify(item, actorId) });
+    prepareDelivery: (sessionId, id, key) => workbench.prepareDelivery(sessionId, id, key), deliver: item => workbench.deliver(item),
+    // Leader 模式目标的新请求先排上代判，再按代判后的可见请求刷新卡片。
+    notify: (item, actorId) => { leaderMode.observe(item); return workbench.notify(item, actorId); },
+    stepContext: (item, definition) => leaderMode.reviewContext(item, definition), answered: (workId, entry) => leaderMode.answered(workId, entry) });
   setupCleanup.push(() => workItems.close());
   const delegations = new LeaderDelegationService({ repositories: repos, runtime, work: workItems, authorizeAgent: authorizeWorkAgent,
     prepareDelivery: (sessionId, id, key) => workbench.prepareDelivery(sessionId, id, key), notice: (workId, text, key) => workbench.notice(workId, text, key),
@@ -731,7 +737,11 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       });
     }
   }, createRelayAskStore(repos.config));
-  const workInteractions = new WorkItemInteractions(workItems, runtime, relayBroker, (sessionId, actorId, action) => authorizeWorkItemInteraction(repos, groupManager, sessionId, actorId, action, env, workbenchHttp.fetch));
+  const authorizeInteraction = (sessionId: string, actorId: string, action: 'high_risk.execute' | 'terminal.write' | 'terminal.read') => authorizeWorkItemInteraction(repos, groupManager, sessionId, actorId, action, env, workbenchHttp.fetch);
+  const workInteractions: WorkItemInteractions = new WorkItemInteractions(workItems, runtime, relayBroker, authorizeInteraction, () => leaderMode);
+  const leaderMode: LeaderModeService = new LeaderModeService({ repositories: repos, runtime, work: () => workItems, interactions: () => workInteractions, broker: relayBroker, authorizeAgent: authorizeWorkAgent, authorizeInteraction,
+    workspaceRoot: join(tmpdir(), 'dutydeck-leader', sha256Hex(resolve(config.databaseUrl)).slice(0, 16)), log: { warn: (details, message) => log.warn(details, message) } });
+  setupCleanup.push(() => leaderMode.close());
   closeResources = () => {
     if (!closeRun) closeRun = (async () => {
       // 名字限定在 SHUTDOWN_PHASES 里，增删步骤时两边对不上会在编译期报错。
@@ -755,7 +765,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       };
       await settle([['watch', () => closeWatch?.()]]);
       await settle([['pluginResults', closePluginResults]]);
-      await settle([['workbench', () => workbench.close()], ['workbenchHttp', () => workbenchHttp.close()], ['workItems', () => workItems.close()], ['delegations', () => delegations.close()], ['automation', () => automation.close()], ['ciWebhook', () => ciWebhook?.close()], ['pullRequests', () => pullRequests.close()]]);
+      await settle([['workbench', () => workbench.close()], ['workbenchHttp', () => workbenchHttp.close()], ['workItems', () => workItems.close()], ['delegations', () => delegations.close()], ['leaderMode', () => leaderMode.close()], ['automation', () => automation.close()], ['ciWebhook', () => ciWebhook?.close()], ['pullRequests', () => pullRequests.close()]]);
       // Wake blocked asks before waiting for HTTP shutdown.
       await settle([['relayClose', () => relayBroker.close()]]);
       await settle([['collaboration', () => collaboration?.close()], ['relayFlush', () => relayBroker.flush()], ['http', () => app?.close()], ['runtime', () => runtime.shutdown()]]);
@@ -1004,7 +1014,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     resourceRetentionTimer.unref();
     sweepResources();
     workItems.start();
-    void delegations.start().catch(error => log.warn({ error }, '分层协作规划恢复失败'));
+    void delegations.start().catch(error => log.warn({ error }, 'Leader 模式规划恢复失败'));
     const tick = () => {
       void timeLoop('automation.tick', loopLog, () => automation.tick()).catch(error => log.warn({ error }, '自动任务轮询失败'));
       if (ciWebhook) void timeLoop('ci-webhook.tick', loopLog, () => ciWebhook.tick()).catch(error => log.warn({ error }, 'CI webhook 续作轮询失败'));

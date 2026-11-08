@@ -15,8 +15,8 @@ import type { LarkMessageEvent } from './listener.js';
 import type { PersistedLarkCardTask } from './coordinator.js';
 
 const originKey = (sessionId: string, key: string) => `workbench.origin.${digest(`${sessionId}\0${key}`)}`;
-/** 心跳已处理完的标记：目标 revision 加待决请求摘要，两者都没变就不必再走一轮 notify。 */
-const settledNoticeKey = (item: WorkItem, requests: WorkItemRequest[]) => `${item.revision}\0${digest(JSON.stringify(requests))}`;
+/** 心跳已处理完的标记：目标 revision、待决请求摘要和 Leader 已定事项数，都没变就不必再走一轮 notify。 */
+const settledNoticeKey = (item: WorkItem, requests: WorkItemRequest[], decided = 0) => `${item.revision}\0${digest(JSON.stringify(requests))}\0${decided}`;
 interface Target { appId: string; chatId: string; replyMessageId: string; replyInThread: boolean }
 const labels: Record<string, string> = { awaiting_confirmation: '待确认', pending: '待执行', running: '执行中', waiting: '待你补充', completed: '已完成', failed: '执行失败', blocked: '需要处理', cancelling: '正在停止', cancelled: '已取消', skipped: '已跳过' };
 
@@ -74,7 +74,11 @@ const parseNoticeClaim = (value: string | undefined) => {
 export interface WorkItemElementOptions {
   /** agentId → 显示名（来自 runtime.listAgents）；缺失或与 id 相同则只显示 agentId。 */
   agentNames?: Record<string, string>;
+  /** Leader 模式目标里 Leader 已经替用户定下、回给 Worker 的事：最近几条和总数。 */
+  leaderDecisions?: LeaderDecisions;
 }
+export type LeaderDecisions = { recent: Array<{ question: string; decision: string; basis?: string }>; total: number };
+const oneLine = (text: string, max: number) => { const line = text.replace(/\s+/g, ' ').trim(); return line.length > max ? `${line.slice(0, max - 1)}…` : line; };
 
 /**
  * 验收状态标签：
@@ -336,8 +340,17 @@ export function workItemElements(item: WorkItem, requests: WorkItemRequest[] = [
     // 有待确认修订时重试会被拒绝，先确认或放弃修订。
     if (step.status === 'failed' && item.status === 'failed' && !pending) elements.push(action('retry', `重试：${definition.title}`, { step_id: step.id }));
   }
+  const decided = options.leaderDecisions;
+  if (decided?.total) elements.push({ tag: 'markdown', content: [
+    `**Leader 已替你定**${decided.total > decided.recent.length ? `（共 ${decided.total} 条，这里是最近 ${decided.recent.length} 条）` : ''}${item.status === 'completed' ? '，不同意直接在话题里说' : ''}`,
+    ...decided.recent.map(entry => `- ${neutralizeCardTags(oneLine(entry.question, 80))} → ${neutralizeCardTags(oneLine(entry.decision, 120))}${entry.basis ? ` · ${neutralizeCardTags(oneLine(entry.basis, 120))}` : ''}`)
+  ].join('\n') });
   for (const request of requests) {
-    elements.push({ tag: 'markdown', content: `**${request.kind === 'permission' ? '工具授权' : 'Agent 提问'} · ${request.stepId}**\n${neutralizeCardTags(request.text.slice(0, 4000))}` });
+    const leader = request.leader;
+    // Leader 模式里交给用户的请求：附上 Leader 写的问题、建议、不回复时会怎样，没能代判时写原因。
+    const note = leader ? [...leader.reason ? [`说明：${leader.reason}`] : [], ...leader.problem ? [`问题：${leader.problem}`] : [],
+      ...leader.suggestion ? [`建议：${leader.suggestion}`] : [], ...leader.ifNoReply ? [`不回复时：${leader.ifNoReply}`] : []] : [];
+    elements.push({ tag: 'markdown', content: `**${request.kind === 'permission' ? '工具授权' : 'Agent 提问'} · ${request.stepId}**\n${neutralizeCardTags(request.text.slice(0, 4000))}${note.length ? `\n\n${neutralizeCardTags(note.join('\n').slice(0, 3000))}` : ''}` });
     const extra = { step_id: request.stepId, request_id: request.requestId, task_id: request.taskId, request_kind: request.kind };
     if (request.kind === 'permission') elements.push(action('respond', '批准本次调用', { ...extra, answer: 'approve' }), action('respond', '拒绝本次调用', { ...extra, answer: 'reject' }));
     else {
@@ -368,7 +381,8 @@ export class LarkWorkbench {
   constructor(private readonly repos: RepositoryBundle, private readonly runtime: DutydeckRuntime,
     private readonly work: () => WorkItemService, private readonly interactions: () => WorkItemInteractions,
     private readonly authorize: (sessionId: string, actorId?: string) => Promise<boolean>,
-    private readonly options: { env?: NodeJS.ProcessEnv; authorizeAgent?: (sessionId: string, actorId: string, agentId: string) => Promise<boolean>; client?: (config: StoredLarkConfig) => LarkCardService; log: { warn: (...args: any[]) => void } }) {}
+    private readonly options: { env?: NodeJS.ProcessEnv; authorizeAgent?: (sessionId: string, actorId: string, agentId: string) => Promise<boolean>; client?: (config: StoredLarkConfig) => LarkCardService;
+      leaderDecisions?: (workId: string) => LeaderDecisions | undefined; log: { warn: (...args: any[]) => void } }) {}
 
   /** 只读：「待处理」汇总读工作项与步骤请求，沿用工作项自己的读权限与身份。 */
   inboxSource() {
@@ -403,7 +417,9 @@ export class LarkWorkbench {
       for (const card of cards) {
         let saved: PersistedLarkCardTask;
         try { saved = JSON.parse(card.extra ?? 'null'); } catch { continue; }
-        if (!saved || saved.app_id !== appId || saved.chat_id !== chatId || !saved.reply_message_id) continue;
+        // 私聊卡片不记回复位置：回复触发消息本身（映射的 externalId），不开话题。
+        const replyMessageId = saved?.reply_message_id ?? (saved?.chat_type && saved.chat_type !== 'group' ? card.externalId : undefined);
+        if (!saved || saved.app_id !== appId || saved.chat_id !== chatId || !replyMessageId) continue;
         if (saved.scope_id && session.sourceId && !session.sourceId.endsWith(`:${saved.scope_id}`) && session.sourceId !== `${appId}:${chatId}:${saved.scope_id}`) continue;
         if (taskId) {
           if (saved.runtime_task_id) {
@@ -423,7 +439,7 @@ export class LarkWorkbench {
             if (req.actor.kind !== 'channel' || req.actor.appId !== appId || (saved.sender_open_id && req.actor.id !== saved.sender_open_id)) continue;
           }
         }
-        target = { appId: appId!, chatId: chatId!, replyMessageId: saved.reply_message_id, replyInThread: saved.reply_in_thread === true };
+        target = { appId: appId!, chatId: chatId!, replyMessageId, replyInThread: saved.reply_in_thread === true };
         break;
       }
     }
@@ -461,7 +477,7 @@ export class LarkWorkbench {
       ...(reviewStatusLabel(item) ? { statusLabel: reviewStatusLabel(item) } : {}),
       readOnly: true, retryable: false, taskId: item.id, taskName: item.title, sessionId: item.parentSessionId,
       // S7：有配置就透传 Web 出口，未配置时 buildLarkCard 不渲染，不做公网兜底。
-      webBaseUrl: config.webBaseUrl, elements: workItemElements(item, requests, { agentNames: await this.agentNames() })
+      webBaseUrl: config.webBaseUrl, elements: workItemElements(item, requests, { agentNames: await this.agentNames(), leaderDecisions: this.options.leaderDecisions?.(item.id) })
     };
   }
 
@@ -531,7 +547,7 @@ export class LarkWorkbench {
     await this.send(item, target, config, `work_${digest(`${item.id}\0${item.output?.digest}`).slice(0, 40)}`);
   }
 
-  /** 分层协作的文字进展，回复到该目标固定的原话题；目标未固定交付位置时不发。 */
+  /** Leader 模式的文字进展，回复到该目标固定的原话题；目标未固定交付位置时不发。 */
   async notice(workId: string, text: string, key: string) {
     const encoded = await this.repos.config.get(`workbench.target.${workId}`);
     if (!encoded) return;
@@ -574,7 +590,7 @@ export class LarkWorkbench {
     // 先用本地记录判断，免得下面的授权每秒去飞书查一遍群成员。
     const snapshot = await this.work().peek(item.id);
     if (snapshot && !['cancelling', 'cancelled', 'completed'].includes(snapshot.status)
-      && this.settledNotices.get(snapshot.id) === settledNoticeKey(snapshot, this.interactions().pending(snapshot))) return;
+      && this.settledNotices.get(snapshot.id) === settledNoticeKey(snapshot, this.interactions().pending(snapshot), this.options.leaderDecisions?.(snapshot.id)?.total)) return;
     if (!await this.authorize(item.parentSessionId, actorId)) return;
     this.assertOpen();
     const current = await this.work().get(item.parentSessionId, item.id, actorId);
@@ -586,7 +602,7 @@ export class LarkWorkbench {
     // current 刚按同一身份 get 过（含授权），直接复用，不再重复授权和读库。
     const requests = this.interactions().pending(current);
     if (item.status === 'running' && !item.steps.some(step => step.status === 'waiting') && !requests.length && !current.pendingRevision) return;
-    const settledKey = settledNoticeKey(current, requests);
+    const settledKey = settledNoticeKey(current, requests, this.options.leaderDecisions?.(current.id)?.total);
     if (this.settledNotices.get(current.id) === settledKey) return;
     const encoded = await this.repos.config.get(`workbench.target.${item.id}`);
     if (!encoded) return;
