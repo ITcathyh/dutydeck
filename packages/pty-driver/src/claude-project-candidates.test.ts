@@ -116,4 +116,3 @@ describe('Claude long cwd candidates', () => {
     expect(resolveClaudeTranscriptPath(cwd, env)).toBe(newer);
   });
 });
-
