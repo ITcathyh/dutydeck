@@ -95,6 +95,15 @@ describe('Leader 指引解析', () => {
     await expect(resolveLeaderGuide(parent(workspace), await arrange(root), home)).rejects.toMatchObject({ code: 'LEADER_GUIDE_UNAVAILABLE', message: expect.stringContaining(reason) });
   });
 
+  it('matches a relative path when the workspace itself is a symlink', async () => {
+    const { root, home } = await directories();
+    const real = join(root, 'real-workspace');
+    const path = await skill(join(real, '.claude', 'skills', 'local'), 'local-leader');
+    await symlink(real, join(root, 'linked-workspace'));
+    expect((await resolveLeaderGuide(parent(join(root, 'linked-workspace')), '.claude/skills/local', home))!.path).toBe(path);
+    expect((await resolveLeaderGuide(parent(join(root, 'linked-workspace')), '.claude/skills/local/SKILL.md', home))!.path).toBe(path);
+  });
+
   it('matches a plugin reference before a path before a name', async () => {
     const { root, workspace, home } = await directories();
     const plugin = join(root, 'plugin');

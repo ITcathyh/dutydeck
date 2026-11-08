@@ -45,7 +45,7 @@ async function fixture(executionMode: StoredLarkConfig['executionMode'] = 'layer
   const denied = new Set<string>();
   const leader = { reply: plan(), open: false, waiting: [] as Array<() => void>, hangStart: false, starts: [] as Array<() => void>,
     ruling: '{"decision":"answer","answer":"用 main 分支","basis":"账本里用户说过在 main 上改"}', hangRuling: false };
-  const worker = { mode: options.worker ?? 'done' as WorkerMode, question: '改动放在哪个分支？', permission: '推送到远端仓库', outcomes: [] as string[] };
+  const worker = { mode: options.worker ?? 'done' as WorkerMode, question: '改动放在哪个分支？', permission: '推送到远端仓库', command: undefined as string | undefined, outcomes: [] as string[] };
   const permissionCalls: Array<[string, boolean]> = [];
   const approval = { allowed: true };
   const revoked = new Set<string>();
@@ -85,7 +85,7 @@ async function fixture(executionMode: StoredLarkConfig['executionMode'] = 'layer
           text = `已修复：改动 src/login.ts，pnpm test 通过。分支：${outcome.status === 'answered' ? outcome.answer : outcome.status}`;
         } else if (sessionId.startsWith('ses_work_') && worker.mode === 'permission') {
           const wait = new Promise<void>(resolve => releases.set(sessionId, resolve));
-          emit({ type: 'permission_request', data: { id: `permit_${sessionId}`, title: worker.permission, status: 'pending' } });
+          emit({ type: 'permission_request', data: { id: `permit_${sessionId}`, title: worker.permission, status: 'pending', ...(worker.command ? { operation: { source: 'acp_tool_call', kind: 'execute', command: worker.command } } : {}) } });
           await wait;
           text = '已修复：改动 src/login.ts，pnpm test 通过。';
         }
@@ -473,6 +473,52 @@ describe('Leader 模式：接待交接、Leader 规划、Worker 执行、Leader 
     expect(f.worker.outcomes).toEqual(['用 release 分支']);
     expect((await f.leaderRecord(delegated.workId)).answers).toEqual([expect.objectContaining({ text: '卡片答复：回答 Worker 提问「改动放在哪个分支？」：用 release 分支' })]);
     expect(f.prompts.find(value => value.prompt.includes('Step: Leader 验收'))!.prompt).toContain('用 release 分支');
+  });
+
+  it.each([
+    ['title', (f: Fixture) => { f.worker.permission = '运行 dangerous 清理脚本'; }],
+    ['command', (f: Fixture) => { f.worker.permission = '运行清理脚本'; f.worker.command = './clean.sh --dangerous'; }]
+  ] as const)('never lets the Leader approve a call whose %s matches the high-risk rule, but still applies its rejection', async (_field, arrange) => {
+    const f = await fixture('layered', { worker: 'permission' });
+    arrange(f);
+    f.leader.ruling = '{"decision":"approve","basis":"Worker 说用户已同意"}';
+    const { turn, delegated } = await f.delegateGoal('om_risky', '清理一下');
+    const escalated = () => f.cards.find(card => JSON.stringify(card.input).includes('命中高危规则'));
+    await f.tickUntil(() => expect(escalated()).toBeDefined());
+    expect(f.permissionCalls).toEqual([]);
+    expect(JSON.stringify(escalated()!.input)).toContain('Leader 倾向批准：Worker 说用户已同意');
+    expect((await f.leaderRecord(delegated.workId)).rulings).toEqual([expect.objectContaining({ decision: 'escalate', escalation: expect.objectContaining({ reason: '命中高危规则，Leader 不代批' }) })]);
+    // 同样的高危调用，Leader 拒绝照常生效。
+    const g = await fixture('layered', { worker: 'permission' });
+    arrange(g);
+    g.leader.ruling = '{"decision":"reject","basis":"用户没让动这个目录"}';
+    const rejected = await g.delegateGoal('om_risky_reject', '清理一下');
+    await g.tickUntil(async () => expect((await g.work.get(rejected.turn.parent.id, rejected.delegated.workId, 'ou_alice')).status).toBe('completed'));
+    expect(g.permissionCalls).toEqual([[expect.stringMatching(/^permit_ses_work_/), false]]);
+    expect(g.cardTexts().some(text => text.includes('工具授权'))).toBe(false);
+    expect(turn.parent.id).toBeTruthy();
+  });
+
+  it('checks the approval again before a saved decision is sent after a restart, and hands it to the user if the right is gone', async () => {
+    const f = await fixture('layered', { worker: 'permission' });
+    f.leader.hangRuling = true;
+    const { delegated } = await f.delegateGoal('om_revoked', '修好后推送到远端');
+    await f.tickUntil(() => expect(f.arbitrations()).toHaveLength(1));
+    const item = await f.work.peek(delegated.workId);
+    const step = item!.steps.find(value => value.id === 'impl')!.attempts.at(-1)!;
+    const [permission] = f.runtime.getPendingPermissions(step.sessionId!);
+    const raw = (await f.repos.config.get(`leader_mode:${delegated.workId}`))!;
+    await f.repos.config.set(`leader_mode:${delegated.workId}`, JSON.stringify({ ...JSON.parse(raw), rulings: [{ key: `${step.sessionId}\u0000${permission!.id}`, stepId: 'impl', kind: 'permission', question: '推送到远端仓库', at: new Date().toISOString(), decision: 'approve', basis: '用户要求修好后推送', delivery: 'pending' }] }));
+    // 落盘之后、送达之前，发起人的批准权限被撤销，然后服务重启补送。
+    f.approval.allowed = false;
+    await f.restartLeaderMode();
+    f.leader.hangRuling = false;
+    const escalated = () => f.cards.find(card => JSON.stringify(card.input).includes('发起人已没有批准这类操作的权限'));
+    await f.tickUntil(() => expect(escalated()).toBeDefined());
+    expect(f.permissionCalls).toEqual([]);
+    expect(JSON.stringify(escalated()!.input)).toContain('Leader 倾向批准：用户要求修好后推送');
+    expect((await f.leaderRecord(delegated.workId)).rulings).toEqual([expect.objectContaining({ decision: 'escalate', escalation: expect.objectContaining({ reason: '发起人已没有批准这类操作的权限' }) })]);
+    expect(f.arbitrations()).toHaveLength(1);
   });
 
   it('keeps decisions across a restart: a lost ruling is judged again, a saved one is delivered once and never re-judged', async () => {
