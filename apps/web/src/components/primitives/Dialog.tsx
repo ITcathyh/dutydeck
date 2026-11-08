@@ -5,6 +5,7 @@ import { useEscapeKey } from '../../useEscapeKey';
 import { cn } from './cn';
 
 export type DialogSize = 'sm' | 'md' | 'lg' | 'xl' | '2xl';
+export type DialogVariant = 'modal' | 'sheet';
 
 export type DialogProps = {
   open: boolean;
@@ -12,6 +13,7 @@ export type DialogProps = {
   label: string;
   size?: DialogSize;
   role?: 'dialog' | 'alertdialog';
+  variant?: DialogVariant;
   closeOnEscape?: boolean;
   closeOnScrim?: boolean;
   initialFocus?: RefObject<HTMLElement | null>;
@@ -41,7 +43,7 @@ const sizeClass: Record<DialogSize, string> = {
   aria-modal 恒为 true：契约 §12.6 要求所有 role=dialog 都带 aria-modal，
   由这里保证，调用方无从遗漏。
 */
-export function Dialog({ open, onClose, label, size = 'md', role = 'dialog', closeOnEscape = true, closeOnScrim = true, initialFocus, children }: DialogProps) {
+export function Dialog({ open, onClose, label, size = 'md', role = 'dialog', variant = 'modal', closeOnEscape = true, closeOnScrim = true, initialFocus, children }: DialogProps) {
   const setDialogNode = useDialogFocus(open);
   useEscapeKey(open && closeOnEscape, onClose);
 
@@ -57,7 +59,12 @@ export function Dialog({ open, onClose, label, size = 'md', role = 'dialog', clo
 
   return createPortal(
     <div
-      className="ui-overlay fixed inset-0 z-dialog grid place-items-center bg-scrim p-4 backdrop-blur-[2px]"
+      className={cn(
+        'ui-overlay fixed inset-0 z-dialog bg-scrim backdrop-blur-[2px]',
+        variant === 'sheet'
+          ? 'flex items-end justify-center p-0 sm:grid sm:place-items-center sm:p-4'
+          : 'grid place-items-center p-4'
+      )}
       // mousedown 而不是 click：在面板内按下、拖到遮罩上松开（划选文本）时
       // click 会落在遮罩上，用 click 关闭会把正在选词的用户的弹层关掉。
       onMouseDown={event => { if (closeOnScrim && event.target === event.currentTarget) onClose(); }}
@@ -67,8 +74,19 @@ export function Dialog({ open, onClose, label, size = 'md', role = 'dialog', clo
         role={role}
         aria-modal="true"
         aria-label={label}
-        className={cn('ui-dialog flex max-h-[92dvh] w-full flex-col overflow-hidden rounded-xl border border-default bg-surface shadow-dialog', sizeClass[size])}
-      >{children}</div>
+        className={cn(
+          'ui-dialog flex w-full flex-col overflow-hidden bg-surface shadow-dialog',
+          variant === 'sheet'
+            ? 'ui-sheet max-h-[80dvh] rounded-t-2xl border-t border-default sm:max-h-[92dvh] sm:rounded-xl sm:border'
+            : 'max-h-[92dvh] rounded-xl border border-default',
+          sizeClass[size]
+        )}
+      >
+        {variant === 'sheet' && (
+          <div className="mx-auto mt-2.5 h-1.5 w-9 shrink-0 rounded-full bg-border-strong sm:hidden" aria-hidden="true"/>
+        )}
+        {children}
+      </div>
     </div>,
     document.body
   );

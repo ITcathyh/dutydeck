@@ -94,7 +94,22 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
     min-height: 44px;
     min-width: 44px;
   }
+  input:not([type="checkbox"]):not([type="radio"]), textarea, select {
+    font-size: 16px !important;
+  }
   [role="tablist"] { max-width: 100%; overflow-x: auto; padding: 2px; }
+}
+@keyframes sheetIn {
+  from { transform: translateY(100%); }
+  to { transform: none; }
+}
+.ui-sheet {
+  animation: sheetIn var(--duration-normal) var(--ease-spring);
+}
+@media (prefers-reduced-motion: reduce) {
+  .ui-sheet {
+    animation: none !important;
+  }
 }
 /* 窄屏底部浮动标签栏：离底边让出系统手势区；列表页主区给它留出同样的高度，内容不会被盖住。 */
 .ui-tabbar { bottom: calc(var(--safe-bottom) + 10px); }

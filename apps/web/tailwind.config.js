@@ -98,9 +98,10 @@ export default {
       },
       // 6 档字号，size 与 line-height 成对（契约 §2）
       fontSize: {
-        meta: ['var(--font-size-meta)', { lineHeight: 'var(--line-height-meta)' }],
         caption: ['var(--font-size-caption)', { lineHeight: 'var(--line-height-caption)' }],
+        meta: ['var(--font-size-meta)', { lineHeight: 'var(--line-height-meta)' }],
         body: ['var(--font-size-body)', { lineHeight: 'var(--line-height-body)' }],
+        read: ['var(--font-size-read)', { lineHeight: 'var(--line-height-read)' }],
         title: ['var(--font-size-title)', { lineHeight: 'var(--line-height-title)' }],
         heading: ['var(--font-size-heading)', { lineHeight: 'var(--line-height-heading)' }],
         display: ['var(--font-size-display)', { lineHeight: 'var(--line-height-display)' }]
@@ -124,6 +125,7 @@ export default {
       },
       boxShadow: {
         card: 'var(--shadow-card)',
+        raised: 'var(--shadow-raised)',
         // 内容卡片与统计卡：发丝环 + 柔和投影，hover 档用于可点的卡片抬起一层。
         elevated: 'var(--shadow-elevated)',
         'elevated-hover': 'var(--shadow-elevated-hover)',

@@ -107,6 +107,29 @@ describe('Dialog 原语', () => {
     expect(screen.getByRole('dialog', { name: '测试弹层' })).toBeTruthy();
   });
 
+  it('支持 variant="sheet"，带 ui-sheet 类且关闭后焦点归还触发按钮', async () => {
+    const user = userEvent.setup({ delay: null });
+    function SheetHarness() {
+      const [open, setOpen] = useState(false);
+      return <div>
+        <button type="button" onClick={() => setOpen(true)}>打开检视</button>
+        <Dialog open={open} onClose={() => setOpen(false)} label="结果检视" variant="sheet">
+          <Dialog.Header><h2>结果检视</h2></Dialog.Header>
+          <Dialog.Body>检视内容</Dialog.Body>
+          <Dialog.Footer><button type="button" onClick={() => setOpen(false)}>关闭</button></Dialog.Footer>
+        </Dialog>
+      </div>;
+    }
+    render(<SheetHarness/>);
+    const opener = screen.getByRole('button', { name: '打开检视' });
+    await user.click(opener);
+    const dialog = screen.getByRole('dialog', { name: '结果检视' });
+    expect(dialog.className).toContain('ui-sheet');
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(opener));
+  });
+
   it('点遮罩关闭；点面板内部不关；closeOnScrim=false 时点遮罩也不关', async () => {
     const user = userEvent.setup({ delay: null });
     const { unmount } = render(<Harness/>);

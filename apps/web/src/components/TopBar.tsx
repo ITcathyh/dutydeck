@@ -1,4 +1,4 @@
-import { Keyboard, Menu, Search } from 'lucide-react';
+import { Keyboard, Menu, Plus, Search } from 'lucide-react';
 import { IconButton, Kbd } from './primitives';
 import { detectPlatform, formatShortcutKeys } from '../useKeyboardShortcuts';
 import { DutydeckIcon } from './ui';
@@ -25,6 +25,11 @@ export type TopBarProps = {
   /** 当前实例；undefined 表示主服务。 */
   instance?: string;
   onInstanceChange?(id: string | undefined): void;
+  /** 手机端（≤760px）非任务详情页的顶栏新建任务按钮。 */
+  showCreateTask?: boolean;
+  onCreateTask?(): void;
+  createTaskDisabled?: boolean;
+  createTaskLabel?: string;
 };
 
 /*
@@ -62,7 +67,7 @@ export type TopBarProps = {
   分隔线用 border-b border-default，采用标准语义边框而非硬编码 linear-gradient 渐变线，
   符合契约对颜色字面量的约束。
 */
-export function TopBar({ align = 'page', onOpenNavigation, onGoHome, onOpenSearch, onOpenShortcuts, themePreference, themeResolved, onThemeChange, hidden, instances, instance, onInstanceChange }: TopBarProps) {
+export function TopBar({ align = 'page', onOpenNavigation, onGoHome, onOpenSearch, onOpenShortcuts, themePreference, themeResolved, onThemeChange, hidden, instances, instance, onInstanceChange, showCreateTask, onCreateTask, createTaskDisabled, createTaskLabel = '新建任务' }: TopBarProps) {
   // 与命令面板的实际绑定（Mod+K）同源：mac 上是 ⌘K，其它平台是 Ctrl K。
   const platform = detectPlatform();
   const paletteKeys = formatShortcutKeys('Mod+K', platform).join(platform === 'mac' ? '' : ' ');
@@ -119,6 +124,16 @@ export function TopBar({ align = 'page', onOpenNavigation, onGoHome, onOpenSearc
         <span className="hidden min-w-0 flex-1 truncate text-left sm:inline">搜索任务目标、工作区或 Agent</span>
         <span className="hidden shrink-0 sm:inline"><Kbd>{paletteKeys}</Kbd></span>
       </button>
+
+      {showCreateTask && onCreateTask ? <button
+        type="button"
+        onClick={onCreateTask}
+        disabled={createTaskDisabled}
+        aria-label={createTaskLabel}
+        className="flex min-h-11 min-w-11 items-center justify-center rounded-md text-subtle transition-colors duration-fast ease-out hover:bg-hover hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring disabled:cursor-not-allowed disabled:opacity-50 md:hidden"
+      >
+        <Plus size={18} aria-hidden="true"/>
+      </button> : null}
 
       <ThemeToggle preference={themePreference} resolved={themeResolved} onChange={onThemeChange}/>
 

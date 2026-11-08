@@ -67,11 +67,12 @@ const contrast = (a: string, b: string) => {
 };
 
 describe('设计 token 与契约一致', () => {
-  it('6 档字号，size 与 line-height 成对（契约 §2）', () => {
+  it('字号档位 12/13/14/15/16/20/28，不出现小于 12px 的文字，size 与 line-height 成对', () => {
     const scale = {
-      meta: ['11px', '16px'],
-      caption: ['12px', '18px'],
+      caption: ['12px', '16px'],
+      meta: ['13px', '20px'],
       body: ['14px', '22px'],
+      read: ['15px', '26px'],
       title: ['16px', '24px'],
       heading: ['20px', '28px'],
       display: ['28px', '36px']
@@ -79,13 +80,15 @@ describe('设计 token 与契约一致', () => {
     for (const [step, [size, lineHeight]] of Object.entries(scale)) {
       expect(declared(`--font-size-${step}`), `--font-size-${step}`).toBe(size);
       expect(declared(`--line-height-${step}`), `--line-height-${step}`).toBe(lineHeight);
+      const px = parseInt(size, 10);
+      expect(px).toBeGreaterThanOrEqual(12);
     }
   });
 
-  it('4 档圆角 + full，按「元素高度 / 3.5」取档（契约 §3）', () => {
-    expect(declared('--radius-sm')).toBe('6px');
-    expect(declared('--radius-md')).toBe('10px');
-    expect(declared('--radius-lg')).toBe('14px');
+  it('圆角 8/12/16/20 + full', () => {
+    expect(declared('--radius-sm')).toBe('8px');
+    expect(declared('--radius-md')).toBe('12px');
+    expect(declared('--radius-lg')).toBe('16px');
     expect(declared('--radius-xl')).toBe('20px');
     expect(declared('--radius-full')).toBe('999px');
   });
