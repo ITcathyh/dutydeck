@@ -306,7 +306,7 @@ dutydeck settings bot set cli_xxx cardActionForwarding=null 'eventHandlers=[{"id
 | `executionMode` | `single` 或 `layered`（Leader 模式：接待 + Leader + Worker；需开群工具，见[Leader 模式](lark.md#leader-mode)） | `single` |
 | `leaderAgentId` | Leader 模式的 Leader Agent | 无 |
 | `workerAgentIds` | Leader 模式的 Worker Agent，1 到 8 个 | 无 |
-| `leaderSkill` | Leader 指引：技能名、`插件名/技能名`，或 `SKILL.md`（或其所在目录）的绝对路径。查找顺序：插件引用、路径、技能名（重名报错）；绝对路径不要求在技能目录里，只带 `SKILL.md`，同目录引用文件由 Leader 按需自己读；技能目录会跳过指向目录外的软链接，放在别处的指引请填绝对路径。`leaderSkill=` 清空，改回内置规则 | 空（内置规则） |
+| `leaderSkill` | Leader 指引：技能名、`插件名/技能名`，或 `SKILL.md`（或其所在目录）的绝对路径。以 `/` 或 `~/` 开头按绝对路径读，其余含 `/` 按插件引用找，剩下的按技能名找（重名报错）；绝对路径不要求在技能目录里，只带 `SKILL.md`，同目录引用文件由 Leader 按需自己读；技能目录会跳过指向目录外的软链接，放在别处的指引请填绝对路径。`leaderSkill=` 清空，改回内置规则 | 空（内置规则） |
 | `structuredAskCards` | 提问用结构化卡片；`false` 时改用文字选项和引用回复 | `true` |
 | `groupCardMention` | 群里的卡片 @ 发起人：结果卡卡尾、审批和提问卡卡首 | `true` |
 | `pushIntervalMs` | 进度卡刷新间隔，500–20000 毫秒 | `1000` |
