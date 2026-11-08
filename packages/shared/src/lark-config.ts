@@ -126,6 +126,8 @@ export interface StoredLarkConfig {
   leaderAgentId?: string;
   /** layered 下 Leader 可以指派的 Worker Agent。 */
   workerAgentIds?: string[];
+  /** layered 下 Leader 的指引技能：技能名、`插件名/技能名` 或 SKILL.md 绝对路径；缺省用宿主内置规则。 */
+  leaderSkill?: string;
   /** 结构化问答卡片总开关，默认开启；显式 false 使用文字选项与引用回复。 */
   structuredAskCards: boolean;
   /** P0-4 群内卡片 @ 发起人总开关，默认开启；开启后群内结果卡卡尾 @ 发起人，审批/提问卡卡首 @。 */
@@ -270,6 +272,7 @@ export interface PublicLarkConfig {
   executionMode: NonNullable<StoredLarkConfig['executionMode']>;
   leaderAgentId?: string;
   workerAgentIds: string[];
+  leaderSkill?: string;
   structuredAskCards: boolean;
   groupCardMention: boolean;
   /** 平台验证命令；未配置时飞书结果卡不提验证，也不给「运行验证」按钮。 */
