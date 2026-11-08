@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { WorkspaceOrganization } from '@dutydeck/shared';
@@ -431,15 +431,17 @@ describe('Calm Workbench 当前任务定位', () => {
   it('一级导航和管理入口常驻，折叠轨道保留完整可及名与展开入口', async () => {
     const onPrimaryNavChange = vi.fn(); const onToggleCollapsed = vi.fn();
     render(<SessionList {...baseProps} open collapsed primaryNav="home" onPrimaryNavChange={onPrimaryNavChange} onToggleCollapsed={onToggleCollapsed}/>);
-    expect(screen.getByRole('button', { name: /^工作台/ }).getAttribute('aria-current')).toBe('page');
-    await userEvent.click(screen.getByRole('button', { name: /^全部任务/ }));
+    expect(screen.getByRole('button', { name: /^总览/ }).getAttribute('aria-current')).toBe('page');
+    await userEvent.click(screen.getByRole('button', { name: /^任务/ }));
     expect(onPrimaryNavChange).toHaveBeenCalledWith('tasks');
+    await userEvent.click(screen.getByRole('button', { name: /^待办/ }));
+    expect(onPrimaryNavChange).toHaveBeenCalledWith('inbox');
     await userEvent.click(screen.getByRole('button', { name: /^自动化/ }));
     expect(onPrimaryNavChange).toHaveBeenCalledWith('automation');
     expect(screen.getAllByRole('button', { name: /^自动化/ })).toHaveLength(1);
     expect(screen.queryByRole('button', { name: /^定时任务/ })).toBeNull();
     expect(screen.getByRole('button', { name: /^Agent 与设置/ })).toBeTruthy();
-    expect(screen.getByRole('button', { name: /^飞书接入/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^机器人与群聊/ })).toBeTruthy();
     await userEvent.click(screen.getByRole('button', { name: '展开侧栏' }));
     expect(onToggleCollapsed).toHaveBeenCalledOnce();
   });
@@ -467,5 +469,45 @@ describe('SessionList 上下文占用徽标', () => {
     expect(badges).toHaveLength(1);
     expect(badges[0]!.closest('button')!.getAttribute('title')).toContain('任务 hot');
     expect(badges[0]!.textContent).toContain('上下文已用 90%');
+  });
+});
+
+describe('SessionList 导航分层与进行中实时任务', () => {
+  const session = (id: string, state: string): Session => ({
+    id,
+    agentId: 'codex',
+    state,
+    cwd: '/repo/active',
+    runId: `run-${id}`,
+    createdAt: '2026-11-08T00:00:00Z',
+    updatedAt: '2026-11-08T00:01:00Z'
+  });
+
+  it('一级导航只保留总览、任务、待办、自动化四个工作入口', () => {
+    const onPrimaryNavChange = vi.fn();
+    render(<SessionList {...baseProps} open primaryNav="home" onPrimaryNavChange={onPrimaryNavChange}/>);
+    const workNav = screen.getByRole('navigation', { name: '工作' });
+    const buttons = within(workNav).getAllByRole('button');
+    expect(buttons.map(button => button.querySelector('span:not(.sr-only)')?.textContent)).toEqual(['总览', '任务', '待办', '自动化']);
+  });
+
+  it('有正在执行或需要决定的任务时，侧栏展示「进行中」实时任务列表并可点击', async () => {
+    const onSelect = vi.fn();
+    const live = [
+      session('live-1', 'thinking'),
+      session('live-2', 'waiting_for_permission'),
+      session('idle-1', 'idle')
+    ];
+    render(<SessionList {...baseProps} open sessions={live} onSelect={onSelect} onPrimaryNavChange={() => {}}/>);
+
+    const liveSection = screen.getByRole('region', { name: '进行中任务' });
+    expect(within(liveSection).getByText('进行中')).toBeTruthy();
+    expect(within(liveSection).getByText('2')).toBeTruthy();
+
+    const liveButtons = within(liveSection).getAllByRole('button');
+    expect(liveButtons).toHaveLength(2);
+    // 需要决定的 live-2 排在正在推进的 live-1 前面
+    await userEvent.click(liveButtons[0]!);
+    expect(onSelect).toHaveBeenCalledWith('live-2');
   });
 });

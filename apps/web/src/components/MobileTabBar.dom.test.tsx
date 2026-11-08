@@ -8,9 +8,9 @@ describe('MobileTabBar', () => {
     const onNavigate = vi.fn();
     render(<MobileTabBar current="tasks" onNavigate={onNavigate} onCreateTask={vi.fn()}/>);
     const nav = screen.getByRole('navigation', { name: '主要页面' });
-    expect(within(nav).getAllByRole('button').map(button => button.textContent)).toEqual(['工作台', '全部任务', '自动化', '机器人']);
-    expect(within(nav).getByRole('button', { name: '全部任务' }).getAttribute('aria-current')).toBe('page');
-    expect(within(nav).getByRole('button', { name: '工作台' }).getAttribute('aria-current')).toBeNull();
+    expect(within(nav).getAllByRole('button').map(button => button.textContent)).toEqual(['总览', '任务', '待办', '自动化']);
+    expect(within(nav).getByRole('button', { name: '任务' }).getAttribute('aria-current')).toBe('page');
+    expect(within(nav).getByRole('button', { name: '总览' }).getAttribute('aria-current')).toBeNull();
     await userEvent.setup({ delay: null }).click(within(nav).getByRole('button', { name: '自动化' }));
     expect(onNavigate).toHaveBeenCalledExactlyOnceWith('automation');
   });

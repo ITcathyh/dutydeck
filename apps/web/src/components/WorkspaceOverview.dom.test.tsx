@@ -3,7 +3,7 @@ import { useState } from 'react';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
-import type { Agent, LarkBotConfig, Session } from '../api';
+import type { Agent, InboxItem, LarkBotConfig, Session } from '../api';
 import { attentionReasonForSession, nextActionForState, workbenchViewLabels, workbenchViewOrder } from '../workspace-model';
 import { WorkspaceOverview, type WorkspaceListFilters } from './WorkspaceOverview';
 
@@ -150,7 +150,7 @@ describe('WorkspaceOverview', () => {
     expect(screen.getByText(nextActionForState('failed'))).toBeTruthy();
     expect(container.querySelectorAll('[data-task-priority="attention"]')).toHaveLength(2);
     expect(container.querySelector('[data-task-priority="attention"]')?.textContent).toContain('更新于');
-    expect(screen.getByRole('button', { name: /待审批.*需要你授权/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /等你审批.*需要你授权/ })).toBeTruthy();
   });
 
   it('总览每个分区只预览前 5 条，「查看全部」切到对应视图；多选时展开全部，避免清理看不见的任务', async () => {
@@ -412,7 +412,7 @@ describe('WorkspaceOverview', () => {
 
 
 describe('Calm Workbench 首页与全部任务', () => {
-  it('首页将决策和恢复前置，空闲可继续，交付和健康接入放在侧栏', () => {
+  it('首页将决策和恢复前置，空闲可继续，交付在侧栏，健康接入不出现在首页', () => {
     const sessions = [session('1', '/repo/a', 'waiting_for_permission'), session('2', '/repo/b', 'failed'), session('3', '/repo/c', 'idle'), session('4', '/repo/d', 'thinking'), { ...session('5', '/repo/e', 'completed'), name: '已交付的真实任务' }];
     render(<WorkspaceOverview {...baseProps} sessions={sessions} larkBots={[makeSimpleBot()]}/>);
     const list = screen.getByRole('region', { name: '任务列表' });
@@ -423,7 +423,7 @@ describe('Calm Workbench 首页与全部任务', () => {
     const rail = screen.getByRole('complementary', { name: '最近交付' });
     expect(within(rail).getByText('已交付的真实任务')).toBeTruthy();
     expect(within(list).queryByText('已交付的真实任务')).toBeNull();
-    expect(within(rail).getByRole('complementary', { name: '协作入口' })).toBeTruthy();
+    expect(within(rail).queryByRole('complementary', { name: '协作入口' })).toBeNull();
   });
 
   it('检查交付使用真实任务id，完成不被描述成验证通过', async () => {
@@ -486,7 +486,7 @@ describe('WorkspaceOverview 受控列表范围', () => {
     await userEvent.click(screen.getByRole('button', { name: '清除搜索' }));
     expect(onFiltersChange).toHaveBeenLastCalledWith({ query: '', project: 'alpha' });
     rerender(<WorkspaceOverview {...baseProps} sessions={sessions} mode="home" filters={{ query: '不存在', project: 'alpha' }} onFiltersChange={onFiltersChange}/>);
-    expect(screen.getByRole('heading', { name: '工作台', level: 1 })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: '总览', level: 1 })).toBeTruthy();
     for (const name of ['修复导航', '整理文档', '修复菜单']) expect(screen.getByRole('button', { name: new RegExp(name) })).toBeTruthy();
     expect(screen.queryByText('没有找到符合条件的任务')).toBeNull();
     expect(onFiltersChange).toHaveBeenCalledTimes(2);
@@ -556,4 +556,60 @@ it.each(['waiting', 'blocked'] as const)('renders one matter attention row for a
   expect(screen.getByText(status === 'waiting' ? '等你决定：今天发布吗？' : '受阻：缺少账号')).toBeTruthy();
   rerender(<WorkspaceOverview {...baseProps} mode="tasks" view="attention" sessions={sessions} summaries={{ '1': { ...summary, taskReport: { ...taskReport, clearedAt: taskReport.reportedAt } } }}/>);
   expect(screen.queryByRole('button', { name: /需要决定的事项/ })).toBeNull();
+});
+
+describe('总览首屏顺序与飞书接入面板异常感知', () => {
+  it('首页按「需要你决定（待办）→ 正在推进 → 最近交付」顺序呈现', () => {
+    const sessions = [
+      session('1', '/repo/a', 'thinking'),
+      { ...session('2', '/repo/b', 'completed'), name: '交付的任务' }
+    ];
+    const inboxItem: InboxItem = {
+      id: 'item:1',
+      kind: 'permission',
+      sessionId: '1',
+      sessionTitle: '任务 1',
+      workspace: 'a',
+      createdAt: '2026-11-08T00:00:00Z',
+      waitingMs: 5000,
+      title: '部署授权',
+      actions: [{ id: 'open', label: '核对并决定', type: 'open' }]
+    };
+    render(
+      <WorkspaceOverview
+        {...baseProps}
+        mode="home"
+        sessions={sessions}
+        inbox={{ items: [inboxItem], loading: false, failed: false, call: vi.fn() }}
+      />
+    );
+
+    // 1. 需要你决定（待办）
+    expect(screen.getByRole('heading', { level: 2, name: '待你决定' })).toBeTruthy();
+    expect(screen.getByText('部署授权')).toBeTruthy();
+
+    // 2. 正在推进
+    const list = screen.getByRole('region', { name: '任务列表' });
+    expect(within(list).getByRole('heading', { level: 2, name: '正在推进' })).toBeTruthy();
+
+    // 3. 最近交付
+    const rail = screen.getByRole('complementary', { name: '最近交付' });
+    expect(within(rail).getByText('交付的任务')).toBeTruthy();
+  });
+
+  it('机器人接入状态异常时才出现在首页，正常监听时不打扰', () => {
+    const normalBot = makeSimpleBot({ listening: true, activeListening: true });
+    const { rerender } = render(
+      <WorkspaceOverview {...baseProps} mode="home" sessions={[]} larkBots={[normalBot]}/>
+    );
+    // 正常状态时不渲染协作入口
+    expect(screen.queryByRole('complementary', { name: '协作入口' })).toBeNull();
+
+    // 异常时（读取失败）才在首页呈现
+    rerender(
+      <WorkspaceOverview {...baseProps} mode="home" sessions={[]} larkBots={[normalBot]} larkBotsFailed/>
+    );
+    expect(screen.getByRole('complementary', { name: '协作入口' })).toBeTruthy();
+    expect(screen.getByText(/无法读取飞书接入状态/)).toBeTruthy();
+  });
 });

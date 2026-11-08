@@ -103,7 +103,7 @@ test.describe('Managed workspace browser acceptance', () => {
 
   test('Journey A: same source worktrees group into single project, navigate correctly, and display actual worktree cwd', async ({ page }) => {
     await page.goto(instance.baseUrl, { waitUntil: 'domcontentloaded' });
-    await page.getByRole('heading', { name: '工作台', level: 1, exact: true }).waitFor({ state: 'visible', timeout: 20_000 });
+    await page.getByRole('heading', { name: '总览', level: 1, exact: true }).waitFor({ state: 'visible', timeout: 20_000 });
 
     // 定位唯一的工作台导航侧栏，避免匹配到页面主区里的其他 aside
     const sidebar = page.getByRole('complementary', { name: 'Dutydeck 工作台导航' });
@@ -203,10 +203,10 @@ test.describe('Managed workspace browser acceptance', () => {
     await confirmArchiveDialog.getByRole('button', { name: '确认归档', exact: true }).click();
     await expect(confirmArchiveDialog).toBeHidden();
 
-    // 归档后回到工作台，再进入完整任务列表查看归档记录。
-    await page.getByRole('heading', { name: '工作台', level: 1, exact: true }).waitFor({ state: 'visible', timeout: 20_000 });
+    // 归档后回到总览，再进入完整任务列表查看归档记录。
+    await page.getByRole('heading', { name: '总览', level: 1, exact: true }).waitFor({ state: 'visible', timeout: 20_000 });
 
-    await page.getByRole('complementary', { name: 'Dutydeck 工作台导航' }).getByRole('button', { name: /^全部任务/ }).click();
+    await page.getByRole('complementary', { name: 'Dutydeck 工作台导航' }).getByRole('button', { name: /^任务/ }).click();
 
     // 点击任务筛选区域中的“已归档”筛选按钮，断言 aria-pressed="true"
     const filterSection = page.getByRole('region', { name: '任务筛选' });

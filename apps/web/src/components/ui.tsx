@@ -1,12 +1,51 @@
 import type { ReactNode } from 'react';
-import type { Agent, PermissionMode, Session } from '../api';
+import type { Agent, InboxItem, PermissionMode, RunSummary, Session } from '../api';
 
 // 展示层术语两级制：一条 Session 对用户叫「任务」，一条 TaskRecord 对用户叫「指令」。
 // 「任务运行」「运行」「会话」都不再作为 Session 的叫法出现在界面上。
 
 export const stateLabels: Record<string, string> = {
-  created: '可继续', starting: '启动中', idle: '可继续', thinking: '进行中', running_tool: '进行中', waiting_for_permission: '待审批', waiting_for_answer: '待回答', interrupting: '正在取消', interrupted: '已中断', completed: '已完成', failed: '失败', stopped: '已停止'
+  created: '可继续', starting: '执行中', idle: '可继续', thinking: '执行中', running_tool: '执行中', waiting_for_permission: '等你审批', waiting_for_answer: '等你回答', interrupting: '正在取消', interrupted: '已中断', completed: '已完成', failed: '失败', stopped: '已停止'
 };
+
+/**
+ * 统一状态文案映射：标题、侧栏、列表、待办共用这一套词。
+ * 执行中 / 等你回答 / 等你审批 / 等你核对 / 已完成（加上失败、已停止等终态）。
+ */
+export function resolveStatusText(
+  target: Session | InboxItem | { state?: string; kind?: string; archivedAt?: string | null },
+  summary?: RunSummary
+): string {
+  if ('archivedAt' in target && target.archivedAt) return '已归档';
+  if ('kind' in target && typeof target.kind === 'string') {
+    switch (target.kind) {
+      case 'permission':
+      case 'plan':
+      case 'work_item_request':
+        return '等你审批';
+      case 'question':
+      case 'task_report':
+      case 'work_item_answer':
+      case 'pull_request_question':
+        return '等你回答';
+      case 'reconcile':
+      case 'work_item_confirm':
+      case 'work_item_revision':
+      case 'pull_request_confirm':
+      case 'result_acceptance':
+        return '等你核对';
+      default:
+        return '等你处理';
+    }
+  }
+  if (summary?.status === 'reconcile_required') return '等你核对';
+  if (summary?.taskReport?.status === 'waiting') return '等你回答';
+  const state = target.state ?? '';
+  if (state === 'waiting_for_permission') return '等你审批';
+  if (state === 'waiting_for_answer') return '等你回答';
+  if (state === 'starting' || state === 'thinking' || state === 'running_tool') return '执行中';
+  return stateLabels[state] ?? '状态待确认';
+}
 
 /**
  * 权限模式的用户可见名称，全站唯一副本。
@@ -53,10 +92,10 @@ export function isSessionActionDisabled(session: Pick<Session, 'archivedAt' | 's
  * 只改这个函数。在调用点补条件只是把「N 份不同的判断」变成「N 份相同的判断」，
  * 下次照样各自漂移。
  */
-export function effectiveStatus(session: Session): { label: string; archived: boolean; busy: boolean; recoverable: boolean } {
+export function effectiveStatus(session: Session, summary?: RunSummary): { label: string; archived: boolean; busy: boolean; recoverable: boolean } {
   if (session.archivedAt) return { label: '已归档', archived: true, busy: false, recoverable: false };
   return {
-    label: stateLabels[session.state] ?? '状态待确认',
+    label: resolveStatusText(session, summary),
     archived: false,
     busy: busyStates.has(session.state),
     recoverable: session.state === 'failed' || session.state === 'stopped'
@@ -69,13 +108,14 @@ export function effectiveStatus(session: Session): { label: string; archived: bo
  * 只负责把 effectiveStatus 的语义映射到侧栏色板，自己不再判
  * archivedAt，也不再判什么算忙。改配色改这里，改语义改 effectiveStatus。
  */
-export function sidebarStatusVisual(session: Session): { label: string; textClass: string; dotClass: string; pulse: boolean } {
-  const status = effectiveStatus(session);
+export function sidebarStatusVisual(session: Session, summary?: RunSummary): { label: string; textClass: string; dotClass: string; pulse: boolean } {
+  const status = effectiveStatus(session, summary);
   if (status.archived) return { label: status.label, textClass: 'text-sidebar-text-muted', dotClass: 'bg-neutral-solid', pulse: false };
+  const isAttention = status.label === '等你审批' || status.label === '等你回答' || status.label === '等你核对';
   return {
     label: status.label,
-    textClass: session.state === 'failed' ? 'text-danger' : session.state === 'waiting_for_permission' ? 'text-warning' : 'text-sidebar-text-muted',
-    dotClass: stateTone[session.state] ?? 'bg-neutral-solid',
+    textClass: session.state === 'failed' ? 'text-danger' : isAttention ? 'text-warning' : 'text-sidebar-text-muted',
+    dotClass: isAttention ? 'bg-attention-solid' : status.label === '执行中' ? 'bg-info-solid' : stateTone[session.state] ?? 'bg-neutral-solid',
     pulse: false
   };
 }

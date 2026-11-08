@@ -508,7 +508,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   page.on('response', response => productResponses.push(response));
 
   await page.goto(BASE, { waitUntil: 'domcontentloaded' });
-  await page.getByRole('heading', { name: '工作台', level: 1, exact: true }).waitFor({ state: 'visible', timeout: 20_000 });
+  await page.getByRole('heading', { name: '总览', level: 1, exact: true }).waitFor({ state: 'visible', timeout: 20_000 });
 
   // 首屏上段是飞书 Bot 概览：飞书 Bot 是 agent 交互核心，dashboard 先回答「Bot 能不能收到我的话」。
   const botOverview = page.getByRole('complementary', { name: '协作入口' });

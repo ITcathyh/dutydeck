@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import type { Session } from '../../api';
+import type { RunSummary, Session } from '../../api';
 import { effectiveStatus } from '../ui';
 import { cn } from './cn';
 
@@ -40,7 +40,7 @@ export function Badge({ tone = 'neutral', variant = 'soft', children }: BadgePro
   )}>{children}</span>;
 }
 
-export type StatusBadgeProps = { session: Session };
+export type StatusBadgeProps = { session: Session; summary?: RunSummary };
 
 /*
   一条任务的状态徽标。文案与「归档优先」判据全部来自 ui.tsx:effectiveStatus。
@@ -60,8 +60,8 @@ const stateBadgeTone: Record<string, BadgeTone> = {
   completed: 'success'
 };
 
-export function StatusBadge({ session }: StatusBadgeProps) {
-  const status = effectiveStatus(session);
-  const tone: BadgeTone = status.archived ? 'neutral' : stateBadgeTone[session.state] ?? 'info';
+export function StatusBadge({ session, summary }: StatusBadgeProps) {
+  const status = effectiveStatus(session, summary);
+  const tone: BadgeTone = status.archived ? 'neutral' : (status.label === '等你审批' || status.label === '等你回答' || status.label === '等你核对') ? 'warning' : stateBadgeTone[session.state] ?? 'info';
   return <Badge tone={tone}><span aria-hidden="true" className="h-1.5 w-1.5 shrink-0 rounded-full bg-current"/>{status.label}</Badge>;
 }

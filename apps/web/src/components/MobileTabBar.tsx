@@ -1,11 +1,11 @@
-import { CalendarClock, Home, ListTodo, MessagesSquare, Plus } from 'lucide-react';
+import { CalendarClock, Home, Inbox, ListTodo, Plus } from 'lucide-react';
 import type { PrimaryNav } from '../app-route';
 
 const tabs: Array<{ nav: PrimaryNav; label: string; Icon: typeof Home }> = [
-  { nav: 'home', label: '工作台', Icon: Home },
-  { nav: 'tasks', label: '全部任务', Icon: ListTodo },
-  { nav: 'automation', label: '自动化', Icon: CalendarClock },
-  { nav: 'bots', label: '机器人', Icon: MessagesSquare }
+  { nav: 'home', label: '总览', Icon: Home },
+  { nav: 'tasks', label: '任务', Icon: ListTodo },
+  { nav: 'inbox', label: '待办', Icon: Inbox },
+  { nav: 'automation', label: '自动化', Icon: CalendarClock }
 ];
 
 /*

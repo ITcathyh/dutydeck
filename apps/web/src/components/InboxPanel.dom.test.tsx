@@ -26,7 +26,7 @@ describe('InboxPanel', () => {
     expect([...rows[1]!.querySelectorAll('mark')].map(mark => mark.textContent)).toEqual(['git reset --hard']);
     expect(within(rows[1]!).getByText(/请打开任务核对后再允许/)).toBeTruthy();
     expect(within(rows[1]!).getByRole('button', { name: '拒绝' })).toBeTruthy();
-    expect(within(rows[1]!).getByRole('button', { name: '查看' })).toBeTruthy();
+    expect(within(rows[1]!).getByRole('button', { name: '核对并决定' })).toBeTruthy();
   });
 
   it('没有条目时不占位；读取失败时给重试并说明任务列表仍可用', async () => {

@@ -16,7 +16,7 @@ describe('RunHeader', () => {
     render(<RunHeader session={session} agent={agent} taskPrompt="优化飞书任务卡片" streamStatus="open" queuedTasks={[queued]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}} onOpenInsight={() => {}}/>);
     expect(screen.getByText('dutydeck')).toBeTruthy();
     expect(screen.getByRole('heading', { name: '优化飞书任务卡片' })).toBeTruthy();
-    expect(screen.getByText('进行中')).toBeTruthy();
+    expect(screen.getByText('执行中')).toBeTruthy();
     expect(screen.getByText(nextActionForState('thinking'))).toBeTruthy();
     // 排队徽标统一为「待执行指令 N 条」，与总览页任务行同一措辞。
     expect(screen.getByText('待执行指令 1 条')).toBeTruthy();
@@ -113,10 +113,10 @@ describe('RunHeader 归档态状态视觉与只读约束', () => {
     expect(screen.getByText(nextActionForState('failed'))).toBeTruthy();
   });
 
-  it('未归档 + thinking：正常执行不持续闪动，状态写「进行中」', () => {
+  it('未归档 + thinking：正常执行不持续闪动，状态写「执行中」', () => {
     const { dot, statusText } = renderHeader({ state: 'thinking' });
-    expect(statusText.textContent).toBe('进行中');
-    expect(dot.getAttribute('aria-label')).toBe('进行中');
+    expect(statusText.textContent).toBe('执行中');
+    expect(dot.getAttribute('aria-label')).toBe('执行中');
     expect(dot.className).not.toContain('ui-status-pulse');
     expect(dot.className).toContain('bg-info-solid');
     expect(screen.getByText(nextActionForState('thinking'))).toBeTruthy();

@@ -7,6 +7,7 @@ import {
 import { hasRisk, riskSegments } from '../permission-risk';
 import { Badge, Banner, Button, Card, Skeleton } from './primitives';
 import { RiskText } from './RiskText';
+import { resolveStatusText } from './ui';
 
 type InboxPanelProps = {
   items: InboxItem[];
@@ -128,7 +129,12 @@ export function InboxPanel({ items, loading, failed = false, onRetry, call, onOp
               ? <input type="checkbox" aria-label={`选择：${item.title}`} checked={selected.includes(item.id)} onChange={() => toggle(item.id)} className="mt-1 h-4 w-4 shrink-0 accent-action"/>
               : <span className="w-4 shrink-0" aria-hidden="true"/>}
             <div className="min-w-0 flex-1">
-              <div className="flex flex-wrap items-center gap-2"><Badge tone="warning">{inboxKindLabels[item.kind]}</Badge><strong className="min-w-0 break-words text-body font-medium text-primary">{item.title}</strong></div>
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge tone={risky ? 'danger' : 'warning'}>{resolveStatusText(item)}</Badge>
+                {risky && <span className="rounded bg-danger-soft px-1.5 py-0.5 text-meta font-medium text-danger">高风险</span>}
+                <span className="text-caption text-secondary">{inboxKindLabels[item.kind]}</span>
+                <strong className="min-w-0 break-words text-body font-medium text-primary">{item.title}</strong>
+              </div>
               {command ? <p className="mt-1 break-all font-mono text-caption text-secondary"><RiskText segments={command}/></p>
                 : item.detail && <p className="mt-1 break-words text-caption text-secondary">{item.detail}</p>}
               {risky && <p className="mt-1 text-caption text-danger">命令里有可能造成破坏的片段，请打开任务核对后再允许。</p>}
@@ -145,7 +151,7 @@ export function InboxPanel({ items, loading, failed = false, onRetry, call, onOp
               {actions.map(action => action.type === 'lark_card'
                 ? <span key={action.id} className="text-caption text-subtle">{action.label}</span>
                 : action.type === 'open'
-                  ? <Button key={action.id} size="sm" variant="ghost" onClick={() => onOpen(item.sessionId)}>{action.label}</Button>
+                  ? <Button key={action.id} size="sm" variant={risky ? 'primary' : 'ghost'} onClick={() => onOpen(item.sessionId)}>{risky ? '核对并决定' : action.label}</Button>
                   : <Fragment key={action.id}>
                     <Button size="sm" variant={toneOf(action)} disabled={busy} onClick={() => void runOne(item, action)}>{action.label}</Button>
                     {action === reasonAction && <Button size="sm" variant="secondary" disabled={busy} aria-expanded={Boolean(reasonOpen)} aria-controls={reasonOpen ? reasonId : undefined} onClick={() => setExplaining(reasonOpen ? undefined : { itemId: item.id, reason: '' })}>{action.label}并说明</Button>}

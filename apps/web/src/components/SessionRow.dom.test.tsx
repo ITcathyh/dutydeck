@@ -69,7 +69,7 @@ describe('SessionRow 归档态状态视觉', () => {
 
   it('未归档 + thinking：以静态蓝点表达进行中', () => {
     const { dot, label } = renderRow(makeSession('thinking'));
-    expect(label.textContent).toBe('进行中');
+    expect(label.textContent).toBe('执行中');
     expect(dot.className).not.toContain('ui-status-pulse');
     expect(dot.className).toContain('bg-info-solid');
   });
