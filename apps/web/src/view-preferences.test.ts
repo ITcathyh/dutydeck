@@ -1,6 +1,6 @@
 import { afterEach, expect, it } from 'vitest';
 import { setInstance } from './instance';
-import { taskReadingScopeKey, viewPreferenceKey } from './view-preferences';
+import { isTimelineDensity, taskReadingScopeKey, viewPreferenceKey } from './view-preferences';
 
 afterEach(() => setInstance(undefined));
 
@@ -14,4 +14,12 @@ it('isolates the default instance from legal main and local peer names for prefe
   }
   expect(preferenceKeys.size).toBe(3);
   expect(readingKeys.size).toBe(3);
+});
+
+it('validates timeline density options correctly', () => {
+  expect(isTimelineDensity('summary')).toBe(true);
+  expect(isTimelineDensity('standard')).toBe(true);
+  expect(isTimelineDensity('detail')).toBe(true);
+  expect(isTimelineDensity('verbose')).toBe(false);
+  expect(isTimelineDensity(null)).toBe(false);
 });

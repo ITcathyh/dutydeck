@@ -75,6 +75,7 @@ export function TurnDiffContent({ sessionId, taskId, shared, embedded = false, r
   }
 
   const { summary, files, truncated, title } = diff.data;
+  const seenCount = files.filter((file, index) => viewed[file.path] === fileVersions[index]).length;
   const startComment = (target: Target, code: string) => { setEditing({ ...target, code }); setText(drafts.find(item => sameTarget(item, target))?.body ?? ''); };
   const addComment = () => {
     if (!editing || !text.trim()) return;
@@ -94,10 +95,19 @@ export function TurnDiffContent({ sessionId, taskId, shared, embedded = false, r
         </div>
         {!shared && !embedded && <a className="shrink-0 text-caption text-link underline" href={sessionPath(sessionId)}>回到任务</a>}
       </div>
-      <div className="mx-auto w-full max-w-4xl px-3 pb-2 text-caption text-subtle sm:px-5">本轮快照 · {taskId}{diff.data.finishedAt ? ` · ${new Date(diff.data.finishedAt).toLocaleString()}` : ''} · 已查看标记仅对所示文件版本有效</div>
+      <div className="mx-auto w-full max-w-4xl px-3 pb-2 text-caption text-subtle sm:px-5">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span>本轮快照 · {taskId}{diff.data.finishedAt ? ` · ${new Date(diff.data.finishedAt).toLocaleString()}` : ''}</span>
+          <span><strong>{seenCount} / {files.length} 已查看</strong> · 已查看标记仅对所示文件版本有效</span>
+        </div>
+        {files.length > 0 && <div className="mt-1 h-1 w-full overflow-hidden rounded-full bg-muted"><div className="h-full bg-action transition-all" style={{ width: `${(seenCount / files.length) * 100}%` }}/></div>}
+      </div>
     </header>
     <div className={embedded ? 'lg:grid lg:grid-cols-[180px_minmax(0,1fr)]' : ''}>
-      {embedded && <nav aria-label="改动文件" className="hidden space-y-1 border-r border-default p-3 lg:block">{files.map((file, index) => <button type="button" key={file.path} className="min-h-11 w-full break-all rounded-md px-2 py-2 text-left font-mono text-caption text-secondary hover:bg-hover" onClick={() => document.getElementById(`diff-${taskId}-${index}`)?.scrollIntoView({ block: 'start', behavior: 'instant' })}>{viewed[file.path] === fileVersions[index] ? '✓ ' : ''}{file.path}<span className="block text-meta"><span className="text-success">+{file.additions}</span> <span className="text-danger">−{file.deletions}</span></span></button>)}</nav>}
+      {embedded && <nav aria-label="改动文件" className="hidden space-y-1 border-r border-default p-3 lg:block">
+        <div className="px-2 pb-1 text-meta font-semibold text-subtle"><strong>{seenCount} / {files.length} 已查看</strong></div>
+        {files.map((file, index) => <button type="button" key={file.path} className="min-h-11 w-full break-all rounded-md px-2 py-2 text-left font-mono text-caption text-secondary hover:bg-hover" onClick={() => document.getElementById(`diff-${taskId}-${index}`)?.scrollIntoView({ block: 'start', behavior: 'instant' })}>{viewed[file.path] === fileVersions[index] ? '✓ ' : ''}{file.path}<span className="block text-meta"><span className="text-success">+{file.additions}</span> <span className="text-danger">−{file.deletions}</span></span></button>)}
+      </nav>}
     <Main className="mx-auto w-full min-w-0 max-w-4xl flex-1 space-y-3 px-3 py-3 pb-32 sm:px-5">
       {truncated && <Banner tone="warning">改动太多，只展开了前面的文件，其余文件只列出名字。</Banner>}
       {submit.isSuccess && <Banner tone="success">{submit.data.delivery === 'lark_confirmation' ? '评论已发到飞书话题，等有权限的人确认后交给 Agent 修改。' : '评论已作为新一轮请求发回当前任务。'}</Banner>}

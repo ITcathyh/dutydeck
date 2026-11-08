@@ -46,6 +46,7 @@ export type TimelineViewProps = {
   hasOngoingActivity: boolean;
   latestUserIndex: number;
   activeOutputLabel: string;
+  density?: import('../view-preferences').TimelineDensity;
   footer?: ReactNode;
   renderProgress?: (emptyState: ReactNode) => ReactNode;
 };
@@ -77,7 +78,7 @@ function ScrollToBottomButton({ onClick }: { onClick(): void }) {
   </div>;
 }
 
-const TimelineBody = memo(function TimelineBody({ timelineSections, activeOutputLabel, onResolvePermission, resolvingPermissionId, awaitingAnswer, hasOngoingActivity, timeline, latestUserIndex }: Pick<TimelineViewProps, 'timelineSections' | 'activeOutputLabel' | 'onResolvePermission' | 'resolvingPermissionId' | 'awaitingAnswer' | 'hasOngoingActivity' | 'timeline' | 'latestUserIndex'>) {
+const TimelineBody = memo(function TimelineBody({ timelineSections, activeOutputLabel, onResolvePermission, resolvingPermissionId, awaitingAnswer, hasOngoingActivity, timeline, latestUserIndex, density }: Pick<TimelineViewProps, 'timelineSections' | 'activeOutputLabel' | 'onResolvePermission' | 'resolvingPermissionId' | 'awaitingAnswer' | 'hasOngoingActivity' | 'timeline' | 'latestUserIndex' | 'density'>) {
   return <>
     {timelineSections.map(section => section.kind === 'event'
       ? <div key={section.event.id} data-timeline-event={section.event.id} style={{ display: 'flow-root' }}><TimelineItem
@@ -96,12 +97,14 @@ const TimelineBody = memo(function TimelineBody({ timelineSections, activeOutput
           modelLabel={activeOutputLabel}
           startedAt={section.startedAt}
           completedAt={section.completedAt}
+          density={density}
         />)}
-    {awaitingAnswer && !hasOngoingActivity && <ActivityPanel groups={[]} ongoing modelLabel={activeOutputLabel} startedAt={timeline[latestUserIndex]?.timestamp}/>}
+    {awaitingAnswer && !hasOngoingActivity && <ActivityPanel groups={[]} ongoing modelLabel={activeOutputLabel} startedAt={timeline[latestUserIndex]?.timestamp} density={density}/>}
   </>;
 }, (a, b) => a.activeOutputLabel === b.activeOutputLabel && a.onResolvePermission === b.onResolvePermission
   && a.resolvingPermissionId === b.resolvingPermissionId && a.awaitingAnswer === b.awaitingAnswer
   && a.hasOngoingActivity === b.hasOngoingActivity
+  && a.density === b.density
   && (!a.awaitingAnswer || a.timeline[a.latestUserIndex]?.timestamp === b.timeline[b.latestUserIndex]?.timestamp)
   && a.timelineSections.length === b.timelineSections.length && a.timelineSections.every((section, index) => section === b.timelineSections[index]));
 
@@ -110,7 +113,7 @@ type TimelineRow = TimelineTurn & { top: number; height: number };
 /** Summarized turns render from their summary, not sections; they share one empty list. */
 const noSections: TimelineSection[] = [];
 
-export function TimelineView({ fullWidth = false, variant, header, aside, onScrollTop, historyTurns, historyPlaces, sourceEvents, activeSessionId, readingScopeKey = activeSessionId ?? 'empty', visible: isVisible = true, eventsLoading, onResolvePermission, resolvingPermissionId, timeline, timelineSections, awaitingAnswer, hasOngoingActivity, latestUserIndex, activeOutputLabel, footer, renderProgress, hasOlder, loadedEventCount, olderError, loadOlder }: TimelineViewProps) {
+export function TimelineView({ fullWidth = false, variant, header, aside, onScrollTop, historyTurns, historyPlaces, sourceEvents, activeSessionId, readingScopeKey = activeSessionId ?? 'empty', visible: isVisible = true, eventsLoading, onResolvePermission, resolvingPermissionId, timeline, timelineSections, awaitingAnswer, hasOngoingActivity, latestUserIndex, activeOutputLabel, density, footer, renderProgress, hasOlder, loadedEventCount, olderError, loadOlder }: TimelineViewProps) {
   const share = variant === 'share';
   // 分享页第一次打开从英雄区开始读，不自动滚到最底部；读者滚到底后才跟随新内容，刷新后照旧跟随。
   const reading = useMemo(() => getTimelineReadingState(readingScopeKey, !share), [readingScopeKey, share]);
@@ -330,6 +333,7 @@ export function TimelineView({ fullWidth = false, variant, header, aside, onScro
               onResolvePermission={onResolvePermission} resolvingPermissionId={resolvingPermissionId}
               awaitingAnswer={awaitingAnswer && row.id === turns.at(-1)?.id}
               hasOngoingActivity={hasOngoingActivity} timeline={timeline} latestUserIndex={latestUserIndex}
+              density={density}
             />}</MeasuredTurn>)}
             <div aria-hidden="true" style={{ height: Math.max(0, layout.height - ((visible.at(-1)?.top ?? 0) + (visible.at(-1)?.height ?? 0))) }}/>
           </>

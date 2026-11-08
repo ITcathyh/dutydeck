@@ -1,5 +1,5 @@
 import { type KeyboardEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { BrainCircuit, Check, ChevronDown, ClipboardList, File, FolderOpen, Gauge, ListEnd, MessageSquarePlus, Plus, RefreshCw, Send, Sparkles, Square, X, Zap } from 'lucide-react';
+import { BrainCircuit, Check, ChevronDown, CircleStop, ClipboardList, File, FolderOpen, Gauge, ListEnd, MessageSquarePlus, Plus, RefreshCw, Send, Sparkles, Square, TriangleAlert, X, Zap } from 'lucide-react';
 import type { AgentModel, Session, SkillReference, Task } from '../api';
 import { replaceSlashQuery, slashQuery, type ComposerReference, type ModelReadiness } from '../composer-utils';
 import { composerCapabilities, mergeComposerCommands, type ComposerCommandAction } from '../composer-commands';
@@ -31,6 +31,72 @@ function useAutoResizeTextarea(value: string) {
     textarea.style.height = `${Math.min(192, Math.max(64, textarea.scrollHeight))}px`;
   }, [value]);
   return ref;
+}
+
+function NowStatusStrip({ state, blockingPermissionId }: { state: Session['state']; blockingPermissionId?: string }) {
+  const isAttention = state === 'waiting_for_permission' || Boolean(blockingPermissionId);
+  const isBusy = busyStates.has(state);
+  const isQueued = state === 'queued';
+  const isStopped = state === 'interrupted' || state === 'cancelled';
+  const isFailed = state === 'failed';
+
+  if (!isAttention && !isBusy && !isQueued && !isStopped && !isFailed) return null;
+
+  const scrollToDecision = () => {
+    const card = document.querySelector('[aria-label="权限审批"], [data-decision]');
+    if (card) {
+      card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      const focusable = card.querySelector<HTMLElement>('input[type="checkbox"], button');
+      focusable?.focus();
+    }
+  };
+
+  const scrollToProcess = () => {
+    const processEl = document.querySelector('details.reasoning, [data-timeline-event]');
+    if (processEl) {
+      processEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  };
+
+  if (isAttention) {
+    return <div role="status" className="mx-4 mb-2 flex items-center gap-2 rounded-lg border border-warning-border bg-warning-soft px-3 py-2 text-caption text-warning shadow-sm">
+      <TriangleAlert size={14} className="shrink-0 text-warning" aria-hidden="true"/>
+      <strong className="text-primary">等你审批</strong>
+      <span className="min-w-0 flex-1 truncate text-secondary">后续步骤暂停，直到你完成操作授权。</span>
+      <button type="button" onClick={scrollToDecision} className="inline-flex h-7 shrink-0 items-center gap-1 rounded bg-surface px-2.5 font-medium text-primary shadow-sm hover:bg-hover">
+        去处理
+      </button>
+    </div>;
+  }
+
+  if (isBusy) {
+    return <div role="status" className="mx-4 mb-2 flex items-center gap-2 rounded-lg border border-default bg-muted px-3 py-2 text-caption text-secondary shadow-sm">
+      <span className="shrink-0 text-info-solid"><Spinner/></span>
+      <strong className="text-primary">执行中</strong>
+      <span className="min-w-0 flex-1 truncate text-subtle">Agent 正在推进当前步骤</span>
+      <button type="button" onClick={scrollToProcess} className="inline-flex h-7 shrink-0 items-center rounded px-2 font-medium text-action hover:bg-hover">
+        查看过程
+      </button>
+    </div>;
+  }
+
+  if (isQueued) {
+    return <div role="status" className="mx-4 mb-2 flex items-center gap-2 rounded-lg border border-queued-border bg-queued-soft px-3 py-2 text-caption text-queued shadow-sm">
+      <span className="h-2 w-2 shrink-0 rounded-full bg-queued-solid"/>
+      <strong>排队中</strong>
+      <span className="min-w-0 flex-1 truncate">等待执行资源</span>
+    </div>;
+  }
+
+  if (isStopped || isFailed) {
+    return <div role="status" className="mx-4 mb-2 flex items-center gap-2 rounded-lg border border-default bg-surface px-3 py-2 text-caption text-subtle shadow-sm">
+      <CircleStop size={14} className={isFailed ? 'text-danger shrink-0' : 'text-subtle shrink-0'} aria-hidden="true"/>
+      <strong className={isFailed ? 'text-danger' : 'text-primary'}>{isFailed ? '已失败' : '已中断'}</strong>
+      <span className="min-w-0 flex-1 truncate">{isFailed ? '任务执行失败，已有改动保留，不会自动重试。' : '任务已中断，已有改动保留。'}</span>
+    </div>;
+  }
+
+  return null;
 }
 
 function QueuedTasks({ tasks, cancellingTaskId, steeringTaskId, injectingTaskId, blockingPermissionId, rejectingPermission, onCancel, onSteer, onInject, onRejectPermission }: { tasks: Task[]; cancellingTaskId?: string; steeringTaskId?: string; injectingTaskId?: string; blockingPermissionId?: string; rejectingPermission?: boolean; onCancel(id: string): void; onSteer(id: string): void; onInject?(id: string): void; onRejectPermission?(permissionId: string): void }) {
@@ -297,6 +363,7 @@ export function Composer({ planFirst = false, onPlanFirstChange, state, session,
 
   return <div className="bg-gradient-to-t from-canvas via-canvas to-transparent ui-composer-dock pt-7"><div className="ui-thread">
     {blockedPlan && <div role="alert" className="mb-2 text-caption text-secondary">这份草稿选择了先出计划。飞书会话请在飞书发送 /plan；如需直接执行，<button type="button" className="text-action underline" onClick={() => onPlanFirstChange?.(false)}>改为普通消息</button>。</div>}
+    <NowStatusStrip state={state} blockingPermissionId={blockingPermissionId}/>
     <QueuedTasks tasks={queuedTasks} cancellingTaskId={cancellingTaskId} steeringTaskId={steeringTaskId} injectingTaskId={injectingTaskId} blockingPermissionId={blockingPermissionId} rejectingPermission={rejectingPermission} onCancel={onCancelQueued} onSteer={onSteerQueued} onInject={steerable && busy ? onInjectQueued : undefined} onRejectPermission={onRejectPermission}/>
 
     <div ref={shell} className={`relative rounded-xl border border-default bg-surface p-2 shadow-panel ring-1 ring-inset ring-subtle backdrop-blur-sm transition-[transform,border-color,box-shadow,background-color] duration-normal ease-out focus-within:-translate-y-0.5 focus-within:border-action focus-within:bg-raised ${queuedTasks.length ? 'rounded-t-md' : ''}`}>

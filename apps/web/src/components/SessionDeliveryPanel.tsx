@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { X } from 'lucide-react';
 import { api, type Session, type Task, type WorkspaceCleanupPreview } from '../api';
 import { sessionDisplayName } from '../run-summary';
+import { sessionWorkspaceName } from '../workspace-model';
 import { turnDiffPath } from '../app-route';
 import { Banner, Button, Dialog, Field, IconButton, Input, Spinner } from './primitives';
 import { PullRequestPanel } from './PullRequestPanel';
@@ -65,6 +66,29 @@ export function SessionDeliveryPanel({ session, tasks, onClose, presentation = '
   const isCleaned = workspace.data?.state === 'cleaned' || Boolean(workspace.data?.cleanedAt);
 
   const content = <div className="space-y-6">
+        <section className="space-y-3" aria-label="交付清单">
+          <h3 className="text-body font-semibold">交付清单</h3>
+          <div className="rounded-lg border border-default bg-surface p-3 space-y-2 text-caption">
+            <div className="flex items-center justify-between">
+              <span className="text-subtle">执行</span>
+              <span className="font-medium text-primary">{effectiveStatus(session).label}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-subtle">改动</span>
+              <span className="font-medium text-primary">
+                {turnDiffs.data?.length ? `${turnDiffs.data.reduce((acc, d) => acc + d.summary.files, 0)} 个文件改动` : '无文件改动'}
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-subtle">验证</span>
+              <span className={`font-medium ${evidence.data?.some(r => r.status === 'passed') ? 'text-success' : 'text-subtle'}`}>
+                {evidence.data?.length ? (evidence.data[0]?.status === 'passed' ? '已验证通过' : '验证未通过') : '未验证'}
+              </span>
+            </div>
+          </div>
+          <p className="text-meta text-subtle">执行完成、改动、验证通过与投递状态分别记录；未验证或未投递不会画为成功。</p>
+        </section>
+
         <section className="space-y-2" aria-label="任务结果">
           <h3 className="text-body font-semibold">结果</h3>
           <p className="text-body text-primary">{sessionDisplayName(session, tasks.find(task => task.prompt.trim())?.prompt)}</p>
@@ -117,6 +141,16 @@ export function SessionDeliveryPanel({ session, tasks, onClose, presentation = '
         <details className="rounded-lg border border-default p-3">
           <summary className="min-h-11 cursor-pointer text-body font-semibold">执行环境与用量</summary>
           <div className="mt-3 space-y-4">
+        <section className="space-y-2">
+          <h3 className="text-body font-semibold">执行环境</h3>
+          <div className="grid grid-cols-2 gap-2 text-caption">
+            <div><span className="text-subtle">工作区：</span><span className="font-medium text-primary">{sessionWorkspaceName(session)}</span></div>
+            <div><span className="text-subtle">分支：</span><span className="font-mono text-primary">{workspace.data?.branch ?? '—'}</span></div>
+            <div><span className="text-subtle">Agent：</span><span className="text-primary">{session.agentId}</span></div>
+            <div><span className="text-subtle">权限：</span><span className="text-primary">{session.permissionMode ? permissionLabels[session.permissionMode] : '默认'}</span></div>
+            {session.model && <div className="col-span-2"><span className="text-subtle">模型：</span><span className="text-primary">{session.model}</span></div>}
+          </div>
+        </section>
         <section className="space-y-2">
           <h3 className="text-body font-semibold">工作目录</h3>
           <p className="break-all text-caption text-secondary">Agent：{session.agentId}{session.permissionMode ? ` · ${permissionLabels[session.permissionMode]}` : ''}</p>

@@ -12,17 +12,24 @@ const session: Session = { id: 's1', agentId: 'codex', state: 'thinking', cwd: '
 const queued: Task = { id: 't1', sessionId: 's1', prompt: '补充测试', status: 'queued', createdAt: '', updatedAt: '' };
 
 describe('RunHeader', () => {
-  it('集中展示 workspace、任务状态、下一步与队列', () => {
-    render(<RunHeader session={session} agent={agent} taskPrompt="优化飞书任务卡片" streamStatus="open" queuedTasks={[queued]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}} onOpenInsight={() => {}}/>);
+  it('集中展示 workspace、任务状态、队列与控制', () => {
+    const onToggleInspector = vi.fn();
+    const onBack = vi.fn();
+    const onDensityChange = vi.fn();
+    render(<RunHeader session={session} agent={agent} taskPrompt="优化飞书任务卡片" streamStatus="open" queuedTasks={[queued]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}} onOpenInsight={() => {}} onBack={onBack} onToggleInspector={onToggleInspector} detailTab="timeline" onDetailTabChange={() => {}} density="standard" onDensityChange={onDensityChange}/>);
     expect(screen.getByText('dutydeck')).toBeTruthy();
     expect(screen.getByRole('heading', { name: '优化飞书任务卡片' })).toBeTruthy();
     expect(screen.getByText('执行中')).toBeTruthy();
-    expect(screen.getByText(nextActionForState('thinking'))).toBeTruthy();
     // 排队徽标统一为「待执行指令 N 条」，与总览页任务行同一措辞。
     expect(screen.getByText('待执行指令 1 条')).toBeTruthy();
-    expect(screen.getByText(permissionLabels['full-trust'])).toBeTruthy();
-    expect(screen.getByTitle('本任务的权限姿态')).toBeTruthy();
     expect(screen.getByTitle('实时同步')).toBeTruthy();
+    expect(screen.getByRole('button', { name: '返回任务' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '结果检视' })).toBeTruthy();
+    expect(screen.getByRole('tab', { name: '对话' })).toBeTruthy();
+    expect(screen.getByRole('tab', { name: '改动' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '摘要' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '标准' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '详细' })).toBeTruthy();
   });
 
   it('任务控制保持可达', async () => {
@@ -98,10 +105,10 @@ describe('RunHeader 归档态状态视觉与只读约束', () => {
     expect(screen.queryByRole('menuitem', { name: '归档任务' })).toBeNull();
   });
 
-  it('归档任务的下一步提示说明只读，不再谎报 Agent 在推进', () => {
-    renderHeader({ state: 'thinking', archivedAt });
+  it('归档任务状态明确标注已归档，不再谎报 Agent 在推进', () => {
+    const { statusText } = renderHeader({ state: 'thinking', archivedAt });
     expect(screen.queryByText(nextActionForState('thinking'))).toBeNull();
-    expect(screen.getByText('已归档任务只读；可查看历史记录，不能再下指令')).toBeTruthy();
+    expect(statusText.textContent).toBe('已归档');
   });
 
   it('未归档 + failed：「重新启动」按钮照旧在，别把正常恢复路径改没了', async () => {
@@ -110,7 +117,6 @@ describe('RunHeader 归档态状态视觉与只读约束', () => {
     await user.click(screen.getByRole('button', { name: '重新启动' }));
     expect(onRestart).toHaveBeenCalledTimes(1);
     expect(screen.getByText('失败')).toBeTruthy();
-    expect(screen.getByText(nextActionForState('failed'))).toBeTruthy();
   });
 
   it('未归档 + thinking：正常执行不持续闪动，状态写「执行中」', () => {
@@ -119,7 +125,6 @@ describe('RunHeader 归档态状态视觉与只读约束', () => {
     expect(dot.getAttribute('aria-label')).toBe('执行中');
     expect(dot.className).not.toContain('ui-status-pulse');
     expect(dot.className).toContain('bg-info-solid');
-    expect(screen.getByText(nextActionForState('thinking'))).toBeTruthy();
   });
 });
 
@@ -180,6 +185,27 @@ describe('RunHeader 失败详情', () => {
     expect(screen.queryByText(session.cwd)).toBeNull();
     expect(screen.queryByText(session.runId)).toBeNull();
     expect(screen.queryByText(/本任务累计/)).toBeNull();
+  });
+
+  it('会话创建于两天前、当前一轮 3 分钟前开始，头部显示约 3 分钟而不是两天', () => {
+    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
+    const threeMinutesAgo = new Date(Date.now() - 3 * 60 * 1000).toISOString();
+    const oldSession: Session = { ...session, state: 'thinking', createdAt: twoDaysAgo };
+    render(<RunHeader session={oldSession} agent={agent} startedAt={threeMinutesAgo} streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}} onOpenInsight={() => {}}/>);
+    expect(screen.getByText('执行中')).toBeTruthy();
+    expect(screen.getByText(/3\s*分/)).toBeTruthy();
+    expect(screen.queryByText(/天/)).toBeNull();
+  });
+
+  it('非执行中不显示耗时，且找不到当前轮开始时间时不显示', () => {
+    const threeMinutesAgo = new Date(Date.now() - 3 * 60 * 1000).toISOString();
+    const { rerender } = render(<RunHeader session={{ ...session, state: 'idle' }} agent={agent} startedAt={threeMinutesAgo} streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}} onOpenInsight={() => {}}/>);
+    expect(screen.queryByText(/3\s*分/)).toBeNull();
+
+    // 运行态但未传 startedAt 时，也不显示从 session.createdAt 算的耗时
+    rerender(<RunHeader session={{ ...session, state: 'thinking', createdAt: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString() }} agent={agent} streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}} onOpenInsight={() => {}}/>);
+    expect(screen.queryByText(/天/)).toBeNull();
+    expect(screen.queryByText(/分/)).toBeNull();
   });
 
   it('费用呈现仍区分账本缺失、部分未知和真实零费用', () => {

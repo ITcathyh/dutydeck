@@ -5,7 +5,7 @@ export type TabsProps<T extends string> = {
   value: T;
   onChange(value: T): void;
   label: string;
-  items: Array<{ id: T; label: string; icon?: ReactNode }>;
+  items: Array<{ id: T; label: string; icon?: ReactNode; badge?: ReactNode }>;
 };
 
 /*
@@ -53,7 +53,7 @@ export function Tabs<T extends string>({ value, onChange, label, items }: TabsPr
           'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring',
           selected ? 'border-action text-primary' : 'border-transparent text-subtle hover:text-primary'
         )}
-      >{item.icon}{item.label}</button>;
+      >{item.icon}<span>{item.label}</span>{item.badge}</button>;
     })}
   </div>;
 }

@@ -523,3 +523,17 @@ it('shows incomplete Skill discovery and per-item diagnostics without disabling 
   rerender(<Composer {...baseProps} value="ordinary request" skillCatalogStatus={{ partial: true, diagnostics: [] }} onSubmit={onSubmit}/>);
   await user.click(screen.getByRole('button', { name: '发送消息' })); expect(onSubmit).toHaveBeenCalledTimes(1);
 });
+
+describe('Composer 输入框上方状态条', () => {
+  it('waiting_for_permission 时显示等你审批状态条并提供去处理按钮', () => {
+    render(<Composer {...baseProps} state="waiting_for_permission"/>);
+    expect(screen.getByText('等你审批')).toBeTruthy();
+    expect(screen.getByRole('button', { name: '去处理' })).toBeTruthy();
+  });
+
+  it('thinking 运行态时显示执行中状态条', () => {
+    render(<Composer {...baseProps} state="thinking"/>);
+    expect(screen.getByText('执行中')).toBeTruthy();
+    expect(screen.getByRole('button', { name: '查看过程' })).toBeTruthy();
+  });
+});
