@@ -215,6 +215,18 @@ dutydeck settings plugin-binding set my-plugin --app cli_bot --chat oc_a 'secret
 
 作者可使用独立发布包 `@dutydeck/plugin-sdk`，其中 `definePlugin`、`PluginBindingContext`、场景、query/action、CI provider 及受控结果工具的作者类型不依赖 server 或私有 shared 包。仓库验收会将 SDK tarball 安装进空目录，用 TypeScript 编译第三方示例并实际 import。`plugins/team-faq` 是可独立 `npm pack` 的双群示例；打包包含清单、provider、场景、SOP 与引用文本，移除源目录后仍可安装运行。详见 [team-faq 用法](../../plugins/team-faq/README.md)。
 
+### 把 Leader 指引做成插件技能 <a id="leader-guide"></a>
+
+[Leader 模式](lark.md#leader-mode)里 Leader 按哪套规则办事，由机器人设置 `leaderSkill` 指向的技能决定。想把一套规则分发给多个机器人或团队，可以把它做成只含一个技能的插件：没有命令、Hook 或 provider，安装不需要信任确认。示例 [leader](../../examples/plugins/leader/README.md) 提供了通用的指引：开工先看什么、哪些事 Leader 自己定、哪些事上报、验收问哪几件、上报怎么写。
+
+```bash
+dutydeck plugin install ./examples/plugins/leader --scope bot:<appId> --yes
+dutydeck restart
+dutydeck settings bot set <appId> leaderSkill=leader-guide/leader
+```
+
+想让 Leader 每次运行都带上的引用文件，写进清单的 `skillResources`；其余引用文件在 `SKILL.md` 里写明路径，Leader 需要时自己读（要求 Leader Agent 能读技能目录）。不做成插件也行：技能目录会跳过指向目录外的软链接，放在别处的指引，`leaderSkill` 直接填 `SKILL.md`（或其所在目录）的绝对路径；这种来源不内联 `skillResources`，同目录的引用文件由 Leader 按路径自己读。授权账本和决定记录由宿主在每次运行里提供，指引里不要让 Leader 自己维护文件。
+
 ## 受控插件结果
 
 可信 `providers` 插件可通过 `api.registerResultTool({ name, description, inputSchema, execute })` 注册导出工具：`inputSchema.parse(input)` 校验参数，`execute(input, { invocationId, requester, signal })` 返回 `Promise<{ files: Array<{ name: string, data: Uint8Array }> }>`。工具返回文件名与字节，不提供文件路径、接收人或模型可见正文。宿主保存字节并发固定查看回执，模型只收到 `deliveryId`、`status`、`fileCount`；`delivered` 仅表示通知送达，不表示下载成功或整轮任务完成。

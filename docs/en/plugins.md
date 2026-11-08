@@ -122,6 +122,18 @@ The host inlines required SOPs and bounded text declared in `skillResources`, in
 
 The independent `@dutydeck/plugin-sdk` exports `definePlugin`, binding/scenario types, query/action contracts, CI provider types and controlled result-tool types without server or private shared dependencies. Packaging tests install its tarball into an empty directory, compile a third-party TypeScript plugin and import it at runtime. `plugins/team-faq` is a real `npm pack` sample containing its manifest, provider, scenarios, SOP and references; tests remove the source directory and exercise two group bindings through the installed tarball. See [team-faq usage](../../plugins/team-faq/README.md).
 
+### Packaging a Leader guide as a plugin skill <a id="leader-guide"></a>
+
+In [Leader mode](lark.md#leader-mode), the skill that the bot setting `leaderSkill` points to decides which rules the Leader follows. To hand one set of rules to several bots or teams, package it as a plugin with a single skill: no commands, hooks or providers, so installing it needs no trust confirmation. The [leader](../../examples/plugins/leader/README.md) example is a generic guide: what to look at first, what the Leader decides itself, what it escalates, which questions acceptance asks and how to word an escalation.
+
+```bash
+dutydeck plugin install ./examples/plugins/leader --scope bot:<appId> --yes
+dutydeck restart
+dutydeck settings bot set <appId> leaderSkill=leader-guide/leader
+```
+
+Reference files you want the Leader to receive on every run go into the manifest's `skillResources`; for the rest, name the path in `SKILL.md` and the Leader reads them itself when needed (the Leader Agent must be able to read the skill directory). A plugin is optional: skill directories skip symlinks that point outside them, so for a guide kept elsewhere put the absolute path of its `SKILL.md` (or directory) in `leaderSkill`; that source does not inline `skillResources`, and the Leader reads sibling reference files itself by path. The authorization ledger and the decision record are supplied by the host on each run, so the guide should not have the Leader maintain files for them.
+
 ## Controlled plugin results
 
 A trusted `providers` plugin registers exports through `api.registerResultTool({ name, description, inputSchema, execute })`. `inputSchema.parse(input)` validates arguments; `execute(input, { invocationId, requester, signal })` returns `Promise<{ files: Array<{ name: string, data: Uint8Array }> }>`. Tools return names and bytes without filesystem paths, recipients or a model-visible body. The host stores bytes and sends a fixed viewing notice. The model receives only `deliveryId`, `status` and `fileCount`; `delivered` confirms the notice, not a download or overall task completion.

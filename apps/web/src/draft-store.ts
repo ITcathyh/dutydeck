@@ -65,6 +65,7 @@ export type BotDraft = {
   executionMode: 'single' | 'layered';
   leaderAgentId: string;
   workerAgentIds: string[];
+  leaderSkill: string;
   riskControlMode: 'off' | 'guidance' | 'enforced';
   highRiskPattern: string;
 };
