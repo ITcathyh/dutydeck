@@ -21,7 +21,7 @@ import { existsSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { pinnedSessionUuid } from '@dutydeck/cli-adapters';
 import { claudeFamilyCliAdapterIds, isClaudeFamilyCli } from '@dutydeck/shared';
-import { claudeProjectDir } from '../cli-paths.js';
+import { claudeProjectDirCandidates } from '../cli-paths.js';
 import { byMtimeDesc, parseJsonlObjects, readHead, nativeTranscriptObjects, walkFiles } from './fs-scan.js';
 import { buildSessionMarker, isUsableMarker } from './marker.js';
 import { userEntryMentionsMarker } from '../transcript/claude-content.js';
@@ -31,7 +31,7 @@ import type { SessionIdLookup, SessionIdLookupContext } from './types.js';
  *  prompt, so a small head window is enough and keeps a long conversation
  *  from being read in full. */
 const HEAD_BYTES = 256 * 1024;
-/** Newest-first cap on candidates scanned in one project dir. */
+/** Newest-first cap on candidates scanned across a cwd's project dirs. */
 const MAX_CANDIDATES = 40;
 
 /** The UUID dutydeck pinned via --session-id; Claude's own ids are bare UUIDs. */
@@ -54,11 +54,15 @@ function markedSession(path: string, sessionId: string, exactPinned = false): st
   return undefined;
 }
 
-/** A pinned native id may not be reused for a fresh launch, even when its marker is unreadable. */
+/** A pinned native id may not be reused for a fresh launch, even when its marker
+ *  is unreadable. A name the filesystem cannot hold (ENAMETOOLONG: an
+ *  untruncated legacy key) cannot hold a session either. */
 export function hasPinnedClaudeSession(adapterId: string, { sessionId, cwd, env }: SessionIdLookupContext): boolean {
   if (!isClaudeFamilyCli(adapterId)) return false;
-  try { lstatSync(join(claudeProjectDir(cwd, env), `${bareId(sessionId)}.jsonl`)); return true; }
-  catch (error) { return (error as NodeJS.ErrnoException).code !== 'ENOENT'; }
+  return claudeProjectDirCandidates(cwd, env).some(dir => {
+    try { lstatSync(join(dir, `${bareId(sessionId)}.jsonl`)); return true; }
+    catch (error) { return !['ENOENT', 'ENAMETOOLONG'].includes((error as NodeJS.ErrnoException).code ?? ''); }
+  });
 }
 
 export const claudeSessionIdLookup: SessionIdLookup = {
@@ -69,26 +73,31 @@ export const claudeSessionIdLookup: SessionIdLookup = {
   adapterIds: claudeFamilyCliAdapterIds,
 
   resolve({ sessionId, cwd, env, requireMarker }: SessionIdLookupContext): string | undefined {
-    const projectDir = claudeProjectDir(cwd, env);
+    // A long cwd has two candidate project dirs (current truncated key and
+    // the legacy untruncated one); both are searched, the content decides.
+    const projectDirs = claudeProjectDirCandidates(cwd, env);
 
     // Fast path: dutydeck pinned the id via --session-id and Claude accepted it.
     const pinned = bareId(sessionId);
-    const pinnedPath = join(projectDir, `${pinned}.jsonl`);
-    if (pinned && existsSync(pinnedPath)) {
+    const pinnedPaths = pinned ? projectDirs.map(dir => join(dir, `${pinned}.jsonl`)).filter(path => existsSync(path)) : [];
+    if (pinnedPaths.length > 0) {
       if (!requireMarker) return pinned;
       // Do not let unrelated newer files push the exact pinned transcript out
-      // of the bounded scan. A conflicting pinned file must not be adopted.
-      return isUsableMarker(sessionId) ? markedSession(pinnedPath, sessionId, true) : undefined;
+      // of the bounded scan. A conflicting pinned file must not be adopted,
+      // and two proven copies cannot be told apart here.
+      if (!isUsableMarker(sessionId)) return undefined;
+      const proven = pinnedPaths.flatMap(path => markedSession(path, sessionId, true) ?? []);
+      return proven.length === 1 ? proven[0] : undefined;
     }
 
     if (!isUsableMarker(sessionId)) return undefined;
 
     // Scan path: find the transcript whose first user prompt carries our
     // marker. Newest first only bounds the work — the marker decides.
-    const candidates = walkFiles(projectDir, {
+    const candidates = projectDirs.flatMap(dir => walkFiles(dir, {
       maxDepth: 0,
       accept: name => name.endsWith('.jsonl'),
-    }).sort(byMtimeDesc).slice(0, MAX_CANDIDATES);
+    })).sort(byMtimeDesc).slice(0, MAX_CANDIDATES);
 
     for (const candidate of candidates) {
       const found = markedSession(candidate.path, sessionId);

@@ -29,4 +29,4 @@ export { readCodexSessionUsage } from './transcript/codex.js';
 export { readNativeTranscriptUsage, type NativeUsageSource } from './transcript/session-usage.js';
 export { verifyTranscriptCheckpoint } from './transcript-source.js';
 
-export { realCwd, claudeDataDir, claudeProjectDir, codexHome, traeHome } from './cli-paths.js';
+export { realCwd, claudeDataDir, claudeProjectDir, claudeProjectDirCandidates, codexHome, traeHome } from './cli-paths.js';

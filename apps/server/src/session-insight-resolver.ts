@@ -31,7 +31,7 @@ import {
   type TranscriptSourceObservation,
   transcriptClientForAdapter,
 } from '@dutydeck/shared';
-import { buildSessionMarker } from '@dutydeck/pty-driver';
+import { buildSessionMarker, claudeProjectDirCandidates } from '@dutydeck/pty-driver';
 
 // ---------------------------------------------------------------------------
 // 公共类型
@@ -214,7 +214,6 @@ interface JsonIdentity {
 interface VerifyContext {
   sessionId: string;
   sessionCwd?: string;
-  claudeProjectKey?: string;
   checkCancelled: () => void;
   onIdentityRead: (bytes: number) => void;
   markLimited: () => void;
@@ -546,7 +545,6 @@ export class SessionInsightResolver {
     }
 
     const sessionCwd = (await canonicalRealPath(session.cwd)) ?? resolve(session.cwd);
-    const claudeProjectKey = sessionCwd.replace(/[^A-Za-z0-9-]/g, '-');
     let discoveryLimited = false;
     let totalIdentityBytes = 0;
     let totalMetasVisited = 0;
@@ -574,7 +572,6 @@ export class SessionInsightResolver {
     const verifyContext: VerifyContext = {
       sessionId,
       sessionCwd,
-      claudeProjectKey,
       checkCancelled,
       onIdentityRead: chargeRead,
       markLimited,
@@ -1179,14 +1176,19 @@ export class SessionInsightResolver {
     ctx: VerifyContext
   ): Promise<{ files: Array<{ path: string; mtimeMs: number }>; limited: boolean }> {
     if (root.client === 'claude') {
-      if (!ctx.claudeProjectKey) return { files: [], limited: false };
-      const projectDir = join(root.path, 'projects', ctx.claudeProjectKey);
-      return walkCandidates(
-        projectDir,
-        name => name.endsWith('.jsonl'),
-        0,
-        ctx
-      );
+      if (!ctx.sessionCwd) return { files: [], limited: false };
+      // A long cwd has two project dirs (current truncated key and the legacy
+      // untruncated one). Both form one candidate set: same-id copies in either
+      // meet the existing conflict rules instead of a directory picking first.
+      const files: Array<{ path: string; mtimeMs: number }> = [];
+      let limited = false;
+      for (const projectDir of claudeProjectDirCandidates(ctx.sessionCwd, { CLAUDE_CONFIG_DIR: root.path })) {
+        // eslint-disable-next-line no-await-in-loop
+        const walked = await walkCandidates(projectDir, name => name.endsWith('.jsonl'), 0, ctx);
+        files.push(...walked.files);
+        if (walked.limited) { limited = true; break; }
+      }
+      return { files, limited };
     }
     const sessionsDir = root.client === 'traex'
       ? join(root.path, 'cli', 'sessions')

@@ -4,7 +4,7 @@ import { closeSync, fstatSync, lstatSync, openSync, readdirSync, readFileSync, r
 import { join } from 'node:path';
 import type { PhysicalProcessIdentity, ProcessProbe } from '@dutydeck/session-backends';
 import type { DriverTranscriptSourceObservation } from '@dutydeck/shared';
-import { claudeDataDir, claudeProjectDir, type CliPathEnv } from './cli-paths.js';
+import { claudeDataDir, claudeProjectDirCandidates, type CliPathEnv } from './cli-paths.js';
 import { parseJsonlObjects, readHeadBytes, readTail } from './session-id/fs-scan.js';
 import { parseProcStat } from '@dutydeck/shared';
 
@@ -82,14 +82,20 @@ function anchoredConversation(anchor: ConversationAnchor, path: string, id: stri
 export function claudeHasConversation(path: string, id: string, cwd: string): boolean {
   return scanConversation(path, id, cwd).value;
 }
-/** Revalidate a durable, runtime-fenced observation before a cold launch. */
+/** The session file under each candidate project dir, current key first. */
+function sessionFileCandidates(id: string, root: string, cwd: string): string[] {
+  return claudeProjectDirCandidates(cwd, { CLAUDE_CONFIG_DIR: root }).map(dir => join(dir, `${id}.jsonl`));
+}
+/** Revalidate a durable, runtime-fenced observation before a cold launch.
+ *  `verifiedPath` may name either candidate dir, so an observation recorded
+ *  under the legacy untruncated key keeps resuming. */
 export function claudeResumeFromObservation(source: DriverTranscriptSourceObservation, cwd: string, env: CliPathEnv): string | undefined {
   try {
     const id = source.nativeSessionId;
     if (source.client !== 'claude' || source.proofKind !== 'launch_observed' || !id || !UUID.test(id)) return;
     const root = realpath(claudeDataDir(env)), realCwd = realpath(cwd);
-    const path = join(claudeProjectDir(realCwd, { CLAUDE_CONFIG_DIR: root }), `${id}.jsonl`);
-    if (source.dataRoot !== root || source.cwd !== realCwd || source.verifiedPath !== path
+    const path = sessionFileCandidates(id, root, realCwd).find(candidate => candidate === source.verifiedPath);
+    if (!path || source.dataRoot !== root || source.cwd !== realCwd
       || source.identityProof !== fileProof(id, path, root, realCwd)) return;
     return claudeHasConversation(path, id, realCwd) ? id : undefined;
   } catch { return undefined; }
@@ -146,7 +152,13 @@ export class ClaudeNativeSessionResolver {
       if (matches.length !== 1) return;
       const { identity, state } = matches[0]!;
       this.cli = identity;
-      const path = join(claudeProjectDir(this.cwd, { CLAUDE_CONFIG_DIR: this.dataRoot }), `${state.sessionId}.jsonl`);
+      // A resumed legacy session keeps its file under the untruncated key; a
+      // new one appears under the current key. Copies in both cannot be told
+      // apart without a durable verifiedPath, so neither is selected.
+      const candidates = sessionFileCandidates(state.sessionId, this.dataRoot, this.cwd);
+      const present = candidates.filter(candidate => regular(candidate));
+      if (present.length > 1) return;
+      const path = present[0] ?? candidates[0]!;
       const proof = fileProof(state.sessionId, path, this.dataRoot, this.cwd);
       const stat = regular(path);
       const key = JSON.stringify([path, stat?.dev, stat?.ino, stat?.size, stat?.mtimeMs]);
