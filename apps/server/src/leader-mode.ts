@@ -15,6 +15,7 @@ import { discoverSkillCatalog, skillFrontmatter } from './skill-catalog.js';
 import { prepareSkillPrompt } from './skill-delivery.js';
 import type { WorkItemInteractions, WorkItemRequest, WorkItemRequestHooks } from './work-item-interactions.js';
 import type { WorkItemService } from './work-items.js';
+import { capturedRiskPolicy } from './work-item-policy.js';
 
 const PREFIX = 'leader_mode:';
 /** 账本超过这个长度时只保留最新的条目。 */
@@ -378,6 +379,7 @@ export class LeaderModeService implements WorkItemRequestHooks {
   /**
    * Leader 能不能代批这次调用，不能时返回原因。命中机器人高危规则的一律不代批，不靠模型判断：
    * 请求文本来自 Worker，可能被注入诱导。规则取原话题机器人当前的配置，匹配出错或超时按命中处理。
+   * 发起任务时就判为没有高危授权的（机器人发起的任务都是），Leader 不代批任何工具授权。
    */
   private async approvalBlocked(record: LeaderModeRecord, request: WorkItemRequest, forbidden: string): Promise<string | undefined> {
     const parent = await this.repos.sessions.get(record.parentSessionId);
@@ -388,6 +390,8 @@ export class LeaderModeService implements WorkItemRequestHooks {
     if (!config) return '群设置读不到，Leader 不代批';
     const facts = [request.text, ...Object.values(request.operation ?? {}).map(String)].join('\n');
     if (await testRegexWithTimeout(config.highRiskPattern || defaultHighRiskPattern, facts).catch(() => true)) return '命中高危规则，Leader 不代批';
+    const captured = capturedRiskPolicy(this.repos, record.parentTaskId);
+    if (captured?.enabled && !captured.authorized) return '这个任务发起时没有高危授权（机器人发起的任务都是这样），Leader 不代批工具授权';
     if (!await this.options.authorizeInteraction(record.parentSessionId, record.actorId, 'high_risk.execute').catch(() => false)) return forbidden;
     return undefined;
   }

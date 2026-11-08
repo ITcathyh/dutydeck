@@ -328,9 +328,9 @@ dutydeck settings bot set cli_xxx cardActionForwarding=null 'eventHandlers=[{"id
 | `allowedUsers` | 发起人名单，JSON 数组 `[{"openId":"ou_…","name":"…"}]`；与 `allowedEmails` 都为空时不限制 | 空 |
 | `allowedUserNames` | 按姓名指定发起人名单，保存时解析成 `allowedUsers` | 空 |
 | `allowedEmails` | 按邮箱指定发起人名单 | 空 |
-| `allowedBots` | 发起人名单受限时仍放行的其他机器人，格式同 `allowedUsers` | 空 |
+| `allowedBots` | 受信机器人（不论发起人名单是否受限）：发起人名单受限时仍放行，并能执行会话命令、没 @ 的消息参与判定，见[受信机器人](lark.md#trusted-bots)；格式同 `allowedUsers` | 空 |
 | `allowedBotNames` | 按名字指定 `allowedBots`，保存时解析 | 空 |
-| `peerBotsAllowed` | 发起人名单受限时，是否放行同群里已授权的其他机器人（需开群工具） | `true` |
+| `peerBotsAllowed` | 发起人名单受限时，是否放行同群里已授权的其他机器人（需开群工具）；开着时这些机器人不论名单是否受限都算受信机器人 | `true` |
 | `highRiskAllowedUsers` | 强制风控下可以执行高危命令的人，格式同 `allowedUsers`；与 `highRiskAllowedEmails` 都为空时不额外限制 | 空 |
 | `highRiskAllowedUserNames` | 按姓名指定 `highRiskAllowedUsers`，保存时解析 | 空 |
 | `highRiskAllowedEmails` | 按邮箱指定高危命令执行人 | 空 |

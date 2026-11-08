@@ -325,7 +325,8 @@ export class LarkLongConnectionListener implements LarkListener {
     await coordinator?.initializeWorkflows(config);
     const recoveryMs = Date.now() - startedAt - identityMs;
     http.fetch.signal!.throwIfAborted();
-    if (coordinator) this.options.participation?.setDispatcher(config.appId, (event, current) => coordinator.adopt(event, current), (scope, actor) => coordinator.canConfirmParticipation(scope, actor));
+    if (coordinator) this.options.participation?.setDispatcher(config.appId, (event, current) => coordinator.adopt(event, current), (scope, actor) => coordinator.canConfirmParticipation(scope, actor),
+      (current, chatId, senderOpenId) => coordinator.trustsBotSender(current, chatId, senderOpenId));
     if (coordinator && this.options.agentCommands) {
       this.agentCommand = request => coordinator.agentCommand(request);
       this.options.agentCommands.set(config.appId, this.agentCommand, request => coordinator.agentView(request), request => coordinator.agentSettings(request));

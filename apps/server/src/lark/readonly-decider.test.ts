@@ -109,6 +109,18 @@ describe('read-only participation decision', () => {
     expect(prompt).toContain('群内个人待办是群材料里的事项，不等于外部飞书任务系统');
   });
 
+  it('accepts a trusted bot message as the trigger and explains its marker only then', async () => {
+    const trusted = snapshot();
+    trusted.observations[0] = { ...trusted.observations[0]!, senderKind: 'bot', senderId: 'ou_peer', refs: ['om_1', 'dutydeck:trusted-bot'] };
+    expect(participationPrompt(trusted, 'obs_1', 'Bot')).toContain('dutydeck:trusted-bot 表示发送者是本机器人信任的协作机器人');
+    expect(participationPrompt(snapshot(), 'obs_1', 'Bot')).not.toContain('dutydeck:trusted-bot');
+    const h = await harness([JSON.stringify(replyDecision), '{"response":"好的"}']);
+    await expect(h.decider.decide(config, trusted, 'obs_1')).resolves.toMatchObject({ action: 'reply' });
+    await expect(h.decider.respond(config, trusted, replyDecision, 'obs_1')).resolves.toBe('好的');
+    const untrusted = structuredClone(trusted); untrusted.observations[0]!.refs = ['om_1'];
+    await expect(h.decider.decide(config, untrusted, 'obs_1')).rejects.toMatchObject({ code: 'COLLABORATION_INVALID_TRIGGER' });
+  });
+
   it('keeps resolve as decision-only evaluation', async () => {
     const h = await harness(JSON.stringify(replyDecision));
     const respond = vi.spyOn(h.decider, 'respond');

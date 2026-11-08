@@ -20,6 +20,7 @@ import {
   countDecisionUsage, type CollaborationSnapshot, type ConfigRepository
 } from '@dutydeck/shared';
 import { LarkGroupParticipation } from './group-participation.js';
+import { TRUSTED_BOT_REF } from './participation-rules.js';
 import { LarkMessageCoordinator } from './coordinator.js';
 import { senderGroupMention } from './card-mentions.js';
 import { LarkWorkflowInteractions } from './workflow-interactions.js';
@@ -54,7 +55,8 @@ const humanMessage = (id: string, patch: Partial<LarkMessageEvent> = {}): LarkMe
 const cleanups: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const clean of cleanups.splice(0).reverse()) await clean(); });
 
-function harness(clock: { now: Date } = { now: new Date('2026-09-18T10:00:00.000Z') }, options: { groupManager?: LarkGroupManager; workflow?: boolean } = {}) {
+function harness(clock: { now: Date } = { now: new Date('2026-09-18T10:00:00.000Z') }, options: { groupManager?: LarkGroupManager; workflow?: boolean; config?: StoredLarkConfig; service?: Record<string, unknown> } = {}) {
+  const current = options.config ?? config;
   const db = new Database(':memory:'); createCollaborationSchema(db);
   const repository = createCollaborationRepository(db);
   const service = {
@@ -62,13 +64,14 @@ function harness(clock: { now: Date } = { now: new Date('2026-09-18T10:00:00.000
     replyText: vi.fn(async () => ({ messageId: 'om_sent' })), sendText: vi.fn(async () => ({ messageId: 'om_sent' })),
     addReaction: vi.fn(async () => ({ reactionId: 'reaction' })), deleteReaction: vi.fn(async () => {}),
     send: vi.fn(async () => ({ messageId: 'om_card' })), reply: vi.fn(async () => ({ messageId: 'om_card' })),
-    update: vi.fn(async () => ({ messageId: 'om_card' }))
+    update: vi.fn(async () => ({ messageId: 'om_card' })),
+    ...options.service
   };
   const decider = { decide: vi.fn(async (_c: StoredLarkConfig, _s: CollaborationSnapshot) => ({ action: 'silent' as const, reason: '无需回复', evidenceIds: [], updates: [] })), respond: vi.fn() };
   const participation = new LarkGroupParticipation({
     repository,
     decider,
-    authorize: vi.fn(async () => true), readConfig: async () => config, serviceFor: () => service as any,
+    authorize: vi.fn(async () => true), readConfig: async () => current, serviceFor: () => service as any,
     readGroupDescription: async () => '门禁测试群', listScopes: async () => [scope], debounceMs: 10_000,
     now: () => clock.now
   });
@@ -79,7 +82,7 @@ function harness(clock: { now: Date } = { now: new Date('2026-09-18T10:00:00.000
   };
   const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
   const peerBotAuthorized = vi.fn(async () => true);
-  const records = new Map<string, string>([['lark.bots', JSON.stringify([config])]]);
+  const records = new Map<string, string>([['lark.bots', JSON.stringify([current])]]);
   const store: ConfigRepository = {
     get: async key => records.get(key), set: async (key, value) => { records.set(key, value); },
     list: async prefix => [...records].filter(([key]) => key.startsWith(prefix)).map(([key, value]) => ({ key, value })),
@@ -131,14 +134,18 @@ describe.each(['off', 'observe', 'selective'] as const)('机器人定向交接�
     }
   });
 
-  it('未@的普通机器人消息不启动执行或只读判定', async () => {
+  it('未@的不受信机器人消息不启动执行或只读判定', async () => {
     const h = await configuredHarness();
+    h.peerBotAuthorized.mockResolvedValue(false);
     await h.coordinator.handle(botMessage('om_bot_chat', { mentions: [] }), { ...restrictedConfig, mentionPolicy: 'never' });
     await h.participation.flush(scope);
     expect(h.runtime.start).not.toHaveBeenCalled();
     expect(h.decider.decide).not.toHaveBeenCalled();
     expect(h.service.addReaction).not.toHaveBeenCalled();
     expect(await turnRecords(h)).toHaveLength(0);
+    expect(await decisions(h)).toHaveLength(0);
+    // 核对同伴要读群成员：只在按需、积极档没 @ 的机器人消息上查。
+    if (mode !== 'selective') expect(h.peerBotAuthorized).not.toHaveBeenCalled();
   });
 
   it.each(['untrusted', 'disabled'] as const)('拒绝%s的peer机器人，不绕过现有访问授权', async reason => {
@@ -302,6 +309,151 @@ describe('多 bot 互相 @ 的可选门禁', () => {
     }
     await h.coordinator.handle(humanMessage('om_human'), config);
     await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
+  });
+});
+
+describe('受信机器人没 @ 的消息走群参与判定', () => {
+  // 发起人名单受限，没配名单时「任何机器人都能访问」的放行不算受信，单独验证。
+  const trusted: StoredLarkConfig = { ...config, name: 'Dock', groupToolsEnabled: true, botLoopGuard: false, allowedUsers: [{ openId: 'ou_alice', name: 'Alice' }] };
+  const unmentioned = (id: string, patch: Partial<LarkMessageEvent> = {}) => botMessage(id, { mentions: [], content: JSON.stringify({ text: 'Dock 帮我看下发布单' }), threadId: 'omt_peer', ...patch });
+  async function trustedHarness(current: StoredLarkConfig = trusted, service?: Record<string, unknown>) {
+    const h = harness(undefined, { config: current, ...(service ? { service } : {}) });
+    await h.repository.updateSettings(scope, { expectedRevision: 0, participation: 'selective' }, 'owner');
+    const dispatch = vi.fn((incoming: LarkMessageEvent, latest: StoredLarkConfig) => h.coordinator.adopt(incoming, latest));
+    h.participation.setDispatcher(scope.appId, dispatch, undefined, (latest, chatId, openId) => h.coordinator.trustsBotSender(latest, chatId, openId));
+    return { ...h, dispatch, current };
+  }
+  const observation = async (h: ReturnType<typeof harness>, id: string) => (await h.repository.listObservations(scope)).find(item => item.eventId === id);
+  const ruleDecisions = async (h: ReturnType<typeof harness>) => (await decisions(h)).filter(item => (item.inputSnapshot as { gate?: string }).gate === undefined);
+
+  it.each(['peer', 'allowlist'] as const)('通过%s受信的机器人叫名字：判为在叫我，按机器人身份起任务', async via => {
+    const workspace = await mkdtemp(join(tmpdir(), 'dutydeck-trusted-bot-hook-'));
+    cleanups.push(() => rm(workspace, { recursive: true, force: true }));
+    await installLarkHook('codex', workspace);
+    const enforced = { ...trusted, workspace, riskControlMode: 'enforced' as const };
+    const current = via === 'peer' ? enforced : { ...enforced, peerBotsAllowed: false, allowedBots: [{ openId: 'ou_peer_bot', name: 'Peer' }] };
+    const h = await trustedHarness(current);
+    if (via === 'allowlist') h.peerBotAuthorized.mockResolvedValue(false);
+    await h.coordinator.handle(unmentioned('om_peer_named'), current);
+    expect(h.runtime.send).not.toHaveBeenCalled();
+    expect(await observation(h, 'om_peer_named')).toMatchObject({ senderKind: 'bot', refs: expect.arrayContaining([TRUSTED_BOT_REF]) });
+    await h.participation.flush(scope);
+    await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
+    expect(h.dispatch).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_peer_named', senderType: 'app', senderOpenId: 'ou_peer_bot',
+      authorization: expect.objectContaining({ via: 'addressed' }) }), expect.anything());
+    expect(await ruleDecisions(h)).toEqual([expect.objectContaining({ action: 'act', inputSnapshot: expect.objectContaining({ decider: expect.objectContaining({ rule: 'calls_name' }) }) })]);
+    // 机器人发起的任务仍不能执行高危操作。
+    expect(h.runtime.send.mock.calls[0]).toEqual(expect.arrayContaining([expect.objectContaining({ enabled: true, authorized: false })]));
+    expect(h.decider.decide).not.toHaveBeenCalled();
+    // 判定唤醒的机器人回合计入连续上限，即使 botLoopGuard 关着。
+    expect(await turnRecords(h)).toHaveLength(1);
+  });
+
+  it.each([
+    ['不在名单、也不是同伴', trusted, false],
+    ['同伴但本机器人没开群工具', { ...trusted, groupToolsEnabled: false }, true],
+    ['同伴但关了同伴放行', { ...trusted, peerBotsAllowed: false }, true],
+    ['没配成员名单时任何机器人都能访问，但不算受信', { ...trusted, allowedUsers: [] }, false]
+  ] satisfies Array<[string, StoredLarkConfig, boolean]>)('%s：没 @ 的消息仍按机器人消息静默', async (_name, current, peer) => {
+    const h = await trustedHarness(current);
+    h.peerBotAuthorized.mockResolvedValue(peer);
+    await h.coordinator.handle(unmentioned('om_untrusted'), current);
+    await h.participation.flush(scope);
+    expect(await observation(h, 'om_untrusted')).toMatchObject({ senderKind: 'bot' });
+    expect((await observation(h, 'om_untrusted'))?.refs ?? []).not.toContain(TRUSTED_BOT_REF);
+    expect(h.dispatch).not.toHaveBeenCalled();
+    expect(h.runtime.send).not.toHaveBeenCalled();
+    expect(h.decider.decide).not.toHaveBeenCalled();
+    expect(await decisions(h)).toHaveLength(0);
+  });
+
+  it.each([true, false])('coordinator 按受信=%s 决定机器人能否执行改会话的命令', async peer => {
+    const current = { ...trusted, allowedUsers: [] };
+    const h = await trustedHarness(current);
+    h.peerBotAuthorized.mockResolvedValue(peer);
+    await h.coordinator.handle(botMessage('om_peer_cancel', { content: JSON.stringify({ text: '@_user_1 /cancel' }) }), current);
+    await vi.waitFor(() => expect(h.service.reply).toHaveBeenCalled());
+    const receipts = JSON.stringify(h.service.reply.mock.calls);
+    // 受信时命令真的执行了：没有在跑的一轮，回执说明没东西可取消。
+    if (peer) expect(receipts).toContain('当前没有正在执行的一轮');
+    else expect(receipts).toContain('不受信的协作机器人不能执行 /cancel');
+    expect(h.runtime.start).not.toHaveBeenCalled();
+  });
+
+  it('入队后机器人被移出名单：判为在叫我也不派发，判定按静默收尾', async () => {
+    const current = { ...trusted, peerBotsAllowed: false, allowedBots: [{ openId: 'ou_peer_bot', name: 'Peer' }] };
+    const h = await trustedHarness(current);
+    h.peerBotAuthorized.mockResolvedValue(false);
+    await h.coordinator.handle(unmentioned('om_revoked'), current);
+    expect(await observation(h, 'om_revoked')).toMatchObject({ refs: expect.arrayContaining([TRUSTED_BOT_REF]) });
+    current.allowedBots = [];
+    await h.participation.flush(scope);
+    expect(h.dispatch).not.toHaveBeenCalled();
+    expect(h.runtime.send).not.toHaveBeenCalled();
+    expect(await ruleDecisions(h)).toEqual([expect.objectContaining({ action: 'act', status: 'suppressed', inputSnapshot: expect.objectContaining({ decider: expect.objectContaining({ rule: 'calls_name' }) }) })]);
+  });
+
+  it.each([false, true])('判定模型要直接回复受信机器人的消息：入队后被移出名单=%s', async revoked => {
+    const members = vi.fn(async () => ({ items: [{ memberId: 'ou_alice', memberType: 'user' }, { memberId: 'ou_bob', memberType: 'user' }, { memberId: 'ou_carol', memberType: 'user' },
+      { memberId: scope.appId, memberType: 'bot', appId: scope.appId, name: 'Dock' }], hasMore: false }));
+    const current = { ...trusted, peerBotsAllowed: false, allowedBots: [{ openId: 'ou_peer_bot', name: 'Peer' }] };
+    const h = await trustedHarness(current, { listChatMembers: members, listOwnReactions: vi.fn(async () => []) });
+    h.peerBotAuthorized.mockResolvedValue(false);
+    h.decider.decide.mockImplementation(async (_config, snapshot) => ({ action: 'reply' as any, reason: '同事在问发布进度', evidenceIds: [snapshot.observations.find(item => item.eventId === 'om_model')!.id], updates: [] }));
+    (h.decider.respond as any).mockResolvedValue('发布单在发布平台的今日列表里。');
+    await h.coordinator.handle(unmentioned('om_model', { content: JSON.stringify({ text: '今天的发布单进展怎么样了' }) }), current);
+    if (revoked) current.allowedBots = [];
+    await h.participation.flush(scope);
+    expect(h.decider.decide).toHaveBeenCalledOnce();
+    const replied = h.service.replyText.mock.calls.some(call => (call as any[])[0]?.messageId === 'om_model');
+    expect(replied).toBe(!revoked);
+    expect(h.dispatch).not.toHaveBeenCalled();
+    if (revoked) expect(await ruleDecisions(h)).toEqual([expect.objectContaining({ action: 'reply', status: 'suppressed' })]);
+  });
+
+  it('真人在话题里发一条不 @ 的消息（判为不接）也会把连续回合清零', async () => {
+    const h = await trustedHarness();
+    for (let index = 1; index <= BOT_LOOP_DEPTH_LIMIT; index++) {
+      await h.coordinator.handle(unmentioned(`om_round_${index}`, { content: JSON.stringify({ text: `Dock 帮我看下第 ${index} 个发布单` }) }), trusted);
+      await h.participation.flush(scope);
+    }
+    await vi.waitFor(() => expect(h.dispatch).toHaveBeenCalledTimes(BOT_LOOP_DEPTH_LIMIT));
+    await vi.waitFor(async () => expect(await turnRecords(h)).toHaveLength(BOT_LOOP_DEPTH_LIMIT));
+    await h.coordinator.handle(humanMessage('om_alice_thanks', { mentions: [], threadId: 'omt_peer', content: JSON.stringify({ text: '谢谢' }) }), trusted);
+    await h.participation.flush(scope);
+    await h.coordinator.handle(unmentioned('om_round_after', { content: JSON.stringify({ text: 'Dock 再帮我看下最后一个发布单' }) }), trusted);
+    await h.participation.flush(scope);
+    await vi.waitFor(async () => expect(await turnRecords(h)).toHaveLength(BOT_LOOP_DEPTH_LIMIT + 1));
+    expect(await gateRecords(h)).toHaveLength(0);
+    expect(h.log.info).not.toHaveBeenCalledWith(expect.anything(), '机器人触发的回合已被门禁挡下');
+  });
+
+  it('本机器人自己的消息永不判定，即使在机器人名单里', async () => {
+    const current = { ...trusted, allowedBots: [{ openId: 'ou_bot', name: 'Dock' }] };
+    const h = await trustedHarness(current);
+    await h.coordinator.handle(unmentioned('om_self', { senderOpenId: 'ou_bot' }), current);
+    await h.participation.flush(scope);
+    expect((await observation(h, 'om_self'))?.refs ?? []).not.toContain(TRUSTED_BOT_REF);
+    expect(h.dispatch).not.toHaveBeenCalled();
+    expect(h.runtime.send).not.toHaveBeenCalled();
+    expect(await decisions(h)).toHaveLength(0);
+  });
+
+  it('botLoopGuard 关着时，判定唤醒的机器人回合第 4 轮被挡；真人触发一轮后清零', async () => {
+    const h = await trustedHarness();
+    for (let index = 1; index <= BOT_LOOP_DEPTH_LIMIT + 1; index++) {
+      await h.coordinator.handle(unmentioned(`om_peer_${index}`, { content: JSON.stringify({ text: `Dock 帮我看下第 ${index} 个发布单` }) }), trusted);
+      await h.participation.flush(scope);
+    }
+    await vi.waitFor(() => expect(h.dispatch).toHaveBeenCalledTimes(BOT_LOOP_DEPTH_LIMIT + 1));
+    await vi.waitFor(() => expect(h.log.info).toHaveBeenCalledWith(expect.objectContaining({ messageId: `om_peer_${BOT_LOOP_DEPTH_LIMIT + 1}` }), '机器人触发的回合已被门禁挡下'));
+    expect(await turnRecords(h)).toHaveLength(BOT_LOOP_DEPTH_LIMIT);
+    expect(await gateRecords(h)).toHaveLength(1);
+    // @ 唤醒的机器人回合仍按开关：关着时不计数，也不被挡。
+    expect(await h.participation.guardBotTurn(botMessage('om_peer_mention', { threadId: 'omt_peer' }), trusted, { botOpenId: 'ou_bot' })).toBeUndefined();
+    expect(await h.participation.guardBotTurn(humanMessage('om_alice', { threadId: 'omt_peer' }), trusted, { botOpenId: 'ou_bot' })).toBeUndefined();
+    expect(await h.participation.guardBotTurn(unmentioned('om_peer_after'), trusted, { botOpenId: 'ou_bot', participationWake: true })).toBeUndefined();
+    expect(await turnRecords(h)).toHaveLength(BOT_LOOP_DEPTH_LIMIT + 1);
   });
 });
 

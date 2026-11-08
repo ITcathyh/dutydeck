@@ -58,7 +58,7 @@ import { LarkWorkbench } from './lark/workbench.js';
 import { createLarkCardService, LarkServiceError } from './lark/service.js';
 import { deliverLarkSessionNotice } from './lark/session-notice.js';
 import { createWorkbenchFetch } from './workbench-fetch.js';
-import { authorizeWorkItemAgent, authorizeWorkItemInteraction, workItemRiskPolicy } from './work-item-policy.js';
+import { authorizeWorkItemAgent, authorizeWorkItemInteraction, capturedRiskPolicy, workItemRiskPolicy } from './work-item-policy.js';
 import { SessionAutomationService } from './session-automation.js';
 import { createAutomationIntegration } from './automation-integration.js';
 import { CiWebhookService } from './ci-webhook.js';
@@ -518,7 +518,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       const background = await collaboration?.riskPolicy(sessionId, fallback);
       if (background) return background.policy;
       const binding = await workItems.parentForSession(sessionId) ?? await delegations.parentForSession(sessionId);
-      return binding ? workItemRiskPolicy(repos, groupManager, binding.parentSessionId, binding.actorId, fallback, env, workbenchHttp.fetch) : groupManager.riskPolicy(sessionId, fallback);
+      return binding ? workItemRiskPolicy(repos, groupManager, binding.parentSessionId, binding.actorId, fallback, env, workbenchHttp.fetch, capturedRiskPolicy(repos, binding.parentTaskId)) : groupManager.riskPolicy(sessionId, fallback);
     },
     acpxCommand: config.acpxCommand,
     ptyDriverFactory,

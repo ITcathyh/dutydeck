@@ -684,7 +684,7 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     const handle = vi.fn(async () => ({ enabled: true, instructions: '' }));
     // guardBotTurn 是机器人回合门禁的入口，coordinator 在唤醒前必调；缺了它整条链路会按
     // 「门禁判定失败」保守拦下，所以这个替身必须给出放行结论（本用例的发送方都是人类）。
-    const h = await harness('ask', { participation: { handle, instructions: async () => '', taskContext: async () => '', guardBotTurn: async () => undefined } as unknown as LarkGroupParticipation });
+    const h = await harness('ask', { participation: { handle, instructions: async () => '', taskContext: async () => '', guardBotTurn: async () => undefined, noteHumanMessage: () => undefined } as unknown as LarkGroupParticipation });
     await h.coordinator.handle(event('om_task', '开始工作'), h.config);
     await vi.waitFor(async () => expect((await h.interactions()).find(item => item.kind === 'ask')?.cardId).toBeTruthy());
     const ask = (await h.interactions()).find(item => item.kind === 'ask')!;
@@ -1106,7 +1106,7 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
   });
 
   it('registers the busy status card as an approval callback source', async () => {
-    const participation = { mode: async () => 'off', handle: async () => ({ handled: false, enabled: false }), guardBotTurn: async () => undefined,
+    const participation = { mode: async () => 'off', handle: async () => ({ handled: false, enabled: false }), guardBotTurn: async () => undefined, noteHumanMessage: () => undefined,
       taskContext: async () => undefined, instructions: async () => '', describe: async () => undefined,
       triageBusy: async () => ({ kind: 'command', command: '/status', action: 'status', view: 'status' }) } as unknown as LarkGroupParticipation;
     const h = await harness('permission', { participation });

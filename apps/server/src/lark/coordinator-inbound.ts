@@ -697,6 +697,13 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     return this.currentAccess(config, scope.chatId, 'group', actor, 'task.create', undefined, actor);
   }
 
+  /** 群参与投递前复核触发消息的机器人：按当前配置（含群级覆盖）重新判断它是否仍受信。 */
+  async trustsBotSender(config: StoredLarkConfig, chatId: string, senderOpenId: string): Promise<boolean> {
+    if (this.stopped) return false;
+    if (this.groupManager) config = await this.groupManager.resolved(config, chatId);
+    return this.isTrustedBot(config, { senderType: 'app', senderOpenId, chatId });
+  }
+
   /** 内部收养请求仍经过普通入口的授权、领取和执行。 */
   adopt(event: LarkMessageEvent, config: StoredLarkConfig) {
     // 只有内部 dispatcher 的场景派生可改变执行身份/话题，正文始终沿用持久原文。
@@ -816,7 +823,6 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     const mentionsBot = this.botOpenId ? event.mentions.some(mention => mention.openId === this.botOpenId) : event.mentions.some(mention => mention.mentionedType === 'bot');
     if (this.stopped) return;
     const botSender = isBotSenderType(event.senderType);
-    const explicit = isExplicitWake({ chatType: event.chatType, botSender, mentionsBot, quotedWorkflow: Boolean(quotedWorkflow), adopted });
     let helpOnly = false;
     let recognizedCommand = false;
     try {
@@ -830,11 +836,18 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     } catch (error) {
       if (captured && !isLarkDeterministicFailure(error) && (error as { code?: string })?.code !== 'LARK_GROUP_NOT_APPLIED') throw error;
       await note('group_unbound');
-      await this.rejectIncoming(event, config, error instanceof Error ? error.message : '群配置尚未生效。', explicit);
+      await this.rejectIncoming(event, config, error instanceof Error ? error.message : '群配置尚未生效。', isExplicitWake({ chatType: event.chatType, botSender, trustedBot: false, mentionsBot, quotedWorkflow: Boolean(quotedWorkflow), adopted }));
       return;
     }
+    // 受信机器人没 @ 的消息和真人一样交给群参与判定。核对同伴要读群成员，只在结论有用时查：
+    // 被群参与受理的消息，或按需、积极档里没 @ 的消息。@ 本机器人的命令在命令路由里另行核对。
+    const ambientBotMode = botSender && event.chatType === 'group' && !adopted && !mentionsBot
+      ? await this.workflowOptions.participation?.mode({ appId: config.appId, chatId: event.chatId }) : undefined;
+    const trustedBot = botSender && event.chatType === 'group' && (adopted || ambientBotMode === 'selective' || ambientBotMode === 'eager')
+      && await this.isTrustedBot(config, event);
+    const explicit = isExplicitWake({ chatType: event.chatType, botSender, trustedBot, mentionsBot, quotedWorkflow: Boolean(quotedWorkflow), adopted });
     const mentionPolicy = resolveParticipation({ mentionPolicy: config.mentionPolicy }).mentionPolicy;
-    const participationMode = mentionPolicy !== 'topic' && event.chatType === 'group' && !botSender && this.groupManager
+    const participationMode = mentionPolicy !== 'topic' && event.chatType === 'group' && (!botSender || trustedBot) && this.groupManager
       ? await this.workflowOptions.participation?.mode({ appId: config.appId, chatId: event.chatId }) : undefined;
     const topicScope = (mentionPolicy === 'topic' || participationMode === 'selective' || participationMode === 'eager') && this.groupManager
       ? await resolveLarkScopeId(event, config, this.chatModeResolver) : undefined;
@@ -847,10 +860,12 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     // 发起人在同一话题里直接回复仍在等待的提问就是在作答，不依赖群参与开关。
     const pendingAskContinuation = Boolean(!recovering && !explicit && await this.continuesPendingAsk(event, config, Boolean(captured)));
     const requestContinuation = Boolean(this.workflowOptions.participation && !recovering && !explicit && !pendingAskContinuation && await this.continuesOwnRequest(event, config, Boolean(captured)));
-    const wakeFacts: WakeFacts = { chatType: event.chatType, botSender, mentionsBot, hasMentions: event.mentions.length > 0, quotedWorkflow: Boolean(quotedWorkflow), adopted, recovering,
+    const wakeFacts: WakeFacts = { chatType: event.chatType, botSender, trustedBot, mentionsBot, hasMentions: event.mentions.length > 0, quotedWorkflow: Boolean(quotedWorkflow), adopted, recovering,
       recognizedCommand, mentionPolicy, ownedTopic: Boolean(ownedTopic), directScenario: Boolean(scenario), pendingAskContinuation, requestContinuation };
     const { addressed, participation: participationInput } = wakeSignals(wakeFacts);
-    const participation = scenario ? undefined : await this.workflowOptions.participation?.handle(event, config, { ...participationInput, botOpenId: this.botOpenId });
+    // 真人发言让同话题的机器人连续回合清零：判为不接的消息也算，所以在唤醒过滤之前做。
+    if (event.chatType === 'group' && !botSender && event.senderOpenId && !scenario) this.workflowOptions.participation?.noteHumanMessage(config.appId, event);
+    const participation = scenario ? undefined : await this.workflowOptions.participation?.handle(event, config, { ...participationInput, botOpenId: this.botOpenId, trustedBot });
     if (this.handledMessages.has(event.messageId)) return;
     const wake = decideWake(wakeFacts, participation);
     if (!wake.wake) { await note(wake.reason === 'not_addressed' && botSender ? 'bot_message' : wake.reason); return; }
@@ -861,7 +876,9 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     if (wake.guardBotTurn && this.workflowOptions.participation) {
       let botTurnGate: string | undefined;
       try {
-        botTurnGate = await this.workflowOptions.participation.guardBotTurn(event, config, { botOpenId: this.botOpenId });
+        // 群参与判定唤醒的机器人回合不论开关都计入连续上限；@ 唤醒的由 botLoopGuard 决定。
+        const participationWake = botSender && (event.authorization?.via === 'addressed' || event.authorization?.via === 'participation_act');
+        botTurnGate = await this.workflowOptions.participation.guardBotTurn(event, config, { botOpenId: this.botOpenId, participationWake });
       } catch (error) {
         if (captured) throw error;
         botTurnGate = '机器人回合门禁判定失败';
@@ -1266,7 +1283,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     const pluginCommands = larkPluginCommandHelp(pluginScope);
     const route = routeLarkCommand(prompt, {
       capabilities: this.larkRouteCapabilities(),
-      operator: { kind: botSender ? 'bot' : 'user', allowlisted },
+      operator: { kind: botSender ? 'bot' : 'user', allowlisted, ...(botSender ? { trusted: await this.isTrustedBot(config, event) } : {}) },
       ...(pluginCommands.length ? { pluginCommands } : {})
     });
     if (route.kind === 'not_a_command') return undefined;

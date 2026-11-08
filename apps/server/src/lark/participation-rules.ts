@@ -26,7 +26,7 @@ export const participationRuleReasons: Record<ParticipationRule, string> = {
   reply_to_other: '那条消息是在回复别人',
   emoji_only: '那条消息只有表情',
   short_thanks: '那条消息只是致谢或确认',
-  bot_sender: '那条消息是机器人发的',
+  bot_sender: '那条消息是不受信的机器人发的',
   calls_other: '那条消息叫的是群里另一个机器人',
   topic_of_other: '那个话题是发给别人或别的机器人的',
   not_responder: '本群指定了别的机器人接没 @ 的消息，我只接 @ 和自己接手的话题',
@@ -43,11 +43,20 @@ export interface RuleRecentActivity {
   partners: string[];
 }
 
+/** 观察 refs 里的标记：发送者是受信机器人（coordinator 的 isTrustedBot），senderKind 仍如实记为 bot。 */
+export const TRUSTED_BOT_REF = 'dutydeck:trusted-bot';
+
+/** 能当判定触发消息的观察：真人消息，或受信机器人的消息。 */
+export const decidableSender = (item: Pick<CollaborationObservation, 'senderKind' | 'refs'>) =>
+  item.senderKind === 'human' || item.senderKind === 'bot' && item.refs.includes(TRUSTED_BOT_REF);
+
 export interface RuleContext {
   text: string;
   messageType: string;
   senderId: string;
   senderKind: 'human' | 'bot' | 'system';
+  /** 发送者是受信机器人：按真人消息的规则判定。 */
+  trustedBot?: boolean;
   at: number;
   /** 消息 @ 了本机器人以外的人或机器人（包括 @所有人）。 */
   mentionsOther: boolean;
@@ -147,7 +156,7 @@ const deicticTask = /(这个|那个|该|刚才的?|上面的?|你的)[^，。,.�
 /** 规则层判定；拿不准返回 undefined。 */
 export function evaluateParticipationRules(ctx: RuleContext): RuleVerdict | undefined {
   const verdict = (action: RuleVerdict['action'], rule: ParticipationRule): RuleVerdict => ({ action, rule, reason: participationRuleReasons[rule] });
-  if (ctx.senderKind !== 'human') return verdict('silent', 'bot_sender');
+  if (ctx.senderKind !== 'human' && !(ctx.senderKind === 'bot' && ctx.trustedBot)) return verdict('silent', 'bot_sender');
   const text = stripMentionPlaceholders(ctx.text);
   if (ctx.mentionsOther) return verdict('silent', 'mentions_other');
   if (callsBotName(text, botFullNames(ctx.botNames))) return verdict('addressed', 'calls_name');
@@ -216,6 +225,7 @@ export function ruleContextOf(trigger: CollaborationObservation, owned: { names:
   const senderId = trigger.senderId ?? '';
   return {
     text: trigger.text, messageType: facts.messageType ?? 'text', senderId, senderKind: trigger.senderKind, at,
+    ...(trigger.senderKind === 'bot' && trigger.refs.includes(TRUSTED_BOT_REF) ? { trustedBot: true } : {}),
     // 走到判定的消息都没有 @ 本机器人，所以出现任何 @ 都是在点别人。
     mentionsOther: trigger.refs.some(ref => ref === 'dutydeck:mention:other' || ref === 'dutydeck:mention:unknown') || /@_all/.test(trigger.text),
     botNames, ownedNames: owned.names, hasActiveMandates: owned.hasActiveMandates, level: facts.level,

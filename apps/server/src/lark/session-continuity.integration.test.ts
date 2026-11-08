@@ -234,7 +234,7 @@ describe('普通群：续接后的话题按话题共享处理唤醒', () => {
 
   it('群参与开启时，发起人在自己任务的话题里不 @ 也算继续和机器人对话', async () => {
     const handle = vi.fn(async () => ({ enabled: true, instructions: '' }));
-    const participation = { handle, mode: async () => 'selective', guardBotTurn: async () => undefined, taskContext: async () => '', instructions: async () => '' } as unknown as LarkGroupParticipation;
+    const participation = { handle, mode: async () => 'selective', guardBotTurn: async () => undefined, noteHumanMessage: () => undefined, taskContext: async () => '', instructions: async () => '' } as unknown as LarkGroupParticipation;
     const h = await harness({ participation });
     h.service.getMessage.mockImplementation(async (id: string) => ({ messageId: id, chatId: 'oc_group', messageType: 'text', rawContent: JSON.stringify({ text: '整理方案' }),
       sender: { id: 'ou_alice', idType: 'open_id', type: 'user' }, mentions: [] }) as any);

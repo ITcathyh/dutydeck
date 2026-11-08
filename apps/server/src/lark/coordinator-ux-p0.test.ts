@@ -1199,7 +1199,7 @@ describe('执行前上下文读取超时', () => {
     let release!: () => void;
     const taskContext = vi.fn().mockImplementationOnce(() => new Promise<string>(resolve => { release = () => resolve(''); }))
       .mockResolvedValue('');
-    const participation = { handle: async () => ({ enabled: false }), guardBotTurn: async () => undefined,
+    const participation = { handle: async () => ({ enabled: false }), guardBotTurn: async () => undefined, noteHumanMessage: () => undefined,
       taskContext, instructions: async () => '' } as unknown as LarkGroupParticipation;
     const h = await harness('normal', { participation });
     vi.spyOn(h.runtime, 'stop').mockImplementation(async () => undefined as any);
@@ -1276,7 +1276,7 @@ describe('执行前上下文读取超时', () => {
     let release!: () => void;
     const taskContext = vi.fn().mockImplementationOnce(() => new Promise<string>(resolve => { release = () => resolve(''); }))
       .mockResolvedValue('');
-    const participation = { handle: async () => ({ enabled: false }), guardBotTurn: async () => undefined,
+    const participation = { handle: async () => ({ enabled: false }), guardBotTurn: async () => undefined, noteHumanMessage: () => undefined,
       taskContext, instructions: async () => '' } as unknown as LarkGroupParticipation;
     const h = await harness('normal', { participation });
     await h.coordinator.handle(event('om_prepared_cancel', '@_user_1 旧请求'), h.config);
@@ -1359,7 +1359,7 @@ describe('群参与开启时的话题续问与转交执行', () => {
   };
   const tag = (mode: 'off' | 'selective' = 'selective') => {
     const handle = vi.fn(async (_event: LarkMessageEvent, _config: StoredLarkConfig, _input: { explicit: boolean }) => ({ enabled: mode !== 'off', instructions: '' }));
-    const participation = { handle, mode: async () => mode, guardBotTurn: async () => undefined, taskContext: async () => '', instructions: async () => '',
+    const participation = { handle, mode: async () => mode, guardBotTurn: async () => undefined, noteHumanMessage: () => undefined, taskContext: async () => '', instructions: async () => '',
       describe: async () => '**群参与**：Tag 按需参与' } as unknown as LarkGroupParticipation;
     return { handle, participation };
   };

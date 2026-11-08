@@ -76,7 +76,7 @@ async function harness() {
     getMessageItems: vi.fn(async () => [] as any[])
   };
   const confirmations = new LarkConfirmCards({ repository: repos.collaboration, readConfig: appId => readLarkConfig(repos.config, appId), serviceFor: () => service as any });
-  const participation = { confirmations, mode: async () => 'off', handle: async () => ({ handled: false, enabled: false }), guardBotTurn: async () => undefined,
+  const participation = { confirmations, mode: async () => 'off', handle: async () => ({ handled: false, enabled: false }), guardBotTurn: async () => undefined, noteHumanMessage: () => undefined,
     taskContext: async () => undefined, instructions: async () => '', describe: async () => undefined } as any;
   const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
   const coordinator = new LarkMessageCoordinator(runtime, service as any, log, Math.random, 'ou_bot',

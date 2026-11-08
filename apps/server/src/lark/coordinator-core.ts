@@ -15,6 +15,7 @@ import { LarkServiceError, type LarkCardService } from './service.js';
 import { isLarkReplyTargetUnavailable } from './api-gate.js';
 import type { LarkHeldCause, LarkRedispatchInfo } from './turn-redispatch.js';
 import { larkNotice } from './notify-tier.js';
+import { isBotSenderType } from './card-mentions.js';
 import { LarkPinManager } from './pin-manager.js';
 import type { LoginLinkStore } from '../auth/auth.js';
 import { larkReplyContext, type LarkChatModeResolver } from './session-resolver.js';
@@ -510,6 +511,22 @@ export abstract class LarkCoordinatorCore {
       this.log.warn({ error, operatorOpenId, upstreamCode }, '获取卡片操作人邮箱失败，按无权限处理');
       return false;
     }
+  }
+
+  /**
+   * 受信机器人：发送人是机器人、不是本机器人自己，且在本机器人的 allowedBots 里，或是本实例托管、
+   * 在本群开了群工具的同伴（与上面的 peer bot 门同口径）。命令和群参与判定都用这一个判断。
+   * 没配成员名单时「任何机器人都能访问」的放行不算受信；查同伴失败按不受信处理。
+   */
+  protected async isTrustedBot(config: StoredLarkConfig, event: Pick<LarkMessageEvent, 'senderType' | 'senderOpenId' | 'chatId'>): Promise<boolean> {
+    const openId = event.senderOpenId;
+    if (!isBotSenderType(event.senderType) || !openId || openId === this.botOpenId) return false;
+    if ((config.allowedBots ?? []).some(bot => bot.openId === openId)) return true;
+    if (config.peerBotsAllowed === false || !config.groupToolsEnabled) return false;
+    return await this.peerBotAuthorized?.(event.chatId, openId).catch(error => {
+      this.log.warn({ error, chatId: event.chatId, senderOpenId: openId }, '核对同伴机器人失败，按不受信处理');
+      return false;
+    }) ?? false;
   }
 
   /**

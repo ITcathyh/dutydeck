@@ -330,6 +330,28 @@ describe('mutating 命令的白名单门', () => {
     expect(routeLarkCommand('/help', bot).kind).toBe('reply');
   });
 
+  it('受信机器人能执行会话类命令；改权限、记忆、审批和发布应用的命令仍只限人类', () => {
+    const caps = { ...fullCapabilities, groupPolicy: true, memory: true, answer: true, approval: true, steerQueued: true, setModel: true };
+    const trusted = context({ capabilities: caps, operator: { kind: 'bot', allowlisted: true, trusted: true } });
+    const untrusted = context({ capabilities: caps, operator: { kind: 'bot', allowlisted: true, trusted: false } });
+    expect(routeLarkCommand('/new --cwd /srv/repo --agent codex -- 跑一遍回归', trusted)).toMatchObject({ kind: 'intent', command: 'new' });
+    for (const text of ['/cancel', '/retry', '/new', '/model gpt-5', '/queue cancel 1', '/steer 改一下']) {
+      expect(routeLarkCommand(text, trusted)).toMatchObject({ kind: 'intent' });
+      expect(authorizeLarkCommandText(text, trusted)).toMatchObject({ decision: 'allowed', mutating: true });
+      const denied = routeLarkCommand(text, untrusted);
+      expect(denied).toMatchObject({ kind: 'denied' });
+      expect(denied.kind === 'denied' && denied.reason).toContain('不受信');
+    }
+    for (const text of ['/grant', '/revoke @_user_1', '/repair', '/answer 1 好', '/approve 1', '/reject 1', '/remember 用 pnpm', '/forget 1']) {
+      const route = routeLarkCommand(text, trusted);
+      expect(route).toMatchObject({ kind: 'denied' });
+      expect(route.kind === 'denied' && route.reason).toContain('只能由白名单内的人类成员操作');
+      expect(authorizeLarkCommandText(text, trusted)).toMatchObject({ decision: 'denied' });
+    }
+    // 受信只放开机器人限制，白名单门照旧。
+    expect(routeLarkCommand('/cancel', context({ capabilities: caps, operator: { kind: 'bot', allowlisted: false, trusted: true } }))).toMatchObject({ kind: 'denied' });
+  });
+
   it('权限门单独回报 mutating 标记，供 coordinator 决定是否解析身份', () => {
     expect(authorizeLarkCommandText('/status', context())).toMatchObject({ recognized: true, mutating: false, decision: 'allowed' });
     expect(authorizeLarkCommandText('/new', context())).toMatchObject({ recognized: true, mutating: true, decision: 'allowed' });

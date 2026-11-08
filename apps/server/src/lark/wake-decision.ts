@@ -10,6 +10,8 @@ export interface WakeFacts {
   chatType: string;
   /** 发送者是机器人（app / bot）。 */
   botSender: boolean;
+  /** 发送者是受信机器人（见 coordinator 的 isTrustedBot）：没 @ 的消息按真人口径交给群参与判定。 */
+  trustedBot: boolean;
   mentionsBot: boolean;
   /** 消息里有任何 @，包括 @ 本机器人。 */
   hasMentions: boolean;
@@ -32,10 +34,10 @@ export interface WakeFacts {
   requestContinuation: boolean;
 }
 
-export type WakeExplicitFacts = Pick<WakeFacts, 'chatType' | 'botSender' | 'mentionsBot' | 'quotedWorkflow' | 'adopted'>;
+export type WakeExplicitFacts = Pick<WakeFacts, 'chatType' | 'botSender' | 'trustedBot' | 'mentionsBot' | 'quotedWorkflow' | 'adopted'>;
 
 export interface WakeSignals {
-  /** 真人明确在叫本机器人：私聊、@、引用工作流或已受理。 */
+  /** 真人明确在叫本机器人：私聊、@、引用工作流或已受理；受信机器人只有被群参与受理的算。 */
   explicit: boolean;
   /** 在叫本机器人，含免 @ 续说自己的请求。 */
   addressed: boolean;
@@ -56,7 +58,8 @@ export type WakeDecision =
   | { wake: false; reason: 'participation_handled' | 'participation_observes' | 'not_addressed' };
 
 export function isExplicitWake(facts: WakeExplicitFacts): boolean {
-  return !facts.botSender && (facts.chatType === 'p2p' || facts.mentionsBot || facts.quotedWorkflow || facts.adopted);
+  if (facts.botSender) return facts.trustedBot && facts.adopted;
+  return facts.chatType === 'p2p' || facts.mentionsBot || facts.quotedWorkflow || facts.adopted;
 }
 
 function legacyWakeReason(facts: WakeFacts): WakeReason | undefined {
@@ -78,14 +81,16 @@ export function wakeSignals(facts: WakeFacts): WakeSignals {
   const explicit = isExplicitWake(facts);
   const legacyWake = legacyWakeReason(facts) !== undefined;
   // Known commands retain their existing wake and authorization rules; unknown /paths remain material.
-  const commandInteraction = !facts.botSender && facts.recognizedCommand && legacyWake;
+  const commandInteraction = (!facts.botSender || facts.trustedBot) && facts.recognizedCommand && legacyWake;
   const addressed = explicit || facts.requestContinuation;
   // 话题内免 @ 续聊也算在叫它，可以直接改档或问「为什么没回」；是否接手仍按老规则。
-  const topicContinuation = facts.ownedTopic && !facts.botSender;
+  const topicContinuation = facts.ownedTopic && (!facts.botSender || facts.trustedBot);
+  // 受信机器人 @ 我或引用工作流时按老规则直接唤醒，群参与只记录，不再判定一次。
+  const trustedLegacyWake = facts.botSender && facts.trustedBot && legacyWake;
   return {
     explicit, addressed, legacyWake, commandInteraction,
     participation: {
-      explicit: addressed || facts.pendingAskContinuation || commandInteraction,
+      explicit: addressed || facts.pendingAskContinuation || commandInteraction || trustedLegacyWake,
       addressed: (addressed || topicContinuation) && !facts.recognizedCommand && !facts.recovering,
       ownedTopic: topicContinuation
     }

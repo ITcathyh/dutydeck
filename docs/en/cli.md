@@ -263,9 +263,9 @@ Every key accepted by `dutydeck settings bot set <app-id> key=value ...` is list
 | `allowedUsers` | Requester list, a JSON array `[{"openId":"ou_…","name":"…"}]`; no restriction when this and `allowedEmails` are both empty | Empty |
 | `allowedUserNames` | Requester list by name, resolved into `allowedUsers` when saved | Empty |
 | `allowedEmails` | Requester list by email | Empty |
-| `allowedBots` | Other bots still allowed when the requester list is restricted, same format as `allowedUsers` | Empty |
+| `allowedBots` | Trusted bots (whether or not the requester list is restricted): still allowed when the requester list is restricted, and can run conversation commands and have their un-@ messages judged, see [trusted bots](lark.md#trusted-bots); same format as `allowedUsers` | Empty |
 | `allowedBotNames` | `allowedBots` by name, resolved when saved | Empty |
-| `peerBotsAllowed` | When the requester list is restricted, whether authorized peer bots in the same group are allowed (requires group tools) | `true` |
+| `peerBotsAllowed` | When the requester list is restricted, whether authorized peer bots in the same group are allowed (requires group tools); while on, those bots are trusted bots whether or not the list is restricted | `true` |
 | `highRiskAllowedUsers` | People who may run high-risk commands under enforced risk control, same format as `allowedUsers`; no extra restriction when this and `highRiskAllowedEmails` are both empty | Empty |
 | `highRiskAllowedUserNames` | `highRiskAllowedUsers` by name, resolved when saved | Empty |
 | `highRiskAllowedEmails` | People who may run high-risk commands, by email | Empty |

@@ -3,8 +3,24 @@ import type { LarkGroupManager } from './lark/group-management.js';
 import { defaultHighRiskPattern, readLarkConfig } from './lark/config.js';
 import { createLarkCardService } from './lark/service.js';
 
-/** Resolve the captured actor without replacing the parent conversation's current actor. */
-export async function workItemRiskPolicy(repos: RepositoryBundle, groups: LarkGroupManager, parentSessionId: string, actorId: string, fallback?: ToolRiskPolicy, env: NodeJS.ProcessEnv = process.env, fetcher: typeof globalThis.fetch = globalThis.fetch): Promise<ToolRiskPolicy | undefined> {
+/** 发起任务时记下的风险策略（例如机器人发起的任务恒为未授权）；工作项和 Leader 运行都以它为上限。 */
+export function capturedRiskPolicy(repos: Pick<RepositoryBundle, 'execution'>, parentTaskId?: string): ToolRiskPolicy | undefined {
+  return parentTaskId ? repos.execution.getAcceptedTask(parentTaskId)?.task.executionContext?.riskPolicy : undefined;
+}
+
+/** 发起时已判为没有高危授权的，现场重算只能更严，不能放宽。 */
+const capRiskPolicy = (policy: ToolRiskPolicy | undefined, captured?: ToolRiskPolicy) =>
+  policy?.enabled && policy.authorized && captured?.enabled && !captured.authorized ? { ...policy, authorized: false, reason: captured.reason ?? policy.reason } : policy;
+
+/**
+ * Resolve the captured actor without replacing the parent conversation's current actor.
+ * captured 是发起任务时记下的策略：它判为未授权时，结果也是未授权；风控现在没开时照旧返回 fallback。
+ */
+export async function workItemRiskPolicy(repos: RepositoryBundle, groups: LarkGroupManager, parentSessionId: string, actorId: string, fallback?: ToolRiskPolicy, env: NodeJS.ProcessEnv = process.env, fetcher: typeof globalThis.fetch = globalThis.fetch, captured?: ToolRiskPolicy): Promise<ToolRiskPolicy | undefined> {
+  return capRiskPolicy(await currentWorkItemRiskPolicy(repos, groups, parentSessionId, actorId, fallback, env, fetcher), captured);
+}
+
+async function currentWorkItemRiskPolicy(repos: RepositoryBundle, groups: LarkGroupManager, parentSessionId: string, actorId: string, fallback: ToolRiskPolicy | undefined, env: NodeJS.ProcessEnv, fetcher: typeof globalThis.fetch): Promise<ToolRiskPolicy | undefined> {
   const parent = await repos.sessions.get(parentSessionId);
   if (parent?.source !== 'lark') return fallback;
   const { appId, chatId, chatType } = parseLarkSourceId(parent.sourceId);

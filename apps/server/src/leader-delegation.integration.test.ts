@@ -435,6 +435,31 @@ describe('Leader 模式：接待交接、Leader 规划、Worker 执行、Leader 
     expect(f.prompts.find(value => value.prompt.includes('Step: Leader 验收'))!.prompt).toContain('卡片答复：批准工具调用「推送到远端仓库」');
   });
 
+  it.each([
+    ['unauthorized (bot-started)', false],
+    ['authorized', true]
+  ] as const)('caps Leader approval by the risk policy captured when the goal was started: %s', async (_name, authorized) => {
+    const f = await fixture('layered', { worker: 'permission' });
+    f.leader.ruling = '{"decision":"approve","basis":"用户要求修好后推送"}';
+    const { turn, delegated } = await f.delegateGoal('om_perm_captured', '修好后推送到远端');
+    const { parentTaskId } = await f.leaderRecord(delegated.workId);
+    const accepted = f.repos.execution.getAcceptedTask.bind(f.repos.execution);
+    vi.spyOn(f.repos.execution, 'getAcceptedTask').mockImplementation(id => {
+      const found = accepted(id);
+      return found && id === parentTaskId ? { ...found, task: { ...found.task, executionContext: { ...found.task.executionContext!, riskPolicy: { enabled: true, authorized, pattern: 'dangerous' } } } } : found;
+    });
+    if (authorized) {
+      await f.tickUntil(async () => expect((await f.work.get(turn.parent.id, delegated.workId, 'ou_alice')).status).toBe('completed'));
+      expect(f.permissionCalls).toEqual([[expect.stringMatching(/^permit_ses_work_/), true]]);
+      return;
+    }
+    // 发起人当前仍可批准（approval.allowed），但发起时没有高危授权：普通工具授权也交给用户。
+    const escalated = () => f.cards.find(card => JSON.stringify(card.input).includes('这个任务发起时没有高危授权'));
+    await f.tickUntil(() => expect(escalated()).toBeDefined());
+    expect(f.permissionCalls).toEqual([]);
+    expect((await f.leaderRecord(delegated.workId)).rulings).toEqual([expect.objectContaining({ decision: 'escalate', escalation: expect.objectContaining({ reason: expect.stringContaining('这个任务发起时没有高危授权') }) })]);
+  });
+
   it('approves a tool call for the Worker without a card when the requester may approve it', async () => {
     const f = await fixture('layered', { worker: 'permission' });
     f.leader.ruling = '{"decision":"approve","basis":"用户要求修好后推送"}';

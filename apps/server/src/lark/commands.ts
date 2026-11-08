@@ -454,9 +454,11 @@ function formatLarkCommandSuggestion(tokens: readonly string[]): string {
 export interface LarkCommandOperator {
   /**
    * 操作人类型。'bot' 表示消息来自机器人（event.senderType 为 app/bot）。
-   * 协作机器人可以创建任务，但不允许驱动会话生命周期（见下方 mutating 规则）。
+   * 机器人可以创建任务；改会话状态的命令只有受信机器人能执行，改权限、记忆和发布应用的仍只限人类（见 {@link humanOnlyCommands}）。
    */
   kind: 'user' | 'bot';
+  /** 受信机器人（coordinator 的 isTrustedBot）。只对 kind 为 'bot' 有意义。 */
+  trusted?: boolean;
   /**
    * 是否在机器人白名单内。**必须**由 coordinator 用既有的白名单逻辑填充
    * （isOperatorAllowed / runTurn 那一套 allowedUsers + allowedEmails + allowedBots +
@@ -479,8 +481,14 @@ export interface LarkPluginCommandHelp { name: string; summary: string; usage: s
 const denyNotAllowlisted = (name: string) =>
   `当前账号不在机器人白名单中，无法执行 /${name}。请联系机器人管理员把你加入白名单后重试。`;
 
+/** 改权限、改会话记忆、回答或审批工具调用、发布应用：受信机器人也不能执行。 */
+const humanOnlyCommands: ReadonlySet<LarkCommandName> = new Set(['grant', 'revoke', 'repair', 'answer', 'approve', 'reject', 'remember', 'forget']);
+
 const denyBotOperator = (name: string) =>
-  `协作机器人不能执行 /${name}：改变会话状态的命令仅限白名单内的人类成员操作。请改由人工在飞书中发送该命令。`;
+  `不受信的协作机器人不能执行 /${name}：改变会话状态的命令仅限白名单内的人类成员和受信机器人（在本机器人的机器人白名单里，或是同一 Dutydeck 托管、在本群开了群工具的机器人）。请改由人工在飞书中发送该命令。`;
+
+const denyHumanOnly = (name: string) =>
+  `/${name} 会改权限、记忆、审批或飞书应用，只能由白名单内的人类成员操作，机器人不能执行。请改由人工在飞书中发送该命令。`;
 
 const defaultUnavailable = (name: string) =>
   `当前 Dutydeck 运行时不支持 /${name}，已停用。`;
@@ -517,7 +525,8 @@ export function evaluateLarkCommand(text: unknown, context: LarkCommandContext):
     };
   }
   if (larkCommandMutates(definition, parsed) && context.operator.kind === 'bot') {
-    return { verdict: 'denied', parsed, definition, reason: denyBotOperator(definition.name) };
+    if (humanOnlyCommands.has(definition.name)) return { verdict: 'denied', parsed, definition, reason: denyHumanOnly(definition.name) };
+    if (!context.operator.trusted) return { verdict: 'denied', parsed, definition, reason: denyBotOperator(definition.name) };
   }
   return { verdict: 'allowed', parsed, definition };
 }

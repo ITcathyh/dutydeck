@@ -13,7 +13,7 @@ import type { LarkCardService, LarkChatMessage } from './service.js';
 import { parseLarkMessageContent } from './message-content.js';
 import { LarkContextBootstrap, observationTime } from './context-bootstrap.js';
 import { decisionInput, participationInput, parseParticipationResult, parseParticipationResponse, scenarioObservations, type ParticipationDecider, type ParticipationFacts, type ParticipationResult } from './readonly-decider.js';
-import { botNameTokens, callsBotName, compactText, evaluateParticipationRules, intrusionCorrection, ownedItems, participationIntentOf, participationRuleReasons, ruleContextOf, stripMentionPlaceholders, type ParticipationRule, type RuleFacts, type RuleVerdict } from './participation-rules.js';
+import { botNameTokens, callsBotName, compactText, decidableSender, evaluateParticipationRules, intrusionCorrection, ownedItems, participationIntentOf, participationRuleReasons, ruleContextOf, stripMentionPlaceholders, TRUSTED_BOT_REF, type ParticipationRule, type RuleFacts, type RuleVerdict } from './participation-rules.js';
 import { responderAnnouncementOf, responderClaimText, responderIntentOf, responderReleaseText } from './group-responder.js';
 import { LarkScenarios, type ScenarioMatch, type ScenarioPhrase } from './group-scenarios.js';
 import { runDirectScenario, type LarkScenarioAdoption } from './scenario-direct.js';
@@ -62,14 +62,18 @@ export interface GroupParticipationOptions {
   log?: { warn(details: unknown, message: string): void };
 }
 type Pending = { event: LarkMessageEvent; config: StoredLarkConfig; observation: CollaborationObservation; botOpenId?: string };
-type ObserveInput = { explicit: boolean; botOpenId?: string; addressed?: boolean; ownedTopic?: boolean };
+type ObserveInput = { explicit: boolean; botOpenId?: string; addressed?: boolean; ownedTopic?: boolean; trustedBot?: boolean };
 /** merged：去抖时被后一条并掉的消息，按到达顺序排队，只跑早期规则。 */
 type Slot = { pending?: Pending; merged?: Pending[]; timer?: NodeJS.Timeout; running?: Promise<void>; stopped: boolean };
-/** 把一条人类消息按显式 @ 交给执行路径；授权、领取与执行由 coordinator 负责。 */
+/** 把一条人类（或受信机器人）消息按显式 @ 交给执行路径；授权、领取与执行由 coordinator 负责。 */
 export type ParticipationDispatcher = (event: LarkMessageEvent, config: StoredLarkConfig) => Promise<void>;
+/** 按当前配置复核一个机器人发送者是否仍受信（coordinator 的 isTrustedBot 口径，含群级覆盖）。 */
+export type ParticipationTrustCheck = (config: StoredLarkConfig, chatId: string, senderOpenId: string) => Promise<boolean>;
 /** 一次回合门禁的结论：放行返回 undefined，拦下返回可直接落日志的理由。 */
 export type BotTurnGate = string | undefined;
 const keyFor = (scope: CollaborationScope) => JSON.stringify([scope.appId, scope.chatId]);
+/** 机器人连续回合按话题计数的键。 */
+const botTopicKey = (scope: CollaborationScope, threadId?: string) => `${keyFor(scope)}::${threadId ?? ''}`;
 const teamContextTimeoutMs = 10_000;
 /** 主动回复与 act 转执行共用每小时主动发言额度。规则判为「在叫我」的转执行等同一次 @，不占这个额度。 */
 const proactiveKinds = ['participation.reply', 'participation.dispatch'];
@@ -139,7 +143,7 @@ export function decisionTrigger(decision: Pick<CollaborationDecision, 'inputSnap
   const meta = deciderMetaOf(decision)?.trigger;
   if (meta) return meta;
   const observations = (decision.inputSnapshot as { observations?: unknown }).observations;
-  const trigger = Array.isArray(observations) ? [...observations as CollaborationObservation[]].reverse().find(item => item?.origin === 'live' && item.senderKind === 'human') : undefined;
+  const trigger = Array.isArray(observations) ? [...observations as CollaborationObservation[]].reverse().find(item => item?.origin === 'live' && decidableSender(item)) : undefined;
   return trigger ? { id: trigger.id, ...(trigger.messageId ? { messageId: trigger.messageId } : {}), ...(trigger.senderId ? { senderId: trigger.senderId } : {}), text: trigger.text.slice(0, 200) } : undefined;
 }
 
@@ -160,6 +164,7 @@ export class LarkGroupParticipation {
   /** 各 Bot 的 coordinator 在监听启动时登记；act 判定经它走显式 @ 的同一路径。 */
   private readonly dispatchers = new Map<string, ParticipationDispatcher>();
   private readonly dispatchAuthorizers = new Map<string, (scope: CollaborationScope, actor: string) => Promise<boolean>>();
+  private readonly trustChecks = new Map<string, ParticipationTrustCheck>();
   private readonly bootstrapper: LarkContextBootstrap;
   /** 群成员缓存：规则层「群里只有一个真人」「多机器人群」和接话人、场景来源的名字要用，按群缓存 10 分钟。 */
   private readonly members = new Map<string, { until: number; value?: Members }>();
@@ -393,10 +398,12 @@ export class LarkGroupParticipation {
     lines.push(...this.scenarios.statusLines({ appId: scope.appId, ...(config?.workspace ? { workspace: config.workspace } : {}) }, duty, decisionsToday));
     return lines;
   }
-  setDispatcher(appId: string, dispatch: ParticipationDispatcher, authorize?: (scope: CollaborationScope, actor: string) => Promise<boolean>) {
+  setDispatcher(appId: string, dispatch: ParticipationDispatcher, authorize?: (scope: CollaborationScope, actor: string) => Promise<boolean>, trusted?: ParticipationTrustCheck) {
     this.dispatchers.set(appId, dispatch);
     if (authorize) this.dispatchAuthorizers.set(appId, authorize);
     else this.dispatchAuthorizers.delete(appId);
+    if (trusted) this.trustChecks.set(appId, trusted);
+    else this.trustChecks.delete(appId);
   }
   refresh(appId: string): Promise<void> {
     if (this.closed) return Promise.resolve();
@@ -437,7 +444,7 @@ export class LarkGroupParticipation {
       const snapshot = await this.options.repository.snapshot(scope, 30);
       if (snapshot.settings.participation === 'off') continue;
       // Live backlog only: history is context, never a source of newly authorized actions.
-      const latest = [...snapshot.observations].reverse().find(item => item.origin === 'live' && item.senderKind === 'human' && !item.refs.includes('dutydeck:explicit'));
+      const latest = [...snapshot.observations].reverse().find(item => item.origin === 'live' && decidableSender(item) && !item.refs.includes('dutydeck:explicit'));
       if (!latest?.messageId || !latest.senderId) continue;
       const decisions = await this.options.repository.listDecisions(scope, 100);
       if (decisions.some(item => item.evidenceIds.includes(latest.id) || (item.inputSnapshot as unknown as CollaborationSnapshot)?.observations?.some(observation => observation.id === latest.id))) continue;
@@ -445,12 +452,13 @@ export class LarkGroupParticipation {
       if (!config?.listening) continue;
       const ref = (prefix: string) => latest.refs.find(item => item.startsWith(prefix))?.slice(prefix.length);
       const parentId = ref('dutydeck:parent:'), botOpenId = ref('dutydeck:self:');
-      this.enqueue(scope, { config, observation: latest, ...(botOpenId ? { botOpenId } : {}), event: { messageId: latest.messageId, chatId: scope.chatId, chatType: 'group', senderOpenId: latest.senderId, senderType: 'user', messageType: 'text', content: JSON.stringify({ text: latest.text }), threadId: latest.threadId, ...(parentId ? { parentId } : {}), createTime: latest.occurredAt, mentions: [] } });
+      this.enqueue(scope, { config, observation: latest, ...(botOpenId ? { botOpenId } : {}), event: { messageId: latest.messageId, chatId: scope.chatId, chatType: 'group', senderOpenId: latest.senderId, senderType: latest.senderKind === 'bot' ? 'app' : 'user', messageType: 'text', content: JSON.stringify({ text: latest.text }), threadId: latest.threadId, ...(parentId ? { parentId } : {}), createTime: latest.occurredAt, mentions: [] } });
     }
   }
   closeApp(appId: string) {
     this.dispatchers.delete(appId);
     this.dispatchAuthorizers.delete(appId);
+    this.trustChecks.delete(appId);
     for (const [key, slot] of this.slots) {
       if ((JSON.parse(key) as [string, string])[0] !== appId) continue;
       slot.stopped = true; slot.pending = undefined; slot.merged = undefined;
@@ -479,6 +487,8 @@ export class LarkGroupParticipation {
     const self = Boolean(input.botOpenId && event.senderOpenId === input.botOpenId);
     const bot = event.senderType === 'app' || event.senderType === 'bot' || self;
     const human = !bot && Boolean(event.senderOpenId);
+    // 受信机器人没 @ 的消息和真人一样交给判定；观察里 senderKind 如实记为 bot，另用 refs 标记受信。自己的消息永不判定。
+    const trusted = bot && !self && input.trustedBot === true;
     // 漏接、误插和改档短语与参与模式无关：只在 @ 时的群也要能在群里改回来。
     let intrusive = false;
     if (human) {
@@ -509,14 +519,14 @@ export class LarkGroupParticipation {
       occurredAt: observationTime(event.createTime, '1970-01-01T00:00:00.000Z'), receivedAt: now, senderId: event.senderOpenId,
       senderKind: bot ? 'bot' : event.senderOpenId ? 'human' : 'system', threadId: event.threadId, messageId: larkMessageAnchor(event),
       text: text.slice(0, 16_000), refs: [larkMessageAnchor(event), ...(event.parentId ? [event.parentId] : []), ...(input.explicit ? ['dutydeck:explicit'] : []),
-        ...(input.botOpenId ? [`dutydeck:self:${input.botOpenId}`] : []),
+        ...(input.botOpenId ? [`dutydeck:self:${input.botOpenId}`] : []), ...(trusted ? [TRUSTED_BOT_REF] : []),
         ...(event.parentId ? [`dutydeck:parent:${event.parentId}`] : []), ...(input.ownedTopic ? [OWNED_TOPIC_REF] : []), ...(scenarioRef ? [`${SCENARIO_REF_PREFIX}${scenarioRef}`] : []),
         ...new Set(event.mentions.map(mention => `dutydeck:mention:${!input.botOpenId || !mention.openId ? 'unknown' : mention.openId === input.botOpenId ? 'self' : 'other'}`))], origin: 'live', missing });
     // Bootstrap can run alongside explicit requests, but is awaited before ambient decisions.
     if (input.explicit) void this.bootstrapper.ensure(scope).catch(error => this.options.log?.warn({ error, scope }, '群上下文补读失败'));
     // 「没问你」之类的回复记下误插后照常留作群材料，但不再交给判定或 Agent。
     if (intrusive) return { enabled: true, instructions: settings.instructions, handled: true };
-    if ((result.created || result.changed) && !input.explicit && human) {
+    if ((result.created || result.changed) && !input.explicit && (human || trusted)) {
       this.enqueue(scope, { event, config, observation: result.observation, ...(input.botOpenId ? { botOpenId: input.botOpenId } : {}) });
     }
     return { enabled: true, instructions: settings.instructions };
@@ -619,11 +629,12 @@ export class LarkGroupParticipation {
     return used >= limit ? `判定预算已用尽：本小时 ${used}/${limit}` : undefined;
   }
   /**
-   * 可选的机器人互相 @ 回合门禁，与 participation 设置无关。
+   * 机器人回合门禁，与 participation 设置无关。
    *
    * 唤醒判据里的 mentionsBot 分支不受 `!botSender` 约束，访问控制在没配成员名单时
    * 又对任何机器人一律放行——两个机器人互相 @ 就能无限往返。开启 `botLoopGuard` 时，
-   * 这里是唯一封口的地方；默认关闭时完全不记录或拦截机器人回合。
+   * 这里是唯一封口的地方；关闭时 @ 唤醒的机器人回合不记录也不拦截。
+   * 群参与判定唤醒的受信机器人回合（participationWake）不看开关，始终计入同话题连续上限。
    * 它只读自己的状态，不看 participation 开关。（真实接线见 service.ts，participation
    * 实例始终存在。）
    *
@@ -634,7 +645,11 @@ export class LarkGroupParticipation {
    *
    * 返回拦截理由，放行返回 undefined。调用方拦下后只留日志与门禁记录，不向群里发消息。
    */
-  guardBotTurn(event: LarkMessageEvent, config: StoredLarkConfig, input: { botOpenId?: string }): Promise<BotTurnGate> {
+  /** 真人在群里说了话（不论唤醒与否）：同话题的机器人连续回合清零。 */
+  noteHumanMessage(appId: string, event: Pick<LarkMessageEvent, 'chatId' | 'threadId'>) {
+    this.botTurnDepth.delete(botTopicKey({ appId, chatId: event.chatId }, event.threadId));
+  }
+  guardBotTurn(event: LarkMessageEvent, config: StoredLarkConfig, input: { botOpenId?: string; participationWake?: boolean }): Promise<BotTurnGate> {
     if (this.closed || event.chatType !== 'group') return Promise.resolve(undefined);
     const key = keyFor({ appId: config.appId, chatId: event.chatId });
     const run = (this.botTurnChain.get(key) ?? Promise.resolve())
@@ -643,13 +658,12 @@ export class LarkGroupParticipation {
     this.botTurnChain.set(key, run.catch(() => undefined));
     return this.track(() => run);
   }
-  private async checkBotTurn(event: LarkMessageEvent, config: StoredLarkConfig, input: { botOpenId?: string }): Promise<BotTurnGate> {
+  private async checkBotTurn(event: LarkMessageEvent, config: StoredLarkConfig, input: { botOpenId?: string; participationWake?: boolean }): Promise<BotTurnGate> {
     const scope = { appId: config.appId, chatId: event.chatId };
-    const chatKey = keyFor(scope);
-    const topicKey = `${chatKey}::${event.threadId ?? ''}`;
+    const topicKey = botTopicKey(scope, event.threadId);
     const bot = event.senderType === 'app' || event.senderType === 'bot' || Boolean(input.botOpenId && event.senderOpenId === input.botOpenId);
-    if (config.botLoopGuard !== true) { this.botTurnDepth.delete(topicKey); return undefined; }
     if (!bot) { this.botTurnDepth.delete(topicKey); return undefined; }
+    if (config.botLoopGuard !== true && !input.participationWake) return undefined;
     const depth = (this.botTurnDepth.get(topicKey) ?? 0) + 1;
     if (depth > BOT_LOOP_DEPTH_LIMIT) {
       // 深度不再往上累加：挡住之后每条消息都在这里返回，不读库也不写库。
@@ -701,7 +715,7 @@ export class LarkGroupParticipation {
         await this.bootstrapper.ensure(scope);
         const full = await this.snapshot(scope, pending.observation);
         if (full.settings.participation === 'off' || !await this.current(scope, full, slot)) return undefined;
-        const trigger = full.observations.find(item => item.messageId === larkMessageAnchor(pending.event) && item.origin === 'live' && item.senderKind === 'human');
+        const trigger = full.observations.find(item => item.messageId === larkMessageAnchor(pending.event) && item.origin === 'live' && decidableSender(item));
         if (!trigger) return undefined;
         // 第二轮规则：补上最近发言（续问、「这个任务」）和事项名称。
         const merged: RuleFacts = { ...facts, ...await this.recentFacts(config, pending, full) };
@@ -833,6 +847,7 @@ export class LarkGroupParticipation {
       return;
     }
     if (!await this.current(scope, snapshot, slot, true)) { await this.noteDisposition(scope, pending, 'participation_stale', id); await repo.updateDecision(scope, id, { status: 'suppressed' }); return; }
+    if (await this.trustRevoked(scope, pending, trigger, id)) return;
     const actions = await repo.listActions(scope, COLLABORATION_LIST_LIMIT);
     if (this.proactiveBudgetExhausted(actions, snapshot.settings.maxProactivePerHour)) { await this.noteDisposition(scope, pending, 'participation_reply_budget', id); await repo.updateDecision(scope, id, { status: 'suppressed' }); return; }
     // Keep uncertain/in-flight delivery deduplicated. A completed answer must not
@@ -895,7 +910,7 @@ export class LarkGroupParticipation {
       action = await repo.updateAction(scope, actionId, { expectedRevision: action.revision, status: 'sending' });
       const send = async () => {
         // Shared group delivery serialization may wait: recheck inside the acquired guard.
-        if (!await this.current(scope, snapshot, slot, true, true)) {
+        if (!await this.current(scope, snapshot, slot, true, true) || !await this.triggerTrusted(scope, trigger)) {
           throw new RuntimeError('COLLABORATION_DELIVERY_SUPPRESSED', 'Context or authorization changed before delivery', 409);
         }
         const config = await this.options.readConfig(scope.appId, scope.chatId);
@@ -925,8 +940,26 @@ export class LarkGroupParticipation {
    * 没人确认就不执行；确认后以点击人的身份重新鉴权。
    * scenario 是用到了 model 场景包的 act：收养字段只带判定记录 id，执行时 coordinator 按它取冻结的指令和材料。
    */
+  /**
+   * 触发消息是机器人发的：按当前配置复核它是否仍受信。观察上的受信标记只是记录时的事实，
+   * 判定到投递之间可能已被移出名单或关了群工具。没登记复核入口时按不受信处理。
+   */
+  private async triggerTrusted(scope: CollaborationScope, trigger: CollaborationObservation): Promise<boolean> {
+    if (trigger.senderKind !== 'bot') return true;
+    const check = this.trustChecks.get(scope.appId);
+    const config = check && trigger.senderId ? await this.options.readConfig(scope.appId, scope.chatId) : undefined;
+    return Boolean(config && await check!(config, scope.chatId, trigger.senderId!).catch(() => false));
+  }
+  /** 不再受信：这条判定按静默收尾，留下处置记录；返回 true 表示已挡下。 */
+  private async trustRevoked(scope: CollaborationScope, pending: Pending, trigger: CollaborationObservation, id: string): Promise<boolean> {
+    if (await this.triggerTrusted(scope, trigger)) return false;
+    await this.noteDisposition(scope, pending, 'access_denied', id, '发这条消息的机器人已不再受信');
+    await this.options.repository.updateDecision(scope, id, { status: 'suppressed' });
+    return true;
+  }
   private async dispatch(scope: CollaborationScope, pending: Pending, trigger: CollaborationObservation, snapshot: CollaborationSnapshot, evidenceIds: string[], id: string, slot: Slot, addressed = false, scenario?: LarkScenarioAdoption) {
     const repo = this.options.repository;
+    if (await this.trustRevoked(scope, pending, trigger, id)) return;
     const dispatch = this.dispatchers.get(scope.appId);
     if (!dispatch || !evidenceIds.includes(trigger.id) || !await this.current(scope, snapshot, slot, !addressed, addressed)
       || !addressed && this.proactiveBudgetExhausted(await repo.listActions(scope, COLLABORATION_LIST_LIMIT), snapshot.settings.maxProactivePerHour)) {
@@ -1329,7 +1362,7 @@ export class LarkGroupParticipation {
     }
     // 规则只看这一条消息本身，期间来了新消息也不影响结论，所以按已受理处理，不比对上下文版本。
     if (full.settings.participation === 'off' || !await this.current(scope, full, slot, false, true)) return;
-    const trigger = full.observations.find(item => item.messageId === larkMessageAnchor(pending.event) && item.origin === 'live' && item.senderKind === 'human');
+    const trigger = full.observations.find(item => item.messageId === larkMessageAnchor(pending.event) && item.origin === 'live' && decidableSender(item));
     if (!trigger) return;
     const snapshot = decisionInput(full, trigger.id);
     const id = decisionIdOf(scope, trigger.id, snapshot);

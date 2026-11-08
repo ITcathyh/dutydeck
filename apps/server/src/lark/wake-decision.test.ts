@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { decideWake, isExplicitWake, wakeSignals, type WakeFacts, type WakeMentionPolicy } from './wake-decision.js';
 
-const base: WakeFacts = { chatType: 'group', botSender: false, mentionsBot: false, hasMentions: false, quotedWorkflow: false, adopted: false, recovering: false,
+const base: WakeFacts = { chatType: 'group', botSender: false, trustedBot: false, mentionsBot: false, hasMentions: false, quotedWorkflow: false, adopted: false, recovering: false,
   recognizedCommand: false, mentionPolicy: 'always', ownedTopic: false, directScenario: false, pendingAskContinuation: false, requestContinuation: false };
 type Participation = { enabled: boolean; handled?: boolean } | undefined;
 const on: Participation = { enabled: true };
@@ -35,7 +35,12 @@ describe('唤醒判定：各分支组合', () => {
     ['@ 我的已识别命令，群参与开着', { mentionsBot: true, hasMentions: true, recognizedCommand: true }, on, { wake: true, reason: 'mention', guardBotTurn: true }],
     ['没 @ 的已识别命令，每次 @ 档', { recognizedCommand: true }, on, { wake: false, reason: 'participation_observes' }],
     ['免 @ 档的已识别命令，群参与开着：命令照常唤醒', { recognizedCommand: true, mentionPolicy: 'never' }, on, { wake: true, reason: 'never_policy', guardBotTurn: true }],
-    ['未知会话类型', { chatType: 'unknown' }, undefined, { wake: false, reason: 'not_addressed' }]
+    ['未知会话类型', { chatType: 'unknown' }, undefined, { wake: false, reason: 'not_addressed' }],
+    ['受信机器人没 @，群参与开着：让给群参与', { botSender: true, trustedBot: true }, on, { wake: false, reason: 'participation_observes' }],
+    ['受信机器人在接手话题里没 @：让给群参与', { botSender: true, trustedBot: true, ownedTopic: true }, on, { wake: false, reason: 'participation_observes' }],
+    ['受信机器人的消息被群参与受理', { botSender: true, trustedBot: true, adopted: true }, on, { wake: true, reason: 'adopted', guardBotTurn: true }],
+    ['不受信机器人的消息不会被群参与受理', { botSender: true, adopted: true }, on, { wake: false, reason: 'participation_observes' }],
+    ['受信机器人 @ 我的已识别命令', { botSender: true, trustedBot: true, mentionsBot: true, hasMentions: true, recognizedCommand: true }, on, { wake: true, reason: 'mention', guardBotTurn: true }]
   ])('%s', (_name, patch, participation, expected) => {
     expect(decideWake({ ...base, ...patch }, participation)).toEqual(expected);
   });
@@ -49,7 +54,13 @@ describe('唤醒判定：各分支组合', () => {
     ['免 @ 档的已识别命令', { recognizedCommand: true, mentionPolicy: 'never' }, { explicit: true, addressed: false, ownedTopic: false }],
     ['回复仍在等待的提问', { pendingAskContinuation: true }, { explicit: true, addressed: false, ownedTopic: false }],
     ['续说自己的请求', { requestContinuation: true }, { explicit: true, addressed: true, ownedTopic: false }],
-    ['普通群消息', {}, { explicit: false, addressed: false, ownedTopic: false }]
+    ['普通群消息', {}, { explicit: false, addressed: false, ownedTopic: false }],
+    ['接手话题里的受信机器人消息', { ownedTopic: true, botSender: true, trustedBot: true }, { explicit: false, addressed: true, ownedTopic: true }],
+    ['受信机器人 @ 我的已识别命令', { botSender: true, trustedBot: true, mentionsBot: true, hasMentions: true, recognizedCommand: true }, { explicit: true, addressed: false, ownedTopic: false }],
+    ['不受信机器人 @ 我的已识别命令', { botSender: true, mentionsBot: true, hasMentions: true, recognizedCommand: true }, { explicit: false, addressed: false, ownedTopic: false }],
+    ['受信机器人的普通消息', { botSender: true, trustedBot: true }, { explicit: false, addressed: false, ownedTopic: false }],
+    ['受信机器人 @ 我：直接唤醒，不再交给判定', { botSender: true, trustedBot: true, mentionsBot: true, hasMentions: true }, { explicit: true, addressed: false, ownedTopic: false }],
+    ['不受信机器人 @ 我', { botSender: true, mentionsBot: true, hasMentions: true }, { explicit: false, addressed: false, ownedTopic: false }]
   ])('交给群参与的输入：%s', (_name, patch, expected) => {
     expect(wakeSignals({ ...base, ...patch }).participation).toEqual(expected);
   });
@@ -72,7 +83,7 @@ function inlineBaseline(f: WakeFacts, participation: Participation) {
 }
 
 describe('唤醒判定与抽取前的原式逐条一致', () => {
-  it('所有布尔事实、唤醒方式、会话类型和群参与结果的组合', () => {
+  it('所有布尔事实、唤醒方式、会话类型和群参与结果的组合（发送者不是受信机器人）', () => {
     const flags = ['botSender', 'mentionsBot', 'hasMentions', 'quotedWorkflow', 'adopted', 'recovering', 'recognizedCommand', 'ownedTopic', 'directScenario', 'pendingAskContinuation', 'requestContinuation'] as const;
     const policies: WakeMentionPolicy[] = ['always', 'topic', 'never', 'ambient'];
     const participations: Participation[] = [undefined, { enabled: false }, { enabled: true }, { enabled: true, handled: true }, { enabled: false, handled: true }];
@@ -81,7 +92,7 @@ describe('唤醒判定与抽取前的原式逐条一致', () => {
     for (let mask = 0; mask < 1 << flags.length; mask++) {
       const bits = Object.fromEntries(flags.map((flag, index) => [flag, Boolean(mask & (1 << index))])) as Pick<WakeFacts, (typeof flags)[number]>;
       for (const chatType of ['group', 'p2p', 'unknown']) for (const mentionPolicy of policies) for (const participation of participations) {
-        const facts: WakeFacts = { ...bits, chatType, mentionPolicy };
+        const facts: WakeFacts = { ...bits, trustedBot: false, chatType, mentionPolicy };
         const expected = inlineBaseline(facts, participation);
         const signals = wakeSignals(facts);
         const decision = decideWake(facts, participation);

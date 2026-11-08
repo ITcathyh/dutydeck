@@ -61,7 +61,7 @@ export const botSettingFields = {
   memoryAutoExtract: {label: '自动提取与整理', step: 2, anchor: 'lark-switch-memory-auto', parent: 'memoryEnabled'},
   workspaceAliases: {label: '工作区别名（可选）', step: 1, anchor: 'bot-setting-workspaceAliases'},
   allowedUserNames: {label: '可使用机器人的成员', step: 1, anchor: 'bot-setting-allowedUserNames'},
-  allowedBotNames: {label: '可调用机器人的其他机器人', step: 1, anchor: 'bot-setting-allowedBotNames'},
+  allowedBotNames: {label: '受信机器人', step: 1, anchor: 'bot-setting-allowedBotNames'},
   defaultAgentId: {label: '默认 Agent', step: 2, anchor: 'bot-setting-defaultAgentId'},
   fallbackAgentId: {label: '兜底 Agent', step: 2, anchor: 'bot-setting-fallbackAgentId'},
   defaultReasoningEffort: {label: '推理强度', step: 2, anchor: 'bot-setting-defaultReasoningEffort', parent: 'defaultAgentId'},

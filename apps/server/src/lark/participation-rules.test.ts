@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { botFullNames, botNameTokens, callsBotName, evaluateParticipationRules, intrusionCorrection, participationIntentOf, ruleContextOf, type RuleContext } from './participation-rules.js';
+import { botFullNames, botNameTokens, callsBotName, decidableSender, evaluateParticipationRules, intrusionCorrection, participationIntentOf, ruleContextOf, TRUSTED_BOT_REF, type RuleContext } from './participation-rules.js';
 
 const at = Date.parse('2026-10-06T10:00:00.000Z');
 const ctx = (patch: Partial<RuleContext> = {}): RuleContext => ({
@@ -128,6 +128,22 @@ describe('多机器人群的接话人', () => {
     expect(context).toMatchObject({ membersUnknown: true });
     expect(context).not.toHaveProperty('members');
     expect(evaluateParticipationRules(context)).toMatchObject({ action: 'silent', rule: 'members_unknown' });
+  });
+
+  it('受信机器人的消息和真人一样走规则，不受信的机器人仍是 bot_sender', () => {
+    for (const patch of [{ text: 'bdev-flash 帮我看下' }, { text: '发版检查', parent: 'self' as const }, { text: '发版检查', level: 'eager' as const }, { text: '谢谢' }, { text: '@_user_2 你看下', mentionsOther: true }]) {
+      expect(rule({ ...patch, senderKind: 'bot', trustedBot: true })).toEqual(rule(patch));
+      expect(rule({ ...patch, senderKind: 'bot' })).toMatchObject({ action: 'silent', rule: 'bot_sender' });
+    }
+    // 受信标记只认机器人发送者；system 消息带了也不判定。
+    expect(rule({ senderKind: 'system', trustedBot: true, text: 'bdev-flash 帮我看下' })).toMatchObject({ action: 'silent', rule: 'bot_sender' });
+    const observation = { id: 'obs_bot', scope: { appId: 'cli_a', chatId: 'oc_1' }, sequence: 1, source: 'lark.message', eventId: 'om_bot', occurredAt: '2026-10-09T00:00:00Z', receivedAt: '2026-10-09T00:00:00Z', senderId: 'ou_peer', senderKind: 'bot' as const, text: 'bdev-flash 帮我看下', refs: [TRUSTED_BOT_REF], origin: 'live' as const, missing: [], revision: 1 };
+    expect(decidableSender(observation)).toBe(true);
+    expect(evaluateParticipationRules(ruleContextOf(observation, { names: [], hasActiveMandates: false }, ['bdev-flash'], { level: 'selective' }))).toMatchObject({ action: 'addressed', rule: 'calls_name' });
+    const untrusted = { ...observation, refs: [] };
+    expect(decidableSender(untrusted)).toBe(false);
+    expect(evaluateParticipationRules(ruleContextOf(untrusted, { names: [], hasActiveMandates: false }, ['bdev-flash'], { level: 'selective' }))).toMatchObject({ action: 'silent', rule: 'bot_sender' });
+    expect(decidableSender({ senderKind: 'system', refs: [TRUSTED_BOT_REF] })).toBe(false);
   });
 });
 
