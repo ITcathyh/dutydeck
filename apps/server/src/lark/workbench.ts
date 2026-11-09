@@ -36,8 +36,7 @@ export function workNoticeFingerprint(item: WorkItem, requests: WorkItemRequest[
   return digest(JSON.stringify([
     focusOf(item.status),
     item.steps.map(step => [step.id, focusOf(step.status)]),
-    // 同一步骤的工具授权算同一件事：后续授权只原位更新那张卡，不再每次推新卡。提问每条都要用户作答，仍按请求区分。
-    [...new Set(requests.map(request => JSON.stringify(request.kind === 'permission' ? [request.stepId, 'permission'] : [request.stepId, request.requestId, request.kind])))],
+    requests.map(request => [request.stepId, request.requestId, request.kind]),
     // 待确认的计划修订是新的人工闸门，要推新卡；按内容摘要区分，Agent 替换修订内容或影响重算也会推新卡。没有修订时指纹与旧版本一致。
     ...item.pendingRevision ? [['revision', item.pendingRevision.digest]] : [],
     // 首次确认前 Agent 改过计划（版本号已递增）：按计划摘要换指纹，重新推确认卡；未改过的计划指纹与旧版本一致。
@@ -380,6 +379,11 @@ export class LarkWorkbench {
   private readonly settledNotices = new Map<string, string>();
   /** 飞书明确告知不可再更新的卡（消息太旧等永久错误）：心跳不再 PATCH，进程重启后最多再试一次。 */
   private readonly unupdatableCards = new Set<string>();
+  /**
+   * 每个目标最近一张卡上列着哪些步骤的工具授权，以及当时除待决请求外的焦点指纹，键是目标 ID。
+   * 同一步骤接连要授权时先原位更新这张卡，不再推新卡。目标结束时删除；进程重启后为空，第一条授权照常推新卡。
+   */
+  private readonly permissionCards = new Map<string, { focus: string; steps: Set<string> }>();
   close() { this.closed = true; this.http.close(); }
   private assertOpen() { if (this.closed) throw new RuntimeError('WORKBENCH_CLOSED', '工作台已关闭', 503); }
 
@@ -498,6 +502,18 @@ export class LarkWorkbench {
     const result = await sendLarkResult(this.client(config), target, { ...(await this.cardInput(item, config, requests)), idempotencyKey: key }, this.options.log, this.repos.config, undefined, { allowConcurrent: true });
     this.assertOpen();
     await this.saveWorkMapping(config.appId, result.messageId, item, target.chatId);
+    this.notePermissionCard(item, requests);
+  }
+
+  private notePermissionCard(item: WorkItem, requests: WorkItemRequest[]) {
+    this.permissionCards.set(item.id, { focus: workNoticeFingerprint(item), steps: new Set(requests.filter(request => request.kind === 'permission').map(request => request.stepId)) });
+  }
+
+  /** 这次的待决请求全是工具授权、步骤都已列在最近那张卡上，且其他焦点没变：只是同一步骤又要了授权。 */
+  private permissionsOnLatestCard(item: WorkItem, requests: WorkItemRequest[]) {
+    const card = this.permissionCards.get(item.id);
+    return Boolean(card) && requests.length > 0 && card!.focus === workNoticeFingerprint(item)
+      && requests.every(request => request.kind === 'permission' && card!.steps.has(request.stepId));
   }
 
   /** PATCH 指定消息整卡覆盖；不可 PATCH（超长结果/平台失败）时返回 false 交调用方回退发新卡。 */
@@ -513,30 +529,35 @@ export class LarkWorkbench {
   private forget(workId: string) {
     this.patchedContent.delete(workId);
     this.settledNotices.delete(workId);
+    this.permissionCards.delete(workId);
   }
 
   /**
    * 找到该目标最近一张工作台卡并原位 PATCH；没有可覆盖的卡时静默跳过，PATCH 失败也不补发新卡（新卡只在 notify 的亮屏剧集里发）。
-   * 返回 false 表示还有待重试的 PATCH。
+   * 返回 false 表示还有待重试的 PATCH。strict 时卡不可更新或找不到卡也返回 false，交调用方推新卡。
    */
-  private async patchLatestCard(item: WorkItem, config: StoredLarkConfig, requests: WorkItemRequest[]): Promise<boolean> {
+  private async patchLatestCard(item: WorkItem, config: StoredLarkConfig, requests: WorkItemRequest[], strict = false): Promise<boolean> {
     const cards = (await this.repos.channelMappings.list(`lark-work-card:${config.appId}`))
       .filter(card => card.sessionId === item.parentSessionId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
     for (const card of cards) {
       let saved: { workId?: string; chatId?: string } | null;
       try { saved = JSON.parse(card.extra ?? 'null'); } catch { continue; }
       if (saved?.workId !== item.id) continue;
-      if (this.unupdatableCards.has(card.externalId)) return true;
+      if (this.unupdatableCards.has(card.externalId)) return !strict;
       // 1 秒心跳会反复走到这里：卡面没变就不再 PATCH；临时性 PATCH 失败（网络抖动、限流）隔 5 分钟再试；永久不可更新（230031 等）在上面已停。
       // 否则停在受阻、失败的目标会每秒调一次飞书接口，直到进程退出。
       const content = digest(JSON.stringify(await this.cardInput(item, config, requests)));
       const last = this.patchedContent.get(item.id);
-      if (last?.messageId === card.externalId && last.content === content && (last.retryAt === undefined || Date.now() < last.retryAt)) return last.retryAt === undefined;
+      if (last?.messageId === card.externalId && last.content === content && (last.retryAt === undefined || Date.now() < last.retryAt)) {
+        if (last.retryAt === undefined) this.notePermissionCard(item, requests);
+        return last.retryAt === undefined;
+      }
       const patched = await this.patchWorkCard(item, saved.chatId ?? card.externalId, config, card.externalId, requests);
       this.patchedContent.set(item.id, { messageId: card.externalId, content, ...(patched ? {} : { retryAt: Date.now() + 300_000 }) });
+      if (patched) this.notePermissionCard(item, requests);
       return patched;
     }
-    return true;
+    return !strict;
   }
 
   async deliver(item: WorkItem) {
@@ -629,6 +650,13 @@ export class LarkWorkbench {
       return;
     }
     if (focused) {
+      // 同一步骤接连要的工具授权：先原位更新最近那张已列出该步骤授权的卡；卡不可更新、找不到卡或这次更新失败，才往下推新卡。
+      if (this.permissionsOnLatestCard(current, requests) && await this.patchLatestCard(current, config, requests, true)
+        .catch(error => { this.options.log.warn({ error, workId: current.id }, '目标卡片 PATCH 失败'); return false; })) {
+        await this.repos.config.set(key, 'patched');
+        this.settledNotices.set(current.id, settledKey);
+        return;
+      }
       // 进入 waiting/blocked/failed 或出现新待决请求才允许亮屏。
       await this.deliverNotice(key, claim.attempts, async () => {
         await this.send(current, target, config, `work_${digest(key).slice(0, 40)}`, requests);

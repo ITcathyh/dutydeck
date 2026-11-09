@@ -24,7 +24,7 @@ afterEach(async () => { while (cleanup.length) await cleanup.pop()!(); });
 const message = (id: string, text: string, actor = 'ou_alice'): LarkMessageEvent => ({ messageId: id, chatId: 'oc_group', chatType: 'group', threadId: 'omt_topic', rootId: 'om_root',
   senderOpenId: actor, senderType: 'user', messageType: 'text', content: JSON.stringify({ text }), mentions: [{ key: '@_user_1', name: 'Dutydeck', openId: 'ou_bot' }] });
 
-async function fixture(mode: 'normal' | 'permission' | 'held' | 'terminal' = 'normal') {
+async function fixture(mode: 'normal' | 'permission' | 'permissions' | 'held' | 'terminal' = 'normal') {
   const directory = await mkdtemp(join(tmpdir(), 'dutydeck-workbench-'));
   const repos = createRepositories(join(directory, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   const cards: Array<{ messageId: string; input: any }> = [];
@@ -54,6 +54,12 @@ async function fixture(mode: 'normal' | 'permission' | 'held' | 'terminal' = 'no
         if (mode === 'held' || mode === 'permission' || mode === 'terminal') {
           const wait = new Promise<void>(resolve => releases.set(sessionId, resolve));
           if (mode === 'permission') emit({ type: 'permission_request', data: { id: `permit_${sessionId}`, title: '读取指定文件', status: 'pending' } });
+          await wait;
+        }
+        // 同一轮先后要两次工具授权，批准第一条后才出现第二条。
+        if (mode === 'permissions') for (const [id, title] of [[`permit_${sessionId}`, '读取指定文件'], [`permit2_${sessionId}`, '写入第二个文件']]) {
+          const wait = new Promise<void>(resolve => releases.set(sessionId, resolve));
+          emit({ type: 'permission_request', data: { id, title, status: 'pending' } });
           await wait;
         }
         const text = prompt.includes('综合两个')
@@ -136,18 +142,6 @@ describe('亮屏指纹与卡片元素（纯函数）', () => {
     expect(workNoticeFingerprint(baseItem('running', 'pending'))).toBe(workNoticeFingerprint(baseItem('running', 'running')));
     expect(workNoticeFingerprint(baseItem('waiting', 'running'), question('问题 A')))
       .toBe(workNoticeFingerprint(baseItem('waiting', 'running'), question('问题 A 的文案完全改写但 requestId 不变')));
-  });
-
-  it('keeps one notice per step for tool approvals but a new one for every question', () => {
-    const request = (stepId: string, requestId: string, kind: 'permission' | 'question'): WorkItemRequest => ({ stepId, sessionId: 'ses_child', taskId: 'task_1', requestId, kind, text: '请求' });
-    const item = baseItem('running', 'running');
-    const running = workNoticeFingerprint(item);
-    const first = workNoticeFingerprint(item, [request('alpha', 'turn_1', 'permission')]);
-    expect(first).not.toBe(running);
-    expect(workNoticeFingerprint(item, [request('alpha', 'turn_2', 'permission')])).toBe(first);
-    expect(workNoticeFingerprint(item, [request('alpha', 'turn_2', 'permission'), request('alpha', 'turn_3', 'permission')])).toBe(first);
-    expect(workNoticeFingerprint(item, [request('beta', 'turn_4', 'permission')])).not.toBe(first);
-    expect(workNoticeFingerprint(item, [request('alpha', 'ask_1', 'question')])).not.toBe(workNoticeFingerprint(item, [request('alpha', 'ask_2', 'question')]));
   });
 
   it('N2 回归①的判定基础：waiting / blocked / failed 或新待决请求出现必换指纹', () => {
@@ -583,6 +577,68 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
     expect(f.permissionCalls).toHaveBeenCalledTimes(1);
     const item = await f.item();
     await vi.waitFor(async () => expect((await f.interactions.list(item.parentSessionId, item.id, 'ou_alice')).map(request => request.sessionId)).toEqual([f.prompts[1]!.sessionId]));
+  });
+
+  const approveCards = (f: Awaited<ReturnType<typeof fixture>>) => f.cards.filter(card => card.input.elements?.some((value: any) => value.behaviors?.[0]?.value?.answer === 'approve'));
+  const approveFirst = async (f: Awaited<ReturnType<typeof fixture>>) => {
+    await f.coordinator.handle(message('om_goal', '/work research 比较'), f.config);
+    await f.work.tick();
+    const item = await f.item();
+    await vi.waitFor(async () => expect((await f.interactions.list(item.parentSessionId, item.id, 'ou_alice')).length).toBe(1));
+    await f.work.tick();
+    await vi.waitFor(() => expect(approveCards(f)).toHaveLength(1));
+    const request = (await f.interactions.list(item.parentSessionId, item.id, 'ou_alice'))[0]!;
+    const { sessionId: _session, text: _text, ...input } = request;
+    await f.interactions.respond(item.parentSessionId, item.id, { ...input, answer: 'approve' }, 'ou_alice');
+    return { item, request, card: approveCards(f)[0]! };
+  };
+  const nextRequest = async (f: Awaited<ReturnType<typeof fixture>>, item: WorkItem, previous: WorkItemRequest) => {
+    let next!: WorkItemRequest;
+    await vi.waitFor(async () => {
+      next = (await f.interactions.list(item.parentSessionId, item.id, 'ou_alice'))[0]!;
+      expect(next?.requestId).toBeDefined();
+      expect(next.requestId).not.toBe(previous.requestId);
+    });
+    return next;
+  };
+  const idle = (f: Awaited<ReturnType<typeof fixture>>) => vi.waitFor(() => expect((f.work as any).effects.size).toBe(0));
+
+  it('updates the same card in place when a step asks for another tool approval', async () => {
+    const f = await fixture('permissions');
+    const { item, request, card } = await approveFirst(f);
+    const next = await nextRequest(f, item, request);
+    expect(next.stepId).toBe(request.stepId);
+    await f.work.tick(); await idle(f);
+    expect(approveCards(f)).toHaveLength(1);
+    const patch = f.client.update.mock.calls.map(([input]: any[]) => input).filter((input: any) => input.messageId === card.messageId).at(-1);
+    expect(JSON.stringify(patch)).toContain('写入第二个文件');
+    expect(JSON.stringify(patch)).toContain(next.requestId);
+  });
+
+  it('posts a new card for the next tool approval when the first card can no longer be updated', async () => {
+    const f = await fixture('permissions');
+    const { item, request, card } = await approveFirst(f);
+    (f.workbench as any).unupdatableCards.add(card.messageId);
+    await nextRequest(f, item, request);
+    await f.work.tick();
+    await vi.waitFor(() => expect(approveCards(f)).toHaveLength(2));
+    expect(JSON.stringify(approveCards(f)[1]!.input)).toContain('写入第二个文件');
+  });
+
+  it('still posts a new card for a tool approval from another step and for a question', async () => {
+    const f = await fixture('permission');
+    const { item, request } = await approveFirst(f);
+    await vi.waitFor(async () => expect((await f.childTasks()).map(task => task.status)).toEqual(['completed']));
+    await f.work.tick();
+    const next = await nextRequest(f, item, request);
+    expect(next.stepId).not.toBe(request.stepId);
+    await f.work.tick();
+    await vi.waitFor(() => expect(approveCards(f)).toHaveLength(2));
+    // 同一步骤在授权之外又来一条提问：仍单独推一张卡。
+    void f.broker.register({ sessionId: next.sessionId, question: '用哪个文件？' }).catch(() => undefined);
+    await f.work.tick();
+    await vi.waitFor(() => expect(f.cards.filter(card => JSON.stringify(card.input).includes('用哪个文件？'))).toHaveLength(1));
+    expect(approveCards(f)).toHaveLength(3);
   });
 
   it('rechecks approval permission after a native request has already arrived', async () => {
