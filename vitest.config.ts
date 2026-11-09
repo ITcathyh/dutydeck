@@ -41,7 +41,6 @@ export default defineConfig({
           // 否则同一份文件会被两个 project 各跑一遍。
           include: ['packages/**/*.test.ts', 'apps/server/**/*.test.ts', 'plugins/**/*.test.ts', 'builtin-plugins/**/*.test.ts', 'tests/**/*.test.ts'],
           setupFiles: [fileURLToPath(new URL('./tests/setup/node-env.ts', import.meta.url))],
-          globalSetup: [fileURLToPath(new URL('./tests/setup/tmpfs-tmpdir.ts', import.meta.url))],
           testTimeout: 15_000,
           hookTimeout: 15_000,
           // New test databases copy the schema the real migrations produced once per worker instead of replaying every
