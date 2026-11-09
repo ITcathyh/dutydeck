@@ -237,7 +237,7 @@ async function browserChecks() {
   page.setDefaultNavigationTimeout(15_000);
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
-  const nav = (label: string) => page!.getByRole('navigation', { name: '工作台', exact: true }).getByRole('button', { name: new RegExp(`^${label}`) });
+  const nav = (label: string) => page!.getByRole('complementary', { name: 'Dutydeck 工作台导航' }).getByRole('button', { name: new RegExp(`^${label}`) });
   const openBot = async () => { await nav('机器人').click(); await page!.getByRole('button').filter({ has: page!.locator('strong', { hasText: /^开发助手$/ }) }).click(); };
   const save = () => page!.getByRole('button', { name: '保存配置', exact: true });
   const saveToApi = async () => {
@@ -262,7 +262,7 @@ async function browserChecks() {
   await page.getByLabel('整理模型', { exact: true }).fill('review-model');
   await page.getByRole('checkbox', { name: '空闲后自动压缩上下文', exact: true }).check();
   await page.getByRole('spinbutton', { name: '空闲时长（小时）', exact: true }).fill('72');
-  await nav('全部任务').click(); await openBot();
+  await nav('任务').click(); await openBot();
   await expect(page.getByLabel('角色名称', { exact: true })).toHaveValue('浏览器角色');
   await expect(page.locator('#bot-fallback-model')).toHaveValue('gpt-6.1-sol');
   await saveToApi();

@@ -130,7 +130,7 @@ async function runTest() {
     page = await context.newPage();
     const errors: string[] = [];
     page.on('pageerror', error => errors.push(error.message));
-    const nav = (label: string) => page!.getByRole('navigation', { name: '工作台', exact: true }).getByRole('button', { name: new RegExp(`^${label}`) });
+    const nav = (label: string) => page!.getByRole('complementary', { name: 'Dutydeck 工作台导航' }).getByRole('button', { name: new RegExp(`^${label}`) });
     const groupRow = () => page!.getByRole('button').filter({ has: page!.locator('strong', { hasText: /^项目群$/ }) });
     const binding = async () => (await request('GET', '/api/lark/management/groups')).groups.find((g: any) => g.chatId === 'oc_project').bots.find((b: any) => b.appId === 'cli_one');
     assert.deepEqual((await request('GET', '/api/lark/management/groups')).groups, []);
@@ -159,7 +159,7 @@ async function runTest() {
     await page.getByRole('button', { name: '选择模型…', exact: true }).click();
     await page.getByRole('option', { name: 'project-model', exact: true }).click();
     // A real navigation unmounts the editor; returning must retain the draft.
-    await nav('全部任务').click(); await nav('群聊').click();
+    await nav('任务').click(); await nav('群聊').click();
     await groupRow().click();
     await expect(page.getByTestId('directory-picker').getByRole('textbox')).toHaveValue(harness.workspaces[0]!);
     await expect(page.getByRole('button', { name: 'project-model', exact: true })).toBeVisible();
@@ -204,7 +204,7 @@ async function runTest() {
     await nav('机器人').click();
     await page.getByRole('button').filter({ has: page.locator('strong', { hasText: /^开发助手$/ }) }).click();
     await page.getByLabel('默认工作目录', { exact: true }).fill(harness.workspaces[1]!);
-    await nav('全部任务').click(); await nav('机器人').click();
+    await nav('任务').click(); await nav('机器人').click();
     await page.getByRole('button').filter({ has: page.locator('strong', { hasText: /^开发助手$/ }) }).click();
     await expect(page.getByLabel('默认工作目录', { exact: true })).toHaveValue(harness.workspaces[1]!);
     await page.getByRole('button', { name: '保存配置', exact: true }).click();
