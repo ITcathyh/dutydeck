@@ -5,6 +5,8 @@ import { join, resolve } from 'node:path';
 import net from 'node:net';
 
 export const REPO_ROOT = resolve(__dirname, '../../..');
+/** expect.poll's default backoff reaches 1s and rounds every turn up to it; a task poll is a cheap local GET. */
+export const TASK_POLL_INTERVALS = [100];
 const SERVER_ENTRY = join(REPO_ROOT, 'apps/server/dist/cli.js');
 
 const POLLUTING_ENV = [
@@ -78,7 +80,8 @@ const submitPrompt = rawPrompt => {
   setTimeout(() => {
     write({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'mock thinking block' }] } });
     const marker = resumed ? 'MOCK_RESUMED' : currentTurn > 1 ? 'MOCK_CONTINUED' : 'MOCK_REPLY';
-    write({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: marker + ': ' + prompt }] } });
+    // 真实 Claude 的收尾回复带 stop_reason；缺了它驱动要多等一轮空闲复核（约 3 秒）。
+    write({ type: 'assistant', message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: marker + ': ' + prompt }] } });
     process.stdout.write('\\u001b[2J\\u001b[HClaude Code v2.1.267 (mock)\\r\\n\\u2733 Worked for 1s\\r\\n────────────────────────\\r\\n\\u276f\\r\\n────────────────────────\\r\\n⏵⏵ bypass permissions on (shift to cycle)');
   }, 300);
 };

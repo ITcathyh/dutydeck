@@ -10,7 +10,8 @@ import type { AgentConfig } from '@dutydeck/shared';
 import { buildApp } from '../apps/server/src/app.js';
 import { LoginLinkStore } from '../apps/server/src/auth/auth.js';
 import { readLarkConfig, saveLarkConfig } from '../apps/server/src/lark/config.js';
-import { LarkMessageCoordinator, type LarkMessageEvent, type PersistedLarkCardTask } from '../apps/server/src/lark/listener.js';
+import { type LarkMessageEvent, type PersistedLarkCardTask } from '../apps/server/src/lark/listener.js';
+import { LarkMessageCoordinator } from '../apps/server/src/lark/coordinator.js';
 import { buildLarkCard } from '../apps/server/src/lark/service.js';
 import { ArtifactLogger, captureBrowserArtifacts, getGitMetadata, installTermination, resolveArtifactDir, withTimeout } from './lark-e2e-shared.mts';
 
@@ -160,7 +161,7 @@ async function runTest() {
   const { chromium } = await import('@playwright/test');
   browser = await chromium.launch({ headless: true });
   context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
-  await context.tracing.start({ screenshots: true, snapshots: true });
+  if (process.env.CI) await context.tracing.start({ screenshots: true, snapshots: true });
   const page = await context.newPage();
   await page.goto(`${base}/sessions/${encodeURIComponent(mapping.sessionId)}`);
   await page.getByLabel('访问令牌').waitFor({ timeout: 15_000 });

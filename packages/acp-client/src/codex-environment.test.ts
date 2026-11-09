@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { afterEach, expect, it, vi } from 'vitest';
 import { createRuntimeStore } from 'acpx/runtime';
 import { AcpxAdapter } from './index.js';
+import '../../../tests/support/short-acpx-reply-drain.js';
 
 afterEach(() => vi.unstubAllEnvs());
 

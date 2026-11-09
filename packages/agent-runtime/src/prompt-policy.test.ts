@@ -7,6 +7,7 @@ import { agentConfigSchema } from '@dutydeck/shared';
 import { DutydeckRuntime, type RuntimeOptions } from './index.js';
 import { assemblePrompt } from '../../../apps/server/src/prompt-context.js';
 import { prepareSkillPrompt } from '../../../apps/server/src/skill-delivery.js';
+import '../../../tests/support/short-acpx-reply-drain.js';
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });

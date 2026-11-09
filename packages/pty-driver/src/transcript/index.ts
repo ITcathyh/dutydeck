@@ -20,7 +20,7 @@
  * unacceptable runtime dependency here), gemini/kimi (no on-disk
  * transcript). Those keep the raw_terminal fallback.
  */
-import { claudeFamilyCliAdapterIds, transcriptClientForAdapter, type NormalizedDriverEvent } from '@dutydeck/shared';
+import { transcriptClientForAdapter, type NormalizedDriverEvent } from '@dutydeck/shared';
 import type { CliPathEnv } from '../cli-paths.js';
 import type { TranscriptEventSource } from './tail.js';
 import { ClaudeTranscriptTailer, type ClaudeTranscriptTailerOptions } from './claude.js';
@@ -108,7 +108,7 @@ export interface CreateTranscriptTailerOptions {
  * that the tailer resolves `~/.claude`, which is Claude Code's tree, not
  * theirs. See the note in the driver on why the child's env is authoritative.
  */
-export const TRANSCRIPT_ADAPTER_IDS: readonly string[] = [...claudeFamilyCliAdapterIds, 'codex', 'traex', 'grok'];
+export { TRANSCRIPT_ADAPTER_IDS } from './adapter-ids.js';
 
 /** Pick a transcript tailer by adapter id. CLIs without a native transcript
  *  (or not yet ported) return undefined — the caller falls back to

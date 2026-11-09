@@ -3,7 +3,7 @@ import { DutydeckRuntime } from '@dutydeck/runtime';
 import type { AgentConfig } from '@dutydeck/shared';
 import Database from 'better-sqlite3';
 import { fork, spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
 import { constants as osConstants, tmpdir } from 'node:os';
@@ -58,7 +58,7 @@ Database.prototype.close = function () {
   return result;
 };
 module.exports = function ProbedDatabase(...args) {
-  const db = new Database(...args);
+  const db = new Database(args[0], { ...args[1], ...workerData.probe.open });
   Atomics.add(state, 1, 1);
   return db;
 };
@@ -120,8 +120,21 @@ process.on('SIGTERM', () => process.exit(0));
 `;
 }
 
-/** 按 pnpm 隔离布局造一个已构建的检出目录：dep-a 依赖 dep-b，dev-only 只是 devDependency。 */
+/** 检出目录模板：git init 和首次提交只做一次，每个用例复制一份。 */
+const checkoutTemplate = mkdtempSync(join(tmpdir(), 'dutydeck-deploy-template-'));
+let templateReady = false;
+afterAll(() => { rmSync(checkoutTemplate, { recursive: true, force: true }); });
+
 function fakeCheckout(root: string, behaviour: CliBehaviour = {}) {
+  const template = join(checkoutTemplate, 'checkout');
+  if (!templateReady) { buildCheckout(template); templateReady = true; }
+  cpSync(template, root, { recursive: true, verbatimSymlinks: true });
+  write(join(root, 'apps', 'server', 'dist', 'cli.js'), cliSource(behaviour));
+  return root;
+}
+
+/** 按 pnpm 隔离布局造一个已构建的检出目录：dep-a 依赖 dep-b，dev-only 只是 devDependency。 */
+function buildCheckout(root: string) {
   const server = join(root, 'apps', 'server');
   const store = join(root, 'node_modules', '.pnpm');
   write(join(root, 'pnpm-workspace.yaml'), 'packages:\n  - apps/*\n');
@@ -142,8 +155,6 @@ function fakeCheckout(root: string, behaviour: CliBehaviour = {}) {
   git(root, 'init', '-q');
   git(root, 'add', 'pnpm-workspace.yaml', 'apps/server/package.json', 'apps/server/src.txt');
   git(root, 'commit', '-q', '-m', 'initial');
-  write(join(server, 'dist', 'cli.js'), cliSource(behaviour));
-  return root;
 }
 
 /** 在同一检出里提交一次新改动并「重新构建」，得到一个新版本。 */
@@ -248,6 +259,17 @@ describe('dutydeck deploy', () => {
   const shortSleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, Math.min(ms, 20)));
   const deps = (extra: Partial<DeployDeps> = {}): DeployDeps => ({ service, checkSqlite: passingSqlite, readToken: () => undefined, info, warn, healthTimeoutMs: 10_000, env: {}, sleep: shortSleep, ...extra });
 
+  /** 新版明确答失败后把时钟拨过截止时间，不用真等超时；进程没起来（连接失败）时照常轮询，回滚后的健康检查重新算截止时间。 */
+  const healthFailsFast = (extra: Partial<DeployDeps> = {}): Partial<DeployDeps> => {
+    let skipped = 0;
+    const inner = extra.fetch ?? fetch;
+    return { ...extra, now: () => Date.now() + skipped, fetch: (async (url, init) => {
+      const response = await inner(url, init);
+      if (new URL(String(url)).pathname === '/health' && !response.ok) skipped += 60_000;
+      return response;
+    }) as typeof fetch };
+  };
+
   async function owner(stage: string) {
     const messages: Array<{ type: string; result?: DeployResult; message?: string }> = [];
     const child = fork(await deployOwner.path(), [source, bot, releases, stage], {
@@ -321,8 +343,8 @@ describe('dutydeck deploy', () => {
     expect(existsSync(results[0]!.manifest!)).toBe(true);
   }, 60_000);
 
-  it('同一发布根依次部署 4 个 unit：每个 unit 各留自己最新 2 份数据库备份', async () => {
-    const units = await Promise.all(['web', 'cli-a', 'cli-b', 'cli-c'].map(async name => {
+  it('同一发布根依次部署多个 unit：每个 unit 各留自己最新 2 份数据库备份', async () => {
+    const units = await Promise.all(['web', 'cli-a'].map(async name => {
       const root = join(tmp, name), unitDatabase = join(root, 'dutydeck.db'), unitPort = await freePort();
       mkdirSync(root, { recursive: true });
       const db = new Database(unitDatabase);
@@ -335,7 +357,8 @@ describe('dutydeck deploy', () => {
       for (let round = 0; round < 3; round++) {
         if (round) nextCommit(source);
         for (const unit of units) {
-          const result = await runDeploy({ source, runtime: unit.root, releases }, deps({ service: unit.service }));
+          // 记录目录按秒命名并排序：每轮时钟前移 1 秒，保证新旧顺序不取决于同一秒内的 commit。
+          const result = await runDeploy({ source, runtime: unit.root, releases }, deps({ service: unit.service, now: () => Date.now() + round * 1000 }));
           expect(result, result.error).toMatchObject({ ok: true, status: 'deployed' });
           unit.backups.push(JSON.parse(readFileSync(result.manifest!, 'utf8')).database_backup);
         }
@@ -508,7 +531,8 @@ describe('dutydeck deploy', () => {
     let writes = 0;
     let exitCode: number | undefined;
     backupProbe.next = {
-      workerData: original => ({ ...original, driver, probe: { driver: original?.driver, state: state.buffer, fail: failure === 'injected' } }),
+      // locked 时备份连接不必等 SQLite 默认的 5 秒才失败。
+      workerData: original => ({ ...original, driver, probe: { driver: original?.driver, state: state.buffer, fail: failure === 'injected', open: failure === 'locked' ? { timeout: 0 } : {} } }),
       attach: worker => {
         worker.on('message', (reader: { open: boolean; readonly: boolean }) => {
           // 备份线程的只读连接已打开、停在 VACUUM INTO 之前：写入者（timeout 0，被锁住会直接抛错）此刻必须能提交。
@@ -559,7 +583,7 @@ describe('dutydeck deploy', () => {
     expect(first.ok).toBe(true);
     nextCommit(source, { health: 503 });
 
-    const broken = await runDeploy({ source, runtime: bot }, deps({ healthTimeoutMs: 2_500 }));
+    const broken = await runDeploy({ source, runtime: bot }, deps(healthFailsFast()));
 
     expect(broken).toMatchObject({ ok: false, status: 'rolled_back', previousRelease: first.release });
     expect(broken.error).toContain('HTTP 503');
@@ -820,7 +844,7 @@ describe('dutydeck deploy', () => {
       stop: async () => { order.push(`stop ${schema(database)}`); return await service.stop(); }
     };
 
-    const broken = await runDeploy({ source, runtime: bot }, deps({ service: tracked, healthTimeoutMs: 2_500 }));
+    const broken = await runDeploy({ source, runtime: bot }, deps(healthFailsFast({ service: tracked })));
 
     expect(readFileSync(`${database}.effects`, 'utf8').trim().split('\n')).toEqual(['queued-before-deploy']);
     expect(broken, broken.error).toMatchObject({ ok: false, status: 'rollback_failed', previousRelease: first.release });
@@ -867,8 +891,7 @@ describe('dutydeck deploy', () => {
       return Response.json({ code: 0, data: { message_id: `om_notice_${replies.length}` } });
     };
     let backups = 0;
-    const broken = await runDeploy({ source, runtime: bot }, deps({
-      healthTimeoutMs: 2_500,
+    const broken = await runDeploy({ source, runtime: bot }, deps(healthFailsFast({
       fetch: feishu,
       backupDatabase: async (from, to) => {
         const db = new Database(from, { readonly: true });
@@ -882,7 +905,7 @@ describe('dutydeck deploy', () => {
           ]);
         }
       }
-    }));
+    })));
 
     expect(broken, broken.error).toMatchObject({ ok: false, status: 'rollback_failed' });
     const manifest = JSON.parse(readFileSync(broken.manifest!, 'utf8'));

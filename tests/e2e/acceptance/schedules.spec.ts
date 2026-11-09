@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createRealShareToken, readAuthContextFromDb } from './session-insight-security-harness.js';
-import { REPO_ROOT, launchIsolatedTestServer, type TestServerInstance } from './harness.js';
+import { REPO_ROOT, TASK_POLL_INTERVALS, launchIsolatedTestServer, type TestServerInstance } from './harness.js';
 
 // Every test launches its own server, so the tests of this file can run on separate workers.
 test.describe.configure({ mode: 'parallel' });
@@ -38,7 +38,7 @@ async function run(instance: TestServerInstance, sourceSessionId: string, schedu
   await expect.poll(async () => {
     const detail = await api(instance, 'GET', `${path}/runs/${occurrence.id}`);
     return detail.occurrence.runStatus;
-  }, { timeout: 75_000 }).toBe('completed');
+  }, { timeout: 75_000, intervals: TASK_POLL_INTERVALS }).toBe('completed');
   const detail = await api(instance, 'GET', `${path}/runs/${occurrence.id}`);
   expect(detail.occurrence.result.output.text).toContain(schedule.prompt);
   expect(detail.occurrence.taskId).toBeTruthy();

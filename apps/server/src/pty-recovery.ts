@@ -4,7 +4,8 @@ import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { canonicalExecutionJson, RuntimeError, type Session } from '@dutydeck/shared';
 import type { PtyRetirementControl } from '@dutydeck/runtime';
-import { dutydeckPtySessionName, captureOwnedTmuxIdentity, stopOwnedTmux, verifyOwnedTmuxExit, captureOwnedTmuxAbsence, verifyOwnedTmuxAbsence, type OwnedTmuxIdentity, type OwnedTmuxExitProof, type OwnedTmuxAbsence, type ProcessProbe } from '@dutydeck/pty-driver';
+import type { OwnedTmuxIdentity, OwnedTmuxExitProof, OwnedTmuxAbsence, ProcessProbe } from '@dutydeck/pty-driver';
+import { dutydeckPtySessionName, captureOwnedTmuxIdentity, stopOwnedTmux, verifyOwnedTmuxExit, captureOwnedTmuxAbsence, verifyOwnedTmuxAbsence } from '@dutydeck/pty-driver/support';
 
 /** All executable resource coordinates are derived on this server, never from the request. */
 export function createPtyRetirementControl(probe: ProcessProbe, herdrBackend?: (session: Session) => HerdrBackend): PtyRetirementControl {

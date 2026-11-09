@@ -82,7 +82,7 @@ import {
   createPtyCliDriver,
   PTY_AGENT_CONTRIBUTIONS,
 } from '@dutydeck/pty-driver';
-import { claudeDataDir, codexHome, traeHome } from '@dutydeck/pty-driver';
+import { claudeDataDir, codexHome, traeHome } from '@dutydeck/pty-driver/support';
 import { childEnvironment } from '@dutydeck/shared/child-environment';
 import { createCliAdapter } from '@dutydeck/cli-adapters';
 import { RelayAskBroker, RelayCapabilityRegistry, RelayService, taskReportHint, loadOrCreateRelaySigningSecret } from '@dutydeck/relay';

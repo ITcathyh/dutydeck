@@ -1,8 +1,8 @@
 import { boundCollaborationSnapshot } from './collaboration-context.js';
 import { randomUUID } from 'node:crypto';
-import { digest as hash } from '@dutydeck/runtime';
+import { digest as hash } from '@dutydeck/runtime/digest';
 import { canonicalExecutionJson, previewNextSchedule, RuntimeError, type CollaborationAction, type CollaborationMandate, type CollaborationScope, type CollaborationSnapshot, type ScheduleDefinition, type ScheduleActionFence, type ScheduleExecutionFence, type ScheduleLease, type ScheduleOccurrence } from '@dutydeck/shared';
-import { scheduleWriterLeaseKey } from '@dutydeck/storage';
+import { scheduleWriterLeaseKey } from '@dutydeck/storage/helpers';
 import { CollaborationService, collaborationContextSignature, scheduleMatchesMandate, type CollaborationAuthorization, type CollaborationRepositories } from './collaboration-service.js';
 import { LarkServiceError } from './lark/service.js';
 

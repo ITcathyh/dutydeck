@@ -11,7 +11,7 @@
  * - 私有的 root/path/env/stdout/stderr 不进 DTO/log；诊断只记 requestId/code/count。
  */
 import { createHash } from 'node:crypto';
-import { digest } from '@dutydeck/runtime';
+import { digest } from '@dutydeck/runtime/digest';
 import { dirname } from 'node:path';
 import {
   RuntimeError,

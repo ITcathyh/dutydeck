@@ -6,6 +6,7 @@ import { AcpxAdapter, listAcpxBuiltinAgents } from '@dutydeck/acp-client';
 import { createRepositories } from '@dutydeck/storage';
 import type { AgentConfig, DriverFactory } from '@dutydeck/shared';
 import { DutydeckRuntime } from './index.js';
+import '../../../tests/support/short-acpx-reply-drain.js';
 
 vi.mock('@dutydeck/acp-client', async importOriginal => ({
   ...await importOriginal<typeof import('@dutydeck/acp-client')>(),

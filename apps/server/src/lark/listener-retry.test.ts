@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { ConfigRepository } from '@dutydeck/shared';
 import { readLarkConfigs, saveLarkConfig } from './config.js';
-import { LarkLongConnectionListener, LarkLongConnectionListenerPool, LarkMessageCoordinator } from './listener.js';
+import { LarkLongConnectionListener, LarkLongConnectionListenerPool } from './listener.js';
+import { LarkMessageCoordinator } from './coordinator.js';
 import { __testOnly_resetLarkGate } from './api-gate.js';
 import { larkListenerStatusKey, type LarkListenerStatus } from './listener-status.js';
 

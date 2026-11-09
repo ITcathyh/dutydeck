@@ -4,7 +4,7 @@ import {
   type CiFailureLog, type CiProvider, type CiRepository, type CiReviewComment, type PublicPullRequest, type PullRequestAvailability,
   type PullRequestStatus, type RepositoryBundle, type Session, type TaskRecord, type VerificationResponse
 } from '@dutydeck/shared';
-import { executionTaskId } from '@dutydeck/storage';
+import { executionTaskId } from '@dutydeck/storage/helpers';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { z } from 'zod';
 import { changeRequestLabel, resolveCiHead, type CiProviderRegistry } from './ci-providers.js';

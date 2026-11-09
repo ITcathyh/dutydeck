@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { chmod, lstat, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { bundleCliForTest } from '../../../tests/support/bundle-for-test.js';
 import { createRepositories } from '@dutydeck/storage';
@@ -24,7 +24,7 @@ function bundle(appSecret: string): string {
 function invoke(root: string, args: string[], input?: string, extraEnv: Record<string, string> = {}) {
   return spawnSync(process.execPath, [bundledCliPath, '--database', join(root, 'dutydeck.db'), ...args], {
     cwd: root,
-    env: { HOME: root, PATH: process.env.PATH, TMPDIR: tmpdir(), ...extraEnv },
+    env: { HOME: root, PATH: process.env.PATH, TMPDIR: tmpdir(), NODE_COMPILE_CACHE: join(dirname(bundledCliPath), 'compile-cache'), ...extraEnv },
     encoding: 'utf8',
     input,
     timeout: 30_000

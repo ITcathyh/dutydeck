@@ -35,6 +35,8 @@ export interface PluginCliIo {
   cwd?: string;
   /** 内置插件目录；默认随包发布的 builtin-plugins。 */
   builtinRoot?: string;
+  /** Provider validation process entry; defaults to the packaged worker. */
+  validationWorker?: string;
 }
 
 /** 与 secret / auth 命令同一个数据目录：显式 --database，其次运行中的 daemon 记录，最后按配置解析。 */
@@ -83,7 +85,7 @@ const restartHint = (ui: CliUi) => ui.hint('运行 dutydeck restart 后生效。
 export async function runPluginCli(action: PluginCliAction, args: string[], options: PluginCliOptions, io: PluginCliIo = {}): Promise<{ ok: boolean }> {
   const ui = io.ui ?? createCliUi();
   const json = options.json === true;
-  const store = () => new PluginStore(pluginDataDir(options.database, io.env), io.builtinRoot, options.database ? resolve(options.database) : readDaemonStatus(resolveDaemonDir())?.database ?? resolveDatabaseUrl(io.env ?? process.env));
+  const store = () => new PluginStore(pluginDataDir(options.database, io.env), io.builtinRoot, options.database ? resolve(options.database) : readDaemonStatus(resolveDaemonDir())?.database ?? resolveDatabaseUrl(io.env ?? process.env), io.validationWorker);
   // 非交互时不问：store 直接报出要信任的能力并提示加 --yes。
   const confirm = io.confirm ?? (process.stdin.isTTY && process.stderr.isTTY ? confirmOnTerminal : undefined);
   const emit = (value: Record<string, unknown>) => { if (json) ui.json({ ok: true, ...value }); };

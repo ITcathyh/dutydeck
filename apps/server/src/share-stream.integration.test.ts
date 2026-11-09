@@ -12,6 +12,9 @@ import { AUTH_COOKIE_NAME, getShareLinkSecret, SHARE_LINK_SECRET_CONFIG_KEY, sig
 
 const cleanup: Array<() => Promise<unknown> | unknown> = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
+// 分享流每秒复查一次密钥：这些用例只伪造周期定时器，拨一个周期代替真实等待。
+const SHARE_POLL_MS = 1_000;
+function fakePolling() { vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] }); cleanup.push(() => vi.useRealTimers()); }
 const event = (sequence: number, text = `output-${sequence}`) => ({ id: `e${sequence}`, sessionId: 's1', sequence, type: 'text', timestamp: '2026-10-06T00:00:00.000Z', data: { text } });
 
 async function server(options: { mode?: 'local' | 'open' | 'token'; getToken?: AuthMiddlewareOptions['getToken']; getShareSecret?: AuthMiddlewareOptions['getShareSecret']; replay?: (id: string, options: any) => Promise<any[]>; instances?: any[] } = {}) {
@@ -83,12 +86,12 @@ describe('share stream revocation', () => {
   });
 
   it.each(['local', 'open', 'token'] as const)('closes an idle %s share stream within the polling bound despite an administrator cookie', async mode => {
+    fakePolling();
     const peer = await server({ mode });
     const s = await stream(`${peer.url}/api/sessions/s1/stream?share=${peer.token()}`);
-    const rotatedAt = performance.now();
     peer.rotate();
+    vi.advanceTimersByTime(SHARE_POLL_MS);
     await expectRevoked(s, peer.unsubscribe);
-    expect(performance.now() - rotatedAt).toBeLessThan(1_500);
   });
 
   it.each([0, 1])('does not disclose replay or buffered live events after rotation during a storage await (cursor %i)', async after => {
@@ -104,16 +107,18 @@ describe('share stream revocation', () => {
   });
 
   it('interrupts a backpressured replay without loading another batch or waiting for drain', async () => {
+    fakePolling();
     const peer = await server({ replay: async () => Array.from({ length: 1_000 }, (_, index) => event(index + 2, 'x'.repeat(32 * 1_024))) });
     let raw!: ServerResponse;
     peer.app.server.once('request', (_request, response) => { raw = response; });
     const s = await stream(`${peer.url}/api/sessions/s1/stream?after=1&share=${peer.token()}`, true);
     await vi.waitFor(() => expect(raw.writableNeedDrain).toBe(true));
-    await new Promise(resolve => setTimeout(resolve, 200));
+    await new Promise(resolve => setTimeout(resolve, 50));
     expect(raw.writableNeedDrain).toBe(true);
     expect(raw.listenerCount('drain')).toBe(1);
     expect(peer.runtime.getEventWindow).toHaveBeenCalledTimes(1);
     peer.rotate();
+    vi.advanceTimersByTime(SHARE_POLL_MS);
     await vi.waitFor(() => expect(peer.unsubscribe).toHaveBeenCalledOnce(), { timeout: 2_500 });
     expect(peer.runtime.getEventWindow).toHaveBeenCalledTimes(1);
     s.response.resume();
@@ -121,6 +126,7 @@ describe('share stream revocation', () => {
   });
 
   it('closes during a backpressured live pump and clears queued output without waiting for drain', async () => {
+    fakePolling();
     const peer = await server();
     let raw!: ServerResponse;
     peer.app.server.once('request', (_request, response) => { raw = response; });
@@ -128,11 +134,12 @@ describe('share stream revocation', () => {
     s.response.pause();
     for (let i = 1; i <= 500; i++) peer.emit(event(i, 'x'.repeat(32 * 1_024)));
     await vi.waitFor(() => expect(raw.writableNeedDrain).toBe(true));
-    await new Promise(resolve => setTimeout(resolve, 200));
+    await new Promise(resolve => setTimeout(resolve, 50));
     expect(raw.writableNeedDrain).toBe(true);
     expect(raw.listenerCount('drain')).toBe(1);
     peer.rotate();
     peer.emit(event(501, 'REVOKED_QUEUED'));
+    vi.advanceTimersByTime(SHARE_POLL_MS);
     await vi.waitFor(() => expect(peer.unsubscribe).toHaveBeenCalledOnce(), { timeout: 2_500 });
     s.response.resume();
     await vi.waitFor(() => expect(s.closed()).toBe(true));
@@ -141,6 +148,7 @@ describe('share stream revocation', () => {
   });
 
   it('fails closed when an idle polling read fails', async () => {
+    fakePolling();
     let fail = false;
     const peer = await server({ getShareSecret: async () => {
       if (fail) throw new Error('storage unavailable');
@@ -148,6 +156,7 @@ describe('share stream revocation', () => {
     } });
     const s = await stream(`${peer.url}/api/sessions/s1/stream?share=${peer.token()}`);
     fail = true;
+    vi.advanceTimersByTime(SHARE_POLL_MS);
     await expectRevoked(s, peer.unsubscribe);
   });
 
@@ -176,7 +185,10 @@ describe('share stream revocation', () => {
     const s = await stream(`${peer.url}/api/sessions/s1/stream?share=${peer.token()}`);
     const calls = peer.getShareSecret.mock.calls.length;
     fail = true;
+    // 挂起的读取要等 1 秒截止时间才算失败：只在发事件和到期这段伪造 setTimeout。
+    if (failure === 'hang') vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     for (let i = 1; i <= 20; i++) peer.emit(event(i, 'REVOKED_LATE'));
+    if (failure === 'hang') { vi.advanceTimersByTime(SHARE_POLL_MS); vi.useRealTimers(); }
     await expectRevoked(s, peer.unsubscribe);
     expect(peer.getShareSecret.mock.calls.length).toBe(calls + 1);
     finish?.('before');
@@ -186,12 +198,13 @@ describe('share stream revocation', () => {
   });
 
   it('keeps normal shares ordered through replay/live overlap and does not recheck administrator streams', async () => {
+    fakePolling();
     let peer!: Awaited<ReturnType<typeof server>>;
     peer = await server({ replay: async () => { peer.emit(event(3)); peer.emit(event(2)); return [event(1), event(2)]; } });
     const shared = await stream(`${peer.url}/api/sessions/s1/stream?share=${peer.token()}`);
     await vi.waitFor(() => expect(shared.text()).toContain('output-3'));
     expect([...shared.text().matchAll(/^id: (\d+)/gm)].map(match => Number(match[1]))).toEqual([1, 2, 3]);
-    await new Promise(resolve => setTimeout(resolve, 1_100));
+    vi.advanceTimersByTime(SHARE_POLL_MS);
     peer.emit(event(4));
     await vi.waitFor(() => expect(shared.text()).toContain('output-4'));
     expect(shared.closed()).toBe(false);
@@ -201,7 +214,7 @@ describe('share stream revocation', () => {
     const admin = await stream(`${peer.url}/api/sessions/s1/stream`);
     const calls = peer.getShareSecret.mock.calls.length;
     peer.rotate();
-    await new Promise(resolve => setTimeout(resolve, 1_100));
+    vi.advanceTimersByTime(SHARE_POLL_MS);
     peer.emit(event(5));
     await vi.waitFor(() => expect(admin.text()).toContain('output-5'));
     expect(admin.closed()).toBe(false);

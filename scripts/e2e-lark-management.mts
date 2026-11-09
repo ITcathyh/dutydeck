@@ -7,6 +7,7 @@ import {
   getGitMetadata,
   ArtifactLogger,
   captureBrowserArtifacts,
+  closeToasts,
   withTimeout,
   installTermination,
 } from './lark-e2e-shared.mts';
@@ -126,7 +127,7 @@ async function runTest() {
     const { chromium, expect } = await import('@playwright/test');
     browser = await chromium.launch({ headless: true });
     context = await browser.newContext({ viewport: { width: 1440, height: 980 } });
-    await context.tracing.start({ screenshots: true, snapshots: true });
+    if (process.env.CI) await context.tracing.start({ screenshots: true, snapshots: true });
     page = await context.newPage();
     const errors: string[] = [];
     page.on('pageerror', error => errors.push(error.message));
@@ -200,6 +201,7 @@ async function runTest() {
     await page.getByRole('button', { name: /放弃.*载入最新/ }).click();
     await expect(page.getByTestId('directory-picker').getByRole('textbox')).toHaveValue(harness.workspaces[0]!);
     passed('browser background refresh cannot overwrite a newer revision; conflict retains the draft and reload restores server values');
+    await closeToasts(page);
 
     await nav('机器人').click();
     await page.getByRole('button').filter({ has: page.locator('strong', { hasText: /^开发助手$/ }) }).click();

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { isTerminalTaskStatus, RuntimeError, type CiFailureLog, type CiWebhookEvent, type CiWebhookRequest, type CiWebhookVerification, type RepositoryBundle, type Session, type TaskRecord } from '@dutydeck/shared';
-import { executionTaskId } from '@dutydeck/storage';
+import { executionTaskId } from '@dutydeck/storage/helpers';
 import { z } from 'zod';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { changeRequestLabel, ciProviderLabel, git, resolveCiBranchHead, type CiProviderRegistry } from './ci-providers.js';

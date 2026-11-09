@@ -4,7 +4,7 @@ import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { LegacyRetirementCandidate } from '@dutydeck/shared';
-import { dutydeckPtySessionName } from '@dutydeck/pty-driver';
+import { dutydeckPtySessionName } from '@dutydeck/pty-driver/support';
 import { createLegacyRetirementVerifier, verifyLegacyRetirementCandidate } from './legacy-session-retirement.js';
 
 const sockets: string[] = [];

@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 import { createRuntimeStore } from 'acpx/runtime';
 import type { AgentConfig, DriverContext, NativeContextExpected, NativeContextIdentity } from '@dutydeck/shared';
 import { AcpxAdapter } from './index.js';
+import '../../../tests/support/short-acpx-reply-drain.js';
 
 // claudeAutoMemory=off 的 ACPX 回归：真实 AcpxAdapter + 持久化 session key，经内置 claude-acp.mjs 启动一个记录自身环境的假 ACP Agent。
 // 断言真正的 Agent 子进程收到的 CLAUDE_CODE_DISABLE_AUTO_MEMORY，以及恢复时 load 的仍是原生会话。

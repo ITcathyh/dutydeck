@@ -1,7 +1,7 @@
 import { Writable } from 'node:stream';
 import pino from 'pino';
 import { describe, expect, it } from 'vitest';
-import { appLoggerOptions } from './app.js';
+import { appLoggerOptions } from './app-logger.js';
 
 /** 用服务实际的 logger 选项写一条日志，取回解析后的 JSON。 */
 function logged(details: Record<string, unknown>): Record<string, any> {

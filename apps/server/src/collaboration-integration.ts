@@ -1,7 +1,8 @@
 import { CollaborationDelivery } from './collaboration-delivery.js';
 import { createHash } from 'node:crypto';
 import { canonicalExecutionJson, installationOwnerTaskActor, parseLarkSourceId, participationLevelFields, resolveParticipation, RuntimeError, type CollaborationRepository, type CollaborationScope, type ScheduleDelivery, type CollaborationSettings, type UpdateCollaborationSettingsInput, type PolicyAction, type RepositoryBundle, type ToolRiskPolicy } from '@dutydeck/shared';
-import { digest, type DutydeckRuntime } from '@dutydeck/runtime';
+import type { DutydeckRuntime } from '@dutydeck/runtime';
+import { digest } from '@dutydeck/runtime/digest';
 import { CollaborationService, type CollaborationAuthorization } from './collaboration-service.js';
 import { ScheduleExecutor, type ScheduleExecutionInput } from './schedule-executor.js';
 import { readConfirmedLarkBoundMessage } from './lark/result-delivery.js';

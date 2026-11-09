@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import { HerdrBackend, PtyBackend, TmuxBackend, herdrControlEnvironment } from '@dutydeck/session-backends';
-import { childProcessIdentity, observeProcess } from '@dutydeck/storage';
+import { childProcessIdentity, observeProcess } from '@dutydeck/storage/helpers';
 import { PtyCliDriver } from './driver.js';
 
 afterEach(() => vi.unstubAllEnvs());

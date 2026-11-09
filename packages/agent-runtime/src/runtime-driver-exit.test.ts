@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createCliAdapter } from '@dutydeck/cli-adapters';
+import { createCliAdapter, type PtyLike } from '@dutydeck/cli-adapters';
 import { createPtyCliDriver } from '@dutydeck/pty-driver';
 import { PtyBackend } from '@dutydeck/session-backends';
 import { agentConfigSchema, type AgentDriver } from '@dutydeck/shared';
@@ -29,7 +29,8 @@ process.stdin.on('data', data => {
 });
 `);
   const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
-  const adapter = createCliAdapter('pi');
+  // The real pi submit waits a second after pasting without a key interface; input timing is not under test here.
+  const adapter = { ...createCliAdapter('pi'), writeInput: async (backend: PtyLike, prompt: string) => { await backend.write(`\x1b[200~${prompt}\x1b[201~`); await backend.write('\r'); } };
   const writeInput = vi.spyOn(adapter, 'writeInput');
   const drivers: AgentDriver[] = [];
   const exits: Array<(code: number | null) => void> = [];
@@ -39,7 +40,7 @@ process.stdin.on('data', data => {
     probe: () => ({ protocol: 'pty-cli', available: true, pause: false, resume: true }),
     ptyDriverFactory(agent, _protocol, onEvent, onExit, sessionId) {
       const backend = new PtyBackend();
-      const driver = createPtyCliDriver({ agent, adapter, backend, onEvent, onExit, sessionId });
+      const driver = createPtyCliDriver({ agent, adapter, backend, onEvent, onExit, sessionId, timings: { quiescenceMs: 100, spinnerGuardMs: 100 } });
       drivers.push(driver); exits.push(onExit);
       return driver;
     },

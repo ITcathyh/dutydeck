@@ -31,7 +31,7 @@ import {
   type TranscriptSourceObservation,
   transcriptClientForAdapter,
 } from '@dutydeck/shared';
-import { buildSessionMarker, claudeProjectDirCandidates } from '@dutydeck/pty-driver';
+import { buildSessionMarker, claudeProjectDirCandidates } from '@dutydeck/pty-driver/support';
 
 // ---------------------------------------------------------------------------
 // 公共类型

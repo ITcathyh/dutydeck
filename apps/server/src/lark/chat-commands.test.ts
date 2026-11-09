@@ -12,7 +12,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir, userInfo } from 'node:os';
 import { createRepositories } from '@dutydeck/storage';
-import { buildSessionMarker, claudeProjectDir } from '@dutydeck/pty-driver';
+import { buildSessionMarker, claudeProjectDir } from '@dutydeck/pty-driver/support';
 import { pinnedSessionUuid } from '@dutydeck/cli-adapters';
 import { DutydeckRuntime, type AgentDriver } from '@dutydeck/runtime';
 import { RuntimeError, type AgentConfig } from '@dutydeck/shared';

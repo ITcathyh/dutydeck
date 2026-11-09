@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { digest } from '@dutydeck/runtime';
+import { digest } from '@dutydeck/runtime/digest';
 import { canonicalExecutionJson, RuntimeError, type JsonValue, type PluginToolAction, type PluginToolBinding, type PluginToolIdentity } from '@dutydeck/shared';
 import { PluginBusinessToolRegistry, validateToolInput, type BusinessToolEntry } from './business-tools.js';
 import { PluginToolGrants } from './tool-grants.js';

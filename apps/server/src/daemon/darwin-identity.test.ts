@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { childProcessIdentity } from '@dutydeck/storage';
+import { childProcessIdentity } from '@dutydeck/storage/helpers';
 import { observeProcess } from '../../../../packages/storage/src/process-identity.js';
 import { inspectDaemonState, type DaemonState } from './daemon.js';
 

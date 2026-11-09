@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { AgentRepository, ConfigRepository, LarkAppCreationJob } from '@dutydeck/shared';
-import { currentProcessIdentity, observeProcess, type ProcessIdentity } from '@dutydeck/storage';
+import type { ProcessIdentity } from '@dutydeck/storage';
+import { currentProcessIdentity, observeProcess } from '@dutydeck/storage/helpers';
 import QRCode from 'qrcode';
 import { LARK_APP_ICON_BASE64 } from './app-icon.js';
 import { readLarkConfig, saveLarkConfig } from './config.js';

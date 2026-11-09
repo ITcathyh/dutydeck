@@ -3,10 +3,11 @@ import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_pr
 import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { bundleCliForTest } from '../../../tests/support/bundle-for-test.js';
+import { bundleCliForTest, lazyBundleForTest } from '../../../tests/support/bundle-for-test.js';
 import { createRepositories } from '@dutydeck/storage';
-import { dutydeckPtySessionName } from '@dutydeck/pty-driver';
+import { dutydeckPtySessionName } from '@dutydeck/pty-driver/support';
 import {
   DatabaseCliError,
   runDatabaseExecutionStatus,
@@ -50,6 +51,12 @@ describe('database-cli', () => {
   let bundled: Promise<{ path: string; cleanup: () => Promise<void> }> | undefined;
   const bundledCli = async () => (await (bundled ??= bundleCliForTest('database-cli'))).path;
   afterAll(async () => { await (await bundled)?.cleanup(); });
+
+  // 竞争连接要在同步回调里启动独立进程，所以提前把存储包打包好，子进程直接 node 运行。
+  const storage = lazyBundleForTest('database-cli-storage', fileURLToPath(new URL('../../../packages/storage/src/index.ts', import.meta.url)));
+  let storageBundle: string;
+  beforeAll(async () => { storageBundle = await storage.path(); }, 60_000);
+  afterAll(() => storage.cleanup());
 
   async function spawnCli(args: string[]): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
     const child = spawn(
@@ -339,7 +346,7 @@ describe('database-cli', () => {
           injected = true;
           const writerScript = `
             import assert from "node:assert/strict";
-            import { createRepositories } from "@dutydeck/storage";
+            import { createRepositories } from ${JSON.stringify(storageBundle)};
             const path = process.argv[1];
             const p = createRepositories(path);
             try {
@@ -352,7 +359,7 @@ describe('database-cli', () => {
           `;
           const writerRes = spawnSync(
             process.execPath,
-            ['--conditions=development', '--import', 'tsx', '--input-type=module', '-e', writerScript, dbPath],
+            ['--input-type=module', '-e', writerScript, dbPath],
             {
               cwd: process.cwd(),
               encoding: 'utf8',
@@ -424,11 +431,11 @@ describe('database-cli', () => {
         let competingResult: { acquired: boolean; code?: string } | undefined;
 
         const claimScript = `
-          import { createRepositories } from "@dutydeck/storage";
+          import { createRepositories } from ${JSON.stringify(storageBundle)};
           const path = process.argv[1];
           let p, c;
           try {
-            p = createRepositories(path, { mode: "runtime" });
+            p = createRepositories(path, { mode: "runtime", busyTimeoutMs: 50 });
             c = p.control.attachRuntime("during-capture");
             console.log(JSON.stringify({ acquired: true }));
           } catch (e) {
@@ -455,7 +462,7 @@ describe('database-cli', () => {
             attempted = true;
             const res = spawnSync(
               process.execPath,
-              ['--conditions=development', '--import', 'tsx', '--input-type=module', '-e', claimScript, dbPath],
+              ['--input-type=module', '-e', claimScript, dbPath],
               {
                 cwd: process.cwd(),
                 encoding: 'utf8',

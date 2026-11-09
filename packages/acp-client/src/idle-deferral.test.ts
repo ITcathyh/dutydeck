@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AcpxAdapter } from './index.js';
+import '../../../tests/support/short-acpx-reply-drain.js';
 
 const dirs: string[] = [];
 const cleanup: Array<() => Promise<void>> = [];
@@ -101,14 +102,16 @@ describe('ACP idle cancellation while the process tree is busy', () => {
 });
 
 describe.runIf(existsSync('/proc/self/stat'))('ACP idle cancellation with a real long-tool agent', () => {
-  const run = async (prompt: string) => {
+  const run = async (prompt: string, during?: (adapter: AcpxAdapter) => Promise<void>) => {
     const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-idle-deferral-real-')); dirs.push(cwd);
     const events: any[] = [];
     const adapter = new AcpxAdapter({ id: 'busy', name: 'Busy Tool', command: process.execPath, args: [resolve(process.cwd(), 'tests/fixtures/acp-busy-tool-agent.mjs')], protocol: 'acp', cwd, env: {}, permissionMode: 'deny-all', timeout: 2, capabilities: { pause: false, resume: true }, builtin: false }, { onEvent: event => events.push(event) });
     cleanup.push(() => adapter.stop());
     await adapter.start();
     const started = Date.now();
-    const outcome = await adapter.send(prompt).then(() => 'resolved', error => error);
+    const sending = adapter.send(prompt).then(() => 'resolved', error => error);
+    await during?.(adapter);
+    const outcome = await sending;
     return { elapsed: Date.now() - started, outcome, events };
   };
   // 无进展超时按失败结束（不是用户中断）：取消确认时 completed 的 stopReason 是 idle_timeout，两种收尾都先发原因码 error。
@@ -117,12 +120,16 @@ describe.runIf(existsSync('/proc/self/stat'))('ACP idle cancellation with a real
       ? result.events.some(event => event.type === 'completed' && event.data.stopReason === 'idle_timeout')
       : (result.outcome as { code?: string }).code === 'AGENT_IDLE_TIMEOUT');
 
-  it('lets a CPU-busy tool run past the timeout and cancels it at the hard limit', async () => {
-    const result = await run('busy tool');
-    expect(cancelled(result)).toBe(true);
-    // 硬上限是 3 × 2 秒，从最后一次算作进展的事件（第一条心跳）起算。
-    expect(result.elapsed).toBeGreaterThanOrEqual(6_000);
-    expect(result.elapsed).toBeLessThan(10_000);
+  // 3 倍超时的硬上限由上面的假时钟用例覆盖；这里验证真实进程树的 CPU 采样让忙碌的工具越过超时。
+  it('lets a CPU-busy tool run past the timeout on a real CPU sample', async () => {
+    const result = await run('busy tool', async adapter => {
+      const sample = vi.spyOn((adapter as any).cpu, 'sample');
+      // 到点时的采样是 active 才继续等；否则这一轮此刻已按无进展取消。
+      await vi.waitFor(() => expect(sample.mock.results.some(item => item.value === 'active')).toBe(true), { timeout: 15_000, interval: 50 });
+      await adapter.stop();
+    });
+    expect(result.events.some(event => event.type === 'error' && event.data.code === 'AGENT_IDLE_TIMEOUT')).toBe(false);
+    expect(result.elapsed).toBeGreaterThanOrEqual(2_000);
   }, 20_000);
 
   it('cancels an idle tool at the timeout even though its heartbeats keep arriving', async () => {

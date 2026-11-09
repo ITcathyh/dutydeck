@@ -1106,7 +1106,7 @@ describe('configuredRootsForSession production env wiring', () => {
 
 import { readFileSync } from 'node:fs';
 import { resolve as pathResolve } from 'node:path';
-import { buildSessionMarker } from '@dutydeck/pty-driver';
+import { buildSessionMarker } from '@dutydeck/pty-driver/support';
 import { createInsightResolver } from './service.js';
 import type { RepositoryBundle, RuntimeControlClaim } from '@dutydeck/shared';
 

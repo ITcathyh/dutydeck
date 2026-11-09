@@ -113,7 +113,7 @@ describe('offline portable backup', () => {
     const f = fixture(), repos = createRepositories(f.database);
     await expect(createBackup(f)).rejects.toThrow(/DATABASE_UPGRADE_BUSY/); repos.close();
     const raw = new Database(f.database, { timeout: 0 }); raw.exec('BEGIN IMMEDIATE');
-    await expect(createBackup(f)).rejects.toThrow(/locked/); raw.close();
+    await expect(createBackup({ ...f, busyTimeoutMs: 20 })).rejects.toThrow(/locked/); raw.close();
     await expect(createBackup(f)).resolves.toMatchObject({ status: 'offline-backup' });
   });
 
@@ -125,7 +125,7 @@ describe('offline portable backup', () => {
       writer.close();
       const child = spawnSync(process.execPath, ['--input-type=module', '-e', `import Database from ${JSON.stringify(createRequire(import.meta.url).resolve('better-sqlite3'))}; const db=new Database(process.argv[1],{timeout:0});try { db.exec("INSERT INTO configs VALUES('child-racing','2')");process.exitCode=1; } catch(error) { process.exitCode=error.code==='SQLITE_BUSY'?0:2; } finally {db.close();}`, f.database], { env: { PATH: process.env.PATH, HOME: f.root }, encoding: 'utf8' });
       expect(child.status, child.stderr).toBe(0);
-      expect(() => createRepositories(f.database)).toThrow(/locked|MAINTENANCE/);
+      expect(() => createRepositories(f.database, { busyTimeoutMs: 20 })).toThrow(/locked|MAINTENANCE/);
     });
     const repos = createRepositories(f.database); expect(await repos.config.get('racing')).toBeUndefined(); repos.close();
   });

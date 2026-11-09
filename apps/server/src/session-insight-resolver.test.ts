@@ -13,7 +13,7 @@ import {
   type TaskRequestV1,
 } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
-import { buildSessionMarker, claudeProjectDirCandidates } from '@dutydeck/pty-driver';
+import { buildSessionMarker, claudeProjectDirCandidates } from '@dutydeck/pty-driver/support';
 import {
   INSIGHT_INSTANCE_ID_CONFIG_KEY,
   SessionInsightResolver,

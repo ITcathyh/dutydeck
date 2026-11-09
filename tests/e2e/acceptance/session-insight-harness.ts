@@ -138,7 +138,7 @@ function submitPrompt(rawPrompt) {
     if (file) {
       // 逐字 user 记录：tailer waitForInput 严格 === 比较
       appendLine(file, { type: 'user', sessionId: pinnedSessionId, cwd: process.cwd(), timestamp: nowIso(), message: { role: 'user', content: text } });
-      appendLine(file, { type: 'assistant', sessionId: pinnedSessionId, cwd: process.cwd(), timestamp: nowIso(), message: { role: 'assistant', content: [{ type: 'text', text: 'CONTROLLED_CLAUDE_TASK_DONE' }] } });
+      appendLine(file, { type: 'assistant', sessionId: pinnedSessionId, cwd: process.cwd(), timestamp: nowIso(), message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: 'CONTROLLED_CLAUDE_TASK_DONE' }] } });
     }
     setTimeout(() => {
       process.stdout.write('\\r\\nCONTROLLED_CLAUDE_TASK_DONE\\r\\n\\u001b[2J\\u001b[HClaude Code v2.1.288 (mock)\\r\\n\\u2733 Worked for 1s\\r\\n────────────────────────\\r\\n\\u276f\\r\\n────────────────────────\\r\\n⏵⏵ bypass permissions on (shift to cycle)');

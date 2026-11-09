@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import type { AgentConfig } from '@dutydeck/shared';
 import { createClaudeCodeAdapter } from '@dutydeck/cli-adapters';
 import { TmuxBackend } from '@dutydeck/session-backends';
-import { childProcessIdentity, observeProcess } from '@dutydeck/storage';
+import { childProcessIdentity, observeProcess } from '@dutydeck/storage/helpers';
 import { PtyCliDriver } from './driver.js';
 import { claudeProjectDir } from './cli-paths.js';
 import { buildSessionMarker } from './session-id/index.js';

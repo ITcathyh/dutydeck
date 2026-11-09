@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { LarkLongConnectionListener, LarkMessageCoordinator } from './listener.js';
+import { LarkLongConnectionListener } from './listener.js';
+import { LarkMessageCoordinator } from './coordinator.js';
 import type { StoredLarkConfig } from './config.js';
 
 const sdk = vi.hoisted(() => ({ handlers: {} as Record<string, (event: any) => unknown> }));

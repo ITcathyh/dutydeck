@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { childProcessIdentity, observeProcess } from '@dutydeck/storage';
+import { childProcessIdentity, observeProcess } from '@dutydeck/storage/helpers';
 import { HerdrBackend, herdrControlEnvironment } from './herdr-backend.js';
 
 describe.skipIf(process.env.DUTYDECK_TEST_HERDR !== 'true')('real Herdr snapshot handoff', () => {

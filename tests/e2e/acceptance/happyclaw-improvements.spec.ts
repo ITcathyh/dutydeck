@@ -2,7 +2,7 @@ import { test, expect, type Page } from '@playwright/test';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { launchIsolatedTestServer, REPO_ROOT, type TestServerInstance } from './harness.js';
+import { launchIsolatedTestServer, REPO_ROOT, TASK_POLL_INTERVALS, type TestServerInstance } from './harness.js';
 
 // Real Chromium, HTTP, execution ledger and private files; the ACP model is a deterministic fixture.
 test.describe('Configuration evidence, explicit project memory and artifact snapshots', () => {
@@ -36,7 +36,7 @@ test.describe('Configuration evidence, explicit project memory and artifact snap
     const response = await receipt;
     expect(response.status()).toBe(202);
     const { task } = await response.json();
-    await expect.poll(async () => (await instance.request('GET', `/api/sessions/${sessionId}/tasks`)).json?.find((value: { id: string }) => value.id === task.id)?.status, { timeout: 30_000 }).toBe('completed');
+    await expect.poll(async () => (await instance.request('GET', `/api/sessions/${sessionId}/tasks`)).json?.find((value: { id: string }) => value.id === task.id)?.status, { timeout: 30_000, intervals: TASK_POLL_INTERVALS }).toBe('completed');
     return task.id as string;
   };
   const receivedPrompt = (marker: string): string => {
@@ -135,6 +135,8 @@ test.describe('Configuration evidence, explicit project memory and artifact snap
     await openSession(page, session.id);
     await sendTurn(page, session.id, 'HAPPYCLAW_CAPTURE_REPORT');
     const source = join(session.cwd, 'report.html'), original = readFileSync(source);
+    // The per-turn reference list refreshes every 10s; reloading fetches this turn's reference now.
+    await page.reload();
     await page.getByRole('button', { name: '结果检视', exact: true }).click();
     const inspector = page.getByRole('complementary', { name: '结果检视', exact: true });
     const references = inspector.getByRole('region', { name: '每轮产物引用', exact: true });

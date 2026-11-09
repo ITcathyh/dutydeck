@@ -5,11 +5,12 @@ import { DutydeckRuntime } from '@dutydeck/runtime';
 import { createRepositories } from '@dutydeck/storage';
 import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import { RelayCapabilityRegistry } from '@dutydeck/relay';
 import { createCliAdapter } from '@dutydeck/cli-adapters';
 import type { AgentConfig, AgentDriver, DriverPermissionDecision, PermissionRequestData, Session } from '@dutydeck/shared';
 import { buildApp } from './app.js';
+import { lazyBundleForTest } from '../../../tests/support/bundle-for-test.js';
 import { HookPermissionRequests, claudeToolKind, permissionHookDeadlineMs, runPermissionHook } from './permission-hook.js';
 
 const env = { dutydeck_relay_url: 'http://127.0.0.1/api/relay', dutydeck_relay_token: 'fixture-token' };
@@ -17,6 +18,8 @@ const payload = { hook_event_name: 'PermissionRequest', session_id: 'native', cw
   tool_name: 'Bash', tool_input: { command: 'pnpm test', description: 'Run the unit tests' } };
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const close of cleanup.splice(0)) await close(); vi.useRealTimers(); });
+const bundledCli = lazyBundleForTest('permission-hook', fileURLToPath(new URL('./cli.ts', import.meta.url)));
+afterAll(() => bundledCli.cleanup());
 
 const session = (patch: Partial<Session> = {}): Session => ({
   id: 'ses_hook', agentId: 'claude-code', state: 'running_tool', cwd: '/repo', runId: 'run_1', source: 'lark', protocol: 'pty-cli',
@@ -59,16 +62,15 @@ describe('Claude PermissionRequest hook over the session relay', () => {
     await app.listen({ port: 0, host: '127.0.0.1' });
     cleanup.push(() => app.close());
     const port = (app.server.address() as { port: number }).port;
-    const cli = fileURLToPath(new URL('./cli.ts', import.meta.url));
     const hookEnv = { ...capabilities.environmentFor('ses_hook'), dutydeck_relay_url: `http://127.0.0.1:${port}/api/relay`,
-      dutydeck_relay_command: `'${process.execPath}' --import tsx '${cli}'`, FIXTURE_API_KEY: 'fixture-key-value' };
+      dutydeck_relay_command: `'${process.execPath}' '${await bundledCli.path()}'`, FIXTURE_API_KEY: 'fixture-key-value' };
     const args = createCliAdapter('claude-code').buildArgs({ sessionId: 'ses_hook', permissionMode: 'ask', env: hookEnv });
     const hook = JSON.parse(args[args.indexOf('--settings') + 1]!).hooks.PermissionRequest[0].hooks[0];
     expect(hook.command).not.toContain(hookEnv.dutydeck_relay_token);
     const run = (input: string) => new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
       const child = execFile('/bin/sh', ['-c', hook.command], {
         cwd: fileURLToPath(new URL('../../../', import.meta.url)),
-        env: { ...process.env, ...hookEnv, NODE_OPTIONS: '--conditions=development' }, timeout: 15_000,
+        env: { ...process.env, ...hookEnv }, timeout: 15_000,
       }, (error, stdout, stderr) => error ? reject(error) : resolve({ stdout, stderr }));
       child.stdin!.end(input);
     });

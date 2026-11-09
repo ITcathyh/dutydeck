@@ -99,6 +99,8 @@ export interface LarkOpenPlatformConfigureOptions {
   creatorUserId?: string;
   /** Only the app-creation job may opt in for its own not-yet-published app. */
   newApp?: boolean;
+  /** 回读发布状态的间隔，默认 1 秒；测试用它跳过等待。 */
+  publishPollMs?: number;
   /** 每个阶段完成后回调一次；失败阶段不会回调。 */
   onStep?: (step: LarkOpenPlatformConfigureStep, detail?: LarkOpenPlatformConfigureStepDetail) => void;
 }
@@ -308,7 +310,7 @@ export async function configureLarkOpenPlatformApp(
     // Even an automatic approval briefly reports status 1. Allow it to finish
     // without resubmitting or reporting a human review based on that state alone.
     if (!options.newApp || asRecord(version).versionStatus !== 1 || attempt === 9) break;
-    await sleep(1_000);
+    await sleep(options.publishPollMs ?? 1_000);
   }
   // Console versionStatus: 2 = published, 1 = under review, 0 = not submitted.
   // A successful commit response alone does not prove publication.

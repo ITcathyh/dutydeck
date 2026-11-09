@@ -1,6 +1,6 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync, spawn } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -8,10 +8,13 @@ import { createHash } from 'node:crypto';
 import { createRepositories } from '@dutydeck/storage';
 import type { AgentConfig, AgentDriver, DriverFactory, Session, TaskRequestV1, VerificationRecord } from '@dutydeck/shared';
 import { RuntimeError } from '@dutydeck/shared';
+import { lazyBundleForTest } from '../../../tests/support/bundle-for-test.js';
 import { DutydeckRuntime, type RuntimeOptions } from './index.js';
 import { repositoryFingerprint } from './verification.js';
 import { WorkspaceManager } from './workspace.js';
 
+const verificationCrash = lazyBundleForTest('verification-crash', join(process.cwd(), 'packages/agent-runtime/tests/fixtures/verification-crash.mts'));
+afterAll(() => verificationCrash.cleanup());
 const agent: AgentConfig = { id: 'mock', name: 'Mock', command: process.execPath, args: [], protocol: 'acp', cwd: '/tmp', env: {}, permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
 const cleanup: string[] = [];
 const runtimes: DutydeckRuntime[] = [];
@@ -33,8 +36,13 @@ function git(cwd: string, ...args: string[]) {
   return execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8' }).trim();
 }
 
-function repository(subdirectory = false) {
-  const root = temporary('dutydeck-git-');
+// One committed template per shape: each test copies it instead of paying five git spawns.
+const repositoryTemplates = new Map<boolean, string>();
+function repositoryTemplate(subdirectory: boolean) {
+  let root = repositoryTemplates.get(subdirectory);
+  if (root) return root;
+  root = mkdtempSync(join(tmpdir(), 'dutydeck-git-template-'));
+  repositoryTemplates.set(subdirectory, root);
   git(root, 'init', '-q');
   git(root, 'config', 'user.email', 'test@example.com');
   git(root, 'config', 'user.name', 'Dutydeck Test');
@@ -44,6 +52,13 @@ function repository(subdirectory = false) {
     writeFileSync(join(root, 'nested', 'code.txt'), 'nested\n');
   }
   git(root, 'add', '.'); git(root, 'commit', '-qm', 'baseline');
+  return root;
+}
+afterAll(() => { for (const root of repositoryTemplates.values()) rmSync(root, { recursive: true, force: true }); });
+
+function repository(subdirectory = false) {
+  const root = temporary('dutydeck-git-');
+  cpSync(repositoryTemplate(subdirectory), root, { recursive: true });
   return root;
 }
 
@@ -686,11 +701,7 @@ process.stdout.write(marker.slice(4));
     createRepositories(database, { newDatabaseAuthority: 'ledger_v1' }).close();
     const writer = join(source, 'verification-writer.mjs');
     writeFileSync(writer, `import { appendFileSync } from 'node:fs';\nconst file=process.argv[2];\nsetInterval(()=>appendFileSync(file,'x'),20);\n`);
-    const fixture = join(process.cwd(), 'packages/agent-runtime/tests/fixtures/verification-crash.mts');
-    const fixtureTsconfig = join(process.cwd(), 'packages/agent-runtime/tests/fixtures/tsconfig.json');
-    const child = spawn(process.execPath, ['--conditions=development', '--import', 'tsx', fixture, database, source, marker, writer], {
-      cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, TSX_TSCONFIG_PATH: fixtureTsconfig }
-    });
+    const child = spawn(process.execPath, [await verificationCrash.path(), database, source, marker, writer], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
     let sessionId = '';
     try {
       sessionId = await new Promise<string>((resolve, reject) => {

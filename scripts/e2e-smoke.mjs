@@ -196,7 +196,8 @@ const submitPrompt = rawPrompt => {
     // persistent tmux 优先续用存活 pane；只有进程不存在时才以 --resume 重启。
     // 用独立标记区分两条合法路径，也让 smoke 能证明第二轮不是历史回放。
     const marker = resumed ? 'MOCK_RESUMED' : currentTurn > 1 ? 'MOCK_CONTINUED' : 'MOCK_REPLY';
-    write({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: marker + ': ' + prompt }] } });
+    // 真实 Claude 的收尾回复带 stop_reason；缺了它驱动要多等一轮空闲复核（约 3 秒）。
+    write({ type: 'assistant', message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: marker + ': ' + prompt }] } });
     // completionPattern：✳ Worked for Ns
     process.stdout.write('\\u001b[2J\\u001b[HClaude Code v2.1.267 (mock)\\r\\n\\u2733 Worked for 1s\\r\\n────────────────────────\\r\\n\\u276f\\r\\n────────────────────────\\r\\n⏵⏵ bypass permissions on (shift to cycle)');
   };
@@ -495,7 +496,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
 
   const context = await browser.newContext({ viewport: { width: 1440, height: 960 } });
   activeContext = context;
-  if (ARTIFACT_DIR) {
+  if (ARTIFACT_DIR && process.env.CI) {
     try {
       await context.tracing.start({ screenshots: true, snapshots: true });
     } catch {}
@@ -710,11 +711,9 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     if (stopped.status !== 200) throw new Error(`stop 返回 ${stopped.status}`);
   });
 
-  // SSE 必须先连上再发消息，否则 completed 可能在订阅前就发出去了
-  // （?after=0 会补发历史事件，这里双保险）
+  // ?after=0 会补发历史事件，completed 发生在订阅建立之前也不会漏。
   const stream = connectSseStream(`${BASE}/api/sessions/${session.id}/stream?after=0`, debug);
   onCleanup('关闭 SSE 连接', () => stream.close());
-  await sleep(500);
 
   const prompt = REAL ? '回复一句话：smoke ok' : 'smoke test prompt';
   const sent = await request('POST', `/api/sessions/${session.id}/send`, { prompt, mode: 'queue' });
@@ -762,16 +761,6 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   const resumed = await request('POST', `/api/sessions/${session.id}/resume`);
   assert(resumed.status === 200 || resumed.status === 202, `POST /resume 返回 2xx（实际 ${resumed.status}）`);
 
-  // 关键：resume 返回 200 之后，failed 才在下一个 tick 悄悄写进去。
-  // 立刻断言"成功"会漏掉整个 bug——必须等一会儿再查状态。
-  await sleep(3_000);
-  const afterResume = await request('GET', `/api/sessions/${session.id}`);
-  assert(afterResume.json?.state !== 'failed',
-    `resume 3 秒后 state 不是 failed（实际 ${afterResume.json?.state}）`);
-  const resumeErrors = stream.since(beforeResume).filter(item => item.type === 'error');
-  assert(resumeErrors.length === 0,
-    `resume 未产生 error 事件（实际 ${JSON.stringify(resumeErrors.map(item => item.event.data?.message))}）`);
-
   const beforeSecondTurn = stream.cursor();
   const secondPrompt = REAL ? '再回复一句话：resume ok' : 'second turn after resume';
   const secondSent = await request('POST', `/api/sessions/${session.id}/send`, { prompt: secondPrompt, mode: 'queue' });
@@ -785,6 +774,14 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   }, { timeoutMs: REAL ? 150_000 : 60_000 });
   assert(secondTurn.some(item => item.type === 'text' || item.type === 'thinking'),
     `第二轮有实质输出（${secondTurn.length} 条新事件，全部 sequence > ${beforeSecondTurn}）`);
+  // 关键：resume 返回 200 之后，failed 才在下一个 tick 悄悄写进去。
+  // 所以要在第二轮走完之后再查，此时那个 tick 早已过去。
+  const afterResume = await request('GET', `/api/sessions/${session.id}`);
+  assert(afterResume.json?.state !== 'failed',
+    `resume 后第二轮结束时 state 不是 failed（实际 ${afterResume.json?.state}）`);
+  const resumeErrors = stream.since(beforeResume).filter(item => item.type === 'error');
+  assert(resumeErrors.length === 0,
+    `resume 未产生 error 事件（实际 ${JSON.stringify(resumeErrors.map(item => item.event.data?.message))}）`);
 
   if (!REAL) {
     const assistantReplies = secondTurn.filter(item => item.type === 'text' && item.event.data?.role !== 'user').map(item => item.event.data?.text ?? '');

@@ -2,7 +2,7 @@ import { readdir, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, expect, it } from 'vitest';
-import { currentProcessIdentity } from '@dutydeck/storage';
+import { currentProcessIdentity } from '@dutydeck/storage/helpers';
 import { quarantineCrashedPlugins, registerPluginCodeRoot } from './crash-attribution.js';
 import { pluginDoctorChecks } from './doctor.js';
 import { PluginHost } from './host.js';

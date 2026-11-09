@@ -76,7 +76,7 @@ export function openDatabaseControl(filename: string, options: RepositoryOpenOpt
   const identity = currentProcessIdentity(); // Never inspect /proc while holding a SQLite write transaction.
   const stat = statSync(filename);
   const entity = `${stat.dev}:${stat.ino}`;
-  const db = new Database(filename);
+  const db = new Database(filename, { timeout: options.busyTimeoutMs ?? 5_000 });
   let closed = false;
   let registered = false;
   function state() { return cachedStatement(db, 'SELECT * FROM dutydeck_control WHERE id = 1').get() as State; }

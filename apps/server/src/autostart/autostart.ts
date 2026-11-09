@@ -2,7 +2,8 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
-import { checkSqliteDriver, describeSqliteDriverFailure, type SqliteDriverCheck, type SqliteDriverCheckOptions } from '@dutydeck/storage';
+import type { SqliteDriverCheck, SqliteDriverCheckOptions } from '@dutydeck/storage';
+import { checkSqliteDriver, describeSqliteDriverFailure } from '@dutydeck/storage/helpers';
 import { SUPERVISOR_ENV, SYSTEMD_UNIT_ENV, daemonPaths, defaultDaemonDir, resolveDaemonDir } from '../daemon/daemon.js';
 import { rotateLogFileSync } from '../resource-retention.js';
 

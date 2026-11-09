@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import * as storage from '@dutydeck/storage';
+import * as storage from '@dutydeck/storage/helpers';
 import * as daemon from './daemon.js';
 import { daemonRestart, daemonStart, daemonStatus, daemonStop, markDaemonReady } from './command.js';
 import { sleep } from './time.js';

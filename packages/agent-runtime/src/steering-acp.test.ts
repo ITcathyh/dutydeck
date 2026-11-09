@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
 import { agentConfigSchema, type Session } from '@dutydeck/shared';
 import { DutydeckRuntime } from './index.js';
+import '../../../tests/support/short-acpx-reply-drain.js';
 
 // 插话请求挂着不回时，会话不能被它卡住：真实 AcpxAdapter + Mock ACP 子进程，
 // 只 mock driver 证明不了 ACP 连接上挂着的请求何时结束。

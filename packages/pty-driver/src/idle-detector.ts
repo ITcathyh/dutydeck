@@ -21,6 +21,12 @@ import type { ProgramStatusEvent } from '@dutydeck/session-backends';
 export type IdleEvidenceSource = 'screen' | 'external' | 'program-status';
 
 /** Pattern bag driving the detector; every field is optional. */
+/** Overrides for the detector's wait times; only tests shorten them. */
+export interface IdleTimings {
+  quiescenceMs?: number;
+  spinnerGuardMs?: number;
+}
+
 export interface IdlePatterns {
   completionPattern?: RegExp;
   idleToBusyPattern?: RegExp;
@@ -83,7 +89,7 @@ export class IdleDetector {
     // Reuse the accumulated prompt/spinner evidence; no new PTY byte is needed.
     if (!this.isIdle && (!this.readyPattern || this.readySeen)) {
       this.clearTimer();
-      this.quiescenceTimer = setTimeout(() => this.quiescenceCheck(), QUIESCENCE_MS);
+      this.quiescenceTimer = setTimeout(() => this.quiescenceCheck(), this.quiescenceMs);
     }
   }
 
@@ -183,7 +189,12 @@ export class IdleDetector {
    *  and must not re-set the latch. -1 = no clear recorded. */
   private staticBusyClearTailPos = -1;
 
-  constructor(patterns: IdlePatterns) {
+  private readonly quiescenceMs: number;
+  private readonly spinnerGuardMs: number;
+
+  constructor(patterns: IdlePatterns, timings: IdleTimings = {}) {
+    this.quiescenceMs = timings.quiescenceMs ?? QUIESCENCE_MS;
+    this.spinnerGuardMs = timings.spinnerGuardMs ?? SPINNER_GUARD_MS;
     this.completionPattern = patterns.completionPattern;
     this.idleToBusyPattern = patterns.idleToBusyPattern;
     this.staticBusyPattern = globalCopy(patterns.staticBusyPattern);
@@ -336,7 +347,7 @@ export class IdleDetector {
     if (this.readyPattern && !this.readySeen) return;
 
     this.clearTimer();
-    this.quiescenceTimer = setTimeout(() => this.quiescenceCheck(), QUIESCENCE_MS);
+    this.quiescenceTimer = setTimeout(() => this.quiescenceCheck(), this.quiescenceMs);
   }
 
   reset(): void {
@@ -397,10 +408,10 @@ export class IdleDetector {
     // feed() re-arms quiescence.
     if (this.staticBusyLatch) return;
     const sinceSpinner = Date.now() - this.lastSpinnerAt;
-    if (sinceSpinner < SPINNER_GUARD_MS) {
+    if (sinceSpinner < this.spinnerGuardMs) {
       this.quiescenceTimer = setTimeout(
         () => this.quiescenceCheck(),
-        SPINNER_GUARD_MS - sinceSpinner + 200,
+        this.spinnerGuardMs - sinceSpinner + 200,
       );
       return;
     }

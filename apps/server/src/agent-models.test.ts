@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import '../../../tests/support/short-acpx-reply-drain.js';
 import type { AcpRuntime } from 'acpx/runtime';
 import { AcpxAdapter } from '@dutydeck/acp-client';
 import { createRuntimeStore } from 'acpx/runtime';

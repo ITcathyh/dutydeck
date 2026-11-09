@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { lstatSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -33,10 +33,12 @@ vi.mock('node:fs/promises', async original => {
   };
 });
 
-const { cachedRepositoryFingerprint, fingerprintCacheSizeForTest, repositoryFingerprint, VerificationManager } = await import('./verification.js');
+const { cachedRepositoryFingerprint, fingerprintCacheSizeForTest, repositoryFingerprint, setRacyWindowForTest, VerificationManager } = await import('./verification.js');
 
 const cleanup: string[] = [];
+beforeEach(() => setRacyWindowForTest(racyWindowMs));
 afterEach(() => {
+  setRacyWindowForTest();
   for (const directory of cleanup.splice(0)) rmSync(directory, { recursive: true, force: true });
   reads.paths.length = 0;
   reads.gate = undefined;
@@ -72,8 +74,9 @@ function memoryConfig(entries: Record<string, string> = {}): ConfigRepository {
 
 const contentReads = (root: string) => reads.paths.filter(path => path.startsWith(root)).length;
 const statsOf = (path: string) => stats.paths.filter(item => item === path).length;
-// Freshly written files are racily recent and never cached; let them age out.
-const ageFiles = () => new Promise(resolve => setTimeout(resolve, 2_100));
+// Freshly written files are racily recent and never cached; let them age out of a shortened window.
+const racyWindowMs = 250;
+const ageFiles = (windowMs = racyWindowMs) => new Promise(resolve => setTimeout(resolve, windowMs + 50));
 
 describe('verification list fingerprint cost', () => {
   it('returns an empty list without fingerprinting the repository', async () => {
@@ -150,9 +153,12 @@ describe('verification list fingerprint cost', () => {
   }, 20_000);
 
   it('stats each entry once per call when the cache misses, racy or not', async () => {
+    // Long enough that two sequential scans of the rewritten file both stay inside it under load.
+    const windowMs = 1_000;
+    setRacyWindowForTest(windowMs);
     const root = repository();
     const tracked = join(realpathSync(root), 'tracked.txt');
-    await ageFiles();
+    await ageFiles(windowMs);
     await cachedRepositoryFingerprint(root);
 
     // Turn end: the agent has just written a file, so the stat is racily recent.
@@ -166,9 +172,9 @@ describe('verification list fingerprint cost', () => {
     expect(first).toBe(second);
 
     // Settled change: one walk produces both the cache key and the content.
-    await ageFiles();
+    await ageFiles(windowMs);
     writeFileSync(tracked, 'BASELINE\n');
-    await ageFiles();
+    await ageFiles(windowMs);
     stats.paths.length = 0;
     const settled = await cachedRepositoryFingerprint(root);
     expect(statsOf(tracked)).toBe(1);

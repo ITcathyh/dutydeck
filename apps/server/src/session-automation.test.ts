@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
+import { cp, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -20,7 +20,7 @@ import {
   type WorkItem
 } from '@dutydeck/shared';
 import { createRepositories, executionTaskId } from '@dutydeck/storage';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import { ciProviders, ciStatus, TEST_CI_REMOTE, type StatusMock } from './ci-provider.test-helpers.js';
 import { workItemId, workItemProgressStatus } from './work-items.js';
 import { CiProviderRegistry } from './ci-providers.js';
@@ -29,14 +29,25 @@ import { SessionAutomationService, type SessionAutomationRuntime, type Automatio
 const run = promisify(execFile);
 const cleanups: Array<() => void | Promise<void>> = [];
 
+/** 用例共用的 Git 仓库模板：只建一次，每个用例复制一份，免去反复 init 和 commit。 */
+let gitTemplate: Promise<string> | undefined;
+function templateRepository() {
+  return gitTemplate ??= (async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-automation-git-template-'));
+    await run('git', ['init', '-q', cwd]);
+    await run('git', ['-C', cwd, 'config', 'user.email', 'test@example.com']);
+    await run('git', ['-C', cwd, 'config', 'user.name', 'Test']);
+    await run('git', ['-C', cwd, 'commit', '--allow-empty', '-qm', 'initial']);
+    await run('git', ['-C', cwd, 'remote', 'add', 'origin', TEST_CI_REMOTE]);
+    return cwd;
+  })();
+}
+afterAll(async () => { if (gitTemplate) await rm(await gitTemplate, { recursive: true, force: true }); });
+
 async function gitRepository() {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-automation-git-'));
   cleanups.push(() => rm(cwd, { recursive: true, force: true }));
-  await run('git', ['init', '-q', cwd]);
-  await run('git', ['-C', cwd, 'config', 'user.email', 'test@example.com']);
-  await run('git', ['-C', cwd, 'config', 'user.name', 'Test']);
-  await run('git', ['-C', cwd, 'commit', '--allow-empty', '-qm', 'initial']);
-  await run('git', ['-C', cwd, 'remote', 'add', 'origin', TEST_CI_REMOTE]);
+  await cp(await templateRepository(), cwd, { recursive: true });
   return cwd;
 }
 
@@ -2948,6 +2959,8 @@ describe('schedule pre-check command', () => {
   };
   const at = (h: Awaited<ReturnType<typeof fixture>>, minute: number) => { h.now.value = new Date(`2026-09-12T00:${String(minute).padStart(2, '0')}:01.000Z`); };
   // 前置命令在后台跑：等本实例所有前置命令及其后续处理结束。
+  // 前置命令停在这里，直到测试放行：不用固定时长的 sleep 判断「命令还在跑」。
+  const untilExists = (file: string) => `until [ -e ${file} ]; do sleep 0.01; done`;
   const settle = async (service: SessionAutomationService) => {
     const runs = (service as unknown as { preconditionRuns: Map<string, Promise<void>> }).preconditionRuns;
     while (runs.size) await Promise.allSettled([...runs.values()]);
@@ -2979,7 +2992,7 @@ describe('schedule pre-check command', () => {
 
   it('counts a timeout as a failed run, tells the thread and disables the schedule after three in a row', async () => {
     const onScheduleProblem = vi.fn(async (_schedule: unknown, notice: { messageId?: string }) => ({ messageId: notice.messageId ?? 'om_notice' }));
-    const h = await fixture({ onScheduleProblem });
+    const h = await fixture({ onScheduleProblem, extra: { preconditionSecondMs: 50 } });
     const schedule = await enable(h, { precondition: { command: 'sleep 30', timeoutSeconds: 1 } });
     for (const minute of [1, 2, 3]) {
       at(h, minute);
@@ -2994,7 +3007,7 @@ describe('schedule pre-check command', () => {
     expect(onScheduleProblem.mock.calls[2]![1]).toMatchObject({ text: expect.stringContaining('已连续 3 次没做成') });
     expect(listed.schedules[0]).toMatchObject({ enabled: false, disabledReason: expect.stringContaining('连续 3 次没做成') });
     expect(h.dispatches).toHaveLength(0);
-  }, 20_000);
+  });
 
   it('runs in the real execution directory with only the minimal tool environment', async () => {
     const h = await fixture();
@@ -3027,12 +3040,13 @@ describe('schedule pre-check command', () => {
     const h = await fixture();
     const second = new SessionAutomationService({ repositories: h.repositories, runtime: h, authorize: async () => true, clock: () => new Date(h.now.value) });
     cleanups.push(() => second.close());
-    const log = join(h.cwd, 'runs.log');
-    await enable(h, { precondition: { command: `echo run >> ${log}; sleep 1; exit 1` } });
+    const log = join(h.cwd, 'runs.log'), gate = join(h.cwd, 'gate');
+    await enable(h, { precondition: { command: `echo run >> ${log}; ${untilExists(gate)}; exit 1` } });
     at(h, 1);
     const first = h.service.tick();
     await vi.waitFor(async () => expect((await readFile(log, 'utf8').catch(() => '')).length).toBeGreaterThan(0));
     await second.tick();
+    await writeFile(gate, '');
     await first;
     await settle(h.service);
     await second.tick();
@@ -3094,16 +3108,16 @@ describe('schedule pre-check command', () => {
 
   it('runs the pre-check in the background: other schedules and a manual run do not wait, and one occurrence runs it once', async () => {
     const h = await fixture();
-    const log = join(h.cwd, 'slow.log');
-    const slow = await enable(h, { name: 'Slow', precondition: { command: `echo run >> ${log}; sleep 2` } });
+    const log = join(h.cwd, 'slow.log'), gate = join(h.cwd, 'gate');
+    const slow = await enable(h, { name: 'Slow', precondition: { command: `echo run >> ${log}; ${untilExists(gate)}` } });
     await enable(h, { name: 'Plain', additional: true });
     at(h, 1);
-    let started = Date.now();
+    // 命令要等 gate 文件才结束：tick 能在放行前返回，就说明它没有等前置命令。
     await h.service.tick();
-    expect(Date.now() - started).toBeLessThan(1_500);
     expect(h.dispatches).toHaveLength(1);
     // 命令还在跑时再触发 tick，同一次触发不会再跑一份。
     await h.service.tick();
+    await writeFile(gate, '');
     await settle(h.service);
     expect((await readFile(log, 'utf8')).trim().split('\n')).toEqual(['run']);
     expect(h.dispatches).toHaveLength(2);
@@ -3111,14 +3125,14 @@ describe('schedule pre-check command', () => {
     expect((await h.service.listBySession(h.session.id, owner)).occurrences.find(item => item.scheduleId === slow.id)).toMatchObject({ conditionStatus: 'passed', runStatus: 'accepted' });
 
     const m = await fixture();
-    const paused = await m.service.createSchedule(m.session.id, { ...scheduleInput, precondition: { command: 'sleep 2' } }, owner);
-    started = Date.now();
+    const manualGate = join(m.cwd, 'gate');
+    const paused = await m.service.createSchedule(m.session.id, { ...scheduleInput, precondition: { command: untilExists(manualGate) } }, owner);
     const manual = await m.service.runSchedule(m.session.id, paused.id, { expectedRevision: paused.revision, idempotencyKey: 'manual-1' }, owner);
-    expect(Date.now() - started).toBeLessThan(1_500);
     expect(manual).toMatchObject({ triggerSource: 'manual', conditionStatus: 'pending', runStatus: 'pending' });
+    await writeFile(manualGate, '');
     await settle(m.service);
     expect((await m.service.listBySession(m.session.id, owner)).occurrences.find(item => item.id === manual.id)).toMatchObject({ conditionStatus: 'passed', runStatus: 'accepted' });
-  }, 15_000);
+  });
 
   it('accepts the setting only from the installation owner and rejects risky or conflicting settings', async () => {
     const h = await fixture();

@@ -9,7 +9,7 @@ import { agentConfigSchema } from '@dutydeck/shared';
 import { buildApp } from '../apps/server/src/app.js';
 import { AgentModelSettings } from '../apps/server/src/agent-model-settings.js';
 import { LarkAppCreationJobManager } from '../apps/server/src/lark/app-creation.js';
-import { LARK_COMMON_TENANT_SCOPES } from '../apps/server/src/lark/open-platform-configurator.js';
+import { configureLarkOpenPlatformApp, LARK_COMMON_TENANT_SCOPES } from '../apps/server/src/lark/open-platform-configurator.js';
 import newAppPrivileges from '../apps/server/src/lark/fixtures/new-app-privileges.json';
 import automaticApproval from '../apps/server/src/lark/fixtures/approval-collaborator-exemption.json';
 import { larkPermissionMode, readLarkConfig, saveLarkConfig } from '../apps/server/src/lark/config.js';
@@ -157,6 +157,7 @@ async function runTest() {
   const jobs = new LarkAppCreationJobManager({
     config: repositories.config,
     agents: repositories.agents,
+    configure: (client, appId, options) => configureLarkOpenPlatformApp(client, appId, { ...options, publishPollMs: 20 }),
     connect: async options => {
       assert.equal(options?.forceLogin, false);
       const scanned = new Promise<void>(resolve => { releaseScan = resolve; });
@@ -238,7 +239,7 @@ async function runTest() {
   checkAborted();
   browser = await chromium.launch({ headless: true });
   context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
-  await context.tracing.start({ screenshots: true, snapshots: true });
+  if (process.env.CI) await context.tracing.start({ screenshots: true, snapshots: true });
   page = await context.newPage();
 
   const errors: string[] = [];

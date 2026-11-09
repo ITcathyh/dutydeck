@@ -1,4 +1,4 @@
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -7,12 +7,15 @@ import type { SessionBackend } from '@dutydeck/session-backends';
 import { agentConfigSchema } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
 import { PtyCliDriver } from '../../pty-driver/src/driver.js';
+import { childDiagnosticLimits } from '../../pty-driver/src/transcript/codex-child-limits.js';
 import { buildTimeline, buildTimelineSections, createTimelineProjector } from '../../../apps/web/src/timeline.js';
 import { renderLarkProcessElements, renderLarkResultElements } from '../../../apps/server/src/lark/card-renderer.js';
 import { DutydeckRuntime } from './index.js';
 
 const releases: Array<() => Promise<void>> = [];
-afterEach(async () => { for (const release of releases.splice(0).reverse()) await release(); });
+const childPollMs = childDiagnosticLimits.intervalMs;
+beforeEach(() => { (childDiagnosticLimits as { intervalMs: number }).intervalMs = 100; });
+afterEach(async () => { for (const release of releases.splice(0).reverse()) await release(); (childDiagnosticLimits as { intervalMs: number }).intervalMs = childPollMs; });
 const line = (record: unknown) => JSON.stringify(record) + '\n';
 const thread = '11111111-1111-4111-8111-111111111111';
 const record = (type: string, turnId: string, extra: Record<string, unknown> = {}) => ({ type: 'event_msg', timestamp: new Date().toISOString(), payload: { type, turn_id: turnId, ...extra } });
@@ -38,7 +41,7 @@ async function fixture() {
         writes.push(prompt); currentTurn = `native-turn-${writes.length}`;
         appendFileSync(join(root, 'history.jsonl'), line({ session_id: thread, ts: Date.now() / 1000, text: prompt }));
         appendFileSync(path, line(record('task_started', currentTurn)) + line(record('user_message', currentTurn, { message: prompt })));
-      } }, backend, sessionId, onEvent, onExit });
+      } }, backend, sessionId, onEvent, onExit, timings: { quiescenceMs: 100, spinnerGuardMs: 100 } });
       return driver;
     },
   });
@@ -91,9 +94,9 @@ it.each(['usage_limit_exceeded', 'rate_limit'])('shows child %s in Web/Lark whil
   const card = JSON.stringify(renderLarkProcessElements(events, { traceLimit: 20, compactTrace: false, hideTraceOnComplete: false }));
   expect(card).toContain('子任务额度诊断'); expect(card).toContain('父任务继续');
   expect(card).not.toContain('do-not-display-upstream-body');
-  // Dedup after another child poll (intervalMs=2s) is code-independent (child.done); check it once.
+  // Dedup after further child polls is code-independent (child.done); check it once.
   if (code === 'usage_limit_exceeded') {
-    await new Promise(resolve => setTimeout(resolve, 2100));
+    await new Promise(resolve => setTimeout(resolve, 400));
     expect((await h.runtime.getEvents(h.session.id)).filter(e => (e.data as any).diagnostic)).toHaveLength(1);
   }
   appendFileSync(h.path, line(record('task_complete', h.turn(), { last_agent_message: '父任务正常完成' })));

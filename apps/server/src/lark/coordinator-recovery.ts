@@ -1,5 +1,5 @@
 import { clearTaskReportSafely } from '@dutydeck/shared';
-import { TRANSCRIPT_ADAPTER_IDS } from '@dutydeck/pty-driver';
+import { TRANSCRIPT_ADAPTER_IDS } from '@dutydeck/pty-driver/support';
 import { readTaskAuthorization, recordTaskAuthorization } from '../task-authorization.js';
 import { randomUUID } from 'node:crypto';
 import { explicitFinalTextReceiptReader } from './explicit-final.js';

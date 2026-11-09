@@ -5,6 +5,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { createRuntimeStore } from 'acpx/runtime';
 import { childEnvironment } from '@dutydeck/shared/child-environment';
 import { AcpxAdapter, prepareAcpxAgentLaunch } from './index.js';
+import '../../../tests/support/short-acpx-reply-drain.js';
 
 afterEach(() => vi.unstubAllEnvs());
 

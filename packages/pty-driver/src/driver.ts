@@ -23,7 +23,7 @@ import type { AdapterSessionContext, CliAdapter, PtyLike } from '@dutydeck/cli-a
 import { buildDutydeckRoutingBlock } from '@dutydeck/cli-adapters';
 import { ProgramStatusFramingStream, captureOwnedTmuxIdentity, captureOwnedTmuxAbsence, stopOwnedTmux, processIdentityKey, verifyOwnedTmuxExit, verifyOwnedTmuxAbsence, PtyBackend, TmuxBackend, HerdrBackend, orphanedTmuxSocketMessage, type SessionBackend, type ProcessProbe, type OwnedTmuxIdentity, type OwnedTmuxExitProof, type OwnedTmuxAbsence } from '@dutydeck/session-backends';
 import { TerminalSnapshot } from '@dutydeck/terminal-renderer';
-import { IdleDetector } from './idle-detector.js';
+import { IdleDetector, type IdleTimings } from './idle-detector.js';
 import { TurnCpu } from './turn-cpu.js';
 import { createTranscriptTailer, type TranscriptEventSource, type TranscriptPosition } from './transcript/index.js';
 import { buildSessionMarker, resolveCliSessionId, hasPinnedClaudeSession } from './session-id/index.js';
@@ -57,6 +57,16 @@ export interface PtyCliDriverOptions {
   nativeForkSessionId?: string;
   /** Composition root knows whether a relay answer is pending. */
   awaitingAnswer?: () => boolean;
+  /** Overrides for product wait times; only tests shorten them. */
+  timings?: PtyCliDriverTimings;
+}
+
+export interface PtyCliDriverTimings extends IdleTimings {
+  turnGraceMs?: number;
+  /** How long a legacy Claude dialect may lack a turn terminal before the completion screen decides. */
+  terminalDrainMs?: number;
+  nativeDiscoveryRetryMs?: number;
+  nativeObservationRetryMs?: number;
 }
 
 /** 计划阶段（deny-all）里 CLI 弹出的工具确认一律拒绝，不发审批卡。 */
@@ -138,6 +148,7 @@ export class PtyCliDriver implements AgentDriver {
   private wiringGeneration = 0;
   private stoppedPid: number | undefined;
   private readonly processProbe: ProcessProbe | undefined;
+  private readonly timings: PtyCliDriverTimings;
   private tmuxIdentity: OwnedTmuxIdentity | undefined;
   private tmuxExitProof: OwnedTmuxExitProof | undefined;
   /** The tmux session had already ended by itself when stop() tried to capture its identity. */
@@ -236,7 +247,7 @@ export class PtyCliDriver implements AgentDriver {
   private readonly terminalSubscribers = new Set<(data: string) => void>();
   /** Session Insight 来源观察（design §3.1）。Driver 级持有：reattach/rewire
    *  不重建；只有真正 spawn/respawn 追加 launch。 */
-  private readonly transcriptSources = new TranscriptSourceTracker();
+  private readonly transcriptSources: TranscriptSourceTracker;
   private transcriptVerification?: { observationId: string; controller: AbortController; pending?: Promise<void> };
   /** 当前后端里 CLI 进程的进程号，按后端实例缓存：tmux 每问一次都要同步起一个 tmux 子进程。 */
   private backendPid: { backend: SessionBackend; pid: number } | undefined;
@@ -258,6 +269,8 @@ export class PtyCliDriver implements AgentDriver {
   constructor(opts: PtyCliDriverOptions) {
     this.awaitingAnswer = opts.awaitingAnswer;
     this.processProbe = opts.processProbe;
+    this.timings = opts.timings ?? {};
+    this.transcriptSources = new TranscriptSourceTracker(this.timings.nativeObservationRetryMs);
     this.agent = opts.agent;
     this.adapter = opts.adapter;
     this.sessionId = opts.sessionId;
@@ -1396,7 +1409,7 @@ export class PtyCliDriver implements AgentDriver {
       staticBusyPattern: this.adapter.staticBusyPattern,
       staticBusyClearPattern: this.adapter.staticBusyClearPattern,
       readyPattern: this.adapter.readyPattern,
-    });
+    }, this.timings);
     let completing = false, idleAgain = false;
     this.programStatusNativeTerminalSeen = undefined;
     this.programStatusBusyWatermark = undefined;
@@ -1433,7 +1446,7 @@ export class PtyCliDriver implements AgentDriver {
         // 已有实质输出（CLI 在干活）→ 不受宽限期限制，idle 即完成。
         // 尚无实质输出 → 可能还在启动期（splash 屏静止），宽限期内禁止 completed，期满再判一次。
         if (source !== 'program-status' && !this.turnHasOutput) {
-          const graceLeft = this.turnStartedAt + PtyCliDriver.TURN_GRACE_MS - Date.now();
+          const graceLeft = this.turnStartedAt + (this.timings.turnGraceMs ?? PtyCliDriver.TURN_GRACE_MS) - Date.now();
           if (graceLeft > 0) { this.retryIdleAfterGrace(graceLeft); return; }
         }
         // Publish the final JSONL record before Runtime closes the turn, even
@@ -1475,10 +1488,11 @@ export class PtyCliDriver implements AgentDriver {
           && !this.transcript.hasTurnTerminal() && !turnError && !nativeCancelled && !this.interruptPending && !this.backgroundHoldExpired
           && !this.adapter.screenCancelledPattern?.test(statusLine ?? '')) {
           this.transcriptTerminalWaitAt ??= Date.now();
+          const terminalDrainMs = this.timings.terminalDrainMs ?? 2_000;
           // Legacy Claude dialects omit terminal markers. After a bounded
           // drain window retain the existing output + completion-screen
           // contract; elapsed time is not an observed native terminal.
-          if (this.transcript.requiresTurnTerminal || Date.now() - this.transcriptTerminalWaitAt < 2_000) {
+          if (this.transcript.requiresTurnTerminal || Date.now() - this.transcriptTerminalWaitAt < terminalDrainMs) {
             this.awaitingTranscriptResult = true;
             this.idleDetector?.reset(); this.idleDetector?.seedReadyEvidence();
             if (source === 'program-status' && !this.transcript.requiresTurnTerminal && !this.programStatusDrainTimer) {
@@ -1487,7 +1501,7 @@ export class PtyCliDriver implements AgentDriver {
                 if (backend !== this.backend || this.stopped || !this.turnActive || this.turnResolve !== resolve || !this.idleDetector?.programStatusTerminal()) return;
                 this.idleDetector.reset();
                 this.idleDetector.fireIdle();
-              }, Math.max(1, 2_000 - (Date.now() - this.transcriptTerminalWaitAt)));
+              }, Math.max(1, terminalDrainMs - (Date.now() - this.transcriptTerminalWaitAt)));
               this.programStatusDrainTimer.unref();
             }
             this.checkRenderedCompletion();
@@ -1567,7 +1581,7 @@ export class PtyCliDriver implements AgentDriver {
     this.sampleClaudeNativeSession = rootIdentity && this.processProbe ? forceDiscovery => {
         if (this.superseded(backend, generation)) return;
         try {
-          nativeResolver ??= new ClaudeNativeSessionResolver(rootIdentity!, this.cwd, this.spawnEnv(), this.processProbe!);
+          nativeResolver ??= new ClaudeNativeSessionResolver(rootIdentity!, this.cwd, this.spawnEnv(), this.processProbe!, this.timings.nativeDiscoveryRetryMs);
           const source = nativeResolver.resolve(forceDiscovery);
           this.claudeNativeSelectionVerified = !!source;
           return source;

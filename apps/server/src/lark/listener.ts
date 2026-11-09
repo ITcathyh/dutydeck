@@ -15,7 +15,7 @@ import { createLarkCardService, larkConfigurationStatus, LarkServiceError, type 
 import { setLarkGateLog } from './api-gate.js';
 import { getChatMode } from './chat-mode.js';
 import { larkCommandCapabilities } from './commands.js';
-import { LarkMessageCoordinator } from './coordinator.js';
+import type { LarkMessageCoordinator } from './coordinator.js';
 import type { LarkMemoryStore } from './memory.js';
 import type { LarkMemoryPipeline } from './memory-pipeline.js';
 import { createLarkWelcomeService, type LarkWelcomeService } from './welcome.js';
@@ -29,7 +29,7 @@ import { larkListenerStatusKey, type LarkListenerStatus } from './listener-statu
 
 // 飞书长连接监听：只负责 WebSocket 事件接入、事件组装与协调器装配。
 // 消息协调见 coordinator.ts，卡片渲染见 card-renderer.ts，会话路由见 session-resolver.ts，
-// 卡片终态对账见 reconciler.ts。本文件同时 re-export 上述模块的公开符号，
+// 卡片终态对账见 reconciler.ts。本文件同时 re-export 卡片渲染的公开符号，
 // 保持既有 import 路径（'./listener.js'）不变。
 
 // The SDK is a multi-megabyte bundle only the listener needs; load it on first connect instead of at
@@ -301,13 +301,15 @@ export class LarkLongConnectionListener implements LarkListener {
     catch (error) { http.close(); throw new LarkServiceError('LARK_LISTENER_START_FAILED', `Failed to resolve Lark bot identity: ${error instanceof Error ? error.message : String(error)}`, 502); }
     const lark = await sdk;
     const identityMs = Date.now() - startedAt;
+    // 只有接管消息时才需要协调器；它拖入大半个服务，只注册路由的进程（和大量测试）不必加载。
+    const coordinatorModule = this.options.runtime ? await import('./coordinator.js') : undefined;
     http.fetch.signal!.throwIfAborted();
     // 话题群种子消息需要按群形态路由：默认用带缓存的 getChatMode，也允许注入（测试/自定义路由）。
     const chatModeResolver = this.options.chatModeResolver ?? ((appId: string, chatId: string) => getChatMode(appId, config.appSecret, chatId, {
       domain,
       read: () => service.callOpenApi(`/open-apis/im/v1/chats/${encodeURIComponent(chatId)}?user_id_type=open_id`, { method: 'GET' })
     }));
-    const coordinator = this.options.runtime ? new LarkMessageCoordinator(
+    const coordinator = this.options.runtime && coordinatorModule ? new coordinatorModule.LarkMessageCoordinator(
       this.options.runtime,
       service,
       this.log,
@@ -819,25 +821,9 @@ export {
   renderLarkTrace
 } from './card-renderer.js';
 export type { TraceEntry, TraceGroup, LarkCardElement } from './card-renderer.js';
-export { LarkMessageCoordinator } from './coordinator.js';
 export type { LarkGroup, LarkTask, LarkTaskState, PersistedLarkCardTask } from './coordinator.js';
-export {
-  larkSessionConfigKey,
-  larkGroupScopeId,
-  larkGroupKey,
-  larkReplyContext,
-  larkSourceId,
-  larkSessionMatchesScope,
-  findPersistedLarkSession,
-  listPersistedLarkSessions,
-  parsePrompt,
-  materializeLarkResources,
-  resolveLarkScopeId,
-  resolveLarkSession
-} from './session-resolver.js';
 export type {
   LarkChatModeResolver
 } from './session-resolver.js';
-export { performLarkCardReconcile } from './reconciler.js';
 export { getChatMode, getCachedChatMode, clearLarkChatModeCache } from './chat-mode.js';
 export type { LarkChatMode } from './chat-mode.js';

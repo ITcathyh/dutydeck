@@ -26,7 +26,7 @@ import { relevantMemoryBudget, renderLarkMemoryInjection, renderMemoryIndex } fr
 import { larkAdhdModePrompt } from './adhd-mode.js';
 import type { AgentEvent, PolicyAction, Session, TaskRecord, ToolRiskPolicy } from '@dutydeck/shared';
 import { deferredConfirmationId, isBackgroundFollowup, RuntimeError, supportsRemoteApproval } from '@dutydeck/shared';
-import { executionTaskId } from '@dutydeck/storage';
+import { executionTaskId } from '@dutydeck/storage/helpers';
 import { isBotSenderType } from './card-mentions.js';
 import { defaultHighRiskPattern, defaultLarkIdleCompactHours, defaultLarkTraceLimit, larkMemoryEnabled, larkPermissionMode, readLarkConfigs, type StoredLarkConfig } from './config.js';
 import { formatRolePrompt } from './role-format.js';

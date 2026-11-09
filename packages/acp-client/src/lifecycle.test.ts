@@ -8,6 +8,7 @@ import { createRuntimeStore } from 'acpx/runtime';
 import { AcpxAdapter } from './index.js';
 import * as regex from './regex-timeout.js';
 import { childEnvironment } from '@dutydeck/shared/child-environment';
+import '../../../tests/support/short-acpx-reply-drain.js';
 
 const releases: Array<() => void> = [];
 function deferred<T = void>() {
@@ -37,6 +38,15 @@ async function setup(extra = {}, options = {}) {
   adapters.push(adapter);
   const runtime = (adapter as any).runtime;
   return { adapter, runtime, cwd, events };
+}
+/** Runs one send through its 20ms idle timeout and the 2s wait for a confirmed cancellation without real waiting. */
+async function timedOutSend(adapter: AcpxAdapter) {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  const sending = adapter.send('first').catch(error => error);
+  await expect.poll(() => vi.mocked((adapter as any).runtime.startTurn).mock.calls.length).toBe(1);
+  await vi.advanceTimersByTimeAsync(2_100);
+  vi.useRealTimers();
+  expect(await sending).toMatchObject({ name: 'AgentIdleTimeoutError' });
 }
 function fakeResources(runtime: any) {
   vi.spyOn(runtime, 'ensureSession').mockResolvedValue({ sessionKey: 'fake' });
@@ -210,7 +220,10 @@ describe('ACP instance revocation', () => {
     const tail = deferred(); const entered = deferred(); let consumers = 0;
     const turn = { events: { async *[Symbol.asyncIterator]() { consumers++; entered.resolve(); await tail.promise; yield { type: 'text_delta', text: 'old text' }; } }, result: Promise.resolve({ status: 'completed' }), cancel: vi.fn().mockResolvedValue(undefined) };
     vi.spyOn(runtime, 'startTurn').mockReturnValue(turn);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const sending = adapter.send('idle').catch(error => error); await entered.promise;
+    await vi.advanceTimersByTimeAsync(2_100); // The 20ms idle timeout plus the 2s wait for a confirmed cancellation.
+    vi.useRealTimers();
     expect(await sending).toMatchObject({ name: 'AgentIdleTimeoutError' });
     let stopped = false; const stopping = adapter.stop().then(() => { stopped = true; });
     await new Promise(resolve => setImmediate(resolve));
@@ -352,7 +365,7 @@ describe('ACP instance revocation', () => {
     vi.spyOn(runtime, 'startTurn')
       .mockReturnValueOnce({ events: { async *[Symbol.asyncIterator]() { await tail.promise; } }, result: Promise.resolve({ status: 'cancelled' }), cancel: vi.fn().mockResolvedValue(undefined) })
       .mockReturnValueOnce({ events: { async *[Symbol.asyncIterator]() {} }, result: Promise.resolve({ status: 'completed' }), cancel: vi.fn().mockResolvedValue(undefined) });
-    await expect(adapter.send('first')).rejects.toMatchObject({ name: 'AgentIdleTimeoutError' });
+    await timedOutSend(adapter);
     let outcome: unknown = 'pending';
     const second = adapter.send('second').then(() => { outcome = 'completed'; }, error => { outcome = error; });
     await new Promise(resolve => setImmediate(resolve));
@@ -370,7 +383,7 @@ describe('ACP instance revocation', () => {
     const { adapter, runtime } = await setup({ timeout: 0.02 }); fakeResources(runtime);
     const tail = deferred();
     vi.spyOn(runtime, 'startTurn').mockReturnValue({ events: { async *[Symbol.asyncIterator]() { await tail.promise; } }, result: Promise.resolve({ status: 'cancelled' }), cancel: vi.fn().mockResolvedValue(undefined) });
-    await expect(adapter.send('first')).rejects.toMatchObject({ name: 'AgentIdleTimeoutError' });
+    await timedOutSend(adapter);
     const second = adapter.send('second').catch(error => error);
     await new Promise(resolve => setImmediate(resolve));
     const stopping = adapter.stop();

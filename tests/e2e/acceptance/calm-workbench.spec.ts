@@ -1,7 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { launchIsolatedTestServer, writeMockCli, REPO_ROOT, type TestServerInstance } from './harness.js';
+import { launchIsolatedTestServer, writeMockCli, REPO_ROOT, TASK_POLL_INTERVALS, type TestServerInstance } from './harness.js';
 
 // Synthetic ACP/PTY CLIs; real Chromium, HTTP, SQLite, workspace snapshots and permission decisions.
 test.describe('Calm Workbench browser acceptance', () => {
@@ -24,9 +24,9 @@ test.describe('Calm Workbench browser acceptance', () => {
       const sent = await instance.request('POST', `/api/sessions/${id}/send`, { prompt, mode: 'queue' });
       expect(sent.status, sent.text).toBe(202);
       if (prompt.includes('permission')) {
-        await expect.poll(async () => (await instance.request('GET', `/api/sessions/${id}`)).json.state, { timeout: 30_000 }).toBe('waiting_for_permission');
+        await expect.poll(async () => (await instance.request('GET', `/api/sessions/${id}`)).json.state, { timeout: 30_000, intervals: TASK_POLL_INTERVALS }).toBe('waiting_for_permission');
       } else {
-        await expect.poll(async () => (await instance.request('GET', `/api/sessions/${id}/tasks`)).json[0]?.status, { timeout: 30_000 }).toBe('completed');
+        await expect.poll(async () => (await instance.request('GET', `/api/sessions/${id}/tasks`)).json[0]?.status, { timeout: 30_000, intervals: TASK_POLL_INTERVALS }).toBe('completed');
       }
     }
     return id;

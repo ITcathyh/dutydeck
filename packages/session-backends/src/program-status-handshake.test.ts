@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { childProcessIdentity, observeProcess } from '@dutydeck/storage';
+import { childProcessIdentity, observeProcess } from '@dutydeck/storage/helpers';
 import { HerdrBackend, herdrControlEnvironment } from './herdr-backend.js';
 import { PtyBackend } from './pty-backend.js';
 import { TmuxBackend } from './tmux-backend.js';

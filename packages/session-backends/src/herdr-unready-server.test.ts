@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { childProcessIdentity, observeProcess } from '@dutydeck/storage';
+import { childProcessIdentity, observeProcess } from '@dutydeck/storage/helpers';
 import { HerdrBackend } from './herdr-backend.js';
 
 const name = `dutydeck-${'f'.repeat(32)}`;

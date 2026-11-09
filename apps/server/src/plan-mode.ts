@@ -1,4 +1,4 @@
-import { inferAcpInsightClient } from '@dutydeck/acp-client';
+import { inferAcpInsightClient } from '@dutydeck/acp-client/transcript-source';
 import { isClaudeFamilyCli, type AgentConfig } from '@dutydeck/shared';
 
 /**

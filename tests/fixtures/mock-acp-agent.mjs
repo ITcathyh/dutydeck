@@ -91,7 +91,7 @@ rl.on('line', async line => {
     }
     if (prompt.includes('active longer than timeout')) {
       for (let index = 1; index <= 3; index++) {
-        await new Promise(resolve => setTimeout(resolve, 1_100));
+        await new Promise(resolve => setTimeout(resolve, Number(process.env.mock_acp_heartbeat_ms ?? 1_100)));
         send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: params.sessionId, update: { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: `heartbeat ${index}` } } } });
       }
       send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'long task completed' } } } });

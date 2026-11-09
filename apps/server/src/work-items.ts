@@ -1,7 +1,7 @@
 import { promptDigest } from './prompt-context.js';
 import { sha256Hex as hash } from './hash.js';
 import { analyzeWorkPlanRevision, canonicalExecutionJson, errorMessage as errorText, now as time, canonicalPlanJson, createWorkItemSchema, reviseWorkPlanSchema, workRevisionConfirmationReasons, type ReviseWorkPlanInput, type WorkRevisionImpact, type WorkRevisionPreview, executionActorSchema, installationOwnerTaskActor, parseLarkSourceId, RuntimeError, timeLoop, type LoopTimingLog, taskAdmissionV1Schema, taskRequestV1Schema, workPlanSchema, workReviewVerdictSchema, type CreateWorkItemInput, type ExecutionActor, type PermissionMode, type RepositoryBundle, type Session, type TaskAdmissionV1, type TaskRecord, type TaskRequestV1, type ToolRiskPolicy, type PendingWorkRevision, type WorkItem, type WorkPlan, type WorkStep, type WorkTemplate } from '@dutydeck/shared';
-import { executionTaskId } from '@dutydeck/storage';
+import { executionTaskId } from '@dutydeck/storage/helpers';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { readWorkAttemptResult } from './task-results.js';
 

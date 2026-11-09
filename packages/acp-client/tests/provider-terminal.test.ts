@@ -6,6 +6,7 @@ import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import { agentConfigSchema } from '@dutydeck/shared';
 import { AcpxAdapter } from '../src/index.js';
+import '../../../tests/support/short-acpx-reply-drain.js';
 
 // Uses the real ACPX runtime, subprocess, persisted native key and task ledger.
 // No provider or live service is contacted.
@@ -13,14 +14,14 @@ describe('typed provider terminal failure through real ACP and Runtime', () => {
   it('keeps a real ACP approval pending beyond idle and continues after approval', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-human-wait-'));
     const events: any[] = [];
-    const agent = agentConfigSchema.parse({ id: 'permission-fixture', name: 'Permission fixture', command: process.execPath, args: [resolve('tests/fixtures/mock-acp-agent.mjs')], protocol: 'acp', cwd, env: {}, permissionMode: 'ask', timeout: 2, capabilities: { pause: false, resume: true } });
+    const agent = agentConfigSchema.parse({ id: 'permission-fixture', name: 'Permission fixture', command: process.execPath, args: [resolve('tests/fixtures/mock-acp-agent.mjs')], protocol: 'acp', cwd, env: {}, permissionMode: 'ask', timeout: 0.5, capabilities: { pause: false, resume: true } });
     const adapter = new AcpxAdapter(agent, { sessionKey: 'human-wait', onEvent: event => events.push(event) });
     try {
       await adapter.start(); let settled = false;
       const sending = adapter.send('request permission').then(() => { settled = true; }, error => { settled = true; throw error; });
       void sending.catch(() => undefined);
       await expect.poll(() => events.some(event => event.type === 'permission_request')).toBe(true);
-      await new Promise(resolve => setTimeout(resolve, 2_200));
+      await new Promise(resolve => setTimeout(resolve, 700));
       expect(settled).toBe(false);
       expect(await adapter.resolvePermission('permission-tool', true)).toBe(true);
       await sending;
@@ -34,7 +35,7 @@ describe('typed provider terminal failure through real ACP and Runtime', () => {
     const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-provider-cancel-'));
     const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
     const runtime = new DutydeckRuntime(repos, { cleanupIntervalMs: 0 });
-    const agent = agentConfigSchema.parse({ id: 'cancel-fixture', name: 'Cancel fixture', command: process.execPath, args: [resolve('packages/acp-client/tests/fixtures/typed-failure-agent.mjs')], protocol: 'acp', cwd, env: {}, permissionMode: 'ask', timeout: 2, capabilities: { pause: false, resume: true } });
+    const agent = agentConfigSchema.parse({ id: 'cancel-fixture', name: 'Cancel fixture', command: process.execPath, args: [resolve('packages/acp-client/tests/fixtures/typed-failure-agent.mjs')], protocol: 'acp', cwd, env: {}, permissionMode: 'ask', timeout: 0.6, capabilities: { pause: false, resume: true } });
     try {
       await runtime.initialize([agent]); const session = await runtime.start({ agentId: agent.id });
       const task = await runtime.send(session.id, 'heartbeat');

@@ -7,7 +7,7 @@ import { realpathSync } from 'node:fs';
 import { lstat, mkdir, mkdtemp, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, extname, join, resolve } from 'node:path';
 import { escapeRegExp, supportsRemoteApproval, type ChannelMappingRepository, type Session } from '@dutydeck/shared';
-import { LEGACY_RETIREMENT_NOTICE } from '@dutydeck/storage';
+import { LEGACY_RETIREMENT_NOTICE } from '@dutydeck/storage/helpers';
 import { larkHookStatus, upgradeInstalledLarkHook } from './security-hooks.js';
 import type { LarkLaunchOptions } from './new-session.js';
 import { larkExecutionConfirmed, larkPermissionMode, type StoredLarkConfig } from './config.js';

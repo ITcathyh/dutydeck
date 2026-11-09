@@ -1,5 +1,5 @@
 import type { ChildProcess } from 'node:child_process';
-import { childProcessIdentity } from '@dutydeck/storage';
+import { childProcessIdentity } from '@dutydeck/storage/helpers';
 import { makeId, now, RuntimeError, taskExecutionSchemas, type BoundExecutionRepository, type ChildPermit, type DriverContext, type DriverResource, type DriverSubmission, type DriverSubmissionInput, type ExecutionRepository, type NativeContextIdentity, type NativeContextExpected, type NativeContextRef, type OperationPermit, type ResourceOperationScope, type SessionFence } from '@dutydeck/shared';
 import { canonicalExecutionJson } from '@dutydeck/shared';
 import { digest } from './ledger.js';

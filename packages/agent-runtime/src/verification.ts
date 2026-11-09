@@ -67,6 +67,9 @@ export async function repositoryFingerprint(cwd: string): Promise<string> {
  * same-size rewrite, so their stat cannot prove the content is unchanged.
  */
 const RACY_WINDOW_MS = 2_000;
+let racyWindowMs = RACY_WINDOW_MS;
+/** Test hook: shortens the racy window; call with no argument to restore it. */
+export const setRacyWindowForTest = (ms = RACY_WINDOW_MS) => { racyWindowMs = ms; };
 /** Entries are statted ENTRY_CHUNK at a time and their content read ENTRY_CONCURRENCY at a time, so a large tree is never held in memory at once. */
 const ENTRY_CHUNK = 256;
 const ENTRY_CONCURRENCY = 16;
@@ -100,7 +103,7 @@ export async function cachedRepositoryFingerprint(cwd: string): Promise<string> 
   const cached = fingerprintCache.get(cwd);
   if (cached?.stamp === scan.stamp) { rememberFingerprint(cwd, cached); return cached.fingerprint; }
   // Racily recent entries: a rewrite may keep the same stat, so neither cache nor share.
-  if (changes.latestChangeMs >= startedAt - RACY_WINDOW_MS) return contentFingerprint(scan);
+  if (changes.latestChangeMs >= startedAt - racyWindowMs) return contentFingerprint(scan);
   const runKey = `${cwd}\0${scan.stamp}`;
   const shared = fingerprintRuns.get(runKey);
   if (shared) return shared;

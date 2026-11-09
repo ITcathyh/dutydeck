@@ -35,9 +35,11 @@ export async function bundleForTest(label: string, entry: string): Promise<{ pat
       plugins: [{ name: 'workspace-sources', setup(builder) {
         builder.onResolve({ filter: /^@dutydeck\// }, ({ path: specifier }) => {
           const name = specifier.slice('@dutydeck/'.length);
-          const source = name === 'shared/child-environment' || name === 'shared/secret-guard' || name === 'shared/safe-git'
-            ? `packages/shared/runtime/${name.slice('shared/'.length)}.mjs`
-            : `packages/${name === 'runtime' ? 'agent-runtime' : name}/src/index.ts`;
+          const [packageName, subpath] = name.split('/') as [string, string | undefined];
+          const packageDirectory = packageName === 'runtime' ? 'agent-runtime' : packageName;
+          const source = packageName === 'shared' && subpath
+            ? `packages/shared/runtime/${subpath}.mjs`
+            : `packages/${packageDirectory}/src/${subpath ?? 'index'}.ts`;
           return { path: join(workspaceRoot, source) };
         });
         builder.onResolve({ filter: /^[^./]/ }, ({ path: specifier, resolveDir }) => {

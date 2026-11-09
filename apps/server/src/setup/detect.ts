@@ -7,7 +7,7 @@
 import { accessSync, constants, statSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
 import { builtinAgents } from '@dutydeck/config';
-import { PTY_AGENT_CONTRIBUTIONS } from '@dutydeck/pty-driver';
+import { PTY_AGENT_CONTRIBUTIONS } from '@dutydeck/pty-driver/support';
 import type { AgentConfig } from '@dutydeck/shared';
 
 export interface DetectedAgent {

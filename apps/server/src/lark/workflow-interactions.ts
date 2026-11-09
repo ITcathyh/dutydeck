@@ -19,7 +19,7 @@ import { LarkUrgentManager, type LarkUrgentCheckResult } from './workflow-urgent
 import { larkCommandEcho } from './commands.js';
 import { escapeLarkPromptEcho } from './queue-summary.js';
 import { redactTraceText } from './secret-redaction.js';
-import { testRegexWithTimeout } from '@dutydeck/acp-client';
+import { testRegexWithTimeout } from '@dutydeck/acp-client/regex-timeout';
 import { permissionIntent } from './permission-intent.js';
 import { planClosedText, planPendingElements, planStaleText, type LarkPlanDecision } from './plan-flow.js';
 

@@ -1,12 +1,10 @@
 import type Database from 'better-sqlite3';
-import { createHash } from 'node:crypto';
 import { cachedStatement } from './statement-cache.js';
 import { RuntimeError, type JsonValue, type MemoryJob, type MemoryJobRepository, type MemoryJobScope, type MemoryJobVersion } from '@dutydeck/shared';
 import { assertBotProcessApp, assertBotProcessConfigWrite } from './bot-process.js';
+import { memoryJobVersionDigest } from './helpers.js';
 
-export function memoryJobVersionDigest(value: string | undefined): string {
-  return value === undefined ? 'absent' : createHash('sha256').update(value).digest('hex');
-}
+export { memoryJobVersionDigest };
 const versionMatches = (version: MemoryJobVersion, value: string | undefined) => version.digest !== undefined ? version.digest === memoryJobVersionDigest(value) : version.value === value;
 const finishedInputFields = ['now', 'promptPolicyVersion', 'actorId', 'agentDigest', 'verifiedMaxInputChars', 'skip'];
 const idsOnly = (items: unknown, field: 'taskId' | 'id'): JsonValue[] => Array.isArray(items)

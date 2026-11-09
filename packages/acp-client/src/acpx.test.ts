@@ -7,6 +7,7 @@ import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createRuntimeStore } from 'acpx/runtime';
 import { AcpxAdapter, buildAcpxSessionOptions, normalizeAcpxEvent, renderAgentCommand } from './index.js';
+import '../../../tests/support/short-acpx-reply-drain.js';
 
 const dirs: string[] = [];
 afterEach(async () => Promise.all(dirs.splice(0).map(path => rm(path, { recursive: true, force: true }))));
@@ -85,7 +86,7 @@ describe('acpx ACP boundary', () => {
     const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-acp-active-timeout-')); dirs.push(cwd);
     const fixture = resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs');
     const events: any[] = [];
-    const adapter = new AcpxAdapter({ id: 'mock', name: 'Mock ACP', command: process.execPath, args: [fixture], protocol: 'acp', cwd, env: {}, permissionMode: 'deny-all', timeout: 2, capabilities: { pause: false, resume: true }, builtin: false }, { onEvent: event => events.push(event) });
+    const adapter = new AcpxAdapter({ id: 'mock', name: 'Mock ACP', command: process.execPath, args: [fixture], protocol: 'acp', cwd, env: { mock_acp_heartbeat_ms: '600' }, permissionMode: 'deny-all', timeout: 1.2, capabilities: { pause: false, resume: true }, builtin: false }, { onEvent: event => events.push(event) });
     await adapter.start();
     await expect(adapter.send('active longer than timeout')).resolves.toBeUndefined();
     expect(events.filter(event => event.type === 'thinking')).toHaveLength(3);

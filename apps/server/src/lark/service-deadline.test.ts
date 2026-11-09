@@ -1,6 +1,7 @@
 import Fastify from 'fastify';
 import { registerLarkRoutes } from './routes.js';
-import { LarkLongConnectionListener, LarkMessageCoordinator } from './listener.js';
+import { LarkLongConnectionListener } from './listener.js';
+import { LarkMessageCoordinator } from './coordinator.js';
 import type { StoredLarkConfig } from './config.js';
 import { createServer, type Server, type ServerResponse } from 'node:http';
 import { once } from 'node:events';

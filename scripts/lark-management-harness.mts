@@ -9,7 +9,8 @@ import { buildApp } from '../apps/server/src/app.js';
 import { AgentModelSettings } from '../apps/server/src/agent-model-settings.js';
 import { LarkGroupManager } from '../apps/server/src/lark/group-management.js';
 import { readLarkConfig, saveLarkConfig } from '../apps/server/src/lark/config.js';
-import { LarkMessageCoordinator, type LarkMessageEvent } from '../apps/server/src/lark/listener.js';
+import { type LarkMessageEvent } from '../apps/server/src/lark/listener.js';
+import { LarkMessageCoordinator } from '../apps/server/src/lark/coordinator.js';
 import { installLarkHook } from '../apps/server/src/lark/security-hooks.js';
 import type { LarkRoutesOptions } from '../apps/server/src/lark/routes.js';
 

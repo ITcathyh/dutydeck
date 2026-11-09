@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { createRepositories, currentProcessIdentity } from '@dutydeck/storage';
 import { PLUGIN_STORE_DIAGNOSTIC, PluginHost } from './host.js';
@@ -14,6 +14,13 @@ import { createCliUi } from '../cli-ui.js';
 import { PluginStore } from './store.js';
 import { pluginActivationBlockers, validateProviderRegistration } from './activation.js';
 import { writePlugin } from './scenario-fixtures.test-helpers.js';
+import { lazyBundleForTest } from '../../../../tests/support/bundle-for-test.js';
+
+// Every activation starts a validation process, and the two-Host case starts two Hosts:
+// run them as bundles instead of paying a TypeScript loader cold start each time.
+const validationWorker = lazyBundleForTest('activation-worker', resolve(import.meta.dirname, 'activation-worker.ts'));
+const hostBundle = lazyBundleForTest('activation-host', resolve(import.meta.dirname, 'host.ts'));
+afterAll(async () => { await Promise.all([validationWorker.cleanup(), hostBundle.cleanup()]); });
 
 const fixture = (version: string) => ({
   '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'versioned', version, providers: 'provider.mjs', userConfig: { token: { description: 'Authentication token', sensitive: true } } }),
@@ -29,7 +36,7 @@ describe('immutable plugin activation', () => {
   beforeEach(async () => {
     directory = await mkdtemp(join(tmpdir(), 'dutydeck-plugin-activation-'));
     source = join(directory, 'source');
-    store = new PluginStore(join(directory, 'data'), join(directory, 'no-builtins'));
+    store = new PluginStore(join(directory, 'data'), join(directory, 'no-builtins'), undefined, await validationWorker.path());
     await writePlugin(source, fixture('1.0.0'));
     await store.install(source, { yes: true });
   });
@@ -141,9 +148,8 @@ describe('immutable plugin activation', () => {
   });
 
   it('keeps two real Host processes safe across one crash and reclaims their stale leases after both exit', async () => {
-    const entry = resolve(import.meta.dirname, 'host.ts');
-    const program = `import {PluginHost} from ${JSON.stringify(entry)}; await PluginHost.load(${JSON.stringify({ dataDir: store.dataDir, builtinRoot: store.builtinRoot })}); process.send('ready'); setInterval(()=>{},1000);`;
-    const children = Array.from({ length: 2 }, () => spawn(process.execPath, ['--conditions=development', '--import', 'tsx', '--input-type=module', '-e', program], { cwd: resolve(import.meta.dirname, '../../../..'), stdio: ['ignore', 'ignore', 'pipe', 'ipc'] }));
+    const program = `import {PluginHost} from ${JSON.stringify(await hostBundle.path())}; await PluginHost.load(${JSON.stringify({ dataDir: store.dataDir, builtinRoot: store.builtinRoot })}); process.send('ready'); setInterval(()=>{},1000);`;
+    const children = Array.from({ length: 2 }, () => spawn(process.execPath, ['--input-type=module', '-e', program], { cwd: resolve(import.meta.dirname, '../../../..'), stdio: ['ignore', 'ignore', 'pipe', 'ipc'] }));
     try {
       await Promise.all(children.map(child => Promise.race([once(child, 'message'), once(child, 'exit').then(([code]) => { throw new Error(`Host child exited ${code}`); })])));
       await stage();
@@ -230,7 +236,7 @@ describe('immutable plugin activation', () => {
     await store.setConfig('versioned', 'token', Buffer.from(canary));
     const output: string[] = [];
     const ui = createCliUi({ stdout: { write: text => { output.push(text); } }, stderr: { write: text => { output.push(text); } } });
-    await expect(runPluginCli('activate', ['versioned'], { database: store.database, json: true }, { ui, builtinRoot: store.builtinRoot })).rejects.toMatchObject({ code: 'PLUGIN_ACTIVATION_FAILED', message: expect.not.stringContaining(canary) });
+    await expect(runPluginCli('activate', ['versioned'], { database: store.database, json: true }, { ui, builtinRoot: store.builtinRoot, validationWorker: await validationWorker.path() })).rejects.toMatchObject({ code: 'PLUGIN_ACTIVATION_FAILED', message: expect.not.stringContaining(canary) });
     await runPluginCli('status', ['versioned'], { database: store.database, json: true }, { ui, builtinRoot: store.builtinRoot });
     expect(await readFile(join(directory, 'secret-seen'), 'utf8')).toBe('true');
     expect(output.join('')).not.toContain(canary);
@@ -277,7 +283,7 @@ describe('immutable plugin activation', () => {
     await store.update('versioned', { yes: true });
     try {
       expect((await store.activate('versioned')).version).toBe('2.0.0');
-      await new Promise(resolve => setTimeout(resolve, 1500));
+      await new Promise(resolve => setTimeout(resolve, 400));
       expect(existsSync(marker)).toBe(false);
     } finally {
       if (existsSync(marker)) try { process.kill(-Number(await readFile(marker, 'utf8')), 'SIGKILL'); } catch {}
@@ -286,6 +292,6 @@ describe('immutable plugin activation', () => {
 
   it('bounds isolated provider registration even for a synchronous infinite loop', async () => {
     await writeFile(join(source, 'provider.mjs'), 'while (true) {}');
-    await expect(validateProviderRegistration({ root: source, dataDir: join(directory, 'validate'), entry: store.get('versioned'), config: {} }, 1500)).rejects.toThrow('超时');
+    await expect(validateProviderRegistration({ root: source, dataDir: join(directory, 'validate'), entry: store.get('versioned'), config: {} }, 1_000, await validationWorker.path())).rejects.toThrow('超时');
   });
 });

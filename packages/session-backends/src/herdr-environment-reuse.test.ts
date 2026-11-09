@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import * as policy from '@dutydeck/shared/child-environment';
-import { childProcessIdentity, observeProcess } from '@dutydeck/storage';
+import { childProcessIdentity, observeProcess } from '@dutydeck/storage/helpers';
 import { HerdrBackend, herdrControlEnvironment } from './herdr-backend.js';
 
 describe.skipIf(process.env.DUTYDECK_TEST_HERDR !== 'true')('owned Herdr server environment reuse', () => {

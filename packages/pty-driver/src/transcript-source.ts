@@ -461,6 +461,7 @@ export class TranscriptSourceTracker {
   private readonly observations: DriverTranscriptSourceObservation[] = [];
   private readonly listeners = new Set<(o: DriverTranscriptSourceObservation) => void>();
   private current: PendingLaunch | undefined;
+  constructor(private readonly nativeRetryMs = 1_000) {}
   private nativeRetryAt = 0;
   private nativeRetries = 0;
 
@@ -537,12 +538,12 @@ export class TranscriptSourceTracker {
       // At most three idempotent retries. Failure cannot make stop wait forever
       // or flood the runtime's diagnostics; the driver preserves its live pane.
       if (this.nativeRetries < 3 && Date.now() >= this.nativeRetryAt) {
-        this.nativeRetries++; this.nativeRetryAt = Date.now() + 1_000;
+        this.nativeRetries++; this.nativeRetryAt = Date.now() + this.nativeRetryMs;
         for (const listener of this.listeners) this.deliver(listener, previous);
       }
       return previous;
     }
-    this.nativeRetryAt = Date.now() + 1_000; this.nativeRetries = 0;
+    this.nativeRetryAt = Date.now() + this.nativeRetryMs; this.nativeRetries = 0;
     return this.publish({
       observationId: randomUUID(), client: 'claude', launchKind: this.current ? 'created' : 'attached',
       proofKind: 'launch_observed', capturedAt: new Date().toISOString(),

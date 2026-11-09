@@ -1,6 +1,7 @@
 import { escapeRegExp } from '@dutydeck/shared';
 import { backupSqlite } from '@dutydeck/storage';
-import { checkSqliteDriver, childProcessIdentity, describeSqliteDriverFailure, observeProcess, type ProcessIdentity } from '@dutydeck/storage';
+import type { ProcessIdentity } from '@dutydeck/storage';
+import { checkSqliteDriver, childProcessIdentity, describeSqliteDriverFailure, observeProcess } from '@dutydeck/storage/helpers';
 import Database from 'better-sqlite3';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';

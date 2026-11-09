@@ -1,10 +1,10 @@
-import { createHash } from 'node:crypto';
 import { ControlledDriverResources, localOnlyDriverContext } from './driver-context.js';
 import type { AcceptedTaskInputV2, AgentDriver, BoundExecutionRepository, DriverResource, ExecutionRepository, JsonValue, ResourceRef, SessionFence } from '@dutydeck/shared';
 import { canonicalExecutionJson, makeId, now, RuntimeError } from '@dutydeck/shared';
+import { digest } from './digest.js';
 
 export type ExecutionOptions = AcceptedTaskInputV2['executionOptions'];
-export const digest = (value: unknown) => createHash('sha256').update(canonicalExecutionJson(value)).digest('hex');
+export { digest };
 
 /** Event payloads may omit optional object fields; request JSON never uses this conversion. */
 export function eventJson(value: unknown): JsonValue {

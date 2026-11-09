@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 import type { ConfigRepository } from '@dutydeck/shared';
-import { currentProcessIdentity } from '@dutydeck/storage';
+import { currentProcessIdentity } from '@dutydeck/storage/helpers';
 import { LarkAppCreationJobManager } from './app-creation.js';
 import { LarkOpenPlatformConfigurationError } from './open-platform-configurator.js';
 import { OpenPlatformRequestError, OpenPlatformSessionError, OpenPlatformSessionExpiredError, type ConnectedOpenPlatformSession, type ConnectOpenPlatformSessionOptions } from './open-platform-session.js';

@@ -1,7 +1,8 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import { RelayAskBroker, RelayCapabilityRegistry } from '@dutydeck/relay';
+import { lazyBundleForTest } from '../../../tests/support/bundle-for-test.js';
 import { buildApp } from './app.js';
 import { runNativeAskHook } from './native-ask-hook.js';
 
@@ -11,8 +12,10 @@ const native = { hook_event_name: 'PreToolUse', tool_name: 'AskUserQuestion', to
   { question: '确认写入？', options: [{ label: '确认' }, { label: '取消' }] },
   { question: '第二道问题不能登记', options: [{ label: '下一步' }] }
 ] } };
-const cli = fileURLToPath(new URL('./cli.ts', import.meta.url));
+const cli = lazyBundleForTest('deferred-relay', fileURLToPath(new URL('./cli.ts', import.meta.url)));
+afterAll(() => cli.cleanup());
 async function harness(options: { ackFailure?: boolean; native?: boolean; missingAttempt?: boolean } = {}) {
+  const entry = await cli.path();
   const order: string[] = [];
   let child: ChildProcess | undefined;
   let activeTaskId = 'task_original';
@@ -26,6 +29,8 @@ async function harness(options: { ackFailure?: boolean; native?: boolean; missin
       expect(attemptId).toBe('attempt_original');
       if (taskId !== activeTaskId || attemptId !== activeAttemptId) throw Object.assign(new Error('old task'), { code: 'TASK_NOT_ACTIVE' });
       if (!stop) return;
+      // CLI 先写 stdout 再发 ACK，但管道和 HTTP 是两条通道，父进程可能先处理到后者：多转两轮事件循环，把已在管道里的输出读进来再比较先后。
+      await new Promise(setImmediate); await new Promise(setImmediate);
       order.push('interrupt');
       if (child?.pid && !options.native) process.kill(-child.pid, 'SIGTERM');
     })
@@ -43,13 +48,13 @@ async function harness(options: { ackFailure?: boolean; native?: boolean; missin
   });
   await app.listen({ host: '127.0.0.1', port: 0 });
   const address = app.server.address() as { port: number };
-  const env = { ...process.env, NODE_OPTIONS: '--conditions=development',
+  const env = { ...process.env,
     dutydeck_relay_url: `http://127.0.0.1:${address.port}/api/relay`, dutydeck_relay_token: capabilities.tokenFor('ses_fixture') };
   cleanups.push(async () => { if (child?.pid && child.exitCode === null && child.signalCode === null) { try { process.kill(-child.pid, 'SIGTERM'); } catch {} }
     await app.close(); broker.close(); });
   const launch = () => {
-    const args = options.native ? ['--import', 'tsx', cli, 'session', 'native-ask']
-      : ['--import', 'tsx', cli, 'session', 'ask', '确认写入？', '--choices', '[{"label":"确认"},{"label":"取消"}]', '--json'];
+    const args = options.native ? [entry, 'session', 'native-ask']
+      : [entry, 'session', 'ask', '确认写入？', '--choices', '[{"label":"确认"},{"label":"取消"}]', '--json'];
     // A semicolon, intentionally: a nonzero CLI exit alone does not stop shell continuation.
     child = options.native ? spawn(process.execPath, args, { env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] })
       : spawn('/bin/sh', ['-c', `"${process.execPath}" ${args.map(value => `'${value.replaceAll("'", "'\\''")}'`).join(' ')}; echo UNSAFE_WRITE_AFTER_ASK`], { env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });

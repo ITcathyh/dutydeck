@@ -5,11 +5,8 @@ import { spawn } from 'node:child_process';
 import Database from 'better-sqlite3';
 import { rotateLogFileSync } from '../resource-retention.js';
 import { writeFileAtomicSync } from '../atomic-file.js';
-import {
-  childProcessIdentity,
-  currentProcessIdentity,
-  type ProcessIdentity
-} from '@dutydeck/storage';
+import type { ProcessIdentity } from '@dutydeck/storage';
+import { childProcessIdentity, currentProcessIdentity } from '@dutydeck/storage/helpers';
 
 /**
  * Self-managed background daemon for the Dutydeck local session server.

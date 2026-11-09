@@ -1,32 +1,14 @@
 export { PtyCliDriver, createPtyCliDriver } from './driver.js';
 export type { PtyCliDriverOptions } from './driver.js';
-export { PTY_AGENT_CONTRIBUTIONS } from './contributions.js';
-export type { PtyAgentContribution } from './contributions.js';
-export {
-  createDutydeckPersistentBackend,
-  dutydeckPtySessionName,
-} from './persistent-backend.js';
+export * from './support.js';
+export { createDutydeckPersistentBackend } from './persistent-backend.js';
 export {
   createTranscriptTailer,
   claudeApiError,
-  TRANSCRIPT_ADAPTER_IDS,
   type TranscriptEventSource,
   type CreateTranscriptTailerOptions,
 } from './transcript/index.js';
-export {
-  resolveCliSessionId,
-  adapterIdsWithSessionIdLookup,
-  buildSessionMarker,
-  type SessionIdLookup,
-  type SessionIdLookupContext,
-} from './session-id/index.js';
-export {
-  captureOwnedTmuxIdentity, stopOwnedTmux, verifyOwnedTmuxExit, captureOwnedTmuxAbsence, verifyOwnedTmuxAbsence,
-  type OwnedTmuxScope, type OwnedTmuxIdentity, type OwnedTmuxExitProof, type OwnedTmuxAbsence, type ProcessProbe,
-} from '@dutydeck/session-backends';
 
 export { readCodexSessionUsage } from './transcript/codex.js';
 export { readNativeTranscriptUsage, type NativeUsageSource } from './transcript/session-usage.js';
 export { verifyTranscriptCheckpoint } from './transcript-source.js';
-
-export { realCwd, claudeDataDir, claudeProjectDir, claudeProjectDirCandidates, codexHome, traeHome } from './cli-paths.js';

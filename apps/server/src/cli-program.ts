@@ -11,7 +11,7 @@ import { pluginBindingFields, agentFields, agentConfigFields, botFields, channel
 import { agentCommandHelp } from './lark/agent-command.js';
 import { addAgentCommands } from './agent-cli.js';
 import { Option, Command } from 'commander';
-import { DatabaseCliError } from './database-cli.js';
+import { DatabaseCliError } from './database-cli-error.js';
 import type { PluginCliAction, PluginCliOptions } from './plugins/cli.js';
 
 export interface CliOptions {

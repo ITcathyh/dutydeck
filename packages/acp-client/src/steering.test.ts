@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createRuntimeStore } from 'acpx/runtime';
 import { AcpxAdapter } from './index.js';
+import '../../../tests/support/short-acpx-reply-drain.js';
 
 // 插话走真实 AcpxAdapter + 打过补丁的 acpx 运行时 + Mock ACP 子进程：
 // 只 mock ACP 客户端证明不了扩展请求真的透传到了 Agent，也覆盖不到持久化键名校验。

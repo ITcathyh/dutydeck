@@ -1,4 +1,5 @@
-import { childProcessIdentity, type SqliteDriverCheck, type SqliteDriverCheckOptions } from '@dutydeck/storage';
+import type { SqliteDriverCheck, SqliteDriverCheckOptions } from '@dutydeck/storage';
+import { childProcessIdentity } from '@dutydeck/storage/helpers';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';

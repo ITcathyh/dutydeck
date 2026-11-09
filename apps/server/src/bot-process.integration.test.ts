@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from 'vitest';
+import { afterAll, afterEach, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { startLocalServer } from './service.js';
 import { fork, type ChildProcess } from 'node:child_process';
@@ -8,7 +8,11 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createRepositories, assertBotProcessStartup } from '@dutydeck/storage';
+import { lazyBundleForTest } from '../../../tests/support/bundle-for-test.js';
 
+// 同一用例要起三个真实运行时：打包一次，省掉每个进程的 TypeScript 加载器冷启动。
+const runtime = lazyBundleForTest('bot-process-runtime', resolve('tests/fixtures/bot-process-runtime.mts'));
+afterAll(() => runtime.cleanup());
 const directories: string[] = [];
 const children: ChildProcess[] = [];
 afterEach(async () => {
@@ -34,9 +38,9 @@ async function shard(appId: string) {
 }
 async function boot(config: Awaited<ReturnType<typeof shard>>, gated = false) {
   const agent = { id: 'fake-agent', name: 'Fake agent', command: process.execPath, args: [resolve('tests/fixtures/process-driver-turn-agent.mjs')], protocol: 'pipe', cwd: config.directory, env: { turn_agent_submission_log: join(config.directory, 'submissions.jsonl'), ...(gated ? { turn_agent_gate_dir: join(config.directory, 'gate') } : {}) }, permissionMode: 'full-trust', timeout: 30, capabilities: { pause: false, resume: true }, builtin: false };
-  const child = fork(resolve('tests/fixtures/bot-process-runtime.mts'), [], {
+  const child = fork(await runtime.path(), [], {
     cwd: config.directory,
-    execArgv: ['--conditions=development', '--import', resolve('node_modules/tsx/dist/loader.mjs')],
+    execArgv: [],
     env: { ...process.env, HOME: config.directory, DUTYDECK_DATABASE_URL: config.database, DUTYDECK_BOT_APP_ID: config.appId, DUTYDECK_DEFAULT_CWD: config.directory, DUTYDECK_HOST: '127.0.0.1', DUTYDECK_PORT: String(config.port), DUTYDECK_AUTH: 'false', DUTYDECK_DISABLE_LARK_LISTENER: 'true', DUTYDECK_AGENTS_JSON: JSON.stringify([agent]) },
     stdio: ['ignore', 'ignore', 'pipe', 'ipc']
   });

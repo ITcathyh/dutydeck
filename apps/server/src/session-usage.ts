@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { createRuntimeStore } from 'acpx/runtime';
-import { inferAcpInsightClient } from '@dutydeck/acp-client';
+import { inferAcpInsightClient } from '@dutydeck/acp-client/transcript-source';
 import { readCodexSessionUsage, readNativeTranscriptUsage, verifyTranscriptCheckpoint, realCwd, claudeProjectDirCandidates, claudeDataDir, codexHome, type NativeUsageSource } from '@dutydeck/pty-driver';
 import { childEnvironment } from '@dutydeck/shared/child-environment';
 import { contextUsage, rateLimitWindow, taskExecutionSchemas, transcriptClientForAdapter, type RepositoryBundle, type SessionUsageSnapshot } from '@dutydeck/shared';

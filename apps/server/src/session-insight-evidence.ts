@@ -21,7 +21,7 @@
  *   字节预算，goals 只吃剩余预算，巨大历史 goals 不会饿死三类关键证据；
  *   侧类与 goals 都按「活跃/最新优先」挑选，发布顺序仍回到规范升序。
  */
-import { digest as executionJsonDigest } from '@dutydeck/runtime';
+import { digest as executionJsonDigest } from '@dutydeck/runtime/digest';
 import {
   canonicalExecutionJson,
   hostEvidenceSnapshotSchema,

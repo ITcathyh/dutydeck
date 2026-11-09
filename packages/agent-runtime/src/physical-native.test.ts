@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { spawn } from 'node:child_process';
@@ -9,7 +9,11 @@ import { AcpxAdapter } from '@dutydeck/acp-client';
 import { createRuntimeStore } from 'acpx/runtime';
 import { agentConfigSchema, type BoundExecutionRepository, type TaskRequestV1, type DriverFactory, type DriverContext, type StartSessionInput } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
+import { lazyBundleForTest } from '../../../tests/support/bundle-for-test.js';
 import { DutydeckRuntime } from './index.js';
+import '../../../tests/support/short-acpx-reply-drain.js';
+const nativeCreationCrash=lazyBundleForTest('native-creation-crash',resolve('packages/agent-runtime/tests/fixtures/native-creation-crash.mts'));
+afterAll(()=>nativeCreationCrash.cleanup());
 const cleanup:Array<()=>Promise<void>>=[];
 afterEach(async()=>{for(const run of cleanup.splice(0).reverse())await run();vi.restoreAllMocks();});
 async function setup(env:Record<string,string>={},observeBound?: (bound:BoundExecutionRepository)=>void,expectedStartError?:string,input:Partial<StartSessionInput>={}) {
@@ -255,7 +259,7 @@ describe('controlled physical resources and strict native context',()=>{
 
  it('closes a crashed creator and recovers its file receipt without replacing the native session',async()=>{
   const dir=await mkdtemp(join(tmpdir(),'dutydeck-native-crash-'));cleanup.push(()=>rm(dir,{recursive:true,force:true}));
-  const child=spawn(process.execPath,['--conditions=development','--import','tsx',resolve('packages/agent-runtime/tests/fixtures/native-creation-crash.mts'),dir],{stdio:['ignore','ignore','pipe','ipc']});
+  const child=spawn(process.execPath,[await nativeCreationCrash.path(),dir],{stdio:['ignore','ignore','pipe','ipc']});
   let stderr='';child.stderr?.on('data',data=>{stderr+=String(data);});
   const exited=once(child,'exit');cleanup.push(async()=>{if(child.exitCode===null&&child.signalCode===null)child.kill('SIGKILL');await exited;});
   const [message]=await once(child,'message');expect(message).toEqual({phase:'native-file-saved'});await exited;expect(stderr).toBe('');

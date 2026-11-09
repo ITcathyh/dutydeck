@@ -6,7 +6,7 @@ import { randomBytes } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import type { AgentConfig } from '@dutydeck/shared';
 import type { CliAdapter } from '@dutydeck/cli-adapters';
-import { childProcessIdentity, observeProcess } from '@dutydeck/storage';
+import { childProcessIdentity, observeProcess } from '@dutydeck/storage/helpers';
 import { HerdrBackend, HerdrCensusUnknownError, herdrControlEnvironment } from '@dutydeck/session-backends';
 import { PtyCliDriver } from './driver.js';
 

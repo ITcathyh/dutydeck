@@ -2,11 +2,15 @@ import { execFile } from 'node:child_process';
 import { createServer } from 'node:http';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import { RelayAskBroker, type RelayAskChoice } from '@dutydeck/relay';
 import { createCliAdapter } from '@dutydeck/cli-adapters';
 import { readNativeAskPayload, runNativeAskHook } from './native-ask-hook.js';
 import { targetGuard } from '../../../tests/support/target-server.js';
+import { lazyBundleForTest } from '../../../tests/support/bundle-for-test.js';
+
+const bundledCli = lazyBundleForTest('native-ask-hook', fileURLToPath(new URL('./cli.ts', import.meta.url)));
+afterAll(() => bundledCli.cleanup());
 
 const env = { dutydeck_relay_url: 'http://127.0.0.1/api/relay', dutydeck_relay_token: 'fixture-token' };
 const payload = { hook_event_name: 'PreToolUse', tool_name: 'AskUserQuestion', tool_input: { questions: [
@@ -45,9 +49,8 @@ describe('native Claude questions over the session relay', () => {
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
     cleanup.push(async () => { await broker.close(); await new Promise<void>(resolve => server.close(() => resolve())); });
     const port = (server.address() as { port: number }).port;
-    const cli = fileURLToPath(new URL('./cli.ts', import.meta.url));
     const hookEnv = { ...env, dutydeck_relay_url: `http://127.0.0.1:${port}/api/relay`,
-      dutydeck_relay_command: `'${process.execPath}' --import tsx '${cli}'` };
+      dutydeck_relay_command: `'${process.execPath}' '${await bundledCli.path()}'` };
     const args = createCliAdapter('claude-code').buildArgs({ sessionId: 'ses_native', env: hookEnv });
     const settings = JSON.parse(args[args.indexOf('--settings') + 1]!);
     const hook = settings.hooks.PreToolUse[0];
@@ -56,7 +59,7 @@ describe('native Claude questions over the session relay', () => {
     const result = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
       const child = execFile('/bin/sh', ['-c', hook.hooks[0].command], {
         cwd: fileURLToPath(new URL('../../../', import.meta.url)),
-        env: { ...process.env, ...hookEnv, NODE_OPTIONS: '--conditions=development' }, timeout: 12_000,
+        env: { ...process.env, ...hookEnv }, timeout: 12_000,
       }, (error, stdout, stderr) => error ? reject(error) : resolve({ stdout, stderr }));
       child.stdin!.end(JSON.stringify(payload));
     });

@@ -9,7 +9,7 @@ import { promisify } from 'node:util';
 import { z } from 'zod';
 import Database from 'better-sqlite3';
 import { errorMessage } from '@dutydeck/shared';
-import { currentProcessIdentity, observeProcess } from '@dutydeck/storage';
+import { currentProcessIdentity, observeProcess } from '@dutydeck/storage/helpers';
 import { pluginActivationBlockers, pluginHostLeases, pluginHostStates, validateProviderRegistration, type PluginHostState } from './activation.js';
 import { LocalFilePluginSecretResolver, LocalFileSecretProvider, secretDirectoryForDatabase } from '@dutydeck/secret-provider';
 import { defaultBuiltinPluginRoot, listBuiltinPlugins } from './builtin.js';
@@ -118,7 +118,7 @@ interface Staged { root: string; plugin: LoadedPlugin; resolved: PluginLockEntry
 export class PluginStore {
   readonly pluginsDir: string;
   /** builtinRoot：内置插件目录，外部插件不能和其中的插件同名。 */
-  constructor(readonly dataDir: string, readonly builtinRoot: string = defaultBuiltinPluginRoot(), readonly database = join(dataDir, 'dutydeck.db')) { this.pluginsDir = join(dataDir, 'plugins'); }
+  constructor(readonly dataDir: string, readonly builtinRoot: string = defaultBuiltinPluginRoot(), readonly database = join(dataDir, 'dutydeck.db'), private readonly validationWorker?: string) { this.pluginsDir = join(dataDir, 'plugins'); }
 
   builtinNames(): Set<string> { return new Set(listBuiltinPlugins(this.builtinRoot).map(item => item.name)); }
 
@@ -230,7 +230,7 @@ export class PluginStore {
             const value = secrets?.read(pluginSecretKey(name, key));
             if (value !== undefined) config[key] = value;
           }
-          await validateProviderRegistration({ root, dataDir: checkDir, entry: { ...entry, enabled: true, version: artifact.version, active: artifact, trustedCapabilities: artifact.trustedCapabilities }, config });
+          await validateProviderRegistration({ root, dataDir: checkDir, entry: { ...entry, enabled: true, version: artifact.version, active: artifact, trustedCapabilities: artifact.trustedCapabilities }, config }, undefined, this.validationWorker);
         }
       } catch {
         artifact.validation = { status: 'failed', checkedAt: new Date().toISOString() }; await this.writeLock(lock);

@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { DriverDetachedError, DriverRecoveryError, type AgentConfig } from '@dutydeck/shared';
-import { childProcessIdentity, observeProcess } from '@dutydeck/storage';
+import { childProcessIdentity, observeProcess } from '@dutydeck/storage/helpers';
 import { HerdrBackend, herdrControlEnvironment } from '@dutydeck/session-backends';
 import { pinnedSessionUuid, type CliAdapter } from '@dutydeck/cli-adapters';
 import { buildSessionMarker } from './session-id/index.js';

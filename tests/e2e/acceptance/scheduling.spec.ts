@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { launchIsolatedTestServer, type TestServerInstance } from './harness.js';
+import { TASK_POLL_INTERVALS, launchIsolatedTestServer, type TestServerInstance } from './harness.js';
 
 // Every test launches its own server, so the tests of this file can run on separate workers.
 test.describe.configure({ mode: 'parallel' });
@@ -12,7 +12,7 @@ async function expectCompletedTask(instance: TestServerInstance, sessionId: stri
     const response = await instance.request('GET', tasksPath);
     expect(response.status).toBe(200);
     return response.json?.map((task: any) => ({ prompt: task.prompt, status: task.status }));
-  }, { timeout }).toEqual([{ prompt, status: 'completed' }]);
+  }, { timeout, intervals: TASK_POLL_INTERVALS }).toEqual([{ prompt, status: 'completed' }]);
   const task = (await instance.request('GET', tasksPath)).json[0];
   const projectsPath = join(instance.dataDir, 'claude', 'projects');
   const userEntries = readdirSync(projectsPath).flatMap(project =>
@@ -31,7 +31,7 @@ async function expectCompletedTask(instance: TestServerInstance, sessionId: stri
     expect(response.status).toBe(200);
     return response.json.filter((event: any) => event.taskId === task.id && event.type === 'text' && event.data.role !== 'user')
       .map((event: any) => event.data.text).join('');
-  }, { timeout: 15_000 }).toBe(expectedOutput);
+  }, { timeout: 15_000, intervals: TASK_POLL_INTERVALS }).toBe(expectedOutput);
   return { task, expectedOutput };
 }
 
@@ -138,7 +138,7 @@ test('creates a paused plan globally without sending a prompt, runs it explicitl
 
 test('an enabled once plan dispatches through the real timer and settles one exact runtime result', async () => {
   test.setTimeout(210_000);
-  const instance = await launchIsolatedTestServer('dutydeck-acc-scheduling-timer-', { extraEnv: { DUTYDECK_AUTOMATION_TICK_MS: '1000' } });
+  const instance = await launchIsolatedTestServer({ prefix: 'dutydeck-acc-scheduling-timer-', extraEnv: { DUTYDECK_AUTOMATION_TICK_MS: '1000' } });
   try {
     const prompt = 'SCHEDULE_ONCE_TIMER_EXECUTION';
     const created = await instance.request('POST', '/api/sessions', { cwd: instance.sourceRepo, agentId: 'claude-code' });
@@ -161,7 +161,7 @@ test('an enabled once plan dispatches through the real timer and settles one exa
     await expect.poll(async () => {
       const response = await instance.request('GET', automationPath);
       return response.json.occurrences.map((item: any) => ({ taskId: item.taskId, runStatus: item.runStatus, output: item.result?.output.text }));
-    }, { timeout: 75_000 }).toEqual([{ taskId: task.id, runStatus: 'completed', output: expectedOutput }]);
+    }, { timeout: 75_000, intervals: TASK_POLL_INTERVALS }).toEqual([{ taskId: task.id, runStatus: 'completed', output: expectedOutput }]);
     const final = (await instance.request('GET', automationPath)).json;
     expect(final.schedules[0]).toMatchObject({ id: saved.json.schedule.id, enabled: false });
     expect(final.schedules[0].nextDueAt).toBeUndefined();

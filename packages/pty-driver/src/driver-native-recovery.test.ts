@@ -53,7 +53,7 @@ it.each(['cancel', 'error', 'thinking-cancel', 'text-error', 'text-success', 'fo
         };
       }
       const driver = new PtyCliDriver({ agent, adapter, sessionId, backend: new TmuxBackend('native-recovery', { ownerId }),
-        onEvent: e => events.push(e), onExit() {} });
+        onEvent: e => events.push(e), onExit() {}, timings: { quiescenceMs: 100, spinnerGuardMs: 100 } });
       releases.push(async () => { await driver.prepareForDaemonShutdown(); await driver.stop(); });
       return driver;
     };

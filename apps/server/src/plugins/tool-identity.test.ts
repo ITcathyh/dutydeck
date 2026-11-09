@@ -1,4 +1,4 @@
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, expect, it, vi } from 'vitest';
 import { DutydeckRuntime, type AgentDriver } from '@dutydeck/runtime';
 import { createRepositories } from '@dutydeck/storage';
 import { RelayCapabilityRegistry } from '@dutydeck/relay';
@@ -6,6 +6,10 @@ import { installationOwnerTaskActor, type AgentConfig } from '@dutydeck/shared';
 import { LarkAgentToolCapabilityRegistry } from '../lark/agent-tools.js';
 import { TaskPluginToolIdentity } from './tool-identity.js';
 import { buildApp } from '../app.js';
+import { fileURLToPath } from 'node:url';
+import { lazyBundleForTest } from '../../../../tests/support/bundle-for-test.js';
+const bundledCli = lazyBundleForTest('tool-identity', fileURLToPath(new URL('../cli.ts', import.meta.url)));
+afterAll(() => bundledCli.cleanup());
 const cleanup: Array<() => unknown | Promise<unknown>> = [];
 afterEach(async () => { for (const work of cleanup.splice(0).reverse()) await work(); });
 async function harness(channel: 'web' | 'lark') {
@@ -47,8 +51,8 @@ it.each(['unspecified', 'automated', 'owner-in-channel', 'other-app'] as const)(
 
 it('runs the actual CLI through current task identity, authorization and optional manual reads', async () => {
   const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
-  const { tmpdir } = await import('node:os'); const { join, resolve } = await import('node:path');
-  const { execFile } = await import('node:child_process'); const { promisify } = await import('node:util'); const { createRequire } = await import('node:module');
+  const { tmpdir } = await import('node:os'); const { join } = await import('node:path');
+  const { execFile } = await import('node:child_process'); const { promisify } = await import('node:util');
   const { PluginBusinessToolRegistry } = await import('./business-tools.js'); const { PluginBusinessToolService } = await import('./tool-service.js');
   const { PluginToolGrants } = await import('./tool-grants.js'); const { PluginToolLedger } = await import('./tool-ledger.js');
   const root = await mkdtemp(join(tmpdir(), 'dutydeck-tool-cli-identity-')); cleanup.push(() => rm(root, { recursive: true, force: true }));
@@ -61,8 +65,8 @@ it('runs the actual CLI through current task identity, authorization and optiona
   const service = new PluginBusinessToolService({ businessTools: registry, resolveBinding: async () => binding, toolManuals: () => ({ root, version: '1.0', manuals: { read: { guide: { description: 'Guide', path: 'guide.md', maxBytes: 100 } } } }) }, grants, new PluginToolLedger(h.repos.config), h.identity);
   const app = await buildApp(h.runtime, { pluginBusinessTools: { service, grants, origin: 'http://127.0.0.1', authorize: async () => false } }); cleanup.push(() => app.close());
   await app.listen({ host: '127.0.0.1', port: 0 }); const url = `http://127.0.0.1:${(app.server.address() as { port: number }).port}`;
-  const cli = resolve(import.meta.dirname, '../cli.ts'); const loader = createRequire(import.meta.url).resolve('tsx');
-  const run = (args: string[]) => promisify(execFile)(process.execPath, ['--import', loader, cli, 'tool', ...args, '--turn', h.turn], { cwd: root, env: { PATH: process.env.PATH, HOME: root, NODE_OPTIONS: '--conditions=development', dutydeck_relay_url: `${url}/api/relay`, dutydeck_relay_token: h.token }, timeout: 15_000 });
+  const cli = await bundledCli.path();
+  const run = (args: string[]) => promisify(execFile)(process.execPath, [cli, 'tool', ...args, '--turn', h.turn], { cwd: root, env: { PATH: process.env.PATH, HOME: root, dutydeck_relay_url: `${url}/api/relay`, dutydeck_relay_token: h.token }, timeout: 15_000 });
   // 三次只读调用互不依赖，并发启动 CLI 省掉两次串行冷启动。
   const [list, describe, manual] = await Promise.all([run(['list', '--summary']), run(['describe', 'tickets/read']), run(['manual', 'tickets/read', 'guide'])]);
   expect(JSON.parse(list.stdout).tools).toEqual([{ id: 'tickets/read', description: 'Read', version: '1', effect: 'read' }]);

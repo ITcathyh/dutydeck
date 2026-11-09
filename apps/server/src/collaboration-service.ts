@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { digest as executionJsonDigest } from '@dutydeck/runtime';
+import { digest as executionJsonDigest } from '@dutydeck/runtime/digest';
 import { z } from 'zod';
 import { RuntimeError, countDecisionUsage, isBotTurnRecord, previewNextSchedule, scheduleDeliverySchema, scheduleTriggerSchema, DECISION_WINDOW_LIMIT, listWindowIncomplete, type CollaborationMandate, type CollaborationRepository, type CollaborationScope, type CollaborationSnapshot, type CreateScheduleDefinitionInput, type RepositoryBundle, type ScheduleDefinition } from '@dutydeck/shared';
 

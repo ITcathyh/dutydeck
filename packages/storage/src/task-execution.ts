@@ -12,6 +12,7 @@ import { cachedStatement } from './statement-cache.js';
 import type { OpenControl } from './database-control.js';
 import { listConfigByJsonField } from './config-query.js';
 import { currentProcessIdentity, observeProcess } from './process-identity.js';
+import { executionTaskId, LEGACY_RETIREMENT_NOTICE } from './helpers.js';
 import { resolveExecutionWorkspace, type ExecutionWorkspaceIdentity } from './execution-workspace.js';
 import { compactTerminalScreens } from './retention.js';
 
@@ -25,14 +26,10 @@ function parseStored<T>(schema: { parse(value: unknown): T }, value: unknown): T
   try { return schema.parse(value); } catch { return fail('EXECUTION_INVALID_INPUT'); }
 }
 function hash(value: string) { return createHash('sha256').update(value).digest('hex'); }
-export function executionTaskId(namespace: TaskRequestV1['namespace'], sessionId: string, key: string): string {
-  taskRequestV1Schema.shape.namespace.parse(namespace); id.parse(sessionId); id.parse(key);
-  return `task_v1_${hash(canonicalExecutionJson([namespace, sessionId, key]))}`;
-}
 function json(value: unknown) { return JSON.stringify(value); }
 function stable(value: unknown) { return canonicalExecutionJson(value); }
 function same(a: unknown, b: unknown) { return stable(a) === stable(b); }
-export const LEGACY_RETIREMENT_NOTICE = '升级已结束旧会话，历史记录保留；原上下文未自动恢复，请用 /new 新建。';
+export { executionTaskId, LEGACY_RETIREMENT_NOTICE };
 function rowJson<T>(row: unknown): T | undefined { return row ? JSON.parse((row as { json: string }).json) as T : undefined; }
 function noCredentials(value: unknown): void {
   if (!value || typeof value !== 'object') return;

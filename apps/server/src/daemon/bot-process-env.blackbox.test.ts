@@ -53,8 +53,11 @@ it.each([false, true])('starts a partition with explicit production argv=%s with
   const fakeSystemctl = readFileSync(join(workspace, 'apps/server/src/daemon/fixtures/bot-process-systemctl.mjs'), 'utf8');
   writeFileSync(join(bin, 'systemctl'), `#!${process.execPath}\n${fakeSystemctl}`, { mode: 0o755 });
   const calls = join(root, 'systemctl-calls.jsonl');
-  env = { HOME: root, PATH: `${bin}:${process.env.PATH ?? ''}`, TEST_RUNTIME_ROOT: shard, TEST_RUNTIME_UNIT: unit, TEST_RUNTIME_CLI: cli, TEST_SYSTEMCTL_CALLS: calls, TEST_RUNTIME_EXPLICIT_ARGS: String(explicitArgs) };
-  for (let i = 0; i < 2; i++) {
+  // 打包产物十几 MB：CLI 和它拉起的 daemon 共用 V8 代码缓存，省掉重复解析。
+  env = { HOME: root, PATH: `${bin}:${process.env.PATH ?? ''}`, NODE_COMPILE_CACHE: join(dirname(cli), 'compile-cache'), TEST_RUNTIME_ROOT: shard, TEST_RUNTIME_UNIT: unit, TEST_RUNTIME_CLI: cli, TEST_SYSTEMCTL_CALLS: calls, TEST_RUNTIME_EXPLICIT_ARGS: String(explicitArgs) };
+  // 停止后能再次启动只需验证一次：另一组参数走一轮就够。
+  const rounds = explicitArgs ? 2 : 1;
+  for (let i = 0; i < rounds; i++) {
     expect(readDaemonStatus(defaultDaemonDir(shard))).toBeUndefined();
     const started = invoke('start');
     expect(started.status, started.stderr + started.stdout + (existsSync(join(shard, 'fixture-server.log')) ? readFileSync(join(shard, 'fixture-server.log'), 'utf8') : '')).toBe(0);
@@ -63,7 +66,7 @@ it.each([false, true])('starts a partition with explicit production argv=%s with
     const response = await fetch(`http://127.0.0.1:${port}/api/lark/config`);
     expect(response.status).toBe(200);
     expect((await response.json() as { bots: Array<{ appId: string }> }).bots.map(bot => bot.appId)).toEqual(['cli_a']);
-    if (explicitArgs) {
+    if (explicitArgs && i === 0) {
       const before = readDaemonStatus(defaultDaemonDir(shard));
       const refused = invoke('start', ['--foreground', '--database', database, '--cwd', root!, '--port', String(port), '--local-only', '--bot-app-id', 'cli_other']);
       expect(refused.status).not.toBe(0);
@@ -77,7 +80,7 @@ it.each([false, true])('starts a partition with explicit production argv=%s with
   }
   const operations = readFileSync(calls, 'utf8').trim().split('\n').map(line => JSON.parse(line));
   expect(operations.every(call => call.unit === unit)).toBe(true);
-  expect(operations.filter(call => call.action === 'start')).toHaveLength(2);
-  expect(operations.filter(call => call.action === 'stop')).toHaveLength(2);
+  expect(operations.filter(call => call.action === 'start')).toHaveLength(rounds);
+  expect(operations.filter(call => call.action === 'stop')).toHaveLength(rounds);
   expect(readFileSync(lastDaemonDirPointerFile(root), 'utf8')).toBe(originalPointer);
 }, 60_000);

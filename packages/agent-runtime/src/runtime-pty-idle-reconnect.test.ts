@@ -64,7 +64,7 @@ it.each([false, true, 'exited'] as const)('Codex continues the same verified nat
     ptyDriverFactory: (agent, _protocol, emit, onExit, sessionId) => {
       const backend = new TmuxBackend(`idle-${sessionId}`, { ownerId: `dutydeck:${sessionId}` });
       const driver = new PtyCliDriver({ agent, adapter: createCliAdapter('codex'), backend, sessionId,
-        onEvent(event) { events.push(event); emit(event); }, onExit });
+        onEvent(event) { events.push(event); emit(event); }, onExit, timings: { quiescenceMs: 100, spinnerGuardMs: 100 } });
       // Physical transport is the only simulated boundary; stop and runtime removal stay real.
       vi.spyOn(driver, 'isStopped').mockImplementation(async () => panes.get(backend.sessionName)?.killed === true);
       drivers.push(driver); return driver;

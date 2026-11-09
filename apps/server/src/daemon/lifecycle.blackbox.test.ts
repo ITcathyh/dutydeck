@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { childProcessIdentity } from '@dutydeck/storage';
+import { childProcessIdentity } from '@dutydeck/storage/helpers';
 import { bundleCliForTest } from '../../../../tests/support/bundle-for-test.js';
 import { daemonPaths, defaultDaemonDir, inspectDaemon, pidAlive, readDaemonStatus, writeState } from './daemon.js';
 
@@ -24,8 +24,10 @@ beforeAll(async () => {
 });
 afterAll(async () => { await Promise.all(cleanups.splice(0).map(cleanup => cleanup())); });
 let root: string;
+// 打包产物十几 MB，同一文件内多次启动共用 V8 代码缓存，省掉重复解析。
+const childEnv = () => ({ HOME: root, PATH: process.env.PATH, NODE_COMPILE_CACHE: join(dirname(cli), 'compile-cache') });
 function invoke(file: string, args: string[]) {
-  return spawnSync(process.execPath, [file, ...args], { cwd: root, env: { HOME: root, PATH: process.env.PATH }, encoding: 'utf8', timeout: 25_000 });
+  return spawnSync(process.execPath, [file, ...args], { cwd: root, env: childEnv(), encoding: 'utf8', timeout: 25_000 });
 }
 function lifecycle(action: string) {
   const result = invoke(fixture, [action]);
@@ -69,7 +71,7 @@ describe('daemon detached process and CLI black box', () => {
   }, 60_000);
   it('two concurrent starts leave exactly one verified daemon', async () => {
     const run = () => new Promise<{ status: number | null; stdout: string }>(resolve => {
-      const child = spawn(process.execPath, [fixture, 'start'], { cwd: root, env: { HOME: root, PATH: process.env.PATH } });
+      const child = spawn(process.execPath, [fixture, 'start'], { cwd: root, env: childEnv() });
       let stdout = '';
       child.stdout.on('data', chunk => { stdout += chunk; });
       child.once('exit', status => resolve({ status, stdout }));

@@ -21,7 +21,7 @@ import type { AdapterSessionContext, CliAdapter, PtyLike } from '@dutydeck/cli-a
 import { claudePlanGuardMatcher, createClaudeCodeAdapter } from '@dutydeck/cli-adapters';
 import { secretGuardHookCommand, secretGuardToolMatcher } from '@dutydeck/shared/secret-guard';
 import { PtyBackend, TmuxBackend, isTmuxAvailable } from '@dutydeck/session-backends';
-import { childProcessIdentity, observeProcess } from '@dutydeck/storage';
+import { childProcessIdentity, observeProcess } from '@dutydeck/storage/helpers';
 import { ClaudeSettings } from './claude-settings.js';
 import { PtyCliDriver } from './driver.js';
 import { buildSessionMarker } from './session-id/index.js';
@@ -1052,6 +1052,7 @@ tmuxDescribe('PtyCliDriver tmux reattach', () => {
       onEvent: e => firstEvents.push(e),
       onExit: () => {},
       sessionId: SESSION_ID,
+      timings: { turnGraceMs: 300 },
     });
     await first.start();
     await waitForAssert(() => {
@@ -1078,6 +1079,7 @@ tmuxDescribe('PtyCliDriver tmux reattach', () => {
       onEvent: e => secondEvents.push(e),
       onExit: () => {},
       sessionId: SESSION_ID,
+      timings: { turnGraceMs: 300 },
     });
     // Production runtime reconnect calls start(), not resume().
     await second.start();

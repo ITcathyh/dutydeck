@@ -22,7 +22,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { sleep } from '../daemon/time.js';
 import { createHash, randomUUID } from 'node:crypto';
-import { currentProcessIdentity, observeProcess } from '@dutydeck/storage';
+import { currentProcessIdentity, observeProcess } from '@dutydeck/storage/helpers';
 import { readTaskAttemptResult, type TaskResultRepositories } from '../task-results.js';
 import { installationOwnerTaskActor, isTerminalTaskStatus, RuntimeError, type AgentCapabilities, type AcceptedTask, type ConfigRepository, type ExecutionRepository, type MemoryJob, type MemoryJobRepository, type StartSessionInput, type TaskRequestV1, type AgentConfig, type AgentEvent, type ExecutionActor, type PermissionMode, type Session, type TaskRecord } from '@dutydeck/shared';
 import { larkMemoryEnabled, type StoredLarkConfig } from './config.js';

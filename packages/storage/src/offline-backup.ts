@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { chmodSync, closeSync, openSync, renameSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { Worker } from 'node:worker_threads';
+import type { RepositoryOpenOptions } from '@dutydeck/shared';
 import { canonicalDatabase, openDatabaseControl } from './database-control.js';
 import { migrations } from './migrations.js';
 
@@ -49,14 +50,14 @@ export async function backupSqlite(source: string, target: string): Promise<void
 }
 
 /** Existing access leases exclude live runtimes; the write lock also excludes raw SQLite writers. */
-export async function withOfflineDatabase<T>(filename: string, action: () => Promise<T>): Promise<T> {
+export async function withOfflineDatabase<T>(filename: string, action: () => Promise<T>, options: Pick<RepositoryOpenOptions, 'busyTimeoutMs'> = {}): Promise<T> {
   filename = canonicalDatabase(filename);
   const probe = new Database(filename, { readonly: true, fileMustExist: true });
   try {
     const version = probe.prepare('SELECT MAX(version) AS version FROM schema_migrations').get() as { version: number };
     if (version.version !== BACKUP_SCHEMA_VERSION) throw new Error('Offline backup requires the current database schema; upgrade separately first');
   } finally { probe.close(); }
-  const control = openDatabaseControl(filename, {});
+  const control = openDatabaseControl(filename, options);
   const writer = new Database(filename, { timeout: 0, fileMustExist: true });
   let maintenance = false;
   try {

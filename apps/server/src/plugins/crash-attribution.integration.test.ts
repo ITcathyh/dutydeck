@@ -3,16 +3,18 @@ import { existsSync } from 'node:fs';
 import { once } from 'node:events';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
-import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { afterEach, expect, it } from 'vitest';
+import { afterAll, afterEach, expect, it } from 'vitest';
 import { pluginsInStack, registerPluginCodeRoot } from './crash-attribution.js';
 import { writePlugin } from './scenario-fixtures.test-helpers.js';
 import { readPluginQuarantine } from './quarantine.js';
 import { PluginStore } from './store.js';
+import { lazyBundleForTest } from '../../../../tests/support/bundle-for-test.js';
 
-const cli = resolve(import.meta.dirname, '../cli.ts');
+// 两个用例各起一个真实服务；打包版省掉 TypeScript 加载器的冷启动。
+const cli = lazyBundleForTest('crash-attribution', resolve(import.meta.dirname, '../cli.ts'));
+afterAll(() => cli.cleanup());
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { while (cleanups.length) await cleanups.pop()!(); });
 
@@ -43,7 +45,7 @@ it('keeps the default crash exit, names the plugin and quarantines it when its a
   });
   await new PluginStore(data).install(join(dir, 'src'), { yes: true });
   const port = await freePort();
-  const child = spawn(process.execPath, ['--conditions=development', '--import', createRequire(import.meta.url).resolve('tsx'), cli, '--local-only', '--port', String(port), '--no-lark-listen'], {
+  const child = spawn(process.execPath, [await cli.path(), '--local-only', '--port', String(port), '--no-lark-listen'], {
     cwd: dir,
     env: { PATH: process.env.PATH ?? '', HOME: dir, DUTYDECK_DATABASE_URL: join(data, 'dutydeck.db'), DUTYDECK_DEFAULT_CWD: dir, DUTYDECK_DAEMON_DIR: join(dir, '.dutydeck', 'daemon') },
     stdio: ['ignore', 'pipe', 'pipe']
@@ -76,7 +78,7 @@ it('does not quarantine a plugin whose provider load is interrupted by a normal 
   });
   await new PluginStore(data).install(join(dir, 'src'), { yes: true });
   const port = await freePort();
-  const child = spawn(process.execPath, ['--conditions=development', '--import', createRequire(import.meta.url).resolve('tsx'), cli, '--local-only', '--port', String(port), '--no-lark-listen'], {
+  const child = spawn(process.execPath, [await cli.path(), '--local-only', '--port', String(port), '--no-lark-listen'], {
     cwd: dir,
     env: { PATH: process.env.PATH ?? '', HOME: dir, DUTYDECK_DATABASE_URL: join(data, 'dutydeck.db'), DUTYDECK_DEFAULT_CWD: dir, DUTYDECK_DAEMON_DIR: join(dir, '.dutydeck', 'daemon') },
     stdio: ['ignore', 'pipe', 'pipe']

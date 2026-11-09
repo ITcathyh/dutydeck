@@ -7,6 +7,7 @@ import { AcpxAdapter } from '@dutydeck/acp-client';
 import { createRepositories } from '@dutydeck/storage';
 import type { AgentConfig, DriverFactory } from '@dutydeck/shared';
 import { DutydeckRuntime } from './index.js';
+import '../../../tests/support/short-acpx-reply-drain.js';
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { vi.useRealTimers(); for (const close of cleanup.splice(0).reverse()) await close(); vi.useRealTimers(); });

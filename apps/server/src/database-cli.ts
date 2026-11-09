@@ -9,13 +9,9 @@ import {
 import { RuntimeError, type ExecutionBlocker, type RepositoryBundle } from '@dutydeck/shared';
 import type { DatabaseExecutionStatusCliOptions, DatabaseRetireLegacyCliOptions, DatabaseUpgradeExecutionCliOptions } from './cli-program.js';
 import { createLegacyRetirementVerifier } from './legacy-session-retirement.js';
+import { DatabaseCliError } from './database-cli-error.js';
 
-export class DatabaseCliError extends Error {
-  constructor(public readonly code: string, message: string) {
-    super(message);
-    this.name = 'DatabaseCliError';
-  }
-}
+export { DatabaseCliError };
 
 export interface DatabaseExecutionStatusResult {
   database: string;

@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import * as command from './command.js';
 import { TmuxBackend, TmuxServerError, isTmuxAvailable } from './tmux-backend.js';
 
 // /tmp cleanup (systemd-tmpfiles, macOS periodic) can delete a long-lived
@@ -15,7 +16,12 @@ const listeners = (path: string) => readFileSync('/proc/net/unix', 'utf8').split
 
 tmuxDescribe('TmuxBackend after its socket file is deleted', () => {
   let root: string, socket: string;
+  // The watcher polls once a second and acts after three consecutive failures. Poll faster and count real polls instead of waiting seconds.
+  const runCommand = vi.spyOn(command, 'runCommand');
+  const polls = () => runCommand.mock.calls.filter(([, args]) => args[0] === 'list-panes').length;
+  const interval = globalThis.setInterval;
   beforeAll(() => {
+    vi.spyOn(globalThis, 'setInterval').mockImplementation(((callback: () => void, ms: number, ...args: unknown[]) => interval(callback, ms === 1_000 ? 50 : ms, ...args)) as typeof setInterval);
     root = mkdtempSync(join(tmpdir(), 'dd-tmux-socket-gone-'));
     socket = join(root, `tmux-${process.getuid!()}`, 'default');
     vi.stubEnv('TMUX_TMPDIR', root);
@@ -23,6 +29,7 @@ tmuxDescribe('TmuxBackend after its socket file is deleted', () => {
     vi.stubEnv('TMUX_PANE', undefined);
   });
   afterAll(() => {
+    vi.restoreAllMocks();
     try { execFileSync('tmux', ['-S', socket, 'kill-server'], { stdio: 'ignore' }); } catch { /* gone */ }
     vi.unstubAllEnvs();
     rmSync(root, { recursive: true, force: true });
@@ -39,7 +46,7 @@ tmuxDescribe('TmuxBackend after its socket file is deleted', () => {
     const stat = readFileSync(`/proc/${pid}/stat`, 'utf8'), server = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1]);
     try {
       // Let the watcher see the pane through the live server at least once.
-      await new Promise(resolve => setTimeout(resolve, 1_500));
+      await vi.waitFor(() => expect(polls()).toBeGreaterThanOrEqual(2));
       expect(listeners(socket)).toBe(1);
       rmSync(socket);
       // The kernel still has the old server bound to the deleted path.
@@ -53,7 +60,9 @@ tmuxDescribe('TmuxBackend after its socket file is deleted', () => {
       expect(refused.message).toContain('SIGUSR1');
       expect(existsSync(socket)).toBe(false);
       expect(listeners(socket)).toBe(1);
-      await new Promise(resolve => setTimeout(resolve, 5_000));
+      // A poll starts only after the previous one was delivered, so this is five readings against the threshold of three.
+      const before = polls();
+      await vi.waitFor(() => expect(polls()).toBeGreaterThanOrEqual(before + 6), { timeout: 10_000 });
       expect(exit).not.toHaveBeenCalled();
       expect(alive(pid)).toBe(true);
       // The CLI really exits: with the socket still gone, the watcher reports it.

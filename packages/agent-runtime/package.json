@@ -10,6 +10,11 @@
       "types": "./dist/index.d.ts",
       "development": "./src/index.ts",
       "import": "./dist/index.js"
+    },
+    "./digest": {
+      "types": "./dist/digest.d.ts",
+      "development": "./src/digest.ts",
+      "import": "./dist/digest.js"
     }
   },
   "files": [

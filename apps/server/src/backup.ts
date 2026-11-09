@@ -130,7 +130,7 @@ async function withPluginLocks<T>(dataDir: string, action: () => Promise<T>): Pr
   } finally { for (const lock of locks.reverse()) lock.close(); }
 }
 
-export async function createBackup(options: { database: string; dataDir: string; output: string }): Promise<{ status: 'offline-backup'; archive: string; missing: string[]; excluded: string[] }> {
+export async function createBackup(options: { database: string; dataDir: string; output: string; busyTimeoutMs?: number }): Promise<{ status: 'offline-backup'; archive: string; missing: string[]; excluded: string[] }> {
   const dataDir = regularRoot(options.dataDir), database = realpathSync(options.database), output = newDestination(options.output);
   if (dirname(database) !== dataDir || lstatSync(resolve(options.database)).isSymbolicLink()) throw new Error('Explicit database must be a regular file directly inside the explicit data directory');
   if (output === dataDir || output.startsWith(`${dataDir}${sep}`)) throw new Error('Backup output must be outside the source data directory');
@@ -176,7 +176,7 @@ export async function createBackup(options: { database: string; dataDir: string;
           }
         }
       }
-    }));
+    }, options));
     writeFileSync(join(stage, 'manifest.json'), JSON.stringify(manifest, null, 2), { mode: 0o600 });
     inspectBackup(stage);
     publish(stage, output);

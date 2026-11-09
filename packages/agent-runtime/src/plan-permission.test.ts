@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
 import { agentConfigSchema, type AgentConfig } from '@dutydeck/shared';
 import { DutydeckRuntime, type AgentDriver } from './index.js';
+import '../../../tests/support/short-acpx-reply-drain.js';
 
 // 先出计划的计划轮是一条以 deny-all 运行的任务；下一轮回到会话本身的权限。
 const cleanup: Array<() => Promise<void>> = [];

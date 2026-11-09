@@ -1,6 +1,6 @@
 import { mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { currentProcessIdentity, observeProcess } from '@dutydeck/storage';
+import { currentProcessIdentity, observeProcess } from '@dutydeck/storage/helpers';
 import { z } from 'zod';
 import { processIdentitySchema } from './activation.js';
 import { writeFileAtomicSync } from '../atomic-file.js';

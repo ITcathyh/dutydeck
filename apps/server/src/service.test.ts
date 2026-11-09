@@ -519,6 +519,7 @@ describe('production PTY backend injection', () => {
     writeFileSync(runner, [
       `#!${process.execPath}`,
       "import { appendFileSync, existsSync, realpathSync } from 'node:fs';",
+      "if (process.argv.includes('--version')) { console.log('fixture 1.0'); process.exit(0); }",
       "import { join } from 'node:path';",
       "const sessionId = process.argv[process.argv.indexOf('--session-id') + 1];",
       "const transcript = join(process.env.CLAUDE_CONFIG_DIR, 'projects', realpathSync(process.cwd()).replace(/[^A-Za-z0-9-]/g, '-'), sessionId + '.jsonl');",
@@ -644,6 +645,7 @@ describe('production PTY backend injection', () => {
     writeFileSync(fakeRunner, [
       `#!${process.execPath}`,
       "import { appendFileSync, realpathSync } from 'node:fs';",
+      "if (process.argv.includes('--version')) { console.log('fixture 1.0'); process.exit(0); }",
       "import { join } from 'node:path';",
       "const sessionId = process.argv[process.argv.indexOf('--session-id') + 1];",
       "const transcript = join(process.env.CLAUDE_CONFIG_DIR, 'projects', realpathSync(process.cwd()).replace(/[^A-Za-z0-9-]/g, '-'), sessionId + '.jsonl');",
@@ -763,6 +765,7 @@ describe('production PTY backend injection', () => {
     const runner = join(root, 'runner.mjs');
     writeFileSync(runner, [
       `#!${process.execPath}`,
+      "if (process.argv.includes('--version')) { console.log('fixture 1.0'); process.exit(0); }",
       "process.stdout.write('Claude Code v2.1.267 (mock)\\r\\n❯ \\r\\n');",
       'setInterval(() => {}, 1000);', '',
     ].join('\n'));

@@ -20,13 +20,14 @@ const run = promisify(execFile);
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
-/** 所有用例共用的初始裸仓库：只建一次，每个用例复制一份当自己的 origin。 */
-let templateRemote: Promise<string> | undefined;
-function seededRemote() {
-  return templateRemote ??= (async () => {
+/** 所有用例共用的初始裸仓库和它的克隆：只建一次，每个用例复制一份，免去每次 git clone。 */
+let template: Promise<{ remote: string; work: string }> | undefined;
+function seededTemplate() {
+  return template ??= (async () => {
     const root = await mkdtemp(join(tmpdir(), 'dutydeck-pr-template-'));
     cleanupTemplate = () => rm(root, { recursive: true, force: true });
     const remote = join(root, 'remote.git');
+    const work = join(root, 'work');
     const seed = join(root, 'seed');
     await run('git', ['init', '-q', '--bare', '-b', 'main', remote]);
     await run('git', ['init', '-q', '-b', 'main', seed]);
@@ -36,7 +37,8 @@ function seededRemote() {
     await run('git', ['-C', seed, 'add', '.']);
     await run('git', ['-C', seed, 'commit', '-qm', 'initial']);
     await run('git', ['-C', seed, 'push', '-q', remote, 'main']);
-    return remote;
+    await run('git', ['clone', '-q', '-c', 'user.email=user@example.com', '-c', 'user.name=User', remote, work]);
+    return { remote, work };
   })();
 }
 let cleanupTemplate: (() => Promise<void>) | undefined;
@@ -48,8 +50,11 @@ async function fixture(options: { withoutPullRequests?: boolean; log?: { warn: (
   cleanups.push(() => rm(root, { recursive: true, force: true }));
   const remote = join(root, 'remote.git');
   const cwd = join(root, 'work');
-  await cp(await seededRemote(), remote, { recursive: true });
-  await run('git', ['clone', '-q', '-c', 'user.email=user@example.com', '-c', 'user.name=User', remote, cwd]);
+  const seeded = await seededTemplate();
+  await cp(seeded.remote, remote, { recursive: true });
+  await cp(seeded.work, cwd, { recursive: true });
+  const config = join(cwd, '.git', 'config');
+  await writeFile(config, (await readFile(config, 'utf8')).replace(seeded.remote, remote));
   const git = async (...args: string[]) => (await run('git', ['-C', cwd, ...args])).stdout.trim();
   const remoteGit = async (...args: string[]) => (await run('git', ['--git-dir', remote, ...args])).stdout.trim();
 
@@ -1391,20 +1396,26 @@ describe('PR 跟进：修复轮推送前验证', () => {
     expect(f.runtime.runVerification).toHaveBeenCalledOnce();
   });
 
-  it.each(['SESSION_STOPPING', 'RUNTIME_SHUTTING_DOWN', 'VERIFICATION_IN_PROGRESS', 'SESSION_RUN_CONFLICT', 'TURN_IN_PROGRESS', 'RESOURCE_REVISION_CONFLICT'])('暂时性错误 %s 不算验证失败：保持验证中，下次轮询重跑，通过后推送', async code => {
+  it('暂时性错误不算验证失败：保持验证中，下次轮询重跑，通过后推送', async () => {
     const f = await fixture({ verificationCommand: 'pnpm test' });
+    // 一条跟进依次遇到清单里的每个错误，不必为每个错误重建仓库和修复轮。
+    const codes = ['SESSION_STOPPING', 'RUNTIME_SHUTTING_DOWN', 'VERIFICATION_IN_PROGRESS', 'SESSION_RUN_CONFLICT', 'TURN_IN_PROGRESS', 'RESOURCE_REVISION_CONFLICT'];
     let calls = 0;
     f.state.verify = async (sessionId, command) => {
       calls += 1;
-      if (calls === 1) throw new RuntimeError(code, 'temporary', 409);
+      if (calls <= codes.length) throw new RuntimeError(codes[calls - 1]!, 'temporary', 409);
       return verificationRecord(sessionId, command, 'passed');
     };
     const pr = await fixRound(f);
     const notices = f.notices.length;
+    for (let rerun = 1; rerun < codes.length; rerun++) {
+      expect((await f.service.listBySession('ses_pr'))[0]).toMatchObject({ status: 'verifying' });
+      await settleAgain(f);
+    }
     expect((await f.service.listBySession('ses_pr'))[0]).toMatchObject({ status: 'verifying' });
     await settleAgain(f);
     await settleAgain(f);
-    expect(calls).toBe(2);
+    expect(calls).toBe(codes.length + 1);
     expect(f.notices.slice(notices).some(notice => notice.title.includes('验证没通过'))).toBe(false);
     expect(await f.remoteGit('rev-parse', pr.branch)).toBe((await f.service.get(pr.id))!.headSha);
   });

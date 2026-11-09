@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { agentConfigSchema, type AgentConfig } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime } from '@dutydeck/runtime';
+import './support/short-acpx-reply-drain.js';
 
 const lifecycleFixture = resolve('tests/fixtures/acp-lifecycle-agent.mjs');
 const turnFixture = resolve('tests/fixtures/process-driver-turn-agent.mjs');

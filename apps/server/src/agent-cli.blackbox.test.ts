@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import { promisify } from 'node:util';
 import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { bundleCliForTest } from '../../../tests/support/bundle-for-test.js';
 
@@ -15,11 +15,14 @@ beforeAll(async () => { ({ path: cliPath, cleanup: cleanupCli } = await bundleCl
 afterAll(async () => { await cleanupCli?.(); });
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
 
+// 打包产物十几 MB，同一文件内多次启动共用 V8 代码缓存，省掉重复解析。
+const compileCache = () => join(dirname(cliPath), 'compile-cache');
+
 // 没有服务、没有会话凭证的干净环境。
 async function invoke(args: string[]) {
   const root = await mkdtemp(join(tmpdir(), 'dutydeck-agent-cli-')); roots.push(root);
   const result = spawnSync(process.execPath, [cliPath, 'agent', ...args], {
-    cwd: root, env: { HOME: root, PATH: process.env.PATH, TMPDIR: tmpdir() }, encoding: 'utf8', timeout: 30_000
+    cwd: root, env: { HOME: root, PATH: process.env.PATH, TMPDIR: tmpdir(), NODE_COMPILE_CACHE: compileCache() }, encoding: 'utf8', timeout: 30_000
   });
   return { ...result, files: await readdir(root) };
 }
@@ -75,7 +78,7 @@ it('real CLI forwards immutable attempt credentials for legacy group, history, m
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   try {
     const address = server.address() as { port: number };
-    const env = { HOME: root, PATH: process.env.PATH, TMPDIR: tmpdir(),
+    const env = { HOME: root, PATH: process.env.PATH, TMPDIR: tmpdir(), NODE_COMPILE_CACHE: compileCache(),
       dutydeck_group_tools_url: `http://127.0.0.1:${address.port}/api/lark/agent-tools`, dutydeck_group_tools_token: 'session-capability' };
     for (const args of [['--agent-turn', 'immutable-attempt', 'group', 'messages'], ['--agent-turn', 'immutable-attempt', 'history', 'list'],
       ['--agent-turn', 'immutable-attempt', 'memory', 'add', 'User requested note'], ['--agent-turn', 'immutable-attempt', 'group', 'send', 'progress'],

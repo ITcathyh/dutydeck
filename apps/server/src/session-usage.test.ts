@@ -5,7 +5,7 @@ import { createRequire } from 'node:module';
 import { afterEach, expect, it, vi } from 'vitest';
 import { createRuntimeStore } from 'acpx/runtime';
 import { AcpxAdapter } from '@dutydeck/acp-client';
-import { buildSessionMarker, claudeProjectDirCandidates } from '@dutydeck/pty-driver';
+import { buildSessionMarker, claudeProjectDirCandidates } from '@dutydeck/pty-driver/support';
 import { createRepositories } from '@dutydeck/storage';
 import { sessionUsageSnapshot } from './session-usage.js';
 import { UsageLedger } from './usage-ledger.js';

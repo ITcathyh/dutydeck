@@ -2,12 +2,15 @@ import { createCliProgram } from './cli-program.js';
 import { execFile } from 'node:child_process';
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
+import { lazyBundleForTest } from '../../../tests/support/bundle-for-test.js';
 import { RelayAskBroker, RelayError, relayHintLines, type RelayAskChoice } from '@dutydeck/relay';
 import { askOutput, runSessionAsk, runSessionReport } from './relay-cli.js';
 
 const workspace = fileURLToPath(new URL('../../../', import.meta.url));
-const cli = fileURLToPath(new URL('./cli.ts', import.meta.url));
+// 真实 CLI 跑打包版，不让每次调用都经 TypeScript 加载器冷启动。
+const cli = lazyBundleForTest('relay-cli', fileURLToPath(new URL('./cli.ts', import.meta.url)));
+afterAll(() => cli.cleanup());
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const close of cleanup.splice(0)) await close(); });
 
@@ -43,13 +46,13 @@ async function harness() {
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
   });
   const address = server.address() as { port: number };
-  const invoke = (args: string[]) => new Promise<{ code: number; stdout: string; stderr: string }>(resolve => {
-    execFile(process.execPath, ['--import', 'tsx', cli, 'session', 'ask', '选哪个方案？', ...args], {
+  const invoke = async (args: string[]) => { const entry = await cli.path(); return await new Promise<{ code: number; stdout: string; stderr: string }>(resolve => {
+    execFile(process.execPath, [entry, 'session', 'ask', '选哪个方案？', ...args], {
       cwd: workspace,
-      env: { ...process.env, NODE_OPTIONS: '--conditions=development', dutydeck_relay_url: `http://127.0.0.1:${address.port}/api/relay`, dutydeck_relay_token: 'fixture-token' },
+      env: { ...process.env, dutydeck_relay_url: `http://127.0.0.1:${address.port}/api/relay`, dutydeck_relay_token: 'fixture-token' },
       timeout: 12_000
     }, (error, stdout, stderr) => resolve({ code: error ? typeof error.code === 'number' ? error.code : -1 : 0, stdout, stderr }));
-  });
+  }); };
   // 同进程走真实 HTTP 与 broker；子进程启动只留给需要验证 cli.ts 输出与退出码的用例。
   const env = { dutydeck_relay_url: `http://127.0.0.1:${address.port}/api/relay`, dutydeck_relay_token: 'fixture-token' };
   const ask = (options: Parameters<typeof runSessionAsk>[1]) => runSessionAsk('选哪个方案？', options, { env });

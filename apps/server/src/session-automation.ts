@@ -71,7 +71,7 @@ import {
   type PublicSchedulePrecondition,
   type SchedulePreconditionInput
 } from '@dutydeck/shared';
-import { executionTaskId } from '@dutydeck/storage';
+import { executionTaskId } from '@dutydeck/storage/helpers';
 import { CiProviderRegistry, ciProviderLabel, resolveCiHead, type CiHead } from './ci-providers.js';
 import type { CiWebhookService } from './ci-webhook.js';
 import type { PullRequestService } from './pull-requests.js';
@@ -219,6 +219,8 @@ export interface SessionAutomationServiceOptions {
   /** 计划可选择每次启动一个已保存的工作项模板；启动沿用模板启动的权限与确认规则。 */
   workTemplates?: ScheduleWorkTemplates;
   clock?: () => Date;
+  /** Milliseconds counted as one configured pre-check timeout second. */
+  preconditionSecondMs?: number;
   pollIntervalMs?: number;
 }
 
@@ -2207,7 +2209,7 @@ export class SessionAutomationService {
       }).catch(() => { controller.abort(); });
     }, CLAIM_TTL_MS / 3);
     let result: Awaited<ReturnType<typeof runIsolatedCommand>>;
-    try { result = await runIsolatedCommand(precondition.command!, cwd, { timeoutMs: timeoutSeconds * 1_000, maxOutputBytes: SCHEDULE_PRECONDITION_MAX_OUTPUT_BYTES, signal: controller.signal }); }
+    try { result = await runIsolatedCommand(precondition.command!, cwd, { timeoutMs: timeoutSeconds * (this.options.preconditionSecondMs ?? 1_000), maxOutputBytes: SCHEDULE_PRECONDITION_MAX_OUTPUT_BYTES, signal: controller.signal }); }
     finally {
       clearInterval(timer);
       this.preconditionAbort.signal.removeEventListener('abort', onClose);

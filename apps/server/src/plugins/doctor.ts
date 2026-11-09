@@ -1,4 +1,4 @@
-import { observeProcess } from '@dutydeck/storage';
+import { observeProcess } from '@dutydeck/storage/helpers';
 import type { DoctorCheck } from '../doctor/types.js';
 import { pluginHostLeases } from './activation.js';
 import { listBuiltinPlugins } from './builtin.js';

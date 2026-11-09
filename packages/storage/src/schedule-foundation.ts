@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
 import { cachedStatement } from './statement-cache.js';
+import { scheduleWriterLeaseKey } from './helpers.js';
 import { createHash } from 'node:crypto';
 import {
   RuntimeError,
@@ -77,7 +78,7 @@ interface VersionRow { before_json: string | null; after_hash: string }
 
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const bounded = (limit = 200) => Math.max(1, Math.min(500, Number.isFinite(limit) ? Math.trunc(limit) : 200));
-export const scheduleWriterLeaseKey = (channelBotId: string) => `schedule_writer:${channelBotId}`;
+export { scheduleWriterLeaseKey };
 
 function triggerFromRow(row: DefinitionRow): ScheduleDefinition['trigger'] {
   if (row.trigger_kind === 'at') return { kind: 'at', localDateTime: row.at_local_datetime! };

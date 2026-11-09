@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { errorMessage as errorText, installationOwnerTaskActor, now as time, parseLarkSourceId, RuntimeError, type RepositoryBundle, type Session, type WorkItem, type WorkPlan } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import type { RelayAskBroker } from '@dutydeck/relay';
-import { testRegexWithTimeout } from '@dutydeck/acp-client';
+import { testRegexWithTimeout } from '@dutydeck/acp-client/regex-timeout';
 import { readBoundedBytes } from './bounded-file.js';
 import { sha256Hex as hash } from './hash.js';
 import { defaultHighRiskPattern, larkPermissionMode, readLarkConfig, type StoredLarkConfig } from './lark/config.js';

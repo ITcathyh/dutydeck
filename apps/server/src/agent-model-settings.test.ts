@@ -2,6 +2,7 @@ import { chmod, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
+import '../../../tests/support/short-acpx-reply-drain.js';
 import { createRuntimeStore } from 'acpx/runtime';
 import { createRepositories } from '@dutydeck/storage';
 import { agentConfigSchema } from '@dutydeck/shared';
@@ -120,7 +121,9 @@ it.each(['bearer', 'api-key'] as const)('injects %s credentials using a real Acp
   let adapter: AcpxAdapter | undefined;
   try {
     let nativeId: string | undefined;
-    for (let pass = 0; pass < 2; pass++) {
+    // 重新打开同一会话两种认证走的是同一路径；只在 bearer 多跑一轮，api-key 的重开由分机器人用例覆盖。
+    const passes = authMode === 'bearer' ? 2 : 1;
+    for (let pass = 0; pass < passes; pass++) {
       adapter = new AcpxAdapter(config, { sessionKey, onEvent() {} });
       await adapter.start(); await adapter.send('hello'); await adapter.stop();
       const record = (await createRuntimeStore({ stateDir: join(cwd, '.dutydeck', 'acpx') }).load(sessionKey))!;
@@ -130,7 +133,7 @@ it.each(['bearer', 'api-key'] as const)('injects %s credentials using a real Acp
       else expect(record.acpSessionId).toBe(nativeId);
     }
     const reports = (await readFile(output, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
-    expect(reports.length).toBeGreaterThanOrEqual(2);
+    expect(reports.length).toBeGreaterThanOrEqual(passes);
     for (const report of reports) expect(report).toEqual({ key: authMode === 'api-key' ? 'ACP_KEY_CANARY' : '', token: authMode === 'bearer' ? 'ACP_KEY_CANARY' : '', base: 'https://gateway.example', oauth: '', cloud: '0' });
   } finally { await adapter?.stop(); }
 });

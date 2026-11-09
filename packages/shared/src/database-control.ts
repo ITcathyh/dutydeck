@@ -15,4 +15,6 @@ export interface RepositoryOpenOptions {
   newDatabaseAuthority?: 'legacy' | 'ledger_v1';
   /** Called with the migration duration (ms) when this open ran schema migrations; startup timing only. */
   onMigrated?: (ms: number) => void;
+  /** How long this open waits on a locked SQLite file, in ms; defaults to the driver's 5 seconds. */
+  busyTimeoutMs?: number;
 }

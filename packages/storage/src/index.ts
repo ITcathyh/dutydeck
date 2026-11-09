@@ -162,7 +162,7 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
   }
   const control = openDatabaseControl(filename, options);
   let sqlite: Database.Database;
-  try { sqlite = new Database(filename); } catch (error) { control.close(); throw error; }
+  try { sqlite = new Database(filename, { timeout: options.busyTimeoutMs ?? 5_000 }); } catch (error) { control.close(); throw error; }
   try {
     sqlite.pragma('foreign_keys = ON');
     const migrate = needsMigration(sqlite) || control.needsRecovery();

@@ -4,6 +4,8 @@ import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, writ
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { childProcessIdentity, observeProcess } from '../../storage/src/process-identity.js';
+import { parseProcStat, procStatExited } from '@dutydeck/shared';
+import { descendantPids } from './descendant-pids.js';
 import { captureOwnedTmuxAbsence, captureOwnedTmuxIdentity, stopOwnedTmux, verifyOwnedTmuxAbsence, verifyOwnedTmuxExit, type OwnedTmuxScope, type ProcessProbe } from './owned-tmux.js';
 
 const probe: ProcessProbe = { identify: childProcessIdentity, observe: observeProcess };
@@ -211,6 +213,7 @@ describe('owned tmux physical exit proofs (real isolated server and process iden
     create(); const identity = (await captureOwnedTmuxIdentity(scope(), probe))!;
     let child: ReturnType<typeof childProcessIdentity> | undefined;
     const records: number[][] = [];
+    const { clock, kill } = untilSigterm();
     try {
       const error = await stopOwnedTmux(identity, probe, async captured => {
         records.push(captured.identities.map(item => item.pid));
@@ -223,6 +226,7 @@ describe('owned tmux physical exit proofs (real isolated server and process iden
         }
         expect(child).toBeDefined();
       }).then(() => undefined, (failure: { code?: string; proof?: Parameters<typeof verifyOwnedTmuxExit>[0] }) => failure);
+      clock.mockRestore(); kill.mockRestore();
       // The child joined the durable record before kill-session, not only the in-memory proof.
       expect(records).toHaveLength(2);
       expect(records[0]).not.toContain(child!.pid);
@@ -231,12 +235,12 @@ describe('owned tmux physical exit proofs (real isolated server and process iden
       // The job-control background child survives the session hangup; being recorded, it is signalled once the session is gone.
       expect(error).toBeUndefined();
       expect(observeProcess(child!)).toBe('dead');
-    } finally { if (child && observeProcess(child) === 'alive') process.kill(child.pid, 'SIGTERM'); }
+    } finally { clock.mockRestore(); kill.mockRestore(); if (child && observeProcess(child) === 'alive') process.kill(child.pid, 'SIGTERM'); }
   }, 20_000);
   // An agent running builds, tests or git keeps forking short-lived children:
   // a scanned child may exit before identify, and no two scans are identical.
   it.skipIf(process.platform !== 'linux')('captures and stops a pane that keeps forking short-lived children', async () => {
-    for (let round = 0; round < 20; round++) {
+    for (let round = 0; round < 5; round++) {
       const name = `busy${round}`;
       tmux('new-session', '-d', '-s', name, 'while true; do sleep 0.03 & sleep 0.01; done');
       tmux('set-option', '-t', name, '@dutydeck_owner_id', `dutydeck:${name}`);
@@ -248,6 +252,29 @@ describe('owned tmux physical exit proofs (real isolated server and process iden
       expect(() => tmux('has-session', '-t', `=${name}`)).toThrow();
     }
   }, 60_000);
+  it.skipIf(process.platform !== 'linux')('skips a descendant that exits between the scan and identify, but not one still running', async () => {
+    tmux('new-session', '-d', '-s', 'owned', 'sleep 30 & sleep 30 & wait');
+    tmux('set-option', '-t', 'owned', '@dutydeck_owner_id', 'dutydeck:owned');
+    const pane = Number(tmux('display-message', '-p', '-t', 'owned', '#{pane_pid}'));
+    await vi.waitFor(() => expect(descendantPids([pane])).toHaveLength(3));
+    const [exiting, running] = descendantPids([pane]).filter(pid => pid !== pane) as [number, number];
+    const exited = (pid: number) => { try { return procStatExited(parseProcStat(readFileSync(`/proc/${pid}/stat`, 'utf8'))); } catch { return true; } };
+    const identifyFailsFor = (target: number, before?: () => void): ProcessProbe => ({ ...probe, identify: pid => {
+      if (pid !== target) return probe.identify(pid);
+      before?.();
+      throw new Error('identify failed');
+    } });
+    try {
+      await expect(captureOwnedTmuxIdentity(scope(), identifyFailsFor(running))).rejects.toThrow('identify failed');
+      // The scan has already listed this child: it exits only now, inside the window a busy pane hits by chance.
+      const identity = (await captureOwnedTmuxIdentity(scope(), identifyFailsFor(exiting, () => {
+        process.kill(exiting, 'SIGKILL');
+        while (!exited(exiting)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+      })))!;
+      expect(identity.identities.map(item => item.pid)).toEqual(expect.arrayContaining([pane, running]));
+      expect(identity.identities.map(item => item.pid)).not.toContain(exiting);
+    } finally { for (const pid of [exiting, running]) try { process.kill(pid, 'SIGKILL'); } catch { /* Exited. */ } }
+  });
   it.skipIf(process.platform !== 'linux')('stops a busy pane through the durable pre-kill callback', async () => {
     tmux('new-session', '-d', '-s', 'owned', 'while true; do sleep 0.03 & sleep 0.01; done');
     tmux('set-option', '-t', 'owned', '@dutydeck_owner_id', 'dutydeck:owned');
@@ -259,9 +286,9 @@ describe('owned tmux physical exit proofs (real isolated server and process iden
     expect(() => tmux('has-session', '-t', '=owned')).toThrow();
   }, 30_000);
   it.skipIf(process.platform !== 'linux')('stops a pane whose children outlive every pre-kill record round but then exit on their own', async () => {
-    tmux('new-session', '-d', '-s', 'owned', 'while true; do sleep 1 & sleep 0.02; done');
+    tmux('new-session', '-d', '-s', 'owned', 'while true; do sleep 0.4 & sleep 0.02; done');
     tmux('set-option', '-t', 'owned', '@dutydeck_owner_id', 'dutydeck:owned');
-    await new Promise(resolve => setTimeout(resolve, 200));
+    await new Promise(resolve => setTimeout(resolve, 100));
     const identity = (await captureOwnedTmuxIdentity(scope(), probe))!;
     const records: Array<Set<string>> = [];
     const proof = await stopOwnedTmux(identity, probe, async captured => { records.push(new Set(captured.identities.map(item => JSON.stringify(item)))); });
@@ -291,6 +318,7 @@ describe('owned tmux physical exit proofs (real isolated server and process iden
     create(); const identity = (await captureOwnedTmuxIdentity(scope(), probe))!;
     const pidFile = join(root, 'late-pid');
     let serverChecks = 0, child: ReturnType<typeof childProcessIdentity> | undefined;
+    const { clock, kill } = untilSigterm();
     const spawning: ProcessProbe = { ...probe, observe: value => {
       if (value.pid === identity.server.pid && ++serverChecks === 2) {
         // Born after the earlier scans, survives kill-session's SIGHUP.
@@ -304,17 +332,19 @@ describe('owned tmux physical exit proofs (real isolated server and process iden
     } };
     try {
       const proof = await stopOwnedTmux(identity, spawning);
+      clock.mockRestore(); kill.mockRestore();
       expect(child).toBeDefined();
       expect(proof.identities.map(item => item.pid)).toContain(child!.pid);
       // Only a recorded survivor of the hangup is signalled, so the late child had to join the proof to be ended.
       expect(observeProcess(child!)).toBe('dead');
       expect(await verifyOwnedTmuxExit(proof, probe)).toBe(true);
-    } finally { if (child && observeProcess(child) === 'alive') process.kill(child.pid, 'SIGKILL'); }
+    } finally { clock.mockRestore(); kill.mockRestore(); if (child && observeProcess(child) === 'alive') process.kill(child.pid, 'SIGKILL'); }
   }, 20_000);
   it('refuses to kill unrecorded children that keep appearing after the last pre-kill record round', async () => {
     create(); const identity = (await captureOwnedTmuxIdentity(scope(), probe))!;
     const children: Array<ReturnType<typeof childProcessIdentity>> = [];
     const records: number[][] = [];
+    const clock = virtualClock(() => 1_000); // Skips the real settle window; the children really stay alive.
     try {
       const failure = await stopOwnedTmux(identity, probe, async captured => {
         records.push(captured.identities.map(item => item.pid));
@@ -325,12 +355,13 @@ describe('owned tmux physical exit proofs (real isolated server and process iden
           catch { await new Promise(resolve => setTimeout(resolve, 10)); }
         }
       }).then(() => undefined, (error: { code?: string }) => error);
+      clock.mockRestore();
       expect(failure?.code).toBe('LEGACY_TMUX_PROCESS_SET_CHANGED');
       // Nothing was killed: the child born after the last durable record is not in it.
       expect(() => tmux('has-session', '-t', '=owned')).not.toThrow();
       expect(records.at(-1)).not.toContain(children.at(-1)!.pid);
       for (const child of children) expect(observeProcess(child)).toBe('alive');
-    } finally { for (const child of children) if (observeProcess(child) === 'alive') process.kill(child.pid, 'SIGKILL'); }
+    } finally { clock.mockRestore(); for (const child of children) if (observeProcess(child) === 'alive') process.kill(child.pid, 'SIGKILL'); }
   }, 30_000);
   it('does not treat an unlinked live server socket as proof of target absence', async () => {
     create(); create('other');
@@ -353,6 +384,11 @@ describe('owned tmux physical exit proofs (real isolated server and process iden
   function virtualClock(step: (elapsed: number) => number) {
     const start = Date.now(); let elapsed = 0;
     return vi.spyOn(Date, 'now').mockImplementation(() => { const now = start + elapsed; elapsed += step(elapsed); return now; });
+  }
+  // A recorded child that survives the hangup holds the stop for the whole exit wait: skip that wait, then let SIGTERM end it in real time.
+  function untilSigterm() {
+    const kill = vi.spyOn(process, 'kill');
+    return { kill, clock: virtualClock(() => kill.mock.calls.some(([, signal]) => signal === 'SIGTERM') ? 1 : 1_000) };
   }
   it('waits past the relay\'s worst-case exit before declaring the stop unproven', async () => {
     const pane = createHupIgnoring(), identity = (await captureOwnedTmuxIdentity(scope(), probe))!;

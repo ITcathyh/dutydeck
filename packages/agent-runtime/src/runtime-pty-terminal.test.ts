@@ -13,6 +13,8 @@ const releases: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const release of releases.splice(0).reverse()) await release(); });
 const line = (record: unknown) => JSON.stringify(record) + '\n';
 const thread = '11111111-1111-4111-8111-111111111111';
+// Waits below are several idle cycles and drain windows long, so a late settle still fails.
+const timings = { quiescenceMs: 100, spinnerGuardMs: 100, terminalDrainMs: 300 };
 const record = (type: string, turnId: string, extra: Record<string, unknown> = {}) => ({ type: 'event_msg', timestamp: new Date().toISOString(), payload: { type, turn_id: turnId, ...extra } });
 async function fixture(kind: 'codex' | 'traex') {
   const dir = mkdtempSync(join(tmpdir(), 'dd-runtime-pty-terminal-'));
@@ -36,7 +38,7 @@ async function fixture(kind: 'codex' | 'traex') {
         writes.push(prompt); currentTurn = `native-turn-${writes.length}`;
         appendFileSync(join(root, 'history.jsonl'), line({ session_id: thread, ts: Date.now() / 1000, text: prompt }));
         appendFileSync(path, line(record('task_started', currentTurn)) + line(record('user_message', currentTurn, { message: prompt })));
-      } }, backend, sessionId, onEvent, onExit });
+      } }, backend, sessionId, onEvent, onExit, timings });
       drivers.push(driver); return driver;
     },
   });
@@ -104,7 +106,7 @@ it.each(['codex', 'traex'] as const)('%s waits past the legacy terminal grace fo
   const h = await fixture(kind), { pending } = await h.send();
   appendFileSync(h.path, line({ type: 'response_item', payload: { type: 'message', role: 'assistant', phase: 'final', content: [{ type: 'output_text', text: 'partial before terminal' }] } }));
   h.paint(kind === 'traex' ? 'partial before terminal\n❯ Ask TraeCode CLI\nContext 100% left' : 'partial before terminal\n› \n100% context left');
-  await new Promise(resolve => setTimeout(resolve, 4_600));
+  await new Promise(resolve => setTimeout(resolve, 1_000));
   expect((await h.runtime.getTasks(h.session.id)).at(-1)?.status).toBe('running');
   appendFileSync(h.path, line(record('task_complete', h.turn(), { last_agent_message: 'partial before terminal', error: { message: 'late backend error' } })));
   const task = await pending; expect(task.status).toBe('failed');
@@ -115,7 +117,7 @@ it.each(['codex', 'traex'] as const)('%s settles a late empty success terminal a
   const h = await fixture(kind), { pending } = await h.send();
   appendFileSync(h.path, line({ type: 'response_item', payload: { type: 'message', role: 'assistant', phase: 'final', content: [{ type: 'output_text', text: 'complete answer' }] } }));
   h.paint(kind === 'traex' ? 'complete answer\n❯ Ask TraeCode CLI\nContext 100% left' : 'complete answer\n› \n100% context left');
-  await new Promise(resolve => setTimeout(resolve, 2_500));
+  await new Promise(resolve => setTimeout(resolve, 1_000));
   expect((await h.runtime.getTasks(h.session.id)).at(-1)?.status).toBe('running');
   appendFileSync(h.path, line(record('task_complete', h.turn(), { last_agent_message: '' })));
   const task = await pending; expect(task.status).toBe('completed');

@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
-import type { Browser, BrowserContext } from '@playwright/test';
+import type { Browser, BrowserContext, Page } from '@playwright/test';
 
 const pExecFile = promisify(execFile);
 
@@ -18,6 +18,14 @@ export async function withTimeout<T>(promise: Promise<T>, ms: number, label: str
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+/** Toasts sit on top of the save bar; a click would otherwise wait until each one expires. */
+export async function closeToasts(page: Page): Promise<void> {
+  const close = page.getByRole('button', { name: /^关闭通知：/ });
+  await close.first().waitFor();
+  // A toast can expire between count and click; the short timeout keeps that from failing the run.
+  while (await close.count()) await close.first().click({ timeout: 1_000 }).catch(() => {});
 }
 
 export interface E2ERunMetadata {

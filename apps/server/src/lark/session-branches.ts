@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { getCliAdapter } from '@dutydeck/cli-adapters';
-import { resolveCliSessionId } from '@dutydeck/pty-driver';
+import { resolveCliSessionId } from '@dutydeck/pty-driver/support';
 import { childEnvironment } from '@dutydeck/shared/child-environment';
 import { supportsNativeFork, type AgentConfig, type Session } from '@dutydeck/shared';
 

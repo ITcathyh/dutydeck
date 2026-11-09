@@ -17,7 +17,7 @@
  */
 import { createHash, randomBytes } from 'node:crypto';
 import { RuntimeError, type MemoryJob, type MemoryJobRepository, type MemoryJobVersion, type JsonValue, type ConfigRepository, type LarkGroupMemoryScope } from '@dutydeck/shared';
-import { memoryJobVersionDigest } from '@dutydeck/storage';
+import { memoryJobVersionDigest } from '@dutydeck/storage/helpers';
 import { relevance } from './text-relevance.js';
 import { redactTraceText } from './secret-redaction.js';
 

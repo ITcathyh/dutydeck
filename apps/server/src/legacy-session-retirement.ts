@@ -1,10 +1,11 @@
 import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { isAbsolute, join, relative } from 'node:path';
-import { digest } from '@dutydeck/runtime';
+import { digest } from '@dutydeck/runtime/digest';
 import { type LegacyRetirementCandidate, type LegacyRetirementReceipt } from '@dutydeck/shared';
-import { captureOwnedTmuxIdentity, dutydeckPtySessionName, stopOwnedTmux, type OwnedTmuxExitProof } from '@dutydeck/pty-driver';
-import { childProcessIdentity, observeProcess } from '@dutydeck/storage';
+import type { OwnedTmuxExitProof } from '@dutydeck/pty-driver';
+import { captureOwnedTmuxIdentity, dutydeckPtySessionName, stopOwnedTmux } from '@dutydeck/pty-driver/support';
+import { childProcessIdentity, observeProcess } from '@dutydeck/storage/helpers';
 
 export interface LegacyRetirementVerificationOptions {
   hostname: string;

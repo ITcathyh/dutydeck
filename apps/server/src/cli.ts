@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { createCliProgram, environmentFromCli, type CliOptions } from './cli-program.js';
 import { runLarkSend, runLarkUpdate } from './lark/cli.js';
 import { runLarkCreate } from './lark/create-cli.js';
-import { PTY_AGENT_CONTRIBUTIONS } from '@dutydeck/pty-driver';
+import { PTY_AGENT_CONTRIBUTIONS } from '@dutydeck/pty-driver/support';
 import { acpkPassThroughArgs, runAcpk } from './acpk.js';
 import { runWorkCommand } from './work-item-cli.js';
 import { AgentCliError, agentCliErrorBody, runAgentCli } from './agent-cli.js';

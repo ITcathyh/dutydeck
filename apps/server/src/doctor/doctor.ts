@@ -31,7 +31,7 @@ import { dirname, resolve } from 'node:path';
 import { parseEnv } from 'node:util';
 import { loadConfigWithDiagnostics } from '@dutydeck/config';
 import { errorMessage } from '@dutydeck/shared';
-import { PTY_AGENT_CONTRIBUTIONS } from '@dutydeck/pty-driver';
+import { PTY_AGENT_CONTRIBUTIONS } from '@dutydeck/pty-driver/support';
 import { daemonDatabasePath, daemonStatus } from '../daemon/command.js';
 import { daemonPaths, readDaemonStatus, resolveDaemonDir } from '../daemon/daemon.js';
 import { abnormalExitNote, readAbnormalExit } from '../abnormal-exit.js';

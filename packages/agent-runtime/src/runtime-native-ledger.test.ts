@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 import { agentConfigSchema } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime } from './index.js';
+import '../../../tests/support/short-acpx-reply-drain.js';
 
 const releases: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const release of releases.splice(0).reverse()) await release(); });

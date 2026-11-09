@@ -4,9 +4,12 @@ import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, describe, expect, it } from 'vitest';
+import { lazyBundleForTest } from '../../../tests/support/bundle-for-test.js';
 
 const exec=promisify(execFile);
+const cli=lazyBundleForTest('herdr-cli',resolve('apps/server/src/cli.ts'));
+afterAll(()=>cli.cleanup());
 const cleanup:Array<()=>Promise<void>>=[];
 afterEach(async()=>{for(const close of cleanup.splice(0).reverse())await close();});
 async function fixture() {
@@ -22,7 +25,7 @@ async function fixture() {
   });await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));
   cleanup.push(()=>new Promise<void>((resolve,reject)=>server.close(error=>error?reject(error):resolve())));
   const env={...process.env,HOME:join(cwd,'different-home'),XDG_CONFIG_HOME:join(cwd,'different-config'),HERDR_SOCKET_PATH:'/user/default.sock',HERDR_SESSION:'default',HERDR_ENV:'1',HERDR_PANE_ID:'user:p1',HERDR_CUSTOM:'outer',dutydeck_relay_url:`http://127.0.0.1:${(server.address() as {port:number}).port}/api/relay`,dutydeck_relay_token:'fixture-token'};
-  const invoke=(args:string[])=>exec(process.execPath,['--import','tsx',resolve('apps/server/src/cli.ts'),'session','herdr','--',...args],{env,cwd:process.cwd()});
+  const invoke=async(args:string[])=>exec(process.execPath,[await cli.path(),'session','herdr','--',...args],{env,cwd:process.cwd()});
   return {invoke,requests,socket,env};
 }
 describe('real session herdr CLI boundary',()=>{

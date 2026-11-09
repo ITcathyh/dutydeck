@@ -8,7 +8,7 @@ import type { AgentConfig, DriverTurnRecovery, NormalizedDriverEvent } from '@du
 import { DriverDetachedError, DriverRecoveryError } from '@dutydeck/shared';
 import { createCliAdapter, pinnedSessionUuid, type CliAdapter, type PtyLike } from '@dutydeck/cli-adapters';
 import { TmuxBackend, isTmuxAvailable, type SessionBackend } from '@dutydeck/session-backends';
-import { childProcessIdentity, observeProcess } from '@dutydeck/storage';
+import { childProcessIdentity, observeProcess } from '@dutydeck/storage/helpers';
 import { buildSessionMarker } from './session-id/index.js';
 import { PtyCliDriver } from './driver.js';
 
@@ -231,12 +231,14 @@ tmuxDescribe('PtyCliDriver in-flight tmux turn recovery', () => {
       agent: config(f.cwd), adapter: { ...createCliAdapter('claude-code')!, buildArgs: () => [], prepareInput: undefined },
       backend: new TmuxBackend(f.name, { ownerId: f.ownerId }),
       onEvent: event => events.push(event), onExit() {}, sessionId,
+      timings: { quiescenceMs: 100, spinnerGuardMs: 100, terminalDrainMs: 300 },
     });
     let settled = false;
     const recovering = recovered.recover(checkpoint).then(() => { settled = true; }, error => error);
     try {
       await waitFor(() => expect(events.some(event => event.type === 'tool_call')).toBe(true));
-      await new Promise(resolve => setTimeout(resolve, 10_500));
+      // Several idle cycles and the whole terminal-drain window pass without closing the turn.
+      await new Promise(resolve => setTimeout(resolve, 1_500));
       expect(events.filter(event => event.type === 'completed')).toEqual([]);
       expect(settled).toBe(false);
     } finally {

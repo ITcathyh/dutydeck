@@ -20,12 +20,13 @@ const adapter = () => ({ ...createCliAdapter('claude-code'), prepareInput: undef
 const agent = (cwd: string) => agentConfigSchema.parse({ id: 'claude-code', name: 'fixture', command: process.execPath, args: [], cwd,
   env: { HOME: cwd, CLAUDE_CONFIG_DIR: cwd }, permissionMode: 'full-trust', timeout: 30, protocol: 'pty-cli', capabilities: { resume: true } });
 const latest = (repos: ReturnType<typeof createRepositories>, id: string) => repos.insight.listSources(id).filter(source => source.client === 'claude' && source.proofKind === 'launch_observed' && source.identityProof?.startsWith('pty-claude-process-v1:')).at(-1);
+const timings = { nativeDiscoveryRetryMs: 100, nativeObservationRetryMs: 100 };
 const launches = (cwd: string) => readFileSync(join(cwd, 'launches.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
 
 describe.skipIf(process.platform !== 'linux')('Claude native process integration', () => {
   it('an active native rotation rejects the old attempt, never resends, and the next input belongs to the new session', async () => {
     const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'dd-claude-active-'))), backend = new PtyBackend(), events: NormalizedDriverEvent[] = [];
-    const driver = new PtyCliDriver({ agent: agent(cwd), adapter: adapter(), backend, processProbe: probe, sessionId: 'ses_rotation_active', onEvent: event => events.push(event), onExit() {} });
+    const driver = new PtyCliDriver({ agent: agent(cwd), adapter: adapter(), backend, processProbe: probe, sessionId: 'ses_rotation_active', onEvent: event => events.push(event), onExit() {}, timings });
     try {
       await driver.start();
       await vi.waitFor(() => expect(launches(cwd)).toHaveLength(1), { timeout: 6_000 });
@@ -50,7 +51,7 @@ describe.skipIf(process.platform !== 'linux')('Claude native process integration
     const configured = agent(cwd);
     if (phase === 'undiscovered') configured.env.FIXTURE_DEFER_NATIVE_STATE = '1';
     const driver = new PtyCliDriver({ agent: configured, adapter: adapter(), backend: new TmuxBackend(name, { ownerId: 'dutydeck:race' }),
-      processProbe: probe, sessionId: 'ses_stop_race', onEvent() {}, onExit() {} });
+      processProbe: probe, sessionId: 'ses_stop_race', onEvent() {}, onExit() {}, timings });
     driver.subscribeTranscriptSource(source => sources.push(source));
     try {
       await driver.start(); await driver.send('first');
@@ -102,7 +103,7 @@ describe.skipIf(process.platform !== 'linux')('Claude native process integration
       ptyDriverFactory: (configured, _protocol, onEvent, onExit, sessionId) => {
         backend = new TmuxBackend(`native-${sessionId}`, { ownerId: `dutydeck:${sessionId}` });
         return new PtyCliDriver({ agent: configured, adapter: adapter(), backend, processProbe: probe, sessionId, onEvent, onExit,
-          claudeResumeSource: latest(repos, sessionId) });
+          claudeResumeSource: latest(repos, sessionId), timings });
       },
     });
     try {
@@ -128,9 +129,10 @@ describe.skipIf(process.platform !== 'linux')('Claude native process integration
       if (failPersistence) {
         liveDriver.confirmTranscriptSource(oldObservation.observationId); // late ACK for A must not confirm B.
         await vi.waitFor(() => expect(failedWrites).toBeGreaterThan(0));
-        await new Promise(resolve => setTimeout(resolve, 4_200));
+        // Each retry fires on a 300ms tail tick once its back-off expires: three of them fit in 1.5s.
+        await new Promise(resolve => setTimeout(resolve, 1_500));
         const attempts = failedWrites;
-        await new Promise(resolve => setTimeout(resolve, 1_100));
+        await new Promise(resolve => setTimeout(resolve, 700));
         expect(failedWrites).toBe(attempts); // bounded retries, not an infinite write/log loop.
         expect(latest(repos, session.id)?.nativeSessionId).toBe(oldObservation.nativeSessionId);
         await runtime.cleanupIdleDrivers(Date.now() + 7 * 60 * 60_000);

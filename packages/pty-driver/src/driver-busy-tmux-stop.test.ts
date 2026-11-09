@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { TmuxBackend, isTmuxAvailable, type ProcessProbe } from '@dutydeck/session-backends';
-import { childProcessIdentity, observeProcess } from '@dutydeck/storage';
+import { childProcessIdentity, observeProcess } from '@dutydeck/storage/helpers';
 import type { AgentConfig } from '@dutydeck/shared';
 import { PtyCliDriver } from './driver.js';
 

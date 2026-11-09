@@ -3,8 +3,8 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { childProcessIdentity, observeProcess } from '@dutydeck/storage';
-import { dutydeckPtySessionName } from '@dutydeck/pty-driver';
+import { childProcessIdentity, observeProcess } from '@dutydeck/storage/helpers';
+import { dutydeckPtySessionName } from '@dutydeck/pty-driver/support';
 import type { Session } from '@dutydeck/shared';
 import { createPtyRetirementControl } from './pty-recovery.js';
 

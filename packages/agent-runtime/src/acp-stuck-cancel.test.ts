@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
 import type { AgentConfig } from '@dutydeck/shared';
 import { DutydeckRuntime } from './index.js';
+import '../../../tests/support/short-acpx-reply-drain.js';
 
 const installationOwner = { kind: 'installation_owner', id: 'installation_owner' } as const;
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };

@@ -6,7 +6,7 @@ import { botFields, runSettingsCli, type SettingsAction, type SettingsCliInput }
 import { readLarkConfig } from '../apps/server/src/lark/config.js';
 import type { LarkListenerPool } from '../apps/server/src/lark/listener.js';
 import { createLarkManagementHarness } from './lark-management-harness.mts';
-import { ArtifactLogger, captureBrowserArtifacts, getGitMetadata, installTermination, resolveArtifactDir, withTimeout } from './lark-e2e-shared.mts';
+import { ArtifactLogger, captureBrowserArtifacts, closeToasts, getGitMetadata, installTermination, resolveArtifactDir, withTimeout } from './lark-e2e-shared.mts';
 
 // This tests configuration delivery, not provider behavior or Feishu rendering.
 // Platform HTTP, listener, ACP executable and native trust RPC are substitutes.
@@ -231,7 +231,7 @@ async function browserChecks() {
   await set({ permissionMode: 'ask', defaultAgentId: 'codex', listening: false, riskControlMode: 'off', memoryEnabled: false, adhdMode: false, busyTriage: false });
   browser = await chromium.launch({ headless: true });
   context = await browser.newContext({ viewport: { width: 1440, height: 1100 } });
-  await context.tracing.start({ screenshots: true, snapshots: true });
+  if (process.env.CI) await context.tracing.start({ screenshots: true, snapshots: true });
   page = await context.newPage();
   page.setDefaultTimeout(15_000);
   page.setDefaultNavigationTimeout(15_000);
@@ -281,6 +281,7 @@ async function browserChecks() {
   await expect(page.getByLabel('角色名称', { exact: true })).toHaveValue('并发服务端值');
   passed('real API revision conflict preserves the browser draft and explicit reload restores current values');
 
+  await closeToasts(page);
   const draftWorkspace = resolve(harness!.directory, 'hook-draft');
   await mkdir(draftWorkspace);
   await nativeTrust(false);
@@ -292,8 +293,10 @@ async function browserChecks() {
   await save().click(); assert.equal((await failedSave).status(), 409);
   await expect(page.getByLabel('默认工作目录', { exact: true })).toHaveValue(draftWorkspace);
   await expect(page.getByText('别人刚改过这个机器人的配置', { exact: true })).toHaveCount(0);
+  await closeToasts(page);
   const hookResponse = page.waitForResponse(response => response.request().method() === 'POST' && response.url().endsWith('/api/lark/hooks/install'));
   await page.getByRole('button', { name: '配置拦截 Hook', exact: true }).click(); assert.equal((await hookResponse).status(), 200);
+  await closeToasts(page);
   assert.deepEqual(await bot(), beforeHook, 'browser hook preparation must preserve saved config/revision');
   assert((await readFile(resolve(draftWorkspace, '.codex/hooks.json'), 'utf8')).includes('dutydeck-lark-high-risk-guard-codex.mjs'));
   assert.equal((await request('GET', `/api/lark/hooks/status?appId=${appId}&agentId=codex-acp&workspace=${encodeURIComponent(draftWorkspace)}`)).nativeReady, false);
@@ -302,6 +305,7 @@ async function browserChecks() {
   assert.equal((await untrustedSave).status(), 409, 'installed but untrusted native hook must still prevent save');
   assert.deepEqual(await bot(), beforeHook);
   await expect(page.getByLabel('默认工作目录', { exact: true })).toHaveValue(draftWorkspace);
+  await closeToasts(page);
   await nativeTrust(true);
   const rechecked = page.waitForResponse(response => response.request().method() === 'GET' && response.url().includes('/api/lark/hooks/status'));
   await page.getByRole('button', { name: '重新检查 Hook', exact: true }).click();

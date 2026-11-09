@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 import { createRuntimeStore } from 'acpx/runtime';
 import type { AgentConfig, DriverContext, NativeContextExpected, NativeContextIdentity, DriverTranscriptSourceObservation } from '@dutydeck/shared';
 import { AcpxAdapter } from './index.js';
+import '../../../tests/support/short-acpx-reply-drain.js';
 import {
   acpDataRoot,
   buildLaunchObservation,

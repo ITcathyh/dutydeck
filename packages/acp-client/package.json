@@ -11,6 +11,16 @@
       "development": "./src/index.ts",
       "import": "./dist/index.js"
     },
+    "./regex-timeout": {
+      "types": "./dist/regex-timeout.d.ts",
+      "development": "./src/regex-timeout.ts",
+      "import": "./dist/regex-timeout.js"
+    },
+    "./transcript-source": {
+      "types": "./dist/transcript-source.d.ts",
+      "development": "./src/transcript-source.ts",
+      "import": "./dist/transcript-source.js"
+    },
     "./mock-agent": "./agents/mock-acp.mjs",
     "./claude-agent": "./agents/claude-acp.mjs"
   },

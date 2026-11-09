@@ -111,7 +111,7 @@ export class ClaudeNativeSessionResolver {
   private conversationAnchor?: ConversationAnchor;
   private readonly cwd: string;
   private readonly dataRoot: string;
-  constructor(identity: PhysicalProcessIdentity, cwd: string, env: CliPathEnv, private readonly probe: ProcessProbe) {
+  constructor(identity: PhysicalProcessIdentity, cwd: string, env: CliPathEnv, private readonly probe: ProcessProbe, private readonly discoveryRetryMs = 5_000) {
     this.root = identity;
     this.cwd = realpath(cwd);
     this.dataRoot = realpath(claudeDataDir(env));
@@ -120,7 +120,7 @@ export class ClaudeNativeSessionResolver {
     if (process.platform !== 'linux' || this.probe.observe(this.root) !== 'alive') return;
     try {
       if (!this.cli && !forceDiscovery && Date.now() < this.nextDiscoveryAt) return;
-      if (!this.cli) this.nextDiscoveryAt = Date.now() + 5_000;
+      if (!this.cli) this.nextDiscoveryAt = Date.now() + this.discoveryRetryMs;
       const pids = this.cli ? [this.cli.pid] : this.statePids();
       const matches: Array<{ identity: PhysicalProcessIdentity; state: any }> = [];
       for (const pid of pids) {
