@@ -304,8 +304,12 @@ describe('owned tmux physical exit proofs (real isolated server and process iden
     tmux('new-session', '-d', '-s', 'owned', 'true');
     tmux('set-option', '-t', 'owned', '@dutydeck_owner_id', 'dutydeck:owned');
     await vi.waitFor(() => expect(tmux('display-message', '-p', '-t', 'owned', '#{pane_dead}')).toBe('1'));
-    const identity = (await captureOwnedTmuxIdentity(scope(), probe))!;
-    expect(identity.identities).toEqual([]);
+    // tmux marks the pane dead on PTY EOF, slightly before it reaps the root process.
+    const identity = await vi.waitFor(async () => {
+      const captured = (await captureOwnedTmuxIdentity(scope(), probe))!;
+      expect(captured.identities).toEqual([]);
+      return captured;
+    });
     expect(await verifyOwnedTmuxExit({ ...identity, stoppedAt: new Date().toISOString() }, probe)).toBe(false);
     const proof = await stopOwnedTmux(identity, probe);
     expect(() => tmux('has-session', '-t', '=owned')).toThrow();

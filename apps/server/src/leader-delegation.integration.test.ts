@@ -323,6 +323,7 @@ describe('Leader 模式：接待交接、Leader 规划、Worker 执行、Leader 
     const sentSession = (await leaderSessions()).find(session => session.id === f.leaderPrompts()[0]!.sessionId)!;
     const [sent, unsent] = sentSession.sourceId === first.id ? [first, second] : [second, first];
     const unsentSession = (await leaderSessions()).find(session => session.sourceId === unsent.id)!;
+    await vi.waitFor(() => expect(f.repos.execution.getSessionExecutions(unsentSession.id)[0]).toBeDefined());
     await f.delegations.close();
     await vi.waitFor(() => expect(f.repos.execution.getSessionExecutions(sentSession.id)[0]!.currentAttempt).toMatchObject({ state: 'reconcile_required' }));
     expect(f.repos.execution.getSessionExecutions(unsentSession.id)[0]).toMatchObject({ task: { status: 'queued' }, attempts: [] });

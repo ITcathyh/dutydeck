@@ -40,10 +40,10 @@ else process.exit(2);
 }
 
 /** Every Date.now() read advances by `step`, so the 10s readiness and 5s signal waits pass quickly. */
-function fastClock(step = 3000) {
+function fastClock(step: () => number = () => 3000) {
   const now = Date.now.bind(Date);
   let skew = 0;
-  vi.spyOn(Date, 'now').mockImplementation(() => now() + (skew += step));
+  vi.spyOn(Date, 'now').mockImplementation(() => now() + (skew += step()));
 }
 
 describe.skipIf(process.platform !== 'linux')('Herdr dedicated server that never becomes ready', () => {
@@ -73,7 +73,9 @@ describe.skipIf(process.platform !== 'linux')('Herdr dedicated server that never
     }));
     const backend = new HerdrBackend(name, f.options);
     expect(await backend.isStopped()).toBe(false);
-    fastClock();
+    // Skip the wait after the ignored SIGTERM; after SIGKILL the process needs real time to die and be reaped.
+    const kill = vi.spyOn(process, 'kill');
+    fastClock(() => kill.mock.calls.some(([, signal]) => signal === 'SIGKILL') ? 0 : 3000);
     await backend.stopOwnedIdentity();
     expect(observeProcess(identity)).toBe('dead');
     expect(server.signalCode).toBe('SIGKILL');
