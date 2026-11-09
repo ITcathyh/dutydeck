@@ -1417,7 +1417,9 @@ it.each(['none', 'workspace', 'secret', 'saved-secret'] as const)('closes throug
   const onClose = vi.fn(() => guard ? guard(leave) : leave());
   render(<QueryClientProvider client={client}><LarkConfigModal agents={agents} target={{ appId: 'cli_test' }} field="preInjectPrompt" onLeaveGuardChange={value => { guard = value; }} onClose={onClose}/></QueryClientProvider>);
   const user = userEvent.setup();
-  await screen.findByRole('textbox', { name: /预注入 Prompt/ });
+  const prompt = await screen.findByRole('textbox', { name: /预注入 Prompt/ });
+  // 打开时定位到字段是最后一步，它会把步骤切回字段所在的一步；等它做完再切步骤，否则这次点击会被切回去。
+  await waitFor(() => expect(document.activeElement).toBe(prompt));
   if (draft !== 'none') {
     await user.click(screen.getByRole('button', { name: /连接飞书应用/ }));
     await typeInto(user, screen.getByLabelText(draft === 'workspace' ? '默认工作区' : 'App Secret'), draft === 'workspace' ? '/unsaved' : 'new-secret');

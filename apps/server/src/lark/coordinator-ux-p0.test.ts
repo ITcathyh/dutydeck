@@ -1143,13 +1143,22 @@ describe('话题内引用自己的请求后补 @', () => {
   });
 });
 
+const realSetTimeout = setTimeout;
+/** 假时钟下等被测代码走到某一步：中间有真实 I/O，只推假时钟不会等它，所以假时钟每走 1 毫秒，真实时间也走 1 毫秒。 */
+async function advanceUntil(ready: () => boolean, budgetMs = 5_000) {
+  for (let i = 0; i < budgetMs && !ready(); i++) {
+    await vi.advanceTimersByTimeAsync(1);
+    await new Promise(resolve => realSetTimeout(resolve, 1));
+  }
+}
+
 describe('执行前上下文读取超时', () => {
   it('reports a stalled thread read and lets the next request in that thread run', async () => {
     const h = await harness();
     h.service.listChatMessages.mockImplementationOnce(() => new Promise(() => {}));
     vi.useFakeTimers();
     await h.coordinator.handle(event('om_stalled', '@_user_1 处理第一件事'), h.config);
-    for (let i = 0; i < 100 && !h.service.listChatMessages.mock.calls.length; i++) await vi.advanceTimersByTimeAsync(1);
+    await advanceUntil(() => h.service.listChatMessages.mock.calls.length > 0);
     expect(h.service.listChatMessages).toHaveBeenCalledOnce();
     await vi.advanceTimersByTimeAsync(15_001);
     vi.useRealTimers();
@@ -1167,7 +1176,7 @@ describe('执行前上下文读取超时', () => {
     h.service.getMessage.mockImplementationOnce(() => new Promise(() => {}));
     vi.useFakeTimers();
     await h.coordinator.handle(event('om_empty_stalled', '@_user_1', { parentId: 'om_parent' }), h.config);
-    for (let i = 0; i < 100 && !h.service.getMessage.mock.calls.length; i++) await vi.advanceTimersByTimeAsync(1);
+    await advanceUntil(() => h.service.getMessage.mock.calls.length > 0);
     expect(h.service.getMessage).toHaveBeenCalledWith('om_parent', expect.any(AbortSignal));
     await vi.advanceTimersByTimeAsync(15_001);
     vi.useRealTimers();
@@ -1185,7 +1194,7 @@ describe('执行前上下文读取超时', () => {
     h.service.listChatMessages.mockImplementationOnce(() => new Promise(() => {}));
     vi.useFakeTimers();
     await h.coordinator.handle(event('om_before_new', '@_user_1 旧请求'), h.config);
-    for (let i = 0; i < 100 && !h.service.listChatMessages.mock.calls.length; i++) await vi.advanceTimersByTimeAsync(1);
+    await advanceUntil(() => h.service.listChatMessages.mock.calls.length > 0);
     expect(h.service.listChatMessages).toHaveBeenCalledOnce();
     await h.coordinator.handle(event('om_new', '/new'), h.config);
     await vi.advanceTimersByTimeAsync(15_001);
@@ -1206,7 +1215,7 @@ describe('执行前上下文读取超时', () => {
     vi.useFakeTimers();
     await h.coordinator.handle(event('om_prepared', '@_user_1 旧请求'), h.config);
     try {
-      for (let i = 0; i < 100 && !taskContext.mock.calls.length; i++) await vi.advanceTimersByTimeAsync(1);
+      await advanceUntil(() => taskContext.mock.calls.length > 0);
       expect(taskContext).toHaveBeenCalledOnce();
       expect(h.service.reply).toHaveBeenCalledWith(expect.objectContaining({ taskId: 'om_prepared', cardKind: 'process' }));
       await h.coordinator.handle(event('om_new_prepared', '/new'), h.config);
@@ -1302,7 +1311,7 @@ describe('执行前上下文读取超时', () => {
     h.service.listChatMessages.mockImplementationOnce(() => new Promise(() => {}));
     vi.useFakeTimers();
     await h.coordinator.handle(event('om_before_stop', '@_user_1 等待读取'), h.config);
-    for (let i = 0; i < 100 && !h.service.listChatMessages.mock.calls.length; i++) await vi.advanceTimersByTimeAsync(1);
+    await advanceUntil(() => h.service.listChatMessages.mock.calls.length > 0);
     expect(h.service.listChatMessages).toHaveBeenCalledOnce();
     h.coordinator.stop();
     await vi.advanceTimersByTimeAsync(15_001);
@@ -1801,7 +1810,7 @@ it('does not publish a material snapshot or cursor when peer reading times out, 
     .mockImplementationOnce(() => new Promise(() => {}));
   vi.useFakeTimers();
   await h.coordinator.handle(event('om_cancel_material', '@_user_1 first request'), h.config);
-  for (let i = 0; i < 100 && h.service.listChatMessages.mock.calls.length < 2; i++) await vi.advanceTimersByTimeAsync(1);
+  await advanceUntil(() => h.service.listChatMessages.mock.calls.length >= 2);
   expect(h.service.listChatMessages).toHaveBeenCalledTimes(2);
   await vi.advanceTimersByTimeAsync(15_001);
   vi.useRealTimers();

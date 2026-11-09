@@ -81,8 +81,10 @@ describe.skipIf(process.platform !== 'linux')('legacy Claude workspace admission
       expect(() => process.kill(originalPid!, 0)).not.toThrow();
       expect(readdirSync(join(cwd, 'sessions'))).toEqual([]);
       expect(repos.insight.listSources(first.id).filter(source => source.identityProof?.startsWith('pty-claude-process-v1:'))).toEqual([]);
-      const launches = readFileSync(join(cwd, 'launches.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
-      expect(launches).toHaveLength(2);
+      // 第二个会话的 CLI 已经拉起，但子进程写下启动记录可能还要片刻。
+      const readLaunches = () => readFileSync(join(cwd, 'launches.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+      await vi.waitFor(() => expect(readLaunches()).toHaveLength(2), { timeout: 5_000 });
+      const launches = readLaunches();
       expect(launches.every(launch => launch.args.includes('--session-id') && !launch.args.includes('--resume'))).toBe(true);
       expect(buildArgs.mock.calls.every(([ctx]) => !ctx.resume)).toBe(true);
       for (const original of liveResources) {
