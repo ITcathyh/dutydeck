@@ -119,6 +119,18 @@ describe('亮屏指纹与卡片元素（纯函数）', () => {
   const question = (text: string): WorkItemRequest[] =>
     [{ stepId: 'alpha', sessionId: 'ses_child', taskId: 'task_1', requestId: 'req_1', kind: 'question', text }];
 
+  it('keeps card form and button names within the Lark limit of 100 characters, unique per request', () => {
+    const id = `work_${'a'.repeat(64)}`;
+    const item = { ...baseItem('waiting', 'running'), id };
+    const request = (requestId: string): WorkItemRequest => ({ stepId: 'alpha', sessionId: 'ses_child', taskId: 'task_1', requestId, kind: 'question', text: '问题' });
+    const forms = workItemElements(item, [request(`turn_${'b'.repeat(64)}`), request(`turn_${'c'.repeat(64)}`)]).filter(element => element.tag === 'form');
+    expect(forms).toHaveLength(2);
+    expect(new Set(forms.map(form => form.name)).size).toBe(2);
+    for (const form of forms) for (const name of [form.name, ...form.elements.map((element: any) => element.name)]) expect(name.length).toBeLessThanOrEqual(100);
+    // 路由字段仍在按钮 value 里，不依赖表单名。
+    expect(forms[0]!.elements.find((element: any) => element.tag === 'button').behaviors[0].value).toMatchObject({ work_id: id, step_id: 'alpha', request_id: `turn_${'b'.repeat(64)}` });
+  });
+
   it('N2 回归②：焦点态不变（含 running→completed）指纹一致，错误文案变化也不换指纹', () => {
     expect(workNoticeFingerprint(baseItem('completed', 'completed'))).toBe(workNoticeFingerprint(baseItem('running', 'running')));
     expect(workNoticeFingerprint(baseItem('running', 'pending'))).toBe(workNoticeFingerprint(baseItem('running', 'running')));

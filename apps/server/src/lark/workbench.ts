@@ -280,13 +280,17 @@ export function workItemElements(item: WorkItem, requests: WorkItemRequest[] = [
   };
   // JSON 2.0 表单：输入框 + 提交按钮，路由字段在按钮 value 里，回答文本经 event.action.form_value 落回
   // （listener 侧合入接线见集成清单）；卡片同时保留文字命令兜底，未接线时命令仍可用。
-  const answerForm = (name: string, placeholder: string, submitLabel: string, value: Record<string, unknown>) => ({
-    tag: 'form', name, direction: 'vertical', vertical_spacing: '8px', margin: '4px 0px', elements: [
-      { tag: 'input', name: 'answer', required: true, width: 'fill', placeholder: { tag: 'plain_text', content: placeholder } },
-      { tag: 'button', name: `${name}_submit`, type: 'primary', text: { tag: 'plain_text', content: submitLabel },
-        form_action_type: 'submit', behaviors: [{ type: 'callback', value }] }
-    ]
-  });
+  // 飞书限制组件 name 最长 100 字符，而目标和请求 ID 各有 60 多位；name 只需在卡内唯一，所以取哈希。
+  const answerForm = (prefix: string, key: string, placeholder: string, submitLabel: string, value: Record<string, unknown>) => {
+    const name = `${prefix}_${digest(key).slice(0, 32)}`;
+    return {
+      tag: 'form', name, direction: 'vertical', vertical_spacing: '8px', margin: '4px 0px', elements: [
+        { tag: 'input', name: 'answer', required: true, width: 'fill', placeholder: { tag: 'plain_text', content: placeholder } },
+        { tag: 'button', name: `${name}_submit`, type: 'primary', text: { tag: 'plain_text', content: submitLabel },
+          form_action_type: 'submit', behaviors: [{ type: 'callback', value }] }
+      ]
+    };
+  };
   const revised = (item.planVersion ?? 1) > 1 ? ` · 计划已修订（v${item.planVersion}）` : '';
   const elements: Array<Record<string, any>> = [
     { tag: 'markdown', content: `**${reviewStatusLabel(item) ?? labels[item.status] ?? item.status} · ${neutralizeCardTags(item.title)}**${revised}\n\n${neutralizeCardTags(item.goal.slice(0, 2000))}` }
@@ -334,7 +338,7 @@ export function workItemElements(item: WorkItem, requests: WorkItemRequest[] = [
     elements.push({ tag: 'markdown', content: `**${labels[step.status]} · ${neutralizeCardTags(definition.title)}**${agentLine(definition.agentId)}\n${neutralizeCardTags(attempt?.error?.slice(0, 1200) ?? '')}${step.status === 'waiting' ? `\n${neutralizeCardTags(definition.instruction)}\n\n回复：\`/work answer ${item.id} ${step.id} 你的回答\`` : ''}` });
     if (step.status === 'running') elements.push({ tag: 'markdown', content: `如 CLI 等待终端确认：\`/work terminal ${item.id} ${step.id}\`` });
     if (step.status === 'waiting') elements.push(
-      answerForm(`work_answer_${item.id}_${step.id}`, '输入回答内容', `提交回答：${definition.title}`,
+      answerForm('work_answer', `${item.id}_${step.id}`, '输入回答内容', `提交回答：${definition.title}`,
         { dutydeck_work_item: 'answer', work_id: item.id, parent_session_id: item.parentSessionId, revision: item.revision, step_id: step.id }),
       action('retry', `重试：${definition.title}`, { step_id: step.id }));
     // 有待确认修订时重试会被拒绝，先确认或放弃修订。
@@ -355,7 +359,7 @@ export function workItemElements(item: WorkItem, requests: WorkItemRequest[] = [
     if (request.kind === 'permission') elements.push(action('respond', '批准本次调用', { ...extra, answer: 'approve' }), action('respond', '拒绝本次调用', { ...extra, answer: 'reject' }));
     else {
       elements.push({ tag: 'markdown', content: `回复：\`/work respond ${item.id} ${request.stepId} ${request.requestId} 你的回答\`` });
-      elements.push(answerForm(`work_respond_${item.id}_${request.stepId}_${request.requestId}`, '输入回答内容', '提交回答',
+      elements.push(answerForm('work_respond', `${item.id}_${request.stepId}_${request.requestId}`, '输入回答内容', '提交回答',
         { dutydeck_work_item: 'respond', work_id: item.id, parent_session_id: item.parentSessionId, revision: item.revision, ...extra }));
     }
   }
