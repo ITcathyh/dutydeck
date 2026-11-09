@@ -218,4 +218,13 @@ describe('TurnDiffPage pending comment submissions', () => {
     }
     expect(payloads).toHaveLength(1);
   });
+
+  it('改动页按文件验收，已查看数量按快照计算并在勾选后增加', async () => {
+    vi.spyOn(api, 'turnDiff').mockResolvedValue(diff);
+    renderPage(false);
+    expect(await screen.findByText('0 / 4 已查看')).toBeTruthy();
+    const checkbox = screen.getByRole('checkbox', { name: '已查看 src/app.ts' });
+    fireEvent.click(checkbox);
+    expect(screen.getByText('1 / 4 已查看')).toBeTruthy();
+  });
 });

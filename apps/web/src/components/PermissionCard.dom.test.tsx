@@ -65,8 +65,10 @@ describe('PermissionCard', () => {
     expect(screen.getByText(/可能造成破坏的片段/)).toBeTruthy();
     const approve = screen.getByRole('button', { name: '允许本次' }) as HTMLButtonElement;
     expect(approve.disabled).toBe(true);
+    expect(screen.getByText('勾选上方核对项后才能允许')).toBeTruthy();
     expect((screen.getByRole('button', { name: '拒绝' }) as HTMLButtonElement).disabled).toBe(false);
     await user.click(screen.getByRole('checkbox', { name: '我已核对标出的片段' }));
+    expect(screen.getByText('只授权这一次，后续高风险操作仍会询问')).toBeTruthy();
     await user.click(approve);
     expect(onResolve).toHaveBeenCalledExactlyOnceWith('permission-1', true);
   });

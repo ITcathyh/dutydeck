@@ -103,7 +103,7 @@ function TaskRow({ session, summary, agent, section, onSelect, selection }: {
     className="group grid min-h-[72px] w-full min-w-0 grid-cols-[auto_minmax(0,1fr)] items-start gap-x-3 gap-y-1 px-4 py-3 text-left transition-colors duration-fast ease-out hover:bg-muted sm:flex sm:items-center sm:gap-3 sm:px-5"
   >
     {/* 徽标文案与归档优先判据都来自 effectiveStatus，由 StatusBadge 单点消费；这里不再拼配色字符串。 */}
-    <span className="mt-0.5 shrink-0 sm:mt-0"><StatusBadge session={session}/></span>
+    <span className="mt-0.5 shrink-0 sm:mt-0"><StatusBadge session={session} summary={summary}/></span>
     <span className="min-w-0 flex-1">
       <strong className="line-clamp-2 text-body font-medium text-primary sm:line-clamp-none sm:block sm:truncate" title={title}>{title}</strong>
       <span className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-caption text-secondary">
@@ -221,17 +221,15 @@ export function WorkspaceOverview({ sessions: rawSessions, summaries, agents, lo
   const botsOverview = <LarkBotsOverview bots={larkBots} agents={agents} loading={larkBotsLoading} agentsLoading={agentsLoading} listeningDisabled={larkListeningDisabled} failed={larkBotsFailed} retrying={larkBotsRetrying} onRetry={() => onRetryLarkBots?.()} onOpenLarkSetup={onOpenLarkSetup} onOpenAgentSetup={onOpenAgentSetup} onManageBots={onManageBots}/>;
 
   return <div className="min-h-0 flex-1 overflow-y-auto bg-canvas">
-    <section aria-labelledby="workspace-overview-title" className="mx-auto w-full max-w-[1440px] px-4 pb-12 pt-6 sm:px-8 sm:pt-8 lg:px-10">
+    <section aria-labelledby="workspace-overview-title" className="ui-page pb-12 pt-6 sm:pt-8">
       <header className="mb-7 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <p className="text-caption text-subtle">{home ? new Intl.DateTimeFormat('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' }).format(new Date()) : 'WORKSPACE'}</p>
-          <h1 id="workspace-overview-title" className="mt-1 text-display font-semibold tracking-[-.035em] text-primary">{home ? '工作台' : '全部任务'}</h1>
+          <h1 id="workspace-overview-title" className="mt-1 text-display font-semibold tracking-[-.035em] text-primary">{home ? '总览' : '全部任务'}</h1>
           <p className="mt-2 text-body text-secondary" role="status">{headlineFor({ loading, agentsLoading, counts, hasAgents: agents.length > 0 })}</p>
         </div>
         <Button variant="secondary" tone="inverse" disabled={createTask.disabled} onClick={createTask.onClick} icon={<Plus size={17}/>}>{createTask.label}</Button>
       </header>
-
-      {botStatusNeedsAttention && <div className="mb-6">{botsOverview}</div>}
 
       {!home && <>
         <div className="flex flex-wrap gap-3">
@@ -270,18 +268,18 @@ export function WorkspaceOverview({ sessions: rawSessions, summaries, agents, lo
               </div>
             </section>;
           })}</div> : <Card padding="none"><EmptyState tone={!search && view === 'attention' ? 'positive' : 'neutral'} title={search || project ? '没有找到符合条件的任务' : '当前视图没有任务'} description={search ? `关键词“${query}” · ${workbenchViewLabels[view]}${project ? ` · ${project}` : ''}` : '选择其他状态，或创建一个新任务。'}/><div className="flex flex-wrap justify-center gap-2 pb-5"><Button variant="secondary" onClick={() => { updateFilters({ query, project: '' }); onViewChange('all'); }}>清除筛选</Button>{query && <Button variant="ghost" onClick={() => updateFilters({ query: '', project })}>清除搜索</Button>}</div></Card>}
+          {home && botStatusNeedsAttention && <div className="mt-8">{botsOverview}</div>}
         </section>
         {home && !selecting && <aside aria-label="最近交付" className="ui-workbench-rail">
           <h2 className="mb-4 text-caption font-medium text-subtle">最近交付</h2>
           {deliveries.length ? deliveries.map(session => <div key={session.id} className="mb-6 border-b border-default pb-5 last:mb-0 last:border-0">
-            <StatusBadge session={session}/><h3 className="mt-3 text-body font-semibold text-primary">{sessionDisplayName(session, summaries[session.id]?.prompt, fallbackRunTitle(session.source))}</h3>
+            <StatusBadge session={session} summary={summaries[session.id]}/><h3 className="mt-3 text-body font-semibold text-primary">{sessionDisplayName(session, summaries[session.id]?.prompt, fallbackRunTitle(session.source))}</h3>
             <p className="mt-2 text-caption text-secondary">{sessionWorkspaceName(session)} · {formatRelativeTime(session.updatedAt || session.createdAt)}</p><p className="mt-2 text-caption text-subtle">本轮已完成，改动与验证请在任务中检查。</p>
             <Button variant="secondary" className="mt-3" iconEnd={<ArrowRight size={14}/>} onClick={() => onOpenChanges ? onOpenChanges(session.id) : onSelect(session.id)}>{onOpenChanges ? '检查交付' : '查看任务'}</Button>
           </div>) : <p className="text-caption text-secondary">新的交付会出现在这里。</p>}
-          {!botStatusNeedsAttention && <div className="mt-6 border-t border-default pt-5">{botsOverview}</div>}
         </aside>}
       </div>
-      {!home && !botStatusNeedsAttention && <div className="mt-8 border-t border-default pt-5">{botsOverview}</div>}
+      {!home && <div className="mt-8 border-t border-default pt-5">{botsOverview}</div>}
     </section>
   </div>;
 }

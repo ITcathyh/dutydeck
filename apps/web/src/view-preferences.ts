@@ -19,3 +19,9 @@ export function useViewPreference<T>(name: string, initial: T, valid: (value: un
   };
   return [value, update] as const;
 }
+
+export type TimelineDensity = 'summary' | 'standard' | 'detail';
+export const isTimelineDensity = (v: unknown): v is TimelineDensity => v === 'summary' || v === 'standard' || v === 'detail';
+export function useTimelineDensityPreference() {
+  return useViewPreference<TimelineDensity>('density', 'standard', isTimelineDensity);
+}

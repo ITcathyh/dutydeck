@@ -62,7 +62,6 @@ export function PermissionCard({ event, resolving = false, onResolve }: { event:
         </figure>}
         {risky && <p className="mt-2 flex items-start gap-1.5 text-caption text-danger"><TriangleAlert size={14} aria-hidden="true" className="mt-0.5 shrink-0"/><span>命令里有可能造成破坏的片段（已标出）。这只是界面提醒，请自己核对后再决定。</span></p>}
       </> : <p className="mt-2 text-caption text-subtle">执行端未提供详细操作。</p>}
-      <p className="mt-2 text-caption text-subtle">本次选择只处理这一条请求，不改变后续授权方式。</p>
       {actionable && risky && <label className="mt-2.5 flex min-h-11 cursor-pointer md:min-h-10 items-center gap-2 text-body text-primary">
         <input type="checkbox" checked={riskAcknowledged} disabled={processing} onChange={event => setRiskAcknowledged(event.target.checked)} className="h-4 w-4 accent-action"/>
         我已核对标出的片段
@@ -71,7 +70,13 @@ export function PermissionCard({ event, resolving = false, onResolve }: { event:
         <Button variant="primary" loading={processing} disabled={risky && !riskAcknowledged} onClick={() => decide(true)} icon={<Check size={14}/>}>允许本次</Button>
         <Button variant="secondary" disabled={processing} onClick={() => decide(false)} icon={<X size={14}/>}>拒绝</Button>
         <Button variant="ghost" disabled={processing} aria-expanded={explaining} onClick={() => setExplaining(open => !open)} icon={<MessageSquareX size={14}/>}>拒绝并说明</Button>
-      </div> : <div className="mt-2 text-caption font-medium text-secondary">{pending ? '等待当前操作者处理' : workspaceRule ? `按工作区规则自动允许：${workspaceRule}` : `${resolvedLabels[event.data.status] ?? event.data.status ?? '已处理'}${rejectedReason ? `：${rejectedReason}` : ''}`}</div>}
+        <span className="text-caption text-subtle">
+          {risky ? (riskAcknowledged ? '只授权这一次，后续高风险操作仍会询问' : '勾选上方核对项后才能允许') : '本次选择只处理这一条请求，不改变后续授权方式。'}
+        </span>
+      </div> : <div className="mt-2 text-caption font-medium text-secondary">
+        {pending ? <><p>等待当前操作者处理</p><p className="mt-1 font-normal text-subtle">本次选择只处理这一条请求，不改变后续授权方式。</p></> : workspaceRule ? `按工作区规则自动允许：${workspaceRule}` : `${resolvedLabels[event.data.status] ?? event.data.status ?? '已处理'}${rejectedReason ? `：${rejectedReason}` : ''}`}
+      </div>}
+
       {actionable && explaining && <div className="mt-2">
         <textarea aria-label="拒绝原因" value={reason} maxLength={permissionRejectReasonMaxLength} disabled={processing} onChange={event => setReason(event.target.value)} placeholder={permissionRejectReasonHint}
           className="min-h-16 w-full resize-y rounded-md border border-default bg-surface px-2.5 py-2 text-body text-primary outline-none placeholder:text-subtle focus-visible:ring-2 focus-visible:ring-focus-ring"/>

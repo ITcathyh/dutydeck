@@ -21,6 +21,8 @@ function mount(state = session.state, options: {
   turnDiffs?: unknown[];
   history?: HistoryOutline;
   historyFailure?: boolean;
+  verifications?: any[];
+  summary?: any;
 } = {}) {
   const requests: Array<{ url: string; init?: RequestInit }> = [];
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
@@ -37,12 +39,12 @@ function mount(state = session.state, options: {
       : historyRequest ? options.historyFailure ? { error: { code: 'HISTORY_UNAVAILABLE', message: 'History unavailable' } } : (options.history ?? { turns: [], highWaterMark: 0, liveAfter: 0 })
       : strUrl.endsWith('/pull-requests') ? { available: false, hint: '没有安装支持开 PR 的 CI 插件。', items: [] }
       : strUrl.endsWith('/automation/ci-providers') ? { providers: [{ id: 'test-ci', displayName: 'Test CI', polling: true, webhook: false }] }
-      : strUrl.endsWith('/verifications') ? init?.method === 'POST' ? { id: 'v2', status: 'passed' } : [{ id: 'v1', command: 'pnpm test', status: 'passed', stale: true, staleReason: options.missingFingerprint ? 'current_fingerprint_unavailable' : 'code_changed', exitCode: 0, beforeFingerprint: 'code-version-1', afterFingerprint: 'code-version-1', taskId: 't1', output: 'old evidence', startedAt: session.createdAt, completedAt: '2026-09-12T00:00:03Z' }]
+      : strUrl.endsWith('/verifications') ? init?.method === 'POST' ? { id: 'v2', status: 'passed' } : (options.verifications ?? [{ id: 'v1', command: 'pnpm test', status: 'passed', stale: true, staleReason: options.missingFingerprint ? 'current_fingerprint_unavailable' : 'code_changed', exitCode: 0, beforeFingerprint: 'code-version-1', afterFingerprint: 'code-version-1', taskId: 't1', output: 'old evidence', startedAt: session.createdAt, completedAt: '2026-09-12T00:00:03Z' }])
       : { subscription: { id: 'ci1', status: 'waiting', provider: 'test-ci' } };
     return new Response(JSON.stringify(body), { status: (options.evidenceFailure && strUrl.endsWith('/verifications') || options.historyFailure && historyRequest) ? 503 : 200, headers: { 'content-type': 'application/json' } });
   });
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-  render(<QueryClientProvider client={qc}><SessionDeliveryPanel session={{ ...session, state, ...(options.archivedAt ? { archivedAt: options.archivedAt } : {}), ...options.sessionOverrides }} tasks={options.tasks ?? []} onClose={() => {}} presentation={options.presentation}/></QueryClientProvider>);
+  render(<QueryClientProvider client={qc}><SessionDeliveryPanel session={{ ...session, state, ...(options.archivedAt ? { archivedAt: options.archivedAt } : {}), ...options.sessionOverrides }} tasks={options.tasks ?? []} summary={options.summary} onClose={() => {}} presentation={options.presentation}/></QueryClientProvider>);
   return requests;
 }
 
@@ -250,4 +252,50 @@ it('distinguishes replaced, verified included, and historical unverified skill r
   ]}] as Task[]});
   expect(await screen.findByText(/旧记录：未核实最终投递/)).toBeTruthy();
   expect(screen.getByText(/正文被 hook 替换，未投递/)).toBeTruthy(); expect(screen.getByText(/正文已加入本轮指令/)).toBeTruthy();
+});
+
+it('当 summary 为 reconcile_required 时，交付清单执行状态显示「等你核对」', async () => {
+  mount('idle', {
+    summary: { sessionId: 's1', taskId: 't1', prompt: '任务', status: 'reconcile_required', queuedCount: 0, updatedAt: '' }
+  });
+  const checklist = screen.getByRole('region', { name: '交付清单' });
+  expect(within(checklist).getByText('等你核对')).toBeTruthy();
+});
+
+it('验证清单仅以最新一条为准且非 stale 时才显示成功，旧通过不掩盖新失败，stale passed 不标成功', async () => {
+  // 1. 最新失败，旧记录通过：显示「验证未通过」，不带 text-success
+  mount('completed', {
+    verifications: [
+      { id: 'v2', command: 'pnpm test', status: 'failed', stale: false, exitCode: 1, startedAt: '2026-09-12T00:00:04Z' },
+      { id: 'v1', command: 'pnpm test', status: 'passed', stale: false, exitCode: 0, startedAt: '2026-09-12T00:00:00Z' }
+    ]
+  });
+  const checklist = screen.getByRole('region', { name: '交付清单' });
+  const failText = await within(checklist).findByText('验证未通过');
+  expect(failText).toBeTruthy();
+  expect(failText.className).not.toContain('text-success');
+
+  // 2. 最新记录通过但 stale 为 true：显示「验证已过期」，不带 text-success
+  cleanup();
+  mount('completed', {
+    verifications: [
+      { id: 'v3', command: 'pnpm test', status: 'passed', stale: true, exitCode: 0, startedAt: '2026-09-12T00:00:04Z' }
+    ]
+  });
+  const checklist2 = screen.getByRole('region', { name: '交付清单' });
+  const staleText = await within(checklist2).findByText('验证已过期');
+  expect(staleText).toBeTruthy();
+  expect(staleText.className).not.toContain('text-success');
+
+  // 3. 最新记录通过且 stale 为 false：显示「已验证通过」且带 text-success
+  cleanup();
+  mount('completed', {
+    verifications: [
+      { id: 'v4', command: 'pnpm test', status: 'passed', stale: false, exitCode: 0, startedAt: '2026-09-12T00:00:04Z' }
+    ]
+  });
+  const checklist3 = screen.getByRole('region', { name: '交付清单' });
+  const passText = await within(checklist3).findByText('已验证通过');
+  expect(passText).toBeTruthy();
+  expect(passText.className).toContain('text-success');
 });

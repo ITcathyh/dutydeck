@@ -100,7 +100,7 @@ test.describe('Calm Workbench browser acceptance', () => {
 
   test('global search opens a filtered-out task with a unique sidebar location and restores the list filter', async ({ page }) => {
     await page.goto(instance.baseUrl);
-    await sidebar(page).getByRole('button', { name: /^全部任务/ }).click();
+    await sidebar(page).getByRole('button', { name: /^任务/ }).click();
     const filters = page.getByRole('region', { name: '任务筛选' });
     await filters.getByRole('button', { name: /^待你处理/ }).click();
     const listQuery = page.getByRole('textbox', { name: '筛选当前任务列表', exact: true });
@@ -270,7 +270,7 @@ test.describe('Calm Workbench browser acceptance', () => {
         await page.emulateMedia({ colorScheme: theme, reducedMotion: 'reduce' });
         await page.goto(instance.baseUrl);
         await page.evaluate(value => { document.documentElement.setAttribute('data-theme', value); localStorage.setItem('dutydeck.theme', value); }, theme);
-        await expect(page.getByRole('heading', { name: '工作台', level: 1, exact: true })).toBeVisible();
+        await expect(page.getByRole('heading', { name: '总览', level: 1, exact: true })).toBeVisible();
         await page.screenshot({ animations: 'disabled', path: info.outputPath(`workbench-${width}-${theme}.png`) });
         await open(page, alpha);
         const closeInspector = page.getByRole('button', { name: '关闭结果检视', exact: true });

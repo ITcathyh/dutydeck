@@ -115,7 +115,7 @@ describe('App summary updates', () => {
       return { accepted: true, task };
     });
     const { container, client } = renderApp();
-    await screen.findByRole('heading', { level: 1, name: '工作台' });
+    await screen.findByRole('heading', { level: 1, name: '总览' });
     await userEvent.click(within(container.querySelector('main')!).getByRole('button', { name: '创建任务' }));
     const dialog = await screen.findByRole('dialog', { name: '创建新任务' });
     fireEvent.change(within(dialog).getByRole('textbox', { name: '任务目标' }), { target: { value: task.prompt } });
@@ -252,7 +252,7 @@ describe('App mobile navigation accessibility', () => {
     vi.stubGlobal('matchMedia', undefined);
     mockAppApi();
     const { container } = renderApp();
-    await screen.findByRole('heading', { level: 1, name: '工作台' });
+    await screen.findByRole('heading', { level: 1, name: '总览' });
     expect(screen.getByRole('button', { name: '收起侧栏' })).toBeTruthy();
     await userEvent.keyboard('{Control>}b{/Control}');
     expect(screen.getByRole('button', { name: '展开侧栏' })).toBeTruthy();
@@ -300,7 +300,7 @@ describe('App mobile navigation accessibility', () => {
     vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
     mockAppApi({ sessions: [session('s1', 'failed')], summaries: [summary('s1', '任务异常：Agent exited with code 129')] });
     const { container } = renderApp();
-    await screen.findByRole('heading', { level: 1, name: '工作台' });
+    await screen.findByRole('heading', { level: 1, name: '总览' });
     // 同名按钮只能有一枚，否则读屏会重复朗读，getByRole 也会抛 multiple elements。
     const triggers = screen.getAllByRole('button', { name: '打开工作台导航' });
     expect(triggers).toHaveLength(1);
@@ -334,7 +334,7 @@ describe('App browser navigation and shell states', () => {
     mockAppApi();
     const user = userEvent.setup();
     const { container } = renderApp();
-    await screen.findByRole('heading', { level: 1, name: '工作台' });
+    await screen.findByRole('heading', { level: 1, name: '总览' });
     const opener = within(container.querySelector('main')!).getByRole('button', { name: '创建任务' });
     await user.click(opener);
     const dialog = await screen.findByRole('dialog', { name: '创建新任务' });
@@ -354,7 +354,7 @@ describe('App browser navigation and shell states', () => {
     vi.spyOn(scheduleApi, 'capabilities').mockResolvedValue(schedules);
     vi.spyOn(scheduleApi, 'list').mockResolvedValue({ capabilities: schedules, schedules: [] });
     const { container } = renderApp();
-    expect(await screen.findByRole('heading', { level: 1, name: '工作台' })).toBeTruthy();
+    expect(await screen.findByRole('heading', { level: 1, name: '总览' })).toBeTruthy();
     const navigation = screen.getByRole('complementary', { name: 'Dutydeck 工作台导航' });
     const opener = within(navigation).getByRole('button', { name: /Agent 与设置/ });
     await userEvent.click(opener);
@@ -394,7 +394,7 @@ describe('App browser navigation and shell states', () => {
       window.history.replaceState(null, '', '/');
       window.dispatchEvent(new PopStateEvent('popstate'));
     });
-    await screen.findByRole('heading', { level: 1, name: '工作台' });
+    await screen.findByRole('heading', { level: 1, name: '总览' });
 
     act(() => {
       window.history.replaceState({ sessionId: 's1' }, '', '/sessions/s1');
@@ -414,7 +414,7 @@ describe('App browser navigation and shell states', () => {
     expect(api.tasks).not.toHaveBeenCalled();
     await userEvent.click(screen.getByRole('button', { name: '回到任务中心' }));
     expect(window.location.pathname).toBe('/');
-    await screen.findByRole('heading', { level: 1, name: '工作台' });
+    await screen.findByRole('heading', { level: 1, name: '总览' });
   });
 
   it('shows retryable failures for every main query instead of empty data', async () => {
@@ -432,7 +432,7 @@ describe('App browser navigation and shell states', () => {
     expect(error.textContent).toContain('任务摘要');
     expect(screen.getByRole('complementary', { name: 'Dutydeck 工作台导航' }).querySelector('.animate-pulse')).toBeNull();
     await userEvent.click(screen.getByRole('button', { name: '重新加载' }));
-    await screen.findByRole('heading', { level: 1, name: '工作台' });
+    await screen.findByRole('heading', { level: 1, name: '总览' });
     expect(agents).toHaveBeenCalledTimes(2);
     expect(sessions).toHaveBeenCalledTimes(2);
     expect(summaries).toHaveBeenCalledTimes(2);
@@ -456,7 +456,7 @@ describe('App browser navigation and shell states', () => {
       window.history.replaceState(null, '', '/');
       window.dispatchEvent(new PopStateEvent('popstate'));
     });
-    await screen.findByRole('heading', { level: 1, name: '工作台' });
+    await screen.findByRole('heading', { level: 1, name: '总览' });
     expect(screen.getByText(/部分数据可能不是最新：任务列表/).closest('[role="status"]')).toBeTruthy();
 
     await userEvent.click(screen.getByRole('button', { name: '重试' }));
@@ -469,7 +469,7 @@ describe('App browser navigation and shell states', () => {
     renderApp();
 
     expect(await screen.findByRole('heading', { name: '找不到这个页面' })).toBeTruthy();
-    expect(screen.queryByRole('heading', { level: 1, name: '工作台' })).toBeNull();
+    expect(screen.queryByRole('heading', { level: 1, name: '总览' })).toBeNull();
     expect(api.events).not.toHaveBeenCalled();
     expect(api.tasks).not.toHaveBeenCalled();
     await userEvent.click(screen.getByRole('button', { name: '回到任务中心' }));
@@ -596,7 +596,7 @@ describe('App 搜索、快捷键与通知接线', () => {
 
     // 先确认自己确实在会话详情页，而不是被路由退回了总览。
     await screen.findByRole('heading', { name: '修复登录超时' });
-    expect(screen.queryByRole('heading', { level: 1, name: '工作台' })).toBeNull();
+    expect(screen.queryByRole('heading', { level: 1, name: '总览' })).toBeNull();
 
     const topBar = container.querySelector('header')!;
     await user.click(within(topBar).getByRole('button', { name: '搜索任务目标、工作区或 Agent' }));
@@ -623,7 +623,7 @@ describe('App 搜索、快捷键与通知接线', () => {
     */
     mockAppApi({ sessions: [session('s1')], summaries: [summary('s1', '修复登录超时')] });
     const { container } = renderApp();
-    await screen.findByRole('heading', { level: 1, name: '工作台' });
+    await screen.findByRole('heading', { level: 1, name: '总览' });
     const main = container.querySelector('main')!;
     expect(main.className).toContain('md:ml-main-inset');
     // 任意值会被 design-consistency 拦下，但「换成另一个硬编码档位」只有这条能拦。
@@ -827,7 +827,7 @@ describe('可深链浮层的 URL 契约', () => {
     mockAppApi();
     mockFoundation();
     renderApp();
-    expect(await screen.findByRole('heading', { level: 1, name: '工作台' })).toBeTruthy();
+    expect(await screen.findByRole('heading', { level: 1, name: '总览' })).toBeTruthy();
     expect(screen.queryByRole('dialog', { name: '群配置与权限' })).toBeNull();
     expect(screen.queryByRole('button', { name: /群与权限/ })).toBeNull();
     act(() => writeExperimental(true));
@@ -839,7 +839,7 @@ describe('可深链浮层的 URL 契约', () => {
     window.history.replaceState(null, '', '/?panel=totally-made-up');
     mockAppApi();
     renderApp();
-    expect(await screen.findByRole('heading', { level: 1, name: '工作台' })).toBeTruthy();
+    expect(await screen.findByRole('heading', { level: 1, name: '总览' })).toBeTruthy();
     expect(screen.queryByRole('dialog')).toBeNull();
   });
 });
@@ -869,7 +869,7 @@ describe('App 飞书 Bot 状态读取失败', () => {
     expect(document.body.textContent).not.toContain('尚未配置机器人');
     expect(document.body.textContent).not.toContain('尚未配置飞书机器人');
     const navigation = screen.getByRole('complementary', { name: 'Dutydeck 工作台导航' });
-    expect(within(navigation).getByRole('button', { name: /飞书接入.*接入状态读取失败/ })).toBeTruthy();
+    expect(within(navigation).getByRole('button', { name: /机器人与群聊.*接入状态读取失败/ })).toBeTruthy();
   });
 
   it('重试按钮真的重新请求 larkConfig，成功后改口为真实状态', async () => {
@@ -905,18 +905,20 @@ describe('App 飞书 Bot 状态读取失败', () => {
     mockAppApi();
     const spy = vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, listeningDisabled: false, bots: [{ appId: 'cli_cached', name: '缓存机器人', setupComplete: true, listening: true, activeListening: true } as never] });
     const { client } = renderApp();
-    expect(await within(screen.getByRole('complementary', { name: '协作入口' })).findByText('1 个机器人 · 监听已启动')).toBeTruthy();
+    const navigation = await screen.findByRole('complementary', { name: 'Dutydeck 工作台导航' });
+    await within(navigation).findByText(/1 个机器人 · 监听已启动/);
+    // 正常健康时不出现在首页
+    expect(screen.queryByRole('complementary', { name: '协作入口' })).toBeNull();
 
-    // 缓存已经有「监听已启动」，这一次 refetch 失败：状态必须降级为未确认。
+    // 缓存已经有「监听已启动」，这一次 refetch 失败：状态必须降级为未确认，并在首页出现异常面板。
     spy.mockRejectedValue(new Error('lark api down'));
-    await act(async () => { await client.refetchQueries({ queryKey: ['lark-config'] }); });
+    await act(async () => { await client.refetchQueries({ queryKey: ['lark-config'] }).catch(() => {}); });
 
-    const aside = screen.getByRole('complementary', { name: '协作入口' });
+    const aside = await screen.findByRole('complementary', { name: '协作入口' });
     await waitFor(() => expect(within(aside).getByText('状态未确认')).toBeTruthy());
     expect(within(aside).getByText(/已有配置记录，但这一次状态读取失败/)).toBeTruthy();
     expect(within(aside).queryByText('监听已启动')).toBeNull();
-    const navigation = screen.getByRole('complementary', { name: 'Dutydeck 工作台导航' });
-    expect(within(navigation).getByRole('button', { name: /飞书接入.*1 个机器人 · 状态未确认/ })).toBeTruthy();
+    expect(within(navigation).getByRole('button', { name: /机器人与群聊.*1 个机器人 · 状态未确认/ })).toBeTruthy();
   });
 
   /*
@@ -962,7 +964,9 @@ describe('App 飞书 Bot 状态读取失败', () => {
     mockAppApi();
     const spy = vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, listeningDisabled: false, bots: [{ appId: 'cli_cached', name: '缓存机器人', setupComplete: true, listening: true, activeListening: true } as never] });
     const { client } = renderApp();
-    expect(await within(screen.getByRole('complementary', { name: '协作入口' })).findByText('1 个机器人 · 监听已启动')).toBeTruthy();
+    const navigation = await screen.findByRole('complementary', { name: 'Dutydeck 工作台导航' });
+    await within(navigation).findByText(/1 个机器人 · 监听已启动/);
+    expect(screen.queryByRole('complementary', { name: '协作入口' })).toBeNull();
     const dialog = await openSettings();
     await openLarkSection(dialog);
 
@@ -997,16 +1001,16 @@ describe('主区一级导航', () => {
     renderApp();
     const navigation = await screen.findByRole('complementary', { name: 'Dutydeck 工作台导航' });
 
-    // 默认在工作台；全部任务与管理入口有独立位置。
-    expect(within(navigation).getByRole('button', { name: /^工作台/ }).getAttribute('aria-current')).toBe('page');
-    expect(within(navigation).getByRole('button', { name: /^全部任务/ }).getAttribute('aria-current')).toBeNull();
+    // 默认在总览；任务与管理入口有独立位置。
+    expect(within(navigation).getByRole('button', { name: /^总览/ }).getAttribute('aria-current')).toBe('page');
+    expect(within(navigation).getByRole('button', { name: /^任务/ }).getAttribute('aria-current')).toBeNull();
     expect(window.location.search).toBe('');
 
-    await user.click(within(navigation).getByRole('button', { name: /^机器人/ }));
+    await user.click(within(navigation).getByRole('button', { name: /^机器人与群聊/ }));
     await screen.findByRole('heading', { name: '机器人管理' });
     expect(window.location.search).toBe('?nav=bots');
-    expect(within(navigation).getByRole('button', { name: /^机器人/ }).getAttribute('aria-current')).toBe('page');
-    expect(within(navigation).getByRole('button', { name: /^全部任务/ }).getAttribute('aria-current')).toBeNull();
+    expect(within(navigation).getByRole('button', { name: /^机器人与群聊/ }).getAttribute('aria-current')).toBe('page');
+    expect(within(navigation).getByRole('button', { name: /^任务/ }).getAttribute('aria-current')).toBeNull();
 
     await user.click(within(navigation).getByRole('button', { name: /^群聊/ }));
     await screen.findByRole('heading', { name: '群聊管理' });
@@ -1037,7 +1041,7 @@ describe('主区一级导航', () => {
     // 任务仍在路径里，只是主区换了视图。
     expect(window.location.pathname).toBe('/sessions/s1');
 
-    await user.click(within(navigation).getByRole('button', { name: /^全部任务/ }));
+    await user.click(within(navigation).getByRole('button', { name: /^任务/ }));
     expect(await screen.findByRole('heading', { name: '修复登录超时' })).toBeTruthy();
   });
 
@@ -1086,7 +1090,7 @@ describe('编辑草稿跨视图存活', () => {
     expect(screen.getByText(/有未保存的修改/)).toBeTruthy();
 
     // 切去任务：机器人页整体卸载。
-    await user.click(within(navigation).getByRole('button', { name: /^全部任务/ }));
+    await user.click(within(navigation).getByRole('button', { name: /^任务/ }));
     await screen.findByRole('heading', { level: 1, name: '全部任务' });
     expect(screen.queryByRole('heading', { name: '机器人管理' })).toBeNull();
 
@@ -1330,7 +1334,7 @@ describe('App 会话分析深链与导航', () => {
     window.history.replaceState(null, '', '/?panel=insight');
     mockAppApi();
     renderApp();
-    await screen.findByRole('heading', { level: 1, name: '工作台' });
+    await screen.findByRole('heading', { level: 1, name: '总览' });
     // 等待一个 tick 确认 lazy 面板没有挂载。
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(screen.queryByRole('dialog', { name: '会话分析' })).toBeNull();
@@ -1681,6 +1685,80 @@ it('remembers closing the result inspector and does not reopen it for session up
 });
 
 
+it.each([
+  { width: 1920, state: 'thinking' as const, open: true },
+  { width: 1700, state: 'completed' as const, open: true },
+  { width: 1700, state: 'thinking' as const, open: false },
+  { width: 1440, state: 'completed' as const, open: false }
+])('opens the result inspector by default on wide screens ($width px, $state) until the user closes it', async ({ width, state, open }) => {
+  vi.stubGlobal('matchMedia', vi.fn((query: string) => {
+    const min = Number(/min-width: (\d+)px/.exec(query)?.[1] ?? NaN);
+    return { matches: Number.isFinite(min) && width >= min, addEventListener: vi.fn(), removeEventListener: vi.fn() };
+  }));
+  window.history.replaceState(null, '', '/sessions/s1');
+  mockAppApi({ sessions: [session('s1', state)], summaries: [summary('s1', 'wide inspector task')] });
+  vi.spyOn(api, 'workspace').mockResolvedValue({ schemaVersion: 1, revision: 1, sessionId: 's1', mode: 'shared', sourceCwd: '/repo/s1', cwd: '/repo/s1', state: 'ready', createdAt: session('s1').createdAt, updatedAt: session('s1').updatedAt });
+  const { client } = renderApp();
+  await screen.findByRole('heading', { level: 1, name: 'wide inspector task' });
+  if (!open) { expect(screen.queryByRole('complementary', { name: '结果检视' })).toBeNull(); return; }
+  const inspector = await screen.findByRole('complementary', { name: '结果检视' });
+  // 切到「改动」后检视栏仍在：它属于任务而不是某个标签页。
+  await userEvent.click(screen.getByRole('tab', { name: '改动' }));
+  expect(screen.getByRole('complementary', { name: '结果检视' })).toBeTruthy();
+  await userEvent.click(within(inspector).getByRole('button', { name: '关闭结果检视' }));
+  await waitFor(() => expect(screen.queryByRole('complementary', { name: '结果检视' })).toBeNull());
+  act(() => client.setQueryData(['sessions'], [session('s1', state === 'completed' ? 'completed' : 'idle')]));
+  expect(screen.queryByRole('complementary', { name: '结果检视' })).toBeNull();
+});
+
+it('手机端在待办页（primaryNav === "inbox"）显示底部导航栏', async () => {
+  vi.stubGlobal('matchMedia', vi.fn((query: string) => ({
+    matches: query === '(min-width: 768px)' ? false : false,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn()
+  })));
+  window.history.replaceState(null, '', '/?nav=inbox');
+  mockAppApi();
+  renderApp();
+  await screen.findByRole('heading', { level: 1, name: '待办' });
+  const tabBar = screen.getByRole('navigation', { name: '主要页面' });
+  expect(tabBar).toBeTruthy();
+  expect(within(tabBar).getByRole('button', { name: '待办' }).getAttribute('aria-current')).toBe('page');
+});
+
+it('宽屏下从待办/提醒或改动链接进入任务时，程序性关闭结果检视记为明确选择，不自动弹开结果检视', async () => {
+  vi.stubGlobal('matchMedia', vi.fn((query: string) => {
+    const min = Number(/min-width: (\d+)px/.exec(query)?.[1] ?? NaN);
+    return { matches: Number.isFinite(min) && 1920 >= min, addEventListener: vi.fn(), removeEventListener: vi.fn() };
+  }));
+  window.history.replaceState(null, '', '/');
+  mockAppApi({
+    sessions: [session('s1', 'waiting_for_permission')],
+    summaries: [summary('s1', '需要授权的任务')]
+  });
+  vi.spyOn(api, 'inbox').mockResolvedValue({
+    generatedAt: '2026-11-08T00:00:00Z',
+    items: [{
+      id: 'item-1',
+      kind: 'permission',
+      sessionId: 's1',
+      sessionTitle: '需要授权的任务',
+      workspace: 'repo',
+      title: '执行危险命令',
+      createdAt: '2026-11-08T00:00:00Z',
+      waitingMs: 1000,
+      actions: [{ id: 'open', type: 'open', label: '打开任务' }]
+    }]
+  });
+  renderApp();
+  await screen.findByRole('heading', { level: 1, name: '总览' });
+  const attentionBtn = await screen.findByRole('button', { name: '打开任务' });
+  await userEvent.click(attentionBtn);
+  await screen.findByRole('heading', { level: 1, name: '需要授权的任务' });
+  // 即使在 1920px 宽屏下，结果检视也不自动弹开挡住对话/终端
+  expect(screen.queryByRole('complementary', { name: '结果检视' })).toBeNull();
+});
+
 it('restores each list entry view, search and project independently across multiple task visits', async () => {
   window.history.replaceState(null, '', '/?nav=tasks');
   mockAppApi({ sessions: [session('s1', 'completed'), session('s2', 'completed'), session('s3', 'thinking')], summaries: [summary('s1', 'first scoped task'), summary('s2', 'second scoped task'), summary('s3', 'running outside scope')] });
@@ -1695,7 +1773,7 @@ it('restores each list entry view, search and project independently across multi
   fireEvent.change(project(), { target: { value: 's1' } });
   await userEvent.click(within(screen.getByRole('region', { name: '任务列表' })).getByRole('button', { name: /first scoped task/ }));
   await screen.findByRole('heading', { level: 1, name: 'first scoped task' });
-  await userEvent.click(within(nav).getByRole('button', { name: /^全部任务/ }));
+  await userEvent.click(within(nav).getByRole('button', { name: /^任务/ }));
   expect(search().value).toBe('first scoped');
   expect(project().value).toBe('s1');
   const historyLength = window.history.length;
@@ -1717,8 +1795,8 @@ it('restores each list entry view, search and project independently across multi
   expect(search().value).toBe('first scoped');
   expect(project().value).toBe('s1');
   expect(within(filters()).getByRole('button', { name: '已完成 2' }).getAttribute('aria-pressed')).toBe('true');
-  await userEvent.click(within(nav).getByRole('button', { name: /^工作台/ }));
-  await screen.findByRole('heading', { level: 1, name: '工作台' });
+  await userEvent.click(within(nav).getByRole('button', { name: /^总览/ }));
+  await screen.findByRole('heading', { level: 1, name: '总览' });
   expect(screen.queryByRole('textbox', { name: '筛选当前任务列表' })).toBeNull();
   expect(within(screen.getByRole('region', { name: '任务列表' })).getByRole('button', { name: /running outside scope/ })).toBeTruthy();
 });
@@ -1764,8 +1842,8 @@ it.each(['acp', 'pty-cli'] as const)('opens the actionable context from the home
   renderApp();
   await userEvent.click(await screen.findByRole('tab', { name: '改动' }));
   const nav = screen.getByRole('complementary', { name: 'Dutydeck 工作台导航' });
-  await userEvent.click(within(nav).getByRole('button', { name: /^工作台/ }));
-  await screen.findByRole('heading', { level: 1, name: '工作台' });
+  await userEvent.click(within(nav).getByRole('button', { name: /^总览/ }));
+  await screen.findByRole('heading', { level: 1, name: '总览' });
   await userEvent.click(within(screen.getByRole('region', { name: '任务列表' })).getByRole('button', { name: /approval target/ }));
   expect(screen.getByRole('tab', { name: protocol === 'acp' ? '对话' : '终端' }).getAttribute('aria-selected')).toBe('true');
   if (protocol === 'acp') expect(await screen.findByRole('complementary', { name: '权限审批' })).toBeTruthy();

@@ -1,8 +1,9 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { X } from 'lucide-react';
-import { api, type Session, type Task, type WorkspaceCleanupPreview } from '../api';
-import { sessionDisplayName } from '../run-summary';
+import { api, type RunSummary, type Session, type Task, type WorkspaceCleanupPreview } from '../api';
+import { sessionDisplayName, summaryFromTasks } from '../run-summary';
+import { sessionWorkspaceName } from '../workspace-model';
 import { turnDiffPath } from '../app-route';
 import { Banner, Button, Dialog, Field, IconButton, Input, Spinner } from './primitives';
 import { PullRequestPanel } from './PullRequestPanel';
@@ -15,11 +16,14 @@ import { useVerifications } from './useVerifications';
 import { usageLabel } from './RunHeader';
 import { effectiveStatus, isSessionActionDisabled, permissionLabels } from './ui';
 
-export function SessionDeliveryPanel({ session, tasks, onClose, presentation = 'dialog' }: { session: Session; tasks: Task[]; onClose(): void; presentation?: 'dialog' | 'inspector' }) {
+export function SessionDeliveryPanel({ session, tasks, summary, onClose, presentation = 'dialog' }: { session: Session; tasks: Task[]; summary?: RunSummary; onClose(): void; presentation?: 'dialog' | 'inspector' }) {
   const qc = useQueryClient();
   const [command, setCommand] = useState('');
   const [cleanupPreview, setCleanupPreview] = useState<WorkspaceCleanupPreview | null>(null);
   const [cleanupError, setCleanupError] = useState<string | null>(null);
+
+  const derivedSummary = summary ?? summaryFromTasks(session.id, tasks);
+  const status = effectiveStatus(session, derivedSummary);
 
   const capabilities = useQuery({ queryKey: ['sessionCapabilities', session.id], queryFn: () => api.sessionCapabilities(session.id) });
   const workspace = useQuery({ queryKey: ['workspace', session.id], queryFn: () => api.workspace(session.id) });
@@ -65,11 +69,47 @@ export function SessionDeliveryPanel({ session, tasks, onClose, presentation = '
   const isCleaned = workspace.data?.state === 'cleaned' || Boolean(workspace.data?.cleanedAt);
 
   const content = <div className="space-y-6">
+        <section className="space-y-3" aria-label="交付清单">
+          <h3 className="text-body font-semibold">交付清单</h3>
+          <div className="rounded-lg border border-default bg-surface p-3 space-y-2 text-caption">
+            <div className="flex items-center justify-between">
+              <span className="text-subtle">执行</span>
+              <span className="font-medium text-primary">{status.label}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-subtle">改动</span>
+              <span className="font-medium text-primary">
+                {turnDiffs.data?.length ? `${turnDiffs.data.reduce((acc, d) => acc + d.summary.files, 0)} 个文件改动` : '无文件改动'}
+              </span>
+            </div>
+            {(() => {
+              const latest = evidence.data?.[0];
+              const isSuccess = Boolean(latest && latest.status === 'passed' && !latest.stale);
+              const text = !latest
+                ? '未验证'
+                : isSuccess
+                ? '已验证通过'
+                : latest.status === 'passed' && latest.stale
+                ? '验证已过期'
+                : '验证未通过';
+              return (
+                <div className="flex items-center justify-between">
+                  <span className="text-subtle">验证</span>
+                  <span className={`font-medium ${isSuccess ? 'text-success' : 'text-subtle'}`}>
+                    {text}
+                  </span>
+                </div>
+              );
+            })()}
+          </div>
+          <p className="text-meta text-subtle">执行完成、改动、验证通过与投递状态分别记录；未验证或未投递不会画为成功。</p>
+        </section>
+
         <section className="space-y-2" aria-label="任务结果">
           <h3 className="text-body font-semibold">结果</h3>
           <p className="text-body text-primary">{sessionDisplayName(session, tasks.find(task => task.prompt.trim())?.prompt)}</p>
           <TaskAuthorizationPanel sessionId={session.id} tasks={tasks}/>
-          <p className="text-caption text-secondary">执行状态：{effectiveStatus(session).label}。执行完成与验证通过分别记录。</p>
+          <p className="text-caption text-secondary">执行状态：{status.label}。执行完成与验证通过分别记录。</p>
           <p className="text-caption text-subtle">结果正文保留在对话中；下方检查已记录的改动与交付证据。</p>
         </section>
         <SessionArtifacts sessionId={session.id}/>
@@ -117,6 +157,16 @@ export function SessionDeliveryPanel({ session, tasks, onClose, presentation = '
         <details className="rounded-lg border border-default p-3">
           <summary className="min-h-11 cursor-pointer text-body font-semibold">执行环境与用量</summary>
           <div className="mt-3 space-y-4">
+        <section className="space-y-2">
+          <h3 className="text-body font-semibold">执行环境</h3>
+          <div className="grid grid-cols-2 gap-2 text-caption">
+            <div><span className="text-subtle">工作区：</span><span className="font-medium text-primary">{sessionWorkspaceName(session)}</span></div>
+            <div><span className="text-subtle">分支：</span><span className="font-mono text-primary">{workspace.data?.branch ?? '—'}</span></div>
+            <div><span className="text-subtle">Agent：</span><span className="text-primary">{session.agentId}</span></div>
+            <div><span className="text-subtle">权限：</span><span className="text-primary">{session.permissionMode ? permissionLabels[session.permissionMode] : '默认'}</span></div>
+            {session.model && <div className="col-span-2"><span className="text-subtle">模型：</span><span className="text-primary">{session.model}</span></div>}
+          </div>
+        </section>
         <section className="space-y-2">
           <h3 className="text-body font-semibold">工作目录</h3>
           <p className="break-all text-caption text-secondary">Agent：{session.agentId}{session.permissionMode ? ` · ${permissionLabels[session.permissionMode]}` : ''}</p>

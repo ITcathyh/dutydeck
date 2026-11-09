@@ -1,14 +1,16 @@
-import { Activity, Archive, BookOpen, ChevronRight, FileDiff, LineChart, MessageSquare, MoreHorizontal, Pencil, RotateCcw, Square, Terminal } from 'lucide-react';
-import type { ReactNode } from 'react';
-import type { Agent, Session, SessionUsage, Task } from '../api';
+import { Activity, Archive, ArrowLeft, BookOpen, ChevronRight, FileDiff, LineChart, MessageSquare, MoreHorizontal, PanelRightOpen, Pencil, RotateCcw, Square, Terminal } from 'lucide-react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import type { Agent, RunSummary, Session, SessionUsage, Task } from '../api';
 import type { StreamStatus } from '../sse';
 import type { SessionSyncState } from '../useSessionStream';
 import { sessionDisplayName } from '../run-summary';
-import { nextActionForState, sessionErrorSummary, sessionWorkspaceName } from '../workspace-model';
+import { sessionErrorSummary, sessionWorkspaceName } from '../workspace-model';
 import { Badge, Banner, Button, IconButton, Tabs } from './primitives';
 import { MenuButton, type MenuEntry } from './MenuButton';
-import { effectiveStatus, permissionLabels, stateTone } from './ui';
+import { effectiveStatus, stateTone } from './ui';
 import { count, usd } from './usageFormat';
+import { elapsedMilliseconds, formatElapsed } from '../tool-presentation';
+import type { TimelineDensity } from '../view-preferences';
 
 export function connectionLabel(status: SessionSyncState | StreamStatus) {
   if (typeof status === 'string') return status === 'open' ? '实时同步' : status === 'reconnecting' ? '正在重连' : '正在连接';
@@ -24,10 +26,10 @@ function ConnectionState({ status }: { status: SessionSyncState | StreamStatus }
 
 export type RunDetailTab = 'timeline' | 'changes' | 'terminal';
 
-export function RunDetailTabs({ value, onChange, terminalAvailable = true }: { value: RunDetailTab; onChange(value: RunDetailTab): void; terminalAvailable?: boolean }) {
+export function RunDetailTabs({ value, onChange, terminalAvailable = true, changesCount }: { value: RunDetailTab; onChange(value: RunDetailTab): void; terminalAvailable?: boolean; changesCount?: number }) {
   return <Tabs value={value} onChange={onChange} label="任务内容" items={[
     { id: 'timeline', label: '对话', icon: <MessageSquare size={13}/> },
-    { id: 'changes', label: '改动', icon: <FileDiff size={13}/> },
+    { id: 'changes', label: '改动', icon: <FileDiff size={13}/>, badge: changesCount !== undefined && changesCount > 0 ? <span className="ml-1 rounded-full bg-muted px-1.5 py-0.2 text-meta tabular-nums text-secondary">{changesCount}</span> : undefined },
     ...(terminalAvailable ? [{ id: 'terminal' as const, label: '终端', icon: <Terminal size={13}/> }] : [])
   ]}/>;
 }
@@ -47,8 +49,40 @@ export function usageLabel(usage?: SessionUsage) {
   return { text: `本任务${unknown ? '已知费用' : '累计'} ${usd(own.costUsd + subSteps.costUsd)}${extra ? `（${extra}）` : ''}`, detail: `输入 ${tokens('inputTokens')} · 输出 ${tokens('outputTokens')} · 缓存读 ${tokens('cacheReadTokens')} · 缓存写 ${tokens('cacheWriteTokens')} token` };
 }
 
-export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTasks, tools, rawVisible, rawAvailable, restarting, onInterrupt, onRestart, onOpenPrompt, onArchive, onToggleRaw, onRename, onOpenInsight, onOpenTrace }: {
+export function RunHeader({
+  session,
+  summary,
+  agent,
+  taskPrompt,
+  streamStatus,
+  queuedTasks,
+  tools,
+  rawVisible,
+  rawAvailable,
+  restarting,
+  onInterrupt,
+  onRestart,
+  onOpenPrompt,
+  onArchive,
+  onToggleRaw,
+  onRename,
+  onOpenInsight,
+  onOpenTrace,
+  onBack,
+  backLabel = '返回任务',
+  inspectorOpen,
+  onToggleInspector,
+  detailTab,
+  onDetailTabChange,
+  terminalAvailable = true,
+  density,
+  onDensityChange,
+  changesCount,
+  elapsedText,
+  startedAt
+}: {
   session: Session;
+  summary?: RunSummary;
   agent?: Agent;
   taskPrompt?: string;
   streamStatus: SessionSyncState | StreamStatus;
@@ -67,20 +101,49 @@ export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTask
   onRename?(): void;
   onOpenInsight(): void;
   onOpenTrace?(): void;
+  onBack?(): void;
+  backLabel?: string;
+  inspectorOpen?: boolean;
+  onToggleInspector?(): void;
+  detailTab?: RunDetailTab;
+  onDetailTabChange?(value: RunDetailTab): void;
+  terminalAvailable?: boolean;
+  density?: TimelineDensity;
+  onDensityChange?(value: TimelineDensity): void;
+  changesCount?: number;
+  elapsedText?: string;
+  startedAt?: string;
 }) {
   const managed = session.source === 'work_item';
   const workspace = sessionWorkspaceName(session);
   const taskGoal = sessionDisplayName(session, taskPrompt, '未命名任务');
   // 状态文案、是否呼吸、能否重新启动全部来自同一个判断，见 ui.tsx:effectiveStatus。
-  // 这里曾经四处直接读 session.state，归档任务因此显示「思考中」+ 呼吸动画，
-  // 并且给出可点击的「重新启动」按钮——归档是只读，那是功能缺陷。
-  const status = effectiveStatus(session);
-  // nextActionForState 的入参只有 state，拿不到 archivedAt，改签名会波及
-  // workspace-model 里 attentionReasonForSession 等调用点；归档分支放在这里。
-  const nextAction = managed ? '此步骤由目标管理；请从原目标处理授权、重试或停止' : status.archived ? '已归档任务只读；可查看历史记录，不能再下指令' : nextActionForState(session.state);
-  // 下一步提示让用户「查看失败详情」，但详情页原先根本没有失败详情，只有总览页有。
-  // 脱敏管线在 workspace-model:sessionErrorSummary，这里只读不改。
-  // 归档任务同样要能看到：历史失败原因是只读信息，不是可操作项。
+  // 归档任务显示「已归档」，仅在执行中且有当前轮开始时间时计算并刷新耗时。
+  const status = effectiveStatus(session, summary);
+  const isAttention = status.label === '等你审批' || status.label === '等你回答' || status.label === '等你核对';
+  const dotClass = status.archived
+    ? 'bg-neutral-solid'
+    : isAttention
+    ? 'bg-attention-solid'
+    : status.label === '执行中'
+    ? 'bg-info-solid'
+    : stateTone[session.state] ?? 'bg-neutral-solid';
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!status.busy || !startedAt) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [status.busy, startedAt]);
+
+  const elapsed = useMemo(() => {
+    if (!status.busy) return undefined;
+    if (elapsedText) return elapsedText;
+    if (!startedAt) return undefined;
+    const start = Date.parse(startedAt);
+    if (!Number.isFinite(start)) return undefined;
+    const ms = Math.max(0, now - start);
+    return formatElapsed(ms);
+  }, [status.busy, elapsedText, startedAt, now]);
   const errorSummary = sessionErrorSummary(session.error);
   const menu: MenuEntry[] = [
     ...(!managed ? [{ id: 'rename', label: '重命名会话', icon: <Pencil size={14}/>, onSelect: () => onRename?.() }] : []),
@@ -90,39 +153,59 @@ export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTask
     { id: 'raw', label: '原始日志', icon: <Terminal size={14}/>, checked: rawVisible, disabled: !rawAvailable, onSelect: onToggleRaw },
     ...(!status.archived && !managed ? [{ id: 'archive-separator', separator: true as const }, { id: 'archive', label: '归档任务', icon: <Archive size={14}/>, tone: 'danger' as const, onSelect: onArchive }] : [])
   ];
-  return <header className="shrink-0 bg-canvas">
-    <div className="flex min-h-12 items-center gap-2 pl-3 pr-2 pt-1 sm:pl-5 sm:pr-3">
+
+  return <header className="shrink-0 border-b border-default bg-canvas">
+    {/* 第一行：返回、标题、状态（含用时）、中断、结果检视等 */}
+    <div className="ui-thread flex min-h-12 items-center gap-2 pt-1">
+      {onBack && <IconButton label={backLabel} onClick={onBack}><ArrowLeft size={16}/></IconButton>}
       <div className="flex min-w-0 flex-1 items-center gap-1.5">
         <span className="max-w-24 shrink-0 truncate text-body text-subtle sm:max-w-44" title={workspace}>{workspace}</span>
         <ChevronRight aria-hidden="true" size={13} className="shrink-0 text-subtle"/>
         <h1 className="min-w-0 truncate text-title font-semibold tracking-tight text-primary" title={taskGoal}>{taskGoal}</h1>
         {/*
           状态胶囊。圆点是这里唯一带 aria-label 的 span，状态文案在它右边的 <strong> 里——
-          RunHeader.dom.test.tsx 用这两个结构做选择器，别给别的 span 加 aria-label。
-          运行态圆点的配色来自 ui.tsx:stateTone，那是全站唯一的 state→色 映射，不在调用点
-          另抄一份。归档与兜底这两支是 RunHeader 自己写的，与 stateTone 同用语义类。
+          RunHeader.dom.test.tsx 用这两个结构做选择器，保持无障碍和测试一致。
         */}
         <span className="ml-1 inline-flex shrink-0 items-center gap-1.5 rounded-full bg-muted py-0.5 pl-2 pr-2.5">
-          <span aria-label={status.label} className={`h-2 w-2 shrink-0 rounded-full ${status.archived ? 'bg-neutral-solid' : stateTone[session.state] ?? 'bg-neutral-solid'}`}/>
+          <span aria-label={status.label} className={`h-2 w-2 shrink-0 rounded-full ${dotClass}`}/>
           <strong className="text-caption font-semibold text-primary">{status.label}</strong>
+          {status.busy && elapsed && <span className="text-caption text-subtle tabular-nums">{elapsed}</span>}
         </span>
       </div>
-      <div className="ml-auto flex shrink-0 items-center gap-0.5">
-        {status.busy && !managed && <IconButton label="中断当前任务" onClick={onInterrupt}><Square size={14}/></IconButton>}
+      <div className="ml-auto flex shrink-0 items-center gap-1">
+        {status.busy && !managed && <Button variant="secondary" size="sm" aria-label="中断当前任务" onClick={onInterrupt} icon={<Square size={13}/>}>中断</Button>}
         {tools}
         <MenuButton label="更多操作" icon={<MoreHorizontal size={16}/>} items={menu}/>
+        {onToggleInspector && <Button variant={inspectorOpen ? 'secondary' : 'ghost'} size="sm" aria-label="结果检视" aria-pressed={inspectorOpen} data-result-inspector-trigger icon={<PanelRightOpen size={14}/>} onClick={onToggleInspector}>结果检视</Button>}
       </div>
     </div>
-    <div className="flex min-h-8 min-w-0 items-center gap-2 px-3 pb-2 text-caption text-subtle sm:px-5">
-      <span className="shrink-0 truncate">{agent?.name ?? session.agentId}</span>
-      {/* 完全信任是飞书 Bot 的默认姿态，用提醒色标出即可，红字留给真正的失败。 */}
-      {session.permissionMode && <><span aria-hidden="true" className="shrink-0">·</span><span title="本任务的权限姿态" className={`shrink-0 ${session.permissionMode === 'full-trust' ? 'text-warning' : 'text-subtle'}`}>{permissionLabels[session.permissionMode]}</span></>}
-      <span aria-hidden="true" className="shrink-0">·</span>
-      <span className="min-w-0 flex-1 truncate text-secondary">{nextAction}</span>
-      {status.recoverable && !managed && <Button variant="secondary" size="sm" loading={restarting} onClick={onRestart} icon={<RotateCcw size={13}/>}>重新启动</Button>}
-      {queuedTasks.length > 0 && <Badge tone="queued">待执行指令 {queuedTasks.length} 条</Badge>}
-      <ConnectionState status={streamStatus}/>
+
+    {/* 第二行：对话 / 改动 / 终端 tabs 与信息密度选择器 */}
+    <div className="ui-thread flex min-h-10 min-w-0 items-center gap-3 pb-1 text-caption text-subtle">
+      {detailTab && onDetailTabChange ? <div className="min-w-0 flex-1 sm:flex-initial">
+        <RunDetailTabs value={detailTab} onChange={onDetailTabChange} terminalAvailable={terminalAvailable} changesCount={changesCount}/>
+      </div> : <div className="min-w-0 flex-1"/>}
+      {density && onDensityChange && (
+        <div role="group" aria-label="信息密度" className="inline-flex items-center rounded-md border border-subtle bg-muted p-0.5 text-caption">
+          {(['summary', 'standard', 'detail'] as const).map(d => (
+            <button
+              key={d}
+              type="button"
+              aria-pressed={density === d}
+              onClick={() => onDensityChange(d)}
+              className={`rounded px-2 py-0.5 font-medium transition-colors ${density === d ? 'bg-surface text-primary shadow-sm' : 'text-subtle hover:text-secondary'}`}
+            >
+              {d === 'summary' ? '摘要' : d === 'standard' ? '标准' : '详细'}
+            </button>
+          ))}
+        </div>
+      )}
+      <div className="ml-auto flex shrink-0 items-center gap-2">
+        {status.recoverable && !managed && <Button variant="secondary" size="sm" loading={restarting} onClick={onRestart} icon={<RotateCcw size={13}/>}>重新启动</Button>}
+        {queuedTasks.length > 0 && <Badge tone="queued">待执行指令 {queuedTasks.length} 条</Badge>}
+        <ConnectionState status={streamStatus}/>
+      </div>
     </div>
-    {errorSummary && <div className="px-3 pb-3 sm:px-5"><Banner tone="danger" title="失败详情">{errorSummary}</Banner></div>}
+    {errorSummary && <div className="ui-thread pb-3"><Banner tone="danger" title="失败详情">{errorSummary}</Banner></div>}
   </header>;
 }
