@@ -138,6 +138,18 @@ describe('亮屏指纹与卡片元素（纯函数）', () => {
       .toBe(workNoticeFingerprint(baseItem('waiting', 'running'), question('问题 A 的文案完全改写但 requestId 不变')));
   });
 
+  it('keeps one notice per step for tool approvals but a new one for every question', () => {
+    const request = (stepId: string, requestId: string, kind: 'permission' | 'question'): WorkItemRequest => ({ stepId, sessionId: 'ses_child', taskId: 'task_1', requestId, kind, text: '请求' });
+    const item = baseItem('running', 'running');
+    const running = workNoticeFingerprint(item);
+    const first = workNoticeFingerprint(item, [request('alpha', 'turn_1', 'permission')]);
+    expect(first).not.toBe(running);
+    expect(workNoticeFingerprint(item, [request('alpha', 'turn_2', 'permission')])).toBe(first);
+    expect(workNoticeFingerprint(item, [request('alpha', 'turn_2', 'permission'), request('alpha', 'turn_3', 'permission')])).toBe(first);
+    expect(workNoticeFingerprint(item, [request('beta', 'turn_4', 'permission')])).not.toBe(first);
+    expect(workNoticeFingerprint(item, [request('alpha', 'ask_1', 'question')])).not.toBe(workNoticeFingerprint(item, [request('alpha', 'ask_2', 'question')]));
+  });
+
   it('N2 回归①的判定基础：waiting / blocked / failed 或新待决请求出现必换指纹', () => {
     const running = workNoticeFingerprint(baseItem('running', 'running'));
     expect(workNoticeFingerprint(baseItem('waiting', 'waiting'))).not.toBe(running);

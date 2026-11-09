@@ -36,7 +36,8 @@ export function workNoticeFingerprint(item: WorkItem, requests: WorkItemRequest[
   return digest(JSON.stringify([
     focusOf(item.status),
     item.steps.map(step => [step.id, focusOf(step.status)]),
-    requests.map(request => [request.stepId, request.requestId, request.kind]),
+    // 同一步骤的工具授权算同一件事：后续授权只原位更新那张卡，不再每次推新卡。提问每条都要用户作答，仍按请求区分。
+    [...new Set(requests.map(request => JSON.stringify(request.kind === 'permission' ? [request.stepId, 'permission'] : [request.stepId, request.requestId, request.kind])))],
     // 待确认的计划修订是新的人工闸门，要推新卡；按内容摘要区分，Agent 替换修订内容或影响重算也会推新卡。没有修订时指纹与旧版本一致。
     ...item.pendingRevision ? [['revision', item.pendingRevision.digest]] : [],
     // 首次确认前 Agent 改过计划（版本号已递增）：按计划摘要换指纹，重新推确认卡；未改过的计划指纹与旧版本一致。
