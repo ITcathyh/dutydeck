@@ -164,6 +164,8 @@ export abstract class LarkCoordinatorCore {
       loginLinks?: Pick<LoginLinkStore, 'issue'>;
       /** 按工作区记住的审批规则（审批卡「本工作区允许此类命令」）。 */
       workspaceApprovals?: import('./workflow-interactions.js').LarkWorkspaceApprovals;
+      /** 见 LarkWorkflowInteractionsOptions.deferredCloseMs。 */
+      deferredCloseMs?: number;
     } = {},
   ) {
     this.memory = workflowOptions.memory?.store;
@@ -171,7 +173,7 @@ export abstract class LarkCoordinatorCore {
       this.inbox = new LarkTaskInbox(workflowOptions.store);
       this.workflows = new LarkWorkflowInteractions(workflowOptions.store, runtime, service, workflowOptions.broker,
         (record, actor, action) => this.authorizeInteraction(record, actor, action),
-        { log: this.log, approverCandidates: record => this.groupManager?.highRiskOpenIds(record.appId, record.event.chatId) ?? Promise.resolve([]),
+        { log: this.log, deferredCloseMs: workflowOptions.deferredCloseMs, approverCandidates: record => this.groupManager?.highRiskOpenIds(record.appId, record.event.chatId) ?? Promise.resolve([]),
           onPlanDecision: record => this.submitPlanDecision(record),
           onConfirmation: record => this.submitConfirmation(record), confirmationAvailable: (record, checkAccess) => this.confirmationAvailable(record, checkAccess),
           ...(workflowOptions.workspaceApprovals ? { workspaceApprovals: workflowOptions.workspaceApprovals, authorizeWorkspaceRule: (record, actor) => this.authorizeWorkspaceRule(record, actor) } : {}) });

@@ -34,7 +34,7 @@ async function fixture(options: { physical?: boolean } = {}) {
   const runtime = new DutydeckRuntime(repos, {
     driverIdleTimeoutMs: 0,
     probe: () => ({ protocol: 'pty-cli', available: true, pause: false, resume: true }),
-    driverFactory: (config, _protocol, onEvent, onExit, sessionId) => new PtyCliDriver({ agent: config,
+    driverFactory: (config, _protocol, onEvent, onExit, sessionId) => new PtyCliDriver({ agent: config, timings: { quiescenceMs: 30, spinnerGuardMs: 40 },
       adapter: { id: 'fixture', capabilities: {}, buildArgs: () => options.physical ? [script] : [], writeInput: backend => { submissions++; if (options.physical) backend.write('work\n'); else feed('\x1b[2J\x1b[HWORKING'); }, readyPattern: /READY/ },
       backend: options.physical ? new PtyBackend() : { kind: 'pty', spawn() {}, write() {}, resize() {}, kill() { stopped = true; exit(0); }, interrupt() { interrupts++; }, onData(cb) { feed = cb; }, onExit(cb) { exit = cb; } }, sessionId, onEvent, onExit })
   });

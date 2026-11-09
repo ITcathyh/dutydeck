@@ -9,6 +9,7 @@
 // 快照只在静止点取样：每条消息记创建时的请求体，再加上到这个静止点为止的最后一次 PATCH。中间帧受心跳与
 // 并发时序影响，不进快照。临时目录、执行身份、随机编号、时间与耗时在序列化后统一换成占位符。
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import '../../../../tests/support/fast-wait-for.js';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -310,7 +311,7 @@ async function harness(options: { config?: Partial<StoredLarkConfig>; turns?: Tu
     const memoryStore = options.memory ? new LarkMemoryStore(repos.config) : undefined;
     const listener = new LarkLongConnectionListener(log, {
       fetcher: feishu.fetcher as typeof fetch, env: gateEnv, runtime, cardMappings: repos.channelMappings, workflowStore: repos.config,
-      relayBroker: broker, usage: ledger, chatModeResolver: async () => 'group',
+      relayBroker: broker, usage: ledger, chatModeResolver: async () => 'group', deferredCloseMs: 10,
       ...(memoryStore ? { memory: { store: memoryStore } } : {})
     });
     await listener.start(config);
@@ -330,10 +331,15 @@ async function harness(options: { config?: Partial<StoredLarkConfig>; turns?: Tu
 
   const until = (check: () => unknown, timeout = 20_000) => vi.waitFor(async () => {
     if (!await check()) throw new Error('条件未满足');
-  }, { timeout, interval: 25 });
+  }, { timeout });
   /** 飞书那一侧连续一段时间没有新请求：这一步引起的卡片发送与 PATCH 都已落定。 */
   const settle = async () => {
-    for (let seen = -1; seen !== feishu.requests;) { seen = feishu.requests; await pause(400); }
+    // 假飞书立即应答，一轮卡片收发全在本进程的事件循环里，连续三个窗口没有新请求就是落定了。
+    for (let seen = feishu.requests, quiet = 0; quiet < 3;) {
+      await pause(40);
+      if (seen === feishu.requests) quiet++;
+      else { seen = feishu.requests; quiet = 0; }
+    }
   };
   const textOf = (messageId: string) => JSON.stringify(feishu.latest(messageId));
   const findMessage = (needle: string) => feishu.messages.find(item => textOf(item.id).includes(needle))?.id;

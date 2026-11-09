@@ -1,5 +1,6 @@
 import { LarkGroupParticipation } from './group-participation.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import '../../../../tests/support/fast-wait-for.js';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -143,7 +144,7 @@ async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options
     participation = new LarkGroupParticipation({ repository: repos.collaboration, decider: { decide: async () => ({ action: 'silent', reason: '普通材料', evidenceIds: [], updates: [] }), respond: vi.fn() },
       authorize: async () => true, readConfig: async () => config, serviceFor: () => service as any, debounceMs: 10000 });
   }
-  const createCoordinator = () => new LarkMessageCoordinator(runtime, service as any, log, Math.random, 'ou_bot', undefined, repos.channelMappings, async () => 'group', undefined, groupManager, { store: repos.config, broker, participation, resourceRoot: join(cwd, 'attachments') });
+  const createCoordinator = () => new LarkMessageCoordinator(runtime, service as any, log, Math.random, 'ou_bot', undefined, repos.channelMappings, async () => 'group', undefined, groupManager, { store: repos.config, broker, participation, deferredCloseMs: 10, resourceRoot: join(cwd, 'attachments') });
   const coordinator = createCoordinator();
   await coordinator.initializeWorkflows(config);
   await coordinator.startReconciliation(config);

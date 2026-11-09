@@ -7,6 +7,7 @@ import { registerLarkRoutes } from './routes.js';
 import { agentSettingsKeys } from './agent-settings.js';
 import { LarkServiceError } from './service.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import '../../../../tests/support/fast-wait-for.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';

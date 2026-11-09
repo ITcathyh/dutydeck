@@ -5,6 +5,7 @@
 // 真实 DutydeckRuntime + SQLite 持久化 + 真实 LarkWorkflowInteractions，service 为内存 mock。
 // /repair 的外部发布绝不真实发生：open-platform-session 整体被 mock，client 为测试桩。
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import '../../../../tests/support/fast-wait-for.js';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -181,7 +182,7 @@ async function harness(
     const value = Reflect.get(target, key, target);
     return typeof value === 'function' ? value.bind(target) : value;
   } }) : runtime;
-  const createCoordinator = () => new LarkMessageCoordinator(coordinatorRuntime, service as any, log, Math.random, 'ou_bot', undefined, repos.channelMappings, async () => 'group', options.executionPolicy, groupManager, { store: repos.config, broker, participation });
+  const createCoordinator = () => new LarkMessageCoordinator(coordinatorRuntime, service as any, log, Math.random, 'ou_bot', undefined, repos.channelMappings, async () => 'group', options.executionPolicy, groupManager, { store: repos.config, broker, participation, deferredCloseMs: 10 });
   const coordinator = createCoordinator();
   await coordinator.initializeWorkflows(config);
   await coordinator.startReconciliation(config);
@@ -852,7 +853,7 @@ describe('S6/S8/P0-7 帧注记纪律：只在非终态帧，终态帧与结果�
   });
 
   it('S6 运行卡心跳携带排队摘要（不 @、不新消息），终态帧与结果卡不带；6+ 长队守 24KB/180', async () => {
-    const h = await harness('hang');
+    const h = await harness('hang', { configPatch: { pushIntervalMs: 500 } });
     await h.coordinator.handle(event('om_a', '第一个任务'), h.config);
     await vi.waitFor(() => expect(cardUpdates(h, input => input.state === 'running' && input.taskId === 'om_a').length).toBeGreaterThan(0));
     // 两条排队来自不同的人：同一人连发的排队消息会并成一条，这里要的是两条独立的排队项。
@@ -879,7 +880,7 @@ describe('S6/S8/P0-7 帧注记纪律：只在非终态帧，终态帧与结果�
   });
 
   it('6 个超长排队项：摘要 5 条 + 溢出提示，整卡不超 24KB/180 组件', async () => {
-    const h = await harness('hang');
+    const h = await harness('hang', { configPatch: { pushIntervalMs: 500 } });
     const longPrompt = `超长任务 <数据 & 明细> ${'甲乙丙丁'.repeat(40)}`;
     await h.coordinator.handle(event('om_a', '主任务'), h.config);
     await vi.waitFor(() => expect(cardUpdates(h, input => input.state === 'running' && input.taskId === 'om_a').length).toBeGreaterThan(0));
@@ -1017,7 +1018,7 @@ describe('飞书输入明确反馈与提问生命周期', () => {
   });
 
   it('真实 broker 超时后一个心跳内关闭卡；点击与引用旧卡均不新建任务', async () => {
-    const h = await harness('hang', { configPatch: { structuredAskCards: true } });
+    const h = await harness('hang', { configPatch: { structuredAskCards: true, pushIntervalMs: 500 } });
     await h.coordinator.handle(event('om_expiry_task', '等我的回答'), h.config);
     await vi.waitFor(() => expect(h.send).toHaveBeenCalledTimes(1));
     const [session] = await h.runtime.listSessions();

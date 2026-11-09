@@ -6,6 +6,7 @@ import { MattersService } from '../matters.js';
 // 只把飞书网络层换成内存桩：这几条命令的价值全在「真的改了运行时/群绑定」，
 // 只 mock runtime 的测试证明不了任何事。
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import '../../../../tests/support/fast-wait-for.js';
 import { execFileSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';

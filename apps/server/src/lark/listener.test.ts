@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import '../../../../tests/support/fast-wait-for.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -169,7 +170,7 @@ describe('Lark message coordinator', () => {
     expect(authorize).toHaveBeenCalledWith('listener', 'task.create');
     expect(authorize).toHaveBeenCalledWith('session', 'task.create');
     expect(authorize).toHaveBeenCalledWith('high_risk', 'high_risk.execute');
-    expect(runtime.send).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledOnce());
   });
 
   it('classifies Feishu per-chat throttling and applies a bounded exponential backoff', () => {

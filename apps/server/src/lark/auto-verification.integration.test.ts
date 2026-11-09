@@ -10,6 +10,7 @@
 // 8) 旧结果卡的记忆删除回调触发重绘后：验证状态行与「运行验证」按钮仍按当前记录显示。
 // 9) 管理群里自动验证带上发起人身份、手动「运行验证」带上点击人身份，都过得了执行授权。
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import '../../../../tests/support/fast-wait-for.js';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -207,7 +208,7 @@ describe('改了代码就自动验证', () => {
     const h = await harness({ verificationCommand: 'test -f work.txt' });
     await h.coordinator.handle(event('om_1'), h.config);
     await h.resultCard('om_1');
-    await pause(500);
+    await pause(100);
     expect(h.runVerification).not.toHaveBeenCalled();
     const line = await h.verificationLine('om_1');
     expect(line).toContain('未验证');
@@ -221,7 +222,7 @@ describe('改了代码就自动验证', () => {
     expect(git(h.repo, 'rev-parse', 'origin/HEAD')).not.toBe(git(h.repo, 'rev-parse', 'HEAD'));
     await h.coordinator.handle(event('om_1', '这段逻辑是做什么的'), h.config);
     await h.resultCard('om_1');
-    await pause(500);
+    await pause(100);
     expect(h.runVerification).not.toHaveBeenCalled();
     expect(await h.verificationLine('om_1')).toContain('未验证');
   }, 30_000);
@@ -272,7 +273,7 @@ describe('改了代码就自动验证', () => {
     await vi.waitFor(() => expect(h.echoes).toHaveLength(2), { timeout: 15_000 });
     const last = await h.settledLine(h.echoes[1]!, '已自动返修 2 轮仍未通过');
     expect(last).toContain('验证未通过');
-    await pause(1_000);
+    await pause(150);
     expect(h.prompts).toHaveLength(3);
     expect(h.runVerification).toHaveBeenCalledTimes(3);
     expect(h.service.replyText).toHaveBeenCalledTimes(2);
@@ -285,7 +286,7 @@ describe('改了代码就自动验证', () => {
     const line = await h.settledLine('om_1', '没有发回 Agent 返修');
     expect(line).toContain('验证未通过');
     expect(line).toContain('退出码 127');
-    await pause(1_000);
+    await pause(150);
     expect(h.service.replyText).not.toHaveBeenCalled();
     expect(h.prompts).toHaveLength(1);
     // 待收尾里已移除，卡上的说明随卡片记录保留，之后重绘仍照它写。
@@ -408,7 +409,7 @@ describe('自动验证进行中服务重启', () => {
       // 收尾过的卡片不再带给下一次启动：再重启一次不会重绘。
       const updates = h.service.update.mock.calls.length;
       await h.restart();
-      await pause(300);
+      await pause(100);
       expect(h.service.update.mock.calls.length).toBe(updates);
     }, 45_000);
   }

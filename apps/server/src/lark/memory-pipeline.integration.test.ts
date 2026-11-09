@@ -2,6 +2,7 @@
 // mock driver 按会话 source 分流：用户会话回普通答案，lark-memory 会话按 prompt 回 facts / actions
 // 的 ```json，从而在不起真实 Agent 的前提下跑通「完成轮次 → 记账 → 提取 → 门禁 → 落账本 → 下一轮索引」。
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import '../../../../tests/support/fast-wait-for.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -164,7 +165,7 @@ async function harness(options: { now?: () => Date; timeoutMs?: number; agentMod
    */
   const waitIdle = () => vi.waitFor(async () => {
     expect((await store.getState(scope)).running).toBeUndefined();
-    await new Promise(resolve => setTimeout(resolve, 80));
+    await new Promise(resolve => setTimeout(resolve, 20));
     expect((await store.getState(scope)).running).toBeUndefined();
   }, { timeout: 15_000 });
   const lastCardText = () => JSON.stringify(cards.at(-1) ?? {});
@@ -523,7 +524,7 @@ describe('Lark memory pipeline through the coordinator', () => {
     // 计数已经越过阈值，但上一轮刚失败，自动触发要退避。
     await h.store.updateState(scope, { turnsSinceConsolidation: 20 });
     await h.pipeline.onTurnCompleted(scope, { sessionId: 'ses_fake', taskId: 'task_after_failure' });
-    await new Promise(resolve => setTimeout(resolve, 300));
+    await h.waitIdle();
     expect(h.memoryPrompts.filter(prompt => prompt.includes('后台整理'))).toHaveLength(attempts);
 
     // 手动触发不受退避限制。
@@ -688,7 +689,8 @@ describe('Lark memory pipeline through the coordinator', () => {
     const before = h.memoryPrompts.filter(prompt => prompt.includes('后台整理')).length;
     await h.store.updateState(scope, { turnsSinceConsolidation: 20 });
     await h.runTurns(1);
-    await new Promise(resolve => setTimeout(resolve, 300));
+    await vi.waitFor(async () => expect((await h.store.getState(scope)).turnsSinceConsolidation).toBe(21), { timeout: 15_000 });
+    await h.waitIdle();
     expect(h.memoryPrompts.filter(prompt => prompt.includes('后台整理'))).toHaveLength(before);
   });
 
@@ -832,8 +834,8 @@ describe('Lark memory pipeline through the coordinator', () => {
   });
 
   it('记忆会话超时但中断未确认：保留原任务、报告恢复所需并清掉管线 running', async () => {
-    const h = await harness({ timeoutMs: 300 });
-    h.setResponder(() => ({ text: jsonBlock({ actions: [{ op: 'noop' }] }), delayMs: 1_500 }));
+    const h = await harness({ timeoutMs: 100 });
+    h.setResponder(() => ({ text: jsonBlock({ actions: [{ op: 'noop' }] }), delayMs: 400 }));
 
     await h.coordinator.handle(event('om_remember', '/remember 这个群的回复统一用中文'), h.config);
     await vi.waitFor(() => expect(h.lastCardText()).toContain('已记住'));

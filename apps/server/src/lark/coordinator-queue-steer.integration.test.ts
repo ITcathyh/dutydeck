@@ -4,6 +4,7 @@
 // 与 chat-commands.test.ts 同样接真实 DutydeckRuntime + SQLite，只把飞书网络层换成内存桩：
 // 这些行为的价值全在「真的改了队列、真的中断了那一轮」，只 mock runtime 的测试证明不了。
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import '../../../../tests/support/fast-wait-for.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';

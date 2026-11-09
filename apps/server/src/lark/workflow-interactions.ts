@@ -290,6 +290,8 @@ export interface LarkWorkflowInteractionsOptions {
   workspaceApprovals?: LarkWorkspaceApprovals;
   /** 谁能建工作区规则：机器人所有者或管理员；未提供时一律不能建 */
   authorizeWorkspaceRule?: (record: LarkInteraction, actor: string) => Promise<boolean>;
+  /** 卡片回调答复后过多久收卡；缺省 1 秒，只有测试需要缩短。 */
+  deferredCloseMs?: number;
 }
 
 /** 不发卡、代发起人批准的来源：发起人点过「本会话允许」，或命中了工作区规则（带命中的规则）。 */
@@ -315,6 +317,7 @@ export class LarkWorkflowInteractions {
   private readonly closedCards = new Set<string>();
   private readonly closingCards = new Map<string, Promise<void>>();
   private readonly deferredCloses = new Map<string, { active: number; timer?: NodeJS.Timeout }>();
+  private readonly deferredCloseMs: number;
   private readonly log?: Pick<ListenerLog, 'warn'>;
   private readonly delivering = new Set<string>();
   private readonly retryAfter = new Map<string, number>();
@@ -353,6 +356,7 @@ export class LarkWorkflowInteractions {
     this.onConfirmation = options?.onConfirmation;
     this.confirmationAvailable = options?.confirmationAvailable;
     this.log = options?.log;
+    this.deferredCloseMs = options?.deferredCloseMs ?? 1_000;
   }
 
   /**
@@ -1287,7 +1291,7 @@ export class LarkWorkflowInteractions {
             const record = JSON.parse(raw) as LarkInteraction;
             if (!['pending', 'resolving'].includes(record.state)) await this.renderClosed(record, await this.closedMessage(record));
           })().catch(error => this.log?.warn({ error, requestId: input.requestId }, '延迟收卡失败，等待终态补关'));
-        }, 1_000);
+        }, this.deferredCloseMs);
         entry.timer.unref();
       }
     }

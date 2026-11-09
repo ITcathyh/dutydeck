@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { afterAll, afterEach, beforeAll, expect, it, vi } from 'vitest';
+import '../../../../tests/support/fast-wait-for.js';
+import { bundleForTest } from '../../../../tests/support/bundle-for-test.js';
 import { createRepositories } from '@dutydeck/storage';
 import { RuntimeError, type ConfigRepository } from '@dutydeck/shared';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
@@ -46,8 +48,8 @@ afterEach(async () => { vi.useRealTimers(); for (const cleanup of cleanups.splic
 
 type ChildExit = { code: number | null; signal: NodeJS.Signals | null; stderr: string };
 /** 在 directory 的 state.db 上跑 durable-intake-child，等它被 SIGKILL；不 reject，启动失败落到 stderr 里由断言报告。 */
-const killedChild = (directory: string, ...events: LarkMessageEvent[]) => new Promise<ChildExit>(resolve => {
-  const child = spawn(process.execPath, ['--conditions=development', '--import', 'tsx', fileURLToPath(new URL('./durable-intake-child.mts', import.meta.url)),
+const killedChild = (bundle: string, directory: string, ...events: LarkMessageEvent[]) => new Promise<ChildExit>(resolve => {
+  const child = spawn(process.execPath, [bundle,
     join(directory, 'state.db'), JSON.stringify(config), ...events.map(event => JSON.stringify(event))], { stdio: ['ignore', 'ignore', 'pipe'] });
   let stderr = ''; child.stderr.on('data', chunk => { stderr += chunk; });
   child.on('error', error => resolve({ code: null, signal: null, stderr: String(error) })); child.on('exit', (code, signal) => resolve({ code, signal, stderr }));
@@ -56,15 +58,17 @@ const intakeKill = { original: message({ chatType: 'p2p' }) };
 const claimKill = { original: message({ senderOpenId: 'ou_alarm', senderType: 'app', mentions: [], content: '{"text":"P0 original alarm"}' }) };
 const claimKillDerived = { ...claimKill.original, senderOpenId: 'ou_admin', senderType: 'user', scenario: trustedScenario, rootId: claimKill.original.messageId, threadId: 'omt_alarm' };
 const killedRuns: Partial<Record<'intake' | 'claim', { directory: string; exit: Promise<ChildExit> }>> = {};
-// 两个 SIGKILL 子进程各自冷启动 tsx 要数秒：文件开始时并行启动，与前面的用例重叠，各自用独立数据库。
+// 两个 SIGKILL 子进程共用一份打包产物：文件开始时并行启动，与前面的用例重叠，各自用独立数据库。
+let childBundle: Awaited<ReturnType<typeof bundleForTest>> | undefined;
 beforeAll(async () => {
+  childBundle = await bundleForTest('durable-intake', fileURLToPath(new URL('./durable-intake-child.mts', import.meta.url)));
   for (const [name, events] of [['intake', [intakeKill.original]], ['claim', [claimKill.original, claimKillDerived]]] as const) {
     const directory = await mkdtemp(join(tmpdir(), 'dutydeck-durable-'));
-    killedRuns[name] = { directory, exit: killedChild(directory, ...events) };
+    killedRuns[name] = { directory, exit: killedChild(childBundle.path, directory, ...events) };
   }
 });
 // 用例被过滤掉时也等子进程退出并删掉目录（用过的目录 harness 已清理，force 不报错）。
-afterAll(async () => { for (const run of Object.values(killedRuns)) { await run!.exit; await rm(run!.directory, { recursive: true, force: true }); } });
+afterAll(async () => { for (const run of Object.values(killedRuns)) { await run!.exit; await rm(run!.directory, { recursive: true, force: true }); } await childBundle?.cleanup(); });
 
 async function harness(existing?: { directory: string; exit: Promise<ChildExit> }) {
   const directory = existing?.directory ?? await mkdtemp(join(tmpdir(), 'dutydeck-durable-'));

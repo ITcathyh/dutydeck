@@ -6,6 +6,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import '../../../../tests/support/fast-wait-for.js';
 import { RelayAskBroker } from '@dutydeck/relay';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime, type AgentDriver } from '@dutydeck/runtime';
@@ -19,12 +20,20 @@ import type { LarkMessageEvent } from './listener.js';
 const cleanups: Array<() => Promise<void> | void> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); vi.restoreAllMocks(); });
 
+// 产品把心跳下限钳到 500ms；这里每个用例要等多拍心跳，读配置时把间隔压到 20ms，其余配置照常解析。
+vi.mock('./config.js', async importOriginal => {
+  const original = await importOriginal<typeof import('./config.js')>();
+  return { ...original, readLarkConfig: async (...args: Parameters<typeof original.readLarkConfig>) => {
+    const config = await original.readLarkConfig(...args);
+    return config && { ...config, pushIntervalMs: 20 };
+  } };
+});
+
 const event = (id: string, text: string): LarkMessageEvent => ({
   messageId: id, chatId: 'oc_group', chatType: 'group', threadId: 'omt_topic', rootId: 'om_root',
   senderOpenId: 'ou_alice', senderType: 'user', messageType: 'text', content: JSON.stringify({ text }),
   mentions: [{ key: '@_user_1', name: 'Dock', openId: 'ou_bot' }]
 });
-const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 async function harness() {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-turn-stall-'));
@@ -62,7 +71,7 @@ async function harness() {
   await broker.initialize();
   const config: StoredLarkConfig = { appId: 'cli_stall', appSecret: 'fake-secret', workspace: cwd, defaultAgentId: 'mock', permissionMode: 'ask', listening: true,
     fullTrustConfirmed: true, preInjectPrompt: '', structuredAskCards: false, groupCardMention: false, groupToolsEnabled: false, groupToolsAllowSend: false,
-    pushIntervalMs: 500, hideTraceOnComplete: false, allowedUsers: [], allowedEmails: [], allowedBots: [], peerBotsAllowed: false,
+    pushIntervalMs: 20, hideTraceOnComplete: false, allowedUsers: [], allowedEmails: [], allowedBots: [], peerBotsAllowed: false,
     highRiskAllowedUsers: [], highRiskAllowedEmails: [], highRiskPattern: 'dangerous', riskControlMode: 'off' };
   await repos.config.set(larkBotsConfigKey, JSON.stringify([config]));
   let nextCard = 0;
@@ -101,7 +110,7 @@ async function harness() {
     walk(buildLarkCard(card));
     return labels;
   };
-  const waitLatest = (taskId: string, check: (card: any) => void) => vi.waitFor(() => { const card = latestCard(taskId); check(card); return card; }, { timeout: 6_000, interval: 50 });
+  const waitLatest = (taskId: string, check: (card: any) => void) => vi.waitFor(() => { const card = latestCard(taskId); check(card); return card; }, { timeout: 6_000 });
   const dispatch = async (id: string, text: string) => {
     await coordinator.handle(event(id, text), config);
     await vi.waitFor(async () => {
@@ -117,12 +126,17 @@ async function harness() {
   };
   /** 静默超过阈值：第一帧心跳只取 CPU 对照样本，再前移一个采样窗口后才下结论。 */
   const goSilent = async () => {
-    offset += 4 * 60_000;
-    await pause(1_200);
+    await heartbeatAfter(4 * 60_000);
     offset += 15_000;
   };
+  /** 墙钟前移 ms（超过 10 秒的空闲重绘间隔）后等心跳真的重绘一帧；否定断言要看这之后的卡。 */
+  const heartbeatAfter = async (ms: number) => {
+    const before = cards.length;
+    offset += ms;
+    await vi.waitFor(() => expect(cards.length).toBeGreaterThan(before), { timeout: 6_000 });
+  };
   const cardMessageId = async (id: string) => (JSON.parse((await repos.channelMappings.get(`lark-card:${config.appId}`, id))!.extra!) as PersistedLarkCardTask).card_message_id!;
-  return { runtime, broker, advance: (ms: number) => { offset += ms; }, coordinator, cards, prompts, interrupt, emit: (value: NormalizedDriverEvent) => emit(value), markdownOf, latestCard, buttonsOf, waitLatest, dispatch, runtimeTask, goSilent, cardMessageId };
+  return { runtime, broker, advance: (ms: number) => { offset += ms; }, coordinator, cards, prompts, interrupt, emit: (value: NormalizedDriverEvent) => emit(value), markdownOf, latestCard, buttonsOf, waitLatest, dispatch, runtimeTask, goSilent, heartbeatAfter, cardMessageId };
 }
 
 describe.runIf(existsSync('/proc/self/stat'))('飞书卡上的「可能卡住」提示', () => {
@@ -196,7 +210,7 @@ describe.runIf(existsSync('/proc/self/stat'))('飞书卡上的「可能卡住」
     expect(await act('refresh')).toMatchObject({ type: 'success' });
     h.advance(15_000);
     expect(await act('refresh')).toMatchObject({ type: 'success' });
-    await pause(1_200);
+    await h.heartbeatAfter(11_000);
     expect(h.cards.slice(since).filter(card => card.taskId === 'om_1' || card.taskId === 'om_2')
       .some(card => card.statusLabel === '可能卡住' || h.markdownOf(card).includes('可能卡住'))).toBe(false);
     expect(h.buttonsOf(h.latestCard('om_2'))).not.toContain('在新会话中执行');
@@ -216,7 +230,8 @@ describe.runIf(existsSync('/proc/self/stat'))('飞书卡上的「可能卡住」
     await h.dispatch('om_1', '第一件事');
     await vi.waitFor(() => expect(h.prompts).toHaveLength(1));
     await h.goSilent();
-    await pause(2_000);
+    await h.heartbeatAfter(11_000);
+    await h.heartbeatAfter(11_000);
     expect(h.cards.filter(card => card.taskId === 'om_1').some(card => card.statusLabel === '可能卡住' || h.markdownOf(card).includes('可能卡住'))).toBe(false);
   }, 30_000);
 });

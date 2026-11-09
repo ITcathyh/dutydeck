@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import '../../../../tests/support/fast-wait-for.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';

@@ -4,12 +4,16 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, expect, it, vi } from 'vitest';
+import '../../../../tests/support/fast-wait-for.js';
 import { createRepositories } from '@dutydeck/storage';
+import { lazyBundleForTest } from '../../../../tests/support/bundle-for-test.js';
 import { deliveryCoordinator } from './delivery-coordinator.fixture.js';
 import { performLarkCardReconcile } from './reconciler.js';
 import { createLarkCardService } from './service.js';
 
+const crashChild = lazyBundleForTest('delivery-fencing', fileURLToPath(new URL('./delivery-coordinator.fixture.ts', import.meta.url)));
+afterAll(() => crashChild.cleanup());
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { vi.useRealTimers(); for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 const temp = async () => { const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-delivery-')); cleanups.push(() => rm(cwd, { recursive: true, force: true })); return cwd; };
@@ -37,7 +41,7 @@ it.each(['process', 'result'])('coordinator.stop invalidates a %s write before a
 
 it('persists the first side-effect time across SIGKILL before a provider response and expires restart delivery', async () => {
   const cwd = await temp();
-  const child = spawn(process.execPath, ['--conditions=development', '--import', 'tsx', fileURLToPath(new URL('./delivery-coordinator.fixture.ts', import.meta.url)), '--crash-child', cwd], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, [await crashChild.path(), '--crash-child', cwd], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
   let stderr = '';
   child.stderr.on('data', data => { stderr += data; });
   cleanups.push(async () => { if (child.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await once(child, 'exit'); } });
