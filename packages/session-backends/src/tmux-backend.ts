@@ -32,7 +32,7 @@ import { TmuxCapture, cleanAbandonedTmuxCapture } from './tmux-capture.js';
 import { statStart } from './proc-stat.js';
 import { unixSocketState } from './unix-socket.js';
 import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -129,7 +129,8 @@ function isSocketMissingErrorText(stderrText: string): boolean {
  */
 function orphanedSocketPath(stderrText: string): string | undefined {
   const path = /error connecting to (.+) \(No such file or directory\)/i.exec(stderrText)?.[1];
-  return path !== undefined && unixSocketState(path) === 'bound' ? path : undefined;
+  // 先查绑定再查文件：has-session 没连上之后，并发启动可能刚建好 server，这时文件也已存在，不算残留。
+  return path !== undefined && unixSocketState(path) === 'bound' && !existsSync(path) ? path : undefined;
 }
 
 /** User-facing explanation for a launch refused because of an orphaned tmux socket. */

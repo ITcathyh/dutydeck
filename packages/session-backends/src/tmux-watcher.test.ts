@@ -164,6 +164,16 @@ it.each([
   expect(classifyPaneListing({ error: { stderr, status, signal } }, 'isolated-fixture'))
     .toEqual({ probe, pid: null, ...(stderr.includes('No such file or directory') ? { socketMissing: true } : {}) });
 });
+it.skipIf(process.platform !== 'linux')('does not call a socket orphaned when a concurrent launch has just created it', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dd-tmux-race-'));
+  const socket = join(root, 'default');
+  const server = createServer();
+  await new Promise<void>(resolve => server.listen(socket, resolve));
+  cleanup.push(() => new Promise<void>(resolve => server.close(() => { rmSync(root, { recursive: true, force: true }); resolve(); })));
+  // has-session 连接时文件还不存在；等查内核表时，并发的启动已经建好 server，文件也在。
+  vi.mocked(runCommand).mockRejectedValueOnce({ status: 1, stderr: `error connecting to ${socket} (No such file or directory)` });
+  expect(await TmuxBackend.orphanedServerSocket('isolated-fixture')).toBeUndefined();
+});
 it('treats spawn failures and timeouts as inconclusive', () => {
   expect(classifyPaneListing({ error: Object.assign(new Error('spawn tmux ENOENT'), { code: 'ENOENT' }) }, 'x')).toEqual({ probe: 'unknown', pid: null });
   expect(classifyPaneListing({ error: { code: 'ETIMEDOUT', signal: 'SIGKILL', status: null, stderr: 'no server running' } }, 'x')).toEqual({ probe: 'unknown', pid: null });
