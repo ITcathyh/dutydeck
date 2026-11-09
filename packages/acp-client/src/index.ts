@@ -655,7 +655,13 @@ export class AcpxAdapter implements AgentDriver {
       throw environmentBoundaryError();
     }
     const stored = record.acpx?.session_options?.env ?? {};
-    if (scopedKeys.every(key => stored[key] === desired[key])) return;
+    if (scopedKeys.every(key => stored[key] === desired[key])) {
+      // 其余变量（如 dutydeck_claude_auto_memory）不换原生会话，但 ACPX 按存档的 env 拉起已有会话，写回存档后这次拉起才用上当前值。
+      if (JSON.stringify(stored) === JSON.stringify(desired)) return;
+      record.acpx = { ...record.acpx, session_options: { ...record.acpx?.session_options, env: desired } };
+      await this.sessionStore.save(record);
+      return;
+    }
     record.acpx = { ...record.acpx, reset_on_next_ensure: true };
     await this.sessionStore.save(record);
   }
