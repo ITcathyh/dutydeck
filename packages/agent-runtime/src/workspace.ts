@@ -54,17 +54,20 @@ async function getLinkedWorktrees(repoDir: string): Promise<LinkedWorktreeEntry[
   const result: LinkedWorktreeEntry[] = [];
   let current: Partial<LinkedWorktreeEntry> = {};
   let isFirst = true;
+  const flushCurrent = async (clear = false) => {
+    if (!current.path || !current.head) return;
+    result.push({
+      path: await canonical(current.path).catch(() => current.path!),
+      head: current.head,
+      branch: current.branch,
+      isMain: current.isMain ?? false
+    });
+    if (clear) current = {};
+  };
 
   for (const line of lines) {
     if (line.startsWith('worktree ')) {
-      if (current.path && current.head) {
-        result.push({
-          path: await canonical(current.path).catch(() => current.path!),
-          head: current.head,
-          branch: current.branch,
-          isMain: current.isMain ?? false
-        });
-      }
+      await flushCurrent();
       current = {
         path: line.slice('worktree '.length).trim(),
         isMain: isFirst
@@ -75,25 +78,10 @@ async function getLinkedWorktrees(repoDir: string): Promise<LinkedWorktreeEntry[
     } else if (line.startsWith('branch ')) {
       current.branch = line.slice('branch '.length).trim().replace(/^refs\/heads\//, '');
     } else if (line.trim() === '') {
-      if (current.path && current.head) {
-        result.push({
-          path: await canonical(current.path).catch(() => current.path!),
-          head: current.head,
-          branch: current.branch,
-          isMain: current.isMain ?? false
-        });
-        current = {};
-      }
+      await flushCurrent(true);
     }
   }
-  if (current.path && current.head) {
-    result.push({
-      path: await canonical(current.path).catch(() => current.path!),
-      head: current.head,
-      branch: current.branch,
-      isMain: current.isMain ?? false
-    });
-  }
+  await flushCurrent();
   return result;
 }
 
