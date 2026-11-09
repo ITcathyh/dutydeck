@@ -52,12 +52,30 @@ export async function collectInbox(sources: InboxSources, sessions: Session[], o
     ? (await sources.pullRequests.listPendingDecisions().catch(() => [])).filter(entry => sessionIds.has(entry.pullRequest.sessionId)) : [];
   const larkCards = sources.larkCards && (want('plan') || want('result_acceptance'))
     ? (await sources.larkCards().catch(() => [])).filter(record => sessionIds.has(record.sessionId)) : [];
+  const larkCardsBySession = new Map<string, LarkInteraction[]>();
+  for (const card of larkCards) {
+    const cards = larkCardsBySession.get(card.sessionId);
+    if (cards) cards.push(card);
+    else larkCardsBySession.set(card.sessionId, [card]);
+  }
+  const pullRequestsBySession = new Map<string, typeof pullRequests>();
+  for (const entry of pullRequests) {
+    const entries = pullRequestsBySession.get(entry.pullRequest.sessionId);
+    if (entries) entries.push(entry);
+    else pullRequestsBySession.set(entry.pullRequest.sessionId, [entry]);
+  }
 
   const perSession = await mapLimit(sessions.filter(session => !session.archivedAt), 8, async session => {
     const items: InboxItem[] = [];
     const sid = session.id;
     const managed = session.source === 'work_item';
     const tasks: TaskRecord[] = await sources.runtime.getTasks(sid).catch(() => []);
+    const taskById = new Map<string, TaskRecord>();
+    for (const task of tasks) if (!taskById.has(task.id)) taskById.set(task.id, task);
+    const sessionLarkCards = larkCardsBySession.get(sid) ?? [];
+    const latestTask = sessionLarkCards.some(card => card.kind === 'plan')
+      ? tasks.reduce<TaskRecord | undefined>((last, item) => !last || Date.parse(item.createdAt) >= Date.parse(last.createdAt) ? item : last, undefined)
+      : undefined;
     const workspace = workspaceName(sessionWorkspaceDirectory(session));
     const sessionTitle = session.name?.trim() || oneLine([...tasks].sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0]?.prompt, 60) || workspace;
     const add = (kind: InboxItemKind, objectId: string, createdAt: string, fields: Pick<InboxItem, 'title' | 'actions'> & Partial<Pick<InboxItem, 'detail' | 'revision' | 'expiresAt' | 'taskId'>>) => {
@@ -87,7 +105,7 @@ export async function collectInbox(sources: InboxSources, sessions: Session[], o
       if (session.source !== 'lark' && want('plan')) {
         const plan = await readPlanState(sources.store, session, tasks).catch(() => undefined);
         if (plan?.state === 'pending' && plan.taskId) {
-          const task = tasks.find(item => item.id === plan.taskId)!;
+          const task = taskById.get(plan.taskId)!;
           const path = `/api/sessions/${enc(sid)}/plan/${enc(plan.taskId)}`;
           add('plan', plan.taskId, task.updatedAt, {
             taskId: plan.taskId, revision: plan.taskId, expiresAt: plan.expiresAt, title: oneLine(planTaskOf(task.prompt), 160) || '先出计划的计划',
@@ -96,12 +114,11 @@ export async function collectInbox(sources: InboxSources, sessions: Session[], o
         }
       }
     }
-    for (const card of larkCards.filter(record => record.sessionId === sid)) {
-      const task = tasks.find(item => item.id === card.taskId);
+    for (const card of sessionLarkCards) {
+      const task = taskById.get(card.taskId);
       if (!task) continue;
       if (card.kind === 'plan') {
-        const latest = tasks.reduce<TaskRecord | undefined>((last, item) => !last || Date.parse(item.createdAt) >= Date.parse(last.createdAt) ? item : last, undefined);
-        if (latest?.id !== task.id || task.status !== 'completed' || (card.expiresAt && Date.parse(card.expiresAt) <= now)) continue;
+        if (latestTask?.id !== task.id || task.status !== 'completed' || (card.expiresAt && Date.parse(card.expiresAt) <= now)) continue;
         add('plan', card.taskId, card.cardCreatedAt ?? card.updatedAt, { taskId: card.taskId, revision: card.taskId, expiresAt: card.expiresAt, title: oneLine(planTaskOf(task.prompt), 160) || '先出计划的计划', actions: [larkCard, open] });
       } else add('result_acceptance', card.taskId, card.cardCreatedAt ?? card.updatedAt, { taskId: card.taskId, title: oneLine(card.taskName || task.prompt, 160), actions: [larkCard, open] });
     }
@@ -150,7 +167,7 @@ export async function collectInbox(sources: InboxSources, sessions: Session[], o
         }
       }
     }
-    for (const entry of pullRequests.filter(entry => entry.pullRequest.sessionId === sid)) {
+    for (const entry of pullRequestsBySession.get(sid) ?? []) {
       const pr = entry.pullRequest;
       if (entry.kind === 'confirm') {
         add('pull_request_confirm', pr.id, entry.createdAt, {
