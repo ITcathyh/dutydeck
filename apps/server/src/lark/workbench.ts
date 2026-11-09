@@ -380,8 +380,8 @@ export class LarkWorkbench {
   /** 飞书明确告知不可再更新的卡（消息太旧等永久错误）：心跳不再 PATCH，进程重启后最多再试一次。 */
   private readonly unupdatableCards = new Set<string>();
   /**
-   * 每个目标最近一张卡上列着哪些步骤的工具授权，以及当时除待决请求外的焦点指纹，键是目标 ID。
-   * 同一步骤接连要授权时先原位更新这张卡，不再推新卡。目标结束时删除；进程重启后为空，第一条授权照常推新卡。
+   * 每个目标最近推出的那张卡上列着哪些步骤的工具授权，以及当时除待决请求外的焦点指纹，键是目标 ID。
+   * 同一步骤接连要授权时先原位更新这张卡，不再推新卡。新推的卡不带授权或目标结束时删除；进程重启后为空，第一条授权照常推新卡。
    */
   private readonly permissionCards = new Map<string, { focus: string; steps: Set<string> }>();
   close() { this.closed = true; this.http.close(); }
@@ -502,11 +502,10 @@ export class LarkWorkbench {
     const result = await sendLarkResult(this.client(config), target, { ...(await this.cardInput(item, config, requests)), idempotencyKey: key }, this.options.log, this.repos.config, undefined, { allowConcurrent: true });
     this.assertOpen();
     await this.saveWorkMapping(config.appId, result.messageId, item, target.chatId);
-    this.notePermissionCard(item, requests);
-  }
-
-  private notePermissionCard(item: WorkItem, requests: WorkItemRequest[]) {
-    this.permissionCards.set(item.id, { focus: workNoticeFingerprint(item), steps: new Set(requests.filter(request => request.kind === 'permission').map(request => request.stepId)) });
+    // 只有真推出去的新卡才登记；心跳原位更新旧卡不算，免得首条授权发送失败后被当成「已经推过」。
+    const steps = new Set(requests.filter(request => request.kind === 'permission').map(request => request.stepId));
+    if (steps.size) this.permissionCards.set(item.id, { focus: workNoticeFingerprint(item), steps });
+    else this.permissionCards.delete(item.id);
   }
 
   /** 这次的待决请求全是工具授权、步骤都已列在最近那张卡上，且其他焦点没变：只是同一步骤又要了授权。 */
@@ -548,13 +547,9 @@ export class LarkWorkbench {
       // 否则停在受阻、失败的目标会每秒调一次飞书接口，直到进程退出。
       const content = digest(JSON.stringify(await this.cardInput(item, config, requests)));
       const last = this.patchedContent.get(item.id);
-      if (last?.messageId === card.externalId && last.content === content && (last.retryAt === undefined || Date.now() < last.retryAt)) {
-        if (last.retryAt === undefined) this.notePermissionCard(item, requests);
-        return last.retryAt === undefined;
-      }
+      if (last?.messageId === card.externalId && last.content === content && (last.retryAt === undefined || Date.now() < last.retryAt)) return last.retryAt === undefined;
       const patched = await this.patchWorkCard(item, saved.chatId ?? card.externalId, config, card.externalId, requests);
       this.patchedContent.set(item.id, { messageId: card.externalId, content, ...(patched ? {} : { retryAt: Date.now() + 300_000 }) });
-      if (patched) this.notePermissionCard(item, requests);
       return patched;
     }
     return !strict;
@@ -824,7 +819,9 @@ export class LarkWorkbench {
     void (async () => {
       const patched = !stale && await this.patchWorkCard(updated, context.chatId!, config, context.messageId!, requests);
       // 回调 PATCH 可能比心跳晚到、把卡改回较早的快照；清掉心跳的记录，下一次心跳按当前内容再画一次。
-      this.forget(updated.id);
+      // 这张卡列过哪些步骤的授权（permissionCards）保留：点完批准后同一步骤再要授权，仍更新这张卡。
+      this.patchedContent.delete(updated.id);
+      this.settledNotices.delete(updated.id);
       if (patched) return;
       await this.send(updated, target, config, fallbackKey, requests);
     })().catch(error => this.options.log.warn({ error, workId: updated.id }, '目标卡片刷新失败'));

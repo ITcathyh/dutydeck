@@ -588,9 +588,13 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
     await f.work.tick();
     await vi.waitFor(() => expect(approveCards(f)).toHaveLength(1));
     const request = (await f.interactions.list(item.parentSessionId, item.id, 'ou_alice'))[0]!;
-    const { sessionId: _session, text: _text, ...input } = request;
-    await f.interactions.respond(item.parentSessionId, item.id, { ...input, answer: 'approve' }, 'ou_alice');
-    return { item, request, card: approveCards(f)[0]! };
+    const card = approveCards(f)[0]!;
+    // 走真实的按钮回调：回调会在后台原位刷新被点的卡，等它刷完再继续。
+    const action = card.input.elements.find((value: any) => value.behaviors?.[0]?.value?.answer === 'approve').behaviors[0].value;
+    const updates = f.client.update.mock.calls.length;
+    expect((await f.coordinator.handleAction(action, 'ou_alice', { messageId: card.messageId, chatId: 'oc_group' })).type).toBe('success');
+    await vi.waitFor(() => expect(f.client.update.mock.calls.slice(updates).some(([input]: any[]) => input.messageId === card.messageId)).toBe(true));
+    return { item, request, card };
   };
   const nextRequest = async (f: Awaited<ReturnType<typeof fixture>>, item: WorkItem, previous: WorkItemRequest) => {
     let next!: WorkItemRequest;
@@ -613,6 +617,39 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
     const patch = f.client.update.mock.calls.map(([input]: any[]) => input).filter((input: any) => input.messageId === card.messageId).at(-1);
     expect(JSON.stringify(patch)).toContain('写入第二个文件');
     expect(JSON.stringify(patch)).toContain(next.requestId);
+    // 交付卡不带授权，这条记录随之删掉，完成的目标不会一直留在内存里。
+    await f.workbench.deliver(await f.item());
+    expect((f.workbench as any).permissionCards.has(item.id)).toBe(false);
+  });
+
+  it('still posts the first approval card after a failed send even if a heartbeat updated an older card meanwhile', async () => {
+    const f = await fixture('permission');
+    await f.coordinator.handle(message('om_goal', '/work research 比较'), f.config);
+    await f.work.tick();
+    const item = await f.item();
+    await vi.waitFor(async () => expect((await f.interactions.list(item.parentSessionId, item.id, 'ou_alice')).length).toBe(1));
+    const current = await f.item();
+    const key = `workbench.notice.${item.id}.${workNoticeFingerprint(current, await f.interactions.list(item.parentSessionId, item.id, 'ou_alice'))}`;
+    expect(approveCards(f)).toHaveLength(0);
+
+    const [reply, send] = [f.client.reply, f.client.send];
+    f.client.reply = vi.fn(async () => { throw new Error('feishu unavailable'); }) as any;
+    f.client.send = vi.fn(async () => { throw new Error('feishu unavailable'); }) as any;
+    await expect(f.workbench.notify(current, 'ou_alice')).rejects.toThrow();
+    Object.assign(f.client, { reply, send });
+    expect(await f.repos.config.get(key)).toMatch(/^failed:1:\d+$/);
+
+    // 退避期间的心跳只原位更新目标原来那张卡，把授权按钮画上去，不推新卡。
+    const updates = f.client.update.mock.calls.length;
+    await f.workbench.notify(current, 'ou_alice');
+    expect(f.client.update.mock.calls.length).toBeGreaterThan(updates);
+    expect(approveCards(f)).toHaveLength(0);
+
+    // 退避到期：这条授权还没推送过，要补推一张新卡提醒，不能算成只更新了旧卡。
+    await f.repos.config.set(key, 'failed:1:0');
+    await f.workbench.notify(current, 'ou_alice');
+    expect(approveCards(f)).toHaveLength(1);
+    expect(await f.repos.config.get(key)).toBe('sent');
   });
 
   it('posts a new card for the next tool approval when the first card can no longer be updated', async () => {
