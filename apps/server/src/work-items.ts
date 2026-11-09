@@ -104,7 +104,7 @@ export interface WorkItemServiceOptions {
   /** 带审查策略的步骤启动时追加在提示词末尾的材料（Leader 模式的验收补充）；抛错时这一步记为失败。 */
   stepContext?: (item: WorkItem, definition: WorkPlan['steps'][number]) => Promise<string | undefined>;
   /** 发起人回答了等待步骤。 */
-  answered?: (workId: string, entry: { kind: 'wait'; question: string; answer: string }) => Promise<void>;
+  answered?: (workId: string, entry: { kind: 'wait'; question: string; answer: string; actorId?: string }) => Promise<void>;
   log?: LoopTimingLog;
 }
 
@@ -430,7 +430,7 @@ export class WorkItemService {
       await this.assertExecution(state.value);
       step.answer = answer; step.status = 'completed'; state.value.item.status = 'running';
       await this.write(state);
-      await this.options.answered?.(id, { kind: 'wait', question: state.value.item.plan.steps.find(definition => definition.id === stepId)?.instruction ?? stepId, answer });
+      await this.options.answered?.(id, { kind: 'wait', question: state.value.item.plan.steps.find(definition => definition.id === stepId)?.instruction ?? stepId, answer, ...(actorId ? { actorId } : {}) });
       return this.view(state.value);
     });
   }

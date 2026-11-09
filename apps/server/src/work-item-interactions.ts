@@ -22,7 +22,7 @@ export interface WorkItemRequest {
 /** Leader 模式挂在请求上的钩子：决定卡片上看得到哪些请求，记下发起人的答复。 */
 export interface WorkItemRequestHooks {
   visible(item: WorkItem, requests: WorkItemRequest[]): WorkItemRequest[];
-  answered(workId: string, entry: { kind: 'question' | 'permission' | 'wait'; question: string; answer: string }): Promise<void>;
+  answered(workId: string, entry: { kind: 'question' | 'permission' | 'wait'; question: string; answer: string; actorId?: string }): Promise<void>;
 }
 
 const responseInput = z.object({
@@ -76,7 +76,7 @@ export class WorkItemInteractions {
         if (input.answer === 'approve') await this.authorizeHuman(parentSessionId, actorId, 'high_risk.execute');
         await this.runtime.resolvePermission(request.sessionId, request.requestId, input.answer === 'approve');
       } else await this.broker.answer(request.requestId, input.answer, { sessionId: request.sessionId });
-      await this.hooks()?.answered(workId, { kind: input.kind, question: request.text, answer: input.answer });
+      await this.hooks()?.answered(workId, { kind: input.kind, question: request.text, answer: input.answer, ...(actorId ? { actorId } : {}) });
       return { ok: true };
     });
   }

@@ -187,7 +187,7 @@ Requirements: group tools are on (`groupToolsEnabled`); a terminal-mode Leader n
 - **Acceptance**: the Leader checks the delivery against the guide and sends unacceptable work back to the Worker, with up to 2 automatic rework rounds before it hands the decision to you.
 - **"Leader decided for you"** (「Leader 已替你定」): the decisions the Leader made on your behalf (problem → decision · basis) are listed on the goal card, the latest 5 with the total noted when there are more, and are attached to the delivery result too. If you disagree, just say so in the topic; the front agent passes the new requirement back to the Leader.
 
-**What counts as your authorization.** Only your own words: the message that started the task, what you said in the topic afterwards, and your answers on the goal card, plus any standing authorization the Leader guide spells out. The Leader's own inferences and the front agent's paraphrased brief do not count.
+**What counts as your authorization.** Only your own words: the message that started the task, what you said in the topic afterwards, and your answers on the goal card, plus any standing authorization the Leader guide spells out. Answers on the card from anyone else are recorded with who answered; they settle only that one request and are not taken as your intent. The Leader's own inferences and the front agent's paraphrased brief do not count.
 
 **The Leader guide.** The guide is a skill (a `SKILL.md` plus reference files) that tells the Leader how to work: what to look at first, what it decides itself, what it escalates, which questions acceptance asks and how to word an escalation. The bot setting `leaderSkill` takes:
 

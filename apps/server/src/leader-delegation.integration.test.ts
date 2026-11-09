@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { agentConfigSchema, workPlanConfirmationRequired, type AgentConfig, type AgentDriver } from '@dutydeck/shared';
+import { agentConfigSchema, installationOwnerTaskActor, workPlanConfirmationRequired, type AgentConfig, type AgentDriver } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import { RelayAskBroker, RelayCapabilityRegistry } from '@dutydeck/relay';
@@ -185,7 +185,7 @@ async function fixture(executionMode: StoredLarkConfig['executionMode'] = 'layer
     return { turn, delegated };
   };
   const tickUntil = async (check: () => Promise<void> | void, timeout = 10_000) => vi.waitFor(async () => { await work.tick(); await check(); }, { timeout });
-  return { directory, home, repos, runtime, work, broker, delegations, coordinator, config, client, cards, prompts, stopped, denied, revoked, leader, worker, approval, permissionCalls, authorizeInteraction, replyText, log, pmoTurn, openLeader, resumed, restartLeaderMode, leaderPrompts, arbitrations, record, setRecord, setConfig, leaderRecord, cardTexts, delegateGoal, tickUntil };
+  return { directory, home, repos, runtime, work, broker, delegations, leaderMode, coordinator, config, client, cards, prompts, stopped, denied, revoked, leader, worker, approval, permissionCalls, authorizeInteraction, replyText, log, pmoTurn, openLeader, resumed, restartLeaderMode, leaderPrompts, arbitrations, record, setRecord, setConfig, leaderRecord, cardTexts, delegateGoal, tickUntil };
 }
 
 describe('Leader 计划解析', () => {
@@ -501,9 +501,9 @@ describe('Leader 模式：接待交接、Leader 规划、Worker 执行、Leader 
     const button = escalated()!.input.elements.find((element: any) => element.behaviors?.[0]?.value?.answer === 'approve').behaviors[0].value;
     await f.coordinator.handleAction(button, 'ou_alice', { messageId: escalated()!.messageId, chatId: 'oc_p2p' });
     expect(f.permissionCalls).toEqual([[expect.stringMatching(/^permit_ses_work_/), true]]);
-    expect((await f.leaderRecord(delegated.workId)).answers).toEqual([expect.objectContaining({ text: '卡片答复：批准工具调用「推送到远端仓库」' })]);
+    expect((await f.leaderRecord(delegated.workId)).answers).toEqual([expect.objectContaining({ text: '发起人卡片答复：批准工具调用「推送到远端仓库」' })]);
     await f.tickUntil(async () => expect((await f.work.get(turn.parent.id, delegated.workId, 'ou_alice')).status).toBe('completed'));
-    expect(f.prompts.find(value => value.prompt.includes('Step: Leader 验收'))!.prompt).toContain('卡片答复：批准工具调用「推送到远端仓库」');
+    expect(f.prompts.find(value => value.prompt.includes('Step: Leader 验收'))!.prompt).toContain('发起人卡片答复：批准工具调用「推送到远端仓库」');
   });
 
   it.each([
@@ -567,7 +567,14 @@ describe('Leader 模式：接待交接、Leader 规划、Worker 执行、Leader 
     await f.coordinator.handleAction({ ...value, form_value: { answer: '用 release 分支' } }, 'ou_alice', { messageId: card()!.messageId, chatId: 'oc_p2p' });
     await f.tickUntil(async () => expect((await f.work.get(turn.parent.id, delegated.workId, 'ou_alice')).status).toBe('completed'));
     expect(f.worker.outcomes).toEqual(['用 release 分支']);
-    expect((await f.leaderRecord(delegated.workId)).answers).toEqual([expect.objectContaining({ text: '卡片答复：回答 Worker 提问「改动放在哪个分支？」：用 release 分支' })]);
+    expect((await f.leaderRecord(delegated.workId)).answers).toEqual([expect.objectContaining({ text: '发起人卡片答复：回答 Worker 提问「改动放在哪个分支？」：用 release 分支' })]);
+    // 不是发起人的答复照记，但注明答复人，Leader 不会把它当成发起人的意思。
+    await f.leaderMode.answered(delegated.workId, { kind: 'question', question: '要不要推送？', answer: '推吧', actorId: 'ou_bob' });
+    await f.leaderMode.answered(delegated.workId, { kind: 'permission', question: 'git push', answer: 'approve', actorId: installationOwnerTaskActor });
+    expect((await f.leaderRecord(delegated.workId)).answers.slice(1).map((entry: { text: string }) => entry.text)).toEqual([
+      '群成员 ou_bob（不是发起人）卡片答复：回答 Worker 提问「要不要推送？」：推吧',
+      '安装所有者（不是发起人）卡片答复：批准工具调用「git push」'
+    ]);
     expect(f.prompts.find(value => value.prompt.includes('Step: Leader 验收'))!.prompt).toContain('用 release 分支');
   });
 
