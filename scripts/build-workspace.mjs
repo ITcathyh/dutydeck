@@ -2,8 +2,10 @@
 // Builds the workspace packages, the Web UI and the server bundle, then records a fingerprint of the build inputs.
 //   node scripts/build-workspace.mjs               always build (pnpm build)
 //   node scripts/build-workspace.mjs --if-changed  skip when the inputs match the last successful build (e2e, verify:package)
-// The fingerprint covers every non-ignored file under the build roots plus the Node version and install state, so any
-// source, test, lockfile or patch edit rebuilds. It lives in apps/server/dist, which the server build recreates.
+//   node scripts/build-workspace.mjs --typecheck   after a build of the same inputs, check only the esbuild-bundled server (pnpm typecheck)
+// The fingerprint covers every non-ignored file under the build roots except test files, which no build output contains,
+// plus the Node version and install state, so any source, lockfile or patch edit rebuilds. It lives in apps/server/dist,
+// which the server build recreates.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
@@ -24,7 +26,7 @@ function fingerprint() {
   hash.update(`node ${process.version}\n`);
   const modules = join(root, 'node_modules/.modules.yaml');
   if (existsSync(modules)) hash.update(readFileSync(modules));
-  const files = execFileSync('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', ...inputs], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+  const files = execFileSync('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', ...inputs, ':(exclude,glob)**/*.test.ts', ':(exclude,glob)**/*.test.tsx'], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
     .split('\0').filter(Boolean).sort();
   for (const file of new Set(files)) {
     const path = join(root, file);
@@ -42,9 +44,14 @@ function outputsPresent() {
   return [...packages, 'apps/web/dist/index.html', 'apps/server/dist/cli.js'].every(path => existsSync(join(root, path)));
 }
 
-const ifChanged = process.argv.includes('--if-changed');
 const before = fingerprint();
-if (ifChanged && outputsPresent() && existsSync(stampPath) && readFileSync(stampPath, 'utf8').trim() === before) {
+const builtFromInputs = outputsPresent() && existsSync(stampPath) && readFileSync(stampPath, 'utf8').trim() === before;
+if (process.argv.includes('--typecheck')) {
+  // tsc already checked the packages and the Web UI during that build.
+  const args = builtFromInputs ? ['--filter', 'dutydeck', 'typecheck'] : ['-r', 'typecheck'];
+  process.exit(spawnSync('pnpm', args, { cwd: root, stdio: 'inherit' }).status ?? 1);
+}
+if (process.argv.includes('--if-changed') && builtFromInputs) {
   console.log('[build] inputs unchanged since the last build; reusing it (pnpm build forces a rebuild)');
   process.exit(0);
 }

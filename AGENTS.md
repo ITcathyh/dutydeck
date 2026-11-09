@@ -45,7 +45,7 @@ pnpm exec tsx apps/server/src/cli.ts --local-only --port 14310 --no-lark-listen
 
 ## 验证
 
-代码改动均须通过 `pnpm typecheck` 和受影响测试的 `pnpm exec vitest run <测试路径>`。从仓库根运行，Node 与 Web/jsdom 由根配置分流；需要限定时用 `--project=node` 或 `--project=web`。node project 由 `tests/setup/node-env.ts` 在每个测试文件前清掉服务实例变量（`child-environment.mjs` 的 `inheritedServiceKeys`、`DUTYDECK_DATABASE_URL`、`DUTYDECK_SUPERVISOR`、`DUTYDECK_SYSTEMD_UNIT` 和 `DUTYDECK_DAEMON_RESTART_*`），需要这些变量的用例要显式设置。`pnpm typecheck` 不检查 `*.test.ts`（tsconfig 已排除），Vitest 运行时也不做类型检查，测试代码里的类型错误两边都发现不了。全量测试并行执行、机器负载高，涉及时间的断言要留足余量或改用假时钟，不能只调到在本机刚好通过。未设置 `CI` 时根 `vitest.config.ts` 把 worker 数限制为可用核数的四分之一（至少 1、至多 16），需要别的并发时在命令行加 `--maxWorkers`；web project 另用最多 3 个线程与 node 同时跑。测试要反复起 TypeScript 入口的子进程（CLI、fixture）时，用 `tests/support/bundle-for-test.ts` 先打包一次再用 `node` 启动，不要每次 `--import tsx`：后者每次冷启动要 1～3 秒，负载高时是超时的主要来源。测试里的本地 HTTP 桩按目标路径过滤后再计数或断言，并行测试会复用刚释放的端口打进无关请求；请求体解析失败时断开该连接并返回，不抛成未处理 rejection。把失败归为既有问题要有依据：在 master 的 detached worktree 复跑同一测试，或对照更早的全量日志。
+代码改动均须通过 `pnpm typecheck` 和受影响测试的 `pnpm exec vitest run <测试路径>`。从仓库根运行，Node 与 Web/jsdom 由根配置分流；需要限定时用 `--project=node` 或 `--project=web`。node project 在未设置 `TMPDIR` 且有 `/dev/shm` 时把临时目录放到内存盘（`tests/setup/tmpfs-tmpdir.ts`），并由 `tests/setup/node-env.ts` 在每个测试文件前清掉服务实例变量（`child-environment.mjs` 的 `inheritedServiceKeys`、`DUTYDECK_DATABASE_URL`、`DUTYDECK_SUPERVISOR`、`DUTYDECK_SYSTEMD_UNIT` 和 `DUTYDECK_DAEMON_RESTART_*`），需要这些变量的用例要显式设置。`pnpm typecheck` 在输入与上次构建相同时只查 server（包和 Web 已在构建时检查过），否则全查；它不检查 `*.test.ts`（tsconfig 已排除），Vitest 运行时也不做类型检查，测试代码里的类型错误两边都发现不了。全量测试并行执行、机器负载高，涉及时间的断言要留足余量或改用假时钟，不能只调到在本机刚好通过。未设置 `CI` 时根 `vitest.config.ts` 把 worker 数限制为可用核数的四分之一（至少 1、至多 16），需要别的并发时在命令行加 `--maxWorkers`；web project 另用最多 3 个线程与 node 同时跑。测试要反复起 TypeScript 入口的子进程（CLI、fixture）时，用 `tests/support/bundle-for-test.ts` 先打包一次再用 `node` 启动，不要每次 `--import tsx`：后者每次冷启动要 1～3 秒，负载高时是超时的主要来源。测试里的本地 HTTP 桩按目标路径过滤后再计数或断言，并行测试会复用刚释放的端口打进无关请求；请求体解析失败时断开该连接并返回，不抛成未处理 rejection。把失败归为既有问题要有依据：在 master 的 detached worktree 复跑同一测试，或对照更早的全量日志。
 
 | 额外影响范围 | 追加检查 |
 |---|---|
@@ -54,7 +54,7 @@ pnpm exec tsx apps/server/src/cli.ts --local-only --port 14310 --no-lark-listen
 | 飞书卡片、机器人接入与设置 | 对应 `apps/server/src/lark/` 测试，加 `pnpm e2e:full`（core + 合成飞书 extended）；普通 smoke 不覆盖飞书投递与回调 |
 | 发布、launcher 或插件 SDK/资源 | `pnpm verify:package`（全部打包/安装验证，确认脱离源码目录后仍能使用）；新增打包验证脚本要挂进 `verify:package:run` |
 
-`pnpm e2e`、`pnpm e2e:full`、`pnpm verify:package` 先跑 `pnpm build:if-changed`：构建输入（`apps/`、`packages/`、锁文件等，含测试文件）与上次构建相同就复用，否则重新构建；`pnpm build` 总是重建。要一次跑完所有检查用 `pnpm verify:all`（按需构建、全量测试、`e2e:full`、`verify:package`），不必再单独跑 smoke。E2E 按文件并行，默认 worker 数为 CPU 数的一半、最多 4 个，`DUTYDECK_E2E_WORKERS` 可覆盖；用例必须自带服务、数据库、HOME、tmux socket 和端口。
+`pnpm e2e`、`pnpm e2e:full`、`pnpm verify:package` 先跑 `pnpm build:if-changed`：构建输入（`apps/`、`packages/`、锁文件等，不含测试文件）与上次构建相同就复用，否则重新构建；`pnpm build` 总是重建。要一次跑完所有检查用 `pnpm verify:all`（按需构建、全量测试、`e2e:full`、`verify:package`），不必再单独跑 smoke。E2E 按文件并行，默认 worker 数为 CPU 数的一半、最多 4 个，`DUTYDECK_E2E_WORKERS` 可覆盖；用例必须自带服务、数据库、HOME、tmux socket 和端口。
 
 E2E 需要 `git`、`tmux` 和 Playwright Chromium；命令、场景及产物位置见 [tests/e2e/README.md](tests/e2e/README.md)。默认使用假 CLI/合成飞书，不能据此宣称真实模型、飞书发送或卡片点击已验证。纯文档改动核对命令、路径、全文一致性及 `git diff --check`，不要求跑无关产品测试。
 

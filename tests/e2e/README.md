@@ -33,7 +33,7 @@ pnpm exec playwright install --with-deps chromium
 
 - `results.json`：汇总测试结果及上下文元数据（Git SHA、dirty 状态、runId、mock 边界与执行时间戳）。
 - `html/index.html`：Playwright HTML 可视化报告。
-- `test-results/<case>/trace.zip` 或 `smoke/smoke-trace.zip`：失败步骤的时间轴 trace。若用例在浏览器启动前失败，无 DOM trace，排查请直接查阅服务端日志。
+- `test-results/<case>/trace.zip` 或 `smoke/smoke-trace.zip`：失败步骤的时间轴 trace。`test-results` 下的 trace 只有 CI 默认录制，本地失败后加 `--trace on` 重跑。若用例在浏览器启动前失败，无 DOM trace，排查请直接查阅服务端日志。
 - `server.log` 与现场截图（`*.png`）：服务端完整日志与失败时刻快照。测试运行期间创建的临时 SQLite 与 tmux 服务在退出时自动清理，排查请以产物日志与 trace 为准。
 
 ### 查看报告与 Trace

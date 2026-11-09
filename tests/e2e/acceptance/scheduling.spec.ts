@@ -138,7 +138,7 @@ test('creates a paused plan globally without sending a prompt, runs it explicitl
 
 test('an enabled once plan dispatches through the real timer and settles one exact runtime result', async () => {
   test.setTimeout(210_000);
-  const instance = await launchIsolatedTestServer('dutydeck-acc-scheduling-timer-');
+  const instance = await launchIsolatedTestServer('dutydeck-acc-scheduling-timer-', { extraEnv: { DUTYDECK_AUTOMATION_TICK_MS: '1000' } });
   try {
     const prompt = 'SCHEDULE_ONCE_TIMER_EXECUTION';
     const created = await instance.request('POST', '/api/sessions', { cwd: instance.sourceRepo, agentId: 'claude-code' });

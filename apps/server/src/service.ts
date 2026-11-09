@@ -1021,7 +1021,8 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       if (ciWebhook) void timeLoop('ci-webhook.tick', loopLog, () => ciWebhook.tick()).catch(error => log.warn({ error }, 'CI webhook 续作轮询失败'));
       void timeLoop('pull-requests.tick', loopLog, () => pullRequests.tick()).catch(error => log.warn({ error }, 'PR 跟进轮询失败'));
     };
-    automationTimer = setInterval(tick, 60_000);
+    // Only the acceptance test that drives a plan through this real timer shortens the interval.
+    automationTimer = setInterval(tick, Number(env.DUTYDECK_AUTOMATION_TICK_MS) || 60_000);
     automationTimer.unref();
     tick();
     let lastCollaborationPrune = 0;

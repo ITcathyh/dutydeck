@@ -58,7 +58,8 @@ export default defineConfig({
     ...devices['Desktop Chrome'],
     viewport: { width: 1440, height: 960 },
     screenshot: 'only-on-failure',
-    trace: 'retain-on-failure',
+    // Recording every test costs about 7% of the run; locally rerun a failure with --trace on.
+    trace: process.env.CI ? 'retain-on-failure' : 'off',
     video: 'off'
   },
   projects: [

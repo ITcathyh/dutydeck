@@ -15,7 +15,7 @@
     "build:packages": "pnpm -r --filter './packages/**' build",
     "build": "node scripts/build-workspace.mjs",
     "build:if-changed": "node scripts/build-workspace.mjs --if-changed",
-    "typecheck": "pnpm -r typecheck",
+    "typecheck": "node scripts/build-workspace.mjs --typecheck",
     "test": "vitest run",
     "test:watch": "vitest",
     "benchmark": "pnpm --filter @dutydeck/web build && node --expose-gc --import tsx scripts/benchmark-history.mts && node --expose-gc --import tsx scripts/benchmark-browser.mts",
@@ -26,7 +26,7 @@
     "e2e:core:run": "playwright test -c tests/e2e/acceptance/playwright.config.ts --project=core",
     "e2e:full": "pnpm build:if-changed && pnpm e2e:full:run",
     "e2e:full:run": "playwright test -c tests/e2e/acceptance/playwright.config.ts",
-    "verify:all": "pnpm build:if-changed && pnpm test && pnpm e2e:full:run && pnpm verify:package:run"
+    "verify:all": "pnpm build:if-changed && vitest run --exclude tests/package-files.test.ts --exclude tests/packaged-content.test.ts && pnpm e2e:full:run && pnpm verify:package:run"
   },
   "devDependencies": {
     "@dutydeck/acp-client": "workspace:*",
