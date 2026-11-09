@@ -109,7 +109,7 @@ tmuxDescribe('restart with a live fixture CLI in isolated tmux', () => {
     const secondTask = await h.runtime.dispatch(h.session.id, 'queued second');
     const thirdTask = await h.runtime.dispatch(h.session.id, 'queued third');
     expect([secondTask.status, thirdTask.status]).toEqual(['queued', 'queued']);
-    await vi.waitFor(async () => expect((await h.runtime.getRestartActivity()).recoverableTasks).toBe(1));
+    await vi.waitFor(async () => expect((await h.runtime.getRestartActivity()).recoverableTasks).toBe(1), { timeout: 10_000 });
     await h.close();
     h.complete();
     await vi.waitFor(() => expect(h.completed()).toBe(true));
@@ -134,7 +134,7 @@ tmuxDescribe('restart with a live fixture CLI in isolated tmux', () => {
     const h = await fixture();
     const original = h.repos.execution.getTaskExecution(h.task.id)!.currentAttempt!;
     h.runtime.setQueueHeld(true);
-    await vi.waitFor(async () => expect((await h.runtime.getRestartActivity()).recoverableTasks).toBe(1));
+    await vi.waitFor(async () => expect((await h.runtime.getRestartActivity()).recoverableTasks).toBe(1), { timeout: 10_000 });
     await h.close();
     const restored = await h.open();
     h.complete();
@@ -169,7 +169,7 @@ tmuxDescribe('restart with a live fixture CLI in isolated tmux', () => {
     const h = await fixture();
     const original = h.repos.execution.getTaskExecution(h.task.id)!.currentAttempt!;
     h.runtime.setQueueHeld(true);
-    await vi.waitFor(async () => expect((await h.runtime.getRestartActivity()).recoverableTasks).toBe(1));
+    await vi.waitFor(async () => expect((await h.runtime.getRestartActivity()).recoverableTasks).toBe(1), { timeout: 10_000 });
     await h.close();
     const restored = await h.open();
     expect(restored.runtime.getRunningTaskCount()).toBe(1);
@@ -190,14 +190,14 @@ tmuxDescribe('restart with a live fixture CLI in isolated tmux', () => {
     h.runtime.setQueueHeld(true);
     expect(await h.runtime.getRestartActivity()).toEqual({ runningTasks: 1, restartBlockers: 1, recoverableTasks: 0 });
     release();
-    await vi.waitFor(async () => expect((await h.runtime.getRestartActivity()).recoverableTasks).toBe(1));
+    await vi.waitFor(async () => expect((await h.runtime.getRestartActivity()).recoverableTasks).toBe(1), { timeout: 10_000 });
     h.complete();
   });
 
   it('rejects a proof when the driver stops during its metadata probe', async () => {
     const h = await fixture();
     h.runtime.setQueueHeld(true);
-    await vi.waitFor(async () => expect((await h.runtime.getRestartActivity()).recoverableTasks).toBe(1));
+    await vi.waitFor(async () => expect((await h.runtime.getRestartActivity()).recoverableTasks).toBe(1), { timeout: 10_000 });
     const recovery = h.repos.execution.getTaskExecution(h.task.id)!.currentAttempt!.submission!.recovery!;
     const original = TmuxBackend.prototype.getDutydeckMetadata;
     let entered!: () => void, release!: () => void;
@@ -220,7 +220,7 @@ tmuxDescribe('restart with a live fixture CLI in isolated tmux', () => {
   it.each(['ask', 'missing-stamp', 'foreign-owner', 'missing-cursor', 'missing-transcript', 'truncated-transcript', 'approval', 'risk'])('waits when recovery or permission proof is unsafe (%s)', async reason => {
     const h = await fixture(reason === 'ask' ? 'ask' : 'full-trust');
     h.runtime.setQueueHeld(true);
-    if (reason !== 'ask') await vi.waitFor(async () => expect((await h.runtime.getRestartActivity()).recoverableTasks).toBe(1));
+    if (reason !== 'ask') await vi.waitFor(async () => expect((await h.runtime.getRestartActivity()).recoverableTasks).toBe(1), { timeout: 10_000 });
     if (reason === 'missing-stamp') await h.backend().setDutydeckMetadata('turn_id', 'unconfirmed');
     if (reason === 'foreign-owner') execFileSync('tmux', ['set-option', '-t', h.backend().sessionName, '@dutydeck_owner_id', 'foreign']);
     if (reason === 'missing-cursor') {

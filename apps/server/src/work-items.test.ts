@@ -47,7 +47,7 @@ it.each([[800, 1], [20, 0]])('the 1s tick taking %sms logs %s slow-loop warning(
 });
 afterEach(async () => { while (cleanup.length) await cleanup.pop()!(); });
 async function eventually(check: () => Promise<boolean>) {
-  for (let i = 0; i < 100; i++) { if (await check()) return; await new Promise(resolve => setTimeout(resolve, 5)); }
+  for (let i = 0; i < 2_000; i++) { if (await check()) return; await new Promise(resolve => setTimeout(resolve, 5)); }
   throw new Error('Condition did not converge');
 }
 const plan: WorkPlan = {

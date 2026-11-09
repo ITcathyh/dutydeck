@@ -45,7 +45,7 @@ export default defineConfig({
           hookTimeout: 15_000,
           // New test databases copy the schema the real migrations produced once per worker instead of replaying every
           // migration (about a third of the suite's time); see FRESH_SCHEMA_TEMPLATE_ENV in packages/storage/src/migrations.ts.
-          env: { DUTYDECK_TEST_FRESH_SCHEMA_TEMPLATE: '1' }
+          env: { DUTYDECK_TEST_FRESH_SCHEMA_TEMPLATE: '1', DUTYDECK_TEST_NO_SYNC: '1' }
         }
       },
       './apps/web/vitest.config.ts'

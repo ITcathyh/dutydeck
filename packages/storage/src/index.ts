@@ -168,6 +168,8 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
     const migrate = needsMigration(sqlite) || control.needsRecovery();
     if (migrate) control.beginUpgrade();
     sqlite.pragma('journal_mode = WAL');
+    // Test-only: thousands of throwaway databases otherwise spend over a tenth of the suite syncing to disk.
+    if (process.env.DUTYDECK_TEST_NO_SYNC === '1') sqlite.pragma('synchronous = OFF');
     if (migrate) {
       const started = performance.now();
       backupBeforeV10(sqlite, filename);

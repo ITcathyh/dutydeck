@@ -39,7 +39,7 @@ pnpm exec tsx apps/server/src/cli.ts --local-only --port 14310 --no-lark-listen
 - **ACPX 持久化**：`session_options` 递归要求小写 `snake_case`；群工具用 `dutydeck_group_tools_url`、`dutydeck_group_tools_token`。供应商的大写环境变量经 `prepareAcpxAgentLaunch` 的 launcher 传递，不直接塞进持久化 `env`。修改此链路须用真实 `AcpxAdapter` 和持久化 session key 回归，参照 `packages/acp-client/src/acpx.test.ts`。
 - **子进程环境**：复用 `packages/shared/runtime/child-environment.mjs` 清洗继承环境，再合并显式 Agent 配置与当前会话凭证；不要修改 daemon 的全局 `process.env` 来切账号或会话。改动同时检查 ACP、PTY 和恢复路径的 `child-environment.test.ts`。
 - **任务与恢复**：沿用执行账本和原生回执区分未提交、执行中与结果未知。超时、断线或重启不能当作“没有执行”自动重发；改生命周期时覆盖停止、迟到回执和恢复后的轮次归属，不能仅凭终端出现文本判完成。入口在 `packages/agent-runtime/`，跨层回归在 `tests/`。
-- **数据库升级**：结构变化同步 `packages/storage/src/schema.ts` 与 `migrations.ts`，追加迁移版本；测试已有数据升级、重复打开和外键完整性。旧程序会拒绝更高 schema，不能把切回旧代码当作数据库回滚。根 Vitest 设置了 `DUTYDECK_TEST_FRESH_SCHEMA_TEMPLATE`，空库直接复制本进程首次真实迁移得到的结构；要观察迁移在空库上逐个执行的用例，先在用例里删掉这个变量。
+- **数据库升级**：结构变化同步 `packages/storage/src/schema.ts` 与 `migrations.ts`，追加迁移版本；测试已有数据升级、重复打开和外键完整性。旧程序会拒绝更高 schema，不能把切回旧代码当作数据库回滚。根 Vitest 设置了 `DUTYDECK_TEST_NO_SYNC`（关闭 SQLite 刷盘）和 `DUTYDECK_TEST_FRESH_SCHEMA_TEMPLATE`，后者让空库直接复制本进程首次真实迁移得到的结构；要观察迁移在空库上逐个执行的用例，先在用例里删掉这个变量。
 - **打包入口**：新增共享包、子路径导出或运行时资源时，核对包 `exports/files`、根与 Web 的 Vitest alias、`apps/server/scripts/build.mjs` 的打包映射和资源复制；源码测试通过不能证明发布产物可运行。进入打包映射的模块（含 `packages/shared/runtime/*.mjs`）不写顶层 `await`：它会让导入方变成异步初始化，落在循环导入里时 esbuild 生成非法代码，打包后的 CLI 无法启动；只复制、不被导入的启动脚本（如 `packages/acp-client/agents/*.mjs`）不受此限。
 - 用户可见的行为、命令或配置变化，同一个改动里更新 `docs/zh/` 与 `docs/en/` 下同名的主题文档（`getting-started`、`cli`、`agents`、`lark`、`plugins`、`web-console`、`features`、`troubleshooting`、`upgrading`）；`README.md` / `README.en.md` 只放概览，功能卖点、上手步骤或支持的 Agent 变化时同步两份 README。`CLAUDE.md` 只引用本文件，项目执行规则集中维护在这里。
 
