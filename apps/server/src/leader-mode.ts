@@ -221,7 +221,7 @@ export function arbitrationPrompt(input: { rules: string; ledger: string; ruling
     permission
       ? '这是一次工具授权请求。可以 approve（批准这一次调用）、reject（拒绝这一次调用）或 escalate（交给用户）。宿主还会复核 approve：命中机器人高危规则的调用、发起人自己无权批准的调用，一律改为交给用户。'
       : '这是 Worker 的提问。可以 answer（直接回答 Worker）或 escalate（交给用户）。',
-    'basis 用一句话写依据：引用账本原话、指引条目或你核对过的事实。escalate 时 problem 写要用户定的问题，suggestion 写你的建议和理由，ifNoReply 写用户不回复时会怎样（这一步会一直等着，其他步骤照常）；这三项直接给用户看，用白话写，不用内部术语。',
+    'basis 用一句话写依据：引用账本原话、指引条目或你核对过的事实；说成「你（用户）说过」的只能是授权账本里的原话，计划、指引和简报里的内容要写明出处。escalate 时 problem 写要用户定的问题，suggestion 写你的建议和理由，ifNoReply 写用户不回复时会怎样（这一步会一直等着，其他步骤照常）；这三项直接给用户看，用白话写，不用内部术语。',
     input.workerCwd ? `Worker 的工作目录：${input.workerCwd}。需要时只读查看。` : '',
     '只输出一个严格 JSON 对象（键和字符串用双引号），不要其他文字：',
     permission
