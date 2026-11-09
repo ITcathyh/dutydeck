@@ -114,7 +114,25 @@ export function withinDeployWindow(windows: Array<{ start: number; end: number }
 
 // ─── 构建产物与发布目录 ──────────────────────────────────────────────────────
 
-const BUILD_OUTPUTS = ['dist/cli.js', 'dist/agents/claude-acp.mjs', 'dist/agents/env-launcher.mjs', 'public/index.html'];
+export const BUILD_OUTPUTS = [
+  'dist/cli.js',
+  'dist/lark-sdk.mjs',
+  'dist/program-status-relay.js',
+  'dist/assets/plugin-validation/cli.js',
+  'dist/assets/session-insight/cli.js',
+  'dist/assets/dutydeck-bouncing-ball.webp',
+  'dist/assets/SVG-SPINNERS-LICENSE.txt',
+  'dist/assets/THIRD_PARTY_NOTICES.md',
+  'dist/builtin-plugins',
+  'dist/agents/claude-acp.mjs',
+  'dist/agents/claude-guard.mjs',
+  'dist/agents/env-launcher.mjs',
+  'dist/agents/codex-permission-bridge.mjs',
+  'dist/agents/child-environment.mjs',
+  'dist/agents/secret-guard.mjs',
+  'dist/agents/launcher-process.mjs',
+  'public/index.html'
+] as const;
 
 interface BuiltCheckout { source: string; server: string; version: string; commit: string; dirty: boolean }
 

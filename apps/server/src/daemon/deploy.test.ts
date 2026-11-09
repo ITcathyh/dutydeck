@@ -14,7 +14,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vites
 import { lazyBundleForTest } from '../../../../tests/support/bundle-for-test.js';
 import type { AutostartCommandOutput } from '../autostart/autostart.js';
 import { DRAIN_INTERVAL_MS } from './command.js';
-import { parseDeployWindows, runDeploy, runDeployPrune, shanghaiMinuteOfDay, withinDeployWindow, type DeployDeps, type DeployResult } from './deploy.js';
+import { BUILD_OUTPUTS, parseDeployWindows, runDeploy, runDeployPrune, shanghaiMinuteOfDay, withinDeployWindow, type DeployDeps, type DeployResult } from './deploy.js';
 
 // The helper runs as a bundle: through the TypeScript loader each fork paid a cold start of a second or more.
 const deployOwner = lazyBundleForTest('deploy-owner', fileURLToPath(new URL('./deploy-owner.test-helper.mjs', import.meta.url)));
@@ -148,9 +148,11 @@ function buildCheckout(root: string) {
   link('../dev-only@1.0.0/node_modules/dev-only', join(store, 'node_modules', 'dev-only'));
   link('../../../node_modules/.pnpm/dep-a@1.0.0/node_modules/dep-a', join(server, 'node_modules', 'dep-a'));
   link('../../../node_modules/.pnpm/dev-only@1.0.0/node_modules/dev-only', join(server, 'node_modules', 'dev-only'));
-  write(join(server, 'dist', 'agents', 'claude-acp.mjs'), '');
-  write(join(server, 'dist', 'agents', 'env-launcher.mjs'), '');
-  write(join(server, 'public', 'index.html'), '<html></html>');
+  for (const output of BUILD_OUTPUTS) {
+    if (output === 'dist/cli.js') continue;
+    if (output === 'dist/builtin-plugins') mkdirSync(join(server, output), { recursive: true });
+    else write(join(server, output), output === 'public/index.html' ? '<html></html>' : '');
+  }
   write(join(server, 'src.txt'), 'v1');
   git(root, 'init', '-q');
   git(root, 'add', 'pnpm-workspace.yaml', 'apps/server/package.json', 'apps/server/src.txt');
@@ -1193,11 +1195,19 @@ describe('dutydeck deploy', () => {
     const stale = await runDeploy({ source, runtime: bot }, deps());
     expect(stale).toMatchObject({ ok: false, status: 'refused' });
     expect(stale.error).toContain('早于最新提交');
+  });
 
-    rmSync(join(source, 'apps', 'server', 'public'), { recursive: true });
+  it.each(BUILD_OUTPUTS)('缺少关键构建产物 %s 时，在切换 current 或重启前拒绝部署', async output => {
+    const first = await runDeploy({ source, runtime: bot }, deps());
+    expect(first, first.error).toMatchObject({ ok: true, status: 'deployed' });
+    const current = realpathSync(join(releases, 'current'));
+
+    rmSync(join(source, 'apps', 'server', output), { recursive: true, force: true });
     const missing = await runDeploy({ source, runtime: bot }, deps());
-    expect(missing.error).toContain('public/index.html');
-    expect(service.ran).toEqual([]);
+    expect(missing).toMatchObject({ ok: false, status: 'refused' });
+    expect(missing.error).toContain(output);
+    expect(realpathSync(join(releases, 'current'))).toBe(current);
+    expect(service.ran).toEqual([first.release]);
   });
 
   it('运行版本无法核实时拒绝部署，不把共享 current 当成该进程的版本', async () => {

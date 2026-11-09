@@ -11,7 +11,7 @@
 ## 2. Install and set up
 
 ```bash
-pnpm add -g @byted/dutydeck --registry=http://bnpm.byted.org
+pnpm add -g @byted/dutydeck
 dutydeck setup
 ```
 

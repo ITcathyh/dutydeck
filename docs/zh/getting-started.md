@@ -12,8 +12,8 @@
 ## 2. 全局安装与配置
 
 ```bash
-# 全局安装 Dutydeck
-pnpm add -g @byted/dutydeck --registry=http://bnpm.byted.org
+# 从默认 npm registry 全局安装 Dutydeck
+pnpm add -g @byted/dutydeck
 
 # 运行交互式配置向导（可重复运行）
 dutydeck setup

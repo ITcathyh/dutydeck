@@ -62,6 +62,9 @@ const workspaceAliasTable = (rows: readonly WorkspaceAliasRow[]): Record<string,
   return table;
 };
 
+const sameStringList = (left: readonly string[], right: readonly string[]) =>
+  left.length === right.length && left.every((value, index) => value === right[index]);
+
 /** 表单草稿：除 name 外都计入未保存改动的比较。 */
 type Draft = {
   appId: string; appSecret: string; workspace: string; webBaseUrl: string; verificationCommand: string; notifyQuietHours: string;
@@ -185,6 +188,23 @@ export function LarkConfigModal({ agents, target, field, onLeaveGuardChange, onC
   const dirty = baseline !== undefined && baseline !== draftSignature;
   useEffect(() => { if (hydratedVersion) setBaseline(draftSignature); }, [hydratedVersion]);
   const current = config.data?.bots.find(bot => bot.appId === selectedAppId);
+  const currentAllowedUserNames = current?.allowedUsers.map(user => user.name) ?? [];
+  const currentHighRiskAllowedUserNames = current?.highRiskAllowedUsers.map(user => user.name) ?? [];
+  // Name resolution clears legacy email entries on the server. Keep the name fields
+  // out of unrelated saves so existing mixed name/email lists remain intact.
+  const allowedUsersChanged = !current
+    || appId.trim() !== current.appId
+    || !sameStringList(allowedUserNames, currentAllowedUserNames)
+    || (!restrictUsers && Boolean(current.allowedUsers.length || current.allowedEmails.length));
+  const highRiskAllowedUsersChanged = !current
+    || appId.trim() !== current.appId
+    || !sameStringList(highRiskAllowedUserNames, currentHighRiskAllowedUserNames);
+  const allowedUsersPayload = allowedUsersChanged
+    ? { allowedUserNames: restrictUsers ? allowedUserNames : [], allowedEmails: [] }
+    : {};
+  const highRiskAllowedUsersPayload = highRiskAllowedUsersChanged
+    ? { highRiskAllowedUserNames, highRiskAllowedEmails: [] }
+    : {};
   // 配置向导里问清手机能不能打开 Web 地址；答不能时不存地址，卡片不显示「查看详情」。
   const webBaseUrlReachability = useMemo(() => describeWebBaseUrlReachability(webBaseUrl), [webBaseUrl]);
   const highRiskPatternValidation = useMemo(() => validateHighRiskPattern(highRiskPattern), [highRiskPattern]);
@@ -243,8 +263,8 @@ export function LarkConfigModal({ agents, target, field, onLeaveGuardChange, onC
   const inspect = useMutation({ mutationFn: () => api.inspectLarkBot({ appId: appId.trim(), appSecret: appSecret.trim() }), onSuccess: result => setField('name', result.appName) });
   const save = useMutation({
     mutationFn: () => step === 1
-      ? api.saveLarkConfig({ stage: 'lark', expectedRevision: draftRevision.current, ...(current ? { originalAppId: current.appId } : {}), appId: appId.trim(), ...(appSecret.trim() ? { appSecret: appSecret.trim() } : {}), workspace: workspace.trim(), workspaceAliases: workspaceAliasTable(workspaceAliasRows), verificationCommand: verificationCommand.trim(), webBaseUrl: webBaseUrl.trim(), webMobileReachable, structuredAskCards, groupCardMention, notifyMentionAction, notifyMentionDone, notifyQuietHours: notifyQuietHours.trim(), completionReactionOnly, silentProgress, urgentEnabled, urgentThresholdMs: urgentThresholdMs ?? null, urgentMaxPerHourPerChat: urgentQuota ?? null, pinLongTasks, pinAfterMs: pinAfterMs ?? null, allowedUserNames: restrictUsers ? allowedUserNames : [], allowedEmails: [], allowedBotNames, peerBotsAllowed, pushIntervalMs, traceLimit: Number(traceLimit), compactTrace, showAgentName })
-      : api.saveLarkConfig({ stage: 'agent', expectedRevision: draftRevision.current, originalAppId: current!.appId, defaultAgentId, fallbackAgentId, fallbackModel, defaultAgentWeights, defaultModel, defaultReasoningEffort, fullTrustConfirmed, permissionMode, preInjectPrompt, listening, groupToolsEnabled, groupToolsAllowSend, memoryEnabled, memoryAutoExtract, groupMemoryScope, claudeAutoMemory, memoryAgentId, memoryModel, decisionAgentId, decisionModel, busyTriage, botLoopGuard, responseAgentId, responseModel, highRiskAllowedUserNames, highRiskAllowedEmails: [], highRiskPattern, riskControlMode }),
+      ? api.saveLarkConfig({ stage: 'lark', expectedRevision: draftRevision.current, ...(current ? { originalAppId: current.appId } : {}), appId: appId.trim(), ...(appSecret.trim() ? { appSecret: appSecret.trim() } : {}), workspace: workspace.trim(), workspaceAliases: workspaceAliasTable(workspaceAliasRows), verificationCommand: verificationCommand.trim(), webBaseUrl: webBaseUrl.trim(), webMobileReachable, structuredAskCards, groupCardMention, notifyMentionAction, notifyMentionDone, notifyQuietHours: notifyQuietHours.trim(), completionReactionOnly, silentProgress, urgentEnabled, urgentThresholdMs: urgentThresholdMs ?? null, urgentMaxPerHourPerChat: urgentQuota ?? null, pinLongTasks, pinAfterMs: pinAfterMs ?? null, ...allowedUsersPayload, allowedBotNames, peerBotsAllowed, pushIntervalMs, traceLimit: Number(traceLimit), compactTrace, showAgentName })
+      : api.saveLarkConfig({ stage: 'agent', expectedRevision: draftRevision.current, originalAppId: current!.appId, defaultAgentId, fallbackAgentId, fallbackModel, defaultAgentWeights, defaultModel, defaultReasoningEffort, fullTrustConfirmed, permissionMode, preInjectPrompt, listening, groupToolsEnabled, groupToolsAllowSend, memoryEnabled, memoryAutoExtract, groupMemoryScope, claudeAutoMemory, memoryAgentId, memoryModel, decisionAgentId, decisionModel, busyTriage, botLoopGuard, responseAgentId, responseModel, ...highRiskAllowedUsersPayload, highRiskPattern, riskControlMode }),
     onSuccess: data => {
       setBaseline(previous => {
         const saved = previous ? JSON.parse(previous) : {};

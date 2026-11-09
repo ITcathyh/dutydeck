@@ -158,7 +158,7 @@ After running [the commands at the top](#install):
 <details>
 <summary><b>Other install options</b></summary>
 
-- **ByteDance intranet**: `pnpm add -g @byted/dutydeck --registry=http://bnpm.byted.org`, then `dutydeck setup` and `dutydeck start` as above.
+- **Install the published package globally**: `pnpm add -g @byted/dutydeck`, then `dutydeck setup` and `dutydeck start` as above.
 - **Scripts / CI, no prompts**: `dutydeck setup --cwd /path/to/project --port 4310 --skip-lark --yes`; Lark binding flags are in [Getting started](docs/en/getting-started.md).
 - **Hot-reload development from source**: see [Development](#dev) below.
 

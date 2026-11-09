@@ -1,8 +1,9 @@
-// Codebase 的 CI 提供方：只接 webhook（流水线结果、MR 状态），没有主动查询接口。
+// CI webhook 提供方：只接收流水线结果和合并请求状态，没有主动查询接口。
 // 接口见 @dutydeck/shared 的 CiProvider；宿主负责重放窗口、去重、订阅匹配和清洗字段。
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 
-const CODEBASE_HOST = 'code.byted.org';
+// 使用保留域名作为公开示例；实际安装时通过插件配置指定代码托管主机。
+const DEFAULT_HOST = 'git.example.com';
 
 const object = value => value && typeof value === 'object' && !Array.isArray(value) ? value : undefined;
 const text = (value, max = 500) => typeof value === 'string' && value.trim() ? value.trim().slice(0, max)
@@ -17,6 +18,16 @@ const tokensEqual = (left, right) => timingSafeEqual(createHash('sha256').update
 const pipelineStates = { success: 'success', succeeded: 'success', passed: 'success', failed: 'failed', failure: 'failed' };
 const mergeRequestActions = { open: 'open', opened: 'open', reopen: 'reopen', reopened: 'reopen', update: 'update', updated: 'update', merge: 'merge', merged: 'merge', close: 'close', closed: 'close' };
 
+const normalizeHost = value => {
+  const raw = String(value ?? '').trim();
+  if (!raw) return undefined;
+  try {
+    const parsed = new URL(raw.includes('://') ? raw : `https://${raw}`);
+    if (parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash) return undefined;
+    return parsed.hostname.toLowerCase();
+  } catch { return undefined; }
+};
+
 /** 秒、毫秒或 ISO / GitLab 风格（`2026-09-25 08:00:00 UTC`）时间统一成毫秒。 */
 export function parseWebhookTime(value) {
   if (typeof value === 'number' || typeof value === 'string' && /^\d+(?:\.\d+)?$/.test(value.trim())) {
@@ -29,9 +40,11 @@ export function parseWebhookTime(value) {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
-/** 取 origin 指向的 Codebase 仓库（如 `group/repo`）；不是 Codebase 返回 undefined。 */
-export function repositoryFromRemote(remote) {
+/** 取 origin 指向的配置主机仓库（如 `group/repo`）；其他地址返回 undefined。 */
+export function repositoryFromRemote(remote, expectedHost = DEFAULT_HOST) {
   const value = String(remote ?? '').trim();
+  const configuredHost = normalizeHost(expectedHost);
+  if (!configuredHost) return undefined;
   const scp = /^[^@\s/]+@([^:\s/]+):(.+)$/.exec(value);
   let host;
   let path;
@@ -42,7 +55,7 @@ export function repositoryFromRemote(remote) {
       if (url.protocol === 'https:' || url.protocol === 'ssh:') { host = url.hostname; path = url.pathname; }
     } catch { return undefined; }
   }
-  if (host?.toLowerCase() !== CODEBASE_HOST || !path) return undefined;
+  if (host?.toLowerCase() !== configuredHost || !path) return undefined;
   const slug = path.replace(/^\/+|\/+$/g, '').replace(/\.git$/i, '');
   if (!/^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+$/.test(slug) || slug.split('/').some(part => part === '.' || part === '..')) return undefined;
   const parts = slug.split('/');
@@ -61,13 +74,13 @@ function failuresFrom(value) {
 
 /**
  * 支持两种载荷：DutyDeck 信封（`type: codebase.pipeline | codebase.merge_request`）和
- * GitLab 风格的 `object_kind`。Codebase / EventHub 的原始载荷未拿到样本核实，字段按文档空缺处的常见写法兜底。
+ * GitLab 风格的 `object_kind`。上游 CI 的原始载荷可能有差异，字段按常见写法兜底。
  * 返回值的 kind 用宿主的 pipeline / pull_request，state 已归一成宿主认识的取值。
  */
 export function parseCodebaseEvent(body) {
   const outer = object(body);
   if (!outer) return undefined;
-  // 转发方可能把原始事件包在 data / payload / event 里（未核实）。
+  // 转发方可能把原始事件包在 data / payload / event 里。
   const direct = outer.type === 'codebase.pipeline' || outer.type === 'codebase.merge_request' || typeof outer.object_kind === 'string';
   const inner = direct ? outer : object(outer.data) ?? object(outer.payload) ?? object(outer.event);
   if (!inner) return undefined;
@@ -116,7 +129,7 @@ export function parseCodebaseEvent(body) {
 /**
  * 两种校验方式，都用常量时间比较：
  * - 签名：`X-Dutydeck-Signature: sha256=<hex>`，HMAC-SHA256(secret, `${X-Dutydeck-Timestamp}.${原始请求体}`)；
- * - 令牌：`X-Dutydeck-Token`、`Authorization: Bearer` 或 URL 的 `token` 参数（EventHub / Codebase 表单只能填 URL 时用）。
+ * - 令牌：`X-Dutydeck-Token`、`Authorization: Bearer` 或 URL 的 `token` 参数（表单只能填 URL 时用）。
  * 令牌模式下带了 X-Dutydeck-Timestamp 也交给宿主校验时间窗口。
  */
 export function verifyCodebaseWebhook(secret, request) {
@@ -137,14 +150,15 @@ export function verifyCodebaseWebhook(secret, request) {
   return signedAt === undefined ? { ok: true } : { ok: true, signedAt };
 }
 
-/** @param {{ webhookSecret?: string }} options */
+/** @param {{ host?: string; webhookSecret?: string }} options */
 export function createCodebaseProvider(options = {}) {
+  const host = options.host === undefined ? DEFAULT_HOST : normalizeHost(options.host);
   const secret = options.webhookSecret?.trim() || undefined;
   return {
     id: 'codebase',
-    displayName: 'Codebase 流水线',
+    displayName: 'CI 流水线',
     changeRequestLabel: number => `MR !${number}`,
-    matchRepository: repositoryFromRemote,
+    matchRepository: repository => host ? repositoryFromRemote(repository, host) : undefined,
     ...(secret ? {
       webhook: {
         verify: request => verifyCodebaseWebhook(secret, request),

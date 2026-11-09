@@ -2,7 +2,7 @@
 
 > [← 返回 README](../../README.md) · [全部文档](../../README.md#docs) · [English](../en/plugins.md)
 
-插件给 Dutydeck 加命令、Agent、skills、外部触发器、hook、CI 提供方、受控结果工具和场景包。核心里没有任何平台专用代码，GitHub、Codebase 的 CI 能力和告警初筛都是插件。
+插件给 Dutydeck 加命令、Agent、skills、外部触发器、hook、CI 提供方、受控结果工具和场景包。核心里没有任何平台专用代码，GitHub 和可配置代码托管 CI 的能力以及告警初筛都是插件。
 
 ## 目录结构
 
@@ -308,15 +308,24 @@ dutydeck plugin-tool call private-export/export-report --json '{"reportId":"week
 
 仓库自带两个 CI 插件（从源码检出目录安装；npm 发布包里不带它们）：
 
-| 插件 | 提供 | 配置项（都是敏感值，用 `--value-fd`） |
+| 插件 | 提供 | 配置项 |
 |---|---|---|
 | `plugins/github` | GitHub Actions 构建状态与失败日志（取失败 job 和步骤，日志末尾 3000 字符）；PR 创建、状态读取、评论读写（供 `/pr` 和 Web「开 PR」使用）；可选 webhook `POST /api/hooks/github`（`X-Hub-Signature-256`） | `github.token`（可选，私有仓库和 PR 操作需要；公开仓库只等构建时不用）、`github.webhook_secret`（可选，填了才启用 webhook） |
-| `plugins/codebase` | 字节 Codebase 的流水线和 MR webhook `POST /api/hooks/codebase`；也是给内部平台写 CI 插件的示例 | `codebase.webhook_secret` |
+| `plugins/codebase` | 可配置代码托管主机的流水线和 MR webhook `POST /api/hooks/codebase`；也是 CI webhook 插件示例 | `codebase.host`（可选，默认 `git.example.com`）、`codebase.webhook_secret`（可选，敏感值） |
 
 ```bash
 dutydeck plugin install ./plugins/github --yes
 printf %s "$TOKEN"  | dutydeck plugin config github token --value-fd 0
 printf %s "$SECRET" | dutydeck plugin config github webhook_secret --value-fd 0
+dutydeck restart
+```
+
+代码托管 CI 示例插件：
+
+```bash
+dutydeck plugin install ./plugins/codebase --yes
+dutydeck plugin config codebase host --value git.example.com
+printf %s "$SECRET" | dutydeck plugin config codebase webhook_secret --value-fd 0
 dutydeck restart
 ```
 
@@ -387,7 +396,7 @@ dutydeck restart
 以前用环境变量配 CI 的部署，**升级后这些变量不再生效**：`DUTYDECK_GITHUB_TOKEN`、`GH_TOKEN`、`GITHUB_TOKEN`、`DUTYDECK_CODEBASE_WEBHOOK_SECRET`。升级后要：
 
 1. `dutydeck plugin install ./plugins/github --yes`（或 `./plugins/codebase`）；
-2. 用 `dutydeck plugin config … --value-fd 0` 填回令牌或 webhook 密钥（对应 `github.token`、`github.webhook_secret`、`codebase.webhook_secret`）；
+2. 用 `dutydeck plugin config …` 填回令牌、代码托管主机或 webhook 密钥（对应 `github.token`、`github.webhook_secret`、`codebase.host`、`codebase.webhook_secret`；敏感值用 `--value-fd 0`）；
 3. `dutydeck restart`。
 
 不这样做的话：旧的等待订阅和 `github_new_failure` 定时条件不再生效，Web 显示“未安装 CI 插件”，`/api/hooks/codebase` 返回 404（现在由 codebase 插件提供，需要装插件）。旧订阅数据仍可读，缺 provider 字段的旧订阅按 GitHub 处理。不做自动迁移。
