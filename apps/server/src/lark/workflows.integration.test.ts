@@ -458,15 +458,14 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     const permission = (await h.interactions()).find(item => item.kind === 'permission' && item.state === 'pending')!;
 
     await h.coordinator.handle(event('om_queued_task', '排队中的任务'), h.config);
-    await vi.waitFor(async () => {
+    // The card mapping is written before its task id is filled in, so wait for the whole chain, not just the row.
+    const { mapping, saved } = await vi.waitFor(async () => {
       const mapping = (await h.repos.channelMappings.list(`lark-card:${h.config.appId}`)).find(item => item.externalId === 'om_queued_task');
       expect(mapping).toBeDefined();
+      const saved = JSON.parse(mapping!.extra!);
+      expect((await h.runtime.getTasks(mapping!.sessionId)).find(item => item.id === saved.runtime_task_id)?.status).toBe('queued');
+      return { mapping, saved };
     });
-
-    const [mapping] = (await h.repos.channelMappings.list(`lark-card:${h.config.appId}`)).filter(item => item.externalId === 'om_queued_task');
-    const saved = JSON.parse(mapping!.extra!);
-    const task = (await h.runtime.getTasks(mapping!.sessionId)).find(item => item.id === saved.runtime_task_id);
-    expect(task?.status).toBe('queued');
 
     const exportValue = { dutydeck_export_trace: 'download', task_id: 'om_queued_task', turn: String(saved.turn ?? 0) };
     const queuedCallback = { messageId: saved.card_message_id, chatId: 'oc_group' };
