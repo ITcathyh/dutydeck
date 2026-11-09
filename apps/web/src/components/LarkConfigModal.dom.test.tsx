@@ -354,6 +354,48 @@ describe('LarkConfigModal 凭据边界', () => {
   });
 });
 
+describe('LarkConfigModal 邮箱名单继承', () => {
+  it('keeps a mixed ordinary name/email allowlist when saving another connection setting', async () => {
+    const user = userEvent.setup();
+    const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(collection({ setupComplete: true }));
+    renderModal(collection({
+      setupComplete: true,
+      allowedUsers: [{ openId: 'ou_alice', name: 'Alice' }],
+      allowedEmails: ['legacy@example.com']
+    }));
+
+    const workspace = await screen.findByDisplayValue('/repo');
+    await user.clear(workspace);
+    await typeInto(user, workspace, '/updated-repo');
+    await user.click(screen.getByRole('button', { name: '下一步' }));
+
+    await waitFor(() => expect(save).toHaveBeenCalledOnce());
+    const payload = save.mock.calls[0]![0];
+    expect(payload).not.toHaveProperty('allowedUserNames');
+    expect(payload).not.toHaveProperty('allowedEmails');
+  });
+
+  it('keeps high-risk emails when risk control is off and agent settings are saved', async () => {
+    const user = userEvent.setup();
+    const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(collection({ setupComplete: true, defaultAgentId: 'codex', fullTrustConfirmed: true }));
+    renderModal(collection({
+      setupComplete: true,
+      defaultAgentId: 'codex',
+      fullTrustConfirmed: true,
+      highRiskAllowedEmails: ['high-risk@example.com'],
+      riskControlMode: 'off'
+    }));
+
+    await user.click(await screen.findByRole('button', { name: /选择 Agent 并启用/ }));
+    await user.click(await screen.findByRole('button', { name: '完成配置' }));
+
+    await waitFor(() => expect(save).toHaveBeenCalledOnce());
+    const payload = save.mock.calls[0]![0];
+    expect(payload).not.toHaveProperty('highRiskAllowedUserNames');
+    expect(payload).not.toHaveProperty('highRiskAllowedEmails');
+  });
+});
+
 describe('LarkConfigModal 模态外壳契约', () => {
   it('portals the wizard to document.body instead of rendering it in place', async () => {
     vi.spyOn(api, 'larkConfig').mockResolvedValue(collection());

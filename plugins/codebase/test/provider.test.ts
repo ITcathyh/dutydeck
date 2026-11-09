@@ -16,7 +16,7 @@ const secret = 'hook-secret-for-tests';
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
-describe('Codebase webhook 校验', () => {
+describe('CI webhook 校验', () => {
   const request = (headers: Record<string, string>, body = '{"type":"codebase.pipeline"}', token?: string) => ({ rawBody: Buffer.from(body), headers, ...(token ? { query: { token } } : {}) });
 
   it('令牌可放在专用头、Bearer 或 URL 参数里，错误或缺失都拒绝', () => {
@@ -37,16 +37,18 @@ describe('Codebase webhook 校验', () => {
     expect(verifyCodebaseWebhook(secret, request({ 'x-dutydeck-signature': signature }, body))).toMatchObject({ ok: false, statusCode: 400, code: 'WEBHOOK_TIMESTAMP_MISSING' });
   });
 
-  it('只认 code.byted.org 的仓库地址', () => {
-    expect(repositoryFromRemote('git@code.byted.org:group/repo.git')?.slug).toBe('group/repo');
-    expect(repositoryFromRemote('https://code.byted.org/group/sub/repo')).toEqual({ owner: 'group/sub', name: 'repo', slug: 'group/sub/repo' });
+  it('只认配置主机的仓库地址', () => {
+    expect(repositoryFromRemote('git@git.example.com:group/repo.git')?.slug).toBe('group/repo');
+    expect(repositoryFromRemote('https://git.example.com/group/sub/repo')).toEqual({ owner: 'group/sub', name: 'repo', slug: 'group/sub/repo' });
+    expect(repositoryFromRemote('https://git.example.com/group/repo', 'git.other.example') ).toBeUndefined();
+    expect(repositoryFromRemote('git@git.other.example:group/repo.git', 'git.other.example')?.slug).toBe('group/repo');
     expect(repositoryFromRemote('git@github.com:octo/repo.git')).toBeUndefined();
-    expect(repositoryFromRemote('https://code.byted.org/../etc')).toBeUndefined();
+    expect(repositoryFromRemote('https://git.example.com/../etc')).toBeUndefined();
   });
 
   it('没有配置 webhook_secret 时不提供 webhook', () => {
     expect(createCodebaseProvider().webhook).toBeUndefined();
-    expect(createCodebaseProvider({ webhookSecret: secret })).toMatchObject({ id: 'codebase', displayName: 'Codebase 流水线' });
+    expect(createCodebaseProvider({ host: 'git.example.com', webhookSecret: secret })).toMatchObject({ id: 'codebase', displayName: 'CI 流水线' });
     expect(createCodebaseProvider().changeRequestLabel!(12)).toBe('MR !12');
   });
 
@@ -70,7 +72,7 @@ describe('Codebase webhook 校验', () => {
   });
 });
 
-/** 工作区 origin 写成 Codebase 地址，推送经 pushInsteadOf 落到本地裸仓库。 */
+/** 工作区 origin 写成示例代码托管地址，推送经 pushInsteadOf 落到本地裸仓库。 */
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'dutydeck-codebase-ci-'));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
@@ -85,8 +87,8 @@ async function fixture() {
   await writeFile(join(cwd, 'app.ts'), 'export const value = 1;\n');
   await git('add', '.');
   await git('commit', '-qm', 'initial');
-  await git('remote', 'add', 'origin', 'git@code.byted.org:group/repo.git');
-  await git('config', `url.${remote}.pushInsteadOf`, 'git@code.byted.org:group/repo.git');
+  await git('remote', 'add', 'origin', 'git@git.example.com:group/repo.git');
+  await git('config', `url.${remote}.pushInsteadOf`, 'git@git.example.com:group/repo.git');
   await git('push', '-q', 'origin', 'HEAD:feat/ci');
 
   const now = { value: Date.parse('2026-09-25T08:00:00.000Z') };
@@ -108,7 +110,7 @@ async function fixture() {
   const database = createRepositories(':memory:');
   cleanups.push(async () => database.close());
   const providers = new CiProviderRegistry();
-  providers.register('codebase', createCodebaseProvider({ webhookSecret: secret }));
+  providers.register('codebase', createCodebaseProvider({ host: 'git.example.com', webhookSecret: secret }));
   const service = new CiWebhookService({
     repositories: { config: database.config, ciWebhook: database.ciWebhook, tasks: { get: async (id: string) => tasks.get(id), save: async () => {}, listBySession: async () => [] }, execution: { getTaskExecution: () => undefined, getAttemptEvents: () => [] } as any },
     runtime, providers, notify: async (_sessionId, _id, notice) => { notices.push(notice); return `om_card_${notices.length}`; }, clock: () => new Date(now.value)
@@ -121,17 +123,17 @@ async function fixture() {
   });
   const pipeline = (sha: string, status: string, failures: Array<Record<string, unknown>> = [], id = randomUUID()) => ({
     id, type: 'codebase.pipeline', repository: 'group/repo', branch: 'feat/ci', sha, status,
-    pipeline: { id: '42', url: 'https://code.byted.org/group/repo/pipelines/42' }, operator: 'alice', failures
+    pipeline: { id: '42', url: 'https://git.example.com/group/repo/pipelines/42' }, operator: 'alice', failures
   });
   return { now, tasks, dispatches, notices, service, subscription, post, pipeline, head: () => git('rev-parse', 'HEAD') };
 }
 
 const unitFailure = [{ job: 'unit-test', stage: 'test', reason: 'script_failure', log: 'FAIL src/math.test.ts > adds\nAssertionError: expected 3 to be 4' }];
 
-describe('Codebase 插件接入宿主的 CI webhook', () => {
+describe('CI 插件接入宿主的 webhook', () => {
   it('订阅结果带上提供方名字', async () => {
     const f = await fixture();
-    expect(f.subscription).toMatchObject({ provider: 'codebase', providerName: 'Codebase 流水线', repository: 'group/repo', branch: 'feat/ci' });
+    expect(f.subscription).toMatchObject({ provider: 'codebase', providerName: 'CI 流水线', repository: 'group/repo', branch: 'feat/ci' });
   });
 
   it('时间戳超出 5 分钟窗口按重放拒绝；签名请求缺时间戳直接拒绝；都不触发任务', async () => {
@@ -155,13 +157,13 @@ describe('Codebase 插件接入宿主的 CI webhook', () => {
     expect(await send(event)).toMatchObject({ statusCode: 202, body: { accepted: true, matched: 1 } });
     expect(await send(event)).toMatchObject({ statusCode: 200, body: { duplicate: true } });
     expect(f.dispatches).toHaveLength(1);
-    expect(f.dispatches[0]!.prompt).toContain('Codebase 流水线失败，请按下面的规则修复（第 1/3 轮）');
+    expect(f.dispatches[0]!.prompt).toContain('CI 流水线失败，请按下面的规则修复（第 1/3 轮）');
   });
 
   it('流水线通过时投递续作任务；MR 合入后停止等待', async () => {
     const f = await fixture();
     await f.post(f.pipeline(await f.head(), 'success'));
-    expect(f.dispatches[0]?.prompt).toContain('Codebase 流水线已通过');
+    expect(f.dispatches[0]?.prompt).toContain('CI 流水线已通过');
     await f.post({ id: 'evt-mr', type: 'codebase.merge_request', repository: 'group/repo', branch: 'feat/ci', mr: 12, action: 'merge', operator: 'bob' });
     expect(await f.service.get(f.subscription.id)).toMatchObject({ mrIid: 12, mrClosed: 'merge', reason: expect.stringContaining('MR !12 已合入') });
   });

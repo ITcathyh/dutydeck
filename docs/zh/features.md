@@ -65,6 +65,6 @@
 - 需要装支持开 PR 的 CI 插件（仓库自带的 `plugins/github`），否则 `/pr` 回“开 PR 未配置”。
 
 ### 7. CI 续作（插件提供）
-- 核心不内置任何 CI 平台。GitHub Actions 和 Codebase 是两个自带插件：`plugins/github`、`plugins/codebase`，装上后才有 `/ci`。
+- 核心不内置任何 CI 平台。GitHub Actions 和可配置代码托管 CI 是两个自带插件：`plugins/github`、`plugins/codebase`，装上后才有 `/ci`。
 - 构建失败时按规则交给 Agent 修复：单次故障最多 3 轮、同一报错指纹出现 2 次即停、推送前校验提交 SHA、不合入、不强制推送。
 - 详见[插件](plugins.md)一节的“CI 提供方”。

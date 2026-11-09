@@ -158,7 +158,7 @@ CI、代码平台等外部集成以插件交付。<br>
 <details>
 <summary><b>其他安装方式</b></summary>
 
-- **字节内网**：`pnpm add -g @byted/dutydeck --registry=http://bnpm.byted.org`，之后同样执行 `dutydeck setup` 和 `dutydeck start`。
+- **全局安装已发布包**：`pnpm add -g @byted/dutydeck`，之后同样执行 `dutydeck setup` 和 `dutydeck start`。
 - **脚本 / CI 里跳过交互**：`dutydeck setup --cwd /path/to/project --port 4310 --skip-lark --yes`，飞书绑定参数见[快速上手文档](docs/zh/getting-started.md)。
 - **源码热重载开发**：见下方[参与开发](#dev)。
 

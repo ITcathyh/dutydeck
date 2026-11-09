@@ -6,7 +6,7 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative } from 'node:path';
 import { expect, it } from 'vitest';
-import { runDeploy, type DeployDeps } from './deploy.js';
+import { BUILD_OUTPUTS, runDeploy, type DeployDeps } from './deploy.js';
 
 it.each([false, true])('首次顺序部署共享 current 的两个 unit：第二个启动失败后恢复实际运行的 A（runtime=%s）', async useRuntime => {
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'dutydeck-multi-unit-')));
@@ -19,8 +19,11 @@ it.each([false, true])('首次顺序部署共享 current 的两个 unit：第二
   mkdirSync(join(source, 'node_modules/.pnpm'), { recursive: true });
   write(join(source, 'pnpm-workspace.yaml'), 'packages:\n  - apps/*\n');
   write(join(source, 'apps/server/package.json'), JSON.stringify({ name: '@byted/dutydeck', version: '1.0.0', type: 'module', dependencies: { 'better-sqlite3': '12.11.1' } }));
-  for (const name of ['claude-acp.mjs', 'env-launcher.mjs']) write(join(source, 'apps/server/dist/agents', name), '');
-  write(join(source, 'apps/server/public/index.html'), '<html/>');
+  for (const output of BUILD_OUTPUTS) {
+    if (output === 'dist/cli.js') continue;
+    if (output === 'dist/builtin-plugins') mkdirSync(join(source, 'apps/server', output), { recursive: true });
+    else write(join(source, 'apps/server', output), output === 'public/index.html' ? '<html/>' : '');
+  }
   write(join(source, 'tracked'), 'A');
   git('init', '-q'); git('add', '.'); git('commit', '-qm', 'A');
   // 复制真实 pnpm 安装的生产依赖闭包，让 runDeploy 按标准打包路径生成独立发布目录。
