@@ -103,7 +103,7 @@ async function fixture(options: { autoFix?: boolean; providerId?: string } = {})
   const providerId = options.providerId ?? 'fake';
   providers.register('fake-plugin', fakeProvider(providerId));
   const createService = () => new CiWebhookService({
-    repositories: { config, ciWebhook, tasks: { get: async (id: string) => tasks.get(id), save: async () => {}, listBySession: async () => [] }, execution: { getTaskExecution: () => undefined, getAttemptEvents: () => [] } as any },
+    repositories: { config, ciWebhook, tasks: { get: async (id: string) => tasks.get(id), save: async () => {}, listBySession: async () => [] }, execution: { getTaskExecution: () => undefined, getAttemptEvents: () => [], getAcceptedTask: () => undefined } as any },
     runtime, providers, notify, clock: () => new Date(now.value)
   });
   let service = createService();

@@ -1,4 +1,5 @@
-import { test, expect, type Page } from '@playwright/test';
+import { expect, type Page } from '@playwright/test';
+import { test } from './fixture.js';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -15,21 +16,21 @@ async function setup(page: Page, fullscreen = false) {
   writeFileSync(join(dir, 'history.txt'), lines);
   writeFileSync(fixture, `process.stdout.write(${JSON.stringify(lines.replaceAll('\n', '\r\n') + '\r\nREADY')});process.stdin.resume();`);
   const make = () => new PtyCliDriver({
-    agent: { id: 'fixture', name: 'Fixture', command: fullscreen ? '/usr/bin/less' : process.execPath,
-      args: [], cwd: dir, env: {}, permissionMode: 'full-trust', protocol: 'pty-cli',
+    agent: { id: 'fixture', name: 'Fixture', command: fullscreen ? 'less' : process.execPath,
+      args: [], cwd: dir, env: { TERM: 'xterm-256color' }, permissionMode: 'full-trust', protocol: 'pty-cli',
       timeout: 30, capabilities: { pause: false, resume: false }, builtin: false },
     adapter: { id: 'fixture', capabilities: {}, buildArgs: () => fullscreen ? ['--mouse', '-R', join(dir, 'history.txt')] : [fixture], writeInput() {} },
     backend: new TmuxBackend(name, { ownerId }), sessionId: name, onEvent() {}, onExit() {}
   });
   let driver = make();
-  await driver.start();
   const pane = () => execFileSync('tmux', ['capture-pane', '-p', '-t', name], { encoding: 'utf8' });
   try {
+    await driver.start();
     await expect.poll(pane).toContain(fullscreen ? 'history 000' : 'READY');
     await driver.prepareForDaemonShutdown();
     await driver.stop();
     driver = make();
-    expect(driver.attachTerminal()).toBe(true);
+    expect(await driver.attachTerminal()).toBe(true);
     await page.routeWebSocket('**/api/terminal/scroll-test', ws => {
       const stream = driver.createTerminalStream();
       ws.onMessage(message => {
@@ -43,8 +44,8 @@ async function setup(page: Page, fullscreen = false) {
     });
     await page.goto('/e2e/terminal.html');
     await expect(page.locator('.xterm-rows')).toContainText(fullscreen ? 'history 000' : 'READY');
-    return { pane, cleanup: async () => { await driver.stop(); rmSync(dir, { recursive: true, force: true }); } };
-  } catch (error) { await driver.stop(); rmSync(dir, { recursive: true, force: true }); throw error; }
+    return { pane, cleanup: async () => { try { await driver.stop(); } finally { rmSync(dir, { recursive: true, force: true }); } } };
+  } catch (error) { try { await driver.stop(); } finally { rmSync(dir, { recursive: true, force: true }); } throw error; }
 }
 const scrollTop = (page: Page) => page.locator('.xterm-viewport').evaluate(el => el.scrollTop);
 async function swipe(page: Page, distance: number) {

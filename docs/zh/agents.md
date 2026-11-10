@@ -94,7 +94,7 @@ Codex 在同一原生会话切换日志文件时，会校验会话归属、读�
 
 Codex 和 TraeX 恢复原生会话时，只使用能确认属于当前会话的记录；继承的上下文不足以证明归属时会拒绝恢复，避免续接其他会话。Codex 会话空闲释放后，下一轮会恢复已验证的原生上下文。
 
-Codex 和 TraeX 终端任务按当前原生轮次的成功、失败或取消事件结算，部分回答不抵消随后出现的失败；取消记为中断。Codex 恢复中的轮次即使尚无正文输出，只要确认了对应输入和失败或取消终态，也会按该终态结束。TraeX 可读取含大型模型目录的会话元数据，正常接收最终回答并结束任务；恢复会先读完同一会话的旧日志段，再读取新段；新版 canonical 记录保留过程、输入回执和最终回答，并去除镜像重复。
+Codex 和 TraeX 终端任务按当前原生轮次的成功、失败或取消事件结算，部分回答不抵消随后出现的失败；取消记为中断。Codex 和 TraeX 恢复中的轮次即使尚无正文输出，只要确认了对应输入和失败或取消终态，也会按该终态结束。TraeX 可读取含大型模型目录的会话元数据，正常接收最终回答并结束任务；恢复会先读完同一会话的旧日志段，再读取新段；新版 canonical 记录保留过程、输入回执和最终回答，并去除镜像重复。
 
 TraeX 用完整终端画面区分忙碌与就绪，兼容独立一行的快捷键页脚；正文或草稿里的状态引用不作为活动页脚。Codex 支持 `›` / `»` 输入提示及 0.164.0 仅显示模型与每周剩余额度的状态栏，信任和更新菜单不视为输入就绪。Cursor 普通输入只发一次 Enter，保留多行输入和普通任务排队；不附带空输入的第二次控制动作。Claude Code、Seed、Relay 的空输入框可被识别为空闲，以便继续处理待确认任务的恢复操作；支持空输入框与权限模式栏之间最多两行自定义 `statusLine`，恢复会话后也能提交首条消息。
 
@@ -115,6 +115,17 @@ Claude Code / Seed / Relay / Genius 的终端默认带 `CLAUDE_CODE_DISABLE_MCP_
 机器人把 `claudeAutoMemory` 设为 `off` 后，它的群聊会话里新拉起的 Claude 进程带 `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`（Claude Code / Seed / Relay / Genius 终端和内置的 ACP Claude；范围见 [features.md](features.md)）。它和上面的默认值在同一层：Agent env、`~/.claude/settings.json` 或项目 `.claude/settings.json` 的 `env` 里显式设了同名变量时以用户的值为准（`0` / `false` 会强制打开 auto memory）。Claude 设置里的 `autoMemoryEnabled: true` 压不过这个变量，要在某个 Agent 上保留 auto memory，请把机器人设置改回 `inherit`。开关只有这一个设置，不要靠给 Agent 加大写 env 来切换：ACP Agent 原本没有大写 env 时，加上后启动方式会从直接启动改为 launcher，该 Agent 已有的持久化 ACP 会话恢复时会报身份冲突。切换设置不会重建已有会话：终端和 ACP（受控与本地会话都一样）都在下次拉起 Claude 进程时生效并续接原会话，已经在跑的进程不受影响。
 
 不要在给 Dutydeck 用的 Claude 里打开 `CLAUDE_CODE_RESUME_INTERRUPTED_TURN`：Claude 恢复会话时可能自己重跑中断的那一轮，和 Dutydeck「结果未知不自动重发」冲突。
+
+### 先出计划时的 Git 命令 <a id="plan-git"></a>
+
+先出计划阶段的 Git 读取须用 `env GIT_ALLOW_PROTOCOL= git` 禁用全部传输协议，并显式禁用分页器、可选写锁、文件监视器、默认签名展示和自定义默认格式；差异读取还须关闭外部 diff 与文本转换。普通 `git status`、`git diff` 等未按下例调用的命令会被拦截，请使用：
+
+```sh
+env GIT_ALLOW_PROTOCOL= git --no-pager --no-optional-locks -c core.fsmonitor=false -c log.showSignature=false -c format.pretty=medium status --short
+env GIT_ALLOW_PROTOCOL= git --no-pager --no-optional-locks -c core.fsmonitor=false -c log.showSignature=false -c format.pretty=medium diff --no-ext-diff --no-textconv -- file.txt
+```
+
+历史读取也用同一前缀，例如后接 `log --no-ext-diff --no-textconv --oneline`。只能读取本地已有对象；部分克隆缺少对象时命令会失败，不会联网补取，应明确说明哪些内容无法核对。会联系远端的 `remote show`、显式转换器、签名验证和任意配置覆盖不放行；需要执行的操作写进计划，批准后再做。计划守卫不是通用进程沙箱。
 
 ### 终端模式 Agent 与飞书审批
 

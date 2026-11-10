@@ -654,7 +654,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     workTemplates: {
       list: (sessionId, actorId) => workItems.listTemplates(sessionId, actorId),
       // 定时启动的工作项不归属父会话此刻正在跑的那一轮。
-      run: (sessionId, templateId, version, goal, key, actorId) => workItems.runTemplate(sessionId, templateId, version, goal, key, actorId, undefined, true),
+      run: (sessionId, templateId, version, goal, key, actorId, admissionChecks) => workItems.runTemplate(sessionId, templateId, version, goal, key, actorId, undefined, true, admissionChecks),
       // 失败但带待确认修订的工作项还没结束，上一次没结束时不启动新的。
       progress: async id => await workItems.exists(id) ? readWorkItemStatus(repos.config, id) ?? 'unknown' : undefined
     },

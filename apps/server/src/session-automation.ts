@@ -226,8 +226,8 @@ export interface SessionAutomationServiceOptions {
 
 export interface ScheduleWorkTemplates {
   list(parentSessionId: string, actorId?: string): Promise<Array<{ id: string; version: number }>>;
-  /** 同一幂等键重试返回同一工作项。 */
-  run(parentSessionId: string, templateId: string, version: number, goal: string, idempotencyKey: string, actorId?: string): Promise<{ id: string; status: string }>;
+  /** 同一幂等键重试返回同一工作项；首次写入须原子核对 admissionChecks，覆盖模板内部异步准备。 */
+  run(parentSessionId: string, templateId: string, version: number, goal: string, idempotencyKey: string, actorId: string | undefined, admissionChecks: Array<{ key: string; expected: string }>): Promise<{ id: string; status: string }>;
   /**
    * 内部进度查询，不做授权：编号只来自触发记录或按启动者派生，不受计划改归属或会话授权变化影响。
    * 工作项不存在时返回 undefined；存在但读不出状态时返回 'unknown'。
@@ -2348,12 +2348,24 @@ export class SessionAutomationService {
     }
     let item: { id: string; status: string };
     const key = `schedule:${occurrence.id}`;
-    try { item = await workTemplates.run(schedule.sessionId, template.id, template.version, schedule.prompt, key, actorId); }
+    try { item = await workTemplates.run(schedule.sessionId, template.id, template.version, schedule.prompt, key, actorId, [
+      { key: scheduleKey(schedule.id), expected: scheduleStored.raw },
+      { key: occurrenceKey(occurrence.id), expected: stored.raw }
+    ]); }
     catch (error) {
       // 工作项已经建好（如响应丢失后重试冲突）时按成功记录，避免下次重叠启动。
       const id = workItemId(schedule.sessionId, actorId, key);
       if (await workTemplates.progress(id).catch(() => undefined) !== undefined) item = { id, status: 'unknown' };
-      else {
+      else if (errorCode(error) === 'WORK_ITEM_ADMISSION_REVOKED') {
+        const current = (await this.getRecord(scheduleKey(schedule.id), readStoredSessionSchedule))?.value;
+        // 仅改名等不换代际的写入也会输掉精确 CAS；保留 pending，下次按新快照重试。
+        if (current && current.generation === occurrence.generation && !current.deletedAt && (current.enabled || occurrence.triggerSource === 'manual')) {
+          await this.replace(occurrenceKey(occurrence.id), stored.raw, sessionScheduleOccurrenceV2Schema.parse({ ...occurrence, revision: occurrence.revision + 1, leaseExpiresAt: iso(this.clock()), updatedAt: iso(this.clock()) }));
+          return;
+        }
+        await this.finishOccurrence(stored, { conditionStatus: 'invalidated', runStatus: 'invalidated', error: 'Schedule changed before work-item creation' });
+        return;
+      } else {
         const code = errorCode(error);
         await fail(code, code === 'WORK_TEMPLATE_NOT_FOUND' ? `工作项模板 ${template.id}（版本 ${template.version}）已删除或不可用，这次没有启动` : `工作项模板没能启动：${errorMessage(error)}`);
         return;

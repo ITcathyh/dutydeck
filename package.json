@@ -26,7 +26,9 @@
     "e2e:core:run": "playwright test -c tests/e2e/acceptance/playwright.config.ts --project=core",
     "e2e:full": "pnpm build:if-changed && pnpm e2e:full:run",
     "e2e:full:run": "playwright test -c tests/e2e/acceptance/playwright.config.ts",
-    "verify:all": "pnpm build:if-changed && vitest run --exclude tests/package-files.test.ts --exclude tests/packaged-content.test.ts && pnpm e2e:full:run && pnpm verify:package:run"
+    "e2e:terminal": "pnpm build:if-changed && pnpm e2e:terminal:run",
+    "e2e:terminal:run": "playwright test -c tests/e2e/terminal/playwright.config.ts",
+    "verify:all": "pnpm build:if-changed && vitest run --exclude tests/package-files.test.ts --exclude tests/packaged-content.test.ts && pnpm e2e:full:run && pnpm e2e:terminal:run && pnpm verify:package:run"
   },
   "devDependencies": {
     "@dutydeck/acp-client": "workspace:*",

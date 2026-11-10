@@ -15,38 +15,40 @@ const line = (record: unknown) => JSON.stringify(record) + '\n';
 const event = (type: string, turn: string, extra = {}) => ({ type: 'event_msg', payload: { type, turn_id: turn, ...extra } });
 const user = (text: string) => ({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] } });
 
-it.each(['cancel', 'error', 'thinking-cancel', 'text-error', 'text-success', 'foreign', 'old'] as const)(
-  'recovers Codex %s only from input and terminal after the real submission cursor', async kind => {
+it.each((['codex', 'traex'] as const).flatMap(adapterId =>
+  (['cancel', 'error', 'thinking-cancel', 'text-error', 'text-success', 'foreign', 'old'] as const).map(kind => ({ adapterId, kind }))))(
+  'recovers $adapterId $kind only from input and terminal after the real submission cursor', async ({ adapterId, kind }) => {
     const cwd = mkdtempSync(join(tmpdir(), 'dd-native-recovery-'));
     releases.push(async () => rmSync(cwd, { recursive: true, force: true }));
     const sessionId = 'ses_native-recovery-fixture', ownerId = `dutydeck:${sessionId}`;
     const nativeId = randomUUID(), nativeTurn = randomUUID();
-    const day = join(cwd, 'sessions', '2026', '10', '20'); mkdirSync(day, { recursive: true });
+    const dataRoot = adapterId === 'traex' ? join(cwd, 'cli') : cwd;
+    const day = join(dataRoot, 'sessions', '2026', '10', '20'); mkdirSync(day, { recursive: true });
     const path = join(day, `rollout-2026-10-20-${nativeId}.jsonl`);
     const marker = buildSessionMarker(sessionId);
     writeFileSync(path, line({ type: 'session_meta', payload: { id: nativeId, cwd, source: 'cli' } })
       + line(event('task_started', 'old-turn')) + line(user(marker + '\nold input'))
       + line(event('task_complete', 'old-turn', { last_agent_message: 'old answer', error: { message: 'old failure' } })));
-    writeFileSync(join(cwd, 'history.jsonl'), line({ session_id: nativeId, text: marker + '\nold input' }));
+    writeFileSync(join(dataRoot, 'history.jsonl'), line({ session_id: nativeId, text: marker + '\nold input' }));
     const metadata = new Map([['first_prompt_sent', 'true']]);
     vi.spyOn(TmuxBackend, 'probeSession').mockResolvedValue('exists');
     vi.spyOn(TmuxBackend, 'sessionOwner').mockResolvedValue(ownerId);
-    vi.spyOn(TmuxBackend.prototype, 'attach').mockImplementation(async function () { this.initialScreen = { data: '›\r\n100% left', cols: 120, rows: 30 }; });
+    vi.spyOn(TmuxBackend.prototype, 'attach').mockImplementation(async function (this: TmuxBackend) { this.initialScreen = { data: '›\r\n100% left', cols: 120, rows: 30 }; });
     vi.spyOn(TmuxBackend.prototype, 'getDutydeckMetadata').mockImplementation(async key => metadata.get(key));
     vi.spyOn(TmuxBackend.prototype, 'setDutydeckMetadata').mockImplementation(async (key, value) => { metadata.set(key, value); });
-    vi.spyOn(TmuxBackend.prototype, 'getPid').mockResolvedValue(undefined);
+    vi.spyOn(TmuxBackend.prototype, 'getPid').mockResolvedValue(null);
     vi.spyOn(TmuxBackend.prototype, 'onData').mockImplementation(() => {});
     vi.spyOn(TmuxBackend.prototype, 'onExit').mockImplementation(() => {});
     vi.spyOn(TmuxBackend.prototype, 'detach').mockResolvedValue();
     vi.spyOn(TmuxBackend.prototype, 'kill').mockImplementation(async () => { throw new Error('must preserve original pane'); });
-    const agent = { id: 'codex', name: 'fixture', command: 'unused-fixture', args: [], cwd, env: { CODEX_HOME: cwd },
-      permissionMode: 'full-trust', protocol: 'pty-cli', timeout: 6, capabilities: { resume: true }, builtin: false } as AgentConfig;
+    const agent: AgentConfig = { id: adapterId, name: 'fixture', command: 'unused-fixture', args: [], cwd, env: adapterId === 'traex' ? { TRAE_HOME: cwd } : { CODEX_HOME: cwd },
+      permissionMode: 'full-trust', protocol: 'pty-cli', timeout: 6, capabilities: { pause: false, resume: true }, builtin: false };
     const make = (events: NormalizedDriverEvent[], submitting = false) => {
-      const adapter = createCliAdapter('codex');
+      const adapter = createCliAdapter(adapterId);
       if (submitting) {
         adapter.prepareInput = undefined;
         adapter.writeInput = (_backend, prompt) => {
-          appendFileSync(join(cwd, 'history.jsonl'), line({ session_id: nativeId, text: prompt, ts: Date.now() / 1000 }));
+          appendFileSync(join(dataRoot, 'history.jsonl'), line({ session_id: nativeId, text: prompt, ts: Date.now() / 1000 }));
           appendFileSync(path, line(event('task_started', nativeTurn)) + line(user('# AGENTS.md instructions'))
             + line(user('<environment_context>fixture</environment_context>')) + line(user(prompt))
             + line(event('item_completed', nativeTurn, { thread_id: nativeId, item: { type: 'UserMessage', content: [{ type: 'text', text: prompt }] } })));

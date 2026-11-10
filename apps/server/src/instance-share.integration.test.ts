@@ -29,6 +29,7 @@ async function shard(id: string, mode: 'local' | 'open' | 'token' = 'local') {
   }
   app.post('/api/sessions/:id/send', async () => ({ writes: ++writes }));
   app.get<{ Params: { id: string; taskId: string } }>('/api/sessions/:id/tasks/:taskId/diff', async request => ({ shard: id, ...request.params }));
+  app.get<{ Params: { id: string; taskId: string }; Querystring: { path: string } }>('/api/sessions/:id/tasks/:taskId/diff/file', async request => ({ shard: id, ...request.params, path: request.query.path }));
   app.post<{ Params: { id: string; taskId: string } }>('/api/sessions/:id/tasks/:taskId/diff/comments', async request => ({ shard: id, ...request.params, body: request.body }));
   registerTerminalRoutes(app, { provider: { lookupTerminalStream: () => ({ status: 'no-session' }) }, auth: { mode, check: token => token === 'admin' } });
   await app.listen({ host: '127.0.0.1', port: 0 });
@@ -62,6 +63,7 @@ describe('migrated bot sharing', () => {
   it('does not expose an older loopback peer that has no share enforcement', async () => {
     const oldPeer = Fastify();
     oldPeer.get('/api/sessions/:id', async () => ({ private: 'legacy data' }));
+    oldPeer.get('/api/sessions/:id/tasks/:taskId/diff/file', async () => ({ private: 'legacy diff' }));
     await oldPeer.listen({ host: '127.0.0.1', port: 0 });
     cleanup.push(() => oldPeer.close());
     const main = await buildApp({} as any, {
@@ -71,6 +73,7 @@ describe('migrated bot sharing', () => {
     await main.listen({ host: '127.0.0.1', port: 0 }); cleanup.push(() => main.close());
     const base = `http://127.0.0.1:${(main.server.address() as AddressInfo).port}/api/instances/old/sessions/ses_legacy`;
     expect((await fetch(`${base}?share=forged`)).status).toBe(404);
+    expect((await fetch(`${base}/tasks/task_1/diff/file?path=file.txt&share=forged`)).status).toBe(404);
     expect(await (await fetch(base, { headers: cookie })).json()).toEqual({ private: 'legacy data' });
   });
 
@@ -105,10 +108,20 @@ describe('migrated bot sharing', () => {
     const read = await fetch(`${base}?share=${w.a.diffToken()}`);
     expect(read.status).toBe(200);
     expect(await read.json()).toEqual({ shard: 'a', id: 'ses_a', taskId: 'task_1' });
+    for (const method of ['GET', 'HEAD'] as const) {
+      const file = await fetch(`${base}/file?path=lock%20file.json&share=${w.a.diffToken()}`, { method });
+      expect(file.status).toBe(200);
+      if (method === 'GET') expect(await file.json()).toEqual({ shard: 'a', id: 'ses_a', taskId: 'task_1', path: 'lock file.json' });
+      for (const share of [w.a.token(), w.a.diffToken('task_2'), w.a.diffToken('task_1', 'ses_b'), 'forged']) {
+        expect((await fetch(`${base}/file?path=lock.json&share=${share}`, { method, headers: cookie })).status).toBe(401);
+      }
+    }
     const posted = await fetch(`${base}/comments?share=${w.a.diffToken()}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ comments: [] }) });
     expect(posted.status).toBe(200);
     expect(await posted.json()).toEqual({ shard: 'a', id: 'ses_a', taskId: 'task_1', body: { comments: [] } });
     for (const [url, init] of [
+      [`${base}/file?path=file.txt&share=${w.a.diffToken()}`, { method: 'POST' }],
+      [`${base}/file/extra?share=${w.a.diffToken()}`, {}],
       [`${base}?share=${w.a.token()}`, {}],
       [`${base}?share=${w.a.diffToken('task_2')}`, {}],
       [`${base}/comments?share=${w.a.token()}`, { method: 'POST' }],

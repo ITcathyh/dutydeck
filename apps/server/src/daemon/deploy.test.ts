@@ -14,6 +14,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vites
 import { lazyBundleForTest } from '../../../../tests/support/bundle-for-test.js';
 import type { AutostartCommandOutput } from '../autostart/autostart.js';
 import { DRAIN_INTERVAL_MS } from './command.js';
+import { splitSystemdShowStrings } from './systemd-environment.js';
 import { BUILD_OUTPUTS, parseDeployWindows, runDeploy, runDeployPrune, shanghaiMinuteOfDay, withinDeployWindow, type DeployDeps, type DeployResult } from './deploy.js';
 
 // The helper runs as a bundle: through the TypeScript loader each fork paid a cold start of a second or more.
@@ -1515,6 +1516,51 @@ describe('dutydeck deploy 与 systemd unit', () => {
     expect(printed).toMatchObject({ ok: true, status: 'unit', unitPath: unitFile });
     expect(printed.unitFile).toBe(original.replace(`${tmp}/runtime/dist/cli.js`, `${tmp}/releases/current/dist/cli.js`));
     expect(readFileSync(unitFile, 'utf8')).toBe(original);
+  });
+
+  it.each([false, true])('quotes a new release path containing spaces while preserving existing arguments (quoted original: %s)', async quoted => {
+    const unitFile = join(tmp, 'fixture.service');
+    const oldScript = join(tmp, 'runtime/dist/cli.js');
+    const interpreter = quoted ? `"${process.execPath}"` : process.execPath;
+    const originalScript = quoted ? `"${oldScript}"` : oldScript;
+    const tail = ' --database "/tmp/database fixture.db" --local-only --port 4311';
+    const original = `[Service]\nExecStart=${interpreter} ${originalScript}${tail}\nRestart=always\n`;
+    writeFileSync(unitFile, original);
+    const sys = systemctl(oldScript, unitFile);
+    const result = await runDeploy({ unit: 'fixture.service', releases: join(tmp, 'release space'), printUnit: true }, {
+      runCommand: sys.runCommand, platform: 'linux', info: vi.fn(), warn: vi.fn()
+    });
+    const script = join(tmp, 'release space/current/dist/cli.js');
+    expect(result).toMatchObject({ ok: true, status: 'unit' });
+    expect(result.unitFile).toBe(`[Service]\nExecStart=${interpreter} "${script}"${tail}\nRestart=always\n`);
+    expect(readFileSync(unitFile, 'utf8')).toBe(original);
+    expect(sys.calls.every(call => call.includes(' show '))).toBe(true);
+  });
+
+  it.skipIf(process.platform !== 'linux' || spawnSync('systemd-analyze', ['--version']).status !== 0)('systemd parses the printed entry as one path and the harmless entry receives the original arguments', async () => {
+    const unitFile = join(tmp, 'parser.service');
+    const oldScript = join(tmp, 'old/dist/cli.js');
+    writeFileSync(unitFile, `[Unit]\nDefaultDependencies=no\n[Service]\nExecStart=${process.execPath} ${oldScript} --database "/tmp/database fixture.db" --local-only\n`);
+    const sys = systemctl(oldScript, unitFile);
+    const result = await runDeploy({ unit: 'parser.service', releases: join(tmp, 'release space'), printUnit: true }, {
+      runCommand: sys.runCommand, platform: 'linux', info: vi.fn(), warn: vi.fn()
+    });
+    expect(result.ok).toBe(true);
+    const script = join(tmp, 'release space/current/dist/cli.js');
+    write(script, 'console.log(JSON.stringify({ reached: true, args: process.argv.slice(2) }))');
+    writeFileSync(unitFile, result.unitFile!);
+    const verification = spawnSync('systemd-analyze', ['--user', '--generators=no', 'verify', unitFile], {
+      encoding: 'utf8', env: { ...process.env, HOME: tmp, XDG_RUNTIME_DIR: tmp, SYSTEMD_UNIT_PATH: tmp, SYSTEMD_LOG_LEVEL: 'debug' }
+    });
+    expect(verification.status, verification.stderr).toBe(0);
+    const command = verification.stdout.split('\n').find(line => line.includes('Command Line:'))?.trim().replace(/^Command Line: /, '');
+    expect(command).toBeDefined();
+    // This fixture has ordinary paths and double quotes only; parse systemd's rendered argument boundaries.
+    const argv = splitSystemdShowStrings(command!);
+    expect(argv).toEqual([process.execPath, script, '--database', '/tmp/database fixture.db', '--local-only']);
+    const child = spawnSync(argv[0]!, argv.slice(1), { encoding: 'utf8', env: { HOME: tmp } });
+    expect(child.status, child.stderr).toBe(0);
+    expect(JSON.parse(child.stdout)).toEqual({ reached: true, args: ['--database', '/tmp/database fixture.db', '--local-only'] });
   });
 
   it('unit 已跑 releases/current 时从 ExecStart 推出发布目录，不再以 unit 布局为由拒绝', async () => {

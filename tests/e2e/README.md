@@ -5,7 +5,7 @@
 ### 基础依赖
 
 - **运行时环境**：Node.js `>= 22.12.0`、包管理器 `pnpm 11`
-- **系统工具**：`git`、`tmux`（用于后台 PTY 会话隔离与受控终端生命周期管理）
+- **系统工具**：`git`、`tmux`（用于后台 PTY 会话隔离与受控终端生命周期管理）；终端套件另需 `PATH` 中可用的 `less`
 - **浏览器**：Playwright Chromium
 
 ```bash
@@ -19,22 +19,26 @@ pnpm exec playwright install --with-deps chromium
 | 命令 | 适用阶段 | 行为说明 |
 |---|---|---|
 | `pnpm e2e` | 本地核心验证 | 按需构建当前源码（输入未变时复用上次构建），在 Chromium 下执行核心 Playwright 套件 |
-| `pnpm e2e:core:run` | CI 门禁 | PR 与 master push 步骤，直接运行已构建的核心套件 |
+| `pnpm e2e:core:run` | 已构建核心验证 | 直接运行已构建的核心套件 |
 | `pnpm e2e:full` | 本地扩展验证 | 按需构建当前源码，执行核心套件与合成飞书场景 |
-| `pnpm e2e:full:run` | CI 定时与手动 | Daily Schedule 与 workflow_dispatch，运行已构建扩展全量套件 |
+| `pnpm e2e:full:run` | 已构建扩展验证 | 直接运行已构建的核心套件与合成飞书场景 |
+| `pnpm e2e:terminal` | 终端验证 | 按需构建，执行终端滚动与真实 tmux 恢复套件 |
+| `pnpm e2e:terminal:run` | 已构建终端验证 | 直接运行 `tests/e2e/terminal/playwright.config.ts` |
 | `pnpm smoke` | 轻量快速冒烟 | 使用隔离假 CLI 运行基础链路，用于手动排障；核心套件的 `smoke.spec.ts` 跑的是同一脚本 |
-| `pnpm verify:all` | 全量验收 | 按需构建、全量单测、`e2e:full`、`verify:package` 依次执行 |
+| `pnpm verify:all` | 全量验收 | 按需构建、全量单测、`e2e:full:run`、`e2e:terminal:run`、`verify:package:run` 依次执行 |
 
-用例按文件分配到多个 worker 并行（默认 CPU 数的一半、最多 4 个，`DUTYDECK_E2E_WORKERS=1` 可退回串行排查）；`lark.spec.ts`、`schedules.spec.ts`、`scheduling.spec.ts` 的用例彼此独立，文件内也并行。新用例必须自带服务、数据库、HOME、tmux socket 和端口，不能依赖其他文件的状态。
+核心与合成飞书套件按文件分配到多个 worker 并行（默认 CPU 数的一半、最多 4 个，`DUTYDECK_E2E_WORKERS=1` 可退回串行排查）；`lark.spec.ts`、`schedules.spec.ts`、`scheduling.spec.ts` 的用例彼此独立，文件内也并行。新用例必须自带服务、数据库、HOME、tmux socket 和端口，不能依赖其他文件的状态。
 
 ## 2. 测试产物与定位排查
 
-测试产物统一保存在 `artifacts/e2e/<run-id>/` 目录下：
+核心与合成飞书套件的测试产物保存在 `artifacts/e2e/<run-id>/` 目录下：
 
 - `results.json`：汇总测试结果及上下文元数据（Git SHA、dirty 状态、runId、mock 边界与执行时间戳）。
 - `html/index.html`：Playwright HTML 可视化报告。
-- `test-results/<case>/trace.zip` 或 `smoke/smoke-trace.zip`：失败步骤的时间轴 trace。`test-results` 下的 trace 和 smoke、飞书脚本的 trace 只有 CI 录制；本地 spec 失败后加 `--trace on` 重跑，smoke 与飞书脚本则设 `CI=1` 重跑。若用例在浏览器启动前失败，无 DOM trace，排查请直接查阅服务端日志。
+- `test-results/<case>/trace.zip` 或 `smoke/smoke-trace.zip`：失败步骤的时间轴 trace。`test-results` 下的 trace 和 smoke、飞书脚本的 trace 默认在设置 `CI` 时录制；本地 spec 失败后加 `--trace on` 重跑，smoke 与飞书脚本则设 `CI=1` 重跑。若用例在浏览器启动前失败，无 DOM trace，排查请直接查阅服务端日志。
 - `server.log` 与现场截图（`*.png`）：服务端完整日志与失败时刻快照。测试运行期间创建的临时 SQLite 与 tmux 服务在退出时自动清理，排查请以产物日志与 trace 为准。
+
+终端套件的失败产物另在 `tests/e2e/terminal/.artifacts/`，保留失败 trace；不生成上述 `results.json` 或 HTML 汇总。可用 `pnpm exec playwright show-trace <trace.zip>` 查看。
 
 ### 查看报告与 Trace
 
@@ -50,8 +54,8 @@ pnpm exec playwright show-trace artifacts/e2e/<run-id>/test-results/<case>/trace
 
 ### 推荐排查流程
 
-1. 查看控制台或 GitHub Actions 运行摘要，获取非零退出码与失败用例名称。
-2. 本地定位或从 CI Artifacts 下载解压 `artifacts/e2e/<run-id>/`。
+1. 查看控制台退出码与失败用例名称。
+2. 定位对应套件的本地产物；若由自建 CI 执行，下载该次运行保存的产物。
 3. 优先核对失败快照 `*.png` 与控制台错误；若需进一步诊断交互细节，执行 `show-trace` 逐帧复现网络请求与操作流。
 4. 若在服务启动或初始化阶段失败，查阅 `server.log` 确认进程启动输出与环境状态。
 
@@ -89,11 +93,16 @@ node --import tsx scripts/e2e-bot-settings.mts --api-only
 pnpm exec playwright test -c tests/e2e/acceptance/playwright.config.ts --project=extended -g e2e-bot-settings
 ```
 
-## 4. CI 门禁与边界说明
+### 终端套件（Terminal）
 
-- **CI 执行策略**：PR 与 master push 运行 core 套件，定时 UTC 18:17（北京时间次日 02:17）与手动 dispatch 运行 full 套件；无论成败保留产物 14 天；schedule 需推入默认分支后生效，required checks 需在托管端按需设置。
+- `pnpm e2e:terminal` 覆盖桌面滚轮、移动触控、历史位置保留，以及真实 tmux 会话重新接回、页面重载和全屏 less 的双向滚动。
+- 套件使用动态前端端口，默认 2 个 worker，不复用外部服务；恢复用例创建私有 HOME 与 tmux socket，退出时只清理本轮资源。需要共享包已构建，以及 `tmux`、Chromium 和 `PATH` 中的 `less`。
+
+## 4. 验收入口与边界说明
+
+- **全量入口**：`pnpm verify:all` 包含核心、合成飞书和终端套件。仓库未配置 CI workflow；在哪些事件运行及如何保存产物，由接入方设置。
 - **真实环境边界**：真实模型/真实飞书未纳入，另需专用测试环境与凭据。
-- **存量脚本边界**：既有 `tests/e2e/visual`、`tests/e2e/terminal`、`tests/e2e/integration-contracts` 及独立 product 脚本未纳入此常态化 CI gate。
+- **存量脚本边界**：`tests/e2e/visual`、`tests/e2e/integration-contracts` 及独立 product 脚本不在 `verify:all` 的执行范围内；`tests/e2e/terminal` 已纳入。
 
 ## 5. 新增用例规范
 

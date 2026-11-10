@@ -169,6 +169,76 @@ describe('PluginTriggerService', () => {
     expect(isSettled).not.toHaveBeenCalledWith('work:work_1');
   });
 
+  it('keeps expired active work bindings through every cleanup path and deletes finished history', async () => {
+    const repositories = createRepositories(':memory:');
+    let now = 10_000;
+    const statuses = new Map<string, WorkItem['status']>([['work_1', 'awaiting_confirmation']]);
+    const trigger = pluginTriggerSchema.parse({ ...tokenTrigger, dedupeKey: '{{payload.id}}' });
+    const deliver = vi.fn(async () => ({ sessionId: 'ses_1', workItemId: 'work_1', awaitingConfirmation: true }));
+    const options = {
+      lookup: () => ({ ...trigger, scope: 'global' }), token: () => 'secret-token', deliver,
+      runBindings: repositories.ciWebhook, workStatus: (id: string) => statuses.get(id), now: () => now,
+      dedupe: { claim: (key: string, time: number, expiry: number) => repositories.ciWebhook.claimEvent(key, time, expiry), release: (key: string, expiry: number) => repositories.ciWebhook.releaseEvent(key, expiry) }
+    };
+    try {
+      const first = new PluginTriggerService(options);
+      const accepted = await first.receive(request(body({ id: 1 })));
+      const runId = String(accepted.body.runId);
+      now += 24 * 60 * 60_000 + 1;
+      const restarted = new PluginTriggerService(options);
+      expect(restarted.inFlightCount('ci', 'build')).toBe(1);
+      expect(restarted.getRun('ci', 'build', runId)).toMatchObject({ workItemId: 'work_1', status: 'queued' });
+      expect((await restarted.receive(request(body({ id: 2 })))).statusCode).toBe(429);
+      // 构造时没有这条绑定，再回填，覆盖 getRun 的持久化回退清理入口。
+      const binding = repositories.ciWebhook.listTaskBindings()[0]!;
+      repositories.ciWebhook.unbindTask(binding.taskId);
+      const late = new PluginTriggerService(options);
+      repositories.ciWebhook.bindTask(binding.taskId, binding.subscriptionId, binding.createdAt);
+      expect(late.getRun('ci', 'build', runId)).toMatchObject({ status: 'queued' });
+      // 去重窗口已重新开启，重复请求还会扫描持久化绑定。
+      const digest = JSON.parse(Buffer.from(binding.subscriptionId.split(':')[1]!, 'base64url').toString()).dedupeDigest as string;
+      repositories.ciWebhook.claimEvent(`plugin-trigger:ci/build:${digest}`, now, now + 1000);
+      expect(await late.receive(request(body({ id: 1 })))).toMatchObject({ statusCode: 200, body: { duplicate: true } });
+      expect(repositories.ciWebhook.listTaskBindings()).toHaveLength(1);
+      statuses.set('work_1', 'completed');
+      expect(restarted.getRun('ci', 'build', runId)).toBeUndefined();
+      // 到期终态从内存和持久化同时移除，不会因为曾活跃而永久保留。
+      expect(restarted.getRun('ci', 'build', runId)).toBeUndefined();
+      const finished = new PluginTriggerService(options);
+      expect(finished.inFlightCount('ci', 'build')).toBe(0);
+      expect(finished.getRun('ci', 'build', runId)).toBeUndefined();
+      expect(repositories.ciWebhook.listTaskBindings()).toEqual([]);
+    } finally { repositories.close(); }
+  });
+
+  it('retains an active task after expiry without confusing its run with the next dedupe window', async () => {
+    const repositories = createRepositories(':memory:');
+    let now = 10_000;
+    let taskStatus: 'running' | 'succeeded' = 'running';
+    const deliver = vi.fn(async () => ({ sessionId: 'ses_1', taskId: `task_${deliver.mock.calls.length}` }));
+    const options = {
+      lookup: () => ({ ...tokenTrigger, maxConcurrent: 2, scope: 'global' }), token: () => 'secret-token', deliver,
+      runBindings: repositories.ciWebhook, taskStatus: () => taskStatus, now: () => now,
+      dedupe: { claim: (key: string, time: number, expiry: number) => repositories.ciWebhook.claimEvent(key, time, expiry), release: (key: string, expiry: number) => repositories.ciWebhook.releaseEvent(key, expiry) }
+    };
+    try {
+      const first = await new PluginTriggerService(options).receive(request(body({ build: { id: 1 } })));
+      now += 24 * 60 * 60_000 + 1;
+      const restarted = new PluginTriggerService(options);
+      expect(restarted.getRun('ci', 'build', String(first.body.runId))).toMatchObject({ status: 'running' });
+      const next = await restarted.receive(request(body({ build: { id: 1 } })));
+      expect(next.statusCode).toBe(202);
+      expect(next.body.runId).not.toBe(first.body.runId);
+      const again = new PluginTriggerService(options);
+      expect(await again.receive(request(body({ build: { id: 1 } })))).toMatchObject({ statusCode: 200, body: { duplicate: true, runId: next.body.runId } });
+      expect(repositories.ciWebhook.listTaskBindings()).toHaveLength(2);
+      taskStatus = 'succeeded';
+      expect(again.getRun('ci', 'build', String(first.body.runId))).toBeUndefined();
+      expect(again.getRun('ci', 'build', String(next.body.runId))).toMatchObject({ status: 'succeeded' });
+      expect(repositories.ciWebhook.listTaskBindings()).toHaveLength(1);
+    } finally { repositories.close(); }
+  });
+
   it('rejects an HMAC nonce replay even when the body changes', async () => {
     let now = 1_700_000_000_000;
     const trigger = pluginTriggerSchema.parse({ ...hmacTrigger, maxConcurrent: 8 });

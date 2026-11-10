@@ -261,6 +261,7 @@ export class LeaderModeService implements WorkItemRequestHooks {
   private readonly queue: Queued[] = [];
   /** 目标 id → 正在进行的代判。 */
   private readonly running = new Map<string, Promise<void>>();
+  private readonly cleaning = new Map<string, Promise<void>>();
   private readonly judging = new Set<string>();
   private readonly delivering = new Set<string>();
   private readonly shutdown = new AbortController();
@@ -315,10 +316,18 @@ export class LeaderModeService implements WorkItemRequestHooks {
     }
   }
 
+  private holdCleanup(workId: string, cleanup: Promise<void>) {
+    const held = Promise.all([this.cleaning.get(workId), cleanup]).then(() => undefined);
+    this.cleaning.set(workId, held);
+    void held.then(() => { if (this.cleaning.get(workId) === held) this.cleaning.delete(workId); this.pump(); }, error => {
+      this.options.log?.warn({ error, workId }, 'Leader 代判会话未确认清退，保留并发名额');
+    });
+  }
+
   private pump() {
     // 同一目标一次只判一个：后一个请求要看得到前一个的决定。
-    while (!this.closed && this.running.size < MAX_ARBITRATIONS) {
-      const index = this.queue.findIndex(entry => !this.running.has(entry.workId));
+    while (!this.closed && new Set([...this.running.keys(), ...this.cleaning.keys()]).size < MAX_ARBITRATIONS) {
+      const index = this.queue.findIndex(entry => !this.running.has(entry.workId) && !this.cleaning.has(entry.workId));
       if (index < 0) return;
       const entry = this.queue.splice(index, 1)[0]!;
       this.judging.add(entry.key);
@@ -371,7 +380,7 @@ export class LeaderModeService implements WorkItemRequestHooks {
         return await runReadonlyPrompt(this.options.runtime, { execution: this.repos.execution }, {
           // 终端模式 Leader 只能以完全信任运行（team() 已核对），「不执行」只靠提示词约束。
           agentId: team.leader.id, cwd, permissionMode: team.leader.protocol === 'pty-cli' ? 'full-trust' : 'deny-all', source: 'lark-leader', sourceId: record!.delegationId,
-          prompt: input, timeoutMs: this.options.timeoutMs ?? ARBITRATION_TIMEOUT_MS, signal: this.shutdown.signal
+          prompt: input, timeoutMs: this.options.timeoutMs ?? ARBITRATION_TIMEOUT_MS, signal: this.shutdown.signal, onCleanup: cleanup => this.holdCleanup(workId, cleanup)
         });
       } catch (error) {
         if (this.closed) return undefined;

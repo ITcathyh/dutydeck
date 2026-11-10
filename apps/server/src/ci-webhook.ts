@@ -4,7 +4,7 @@ import { executionTaskId } from '@dutydeck/storage/helpers';
 import { z } from 'zod';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { changeRequestLabel, ciProviderLabel, git, resolveCiBranchHead, type CiProviderRegistry } from './ci-providers.js';
-import { codeBlock, errorMessage, isRunnable, iso, short, SingleFlight } from './ci-common.js';
+import { assertContinuationTask, codeBlock, errorMessage, isRunnable, iso, short, SingleFlight, unboundContinuationSource } from './ci-common.js';
 import { readTaskOutput } from './task-results.js';
 
 const SUBSCRIPTION_PREFIX = 'ci_webhook/subscription/';
@@ -557,7 +557,6 @@ export class CiWebhookService {
       task: { id, key, kind, round, baseSha: value.headSha, prompt, ...(actorId ? { actorId } : {}) }
     });
     if (!saved) return false;
-    this.options.repositories.ciWebhook.bindTask(id, value.id, this.clock().getTime());
     await this.dispatch(saved);
     // 按钮回调有 3 秒时限，开始通知不阻塞回执。
     if (kind === 'fix') void this.notice(saved.value, { key: `${value.id}:fix:${round}`, title: `CI 修复第 ${round} 轮`, markdown: this.failureMarkdown(saved.value, `${spaced(this.label(value))}失败，已交给 Agent 修复（第 ${round}/${ciFixLimits.rounds} 轮）。`) });
@@ -568,6 +567,7 @@ export class CiWebhookService {
   private async dispatch(stored: Stored) {
     const { value } = stored;
     const task = value.task!;
+    await this.ensureTaskBinding(value);
     try {
       const accepted = await this.options.runtime.dispatch(value.sessionId, task.prompt, 'queue', task.prompt, undefined, task.actorId, task.key);
       if (accepted.id !== task.id) throw new RuntimeError('CI_WEBHOOK_TASK_CONFLICT', 'Runtime task identity did not match the webhook task', 409);
@@ -578,9 +578,28 @@ export class CiWebhookService {
     }
   }
 
+  private async ensureTaskBinding(value: CiWebhookSubscription) {
+    const task = value.task!;
+    const bindings = this.options.repositories.ciWebhook;
+    if (!bindings.taskSubscription(task.id)) {
+      await assertContinuationTask(this.options.repositories, this.options.runtime, value.sessionId, task, 'CI_WEBHOOK_TASK_CONFLICT');
+      bindings.bindTask(task.id, value.id, this.clock().getTime());
+    }
+    if (bindings.taskSubscription(task.id) !== value.id) throw new RuntimeError('CI_WEBHOOK_TASK_CONFLICT', 'CI task is already bound to another subscription', 409);
+  }
+
   async authorizeTask(task: TaskRecord, phase: 'prepare' | 'submit') {
-    const subscriptionId = this.options.repositories.ciWebhook.taskSubscription(task.id);
-    if (!subscriptionId) return;
+    let subscriptionId = this.options.repositories.ciWebhook.taskSubscription(task.id);
+    if (!subscriptionId) {
+      const sourceId = await unboundContinuationSource(this.options.repositories, this.options.runtime, task, /^ci-webhook:([^:]+):(?:continue|fix):(?:0|[1-9]\d*):[a-f0-9]{12}$/);
+      if (!sourceId) return;
+      const source = await this.read(sourceId);
+      if (!source || source.value.id !== sourceId || source.value.sessionId !== task.sessionId) return;
+      // cancel 清掉 task 后不能补绑，但旧的未绑定队列仍必须被撤销。
+      if (source.value.status !== 'running' || source.value.task?.id !== task.id) throw new RuntimeError('CI_WEBHOOK_TASK_REVOKED', 'CI 续作已取消或已被新的状态取代', 403);
+      await this.ensureTaskBinding(source.value);
+      subscriptionId = sourceId;
+    }
     for (let attempt = 0; attempt < 5; attempt += 1) {
       const stored = await this.read(subscriptionId);
       const value = stored?.value;
@@ -632,6 +651,7 @@ export class CiWebhookService {
         continue;
       }
       if (isTerminalTaskStatus(task.status)) await this.settle(item, task);
+      else await this.ensureTaskBinding(value);
     }
     // 任务结束后删除绑定；一直没投递成功的绑定在订阅有效期过后删除。未结束的任务要靠绑定在 authorizeTask 处拦截，不能提前删。
     const bindings = this.options.repositories.ciWebhook;

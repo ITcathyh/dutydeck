@@ -115,7 +115,7 @@ async function fixture(options: { withoutPullRequests?: boolean; log?: { warn: (
   const outputs = new Map<string, string>();
   const createService = () => {
     const created = new PullRequestService({
-      repositories: { config: database.config, tasks: { get: async (id: string) => tasks.get(id), save: async () => {}, listBySession: async () => [] }, execution: {} as any },
+      repositories: { config: database.config, tasks: { get: async (id: string) => tasks.get(id), save: async () => {}, listBySession: async () => [] }, execution: { getAcceptedTask: () => undefined } as any },
       runtime, providers, readTaskOutput: (_sessionId, taskId) => outputs.get(taskId),
       notify: async (_sessionId, _id, notice) => {
         if (state.notifyFailures > 0) { state.notifyFailures -= 1; throw new Error('飞书发送失败'); }

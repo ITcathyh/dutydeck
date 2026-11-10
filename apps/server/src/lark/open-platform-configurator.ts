@@ -120,9 +120,11 @@ export interface LarkOpenPlatformConfigurationResult {
 }
 
 export class LarkOpenPlatformConfigurationError extends Error {
-  constructor(readonly code: string, message: string, options?: ErrorOptions) {
+  declare readonly publishAttempted?: boolean;
+  constructor(readonly code: string, message: string, options?: ErrorOptions & { publishAttempted?: boolean }) {
     super(message);
     this.name = 'LarkOpenPlatformConfigurationError';
+    if (options?.publishAttempted) this.publishAttempted = true;
     if (options && 'cause' in options) {
       Object.defineProperty(this, 'cause', {
         value: options.cause,
@@ -298,8 +300,16 @@ export async function configureLarkOpenPlatformApp(
   }
   onStep('version_create', { versionId });
   if (options.newApp) await verifyAutomaticApproval(client, appId, versionId, visibility);
-  await post(client, `/developers/v1/publish/commit/${appId}/${versionId}`, { clientId: appId },
-    'publish_failed', '发布飞书应用版本失败');
+  try {
+    await post(client, `/developers/v1/publish/commit/${appId}/${versionId}`, { clientId: appId },
+      'publish_failed', '提交发布请求失败，无法确认该版本是否已提交');
+  } catch (error) {
+    // A transport failure cannot prove that the platform did not accept the commit.
+    if (error instanceof LarkOpenPlatformConfigurationError) {
+      throw new LarkOpenPlatformConfigurationError(error.code, error.message, { cause: error, publishAttempted: true });
+    }
+    throw error;
+  }
   onStep('publish_commit', { versionId });
   let version: unknown;
   for (let attempt = 0; attempt < 10; attempt++) {

@@ -172,7 +172,7 @@ export class PluginTriggerService {
     this.dedupe = options.dedupe ?? new MemoryTriggerDedupe();
     for (const binding of options.runBindings?.listTaskBindings() ?? []) {
       if (!binding.subscriptionId.startsWith('dutydeck-plugin-trigger:')) continue;
-      if (binding.createdAt + DEDUPE_TTL_MS <= (options.now?.() ?? Date.now())) { options.runBindings?.unbindTask(binding.taskId); continue; }
+      if (this.expireBinding(binding, options.now?.() ?? Date.now())) continue;
       const decoded = decodeRunBinding(binding.subscriptionId);
       if (!decoded) continue;
       const status = this.entryStatus(binding.taskId) ?? 'running';
@@ -191,7 +191,7 @@ export class PluginTriggerService {
     if (!trigger) return { statusCode: 404, body: { error: { code: 'PLUGIN_TRIGGER_NOT_FOUND', message: '没有这个触发器，或插件未启用' } } };
     if (request.rawBody.length > TRIGGER_BODY_LIMIT) return { statusCode: 413, body: { error: { code: 'PLUGIN_TRIGGER_BODY_TOO_LARGE', message: `请求体超过 ${TRIGGER_BODY_LIMIT} 字节` } } };
     const now = this.options.now?.() ?? Date.now();
-    for (const binding of this.options.runBindings?.listTaskBindings() ?? []) if (binding.subscriptionId.startsWith('dutydeck-plugin-trigger:') && binding.createdAt + DEDUPE_TTL_MS <= now) this.options.runBindings?.unbindTask(binding.taskId);
+    for (const binding of this.options.runBindings?.listTaskBindings() ?? []) if (binding.subscriptionId.startsWith('dutydeck-plugin-trigger:')) this.expireBinding(binding, now);
     const secret = this.options.token(request.plugin, request.triggerId);
     if (!secret || !verifyTriggerAuth(trigger.auth, secret, request, now)) {
       return { statusCode: 401, body: { error: { code: 'PLUGIN_TRIGGER_UNAUTHORIZED', message: '触发器令牌或签名无效' } } };
@@ -291,6 +291,11 @@ export class PluginTriggerService {
   getRun(plugin: string, triggerId: string, runId: string): TriggerRun | undefined {
     const run = this.runs.get(runId);
     if (run && run.plugin === plugin && run.triggerId === triggerId) {
+      const entry = run.taskId ?? (run.workItemId ? `${WORK_ENTRY}${run.workItemId}` : undefined);
+      if (entry && this.expireBinding({ taskId: entry, createdAt: run.createdAt }, this.options.now?.() ?? Date.now(), run.status)) {
+        this.runs.delete(runId);
+        return undefined;
+      }
       // 工作项没有结算通知，每次查询按工作项当前状态给出；已取消的保持取消。
       if (run.workItemId) return run.status === 'cancelled' ? { ...run } : { ...run, status: this.entryStatus(`${WORK_ENTRY}${run.workItemId}`) ?? run.status };
       // 任务被外部取消、会话停止或恢复时结算都不发结算通知：按任务实时状态补结算，回写后参与过期清理并释放名额。
@@ -305,10 +310,7 @@ export class PluginTriggerService {
     }
     const binding = this.options.runBindings?.listTaskBindings().find(item => {
       if (!item.subscriptionId.startsWith('dutydeck-plugin-trigger:')) return false;
-      if (item.createdAt + DEDUPE_TTL_MS <= (this.options.now?.() ?? Date.now())) {
-        this.options.runBindings?.unbindTask(item.taskId);
-        return false;
-      }
+      if (this.expireBinding(item, this.options.now?.() ?? Date.now())) return false;
       const decoded = decodeRunBinding(item.subscriptionId);
       return decoded?.runId === runId && decoded.plugin === plugin && decoded.triggerId === triggerId;
     });
@@ -377,10 +379,26 @@ export class PluginTriggerService {
 
   inFlightCount(plugin: string, triggerId: string): number { return this.inFlight.get(`${plugin}/${triggerId}`)?.size ?? 0; }
 
+  /** 历史保留期不终止活跃运行；首次确认也没有 24 小时截止。 */
+  private expireBinding(binding: { taskId: string; createdAt: number; subscriptionId?: string }, now: number, known?: TriggerRunStatus): boolean {
+    if (binding.createdAt + DEDUPE_TTL_MS > now) return false;
+    const decoded = binding.subscriptionId ? decodeRunBinding(binding.subscriptionId) : undefined;
+    const status = this.entryStatus(binding.taskId) ?? known ?? (decoded ? this.runs.get(decoded.runId)?.status : undefined);
+    if (this.entryHolds(binding.taskId, status)) return false;
+    this.options.runBindings?.unbindTask(binding.taskId);
+    if (decoded) this.runs.delete(decoded.runId);
+    for (const id of this.inFlight.keys()) this.release(id, binding.taskId);
+    return true;
+  }
+
   private findDurableRunByDigest(plugin: string, triggerId: string, digest: string): { runId: string } | undefined {
+    const now = this.options.now?.() ?? Date.now();
     for (const binding of this.options.runBindings?.listTaskBindings() ?? []) {
       if (!binding.subscriptionId.startsWith('dutydeck-plugin-trigger:')) continue;
-      if (binding.createdAt + DEDUPE_TTL_MS <= (this.options.now?.() ?? Date.now())) { this.options.runBindings?.unbindTask(binding.taskId); continue; }
+      if (binding.createdAt + DEDUPE_TTL_MS <= now) {
+        this.expireBinding(binding, now);
+        continue; // 活跃旧运行仍可查询，但不属于当前去重窗口。
+      }
       const decoded = decodeRunBinding(binding.subscriptionId);
       if (decoded?.plugin === plugin && decoded.triggerId === triggerId && decoded.dedupeDigest === digest) return { runId: decoded.runId };
     }

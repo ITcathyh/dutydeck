@@ -118,7 +118,7 @@ dutydeck plugin uninstall <名字>
 - `target` 的值可以写 `{{config.<键>}}`，引用插件配置；配置没填齐时触发器不可用。`session` 为 `new`（每次新会话）或 `reuse`。
 - 返回码：`202 {runId, sessionId, taskId, statusUrl}` 已接受；`200 {duplicate:true, runId}` 重复事件；`400` 请求体不是 JSON；`401` 令牌、签名、时间戳无效或 nonce 已使用；`404` 触发器不存在或插件未启用；`413` 请求体超过 1 MiB；`429` 达到 `maxConcurrent`；`502` 投递失败（同时撤销去重记录，可重试）。可用相同鉴权请求 `GET .../runs/<runId>` 查询状态，并对仍在队列、尚未提交给 Agent 的运行 `POST .../cancel`；HMAC 查询和取消也要为零请求体生成新 nonce 和签名，nonce 只用一次；已开始执行的运行保持 running，取消不会撤回已发出的外部副作用。
 - 也可使用统一任务入口 `POST /api/plugin-triggers/v1/runs?plugin=<插件>&triggerId=<触发器>`，状态和取消地址分别是 `/api/plugin-triggers/v1/runs/<runId>` 与 `/cancel`（查询参数带回 `plugin`、`triggerId`）。请求头 `Idempotency-Key` 与清单中的 `idempotencyKey` 模板都会参与 24 小时去重；`dryRun=true` 只校验鉴权和模板，不启动任务。
-- 去重 24 小时，重启后仍有效；去重键是 `dedupeKey` 渲染结果，没写就用整个请求体。`maxConcurrent` 默认 4，范围 1 到 32。
+- 去重 24 小时，重启后仍有效；去重键是 `dedupeKey` 渲染结果，没写就用整个请求体。`maxConcurrent` 默认 4，范围 1 到 32。活跃任务和仍占并发名额的工作项（包括首次等确认）超过 24 小时仍保留运行记录，重启后可查询并继续占位；已结束的过期记录会清除。去重到期不等于取消旧运行，同一事件在新窗口可按并发规则产生新运行。
 - 模板里 `{{payload.a.b}}` 取请求体字段，`{{payload}}` 取整个请求体。进入 prompt 的每个取值都被当作**不可信数据**包裹（带随机边界，单个取值最多 2 万字符）。模板读不到鉴权头、`authorization` 和 `cookie`。
 - 任务结果以文本发回目标群，最多 8000 字符。
 - **启动工作项模板**：把 `prompt` 换成 `workTemplate`（两者只能写一个），触发时按已保存的工作项模板开一个工作项，而不是发一段提示词：
@@ -226,6 +226,10 @@ dutydeck settings bot set <appId> leaderSkill=leader-guide/leader
 ```
 
 想让 Leader 每次运行都带上的引用文件，写进清单的 `skillResources`；其余引用文件在 `SKILL.md` 里写明路径，Leader 需要时自己读（要求 Leader Agent 能读技能目录）。不做成插件也行：技能目录会跳过指向目录外的软链接，放在别处的指引，`leaderSkill` 直接填 `SKILL.md`（或其所在目录）的绝对路径；这种来源不内联 `skillResources`，同目录的引用文件由 Leader 按路径自己读。授权账本和决定记录由宿主在每次运行里提供，指引里不要让 Leader 自己维护文件。
+
+## 插件服务
+
+同一插件服务的启动、停止、重启和自动重启按请求顺序处理，重启会先结束旧实例再启动新实例。在 POSIX 系统上，停止等待所属进程组中的 worker 一起退出；宽限期后仍未退出的会被强制结束。父进程先退出不会提前显示「已停止」。清退失败会返回错误，只有旧实例清理完成后才能再次启动。主动脱离进程组的后代不在清理范围内；Windows 仍只管理直接子进程。
 
 ## 受控插件结果
 

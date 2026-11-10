@@ -266,8 +266,9 @@ export class WorkItemService {
   /**
    * confirmation 显式为 true/false 时覆盖默认闸门判定；工具与 HTTP 入口一律不传，只走默认判定。
    * parentTaskId 供父任务结束后才创建的计划沿用原任务的风险策略；缺省取当前活动任务；null 表示不归属任何父任务。
+   * admissionChecks 与首次写入原子核对，撤销来源后不再接纳尚未创建的目标；已有目标仍返回幂等结果。
    */
-  async create(parentSessionId: string, input: CreateWorkItemInput, actorId?: string, confirmation?: boolean, parentTaskId?: string | null): Promise<WorkItem> {
+  async create(parentSessionId: string, input: CreateWorkItemInput, actorId?: string, confirmation?: boolean, parentTaskId?: string | null, admissionChecks?: Array<{ key: string; expected: string }>): Promise<WorkItem> {
     input = createWorkItemSchema.parse(input);
     const parent = await this.access(parentSessionId, actorId);
     if (parent.archivedAt || ['stopped', 'failed'].includes(parent.state)) throw new RuntimeError('WORK_ITEM_PARENT_INACTIVE', 'Parent session is not runnable', 409);
@@ -299,7 +300,10 @@ export class WorkItemService {
       const record: StoredWork = { item, actorId: actorId!, actor, inputHash, confirmationRequired: gated, parentFingerprint: this.parentFingerprint(parent), cwd: parent.cwd, agents, stoppedAttempts: [], riskPolicy: parentTask?.executionContext?.riskPolicy, promptPolicyVersion: parentTask?.executionContext?.promptPolicyVersion ?? 'legacy-v1', ...(taskId ? { parentTaskId: taskId } : {}) };
       await this.options.prepareDelivery?.(parentSessionId, id, input.idempotencyKey);
       await this.access(parentSessionId, actorId);
-      if (!await this.repos.config.compareAndSet!(PREFIX + id, undefined, JSON.stringify(record))) throw new RuntimeError('WORK_ITEM_CONFLICT', 'Work-item creation conflicted', 409);
+      if (admissionChecks) {
+        if (!this.repos.config.compareAndSetBatch) throw new RuntimeError('WORK_ITEM_STORAGE_UNAVAILABLE', 'Scheduled templates require atomic batch storage', 503);
+        if (!await this.repos.config.compareAndSetBatch([...admissionChecks, { key: PREFIX + id, expected: undefined }], [{ key: PREFIX + id, value: JSON.stringify(record) }])) throw new RuntimeError('WORK_ITEM_ADMISSION_REVOKED', 'Scheduled template admission changed before creation', 409);
+      } else if (!await this.repos.config.compareAndSet!(PREFIX + id, undefined, JSON.stringify(record))) throw new RuntimeError('WORK_ITEM_CONFLICT', 'Work-item creation conflicted', 409);
       return this.view(record);
     });
   }
@@ -577,10 +581,10 @@ export class WorkItemService {
     return (await this.repos.config.list!(TEMPLATES)).map(row => JSON.parse(row.value) as StoredTemplate).filter(record => record.template.parentSessionId === parentSessionId && (record.actorId === actorId || actorId === installationOwnerTaskActor)).map(record => record.template);
   }
   /** detached：定时或触发器启动，不归属父会话此刻正在跑的那一轮（不计入其用量、不沿用其风险策略）。 */
-  async runTemplate(parentSessionId: string, templateId: string, version: number, goal: string, idempotencyKey: string, actorId?: string, confirmation?: boolean, detached = false): Promise<WorkItem> {
+  async runTemplate(parentSessionId: string, templateId: string, version: number, goal: string, idempotencyKey: string, actorId?: string, confirmation?: boolean, detached = false, admissionChecks?: Array<{ key: string; expected: string }>): Promise<WorkItem> {
     const template = (await this.listTemplates(parentSessionId, actorId)).find(template => template.id === templateId && template.version === version);
     if (!template) throw new RuntimeError('WORK_TEMPLATE_NOT_FOUND', 'Template version not found', 404);
-    return this.create(parentSessionId, { goal, plan: template.plan, idempotencyKey }, actorId, confirmation, detached ? null : undefined);
+    return this.create(parentSessionId, { goal, plan: template.plan, idempotencyKey }, actorId, confirmation, detached ? null : undefined, admissionChecks);
   }
   tick(): Promise<void> {
     if (this.closed) return Promise.resolve();

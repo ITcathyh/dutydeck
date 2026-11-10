@@ -6,6 +6,7 @@ import draftCatalog from './fixtures/scope-catalog-draft.json';
 import newAppPrivileges from './fixtures/new-app-privileges.json';
 import automaticApproval from './fixtures/approval-collaborator-exemption.json';
 import { larkCommandRegistry } from './commands.js';
+import { renderRepairResultCard, runOpenPlatformRepair } from './repair.js';
 import {
   OpenPlatformSessionExpiredError,
 } from './open-platform-session.js';
@@ -721,4 +722,43 @@ describe('session expiration propagation', () => {
     expect(serialized).not.toContain('cause');
     expect(Object.keys(caught as object)).toEqual(['code', 'name']);
   });
+});
+
+it.each([false, true])('marks a failed publish request as attempted even when the transport reports expired login (%s)', async expired => {
+  const { client, calls } = harness();
+  const original = client.postJson;
+  client.postJson = async (path, body) => {
+    if (path.includes('/publish/commit/')) {
+      if (expired) throw new OpenPlatformSessionExpiredError();
+      throw new Error('network reset with secret=LEAK');
+    }
+    return original(path, body);
+  };
+  await expect(configureLarkOpenPlatformApp(client, 'cli_test')).rejects.toMatchObject({
+    code: expired ? 'session_expired' : 'publish_failed', publishAttempted: true
+  });
+  expect(calls.some(call => call.path.includes('/app_version/create/'))).toBe(true);
+});
+
+it.each(['commit', 'readback'] as const)('renders an unconfirmed repair when the real configurator loses the %s response after the write', async phase => {
+  const { client } = harness();
+  const original = client.postJson;
+  let commits = 0;
+  client.postJson = async (path, body) => {
+    if (path.includes('/publish/commit/')) {
+      commits++;
+      if (phase === 'commit') throw new Error('response lost after platform write: secret=LEAK');
+    }
+    if (commits && phase === 'readback' && path.includes('/app_version/list/')) throw new Error('readback lost');
+    return original(path, body);
+  };
+  const result = await runOpenPlatformRepair({ connectClient: async () => ({ client }) }, { appId: 'cli_test', confirmed: true });
+  expect(result).toMatchObject({ status: 'failed', publishAttempted: true });
+  const card = renderRepairResultCard(result);
+  expect(card.title).toContain('待确认');
+  expect(card.markdown).toContain('version-2');
+  expect(card.markdown).toContain('发布结果尚未确认');
+  expect(card.markdown).toContain('确认前不要重复执行');
+  expect(card.markdown).not.toMatch(/未产生已发布版本|配置未生效|尚未提交发布|LEAK/);
+  expect(commits).toBe(1);
 });

@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { constants as osConstants } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { AUTOSTART_LINUX_UNIT } from '../autostart/autostart.js';
+import { AUTOSTART_LINUX_UNIT, systemdQuote } from '../autostart/autostart.js';
 import type { DeployCliOptions, DeployPruneCliOptions } from '../cli-program.js';
 import { defaultDaemonDir, pidAlive } from './daemon.js';
 import { DRAIN_INTERVAL_MS, drainRuntime, healthCheckUrl, systemdServiceControl, unitRuntime, waitForServiceHealth, type DaemonCommandDeps, type DrainResult, type RuntimeEndpoint, type ServiceControl, type UnitRuntime } from './command.js';
@@ -588,10 +588,10 @@ function printUnit(target: DeployTarget): DeployResult {
   try { original = readFileSync(path, 'utf8'); } catch (error) { return refused(`读不到 unit 文件 ${path}：${message(error)}`); }
   let replaced = 0;
   const unitFile = original.split('\n').map(line => {
-    const match = /^(ExecStart=\S+\s+)(\S+)(.*)$/.exec(line);
+    const match = /^(ExecStart=(?:"(?:[^"\\]|\\.)*"|'[^']*'|\S+)\s+)(?:"(?:[^"\\]|\\.)*"|'[^']*'|\S+)(.*)$/.exec(line);
     if (!match) return line;
     replaced++;
-    return `${match[1]}${script}${match[3]}`;
+    return `${match[1]}${systemdQuote(script)}${match[2]}`;
   }).join('\n');
   if (replaced !== 1) return refused(`${path} 里应当正好有一行 ExecStart=<node> <cli.js> ...（找到 ${replaced} 行），没法自动改写。`);
   return { ok: true, status: 'unit', unitFile, unitPath: path };

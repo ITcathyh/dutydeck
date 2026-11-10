@@ -12,6 +12,7 @@
 
 import {
   configureLarkOpenPlatformApp,
+  LarkOpenPlatformConfigurationError,
   isValidLarkAppId,
   larkSlashCommandDefinitions,
   LARK_REQUIRED_EVENTS,
@@ -81,6 +82,7 @@ export type OpenPlatformRepairResult =
       appId: string;
       failedStep?: RepairStepStatus;
       code: string;
+      publishAttempted?: boolean;
       reason: string;
       hint: string;
       steps: RepairStepReport[];
@@ -94,7 +96,8 @@ export interface RunOpenPlatformRepairInput {
 }
 
 /**  configurator 错误码 → 可操作建议。错误本身的 message 已是中文原因，这里只补下一步动作。 */
-function repairFailureHint(code: string): string {
+function repairFailureHint(code: string, publishAttempted = false): string {
+  if (publishAttempted) return '发布结果尚未确认，请到开放平台版本管理页核对该版本状态；确认前不要重复执行 /repair。';
   switch (code) {
     case 'session_expired':
       return '开放平台登录态已失效，请重新完成扫码登录后再执行 /repair。';
@@ -124,11 +127,6 @@ function repairFailureHint(code: string): string {
     case 'visibility_read_failed':
     case 'visibility_unreadable':
       return '请到开放平台核对版本列表与应用可见范围（白名单/黑名单）配置是否完整，处理后重新执行 /repair。';
-    case 'publish_failed':
-      return '版本已创建但提交发布失败，请到开放平台版本管理页核对该版本状态后重试；切勿在状态不明时重复创建版本。';
-    case 'publish_verification_read_failed':
-    case 'publish_verification_failed':
-      return '发布请求已提交但无法确认发布结果，请到开放平台版本管理页核对 versionStatus，确认前不要重复执行 /repair。';
     default:
       return '请稍后重试；若持续失败，请到飞书开放平台核对该应用的权限、事件订阅与版本状态。';
   }
@@ -233,9 +231,12 @@ export async function runOpenPlatformRepair(
     const code = typeof (error as { code?: unknown })?.code === 'string'
       ? (error as { code: string }).code
       : 'repair_failed';
+    const publishAttempted = steps.some(step => step.step === 'publish_commit')
+      || error instanceof LarkOpenPlatformConfigurationError && error.publishAttempted
+      || ['publish_failed', 'publish_verification_read_failed', 'publish_verification_failed', 'publish_verification_pending'].includes(code);
     const reason = code === 'repair_failed'
-      ? '修复流程发生未预期错误，未完成发布。'
-      : error instanceof Error ? error.message : '修复流程失败，未完成发布。';
+      ? '修复流程发生未预期错误。'
+      : error instanceof Error ? error.message : '修复流程失败。';
     if (code === 'publish_pending_review') {
       const versionId = [...steps].reverse().find(step => step.detail?.versionId)?.detail?.versionId;
       return { status: 'pending_review', appId, ...(versionId ? { versionId } : {}), steps };
@@ -243,7 +244,8 @@ export async function runOpenPlatformRepair(
     return {
       status: 'failed', appId,
       ...(steps.length ? { failedStep: steps[steps.length - 1]!.step } : {}),
-      code, reason, hint: repairFailureHint(code), steps
+      code, reason, ...(publishAttempted ? { publishAttempted: true } : {}),
+      hint: repairFailureHint(code, publishAttempted), steps
     };
   }
 }
@@ -384,11 +386,14 @@ export function renderRepairResultCard(result: OpenPlatformRepairResult): Repair
         ].join('\n'),
         elements: []
       };
-    case 'failed':
+    case 'failed': {
+      const publishAttempted = result.publishAttempted || result.steps.some(step => step.step === 'publish_commit');
       return {
-        title: '/repair 修复失败',
+        title: publishAttempted ? '/repair 发布结果待确认' : '/repair 修复失败',
         markdown: [
-          '**修复未完成，未产生已发布版本，配置未生效。**',
+          publishAttempted
+            ? '**发布结果尚未确认，请到开放平台核对该版本状态；确认前不要重复执行 /repair。**'
+            : '**修复未完成，尚未提交发布，本次配置未生效。**',
           '',
           ...(result.failedStep ? [`中断步骤：${stepLabels[result.failedStep]}`] : []),
           `原因：${result.reason}`,
@@ -399,5 +404,6 @@ export function renderRepairResultCard(result: OpenPlatformRepairResult): Repair
         ].join('\n'),
         elements: []
       };
+    }
   }
 }

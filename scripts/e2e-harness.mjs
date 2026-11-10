@@ -10,12 +10,13 @@
  * 重复 250 行样板，换来「基线脚本零改动」这个可验证的事实。
  * 两边的行为约定必须保持一致；改了这里的语义，也要回头看一眼那边。
  */
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { childEnvironment } from '../packages/shared/runtime/child-environment.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const REPO = resolve(HERE, '..');
@@ -353,7 +354,27 @@ export function createDataDir({ onCleanup, prefix = 'dutydeck-product-' }) {
  * 所以这里先确认端口空闲，再确认 /health 的应答来自我们自己拉起的进程。
  */
 export function startServer({ port, dirs, agentsJson, onCleanup, verbose = false }) {
-  const serverEnv = { ...process.env };
+  const home = join(dirs.dataDir, 'home');
+  const tmuxTmpDir = join(dirs.dataDir, 'tmux-tmp');
+  const runtimeDir = join(dirs.dataDir, 'run');
+  for (const dir of [home, tmuxTmpDir, runtimeDir]) mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const serverEnv = childEnvironment(process.env);
+  for (const key of Object.keys(serverEnv)) {
+    if (/^(?:DUTYDECK_|DOCKMUX_|GIT_)/.test(key)) delete serverEnv[key];
+  }
+  Object.assign(serverEnv, {
+    HOME: home, TMUX_TMPDIR: tmuxTmpDir, TMPDIR: join(dirs.dataDir, 'tmp'),
+    XDG_CONFIG_HOME: join(home, '.config'), XDG_DATA_HOME: join(home, '.local/share'),
+    XDG_CACHE_HOME: join(home, '.cache'), XDG_STATE_HOME: join(home, '.local/state'), XDG_RUNTIME_DIR: runtimeDir,
+    DUTYDECK_DAEMON_DIR: join(home, '.dutydeck/daemon'),
+    DUTYDECK_DATABASE_URL: join(dirs.dataDir, 'dutydeck.db'),
+    DUTYDECK_DEFAULT_CWD: dirs.workspace
+  });
+  mkdirSync(serverEnv.TMPDIR, { recursive: true, mode: 0o700 });
+  onCleanup('停止独立 tmux server', () => {
+    const socket = join(tmuxTmpDir, `tmux-${process.getuid()}`, 'default');
+    spawnSync('tmux', ['-S', socket, 'kill-server'], { env: serverEnv, stdio: 'ignore' });
+  });
   for (const key of POLLUTING_ENV) delete serverEnv[key];
   serverEnv.NODE_ENV = 'production';
   serverEnv.DUTYDECK_AGENTS_JSON = JSON.stringify(agentsJson);

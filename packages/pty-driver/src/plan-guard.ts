@@ -109,15 +109,40 @@ export function planGuardAllowsBash(command: string): boolean {
   });
   const gitReadOnly = new Set(['log', 'show', 'diff', 'status', 'blame', 'grep', 'ls-files', 'ls-tree', 'rev-parse', 'describe', 'shortlog',
     'cat-file', 'merge-base', 'rev-list', 'show-ref', 'whatchanged', 'diff-tree', 'diff-files', 'diff-index', 'for-each-ref', 'check-ignore', 'count-objects']);
+  const gitDiff = new Set(['log', 'show', 'diff', 'shortlog', 'whatchanged', 'diff-tree', 'diff-files', 'diff-index', 'rev-list']);
   const git = (args: string[]) => {
     let rest = args;
+    // Never inherit a pager, fsmonitor or implicit signature/pretty-format verifier.
+    // Only these exact -c overrides are accepted, so later options cannot re-enable them.
+    const required = new Set(['--no-pager', '--no-optional-locks', 'core.fsmonitor=false', 'log.showSignature=false', 'format.pretty=medium']);
     while (rest.length && rest[0]!.startsWith('-')) {
       if (rest[0] === '-C' && rest.length > 1) rest = rest.slice(2);
-      else if (rest[0] === '--no-pager' || rest[0] === '-P') rest = rest.slice(1);
+      else if (rest[0] === '--no-pager' || rest[0] === '-P') { required.delete('--no-pager'); rest = rest.slice(1); }
+      else if (rest[0] === '--no-optional-locks') { required.delete(rest[0]); rest = rest.slice(1); }
+      else if (rest[0] === '-c' && required.has(rest[1] ?? '')) { required.delete(rest[1]!); rest = rest.slice(2); }
       else return false;
     }
+    if (required.size) return false;
     const [sub, ...params] = rest;
     if (!sub || flagged(params, /^-[^-]*O/) || abbreviates(params, ['--output', '--output-directory', '--open-files-in-pager', '--ext-diff'])) return false;
+    // Repository/user configuration may run textconv or external diff even
+    // without an explicit request. Only accept commands that disable both;
+    // path names after -- are not options, and enabling abbreviations lose.
+    const optionsEnd = params.indexOf('--');
+    const commandOptions = optionsEnd < 0 ? params : params.slice(0, optionsEnd);
+    if (abbreviates(commandOptions, ['--textconv', '--filters', '--show-signature']) || commandOptions.some(param => /%G|%\(\*?signature/.test(param))) return false;
+    // Named pretty formats can resolve repository-configured aliases containing
+    // signature placeholders, which start gpg. Accept built-ins or literal formats.
+    for (let index = 0; index < commandOptions.length; index++) {
+      const option = commandOptions[index]!.split('=')[0]!;
+      if (option.length <= 2 || !['--pretty', '--format'].some(name => name.startsWith(option))) continue;
+      const value = commandOptions[index]!.includes('=') ? commandOptions[index]!.slice(option.length + 1) : commandOptions[++index];
+      if (value !== undefined && !/^(oneline|short|medium|full|fuller|reference|email|mboxrd|raw)$/.test(value)
+        && !/^(t?format:)/.test(value) && !value.includes('%')) return false;
+    }
+    const safeDiff = commandOptions.includes('--no-ext-diff') && commandOptions.includes('--no-textconv');
+    if (gitDiff.has(sub)) return safeDiff;
+    if (sub === 'blame') return commandOptions.includes('--no-textconv');
     if (gitReadOnly.has(sub)) return true;
     const options = params.every(param => param.startsWith('-'));
     if (sub === 'branch') return (options || params.some(param => param === '--list' || param === '-l'))
@@ -125,12 +150,12 @@ export function planGuardAllowsBash(command: string): boolean {
         '--track', '--no-track', '--edit-description', '--create-reflog', '--recurse-submodules']);
     if (sub === 'tag') return !params.length || params.some(param => param === '--list' || param === '-l') && !flagged(params, /^-[^-]*[dasfmFue]/)
       && !abbreviates(params, ['--delete', '--annotate', '--sign', '--force', '--message', '--file', '--edit', '--local-user', '--create-reflog', '--cleanup', '--trailer']);
-    if (sub === 'remote') return !params.length || params.length === 1 && params[0] === '-v' || params.length === 2 && ['show', 'get-url'].includes(params[0]!);
+    if (sub === 'remote') return !params.length || params.length === 1 && params[0] === '-v' || params.length === 2 && params[0] === 'get-url';
     if (sub === 'config') return params.some(param => /^(--get|--get-all|--get-regexp|--list|-l)$/.test(param)) && !flagged(params, /^-[^-]*e/)
       && !abbreviates(params, ['--unset', '--unset-all', '--add', '--replace-all', '--rename-section', '--remove-section', '--edit']);
-    if (sub === 'stash') return ['list', 'show'].includes(params[0] ?? '');
+    if (sub === 'stash') return ['list', 'show'].includes(params[0] ?? '') && safeDiff;
     if (sub === 'worktree') return params[0] === 'list';
-    if (sub === 'reflog') return !params.length || params[0] === 'show';
+    if (sub === 'reflog') return (!params.length || params[0] === 'show' || params[0]?.startsWith('-')) && safeDiff;
     return false;
   };
   return segments.every(({ words: [name, ...args], globbed }) => {
@@ -150,7 +175,10 @@ export function planGuardAllowsBash(command: string): boolean {
       const end = args.indexOf('--');
       return args.filter((arg, at) => end >= 0 && at > end || arg === '-' || !arg.startsWith('-')).length <= 1;
     }
-    if (name === 'env') return !args.length;
+    // Empty Git transport allowlist also blocks implicit promisor/lazy fetches.
+    // This is the only env-wrapped command: no env options, extra assignments,
+    // alternate executable or recursion through the general allowlist.
+    if (name === 'env') return !args.length || args[0] === 'GIT_ALLOW_PROTOCOL=' && args[1] === 'git' && git(args.slice(2));
     if (name === 'sed') {
       // sed 只认按行号打印（sed -n '1,80p' file）：-i 原地改写，脚本里的 w / e 命令能写文件、执行程序。
       const options = args.filter(arg => arg.startsWith('-'));
@@ -158,12 +186,11 @@ export function planGuardAllowsBash(command: string): boolean {
       return options.includes('-n') && options.every(option => ['-n', '-E', '-r', '-u', '-z', '--quiet', '--silent'].includes(option))
         && /^(\d+|\$)(,(\d+|\$))?p$/.test(scripts[0] ?? '');
     }
-    if (name === 'git') return git(args);
     return false;
   });
 }
 
-export const planGuardBashReason = '先出计划阶段只能运行只读命令（如 ls、cat、rg、git log），这条命令可能修改文件或执行程序，已被 Dutydeck 拦截。请改用只读方式调研，把要执行的操作写进计划，等用户批准后再做。';
+export const planGuardBashReason = '先出计划阶段只能运行只读命令（如 ls、cat、rg），这条命令可能修改文件或执行程序，已被 Dutydeck 拦截。Git 状态示例：env GIT_ALLOW_PROTOCOL= git --no-pager --no-optional-locks -c core.fsmonitor=false -c log.showSignature=false -c format.pretty=medium status --short；差异示例：env GIT_ALLOW_PROTOCOL= git --no-pager --no-optional-locks -c core.fsmonitor=false -c log.showSignature=false -c format.pretty=medium diff --no-ext-diff --no-textconv。其它操作请写进计划，等用户批准后再做。';
 export const planGuardToolReason = '先出计划阶段不能修改文件或做有副作用的操作，已被 Dutydeck 拦截。请把这一步写进计划，等用户批准后再执行。';
 
 /** 写进会话私有设置目录的守卫脚本：只读 Bash 放行，其余拒绝（退出码 2，原因写 stderr）。 */

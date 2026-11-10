@@ -92,6 +92,7 @@ export class TraexTranscriptTailer implements TranscriptEventSource {
   stop(): void { this.inputReceipt?.stop(); this.tailer.stop(); }
   onEvent(cb: (e: NormalizedDriverEvent) => void): void { this.tailer.onEvent(cb); }
   onProgress(cb: () => void): void { this.tailer.onProgress(cb); }
+  hasRecoveredInput(): boolean { return this.turn.hasRecoveredInput(); }
   hasTurnTerminal(): boolean { return this.turn.hasTerminal(); }
   takeTurnError(): NormalizedDriverEvent | undefined { return this.turn.takeError(); }
   takeInputError(): NormalizedDriverEvent | undefined { return this.turn.takeError(); }

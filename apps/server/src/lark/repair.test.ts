@@ -166,6 +166,25 @@ describe('runOpenPlatformRepair', () => {
     expect(card.markdown).not.toContain('已发布并通过审核');
   });
 
+  it.each(['publish_failed', 'publish_verification_read_failed', 'publish_verification_failed', 'repair_failed', 'session_expired'])('keeps publication unknown after %s instead of denying a release', async code => {
+    const result = await runOpenPlatformRepair({
+      connectClient: async () => ({ client: mockClient }),
+      configure: async (_client, _appId, options) => {
+        options?.onStep?.('version_create', { versionId: 'v-unknown' });
+        if (code !== 'publish_failed' && code !== 'session_expired') options?.onStep?.('publish_commit', { versionId: 'v-unknown' });
+        if (code === 'repair_failed') throw new Error('secret=LEAK');
+        throw new LarkOpenPlatformConfigurationError(code, '无法确认发布状态', { publishAttempted: true });
+      }
+    }, { appId, confirmed: true });
+    expect(result).toMatchObject({ status: 'failed', publishAttempted: true });
+    const card = renderRepairResultCard(result);
+    expect(card.title).toContain('待确认');
+    expect(card.markdown).toContain('发布结果尚未确认');
+    expect(card.markdown).toContain('确认前不要重复执行');
+    expect(card.markdown).toContain('v-unknown');
+    expect(card.markdown).not.toMatch(/未产生已发布版本|配置未生效|尚未提交发布|未完成发布|LEAK/);
+  });
+
   it('登录态半失效：透传 session_expired 与重新扫码文案，不换成固定的读取失败', async () => {
     const configure = vi.fn(async () => {
       throw new LarkOpenPlatformConfigurationError('session_expired', '飞书开放平台登录已失效，请重新扫码。');

@@ -8,7 +8,7 @@ import { executionTaskId } from '@dutydeck/storage/helpers';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { z } from 'zod';
 import { changeRequestLabel, resolveCiHead, type CiProviderRegistry } from './ci-providers.js';
-import { codeBlock, errorMessage, isRunnable, iso, short, SingleFlight } from './ci-common.js';
+import { assertContinuationTask, codeBlock, errorMessage, isRunnable, iso, short, SingleFlight, unboundContinuationSource } from './ci-common.js';
 import { sleep } from './daemon/time.js';
 import { ciFixLimits, failureFingerprint, type CiNotice } from './ci-webhook.js';
 import {
@@ -704,8 +704,16 @@ export class PullRequestService {
 
   /** 跟进任务开始前核对：记录仍在跟进、任务没被取代，工作区里 PR 的文件仍和 PR 一致。 */
   async authorizeTask(task: TaskRecord, phase: 'prepare' | 'submit') {
-    const id = await this.options.repositories.config.get(`${TASK_PREFIX}${task.id}`);
-    if (!id) return;
+    let id = await this.options.repositories.config.get(`${TASK_PREFIX}${task.id}`);
+    if (!id) {
+      const sourceId = await unboundContinuationSource(this.options.repositories, this.options.runtime, task, /^pull-request:([^:]+):(?:ci|review):[1-9]\d*$/);
+      if (!sourceId) return;
+      const source = await this.read(sourceId);
+      if (!source || source.value.id !== sourceId || source.value.sessionId !== task.sessionId) return;
+      if (source.value.status !== 'open' || source.value.task?.id !== task.id) throw new RuntimeError('PR_TASK_REVOKED', 'PR 跟进已停止或已被新的状态取代', 403);
+      await this.ensureTaskBinding(source.value);
+      id = sourceId;
+    }
     for (let attempt = 0; attempt < 5; attempt += 1) {
       const stored = await this.read(id);
       const value = stored?.value;
@@ -771,7 +779,9 @@ export class PullRequestService {
       return;
     }
     // 推送前验证还在后台跑：跑完会自己回到这里。
-    if (isTerminalTaskStatus(task.status) && !this.verifying.has(value.id)) await this.settle(stored, task);
+    if (isTerminalTaskStatus(task.status)) {
+      if (!this.verifying.has(value.id)) await this.settle(stored, task);
+    } else await this.ensureTaskBinding(value);
   }
 
   /** 看一次 PR：状态、CI、评审意见。同一时间只跑一个跟进任务。 */
@@ -911,7 +921,6 @@ export class PullRequestService {
     const actorId = value.confirmedBy ?? value.actorId;
     const saved = await this.save(stored, { ...next, task: { id, key, kind, round, baseSha: value.headSha!, comments, prompt, ...(actorId ? { actorId } : {}) } });
     if (!saved) return;
-    await this.options.repositories.config.set(`${TASK_PREFIX}${id}`, value.id);
     await this.dispatch(saved.value);
     void this.notice(saved.value, kind === 'ci'
       ? { key: `${value.id}:ci:${round}`, title: `${this.label(value)} CI 失败，修复第 ${round} 轮`, markdown: this.summary(saved.value, `CI 在 ${short(value.headSha!)} 上失败，已交给 Agent 修复（第 ${round}/${pullRequestLimits.ciRounds} 轮）。`), failed: true }
@@ -920,6 +929,7 @@ export class PullRequestService {
 
   private async dispatch(value: PullRequestRecord) {
     const task = value.task!;
+    await this.ensureTaskBinding(value);
     try {
       const accepted = await this.options.runtime.dispatch(value.sessionId, task.prompt, 'queue', task.prompt, undefined, task.actorId, task.key);
       if (accepted.id !== task.id) throw new RuntimeError('PR_TASK_CONFLICT', 'Runtime task identity did not match the pull request task', 409);
@@ -927,6 +937,16 @@ export class PullRequestService {
       if (await this.options.repositories.tasks.get?.(task.id)) return;
       await this.fail(value.id, `跟进任务提交失败：${errorMessage(error)}`, ['open']);
     }
+  }
+
+  private async ensureTaskBinding(value: PullRequestRecord) {
+    const key = `${TASK_PREFIX}${value.task!.id}`;
+    const store = this.store();
+    if (!await store.get(key)) {
+      await assertContinuationTask(this.options.repositories, this.options.runtime, value.sessionId, value.task!, 'PR_TASK_CONFLICT');
+      await store.compareAndSet(key, undefined, value.id);
+    }
+    if (await store.get(key) !== value.id) throw new RuntimeError('PR_TASK_CONFLICT', 'PR task is already bound to another follow-up', 409);
   }
 
   private output(sessionId: string, taskId: string) {

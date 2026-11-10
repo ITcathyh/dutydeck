@@ -277,7 +277,7 @@ export function readLaunchdProgram(homeDir: string): { execPath: string; script:
 }
 
 /** systemd 支持 shell 风格引号；只在含空白/引号时才加，避免无谓地改变已有 unit 内容。 */
-function systemdQuote(value: string): string {
+export function systemdQuote(value: string): string {
   if (!/[\s"'\\]/.test(value)) return value;
   return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 }

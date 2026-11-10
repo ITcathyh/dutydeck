@@ -1,5 +1,8 @@
-import { spawn, type ChildProcess } from 'node:child_process';
-import { once } from 'node:events';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { readdir, readFile } from 'node:fs/promises';
+import { promisify } from 'node:util';
+import { parseProcStat, procStatExited } from '@dutydeck/shared';
 import { childEnvironment } from '@dutydeck/shared/child-environment';
 
 export type PluginServiceStatus = 'stopped' | 'starting' | 'running' | 'stopping' | 'crashed';
@@ -56,19 +59,19 @@ export class PluginServiceSupervisor {
 
   register(spec: PluginServiceSpec): void {
     const existing = this.records.get(spec.plugin);
-    if (existing?.child && existing.status !== 'stopped') throw new Error(`PLUGIN_SERVICE_RUNNING: ${spec.plugin}`);
+    if (existing?.child || existing?.operation) throw new Error(`PLUGIN_SERVICE_RUNNING: ${spec.plugin}`);
     if (existing) clearAutoRestart(existing);
     this.records.set(spec.plugin, { spec: freezeSpec(spec), status: 'stopped', restarts: existing?.restarts ?? 0 });
   }
 
   async start(plugin: string): Promise<PluginServiceSnapshot> {
-    return this.startInternal(plugin, false);
+    return this.enqueue(plugin, record => this.startInternal(record, false));
   }
 
-  private async startInternal(plugin: string, automatic: boolean): Promise<PluginServiceSnapshot> {
-    const record = this.records.get(plugin);
-    if (!record) throw new Error(`PLUGIN_SERVICE_NOT_FOUND: ${plugin}`);
+  private async startInternal(record: RecordState, automatic: boolean): Promise<PluginServiceSnapshot> {
+    const plugin = record.spec.plugin;
     if (record.child && (record.status === 'starting' || record.status === 'running')) return snapshot(record);
+    if (record.child) await this.stopInternal(record);
     if (!automatic) {
       clearAutoRestart(record);
       record.autoRestartCount = 0;
@@ -92,21 +95,20 @@ export class PluginServiceSupervisor {
       detached: process.platform !== 'win32'
     });
     record.child = child;
+    record.processGroup = child.pid && process.platform !== 'win32' ? { pid: child.pid, start: linuxStart(child.pid), exited: false } : undefined;
     record.status = 'running';
     record.startedAt = this.timing.now();
     child.stdout?.resume();
     child.stderr?.on('data', chunk => this.logStderr(record, String(chunk)));
     child.once('error', error => {
-      if (record.child !== child) return;
+      if (record.child !== child || record.status === 'stopping') return;
       this.crash(record, child, error.message, undefined);
       this.log?.warn({ plugin, error: error.message }, '插件服务启动失败');
     });
     child.once('exit', (code, signal) => {
       if (record.child !== child) return;
       if (record.status === 'stopping') {
-        record.child = undefined;
         record.lastExitCode = code;
-        record.status = 'stopped';
         return;
       }
       this.crash(record, child, signal ? `signal:${signal}` : undefined, code);
@@ -116,8 +118,8 @@ export class PluginServiceSupervisor {
   }
 
   private crash(record: RecordState, child: ChildProcess, error: string | undefined, code: number | null | undefined): void {
-    if (record.child !== child) return;
-    record.child = undefined;
+    if (record.child !== child || record.status === 'crashed') return;
+    // 保留进程组所有权：主进程退出后，下一次启停仍需清退同组 worker。
     record.status = 'crashed';
     record.lastError = error;
     record.lastExitCode = code ?? child.exitCode;
@@ -133,8 +135,10 @@ export class PluginServiceSupervisor {
     record.autoRestartCount = attempt;
     record.autoRestartTimer = setTimeout(() => {
       record.autoRestartTimer = undefined;
-      if (record.status !== 'crashed' || record.child) return;
-      void this.startInternal(record.spec.plugin, true).catch(startError => {
+      void this.enqueue(record.spec.plugin, async current => {
+        if (current !== record || record.status !== 'crashed') return snapshot(current);
+        return this.startInternal(record, true);
+      }).catch(startError => {
         record.status = 'crashed';
         record.lastError = startError instanceof Error ? startError.message : String(startError);
       });
@@ -155,25 +159,40 @@ export class PluginServiceSupervisor {
   }
 
   async stop(plugin: string): Promise<PluginServiceSnapshot> {
-    const record = this.records.get(plugin);
-    if (!record) throw new Error(`PLUGIN_SERVICE_NOT_FOUND: ${plugin}`);
-    const child = record.child;
-    if (!child) { clearAutoRestart(record); record.status = 'stopped'; return snapshot(record); }
-    record.status = 'stopping';
-    kill(child, 'SIGTERM');
-    await waitForExit(child, this.stopTimeoutMs).catch(async () => {
-      kill(child, 'SIGKILL');
-      await waitForExit(child, this.stopTimeoutMs).catch(() => undefined);
-    });
+    return this.enqueue(plugin, record => this.stopInternal(record));
+  }
+
+  private async stopInternal(record: RecordState): Promise<PluginServiceSnapshot> {
     clearAutoRestart(record);
-    if (record.child === child) record.child = undefined;
+    const child = record.child;
+    if (!child) { record.status = 'stopped'; return snapshot(record); }
+    record.status = 'stopping';
+    await signal(record, 'SIGTERM');
+    if (!await waitForExit(record, this.stopTimeoutMs)) {
+      await signal(record, 'SIGKILL');
+      if (!await waitForExit(record, this.stopTimeoutMs)) throw new Error('PLUGIN_SERVICE_STOP_TIMEOUT');
+    }
+    record.child = undefined;
+    record.processGroup = undefined;
     record.status = 'stopped';
     return snapshot(record);
   }
 
   async restart(plugin: string): Promise<PluginServiceSnapshot> {
-    await this.stop(plugin);
-    return this.start(plugin);
+    return this.enqueue(plugin, async record => {
+      await this.stopInternal(record);
+      return this.startInternal(record, false);
+    });
+  }
+
+  private enqueue(plugin: string, action: (record: RecordState) => Promise<PluginServiceSnapshot>): Promise<PluginServiceSnapshot> {
+    const record = this.records.get(plugin);
+    if (!record) return Promise.reject(new Error(`PLUGIN_SERVICE_NOT_FOUND: ${plugin}`));
+    const operation = (record.operation ?? Promise.resolve()).then(() => action(record));
+    const tail = operation.then(() => undefined, () => undefined);
+    record.operation = tail;
+    void tail.then(() => { if (record.operation === tail) record.operation = undefined; });
+    return operation;
   }
 
   status(plugin?: string): PluginServiceSnapshot | PluginServiceSnapshot[] {
@@ -194,6 +213,8 @@ interface RecordState {
   spec: PluginServiceSpec;
   status: PluginServiceStatus;
   child?: ChildProcess;
+  processGroup?: { pid: number; start?: string; exited: boolean };
+  operation?: Promise<void>;
   restarts: number;
   lastExitCode?: number | null;
   lastError?: string;
@@ -220,24 +241,67 @@ function snapshot(record: RecordState): PluginServiceSnapshot {
     status: record.status,
     root: record.spec.root,
     entry: record.spec.entry,
-    ...(record.child?.pid ? { pid: record.child.pid } : {}),
+    ...(record.child?.pid && record.status !== 'crashed' ? { pid: record.child.pid } : {}),
     restarts: record.restarts,
     ...(record.lastExitCode !== undefined ? { lastExitCode: record.lastExitCode } : {}),
     ...(record.lastError ? { lastError: record.lastError } : {})
   };
 }
 
-function kill(child: ChildProcess, signal: NodeJS.Signals): void {
-  try {
-    if (child.pid && process.platform !== 'win32') process.kill(-child.pid, signal);
-    else child.kill(signal);
-  } catch { child.kill(signal); }
+function linuxStart(pid: number): string | undefined {
+  if (process.platform !== 'linux') return undefined;
+  try { return parseProcStat(readFileSync(`/proc/${pid}/stat`, 'utf8')).start; }
+  catch (error) { if (!gone(error)) throw error; return undefined; }
 }
 
-async function waitForExit(child: ChildProcess, timeout: number): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return;
-  await Promise.race([
-    once(child, 'exit').then(() => undefined),
-    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('PLUGIN_SERVICE_STOP_TIMEOUT')), timeout))
-  ]);
+function gone(error: unknown): boolean {
+  return ['ENOENT', 'ESRCH'].includes((error as NodeJS.ErrnoException).code ?? '');
+}
+
+async function alive(record: RecordState): Promise<boolean> {
+  const group = record.processGroup;
+  if (!group) return !!record.child?.pid && record.child.exitCode === null && record.child.signalCode === null;
+  if (group.exited) return false;
+  let live: boolean;
+  if (process.platform === 'linux') {
+    // PID + 启动时间阻止把复用的组长当成旧服务；孤儿僵尸不再执行，不阻塞停止。
+    const start = linuxStart(group.pid);
+    if (group.start && start && group.start !== start) { group.exited = true; return false; }
+    const members = await Promise.all((await readdir('/proc')).filter(pid => /^\d+$/.test(pid)).map(async pid => {
+      try {
+        const stat = parseProcStat(await readFile(`/proc/${pid}/stat`, 'utf8'));
+        return stat.pgid === group.pid && !procStatExited(stat);
+      } catch (error) { if (gone(error)) return false; throw error; }
+    }));
+    live = members.some(Boolean);
+  } else {
+    const { stdout } = await promisify(execFile)('ps', ['-axo', 'pid=,pgid=,stat=']);
+    live = stdout.split('\n').some(line => {
+      const [, pgid, state] = line.trim().split(/\s+/);
+      return Number(pgid) === group.pid && !/^[ZX]/.test(state ?? '');
+    });
+  }
+  if (!live) group.exited = true;
+  return live;
+}
+
+async function signal(record: RecordState, name: NodeJS.Signals): Promise<void> {
+  if (!await alive(record)) return;
+  try {
+    if (record.processGroup) {
+      const group = record.processGroup, start = linuxStart(group.pid);
+      // alive() 会异步扫描进程表，发送信号前再次核对组长身份。
+      if (group.start && start && group.start !== start) { group.exited = true; return; }
+      process.kill(-group.pid, name);
+    } else record.child?.kill(name);
+  } catch (error) { if (!gone(error)) throw error; }
+}
+
+async function waitForExit(record: RecordState, timeout: number): Promise<boolean> {
+  const deadline = Date.now() + timeout;
+  while (await alive(record)) {
+    if (Date.now() >= deadline) return false;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  return true;
 }

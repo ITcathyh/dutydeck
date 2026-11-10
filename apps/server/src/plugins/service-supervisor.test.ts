@@ -2,10 +2,20 @@ import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { parseProcStat, procStatExited } from '@dutydeck/shared';
 import { PluginServiceSupervisor } from './service-supervisor.js';
 
 const roots: string[] = [];
-afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
+const processGroups = new Set<number>();
+afterEach(async () => {
+  // 即使 supervisor 的回归断言失败，也只清理本测试启动的进程组。
+  for (const pid of processGroups) {
+    try { process.kill(process.platform === 'win32' ? pid : -pid, 'SIGKILL'); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
+  }
+  processGroups.clear();
+  await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })));
+});
 
 async function fixture(source: string) {
   const root = await mkdtemp(join(tmpdir(), 'dutydeck-plugin-service-'));
@@ -125,6 +135,114 @@ describe('PluginServiceSupervisor', () => {
     } finally { await supervisor.stop('noisy'); }
   });
 
+  it.runIf(process.platform === 'linux')('waits for and kills a TERM-resistant worker after its parent exits', async () => {
+    const f = await fixture(`import { spawn } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+spawn(process.execPath, [process.env.DUTYDECK_PLUGIN_ROOT + '/worker.mjs'], { stdio: 'ignore' });
+process.on('SIGTERM', () => { writeFileSync(process.env.DUTYDECK_PLUGIN_ROOT + '/parent-exited', 'yes'); process.exit(0); });
+setInterval(() => {}, 1000);`);
+    await writeFile(join(f.root, 'worker.mjs'), `import { writeFileSync } from 'node:fs';
+process.on('SIGTERM', () => {});
+writeFileSync(process.env.DUTYDECK_PLUGIN_ROOT + '/worker-ready', String(process.pid));
+setInterval(() => {}, 1000);`);
+    const supervisor = new PluginServiceSupervisor(undefined, 500);
+    supervisor.register({ plugin: 'worker', ...f });
+    try {
+      processGroups.add((await supervisor.start('worker')).pid!);
+      const worker = await readyPid(join(f.root, 'worker-ready'));
+      const stopped = await supervisor.stop('worker');
+      expect(await readFile(join(f.root, 'parent-exited'), 'utf8')).toBe('yes');
+      expect(await processAlive(worker)).toBe(false);
+      expect(stopped).toMatchObject({ status: 'stopped' });
+      expect(stopped).not.toHaveProperty('pid');
+    } finally { await supervisor.stopAll(); }
+  });
+
+  it('serializes stop, start and restart without losing the replacement child', async () => {
+    const f = await fixture(`import { writeFileSync } from 'node:fs';
+process.on('SIGTERM', () => setTimeout(() => process.exit(0), 150));
+writeFileSync(process.env.DUTYDECK_PLUGIN_ROOT + '/' + process.pid, String(process.pid));
+setInterval(() => {}, 1000);`);
+    const supervisor = new PluginServiceSupervisor(undefined, 1_000);
+    supervisor.register({ plugin: 'race', ...f });
+    try {
+      const first = await supervisor.start('race');
+      processGroups.add(first.pid!);
+      await readyPid(join(f.root, String(first.pid)));
+      const stopping = supervisor.stop('race');
+      const starting = supervisor.start('race');
+      expect(() => supervisor.register({ plugin: 'race', ...f })).toThrow('PLUGIN_SERVICE_RUNNING');
+      expect(await stopping).toMatchObject({ status: 'stopped' });
+      const second = await starting;
+      processGroups.add(second.pid!);
+      await readyPid(join(f.root, String(second.pid)));
+      const third = await supervisor.start('race');
+      processGroups.add(third.pid!);
+      expect(third.pid).toBe(second.pid);
+      expect(second.pid).not.toBe(first.pid);
+      expect(supervisor.status('race')).toMatchObject({ status: 'running', pid: second.pid });
+      expect(await processAlive(first.pid!)).toBe(false);
+      const restarting = supervisor.restart('race');
+      const stopAfterRestart = supervisor.stop('race');
+      const restarted = await restarting;
+      processGroups.add(restarted.pid!);
+      expect(restarted.pid).not.toBe(second.pid);
+      expect(await stopAfterRestart).toMatchObject({ status: 'stopped' });
+      expect(await processAlive(second.pid!)).toBe(false);
+      expect(await processAlive(restarted.pid!)).toBe(false);
+    } finally { await supervisor.stopAll(); }
+  });
+
+  it.runIf(process.platform !== 'win32')('keeps ownership and rejects stop when the process group cannot be cleared', async () => {
+    const f = await fixture(`import { writeFileSync } from 'node:fs'; writeFileSync(process.env.DUTYDECK_PLUGIN_ROOT + '/ready', String(process.pid)); setInterval(() => {}, 1000);`);
+    const supervisor = new PluginServiceSupervisor(undefined, 100);
+    supervisor.register({ plugin: 'uncleared', ...f });
+    try {
+      const started = await supervisor.start('uncleared');
+      processGroups.add(started.pid!);
+      await readyPid(join(f.root, 'ready'));
+      const kill = process.kill.bind(process);
+      const signal = vi.spyOn(process, 'kill').mockImplementation((pid, name) => {
+        if (pid === -started.pid! && (name === 'SIGTERM' || name === 'SIGKILL')) return true;
+        return kill(pid, name);
+      });
+      try {
+        await expect(supervisor.stop('uncleared')).rejects.toThrow('PLUGIN_SERVICE_STOP_TIMEOUT');
+        expect(supervisor.status('uncleared')).toMatchObject({ status: 'stopping', pid: started.pid });
+        expect(await processAlive(started.pid!)).toBe(true);
+      } finally { signal.mockRestore(); }
+      expect(await supervisor.stop('uncleared')).toMatchObject({ status: 'stopped' });
+      expect(await processAlive(started.pid!)).toBe(false);
+    } finally { await supervisor.stopAll(); }
+  });
+
+  it.runIf(process.platform === 'linux')('cleans a crashed service group before its automatic replacement starts', async () => {
+    const f = await fixture(`import { spawn } from 'node:child_process';
+import { existsSync, writeFileSync } from 'node:fs';
+const root = process.env.DUTYDECK_PLUGIN_ROOT;
+if (!existsSync(root + '/worker-ready')) {
+  spawn(process.execPath, [root + '/worker.mjs'], { stdio: 'ignore' });
+  setInterval(() => { if (existsSync(root + '/worker-ready')) process.exit(7); }, 10);
+} else { writeFileSync(root + '/replacement-ready', String(process.pid)); setInterval(() => {}, 1000); }`);
+    await writeFile(join(f.root, 'worker.mjs'), `import { writeFileSync } from 'node:fs';
+process.on('SIGTERM', () => {});
+writeFileSync(process.env.DUTYDECK_PLUGIN_ROOT + '/worker-ready', String(process.pid));
+setInterval(() => {}, 1000);`);
+    const supervisor = new PluginServiceSupervisor(undefined, 200, { restartBaseDelayMs: 20 });
+    supervisor.register({ plugin: 'auto-worker', ...f, mode: 'auto' });
+    try {
+      processGroups.add((await supervisor.start('auto-worker')).pid!);
+      const worker = await readyPid(join(f.root, 'worker-ready'));
+      const replacement = await readyPid(join(f.root, 'replacement-ready'));
+      processGroups.add(replacement);
+      expect(await processAlive(worker)).toBe(false);
+      expect(supervisor.status('auto-worker')).toMatchObject({ status: 'running', pid: replacement, restarts: 1 });
+      await supervisor.stop('auto-worker');
+      await new Promise(resolve => setTimeout(resolve, 100));
+      expect(supervisor.status('auto-worker')).toMatchObject({ status: 'stopped', restarts: 1 });
+    } finally { await supervisor.stopAll(); }
+  });
+
   it('refuses to replace a running service spec', async () => {
     const f = await fixture(`setInterval(() => {}, 1000);`);
     const supervisor = new PluginServiceSupervisor(undefined, 1_000);
@@ -134,3 +252,23 @@ describe('PluginServiceSupervisor', () => {
     await supervisor.stop('sample');
   });
 });
+
+async function readyPid(file: string): Promise<number> {
+  let pid = 0;
+  await vi.waitFor(async () => {
+    pid = Number(await readFile(file, 'utf8'));
+    expect(pid).toBeGreaterThan(0);
+  }, { timeout: 10_000, interval: 20 });
+  return pid;
+}
+
+async function processAlive(pid: number): Promise<boolean> {
+  try {
+    if (process.platform === 'linux') return !procStatExited(parseProcStat(await readFile(`/proc/${pid}/stat`, 'utf8')));
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (['ENOENT', 'ESRCH'].includes((error as NodeJS.ErrnoException).code ?? '')) return false;
+    throw error;
+  }
+}
