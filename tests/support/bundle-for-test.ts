@@ -1,9 +1,9 @@
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { build } from 'esbuild';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { build, transform } from 'esbuild';
 
 const workspaceRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 // Native addons, and acpx/runtime (which the server build also keeps external), stay outside the bundle. They are
@@ -33,6 +33,14 @@ export async function bundleForTest(label: string, entry: string): Promise<{ pat
       logLevel: 'error',
       banner: { js: "import { createRequire as __ddCreateRequire } from 'node:module'; const require = __ddCreateRequire(import.meta.url);" },
       plugins: [{ name: 'workspace-sources', setup(builder) {
+        // Launcher paths are persisted: a bundled creator and the source-based restorer must use the same path.
+        builder.onLoad({ filter: /[\\/]packages[\\/]acp-client[\\/]src[\\/]index\.ts$/ }, async ({ path: sourcePath }) => ({
+          contents: (await transform(await readFile(sourcePath, 'utf8'), {
+            loader: 'ts', format: 'esm', target: 'node22',
+            define: { 'import.meta.url': JSON.stringify(pathToFileURL(sourcePath).href) }
+          })).code,
+          loader: 'js'
+        }));
         builder.onResolve({ filter: /^@dutydeck\// }, ({ path: specifier }) => {
           const name = specifier.slice('@dutydeck/'.length);
           const [packageName, subpath] = name.split('/') as [string, string | undefined];
