@@ -1,6 +1,6 @@
-import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { ConfigRepository } from '@dutydeck/shared';
+import { sha256Hex } from '../hash.js';
 import { LarkServiceError } from './service.js';
 
 export const botPromptVersionSchema = z.object({
@@ -18,7 +18,7 @@ export const botPromptUsageSchema = z.object({
 }).strict();
 export type BotPromptUsage = z.infer<typeof botPromptUsageSchema>;
 export const promptVersionKey = (appId: string, version: number) => `bot_prompt_version/${encodeURIComponent(appId)}/${version}`;
-export const promptHash = (text: string) => createHash('sha256').update(text).digest('hex');
+export const promptHash = (text: string) => sha256Hex(text);
 
 export async function promptHistory(store: ConfigRepository, appId: string): Promise<BotPromptVersion[]> {
   const versions: BotPromptVersion[] = [];

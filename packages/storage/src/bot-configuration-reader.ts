@@ -29,7 +29,8 @@ import {
   type BotConfigChange,
   type ListBotsOptionsInput,
   type ListVersionsOptionsInput,
-  type ConfigurationAuthority
+  type ConfigurationAuthority,
+  type ConfigurationRepository
 } from '@dutydeck/shared';
 
 export function canonicalSnapshotJson(snapshot: BotSnapshot): string {
@@ -40,15 +41,10 @@ export function computeSnapshotDigest(snapshot: BotSnapshot): string {
   return createHash('sha256').update(canonicalExecutionJson(snapshot)).digest('hex');
 }
 
-export interface ConfigurationReader {
-  authority(): ConfigurationAuthority;
-  listBots(options?: ListBotsOptionsInput): ChannelBotV2[];
-  listVersions(botId: string, options?: ListVersionsOptionsInput): BotConfigurationVersionMetadata[];
-  readVersion(botId: string, versionId: string): BotConfigurationVersion | undefined;
-  read(botId: string): BotSnapshot | undefined;
-  readByApp(appId: string): BotSnapshot | undefined;
-  listChanges(afterSequence: number, limit: number): BotConfigChange[];
-}
+export type ConfigurationReader = Pick<
+  ConfigurationRepository,
+  'authority' | 'listBots' | 'listVersions' | 'readVersion' | 'read' | 'readByApp' | 'listChanges'
+>;
 
 interface ChannelBotRow {
   id: string;

@@ -15,7 +15,7 @@ vi.mock('./composer-utils', async importOriginal => {
   const original = await importOriginal<typeof import('./composer-utils')>();
   return { ...original, currentContextStats: vi.fn(original.currentContextStats), commandsFromEvents: vi.fn(original.commandsFromEvents) };
 });
-vi.mock('./useSessionStream', () => ({ useSessionStream: () => 'open' }));
+vi.mock('./useSessionStream', () => ({ useSessionStream: () => ({ transport: 'open', content: 'ready' }) }));
 vi.mock('./components/TimelineView', async importOriginal => {
   const original = await importOriginal<typeof import('./components/TimelineView')>();
   return { ...original, TimelineView: (props: TimelineViewProps) => {

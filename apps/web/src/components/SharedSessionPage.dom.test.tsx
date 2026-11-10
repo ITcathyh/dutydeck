@@ -7,8 +7,9 @@ import { api, ApiError, type DockEvent, type HistoryTurnSummary, type Session, t
 import { SharedSessionPage } from './SharedSessionPage';
 import { ToolCard } from './ToolCard';
 import { getTimelineReadingState } from '../timeline-reading-state';
+import { useSessionStream } from '../useSessionStream';
 
-vi.mock('../useSessionStream', () => ({ useSessionStream: () => 'open' }));
+vi.mock('../useSessionStream', () => ({ useSessionStream: vi.fn() }));
 
 const session: Session = { id: 'ses_1', agentId: 'codex', model: 'gpt-5', state: 'waiting_permission', cwd: '/repo', runId: 'run-1', createdAt: '2026-09-25T00:00:00Z', updatedAt: '2026-09-25T00:00:05Z' };
 const tasks: Task[] = [{ id: 'task-1', sessionId: 'ses_1', prompt: '修复登录页', status: 'running', createdAt: '2026-09-25T00:00:01Z', updatedAt: '2026-09-25T00:00:01Z' }];
@@ -25,6 +26,36 @@ function renderPage(sessionId = 'ses_1') {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe('SharedSessionPage', () => {
+  it('记录同步失败时优先提示失败并允许重试，恢复后只在重连时提示', async () => {
+    vi.spyOn(api, 'session').mockResolvedValue(session);
+    vi.spyOn(api, 'events').mockResolvedValue([]);
+    vi.spyOn(api, 'tasks').mockResolvedValue(tasks);
+    const retry = vi.fn();
+    vi.mocked(useSessionStream).mockReturnValue({ transport: 'reconnecting', content: 'failed', retrying: false, retry });
+    const { client, rerender } = renderPage();
+    expect(await screen.findByText('记录同步失败')).toBeTruthy();
+    expect(screen.queryByText('正在重连')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '重试同步' }));
+    expect(retry).toHaveBeenCalledTimes(1);
+
+    vi.mocked(useSessionStream).mockReturnValue({ transport: 'reconnecting', content: 'failed', retrying: true, retry });
+    rerender(<QueryClientProvider client={client}><SharedSessionPage sessionId="ses_1"/></QueryClientProvider>);
+    expect(screen.getByText('记录同步失败，正在重试')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '重试同步' })).toBeNull();
+
+    vi.mocked(useSessionStream).mockReturnValue({ transport: 'reconnecting', content: 'catching_up' });
+    rerender(<QueryClientProvider client={client}><SharedSessionPage sessionId="ses_1"/></QueryClientProvider>);
+    expect(screen.getByText('正在重连')).toBeTruthy();
+    expect(screen.queryByText(/记录同步失败/)).toBeNull();
+
+    for (const content of ['catching_up', 'ready'] as const) {
+      vi.mocked(useSessionStream).mockReturnValue({ transport: 'open', content });
+      rerender(<QueryClientProvider client={client}><SharedSessionPage sessionId="ses_1"/></QueryClientProvider>);
+      expect(screen.queryByText(/正在重连|实时同步|正在补齐记录/)).toBeNull();
+      expect(screen.queryByRole('button', { name: '重试同步' })).toBeNull();
+    }
+  });
+
   it('只读显示单个任务的标题、状态和执行记录，没有输入框、导航和审批按钮', async () => {
     const sessionRead = vi.spyOn(api, 'session').mockResolvedValue(session);
     vi.spyOn(api, 'events').mockResolvedValue(events);
@@ -172,6 +203,7 @@ it('retries a failed initial shared history read', async () => {
 });
 
 beforeEach(() => {
+  vi.mocked(useSessionStream).mockReturnValue({ transport: 'open', content: 'ready' });
   vi.spyOn(api, 'sessionHistory').mockResolvedValue({ turns: [], highWaterMark: 0, liveAfter: 0 });
   // 阅读状态按会话保存在模块里；每条用例都像第一次打开分享页：不跟随、停在顶部、「更早 N 轮」收起。
   const reading = getTimelineReadingState('ses_1');

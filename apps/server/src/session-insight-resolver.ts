@@ -13,7 +13,6 @@
  *  - 发现被截断（limited）时，未完整排除冲突的 marker 发现不得假唯一绑定为 primary。
  *  - 路径是私有字段，只存在于本模块返回的内部来源；toSafeManifestEntries() 负责剥离。
  */
-import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, open, opendir, realpath } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
@@ -32,6 +31,7 @@ import {
   transcriptClientForAdapter,
 } from '@dutydeck/shared';
 import { buildSessionMarker, claudeProjectDirCandidates } from '@dutydeck/pty-driver/support';
+import { sha256Hex } from './hash.js';
 
 // ---------------------------------------------------------------------------
 // 公共类型
@@ -233,10 +233,6 @@ function fail(code: string, message: string, statusCode = 409): never {
   error.code = code;
   error.statusCode = statusCode;
   throw error;
-}
-
-function sha256Hex(value: string): string {
-  return createHash('sha256').update(value, 'utf8').digest('hex');
 }
 
 function asNativeContextRef(value: unknown): NativeContextRef | undefined {

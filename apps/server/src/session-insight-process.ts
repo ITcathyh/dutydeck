@@ -223,7 +223,6 @@ export async function runInsightProcess(
       );
     }
 
-    let killed = false;
     let killReason:
       | 'timeout'
       | 'abort'
@@ -248,8 +247,7 @@ export async function runInsightProcess(
         | 'stdin_error'
         | 'child_error'
     ) => {
-      if (killed) return;
-      killed = true;
+      if (killReason !== null) return;
       killReason = reason;
 
       try {
@@ -282,14 +280,13 @@ export async function runInsightProcess(
       }
     }
 
-    // 收集标准输出与错误输出
+    // 收集标准输出并限制输出字节数
     const stdoutChunks: Buffer[] = [];
     let stdoutBytes = 0;
-    const stderrChunks: Buffer[] = [];
     let stderrBytes = 0;
 
     child.stdout?.on('data', (chunk: Buffer) => {
-      if (killed) return;
+      if (killReason !== null) return;
       stdoutBytes += chunk.length;
       if (stdoutBytes > SESSION_INSIGHT_LIMITS.maxStdoutBytes) {
         terminateChild('budget_stdout');
@@ -299,13 +296,12 @@ export async function runInsightProcess(
     });
 
     child.stderr?.on('data', (chunk: Buffer) => {
-      if (killed) return;
+      if (killReason !== null) return;
       stderrBytes += chunk.length;
       if (stderrBytes > SESSION_INSIGHT_LIMITS.maxStderrBytes) {
         terminateChild('budget_stderr');
         return;
       }
-      stderrChunks.push(chunk);
     });
 
     // 处理 stdin 写入与写入错误，绝不静默吞掉，统一触发终止并等待 close

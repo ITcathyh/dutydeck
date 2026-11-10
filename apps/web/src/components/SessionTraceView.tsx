@@ -1,7 +1,6 @@
 import { Activity, ArrowDownWideNarrow, ChevronDown, ChevronRight, ListTree, Search, X } from 'lucide-react';
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import type { Agent, DockEvent, Session } from '../api';
-import type { StreamStatus } from '../sse';
 import type { SessionSyncState } from '../useSessionStream';
 import { buildTraceRows, filterTraceRows, groupTraceRows, matchesTraceCategory, TRACE_PAGE_SIZE, traceCategories, traceDuration, traceLabels, type TraceCategory, type TraceRow } from '../trace-view';
 import { connectionLabel } from './RunHeader';
@@ -64,7 +63,7 @@ export function SessionTraceView({ session, agent, events, loading, error, histo
   loading: boolean;
   error?: string;
   historyLoaded: boolean;
-  streamStatus: SessionSyncState | StreamStatus;
+  streamStatus: SessionSyncState;
   onRetry(): void;
   onClose(): void;
 }) {

@@ -124,6 +124,12 @@ export function inspectExecutionDatabase(path: string): ExecutionDatabaseInspect
         "SELECT name FROM main.sqlite_schema WHERE type = 'table' AND name NOT GLOB 'sqlite_*'"
       ).all() as Array<{ name: string }>;
       const tables = new Set(tableRows.map(row => row.name));
+      const readCounts = (): ExecutionDatabaseCounts => ({
+        tasks: tables.has('tasks') ? (db.prepare('SELECT COUNT(*) AS count FROM tasks').get() as { count: number }).count : 0,
+        attempts: tables.has('task_attempts') ? (db.prepare('SELECT COUNT(*) AS count FROM task_attempts').get() as { count: number }).count : 0,
+        resources: tables.has('driver_resources') ? (db.prepare('SELECT COUNT(*) AS count FROM driver_resources').get() as { count: number }).count : 0,
+        registeredAccess
+      });
 
       // Validate execution authority table if present.
       let authority: 'legacy' | 'ledger_v1' | undefined;
@@ -150,12 +156,7 @@ export function inspectExecutionDatabase(path: string): ExecutionDatabaseInspect
             status: 'unsupported',
             ...(authority ? { authority } : {}),
             schemaVersion,
-            counts: {
-              tasks: tables.has('tasks') ? (db.prepare('SELECT COUNT(*) AS count FROM tasks').get() as { count: number }).count : 0,
-              attempts: tables.has('task_attempts') ? (db.prepare('SELECT COUNT(*) AS count FROM task_attempts').get() as { count: number }).count : 0,
-              resources: tables.has('driver_resources') ? (db.prepare('SELECT COUNT(*) AS count FROM driver_resources').get() as { count: number }).count : 0,
-              registeredAccess
-            },
+            counts: readCounts(),
             ...(controlInfo ? { control: controlInfo } : {}),
             unsupportedReason: 'DATABASE_SCHEMA_TOO_NEW'
           };
@@ -169,31 +170,13 @@ export function inspectExecutionDatabase(path: string): ExecutionDatabaseInspect
           status: 'unsupported',
           ...(authority ? { authority } : {}),
           ...(schemaVersion !== undefined ? { schemaVersion } : {}),
-          counts: {
-            tasks: tables.has('tasks') ? (db.prepare('SELECT COUNT(*) AS count FROM tasks').get() as { count: number }).count : 0,
-            attempts: tables.has('task_attempts') ? (db.prepare('SELECT COUNT(*) AS count FROM task_attempts').get() as { count: number }).count : 0,
-            resources: tables.has('driver_resources') ? (db.prepare('SELECT COUNT(*) AS count FROM driver_resources').get() as { count: number }).count : 0,
-            registeredAccess
-          },
+          counts: readCounts(),
           ...(controlInfo ? { control: controlInfo } : {}),
           unsupportedReason: 'NOT_A_DUTYDECK_DATABASE'
         };
       }
 
-      const tasksCount = (db.prepare('SELECT COUNT(*) AS count FROM tasks').get() as { count: number }).count;
-      const attemptsCount = tables.has('task_attempts')
-        ? (db.prepare('SELECT COUNT(*) AS count FROM task_attempts').get() as { count: number }).count
-        : 0;
-      const resourcesCount = tables.has('driver_resources')
-        ? (db.prepare('SELECT COUNT(*) AS count FROM driver_resources').get() as { count: number }).count
-        : 0;
-
-      const counts: ExecutionDatabaseCounts = {
-        tasks: tasksCount,
-        attempts: attemptsCount,
-        resources: resourcesCount,
-        registeredAccess
-      };
+      const counts = readCounts();
 
       if (authority === 'ledger_v1') {
         const missingLedgerTables = REQUIRED_LEDGER_TABLES.filter(name => !tables.has(name));

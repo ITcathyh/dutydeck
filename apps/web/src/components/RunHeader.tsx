@@ -1,7 +1,6 @@
 import { Activity, Archive, ArrowLeft, BookOpen, ChevronRight, FileDiff, LineChart, MessageSquare, MoreHorizontal, PanelRightOpen, Pencil, RotateCcw, Square, Terminal } from 'lucide-react';
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import type { Agent, RunSummary, Session, SessionUsage, Task } from '../api';
-import type { StreamStatus } from '../sse';
 import type { SessionSyncState } from '../useSessionStream';
 import { sessionDisplayName } from '../run-summary';
 import { sessionErrorSummary, sessionWorkspaceName } from '../workspace-model';
@@ -12,16 +11,15 @@ import { count, usd } from './usageFormat';
 import { elapsedMilliseconds, formatElapsed } from '../tool-presentation';
 import type { TimelineDensity } from '../view-preferences';
 
-export function connectionLabel(status: SessionSyncState | StreamStatus) {
-  if (typeof status === 'string') return status === 'open' ? '实时同步' : status === 'reconnecting' ? '正在重连' : '正在连接';
+export function connectionLabel(status: SessionSyncState) {
   if (status.transport !== 'open') return status.transport === 'reconnecting' ? '正在重连' : '正在连接';
   return status.content === 'ready' ? '实时同步' : status.content === 'failed' ? status.retrying ? '记录同步失败，正在重试' : '记录同步失败' : '已连接，正在补齐记录';
 }
-function ConnectionState({ status }: { status: SessionSyncState | StreamStatus }) {
+function ConnectionState({ status }: { status: SessionSyncState }) {
   const label = connectionLabel(status);
-  const ready = typeof status === 'string' ? status === 'open' : status.transport === 'open' && status.content === 'ready';
-  const calibrated = typeof status !== 'string' && status.lastCalibratedAt ? `；最近校准 ${new Date(status.lastCalibratedAt).toLocaleTimeString()}` : '';
-  return <span title={label + calibrated} className="inline-flex shrink-0 items-center gap-1.5 text-meta text-subtle"><span className={`h-1.5 w-1.5 rounded-full ${ready ? 'bg-neutral-solid' : 'ui-status-pulse bg-warning-solid'}`}/><span className="hidden sm:inline">{label}</span>{typeof status !== 'string' && status.content === 'failed' && !status.retrying && <button className="text-info" onClick={status.retry}>重试同步</button>}</span>;
+  const ready = status.transport === 'open' && status.content === 'ready';
+  const calibrated = status.lastCalibratedAt ? `；最近校准 ${new Date(status.lastCalibratedAt).toLocaleTimeString()}` : '';
+  return <span title={label + calibrated} className="inline-flex shrink-0 items-center gap-1.5 text-meta text-subtle"><span className={`h-1.5 w-1.5 rounded-full ${ready ? 'bg-neutral-solid' : 'ui-status-pulse bg-warning-solid'}`}/><span className="hidden sm:inline">{label}</span>{status.content === 'failed' && !status.retrying && <button className="text-info" onClick={status.retry}>重试同步</button>}</span>;
 }
 
 export type RunDetailTab = 'timeline' | 'changes' | 'terminal';
@@ -85,7 +83,7 @@ export function RunHeader({
   summary?: RunSummary;
   agent?: Agent;
   taskPrompt?: string;
-  streamStatus: SessionSyncState | StreamStatus;
+  streamStatus: SessionSyncState;
   queuedTasks: Task[];
   usage?: SessionUsage;
   /** 目标等面板入口，排在「更多操作」前面。 */

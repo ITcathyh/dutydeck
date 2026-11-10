@@ -15,7 +15,7 @@ import { shortcutDefinitions } from './useKeyboardShortcuts';
 import { toastStore } from './useToasts';
 import { EXPERIMENTAL_STORAGE_KEY, writeExperimental } from './experimental';
 
-vi.mock('./useSessionStream', () => ({ useSessionStream: () => 'open' }));
+vi.mock('./useSessionStream', () => ({ useSessionStream: () => ({ transport: 'open', content: 'ready' }) }));
 vi.mock('./components/TerminalView', () => ({ TerminalView: ({ sessionId }: { sessionId: string }) => <div>Terminal {sessionId}</div> }));
 
 const agent = (protocol: Agent['protocol'] = 'acp'): Agent => ({ id: 'codex', name: 'Codex', protocol, permissionMode: 'full-trust' });

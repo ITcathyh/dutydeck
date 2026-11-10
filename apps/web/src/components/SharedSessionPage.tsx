@@ -110,9 +110,7 @@ export function SharedSessionPage({ sessionId }: { sessionId: string }) {
   const output = latest?.output?.text?.trim();
   const source = session.sourceContext;
   // 连接正常时不显示同步状态；只有重连或补记录失败时才提示。
-  const syncProblem = typeof streamStatus === 'string'
-    ? streamStatus === 'reconnecting' ? '正在重连' : undefined
-    : streamStatus.content === 'failed' ? streamStatus.retrying ? '记录同步失败，正在重试' : '记录同步失败' : streamStatus.transport === 'reconnecting' ? '正在重连' : undefined;
+  const syncProblem = streamStatus.content === 'failed' ? streamStatus.retrying ? '记录同步失败，正在重试' : '记录同步失败' : streamStatus.transport === 'reconnecting' ? '正在重连' : undefined;
   const header = <>
     <div className="share-aura" aria-hidden="true"><i/><i/><i/></div>
     <header className="share-brand share-gutter">
@@ -126,7 +124,7 @@ export function SharedSessionPage({ sessionId }: { sessionId: string }) {
         <TurnSpan facts={latest} running={running}/>
         {latest && <span className="share-narrow-only share-meta-run"><RunSummary facts={latest} running={running}/></span>}
         {queued > 0 && <span className="share-queue">待执行指令 {queued} 条</span>}
-        {syncProblem && <span role="status" className="share-sync">{syncProblem}{typeof streamStatus !== 'string' && streamStatus.content === 'failed' && !streamStatus.retrying && <button type="button" onClick={streamStatus.retry} className="share-text-button">重试同步</button>}</span>}
+        {syncProblem && <span role="status" className="share-sync">{syncProblem}{streamStatus.content === 'failed' && !streamStatus.retrying && <button type="button" onClick={streamStatus.retry} className="share-text-button">重试同步</button>}</span>}
       </div>
       {/* 窄屏只放能点的来源；没有记录话题时不放占位胶囊。 */}
       {source && <div className="share-narrow-only share-chips share-rise">

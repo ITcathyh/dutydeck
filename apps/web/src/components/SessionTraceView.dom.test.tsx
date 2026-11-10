@@ -7,7 +7,7 @@ import { SessionTraceView } from './SessionTraceView';
 const session: Session = { id: 's1', agentId: 'codex', state: 'thinking', cwd: '/repo/project', runId: 'run1', createdAt: '', updatedAt: '' };
 const event = (sequence: number, type: string, data: unknown = {}): DockEvent => ({ id: `e${sequence}`, sequence, type, timestamp: `2026-10-28T00:00:${String(sequence % 60).padStart(2, '0')}Z`, data });
 const source = [event(1, 'text', { role: 'user', taskId: 't1', text: 'find trace bug' }), event(2, 'tool_call', { id: 'read', name: 'Read', input: { path: 'README.md' } }), event(3, 'tool_result', { id: 'read', name: 'Read', status: 'completed', output: 'result canary' }), event(4, 'text', { text: 'fixed answer' })];
-const props = { session, events: source, loading: false, historyLoaded: true, streamStatus: 'open' as const, onRetry: vi.fn(), onClose: vi.fn() };
+const props = { session, events: source, loading: false, historyLoaded: true, streamStatus: { transport: 'open', content: 'ready' } as const, onRetry: vi.fn(), onClose: vi.fn() };
 
 const table = () => screen.getByRole('table', { name: '追踪事件' });
 describe('SessionTraceView', () => {
