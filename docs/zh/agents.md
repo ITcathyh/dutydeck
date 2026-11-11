@@ -12,6 +12,8 @@ Dutydeck 默认优先用终端适配器运行本机已安装的 CLI Agent，新�
 
 Codex 终端 Agent 会从 `CODEX_HOME/config.toml` 读取 `[profiles.<name>]` 配置，并在 Web 新建任务时提供 profile 选择；选择结果只作用于新会话，未选择时沿用 Agent 默认 profile。profile 名称不会写入 Agent 的环境变量。
 
+普通 relay 提问支持用稳定 `requestId` 跨断线和服务重启查询、续等。`session ask` 将 ID 写到 stderr，可用 `--request-id` 自行指定；`session ask-result <id> --json` 只读历史，`session ask-wait <id>` 只等待原问题，不重发 prompt 或创建新轮。问题、选项、原 task/attempt 和截止时间冻结，最多 24 小时；旧无 ID 请求和原生权限的有限期限不变。只有原轮仍可继续且当前权限有效，wait 才返回答案及退出码 0；原轮已结束、被替换或结果未知时返回 3，历史答案仍不构成执行授权。ADHD 的结构化确认仍是点击后新轮继续，不能与普通等待互换。命令与退出码见 [CLI 文档](cli.md)。
+
 ## 1. 自定义 Agent (`DUTYDECK_AGENTS_JSON`)
 
 用环境变量 `DUTYDECK_AGENTS_JSON` 注册自定义 Agent。
@@ -191,6 +193,7 @@ Codex ACP 的非完全信任会话在每轮原生请求（包括恢复后）使�
 | `DUTYDECK_DATABASE_URL` | `<cwd>/.dutydeck/dutydeck.db` | SQLite 数据库文件路径 |
 | `DUTYDECK_AGENTS_JSON` | `[]` | 自定义 Agent 注册列表 |
 | `DUTYDECK_CLEANUP_INTERVAL_MS` | `300000` | 周期清理间隔，整数毫秒，范围 1–2147483647 |
+| `DUTYDECK_DRIVER_IDLE_CPU_ACTION` | `diagnose` | 空闲 CLI 持续占用 CPU 的处理方式：`off` 关闭此检查，`diagnose` 仅记录诊断，`retire` 在证明安全后提前释放进程 |
 | `DUTYDECK_DRIVER_IDLE_TIMEOUT_MS` | `21600000` | 空闲终端释放阈值，非负毫秒；`0` 禁用，不受周期定时器的 32 位上限限制；仍有原生后台任务的会话不释放 |
 | `DUTYDECK_USAGE_PRICING_JSON` | 内置价格表 | 整表覆盖用量估算的单价 |
 | `DUTYDECK_USAGE_PRICING_EXTRA_JSON` | 不设 | 在价格表上按型号叠加单价，格式 `{"version"?: "...", "models": [{"match": "...", "inputPerMTok": ..., "cachedInputPerMTok": ..., "outputPerMTok": ...}]}`，条目可带可选的 `provider`；基础表里型号名和 `provider` 都相同（不分大小写）的条目被替换，其他 provider 的同名条目保留，同一型号和 `provider` 不能重复写，不允许 `default`。设置后这些型号的花费开始计入月度上限，已设上限的实例可能比以前更早被拦；写错时服务起不来，`dutydeck doctor` 会报 `usage.pricing` 失败并点名变量 |
@@ -199,3 +202,11 @@ Codex ACP 的非完全信任会话在每轮原生请求（包括恢复后）使�
 | `LARK_APP_SECRET` | - | 同上。机器人用 `dutydeck setup` 配置，Secret 存在机器人配置里，不需要它 |
 
 CI 相关的令牌和 webhook 密钥**不再是环境变量**，见[插件](plugins.md)。
+
+### 空闲 CLI 持续占用 CPU
+
+默认 `diagnose` 只记录异常候选，不提前结束进程。要启用提前释放，在启动服务时传 `--driver-idle-cpu-action retire`，或设置 `DUTYDECK_DRIVER_IDLE_CPU_ACTION=retire`；改成 `off` 可关闭这项检查。原有默认 6 小时闲置回收独立生效，`--idle-timeout-ms 0` 只关闭该通用回收。
+
+提前释放仅支持 Linux 上能核实进程出生身份和原生会话恢复记录的 PTY CLI。当前检查覆盖 Codex 和 Claude 家族适配器的无子进程实例（例如 `seed`、`relay`）；标准 `claude-code` 的 tmux 中继包装以及其他仍有子进程的实例会跳过。保守默认要求空闲至少 10 分钟，至少 3 个有效采样窗口、累计至少 5 分钟持续占用单核 50% 以上；使用维护循环的采样间隔，因此实际等待可能更久；相邻有效采样超过 10 分钟时重新积累证据。新输入、排队或结果未知任务、审批、Ask、原生后台工作，以及任何额外存活子进程都会阻止回收。采样不完整或恢复证据不足也会跳过，包括未知 ACP 和插件驱动。
+
+回收只结束原进程，下一次对话恢复原生会话。退出未核实时仍阻止启动替代任务，并按已有停止复核流程处理。这些阈值是产品默认值，不代表线上发生率或已测量的 CPU 节省。

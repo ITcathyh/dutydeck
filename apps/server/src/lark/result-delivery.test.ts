@@ -362,7 +362,7 @@ describe('durable multi-message result delivery', () => {
     expect(sendText).toHaveBeenCalledOnce();
   });
 
-  it('reopens SQLite after summary failure and sends only the missing summary, then replays both receipts', async () => {
+  it.each(['完整结果🙂'.repeat(5000), '"'.repeat(10_000)])('reopens SQLite after summary failure and sends only the missing summary, then replays both receipts (%#)', async text => {
     const dir = await mkdtemp(join(tmpdir(), 'dutydeck-result-restart-'));
     let repos = createRepositories(join(dir, 'state.db'));
     cleanups.push(async () => { repos.close(); await rm(dir, { recursive: true, force: true }); });
@@ -374,7 +374,7 @@ describe('durable multi-message result delivery', () => {
       return { messageId: providerMessages.get(value.idempotencyKey)! };
     };
     const service = { uploadFile: vi.fn(async (_value: any) => 'file_key'), replyFile: vi.fn(accepted), sendFile: vi.fn(accepted), reply: vi.fn(accepted), send: vi.fn(accepted) };
-    const original = input('完整结果🙂'.repeat(5000));
+    const original = input(text);
     const target = { chatId: 'oc_group', replyMessageId: 'om_question', replyInThread: true };
     await expect(sendLarkResult(service as any, target, original, log, repos.config)).rejects.toThrow('temporarily unavailable');
     expect(providerMessages.size).toBe(1);

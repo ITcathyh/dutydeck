@@ -1,8 +1,7 @@
 import { createContext, memo, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { useQuery } from '@tanstack/react-query';
 import { Check, ChevronDown, CircleAlert, Copy, Sparkles } from 'lucide-react';
 import type { HistoryTurnSummary, Task } from '../api';
-import { loadTurnHistory } from '../event-history';
+import { useHistoryDetail } from '../useHistoryDetail';
 import { buildTimelineSections, createTimelineProjector, type TimelineSection } from '../timeline';
 import { useTimelineDisclosure } from '../timeline-disclosure';
 import { elapsedMilliseconds, formatElapsed } from '../tool-presentation';
@@ -47,9 +46,8 @@ export function useNow(active: boolean) {
 
 /** 历史轮次的完整记录：和工作台同一个缓存键，展开时才读。 */
 export function useHistoryTurnDetail(sessionId: string, summary: HistoryTurnSummary | undefined, tasks: Task[] | undefined, enabled: boolean) {
-  const query = useQuery({ queryKey: ['history-detail', sessionId, summary?.firstSequence, summary?.lastSequence],
-    queryFn: ({ signal }) => loadTurnHistory(sessionId, summary!, signal), enabled: enabled && Boolean(summary), staleTime: Infinity });
-  const projector = useMemo(() => createTimelineProjector(), [summary?.id]);
+  const query = useHistoryDetail(sessionId, summary, enabled);
+  const projector = useMemo(() => createTimelineProjector(), [summary?.id, enabled]);
   const sections = useMemo(() => query.data ? buildTimelineSections(projector(shareableEvents(query.data), []).timeline, tasks ?? [], false) : undefined, [projector, query.data, tasks]);
   return { query, sections };
 }
@@ -61,25 +59,27 @@ export function useHistoryTurnDetail(sessionId: string, summary: HistoryTurnSumm
 export type EarlierPlace = { index: number; count: number; lastAt?: string; width: MomentWidth; open: boolean; onToggle(open: boolean): void };
 
 export const ShareTurn = memo(function ShareTurn({ id, summary, sections, earlier }: { id: string; summary?: HistoryTurnSummary; sections: TimelineSection[]; earlier?: EarlierPlace }) {
-  return summary ? <HistoryShareTurn id={id} summary={summary} earlier={earlier}/> : <LiveShareTurn id={id} sections={sections} earlier={earlier}/>;
+  const expansion = useTimelineDisclosure(`share-turn:${id}`, false);
+  return summary ? <HistoryShareTurn id={id} summary={summary} earlier={earlier} expansion={expansion}/> : <LiveShareTurn id={id} sections={sections} earlier={earlier} expansion={expansion}/>;
 });
 
-function LiveShareTurn({ id, sections, earlier }: { id: string; sections: TimelineSection[]; earlier?: EarlierPlace }) {
+function LiveShareTurn({ id, sections, earlier, expansion }: { id: string; sections: TimelineSection[]; earlier?: EarlierPlace; expansion: ReturnType<typeof useTimelineDisclosure> }) {
   const latest = !earlier;
   const share = useShare();
   const running = latest && share.running;
   const facts = useMemo(() => liveTurnFacts(sections, running), [sections, running]);
   const [open, setOpen] = useTimelineDisclosure(`share-record:${id}`, false);
   return <ShareTurnView id={id} facts={facts} latest={latest} running={running} recordOpen={open} onRecordToggle={setOpen}
-    record={<ShareRecord sections={facts.record} running={running}/>} earlier={earlier}/>;
+    record={<ShareRecord sections={facts.record} running={running}/>} earlier={earlier} expansion={expansion}/>;
 }
 
-function HistoryShareTurn({ id, summary, earlier }: { id: string; summary: HistoryTurnSummary; earlier?: EarlierPlace }) {
+function HistoryShareTurn({ id, summary, earlier, expansion }: { id: string; summary: HistoryTurnSummary; earlier?: EarlierPlace; expansion: ReturnType<typeof useTimelineDisclosure> }) {
   const share = useShare();
   const latest = !earlier;
   const [open, setOpen] = useTimelineDisclosure(`share-record:${id}`, false);
   // 最新一轮的结论被摘要截断时，直接读完整记录补全结论卡。
-  const detail = useHistoryTurnDetail(share.sessionId, summary, share.tasks, open || (latest && summary.output.truncated));
+  const recordVisible = open && (!earlier || (expansion[0] && (earlier.count === 1 || earlier.open)));
+  const detail = useHistoryTurnDetail(share.sessionId, summary, share.tasks, recordVisible || (latest && summary.output.truncated));
   const task = share.tasks?.find(item => item.id === summary.taskId);
   const facts = useMemo(() => {
     const base = summaryTurnFacts(summary, task);
@@ -91,12 +91,12 @@ function HistoryShareTurn({ id, summary, earlier }: { id: string; summary: Histo
     : detail.query.isError
       ? <p role="alert" className="share-record-note">记录读取失败：{detail.query.error.message}<button type="button" onClick={() => void detail.query.refetch()} className="share-text-button">重试</button></p>
       : <ShareRecord sections={recordSections(detail.sections ?? [])} running={false}/>;
-  return <ShareTurnView id={id} facts={facts} latest={latest} running={false} recordOpen={open} onRecordToggle={setOpen} record={record} earlier={earlier}/>;
+  return <ShareTurnView id={id} facts={facts} latest={latest} running={false} recordOpen={open} onRecordToggle={setOpen} record={record} earlier={earlier} expansion={expansion}/>;
 }
 
-function ShareTurnView({ id, facts, latest, running, recordOpen, onRecordToggle, record, earlier }: { id: string; facts: TurnFacts; latest: boolean; running: boolean; recordOpen: boolean; onRecordToggle(open: boolean): void; record: ReactNode; earlier?: EarlierPlace }) {
+function ShareTurnView({ id, facts, latest, running, recordOpen, onRecordToggle, record, earlier, expansion }: { id: string; facts: TurnFacts; latest: boolean; running: boolean; recordOpen: boolean; onRecordToggle(open: boolean): void; record: ReactNode; earlier?: EarlierPlace; expansion: ReturnType<typeof useTimelineDisclosure> }) {
   const share = useShare();
-  const [expanded, setExpanded] = useTimelineDisclosure(`share-turn:${id}`, false);
+  const [expanded, setExpanded] = expansion;
   const prompt = facts.prompt?.trim();
   const statusLabel = latest && (running || share.status.tone === 'failed') ? share.status.label : turnStatusLabels[facts.status] ?? facts.status;
   const text = facts.output?.text?.trim();

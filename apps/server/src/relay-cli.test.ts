@@ -31,6 +31,7 @@ async function harness() {
     try { body = JSON.parse(Buffer.concat(chunks).toString()); } catch { request.socket.destroy(); return; }
     requests.push({ url: request.url, authorization: request.headers.authorization, body });
     response.setHeader('content-type', 'application/json');
+    if (body.requestId === 'fail-id') { response.statusCode = 503; response.end(JSON.stringify({ error: { code: 'RELAY_UNAVAILABLE', message: 'connection lost' } })); return; }
     try {
       const outcome = await broker.register({ sessionId: 'ses_test', question: body.question,
         timeoutMs: body.timeoutMs, choices: body.choices as RelayAskChoice[], multiple: body.multiple });
@@ -74,24 +75,35 @@ describe('session ask CLI over HTTP', () => {
     expect(() => program.parse(['node', 'dutydeck', 'session', 'ask', '--help'])).toThrowError(expect.objectContaining({ exitCode: 0 }));
     const example = help.match(/--choices '([^']+)'/);
     expect(example).not.toBeNull();
-    expect(await h.invoke(['--choices', example![1]!, '--timeout', '60'])).toEqual({ code: 0, stdout: 'a\n', stderr: '' });
+    const result = await h.invoke(['--choices', example![1]!, '--timeout', '60']);
+    expect(result).toEqual({ code: 0, stdout: 'a\n', stderr: `requestId: ${h.requests[0]!.body.requestId}\n` });
+    expect(h.requests[0]!.body.requestId).toMatch(/^[a-f0-9-]{36}$/);
     expect(h.requests).toEqual([{ url: '/api/relay/sessions/self/ask', authorization: 'Bearer fixture-token',
-      body: { question: '选哪个方案？', choices, timeoutMs: 60_000 } }]);
+      body: { requestId: h.requests[0]!.body.requestId, question: '选哪个方案？', choices, timeoutMs: 60_000 } }]);
   });
 
   it('passes multiple selection and preserves JSON result output', async () => {
     const h = await harness();
     const result = await h.invoke(['--choices', JSON.stringify(choices), '--multiple', '--json']);
     expect(result.code).toBe(0);
-    expect(result.stderr).toBe('');
+    expect(result.stderr).toBe(`requestId: ${h.requests[0]!.body.requestId}\n`);
     expect(JSON.parse(result.stdout)).toMatchObject({ status: 'answered', answer: 'a、b', askId: expect.any(String) });
-    expect(h.requests[0]?.body).toEqual({ question: '选哪个方案？', choices, multiple: true });
+    expect(h.requests[0]?.body).toEqual({ requestId: h.requests[0]!.body.requestId, question: '选哪个方案？', choices, multiple: true });
   });
 
   it('keeps plain asks free of choice fields', async () => {
     const h = await harness();
     expect(askOutput(await h.ask({}))).toEqual({ stdout: 'a\n', stderr: '', exitCode: 0 });
-    expect(h.requests[0]?.body).toEqual({ question: '选哪个方案？' });
+    expect(h.requests[0]?.body).toEqual({ requestId: expect.stringMatching(/^[a-f0-9-]{36}$/), question: '选哪个方案？' });
+  });
+
+  it('preserves a supplied identity on failure without printing an answer', async () => {
+    const h = await harness();
+    const result = await h.invoke(['--request-id', 'fail-id']);
+    expect(result.code).toBe(3);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toContain('requestId: fail-id\n');
+    expect(h.requests[0]!.body.requestId).toBe('fail-id');
   });
 
   it('rejects malformed JSON before issuing HTTP', async () => {

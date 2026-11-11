@@ -26,6 +26,7 @@ it.each(cases)('isolates real %s children, including stale tmux server values (e
     BOTMUX_SESSION_ID: 'sentinel-old-session', BOTMUX_OWNER_OPEN_ID: 'sentinel-owner',
     BOTMUX_IDENTITY_BIN: identityBin, BYTEDCLI_USER_CLOUD_JWT: 'sentinel-user',
     LARKSUITE_CLI_USER_ACCESS_TOKEN: 'sentinel-lark', LARK_APP_SECRET: 'sentinel-host',
+    DUTYDECK_DRIVER_IDLE_CPU_ACTION: 'retire',
     DUTYDECK_WEBHOOK_SECRET: 'sentinel-webhook', dutydeck_group_tools_token: 'sentinel-old-scope',
     dutydeck_relay_token: 'sentinel-old-relay', dutydeck_session_id: 'sentinel-old-id',
     ANTHROPIC_API_KEY: 'sentinel-daemon-account', HERDR_PANE_ID: 'sentinel:p1',

@@ -42,6 +42,7 @@ export {
   RelayAskBroker,
   relayAskDefaultTimeoutMs,
   relayAskMaxTimeoutMs,
+  relayAskDurableMaxTimeoutMs,
   relayAskMinTimeoutMs,
   relayAskMaxChoices,
   relayAskChoiceMaxLength,
@@ -72,3 +73,5 @@ export {
 
 export { RelayCliError, RelayHttpClient, type RelayClientOptions } from './client.js';
 export { retryWhileRefused } from './retry.js';
+
+export { relayAskId, type RelayContinuation, type RelayContinuationChecker, type RelayAskLifecycleWatcher } from './durable-asks.js';

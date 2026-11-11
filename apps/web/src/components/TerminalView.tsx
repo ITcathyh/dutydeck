@@ -7,6 +7,8 @@ import { bindTerminalTouchScroll } from '../terminal-touch';
 import { readThemeColor } from '../theme';
 import { useMediaQuery } from '../useMediaQuery';
 import { TerminalKeyBar } from './TerminalKeyBar';
+import { terminalText } from '../terminal-text';
+import { TerminalTextPanel, type TerminalTextSnapshot } from './TerminalTextPanel';
 
 // 主题色只能给 xterm 真实色值，CSS 变量它读不懂，所以运行时从 :root 上取计算值。
 // readThemeColor 在 jsdom（返回空串）与取值失败时回落到原来写死的浅色配色。
@@ -31,6 +33,17 @@ export function TerminalView({ sessionId, className, showKeyBar, readOnly = fals
   // xterm 会往 hostRef 里塞自己的 DOM，所以它必须是一个 React 不放子节点的空容器：
   // 快捷键条挂在外层 wrapper 上，两边各管一棵子树，React 的 diff 不会和 xterm 抢节点。
   const hostRef = useRef<HTMLDivElement>(null);
+  const terminalRef = useRef<Terminal | undefined>(undefined);
+  const [textSnapshot, setTextSnapshot] = useState<TerminalTextSnapshot>();
+  const openText = useCallback((anchor?: number) => {
+    const term = terminalRef.current;
+    if (!term) return;
+    const buffer = term.buffer.active;
+    const range = anchor === undefined ? term.getSelectionPosition() : undefined;
+    const first = range?.start.y ?? buffer.viewportY;
+    const last = range ? range.end.y - (range.end.x === 0 ? 1 : 0) : buffer.viewportY + term.rows - 1;
+    setTextSnapshot(terminalText(buffer, first, last, { anchor, width: term.cols, ...(range ? { columns: { start: range.start.x, end: range.end.x || term.cols } } : {}) }));
+  }, []);
   // 快捷键条要往已建立的 WS 里写字节，而 ws 实例活在 effect 作用域里，用 ref 把发送口暴露出来
   const sendInputRef = useRef<(data: string) => void>(() => {});
   const wideEnoughForKeys = useMediaQuery(KEY_BAR_MEDIA);
@@ -67,7 +80,36 @@ export function TerminalView({ sessionId, className, showKeyBar, readOnly = fals
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(host);
+    terminalRef.current = term;
+    setTextSnapshot(undefined);
     const unbindTouchScroll = bindTerminalTouchScroll(term, () => selectModeRef.current);
+    let press: ReturnType<typeof setTimeout> | undefined;
+    let pressPoint: { x: number; y: number } | undefined;
+    let openedByPress = false;
+    const cancelPress = () => { if (press) clearTimeout(press); press = undefined; };
+    const startPress = (event: TouchEvent) => {
+      cancelPress(); openedByPress = false;
+      if (selectModeRef.current || event.touches.length !== 1) return;
+      const touch = event.touches[0];
+      pressPoint = { x: touch.clientX, y: touch.clientY };
+      press = setTimeout(() => {
+        const screen = term.element?.querySelector('.xterm-screen')?.getBoundingClientRect();
+        if (!screen?.height || !pressPoint) return;
+        const row = Math.max(0, Math.min(term.rows - 1, Math.floor((pressPoint.y - screen.top) / (screen.height / term.rows))));
+        openedByPress = true;
+        openText(term.buffer.active.viewportY + row);
+      }, 450);
+    };
+    const movePress = (event: TouchEvent) => {
+      const touch = event.touches[0];
+      if (!touch || !pressPoint || Math.max(Math.abs(touch.clientX - pressPoint.x), Math.abs(touch.clientY - pressPoint.y)) >= 6) cancelPress();
+    };
+    const contextMenu = (event: Event) => { if (openedByPress) event.preventDefault(); };
+    term.element!.addEventListener('touchstart', startPress, { capture: true, passive: true });
+    term.element!.addEventListener('touchmove', movePress, { capture: true, passive: true });
+    term.element!.addEventListener('touchend', cancelPress);
+    term.element!.addEventListener('touchcancel', cancelPress);
+    term.element!.addEventListener('contextmenu', contextMenu);
     setScrolledUp(false);
     setUnreachable(false);
     scrollToBottomRef.current = focus => { term.scrollToBottom(); if (focus) term.focus(); };
@@ -197,12 +239,19 @@ export function TerminalView({ sessionId, className, showKeyBar, readOnly = fals
       inputDisposable.dispose();
       scrollDisposable.dispose();
       unbindTouchScroll();
+      cancelPress();
+      term.element!.removeEventListener('touchstart', startPress, true);
+      term.element!.removeEventListener('touchmove', movePress, true);
+      term.element!.removeEventListener('touchend', cancelPress);
+      term.element!.removeEventListener('touchcancel', cancelPress);
+      term.element!.removeEventListener('contextmenu', contextMenu);
+      terminalRef.current = undefined;
       scrollToBottomRef.current = () => {};
       sendInputRef.current = () => {};
       ws?.close();
       term.dispose();
     };
-  }, [sessionId, readOnly]);
+  }, [sessionId, readOnly, openText]);
 
   const onKey = useCallback((data: string) => sendInputRef.current(data), []);
   const keyBarVisible = !readOnly && (showKeyBar ?? wideEnoughForKeys);
@@ -212,6 +261,8 @@ export function TerminalView({ sessionId, className, showKeyBar, readOnly = fals
 
   return <div className={`relative ${className ?? ''}`}>
     <div ref={hostRef} data-touch-scroll={touchScroll ? 'on' : undefined} className={`h-full w-full ${touchScroll ? '[&_.xterm-screen]:select-none [&_.xterm-screen]:[-webkit-touch-callout:none] [&_.xterm-screen_*]:select-none [&_.xterm-viewport]:overscroll-none' : ''}`}/>
+    <button type="button" onClick={() => openText()} className="absolute left-2 top-2 z-sticky min-h-11 rounded-md border border-default bg-surface px-3 text-caption text-secondary shadow-panel">复制终端文本</button>
+    {textSnapshot && <TerminalTextPanel snapshot={textSnapshot} onClose={() => setTextSnapshot(undefined)}/>}
     {connectionState !== 'ready' && <div role="status" className="pointer-events-none absolute bottom-14 left-2 right-2 z-sticky rounded-md border border-default bg-surface p-3 text-caption text-secondary shadow-panel">
       {unreachable ? <><p className="font-medium text-primary">终端暂时连不上</p><p>服务端没有接受终端连接，浏览器拿不到具体原因。任务进度仍可在「执行记录」查看。仍在自动重试。</p></>
         : connectionState === 'initializing' ? '正在初始化终端…'

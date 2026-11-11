@@ -455,7 +455,7 @@ describe('Leader 模式：接待交接、Leader 规划、Worker 执行、Leader 
     expect(planning).toContain('分支一律用 main');
     expect(planning).toContain(`Path: ${join(f.directory, '.claude', 'skills', 'leader-guide', 'SKILL.md')}`);
     expect(planning).toContain('[授权账本');
-    expect(planning).toContain('消息：帮我修复登录，就在 main 上改');
+    expect(planning).toContain('发起人原话：帮我修复登录，就在 main 上改');
     // 私聊不需要「开始执行」确认，计划直接执行。
     expect((await f.work.get(turn.parent.id, delegated.workId, 'ou_alice')).status).toBe('running');
 
@@ -465,14 +465,14 @@ describe('Leader 模式：接待交接、Leader 规划、Worker 执行、Leader 
     expect(f.arbitrations()).toHaveLength(1);
     expect(arbitration!.prompt).toContain('分支一律用 main');
     expect(arbitration!.prompt).toContain('改动放在哪个分支？');
-    expect(arbitration!.prompt).toContain('消息：帮我修复登录，就在 main 上改');
+    expect(arbitration!.prompt).toContain('发起人原话：帮我修复登录，就在 main 上改');
     expect((await f.runtime.getSession(arbitration!.sessionId))).toMatchObject({ source: 'lark-leader', sourceId: delegated.id, permissionMode: 'deny-all' });
     // 代判中的提问从没出现在卡片上。
     expect(f.cardTexts().some(text => text.includes('Agent 提问'))).toBe(false);
     const review = f.prompts.find(value => value.prompt.includes('Step: Leader 验收'))!.prompt;
     expect(review).toContain('[Leader 模式：验收补充（宿主追加）]');
     expect(review).toContain('分支一律用 main');
-    expect(review).toContain('消息：帮我修复登录，就在 main 上改');
+    expect(review).toContain('发起人原话：帮我修复登录，就在 main 上改');
     expect(review).toMatch(/Worker 提问「改动放在哪个分支？」→ 回答：用 main 分支 · 依据：账本里用户说过在 main 上改/);
     expect((await f.leaderRecord(delegated.workId)).rulings).toEqual([expect.objectContaining({ decision: 'answer', answer: '用 main 分支', delivery: 'delivered' })]);
     const final = () => f.cards.find(card => card.input.taskId === delegated.workId && card.input.elements?.some((element: any) => element.element_id === 'final_output'));

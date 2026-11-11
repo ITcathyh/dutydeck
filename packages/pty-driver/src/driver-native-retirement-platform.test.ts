@@ -18,6 +18,7 @@ it.each(['linux', 'darwin', 'win32'])('limits the native discovery retirement ga
     // No native observation exists yet. Linux must preserve rather than trust
     // an undiscovered dialect; other platforms keep the prior marker rules.
     expect(await driver.prepareForIdleRetirement()).toBe(platform !== 'linux');
+    expect(driver.idleCpuProof()).toBeUndefined();
     expect(identify).not.toHaveBeenCalled(); expect(observe).not.toHaveBeenCalled();
   } finally {
     Object.defineProperty(process, 'platform', original);

@@ -4,6 +4,20 @@
 
 收尾需要人查看时，Agent 可在本轮结束前用 `dutydeck session report --status waiting --question "一个具体问题"`，或 `--status blocked --summary "一句原因"`。它们会进入飞书 `/tasks` 和网页「待你处理」，结果卡首行显示问题或原因；原会话开始下一轮或通过已有操作处理后自动清除。`ready` 表示完成（默认无需报告），`dropped` 表示无需处理；需要固定选项并阻塞等待回答时继续用 `session ask --choices`。
 
+普通 `session ask` 会生成 `requestId` 并先写到 stderr；stdout 仍只输出答案，`--json` 会附带身份。需要自行保存身份时使用 `--request-id`。同一会话中重复使用同一 ID，问题、完整正文、选项、超时及原任务/执行轮必须一致，否则拒绝；截止时间不会顺延。默认等 300 秒，持久普通提问最多 86400 秒。旧版无 ID 的 API 最多一小时，原生权限请求仍有自己的期限。
+
+```bash
+dutydeck session ask "继续检查吗？" --request-id check-1 --timeout 86400
+# 网络断开或服务重启后，只读查看原问题和答案：
+dutydeck session ask-result check-1 --json
+# 原执行轮仍可继续时，重新等待同一问题，不重新发卡或提交任务：
+dutydeck session ask-wait check-1
+```
+
+`ask` / `ask-wait` 退出码：0 表示答案已返回且原轮仍可继续，124 表示到期，2 表示用法错误，3 表示通道不可用、取消或原轮已结束/结果未知。`ask-result` 返回的 `continuation` 为 `available`、`ended` 或 `unknown`；查询成功仅表示读到了记录，不能据历史答案继续执行 shell 后续命令。当前会话凭证、权限和原任务/执行轮仍须有效；停止或归档的会话凭证不能用于查询。HTTP 断线和服务关闭保留持久问题，显式结束原轮、撤权或到期使它不能继续。答案先落盘，显示失败不丢答案，也不会重新开放抢答。
+
+ADHD 飞书结构化确认仍沿用原来的 24 小时确认卡、点击后同会话新轮及 deferred 回执；它与普通提问返回原调用的语义不同。
+
 ## 1. 守护进程日常管理
 
 ```bash
@@ -458,3 +472,13 @@ dutydeck settings bot set <app-id> cardLinks=
 `lark send --json` 成功返回 `{"ok":true,"data":{"message_id":"om_example","url":"https://client.example.test/message"}}`。`--app` 从本机数据库选择已绑定机器人，可加 `--database /path/to/runtime.db`；不传时保留原有 `LARK_*` 环境变量行为。`--reply-to` 回复指定消息，`--in-thread` 将回复放入话题。同一次调用的发送重试共用固定幂等 UUID。任何一次尝试结果未知时，后续拒绝不能证明此前未送达；只有确定成功的回执才能消除该次调用的不确定性。连接中断、响应读取失败等导致投递结果不确定，或消息已发出但无法取得链接时，返回 `unknown_outcome`（退出码 5），不要自动重发。
 
 机器人设置 `cardLinks` 是最多 2 项的 JSON 数组，省略保留，`cardLinks=` 或 `[]` 清空。每项 `label` 为 1–12 字，所有 URL 最多 2048 字符，`url` 必须是 HTTPS；可选 `android_url`、`ios_url`、`pc_url` 支持应用 scheme，拒绝 `javascript:`、`vbscript:`、`data:`。链接里的 `{sessionId}` 替换为 URL 编码后的会话 ID，替换后任一 URL 超过 2048 字符时省略该条链接。在进度卡和结果卡底部按飞书 `multi_url` 渲染；附加链接使整卡超出安全预算时省略链接，不改变正文的既有处理。
+
+### 空闲 CPU 策略
+
+服务启动选项 `--driver-idle-cpu-action off|diagnose|retire` 对应 `DUTYDECK_DRIVER_IDLE_CPU_ACTION`，默认 `diagnose`。诊断只写日志；`retire` 才允许对已核实安全且可恢复的空闲 PTY CLI 提前释放。示例：
+
+```sh
+dutydeck --driver-idle-cpu-action retire
+```
+
+恢复默认诊断用 `--driver-idle-cpu-action diagnose`，关闭检查用 `--driver-idle-cpu-action off`。这是服务启动配置；已有后台服务需要在其启动配置中设置环境变量后按原方式重启。通用闲置超时仍独立生效，详见 [Agent 配置](agents.md#空闲-cli-持续占用-cpu)。

@@ -3,6 +3,7 @@ import { appendFileSync, mkdirSync, readFileSync, realpathSync, writeFileSync } 
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
+import { spawn } from 'node:child_process';
 // Inline copy of cli-paths.ts claudeProjectKey (this child imports nothing
 // from src); cli-paths.test.ts asserts the two agree on every vector.
 export function projectKey(path) {
@@ -31,6 +32,18 @@ function run() {
   appendFileSync(join(root, 'launches.jsonl'), JSON.stringify({ sid, args: process.argv.slice(2), pid: process.pid }) + '\n');
   if (process.env.FIXTURE_DEFER_NATIVE_STATE !== '1') state();
   frame('idle');
+  if (process.env.FIXTURE_IDLE_CPU === '1') {
+    const spin = () => { const until = performance.now() + 30; while (performance.now() < until) {} setImmediate(spin); };
+    setImmediate(spin);
+  }
+  const childKind = process.env.FIXTURE_IDLE_CHILD;
+  if (childKind) {
+    const child = childKind === 'shell' ? spawn('/bin/sh', ['-c', 'while :; do sleep 1; done'])
+      : spawn(process.execPath, ['-e', childKind === 'watcher'
+        ? "require('node:fs').watch(process.cwd(),()=>{});setInterval(()=>{},1000)"
+        : "process.stdin.resume();setInterval(()=>{},1000)"]);
+    writeFileSync(join(root, 'child.pid'), String(child.pid));
+  }
   if (process.stdin.isTTY) process.stdin.setRawMode(true);
   let buffer = '';
   process.stdin.on('data', data => {

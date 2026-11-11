@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TerminalView } from './TerminalView';
 
@@ -21,6 +21,7 @@ vi.mock('@xterm/xterm', () => ({
     dispose = vi.fn();
     focus = vi.fn();
     scrollToBottom = vi.fn();
+    getSelectionPosition = vi.fn();
     constructor(options: any) { this.options = options; terminals.push(this); }
     loadAddon(addon: any) { addon.term = this; }
     open(host: HTMLElement) { this.element = document.createElement('div'); host.append(this.element); }
@@ -67,6 +68,27 @@ beforeEach(() => {
     observe() {}
     disconnect() {}
   });
+});
+
+it('opens a read-only terminal text snapshot and never sends copy actions as terminal input', async () => {
+  render(<TerminalView sessionId="shared-copy" readOnly showKeyBar/>);
+  const term = terminals[0];
+  const text = 'private public private';
+  term.buffer.active.length = 1;
+  term.buffer.active.getLine = () => ({ length: text.length, isWrapped: false, getCell: (index: number) => ({ getCode: () => text.charCodeAt(index), getWidth: () => 1, getChars: () => text[index] }) });
+  term.getSelectionPosition.mockReturnValue({ start: { x: 8, y: 0 }, end: { x: 14, y: 0 } });
+  const socket = Socket.instances[0];
+  act(() => socket.open());
+  fireEvent.click(screen.getByRole('button', { name: '复制终端文本' }));
+  const area = screen.getByRole('textbox', { name: '可复制的终端文本' }) as HTMLTextAreaElement;
+  expect(area.value).toBe('public');
+  expect(area.readOnly).toBe(true);
+  expect(screen.queryByRole('toolbar')).toBeNull();
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: '复制文本' })));
+  expect(writeText).toHaveBeenCalledWith('public');
+  expect(socket.sent).toEqual([]);
 });
 afterEach(() => {
   cleanup();

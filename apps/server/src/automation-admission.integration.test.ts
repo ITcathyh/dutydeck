@@ -87,7 +87,7 @@ async function continuation(kind: 'ci' | 'pr', missing: boolean) {
     if (service instanceof CiWebhookService) {
       id = (await service.subscribe(session.id, { autoFix: false }, 'installation_owner'))!.id;
       const received = service.receive('fake', { headers: {}, rawBody: Buffer.from(JSON.stringify({ kind: 'pipeline', repository: 'example/repo', branch: 'feature', headSha: sha, state: 'success', eventId: 'evt-1' })) });
-      if (missing) await expect(received).rejects.toThrow('Crash before binding'); else await received;
+      expect(await received).toMatchObject({ statusCode: 202, body: { accepted: true, matched: missing ? 0 : 1 } });
     } else {
       id = (await service.follow(session.id, { pullRequest: '7' }, 'installation_owner')).id;
       await service.idle();

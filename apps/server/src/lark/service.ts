@@ -422,9 +422,14 @@ const cardFieldLimits = {
   webBaseUrl: 512,
   imageKey: 256
 } as const;
+/** 本地保守预算，限制二次 JSON 序列化后的请求体，不是平台硬上限。 */
 export const larkCardSafeLimits = { bytes: 24 * 1024, components: 180 } as const;
 export const larkCardSnapshotLimits = { bytes: 16 * 1024, components: 120 } as const;
 const cardBytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), 'utf8');
+// 未知投递目标时预留收件人与幂等字段；发送时使用实际字段重新核对。
+const defaultCardRequestFields = { receive_id: 'x'.repeat(1024), msg_type: 'interactive', reply_in_thread: true, uuid: 'x'.repeat(50) };
+export const larkCardRequestBytes = (card: unknown, fields: Record<string, unknown> = defaultCardRequestFields) =>
+  cardBytes({ ...fields, content: JSON.stringify(card) });
 
 /**
  * 超预算时从一个执行分组里剥掉一段工具内容，剥到只剩第一段就停手。
@@ -447,6 +452,10 @@ const stripFirstToolSection = (group: Record<string, unknown>): boolean => {
   tool.elements = [(tool.elements as Array<Record<string, unknown>>)[0]!];
   return true;
 };
+
+const hasCardControl = (value: unknown): boolean => Array.isArray(value) ? value.some(hasCardControl)
+  : Boolean(value && typeof value === 'object' && (['button', 'form', 'select_static', 'multi_select_static', 'input'].includes(String((value as Record<string, unknown>).tag))
+    || Object.values(value).some(hasCardControl)));
 
 const isTraceGroup = (element: Record<string, unknown>) =>
   typeof element.element_id === 'string' && element.element_id.startsWith('trace_group_');
@@ -474,7 +483,7 @@ const upsertOmissionNotice = (elements: Array<Record<string, unknown>>, omission
  * 快照裁剪和整卡裁剪共用，两处只有省略提示 id 和预算不同。
  */
 const trimOldestTraceGroup = (mainElements: Array<Record<string, unknown>>, omission: TraceOmission): boolean => {
-  const groupIndex = mainElements.findIndex(isTraceGroup);
+  const groupIndex = mainElements.findIndex(element => isTraceGroup(element) && !hasCardControl(element));
   if (groupIndex < 0) return false;
   const group = mainElements[groupIndex] as Record<string, unknown>;
   const groupElements = Array.isArray(group.elements) ? group.elements as Array<Record<string, unknown>> : [];
@@ -509,8 +518,8 @@ export function boundLarkCardElements(elements: Array<Record<string, unknown>>):
     return [
       ...mainElements.filter(element => element.element_id === 'task_report'),
       ...meta,
-      { tag: 'markdown', element_id: 'final_output', content: fallbackText.length > 4_000 ? `${fallbackText.slice(0, 3_999)}…` : fallbackText, text_align: 'left', text_size: 'normal_v2', margin: '0px' },
-      { tag: 'markdown', element_id: 'dutydeck_snapshot_omission', content: "<font color='grey'>卡片内容超过飞书限制，过程记录已收起。</font>", text_size: 'x-small', margin: '8px 0px 0px 0px' }
+      { tag: 'markdown', element_id: 'final_output', content: fallbackText.length > 4_000 ? `${Array.from(fallbackText).slice(0, 3_999).join('')}…` : fallbackText, text_align: 'left', text_size: 'normal_v2', margin: '0px' },
+      { tag: 'markdown', element_id: 'dutydeck_snapshot_omission', content: "<font color='grey'>卡片内容超过本地安全预算，过程记录已收起。</font>", text_size: 'x-small', margin: '8px 0px 0px 0px' }
     ];
   }
   return mainElements;
@@ -561,20 +570,21 @@ export function loadLarkBotConfig(env: NodeJS.ProcessEnv = process.env, input: L
   };
 }
 
-const withinCardLimits = (card: unknown) => cardBytes(card) <= larkCardSafeLimits.bytes && countCardComponents(card) <= larkCardSafeLimits.components;
+const withinCardLimits = (card: unknown, fields?: Record<string, unknown>) => larkCardRequestBytes(card, fields) <= larkCardSafeLimits.bytes && countCardComponents(card) <= larkCardSafeLimits.components;
 
-export function buildLarkCard(input: LarkCardInput = {}) {
+export function buildLarkCard(input: LarkCardInput = {}, requestFields?: Record<string, unknown>) {
   const { cardBody, ...hostInput } = input;
-  const base = buildDefaultLarkCard(cardBody ? { ...hostInput, elements: [] } : hostInput);
+  const base = buildDefaultLarkCard(cardBody ? { ...hostInput, elements: [] } : hostInput, requestFields);
   // Preserve custom body handling; the extra budget check only gates optional links.
   const card = cardBody ? { ...base, body: { direction: 'vertical', padding: '10px 12px', ...cardBody } } : base;
   const links = cardBody || input.cardKind ? cardLinkElements(input.cardLinks, input.sessionId) : [];
   if (!links.length) return card;
   const linked = { ...card, body: { ...card.body, elements: [...card.body.elements, ...links] } };
-  return withinCardLimits(linked) ? linked : card;
+  return withinCardLimits(linked, requestFields) ? linked : card;
 }
 
-function buildDefaultLarkCard(input: LarkCardInput) {
+function buildDefaultLarkCard(input: LarkCardInput, requestFields?: Record<string, unknown>) {
+  const withinLimits = (card: unknown) => withinCardLimits(card, requestFields);
   const compactAsk = input.adhdMode === true && input.readOnly === true && !input.cardKind;
   const state = input.state ?? 'running';
   const presentation = statePresentation[state];
@@ -1101,23 +1111,25 @@ function buildDefaultLarkCard(input: LarkCardInput) {
   const mainElements = [...sourceMainElements];
   const omission: TraceOmission = { noticeId: 'dutydeck_omission', omittedGroups: 0 };
   let card = assemble(mainElements);
-  while (!withinCardLimits(card) && trimOldestTraceGroup(mainElements, omission)) card = assemble(mainElements);
-  if (withinCardLimits(card)) return card;
+  while (!withinLimits(card) && trimOldestTraceGroup(mainElements, omission)) card = assemble(mainElements);
+  if (withinLimits(card)) return card;
   const fallbackText = String((sourceMainElements.find(element => element.element_id === 'final_output') as Record<string, unknown> | undefined)?.content
     ?? (sourceMainElements.find(element => element.tag === 'markdown' && !metaIds.has(String(element.element_id ?? ''))) as Record<string, unknown> | undefined)?.content
     ?? content ?? '内容过长');
   // 步骤总数和最后失败的步骤都很小，兜底时照样带上：失败卡不能因为记录被收起就改口说「没有失败的步骤」。
+  const controls = sourceMainElements.filter(hasCardControl);
   const fallbackCard = assemble([
+    ...controls,
     ...sourceMainElements.filter(element => element.element_id === 'task_report'),
     ...sourceMainElements.filter(element => metaIds.has(String(element.element_id ?? ''))),
-    { tag: 'markdown', content: fallbackText.length > 4_000 ? `${fallbackText.slice(0, 3_999)}…` : fallbackText, text_align: 'left', text_size: 'normal_v2', margin: '0px' },
-    { tag: 'markdown', element_id: 'dutydeck_fallback_omission', content: "<font color='grey'>卡片内容超过飞书限制，过程记录已收起。</font>", text_size: 'x-small', margin: '8px 0px 0px 0px' }
+    { tag: 'markdown', content: fallbackText.length > 4_000 ? `${Array.from(fallbackText).slice(0, 3_999).join('')}…` : fallbackText, text_align: 'left', text_size: 'normal_v2', margin: '0px' },
+    { tag: 'markdown', element_id: 'dutydeck_fallback_omission', content: "<font color='grey'>卡片内容超过本地安全预算，过程记录已收起。</font>", text_size: 'x-small', margin: '8px 0px 0px 0px' }
   ]);
-  if (withinCardLimits(fallbackCard)) return fallbackCard;
+  if (withinLimits(fallbackCard)) return fallbackCard;
   // All caller-controlled fields have already been bounded. This last constant-size shape is the
   // hard safety net for unexpected Card schema overhead or deeply nested third-party elements.
   const waitingForApproval = state === 'running' && hasPendingApproval(sourceMainElements);
-  const hardFallbackOmission = { tag: 'markdown', element_id: 'dutydeck_hard_fallback_omission', content: `卡片内容超过飞书安全预算，详细内容已收起。${hardFallbackHint}`, text_size: 'normal' };
+  const hardFallbackOmission = { tag: 'markdown', element_id: 'dutydeck_hard_fallback_omission', content: `卡片内容超过本地安全预算，详细内容已收起。${hardFallbackHint}`, text_size: 'normal' };
   if (isProcessCard || isResultCard) {
     // 与正常布局同形：状态在标题栏标签里，完成的过程卡只留一行回执、不带标题栏。
     const userStatus = userStatusFor(waitingForApproval);
@@ -1143,6 +1155,7 @@ function buildDefaultLarkCard(input: LarkCardInput) {
         elements: [
           ...(isResultCard ? sourceMainElements.filter(element => element.element_id === 'task_report') : []),
           ...(receiptOnly ? [{ tag: 'markdown', element_id: 'task_overview', content: `<font color='${state === 'completed' ? 'green' : state === 'failed' ? 'red' : 'grey'}'>${statusLabel}</font>`, text_size: 'normal', margin: '0px', icon: { tag: 'standard_icon', token: state === 'completed' ? 'done_outlined' : 'close_outlined', color: state === 'completed' ? 'green' : state === 'failed' ? 'red' : 'grey' } }] : []),
+          ...controls,
           hardFallbackOmission,
           ...(detailButton ? [detailButton] : []),
           meta
@@ -1158,12 +1171,23 @@ function buildDefaultLarkCard(input: LarkCardInput) {
       direction: 'vertical', padding: '10px 12px',
       elements: [
         { tag: 'markdown', content: `<text_tag color='${presentation.color}'>${liveTitle}</text_tag>${elapsedSeconds > 0 ? `　<font color='grey'>已用时 ${larkElapsedLabel(elapsedSeconds)}</font>` : ''}`, text_size: 'small' },
+        ...controls,
         hardFallbackOmission,
         ...(detailButton ? [detailButton] : []),
         brandBadge
       ]
     }
   };
+}
+
+function larkCardRequestBody(input: LarkCardInput, fields: Record<string, unknown>) {
+  const card = buildLarkCard(input, fields);
+  const output = input.elements?.find(element => element.element_id === 'final_output')?.content;
+  // 配置中的 Agent 名称等字段可能比投递预检更长；最终正文不能在这里静默变成节选。
+  const lostResult = input.cardKind === 'result' && !input.cardBody && typeof output === 'string'
+    && larkCardFinalOutputText(card.body.elements) !== larkCardShownResult(output);
+  if (!withinCardLimits(card, fields) || lostResult) throw new LarkServiceError('LARK_CARD_BUDGET_EXCEEDED', '卡片内容超过本地安全预算，请缩短内容或改用完整附件。', 400);
+  return { ...fields, content: JSON.stringify(card) };
 }
 
 export class LarkServiceError extends Error {
@@ -1253,14 +1277,13 @@ export class LarkCardService {
       const receiveId = required(chatId ?? input.receiveId ?? this.config.defaultReceiveId, 'chatId, receiveId, LARK_CHAT_ID, or LARK_RECEIVE_ID');
       const resolvedReceiveIdType = receiveIdType(chatId ? 'chat_id' : input.receiveIdType ?? this.config.defaultReceiveIdType);
       const cardInput = await this.cardInput(input);
+      const fields = {
+        receive_id: receiveId, msg_type: 'interactive',
+        ...(input.idempotencyKey?.trim() ? { uuid: larkMessageUuid(input.idempotencyKey.trim()) } : {})
+      };
       const payload = await this.request(`/open-apis/im/v1/messages?receive_id_type=${encodeURIComponent(resolvedReceiveIdType)}`, {
-        onFailure: input.onDeliveryFailure,
-        beforeSend: input.beforeSend, body: {
-          receive_id: receiveId,
-          msg_type: 'interactive',
-          content: JSON.stringify(buildLarkCard({ ...cardInput, agentName: input.agentName ?? this.config.defaultAgentName, showAgentName: input.showAgentName ?? this.config.resolveShowAgentName?.() ?? this.config.showAgentName })),
-          ...(input.idempotencyKey?.trim() ? { uuid: larkMessageUuid(input.idempotencyKey.trim()) } : {})
-        }
+        onFailure: input.onDeliveryFailure, beforeSend: input.beforeSend,
+        body: larkCardRequestBody({ ...cardInput, agentName: input.agentName ?? this.config.defaultAgentName, showAgentName: input.showAgentName ?? this.config.resolveShowAgentName?.() ?? this.config.showAgentName }, fields)
       });
       const messageId = payload.data?.message_id;
       if (!messageId) throw new LarkServiceError('INVALID_LARK_RESPONSE', 'Lark send response did not include message_id', 502);
@@ -1277,14 +1300,13 @@ export class LarkCardService {
       // root 锚点参数——话题锚定由 path 的 message_id 决定。replyInThread=true 且带 replyRootId（话题根
       // 消息 om_*）时，用 replyRootId 作为 path 锚点，让卡片落在话题根下；否则回落到触发消息 messageId。
       const threadAnchor = input.replyInThread && input.replyRootId?.trim() ? input.replyRootId.trim() : messageId;
+      const fields = {
+        msg_type: 'interactive', ...(input.replyInThread ? { reply_in_thread: true } : {}),
+        ...(input.idempotencyKey?.trim() ? { uuid: larkMessageUuid(input.idempotencyKey.trim()) } : {})
+      };
       const payload = await this.request(`/open-apis/im/v1/messages/${encodeURIComponent(threadAnchor)}/reply`, {
-        onFailure: input.onDeliveryFailure,
-        beforeSend: input.beforeSend, body: {
-          msg_type: 'interactive',
-          content: JSON.stringify(buildLarkCard({ ...cardInput, agentName: input.agentName ?? this.config.defaultAgentName, showAgentName: input.showAgentName ?? this.config.resolveShowAgentName?.() ?? this.config.showAgentName })),
-          ...(input.replyInThread ? { reply_in_thread: true } : {}),
-          ...(input.idempotencyKey?.trim() ? { uuid: larkMessageUuid(input.idempotencyKey.trim()) } : {})
-        }
+        onFailure: input.onDeliveryFailure, beforeSend: input.beforeSend,
+        body: larkCardRequestBody({ ...cardInput, agentName: input.agentName ?? this.config.defaultAgentName, showAgentName: input.showAgentName ?? this.config.resolveShowAgentName?.() ?? this.config.showAgentName }, fields)
       });
       const replyId = payload.data?.message_id;
       if (!replyId) throw new LarkServiceError('INVALID_LARK_RESPONSE', 'Lark reply response did not include message_id', 502);
@@ -1297,7 +1319,7 @@ export class LarkCardService {
       const messageId = required(input.messageId, 'messageId');
       const cardInput = await this.cardInput(input);
       const payload = await this.request(`/open-apis/im/v1/messages/${encodeURIComponent(messageId)}`, {
-        beforeSend: input.beforeSend, method: 'PATCH', body: { content: JSON.stringify(buildLarkCard({ ...cardInput, taskId: input.taskId ?? messageId, agentName: input.agentName ?? this.config.defaultAgentName, showAgentName: input.showAgentName ?? this.config.resolveShowAgentName?.() ?? this.config.showAgentName })) }
+        beforeSend: input.beforeSend, method: 'PATCH', body: larkCardRequestBody({ ...cardInput, taskId: input.taskId ?? messageId, agentName: input.agentName ?? this.config.defaultAgentName, showAgentName: input.showAgentName ?? this.config.resolveShowAgentName?.() ?? this.config.showAgentName }, {})
       });
       return { messageId: payload.data?.message_id || messageId, chatId: payload.data?.chat_id };
     });

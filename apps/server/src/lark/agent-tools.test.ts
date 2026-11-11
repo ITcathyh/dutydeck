@@ -538,77 +538,54 @@ describe('Agent group collaboration domain service', () => {
     expect(current.getMessage).not.toHaveBeenCalledWith('omt_topic');
   });
 
-  it('derives a deterministic uuid from chat, target and content when no idempotency key is given', async () => {
-    const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  it('persists derived UUIDs and only calls the platform once for each normalized intent', async () => {
     const current = fakeClient({
       listChatMembers: vi.fn(async input => ({
-        items: input.memberTypes?.includes('user')
-          ? [
-              { memberId: 'ou_human', openId: 'ou_human', memberType: 'user' as const, name: '伟哥' },
-              { memberId: 'ou_other', openId: 'ou_other', memberType: 'user' as const, name: '阿强' }
-            ]
-          : [],
-        hasMore: false, securityLimited: false
+        items: input.memberTypes?.includes('user') ? [
+          { memberId: 'ou_human', openId: 'ou_human', memberType: 'user' as const, name: 'Member' },
+          { memberId: 'ou_other', openId: 'ou_other', memberType: 'user' as const, name: 'Other' }
+        ] : [], hasMore: false, securityLimited: false
       }))
     });
     const { tools, token } = await setup({ cli_current: current });
     const sendKey = (index: number) => vi.mocked(current.sendText).mock.calls[index]![0].idempotencyKey!;
     const replyKey = (index: number) => vi.mocked(current.replyText).mock.calls[index]![0].idempotencyKey!;
-
-    // 无 key 时同群同内容重试派生同一 UUID，且为合法 UUID 形态、不超过 50 字符。
-    await tools.send(token, { content: '发布窗口已开启' });
-    await tools.send(token, { content: '发布窗口已开启' });
-    expect(sendKey(0)).toBe(sendKey(1));
-    expect(sendKey(0)).toMatch(uuidPattern);
+    const first = await tools.send(token, { content: 'window open' });
+    expect(await tools.send(token, { content: 'window open' })).toEqual(first);
+    expect(await tools.send(token, { content: '  window open  ' })).toEqual(first);
+    expect(current.sendText).toHaveBeenCalledTimes(1);
+    expect(sendKey(0)).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
     expect(sendKey(0)).toHaveLength(36);
     expect(sendKey(0).length).toBeLessThanOrEqual(50);
     expect(sendKey(0)).not.toContain('dutydeck-');
-
-    // 内容首尾空白归一化不会绕过合并；内容不同一定不同值。
-    await tools.send(token, { content: '  发布窗口已开启  ' });
-    expect(sendKey(2)).toBe(sendKey(0));
-    await tools.send(token, { content: '发布窗口已关闭' });
-    expect(sendKey(3)).not.toBe(sendKey(0));
-
-    // --to 目标参与指纹：trim 归一化后同目标同值，不同目标不同值。
-    await tools.send(token, { content: '请处理', to: ' 伟哥 ' });
-    await tools.send(token, { content: '请处理', to: '伟哥' });
-    expect(sendKey(4)).toBe(sendKey(5));
-    await tools.send(token, { content: '请处理', to: '阿强' });
-    expect(sendKey(6)).not.toBe(sendKey(4));
-
-    // 回复目标与话题形态参与指纹：同目标同值，换回复消息或换话题形态不同值。
-    await tools.send(token, { content: '收到', replyTo: 'om_root', inThread: true });
-    await tools.send(token, { content: '收到', replyTo: 'om_root', inThread: true });
-    expect(replyKey(0)).toBe(replyKey(1));
-    await tools.send(token, { content: '收到', replyTo: 'om_other', inThread: true });
+    await tools.send(token, { content: 'window closed' });
+    expect(sendKey(1)).not.toBe(sendKey(0));
+    await tools.send(token, { content: 'handle', to: ' Member ' });
+    await tools.send(token, { content: 'handle', to: 'member' });
+    expect(current.sendText).toHaveBeenCalledTimes(3);
+    await tools.send(token, { content: 'handle', to: 'Other' });
+    expect(sendKey(3)).not.toBe(sendKey(2));
+    await tools.send(token, { content: 'ack', replyTo: 'om_root', inThread: true });
+    await tools.send(token, { content: 'ack', replyTo: 'om_root', inThread: true });
+    expect(current.replyText).toHaveBeenCalledTimes(1);
+    await tools.send(token, { content: 'ack', replyTo: 'om_other', inThread: true });
+    expect(replyKey(1)).not.toBe(replyKey(0));
+    await tools.send(token, { content: 'ack', replyTo: 'om_root' });
     expect(replyKey(2)).not.toBe(replyKey(0));
-    await tools.send(token, { content: '收到', replyTo: 'om_root' });
-    expect(replyKey(3)).not.toBe(replyKey(0));
-
-    // 显式 key trim 后原样优先，不改写为派生 UUID。
-    await tools.send(token, { content: '发布窗口已开启', idempotencyKey: '  agent-supplied-key  ' });
-    expect(sendKey(7)).toBe('agent-supplied-key');
-    expect(sendKey(7)).not.toMatch(uuidPattern);
-
-    // 超长内容仍稳定且 UUID 长度不受内容长度影响。
-    const longContent = '很长'.repeat(5_000);
+    await tools.send(token, { content: 'window open', idempotencyKey: '  agent-supplied-key  ' });
+    expect(sendKey(4)).toBe('agent-supplied-key');
+    const longContent = 'long'.repeat(5_000);
     await tools.send(token, { content: longContent });
     await tools.send(token, { content: longContent });
-    expect(sendKey(8)).toBe(sendKey(9));
-    expect(sendKey(8)).toMatch(uuidPattern);
-    expect(sendKey(8).length).toBeLessThanOrEqual(50);
-
-    // 不同群即使会话与内容相同也不复用 UUID。
+    expect(current.sendText).toHaveBeenCalledTimes(6);
+    expect(sendKey(5)).toHaveLength(36);
     const other = fakeClient();
     const otherSetup = await setup({ cli_current: other }, undefined, undefined, 'oc_other');
-    await otherSetup.tools.send(otherSetup.token, { content: '发布窗口已开启' });
+    await otherSetup.tools.send(otherSetup.token, { content: 'window open' });
     expect(vi.mocked(other.sendText).mock.calls[0]![0].idempotencyKey).not.toBe(sendKey(0));
-
-    // 同群不同会话即使内容完全相同也不复用 UUID，避免两条独立回复被平台折叠。
     const otherSession = fakeClient();
     const sessionSetup = await setup({ cli_current: otherSession }, undefined, undefined, 'oc_group', 'ses_other');
-    await sessionSetup.tools.send(sessionSetup.token, { content: '发布窗口已开启' });
+    await sessionSetup.tools.send(sessionSetup.token, { content: 'window open' });
     expect(vi.mocked(otherSession.sendText).mock.calls[0]![0].idempotencyKey).not.toBe(sendKey(0));
   });
 
@@ -618,22 +595,71 @@ describe('Agent group collaboration domain service', () => {
     const { tools, token } = await setup({ cli_current: current }, undefined, undefined, 'oc_group', 'ses_lark', { workbenchTask: () => active });
     const sendKey = (index: number) => vi.mocked(current.sendText).mock.calls[index]![0].idempotencyKey!;
     const replyKey = (index: number) => vi.mocked(current.replyText).mock.calls[index]![0].idempotencyKey!;
-
-    // 同一轮内重试仍去重。
-    await tools.send(token, { content: '今日无新增告警' });
-    await tools.send(token, { content: '今日无新增告警' });
-    expect(sendKey(1)).toBe(sendKey(0));
-    await tools.send(token, { content: '收到', replyTo: 'om_root' });
-    // 同一任务换了尝试、或换了任务，都是新的一轮，键不同。
+    await tools.send(token, { content: 'no alerts' });
+    await tools.send(token, { content: 'no alerts' });
+    expect(current.sendText).toHaveBeenCalledTimes(1);
+    await tools.send(token, { content: 'ack', replyTo: 'om_root' });
     active.attemptId = 'attempt-two';
-    await tools.send(token, { content: '今日无新增告警' });
-    expect(sendKey(2)).not.toBe(sendKey(0));
-    await tools.send(token, { content: '收到', replyTo: 'om_root' });
+    await tools.send(token, { content: 'no alerts' });
+    expect(sendKey(1)).not.toBe(sendKey(0));
+    await tools.send(token, { content: 'ack', replyTo: 'om_root' });
     expect(replyKey(1)).not.toBe(replyKey(0));
     active.taskId = 'task-two';
-    await tools.send(token, { content: '今日无新增告警' });
-    expect(sendKey(3)).not.toBe(sendKey(2));
-    expect(sendKey(3)).not.toBe(sendKey(0));
+    await tools.send(token, { content: 'no alerts' });
+    expect(sendKey(2)).not.toBe(sendKey(1));
+    expect(sendKey(2)).not.toBe(sendKey(0));
+  });
+
+  it('rejects explicit-key intent changes including reply position and resolved mentions', async () => {
+    const current = fakeClient({ listChatMembers: vi.fn(async input => ({ items: input.memberTypes?.includes('user') ? [
+      { memberId: 'ou_one', openId: 'ou_one', memberType: 'user' as const, name: 'Member' },
+      { memberId: 'ou_two', openId: 'ou_two', memberType: 'user' as const, name: 'Other' }
+    ] : [], hasMore: false, securityLimited: false })) });
+    const f = await setup({ cli_current: current });
+    const intent = { content: 'hello', to: 'Member', replyTo: 'om_root', inThread: true, idempotencyKey: 'same-key' };
+    await f.tools.send(f.token, intent);
+    for (const changed of [{ content: 'changed' }, { to: 'Other' }, { replyTo: 'om_other' }, { inThread: false }]) {
+      await expect(f.tools.send(f.token, { ...intent, ...changed })).rejects.toMatchObject({ code: 'GROUP_SEND_CONTENT_CONFLICT' });
+    }
+    vi.mocked(current.listChatMembers).mockImplementation(async input => ({ items: input.memberTypes?.includes('user') ? [
+      { memberId: 'ou_new', openId: 'ou_new', memberType: 'user' as const, name: 'Member' }
+    ] : [], hasMore: false, securityLimited: false }));
+    await expect(f.tools.send(f.token, intent)).rejects.toMatchObject({ code: 'GROUP_SEND_CONTENT_CONFLICT' });
+    expect(current.replyText).toHaveBeenCalledTimes(1);
+  });
+
+  it('rechecks the bound turn after the persistent attempt claim and before calling the platform', async () => {
+    const current = fakeClient();
+    const active = { taskId: 'task-one', attemptId: 'attempt-one', actorId: 'ou_owner' };
+    const f = await setup({ cli_current: current }, undefined, undefined, 'oc_group', 'ses_lark', { workbenchTask: () => active });
+    const turn = f.capabilities.workbenchTurnToken('ses_lark', active.taskId, active.attemptId);
+    const cas = f.repos.config.compareAndSet!.bind(f.repos.config);
+    vi.spyOn(f.repos.config, 'compareAndSet').mockImplementation(async (key, expected, value) => {
+      const saved = await cas(key, expected, value);
+      if (key.startsWith('lark.send.') && JSON.parse(value).firstAttemptAt !== undefined) active.attemptId = 'attempt-two';
+      return saved;
+    });
+    const send = new Promise((resolve, reject) => f.tools.runInRequestScope(() => {
+      void (async () => { await f.tools.bindRequestTurn(f.token, turn); return f.tools.send(f.token, { content: 'old turn' }); })().then(resolve, reject);
+    }));
+    await expect(send).rejects.toMatchObject({ code: 'GROUP_SEND_RESULT_UNKNOWN' });
+    expect(current.sendText).not.toHaveBeenCalled();
+  });
+
+  it('checks current read permission and reply scope before returning an old receipt', async () => {
+    let readAllowed = true;
+    const current = fakeClient();
+    const f = await setup({ cli_current: current }, undefined, undefined, 'oc_group', 'ses_lark', {
+      authorizeTool: async (_sessionId, action) => { if (action === 'group_tools.read' && !readAllowed) throw new AgentGroupToolError('REVOKED', 'revoked', 403); }
+    });
+    const input = { content: 'hello', replyTo: 'om_root', idempotencyKey: 'receipt' };
+    await f.tools.send(f.token, input);
+    readAllowed = false;
+    await expect(f.tools.send(f.token, input)).rejects.toMatchObject({ code: 'REVOKED' });
+    readAllowed = true;
+    vi.mocked(current.getMessage).mockResolvedValue({ ...message('om_root', '1000', 'original'), chatId: 'oc_elsewhere' });
+    await expect(f.tools.send(f.token, input)).rejects.toMatchObject({ code: 'GROUP_REPLY_OUT_OF_SCOPE' });
+    expect(current.replyText).toHaveBeenCalledTimes(1);
   });
 
   it('sends the same file again in a later turn instead of replaying the earlier delivery', async () => {

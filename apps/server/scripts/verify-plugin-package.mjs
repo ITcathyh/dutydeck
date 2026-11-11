@@ -1,10 +1,12 @@
 // Run after pnpm build. Exercises the published layout, without workspace packages or tsx.
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createServer } from 'node:http';
+import { promisify } from 'node:util';
 
 const server = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const temp = await mkdtemp(join(tmpdir(), 'dutydeck-plugin-package-'));
@@ -25,6 +27,30 @@ try {
   }
   assert.equal(Object.keys(metadata.dependencies).some(name => name.startsWith('@dutydeck/')), false);
   await readFile(join(pkg, 'dist/assets/plugin-validation/cli.js'));
+  const relayRequests = [];
+  const relayServer = createServer(async (request, response) => {
+    if (request.method !== 'POST' || !/^\/api\/relay\/sessions\/self\/(ask|ask-result|ask-wait)$/.test(request.url ?? '')) { response.writeHead(404).end(); return; }
+    let body;
+    try { const chunks = []; for await (const chunk of request) chunks.push(chunk); body = JSON.parse(Buffer.concat(chunks)); }
+    catch { request.destroy(); return; }
+    relayRequests.push({ path: request.url, body });
+    response.setHeader('content-type', 'application/json');
+    response.end(JSON.stringify(request.url.endsWith('/ask-wait')
+      ? { status: 'cancelled', askId: 'ask_fixture', reason: 'original attempt ended' }
+      : { status: 'answered', answer: 'saved answer', askId: 'ask_fixture', requestId: body.requestId, continuation: request.url.endsWith('/ask') ? 'available' : 'ended', expiresAt: new Date(Date.now() + 60_000).toISOString() }));
+  });
+  await new Promise(resolve => relayServer.listen(0, '127.0.0.1', resolve));
+  try {
+    const invokeRelay = args => promisify(execFile)(process.execPath, [join(pkg, 'dist/cli.js'), 'session', ...args], { cwd: temp,
+      env: { PATH: process.env.PATH, HOME: temp, NO_COLOR: '1', dutydeck_relay_url: `http://127.0.0.1:${relayServer.address().port}/api/relay`, dutydeck_relay_token: 'package-fixture' } });
+    const asked = await invokeRelay(['ask', 'Proceed?', '--request-id', 'saved-id']);
+    assert.equal(asked.stdout, 'saved answer\n'); assert.equal(asked.stderr, 'requestId: saved-id\n');
+    assert.deepEqual(relayRequests[0], { path: '/api/relay/sessions/self/ask', body: { requestId: 'saved-id', question: 'Proceed?' } });
+    const result = await invokeRelay(['ask-result', 'saved-id', '--json']);
+    assert.equal(JSON.parse(result.stdout).continuation, 'ended');
+    await assert.rejects(invokeRelay(['ask-wait', 'saved-id']), error => error.code === 3 && error.stdout === '' && error.stderr.includes('original attempt ended'));
+    assert.deepEqual(relayRequests.map(request => request.path.split('/').pop()), ['ask', 'ask-result', 'ask-result', 'ask-wait']);
+  } finally { await new Promise(resolve => relayServer.close(resolve)); }
   const source = join(temp, 'source'), database = join(temp, 'data/dutydeck.db');
   await mkdir(join(source, '.dutydeck-plugin'), { recursive: true });
   const fixture = async (version, provider = 'export default api => api.registerHookHandler("notify", async () => ({}));') => {

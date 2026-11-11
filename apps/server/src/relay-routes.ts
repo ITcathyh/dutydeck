@@ -9,6 +9,8 @@ import {
   RelayError,
   RelayService,
   type RelayEventPublisher,
+  type RelayContinuationChecker,
+  type RelayAskLifecycleWatcher,
   type RelayPublishInput
 } from '@dutydeck/relay';
 import { HookPermissionRequests } from './permission-hook.js';
@@ -20,17 +22,40 @@ export interface RelayRoutesOptions {
   broker?: RelayAskBroker;
   service?: RelayService;
   permissions?: HookPermissionRequests;
+  continuation?: RelayContinuationChecker;
   authorize?(request: FastifyRequest, sessionId: string, action: 'task.view_result' | 'turn.append'): Promise<void>;
 }
 
 /** Only child-to-host relay calls use the session HMAC as their sole credential. */
 export const isRelayCapabilityRequest = (method: string, pathname: string) =>
   method.toUpperCase() === 'POST'
-  && /^\/api\/relay\/sessions\/[^/]+\/(?:send|ask|report|deferred-ack|herdr|permission)$/.test(pathname);
+  && /^\/api\/relay\/sessions\/[^/]+\/(?:send|ask|ask-result|ask-wait|report|deferred-ack|herdr|permission)$/.test(pathname);
 
 /** 会话进入这些状态时，把该会话所有阻塞中的 ask 唤醒 */
 const terminalStates = new Set(['stopped', 'failed']);
 const endedTaskStates = new Set(['completed', 'failed', 'interrupted', 'cancelled', 'reconcile_required']);
+
+/** Keep questions tied to owner lifecycle even with no connected HTTP waiter. */
+export const createRelayAskLifecycleWatcher = (runtime: DutydeckRuntime): RelayAskLifecycleWatcher => (record, changed) =>
+  runtime.subscribe(record.sessionId, event => { if (event.type === 'task' || event.type === 'status') changed(); });
+
+/** Reconnection checks the saved owner, never adopts the current task as its owner. */
+export function createRelayContinuationChecker(runtime: DutydeckRuntime, authorized?: (sessionId: string) => Promise<boolean>): RelayContinuationChecker {
+  return async record => {
+    try {
+      const session = await runtime.getSession(record.sessionId);
+      if (!session || session.archivedAt || terminalStates.has(session.state)) return 'ended';
+      if (authorized && !await authorized(record.sessionId)) return 'ended';
+      if (!record.taskId) return 'available';
+      const recovery = await runtime.getTaskRecovery(record.sessionId, record.taskId);
+      if (recovery.status === 'reconcile_required' || recovery.resolvedUnknown || recovery.blockers.length) return 'unknown';
+      if (recovery.status !== 'running') return 'ended';
+      const owner = runtime.getActiveTaskContext(record.sessionId);
+      if (!record.attemptId || !owner?.attemptId) return 'unknown';
+      return owner.taskId === record.taskId && owner.attemptId === record.attemptId ? 'available' : 'ended';
+    } catch { return 'unknown'; }
+  };
+}
 
 /**
  * 事件流投递适配器：把 relay 的抽象消息映射成 runtime 的 `text` 事件。
@@ -55,7 +80,7 @@ function createRuntimePublisher(runtime: DutydeckRuntime): RelayEventPublisher {
         text: input.text,
         relay: input.kind,
         ...(input.askId ? { askId: input.askId } : {})
-      });
+      }, input.eventId);
     }
   };
 }
@@ -86,6 +111,7 @@ export function registerRelayRoutes(app: FastifyInstance, options: RelayRoutesOp
       ? new RelayService(capabilities, createRuntimePublisher(runtime), broker)
       : undefined);
   if (!service || !broker) return;
+  if (runtime) broker.setContinuationChecker(options.continuation ?? createRelayContinuationChecker(runtime), createRelayAskLifecycleWatcher(runtime));
 
   const deferredTurns = new Map<string, { sessionId: string; taskId: string; attemptId: string; timer?: NodeJS.Timeout; ended?: Promise<void> }>();
   const endDeferredTurn = (askId: string) => {
@@ -150,7 +176,7 @@ export function registerRelayRoutes(app: FastifyInstance, options: RelayRoutesOp
     for (const turn of deferredTurns.values()) clearTimeout(turn.timer);
     deferredTurns.clear();
     for (const sessionId of [...watched.keys()]) unwatch(sessionId);
-    // daemon 关停也要唤醒并取消所有等待中的 ask 请求
+    // 关闭等待连接；持久问题保留给重连，旧临时问题仍取消。
     broker.close();
   });
 
@@ -183,14 +209,14 @@ export function registerRelayRoutes(app: FastifyInstance, options: RelayRoutesOp
     } catch (error) { return handleRelayError(error, reply); }
   });
 
-  app.post<{ Params: { id: string }; Body: { question?: string; timeoutMs?: number } }>('/api/relay/sessions/:id/ask', async (request, reply) => {
+  app.post<{ Params: { id: string }; Body: { requestId?: string; question?: string; timeoutMs?: number } }>('/api/relay/sessions/:id/ask', async (request, reply) => {
     let release: (() => void) | undefined;
     try {
       // 首次 await 前用已验签的身份绑定任务和监听；异步存活查询期间任务可能已结束并清除 activeTask。
       const capability = service.verifySession(request.headers.authorization, request.params.id);
       const owner = runtime?.getActiveTaskContext(capability.sessionId);
       const controller = new AbortController();
-      // 提问方断开（进程被杀、客户端超时）后没人再等答案：撤掉提问，免得提问卡挂着、回答落空。
+      // 断线撤掉本次等待；无 requestId 的旧提问仍随连接取消，持久提问保留。
       reply.raw.once('close', () => { if (!reply.raw.writableFinished) controller.abort('提问方已断开'); });
       release = watchSession(capability.sessionId, { ...owner, controller });
       await service.resolveSession(request.headers.authorization, request.params.id);
@@ -221,6 +247,24 @@ export function registerRelayRoutes(app: FastifyInstance, options: RelayRoutesOp
     } catch (error) { return handleRelayError(error, reply); }
     finally { release?.(); }
   });
+
+  for (const action of ['ask-result', 'ask-wait'] as const) {
+    app.post<{ Params: { id: string }; Body: { requestId?: string } }>(`/api/relay/sessions/:id/${action}`, async (request, reply) => {
+      let release: (() => void) | undefined;
+      try {
+        const capability = await service.resolveSession(request.headers.authorization, request.params.id);
+        const requestId = request.body?.requestId;
+        if (typeof requestId !== 'string' || Object.keys(request.body ?? {}).some(key => key !== 'requestId')) throw new RelayError('RELAY_INVALID_REQUEST_ID', '只接受 requestId。', 400);
+        const record = await broker.result(capability.sessionId, requestId);
+        if (action === 'ask-result') return record;
+        const controller = new AbortController();
+        reply.raw.once('close', () => { if (!reply.raw.writableFinished) controller.abort('等待连接已断开'); });
+        release = watchSession(capability.sessionId, { taskId: record.taskId, attemptId: record.attemptId, controller });
+        return await broker.wait(capability.sessionId, requestId, controller.signal);
+      } catch (error) { return handleRelayError(error, reply); }
+      finally { release?.(); }
+    });
+  }
 
   // Claude PermissionRequest hook 的短轮询入口：首次带工具事实登记，之后带 permissionId 续等，直到拿到裁决。
   const permissions = options.permissions ?? (runtime ? new HookPermissionRequests(runtime) : undefined);

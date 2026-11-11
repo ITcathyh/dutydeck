@@ -310,6 +310,10 @@ dutydeck plugin-tool call private-export/export-report --json '{"reportId":"week
 - 可选 PR 方法，`/pr` 和 Web「开 PR」会实际用到：`createPullRequest`（开 PR）、`listReviewComments`（读评审意见）、`postComment`（回复），以及 `getPullRequest(repository, number)`，返回 `{ state: 'open' | 'closed' | 'merged', headSha?, headBranch?, baseBranch?, headRepository?, title?, url? }`，用来发现 PR 已合并或关闭。同时给出 `headBranch` 和 `headRepository` 的插件才支持 `/pr follow` 认领已有 PR；`headRepository` 与工作区仓库不一致时按来自 fork 拒绝认领，没给时无法排除 fork，也拒绝认领。没实现 `getPullRequest` 的插件只能靠 webhook 的 merge_request 事件发现合并或关闭；两者都没有时，跟进会一直轮询，直到达到轮次上限或有人手动停止。`listReviewComments` 返回的每条 `CiReviewComment` 带 `trusted`、`isBot`、`authorAssociation`：**不给 `trusted: true` 的评论不会被自动处理**，只会发“需要你决定”卡片。github 插件的判定是 `author_association` 为 OWNER、MEMBER、COLLABORATOR 之一且不是 Bot 账号。`postComment` 返回的 `id` 要和 `listReviewComments` 里同一条评论的 `id` 写法一致，否则会把自己的回复当成新评论；
 - 可选 `webhook: { verify(req), parse(req) }`：`verify` 可返回 `signedAt`（宿主据此做 5 分钟重放窗口）；`parse` 返回统一的 `CiWebhookEvent`，请求体有问题时抛出 `statusCode: 400`。事件里 `timeIsAdvisory: true` 表示 `occurredAt` 只用于排序，不做重放窗口检查。缺哪个可选方法，对应能力就不可用。
 
+CI webhook 校验通过后，宿主先在同一数据库事务内保存规范化事件与当时匹配的订阅 ID，提交后才返回 `accepted`。处理途中退出时，重启只补尚未接纳的订阅；已保存的修复或续作任务沿现有任务账本恢复，不重放整条事件，也不把后建订阅加进旧事件。恢复会重查提供方、订阅、会话及任务授权；取消或失效的目标不会执行。订阅的待处理流水线队列满时，事件仍保留待接纳，后续维护轮次继续处理。
+
+同一事件 ID 在去重保留期内改换内容会返回冲突。待接纳事件不会因去重 TTL 到期被删除；已接纳完成的记录过期后可以清理，因此去重保证不跨越记录清理。插件 trigger 的纯去重记录保持原语义，`/pr` 跟进仍是尽力通知，不承诺这两条链路具备同样的持久恢复保证。
+
 仓库自带两个 CI 插件（从源码检出目录安装；npm 发布包里不带它们）：
 
 | 插件 | 提供 | 配置项 |

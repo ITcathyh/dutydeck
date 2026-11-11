@@ -1,11 +1,19 @@
-/**
- * CI webhook 的短期记录：event-id 去重和修复任务绑定。
- * 过期或任务结束后物理删除，行数只随在途事件和任务变化，不随历史累积。
- */
+export interface CiWebhookPendingEvent {
+  eventKey: string;
+  providerId: string;
+  payloadJson: string;
+  receivedAt: number;
+  targets: string[];
+}
+
+/** CI event admission and task bindings. Pending admissions survive the deduplication TTL. */
 export interface CiWebhookRepository {
-  /** 先删掉已过期的去重记录，再占用 event-id；TTL 内已被占用时返回 false。 */
+  acceptEvent(input: { eventKey: string; providerId: string; payloadJson: string; targets: string[]; now: number; expiresAt: number }): 'accepted' | 'duplicate' | 'conflict';
+  listPendingEvents(): CiWebhookPendingEvent[];
+  commitTarget(input: { eventKey: string; subscriptionId: string; configKey: string; expectedConfig: string | undefined; nextConfig?: string; state: 'admitted' | 'skipped' }): boolean;
+  /** 清理已过期且无待接纳目标的记录，再占用 event-id。 */
   claimEvent(eventKey: string, now: number, expiresAt: number): boolean;
-  /** 处理失败时只删自己这次的占用，让发送方重试。 */
+  /** 只释放纯去重记录，不删除已持久接纳的事件。 */
   releaseEvent(eventKey: string, expiresAt: number): void;
   bindTask(taskId: string, subscriptionId: string, createdAt: number): void;
   taskSubscription(taskId: string): string | undefined;

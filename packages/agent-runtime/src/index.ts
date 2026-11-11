@@ -13,6 +13,7 @@ import { PersistentEventPublisher, type SubscribeOptions, type EventListener } f
 import { digest, eventJson, DriverConfigurationLedger, LocalDriverLedger, type ExecutionOptions } from './ledger.js';
 import { localOnlyDriverContext } from './driver-context.js';
 import { agentAuthFailure, agentLoginProblem, defaultAgentStatusCheck, type AgentStatusCheck, type AgentUnavailable } from './agent-availability.js';
+import { IdleCpuWindow, IDLE_CPU_MIN_IDLE_MS, sameIdleCpuProof } from './idle-cpu.js';
 import { WorkspaceManager } from './workspace.js';
 import { cachedRepositoryFingerprint, VerificationManager } from './verification.js';
 import { owner, RevokedOperation, SessionMutations, type Owner } from './ownership.js';
@@ -154,6 +155,7 @@ export interface RuntimeOptions {
   terminalBackend?: () => Promise<'tmux' | 'herdr'>;
   probe?: typeof probeAgent;
   driverIdleTimeoutMs?: number;
+  driverIdleCpuAction?: 'off' | 'diagnose' | 'retire';
   cleanupIntervalMs?: number;
   configureAgent?: (agent: AgentConfig, session: Session) => Promise<AgentConfig>;
   sessionEnvironment?: (session: Session) => Record<string, string>;
@@ -386,7 +388,7 @@ export class DutydeckRuntime {
       return new JsonlTransport(agent, { onEvent, onExit, context });
     });
     if (!options.driverFactory) this.factory.controlledResources = protocol => protocol === 'acp' || protocol === 'jsonl' || protocol === 'pipe';
-    // 空闲驱动回收（driverIdleTimeoutMs 为 0 时跳过）和结果未知任务的提醒、老化结案共用这个维护循环。
+    // 通用闲置回收、空闲 CPU 检查和结果未知任务的提醒、老化结案共用这个维护循环。
     if (interval > 0) {
       this.cleanupTimer = setInterval(() => { if (this.initialized && !this.shuttingDown) void timeLoop('runtime.cleanup-idle-drivers', options.log, () => this.cleanupIdleDrivers()).catch(error => {
         options.log?.warn({ code: error instanceof RuntimeError ? error.code : 'RUNTIME_MAINTENANCE_FAILED', error }, 'Runtime maintenance loop failed');
@@ -1782,7 +1784,7 @@ export class DutydeckRuntime {
   }
 
   /** Persist descriptive out-of-band events through the same authoritative ledger. */
-  async publishSessionEvent(sessionId: string, type: EventType, data: unknown) {
+  async publishSessionEvent(sessionId: string, type: EventType, data: unknown, eventId?: string) {
     if (['completed', 'status', 'task'].includes(type)) throw new RuntimeError('EXECUTION_EVENT_RESERVED', 'Execution transitions require an explicit ledger command', 409);
     return this.scoped(sessionId, async () => {
     if (this.shuttingDown) throw new RuntimeError('RUNTIME_SHUTTING_DOWN', 'Dutydeck is shutting down', 503);
@@ -1790,7 +1792,7 @@ export class DutydeckRuntime {
     if (this.shuttingDown) throw new RuntimeError('RUNTIME_SHUTTING_DOWN', 'Dutydeck is shutting down', 503);
     if (!session) throw new RuntimeError('SESSION_NOT_FOUND', `Unknown session: ${sessionId}`, 404);
     if (session.archivedAt) throw new RuntimeError('SESSION_ARCHIVED', 'Archived sessions are read-only', 409);
-    return this.mutations.run(undefined, () => this.emit(sessionId, type, data));
+    return this.mutations.run(undefined, () => this.emit(sessionId, type, data, undefined, eventId));
     });
   }
 
@@ -3974,8 +3976,57 @@ export class DutydeckRuntime {
     });
   }
 
+  private readonly idleCpuWindows = new Map<string, { driver: AgentDriver; window: IdleCpuWindow }>();
+
+  private idleCpuBlocked(id: string, driver: AgentDriver): boolean {
+    return this.shuttingDown || this.drivers.get(id) !== driver || this.lifecycle(id).revoked
+      || this.recoveryInFlight(id) || this.blockedDrivers.has(id) || this.retiringDrivers.has(id)
+      || this.steeringSessions.has(id) || this.verifyingSessions.has(id) || this.permissionsForSession(id).length > 0
+      || !!this.options.awaitingAnswer?.(id) || driver.hasBackgroundWork?.() === true
+      || driver.isDetachedForShutdown?.() === true || driver.isIdle?.() !== true
+      || this.repos.execution.getUnresolvedTasks(id).length > 0
+      || this.repos.execution.getSessionExecutions(id).some(value => value.task.status === 'queued' || value.task.status === 'running');
+  }
+
+  private async inspectIdleCpu(id: string, driver: AgentDriver, at: number): Promise<void> {
+    const reset = () => { this.idleCpuWindows.delete(id); };
+    if (!driver.idleCpuProof || !driver.beginIdleCpuRetirement || this.idleCpuBlocked(id, driver)
+      || at - (this.lastActivity.get(id) ?? at) < IDLE_CPU_MIN_IDLE_MS) { reset(); return; }
+    const session = await this.repos.sessions.get(id);
+    if (!session || session.archivedAt || !['idle', 'completed', 'interrupted'].includes(session.state)
+      || this.idleCpuBlocked(id, driver)) { reset(); return; }
+    const proof = driver.idleCpuProof();
+    if (!proof || at - proof.lastInputAt < IDLE_CPU_MIN_IDLE_MS) { reset(); return; }
+    let entry = this.idleCpuWindows.get(id);
+    if (entry?.driver !== driver) { entry = { driver, window: new IdleCpuWindow() }; this.idleCpuWindows.set(id, entry); }
+    const high = entry.window.sample(proof, proof.sampledAt);
+    if (!high) return;
+    const action = this.options.driverIdleCpuAction ?? 'diagnose';
+    if (high.report) this.options.log?.warn({ sessionId: id, code: 'IDLE_CPU_HIGH', action, ratio: high.ratio },
+      'An idle, resumable CLI is continuously using CPU');
+    if (action !== 'retire') return;
+    if (!driver.prepareForIdleRetirement || !await driver.prepareForIdleRetirement()) {
+      this.options.log?.info?.({ sessionId: id, code: 'IDLE_CPU_SKIPPED', reason: 'native-recovery-unprepared' }, 'Idle CPU retirement skipped');
+      reset(); return;
+    }
+    const current = driver.idleCpuProof();
+    if (!current || !sameIdleCpuProof(proof, current) || this.idleCpuBlocked(id, driver)) { reset(); return; }
+    // No await between the final driver input fence and revoking the runtime
+    // lifecycle. New terminal input or queued tasks cannot slip into teardown.
+    if (!driver.beginIdleCpuRetirement(current)) { reset(); return; }
+    reset();
+    await this.finishIdleRetirement(id, driver, this.lifecycle(id));
+    this.options.log?.info?.({ sessionId: id, code: this.drivers.get(id) === driver || this.blockedDrivers.get(id)?.driver === driver ? 'IDLE_CPU_EXIT_UNVERIFIED' : 'IDLE_CPU_RETIRED', ratio: high.ratio },
+      'Idle CPU retirement finished');
+  }
+
   private async cleanupIdleDriversOnce(at: number) {
     const timeout = this.options.driverIdleTimeoutMs ?? 6 * 60 * 60_000;
+    for (const id of this.idleCpuWindows.keys()) if (!this.drivers.has(id)) this.idleCpuWindows.delete(id);
+    if (this.options.driverIdleCpuAction !== 'off') for (const [id, driver] of this.drivers) {
+      try { await this.inspectIdleCpu(id, driver, at); }
+      catch (error) { this.idleCpuWindows.delete(id); this.options.log?.warn({ sessionId: id, code: 'IDLE_CPU_CHECK_FAILED', error }, 'Idle CPU check failed'); }
+    }
     // 单个会话出错只跳过它自己：其余会话照常回收，结果未知提醒照常检查。
     if (timeout > 0) for (const [sessionId, driver] of this.drivers) {
       try { await this.retireIdleDriver(sessionId, driver, at, timeout); }
@@ -3997,6 +4048,9 @@ export class DutydeckRuntime {
       this.options.log?.warn({ sessionId, code: 'IDLE_RETIREMENT_UNPREPARED', idleMs }, 'Retiring an idle driver whose native session could not be confirmed');
     }
     if (this.drivers.get(sessionId) !== driver || this.attempts.has(sessionId) || driver.hasBackgroundWork?.() || this.lifecycle(sessionId) !== lifecycle) return;
+    await this.finishIdleRetirement(sessionId, driver, lifecycle);
+  }
+  private async finishIdleRetirement(sessionId: string, driver: AgentDriver, lifecycle: Owner) {
     const transition = this.transition(sessionId), startedAt = Date.now();
     try {
       await this.revokeSession(sessionId, false, 'interrupted');

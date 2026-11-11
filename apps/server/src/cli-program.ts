@@ -26,6 +26,7 @@ export interface CliOptions {
   database?: string;
   botAppId?: string;
   idleTimeoutMs?: string;
+  driverIdleCpuAction?: 'off' | 'diagnose' | 'retire';
   cleanupIntervalMs?: string;
   larkAppId?: string;
   larkAppSecret?: string;
@@ -133,6 +134,7 @@ export interface UpdateCliOptions {
 }
 
 export interface SessionRelayCliOptions {
+  requestId?: string;
   /** ask 超时秒数 */
   timeout?: string;
   /** 以 JSON 输出结果而非裸答案 */
@@ -284,6 +286,8 @@ export interface CliHandlers {
   sessionHerdr?(args: string[]): void | Promise<void>;
   sessionReport?(options: { status: string; question?: string; summary?: string }): void | Promise<void>;
   sessionSend?(text: string): void | Promise<void>;
+  sessionAskResult?(requestId: string, options: SessionRelayCliOptions): void | Promise<void>;
+  sessionAskWait?(requestId: string, options: SessionRelayCliOptions): void | Promise<void>;
   sessionAsk?(question: string, options: SessionRelayCliOptions): void | Promise<void>;
   sessionNativeAsk?(): void | Promise<void>;
   sessionPermissionHook?(): void | Promise<void>;
@@ -330,6 +334,7 @@ const addServerOptions = (command: Command) => command
   .option('--cwd <directory>', 'Default Agent working directory')
   .option('--database <file>', 'SQLite database path')
   .option('--bot-app-id <appId>', 'Run the bot assigned to a partitioned database')
+  .addOption(new Option('--driver-idle-cpu-action <action>', 'Idle CPU policy (default: diagnose)').choices(['off', 'diagnose', 'retire']))
   .option('--idle-timeout-ms <ms>', 'Release idle Agent drivers (default: 21600000)')
   .option('--cleanup-interval-ms <ms>', 'Idle cleanup interval (default: 300000)')
   .option('--lark-app-id <id>', 'Lark app ID used by /api/lark; defaults to LARK_APP_ID')
@@ -1023,7 +1028,8 @@ alarm=<JSON> (the old flat alarm subscription) still works for one release and i
   session.command('ask')
     .description('Ask the user a question and block until they answer')
     .argument('<question>', 'Question to ask')
-    .option('--timeout <seconds>', 'Seconds to wait for an answer (default: 300)')
+    .option('--request-id <id>', 'Stable request identity; reuse only for the same question and execution attempt')
+    .option('--timeout <seconds>', 'Seconds to wait for an answer (default: 300, maximum: 86400)')
     .option('--choices <json>', 'JSON array of {label, value?} options; card selections return value or label, text replies return verbatim')
     .option('--multiple', 'Allow multiple selections (requires --choices)')
     .option('--json', 'Print the full result as JSON instead of the bare answer')
@@ -1040,6 +1046,17 @@ Examples:
   $ answer=$(dutydeck session ask "要继续发布吗？") && echo "user said: $answer"
   $ dutydeck session ask "选哪个方案？" --choices '[{"label":"方案甲","value":"a"},{"label":"方案乙","value":"b"}]' --timeout 60
   $ dutydeck session ask "要检查哪些项？" --choices '[{"label":"代码"},{"label":"文档"}]' --multiple --json`);
+
+  session.command('ask-result')
+    .description('Read a saved answer and continuation state; this does not authorize execution')
+    .argument('<request-id>', 'Request identity printed by session ask')
+    .option('--json', 'Print the saved request as JSON')
+    .action((requestId, options) => handlers.sessionAskResult?.(requestId, options));
+  session.command('ask-wait')
+    .description('Wait again for the same question while its original execution attempt remains valid')
+    .argument('<request-id>', 'Request identity printed by session ask')
+    .option('--json', 'Print the full result as JSON')
+    .action((requestId, options) => handlers.sessionAskWait?.(requestId, options));
 
   // canonical 命令是 `dutydeck migrate`；`dutydeck botmux` 保留为兼容别名，二者行为完全一致。
   // 别名输出的 JSON command 字段必须保持历史值（botmux.discover/plan/archive），由 action 按 invokedAs 区分。
@@ -1385,6 +1402,7 @@ export function environmentFromCli(options: CliOptions, base: NodeJS.ProcessEnv 
   if (options.cwd !== undefined) env.DUTYDECK_DEFAULT_CWD = options.cwd;
   if (options.database !== undefined) env.DUTYDECK_DATABASE_URL = options.database;
   if (options.botAppId !== undefined) env.DUTYDECK_BOT_APP_ID = options.botAppId;
+  if (options.driverIdleCpuAction !== undefined) env.DUTYDECK_DRIVER_IDLE_CPU_ACTION = options.driverIdleCpuAction;
   if (options.idleTimeoutMs !== undefined) env.DUTYDECK_DRIVER_IDLE_TIMEOUT_MS = options.idleTimeoutMs;
   if (options.cleanupIntervalMs !== undefined) env.DUTYDECK_CLEANUP_INTERVAL_MS = options.cleanupIntervalMs;
   if (options.larkAppId !== undefined) env.LARK_APP_ID = options.larkAppId;

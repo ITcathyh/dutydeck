@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { randomUUID } from 'node:crypto';
 import { runTaskCli, taskError, TaskCliError } from './task-cli.js';
 import { runLarkDisposition } from './lark-disposition-cli.js';
 import { createBackup, inspectBackup, restoreBackup } from './backup.js';
@@ -22,7 +23,7 @@ import { runWorkCommand } from './work-item-cli.js';
 import { AgentCliError, agentCliErrorBody, runAgentCli } from './agent-cli.js';
 import { AgentGroupToolCliError, runAgentCommand, runGroupBots, runGroupHandoff, runGroupMembers, runGroupMessage, runGroupMessages, runGroupPeers, runGroupReplyAgent, runGroupSelf, runGroupSend, runGroupSendFile, runGroupTeamSearch, runGroupWait, runHistoryList, runHistoryShow } from './lark/agent-tools-cli.js';
 import { runMemoryAdd, runMemoryList, runMemoryRemove, runMemorySearch, runMemoryShow } from './lark/memory-cli.js';
-import { acknowledgeDeferredAsk, askOutput, runSessionAsk, runSessionSend, runSessionReport } from './relay-cli.js';
+import { acknowledgeDeferredAsk, askOutput, runSessionAsk, runSessionAskResult, runSessionAskWait, runSessionSend, runSessionReport } from './relay-cli.js';
 import { readNativeAskPayload, runNativeAskHook } from './native-ask-hook.js';
 import { runPermissionHook } from './permission-hook.js';
 import { RelayCliError } from '@dutydeck/relay';
@@ -535,11 +536,20 @@ async function main() {
     sessionAsk: async (question, options) => {
       // ask 有自己的 stdout/退出码契约（答案裸文本走 stdout，提示走 stderr），
       // 不能套用通用的 output()：调用方要能 `answer=$(dutydeck session ask ...)`。
-      const result = await runSessionAsk(question, options);
+      const requestId = options.requestId ?? randomUUID();
+      process.stderr.write(`requestId: ${requestId}\n`);
+      const result = await runSessionAsk(question, { ...options, requestId });
       const rendered = askOutput(result, options.json === true);
       if (rendered.stdout) await new Promise<void>((resolve, reject) => process.stdout.write(rendered.stdout, error => error ? reject(error) : resolve()));
       if (rendered.stderr) await new Promise<void>((resolve, reject) => process.stderr.write(rendered.stderr, error => error ? reject(error) : resolve()));
       if (result.status === 'deferred' && result.askId) await acknowledgeDeferredAsk(result.askId);
+      process.exitCode = rendered.exitCode;
+    },
+    sessionAskResult: async requestId => { output(await runSessionAskResult(requestId)); },
+    sessionAskWait: async (requestId, options) => {
+      const rendered = askOutput(await runSessionAskWait(requestId), options.json === true);
+      if (rendered.stdout) process.stdout.write(rendered.stdout);
+      if (rendered.stderr) process.stderr.write(rendered.stderr);
       process.exitCode = rendered.exitCode;
     },
     databaseExecutionStatus: async options => { output(await runDatabaseExecutionStatus(options)); },

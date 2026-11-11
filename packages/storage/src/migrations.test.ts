@@ -69,7 +69,7 @@ const BUSINESS_TABLES = [
 ]
 
 const SESSION_PATCH_COLUMNS = ['reasoning_effort', 'system_prompt', 'permission_mode', 'source', 'source_id', 'archived_at']
-const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49]
+const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50]
 const temporaryDirectories: string[] = []
 const linuxIt = process.platform === 'linux' ? it : it.skip
 
@@ -1023,7 +1023,7 @@ describe('storage migrations', () => {
       for (const name of ['task_attempts_session_state', 'task_attempts_session_order']) expect(indexNames()).not.toContain(name)
 
       const ci = createCiWebhookRepository(db)
-      expect(ci.claimEvent('event-v27', 1_000, 11_000)).toBe(true)
+      expect(db.prepare('INSERT INTO ci_webhook_events (event_key, expires_at) VALUES (?, ?)').run('event-v27', 11_000).changes).toBe(1)
       ci.bindTask('task-v27', 'subscription-v27', 1_000)
       db.prepare(`INSERT INTO usage_ledger (id, recorded_at, app_id, chat_id, session_id, task_id, attempt_id, actor_id,
         category, origin, agent_id, usage_ref, input_tokens, output_tokens, cost_usd, cumulative_cost_usd, cost_estimated, data_status)

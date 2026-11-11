@@ -10,7 +10,8 @@ import { getTimelineReadingState, saveTimelineReadingState, type TimelineReading
 import { TimelineItem } from './TimelineItem';
 import { useQuery } from '@tanstack/react-query';
 import { api, type DockEvent, type HistoryTurnPlace, type HistoryTurnSummary } from '../api';
-import { HISTORY_TURN_PAGE_SIZE, loadTurnHistory } from '../event-history';
+import { HISTORY_TURN_PAGE_SIZE } from '../event-history';
+import { useHistoryDetail } from '../useHistoryDetail';
 import { buildTimelineSections, createTimelineProjector } from '../timeline';
 import { useTimelineDisclosure } from '../timeline-disclosure';
 import { MarkdownContent } from '../MarkdownContent';
@@ -403,9 +404,8 @@ function HistoryTurn({ sessionId, summary, activeOutputLabel, requestedSource }:
   const [open, setOpen] = useTimelineDisclosure(`history:${summary.id}`, false);
   const requested = requestedSource && requestedSource.sequence >= summary.firstSequence && requestedSource.sequence <= summary.lastSequence;
   useEffect(() => { if (requested) setOpen(true); }, [requestedSource]);
-  const detail = useQuery({ queryKey: ['history-detail', sessionId, summary.firstSequence, summary.lastSequence],
-    queryFn: ({ signal }) => loadTurnHistory(sessionId, summary, signal), enabled: open, staleTime: Infinity });
-  const projector = useMemo(() => createTimelineProjector(), [summary.id]);
+  const detail = useHistoryDetail(sessionId, summary, open);
+  const projector = useMemo(() => createTimelineProjector(), [summary.id, open]);
   const tasks = useQuery({ queryKey: ['tasks', sessionId], queryFn: () => api.tasks(sessionId), enabled: open, staleTime: Infinity });
   const { timeline } = useMemo(() => projector(detail.data ?? [], []), [projector, detail.data]);
   const timelineSections = useMemo(() => buildTimelineSections(timeline, tasks.data ?? [], false), [timeline, tasks.data]);

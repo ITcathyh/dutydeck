@@ -76,7 +76,7 @@ async function repository() {
   return { cwd, head: () => git('rev-parse', 'HEAD'), commit };
 }
 
-async function fixture(options: { autoFix?: boolean; providerId?: string } = {}) {
+async function fixture(options: { autoFix?: boolean; providerId?: string; durable?: boolean } = {}) {
   const repo = await repository();
   const now = { value: Date.parse('2026-09-25T08:00:00.000Z') };
   const session: Session = { id: 'ses_ci', agentId: 'codex', state: 'idle', cwd: repo.cwd, runId: 'run_1', source: 'lark', sourceId: 'cli_app:oc_chat:group', createdAt: '2026-09-25T00:00:00.000Z', updatedAt: '2026-09-25T00:00:00.000Z' };
@@ -95,10 +95,11 @@ async function fixture(options: { autoFix?: boolean; providerId?: string } = {})
   };
   const notices: CiNotice[] = [];
   const notify = vi.fn(async (_sessionId: string, _id: string, notice: CiNotice) => { notices.push(notice); return `om_card_${notices.length}`; });
-  const database = createRepositories(':memory:');
+  const databasePath = options.durable ? join(repo.cwd, '..', 'events.db') : ':memory:';
+  let database = createRepositories(databasePath);
   cleanups.push(async () => database.close());
-  const config = database.config;
-  const ciWebhook = database.ciWebhook;
+  let config = database.config;
+  let ciWebhook = database.ciWebhook;
   const providers = new CiProviderRegistry();
   const providerId = options.providerId ?? 'fake';
   providers.register('fake-plugin', fakeProvider(providerId));
@@ -107,7 +108,11 @@ async function fixture(options: { autoFix?: boolean; providerId?: string } = {})
     runtime, providers, notify, clock: () => new Date(now.value)
   });
   let service = createService();
-  const restart = async () => { await service.close(); service = createService(); return service; };
+  const restart = async () => {
+    await service.close();
+    if (options.durable) { database.close(); database = createRepositories(databasePath); config = database.config; ciWebhook = database.ciWebhook; }
+    service = createService(); return service;
+  };
   const subscription = (await service.subscribe(session.id, { autoFix: options.autoFix ?? true }, 'ou_owner'))!;
   const post = (body: Record<string, unknown>, headers: Record<string, string> = {}) => service.receive(providerId, {
     rawBody: Buffer.from(JSON.stringify(body)),
@@ -124,7 +129,7 @@ async function fixture(options: { autoFix?: boolean; providerId?: string } = {})
     await service.tick();
   };
   const current = async () => (await service.get(subscription.id))!;
-  return { repo, now, session, tasks, dispatches, runtime, notices, config, ciWebhook, providers, get service() { return service; }, restart, subscription, post, pipeline, finishLatest, current };
+  return { repo, now, session, tasks, dispatches, runtime, notices, get config() { return config; }, get ciWebhook() { return ciWebhook; }, providers, get service() { return service; }, restart, subscription, post, pipeline, finishLatest, current };
 }
 
 const unitFailure = [{ job: 'unit-test', stage: 'test', reason: 'script_failure', log: '2026-09-25T08:00:01Z FAIL src/math.test.ts > adds\nAssertionError: expected 3 to be 4' }];
@@ -188,13 +193,17 @@ describe('CI webhook 入口：时间戳与去重', () => {
     expect(await f.post(anonymous)).toMatchObject({ statusCode: 200, body: { duplicate: true } });
   });
 
-  it('处理失败时释放 event-id，发送方重试可以再处理', async () => {
+  it('处理失败后保留已接纳事件，tick 恢复而不要求发送方重试', async () => {
     const f = await fixture();
     const sha = await f.repo.head();
     f.runtime.getSession.mockRejectedValueOnce(new Error('database busy'));
     const event = f.pipeline(sha, 'failed', unitFailure, 'evt-3');
-    await expect(f.post(event)).rejects.toThrow('database busy');
-    expect(await f.post(event)).toMatchObject({ statusCode: 202, body: { accepted: true } });
+    expect(await f.post(event)).toMatchObject({ statusCode: 202, body: { accepted: true, matched: 0 } });
+    expect(f.ciWebhook.listPendingEvents()).toHaveLength(1);
+    expect(await f.post(event)).toMatchObject({ statusCode: 200, body: { duplicate: true } });
+    await f.service.tick();
+    expect(f.dispatches).toHaveLength(1);
+    expect(f.ciWebhook.listPendingEvents()).toHaveLength(0);
   });
 });
 
@@ -412,15 +421,15 @@ describe('CI webhook durable event conflicts', () => {
     const f = await fixture();
     await f.post(f.pipeline(await f.repo.head(), 'failed', unitFailure));
     const fixed = await f.repo.commit();
-    const cas = f.config.compareAndSet!.bind(f.config);
+    const commit = f.ciWebhook.commitTarget.bind(f.ciWebhook);
     let conflicted = false;
-    vi.spyOn(f.config, 'compareAndSet').mockImplementation(async (key, expected, next) => {
-      if (!conflicted && JSON.parse(next).pendingPipelines?.length) {
+    vi.spyOn(f.ciWebhook, 'commitTarget').mockImplementation(input => {
+      if (!conflicted && input.nextConfig && JSON.parse(input.nextConfig).pendingPipelines?.length) {
         conflicted = true;
-        const previous = JSON.parse(expected!);
-        await cas(key, expected, JSON.stringify({ ...previous, revision: previous.revision + 1, mrIid: 12 }));
+        // A concurrent subscription update changed the version used for admission.
+        void f.config.compareAndSet!(input.configKey, input.expectedConfig, JSON.stringify({ ...JSON.parse(input.expectedConfig!), revision: JSON.parse(input.expectedConfig!).revision + 1, mrIid: 12 }));
       }
-      return cas(key, expected, next);
+      return commit(input);
     });
     await f.post(f.pipeline(fixed, 'success'));
     expect(conflicted).toBe(true);
@@ -475,7 +484,7 @@ describe('CI webhook durable event conflicts', () => {
   });
 
   it('OCR-04 ignores unrelated targets, old events and unconfirmed SHAs, with bounded persistence', async () => {
-    const f = await fixture();
+    const f = await fixture({ durable: true });
     const base = await f.repo.head();
     await f.post(f.pipeline(base, 'failed', unitFailure));
     await f.service.authorizeTask([...f.tasks.values()][0]!, 'submit');
@@ -487,12 +496,17 @@ describe('CI webhook durable event conflicts', () => {
     expect((await f.current()).pendingPipelines).toBeUndefined();
     for (let index = 1; index <= 16; index += 1) await f.post(f.pipeline(index.toString(16).padStart(40, '0'), 'success'));
     const success = f.pipeline(fixed, 'success');
-    await expect(f.post(success)).rejects.toMatchObject({ code: 'CI_WEBHOOK_PENDING_LIMIT', statusCode: 503 });
+    expect(await f.post(success)).toMatchObject({ statusCode: 202, body: { accepted: true, matched: 0 } });
+    expect(f.ciWebhook.listPendingEvents()).toHaveLength(1);
     expect((await f.current()).pendingPipelines).toHaveLength(16);
+    await f.restart();
+    expect(f.ciWebhook.listPendingEvents()).toHaveLength(1);
     await f.finishLatest();
     expect(f.dispatches).toHaveLength(1);
     expect(await f.current()).toMatchObject({ status: 'waiting', headSha: fixed, pendingPipelines: [] });
-    expect(await f.post(success)).toMatchObject({ body: { accepted: true, matched: 1 } });
+    expect(await f.post(success)).toMatchObject({ body: { duplicate: true } });
+    await f.service.tick();
+    expect(f.ciWebhook.listPendingEvents()).toHaveLength(0);
     expect(f.dispatches).toHaveLength(2);
   });
 
@@ -613,5 +627,125 @@ describe('插件化之前的订阅记录', () => {
     expect(await f.service.get('legacy_1')).toMatchObject({ status: 'failed' });
     expect(JSON.parse((await f.config.get('ci_webhook/codebase/legacy_1'))!).provider).toBeUndefined();
     expect(f.notices.at(-1)).toMatchObject({ title: 'CI 失败', markdown: expect.stringContaining('Fake CI 失败') });
+  });
+});
+
+
+describe('CI admitted-event recovery across SQLite reopen', () => {
+  it('recovers before the first target and never adds a later subscription to the frozen event', async () => {
+    const f = await fixture({ durable: true });
+    const event = f.pipeline(await f.repo.head(), 'success', [], 'frozen-event');
+    f.runtime.getSession.mockRejectedValueOnce(new Error('exit before target admission'));
+    expect(await f.post(event)).toMatchObject({ body: { accepted: true, matched: 0 } });
+    const second = { ...(await f.current()), id: 'ciw_later' };
+    await f.config.set(`ci_webhook/subscription/${second.id}`, JSON.stringify(second));
+    const restored = await f.restart();
+    expect(f.ciWebhook.listPendingEvents()[0]?.targets).toEqual([f.subscription.id]);
+    // Recovery does not re-verify the expired signature, and the subscription is still live.
+    f.now.value += 10 * 60_000;
+    await restored.tick();
+    expect(f.dispatches).toHaveLength(1);
+    expect((await restored.get(second.id))?.status).toBe('waiting');
+    expect(f.ciWebhook.listPendingEvents()).toHaveLength(0);
+  });
+
+  it('recovers only the remaining target when an already admitted task has finished', async () => {
+    const f = await fixture({ durable: true });
+    const second = { ...(await f.current()), id: 'ciw_zz_second' };
+    await f.config.set(`ci_webhook/subscription/${second.id}`, JSON.stringify(second));
+    const commit = f.ciWebhook.commitTarget.bind(f.ciWebhook);
+    vi.spyOn(f.ciWebhook, 'commitTarget').mockImplementation(input => {
+      if (input.subscriptionId === second.id) throw new Error('exit before second target');
+      return commit(input);
+    });
+    expect(await f.post(f.pipeline(await f.repo.head(), 'success'))).toMatchObject({ body: { accepted: true, matched: 1 } });
+    expect(f.dispatches).toHaveLength(1);
+    [...f.tasks.values()][0]!.status = 'completed';
+    const restored = await f.restart();
+    await restored.tick(); await restored.tick();
+    expect(f.dispatches).toHaveLength(2);
+    expect(await f.current()).toMatchObject({ status: 'passed' });
+    expect((await f.current()).task).toBeUndefined();
+    expect(await restored.get(second.id)).toMatchObject({ status: 'running', task: { kind: 'continue' } });
+    expect(f.ciWebhook.listPendingEvents()).toHaveLength(0);
+  });
+
+  it('resumes the failed action once after admission, without recounting its fingerprint', async () => {
+    const f = await fixture({ durable: true });
+    const commit = f.ciWebhook.commitTarget.bind(f.ciWebhook);
+    vi.spyOn(f.ciWebhook, 'commitTarget').mockImplementation(input => {
+      const result = commit(input);
+      if (result && input.nextConfig && JSON.parse(input.nextConfig).status === 'failed') throw new Error('exit before auto-fix');
+      return result;
+    });
+    const event = f.pipeline(await f.repo.head(), 'failed', unitFailure);
+    expect(await f.post(event)).toMatchObject({ body: { accepted: true } });
+    expect(await f.current()).toMatchObject({ status: 'failed', pendingFailureAction: expect.any(String) });
+    expect(f.dispatches).toHaveLength(0);
+    const restored = await f.restart();
+    await restored.tick(); await restored.tick();
+    expect(f.dispatches).toHaveLength(1);
+    expect(await f.current()).toMatchObject({ status: 'running', rounds: 1 });
+    expect((await f.current()).pendingFailureAction).toBeUndefined();
+    expect(Object.values((await f.current()).fingerprints)).toEqual([1]);
+    expect(await f.post(event)).toMatchObject({ body: { duplicate: true } });
+  });
+
+  it('keeps running-task recovery when exit occurs before bind or dispatch', async () => {
+    const f = await fixture({ durable: true });
+    const commit = f.ciWebhook.commitTarget.bind(f.ciWebhook);
+    vi.spyOn(f.ciWebhook, 'commitTarget').mockImplementation(input => {
+      const result = commit(input);
+      if (result && input.nextConfig && JSON.parse(input.nextConfig).status === 'running') throw new Error('exit before dispatch');
+      return result;
+    });
+    await f.post(f.pipeline(await f.repo.head(), 'success'));
+    const saved = await f.current();
+    expect(saved.status).toBe('running'); expect(f.dispatches).toHaveLength(0);
+    expect(f.ciWebhook.taskSubscription(saved.task!.id)).toBeUndefined();
+    const restored = await f.restart(); f.now.value += 121_000;
+    await restored.tick(); await restored.tick();
+    expect(f.dispatches).toHaveLength(1);
+    expect(f.ciWebhook.taskSubscription(saved.task!.id)).toBe(f.subscription.id);
+    await f.finishLatest(); await restored.tick();
+    expect(await f.current()).toMatchObject({ status: 'passed' });
+    expect(f.dispatches).toHaveLength(1);
+  });
+
+  it.each(['cancelled', 'expired', 'provider-revoked', 'session-stopped'])('guards an accepted target after %s', async state => {
+    const f = await fixture({ durable: true });
+    f.runtime.getSession.mockRejectedValueOnce(new Error('exit before admission'));
+    await f.post(f.pipeline(await f.repo.head(), 'success'));
+    const restored = await f.restart();
+    if (state === 'cancelled') await restored.cancel(f.session.id, f.subscription.id);
+    if (state === 'expired') f.now.value += 24 * 60 * 60_000 + 1;
+    if (state === 'provider-revoked') vi.spyOn(f.providers, 'get').mockReturnValue(undefined);
+    if (state === 'session-stopped') f.session.state = 'stopped';
+    await restored.tick();
+    expect(f.dispatches).toHaveLength(0);
+    expect(f.ciWebhook.listPendingEvents()).toHaveLength(0);
+  });
+
+  it('completes failure evidence independently for each frozen target', async () => {
+    const f = await fixture({ durable: true, autoFix: false });
+    const second = { ...(await f.current()), id: 'ciw_zz_second' };
+    await f.config.set(`ci_webhook/subscription/${second.id}`, JSON.stringify(second));
+    const logs = vi.fn().mockResolvedValueOnce(unitFailure).mockResolvedValueOnce(lintFailure);
+    f.providers.get('fake')!.getFailureLogs = logs;
+    await f.post(f.pipeline(await f.repo.head(), 'failed'));
+    expect(logs).toHaveBeenCalledTimes(2);
+    const first = await f.current(); const other = await f.service.get(second.id);
+    expect(first.failure?.fingerprint).not.toBe(other?.failure?.fingerprint);
+    expect(f.ciWebhook.listPendingEvents()).toHaveLength(0);
+  });
+
+  it('accepts the same ID once under concurrent delivery and rejects a changed payload', async () => {
+    const f = await fixture({ durable: true }); const sha = await f.repo.head();
+    const event = f.pipeline(sha, 'success', [], 'concurrent');
+    const responses = await Promise.all([f.post(event), f.post(event)]);
+    expect(responses.filter(result => result.body.accepted === true)).toHaveLength(1);
+    expect(responses.filter(result => result.body.duplicate === true)).toHaveLength(1);
+    expect(f.dispatches).toHaveLength(1);
+    expect(await f.post({ ...event, status: 'failed' })).toMatchObject({ statusCode: 409, body: { error: { code: 'WEBHOOK_EVENT_CONFLICT' } } });
   });
 });

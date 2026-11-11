@@ -7,7 +7,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { AgentEvent, ConfigRepository, PermissionRequestData, PolicyAction } from '@dutydeck/shared';
 import type { RelayAskBroker, RelayAskChoice, RelayDeferredAsk } from '@dutydeck/relay';
 import type { LarkMessageEvent, LarkRuntime, ListenerLog } from './listener.js';
-import { LarkServiceError, buildLarkCard, larkCardSafeLimits } from './service.js';
+import { LarkServiceError, buildLarkCard, larkCardSafeLimits, larkCardRequestBytes } from './service.js';
 import type { LarkCardService } from './service.js';
 import { safeLarkWebUrl } from './card-actions.js';
 import { countCardComponents } from './card-elements.js';
@@ -54,6 +54,8 @@ export interface LarkInteraction extends LarkInteractionContext {
   question: string;
   state: 'pending' | 'resolving' | 'answered' | 'approved' | 'rejected' | 'expired' | 'accepted' | 'needs_changes';
   cardId?: string;
+  /** Ordinary durable Ask: one platform delivery attempt, including an unknown outcome. */
+  relayDeliveryStartedAt?: string;
   relatedCardIds?: string[];
   expiresAt?: string;
   updatedAt: string;
@@ -409,6 +411,19 @@ export class LarkWorkflowInteractions {
         await this.reconcileConfirmation(record).catch(error => this.log?.warn({ error, requestId: record.id }, 'Recovering durable confirmation failed'));
         continue;
       }
+      const relay = record.kind === 'ask' ? this.broker?.get(record.nativeId) : undefined;
+      if (relay?.mode === 'return-answer') {
+        if (relay.status === 'answered') {
+          record = await this.move(record, 'answered', undefined, this.askAttribution(record, relay.handledBy));
+          await this.renderClosed(record, await this.closedMessage(record));
+          continue;
+        }
+        if (await this.live(record, true)) {
+          if (record.state === 'resolving') await this.move(record, 'pending', undefined);
+          else if (record.state === 'expired') await this.restorePendingAsk(record);
+          continue;
+        }
+      }
       if (record.kind === 'plan' && record.state === 'resolving') {
         // 上个进程提交决定到一半：重新提交（幂等）后收尾。
         await this.finishPlan(record).catch(() => undefined);
@@ -439,6 +454,10 @@ export class LarkWorkflowInteractions {
     }
     await this.schedulePlanCheck(appId);
   }
+  private askAttribution(record: LarkInteraction, handledBy?: string): Partial<LarkInteraction> {
+    if (!handledBy) return {};
+    return handledBy === record.actorId ? { handledBy: undefined } : { handledBy, actorId: undefined };
+  }
   private async expiryMessage(record: LarkInteraction) {
     if (record.kind === 'ask' && record.adhdMode === true) return record.timedOutAt ? '已过期，未执行' : '已结束，未执行';
     // 超时的时刻就是截止时间：停机期间到期、重启后才补做的，也按截止时间写。
@@ -465,7 +484,8 @@ export class LarkWorkflowInteractions {
       }
       if (record.kind === 'ask' && !record.durable && (['pending', 'expired'].includes(record.state) || record.state === 'resolving' && record.boot !== this.boot)) {
         const ask = this.broker?.get(record.nativeId);
-        if (ask?.status === 'answered') record = await this.move(record, 'answered', undefined, { closeMessage: undefined, cardClosedAt: undefined, closeAttempts: 0, closeRetryAt: undefined, ...(ask.handledBy ? { handledBy: ask.handledBy, actorId: undefined } : {}) });
+        if (ask?.status === 'answered') record = await this.move(record, 'answered', undefined, { closeMessage: undefined, cardClosedAt: undefined, closeAttempts: 0, closeRetryAt: undefined, ...this.askAttribution(record, ask.handledBy) });
+        else if (ask?.status === 'pending' && ask.mode === 'return-answer' && record.state === 'resolving' && await this.live(record, true)) record = await this.move(record, 'pending', undefined);
         else if (ask?.status === 'pending' && record.state === 'expired' && await this.live(record, true)) record = await this.restorePendingAsk(record);
       }
       if (record.state === 'pending' && !await this.live(record, true)) {
@@ -619,7 +639,7 @@ export class LarkWorkflowInteractions {
       record = await this.current(record);
       const ask = this.broker?.get(record.nativeId);
       if (record.state === 'pending' && ask && !['pending', 'answering'].includes(ask.status)) {
-        try { record = await this.move(record, ask.status === 'answered' ? 'answered' : 'expired', undefined, ask.handledBy ? { handledBy: ask.handledBy, actorId: undefined } : {}); }
+        try { record = await this.move(record, ask.status === 'answered' ? 'answered' : 'expired', undefined, this.askAttribution(record, ask.handledBy)); }
         catch (error) {
           if (!(error instanceof LarkServiceError) || error.code !== 'LARK_INTERACTION_EXPIRED') throw error;
           record = await this.current(record);
@@ -799,7 +819,8 @@ export class LarkWorkflowInteractions {
     return next;
   }
   private interactionId(context: LarkInteractionContext, kind: LarkInteraction['kind'], nativeId: string) {
-    return createHash('sha256').update([context.appId, context.sessionId, context.taskId, context.turn, kind, nativeId, kind === 'result' || kind === 'plan' ? '' : this.boot].join('\0')).digest('hex').slice(0, 24);
+    const persistentAsk = kind === 'ask' && this.broker?.get(nativeId)?.mode === 'return-answer';
+    return createHash('sha256').update([context.appId, context.sessionId, context.taskId, context.turn, kind, nativeId, kind === 'result' || kind === 'plan' || persistentAsk ? '' : this.boot].join('\0')).digest('hex').slice(0, 24);
   }
   private async create(
     context: LarkInteractionContext,
@@ -866,7 +887,8 @@ export class LarkWorkflowInteractions {
       if (receipt?.status !== 'answered' || receipt.sessionId !== context.sessionId) return;
       for (const record of await this.list(context.appId)) {
         if (record.kind !== 'ask' || record.durable || record.sessionId !== context.sessionId || record.nativeId !== data.askId || !['pending', 'resolving', 'expired'].includes(record.state)) continue;
-        const answered = await this.move(record, 'answered', undefined, { handledBy: receipt.handledBy, actorId: undefined, closeMessage: undefined, cardClosedAt: undefined, closeAttempts: 0, closeRetryAt: undefined });
+        if (record.state === 'resolving' && record.actorId === receipt.handledBy) continue;
+        const answered = await this.move(record, 'answered', undefined, { ...this.askAttribution(record, receipt.handledBy), closeMessage: undefined, cardClosedAt: undefined, closeAttempts: 0, closeRetryAt: undefined });
         await this.renderClosed(answered, await this.closedMessage(answered));
       }
       return;
@@ -884,7 +906,7 @@ export class LarkWorkflowInteractions {
     if (event.type === 'text' && data.relay === 'ask' && this.broker) {
       const ask = this.broker.get(String(data.askId));
       if (!ask || ask.status !== 'pending' || ask.sessionId !== context.sessionId) return;
-      kind = 'ask'; nativeId = ask.id; question = ask.question;
+      kind = 'ask'; nativeId = ask.id; question = ask.questionBody ?? ask.question;
       askChoices = Array.isArray(ask.choices) ? ask.choices : undefined;
       askMultiple = ask.multiple === true;
       expiresAt = ask.expiresAt;
@@ -933,7 +955,7 @@ export class LarkWorkflowInteractions {
         ...(allowKey ? { sessionAllowKey: allowKey } : {}), ...(workspaceRule ? { workspaceRule } : {}), ...(intent ? { intent } : {}), ...(kind === 'permission' && options.groupMention === true ? { groupMention: true } : {}) }
     );
     let record = created.record;
-    if (record.state !== 'pending' || record.cardId || this.delivering.has(record.id) || (this.retryAfter.get(record.id) ?? 0) > Date.now()) return;
+    if (record.state !== 'pending' || record.cardId || record.relayDeliveryStartedAt || this.delivering.has(record.id) || (this.retryAfter.get(record.id) ?? 0) > Date.now()) return;
     this.delivering.add(record.id);
     const approvers = kind === 'permission' ? await this.approvers(record).catch(() => []) : [];
     const requesterApproves = Boolean(context.event.senderOpenId) && approvers[0] === context.event.senderOpenId;
@@ -1007,6 +1029,11 @@ export class LarkWorkflowInteractions {
     const safeWebBaseUrl = structuredOn && kind === 'ask' ? safeLarkWebUrl(options.webBaseUrl) : undefined;
     try {
       if (!await this.live(record)) { await this.move(record, 'expired'); return; }
+      if (kind === 'ask' && this.broker?.get(nativeId)?.mode === 'return-answer') {
+        const next = { ...record, relayDeliveryStartedAt: new Date().toISOString() };
+        if (!await this.store.compareAndSet!(this.key(record), JSON.stringify(record), JSON.stringify(next))) throw stale();
+        record = next;
+      }
       if (kind === 'ask') {
         const questionIndex = elements.indexOf(displayedQuestion);
         const labels = (askChoices ?? []).map((choice, index) => `${index + 1}. ${choice.label}`);
@@ -1104,10 +1131,9 @@ export class LarkWorkflowInteractions {
       ...(webBaseUrl ? { webBaseUrl } : {})
     });
     envelope.body.elements.push(...elements);
-    const content = JSON.stringify(envelope);
     // reply 的 content 是再次序列化的 JSON 字符串；引号和反斜杠会放大整个 HTTP 请求。
-    const projectedRequestBytes = Buffer.byteLength(JSON.stringify({ msg_type: 'interactive', content,
-      reply_in_thread: true, uuid: `workflow_${'x'.repeat(24)}` }), 'utf8');
+    const projectedRequestBytes = larkCardRequestBytes(envelope, { msg_type: 'interactive',
+      reply_in_thread: true, uuid: `workflow_${'x'.repeat(24)}` });
     const projectedComponents = countCardComponents(envelope);
     return projectedRequestBytes <= larkCardSafeLimits.bytes - structuredCardBudgetHeadroomBytes
       && projectedComponents <= larkCardSafeLimits.components;
@@ -1306,6 +1332,13 @@ export class LarkWorkflowInteractions {
   private async live(record: LarkInteraction, local = false) {
     if (record.durable) return !this.closed && await this.confirmationAvailable?.(record, !local) === true;
     if (record.kind === 'plan') return this.planLive(record);
+    const relay = record.kind === 'ask' ? this.broker?.get(record.nativeId) : undefined;
+    if (relay?.mode === 'return-answer' && relay.requestId) {
+      if (this.closed || relay.sessionId !== record.sessionId || relay.taskId && relay.taskId !== record.taskId) return false;
+      await this.broker!.refreshPending(record.sessionId);
+      const current = await this.broker!.result(record.sessionId, relay.requestId);
+      return current.status === 'pending' && current.continuation === 'available';
+    }
     if (this.closed || record.boot !== this.boot) return false;
     if (!(await this.runtime.getTasks?.(record.sessionId))?.some(task => task.id === record.taskId && task.status === 'running')) return false;
     return record.kind === 'ask'
@@ -1376,7 +1409,7 @@ export class LarkWorkflowInteractions {
     }
     // 提问过期后发起人再用文字回复：答案不再作废，交回调用方附上原问题，作为一条新消息发给 Agent。
     // 只认发起人本人；新消息照常走建任务的授权，这里不代任何人答题。
-    if (record.kind === 'ask' && !input.callback && input.actorId === record.event.senderOpenId && await this.askExpired(record)) {
+    if (record.kind === 'ask' && this.broker?.get(record.nativeId)?.mode !== 'return-answer' && !input.callback && input.actorId === record.event.senderOpenId && await this.askExpired(record)) {
       throw new LarkServiceError('LARK_ASK_EXPIRED', '这条提问已过期，回复会作为新消息发给 Agent。', 409, { question: record.question });
     }
     // 计划卡三个动作与验收、中断同一道：发起人本来就能直接发这个任务，批准计划不要更高权限。
@@ -1467,7 +1500,8 @@ export class LarkWorkflowInteractions {
     record = await this.move(record, 'resolving', input.actorId);
     try {
       // The authoritative broker/runtime repeats the single-consumer and liveness check.
-      if (input.action === 'answer') await this.broker!.answer(record.nativeId, answerText, { sessionId: record.sessionId });
+      if (input.action === 'answer') await this.broker!.answer(record.nativeId, answerText, { sessionId: record.sessionId, handledBy: input.actorId,
+        beforeClaim: async () => { if (!await this.authorize(record, input.actorId!, 'turn.append')) throw new LarkServiceError('LARK_INTERACTION_DENIED', '当前账号无权回答此任务。', 403); } });
       else {
         const resolved = rejectReasonText
           ? await this.runtime.resolvePermission!(record.sessionId, record.nativeId, false, rejectReasonText)
@@ -1493,7 +1527,7 @@ export class LarkWorkflowInteractions {
       if (record.kind === 'ask') {
         const ask = this.broker?.get(record.nativeId);
         if (ask?.status === 'answered') {
-          const answered = await this.move(record, 'answered', undefined, { ...(ask.handledBy ? { handledBy: ask.handledBy, actorId: undefined } : {}) });
+          const answered = await this.move(record, 'answered', undefined, { ...this.askAttribution(record, ask.handledBy) });
           await this.renderClosed(answered, await this.closedMessage(answered));
           throw error;
         }

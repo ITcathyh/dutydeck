@@ -4,6 +4,20 @@
 
 Before ending a turn, agents can run `dutydeck session report --status waiting --question "一个具体问题"` or `--status blocked --summary "一句原因"`. These reports appear in Lark `/tasks`, the web attention list, and the first line of the result card. Starting the next turn or handling the task through existing actions clears the report. `ready` means done (no report is required by default); `dropped` means no action is needed. Continue using `session ask --choices` for fixed choices that block until answered.
 
+Ordinary `session ask` generates a `requestId` and writes it to stderr before connecting. Stdout still contains only the answer; `--json` includes the identity. Use `--request-id` to supply an ID you have saved. Reusing an ID in the same session requires the same question, full body, choices, timeout and original task/attempt; conflicts are rejected and the deadline never moves. The default is 300 seconds, with a maximum of 86400 seconds for persistent ordinary questions. Legacy requests without an ID retain their one-hour limit; native permission requests retain their own deadlines.
+
+```bash
+dutydeck session ask "Continue checking?" --request-id check-1 --timeout 86400
+# Read the saved question and answer after disconnection or a server restart:
+dutydeck session ask-result check-1 --json
+# Wait again while the original attempt remains valid, without publishing or dispatching again:
+dutydeck session ask-wait check-1
+```
+
+`ask` / `ask-wait` exit codes: 0 means an answer was returned and the original attempt can continue, 124 means expired, 2 means invalid usage, and 3 means unavailable, cancelled or an ended/unknown original attempt. `ask-result` includes `continuation=available|ended|unknown`. A successful query only confirms that a record was read; a historical answer does not authorize the next shell command. Current session credentials, permissions and the original task/attempt must remain valid. Stopped or archived session credentials cannot query results. HTTP disconnection and service shutdown preserve the question; ending its original attempt, revocation or expiry prevents continuation. Answers commit before display; display failures neither lose an answer nor reopen voting.
+
+ADHD Lark structured confirmations retain their existing 24-hour card, same-session new turn after a click, and deferred acknowledgement. They do not return an answer to the original call.
+
 ```bash
 # Daemon
 dutydeck start [--cwd /path] [--port 4310] [--host 0.0.0.0]
@@ -409,3 +423,13 @@ dutydeck settings bot set <app-id> cardLinks=
 `lark send --json` returns `{"ok":true,"data":{"message_id":"om_example","url":"https://client.example.test/message"}}`. `--app` selects a saved bot from the local database; optionally pass `--database /path/to/runtime.db`. Omitting it preserves existing `LARK_*` environment behavior. `--reply-to` replies to a message, and `--in-thread` places the reply in its thread. All sending retries within one invocation share a fixed idempotency UUID. Once an attempt has an uncertain outcome, a later rejection cannot prove the earlier attempt was unexecuted; only a confirmed success clears uncertainty for that invocation. An uncertain delivery caused by a connection loss or response read failure, or a sent message whose link cannot be retrieved, returns `unknown_outcome` (exit 5); do not resend automatically.
 
 The bot's `cardLinks` setting is a JSON array of at most two entries. Omission preserves the value; `cardLinks=` or `[]` clears it. Each entry requires a 1–12 character `label` and an HTTPS `url`; every URL is limited to 2048 characters. Optional `android_url`, `ios_url` and `pc_url` accept application schemes, excluding `javascript:`, `vbscript:` and `data:`. `{sessionId}` expands to the URL-encoded session ID. If any expanded URL exceeds 2048 characters, that link is omitted. Progress and result cards render these links at the bottom using Lark `multi_url`. Links are omitted if adding them would exceed the complete card budget; existing body handling is preserved.
+
+### Idle CPU policy
+
+The service startup option `--driver-idle-cpu-action off|diagnose|retire` maps to `DUTYDECK_DRIVER_IDLE_CPU_ACTION` and defaults to `diagnose`. Diagnosis only logs candidates; `retire` permits early release of idle PTY CLIs with verified safety and recovery evidence. For example:
+
+```sh
+dutydeck --driver-idle-cpu-action retire
+```
+
+Use `--driver-idle-cpu-action diagnose` to restore diagnosis or `--driver-idle-cpu-action off` to disable the check. This is a service startup setting; an existing background service needs the environment variable in its startup configuration and its usual restart procedure. The general idle timeout remains independent; see [Agent configuration](agents.md#sustained-cpu-use-by-idle-clis).

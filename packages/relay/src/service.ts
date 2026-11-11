@@ -6,16 +6,16 @@ import { RelayCapabilityRegistry, relayBearerToken } from './capability.js';
 export const relayMessageMaxLength = 32_000;
 
 export interface RelaySendInput { text?: string }
-export interface RelayAskInput { question?: string; questionBody?: string; timeoutMs?: number; choices?: RelayAskChoice[]; multiple?: boolean }
+export interface RelayAskInput { requestId?: string; question?: string; questionBody?: string; timeoutMs?: number; choices?: RelayAskChoice[]; multiple?: boolean }
 export interface RelayAnswerInput { answer?: string; handledBy?: string }
 
 function requireAskInput(input: unknown): asserts input is RelayAskInput {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     throw new RelayError('RELAY_INVALID_ASK', '提问请求必须是对象。', 400);
   }
-  const fields = ['question', 'questionBody', 'timeoutMs', 'choices', 'multiple'];
+  const fields = ['requestId', 'question', 'questionBody', 'timeoutMs', 'choices', 'multiple'];
   if (Object.keys(input).some(key => !fields.includes(key))) {
-    throw new RelayError('RELAY_INVALID_ASK', '提问请求仅支持 question、questionBody、timeoutMs、choices、multiple。', 400);
+    throw new RelayError('RELAY_INVALID_ASK', '提问请求仅支持 requestId、question、questionBody、timeoutMs、choices、multiple。', 400);
   }
   const record = input as Record<string, unknown>;
   if (record.question !== undefined && typeof record.question !== 'string') {
@@ -65,6 +65,7 @@ export class RelayService {
     const question = requireText(input.question, 'RELAY_QUESTION_REQUIRED', '提问内容');
     return this.broker.register({
       sessionId: capability.sessionId, question, timeoutMs: input.timeoutMs,
+      ...(input.requestId === undefined ? {} : { requestId: input.requestId }),
       ...(input.questionBody === undefined ? {} : { questionBody: requireText(input.questionBody, 'RELAY_QUESTION_REQUIRED', '问题正文') }),
       // 不能用 truthy：choices:null 必须进 broker 的校验抛 400，而不是被静默当成普通提问登记。
       ...(input.choices !== undefined ? { choices: input.choices } : {}),
@@ -92,7 +93,8 @@ export class RelayService {
     return this.broker.answer(askId, answer, { sessionId, beforeClaim, handledBy: input.handledBy });
   }
 
-  listPending(sessionId: string) {
+  async listPending(sessionId: string) {
+    await this.broker.refreshPending(sessionId);
     return { asks: this.broker.listPending(sessionId) };
   }
 }

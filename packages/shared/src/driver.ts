@@ -119,10 +119,24 @@ export type DriverSteeringOutcome = 'injected' | 'startedNewTurn' | 'promptRequi
 /** 驱动外部发起的权限请求最终裁决；reason 只在拒绝时出现。 */
 export interface DriverPermissionDecision { approved: boolean; reason?: string }
 
+/** A fresh, resumable, child-free owned PTY process sample. CPU excludes reaped children. */
+export interface DriverIdleCpuProof {
+  identity: string;
+  generation: number;
+  inputRevision: number;
+  lastInputAt: number;
+  nativeSessionId: string;
+  cpuMs: number;
+  sampledAt: number;
+}
+
 export interface AgentDriver {
   /** Runtime chooses whether uncertain execution must remain attached to its persistent session. */
   /** Refuse automatic idle retirement until the latest native source is durable. */
   prepareForIdleRetirement?(): Promise<boolean>;
+  idleCpuProof?(): DriverIdleCpuProof | undefined;
+  /** Synchronously revalidate the proof and fence all new input before runtime revocation. */
+  beginIdleCpuRetirement?(expected: DriverIdleCpuProof): boolean;
   prepareForDaemonShutdown?(preserveSession: boolean): void | Promise<void>;
   /** 启动/确保会话就绪（ACP ensureSession / PTY spawn CLI）。失败必须抛错。 */
   start(): Promise<void>;

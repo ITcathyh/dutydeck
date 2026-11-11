@@ -13,6 +13,7 @@ import {
   type DriverPermissionDecision,
   type AgentIdleTimeoutData,
   type AgentDriver,
+  type DriverIdleCpuProof,
   type DriverTurnRecovery,
   type NormalizedDriverEvent,
   type PermissionRequestData,
@@ -24,6 +25,7 @@ import { buildDutydeckRoutingBlock } from '@dutydeck/cli-adapters';
 import { ProgramStatusFramingStream, captureOwnedTmuxIdentity, captureOwnedTmuxAbsence, stopOwnedTmux, processIdentityKey, verifyOwnedTmuxExit, verifyOwnedTmuxAbsence, PtyBackend, TmuxBackend, HerdrBackend, orphanedTmuxSocketMessage, type SessionBackend, type ProcessProbe, type OwnedTmuxIdentity, type OwnedTmuxExitProof, type OwnedTmuxAbsence } from '@dutydeck/session-backends';
 import { TerminalSnapshot } from '@dutydeck/terminal-renderer';
 import { IdleDetector, type IdleTimings } from './idle-detector.js';
+import { IdleCpuProcess } from './idle-cpu-process.js';
 import { TurnCpu } from './turn-cpu.js';
 import { createTranscriptTailer, type TranscriptEventSource, type TranscriptPosition } from './transcript/index.js';
 import { buildSessionMarker, resolveCliSessionId, hasPinnedClaudeSession } from './session-id/index.js';
@@ -264,6 +266,13 @@ export class PtyCliDriver implements AgentDriver {
   private claudeSourceConfirmed = true;
   private claudeNativeSelectionVerified = false;
   private idleRetirementArmed = false;
+  private idleCpuProcess?: IdleCpuProcess;
+  private idleCpuIdentity?: string;
+  private idleCpuRoot?: ReturnType<ProcessProbe['identify']>;
+  private idleCpuFence?: DriverIdleCpuProof;
+  private inputRevision = 0;
+  private terminalWrites = 0;
+  private lastInputAt = Date.now();
   private sampleClaudeNativeSession?: (forceDiscovery?: boolean) => import('./claude-native-session.js').ClaudeNativeSession | undefined;
 
   constructor(opts: PtyCliDriverOptions) {
@@ -312,6 +321,7 @@ export class PtyCliDriver implements AgentDriver {
   }
 
   private resolveHookPermission(id: string, approved: boolean, reason?: string) {
+    if (!this.stopped) this.noteInput();
     const resolve = this.hookPermissions.get(id);
     if (!resolve) return false;
     this.hookPermissions.delete(id);
@@ -516,6 +526,7 @@ export class PtyCliDriver implements AgentDriver {
 
   /** buildArgs 之前的异步准备（如 Kimi 探测 `--auto`），用即将启动 CLI 的同一份清洗后环境；不阻塞事件循环。 */
   private async prepareLaunch(): Promise<void> {
+    this.noteInput();
     await this.adapter.prepareLaunch?.(this.sessionContext(), this.spawnEnv());
   }
 
@@ -525,7 +536,7 @@ export class PtyCliDriver implements AgentDriver {
   }
 
   async send(prompt: string): Promise<void> {
-    this.idleRetirementArmed = false;
+    this.noteInput();
     if (this.stopped) throw new Error('PtyCliDriver: send() called after stop()');
     if (!this.started) await this.start();
     if (this.stopped) throw new Error('Driver stopped');
@@ -865,6 +876,7 @@ export class PtyCliDriver implements AgentDriver {
   }
 
   async resume(): Promise<void> {
+    this.noteInput();
     if (this.stopped) return;
     const backend = this.backend;
     const generation = this.wiringGeneration;
@@ -1076,6 +1088,49 @@ export class PtyCliDriver implements AgentDriver {
     }
   }
 
+  private noteInput(): void {
+    if (this.idleCpuFence) throw new DriverDetachedError();
+    this.inputRevision++;
+    this.lastInputAt = Date.now();
+    this.idleRetirementArmed = false;
+  }
+
+  idleCpuProof(): DriverIdleCpuProof | undefined {
+    if (process.platform !== 'linux' || this.stopped || this.detachedForShutdown || this.detachOnStop
+      || !this.idleCpuProcess || !this.idleCpuIdentity || !this.idleCpuRoot || !this.processProbe
+      || this.terminalWrites > 0 || !this.isIdle() || this.hasBackgroundWork() || this.hookPermissions.size || this.humanWaits.size
+      || this.awaitingAnswer?.() || this.backendPid?.backend !== this.backend) return undefined;
+    if (this.processProbe.observe(this.idleCpuRoot) !== 'alive') return undefined;
+    if (this.backend instanceof TmuxBackend && (!this.tmuxIdentity
+      || this.tmuxIdentity.identities.some(identity => processIdentityKey(identity) !== this.idleCpuIdentity
+        && this.processProbe!.observe(identity) !== 'dead'))) return undefined;
+    if (isClaudeFamilyCli(this.adapter.id)) {
+      const source = this.sampleClaudeNativeSession?.(true);
+      if (!source || !this.claudeSourceConfirmed || !this.claudeNativeSelectionVerified
+        || source.identityProof !== this.claudeResumeSource?.identityProof) return undefined;
+    }
+    const nativeSessionId = this.resumableNativeSession();
+    if (!nativeSessionId) return undefined;
+    const cpuMs = this.idleCpuProcess.sample();
+    if (cpuMs === undefined || this.processProbe.observe(this.idleCpuRoot) !== 'alive') return undefined;
+    return { identity: this.idleCpuIdentity, generation: this.wiringGeneration,
+      inputRevision: this.inputRevision, lastInputAt: this.lastInputAt, nativeSessionId, cpuMs, sampledAt: Date.now() };
+  }
+
+  beginIdleCpuRetirement(expected: DriverIdleCpuProof): boolean {
+    const current = this.idleCpuProof();
+    if (!this.idleRetirementArmed || !current || !this.sameIdleCpuIdentity(expected, current)) return false;
+    // This is the synchronous retirement entry: no input can cross the later
+    // runtime ledger/stop awaits. A stale candidate makes no lifecycle change.
+    this.idleCpuFence = expected;
+    return true;
+  }
+
+  private sameIdleCpuIdentity(a: DriverIdleCpuProof, b: DriverIdleCpuProof): boolean {
+    return a.identity === b.identity && a.generation === b.generation
+      && a.inputRevision === b.inputRevision && a.nativeSessionId === b.nativeSessionId;
+  }
+
   async prepareForIdleRetirement(): Promise<boolean> {
     if (process.platform === 'linux' && this.processProbe && isClaudeFamilyCli(this.adapter.id)) {
       // Retirement must not inherit the idle discovery backoff. A missing PID
@@ -1114,6 +1169,12 @@ export class PtyCliDriver implements AgentDriver {
 
   stop(options: { discardSession?: boolean } = {}): Promise<void> {
     if (this.stopping) return this.stopping;
+    if (this.idleCpuFence && !this.stopped) {
+      const current = this.idleCpuProof();
+      if (!current || !this.sameIdleCpuIdentity(this.idleCpuFence, current)) {
+        throw new DriverRecoveryError('Idle CPU retirement proof changed; original process preserved');
+      }
+    }
     const alreadyStopped = this.stopped;
     if (!alreadyStopped && this.idleRetirementArmed && this.claudeResumeSource) {
       // No await before stopped: a native switch during receipt persistence or
@@ -1277,12 +1338,15 @@ export class PtyCliDriver implements AgentDriver {
         if (!ready) capture();
       },
       write: async data => {
-        this.idleRetirementArmed = false;
+        this.noteInput();
         const backend = this.backend;
         if (this.stopped) throw new DriverDetachedError();
-        const result = await backend.write(data);
-        if (this.stopped || this.backend !== backend) throw new DriverDetachedError();
-        if (result === false) throw new DriverRecoveryError('Terminal input was not confirmed');
+        this.terminalWrites++;
+        try {
+          const result = await backend.write(data);
+          if (this.stopped || this.backend !== backend) throw new DriverDetachedError();
+          if (result === false) throw new DriverRecoveryError('Terminal input was not confirmed');
+        } finally { this.terminalWrites--; }
       },
       resize: async (cols, rows) => {
         const backend = this.backend;
@@ -1389,10 +1453,13 @@ export class PtyCliDriver implements AgentDriver {
     // can replace its PID. Native state is accepted only from this process tree.
     let nativeResolver: ClaudeNativeSessionResolver | undefined;
     let rootIdentity: ReturnType<ProcessProbe['identify']> | undefined;
-    if (pid && this.processProbe && isClaudeFamilyCli(this.adapter.id)) {
+    if (pid && this.processProbe) {
       try { rootIdentity = this.processProbe.identify(pid); } catch { /* Unsupported platform retains marker resolution. */ }
     }
     this.backendPid = pid ? { backend, pid } : undefined;
+    this.idleCpuRoot = rootIdentity;
+    this.idleCpuIdentity = rootIdentity && processIdentityKey(rootIdentity);
+    this.idleCpuProcess = rootIdentity && new IdleCpuProcess(rootIdentity.pid, rootIdentity.start);
     this.tmuxIdentity = undefined;
     this.tmuxExitProof = undefined;
     this.tmuxAbsence = undefined;
@@ -2175,6 +2242,7 @@ export class PtyCliDriver implements AgentDriver {
       if (this.activeSubmission !== submission || this.backend !== target) throw new Error('PtyCliDriver: submission is no longer active');
     };
     const guarded = <T>(write: () => T | Promise<T>): Promise<T> => {
+      this.noteInput();
       check();
       const operation = (submission.pending ?? Promise.resolve()).then(async () => {
         check();

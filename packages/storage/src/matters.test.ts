@@ -29,7 +29,7 @@ describe('matter storage and schema 44', () => {
       expect(repos.matters!.find('session', 'fork')?.id).toBe(first.id); repos.close();
       const check = new Database(file);
       expect(check.pragma('foreign_key_check')).toEqual([]);
-      expect(check.prepare('SELECT MAX(version) AS v FROM schema_migrations').get()).toEqual({ v: 49 }); check.close();
+      expect(check.prepare('SELECT MAX(version) AS v FROM schema_migrations').get()).toEqual({ v: 50 }); check.close();
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
   it('creates the source before a derived session first receives a task', () => {

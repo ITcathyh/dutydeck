@@ -1,3 +1,4 @@
+import { createRelayContinuationChecker, createRelayAskLifecycleWatcher } from './relay-routes.js';
 import { inheritedListenOptions, inheritedSocketMismatch, takeInheritedListenSocket } from './socket-activation.js';
 import { MattersService } from './matters.js';
 import { DutydeckWatch, startDutydeckWatch, watchDeliveryRejection, watchReceiverType } from './watch.js';
@@ -524,6 +525,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     ptyDriverFactory,
     terminalBackend: () => terminalSettings.current(),
     driverIdleTimeoutMs: config.driverIdleTimeoutMs,
+    driverIdleCpuAction: config.driverIdleCpuAction,
     cleanupIntervalMs: config.cleanupIntervalMs,
     sessionEnvironment: session => ({ ...capabilities.environmentFor(session), ...relayCapabilities.environmentFor(session.id), ...herdr.environmentFor(session.id),
       ...(session.protocol === 'pty-cli' && isFrozenCollaborationSession(session) ? { dutydeck_frozen_materials: 'true' } : {}) }),
@@ -735,9 +737,10 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
         relay: input.kind,
         ...(input.handledBy ? { handledBy: input.handledBy } : {}),
         ...(input.askId ? { askId: input.askId } : {})
-      });
+      }, input.eventId);
     }
   }, createRelayAskStore(repos.config));
+  const relayContinuation = createRelayContinuationChecker(runtime, async sessionId => (await groupManager.authorizeSession(sessionId, 'turn.append', false, true))?.allowed !== false);
   const authorizeInteraction = (sessionId: string, actorId: string, action: 'high_risk.execute' | 'terminal.write' | 'terminal.read') => authorizeWorkItemInteraction(repos, groupManager, sessionId, actorId, action, env, workbenchHttp.fetch);
   const workInteractions: WorkItemInteractions = new WorkItemInteractions(workItems, runtime, relayBroker, authorizeInteraction, () => leaderMode);
   const leaderMode: LeaderModeService = new LeaderModeService({ repositories: repos, runtime, work: () => workItems, interactions: () => workInteractions, broker: relayBroker, authorizeAgent: authorizeWorkAgent, authorizeInteraction,
@@ -796,6 +799,8 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     startupPhase('agentDefaults');
     // agents：绑定账本并登记 Agent；sessions：逐个会话恢复与对账（孤儿记录、资源观察、接回原轮、排队）。
     await runtime.initialize(bootAgents, () => startupPhase('agents'));
+    relayBroker.setContinuationChecker(relayContinuation, createRelayAskLifecycleWatcher(runtime));
+    await relayBroker.refreshPending();
     startupPhase('sessions');
     const webRoot = options.webRoot ?? fileURLToPath(new URL('../public', import.meta.url));
     const memoryRoot = config.databaseUrl === ':memory:'
@@ -907,7 +912,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
         authorize: (request, sessionId, action) => authorizeSessionRequest(request, sessionId, 'terminal', action),
       },
       instances: parsePeerInstances(env.DUTYDECK_INSTANCES_JSON),
-      relay: { runtime, capabilities: relayCapabilities, broker: relayBroker, herdr },
+      relay: { runtime, capabilities: relayCapabilities, broker: relayBroker, herdr, continuation: relayContinuation },
       foundation: { repositories: repos, authorize: foundationManagementAuthorizer, inspectSecretRef, isLiveManagedBot: id => groupManager.isLiveManagedBot(id) },
       identityPreflight: { repositories: repos, authorize: foundationManagementAuthorizer, probe: identityPreflightProbe, now: options.identityPreflight?.now },
       schedule: { repositories: repos, authorize: foundationManagementAuthorizer, uiEntryReady: true, collaborationExecutorWired: true },

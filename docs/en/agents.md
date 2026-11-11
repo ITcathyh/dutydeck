@@ -12,6 +12,8 @@ The built-in `codex` and `codex-cli` terminal entries and “Codex (ACP)” (`co
 
 Codex terminal Agents read `[profiles.<name>]` entries from `CODEX_HOME/config.toml` and expose those profiles in the Web new-session dialog. A selected profile applies to the new session only; leaving it empty keeps the Agent's default profile. The profile name is passed as a Codex CLI option rather than persisted in the Agent environment.
 
+Ordinary relay questions support querying and waiting again after disconnection or a server restart using a stable `requestId`. `session ask` prints the ID to stderr; `--request-id` supplies your own. `session ask-result <id> --json` reads history, while `session ask-wait <id>` waits for the original question without resending a prompt or creating a turn. The question, choices, original task/attempt and deadline are frozen, with a 24-hour maximum. Legacy requests without IDs and native permissions retain their existing finite limits. Wait returns an answer with exit code 0 only while the original attempt can continue under current permissions. Ended, replaced or unknown attempts return 3; historical answers do not authorize execution. ADHD structured confirmations still continue in a new turn after a click. See the [CLI reference](cli.md) for commands and exit codes.
+
 ## 1. Custom agents (`DUTYDECK_AGENTS_JSON`)
 
 ```json
@@ -152,6 +154,7 @@ The "本工作区允许此类命令" (allow this kind of command in this workspa
 | `DUTYDECK_DATABASE_URL` | `<cwd>/.dutydeck/dutydeck.db` | SQLite file |
 | `DUTYDECK_AGENTS_JSON` | `[]` | Custom agents |
 | `DUTYDECK_CLEANUP_INTERVAL_MS` | `300000` | Cleanup interval: integer milliseconds from 1 to 2147483647 |
+| `DUTYDECK_DRIVER_IDLE_CPU_ACTION` | `diagnose` | Policy for sustained CPU use by idle CLIs: `off` disables this check, `diagnose` logs candidates, `retire` releases the process early only after safety checks |
 | `DUTYDECK_DRIVER_IDLE_TIMEOUT_MS` | `21600000` | Nonnegative idle-terminal release threshold in milliseconds; `0` disables it; the periodic timer's 32-bit limit does not apply; sessions whose native background tasks are still running are not released |
 | `DUTYDECK_USAGE_PRICING_JSON` | built-in table | Override usage prices |
 | `DUTYDECK_USAGE_PRICING_EXTRA_JSON` | unset | Add per-model prices on top of the price table: `{"version"?: "...", "models": [{"match": "...", "inputPerMTok": ..., "cachedInputPerMTok": ..., "outputPerMTok": ...}]}`, each entry may carry an optional `provider`; a base entry with the same `match` and `provider` (case-insensitive) is replaced, entries for other providers are kept, the same `match` and `provider` may not appear twice, and `default` is not allowed. Once set, these models' cost counts toward monthly caps, so an instance with caps may be blocked earlier than before; an invalid value stops the service from starting and `dutydeck doctor` reports a failed `usage.pricing` check naming the variable |
@@ -159,3 +162,11 @@ The "本工作区允许此类命令" (allow this kind of command in this workspa
 | `LARK_APP_ID`, `LARK_APP_SECRET` | - | Fallback for `dutydeck lark send`-style commands only. Bots configured by `dutydeck setup` keep the secret in the bot configuration |
 
 CI tokens and webhook secrets are **no longer environment variables**; see Plugins.
+
+### Sustained CPU use by idle CLIs
+
+The default, `diagnose`, logs candidates without ending processes early. To enable early release, start the service with `--driver-idle-cpu-action retire` or set `DUTYDECK_DRIVER_IDLE_CPU_ACTION=retire`; use `off` to disable this check. The existing six-hour idle release remains independent: `--idle-timeout-ms 0` disables only that general timeout.
+
+Early release supports Linux PTY CLIs only when process birth identity and native conversation recovery can be verified. Current checks cover child-free Codex and Claude-family adapter instances (such as `seed` and `relay`); the standard `claude-code` tmux relay wrapper and other instances with live children are skipped. Conservative defaults require at least 10 minutes idle and at least three valid sample windows spanning five minutes, each using at least 50% of one CPU core. Samples follow the maintenance interval, so the actual wait may be longer; a gap over 10 minutes restarts evidence collection. New input, queued or unresolved tasks, permissions, Ask requests, native background work, and every additional live descendant block release. Incomplete samples and missing recovery proof also skip release, including unsupported ACP and plugin drivers.
+
+Release ends only the original process; the next message resumes the original native conversation. Unverified exit continues to block replacement tasks and uses the existing stop recheck. These thresholds are product defaults, not measurements of production frequency or CPU savings.

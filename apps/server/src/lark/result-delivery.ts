@@ -359,7 +359,8 @@ const withinTableLimits = (elements: unknown) => {
   return visit(elements) && total <= larkCardTableLimits.card;
 };
 /** 结果卡被平台按卡片内容拒收：230099 卡片内容创建失败（表格超限、非法图片等），230025 超过消息体积上限。 */
-const isLarkResultCardRejected = (error: unknown) => error instanceof LarkServiceError && [230099, 230025].includes(error.upstreamCode);
+const isLarkResultCardRejected = (error: unknown) => error instanceof LarkServiceError
+  && (error.code === 'LARK_CARD_BUDGET_EXCEEDED' || [230099, 230025].includes(error.upstreamCode));
 
 /** forceAttachment：整卡已被平台拒收，这次直接走「节选 + 附件」，节选卡换一个 UUID（内容不同）。 */
 export async function prepareLarkResult(
@@ -376,7 +377,7 @@ export async function prepareLarkResult(
   if (input.cardBody && forceAttachment) throw new LarkServiceError('INVALID_FINAL_CARD', '自定义卡片被平台拒收，请修正静态卡片内容后重新提交。', 400);
   const resultInput = { ...input, cardKind: 'result' as const };
   const output = resultInput.elements.find(element => element.element_id === 'final_output')?.content;
-  const card = buildLarkCard(resultInput);
+  const card = buildLarkCard(resultInput, { receive_id: target.chatId, msg_type: 'interactive', reply_in_thread: true, uuid: 'x'.repeat(50) });
   // 长结论在卡上拆成「开头 + 折叠」两段，按拼起来的全文判断整份结论是否都在卡上；卡面改写过图片和本机路径链接、
   // 拿走了「需要你：」行，按改写后的文字比。
   // 表格数超过飞书上限的卡一定会被拒收，同样按放不下处理。
@@ -547,7 +548,7 @@ export async function patchLarkCard(
   onUnupdatable?: () => void
 ): Promise<{ messageId: string } | null> {
   const output = input.elements.find(element => element.element_id === 'final_output')?.content;
-  const card = buildLarkCard(input);
+  const card = buildLarkCard(input, {});
   // 长结论在卡上拆成「开头 + 折叠」两段，按拼起来的全文判断整份结论是否都在卡上。
   const fits = !output || larkCardFinalOutputText(card.body.elements as Array<Record<string, unknown>>) === output;
   if (!fits) return null;

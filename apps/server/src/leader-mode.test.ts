@@ -119,7 +119,17 @@ describe('Leader 指引解析', () => {
 
 describe('授权账本', () => {
   const task = (id: string, createdAt: string, prompt: string, actorId = 'ou_alice'): TaskRecord => ({ id, sessionId: 'ses_parent', prompt, status: 'completed', createdAt, updatedAt: createdAt, executionContext: { actorId, agentPrompt: `[注入材料]\n${prompt}` } });
-  const repositories = (tasks: TaskRecord[]) => ({ tasks: { listBySession: async () => tasks } }) as unknown as RepositoryBundle;
+  const repositories = (tasks: TaskRecord[]) => ({
+    tasks: { listBySession: async () => tasks },
+    execution: { getAcceptedTask: (id: string) => {
+      const task = tasks.find(task => task.id === id)!;
+      return { replayValidation: 'complete', request: { namespace: 'runtime', key: `lark:cli_bot:om_${id}:1`, actor: { kind: 'channel', appId: 'cli_bot', id: task.executionContext?.actorId }, prompt: task.prompt } };
+    } },
+    config: { get: async (key: string) => {
+      const task = tasks.find(task => key === `lark.inbox.cli_bot.om_${task.id}`);
+      return task ? JSON.stringify({ appId: 'cli_bot', event: { messageId: `om_${task.id}`, senderType: 'user', senderOpenId: task.executionContext?.actorId, messageType: 'text', content: JSON.stringify({ text: task.prompt }) }, sessionId: task.sessionId, taskId: task.id, turn: 1 }) : undefined;
+    } }
+  }) as unknown as RepositoryBundle;
   const scope = { parentSessionId: 'ses_parent', actorId: 'ou_alice', parentTaskId: 'task_origin' };
 
   it('quotes the trigger and the requester\'s later messages verbatim, skipping earlier turns and other people', async () => {
@@ -130,9 +140,9 @@ describe('授权账本', () => {
       task('task_after', '2026-11-08T03:00:00.000Z', '算了，上线前先问我')
     ]), scope, [{ at: '2026-11-08T02:30:00.000Z', text: '卡片答复：批准工具调用「git push」' }]);
     expect(ledger.split('\n').slice(1, -1)).toEqual([
-      '- 2026-11-08T01:00:00.000Z 消息：修复登录，可以直接上线',
+      '- 2026-11-08T01:00:00.000Z 发起人原话：修复登录，可以直接上线',
       '- 2026-11-08T02:30:00.000Z 卡片答复：批准工具调用「git push」',
-      '- 2026-11-08T03:00:00.000Z 消息：算了，上线前先问我'
+      '- 2026-11-08T03:00:00.000Z 发起人原话：算了，上线前先问我'
     ]);
     expect(ledger).not.toContain('注入材料');
   });

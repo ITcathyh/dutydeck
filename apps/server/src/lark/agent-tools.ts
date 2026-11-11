@@ -1,3 +1,4 @@
+import { OrdinarySendError, sendOrdinaryMessage } from './ordinary-send.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { clock } from './group-task-context.js';
 import { sleep } from '../daemon/time.js';
@@ -607,6 +608,7 @@ export class LarkAgentToolsService {
       return result;
     }
     catch (error) {
+      if (error instanceof OrdinarySendError) throw new AgentGroupToolError(error.code, error.message, error.statusCode);
       if (error instanceof Error && 'code' in error && error.code === 'FINAL_CONTENT_CONFLICT') throw new AgentGroupToolError('FINAL_CONTENT_CONFLICT', error.message, 409);
       if (isPermissionError(error)) throw authorizationError(context, operation, error as LarkServiceError);
       if (error instanceof LarkServiceError) throw groupLarkError(operation, error);
@@ -1277,15 +1279,29 @@ export class LarkAgentToolsService {
       text = `<at user_id="${mentionId}">${escapeCardInline(match.name)}</at> ${text}`;
     }
 
-    if (input.replyTo?.trim()) {
-      const replyTo = input.replyTo.trim();
-      const original = await this.authorized(context, 'reply', () => context.client.getMessage(replyTo));
-      await this.assertMessageScope(context, original, true);
-      return this.authorized(context, 'reply', () => context.client.replyText({
-        messageId: replyTo, text, ...(input.inThread ? { replyInThread: true } : {}), idempotencyKey
-      }));
-    }
-    return this.authorized(context, 'send', () => context.client.sendText({ chatId: context.chatId, text, idempotencyKey }));
+    const replyTo = input.replyTo?.trim();
+    const checkTarget = async (fresh: ToolContext) => {
+      if (replyTo) {
+        const original = await this.authorized(fresh, 'reply', () => fresh.client.getMessage(replyTo));
+        await this.assertMessageScope(fresh, original, true);
+      }
+    };
+    const scope = JSON.stringify({ appId: context.appId, sessionId: context.sessionId, chatId: context.chatId, chatType: context.chatType,
+      threadId: context.threadId, threadRootMessageId: context.threadRootMessageId });
+    await checkTarget(context);
+    return this.authorized(context, replyTo ? 'reply' : 'send', () => sendOrdinaryMessage(this.configs, {
+      scope, idempotencyKey,
+      payload: { text, to: input.to?.trim().toLowerCase() ?? '', replyTo: replyTo ?? '', inThread: input.inThread === true },
+      beforeSend: async () => {
+        const fresh = await this.context(token, 'group_tools.send');
+        if (!fresh.config.groupToolsAllowSend) throw new AgentGroupToolError('GROUP_TOOL_SEND_DISABLED', '发送能力已关闭。', 403);
+        await checkTarget(fresh);
+      },
+      beforeReceipt: async () => { await checkTarget(await this.context(token, 'group_tools.read')); },
+      send: providerUuid => this.authorized(context, replyTo ? 'reply' : 'send', () => replyTo
+        ? context.client.replyText({ messageId: replyTo, text, ...(input.inThread ? { replyInThread: true } : {}), idempotencyKey: providerUuid })
+        : context.client.sendText({ chatId: context.chatId, text, idempotencyKey: providerUuid }))
+    }));
   }
 
   async sendFile(token: string | undefined, input: { path?: string; replyTo?: string; inThread?: boolean; idempotencyKey?: string; image?: boolean }) {

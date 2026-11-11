@@ -37,6 +37,7 @@ describe('child environment policy', () => {
 
   it('drops inherited service configuration and Lark/Feishu app secrets but keeps provider keys and explicit values', () => {
     const inherited = {
+    DUTYDECK_DRIVER_IDLE_CPU_ACTION: 'retire',
       DUTYDECK_AGENTS_JSON: '[{"env":{"ANTHROPIC_AUTH_TOKEN":"other-agent"}}]', DUTYDECK_INSTANCES_JSON: '[]',
       DUTYDECK_DATABASE_URL: '/srv/dutydeck.db', DUTYDECK_PLUGIN_SECRETS: 'plugin', DUTYDECK_DAEMON_RESTART_HOST: '0.0.0.0',
       FEISHU_APP_SECRET: 'feishu', LARK_ENCRYPT_KEY: 'lark-encrypt', FEISHU_VERIFICATION_TOKEN: 'feishu-verify',

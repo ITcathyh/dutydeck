@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { integer, sqliteTable, text, uniqueIndex, index } from 'drizzle-orm/sqlite-core';
+import { integer, sqliteTable, text, uniqueIndex, index, primaryKey } from 'drizzle-orm/sqlite-core';
 
 const timestamps = { createdAt: text('created_at').notNull(), updatedAt: text('updated_at').notNull() };
 export const agentConfigs = sqliteTable('agent_configs', { id: text('id').primaryKey(), json: text('json').notNull(), ...timestamps });
@@ -38,3 +38,12 @@ export const fullTrustConfirmations = sqliteTable('full_trust_confirmations', { 
 export const matters = sqliteTable('matters', { id: text('id').primaryKey(), title: text('title').notNull(), status: text('status').notNull(), ...timestamps, originAppId: text('origin_app_id'), originChatId: text('origin_chat_id'), originMessageId: text('origin_message_id') });
 export const matterLinks = sqliteTable('matter_links', { matterId: text('matter_id').notNull().references(() => matters.id, { onDelete: 'cascade' }), kind: text('kind').notNull(), refId: text('ref_id').notNull(), relation: text('relation').notNull(), createdAt: text('created_at').notNull() }, table => [uniqueIndex('matter_links_unique').on(table.matterId, table.kind, table.refId), uniqueIndex('matter_links_owner').on(table.kind, table.refId).where(sql`${table.kind} IN ('session','task','schedule')`), index('matter_links_ref').on(table.kind, table.refId)]);
 export const workspaceApprovalRules = sqliteTable('workspace_approval_rules', { id: text('id').primaryKey(), appId: text('app_id').notNull(), workspace: text('workspace').notNull(), pattern: text('pattern').notNull(), createdBy: text('created_by').notNull(), createdAt: text('created_at').notNull() }, table => [uniqueIndex('workspace_approval_rules_unique').on(table.appId, table.workspace, table.pattern)]);
+
+export const ciWebhookEvents = sqliteTable('ci_webhook_events', {
+  eventKey: text('event_key').primaryKey(), expiresAt: integer('expires_at').notNull(),
+  providerId: text('provider_id'), payloadJson: text('payload_json'), receivedAt: integer('received_at')
+}, table => [index('ci_webhook_events_expires').on(table.expiresAt)]);
+export const ciWebhookEventTargets = sqliteTable('ci_webhook_event_targets', {
+  eventKey: text('event_key').notNull().references(() => ciWebhookEvents.eventKey, { onDelete: 'cascade' }),
+  subscriptionId: text('subscription_id').notNull(), state: text('state', { enum: ['pending', 'admitted', 'skipped'] }).notNull()
+}, table => [primaryKey({ columns: [table.eventKey, table.subscriptionId] })]);

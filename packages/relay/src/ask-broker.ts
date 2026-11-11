@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto';
+import { DurableRelayAsks, relayAskId, type RelayContinuationChecker, type RelayAskLifecycleWatcher } from './durable-asks.js';
 import { RelayError, type RelayAskChoice, type RelayAskRecord, type RelayAskStore, type RelayEventPublisher } from './types.js';
 
 export const relayAskDefaultTimeoutMs = 300_000;
 export const relayAskMinTimeoutMs = 1_000;
 export const relayAskMaxTimeoutMs = 3_600_000;
+export const relayAskDurableMaxTimeoutMs = 86_400_000;
 /** 结构化选项的 schema 级上限；IM 卡片侧还有自己的整卡预算，可能渲染更少 */
 export const relayAskMaxChoices = 50;
 export const relayAskChoiceMaxLength = 200;
@@ -62,6 +64,7 @@ interface AskRegistration {
   sessionId: string;
   prepared(): void;
   reason?: string;
+  durableCancellationReason?: string;
   ask?: PendingAsk;
 }
 
@@ -75,7 +78,7 @@ interface PendingAsk {
   answerPublishStarted?: boolean;
 }
 
-/** Persistent history never restores a lost HTTP waiter or grants permission to answer it. */
+/** Legacy HTTP questions and durable return-answer requests share the same CAS store. */
 export class RelayAskBroker {
   private readonly registrations = new Set<AskRegistration>();
   private readonly pending = new Map<string, PendingAsk>();
@@ -84,6 +87,7 @@ export class RelayAskBroker {
   private readonly ready: Promise<void>;
   private readonly writeErrors: unknown[] = [];
   private closed = false;
+  private readonly durable: DurableRelayAsks;
   private readonly deferredHandlers = new Set<RelayDeferredHandler>();
 
   addDeferredHandler(handler: RelayDeferredHandler) {
@@ -92,16 +96,23 @@ export class RelayAskBroker {
   }
 
   constructor(private readonly publisher: RelayEventPublisher, private readonly store?: RelayAskStore) {
+    this.durable = new DurableRelayAsks(publisher, store);
     this.ready = this.recover();
   }
 
   async initialize() { await this.ready; }
+
+  setContinuationChecker(check: RelayContinuationChecker, watch?: RelayAskLifecycleWatcher) { this.durable.checkContinuation = check; this.durable.setLifecycleWatcher(watch); }
+  async refreshPending(sessionId?: string) { await this.ready; await this.durable.refresh(sessionId); }
+  async result(sessionId: string, requestId: string) { await this.ready; return this.durable.result(sessionId, requestId); }
+  async wait(sessionId: string, requestId: string, signal?: AbortSignal) { await this.ready; return this.durable.wait(sessionId, requestId, signal); }
 
   private get durableHistory() { return Boolean(this.store?.getSync && this.store.listUnsettled); }
 
   private async recover() {
     if (!this.store) return;
     for (const initial of await (this.durableHistory ? this.store.listUnsettled!() : this.store.list())) {
+      if (initial.mode === 'return-answer' && initial.requestId) { await this.durable.restore(initial); continue; }
       let record: RelayAskRecord | undefined = initial;
       for (let attempt = 0; record && attempt < 3; attempt++) {
         if (record.status !== 'pending' && record.status !== 'answering') break;
@@ -114,7 +125,7 @@ export class RelayAskBroker {
     }
   }
 
-  register(input: { sessionId: string; question: string; questionBody?: string; timeoutMs?: number; choices?: RelayAskChoice[]; multiple?: boolean }, context: RelayAskContext = {}): Promise<RelayAskOutcome> {
+  register(input: { sessionId: string; requestId?: string; question: string; questionBody?: string; timeoutMs?: number; choices?: RelayAskChoice[]; multiple?: boolean }, context: RelayAskContext = {}): Promise<RelayAskOutcome> {
     // Register the cancellation fence before readiness or the first storage await.
     let prepared!: () => void;
     this.track(new Promise<void>(resolve => { prepared = resolve; }));
@@ -130,23 +141,27 @@ export class RelayAskBroker {
     });
   }
 
-  private async registerAsk(input: { sessionId: string; question: string; questionBody?: string; timeoutMs?: number; choices?: RelayAskChoice[]; multiple?: boolean }, context: RelayAskContext, registration: AskRegistration): Promise<RelayAskOutcome> {
+  private async registerAsk(input: { sessionId: string; requestId?: string; question: string; questionBody?: string; timeoutMs?: number; choices?: RelayAskChoice[]; multiple?: boolean }, context: RelayAskContext, registration: AskRegistration): Promise<RelayAskOutcome> {
     await this.ready;
     if (this.closed) throw new RelayError('RELAY_CLOSED', 'Dutydeck 提问通道已关闭。', 409);
     const question = input.question.trim();
     if (!question) throw new RelayError('RELAY_QUESTION_REQUIRED', '提问内容不能为空。', 400);
     const timeoutMs = input.timeoutMs ?? relayAskDefaultTimeoutMs;
-    if (!Number.isInteger(timeoutMs) || timeoutMs < relayAskMinTimeoutMs || timeoutMs > relayAskMaxTimeoutMs) {
-      throw new RelayError('RELAY_INVALID_TIMEOUT', '超时必须是 ' + relayAskMinTimeoutMs + '-' + relayAskMaxTimeoutMs + ' 之间的整数毫秒。', 400);
+    if (!Number.isInteger(timeoutMs) || timeoutMs < relayAskMinTimeoutMs || timeoutMs > (input.requestId === undefined ? relayAskMaxTimeoutMs : relayAskDurableMaxTimeoutMs)) {
+      throw new RelayError('RELAY_INVALID_TIMEOUT', '超时必须是 ' + relayAskMinTimeoutMs + '-' + (input.requestId === undefined ? relayAskMaxTimeoutMs : relayAskDurableMaxTimeoutMs) + ' 之间的整数毫秒。', 400);
     }
     // multiple 只在 choices 存在时成立，避免「多选但没有选项」的自相矛盾记录。
     const choices = normalizeChoices(input.choices);
     const multiple = choices !== undefined && input.multiple === true;
-    if (choices && !registration.reason) {
+    const existingDurable = input.requestId !== undefined && await this.durable.has(relayAskId(input.sessionId, input.requestId));
+    if (choices && !registration.reason && !existingDurable) {
       for (const handler of this.deferredHandlers) {
         const deferred = await handler({ sessionId: input.sessionId, question: input.questionBody ?? question, choices, ...(multiple ? { multiple } : {}) }, context);
         if (deferred) return deferred;
       }
+    }
+    if (input.requestId !== undefined) {
+      return this.durable.register({ ...input, question, timeoutMs, choices, multiple }, context, registration.prepared, () => registration.durableCancellationReason);
     }
     const record: RelayAskRecord = {
       id: 'ask_' + randomUUID(), sessionId: input.sessionId, question, status: 'pending',
@@ -195,6 +210,7 @@ export class RelayAskBroker {
     // A live question is read and claimed without another await after this
     // policy check. Readiness may have waited while permission was revoked.
     if (options.beforeClaim) await options.beforeClaim();
+    if (await this.durable.has(askId)) return this.durable.answer(askId, answer, options);
     const ask = this.pending.get(askId);
     const known = ask?.record ?? this.history.get(askId) ?? await this.store?.get(askId);
     if (!known || options.sessionId && options.sessionId !== known.sessionId) throw new RelayError('RELAY_ASK_NOT_FOUND', '未知的提问：' + askId, 404);
@@ -236,11 +252,11 @@ export class RelayAskBroker {
   }
 
   listPending(sessionId?: string): RelayAskRecord[] {
-    return [...this.pending.values()].filter(ask => (!sessionId || ask.record.sessionId === sessionId) && ask.record.status === 'pending' && !ask.settlement).map(ask => ({ ...ask.record }));
+    return [...this.durable.listPending(sessionId), ...[...this.pending.values()].filter(ask => (!sessionId || ask.record.sessionId === sessionId) && ask.record.status === 'pending' && !ask.settlement).map(ask => ({ ...ask.record }))];
   }
 
   get(askId: string): RelayAskRecord | undefined {
-    let record = this.pending.get(askId)?.record;
+    let record = this.durable.get(askId) ?? this.pending.get(askId)?.record;
     if (!record && this.durableHistory) {
       try {
         record = this.store!.getSync!(askId);
@@ -253,7 +269,8 @@ export class RelayAskBroker {
     return record ? { ...record } : undefined;
   }
 
-  private cancelRegistration(registration: AskRegistration, reason: string) {
+  private cancelRegistration(registration: AskRegistration, reason: string, cancelDurable = false) {
+    if (cancelDurable) registration.durableCancellationReason ??= reason;
     registration.reason ??= reason;
     const ask = registration.ask;
     if (ask && (ask.record.status === 'pending' || ask.record.status === 'answering' && !ask.answerPublishStarted)) {
@@ -262,13 +279,15 @@ export class RelayAskBroker {
   }
 
   cancelSession(sessionId: string, reason = '会话已结束') {
+    this.track(this.durable.cancelSession(sessionId, reason));
     for (const registration of this.registrations) {
-      if (registration.sessionId === sessionId) this.cancelRegistration(registration, reason);
+      if (registration.sessionId === sessionId) this.cancelRegistration(registration, reason, true);
     }
   }
 
   close(reason = 'Dutydeck 服务已关闭') {
     this.closed = true;
+    this.durable.close();
     for (const registration of this.registrations) if (!registration.ask) registration.reason ??= reason;
     for (const ask of [...this.pending.values()]) {
       if (ask.record.status === 'pending') this.track(this.finish(ask, { status: 'cancelled', askId: ask.record.id, reason }));
@@ -281,6 +300,7 @@ export class RelayAskBroker {
   }
 
   async flush() {
+    await this.durable.flush();
     await Promise.allSettled([...this.writes]);
     const errors = this.writeErrors.splice(0);
     if (errors.length) throw new AggregateError(errors, 'Relay question persistence failed');

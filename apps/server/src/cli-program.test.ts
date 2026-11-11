@@ -454,3 +454,13 @@ it('requires an explicit backup database and forwards isolated backup destinatio
   await program().parseAsync(['node', 'dutydeck', 'backup', 'restore', '--archive', '/tmp/archive', '--target', '/tmp/new']);
   expect(backup).toHaveBeenLastCalledWith('restore', { archive: '/tmp/archive', target: '/tmp/new' });
 });
+
+it.each(['off', 'diagnose', 'retire'] as const)('maps idle CPU action %s to the service environment', action => {
+  const program = createCliProgram('0.0.5');
+  program.parse(['node', 'dutydeck', '--driver-idle-cpu-action', action]);
+  expect(environmentFromCli(program.opts(), {})).toEqual({ DUTYDECK_DRIVER_IDLE_CPU_ACTION: action });
+});
+it('rejects unknown idle CPU actions', () => {
+  const program = createCliProgram('0.0.5').exitOverride();
+  expect(() => program.parse(['node', 'dutydeck', '--driver-idle-cpu-action', 'kill'])).toThrow();
+});

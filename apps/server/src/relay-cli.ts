@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { RelayCliError, RelayHttpClient, relayAskDefaultTimeoutMs, relayAskExitCodes, type RelayClientOptions } from '@dutydeck/relay';
 
 import { taskReportInputSchema } from '@dutydeck/shared';
@@ -10,6 +11,7 @@ export async function runSessionReport(input: { status: string; question?: strin
 
 export interface RelaySessionCliOptions {
   timeout?: string;
+  requestId?: string;
   json?: boolean;
   choices?: string;
   questionBody?: string;
@@ -33,6 +35,8 @@ export async function runSessionSend(text: string, options: RelayClientOptions =
 
 export interface RelayAskResult {
   status: string;
+  requestId?: string;
+  continuation?: string;
   answer?: string;
   askId?: string;
   reason?: string;
@@ -65,8 +69,10 @@ export async function runSessionAsk(
     }
     timeoutMs = Math.round(seconds * 1000);
   }
+  const requestId = cliOptions.requestId ?? randomUUID();
   const client = new RelayHttpClient(options);
   const payload = await client.post(sessionPath('ask'), {
+    requestId,
     question,
     ...(cliOptions.questionBody === undefined ? {} : { questionBody: cliOptions.questionBody }),
     // RelayAskBroker owns choice shape, length, and duplicate-value validation.
@@ -74,7 +80,19 @@ export async function runSessionAsk(
     ...(cliOptions.multiple ? { multiple: true } : {}),
     ...(timeoutMs === undefined ? {} : { timeoutMs })
   }, (timeoutMs ?? relayAskDefaultTimeoutMs) + askResponseMarginMs);
-  return payload as unknown as RelayAskResult;
+  return { ...payload, requestId } as unknown as RelayAskResult;
+}
+
+/** Queries never dispatch or publish another question. */
+export async function runSessionAskResult(requestId: string, options: RelayClientOptions = {}) {
+  return new RelayHttpClient(options).post(sessionPath('ask-result'), { requestId });
+}
+export async function runSessionAskWait(requestId: string, options: RelayClientOptions = {}): Promise<RelayAskResult> {
+  const client = new RelayHttpClient(options);
+  const record = await client.post(sessionPath('ask-result'), { requestId });
+  const remaining = Math.max(0, Date.parse(String(record.expiresAt)) - Date.now());
+  const result = await client.post(sessionPath('ask-wait'), { requestId }, remaining + askResponseMarginMs);
+  return { ...result, requestId } as unknown as RelayAskResult;
 }
 
 /** 把 ask 结果映射成退出码 + 要打印的内容 */

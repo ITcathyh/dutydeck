@@ -52,6 +52,7 @@ const subscriptionSchema = z.object({
   autoFix: z.boolean(),
   mrClosed: z.enum(['merge', 'close']).optional(),
   pendingPipelines: z.array(pendingPipelineSchema).max(MAX_PENDING_PIPELINES).optional(),
+  pendingFailureAction: z.string().min(1).optional(),
   status: z.enum(['waiting', 'failed', 'running', 'passed', 'stopped', 'closed', 'cancelled', 'expired']),
   rounds: z.number().int().nonnegative(),
   /** 错误指纹 → 出现次数；同一提交上的重跑不重复计数。 */
@@ -84,6 +85,7 @@ const subscriptionSchema = z.object({
   updatedAt: timestamp
 }).strict();
 export type CiWebhookSubscription = z.infer<typeof subscriptionSchema>;
+type Admission = { eventKey: string; subscriptionId: string };
 type Stored = { key: string; raw: string; value: CiWebhookSubscription };
 
 /** 宿主内部的事件形状：提供方的 CiWebhookEvent 经 normalizeEvent 清洗后得到。 */
@@ -281,10 +283,12 @@ export class CiWebhookService {
   }
 
   /** CAS 写回；并发下输给别人时返回 undefined，调用方放弃本次动作。 */
-  private async save(current: Stored, next: CiWebhookSubscription): Promise<Stored | undefined> {
+  private async save(current: Stored, next: CiWebhookSubscription, admission?: Admission): Promise<Stored | undefined> {
     const value = subscriptionSchema.parse({ ...next, revision: current.value.revision + 1, updatedAt: iso(this.clock().getTime()) });
     const raw = JSON.stringify(value);
-    return await this.store().compareAndSet(current.key, current.raw, raw) ? { key: current.key, raw, value } : undefined;
+    const saved = admission ? this.options.repositories.ciWebhook.commitTarget({ ...admission, configKey: current.key, expectedConfig: current.raw, nextConfig: raw, state: 'admitted' })
+      : await this.store().compareAndSet(current.key, current.raw, raw);
+    return saved ? { key: current.key, raw, value } : undefined;
   }
 
   private async notice(value: CiWebhookSubscription, notice: CiNotice) {
@@ -343,7 +347,7 @@ export class CiWebhookService {
   }
 
   private async stop(stored: Stored, reason: string) {
-    const saved = await this.save(stored, { ...stored.value, status: 'stopped', task: undefined, reason });
+    const saved = await this.save(stored, { ...stored.value, status: 'stopped', task: undefined, pendingFailureAction: undefined, reason });
     if (saved) await this.notice(saved.value, { key: `${saved.value.id}:stopped:${saved.value.revision}`, title: 'CI 修复已停止', markdown: this.failureMarkdown(saved.value, reason), failed: true });
     return reason;
   }
@@ -389,7 +393,7 @@ export class CiWebhookService {
     if (!stored || stored.value.sessionId !== sessionId) throw new RuntimeError('CI_WEBHOOK_NOT_FOUND', '此工作项中找不到该等待记录。', 404);
     if (!activeStatuses.has(stored.value.status)) return stored.value;
     // 清掉 task 后，尚未开始的续作在 authorizeTask 处被拒绝。
-    const saved = await this.save(stored, { ...stored.value, status: 'cancelled', task: undefined, reason: '已手动取消' });
+    const saved = await this.save(stored, { ...stored.value, status: 'cancelled', task: undefined, pendingFailureAction: undefined, reason: '已手动取消' });
     if (!saved) throw new RuntimeError('CI_WEBHOOK_CONFLICT', 'CI 等待记录刚刚变化，请重试。', 409);
     return saved.value;
   }
@@ -429,62 +433,80 @@ export class CiWebhookService {
     if (occurredAt !== undefined && Math.abs(this.clock().getTime() - occurredAt) > webhookTimestampToleranceMs) return reject(401, 'WEBHOOK_TIMESTAMP_EXPIRED', '事件时间超出 5 分钟窗口，按重放拒绝');
     const eventId = event.eventId || `body:${createHash('sha256').update(request.rawBody).digest('hex')}`;
     const eventKey = createHash('sha256').update(`${provider.id}\0${eventId}`).digest('hex').slice(0, 32);
-    // 按 event-id 去重：TTL 内重复投递直接确认；处理失败时释放，允许发送方重试。
     const now = this.clock().getTime();
-    const expiresAt = now + webhookEventTtlMs;
     const events = this.options.repositories.ciWebhook;
-    if (!events.claimEvent(eventKey, now, expiresAt)) return { statusCode: 200, body: { accepted: false, duplicate: true } };
-    await this.options.onEvent?.(provider.id, event).catch(error => this.options.log?.warn({ error }, 'PR 跟进处理 webhook 事件失败'));
-    try { return { statusCode: 202, body: { accepted: true, matched: await this.handleEvent(event, eventKey, provider.id) } }; }
-    catch (error) { events.releaseEvent(eventKey, expiresAt); throw error; }
-  }
-
-  private async handleEvent(event: CiEvent, eventKey: string, providerId: string, subscriptionId?: string) {
+    const targets = (await this.list()).filter(item => this.matches(item.value, event, provider.id)).map(item => item.value.id);
+    const accepted = events.acceptEvent({ eventKey, providerId: provider.id, payloadJson: JSON.stringify(event), targets, now, expiresAt: now + webhookEventTtlMs });
+    if (accepted === 'conflict') return reject(409, 'WEBHOOK_EVENT_CONFLICT', '同一事件标识对应不同内容');
+    if (accepted === 'duplicate') return { statusCode: 200, body: { accepted: false, duplicate: true } };
+    await this.options.onEvent?.(provider.id, structuredClone(event)).catch(error => this.options.log?.warn({ error }, 'PR 跟进处理 webhook 事件失败'));
     let matched = 0;
-    for (const listed of await this.list()) {
-      if (subscriptionId && listed.value.id !== subscriptionId) continue;
-      if (providerOf(listed.value) !== providerId) continue;
-      let item: Stored | undefined = listed;
-      // 事件已领取去重键；CAS 冲突必须重读，不能把尚未保存的结果确认掉。
-      while (item) {
-        const value = item.value;
-        if (!activeStatuses.has(value.status) || value.repository.toLowerCase() !== event.repository.toLowerCase()) break;
-        const sameTarget = value.mrIid !== undefined && event.mrIid !== undefined ? value.mrIid === event.mrIid : event.branch === value.branch;
-        if (!sameTarget) break;
-        if (event.kind === 'merge_request') {
-          if (await this.onMergeRequest(item, event)) { matched += 1; break; }
-        } else {
-          if (value.mrClosed) break;
-          if (event.headSha !== value.headSha) {
-            if (value.status !== 'running' || value.task?.kind !== 'fix' || !event.headSha) break;
-            if (event.occurredAt !== undefined && event.occurredAt < Date.parse(value.task.startedAt ?? value.createdAt) - 1_000) break;
-            const previous = value.pendingPipelines?.find(pending => pending.event.headSha === event.headSha);
-            if (previous?.event.occurredAt !== undefined && event.occurredAt !== undefined && previous.event.occurredAt > event.occurredAt) break;
-            const { eventId: _eventId, ...pipeline } = event;
-            const pending = pendingPipelineSchema.parse({ key: eventKey, event: pipeline });
-            const pendingPipelines = [...(value.pendingPipelines ?? []).filter(entry => entry.event.headSha !== event.headSha), pending];
-            // 不淘汰已确认接收的结果；释放当前事件的去重键，让发送方在结算后重试。
-            if (pendingPipelines.length > MAX_PENDING_PIPELINES) throw new RuntimeError('CI_WEBHOOK_PENDING_LIMIT', 'Pending repair results are full; retry after the repair settles', 503);
-            if (await this.save(item, { ...value, pendingPipelines })) { matched += 1; break; }
-          } else if (await this.onPipeline(item, event, eventKey)) { matched += 1; break; }
-        }
-        item = await this.read(value.id);
-      }
+    for (const subscriptionId of targets) {
+      try { matched += await this.handleEvent(structuredClone(event), eventKey, provider.id, subscriptionId, { eventKey, subscriptionId }); }
+      catch (error) { this.options.log?.warn({ error, eventKey, subscriptionId }, 'CI 事件已接纳，等待恢复处理'); }
     }
-    return matched;
+    return { statusCode: 202, body: { accepted: true, matched } };
   }
 
-  private async onMergeRequest(item: Stored, event: CiEvent) {
+  private matches(value: CiWebhookSubscription, event: CiEvent, providerId: string) {
+    return providerOf(value) === providerId && activeStatuses.has(value.status)
+      && value.repository.toLowerCase() === event.repository.toLowerCase()
+      && (value.mrIid !== undefined && event.mrIid !== undefined ? value.mrIid === event.mrIid : event.branch === value.branch);
+  }
+
+  private async skipTarget(admission: Admission | undefined, item?: Stored) {
+    if (!admission) return true;
+    return this.options.repositories.ciWebhook.commitTarget({ ...admission, configKey: item?.key ?? `${SUBSCRIPTION_PREFIX}${admission.subscriptionId}`, expectedConfig: item?.raw, state: 'skipped' });
+  }
+
+  private async handleEvent(event: CiEvent, eventKey: string, providerId: string, subscriptionId: string, admission?: Admission) {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const item = await this.read(subscriptionId);
+      if (!item) { if (await this.skipTarget(admission)) return 0; continue; }
+      const value = item.value;
+      const session = await this.options.runtime.getSession(value.sessionId);
+      if (!this.options.providers.get(providerId)?.webhook || !this.matches(value, event, providerId)
+        || !isRunnable(session) || Date.parse(value.expiresAt) <= this.clock().getTime()) {
+        if (await this.skipTarget(admission, item)) return 0;
+        continue;
+      }
+      if (event.kind === 'merge_request') {
+        if (await this.onMergeRequest(item, event, admission)) return 1;
+      } else if (value.mrClosed) {
+        if (await this.skipTarget(admission, item)) return 0;
+      } else if (event.headSha !== value.headSha) {
+        if (value.status !== 'running' || value.task?.kind !== 'fix' || !event.headSha
+          || (event.occurredAt !== undefined && event.occurredAt < Date.parse(value.task.startedAt ?? value.createdAt) - 1_000)) {
+          if (await this.skipTarget(admission, item)) return 0;
+          continue;
+        }
+        const previous = value.pendingPipelines?.find(pending => pending.event.headSha === event.headSha);
+        if (previous?.event.occurredAt !== undefined && event.occurredAt !== undefined && previous.event.occurredAt > event.occurredAt) {
+          if (await this.skipTarget(admission, item)) return 0;
+          continue;
+        }
+        const { eventId: _eventId, ...pipeline } = event;
+        const pending = pendingPipelineSchema.parse({ key: eventKey, event: pipeline });
+        const pendingPipelines = [...(value.pendingPipelines ?? []).filter(entry => entry.event.headSha !== event.headSha), pending];
+        // Keep the target pending until the existing bounded queue has room.
+        if (pendingPipelines.length > MAX_PENDING_PIPELINES) return 0;
+        if (await this.save(item, { ...value, pendingPipelines }, admission)) return 1;
+      } else if (await this.onPipeline(item, event, eventKey, admission)) return 1;
+    }
+    return 0;
+  }
+
+  private async onMergeRequest(item: Stored, event: CiEvent, admission?: Admission) {
     const value = item.value;
     const mrIid = value.mrIid ?? event.mrIid;
-    if (value.mrClosed) return true;
+    if (value.mrClosed) return Boolean(await this.save(item, value, admission));
     if (event.state !== 'merge' && event.state !== 'close') {
-      return value.mrIid !== undefined || mrIid === undefined || Boolean(await this.save(item, { ...value, mrIid }));
+      return Boolean(await this.save(item, { ...value, mrIid }, admission));
     }
     const subject = mrIid ? changeRequestLabel(this.provider(value), mrIid) : '合并请求';
     const reason = event.state === 'merge' ? `${subject} 已合入，停止等待 CI。` : `${subject} 已关闭，停止等待 CI。`;
     // 保留当前任务及绑定以便正常收尾；合并请求终态阻止新的 CI 续作。
-    const saved = await this.save(item, { ...value, mrIid, mrClosed: event.state, pendingPipelines: undefined, status: value.status === 'running' ? 'running' : 'closed', reason });
+    const saved = await this.save(item, { ...value, mrIid, mrClosed: event.state, pendingPipelines: undefined, status: value.status === 'running' ? 'running' : 'closed', reason, pendingFailureAction: undefined }, admission);
     if (saved) await this.notice(saved.value, { key: `${value.id}:closed`, title: 'CI 等待已结束', markdown: reason });
     return Boolean(saved);
   }
@@ -501,37 +523,49 @@ export class CiWebhookService {
     } catch (error) { this.options.log?.warn({ error, subscriptionId: value.id }, '读取 CI 失败日志失败'); }
   }
 
-  private async onPipeline(item: Stored, event: CiEvent, eventKey: string) {
+  private async onPipeline(item: Stored, event: CiEvent, eventKey: string, admission?: Admission) {
     const value = item.value;
     // 续作或修复进行中：同一提交迟到或重复的结果不再触发。
-    if (value.status === 'running' || value.mrClosed) return true;
-    if (event.state === 'success') return this.startTask(item, 'continue', value.actorId, this.continuePrompt(value, event), value.rounds);
+    if (value.status === 'running' || value.mrClosed) return Boolean(await this.save(item, value, admission));
+    if (event.state === 'success') return this.startTask(item, 'continue', value.actorId, this.continuePrompt(value, event), value.rounds, admission);
     await this.completeFailures(value, event);
     const fingerprint = failureFingerprint(event.failures);
     const rerun = value.failure?.sha === value.headSha && value.failure.fingerprint === fingerprint;
     const seen = (value.fingerprints[fingerprint] ?? 0) + (rerun ? 0 : 1);
     const failed: CiWebhookSubscription = {
-      ...value, status: 'failed', reason: undefined, pendingPipelines: undefined, fingerprints: { ...value.fingerprints, [fingerprint]: seen },
+      ...value, status: 'failed', reason: undefined, pendingPipelines: undefined, pendingFailureAction: eventKey, fingerprints: { ...value.fingerprints, [fingerprint]: seen },
       failure: {
         key: eventKey, sha: value.headSha, fingerprint, summary: failureSummary(event.failures), evidence: failureEvidence(event.failures),
         ...(event.pipelineId ? { pipelineId: event.pipelineId } : {}), ...(event.url ? { url: event.url } : {}), ...(event.operator ? { operator: event.operator } : {}),
         receivedAt: iso(this.clock().getTime())
       }
     };
-    const saved = await this.save(item, failed);
+    const saved = await this.save(item, failed, admission);
     if (!saved) return false;
-    if (seen >= ciFixLimits.sameError) { await this.stop(saved, `同一个错误第 ${seen} 次出现（指纹 ${fingerprint}），不再自动修复。`); return true; }
-    if (value.rounds >= ciFixLimits.rounds) { await this.stop(saved, `已经修了 ${value.rounds} 轮仍然失败，不再自动修复。`); return true; }
-    if (value.autoFix) { await this.startFix(saved, value.actorId); return true; }
-    const cardMessageId = await this.notice(saved.value, {
+    await this.resumeFailureAction(saved);
+    return true;
+  }
+
+  private async resumeFailureAction(stored: Stored) {
+    const value = stored.value;
+    const eventKey = value.pendingFailureAction;
+    if (value.status !== 'failed' || !eventKey || value.failure?.key !== eventKey) return;
+    if (!this.provider(value)?.webhook || Date.parse(value.expiresAt) <= this.clock().getTime()) return;
+    const seen = value.fingerprints[value.failure.fingerprint] ?? 0;
+    if (seen >= ciFixLimits.sameError) { await this.stop(stored, `同一个错误第 ${seen} 次出现（指纹 ${value.failure.fingerprint}），不再自动修复。`); return; }
+    if (value.rounds >= ciFixLimits.rounds) { await this.stop(stored, `已经修了 ${value.rounds} 轮仍然失败，不再自动修复。`); return; }
+    if (value.autoFix) { await this.startFix(stored, value.actorId); return; }
+    if (!isRunnable(await this.options.runtime.getSession(value.sessionId))) { await this.stop(stored, '会话已结束，无法处理 CI 失败。'); return; }
+    const cardMessageId = await this.notice(value, {
       key: `${value.id}:failure:${eventKey}`, title: 'CI 失败', failed: true,
-      markdown: this.failureMarkdown(saved.value, `${spaced(this.label(value))}失败。点下方按钮交给 Agent 按规则修复：最多 ${ciFixLimits.rounds} 轮；同一错误出现 ${ciFixLimits.sameError} 次、每轮改动超过 ${ciFixLimits.files} 个文件或 ${ciFixLimits.lines} 行、head SHA 变化时会停下。`),
+      markdown: this.failureMarkdown(value, `${spaced(this.label(value))}失败。点下方按钮交给 Agent 按规则修复：最多 ${ciFixLimits.rounds} 轮；同一错误出现 ${ciFixLimits.sameError} 次、每轮改动超过 ${ciFixLimits.files} 个文件或 ${ciFixLimits.lines} 行、head SHA 变化时会停下。`),
       action: { label: '交给 Agent 修', value: { dutydeck_ci_fix: value.id, failure: eventKey } }
     });
-    if (!cardMessageId) return true;
+    if (!cardMessageId) return;
     const latest = await this.read(value.id);
-    if (latest?.value.failure?.key === eventKey) await this.save(latest, { ...latest.value, failure: { ...latest.value.failure, cardMessageId } });
-    return true;
+    if (latest?.value.status === 'failed' && latest.value.pendingFailureAction === eventKey && latest.value.failure?.key === eventKey) {
+      await this.save(latest, { ...latest.value, pendingFailureAction: undefined, failure: { ...latest.value.failure, cardMessageId } });
+    }
   }
 
   /** 动手前的第一次核对：本地分支 HEAD 必须仍是失败流水线的提交。 */
@@ -548,14 +582,14 @@ export class CiWebhookService {
     return `已交给 Agent 修复（第 ${round}/${ciFixLimits.rounds} 轮）。`;
   }
 
-  private async startTask(stored: Stored, kind: 'continue' | 'fix', actorId: string | undefined, prompt: string, round: number) {
+  private async startTask(stored: Stored, kind: 'continue' | 'fix', actorId: string | undefined, prompt: string, round: number, admission?: Admission) {
     const value = stored.value;
     const key = `ci-webhook:${value.id}:${kind}:${round}:${short(value.headSha)}`;
     const id = executionTaskId('runtime', value.sessionId, key);
     const saved = await this.save(stored, {
-      ...value, status: 'running', rounds: round, reason: undefined, pendingPipelines: undefined,
+      ...value, status: 'running', rounds: round, reason: undefined, pendingPipelines: undefined, pendingFailureAction: undefined,
       task: { id, key, kind, round, baseSha: value.headSha, prompt, ...(actorId ? { actorId } : {}) }
-    });
+    }, admission);
     if (!saved) return false;
     await this.dispatch(saved);
     // 按钮回调有 3 秒时限，开始通知不阻塞回执。
@@ -630,14 +664,22 @@ export class CiWebhookService {
   }
 
   private async runTick() {
+    for (const event of this.options.repositories.ciWebhook.listPendingEvents()) {
+      for (const subscriptionId of event.targets) {
+        if (this.closed) return;
+        try { await this.handleEvent(JSON.parse(event.payloadJson) as CiEvent, event.eventKey, event.providerId, subscriptionId, { eventKey: event.eventKey, subscriptionId }); }
+        catch (error) { this.options.log?.warn({ error, eventKey: event.eventKey, subscriptionId }, 'CI 待接纳事件恢复失败'); }
+      }
+    }
     for (const item of await this.list()) {
       if (this.closed) return;
       const value = item.value;
       const now = this.clock().getTime();
       if ((value.status === 'waiting' || value.status === 'failed') && Date.parse(value.expiresAt) <= now) {
-        await this.save(item, { ...value, status: 'expired' });
+        await this.save(item, { ...value, status: 'expired', pendingFailureAction: undefined });
         continue;
       }
+      if (value.status === 'failed' && value.pendingFailureAction) { await this.resumeFailureAction(item); continue; }
       if (value.status === 'waiting' && value.pendingPipelines?.length) {
         const pending = value.pendingPipelines.find(entry => entry.event.headSha === value.headSha);
         if (pending) await this.handleEvent({ ...pending.event }, pending.key, providerOf(value), value.id);
@@ -683,7 +725,7 @@ export class CiWebhookService {
     const checked = await this.checkRound(value, current, task).catch(error => ({ headSha: undefined, message: `无法核对第 ${current.round} 轮的修复提交：${errorMessage(error)}，已停止。` }));
     const saved = await this.save(stored, checked.headSha
       ? { ...value, status: 'waiting', headSha: checked.headSha, failure: undefined, task: undefined, pendingPipelines: value.pendingPipelines?.filter(entry => entry.event.headSha === checked.headSha), reason: checked.message }
-      : { ...value, status: 'stopped', task: undefined, pendingPipelines: undefined, reason: checked.message });
+      : { ...value, status: 'stopped', task: undefined, pendingFailureAction: undefined, pendingPipelines: undefined, reason: checked.message });
     if (saved) await this.notice(saved.value, { key: `${value.id}:settle:${task.id}`, title: `CI 修复第 ${current.round} 轮结果`, markdown: checked.message, failed: !checked.headSha, output });
     const pending = saved?.value.pendingPipelines?.[0];
     if (pending) await this.handleEvent({ ...pending.event }, pending.key, providerOf(value), value.id);

@@ -4,9 +4,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
 import type { RelayAskBroker } from '@dutydeck/relay';
+import type { PolicyAction } from '@dutydeck/shared';
 import type { LarkRuntime } from './listener.js';
 import { buildLarkCard, LarkServiceError, type LarkCardService } from './service.js';
-import { LarkWorkflowInteractions, type LarkInteractionContext } from './workflow-interactions.js';
+import { LarkWorkflowInteractions, type LarkInteractionContext, type LarkInteraction } from './workflow-interactions.js';
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -27,15 +28,16 @@ async function harness(adhdMode: boolean, options: { multiple?: boolean; freeTex
   const ask = { id: 'ask_example', sessionId: ctx.sessionId, status: 'pending', question: options.question ?? '确认把这件事记为待办？',
     expiresAt: '2026-10-22T00:08:00.000Z', multiple: options.multiple,
     choices: options.freeText ? undefined : [{ label: '确认写入', value: 'write' }, ...(options.single ? [] : [{ label: '取消', value: 'cancel' }])] };
-  const broker = { get: () => ask, answer: vi.fn(async () => { ask.status = 'answered'; ask.choices = undefined; }) };
+  const broker = { get: () => ask, answer: vi.fn(async (_id: string, _answer: string, input: Parameters<RelayAskBroker['answer']>[2]) => { await input?.beforeClaim?.(); ask.status = 'answered'; ask.choices = undefined; }) };
   const runtime = { getTasks: async () => active ? [{ id: ctx.taskId, status: 'running' }] : [] } as unknown as LarkRuntime;
   const reply = vi.fn(async (_input: any) => ({ messageId: 'om_question' }));
   const update = vi.fn(async (_input: any) => ({}));
   const service = { reply, update } as unknown as LarkCardService;
   const warn = vi.fn();
+  const authorize = vi.fn(async (_record: LarkInteraction, _actor: string, _action: PolicyAction) => !options.deny);
   const create = () => {
     const workflow = new LarkWorkflowInteractions(repos.config, runtime, service, broker as unknown as RelayAskBroker,
-      async () => !options.deny, { log: { warn } });
+      authorize, { log: { warn } });
     Object.defineProperty(workflow, 'boot', { value: 'boot_example' });
     return workflow;
   };
@@ -48,7 +50,7 @@ async function harness(adhdMode: boolean, options: { multiple?: boolean; freeTex
     actorId: 'ou_requester', requestId: record.id, action: 'answer', answer: 'write', callback: true,
     cardId: record.cardId, generation: record.boot, ...patch });
   const cancel = () => { active = false; ask.status = 'cancelled'; };
-  return { repos, record, broker, reply, update, warn, respond, cancel, ask, get workflow() { return workflow; },
+  return { repos, record, broker, reply, update, warn, respond, cancel, ask, authorize, get workflow() { return workflow; },
     restart: async () => { workflow.close(); workflow = create(); await workflow.initialize(ctx.appId); } };
 }
 
@@ -107,7 +109,13 @@ describe('ADHD card presentation', () => {
     expect(pending).not.toContain('回答截止时间');
     expect(pending).not.toContain('可选项：');
     await h.respond();
-    expect(h.broker.answer).toHaveBeenCalledWith('ask_example', 'write', { sessionId: ctx.sessionId });
+    const beforeClaim = h.broker.answer.mock.calls[0]![2]!.beforeClaim;
+    expect(beforeClaim).toEqual(expect.any(Function));
+    expect(h.broker.answer).toHaveBeenCalledWith('ask_example', 'write', { sessionId: ctx.sessionId, handledBy: 'ou_requester', beforeClaim });
+    expect(h.authorize.mock.calls.map(([record, actor, action]) => ({ requestId: record.id, sessionId: record.sessionId, chatId: record.event.chatId, actor, action }))).toEqual([
+      { requestId: h.record.id, sessionId: ctx.sessionId, chatId: ctx.event.chatId, actor: 'ou_requester', action: 'run.interrupt' },
+      { requestId: h.record.id, sessionId: ctx.sessionId, chatId: ctx.event.chatId, actor: 'ou_requester', action: 'turn.append' },
+    ]);
     expect(h.update.mock.calls.at(-1)![0].elements).toEqual([{ tag: 'markdown', content: '已确认写入 · <at id=ou_requester></at> · 08:03' }]);
     const answered = JSON.stringify(buildLarkCard(h.update.mock.calls.at(-1)![0]));
     expect(answered).not.toContain('callback');

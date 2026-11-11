@@ -70,11 +70,12 @@ describe('native Claude questions over the session relay', () => {
       },
     } });
     expect(received).toEqual([
-      { url: '/api/relay/sessions/self/ask', token: 'Bearer fixture-token', question: '要检查哪些项？\n代码：检查实现\n文档：检查说明', questionBody: '要检查哪些项？',
+      { url: '/api/relay/sessions/self/ask', token: 'Bearer fixture-token', requestId: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/), question: '要检查哪些项？\n代码：检查实现\n文档：检查说明', questionBody: '要检查哪些项？',
         choices: [{ label: '代码' }, { label: '文档' }], multiple: true },
-      { url: '/api/relay/sessions/self/ask', token: 'Bearer fixture-token', question: '下一步？', questionBody: '下一步？',
+      { url: '/api/relay/sessions/self/ask', token: 'Bearer fixture-token', requestId: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/), question: '下一步？', questionBody: '下一步？',
         choices: [{ label: '继续' }, { label: '暂停' }] },
     ]);
+    expect(received[0].requestId).not.toBe(received[1].requestId);
     expect(broker.listPending()).toHaveLength(0);
   });
 

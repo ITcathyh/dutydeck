@@ -13,6 +13,7 @@ export const appConfigSchema = z.object({
   authEnabled: z.boolean().default(true),
   databaseUrl: z.string().default('./.dutydeck/dutydeck.db'),
   acpxCommand: z.string().default('acpx'),
+  driverIdleCpuAction: z.enum(['off', 'diagnose', 'retire']).default('diagnose'),
   driverIdleTimeoutMs: z.number().nonnegative().default(6 * 60 * 60_000),
   cleanupIntervalMs: z.number().int().min(1).max(2_147_483_647).default(5 * 60_000),
   agents: z.array(agentConfigSchema).default([])
@@ -234,6 +235,7 @@ export function loadConfigWithDiagnostics(env: NodeJS.ProcessEnv = process.env, 
       : z.enum(['true', 'false']).parse(env.DUTYDECK_AUTH) === 'true',
     databaseUrl: resolveDatabaseUrl(env),
     acpxCommand: env.DUTYDECK_ACPX_COMMAND,
+    driverIdleCpuAction: env.DUTYDECK_DRIVER_IDLE_CPU_ACTION,
     driverIdleTimeoutMs: env.DUTYDECK_DRIVER_IDLE_TIMEOUT_MS ? Number(env.DUTYDECK_DRIVER_IDLE_TIMEOUT_MS) : undefined,
     cleanupIntervalMs: env.DUTYDECK_CLEANUP_INTERVAL_MS ? Number(env.DUTYDECK_CLEANUP_INTERVAL_MS) : undefined,
     agents: [...agents.values()]

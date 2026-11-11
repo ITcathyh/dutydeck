@@ -2510,3 +2510,68 @@ describe('questions answered outside the card', () => {
     } finally { workflow.close(); await broker.close(); repos.close(); vi.useRealTimers(); }
   });
 });
+
+it.each(['pending', 'resolving'] as const)('restores an ordinary persistent Ask card across boots without sending another card (%s)', async state => {
+  const { directory, filename, repositories } = await openDatabase();
+  let repos = repositories;
+  let broker = new RelayAskBroker({ publish: async () => {} }, createRelayAskStore(repos.config));
+  let workflow: LarkWorkflowInteractions | undefined;
+  try {
+    const waiting = broker.register({ sessionId: 'ses_one', requestId: 'persistent-card', question: 'Continue?' });
+    await vi.waitFor(() => expect(broker.listPending()).toHaveLength(1));
+    const ask = broker.listPending()[0]!;
+    const firstRuntime = makeRuntime([runningTask()], []).runtime;
+    const firstService = makeService();
+    const firstWorkflow = new LarkWorkflowInteractions(repos.config, firstRuntime, firstService.service, broker, async () => true);
+    await firstWorkflow.observe(context(), agentEvent('text', { relay: 'ask', askId: ask.id }));
+    const old = { ...(await firstWorkflow.list('app_one'))[0]!, state };
+    await persistInteraction(repos.config, old);
+    firstWorkflow.close();
+    broker.close(); await broker.flush(); await waiting; repos.close();
+    repos = createRepositories(filename);
+    broker = new RelayAskBroker({ publish: async () => {} }, createRelayAskStore(repos.config));
+    await broker.initialize();
+    const { runtime } = makeRuntime([runningTask()], []);
+    const { service, reply } = makeService();
+    const authorize = vi.fn(async (_record: LarkInteraction, _actor: string, _action: string) => true);
+    workflow = new LarkWorkflowInteractions(repos.config, runtime, service, broker, authorize);
+    await workflow.initialize('app_one');
+    expect(await workflow.list('app_one')).toEqual([expect.objectContaining({ state: 'pending', boot: old.boot, cardId: old.cardId })]);
+    await workflow.observe(context(), agentEvent('text', { relay: 'ask', askId: ask.id }));
+    expect(reply).not.toHaveBeenCalled();
+    const reconnected = broker.wait('ses_one', 'persistent-card');
+    await workflow.respond(responseInput(old));
+    expect(await reconnected).toMatchObject({ status: 'answered', answer: '可以' });
+    expect(authorize.mock.calls.some(call => call[2] === 'turn.append')).toBe(true);
+    expect(reply).not.toHaveBeenCalled();
+  } finally { workflow?.close(); broker.close(); await broker.flush(); repos.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+it('does not send another persistent Ask card after a platform response is lost and the workflow restarts', async () => {
+  const { directory, filename, repositories } = await openDatabase();
+  let repos = repositories;
+  let broker = new RelayAskBroker({ publish: async () => {} }, createRelayAskStore(repos.config));
+  let workflow: LarkWorkflowInteractions | undefined;
+  try {
+    const waiting = broker.register({ sessionId: 'ses_one', requestId: 'unknown-card', question: 'Continue?' });
+    await vi.waitFor(() => expect(broker.listPending()).toHaveLength(1));
+    const id = broker.listPending()[0]!.id;
+    const { runtime } = makeRuntime([runningTask()], []);
+    const first = makeService();
+    first.reply.mockRejectedValueOnce(new Error('platform response lost'));
+    workflow = new LarkWorkflowInteractions(repos.config, runtime, first.service, broker, async () => true);
+    await expect(workflow.observe(context(), agentEvent('text', { relay: 'ask', askId: id }))).rejects.toThrow('platform response lost');
+    expect(first.reply).toHaveBeenCalledTimes(1);
+    expect((await workflow.list('app_one'))[0]).toMatchObject({ relayDeliveryStartedAt: expect.any(String), state: 'pending' });
+    workflow.close(); broker.close(); await broker.flush(); await waiting; repos.close();
+    repos = createRepositories(filename); broker = new RelayAskBroker({ publish: async () => {} }, createRelayAskStore(repos.config));
+    await broker.initialize();
+    const next = makeService();
+    workflow = new LarkWorkflowInteractions(repos.config, runtime, next.service, broker, async () => true);
+    await workflow.initialize('app_one');
+    await workflow.observe(context(), agentEvent('text', { relay: 'ask', askId: id }));
+    expect(next.reply).not.toHaveBeenCalled();
+    expect(await broker.result('ses_one', 'unknown-card')).toMatchObject({ status: 'pending' });
+    expect(await workflow.list('app_one')).toHaveLength(1);
+  } finally { workflow?.close(); broker.close(); await broker.flush(); repos.close(); await rm(directory, { recursive: true, force: true }); }
+});

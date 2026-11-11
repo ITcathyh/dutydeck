@@ -11,7 +11,7 @@ import { createTaskExecutionSchema } from './task-execution-migration.js'
 import { createBotConfigurationSchema } from './bot-configuration-migration.js'
 import { createCollaborationDutySchema, createCollaborationSchema } from './collaboration-migration.js'
 import { pruneScheduleEntityVersions } from './schedule-foundation.js'
-import { createCiWebhookSchema } from './ci-webhook.js'
+import { createCiWebhookAdmissionSchema, createCiWebhookSchema } from './ci-webhook.js'
 import { createUsageLedgerSchema, migrateUsagePricing } from './usage-ledger.js'
 import { createSessionInsightSchema } from './session-insight-migration.js'
 import { migrateLegacyDutyScenarios } from './scenario-legacy.js'
@@ -661,7 +661,8 @@ export const migrations: Migration[] = [
     db.exec(`CREATE INDEX IF NOT EXISTS events_user_text ON events(session_id,sequence,json_type(data,'$.steering') IS NULL,
       COALESCE(task_id,json_extract(data,'$.taskId')),attempt_id,substr(json_extract(data,'$.text'),1,40),id)
       WHERE type='text' AND json_valid(data) AND json_extract(data,'$.role')='user'`);
-  } }
+  } },
+  { version: 50, name: 'ci_webhook_durable_admission', up: createCiWebhookAdmissionSchema }
 ]
 
 /** v38：collaboration_duties 加 scenarios_json 列，把旧的 alarm_json 转进去。 */

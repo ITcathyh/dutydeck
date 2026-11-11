@@ -178,3 +178,9 @@ describe('Node timer configuration bounds', () => {
     expect(() => loadConfig({ DUTYDECK_CLEANUP_INTERVAL_MS: '2147483648' })).toThrow();
   });
 });
+
+it('validates the explicit idle CPU action and defaults to diagnosis', () => {
+  expect(loadConfig({}).driverIdleCpuAction).toBe('diagnose');
+  for (const action of ['off', 'diagnose', 'retire']) expect(loadConfig({ DUTYDECK_DRIVER_IDLE_CPU_ACTION: action }).driverIdleCpuAction).toBe(action);
+  expect(() => loadConfig({ DUTYDECK_DRIVER_IDLE_CPU_ACTION: 'kill' })).toThrow();
+});
