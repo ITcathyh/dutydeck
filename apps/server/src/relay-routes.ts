@@ -47,8 +47,11 @@ export function createRelayContinuationChecker(runtime: DutydeckRuntime, authori
       const session = await runtime.getSession(record.sessionId);
       if (!session || session.archivedAt || terminalStates.has(session.state)) return 'ended';
       if (authorized && !await authorized(record.sessionId)) return 'ended';
-      if (!record.taskId) return 'available';
-      const recovery = await runtime.getTaskRecovery(record.sessionId, record.taskId);
+      const recovery = record.taskId ? await runtime.getTaskRecovery(record.sessionId, record.taskId) : undefined;
+      // Authorization/recovery reads can suspend while the session stops or is archived.
+      const current = await runtime.getSession(record.sessionId);
+      if (!current || current.archivedAt || terminalStates.has(current.state)) return 'ended';
+      if (!recovery) return 'available';
       if (recovery.status === 'reconcile_required' || recovery.resolvedUnknown || recovery.blockers.length) return 'unknown';
       if (recovery.status !== 'running') return 'ended';
       const owner = runtime.getActiveTaskContext(record.sessionId);
@@ -256,12 +259,21 @@ export function registerRelayRoutes(app: FastifyInstance, options: RelayRoutesOp
         const controller = new AbortController();
         reply.raw.once('close', () => { if (!reply.raw.writableFinished) controller.abort('等待连接已断开'); });
         if (reply.raw.destroyed) controller.abort('等待连接已断开');
-        const capability = await service.resolveSession(request.headers.authorization, request.params.id);
+        const capability = service.verifySession(request.headers.authorization, request.params.id);
+        if (action === 'ask-result' && runtime) release = runtime.subscribe(capability.sessionId, event => {
+          const state = (event.data as { state?: string } | undefined)?.state;
+          if (event.type === 'status' && state && terminalStates.has(state)) controller.abort('会话已结束');
+        });
+        await service.resolveSession(request.headers.authorization, request.params.id);
         const requestId = request.body?.requestId;
         if (typeof requestId !== 'string' || Object.keys(request.body ?? {}).some(key => key !== 'requestId')) throw new RelayError('RELAY_INVALID_REQUEST_ID', '只接受 requestId。', 400);
-        if (action === 'ask-result') await options.authorizeResult?.(capability.sessionId);
         const record = await broker.result(capability.sessionId, requestId);
-        if (action === 'ask-result') return record;
+        if (action === 'ask-result') {
+          await options.authorizeResult?.(capability.sessionId);
+          await service.resolveSession(request.headers.authorization, request.params.id);
+          if (controller.signal.aborted) throw new RelayError('RELAY_CONNECTION_CLOSED', '查询连接已断开。', 409);
+          return record;
+        }
         release = watchSession(capability.sessionId, { taskId: record.taskId, attemptId: record.attemptId, controller });
         return await broker.wait(capability.sessionId, requestId, controller.signal);
       } catch (error) { return handleRelayError(error, reply); }

@@ -138,19 +138,23 @@ export class DurableRelayAsks {
     const initial = await this.result(sessionId, requestId);
     if (this.closed || signal?.aborted) return ended(initial.id, '等待连接已关闭；使用 ask-result 查询或 ask-wait 续等同一 requestId。');
     if (initial.continuation !== 'available') { const stored = await this.storage().get(initial.id); if (stored) await this.validate(stored); return ended(initial.id); }
-    const record = await this.validate(await this.storage().get(initial.id) ?? initial);
-    if (record.status !== 'pending') return await this.checkContinuation(record) === 'available' ? outcome(record) : ended(record.id);
+    const record = await this.storage().get(initial.id) ?? initial;
+    if (record.status !== 'pending') {
+      const continuation = await this.checkContinuation(record);
+      return !this.closed && !signal?.aborted && continuation === 'available' ? outcome(record) : ended(record.id);
+    }
     const entry = this.restore(record)!;
     await new Promise<void>((resolve, reject) => {
       const wake = () => { entry.waiters.delete(wake); signal?.removeEventListener('abort', wake); resolve(); };
       entry.waiters.add(wake);
       signal?.addEventListener('abort', wake, { once: true });
       if (this.closed || signal?.aborted || entry.record.status !== 'pending') wake();
-      void this.storage().get(record.id).then(current => { if (current && current.status !== 'pending') this.notify(current); }, error => { entry.waiters.delete(wake); signal?.removeEventListener('abort', wake); reject(error); });
+      // Subscribe before validation: an unknown result must wake this caller too.
+      void this.storage().get(record.id).then(current => current && this.validate(current)).then(current => { if (current) this.notify(current); }, error => { entry.waiters.delete(wake); signal?.removeEventListener('abort', wake); reject(error); });
     });
     if (signal?.aborted || this.closed) { if (!this.closed) await this.validate(await this.storage().get(record.id) ?? record); return ended(record.id, '等待连接已关闭；使用 ask-result 查询或 ask-wait 续等同一 requestId。'); }
     const latest = await this.result(sessionId, requestId);
-    return latest.continuation === 'available' ? outcome(latest) : ended(latest.id);
+    return !this.closed && !signal?.aborted && latest.continuation === 'available' ? outcome(latest) : ended(latest.id);
   }
   async answer(id: string, answer: string, options: { sessionId?: string; beforeClaim?: () => Promise<void>; handledBy?: string }) {
     let previous = await this.storage().get(id);
