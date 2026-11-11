@@ -51,6 +51,34 @@ it('releases canonical bodies and projections after each of 24 real open/close r
   expect(loader).toHaveBeenCalledTimes(25);
 });
 
+it('replaces the real mounted observers previous data when four readers close', async () => {
+  const { client, wrapper } = setup();
+  const observers = new Set<QueryObserver<any>>();
+  const unsubscribe = client.getQueryCache().subscribe(event => {
+    if (event.type === 'observerAdded' && event.query.queryKey[0] === 'history-detail') observers.add(event.observer);
+  });
+  vi.spyOn(api, 'events').mockImplementation(async (_id, range) => [body(range!.after! + 1, 'x'.repeat(1_000_000))]);
+  const readers = [1, 2, 3, 4].map(sequence => renderHook(({ open }) => useHistoryTurnDetail('mounted', summary(sequence), [], open), { wrapper, initialProps: { open: true } }));
+  await waitFor(() => readers.forEach(reader => expect(reader.result.current.query.data?.[0]?.data.text.length).toBe(1_000_000)));
+  readers.forEach(reader => reader.rerender({ open: false }));
+  await waitFor(() => expect(client.getQueryCache().findAll({ queryKey: ['history-detail'] })).toHaveLength(0));
+  readers.forEach(reader => {
+    expect(reader.result.current.query.data).toBeUndefined();
+    expect(reader.result.current.sections).toBeUndefined();
+  });
+  expect(observers.size).toBe(4);
+  // Inspect QueryObserver's actual last defined query through its public placeholder callback.
+  // Cache removal alone leaves the previous million-character body reachable here.
+  const previous: unknown[] = [];
+  act(() => {
+    for (const observer of observers) observer.setOptions({ queryKey: ['previous-probe'], enabled: false,
+      placeholderData: (value: unknown) => { previous.push(value); return undefined; } });
+  });
+  expect(previous).toHaveLength(4);
+  expect(previous).toEqual([[], [], [], []]);
+  unsubscribe();
+});
+
 it('keeps shared readers, cancels the final in-flight reader, and isolates its late response', async () => {
   const { client, wrapper } = setup();
   let complete!: () => void;

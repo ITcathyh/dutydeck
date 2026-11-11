@@ -23,6 +23,7 @@ export interface RelayRoutesOptions {
   service?: RelayService;
   permissions?: HookPermissionRequests;
   continuation?: RelayContinuationChecker;
+  authorizeResult?: (sessionId: string) => Promise<void>;
   authorize?(request: FastifyRequest, sessionId: string, action: 'task.view_result' | 'turn.append'): Promise<void>;
 }
 
@@ -252,13 +253,15 @@ export function registerRelayRoutes(app: FastifyInstance, options: RelayRoutesOp
     app.post<{ Params: { id: string }; Body: { requestId?: string } }>(`/api/relay/sessions/:id/${action}`, async (request, reply) => {
       let release: (() => void) | undefined;
       try {
+        const controller = new AbortController();
+        reply.raw.once('close', () => { if (!reply.raw.writableFinished) controller.abort('等待连接已断开'); });
+        if (reply.raw.destroyed) controller.abort('等待连接已断开');
         const capability = await service.resolveSession(request.headers.authorization, request.params.id);
         const requestId = request.body?.requestId;
         if (typeof requestId !== 'string' || Object.keys(request.body ?? {}).some(key => key !== 'requestId')) throw new RelayError('RELAY_INVALID_REQUEST_ID', '只接受 requestId。', 400);
+        if (action === 'ask-result') await options.authorizeResult?.(capability.sessionId);
         const record = await broker.result(capability.sessionId, requestId);
         if (action === 'ask-result') return record;
-        const controller = new AbortController();
-        reply.raw.once('close', () => { if (!reply.raw.writableFinished) controller.abort('等待连接已断开'); });
         release = watchSession(capability.sessionId, { taskId: record.taskId, attemptId: record.attemptId, controller });
         return await broker.wait(capability.sessionId, requestId, controller.signal);
       } catch (error) { return handleRelayError(error, reply); }

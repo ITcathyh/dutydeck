@@ -177,8 +177,8 @@ export interface LarkGroupToolClient {
   listChatMessages(input: LarkChatMessagesInput): Promise<{ items: LarkChatMessage[]; hasMore: boolean; pageToken?: string }>;
   getMessage(messageId: string): Promise<LarkChatMessage>;
   getMessageItems(messageId: string): Promise<LarkChatMessage[]>;
-  sendText(input: { chatId: string; text: string; idempotencyKey?: string }): Promise<LarkMessageResult>;
-  replyText(input: { messageId: string; text: string; replyInThread?: boolean; idempotencyKey?: string }): Promise<LarkMessageResult>;
+  sendText(input: { chatId: string; text: string; idempotencyKey?: string; retry?: boolean }): Promise<LarkMessageResult>;
+  replyText(input: { messageId: string; text: string; replyInThread?: boolean; idempotencyKey?: string; retry?: boolean }): Promise<LarkMessageResult>;
   uploadFile?: ArtifactClient['uploadFile']; uploadImage?: ArtifactClient['uploadImage'];
   sendFile?: (input: { chatId: string; fileKey: string; idempotencyKey: string }) => Promise<LarkMessageResult>;
   sendImage?: (input: { chatId: string; imageKey: string; idempotencyKey: string }) => Promise<LarkMessageResult>;
@@ -1299,8 +1299,8 @@ export class LarkAgentToolsService {
       },
       beforeReceipt: async () => { await checkTarget(await this.context(token, 'group_tools.read')); },
       send: providerUuid => this.authorized(context, replyTo ? 'reply' : 'send', () => replyTo
-        ? context.client.replyText({ messageId: replyTo, text, ...(input.inThread ? { replyInThread: true } : {}), idempotencyKey: providerUuid })
-        : context.client.sendText({ chatId: context.chatId, text, idempotencyKey: providerUuid }))
+        ? context.client.replyText({ messageId: replyTo, text, ...(input.inThread ? { replyInThread: true } : {}), idempotencyKey: providerUuid, retry: false })
+        : context.client.sendText({ chatId: context.chatId, text, idempotencyKey: providerUuid, retry: false }))
     }));
   }
 

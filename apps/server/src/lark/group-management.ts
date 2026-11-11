@@ -530,17 +530,17 @@ export class LarkGroupManager {
     else await this.repos.config.set(runKey(session.id), JSON.stringify(value));
   }
 
-  async authorizeSession(sessionId: string, action: PolicyAction, installationOwner = false, readOnly = false) {
+  async authorizeSession(sessionId: string, action: PolicyAction, installationOwner = false, readOnly = false, options: { propagateRefreshErrors?: boolean } = {}) {
     const run = parse<RunContext>(await this.repos.config.get(runKey(sessionId)));
     if (run) {
       const actor = run.activeOpenId;
       const owner = installationOwner || actor === installationOwnerTaskActor;
-      return this.authorize(run.appId, run.chatId, owner ? undefined : actor, action, sessionId, { installationOwner: owner, readOnly, ...(actor && !owner ? { taskRequesterOpenId: actor } : {}) });
+      return this.authorize(run.appId, run.chatId, owner ? undefined : actor, action, sessionId, { ...options, installationOwner: owner, readOnly, ...(actor && !owner ? { taskRequesterOpenId: actor } : {}) });
     }
     const session = await this.repos.sessions.get(sessionId);
     const { appId, chatId, chatType } = parseLarkSourceId(session?.sourceId);
     if (session?.source !== 'lark' || !appId || !chatId || chatType !== 'group') return undefined;
-    return this.authorize(appId, chatId, undefined, action, sessionId, { installationOwner, readOnly });
+    return this.authorize(appId, chatId, undefined, action, sessionId, { ...options, installationOwner, readOnly });
   }
 
   async prepareTurn(sessionId: string, actorId?: string): Promise<(() => Promise<void>) | undefined> {

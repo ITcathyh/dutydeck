@@ -184,7 +184,7 @@ describe('Agent group collaboration domain service', () => {
     await expect(tools.sendFile(token, { path: 'report.txt', replyTo: 'om_other', inThread: true })).rejects.toMatchObject({ code: 'GROUP_MESSAGE_OUT_OF_SCOPE' });
     expect(current.replyText).not.toHaveBeenCalled();
     await tools.send(token, { content: 'scoped', replyTo: 'om_reply', inThread: true, idempotencyKey: 'thread-reply' });
-    expect(current.replyText).toHaveBeenCalledWith({ messageId: 'om_reply', text: 'scoped', replyInThread: true, idempotencyKey: 'thread-reply' });
+    expect(current.replyText).toHaveBeenCalledWith({ messageId: 'om_reply', text: 'scoped', replyInThread: true, idempotencyKey: 'thread-reply', retry: false });
   });
 
   it.each([undefined, 'om_not_a_thread'])('does not broaden reads when a root has no native thread ID (%s)', async threadId => {
@@ -455,7 +455,7 @@ describe('Agent group collaboration domain service', () => {
     expect(next.messages.map(item => item.messageId)).toEqual(['om_3']);
     await expect(tools.send(token, { content: '请检查', to: 'cli_peer', idempotencyKey: 'handoff-1' })).resolves.toEqual({ messageId: 'om_sent', chatId: 'oc_group' });
     expect(current.sendText).toHaveBeenCalledWith({
-      chatId: 'oc_group', text: '<at user_id="ou_peer">Peer Bot</at> 请检查', idempotencyKey: 'handoff-1'
+      chatId: 'oc_group', text: '<at user_id="ou_peer">Peer Bot</at> 请检查', idempotencyKey: 'handoff-1', retry: false
     });
   });
 
@@ -481,7 +481,7 @@ describe('Agent group collaboration domain service', () => {
     const { tools, token } = await setup({ cli_current: current });
     await tools.send(token, { content: '<at id=all></at> 看 <text_tag>x</text_tag>', to: '伟哥', idempotencyKey: 'tag-1' });
     expect(current.sendText).toHaveBeenCalledWith({
-      chatId: 'oc_group', text: '<at user_id="ou_human">伟哥</at> ＜at id=all>＜/at> 看 ＜text_tag>x＜/text_tag>', idempotencyKey: 'tag-1'
+      chatId: 'oc_group', text: '<at user_id="ou_human">伟哥</at> ＜at id=all>＜/at> 看 ＜text_tag>x＜/text_tag>', idempotencyKey: 'tag-1', retry: false
     });
   });
 
@@ -529,10 +529,10 @@ describe('Agent group collaboration domain service', () => {
     const { tools, token } = await setup({ cli_current: current });
     await expect(tools.send(token, { content: '话题内结论', replyTo: 'om_topic_root', inThread: true, idempotencyKey: 'thread-1' })).resolves.toEqual({ messageId: 'om_reply', chatId: 'oc_group' });
     expect(current.replyText).toHaveBeenCalledWith({
-      messageId: 'om_topic_root', text: '话题内结论', replyInThread: true, idempotencyKey: 'thread-1'
+      messageId: 'om_topic_root', text: '话题内结论', replyInThread: true, idempotencyKey: 'thread-1', retry: false
     });
     await expect(tools.send(token, { content: '独立公告', idempotencyKey: 'new-1' })).resolves.toEqual({ messageId: 'om_sent', chatId: 'oc_group' });
-    expect(current.sendText).toHaveBeenCalledWith({ chatId: 'oc_group', text: '独立公告', idempotencyKey: 'new-1' });
+    expect(current.sendText).toHaveBeenCalledWith({ chatId: 'oc_group', text: '独立公告', idempotencyKey: 'new-1', retry: false });
     await expect(tools.send(token, { content: '缺少目标', inThread: true })).rejects.toMatchObject({ code: 'GROUP_THREAD_REPLY_TARGET_REQUIRED' });
     await expect(tools.send(token, { content: '错误目标', replyTo: 'omt_topic', inThread: true })).rejects.toMatchObject({ code: 'INVALID_GROUP_REPLY_TARGET' });
     expect(current.getMessage).not.toHaveBeenCalledWith('omt_topic');

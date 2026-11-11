@@ -230,7 +230,7 @@ export interface LarkChatMessagesInput {
   endTime?: number;
 }
 export interface LarkChatMessagesResult { items: LarkChatMessage[]; hasMore: boolean; pageToken?: string }
-export interface LarkTextMessageInput { beforeSend?: LarkWriteGuard; text: string; idempotencyKey?: string }
+export interface LarkTextMessageInput { retry?: boolean; beforeSend?: LarkWriteGuard; text: string; idempotencyKey?: string }
 export interface LarkSendTextInput extends LarkTextMessageInput { chatId: string }
 export interface LarkReplyTextInput extends LarkTextMessageInput { messageId: string; replyInThread?: boolean }
 export interface LarkUploadInput { beforeSend?: LarkWriteGuard; data: Uint8Array; filename: string; idempotencyKey: string }
@@ -1524,7 +1524,7 @@ export class LarkCardService {
     const chatId = required(input.chatId, 'chatId');
     if (!chatId.startsWith('oc_')) throw new LarkServiceError('INVALID_CHAT_ID', 'chatId must start with oc_', 400);
     const payload = await this.request('/open-apis/im/v1/messages?receive_id_type=chat_id', {
-      beforeSend: input.beforeSend, body: { receive_id: chatId, msg_type: 'text', content: JSON.stringify({ text: required(input.text, 'text') }), ...(input.idempotencyKey ? { uuid: larkMessageUuid(input.idempotencyKey) } : {}) }
+      retry: input.retry, beforeSend: input.beforeSend, body: { receive_id: chatId, msg_type: 'text', content: JSON.stringify({ text: required(input.text, 'text') }), ...(input.idempotencyKey ? { uuid: larkMessageUuid(input.idempotencyKey) } : {}) }
     });
     const messageId = payload.data?.message_id;
     if (!messageId) throw new LarkServiceError('INVALID_LARK_RESPONSE', 'Lark send response did not include message_id', 502);
@@ -1534,7 +1534,7 @@ export class LarkCardService {
   async replyText(input: LarkReplyTextInput): Promise<LarkMessageResult> {
     const messageId = required(input.messageId, 'messageId');
     const payload = await this.request(`/open-apis/im/v1/messages/${encodeURIComponent(messageId)}/reply`, {
-      beforeSend: input.beforeSend, body: {
+      retry: input.retry, beforeSend: input.beforeSend, body: {
         msg_type: 'text', content: JSON.stringify({ text: required(input.text, 'text') }),
         ...(input.replyInThread ? { reply_in_thread: true } : {}),
         ...(input.idempotencyKey ? { uuid: larkMessageUuid(input.idempotencyKey) } : {})

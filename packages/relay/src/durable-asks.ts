@@ -81,7 +81,9 @@ export class DurableRelayAsks {
     if (record.status !== 'pending') return record;
     if (Date.parse(record.expiresAt) <= Date.now()) return this.settle(record, { ...record, status: 'expired' });
     const continuation = await this.checkContinuation(record);
-    if (continuation !== 'available') return this.settle(record, { ...record, status: 'cancelled', reason: '原执行轮已结束或无法核实，未继续执行。' });
+    if (continuation === 'ended') return this.settle(record, { ...record, status: 'cancelled', reason: '原执行轮已结束或权限已撤销，未继续执行。' });
+    // Unverifiable authority stops connected callers without destroying a still-live question.
+    if (continuation === 'unknown') for (const wake of this.pending.get(record.id)?.waiters ?? []) wake();
     return record;
   }
   async refresh(sessionId?: string) {
@@ -117,7 +119,7 @@ export class DurableRelayAsks {
     const waiting = this.wait(input.sessionId, input.requestId!, signal);
     void waiting.catch(() => undefined);
     try {
-      if (inserted && current.status === 'pending' && !this.closed && !context.signal?.aborted && !cancellation()) {
+      if (inserted && current.status === 'pending' && await this.checkContinuation(current) === 'available' && !this.closed && !context.signal?.aborted && !cancellation()) {
         // Saving the question precedes its single publication attempt. Reconnect never republishes it.
         await Promise.race([this.publisher.publish(record.sessionId, { kind: 'ask', askId: id, text: record.questionBody ?? record.question,
           ...(record.choices ? { choices: record.choices } : {}), ...(record.multiple ? { multiple: true } : {}) }), waiting.then(() => undefined)]);

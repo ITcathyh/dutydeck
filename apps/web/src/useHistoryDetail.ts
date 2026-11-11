@@ -12,6 +12,8 @@ export function useHistoryDetail(sessionId: string, summary: HistoryTurnSummary 
     queryKey: reading ? ['history-detail', sessionId, first, last] : ['history-detail-closed'],
     queryFn: ({ signal }) => loadTurnHistory(sessionId, summary!, signal),
     enabled: reading,
+    // A defined empty state also releases QueryObserver.lastQueryWithDefinedData.
+    initialData: reading ? undefined : [],
     staleTime: Infinity,
     // Offline details may be the only available copy. Explicitly release online cold details below.
     gcTime: reading ? Infinity : 0
@@ -43,5 +45,5 @@ export function useHistoryDetail(sessionId: string, summary: HistoryTurnSummary 
     };
   }, [client, reading, sessionId, first, last]);
 
-  return query;
+  return { ...query, data: reading ? query.data : undefined };
 }

@@ -172,10 +172,10 @@ async function leaderMessage(repositories: RepositoryBundle, task: TaskRecord, a
       && actor.kind === 'channel' && actor.appId === appId && actor.id === actorId
       && inbox.event.senderOpenId === actor.id && original.senderOpenId === actor.id) {
       if (inbox.event.scenario || original.scenario || original.senderType === 'app' || original.senderType === 'bot') return [material('飞书自动化或机器人')];
-      if (original.senderType === 'user' && !inbox.event.replyMessageId) {
-        if (!['text', 'post', 'rich_text'].includes(original.messageType)) return [material('飞书转发或非文本内容')];
-        // 只解析持久化的平台原文，不拉取转发内容或附件。插件命令模板不能冒充用户原话。
-        const { text } = await parseLarkMessageContent(original.messageType, original.content);
+      if (original.senderType === 'user' && inbox.event.senderType === 'user' && !inbox.event.replyMessageId) {
+        if (!['text', 'post', 'rich_text'].includes(inbox.event.messageType)) return [material('飞书转发或非文本内容')];
+        // 原事件核验作者；经平台核验的编辑以当前正文为准。插件展开仍只是执行材料。
+        const { text } = await parseLarkMessageContent(inbox.event.messageType, inbox.event.content);
         return [entry('发起人原话', text), ...(text !== request.prompt ? [material('宿主展开的执行输入')] : [])];
       }
     }
