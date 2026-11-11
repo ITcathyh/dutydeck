@@ -130,6 +130,11 @@ export interface DriverIdleCpuProof {
   sampledAt: number;
 }
 
+export function sameIdleCpuProof(a: DriverIdleCpuProof, b: DriverIdleCpuProof): boolean {
+  return a.identity === b.identity && a.generation === b.generation
+    && a.inputRevision === b.inputRevision && a.nativeSessionId === b.nativeSessionId;
+}
+
 export interface AgentDriver {
   /** Runtime chooses whether uncertain execution must remain attached to its persistent session. */
   /** Refuse automatic idle retirement until the latest native source is durable. */

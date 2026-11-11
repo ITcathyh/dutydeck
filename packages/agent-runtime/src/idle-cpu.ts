@@ -1,14 +1,9 @@
-import type { DriverIdleCpuProof } from '@dutydeck/shared';
+import { sameIdleCpuProof, type DriverIdleCpuProof } from '@dutydeck/shared';
 
 export const IDLE_CPU_MIN_IDLE_MS = 10 * 60_000;
 const MIN_WINDOW_MS = 60_000;
 const MAX_WINDOW_MS = 10 * 60_000;
 const MIN_HIGH_MS = 5 * 60_000;
-
-export function sameIdleCpuProof(a: DriverIdleCpuProof, b: DriverIdleCpuProof): boolean {
-  return a.identity === b.identity && a.generation === b.generation
-    && a.inputRevision === b.inputRevision && a.nativeSessionId === b.nativeSessionId;
-}
 
 /** At least three fresh high windows, with no gaps, low sample or identity change. */
 export class IdleCpuWindow {

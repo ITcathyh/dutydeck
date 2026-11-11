@@ -1186,8 +1186,9 @@ function larkCardRequestBody(input: LarkCardInput, fields: Record<string, unknow
   // 配置中的 Agent 名称等字段可能比投递预检更长；最终正文不能在这里静默变成节选。
   const lostResult = input.cardKind === 'result' && !input.cardBody && typeof output === 'string'
     && larkCardFinalOutputText(card.body.elements) !== larkCardShownResult(output);
-  if (!withinCardLimits(card, fields) || lostResult) throw new LarkServiceError('LARK_CARD_BUDGET_EXCEEDED', '卡片内容超过本地安全预算，请缩短内容或改用完整附件。', 400);
-  return { ...fields, content: JSON.stringify(card) };
+  const body = { ...fields, content: JSON.stringify(card) };
+  if (cardBytes(body) > larkCardSafeLimits.bytes || countCardComponents(card) > larkCardSafeLimits.components || lostResult) throw new LarkServiceError('LARK_CARD_BUDGET_EXCEEDED', '卡片内容超过本地安全预算，请缩短内容或改用完整附件。', 400);
+  return body;
 }
 
 export class LarkServiceError extends Error {

@@ -8,6 +8,7 @@ import {
   isBackgroundFollowup,
   isClaudeFamilyCli,
   RuntimeError,
+  sameIdleCpuProof,
   type AgentConfig,
   type PermissionMode,
   type DriverPermissionDecision,
@@ -1119,16 +1120,11 @@ export class PtyCliDriver implements AgentDriver {
 
   beginIdleCpuRetirement(expected: DriverIdleCpuProof): boolean {
     const current = this.idleCpuProof();
-    if (!this.idleRetirementArmed || !current || !this.sameIdleCpuIdentity(expected, current)) return false;
+    if (!this.idleRetirementArmed || !current || !sameIdleCpuProof(expected, current)) return false;
     // This is the synchronous retirement entry: no input can cross the later
     // runtime ledger/stop awaits. A stale candidate makes no lifecycle change.
     this.idleCpuFence = expected;
     return true;
-  }
-
-  private sameIdleCpuIdentity(a: DriverIdleCpuProof, b: DriverIdleCpuProof): boolean {
-    return a.identity === b.identity && a.generation === b.generation
-      && a.inputRevision === b.inputRevision && a.nativeSessionId === b.nativeSessionId;
   }
 
   async prepareForIdleRetirement(): Promise<boolean> {
@@ -1171,7 +1167,7 @@ export class PtyCliDriver implements AgentDriver {
     if (this.stopping) return this.stopping;
     if (this.idleCpuFence && !this.stopped) {
       const current = this.idleCpuProof();
-      if (!current || !this.sameIdleCpuIdentity(this.idleCpuFence, current)) {
+      if (!current || !sameIdleCpuProof(this.idleCpuFence, current)) {
         throw new DriverRecoveryError('Idle CPU retirement proof changed; original process preserved');
       }
     }
