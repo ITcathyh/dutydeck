@@ -967,13 +967,14 @@ alarm=<JSON> (the old flat alarm subscription) still works for one release and i
     .action((ruleId, _options, command) => runSettings('approval-rule-remove', command, { ruleId }));
 
   const task = program.command('task').description('Open task commands for external programs');
-  for (const action of ['list', 'read', 'send', 'interrupt', 'decide'] as const) {
+  for (const action of ['list', 'read', 'send', 'interrupt', 'decide', 'archive'] as const) {
     const command = task.command(action === 'list' ? 'list' : `${action} <id>`)
       .option('--url <url>', 'Exact local runtime URL; requires --database')
       .option('--database <path>', 'Runtime database used for local authentication')
       .option('--json', 'Print one JSON response');
     if (action === 'list' || action === 'read') command.option('--limit <count>', 'Maximum items (1-200)');
     else command.option('--client <name>', 'Audit client name ([a-z0-9-]{1,32})');
+    if (action === 'list') command.option('--recent', 'Running tasks and tasks completed within the last 24 hours');
     if (action === 'send') command.option('--text <text>', 'User input').option('--stdin', 'Read input from stdin').option('--mode <mode>', 'queue or steer', 'queue');
     if (action === 'decide') command.requiredOption('--waiting <id>', 'Pending approval or question').requiredOption('--option <id>', 'allow, deny, answer or a choice value').option('--text <text>', 'Answer or rejection reason');
     if (action === 'list') command.action((options, command) => handlers.task?.({ action, ...options, ...localRuntimeOptionsFrom(options, command) }));

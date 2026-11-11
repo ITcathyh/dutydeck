@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import { inferAcpInsightClient } from '@dutydeck/acp-client';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
@@ -109,19 +110,35 @@ export function registerTaskRoutes(app: FastifyInstance, runtime: DutydeckRuntim
   can(request: FastifyRequest, id: string, boundary: 'session' | 'high_risk', action: PolicyAction): Promise<boolean>;
   source(session: Session): Promise<SessionSourceContext | undefined>;
 }) {
-  app.get<{ Querystring: { limit?: string } }>('/api/tasks', async request => {
-    const deadline = Date.now() + 3000;
+  app.get<{ Querystring: { limit?: string; recent?: string } }>('/api/tasks', async request => {
+    const now = Date.now();
+    const deadline = now + 3000;
+    const recent = request.query.recent === 'true';
+    if (request.query.recent !== undefined && !['true', 'false'].includes(request.query.recent)) throw new RuntimeError('invalid_argument', 'recent must be true or false', 400);
     const limit = taskLimit(request.query.limit, 50);
-    const sessions = (await options.filterViewable(request, await runtime.listSessions()))
+    const visible = (await options.filterViewable(request, await runtime.listSessions()))
       .filter(session => !session.archivedAt)
-      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, limit);
-    const sources = await taskSources(sessions, options.source, deadline);
-    const agents = await runtime.listAgents();
-    const tasks = [];
-    for (const session of sessions) {
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    const candidates = [];
+    for (const session of recent ? visible : visible.slice(0, limit)) {
       const records = await runtime.getTasks(session.id);
       const waiting = taskWaiting(await runtime.getPendingPermissions(session.id), options.broker?.listPending(session.id) ?? []);
       const status = taskStatus(session, records, waiting);
+      const updatedAt = recent && status === 'done' ? records.at(-1)?.updatedAt ?? session.updatedAt : session.updatedAt;
+      if (recent && !['running', 'queued', 'waiting'].includes(status)) {
+        const completedAt = Date.parse(updatedAt);
+        if (status !== 'done' || (records.length > 0 && records.at(-1)?.status !== 'completed')
+          || !z.string().datetime({ offset: true }).safeParse(updatedAt).success || !Number.isFinite(completedAt) || completedAt > now || completedAt < now - 24 * 60 * 60 * 1000) continue;
+      }
+      candidates.push({ session, records, waiting, status, updatedAt });
+    }
+    if (recent) candidates.sort((a, b) => Number(a.status === 'done') - Number(b.status === 'done') || Date.parse(b.updatedAt) - Date.parse(a.updatedAt) || b.updatedAt.localeCompare(a.updatedAt));
+    const selected = candidates.slice(0, limit);
+    const sources = await taskSources(selected.map(item => item.session), options.source, deadline);
+    const agents = await runtime.listAgents();
+    const tasks = [];
+    const archivable = [];
+    for (const { session, records, waiting, status, updatedAt } of selected) {
       const agent = agents.find(a => a.id === session.agentId);
       const family = agent ? inferAcpInsightClient(agent) : undefined;
       const source = sources.get(session.id);
@@ -131,15 +148,17 @@ export function registerTaskRoutes(app: FastifyInstance, runtime: DutydeckRuntim
       const actions = [];
       const mutable = !session.archivedAt && session.source !== 'work_item' && session.state !== 'stopped' && !records.some(t => ['reconcile_required', 'legacy_unresolved'].includes(t.status));
       if (mutable && await options.can(request, session.id, 'session', 'turn.append')) actions.push('send');
-      if (mutable && ['running', 'waiting', 'queued'].includes(status) && await options.can(request, session.id, 'session', 'run.interrupt')) actions.push('interrupt');
+      const canInterrupt = (recent && session.source !== 'work_item' || mutable && ['running', 'waiting', 'queued'].includes(status)) && await options.can(request, session.id, 'session', 'run.interrupt');
+      if (mutable && ['running', 'waiting', 'queued'].includes(status) && canInterrupt) actions.push('interrupt');
+      if (recent && session.source !== 'work_item' && canInterrupt) archivable.push(session.id);
       if (waiting.some(w => w.kind === 'approval') && runtime.getDriver(session.id)?.resolvePermission && await options.can(request, session.id, 'high_risk', 'high_risk.execute')
         || waiting.some(w => w.kind === 'question') && await options.can(request, session.id, 'session', 'turn.append')) actions.push('decide');
-      tasks.push({ id: session.id, title: session.name || records[0]?.prompt.slice(0, 80) || session.id, status, updated_at: session.updatedAt,
+      tasks.push({ id: session.id, title: session.name || records[0]?.prompt.slice(0, 80) || session.id, status, updated_at: updatedAt,
         agent: family === 'claude' || family === 'codex' ? family : 'other', agent_label: agent?.name ?? session.agentId, cwd: session.cwd,
         origin: { kind: source ? 'lark' : ['lark', 'web', 'schedule', 'trigger'].includes(session.source ?? '') ? session.source : 'other', label: source?.topic?.title ?? source?.chat.name ?? session.source ?? 'other', ...(origin?.url ? { url: origin.url } : {}) },
         waiting, verification: { state: verification && !verification.stale && ['passed', 'failed'].includes(verification.status) ? verification.status : 'none', summary: verification ? `${verification.command}: ${verification.status}${verification.stale ? ' (stale)' : ''}`.slice(0, 200) : '' }, actions });
     }
-    return { tasks };
+    return recent ? { tasks, archivable } : { tasks };
   });
   app.get<{ Params: { id: string }; Querystring: { limit?: string } }>('/api/tasks/:id', async request => {
     const limit = taskLimit(request.query.limit, 40);
