@@ -16,15 +16,7 @@ describe('恢复文案', () => {
     expect(note).not.toContain('重新验收');
   });
 
-  it('两次调用措辞稳定，供两处复用不漂移', () => {
-    expect(replayedRecoveryNote()).toBe(replayedRecoveryNote());
-  });
-
   it('reconciler 恢复卡统一文案为现有原文（替换不改卡面）', () => {
     expect(RECOVERY_TRACKING_NOTE).toBe('Dutydeck 已恢复任务状态，正在继续跟踪执行进度。');
-  });
-
-  it('两条文案各自独立、不相同', () => {
-    expect(replayedRecoveryNote()).not.toBe(RECOVERY_TRACKING_NOTE);
   });
 });

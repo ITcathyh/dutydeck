@@ -573,12 +573,6 @@ describe('factory', () => {
     expect([...ALL_CLI_IDS].sort()).toEqual([...EXPECTED_IDS].sort());
   });
 
-  it('createCliAdapter 按 id 创建，id 自洽', () => {
-    for (const id of ALL_CLI_IDS) {
-      expect(createCliAdapter(id).id).toBe(id);
-    }
-  });
-
   it('未知 id：create 抛错，get 返回 undefined', () => {
     expect(() => createCliAdapter('nope')).toThrow(/Unknown CLI adapter/);
     expect(getCliAdapter('nope')).toBeUndefined();

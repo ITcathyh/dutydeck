@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import { listAcpxBuiltinAgents, normalizeAcpxEvent, renderAgentCommand } from '@dutydeck/acp-client';
+import './support/short-acpx-reply-drain.js';
 
 let cwd: string;
 beforeAll(async () => { cwd = await mkdtemp(join(tmpdir(), 'dutydeck-traex-')); });

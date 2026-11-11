@@ -6,6 +6,7 @@ import { expect, it } from 'vitest';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import { createRepositories } from '@dutydeck/storage';
 import { canonicalExecutionJson, extractEventArtifactReferences, type AgentConfig } from '@dutydeck/shared';
+import './support/short-acpx-reply-drain.js';
 
 it('preserves ACP non-text parts from the real adapter through ledger settlement and a database reopen', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'dutydeck-content-chain-'));

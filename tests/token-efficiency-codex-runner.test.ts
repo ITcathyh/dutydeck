@@ -3,12 +3,15 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterAll, expect, it } from 'vitest';
+import { afterAll, beforeAll, expect, it } from 'vitest';
+import { bundleForTest } from './support/bundle-for-test.js';
 const directories: string[] = [];
+const scriptSource = fileURLToPath(new URL('../scripts/token-efficiency-codex-runner.mts', import.meta.url));
+let script: string;
+let cleanupScript: (() => Promise<void>) | undefined;
+beforeAll(async () => { ({ path: script, cleanup: cleanupScript } = await bundleForTest('token-efficiency-codex-runner', scriptSource)); });
 // Cleanup waits for all cases: they run concurrently, each in its own workspace.
-afterAll(async () => { for (const dir of directories.splice(0)) await rm(dir, { recursive: true, force: true }); });
-const script = fileURLToPath(new URL('../scripts/token-efficiency-codex-runner.mts', import.meta.url));
-const loader = fileURLToPath(new URL('../node_modules/tsx/dist/loader.mjs', import.meta.url));
+afterAll(async () => { for (const dir of directories.splice(0)) await rm(dir, { recursive: true, force: true }); await cleanupScript?.(); });
 
 async function run(mode = 'valid') {
   const workspace = await mkdtemp(join(tmpdir(), 'dutydeck-provider-runner-test-')); directories.push(workspace);
@@ -34,7 +37,7 @@ else {
   const request = { version: 1, policy: 'optimized', config: { model: 'fixture-requested-model', protocol: 'codex-jsonl', reasoningEffort: 'high' }, workspace, inputDigest: 'frozen',
     case: { id: 'fixture-case', input: { promptSource: 'test fixtures', prompts: { legacy: 'old prompt', optimized: 'new prompt' } } } };
   const execution = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
-    const child = spawn(process.execPath, ['--import', loader, script], { env: { ...process.env, PATH: `${workspace}:${process.env.PATH}`, FAKE_CODEX_MODE: mode }, cwd: workspace, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, [script], { env: { ...process.env, PATH: `${workspace}:${process.env.PATH}`, FAKE_CODEX_MODE: mode }, cwd: workspace, stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '', stderr = '';
     child.stdout.on('data', chunk => { stdout += String(chunk); }); child.stderr.on('data', chunk => { stderr += String(chunk); });
     child.on('error', reject); child.on('close', code => resolve({ code, stdout, stderr })); child.stdin.end(JSON.stringify(request));

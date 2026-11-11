@@ -2,16 +2,16 @@ import { spawn } from 'node:child_process';
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
-import { it, type TestContext } from 'vitest';
+import { afterAll, it, type TestContext } from 'vitest';
 import Database from 'better-sqlite3';
 import { createRepositories, currentProcessIdentity } from '@dutydeck/storage';
 import { agentConfigSchema } from '@dutydeck/shared';
 import { defaultDaemonDir, writeLastDaemonDir, writeState } from '../daemon/daemon.js';
+import { lazyBundleForTest } from '../../../../tests/support/bundle-for-test.js';
 
-const cli = fileURLToPath(new URL('../cli.ts', import.meta.url));
-const tsx = createRequire(import.meta.url).resolve('tsx');
+const cli = lazyBundleForTest('create-cli', fileURLToPath(new URL('../cli.ts', import.meta.url)));
+afterAll(async () => { await cli.cleanup(); });
 const uuid = 'dfe543ed-a565-46af-8f04-552fd038df58';
 
 function fixture(onTestFinished: TestContext['onTestFinished']) {
@@ -24,10 +24,11 @@ function fixture(onTestFinished: TestContext['onTestFinished']) {
   return { root, cwd, database };
 }
 
-// 每次调用都是冷启动 tsx 子进程，互不依赖的调用并发跑；三个用例各用独立 HOME 与数据库，也并发执行。
-function invoke(root: string, cwd: string, args: string[]) {
+// 每次调用都是独立子进程，互不依赖的调用并发跑；三个用例各用独立 HOME 与数据库，也并发执行。
+async function invoke(root: string, cwd: string, args: string[]) {
+  const cliPath = await cli.path();
   return new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve, reject) => {
-    const child = spawn(process.execPath, ['--conditions=development', '--import', tsx, cli, ...args], {
+    const child = spawn(process.execPath, ['--conditions=development', cliPath, ...args], {
       cwd, env: { HOME: root, PATH: dirname(process.execPath), NO_COLOR: '1' }, timeout: 10_000,
     });
     let stdout = '', stderr = '';
