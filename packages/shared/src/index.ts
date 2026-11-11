@@ -249,6 +249,8 @@ export interface ToolCallData {
 }
 
 export interface PermissionRequestData {
+  /** Display-only audit channel; never grants authority. */
+  handledBy?: string;
   id: string;
   toolCallId?: string;
   /**

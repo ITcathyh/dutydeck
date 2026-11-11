@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { runTaskCli, taskError, TaskCliError } from './task-cli.js';
 import { runLarkDisposition } from './lark-disposition-cli.js';
 import { createBackup, inspectBackup, restoreBackup } from './backup.js';
 import { runMemoryManagementCli } from './memory-management-cli.js';
@@ -55,6 +56,8 @@ import { AutostartError, autostartDisable, autostartEnable, autostartStatus } fr
 import { createCliUi } from './cli-ui.js';
 import { adoptLegacyEnv, migrateLegacyBrandDirs } from './legacy-brand.js';
 import { runPluginCli } from './plugins/cli.js';
+
+let openCliInvocation = false;
 
 const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { name: string; version: string };
 
@@ -455,7 +458,8 @@ async function main() {
     secretRotate: async (id, options) => { output(await withSecretContext(options.database, context => runSecretRotate(id, options, context))); },
     secretRemove: async (id, options) => { output(await withSecretContext(options.database, context => runSecretRemove(id, options, context))); },
     larkDisposition: async input => { output(await runLarkDisposition(input)); },
-    larkSend: async (markdown, options) => { output(await runLarkSend(markdown, options)); },
+    task: async input => { output({ ok: true, data: await runTaskCli(input) }); },
+    larkSend: async (markdown, options) => { const result = await runLarkSend(markdown, options); output(options.json ? { ok: true, data: result } : result); },
     larkCreate: async (name, options) => {
       const configured = resolveCliDatabase(options.database);
       const repositories = createRepositories(configured);
@@ -573,12 +577,30 @@ async function main() {
       }
     }
   });
+  const invocation = process.argv.slice(2);
+  while (invocation[0]?.startsWith('-')) {
+    const flag = invocation.shift()!;
+    const option = program.options.find(option => option.short === flag.split('=')[0] || option.long === flag.split('=')[0]);
+    if (option?.required && !flag.includes('=')) invocation.shift();
+  }
+  openCliInvocation = invocation[0] === 'task' || invocation[0] === 'lark' && invocation[1] === 'send' && process.argv.includes('--json');
+  if (openCliInvocation) {
+    for (const command of [program, ...program.commands, ...program.commands.flatMap(command => command.commands)]) {
+      command.exitOverride();
+      command.configureOutput({ writeErr: () => {} });
+    }
+  }
   await program.parseAsync();
 }
 
 try {
   await main();
 } catch (error) {
+  if (openCliInvocation) {
+    const failure = error instanceof TaskCliError ? error : taskError((error as { code?: string }).code?.startsWith('commander.') ? 'invalid_argument' : (error as { code?: string }).code ?? 'unavailable', error instanceof Error ? error.message : String(error));
+    process.stdout.write(`${JSON.stringify({ ok: false, error: { code: failure.code, message: failure.message } })}\n`);
+    process.exit(failure.exitCode);
+  }
   // dutydeck agent 的用法错误也只往 stdout 写一个 JSON。
   if (error instanceof AgentCliError) process.stdout.write(`${JSON.stringify({ ok: false, error: agentCliErrorBody(error) })}\n`);
   else if (error instanceof AgentGroupToolCliError) process.stderr.write(`${JSON.stringify({ ok: false, error: error.error })}\n`);

@@ -190,7 +190,7 @@ export class RelayAskBroker {
     return outcome;
   }
 
-  async answer(askId: string, answer: string, options: { sessionId?: string; beforeClaim?: () => Promise<void> } = {}): Promise<RelayAskRecord> {
+  async answer(askId: string, answer: string, options: { sessionId?: string; beforeClaim?: () => Promise<void>; handledBy?: string } = {}): Promise<RelayAskRecord> {
     await this.ready;
     // A live question is read and claimed without another await after this
     // policy check. Readiness may have waited while permission was revoked.
@@ -207,7 +207,7 @@ export class RelayAskBroker {
     }
     const previous = ask.record;
     // Claim before any await; timeout, stop and another answer cannot overtake the winner.
-    ask.record = { ...previous, status: 'answering' };
+    ask.record = { ...previous, status: 'answering', ...(options.handledBy ? { handledBy: options.handledBy } : {}) };
     clearTimeout(ask.timer);
     ask.timer = undefined;
     try {
@@ -222,7 +222,7 @@ export class RelayAskBroker {
       }
       ask.answerPublishStarted = true;
       await Promise.race([
-        this.publisher.publish(ask.record.sessionId, { kind: 'answer', text, askId }),
+        this.publisher.publish(ask.record.sessionId, { kind: 'answer', text, askId, ...(options.handledBy ? { handledBy: options.handledBy } : {}) }),
         ask.outcome.then(() => { throw new RelayError('RELAY_ASK_SETTLED', '提问已结束，答案未继续提交。', 409); })
       ]);
       await this.finish(ask, { status: 'answered', answer: text, askId });
@@ -230,7 +230,7 @@ export class RelayAskBroker {
       if (result.status !== 'answered') throw new RelayError('RELAY_ASK_SETTLED', '提问已结束，答案未继续提交。', 409);
       return result;
     } catch (error) {
-      if (this.pending.has(askId)) await this.finish(ask, { status: 'cancelled', askId, reason: '答案提交失败，请重新提问。' });
+      if (this.pending.has(askId) && ask.record.status !== 'pending') await this.finish(ask, { status: 'cancelled', askId, reason: '答案提交失败，请重新提问。' });
       throw error;
     }
   }
@@ -302,13 +302,7 @@ export class RelayAskBroker {
       ...(outcome.status === 'answered' ? { answer: outcome.answer } : {}),
       ...(outcome.status === 'cancelled' ? { reason: outcome.reason } : {})
     };
-    ask.settlement = (async () => {
-      let committed = proposed;
-      if (this.store && !await this.store.compareAndSet(previous, proposed)) {
-        const authoritative = await this.store.get(previous.id);
-        if (!authoritative || authoritative.status === 'pending' || authoritative.status === 'answering') throw new RelayError('RELAY_ASK_CONFLICT', '提问状态未能持久保存，连接已结束，请重新提问。', 409);
-        committed = authoritative;
-      }
+    const settle = (committed: RelayAskRecord) => {
       const committedOutcome: RelayAskOutcome = committed.status === 'answered'
         ? { status: 'answered', askId: committed.id, answer: committed.answer! }
         : committed.status === 'expired' ? { status: 'expired', askId: committed.id }
@@ -317,8 +311,37 @@ export class RelayAskBroker {
       this.pending.delete(committed.id);
       if (!this.durableHistory) this.history.set(committed.id, committed);
       ask.resolve(committedOutcome);
-    })().catch(error => {
-      // Failed persistence must not evict the last known record. It is not a live waiter.
+    };
+    ask.settlement = (async () => {
+      let committed = proposed;
+      if (this.store && !await this.store.compareAndSet(previous, proposed)) {
+        const authoritative = await this.store.get(previous.id);
+        if (!authoritative || authoritative.status === 'pending' || authoritative.status === 'answering') throw new RelayError('RELAY_ASK_CONFLICT', '提问状态未能持久保存，连接已结束，请重新提问。', 409);
+        committed = authoritative;
+      }
+      settle(committed);
+    })().catch(async error => {
+      if (outcome.status === 'answered' && this.store) {
+        const stored = await this.store.get(previous.id).catch(() => undefined);
+        // A write may have committed before its acknowledgement failed.
+        if (stored && !['pending', 'answering'].includes(stored.status)) { settle(stored); return; }
+        const retry: RelayAskRecord = { ...previous, status: 'pending' };
+        delete retry.handledBy;
+        if (!this.closed && stored?.status === 'answering' && await this.store.compareAndSet(previous, retry).catch(() => false)) {
+          // The original waiter has not received an answer. Keep it live after
+          // the failed commit and require another explicit human decision.
+          ask.record = retry;
+          ask.settlement = undefined;
+          ask.answerPublishStarted = false;
+          clearTimeout(ask.timer);
+          ask.timer = setTimeout(() => this.track(this.finish(ask, { status: 'expired', askId: retry.id })), Math.max(0, Date.parse(retry.expiresAt) - Date.now()));
+          ask.timer.unref?.();
+          const stopped = [...this.registrations].find(registration => registration.ask === ask && registration.reason)?.reason;
+          if (this.closed || stopped) await this.finish(ask, { status: 'cancelled', askId: retry.id, reason: stopped ?? 'Dutydeck 服务已关闭' });
+          throw error;
+        }
+      }
+      // Other failed terminal writes cannot recreate a waiter.
       if (this.durableHistory) this.history.set(previous.id, previous);
       this.pending.delete(previous.id);
       ask.reject(error);

@@ -27,7 +27,10 @@ export type LarkGroupMemoryScope = 'shared' | 'per-group';
 /** 群聊里 Claude 自带的 auto memory：'inherit' 沿用 Claude 自己的设置（默认，即历史行为）；'off' 在群聊的 Claude 家族会话里关闭。 */
 export type LarkClaudeAutoMemory = 'inherit' | 'off';
 
+export interface LarkCardLink { label: string; url: string; android_url?: string; ios_url?: string; pc_url?: string }
+
 export interface StoredLarkConfig {
+  cardLinks?: LarkCardLink[];
   eventHandlers?: LarkEventHandler[];
   eventHandlersError?: string;
   cardActionForwarding?: CardActionForwarding;
@@ -218,6 +221,7 @@ export interface SaveLarkConfigInput extends Partial<Omit<StoredLarkConfig, 'eve
 }
 
 export interface PublicLarkConfig {
+  cardLinks?: LarkCardLink[];
   eventHandlers?: Array<Omit<LarkEventHandler, 'token'>>;
   eventHandlersError?: string;
   cardActionForwarding?: Omit<CardActionForwarding, 'token'>;

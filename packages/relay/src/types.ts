@@ -29,6 +29,7 @@ export interface RelaySessionLookup {
 
 /** 投递进事件流的载荷 */
 export interface RelayPublishInput {
+  handledBy?: string;
   kind: RelayMessageKind;
   text: string;
   askId?: string;
@@ -66,6 +67,7 @@ export type RelayAskStatus = 'pending' | 'answering' | 'answered' | 'cancelled' 
 
 /** 提问记录（对外只读投影） */
 export interface RelayAskRecord {
+  handledBy?: string;
   taskId?: string;
   attemptId?: string;
   id: string;

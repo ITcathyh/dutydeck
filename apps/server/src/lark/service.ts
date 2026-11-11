@@ -1,3 +1,5 @@
+import { cardLinkElements } from './card-links.js';
+import type { LarkCardLink } from '@dutydeck/shared';
 import { type FinalCardBody } from './final-card.js';
 import { mkdtemp, open, readFile, rename, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -42,6 +44,9 @@ function larkMessageUuid(key: string): string {
 }
 
 export interface LarkCardInput {
+  cardLinks?: LarkCardLink[];
+  /** Observe every failed provider attempt, including failures hidden by retries. */
+  onDeliveryFailure?: (error: unknown) => void;
   /** Validated static custom final body; execution header and completion decorations remain host-owned. */
   cardBody?: FinalCardBody;
   /** Local authority check, repeated after token/quota waits before every provider attempt. */
@@ -556,12 +561,17 @@ export function loadLarkBotConfig(env: NodeJS.ProcessEnv = process.env, input: L
   };
 }
 
+const withinCardLimits = (card: unknown) => cardBytes(card) <= larkCardSafeLimits.bytes && countCardComponents(card) <= larkCardSafeLimits.components;
+
 export function buildLarkCard(input: LarkCardInput = {}) {
-  if (!input.cardBody) return buildDefaultLarkCard(input);
   const { cardBody, ...hostInput } = input;
-  // New bodies are validated at admission. Completion may append trusted host controls.
-  const card = buildDefaultLarkCard({ ...hostInput, elements: [] });
-  return { ...card, body: { direction: 'vertical', padding: '10px 12px', ...cardBody } };
+  const base = buildDefaultLarkCard(cardBody ? { ...hostInput, elements: [] } : hostInput);
+  // Preserve custom body handling; the extra budget check only gates optional links.
+  const card = cardBody ? { ...base, body: { direction: 'vertical', padding: '10px 12px', ...cardBody } } : base;
+  const links = cardBody || input.cardKind ? cardLinkElements(input.cardLinks, input.sessionId) : [];
+  if (!links.length) return card;
+  const linked = { ...card, body: { ...card.body, elements: [...card.body.elements, ...links] } };
+  return withinCardLimits(linked) ? linked : card;
 }
 
 function buildDefaultLarkCard(input: LarkCardInput) {
@@ -1088,12 +1098,11 @@ function buildDefaultLarkCard(input: LarkCardInput) {
       }
     };
   };
-  const withinLimits = (card: unknown) => cardBytes(card) <= larkCardSafeLimits.bytes && countCardComponents(card) <= larkCardSafeLimits.components;
   const mainElements = [...sourceMainElements];
   const omission: TraceOmission = { noticeId: 'dutydeck_omission', omittedGroups: 0 };
   let card = assemble(mainElements);
-  while (!withinLimits(card) && trimOldestTraceGroup(mainElements, omission)) card = assemble(mainElements);
-  if (withinLimits(card)) return card;
+  while (!withinCardLimits(card) && trimOldestTraceGroup(mainElements, omission)) card = assemble(mainElements);
+  if (withinCardLimits(card)) return card;
   const fallbackText = String((sourceMainElements.find(element => element.element_id === 'final_output') as Record<string, unknown> | undefined)?.content
     ?? (sourceMainElements.find(element => element.tag === 'markdown' && !metaIds.has(String(element.element_id ?? ''))) as Record<string, unknown> | undefined)?.content
     ?? content ?? '内容过长');
@@ -1104,7 +1113,7 @@ function buildDefaultLarkCard(input: LarkCardInput) {
     { tag: 'markdown', content: fallbackText.length > 4_000 ? `${fallbackText.slice(0, 3_999)}…` : fallbackText, text_align: 'left', text_size: 'normal_v2', margin: '0px' },
     { tag: 'markdown', element_id: 'dutydeck_fallback_omission', content: "<font color='grey'>卡片内容超过飞书限制，过程记录已收起。</font>", text_size: 'x-small', margin: '8px 0px 0px 0px' }
   ]);
-  if (withinLimits(fallbackCard)) return fallbackCard;
+  if (withinCardLimits(fallbackCard)) return fallbackCard;
   // All caller-controlled fields have already been bounded. This last constant-size shape is the
   // hard safety net for unexpected Card schema overhead or deeply nested third-party elements.
   const waitingForApproval = state === 'running' && hasPendingApproval(sourceMainElements);
@@ -1245,6 +1254,7 @@ export class LarkCardService {
       const resolvedReceiveIdType = receiveIdType(chatId ? 'chat_id' : input.receiveIdType ?? this.config.defaultReceiveIdType);
       const cardInput = await this.cardInput(input);
       const payload = await this.request(`/open-apis/im/v1/messages?receive_id_type=${encodeURIComponent(resolvedReceiveIdType)}`, {
+        onFailure: input.onDeliveryFailure,
         beforeSend: input.beforeSend, body: {
           receive_id: receiveId,
           msg_type: 'interactive',
@@ -1268,6 +1278,7 @@ export class LarkCardService {
       // 消息 om_*）时，用 replyRootId 作为 path 锚点，让卡片落在话题根下；否则回落到触发消息 messageId。
       const threadAnchor = input.replyInThread && input.replyRootId?.trim() ? input.replyRootId.trim() : messageId;
       const payload = await this.request(`/open-apis/im/v1/messages/${encodeURIComponent(threadAnchor)}/reply`, {
+        onFailure: input.onDeliveryFailure,
         beforeSend: input.beforeSend, body: {
           msg_type: 'interactive',
           content: JSON.stringify(buildLarkCard({ ...cardInput, agentName: input.agentName ?? this.config.defaultAgentName, showAgentName: input.showAgentName ?? this.config.resolveShowAgentName?.() ?? this.config.showAgentName })),

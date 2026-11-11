@@ -57,6 +57,7 @@ export interface LarkInteraction extends LarkInteractionContext {
   relatedCardIds?: string[];
   expiresAt?: string;
   updatedAt: string;
+  handledBy?: string;
   actorId?: string;
   /** ask 渲染时是否带结构化选项（单选/多选）；缺省为自由文本问答 */
   structured?: boolean;
@@ -91,6 +92,8 @@ export interface LarkInteraction extends LarkInteractionContext {
   feedback?: string;
   /** ask 实际展示的正文、选项与全文附件提示，关闭卡复用同一份内容。 */
   askContentElements?: LarkCardElement[];
+  /** 原卡的可操作元素，用于提交失败后的原位恢复。 */
+  askPendingElements?: LarkCardElement[];
   /** 建卡时的显示模式，终态重绘和重启修复沿用。 */
   adhdMode?: boolean;
   /** 终态卡回执和有界重试记录，保存在已有配置记录中。 */
@@ -460,6 +463,11 @@ export class LarkWorkflowInteractions {
         try { record = await this.reconcileConfirmation(record); if (record.state === 'pending' && !record.cardId) unresolved++; }
         catch (error) { this.log?.warn({ error, requestId: record.id }, 'Reconciling durable confirmation failed'); unresolved++; continue; }
       }
+      if (record.kind === 'ask' && !record.durable && (['pending', 'expired'].includes(record.state) || record.state === 'resolving' && record.boot !== this.boot)) {
+        const ask = this.broker?.get(record.nativeId);
+        if (ask?.status === 'answered') record = await this.move(record, 'answered', undefined, { closeMessage: undefined, cardClosedAt: undefined, closeAttempts: 0, closeRetryAt: undefined, ...(ask.handledBy ? { handledBy: ask.handledBy, actorId: undefined } : {}) });
+        else if (ask?.status === 'pending' && record.state === 'expired' && await this.live(record, true)) record = await this.restorePendingAsk(record);
+      }
       if (record.state === 'pending' && !await this.live(record, true)) {
         // Runtime hides a permission while its decision is being submitted.
         // A still-running task with a pending receipt has no expiry evidence.
@@ -509,7 +517,7 @@ export class LarkWorkflowInteractions {
       if (current.timedOutAt || ['approved', 'rejected'].includes(current.state)
         || current.state === 'resolving' && current.boot === this.boot) return current;
       try {
-        return await this.move(current, receipt.status, undefined, { closeMessage: undefined, cardClosedAt: undefined, closeAttempts: 0, closeRetryAt: undefined,
+        return await this.move(current, receipt.status, undefined, { ...(receipt.handledBy ? { handledBy: receipt.handledBy, actorId: undefined } : {}), closeMessage: undefined, cardClosedAt: undefined, closeAttempts: 0, closeRetryAt: undefined,
           ...(receipt.status === 'rejected' && receipt.reason ? { rejectReason: rejectReasonSummary(receipt.reason) } : {}) });
       } catch (error) {
         if (!(error instanceof LarkServiceError) || error.code !== 'LARK_INTERACTION_EXPIRED') throw error;
@@ -524,7 +532,7 @@ export class LarkWorkflowInteractions {
     const outcome = record.kind === 'plan'
       ? ({ approved: '已批准', needs_changes: '已提修改意见', rejected: '已取消' } as Record<string, string>)[record.state]
       : ({ answered: record.adhdMode === true && record.answerLabel ? `已${record.answerLabel}` : '已回答', approved: '已允许', rejected: '已拒绝' } as Record<string, string>)[record.state];
-    return [withRejectReason([outcome ?? '已处理', actor, shanghaiClock(Date.parse(record.updatedAt))].filter(Boolean).join(' · '), record.state === 'rejected' ? record.rejectReason : undefined),
+    return [withRejectReason([outcome ?? '已处理', record.handledBy ? `已处理（经 ${record.handledBy}）` : undefined, actor, shanghaiClock(Date.parse(record.updatedAt))].filter(Boolean).join(' · '), record.state === 'rejected' ? record.rejectReason : undefined),
       ...(record.kind === 'plan' ? [planClosedText(record)] : [])].join('\n\n');
   }
   private async renderClosed(record: LarkInteraction, message: string) {
@@ -588,6 +596,49 @@ export class LarkWorkflowInteractions {
       release();
       if (changed) await this.schedulePlanCheck(record.appId);
     }
+  }
+  private async restorePendingAsk(record: LarkInteraction) {
+    while (this.closingCards.has(record.id)) await this.closingCards.get(record.id);
+    let release!: () => void;
+    this.closingCards.set(record.id, new Promise<void>(resolve => { release = resolve; }));
+    const clearClose = { closeMessage: undefined, cardClosedAt: undefined, closeAttempts: 0, closeRetryAt: undefined };
+    try {
+      record = await this.current(record);
+      if (record.state !== 'expired' || this.broker?.get(record.nativeId)?.status !== 'pending') return record;
+      try { record = await this.move(record, 'pending', undefined, { actorId: undefined, handledBy: undefined, ...clearClose }); }
+      catch (error) {
+        if (!(error instanceof LarkServiceError) || error.code !== 'LARK_INTERACTION_EXPIRED') throw error;
+        return this.current(record);
+      }
+      if (record.cardId) {
+        for (const key of this.closedCards) if (key.startsWith(`${record.cardId}:`)) this.closedCards.delete(key);
+        await this.service.update({ ...(record.adhdMode === true ? { adhdMode: true } : {}), messageId: record.cardId, taskId: record.id,
+          taskName: record.taskName || 'Agent 需要你的回答', permissionMode: 'ask', state: 'running', statusLabel: '待回答', awaitingHuman: true, readOnly: true,
+          elements: record.askPendingElements ?? [...(record.askContentElements ?? [questionElement('ask', record.question)]), { tag: 'markdown', content: '请引用本卡片回复你的答案。' }] });
+      }
+      record = await this.current(record);
+      const ask = this.broker?.get(record.nativeId);
+      if (record.state === 'pending' && ask && !['pending', 'answering'].includes(ask.status)) {
+        try { record = await this.move(record, ask.status === 'answered' ? 'answered' : 'expired', undefined, ask.handledBy ? { handledBy: ask.handledBy, actorId: undefined } : {}); }
+        catch (error) {
+          if (!(error instanceof LarkServiceError) || error.code !== 'LARK_INTERACTION_EXPIRED') throw error;
+          record = await this.current(record);
+        }
+      }
+      // A decision can commit while the provider PATCH is in flight. Its
+      // earlier close attempt was blocked by this lock, so redraw after release.
+      if (!['pending', 'resolving'].includes(record.state)) record = await this.annotate(record, clearClose);
+    } catch (error) {
+      // A failed restore must remain eligible for the next reconciliation.
+      const current = await this.current(record);
+      if (current.state === 'pending') await this.move(current, 'expired').catch(() => undefined);
+      throw error;
+    } finally {
+      this.closingCards.delete(record.id);
+      release();
+    }
+    if (!['pending', 'resolving'].includes(record.state)) await this.renderClosed(record, await this.closedMessage(record));
+    return this.current(record);
   }
   private async renderPendingPermission(record: LarkInteraction) {
     if (!record.cardId) return;
@@ -810,6 +861,16 @@ export class LarkWorkflowInteractions {
       }
       return;
     }
+    if (event.type === 'text' && data.relay === 'answer' && data.handledBy) {
+      const receipt = this.broker?.get(String(data.askId));
+      if (receipt?.status !== 'answered' || receipt.sessionId !== context.sessionId) return;
+      for (const record of await this.list(context.appId)) {
+        if (record.kind !== 'ask' || record.durable || record.sessionId !== context.sessionId || record.nativeId !== data.askId || !['pending', 'resolving', 'expired'].includes(record.state)) continue;
+        const answered = await this.move(record, 'answered', undefined, { handledBy: receipt.handledBy, actorId: undefined, closeMessage: undefined, cardClosedAt: undefined, closeAttempts: 0, closeRetryAt: undefined });
+        await this.renderClosed(answered, await this.closedMessage(answered));
+      }
+      return;
+    }
     let kind: 'ask' | 'permission';
     let nativeId: string;
     let question: string;
@@ -990,7 +1051,7 @@ export class LarkWorkflowInteractions {
         }
         // 展示真相独立于 broker 的 live waiter；回答/过期后的重绘仍保留当时全部可读内容。
         for (;;) {
-          const next = { ...record, askContentElements: contentElements };
+          const next = { ...record, askContentElements: contentElements, askPendingElements: elements };
           if (await this.store.compareAndSet!(this.key(record), JSON.stringify(record), JSON.stringify(next))) { record = next; break; }
           const current = await this.store.get(this.key(record));
           if (!current) throw stale();
@@ -1321,6 +1382,7 @@ export class LarkWorkflowInteractions {
     // 计划卡三个动作与验收、中断同一道：发起人本来就能直接发这个任务，批准计划不要更高权限。
     const policy: PolicyAction = input.action === 'approve' || input.action === 'allow_session' || input.action === 'allow_workspace' ? 'high_risk.execute' : 'run.interrupt';
     if (!await this.authorize(record, input.actorId, policy)) throw new LarkServiceError('LARK_INTERACTION_DENIED', '当前账号无权操作此任务。', 403);
+    if (record.kind === 'ask' && this.broker?.get(record.nativeId)?.status === 'answering') throw stale();
     // 截止时间已过而对账还没轮到它：先按超时收尾，迟到的批准不再生效。
     if (record.state === 'pending' && pastDeadline(record)) record = await this.timeoutPermission(record);
     if (record.state !== 'pending') {
@@ -1421,13 +1483,26 @@ export class LarkWorkflowInteractions {
       }
       // Runtime may reject before its driver consumes the decision (for example
       // while persisting intent). A live permission remains safely retryable;
-      // do not burn its fixed interaction id. Relay asks have no equivalent
-      // recoverable state and retain the expired behavior below.
+      // do not burn its fixed interaction id.
       const code = (error as { code?: string }).code;
       if (record.kind === 'permission' && !['PERMISSION_NOT_FOUND', 'PERMISSION_EXPIRED', 'LARK_INTERACTION_EXPIRED'].includes(code ?? '') && await this.live(record)) {
         const pending = await this.move(record, 'pending');
         await this.renderPendingPermission(pending);
         throw error;
+      }
+      if (record.kind === 'ask') {
+        const ask = this.broker?.get(record.nativeId);
+        if (ask?.status === 'answered') {
+          const answered = await this.move(record, 'answered', undefined, { ...(ask.handledBy ? { handledBy: ask.handledBy, actorId: undefined } : {}) });
+          await this.renderClosed(answered, await this.closedMessage(answered));
+          throw error;
+        }
+        if (!ask || ['pending', 'answering'].includes(ask.status)) {
+          // The broker may restore pending after a failed receipt write. No
+          // terminal receipt means the original card must remain actionable.
+          await this.move(record, 'pending', undefined, { actorId: undefined });
+          throw error;
+        }
       }
       await this.renderClosed(await this.move(record, 'expired'), await this.expiryMessage(record));
       throw error;

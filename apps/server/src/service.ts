@@ -733,6 +733,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       await runtime.publishSessionEvent(sessionId, 'text', {
         text: input.text,
         relay: input.kind,
+        ...(input.handledBy ? { handledBy: input.handledBy } : {}),
         ...(input.askId ? { askId: input.askId } : {})
       });
     }

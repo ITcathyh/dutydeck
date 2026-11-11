@@ -1,3 +1,4 @@
+import { registerTaskRoutes, taskClient, auditTaskClient } from './task-routes.js';
 import { matterStatusForSessions, isSupersededMatterSession, cleanPermissionRejectReason, freeTextInputMaxBytes, freeTextInputViolation, permissionRejectReasonMaxLength } from '@dutydeck/shared';
 import { appLoggerOptions, createAppLogger } from './app-logger.js';
 import { registerConfigurationExplanationRoutes, type ConfigurationExplanationOptions } from './configuration-explanation.js';
@@ -417,6 +418,11 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     if (typeof runtime.getSessionTaskReports === 'function') return runtime.getSessionTaskReports(sessionIds);
     return new Map(await Promise.all(sessionIds.map(async id => [id, await runtime.getSessionTaskReport?.(id)] as const)));
   };
+  registerTaskRoutes(app, runtime, { broker: options.relay?.broker,
+    filterViewable: (request, sessions) => filterViewable(request, sessions, s => s.id, sessions),
+    authorize: requireSessionExecution, source: sessionSource,
+    can: async (request, id, boundary, action) => !options.executionPolicy || (await options.executionPolicy.authorize(request, id, boundary, action)).allowed
+  });
   app.get('/api/sessions', async request => {
     const sessions = await runtime.listSessions();
     const visible = await filterViewable(request, sessions, session => session.id, sessions);
@@ -571,7 +577,8 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     const decision = await requireSessionExecution(request, request.params.id, 'session', 'terminal.write');
     return runtime.runVerification(request.params.id, request.body, decision?.source === 'owner' ? installationOwnerTaskActor : undefined);
   });
-  app.post<{ Params: { id: string }; Body: { prompt: string; mode?: 'queue' | 'interrupt' | 'steer'; skillRequests?: string[] } }>('/api/sessions/:id/send', async (request, reply) => {
+  app.post<{ Params: { id: string }; Body: { prompt: string; mode?: 'queue' | 'interrupt' | 'steer'; skillRequests?: string[]; client?: string; strictSteer?: boolean } }>('/api/sessions/:id/send', async (request, reply) => {
+    const client = taskClient(request.body);
     const prompt = request.body?.prompt?.trim();
     const requested = request.body?.mode ?? 'queue';
     if (!prompt) throw new RuntimeError('INVALID_PROMPT', 'Prompt must not be empty', 400);
@@ -581,6 +588,8 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     const skillRequests = request.body.skillRequests;
     if (skillRequests !== undefined && (!Array.isArray(skillRequests) || skillRequests.length > 16 || skillRequests.some(path => typeof path !== 'string' || !path.trim() || path.length > 4096))) throw new RuntimeError('INVALID_SKILL_REQUESTS', '请选择目录中的 Skill，最多 16 项', 400);
     const decision = await requireSessionExecution(request, request.params.id, 'session', 'turn.append');
+    if (requested === 'steer' && request.body.strictSteer && (!runtime.getDriver(request.params.id)?.steer || !(await runtime.getTasks(request.params.id)).some(task => task.status === 'running'))) throw new RuntimeError('invalid_argument', 'Steering requires a running turn that supports it', 400);
+    await auditTaskClient(runtime, request.params.id, 'send', client);
     // 插件斜杠命令在这里换成模板展开后的 prompt；时间线仍显示用户输入的原文。
     const pluginPrompt = options.plugins && prompt.startsWith('/')
       ? options.plugins.commands.expand(prompt, { cwd: (await runtime.getSession(request.params.id))?.cwd }) : undefined;
@@ -601,6 +610,13 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
           ? { task: currentTask, outcome: 'moved' }
           : { task: currentTask, outcome: 'failed', error: error instanceof Error ? error.message : String(error) };
       }
+    }
+    if (request.body.strictSteer && ['unknown', 'failed'].includes(steering.outcome)) throw new RuntimeError('unknown_outcome', 'Steering delivery is not confirmed; read the task before retrying', 409);
+    if (request.body.strictSteer && steering.outcome === 'unsupported') {
+      // No native steering was issued. Withdraw the queued fallback before rejecting.
+      try { await runtime.cancelQueued(request.params.id, task.id, decision?.source === 'owner' ? installationOwnerTaskActor : undefined); }
+      catch { throw new RuntimeError('unknown_outcome', 'Steering was unsupported and the queued fallback could not be withdrawn; read the task before retrying', 409); }
+      throw new RuntimeError('invalid_argument', 'This session does not support steering', 400);
     }
     return reply.code(202).send({ accepted: true, task: steering.task, steering: { outcome: steering.outcome, ...(steering.error ? { error: steering.error } : {}) } });
   });
@@ -648,7 +664,9 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   };
   for (const action of ['interrupt', 'pause', 'resume', 'stop', 'restart'] as const) {
     app.post<{ Params: { id: string } }>(`/api/sessions/:id/${action}`, async request => {
+      const client = taskClient(request.body);
       const decision = await requireSessionExecution(request, request.params.id, 'session', sessionActionPolicy[action]);
+      await auditTaskClient(runtime, request.params.id, action, client);
       // 账本里的管理操作要有具名操作者；本机所有者以安装者身份记录，其余请求维持原样。
       const owner = decision?.source === 'owner';
       const result = action === 'interrupt' ? await runtime.interrupt(request.params.id, undefined, owner ? installationOwnerTaskActor : undefined)
@@ -662,7 +680,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     const decision = await requireSessionExecution(request, request.params.id, 'session', 'run.interrupt');
     return runtime.archive(request.params.id, decision?.source === 'owner' ? installationOwnerActor : undefined);
   });
-  app.post<{ Params: { id: string; permissionId: string }; Body: { approved: boolean; reason?: string } }>('/api/sessions/:id/permissions/:permissionId', async request => {
+  app.post<{ Params: { id: string; permissionId: string }; Body: { approved: boolean; reason?: string; client?: string } }>('/api/sessions/:id/permissions/:permissionId', async request => {
     await requireSessionExecution(request, request.params.id, 'high_risk', 'high_risk.execute');
     const { approved, reason: rawReason } = request.body;
     if (rawReason !== undefined && typeof rawReason !== 'string') throw new RuntimeError('INVALID_PERMISSION_REASON', 'reason must be a string', 400);
@@ -670,7 +688,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     if (reason && approved) throw new RuntimeError('INVALID_PERMISSION_REASON', 'reason is only allowed when the request is rejected', 400);
     const violation = reason ? freeTextInputViolation(reason, permissionRejectReasonMaxLength) : undefined;
     if (violation) throw new RuntimeError('INVALID_PERMISSION_REASON', violation === 'bytes' ? `reason must not exceed ${freeTextInputMaxBytes} bytes` : `reason must not exceed ${permissionRejectReasonMaxLength} characters`, 400);
-    return runtime.resolvePermission(request.params.id, request.params.permissionId, approved, reason);
+    return runtime.resolvePermission(request.params.id, request.params.permissionId, approved, reason, { handledBy: taskClient(request.body) ?? 'Web' });
   });
   const parseEventCursor = (value: string | undefined, name: string) => {
     if (value === undefined) return undefined;

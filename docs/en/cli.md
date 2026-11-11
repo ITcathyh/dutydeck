@@ -198,6 +198,7 @@ Every key accepted by `dutydeck settings bot set <app-id> key=value ...` is list
 | Key | Effect | Default |
 |---|---|---|
 | `eventHandlers` | External HTTP handlers for Lark events (card clicks, incoming messages), called in array order; see above. `null` or `[]` disables | None |
+| `cardLinks` | Extra links on progress and result cards, at most two; see Commands for external programs; `cardLinks=` clears | `[]` |
 | `cardActionForwarding` | Legacy card-callback forwarding, still supported; cannot be enabled together with a non-empty `eventHandlers` | None |
 | `welcomeEnabled` | Send a welcome when joining a group and on the first direct message | `true` |
 | `workspace` | Default working directory for new sessions; must be absolute | None |
@@ -353,3 +354,58 @@ Read-only checks also flag latest uncleared waiting/blocked reports older than 2
 Unknown results are judged by whether the current execution attempt is settled: settled ones are no longer reported, and earlier findings recover on the next check. Bot messages that group participation never judges do not count as intake backlog. Checks also report a schedule whose latest trigger failed, a session whose stop is unverified (messages to it will fail), a terminal that is gone while its record still says live, and a schedule left disabled more than 24 hours after creation; all go into the same hourly direct message. The receiver is the first allowlisted user, else the person who created the app; members registered only because they sent a request in a group do not count. When none exists, `dutydeck doctor` shows “巡检无人接收” and the log warns at most once a day. Adding someone to the allowlist restricts who can use the bot, so do not do it only to receive check messages.
 
 Lark card reconciliation treats a settled unknown-result card as done. While cards are still open, queued or running tasks keep the 5-second cadence; when only cards waiting for a person or a resend remain, the interval doubles each round up to 1 minute and only those cards are re-read. A new message or task state change returns to 5 seconds with a full re-read.
+
+## Commands for external programs
+
+These commands connect as the local installation owner using the same instance discovery and authentication as `session list`. Each `task` command accepts `--url http://127.0.0.1:4310 --database /path/to/runtime.db` to select an exact instance. The database is opened only to read its access token; the URL must be local HTTP. Lists use the Web visibility filter. Origin enrichment runs at concurrency four with a shared three-second budget; tasks still return with known origin information when enrichment times out. Writes retain the existing authorization checks.
+
+```bash
+dutydeck task list --json --limit 50
+dutydeck task read <session-id> --json --limit 40
+dutydeck task send <session-id> --text 'Additional requirements' --mode queue --client phone --json
+printf '%s' 'Additional requirements' | dutydeck task send <session-id> --stdin --json
+dutydeck task interrupt <session-id> --client phone --json
+dutydeck task decide <session-id> --waiting <request-id> --option allow --client phone --json
+dutydeck task decide <session-id> --waiting <request-id> --option deny --text 'Use a test directory' --json
+dutydeck task decide <session-id> --waiting <ask-id> --option <choice-value> --json
+dutydeck task decide <session-id> --waiting <ask-id> --option answer --text 'Custom answer' --json
+```
+
+Task IDs are session IDs. `list` returns 50 sessions by default, newest updated first; `read` returns the latest 40 conversation entries. Both accept `--limit` from 1 to 200. `send` requires exactly one of `--text` or `--stdin`. Its mode is `queue` (default) or `steer`; unsupported sessions reject steering. `interrupt` returns `interrupting` when accepted but the original turn has not yet been confirmed finished, `interrupted` only when the execution ledger confirms that turn has ended, or `idle` when there is no active turn. Approvals accept `allow` or `deny`, with optional rejection text. Questions accept a choice value or `answer --text` for free text.
+
+With `--json`, stdout contains exactly one JSON object. Success exits 0 and returns `{"ok":true,"data":...}`. Examples of `data` (optional fields are omitted when no source evidence exists):
+
+```json
+{"tasks":[{"id":"ses_example","title":"Check project","status":"waiting","updated_at":"2026-11-11T00:00:00Z","agent":"codex","agent_label":"Example Agent","cwd":"/path/to/project","origin":{"kind":"web","label":"web"},"waiting":[{"id":"request_example","kind":"approval","prompt":"Run tests","detail":"pnpm test","options":[{"id":"allow","label":"允许","kind":"allow"},{"id":"deny","label":"拒绝","kind":"deny"}],"free_text":false}],"verification":{"state":"none","summary":""},"actions":["send","interrupt","decide"]}]}
+{"items":[{"role":"user","text":"Check project","at":"2026-11-11T00:00:00Z"},{"role":"assistant","text":"Findings","at":"2026-11-11T00:01:00Z"}],"truncated":false}
+{"task_id":"ses_example","accepted":true}
+{"state":"interrupted"}
+{"resolved":true}
+```
+
+Status is `running|waiting|queued|done|failed|stopped|unknown`; pending approvals/questions take precedence as `waiting`, while unreconciled results are `unknown`. Agent family is `claude|codex|other`. Origin is `lark|schedule|web|trigger|other`, with `origin.url` when known. A `question` uses options of `kind=answer`; `free_text` indicates whether arbitrary text is accepted. Prompts are limited to 500 characters, operation details to 2000 and verification summaries to 200. Verification state is `passed|failed|none`; stale or absent evidence yields `none`. Actions contain only currently available, authorized operations. Conversation entries are chronological, with roles `user|assistant|tool|system`. Tool calls and results merge into a summary; thinking is excluded. Text over 4000 characters is clipped with `…`; clipped text or omitted older entries set `truncated=true`.
+
+Failures return `{"ok":false,"error":{"code":"already_resolved","message":"This request has already been handled"}}`:
+
+| Exit | Code and meaning |
+|---|---|
+| 2 | `invalid_argument`: invalid input or unsupported action |
+| 3 | `unavailable`: runtime unreachable during a read, or a write proven unsubmitted, such as a refused connection before submission |
+| 4 | `not_found`: missing object; `already_resolved`: already handled or submitting, never execute twice |
+| 5 | `unknown_outcome`: a submitted write received a 5xx, damaged response or connection loss without proof it was unexecuted; read again to reconcile, never automatically retry |
+| 1 | `forbidden`: insufficient authority; `conflict`: incompatible current state |
+
+Writes accept `--client <name>`, matching `[a-z0-9-]{1,32}`. This adds an audit label without granting authority. Decisions from Web or CLI close the original Lark approval/question card in place, showing “已处理（经 Web or client name）” and removing controls. Failed card updates use the existing persistent retries. Questions reject duplicate actions while an answer is being submitted and close only after the answered receipt is persisted. If persistence fails and the question returns to pending, the original card remains actionable.
+
+### Archive cards and extra links
+
+```bash
+dutydeck lark send '## Archive summary' --app <app-id> --chat-id <chat-id> --json
+dutydeck lark send '## Archive summary' --app <app-id> --reply-to <message-id> --in-thread --json
+dutydeck settings bot set <app-id> 'cardLinks=[{"label":"Open task","url":"https://client.example.test/tasks/{sessionId}","android_url":"client://tasks/{sessionId}"}]'
+dutydeck settings bot set <app-id> cardLinks=
+```
+
+`lark send --json` returns `{"ok":true,"data":{"message_id":"om_example","url":"https://client.example.test/message"}}`. `--app` selects a saved bot from the local database; optionally pass `--database /path/to/runtime.db`. Omitting it preserves existing `LARK_*` environment behavior. `--reply-to` replies to a message, and `--in-thread` places the reply in its thread. All sending retries within one invocation share a fixed idempotency UUID. Once an attempt has an uncertain outcome, a later rejection cannot prove the earlier attempt was unexecuted; only a confirmed success clears uncertainty for that invocation. An uncertain delivery caused by a connection loss or response read failure, or a sent message whose link cannot be retrieved, returns `unknown_outcome` (exit 5); do not resend automatically.
+
+The bot's `cardLinks` setting is a JSON array of at most two entries. Omission preserves the value; `cardLinks=` or `[]` clears it. Each entry requires a 1–12 character `label` and an HTTPS `url`; every URL is limited to 2048 characters. Optional `android_url`, `ios_url` and `pc_url` accept application schemes, excluding `javascript:`, `vbscript:` and `data:`. `{sessionId}` expands to the URL-encoded session ID. If any expanded URL exceeds 2048 characters, that link is omitted. Progress and result cards render these links at the bottom using Lark `multi_url`. Links are omitted if adding them would exceed the complete card budget; existing body handling is preserved.

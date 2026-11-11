@@ -1,3 +1,4 @@
+import { taskClient } from './task-routes.js';
 import type { HerdrSessions } from './herdr.js';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { taskReportInputSchema, RuntimeError } from '@dutydeck/shared';
@@ -239,10 +240,10 @@ export function registerRelayRoutes(app: FastifyInstance, options: RelayRoutesOp
     catch (error) { return handleRelayError(error, reply); }
   });
 
-  app.post<{ Params: { id: string; askId: string }; Body: { answer?: string } }>('/api/relay/sessions/:id/asks/:askId/answer', async (request, reply) => {
+  app.post<{ Params: { id: string; askId: string }; Body: { answer?: string; client?: string } }>('/api/relay/sessions/:id/asks/:askId/answer', async (request, reply) => {
     try {
       if ((await runtime?.getSession(request.params.id))?.source === 'work_item') throw new RuntimeError('WORK_ITEM_MANAGED_SESSION', '请从目标查看和回答步骤提问', 403);
-      const ask = await service.answer(request.params.id, request.params.askId, request.body ?? {},
+      const ask = await service.answer(request.params.id, request.params.askId, { ...request.body, handledBy: taskClient(request.body) ?? 'Web' },
         async () => { await options.authorize?.(request, request.params.id, 'turn.append'); });
       return { ok: true, ask };
     } catch (error) { return handleRelayError(error, reply); }

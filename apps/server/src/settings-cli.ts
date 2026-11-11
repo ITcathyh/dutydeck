@@ -74,7 +74,7 @@ export const channelBotFields = {
 
 /** dashboard 能保存的 Bot 字段。satisfies 保证保存接口新增字段时这里编译不过，CLI 不会漏项。 */
 export const botFields = {
-  eventHandlers: 'json', cardActionForwarding: 'json', welcomeEnabled: 'boolean',
+  cardLinks: 'json', eventHandlers: 'json', cardActionForwarding: 'json', welcomeEnabled: 'boolean',
   workspace: 'string', workspaceAliases: 'json', webBaseUrl: 'string', webMobileReachable: 'boolean', displayName: 'string', brand: ['feishu', 'lark'],
   defaultAgentId: 'string', fallbackAgentId: 'string', fallbackModel: 'string', defaultAgentWeights: 'json', defaultModel: 'string', defaultReasoningEffort: 'string',
   permissionMode: ['ask', 'approve-reads', 'full-trust'], fullTrustConfirmed: 'boolean',
@@ -438,7 +438,7 @@ export async function runSettingsCli(action: SettingsAction, input: SettingsCliI
     case 'bot-set': {
       const appId = required(input.appId, 'App ID');
       if (!input.pairs?.length && !input.appSecret) throw new SettingsCliError('SETTINGS_ARGUMENT_REQUIRED', 'Pass at least one key=value or --app-secret-fd');
-      const fields = parsePairs(input.pairs ?? [], botFields, 'dutydeck settings bot set --help');
+      const fields = parsePairs((input.pairs ?? []).map(pair => pair === 'cardLinks=' ? 'cardLinks=[]' : pair), botFields, 'dutydeck settings bot set --help');
       const larkStage = input.appSecret !== undefined || larkStageFields.some(key => key in fields);
       if (larkStage) larkStageOnly(fields, 'a brand, App Secret or member list change');
       const bot = await findBot(request, appId);

@@ -2198,6 +2198,18 @@ describe('permission cards follow authoritative Runtime decisions from every ent
     });
   });
 
+  it.each(['Web', 'phone'])('closes approvals in place with the %s audit channel and no live controls', async handledBy => {
+    await withPermission(async h => {
+      await h.workflow.observe(context(), agentEvent('permission_request', { id: 'native_web', status: 'approved', handledBy }, { taskId: 'task_one' }));
+      expect(await h.workflow.get('app_one', h.record.id)).toMatchObject({ state: 'approved', handledBy });
+      const input = h.service.update.mock.calls.at(-1)[0];
+      expect(input).toMatchObject({ messageId: h.record.cardId, readOnly: true });
+      const card = buildLarkCard(input);
+      expect(JSON.stringify(card)).toContain(`已处理（经 ${handledBy}）`);
+      expect(JSON.stringify(card)).not.toContain('dockmux_workflow');
+    });
+  });
+
   it('Web 端带说明拒绝后，飞书卡收起文案显示脱敏的原因摘要', async () => {
     await withPermission(async h => {
       const decision = agentEvent('permission_request', { id: 'native_web', status: 'rejected', reason: '改用测试库 password=hunter2 再试' }, { taskId: 'task_one' });
@@ -2297,5 +2309,204 @@ describe('indexed permission receipts through the real runtime and SQLite', () =
       expect(lookup).not.toHaveBeenCalled();
       expect(fullRead).not.toHaveBeenCalled();
     } finally { workflow.close(); repositories.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+});
+
+
+describe('questions answered outside the card', () => {
+  it('keeps a question actionable when its answered receipt cannot be persisted', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-11-11T00:00:00Z'));
+    const repos = createRepositories(':memory:'); const { service } = makeService();
+    const store = createRelayAskStore(repos.config); const cas = store.compareAndSet.bind(store);
+    let fail = true;
+    store.compareAndSet = async (previous, next) => { if (next.status === 'answered' && fail) throw new Error('receipt storage failed'); return cas(previous, next); };
+    const { runtime } = makeRuntime([runningTask()], []);
+    let workflow!: LarkWorkflowInteractions;
+    const broker = new RelayAskBroker({ publish: async (_session, input) => { if (input.kind === 'answer') await workflow.observe(context(), agentEvent('text', { relay: 'answer', askId: input.askId, text: input.text, handledBy: input.handledBy })); } }, store);
+    workflow = new LarkWorkflowInteractions(repos.config, runtime, service, broker, async () => true, { deferredCloseMs: 0 });
+    const outcome = broker.register({ sessionId: 'ses_one', question: 'Continue?' });
+    void outcome.catch(() => {});
+    try {
+      await vi.waitFor(() => expect(broker.listPending()).toHaveLength(1));
+      const ask = broker.listPending()[0]!;
+      await workflow.observe(context(), agentEvent('text', { relay: 'ask', askId: ask.id }));
+      const record = (await workflow.list('app_one'))[0]!;
+      await expect(broker.answer(ask.id, 'yes', { handledBy: 'phone' })).rejects.toThrow('receipt storage failed');
+      await workflow.reconcile('app_one');
+      expect(await workflow.get('app_one', record.id)).toMatchObject({ state: 'pending' });
+      expect(broker.listPending().map(ask => ask.id)).toEqual([ask.id]);
+      expect(JSON.stringify(vi.mocked(service.update).mock.calls)).not.toContain('已回答');
+      fail = false;
+      await broker.answer(ask.id, 'yes', { handledBy: 'phone' });
+      await expect(outcome).resolves.toMatchObject({ status: 'answered', answer: 'yes' });
+      await workflow.reconcile('app_one');
+      expect(await workflow.get('app_one', record.id)).toMatchObject({ state: 'answered', handledBy: 'phone' });
+    } finally { fail = false; workflow.close(); broker.close(); await broker.flush().catch(() => {}); repos.close(); vi.useRealTimers(); }
+  });
+  it.each(['Web race', 'Lark', 'closed card repair'])('restores the same actionable card after an answered write fails: %s', async source => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-11-11T00:00:00Z'));
+    const repos = createRepositories(':memory:'); const { service } = makeService();
+    const store = createRelayAskStore(repos.config); const cas = store.compareAndSet.bind(store);
+    const entered = deferred(); const release = deferred(); let fail = true;
+    store.compareAndSet = async (previous, next) => {
+      if (next.status === 'answered' && fail) { entered.resolve(); await release.promise; throw new Error('receipt storage failed'); }
+      return cas(previous, next);
+    };
+    const { runtime } = makeRuntime([runningTask()], []);
+    const broker = new RelayAskBroker({ publish: async () => {} }, store);
+    const workflow = new LarkWorkflowInteractions(repos.config, runtime, service, broker, async () => true, { deferredCloseMs: 0 });
+    const outcome = broker.register({ sessionId: 'ses_one', question: 'Continue?', choices: [{ label: 'Yes', value: 'yes' }] });
+    void outcome.catch(() => {});
+    try {
+      await vi.waitFor(() => expect(broker.listPending()).toHaveLength(1));
+      const ask = broker.listPending()[0]!;
+      await workflow.observe(context(), agentEvent('text', { relay: 'ask', askId: ask.id }), { structuredAskCards: true });
+      const record = (await workflow.list('app_one'))[0]!;
+      const answering = source === 'Lark' ? workflow.respond(responseInput(record, { answer: 'yes' })) : broker.answer(ask.id, 'yes', { handledBy: 'Web' });
+      const failed = expect(answering).rejects.toThrow('receipt storage failed');
+      await entered.promise;
+      if (source === 'Web race') {
+        expect(broker.get(ask.id)?.status).toBe('answering');
+        await expect(workflow.respond(responseInput(record, { answer: 'yes' }))).rejects.toMatchObject({ statusCode: 409 });
+        expect(await workflow.get('app_one', record.id)).toMatchObject({ state: 'pending' });
+        expect(service.update).not.toHaveBeenCalled();
+      }
+      release.resolve(); await failed;
+      expect(broker.get(ask.id)?.status).toBe('pending');
+      if (source === 'closed card repair') {
+        await persistInteraction(repos.config, { ...(await workflow.get('app_one', record.id))!, state: 'expired', cardClosedAt: new Date().toISOString(), closeMessage: '已失效' });
+      }
+      await workflow.reconcile('app_one');
+      const pending = (await workflow.get('app_one', record.id))!;
+      expect(pending).toMatchObject({ state: 'pending', cardId: record.cardId });
+      if (source === 'closed card repair') {
+        const update = vi.mocked(service.update).mock.calls.at(-1)![0];
+        expect(update).toMatchObject({ messageId: record.cardId, statusLabel: '待回答', elements: vi.mocked(service.reply).mock.calls[0]![0].elements });
+        expect(JSON.stringify(buildLarkCard(update))).toContain('dutydeck_workflow');
+      }
+      fail = false;
+      await expect(workflow.respond(responseInput(pending, { answer: 'yes' }))).resolves.toContain('回答已送达');
+      await expect(outcome).resolves.toMatchObject({ status: 'answered', answer: 'yes' });
+      expect(await workflow.get('app_one', record.id)).toMatchObject({ state: 'answered' });
+      expect(vi.mocked(service.update).mock.calls.at(-1)![0].statusLabel).toBe('已回答');
+    } finally { fail = false; release.resolve(); workflow.close(); broker.close(); await broker.flush().catch(() => {}); repos.close(); vi.useRealTimers(); }
+  });
+  it('keeps the card answered when Web answers during a delayed pending-card restoration', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-11-11T00:00:00Z'));
+    const repos = createRepositories(':memory:'); const { service } = makeService();
+    const entered = deferred(); const release = deferred();
+    let rendered = ''; const delivered: string[] = [];
+    vi.mocked(service.update).mockImplementation(async input => {
+      if (input.statusLabel === '待回答') { entered.resolve(); await release.promise; }
+      rendered = JSON.stringify(buildLarkCard(input));
+      delivered.push(input.statusLabel!);
+      return { messageId: input.messageId };
+    });
+    const broker = new RelayAskBroker({ publish: async () => {} }, createRelayAskStore(repos.config));
+    const { runtime } = makeRuntime([runningTask()], []);
+    const workflow = new LarkWorkflowInteractions(repos.config, runtime, service, broker, async () => true, { deferredCloseMs: 0 });
+    const outcome = broker.register({ sessionId: 'ses_one', question: 'Continue?', choices: [{ label: 'Yes', value: 'yes' }] });
+    void outcome.catch(() => {});
+    let restoring: Promise<unknown> | undefined;
+    try {
+      await vi.waitFor(() => expect(broker.listPending()).toHaveLength(1));
+      const ask = broker.listPending()[0]!;
+      await workflow.observe(context(), agentEvent('text', { relay: 'ask', askId: ask.id }), { structuredAskCards: true });
+      const record = (await workflow.list('app_one'))[0]!;
+      await persistInteraction(repos.config, { ...record, state: 'expired', cardClosedAt: new Date().toISOString(), closeMessage: '已失效' });
+      restoring = workflow.reconcile('app_one').catch(error => error);
+      await entered.promise;
+      await broker.answer(ask.id, 'yes', { handledBy: 'Web' }); await outcome;
+      await workflow.reconcile('app_one');
+      expect(await workflow.get('app_one', record.id)).toMatchObject({ state: 'answered' });
+      release.resolve(); const restored = await restoring;
+      expect(rendered).toContain('已回答');
+      expect(restored).toBe(0);
+      expect(rendered).not.toContain('dutydeck_workflow');
+      expect(delivered).toEqual(['待回答', '已回答']);
+      const settled = await workflow.get('app_one', record.id);
+      expect(settled).toMatchObject({ state: 'answered', handledBy: 'Web', cardId: record.cardId });
+      expect(settled?.cardClosedAt).toBeDefined();
+      await workflow.reconcile('app_one'); await workflow.reconcile('app_one');
+      expect(rendered).toContain('已回答');
+      expect(rendered).not.toContain('dutydeck_workflow');
+      expect(delivered).toEqual(['待回答', '已回答']);
+    } finally { release.resolve(); await restoring; workflow.close(); broker.close(); await broker.flush().catch(() => {}); repos.close(); vi.useRealTimers(); }
+  });
+  it('retries a failed pending-card restoration while the broker is still pending', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-11-11T00:00:00Z'));
+    const repos = createRepositories(':memory:'); const { service } = makeService();
+    const broker = new RelayAskBroker({ publish: async () => {} }, createRelayAskStore(repos.config));
+    const { runtime } = makeRuntime([runningTask()], []);
+    const workflow = new LarkWorkflowInteractions(repos.config, runtime, service, broker, async () => true, { deferredCloseMs: 0 });
+    const outcome = broker.register({ sessionId: 'ses_one', question: 'Continue?', choices: [{ label: 'Yes', value: 'yes' }] });
+    void outcome.catch(() => {});
+    try {
+      await vi.waitFor(() => expect(broker.listPending()).toHaveLength(1));
+      const ask = broker.listPending()[0]!;
+      await workflow.observe(context(), agentEvent('text', { relay: 'ask', askId: ask.id }), { structuredAskCards: true });
+      const record = (await workflow.list('app_one'))[0]!;
+      await persistInteraction(repos.config, { ...record, state: 'expired' });
+      vi.mocked(service.update).mockRejectedValueOnce(new Error('provider unavailable'));
+      await expect(workflow.reconcile('app_one')).rejects.toThrow('provider unavailable');
+      expect(broker.get(ask.id)?.status).toBe('pending');
+      await workflow.reconcile('app_one');
+      expect(service.update).toHaveBeenCalledTimes(2);
+      expect(await workflow.get('app_one', record.id)).toMatchObject({ state: 'pending', cardId: record.cardId });
+      expect(JSON.stringify(buildLarkCard(vi.mocked(service.update).mock.calls.at(-1)![0]))).toContain('dutydeck_workflow');
+    } finally { workflow.close(); broker.close(); await broker.flush().catch(() => {}); repos.close(); vi.useRealTimers(); }
+  });
+  it('does not redraw a pending card when its restoration CAS loses to an answered receipt', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-11-11T00:00:00Z'));
+    const repos = createRepositories(':memory:'); const { service } = makeService();
+    const broker = new RelayAskBroker({ publish: async () => {} }, createRelayAskStore(repos.config));
+    const { runtime } = makeRuntime([runningTask()], []);
+    const workflow = new LarkWorkflowInteractions(repos.config, runtime, service, broker, async () => true, { deferredCloseMs: 0 });
+    const outcome = broker.register({ sessionId: 'ses_one', question: 'Continue?' });
+    void outcome.catch(() => {});
+    try {
+      await vi.waitFor(() => expect(broker.listPending()).toHaveLength(1));
+      const ask = broker.listPending()[0]!;
+      await workflow.observe(context(), agentEvent('text', { relay: 'ask', askId: ask.id }));
+      const record = (await workflow.list('app_one'))[0]!;
+      await persistInteraction(repos.config, { ...record, state: 'expired' });
+      const cas = repos.config.compareAndSet!.bind(repos.config);
+      vi.spyOn(repos.config, 'compareAndSet').mockImplementation(async (key, previous, next) => {
+        if (key === `lark.interaction.app_one.${record.id}` && JSON.parse(previous!).state === 'expired' && JSON.parse(next).state === 'pending') {
+          await broker.answer(ask.id, 'yes', { handledBy: 'Web' }); await outcome;
+          await persistInteraction(repos.config, { ...record, state: 'answered', handledBy: 'Web' });
+          return false;
+        }
+        return cas(key, previous, next);
+      });
+      await expect(workflow.reconcile('app_one')).resolves.toBe(0);
+      expect(vi.mocked(service.update).mock.calls.map(([input]) => input.statusLabel)).toEqual(['已回答']);
+      expect(await workflow.get('app_one', record.id)).toMatchObject({ state: 'answered' });
+    } finally { workflow.close(); broker.close(); await broker.flush().catch(() => {}); repos.close(); vi.useRealTimers(); }
+  });
+  it.each(['Web', 'phone'])('closes the original card after %s answers, including reconciliation', async handledBy => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-11-11T00:00:00Z'));
+    const repos = createRepositories(':memory:');
+    const { service } = makeService();
+    const broker = new RelayAskBroker({ publish: async () => {} }, createRelayAskStore(repos.config));
+    const { runtime } = makeRuntime([runningTask()], []);
+    const workflow = new LarkWorkflowInteractions(repos.config, runtime, service, broker, async () => true, { deferredCloseMs: 0 });
+    try {
+      const outcome = broker.register({ sessionId: 'ses_one', question: 'Continue?', choices: [{ label: 'Yes', value: 'yes' }] });
+      await vi.waitFor(() => expect(broker.listPending('ses_one')).toHaveLength(1));
+      const ask = broker.listPending('ses_one')[0]!;
+      await workflow.observe(context(), agentEvent('text', { relay: 'ask', askId: ask.id }));
+      const record = (await workflow.list('app_one'))[0]!;
+      await broker.answer(ask.id, 'yes', { handledBy }); await outcome;
+      if (handledBy === 'phone') await workflow.observe(context(), agentEvent('text', { relay: 'answer', askId: ask.id, text: 'yes', handledBy }));
+      await workflow.reconcile('app_one');
+      expect(await workflow.get('app_one', record.id)).toMatchObject({ state: 'answered', handledBy });
+      const input = vi.mocked(service.update).mock.calls.at(-1)![0];
+      expect(input.messageId).toBe(record.cardId);
+      const card = JSON.stringify(buildLarkCard(input));
+      expect(card).toContain(`已处理（经 ${handledBy}）`);
+      expect(card).not.toContain('dockmux_workflow'); expect(card).not.toContain('已失效');
+      await expect(broker.answer(ask.id, 'again')).rejects.toMatchObject({ code: 'RELAY_ASK_SETTLED' });
+    } finally { workflow.close(); await broker.close(); repos.close(); vi.useRealTimers(); }
   });
 });

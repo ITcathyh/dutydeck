@@ -300,6 +300,24 @@ describe('settings CLI against the real bot routes', () => {
     }
   });
 
+  it('sets, preserves and clears cardLinks and rejects unsafe URLs atomically', async () => {
+    const { repos, run } = await botRuntime();
+    const links = [{ label: 'Open task', url: 'https://client.example.test/tasks/{sessionId}', android_url: 'client://tasks/{sessionId}' }];
+    expect((await run('bot-set', { appId: 'cli_a', pairs: [`cardLinks=${JSON.stringify(links)}`] })).bot).toMatchObject({ cardLinks: links });
+    await run('bot-set', { appId: 'cli_a', pairs: ['preInjectPrompt=preserve links'] });
+    expect(await readLarkConfig(repos.config, 'cli_a')).toMatchObject({ cardLinks: links });
+    const before = await repos.config.get('lark.bots');
+    await expect(run('bot-set', { appId: 'cli_a', pairs: ['cardLinks=[{"label":"Bad","url":"https://client.example.test","ios_url":"javascript:alert(1)"}]'] })).rejects.toThrow();
+    expect(await repos.config.get('lark.bots')).toBe(before);
+    for (const key of ['url', 'android_url', 'ios_url', 'pc_url']) {
+      const oversized = [{ ...links[0], [key]: 'https://client.example.test/' + 'x'.repeat(2048) }];
+      await expect(run('bot-set', { appId: 'cli_a', pairs: [`cardLinks=${JSON.stringify(oversized)}`] })).rejects.toThrow();
+      expect(await repos.config.get('lark.bots')).toBe(before);
+    }
+    expect((await run('bot-set', { appId: 'cli_a', pairs: ['cardLinks='] })).bot).toMatchObject({ cardLinks: [] });
+    expect(await readLarkConfig(repos.config, 'cli_a')).toMatchObject({ cardLinks: [] });
+  });
+
   it('changes bot settings with typed values and the current revision, like the dashboard', async () => {
     const { repos, run } = await botRuntime();
     const before = (await run('bot-show', { appId: 'cli_a' })).bot as { revision: number };

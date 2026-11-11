@@ -297,7 +297,8 @@ export function larkFailureKind(err: unknown): LarkFailureKind {
     return value?.name === 'LarkServiceError' && status !== undefined && status >= 400 && status < 500 ? 'not_sent' : 'unknown';
   }
   const status = upstreamHttpStatus(err);
-  if (status === undefined || status >= 500 || larkBusinessCode(err) === LARK_MESSAGE_SENDING_CODE) return 'unknown';
+  if (status === undefined || status >= 500 || larkBusinessCode(err) === LARK_MESSAGE_SENDING_CODE
+    || status >= 200 && status < 300 && larkBusinessCode(err) === undefined) return 'unknown';
   return 'rejected';
 }
 

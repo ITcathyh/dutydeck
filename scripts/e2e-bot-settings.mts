@@ -124,6 +124,7 @@ async function configurationMatrix() {
   const cases = {
     eventHandlers: { value: [{ id: 'settings', eventTypes: ['im.message.receive_v1'], url: 'http://127.0.0.1:14432/events', token: 'synthetic-handler-secret' }], expected: [{ id: 'settings', eventTypes: ['im.message.receive_v1'], url: 'http://127.0.0.1:14432/events' }] },
     cardActionForwarding: { value: { owner: 'settings-fixture', url: 'http://127.0.0.1:14432/cards', token: 'synthetic-forward-secret', legacyActions: ['ack'] }, expected: { owner: 'settings-fixture', url: 'http://127.0.0.1:14432/cards', legacyActions: ['ack'] } },
+    cardLinks: { value: [{ label: 'Open task', url: 'https://client.example.test/tasks/{sessionId}', android_url: 'client://tasks/{sessionId}' }] },
     welcomeEnabled: { value: false }, workspace: { value: workspace }, workspaceAliases: { value: { review: workspace } },
     webBaseUrl: { value: ' https://deck.example.test/ ', expected: 'https://deck.example.test' }, webMobileReachable: { value: false }, displayName: { value: ' 设置验收 ', expected: '设置验收' }, brand: { value: 'lark' },
     defaultAgentId: { value: 'codex' }, fallbackAgentId: { value: 'codex-acp' }, fallbackModel: { value: ' gpt-6.1-sol ', expected: 'gpt-6.1-sol' }, defaultAgentWeights: { value: [{ agentId: 'codex', weight: 3 }, { agentId: 'claude', weight: 7 }] }, defaultModel: { value: 'project-model' }, defaultReasoningEffort: { value: 'high' },
@@ -193,6 +194,9 @@ async function configurationMatrix() {
   await rejected({ fallbackAgentId: 'codex' }, 'INVALID_LARK_CONFIG', 400);
   await rejected({ defaultAgentWeights: [{ agentId: 'codex', weight: 0 }] }, 'INVALID_LARK_CONFIG', 400);
   await rejected({ defaultAgentWeights: [{ agentId: 'missing', weight: 1 }] }, 'RISK_CONTROL_HOOK_NOT_READY', 409);
+  for (const key of ['url', 'android_url', 'ios_url', 'pc_url']) {
+    await rejected({ cardLinks: [{ label: 'Open task', url: 'https://client.example.test/task', [key]: 'https://client.example.test/' + 'x'.repeat(2048) }] }, 'INVALID_INPUT', 400);
+  }
   await rejected({ idleCompactHours: 0 }, 'INVALID_LARK_CONFIG', 400);
   await rejected({ pushIntervalMs: 499 }, 'INVALID_LARK_CONFIG', 400);
   await rejected({ traceLimit: 0 }, 'INVALID_LARK_CONFIG', 400);
@@ -212,8 +216,9 @@ async function configurationMatrix() {
   passed('invalid routing, full-trust consent, unsupported approval, layered prerequisites, ranges, regex and stale saves are rejected atomically');
 
   // Explicit clearing is different from omitting a field or submitting a default.
-  await set({ riskControlMode: 'off', executionMode: 'single', fallbackAgentId: '', defaultAgentWeights: [], roleTitle: '', roleScope: '', memoryAgentId: '', memoryModel: '', decisionAgentId: '', decisionModel: '', responseAgentId: '', responseModel: '', workerAgentIds: [], leaderSkill: '', workspaceAliases: {}, urgentThresholdMs: null, urgentMaxPerHourPerChat: null, pinAfterMs: null });
+  await set({ cardLinks: [], riskControlMode: 'off', executionMode: 'single', fallbackAgentId: '', defaultAgentWeights: [], roleTitle: '', roleScope: '', memoryAgentId: '', memoryModel: '', decisionAgentId: '', decisionModel: '', responseAgentId: '', responseModel: '', workerAgentIds: [], leaderSkill: '', workspaceAliases: {}, urgentThresholdMs: null, urgentMaxPerHourPerChat: null, pinAfterMs: null });
   const cleared = await bot();
+  assert.deepEqual(cleared.cardLinks, [], 'clear cardLinks');
   for (const key of ['fallbackAgentId', 'fallbackModel', 'defaultAgentWeights', 'roleTitle', 'roleScope', 'memoryAgentId', 'memoryModel', 'decisionAgentId', 'decisionModel', 'responseAgentId', 'responseModel', 'leaderSkill', 'workspaceAliases', 'urgentThresholdMs', 'urgentMaxPerHourPerChat', 'pinAfterMs']) assert.equal(cleared[key], undefined, `clear ${key}`);
   assert.deepEqual(cleared.workerAgentIds, []);
   await set({ permissionMode: 'ask', fullTrustConfirmed: false });

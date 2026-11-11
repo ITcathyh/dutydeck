@@ -1,3 +1,4 @@
+import type { TaskCliInput } from './task-cli.js';
 import type { MemoryManagementCliInput } from './memory-management-cli.js';
 import { registerBusinessToolCli } from './plugins/tool-cli.js';
 import { registerPluginResultCli } from './plugins/result-cli.js';
@@ -75,6 +76,7 @@ export interface DeployPruneCliOptions {
 }
 
 export interface LarkCliOptions {
+  json?: boolean; app?: string; database?: string; replyTo?: string; inThread?: boolean;
   state?: string;
   readOnly?: boolean;
   agentName?: string;
@@ -247,6 +249,7 @@ export interface CliHandlers {
   secretRotate?(id: string, options: SecretRotateCliOptions): void | Promise<void>;
   secretRemove?(id: string, options: SecretRemoveCliOptions): void | Promise<void>;
   larkDisposition?(input: { messageId?: string; app?: string; chat?: string; since?: string; database?: string }): void | Promise<void>;
+  task?(input: TaskCliInput): void | Promise<void>;
   larkSend?(markdown: string | undefined, options: LarkCliOptions): void | Promise<void>;
   larkCreate?(name: string | undefined, options: LarkCreateCliOptions): void | Promise<void>;
   larkUpdate?(markdown: string | undefined, options: LarkCliOptions): void | Promise<void>;
@@ -559,8 +562,13 @@ Examples:
     .argument('[markdown]', 'Final Markdown or fallback card content')
     .option('--receive-id <id>', 'Recipient ID; defaults to LARK_RECEIVE_ID')
     .option('--chat-id <id>', 'Group chat ID (oc_xxx); defaults to LARK_CHAT_ID')
-    .option('--receive-id-type <type>', 'ID type; defaults to LARK_RECEIVE_ID_TYPE'))
-    .action((markdown, options) => handlers.larkSend?.(markdown, options));
+    .option('--receive-id-type <type>', 'ID type; defaults to LARK_RECEIVE_ID_TYPE')
+    .option('--json', 'Print one JSON response')
+    .option('--app <app-id>', 'Send with a saved bot')
+    .option('--database <path>', 'Runtime database containing the bot')
+    .option('--reply-to <message-id>', 'Reply to this message')
+    .option('--in-thread', 'Reply inside the message thread'))
+    .action((markdown, options, command) => handlers.larkSend?.(markdown, authOptionsFrom(options, command)));
   addCardOptions(lark.command('update')
     .description('Update an existing Dutydeck card in place')
     .argument('[markdown]', 'Final Markdown or fallback card content')
@@ -952,6 +960,20 @@ alarm=<JSON> (the old flat alarm subscription) still works for one release and i
     .action((options, command) => runSettings('approval-rule-list', command, { appId: options.app, workspace: options.workspace }));
   withTarget(approvalRules.command('remove <rule-id>').description('Revoke a rule; the next matching command asks for approval again'))
     .action((ruleId, _options, command) => runSettings('approval-rule-remove', command, { ruleId }));
+
+  const task = program.command('task').description('Open task commands for external programs');
+  for (const action of ['list', 'read', 'send', 'interrupt', 'decide'] as const) {
+    const command = task.command(action === 'list' ? 'list' : `${action} <id>`)
+      .option('--url <url>', 'Exact local runtime URL; requires --database')
+      .option('--database <path>', 'Runtime database used for local authentication')
+      .option('--json', 'Print one JSON response');
+    if (action === 'list' || action === 'read') command.option('--limit <count>', 'Maximum items (1-200)');
+    else command.option('--client <name>', 'Audit client name ([a-z0-9-]{1,32})');
+    if (action === 'send') command.option('--text <text>', 'User input').option('--stdin', 'Read input from stdin').option('--mode <mode>', 'queue or steer', 'queue');
+    if (action === 'decide') command.requiredOption('--waiting <id>', 'Pending approval or question').requiredOption('--option <id>', 'allow, deny, answer or a choice value').option('--text <text>', 'Answer or rejection reason');
+    if (action === 'list') command.action((options, command) => handlers.task?.({ action, ...options, ...localRuntimeOptionsFrom(options, command) }));
+    else command.action((id, options, command) => handlers.task?.({ action, id, ...options, ...localRuntimeOptionsFrom(options, command) }));
+  }
 
   const session = program.command('session').enablePositionalOptions().description('Relay messages to the user who owns the current Dutydeck session');
   session.command('list')

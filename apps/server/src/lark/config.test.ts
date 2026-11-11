@@ -1139,3 +1139,10 @@ describe('per-bot fallback model', () => {
     expect((await readLarkConfigs(repository))[0]).not.toHaveProperty('fallbackModel');
   });
 });
+
+
+it('keeps a stored bot readable when an old optional card link exceeds the new URL limit', async () => {
+  const repository = seedBots([{ appId: 'cli_legacy', appSecret: 'placeholder-secret', cardLinks: [{ label: 'Open', url: 'https://client.example.test/' + 'x'.repeat(3000) }] }]);
+  const [config] = await readLarkConfigs(repository);
+  expect(config).toMatchObject({ appId: 'cli_legacy', cardLinks: [] });
+});

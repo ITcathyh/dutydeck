@@ -28,6 +28,34 @@ function deferred() {
 }
 
 describe('runtime lifecycle acceptance', () => {
+  it('reports interrupting until the original driver produces its terminal receipt', async () => {
+    const gate = deferred(); const h = harness();
+    h.driver.send = vi.fn(async () => { await gate.promise; h.emit({ type: 'completed', data: { stopReason: 'cancelled' } }); });
+    await h.runtime.initialize([agent]); const session = await h.runtime.start({ agentId: agent.id });
+    const turn = h.runtime.send(session.id, 'long task');
+    try {
+      await vi.waitFor(() => expect(h.driver.send).toHaveBeenCalledOnce());
+      const task = (await h.runtime.getTasks(session.id)).at(-1)!;
+      await expect(h.runtime.interrupt(session.id, task.id)).resolves.toMatchObject({ interrupted: true, state: 'interrupting' });
+      expect((await h.runtime.getTaskRecovery(session.id, task.id)).status).toBe('running');
+      gate.resolve(); await turn;
+      await expect(h.runtime.interrupt(session.id)).resolves.toMatchObject({ interrupted: false, state: 'idle' });
+    } finally { gate.resolve(); await turn; await h.runtime.shutdown(); h.repos.close(); }
+  });
+  it('stores client audit separately from the event stream', async () => {
+    const h = harness(); await h.runtime.initialize([agent]);
+    const session = await h.runtime.start({ agentId: agent.id });
+    try {
+      await h.runtime.send(session.id, 'hello');
+      const before = await h.runtime.getEvents(session.id);
+      await h.runtime.recordClientAudit(session.id, 'interrupt', 'phone');
+      expect(await h.runtime.getEvents(session.id)).toEqual(before);
+      const rows = await h.repos.config.list!('client_audit/');
+      expect(rows).toHaveLength(1);
+      expect(JSON.parse(rows[0]!.value)).toMatchObject({ sessionId: session.id, action: 'interrupt', client: 'phone' });
+    } finally { await h.runtime.shutdown(); h.repos.close(); }
+  });
+
   it('clears a report when the user interrupts that active task', async () => {
     const gate = deferred(); const h = harness();
     h.driver.send = vi.fn(async () => { await gate.promise; h.emit({ type: 'text', data: { text: '停止前的结果' } }); h.emit({ type: 'completed', data: { stopReason: 'cancelled' } }); });
@@ -828,7 +856,7 @@ describe('runtime lifecycle acceptance', () => {
     await authorizing.promise;
     const taskId = h.runtime.getActiveTaskContext(s.id)!.taskId;
     // The interrupt lands while submission is still being authorized, before any prompt reaches the driver.
-    await expect(h.runtime.interrupt(s.id, taskId)).resolves.toMatchObject({ interrupted: true });
+    await expect(h.runtime.interrupt(s.id, taskId)).resolves.toMatchObject({ interrupted: true, state: 'interrupted' });
     release.resolve();
     await sending;
     expect(h.driver.send).not.toHaveBeenCalled();
@@ -1029,10 +1057,13 @@ describe('runtime lifecycle acceptance', () => {
     await vi.waitFor(() => expect(h.runtime.getPendingPermissions(s.id)).toHaveLength(1));
     const [pending] = h.runtime.getPendingPermissions(s.id);
     const reason = '改用测试库，password=hunter2 不要外传';
-    expect(await h.runtime.resolvePermission(s.id, pending!.id, false, reason)).toMatchObject({ status: 'rejected', reason: '改用测试库，password=[REDACTED] 不要外传' });
+    expect(await h.runtime.resolvePermission(s.id, pending!.id, false, reason, { handledBy: 'phone' })).toMatchObject({ status: 'rejected', reason: '改用测试库，password=[REDACTED] 不要外传', handledBy: 'phone' });
+    await expect(h.runtime.resolvePermission(s.id, pending!.id, false)).rejects.toMatchObject({ code: 'PERMISSION_NOT_FOUND' });
+    expect(h.driver.resolvePermission).toHaveBeenCalledTimes(1);
     expect(h.driver.resolvePermission).toHaveBeenCalledWith('hook_r', false, reason);
     const saved = (await h.runtime.getEvents(s.id)).filter(event => event.type === 'permission_request' && (event.data as any).status === 'rejected');
     expect(saved.map(event => (event.data as any).reason)).toEqual(['改用测试库，password=[REDACTED] 不要外传']);
+    expect(saved[0].data).toMatchObject({ handledBy: 'phone' });
     expect(JSON.stringify(saved)).not.toContain('hunter2');
     permissionTurn.resolve(); expect((await turn).status).toBe('completed');
     await h.runtime.shutdown(); h.repos.close();

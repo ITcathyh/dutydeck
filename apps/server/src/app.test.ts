@@ -400,20 +400,20 @@ describe('HTTP API boundary', () => {
     expect(runtime.resolvePermission).not.toHaveBeenCalled();
     // 空白视为没有说明；批准加空白说明也只是普通批准。
     expect((await post({ approved: false, reason: ' \n\t ' })).statusCode).toBe(200);
-    expect(runtime.resolvePermission).toHaveBeenLastCalledWith('s1', 'p1', false, undefined);
+    expect(runtime.resolvePermission).toHaveBeenLastCalledWith('s1', 'p1', false, undefined, { handledBy: 'Web' });
     expect((await post({ approved: true, reason: '  ' })).statusCode).toBe(200);
-    expect(runtime.resolvePermission).toHaveBeenLastCalledWith('s1', 'p1', true, undefined);
+    expect(runtime.resolvePermission).toHaveBeenLastCalledWith('s1', 'p1', true, undefined, { handledBy: 'Web' });
     expect((await post({ approved: false })).statusCode).toBe(200);
-    expect(runtime.resolvePermission).toHaveBeenLastCalledWith('s1', 'p1', false, undefined);
+    expect(runtime.resolvePermission).toHaveBeenLastCalledWith('s1', 'p1', false, undefined, { handledBy: 'Web' });
     // 按字素计数：1000 个组合 emoji（11000 个 UTF-16 码元）照常接受。
     const emoji = '\u{1F468}‍\u{1F469}‍\u{1F467}‍\u{1F466}'.repeat(1000);
     expect((await post({ approved: false, reason: emoji })).statusCode).toBe(200);
-    expect(runtime.resolvePermission).toHaveBeenLastCalledWith('s1', 'p1', false, emoji);
+    expect(runtime.resolvePermission).toHaveBeenLastCalledWith('s1', 'p1', false, emoji, { handledBy: 'Web' });
     // 去首尾空白与控制字符（保留换行）；恰好 1000 字可以通过。
     expect(await post({ approved: false, reason: '  先别动\u0007配置\n改用 /tmp  ' })).toMatchObject({ statusCode: 200 });
-    expect(runtime.resolvePermission).toHaveBeenLastCalledWith('s1', 'p1', false, '先别动配置\n改用 /tmp');
+    expect(runtime.resolvePermission).toHaveBeenLastCalledWith('s1', 'p1', false, '先别动配置\n改用 /tmp', { handledBy: 'Web' });
     expect((await post({ approved: false, reason: ` ${'x'.repeat(1000)} ` })).statusCode).toBe(200);
-    expect(runtime.resolvePermission).toHaveBeenLastCalledWith('s1', 'p1', false, 'x'.repeat(1000));
+    expect(runtime.resolvePermission).toHaveBeenLastCalledWith('s1', 'p1', false, 'x'.repeat(1000), { handledBy: 'Web' });
   });
 
   it('replays missed SSE events after Last-Event-ID reconnect', async () => {

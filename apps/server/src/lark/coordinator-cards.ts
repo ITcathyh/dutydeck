@@ -226,7 +226,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
       ...resultElements.filter(item => !isLarkTurnMemoryElement(item) && !['workflow_accept', 'workflow_changes', 'workflow_result_status', LARK_VERIFICATION_ELEMENT_ID].includes(String(item.element_id))),
       ...(verification.element ? [verification.element] : []),
       ...await this.workflows!.result(record, record.cardId, saved.final_attachment_message_id ? [saved.final_attachment_message_id] : undefined)];
-    await this.service.update({ cardKind: 'result', ...(config.adhdMode === true ? { adhdMode: true } : {}), messageId: record.cardId, taskId: mapping.externalId, taskName: saved.task_name, state: 'completed', readOnly: true, elements,
+    await this.service.update({ cardLinks: config.cardLinks, sessionId: mapping.sessionId, cardKind: 'result', ...(config.adhdMode === true ? { adhdMode: true } : {}), messageId: record.cardId, taskId: mapping.externalId, taskName: saved.task_name, state: 'completed', readOnly: true, elements,
       capabilities: { ...this.capabilitiesForTask(restored), ...verification.capabilities, ...await this.resultActionCapabilities(restored, config, saved.state) },
       agentName: await this.resolveSessionAgentName(config, mapping.sessionId), showAgentName: config.showAgentName === true, turn: saved.turn });
     const current = (await this.cardMappings!.list(larkCardChannel(config.appId))).find(item => item.id === mapping.id);

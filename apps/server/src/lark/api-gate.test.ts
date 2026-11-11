@@ -142,6 +142,7 @@ describe('Lark api gate error classification', () => {
     // 230049 是「同一 UUID 的消息正在发送」：原请求可能即将成功，结果未知。
     expect(larkFailureKind(openApiError(230049, 400))).toBe('unknown');
     expect(larkFailureKind(openApiError(undefined, 503))).toBe('unknown');
+    expect(larkFailureKind(openApiError(undefined, 200))).toBe('unknown');
     expect(larkFailureKind(networkError())).toBe('unknown');
     expect(larkFailureKind(new DOMException('The operation timed out.', 'TimeoutError'))).toBe('unknown');
     expect(larkFailureKind(localError('LARK_REQUEST_BUDGET_EXHAUSTED', 503))).toBe('unknown');

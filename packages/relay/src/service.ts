@@ -7,7 +7,7 @@ export const relayMessageMaxLength = 32_000;
 
 export interface RelaySendInput { text?: string }
 export interface RelayAskInput { question?: string; questionBody?: string; timeoutMs?: number; choices?: RelayAskChoice[]; multiple?: boolean }
-export interface RelayAnswerInput { answer?: string }
+export interface RelayAnswerInput { answer?: string; handledBy?: string }
 
 function requireAskInput(input: unknown): asserts input is RelayAskInput {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
@@ -89,7 +89,7 @@ export class RelayService {
    */
   answer(sessionId: string, askId: string, input: RelayAnswerInput, beforeClaim?: () => Promise<void>) {
     const answer = requireText(input.answer, 'RELAY_ANSWER_REQUIRED', '回答内容');
-    return this.broker.answer(askId, answer, { sessionId, beforeClaim });
+    return this.broker.answer(askId, answer, { sessionId, beforeClaim, handledBy: input.handledBy });
   }
 
   listPending(sessionId: string) {

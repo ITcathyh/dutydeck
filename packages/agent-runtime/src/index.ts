@@ -319,6 +319,7 @@ export class DutydeckRuntime {
   private readonly queueRuns = new Map<string, Promise<void>>();
   private readonly permissions = new Map<string, PendingPermission>();
   private readonly permissionResolutions = new Map<string, string>();
+  private readonly permissionHandledBy = new Map<string, string>();
   /** 正在提交的拒绝说明（已脱敏）；驱动在裁决时同步发出的终态事件据此补上 reason。 */
   private readonly permissionRejectReasons = new Map<string, string>();
   private readonly sessionGenerations = new Map<string, number>();
@@ -1772,6 +1773,14 @@ export class DutydeckRuntime {
     this.verificationHolds.set(session.id, root);
   }
 
+  /** Client labels are audit metadata, never assistant output or execution transitions. */
+  async recordClientAudit(sessionId: string, action: string, client: string) {
+    return this.scoped(sessionId, async () => {
+      if (!await this.repos.sessions.get(sessionId)) throw new RuntimeError('SESSION_NOT_FOUND', `Unknown session: ${sessionId}`, 404);
+      await this.repos.config.set(`client_audit/${makeId('audit')}`, JSON.stringify({ sessionId, action, client, at: new Date().toISOString() }));
+    });
+  }
+
   /** Persist descriptive out-of-band events through the same authoritative ledger. */
   async publishSessionEvent(sessionId: string, type: EventType, data: unknown) {
     if (['completed', 'status', 'task'].includes(type)) throw new RuntimeError('EXECUTION_EVENT_RESERVED', 'Execution transitions require an explicit ledger command', 409);
@@ -1882,6 +1891,10 @@ export class DutydeckRuntime {
       return;
     }
     let data = this.driverEventData(scope, event);
+    if (event.type === 'permission_request' && ['approved', 'rejected'].includes(data.status)) {
+      const handledBy = this.permissionHandledBy.get(this.permissionKey(session.id, data.id));
+      if (handledBy) data = { ...data, handledBy };
+    }
     const rejectReason = event.type === 'permission_request' && data.status === 'rejected' && !data.reason ? this.permissionRejectReasons.get(this.permissionKey(session.id, data.id)) : undefined;
     if (rejectReason) data = { ...data, reason: rejectReason };
     let tools: AttemptTools | undefined;
@@ -3661,12 +3674,13 @@ export class DutydeckRuntime {
     return this.scoped(id, async () => {
       const { session } = await this.active(id);
       const token = this.attempts.get(id), ref = token && this.attemptRefs.get(token);
-      if (!ref) return { interrupted: false, reason: 'no_active_attempt' };
+      if (!ref) return { interrupted: false, reason: 'no_active_attempt', state: 'idle' as const };
       if (expectedTaskId && expectedTaskId !== ref.taskId) throw new RuntimeError('TASK_NOT_ACTIVE', 'The requested task is no longer active', 409);
       await this.mutations.write(id, async () => this.wake(this.bound().recordInterruptIntent(this.attemptFence(ref), { operationId, actor: this.actor(session, actorId) })));
       if (this.attempts.get(id) === token) await this.interruptOwnedAttempt(ref, token!, operationId);
       await clearTaskReportSafely(this.repos.config, ref.taskId);
-      return { interrupted: true };
+      const attempt = this.repos.execution.getTaskExecution(ref.taskId)?.attempts.find(attempt => attempt.attemptId === ref.attemptId);
+      return { interrupted: true, state: attempt?.state === 'settled' && attempt.outcome !== 'unknown' ? 'interrupted' as const : 'interrupting' as const };
     });
   }
   async setRiskPolicy(id: string, policy?: ToolRiskPolicy) {
@@ -3908,7 +3922,7 @@ export class DutydeckRuntime {
   }
 
   /** annotation.workspaceRule：按工作区规则代为批准时命中的规则，写进最终的审批记录。 */
-  async resolvePermission(sessionId: string, permissionId: string, approved: boolean, reason?: string, annotation?: Pick<PermissionRequestData, 'workspaceRule'>) {
+  async resolvePermission(sessionId: string, permissionId: string, approved: boolean, reason?: string, annotation?: Pick<PermissionRequestData, 'workspaceRule' | 'handledBy'>) {
     return this.scoped(sessionId, async () => {
     const { driver } = await this.active(sessionId);
     const key = this.permissionKey(sessionId, permissionId);
@@ -3924,7 +3938,8 @@ export class DutydeckRuntime {
       }
       // 记录里的说明脱敏后保存；交给执行端的仍是用户原文。
       const shownReason = !approved && reason ? permissionDisplayText(reason, [], freeTextInputMaxBytes) : '';
-      const request = { ...pending.request, status: approved ? 'approved' as const : 'rejected' as const, ...(shownReason ? { reason: shownReason } : {}),
+      if (annotation?.handledBy) this.permissionHandledBy.set(key, annotation.handledBy);
+      const request = { ...pending.request, ...(annotation?.handledBy ? { handledBy: annotation.handledBy } : {}), status: approved ? 'approved' as const : 'rejected' as const, ...(shownReason ? { reason: shownReason } : {}),
         ...(approved && annotation?.workspaceRule ? { workspaceRule: annotation.workspaceRule } : {}) };
       if (shownReason) this.permissionRejectReasons.set(key, shownReason);
       // Keep the stored request pending while recording the requested decision.
@@ -3955,7 +3970,7 @@ export class DutydeckRuntime {
       }
       // Subsequent driver events own the session state; an approval must not overwrite a completed turn.
       return request;
-    } finally { this.permissionRejectReasons.delete(key); if (this.permissionResolutions.get(key) === claim) this.permissionResolutions.delete(key); }
+    } finally { this.permissionHandledBy.delete(key); this.permissionRejectReasons.delete(key); if (this.permissionResolutions.get(key) === claim) this.permissionResolutions.delete(key); }
     });
   }
 

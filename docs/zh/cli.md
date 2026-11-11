@@ -263,6 +263,7 @@ dutydeck settings bot set cli_xxx cardActionForwarding=null 'eventHandlers=[{"id
 | 键 | 作用 | 默认值 |
 |---|---|---|
 | `eventHandlers` | 飞书事件的外部 HTTP 处理器（卡片点击、消息接收），按数组顺序调用，见上文；`null` 或 `[]` 关闭 | 无 |
+| `cardLinks` | 进度卡和结果卡底部的附加链接，最多 2 项，详见「给外部程序用的命令」；`cardLinks=` 清空 | `[]` |
 | `cardActionForwarding` | 旧版卡片回调转发，仍兼容；不能与非空 `eventHandlers` 同时启用 | 无 |
 | `welcomeEnabled` | 入群和首次私聊时发欢迎 | `true` |
 | `workspace` | 新会话的默认工作目录，须是绝对路径 | 无 |
@@ -402,3 +403,58 @@ dutydeck schedule update schedule_xxx --session ses_xxx --at 2026-12-01T09:00   
 「结果未知」按当前执行记录是否已结算判断：已结案的不再报，之前报过的下一轮记为已恢复；机器人发的、群参与不会判断的消息不算入站积压。巡检还报告定时计划最近一次触发出错、会话停止未核实（发给它的消息会失败）、终端已不在但记录仍是运行中、计划建好超过 24 小时还没启用，都并入同一封每小时私信。接收人依次取允许名单第一人、创建该应用的人（在群里发过请求而被登记的成员不算）；都取不到时只在 `dutydeck doctor` 显示「巡检无人接收」，日志每天最多提示一次。加入允许名单会限制谁能使用机器人，只为接收巡检私信时不要这样做。
 
 飞书卡片对账把已结算的结果未知卡算作处理完。还有卡没处理完时，排队或执行中的任务照常每 5 秒对账一次；只剩等人处理或等重发的，间隔逐轮翻倍、最长 1 分钟，且只重查这些卡；有新消息或任务状态变化时立即回到 5 秒并重查全部。
+
+## 9. 给外部程序用的命令
+
+这些命令以本机安装者身份访问当前实例，沿用 `session list` 的实例定位与鉴权。需要指定实例时，每条 `task` 命令都接受 `--url http://127.0.0.1:4310 --database /path/to/runtime.db`；数据库只用于读取该实例的访问令牌，URL 必须是本机 HTTP 地址。列表沿用 Web 的可见性过滤；来源名称与链接最多并发查询 4 项，共用 3 秒预算，未及时取得时仍返回任务及已有来源信息。写操作仍经过原有权限检查。
+
+```bash
+dutydeck task list --json --limit 50
+dutydeck task read <session-id> --json --limit 40
+dutydeck task send <session-id> --text '补充要求' --mode queue --client phone --json
+printf '%s' '补充要求' | dutydeck task send <session-id> --stdin --json
+dutydeck task interrupt <session-id> --client phone --json
+dutydeck task decide <session-id> --waiting <request-id> --option allow --client phone --json
+dutydeck task decide <session-id> --waiting <request-id> --option deny --text '请换到测试目录' --json
+dutydeck task decide <session-id> --waiting <ask-id> --option <choice-value> --json
+dutydeck task decide <session-id> --waiting <ask-id> --option answer --text '自定义回答' --json
+```
+
+`task` 的 ID 是会话 ID。`list` 默认返回最近更新的 50 个会话，`read` 默认返回最近 40 条对话；`--limit` 范围均为 1–200。`send` 的 `--text` 与 `--stdin` 必须二选一；`--mode` 为 `queue`（默认）或 `steer`，不支持插话的会话拒绝 `steer`。`interrupt` 在请求已接受但原轮次尚未确认结束时返回 `interrupting`，账本确认原轮次结束后才返回 `interrupted`，没有活动轮次时返回 `idle`。审批只接受 `allow` / `deny`，拒绝时可带说明；提问接受选项值或 `answer --text` 自由回答。
+
+`--json` 时 stdout 只输出一个 JSON 对象。成功退出码为 0，形状为 `{"ok":true,"data":...}`。以下是 `data` 的示例（可选字段在没有来源证据时省略）：
+
+```json
+{"tasks":[{"id":"ses_example","title":"检查项目","status":"waiting","updated_at":"2026-11-11T00:00:00Z","agent":"codex","agent_label":"Example Agent","cwd":"/path/to/project","origin":{"kind":"web","label":"web"},"waiting":[{"id":"request_example","kind":"approval","prompt":"运行测试","detail":"pnpm test","options":[{"id":"allow","label":"允许","kind":"allow"},{"id":"deny","label":"拒绝","kind":"deny"}],"free_text":false}],"verification":{"state":"none","summary":""},"actions":["send","interrupt","decide"]}]}
+{"items":[{"role":"user","text":"检查项目","at":"2026-11-11T00:00:00Z"},{"role":"assistant","text":"检查结果","at":"2026-11-11T00:01:00Z"}],"truncated":false}
+{"task_id":"ses_example","accepted":true}
+{"state":"interrupted"}
+{"resolved":true}
+```
+
+状态为 `running|waiting|queued|done|failed|stopped|unknown`，待审批/提问优先显示 `waiting`；结果待核对显示 `unknown`。`agent` 为 `claude|codex|other`；来源为 `lark|schedule|web|trigger|other`，已知时带 `origin.url`。`waiting` 中的 `question` 选项使用 `kind=answer`，`free_text` 表示是否可自由回答。问题最多 500 字、操作原文最多 2000 字，验证摘要最多 200 字。`verification.state` 为 `passed|failed|none`，过期或没有验证证据时为 `none`。`actions` 仅列当前允许且可用的动作。对话按时间升序，角色为 `user|assistant|tool|system`；工具调用与结果合并成一条摘要，不输出 thinking；单条超过 4000 字时截断并加 `…`，截断文本或省略较早条目时 `truncated=true`。
+
+失败形状为 `{"ok":false,"error":{"code":"already_resolved","message":"该请求已被处理"}}`：
+
+| 退出码 | code 与含义 |
+|---|---|
+| 2 | `invalid_argument`：参数不合法或会话不支持该动作 |
+| 3 | `unavailable`：读取时实例不可达，或写请求能够证明未提交（例如连接建立前被拒绝） |
+| 4 | `not_found`：对象不存在；`already_resolved`：请求已经处理或正在提交，不能重复执行 |
+| 5 | `unknown_outcome`：写请求发出后遇到 5xx、响应损坏或连接中断，且不能证明未执行；不能自动重试，重新读取核对 |
+| 1 | `forbidden`：权限不足；`conflict`：当前状态冲突 |
+
+写操作可带 `--client <name>`，名称匹配 `[a-z0-9-]{1,32}`，只记入审计，不增加权限。Web 或 CLI 处理审批/提问后，原飞书卡片显示「已处理（经 Web 或客户端名称）」，移除交互按钮；卡片更新失败沿用持久化重试。提问的回答提交中会拒绝重复操作，只有回答回执持久化成功后才关闭卡片；写入失败并恢复待回答时，原卡仍可操作。
+
+### 发送存档卡与附加链接
+
+```bash
+dutydeck lark send '## 存档摘要' --app <app-id> --chat-id <chat-id> --json
+dutydeck lark send '## 存档摘要' --app <app-id> --reply-to <message-id> --in-thread --json
+dutydeck settings bot set <app-id> 'cardLinks=[{"label":"打开任务","url":"https://client.example.test/tasks/{sessionId}","android_url":"client://tasks/{sessionId}"}]'
+dutydeck settings bot set <app-id> cardLinks=
+```
+
+`lark send --json` 成功返回 `{"ok":true,"data":{"message_id":"om_example","url":"https://client.example.test/message"}}`。`--app` 从本机数据库选择已绑定机器人，可加 `--database /path/to/runtime.db`；不传时保留原有 `LARK_*` 环境变量行为。`--reply-to` 回复指定消息，`--in-thread` 将回复放入话题。同一次调用的发送重试共用固定幂等 UUID。任何一次尝试结果未知时，后续拒绝不能证明此前未送达；只有确定成功的回执才能消除该次调用的不确定性。连接中断、响应读取失败等导致投递结果不确定，或消息已发出但无法取得链接时，返回 `unknown_outcome`（退出码 5），不要自动重发。
+
+机器人设置 `cardLinks` 是最多 2 项的 JSON 数组，省略保留，`cardLinks=` 或 `[]` 清空。每项 `label` 为 1–12 字，所有 URL 最多 2048 字符，`url` 必须是 HTTPS；可选 `android_url`、`ios_url`、`pc_url` 支持应用 scheme，拒绝 `javascript:`、`vbscript:`、`data:`。链接里的 `{sessionId}` 替换为 URL 编码后的会话 ID，替换后任一 URL 超过 2048 字符时省略该条链接。在进度卡和结果卡底部按飞书 `multi_url` 渲染；附加链接使整卡超出安全预算时省略链接，不改变正文的既有处理。

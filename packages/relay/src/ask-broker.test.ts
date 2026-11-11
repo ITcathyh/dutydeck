@@ -203,6 +203,58 @@ describe('relay answer races', () => {
     await expect(broker.flush()).resolves.toBeUndefined();
   });
 
+  it.each(['before', 'after'] as const)('reconciles an answered persistence failure %s the write', async failure => {
+    let record: RelayAskRecord | undefined;
+    let fail = true;
+    const store: RelayAskStore = {
+      list: async () => [], get: async () => record,
+      compareAndSet: async (previous, next) => {
+        if (JSON.stringify(previous) !== JSON.stringify(record)) return false;
+        if (next.status === 'answered' && fail && failure === 'before') throw new Error('receipt write failed');
+        record = next;
+        if (next.status === 'answered' && fail && failure === 'after') throw new Error('receipt acknowledgement lost');
+        return true;
+      }
+    };
+    const broker = new RelayAskBroker({ publish: async () => {} }, store);
+    const waiting = broker.register({ sessionId: 'ses_one', question: 'Proceed?' });
+    try {
+      await vi.waitFor(() => expect(broker.listPending()).toHaveLength(1));
+      const id = broker.listPending()[0]!.id;
+      if (failure === 'before') {
+        await expect(broker.answer(id, 'yes', { handledBy: 'phone' })).rejects.toThrow('receipt write failed');
+        expect(record).toMatchObject({ status: 'pending' });
+        expect(broker.listPending().map(ask => ask.id)).toEqual([id]);
+        fail = false;
+      }
+      await expect(broker.answer(id, 'yes', { handledBy: 'phone' })).resolves.toMatchObject({ status: 'answered', answer: 'yes' });
+      await expect(waiting).resolves.toMatchObject({ status: 'answered', answer: 'yes' });
+      expect(broker.listPending()).toEqual([]);
+    } finally { fail = false; broker.close(); await broker.flush(); }
+  });
+
+  it('does not reopen a cancelled task when its answered commit fails', async () => {
+    const writing = deferred(), release = deferred();
+    let record: RelayAskRecord | undefined;
+    const broker = new RelayAskBroker({ publish: async () => {} }, {
+      list: async () => [], get: async () => record,
+      compareAndSet: async (previous, next) => {
+        if (JSON.stringify(previous) !== JSON.stringify(record)) return false;
+        if (next.status === 'answered') { writing.resolve(); await release.promise; throw new Error('receipt failed'); }
+        record = next; return true;
+      }
+    });
+    const waiting = broker.register({ sessionId: 'ses_one', question: 'Proceed?' });
+    await vi.waitFor(() => expect(broker.listPending()).toHaveLength(1));
+    const answer = broker.answer(broker.listPending()[0]!.id, 'yes').catch(error => error);
+    await writing.promise;
+    broker.cancelSession('ses_one', 'original task ended'); release.resolve();
+    expect(await answer).toMatchObject({ message: 'receipt failed' });
+    await expect(waiting).resolves.toMatchObject({ status: 'cancelled', reason: 'original task ended' });
+    expect(broker.listPending()).toEqual([]);
+    broker.close(); await broker.flush();
+  });
+
   it('cleans pending state and reports a terminal CAS error through flush', async () => {
     const writeError = new Error('terminal write failed');
     let persisted: RelayAskRecord | undefined;

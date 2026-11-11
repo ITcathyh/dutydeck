@@ -1,3 +1,4 @@
+import { parseCardLinks, readCardLinks } from './card-links.js';
 import { preparePromptVersions, type PromptSaveOrigin } from './prompt-versions.js';
 import { parseLarkEventHandlers, validateLarkEventConfiguration, type LarkEventHandler } from './event-pipeline.js';
 import { parseCardActionForwarding, type CardActionForwarding } from './card-action-forwarding.js';
@@ -258,6 +259,7 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
     ...(eventHandlers ? { eventHandlers } : {}),
     ...(cardActionForwardingError ? { cardActionForwardingError } : {}),
     ...(cardActionForwarding ? { cardActionForwarding } : {}),
+    cardLinks: readCardLinks(parsed.cardLinks),
     appId: parsed.appId.trim(),
     revision: Number.isInteger(parsed.revision) && Number(parsed.revision) > 0 ? parsed.revision : 1,
     mentionPolicy: resolveParticipation({ mentionPolicy: parsed.mentionPolicy }).mentionPolicy,
@@ -399,6 +401,7 @@ export const publicLarkConfig = (config: StoredLarkConfig, activeAppIds: Readonl
   setupComplete: Boolean(config.defaultAgentId && larkExecutionConfirmed(config)),
   ...(config.workspace ? { workspace: config.workspace } : {}),
   ...(config.workspaceAliases ? { workspaceAliases: config.workspaceAliases } : {}),
+  cardLinks: config.cardLinks ?? [],
   ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
   ...(config.webMobileReachable === false ? { webMobileReachable: false as const } : {}),
   ...(config.fallbackAgentId ? { fallbackAgentId: config.fallbackAgentId } : {}),
@@ -545,6 +548,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   const appSecret = input.appSecret?.trim() || current?.appSecret;
   const name = input.name === undefined ? current?.name : input.name.trim() || undefined;
   const workspace = input.workspace === undefined ? current?.workspace : input.workspace.trim() || undefined;
+  const cardLinks = input.cardLinks === undefined ? current?.cardLinks ?? [] : parseCardLinks(input.cardLinks);
   const workspaceAliases = input.workspaceAliases === undefined ? current?.workspaceAliases : normalizeWorkspaceAliases(input.workspaceAliases);
   // 同一套部署的机器人共用一个控制台。新建时没给地址（扫码一键创建、CLI 创建都不带）就沿用
   // 已有机器人的地址，否则卡片上没有「查看详情」；显式传空串仍表示不配置。
@@ -672,6 +676,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
     ...(name ? { name } : {}),
     ...(workspace ? { workspace } : {}),
     ...(workspaceAliases ? { workspaceAliases } : {}),
+    cardLinks,
     ...(webBaseUrl ? { webBaseUrl } : {}),
     ...(webMobileReachable ? {} : { webMobileReachable: false as const }),
     ...(fallbackAgentId ? { fallbackAgentId } : {}),
