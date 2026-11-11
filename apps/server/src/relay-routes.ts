@@ -42,23 +42,15 @@ export const createRelayAskLifecycleWatcher = (runtime: DutydeckRuntime): RelayA
 
 /** Reconnection checks the saved owner, never adopts the current task as its owner. */
 export function createRelayContinuationChecker(runtime: DutydeckRuntime, authorized?: (sessionId: string) => Promise<boolean>): RelayContinuationChecker {
-  return async record => {
+  const check: RelayContinuationChecker = async record => {
     try {
-      const session = await runtime.getSession(record.sessionId);
-      if (!session || session.archivedAt || terminalStates.has(session.state)) return 'ended';
+      const guard = runtime.captureSessionContinuation(record.sessionId);
       if (authorized && !await authorized(record.sessionId)) return 'ended';
-      const recovery = record.taskId ? await runtime.getTaskRecovery(record.sessionId, record.taskId) : undefined;
-      // Authorization/recovery reads can suspend while the session stops or is archived.
-      const current = await runtime.getSession(record.sessionId);
-      if (!current || current.archivedAt || terminalStates.has(current.state)) return 'ended';
-      if (!recovery) return 'available';
-      if (recovery.status === 'reconcile_required' || recovery.resolvedUnknown || recovery.blockers.length) return 'unknown';
-      if (recovery.status !== 'running') return 'ended';
-      const owner = runtime.getActiveTaskContext(record.sessionId);
-      if (!record.attemptId || !owner?.attemptId) return 'unknown';
-      return owner.taskId === record.taskId && owner.attemptId === record.attemptId ? 'available' : 'ended';
+      return guard(record);
     } catch { return 'unknown'; }
   };
+  check.capture = sessionId => runtime.captureSessionContinuation(sessionId);
+  return check;
 }
 
 /**
@@ -219,14 +211,13 @@ export function registerRelayRoutes(app: FastifyInstance, options: RelayRoutesOp
       // 首次 await 前用已验签的身份绑定任务和监听；异步存活查询期间任务可能已结束并清除 activeTask。
       const capability = service.verifySession(request.headers.authorization, request.params.id);
       const owner = runtime?.getActiveTaskContext(capability.sessionId);
+      const guard = runtime?.captureSessionContinuation(capability.sessionId);
       const controller = new AbortController();
       // 断线撤掉本次等待；无 requestId 的旧提问仍随连接取消，持久提问保留。
       reply.raw.once('close', () => { if (!reply.raw.writableFinished) controller.abort('提问方已断开'); });
       release = watchSession(capability.sessionId, { ...owner, controller });
       await service.resolveSession(request.headers.authorization, request.params.id);
-      // The durable settlement may already precede subscription while the
-      // in-memory active task is still being cleaned up.
-      if (owner && endedTaskStates.has((await runtime!.getTaskRecovery(capability.sessionId, owner.taskId)).status)) controller.abort('任务已结束');
+      if (guard && guard(owner) === 'ended') controller.abort('任务已结束');
       const outcome = await service.ask(request.headers.authorization, request.params.id, request.body ?? {}, { ...owner, signal: controller.signal });
       // 长轮询结果一律 200：answered / expired / cancelled 都是通道正常工作的结果，
       // CLI 侧据 status 决定退出码，不靠 HTTP 状态码区分。
@@ -247,6 +238,7 @@ export function registerRelayRoutes(app: FastifyInstance, options: RelayRoutesOp
           turn.timer.unref();
         });
       }
+      if (outcome.status === 'answered' && (controller.signal.aborted || guard && guard(owner) !== 'available')) return { status: 'cancelled', askId: outcome.askId, reason: '原执行轮已结束或无法核实。' };
       return outcome;
     } catch (error) { return handleRelayError(error, reply); }
     finally { release?.(); }
@@ -260,22 +252,21 @@ export function registerRelayRoutes(app: FastifyInstance, options: RelayRoutesOp
         reply.raw.once('close', () => { if (!reply.raw.writableFinished) controller.abort('等待连接已断开'); });
         if (reply.raw.destroyed) controller.abort('等待连接已断开');
         const capability = service.verifySession(request.headers.authorization, request.params.id);
-        if (action === 'ask-result' && runtime) release = runtime.subscribe(capability.sessionId, event => {
-          const state = (event.data as { state?: string } | undefined)?.state;
-          if (event.type === 'status' && state && terminalStates.has(state)) controller.abort('会话已结束');
-        });
+        const guard = runtime?.captureSessionContinuation(capability.sessionId);
         await service.resolveSession(request.headers.authorization, request.params.id);
         const requestId = request.body?.requestId;
         if (typeof requestId !== 'string' || Object.keys(request.body ?? {}).some(key => key !== 'requestId')) throw new RelayError('RELAY_INVALID_REQUEST_ID', '只接受 requestId。', 400);
         const record = await broker.result(capability.sessionId, requestId);
         if (action === 'ask-result') {
           await options.authorizeResult?.(capability.sessionId);
-          await service.resolveSession(request.headers.authorization, request.params.id);
           if (controller.signal.aborted) throw new RelayError('RELAY_CONNECTION_CLOSED', '查询连接已断开。', 409);
-          return record;
+          if (guard && guard() !== 'available') throw new RelayError('RELAY_SESSION_ENDED', '会话已结束，回传凭证不再有效。', 401);
+          return { ...record, continuation: record.continuation === 'available' && guard ? guard(record) : record.continuation };
         }
         release = watchSession(capability.sessionId, { taskId: record.taskId, attemptId: record.attemptId, controller });
-        return await broker.wait(capability.sessionId, requestId, controller.signal);
+        const outcome = await broker.wait(capability.sessionId, requestId, controller.signal);
+        if (outcome.status === 'answered' && (controller.signal.aborted || guard && guard(record) !== 'available')) return { status: 'cancelled', askId: outcome.askId, reason: '原执行轮已结束或无法核实。' };
+        return outcome;
       } catch (error) { return handleRelayError(error, reply); }
       finally { release?.(); }
     });

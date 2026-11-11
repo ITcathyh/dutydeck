@@ -26,6 +26,10 @@ function fakeRuntime(sessions: Record<string, Session | undefined>) {
     events,
     listeners,
     getActiveTaskContext() { return undefined; },
+    captureSessionContinuation(id: string) {
+      const runId = sessions[id]?.runId;
+      return () => { const current = sessions[id]; return !current || current.runId !== runId || current.archivedAt || ['stopped', 'failed'].includes(current.state) ? 'ended' : 'available'; };
+    },
     async getSession(id: string) { return sessions[id]; },
     async publishSessionEvent(sessionId: string, type: EventType, data: unknown) {
       const session = sessions[sessionId];

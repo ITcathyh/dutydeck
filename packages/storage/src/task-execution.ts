@@ -720,6 +720,10 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
   };
   return {
     authority, upgradeLegacy, beginLegacyRetirement, lookupAccepted: lookup, getAcceptedTask,
+    getSessionScope(sessionId) {
+      const row = cached('SELECT run_id,state,archived_at FROM sessions WHERE id=?').get(sessionId) as { run_id: string; state: Session['state']; archived_at: string | null } | undefined;
+      return row && { sessionId, runId: row.run_id, state: row.state, ...(row.archived_at ? { archivedAt: row.archived_at } : {}) };
+    },
     getResources: resources,
     getRecoveryDecision(decisionId) {
       id.parse(decisionId);

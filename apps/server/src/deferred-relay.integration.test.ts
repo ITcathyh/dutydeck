@@ -23,7 +23,8 @@ async function harness(options: { ackFailure?: boolean; native?: boolean; missin
   const runtime = {
     getSession: async (id: string) => ({ id, state: 'running', cwd: '/tmp' }),
     getActiveTaskContext: () => ({ taskId: activeTaskId, ...(options.missingAttempt ? {} : { attemptId: activeAttemptId }), actorId: 'ou_original' }),
-    getTaskRecovery: async () => ({ status: 'running' }), subscribe: () => () => {},
+    captureSessionContinuation: () => (expected?: { taskId?: string; attemptId?: string }) => !expected?.taskId ? 'available' : !expected.attemptId ? 'unknown' : expected.taskId === activeTaskId && expected.attemptId === activeAttemptId ? 'available' : 'ended',
+    subscribe: () => () => {},
     deferTurn: vi.fn(async (_id, taskId, askId, stop, attemptId) => {
       expect(askId).toBe('confirmation_fixture');
       expect(attemptId).toBe('attempt_original');

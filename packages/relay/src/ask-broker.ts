@@ -105,7 +105,7 @@ export class RelayAskBroker {
   setContinuationChecker(check: RelayContinuationChecker, watch?: RelayAskLifecycleWatcher) { this.durable.checkContinuation = check; this.durable.setLifecycleWatcher(watch); }
   async refreshPending(sessionId?: string) { await this.ready; await this.durable.refresh(sessionId); }
   async result(sessionId: string, requestId: string) { await this.ready; return this.durable.result(sessionId, requestId); }
-  async wait(sessionId: string, requestId: string, signal?: AbortSignal) { await this.ready; return this.durable.wait(sessionId, requestId, signal); }
+  wait(sessionId: string, requestId: string, signal?: AbortSignal) { return this.durable.wait(sessionId, requestId, signal, this.ready); }
 
   private get durableHistory() { return Boolean(this.store?.getSync && this.store.listUnsettled); }
 
@@ -126,6 +126,7 @@ export class RelayAskBroker {
   }
 
   register(input: { sessionId: string; requestId?: string; question: string; questionBody?: string; timeoutMs?: number; choices?: RelayAskChoice[]; multiple?: boolean }, context: RelayAskContext = {}): Promise<RelayAskOutcome> {
+    const guard = this.durable.checkContinuation.capture?.(input.sessionId);
     // Register the cancellation fence before readiness or the first storage await.
     let prepared!: () => void;
     this.track(new Promise<void>(resolve => { prepared = resolve; }));
@@ -138,7 +139,8 @@ export class RelayAskBroker {
       registration.prepared();
       this.registrations.delete(registration);
       context.signal?.removeEventListener('abort', cancel);
-    });
+    }).then(outcome => outcome.status === 'answered' && (input.requestId !== undefined && (this.closed || context.signal?.aborted) || guard && guard(context) !== 'available')
+      ? { status: 'cancelled', askId: outcome.askId, reason: '原执行轮已结束或无法核实。' } : outcome);
   }
 
   private async registerAsk(input: { sessionId: string; requestId?: string; question: string; questionBody?: string; timeoutMs?: number; choices?: RelayAskChoice[]; multiple?: boolean }, context: RelayAskContext, registration: AskRegistration): Promise<RelayAskOutcome> {

@@ -326,6 +326,8 @@ export interface AttemptActivity {
 }
 
 export interface ExecutionRepository {
+  /** Current session authority, without asynchronous display metadata. */
+  getSessionScope(sessionId: string): (SessionFence & Pick<Session, 'state' | 'archivedAt'>) | undefined;
   authority(): 'legacy' | 'ledger_v1';
   upgradeLegacy(): ExecutionUpgradeSnapshot;
   beginLegacyRetirement(): LegacyRetirementMaintenance;

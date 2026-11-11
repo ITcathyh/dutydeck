@@ -29,7 +29,7 @@ async function fixture(recoverable?: boolean) {
         ...(recoverable ? { checkpoint: () => ({ kind: 'pty-jsonl-v1' as const, turnId: 'original', transcript: { offset: 0 } }),
           canRecoverTurn: async () => true, prepareForDaemonShutdown: (keep: boolean) => { preserve = keep; }, isDetachedForShutdown: () => detached,
           recover: async (_state: DriverTurnRecovery, onAttached?: () => Promise<void>) => { await onAttached?.(); await new Promise<void>(resolve => { finish = resolve; }); } } : {}),
-        send: async prompt => { sends.push(prompt); emit({ type: 'text', data: { text: 'waiting' }, sourceId: 'waiting' }); await new Promise<void>(resolve => { finish = resolve; }); } };
+        send: async prompt => { sends.push(typeof prompt === 'string' ? prompt : prompt.prompt); emit({ type: 'text', data: { text: 'waiting' }, sourceId: 'waiting' }); await new Promise<void>(resolve => { finish = resolve; }); } };
       return driver;
     }
   });
@@ -158,7 +158,13 @@ it.each(['reconcile_required', 'completed', 'replaced', 'revoked'] as const)('pr
   await f.broker.answer(record.id, 'yes'); expect(await waiting).toMatchObject({ status: 'answered' });
   if (state === 'revoked') f.deny();
   else if (state === 'replaced') vi.spyOn(f.runtime, 'getActiveTaskContext').mockReturnValue({ taskId: record.taskId!, attemptId: 'new-attempt' });
-  else vi.spyOn(f.runtime, 'getTaskRecovery').mockResolvedValue({ status: state, resolvedUnknown: false, blockers: [] });
+  else {
+    const read = f.repos.execution.getTaskExecution.bind(f.repos.execution);
+    vi.spyOn(f.repos.execution, 'getTaskExecution').mockImplementation((...args) => {
+      const projection = read(...args);
+      return projection && { ...projection, task: { ...projection.task, status: state } };
+    });
+  }
   const result = (await f.post('ask-result', { requestId: 'question' })).json();
   expect(result).toMatchObject({ status: 'answered', answer: 'yes', continuation: state === 'reconcile_required' ? 'unknown' : 'ended' });
   expect((await f.post('ask-wait', { requestId: 'question' })).json()).toMatchObject({ status: 'cancelled' });

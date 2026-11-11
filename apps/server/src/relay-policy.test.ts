@@ -8,7 +8,7 @@ const owner = { authorization: 'Bearer owner' };
 async function harness(store?: RelayAskStore, source?: string) {
   const session = { id: 'session', state: 'idle', source } as Session;
   const events: Array<{ kind: string }> = [];
-  const runtime = { getSession: async () => session, subscribe: () => () => {}, publishSessionEvent: async () => {} };
+  const runtime = { captureSessionContinuation: () => () => 'available', getSession: async () => session, subscribe: () => () => {}, publishSessionEvent: async () => {} };
   const broker = new RelayAskBroker({ publish: async (_session, input) => { events.push(input); } }, store);
   const capabilities = new RelayCapabilityRegistry({ get: async () => session }, 'http://127.0.0.1', 'test-secret');
   let allowed = true;

@@ -4,7 +4,8 @@ import type { RelayAskContext, RelayAskOutcome } from './ask-broker.js';
 
 export type RelayContinuation = 'available' | 'ended' | 'unknown';
 export type RelayAskLifecycleWatcher = (record: RelayAskRecord, changed: () => void) => () => void;
-export type RelayContinuationChecker = (record: RelayAskRecord) => Promise<RelayContinuation>;
+export type RelayContinuationGuard = (owner?: Pick<RelayAskRecord, 'taskId' | 'attemptId'>) => RelayContinuation;
+export type RelayContinuationChecker = ((record: RelayAskRecord) => Promise<RelayContinuation>) & { capture?: (sessionId: string) => RelayContinuationGuard };
 export function relayAskId(sessionId: string, requestId: string) {
   if (typeof requestId !== 'string' || !/^[A-Za-z0-9_.:-]{1,128}$/.test(requestId)) {
     throw new RelayError('RELAY_INVALID_REQUEST_ID', 'requestId 必须是 1-128 个字母、数字或 _ . : -。', 400);
@@ -134,14 +135,16 @@ export class DurableRelayAsks {
     // A historical answer is evidence, never permission to resume an ended attempt.
     return { ...record, askId: record.id, continuation: await this.checkContinuation(record) };
   }
-  async wait(sessionId: string, requestId: string, signal?: AbortSignal): Promise<RelayAskOutcome> {
+  async wait(sessionId: string, requestId: string, signal?: AbortSignal, ready?: Promise<void>): Promise<RelayAskOutcome> {
+    const guard = this.checkContinuation.capture?.(sessionId);
+    await ready;
     const initial = await this.result(sessionId, requestId);
     if (this.closed || signal?.aborted) return ended(initial.id, '等待连接已关闭；使用 ask-result 查询或 ask-wait 续等同一 requestId。');
     if (initial.continuation !== 'available') { const stored = await this.storage().get(initial.id); if (stored) await this.validate(stored); return ended(initial.id); }
     const record = await this.storage().get(initial.id) ?? initial;
     if (record.status !== 'pending') {
       const continuation = await this.checkContinuation(record);
-      return !this.closed && !signal?.aborted && continuation === 'available' ? outcome(record) : ended(record.id);
+      return !this.closed && !signal?.aborted && continuation === 'available' && (!guard || guard(record) === 'available') ? outcome(record) : ended(record.id);
     }
     const entry = this.restore(record)!;
     await new Promise<void>((resolve, reject) => {
@@ -154,7 +157,7 @@ export class DurableRelayAsks {
     });
     if (signal?.aborted || this.closed) { if (!this.closed) await this.validate(await this.storage().get(record.id) ?? record); return ended(record.id, '等待连接已关闭；使用 ask-result 查询或 ask-wait 续等同一 requestId。'); }
     const latest = await this.result(sessionId, requestId);
-    return !this.closed && !signal?.aborted && latest.continuation === 'available' ? outcome(latest) : ended(latest.id);
+    return !this.closed && !signal?.aborted && latest.continuation === 'available' && (!guard || guard(latest) === 'available') ? outcome(latest) : ended(latest.id);
   }
   async answer(id: string, answer: string, options: { sessionId?: string; beforeClaim?: () => Promise<void>; handledBy?: string }) {
     let previous = await this.storage().get(id);

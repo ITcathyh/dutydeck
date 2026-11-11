@@ -20,9 +20,11 @@ async function httpFixture(owned = false, status: 'pending' | 'answered' = 'answ
   const repos = createRepositories(join(dir, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   const agent = agentConfigSchema.parse({ id: 'fixture', name: 'fixture', command: process.execPath, cwd: dir, protocol: 'acp' });
   let finish: (() => void) | undefined;
+  let exit = (_code: number) => {};
   const runtime = new DutydeckRuntime(repos, { cleanupIntervalMs: 0,
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: false }),
-    driverFactory: (_agent, _protocol, emit) => {
+    driverFactory: (_agent, _protocol, emit, onExit) => {
+      exit = onExit;
       const stop = async () => { emit({ type: 'completed', data: { stopReason: 'cancelled' } }); finish?.(); };
       return { start: async () => {}, send: async () => { emit({ type: 'text', data: { text: 'waiting' } }); await new Promise<void>(resolve => { finish = resolve; }); }, stop, interrupt: stop, resume: async () => {}, isStopped: async () => true };
     } });
@@ -66,7 +68,7 @@ async function httpFixture(owned = false, status: 'pending' | 'answered' = 'answ
   const post = (action: 'ask-result' | 'ask-wait', signal?: AbortSignal) => fetch(`${origin}/api/relay/sessions/${session.id}/${action}`, {
     signal, method: 'POST', headers: { authorization: `Bearer ${capabilities.tokenFor(session.id)}`, 'content-type': 'application/json' }, body: JSON.stringify({ requestId: 'saved' }) });
   cleanups.push(async () => { release(); broker.close(); await broker.flush(); await app.close(); await runtime.shutdown(); repos.close(); await rm(dir, { recursive: true, force: true }); });
-  return { runtime, session, store, id, post, broker, manager, origin, capabilities, removeMember: () => { member = false; },
+  return { repos, runtime, session, store, id, post, broker, manager, origin, capabilities, exit, removeMember: () => { member = false; },
     disableGroup: async () => { await manager.save('fixture-app', 'fixture-chat', { expectedRevision: 1, patch: { accessOverride: { mode: 'disabled', principalIds: [] } } }); },
     holdMembership(n: number) {
     memberships = 0; holdAt = n;
@@ -94,6 +96,7 @@ it.each([false, true].flatMap(owned => (['stop', 'archive'] as const).flatMap(ch
     response = f.post(action);
   }
   await gate.entered;
+  await f.runtime.publishSessionEvent(f.session.id, 'text', { text: 'still working' });
   if (owned) await f.runtime.interrupt(f.session.id, undefined, 'alice');
   await f.runtime[change](f.session.id, { kind: 'channel', id: 'alice', appId: 'fixture-app' });
   const current = (await f.runtime.getSession(f.session.id))!;
@@ -193,28 +196,66 @@ it.each([false, true].flatMap(owned => (['saved', 'pending'] as const).flatMap(s
   else expect(await (await response).json()).toMatchObject({ status: 'cancelled' });
 });
 
-it.each(['stop', 'archive'] as const)('keeps the history lifecycle guard through the final capability lookup: %s', async change => {
+it.each((['stop', 'archive'] as const).flatMap(change => (['ask-result', 'ask-wait'] as const).flatMap(action =>
+  [false, true].map(precedingText => ({ change, action, precedingText })))))
+  ('rejects $action after $change during real session metadata lookup (preceding text=$precedingText)', async ({ change, action, precedingText }) => {
   const f = await httpFixture();
-  const lookup = f.runtime.getSession.bind(f.runtime);
-  let calls = 0, entered!: () => void, release!: () => void;
+  const lookup = f.repos.config.get.bind(f.repos.config);
+  let entered!: () => void, release!: () => void, held = false;
   const reached = new Promise<void>(resolve => { entered = resolve; });
   const blocked = new Promise<void>(resolve => { release = resolve; });
-  vi.spyOn(f.runtime, 'getSession').mockImplementation(async id => {
-    const session = await lookup(id);
-    // Initial capability, two continuation reads, then the final capability read.
-    if (++calls === 4) { entered(); await blocked; }
-    return session;
+  vi.spyOn(f.repos.config, 'get').mockImplementation(async key => {
+    const value = await lookup(key);
+    // Real getSession has read the row and is now suspended in display metadata.
+    if (key === `session_name:${f.session.id}` && !held) { held = true; entered(); await blocked; }
+    return value;
   });
   try {
-    const pending = f.post('ask-result');
+    const pending = f.post(action);
     await reached;
+    if (precedingText) await f.runtime.publishSessionEvent(f.session.id, 'text', { text: 'still working' });
     await f.runtime[change](f.session.id);
-    expect((await lookup(f.session.id))!.state).toBe('stopped');
+    expect((await f.repos.sessions.get(f.session.id))!.state).toBe('stopped');
     release();
     const response = await pending;
-    expect(response.status).toBe(409);
-    expect(await response.json()).not.toHaveProperty('answer');
-    expect((await f.post('ask-result')).status).toBe(401);
+    expect(response.status).toBe(action === 'ask-result' ? 401 : 200);
+    const body = await response.json();
+    if (action === 'ask-wait') expect(body.status).toBe('cancelled');
+    expect(body).not.toHaveProperty('answer');
+    expect((await f.post(action)).status).toBe(401);
     expect(await f.store.get(f.id)).toMatchObject({ status: 'answered', answer: 'yes' });
   } finally { release(); }
+});
+
+it.each(['ask-result', 'ask-wait'] as const)('rejects %s after a real idle driver failure without lifecycle revocation', async action => {
+  const f = await httpFixture();
+  const guard = f.runtime.captureSessionContinuation(f.session.id);
+  expect(guard()).toBe('available');
+  const gate = f.holdMembership(action === 'ask-result' ? 2 : 3);
+  const response = f.post(action);
+  await gate.entered;
+  f.exit(1);
+  await vi.waitFor(async () => expect((await f.repos.sessions.get(f.session.id))!.state).toBe('failed'));
+  expect(guard()).toBe('ended');
+  gate.release();
+  const result = await response;
+  expect(result.status).toBe(action === 'ask-result' ? 401 : 200);
+  expect(await result.json()).not.toHaveProperty('answer');
+  expect(await f.store.get(f.id)).toMatchObject({ status: 'answered', answer: 'yes' });
+});
+
+it('rejects an old history request across restart but permits a new request in the live session', async () => {
+  const f = await httpFixture();
+  const gate = f.holdMembership(2);
+  const response = f.post('ask-result');
+  await gate.entered;
+  await f.runtime.restart(f.session.id);
+  const current = (await f.repos.sessions.get(f.session.id))!;
+  expect(current.state).toBe('idle');
+  gate.release();
+  expect((await response).status).toBe(401);
+  const fresh = await f.post('ask-result');
+  expect(fresh.status).toBe(200);
+  expect(await fresh.json()).toMatchObject({ status: 'answered', answer: 'yes' });
+  expect(await f.store.get(f.id)).toMatchObject({ status: 'answered', answer: 'yes' });
 });

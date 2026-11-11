@@ -1352,11 +1352,36 @@ export class DutydeckRuntime {
   }
   getEventWindow(id: string, options?: EventWindowOptions) { return this.repos.events.listWindow(id, options); }
   async getTasks(id: string) { return (await this.repos.tasks.listBySession(id)).map(task => this.publicTask(task)); }
-  async getTaskRecovery(id: string, taskId: string) {
+  async getTaskRecovery(id: string, taskId: string) { return this.readTaskRecovery(id, taskId).recovery; }
+
+  private readTaskRecovery(id: string, taskId: string) {
     const projection = this.repos.execution.getTaskExecution(taskId, this.binding ? { claim: this.binding, idleResources: this.idleResourceChecks() } : undefined);
     if (!projection || projection.task.sessionId !== id) throw new RuntimeError('TASK_NOT_FOUND', 'Task not found in this session', 404);
     const active = this.repos.execution.getUnresolvedTasks(id).find(task => task.id !== taskId);
-    return this.taskRecovery(id, projection, active, this.localResources.reusableIds(id));
+    return { projection, recovery: this.taskRecovery(id, projection, active, this.localResources.reusableIds(id)) };
+  }
+
+  /** Capture the session before asynchronous authorization; call the returned check at the final return boundary. */
+  captureSessionContinuation(id: string) {
+    const initial = this.repos.execution.getSessionScope(id);
+    const lifecycle = this.lifecycles.get(id);
+    const generation = this.sessionGenerations.get(id);
+    return (expected?: { taskId?: string; attemptId?: string }): 'available' | 'ended' | 'unknown' => {
+      try {
+        this.assertReady();
+        const current = this.repos.execution.getSessionScope(id);
+        if (!initial || !current || current.runId !== initial.runId || current.archivedAt || ['stopped', 'failed'].includes(current.state)
+          || this.lifecycles.get(id) !== lifecycle || lifecycle && !this.mutations.valid(lifecycle) || this.sessionGenerations.get(id) !== generation) return 'ended';
+        if (!expected?.taskId) return 'available';
+        const { projection, recovery } = this.readTaskRecovery(id, expected.taskId);
+        if (recovery.status === 'reconcile_required' || recovery.resolvedUnknown || recovery.blockers.length) return 'unknown';
+        if (recovery.status !== 'running' || projection.currentAttempt?.state === 'settled') return 'ended';
+        const owner = this.getActiveTaskContext(id);
+        if (!expected.attemptId || !owner?.attemptId || projection.currentAttempt?.state !== 'active') return 'unknown';
+        return owner.taskId === expected.taskId && owner.attemptId === expected.attemptId && projection.currentAttempt.attemptId === expected.attemptId
+          && projection.currentAttempt.runId === current.runId && this.mutations.valid(this.attempts.get(id)) ? 'available' : 'ended';
+      } catch { return 'unknown'; }
+    };
   }
 
   /** One consistent traversal for callers checking every task in a session. */
