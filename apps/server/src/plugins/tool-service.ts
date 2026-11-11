@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { digest } from '@dutydeck/runtime/digest';
-import { canonicalExecutionJson, RuntimeError, type JsonValue, type PluginToolAction, type PluginToolBinding, type PluginToolIdentity } from '@dutydeck/shared';
+import { canonicalExecutionJson, RuntimeError, withTimeout, type JsonValue, type PluginToolAction, type PluginToolBinding, type PluginToolIdentity } from '@dutydeck/shared';
 import { PluginBusinessToolRegistry, validateToolInput, type BusinessToolEntry } from './business-tools.js';
 import { PluginToolGrants } from './tool-grants.js';
 import { PluginToolLedger } from './tool-ledger.js';
@@ -110,15 +110,9 @@ export class PluginBusinessToolService {
   }
   private async bounded<T>(work: (signal: AbortSignal) => Promise<T>, onUnderlyingSettled?: () => void) {
     const controller = new AbortController();
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      const underlying = Promise.resolve().then(() => work(controller.signal));
-      if (onUnderlyingSettled) void underlying.then(onUnderlyingSettled, onUnderlyingSettled);
-      return await Promise.race([underlying, new Promise<never>((_, reject) => {
-        timer = setTimeout(() => { controller.abort(); reject(new Error('PLUGIN_TOOL_TIMEOUT')); }, this.timeoutMs);
-        timer.unref();
-      })]);
-    } finally { if (timer) clearTimeout(timer); }
+    const underlying = Promise.resolve().then(() => work(controller.signal));
+    if (onUnderlyingSettled) void underlying.then(onUnderlyingSettled, onUnderlyingSettled);
+    return withTimeout(underlying, this.timeoutMs, () => { controller.abort(); return new Error('PLUGIN_TOOL_TIMEOUT'); });
   }
   async call(id: string, input: unknown, callId: string, token?: string, turn?: string) {
     if (typeof callId !== 'string' || !/^[A-Za-z0-9_.:-]{1,128}$/.test(callId)) throw new RuntimeError('PLUGIN_TOOL_INVALID_CALL_ID', 'A stable callId is required', 400);

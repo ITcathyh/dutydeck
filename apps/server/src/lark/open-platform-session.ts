@@ -1,8 +1,8 @@
-import { randomUUID } from 'node:crypto';
 import { sleep } from '../daemon/time.js';
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { writeFileAtomicSync } from '../atomic-file.js';
+import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { asRecord } from '@dutydeck/shared';
 import { pickString } from './open-platform-values.js';
 
@@ -143,25 +143,11 @@ export function writeOpenPlatformSessionCookies(
     // chmod is best-effort on non-POSIX filesystems.
   }
 
-  const temporary = join(directory, `.${basename(filePath)}.${process.pid}.${randomUUID()}.tmp`);
+  writeFileAtomicSync(filePath, JSON.stringify({ cookies: pruneExpiredCookies(cookies) }));
   try {
-    writeFileSync(temporary, JSON.stringify({ cookies: pruneExpiredCookies(cookies) }), {
-      encoding: 'utf8',
-      mode: 0o600,
-      flag: 'wx',
-    });
-    renameSync(temporary, filePath);
-    try {
-      chmodSync(filePath, 0o600);
-    } catch {
-      // chmod is best-effort on non-POSIX filesystems.
-    }
-  } finally {
-    try {
-      unlinkSync(temporary);
-    } catch {
-      // The rename normally removed the temporary path.
-    }
+    chmodSync(filePath, 0o600);
+  } catch {
+    // chmod is best-effort on non-POSIX filesystems.
   }
 }
 

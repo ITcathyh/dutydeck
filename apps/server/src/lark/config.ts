@@ -128,13 +128,7 @@ const normalizeUrgentQuota = (value: unknown): number | undefined => {
   return Number.isInteger(parsed) && parsed >= 1 ? parsed : undefined;
 };
 
-const normalizeDisplayName = (value: unknown): string | undefined => {
-  if (typeof value !== 'string') return undefined;
-  const trimmed = value.trim();
-  return trimmed || undefined;
-};
-
-const normalizeRoleField = (value: unknown): string | undefined => {
+const normalizeTrimmedString = (value: unknown): string | undefined => {
   if (typeof value !== 'string') return undefined;
   const trimmed = value.trim();
   return trimmed || undefined;
@@ -250,9 +244,9 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
   const env = normalizeEnv(parsed.env);
   const startupCommands = normalizeStartupCommands(parsed.startupCommands);
   const brand = normalizeBrand(parsed.brand);
-  const displayName = normalizeDisplayName(parsed.displayName);
-  const roleTitle = normalizeRoleField(parsed.roleTitle);
-  const roleScope = normalizeRoleField(parsed.roleScope);
+  const displayName = normalizeTrimmedString(parsed.displayName);
+  const roleTitle = normalizeTrimmedString(parsed.roleTitle);
+  const roleScope = normalizeTrimmedString(parsed.roleScope);
   const config: StoredLarkConfig = {
     welcomeEnabled: parsed.welcomeEnabled !== false,
     ...(eventHandlersError ? { eventHandlersError } : {}),
@@ -602,9 +596,9 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   const env = input.env === undefined ? current?.env : normalizeEnv(input.env);
   const startupCommands = input.startupCommands === undefined ? current?.startupCommands : normalizeStartupCommands(input.startupCommands);
   const brand = input.brand === undefined ? current?.brand : normalizeBrand(input.brand);
-  const displayName = input.displayName === undefined ? current?.displayName : normalizeDisplayName(input.displayName);
-  const roleTitle = input.roleTitle === undefined ? current?.roleTitle : normalizeRoleField(input.roleTitle);
-  const roleScope = input.roleScope === undefined ? current?.roleScope : normalizeRoleField(input.roleScope);
+  const displayName = input.displayName === undefined ? current?.displayName : normalizeTrimmedString(input.displayName);
+  const roleTitle = input.roleTitle === undefined ? current?.roleTitle : normalizeTrimmedString(input.roleTitle);
+  const roleScope = input.roleScope === undefined ? current?.roleScope : normalizeTrimmedString(input.roleScope);
   const verificationCommand = input.verificationCommand === undefined ? current?.verificationCommand : input.verificationCommand.trim() || undefined;
   const urgentEnabled = input.urgentEnabled ?? current?.urgentEnabled ?? false;
   // 三个阈值都用 null 表示「清回模块默认」，与 traceLimit 同一口径；不传才是继承现值。

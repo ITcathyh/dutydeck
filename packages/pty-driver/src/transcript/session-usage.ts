@@ -5,11 +5,21 @@ import { realCwd } from '../cli-paths.js';
 import { codexRateLimits, contextUsage, type NativeTokenUsage, type SessionUsageSnapshot } from '@dutydeck/shared';
 
 export interface NativeUsageSource { client: 'codex' | 'claude'; path: string; dataRoot: string; nativeSessionId: string; cwd: string }
-interface Cursor { inode: number; device: number; mtime: number; offset: number; pending: Buffer; skippingLine: boolean; bound: boolean; invalid: boolean; partial: boolean; snapshot: SessionUsageSnapshot; messages: Map<string, NativeTokenUsage> }
+const usageFields = ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'totalTokens'] as const;
+type UsageField = typeof usageFields[number];
+type UsageTotals = Record<UsageField, { sum: number; missing: number }>;
+interface Cursor { inode: number; device: number; mtime: number; offset: number; pending: Buffer; skippingLine: boolean; bound: boolean; invalid: boolean; partial: boolean; snapshot: SessionUsageSnapshot; messages: Map<string, NativeTokenUsage>; totals: UsageTotals; latest?: NativeTokenUsage }
 const cursors = new Map<string, Cursor>();
 const pendingReads = new Map<string, Promise<SessionUsageSnapshot | undefined>>();
 const count = (value: unknown): number | undefined => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 const copy = (snapshot: SessionUsageSnapshot): SessionUsageSnapshot => structuredClone(snapshot);
+const emptyUsageTotals = () => Object.fromEntries(usageFields.map(field => [field, { sum: 0, missing: 0 }])) as UsageTotals;
+const updateUsageTotals = (totals: UsageTotals, usage: NativeTokenUsage, direction: 1 | -1) => {
+  for (const field of usageFields) {
+    if (usage[field] === undefined) totals[field].missing += direction;
+    else totals[field].sum += direction * usage[field]!;
+  }
+};
 
 function tokens(raw: any, client: NativeUsageSource['client'], observedAt: string): NativeTokenUsage | undefined {
   if (!raw || !Number.isFinite(Date.parse(observedAt))) return;
@@ -53,7 +63,7 @@ async function readUsage(source: NativeUsageSource, key: string): Promise<Sessio
     finally { await current.close(); }
     let cursor = cursors.get(key);
     if (!cursor || cursor.inode !== stat.ino || cursor.device !== stat.dev || stat.size < cursor.offset || stat.size === cursor.offset && stat.mtimeMs !== cursor.mtime) {
-      cursor = { inode: stat.ino, device: stat.dev, mtime: stat.mtimeMs, offset: 0, pending: Buffer.alloc(0), skippingLine: false, bound: false, invalid: false, partial: false, snapshot: {}, messages: new Map() };
+      cursor = { inode: stat.ino, device: stat.dev, mtime: stat.mtimeMs, offset: 0, pending: Buffer.alloc(0), skippingLine: false, bound: false, invalid: false, partial: false, snapshot: {}, messages: new Map(), totals: emptyUsageTotals() };
     }
     const accept = (line: Buffer) => {
       if (line.length > 1024 * 1024) { cursor!.partial = true; return; }
@@ -85,6 +95,9 @@ async function readUsage(source: NativeUsageSource, key: string): Promise<Sessio
         const previous = cursor!.messages.get(entry.message.id);
         if (previous && Date.parse(previous.observedAt) > Date.parse(total.observedAt)) return;
         cursor!.messages.set(entry.message.id, total);
+        if (previous) updateUsageTotals(cursor!.totals, previous, -1);
+        updateUsageTotals(cursor!.totals, total, 1);
+        if (!cursor!.latest || Date.parse(cursor!.latest.observedAt) <= Date.parse(total.observedAt)) cursor!.latest = total;
         const input = [total.inputTokens, total.cacheReadTokens, total.cacheWriteTokens];
         const context = input.every(value => value !== undefined) ? contextUsage(input.reduce<number>((sum, value) => sum + value!, 0), undefined, entry.timestamp) : undefined;
         if (context && (!cursor!.snapshot.context || Date.parse(context.observedAt) >= Date.parse(cursor!.snapshot.context.observedAt))) cursor!.snapshot.context = { ...context, source: 'claude_transcript' };
@@ -108,12 +121,10 @@ async function readUsage(source: NativeUsageSource, key: string): Promise<Sessio
     }
     if (!cursor.bound || cursor.invalid) { cursors.delete(key); return; }
     if (appended && cursor.messages.size) {
-      const messages = [...cursor.messages.values()];
-      const latest = messages.reduce((a, b) => Date.parse(a.observedAt) > Date.parse(b.observedAt) ? a : b);
-      const total: NativeTokenUsage = { source: 'claude_transcript', scope: 'current_native_session', observedAt: latest.observedAt, ...(cursor.partial ? { partial: true } : {}) };
-      for (const field of ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'totalTokens'] as const) {
+      const total: NativeTokenUsage = { source: 'claude_transcript', scope: 'current_native_session', observedAt: cursor.latest!.observedAt, ...(cursor.partial ? { partial: true } : {}) };
+      for (const field of usageFields) {
         // A missing field stays unknown, rather than turning into a complete zero.
-        if (messages.every(message => message[field] !== undefined)) total[field] = count(messages.reduce((sum, message) => sum + message[field]!, 0));
+        if (cursor.totals[field].missing === 0) total[field] = count(cursor.totals[field].sum);
       }
       cursor.snapshot.nativeTokens = total;
     }

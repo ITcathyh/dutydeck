@@ -1,5 +1,5 @@
 import type { PluginRuntimeHooks } from './integration.js';
-import { canonicalExecutionJson, RuntimeError, type PluginCommandIdentity, type JsonValue } from '@dutydeck/shared';
+import { canonicalExecutionJson, RuntimeError, withTimeout, type PluginCommandIdentity, type JsonValue } from '@dutydeck/shared';
 import { validateToolInput } from './business-tools.js';
 import type { RegisteredPluginCommand } from './commands.js';
 import type { PluginToolHost } from './tool-service.js';
@@ -39,18 +39,17 @@ export class PluginCommandQueryService {
     if (await this.hooks?.toolBeforeCall(identity, { tool: id, input, resource, effect: 'read' }, binding.revision) === 'deny') throw new RuntimeError('PLUGIN_TOOL_DENIED', 'Plugin hook denied this query', 403);
     await guard();
     const controller = new AbortController();
-    let timer: ReturnType<typeof setTimeout> | undefined;
     let output: JsonValue;
     try {
-      const result = await Promise.race([
+      const result = await withTimeout(
         Promise.resolve().then(() => tool.execute(input, { identity, binding, signal: controller.signal })),
-        new Promise<never>((_, reject) => { timer = setTimeout(() => { controller.abort(); reject(new Error('timeout')); }, this.timeoutMs); timer.unref(); })
-      ]);
+        this.timeoutMs,
+        () => { controller.abort(); return new Error('timeout'); }
+      );
       const encoded = canonicalExecutionJson(result);
       if (Buffer.byteLength(encoded, 'utf8') > 64_000) throw new Error('output budget');
       output = JSON.parse(encoded) as JsonValue;
     } catch { throw new RuntimeError('PLUGIN_TOOL_QUERY_FAILED', 'Query failed or exceeded its output/time budget', 502); }
-    finally { if (timer) clearTimeout(timer); }
     await guard();
     await deliver?.(output, guard);
     return output;

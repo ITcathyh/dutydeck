@@ -1,8 +1,9 @@
 import { isDeepStrictEqual } from 'node:util';
 import Database from 'better-sqlite3';
-import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, realpathSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, realpathSync, mkdirSync, readFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
+import { writeFileAtomicSync } from '../atomic-file.js';
 import { z } from 'zod';
 import { RuntimeError, pluginBindingSchema, savePluginBindingSchema, resolvePluginConfig, type PluginBinding, type PluginBindingContext, type PluginBindingScope, type PluginManifest, type SavePluginBinding } from '@dutydeck/shared';
 
@@ -50,7 +51,6 @@ export class PluginBindings {
     mkdirSync(this.directory, { recursive: true });
     // SQLite's process lock is released by the kernel after a crash; no stale O_EXCL sentinel.
     const lock = new Database(join(this.directory, '.binding-lock.sqlite'), { timeout: 0 });
-    const temporary = `${this.path}.${randomBytes(8).toString('hex')}`;
     try {
       try { lock.exec('BEGIN IMMEDIATE'); } catch (error) { if ((error as {code?:string}).code === 'SQLITE_BUSY') throw new RuntimeError('PLUGIN_BINDING_BUSY', 'Another binding update is in progress; retry', 409); throw error; }
       const bindings = this.list();
@@ -60,10 +60,9 @@ export class PluginBindings {
       if ((previous?.revision ?? 0) !== parsed.expectedRevision) throw new RuntimeError('PLUGIN_BINDING_CONFLICT', 'Binding changed; reload before saving', 409);
       const { expectedRevision, ...values } = parsed;
       const binding = { ...values, id, revision: expectedRevision + 1 };
-      writeFileSync(temporary, JSON.stringify({ version: 1, bindings: [...bindings.filter(item => item.id !== id), binding] }), { flag: 'wx', mode: 0o600 });
-      renameSync(temporary, this.path);
+      writeFileAtomicSync(this.path, JSON.stringify({ version: 1, bindings: [...bindings.filter(item => item.id !== id), binding] }));
       return binding;
-    } finally { lock.close(); if (existsSync(temporary)) unlinkSync(temporary); }
+    } finally { lock.close(); }
   }
   resolve(plugin: string, scope: PluginBindingScope, manifest: PluginManifest, bindings?: () => PluginBinding[]): PluginBindingContext | undefined {
     const binding = this.select(plugin, scope, bindings);

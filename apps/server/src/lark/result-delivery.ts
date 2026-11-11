@@ -370,8 +370,7 @@ export async function prepareLarkResult(
   log: DeliveryLog,
   store?: ConfigRepository,
   beforeSend?: LarkWriteGuard,
-  forceAttachment = false,
-  options: DeliveryConcurrencyOptions = {}
+  forceAttachment = false
 ): Promise<{ input: LarkCardInput & { elements: Array<Record<string, any>>; idempotencyKey: string }; attachmentMessageId?: string }> {
   beforeSend ??= input.beforeSend;
   if (input.cardBody && forceAttachment) throw new LarkServiceError('INVALID_FINAL_CARD', '自定义卡片被平台拒收，请修正静态卡片内容后重新提交。', 400);
@@ -459,13 +458,13 @@ export async function sendLarkResult(
     throw new LarkServiceError('LARK_OPENAPI_ERROR', '最终结果已被飞书内容审核拒收。', 502, { upstreamCode: Number(previous), upstreamHttpStatus: 400 });
   }
   try {
-    const prepared = await prepareLarkResult(service, target, input, log, store, beforeSend, false, options);
+    const prepared = await prepareLarkResult(service, target, input, log, store, beforeSend);
     try { return await sendPreparedLarkResult(service, target, prepared, log, store, beforeSend, options); }
     catch (error) {
       const output = input.elements.find(element => element.element_id === 'final_output')?.content;
       if (prepared.attachmentMessageId || typeof output !== 'string' || !output || !isLarkResultCardRejected(error)) throw error;
       log.warn({ error, idempotencyKey: input.idempotencyKey }, '结果卡被飞书拒收，改为正文节选加附件发送');
-      return await sendPreparedLarkResult(service, target, await prepareLarkResult(service, target, input, log, store, beforeSend, true, options), log, store, beforeSend, options);
+      return await sendPreparedLarkResult(service, target, await prepareLarkResult(service, target, input, log, store, beforeSend, true), log, store, beforeSend, options);
     }
   } catch (error) {
     if (isLarkFinalContentAuditRejected(error)) {

@@ -1138,9 +1138,8 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
       } else if (!this.foreignActionConfirmed(operatorOpenId, saved.sender_open_id, `${taskId}|${turn}|${action}|${target}`)) {
         return { type: 'warning', content: '该任务由他人发起，再次点击同一按钮以确认操作' };
       }
-      let result: Awaited<ReturnType<typeof resolveUnknownTask>>;
       try {
-        result = await resolveUnknownTask(runtime as UnknownTaskRuntime, { sessionId: mapping.sessionId, taskId: saved.runtime_task_id, target, action: kind, operator: { channel: 'lark', id: operatorOpenId } });
+        await resolveUnknownTask(runtime as UnknownTaskRuntime, { sessionId: mapping.sessionId, taskId: saved.runtime_task_id, target, action: kind, operator: { channel: 'lark', id: operatorOpenId } });
       } catch (error) {
         if (!(error instanceof RuntimeError)) throw error;
         if (error.code === 'UNKNOWN_TASK_ALREADY_RESOLVED') {

@@ -9,11 +9,12 @@ import type { LarkRedispatchInfo } from './turn-redispatch.js';
 import { isBotSenderType } from './card-mentions.js';
 
 export type LarkInboxAdoption = Pick<LarkMessageEvent, 'senderOpenId' | 'senderType' | 'scenario' | 'authorization' | 'rootId' | 'threadId' | 'parentId'> & { confirmedInputDigest?: string };
+const stableStringify = (value: object) => JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item)
+  ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b))) : item);
 /** Bind confirmation to content, attachments and routing, independently of its confirmer and host evidence. */
 export function larkConfirmationInputDigest(event: LarkMessageEvent): string {
   const { senderOpenId: _actor, senderType: _kind, authorization: _authorization, scenario: _scenario, triage: _triage, replyMessageId: _reply, ...input } = event;
-  return createHash('sha256').update(JSON.stringify(input, (_key, value) => value && typeof value === 'object' && !Array.isArray(value)
-    ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value)).digest('hex');
+  return createHash('sha256').update(stableStringify(input)).digest('hex');
 }
 export interface LarkInboxRecord {
   reason?: Disposition['reason'];
@@ -69,7 +70,7 @@ export const LARK_IGNORED_BOT_BODY_GRACE_MS = 3_600_000;
 export const LARK_IGNORED_RETENTION_LIMIT = 60_000;
 export const LARK_IGNORED_RETENTION_MS = 30 * 86_400_000;
 // 清空后重写字段会改变落库键顺序；只比较执行值，数组顺序仍有意义。
-const executionRecord = ({ reason: _reason, detail: _detail, disposition: _disposition, duplicateCount: _duplicates, ...rest }: LarkInboxRecord) => JSON.stringify(rest, (_key, value) => value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value);
+const executionRecord = ({ reason: _reason, detail: _detail, disposition: _disposition, duplicateCount: _duplicates, ...rest }: LarkInboxRecord) => stableStringify(rest);
 const prefix = (appId: string) => `lark.inbox.${appId}.`;
 /**
  * 首张进度卡没送达时抛出的错误带这个标记：runtime 还没接到这条任务，

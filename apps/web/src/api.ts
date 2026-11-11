@@ -8,7 +8,7 @@ export type { HistoryOutline, HistoryTurnPlace, HistoryTurnSummary } from '@duty
 import type { AutomationSchedulePage, AutomationRunDetail } from '@dutydeck/shared';
 import type { PluginBinding, SavePluginBinding, PluginConfigSchema, PluginBindingScope } from '@dutydeck/shared';
 import type { LarkAllowedUser, PublicLarkConfig, PublicLarkConfigCollection, RiskControlMode, SaveLarkConfigInput } from '@dutydeck/shared';
-import type { InboxAction, InboxResponse, LarkAppCreationJob, PermissionMode, ScenarioBinding, ScenarioParam, SessionSourceContext, SessionUsageSnapshot } from '@dutydeck/shared';
+import type { InboxAction, InboxResponse, LarkAppCreationJob, PermissionMode, ScenarioBinding, ScenarioParam, Session as SharedSession, RunSummary as SharedRunSummary, SessionSourceContext, SessionUsageSnapshot } from '@dutydeck/shared';
 import type {
   SessionInsightDetailsResponse,
   SessionInsightRefreshResponse,
@@ -189,7 +189,7 @@ export type LarkOpenPlatformSetupJob = {
 };
 export type { LarkAppCreationJob };
 export type MatterDetail = { id: string; title: string; status: 'open' | 'done' | 'cancelled'; sessions: Session[]; schedules: Array<{ id: string; name: string; enabled: boolean }>; originUrl?: string };
-export type Session = { matter?: import('@dutydeck/shared').MatterSummary; id: string; agentId: string; state: string; cwd: string; name?: string; model?: string; reasoningEffort?: string; permissionMode?: PermissionMode; source?: string; sourceId?: string; sourceContext?: SessionSourceContext; archivedAt?: string; runId: string; createdAt: string; updatedAt: string; error?: string; systemPrompt?: string; workspaceMode?: WorkspaceMode; workspaceSourceCwd?: string };
+export type Session = Omit<SharedSession, 'state'> & { state: string; matter?: import('@dutydeck/shared').MatterSummary; sourceContext?: SessionSourceContext };
 export type DockEvent = { taskId?: string; attemptId?: string; id: string; sequence: number; type: string; timestamp: string; data: any; raw?: string };
 export type Task = { skillDeliveries?: SkillDeliveryMetadata[]; id: string; sessionId: string; prompt: string; status: string; createdAt: string; updatedAt: string };
 /** 结果未知、现在可以由人处理的一轮：已知事实与三行摘要（服务端生成，与飞书提醒卡同一份文字）。 */
@@ -200,7 +200,7 @@ export type SteeringOutcome = 'injected' | 'startedNewTurn' | 'moved' | 'promptR
 export type PlanState = { state: 'none' | 'planning' | 'pending' | 'approved' | 'needs_changes' | 'cancelled' | 'expired'; taskId?: string; expiresAt?: string; operable?: boolean };
 export type PlanAction = 'approve' | 'revise' | 'cancel';
 export type SteeringResult = { outcome: SteeringOutcome; error?: string };
-export type RunSummary = { taskReport?: import('@dutydeck/shared').TaskReport; /** 最近一次上下文用量；服务端只在已有用量事件时附带。 */ context?: import('@dutydeck/shared').ContextUsage; sessionId: string; taskId: string; prompt: string; status: string; queuedCount: number; updatedAt: string };
+export type RunSummary = SharedRunSummary & { taskReport?: import('@dutydeck/shared').TaskReport; /** 最近一次上下文用量；服务端只在已有用量事件时附带。 */ context?: import('@dutydeck/shared').ContextUsage };
 export type EventWindowQuery = { before?: number; after?: number; limit?: number; direction?: 'backward' | 'forward' };
 export type BrowserAuthState = { authenticated: boolean; required: boolean; password?: boolean };
 export type FoundationCapability = { schemaVersion: 1; repositoriesWired: boolean; permissionEvaluatorWired: boolean; secretInspectorWired: boolean; runtimeWired: false; writesEnabled: boolean; readiness: 'repository_unwired' | 'permission_unwired' | 'secret_inspector_unwired' | 'offline_management_ready'; blockers: Array<{ code: string; message: string; action: string }> };

@@ -1,6 +1,6 @@
 import { Activity, Archive, ArrowLeft, BookOpen, ChevronRight, FileDiff, LineChart, MessageSquare, MoreHorizontal, PanelRightOpen, Pencil, RotateCcw, Square, Terminal } from 'lucide-react';
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import type { Agent, RunSummary, Session, SessionUsage, Task } from '../api';
+import type { RunSummary, Session, SessionUsage, Task } from '../api';
 import type { SessionSyncState } from '../useSessionStream';
 import { sessionDisplayName } from '../run-summary';
 import { sessionErrorSummary, sessionWorkspaceName } from '../workspace-model';
@@ -50,7 +50,6 @@ export function usageLabel(usage?: SessionUsage) {
 export function RunHeader({
   session,
   summary,
-  agent,
   taskPrompt,
   streamStatus,
   queuedTasks,
@@ -81,11 +80,9 @@ export function RunHeader({
 }: {
   session: Session;
   summary?: RunSummary;
-  agent?: Agent;
   taskPrompt?: string;
   streamStatus: SessionSyncState;
   queuedTasks: Task[];
-  usage?: SessionUsage;
   /** 目标等面板入口，排在「更多操作」前面。 */
   tools?: ReactNode;
   rawVisible: boolean;

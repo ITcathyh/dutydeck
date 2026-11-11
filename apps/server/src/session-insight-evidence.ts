@@ -101,14 +101,13 @@ function projectGoals(
   const projections = [...byTask.values()];
 
   // 规范（发布/digest）顺序：createdAt、id 升序。
-  const canonicalOrder = projections
-    .map((projection, index) => ({ projection, index }))
+  const canonicalOrder = [...projections]
     .sort((x, y) => {
-      const byCreated = compareAsc(x.projection.task.createdAt, y.projection.task.createdAt);
-      return byCreated !== 0 ? byCreated : compareAsc(x.projection.task.id, y.projection.task.id);
+      const byCreated = compareAsc(x.task.createdAt, y.task.createdAt);
+      return byCreated !== 0 ? byCreated : compareAsc(x.task.id, y.task.id);
     });
 
-  const items = canonicalOrder.map(({ projection }) => {
+  const items = canonicalOrder.map(projection => {
     const taskId = projection.task.id;
     const attemptId = projection.task.currentAttemptId ?? null;
     assertSafeIdentity('taskGoals.taskId', taskId, context);
@@ -126,9 +125,9 @@ function projectGoals(
   const priority = canonicalOrder
     .map((entry, canonicalIndex) => ({
       canonicalIndex,
-      active: ACTIVE_TASK_STATUSES.has(entry.projection.task.status) ? 0 : 1,
-      createdAt: entry.projection.task.createdAt,
-      id: entry.projection.task.id
+      active: ACTIVE_TASK_STATUSES.has(entry.task.status) ? 0 : 1,
+      createdAt: entry.task.createdAt,
+      id: entry.task.id
     }))
     .sort((x, y) => {
       if (x.active !== y.active) return x.active - y.active;
@@ -152,16 +151,15 @@ function projectSteering(
     }
   }
   const operations = [...byOperation.values()];
-  const canonicalOrder = operations
-    .map((steering, index) => ({ steering, index }))
+  const canonicalOrder = [...operations]
     .sort((x, y) => {
-      const byUpdated = compareAsc(x.steering.updatedAt, y.steering.updatedAt);
+      const byUpdated = compareAsc(x.updatedAt, y.updatedAt);
       return byUpdated !== 0
         ? byUpdated
-        : compareAsc(x.steering.operationId, y.steering.operationId);
+        : compareAsc(x.operationId, y.operationId);
     });
 
-  const items = canonicalOrder.map(({ steering }) => {
+  const items = canonicalOrder.map(steering => {
     assertSafeIdentity('steering.steeringTaskId', steering.taskId, context);
     assertSafeIdentity('steering.targetTaskId', steering.target.taskId, context);
     assertSafeIdentity('steering.targetAttemptId', steering.target.attemptId, context);
@@ -177,8 +175,8 @@ function projectSteering(
   const priority = canonicalOrder
     .map((entry, canonicalIndex) => ({
       canonicalIndex,
-      updatedAt: entry.steering.updatedAt,
-      id: entry.steering.operationId
+      updatedAt: entry.updatedAt,
+      id: entry.operationId
     }))
     .sort((x, y) => {
       const byUpdated = compareDesc(x.updatedAt, y.updatedAt);
@@ -254,17 +252,16 @@ function projectModelConfigs(
     if (!byTask.has(value.task.id)) byTask.set(value.task.id, value);
   }
   const values = [...byTask.values()];
-  const canonicalOrder = values
-    .map((value, index) => ({ value, index }))
+  const canonicalOrder = [...values]
     .sort((x, y) => {
-      const byUpdated = compareAsc(x.value.task.updatedAt, y.value.task.updatedAt);
-      return byUpdated !== 0 ? byUpdated : compareAsc(x.value.task.id, y.value.task.id);
+      const byUpdated = compareAsc(x.task.updatedAt, y.task.updatedAt);
+      return byUpdated !== 0 ? byUpdated : compareAsc(x.task.id, y.task.id);
     });
 
   const items: ModelConfigItem[] = [];
   // 仅保留有冻结模型的条目，同时记录其在 items 内的规范序与挑选序。
   const keptCanonical: Array<{ canonicalIndex: number; updatedAt: string; id: string }> = [];
-  canonicalOrder.forEach(({ value }, canonicalIndex) => {
+  canonicalOrder.forEach(value => {
     const model = configuredModelOf(value);
     if (!model) return;
     assertSafeIdentity('modelConfigs.taskId', value.task.id, context);
