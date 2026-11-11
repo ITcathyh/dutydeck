@@ -3872,8 +3872,30 @@ export class DutydeckRuntime {
   async archive(id: string, actor?: ExecutionActor) {
     this.assertReady();
     const token = this.transition(id);
+    const running = this.attempts.get(id);
+    const ref = running && this.attemptRefs.get(running);
     await this.stopTransition(id, token, actor);
-    const session = await this.mutations.run(token, () => this.patchSession(id, { archivedAt: now() }));
+    const session = await this.mutations.run(token, async () => {
+      const attempt = ref && this.repos.execution.getTaskExecution(ref.taskId)?.currentAttempt;
+      // A verified stop ends execution, not proof of its external effects. Record
+      // the owner's abandonment of this turn while retaining its unknown result.
+      if (ref && attempt?.attemptId === ref.attemptId && attempt.state === 'reconcile_required') {
+        if (!actor) throw new RuntimeError('RECOVERY_OWNER_REQUIRED', 'Installation owner authorization is required', 403);
+        this.requireRecoveryOwner(actor);
+        if (this.recoveryInFlight(id)) throw new RuntimeError('RECOVERY_EXECUTION_ACTIVE', 'Original execution still has an in-flight owner', 409);
+        const recovery = await this.inspectExecutionRecovery(id, actor);
+        this.mutations.check(token);
+        await this.mutations.write(id, async () => {
+          const decisionId = makeId('archive');
+          this.wake(this.bound().confirmAttemptRecovery({ ...ref, expectedRevision: attempt.revision }, `archive:${decisionId}`, {
+            kind: 'manual', outcome: 'unknown', decision: { decisionId, actor, action: 'confirm_result',
+              evidenceRefs: ['session_archive_after_verified_stop'], resourceChecks: recovery.resourceChecks }
+          }));
+        });
+        await this.saveState((await this.repos.sessions.get(id))!, 'stopped');
+      }
+      return this.patchSession(id, { archivedAt: now() });
+    });
     return this.withSessionMetadata(session);
   }
   async restart(id: string, actor?: ExecutionActor) {

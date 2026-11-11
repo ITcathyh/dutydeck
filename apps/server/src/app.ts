@@ -676,8 +676,10 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
       return result ?? { ok: true };
     });
   }
-  app.post<{ Params: { id: string } }>('/api/sessions/:id/archive', async request => {
+  app.post<{ Params: { id: string }; Body: { client?: string } }>('/api/sessions/:id/archive', async request => {
+    const client = taskClient(request.body);
     const decision = await requireSessionExecution(request, request.params.id, 'session', 'run.interrupt');
+    await auditTaskClient(runtime, request.params.id, 'archive', client);
     return runtime.archive(request.params.id, decision?.source === 'owner' ? installationOwnerActor : undefined);
   });
   app.post<{ Params: { id: string; permissionId: string }; Body: { approved: boolean; reason?: string; client?: string } }>('/api/sessions/:id/permissions/:permissionId', async request => {

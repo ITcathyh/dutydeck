@@ -424,17 +424,23 @@ dutydeck schedule update schedule_xxx --session ses_xxx --at 2026-12-01T09:00   
 
 ```bash
 dutydeck task list --json --limit 50
+dutydeck task list --recent --limit 200 --json
 dutydeck task read <session-id> --json --limit 40
 dutydeck task send <session-id> --text '补充要求' --mode queue --client phone --json
 printf '%s' '补充要求' | dutydeck task send <session-id> --stdin --json
 dutydeck task interrupt <session-id> --client phone --json
+dutydeck task archive <session-id> --client rovetap --json
 dutydeck task decide <session-id> --waiting <request-id> --option allow --client phone --json
 dutydeck task decide <session-id> --waiting <request-id> --option deny --text '请换到测试目录' --json
 dutydeck task decide <session-id> --waiting <ask-id> --option <choice-value> --json
 dutydeck task decide <session-id> --waiting <ask-id> --option answer --text '自定义回答' --json
 ```
 
-`task` 的 ID 是会话 ID。`list` 默认返回最近更新的 50 个会话，`read` 默认返回最近 40 条对话；`--limit` 范围均为 1–200。`send` 的 `--text` 与 `--stdin` 必须二选一；`--mode` 为 `queue`（默认）或 `steer`，不支持插话的会话拒绝 `steer`。`interrupt` 在请求已接受但原轮次尚未确认结束时返回 `interrupting`，账本确认原轮次结束后才返回 `interrupted`，没有活动轮次时返回 `idle`。审批只接受 `allow` / `deny`，拒绝时可带说明；提问接受选项值或 `answer --text` 自由回答。
+`task` 的 ID 是会话 ID。`list` 排除已归档会话后，默认返回最近更新的最多 50 个会话；已完成或停止但未归档的会话仍会返回。`read` 默认返回最近 40 条对话，已归档会话的历史仍可按 ID 读取；`--limit` 范围均为 1–200。`send` 的 `--text` 与 `--stdin` 必须二选一；`--mode` 为 `queue`（默认）或 `steer`，不支持插话的会话拒绝 `steer`。`interrupt` 在请求已接受但原轮次尚未确认结束时返回 `interrupting`，账本确认原轮次结束后才返回 `interrupted`，没有活动轮次时返回 `idle`。审批只接受 `allow` / `deny`，拒绝时可带说明；提问接受选项值或 `answer --text` 自由回答。
+
+`list --recent` 对应 `GET /api/tasks?recent=true&limit=200`（上例），只保留未归档且可见的运行、排队、等待任务，以及最近 24 小时完成的任务，恰好 24 小时也保留；未来或无效的完成时间不计入。完成时间与 `updated_at` 取最新完成任务的 `updatedAt`，没有任务记录时用会话更新时间。先筛选再截断，运行、排队、等待任务排在已完成任务前，每组按最近更新时间排序。来源查询只针对截断后返回的任务。此模式的 `data` 为 `{"tasks":[...],"archivable":["ses_example"]}`；`archivable` 只列返回任务中有 `run.interrupt` 权限且可归档的会话，目标管理的后台步骤不提供归档入口。普通 `list` 仍只返回 `{"tasks":[...]}`，原 `actions` 枚举不变。
+
+`archive` 通过现有会话归档接口停止执行、取消排队并永久归档；成功返回 `{"archived":true}`。它要求原有 `run.interrupt` 权限，客户端名称只记审计。只有回执会话 ID 一致且含有效归档时间才算成功；5xx、断线或损坏回执返回 `unknown_outcome`，不要自动重试，重新读取核对。归档当前已提交的轮次时，安装者的终止决定只结束执行，历史结果仍保留为未知，不会改成完成；原执行资源未证实退出时拒绝归档，也不会自动处理此前已经未知的结果。归档失败时不会报告成功。
 
 `--json` 时 stdout 只输出一个 JSON 对象。成功退出码为 0，形状为 `{"ok":true,"data":...}`。以下是 `data` 的示例（可选字段在没有来源证据时省略）：
 
@@ -444,6 +450,7 @@ dutydeck task decide <session-id> --waiting <ask-id> --option answer --text '自
 {"task_id":"ses_example","accepted":true}
 {"state":"interrupted"}
 {"resolved":true}
+{"archived":true}
 ```
 
 状态为 `running|waiting|queued|done|failed|stopped|unknown`，待审批/提问优先显示 `waiting`；结果待核对显示 `unknown`。`agent` 为 `claude|codex|other`；来源为 `lark|schedule|web|trigger|other`，已知时带 `origin.url`。`waiting` 中的 `question` 选项使用 `kind=answer`，`free_text` 表示是否可自由回答。问题最多 500 字、操作原文最多 2000 字，验证摘要最多 200 字。`verification.state` 为 `passed|failed|none`，过期或没有验证证据时为 `none`。`actions` 仅列当前允许且可用的动作。对话按时间升序，角色为 `user|assistant|tool|system`；工具调用与结果合并成一条摘要，不输出 thinking；单条超过 4000 字时截断并加 `…`，截断文本或省略较早条目时 `truncated=true`。

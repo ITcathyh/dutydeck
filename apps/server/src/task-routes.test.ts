@@ -11,7 +11,7 @@ const apps: Awaited<ReturnType<typeof buildApp>>[] = [];
 afterEach(async () => { for (const app of apps.splice(0)) await app.close(); vi.useRealTimers(); });
 function runtime() {
   return { listSessions: vi.fn(async () => [session]), listAgents: vi.fn(async () => [{ id: 'mock', name: 'Mock', command: 'codex', args: [] }]), getSession: vi.fn(async () => session),
-    getTasks: vi.fn(async () => [task]), getEvents: vi.fn(async () => []), getPendingPermissions: vi.fn(() => []), getVerifications: vi.fn(async () => []),
+    getTasks: vi.fn(async (_id: string) => [task]), getEvents: vi.fn(async () => []), getPendingPermissions: vi.fn((_id: string) => []), getVerifications: vi.fn(async () => []),
     getDriver: vi.fn(() => ({})), dispatch: vi.fn(async () => task), interrupt: vi.fn(async () => ({ interrupted: true })), publishSessionEvent: vi.fn(async () => {}), recordClientAudit: vi.fn(async () => {}) };
 }
 describe('open task projections', () => {
@@ -55,6 +55,93 @@ describe('open task projections', () => {
     expect(r.getTasks).toHaveBeenCalledTimes(1);
     expect((await app.inject('/api/tasks?limit=201')).statusCode).toBe(400);
     expect((await app.inject('/api/tasks/s')).json()).toEqual({ items: [{ role: 'user', text: task.prompt, at }], truncated: false });
+  });
+  it('excludes archived sessions before applying the newest-first limit', async () => {
+    const r = runtime();
+    r.listSessions.mockResolvedValue([
+      session,
+      { ...session, id: 'archived', state: 'stopped', archivedAt: at, updatedAt: '2026-11-13T00:00:00.000Z' },
+      { ...session, id: 'stopped', state: 'stopped', updatedAt: '2026-11-12T00:00:00.000Z' },
+    ]);
+    const app = await buildApp(r as any); apps.push(app);
+    const response = await app.inject('/api/tasks?limit=1');
+    expect(response.statusCode).toBe(200);
+    expect(response.json().tasks).toMatchObject([{ id: 'stopped', status: 'stopped' }]);
+    expect(response.json().tasks).toHaveLength(1);
+    expect(r.getTasks.mock.calls).toEqual([['stopped']]);
+    expect((await app.inject('/api/tasks')).json().tasks.map((item: { id: string }) => item.id)).toEqual(['stopped', 's']);
+  });
+  it('selects current work and recent completions before the limit and enriches only selected origins', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse(at));
+    const old = '2026-11-01T00:00:00.000Z';
+    const boundary = '2026-11-10T00:00:00.000Z';
+    const states: Record<string, { status: string; updatedAt: string }[]> = {
+      running: [{ status: 'running', updatedAt: old }], queued: [{ status: 'queued', updatedAt: old }],
+      waiting: [{ status: 'running', updatedAt: old }], done: [{ status: 'completed', updatedAt: '2026-11-10T23:00:00.000Z' }],
+      boundary: [{ status: 'completed', updatedAt: boundary }], expired: [{ status: 'completed', updatedAt: '2026-11-09T23:59:59.999Z' }],
+      future: [{ status: 'completed', updatedAt: '2026-11-11T00:00:00.001Z' }], invalid: [{ status: 'completed', updatedAt: 'invalid' }],
+      failed: [{ status: 'completed', updatedAt: at }, { status: 'failed', updatedAt: at }],
+      latest: [{ status: 'completed', updatedAt: old }, { status: 'completed', updatedAt: at }], fallback: [],
+      managed: [{ status: 'queued', updatedAt: old }], denied: [{ status: 'running', updatedAt: old }]
+    };
+    const r = runtime();
+    r.listSessions.mockResolvedValue([
+      ...Array.from({ length: 205 }, (_, i) => ({ ...session, id: `history${i}`, updatedAt: at })),
+      ...Object.keys(states).map(id => ({ ...session, id, state: id === 'fallback' ? 'completed' as const : 'idle' as const,
+        updatedAt: id === 'waiting' ? '2026-11-02T00:00:00.000Z' : ['running', 'queued', 'managed', 'denied'].includes(id) ? old : at, ...(id === 'managed' ? { source: 'work_item' } : {}) })),
+      { ...session, id: 'archived', archivedAt: at }, { ...session, id: 'hidden' }
+    ]);
+    r.getTasks.mockImplementation(async id => (states[id] ?? [{ status: 'completed', updatedAt: old }]).map((record, i) => ({ ...task, id: `${id}-${i}`, ...record })));
+    r.getPendingPermissions.mockImplementation(id => id === 'waiting' ? [{ id: 'p', title: 'Approve', status: 'pending' }] as any : []);
+    const source = vi.fn(async (_session: Session) => undefined);
+    const app = Fastify();
+    registerTaskRoutes(app, r as any, { filterViewable: async (_req, sessions) => sessions.filter(s => s.id !== 'hidden'), authorize: async () => {}, can: async (_req, id) => id !== 'denied', source });
+    try {
+      const response = await app.inject('/api/tasks?recent=true&limit=200');
+      expect(response.statusCode).toBe(200);
+      const data = response.json();
+      expect(data.tasks.map((t: any) => t.id)).toEqual(['waiting', 'running', 'queued', 'managed', 'denied', 'latest', 'fallback', 'done', 'boundary']);
+      expect(data.tasks.map((t: any) => t.status)).toEqual(['waiting', 'running', 'queued', 'queued', 'running', 'done', 'done', 'done', 'done']);
+      expect(data.tasks.find((t: any) => t.id === 'boundary').updated_at).toBe(boundary);
+      expect(data.tasks.find((t: any) => t.id === 'done').updated_at).toBe(states.done![0]!.updatedAt);
+      expect(data.archivable).toEqual(['waiting', 'running', 'queued', 'latest', 'fallback', 'done', 'boundary']);
+      expect(data.tasks.find((t: any) => t.id === 'done').actions).toEqual(['send']);
+      expect(data.tasks.find((t: any) => t.id === 'managed').actions).toEqual([]);
+      expect(source.mock.calls.map(([s]) => s.id)).toEqual(data.tasks.map((t: any) => t.id));
+      expect(r.getTasks.mock.calls.flat()).not.toContain('hidden'); expect(r.getTasks.mock.calls.flat()).not.toContain('archived');
+      source.mockClear();
+      const limited = (await app.inject('/api/tasks?recent=true&limit=1')).json();
+      expect(limited.tasks.map((t: any) => t.id)).toEqual(['waiting']); expect(limited.archivable).toEqual(['waiting']); expect(source).toHaveBeenCalledOnce();
+      expect((await app.inject('/api/tasks?recent=invalid')).statusCode).toBe(400);
+    } finally { await app.close(); vi.restoreAllMocks(); }
+  });
+  it('requires archive authority before auditing or changing state and preserves the named owner', async () => {
+    const r = { ...runtime(), archive: vi.fn(async () => ({ ...session, archivedAt: at })) };
+    let allowed = false;
+    const authorize = vi.fn(async (_req, _id, _boundary, action) => ({ allowed, code: 'forbidden', reason: 'denied', action, source: 'owner' }));
+    const app = await buildApp(r as any, { executionPolicy: { authorize } }); apps.push(app);
+    const request = { method: 'POST' as const, url: '/api/sessions/s/archive', payload: { client: 'rovetap' } };
+    expect((await app.inject(request)).statusCode).toBe(403);
+    expect(r.archive).not.toHaveBeenCalled(); expect(r.recordClientAudit).not.toHaveBeenCalled();
+    allowed = true;
+    expect((await app.inject({ ...request, payload: { client: 'Bad client' } })).statusCode).toBe(400);
+    expect(r.archive).not.toHaveBeenCalled();
+    const response = await app.inject(request);
+    expect(response.statusCode).toBe(200); expect(response.json()).toMatchObject({ id: 's', archivedAt: at });
+    expect(authorize).toHaveBeenLastCalledWith(expect.anything(), 's', 'session', 'run.interrupt');
+    expect(r.recordClientAudit).toHaveBeenCalledWith('s', 'archive', 'rovetap');
+    expect(r.archive).toHaveBeenCalledWith('s', { kind: 'installation_owner', id: 'installation_owner' });
+  });
+  it('returns an empty list when every session is archived and keeps history readable', async () => {
+    const r = runtime();
+    const archived = { ...session, state: 'stopped' as const, archivedAt: at };
+    r.listSessions.mockResolvedValue([archived]); r.getSession.mockResolvedValue(archived);
+    const app = await buildApp(r as any); apps.push(app);
+    expect((await app.inject('/api/tasks')).json()).toEqual({ tasks: [] });
+    expect(r.getTasks).not.toHaveBeenCalled();
+    const history = await app.inject('/api/tasks/s');
+    expect(history.statusCode).toBe(200);
+    expect(history.json().items).toEqual([{ role: 'user', text: task.prompt, at }]);
   });
   it('never dispatches unsupported steering and records client without changing the actor', async () => {
     const r = runtime(); const app = await buildApp(r as any); apps.push(app);

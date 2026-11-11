@@ -375,17 +375,23 @@ These commands connect as the local installation owner using the same instance d
 
 ```bash
 dutydeck task list --json --limit 50
+dutydeck task list --recent --limit 200 --json
 dutydeck task read <session-id> --json --limit 40
 dutydeck task send <session-id> --text 'Additional requirements' --mode queue --client phone --json
 printf '%s' 'Additional requirements' | dutydeck task send <session-id> --stdin --json
 dutydeck task interrupt <session-id> --client phone --json
+dutydeck task archive <session-id> --client rovetap --json
 dutydeck task decide <session-id> --waiting <request-id> --option allow --client phone --json
 dutydeck task decide <session-id> --waiting <request-id> --option deny --text 'Use a test directory' --json
 dutydeck task decide <session-id> --waiting <ask-id> --option <choice-value> --json
 dutydeck task decide <session-id> --waiting <ask-id> --option answer --text 'Custom answer' --json
 ```
 
-Task IDs are session IDs. `list` returns 50 sessions by default, newest updated first; `read` returns the latest 40 conversation entries. Both accept `--limit` from 1 to 200. `send` requires exactly one of `--text` or `--stdin`. Its mode is `queue` (default) or `steer`; unsupported sessions reject steering. `interrupt` returns `interrupting` when accepted but the original turn has not yet been confirmed finished, `interrupted` only when the execution ledger confirms that turn has ended, or `idle` when there is no active turn. Approvals accept `allow` or `deny`, with optional rejection text. Questions accept a choice value or `answer --text` for free text.
+Task IDs are session IDs. `list` excludes archived sessions before returning up to 50 sessions by default, newest updated first. Completed or stopped sessions remain in the list until archived. `read` returns the latest 40 conversation entries, and archived history remains readable by session ID. Both accept `--limit` from 1 to 200. `send` requires exactly one of `--text` or `--stdin`. Its mode is `queue` (default) or `steer`; unsupported sessions reject steering. `interrupt` returns `interrupting` when accepted but the original turn has not yet been confirmed finished, `interrupted` only when the execution ledger confirms that turn has ended, or `idle` when there is no active turn. Approvals accept `allow` or `deny`, with optional rejection text. Questions accept a choice value or `answer --text` for free text.
+
+`list --recent` uses `GET /api/tasks?recent=true&limit=200` in the example above. It keeps visible, unarchived running, queued and waiting tasks, plus tasks completed within the last 24 hours, including the exact boundary. Future or invalid completion timestamps are excluded. Completion time and `updated_at` use the latest completed task’s `updatedAt`, falling back to the session update time only when no task records exist. Filtering precedes the limit; running, queued and waiting tasks come before completed tasks, newest updated first within each group. Origin enrichment reads only the selected tasks. This mode returns `data` as `{"tasks":[...],"archivable":["ses_example"]}`. `archivable` contains only returned sessions that permit `run.interrupt` and can be archived; managed background steps do not offer archival. Plain `list` still returns only `{"tasks":[...]}`, and the existing `actions` enum is unchanged.
+
+`archive` calls the existing session archive route to stop execution, cancel queued work and permanently archive the session. Success returns `{"archived":true}`. Existing `run.interrupt` authorization still applies; the client name is audit metadata only. Success requires a matching session ID and valid archive timestamp in the receipt. A 5xx, connection loss or damaged receipt returns `unknown_outcome`; never retry automatically, read again to reconcile. When archiving a currently submitted turn, the installation owner’s termination decision ends execution while preserving an unknown historical outcome, never marking it completed. Archival is refused without proven physical exit and does not automatically settle results that were already unknown before the request. A failed archive is never reported as successful.
 
 With `--json`, stdout contains exactly one JSON object. Success exits 0 and returns `{"ok":true,"data":...}`. Examples of `data` (optional fields are omitted when no source evidence exists):
 
@@ -395,6 +401,7 @@ With `--json`, stdout contains exactly one JSON object. Success exits 0 and retu
 {"task_id":"ses_example","accepted":true}
 {"state":"interrupted"}
 {"resolved":true}
+{"archived":true}
 ```
 
 Status is `running|waiting|queued|done|failed|stopped|unknown`; pending approvals/questions take precedence as `waiting`, while unreconciled results are `unknown`. Agent family is `claude|codex|other`. Origin is `lark|schedule|web|trigger|other`, with `origin.url` when known. A `question` uses options of `kind=answer`; `free_text` indicates whether arbitrary text is accepted. Prompts are limited to 500 characters, operation details to 2000 and verification summaries to 200. Verification state is `passed|failed|none`; stale or absent evidence yields `none`. Actions contain only currently available, authorized operations. Conversation entries are chronological, with roles `user|assistant|tool|system`. Tool calls and results merge into a summary; thinking is excluded. Text over 4000 characters is clipped with `…`; clipped text or omitted older entries set `truncated=true`.

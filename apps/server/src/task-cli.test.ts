@@ -10,10 +10,33 @@ function deps(responses: unknown[] = [{}]) {
 describe('open task CLI', () => {
   it('registers all commands and inherits exact runtime options', async () => {
     const task = vi.fn();
-    for (const args of [['list'], ['read', 's'], ['send', 's', '--text', 'hello'], ['interrupt', 's'], ['decide', 's', '--waiting', 'p', '--option', 'deny']]) {
+    for (const args of [['list'], ['archive', 's', '--client', 'rovetap'], ['read', 's'], ['send', 's', '--text', 'hello'], ['interrupt', 's'], ['decide', 's', '--waiting', 'p', '--option', 'deny']]) {
       await createCliProgram('test', { task }).parseAsync(['node', 'dutydeck', '--database', target.database, 'task', ...args, '--url', target.url, '--json']);
       expect(task).toHaveBeenLastCalledWith(expect.objectContaining({ action: args[0], ...target, json: true }));
     }
+  });
+  it('requests the recent projection and preserves its separate archive capabilities', async () => {
+    const task = vi.fn();
+    await createCliProgram('test', { task }).parseAsync(['node', 'dutydeck', 'task', 'list', '--recent', '--limit', '200', '--json']);
+    expect(task).toHaveBeenCalledWith(expect.objectContaining({ action: 'list', recent: true, limit: '200', json: true }));
+    const d = deps([{ tasks: [{ id: 's', actions: ['send'] }], archivable: ['s'] }]);
+    expect(await runTaskCli({ action: 'list', recent: true, limit: '200', ...target }, d)).toEqual({ tasks: [{ id: 's', actions: ['send'] }], archivable: ['s'] });
+    expect(String(d.fetcher.mock.calls[0]![0])).toBe(`${target.url}/api/tasks?recent=true&limit=200`);
+    for (const response of [{ tasks: [] }, { tasks: [], archivable: ['missing'] }, { tasks: [], archivable: [3] }]) {
+      await expect(runTaskCli({ action: 'list', recent: true, ...target }, deps([response]))).rejects.toMatchObject({ code: 'unavailable' });
+    }
+  });
+  it('archives through the existing route with an audited client and a verified receipt', async () => {
+    const d = deps([{ id: 's/a', archivedAt: '2026-11-11T00:00:00.000Z' }]);
+    expect(await runTaskCli({ action: 'archive', id: 's/a', client: 'rovetap', ...target }, d)).toEqual({ archived: true });
+    expect(String(d.fetcher.mock.calls[0]![0])).toBe(`${target.url}/api/sessions/s%2Fa/archive`);
+    expect(JSON.parse(d.fetcher.mock.calls[0]![1]!.body as string)).toEqual({ client: 'rovetap' });
+    expect(d.fetcher).toHaveBeenCalledOnce();
+  });
+  it.each([{}, { id: 'other', archivedAt: '2026-11-11T00:00:00Z' }, { id: 's' }, { id: 's', archivedAt: true }, { id: 's', archivedAt: 'now' }, { id: 's', archivedAt: '2026-02-30T00:00:00Z' }, { id: 's', archivedAt: '2026-11-11T00:00:00+99:99' }])('rejects an unconfirmed archive receipt without retrying: %j', async response => {
+    const d = deps([response]);
+    await expect(runTaskCli({ action: 'archive', id: 's', ...target }, d)).rejects.toMatchObject({ code: 'unknown_outcome', exitCode: 5 });
+    expect(d.fetcher).toHaveBeenCalledOnce();
   });
   it('passes the root database and send JSON flags to Lark send', async () => {
     const larkSend = vi.fn();
@@ -64,7 +87,7 @@ describe('open task CLI', () => {
     }
   });
 
-  it.each(['send', 'interrupt', 'decide'] as const)('treats damaged 5xx write receipts for %s as unknown', async action => {
+  it.each(['send', 'interrupt', 'decide', 'archive'] as const)('treats damaged 5xx write receipts for %s as unknown', async action => {
     for (const failure of ['html', 'body', 'unavailable', 'malformed', 'missing', 'reset']) {
       const fetcher = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
         if (init?.method === 'GET') return new Response(JSON.stringify({ kind: 'approval' }));

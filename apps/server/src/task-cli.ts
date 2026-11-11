@@ -1,8 +1,9 @@
+import { z } from 'zod';
 import { executeLocalRuntimeRequest, type LocalRuntimeRequestDependencies } from './local-runtime-request.js';
 
 export interface TaskCliInput {
-  action: 'list' | 'read' | 'send' | 'interrupt' | 'decide';
-  id?: string; limit?: string; text?: string; stdin?: boolean; mode?: string;
+  action: 'list' | 'read' | 'send' | 'interrupt' | 'decide' | 'archive';
+  id?: string; limit?: string; recent?: boolean; text?: string; stdin?: boolean; mode?: string;
   waiting?: string; option?: string; client?: string; url?: string; database?: string; json?: boolean;
 }
 export class TaskCliError extends Error {
@@ -56,8 +57,9 @@ export async function runTaskCli(input: TaskCliInput, dependencies: LocalRuntime
   };
   const base = `/api/sessions/${encodeURIComponent(input.id ?? '')}`;
   if (input.action === 'list') {
-    const data = await request('GET', `/api/tasks?limit=${limit}`) as { tasks?: unknown };
+    const data = await request('GET', `/api/tasks?${input.recent ? 'recent=true&' : ''}limit=${limit}`) as { tasks?: unknown; archivable?: unknown };
     if (!Array.isArray(data.tasks)) throw new TaskCliError('unavailable', 'The runtime returned an invalid task list');
+    if (input.recent && (!Array.isArray(data.archivable) || data.archivable.some(id => typeof id !== 'string' || !(data.tasks as Array<{ id?: unknown }>).some(task => task?.id === id)))) throw new TaskCliError('unavailable', 'The runtime returned invalid archive capabilities');
     return data;
   }
   if (input.action === 'read') {
@@ -77,6 +79,11 @@ export async function runTaskCli(input: TaskCliInput, dependencies: LocalRuntime
     const result = await request('POST', `${base}/interrupt`, { client: input.client }) as { state?: string; interrupted?: boolean };
     if (typeof result.interrupted !== 'boolean' && !['interrupting', 'interrupted', 'idle', 'stopped'].includes(result.state ?? '')) throw new TaskCliError('unknown_outcome', 'The runtime did not confirm interruption');
     return { state: result?.state === 'interrupting' ? 'interrupting' : ['interrupted', 'stopped'].includes(result?.state ?? '') ? 'interrupted' : result.interrupted === true ? 'interrupting' : 'idle' };
+  }
+  if (input.action === 'archive') {
+    const result = await request('POST', `${base}/archive`, { client: input.client }) as { id?: unknown; archivedAt?: unknown };
+    if (result.id !== input.id || typeof result.archivedAt !== 'string' || !z.string().datetime({ offset: true }).safeParse(result.archivedAt).success || !Number.isFinite(Date.parse(result.archivedAt))) throw new TaskCliError('unknown_outcome', 'The runtime did not confirm archival');
+    return { archived: true };
   }
   if (!input.waiting || !input.option) throw new TaskCliError('invalid_argument', '--waiting and --option are required');
   const waiting = await request('GET', `${base}/waiting/${encodeURIComponent(input.waiting)}`) as { kind: string; options: Array<{ id: string }>; free_text: boolean };
