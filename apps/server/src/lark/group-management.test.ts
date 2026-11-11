@@ -519,7 +519,16 @@ describe('live group configuration', () => {
     const session: Session = { id: 'relay-group', agentId: 'agent_one', cwd: dir, source: 'lark', sourceId: 'cli_one:oc_one:group:thread:om_root', state: 'thinking', runId: 'run', createdAt: time.toISOString(), updatedAt: time.toISOString() };
     await repos.sessions.save(session);
     const publish = vi.fn(async () => {});
-    const runtime = { getSession: (id: string) => repos.sessions.get(id), subscribe: () => () => {}, publishSessionEvent: publish };
+    const runtime = { getSession: (id: string) => repos.sessions.get(id), subscribe: () => () => {}, publishSessionEvent: publish,
+      captureSessionContinuation(id: string) {
+        const initial = repos.execution.getSessionScope(id);
+        return (owner?: { taskId?: string }) => {
+          const current = repos.execution.getSessionScope(id);
+          if (!initial || !current || current.runId !== initial.runId || current.archivedAt || ['stopped', 'failed'].includes(current.state)) return 'ended';
+          return owner?.taskId ? 'unknown' : 'available';
+        };
+      }
+    };
     const broker = new RelayAskBroker({ publish });
     const capabilities = new RelayCapabilityRegistry(repos.sessions, 'http://127.0.0.1', 'synthetic-secret');
     const app = await buildApp(runtime as any, {
