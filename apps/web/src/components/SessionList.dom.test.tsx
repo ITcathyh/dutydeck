@@ -475,6 +475,7 @@ describe('SessionList 上下文占用徽标', () => {
 describe('SessionList 导航分层与进行中实时任务', () => {
   const session = (id: string, state: string): Session => ({
     id,
+    name: `任务 ${id}`,
     agentId: 'codex',
     state,
     cwd: '/repo/active',
@@ -498,7 +499,7 @@ describe('SessionList 导航分层与进行中实时任务', () => {
       session('live-2', 'waiting_for_permission'),
       session('idle-1', 'idle')
     ];
-    render(<SessionList {...baseProps} open sessions={live} onSelect={onSelect} onPrimaryNavChange={() => {}}/>);
+    const { rerender } = render(<SessionList {...baseProps} open sessions={live} onSelect={onSelect} onPrimaryNavChange={() => {}}/>);
 
     const liveSection = screen.getByRole('region', { name: '进行中任务' });
     expect(within(liveSection).getByText('进行中')).toBeTruthy();
@@ -506,8 +507,17 @@ describe('SessionList 导航分层与进行中实时任务', () => {
 
     const liveButtons = within(liveSection).getAllByRole('button');
     expect(liveButtons).toHaveLength(2);
+    for (const id of ['live-1', 'live-2']) expect(screen.getAllByRole('button', { name: new RegExp(`任务 ${id}`) })).toHaveLength(1);
+    const project = screen.getByRole('button', { name: /^active/ }).closest('section')!;
+    expect(within(project).getByRole('button', { name: /任务 idle-1/ })).toBeTruthy();
+    expect(within(project).queryByRole('button', { name: /任务 live-/ })).toBeNull();
     // 需要决定的 live-2 排在正在推进的 live-1 前面
     await userEvent.click(liveButtons[0]!);
     expect(onSelect).toHaveBeenCalledWith('live-2');
+
+    rerender(<SessionList {...baseProps} open sessions={live.map(item => item.id === 'live-1' ? { ...item, state: 'idle' } : item)} onSelect={onSelect} onPrimaryNavChange={() => {}}/>);
+    expect(within(screen.getByRole('region', { name: '进行中任务' })).queryByRole('button', { name: /任务 live-1/ })).toBeNull();
+    expect(within(project).getByRole('button', { name: /任务 live-1/ })).toBeTruthy();
+    expect(screen.getAllByRole('button', { name: /任务 live-1/ })).toHaveLength(1);
   });
 });

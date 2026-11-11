@@ -257,7 +257,7 @@ describe('收件箱拒绝原因', () => {
       const submit = (reason?: string) => app.inject({ method: reject.method!, url: reject.path!, payload: reason === undefined ? reject.body : { ...reject.body, reason } });
       expect((await submit()).statusCode).toBe(200);
       expect((await submit('改用 pnpm')).statusCode).toBe(200);
-      expect(resolved).toEqual([['s1', 'p1', false, undefined], ['s1', 'p1', false, '改用 pnpm']]);
+      expect(resolved).toEqual([['s1', 'p1', false, undefined, { handledBy: 'Web' }], ['s1', 'p1', false, '改用 pnpm', { handledBy: 'Web' }]]);
       const tooLong = await submit('x'.repeat(reject.reasonMaxLength! + 1));
       expect(tooLong.statusCode).toBe(400);
       expect(tooLong.json()).toMatchObject({ error: { code: 'INVALID_PERMISSION_REASON' } });

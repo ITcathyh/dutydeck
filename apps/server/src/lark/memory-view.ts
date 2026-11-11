@@ -182,27 +182,30 @@ export function renderMemoryIndex(
     return picked;
   };
 
-  // 2. 选取规则：
-  // 主题按「该主题最新条目的 createdAt」降序排列，逐主题加入其最新 1 条
-  const topicsWithNewest = [...topicMap.entries()].map(([topic, group]) => {
-    const newest = [...group].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]!;
-    return { topic, group, newest };
-  });
-  topicsWithNewest.sort((a, b) => b.newest.createdAt.localeCompare(a.newest.createdAt));
-
   let selectedIds = new Set<string>();
   let initialPhaseOverBudget = false;
 
-  if (relevance) selectedIds = selectByRelevance();
-  else for (const item of topicsWithNewest) {
-    const trialIds = new Set(selectedIds);
-    trialIds.add(item.newest.id);
-    const trialOmitted = entries.length - trialIds.size;
-    if (formatIndexWith(trialIds, trialOmitted).length <= budget) {
-      selectedIds.add(item.newest.id);
-    } else {
-      initialPhaseOverBudget = true;
-      break;
+  if (relevance) {
+    selectedIds = selectByRelevance();
+  } else {
+    // 2. 选取规则：
+    // 主题按「该主题最新条目的 createdAt」降序排列，逐主题加入其最新 1 条
+    const topicsWithNewest = [...topicMap.entries()].map(([topic, group]) => {
+      const newest = [...group].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]!;
+      return { topic, group, newest };
+    });
+    topicsWithNewest.sort((a, b) => b.newest.createdAt.localeCompare(a.newest.createdAt));
+
+    for (const item of topicsWithNewest) {
+      const trialIds = new Set(selectedIds);
+      trialIds.add(item.newest.id);
+      const trialOmitted = entries.length - trialIds.size;
+      if (formatIndexWith(trialIds, trialOmitted).length <= budget) {
+        selectedIds.add(item.newest.id);
+      } else {
+        initialPhaseOverBudget = true;
+        break;
+      }
     }
   }
 
@@ -439,10 +442,8 @@ export class LarkMemoryProjection {
       await atomicWrite(join(dir, 'ledger.jsonl'), renderLedgerJsonl(allEntries));
 
       // 3. 写各有效主题的 markdown
-      const liveTopics = new Set<string>();
       const topicGroups = new Map<string, LarkMemoryEntry[]>();
       for (const entry of liveEntries) {
-        liveTopics.add(entry.topic);
         let group = topicGroups.get(entry.topic);
         if (!group) {
           group = [];
@@ -461,7 +462,7 @@ export class LarkMemoryProjection {
         for (const file of files) {
           if (file.endsWith('.md') && !file.endsWith('.tmp')) {
             const topic = file.slice(0, -3);
-            if (!liveTopics.has(topic)) {
+            if (!topicGroups.has(topic)) {
               await rm(join(topicsDir, file), { force: true });
             }
           }

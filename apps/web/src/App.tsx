@@ -542,7 +542,7 @@ export default function App() {
   // 有浮层占用键盘时整套快捷键停用，避免和弹窗内的按键语义打架。
   const overlayOpen = Boolean(overlay && !(overlay.kind === 'workspace' && inspectorSideBySide)) || newOpen || archiveConfirm || bulkArchiveIds.length > 0 || systemPromptOpen || paletteOpen || helpOpen || Boolean(renameSession) || (rawVisible && !rawSideBySide) || (inspectorOpen && !inspectorSideBySide);
   useEscapeKey(inspectorOpen && inspectorSideBySide && !overlayOpen, closeInspector);
-  const shortcutHandlers = useMemo(() => ({
+  const shortcutHandlers = {
     'command-palette': openPalette,
     'toggle-help': () => setHelpOpen(open => !open),
     'focus-search': openPalette,
@@ -560,15 +560,7 @@ export default function App() {
       'toggle-detail-tab': () => { setDetailTab(tab => tab === 'timeline' ? 'changes' : tab === 'changes' && isPtyCli ? 'terminal' : 'timeline'); },
       'toggle-raw-log': () => { if (rawAvailable) toggleRawPanel(); }
     } : {})
-  // openCreateTask / openSettings / openLarkSetup / act 每次渲染重建但只读最新 state，hook 内部用 ref 同步，
-  // 因此依赖数组只跟踪真正影响可用性的值。
-  //
-  // agents.data 必须在列：openCreateTask 会在「一个 Agent 都没有」时改道去设置页，而首屏
-  // agents 还没加载完。漏掉它会让这个 memo 冻住一个「看到 0 个 Agent」的过期闭包——整页
-  // 打开或刷新任务中心后按 n 永久跳到设置与接入。hook 内部同步的是这个 memo 对象本身，
-  // 救不了对象里的陈旧闭包。
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [active, agents.data, isPtyCli, rawAvailable, selectSession, toggleRawPanel, detailTab, taskViews, sidebarCollapsed, mobile, setPrimaryNav]);
+  };
   useKeyboardShortcuts(shortcutHandlers, { enabled: !overlayOpen, sessionOpen: Boolean(active) });
   /**
    * 帮助面板的可用性标注刻意不传 enabled。

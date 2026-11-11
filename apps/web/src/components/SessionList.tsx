@@ -72,6 +72,7 @@ export function SessionList({ open, collapsed = false, onToggleCollapsed, onClos
         return (b.updatedAt || b.createdAt).localeCompare(a.updatedAt || a.createdAt);
       });
   }, [sessions, summaries]);
+  const liveSessionIds = new Set(liveSessions.map(session => session.id));
 
   const workspaces = useMemo(() => {
     const groups = groupSessionsByWorkspace(sessions, view, summaries, organization);
@@ -170,7 +171,7 @@ export function SessionList({ open, collapsed = false, onToggleCollapsed, onClos
             <span className="min-w-0 flex-1 truncate text-caption font-semibold text-sidebar-text">{workspace.name}</span>
             <span className="ml-1 shrink-0 font-mono text-meta text-sidebar-text-muted">{workspace.sessions.length}</span>
           </button>
-          {(expanded || containsActive(workspace)) && <div className="ml-4 mt-0.5 border-l border-sidebar-border pl-1.5">{!expanded && <p className="px-2 text-meta text-sidebar-text-muted">当前任务</p>}{activeOutsideView && containsActive(workspace) && <p className="px-2 text-meta text-sidebar-text-muted">当前任务不在此筛选中</p>}{workspace.sessions.filter(session => (expanded || session.id === activeSessionId) && !liveSessions.some(ls => ls.id === session.id)).map(session => <SessionRow key={session.id} session={session} summary={summaries[session.id]} agent={agents.find(item => item.id === session.agentId)} botName={larkBots.find(bot => session.sourceId?.startsWith(`${bot.appId}:`))?.name} active={activeSessionId === session.id} onClick={() => { onSelect(session.id); onClose(); }}/>)}</div>}
+          {(expanded || containsActive(workspace)) && <div className="ml-4 mt-0.5 border-l border-sidebar-border pl-1.5">{!expanded && <p className="px-2 text-meta text-sidebar-text-muted">当前任务</p>}{activeOutsideView && containsActive(workspace) && <p className="px-2 text-meta text-sidebar-text-muted">当前任务不在此筛选中</p>}{workspace.sessions.filter(session => (expanded || session.id === activeSessionId) && !liveSessionIds.has(session.id)).map(session => <SessionRow key={session.id} session={session} summary={summaries[session.id]} agent={agents.find(item => item.id === session.agentId)} botName={larkBots.find(bot => session.sourceId?.startsWith(`${bot.appId}:`))?.name} active={activeSessionId === session.id} onClick={() => { onSelect(session.id); onClose(); }}/>)}</div>}
         </section>;
       })
       : <div className="rounded-lg border border-dashed border-sidebar-border px-4 py-6 text-center text-caption text-sidebar-text-muted">当前视图没有任务。</div>}</div></div>

@@ -614,7 +614,6 @@ interface PreparedCandidate {
   /** 非 null 表示该行不参与合计的会话级原因；shared/conflict 也在此标记。 */
   sessionExclusion: string | null;
   shared: boolean;
-  ownerDuplicateCount: number;
   note?: string;
   /** 合格 contributor 时的 primary 源观察。 */  primary: ReturnType<typeof primarySourceOf>;
   metricVersion: string | null;
@@ -698,7 +697,7 @@ export function buildSessionInsightSummaryResponse(options: BuildSummaryOptions)
     }
     return {
       candidate: c, workspace, usage, modelGroup, sessionExclusion, shared,
-      ownerDuplicateCount: duplicateCounts.get(c.sessionId) ?? 0, note, primary,
+      note, primary,
       metricVersion: c.snapshot && primary && sessionExclusion === null ? c.snapshot.metricVersion : null
     };
   });
@@ -719,7 +718,12 @@ export function buildSessionInsightSummaryResponse(options: BuildSummaryOptions)
   const recordVerdict = (
     sessionId: string, metricKey: keyof FileMetrics, verdict: { included: boolean; reason?: string }
   ) => {
-    attributions.set(sessionId, { ...attributions.get(sessionId), [metricKey]: verdict });
+    let sessionAttributions = attributions.get(sessionId);
+    if (!sessionAttributions) {
+      sessionAttributions = {};
+      attributions.set(sessionId, sessionAttributions);
+    }
+    sessionAttributions[metricKey] = verdict;
   };
 
   /** 单个成员对单个指标是否可合计；不可合计必须给出稳定原因码。 */
