@@ -56,6 +56,32 @@ describe('open task projections', () => {
     expect((await app.inject('/api/tasks?limit=201')).statusCode).toBe(400);
     expect((await app.inject('/api/tasks/s')).json()).toEqual({ items: [{ role: 'user', text: task.prompt, at }], truncated: false });
   });
+  it('excludes archived sessions before applying the newest-first limit', async () => {
+    const r = runtime();
+    r.listSessions.mockResolvedValue([
+      session,
+      { ...session, id: 'archived', state: 'stopped', archivedAt: at, updatedAt: '2026-11-13T00:00:00.000Z' },
+      { ...session, id: 'stopped', state: 'stopped', updatedAt: '2026-11-12T00:00:00.000Z' },
+    ]);
+    const app = await buildApp(r as any); apps.push(app);
+    const response = await app.inject('/api/tasks?limit=1');
+    expect(response.statusCode).toBe(200);
+    expect(response.json().tasks).toMatchObject([{ id: 'stopped', status: 'stopped' }]);
+    expect(response.json().tasks).toHaveLength(1);
+    expect(r.getTasks.mock.calls).toEqual([['stopped']]);
+    expect((await app.inject('/api/tasks')).json().tasks.map((item: { id: string }) => item.id)).toEqual(['stopped', 's']);
+  });
+  it('returns an empty list when every session is archived and keeps history readable', async () => {
+    const r = runtime();
+    const archived = { ...session, state: 'stopped' as const, archivedAt: at };
+    r.listSessions.mockResolvedValue([archived]); r.getSession.mockResolvedValue(archived);
+    const app = await buildApp(r as any); apps.push(app);
+    expect((await app.inject('/api/tasks')).json()).toEqual({ tasks: [] });
+    expect(r.getTasks).not.toHaveBeenCalled();
+    const history = await app.inject('/api/tasks/s');
+    expect(history.statusCode).toBe(200);
+    expect(history.json().items).toEqual([{ role: 'user', text: task.prompt, at }]);
+  });
   it('never dispatches unsupported steering and records client without changing the actor', async () => {
     const r = runtime(); const app = await buildApp(r as any); apps.push(app);
     const unsupported = await app.inject({ method: 'POST', url: '/api/sessions/s/send', payload: { prompt: 'steer', mode: 'steer', strictSteer: true, client: 'phone' } });

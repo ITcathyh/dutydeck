@@ -112,7 +112,9 @@ export function registerTaskRoutes(app: FastifyInstance, runtime: DutydeckRuntim
   app.get<{ Querystring: { limit?: string } }>('/api/tasks', async request => {
     const deadline = Date.now() + 3000;
     const limit = taskLimit(request.query.limit, 50);
-    const sessions = (await options.filterViewable(request, await runtime.listSessions())).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, limit);
+    const sessions = (await options.filterViewable(request, await runtime.listSessions()))
+      .filter(session => !session.archivedAt)
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, limit);
     const sources = await taskSources(sessions, options.source, deadline);
     const agents = await runtime.listAgents();
     const tasks = [];

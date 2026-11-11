@@ -434,7 +434,7 @@ dutydeck task decide <session-id> --waiting <ask-id> --option <choice-value> --j
 dutydeck task decide <session-id> --waiting <ask-id> --option answer --text '自定义回答' --json
 ```
 
-`task` 的 ID 是会话 ID。`list` 默认返回最近更新的 50 个会话，`read` 默认返回最近 40 条对话；`--limit` 范围均为 1–200。`send` 的 `--text` 与 `--stdin` 必须二选一；`--mode` 为 `queue`（默认）或 `steer`，不支持插话的会话拒绝 `steer`。`interrupt` 在请求已接受但原轮次尚未确认结束时返回 `interrupting`，账本确认原轮次结束后才返回 `interrupted`，没有活动轮次时返回 `idle`。审批只接受 `allow` / `deny`，拒绝时可带说明；提问接受选项值或 `answer --text` 自由回答。
+`task` 的 ID 是会话 ID。`list` 排除已归档会话后，默认返回最近更新的最多 50 个会话；已完成或停止但未归档的会话仍会返回。`read` 默认返回最近 40 条对话，已归档会话的历史仍可按 ID 读取；`--limit` 范围均为 1–200。`send` 的 `--text` 与 `--stdin` 必须二选一；`--mode` 为 `queue`（默认）或 `steer`，不支持插话的会话拒绝 `steer`。`interrupt` 在请求已接受但原轮次尚未确认结束时返回 `interrupting`，账本确认原轮次结束后才返回 `interrupted`，没有活动轮次时返回 `idle`。审批只接受 `allow` / `deny`，拒绝时可带说明；提问接受选项值或 `answer --text` 自由回答。
 
 `--json` 时 stdout 只输出一个 JSON 对象。成功退出码为 0，形状为 `{"ok":true,"data":...}`。以下是 `data` 的示例（可选字段在没有来源证据时省略）：
 
