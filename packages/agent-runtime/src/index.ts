@@ -607,10 +607,24 @@ export class DutydeckRuntime {
       if (page.length < 200) break;
       afterSequence = page.at(-1)!.sequence;
     }
+    const firstToolCall = new Map<string, number>();
+    // driverEventData 会把缺失 id 字符串化并加轮次前缀；这些事件仍必须作为分隔符。
+    const missingToolCallIds = new Set(['', 'undefined', 'null'].map(id => `turn_${digest([ref.taskId, ref.attemptId, id])}`));
+    for (const [index, event] of events.entries()) {
+      if (event.type !== 'tool_call') continue;
+      const id = (event.data as { id?: unknown }).id;
+      if (typeof id === 'string' && id && !missingToolCallIds.has(id) && !firstToolCall.has(id)) firstToolCall.set(id, index);
+    }
     let finalContent = false;
     for (let index = events.length - 1; index >= 0; index--) {
       const event = events[index]!;
-      if (['thinking', 'tool_call', 'tool_result'].includes(event.type)) break;
+      if (event.type === 'thinking' || event.type === 'tool_result') break;
+      if (event.type === 'tool_call') {
+        const data = event.data as { id?: unknown; status?: ToolCallData['status'] };
+        const first = typeof data.id === 'string' && !missingToolCallIds.has(data.id) ? firstToolCall.get(data.id) : undefined;
+        if (first === undefined || first === index || settledToolStatus(data.status)) break;
+        continue;
+      }
       if (event.type === 'text' && (event.data as { role?: string })?.role !== 'user' && eventHasContent(event.data as { text?: unknown; parts?: unknown })) finalContent = true;
     }
     const confirmation = deferredConfirmationId(events, ref.taskId);

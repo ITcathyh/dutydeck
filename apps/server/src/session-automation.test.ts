@@ -612,6 +612,34 @@ describe('SessionAutomationService schedules', () => {
     expect(await h.repositories.tasks.listBySession(h.session.id)).toHaveLength(1);
   });
 
+  it('reconciles an accepted unknown result before considering an Agent-environment dispatch error', async () => {
+    const onScheduleProblem = vi.fn(async () => {});
+    const h = await fixture({ onScheduleProblem });
+    const options = (h.service as unknown as { options: { runtime: SessionAutomationRuntime } }).options;
+    const original = options.runtime.dispatchRequest;
+    const dispatch = vi.fn(async (request: TaskRequestV1) => {
+      await original(request);
+      throw new RuntimeError('AGENT_UNAVAILABLE', 'Command not found after acceptance', 503);
+    });
+    options.runtime = { ...options.runtime, dispatchRequest: dispatch };
+    const created = await h.service.createSchedule(h.session.id, scheduleInput, 'ou_owner');
+    await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+    h.now.value = new Date('2026-09-12T00:01:01.000Z');
+    await h.service.tick();
+    const [task] = await h.repositories.tasks.listBySession(h.session.id);
+    expect((await h.service.listBySession(h.session.id)).occurrences[0]).toMatchObject({ runStatus: 'accepted', taskId: task!.id });
+
+    h.settleAttempt1UnknownThenAttempt2Completes(task!.id, undefined, false);
+    await h.service.tick();
+    expect((await h.service.listBySession(h.session.id)).occurrences[0]).toMatchObject({ runStatus: 'blocked', blockReason: 'reconcile_required', taskId: task!.id });
+    await h.service.tick();
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(await h.repositories.tasks.listBySession(h.session.id)).toHaveLength(1);
+    expect(await h.service.getScheduleDefinition(h.session.id, created.id)).toMatchObject({ enabled: true });
+    expect(await h.repositories.config.get(`session_automation/streak/${created.id}`)).toBeUndefined();
+    expect(onScheduleProblem).not.toHaveBeenCalled();
+  });
+
   it('keeps a ledger-accepted occurrence left pending when the schedule is edited before recovery', async () => {
     const h = await fixture();
     const created = await h.service.createSchedule(h.session.id, scheduleInput, 'ou_owner');

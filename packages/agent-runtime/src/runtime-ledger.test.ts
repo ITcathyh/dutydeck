@@ -410,6 +410,85 @@ describe('Runtime uses the execution ledger', () => {
     const task = await h.runtime.send(h.session.id, 'answer');
     expect(h.repos.execution.getTaskExecution(task.id)?.currentAttempt?.settlement).toMatchObject({ kind: 'driver_result', outcome: 'completed', outputDigest: createHash('sha256').update('Answer\n', 'utf8').digest('hex') });
   });
+  it.each([
+    {
+      name: 'ignores only repeated non-terminal progress for a tool that started before the final text',
+      outcome: 'completed',
+      events: [
+        { type: 'tool_call', data: { id: 'tool', name: 'read', status: 'running' } },
+        { type: 'text', data: { text: 'final answer' } },
+        { type: 'tool_call', data: { id: 'tool', name: 'read', status: 'running' } }
+      ]
+    },
+    {
+      name: 'does not promote an opening before the first tool call to a final answer',
+      outcome: 'failed',
+      events: [
+        { type: 'text', data: { text: '我先看一下' } },
+        { type: 'tool_call', data: { id: 'tool', name: 'read', status: 'running' } },
+        { type: 'tool_call', data: { id: 'tool', name: 'read', status: 'running' } }
+      ]
+    },
+    {
+      name: 'keeps a tool result as a final-output boundary',
+      outcome: 'failed',
+      events: [
+        { type: 'tool_call', data: { id: 'tool', name: 'read', status: 'running' } },
+        { type: 'text', data: { text: 'final answer' } },
+        { type: 'tool_result', data: { id: 'tool', name: 'read', status: 'completed', output: 'ok' } },
+        { type: 'tool_call', data: { id: 'tool', name: 'read', status: 'running' } }
+      ]
+    },
+    {
+      name: 'keeps tool calls without an id as final-output boundaries',
+      outcome: 'failed',
+      events: [
+        { type: 'tool_call', data: { name: 'read', status: 'running' } },
+        { type: 'text', data: { text: 'final answer' } },
+        { type: 'tool_call', data: { name: 'read', status: 'running' } }
+      ]
+    },
+    {
+      name: 'keeps a different tool id as a final-output boundary',
+      outcome: 'failed',
+      events: [
+        { type: 'tool_call', data: { id: 'first', name: 'read', status: 'running' } },
+        { type: 'text', data: { text: 'final answer' } },
+        { type: 'tool_call', data: { id: 'second', name: 'read', status: 'running' } }
+      ]
+    },
+    {
+      name: 'keeps a terminal tool call as a final-output boundary',
+      outcome: 'failed',
+      events: [
+        { type: 'tool_call', data: { id: 'tool', name: 'read', status: 'running' } },
+        { type: 'text', data: { text: 'final answer' } },
+        { type: 'tool_call', data: { id: 'tool', name: 'read', status: 'completed' } }
+      ]
+    },
+    {
+      name: 'keeps thinking as a final-output boundary',
+      outcome: 'failed',
+      events: [
+        { type: 'tool_call', data: { id: 'tool', name: 'read', status: 'running' } },
+        { type: 'text', data: { text: 'final answer' } },
+        { type: 'thinking', data: { text: 'still working' } },
+        { type: 'tool_call', data: { id: 'tool', name: 'read', status: 'running' } }
+      ]
+    }
+  ] satisfies Array<{ name: string; outcome: 'completed' | 'failed'; events: NormalizedDriverEvent[] }>)('$name', async ({ outcome, events }) => {
+    const h = await fixture({}, async emit => {
+      for (const event of events) emit(event);
+      emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+    });
+    const task = await h.runtime.send(h.session.id, 'work');
+    const attempt = h.repos.execution.getTaskExecution(task.id)!.currentAttempt!;
+    expect(task.status).toBe(outcome);
+    expect(attempt.settlement).toMatchObject({ kind: 'driver_result', outcome });
+    const originalText = events.filter(event => event.type === 'text').map(event => event.data.text).join('');
+    expect(attempt.settlement).toMatchObject({ outputDigest: createHash('sha256').update(originalText, 'utf8').digest('hex') });
+  });
+
   it('settles a non-text assistant result against its persisted parts and trusted event identity', async () => {
     const parts = [{ type: 'image', mimeType: 'image/png', data: 'YWJj' }, { type: 'resource_link', uri: 'file:///work/report.html', name: 'Report' }];
     const h = await fixture({}, async emit => {

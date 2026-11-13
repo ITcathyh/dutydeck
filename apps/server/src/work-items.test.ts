@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { agentConfigSchema, workPlanSchema, type AgentDriver, type WorkItem, type WorkPlan } from '@dutydeck/shared';
+import * as shared from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import { WorkItemService, readWorkItemStatus, workItemProgressStatus, workPlanDigest } from './work-items.js';
@@ -44,6 +45,58 @@ it.each([[800, 1], [20, 0]])('the 1s tick taking %sms logs %s slow-loop warning(
     expect(warn).toHaveBeenCalledTimes(warnings);
     if (warnings) expect(warn).toHaveBeenCalledWith(expect.objectContaining({ loop: 'work-items.tick', durationMs: tickMs }), expect.any(String));
   } finally { await service.close(); repos.close(); clock.mockRestore(); vi.useRealTimers(); await rm(directory, { recursive: true, force: true }); }
+});
+it('skips timer wrappers while a tick is running and logs only its real duration', async () => {
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+  let now = 0;
+  const clock = vi.spyOn(performance, 'now').mockImplementation(() => now);
+  const timing = vi.spyOn(shared, 'timeLoop');
+  const directory = await mkdtemp(join(tmpdir(), 'work-tick-overlap-'));
+  const repos = createRepositories(join(directory, 'timing.db'));
+  const warn = vi.fn();
+  const service = new WorkItemService({ repositories: repos, runtime: {} as DutydeckRuntime, authorize: async () => true, log: { warn } });
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const completed = { item: { id: 'slow', status: 'completed' }, actorId: 'owner' };
+  const drive = vi.fn(() => gate.then(() => completed));
+  try {
+    vi.spyOn(repos.workItems, 'listScheduledIds').mockResolvedValue(['slow']);
+    (service as unknown as { drive: typeof drive }).drive = drive;
+    service.start();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(drive).toHaveBeenCalledTimes(1);
+    const running = service.tick();
+    expect(service.tick()).toBe(running);
+    await vi.advanceTimersByTimeAsync(9000);
+    expect(drive).toHaveBeenCalledTimes(1);
+    expect(timing).toHaveBeenCalledTimes(1);
+    now = 10_000;
+    release();
+    await running;
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.objectContaining({ loop: 'work-items.tick', durationMs: 10_000 }), expect.any(String));
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(drive).toHaveBeenCalledTimes(2);
+    expect(timing).toHaveBeenCalledTimes(2);
+    expect(warn).toHaveBeenCalledTimes(1);
+  } finally {
+    release();
+    await service.close(); repos.close(); timing.mockRestore(); clock.mockRestore(); vi.useRealTimers(); await rm(directory, { recursive: true, force: true });
+  }
+});
+it('schedules another tick after the previous tick rejects', async () => {
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+  const directory = await mkdtemp(join(tmpdir(), 'work-tick-rejection-'));
+  const repos = createRepositories(join(directory, 'timing.db'));
+  const service = new WorkItemService({ repositories: repos, runtime: {} as DutydeckRuntime, authorize: async () => true });
+  try {
+    const scheduled = vi.spyOn(repos.workItems, 'listScheduledIds').mockRejectedValueOnce(new Error('injected tick failure')).mockResolvedValue([]);
+    service.start();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(scheduled).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(scheduled).toHaveBeenCalledTimes(2);
+  } finally { await service.close(); repos.close(); vi.useRealTimers(); await rm(directory, { recursive: true, force: true }); }
 });
 afterEach(async () => { while (cleanup.length) await cleanup.pop()!(); });
 async function eventually(check: () => Promise<boolean>) {
