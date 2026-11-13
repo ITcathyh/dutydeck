@@ -1,3 +1,4 @@
+import { LarkReplyPolisher, type ReplyPolish } from './lark/reply-polish.js';
 import { createRelayContinuationChecker, createRelayAskLifecycleWatcher } from './relay-routes.js';
 import { inheritedListenOptions, inheritedSocketMismatch, takeInheritedListenSocket } from './socket-activation.js';
 import { MattersService } from './matters.js';
@@ -65,7 +66,7 @@ import { createAutomationIntegration } from './automation-integration.js';
 import { CiWebhookService } from './ci-webhook.js';
 import { PullRequestService } from './pull-requests.js';
 import { CiProviderRegistry } from './ci-providers.js';
-import { prepareSkillPrompt } from './skill-delivery.js';
+import { prepareSkillPrompt, type PrepareSkillPromptResult } from './skill-delivery.js';
 import { readTokenEfficiencyPolicy } from './token-efficiency.js';
 import { assemblePrompt, isFrozenCollaborationSession, promptDigest, promptTemplateVersion } from './prompt-context.js';
 import { createRelayAskStore } from './relay-ask-store.js';
@@ -402,6 +403,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   let readCollaborationMemory: (scope: import('@dutydeck/shared').CollaborationScope) => Promise<string> = async () => '';
   let collaboration: ReturnType<typeof createCollaborationIntegration> | undefined;
   const isAutomatedTask = (taskId: string) => isAutomatedRequest(repos.execution.getAcceptedTask(taskId)?.request);
+  const polishReply: ReplyPolish = (...args) => replyPolisher.polish(...args);
   const agentTools = new LarkAgentToolsService(capabilities, repos.config, {
     env,
     groupToolsCommand: options.groupToolsCommand,
@@ -409,6 +411,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     workbenchTask: sessionId => runtime.getActiveTaskContext(sessionId),
     scheduleRequests: true,
     automatedTask: taskId => isAutomatedTask(taskId),
+    polishReply,
     finalTaskContext: async (binding, task) => resolveExplicitFinalContext(await repos.channelMappings.list(`lark-card:${binding.appId}`), binding, task),
     authorizeTool: (sessionId, action) => collaboration?.background.authorizeTool(sessionId, action) ?? Promise.resolve(),
     previewTool: (sessionId, action) => collaboration?.background.authorizeTool(sessionId, action, true) ?? Promise.resolve(),
@@ -527,7 +530,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     driverIdleTimeoutMs: config.driverIdleTimeoutMs,
     driverIdleCpuAction: config.driverIdleCpuAction,
     cleanupIntervalMs: config.cleanupIntervalMs,
-    sessionEnvironment: session => ({ ...capabilities.environmentFor(session), ...relayCapabilities.environmentFor(session.id), ...herdr.environmentFor(session.id),
+    sessionEnvironment: session => session.source === 'lark-reply-polish' ? {} : ({ ...capabilities.environmentFor(session), ...relayCapabilities.environmentFor(session.id), ...herdr.environmentFor(session.id),
       ...(session.protocol === 'pty-cli' && isFrozenCollaborationSession(session) ? { dutydeck_frozen_materials: 'true' } : {}) }),
     selectPromptPolicy: async session => {
       const parent = await workItems.parentForSession(session.id) ?? await delegations.parentForSession(session.id);
@@ -538,12 +541,17 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       const policy = await readTokenEfficiencyPolicy(repos.config);
       return { version: promptTemplateVersion(policy.mode), ...(policy.diagnosticReason ? { diagnosticReason: policy.diagnosticReason } : {}) };
     },
-    prepareTaskPrompt: pluginWiring
-      ? (session, prompt, skills, context) => prepareBoundTaskPrompt(pluginHost!, pluginWiring.hooks, session, prompt, skills, context)
-      : (session, prompt, skills, context) => prepareSkillPrompt(session.cwd, prompt, skills, context),
+    prepareTaskPrompt: async (session, prompt, skills, context) => {
+      if (session.source === 'lark-reply-polish') {
+        const prepared: PrepareSkillPromptResult = { agentPrompt: prompt, skillDeliveries: [], ...(context?.promptParts ? { promptParts: context.promptParts } : {}) };
+        return pluginWiring ? pluginWiring.hooks.beforeRun(session, prepared, context?.promptPolicyVersion) : prepared;
+      }
+      return pluginWiring ? prepareBoundTaskPrompt(pluginHost!, pluginWiring.hooks, session, prompt, skills, context)
+        : prepareSkillPrompt(session.cwd, prompt, skills, context);
+    },
     sessionPrompt: async (session, prompt, context) => {
       const version = context?.promptPolicyVersion ?? 'legacy-v1';
-      if (isFrozenCollaborationSession(session)) {
+      if (session.source === 'lark-reply-polish' || isFrozenCollaborationSession(session)) {
         const result = assemblePrompt(context?.promptParts ?? [{ kind: 'user_request', trustScope: 'user_request', content: prompt }], prompt, version);
         if (context?.promptDiagnostics?.fallbackReason && !result.diagnostics.fallbackReason) result.diagnostics.fallbackReason = context.promptDiagnostics.fallbackReason;
         return result;
@@ -578,6 +586,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     log: { warn: (...args: unknown[]) => log.warn(...args as [unknown, string]), info: (data, message) => log.info(data, message) },
     ...pluginWiring?.runtimeOptions
   });
+  const replyPolisher = new LarkReplyPolisher({ runtime, repos, log: { warn: (details, message) => log.warn(details, message) } });
   setupCleanup.push(() => runtime.shutdown());
   const workspaceOrganizationService = new WorkspaceOrganizationService({
     config: repos.config,
@@ -782,7 +791,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     })();
     return closeRun;
   };
-    collaboration = createCollaborationIntegration({ repositories: repos, runtime, groups: groupManager,
+    collaboration = createCollaborationIntegration({ polishReply, repositories: repos, runtime, groups: groupManager,
       workspaceRoot: config.databaseUrl === ':memory:' ? join(tmpdir(), 'dutydeck-decisions') : join(dirname(resolve(config.databaseUrl)), 'decisions'),
       client: bot => createLarkCardService(env, workbenchHttp.fetch, bot), configureExtensions: options.configureCollaborationExtensions,
       readMemory: scope => readCollaborationMemory(scope),
@@ -879,6 +888,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
         resourceRoot,
         fetcher: workbenchHttp.fetch,
         participation: collaboration.participation,
+        polishReply,
         usage: usageLedger,
         automation,
         scheduleRequests: { prepareDelivery: automationIntegration.prepareMessageDelivery, sendConfirmation: automationIntegration.sendScheduleRequest },

@@ -328,6 +328,20 @@ describe('settings CLI against the real bot routes', () => {
     expect((await run('bot-list')).bots).toEqual([expect.objectContaining({ appId: 'cli_a', defaultAgentId: 'codex', listening: false })]);
   });
 
+  it('round-trips default-off reply polishing settings and clears independent selection', async () => {
+    const { run } = await botRuntime();
+    expect((await run('bot-show', { appId: 'cli_a' })).bot).toMatchObject({ replyPolishEnabled: false });
+    const saved = await run('bot-set', { appId: 'cli_a', pairs: ['replyPolishAgentId=codex', 'replyPolishModel=editor-model', 'replyPolishEnabled=true', 'replyPolishTimeoutMs=120000'] });
+    expect(saved.bot).toMatchObject({ replyPolishEnabled: true, replyPolishAgentId: 'codex', replyPolishModel: 'editor-model', replyPolishTimeoutMs: 120000 });
+    const cleared = await run('bot-set', { appId: 'cli_a', pairs: ['replyPolishEnabled=false', 'replyPolishAgentId=', 'replyPolishModel='] });
+    expect(cleared.bot).toMatchObject({ replyPolishEnabled: false });
+    expect(cleared.bot).not.toHaveProperty('replyPolishAgentId');
+    expect(cleared.bot).not.toHaveProperty('replyPolishModel');
+    expect(cleared.bot).toMatchObject({ replyPolishTimeoutMs: 120000 });
+    const defaults = await run('bot-set', { appId: 'cli_a', pairs: ['replyPolishTimeoutMs=null'] });
+    expect(defaults.bot).toMatchObject({ replyPolishTimeoutMs: 60000 });
+  });
+
   it('defaults busy triage off and saves typed on/off values through the bot route', async () => {
     const { repos, run } = await botRuntime();
     expect((await run('bot-show', { appId: 'cli_a' })).bot).toMatchObject({ busyTriage: false });

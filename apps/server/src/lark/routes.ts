@@ -1,3 +1,4 @@
+import type { ReplyPolish } from './reply-polish.js';
 import { queryDispositions } from './disposition.js';
 import { unrecordedPromptUsages, promptHistory, promptVersion, promptLineDiff } from './prompt-versions.js';
 import { isAbsolute } from 'node:path';
@@ -37,6 +38,7 @@ const larkError = (reply: FastifyReply, error: unknown) => {
 };
 
 export interface LarkRoutesOptions {
+  polishReply?: ReplyPolish;
   scheduleRequests?: import('../agent-schedule-request.js').LarkScheduleRequests;
   workspaceApprovals?: import('./workflow-interactions.js').LarkWorkspaceApprovals;
   clearBotModelSettings?: (appId: string) => Promise<void>;
@@ -94,6 +96,7 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
   const listener: LarkListenerPool = options.listener ?? new LarkLongConnectionListenerPool(app.log, {
     runtime: options.runtime,
     participation: options.participation,
+    polishReply: options.polishReply,
     usage: options.usage,
     automation: options.automation,
     workbench: options.workbench,

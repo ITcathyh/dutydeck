@@ -25,8 +25,10 @@ const agentDetails: Record<string, { name: string; cli: string }> = {
   gemini: { name: 'Gemini', cli: 'gemini' }, cursor: { name: 'Cursor Agent', cli: 'cursor-agent' }, copilot: { name: 'GitHub Copilot', cli: 'copilot' }, droid: { name: 'Factory Droid', cli: 'droid' },
   'fast-agent': { name: 'fast-agent', cli: 'fast-agent-mcp' }, 'grok-build': { name: 'Grok Build', cli: 'grok' }, iflow: { name: 'iFlow', cli: 'iflow' }, kilocode: { name: 'Kilocode', cli: 'kilocode' },
   kimi: { name: 'Kimi', cli: 'kimi' }, kiro: { name: 'Kiro', cli: 'kiro-cli-chat' }, mux: { name: 'Mux', cli: 'mux' }, opencode: { name: 'OpenCode', cli: 'opencode' },
-  pool: { name: 'Poolside', cli: 'pool' }, qoder: { name: 'Qoder', cli: 'qodercli' }, qwen: { name: 'Qwen Code', cli: 'qwen' }, trae: { name: 'Trae', cli: 'traecli' }, zeroclaw: { name: 'ZeroClaw', cli: 'zeroclaw' }
+  pool: { name: 'Poolside', cli: 'pool' }, qoder: { name: 'Qoder', cli: 'qodercli' }, qwen: { name: 'Qwen Code', cli: 'qwen' }, trae: { name: 'Trae', cli: 'traecli' }, 'traex-acp': { name: 'TRAE (ACP)', cli: 'traex' }, zeroclaw: { name: 'ZeroClaw', cli: 'zeroclaw' }
 };
+
+const builtinAcpAgents = () => [...listAcpxBuiltinAgents(), { id: 'traex-acp', argv: ['traex', 'acp', 'serve'] }];
 
 const VERSION_ARGS = [['--version'], ['-V'], ['version']];
 const versionLine = (stdout: string, stderr: string) => `${stdout}\n${stderr}`.split(/\r?\n/).map(value => value.trim()).find(Boolean)?.slice(0, 100);
@@ -97,7 +99,7 @@ const scanBuiltinAgents = (env: NodeJS.ProcessEnv) => {
   const cacheKey = env.CODEX_PATH ?? '';
   const cached = scannedBuiltinAgents.get(cacheKey);
   if (cached) return cached;
-  const agents = listAcpxBuiltinAgents().flatMap(({ id, argv }) => {
+  const agents = builtinAcpAgents().flatMap(({ id, argv }) => {
     const detail = agentDetails[id];
     const command = builtinProbeCommand(id, env);
     if (!detail || !command) return [];
@@ -210,7 +212,7 @@ export function resolveDatabaseUrl(env: NodeJS.ProcessEnv = process.env): string
  */
 // A custom CLI wrapper may change local settings even for --version.
 const probesConfiguredVersion = (configured: AgentConfig) => configured.version === undefined && !(configured.protocol === 'pty-cli' && configured.adapterId);
-const configuredBuiltinIds = (ptyContributions: PtyAgentContribution[]) => new Set(['codex-acp', ...listAcpxBuiltinAgents().map(agent => agent.id), ...ptyContributions.map(agent => agent.id)]);
+const configuredBuiltinIds = (ptyContributions: PtyAgentContribution[]) => new Set(['codex-acp', ...builtinAcpAgents().map(agent => agent.id), ...ptyContributions.map(agent => agent.id)]);
 
 export function loadConfigWithDiagnostics(env: NodeJS.ProcessEnv = process.env, ptyContributions: PtyAgentContribution[] = [], pluginAgents: AgentConfig[] = []): LoadedConfig {
   const extra = parseAgentsJson(env.DUTYDECK_AGENTS_JSON);
@@ -252,7 +254,7 @@ export async function loadConfigWithDiagnosticsAsync(env: NodeJS.ProcessEnv = pr
   const builtinIds = configuredBuiltinIds(ptyContributions);
   const configured = [...pluginAgents.filter(agent => !builtinIds.has(agent.id)).map(agent => agentConfigSchema.parse(agent)), ...parseAgentsJson(env.DUTYDECK_AGENTS_JSON)];
   const commands = new Set([
-    ...listAcpxBuiltinAgents().map(({ id }) => builtinProbeCommand(id, merged)),
+    ...builtinAcpAgents().map(({ id }) => builtinProbeCommand(id, merged)),
     ...ptyContributions.map(contribution => ptyCommand(contribution, merged)).filter(command => commandExists(command)),
     ...configured.filter(agent => probesConfiguredVersion(agent) && commandExists(agent.command)).map(agent => agent.command)
   ].filter((command): command is string => Boolean(command)));

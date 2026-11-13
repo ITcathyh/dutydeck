@@ -1,3 +1,4 @@
+import type { ReplyPolish } from './reply-polish.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import '../../../../tests/support/fast-wait-for.js';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -31,7 +32,7 @@ const verificationRecord = (patch: Partial<VerificationResponse> = {}): Verifica
   beforeFingerprint: 'abcdef1234567890', afterFingerprint: 'abcdef1234567890', stale: false, ...patch
 });
 
-async function harness(options: { verificationCommand?: string; verifications?: VerificationResponse[]; fail?: boolean; interrupted?: boolean; reaction?: boolean; text?: string; p2p?: boolean; groupMention?: boolean; botOrigin?: boolean } = {}) {
+async function harness(options: { polish?: ReplyPolish; verificationCommand?: string; verifications?: VerificationResponse[]; fail?: boolean; interrupted?: boolean; reaction?: boolean; text?: string; p2p?: boolean; groupMention?: boolean; botOrigin?: boolean } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-resultcard-'));
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   let release!: () => void;
@@ -97,7 +98,7 @@ async function harness(options: { verificationCommand?: string; verifications?: 
   };
   const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
   const createCoordinator = () => new LarkMessageCoordinator(runtime, service as any, log, Math.random, 'ou_bot',
-    undefined, repos.channelMappings, async () => 'group', undefined, undefined, { store: repos.config });
+    undefined, repos.channelMappings, async () => 'group', undefined, undefined, { store: repos.config, polishReply: options.polish });
   const coordinator = createCoordinator();
   await coordinator.initializeWorkflows(config);
   cleanups.push(async () => { coordinator.stop(); release(); await runtime.shutdown(); repos.close(); await rm(cwd, { recursive: true, force: true }); });
@@ -127,6 +128,7 @@ async function harness(options: { verificationCommand?: string; verifications?: 
   const token = capabilities.environmentFor(session).dutydeck_group_tools_token!;
   const authorize = vi.fn(async () => {});
   const tools = new LarkAgentToolsService(capabilities, repos.config, {
+    polishReply: options.polish,
     authorizeTool: authorize, previewTool: authorize, clientFactory: entry => entry.appId === 'cli_parent' ? { ...service, getBotInfo: async () => ({ appName: 'Parent', openId: 'ou_parent' }) } as any : service as any,
     workbenchTask: id => runtime.getActiveTaskContext(id),
     finalTaskContext: async (binding, task) => resolveExplicitFinalContext(await repos.channelMappings.list(channel), binding, task)
@@ -965,4 +967,53 @@ it('keeps dropped out of attention and leaves the existing result body first', a
   h.release(); const saved = await h.resultCard();
   expect(h.cards.get(saved.final_message_id!).elements.some((el: any) => el.element_id === 'task_report')).toBe(false);
   expect((await h.runtime.getTasks(h.session.id))[0]?.status).toBe('completed');
+});
+
+
+it('polishes only the final result payload and keeps raw execution output', async () => {
+  const polish = vi.fn(async () => '自然的答复');
+  const h = await harness({ text: '值得注意的是，原始答复', polish });
+  h.release();
+  const saved = await h.resultCard();
+  expect(saved.final_elements?.find((element: any) => element.element_id === 'final_output')?.content).toBe('自然的答复');
+  expect(polish).toHaveBeenCalledOnce();
+  expect(JSON.stringify(await h.runtime.getEvents(h.session.id))).toContain('值得注意的是，原始答复');
+});
+
+it('freezes polished explicit publication across retries while retaining the original final record', async () => {
+  const polish = vi.fn(async () => '自然的答复');
+  const h = await harness({ polish });
+  const first = await h.sendFinal('原始答复');
+  expect(first.elements.find((element: any) => element.element_id === 'final_output')?.content).toBe('自然的答复');
+  expect(await h.sendFinal('原始答复')).toMatchObject({ messageId: first.messageId });
+  expect(polish).toHaveBeenCalledOnce();
+  h.release();
+  await h.resultCard();
+  expect(polish).toHaveBeenCalledOnce();
+});
+
+
+it('reuses the frozen ordinary wording after an unknown delivery and coordinator restart', async () => {
+  const cache = new Map<string, string>();
+  const generate = vi.fn(async () => '自然的答复');
+  const polish: ReplyPolish = async (_config, text, key, _chatId, cachedOnly) => {
+    if (cache.has(key)) return cache.get(key)!;
+    if (cachedOnly) return text;
+    const edited = await generate(); cache.set(key, edited); return edited;
+  };
+  const h = await harness({ text: '原始答复', polish });
+  const reply = h.service.reply.getMockImplementation()!;
+  h.service.reply.mockImplementationOnce(async input => {
+    await reply(input); throw new LarkServiceError('LARK_NETWORK_ERROR', 'lost final response', 502);
+  });
+  h.release();
+  await vi.waitFor(() => expect(h.log.error).toHaveBeenCalledWith(expect.anything(), '交付飞书执行结果失败，等待对账补偿'));
+  h.coordinator.stop();
+  const restarted = h.createCoordinator();
+  try { await restarted.reconcile(h.config); } finally { restarted.stop(); }
+  const saved = await h.persisted();
+  expect(saved.final_elements?.find((element: any) => element.element_id === 'final_output')?.content).toBe('自然的答复');
+  expect(resultSends(h)).toHaveLength(2);
+  expect(resultSends(h).every(input => input.elements.find((element: any) => element.element_id === 'final_output')?.content === '自然的答复')).toBe(true);
+  expect(generate).toHaveBeenCalledOnce();
 });

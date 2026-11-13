@@ -192,6 +192,7 @@ Dutydeck ships **30 built-in terminal adapters**, and ACP agents (21 in the acpx
 |---|---|:---:|
 | **Claude Code** (including gateway / custom-settings variants) | Terminal · ACP | ✅ |
 | **Codex** | Terminal (`codex`) · ACP (`codex-acp`) | ACP ✅ |
+| **TRAE** | Terminal (`traex`) · ACP (`traex-acp`) | Native policy applies |
 | **ACP agents** (Qwen Code, Factory Droid, iFlow and more, auto-detected) | ACP | ✅ |
 
 > [!WARNING]

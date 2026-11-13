@@ -255,6 +255,10 @@ Every key accepted by `dutydeck settings bot set <app-id> key=value ...` is list
 | `decisionModel` | Model that decides whether to respond in a group | Same chain, using the matching model |
 | `responseAgentId` | Agent for direct replies in groups | `memoryAgentId`, then `defaultAgentId` |
 | `responseModel` | Model for direct replies in groups | Same chain, using the matching model |
+| `replyPolishEnabled` | Polish final answer wording; requires an ACP polishing Agent | `false` |
+| `replyPolishAgentId` | Independent polishing Agent; empty string clears it | Unset |
+| `replyPolishModel` | Polishing model; empty or changing the polishing Agent uses its own default model | Unset |
+| `replyPolishTimeoutMs` | Editing deadline in positive integer milliseconds; `null` restores the default; retained while off | `60000` |
 | `executionMode` | `single` or `layered` (Leader mode: front agent + Leader + Workers; requires group tools, see [Leader mode](lark.md#leader-mode)) | `single` |
 | `leaderAgentId` | Leader Agent for Leader mode | None |
 | `workerAgentIds` | Worker Agents for Leader mode, 1 to 8 | None |

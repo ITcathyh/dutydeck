@@ -28,7 +28,7 @@ const relayIntentSchema = z.object({ target_id: z.string().min(1), sender_id: z.
 const relayRecordSchema = relayIntentSchema.extend({ status: z.enum(['pending', 'delivered']), message_id: z.string().min(1).optional(), delivery_unknown: z.boolean().optional() }).strict();
 export interface ExplicitFinalDelivery { mode: 'publish' | 'reply-agent' | 'both'; relay?: z.infer<typeof relayIntentSchema> }
 interface FinalRecord {
-  version: 1; status: 'pending' | 'failed' | 'delivered'; scope: ExplicitFinalScope; content: string; provider_uuid: string;
+  version: 1; status: 'pending' | 'failed' | 'delivered'; scope: ExplicitFinalScope; content: string; polished_content?: string; provider_uuid: string;
   delivery_mode?: ExplicitFinalDelivery['mode']; relay?: z.infer<typeof relayRecordSchema>; revision?: number;
   task_name: string; card_body?: FinalCardBody; first_attempt_at?: number; audit_rejected?: boolean; delivery_unknown?: boolean; message_id?: string; attachment_message_id?: string; elements?: Elements;
 }
@@ -85,6 +85,7 @@ async function readRecord(store: ConfigRepository, scope: ExplicitFinalScope, st
     const record = JSON.parse(saved ?? 'null') as FinalRecord | null;
     if (!record || record.version !== 1 || !['pending', 'failed', 'delivered'].includes(record.status) || JSON.stringify(record.scope) !== JSON.stringify(scope)
       || record.provider_uuid !== uuidFor(scope) || typeof record.content !== 'string' || !record.content.trim()
+      || record.polished_content !== undefined && (typeof record.polished_content !== 'string' || !record.polished_content.trim())
       || typeof record.task_name !== 'string' || (record.message_id !== undefined && (typeof record.message_id !== 'string' || !record.message_id.trim()
         || !Array.isArray(record.elements) || !record.elements.every(item => item && typeof item === 'object')))) return invalid();
     if (record.delivery_mode !== undefined && !['publish', 'reply-agent', 'both'].includes(record.delivery_mode)) return invalid();
@@ -100,7 +101,7 @@ async function readRecord(store: ConfigRepository, scope: ExplicitFinalScope, st
     }
     if (record.message_id && !record.card_body) {
       const output = record.elements?.find(item => item.element_id === 'final_output');
-      if (!output || (output.content !== record.content && !(typeof record.attachment_message_id === 'string' && record.attachment_message_id.trim()
+      if (!output || (output.content !== (record.polished_content ?? record.content) && !(typeof record.attachment_message_id === 'string' && record.attachment_message_id.trim()
         && record.elements?.some(item => item.element_id === 'result_attachment')))) return invalid();
     }
     return record;
@@ -123,7 +124,7 @@ const complete = (record: FinalRecord) => (record.delivery_mode === 'reply-agent
 const frozenIntent = (record: FinalRecord) => Boolean(record.card_body || record.delivery_mode && record.delivery_mode !== 'publish');
 const authoritative = (record: FinalRecord, state: LarkCardInput['state']) => frozenIntent(record) || (state === 'completed' && (record.status !== 'failed' || record.audit_rejected));
 const receiptFor = (record: FinalRecord): ExplicitFinalReceipt => ({ messageId: (record.message_id ?? record.relay?.message_id)!,
-  elements: record.elements ?? [{ tag: 'markdown', element_id: 'final_output', content: record.content }], attachmentMessageId: record.attachment_message_id,
+  elements: record.elements ?? [{ tag: 'markdown', element_id: 'final_output', content: record.polished_content ?? record.content }], attachmentMessageId: record.attachment_message_id,
   ...(record.delivery_mode === 'reply-agent' ? { textReceipt: true as const } : {}) });
 
 /** 仅返回至少一个指定目标已确认收到的摘要，供会话历史回看。 */
@@ -166,7 +167,7 @@ const finalInput = (record: FinalRecord) => ({
   state: 'running' as const, cardKind: 'result' as const, statusLabel: '答复已送达，执行尚未结束', readOnly: true,
   taskId: record.scope.origin_message_id, taskName: record.task_name, sessionId: record.scope.session_id, turn: record.scope.turn,
   capabilities: { canCancelQueued: false, canInterrupt: false, canRetry: false, canRefresh: false, canVerify: false },
-  elements: record.card_body?.elements ?? [{ tag: 'markdown', element_id: 'final_output', content: record.content }],
+  elements: record.card_body?.elements ?? [{ tag: 'markdown', element_id: 'final_output', content: record.polished_content ?? record.content }],
   ...(record.card_body ? { cardBody: record.card_body } : {}), idempotencyKey: record.provider_uuid
 });
 /** Confirmed body only; never PATCH execution decorations during expired recovery. */
@@ -281,12 +282,13 @@ async function deliver(store: ConfigRepository, service: LarkCardService, record
   return record;
 }
 // Caller holds the per-store/task lock, including authority/current-attempt checks.
-export async function sendExplicitFinal(store: ConfigRepository, service: LarkCardService, context: ExplicitFinalContext, content: string, beforeSend?: LarkWriteGuard, cardBody?: FinalCardBody, delivery: ExplicitFinalDelivery = { mode: 'publish' }) {
+export async function sendExplicitFinal(store: ConfigRepository, service: LarkCardService, context: ExplicitFinalContext, content: string, beforeSend?: LarkWriteGuard, cardBody?: FinalCardBody, delivery: ExplicitFinalDelivery = { mode: 'publish' }, polish?: (text: string) => Promise<string>) {
   if (delivery.mode !== 'publish') delivery = { ...delivery, relay: relayIntentSchema.parse(delivery.relay) };
   let record = await readRecord(store, context.scope, true);
   if (record && ((record.delivery_mode ?? 'publish') !== delivery.mode || JSON.stringify(record.relay && relayIntent(record.relay)) !== JSON.stringify(delivery.relay) || record.content !== content || JSON.stringify(record.card_body) !== JSON.stringify(cardBody))) throw Object.assign(new Error('本轮已提交不同的最终答复，不能覆盖。'), { code: 'FINAL_CONTENT_CONFLICT', statusCode: 409 });
   if (!record) {
     record = { version: 1, status: 'pending', scope: context.scope, content, ...(delivery.mode !== 'publish' ? { delivery_mode: delivery.mode, relay: { ...delivery.relay!, status: 'pending' as const } } : {}), ...(cardBody ? { card_body: cardBody } : {}), task_name: context.taskName, provider_uuid: uuidFor(context.scope) };
+    if (!cardBody && delivery.mode !== 'reply-agent' && polish) record.polished_content = await polish(content);
     await saveRecord(store, record);
   }
   if (record.status === 'failed' && !record.audit_rejected) {

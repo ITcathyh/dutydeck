@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { ChildProcess } from 'node:child_process';
-import { delimiter, dirname, join, resolve } from 'node:path';
+import { basename, delimiter, dirname, join, resolve } from 'node:path';
 import { accessSync, chmodSync, constants, existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { assertNativeContextRecord, createAcpRuntime, createAgentRegistry, createRuntimeStore, type AcpPermissionDecision, type AcpPermissionRequest, type AcpRuntime, type AcpRuntimeResourceScope, type AcpRuntimeHandle, type AcpRuntimeProcessEvent, type AcpRuntimeStatus, type AcpRuntimeTurn, type AcpSessionStore } from 'acpx/runtime';
@@ -136,13 +136,26 @@ export interface AcpxAgentLaunch {
   cleanup(): void;
 }
 
+function acpxAgentCommand(agent: AgentConfig): string[] {
+  // Native Traex can execute tools without requesting ACP approval. Restrict
+  // deny-all sessions natively too, including the exec wrapper for nested tools.
+  const restrictTraex = agent.permissionMode === 'deny-all' && /^(?:traex|traecli)(?:\.exe)?$/i.test(basename(agent.command))
+    && agent.args[0] === 'acp' && agent.args[1] === 'serve';
+  if (restrictTraex && agent.args.some(arg => ['-y', '--yolo', '--dangerously-bypass-approvals-and-sandbox'].includes(arg))) {
+    throw new RuntimeError('PERMISSION_MODE_UNSUPPORTED', 'Traex deny-all sessions cannot bypass native approvals and sandboxing', 422);
+  }
+  return [agent.command, ...agent.args, ...(restrictTraex ? ['-c', 'sandbox_mode="read-only"',
+    ...['exec', 'exec_command', 'apply_patch', 'spawn_agent', 'tool_search'].flatMap(tool => ['--disallowed-tool', tool])] : [])];
+}
+
 /** Prepare the ACPX boundary without persisting vendor env names or values. */
 export function prepareAcpxAgentLaunch(agent: AgentConfig, options: ({ runtimeDirectory: string } | { workspace: string }) & { sessionKey: string; forceLauncher?: boolean }): AcpxAgentLaunch {
   const { persisted, bridged } = splitAgentEnvironment(agent.env);
+  const command = acpxAgentCommand(agent);
   // Preserve the native argv of clean direct launches. Dirty environments and
   // uppercase accounts need the launcher; never mutate the daemon snapshot.
   if (!options.forceLauncher && !inheritedEnvironmentNeedsCleanup() && Object.keys(bridged).length === 0) {
-    return { command: [agent.command, ...agent.args], sessionOptions: buildAcpxSessionOptions(agent), cleanup() {} };
+    return { command, sessionOptions: buildAcpxSessionOptions(agent), cleanup() {} };
   }
   // Carry all explicit values so current scopes/accounts can survive ambient cleanup.
   const runtimeDirectory = 'workspace' in options ? privateWorkspaceDirectory(options.workspace, 'runtime-env') : options.runtimeDirectory;
@@ -157,7 +170,7 @@ export function prepareAcpxAgentLaunch(agent: AgentConfig, options: ({ runtimeDi
   writeFileSync(environmentFile, payload, { encoding: 'utf8', mode: 0o600 });
   chmodSync(environmentFile, 0o600);
   return {
-    command: [process.execPath, envLauncherPath(), agent.command, ...agent.args],
+    command: [process.execPath, envLauncherPath(), ...command],
     sessionOptions: {
       ...buildAcpxSessionOptions(agent),
       env: {
@@ -649,7 +662,7 @@ export class AcpxAdapter implements AgentDriver {
     this.assertActive();
     if (!record) return;
     if (this.launch.command[1] === envLauncherPath()
-      && JSON.stringify(record.agentArgv) === JSON.stringify([this.agent.command, ...this.agent.args])) {
+      && JSON.stringify(record.agentArgv) === JSON.stringify(acpxAgentCommand(this.agent))) {
       // ACPX would otherwise silently create a new native session on argv
       // mismatch. Keep the old context intact until the ambient environment is clean.
       throw environmentBoundaryError();
@@ -734,7 +747,7 @@ export class AcpxAdapter implements AgentDriver {
     if (!this.handle) {
       const record = await this.sessionStore.load(this.sessionKey);
       this.assertActive();
-      const wrapped = [process.execPath, envLauncherPath(), this.agent.command, ...this.agent.args];
+      const wrapped = [process.execPath, envLauncherPath(), ...acpxAgentCommand(this.agent)];
       const digest = createHash('sha256').update(JSON.stringify(splitAgentEnvironment(this.agent.env).bridged)).digest('hex');
       const savedEnv = record?.acpx?.session_options?.env;
       if (typeof savedEnv?.[bridgedAgentEnvFileKey] === 'string' && typeof savedEnv?.[bridgedAgentEnvDigestKey] === 'string'

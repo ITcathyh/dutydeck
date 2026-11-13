@@ -189,6 +189,7 @@ CI、代码平台等外部集成以插件交付。<br>
 |---|---|:---:|
 | **Claude Code**（含经网关、自定义配置的变体） | 终端 · ACP | ✅ |
 | **Codex** | 终端（`codex`）· ACP（`codex-acp`） | ACP ✅ |
+| **TRAE** | 终端（`traex`）· ACP（`traex-acp`） | 取决于原生策略 |
 | **ACP Agent**（Qwen Code、Factory Droid、iFlow 等，自动发现） | ACP | ✅ |
 
 > [!WARNING]

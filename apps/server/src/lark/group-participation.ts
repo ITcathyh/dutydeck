@@ -1,3 +1,4 @@
+import type { ReplyPolish } from './reply-polish.js';
 import { annotateDisposition, type Disposition } from './disposition.js';
 import type { ConfigRepository } from '@dutydeck/shared';
 import { larkMessageAnchor } from './message-anchor.js';
@@ -33,6 +34,7 @@ export interface GroupParticipationOptions {
   repository: CollaborationRepository;
   inboxStore?: ConfigRepository;
   decider: ParticipationDecider;
+  polishReply?: ReplyPolish;
   authorize(scope: CollaborationScope, actorId: string | undefined, action: 'observe' | 'update' | 'deliver', followup?: CollaborationFollowup): Promise<boolean>;
   readConfig(appId: string, chatId?: string): Promise<StoredLarkConfig | undefined>;
   /** 规则层要读父消息和群成员，确认卡要发卡和刷新；缺这些能力时对应规则不触发、确认卡不可用。 */
@@ -905,6 +907,9 @@ export class LarkGroupParticipation {
         generationError = error instanceof Error ? error.message.slice(0, 1000) : 'Reply generation failed';
         // 判定之后成本刚好用满：如实说明上限，「稍后重试」在调高上限或下月之前都不会成功。
         response = error instanceof RuntimeError && ['USAGE_CAP_EXCEEDED', 'USAGE_BACKGROUND_CAP_EXCEEDED'].includes(error.code) ? error.message : '这次回复生成失败，请稍后重试。';
+      }
+      if (!generationError && trigger.senderKind !== 'bot' && this.options.polishReply) {
+        response = await this.options.polishReply(config, response, actionId, scope.chatId);
       }
       await repo.updateDecision(scope, id, { status: generationError ? 'failed' : 'candidate', response });
       action = await repo.updateAction(scope, actionId, { expectedRevision: action.revision, status: 'sending' });

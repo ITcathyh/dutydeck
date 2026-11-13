@@ -1564,6 +1564,16 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           ...(turnDiff ? [turnDiff] : []),
           ...(gitStatus ? [{ tag: 'markdown', element_id: 'git_status', content: gitStatus }] : []),
           ...(terminalMention ? [{ tag: 'markdown', element_id: 'group_mention', content: terminalMention }] : [])];
+        // The task ledger remains raw. Only replace the final prose element,
+        // before the first provider attempt, and freeze it under its delivery key.
+        const polishKey = larkResultKey(task.cardMessageId ?? larkSilentResultAnchor(task.id, currentTurn));
+        const output = elements.find(element => element.element_id === 'final_output');
+        if (state === 'completed' && !explicit && !task.steered && planTask === undefined && !isBotSenderType(event.senderType)
+          && typeof output?.content === 'string' && this.workflowOptions.polishReply) {
+          // A pre-feature/disabled first attempt may already have used this UUID.
+          // On recovery, use cached polish only; never invent a new payload.
+          output.content = await this.workflowOptions.polishReply(config, output.content, polishKey, event.chatId, task.finalDeliveryFirstFailedAt !== undefined);
+        }
         const planContext = planTask !== undefined && state === 'completed' && !explicit ? context : undefined;
         if (planContext && this.workflows) {
           const planText = (elements.find(element => element.element_id === 'final_output') as { content?: unknown } | undefined)?.content;

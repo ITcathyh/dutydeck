@@ -359,10 +359,10 @@ export default function App() {
   }, [applySessionSelection]);
 
   const sortedSessions = useMemo(() => [...(sessions.data ?? [])].sort((left, right) => (right.updatedAt ?? right.createdAt).localeCompare(left.updatedAt ?? left.createdAt)), [sessions.data]);
-  // 目标步骤（work_item）与飞书会话记忆的后台提取（lark-memory）都不是用户下达的任务：
+  // 目标步骤（work_item）、飞书记忆提取（lark-memory）和文字优化都不是用户下达的任务：
   // 后者会以 .dutydeck/memory/<app>/<chat> 为工作区出现在侧栏，并以「已取消」挤进待你处理。
   // 直接打开链接仍能查看，active 取自 sortedSessions。
-  const visibleSessions = useMemo(() => sortedSessions.filter(session => session.source !== 'work_item' && session.source !== 'lark-memory'), [sortedSessions]);
+  const visibleSessions = useMemo(() => sortedSessions.filter(session => session.source !== 'work_item' && session.source !== 'lark-memory' && session.source !== 'lark-reply-polish'), [sortedSessions]);
   const active = useMemo(() => sortedSessions.find(session => session.id === activeSessionId), [sortedSessions, activeSessionId]);
   const handleSelectAttention = useCallback((id: string) => {
     const target = sortedSessions.find(session => session.id === id);

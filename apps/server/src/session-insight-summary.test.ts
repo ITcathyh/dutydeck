@@ -318,6 +318,7 @@ describe('deriveSessionUsage (design 6.1)', () => {
     });
     expect(usage).toBe('unknown');
     expect(deriveSessionUsage({ source: 'lark-memory', sourceId: 'x:groups:x' })).toBe('background');
+    expect(deriveSessionUsage({ source: 'lark-reply-polish', sourceId: 'cli_a:oc_b' })).toBe('background');
     expect(deriveSessionUsage({ source: undefined, tasks: [] })).toBe('unknown');
   });
 

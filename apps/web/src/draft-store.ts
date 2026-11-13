@@ -47,6 +47,10 @@ export type BotDraft = {
   roleScope: string;
   preInjectPrompt: string;
   adhdMode: boolean;
+  replyPolishEnabled: boolean;
+  replyPolishAgentId: string;
+  replyPolishModel: string;
+  replyPolishTimeoutSeconds: string;
   listening: boolean;
   groupToolsEnabled: boolean;
   groupToolsAllowSend: boolean;

@@ -6,6 +6,21 @@
 
 飞书任务卡默认不显示 Agent 名称。在机器人设置的「访问范围与高级设置」中开启「卡片显示 Agent 名称」后，状态右侧会显示简称角标（例如 `完成` `CCFlash`），不展示括号中的宿主细节。也可用 `dutydeck settings bot set <appId> showAgentName=true` 开启，设为 `false` 关闭。
 
+
+## 文字优化（默认关闭）
+
+在 Web「机器人管理」的默认执行设置或接入向导第二步开启「文字优化」，选择独立的优化 Agent 和模型。原 Agent 继续执行任务；最终答复发送前，再由优化 Agent 改写措辞。例如主 Agent 用 Codex，优化 Agent 可选 TRAE (ACP)（`traex-acp`），模型从该 Agent 当前可用的列表选择；留空使用优化 Agent 自己的默认模型，不沿用主 Agent 的模型。
+
+```sh
+dutydeck settings bot set cli_xxx replyPolishAgentId=traex-acp replyPolishModel=your-model-id replyPolishTimeoutMs=120000 replyPolishEnabled=true
+dutydeck settings bot set cli_xxx replyPolishEnabled=false
+dutydeck settings bot set cli_xxx replyPolishModel= # 恢复优化 Agent 默认模型
+```
+
+每份答复增加一次模型调用。等待时间由你设置，默认 60 秒；Web 输入秒数，API / CLI 用 `replyPolishTimeoutMs` 毫秒，传 `null` 恢复默认，关闭优化后保留已设时间。超时、失败、无效输出或并发名额已满时发送原文，不截断长答复。代码、链接和数字原样保留，缺失、重复或新增这些内容时退回原文；事实、否定和不确定性的保留仍依赖编辑模型遵循提示词，执行记录可核对原始答复。优化用量归到该机器人，来源为 `reply_polish`。
+
+优化作用于普通任务成功后的最终正文、Agent 提前发布的纯文字最终答复，以及群里面向真人的直接回复。过程记录、提问和审批、失败提示、待批准的计划、自定义结构化最终卡和机器人间回传保持原样。主会话保留原始输出；结果投递重试和服务重启沿用已保存的优化结果，不重复润色。默认关闭时不会启动优化 Agent。
+
 ## 1. 经典任务交互流程
 
 ```text

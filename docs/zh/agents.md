@@ -12,6 +12,10 @@ Dutydeck 默认优先用终端适配器运行本机已安装的 CLI Agent，新�
 
 Codex 终端 Agent 会从 `CODEX_HOME/config.toml` 读取 `[profiles.<name>]` 配置，并在 Web 新建任务时提供 profile 选择；选择结果只作用于新会话，未选择时沿用 Agent 默认 profile。profile 名称不会写入 Agent 的环境变量。
 
+本机安装 `traex` 后，Dutydeck 同时提供终端入口 `traex` 和「TRAE (ACP)」（`traex-acp`）。后者通过 `traex acp serve` 连接，需要支持该命令的 Traex 版本；可用于独立的文字优化 Agent，模型以该 Agent 实际返回的列表为准。两个入口沿用本机 Traex 的登录配置，选择 ACP 不会改变已有终端会话。Traex 原生策略可能自动放行工作区内的操作，因此普通 `ask` 会话不保证每个动作都触发 Dutydeck 审批。
+
+直接通过 `traex acp serve` 或 `traecli acp serve` 启动的 `deny-all` 会话还会启用原生只读沙箱，并禁用执行工具及其嵌套调用入口；带 `--yolo` 等跳过沙箱参数的配置会被拒绝。这些限制只作用于该子进程，不改全局配置；其他自定义包装命令的参数保持原样。
+
 普通 relay 提问支持用稳定 `requestId` 跨断线和服务重启查询、续等。`session ask` 将 ID 写到 stderr，可用 `--request-id` 自行指定；`session ask-result <id> --json` 只读历史，`session ask-wait <id>` 只等待原问题，不重发 prompt 或创建新轮。问题、选项、原 task/attempt 和截止时间冻结，最多 24 小时；旧无 ID 请求和原生权限的有限期限不变。只有原轮仍可继续且当前权限有效，wait 才返回答案及退出码 0；原轮已结束、被替换或结果未知时返回 3，历史答案仍不构成执行授权。历史查询会检查当前结果读取权限，续等和答题会重新核验群成员、邮箱白名单及过期的权限事实；权限查询临时失败不会永久取消问题，恢复后可用同一 ID 续等。查询可能刷新权限缓存，但不改变问题、答案或任务执行。ADHD 的结构化确认仍是点击后新轮继续，不能与普通等待互换。命令与退出码见 [CLI 文档](cli.md)。
 
 ## 1. 自定义 Agent (`DUTYDECK_AGENTS_JSON`)

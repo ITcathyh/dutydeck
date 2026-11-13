@@ -109,6 +109,7 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
         ));
       },
       deliveryStore: this.workflowOptions.store,
+      polishReply: this.workflowOptions.polishReply,
       deferredTask: (sessionId, taskId) => this.isDeferredTask(sessionId, taskId),
       authorizeFinalRelay: (scope, actorId) => this.authorizeFinalRelay(scope, actorId),
       relaunchReady: (taskId, status, turn) => this.relaunchReady(config.appId, taskId, status, turn),
