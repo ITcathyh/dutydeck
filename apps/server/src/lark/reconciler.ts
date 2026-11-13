@@ -1,3 +1,6 @@
+import { planTaskOf } from '../plan-mode.js';
+import type { ReplyPolish } from './reply-polish.js';
+import { isBotSenderType } from './card-mentions.js';
 import { explicitFinalTextReceiptReader, completeExplicitFinal, readConfirmedExplicitFinal, explicitFinalContext, hasExplicitFinal, withExplicitFinalLock } from './explicit-final.js';
 import { sleep } from '../daemon/time.js';
 import { describeLarkTaskRecovery, notifyLarkTaskRecovery, verifiedLarkRecoveryOutput } from './task-recovery.js';
@@ -94,6 +97,7 @@ export async function performLarkCardReconcile(input: {
   config: StoredLarkConfig;
   channel: string;
   deliveryStore?: ConfigRepository;
+  polishReply?: ReplyPolish;
   /** Registered confirmations own the original request, including crashes before its host marker. */
   deferredTask?(sessionId: string, taskId: string): Promise<boolean>;
   authorizeFinalRelay?: (scope: import('./explicit-final.js').ExplicitFinalScope, actorId: string) => Promise<void>;
@@ -467,6 +471,12 @@ export async function performLarkCardReconcile(input: {
             chatType: persisted.chat_type, senderOpenId: persisted.sender_open_id, senderType: persisted.sender_type }).mention;
           const decoration = !receiptOnly ? await input.terminalDecoration?.(mapping, { ...persisted, runtime_task_id: runtimeTask.id, state }, effective) : undefined;
           const resultBody = explicit ? [] : steered ? [{ tag: 'markdown', element_id: 'steer_note', content: steeringOutcomeText(steered) }] : renderLarkResultElements(verifiedOutput ? [verifiedOutput] : events);
+          const prose = resultBody.find(element => element.element_id === 'final_output');
+          if (completed && !explicit && !steered && planTaskOf(persisted.prompt) === undefined && !isBotSenderType(persisted.sender_type)
+            && typeof prose?.content === 'string' && input.polishReply) {
+            prose.content = await input.polishReply(effective, prose.content,
+              larkResultKey(cardMessageId ?? larkSilentResultAnchor(mapping.externalId, persisted.turn)), persisted.chat_id, true);
+          }
           const finalOutput = explicit || steered ? undefined : String(resultBody.find(element => element.element_id === 'final_output')?.content ?? '');
           const elements = [
             ...reportElements,

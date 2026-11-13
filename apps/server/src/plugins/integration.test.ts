@@ -59,7 +59,7 @@ describe('plugin hooks on background sessions (decision, response, memory)', () 
   // 与 readonly-decider、memory-pipeline 开的后台会话同形。
   const background = (source: string) => ({ ...session, id: source, sourceId: source === 'lark-memory' ? 'cli_a:groups:memory' : 'cli_a:oc_b', source }) as Session;
   const bound = (event: HookRegistration['event'], handle: PluginHookHandler, plugin = 'p'): HookRegistration => ({ kind: 'handler', plugin, scope: 'bot:cli_a', event, timeout: 1_000, handler: handle });
-  const sources = ['lark-decision', 'lark-response', 'lark-memory'];
+  const sources = ['lark-decision', 'lark-response', 'lark-memory', 'lark-reply-polish'];
   const prepared = () => ({ agentPrompt: 'old', skillDeliveries: [], promptParts: [{ kind: 'user_request' as const, trustScope: 'user', content: 'old' }] });
 
   it('gives bot-scoped hooks the bot of each background session; memory sessions carry no chat', async () => {
@@ -72,7 +72,8 @@ describe('plugin hooks on background sessions (decision, response, memory)', () 
     expect(seen.mock.calls.map(([input]) => [input.event, input.sessionId, input.botAppId, input.chatId])).toEqual([
       ['task.received', 'lark-decision', 'cli_a', 'oc_b'], ['task.beforeRun', 'lark-decision', 'cli_a', 'oc_b'],
       ['task.received', 'lark-response', 'cli_a', 'oc_b'], ['task.beforeRun', 'lark-response', 'cli_a', 'oc_b'],
-      ['task.received', 'lark-memory', 'cli_a', undefined], ['task.beforeRun', 'lark-memory', 'cli_a', undefined]
+      ['task.received', 'lark-memory', 'cli_a', undefined], ['task.beforeRun', 'lark-memory', 'cli_a', undefined],
+      ['task.received', 'lark-reply-polish', 'cli_a', 'oc_b'], ['task.beforeRun', 'lark-reply-polish', 'cli_a', 'oc_b']
     ]);
   });
 

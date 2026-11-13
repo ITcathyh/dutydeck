@@ -86,6 +86,7 @@ export const botFields = {
   groupToolsEnabled: 'boolean', groupToolsAllowSend: 'boolean',
   memoryEnabled: 'boolean', memoryAutoExtract: 'boolean', groupMemoryScope: ['shared', 'per-group'], claudeAutoMemory: ['inherit', 'off'], memoryAgentId: 'string', memoryModel: 'string',
   busyTriage: 'boolean', botLoopGuard: 'boolean', decisionAgentId: 'string', decisionModel: 'string', responseAgentId: 'string', responseModel: 'string',
+  replyPolishEnabled: 'boolean', replyPolishAgentId: 'string', replyPolishModel: 'string', replyPolishTimeoutMs: 'integer|null',
   executionMode: ['single', 'layered'], leaderAgentId: 'string', workerAgentIds: 'list', leaderSkill: 'string',
   structuredAskCards: 'boolean', groupCardMention: 'boolean', pushIntervalMs: 'integer', traceLimit: 'integer|null',
   hideTraceOnComplete: 'boolean', compactTrace: 'boolean', showAgentName: 'boolean', completionReactionOnly: 'boolean', silentProgress: 'boolean', adhdMode: 'boolean',

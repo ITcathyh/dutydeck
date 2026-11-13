@@ -319,6 +319,10 @@ dutydeck settings bot set cli_xxx cardActionForwarding=null 'eventHandlers=[{"id
 | `decisionModel` | 群里判断要不要接话的模型 | 同上，沿用对应模型 |
 | `responseAgentId` | 群里直接回复用的 Agent | 沿用 `memoryAgentId`，再回落 `defaultAgentId` |
 | `responseModel` | 群里直接回复用的模型 | 同上，沿用对应模型 |
+| `replyPolishEnabled` | 最终答复文字优化；开启前需选择 ACP 优化 Agent | `false` |
+| `replyPolishAgentId` | 文字优化 Agent；独立于任务 Agent，空串清除 | 未配置 |
+| `replyPolishModel` | 文字优化模型；空串或更换优化 Agent 后使用该 Agent 默认模型 | 未配置 |
+| `replyPolishTimeoutMs` | 文字优化等待时间（毫秒），正整数；`null` 恢复默认，关闭优化时保留 | `60000` |
 | `executionMode` | `single` 或 `layered`（Leader 模式：接待 + Leader + Worker；需开群工具，见[Leader 模式](lark.md#leader-mode)） | `single` |
 | `leaderAgentId` | Leader 模式的 Leader Agent | 无 |
 | `workerAgentIds` | Leader 模式的 Worker Agent，1 到 8 个 | 无 |

@@ -302,6 +302,10 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
     ...(parsed.decisionModel?.trim() ? { decisionModel: parsed.decisionModel.trim() } : {}),
     ...(parsed.responseAgentId?.trim() ? { responseAgentId: parsed.responseAgentId.trim() } : {}),
     ...(parsed.responseModel?.trim() ? { responseModel: parsed.responseModel.trim() } : {}),
+    replyPolishEnabled: parsed.replyPolishEnabled === true,
+    ...(Number.isInteger(parsed.replyPolishTimeoutMs) && parsed.replyPolishTimeoutMs! >= 1 && parsed.replyPolishTimeoutMs! <= 2_147_483_647 ? { replyPolishTimeoutMs: parsed.replyPolishTimeoutMs } : {}),
+    ...(typeof parsed.replyPolishAgentId === 'string' && parsed.replyPolishAgentId.trim() ? { replyPolishAgentId: parsed.replyPolishAgentId.trim() } : {}),
+    ...(typeof parsed.replyPolishModel === 'string' && parsed.replyPolishModel.trim() ? { replyPolishModel: parsed.replyPolishModel.trim() } : {}),
     ...(parsed.executionMode === 'layered' ? { executionMode: 'layered' as const } : {}),
     ...(parsed.leaderAgentId?.trim() ? { leaderAgentId: parsed.leaderAgentId.trim() } : {}),
     ...(normalizeAgentIds(parsed.workerAgentIds).length ? { workerAgentIds: normalizeAgentIds(parsed.workerAgentIds) } : {}),
@@ -440,6 +444,10 @@ export const publicLarkConfig = (config: StoredLarkConfig, activeAppIds: Readonl
   ...(config.decisionModel ? { decisionModel: config.decisionModel } : {}),
   ...(config.responseAgentId ? { responseAgentId: config.responseAgentId } : {}),
   ...(config.responseModel ? { responseModel: config.responseModel } : {}),
+  replyPolishEnabled: config.replyPolishEnabled === true,
+  replyPolishTimeoutMs: config.replyPolishTimeoutMs ?? 60_000,
+  ...(config.replyPolishAgentId ? { replyPolishAgentId: config.replyPolishAgentId } : {}),
+  ...(config.replyPolishModel ? { replyPolishModel: config.replyPolishModel } : {}),
   executionMode: config.executionMode === 'layered' ? 'layered' : 'single',
   ...(config.leaderAgentId ? { leaderAgentId: config.leaderAgentId } : {}),
   workerAgentIds: config.workerAgentIds ?? [],
@@ -571,6 +579,25 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   const decisionModel = input.decisionModel === undefined ? current?.decisionModel : input.decisionModel.trim() || undefined;
   const responseAgentId = input.responseAgentId === undefined ? current?.responseAgentId : input.responseAgentId.trim() || undefined;
   const responseModel = input.responseModel === undefined ? current?.responseModel : input.responseModel.trim() || undefined;
+  if (input.replyPolishEnabled !== undefined && typeof input.replyPolishEnabled !== 'boolean'
+    || input.replyPolishAgentId !== undefined && typeof input.replyPolishAgentId !== 'string'
+    || input.replyPolishModel !== undefined && typeof input.replyPolishModel !== 'string') {
+    throw new LarkServiceError('INVALID_LARK_CONFIG', '文字优化的开关须为布尔值，Agent 和模型须为字符串。', 400);
+  }
+  const replyPolishTimeoutMs = input.replyPolishTimeoutMs === null ? undefined : input.replyPolishTimeoutMs ?? current?.replyPolishTimeoutMs;
+  if (replyPolishTimeoutMs !== undefined && (!Number.isInteger(replyPolishTimeoutMs) || replyPolishTimeoutMs < 1 || replyPolishTimeoutMs > 2_147_483_647)) {
+    throw new LarkServiceError('INVALID_LARK_CONFIG', '文字优化等待时间须为正整数毫秒，且在系统计时器可表示的范围内（1–2147483647 毫秒）。', 400);
+  }
+  const replyPolishEnabled = input.replyPolishEnabled ?? current?.replyPolishEnabled ?? false;
+  const replyPolishAgentId = input.replyPolishAgentId === undefined ? current?.replyPolishAgentId : input.replyPolishAgentId.trim() || undefined;
+  const replyPolishModel = input.replyPolishModel !== undefined ? input.replyPolishModel.trim() || undefined
+    : replyPolishAgentId === current?.replyPolishAgentId ? current?.replyPolishModel : undefined;
+  if (replyPolishEnabled) {
+    if (!replyPolishAgentId) throw new LarkServiceError('INVALID_LARK_CONFIG', '开启文字优化前请选择优化 Agent。', 400);
+    const agent = await agents?.get(replyPolishAgentId);
+    if (agents && !agent) throw new LarkServiceError('INVALID_LARK_CONFIG', `Unknown polishing Agent: ${replyPolishAgentId}`, 400);
+    if (agent && agent.protocol !== 'acp') throw new LarkServiceError('INVALID_LARK_CONFIG', '文字优化需要支持只读执行的 ACP Agent，例如 TRAE (ACP)。', 400);
+  }
   const executionMode = input.executionMode ?? current?.executionMode ?? 'single';
   const leaderAgentId = input.leaderAgentId === undefined ? current?.leaderAgentId : input.leaderAgentId.trim() || undefined;
   const workerAgentIds = input.workerAgentIds === undefined ? current?.workerAgentIds ?? [] : normalizeAgentIds(input.workerAgentIds);
@@ -707,6 +734,10 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
     ...(decisionModel ? { decisionModel } : {}),
     ...(responseAgentId ? { responseAgentId } : {}),
     ...(responseModel ? { responseModel } : {}),
+    replyPolishEnabled,
+    ...(replyPolishTimeoutMs !== undefined ? { replyPolishTimeoutMs } : {}),
+    ...(replyPolishAgentId ? { replyPolishAgentId } : {}),
+    ...(replyPolishModel ? { replyPolishModel } : {}),
     ...(executionMode === 'layered' ? { executionMode } : {}),
     ...(leaderAgentId ? { leaderAgentId } : {}),
     ...(workerAgentIds.length ? { workerAgentIds } : {}),

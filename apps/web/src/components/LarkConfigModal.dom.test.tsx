@@ -1486,3 +1486,21 @@ it.each(['none', 'workspace', 'secret', 'saved-secret'] as const)('closes throug
     expect((screen.getByLabelText(draft === 'workspace' ? '默认工作区' : 'App Secret') as HTMLInputElement).value).toBe(draft === 'workspace' ? '/repo/unsaved' : 'new-secret');
   }
 });
+
+
+it('saves and resets the user-selected wording deadline from the Agent setup step', async () => {
+  const user = userEvent.setup();
+  const saved = collection({ fullTrustConfirmed: true, defaultAgentId: 'codex', replyPolishEnabled: true, replyPolishAgentId: 'claude', replyPolishTimeoutMs: 90000 });
+  const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(saved);
+  renderModal(saved);
+  await user.click(await screen.findByRole('button', { name: /选择 Agent 并启用/ }));
+  const input = await screen.findByLabelText('优化等待时间（秒）');
+  expect((input as HTMLInputElement).value).toBe('90');
+  await user.clear(input);
+  await typeInto(user, input, '120');
+  await user.click(screen.getByRole('button', { name: '完成配置' }));
+  await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ replyPolishTimeoutMs: 120000 })));
+  await user.clear(input);
+  await user.click(screen.getByRole('button', { name: '完成配置' }));
+  await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ replyPolishTimeoutMs: null })));
+});

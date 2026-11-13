@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { useState } from 'react';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { agentModelSettingsApi, api, ApiError, type Agent, type LarkBotConfig, type LarkConfig, type ManagedGroup } from '../api';
@@ -178,6 +178,27 @@ describe('BotManagement component', () => {
         })
       );
     });
+  });
+
+  it('文字优化默认关闭，保存独立 Agent 和模型并保留主模型', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [mockBot], listeningDisabled: false });
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    const saved = { ...mockBot, revision: 4, replyPolishEnabled: true, replyPolishAgentId: 'editor', replyPolishModel: 'editor-model', replyPolishTimeoutMs: 120000 };
+    const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue({ configured: true, bots: [saved], listeningDisabled: false });
+    renderWithClient(<BotManagement selectedAppId={mockBot.appId} onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={[...mockAgents, { id: 'editor', name: 'Editor', protocol: 'acp', permissionMode: 'ask' }, { id: 'terminal', name: 'Terminal', protocol: 'pty-cli', permissionMode: 'full-trust' }]}/>);
+    const toggle = await screen.findByRole('switch', { name: '文字优化' });
+    expect((toggle as HTMLInputElement).checked).toBe(false);
+    await user.click(toggle);
+    expect(within(screen.getByLabelText('优化 Agent')).queryByRole('option', { name: 'Terminal' })).toBeNull();
+    await user.selectOptions(screen.getByLabelText('优化 Agent'), 'editor');
+    await typeInto(user, screen.getByLabelText('优化模型'), 'editor-model');
+    expect((screen.getByLabelText('优化等待时间（秒）') as HTMLInputElement).value).toBe('60');
+    await user.clear(screen.getByLabelText('优化等待时间（秒）'));
+    await typeInto(user, screen.getByLabelText('优化等待时间（秒）'), '120');
+    await user.click(screen.getByRole('button', { name: '保存配置' }));
+    await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ defaultModel: mockBot.defaultModel, replyPolishEnabled: true, replyPolishAgentId: 'editor', replyPolishModel: 'editor-model', replyPolishTimeoutMs: 120000 })));
   });
 
   it('保存发生 409 冲突时展示冲突提示并保留草稿', async () => {

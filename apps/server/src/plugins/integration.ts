@@ -24,8 +24,8 @@ import { scopeApplies } from './scope.js';
 /** 触发器开的会话：sourceId 为 `<appId>:<chatId>:plugin:<插件>:<触发器>`。 */
 export const PLUGIN_TRIGGER_SOURCE = 'plugin_trigger';
 
-/** 群协作判定、回复生成、记忆整理三类后台会话：hook 照常运行，但只能拒绝，不能改写 prompt，也不能代为批准工具调用。 */
-const backgroundSources = new Set(['lark-decision', 'lark-response', 'lark-memory']);
+/** 群协作判定、回复生成、记忆整理与文字优化后台会话：hook 照常运行，但只能拒绝，不能改写 prompt，也不能代为批准工具调用。 */
+const backgroundSources = new Set(['lark-decision', 'lark-response', 'lark-memory', 'lark-reply-polish']);
 
 export function sessionHookContext(session: Pick<Session, 'id' | 'cwd' | 'source' | 'sourceId'>) {
   const appId = botAppIdOfSession(session);

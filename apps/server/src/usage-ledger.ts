@@ -196,6 +196,7 @@ export function usageScopeOf(session: Pick<Session, 'source' | 'sourceId'>): { a
   const { appId, chatId, chatType: kind } = parseLarkSourceId(session.sourceId);
   if (!appId || !chatId) return {};
   if (session.source === 'lark') return { appId, chatId, chatType: kind };
+  if (session.source === 'lark-reply-polish') return { appId, chatId };
   if (session.source === 'lark-decision' || session.source === 'lark-response') return { appId, chatId, chatType: 'group' };
   // 记忆会话按池划分：群聊共用 groups 池，按群独立的池归到那个群，私聊一人一池（池名即会话 id）。
   if (session.source === 'lark-memory') {
@@ -211,6 +212,7 @@ export function classifyUsage(session: Pick<Session, 'source' | 'sourceId'>, req
   if (request?.namespace === 'schedule') return { category: 'scheduled', origin: parseLarkSourceId(session.sourceId).scope[0] === 'collaboration' ? 'mandate' : 'schedule' };
   if (request?.namespace === 'automation') return { category: 'scheduled', origin: 'ci' };
   if (session.source === 'lark-decision') return { category: 'background', origin: 'decision' };
+  if (session.source === 'lark-reply-polish') return { category: 'background', origin: 'reply_polish' };
   if (session.source === 'lark-response') return { category: 'background', origin: 'response' };
   if (session.source === 'lark-memory') return { category: 'background', origin: 'memory' };
   if (session.source === 'work_item') return { category: 'background', origin: 'work_item' };

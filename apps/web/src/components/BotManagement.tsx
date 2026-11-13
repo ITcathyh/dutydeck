@@ -1,3 +1,4 @@
+import { ReplyPolishSettings, replyPolishTimeoutValue } from './ReplyPolishSettings';
 import { InboxDispositions } from './InboxDispositions';
 import { botDetailFields, focusSettingField } from '../settings-search';
 import { AgentModelSettings } from './AgentModelSettings';
@@ -65,6 +66,10 @@ function initialDraft(bot: LarkBotConfig): BotDraft {
     roleScope: bot.roleScope ?? '',
     preInjectPrompt: bot.preInjectPrompt ?? '',
     adhdMode: bot.adhdMode ?? false,
+    replyPolishEnabled: bot.replyPolishEnabled ?? false,
+    replyPolishAgentId: bot.replyPolishAgentId ?? '',
+    replyPolishModel: bot.replyPolishModel ?? '',
+    replyPolishTimeoutSeconds: String((bot.replyPolishTimeoutMs ?? 60_000) / 1000),
     listening: bot.listening ?? true,
     groupToolsEnabled: bot.groupToolsEnabled ?? false,
     groupToolsAllowSend: bot.groupToolsAllowSend ?? false,
@@ -281,6 +286,10 @@ export function BotManagement({
       roleScope: draft.roleScope,
       preInjectPrompt: draft.preInjectPrompt,
       adhdMode: draft.adhdMode,
+      replyPolishEnabled: draft.replyPolishEnabled,
+      replyPolishAgentId: draft.replyPolishAgentId,
+      replyPolishModel: draft.replyPolishModel,
+      replyPolishTimeoutMs: replyPolishTimeoutValue(draft.replyPolishTimeoutSeconds),
       listening: draft.listening,
       groupToolsEnabled: draft.groupToolsEnabled,
       groupToolsAllowSend: draft.groupToolsAllowSend,
@@ -881,6 +890,8 @@ export function BotManagement({
                     回复第一行就给结论或要你做的事，多步骤编号，列表不超过 5 项，结尾只留一个下一步，不写开场白和客套话。规则改编自 i-have-adhd，保存后从下一轮任务开始生效。
                   </p>
                 </div>
+
+                <ReplyPolishSettings appId={activeAppId} agents={agents} value={currentDraft} onChange={updateCurrentDraft}/>
 
                 <div className="space-y-3 border-t border-subtle pt-4">
                   <h4 className="text-caption font-semibold text-primary">会话记忆</h4>

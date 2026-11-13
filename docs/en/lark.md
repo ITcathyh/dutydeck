@@ -6,6 +6,21 @@ Ordinary relay questions with a stable requestId keep their original card usable
 
 Lark task cards hide the Agent name by default. Enable the Agent name switch under the bot’s access and advanced settings to show a short name badge after the status (for example, `Completed` `CCFlash`), without parenthesized host details. You can also enable it with `dutydeck settings bot set <appId> showAgentName=true`, or set it to `false` to hide it.
 
+
+## Reply wording polish (off by default)
+
+Enable **文字优化** in the bot's default execution settings or step two of its setup wizard, then select an independent polishing Agent and model. The primary Agent runs the task; the polishing Agent edits the final wording before delivery. For example, keep Codex for execution and select TRAE (ACP), `traex-acp`, for editing. Choose a model currently available to that Agent. An empty model uses the editor's own default, never the primary bot model.
+
+```sh
+dutydeck settings bot set cli_xxx replyPolishAgentId=traex-acp replyPolishModel=your-model-id replyPolishTimeoutMs=120000 replyPolishEnabled=true
+dutydeck settings bot set cli_xxx replyPolishEnabled=false
+dutydeck settings bot set cli_xxx replyPolishModel= # Restore the editor default
+```
+
+Each answer adds one model call. You choose the waiting time; the default is 60 seconds. The Web field uses seconds and API / CLI `replyPolishTimeoutMs` uses milliseconds; `null` restores the default. Disabling polishing preserves the saved deadline. Timeouts, failures, invalid output and occupied concurrency slots fall back to the original. Long answers are sent without truncation. Code, links and numbers are preserved verbatim; missing, duplicated or newly introduced material rejects the edit. Preserving facts, negation and uncertainty still relies on the editing model following its instructions; execution history retains the original answer for comparison. Usage belongs to this bot with origin `reply_polish`.
+
+This applies to the final prose of successful ordinary tasks, early plain-text final publications, and direct group replies to humans. Progress, questions, approvals, failures, plans awaiting approval, custom structured final cards and bot-to-bot relays keep their original content. The primary session retains its raw output. Delivery retries and restarts reuse saved wording without another editing call. When off, no polishing Agent is started.
+
 ## 1. Task lifecycle
 
 1. **Dispatch**: DM the bot, or `@bot task` in a group.

@@ -1,3 +1,4 @@
+import type { ReplyPolish } from './reply-polish.js';
 import { normalizeCardCallback } from './card-action-forwarding.js';
 import { runLarkEventPipeline } from './event-pipeline.js';
 import type { LarkAgentCommandHandler, LarkAgentCommands } from './agent-command.js';
@@ -190,6 +191,7 @@ export interface LarkLongConnectionListenerOptions {
   usage?: import('../usage-ledger.js').UsageLedger;
   automation?: SessionAutomationService;
   workbench?: import('./workbench.js').LarkWorkbench;
+  polishReply?: ReplyPolish;
   workflowStore?: ConfigRepository;
   resourceRoot?: string;
   relayBroker?: RelayAskBroker;
@@ -322,7 +324,7 @@ export class LarkLongConnectionListener implements LarkListener {
       chatModeResolver,
       this.options.executionPolicy,
       this.options.groupManager,
-      { store: this.options.workflowStore, resourceRoot: this.options.resourceRoot, broker: this.options.relayBroker, automation: this.options.automation, workbench: this.options.workbench, memory: this.options.memory, participation: this.options.participation, usage: this.options.usage, loginLinks: this.options.loginLinks, saveBotConfig: this.options.saveBotConfig, scheduleRequests: this.options.scheduleRequests,
+      { store: this.options.workflowStore, polishReply: this.options.polishReply, resourceRoot: this.options.resourceRoot, broker: this.options.relayBroker, automation: this.options.automation, workbench: this.options.workbench, memory: this.options.memory, participation: this.options.participation, usage: this.options.usage, loginLinks: this.options.loginLinks, saveBotConfig: this.options.saveBotConfig, scheduleRequests: this.options.scheduleRequests,
         workspaceApprovals: this.options.workspaceApprovals, deferredCloseMs: this.options.deferredCloseMs },
     ) : undefined;
     this.coordinator = coordinator;

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import type { Session, TaskRequestV1 } from '@dutydeck/shared';
-import { classifyUsage, cumulativeDelta, defaultUsagePricing, estimateCostUsd, measureUsage, parseUsagePricing, resolveUsageRange, UsageLedger, withExtraPricing, type UsageLedgerOptions } from './usage-ledger.js';
+import { classifyUsage, usageScopeOf, cumulativeDelta, defaultUsagePricing, estimateCostUsd, measureUsage, parseUsagePricing, resolveUsageRange, UsageLedger, withExtraPricing, type UsageLedgerOptions } from './usage-ledger.js';
 
 const at = '2026-09-25T00:00:00.000Z';
 const session = (id: string, source: string | undefined, sourceId?: string, agentId = 'claude'): Session => ({ id, agentId, state: 'idle', cwd: '/tmp', source, sourceId, runId: `run_${id}`, createdAt: at, updatedAt: at } as Session);
@@ -206,6 +206,8 @@ describe('usage classification', () => {
     expect(classifyUsage(session('m', 'lark', 'cli_a:oc_1:group:collaboration:mandate_1'), request({ namespace: 'schedule' }), false)).toEqual({ category: 'scheduled', origin: 'mandate' });
     expect(classifyUsage(group, request({ namespace: 'automation' }), false)).toEqual({ category: 'scheduled', origin: 'ci' });
     expect(classifyUsage(session('d', 'lark-decision', 'cli_a:oc_1'), request({}), false)).toEqual({ category: 'background', origin: 'decision' });
+    expect(usageScopeOf(session('polish', 'lark-reply-polish', 'cli_a:oc_1'))).toEqual({ appId: 'cli_a', chatId: 'oc_1' });
+    expect(classifyUsage(session('polish', 'lark-reply-polish', 'cli_a:oc_1'), request({}), false)).toEqual({ category: 'background', origin: 'reply_polish' });
     expect(classifyUsage(session('r', 'lark-response', 'cli_a:oc_1'), request({}), false)).toEqual({ category: 'background', origin: 'response' });
     expect(classifyUsage(session('mem', 'lark-memory', 'cli_a:groups:memory'), request({}), false)).toEqual({ category: 'background', origin: 'memory' });
   });

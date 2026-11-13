@@ -123,6 +123,12 @@ export interface StoredLarkConfig {
   /** 群回复独立选型；缺省沿用 memory，再回落 default。 */
   responseAgentId?: string;
   responseModel?: string;
+  /** Optional final-answer wording pass; absent/false preserves the original. */
+  replyPolishEnabled?: boolean;
+  replyPolishAgentId?: string;
+  replyPolishModel?: string;
+  /** Editing deadline in milliseconds; absent uses 60 seconds. */
+  replyPolishTimeoutMs?: number;
   /** 执行方式，缺省 single；layered 时默认 Agent 当 PMO，把执行类任务交给 Leader 拆解、Worker 执行。 */
   executionMode?: 'single' | 'layered';
   /** layered 下负责拆解与验收的 Agent。 */
@@ -189,12 +195,12 @@ export interface StoredLarkConfig {
 }
 
 /** 保存时可传 null 清回默认值的字段。 */
-type LarkConfigClearableFields = 'groupReplyMode' | 'urgentThresholdMs' | 'urgentMaxPerHourPerChat' | 'pinAfterMs' | 'traceLimit';
+type LarkConfigClearableFields = 'groupReplyMode' | 'urgentThresholdMs' | 'urgentMaxPerHourPerChat' | 'pinAfterMs' | 'traceLimit' | 'replyPolishTimeoutMs';
 
 /**
  * 保存请求体：字段与 StoredLarkConfig 同名同型，未提供时保留原值；以下是与存储形态不同的部分。
  * groupReplyMode 传 null 恢复自动选择；urgentThresholdMs（≥ 60000）、urgentMaxPerHourPerChat（≥ 1 的整数）、
- * pinAfterMs（≥ 1000）、traceLimit 传 null 清回模块默认。字符串字段归一化时 trim，空白串视为清除或未配置。
+ * pinAfterMs（≥ 1000）、traceLimit、replyPolishTimeoutMs 传 null 清回模块默认。字符串字段归一化时 trim，空白串视为清除或未配置。
  */
 export interface SaveLarkConfigInput extends Partial<Omit<StoredLarkConfig, 'eventHandlers' | 'eventHandlersError' | 'cardActionForwarding' | 'cardActionForwardingError' | 'revision' | 'managedGroup' | 'webMobileReachable' | LarkConfigClearableFields>> {
   eventHandlers?: Array<Omit<LarkEventHandler, 'token'> & { token?: string }> | null;
@@ -209,6 +215,7 @@ export interface SaveLarkConfigInput extends Partial<Omit<StoredLarkConfig, 'eve
   urgentMaxPerHourPerChat?: number | null;
   pinAfterMs?: number | null;
   traceLimit?: number | null;
+  replyPolishTimeoutMs?: number | null;
   allowedBotNames?: string[];
   /** @deprecated Compatibility-only input for clients predating riskControlMode. */
   gateEnabled?: boolean;
@@ -273,6 +280,12 @@ export interface PublicLarkConfig {
   botLoopGuard: boolean;
   responseAgentId?: string;
   responseModel?: string;
+  /** Optional final-answer wording pass; absent/false preserves the original. */
+  replyPolishEnabled?: boolean;
+  replyPolishAgentId?: string;
+  replyPolishModel?: string;
+  /** Editing deadline in milliseconds; absent uses 60 seconds. */
+  replyPolishTimeoutMs?: number;
   executionMode: NonNullable<StoredLarkConfig['executionMode']>;
   leaderAgentId?: string;
   workerAgentIds: string[];

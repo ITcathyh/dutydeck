@@ -420,7 +420,7 @@ export interface SessionUsageEvidence {
 }
 
 const BACKGROUND_ONLY_SOURCES = new Set([
-  'lark-decision', 'lark-response', 'lark-memory', 'work_item', 'lark-leader'
+  'lark-decision', 'lark-response', 'lark-memory', 'lark-reply-polish', 'work_item', 'lark-leader'
 ]);
 
 /**

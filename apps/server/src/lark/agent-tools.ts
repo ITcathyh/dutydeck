@@ -1,3 +1,4 @@
+import type { ReplyPolish } from './reply-polish.js';
 import { OrdinarySendError, sendOrdinaryMessage } from './ordinary-send.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { clock } from './group-task-context.js';
@@ -189,6 +190,7 @@ export interface LarkGroupToolClient {
 }
 
 export interface LarkAgentToolsOptions {
+  polishReply?: ReplyPolish;
   authorizeTool?: (sessionId: string, action: 'group_tools.read' | 'group_tools.discover' | 'group_tools.send' | 'memory') => Promise<{ actorId: string } | void>;
   /** Local previews must not request external grants or mutate authorization state. */
   previewTool?: LarkAgentToolsOptions['authorizeTool'];
@@ -1237,7 +1239,7 @@ export class LarkAgentToolsService {
           const stillActive = this.options.workbenchTask?.(fresh.sessionId);
           if (stillActive?.taskId !== active.taskId || stillActive.attemptId !== active.attemptId) throw new AgentGroupToolError('FINAL_TURN_EXPIRED', '任务轮次已结束。', 403);
         };
-        return this.authorized(current, scope.reply_message_id ? 'reply' : 'send', () => sendExplicitFinal(this.configs, current.client as LarkCardService, target, content, beforeSend, cardBody, delivery));
+        return this.authorized(current, scope.reply_message_id ? 'reply' : 'send', () => sendExplicitFinal(this.configs, current.client as LarkCardService, target, content, beforeSend, cardBody, delivery, this.options.polishReply && (text => this.options.polishReply!(current.config, text, `explicit:${task.taskId}:${task.attemptId}`, current.chatId))));
       });
     }
     if (content.length > 20_000) throw new AgentGroupToolError('INVALID_GROUP_MESSAGE', 'content 不能超过 20000 个字符。', 400);

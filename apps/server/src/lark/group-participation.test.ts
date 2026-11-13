@@ -29,7 +29,7 @@ const act = (snapshot: CollaborationSnapshot, evidence = true): ParticipationRes
 const cleanups: Array<() => void | Promise<void>> = [];
 afterEach(async () => { vi.useRealTimers(); for (const clean of cleanups.splice(0).reverse()) await clean(); });
 
-async function harness(mode: 'off' | 'observe' | 'selective' | 'eager' = 'selective', extra: Partial<Pick<GroupParticipationOptions, 'inboxStore' | 'withDelivery' | 'readMemory' | 'readGroupDescription' | 'readTeamContext' | 'authorizeTeamContext' | 'now' | 'usageRefusal' | 'canOperate' | 'applyLevel' | 'readParticipationUsage'>> = {}) {
+async function harness(mode: 'off' | 'observe' | 'selective' | 'eager' = 'selective', extra: Partial<Pick<GroupParticipationOptions, 'polishReply' | 'inboxStore' | 'withDelivery' | 'readMemory' | 'readGroupDescription' | 'readTeamContext' | 'authorizeTeamContext' | 'now' | 'usageRefusal' | 'canOperate' | 'applyLevel' | 'readParticipationUsage'>> = {}) {
   const db = new Database(':memory:'); createCollaborationSchema(db); allowEagerParticipation(db); addCollaborationScenarios(db);
   const repository = createCollaborationRepository(db);
   if (mode !== 'off') await repository.updateSettings(scope, { expectedRevision: 0, participation: mode }, 'owner');
@@ -1830,4 +1830,31 @@ it.each([false,true])('records proactive reply completion or budget suppression 
  await h.coordinator.handle(message(),config); await h.participation.flush(scope);
  expect(JSON.parse(values.get(`lark.inbox.${scope.appId}.om_1`)!)).toMatchObject({reason:blocked?'participation_reply_budget':'participation_replied',disposition:{decisionId:expect.any(String)}});
  expect(h.service.replyText).toHaveBeenCalledTimes(blocked?0:1);
+});
+
+
+it('polishes a direct human reply before persisting and delivering it', async () => {
+  const polishReply = vi.fn(async () => '自然的答复');
+  const h = await harness('selective', { polishReply });
+  h.decide.mockImplementation(async (_config, snapshot) => reply(snapshot));
+  await h.coordinator.handle(message('om_polish', '有没有新的进展？'), config);
+  await h.participation.flush(scope);
+  expect(polishReply).toHaveBeenCalledWith(expect.objectContaining({ appId: scope.appId }), '材料已有进展', expect.any(String), scope.chatId);
+  expect(h.service.replyText).toHaveBeenCalledWith(expect.objectContaining({ text: '自然的答复' }));
+  expect((await h.repository.listDecisions(scope))[0]).toMatchObject({ status: 'sent', response: '自然的答复' });
+});
+
+it('rechecks authorization after a slow wording pass and suppresses a revoked reply', async () => {
+  let finish!: () => void;
+  const polishReply = vi.fn(() => new Promise<string>(resolve => { finish = () => resolve('已被撤权的答复'); }));
+  const h = await harness('selective', { polishReply });
+  h.decide.mockImplementation(async (_config, snapshot) => reply(snapshot));
+  await h.coordinator.handle(message('om_polish_revoked', '有没有新的进展？'), config);
+  const pending = h.participation.flush(scope);
+  await vi.waitFor(() => expect(polishReply).toHaveBeenCalledOnce());
+  h.authorize.mockResolvedValue(false);
+  finish();
+  await pending;
+  expect(h.service.replyText).not.toHaveBeenCalled();
+  expect((await h.repository.listDecisions(scope))[0]).toMatchObject({ status: 'suppressed' });
 });

@@ -1,3 +1,4 @@
+import type { ReplyPolish } from './reply-polish.js';
 import { larkMessageAnchor } from './message-anchor.js';
 import type { LarkGroupParticipation } from './group-participation.js';
 import { randomUUID } from 'node:crypto';
@@ -147,6 +148,7 @@ export abstract class LarkCoordinatorCore {
     },
     protected readonly groupManager?: LarkGroupManager,
     protected readonly workflowOptions: {
+      polishReply?: ReplyPolish;
       participation?: LarkGroupParticipation;
       scheduleRequests?: import('../agent-schedule-request.js').LarkScheduleRequests;
       saveBotConfig?(input: import('./config.js').SaveLarkConfigInput): Promise<unknown>;

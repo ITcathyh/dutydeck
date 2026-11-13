@@ -2009,3 +2009,12 @@ describe('App plan creation channels', () => {
 beforeEach(() => { vi.spyOn(api, 'sessionHistory').mockResolvedValue({ turns: [], highWaterMark: 0, liveAfter: 0 }); });
 
 vi.mock('./skill-catalog-api', async () => { const { api } = await import('./api'); return { fetchSkillCatalog: async (...args: Parameters<typeof api.skills>) => ({ skills: await api.skills(...args), diagnostics: [], partial: false }) }; });
+
+
+it('hides internal wording sessions from the user task list', async () => {
+  mockAppApi({ sessions: [{ ...session('s1'), name: '主要用户任务' }, { ...session('polish'), name: '内部文字优化', source: 'lark-reply-polish' }],
+    summaries: [summary('s1', '主要用户任务'), summary('polish', '内部文字优化')] });
+  renderApp();
+  await screen.findAllByText('主要用户任务');
+  expect(screen.queryByText('内部文字优化')).toBeNull();
+});

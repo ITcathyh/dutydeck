@@ -10,7 +10,7 @@ export const parseLarkSourceId = (sourceId: string | null | undefined) => {
  * 模型服务归属、用量归集等调用方都从这里识别；注意 lark-leader 的 sourceId 是委托
  * 记录 id（不含 appId），work_item 的 sourceId 是 attempt id，二者都只能沿父会话链找归属。
  */
-export const larkScopedSessionSources = ['lark', 'lark-memory', 'lark-decision', 'lark-response', 'plugin_trigger'] as const;
+export const larkScopedSessionSources = ['lark', 'lark-memory', 'lark-decision', 'lark-response', 'lark-reply-polish', 'plugin_trigger'] as const;
 
 /** 会话直接绑定的机器人 appId；非 bot 作用域会话返回 undefined（调用方再沿父会话链查找）。 */
 export const botAppIdOfSession = (session: { source?: string | null; sourceId?: string | null }): string | undefined =>

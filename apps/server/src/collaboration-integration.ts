@@ -1,3 +1,4 @@
+import type { ReplyPolish } from './lark/reply-polish.js';
 import { CollaborationDelivery } from './collaboration-delivery.js';
 import { createHash } from 'node:crypto';
 import { canonicalExecutionJson, installationOwnerTaskActor, parseLarkSourceId, participationLevelFields, resolveParticipation, RuntimeError, type CollaborationRepository, type CollaborationScope, type ScheduleDelivery, type CollaborationSettings, type UpdateCollaborationSettingsInput, type PolicyAction, type RepositoryBundle, type ToolRiskPolicy } from '@dutydeck/shared';
@@ -22,6 +23,7 @@ import { MandateCards } from './collaboration-mandate-cards.js';
 import type { ScenarioRegistry } from './plugins/scenario-registry.js';
 
 export interface CollaborationIntegrationOptions {
+  polishReply?: ReplyPolish;
   repositories: RepositoryBundle;
   runtime: DutydeckRuntime;
   groups: LarkGroupManager;
@@ -125,6 +127,7 @@ export function createCollaborationIntegration(options: CollaborationIntegration
   const deliveries = new CollaborationDelivery(repos.collaboration);
   const participation = new LarkGroupParticipation({
     inboxStore: repos.config,
+    polishReply: options.polishReply,
     withDelivery: (scope, actionId, send) => deliveries.run(scope, actionId, send),
     repository: roleParticipationRepo, decider, readConfig, serviceFor: client, readMemory: options.readMemory, usageRefusal: options.usageRefusal, log: options.log, scenarios: options.scenarios,
     readTeamContext: (scope, query) => teamContext.read(scope, query),
