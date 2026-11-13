@@ -14,6 +14,7 @@ import { explicitFinalContext, sendExplicitFinal } from './explicit-final.js';
 import { larkCardChannel } from './coordinator-core.js';
 import type { LarkMessageEvent } from './listener.js';
 import { larkSessionConfigKey, larkSourceId } from './session-resolver.js';
+import '../../../../tests/support/fast-wait-for.js';
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {

@@ -151,23 +151,25 @@ describe('configuration command transactions', () => {
     expect(createConfigurationReader(db).listVersions('bot_a')).toHaveLength(1);
   });
 
-  it.each(['action', 'actor', 'target', 'prepared_fingerprint', 'business_revision'])('rejects reused operation with different %s', field => {
+  it('rejects reused operation with different identity fields', () => {
     const { db } = fixture(); seedBot(db); seedBot(db, 'bot_b');
     const first = command(db, { stablePayload: input => ({ patch: input.patch, prepared: { fingerprint: 'a'.repeat(64) }, business: { revision: 1 } }) });
     runConfigurationCommand(db, request(), first);
-    const changed = command(db, { ...first,
-      ...(field === 'action' ? { action: 'delete' } : {}),
-      ...(field === 'actor' ? { operation: () => ({ operationId: 'operation_1', actor: { kind: 'principal', principalId: 'principal_other', channelBotId: 'bot_a' } }), access: () => ({ kind: 'bot', botId: 'bot_a' }) } : {}),
-      ...(field === 'target' ? { target: () => ({ botId: 'bot_b' }) } : {}),
-      ...(field === 'prepared_fingerprint' ? { stablePayload: input => ({ patch: input.patch, prepared: { fingerprint: 'b'.repeat(64) }, business: { revision: 1 } }) } : {}),
-      ...(field === 'business_revision' ? { stablePayload: input => ({ patch: input.patch, prepared: { fingerprint: 'a'.repeat(64) }, business: { revision: 2 } }) } : {})
-    });
-    if (field === 'actor') {
-      role(db, 'other'); db.prepare("UPDATE role_assignments SET principal_id='principal_other' WHERE id='other'").run();
+    for (const field of ['action', 'actor', 'target', 'prepared_fingerprint', 'business_revision'] as const) {
+      const changed = command(db, { ...first,
+        ...(field === 'action' ? { action: 'delete' } : {}),
+        ...(field === 'actor' ? { operation: () => ({ operationId: 'operation_1', actor: { kind: 'principal', principalId: 'principal_other', channelBotId: 'bot_a' } }), access: () => ({ kind: 'bot', botId: 'bot_a' }) } : {}),
+        ...(field === 'target' ? { target: () => ({ botId: 'bot_b' }) } : {}),
+        ...(field === 'prepared_fingerprint' ? { stablePayload: input => ({ patch: input.patch, prepared: { fingerprint: 'b'.repeat(64) }, business: { revision: 1 } }) } : {}),
+        ...(field === 'business_revision' ? { stablePayload: input => ({ patch: input.patch, prepared: { fingerprint: 'a'.repeat(64) }, business: { revision: 2 } }) } : {})
+      });
+      if (field === 'actor') {
+        role(db, 'other'); db.prepare("UPDATE role_assignments SET principal_id='principal_other' WHERE id='other'").run();
+      }
+      const before = db.serialize();
+      expect(() => runConfigurationCommand(db, request(), changed), `operation conflict for ${field}`).toThrow(/CONFIGURATION_OPERATION_CONFLICT/);
+      expect(db.serialize().equals(before), `database unchanged after ${field} conflict`).toBe(true);
     }
-    const before = db.serialize();
-    expect(() => runConfigurationCommand(db, request(), changed)).toThrow(/CONFIGURATION_OPERATION_CONFLICT/);
-    expect(db.serialize().equals(before)).toBe(true);
   });
 
   it('rechecks current roles before a cached result after revoke and expiry', () => {

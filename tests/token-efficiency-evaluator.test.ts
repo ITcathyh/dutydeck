@@ -1,9 +1,14 @@
-import { describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { fileURLToPath } from 'node:url';
 import { evaluate, p95, validateManifest, type Manifest } from '../scripts/evaluate-token-efficiency.mts';
-const runner = fileURLToPath(new URL('./fixtures/token-efficiency/local-runner.mts', import.meta.url));
+import { bundleForTest } from './support/bundle-for-test.js';
+const runnerSource = fileURLToPath(new URL('./fixtures/token-efficiency/local-runner.mts', import.meta.url));
+let runner: string;
+let cleanupRunner: (() => Promise<void>) | undefined;
+beforeAll(async () => { ({ path: runner, cleanup: cleanupRunner } = await bundleForTest('token-efficiency-local-runner', runnerSource)); });
+afterAll(async () => { await cleanupRunner?.(); });
 const fixture = (fault?: string): Manifest => ({ version: 1, frozenConfig: { model: 'local-fixture', protocol: 'mock' }, repetitions: 1,
-  runners: { legacy: [process.execPath, '--import', fileURLToPath(new URL('../node_modules/tsx/dist/loader.mjs', import.meta.url)), runner], optimized: [process.execPath, '--import', fileURLToPath(new URL('../node_modules/tsx/dist/loader.mjs', import.meta.url)), runner] },
+  runners: { legacy: [process.execPath, runner], optimized: [process.execPath, runner] },
   cases: [{ id: 'fact', type: 'retrieval', input: { messageId: 'm1', requiredWord: 'confirmed' }, toolData: { messages: [{ id: 'm1', text: 'ship on Friday' }, { id: 'm2', text: 'other message' }], fault }, files: { 'initial.txt': 'frozen' },
     checks: [{ kind: 'exact', path: ['fact'], value: 'ship on Friday' }, { kind: 'exact', path: ['requiredWord'], value: 'confirmed' }, { kind: 'schema', path: [], required: ['messageId', 'fact', 'requiredWord'] }] }] });
 

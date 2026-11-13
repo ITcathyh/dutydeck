@@ -1,11 +1,12 @@
 import { execFile } from 'node:child_process';
-import { createRequire } from 'node:module';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { describe, it } from 'vitest';
+import { afterAll, describe, it } from 'vitest';
+import { lazyBundleForTest } from '../../../tests/support/bundle-for-test.js';
 
 const execute = promisify(execFile);
-const cli = fileURLToPath(new URL('./cli.ts', import.meta.url));
+const cli = lazyBundleForTest('agent-tool-help', fileURLToPath(new URL('./cli.ts', import.meta.url)));
+afterAll(async () => { await cli.cleanup(); });
 describe('offline Agent tool help', () => {
   // 每条都是独立子进程启动，彼此无共享状态，并发跑以缩短文件墙钟。
   it.concurrent.for([
@@ -18,7 +19,7 @@ describe('offline Agent tool help', () => {
     [['session', 'herdr', '--help'], ['session_name/workspace_id/root_pane_id', 'pane split', 'default session', '--remote', 'stop']],
     [['session', 'ask', '--help'], ['--choices', '--multiple', '124', 'stdout']]
   ] as Array<[string[], string[]]>)('reads %j without service credentials', async ([args, expected], { expect }) => {
-    const result = await execute(process.execPath, ['--import', createRequire(import.meta.url).resolve('tsx'), cli, ...args], {
+    const result = await execute(process.execPath, [await cli.path(), ...args], {
       env: { PATH: process.env.PATH, NODE_OPTIONS: '--conditions=development' }, timeout: 15_000
     });
     expect(result.stderr).toBe('');
