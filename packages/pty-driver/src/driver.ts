@@ -70,6 +70,9 @@ export interface PtyCliDriverTimings extends IdleTimings {
   terminalDrainMs?: number;
   nativeDiscoveryRetryMs?: number;
   nativeObservationRetryMs?: number;
+  /** Test-only bounds for maintenance observation and post-interrupt composer recovery. */
+  maintenanceTimeoutMs?: number;
+  maintenanceIdleGraceMs?: number;
 }
 
 /** 计划阶段（deny-all）里 CLI 弹出的工具确认一律拒绝，不发审批卡。 */
@@ -218,6 +221,26 @@ export class PtyCliDriver implements AgentDriver {
    * write travels through this identity-bound guard so a detached driver
    * cannot leave a delayed submit key in a surviving tmux pane. */
   private activeSubmission: { cancelError?: Error; pending?: Promise<unknown>; receiptAbort?: AbortController } | undefined;
+  /** Maintenance is deliberately not a business turn. Its object identity is
+   * the ownership fence across async flushes, cancellation and reconnects. */
+  private maintenanceActive: {
+    generation: number;
+    backend: SessionBackend;
+    wiringGeneration: number;
+    controller: AbortController;
+    cancelRequested: boolean;
+    timedOut: boolean;
+    sent: boolean;
+    composerWritten: boolean;
+    submitted: boolean;
+    terminalInterrupt?: Promise<void>;
+    cancelError?: Error;
+    pending?: Promise<unknown>;
+  } | undefined;
+  private maintenanceUnknown = false;
+  private maintenanceGeneration = 0;
+  private static readonly MAINTENANCE_TIMEOUT_MS = 5 * 60_000;
+  private static readonly MAINTENANCE_IDLE_GRACE_MS = 15_000;
   /** Cancellation invalidates the turn stamp after any in-flight metadata
    * operation, so a late control reply cannot make that turn recoverable again. */
   private submissionMetadata: Promise<void> = Promise.resolve();
@@ -539,7 +562,13 @@ export class PtyCliDriver implements AgentDriver {
   async send(prompt: string): Promise<void> {
     this.noteInput();
     if (this.stopped) throw new Error('PtyCliDriver: send() called after stop()');
+    if (this.maintenanceActive || this.maintenanceUnknown) {
+      throw new PromptNotWrittenError('Context compaction has not released this terminal; the business prompt was not written');
+    }
     if (!this.started) await this.start();
+    if (this.maintenanceActive || this.maintenanceUnknown) {
+      throw new PromptNotWrittenError('Context compaction acquired this terminal before the business prompt was written');
+    }
     if (this.stopped) throw new Error('Driver stopped');
     if (this.planGuardActive) this.assertPlanGuardWired();
 
@@ -713,6 +742,286 @@ export class PtyCliDriver implements AgentDriver {
     return completion!;
   }
 
+  async compact(): Promise<'completed' | 'failed' | 'unsupported' | 'cancelled'> {
+    this.noteInput();
+    if (!isClaudeFamilyCli(this.adapter.id)) {
+      this.emitEvent({ type: 'status', data: { state: 'compaction', phase: 'unsupported', proactive: true } });
+      return 'unsupported';
+    }
+    if (this.maintenanceActive || this.maintenanceUnknown || this.turnActive || this.activeSubmission) {
+      throw new PromptNotWrittenError('Another terminal submission or an unreconciled compaction still owns this session');
+    }
+    const maintenance: NonNullable<PtyCliDriver['maintenanceActive']> = {
+      generation: ++this.maintenanceGeneration,
+      backend: this.backend,
+      wiringGeneration: this.wiringGeneration,
+      controller: new AbortController(),
+      cancelRequested: false,
+      timedOut: false,
+      sent: false,
+      composerWritten: false,
+      submitted: false,
+    };
+    this.maintenanceActive = maintenance;
+    const cancelled = new Promise<never>((_, reject) => {
+      const abort = () => reject(maintenance.controller.signal.reason instanceof Error ? maintenance.controller.signal.reason : new Error('Compaction maintenance cancelled'));
+      if (maintenance.controller.signal.aborted) abort();
+      else maintenance.controller.signal.addEventListener('abort', abort, { once: true });
+    });
+    void cancelled.catch(() => {});
+    const race = <T>(operation: Promise<T> | undefined): Promise<T> => Promise.race([operation, cancelled]) as Promise<T>;
+    const finish = (outcome: 'completed' | 'failed' | 'cancelled') => {
+      if (!this.stopped) this.emitEvent({ type: 'status', data: { state: 'compaction', phase: outcome, proactive: true, maintenanceGeneration: maintenance.generation } });
+      return outcome;
+    };
+    const unknown = (message: string): PromptNotWrittenError => {
+      this.maintenanceUnknown = true;
+      return new PromptNotWrittenError(message);
+    };
+    const failBeforeWrite = async () => {
+      const recovered = await race(this.waitForMaintenanceRecovery(maintenance, this.timings.maintenanceIdleGraceMs ?? PtyCliDriver.MAINTENANCE_IDLE_GRACE_MS));
+      if (!recovered) throw unknown('Compaction was not written and the terminal is not verifiably writable; the business prompt was not written');
+      return finish('failed');
+    };
+    const timeout = setTimeout(() => {
+      const error = new Error('Context compaction timed out');
+      maintenance.timedOut = true;
+      maintenance.cancelError ??= error;
+      maintenance.controller.abort(error);
+    }, this.timings.maintenanceTimeoutMs ?? PtyCliDriver.MAINTENANCE_TIMEOUT_MS);
+    timeout.unref();
+    try {
+      if (!this.started) await race(this.start());
+      if (this.stopped) throw unknown('Driver stopped before compaction; the business prompt was not written');
+      maintenance.backend = this.backend;
+      maintenance.wiringGeneration = this.wiringGeneration;
+      this.emitEvent({ type: 'status', data: { state: 'compaction', phase: 'start', proactive: true, maintenanceGeneration: maintenance.generation } });
+      if (!this.maintenanceReady(maintenance)) return await failBeforeWrite();
+      const transcript = this.transcript;
+      if (!transcript?.waitForCompaction || !transcript.captureWatermark || !transcript.compactionNativeSession) return finish('failed');
+      await race(transcript.flush());
+      if (!this.maintenanceReady(maintenance)) return await failBeforeWrite();
+      const position = transcript.captureWatermark();
+      const nativeSessionId = transcript.compactionNativeSession();
+      if (!position || !nativeSessionId) return finish('failed');
+      const observation = transcript.waitForCompaction({
+        nativeSessionId, position, generation: maintenance.generation, signal: maintenance.controller.signal,
+      });
+      void observation.catch(() => {});
+      // Arming the observer does not grant write authority: background work,
+      // approvals, answers and human waits are checked again at the final key.
+      if (!this.maintenanceReady(maintenance)) return await failBeforeWrite();
+      maintenance.sent = true;
+      await race(Promise.resolve().then(() => this.adapter.writeInput(this.submissionBackend(maintenance, 'maintenance'), '/compact')));
+      await race(maintenance.pending);
+      // An adapter without per-key methods still counts a fulfilled writer as
+      // submitted. Real Claude writers mark the final Enter inside the guard.
+      maintenance.composerWritten = true;
+      maintenance.submitted = true;
+      const outcome = await race(observation);
+      let recovered = await race(this.recoverCompletedMaintenance(maintenance));
+      let interruptedRecovery = false;
+      if (!recovered) {
+        interruptedRecovery = true;
+        recovered = await race(this.recoverInterruptedMaintenance(maintenance));
+      }
+      if ((maintenance.cancelRequested || maintenance.timedOut) && !interruptedRecovery) {
+        recovered = await race(this.recoverInterruptedMaintenance(maintenance));
+      }
+      if (!recovered) throw unknown('Compaction completed without a verifiably writable terminal; the business prompt was not written');
+      if (maintenance.cancelRequested) return finish('cancelled');
+      if (maintenance.timedOut) return finish('failed');
+      return finish(outcome);
+    } catch (error) {
+      if (this.maintenanceUnknown) throw error;
+      const interruptionRequested = maintenance.cancelRequested || maintenance.timedOut;
+      // Once Enter was attempted (or the whole adapter writer fulfilled), an
+      // idle screen cannot turn missing transcript evidence into safe failure.
+      if (maintenance.submitted && !interruptionRequested) {
+        throw unknown('Compaction was submitted but its outcome is unknown; the business prompt was not written');
+      }
+      let interruptedRecovery = interruptionRequested;
+      let recovered = interruptedRecovery
+        ? await this.recoverInterruptedMaintenance(maintenance)
+        : await this.recoverCompletedMaintenance(maintenance);
+      if (!recovered && maintenance.sent && !interruptedRecovery) {
+        interruptedRecovery = true;
+        recovered = await this.recoverInterruptedMaintenance(maintenance);
+      }
+      if ((maintenance.cancelRequested || maintenance.timedOut) && !interruptedRecovery) {
+        recovered = await this.recoverInterruptedMaintenance(maintenance);
+      }
+      if (!recovered) throw unknown('Compaction outcome or terminal recovery is unknown; the business prompt was not written');
+      return finish(maintenance.cancelRequested ? 'cancelled' : 'failed');
+    } finally {
+      clearTimeout(timeout);
+      maintenance.controller.abort(new Error('Compaction maintenance generation retired'));
+      if (this.maintenanceActive === maintenance) this.maintenanceActive = undefined;
+    }
+  }
+
+  private maintenanceReady(maintenance: NonNullable<PtyCliDriver['maintenanceActive']>): boolean {
+    return this.maintenanceTerminalRecovered(maintenance) && this.maintenanceSafetyClear();
+  }
+
+  private maintenanceSafetyClear(): boolean {
+    return !this.hasBackgroundWork() && this.hookPermissions.size === 0 && this.humanWaits.size === 0 && !this.awaitingAnswer?.();
+  }
+
+  private maintenanceTerminalRecovered(maintenance: NonNullable<PtyCliDriver['maintenanceActive']>): boolean {
+    return this.maintenanceActive === maintenance && !this.stopped && this.backend === maintenance.backend
+      && this.wiringGeneration === maintenance.wiringGeneration && this.terminalIsIdle();
+  }
+
+  private maintenanceStatusEvidenceLines(lines: string[]): string[] {
+    const footer = /^✔ /.test(lines.at(-1) ?? '') ? lines.length - 2 : lines.length - 1;
+    if (!/^(?:(?:⏵⏵|⏸) [a-z ]+ on\b|\? for shortcuts\b)/.test(lines[footer] ?? '')) return lines;
+    for (let statusRows = 0; statusRows <= 2; statusRows++) {
+      const border = footer - statusRows - 1;
+      if (border >= 2 && /^─{8,}$/.test(lines[border] ?? '') && lines[border - 2] === lines[border]
+        && /^❯(?:\s|$)/.test(lines[border - 1] ?? '')) return lines.slice(0, border - 2);
+    }
+    return lines;
+  }
+
+  private maintenanceStatusBlocks(lines: string[], interrupted: boolean): boolean {
+    const { screenActivityPattern: activity, backgroundWaitPattern: background, completionPattern: completion,
+      screenCancelledPattern: cancelled, screenBusyPattern: busy } = this.adapter;
+    const evidence = this.maintenanceStatusEvidenceLines(lines);
+    for (let index = evidence.length - 1; index >= 0; index--) {
+      const line = evidence[index]!;
+      if (/^✔ /.test(line)) continue;
+      if (activity?.test(line) || busy?.test(line)) return true;
+      if (background?.test(line)) return !interrupted;
+      if (completion?.test(line) || cancelled?.test(line)) return false;
+    }
+    return false;
+  }
+
+  private maintenanceInterruptedTerminalRecovered(maintenance: NonNullable<PtyCliDriver['maintenanceActive']>): boolean {
+    const screen = this.snapshot?.viewportText({ preserveStructure: true });
+    if (!screen || this.maintenanceActive !== maintenance || this.stopped || this.backend !== maintenance.backend
+      || this.wiringGeneration !== maintenance.wiringGeneration || this.turnActive || this.activeSubmission) return false;
+    // Background/hook/answer/human waits are pre-write gates only. Compaction
+    // activity is different: Enter has been sent, so the composer is not safe
+    // until Claude has actually left that activity and shown an empty composer.
+    const lines = screen.replace(/\r/g, '').split('\n').map(line => line.trim()).filter(Boolean);
+    if (this.maintenanceStatusBlocks(lines, true)) return false;
+    return this.adapter.isIdleScreen?.(screen) === true;
+  }
+
+  /** Match the complete bottom composer, not a historical /compact line. The
+   * shape mirrors Claude's empty-composer recognition without changing G2. */
+  private maintenanceComposerIsOwned(maintenance: NonNullable<PtyCliDriver['maintenanceActive']>, interrupted = false): boolean {
+    if (!maintenance.composerWritten || this.maintenanceActive !== maintenance || this.backend !== maintenance.backend
+      || this.wiringGeneration !== maintenance.wiringGeneration) return false;
+    const lines = this.snapshot?.viewportText({ preserveStructure: true })
+      .replace(/\r/g, '').split('\n').map(line => line.trim()).filter(Boolean) ?? [];
+    const footer = /^✔ /.test(lines.at(-1) ?? '') ? lines.length - 2 : lines.length - 1;
+    let owned = false;
+    if (footer >= 3 && /^(?:(?:⏵⏵|⏸) [a-z ]+ on\b|\? for shortcuts\b)/.test(lines[footer] ?? '')) {
+      for (let statusRows = 0; statusRows <= 2; statusRows++) {
+        const border = footer - statusRows - 1;
+        if (border < 2 || !/^─{8,}$/.test(lines[border] ?? '') || lines[border - 2] !== lines[border]
+          || !/^❯\s+\/compact(?:\s+<optional custom summarization instructions>)?$/.test(lines[border - 1] ?? '')) continue;
+        owned = lines.slice(border + 1, footer).every(line => !/[❯›]|^(?:Permission required|Do you want to (?:proceed|allow)|Select an option|Enter to (?:select|confirm)|Accessing workspace:|Quick safety check:|Security guide)\b/i.test(line));
+        break;
+      }
+    }
+    // Claude 2.1.220 opens its slash-command palette after the paste. The
+    // built-in description is the bottom composer's evidence in this shape.
+    if (!owned) {
+      for (let border = lines.length - 3; border >= 2; border--) {
+        if (!/^─{8,}$/.test(lines[border] ?? '') || lines[border - 2] !== lines[border]
+          || !/^❯\s+\/compact(?:\s+<optional custom summarization instructions>)?$/.test(lines[border - 1] ?? '')
+          || !/^\/compact\s+Free up context by summarizing the conversation so far$/.test(lines[border + 1] ?? '')) continue;
+        owned = lines.slice(border + 2).every(line => !/[❯›]/.test(line));
+        break;
+      }
+    }
+    if (!owned) return false;
+    if (this.maintenanceStatusBlocks(lines, interrupted)) return false;
+    return interrupted || !this.screenWaitsForHuman();
+  }
+
+  private assertMaintenanceWrite(maintenance: NonNullable<PtyCliDriver['maintenanceActive']>, finalEnter: boolean): void {
+    if (!this.maintenanceSafetyClear()) throw new Error('Compaction submission blocked by new terminal work or a human wait');
+    if (finalEnter) {
+      if (!this.maintenanceComposerIsOwned(maintenance)) throw new Error('Compaction final Enter blocked: the current composer is not the owned /compact draft');
+      return;
+    }
+    if (maintenance.composerWritten) {
+      if (!this.maintenanceComposerIsOwned(maintenance)) throw new Error('Compaction input blocked: the owned composer changed');
+    } else if (!this.maintenanceTerminalRecovered(maintenance)) {
+      throw new Error('Compaction input blocked: the terminal is not writable');
+    }
+  }
+
+  private async settleMaintenanceWrites(maintenance: NonNullable<PtyCliDriver['maintenanceActive']>): Promise<boolean> {
+    const pending = maintenance.pending;
+    if (!pending) return true;
+    const graceMs = this.timings.maintenanceIdleGraceMs ?? PtyCliDriver.MAINTENANCE_IDLE_GRACE_MS;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const expired = new Promise<false>(resolve => {
+        timer = setTimeout(() => resolve(false), graceMs);
+        timer.unref();
+      });
+      return await Promise.race([pending.then(() => true, () => true), expired]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  private async recoverCompletedMaintenance(maintenance: NonNullable<PtyCliDriver['maintenanceActive']>): Promise<boolean> {
+    if (!await this.settleMaintenanceWrites(maintenance)) return false;
+    return this.waitForMaintenanceRecovery(maintenance, this.timings.maintenanceIdleGraceMs ?? PtyCliDriver.MAINTENANCE_IDLE_GRACE_MS);
+  }
+
+  private async waitForMaintenanceRecovery(maintenance: NonNullable<PtyCliDriver['maintenanceActive']>, graceMs: number, interrupted = false): Promise<boolean> {
+    const deadline = Date.now() + graceMs;
+    for (;;) {
+      const recovered = interrupted ? this.maintenanceInterruptedTerminalRecovered(maintenance) : this.maintenanceTerminalRecovered(maintenance);
+      if (recovered) return true;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return false;
+      await new Promise<void>(resolve => { const timer = setTimeout(resolve, Math.min(50, remaining)); timer.unref(); });
+    }
+  }
+
+  private async recoverInterruptedMaintenance(maintenance: NonNullable<PtyCliDriver['maintenanceActive']>): Promise<boolean> {
+    const graceMs = this.timings.maintenanceIdleGraceMs ?? PtyCliDriver.MAINTENANCE_IDLE_GRACE_MS;
+    const interrupting = this.requestMaintenanceInterrupt(maintenance);
+    if (!await this.settleMaintenanceWrites(maintenance)) {
+      await interrupting;
+      return false;
+    }
+    await interrupting;
+    const deadline = Date.now() + graceMs;
+    let cleanupAttempted = false;
+    for (;;) {
+      if (this.maintenanceInterruptedTerminalRecovered(maintenance)) return true;
+      // Polling continues while compaction is active. Ctrl-U is considered
+      // only after that activity clears, and is revalidated by the write guard.
+      if (!cleanupAttempted && this.maintenanceComposerIsOwned(maintenance, true)) {
+        cleanupAttempted = true;
+        try { await this.submissionBackend(maintenance, 'maintenance-cleanup').write('\x15'); } catch { /* Recovery below remains the only proof. */ }
+        continue;
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return false;
+      await new Promise<void>(resolve => { const timer = setTimeout(resolve, Math.min(50, remaining)); timer.unref(); });
+    }
+  }
+
+  private async requestMaintenanceInterrupt(maintenance: NonNullable<PtyCliDriver['maintenanceActive']>): Promise<void> {
+    if (!maintenance.sent || this.stopped) return;
+    maintenance.terminalInterrupt ??= Promise.resolve()
+      .then(() => maintenance.backend.interrupt())
+      .catch(() => { /* The composer proof below still decides recovery. */ });
+    await maintenance.terminalInterrupt;
+  }
+
   private recordPrompt(prompt: string, stage: 'pty_routing' | 'pty_input') {
     const data: PromptAssemblyData = {
       state: 'prompt_assembly', version: 1, stage,
@@ -841,6 +1150,10 @@ export class PtyCliDriver implements AgentDriver {
    * 适配器认不出空输入框时返回 false。
    */
   isIdle(): boolean {
+    return !this.maintenanceActive && !this.maintenanceUnknown && this.terminalIsIdle();
+  }
+
+  private terminalIsIdle(): boolean {
     const screen = this.snapshot?.viewportText({ preserveStructure: true });
     if (this.stopped || this.turnActive || this.activeSubmission || !screen || !this.adapter.isIdleScreen) return false;
     const { screenActivityPattern: activity, backgroundWaitPattern: background, completionPattern: completion, screenCancelledPattern: cancelled } = this.adapter;
@@ -862,6 +1175,14 @@ export class PtyCliDriver implements AgentDriver {
     // waiting for turn completion. Fence that submission before signalling the
     // backend so a late poll or delayed Enter cannot submit after interrupt.
     const interruptError = new Error('Driver interrupted');
+    if (this.maintenanceActive) {
+      const maintenance = this.maintenanceActive;
+      maintenance.cancelRequested = true;
+      maintenance.cancelError ??= interruptError;
+      maintenance.controller.abort(interruptError);
+      await this.requestMaintenanceInterrupt(maintenance);
+      return;
+    }
     this.cancelActiveSubmission(interruptError);
     await this.submissionMetadata;
     if (this.superseded(backend, generation) || (this.turnReject && this.turnReject !== turn)) return;
@@ -1198,6 +1519,11 @@ export class PtyCliDriver implements AgentDriver {
       && !options.discardSession
       && tmuxBackend !== undefined;
     const stopReason = preservePersistentSession ? new DriverDetachedError() : new Error('Driver stopped');
+    if (this.maintenanceActive) {
+      this.maintenanceActive.cancelRequested = true;
+      this.maintenanceActive.cancelError ??= stopReason;
+      this.maintenanceActive.controller.abort(stopReason);
+    }
     this.cancelActiveSubmission(stopReason);
     await this.submissionMetadata;
     if (!preservePersistentSession && !this.recoveryRejected && tmuxBackend) {
@@ -2230,18 +2556,33 @@ export class PtyCliDriver implements AgentDriver {
   /** Wrap the intentionally-small adapter PTY surface per submission. The
    * real Claude adapter awaits between its bracketed paste and Enter, so
    * checking only before writeInput is insufficient after daemon detach. */
-  private submissionBackend(submission: { cancelError?: Error; pending?: Promise<unknown> }): PtyLike {
+  private submissionBackend(submission: { cancelError?: Error; pending?: Promise<unknown>; wiringGeneration?: number; composerWritten?: boolean; submitted?: boolean }, owner: 'turn' | 'maintenance' | 'maintenance-cleanup' = 'turn'): PtyLike {
     const target = this.backend as SessionBackend & Partial<PtyLike>;
     const check = () => {
-      if (submission.cancelError) throw submission.cancelError;
+      if (owner !== 'maintenance-cleanup' && submission.cancelError) throw submission.cancelError;
       if (this.stopped) throw new Error('Driver stopped');
-      if (this.activeSubmission !== submission || this.backend !== target) throw new Error('PtyCliDriver: submission is no longer active');
+      const active = owner === 'turn' ? this.activeSubmission === submission : this.maintenanceActive === submission;
+      if (!active || this.backend !== target || owner !== 'turn' && this.wiringGeneration !== submission.wiringGeneration) throw new Error('PtyCliDriver: submission is no longer active');
     };
-    const guarded = <T>(write: () => T | Promise<T>): Promise<T> => {
+    const guarded = <T>(write: () => T | Promise<T>, maintenanceInput?: 'text' | 'enter'): Promise<T> => {
       this.noteInput();
       check();
-      const operation = (submission.pending ?? Promise.resolve()).then(async () => {
+      const previous = submission.pending ?? Promise.resolve();
+      // Cleanup is a new, separately guarded operation. It must wait for the
+      // cancelled paste to settle without inheriting that paste's rejection.
+      const predecessor = owner === 'maintenance-cleanup' ? previous.catch(() => {}) : previous;
+      const operation = predecessor.then(async () => {
         check();
+        if (owner === 'maintenance-cleanup'
+          && !this.maintenanceComposerIsOwned(submission as NonNullable<PtyCliDriver['maintenanceActive']>, true)) {
+          throw new Error('Compaction cleanup blocked: the current composer is no longer the owned /compact draft');
+        }
+        if (owner === 'maintenance' && maintenanceInput) {
+          const maintenance = submission as NonNullable<PtyCliDriver['maintenanceActive']>;
+          this.assertMaintenanceWrite(maintenance, maintenanceInput === 'enter');
+          if (maintenanceInput === 'enter') maintenance.submitted = true;
+          else maintenance.composerWritten = true;
+        }
         const result = await write();
         check();
         if (result === false) throw new DriverRecoveryError('PTY backend rejected input; original process preserved');
@@ -2252,7 +2593,7 @@ export class PtyCliDriver implements AgentDriver {
       return operation;
     };
     const proxy: PtyLike = {
-      write: data => guarded(() => target.write(data)),
+      write: data => guarded(() => target.write(data), owner === 'maintenance' ? data === '\r' ? 'enter' : 'text' : undefined),
       lastOutputAt: () => { check(); return this.lastOutputAt; },
       processKey: target,
       // tmux can capture the pane through its management client. Prefer that authoritative
@@ -2271,9 +2612,9 @@ export class PtyCliDriver implements AgentDriver {
         return '';
       }),
     };
-    if (target.sendText) proxy.sendText = text => guarded(() => target.sendText!(text));
-    if (target.sendSpecialKeys) proxy.sendSpecialKeys = (...keys) => guarded(() => target.sendSpecialKeys!(...keys));
-    if (target.pasteText) proxy.pasteText = text => guarded(() => target.pasteText!(text));
+    if (target.sendText) proxy.sendText = text => guarded(() => target.sendText!(text), owner === 'maintenance' ? 'text' : undefined);
+    if (target.sendSpecialKeys) proxy.sendSpecialKeys = (...keys) => guarded(() => target.sendSpecialKeys!(...keys), owner === 'maintenance' ? keys.includes('Enter') ? 'enter' : 'text' : undefined);
+    if (target.pasteText) proxy.pasteText = text => guarded(() => target.pasteText!(text), owner === 'maintenance' ? 'text' : undefined);
     return proxy;
   }
 

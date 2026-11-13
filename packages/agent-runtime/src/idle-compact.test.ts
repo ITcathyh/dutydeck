@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import type { AgentConfig, AgentDriver } from '@dutydeck/shared';
+import { PromptNotWrittenError } from '@dutydeck/shared';
 import { DutydeckRuntime } from './index.js';
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -68,6 +69,15 @@ describe('idle compaction at serialized task activation', () => {
     vi.setSystemTime(new Date('2026-10-02T01:00:00Z'));
     const next = await h.dispatch('must not send', 24); await h.wait(next.id, 'reconcile_required');
     expect(h.order).toEqual(['old', 'compact']);
+  });
+  it('settles the business prompt as not submitted when compaction cannot prove terminal recovery', async () => {
+    const h = await fixture(async () => { throw new PromptNotWrittenError('maintenance outcome unknown'); });
+    vi.setSystemTime(new Date('2026-10-02T01:00:00Z'));
+    const next = await h.dispatch('must not send', 24);
+    await h.wait(next.id, 'failed');
+    expect(h.order).toEqual(['old', 'compact']);
+    const execution = h.repos.execution.getTaskExecution(next.id);
+    expect(execution?.attempts[0]).toMatchObject({ state: 'settled', outcome: 'failed', settlement: { kind: 'not_submitted' } });
   });
   it('honors durable interrupt intent between compact and the real prompt', async () => {
     const gate = deferred();
