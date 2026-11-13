@@ -324,7 +324,7 @@ describe('bounded systemd journal enrichment', () => {
   function interrupted() {
     const root = scratch(), database = databaseIn(root), previous = beginServeRun(database, lifecycle('killed-run')).lifecycle;
     markServeRunning(database, previous);
-    beginServeRun(database, lifecycle('current-run'), { isProcessAlive: () => false });
+    beginServeRun(database, lifecycle('current-run', { pid: 5432 }), { isProcessAlive: () => false });
     return { database, previous };
   }
 
@@ -346,7 +346,7 @@ describe('bounded systemd journal enrichment', () => {
   ])('normalizes persisted and journal boot IDs (%s vs %s)', async (persistedBoot, journalBoot) => {
     const root = scratch(), database = databaseIn(root), previous = beginServeRun(database, lifecycle('killed-run', { boot: persistedBoot })).lifecycle;
     markServeRunning(database, previous);
-    beginServeRun(database, lifecycle('current-run', { boot: persistedBoot }), { isProcessAlive: () => false });
+    beginServeRun(database, lifecycle('current-run', { pid: 5432, boot: persistedBoot }), { isProcessAlive: () => false });
     await enrichAbnormalExitFromJournal(database, previous, { queryJournal: async () => [exitEntry(previous, { _BOOT_ID: journalBoot })] });
     expect(readAbnormalExit(database)).toMatchObject({ signal: 'SIGKILL', source: 'systemd-journal' });
   });
@@ -439,6 +439,77 @@ describe('bounded systemd journal enrichment', () => {
     expect(upperBounds).toEqual(['2026-11-13T00:01:00.000Z', '2026-11-13T00:01:00.000Z']);
     expect(firstA.journalUntil).toBe('2026-11-13T00:01:00.000Z');
     expect(secondA.journalUntil).toBe('2026-11-13T00:01:00.000Z');
+  });
+
+  it('bounds a generation by a later same-PID start when reuse happened before its first death detection', async () => {
+    const root = scratch(), database = databaseIn(root);
+    const startedA = beginServeRun(database, lifecycle('run-a-before-bound', { pid: 1001, startedAt: '2026-11-13T00:00:00.000Z' }));
+    const a = markServeRunning(database, startedA.lifecycle).lifecycle;
+    recordAbnormalExit(database, { kind: 'fatal', exitCode: 1, error: 'A original before PID reuse', version: '1', lifecycle: a, now: new Date('2026-11-13T00:00:30.000Z') });
+    const cInput = lifecycle('run-c-reused-pid', { pid: 1001, startedAt: '2026-11-13T02:00:00.000Z' });
+    const startedC = beginServeRun(database, { ...cInput, now: new Date('2026-11-13T02:00:00.000Z') }, { isProcessAlive: () => true });
+    expect(startedC.previousRuns).toBeUndefined();
+    expect(documentIn(database).lifecycleRuns.find((run: any) => run.runId === a.runId).journalUntil).toBeUndefined();
+    const c = markServeRunning(database, startedC.lifecycle, { isProcessAlive: () => true, now: new Date('2026-11-13T02:00:00.000Z') }).lifecycle;
+    const discovered = beginServeRun(database, {
+      ...lifecycle('run-d', { pid: 1003, startedAt: '2026-11-13T02:02:00.000Z' }), now: new Date('2026-11-13T02:02:00.000Z')
+    }, { isProcessAlive: () => false });
+    const previousA = discovered.previousRuns?.find(run => run.runId === a.runId)!;
+    const previousC = discovered.previousRuns?.find(run => run.runId === c.runId)!;
+    const cExit = exitEntry(c, { __REALTIME_TIMESTAMP: String(Date.parse('2026-11-13T02:01:00.000Z') * 1_000) });
+    const upperBounds: Record<string, string[]> = { [a.runId]: [], [c.runId]: [] };
+    for (const previous of [previousA, previousC]) {
+      await enrichAbnormalExitFromJournal(database, previous, {
+        now: new Date('2026-11-13T03:02:00.000Z'),
+        queryJournal: async request => { upperBounds[previous.runId].push(request.until); return [cExit]; }
+      });
+    }
+    const document = documentIn(database);
+    const recordA = document.history.find((entry: any) => entry.runId === a.runId);
+    const recordC = document.history.find((entry: any) => entry.runId === c.runId);
+    expect(recordA).toMatchObject({ at: '2026-11-13T00:00:30.000Z', error: 'A original before PID reuse' });
+    expect(recordA.signal).toBeUndefined();
+    expect(recordC).toMatchObject({ at: '2026-11-13T02:01:00.000Z', signal: 'SIGKILL', source: 'systemd-journal' });
+    expect(upperBounds[a.runId]).toEqual(['2026-11-13T01:59:59.999Z']);
+    expect(upperBounds[c.runId]).toEqual(['2026-11-13T02:02:00.000Z']);
+    expect(Date.parse(upperBounds[a.runId][0])).toBeLessThan(Date.parse(c.startedAt));
+  });
+
+  it('uses a later same-PID generation from another database to narrow the journal window', async () => {
+    const root = scratch(), a = join(root, 'a.db'), b = join(root, 'b.db');
+    writeFileSync(a, ''); writeFileSync(b, '');
+    const runA = beginServeRun(a, lifecycle('run-a-cross-db', { database: a, pid: 1001, startedAt: '2026-11-13T00:00:00.000Z' })).lifecycle;
+    recordAbnormalExit(a, { kind: 'fatal', exitCode: 1, error: 'A cross-database original', version: '1', lifecycle: runA, now: new Date('2026-11-13T00:00:30.000Z') });
+    const runC = beginServeRun(b, lifecycle('run-c-cross-db', { database: b, pid: 1001, startedAt: '2026-11-13T02:00:00.000Z' })).lifecycle;
+    const discovered = beginServeRun(a, {
+      ...lifecycle('run-d-cross-db', { database: a, pid: 1003, startedAt: '2026-11-13T02:02:00.000Z' }), now: new Date('2026-11-13T02:02:00.000Z')
+    }, { isProcessAlive: () => false });
+    const previousA = discovered.previousRuns?.find(run => run.runId === runA.runId)!;
+    expect(previousA.journalUntil).toBe('2026-11-13T01:59:59.999Z');
+    await enrichAbnormalExitFromJournal(a, previousA, { queryJournal: async () => [exitEntry(runC, { __REALTIME_TIMESTAMP: String(Date.parse('2026-11-13T02:01:00.000Z') * 1_000) })] });
+    expect(readAbnormalExit(a)).toMatchObject({ at: '2026-11-13T00:00:30.000Z', error: 'A cross-database original' });
+    expect(readAbnormalExit(a)?.signal).toBeUndefined();
+  });
+
+  it('does not attribute a journal exit to either same-PID generation when their start times are identical', async () => {
+    const root = scratch(), database = databaseIn(root);
+    const a = beginServeRun(database, lifecycle('run-a-ambiguous', { pid: 1001, startedAt: '2026-11-13T00:00:00.000Z' })).lifecycle;
+    const c = beginServeRun(database, {
+      ...lifecycle('run-c-ambiguous', { pid: 1001, startedAt: a.startedAt }), now: new Date(a.startedAt)
+    }, { isProcessAlive: () => true }).lifecycle;
+    const discovered = beginServeRun(database, {
+      ...lifecycle('run-d-ambiguous', { pid: 1003, startedAt: '2026-11-13T00:01:00.000Z' }), now: new Date('2026-11-13T00:01:00.000Z')
+    }, { isProcessAlive: () => false });
+    const previous = [a, c].map(run => discovered.previousRuns?.find(candidate => candidate.runId === run.runId)!);
+    const upperBounds: string[] = [];
+    for (const run of previous) {
+      await enrichAbnormalExitFromJournal(database, run, {
+        queryJournal: async request => { upperBounds.push(request.until); return [exitEntry(c, { __REALTIME_TIMESTAMP: String(Date.parse('2026-11-13T00:00:30.000Z') * 1_000) })]; }
+      });
+    }
+    expect(upperBounds).toEqual(['2026-11-12T23:59:59.999Z', '2026-11-12T23:59:59.999Z']);
+    const document = documentIn(database);
+    for (const run of [a, c]) expect(document.history.find((entry: any) => entry.runId === run.runId).signal).toBeUndefined();
   });
 
   it('fixes a legacy lifecycle bound on first enrichment and still accepts SIGKILL inside that window', async () => {
