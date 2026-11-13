@@ -191,16 +191,17 @@ describe('lifecycle ownership regressions', () => {
     expect(document).toMatchObject({ runId: 'run-a', kind: 'fatal' });
   });
 
-  it('reports an ownership conflict without publishing B or allowing B to mark a clean exit', () => {
+  it('treats database ownership as proof to publish B even when the old running PID is alive', () => {
     const root = scratch(), database = databaseIn(root);
     const a = beginServeRun(database, lifecycle('run-a', { pid: 1001 })).lifecycle;
     markServeRunning(database, a);
     const b = beginServeRun(database, lifecycle('run-b', { pid: 1002 }), { isProcessAlive: () => true }).lifecycle;
-    const conflict = markServeRunning(database, b, { isProcessAlive: () => true });
-    expect(conflict.lifecycle).toBeUndefined();
-    expect(documentIn(database).lifecycle.runId).toBe('run-a');
-    recordCleanExit(database, b, { reason: 'stopped' });
+    const published = markServeRunning(database, b, { isProcessAlive: () => true });
+    expect(published.lifecycle).toMatchObject({ runId: 'run-b', phase: 'running' });
+    expect(documentIn(database).lifecycle.runId).toBe('run-b');
+    recordCleanExit(database, a, { reason: 'stopped' });
     expect(documentIn(database)['clean-exit']).toBeUndefined();
+    expect(documentIn(database).cleanExits?.find((entry: any) => entry.runId === 'run-a')).toMatchObject({ runId: 'run-a', database });
   });
 
   it('persists the first running lifecycle when the database directory did not exist at begin', () => {
@@ -226,6 +227,82 @@ describe('lifecycle ownership regressions', () => {
     expect(document.kind).toBeUndefined();
   });
 
+  it('returns every dead unclean generation for asynchronous journal enrichment', () => {
+    const root = scratch(), database = databaseIn(root);
+    const a = beginServeRun(database, lifecycle('run-a', { pid: 1001 })).lifecycle;
+    markServeRunning(database, a);
+    beginServeRun(database, lifecycle('run-b', { pid: 1002 }), { isProcessAlive: () => true });
+    const next = beginServeRun(database, lifecycle('run-c', { pid: 1003 }), { isProcessAlive: () => false });
+    expect(next.previousRuns?.map(run => run.runId)).toEqual(['run-a', 'run-b']);
+    expect(next.previousRun?.runId).toBe('run-b');
+    const document = documentIn(database);
+    expect(document.history.some((entry: any) => entry.runId === 'run-a')).toBe(true);
+    expect(document.history.some((entry: any) => entry.runId === 'run-b')).toBe(true);
+  });
+
+  it('retains A across a clean b.db run and reports A when a.db starts again', () => {
+    const root = scratch(), a = join(root, 'a.db'), b = join(root, 'b.db');
+    writeFileSync(a, ''); writeFileSync(b, '');
+    const runA = beginServeRun(a, lifecycle('run-a', { pid: 1001 })).lifecycle;
+    markServeRunning(a, runA);
+    const runB = beginServeRun(b, lifecycle('run-b', { pid: 1002 }), { isProcessAlive: () => false }).lifecycle;
+    markServeRunning(b, runB);
+    recordCleanExit(b, runB, { reason: 'stopped' });
+    beginServeRun(a, lifecycle('run-a2', { pid: 1003 }), { isProcessAlive: () => false });
+    expect(readAbnormalExit(a)).toMatchObject({ runId: 'run-a', kind: 'fatal', database: a });
+  });
+
+  it('keeps per-database lifecycles while A and B are both alive, then finds A after it is killed', () => {
+    const root = scratch(), a = join(root, 'a.db'), b = join(root, 'b.db');
+    writeFileSync(a, ''); writeFileSync(b, '');
+    const runA = beginServeRun(a, lifecycle('run-a', { pid: 1001 })).lifecycle;
+    markServeRunning(a, runA);
+    const runB = beginServeRun(b, lifecycle('run-b', { pid: 1002 }), { isProcessAlive: () => true }).lifecycle;
+    markServeRunning(b, runB);
+    beginServeRun(a, lifecycle('run-a2', { pid: 1003 }), { isProcessAlive: pid => pid === 1002 });
+    expect(readAbnormalExit(a)).toMatchObject({ runId: 'run-a', kind: 'fatal', database: a });
+    expect(readAbnormalExit(b)).toBeUndefined();
+  });
+
+  it('remembers a slow-starting A killed after B became ready on the same database', () => {
+    const root = scratch(), database = databaseIn(root);
+    const a = beginServeRun(database, lifecycle('run-a', { pid: 1001 })).lifecycle;
+    const b = beginServeRun(database, lifecycle('run-b', { pid: 1002 }), { isProcessAlive: () => true }).lifecycle;
+    markServeRunning(database, b, { isProcessAlive: () => true });
+    const c = beginServeRun(database, lifecycle('run-c', { pid: 1003 }), { isProcessAlive: pid => pid === 1002 });
+    expect(c.previousRuns?.map(run => run.runId)).toEqual(['run-a']);
+    expect(readAbnormalExit(database)).toMatchObject({ runId: 'run-a', kind: 'startup', database });
+    expect(documentIn(database).lifecycle.runId).toBe('run-b');
+    expect(documentIn(database).history.filter((entry: any) => entry.runId === 'run-b')).toHaveLength(0);
+  });
+
+  it('bounds lifecycleRuns and cleanExits to the latest 10 generations', () => {
+    const root = scratch(), database = databaseIn(root);
+    for (let index = 0; index < 12; index++) {
+      const run = beginServeRun(database, lifecycle(`run-${index}`, { pid: 1000 + index }), { isProcessAlive: () => true }).lifecycle;
+      recordCleanExit(database, run, { reason: 'stopped' });
+    }
+    const document = documentIn(database);
+    expect(document.lifecycleRuns).toHaveLength(10);
+    expect(document.cleanExits).toHaveLength(10);
+    expect(document.lifecycleRuns.some((entry: any) => entry.runId === 'run-0')).toBe(false);
+    expect(document.cleanExits.some((entry: any) => entry.runId === 'run-11')).toBe(true);
+  });
+
+  it('publishes B when slow-starting A is still alive, and accepts A late clean without a later false abnormal', () => {
+    const root = scratch(), database = databaseIn(root);
+    const a = beginServeRun(database, lifecycle('run-a', { pid: 1001 })).lifecycle;
+    const b = beginServeRun(database, lifecycle('run-b', { pid: 1002 }), { isProcessAlive: () => true }).lifecycle;
+    const published = markServeRunning(database, b, { isProcessAlive: () => true });
+    expect(published.lifecycle).toMatchObject({ runId: 'run-b', phase: 'running' });
+    expect(documentIn(database).lifecycle.runId).toBe('run-b');
+    recordCleanExit(database, a, { reason: 'stopped' });
+    expect(documentIn(database).cleanExits?.find((entry: any) => entry.runId === 'run-a')).toMatchObject({ runId: 'run-a', database });
+    recordCleanExit(database, b, { reason: 'stopped' });
+    beginServeRun(database, lifecycle('run-c', { pid: 1003 }), { isProcessAlive: () => false });
+    expect(readAbnormalExit(database)).toBeUndefined();
+  });
+
   it('clears optional metadata from the previous abnormal before writing a plain startup error', () => {
     const root = scratch(), database = databaseIn(root), previous = lifecycle('sigkill-run');
     recordAbnormalExit(database, { kind: 'fatal', exitCode: 1, error: 'killed', version: '1', lifecycle: previous, signal: 'SIGKILL', source: 'systemd-journal' });
@@ -245,8 +322,7 @@ describe('bounded systemd journal enrichment', () => {
     __REALTIME_TIMESTAMP: String((Date.parse(run.startedAt) + 5_000) * 1_000), ...override
   });
   function interrupted() {
-    const root = scratch(), database = databaseIn(root), previous = lifecycle('killed-run');
-    beginServeRun(database, previous);
+    const root = scratch(), database = databaseIn(root), previous = beginServeRun(database, lifecycle('killed-run')).lifecycle;
     markServeRunning(database, previous);
     beginServeRun(database, lifecycle('current-run'), { isProcessAlive: () => false });
     return { database, previous };
@@ -262,6 +338,17 @@ describe('bounded systemd journal enrichment', () => {
     expect(record).toMatchObject({ kind: 'fatal', exitCode: 1, runId: 'killed-run', signal: 'SIGKILL', source: 'systemd-journal', at: '2026-11-13T00:00:05.000Z' });
     expect(abnormalExitNote(record, { running: true, ready: true, startedAt: '2026-11-13T00:01:00.000Z' }, new Date('2026-11-13T00:02:00.000Z'))).toContain('SIGKILL');
     expect(documentIn(database).history.filter((entry: any) => entry.runId === previous.runId)).toHaveLength(1);
+  });
+
+  it.each([
+    ['01234567-89ab-cdef-8123-456789abcdef', '0123456789abcdef8123456789abcdef'],
+    ['0123456789abcdef8123456789abcdef', '01234567-89ab-cdef-8123-456789abcdef']
+  ])('normalizes persisted and journal boot IDs (%s vs %s)', async (persistedBoot, journalBoot) => {
+    const root = scratch(), database = databaseIn(root), previous = beginServeRun(database, lifecycle('killed-run', { boot: persistedBoot })).lifecycle;
+    markServeRunning(database, previous);
+    beginServeRun(database, lifecycle('current-run', { boot: persistedBoot }), { isProcessAlive: () => false });
+    await enrichAbnormalExitFromJournal(database, previous, { queryJournal: async () => [exitEntry(previous, { _BOOT_ID: journalBoot })] });
+    expect(readAbnormalExit(database)).toMatchObject({ signal: 'SIGKILL', source: 'systemd-journal' });
   });
 
   it('accepts the user-unit journal field even when UNIT names the user manager', async () => {
@@ -288,6 +375,37 @@ describe('bounded systemd journal enrichment', () => {
       expect(readAbnormalExit(database)).toMatchObject({ runId: previous.runId, source: 'lifecycle', error: expect.stringContaining('pending journal enrichment') });
       expect(readAbnormalExit(database)?.signal).toBeUndefined();
     }
+  });
+
+  it('does not enrich a generation after its late clean marker arrives', async () => {
+    const { database, previous } = interrupted();
+    recordCleanExit(database, previous, { reason: 'stopped' });
+    await enrichAbnormalExitFromJournal(database, previous, { queryJournal: async () => [exitEntry(previous)] });
+    expect(readAbnormalExit(database)).toMatchObject({ runId: previous.runId, source: 'lifecycle' });
+    expect(readAbnormalExit(database)?.signal).toBeUndefined();
+  });
+
+  it('scopes journal enrichment to the canonical database even when two records share runId', async () => {
+    const root = scratch(), a = join(root, 'a.db'), b = join(root, 'b.db');
+    writeFileSync(a, ''); writeFileSync(b, '');
+    const runA = lifecycle('shared-run', { database: a, pid: 1001 });
+    const runB = lifecycle('shared-run', { database: b, pid: 1002 });
+    const record = (database: string, run: ServeRunLifecycle, error: string): AbnormalExitRecord => ({
+      at: run.startedAt, kind: 'fatal', exitCode: 1, error, version: '1', database,
+      runId: run.runId, pid: run.pid, startedAt: run.startedAt, unit: run.unit, boot: run.boot, phase: run.phase
+    });
+    const recordA = record(a, runA, 'A pending'), recordB = record(b, runB, 'B pending');
+    writeFileSync(join(root, abnormalExitFileName), JSON.stringify({ ...recordB, history: [recordA, recordB], lifecycle: runB, lifecycleRuns: [runA, runB] }));
+    let wrongDatabaseQueries = 0;
+    await enrichAbnormalExitFromJournal(b, runA, { queryJournal: async () => { wrongDatabaseQueries++; return []; } });
+    await enrichAbnormalExitFromJournal(a, runA, { queryJournal: async () => [exitEntry(runA)] });
+    const document = documentIn(a);
+    expect(document.history.find((entry: any) => entry.database === a)).toMatchObject({ signal: 'SIGKILL', source: 'systemd-journal' });
+    expect(document.history.find((entry: any) => entry.database === b)).toMatchObject({ error: 'B pending' });
+    expect(document.history.find((entry: any) => entry.database === b).signal).toBeUndefined();
+    expect(document).toMatchObject({ database: b, error: 'B pending' });
+    expect(document.signal).toBeUndefined();
+    expect(wrongDatabaseQueries).toBe(0);
   });
 
   it('a late result enriches its own history entry without replacing a newer top-level abnormal', async () => {

@@ -84,7 +84,7 @@ async function serve(options: CliOptions, onReady?: () => void) {
   const unit = daemonState?.pid === process.pid && daemonState.supervisor === 'systemd' ? daemonState.systemdUnit : undefined;
   const started = beginServeRun(databaseUrl, { version: packageJson.version, ...(unit ? { unit } : {}) });
   let serveRun: ServeRunLifecycle = started.lifecycle;
-  if (started.previousRun) void enrichAbnormalExitFromJournal(databaseUrl, started.previousRun);
+  for (const previousRun of started.previousRuns ?? (started.previousRun ? [started.previousRun] : [])) void enrichAbnormalExitFromJournal(databaseUrl, previousRun);
   const abnormal = (kind: 'fatal' | 'startup', exitCode: number, error: unknown, signal?: string) => {
     recordAbnormalExit(databaseUrl, { kind, exitCode, error, version: packageJson.version, lifecycle: serveRun, source: 'process', ...(signal ? { signal } : {}) });
   };
@@ -121,12 +121,8 @@ async function serve(options: CliOptions, onReady?: () => void) {
   }
   databaseUrl = service.config.databaseUrl;
   const running = markServeRunning(databaseUrl, serveRun);
-  if (!running.lifecycle) {
-    abnormal('fatal', 1, 'Serve lifecycle ownership conflict: another generation is still running');
-    process.exit(1);
-  }
   serveRun = running.lifecycle;
-  if (running.previousRun) void enrichAbnormalExitFromJournal(databaseUrl, running.previousRun);
+  for (const previousRun of running.previousRuns ?? (running.previousRun ? [running.previousRun] : [])) void enrichAbnormalExitFromJournal(databaseUrl, previousRun);
   process.off('SIGINT', startupSignal); process.off('SIGTERM', startupSignal);
   const address = service.config.host === '0.0.0.0'
     ? `http://127.0.0.1:${service.config.port} (LAN access enabled; other devices can use this computer's LAN IP)`

@@ -53,6 +53,8 @@ export interface AbnormalExitRecord {
 interface AbnormalExitDocument extends Record<string, unknown> {
   history?: unknown;
   lifecycle?: unknown;
+  lifecycleRuns?: unknown;
+  cleanExits?: unknown;
   'clean-exit'?: unknown;
 }
 export interface JournalQueryRequest { unit: string; boot: string; pid: number; startedAt: string; until: string }
@@ -219,18 +221,60 @@ export function recordAbnormalExit(databaseUrl: string | undefined, input: {
 }
 
 function readBootId(): string | undefined {
-  try { return readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim() || undefined; } catch { return undefined; }
+  try { const value = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim(); return value ? normalizeBootId(value) : undefined; } catch { return undefined; }
 }
 
 function lifecycleBelongsTo(run: ServeRunLifecycle, databaseUrl: string | undefined): boolean {
   return Boolean(usableDatabase(databaseUrl) && run.database && canonical(run.database) === canonical(databaseUrl));
 }
 
+const runKey = (run: { runId: string; database?: string }) => `${canonical(run.database!)}\0${run.runId}`;
+const lifecycleHistoryLimit = 10;
+function allLifecycles(document: AbnormalExitDocument): ServeRunLifecycle[] {
+  const runs = new Map<string, ServeRunLifecycle>();
+  const values = [...(Array.isArray(document.lifecycleRuns) ? document.lifecycleRuns : []), document.lifecycle];
+  for (const value of values) {
+    const run = asLifecycle(value);
+    if (run?.database) runs.set(runKey(run), run);
+  }
+  return [...runs.values()];
+}
+
+function asCleanExit(value: unknown): CleanExitRecord | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const parsed = value as Record<string, unknown>;
+  if (typeof parsed.runId !== 'string' || typeof parsed.database !== 'string' || typeof parsed.at !== 'string') return undefined;
+  if (parsed.reason !== 'stopped' && parsed.reason !== 'planned-restart') return undefined;
+  return {
+    runId: parsed.runId, database: parsed.database, at: parsed.at, reason: parsed.reason,
+    ...(typeof parsed.signal === 'string' ? { signal: parsed.signal } : {})
+  };
+}
+
+function allCleanExits(document: AbnormalExitDocument): CleanExitRecord[] {
+  const records = new Map<string, CleanExitRecord>();
+  const values = [...(Array.isArray(document.cleanExits) ? document.cleanExits : []), document['clean-exit']];
+  for (const value of values) {
+    const clean = asCleanExit(value);
+    if (clean) records.set(runKey(clean), clean);
+  }
+  return [...records.values()];
+}
+
+function storeLifecycle(document: AbnormalExitDocument, run: ServeRunLifecycle): void {
+  const runs = allLifecycles(document).filter(candidate => runKey(candidate) !== runKey(run));
+  runs.push(run);
+  document.lifecycleRuns = runs.slice(-lifecycleHistoryLimit);
+}
+
+function storeCleanExit(document: AbnormalExitDocument, clean: CleanExitRecord): void {
+  const records = allCleanExits(document).filter(candidate => runKey(candidate) !== runKey(clean));
+  records.push(clean);
+  document.cleanExits = records.slice(-lifecycleHistoryLimit);
+}
+
 function hasCleanExit(document: AbnormalExitDocument, run: ServeRunLifecycle): boolean {
-  const clean = document['clean-exit'];
-  if (!clean || typeof clean !== 'object' || Array.isArray(clean)) return false;
-  const parsed = clean as Record<string, unknown>;
-  return parsed.runId === run.runId && typeof parsed.database === 'string' && Boolean(run.database) && canonical(parsed.database) === canonical(run.database!);
+  return allCleanExits(document).some(clean => runKey(clean) === runKey(run));
 }
 
 function appendUncleanExit(document: AbnormalExitDocument, previous: ServeRunLifecycle, now: Date, fallbackVersion: string): void {
@@ -249,86 +293,98 @@ function appendUncleanExit(document: AbnormalExitDocument, previous: ServeRunLif
   });
 }
 
+function normalizeBootId(value: string): string { return value.replaceAll('-', ''); }
+interface ServeRunTransition { lifecycle: ServeRunLifecycle; previousRun?: ServeRunLifecycle; previousRuns?: ServeRunLifecycle[] }
+function transition(lifecycle: ServeRunLifecycle, previousRuns: ServeRunLifecycle[]): ServeRunTransition {
+  return {
+    lifecycle,
+    ...(previousRuns.length ? { previousRun: previousRuns.at(-1)!, previousRuns } : {})
+  };
+}
+
 /** 开始一代 serve；只同步写本地生命周期，journal 富集由调用方异步启动，不阻塞就绪。 */
 export function beginServeRun(databaseUrl: string | undefined, input: {
   version: string; runId?: string; pid?: number; startedAt?: string; unit?: string; boot?: string; now?: Date;
-}, dependencies: { isProcessAlive?: (pid: number) => boolean } = {}): { lifecycle: ServeRunLifecycle; previousRun?: ServeRunLifecycle } {
+}, dependencies: { isProcessAlive?: (pid: number) => boolean } = {}): ServeRunTransition {
   const now = input.now ?? new Date();
   const lifecycle: ServeRunLifecycle = {
     runId: input.runId ?? randomUUID(), pid: input.pid ?? process.pid, startedAt: input.startedAt ?? now.toISOString(), version: input.version, phase: 'starting',
     ...(usableDatabase(databaseUrl) ? { database: canonical(databaseUrl) } : {}),
     ...(input.unit ? { unit: input.unit } : {}), ...(input.boot ?? readBootId() ? { boot: input.boot ?? readBootId()! } : {})
   };
-  let previousRun: ServeRunLifecycle | undefined;
+  const previousRuns: ServeRunLifecycle[] = [];
   updateDocument(databaseUrl, document => {
-    const previous = asLifecycle(document.lifecycle);
-    const previousBelongs = previous && lifecycleBelongsTo(previous, databaseUrl);
-    let preserveLivePrevious = false;
-    if (previous && previousBelongs && !hasCleanExit(document, previous)) {
-      const sameBoot = !previous.boot || !lifecycle.boot || previous.boot === lifecycle.boot;
-      const alive = sameBoot && (dependencies.isProcessAlive ?? defaultPidAlive)(previous.pid);
-      if (alive) preserveLivePrevious = true;
-      else {
-        previousRun = previous;
-        appendUncleanExit(document, previous, now, input.version);
-      }
+    const candidates = allLifecycles(document).filter(run => lifecycleBelongsTo(run, databaseUrl));
+    const alive = new Map<string, boolean>();
+    const isAlive = (run: ServeRunLifecycle) => {
+      if (!alive.has(run.runId)) alive.set(run.runId, Boolean((!run.boot || !lifecycle.boot || normalizeBootId(run.boot) === normalizeBootId(lifecycle.boot))
+        && (dependencies.isProcessAlive ?? defaultPidAlive)(run.pid)));
+      return alive.get(run.runId)!;
+    };
+    const current = asLifecycle(document.lifecycle);
+    const preserveLiveCurrent = current && lifecycleBelongsTo(current, databaseUrl) && !hasCleanExit(document, current) && isAlive(current);
+    for (const previous of candidates) {
+      if (hasCleanExit(document, previous) || isAlive(previous)) continue;
+      previousRuns.push(previous);
+      appendUncleanExit(document, previous, now, input.version);
     }
-    // 存活代仍是服务所有者；B 只有真正进入 running 时才可发布自己。
-    if (!preserveLivePrevious) document.lifecycle = lifecycle;
+    storeLifecycle(document, lifecycle);
+    // 存活代仍占据单数展示；B 可新增 starting，但不抹掉数组里的 A。
+    if (!preserveLiveCurrent) document.lifecycle = lifecycle;
   });
-  return { lifecycle, ...(previousRun ? { previousRun } : {}) };
+  return transition(lifecycle, previousRuns);
 }
 
 export function markServeRunning(databaseUrl: string | undefined, lifecycle: ServeRunLifecycle, dependencies: {
   isProcessAlive?: (pid: number) => boolean; now?: Date;
-} = {}): { lifecycle?: ServeRunLifecycle; previousRun?: ServeRunLifecycle } {
+} = {}): ServeRunTransition {
   const running: ServeRunLifecycle = {
     ...lifecycle, phase: 'running',
     ...(usableDatabase(databaseUrl) ? { database: canonical(databaseUrl) } : {})
   };
-  let previousRun: ServeRunLifecycle | undefined;
-  let published = true;
+  const previousRuns: ServeRunLifecycle[] = [];
   updateDocument(databaseUrl, document => {
-    const current = asLifecycle(document.lifecycle);
-    if (!current || !lifecycleBelongsTo(current, databaseUrl)) {
-      document.lifecycle = running;
-      return;
+    const candidates = allLifecycles(document).filter(run => lifecycleBelongsTo(run, databaseUrl) && run.runId !== running.runId);
+    const alive = new Map<string, boolean>();
+    const isAlive = (run: ServeRunLifecycle) => {
+      if (!alive.has(run.runId)) alive.set(run.runId, Boolean((!run.boot || !running.boot || normalizeBootId(run.boot) === normalizeBootId(running.boot))
+        && (dependencies.isProcessAlive ?? defaultPidAlive)(run.pid)));
+      return alive.get(run.runId)!;
+    };
+    // startLocalServer 成功已经证明 B 取得数据库所有权；旧代是否存活只决定能否补记异常，不否决本次发布。
+    for (const previous of candidates) {
+      if (hasCleanExit(document, previous) || isAlive(previous)) continue;
+      previousRuns.push(previous);
+      appendUncleanExit(document, previous, dependencies.now ?? new Date(), running.version);
     }
-    if (current.runId === running.runId) {
-      document.lifecycle = running;
-      return;
-    }
-    if (hasCleanExit(document, current)) {
-      document.lifecycle = running;
-      return;
-    }
-    const sameBoot = !current.boot || !running.boot || current.boot === running.boot;
-    if (sameBoot && (dependencies.isProcessAlive ?? defaultPidAlive)(current.pid)) { published = false; return; }
-    previousRun = current;
-    appendUncleanExit(document, current, dependencies.now ?? new Date(), running.version);
+    storeLifecycle(document, running);
     document.lifecycle = running;
   });
-  return published ? { lifecycle: running, ...(previousRun ? { previousRun } : {}) } : {};
+  return transition(running, previousRuns);
 }
 
-/** 只有仍属于同一 runId、同一数据库的当前代才能写干净标记；迟到的上一代关闭不能覆盖新代。 */
+/** 迟到旧代只写自己的 cleanExits；只有当前代才更新单数 clean-exit 展示。 */
 export function recordCleanExit(databaseUrl: string | undefined, lifecycle: ServeRunLifecycle, input: {
   reason: CleanExitRecord['reason']; signal?: string; now?: Date;
 }): void {
   updateDocument(databaseUrl, document => {
-    const current = asLifecycle(document.lifecycle);
-    if (current?.runId !== lifecycle.runId || !lifecycleBelongsTo(current, databaseUrl)) return;
+    const owned = allLifecycles(document).find(run => run.runId === lifecycle.runId && lifecycleBelongsTo(run, databaseUrl));
+    if (!owned) return;
     const record: CleanExitRecord = {
-      runId: lifecycle.runId, at: (input.now ?? new Date()).toISOString(), reason: input.reason,
+      runId: owned.runId, at: (input.now ?? new Date()).toISOString(), reason: input.reason,
       database: canonical(databaseUrl!), ...(input.signal ? { signal: input.signal } : {})
     };
-    document['clean-exit'] = record;
+    // 同步刷新两个有界序列的顺序，避免 clean 已裁剪而 lifecycle 仍被误报。
+    storeLifecycle(document, owned);
+    storeCleanExit(document, record);
+    const current = asLifecycle(document.lifecycle);
+    if (current?.runId === owned.runId && lifecycleBelongsTo(current, databaseUrl)) document['clean-exit'] = record;
   });
 }
 
 export async function defaultJournalQuery(request: JournalQueryRequest): Promise<Array<Record<string, unknown>>> {
   const stdout = await new Promise<string>((resolve, reject) => {
-    execFile('journalctl', ['--user', `--unit=${request.unit}`, '--output=json', '--no-pager', '--boot', request.boot.replaceAll('-', ''),
+    execFile('journalctl', ['--user', `--unit=${request.unit}`, '--output=json', '--no-pager', '--boot', normalizeBootId(request.boot),
       // systemd 252 不接受 toISOString；查询按秒向外放宽，exactSigkill 仍按毫秒精确归属。
       '--since', `@${Math.floor(Date.parse(request.startedAt) / 1_000) - 1}`,
       '--until', `@${Math.ceil(Date.parse(request.until) / 1_000) + 1}`], { timeout: 2_000, maxBuffer: 1024 * 1024, killSignal: 'SIGKILL' },
@@ -352,7 +408,7 @@ function exactSigkill(entries: Array<Record<string, unknown>>, run: ServeRunLife
   for (const entry of entries) {
     const units = [entry._SYSTEMD_UNIT, entry._SYSTEMD_USER_UNIT, entry.UNIT];
     if (!units.includes(run.unit)) continue;
-    if (entry._BOOT_ID !== run.boot || Number(entry.MAIN_PID) !== run.pid) continue;
+    if (typeof entry._BOOT_ID !== 'string' || normalizeBootId(entry._BOOT_ID) !== normalizeBootId(run.boot) || Number(entry.MAIN_PID) !== run.pid) continue;
     if (entry.EXIT_CODE !== 'killed' || Number(entry.EXIT_STATUS) !== 9) continue;
     const at = journalTimestamp(entry), started = Date.parse(run.startedAt);
     if (at === undefined || at < started || at > untilMs) continue;
@@ -365,21 +421,21 @@ function exactSigkill(entries: Array<Record<string, unknown>>, run: ServeRunLife
 export async function enrichAbnormalExitFromJournal(databaseUrl: string | undefined, run: ServeRunLifecycle, dependencies: {
   queryJournal?: JournalQuery; now?: Date;
 } = {}): Promise<void> {
-  if (!usableDatabase(databaseUrl) || !run.unit || !run.boot) return;
+  if (!usableDatabase(databaseUrl) || !run.unit || !run.boot || !lifecycleBelongsTo(run, databaseUrl)) return;
   const now = dependencies.now ?? new Date();
   try {
     const entries = await (dependencies.queryJournal ?? defaultJournalQuery)({ unit: run.unit, boot: run.boot, pid: run.pid, startedAt: run.startedAt, until: now.toISOString() });
     const at = exactSigkill(entries, run, now.getTime());
     if (at === undefined) return;
     updateDocument(databaseUrl, document => {
-      const clean = document['clean-exit'];
-      if (clean && typeof clean === 'object' && (clean as Record<string, unknown>).runId === run.runId) return;
-      const enrich = (record: AbnormalExitRecord): AbnormalExitRecord => record.runId === run.runId
+      if (hasCleanExit(document, run)) return;
+      const belongsToRun = (record: AbnormalExitRecord) => record.runId === run.runId && Boolean(record.database && canonical(record.database) === canonical(run.database!));
+      const enrich = (record: AbnormalExitRecord): AbnormalExitRecord => belongsToRun(record)
         ? { ...record, at: new Date(at).toISOString(), error: 'Process was killed by SIGKILL (matched systemd journal exit record)', signal: 'SIGKILL', source: 'systemd-journal' }
         : record;
       if (Array.isArray(document.history)) document.history = document.history.map(entry => { const record = asRecord(entry); return record ? enrich(record) : entry; });
       const top = asRecord(document);
-      if (top?.runId === run.runId) Object.assign(document, enrich(top));
+      if (top && belongsToRun(top)) Object.assign(document, enrich(top));
     });
   } catch { /* 无 journal、权限不足或超时时保留基础记录。 */ }
 }

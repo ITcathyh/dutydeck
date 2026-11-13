@@ -40,7 +40,7 @@ dutydeck update
 dutydeck doctor
 ```
 
-服务启动失败或运行中崩溃时，会在数据库所在目录写一份 `last-abnormal-exit.json`（时间、类型、退出码、脱敏后的错误首行、版本和数据库路径）；数据库目录还不存在时不写，也不会写到 `last-daemon-dir` 指向的其他实例。顶层仍是最近一条 `fatal|startup` 异常，可选 `history` 只保留最近 10 条并按 `runId` 去重；`lifecycle` 记录每代的 PID、启动时间、unit/boot，`clean-exit` 只由同一代干净停止或计划重启写入，不覆盖最近异常。上一代没有干净标记且已不在运行时，下一代先记「原因待 journal 富集」；Linux systemd 下只在同一 unit、boot、PID 和启动时间都能对齐退出记录时补 SIGKILL，查询有界且不阻塞就绪，查不到或没有权限时保留基础记录。上一代仍在运行不会报历史崩溃；launchd 富集本轮不支持。`dutydeck doctor` 读到 7 天内、且属于同一个数据库的记录时，在「守护进程」一项后面接一句「X 小时前异常退出（…）」：当前实例已就绪且是之后启动的，写「已自动恢复」，否则提示去看 journalctl。这一项的级别不变，没有记录时输出和以前一样。
+服务启动失败或运行中崩溃时，会在数据库所在目录写一份 `last-abnormal-exit.json`（时间、类型、退出码、脱敏后的错误首行、版本和数据库路径）；数据库目录还不存在时不写，也不会写到 `last-daemon-dir` 指向的其他实例。顶层仍是最近一条 `fatal|startup` 异常，可选 `history` 只保留最近 10 条并按 `runId` 去重；`lifecycle`/`clean-exit` 保留当前代兼容展示，`lifecycleRuns`/`cleanExits` 则按 runId+database 去重、各保留最近 10 条，记录各代 PID、启动时间、unit/boot 和干净停止，避免同目录多库或重叠启动互相覆盖；迟到旧代只写自己的 `cleanExits`，不改当前单数展示，干净退出不覆盖最近异常。上一代没有干净标记且已不在运行时，下一代先记「原因待 journal 富集」；Linux systemd 下只在同一 unit、boot、PID 和启动时间都能对齐退出记录时补 SIGKILL，查询有界且不阻塞就绪，查不到或没有权限时保留基础记录。上一代仍在运行不会报历史崩溃；launchd 富集本轮不支持。`dutydeck doctor` 读到 7 天内、且属于同一个数据库的记录时，在「守护进程」一项后面接一句「X 小时前异常退出（…）」：当前实例已就绪且是之后启动的，写「已自动恢复」，否则提示去看 journalctl。这一项的级别不变，没有记录时输出和以前一样。
 
 `restart` 先暂停领取新任务。已提交成功、恢复日志与原轮身份可验证的 `full-trust` tmux 任务继续在原 CLI 进程里运行，新服务接回同一轮，不重发输入；其余任务继续等待结束。ACP、普通 PTY、Herdr、提交中、缺少恢复日志或身份，以及待审批或高危权限门禁未授权的任务都不会跳过等待。systemd 只在当前 `KillMode=process` 时保留任务；其他值或读不到时全量等待。旧服务不支持恢复计数、排空失败或租约续期失败时也全量等待。`--drain-timeout` 控制等待上限，`--force` 保留原来的强制重启行为，当前 Agent 自己的会话仍自动排除。`deploy` 使用同一保留策略，ACP 等不可保留的任务仍等待结束。
 
