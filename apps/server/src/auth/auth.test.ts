@@ -211,6 +211,10 @@ describe('access cookie naming and ordered validation', () => {
     '[::1',
     'dutydeck.test:4310/path',
     'attacker@dutydeck.test:4310',
+    'evil":4310',
+    'evil`:4310',
+    'evil{test}:4310',
+    'evil}:4310',
     `${AUTH_COOKIE_NAME}_9999:forged`,
   ])('does not scope a cookie from invalid Host %s', host => {
     expect(accessCookieNameForRequest({ host })).toBe(AUTH_COOKIE_NAME);
@@ -535,6 +539,28 @@ describe('port-scoped access cookies', () => {
       expect(legacy.json()).toMatchObject({ authenticated: true });
       const login = await app.inject({ method: 'POST', url: '/api/auth/login', headers: { host }, payload: { token: TOKEN_A } });
       expect(login.headers['set-cookie']).toContain(`${AUTH_COOKIE_NAME}_4310=${TOKEN_A}`);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('uses legacy naming, validation and logout for invalid Host characters', async () => {
+    const app = buildTokenApp(TOKEN_A);
+    try {
+      for (const rawHost of ['evil":4310', 'evil`:4310', 'evil{test}:4310', 'evil}:4310']) {
+        for (const headers of [
+          { host: rawHost },
+          { host: '127.0.0.1:4310', 'x-forwarded-host': rawHost }
+        ]) {
+          const login = await app.inject({ method: 'POST', url: '/api/auth/login', headers, payload: { token: TOKEN_A } });
+          expect(String(login.headers['set-cookie'])).toContain(`${AUTH_COOKIE_NAME}=${TOKEN_A}`);
+          expect(String(login.headers['set-cookie'])).not.toContain(`${AUTH_COOKIE_NAME}_4310=`);
+          const cookie = `${AUTH_COOKIE_NAME}_4310=invalid; ${AUTH_COOKIE_NAME}=${TOKEN_A}`;
+          expect((await app.inject({ method: 'GET', url: '/api/protected', headers: { ...headers, cookie } })).statusCode).toBe(200);
+          const logout = await app.inject({ method: 'POST', url: '/api/auth/logout', headers: { ...headers, cookie } });
+          expect(String(logout.headers['set-cookie'])).toMatch(new RegExp(`^${AUTH_COOKIE_NAME}=;.*Max-Age=0$`));
+        }
+      }
     } finally {
       await app.close();
     }

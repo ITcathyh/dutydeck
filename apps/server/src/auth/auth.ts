@@ -280,7 +280,7 @@ function explicitHostPort(rawHost: string | undefined): string | undefined {
     if (!match) return undefined;
     portText = match[1]!;
   } else {
-    const match = /^[^:]+:(\d+)$/.exec(host);
+    const match = /^(?:[A-Za-z0-9._~!$&'()*+,;=-]|%[0-9A-Fa-f]{2})*:(\d+)$/.exec(host);
     if (!match) return undefined;
     portText = match[1]!;
   }
