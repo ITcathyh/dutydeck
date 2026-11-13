@@ -19,6 +19,20 @@
 
 ## 常见问题与排障 (FAQ) <a id="faq"></a>
 
+### 启动报 `DATABASE_SCHEMA_TOO_NEW`，或备份提示版本不匹配？
+
+错误中的两个版本分别是数据库实际 schema 和当前程序支持的上限。复制错误里带实际路径的完整命令检查，不要把 `--database` 换成别的实例：
+
+```bash
+dutydeck database execution-status --database /path/to/runtime/dutydeck.db
+```
+
+它只读，不修复或降级数据库。优先换用支持该 schema 的 Dutydeck。只有停止所有写入方并确认备份时间后，才考虑把备份恢复到独立新目录核对；恢复会丢备份后的写入，切回旧代码本身不会回滚数据库。
+
+### 服务被 SIGKILL 后，doctor 为什么说“原因待富集”？
+
+SIGKILL 无法执行进程内退出处理，所以下一代先根据上一代缺少 `clean-exit` 标记写基础异常。Linux/systemd 下会异步查有界 journal，只有同一 unit、boot、PID 与启动时间精确对齐才补 `SIGKILL`；journal 不存在、无权限、超时或归属不唯一时保留基础记录，不阻塞服务就绪。干净停止和计划重启不写异常，上一代 PID 仍存活也不报崩溃。文件只留最近 10 条；launchd 富集本轮不支持。
+
 ### Q1: 在飞书给机器人发消息，没有反应，也没贴 `👌`？
 1. 运行 `dutydeck doctor`，看「飞书监听」一栏是否正常。
 2. 到飞书开放平台检查应用是否开启了 **「机器人能力」**，事件订阅方式为 **长连接**（已订阅 `im.message.receive_v1`）。

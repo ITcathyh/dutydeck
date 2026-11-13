@@ -109,6 +109,37 @@ describe('offline portable backup', () => {
     expect(() => repos.control.attachRuntime('linked-restore')).toThrow(/quarantined/); repos.close();
   });
 
+  it('reports both versions and the source database command when backup creation sees a future schema', async () => {
+    const f = fixture();
+    const db = new Database(f.database);
+    db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (999, ?)').run(new Date().toISOString());
+    db.close();
+    let message = '';
+    try { await createBackup(f); } catch (error) { message = (error as Error).message; }
+    expect(message).toMatch(/^Unsupported or mismatched database schema/);
+    expect(message).toContain('999');
+    expect(message).toContain(`dutydeck database execution-status --database ${f.database}`);
+    expect(message).toMatch(/backup.*discards|writes.*backup/i);
+    expect(existsSync(f.output)).toBe(false);
+  });
+
+  it('reports both schema versions and isolated recovery when an archived database is too new', async () => {
+    const f = fixture(); await createBackup(f);
+    const supported = inspectBackup(f.output).manifest.schema;
+    const database = join(f.output, 'dutydeck.db');
+    const db = new Database(database);
+    db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (999, ?)').run(new Date().toISOString());
+    db.close(); rehashDatabase(f.output);
+    let message = '';
+    try { inspectBackup(f.output); } catch (error) { message = (error as Error).message; }
+    expect(message).toMatch(/^Unsupported or mismatched database schema/);
+    expect(message).toContain('999');
+    expect(message).toContain(String(supported));
+    expect(message).toContain(`dutydeck database execution-status --database ${database}`);
+    expect(message).toMatch(/backup.*(loses|discards)|writes.*backup/i);
+    expect(message).toMatch(/older code.*not.*rollback/i);
+  });
+
   it('rejects live repositories and raw SQLite writers; releases locks on failure', async () => {
     const f = fixture(), repos = createRepositories(f.database);
     await expect(createBackup(f)).rejects.toThrow(/DATABASE_UPGRADE_BUSY/); repos.close();

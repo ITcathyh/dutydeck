@@ -40,7 +40,7 @@ dutydeck update
 dutydeck doctor
 ```
 
-服务启动失败或运行中崩溃时，会在数据库所在目录写一份 `last-abnormal-exit.json`（时间、类型、退出码、脱敏后的错误首行、版本和数据库路径）；数据库目录还不存在时不写，也不会写到 `last-daemon-dir` 指向的其他实例。`dutydeck doctor` 读到 7 天内、且属于同一个数据库的记录时，在「守护进程」一项后面接一句「X 小时前异常退出（…）」：当前实例已就绪且是之后启动的，写「已自动恢复」，否则提示去看 journalctl。这一项的级别不变，没有记录时输出和以前一样。
+服务启动失败或运行中崩溃时，会在数据库所在目录写一份 `last-abnormal-exit.json`（时间、类型、退出码、脱敏后的错误首行、版本和数据库路径）；数据库目录还不存在时不写，也不会写到 `last-daemon-dir` 指向的其他实例。顶层仍是最近一条 `fatal|startup` 异常，可选 `history` 只保留最近 10 条并按 `runId` 去重；`lifecycle` 记录每代的 PID、启动时间、unit/boot，`clean-exit` 只由同一代干净停止或计划重启写入，不覆盖最近异常。上一代没有干净标记且已不在运行时，下一代先记「原因待 journal 富集」；Linux systemd 下只在同一 unit、boot、PID 和启动时间都能对齐退出记录时补 SIGKILL，查询有界且不阻塞就绪，查不到或没有权限时保留基础记录。上一代仍在运行不会报历史崩溃；launchd 富集本轮不支持。`dutydeck doctor` 读到 7 天内、且属于同一个数据库的记录时，在「守护进程」一项后面接一句「X 小时前异常退出（…）」：当前实例已就绪且是之后启动的，写「已自动恢复」，否则提示去看 journalctl。这一项的级别不变，没有记录时输出和以前一样。
 
 ### doctor 暴露组合检查<a id="doctor-exposure"></a>
 
@@ -146,6 +146,14 @@ dutydeck backup restore --archive /path/to/backups/snapshot-1 --target /path/to/
 ```
 
 三条命令均输出 JSON，必须显式提供路径，不从 `.env` 或 daemon 记录猜测源实例。源数据库须直接位于数据目录中且已升级到当前 schema；有活跃使用者时拒绝备份。输出和恢复目标目录必须不存在、父目录必须存在；备份放在源数据目录之外，恢复不覆盖已有目录。
+
+启动报 `DATABASE_SCHEMA_TOO_NEW` 时，错误会给出数据库版本和程序支持版本，并打印带实际路径的只读检查命令：
+
+```bash
+dutydeck database execution-status --database /path/to/runtime/dutydeck.db
+```
+
+该命令只读，不迁移、不降级，也不要求先能正常打开服务；`--database` 必须显式提供。应换用支持该 schema 的 Dutydeck，或在停止所有写入方后，用确认过时间的备份恢复到另一个新目录核对：`dutydeck backup restore --archive <备份目录> --target <新的恢复目录>`。**使用备份会丢备份后的全部写入；切回旧代码不是数据库回滚。**
 
 备份包含 SQLite 主数据、插件非秘密配置 / 绑定 / 锁文件、引用的不可变插件包，以及冻结数据库引用的产物快照。持有数据库和插件写锁期间复制，并检查组件哈希、快照大小、schema、SQLite 完整性和外键；缺少引用的产物快照或内容不一致会失败。清单列出缺失及排除项。备份目录为 0700、文件为 0600；完整数据库可能含仍可用于源实例的认证令牌、分享签名密钥及敏感正文；归档没有额外加密，不是无密钥备份。
 
