@@ -96,7 +96,7 @@ it.each(['running', 'completed'] as const)('keeps the %s task from SSE/refetch w
   await waitFor(() => expect(client!.isFetching()).toBe(0));
   fireEvent.change(screen.getByRole('textbox', { name: '消息' }), { target: { value: queued.prompt } });
   await userEvent.click(await screen.findByRole('button', { name: /^(发送消息|加入队列|立即插话|停止当前执行并发送)$/ }));
-  await waitFor(() => expect(sentBody).toEqual({ prompt: queued.prompt, mode: 'queue' }));
+  await waitFor(() => expect(sentBody).toEqual({ prompt: queued.prompt, mode: 'queue', idempotencyKey: expect.any(String) }));
   expect(client.isMutating()).toBe(1);
 
   let sequence = 0;
@@ -179,7 +179,7 @@ it.each(['queue', 'steer'] as const)('shows a new %s acknowledgement immediately
   }
   await userEvent.click(screen.getByRole('button', { name: /^(发送消息|加入队列|立即插话|停止当前执行并发送)$/ }));
   await waitFor(() => expect(client!.isMutating()).toBe(0));
-  expect(sentBody).toEqual({ prompt: queued.prompt, mode });
+  expect(sentBody).toEqual({ prompt: queued.prompt, mode, ...(mode === 'queue' ? { idempotencyKey: expect.any(String) } : {}) });
   expect(await screen.findByRole('button', { name: `取消排队：${queued.prompt}` })).toBeTruthy();
   expect((input as HTMLTextAreaElement).value).toBe('');
   expect(client.getQueryData<Task[]>(['tasks', 's1'])).toEqual([queued]);
@@ -188,6 +188,105 @@ it.each(['queue', 'steer'] as const)('shows a new %s acknowledgement immediately
   await act(async () => releaseTasks(response([queued])));
   await waitFor(() => expect(client!.isFetching()).toBe(0));
   expect(screen.getByRole('button', { name: `取消排队：${queued.prompt}` })).toBeTruthy();
+});
+
+it('reuses a UUID only for the same unknown queue submission and rotates it after acceptance or editing', async () => {
+  unrelatedApi();
+  ControlledEventSource.instances = [];
+  vi.stubGlobal('EventSource', ControlledEventSource);
+  window.history.replaceState(null, '', '/sessions/s1');
+  const session: Session = { id: 's1', agentId: 'codex', state: 'idle', cwd: '/tmp/isolated-workspace', permissionMode: 'full-trust', runId: 'run-s1', createdAt: at(0), updatedAt: at(0) };
+  let serverTasks: Task[] = [];
+  const sendBodies: Array<Record<string, unknown>> = [];
+  const unknownAttempts = new Set([1, 4]);
+  vi.stubGlobal('fetch', vi.fn(async (input: string, init?: RequestInit) => {
+    const url = new URL(input, 'http://localhost');
+    if (url.pathname === '/api/sessions') return response([session]);
+    if (url.pathname === '/api/sessions/summaries') return response(serverTasks.map(task => ({ sessionId: 's1', taskId: task.id, prompt: task.prompt, status: task.status, queuedCount: 0, updatedAt: task.updatedAt })));
+    if (url.pathname === '/api/sessions/s1/tasks') return response(serverTasks);
+    if (url.pathname === '/api/sessions/s1/events') return response([]);
+    if (url.pathname === '/api/sessions/s1/send') {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      sendBodies.push(body);
+      if (sendBodies.length === 6) return response({ error: { code: 'INVALID_PROMPT', message: 'known rejection' } }, 400);
+      if (unknownAttempts.has(sendBodies.length)) throw new TypeError('response lost');
+      const task: Task = { ...queued, id: `task-${sendBodies.length}`, prompt: String(body.prompt) };
+      serverTasks = [...serverTasks, task];
+      return response({ accepted: true, task }, 202);
+    }
+    throw new Error(`Unexpected fetch ${input}`);
+  }));
+  client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: 1, retryDelay: 1 } } });
+  render(<QueryClientProvider client={client}><App/></QueryClientProvider>);
+  const input = await screen.findByRole('textbox', { name: '消息' });
+  const submit = () => screen.getByRole('button', { name: /^(发送消息|加入队列|立即插话|停止当前执行并发送)$/ });
+  await waitFor(() => expect(client!.isFetching()).toBe(0));
+
+  fireEvent.change(input, { target: { value: 'repeatable instruction' } });
+  await userEvent.click(submit());
+  await userEvent.click(await screen.findByRole('button', { name: '重试' }));
+  await waitFor(() => expect(sendBodies).toHaveLength(2));
+  await waitFor(() => expect((input as HTMLTextAreaElement).value).toBe(''));
+  expect(sendBodies[0]?.idempotencyKey).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  expect(sendBodies[1]).toEqual(sendBodies[0]);
+
+  fireEvent.change(input, { target: { value: 'repeatable instruction' } });
+  await userEvent.click(submit());
+  await waitFor(() => expect(sendBodies).toHaveLength(3));
+  await waitFor(() => expect((input as HTMLTextAreaElement).value).toBe(''));
+  expect(sendBodies[2]?.idempotencyKey).not.toBe(sendBodies[0]?.idempotencyKey);
+
+  fireEvent.change(input, { target: { value: 'before editing' } });
+  await userEvent.click(submit());
+  await screen.findByRole('button', { name: '重试' });
+  expect(sendBodies).toHaveLength(4);
+  fireEvent.change(input, { target: { value: 'after editing' } });
+  await userEvent.click(screen.getByRole('button', { name: '重试' }));
+  await waitFor(() => expect(sendBodies).toHaveLength(5));
+  await waitFor(() => expect((input as HTMLTextAreaElement).value).toBe(''));
+  expect(sendBodies[4]?.prompt).toBe('after editing');
+  expect(sendBodies[4]?.idempotencyKey).not.toBe(sendBodies[3]?.idempotencyKey);
+
+  fireEvent.change(input, { target: { value: 'definitely rejected' } });
+  await userEvent.click(submit());
+  await screen.findByText('known rejection');
+  expect(sendBodies).toHaveLength(6);
+  expect(screen.queryByRole('button', { name: '重试' })).toBeNull();
+  await userEvent.click(submit());
+  await waitFor(() => expect(sendBodies).toHaveLength(7));
+  await waitFor(() => expect((input as HTMLTextAreaElement).value).toBe(''));
+  expect(sendBodies[6]?.idempotencyKey).not.toBe(sendBodies[5]?.idempotencyKey);
+});
+
+it('does not generate a retry key or automatically retry steer after an unknown response', async () => {
+  unrelatedApi();
+  ControlledEventSource.instances = [];
+  vi.stubGlobal('EventSource', ControlledEventSource);
+  window.history.replaceState(null, '', '/sessions/s1');
+  const session: Session = { id: 's1', agentId: 'codex', state: 'thinking', cwd: '/tmp/isolated-workspace', permissionMode: 'full-trust', runId: 'run-s1', createdAt: at(0), updatedAt: at(0) };
+  const sendBodies: Array<Record<string, unknown>> = [];
+  vi.stubGlobal('fetch', vi.fn(async (input: string, init?: RequestInit) => {
+    const url = new URL(input, 'http://localhost');
+    if (url.pathname === '/api/sessions') return response([session]);
+    if (url.pathname === '/api/sessions/summaries' || url.pathname === '/api/sessions/s1/tasks' || url.pathname === '/api/sessions/s1/events') return response([]);
+    if (url.pathname === '/api/sessions/s1/send') {
+      sendBodies.push(JSON.parse(String(init?.body)));
+      throw new TypeError('response lost');
+    }
+    throw new Error(`Unexpected fetch ${input}`);
+  }));
+  client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: 1, retryDelay: 1 } } });
+  render(<QueryClientProvider client={client}><App/></QueryClientProvider>);
+  const input = await screen.findByRole('textbox', { name: '消息' });
+  await waitFor(() => expect(client!.isFetching()).toBe(0));
+  fireEvent.change(input, { target: { value: 'steer exactly once' } });
+  await userEvent.click(screen.getByRole('button', { name: '排队' }));
+  await userEvent.click(screen.getByRole('button', { name: '插话到当前这一轮' }));
+  await userEvent.click(screen.getByRole('button', { name: '立即插话' }));
+  await screen.findByText(/插话结果未知.*核对现有任务.*不会自动重发/);
+  expect(sendBodies).toHaveLength(1);
+  expect(sendBodies[0]).toEqual({ prompt: 'steer exactly once', mode: 'steer' });
+  expect(screen.queryByRole('button', { name: '重试' })).toBeNull();
 });
 
 beforeEach(() => { vi.spyOn(api, 'sessionHistory').mockResolvedValue({ turns: [], highWaterMark: 0, liveAfter: 0 }); });

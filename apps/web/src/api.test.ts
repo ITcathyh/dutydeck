@@ -51,6 +51,22 @@ describe('web api adapter', () => {
     expect(fetcher).toHaveBeenCalledWith('/api/sessions/s1/restart', { credentials: 'same-origin', method: 'POST' });
   });
 
+  it('forwards an optional send idempotency key without changing legacy requests', async () => {
+    const task = { id: 't1', sessionId: 's1', prompt: 'hello', status: 'queued', createdAt: '', updatedAt: '' };
+    const fetcher = vi.fn(async () => ({ ok: true, json: async () => ({ accepted: true, task }) }));
+    vi.stubGlobal('fetch', fetcher);
+    await api.send('s1', 'hello', 'interrupt', [], 'web-operation-1');
+    expect(fetcher).toHaveBeenLastCalledWith('/api/sessions/s1/send', {
+      credentials: 'same-origin', method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'hello', mode: 'interrupt', idempotencyKey: 'web-operation-1' })
+    });
+    await api.send('s1', 'hello', 'steer');
+    expect(fetcher).toHaveBeenLastCalledWith('/api/sessions/s1/send', {
+      credentials: 'same-origin', method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'hello', mode: 'steer' })
+    });
+  });
+
   it('runs schedules with a revision and operation key, and deletes with a revision', async () => {
     const data = { occurrence: { id: 'o1' } };
     const fetcher = vi.fn(async () => ({ ok: true, json: async () => data }));

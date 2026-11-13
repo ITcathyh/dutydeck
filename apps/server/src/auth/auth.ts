@@ -246,20 +246,104 @@ export function extractBearerToken(authorization: string | undefined): string | 
   return token || undefined;
 }
 
-/** The access credential a request presents: Bearer for non-browser clients, else the HttpOnly cookie. */
-export const presentedCredential = (headers: { authorization?: string; cookie?: string }) =>
-  extractBearerToken(headers.authorization) ?? extractCookie(headers.cookie);
+type AccessCredentialHeaders = {
+  authorization?: string;
+  cookie?: string;
+  host?: string;
+  'x-forwarded-host'?: string | string[];
+};
 
-/** Read one exact cookie without decoding arbitrary user-controlled values. */
-export function extractCookie(cookieHeader: string | undefined, name = AUTH_COOKIE_NAME): string | undefined {
-  if (!cookieHeader) return undefined;
+function extractCookieValues(cookieHeader: string | undefined, name: string): string[] {
+  if (!cookieHeader) return [];
+  const values: string[] = [];
   for (const part of cookieHeader.split(';')) {
     const separator = part.indexOf('=');
     if (separator < 0 || part.slice(0, separator).trim() !== name) continue;
     const value = part.slice(separator + 1).trim();
-    return value || undefined;
+    values.push(value);
   }
-  return undefined;
+  return values;
+}
+
+/** Read one exact cookie without decoding arbitrary user-controlled values. */
+export function extractCookie(cookieHeader: string | undefined, name = AUTH_COOKIE_NAME): string | undefined {
+  return extractCookieValues(cookieHeader, name)[0] || undefined;
+}
+
+/** A port is scoped only when it was explicitly present in the raw, valid Host value. */
+function explicitHostPort(rawHost: string | undefined): string | undefined {
+  const host = rawHost?.trim();
+  if (!host || /[\s/\\@?#]/.test(host)) return undefined;
+  let portText: string;
+  if (host.startsWith('[')) {
+    const match = /^\[[0-9A-Fa-f:.]+\]:(\d+)$/.exec(host);
+    if (!match) return undefined;
+    portText = match[1]!;
+  } else {
+    const match = /^(?:[A-Za-z0-9._~!$&'()*+,;=-]|%[0-9A-Fa-f]{2})*:(\d+)$/.exec(host);
+    if (!match) return undefined;
+    portText = match[1]!;
+  }
+  const port = Number(portText);
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) return undefined;
+  try {
+    const parsed = new URL(`http://${host}`);
+    if (parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash) return undefined;
+    return String(port);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Login, one-time login links and logout all use this same public-Host naming rule. */
+export function accessCookieNameForRequest(headers: Pick<OriginHeaders, 'host' | 'x-forwarded-host'>): string {
+  const host = firstForwardedValue(headers['x-forwarded-host']) || headers.host?.trim();
+  const port = explicitHostPort(host);
+  return port ? `${AUTH_COOKIE_NAME}_${port}` : AUTH_COOKIE_NAME;
+}
+
+function accessCookieNames(headers: AccessCredentialHeaders): string[] {
+  const scoped = accessCookieNameForRequest(headers);
+  return scoped === AUTH_COOKIE_NAME ? [AUTH_COOKIE_NAME] : [scoped, AUTH_COOKIE_NAME];
+}
+
+/** Ordered request credentials: Bearer alone, otherwise every scoped value followed by every legacy value. */
+export function presentedCredentialCandidates(headers: AccessCredentialHeaders): string[] {
+  const bearer = extractBearerToken(headers.authorization);
+  if (bearer) return [bearer];
+  return accessCookieNames(headers).flatMap(name => extractCookieValues(headers.cookie, name)).filter(Boolean);
+}
+
+const isPromise = (value: boolean | Promise<boolean>): value is Promise<boolean> =>
+  typeof (value as Promise<boolean>).then === 'function';
+
+/**
+ * Validate candidates in order against this instance. A synchronous validator stays synchronous;
+ * an asynchronous validator is awaited before trying the next value. An invalid Bearer never falls
+ * back to cookies, while an invalid cookie cannot shadow a later valid value.
+ */
+export function validatePresentedCredential(headers: AccessCredentialHeaders, isValid: (presented: string | undefined) => boolean): boolean;
+export function validatePresentedCredential(headers: AccessCredentialHeaders, isValid: (presented: string | undefined) => Promise<boolean>): Promise<boolean>;
+export function validatePresentedCredential(headers: AccessCredentialHeaders, isValid: (presented: string | undefined) => boolean | Promise<boolean>): boolean | Promise<boolean>;
+export function validatePresentedCredential(headers: AccessCredentialHeaders, isValid: (presented: string | undefined) => boolean | Promise<boolean>): boolean | Promise<boolean> {
+  const candidates = presentedCredentialCandidates(headers);
+  if (!candidates.length) return isValid(undefined);
+  const visit = (index: number): boolean | Promise<boolean> => {
+    if (index >= candidates.length) return false;
+    const result = isValid(candidates[index]);
+    if (isPromise(result)) return result.then(valid => valid ? true : visit(index + 1));
+    return result ? true : visit(index + 1);
+  };
+  return visit(0);
+}
+
+/** Validate all request candidates with the existing access-token/password-session verifier. */
+export function isValidPresentedAccessCredential(
+  headers: AccessCredentialHeaders,
+  getToken: () => Promise<string | null>,
+  getPasswordHash?: () => Promise<string | null>,
+): Promise<boolean> {
+  return validatePresentedCredential(headers, presented => isValidAccessCredential(presented, getToken, getPasswordHash));
 }
 
 /** 一次性登录链接的有效期 */
@@ -463,11 +547,11 @@ export function registerAuthMiddleware(app: FastifyInstance, options: AuthMiddle
     if (hasShare) return checkShare();
     if (options.exempt?.(request.method, matchedPathname(request))) return;
     const bearer = extractBearerToken(request.headers.authorization);
-    const cookie = extractCookie(request.headers.cookie);
-    if (!bearer && cookie && !isSameOriginRequest(request.headers, request.protocol)) {
+    const cookieCandidates = bearer ? [] : presentedCredentialCandidates(request.headers);
+    if (!bearer && cookieCandidates.length > 0 && !isSameOriginRequest(request.headers, request.protocol)) {
       return reply.code(403).send({ error: { code: 'ORIGIN_NOT_ALLOWED', message: 'Request origin does not match Dutydeck' } });
     }
-    if (!await isValidAccessCredential(bearer ?? cookie, options.getToken, options.getPasswordHash)) {
+    if (!await isValidPresentedAccessCredential(request.headers, options.getToken, options.getPasswordHash)) {
       return reply.code(401).send(UNAUTHORIZED_PAYLOAD);
     }
   });
@@ -476,12 +560,12 @@ export function registerAuthMiddleware(app: FastifyInstance, options: AuthMiddle
 const browserAuthRequired = (request: FastifyRequest, options: AuthMiddlewareOptions) =>
   accessMode(options) === 'token';
 
-const cookieAttributes = (request: FastifyRequest, clear = false) => {
+const cookieAttributes = (request: FastifyRequest, clear = false, name = accessCookieNameForRequest(request.headers)) => {
   const forwarded = request.headers['x-forwarded-proto'];
   const protocol = (Array.isArray(forwarded) ? forwarded[0] : forwarded)?.split(',')[0]?.trim();
   const secure = request.protocol === 'https' || protocol === 'https';
   return [
-    `${AUTH_COOKIE_NAME}=${clear ? '' : '__VALUE__'}`,
+    `${name}=${clear ? '' : '__VALUE__'}`,
     'Path=/',
     'HttpOnly',
     'SameSite=Strict',
@@ -505,7 +589,7 @@ export function registerBrowserAuthRoutes(app: FastifyInstance, options: AuthMid
     const required = browserAuthRequired(request, options);
     if (!required) return { authenticated: true, required: false };
     const passwordHash = await options.getPasswordHash?.() ?? null;
-    const authenticated = await isValidAccessCredential(presentedCredential(request.headers), options.getToken, async () => passwordHash);
+    const authenticated = await isValidPresentedAccessCredential(request.headers, options.getToken, async () => passwordHash);
     return { authenticated, required: true, ...passwordFlag(passwordHash) };
   });
 
@@ -572,9 +656,19 @@ export function registerBrowserAuthRoutes(app: FastifyInstance, options: AuthMid
 
   app.post('/api/auth/logout', async (request, reply) => {
     reply.header('Cache-Control', 'no-store');
-    reply.header('Set-Cookie', cookieAttributes(request, true));
     const required = browserAuthRequired(request, options);
     const passwordHash = required ? await options.getPasswordHash?.() ?? null : null;
+    const scoped = accessCookieNameForRequest(request.headers);
+    const names = [scoped];
+    // A legacy cookie belongs to another instance until this instance's own verifier accepts it.
+    // Without an explicit port the selected name already is the legacy cookie, so preserve old logout behavior.
+    if (required && scoped !== AUTH_COOKIE_NAME
+      && await validatePresentedCredential({ cookie: request.headers.cookie }, presented =>
+        isValidAccessCredential(presented, options.getToken, async () => passwordHash))) {
+      names.push(AUTH_COOKIE_NAME);
+    }
+    const cookies = names.map(name => cookieAttributes(request, true, name));
+    reply.header('Set-Cookie', cookies.length === 1 ? cookies[0]! : cookies);
     return { authenticated: !required, required, ...passwordFlag(passwordHash) } satisfies BrowserAuthState;
   });
 }

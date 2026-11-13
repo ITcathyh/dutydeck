@@ -84,6 +84,24 @@ describe('TimelineItem 事件分发', () => {
     expect(container.querySelector('article')).toBeNull();
   });
 
+  it('用户气泡为长 Markdown 提供局部折行，并保留代码块的独立滚动作用域', () => {
+    const url = `https://example.invalid/${'segment/'.repeat(30)}`;
+    const code = `CODE_${'x'.repeat(240)}_END`;
+    const { container } = render(<TimelineItem event={event('text', { role: 'user', text: `${url}\n\n\`\`\`text\n${code}\n\`\`\`` })}/>);
+    const bubble = container.querySelector<HTMLElement>('.justify-end > div')!;
+    expect(bubble.className).toContain('min-w-0');
+    expect(bubble.className).toContain('[overflow-wrap:anywhere]');
+    expect(bubble.querySelector('a')?.textContent).toBe(url);
+    expect(bubble.querySelector('.code-renderer')?.textContent).toContain(code);
+  });
+
+  it('assistant 输出不携带用户气泡专用的折行工具类', () => {
+    const { container } = render(<TimelineItem event={event('text', { role: 'assistant', text: 'https://example.invalid/' + 'x'.repeat(240) })}/>);
+    const article = container.querySelector('article')!;
+    expect(article.className).not.toContain('[overflow-wrap:anywhere]');
+    expect(article.className).toContain('markdown');
+  });
+
   it('插话送达的用户消息标明它并入了当前这一轮', () => {
     render(<TimelineItem event={event('text', { role: 'user', text: '顺便看日志', steering: { outcome: 'injected' } })}/>);
     expect(screen.getByText('插话到当前这一轮')).toBeTruthy();

@@ -28,7 +28,7 @@ function UserMessage({ id, text, steered = false }: { id: string; text: string; 
     if (body) setOverflowing(body.scrollHeight > body.clientHeight + 1);
   }, [text]);
   const collapsed = overflowing && !expanded;
-  return <div className="ui-timeline-item my-6 flex justify-end"><div className="max-w-[84%] rounded-lg rounded-br-sm border border-action-soft-hover bg-action-soft px-4 py-3 text-body text-primary sm:max-w-[78%]">
+  return <div className="ui-timeline-item my-6 flex justify-end"><div className="min-w-0 max-w-[84%] rounded-lg rounded-br-sm border border-action-soft-hover bg-action-soft px-4 py-3 text-body text-primary [overflow-wrap:anywhere] sm:max-w-[78%]">
     {steered && <div className="mb-1 text-caption text-subtle">插话到当前这一轮</div>}
     <div ref={bodyRef} className={expanded ? undefined : `max-h-40 overflow-hidden ${collapsed ? 'ui-fade-bottom' : ''}`}><MarkdownContent>{text}</MarkdownContent></div>
     {overflowing && <button type="button" aria-expanded={expanded} onClick={() => setExpanded(value => !value)} className="mt-1 min-h-8 text-caption font-medium text-link hover:underline">{expanded ? '收起' : '展开全文'}</button>}
