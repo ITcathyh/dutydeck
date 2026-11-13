@@ -10,7 +10,7 @@ import { WATCH_PREFIX } from '../watch.js';
  *   · 每个 fail / warn 必须带 remedy，有可执行动作时必须带 command。
  *   · 任何字段都不得包含机密（app secret、access token）。
  */
-import { larkBotEntryError, larkBotsConfigKey, larkExecutionConfirmed, larkMemoryEnabled, publicLarkConfigs, readLarkConfigs, type StoredLarkConfig } from '../lark/config.js';
+import { larkBotEntryError, larkBotsConfigKey, larkConfigBlockingError, larkExecutionConfirmed, larkMemoryEnabled, publicLarkConfigs, readLarkConfigs, type StoredLarkConfig } from '../lark/config.js';
 import { AUTH_TOKEN_CONFIG_KEY } from '../auth/auth.js';
 import { isRuntimeModelAlias, modelHasPrice, type UsagePricing } from '../usage-ledger.js';
 import { larkMemoryErrorLabel } from '../lark/memory.js';
@@ -1065,8 +1065,9 @@ export async function checkLarkExposure(observation: LarkExposureObservation): P
   const bots = publicLarkConfigs(usable, { listeningDisabled: observation.listenerDisabled }).bots;
   if (bots.length === 0) return { ...base, level: 'skip', detail: `${network}；未配置机器人，无权限组合可判` };
 
-  const projections = bots.map(bot => {
-    const listening = !observation.listenerDisabled && bot.listening && bot.setupComplete;
+  const projections = bots.map((bot, index) => {
+    const blocked = larkConfigBlockingError(usable[index]!) !== undefined;
+    const listening = !blocked && !observation.listenerDisabled && bot.listening && bot.setupComplete;
     const fullTrust = listening && bot.permissionMode === 'full-trust';
     const userCount = bot.highRiskAllowedUsers.length;
     const emailCount = bot.highRiskAllowedEmails.length;
@@ -1076,11 +1077,12 @@ export async function checkLarkExposure(observation: LarkExposureObservation): P
     const weak = riskControlMode !== 'enforced';
     const dangerous = mode === 'open' && fullTrust && broad && weak;
     const scopeNote = riskControlMode === 'off' && userCount + emailCount > 0 ? '，off 下名单不限制执行' : '';
+    const listeningNote = blocked ? '（配置受阻，未形成监听权限）' : listening ? '' : '（未形成监听权限）';
     return {
       appId: bot.appId,
       dangerous,
       off: riskControlMode === 'off',
-      text: `${bot.appId}：permissionMode=${bot.permissionMode ?? 'full-trust'}${listening ? '' : '（未形成监听权限）'}；高危范围=${broad ? '全部' : '指定'}（ID ${userCount}、邮箱 ${emailCount}${scopeNote}）；riskControlMode=${riskControlMode}`
+      text: `${bot.appId}：permissionMode=${bot.permissionMode ?? 'full-trust'}${listeningNote}；高危范围=${broad ? '全部' : '指定'}（ID ${userCount}、邮箱 ${emailCount}${scopeNote}）；riskControlMode=${riskControlMode}`
     };
   });
   const detail = `${network}；${projections.map(bot => bot.text).join('；')}；边界=不包含反向代理或防火墙后的其他访问路径`;
