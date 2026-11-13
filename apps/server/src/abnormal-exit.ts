@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { redactCredentialText } from '@dutydeck/shared';
 import { writeFileAtomicSync } from './atomic-file.js';
@@ -21,6 +21,8 @@ export interface ServeRunLifecycle {
   startedAt: string;
   version: string;
   phase: 'starting' | 'running';
+  /** 规范化数据库路径；同目录的不同数据库不得共享一代生命周期。 */
+  database?: string;
   unit?: string;
   boot?: string;
 }
@@ -28,6 +30,7 @@ export interface CleanExitRecord {
   runId: string;
   at: string;
   reason: 'stopped' | 'planned-restart';
+  database?: string;
   signal?: string;
 }
 export interface AbnormalExitRecord {
@@ -100,6 +103,7 @@ function asLifecycle(value: unknown): ServeRunLifecycle | undefined {
   return {
     runId: parsed.runId, pid: parsed.pid, startedAt: parsed.startedAt,
     version: typeof parsed.version === 'string' ? parsed.version : '', phase: parsed.phase === 'running' ? 'running' : 'starting',
+    ...(typeof parsed.database === 'string' ? { database: parsed.database } : {}),
     ...(typeof parsed.unit === 'string' ? { unit: parsed.unit } : {}), ...(typeof parsed.boot === 'string' ? { boot: parsed.boot } : {})
   };
 }
@@ -125,6 +129,8 @@ function appendRecord(document: AbnormalExitDocument, record: AbnormalExitRecord
   }
   const deduplicated = history.filter(entry => !record.runId || entry.runId !== record.runId);
   deduplicated.push(record);
+  // 顶层只描述这一条异常；文档级 history/lifecycle/clean-exit 与其他未知元数据保留。
+  for (const key of ['at', 'kind', 'exitCode', 'error', 'version', 'database', 'runId', 'pid', 'startedAt', 'unit', 'boot', 'phase', 'signal', 'source']) delete document[key];
   Object.assign(document, record);
   document.history = deduplicated.slice(-abnormalHistoryLimit);
 }
@@ -134,26 +140,50 @@ function defaultPidAlive(pid: number): boolean {
 }
 
 const lockPause = new Int32Array(new SharedArrayBuffer(4));
+interface LockObservation { dev: number; ino: number; mtimeMs: number; owner?: string }
+function observeLock(lock: string): LockObservation | undefined {
+  try {
+    const info = statSync(lock);
+    try { return { dev: info.dev, ino: info.ino, mtimeMs: info.mtimeMs, owner: readFileSync(join(lock, 'owner'), 'utf8') }; }
+    catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT' ? { dev: info.dev, ino: info.ino, mtimeMs: info.mtimeMs } : undefined; }
+  } catch { return undefined; }
+}
+/** 先把候选移到唯一隔离名，再复核 inode 与 owner；替换过的新锁绝不删除。 */
+function reclaimStaleLock(lock: string, observed: LockObservation): void {
+  const quarantine = `${lock}.stale.${process.pid}.${randomUUID()}`;
+  try { renameSync(lock, quarantine); } catch { return; }
+  const moved = observeLock(quarantine);
+  if (!moved || moved.dev !== observed.dev || moved.ino !== observed.ino || moved.owner !== observed.owner) {
+    try { renameSync(quarantine, lock); } catch { /* 原位置已有新锁时保留隔离目录，不删除任何新锁。 */ }
+    return;
+  }
+  rmSync(quarantine, { recursive: true, force: true });
+}
 /** 有界跨进程锁；读改写必须在同一临界区，不能两个 PID 各自 rename 覆盖历史。 */
 function withRecordLock(file: string, action: () => void): boolean {
   const lock = `${file}.lock`;
+  const ownerToken = `${process.pid}:${randomUUID()}`;
   const deadline = Date.now() + 2_000;
   for (;;) {
     try {
       mkdirSync(lock, { mode: 0o700 });
-      writeFileSync(join(lock, 'owner'), String(process.pid), { mode: 0o600 });
+      try { writeFileSync(join(lock, 'owner'), ownerToken, { mode: 0o600, flag: 'wx' }); }
+      catch (error) { rmSync(lock, { recursive: true, force: true }); throw error; }
       break;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      try {
-        const owner = Number(readFileSync(join(lock, 'owner'), 'utf8'));
-        if (Date.now() - statSync(lock).mtimeMs > 1_000 && (!owner || !defaultPidAlive(owner))) rmSync(lock, { recursive: true, force: true });
-      } catch { /* 锁正在创建或已被释放，下轮重试。 */ }
+      const observed = observeLock(lock);
+      const ownerPid = Number(observed?.owner?.split(':')[0]);
+      if (observed && Date.now() - observed.mtimeMs > 1_000 && (!observed.owner || !ownerPid || !defaultPidAlive(ownerPid))) reclaimStaleLock(lock, observed);
       if (Date.now() >= deadline) return false;
       Atomics.wait(lockPause, 0, 0, 10);
     }
   }
-  try { action(); return true; } finally { rmSync(lock, { recursive: true, force: true }); }
+  try { action(); return true; }
+  finally {
+    // 只有仍持有同一个 owner token 才释放，避免误删已替换的新锁。
+    try { if (readFileSync(join(lock, 'owner'), 'utf8') === ownerToken) rmSync(lock, { recursive: true, force: true }); } catch { /* 已被 stale 清理或替换。 */ }
+  }
 }
 
 function updateDocument(databaseUrl: string | undefined, action: (document: AbnormalExitDocument, file: string) => void): boolean {
@@ -192,6 +222,33 @@ function readBootId(): string | undefined {
   try { return readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim() || undefined; } catch { return undefined; }
 }
 
+function lifecycleBelongsTo(run: ServeRunLifecycle, databaseUrl: string | undefined): boolean {
+  return Boolean(usableDatabase(databaseUrl) && run.database && canonical(run.database) === canonical(databaseUrl));
+}
+
+function hasCleanExit(document: AbnormalExitDocument, run: ServeRunLifecycle): boolean {
+  const clean = document['clean-exit'];
+  if (!clean || typeof clean !== 'object' || Array.isArray(clean)) return false;
+  const parsed = clean as Record<string, unknown>;
+  return parsed.runId === run.runId && typeof parsed.database === 'string' && Boolean(run.database) && canonical(parsed.database) === canonical(run.database!);
+}
+
+function appendUncleanExit(document: AbnormalExitDocument, previous: ServeRunLifecycle, now: Date, fallbackVersion: string): void {
+  if (!previous.database) return;
+  const database = canonical(previous.database);
+  const history = Array.isArray(document.history) ? document.history.map(asRecord).filter((entry): entry is AbnormalExitRecord => Boolean(entry)) : [];
+  const top = asRecord(document);
+  if (top) history.push(top);
+  if (history.some(record => record.runId === previous.runId && record.database && canonical(record.database) === database)) return;
+  appendRecord(document, {
+    at: now.toISOString(), kind: previous.phase === 'starting' ? 'startup' : 'fatal', exitCode: 1,
+    error: 'Process exited without a clean-exit marker; cause pending journal enrichment',
+    version: previous.version || fallbackVersion, database, runId: previous.runId, pid: previous.pid,
+    startedAt: previous.startedAt, phase: previous.phase, source: 'lifecycle',
+    ...(previous.unit ? { unit: previous.unit } : {}), ...(previous.boot ? { boot: previous.boot } : {})
+  });
+}
+
 /** 开始一代 serve；只同步写本地生命周期，journal 富集由调用方异步启动，不阻塞就绪。 */
 export function beginServeRun(databaseUrl: string | undefined, input: {
   version: string; runId?: string; pid?: number; startedAt?: string; unit?: string; boot?: string; now?: Date;
@@ -199,60 +256,82 @@ export function beginServeRun(databaseUrl: string | undefined, input: {
   const now = input.now ?? new Date();
   const lifecycle: ServeRunLifecycle = {
     runId: input.runId ?? randomUUID(), pid: input.pid ?? process.pid, startedAt: input.startedAt ?? now.toISOString(), version: input.version, phase: 'starting',
+    ...(usableDatabase(databaseUrl) ? { database: canonical(databaseUrl) } : {}),
     ...(input.unit ? { unit: input.unit } : {}), ...(input.boot ?? readBootId() ? { boot: input.boot ?? readBootId()! } : {})
   };
   let previousRun: ServeRunLifecycle | undefined;
   updateDocument(databaseUrl, document => {
     const previous = asLifecycle(document.lifecycle);
-    const clean = document['clean-exit'];
-    const cleanRunId = clean && typeof clean === 'object' && !Array.isArray(clean) ? (clean as Record<string, unknown>).runId : undefined;
-    if (previous && cleanRunId !== previous.runId) {
+    const previousBelongs = previous && lifecycleBelongsTo(previous, databaseUrl);
+    let preserveLivePrevious = false;
+    if (previous && previousBelongs && !hasCleanExit(document, previous)) {
       const sameBoot = !previous.boot || !lifecycle.boot || previous.boot === lifecycle.boot;
       const alive = sameBoot && (dependencies.isProcessAlive ?? defaultPidAlive)(previous.pid);
-      if (!alive) {
+      if (alive) preserveLivePrevious = true;
+      else {
         previousRun = previous;
-        const history = Array.isArray(document.history) ? document.history.map(asRecord) : [];
-        const top = asRecord(document);
-        if (top) history.push(top);
-        if (!history.some(record => record?.runId === previous.runId)) {
-          appendRecord(document, {
-            at: now.toISOString(), kind: previous.phase === 'starting' ? 'startup' : 'fatal', exitCode: 1,
-            error: 'Process exited without a clean-exit marker; cause pending journal enrichment',
-            version: previous.version || input.version, database: canonical(databaseUrl!), runId: previous.runId, pid: previous.pid,
-            startedAt: previous.startedAt, phase: previous.phase, source: 'lifecycle',
-            ...(previous.unit ? { unit: previous.unit } : {}), ...(previous.boot ? { boot: previous.boot } : {})
-          });
-        }
+        appendUncleanExit(document, previous, now, input.version);
       }
     }
-    document.lifecycle = lifecycle;
+    // 存活代仍是服务所有者；B 只有真正进入 running 时才可发布自己。
+    if (!preserveLivePrevious) document.lifecycle = lifecycle;
   });
   return { lifecycle, ...(previousRun ? { previousRun } : {}) };
 }
 
-export function markServeRunning(databaseUrl: string | undefined, lifecycle: ServeRunLifecycle): ServeRunLifecycle {
-  const running = { ...lifecycle, phase: 'running' as const };
+export function markServeRunning(databaseUrl: string | undefined, lifecycle: ServeRunLifecycle, dependencies: {
+  isProcessAlive?: (pid: number) => boolean; now?: Date;
+} = {}): { lifecycle?: ServeRunLifecycle; previousRun?: ServeRunLifecycle } {
+  const running: ServeRunLifecycle = {
+    ...lifecycle, phase: 'running',
+    ...(usableDatabase(databaseUrl) ? { database: canonical(databaseUrl) } : {})
+  };
+  let previousRun: ServeRunLifecycle | undefined;
+  let published = true;
   updateDocument(databaseUrl, document => {
-    if (asLifecycle(document.lifecycle)?.runId === lifecycle.runId) document.lifecycle = running;
+    const current = asLifecycle(document.lifecycle);
+    if (!current || !lifecycleBelongsTo(current, databaseUrl)) {
+      document.lifecycle = running;
+      return;
+    }
+    if (current.runId === running.runId) {
+      document.lifecycle = running;
+      return;
+    }
+    if (hasCleanExit(document, current)) {
+      document.lifecycle = running;
+      return;
+    }
+    const sameBoot = !current.boot || !running.boot || current.boot === running.boot;
+    if (sameBoot && (dependencies.isProcessAlive ?? defaultPidAlive)(current.pid)) { published = false; return; }
+    previousRun = current;
+    appendUncleanExit(document, current, dependencies.now ?? new Date(), running.version);
+    document.lifecycle = running;
   });
-  return running;
+  return published ? { lifecycle: running, ...(previousRun ? { previousRun } : {}) } : {};
 }
 
-/** 只有仍属于同一 runId 的当前代才能写干净标记；迟到的上一代关闭不能覆盖新代。 */
+/** 只有仍属于同一 runId、同一数据库的当前代才能写干净标记；迟到的上一代关闭不能覆盖新代。 */
 export function recordCleanExit(databaseUrl: string | undefined, lifecycle: ServeRunLifecycle, input: {
   reason: CleanExitRecord['reason']; signal?: string; now?: Date;
 }): void {
   updateDocument(databaseUrl, document => {
-    if (asLifecycle(document.lifecycle)?.runId !== lifecycle.runId) return;
-    const record: CleanExitRecord = { runId: lifecycle.runId, at: (input.now ?? new Date()).toISOString(), reason: input.reason, ...(input.signal ? { signal: input.signal } : {}) };
+    const current = asLifecycle(document.lifecycle);
+    if (current?.runId !== lifecycle.runId || !lifecycleBelongsTo(current, databaseUrl)) return;
+    const record: CleanExitRecord = {
+      runId: lifecycle.runId, at: (input.now ?? new Date()).toISOString(), reason: input.reason,
+      database: canonical(databaseUrl!), ...(input.signal ? { signal: input.signal } : {})
+    };
     document['clean-exit'] = record;
   });
 }
 
-async function defaultJournalQuery(request: JournalQueryRequest): Promise<Array<Record<string, unknown>>> {
+export async function defaultJournalQuery(request: JournalQueryRequest): Promise<Array<Record<string, unknown>>> {
   const stdout = await new Promise<string>((resolve, reject) => {
-    execFile('journalctl', ['--user', `--unit=${request.unit}`, '--output=json', '--no-pager', '--boot', request.boot,
-      '--since', request.startedAt, '--until', request.until], { timeout: 2_000, maxBuffer: 1024 * 1024, killSignal: 'SIGKILL' },
+    execFile('journalctl', ['--user', `--unit=${request.unit}`, '--output=json', '--no-pager', '--boot', request.boot.replaceAll('-', ''),
+      // systemd 252 不接受 toISOString；查询按秒向外放宽，exactSigkill 仍按毫秒精确归属。
+      '--since', `@${Math.floor(Date.parse(request.startedAt) / 1_000) - 1}`,
+      '--until', `@${Math.ceil(Date.parse(request.until) / 1_000) + 1}`], { timeout: 2_000, maxBuffer: 1024 * 1024, killSignal: 'SIGKILL' },
     (error, output) => error ? reject(error) : resolve(output));
   });
   return stdout.split(/\r?\n/).filter(Boolean).flatMap(line => {

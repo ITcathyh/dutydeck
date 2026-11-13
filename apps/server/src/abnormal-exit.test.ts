@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { abnormalExitFileName, abnormalExitNote, beginServeRun, enrichAbnormalExitFromJournal, markServeRunning, readAbnormalExit, recordAbnormalExit, recordCleanExit, type AbnormalExitRecord, type ServeRunLifecycle } from './abnormal-exit.js';
@@ -122,11 +122,11 @@ describe('serve lifecycle and bounded abnormal history', () => {
     const second = beginServeRun(database, lifecycle('run-2'), { isProcessAlive: () => true });
     expect(second.previousRun).toBeUndefined();
     expect(readAbnormalExit(database)).toBeUndefined();
-    recordCleanExit(database, first, { reason: 'stopped' });
+    recordCleanExit(database, second.lifecycle, { reason: 'stopped' });
     expect(documentIn(database)['clean-exit']).toBeUndefined();
     const third = beginServeRun(database, lifecycle('run-3'), { isProcessAlive: () => false });
-    expect(third.previousRun?.runId).toBe('run-2');
-    expect(readAbnormalExit(database)).toMatchObject({ runId: 'run-2', kind: 'startup', phase: 'starting' });
+    expect(third.previousRun?.runId).toBe('run-1');
+    expect(readAbnormalExit(database)).toMatchObject({ runId: 'run-1', kind: 'startup', phase: 'starting' });
   });
 
   it('keeps startup and running phases distinct and preserves an existing abnormal record across later clean stops', () => {
@@ -151,6 +151,91 @@ describe('serve lifecycle and bounded abnormal history', () => {
     expect(documentIn(database).lifecycle.runId).toBe('new-run');
     recordAbnormalExit(database, { kind: 'fatal', exitCode: 1, error: 'after corruption', version: '1' });
     expect(readAbnormalExit(database)).toMatchObject({ error: 'after corruption', kind: 'fatal' });
+  });
+});
+
+describe('lifecycle ownership regressions', () => {
+  it('recovers an expired lock whose owner file was never written', () => {
+    const root = scratch(), database = databaseIn(root), file = join(root, abnormalExitFileName), lock = `${file}.lock`;
+    mkdirSync(lock); const expired = new Date(Date.now() - 10_000); utimesSync(lock, expired, expired);
+    recordAbnormalExit(database, { kind: 'fatal', exitCode: 1, error: 'after stale lock', version: '1' });
+    expect(readAbnormalExit(database)).toMatchObject({ error: 'after stale lock' });
+    expect(existsSync(lock)).toBe(false);
+  });
+
+  it('keeps a live A lifecycle when B is rejected, then attributes A SIGKILL to C', () => {
+    const root = scratch(), database = databaseIn(root);
+    const a = beginServeRun(database, lifecycle('run-a', { pid: 1001 })).lifecycle;
+    markServeRunning(database, a);
+    beginServeRun(database, lifecycle('run-b', { pid: 1002 }), { isProcessAlive: () => true });
+    expect(documentIn(database).lifecycle.runId).toBe('run-a');
+    recordAbnormalExit(database, { kind: 'startup', exitCode: 1, error: 'DATABASE_RUNTIME_BUSY', version: '2', lifecycle: lifecycle('run-b', { pid: 1002 }) });
+    expect(documentIn(database).lifecycle.runId).toBe('run-a');
+
+    beginServeRun(database, lifecycle('run-c', { pid: 1003 }), { isProcessAlive: () => false });
+    const document = documentIn(database);
+    expect(document).toMatchObject({ runId: 'run-a', kind: 'fatal', database });
+    expect(document.lifecycle.runId).toBe('run-c');
+    expect(document.history.some((entry: any) => entry.runId === 'run-b' && entry.kind === 'startup')).toBe(true);
+  });
+
+  it('publishes B when it really acquires ownership after A exits and records A before enrichment', () => {
+    const root = scratch(), database = databaseIn(root);
+    const a = beginServeRun(database, lifecycle('run-a', { pid: 1001 })).lifecycle;
+    markServeRunning(database, a);
+    const b = beginServeRun(database, lifecycle('run-b', { pid: 1002 }), { isProcessAlive: () => true }).lifecycle;
+    const published = markServeRunning(database, b, { isProcessAlive: () => false });
+    const document = documentIn(database);
+    expect(published.previousRun?.runId).toBe('run-a');
+    expect(document.lifecycle).toMatchObject({ runId: 'run-b', phase: 'running' });
+    expect(document).toMatchObject({ runId: 'run-a', kind: 'fatal' });
+  });
+
+  it('reports an ownership conflict without publishing B or allowing B to mark a clean exit', () => {
+    const root = scratch(), database = databaseIn(root);
+    const a = beginServeRun(database, lifecycle('run-a', { pid: 1001 })).lifecycle;
+    markServeRunning(database, a);
+    const b = beginServeRun(database, lifecycle('run-b', { pid: 1002 }), { isProcessAlive: () => true }).lifecycle;
+    const conflict = markServeRunning(database, b, { isProcessAlive: () => true });
+    expect(conflict.lifecycle).toBeUndefined();
+    expect(documentIn(database).lifecycle.runId).toBe('run-a');
+    recordCleanExit(database, b, { reason: 'stopped' });
+    expect(documentIn(database)['clean-exit']).toBeUndefined();
+  });
+
+  it('persists the first running lifecycle when the database directory did not exist at begin', () => {
+    const root = scratch(), database = join(root, 'missing', 'dutydeck.db');
+    const first = beginServeRun(database, lifecycle('first-run')).lifecycle;
+    expect(existsSync(join(root, 'missing'))).toBe(false);
+    mkdirSync(join(root, 'missing'), { recursive: true }); writeFileSync(database, '');
+    markServeRunning(database, first);
+    expect(documentIn(database).lifecycle).toMatchObject({ runId: 'first-run', phase: 'running' });
+    beginServeRun(database, lifecycle('second-run'), { isProcessAlive: () => false });
+    expect(readAbnormalExit(database)).toMatchObject({ runId: 'first-run', kind: 'fatal' });
+  });
+
+  it('never attributes a lifecycle from a.db to b.db in the same directory', () => {
+    const root = scratch(), a = join(root, 'a.db'), b = join(root, 'b.db');
+    writeFileSync(a, ''); writeFileSync(b, '');
+    const first = beginServeRun(a, lifecycle('run-a')).lifecycle;
+    markServeRunning(a, first);
+    beginServeRun(b, lifecycle('run-b'), { isProcessAlive: () => false });
+    expect(readAbnormalExit(b)).toBeUndefined();
+    const document = documentIn(b);
+    expect(document.lifecycle).toMatchObject({ runId: 'run-b', database: b });
+    expect(document.kind).toBeUndefined();
+  });
+
+  it('clears optional metadata from the previous abnormal before writing a plain startup error', () => {
+    const root = scratch(), database = databaseIn(root), previous = lifecycle('sigkill-run');
+    recordAbnormalExit(database, { kind: 'fatal', exitCode: 1, error: 'killed', version: '1', lifecycle: previous, signal: 'SIGKILL', source: 'systemd-journal' });
+    recordAbnormalExit(database, { kind: 'startup', exitCode: 1, error: 'plain config error', version: '1' });
+    const document = documentIn(database);
+    expect(document).toMatchObject({ kind: 'startup', error: 'plain config error' });
+    expect(document.runId).toBeUndefined();
+    expect(document.signal).toBeUndefined();
+    expect(document.source).toBeUndefined();
+    expect(document.history[0]).toMatchObject({ runId: 'sigkill-run', signal: 'SIGKILL' });
   });
 });
 

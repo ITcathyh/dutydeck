@@ -120,7 +120,13 @@ async function serve(options: CliOptions, onReady?: () => void) {
     throw error;
   }
   databaseUrl = service.config.databaseUrl;
-  serveRun = markServeRunning(databaseUrl, serveRun);
+  const running = markServeRunning(databaseUrl, serveRun);
+  if (!running.lifecycle) {
+    abnormal('fatal', 1, 'Serve lifecycle ownership conflict: another generation is still running');
+    process.exit(1);
+  }
+  serveRun = running.lifecycle;
+  if (running.previousRun) void enrichAbnormalExitFromJournal(databaseUrl, running.previousRun);
   process.off('SIGINT', startupSignal); process.off('SIGTERM', startupSignal);
   const address = service.config.host === '0.0.0.0'
     ? `http://127.0.0.1:${service.config.port} (LAN access enabled; other devices can use this computer's LAN IP)`

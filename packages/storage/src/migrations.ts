@@ -839,9 +839,14 @@ function applyFreshSchemaTemplate(db: Database.Database): boolean {
  * 版本号到迁移名的已记录映射；name 为 null 的行早于迁移名记录，无法核对，只能按版本号认定。
  * 迁移名不一致说明库由另一条分支的迁移序列升级过，同一版本号已执行的是别的迁移，必须拒绝继续。
  */
+function shellArgument(value: string): string {
+  return /^[A-Za-z0-9_./:@%+=,-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`
+}
+
 function schemaTooNewError(db: Database.Database, actualVersion: number): Error {
   const supportedVersion = migrations.at(-1)!.version
-  return new Error(`DATABASE_SCHEMA_TOO_NEW: database schema version ${actualVersion}; this build supports schema version ${supportedVersion}. Startup refuses the newer database and does not migrate or downgrade it. Read-only inspection: dutydeck database execution-status --database ${db.name}. Use a Dutydeck build that supports schema ${actualVersion}, or stop all writers and restore a known-good backup into a separate new directory with dutydeck backup restore --archive <backup-archive> --target <new-restored-directory>. Restoring a backup discards all writes made after that backup; switching to older code is not a database rollback.`)
+  const command = `dutydeck database execution-status --database ${shellArgument(db.name)}`
+  return new Error(`DATABASE_SCHEMA_TOO_NEW: database schema version ${actualVersion}; this build supports schema version ${supportedVersion}. Startup refuses the newer database and does not migrate or downgrade it.\nRead-only inspection:\n${command}\nUse a Dutydeck build that supports schema ${actualVersion}, or stop all writers and restore a known-good backup into a separate new directory with dutydeck backup restore --archive <backup-archive> --target <new-restored-directory>. Restoring a backup discards all writes made after that backup; switching to older code is not a database rollback.`)
 }
 
 function recordedMigrations(db: Database.Database): Map<number, string | null> {
