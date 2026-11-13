@@ -57,7 +57,7 @@ async function exposure(scenario: Scenario = {}): Promise<{ check: DoctorCheck |
   const dependencies = {
     ui: createCliUi({ stdout: { write() {}, isTTY: false }, stderr: { write() {}, isTTY: false }, env: {}, color: false }),
     env: {
-      ...(scenario.localOnly ? { DUTYDECK_LOCAL_ONLY: 'true' } : {}),
+      ...(scenario.localOnly !== undefined ? { DUTYDECK_LOCAL_ONLY: String(scenario.localOnly) } : {}),
       ...(scenario.listenerDisabled ? { DUTYDECK_DISABLE_LARK_LISTENER: 'true' } : {})
     },
     nodeVersion: 'v22.12.0',
@@ -65,7 +65,7 @@ async function exposure(scenario: Scenario = {}): Promise<{ check: DoctorCheck |
     username: 'tester',
     getuid: () => 1000,
     processUid: () => 1000,
-    config: { ...baseConfig, host, authEnabled, localOnly: scenario.localOnly === true },
+    config: { ...baseConfig, host, authEnabled, ...(scenario.localOnly !== undefined ? { localOnly: scenario.localOnly } : {}) },
     daemonStatus: () => ({ running: true, pid: 4242, ready: true, address: 'http://127.0.0.1:4310', authEnabled }),
     daemonRecord: () => ({
       pid: 4242,
@@ -152,6 +152,22 @@ describe('lark.exposure —— 网络与机器人权限组合', () => {
     expect(restrictedGuidance.check?.detail).toContain('高危范围=指定');
   });
 
+  it.each([
+    ['无效用户条目', { highRiskAllowedUsers: [{}], highRiskAllowedEmails: [] }],
+    ['空白邮箱', { highRiskAllowedUsers: [], highRiskAllowedEmails: [' '] }]
+  ])('guidance 的%s被运行时清空后仍是广范围，必须告警', async (_label, lists) => {
+    const { check } = await exposure({ rawBots: JSON.stringify([bot({ riskControlMode: 'guidance', ...lists })]) });
+    expect(check?.level).toBe('warn');
+    expect(check?.detail).toContain('高危范围=全部');
+    expect(check?.detail).toContain('ID 0、邮箱 0');
+  });
+
+  it('缺默认 Agent 的完全信任机器人不能形成会话，不误报为可运行危险权限', async () => {
+    const { check } = await exposure({ rawBots: JSON.stringify([bot({ defaultAgentId: undefined })]) });
+    expect(check?.level).toBe('ok');
+    expect(check?.detail).toContain('未形成监听权限');
+  });
+
   it('off 不会执行已配置的高危名单，仍按广范围处理', async () => {
     const { check } = await exposure({
       rawBots: JSON.stringify([bot({
@@ -187,6 +203,13 @@ describe('lark.exposure —— 网络与机器人权限组合', () => {
     expect(check?.level).toBe('ok');
     expect(check?.detail).toContain('local-only=开启');
     expect(check?.detail).toContain('认证=local');
+  });
+
+  it('daemon 可能由另一个 shell 以 --local-only 启动时，缺少显式事实显示未知而非关闭', async () => {
+    const { check } = await exposure({ host: '127.0.0.1', runningHost: '127.0.0.1' });
+    expect(check?.level).toBe('ok');
+    expect(check?.detail).toContain('local-only=未知');
+    expect(check?.detail).not.toContain('local-only=关闭');
   });
 
   it('socket 激活按 unit 观测地址判定，不套用 .env 的 host', async () => {

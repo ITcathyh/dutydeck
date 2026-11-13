@@ -44,9 +44,9 @@ dutydeck doctor
 
 ### doctor 暴露组合检查<a id="doctor-exposure"></a>
 
-`lark.exposure` 在同一项里组合监听地址、显式 `local-only`、认证模式、socket 激活、机器人 `permissionMode` / `fullTrustConfirmed`、高危用户范围和 `riskControlMode`。监听与认证优先取运行中守护进程的记录；认证模式按实际语义显示为 `local`、`token` 或 `open`，不是只显示一个布尔值。`local-only` 保留本次 doctor 能看到的显式配置事实，不从解析后的 `127.0.0.1` 反推。socket 激活只认当前进程的 `LISTEN_PID` / `LISTEN_FDS` 或运行中 systemd unit 的 `TriggeredBy`；这些事实不能证明继承 fd 的实际地址时，该项降级为「实际监听地址未知」，不会拿 `.env` 的 host 猜成回环或通配地址。
+`lark.exposure` 在同一项里组合监听地址、显式 `local-only`、认证模式、socket 激活、机器人 `permissionMode` / `fullTrustConfirmed`、高危用户范围和 `riskControlMode`。监听与认证优先取运行中守护进程的记录；认证模式按实际语义显示为 `local`、`token` 或 `open`，不是只显示一个布尔值。`local-only` 保留本次 doctor 能看到的显式配置事实，不从解析后的 `127.0.0.1` 反推；另一个 shell 看不到 daemon 的启动参数时显示「未知」，不会误写成「关闭」。socket 激活只认当前进程的 `LISTEN_PID` / `LISTEN_FDS` 或运行中 systemd unit 的 `TriggeredBy`；这些事实不能证明继承 fd 的实际地址时，该项降级为「实际监听地址未知」，不会拿 `.env` 的 host 猜成回环或通配地址。
 
-机器人部分只把已开启监听且执行模式已确认的条目算作可运行权限；旧记录仅写 `fullTrustConfirmed=true` 时仍按完全信任处理。高危用户范围只显示「全部 / 指定」及 ID、邮箱数量，不输出 openId、姓名、邮箱、App Secret 或访问令牌。`off` 不执行高危名单，即使填了名单也按广范围处理；`guidance` 只提醒，`enforced` 才是强制拦截。只有「非回环 `open` + 可运行的完全信任机器人 + 广范围高危用户 + 弱风控」同时成立时，本项才升级：`off` 为 fail，`guidance` 为 warn。强制风控、较窄的 guidance 名单、token/local，或机器人不是完全信任时，本项不新增告警；既有 `access.posture` 等检查不变。数据库或机器人配置不可读时降级为 skip，不重复报错。
+机器人部分只把已开启监听、默认 Agent 已配置且执行模式已确认的条目算作可运行权限；旧记录仅写 `fullTrustConfirmed=true` 时仍按完全信任处理。高危名单先按运行时同一只读归一化路径清理无效用户和空白邮箱，再显示「全部 / 指定」及 ID、邮箱数量，不输出 openId、姓名、邮箱、App Secret 或访问令牌。`off` 不执行高危名单，即使填了名单也按广范围处理；`guidance` 只提醒，`enforced` 才是强制拦截。只有「非回环 `open` + 可运行的完全信任机器人 + 广范围高危用户 + 弱风控」同时成立时，本项才升级：`off` 为 fail，`guidance` 为 warn。强制风控、较窄的 guidance 名单、token/local，或机器人不是完全信任时，本项不新增告警；既有 `access.posture` 等检查不变。数据库或机器人配置不可读时降级为 skip，不重复报错。
 
 命中危险组合时会给出 remedy 和可复制命令，例如 `dutydeck settings bot set <appId> permissionMode=ask fullTrustConfirmed=false`，或改用 `dutydeck setup --local-only`；保留完全信任时，先运行 `dutydeck settings bot install-hook <appId>`，再设置 `riskControlMode=enforced` 并配置 `highRiskAllowedUsers` / `highRiskAllowedEmails`。doctor 只报告，不自动修改 `.env`、unit 或机器人配置。结论只覆盖它能观测的监听地址，不假定反向代理、防火墙或端口转发后的其他访问路径已经安全或已经验证。
 

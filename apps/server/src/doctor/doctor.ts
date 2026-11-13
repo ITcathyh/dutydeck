@@ -279,7 +279,7 @@ export async function runDoctor(
   try {
     // 配置库按 daemon 的取法以根目录为基准：loadConfig 以 DUTYDECK_DEFAULT_CWD（Agent 默认目录）为基准，
     // 两者不同时（比如 DEFAULT_CWD 设成 HOME）会报出一个 daemon 从不打开的路径。
-    config = dependencies.config ?? (() => { const loaded = loadConfigWithDiagnostics(env, PTY_AGENT_CONTRIBUTIONS); return { ...loaded.config, localOnly: env.DUTYDECK_LOCAL_ONLY === 'true', databaseUrl: daemonDatabasePath(daemonRoot(), env.DUTYDECK_DATABASE_URL), droppedAgents: loaded.droppedAgents }; })();
+    config = dependencies.config ?? (() => { const loaded = loadConfigWithDiagnostics(env, PTY_AGENT_CONTRIBUTIONS); return { ...loaded.config, ...(env.DUTYDECK_LOCAL_ONLY !== undefined ? { localOnly: env.DUTYDECK_LOCAL_ONLY === 'true' } : {}), databaseUrl: daemonDatabasePath(daemonRoot(), env.DUTYDECK_DATABASE_URL), droppedAgents: loaded.droppedAgents }; })();
     checks.push(checkConfig(config));
   } catch (error) {
     // 配置坏了也要把体检跑完：这正是用户最需要诊断的时候。
@@ -288,7 +288,7 @@ export async function runDoctor(
       host: env.DUTYDECK_HOST ?? '127.0.0.1',
       port: Number(env.DUTYDECK_PORT) || 4310,
       authEnabled: env.DUTYDECK_AUTH !== 'false',
-      localOnly: env.DUTYDECK_LOCAL_ONLY === 'true',
+      ...(env.DUTYDECK_LOCAL_ONLY !== undefined ? { localOnly: env.DUTYDECK_LOCAL_ONLY === 'true' } : {}),
       databaseUrl: daemonDatabasePath(daemonRoot(), env.DUTYDECK_DATABASE_URL),
       agents: []
     };
@@ -407,10 +407,11 @@ export async function runDoctor(
   })).catch((): DoctorSocketActivationObservation => ({ status: 'unknown', reason: 'unit-unavailable' }));
   const runningHost = status.running && record?.host !== undefined ? record.host : undefined;
   const exposureHost = socket.status === 'active' ? socket.host : socket.status === 'unknown' ? undefined : runningHost ?? config.host;
-  checks.push(checkLarkExposure({
+  const localOnly = config.localOnly ?? (env.DUTYDECK_LOCAL_ONLY === undefined ? undefined : env.DUTYDECK_LOCAL_ONLY === 'true');
+  checks.push(await checkLarkExposure({
     ...(exposureHost !== undefined ? { host: exposureHost } : {}),
     hostSource: socket.status === 'active' ? 'socket' : runningHost !== undefined ? 'runtime' : 'config',
-    localOnly: config.localOnly ?? env.DUTYDECK_LOCAL_ONLY === 'true',
+    ...(localOnly !== undefined ? { localOnly } : {}),
     authEnabled: status.running && record?.authEnabled !== undefined ? record.authEnabled : config.authEnabled,
     socket,
     unavailable: databaseUnreadable,

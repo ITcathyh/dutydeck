@@ -49,7 +49,7 @@ export interface DoctorConfig {
   host: string;
   port: number;
   authEnabled: boolean;
-  /** 显式 DUTYDECK_LOCAL_ONLY / --local-only 事实；不能从解析后的 host 反推。 */
+  /** 显式配置可见时为 true/false；另一个 shell 看不到 daemon 启动参数时保持未知。 */
   localOnly?: boolean;
   databaseUrl: string;
   acpxCommand?: string;
@@ -169,7 +169,8 @@ export interface LarkExposureObservation {
   /** undefined 表示 socket 已激活或 unit 探测失败，实际监听地址不可知。 */
   host?: string;
   hostSource: 'config' | 'runtime' | 'socket';
-  localOnly: boolean;
+  /** 缺席表示当前 doctor 无法看见显式 local-only 配置，不能报成关闭。 */
+  localOnly?: boolean;
   authEnabled: boolean;
   socket: DoctorSocketActivationObservation;
   rawBots?: string;
