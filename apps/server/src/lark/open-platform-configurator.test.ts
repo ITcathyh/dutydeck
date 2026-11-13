@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-// 该 fixture 是 console 实抓，唯一例外是标了 `_synthetic` 的五行
-// （application:app_slash_command:read/write、im:message:urgent_app、im:pin、task:task:write
-// 的真实 scope id 未知，手工补入以便权限映射与发布测试能跑，一律按已开通填）。
+// 该 fixture 是 console 实抓，唯一例外是标了 `_synthetic` 的六行
+// （application:app_slash_command:read/write、application:application:self_manage、
+// im:message:urgent_app、im:pin、task:task:write 的真实 scope id 未知，手工补入以便权限映射与发布测试能跑，一律按已开通填）。
 import draftCatalog from './fixtures/scope-catalog-draft.json';
 import newAppPrivileges from './fixtures/new-app-privileges.json';
 import automaticApproval from './fixtures/approval-collaborator-exemption.json';
@@ -234,6 +234,7 @@ describe('configureLarkOpenPlatformApp', () => {
     expect(LARK_COMMON_TENANT_SCOPES).toEqual([
       'application:app_slash_command:read',
       'application:app_slash_command:write',
+      'application:application:self_manage',
       'contact:contact.base:readonly',
       'contact:user.base:readonly',
       'contact:user.email:readonly',
@@ -261,7 +262,7 @@ describe('configureLarkOpenPlatformApp', () => {
 
     expect(result).toEqual({
       status: 'ready',
-      scopeCount: 21,
+      scopeCount: 22,
       skippedScopes: [],
       eventCount: 3,
       callbackCount: 1,
@@ -364,7 +365,7 @@ describe('configureLarkOpenPlatformApp', () => {
 
     const result = await configureLarkOpenPlatformApp(client, 'cli_test');
 
-    expect(result).toMatchObject({ status: 'ready', scopeCount: 20, skippedScopes: ['task:task:write'] });
+    expect(result).toMatchObject({ status: 'ready', scopeCount: 21, skippedScopes: ['task:task:write'] });
     // 申请清单里不得出现跳过项的 id，回读校验也不得因为它失败。
     expect(calls.find(call => call.path.includes('/scope/update/'))?.body?.appScopeIDs)
       .toEqual(present.map((_, index) => `tenant-${index + 1}`));
@@ -384,6 +385,7 @@ describe('configureLarkOpenPlatformApp', () => {
     expect(featureScopes).toEqual([
       'application:app_slash_command:read',
       'application:app_slash_command:write',
+      'application:application:self_manage',
       'im:message:urgent_app',
       'im:pin',
       'task:task:write',
@@ -568,6 +570,7 @@ describe('native slash commands', () => {
     // 分级只认 LARK_TENANT_SCOPES 这张表，不靠名字前缀猜。
     expect(LARK_TENANT_SCOPES.find(scope => scope.name === 'application:app_slash_command:read')?.tier).toBe('feature');
     expect(LARK_TENANT_SCOPES.find(scope => scope.name === 'application:app_slash_command:write')?.tier).toBe('feature');
+    expect(LARK_TENANT_SCOPES.find(scope => scope.name === 'application:application:self_manage')?.tier).toBe('feature');
     expect(LARK_TENANT_SCOPES.filter(scope => scope.tier === 'base')).toHaveLength(16);
   });
 

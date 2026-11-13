@@ -27,6 +27,18 @@
         "status": 5
       },
       {
+        "_synthetic": "Dutydeck 手工补入，非 console 实抓：真实 scope id 未知，此处的 id 仅用于让权限映射与发布测试跑通。",
+        "id": "30003",
+        "name": "application:application:self_manage",
+        "scopeType": [
+          2
+        ],
+        "scopeType2ScopeStatus": {
+          "2": 5
+        },
+        "status": 5
+      },
+      {
         "id": "100032",
         "name": "contact:contact.base:readonly",
         "scopeType": [

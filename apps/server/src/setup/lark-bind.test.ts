@@ -14,7 +14,7 @@ import type {
   ConnectedOpenPlatformSession,
 } from '../lark/open-platform-session.js';
 import type { Prompter } from './prompts.js';
-import { bindLarkApp, larkBindSmokeOwnerOpenId, type LarkBindResult, type LarkBindStepKey } from './lark-bind.js';
+import { bindLarkApp, type LarkBindResult, type LarkBindStepKey } from './lark-bind.js';
 
 const APP_ID = 'cli_dutydeck_test';
 
@@ -255,20 +255,18 @@ const levelOf = (result: LarkBindResult, key: LarkBindStepKey) =>
   result.steps.find(step => step.key === key)?.level;
 
 describe('bindLarkApp', () => {
-  it('does not hand a generic console collaborator ou_ ID to the target-app smoke', async () => {
+  it('does not expose generic console identity IDs in the binding result', async () => {
     const { promise } = run();
     const result = await promise;
-    expect(larkBindSmokeOwnerOpenId(result)).toBeUndefined();
     expect(JSON.stringify(result)).not.toContain(SECRETS.userId);
     expect(JSON.stringify(result)).not.toContain(SECRETS.tenantId);
   });
 
-  it('does not guess that an internal owner user ID is an app open ID', async () => {
+  it('does not expose an internal console user ID as an app open ID', async () => {
     const session = connected();
     session.owner.userId = 'user-private-id';
     const { promise } = run({ connect: async () => session });
     const result = await promise;
-    expect(larkBindSmokeOwnerOpenId(result)).toBeUndefined();
     expect(JSON.stringify(result)).not.toContain('user-private-id');
   });
 
@@ -338,8 +336,8 @@ describe('bindLarkApp', () => {
     const result = await promise;
 
     expect(levelOf(result, 'scopes')).toBe('done');
-    // 21 项里已生效 12 项，实测缺口就是 9 项。
-    expect(result.steps.find(step => step.key === 'scopes')?.detail).toContain('本次补齐 9 项');
+    // 22 项里已生效 12 项，实测缺口就是 10 项。
+    expect(result.steps.find(step => step.key === 'scopes')?.detail).toContain('本次补齐 10 项');
     expect(levelOf(result, 'events')).toBe('done');
     // 回调本来就好，不能被顺带标成 done。
     expect(levelOf(result, 'callback')).toBe('ok');
@@ -628,10 +626,10 @@ describe('bindLarkApp', () => {
     });
     const result = await promise;
 
-    // 实测缺 11 项。直接转述 configurator 的 scopeCount（21）就是假绿灯。
+    // 实测缺 12 项。直接转述 configurator 的 scopeCount（22）就是假绿灯。
     const scopes = result.steps.find(step => step.key === 'scopes');
     expect(scopes?.level).toBe('done');
-    expect(scopes?.detail).toContain('本次补齐 11 项');
+    expect(scopes?.detail).toContain('本次补齐 12 项');
     expect(JSON.stringify(result)).not.toContain('scopeCount');
     expect(JSON.stringify(result)).not.toContain('eventCount');
   });
@@ -654,7 +652,7 @@ describe('bindLarkApp', () => {
     expect(result.versionId).toBe('version-2');
     const scopes = result.steps.find(step => step.key === 'scopes');
     expect(scopes?.level).toBe('ok');
-    expect(scopes?.detail).toContain('20 项权限本来就已生效');
+    expect(scopes?.detail).toContain('21 项权限本来就已生效');
     expect(scopes?.detail).toContain('task:task:write');
     expect(result.warnings.some(warning => warning.includes('task:task:write'))).toBe(true);
   });

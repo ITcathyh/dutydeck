@@ -15,7 +15,7 @@ import type { DetectedAgent } from './detect.js';
 import { saveBot as saveRealBot, type ExistingBot, type SaveBotInput, type SaveBotResult } from './bot-store.js';
 import { readLarkConfig } from '../lark/config.js';
 import { readExistingConfig, type WriteEnvResult } from './env-file.js';
-import type { LarkBindOptions, LarkBindResult, larkBindSmokeOwnerOpenId } from './lark-bind.js';
+import type { LarkBindOptions, LarkBindResult } from './lark-bind.js';
 import type { offerLarkSetupSmoke } from './lark-smoke.js';
 import type { TerminalBackendProbe } from '../doctor/types.js';
 import { PromptUnavailableError, type AskOptions, type Prompter } from './prompts.js';
@@ -92,7 +92,6 @@ interface HarnessOptions {
   storedBot?: ExistingBot;
   readSecretFd?: (fd: string) => Promise<string>;
   smoke?: typeof offerLarkSetupSmoke;
-  readSmokeOwnerOpenId?: typeof larkBindSmokeOwnerOpenId;
   terminalBackendProbe?: TerminalBackendProbe;
   readTerminalBackend?: () => Promise<'tmux' | 'herdr'>;
 }
@@ -132,7 +131,6 @@ function harness(options: HarnessOptions) {
   const deps: SetupDependencies = {
     ui, prompter, cwd: options.cwd, env: {}, detect, bind, writeEnv, readExisting,
     readBot, saveBot, smoke, terminalBackendProbe, readTerminalBackend, database: join(options.cwd, 'fixture.db'),
-    ...(options.readSmokeOwnerOpenId ? { readSmokeOwnerOpenId: options.readSmokeOwnerOpenId } : {}),
     ...(options.readSecretFd ? { readSecretFd: options.readSecretFd } : {})
   };
   return { out, err, deps, writeEnv, bind, detect, readExisting, readBot, saveBot, smoke, terminalBackendProbe, readTerminalBackend };
@@ -779,7 +777,6 @@ describe('runSetup —— 默认 Agent 与 App Secret', () => {
     const smoke = vi.fn(async () => ({ status: 'inbound_unverified' as const, message: '测试卡已发送；入站未验证。' }));
     const { deps, writeEnv } = harness({
       cwd: dir, agents: [AGENT], bind: async () => ready(), prompter, smoke,
-      readSmokeOwnerOpenId: () => 'ou_owner',
       storedBot: { appSecret: SECRET, defaultAgentId: 'claude', listening: true }
     });
     setIsTTY(true);
@@ -787,16 +784,10 @@ describe('runSetup —— 默认 Agent 与 App Secret', () => {
     expect(result.ok).toBe(true);
     expect(result.warnings).toContain('测试卡已发送；入站未验证。');
     expect(smoke).toHaveBeenCalledWith(expect.objectContaining({
-      database: join(dir, 'fixture.db'), appId: 'cli_ok', ownerOpenId: 'ou_owner', interactive: true, assumeYes: false
+      database: join(dir, 'fixture.db'), appId: 'cli_ok', interactive: true, assumeYes: false
     }));
+    // 通用控制台登录身份不是目标应用 owner 证明；默认 smoke 自己读取目标应用信息。
+    expect(smoke.mock.calls[0]![0]).not.toHaveProperty('ownerOpenId');
     expect(writeEnv.mock.invocationCallOrder[0]).toBeLessThan(smoke.mock.invocationCallOrder[0]!);
-
-    const noOwner = harness({
-      cwd: dir, agents: [AGENT], bind: async () => ready(), prompter, smoke,
-      storedBot: { appSecret: SECRET, defaultAgentId: 'claude', listening: true }
-    });
-    setIsTTY(true);
-    await runSetup({ cwd: dir, port: '4310', larkAppId: 'cli_ok' }, noOwner.deps);
-    expect(smoke).toHaveBeenLastCalledWith(expect.objectContaining({ ownerOpenId: undefined }));
   });
 });

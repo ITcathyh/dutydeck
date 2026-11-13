@@ -62,6 +62,30 @@ function acquireRuntime(database: string): RuntimeLease {
   return createRepositories(database, { mode: 'runtime' });
 }
 
+type SmokeOwnerResolution = { ownerOpenId: string } | { failure: 'read' | 'not_dm_owner' };
+
+async function readSmokeOwnerOpenId(bot: StoredLarkConfig): Promise<SmokeOwnerResolution> {
+  const service = createLarkCardService(process.env, undefined, bot);
+  try {
+    const query = new URLSearchParams({ lang: 'zh_cn', user_id_type: 'open_id' });
+    const payload = await service.callOpenApi(
+      `/open-apis/application/v6/applications/${encodeURIComponent(bot.appId)}?${query}`,
+      { method: 'GET' }
+    );
+    const app = payload?.data?.app;
+    if (!app || typeof app !== 'object') return { failure: 'not_dm_owner' };
+    if (app.app_id !== undefined && app.app_id !== bot.appId) return { failure: 'not_dm_owner' };
+    const owner = app.owner;
+    if (!owner || owner.type !== 2 || typeof owner.owner_id !== 'string') return { failure: 'not_dm_owner' };
+    const ownerOpenId = owner.owner_id.trim();
+    return ownerOpenId.startsWith('ou_') && ownerOpenId.length > 3 ? { ownerOpenId } : { failure: 'not_dm_owner' };
+  } catch {
+    return { failure: 'read' };
+  } finally {
+    service.close();
+  }
+}
+
 async function sendSmokeCard(bot: StoredLarkConfig, input: { uuid: string; ownerOpenId: string }): Promise<{ messageId: string; chatId?: string }> {
   const service = createLarkCardService(process.env, undefined, bot);
   try {
@@ -108,9 +132,6 @@ export async function offerLarkSetupSmoke(
   if (!options.interactive || !options.prompter.interactive || options.assumeYes === true || options.json === true) {
     return { status: 'skipped', message: '未请求飞书收发验证，未发送测试卡。' };
   }
-  if (!options.ownerOpenId?.startsWith('ou_')) {
-    return { status: 'unavailable', message: '无法确认机器人所有者在该应用下的 open_id，未提供收发验证，也未发送测试卡。' };
-  }
   if (serviceConflict(options, dependencies)) return { status: 'unavailable', message: SERVICE_CONFLICT_MESSAGE };
   let bot: StoredLarkConfig | undefined;
   try { bot = await (dependencies.loadBot ?? loadSavedBot)(options.database, options.appId); }
@@ -118,6 +139,24 @@ export async function offerLarkSetupSmoke(
   if (!bot?.appSecret || larkConfigBlockingError(bot)) {
     return { status: 'unavailable', message: '机器人配置尚不可用于收发验证，未发送测试卡。' };
   }
+  let ownerOpenId = options.ownerOpenId;
+  let ownerReadFailure: 'read' | 'not_dm_owner' | undefined;
+  if (ownerOpenId === undefined) {
+    const resolved = await readSmokeOwnerOpenId(bot);
+    if ('ownerOpenId' in resolved) ownerOpenId = resolved.ownerOpenId;
+    else ownerReadFailure = resolved.failure;
+  }
+  if (!ownerOpenId?.startsWith('ou_')) {
+    return {
+      status: 'unavailable',
+      message: options.ownerOpenId !== undefined
+        ? '无法确认机器人所有者在该应用下的 open_id，未提供收发验证，也未发送测试卡。'
+        : ownerReadFailure === 'read'
+          ? `读取机器人应用信息失败，无法确认所有者；请重跑 dutydeck setup --lark-app-id ${options.appId}，在既有确认流程中开通并发布 application:application:self_manage 权限；网络错误也可修复后重试。未询问、未监听、未发送测试卡。`
+          : '目标应用信息未返回可私聊的企业内成员所有者及其在该应用下匹配的 open_id，未询问、未监听、未发送测试卡。'
+    };
+  }
+  const recipientOpenId = ownerOpenId;
   let confirmed: boolean;
   try {
     confirmed = await options.prompter.confirm({
@@ -156,7 +195,7 @@ export async function offerLarkSetupSmoke(
     reply();
   };
   const onEvent = (event: LarkSmokeEvent) => {
-    if (settled || event.chatType !== 'p2p' || event.senderType !== 'user' || event.senderOpenId !== options.ownerOpenId) return;
+    if (settled || event.chatType !== 'p2p' || event.senderType !== 'user' || event.senderOpenId !== recipientOpenId) return;
     // A fast reply may arrive before send() resolves. Queue it, but accept nothing until the send is known successful.
     if (sending && !accepting) {
       if (queued.length < 100) queued.push(event);
@@ -179,7 +218,7 @@ export async function offerLarkSetupSmoke(
       return { status: 'unavailable', message: '飞书临时监听启动失败，未发送测试卡；入站未验证。' };
     }
     sending = true;
-    try { sentMessage = await (dependencies.sendCard ?? sendSmokeCard)(bot, { uuid, ownerOpenId: options.ownerOpenId }); }
+    try { sentMessage = await (dependencies.sendCard ?? sendSmokeCard)(bot, { uuid, ownerOpenId: recipientOpenId }); }
     catch {
       return { status: 'send_failed', message: '测试卡发送失败或结果未确认；入站未验证。请用 dutydeck doctor 检查权限与网络。' };
     } finally { sending = false; }

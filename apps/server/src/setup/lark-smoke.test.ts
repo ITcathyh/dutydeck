@@ -207,11 +207,11 @@ describe('offerLarkSetupSmoke', () => {
     reopened.close();
   });
 
-  it('does not offer the smoke when the owner open ID cannot be established', async () => {
+  it('does not offer the smoke for an explicitly supplied non-open ID', async () => {
     const prompt = prompter();
     const sendCard = vi.fn();
     const startListener = vi.fn(async () => vi.fn());
-    const result = await smoke({ ownerOpenId: undefined, prompter: prompt }, {
+    const result = await smoke({ ownerOpenId: 'generic-console-user-id', prompter: prompt }, {
       loadBot: async () => bot, startListener, sendCard
     });
     expect(result.status).toBe('unavailable');
@@ -435,7 +435,7 @@ describe('offerLarkSetupSmoke', () => {
     expect(stop).toHaveBeenCalledOnce();
   });
 
-  it('uses the environment base URL for token and send requests in the default sender', async () => {
+  it('uses the environment base URL for owner, token and send requests in the default implementation', async () => {
     const requests: string[] = [];
     let onEvent: ((event: LarkSmokeEvent) => void) | undefined;
     const server = createServer((request, response) => {
@@ -448,6 +448,11 @@ describe('offerLarkSetupSmoke', () => {
       if (request.method === 'POST' && url.pathname === '/open-apis/auth/v3/tenant_access_token/internal/') {
         requests.push(`${url.pathname}${url.search}`);
         json({ code: 0, tenant_access_token: 'fixture-token', expire: 7200 });
+        return;
+      }
+      if (request.method === 'GET' && url.pathname === '/open-apis/application/v6/applications/cli_smoke') {
+        requests.push(`${url.pathname}${url.search}`);
+        json({ code: 0, data: { app: { app_id: 'cli_smoke', owner: { type: 2, owner_id: 'ou_owner' } } } });
         return;
       }
       if (request.method === 'POST' && url.pathname === '/open-apis/im/v1/messages') {
@@ -468,13 +473,15 @@ describe('offerLarkSetupSmoke', () => {
     vi.stubEnv('LARK_API_RETRY_MAX_ATTEMPTS', '0');
     try {
       const stop = vi.fn();
-      const result = await smoke({}, {
+      const result = await smoke({ ownerOpenId: undefined }, {
         loadBot: async () => bot,
         startListener: async (_bot, receive) => { onEvent = receive; return stop; }
       });
       expect(result.status).toBe('verified');
       expect(stop).toHaveBeenCalledOnce();
       expect(requests).toEqual([
+        '/open-apis/auth/v3/tenant_access_token/internal/',
+        '/open-apis/application/v6/applications/cli_smoke?lang=zh_cn&user_id_type=open_id',
         '/open-apis/auth/v3/tenant_access_token/internal/',
         '/open-apis/im/v1/messages?receive_id_type=open_id'
       ]);

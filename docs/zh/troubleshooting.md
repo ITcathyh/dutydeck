@@ -66,5 +66,5 @@
 - 只配置 ACP 或已经选择 Herdr 时，tmux 缺失不是致命故障；需要 tmux 的 `pty-cli` 终端 Agent 才依赖这项检查。
 
 ### Q11: setup 提示无法确认机器人所有者在该应用下的 open_id？
-- 这是当前功能限制：常规浏览器绑定不提供收发验证，也不会发送测试卡。控制台通用账号 ID 不能证明目标应用所有者角色，也不能可靠作为该应用下的 open_id。
-- 重跑或重新扫码不会补齐这项证明；不要改用协作者 ID、allowedUsers 或仅凭 `ou_` 前缀外发。
+- setup 只接受目标应用信息中匹配的应用 ID、`owner.type=2`（企业内成员）及该应用下的 `ou_` owner open_id。所有者不是企业内成员、缺少 owner、ID 不匹配时不会提供收发验证，也不会监听或发送测试卡；不要改用协作者 ID、allowedUsers、通用控制台账号 ID 或仅凭 `ou_` 前缀外发。
+- 如果提示应用信息读取失败，确认应用已开通并发布 `application:application:self_manage`，再重跑 `dutydeck setup --lark-app-id cli_xxx` 完成授权与发布；网络错误可在修复后重试。旧机器人缺权限时重跑绑定前仍不可用，不会自动外发。

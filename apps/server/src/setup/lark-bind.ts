@@ -76,12 +76,6 @@ export interface LarkBindResult {
   error?: { code: string; message: string };
 }
 
-/**
- * A generic console login is neither a target-app owner proof nor an app-scoped open_id source.
- * No verified owner source is available in this binding flow, so the resolver must fail closed.
- */
-export const larkBindSmokeOwnerOpenId = (_result: LarkBindResult): string | undefined => undefined;
-
 export interface LarkBindOptions {
   appId: string;
   ui: CliUi;

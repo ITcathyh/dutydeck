@@ -7,7 +7,7 @@
 - **`dutydeck update` 支持精确版本**：可运行 `dutydeck update 1.2.3`，版本参数与 `--dist-tag` 互斥；无参数时仍使用 `latest`。安装、版本核对或重启失败会附 `npm install --global @byted/dutydeck@<实际旧版本> && dutydeck restart` 的手工回退步骤，直接重装旧包，不依赖旧版 CLI 是否认识 `update [version]`；旧版本不能安全放入命令时则明确说明，不自动回滚。
 - **tmux 预检**：`doctor` 新增 `terminal.backend`，在独立临时 socket 上检查 tmux 命令、版本和会话建退，不碰默认 server；所有调用使用 `-f /dev/null` 和私有 `XDG_CONFIG_HOME`，测试会话只运行受控命令，不加载系统或用户配置。setup 对需要 tmux 的终端 Agent 增加一行同类警告，缺失或失败不阻止写配置。纯 ACP 与 Herdr 配置不因缺 tmux 报致命错误。
 - **无机器人时的首启提示**：前台交互启动且读不到机器人配置时，监听地址下每次都会显示 setup、doctor 和实际 Web 地址，不新增展示状态配置；`--json`、非 TTY 和 daemon 子进程不显示。CLI 不在 `PATH` 时增加通用修复提示。
-- **setup 飞书收发验证目前不可用**：常规浏览器绑定只能确认通用控制台账号，不能证明目标应用所有者身份，也不能可靠提供该账号在目标应用下的 open_id。setup 会明确提示无法确认所有者，不提供验证、不发送测试卡；没有 owner open_id 输入 flag，也不会从协作者、allowedUsers 或 ID 前缀猜测。
+- **setup 飞书收发验证按可靠应用所有者开放**：交互式 setup 现在读取目标应用信息，只有应用 ID 匹配、`owner.type=2`（企业内成员）且返回 `ou_` owner open_id 时才以默认 No 询问是否发送测试卡。绑定和重绑定会申请 `application:application:self_manage` 并走既有发布确认；旧机器人缺少或未发布该权限、读取失败或所有者类型/ID 不可靠时仍不提供验证、不发送，可按提示重跑 setup 补授权与发布。`--yes`、非交互和 `--json` 不读取所有者身份；没有 owner open_id 输入 flag，也不会从协作者、allowedUsers、通用控制台账号或 ID 前缀猜测。
 
 - **tmux 会话生命周期**：Linux 上 tmux socket 文件被清理但旧 server 仍在时，启动会拒绝另建同名 server，并提示用 `SIGUSR1` 重建 socket 或结束旧 server；不会再让两个 CLI 接管同一会话。启用 `remain-on-exit` 时，下次启动会回收 Dutydeck 自有且全部 pane 已退出的死会话，仍有 pane 运行的会话保留。非 Linux 行为不变。
 

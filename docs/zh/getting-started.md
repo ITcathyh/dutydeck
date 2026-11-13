@@ -37,7 +37,7 @@ printf %s "$LARK_SECRET" | dutydeck setup --lark-app-id cli_xxx --lark-app-secre
 
 向导选项：`--agent <id>` 指定默认 Agent（必须是检测到的 CLI）、`--lark-app-secret-fd <fd>` 从文件描述符读 Secret、`--listen` 同时开启监听。已在运行的服务要 `dutydeck restart` 才会读到新的机器人配置。
 
-机器人配置完成后，当前浏览器扫码绑定只能确认控制台登录账号，不能证明该账号是目标应用所有者，也不能可靠提供该账号在目标应用下的 open_id。常规 setup 因此会提示无法确认所有者身份，不提供收发验证，也不发送测试卡；没有 owner open_id 输入 flag，不会用协作者 ID、allowedUsers 或 ID 前缀猜测。`--yes`、非交互模式和 `--json` 同样不会自动发送。
+机器人配置完成后，交互式 setup 会读取目标应用信息；只有响应中的应用 ID 匹配、所有者为 `owner.type=2`（企业内成员）且返回该应用下的 `ou_` open_id 时，才会用默认 No 的专用问题询问是否发送测试卡。绑定和重绑定会申请 `application:application:self_manage` 并走既有发布确认；旧机器人缺少或未发布该权限、读取失败、所有者不是企业内成员或 ID 不可靠时，不提供验证也不发送，权限或读取失败可按提示重跑 setup 完成授权与发布。没有 owner open_id 输入 flag，不会用协作者 ID、allowedUsers 或 ID 前缀猜测。`--yes`、非交互模式和 `--json` 不读取所有者身份，也不会自动发送。
 
 如果终端提示 `dutydeck: command not found`，说明全局可执行目录不在 `PATH`。pnpm 安装可运行 `pnpm setup`，按提示把全局可执行目录加入 `PATH` 后重开终端；npm 安装可用 `npm prefix -g` 找到全局前缀并配置其可执行目录。也可以不修改 `PATH`，改用 `pnpm dlx @byted/dutydeck setup` 或 `npx @byted/dutydeck setup`。
 

@@ -19,7 +19,7 @@ import { createCliUi, type CliUi } from '../cli-ui.js';
 import { createPrompter, PromptAbortedError, PromptUnavailableError, type Prompter } from './prompts.js';
 import { detectAgents, validateWorkingDirectory, type DetectedAgent } from './detect.js';
 import { isSecretKey, MANAGED_KEYS, maskSecret, readExistingConfig, writeEnvFile, type WriteEnvResult } from './env-file.js';
-import { bindLarkApp, larkBindSmokeOwnerOpenId, renderLarkBindResult, type LarkBindResult } from './lark-bind.js';
+import { bindLarkApp, renderLarkBindResult, type LarkBindResult } from './lark-bind.js';
 import { offerLarkSetupSmoke, type LarkSetupSmokeResult } from './lark-smoke.js';
 import { isValidLarkAppId } from '../lark/open-platform-configurator.js';
 import { readDaemonStatus, resolveDaemonDir } from '../daemon/daemon.js';
@@ -72,9 +72,8 @@ export interface SetupDependencies {
   saveBot?: SaveBot;
   /** 机器人配置所在的数据库文件；默认按 `dutydeck start` 的规则推出。 */
   database?: string;
-  /** 可选飞书收发冒烟；测试必须注入合成实现，默认实现也只在专用确认后外发。 */
+  /** 可选飞书收发冒烟；测试必须注入合成实现，默认实现只在可靠读取所有者后询问，且仅在专用确认后外发。 */
   smoke?: typeof offerLarkSetupSmoke;
-  readSmokeOwnerOpenId?: typeof larkBindSmokeOwnerOpenId;
   terminalBackendProbe?: typeof defaultTerminalBackendProbe;
   readTerminalBackend?: (database: string) => Promise<'tmux' | 'herdr'>;
 }
@@ -309,7 +308,6 @@ export async function runSetup(options: SetupCliOptions = {}, dependencies: Setu
     let lark: LarkBindResult | undefined;
     let botResult: (SaveBotResult & { appId: string }) | undefined;
     let defaultAgentId: string | undefined;
-    let smokeOwnerOpenId: string | undefined;
     const skipLark = options.skipLark === true;
     let appId = options.larkAppId;
     // 只给 --agent / --lark-app-secret-fd、没给 --lark-app-id：改 .env 里那个机器人的默认 Agent 或 App Secret，不碰开放平台。
@@ -410,7 +408,6 @@ export async function runSetup(options: SetupCliOptions = {}, dependencies: Setu
               knownAgents: detected
             })
           };
-          smokeOwnerOpenId = lark ? (dependencies.readSmokeOwnerOpenId ?? larkBindSmokeOwnerOpenId)(lark) : undefined;
         } else {
           warnings.push(`尚未提供 App Secret（也没有 .env 里的 LARK_APP_SECRET），飞书机器人未保存，默认 Agent 也因此没有写入；飞书通道要等它就位才能收发消息。补上它（输入不回显）：dutydeck setup --lark-app-id ${validated}；脚本里用 printf %s "$SECRET" | dutydeck setup --lark-app-id ${validated} --lark-app-secret-fd 0 --yes。`);
         }
@@ -429,7 +426,7 @@ export async function runSetup(options: SetupCliOptions = {}, dependencies: Setu
     if (interactive && !assumeYes && botResult?.hasSecret && botResult.defaultAgentId) {
       try {
         smokeResult = await (dependencies.smoke ?? offerLarkSetupSmoke)({
-          database: databasePath(), appId: botResult.appId, ownerOpenId: smokeOwnerOpenId,
+          database: databasePath(), appId: botResult.appId,
           interactive, assumeYes, json, prompter
         });
       } catch {
