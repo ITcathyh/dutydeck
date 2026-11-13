@@ -406,10 +406,10 @@ async function main() {
       renderDaemonResult({ action: 'status', ...status }, options.json === true);
       // status 是查询命令：不在运行不是「命令失败」，退出码保持 0。
     },
-    logs: options => {
+    logs: async options => {
       const lines = options.unit === undefined
         ? readDaemonLog(resolveDaemonDir(), options.lines)
-        : readJournalctlLog(options.unit, options.lines);
+        : await readJournalctlLog(options.unit, options.lines);
       if (lines.length) process.stdout.write(`${lines.join('\n')}\n`);
     },
     update: async options => {

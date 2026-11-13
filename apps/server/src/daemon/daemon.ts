@@ -1,7 +1,7 @@
 import { dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync, writeFileSync } from 'node:fs';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import Database from 'better-sqlite3';
 import { rotateLogFileSync } from '../resource-retention.js';
 import { writeFileAtomicSync } from '../atomic-file.js';
@@ -441,6 +441,45 @@ export function tailDaemonLog(dir: string, lines = 3, fromByte = 0): string[] {
 /** 回放窗口上限：只需要本次启动的头几行报错，不为一次失败把整份日志读进内存。 */
 const MAX_TAIL_BYTES = 256 * 1024;
 
+function textFromTail(bytes: Buffer, truncated: boolean): string {
+  const text = bytes.toString('utf8');
+  if (!truncated) return text;
+  const firstNewline = text.indexOf('\n');
+  // 窗口内没有完整行边界时，整段都可能是残片；不能原样返回泄漏窗口外的敏感前缀。
+  return firstNewline === -1 ? '' : text.slice(firstNewline + 1);
+}
+
+function rollingTail(limit = MAX_TAIL_BYTES) {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  let truncated = false;
+  return {
+    append(chunk: Buffer): void {
+      if (!chunk.length) return;
+      chunks.push(chunk);
+      size += chunk.length;
+      if (size <= limit) return;
+      truncated = true;
+      let excess = size - limit;
+      while (excess > 0) {
+        const first = chunks[0]!;
+        if (first.length > excess) {
+          chunks[0] = first.subarray(excess);
+          size -= excess;
+          excess = 0;
+        } else {
+          chunks.shift();
+          size -= first.length;
+          excess -= first.length;
+        }
+      }
+    },
+    text(): string {
+      return textFromTail(Buffer.concat(chunks, size), truncated);
+    }
+  };
+}
+
 /**
  * 按字节偏移读日志。偏移来自 statSync().size（字节），不能拿它去切 JS 字符串：日志里有中文时字符数
  * 少于字节数，会切到上一轮的旧行或越过这次的新行。偏移超过当前大小说明日志被轮转过，从头读新文件。
@@ -458,9 +497,8 @@ function readLogFrom(file: string, fromByte: number): string {
       if (count === 0) break;
       read += count;
     }
-    const text = buffer.subarray(0, read).toString('utf8');
-    // 截了头时第一行多半不完整（可能切在多字节字符中间），丢掉。
-    return from > start ? text.slice(text.indexOf('\n') + 1) : text;
+    // 截了头时第一行多半不完整（可能切在多字节字符中间），丢掉；没有换行则整段都是残片。
+    return textFromTail(buffer.subarray(0, read), from > start);
   } finally {
     closeSync(fd);
   }
@@ -478,22 +516,40 @@ export function readDaemonLog(dir: string, lines = 50, fromByte = 0): string[] {
 }
 
 /** Read a bounded journal snapshot without invoking a shell or following new entries. */
-export function readJournalctlLog(unit: string, lines = 50): string[] {
+export async function readJournalctlLog(unit: string, lines = 50): Promise<string[]> {
   if (!unit.trim()) throw new Error('--unit must not be empty');
   const args = ['--user', `--unit=${unit}`, `--lines=${lines}`, '--no-pager'];
-  const result = spawnSync('journalctl', args, { encoding: 'utf8', shell: false });
-  if (result.error) {
-    if ((result.error as NodeJS.ErrnoException).code === 'ENOENT') {
-      throw new Error('journalctl was not found in PATH; install systemd or omit --unit to read the daemon log file');
-    }
-    throw new Error(`journalctl could not be executed: ${result.error.message}`);
-  }
-  if (result.status !== 0) {
-    const detail = (result.stderr || result.stdout).split('\n')
-      .find(line => line.trim() && !isSecretLogLine(line))?.trim();
-    throw new Error(`journalctl failed for systemd unit ${unit}${detail ? `: ${detail}` : ` (exit code ${result.status ?? 'unknown'})`}`);
-  }
-  return visibleLogLines(result.stdout);
+  const child = spawn('journalctl', args, {
+    shell: false,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, LC_ALL: 'C' }
+  });
+  const stdout = rollingTail();
+  const stderr = rollingTail();
+  return new Promise<string[]>((resolve, reject) => {
+    child.stdout.on('data', (chunk: Buffer) => stdout.append(chunk));
+    child.stderr.on('data', (chunk: Buffer) => stderr.append(chunk));
+    child.once('error', error => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        reject(new Error('journalctl was not found in PATH; install systemd or omit --unit to read the daemon log file'));
+      } else {
+        reject(new Error(`journalctl could not be executed: ${error.message}`));
+      }
+    });
+    child.once('close', status => {
+      const output = stdout.text();
+      if (status !== 0) {
+        const detail = visibleLogLines(stderr.text() || output).find(line => line.trim())?.trim();
+        reject(new Error(`journalctl failed for systemd unit ${unit}${detail ? `: ${detail}` : ` (exit code ${status ?? 'unknown'})`}`));
+        return;
+      }
+      if (output.trim() === '-- No entries --') {
+        reject(new Error('unit 不存在或尚无日志，请核对 unit'));
+        return;
+      }
+      resolve(visibleLogLines(output).slice(-lines));
+    });
+  });
 }
 
 /** Open a log file for append (creating parent directories), returning its numeric fd. */

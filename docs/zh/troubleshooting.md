@@ -59,7 +59,7 @@
 ### Q9: 如何查看最近服务日志？为什么有些行没有显示？
 - 普通 daemon 用 `dutydeck logs`，systemd 用户实例用 `dutydeck logs --unit <unit>`；默认各取最近 50 行，可用 `-n 200` 增加行数。命令只取一次快照，不会持续等待新日志。
 - 普通行、错误行和多行堆栈都会保留。含疑似 token、密码、凭据或 Authorization 的整行会被过滤，所以原始日志里的这些行不会出现在命令输出中，原始日志不变。
-- 如果提示找不到 `journalctl`，检查 systemd 是否已安装且命令在 PATH 中；unit 不存在时先核对名称。普通 daemon 不依赖 `journalctl`，不带 `--unit` 即可读取当前 daemon 日志文件。
+- 如果提示找不到 `journalctl`，检查 systemd 是否已安装且命令在 PATH 中；提示 unit 不存在或尚无日志时先核对名称，名称正确则说明该 unit 当前没有匹配日志。普通 daemon 不依赖 `journalctl`，不带 `--unit` 即可读取当前 daemon 日志文件。
 
 ### Q10: `doctor` 的 `terminal.backend` 检查失败？
 - 先看失败阶段：找不到命令时装 tmux 或修正 `PATH`；`tmux -V` 失败时检查二进制是否可执行、是否与本机架构匹配；创建或核验私有会话失败时检查临时目录权限和 tmux server 日志。检查只使用独立临时 socket，不会连接或结束你的默认 tmux server，也不会自动安装软件。

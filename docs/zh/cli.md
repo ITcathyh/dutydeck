@@ -76,9 +76,9 @@ dutydeck logs -n 200
 dutydeck logs --unit dutydeck.service -n 100
 ```
 
-不带 `--unit` 时，命令读取当前 daemon 的 `.dutydeck/daemon/dutydeck.log`，最多读取文件末尾 256KiB，默认输出最后 50 行；`-n` 可指定 1–10000 行。带 `--unit` 时改为通过无 shell 的 `journalctl --user` 读取这个 systemd 用户实例的最近日志。两种来源都只输出一次快照，不提供 follow。
+不带 `--unit` 时，命令读取当前 daemon 的 `.dutydeck/daemon/dutydeck.log`，最多读取文件末尾 256KiB，默认输出最后 50 行；`-n` 可指定 1–10000 行。带 `--unit` 时改为通过无 shell 的流式 `journalctl --user` 子进程读取这个 systemd 用户实例，stdout 同样只滚动保留末尾 256KiB，再过滤并取最近 N 行。两种来源都只输出一次快照，不提供 follow。
 
-普通行和错误行按原顺序保留，多行堆栈不会被压成一行。为避免把凭据带进终端记录，含 token、secret、password、credential、API key、Authorization、Bearer 等疑似秘密的整行不会输出；这不改变原始日志文件或 journal。unit 不存在、无法执行 `journalctl` 或行数无效时命令明确报错并返回非零退出码，不输出环境配置。
+普通行和错误行按原顺序保留，多行堆栈不会被压成一行。为避免把凭据带进终端记录，含 token、secret、password、credential、API key、Authorization、Bearer 等疑似秘密的整行不会输出；这不改变原始日志文件或 journal。unit 不存在或尚无日志、无法执行 `journalctl` 或行数无效时命令明确报错并返回非零退出码，不输出环境配置。
 
 ## 2. 版本发布与部署 (`deploy`)
 

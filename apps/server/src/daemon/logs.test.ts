@@ -28,9 +28,9 @@ function journalctlStub(options: { stdout?: string; stderr?: string; status?: nu
   const script = [
     `#!${process.execPath}`,
     `require('node:fs').writeFileSync(${JSON.stringify(options.capture)}, JSON.stringify(process.argv.slice(2)));`,
-    `process.stdout.write(${JSON.stringify(options.stdout ?? '')});`,
-    `process.stderr.write(${JSON.stringify(options.stderr ?? '')});`,
-    `process.exit(${options.status ?? 0});`
+    `process.stdout.write(${JSON.stringify(options.stdout ?? '')}, () => {`,
+    `  process.stderr.write(${JSON.stringify(options.stderr ?? '')}, () => process.exit(${options.status ?? 0}));`,
+    '});'
   ].join('\n');
   writeFileSync(join(bin, 'journalctl'), script, { mode: 0o755 });
   vi.stubEnv('PATH', bin);
@@ -62,6 +62,13 @@ describe('readDaemonLog', () => {
     expect(lines).not.toContain(rows[0]);
   });
 
+  it('drops a truncated tail with no complete line boundary instead of leaking a secret fragment', () => {
+    const dir = writeDaemonLog(`token=${'x'.repeat(256 * 1024)}fixture-window-leak`);
+    const lines = readDaemonLog(dir);
+    expect(lines.some(line => line.includes('fixture-window-leak'))).toBe(false);
+    expect(lines).toHaveLength(0);
+  });
+
   it('preserves multiline stack lines, indentation and internal blank lines', () => {
     const rows = ['Error: exploded', '    at first (fixture.js:1:1)', '', '    at second (fixture.js:2:2)', 'ordinary after stack'];
     const dir = writeDaemonLog(`${rows.join('\n')}\n`);
@@ -85,40 +92,91 @@ describe('readDaemonLog', () => {
 });
 
 describe('readJournalctlLog', () => {
-  it('uses bounded journalctl arguments and preserves ordinary, error and stack lines while filtering secrets', () => {
+  it('uses bounded journalctl arguments and preserves ordinary, error and stack lines while filtering secrets', async () => {
     const capture = join(tmp, 'argv.json');
     journalctlStub({
       capture,
       stdout: ['ordinary before', 'token=fixture-journal-secret', 'Error: exploded', '    at fixture (fixture.js:1:1)', 'ordinary after'].join('\n') + '\n'
     });
-    expect(readJournalctlLog('dutydeck-fixture.service', 3)).toEqual([
-      'ordinary before', 'Error: exploded', '    at fixture (fixture.js:1:1)', 'ordinary after'
+    expect(await readJournalctlLog('dutydeck-fixture.service', 3)).toEqual([
+      'Error: exploded', '    at fixture (fixture.js:1:1)', 'ordinary after'
     ]);
     expect(JSON.parse(readFileSync(capture, 'utf8'))).toEqual([
       '--user', '--unit=dutydeck-fixture.service', '--lines=3', '--no-pager'
     ]);
   });
 
-  it('surfaces a journalctl error for an unknown unit', () => {
+  it('streams more than 1 MiB and keeps only the newest complete lines in the 256 KiB window', async () => {
+    const capture = join(tmp, 'argv.json');
+    const rows = Array.from({ length: 160 }, (_, index) => `journal-row-${index}-${'x'.repeat(8192)}`);
+    journalctlStub({ capture, stdout: `${rows.join('\n')}\n` });
+    const lines = await readJournalctlLog('dutydeck-large.service');
+    expect(lines.length).toBeGreaterThan(0);
+    expect(lines.length).toBeLessThan(rows.length);
+    expect(lines).toEqual(rows.slice(-lines.length));
+    expect(lines.at(-1)).toBe(rows.at(-1));
+    expect(lines).not.toContain(rows[0]);
+  }, 15_000);
+
+  it('bounds large stderr while retaining the actual journal failure', async () => {
+    const capture = join(tmp, 'argv.json');
+    const rows = Array.from({ length: 160 }, (_, index) => `journal-error-${index}-${'x'.repeat(8192)}`);
+    journalctlStub({ capture, status: 1, stderr: `${rows.join('\n')}\n` });
+    let failure: unknown;
+    try {
+      await readJournalctlLog('dutydeck-large-error.service');
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(Error);
+    const message = (failure as Error).message;
+    expect(message).toContain('journalctl failed for systemd unit dutydeck-large-error.service');
+    expect(message).toContain('journal-error-');
+    expect(message).not.toContain(rows[0]);
+    expect(message.length).toBeLessThan(256 * 1024 + 500);
+  }, 15_000);
+
+  it('drops a streaming tail with no complete line boundary instead of leaking a secret fragment', async () => {
+    const capture = join(tmp, 'argv.json');
+    journalctlStub({ capture, stdout: `old ordinary\ntoken=${'x'.repeat(256 * 1024)}fixture-journal-window-leak` });
+    const lines = await readJournalctlLog('dutydeck-window.service');
+    expect(lines.some(line => line.includes('fixture-journal-window-leak'))).toBe(false);
+    expect(lines).toHaveLength(0);
+  });
+
+  it('reports an empty journal as an unknown unit or a unit without logs', async () => {
+    const capture = join(tmp, 'argv.json');
+    journalctlStub({ capture, stdout: '-- No entries --\n' });
+    await expect(Promise.resolve().then(() => readJournalctlLog('dutydeck-empty.service'))).rejects.toThrow('unit 不存在或尚无日志，请核对 unit');
+  });
+
+  it('does not mistake normal output containing the no-entries text for an empty journal', async () => {
+    const capture = join(tmp, 'argv.json');
+    const normal = 'ordinary message mentioning -- No entries -- without being an empty journal';
+    journalctlStub({ capture, stdout: `${normal}\n` });
+    expect(await readJournalctlLog('dutydeck-normal.service')).toEqual([normal]);
+  });
+
+  it('surfaces a non-zero journalctl error for an unknown unit', async () => {
     const capture = join(tmp, 'argv.json');
     journalctlStub({ capture, status: 1, stderr: 'Unit dutydeck-missing.service not found.\n' });
-    expect(() => readJournalctlLog('dutydeck-missing.service')).toThrow(/dutydeck-missing\.service.*not found/i);
+    await expect(Promise.resolve().then(() => readJournalctlLog('dutydeck-missing.service'))).rejects.toThrow(/dutydeck-missing\.service.*not found/i);
     expect(JSON.parse(readFileSync(capture, 'utf8'))).toEqual([
       '--user', '--unit=dutydeck-missing.service', '--lines=50', '--no-pager'
     ]);
   });
 
-  it('reports clearly when journalctl is not installed or not on PATH', () => {
+  it('reports clearly when journalctl is not installed or not on PATH', async () => {
     vi.stubEnv('PATH', join(tmp, 'empty-path'));
-    expect(() => readJournalctlLog('dutydeck.service')).toThrow(/journalctl.*(not found|无法执行)/i);
+    await expect(Promise.resolve().then(() => readJournalctlLog('dutydeck.service'))).rejects.toThrow(/journalctl.*(not found|无法执行)/i);
   });
 
-  it('keeps the unit attached as one value so it cannot become an option or shell command', () => {
+  it('keeps the unit attached as one value so it cannot become an option or shell command', async () => {
     const capture = join(tmp, 'argv.json');
     const marker = join(tmp, 'injection-executed');
     journalctlStub({ capture, stdout: 'ordinary\n' });
     const unit = `--output=json; touch ${marker}`;
-    expect(readJournalctlLog(unit, 2)).toEqual(['ordinary']);
+    expect(await readJournalctlLog(unit, 2)).toEqual(['ordinary']);
     expect(JSON.parse(readFileSync(capture, 'utf8'))).toEqual([
       '--user', `--unit=${unit}`, '--lines=2', '--no-pager'
     ]);
