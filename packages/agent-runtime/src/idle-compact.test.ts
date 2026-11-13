@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import type { AgentConfig, AgentDriver } from '@dutydeck/shared';
+import { PromptNotWrittenError } from '@dutydeck/shared';
 import { DutydeckRuntime } from './index.js';
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -68,6 +69,34 @@ describe('idle compaction at serialized task activation', () => {
     vi.setSystemTime(new Date('2026-10-02T01:00:00Z'));
     const next = await h.dispatch('must not send', 24); await h.wait(next.id, 'reconcile_required');
     expect(h.order).toEqual(['old', 'compact']);
+  });
+  it('settles the business prompt as not submitted when compaction cannot prove terminal recovery', async () => {
+    const h = await fixture(async () => { throw new PromptNotWrittenError('maintenance outcome unknown'); });
+    vi.setSystemTime(new Date('2026-10-02T01:00:00Z'));
+    const next = await h.dispatch('must not send', 24);
+    await h.wait(next.id, 'failed');
+    expect(h.order).toEqual(['old', 'compact']);
+    const execution = h.repos.execution.getTaskExecution(next.id);
+    expect(execution?.attempts[0]).toMatchObject({ state: 'settled', outcome: 'failed', settlement: { kind: 'not_submitted' } });
+  });
+  it('keeps the rejected business prompt not submitted and allows a later recovered generation', async () => {
+    let recovered = false;
+    const h = await fixture(async () => {
+      if (!recovered) throw new PromptNotWrittenError('maintenance outcome unknown');
+      return 'completed';
+    });
+    vi.setSystemTime(new Date('2026-10-02T01:00:00Z'));
+    const rejected = await h.dispatch('must not send', 24);
+    await h.wait(rejected.id, 'failed');
+    expect(h.repos.execution.getTaskExecution(rejected.id)?.attempts[0]).toMatchObject({
+      state: 'settled', outcome: 'failed', settlement: { kind: 'not_submitted' },
+    });
+    expect(h.order).toEqual(['old', 'compact']);
+    recovered = true;
+    vi.setSystemTime(new Date('2026-10-03T02:00:00Z'));
+    const next = await h.dispatch('after recovery', 24);
+    await h.wait(next.id);
+    expect(h.order).toEqual(['old', 'compact', 'compact', 'after recovery']);
   });
   it('honors durable interrupt intent between compact and the real prompt', async () => {
     const gate = deferred();
