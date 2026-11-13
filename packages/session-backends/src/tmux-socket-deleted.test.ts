@@ -18,7 +18,7 @@ tmuxDescribe('TmuxBackend after its socket file is deleted', () => {
   let root: string, socket: string;
   // The watcher polls once a second and acts after three consecutive failures. Poll faster and count real polls instead of waiting seconds.
   const runCommand = vi.spyOn(command, 'runCommand');
-  const polls = () => runCommand.mock.calls.filter(([, args]) => args[0] === 'list-panes').length;
+  const polls = () => runCommand.mock.calls.filter(([, args]) => args[1] === 'list-panes').length;
   const interval = globalThis.setInterval;
   beforeAll(() => {
     vi.spyOn(globalThis, 'setInterval').mockImplementation(((callback: () => void, ms: number, ...args: unknown[]) => interval(callback, ms === 1_000 ? 50 : ms, ...args)) as typeof setInterval);
@@ -30,7 +30,7 @@ tmuxDescribe('TmuxBackend after its socket file is deleted', () => {
   });
   afterAll(() => {
     vi.restoreAllMocks();
-    try { execFileSync('tmux', ['-S', socket, 'kill-server'], { stdio: 'ignore' }); } catch { /* gone */ }
+    try { execFileSync('tmux', ['-u', '-S', socket, 'kill-server'], { stdio: 'ignore' }); } catch { /* gone */ }
     vi.unstubAllEnvs();
     rmSync(root, { recursive: true, force: true });
   });

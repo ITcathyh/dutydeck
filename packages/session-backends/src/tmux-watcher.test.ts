@@ -23,7 +23,7 @@ function watch(name = 'isolated-fixture') {
   return { backend, watcher, exit };
 }
 const listing = (...rows: Array<[string, string, number | string]>) => rows.map(row => `${row.join('\t')}\n`).join('');
-const listCalls = () => vi.mocked(runCommand).mock.calls.filter(([, args]) => args[0] === 'list-panes');
+const listCalls = () => vi.mocked(runCommand).mock.calls.filter(([, args]) => args.includes('list-panes'));
 
 describe('asynchronous tmux exit watcher', () => {
   it('is single-flight and ignores results from a detached watcher', async () => {
@@ -45,7 +45,7 @@ describe('asynchronous tmux exit watcher', () => {
     const watchers = ['a', 'b', 'c'].map(name => watch(name));
     await vi.advanceTimersByTimeAsync(5000);
     expect(listCalls()).toHaveLength(5);
-    expect(listCalls()[0]?.[1]).toEqual(['list-panes', '-a', '-F', '#{session_name}\t#{window_active}#{pane_active}\t#{pane_pid}']);
+    expect(listCalls()[0]?.[1]).toEqual(['-u', 'list-panes', '-a', '-F', '#{session_name}\t#{window_active}#{pane_active}\t#{pane_pid}']);
     expect(listCalls()[0]?.[2]).toMatchObject({ timeout: 3000 });
     for (const { exit } of watchers) expect(exit).not.toHaveBeenCalled();
     for (const { watcher } of watchers) watcher.stopExitWatcher();
@@ -195,27 +195,46 @@ it.each(['ESRCH', 'EPERM'])('only counts PID failure %s as exit when appropriate
   vi.spyOn(process, 'kill').mockImplementation(() => { throw Object.assign(new Error(code), { code }); });
   await vi.advanceTimersByTimeAsync(3000); expect(exit).toHaveBeenCalledTimes(code === 'ESRCH' ? 1 : 0);
 });
+it('keeps real pane discovery alive without a UTF-8 locale', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'tmux-locale-real-'));
+  cleanup.push(() => rmSync(directory, { recursive: true, force: true }));
+  vi.stubEnv('TMUX_TMPDIR', directory);
+  for (const key of ['LANG', 'LC_ALL', 'LC_CTYPE']) vi.stubEnv(key, undefined);
+  const env = { ...process.env }; delete env.TMUX;
+  await runCommand('tmux', ['-u', '-f', '/dev/null', 'new-session', '-d', '-s', 'isolated-fixture', 'sleep 30'], { env });
+  cleanup.push(async () => { try { await runCommand('tmux', ['-u', 'kill-server'], { env }); } catch { /* Already gone. */ } });
+  const expected = Number((await runCommand('tmux', ['-u', 'display-message', '-p', '-t', 'isolated-fixture', '#{pane_pid}'], { env })).trim());
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+  const { watcher } = watch();
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(listCalls()).toHaveLength(1);
+  const call = listCalls()[0]!;
+  const callIndex = vi.mocked(runCommand).mock.calls.indexOf(call);
+  const stdout = await vi.mocked(runCommand).mock.results[callIndex]!.value as string;
+  expect(classifyPaneListing({ stdout }, 'isolated-fixture')).toEqual({ probe: 'exists', pid: expected });
+  watcher.stopExitWatcher();
+});
 it('agrees with display-message against a real private tmux socket and observes session disappearance', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'tmux-queue-real-'));
   cleanup.push(() => rmSync(directory, { recursive: true, force: true }));
   vi.stubEnv('TMUX_TMPDIR', directory);
   const env = { ...process.env }; delete env.TMUX;
-  await runCommand('tmux', ['-f', '/dev/null', 'new-session', '-d', '-s', 'isolated-fixture', 'sleep 30'], { env });
-  cleanup.push(async () => { try { await runCommand('tmux', ['kill-server'], { env }); } catch { /* Already gone. */ } });
-  await runCommand('tmux', ['split-window', '-t', 'isolated-fixture', 'sleep 30'], { env });
-  await runCommand('tmux', ['new-window', '-t', 'isolated-fixture', 'sleep 30'], { env });
-  await runCommand('tmux', ['new-session', '-d', '-s', 'keeper', 'sleep 30'], { env });
-  const list = () => runCommand('tmux', ['list-panes', '-a', '-F', '#{session_name}\t#{window_active}#{pane_active}\t#{pane_pid}'], { env }).then(stdout => ({ stdout }), error => ({ error }));
-  const expected = Number((await runCommand('tmux', ['display-message', '-p', '-t', 'isolated-fixture', '#{pane_pid}'], { env })).trim());
+  await runCommand('tmux', ['-u', '-f', '/dev/null', 'new-session', '-d', '-s', 'isolated-fixture', 'sleep 30'], { env });
+  cleanup.push(async () => { try { await runCommand('tmux', ['-u', 'kill-server'], { env }); } catch { /* Already gone. */ } });
+  await runCommand('tmux', ['-u', 'split-window', '-t', 'isolated-fixture', 'sleep 30'], { env });
+  await runCommand('tmux', ['-u', 'new-window', '-t', 'isolated-fixture', 'sleep 30'], { env });
+  await runCommand('tmux', ['-u', 'new-session', '-d', '-s', 'keeper', 'sleep 30'], { env });
+  const list = () => runCommand('tmux', ['-u', 'list-panes', '-a', '-F', '#{session_name}\t#{window_active}#{pane_active}\t#{pane_pid}'], { env }).then(stdout => ({ stdout }), error => ({ error }));
+  const expected = Number((await runCommand('tmux', ['-u', 'display-message', '-p', '-t', 'isolated-fixture', '#{pane_pid}'], { env })).trim());
   expect(classifyPaneListing(await list(), 'isolated-fixture')).toEqual({ probe: 'exists', pid: expected });
   vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
   const { watcher, exit } = watch();
   const keeper = watch('keeper');
-  await runCommand('tmux', ['kill-session', '-t', 'isolated-fixture'], { env });
+  await runCommand('tmux', ['-u', 'kill-session', '-t', 'isolated-fixture'], { env });
   expect(classifyPaneListing(await list(), 'isolated-fixture')).toEqual({ probe: 'missing', pid: null });
   await vi.waitFor(() => { vi.advanceTimersByTime(1000); expect(exit).toHaveBeenCalled(); }, { timeout: 5_000, interval: 20 });
   vi.advanceTimersByTime(3000);
   expect(exit).toHaveBeenCalledTimes(1); expect(keeper.exit).not.toHaveBeenCalled(); watcher.stopExitWatcher();
-  await runCommand('tmux', ['kill-server'], { env });
+  await runCommand('tmux', ['-u', 'kill-server'], { env });
   expect(classifyPaneListing(await list(), 'keeper').probe).not.toBe('exists');
 });
