@@ -2,6 +2,12 @@
 
 > [← Back to README](../../README.en.md) · [All docs](../../README.en.md#docs) · [简体中文](../zh/upgrading.md)
 
+### Breaking changes
+
+| Entry | Behavior change | Compatibility boundary |
+|---|---|---|
+| CT6-04 | For Claude native questions with `description`, the default card moves the explanation from an appendix to the question body into the corresponding option's description position; the body no longer repeats it. | The description is an optional plain-text field of up to 1000 characters. It counts toward the whole-card budget and remains in text fallback and full-text attachments. Requests and stored records without descriptions keep their layout; request IDs, answer values and timeouts are unchanged. Older builds can ignore the field and continue displaying label/value. |
+
 - **Lark cancellation and interruption cards can name the actor**: when the ledger records an explicit interrupt actor, the result card resolves that open_id once and adds "由 <name> 取消" if a member name is available. Lookup failures, insufficient permission, and unresolvable bot or system actors retain the original wording without blocking terminal delivery; queued cancellations without actor evidence do not guess the requester. The name or fallback decision is frozen with the card input, so delivery retries, restart reconciliation and old-card repaints do not repeat the lookup. Card callbacks and ledger fields are unchanged, and no new setting is required.
 
 - **tmux session lifecycle**: on Linux, if cleanup removes a tmux socket while its old server is still running, startup now refuses to create another server with the same name and explains how to rebuild the socket with `SIGUSR1` or end the old server. Two CLIs will no longer attach to one conversation. With `remain-on-exit`, the next start reaps a Dutydeck-owned session only when every pane has exited; a session with any live pane is retained. Non-Linux behavior is unchanged.

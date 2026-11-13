@@ -9,6 +9,7 @@ export const relayAskDurableMaxTimeoutMs = 86_400_000;
 /** 结构化选项的 schema 级上限；IM 卡片侧还有自己的整卡预算，可能渲染更少 */
 export const relayAskMaxChoices = 50;
 export const relayAskChoiceMaxLength = 200;
+const relayAskChoiceDescriptionMaxLength = 1_000;
 
 export type RelayAskOutcome =
   | { status: 'deferred'; askId: string; reason: string }
@@ -43,10 +44,17 @@ function normalizeChoices(input: unknown): RelayAskChoice[] | undefined {
       if (trimmed.length > relayAskChoiceMaxLength) throw invalid(`选项值长度必须在 1-${relayAskChoiceMaxLength} 字符之间。`);
       value = trimmed || undefined;
     }
+    const rawDescription = (item as { description?: unknown }).description;
+    let description: string | undefined;
+    if (rawDescription !== undefined && rawDescription !== null) {
+      const trimmed = String(rawDescription).trim();
+      if (trimmed.length > relayAskChoiceDescriptionMaxLength) throw invalid(`选项说明长度不能超过 ${relayAskChoiceDescriptionMaxLength} 字符。`);
+      description = trimmed || undefined;
+    }
     const answer = value ?? label;
     if (answers.has(answer)) throw invalid('选项的 value（未提供 value 时为文案）不能重复。');
     answers.add(answer);
-    choices.push(value ? { label, value } : { label });
+    choices.push({ label, ...(value ? { value } : {}), ...(description ? { description } : {}) });
   }
   return choices;
 }

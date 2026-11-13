@@ -44,6 +44,8 @@ export interface RelayPublishInput {
 export interface RelayAskChoice {
   label: string;
   value?: string;
+  /** 选项的补充说明；仅用于展示，不参与答案值。 */
+  description?: string;
 }
 
 /** 事件流投递端口 */

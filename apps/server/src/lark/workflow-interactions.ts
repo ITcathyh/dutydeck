@@ -226,14 +226,18 @@ const otherAnswerForm = (record: LarkInteraction): LarkCardElement => ({
 
 /** 单选：每个选项一个回调按钮，点按即提交，回调 value 复用 dutydeck_workflow 命名空间。 */
 const singleChoiceElements = (record: LarkInteraction, choices: RelayAskChoice[]): LarkCardElement[] =>
-  choices.map((choice, index) => ({
-    tag: 'button', element_id: `workflow_answer_choice_${index}`, type: record.adhdMode === true && choices.length === 1 ? 'primary' : 'default',
-    text: { tag: 'plain_text', content: choice.label },
-    behaviors: [{ type: 'callback', value: {
-      dutydeck_workflow: 'answer', request_id: record.id, generation: record.boot,
-      answer: choice.value ?? choice.label
-    } }]
-  }));
+  choices.flatMap((choice, index): LarkCardElement[] => [
+    {
+      tag: 'button', element_id: `workflow_answer_choice_${index}`, type: record.adhdMode === true && choices.length === 1 ? 'primary' : 'default',
+      text: { tag: 'plain_text', content: choice.label },
+      behaviors: [{ type: 'callback', value: {
+        dutydeck_workflow: 'answer', request_id: record.id, generation: record.boot,
+        answer: choice.value ?? choice.label
+      } }]
+    },
+    ...(choice.description ? [{ tag: 'div', element_id: `workflow_answer_choice_description_${index}`,
+      text: { tag: 'plain_text', content: choice.description } }] : [])
+  ]);
 
 /**
  * 多选：JSON 2.0 原生表单（form + multi_select_static + form_action_type:'submit' 按钮）。
@@ -245,7 +249,10 @@ const multipleChoiceForm = (record: LarkInteraction, choices: RelayAskChoice[], 
   elements: [
     { tag: 'multi_select_static', element_id: 'workflow_answer_select', name: 'answer', behaviors: [],
       placeholder: { tag: 'plain_text', content: '选择一个或多个选项' },
-      options: choices.map(choice => ({ text: { tag: 'plain_text', content: choice.label }, value: choice.value ?? choice.label })) },
+      options: choices.map(choice => ({
+        text: { tag: 'plain_text', content: choice.label }, value: choice.value ?? choice.label,
+        ...(choice.description ? { description: { tag: 'plain_text', content: choice.description } } : {})
+      })) },
     ...(withOther ? [otherAnswerInput] : []),
     { tag: 'button', element_id: 'workflow_answer_submit', type: 'primary',
       text: { tag: 'plain_text', content: '提交选择' }, form_action_type: 'submit',
@@ -1036,7 +1043,8 @@ export class LarkWorkflowInteractions {
       }
       if (kind === 'ask') {
         const questionIndex = elements.indexOf(displayedQuestion);
-        const labels = (askChoices ?? []).map((choice, index) => `${index + 1}. ${choice.label}`);
+        const labels = (askChoices ?? []).map((choice, index) =>
+          `${index + 1}. ${choice.label}${choice.description ? `\n   ${choice.description}` : ''}`);
         const choicesElement = (visible: number): LarkCardElement => ({ tag: 'div', text: { tag: 'plain_text',
           content: `可选项：\n${labels.slice(0, visible).join('\n')}${visible < labels.length ? `\n还有 ${labels.length - visible} 个选项未展示，请查看全文附件。` : ''}` } });
         const fullTextParts = labels.length ? [choicesElement(labels.length)] : [];

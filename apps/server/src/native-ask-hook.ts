@@ -23,32 +23,28 @@ export async function runNativeAskHook(payload: unknown, options: RelayClientOpt
   if (!Array.isArray(questions) || !questions.length || questions.length > 4) {
     return deny('无法转换提问格式。请用本会话的 dutydeck session ask 重新向用户提问，不要代替用户选择。');
   }
-  const parsed: Array<{ question: string; prompt: string; choices: Array<{ label: string }>; multiple: boolean }> = [];
+  const parsed: Array<{ question: string; choices: Array<{ label: string; description?: string }>; multiple: boolean }> = [];
   for (const question of questions) {
     if (!object(question) || typeof question.question !== 'string' || !question.question.trim()
       || question.question.length > 20_000 || !Array.isArray(question.options)
       || question.options.length < 1 || question.options.length > 50) return deny('提问或选项无效，请用 session ask 重新提问。');
-    const choices: Array<{ label: string }> = [];
-    const descriptions: string[] = [];
+    const choices: Array<{ label: string; description?: string }> = [];
     for (const option of question.options) {
       if (!object(option) || typeof option.label !== 'string' || !option.label.trim() || option.label.length > 200) {
         return deny('选项文案无效，请用 session ask 重新提问。');
       }
-      choices.push({ label: option.label });
-      if (typeof option.description === 'string' && option.description.trim()) {
-        descriptions.push(`${option.label}：${option.description}`);
-      }
+      const description = typeof option.description === 'string' ? option.description.trim() : '';
+      choices.push({ label: option.label, ...(description ? { description } : {}) });
     }
     if (new Set(choices.map(choice => choice.label.trim())).size !== choices.length
       || parsed.some(previous => previous.question === question.question)) return deny('问题或选项重复，请拆开重新提问。');
-    parsed.push({ question: question.question,
-      prompt: [question.question, ...descriptions].join('\n'), choices, multiple: question.multiSelect === true });
+    parsed.push({ question: question.question, choices, multiple: question.multiSelect === true });
   }
   const answers: Array<[string, string]> = [];
   try {
     // Ask one question at a time so an ordinary topic reply has one clear target.
     for (const question of parsed) {
-      const result = await runSessionAsk(question.prompt, {
+      const result = await runSessionAsk(question.question, {
         choices: JSON.stringify(question.choices), multiple: question.multiple, questionBody: question.question,
       }, options);
       if (result.status === 'deferred') {
