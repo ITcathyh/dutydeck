@@ -102,6 +102,51 @@ export interface PluginTrustPrompt {
   capabilities: string[];
   /** 每个 hook 实际要运行的命令，供用户核对。 */
   details: string[];
+  /** 活动版本到候选版本的执行内容摘要；新增/删除的一侧为 null。 */
+  changes?: PluginCommandChange[];
+}
+
+export interface PluginCommandChange {
+  kind: 'agent' | 'hook' | 'command';
+  name: string;
+  before: string | null;
+  after: string | null;
+}
+
+export const describePluginCommandChange = (change: PluginCommandChange) =>
+  `${change.kind} ${change.name}：${change.before ?? '(新增前不存在)'} → ${change.after ?? '(已删除)'}`;
+
+function canonical(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .filter(([, entry]) => entry !== undefined)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, entry]) => [key, canonical(entry)]));
+  return value;
+}
+
+const executableDigest = (value: unknown) => createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
+
+/** 只摘要执行内容；展示描述、参数提示和宿主来源标记不参与重新信任。 */
+export function pluginCommandChanges(before: LoadedPlugin, after: LoadedPlugin): PluginCommandChange[] {
+  const collect = (plugin: LoadedPlugin) => {
+    const entries = new Map<string, { kind: PluginCommandChange['kind']; name: string; digest: string }>();
+    const add = (kind: PluginCommandChange['kind'], name: string, value: unknown) => entries.set(`${kind}\0${name}`, { kind, name, digest: executableDigest(value) });
+    for (const agent of plugin.agents) {
+      const { id, name: _name, builtin: _builtin, origin: _origin, ...execution } = agent;
+      add('agent', id, execution);
+    }
+    for (const command of plugin.commands) add('command', `${plugin.manifest.name}:${command.name}`, { template: command.template, query: command.query });
+    for (const [event, specs] of Object.entries(plugin.hooks)) if (specs?.length) add('hook', event, specs);
+    return entries;
+  };
+  const previous = collect(before), candidate = collect(after);
+  return [...new Set([...previous.keys(), ...candidate.keys()])].sort((left, right) => left.localeCompare(right)).flatMap(key => {
+    const old = previous.get(key), next = candidate.get(key);
+    if (old?.digest === next?.digest) return [];
+    const identity = old ?? next!;
+    return [{ kind: identity.kind, name: identity.name, before: old?.digest ?? null, after: next?.digest ?? null }];
+  });
 }
 
 export function trustDetails(plugin: LoadedPlugin): string[] {
@@ -283,12 +328,23 @@ export class PluginStore {
     return stagePluginSource(source, join(this.pluginsDir, STAGING_DIR));
   }
 
-  /** 需要新信任的能力：声明式插件为空；update 时只问新增的。 */
-  private async confirmTrust(plugin: LoadedPlugin, alreadyTrusted: string[], options: PluginInstallOptions) {
+  /** 需要新信任的能力：声明式插件为空；update 时只问新增的。执行内容变化在交互式更新里也要重新确认。 */
+  private async confirmTrust(plugin: LoadedPlugin, alreadyTrusted: string[], options: PluginInstallOptions, changes: PluginCommandChange[] = []) {
     const added = plugin.capabilities.filter(capability => !alreadyTrusted.includes(capability));
-    if (!added.length || options.yes) return;
-    const prompt = { plugin: plugin.manifest.name, capabilities: added, details: trustDetails(plugin) };
-    if (!options.confirm) throw new PluginStoreError('PLUGIN_TRUST_REQUIRED', `插件 ${plugin.manifest.name} 需要信任以下能力：${added.join('、')}。确认后加 --yes 重新执行。\n${prompt.details.join('\n')}`);
+    if ((!added.length && !changes.length) || options.yes) return;
+    // 只有命令变化时，非交互更新保持原有行为：由调用方输出摘要，不新增失败。
+    if (!added.length && !options.confirm) return;
+    const prompt: PluginTrustPrompt = {
+      plugin: plugin.manifest.name,
+      capabilities: added,
+      // 仅为命令 diff 确认时不回显完整新命令；新增能力仍保留原来的完整确认信息。
+      details: added.length ? trustDetails(plugin) : [],
+      ...(changes.length ? { changes } : {})
+    };
+    if (!options.confirm) {
+      const review = changes.length ? `\n命令变化（前后摘要）：\n${changes.map(change => describePluginCommandChange(change)).join('\n')}` : '';
+      throw new PluginStoreError('PLUGIN_TRUST_REQUIRED', `插件 ${plugin.manifest.name} 需要信任以下能力：${added.join('、')}。确认后加 --yes 重新执行。\n${prompt.details.join('\n')}${review}`);
+    }
     if (!await options.confirm(prompt)) throw new PluginStoreError('PLUGIN_TRUST_DECLINED', `未信任插件 ${plugin.manifest.name}，没有做任何改动`);
   }
 
@@ -323,12 +379,16 @@ export class PluginStore {
   }
 
   /** 按记录的来源重新拉取；能力集合有新增时重新确认，拒绝则保持原版本。 */
-  async update(name: string, options: PluginInstallOptions = {}): Promise<{ entry: PluginLockEntry; changed: boolean }> {
+  async update(name: string, options: PluginInstallOptions = {}): Promise<{ entry: PluginLockEntry; changed: boolean; changes: PluginCommandChange[] }> {
     const current = this.get(name);
     const staged = await this.stage(current.source);
     try {
       if (staged.plugin.manifest.name !== name) throw new PluginStoreError('PLUGIN_NAME_CHANGED', `来源里的插件名变成了 ${staged.plugin.manifest.name}，不会覆盖 ${name}`);
-      await this.confirmTrust(staged.plugin, [...current.trustedCapabilities, ...(current.candidate?.trustedCapabilities ?? [])], options);
+      const activePlugin = await loadPluginDirectory(this.artifactDir(name, this.activeArtifact(current)));
+      const changes = pluginCommandChanges(activePlugin, staged.plugin);
+      const reviewBase = current.candidate ? await loadPluginDirectory(this.artifactDir(name, current.candidate)) : activePlugin;
+      const reviewChanges = pluginCommandChanges(reviewBase, staged.plugin);
+      await this.confirmTrust(staged.plugin, [...current.trustedCapabilities, ...(current.candidate?.trustedCapabilities ?? [])], options, reviewChanges);
       return await this.withStoreLock(async () => {
         const lock = this.readLock();
         const latest = lock.plugins[name];
@@ -343,7 +403,7 @@ export class PluginStore {
         const entry: PluginLockEntry = { ...rest, active, ...(candidate.id !== active.id ? { candidate } : {}), updatedAt: new Date().toISOString() };
         lock.plugins[name] = entry;
         await this.writeLock(lock);
-        return { entry, changed };
+        return { entry, changed, changes };
       });
     } finally { await staged.cleanup(); }
   }

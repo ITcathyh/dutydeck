@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createCliUi } from '../cli-ui.js';
 import { runPluginCli } from './cli.js';
-import { parsePluginSource, PluginStore } from './store.js';
+import { parsePluginSource, PluginStore, type PluginTrustPrompt } from './store.js';
 import { writePlugin } from './scenario-fixtures.test-helpers.js';
 
 const examplePlugin = resolve(import.meta.dirname, '../../../../examples/plugins/hello');
@@ -163,6 +163,97 @@ describe('PluginStore', () => {
     expect(again).not.toHaveBeenCalled();
   });
 
+  it('reports added, removed and changed executable command digests without exposing their contents', async () => {
+    const source = join(temp, 'review');
+    await writePlugin(source, {
+      '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'review', version: '1.0.0' }),
+      'commands/summary.md': 'old command secret',
+      'commands/remove.md': 'remove me',
+      'agents/worker.json': JSON.stringify({ id: 'worker', name: 'Worker', command: 'node', args: ['old.mjs'] }),
+      'hooks/hooks.json': JSON.stringify({ 'task.completed': [{ command: ['node', 'old-hook.mjs'], timeout: 1000 }] })
+    });
+    await store.install(source, { yes: true });
+    await writePlugin(source, {
+      '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'review', version: '2.0.0' }),
+      'commands/summary.md': 'new command secret',
+      'commands/added.md': 'added command secret',
+      'agents/worker.json': JSON.stringify({ id: 'worker', name: 'Worker', command: 'node', args: ['new.mjs', '--flag'] }),
+      'hooks/hooks.json': JSON.stringify({ 'task.completed': [{ command: ['node', 'new-hook.mjs'], timeout: 1000 }] })
+    });
+    await rm(join(source, 'commands/remove.md'));
+
+    const updated = await store.update('review', { yes: true });
+    expect(updated.changed).toBe(true);
+    expect(updated.changes).toHaveLength(5);
+    expect(updated.changes).toEqual(expect.arrayContaining([
+      { kind: 'agent', name: 'worker', before: expect.stringMatching(/^[0-9a-f]{64}$/), after: expect.stringMatching(/^[0-9a-f]{64}$/) },
+      { kind: 'hook', name: 'task.completed', before: expect.stringMatching(/^[0-9a-f]{64}$/), after: expect.stringMatching(/^[0-9a-f]{64}$/) },
+      { kind: 'command', name: 'review:summary', before: expect.stringMatching(/^[0-9a-f]{64}$/), after: expect.stringMatching(/^[0-9a-f]{64}$/) },
+      { kind: 'command', name: 'review:added', before: null, after: expect.stringMatching(/^[0-9a-f]{64}$/) },
+      { kind: 'command', name: 'review:remove', before: expect.stringMatching(/^[0-9a-f]{64}$/), after: null }
+    ]));
+    expect(JSON.stringify(updated.changes)).not.toContain('secret');
+
+    // 同一活动版本与候选的规范序列化摘要稳定，与文件键顺序和重复执行无关。
+    const again = await store.update('review', { yes: true });
+    expect(again.changed).toBe(false);
+    expect(again.changes).toEqual(updated.changes);
+  });
+
+  it('ignores description-only changes in command review digests and prompts', async () => {
+    const source = join(temp, 'descriptions');
+    await writePlugin(source, {
+      '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'descriptions', version: '1.0.0', description: 'old plugin description' }),
+      'commands/summary.md': '---\ndescription: old command description\nargument-hint: <old>\n---\nsame $ARGUMENTS'
+    });
+    await store.install(source);
+    await writePlugin(source, {
+      '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'descriptions', version: '1.0.0', description: 'new plugin description' }),
+      'commands/summary.md': '---\ndescription: new command description\nargument-hint: <new>\n---\nsame $ARGUMENTS'
+    });
+    const confirm = vi.fn(async () => true);
+    const updated = await store.update('descriptions', { confirm });
+    expect(updated.changed).toBe(true);
+    expect(updated.changes).toEqual([]);
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it('re-confirms changed commands interactively, keeps rejection atomic, and preserves non-interactive and --yes behavior', async () => {
+    const source = join(temp, 'retrust');
+    await writePlugin(source, {
+      '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'retrust', version: '1.0.0' }),
+      'commands/summary.md': 'old prompt',
+      'hooks/hooks.json': JSON.stringify({ 'task.completed': [{ command: 'old-hook-command', timeout: 1000 }] })
+    });
+    await store.install(source, { yes: true });
+    const original = store.get('retrust');
+    await writePlugin(source, {
+      'commands/summary.md': 'new prompt secret',
+      'hooks/hooks.json': JSON.stringify({ 'task.completed': [{ command: 'new-hook-command-secret', timeout: 1000 }] })
+    });
+
+    const decline = vi.fn(async () => false);
+    await expect(store.update('retrust', { confirm: decline })).rejects.toMatchObject({ code: 'PLUGIN_TRUST_DECLINED' });
+    expect(store.get('retrust')).toEqual(original);
+    expect(decline).toHaveBeenCalledWith(expect.objectContaining({ capabilities: [], details: [] }));
+    const prompt = decline.mock.calls[0]![0];
+    expect(prompt.changes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'command', name: 'retrust:summary' }),
+      expect.objectContaining({ kind: 'hook', name: 'task.completed' })
+    ]));
+    expect(JSON.stringify(prompt)).not.toContain('new-hook-command-secret');
+    expect(JSON.stringify(prompt)).not.toContain('new prompt secret');
+
+    // 只有命令变化、没有新增能力时，无 confirm 不新增失败。
+    const nonInteractive = await store.update('retrust');
+    expect(nonInteractive.changes).toHaveLength(2);
+
+    const confirm = vi.fn(async () => true);
+    const accepted = await store.update('retrust', { yes: true, confirm });
+    expect(accepted.changes).toEqual(nonInteractive.changes);
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
   it('reports same-version local content replacement as changed', async () => {
     const source = join(temp, 'local');
     await writePlugin(source, declarative('local'));
@@ -188,11 +279,11 @@ describe('dutydeck plugin CLI', () => {
   beforeEach(async () => { temp = await mkdtemp(join(tmpdir(), 'dutydeck-plugin-cli-')); });
   afterEach(async () => { await rm(temp, { recursive: true, force: true }); });
 
-  const cli = async (action: Parameters<typeof runPluginCli>[0], args: string[], options: Parameters<typeof runPluginCli>[2] = {}) => {
+  const cli = async (action: Parameters<typeof runPluginCli>[0], args: string[], options: Parameters<typeof runPluginCli>[2] = {}, confirm: ((prompt: PluginTrustPrompt) => Promise<boolean>) | null = async () => false) => {
     let out = '';
     const ui = createCliUi({ stdout: { write: chunk => { out += chunk; } }, stderr: { write: () => {} }, color: false });
     // 只看外部插件：内置插件目录指向空目录。
-    const result = await runPluginCli(action, args, { database: join(temp, 'data/dutydeck.db'), ...options }, { ui, cwd: temp, confirm: async () => false, builtinRoot: join(temp, 'no-builtin') });
+    const result = await runPluginCli(action, args, { database: join(temp, 'data/dutydeck.db'), ...options }, { ui, cwd: temp, ...(confirm ? { confirm } : {}), builtinRoot: join(temp, 'no-builtin') });
     return { ...result, out };
   };
 
@@ -217,9 +308,27 @@ describe('dutydeck plugin CLI', () => {
     await writePlugin(join(temp, 'local'), declarative('local'));
     await cli('install', ['./local']);
     await writePlugin(join(temp, 'local'), { 'commands/summary.md': 'new contents' });
-    const result = await cli('update', ['local']);
+    const result = await cli('update', ['local'], {}, null);
     expect(result.out).toContain('dutydeck plugin activate');
     expect(result.out).not.toContain('已是最新');
+  });
+
+  it('includes command names and before/after digests in human and JSON update output without echoing command contents', async () => {
+    await writePlugin(join(temp, 'local'), declarative('local'));
+    await cli('install', ['./local']);
+    await writePlugin(join(temp, 'local'), { 'commands/summary.md': 'new command output-secret' });
+
+    const human = await cli('update', ['local'], {}, null);
+    expect(human.out).toContain('command local:summary');
+    expect(human.out).toMatch(/[0-9a-f]{64}.*[0-9a-f]{64}/);
+    expect(human.out).not.toContain('output-secret');
+
+    const machine = JSON.parse((await cli('update', ['local'], { json: true }, null)).out);
+    expect(machine.plugins).toHaveLength(1);
+    expect(machine.plugins[0].changes).toEqual([
+      { kind: 'command', name: 'local:summary', before: expect.stringMatching(/^[0-9a-f]{64}$/), after: expect.stringMatching(/^[0-9a-f]{64}$/) }
+    ]);
+    expect(JSON.stringify(machine)).not.toContain('output-secret');
   });
 
   it('validate exits non-zero and lists issues', async () => {

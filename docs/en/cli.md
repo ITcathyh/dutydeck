@@ -18,10 +18,15 @@ dutydeck session ask-wait check-1
 
 ADHD Lark structured confirmations retain their existing 24-hour card, same-session new turn after a click, and deferred acknowledgement. They do not return an answer to the original call.
 
+`dutydeck update [version]` accepts only an exact semver, not a range, tag, or option string. Without the argument it still resolves `latest` or an explicit `--dist-tag`. Installation, verification, and restart errors keep their original prefix and append `npm install --global dutydeck@<actual previous version> && dutydeck restart` as the manual rollback steps. This reinstalls the old package directly and does not depend on the old CLI understanding `update [version]`. If the previous version is missing or is not an exact semver, the error says that no safe command can be generated. Dutydeck never rolls back automatically or bypasses the deployment window.
+
 ```bash
 # Daemon
 dutydeck start [--cwd /path] [--port 4310] [--host 0.0.0.0]
-dutydeck status | restart | stop | update | doctor   # doctor warns when the daemon runs as root (in full-trust mode the Agent then has whole-machine access; if no running daemon is found it checks the current command) and when a model has no price, so usage caps do not cover it (configured bot models other than aliases such as `opus`, plus models the usage ledger failed to price in the last 30 days); it also notes a large share of free pages in the database file
+dutydeck status | restart | stop | doctor   # doctor warns when the daemon runs as root (in full-trust mode the Agent then has whole-machine access; if no running daemon is found it checks the current command) and when a model has no price, so usage caps do not cover it (configured bot models other than aliases such as `opus`, plus models the usage ledger failed to price in the last 30 days); it also notes a large share of free pages in the database file
+dutydeck update                 # latest dist-tag
+dutydeck update 1.2.3           # exact semver; mutually exclusive with --dist-tag
+dutydeck update --dist-tag next # explicit dist-tag
 
 # Immutable release deploy and cleanup
 dutydeck deploy --source /path/to/checkout

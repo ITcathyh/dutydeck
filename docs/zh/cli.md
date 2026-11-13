@@ -33,12 +33,18 @@ dutydeck restart
 # 停止守护进程
 dutydeck stop
 
-# 更新全局 Dutydeck 包并自动重启
+# 更新全局 Dutydeck 包并自动重启（默认 latest）
 dutydeck update
+# 安装精确 semver；与 --dist-tag 互斥
+dutydeck update 1.2.3
+# 按 dist-tag 更新
+dutydeck update --dist-tag next
 
 # 一键诊断（端口、SQLite、Agent 可执行性与默认 Agent、飞书监听、守护进程是否以 root 运行、型号是否缺价格（机器人配置的非别名型号，以及近 30 天用量记录里没能计价的型号）、库文件空闲页等）
 dutydeck doctor
 ```
+
+`dutydeck update [version]` 的版本参数只接受精确 semver，不接受 range、tag 或选项字符串；未传版本时仍按 `latest` 或显式 `--dist-tag` 解析。安装、版本核对或重启失败时保留原错误，并追加 `npm install --global dutydeck@<实际旧版本> && dutydeck restart` 作为手工回退步骤；它直接重装旧包，不依赖旧版 CLI 是否认识 `update [version]`。旧版本缺失或不是精确 semver 时会明确说明无法安全生成命令。不会自动回滚，也不会越过部署窗口。
 
 服务启动失败或运行中崩溃时，会在数据库所在目录写一份 `last-abnormal-exit.json`（时间、类型、退出码、脱敏后的错误首行、版本和数据库路径）；数据库目录还不存在时不写，也不会写到 `last-daemon-dir` 指向的其他实例。`dutydeck doctor` 读到 7 天内、且属于同一个数据库的记录时，在「守护进程」一项后面接一句「X 小时前异常退出（…）」：当前实例已就绪且是之后启动的，写「已自动恢复」，否则提示去看 journalctl。这一项的级别不变，没有记录时输出和以前一样。
 

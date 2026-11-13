@@ -128,6 +128,7 @@ export interface AgentGroupCliOptions {
 }
 
 export interface UpdateCliOptions {
+  version?: string;
   distTag?: string;
   force?: boolean;
   drainTimeout?: string;
@@ -1170,12 +1171,15 @@ Examples:
     .option('--json', 'Print the result as a single line of JSON')
     .action((name, key, options, command) => handlers.plugin?.('config', [name, key], pluginOptions(options, command)));
 
-  program.command('update')
-    .description('Update the global Dutydeck package and restart the background service')
+  program.command('update [version]')
+    .description('Update the global Dutydeck package to an exact version or npm dist-tag and restart the background service')
     .option('--dist-tag <tag>', 'npm dist-tag to install (default: latest)', 'latest')
     .option('--force', 'Skip waiting for running tasks and restart immediately')
     .option('--drain-timeout <seconds>', 'Maximum seconds to wait for running tasks before aborting restart (default: 900)')
-    .action(options => handlers.update?.(options));
+    .action((version: string | undefined, options, command: Command) => {
+      if (version !== undefined && command.getOptionValueSource('distTag') === 'cli') throw new Error('The exact update version and --dist-tag are mutually exclusive.');
+      return handlers.update?.({ ...options, distTag: version === undefined ? options.distTag : undefined, version });
+    });
 
   const backup = program.command('backup').description('Offline portable backups and quarantined restore into a new directory; external credential files are excluded; the full database may contain authentication tokens, signing keys and private content');
   backup.command('create').description('Require stopped database users; snapshot database and locked plugin files')

@@ -141,6 +141,23 @@ describe('Dutydeck CLI', () => {
     expect(unit).toHaveBeenCalledWith(expect.objectContaining({ unit: 'dutydeck-tag.service' }));
   });
 
+  it('passes an optional exact update version and keeps the default dist-tag flow unchanged', async () => {
+    const update = vi.fn();
+    await createCliProgram('0.0.6', { update }).parseAsync(['node', 'dutydeck', 'update', '1.2.3-beta.1']);
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({ version: '1.2.3-beta.1', distTag: undefined }));
+
+    const latest = vi.fn();
+    await createCliProgram('0.0.6', { update: latest }).parseAsync(['node', 'dutydeck', 'update']);
+    expect(latest).toHaveBeenCalledWith(expect.objectContaining({ version: undefined, distTag: 'latest' }));
+  });
+
+  it('rejects an exact update version combined with --dist-tag before calling the handler', async () => {
+    const update = vi.fn();
+    const program = createCliProgram('0.0.6', { update }).exitOverride().configureOutput({ writeErr: () => {} });
+    await expect(program.parseAsync(['node', 'dutydeck', 'update', '1.2.3', '--dist-tag', 'next'])).rejects.toThrow('mutually exclusive');
+    expect(update).not.toHaveBeenCalled();
+  });
+
   it('parses deploy prune options, taking --releases and --json from the parent deploy command too', async () => {
     const deployPrune = vi.fn(); const deploy = vi.fn();
     await createCliProgram('0.0.6', { deploy, deployPrune }).parseAsync(['node', 'dutydeck', 'deploy', 'prune', '--releases', '/r', '--keep', '3', '--dry-run', '--include-unmarked', '--json']);
