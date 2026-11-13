@@ -56,14 +56,14 @@ async function startPeer() {
   return { seen, port, closedStreams: () => closedStreams };
 }
 
-async function startMain(peerPort: number, token = () => 'secret-token') {
+async function startMain(peerPort: number, token = () => 'secret-token', check?: (presented: string | undefined) => boolean) {
   const unused = createServer();
   const downPort = await listen(unused);
   await new Promise(resolve => unused.close(resolve));
   const app = await buildApp({} as any, {
     instances: [{ id: 'tag', name: 'Tag', url: `http://127.0.0.1:${peerPort}` }, { id: 'down', name: 'Down', url: `http://127.0.0.1:${downPort}` }],
     auth: { mode: 'token', getToken: async () => token(), localOnly: false },
-    terminal: { provider: { lookupTerminalStream: () => ({ status: 'no-session' as const }) }, auth: { mode: 'token', check: presented => presented === token() } }
+    terminal: { provider: { lookupTerminalStream: () => ({ status: 'no-session' as const }) }, auth: { mode: 'token', check: check ?? (presented => presented === token()) } }
   });
   await app.listen({ host: '127.0.0.1', port: 0 });
   closers.push(() => app.close());
@@ -144,13 +144,15 @@ describe('转发到同机其他实例', () => {
     expect(upgrade?.headers.authorization).toBeUndefined();
   });
 
-  it('token 轮换后，已转发的终端 WebSocket 和实时流都被断开', async () => {
+  it('scoped Cookie 失效后，已转发的终端 WebSocket 和实时流都按同一候选顺序复核并断开', async () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     closers.push(async () => vi.useRealTimers());
     let token = 'secret-token';
+    const credentialCheck = vi.fn((presented: string | undefined) => presented === token);
     const peer = await startPeer();
-    const main = await startMain(peer.port, () => token);
-    const socket = new WebSocket(`ws://${main}/api/instances/tag/terminal/s1`, { headers: authorized });
+    const main = await startMain(peer.port, () => token, credentialCheck);
+    const cookie = `dutydeck_access_${main.split(':').at(-1)}=wrong; dutydeck_access=${token}`;
+    const socket = new WebSocket(`ws://${main}/api/instances/tag/terminal/s1`, { headers: { cookie } });
     const messages: string[] = [];
     let socketClosed = false;
     socket.on('message', data => messages.push(String(data)));
@@ -159,7 +161,7 @@ describe('转发到同机其他实例', () => {
     let streamText = '';
     let streamClosed = false;
     await new Promise<void>((resolve, reject) => {
-      const request = httpGet(`http://${main}/api/instances/tag/sessions/s1/stream`, { headers: authorized, agent: false }, response => {
+      const request = httpGet(`http://${main}/api/instances/tag/sessions/s1/stream`, { headers: { cookie }, agent: false }, response => {
         response.on('data', chunk => { streamText += chunk; resolve(); });
         response.on('error', () => {});
         response.once('close', () => { streamClosed = true; });
@@ -170,6 +172,7 @@ describe('转发到同机其他实例', () => {
     expect(streamText).toBe('data: first\n\n');
 
     vi.advanceTimersByTime(5_000);
+    expect(credentialCheck).toHaveBeenCalledTimes(6);
     socket.send('ping');
     await vi.waitFor(() => expect(messages).toEqual(['hello', 'echo:ping']));
     expect(socketClosed || streamClosed).toBe(false);

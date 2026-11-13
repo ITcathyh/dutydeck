@@ -4,7 +4,7 @@ import type { Readable } from 'node:stream';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { RuntimeError, type ConfigRepository } from '@dutydeck/shared';
-import { presentedCredential } from './auth/auth.js';
+import { validatePresentedCredential } from './auth/auth.js';
 import { CredentialSweep, registerUpgradeRoute, rejectUpgrade, terminalAccessMode, upgradeRejection, type TerminalRouteAuth } from './terminal/terminal-ws.js';
 
 /**
@@ -111,8 +111,7 @@ export async function registerInstanceProxy(app: FastifyInstance, peers: PeerIns
   const credentials = new CredentialSweep<() => void>(CREDENTIAL_RECHECK_MS);
   const bindCredential = (close: () => void, request: IncomingMessage) => {
     if (!auth || terminalAccessMode(auth) !== 'token') return;
-    const presented = presentedCredential(request.headers);
-    credentials.bind(close, () => auth.check(presented), close);
+    credentials.bind(close, () => validatePresentedCredential(request.headers, auth.check), close);
   };
   app.addHook('preClose', async () => {
     closing = true;

@@ -720,7 +720,7 @@ describe('HTTP API boundary', () => {
     expect((await app.inject({ method: 'POST', url: '/api/hooks/ci', ...remote })).statusCode).not.toBe(401);
     // 浏览器认证入口公开，但只返回认证状态；登录后 cookie 才能访问业务 API。
     expect((await app.inject({ method: 'GET', url: '/api/auth/status', ...remote })).json()).toEqual({ authenticated: false, required: true });
-    const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { token: 'secret-token' }, ...remote });
+    const login = await app.inject({ method: 'POST', url: '/api/auth/login', headers: { host: 'dutydeck.test' }, payload: { token: 'secret-token' }, ...remote });
     expect(login.statusCode).toBe(200);
     expect(login.headers['set-cookie']).toContain('dutydeck_access=secret-token');
     expect((await app.inject({ method: 'GET', url: '/api/sessions', headers: { cookie: login.headers['set-cookie'] }, ...remote })).statusCode).not.toBe(401);
@@ -778,7 +778,7 @@ describe('HTTP API boundary', () => {
     for (const method of ['PUT', 'PATCH', 'DELETE'] as const) {
       expect((await app.inject({ method, url: `/api/auth/link?code=${code}`, ...remote })).statusCode).toBe(401);
     }
-    const redeemed = await app.inject({ method: 'POST', url: '/api/auth/link', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    const redeemed = await app.inject({ method: 'POST', url: '/api/auth/link', headers: { host: 'dutydeck.test', 'content-type': 'application/x-www-form-urlencoded' },
       payload: `code=${code}`, ...remote });
     expect(redeemed.statusCode).toBe(303);
     expect(redeemed.headers.location).toBe('/sessions/ses_1');

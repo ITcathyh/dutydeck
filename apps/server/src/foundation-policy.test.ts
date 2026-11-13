@@ -29,6 +29,23 @@ describe('WP1b foundation production policy wiring', () => {
     await expect(authorize(request({ authorization: 'Bearer verified-token' }) as any, 'channel_bot.update')).resolves.toMatchObject({ allowed: true, code: 'allowed_admin', source: 'owner' });
   });
 
+  it('resolves owner routes through ordered scoped and legacy cookies without Bearer fallback', async () => {
+    let current = 'verified-token';
+    const token = createInstallationPrincipalResolver({ authEnabled: true, mode: 'token', getToken: async () => current });
+    const headers = {
+      host: 'dutydeck.test:4310',
+      cookie: 'dutydeck_access_4310=wrong; dutydeck_access=wrong; dutydeck_access=verified-token'
+    };
+    await expect(token(request(headers))).resolves.toMatchObject({ authentication: 'verified_access_token' });
+    await expect(token(request({ ...headers, authorization: 'Bearer wrong' }))).resolves.toBeUndefined();
+    await expect(token(request({ host: 'other.test:4310', cookie: 'dutydeck_access_4310=other-instance-token' }))).resolves.toBeUndefined();
+
+    const authorize = createFoundationManagementAuthorizer(token);
+    await expect(authorize(request(headers) as any, 'channel_bot.update')).resolves.toMatchObject({ allowed: true, code: 'allowed_admin', source: 'owner' });
+    current = 'rotated-token';
+    await expect(token(request(headers))).resolves.toBeUndefined();
+  });
+
   it('isolates legacy execution and blocks every managed staged execution edge', async () => {
     const repos = createRepositories(':memory:'); repositories.push(repos);
     await repos.channelBots.create({

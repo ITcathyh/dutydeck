@@ -6,6 +6,7 @@ import {
   AUTH_PASSWORD_CONFIG_KEY,
   AUTH_TOKEN_CONFIG_KEY,
   AUTH_COOKIE_NAME,
+  accessCookieNameForRequest,
   extractCookie,
   extractBearerToken,
   generateAuthToken,
@@ -29,6 +30,7 @@ import {
   SHARE_TOKEN_QUERY_KEY,
   signSessionShareToken,
   tokensEqual,
+  validatePresentedCredential,
   verifyBrowserSession,
   verifyPassword,
   type AuthMiddlewareOptions
@@ -186,6 +188,79 @@ describe('extractCookie', () => {
   });
 });
 
+describe('access cookie naming and ordered validation', () => {
+  it.each([
+    ['dutydeck.test', AUTH_COOKIE_NAME],
+    ['dutydeck.test:4310', `${AUTH_COOKIE_NAME}_4310`],
+    ['dutydeck.test:80', `${AUTH_COOKIE_NAME}_80`],
+    ['dutydeck.test:443', `${AUTH_COOKIE_NAME}_443`],
+    ['dutydeck.test:00080', `${AUTH_COOKIE_NAME}_80`],
+    ['[::1]', AUTH_COOKIE_NAME],
+    ['[::1]:4310', `${AUTH_COOKIE_NAME}_4310`],
+    ['[2001:db8::1]:65535', `${AUTH_COOKIE_NAME}_65535`],
+  ])('names the cookie from raw Host %s', (host, expected) => {
+    expect(accessCookieNameForRequest({ host })).toBe(expected);
+  });
+
+  it.each([
+    'dutydeck.test:',
+    'dutydeck.test:0',
+    'dutydeck.test:65536',
+    'dutydeck.test:http',
+    '2001:db8::1:4310',
+    '[::1',
+    'dutydeck.test:4310/path',
+    'attacker@dutydeck.test:4310',
+    `${AUTH_COOKIE_NAME}_9999:forged`,
+  ])('does not scope a cookie from invalid Host %s', host => {
+    expect(accessCookieNameForRequest({ host })).toBe(AUTH_COOKIE_NAME);
+  });
+
+  it('uses the same forwarded public Host boundary as Origin validation', () => {
+    expect(accessCookieNameForRequest({ host: '127.0.0.1:4310', 'x-forwarded-host': 'dutydeck.example' })).toBe(AUTH_COOKIE_NAME);
+    expect(accessCookieNameForRequest({ host: '127.0.0.1:4310', 'x-forwarded-host': 'dutydeck.example:8443, proxy.internal' })).toBe(`${AUTH_COOKIE_NAME}_8443`);
+    expect(accessCookieNameForRequest({ host: '127.0.0.1:4310', 'x-forwarded-host': ['dutydeck.example:9443', 'proxy.internal'] })).toBe(`${AUTH_COOKIE_NAME}_9443`);
+    expect(accessCookieNameForRequest({ host: '127.0.0.1:4310', 'x-forwarded-host': 'attacker@dutydeck.example:8443' })).toBe(AUTH_COOKIE_NAME);
+  });
+
+  it('keeps synchronous validation synchronous, ordered and stops at the first valid candidate', () => {
+    const check = vi.fn((presented: string | undefined) => presented === 'good');
+    const valid = validatePresentedCredential({
+      host: 'dutydeck.test:4310',
+      cookie: `${AUTH_COOKIE_NAME}_4310=; ${AUTH_COOKIE_NAME}_4310=bad; ${AUTH_COOKIE_NAME}_4310=good; ${AUTH_COOKIE_NAME}=good`
+    }, check);
+    expect(valid).toBe(true);
+    expect(check.mock.calls).toEqual([['bad'], ['good']]);
+  });
+
+  it('awaits each asynchronous validator before trying the next candidate', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const events: string[] = [];
+    const check = vi.fn(async (presented: string | undefined) => {
+      events.push(`start:${presented}`);
+      if (presented === 'bad') await gate;
+      events.push(`end:${presented}`);
+      return presented === 'good';
+    });
+    const pending = validatePresentedCredential({
+      host: 'dutydeck.test:4310',
+      cookie: `${AUTH_COOKIE_NAME}_4310=bad; ${AUTH_COOKIE_NAME}=good`
+    }, check);
+    await Promise.resolve();
+    expect(events).toEqual(['start:bad']);
+    release();
+    await expect(pending).resolves.toBe(true);
+    expect(events).toEqual(['start:bad', 'end:bad', 'start:good', 'end:good']);
+  });
+
+  it('does not let cookies rescue an invalid Bearer credential', () => {
+    const check = vi.fn((presented: string | undefined) => presented === 'good');
+    expect(validatePresentedCredential({ authorization: 'Bearer bad', cookie: `${AUTH_COOKIE_NAME}=good` }, check)).toBe(false);
+    expect(check.mock.calls).toEqual([['bad']]);
+  });
+});
+
 describe('registerAuthMiddleware', () => {
   const TOKEN = 'test-token-abcdefghijklmnopqrstuvwxyz123456';
 
@@ -278,6 +353,46 @@ describe('registerAuthMiddleware', () => {
     await app.close();
   });
 
+  it('同名 legacy Cookie 的无效首值不遮蔽后续有效值，无效 Bearer 也不回退 Cookie', async () => {
+    const app = buildApp({ getToken: async () => TOKEN, localOnly: false });
+    const cookieFallback = await app.inject({
+      method: 'GET', url: '/api/protected', headers: { host: 'dutydeck.test', cookie: `${AUTH_COOKIE_NAME}=wrong; ${AUTH_COOKIE_NAME}=${TOKEN}` }
+    });
+    expect(cookieFallback.statusCode).toBe(200);
+    const bearer = await app.inject({
+      method: 'GET', url: '/api/protected', headers: { host: 'dutydeck.test', authorization: 'Bearer wrong', cookie: `${AUTH_COOKIE_NAME}=${TOKEN}` }
+    });
+    expect(bearer.statusCode).toBe(401);
+    await app.close();
+  });
+
+  it('scoped Cookie 仍要求精确同源', async () => {
+    const app = buildApp({ getToken: async () => TOKEN, localOnly: false });
+    const response = await app.inject({
+      method: 'POST', url: '/api/protected', headers: {
+        host: 'dutydeck.test:4310', origin: 'https://evil.example', cookie: `${AUTH_COOKIE_NAME}_4310=${TOKEN}`
+      }
+    });
+    expect(response.statusCode).toBe(403);
+    expect(response.json().error.code).toBe('ORIGIN_NOT_ALLOWED');
+    await app.close();
+  });
+
+  it('伪造 Host 只能选择合法端口后缀，且不能越过本实例 token 校验', async () => {
+    const app = buildApp({ getToken: async () => TOKEN, localOnly: false });
+    const wrong = await app.inject({
+      method: 'GET', url: '/api/protected', headers: { host: 'attacker.example:4310', cookie: `${AUTH_COOKIE_NAME}_4310=other-instance-token` }
+    });
+    expect(wrong.statusCode).toBe(401);
+    const malformed = await app.inject({
+      method: 'GET', url: '/api/protected', headers: {
+        host: 'dutydeck.test:4310', 'x-forwarded-host': 'attacker@dutydeck.example:8443', cookie: `${AUTH_COOKIE_NAME}_8443=${TOKEN}`
+      }
+    });
+    expect(malformed.statusCode).toBe(401);
+    await app.close();
+  });
+
   it('URL query token 不再作为凭据，避免泄露到访问日志', async () => {
     const app = buildApp({ getToken: async () => TOKEN, localOnly: false });
     const response = await app.inject({
@@ -361,6 +476,101 @@ describe('registerAuthMiddleware', () => {
   });
 });
 
+describe('port-scoped access cookies', () => {
+  const TOKEN_A = 'token-a-abcdefghijklmnopqrstuvwxyz123456';
+  const TOKEN_B = 'token-b-abcdefghijklmnopqrstuvwxyz123456';
+
+  function buildTokenApp(token: string) {
+    const app = Fastify();
+    const auth: AuthMiddlewareOptions = { mode: 'token', localOnly: false, getToken: async () => token };
+    registerBrowserAuthRoutes(app, auth);
+    registerAuthMiddleware(app, { ...auth, exempt: (_method, pathname) => pathname.startsWith('/api/auth/') });
+    app.get('/api/protected', async () => ({ ok: true }));
+    return app;
+  }
+
+  it('keeps two explicit-port logins independent and rejects a cross-port token', async () => {
+    const first = buildTokenApp(TOKEN_A);
+    const second = buildTokenApp(TOKEN_B);
+    try {
+      const firstLogin = await first.inject({ method: 'POST', url: '/api/auth/login', headers: { host: '127.0.0.1:4310' }, payload: { token: TOKEN_A } });
+      const secondLogin = await second.inject({ method: 'POST', url: '/api/auth/login', headers: { host: '127.0.0.1:4311' }, payload: { token: TOKEN_B } });
+      const firstSetCookie = String(firstLogin.headers['set-cookie']);
+      const secondSetCookie = String(secondLogin.headers['set-cookie']);
+      expect(firstSetCookie).toContain(`${AUTH_COOKIE_NAME}_4310=${TOKEN_A}`);
+      expect(secondSetCookie).toContain(`${AUTH_COOKIE_NAME}_4311=${TOKEN_B}`);
+      const cookie = `${firstSetCookie.split(';')[0]}; ${secondSetCookie.split(';')[0]}`;
+      expect((await first.inject({ method: 'GET', url: '/api/protected', headers: { host: '127.0.0.1:4310', cookie } })).statusCode).toBe(200);
+      expect((await second.inject({ method: 'GET', url: '/api/protected', headers: { host: '127.0.0.1:4311', cookie } })).statusCode).toBe(200);
+      expect((await first.inject({ method: 'GET', url: '/api/auth/status', headers: { host: '127.0.0.1:4310', cookie } })).json()).toMatchObject({ authenticated: true });
+      expect((await second.inject({ method: 'GET', url: '/api/auth/status', headers: { host: '127.0.0.1:4311', cookie } })).json()).toMatchObject({ authenticated: true });
+      expect((await second.inject({ method: 'GET', url: '/api/protected', headers: { host: '127.0.0.1:4311', cookie: firstSetCookie.split(';')[0]! } })).statusCode).toBe(401);
+    } finally {
+      await first.close();
+      await second.close();
+    }
+  });
+
+  it('tries a later valid value when the first scoped cookie is invalid', async () => {
+    const app = buildTokenApp(TOKEN_A);
+    try {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/protected',
+        headers: {
+          host: '127.0.0.1:4310',
+          cookie: `${AUTH_COOKIE_NAME}_4310=invalid; ${AUTH_COOKIE_NAME}_4310=${TOKEN_A}; ${AUTH_COOKIE_NAME}=also-invalid`
+        }
+      });
+      expect(response.statusCode).toBe(200);
+    } finally {
+      await app.close();
+    }
+  });
+  it('accepts a legacy cookie after upgrade and issues the scoped name on the next login', async () => {
+    const app = buildTokenApp(TOKEN_A);
+    const host = '127.0.0.1:4310';
+    try {
+      const legacy = await app.inject({ method: 'GET', url: '/api/auth/status', headers: { host, cookie: `${AUTH_COOKIE_NAME}=${TOKEN_A}` } });
+      expect(legacy.json()).toMatchObject({ authenticated: true });
+      const login = await app.inject({ method: 'POST', url: '/api/auth/login', headers: { host }, payload: { token: TOKEN_A } });
+      expect(login.headers['set-cookie']).toContain(`${AUTH_COOKIE_NAME}_4310=${TOKEN_A}`);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('logout clears scoped and a valid legacy cookie without deleting another instance credential', async () => {
+    const app = buildTokenApp(TOKEN_A);
+    const other = buildTokenApp(TOKEN_B);
+    const host = '127.0.0.1:4310';
+    const scoped = `${AUTH_COOKIE_NAME}_4310`;
+    const setCookies = (value: string | string[] | undefined) => value === undefined ? [] : Array.isArray(value) ? value : [value];
+    try {
+      const foreignLogout = await app.inject({ method: 'POST', url: '/api/auth/logout', headers: { host, cookie: `${scoped}=${TOKEN_A}; ${AUTH_COOKIE_NAME}=${TOKEN_B}` } });
+      const foreignClears = setCookies(foreignLogout.headers['set-cookie']);
+      expect(foreignClears).toHaveLength(1);
+      expect(foreignClears[0]).toMatch(new RegExp(`^${scoped}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0$`));
+      expect((await app.inject({ method: 'GET', url: '/api/auth/status', headers: { host, cookie: `${AUTH_COOKIE_NAME}=${TOKEN_B}` } })).json()).toMatchObject({ authenticated: false });
+      expect((await other.inject({ method: 'GET', url: '/api/auth/status', headers: { host: '127.0.0.1', cookie: `${AUTH_COOKIE_NAME}=${TOKEN_B}` } })).json()).toMatchObject({ authenticated: true });
+
+      const ownLogout = await app.inject({ method: 'POST', url: '/api/auth/logout', headers: { host, cookie: `${scoped}=${TOKEN_A}; ${AUTH_COOKIE_NAME}=${TOKEN_A}` } });
+      const ownClears = setCookies(ownLogout.headers['set-cookie']);
+      expect(ownClears).toHaveLength(2);
+      expect(ownClears[0]).toContain(`${scoped}=;`);
+      expect(ownClears[1]).toContain(`${AUTH_COOKIE_NAME}=;`);
+      for (const cookie of ownClears) expect(cookie).toContain('Max-Age=0');
+      const clearedNames = ownClears.map(cookie => cookie.slice(0, cookie.indexOf('=')));
+      const remaining = [`${scoped}=${TOKEN_A}`, `${AUTH_COOKIE_NAME}=${TOKEN_A}`].filter(cookie => !clearedNames.includes(cookie.slice(0, cookie.indexOf('='))));
+      expect(remaining).toEqual([]);
+      expect((await app.inject({ method: 'GET', url: '/api/auth/status', headers: { host, cookie: remaining.join('; ') } })).json()).toMatchObject({ authenticated: false });
+    } finally {
+      await app.close();
+      await other.close();
+    }
+  });
+});
+
 describe('browser auth routes', () => {
   const TOKEN = 'test-token-abcdefghijklmnopqrstuvwxyz123456';
 
@@ -386,6 +596,7 @@ describe('browser auth routes', () => {
       method: 'POST',
       url: '/api/auth/login',
       remoteAddress: '203.0.113.7',
+      headers: { host: 'dutydeck.test' },
       payload: { token: TOKEN }
     });
     expect(login.statusCode).toBe(200);
@@ -399,9 +610,27 @@ describe('browser auth routes', () => {
       method: 'GET',
       url: '/api/auth/status',
       remoteAddress: '203.0.113.7',
-      headers: { cookie }
+      headers: { host: 'dutydeck.test', cookie }
     });
     expect(status.json()).toEqual({ authenticated: true, required: true });
+    await app.close();
+  });
+
+  it('uses the forwarded public port and preserves secure cookie attributes', async () => {
+    const app = buildApp();
+    const scoped = await app.inject({
+      method: 'POST', url: '/api/auth/login', payload: { token: TOKEN }, headers: {
+        host: '127.0.0.1:4310', 'x-forwarded-host': 'dutydeck.example:8443, proxy.internal', 'x-forwarded-proto': 'https'
+      }
+    });
+    const cookie = String(scoped.headers['set-cookie']);
+    expect(cookie).toMatch(new RegExp(`^${AUTH_COOKIE_NAME}_8443=${TOKEN}; Path=/; HttpOnly; SameSite=Strict; Secure; Max-Age=2592000$`));
+    const publicDefaultPort = await app.inject({
+      method: 'POST', url: '/api/auth/login', payload: { token: TOKEN }, headers: {
+        host: '127.0.0.1:4310', 'x-forwarded-host': 'dutydeck.example', 'x-forwarded-proto': 'https'
+      }
+    });
+    expect(publicDefaultPort.headers['set-cookie']).toContain(`${AUTH_COOKIE_NAME}=${TOKEN}`);
     await app.close();
   });
 
@@ -410,7 +639,7 @@ describe('browser auth routes', () => {
     const rejected = await app.inject({ method: 'POST', url: '/api/auth/login', remoteAddress: '203.0.113.7', payload: { token: 'wrong' } });
     expect(rejected.statusCode).toBe(401);
     expect(rejected.headers['set-cookie']).toBeUndefined();
-    const logout = await app.inject({ method: 'POST', url: '/api/auth/logout', remoteAddress: '203.0.113.7' });
+    const logout = await app.inject({ method: 'POST', url: '/api/auth/logout', remoteAddress: '203.0.113.7', headers: { host: 'dutydeck.test' } });
     expect(logout.headers['set-cookie']).toContain(`${AUTH_COOKIE_NAME}=`);
     expect(logout.headers['set-cookie']).toContain('Max-Age=0');
     await app.close();
@@ -497,6 +726,23 @@ describe('one-time login links', () => {
     expect(redeemed.headers['set-cookie']).toBe(login.headers['set-cookie']);
     const status = await app.inject({ method: 'GET', url: '/api/auth/status', headers: { cookie: redeemed.headers['set-cookie'] as string }, ...remote });
     expect(status.json()).toEqual({ authenticated: true, required: true });
+    await app.close();
+  });
+
+  it('一次性登录链接与普通登录共用 IPv6 显式端口 Cookie 命名', async () => {
+    const links = new LoginLinkStore();
+    const app = buildLinkApp(links);
+    const host = '[::1]:4310';
+    const code = links.issue('ses_ipv6');
+    const redeemed = await app.inject({ method: 'POST', url: '/api/auth/link', headers: {
+      host, 'content-type': 'application/x-www-form-urlencoded'
+    }, payload: `code=${encodeURIComponent(code)}`, ...remote });
+    expect(redeemed.statusCode).toBe(303);
+    expect(redeemed.headers['set-cookie']).toContain(`${AUTH_COOKIE_NAME}_4310=${TOKEN}`);
+    const login = await app.inject({ method: 'POST', url: '/api/auth/login', headers: { host }, payload: { token: TOKEN }, ...remote });
+    expect(redeemed.headers['set-cookie']).toBe(login.headers['set-cookie']);
+    const status = await app.inject({ method: 'GET', url: '/api/auth/status', headers: { host, cookie: redeemed.headers['set-cookie'] as string }, ...remote });
+    expect(status.json()).toMatchObject({ authenticated: true });
     await app.close();
   });
 
@@ -634,7 +880,7 @@ describe('密码登录', () => {
     return { app, configs };
   }
   const login = (app: Awaited<ReturnType<typeof passwordApp>>['app'], payload: Record<string, string>, source: { remoteAddress: string } = remote) =>
-    app.inject({ method: 'POST', url: '/api/auth/login', payload, ...source });
+    app.inject({ method: 'POST', url: '/api/auth/login', headers: { host: 'dutydeck.test' }, payload, ...source });
 
   it('未登录从非回环地址读会话列表被拒；密码登录后 cookie 可读；Bearer token 照旧可用', async () => {
     const { app } = await passwordApp();

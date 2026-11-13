@@ -33,7 +33,7 @@ import { registerLarkRoutes, type LarkRoutesOptions } from './lark/routes.js';
 import { discoverAgentModels } from './agent-models.js';
 import { discoverSessionAgentModels } from './session-model-probe.js';
 import { registerSystemRoutes, type SystemRoutesOptions } from './system-routes.js';
-import { accessMode, isValidAccessCredential, presentedCredential, isValidSessionShareCredential, SHARE_TOKEN_QUERY_KEY, registerAuthMiddleware, registerBrowserAuthRoutes, type AuthMiddlewareOptions } from './auth/auth.js';
+import { accessMode, isValidPresentedAccessCredential, isValidSessionShareCredential, SHARE_TOKEN_QUERY_KEY, registerAuthMiddleware, registerBrowserAuthRoutes, type AuthMiddlewareOptions } from './auth/auth.js';
 import { registerTerminalRoutes, type TerminalRouteAuth, type TerminalStreamProvider } from './terminal/terminal-ws.js';
 import { isSharedInstanceRead, registerInstanceProxy, rewriteSharedSessionProxyUrl, type PeerInstance } from './instance-proxy.js';
 import { isRelayCapabilityRequest, registerRelayRoutes, type RelayRoutesOptions } from './relay-routes.js';
@@ -757,7 +757,6 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     // The access credential was checked once at connect; a token rotation or
     // password reset must also end streams that are already open.
     const accessAuth = !shared && options.auth && accessMode(options.auth) === 'token' ? options.auth : undefined;
-    const accessCredential = presentedCredential(request.headers);
     let accessPoll: ReturnType<typeof setInterval> | undefined;
     let accessChecking = false;
     const sharedSessionId = request.params.id;
@@ -871,7 +870,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
       // A check still unresolved a whole period later cannot prove access.
       if (accessChecking) return disconnect();
       accessChecking = true;
-      void isValidAccessCredential(accessCredential, accessAuth.getToken, accessAuth.getPasswordHash)
+      void isValidPresentedAccessCredential(request.headers, accessAuth.getToken, accessAuth.getPasswordHash)
         .then(valid => { if (!valid) disconnect(); }, disconnect)
         .finally(() => { accessChecking = false; });
     }, SESSION_STREAM_ACCESS_RECHECK_MS);

@@ -9,12 +9,14 @@ afterEach(async () => {
 
 function fakeRuntime() {
   const unsubscribe = vi.fn();
+  let live: ((event: any) => void) | undefined;
   return {
     listAgents: vi.fn(async () => []),
     listSessions: vi.fn(async () => []),
     start: vi.fn(async () => ({ id: 'session-open' })),
     getEventWindow: vi.fn(async () => []),
-    subscribe: vi.fn(() => unsubscribe),
+    subscribe: vi.fn((_sessionId: string, callback: (event: any) => void) => { live = callback; return unsubscribe; }),
+    emit: (event: any) => live?.(event),
     unsubscribe
   };
 }
@@ -31,6 +33,47 @@ describe('remote access modes', () => {
     expect((await app.inject({ method: 'GET', url: '/api/sessions/s1/stream' })).statusCode).toBe(401);
     expect(runtime.listSessions).not.toHaveBeenCalled();
     expect(runtime.subscribe).not.toHaveBeenCalled();
+  });
+
+  it('SSE 初验与周期复核都按 scoped → legacy 重新验证候选', async () => {
+    let token = 'secret-token';
+    const getToken = vi.fn(async () => token);
+    const runtime = fakeRuntime();
+    const app = await buildApp(runtime as any, {
+      auth: { mode: 'token', getToken, localOnly: false }
+    });
+    apps.push(app);
+    await app.listen({ host: '127.0.0.1', port: 0 });
+    const address = app.server.address();
+    if (!address || typeof address === 'string') throw new Error('expected TCP address');
+    const controller = new AbortController();
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/sessions/s1/stream`, {
+        headers: { cookie: `dutydeck_access_${address.port}=wrong; dutydeck_access=${token}` },
+        signal: controller.signal
+      });
+      expect(response.status).toBe(200);
+      const reader = response.body!.getReader();
+      expect(new TextDecoder().decode((await reader.read()).value)).toContain(': connected');
+      expect(getToken).toHaveBeenCalledTimes(2);
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(getToken).toHaveBeenCalledTimes(4);
+      runtime.emit({ sequence: 1, type: 'test', value: 'still-connected' });
+      const event = await reader.read();
+      expect(event.done).toBe(false);
+      expect(new TextDecoder().decode(event.value)).toContain('still-connected');
+
+      token = 'rotated-token';
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(getToken).toHaveBeenCalledTimes(6);
+      const disconnected = await reader.read().then(result => result.done === true, () => true);
+      expect(disconnected).toBe(true);
+    } finally {
+      controller.abort();
+      vi.useRealTimers();
+    }
   });
 
   it('serves status, business HTTP, and SSE without a token in explicit open mode', async () => {

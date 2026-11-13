@@ -442,6 +442,32 @@ describe('terminal WS proxy', () => {
     await vi.waitFor(() => expect(fake.disposeCount).toBe(1));
   });
 
+  it('WS 初验与周期复核都按 scoped → legacy 重新验证候选', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const fake = createFakeStream();
+    let current = 'good-token';
+    const check = vi.fn((token: string | undefined) => token === current);
+    let ws: WebSocket | undefined;
+    try {
+      const { port } = await startServer(providerFrom({ s1: fake.handle }), { check }, undefined, { credentialRecheckMs: 5_000 });
+      ws = await connect(port, '/api/terminal/s1', { cookie: `dutydeck_access_${port}=wrong; dutydeck_access=${current}` });
+      const closeCode = new Promise<number>(resolve => ws!.once('close', code => resolve(code)));
+      expect(check).toHaveBeenCalledTimes(2);
+
+      vi.advanceTimersByTime(5_000);
+      expect(ws.readyState).toBe(WebSocket.OPEN);
+      expect(check).toHaveBeenCalledTimes(4);
+
+      current = 'rotated-token';
+      vi.advanceTimersByTime(5_000);
+      expect(await closeCode).toBe(4401);
+      expect(check).toHaveBeenCalledTimes(6);
+    } finally {
+      ws?.terminate();
+      vi.useRealTimers();
+    }
+  });
+
   it('浏览器 cookie 的 WS 必须来自相同 Origin', async () => {
     const auth: TerminalRouteAuth = { check: token => token === 'good-token' };
     const { port } = await startServer(providerFrom({ s1: createFakeStream().handle }), auth);
