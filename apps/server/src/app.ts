@@ -577,12 +577,15 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     const decision = await requireSessionExecution(request, request.params.id, 'session', 'terminal.write');
     return runtime.runVerification(request.params.id, request.body, decision?.source === 'owner' ? installationOwnerTaskActor : undefined);
   });
-  app.post<{ Params: { id: string }; Body: { prompt: string; mode?: 'queue' | 'interrupt' | 'steer'; skillRequests?: string[]; client?: string; strictSteer?: boolean } }>('/api/sessions/:id/send', async (request, reply) => {
+  app.post<{ Params: { id: string }; Body: { prompt: string; mode?: 'queue' | 'interrupt' | 'steer'; skillRequests?: string[]; client?: string; strictSteer?: boolean; idempotencyKey?: string } }>('/api/sessions/:id/send', async (request, reply) => {
     const client = taskClient(request.body);
     const prompt = request.body?.prompt?.trim();
     const requested = request.body?.mode ?? 'queue';
+    const idempotencyKey = request.body?.idempotencyKey;
     if (!prompt) throw new RuntimeError('INVALID_PROMPT', 'Prompt must not be empty', 400);
     if (requested !== 'queue' && requested !== 'interrupt' && requested !== 'steer') throw new RuntimeError('INVALID_SEND_MODE', `Unknown send mode: ${String(requested)}`, 400);
+    if (idempotencyKey !== undefined && (typeof idempotencyKey !== 'string' || !idempotencyKey.trim() || idempotencyKey.length > 128)) throw new RuntimeError('INVALID_IDEMPOTENCY_KEY', 'Idempotency key must be a non-empty string of at most 128 characters', 400);
+    if (requested === 'steer' && idempotencyKey !== undefined) throw new RuntimeError('STEER_IDEMPOTENCY_UNSUPPORTED', 'Steering does not support idempotency keys; check existing tasks before retrying', 400);
     // 插话先按排队接收（完整的任务链路），再尝试送进正在执行的那一轮；送不进去就照常排队。
     const mode = requested === 'steer' ? 'queue' : requested;
     const skillRequests = request.body.skillRequests;
@@ -595,8 +598,8 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
       ? options.plugins.commands.expand(prompt, { cwd: (await runtime.getSession(request.params.id))?.cwd }) : undefined;
     const agentPrompt = pluginPrompt ?? prompt;
     const task = decision?.source === 'owner'
-      ? await runtime.dispatch(request.params.id, prompt, mode, agentPrompt, undefined, installationOwnerTaskActor, undefined, skillRequests)
-      : await runtime.dispatch(request.params.id, prompt, mode, agentPrompt, undefined, undefined, undefined, skillRequests);
+      ? await runtime.dispatch(request.params.id, prompt, mode, agentPrompt, undefined, installationOwnerTaskActor, idempotencyKey, skillRequests)
+      : await runtime.dispatch(request.params.id, prompt, mode, agentPrompt, undefined, undefined, idempotencyKey, skillRequests);
     if (requested !== 'steer') return reply.code(202).send({ accepted: true, task });
     // 这一条已经开跑（没有排队）也算按正常新一轮处理。
     let steering: { task: unknown; outcome: string; error?: string } = { task, outcome: 'promptRequired' };

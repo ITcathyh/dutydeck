@@ -342,7 +342,7 @@ export const api = {
   plan: (id: string, prompt: string) => send<{ accepted: true; task: Task; steering?: undefined }>('POST', `/api/sessions/${id}/plan`, { prompt }),
   planState: (id: string) => json<PlanState>(`/api/sessions/${id}/plan`, { cache: 'no-store' }),
   decidePlan: (id: string, taskId: string, action: PlanAction, feedback?: string) => send<{ state: PlanState['state']; task?: Task }>('POST', `/api/sessions/${id}/plan/${taskId}`, { action, ...(feedback ? { feedback } : {}) }),
-  send: (id: string, prompt: string, mode: 'queue' | 'interrupt' | 'steer' = 'queue', skillRequests?: string[]) => send<{ accepted: true; task: Task; steering?: SteeringResult }>('POST', `/api/sessions/${id}/send`, { prompt, mode, ...(skillRequests?.length ? { skillRequests } : {}) }),
+  send: (id: string, prompt: string, mode: 'queue' | 'interrupt' | 'steer' = 'queue', skillRequests?: string[], idempotencyKey?: string) => send<{ accepted: true; task: Task; steering?: SteeringResult }>('POST', `/api/sessions/${id}/send`, { prompt, mode, ...(skillRequests?.length ? { skillRequests } : {}), ...(idempotencyKey !== undefined ? { idempotencyKey } : {}) }),
   setSessionModel: (id: string, model: string) => send<Session>('PATCH', `/api/sessions/${id}/config`, { model }),
   setSessionReasoningEffort: (id: string, reasoningEffort: string) => send<Session>('PATCH', `/api/sessions/${id}/config`, { reasoningEffort }),
   setSessionName: (id: string, name: string | null) => send<Session>('PATCH', `/api/sessions/${encodeURIComponent(id)}/name`, { name }),
