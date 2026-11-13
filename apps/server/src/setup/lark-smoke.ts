@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync, statSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { createRepositories } from '@dutydeck/storage';
 import type { StoredLarkConfig } from '@dutydeck/shared';
 import { larkConfigBlockingError, readLarkConfig } from '../lark/config.js';
@@ -7,7 +7,6 @@ import { createLarkCardService } from '../lark/service.js';
 import type { Prompter } from './prompts.js';
 import { startLarkSmokeListener } from './lark-smoke-listener.js';
 import { daemonStatus, type DaemonStatusInfo } from '../daemon/command.js';
-import { larkListenerStatusKey, type LarkListenerStatus } from '../lark/listener-status.js';
 
 export interface LarkSmokeEvent {
   eventId?: string;
@@ -38,13 +37,16 @@ interface LarkSetupSmokeOptions {
   timeoutMs?: number;
 }
 
+interface RuntimeLease {
+  close(): void;
+}
+
 interface LarkSetupSmokeDependencies {
   loadBot?: (database: string, appId: string) => Promise<StoredLarkConfig | undefined>;
   startListener?: (bot: StoredLarkConfig, onEvent: (event: LarkSmokeEvent) => void) => Promise<() => void | Promise<void>>;
   sendCard?: (bot: StoredLarkConfig, input: { uuid: string; ownerOpenId: string }) => Promise<{ messageId: string; chatId?: string }>;
   daemonStatus?: () => Pick<DaemonStatusInfo, 'processStatus'>;
-  readListenerStatus?: (database: string) => Promise<string | undefined>;
-  processKill?: (pid: number, signal: 0) => void;
+  acquireRuntime?: (database: string) => RuntimeLease;
   uuid?: () => string;
 }
 
@@ -55,19 +57,12 @@ async function loadSavedBot(database: string, appId: string): Promise<StoredLark
   finally { repositories.close(); }
 }
 
-async function loadListenerStatus(database: string): Promise<string | undefined> {
-  try { statSync(database); }
-  catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-    throw error;
-  }
-  const repositories = createRepositories(database);
-  try { return await repositories.config.get(larkListenerStatusKey); }
-  finally { repositories.close(); }
+function acquireRuntime(database: string): RuntimeLease {
+  return createRepositories(database, { mode: 'runtime' });
 }
 
 async function sendSmokeCard(bot: StoredLarkConfig, input: { uuid: string; ownerOpenId: string }): Promise<{ messageId: string; chatId?: string }> {
-  const service = createLarkCardService({}, undefined, bot);
+  const service = createLarkCardService(process.env, undefined, bot);
   try {
     return await service.send({
       cardKind: 'result',
@@ -83,34 +78,24 @@ async function sendSmokeCard(bot: StoredLarkConfig, input: { uuid: string; owner
   } finally { service.close(); }
 }
 
-const SERVICE_CONFLICT_MESSAGE = '检测到同库服务运行或无法确认其已停止；为避免分流正常消息，不启动临时监听、不发卡；停止同库服务后再试。';
+const SERVICE_CONFLICT_MESSAGE = '同库服务正在运行或同库 runtime 占用无法获取；为避免分流正常消息，不启动临时监听、不发卡；停止同库服务后再试。';
 
 function daemonConflict(dependencies: LarkSetupSmokeDependencies): boolean {
   try { return (dependencies.daemonStatus ?? daemonStatus)().processStatus !== 'stale'; }
   catch { return true; }
 }
 
-async function listenerConflict(database: string, dependencies: LarkSetupSmokeDependencies): Promise<boolean> {
-  let raw: string | undefined;
-  try { raw = await (dependencies.readListenerStatus ?? loadListenerStatus)(database); }
+function runtimeConflict(database: string, dependencies: LarkSetupSmokeDependencies): boolean {
+  let runtime: RuntimeLease;
+  try { runtime = (dependencies.acquireRuntime ?? acquireRuntime)(database); }
   catch { return true; }
-  if (raw === undefined) return false;
-  let status: unknown;
-  try { status = JSON.parse(raw); }
+  try { runtime.close(); }
   catch { return true; }
-  const pid = status && typeof status === 'object' ? (status as Partial<LarkListenerStatus>).pid : undefined;
-  if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 0) return true;
-  try {
-    (dependencies.processKill ?? process.kill)(pid, 0);
-    return true;
-  } catch (error) {
-    // 只有 ESRCH 能证明旧状态所属进程已消失；EPERM 与其它错误都不能排除活跃服务。
-    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
-  }
+  return false;
 }
 
-async function serviceConflict(options: LarkSetupSmokeOptions, dependencies: LarkSetupSmokeDependencies): Promise<boolean> {
-  return daemonConflict(dependencies) || await listenerConflict(options.database, dependencies);
+function serviceConflict(options: LarkSetupSmokeOptions, dependencies: LarkSetupSmokeDependencies): boolean {
+  return daemonConflict(dependencies) || runtimeConflict(options.database, dependencies);
 }
 
 /** The only outbound consent surface: an interactive, dedicated default-No question. */
@@ -124,7 +109,7 @@ export async function offerLarkSetupSmoke(
   if (!options.ownerOpenId?.startsWith('ou_')) {
     return { status: 'unavailable', message: '无法确认机器人所有者在该应用下的 open_id，未提供收发验证，也未发送测试卡。' };
   }
-  if (await serviceConflict(options, dependencies)) return { status: 'unavailable', message: SERVICE_CONFLICT_MESSAGE };
+  if (serviceConflict(options, dependencies)) return { status: 'unavailable', message: SERVICE_CONFLICT_MESSAGE };
   let bot: StoredLarkConfig | undefined;
   try { bot = await (dependencies.loadBot ?? loadSavedBot)(options.database, options.appId); }
   catch { return { status: 'unavailable', message: '机器人配置读取失败，未提供收发验证，也未发送测试卡。' }; }
@@ -142,7 +127,9 @@ export async function offerLarkSetupSmoke(
     return { status: 'skipped', message: '已跳过飞书收发验证，未发送测试卡。' };
   }
   if (!confirmed) return { status: 'skipped', message: '已跳过飞书收发验证，未发送测试卡。' };
-  if (await serviceConflict(options, dependencies)) return { status: 'unavailable', message: SERVICE_CONFLICT_MESSAGE };
+  let runtime: RuntimeLease;
+  try { runtime = (dependencies.acquireRuntime ?? acquireRuntime)(options.database); }
+  catch { return { status: 'unavailable', message: SERVICE_CONFLICT_MESSAGE }; }
 
   const uuid = (dependencies.uuid ?? randomUUID)();
   const seenEvents = new Set<string>();
@@ -177,13 +164,13 @@ export async function offerLarkSetupSmoke(
   };
 
   let stop: (() => void | Promise<void>) | undefined;
-  try {
-    stop = await (dependencies.startListener ?? startLarkSmokeListener)(bot, onEvent);
-  } catch {
-    return { status: 'unavailable', message: '飞书临时监听启动失败，未发送测试卡；入站未验证。' };
-  }
   let timer: NodeJS.Timeout | undefined;
   try {
+    try {
+      stop = await (dependencies.startListener ?? startLarkSmokeListener)(bot, onEvent);
+    } catch {
+      return { status: 'unavailable', message: '飞书临时监听启动失败，未发送测试卡；入站未验证。' };
+    }
     sending = true;
     try { sentMessage = await (dependencies.sendCard ?? sendSmokeCard)(bot, { uuid, ownerOpenId: options.ownerOpenId }); }
     catch {
@@ -209,6 +196,7 @@ export async function offerLarkSetupSmoke(
     accepting = false;
     queued.length = 0;
     if (timer) clearTimeout(timer);
-    await stop();
+    try { if (stop) await stop(); }
+    finally { runtime.close(); }
   }
 }

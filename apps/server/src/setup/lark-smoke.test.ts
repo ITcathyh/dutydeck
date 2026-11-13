@@ -2,10 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createServer } from 'node:http';
+import { once } from 'node:events';
 import type { StoredLarkConfig } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
 import { larkBotsConfigKey } from '../lark/config.js';
-import { larkListenerStatusKey, type LarkListenerStatus } from '../lark/listener-status.js';
 import { offerLarkSetupSmoke, type LarkSmokeEvent } from './lark-smoke.js';
 import type { Prompter } from './prompts.js';
 
@@ -20,9 +21,6 @@ vi.mock('../daemon/command.js', () => ({
 
 const bot = { appId: 'cli_smoke', appSecret: 'secret_fixture', listening: true } as StoredLarkConfig;
 const temporaryDirectories: string[] = [];
-const listenerStatus = (pid: number): string => JSON.stringify({
-  pid, updatedAt: new Date().toISOString(), active: [], retrying: [], reconnecting: []
-} satisfies LarkListenerStatus);
 const ownerEvent: LarkSmokeEvent = {
   eventId: 'event_owner', messageId: 'message_owner', chatId: 'oc_dm', chatType: 'p2p',
   parentId: 'om_test_card', senderOpenId: 'ou_owner', senderType: 'user', content: '{"text":"done"}'
@@ -47,6 +45,13 @@ function options(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function smoke(overrides: Record<string, unknown> = {}, dependencies: NonNullable<Parameters<typeof offerLarkSetupSmoke>[1]> = {}) {
+  return offerLarkSetupSmoke(options(overrides), {
+    acquireRuntime: () => ({ close() {} }),
+    ...dependencies
+  });
+}
+
 beforeEach(() => {
   daemonProbe.statuses = ['stale'];
   daemonProbe.calls = 0;
@@ -54,6 +59,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.unstubAllEnvs();
   for (const directory of temporaryDirectories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
@@ -62,11 +68,15 @@ describe('offerLarkSetupSmoke', () => {
     const startListener = vi.fn(async () => vi.fn());
     const sendCard = vi.fn();
     const prompt = prompter(false);
-    const result = await offerLarkSetupSmoke(options({ prompter: prompt }), {
-      loadBot: async () => bot, startListener, sendCard
+    const close = vi.fn();
+    const acquireRuntime = vi.fn(() => ({ close }));
+    const result = await smoke({ prompter: prompt }, {
+      loadBot: async () => bot, acquireRuntime, startListener, sendCard
     });
     expect(result.status).toBe('skipped');
     expect(prompt.confirm).toHaveBeenCalledWith(expect.objectContaining({ defaultValue: false, dangerous: true }));
+    expect(acquireRuntime).toHaveBeenCalledOnce();
+    expect(close).toHaveBeenCalledOnce();
     expect(startListener).not.toHaveBeenCalled();
     expect(sendCard).not.toHaveBeenCalled();
   });
@@ -79,7 +89,7 @@ describe('offerLarkSetupSmoke', () => {
     const prompt = prompter();
     const loadBot = vi.fn(async () => bot);
     const sendCard = vi.fn();
-    const result = await offerLarkSetupSmoke(options({ ...override, prompter: prompt }), { loadBot, sendCard });
+    const result = await smoke({ ...override, prompter: prompt }, { loadBot, sendCard });
     expect(result.status).toBe('skipped');
     expect(prompt.confirm).not.toHaveBeenCalled();
     expect(loadBot).not.toHaveBeenCalled();
@@ -92,7 +102,7 @@ describe('offerLarkSetupSmoke', () => {
     const prompt = prompter();
     const startListener = vi.fn(async () => vi.fn());
     const sendCard = vi.fn();
-    const pending = offerLarkSetupSmoke(options({ prompter: prompt }), {
+    const pending = smoke({ prompter: prompt }, {
       loadBot: async () => bot, startListener, sendCard
     });
     await vi.advanceTimersByTimeAsync(60_000);
@@ -105,130 +115,55 @@ describe('offerLarkSetupSmoke', () => {
     expect(sendCard).not.toHaveBeenCalled();
   });
 
-  it('rechecks after confirmation and refuses a daemon that appears before listener startup', async () => {
-    vi.useFakeTimers();
-    daemonProbe.statuses = ['stale', 'verified'];
+  it('fails closed before prompting when the runtime lease cannot be acquired', async () => {
+    const prompt = prompter();
+    const loadBot = vi.fn(async () => bot);
+    const startListener = vi.fn(async () => vi.fn());
+    const sendCard = vi.fn();
+    const acquireRuntime = vi.fn(() => { throw new Error('synthetic runtime busy'); });
+    const result = await smoke({ prompter: prompt }, { loadBot, acquireRuntime, startListener, sendCard });
+    expect(result.status).toBe('unavailable');
+    expect(result.message).toContain('runtime');
+    expect(prompt.confirm).not.toHaveBeenCalled();
+    expect(loadBot).not.toHaveBeenCalled();
+    expect(startListener).not.toHaveBeenCalled();
+    expect(sendCard).not.toHaveBeenCalled();
+  });
+
+  it('releases the preflight lease and refuses when reacquisition fails after confirmation', async () => {
     const prompt = prompter();
     const startListener = vi.fn(async () => vi.fn());
     const sendCard = vi.fn();
-    const pending = offerLarkSetupSmoke(options({ prompter: prompt }), {
-      loadBot: async () => bot, startListener, sendCard
+    const close = vi.fn();
+    const acquireRuntime = vi.fn()
+      .mockImplementationOnce(() => ({ close }))
+      .mockImplementationOnce(() => { throw new Error('synthetic runtime busy'); });
+    const result = await smoke({ prompter: prompt }, {
+      loadBot: async () => bot, acquireRuntime, startListener, sendCard
     });
-    await vi.advanceTimersByTimeAsync(60_000);
-    const result = await pending;
     expect(result.status).toBe('unavailable');
-    expect(daemonProbe.calls).toBe(2);
+    expect(acquireRuntime).toHaveBeenCalledTimes(2);
+    expect(close).toHaveBeenCalledOnce();
     expect(prompt.confirm).toHaveBeenCalledOnce();
     expect(startListener).not.toHaveBeenCalled();
     expect(sendCard).not.toHaveBeenCalled();
   });
 
-  it.each([
-    ['is alive', undefined],
-    ['returns EPERM', 'EPERM'],
-    ['returns an unknown error', 'EIO']
-  ])('fails closed before prompting when the listener process %s', async (_name, code) => {
-    const prompt = prompter();
-    const startListener = vi.fn(async () => vi.fn());
-    const sendCard = vi.fn();
-    const processKill = vi.fn(() => {
-      if (code) throw Object.assign(new Error(code), { code });
-    });
-    const result = await offerLarkSetupSmoke(options({ prompter: prompt }), {
-      loadBot: async () => bot,
-      readListenerStatus: async () => listenerStatus(4242),
-      processKill,
-      startListener,
-      sendCard
-    });
-    expect(result.status).toBe('unavailable');
-    expect(result.message).toContain('同库服务');
-    expect(processKill).toHaveBeenCalledWith(4242, 0);
-    expect(prompt.confirm).not.toHaveBeenCalled();
-    expect(startListener).not.toHaveBeenCalled();
-    expect(sendCard).not.toHaveBeenCalled();
-  });
-
-  it.each([
-    ['malformed JSON', '{broken'],
-    ['a missing PID', '{}'],
-    ['an invalid PID', '{"pid":0}']
-  ])('fails closed before prompting for listener status with %s', async (_name, raw) => {
-    const prompt = prompter();
-    const sendCard = vi.fn();
-    const result = await offerLarkSetupSmoke(options({ prompter: prompt }), {
-      loadBot: async () => bot, readListenerStatus: async () => raw, sendCard
-    });
-    expect(result.status).toBe('unavailable');
-    expect(prompt.confirm).not.toHaveBeenCalled();
-    expect(sendCard).not.toHaveBeenCalled();
-  });
-
-  it('fails closed before prompting when the listener status cannot be read', async () => {
-    const prompt = prompter();
-    const sendCard = vi.fn();
-    const result = await offerLarkSetupSmoke(options({ prompter: prompt }), {
-      loadBot: async () => bot,
-      readListenerStatus: async () => { throw new Error('synthetic database failure'); },
-      sendCard
-    });
-    expect(result.status).toBe('unavailable');
-    expect(prompt.confirm).not.toHaveBeenCalled();
-    expect(sendCard).not.toHaveBeenCalled();
-  });
-
-  it('treats an ESRCH listener PID as stale and preserves the first-setup offer', async () => {
-    const prompt = prompter(false);
-    const startListener = vi.fn(async () => vi.fn());
-    const sendCard = vi.fn();
-    const result = await offerLarkSetupSmoke(options({ prompter: prompt }), {
-      loadBot: async () => bot,
-      readListenerStatus: async () => listenerStatus(4242),
-      processKill: () => { throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' }); },
-      startListener,
-      sendCard
-    });
-    expect(result.status).toBe('skipped');
-    expect(prompt.confirm).toHaveBeenCalledOnce();
-    expect(startListener).not.toHaveBeenCalled();
-    expect(sendCard).not.toHaveBeenCalled();
-  });
-
-  it('rechecks listener status after confirmation and refuses a same-database service that appears', async () => {
-    const prompt = prompter();
-    const startListener = vi.fn(async () => vi.fn());
-    const sendCard = vi.fn();
-    const readListenerStatus = vi.fn()
-      .mockResolvedValueOnce(undefined)
-      .mockResolvedValueOnce(listenerStatus(4242));
-    const result = await offerLarkSetupSmoke(options({ prompter: prompt }), {
-      loadBot: async () => bot,
-      readListenerStatus,
-      processKill: () => {},
-      startListener,
-      sendCard
-    });
-    expect(result.status).toBe('unavailable');
-    expect(readListenerStatus).toHaveBeenCalledTimes(2);
-    expect(prompt.confirm).toHaveBeenCalledOnce();
-    expect(startListener).not.toHaveBeenCalled();
-    expect(sendCard).not.toHaveBeenCalled();
-  });
-
-  it('fails closed for a live root service recorded in a real temporary SQLite database', async () => {
+  it('fails closed for a real runtime lease without any listener status during root service startup', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'dutydeck-lark-smoke-'));
     temporaryDirectories.push(directory);
     const database = join(directory, 'state.db');
-    const repositories = createRepositories(database);
-    try {
-      await repositories.config.set(larkBotsConfigKey, JSON.stringify([bot]));
-      // 直接根服务没有 daemon 状态；空 active 也不能证明这个活进程以后不会加载目标 bot。
-      await repositories.config.set(larkListenerStatusKey, listenerStatus(process.pid));
-    } finally { repositories.close(); }
+    const seed = createRepositories(database);
+    try { await seed.config.set(larkBotsConfigKey, JSON.stringify([bot])); }
+    finally { seed.close(); }
+    const rootService = createRepositories(database, { mode: 'runtime' });
     const prompt = prompter();
     const startListener = vi.fn(async () => vi.fn());
     const sendCard = vi.fn();
-    const result = await offerLarkSetupSmoke(options({ database, prompter: prompt }), { startListener, sendCard });
+    let result;
+    try {
+      result = await offerLarkSetupSmoke(options({ database, prompter: prompt }), { startListener, sendCard });
+    } finally { rootService.close(); }
     expect(result.status).toBe('unavailable');
     expect(result.message).toContain('同库服务');
     expect(daemonProbe.calls).toBe(1);
@@ -237,11 +172,46 @@ describe('offerLarkSetupSmoke', () => {
     expect(sendCard).not.toHaveBeenCalled();
   });
 
+  it('allows first setup with the default runtime lease and releases it after verification', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'dutydeck-lark-smoke-'));
+    temporaryDirectories.push(directory);
+    const database = join(directory, 'state.db');
+    const seed = createRepositories(database);
+    try { await seed.config.set(larkBotsConfigKey, JSON.stringify([bot])); }
+    finally { seed.close(); }
+    const expectRuntimeBusy = () => {
+      expect(() => {
+        const concurrent = createRepositories(database, { mode: 'runtime' });
+        concurrent.close();
+      }).toThrow();
+    };
+    let onEvent: ((event: LarkSmokeEvent) => void) | undefined;
+    const stop = vi.fn(() => { expectRuntimeBusy(); });
+    const sendCard = vi.fn(async () => {
+      expectRuntimeBusy();
+      onEvent?.(ownerEvent);
+      return { messageId: 'om_test_card', chatId: 'oc_dm' };
+    });
+    const result = await offerLarkSetupSmoke(options({ database }), {
+      startListener: async (_bot, receive) => {
+        expectRuntimeBusy();
+        onEvent = receive;
+        return stop;
+      },
+      sendCard
+    });
+    expect(result.status).toBe('verified');
+    expect(sendCard).toHaveBeenCalledOnce();
+    expect(stop).toHaveBeenCalledOnce();
+    const reopened = createRepositories(database, { mode: 'runtime' });
+    reopened.close();
+  });
+
   it('does not offer the smoke when the owner open ID cannot be established', async () => {
     const prompt = prompter();
     const sendCard = vi.fn();
     const startListener = vi.fn(async () => vi.fn());
-    const result = await offerLarkSetupSmoke(options({ ownerOpenId: undefined, prompter: prompt }), {
+    const result = await smoke({ ownerOpenId: undefined, prompter: prompt }, {
       loadBot: async () => bot, startListener, sendCard
     });
     expect(result.status).toBe('unavailable');
@@ -253,7 +223,7 @@ describe('offerLarkSetupSmoke', () => {
 
   it('does not offer the smoke without a usable saved bot', async () => {
     const prompt = prompter();
-    const result = await offerLarkSetupSmoke(options({ prompter: prompt }), {
+    const result = await smoke({ prompter: prompt }, {
       loadBot: async () => undefined, sendCard: vi.fn()
     });
     expect(result.status).toBe('unavailable');
@@ -263,17 +233,33 @@ describe('offerLarkSetupSmoke', () => {
   it('starts listening before sending one UUID card and verifies the owner p2p reply', async () => {
     const order: string[] = [];
     let onEvent: ((event: LarkSmokeEvent) => void) | undefined;
-    const stop = vi.fn(() => { order.push('stop'); });
+    let held = false;
+    const close = vi.fn(() => {
+      expect(held).toBe(true);
+      held = false;
+      order.push('release');
+    });
+    const acquireRuntime = vi.fn(() => {
+      held = true;
+      return { close };
+    });
+    const stop = vi.fn(() => {
+      expect(held).toBe(true);
+      order.push('stop');
+    });
     const sendCard = vi.fn(async (_bot, input: { uuid: string; ownerOpenId: string }) => {
+      expect(held).toBe(true);
       order.push('send');
       expect(input.uuid).toBe('uuid_fixed');
       expect(input.ownerOpenId).toBe('ou_owner');
       onEvent?.(ownerEvent);
       return { messageId: 'om_test_card', chatId: 'oc_dm' };
     });
-    const result = await offerLarkSetupSmoke(options(), {
+    const result = await smoke({}, {
       loadBot: async () => bot,
+      acquireRuntime,
       startListener: async (_bot, receive) => {
+        expect(held).toBe(true);
         order.push('start');
         onEvent = receive;
         return stop;
@@ -285,14 +271,20 @@ describe('offerLarkSetupSmoke', () => {
     expect(result.message).toContain('端到端');
     expect(sendCard).toHaveBeenCalledTimes(1);
     expect(stop).toHaveBeenCalledTimes(1);
-    expect(order).toEqual(['start', 'send', 'stop']);
+    expect(acquireRuntime).toHaveBeenCalledTimes(2);
+    expect(close).toHaveBeenCalledTimes(2);
+    expect(held).toBe(false);
+    expect(order).toEqual(['release', 'start', 'send', 'stop', 'release']);
   });
 
   it('reports send failure without claiming inbound or end-to-end verification', async () => {
     const stop = vi.fn();
+    const close = vi.fn();
+    const acquireRuntime = vi.fn(() => ({ close }));
     let onEvent: ((event: LarkSmokeEvent) => void) | undefined;
-    const result = await offerLarkSetupSmoke(options(), {
+    const result = await smoke({}, {
       loadBot: async () => bot,
+      acquireRuntime,
       startListener: async (_bot, receive) => { onEvent = receive; return stop; },
       sendCard: async () => { onEvent?.(ownerEvent); throw new Error('synthetic send failure'); }
     });
@@ -301,13 +293,18 @@ describe('offerLarkSetupSmoke', () => {
     expect(result.message).toContain('入站未验证');
     expect(result.message).not.toContain('端到端通过');
     expect(stop).toHaveBeenCalledOnce();
+    expect(close).toHaveBeenCalledTimes(2);
+    expect(stop.mock.invocationCallOrder[0]).toBeLessThan(close.mock.invocationCallOrder[1]!);
   });
 
   it('marks a successful send without a reply as inbound unverified after the bounded wait', async () => {
     vi.useFakeTimers();
     const stop = vi.fn();
-    const pending = offerLarkSetupSmoke(options(), {
+    const close = vi.fn();
+    const acquireRuntime = vi.fn(() => ({ close }));
+    const pending = smoke({}, {
       loadBot: async () => bot,
+      acquireRuntime,
       startListener: async () => stop,
       sendCard: async () => ({ messageId: 'om_test_card', chatId: 'oc_dm' })
     });
@@ -317,12 +314,14 @@ describe('offerLarkSetupSmoke', () => {
     expect(result.message).toContain('入站未验证');
     expect(result.message).not.toContain('端到端通过');
     expect(stop).toHaveBeenCalledOnce();
+    expect(close).toHaveBeenCalledTimes(2);
+    expect(stop.mock.invocationCallOrder[0]).toBeLessThan(close.mock.invocationCallOrder[1]!);
   });
 
   it('does not verify an unrelated owner private message', async () => {
     vi.useFakeTimers();
     let onEvent: ((event: LarkSmokeEvent) => void) | undefined;
-    const pending = offerLarkSetupSmoke(options(), {
+    const pending = smoke({}, {
       loadBot: async () => bot,
       startListener: async (_bot, receive) => { onEvent = receive; return vi.fn(); },
       sendCard: async () => {
@@ -336,7 +335,7 @@ describe('offerLarkSetupSmoke', () => {
 
   it('verifies a UUID-bearing owner reply delivered while send is completing', async () => {
     let onEvent: ((event: LarkSmokeEvent) => void) | undefined;
-    const result = await offerLarkSetupSmoke(options(), {
+    const result = await smoke({}, {
       loadBot: async () => bot,
       startListener: async (_bot, receive) => { onEvent = receive; return vi.fn(); },
       sendCard: async () => {
@@ -351,7 +350,7 @@ describe('offerLarkSetupSmoke', () => {
   it('ignores another user, a group message and a bot sender', async () => {
     vi.useFakeTimers();
     let onEvent: ((event: LarkSmokeEvent) => void) | undefined;
-    const pending = offerLarkSetupSmoke(options(), {
+    const pending = smoke({}, {
       loadBot: async () => bot,
       startListener: async (_bot, receive) => { onEvent = receive; return vi.fn(); },
       sendCard: async () => {
@@ -375,7 +374,7 @@ describe('offerLarkSetupSmoke', () => {
       onEvent?.({ ...ownerEvent, eventId: 'same_message_redelivered' });
       return { messageId: 'om_test_card', chatId: 'oc_dm' };
     });
-    const result = await offerLarkSetupSmoke(options(), {
+    const result = await smoke({}, {
       loadBot: async () => bot,
       startListener: async (_bot, receive) => { onEvent = receive; return stop; },
       sendCard
@@ -385,15 +384,68 @@ describe('offerLarkSetupSmoke', () => {
     expect(stop).toHaveBeenCalledOnce();
   });
 
+  it('uses the environment base URL for token and send requests in the default sender', async () => {
+    const requests: string[] = [];
+    let onEvent: ((event: LarkSmokeEvent) => void) | undefined;
+    const server = createServer((request, response) => {
+      const url = new URL(request.url ?? '/', 'http://fixture.invalid');
+      const json = (body: unknown) => {
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify(body));
+      };
+      request.resume();
+      if (request.method === 'POST' && url.pathname === '/open-apis/auth/v3/tenant_access_token/internal/') {
+        requests.push(`${url.pathname}${url.search}`);
+        json({ code: 0, tenant_access_token: 'fixture-token', expire: 7200 });
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/open-apis/im/v1/messages') {
+        requests.push(`${url.pathname}${url.search}`);
+        json({ code: 0, data: { message_id: 'om_test_card', chat_id: 'oc_dm' } });
+        onEvent?.(ownerEvent);
+        return;
+      }
+      response.writeHead(404).end();
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('No loopback address for the Lark stub');
+    vi.stubEnv('LARK_OPEN_API_BASE_URL', `http://127.0.0.1:${address.port}`);
+    vi.stubEnv('LARK_API_QPS', '1000');
+    vi.stubEnv('LARK_API_BURST', '1000');
+    vi.stubEnv('LARK_API_RETRY_MAX_ATTEMPTS', '0');
+    try {
+      const stop = vi.fn();
+      const result = await smoke({}, {
+        loadBot: async () => bot,
+        startListener: async (_bot, receive) => { onEvent = receive; return stop; }
+      });
+      expect(result.status).toBe('verified');
+      expect(stop).toHaveBeenCalledOnce();
+      expect(requests).toEqual([
+        '/open-apis/auth/v3/tenant_access_token/internal/',
+        '/open-apis/im/v1/messages?receive_id_type=open_id'
+      ]);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    }
+  });
+
   it('cleans up and does not send if the listener cannot start', async () => {
     const sendCard = vi.fn();
-    const result = await offerLarkSetupSmoke(options(), {
+    const close = vi.fn();
+    const acquireRuntime = vi.fn(() => ({ close }));
+    const result = await smoke({}, {
       loadBot: async () => bot,
+      acquireRuntime,
       startListener: async () => { throw new Error('synthetic listener failure'); },
       sendCard
     });
     expect(result.status).toBe('unavailable');
     expect(result.message).toContain('监听');
     expect(sendCard).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledTimes(2);
   });
 });
