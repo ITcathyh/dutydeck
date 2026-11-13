@@ -55,3 +55,7 @@
 ### Q8: 报 tmux socket 被删、原终端仍在运行，无法启动会话？
 - **原因**：Linux 上 `/tmp` 清理了 tmux socket 文件，但原 tmux server 和 pane 仍在；Dutydeck 会拒绝再启动一个同名 server，避免同一会话同时跑两个 CLI。
 - **处理**：按 tmux 手册向原 server 进程发送 `SIGUSR1` 重建 socket，或结束原 tmux server 后重新发送消息。可把 `TMUX_TMPDIR` 指到不会被清理的目录，或让 `systemd-tmpfiles` 排除 tmux 目录。非 Linux 不做这项内核检查，行为保持原样。开启 `remain-on-exit` 时，Dutydeck 下次启动会回收自己留下且所有 pane 都已退出的死会话；仍有运行中 pane 的会话会保留。
+
+### Q9: `doctor` 的 `lark.exposure` 报警或显示监听地址未知？
+- **报警**：只有非回环无认证、可运行的完全信任机器人、广范围高危用户和弱风控同时出现时，这项才升级为 warn/fail。按报告选择：用 `dutydeck setup --local-only` 收口监听；设置访问密码并重新开启认证；或用报告给出的 `dutydeck settings bot set <appId> permissionMode=ask fullTrustConfirmed=false` 降低权限。保留完全信任时，先 `dutydeck settings bot install-hook <appId>`，再启用 `riskControlMode=enforced` 并缩小高危名单。`off` 下即使配置了高危名单也不会限制执行，`guidance` 也不是强制拦截。
+- **地址未知**：socket 激活的 `LISTEN_*` 或 unit `TriggeredBy` 只能证明激活关系，不能证明继承 fd 的实际地址。此时本项降级为 skip，不会把 `.env` 里的 host 当成实际监听；请核对 `.socket` 的 `ListenStream=` 与服务 `--host` / `--port`，再重跑 `dutydeck doctor`。反向代理、防火墙和端口转发不在这项观测范围内。
