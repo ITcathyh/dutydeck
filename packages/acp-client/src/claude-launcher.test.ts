@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { afterEach, describe, expect, it } from 'vitest';
 import { listAcpxBuiltinAgents } from './index.js';
+import { probeClaudeHookFailureBlock } from '@dutydeck/shared/secret-guard';
 
 const dirs: string[] = [];
 afterEach(async () => Promise.all(dirs.splice(0).map(path => rm(path, { recursive: true, force: true }))));
@@ -66,8 +67,87 @@ describe('Claude ACP launcher', () => {
     const settings = JSON.parse(child.args[1]);
     expect(settings.model).toBe('m');
     expect(settings.hooks.PreToolUse).toEqual([...JSON.parse(guard).hooks.PreToolUse, sdkHook]);
-    expect(settings.hooks.PreToolUse[0].hooks[0].command).toContain(`'${project}'/.dutydeck/security/sessions/`);
+    expect(settings.hooks.PreToolUse[0].hooks[0].command).toContain(`DUTYDECK_POLICY_ROOT='${project}'`);
   });
+  it('blocks an ACP secret-guard timeout through launcher settings only with onFailure:block', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dutydeck-claude-acp-timeout-')); dirs.push(root);
+    const project = join(root, 'project'); const bin = join(root, 'bin');
+    const sessions = join(project, '.dutydeck', 'security', 'sessions');
+    await mkdir(sessions, { recursive: true }); await mkdir(bin);
+    const sessionId = 'ses_acp_secret_timeout';
+    await writeFile(join(sessions, `${sessionId}.json`), JSON.stringify({ enabled: true, authorized: false, pattern: '(a+)+$' }));
+    const claude = join(bin, 'claude');
+    await writeFile(claude, `#!${process.execPath}\nif (process.argv.includes('--version')) process.stdout.write('2.1.295 (Claude Code)\\n');\n`, { mode: 0o755 });
+    const inspect = `process.stdout.write(JSON.stringify({ guard: process.env.dutydeck_secret_guard_settings }))`;
+    const launched = spawnSync(process.execPath, [resolve(process.cwd(), 'packages/acp-client/agents/claude-acp.mjs')], {
+      cwd: project,
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}`, DUTYDECK_CLAUDE_ACP_COMMAND: process.execPath, DUTYDECK_CLAUDE_ACP_ARGS_JSON: JSON.stringify(['-e', inspect]) },
+      encoding: 'utf8', timeout: 10_000,
+    });
+    expect(launched.status).toBe(0);
+    const guard = JSON.parse(launched.stdout).guard;
+    const marker = join(root, 'tool-ran');
+    const outcome = spawnSync(process.execPath, [resolve(process.cwd(), 'tests/fixtures/claude-hook-runner.mjs'), '--settings', guard, '--hook', 'secret-guard.mjs'], {
+      cwd: project,
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}`, dutydeck_session_id: sessionId, CLAUDE_HOOK_TEST_TOOL_MARKER: marker, CLAUDE_HOOK_TEST_TIMEOUT_MS: '40', CLAUDE_HOOK_TEST_EVENT: JSON.stringify({ tool_name: 'Bash', tool_input: { command: `${'a'.repeat(100_000)}!` } }) },
+      encoding: 'utf8', timeout: 5_000,
+    });
+    expect(outcome.error).toBeUndefined();
+    expect(JSON.parse(outcome.stdout)).toMatchObject({ timedOut: true, onFailure: 'block', blocked: true });
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it.each([
+    ['2.1.220 (Claude Code)\n', false],
+    ['2.1.295 (Claude Code)\n', true],
+    ['2.1.999 (Unknown Fork)\n', false],
+    ['not a version\n', false],
+  ])('keeps the ACP secret guard wired and writes onFailure only for supported Claude: %s', async (version, supported) => {
+    const root = await mkdtemp(join(tmpdir(), 'dutydeck-claude-acp-version-')); dirs.push(root);
+    const bin = join(root, 'bin'); await mkdir(bin);
+    const claude = join(bin, 'claude');
+    await writeFile(claude, `#!${process.execPath}\nif (process.argv.includes('--version')) process.stdout.write(${JSON.stringify(version)});\n`, { mode: 0o755 });
+    const inspect = `process.stdout.write(JSON.stringify({ guard: process.env.dutydeck_secret_guard_settings }))`;
+    const launched = spawnSync(process.execPath, [resolve(process.cwd(), 'packages/acp-client/agents/claude-acp.mjs')], {
+      cwd: root,
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}`, DUTYDECK_CLAUDE_ACP_COMMAND: process.execPath, DUTYDECK_CLAUDE_ACP_ARGS_JSON: JSON.stringify(['-e', inspect]) },
+      encoding: 'utf8', timeout: 10_000,
+    });
+    expect(launched.status).toBe(0);
+    const settings = JSON.parse(JSON.parse(launched.stdout).guard);
+    expect(settings.hooks.PreToolUse).toHaveLength(1);
+    expect(settings.hooks.PreToolUse[0].matcher).toBe('.*');
+    expect(settings.hooks.PreToolUse[0].hooks[0]).toMatchObject({ type: 'command', command: expect.stringContaining('secret-guard.mjs') });
+    expect(settings.hooks.PreToolUse[0].hooks[0].onFailure === 'block').toBe(supported);
+  });
+
+  it.skipIf(process.platform === 'win32')('wraps the SDK native fallback with the same guard when PATH Claude disappears', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dutydeck-claude-acp-fallback-')); dirs.push(root);
+    const emptyPath = join(root, 'empty-path'); await mkdir(emptyPath);
+    const inspect = `process.stdout.write(JSON.stringify({ guard: process.env.dutydeck_secret_guard_settings, executable: process.env.dutydeck_claude_executable, childExecutable: process.env.CLAUDE_CODE_EXECUTABLE }))`;
+    const env = {
+      ...process.env, PATH: emptyPath,
+      DUTYDECK_CLAUDE_ACP_COMMAND: process.execPath,
+      DUTYDECK_CLAUDE_ACP_ARGS_JSON: JSON.stringify(['-e', inspect]),
+    };
+    delete env.CLAUDE_CODE_EXECUTABLE;
+    const launched = spawnSync(process.execPath, [resolve(process.cwd(), 'packages/acp-client/agents/claude-acp.mjs')], {
+      cwd: root, env, encoding: 'utf8', timeout: 10_000,
+    });
+    expect(launched.status).toBe(0);
+    expect(launched.stderr).toBe('');
+    const output = JSON.parse(launched.stdout);
+    expect(output.executable).toMatch(/(?:^|[/\\])claude$/);
+    expect(existsSync(output.executable)).toBe(true);
+    expect(output.childExecutable).not.toBe(output.executable);
+    const settings = JSON.parse(output.guard);
+    expect(settings.hooks.PreToolUse).toHaveLength(1);
+    const hook = settings.hooks.PreToolUse[0].hooks[0];
+    expect(hook).toMatchObject({ type: 'command', command: expect.stringContaining('secret-guard.mjs') });
+    const supported = await probeClaudeHookFailureBlock({ command: output.executable, env: { ...process.env, PATH: emptyPath }, cwd: root });
+    expect(hook.onFailure === 'block').toBe(supported);
+  }, 15_000);
+
   it.each(['bearer', 'api-key'] as const)('keeps explicit %s credentials exclusive over user and project cloud settings', async mode => {
     const root = await mkdtemp(join(tmpdir(), 'dutydeck-claude-auth-')); dirs.push(root);
     await mkdir(join(root, '.claude'));
@@ -118,10 +198,13 @@ describe('Claude ACP launcher', () => {
     const inspect = `process.stdout.write(JSON.stringify(Object.fromEntries(${JSON.stringify(keys)}.map(key => [key, process.env[key] ?? null]))))`;
     const inherited = { ...process.env };
     for (const key of keys) delete inherited[key];
-    // No Claude CLI on PATH, so the launcher does not replace CLAUDE_CODE_EXECUTABLE itself.
+    // No Claude CLI on PATH: the SDK native fallback is wrapped; project settings cannot choose the executable.
     const result = spawnSync(process.execPath, [resolve('packages/acp-client/agents/claude-acp.mjs')], { cwd: root, env: { ...inherited, PATH: bin, CLAUDE_CONFIG_DIR: join(root, 'config'), DUTYDECK_CLAUDE_ACP_COMMAND: process.execPath, DUTYDECK_CLAUDE_ACP_ARGS_JSON: JSON.stringify(['-e', inspect]) }, encoding: 'utf8' });
     expect(result.status).toBe(0);
-    expect(JSON.parse(result.stdout)).toEqual({ ...Object.fromEntries(keys.map(key => [key, null])), ANTHROPIC_MODEL: 'project-model' });
+    expect(JSON.parse(result.stdout)).toEqual({
+      ...Object.fromEntries(keys.map(key => [key, null])), ANTHROPIC_MODEL: 'project-model',
+      CLAUDE_CODE_EXECUTABLE: expect.stringMatching(/claude-[\da-f]+\.sh$/),
+    });
     expect(existsSync(marker)).toBe(false);
   });
 });

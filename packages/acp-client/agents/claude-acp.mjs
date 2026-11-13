@@ -37,7 +37,7 @@ const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
 
 // 凭据保护：claude-agent-acp 起的 Claude Code 也要带上 PreToolUse hook（非管理员轮次才生效，见 secret-guard.mjs）。
 // SDK 只接受一个可执行文件路径，这里写一个 sh 转发脚本，经 claude-guard.mjs 把 hook 并进 --settings 再启动真正的 CLI。
-async function guardedExecutable() {
+async function guardedExecutable(installedClaude, env) {
   const guardUrl = new URL('./secret-guard.mjs', import.meta.url);
   const guard = await import(existsSync(guardUrl) ? guardUrl.href : '@dutydeck/shared/secret-guard');
   const directory = join(tmpdir(), `dutydeck-claude-guard-${process.getuid?.() ?? 'user'}`);
@@ -49,7 +49,8 @@ async function guardedExecutable() {
   const script = `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(fileURLToPath(new URL('./claude-guard.mjs', import.meta.url)))} "$@"\n`;
   const file = join(directory, `claude-${createHash('sha256').update(script).digest('hex').slice(0, 16)}.sh`);
   await writeFile(file, script, { mode: 0o700, flag: 'wx' }).catch(error => { if (error.code !== 'EEXIST') throw error; });
-  const hook = { matcher: guard.secretGuardToolMatcher, hooks: [{ type: 'command', command: guard.secretGuardHookCommand({ nodePath: process.execPath, policyRoot: process.cwd() }), timeout: 10 }] };
+  const failureBlock = await guard.probeClaudeHookFailureBlock({ command: installedClaude, env, cwd: process.cwd() });
+  const hook = { matcher: guard.secretGuardToolMatcher, hooks: [{ type: 'command', command: guard.secretGuardHookCommand({ nodePath: process.execPath, policyRoot: process.cwd() }), timeout: 10, ...(failureBlock ? { onFailure: 'block' } : {}) }] };
   return { file, settings: JSON.stringify({ hooks: { PreToolUse: [hook] } }) };
 }
 
@@ -65,9 +66,15 @@ const settingsEnv = Object.assign(
 const autoMemoryDefault = process.env.dutydeck_claude_auto_memory === 'off' ? { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' } : {};
 // 设置里的变量同样过一遍子进程清洗，不把服务密钥和别的会话身份带给 Claude。
 const env = { ...autoMemoryDefault, ...childEnvironment(settingsEnv), ...process.env };
-const installedClaude = await findClaudeExecutable(env.PATH);
+let installedClaude = await findClaudeExecutable(env.PATH);
+if (!installedClaude) {
+  // This is the same native SDK fallback claude-agent-acp uses when no executable
+  // is configured. Wrap that actual CLI too instead of letting it run without the guard.
+  const { claudeCliPath } = await import('@agentclientprotocol/claude-agent-acp/dist/acp-agent.js');
+  installedClaude = await claudeCliPath();
+}
 if (installedClaude && process.platform !== 'win32') {
-  const guarded = await guardedExecutable();
+  const guarded = await guardedExecutable(installedClaude, env);
   env.dutydeck_claude_executable = installedClaude;
   env.dutydeck_secret_guard_settings = guarded.settings;
   env.CLAUDE_CODE_EXECUTABLE = guarded.file;

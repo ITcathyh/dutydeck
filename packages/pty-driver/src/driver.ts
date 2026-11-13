@@ -1,4 +1,5 @@
 import { childEnvironment } from '@dutydeck/shared/child-environment';
+import { probeClaudeHookFailureBlock, secretGuardActive } from '@dutydeck/shared/secret-guard';
 import {
   AGENT_IDLE_TIMEOUT,
   AGENT_LOGIN_REQUIRED,
@@ -356,9 +357,29 @@ export class PtyCliDriver implements AgentDriver {
     this.planGuardActive = false;
   }
 
-  private assertPlanGuardWired() {
-    if (!this.started || this.claudeSettings.planGuardWired(this.lastArgs, this.cwd)) return;
+  private assertPlanGuardWired(failureBlockRequired = false) {
+    if (!this.started || this.claudeSettings.planGuardWired(this.lastArgs, this.cwd, failureBlockRequired)) return;
+    if (failureBlockRequired) throw new RuntimeError('PLAN_GUARD_UNAVAILABLE', '这个终端会话的计划守卫缺少 onFailure:"block"。请开新会话（飞书里发 /new）再用先出计划。', 409);
     throw new RuntimeError('PLAN_GUARD_UNAVAILABLE', '这个终端会话启动时还没有计划阶段拦截，没法保证计划阶段不改文件。请开新会话（飞书里发 /new）后再用先出计划。', 409);
+  }
+
+  private secretGuardRequired(): boolean {
+    return isClaudeFamilyCli(this.adapter.id) && secretGuardActive({
+      root: this.cwd, sessionId: this.agent.env.dutydeck_session_id ?? this.sessionId,
+    });
+  }
+
+  /** 受保护轮次仍核对真实接线；只有确认支持 onFailure:block 的官方新版才要求这个字段。 */
+  private async assertGuardWiring(secretActive: boolean): Promise<void> {
+    const failureBlockRequired = this.adapter.id === 'claude-code' && await probeClaudeHookFailureBlock({
+      command: this.agent.command, env: this.spawnEnv(), cwd: this.cwd,
+    });
+    if (this.planGuardActive) this.assertPlanGuardWired(failureBlockRequired);
+    if (secretActive && (!this.started || !this.claudeSettings.secretGuardWired(this.lastArgs, this.cwd, failureBlockRequired))) {
+      throw new PromptNotWrittenError(failureBlockRequired
+        ? '当前终端的凭据守卫缺少 onFailure:"block"，无法在守卫失败时保证阻断。请重开会话后再发，本轮消息尚未写入。'
+        : '当前终端没有完整的凭据守卫接线。请重开会话后再发，本轮消息尚未写入。');
+    }
   }
 
   /** resume 会拆掉接线（截止计时、原生回执、转录跟踪）：轮次或提交进行中时拒绝，交给运行时等本轮结束。 */
@@ -541,7 +562,8 @@ export class PtyCliDriver implements AgentDriver {
     if (this.stopped) throw new Error('PtyCliDriver: send() called after stop()');
     if (!this.started) await this.start();
     if (this.stopped) throw new Error('Driver stopped');
-    if (this.planGuardActive) this.assertPlanGuardWired();
+    const secretActive = this.secretGuardRequired();
+    if (this.planGuardActive || secretActive) await this.assertGuardWiring(secretActive);
 
     let finalPrompt = prompt;
     let routingPrefix: string | undefined;

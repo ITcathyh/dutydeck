@@ -105,3 +105,8 @@ SIGKILL 无法执行进程内退出处理，所以下一代先根据上一代缺
 ### Q17: `doctor` 的 `lark.exposure` 报警或显示监听地址未知？
 - **报警**：只有非回环无认证、可运行的完全信任机器人、广范围高危用户和弱风控同时出现时，这项才升级为 warn/fail。按报告选择：用 `dutydeck setup --local-only` 收口监听；设置访问密码并重新开启认证；或用报告给出的 `dutydeck settings bot set <appId> permissionMode=ask fullTrustConfirmed=false` 降低权限。保留完全信任时，先 `dutydeck settings bot install-hook <appId>`，再启用 `riskControlMode=enforced` 并缩小高危名单。`off` 下即使配置了高危名单也不会限制执行，`guidance` 也不是强制拦截。
 - **地址未知**：socket 激活的 `LISTEN_*` 或 unit `TriggeredBy` 只能证明激活关系，不能证明继承 fd 的实际地址。此时本项降级为 skip，不会把 `.env` 里的 host 当成实际监听；请核对 `.socket` 的 `ListenStream=` 与服务 `--host` / `--port`，再重跑 `dutydeck doctor`。反向代理、防火墙和端口转发不在这项观测范围内。
+
+### Q18: Claude 守卫超时、读取失败或恢复后提示设置不完整？
+- **守卫超时**：只有官方 Claude Code 2.1.295+ 会通过 `onFailure: "block"` 让守卫超时也阻断工具调用。旧版、版本探测失败和未验证分支的受保护轮次照常提交，超时维持原行为；显式拒绝和脚本崩溃仍由 `|| exit 2` 拦截。需要超时阻断时升级官方 Claude Code 并重开会话。
+- **恢复后的设置不完整**：新版接管终端时检查 marker、精确 matcher、command type 和实际 `onFailure: "block"`；旧版只要求真实守卫接线，不因缺少该字段拒绝轮次。新版设置形状不符时重开会话（飞书发 `/new`）生成完整设置。
+- **策略或脚本故障**：策略文件不存在、未启用风险策略或没有未授权匹配时照常放行；读取错误、损坏 JSON、active 计划脚本缺失会拒绝操作。检查 `.dutydeck/security/sessions/` 的文件类型与 JSON、会话私有设置目录和机器负载。错误文本不会回显策略里的敏感值。

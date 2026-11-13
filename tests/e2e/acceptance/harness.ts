@@ -47,6 +47,11 @@ export function writeMockCli(binDir: string, claudeDataDir: string): string {
 import { appendFileSync, mkdirSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 
+if (process.argv.includes('--version')) {
+  process.stdout.write('2.1.295 (Claude Code)\\n');
+  process.exit(0);
+}
+
 const dataDir = process.env.MOCK_CLAUDE_DATA_DIR;
 const freshIndex = process.argv.indexOf('--session-id');
 const resumeIndex = process.argv.indexOf('--resume');

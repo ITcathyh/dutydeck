@@ -28,7 +28,7 @@ export interface AdapterSessionContext {
   env?: Record<string, string>;
   /**
    * 计划阶段守卫的 hook 命令（只有 Claude 家族终端由驱动给出）。适配器把它挂成 PreToolUse hook，
-   * 守卫脚本不存在时它什么都不做；先出计划的第一阶段驱动写入脚本，写操作就被拦下。
+   * 没有 active 元数据时直接放行；先出计划的第一阶段驱动写入元数据和脚本，写操作就被拦下。
    */
   planGuardCommand?: string;
 }

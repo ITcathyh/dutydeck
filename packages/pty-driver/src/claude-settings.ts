@@ -3,11 +3,14 @@ import { lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, rmdirSync, wri
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { shellQuote as quote } from '@dutydeck/shared';
+import { secretGuardToolMatcher } from '@dutydeck/shared/secret-guard';
+import { claudePlanGuardMatcher } from '@dutydeck/cli-adapters';
 import { planGuardScript } from './plan-guard.js';
 
 /** Claude 家族终端适配器：生成 --settings 的是这一组，driver.ts 的子进程默认环境也用这一组。 */
 export const claudeAdapters: ReadonlySet<string> = new Set(['claude-code', 'seed', 'relay', 'genius']);
 const planGuardFile = 'plan-guard.mjs';
+const planGuardActiveFile = 'plan-guard-active';
 
 function settingsArgs(args: string[]): { rest: string[]; value?: string } {
   const rest: string[] = [];
@@ -42,6 +45,15 @@ function readSettings(value: string, cwd: string): Record<string, unknown> {
     // JSON parser errors can include the settings contents, including credentials.
     throw new Error('Invalid Claude --settings: expected a readable JSON object with object permissions and string env');
   }
+}
+
+function hasGuardHook(settings: Record<string, unknown>, expectedMatcher: string, commandMarkers: string[], failureBlockRequired: boolean): boolean {
+  if (!object(settings.hooks) || !Array.isArray(settings.hooks.PreToolUse)) return false;
+  return settings.hooks.PreToolUse.some(group => object(group) && group.matcher === expectedMatcher && Array.isArray(group.hooks) && group.hooks.some(hook => {
+    if (!object(hook) || hook.type !== 'command' || typeof hook.command !== 'string') return false;
+    const command = hook.command;
+    return commandMarkers.every(marker => command.includes(marker)) && (!failureBlockRequired || hook.onFailure === 'block');
+  }));
 }
 
 /** The session directory survives daemon detach so an adopted pane keeps its settings. */
@@ -104,44 +116,61 @@ export class ClaudeSettings {
   }
 
   /**
-   * 计划阶段守卫脚本的位置。脚本只在任务以 deny-all 运行期间存在；hook 命令先看它在不在，不在就直接放行（只花一次 test）。
-   * 跑脚本失败（如 node 不可用）按拒绝处理，不会因为守卫坏了就放行。
+   * 计划阶段守卫脚本和 active 元数据的位置。无 active 元数据时放行；
+   * active 已启用但脚本缺失或跑不起来都退出 2，不把启用状态与脚本是否存在混为一谈。
    */
   planGuardCommand(nodePath = process.execPath): string {
     const script = quote(join(this.directory, planGuardFile));
-    return `test ! -e ${script} || ${quote(nodePath)} ${script} || exit 2`;
+    const active = quote(join(this.directory, planGuardActiveFile));
+    return `test ! -e ${active} && exit 0; test -f ${script} || exit 2; ${quote(nodePath)} ${script} || exit 2`;
   }
 
-  /** 打开或关掉计划阶段守卫：写入或删除会话私有目录里的守卫脚本。 */
+  /** 打开或关掉计划阶段守卫：写入或删除会话私有目录里的 active 元数据与守卫脚本。 */
   setPlanGuard(active: boolean): void {
     const path = join(this.directory, planGuardFile);
+    const activePath = join(this.directory, planGuardActiveFile);
     if (!active) {
+      // Remove the script first: an interrupted deactivation stays fail-closed.
       rmSync(path, { force: true });
+      rmSync(activePath, { force: true });
       this.files.delete(path);
+      this.files.delete(activePath);
       return;
     }
     try { mkdirSync(this.directory, { mode: 0o700 }); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
     this.assertPrivateDirectory();
     writeFileSync(path, planGuardScript(), { mode: 0o600 });
+    writeFileSync(activePath, '1', { mode: 0o600 });
     this.files.add(path);
+    this.files.add(activePath);
   }
 
   /**
-   * 正在跑的 CLI 有没有装守卫 hook：本驱动启动的看启动参数里的设置，接管的旧终端看会话目录里的每份设置。
-   * 守卫上线前启动的终端没有这个 hook，计划阶段拦不住写操作，只能换新会话。
+   * 正在跑的 CLI 有没有守卫 hook：本驱动启动的看启动参数里的设置，接管的旧终端看会话目录里的每份设置。
+   * marker、精确 matcher 和 command type 始终核对；确认支持 onFailure:block 的官方新版还必须带这个字段。
    */
-  planGuardWired(launchArgs: string[], cwd: string): boolean {
-    const marker = join(this.directory, planGuardFile);
-    const index = launchArgs.indexOf('--settings');
-    if (index >= 0) {
-      const value = launchArgs[index + 1] ?? '';
-      try { return (value.trimStart().startsWith('{') ? value : readFileSync(resolve(cwd, value), 'utf8')).includes(marker); }
+  planGuardWired(launchArgs: string[], cwd: string, failureBlockRequired = false): boolean {
+    return this.guardWired(launchArgs, cwd, claudePlanGuardMatcher, [join(this.directory, planGuardFile)], failureBlockRequired);
+  }
+
+  /** 新版恢复或接管时，凭据守卫还必须带策略 marker 和 onFailure:block。 */
+  secretGuardWired(launchArgs: string[], cwd: string, failureBlockRequired = false): boolean {
+    return this.guardWired(launchArgs, cwd, secretGuardToolMatcher, ['secret-guard.mjs', 'DUTYDECK_POLICY_ROOT=', quote(cwd)], failureBlockRequired);
+  }
+
+  private guardWired(launchArgs: string[], cwd: string, expectedMatcher: string, commandMarkers: string[], failureBlockRequired: boolean): boolean {
+    if (launchArgs.length) {
+      const { value } = settingsArgs(launchArgs);
+      if (value === undefined) return false;
+      try { return hasGuardHook(readSettings(value, cwd), expectedMatcher, commandMarkers, failureBlockRequired); }
       catch { return false; }
     }
-    if (launchArgs.length) return false;
     const settings = [...this.files].filter(path => path.endsWith('.json'));
-    return settings.length > 0 && settings.every(path => { try { return readFileSync(path, 'utf8').includes(marker); } catch { return false; } });
+    return settings.length > 0 && settings.every(path => {
+      try { return hasGuardHook(readSettings(path, cwd), expectedMatcher, commandMarkers, failureBlockRequired); }
+      catch { return false; }
+    });
   }
 
   cleanup(): void {

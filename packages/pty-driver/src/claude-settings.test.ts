@@ -84,6 +84,8 @@ describe('Claude settings composition', () => {
 
   it('installs the native question hook during driver startup using agent.env', async () => {
     const { cwd, sessionId } = fixture();
+    const command = join(cwd, 'claude-old');
+    writeFileSync(command, `#!${process.execPath}\nif (process.argv.includes('--version')) process.stdout.write('2.1.220 (Claude Code)\\n');\n`, { mode: 0o755 });
     let spawnedArgs: string[] = [];
     const backend: SessionBackend = {
       kind: 'pty', spawn(_command, args) { spawnedArgs = args; }, write() {}, resize() {},
@@ -91,7 +93,7 @@ describe('Claude settings composition', () => {
     };
     const driver = new PtyCliDriver({
       agent: {
-        id: 'claude-code', name: 'Claude', command: 'claude', args: ['--settings', JSON.stringify({ theme: 'dark' })],
+        id: 'claude-code', name: 'Claude', command, args: ['--settings', JSON.stringify({ theme: 'dark' })],
         protocol: 'pty-cli', cwd, permissionMode: 'full-trust', timeout: 60,
         env: {
           dutydeck_relay_url: 'http://localhost/api/relay',
@@ -123,6 +125,53 @@ describe('Claude settings composition', () => {
     } finally {
       await driver.stop();
     }
+  });
+
+  it('requires real markers and onFailure:block for resumed secret and plan guards on supported Claude', async () => {
+    const { cwd, helper, sessionId } = fixture();
+    const command = join(cwd, 'claude');
+    writeFileSync(command, `#!${process.execPath}\nif (process.argv.includes('--version')) process.stdout.write('2.1.295 (Claude Code)\\n');\n`, { mode: 0o755 });
+    const adapter = createCliAdapter('claude-code');
+    await adapter.prepareLaunch!({ sessionId, command, cwd, permissionMode: 'ask' }, { ...process.env } as Record<string, string>);
+    const args = adapter.buildArgs({ sessionId, command, cwd, permissionMode: 'ask', planGuardCommand: helper.planGuardCommand() });
+    expect(helper.secretGuardWired(args, cwd, true)).toBe(true);
+    expect(helper.planGuardWired(args, cwd, true)).toBe(true);
+
+    const value = JSON.parse(args[args.indexOf('--settings') + 1]!);
+    const withoutSecret = { ...value, hooks: { PreToolUse: value.hooks.PreToolUse.filter((group: { matcher: string }) => group.matcher !== secretGuardToolMatcher) } };
+    expect(helper.secretGuardWired(['--settings', JSON.stringify(withoutSecret)], cwd, true)).toBe(false);
+    expect(helper.planGuardWired(['--settings', JSON.stringify(withoutSecret)], cwd, true)).toBe(true);
+    const withoutPlan = { ...value, hooks: { PreToolUse: value.hooks.PreToolUse.filter((group: { matcher: string }) => group.matcher !== claudePlanGuardMatcher) } };
+    expect(helper.secretGuardWired(['--settings', JSON.stringify(withoutPlan)], cwd, true)).toBe(true);
+    expect(helper.planGuardWired(['--settings', JSON.stringify(withoutPlan)], cwd, true)).toBe(false);
+
+    const wrongSecretMatcher = structuredClone(value);
+    wrongSecretMatcher.hooks.PreToolUse.find((group: { matcher: string }) => group.matcher === secretGuardToolMatcher).matcher = 'Bash';
+    expect(helper.secretGuardWired(['--settings', JSON.stringify(wrongSecretMatcher)], cwd, true)).toBe(false);
+    const wrongPlanMatcher = structuredClone(value);
+    wrongPlanMatcher.hooks.PreToolUse.find((group: { matcher: string }) => group.matcher === claudePlanGuardMatcher).matcher = '.*';
+    expect(helper.planGuardWired(['--settings', JSON.stringify(wrongPlanMatcher)], cwd, true)).toBe(false);
+  });
+
+  it('accepts wired legacy guards without onFailure but still rejects wrong matcher and type', async () => {
+    const { cwd, helper, sessionId } = fixture();
+    const command = join(cwd, 'claude');
+    writeFileSync(command, `#!${process.execPath}\nif (process.argv.includes('--version')) process.stdout.write('2.1.220 (Claude Code)\\n');\n`, { mode: 0o755 });
+    const adapter = createCliAdapter('claude-code');
+    await adapter.prepareLaunch!({ sessionId, command, cwd, permissionMode: 'ask' }, { ...process.env } as Record<string, string>);
+    const args = adapter.buildArgs({ sessionId, command, cwd, permissionMode: 'ask', planGuardCommand: helper.planGuardCommand() });
+    expect(helper.secretGuardWired(args, cwd)).toBe(true);
+    expect(helper.planGuardWired(args, cwd)).toBe(true);
+    expect(helper.secretGuardWired(args, cwd, true)).toBe(false);
+    expect(helper.planGuardWired(args, cwd, true)).toBe(false);
+
+    const wrong = JSON.parse(args[args.indexOf('--settings') + 1]!);
+    for (const group of wrong.hooks.PreToolUse) {
+      group.matcher = 'Bash';
+      group.hooks[0].type = 'http';
+    }
+    expect(helper.secretGuardWired(['--settings', JSON.stringify(wrong)], cwd)).toBe(false);
+    expect(helper.planGuardWired(['--settings', JSON.stringify(wrong)], cwd)).toBe(false);
   });
 
   it.each(['claude-code', 'seed', 'relay', 'genius'])('preserves user settings and permissions for %s without credentials in argv', adapterId => {

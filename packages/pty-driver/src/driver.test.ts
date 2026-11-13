@@ -47,11 +47,14 @@ function waitFor(description: string, cond: () => boolean, timeoutMs = 10_000): 
 describe('PtyCliDriver（PtyBackend + 假 CLI 集成）', () => {
   let dir: string;
   let fixturePath: string;
+  let claudeVersionPath: string;
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'pty-driver-test-'));
     fixturePath = join(dir, 'mock-cli.mjs');
     await writeFile(fixturePath, MOCK_CLI_SOURCE, 'utf8');
+    claudeVersionPath = join(dir, 'claude-version');
+    await writeFile(claudeVersionPath, `#!${process.execPath}\nif (process.argv.includes('--version')) process.stdout.write('2.1.295 (Claude Code)\\n');\n`, { mode: 0o755 });
   });
 
   afterEach(async () => {
@@ -63,6 +66,7 @@ describe('PtyCliDriver（PtyBackend + 假 CLI 集成）', () => {
     const events: NormalizedDriverEvent[] = [];
     const claude = createCliAdapter('claude-code');
     const adapter: CliAdapter = { id: 'claude-code', capabilities: {}, buildArgs: context => [fixturePath, ...claude.buildArgs(context)],
+      prepareLaunch: async (context, env) => claude.prepareLaunch!({ ...context, command: claudeVersionPath }, env),
       ...(adapterContext ? { injectSessionContext: (context: Parameters<NonNullable<CliAdapter['injectSessionContext']>>[0]) => claude.injectSessionContext!(context) } : {}),
       writeInput: (backend, prompt) => { prompts.push(prompt); backend.write(prompt + '\n'); }, completionPattern: /MOCK DONE/ };
     const driver = new PtyCliDriver({ agent: { id: 'mock', name: 'Mock', command: process.execPath, args: [], protocol: 'pty-cli',

@@ -1,6 +1,6 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, readFileSync, statSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -467,4 +467,88 @@ it('preserves Claude quota metadata through real ACPX with a persistent session 
     });
     expect(JSON.stringify(events.find(e => e.data?.rateLimits))).not.toContain('private');
   } finally { await adapter.stop(); vi.unstubAllEnvs(); }
+});
+
+describe('Claude ACP secret-guard version compatibility', () => {
+  afterEach(() => { vi.unstubAllEnvs(); });
+
+  const fixture = (cwd: string, version: string, extraEnv: Record<string, string> = {}) => {
+    const bin = join(cwd, 'bin');
+    mkdirSync(bin);
+    const executable = join(bin, 'claude');
+    const output = version === 'probe-failure' ? 'process.exit(1);'
+      : `process.stdout.write(${JSON.stringify(version === 'unknown-fork' ? '2.1.999 (Unknown Fork)\n' : `${version} (Claude Code)\n`)});`;
+    writeFileSync(executable, `#!${process.execPath}\nif (process.argv.includes('--version')) { ${output} }\n`);
+    chmodSync(executable, 0o755);
+    const policies = join(cwd, '.dutydeck', 'security', 'sessions');
+    mkdirSync(policies, { recursive: true });
+    writeFileSync(join(policies, 'claude-guard-version-session.json'), JSON.stringify({ enabled: true, authorized: false, pattern: '.*' }));
+    vi.stubEnv('CLAUDE_CODE_EXECUTABLE', undefined);
+    return {
+      id: 'claude', name: 'Claude', command: process.execPath,
+      args: [resolve(process.cwd(), 'packages/acp-client/agents/claude-acp.mjs')], protocol: 'acp' as const,
+      cwd, env: {
+        PATH: `${bin}:${process.env.PATH ?? ''}`,
+        DUTYDECK_CLAUDE_ACP_COMMAND: process.execPath,
+        DUTYDECK_CLAUDE_ACP_ARGS_JSON: JSON.stringify([resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs')]),
+        dutydeck_session_id: 'claude-guard-version-session',
+        ...extraEnv,
+      },
+      permissionMode: 'full-trust' as const, timeout: 10,
+      capabilities: { pause: false, resume: true }, builtin: true,
+    };
+  };
+
+  const calls = (log: string) => readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line) as { method: string; prompt?: string });
+
+  it.each(['2.1.220', '2.1.295', 'probe-failure', 'unknown-fork'])('submits a credential-protected send on Claude %s', async version => {
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-claude-acp-send-')); dirs.push(cwd);
+    const log = join(cwd, 'calls.jsonl');
+    const events: any[] = [];
+    const adapter = new AcpxAdapter(fixture(cwd, version, { mock_acp_call_log: log }), {
+      sessionKey: 'claude-guard-version-session', onEvent: event => events.push(event),
+      resolveRiskPolicy: async () => ({ enabled: true, authorized: false, pattern: '.*' }),
+    });
+    try {
+      await expect(adapter.send('protected prompt')).resolves.toBeUndefined();
+      expect(events.filter(event => event.type === 'text')).toHaveLength(1);
+      expect(calls(log).filter(call => call.method === 'session/prompt').map(call => call.prompt)).toEqual(['protected prompt']);
+    } finally { await adapter.stop(); }
+  }, 20_000);
+
+  it.each(['2.1.220', '2.1.295', 'probe-failure', 'unknown-fork'])('submits automatic compaction on Claude %s', async version => {
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-claude-acp-compact-')); dirs.push(cwd);
+    const log = join(cwd, 'calls.jsonl');
+    const adapter = new AcpxAdapter(fixture(cwd, version, { mock_acp_call_log: log, mock_acp_compact: '1' }), {
+      sessionKey: 'claude-guard-version-session', onEvent: () => {},
+      resolveRiskPolicy: async () => ({ enabled: true, authorized: false, pattern: '.*' }),
+    });
+    try {
+      await expect(adapter.compact()).resolves.toBe('completed');
+      expect(calls(log).filter(call => call.method === 'session/prompt').map(call => call.prompt)).toEqual(['/compact']);
+    } finally { await adapter.stop(); }
+  }, 20_000);
+
+  it.each(['2.1.220', 'probe-failure'])('submits a protected prompt after restoring Claude %s', async version => {
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-claude-acp-restore-')); dirs.push(cwd);
+    const log = join(cwd, 'calls.jsonl');
+    const config = fixture(cwd, version, { mock_acp_call_log: log });
+    const sessionKey = 'claude-guard-version-session';
+    const first = new AcpxAdapter(config, { sessionKey, onEvent: () => {} });
+    await first.start();
+    await first.stop();
+    expect(calls(log).filter(call => call.method === 'spawn')).toHaveLength(1);
+
+    const restored = new AcpxAdapter(config, {
+      sessionKey, onEvent: () => {},
+      resolveRiskPolicy: async () => ({ enabled: true, authorized: false, pattern: '.*' }),
+    });
+    try {
+      await restored.start();
+      expect(calls(log).filter(call => call.method === 'spawn')).toHaveLength(1);
+      await expect(restored.send('protected after restore')).resolves.toBeUndefined();
+      expect(calls(log).filter(call => call.method === 'spawn')).toHaveLength(2);
+      expect(calls(log).filter(call => call.method === 'session/prompt').map(call => call.prompt)).toEqual(['protected after restore']);
+    } finally { await restored.stop(); }
+  }, 20_000);
 });

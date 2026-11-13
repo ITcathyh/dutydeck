@@ -496,10 +496,10 @@ describe('production PTY backend injection', () => {
             matcher: '^AskUserQuestion$',
             hooks: [{ type: 'command', command: 'dutydeck-fixture session native-ask', timeout: 1230 }],
           },
-          // 先出计划的守卫 hook：平时守卫脚本不在，hook 直接放行。
+          // 先出计划的守卫 hook：active 元数据不在时直接放行。
           {
             matcher: claudePlanGuardMatcher,
-            hooks: [{ type: 'command', command: `test ! -e '${dirname(settingsPath)}/plan-guard.mjs' || '${process.execPath}' '${dirname(settingsPath)}/plan-guard.mjs' || exit 2`, timeout: 30 }],
+            hooks: [{ type: 'command', command: `test ! -e '${dirname(settingsPath)}/plan-guard-active' && exit 0; test -f '${dirname(settingsPath)}/plan-guard.mjs' || exit 2; '${process.execPath}' '${dirname(settingsPath)}/plan-guard.mjs' || exit 2`, timeout: 30 }],
           },
         ]);
       }

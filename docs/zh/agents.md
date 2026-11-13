@@ -18,6 +18,12 @@ Codex 终端 Agent 会从 `CODEX_HOME/config.toml` 读取 `[profiles.<name>]` �
 
 普通 relay 提问支持用稳定 `requestId` 跨断线和服务重启查询、续等。`session ask` 将 ID 写到 stderr，可用 `--request-id` 自行指定；`session ask-result <id> --json` 只读历史，`session ask-wait <id>` 只等待原问题，不重发 prompt 或创建新轮。问题、选项、原 task/attempt 和截止时间冻结，最多 24 小时；旧无 ID 请求和原生权限的有限期限不变。只有原轮仍可继续且当前权限有效，wait 才返回答案及退出码 0；原轮已结束、被替换或结果未知时返回 3，历史答案仍不构成执行授权。历史查询会检查当前结果读取权限，续等和答题会重新核验群成员、邮箱白名单及过期的权限事实；权限查询临时失败不会永久取消问题，恢复后可用同一 ID 续等。查询可能刷新权限缓存，但不改变问题、答案或任务执行。ADHD 的结构化确认仍是点击后新轮继续，不能与普通等待互换。命令与退出码见 [CLI 文档](cli.md)。
 
+### Claude 凭据与计划守卫的失败阻断
+
+Dutydeck 自己生成的 Claude 凭据守卫（终端与内置 ACP）和计划守卫（终端）在官方 Claude Code **2.1.295 或更高版本**上带 `onFailure: "block"`：守卫超时或未被脚本内显式拒绝覆盖的执行失败也阻断工具调用。策略文件读取或 JSON 解析失败、计划阶段已启用但守卫脚本缺失同样按拒绝处理。Ask relay、PermissionRequest 和用户自己的 hooks 不增加这个字段。
+
+启动前探测使用与 Agent 相同的清洗后子进程环境，最多 3 秒并按可执行文件身份缓存；内置 ACP launcher 独立探测同一个实际 Claude 可执行文件。旧版、探测失败和 Seed / Relay / Genius 等未验证分支不写这个字段，凭据策略生效或 deny-all 的轮次也照常提交，守卫超时维持原来的放行行为，显式拒绝和脚本崩溃仍由 `|| exit 2` 拦截。恢复或接管终端时，新版核对真实设置里的守卫 marker、精确 matcher、command type 与 `onFailure: "block"`；旧版按 marker、精确 matcher 和 command type 核对，不因缺少这个字段拒绝轮次。`dutydeck doctor` 的默认 Agent 可用性检查会对识别出的旧版官方 Claude Code 给出升级提醒。
+
 ## 1. 自定义 Agent (`DUTYDECK_AGENTS_JSON`)
 
 用环境变量 `DUTYDECK_AGENTS_JSON` 注册自定义 Agent。

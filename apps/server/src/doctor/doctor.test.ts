@@ -1428,13 +1428,29 @@ describe('默认 Agent 可用性', () => {
     const calls: Array<{ command: string; timeout: number }> = [];
     const report = await runDoctor({ json: true }, botsWith('claude', {
       config: { ...baseConfig, agents: [{ id: 'claude', name: 'Claude Code', command: 'npx', protocol: 'acp', builtin: true }] },
-      agentProbe: async (command, timeout) => { calls.push({ command, timeout }); return { status: 'ok', version: '2.0.1 (Claude Code)' }; },
+      agentProbe: async (command, timeout) => { calls.push({ command, timeout }); return { status: 'ok', version: '2.1.295 (Claude Code)' }; },
       agentProbeTimeoutMs: 1234
     }));
     expect(calls).toEqual([{ command: 'claude', timeout: 1234 }]);
     const check = find(report, 'agents.default')!;
     expect(check.level).toBe('ok');
-    expect(check.detail).toContain('2.0.1');
+    expect(check.detail).toContain('2.1.295');
+  });
+
+  it('旧版官方 Claude 在现有可用性检查里提示守卫超时阻断需要 2.1.295+', async () => {
+    const check = find(await runDoctor({ json: true }, botsWith('claude', {
+      agentProbe: async () => ({ status: 'ok', version: '2.1.220 (Claude Code)' }),
+    })), 'agents.default')!;
+    expect(check.level).toBe('warn');
+    expect(check.detail).toContain('旧版维持原行为');
+    expect(check.remedy).toContain('仍可运行受保护轮次');
+  });
+
+  it('未验证分支的版本输出不冒充官方 Claude 旧版提醒', async () => {
+    const check = find(await runDoctor({ json: true }, botsWith('claude', {
+      agentProbe: async () => ({ status: 'ok', version: '2.1.220 (Unknown Fork)' }),
+    })), 'agents.default')!;
+    expect(check.level).toBe('ok');
   });
 
   it('命令找不到为 fail，给出可复制的 command -v 与绝对路径建议', async () => {
