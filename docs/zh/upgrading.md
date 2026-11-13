@@ -2,7 +2,7 @@
 
 > [← 返回 README](../../README.md) · [全部文档](../../README.md#docs) · [English](../en/upgrading.md)
 
-- **异常退出历史与回滚**：`last-abnormal-exit.json` 新增最近 10 条 `history`、运行代次和 `clean-exit` 元数据，顶层仍是最近一条旧枚举 `fatal|startup`，旧程序仍能读取顶层异常；但旧程序再次写异常文件会丢掉新增的 history、lifecycle 和 clean-exit 元数据，不能据此恢复历史。Linux/systemd 可在精确匹配退出记录后补充 SIGKILL；launchd 富集尚未验证，不声明支持。
+- **异常退出历史与回滚**：`last-abnormal-exit.json` 新增最近 10 条 `history`，以及各按 runId+database 去重、各保留最近 10 代的 `lifecycleRuns`/`cleanExits`；单数 `lifecycle`/`clean-exit` 保留当前代兼容展示，顶层仍是最近一条旧枚举 `fatal|startup`，旧程序仍能读取顶层异常；但旧程序再次写异常文件会丢掉新增 history 和生命周期/干净退出元数据，不能据此恢复历史。Linux/systemd 可在精确匹配退出记录后补充 SIGKILL；launchd 富集尚未验证，不声明支持。
 - **schema 过新错误更可行动**：`DATABASE_SCHEMA_TOO_NEW` 和备份版本不匹配错误会列出数据库版本、程序支持版本及带实际路径的只读 `dutydeck database execution-status --database <数据库路径>`。打开仍会被拒绝，不自动迁移或降级；切回旧代码不是数据库回滚，使用备份恢复会丢备份后的写入。
 - **doctor 暴露组合检查（CT6-10）**：新增 `lark.exposure`，把监听地址、显式 local-only、local/token/open 认证、socket 激活、完全信任、高危用户范围与风控模式放在同一项判断。只有非回环无认证叠加可运行完全信任、广范围高危用户和弱风控时才新增 warn/fail；正常配置不新增失败。报告只含非机密的范围与数量，不自动修改 `.env`、unit 或机器人配置。socket 实际地址不可知或机器人配置不可读时降级为 skip，不猜测；既有 `access.posture` 等检查及回滚行为不变。
 
