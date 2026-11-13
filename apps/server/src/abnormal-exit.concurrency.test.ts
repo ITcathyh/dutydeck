@@ -36,3 +36,18 @@ it('merges read-modify-write updates from two PIDs without losing either history
   }
   expect(['fatal', 'startup']).toContain(document.kind);
 }, 30_000);
+
+it('keeps one write from each of three real processes in the same critical section protocol', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dutydeck-abnormal-concurrent-three-')); roots.push(root);
+  const database = join(root, 'dutydeck.db'); writeFileSync(database, '');
+  const startAt = String(Date.now() + 250);
+  const run = async (label: string) => {
+    const child = spawn(process.execPath, [fixture!, database, label, startAt, '1'], { stdio: ['ignore', 'ignore', 'pipe'] });
+    let stderr = ''; child.stderr.on('data', chunk => { stderr += chunk; });
+    const exit = new Promise<number | null>(resolve => child.once('exit', resolve));
+    expect(await exit, stderr).toBe(0);
+  };
+  await Promise.all([run('first'), run('second'), run('third')]);
+  const document = JSON.parse(readFileSync(join(root, abnormalExitFileName), 'utf8'));
+  expect(document.history.map((entry: any) => entry.runId).sort()).toEqual(['first-0', 'second-0', 'third-0']);
+}, 30_000);
