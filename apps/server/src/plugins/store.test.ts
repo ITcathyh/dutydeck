@@ -217,6 +217,41 @@ describe('PluginStore', () => {
     expect(again.changes).toEqual(updated.changes);
   });
 
+  it('reviews every same-id agent execution when an earlier definition is added or removed', async () => {
+    const source = join(temp, 'duplicate-agents');
+    const secret = 'added-agent-command-secret';
+    await writePlugin(source, {
+      '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'duplicate-agents', version: '1.0.0' }),
+      'agents/b.json': JSON.stringify({ id: 'shared', name: 'B', command: 'node', args: ['b.mjs'] })
+    });
+    await store.install(source, { yes: true });
+
+    await writePlugin(source, {
+      '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'duplicate-agents', version: '2.0.0' }),
+      'agents/a.json': JSON.stringify({ id: 'shared', name: 'A', command: secret, args: ['a.mjs'] })
+    });
+    const added = vi.fn(async () => false);
+    await expect(store.update('duplicate-agents', { confirm: added })).rejects.toMatchObject({ code: 'PLUGIN_TRUST_DECLINED' });
+    expect(added).toHaveBeenCalledTimes(1);
+    const addition = added.mock.calls[0]![0];
+    expect(addition.details).toEqual([]);
+    expect(addition.changes).toEqual([
+      { kind: 'agent', name: 'shared', before: expect.stringMatching(/^[0-9a-f]{64}$/), after: expect.stringMatching(/^[0-9a-f]{64}$/) }
+    ]);
+    expect(addition.changes![0]!.before).not.toBe(addition.changes![0]!.after);
+    expect(JSON.stringify(addition)).not.toContain(secret);
+
+    await store.update('duplicate-agents', { confirm: async () => true });
+    await rm(join(source, 'agents/a.json'));
+    const removed = vi.fn(async () => false);
+    await expect(store.update('duplicate-agents', { confirm: removed })).rejects.toMatchObject({ code: 'PLUGIN_TRUST_DECLINED' });
+    expect(removed).toHaveBeenCalledTimes(1);
+    expect(removed.mock.calls[0]![0].changes).toEqual([
+      { kind: 'agent', name: 'shared', before: expect.stringMatching(/^[0-9a-f]{64}$/), after: expect.stringMatching(/^[0-9a-f]{64}$/) }
+    ]);
+    expect(JSON.stringify(removed.mock.calls[0]![0])).not.toContain(secret);
+  });
+
   it('ignores description-only changes in command review digests and prompts', async () => {
     const source = join(temp, 'descriptions');
     await writePlugin(source, {

@@ -132,10 +132,15 @@ export function pluginCommandChanges(before: LoadedPlugin, after: LoadedPlugin):
   const collect = (plugin: LoadedPlugin) => {
     const entries = new Map<string, { kind: PluginCommandChange['kind']; name: string; digest: string }>();
     const add = (kind: PluginCommandChange['kind'], name: string, value: unknown) => entries.set(`${kind}\0${name}`, { kind, name, digest: executableDigest(value) });
+    const agentExecutions = new Map<string, unknown[]>();
     for (const agent of plugin.agents) {
       const { id, name: _name, builtin: _builtin, origin: _origin, ...execution } = agent;
-      add('agent', id, execution);
+      const executions = agentExecutions.get(id) ?? [];
+      executions.push(execution);
+      agentExecutions.set(id, executions);
     }
+    // 同 ID 的全部 execution 按加载顺序参与摘要，新增、删除或换序都不能互相覆盖。
+    for (const [id, executions] of agentExecutions) add('agent', id, executions);
     for (const command of plugin.commands) add('command', `${plugin.manifest.name}:${command.name}`, { template: command.template, query: command.query });
     for (const [event, specs] of Object.entries(plugin.hooks)) if (specs?.length) add('hook', event, specs);
     return entries;
