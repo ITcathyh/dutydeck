@@ -30,6 +30,10 @@ printf %s "$LARK_SECRET" | dutydeck setup --lark-app-id cli_xxx --lark-app-secre
 
 `--agent <id>` sets the default Agent (must be a detected CLI), `--lark-app-secret-fd <fd>` reads the secret from a file descriptor, `--listen` also enables listening. A running service needs `dutydeck restart` to pick up the new bot configuration.
 
+After the bot is configured, an interactive wizard separately asks whether to send the bot owner a test card with a unique ID and wait for one direct reply. The default is No. Only an explicit Yes to this question sends anything; `--yes`, non-interactive mode and `--json` never send the card automatically. A sent card followed by a reply timeout means “inbound unverified”, not end-to-end success.
+
+If the shell says `dutydeck: command not found`, your package manager's global executable directory is not on `PATH`. For pnpm, run `pnpm setup`, follow its PATH instructions and restart the terminal. For npm, use `npm prefix -g` to locate the global prefix and add its executable directory to `PATH`. Alternatively, leave `PATH` unchanged and run `pnpm dlx @byted/dutydeck setup` or `npx @byted/dutydeck setup`.
+
 When rerun in a directory that already has a `.env`, the wizard shows values on screen only for the settings it manages: default working directory, port, host, local-only and Lark App ID. The App Secret shows only its last 4 characters; other `.env` keys (such as `DUTYDECK_AGENTS_JSON`) are listed by name without their values.
 
 ## 3. Start and check
@@ -40,7 +44,11 @@ dutydeck doctor    # runs `--version` on each bot's default Agent (5s timeout, n
 dutydeck status
 ```
 
+The `terminal.backend` doctor check also runs the tmux version command and creates, verifies and exits a session on a private temporary socket; it never connects to the default tmux server. If tmux is missing, install it or fix `PATH` as shown in the remedy. Configurations that only use ACP, or explicitly use Herdr, do not treat missing tmux as fatal.
+
 Web console: `http://127.0.0.1:4310` (no login for local requests).
+
+An interactive foreground start with no readable bot configuration prints `setup`, `doctor` and the actual Web address below the listening address. It does so whenever that condition holds; no “already shown” state is stored. `--json`, non-TTY output and daemon children omit the guidance.
 
 ## Development from source
 

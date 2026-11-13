@@ -4,12 +4,13 @@ import { checkWatchFindings } from '../watch.js';
  *
  * 四条硬约束（每条都对应一个真实踩坑）：
  *
- *   1. **只报不改。** 体检是诊断命令，不得因为「检查了一下」而改变磁盘状态：
- *      不建库、不建目录、不写配置、不生成令牌。因此本模块绝不调用
+ *   1. **除私有终端 smoke 外只报不改。** 体检不得因为「检查了一下」而改变持久状态：
+ *      不建库、不在数据目录建目录、不写配置、不生成令牌。因此本模块绝不调用
  *      createRepositories（会 mkdir + 建库 + 开 WAL + 可能 VACUUM 备份 + 跑迁移）、
  *      不调用 readLarkConfigs（会写回 lark.bots 做迁移）、不调用
- *      loadOrCreateAuthToken / rotateAuthToken（都会写）。唯一容许的副作用是
- *      只读打开 WAL 库时 SQLite 自建的 -wal/-shm 边车文件，见 probes.ts。
+ *      loadOrCreateAuthToken / rotateAuthToken（都会写）。常规副作用只有只读打开 WAL 库时
+ *      SQLite 自建的 -wal/-shm 边车文件，见 probes.ts；terminal.backend 另会在 /tmp 新建
+ *      私有 tmux socket 做 smoke 并清理，清理结果不确定时保留现场，见 terminal-backend.ts。
  *
  *   2. **状态不许说谎。** daemonStatus() 把死掉的 pid 折叠成 running:false，
  *      与「从未启动过」不可区分，所以额外读原始记录把两者分开。同理，端口探测
@@ -39,12 +40,14 @@ import { accessMode } from '../service.js';
 import { createCliUi, type CliUi } from '../cli-ui.js';
 import { locateEnvFile } from '../env-location.js';
 import { defaultAgentProbe, defaultDatabaseProbe, defaultPortProbe, defaultProcessUid } from './probes.js';
+import { defaultTerminalBackendProbe } from './terminal-backend.js';
 import { agentsToProbe, checkDefaultAgents, checkDroppedAgents, readDefaultAgents } from './agent-checks.js';
 import { pluginDoctorChecks } from '../plugins/doctor.js';
 import {
   AUTH_TOKEN_CONFIG_KEY,
   DOCTOR_CONFIG_KEYS,
   DOCTOR_CONFIG_PREFIXES,
+  TERMINAL_BACKEND_CONFIG_KEY,
   checkAccessPosture,
   checkAccessToken,
   checkAgentAuth,
@@ -65,9 +68,11 @@ import {
   checkPort,
   checkPostureDrift,
   checkSchema,
+  checkTerminalBackend,
   checkUnpricedModels,
   larkBotsConfigKey,
   larkListenerStatusKey,
+  planTerminalBackend,
   summarize,
   type DirectoryObservation
 } from './checks.js';
@@ -92,12 +97,15 @@ export type {
   DoctorOptions,
   DoctorReport,
   PortProbe,
-  PortProbeOutcome
+  PortProbeOutcome,
+  TerminalBackendProbe,
+  TerminalBackendProbeResult
 } from './types.js';
 export { REQUIRED_NODE_VERSION } from './checks.js';
 
 const DEFAULT_PORT_PROBE_TIMEOUT_MS = 1_000;
 const DEFAULT_AGENT_PROBE_TIMEOUT_MS = 5_000;
+const DEFAULT_TERMINAL_BACKEND_PROBE_TIMEOUT_MS = 3_000;
 
 /** 动态 import autostart 模块：它可能尚未落地，缺失时该项降级为 skip。 */
 async function loadAutostartStatus(): Promise<DoctorAutostartResult | undefined> {
@@ -193,6 +201,7 @@ export async function runDoctor(
   const access = dependencies.access ?? fsAccess;
   const stat = dependencies.stat ?? (async (path: string) => ({ mode: (await fsStat(path)).mode }));
   const databaseProbe = dependencies.databaseProbe ?? defaultDatabaseProbe;
+  const terminalBackendProbe = dependencies.terminalBackendProbe ?? defaultTerminalBackendProbe;
   const portProbe = dependencies.portProbe ?? defaultPortProbe;
   const portTimeout = dependencies.portProbeTimeoutMs ?? DEFAULT_PORT_PROBE_TIMEOUT_MS;
   const username = dependencies.username ?? (() => {
@@ -304,6 +313,21 @@ export async function runDoctor(
     if (targets.length > 0) progress(`检查默认 Agent 命令（--version，最多 ${Math.round(agentTimeout / 1000)} 秒）`);
     const results = new Map(await Promise.all(targets.map(async target => [target.id, await agentProbe(target.command, agentTimeout)] as const)));
     checks.push(checkDefaultAgents({ bots: defaultBots, agents: config.agents, dropped: config.droppedAgents ?? [], results, timeoutMs: agentTimeout }));
+  }
+
+  // ---- 6b. 主终端后端 ----
+  const terminalPlan = planTerminalBackend({
+    ...(configError !== undefined ? { configError } : {}),
+    database: probe,
+    backend: probe.values?.[TERMINAL_BACKEND_CONFIG_KEY],
+    agents: config.agents
+  });
+  if (terminalPlan.action === 'probe') {
+    const timeout = dependencies.terminalBackendProbeTimeoutMs ?? DEFAULT_TERMINAL_BACKEND_PROBE_TIMEOUT_MS;
+    progress('用私有 socket 检查 tmux（不影响已有 tmux 会话）');
+    checks.push(checkTerminalBackend(terminalPlan, await terminalBackendProbe(timeout, env)));
+  } else {
+    checks.push(checkTerminalBackend(terminalPlan));
   }
 
   // ---- 7. 飞书 ----

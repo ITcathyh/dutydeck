@@ -76,6 +76,10 @@ export interface LarkBindResult {
   error?: { code: string; message: string };
 }
 
+const smokeOwnerOpenIds = new WeakMap<LarkBindResult, string>();
+/** Internal handoff only; the ID is deliberately absent from the enumerable result and JSON. */
+export const larkBindSmokeOwnerOpenId = (result: LarkBindResult): string | undefined => smokeOwnerOpenIds.get(result);
+
 export interface LarkBindOptions {
   appId: string;
   ui: CliUi;
@@ -476,7 +480,7 @@ export async function bindLarkApp(options: LarkBindOptions): Promise<LarkBindRes
   }
 
   const outcome = classify(steps, versionId);
-  return {
+  const result: LarkBindResult = {
     outcome,
     appId,
     steps,
@@ -488,6 +492,8 @@ export async function bindLarkApp(options: LarkBindOptions): Promise<LarkBindRes
       : `部分步骤未能确认，请到管理台核对后按需重跑：${resumeCommand(appId, false)}`,
     warnings,
   };
+  if (session.owner.userId.startsWith('ou_')) smokeOwnerOpenIds.set(result, session.owner.userId);
+  return result;
 }
 
 /** 建立会话；只在交互且非 json 时渲染二维码。 */

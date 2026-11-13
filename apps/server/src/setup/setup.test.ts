@@ -15,7 +15,9 @@ import type { DetectedAgent } from './detect.js';
 import { saveBot as saveRealBot, type ExistingBot, type SaveBotInput, type SaveBotResult } from './bot-store.js';
 import { readLarkConfig } from '../lark/config.js';
 import { readExistingConfig, type WriteEnvResult } from './env-file.js';
-import type { LarkBindOptions, LarkBindResult } from './lark-bind.js';
+import type { LarkBindOptions, LarkBindResult, larkBindSmokeOwnerOpenId } from './lark-bind.js';
+import type { offerLarkSetupSmoke } from './lark-smoke.js';
+import type { TerminalBackendProbe } from '../doctor/types.js';
 import { PromptUnavailableError, type AskOptions, type Prompter } from './prompts.js';
 import { runSetup, type SetupDependencies } from './setup.js';
 
@@ -89,6 +91,10 @@ interface HarnessOptions {
   /** 已保存的机器人（readBot 的返回）；缺省为库里没有这个机器人。 */
   storedBot?: ExistingBot;
   readSecretFd?: (fd: string) => Promise<string>;
+  smoke?: typeof offerLarkSetupSmoke;
+  readSmokeOwnerOpenId?: typeof larkBindSmokeOwnerOpenId;
+  terminalBackendProbe?: TerminalBackendProbe;
+  readTerminalBackend?: () => Promise<'tmux' | 'herdr'>;
 }
 
 function harness(options: HarnessOptions) {
@@ -120,12 +126,16 @@ function harness(options: HarnessOptions) {
     ...((input.defaultAgentId ?? options.storedBot?.defaultAgentId) ? { defaultAgentId: input.defaultAgentId ?? options.storedBot?.defaultAgentId } : {}),
     listening: input.listen === true || options.storedBot?.listening === true
   }));
+  const smoke = vi.fn(options.smoke ?? (async () => ({ status: 'skipped' as const, message: '已跳过飞书收发验证，未发送测试卡。' })));
+  const terminalBackendProbe = vi.fn(options.terminalBackendProbe ?? (async () => ({ status: 'ok' as const })));
+  const readTerminalBackend = vi.fn(options.readTerminalBackend ?? (async () => 'tmux' as const));
   const deps: SetupDependencies = {
     ui, prompter, cwd: options.cwd, env: {}, detect, bind, writeEnv, readExisting,
-    readBot, saveBot, database: join(options.cwd, 'fixture.db'),
+    readBot, saveBot, smoke, terminalBackendProbe, readTerminalBackend, database: join(options.cwd, 'fixture.db'),
+    ...(options.readSmokeOwnerOpenId ? { readSmokeOwnerOpenId: options.readSmokeOwnerOpenId } : {}),
     ...(options.readSecretFd ? { readSecretFd: options.readSecretFd } : {})
   };
-  return { out, err, deps, writeEnv, bind, detect, readExisting, readBot, saveBot };
+  return { out, err, deps, writeEnv, bind, detect, readExisting, readBot, saveBot, smoke, terminalBackendProbe, readTerminalBackend };
 }
 
 /** writeEnv 收到的 updates（第 n 次调用）。 */
@@ -441,6 +451,47 @@ describe('runSetup', () => {
 
     expect(result.warnings.some(warning => warning.includes('已不存在'))).toBe(false);
   });
+
+  it('adds one tmux warning for a terminal Agent without blocking the configuration write', async () => {
+    const dir = await makeTempDir();
+    const terminal = { ...AGENT, protocol: 'pty-cli' as const, adapterId: 'claude-code' };
+    const { deps, writeEnv, terminalBackendProbe, out } = harness({
+      cwd: dir, agents: [terminal], terminalBackendProbe: async () => ({ status: 'not_found' })
+    });
+    const result = await runSetup({ cwd: dir, port: '4310', skipLark: true, yes: true }, deps);
+    expect(result.ok).toBe(true);
+    expect(writeEnv).toHaveBeenCalledOnce();
+    expect(terminalBackendProbe).toHaveBeenCalledOnce();
+    expect(result.warnings.filter(warning => warning.includes('terminal.backend'))).toHaveLength(1);
+    expect(result.warnings.join('\n')).toContain('PATH');
+    expect(out.read().match(/terminal\.backend/g)).toHaveLength(1);
+  });
+
+  it('shows one successful terminal.backend line with the version and private socket result', async () => {
+    const dir = await makeTempDir();
+    const terminal = { ...AGENT, protocol: 'pty-cli' as const, adapterId: 'claude-code' };
+    const { deps, out } = harness({
+      cwd: dir, agents: [terminal], terminalBackendProbe: async () => ({ status: 'ok', version: 'tmux 3.4' })
+    });
+    const result = await runSetup({ cwd: dir, port: '4310', skipLark: true, yes: true }, deps);
+    expect(result.ok).toBe(true);
+    expect(result.warnings.filter(warning => warning.includes('terminal.backend'))).toHaveLength(0);
+    expect(out.read().match(/terminal\.backend/g)).toHaveLength(1);
+    expect(out.read()).toContain('tmux 3.4');
+    expect(out.read()).toContain('私有 socket 可用');
+  });
+
+  it('does not run the tmux probe for ACP-only or Herdr setups', async () => {
+    const dir = await makeTempDir();
+    const acp = harness({ cwd: dir, agents: [AGENT] });
+    expect((await runSetup({ cwd: dir, port: '4310', skipLark: true, yes: true }, acp.deps)).ok).toBe(true);
+    expect(acp.terminalBackendProbe).not.toHaveBeenCalled();
+
+    const terminal = { ...AGENT, protocol: 'pty-cli' as const, adapterId: 'claude-code' };
+    const herdr = harness({ cwd: dir, agents: [terminal], readTerminalBackend: async () => 'herdr' });
+    expect((await runSetup({ cwd: dir, port: '4310', skipLark: true, yes: true }, herdr.deps)).ok).toBe(true);
+    expect(herdr.terminalBackendProbe).not.toHaveBeenCalled();
+  });
 });
 
 describe('runSetup —— 默认 Agent 与 App Secret', () => {
@@ -701,5 +752,51 @@ describe('runSetup —— 默认 Agent 与 App Secret', () => {
     const result = await runSetup({ cwd: dir, port: '4310', larkAppId: 'cli_ok', larkAppSecretFd: '0', listen: true, yes: true }, deps);
     expect(saveBot.mock.calls[0]![0].listen).toBe(true);
     expect(result.bot?.listening).toBe(true);
+  });
+
+  it.each([
+    ['--yes', { yes: true }],
+    ['--json', { json: true, yes: true }],
+    ['non-interactive', {}]
+  ])('setup %s never invokes the optional outbound smoke', async (_name, mode) => {
+    const dir = await makeTempDir();
+    const { deps, smoke } = harness({ cwd: dir, agents: [AGENT], bind: async () => ready(), readSecretFd: async () => SECRET });
+    const result = await runSetup({ cwd: dir, port: '4310', larkAppId: 'cli_ok', larkAppSecretFd: '0', ...mode }, deps);
+    expect(result.ok).toBe(true);
+    expect(smoke).not.toHaveBeenCalled();
+  });
+
+  it('offers the smoke only after writing a usable bot and keeps inbound timeout as a warning', async () => {
+    const dir = await makeTempDir();
+    const prompter: Prompter = {
+      interactive: true,
+      async ask<T>(): Promise<T> { throw new Error('unexpected ask'); },
+      async choose<T>(options: { choices: Array<{ value: T }> }): Promise<T> { return options.choices[0]!.value; },
+      async confirm(): Promise<boolean> { return false; },
+      async secret(): Promise<string> { return SECRET; },
+      close() {}
+    };
+    const smoke = vi.fn(async () => ({ status: 'inbound_unverified' as const, message: '测试卡已发送；入站未验证。' }));
+    const { deps, writeEnv } = harness({
+      cwd: dir, agents: [AGENT], bind: async () => ready(), prompter, smoke,
+      readSmokeOwnerOpenId: () => 'ou_owner',
+      storedBot: { appSecret: SECRET, defaultAgentId: 'claude', listening: true }
+    });
+    setIsTTY(true);
+    const result = await runSetup({ cwd: dir, port: '4310', larkAppId: 'cli_ok' }, deps);
+    expect(result.ok).toBe(true);
+    expect(result.warnings).toContain('测试卡已发送；入站未验证。');
+    expect(smoke).toHaveBeenCalledWith(expect.objectContaining({
+      database: join(dir, 'fixture.db'), appId: 'cli_ok', ownerOpenId: 'ou_owner', interactive: true, assumeYes: false
+    }));
+    expect(writeEnv.mock.invocationCallOrder[0]).toBeLessThan(smoke.mock.invocationCallOrder[0]!);
+
+    const noOwner = harness({
+      cwd: dir, agents: [AGENT], bind: async () => ready(), prompter, smoke,
+      storedBot: { appSecret: SECRET, defaultAgentId: 'claude', listening: true }
+    });
+    setIsTTY(true);
+    await runSetup({ cwd: dir, port: '4310', larkAppId: 'cli_ok' }, noOwner.deps);
+    expect(smoke).toHaveBeenLastCalledWith(expect.objectContaining({ ownerOpenId: undefined }));
   });
 });

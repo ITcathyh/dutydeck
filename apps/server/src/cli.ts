@@ -51,6 +51,7 @@ import { PullRequestCliError, runPullRequestCli } from './pull-request-cli.js';
 import { DatabaseCliError, runDatabaseExecutionStatus, runDatabaseRetireLegacy, runDatabaseUpgradeExecution } from './database-cli.js';
 import { IdentityPreflightCliError, runIdentityPreflightCli } from './identity-preflight-cli.js';
 import { runSetup } from './setup/setup.js';
+import { maybePrintFirstRunGuidance } from './setup/first-run.js';
 import { PromptAbortedError, PromptUnavailableError } from './setup/prompts.js';
 import { InvalidWorkingDirectoryError } from './setup/detect.js';
 import { AutostartError, autostartDisable, autostartEnable, autostartStatus } from './autostart/autostart.js';
@@ -114,6 +115,12 @@ async function serve(options: CliOptions, onReady?: () => void) {
     : `http://${service.config.host.includes(':') ? `[${service.config.host}]` : service.config.host}:${service.config.port}`;
   process.stdout.write(`Dutydeck UI and API listening on ${address}\n`);
   onReady?.();
+  await maybePrintFirstRunGuidance({
+    address,
+    databaseUrl: service.config.databaseUrl,
+    json: options.json,
+    isTTY: process.stdout.isTTY === true
+  });
   let closing = false;
   const shutdown = async (signal: NodeJS.Signals) => {
     if (closing) {

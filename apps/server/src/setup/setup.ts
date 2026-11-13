@@ -19,11 +19,15 @@ import { createCliUi, type CliUi } from '../cli-ui.js';
 import { createPrompter, PromptAbortedError, PromptUnavailableError, type Prompter } from './prompts.js';
 import { detectAgents, validateWorkingDirectory, type DetectedAgent } from './detect.js';
 import { isSecretKey, MANAGED_KEYS, maskSecret, readExistingConfig, writeEnvFile, type WriteEnvResult } from './env-file.js';
-import { bindLarkApp, renderLarkBindResult, type LarkBindResult } from './lark-bind.js';
+import { bindLarkApp, larkBindSmokeOwnerOpenId, renderLarkBindResult, type LarkBindResult } from './lark-bind.js';
+import { offerLarkSetupSmoke, type LarkSetupSmokeResult } from './lark-smoke.js';
 import { isValidLarkAppId } from '../lark/open-platform-configurator.js';
 import { readDaemonStatus, resolveDaemonDir } from '../daemon/daemon.js';
 import { readSecretValue } from '../secret-cli.js';
 import { BotSetupApprovalError, readBot, saveBot, type ReadBot, type SaveBot, type SaveBotResult } from './bot-store.js';
+import { defaultTerminalBackendProbe } from '../doctor/terminal-backend.js';
+import type { TerminalBackendProbeResult } from '../doctor/types.js';
+import { createRepositories } from '@dutydeck/storage';
 
 export interface SetupCliOptions {
   /** 非交互确认；也是跳过危险确认（发布飞书版本）的唯一方式。 */
@@ -68,6 +72,11 @@ export interface SetupDependencies {
   saveBot?: SaveBot;
   /** 机器人配置所在的数据库文件；默认按 `dutydeck start` 的规则推出。 */
   database?: string;
+  /** 可选飞书收发冒烟；测试必须注入合成实现，默认实现也只在专用确认后外发。 */
+  smoke?: typeof offerLarkSetupSmoke;
+  readSmokeOwnerOpenId?: typeof larkBindSmokeOwnerOpenId;
+  terminalBackendProbe?: typeof defaultTerminalBackendProbe;
+  readTerminalBackend?: (database: string) => Promise<'tmux' | 'herdr'>;
 }
 
 export interface SetupResult {
@@ -127,6 +136,20 @@ function maskedView(entries: Map<string, string>): Array<[string, string]> {
   return [...entries.entries()].map(([key, value]) => [key, isSecretKey(key) ? maskSecret(value) : shown.has(key) ? value : '(内容不回显)']);
 }
 
+async function readSetupTerminalBackend(database: string): Promise<'tmux' | 'herdr'> {
+  if (!existsSync(database)) return 'tmux';
+  const repositories = createRepositories(database);
+  try { return await repositories.config.get('dutydeck.terminal_backend') === 'herdr' ? 'herdr' : 'tmux'; }
+  finally { repositories.close(); }
+}
+
+function terminalBackendWarning(result: TerminalBackendProbeResult): string | undefined {
+  if (result.status === 'ok') return undefined;
+  if (result.status === 'not_found') return 'terminal.backend：PATH 中找不到 tmux；需要终端 Agent 时请安装 tmux 或修正 PATH。配置仍会继续写入。';
+  const detail = result.detail.split(/\r?\n/).find(Boolean)?.slice(0, 180);
+  return `terminal.backend：tmux ${result.stage} 检查${result.status === 'timeout' ? '超时' : '失败'}${detail ? `（${detail}）` : ''}。配置仍会继续写入；修复提示请运行 dutydeck doctor。`;
+}
+
 export async function runSetup(options: SetupCliOptions = {}, dependencies: SetupDependencies = {}): Promise<SetupResult> {
   const env = dependencies.env ?? process.env;
   const cwd = dependencies.cwd ?? process.cwd();
@@ -149,6 +172,7 @@ export async function runSetup(options: SetupCliOptions = {}, dependencies: Setu
   const existing = readExisting(envFile);
   const mode: 'initial' | 'update' = existing.size > 0 ? 'update' : 'initial';
   const warnings: string[] = [];
+  let terminalBackendVersion: string | undefined;
   /** 累积的待写键值；只有全部步骤成功才会落盘。 */
   const updates: Record<string, string | undefined> = {};
 
@@ -195,6 +219,23 @@ export async function runSetup(options: SetupCliOptions = {}, dependencies: Setu
     }
     if (detected.length === 0) {
       warnings.push('未检测到已安装的 Agent CLI；配置仍会写入，但需要装好 CLI 才能跑任务。');
+    }
+    if (detected.some(agent => agent.protocol === 'pty-cli')) {
+      let backend: 'tmux' | 'herdr' | undefined;
+      try { backend = await (dependencies.readTerminalBackend ?? readSetupTerminalBackend)(databasePath()); }
+      catch { warnings.push('terminal.backend：终端后端设置读取失败，未执行 tmux 预检。配置仍会继续写入；可运行 dutydeck doctor 复核。'); }
+      if (backend === 'tmux') {
+        try {
+          const probed = await (dependencies.terminalBackendProbe ?? defaultTerminalBackendProbe)(3_000, env);
+          if (probed.status === 'ok') terminalBackendVersion = probed.version;
+          else {
+            const warning = terminalBackendWarning(probed);
+            if (warning) warnings.push(warning);
+          }
+        } catch {
+          warnings.push('terminal.backend：tmux 预检异常中止。配置仍会继续写入；修复提示请运行 dutydeck doctor。');
+        }
+      }
     }
     const wantedAgent = options.agent?.trim();
     if (options.agent !== undefined && !detected.some(agent => agent.id === wantedAgent)) {
@@ -268,6 +309,7 @@ export async function runSetup(options: SetupCliOptions = {}, dependencies: Setu
     let lark: LarkBindResult | undefined;
     let botResult: (SaveBotResult & { appId: string }) | undefined;
     let defaultAgentId: string | undefined;
+    let smokeOwnerOpenId: string | undefined;
     const skipLark = options.skipLark === true;
     let appId = options.larkAppId;
     // 只给 --agent / --lark-app-secret-fd、没给 --lark-app-id：改 .env 里那个机器人的默认 Agent 或 App Secret，不碰开放平台。
@@ -368,6 +410,7 @@ export async function runSetup(options: SetupCliOptions = {}, dependencies: Setu
               knownAgents: detected
             })
           };
+          smokeOwnerOpenId = lark ? (dependencies.readSmokeOwnerOpenId ?? larkBindSmokeOwnerOpenId)(lark) : undefined;
         } else {
           warnings.push(`尚未提供 App Secret（也没有 .env 里的 LARK_APP_SECRET），飞书机器人未保存，默认 Agent 也因此没有写入；飞书通道要等它就位才能收发消息。补上它（输入不回显）：dutydeck setup --lark-app-id ${validated}；脚本里用 printf %s "$SECRET" | dutydeck setup --lark-app-id ${validated} --lark-app-secret-fd 0 --yes。`);
         }
@@ -381,6 +424,19 @@ export async function runSetup(options: SetupCliOptions = {}, dependencies: Setu
 
     // ---- 落盘：到这里所有校验都过了，一次性原子写入 ----
     const written: WriteEnvResult = writeEnv(envFile, updates);
+
+    let smokeResult: LarkSetupSmokeResult | undefined;
+    if (interactive && !assumeYes && botResult?.hasSecret && botResult.defaultAgentId) {
+      try {
+        smokeResult = await (dependencies.smoke ?? offerLarkSetupSmoke)({
+          database: databasePath(), appId: botResult.appId, ownerOpenId: smokeOwnerOpenId,
+          interactive, assumeYes, json, prompter
+        });
+      } catch {
+        smokeResult = { status: 'unavailable', message: '飞书收发验证异常中止；入站未验证。' };
+      }
+      if (smokeResult.status !== 'skipped' && smokeResult.status !== 'verified') warnings.push(smokeResult.message);
+    }
 
     const next = written.changed || botResult?.changed
       ? 'dutydeck start'
@@ -409,6 +465,9 @@ export async function runSetup(options: SetupCliOptions = {}, dependencies: Setu
         botResult.listening ? '监听已启用' : '监听未启用'
       ].join(' · '));
     }
+    if (terminalBackendVersion) ui.status('ok', 'terminal.backend', `${terminalBackendVersion} · 私有 socket 可用`);
+    if (smokeResult?.status === 'verified') ui.status('done', smokeResult.message);
+    else if (smokeResult?.status === 'skipped') ui.status('skip', smokeResult.message);
     for (const warning of warnings) ui.status('warn', warning);
 
     const summary = [

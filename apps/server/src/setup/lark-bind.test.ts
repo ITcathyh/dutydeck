@@ -14,7 +14,7 @@ import type {
   ConnectedOpenPlatformSession,
 } from '../lark/open-platform-session.js';
 import type { Prompter } from './prompts.js';
-import { bindLarkApp, type LarkBindResult, type LarkBindStepKey } from './lark-bind.js';
+import { bindLarkApp, larkBindSmokeOwnerOpenId, type LarkBindResult, type LarkBindStepKey } from './lark-bind.js';
 
 const APP_ID = 'cli_dutydeck_test';
 
@@ -255,6 +255,23 @@ const levelOf = (result: LarkBindResult, key: LarkBindStepKey) =>
   result.steps.find(step => step.key === key)?.level;
 
 describe('bindLarkApp', () => {
+  it('keeps the owner open ID internal to the smoke handoff and out of JSON', async () => {
+    const { promise } = run();
+    const result = await promise;
+    expect(larkBindSmokeOwnerOpenId(result)).toBe(SECRETS.userId);
+    expect(JSON.stringify(result)).not.toContain(SECRETS.userId);
+    expect(JSON.stringify(result)).not.toContain(SECRETS.tenantId);
+  });
+
+  it('does not guess that an internal owner user ID is an app open ID', async () => {
+    const session = connected();
+    session.owner.userId = 'user-private-id';
+    const { promise } = run({ connect: async () => session });
+    const result = await promise;
+    expect(larkBindSmokeOwnerOpenId(result)).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain('user-private-id');
+  });
+
   it('syncs native slash commands after configuration with the matching app credential', async () => {
     const syncSlashCommands = vi.fn(async (_input: { appId: string; appSecret: string }) => ({}));
     const { promise, configure } = run({ syncSlashCommands });
