@@ -54,16 +54,15 @@ describe('startLarkSmokeListener', () => {
       body: JSON.stringify({
         version: 1, app_id: 'cli_smoke', handler_id: 'setup_smoke', event_type: 'im.message.receive_v1',
         event: {
-          event_id: 'event_1', sender: { sender_type: 'user', sender_id: { open_id: 'ou_owner' } },
-          message: { message_id: 'message_1', chat_id: 'oc_dm', chat_type: 'p2p', parent_id: 'om_card', root_id: 'om_root', content: '{"text":"reply"}' }
+          event_id: 'event_1', sender: { sender_type: 'user' },
+          message: { message_id: 'message_1', chat_type: 'p2p', content: '{"text":"reply"}' }
         }
       })
     });
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ event_id: 'event_1', decision: 'stop' });
     expect(received).toEqual([{
-      eventId: 'event_1', messageId: 'message_1', chatId: 'oc_dm', chatType: 'p2p',
-      parentId: 'om_card', rootId: 'om_root', content: '{"text":"reply"}', senderOpenId: 'ou_owner', senderType: 'user'
+      messageId: 'message_1', chatType: 'p2p', content: '{"text":"reply"}', senderType: 'user'
     }]);
 
     await stop();

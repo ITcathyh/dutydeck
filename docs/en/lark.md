@@ -237,7 +237,7 @@ dutydeck lark create "Dev Assistant" --agent <terminal agent id> --full-trust --
 printf %s "$LARK_SECRET" | dutydeck setup --lark-app-id cli_xxx --lark-app-secret-fd 0 --agent claude --yes
 ```
 
-The scope catalog used by automatic creation, binding and `/repair` includes `application:application:self_manage`. Interactive setup uses it to read the target app's owner and decide whether to offer the delivery check; authorization and publication keep their existing confirmations. This permission affects only that optional check: other bot capabilities remain enabled without it, but setup neither asks nor sends a test card. On an older app, rerun setup or use `/repair` to grant and publish the permission.
+The optional interactive-setup delivery check is initiated by the user and neither changes bot scopes nor persists a user's open_id. Its dedicated confirmation defaults to No. After acceptance, setup starts a temporary listener and then shows a one-time UUID in the terminal; send that code to the bot in a Lark direct message. Only a user DM containing this UUID within the bounded wait is accepted, and the bot replies to that message with the same UUID. Lark accepting the reply means inbound passed and outbound was sent; confirm actual receipt in Lark. A timeout means inbound is unverified and nothing was sent. `--yes`, non-interactive mode and `--json` skip the check.
 
 Agents that support Lark per-action approval: ACP agents (based on a successful ACP protocol handshake, independent of optional model enumeration metadata), and Claude Code / Seed / Relay in terminal mode (via a PermissionRequest hook). Other terminal CLIs can only run `full-trust`.
 

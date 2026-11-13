@@ -336,8 +336,8 @@ describe('bindLarkApp', () => {
     const result = await promise;
 
     expect(levelOf(result, 'scopes')).toBe('done');
-    // 22 项里已生效 12 项，实测缺口就是 10 项。
-    expect(result.steps.find(step => step.key === 'scopes')?.detail).toContain('本次补齐 10 项');
+    // 21 项里已生效 12 项，实测缺口就是 9 项。
+    expect(result.steps.find(step => step.key === 'scopes')?.detail).toContain('本次补齐 9 项');
     expect(levelOf(result, 'events')).toBe('done');
     // 回调本来就好，不能被顺带标成 done。
     expect(levelOf(result, 'callback')).toBe('ok');
@@ -626,10 +626,10 @@ describe('bindLarkApp', () => {
     });
     const result = await promise;
 
-    // 实测缺 12 项。直接转述 configurator 的 scopeCount（22）就是假绿灯。
+    // 实测缺 11 项。直接转述 configurator 的 scopeCount（21）就是假绿灯。
     const scopes = result.steps.find(step => step.key === 'scopes');
     expect(scopes?.level).toBe('done');
-    expect(scopes?.detail).toContain('本次补齐 12 项');
+    expect(scopes?.detail).toContain('本次补齐 11 项');
     expect(JSON.stringify(result)).not.toContain('scopeCount');
     expect(JSON.stringify(result)).not.toContain('eventCount');
   });
@@ -652,7 +652,7 @@ describe('bindLarkApp', () => {
     expect(result.versionId).toBe('version-2');
     const scopes = result.steps.find(step => step.key === 'scopes');
     expect(scopes?.level).toBe('ok');
-    expect(scopes?.detail).toContain('21 项权限本来就已生效');
+    expect(scopes?.detail).toContain('20 项权限本来就已生效');
     expect(scopes?.detail).toContain('task:task:write');
     expect(result.warnings.some(warning => warning.includes('task:task:write'))).toBe(true);
   });

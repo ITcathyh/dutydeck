@@ -50,7 +50,7 @@ dutydeck doctor
 
 `dutydeck setup` 在检测到需要 tmux 的终端 Agent 时做一次私有 socket 预检；失败只在结果里增加一行警告，仍写入配置。`dutydeck doctor` 的 `terminal.backend` 检查会定位到命令缺失、版本执行失败、会话建退失败或清理失败，并给出安装或 `PATH` 修复提示；它不会自动安装 tmux，也不会连接或终止默认 tmux server。所有调用都使用 `-f /dev/null`，`XDG_CONFIG_HOME` 指向私有目录，测试会话只运行受控存活命令，不加载系统或用户 tmux 配置。纯 ACP 配置只显示终端后端说明，Herdr 配置不把 tmux 缺失当成故障。
 
-交互式 setup 会读取目标应用信息；只有应用 ID 匹配、`owner.type=2`（企业内成员）且 owner open_id 为 `ou_` 时，才用默认 No 的专用确认询问是否发送测试卡。绑定和重绑定会申请 `application:application:self_manage` 并走既有发布确认。旧机器人缺少或未发布该权限、读取失败、所有者不是企业内成员或 ID 不可靠时，不提供收发验证也不发送；权限或读取失败可按提示重跑 setup 完成授权与发布。没有 owner open_id 输入 flag，不会用协作者 ID、allowedUsers 或 ID 前缀猜测。`--yes`、非交互和 `--json` 不读取所有者身份，也不自动外发。
+机器人配置完成后，交互式 setup 会用默认 No 的专用问题询问是否验证飞书收发；拒绝则不监听也不发送。同意并启动临时监听后，终端显示一次性 UUID，请在飞书里私聊机器人发送这段验证码。只有在有界时间内收到包含本次 UUID 的用户私聊，机器人才回复该消息并携带同一 UUID。回复被飞书接受表示「入站通过、出站已发送」，仍需你在飞书确认收到；超时则入站未验证，且不发送任何消息。`--yes`、非交互和 `--json` 不进入该验证。此流程不改变机器人权限，也不持久化用户 open_id。
 
 没有机器人配置的前台交互启动会在监听地址下显示 setup、doctor 和实际 Web 地址；每次满足条件都显示，不保存展示状态。`--json`、非 TTY 和 daemon 子进程不显示。CLI 不在 `PATH` 时会给出 pnpm/npm 通用修复入口。
 

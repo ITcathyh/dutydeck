@@ -50,14 +50,9 @@ export async function startLarkSmokeListener(
         return;
       }
       onEvent({
-        eventId,
         messageId: event.message?.message_id,
-        chatId: event.message?.chat_id,
         chatType: event.message?.chat_type,
-        parentId: event.message?.parent_id,
-        rootId: event.message?.root_id,
         content: event.message?.content,
-        senderOpenId: event.sender?.sender_id?.open_id,
         senderType: event.sender?.sender_type
       });
       response.writeHead(200, { 'content-type': 'application/json' });

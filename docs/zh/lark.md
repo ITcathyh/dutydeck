@@ -339,7 +339,7 @@ dutydeck lark create "研发助手" --agent <终端模式 Agent 的 id> --full-t
 printf %s "$LARK_SECRET" | dutydeck setup --lark-app-id cli_xxxxxxxx --lark-app-secret-fd 0 --agent claude --yes
 ```
 
-自动创建、绑定和 `/repair` 的权限清单包含 `application:application:self_manage`，用于交互式 setup 读取目标应用的所有者并决定是否提供收发验证；授权与发布仍走既有确认。该权限只影响这项可选验证，缺失时其他机器人能力不因此停用，但 setup 不会询问或发送测试卡。旧应用可重跑 setup 或执行 `/repair` 补齐并发布权限。
+交互式 setup 的可选收发验证由用户先发起，不改变机器人权限，也不持久化用户 open_id。专用确认默认 No；同意后先启动临时监听，终端再显示一次性 UUID，由你在飞书里私聊机器人发送这段验证码。只有在有界时间内收到包含本次 UUID 的用户私聊，机器人才回复该消息并携带同一 UUID。飞书接受回复表示入站通过、出站已发送，你仍需在飞书确认收到；超时则入站未验证，且不发送任何消息。`--yes`、非交互和 `--json` 不进入该验证。
 
 “支持飞书逐项审批”的 Agent：ACP Agent（基于成功的 ACP 协议握手，不依赖可选的模型枚举元数据），以及 Claude Code / Seed / Relay 终端模式（经 PermissionRequest hook）。其它终端模式 CLI 只能用 `full-trust`。
 

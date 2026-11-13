@@ -72,7 +72,7 @@ export interface SetupDependencies {
   saveBot?: SaveBot;
   /** 机器人配置所在的数据库文件；默认按 `dutydeck start` 的规则推出。 */
   database?: string;
-  /** 可选飞书收发冒烟；测试必须注入合成实现，默认实现只在可靠读取所有者后询问，且仅在专用确认后外发。 */
+  /** 可选飞书收发冒烟；默认实现只在交互确认后启动临时监听并显示一次性验证码。 */
   smoke?: typeof offerLarkSetupSmoke;
   terminalBackendProbe?: typeof defaultTerminalBackendProbe;
   readTerminalBackend?: (database: string) => Promise<'tmux' | 'herdr'>;
@@ -427,7 +427,8 @@ export async function runSetup(options: SetupCliOptions = {}, dependencies: Setu
       try {
         smokeResult = await (dependencies.smoke ?? offerLarkSetupSmoke)({
           database: databasePath(), appId: botResult.appId,
-          interactive, assumeYes, json, prompter
+          interactive, assumeYes, json, prompter,
+          onVerificationCode: uuid => ui.notice(`飞书收发验证的一次性验证码：${uuid}\n请在飞书里私聊机器人发送这段验证码。`)
         });
       } catch {
         smokeResult = { status: 'unavailable', message: '飞书收发验证异常中止；入站未验证。' };

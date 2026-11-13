@@ -16,7 +16,7 @@ import { saveBot as saveRealBot, type ExistingBot, type SaveBotInput, type SaveB
 import { readLarkConfig } from '../lark/config.js';
 import { readExistingConfig, type WriteEnvResult } from './env-file.js';
 import type { LarkBindOptions, LarkBindResult } from './lark-bind.js';
-import type { offerLarkSetupSmoke } from './lark-smoke.js';
+import { offerLarkSetupSmoke } from './lark-smoke.js';
 import type { TerminalBackendProbe } from '../doctor/types.js';
 import { PromptUnavailableError, type AskOptions, type Prompter } from './prompts.js';
 import { runSetup, type SetupDependencies } from './setup.js';
@@ -125,7 +125,7 @@ function harness(options: HarnessOptions) {
     ...((input.defaultAgentId ?? options.storedBot?.defaultAgentId) ? { defaultAgentId: input.defaultAgentId ?? options.storedBot?.defaultAgentId } : {}),
     listening: input.listen === true || options.storedBot?.listening === true
   }));
-  const smoke = vi.fn(options.smoke ?? (async () => ({ status: 'skipped' as const, message: '已跳过飞书收发验证，未发送测试卡。' })));
+  const smoke = vi.fn(options.smoke ?? (async () => ({ status: 'skipped' as const, message: '已跳过飞书收发验证，未发送任何消息。' })));
   const terminalBackendProbe = vi.fn(options.terminalBackendProbe ?? (async () => ({ status: 'ok' as const })));
   const readTerminalBackend = vi.fn(options.readTerminalBackend ?? (async () => 'tmux' as const));
   const deps: SetupDependencies = {
@@ -758,10 +758,12 @@ describe('runSetup —— 默认 Agent 与 App Secret', () => {
     ['non-interactive', {}]
   ])('setup %s never invokes the optional outbound smoke', async (_name, mode) => {
     const dir = await makeTempDir();
-    const { deps, smoke } = harness({ cwd: dir, agents: [AGENT], bind: async () => ready(), readSecretFd: async () => SECRET });
+    const { deps, smoke, out, err } = harness({ cwd: dir, agents: [AGENT], bind: async () => ready(), readSecretFd: async () => SECRET });
     const result = await runSetup({ cwd: dir, port: '4310', larkAppId: 'cli_ok', larkAppSecretFd: '0', ...mode }, deps);
     expect(result.ok).toBe(true);
     expect(smoke).not.toHaveBeenCalled();
+    expect(out.read() + err.read()).not.toContain('一次性验证码');
+    expect(out.read() + err.read()).not.toContain('私聊机器人');
   });
 
   it('offers the smoke only after writing a usable bot and keeps inbound timeout as a warning', async () => {
@@ -774,7 +776,7 @@ describe('runSetup —— 默认 Agent 与 App Secret', () => {
       async secret(): Promise<string> { return SECRET; },
       close() {}
     };
-    const smoke = vi.fn(async () => ({ status: 'inbound_unverified' as const, message: '测试卡已发送；入站未验证。' }));
+    const smoke = vi.fn(async () => ({ status: 'inbound_unverified' as const, message: '未收到有效私聊；入站未验证，未发送任何消息。' }));
     const { deps, writeEnv } = harness({
       cwd: dir, agents: [AGENT], bind: async () => ready(), prompter, smoke,
       storedBot: { appSecret: SECRET, defaultAgentId: 'claude', listening: true }
@@ -782,12 +784,53 @@ describe('runSetup —— 默认 Agent 与 App Secret', () => {
     setIsTTY(true);
     const result = await runSetup({ cwd: dir, port: '4310', larkAppId: 'cli_ok' }, deps);
     expect(result.ok).toBe(true);
-    expect(result.warnings).toContain('测试卡已发送；入站未验证。');
+    expect(result.warnings).toContain('未收到有效私聊；入站未验证，未发送任何消息。');
     expect(smoke).toHaveBeenCalledWith(expect.objectContaining({
       database: join(dir, 'fixture.db'), appId: 'cli_ok', interactive: true, assumeYes: false
     }));
-    // 通用控制台登录身份不是目标应用 owner 证明；默认 smoke 自己读取目标应用信息。
-    expect(smoke.mock.calls[0]![0]).not.toHaveProperty('ownerOpenId');
+    // setup 只负责把真实监听给出的验证码呈现到终端，不传任何用户身份。
+    expect(smoke.mock.calls[0]![0]).toHaveProperty('onVerificationCode');
     expect(writeEnv.mock.invocationCallOrder[0]).toBeLessThan(smoke.mock.invocationCallOrder[0]!);
+  });
+
+  it('displays the production smoke verification code through ui.notice after the listener is ready', async () => {
+    const dir = await makeTempDir();
+    let receive: ((event: { messageId: string; chatType: string; senderType: string; content: string }) => void) | undefined;
+    const reply = vi.fn(async () => ({ messageId: 'om_reply' }));
+    const smoke: typeof offerLarkSetupSmoke = options => offerLarkSetupSmoke({
+      ...options,
+      onVerificationCode: code => {
+        options.onVerificationCode?.(code);
+        queueMicrotask(() => receive?.({
+          messageId: 'om_setup', chatType: 'p2p', senderType: 'user',
+          content: JSON.stringify({ text: code })
+        }));
+      }
+    }, {
+      loadBot: async () => ({ appId: 'cli_ok', appSecret: SECRET, listening: true } as import('@dutydeck/shared').StoredLarkConfig),
+      daemonStatus: () => ({ processStatus: 'stale' }),
+      acquireRuntime: () => ({ close() {} }),
+      startListener: async (_bot, onEvent) => { receive = onEvent; return vi.fn(); },
+      reply
+    });
+    const prompter: Prompter = {
+      interactive: true,
+      async ask<T>(): Promise<T> { throw new Error('unexpected ask'); },
+      async choose<T>(options: { choices: Array<{ value: T }> }): Promise<T> { return options.choices[0]!.value; },
+      async confirm(): Promise<boolean> { return true; },
+      async secret(): Promise<string> { return SECRET; },
+      close() {}
+    };
+    const { deps, err } = harness({
+      cwd: dir, agents: [AGENT], bind: async () => ready(), prompter, smoke,
+      storedBot: { appSecret: SECRET, defaultAgentId: 'claude', listening: true }
+    });
+    setIsTTY(true);
+    const result = await runSetup({ cwd: dir, port: '4310', larkAppId: 'cli_ok' }, deps);
+    expect(result.ok).toBe(true);
+    expect(reply).toHaveBeenCalledOnce();
+    expect(err.read()).toContain('一次性验证码');
+    expect(err.read()).toMatch(/[0-9a-f]{8}-[0-9a-f-]{27,}/i);
+    expect(err.read()).toContain('在飞书里私聊机器人发送这段验证码');
   });
 });
