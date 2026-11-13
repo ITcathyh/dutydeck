@@ -54,14 +54,18 @@ function publish(stage: string, target: string): void {
   try { renameSync(stage, target); } catch (error) { try { rmdirSync(target); } catch { /* Preserve anything another process placed here. */ } throw error; }
 }
 const integrityLinesShown = 5;
+function shellArgument(value: string): string {
+  return /^[A-Za-z0-9_./:@%+=,-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
+}
 function schemaRecoveryGuidance(database: string, actualVersion: number): string {
-  return `Read-only inspection: dutydeck database execution-status --database ${database}. Use a Dutydeck build that supports schema ${actualVersion}, or stop all writers and restore a known-good backup into a separate new directory with dutydeck backup restore --archive <backup-archive> --target <new-restored-directory>. Restoring a backup discards all writes made after that backup; switching to older code is not a database rollback.`;
+  const command = `dutydeck database execution-status --database ${shellArgument(database)}`;
+  return `\nRead-only inspection:\n${command}\nUse a Dutydeck build that supports schema ${actualVersion}, or stop all writers and restore a known-good backup into a separate new directory with dutydeck backup restore --archive <backup-archive> --target <new-restored-directory>. Restoring a backup discards all writes made after that backup; switching to older code is not a database rollback.`;
 }
 function assertSupportedSchema(file: string): void {
   const db = new Database(file, { readonly: true, fileMustExist: true });
   try {
     const version = (db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get() as { version: number }).version;
-    if (version !== BACKUP_SCHEMA_VERSION) throw new Error(`Unsupported or mismatched database schema: database schema version ${version}; this build supports schema version ${BACKUP_SCHEMA_VERSION}. ${schemaRecoveryGuidance(file, version)}`);
+    if (version !== BACKUP_SCHEMA_VERSION) throw new Error(`Unsupported or mismatched database schema: database schema version ${version}; this build supports schema version ${BACKUP_SCHEMA_VERSION}.${schemaRecoveryGuidance(file, version)}`);
   } finally { db.close(); }
 }
 function validateSqlite(file: string, expectedSchema: number): void {
@@ -82,7 +86,7 @@ function validateSqlite(file: string, expectedSchema: number): void {
       throw new Error(`SQLite integrity or foreign key check failed: ${details.join('; ')}`);
     }
     const version = (db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get() as { version: number }).version;
-    if (version !== expectedSchema || version !== BACKUP_SCHEMA_VERSION) throw new Error(`Unsupported or mismatched database schema: database schema version ${version}; this build supports schema version ${BACKUP_SCHEMA_VERSION}; archive manifest expects ${expectedSchema}. ${schemaRecoveryGuidance(file, version)}`);
+    if (version !== expectedSchema || version !== BACKUP_SCHEMA_VERSION) throw new Error(`Unsupported or mismatched database schema: database schema version ${version}; this build supports schema version ${BACKUP_SCHEMA_VERSION}; archive manifest expects ${expectedSchema}.${schemaRecoveryGuidance(file, version)}`);
   } finally { db.close(); }
 }
 const snapshotSchema = z.object({ version: z.literal(1), id: z.string().regex(/^[a-f0-9]{64}$/), size: z.number().int().nonnegative(), sha256: z.string().regex(/^[a-f0-9]{64}$/) });
@@ -219,7 +223,7 @@ function validateArtifacts(root: string, manifest: BackupManifest): void {
 export function inspectBackup(archive: string): { status: 'quarantined'; manifest: BackupManifest; missing: string[] } {
   const root = regularRoot(archive);
   const manifest = manifestSchema.parse(readJson(safePath(root, 'manifest.json')));
-  if (manifest.schema !== BACKUP_SCHEMA_VERSION) throw new Error(`Unsupported backup schema: backup manifest schema version ${manifest.schema}; this build supports schema version ${BACKUP_SCHEMA_VERSION}. ${schemaRecoveryGuidance(join(root, manifest.database), manifest.schema)}`);
+  if (manifest.schema !== BACKUP_SCHEMA_VERSION) throw new Error(`Unsupported backup schema: backup manifest schema version ${manifest.schema}; this build supports schema version ${BACKUP_SCHEMA_VERSION}.${schemaRecoveryGuidance(join(root, manifest.database), manifest.schema)}`);
   const paths = new Set<string>();
   for (const entry of manifest.entries) {
     if (paths.has(entry.path) || entry.path === 'manifest.json') throw new Error('Duplicate or reserved backup component');

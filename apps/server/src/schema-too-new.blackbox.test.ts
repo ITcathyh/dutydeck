@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:net';
@@ -47,6 +47,33 @@ it('a future schema error prints an exact read-only command that reports the sam
   expect(inspected.status, inspected.stderr).toBe(0);
   expect(JSON.parse(inspected.stdout)).toMatchObject({ ok: true, database, status: 'unsupported', schemaVersion: 999, unsupportedReason: 'DATABASE_SCHEMA_TOO_NEW' });
   expect(digest()).toBe(before);
+}, 90_000);
+
+it('shell-quotes the actual database path and executes the extracted command for migrations and backup errors', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dutydeck-schema-shell-')); roots.push(root);
+  const scratch = join(root, 'scratch'), data = join(scratch, "odd ' $dir"); mkdirSync(data, { recursive: true });
+  const database = join(data, "duty deck's $data.db");
+  createRepositories(database).close();
+  const raw = new Database(database);
+  raw.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (999, ?)').run(new Date().toISOString()); raw.close();
+  const env = { HOME: root, PATH: process.env.PATH, DUTYDECK_DATABASE_URL: database, DUTYDECK_DEFAULT_CWD: scratch, DUTYDECK_AGENTS_JSON: '[]', DUTYDECK_DISABLE_LARK_LISTENER: 'true' };
+  const opened = spawnSync(process.execPath, [cli, '--local-only', '--port', String(await freePort()), '--no-lark-listen'], { cwd: scratch, env, encoding: 'utf8', timeout: 60_000 });
+  const backup = spawnSync(process.execPath, [cli, 'backup', 'create', '--database', database, '--data-dir', data, '--output', join(root, 'archive')], { cwd: scratch, env, encoding: 'utf8', timeout: 60_000 });
+  expect(opened.status).not.toBe(0); expect(backup.status).not.toBe(0);
+
+  const bin = join(root, 'bin'); mkdirSync(bin);
+  const wrapper = join(bin, 'dutydeck');
+  writeFileSync(wrapper, '#!/bin/sh\nexec "$DUTYDECK_TEST_NODE" "$DUTYDECK_TEST_CLI" "$@"\n'); chmodSync(wrapper, 0o755);
+  for (const stderr of [opened.stderr, backup.stderr]) {
+    const command = stderr.split(/\r?\n/).find(line => line.startsWith('dutydeck database execution-status --database '));
+    expect(command, stderr).toBeDefined();
+    const inspected = spawnSync('/bin/sh', ['-c', command!], {
+      cwd: scratch, encoding: 'utf8', timeout: 60_000,
+      env: { HOME: root, PATH: `${bin}:${process.env.PATH}`, DUTYDECK_TEST_NODE: process.execPath, DUTYDECK_TEST_CLI: cli, DUTYDECK_DISABLE_LARK_LISTENER: 'true' }
+    });
+    expect(inspected.status, inspected.stderr).toBe(0);
+    expect(JSON.parse(inspected.stdout)).toMatchObject({ ok: true, database, status: 'unsupported', schemaVersion: 999 });
+  }
 }, 90_000);
 
 it('documents the explicit read-only command and backup data-loss warning in both languages', () => {
