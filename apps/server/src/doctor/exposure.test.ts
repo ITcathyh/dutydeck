@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createCliUi } from '../cli-ui.js';
 import { AUTH_TOKEN_CONFIG_KEY } from '../auth/auth.js';
-import { larkBotsConfigKey } from './checks.js';
+import { checkLarkExposure, larkBotsConfigKey } from './checks.js';
 import { observeSocketActivation, runDoctor } from './doctor.js';
 import type { DoctorCheck, DoctorConfig, DoctorDependencies } from './types.js';
 
@@ -94,6 +94,18 @@ async function exposure(scenario: Scenario = {}): Promise<{ check: DoctorCheck |
   return { check, serialized: JSON.stringify(report) };
 }
 
+async function blockedExposure(rawBots: string): Promise<{ check: DoctorCheck; serialized: string }> {
+  const check = await checkLarkExposure({
+    host: '0.0.0.0',
+    hostSource: 'runtime',
+    authEnabled: false,
+    socket: { status: 'inactive' },
+    rawBots,
+    listenerDisabled: false
+  });
+  return { check, serialized: JSON.stringify(check) };
+}
+
 describe('lark.exposure —— 网络与机器人权限组合', () => {
   it('非回环无认证但机器人不是完全信任时，不新增告警', async () => {
     const { check } = await exposure({ rawBots: JSON.stringify([bot({ permissionMode: 'ask', fullTrustConfirmed: false })]) });
@@ -166,6 +178,31 @@ describe('lark.exposure —— 网络与机器人权限组合', () => {
     const { check } = await exposure({ rawBots: JSON.stringify([bot({ defaultAgentId: undefined })]) });
     expect(check?.level).toBe('ok');
     expect(check?.detail).toContain('未形成监听权限');
+  });
+
+  it.each([
+    { field: 'eventHandlers', value: 'broken', marker: 'broken' },
+    { field: 'cardActionForwarding', value: { owner: 'exposure', token: 'exposure-forwarding-secret-must-not-leak' }, marker: 'exposure-forwarding-secret-must-not-leak' }
+  ])('$field 配置受阻时不算危险，也不吞掉其他有效机器人的告警', async ({ field, value, marker }) => {
+    const blocked = bot({
+      appId: 'cli_blocked',
+      [field]: value,
+      highRiskAllowedUsers: [{ openId: HIGH_RISK_OPEN_ID, name: 'High Risk User' }],
+      highRiskAllowedEmails: [HIGH_RISK_EMAIL]
+    });
+    const isolated = await blockedExposure(JSON.stringify([blocked]));
+    expect(isolated.check.level).toBe('ok');
+    expect(isolated.check.detail).toContain('cli_blocked：permissionMode=full-trust（配置受阻，未形成监听权限）');
+    expect(isolated.check.detail).not.toContain(marker);
+    expect(isolated.serialized).not.toContain(SECRET);
+    expect(isolated.serialized).not.toContain(marker);
+    expect(isolated.serialized).not.toContain(HIGH_RISK_OPEN_ID);
+    expect(isolated.serialized).not.toContain(HIGH_RISK_EMAIL);
+    expect(isolated.serialized).not.toContain('High Risk User');
+
+    const mixed = await blockedExposure(JSON.stringify([blocked, bot({ appId: 'cli_valid' })]));
+    expect(mixed.check.level).toBe('fail');
+    expect(mixed.check.command).toBe('dutydeck settings bot set cli_valid permissionMode=ask fullTrustConfirmed=false');
   });
 
   it('off 不会执行已配置的高危名单，仍按广范围处理', async () => {
