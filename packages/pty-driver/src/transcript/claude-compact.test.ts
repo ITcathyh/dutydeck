@@ -162,6 +162,26 @@ describe('Claude maintenance compaction evidence', () => {
     await expect(second.pending).resolves.toBe('completed');
   });
 
+  it('keeps the current boundary valid when an older boundary and summary arrive later', async () => {
+    await setup([clone(successFixture[0])]);
+    const previous = successfulSequence('previous-prompt', sessionId, 'previous-late');
+    const currentSequence = successfulSequence('current-prompt', sessionId, 'current-boundary');
+    previous[0].parentUuid = currentSequence[0].parentUuid;
+    previous[1].logicalParentUuid = currentSequence[0].parentUuid;
+    const first = arm();
+    await append(previous[0]);
+    first.controller.abort();
+    await expect(first.pending).rejects.toThrow();
+
+    const current = arm();
+    await append(currentSequence[0], currentSequence[1]);
+    await append(previous[1], previous[2]);
+    expect(current.settled()).toBe(false);
+    await append(currentSequence[2]);
+    expect(current.settled()).toBe(true);
+    await expect(current.pending).resolves.toBe('completed');
+  });
+
   it('does not let a replayed previous-generation input, boundary and summary complete the next generation', async () => {
     await setup([clone(successFixture[0])]);
     const first = arm();

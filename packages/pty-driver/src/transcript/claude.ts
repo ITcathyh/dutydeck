@@ -459,7 +459,7 @@ interface ClaudeCompactionWait {
   inputUuid?: string;
   inputParentUuid?: string;
   readonly commandUuids: Set<string>;
-  boundaryUuid?: string;
+  readonly boundaryUuids: Set<string>;
   invalidated: boolean;
   finish(outcome?: 'completed' | 'failed', error?: Error): void;
 }
@@ -694,7 +694,7 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
     }
     return new Promise((resolve, reject) => {
       const wait: ClaudeCompactionWait = {
-        observation, armedAt: Date.now(), commandUuids: new Set(), invalidated: false,
+        observation, armedAt: Date.now(), commandUuids: new Set(), boundaryUuids: new Set(), invalidated: false,
         finish: (outcome, error) => {
           if (this.compaction !== wait) return;
           this.compaction = undefined;
@@ -743,12 +743,12 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
     if (entry.type === 'system' && entry.subtype === 'compact_boundary') {
       if (entry.compactMetadata?.trigger === 'manual' && typeof entry.uuid === 'string'
         && typeof wait.inputParentUuid === 'string' && entry.logicalParentUuid === wait.inputParentUuid) {
-        wait.boundaryUuid = entry.uuid;
+        wait.boundaryUuids.add(entry.uuid);
       }
       return;
     }
     if (entry.isCompactSummary === true) {
-      if (wait.boundaryUuid && entry.parentUuid === wait.boundaryUuid && entry.promptId === wait.promptId) wait.finish('completed');
+      if (wait.boundaryUuids.has(entry.parentUuid) && entry.promptId === wait.promptId) wait.finish('completed');
       return;
     }
     const content = entry.message?.content;

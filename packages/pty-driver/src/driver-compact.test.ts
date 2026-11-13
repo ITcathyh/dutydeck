@@ -18,6 +18,7 @@ const busyScreen = '❯ /compact\n✻ Compacting conversation…\nesc to interru
 const compactDraftScreen = '──────────\n❯ /compact  <optional custom summarization instructions>\n──────────\n⏵⏵ bypass permissions on (shift+tab to cycle)';
 const compactDraftWithStatusScreen = '──────────\n❯ /compact  <optional custom summarization instructions>\n──────────\nContext status one\nContext status two\n⏵⏵ bypass permissions on (shift+tab to cycle)';
 const idleWithStatusScreen = (status: string) => idleScreen.replace('⏵⏵ bypass', `${status}\nContext status two\n⏵⏵ bypass`);
+const maintenanceNotWrittenMessage = '上下文压缩还没结束，或无法确认终端已恢复，本条消息没有写入。请稍后重发；一直这样请发 /new 开新会话。';
 function deferred() {
   let resolve!: () => void, reject!: (error: Error) => void;
   const promise = new Promise<void>((done, fail) => { resolve = done; reject = fail; });
@@ -136,6 +137,24 @@ describe('PTY Claude maintenance compaction', () => {
     output(screen(`answer to ${text}\n✻ Cooked for 1s\n${idleScreen}`));
     await vi.advanceTimersByTimeAsync(3_000);
     await pending;
+  }
+
+  async function expectMaintenanceRejected(pending: Promise<unknown>) {
+    void pending.catch(() => {});
+    let settled = false;
+    void pending.then(() => { settled = true; }, () => { settled = true; });
+    await advanceUntil(() => settled, 2_000);
+    await expect(pending).rejects.toBeInstanceOf(PromptNotWrittenError);
+    await expect(pending).rejects.toThrow(maintenanceNotWrittenMessage);
+  }
+
+  async function makeUnknown() {
+    const { pending } = await armCompact();
+    output(screen(busyScreen));
+    await vi.advanceTimersByTimeAsync(1_601);
+    await expect(pending).rejects.toBeInstanceOf(PromptNotWrittenError);
+    expect((driver as any).maintenanceUnknown).toBe(true);
+    expect(prompts).toEqual(['/compact']);
   }
 
   it('completes from generation-bound evidence without creating a business turn, then sends normally', async () => {
@@ -312,8 +331,8 @@ describe('PTY Claude maintenance compaction', () => {
     output(screen(busyScreen));
     await vi.advanceTimersByTimeAsync(1_601);
     await expect(pending).rejects.toBeInstanceOf(PromptNotWrittenError);
-    await expect(driver.send('not submitted')).rejects.toBeInstanceOf(PromptNotWrittenError);
-    await expect(driver.compact!()).rejects.toBeInstanceOf(PromptNotWrittenError);
+    await expectMaintenanceRejected(driver.send('not submitted'));
+    await expectMaintenanceRejected(driver.compact!());
     expect(prompts).toEqual(['/compact']);
     expect(events.filter(event => event.type === 'completed')).toHaveLength(0);
   });
@@ -541,7 +560,13 @@ describe('PTY Claude maintenance compaction', () => {
     await expect(pending).rejects.toBeInstanceOf(PromptNotWrittenError);
     expect((driver as any).maintenanceUnknown).toBe(true);
     expect(prompts).toEqual([]);
-    await expect(driver.send('must not be written')).rejects.toBeInstanceOf(PromptNotWrittenError);
+    await expectMaintenanceRejected(driver.send('must not be written'));
+    let clears = 0;
+    (driver as any).backend.write = (data: string) => { if (data === '\x15') clears++; };
+    output(screen(compactDraftScreen));
+    await expectMaintenanceRejected(driver.send('an unowned compact draft is not cleanup authority'));
+    expect(clears).toBe(0);
+    expect(prompts).toEqual([]);
   });
 
   it('shares and awaits the in-flight backend interrupt before releasing maintenance', async () => {
@@ -632,7 +657,18 @@ describe('PTY Claude maintenance compaction', () => {
     void pending.then(() => { settled = true; }, () => { settled = true; });
     await advanceUntil(() => settled, 1_000);
     await expect(pending).rejects.toBeInstanceOf(PromptNotWrittenError);
-    await expect(driver.send('must wait for the old paste')).rejects.toBeInstanceOf(PromptNotWrittenError);
+    await expectMaintenanceRejected(driver.send('must wait for the old paste'));
+    output(screen(idleScreen));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(driver.isIdle()).toBe(false);
+    expect((driver as any).maintenanceUnknown).toBe(true);
+    paste.resolve();
+    await advanceUntil(() => (driver as any).maintenanceUnknownRecovery?.writesSettled === true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(driver.isIdle()).toBe(true);
+    expect((driver as any).maintenanceUnknown).toBe(false);
+    (driver as any).adapter = { ...(driver as any).adapter, writeInput(_backend: any, prompt: string) { prompts.push(prompt); } };
+    await completeBusiness('after the old paste settled');
   });
 
   it('revalidates the owned composer when queued cleanup reaches the backend', async () => {
@@ -659,10 +695,13 @@ describe('PTY Claude maintenance compaction', () => {
   it('keeps the unknown fence when a late recovery attempt would otherwise return failed', async () => {
     const { pending } = await armCompact();
     vi.spyOn((driver as any), 'waitForMaintenanceRecovery').mockResolvedValueOnce(false).mockResolvedValueOnce(true);
-    vi.spyOn((driver as any), 'recoverInterruptedMaintenance').mockResolvedValueOnce(false);
+    const interruptedRecovery = vi.spyOn((driver as any), 'recoverInterruptedMaintenance').mockResolvedValueOnce(false);
     await succeedCompact('late-recovery');
     await expect(pending).rejects.toBeInstanceOf(PromptNotWrittenError);
-    await expect(driver.send('still fenced')).rejects.toBeInstanceOf(PromptNotWrittenError);
+    interruptedRecovery.mockRestore();
+    output(screen(busyScreen));
+    await vi.advanceTimersByTimeAsync(0);
+    await expectMaintenanceRejected(driver.send('still fenced'));
   });
 
   it('keeps maintenance unknown when observation fails after the real final Enter on an idle screen', async () => {
@@ -683,8 +722,13 @@ describe('PTY Claude maintenance compaction', () => {
     await advanceUntil(() => settled);
     expect(writes).toContain('\r');
     await expect(pending).rejects.toBeInstanceOf(PromptNotWrittenError);
-    await expect(driver.send('must remain unsubmitted')).rejects.toBeInstanceOf(PromptNotWrittenError);
+    output(screen(busyScreen));
+    await vi.advanceTimersByTimeAsync(0);
+    await expectMaintenanceRejected(driver.send('must remain unsubmitted'));
     expect(prompts).toEqual(['/compact']);
+    output(screen(idleScreen));
+    (driver as any).adapter = { ...(driver as any).adapter, writeInput(_backend: any, prompt: string) { prompts.push(prompt); } };
+    await completeBusiness('after observation failure and terminal recovery');
   });
 
   it('can return explicit failure when writing fails before the final Enter and the owned draft is cleared', async () => {
@@ -731,6 +775,137 @@ describe('PTY Claude maintenance compaction', () => {
     expect(prompts).toEqual(['/compact']);
     await succeedCompact('after-start');
     await expect(compacting).resolves.toBe('completed');
+  });
+
+  it('rechecks an unknown terminal and completes the next business prompt after recovery', async () => {
+    await makeUnknown();
+    output(screen(idleScreen));
+    await completeBusiness('after unknown terminal recovery');
+    expect((driver as any).maintenanceUnknown).toBe(false);
+    expect(prompts).toHaveLength(2);
+    expect(prompts[0]).toBe('/compact');
+    expect(prompts[1]).toContain('after unknown terminal recovery');
+    expect(events.filter(event => event.type === 'completed')).toHaveLength(1);
+  });
+
+  it('rejects in Chinese while real activity remains, then recovers without another interrupt', async () => {
+    await makeUnknown();
+    const interruptCount = interrupts;
+    output(screen(`✶ Compacting conversation…\n▱▱▱▱▱▱▱▱ 0%\n${idleWithStatusScreen('✻ Cooked for 1s')}`));
+    await expectMaintenanceRejected(driver.send('still compacting'));
+    expect((driver as any).maintenanceUnknown).toBe(true);
+    expect(prompts).toEqual(['/compact']);
+    expect(interrupts).toBe(interruptCount);
+    output(screen(`✻ Compacting conversation…\nesc to interrupt\n✻ Cooked for 1s\n${idleWithStatusScreen('esc to interrupt')}`));
+    await completeBusiness('after real completion despite display-only busy');
+    expect(interrupts).toBe(interruptCount);
+  });
+
+  it('resets unknown from synchronous isIdle only for an actually empty composer', async () => {
+    await makeUnknown();
+    const writes: string[] = [];
+    (driver as any).backend.write = (data: string) => { writes.push(data); };
+    output(screen(compactDraftScreen));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(driver.isIdle()).toBe(false);
+    expect((driver as any).maintenanceUnknown).toBe(true);
+    expect(prompts).toEqual(['/compact']);
+    output(screen(idleScreen));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(driver.isIdle()).toBe(true);
+    expect((driver as any).maintenanceUnknown).toBe(false);
+    expect(prompts).toEqual(['/compact']);
+    expect(writes).toEqual([]);
+  });
+
+  it('cleans only the current owned compact draft before recovering a business send', async () => {
+    await makeUnknown();
+    const interruptCount = interrupts;
+    let clears = 0;
+    (driver as any).backend.write = (data: string) => {
+      if (data === '\x15') { clears++; output(screen(idleScreen)); }
+    };
+    output(screen(compactDraftScreen));
+    await completeBusiness('after owned unknown draft cleanup');
+    expect(clears).toBe(1);
+    expect(interrupts).toBe(interruptCount);
+    expect((driver as any).maintenanceUnknown).toBe(false);
+  });
+
+  it.each([
+    ['current clear', '──────────\n❯ /clear\n──────────\n⏵⏵ bypass permissions on (shift+tab to cycle)'],
+    ['unrelated draft', '──────────\n❯ do not erase this\n──────────\n⏵⏵ bypass permissions on (shift+tab to cycle)'],
+    ['historical compact above clear', '❯ /compact  <optional custom summarization instructions>\nCompacted old history\n──────────\n❯ /clear\n──────────\n⏵⏵ bypass permissions on (shift+tab to cycle)'],
+  ])('does not erase or release a %s composer after unknown', async (_kind, currentScreen) => {
+    await makeUnknown();
+    let clears = 0;
+    (driver as any).backend.write = (data: string) => { if (data === '\x15') clears++; };
+    output(screen(currentScreen));
+    await expectMaintenanceRejected(driver.send('must not replace a foreign draft'));
+    expect(clears).toBe(0);
+    expect((driver as any).maintenanceUnknown).toBe(true);
+    expect(prompts).toEqual(['/compact']);
+  });
+
+  it('starts a new compact generation after recovery without adopting late old evidence', async () => {
+    await makeUnknown();
+    (driver as any).timings.maintenanceTimeoutMs = 10_000;
+    output(screen(idleScreen));
+    const second = driver.compact!();
+    void second.catch(() => {});
+    let settled = false;
+    void second.then(() => { settled = true; }, () => { settled = true; });
+    await advanceUntil(() => prompts.length === 2);
+    const late = sequence(successFixture, 'late-old');
+    const current = sequence(successFixture, 'independent-new-generation');
+    current[0].promptId = 'new-generation-prompt-id';
+    current[2].promptId = 'new-generation-prompt-id';
+    await append(current[0]);
+    await append(late[1], late[2]);
+    expect(settled).toBe(false);
+    expect(events.filter(event => event.type === 'status' && event.data?.state === 'compaction'
+      && event.data.maintenanceGeneration === 1 && ['completed', 'failed', 'cancelled'].includes(String(event.data.phase)))).toEqual([]);
+    await append(current[1], current[2]);
+    await advanceUntil(() => settled);
+    await expect(second).resolves.toBe('completed');
+    expect(events.filter(event => event.type === 'status' && event.data?.state === 'compaction'
+      && event.data.maintenanceGeneration === 2 && event.data.phase === 'completed')).toHaveLength(1);
+    expect(events.filter(event => event.type === 'status' && event.data?.state === 'compaction'
+      && event.data.maintenanceGeneration === 1 && ['completed', 'failed', 'cancelled'].includes(String(event.data.phase)))).toEqual([]);
+  });
+
+  it('keeps the new boundary valid when old boundary and summary arrive after it', async () => {
+    await makeUnknown();
+    (driver as any).timings.maintenanceTimeoutMs = 10_000;
+    output(screen(idleScreen));
+    const second = driver.compact!();
+    void second.catch(() => {});
+    let settled = false;
+    void second.then(() => { settled = true; }, () => { settled = true; });
+    await advanceUntil(() => prompts.length === 2);
+    const late = sequence(successFixture, 'late-old-after-new-boundary');
+    const current = sequence(successFixture, 'new-boundary-before-old-boundary');
+    current[0].promptId = 'new-boundary-prompt-id';
+    current[2].promptId = 'new-boundary-prompt-id';
+    await append(current[0], current[1]);
+    await append(late[1], late[2]);
+    expect(settled).toBe(false);
+    await append(current[2]);
+    expect(settled).toBe(true);
+    await expect(second).resolves.toBe('completed');
+    expect(events.filter(event => event.type === 'status' && event.data?.state === 'compaction'
+      && event.data.maintenanceGeneration === 2 && event.data.phase === 'completed')).toHaveLength(1);
+    expect(events.filter(event => event.type === 'status' && event.data?.state === 'compaction'
+      && event.data.maintenanceGeneration === 1 && ['completed', 'failed', 'cancelled'].includes(String(event.data.phase)))).toEqual([]);
+  });
+
+  it('does not release unknown after backend wiring ownership changes', async () => {
+    await makeUnknown();
+    output(screen(idleScreen));
+    (driver as any).wiringGeneration++;
+    await expectMaintenanceRejected(driver.send('must not cross wiring ownership'));
+    expect((driver as any).maintenanceUnknown).toBe(true);
+    expect(prompts).toEqual(['/compact']);
   });
 
   it('leaves other CLI families unsupported without writing a slash command', async () => {
