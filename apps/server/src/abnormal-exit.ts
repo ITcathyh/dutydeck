@@ -246,7 +246,19 @@ function storeLifecycle(document: AbnormalExitDocument, run: ServeRunLifecycle):
 }
 
 function fixJournalWindow(document: AbnormalExitDocument, run: ServeRunLifecycle, now: Date): ServeRunLifecycle {
-  const bounded = run.journalUntil ? run : { ...run, journalUntil: now.toISOString() };
+  let untilMs = Date.parse(run.journalUntil ?? now.toISOString());
+  const startedMs = Date.parse(run.startedAt);
+  if (run.unit && run.boot) {
+    // PID 复用后，后续代启动即旧代可归属的终点；跨库代次也参与，启动时间相同则两边都不富集。
+    for (const candidate of allLifecycles(document)) {
+      if (runKey(candidate) === runKey(run) || candidate.unit !== run.unit || candidate.pid !== run.pid) continue;
+      if (!candidate.boot || normalizeBootId(candidate.boot) !== normalizeBootId(run.boot)) continue;
+      const candidateStartedMs = Date.parse(candidate.startedAt);
+      if (candidateStartedMs > startedMs) untilMs = Math.min(untilMs, candidateStartedMs - 1);
+      else if (candidateStartedMs === startedMs) untilMs = Math.min(untilMs, startedMs - 1);
+    }
+  }
+  const bounded = { ...run, journalUntil: new Date(untilMs).toISOString() };
   storeLifecycle(document, bounded);
   const current = asLifecycle(document.lifecycle);
   if (current && runKey(current) === runKey(bounded)) document.lifecycle = bounded;
@@ -418,8 +430,8 @@ export async function enrichAbnormalExitFromJournal(databaseUrl: string | undefi
     updateDocument(databaseUrl, document => {
       const stored = allLifecycles(document).find(candidate => candidate.runId === run.runId && lifecycleBelongsTo(candidate, databaseUrl));
       if (!stored) return;
-      if (stored.journalUntil) bounded = { ...run, journalUntil: stored.journalUntil };
-      else fixJournalWindow(document, stored, now);
+      const fixed = fixJournalWindow(document, stored, now);
+      bounded = { ...run, journalUntil: fixed.journalUntil };
     });
   }
   try {
