@@ -80,4 +80,88 @@ describe('Dutydeck updater', () => {
     expect(() => normalizeDistTag('0.1.23')).toThrow('Invalid npm dist-tag');
     expect(() => normalizeDistTag('fix; reboot')).toThrow('Invalid npm dist-tag');
   });
+
+  it('installs an exact semver without resolving a dist-tag', async () => {
+    const runNpm = vi.fn()
+      .mockResolvedValueOnce('installed')
+      .mockResolvedValueOnce(JSON.stringify({ dependencies: { dutydeck: { version: '1.2.3-beta.1+build.5' } } }))
+      .mockResolvedValueOnce('/opt/npm/lib/node_modules\n');
+    const restart = vi.fn(async (_entrypoint: string) => {});
+    const drain = vi.fn(async () => {});
+    await expect(updateDutydeck('1.2.2', { version: '1.2.3-beta.1+build.5' }, { runNpm, restart, drain })).resolves.toEqual({
+      action: 'update', packageName: 'dutydeck', previousVersion: '1.2.2',
+      version: '1.2.3-beta.1+build.5', updated: true, restarted: true
+    });
+    expect(runNpm.mock.calls.map(([args]) => args)).toEqual([
+      ['install', '--global', 'dutydeck@1.2.3-beta.1+build.5'],
+      ['list', '--global', 'dutydeck', '--depth=0', '--json'],
+      ['root', '--global']
+    ]);
+    expect(drain).toHaveBeenCalledOnce();
+    expect(restart).toHaveBeenCalledWith('/opt/npm/lib/node_modules/dutydeck/dist/cli.js', { force: undefined, drainTimeout: undefined });
+  });
+
+  it('rejects a version combined with a dist-tag before invoking npm', async () => {
+    const runNpm = vi.fn();
+    await expect(updateDutydeck('1.2.2', { version: '1.2.3', distTag: 'next' }, { runNpm, restart: vi.fn() }))
+      .rejects.toThrow('mutually exclusive');
+    expect(runNpm).not.toHaveBeenCalled();
+  });
+
+  it.each(['1.2', '^1.2.3', '~1.2.3', 'latest', 'v1.2.3', '1.02.3', '1.2.3-01', '1.2.3 --force', '--registry=http://example.invalid', '1.2.3; reboot'])(
+    'rejects non-exact or injectable version %s before invoking npm', async version => {
+      const runNpm = vi.fn();
+      await expect(updateDutydeck('1.2.2', { version }, { runNpm, restart: vi.fn() })).rejects.toThrow('Invalid exact Dutydeck version');
+      expect(runNpm).not.toHaveBeenCalled();
+    }
+  );
+
+  it('preserves the installation error prefix, code and cause while appending a package-specific rollback command', async () => {
+    const cause = Object.assign(new Error('npm install failed: registry unavailable'), { code: 'EAI_AGAIN' });
+    const runNpm = vi.fn().mockResolvedValueOnce('"1.2.3"').mockRejectedValueOnce(cause);
+    const error = await updateDutydeck('1.2.2', {}, { runNpm, restart: vi.fn(), packageName: '@example/dutydeck' })
+      .catch((caught: unknown) => caught as Error & { code?: string });
+    expect(error.message).toMatch(/^npm install failed: registry unavailable/);
+    expect(error.message).toContain('To roll back, run: npm install --global @example/dutydeck@1.2.2 && dutydeck restart');
+    expect(error.code).toBe('EAI_AGAIN');
+    expect(error.cause).toBe(cause);
+  });
+
+  it('preserves the verification error prefix, appends rollback guidance, and does not restart', async () => {
+    const runNpm = vi.fn()
+      .mockResolvedValueOnce('installed')
+      .mockResolvedValueOnce(JSON.stringify({ dependencies: { dutydeck: { version: '1.2.4' } } }));
+    const restart = vi.fn();
+    await expect(updateDutydeck('1.2.2', { version: '1.2.3' }, { runNpm, restart })).rejects.toThrow(
+      /^Dutydeck update verification failed: 1\.2\.3 resolved to 1\.2\.3, but npm installed 1\.2\.4\. The service was not restarted\.[\s\S]*npm install --global dutydeck@1\.2\.2 && dutydeck restart/
+    );
+    expect(restart).not.toHaveBeenCalled();
+  });
+
+  it('preserves the restart error prefix and gives rollback guidance without internal paths or automatic rollback', async () => {
+    const runNpm = vi.fn()
+      .mockResolvedValueOnce('"1.2.3"')
+      .mockResolvedValueOnce('installed')
+      .mockResolvedValueOnce(JSON.stringify({ dependencies: { dutydeck: { version: '1.2.3' } } }))
+      .mockResolvedValueOnce('/private/internal/npm\n');
+    const restart = vi.fn(async () => { throw new Error('Dutydeck restart exited with code 1.'); });
+    const attempt = updateDutydeck('1.2.2', {}, { runNpm, restart });
+    await expect(attempt).rejects.toThrow(
+      /^Dutydeck restart exited with code 1\.[\s\S]*To roll back, run: npm install --global dutydeck@1\.2\.2 && dutydeck restart/
+    );
+    const error = await attempt.catch((caught: unknown) => caught as Error);
+    expect(runNpm).toHaveBeenCalledTimes(4);
+    expect(error.message).not.toContain('/private/internal/npm');
+  });
+
+  it('states when a missing or unsafe previous version cannot produce a rollback command', async () => {
+    for (const previousVersion of ['', 'not-a-version', '1.2.2; reboot']) {
+      const runNpm = vi.fn().mockResolvedValueOnce('"1.2.3"').mockRejectedValueOnce(new Error('npm install failed'));
+      const error = await updateDutydeck(previousVersion, {}, { runNpm, restart: vi.fn() }).catch((caught: unknown) => caught as Error);
+      expect(error.message).toMatch(/^npm install failed/);
+      expect(error.message).toContain('No safe rollback command can be generated because the previous version is missing or is not an exact semver.');
+      expect(error.message).not.toContain('To roll back, run:');
+      expect(error.message).not.toContain('npm install --global');
+    }
+  });
 });

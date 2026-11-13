@@ -16,6 +16,8 @@ import { saveBot as saveRealBot, type ExistingBot, type SaveBotInput, type SaveB
 import { readLarkConfig } from '../lark/config.js';
 import { readExistingConfig, type WriteEnvResult } from './env-file.js';
 import type { LarkBindOptions, LarkBindResult } from './lark-bind.js';
+import { offerLarkSetupSmoke } from './lark-smoke.js';
+import type { TerminalBackendProbe } from '../doctor/types.js';
 import { PromptUnavailableError, type AskOptions, type Prompter } from './prompts.js';
 import { runSetup, type SetupDependencies } from './setup.js';
 
@@ -89,6 +91,9 @@ interface HarnessOptions {
   /** 已保存的机器人（readBot 的返回）；缺省为库里没有这个机器人。 */
   storedBot?: ExistingBot;
   readSecretFd?: (fd: string) => Promise<string>;
+  smoke?: typeof offerLarkSetupSmoke;
+  terminalBackendProbe?: TerminalBackendProbe;
+  readTerminalBackend?: () => Promise<'tmux' | 'herdr'>;
 }
 
 function harness(options: HarnessOptions) {
@@ -120,12 +125,15 @@ function harness(options: HarnessOptions) {
     ...((input.defaultAgentId ?? options.storedBot?.defaultAgentId) ? { defaultAgentId: input.defaultAgentId ?? options.storedBot?.defaultAgentId } : {}),
     listening: input.listen === true || options.storedBot?.listening === true
   }));
+  const smoke = vi.fn(options.smoke ?? (async () => ({ status: 'skipped' as const, message: '已跳过飞书收发验证，未发送任何消息。' })));
+  const terminalBackendProbe = vi.fn(options.terminalBackendProbe ?? (async () => ({ status: 'ok' as const })));
+  const readTerminalBackend = vi.fn(options.readTerminalBackend ?? (async () => 'tmux' as const));
   const deps: SetupDependencies = {
     ui, prompter, cwd: options.cwd, env: {}, detect, bind, writeEnv, readExisting,
-    readBot, saveBot, database: join(options.cwd, 'fixture.db'),
+    readBot, saveBot, smoke, terminalBackendProbe, readTerminalBackend, database: join(options.cwd, 'fixture.db'),
     ...(options.readSecretFd ? { readSecretFd: options.readSecretFd } : {})
   };
-  return { out, err, deps, writeEnv, bind, detect, readExisting, readBot, saveBot };
+  return { out, err, deps, writeEnv, bind, detect, readExisting, readBot, saveBot, smoke, terminalBackendProbe, readTerminalBackend };
 }
 
 /** writeEnv 收到的 updates（第 n 次调用）。 */
@@ -441,6 +449,47 @@ describe('runSetup', () => {
 
     expect(result.warnings.some(warning => warning.includes('已不存在'))).toBe(false);
   });
+
+  it('adds one tmux warning for a terminal Agent without blocking the configuration write', async () => {
+    const dir = await makeTempDir();
+    const terminal = { ...AGENT, protocol: 'pty-cli' as const, adapterId: 'claude-code' };
+    const { deps, writeEnv, terminalBackendProbe, out } = harness({
+      cwd: dir, agents: [terminal], terminalBackendProbe: async () => ({ status: 'not_found' })
+    });
+    const result = await runSetup({ cwd: dir, port: '4310', skipLark: true, yes: true }, deps);
+    expect(result.ok).toBe(true);
+    expect(writeEnv).toHaveBeenCalledOnce();
+    expect(terminalBackendProbe).toHaveBeenCalledOnce();
+    expect(result.warnings.filter(warning => warning.includes('terminal.backend'))).toHaveLength(1);
+    expect(result.warnings.join('\n')).toContain('PATH');
+    expect(out.read().match(/terminal\.backend/g)).toHaveLength(1);
+  });
+
+  it('shows one successful terminal.backend line with the version and private socket result', async () => {
+    const dir = await makeTempDir();
+    const terminal = { ...AGENT, protocol: 'pty-cli' as const, adapterId: 'claude-code' };
+    const { deps, out } = harness({
+      cwd: dir, agents: [terminal], terminalBackendProbe: async () => ({ status: 'ok', version: 'tmux 3.4' })
+    });
+    const result = await runSetup({ cwd: dir, port: '4310', skipLark: true, yes: true }, deps);
+    expect(result.ok).toBe(true);
+    expect(result.warnings.filter(warning => warning.includes('terminal.backend'))).toHaveLength(0);
+    expect(out.read().match(/terminal\.backend/g)).toHaveLength(1);
+    expect(out.read()).toContain('tmux 3.4');
+    expect(out.read()).toContain('私有 socket 可用');
+  });
+
+  it('does not run the tmux probe for ACP-only or Herdr setups', async () => {
+    const dir = await makeTempDir();
+    const acp = harness({ cwd: dir, agents: [AGENT] });
+    expect((await runSetup({ cwd: dir, port: '4310', skipLark: true, yes: true }, acp.deps)).ok).toBe(true);
+    expect(acp.terminalBackendProbe).not.toHaveBeenCalled();
+
+    const terminal = { ...AGENT, protocol: 'pty-cli' as const, adapterId: 'claude-code' };
+    const herdr = harness({ cwd: dir, agents: [terminal], readTerminalBackend: async () => 'herdr' });
+    expect((await runSetup({ cwd: dir, port: '4310', skipLark: true, yes: true }, herdr.deps)).ok).toBe(true);
+    expect(herdr.terminalBackendProbe).not.toHaveBeenCalled();
+  });
 });
 
 describe('runSetup —— 默认 Agent 与 App Secret', () => {
@@ -701,5 +750,87 @@ describe('runSetup —— 默认 Agent 与 App Secret', () => {
     const result = await runSetup({ cwd: dir, port: '4310', larkAppId: 'cli_ok', larkAppSecretFd: '0', listen: true, yes: true }, deps);
     expect(saveBot.mock.calls[0]![0].listen).toBe(true);
     expect(result.bot?.listening).toBe(true);
+  });
+
+  it.each([
+    ['--yes', { yes: true }],
+    ['--json', { json: true, yes: true }],
+    ['non-interactive', {}]
+  ])('setup %s never invokes the optional outbound smoke', async (_name, mode) => {
+    const dir = await makeTempDir();
+    const { deps, smoke, out, err } = harness({ cwd: dir, agents: [AGENT], bind: async () => ready(), readSecretFd: async () => SECRET });
+    const result = await runSetup({ cwd: dir, port: '4310', larkAppId: 'cli_ok', larkAppSecretFd: '0', ...mode }, deps);
+    expect(result.ok).toBe(true);
+    expect(smoke).not.toHaveBeenCalled();
+    expect(out.read() + err.read()).not.toContain('一次性验证码');
+    expect(out.read() + err.read()).not.toContain('私聊机器人');
+  });
+
+  it('offers the smoke only after writing a usable bot and keeps inbound timeout as a warning', async () => {
+    const dir = await makeTempDir();
+    const prompter: Prompter = {
+      interactive: true,
+      async ask<T>(): Promise<T> { throw new Error('unexpected ask'); },
+      async choose<T>(options: { choices: Array<{ value: T }> }): Promise<T> { return options.choices[0]!.value; },
+      async confirm(): Promise<boolean> { return false; },
+      async secret(): Promise<string> { return SECRET; },
+      close() {}
+    };
+    const smoke = vi.fn(async () => ({ status: 'inbound_unverified' as const, message: '未收到有效私聊；入站未验证，未发送任何消息。' }));
+    const { deps, writeEnv } = harness({
+      cwd: dir, agents: [AGENT], bind: async () => ready(), prompter, smoke,
+      storedBot: { appSecret: SECRET, defaultAgentId: 'claude', listening: true }
+    });
+    setIsTTY(true);
+    const result = await runSetup({ cwd: dir, port: '4310', larkAppId: 'cli_ok' }, deps);
+    expect(result.ok).toBe(true);
+    expect(result.warnings).toContain('未收到有效私聊；入站未验证，未发送任何消息。');
+    expect(smoke).toHaveBeenCalledWith(expect.objectContaining({
+      database: join(dir, 'fixture.db'), appId: 'cli_ok', interactive: true, assumeYes: false
+    }));
+    // setup 只负责把真实监听给出的验证码呈现到终端，不传任何用户身份。
+    expect(smoke.mock.calls[0]![0]).toHaveProperty('onVerificationCode');
+    expect(writeEnv.mock.invocationCallOrder[0]).toBeLessThan(smoke.mock.invocationCallOrder[0]!);
+  });
+
+  it('displays the production smoke verification code through ui.notice after the listener is ready', async () => {
+    const dir = await makeTempDir();
+    let receive: ((event: { messageId: string; chatType: string; senderType: string; content: string }) => void) | undefined;
+    const reply = vi.fn(async () => ({ messageId: 'om_reply' }));
+    const smoke: typeof offerLarkSetupSmoke = options => offerLarkSetupSmoke({
+      ...options,
+      onVerificationCode: code => {
+        options.onVerificationCode?.(code);
+        queueMicrotask(() => receive?.({
+          messageId: 'om_setup', chatType: 'p2p', senderType: 'user',
+          content: JSON.stringify({ text: code })
+        }));
+      }
+    }, {
+      loadBot: async () => ({ appId: 'cli_ok', appSecret: SECRET, listening: true } as import('@dutydeck/shared').StoredLarkConfig),
+      daemonStatus: () => ({ processStatus: 'stale' }),
+      acquireRuntime: () => ({ close() {} }),
+      startListener: async (_bot, onEvent) => { receive = onEvent; return vi.fn(); },
+      reply
+    });
+    const prompter: Prompter = {
+      interactive: true,
+      async ask<T>(): Promise<T> { throw new Error('unexpected ask'); },
+      async choose<T>(options: { choices: Array<{ value: T }> }): Promise<T> { return options.choices[0]!.value; },
+      async confirm(): Promise<boolean> { return true; },
+      async secret(): Promise<string> { return SECRET; },
+      close() {}
+    };
+    const { deps, err } = harness({
+      cwd: dir, agents: [AGENT], bind: async () => ready(), prompter, smoke,
+      storedBot: { appSecret: SECRET, defaultAgentId: 'claude', listening: true }
+    });
+    setIsTTY(true);
+    const result = await runSetup({ cwd: dir, port: '4310', larkAppId: 'cli_ok' }, deps);
+    expect(result.ok).toBe(true);
+    expect(reply).toHaveBeenCalledOnce();
+    expect(err.read()).toContain('一次性验证码');
+    expect(err.read()).toMatch(/[0-9a-f]{8}-[0-9a-f-]{27,}/i);
+    expect(err.read()).toContain('在飞书里私聊机器人发送这段验证码');
   });
 });

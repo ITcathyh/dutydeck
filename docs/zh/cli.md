@@ -33,12 +33,26 @@ dutydeck restart
 # 停止守护进程
 dutydeck stop
 
-# 更新全局 Dutydeck 包并自动重启
+# 更新全局 Dutydeck 包并自动重启（默认 latest）
 dutydeck update
+# 安装精确 semver；与 --dist-tag 互斥
+dutydeck update 1.2.3
+# 按 dist-tag 更新
+dutydeck update --dist-tag next
 
 # 一键诊断（端口、SQLite、Agent 可执行性与默认 Agent、飞书监听、守护进程是否以 root 运行、型号是否缺价格（机器人配置的非别名型号，以及近 30 天用量记录里没能计价的型号）、库文件空闲页等）
 dutydeck doctor
 ```
+
+`dutydeck update [version]` 的版本参数只接受精确 semver，不接受 range、tag 或选项字符串；未传版本时仍按 `latest` 或显式 `--dist-tag` 解析。安装、版本核对或重启失败时保留原错误，并追加 `npm install --global @byted/dutydeck@<实际旧版本> && dutydeck restart` 作为手工回退步骤；它直接重装旧包，不依赖旧版 CLI 是否认识 `update [version]`。旧版本缺失或不是精确 semver 时会明确说明无法安全生成命令。不会自动回滚，也不会越过部署窗口。
+
+### setup、首启与终端预检
+
+`dutydeck setup` 在检测到需要 tmux 的终端 Agent 时做一次私有 socket 预检；失败只在结果里增加一行警告，仍写入配置。`dutydeck doctor` 的 `terminal.backend` 检查会定位到命令缺失、版本执行失败、会话建退失败或清理失败，并给出安装或 `PATH` 修复提示；它不会自动安装 tmux，也不会连接或终止默认 tmux server。所有调用都使用 `-f /dev/null`，`XDG_CONFIG_HOME` 指向私有目录，测试会话只运行受控存活命令，不加载系统或用户 tmux 配置。纯 ACP 配置只显示终端后端说明，Herdr 配置不把 tmux 缺失当成故障。
+
+机器人配置完成后，交互式 setup 会用默认 No 的专用问题询问是否验证飞书收发；拒绝则不监听也不发送。同意并启动临时监听后，终端显示一次性 UUID，请在飞书里私聊机器人发送这段验证码。只有在有界时间内收到包含本次 UUID 的用户私聊，机器人才回复该消息并携带同一 UUID。回复被飞书接受表示「入站通过、出站已发送」，仍需你在飞书确认收到；超时则入站未验证，且不发送任何消息。`--yes`、非交互和 `--json` 不进入该验证。此流程不改变机器人权限，也不持久化用户 open_id。
+
+没有机器人配置的前台交互启动会在监听地址下显示 setup、doctor 和实际 Web 地址；每次满足条件都显示，不保存展示状态。`--json`、非 TTY 和 daemon 子进程不显示。CLI 不在 `PATH` 时会给出 pnpm/npm 通用修复入口。
 
 服务启动失败或运行中崩溃时，会在数据库所在目录写一份 `last-abnormal-exit.json`（时间、类型、退出码、脱敏后的错误首行、版本和数据库路径）；数据库目录还不存在时不写，也不会写到 `last-daemon-dir` 指向的其他实例。顶层仍是最近一条 `fatal|startup` 异常，可选 `history` 只保留最近 10 条并按 `runId` 去重；`lifecycle`/`clean-exit` 保留当前代兼容展示，`lifecycleRuns`/`cleanExits` 则按 runId+database 去重、各保留最近 10 条，记录各代 PID、启动时间、unit/boot 和干净停止，避免同目录多库或重叠启动互相覆盖；迟到旧代只写自己的 `cleanExits`，不改当前单数展示，干净退出不覆盖最近异常。上一代没有干净标记且已不在运行时，下一代先记「原因待 journal 富集」；Linux systemd 下只在同一 unit、boot、PID 和启动时间都能对齐退出记录时补 SIGKILL，查询有界且不阻塞就绪，查不到或没有权限时保留基础记录。上一代仍在运行不会报历史崩溃；launchd 富集本轮不支持。`dutydeck doctor` 读到 7 天内、且属于同一个数据库的记录时，在「守护进程」一项后面接一句「X 小时前异常退出（…）」：当前实例已就绪且是之后启动的，写「已自动恢复」，否则提示去看 journalctl。这一项的级别不变，没有记录时输出和以前一样。
 
@@ -61,6 +75,18 @@ Codex 的 `codex` 入口默认使用终端模式，`codex-cli` 入口继续兼�
 **守护日志轮转**：`.dutydeck/daemon/dutydeck.log` 超过 10MB 时，在新进程打开它之前轮转成 `.1`（最多保留 `.1`–`.3`）：detached 启动前，以及 `start` / `restart` / `restart --unit` / `deploy` 调用 `systemctl start` 或 `restart` 之前。旧进程停服期间的最后几行写进 `.1`。systemd 因崩溃自动重拉时不轮转，下一次 restart 或 deploy 时补上。
 
 `GET /api/system/activity` 的 `runningTasks` 包含正在执行主轮的会话，以及主轮已结束但仍有原生后台任务的会话；同一会话只计一次。显式加 `?restart=true` 才检查恢复证据并返回 `restartBlockers` 和 `recoverableTasks`；未进入排空时不减去可恢复任务，`excludeSessionId` 同时适用于这三个计数。
+
+### 只读日志（`logs`）<a id="logs"></a>
+
+```bash
+dutydeck logs
+dutydeck logs -n 200
+dutydeck logs --unit dutydeck.service -n 100
+```
+
+不带 `--unit` 时，命令读取当前 daemon 的 `.dutydeck/daemon/dutydeck.log`，最多读取文件末尾 256KiB，默认输出最后 50 行；`-n` 可指定 1–10000 行。带 `--unit` 时改为通过无 shell 的流式 `journalctl --user` 子进程读取这个 systemd 用户实例，stdout 同样只滚动保留末尾 256KiB，再过滤并取最近 N 行。两种来源都只输出一次快照，不提供 follow。
+
+普通行和错误行按原顺序保留，多行堆栈不会被压成一行。为避免把凭据带进终端记录，含 token、secret、password、credential、API key、Authorization、Bearer 等疑似秘密的整行不会输出；这不改变原始日志文件或 journal。unit 不存在或尚无日志、无法执行 `journalctl` 或行数无效时命令明确报错并返回非零退出码，不输出环境配置。
 
 ## 2. 版本发布与部署 (`deploy`)
 

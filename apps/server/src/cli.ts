@@ -28,7 +28,7 @@ import { readNativeAskPayload, runNativeAskHook } from './native-ask-hook.js';
 import { runPermissionHook } from './permission-hook.js';
 import { RelayCliError } from '@dutydeck/relay';
 import { daemonRestart, daemonStart, daemonStatus, daemonStop, resolveCliDatabase, systemdRestartTarget, waitForRunningTasksDrain, type DaemonCommandResult, type DaemonStatusInfo } from './daemon/command.js';
-import { SUPERVISOR_ENV, readDaemonStatus, resolveDaemonDir } from './daemon/daemon.js';
+import { SUPERVISOR_ENV, readDaemonLog, readDaemonStatus, readJournalctlLog, resolveDaemonDir } from './daemon/daemon.js';
 import { sleep } from './daemon/time.js';
 import { armShutdownDeadline } from './shutdown-phases.js';
 import { runNpmForDutydeckUpdate, updateDutydeck } from './update.js';
@@ -51,6 +51,7 @@ import { PullRequestCliError, runPullRequestCli } from './pull-request-cli.js';
 import { DatabaseCliError, runDatabaseExecutionStatus, runDatabaseRetireLegacy, runDatabaseUpgradeExecution } from './database-cli.js';
 import { IdentityPreflightCliError, runIdentityPreflightCli } from './identity-preflight-cli.js';
 import { runSetup } from './setup/setup.js';
+import { maybePrintFirstRunGuidance } from './setup/first-run.js';
 import { PromptAbortedError, PromptUnavailableError } from './setup/prompts.js';
 import { InvalidWorkingDirectoryError } from './setup/detect.js';
 import { AutostartError, autostartDisable, autostartEnable, autostartStatus } from './autostart/autostart.js';
@@ -129,6 +130,12 @@ async function serve(options: CliOptions, onReady?: () => void) {
     : `http://${service.config.host.includes(':') ? `[${service.config.host}]` : service.config.host}:${service.config.port}`;
   process.stdout.write(`Dutydeck UI and API listening on ${address}\n`);
   onReady?.();
+  await maybePrintFirstRunGuidance({
+    address,
+    databaseUrl: service.config.databaseUrl,
+    json: options.json,
+    isTTY: process.stdout.isTTY === true
+  });
   let closing = false;
   const shutdown = async (signal: NodeJS.Signals) => {
     if (closing) {
@@ -419,6 +426,12 @@ async function main() {
       const status = daemonStatus();
       renderDaemonResult({ action: 'status', ...status }, options.json === true);
       // status 是查询命令：不在运行不是「命令失败」，退出码保持 0。
+    },
+    logs: async options => {
+      const lines = options.unit === undefined
+        ? readDaemonLog(resolveDaemonDir(), options.lines)
+        : await readJournalctlLog(options.unit, options.lines);
+      if (lines.length) process.stdout.write(`${lines.join('\n')}\n`);
     },
     update: async options => {
       output(await updateDutydeck(packageJson.version, options, {

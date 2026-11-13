@@ -24,7 +24,8 @@ import type {
   DoctorDaemonRecord,
   DoctorDaemonStatus,
   LarkExposureObservation,
-  PortProbeOutcome
+  PortProbeOutcome,
+  TerminalBackendProbeResult
 } from './types.js';
 import type { EnvLocation } from '../env-location.js';
 
@@ -33,8 +34,11 @@ export const REQUIRED_NODE_VERSION = '22.12.0';
 
 export { larkBotsConfigKey, AUTH_TOKEN_CONFIG_KEY, larkListenerStatusKey };
 
+/** 主终端后端设置；缺键与数据库尚不存在时都按产品默认 tmux。 */
+export const TERMINAL_BACKEND_CONFIG_KEY = 'dutydeck.terminal_backend';
+
 /** 体检需要从 configs 表读的键。都是「读」，绝不写。 */
-export const DOCTOR_CONFIG_KEYS = [larkBotsConfigKey, AUTH_TOKEN_CONFIG_KEY, larkListenerStatusKey] as const;
+export const DOCTOR_CONFIG_KEYS = [larkBotsConfigKey, AUTH_TOKEN_CONFIG_KEY, larkListenerStatusKey, TERMINAL_BACKEND_CONFIG_KEY] as const;
 
 /** 会话记忆状态的键前缀，与 lark/memory.ts 的 larkMemoryStateKey 一致：`lark.memory.state.<appId>.<pool>`。 */
 const larkMemoryStatePrefix = 'lark.memory.state.';
@@ -1021,6 +1025,115 @@ export function checkAutostart(result: DoctorAutostartResult | undefined, userna
     });
   }
   return checks;
+}
+
+// ─── 11b. terminal.backend ──────────────────────────────────────────────────
+
+export interface TerminalBackendObservation {
+  /** 配置解析失败时不能拿兜底的空 agents 猜成默认 tmux。 */
+  configError?: string;
+  database: Pick<DatabaseProbeResult, 'exists' | 'error'>;
+  /** configs 表里的 dutydeck.terminal_backend 原始值。 */
+  backend?: string;
+  agents: DoctorConfig['agents'];
+}
+
+export type TerminalBackendPlan =
+  | { action: 'probe'; backend: 'tmux' }
+  | { action: 'skip'; reason: 'config' | 'database' | 'herdr' }
+  | { action: 'info'; reason: 'acp' };
+
+export function planTerminalBackend(observation: TerminalBackendObservation): TerminalBackendPlan {
+  if (observation.configError !== undefined) return { action: 'skip', reason: 'config' };
+  if (observation.database.error) return { action: 'skip', reason: 'database' };
+  // 没有库就是首次使用前的状态，和键不存在一样使用产品默认值，不算“读失败”。
+  const backend = observation.database.exists ? observation.backend ?? 'tmux' : 'tmux';
+  if (backend === 'herdr') return { action: 'skip', reason: 'herdr' };
+  if (backend !== 'tmux') return { action: 'skip', reason: 'config' };
+  if (observation.agents.length > 0 && observation.agents.every(agent => agent.protocol !== 'pty-cli')) {
+    return { action: 'info', reason: 'acp' };
+  }
+  return { action: 'probe', backend: 'tmux' };
+}
+
+const terminalBackendBase = { id: 'terminal.backend', label: '终端后端' } as const;
+
+export function checkTerminalBackend(plan: TerminalBackendPlan, result?: TerminalBackendProbeResult): DoctorCheck {
+  if (plan.action === 'info') {
+    return { ...terminalBackendBase, level: 'info', detail: '已配置的 Agent 全部使用 ACP，无需 tmux 终端后端，未执行 tmux 探测' };
+  }
+  if (plan.action === 'skip') {
+    if (plan.reason === 'herdr') {
+      return { ...terminalBackendBase, level: 'skip', detail: `${TERMINAL_BACKEND_CONFIG_KEY}=herdr，使用 Herdr，未执行 tmux smoke` };
+    }
+    if (plan.reason === 'database') {
+      return { ...terminalBackendBase, level: 'skip', detail: `数据库不可读，无法确认 ${TERMINAL_BACKEND_CONFIG_KEY}，未猜测终端后端` };
+    }
+    return { ...terminalBackendBase, level: 'skip', detail: '配置不可用或终端后端设置无效，未猜测终端后端，也未执行 tmux 探测' };
+  }
+
+  const probe = result!;
+  let check: DoctorCheck;
+  if (probe.status === 'ok') {
+    check = { ...terminalBackendBase, level: 'ok', detail: `${probe.version}；私有 socket 创建、精确会话核验与退出均通过` };
+  } else if (probe.status === 'not_found') {
+    check = {
+      ...terminalBackendBase,
+      level: 'fail',
+      detail: 'PATH 中找不到 tmux，可执行文件尚未安装或守护进程 PATH 不完整',
+      remedy: 'PTY CLI 会话默认需要 tmux。请用系统包管理器安装 tmux，或把包含可执行 tmux 的目录加入启动 Dutydeck 时的 PATH；体检不会自动安装。',
+      command: 'command -v tmux',
+      verify: 'dutydeck doctor --json'
+    };
+  } else if ((probe.status === 'failed' || probe.status === 'timeout') && probe.stage === 'cleanup') {
+    check = {
+      ...terminalBackendBase,
+      level: 'warn',
+      detail: `tmux 私有会话核验已通过，但清理${probe.status === 'timeout' ? '超时' : '失败'}：${probe.detail}${probe.tempDir ? `（临时目录 ${probe.tempDir}）` : ''}`,
+      remedy: '私有 tmux server 可能仍在运行，所以保留了 socket 临时目录，没有删除可能仍连接活 server 的入口。请只检查并结束本次探测的私有 server，确认退出后再删除该目录。',
+      verify: 'dutydeck doctor --json'
+    };
+  } else if (probe.status === 'timeout') {
+    const stage = { version: 'tmux -V', create: '创建私有会话', verify: '核验精确会话', cleanup: '清理私有会话' }[probe.stage];
+    check = {
+      ...terminalBackendBase,
+      level: 'warn',
+      detail: `${stage}探测超时：${probe.detail}`,
+      remedy: 'tmux 或系统响应较慢，超时本身不代表安装损坏。请稍后重跑体检，并在终端直接确认 tmux -V 能正常返回；探测只使用私有 socket，不影响已有 tmux 会话。',
+      command: 'tmux -V',
+      verify: 'dutydeck doctor --json'
+    };
+  } else {
+    const stage = {
+      prepare: '准备私有探测目录',
+      version: '执行 tmux -V',
+      create: '在私有 socket 上创建会话',
+      verify: '核验刚创建的精确会话',
+      cleanup: '清理私有会话'
+    }[probe.stage];
+    check = {
+      ...terminalBackendBase,
+      level: 'fail',
+      detail: `${stage}失败：${probe.detail}`,
+      remedy: probe.stage === 'version'
+        ? 'tmux 已找到但不能执行。请检查文件的可执行权限、安装是否完整，以及启动 Dutydeck 时的 PATH；修复后重跑体检。体检不会自动安装或修改 tmux。'
+        : '请确认当前用户对系统临时目录可写、tmux 安装完整且能创建会话，然后重跑体检。探测只使用私有 TMUX_TMPDIR 与 -S socket，不会连接或停止已有 tmux 会话。',
+      verify: 'dutydeck doctor --json'
+    };
+  }
+
+  if (probe.cleanup) {
+    const action = probe.cleanup.status === 'timeout' ? '超时' : '失败';
+    const cleanupRemedy = `私有 tmux server 可能仍在运行，所以保留了 socket 临时目录，没有删除可能仍连接活 server 的入口。请只检查并结束本次探测的私有 server，确认退出后再删除该目录。`;
+    check = {
+      ...check,
+      // 原始 fail 保持 fail；主探测 ok 时清理问题至少报 warn。
+      level: check.level === 'ok' ? 'warn' : check.level,
+      detail: `${check.detail ?? ''}；私有清理${action}：${probe.cleanup.detail}${probe.tempDir ? `（临时目录 ${probe.tempDir}）` : ''}`,
+      remedy: [check.remedy, cleanupRemedy].filter(Boolean).join(' ')
+    };
+  }
+  return check;
 }
 
 // ─── 汇总 ────────────────────────────────────────────────────────────────────

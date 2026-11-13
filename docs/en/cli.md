@@ -18,10 +18,15 @@ dutydeck session ask-wait check-1
 
 ADHD Lark structured confirmations retain their existing 24-hour card, same-session new turn after a click, and deferred acknowledgement. They do not return an answer to the original call.
 
+`dutydeck update [version]` accepts only an exact semver, not a range, tag, or option string. Without the argument it still resolves `latest` or an explicit `--dist-tag`. Installation, verification, and restart errors keep their original prefix and append `npm install --global @byted/dutydeck@<actual previous version> && dutydeck restart` as the manual rollback steps. This reinstalls the old package directly and does not depend on the old CLI understanding `update [version]`. If the previous version is missing or is not an exact semver, the error says that no safe command can be generated. Dutydeck never rolls back automatically or bypasses the deployment window.
+
 ```bash
 # Daemon
 dutydeck start [--cwd /path] [--port 4310] [--host 0.0.0.0]
-dutydeck status | restart | stop | update | doctor   # doctor warns when the daemon runs as root (in full-trust mode the Agent then has whole-machine access; if no running daemon is found it checks the current command) and when a model has no price, so usage caps do not cover it (configured bot models other than aliases such as `opus`, plus models the usage ledger failed to price in the last 30 days); it also notes a large share of free pages in the database file
+dutydeck status | restart | stop | doctor   # doctor warns when the daemon runs as root (in full-trust mode the Agent then has whole-machine access; if no running daemon is found it checks the current command) and when a model has no price, so usage caps do not cover it (configured bot models other than aliases such as `opus`, plus models the usage ledger failed to price in the last 30 days); it also notes a large share of free pages in the database file
+dutydeck update                 # latest dist-tag
+dutydeck update 1.2.3           # exact semver; mutually exclusive with --dist-tag
+dutydeck update --dist-tag next # explicit dist-tag
 
 # Immutable release deploy and cleanup
 dutydeck deploy --source /path/to/checkout
@@ -71,6 +76,14 @@ dutydeck auth token [--rotate]            # token for CLI/scripts/API
 dutydeck auth share-key rotate
 ```
 
+### Setup, first start and terminal preflight
+
+When `dutydeck setup` detects a terminal Agent that needs tmux, it runs a private-socket preflight. A failure adds one warning to the result but does not prevent the configuration from being written. Doctor's `terminal.backend` check distinguishes a missing command, a version failure, session create/verify failure and cleanup failure, with installation or `PATH` remedies. It never installs tmux and never connects to or stops the default tmux server. Every invocation uses `-f /dev/null`, `XDG_CONFIG_HOME` is private, and the test session runs only a controlled keep-alive command, so system and user tmux configuration is not loaded. ACP-only configurations receive only an informational terminal-backend note; Herdr configurations do not treat missing tmux as a failure.
+
+After the bot is configured, interactive setup offers the delivery check through a dedicated default-No question; declining starts no listener and sends nothing. After you accept and the temporary listener is ready, the terminal shows a one-time UUID. Send that code to the bot in a Lark direct message. Only a user DM containing this UUID within the bounded wait is accepted; the bot then replies to that message with the same UUID. Lark accepting the reply means inbound passed and outbound was sent, not that you received it—confirm receipt in Lark. A timeout means inbound is unverified and nothing was sent. `--yes`, non-interactive mode and `--json` skip the check. The flow does not change bot scopes or persist a user's open_id.
+
+An interactive foreground start with no bot configuration prints setup, doctor and the actual Web address below the listening line. It prints whenever the condition holds and stores no shown state. `--json`, non-TTY output and daemon children omit it. If the CLI is not on `PATH`, the guidance includes generic pnpm/npm repair options.
+
 `auth` commands write to `--database` when given, otherwise to `DUTYDECK_DATABASE_URL` (relative paths resolve against the Dutydeck root, as for `start`), otherwise to the database of the running daemon whose process identity is verified; state left behind by a crashed daemon is ignored and the root's default `.dutydeck/dutydeck.db` is used. The output includes `database`, the file that was written. `secret` and `lark create` follow the same rule.
 
 To bind an international Lark app, use `dutydeck settings bot add <app-id> brand=lark --app-secret-fd 0`. Unless `LARK_OPEN_API_BASE_URL` overrides the service address, `brand=lark` validates credentials against the international Lark domain; omitting the brand defaults to Feishu. `brand`, App Secret and member lists share the credential-validation step. Submit default Agent, permissions or listening changes separately. With the Lark task dispatch channel enabled (`LARK_TASK_AGENT_ENABLED`), Dutydeck checks the bot's currently saved requester lists (`allowedUsers` / `allowedEmails`) and listening switch before each poll and when handing a task to message processing. Clearing both lists or turning listening off stops intake; an in-flight task whose handoff check sees the channel closed is returned for later dispatch and can be processed without duplicate dispatch when it reopens. Tasks that have already passed the handoff check are not withdrawn. Adding a list enables intake without a restart. An empty list still means open to everyone for ordinary direct messages.
@@ -98,6 +111,18 @@ The `codex` entry defaults to terminal mode; `codex-cli` remains available for c
 **Daemon log rotation**: when `.dutydeck/daemon/dutydeck.log` exceeds 10 MB it is rotated to `.1` (keeping `.1`–`.3`) right before a new process opens it: before a detached start, and before `start`, `restart`, `restart --unit` and `deploy` call `systemctl start` or `restart`. The last lines the old process writes while stopping land in `.1`. Automatic restarts by systemd after a crash do not rotate; the next restart or deploy does.
 
 `GET /api/system/activity` counts sessions with an active main turn or native background tasks remaining after the main turn in `runningTasks`, once per session. Add `?restart=true` to verify recovery evidence and receive `restartBlockers` and `recoverableTasks`; no tasks are deducted unless queue claiming is held. `excludeSessionId` applies to all three counts.
+
+### Recent logs (`logs`)<a id="logs"></a>
+
+```bash
+dutydeck logs
+dutydeck logs -n 200
+dutydeck logs --unit dutydeck.service -n 100
+```
+
+Without `--unit`, the command reads the current daemon's `.dutydeck/daemon/dutydeck.log`, reading at most the last 256KiB and printing the last 50 lines by default. Use `-n` to request 1–10000 lines. With `--unit`, it instead runs a streaming `journalctl --user` child process without a shell, retaining only the last 256KiB of stdout before filtering and selecting the most recent N lines. Both sources produce a one-time snapshot; follow mode is not available.
+
+Ordinary and error lines retain their original order, and multiline stacks are not flattened. To keep credentials out of terminal records, any line containing a suspected secret such as token, secret, password, credential, API key, Authorization or Bearer is omitted. This does not change the original log file or journal. A unit that does not exist or has no matching log entries, unavailable `journalctl`, or an invalid line count produces a clear error and a non-zero exit code; environment configuration is not printed.
 
 Use `channel-bot` for the draft bots shown in the experimental “Groups & permissions” page. Its argument is the internal `id` returned by `list`, not the Lark App ID:
 

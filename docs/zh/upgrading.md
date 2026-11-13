@@ -29,6 +29,13 @@
 
 - **Claude 守卫失败阻断需要官方 Claude Code 2.1.295+**：Dutydeck 自己的凭据与计划守卫在官方 Claude Code 2.1.295+ 上新增 `onFailure: "block"`，超时及未被现有 `|| exit 2` 覆盖的失败不再退回普通权限流程；策略读取/JSON 解析错误和 active 计划脚本缺失也会拒绝。旧版、探测失败和未验证分支不写这个字段，受保护轮次照常提交，守卫超时维持原行为，显式拒绝和脚本崩溃仍由 `|| exit 2` 拦截。恢复或接管的新版终端核对 marker、精确 matcher、command type 和实际 `onFailure` 形状；旧版不因缺少该字段被判为未接线。Ask relay、PermissionRequest 和用户 hooks 不变；没有新增设置、命令或数据库迁移。
 
+- **新增只读日志命令**：`dutydeck logs [-n N] [--unit <unit>]` 默认查看最近 50 行，行数可设为 1–10000。不带 `--unit` 时读取当前 daemon 日志文件的末尾，带 `--unit` 时通过无 shell 的流式 `journalctl --user` 子进程读取对应 systemd 用户实例，两种来源最多保留末尾 256KiB；首版不 follow。普通行、错误行和多行堆栈按原顺序输出，疑似含秘密的整行过滤，unit 不存在或尚无日志会明确报错。它不写配置、不改原始日志或数据库；回滚到旧版本只是没有该命令，已有日志不受影响。
+- **插件升级会显示执行命令变化**：`plugin update` 现在列出斜杠命令、Agent 启动配置和 hook 执行规格的标识与前后 SHA-256 摘要，JSON 结果增加 `changes`。交互终端会要求重新信任这些变化，拒绝时不写候选；非交互且未带 `--yes` 只打印变化，不新增失败，`--yes` 行为不变。仅描述变化不产生摘要，候选没有新的执行内容变化时不重复提问。活动版本仍需按原流程执行 `plugin activate`，不会在 update 中执行候选命令。
+- **`dutydeck update` 支持精确版本**：可运行 `dutydeck update 1.2.3`，版本参数与 `--dist-tag` 互斥；无参数时仍使用 `latest`。安装、版本核对或重启失败会附 `npm install --global @byted/dutydeck@<实际旧版本> && dutydeck restart` 的手工回退步骤，直接重装旧包，不依赖旧版 CLI 是否认识 `update [version]`；旧版本不能安全放入命令时则明确说明，不自动回滚。
+- **tmux 预检**：`doctor` 新增 `terminal.backend`，在独立临时 socket 上检查 tmux 命令、版本和会话建退，不碰默认 server；所有调用使用 `-f /dev/null` 和私有 `XDG_CONFIG_HOME`，测试会话只运行受控命令，不加载系统或用户配置。setup 对需要 tmux 的终端 Agent 增加一行同类警告，缺失或失败不阻止写配置。纯 ACP 与 Herdr 配置不因缺 tmux 报致命错误。
+- **无机器人时的首启提示**：前台交互启动且读不到机器人配置时，监听地址下每次都会显示 setup、doctor 和实际 Web 地址，不新增展示状态配置；`--json`、非 TTY 和 daemon 子进程不显示。CLI 不在 `PATH` 时增加通用修复提示。
+- **setup 飞书收发验证改为用户先发起**：专用确认默认 No；同意并启动临时监听后，终端显示一次性 UUID，由用户在飞书里私聊机器人发送这段验证码。只有在有界时间内收到包含本次 UUID 的用户私聊，机器人才回复该消息并携带同一 UUID。飞书接受回复表示入站通过、出站已发送，用户仍需在飞书确认收到；超时则入站未验证，且不发送任何消息。`--yes`、非交互和 `--json` 不进入该验证。此流程不改变机器人权限，也不持久化用户 open_id。
+
 - **tmux 会话生命周期**：Linux 上 tmux socket 文件被清理但旧 server 仍在时，启动会拒绝另建同名 server，并提示用 `SIGUSR1` 重建 socket 或结束旧 server；不会再让两个 CLI 接管同一会话。启用 `remain-on-exit` 时，下次启动会回收 Dutydeck 自有且全部 pane 已退出的死会话，仍有 pane 运行的会话保留。非 Linux 行为不变。
 
 - **飞书会话提醒在原消息撤回后改为新发**：排队受阻、排队超时取消、结果未知这类会话提醒要回复的原消息已被撤回时，从丢失改为在原会话（群或私聊）里新发一条，服务日志记一条「回复会话提醒失败，回退为会话内发送」告警。定时任务的提醒与同一计划的其他投递一致，仍不改发；超时这类结果未知的失败也不改发。不需要配置。

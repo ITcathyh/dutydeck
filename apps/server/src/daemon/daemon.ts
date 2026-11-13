@@ -400,6 +400,10 @@ const FAILURE_LINE_PATTERN = /error|EADDRINUSE|EACCES|EPERM|ENOENT|ENOTDIR|canno
  */
 const SECRET_LINE_PATTERN = /token|secret|password|passwd|credential|api[-_ ]?key|authorization|bearer/i;
 
+function isSecretLogLine(line: string): boolean {
+  return SECRET_LINE_PATTERN.test(line);
+}
+
 /** 单行上限，防止一条巨大的堆栈或 JSON 把终端糊满。 */
 const MAX_REASON_LINE = 200;
 
@@ -425,7 +429,7 @@ export function tailDaemonLog(dir: string, lines = 3, fromByte = 0): string[] {
       .split('\n')
       .map(line => line.trim())
       .filter(line => line !== '')
-      .filter(line => !SECRET_LINE_PATTERN.test(line))
+      .filter(line => !isSecretLogLine(line))
       .filter(line => FAILURE_LINE_PATTERN.test(line))
       .map(line => line.length > MAX_REASON_LINE ? `${line.slice(0, MAX_REASON_LINE)}…` : line)
       .slice(-lines);
@@ -436,6 +440,45 @@ export function tailDaemonLog(dir: string, lines = 3, fromByte = 0): string[] {
 
 /** 回放窗口上限：只需要本次启动的头几行报错，不为一次失败把整份日志读进内存。 */
 const MAX_TAIL_BYTES = 256 * 1024;
+
+function textFromTail(bytes: Buffer, truncated: boolean): string {
+  const text = bytes.toString('utf8');
+  if (!truncated) return text;
+  const firstNewline = text.indexOf('\n');
+  // 窗口内没有完整行边界时，整段都可能是残片；不能原样返回泄漏窗口外的敏感前缀。
+  return firstNewline === -1 ? '' : text.slice(firstNewline + 1);
+}
+
+function rollingTail(limit = MAX_TAIL_BYTES) {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  let truncated = false;
+  return {
+    append(chunk: Buffer): void {
+      if (!chunk.length) return;
+      chunks.push(chunk);
+      size += chunk.length;
+      if (size <= limit) return;
+      truncated = true;
+      let excess = size - limit;
+      while (excess > 0) {
+        const first = chunks[0]!;
+        if (first.length > excess) {
+          chunks[0] = first.subarray(excess);
+          size -= excess;
+          excess = 0;
+        } else {
+          chunks.shift();
+          size -= first.length;
+          excess -= first.length;
+        }
+      }
+    },
+    text(): string {
+      return textFromTail(Buffer.concat(chunks, size), truncated);
+    }
+  };
+}
 
 /**
  * 按字节偏移读日志。偏移来自 statSync().size（字节），不能拿它去切 JS 字符串：日志里有中文时字符数
@@ -454,12 +497,59 @@ function readLogFrom(file: string, fromByte: number): string {
       if (count === 0) break;
       read += count;
     }
-    const text = buffer.subarray(0, read).toString('utf8');
-    // 截了头时第一行多半不完整（可能切在多字节字符中间），丢掉。
-    return from > start ? text.slice(text.indexOf('\n') + 1) : text;
+    // 截了头时第一行多半不完整（可能切在多字节字符中间），丢掉；没有换行则整段都是残片。
+    return textFromTail(buffer.subarray(0, read), from > start);
   } finally {
     closeSync(fd);
   }
+}
+
+function visibleLogLines(text: string): string[] {
+  const lines = text.split('\n');
+  if (lines.at(-1) === '') lines.pop();
+  return lines.filter(line => !isSecretLogLine(line));
+}
+
+/** Read recent daemon output without the failure-only filtering used for startup errors. */
+export function readDaemonLog(dir: string, lines = 50, fromByte = 0): string[] {
+  return visibleLogLines(readLogFrom(daemonPaths(dir).logFile, fromByte)).slice(-lines);
+}
+
+/** Read a bounded journal snapshot without invoking a shell or following new entries. */
+export async function readJournalctlLog(unit: string, lines = 50): Promise<string[]> {
+  if (!unit.trim()) throw new Error('--unit must not be empty');
+  const args = ['--user', `--unit=${unit}`, `--lines=${lines}`, '--no-pager'];
+  const child = spawn('journalctl', args, {
+    shell: false,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, LC_ALL: 'C' }
+  });
+  const stdout = rollingTail();
+  const stderr = rollingTail();
+  return new Promise<string[]>((resolve, reject) => {
+    child.stdout.on('data', (chunk: Buffer) => stdout.append(chunk));
+    child.stderr.on('data', (chunk: Buffer) => stderr.append(chunk));
+    child.once('error', error => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        reject(new Error('journalctl was not found in PATH; install systemd or omit --unit to read the daemon log file'));
+      } else {
+        reject(new Error(`journalctl could not be executed: ${error.message}`));
+      }
+    });
+    child.once('close', status => {
+      const output = stdout.text();
+      if (status !== 0) {
+        const detail = visibleLogLines(stderr.text() || output).find(line => line.trim())?.trim();
+        reject(new Error(`journalctl failed for systemd unit ${unit}${detail ? `: ${detail}` : ` (exit code ${status ?? 'unknown'})`}`));
+        return;
+      }
+      if (output.trim() === '-- No entries --') {
+        reject(new Error('unit 不存在或尚无日志，请核对 unit'));
+        return;
+      }
+      resolve(visibleLogLines(output).slice(-lines));
+    });
+  });
 }
 
 /** Open a log file for append (creating parent directories), returning its numeric fd. */

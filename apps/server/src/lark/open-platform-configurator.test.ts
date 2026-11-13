@@ -119,6 +119,32 @@ function harness(options: {
 }
 
 describe('configureLarkOpenPlatformApp', () => {
+  it('keeps every tenant scope name, tier and feature exactly equal to 79771a39/master', () => {
+    expect(LARK_TENANT_SCOPES).toEqual([
+      { name: 'application:app_slash_command:read', tier: 'feature', feature: '原生斜杠命令列表读取' },
+      { name: 'application:app_slash_command:write', tier: 'feature', feature: '原生斜杠命令注册' },
+      { name: 'contact:contact.base:readonly', tier: 'base' },
+      { name: 'contact:user.base:readonly', tier: 'base' },
+      { name: 'contact:user.email:readonly', tier: 'base' },
+      { name: 'contact:user.id:readonly', tier: 'base' },
+      { name: 'im:chat.members:read', tier: 'base' },
+      { name: 'im:chat:read', tier: 'base' },
+      { name: 'im:message', tier: 'base' },
+      { name: 'im:message.group_at_msg.include_bot:readonly', tier: 'base' },
+      { name: 'im:message.group_at_msg:readonly', tier: 'base' },
+      { name: 'im:message.group_msg', tier: 'base' },
+      { name: 'im:message.group_msg.include_bot:read', tier: 'base' },
+      { name: 'im:message.p2p_msg:readonly', tier: 'base' },
+      { name: 'im:message.reactions:write_only', tier: 'base' },
+      { name: 'im:message:readonly', tier: 'base' },
+      { name: 'im:message:update', tier: 'base' },
+      { name: 'im:message:urgent_app', tier: 'feature', feature: '卡片加急' },
+      { name: 'im:pin', tier: 'feature', feature: '卡片置顶' },
+      { name: 'im:resource', tier: 'base' },
+      { name: 'task:task:write', tier: 'feature', feature: '飞书任务智能体通道' },
+    ]);
+  });
+
   it('uses the real collaborator exemption flow despite canAutoApproval=false and a CC recipient', async () => {
     const { client, calls } = harness({ versions: { data: { versions: [] } } });
     await configureLarkOpenPlatformApp(client, 'cli_test', { newApp: true, creatorUserId: 'creator' });
