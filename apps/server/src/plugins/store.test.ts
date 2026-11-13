@@ -20,6 +20,22 @@ const declarative = (name: string, version = '1.0.0') => ({
 });
 const hookFiles = { 'hooks/hooks.json': JSON.stringify({ 'task.completed': [{ command: 'true', timeout: 1000 }] }) };
 
+async function stageCandidateWithSecretHook(store: PluginStore, source: string, name: string, secret: string) {
+  await writePlugin(source, {
+    '.dutydeck-plugin/plugin.json': JSON.stringify({ name, version: '1.0.0' })
+  });
+  await store.install(source);
+  await writePlugin(source, {
+    '.dutydeck-plugin/plugin.json': JSON.stringify({ name, version: '2.0.0' }),
+    'hooks/hooks.json': JSON.stringify({ 'task.completed': [{ command: ['node', 'hook.mjs', secret], timeout: 1000 }] })
+  });
+  await store.update(name, { yes: true });
+  await writePlugin(source, {
+    '.dutydeck-plugin/plugin.json': JSON.stringify({ name, version: '3.0.0', providers: 'provider.mjs' }),
+    'provider.mjs': 'export default () => {};'
+  });
+}
+
 describe('PluginStore', () => {
   let temp: string;
   let store: PluginStore;
@@ -289,6 +305,37 @@ describe('PluginStore', () => {
     expect(nonInteractive.message).toMatch(/[0-9a-f]{64} → [0-9a-f]{64}/);
     expect(nonInteractive.message).not.toContain(secret);
     expect(store.get('provider-review')).toEqual(original);
+  });
+
+  it('redacts an unchanged candidate hook when an interactive update only adds a provider', async () => {
+    const source = join(temp, 'candidate-provider');
+    const secret = 'candidate-provider-interactive-secret';
+    await stageCandidateWithSecretHook(store, source, 'candidate-provider', secret);
+    const original = store.get('candidate-provider');
+
+    const confirm = vi.fn(async () => false);
+    await expect(store.update('candidate-provider', { confirm })).rejects.toMatchObject({ code: 'PLUGIN_TRUST_DECLINED' });
+    const prompt = confirm.mock.calls[0]![0];
+    expect(prompt.capabilities).toEqual(['providers']);
+    expect(prompt.details).toEqual([]);
+    expect(prompt.changes).toBeUndefined();
+    expect(JSON.stringify(prompt)).not.toContain(secret);
+    expect(store.get('candidate-provider')).toEqual(original);
+  });
+
+  it('redacts an unchanged candidate hook from PLUGIN_TRUST_REQUIRED when an update only adds a provider', async () => {
+    const source = join(temp, 'candidate-provider');
+    const secret = 'candidate-provider-non-interactive-secret';
+    await stageCandidateWithSecretHook(store, source, 'candidate-provider', secret);
+    const original = store.get('candidate-provider');
+
+    const error = await store.update('candidate-provider').then(
+      () => { throw new Error('expected PLUGIN_TRUST_REQUIRED'); },
+      reason => reason as Error
+    );
+    expect(error).toMatchObject({ code: 'PLUGIN_TRUST_REQUIRED', message: expect.stringContaining('需要信任以下能力：providers') });
+    expect(error.message).not.toContain(secret);
+    expect(store.get('candidate-provider')).toEqual(original);
   });
 
   it('reports same-version local content replacement as changed', async () => {

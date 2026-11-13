@@ -18,7 +18,7 @@ dutydeck session ask-wait check-1
 
 ADHD Lark structured confirmations retain their existing 24-hour card, same-session new turn after a click, and deferred acknowledgement. They do not return an answer to the original call.
 
-`dutydeck update [version]` accepts only an exact semver, not a range, tag, or option string. Without the argument it still resolves `latest` or an explicit `--dist-tag`. Installation, verification, and restart errors keep their original prefix and append `npm install --global dutydeck@<actual previous version> && dutydeck restart` as the manual rollback steps. This reinstalls the old package directly and does not depend on the old CLI understanding `update [version]`. If the previous version is missing or is not an exact semver, the error says that no safe command can be generated. Dutydeck never rolls back automatically or bypasses the deployment window.
+`dutydeck update [version]` accepts only an exact semver, not a range, tag, or option string. Without the argument it still resolves `latest` or an explicit `--dist-tag`. Installation, verification, and restart errors keep their original prefix and append `npm install --global @byted/dutydeck@<actual previous version> && dutydeck restart` as the manual rollback steps. This reinstalls the old package directly and does not depend on the old CLI understanding `update [version]`. If the previous version is missing or is not an exact semver, the error says that no safe command can be generated. Dutydeck never rolls back automatically or bypasses the deployment window.
 
 ```bash
 # Daemon

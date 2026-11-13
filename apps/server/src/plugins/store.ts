@@ -329,7 +329,7 @@ export class PluginStore {
   }
 
   /** 需要新信任的能力：声明式插件为空；update 时只问新增的。执行内容变化在交互式更新里也要重新确认。 */
-  private async confirmTrust(plugin: LoadedPlugin, alreadyTrusted: string[], options: PluginInstallOptions, changes: PluginCommandChange[] = []) {
+  private async confirmTrust(plugin: LoadedPlugin, alreadyTrusted: string[], options: PluginInstallOptions, changes: PluginCommandChange[] = [], context: 'install' | 'update' = 'install') {
     const added = plugin.capabilities.filter(capability => !alreadyTrusted.includes(capability));
     if ((!added.length && !changes.length) || options.yes) return;
     // 只有命令变化时，非交互更新保持原有行为：由调用方输出摘要，不新增失败。
@@ -337,8 +337,8 @@ export class PluginStore {
     const prompt: PluginTrustPrompt = {
       plugin: plugin.manifest.name,
       capabilities: added,
-      // update 有执行摘要时不再回显完整新命令；新 install 仍保留原来的完整确认信息。
-      details: !changes.length && added.length ? trustDetails(plugin) : [],
+      // update 无论是否有执行摘要都不回显完整新命令；新 install 仍保留原来的完整确认信息。
+      details: context === 'install' && !changes.length && added.length ? trustDetails(plugin) : [],
       ...(changes.length ? { changes } : {})
     };
     if (!options.confirm) {
@@ -391,7 +391,7 @@ export class PluginStore {
         ? await loadPluginDirectory(this.artifactDir(name, current.candidate)).catch(() => activePlugin)
         : activePlugin;
       const reviewChanges = pluginCommandChanges(reviewBase, staged.plugin);
-      await this.confirmTrust(staged.plugin, [...current.trustedCapabilities, ...(current.candidate?.trustedCapabilities ?? [])], options, reviewChanges);
+      await this.confirmTrust(staged.plugin, [...current.trustedCapabilities, ...(current.candidate?.trustedCapabilities ?? [])], options, reviewChanges, 'update');
       return await this.withStoreLock(async () => {
         const lock = this.readLock();
         const latest = lock.plugins[name];
