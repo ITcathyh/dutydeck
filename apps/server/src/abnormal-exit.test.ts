@@ -155,12 +155,12 @@ describe('serve lifecycle and bounded abnormal history', () => {
 });
 
 describe('lifecycle ownership regressions', () => {
-  it('recovers an expired lock whose owner file was never written', () => {
+  it('ignores a legacy lock directory without deleting state that an older process may still own', () => {
     const root = scratch(), database = databaseIn(root), file = join(root, abnormalExitFileName), lock = `${file}.lock`;
     mkdirSync(lock); const expired = new Date(Date.now() - 10_000); utimesSync(lock, expired, expired);
     recordAbnormalExit(database, { kind: 'fatal', exitCode: 1, error: 'after stale lock', version: '1' });
     expect(readAbnormalExit(database)).toMatchObject({ error: 'after stale lock' });
-    expect(existsSync(lock)).toBe(false);
+    expect(existsSync(lock)).toBe(true);
   });
 
   it('keeps a live A lifecycle when B is rejected, then attributes A SIGKILL to C', () => {
@@ -406,6 +406,62 @@ describe('bounded systemd journal enrichment', () => {
     expect(document).toMatchObject({ database: b, error: 'B pending' });
     expect(document.signal).toBeUndefined();
     expect(wrongDatabaseQueries).toBe(0);
+  });
+
+  it('does not expand a dead generation journal window when a later generation reuses its PID', async () => {
+    const root = scratch(), database = databaseIn(root);
+    const started = beginServeRun(database, lifecycle('run-a', { pid: 1001, startedAt: '2026-11-13T00:00:00.000Z' }));
+    const a = markServeRunning(database, started.lifecycle).lifecycle;
+    recordAbnormalExit(database, { kind: 'fatal', exitCode: 1, error: 'A original error', version: '1', lifecycle: a, now: new Date('2026-11-13T00:00:30.000Z') });
+    const discovered = beginServeRun(database, {
+      ...lifecycle('run-b', { pid: 1002, startedAt: '2026-11-13T00:01:00.000Z' }), now: new Date('2026-11-13T00:01:00.000Z')
+    }, { isProcessAlive: () => false });
+    const firstA = discovered.previousRuns?.find(run => run.runId === 'run-a')!;
+    expect(firstA.journalUntil).toBe('2026-11-13T00:01:00.000Z');
+    const c = lifecycle('run-c', { pid: 1001, startedAt: '2026-11-13T02:00:00.000Z' });
+    const cExit = exitEntry(c, { __REALTIME_TIMESTAMP: String(Date.parse('2026-11-13T02:01:00.000Z') * 1_000) });
+    const upperBounds: string[] = [];
+    await enrichAbnormalExitFromJournal(database, firstA, {
+      now: new Date('2026-11-13T02:02:00.000Z'),
+      queryJournal: async request => { upperBounds.push(request.until); return [cExit]; }
+    });
+    const rediscovered = beginServeRun(database, {
+      ...lifecycle('run-d', { pid: 1003, startedAt: '2026-11-13T02:03:00.000Z' }), now: new Date('2026-11-13T02:03:00.000Z')
+    }, { isProcessAlive: pid => pid === 1002 });
+    const secondA = rediscovered.previousRuns?.find(run => run.runId === 'run-a')!;
+    expect(secondA.journalUntil).toBe('2026-11-13T00:01:00.000Z');
+    await enrichAbnormalExitFromJournal(database, secondA, {
+      now: new Date('2026-11-13T03:02:00.000Z'),
+      queryJournal: async request => { upperBounds.push(request.until); return [cExit]; }
+    });
+    expect(readAbnormalExit(database)).toMatchObject({ runId: 'run-a', at: '2026-11-13T00:00:30.000Z', error: 'A original error' });
+    expect(readAbnormalExit(database)?.signal).toBeUndefined();
+    expect(upperBounds).toEqual(['2026-11-13T00:01:00.000Z', '2026-11-13T00:01:00.000Z']);
+    expect(firstA.journalUntil).toBe('2026-11-13T00:01:00.000Z');
+    expect(secondA.journalUntil).toBe('2026-11-13T00:01:00.000Z');
+  });
+
+  it('fixes a legacy lifecycle bound on first enrichment and still accepts SIGKILL inside that window', async () => {
+    const root = scratch(), database = databaseIn(root);
+    const previous = lifecycle('legacy-run', { database, startedAt: '2026-11-13T00:00:00.000Z' });
+    recordAbnormalExit(database, { kind: 'fatal', exitCode: 1, error: 'legacy pending', version: '1', lifecycle: previous, now: new Date('2026-11-13T00:00:30.000Z') });
+    const legacyDocument = documentIn(database);
+    legacyDocument.lifecycle = previous;
+    legacyDocument.lifecycleRuns = [previous];
+    writeFileSync(join(root, abnormalExitFileName), JSON.stringify(legacyDocument));
+    const upperBounds: string[] = [];
+    await enrichAbnormalExitFromJournal(database, previous, {
+      now: new Date('2026-11-13T00:01:00.000Z'),
+      queryJournal: async request => { upperBounds.push(request.until); return [exitEntry(previous, { __REALTIME_TIMESTAMP: String(Date.parse('2026-11-13T00:00:45.000Z') * 1_000) })]; }
+    });
+    expect(readAbnormalExit(database)).toMatchObject({ runId: 'legacy-run', at: '2026-11-13T00:00:45.000Z', signal: 'SIGKILL', source: 'systemd-journal' });
+    expect(upperBounds).toEqual(['2026-11-13T00:01:00.000Z']);
+    expect(documentIn(database).lifecycleRuns.find((run: any) => run.runId === 'legacy-run').journalUntil).toBe('2026-11-13T00:01:00.000Z');
+    await enrichAbnormalExitFromJournal(database, previous, {
+      now: new Date('2026-11-13T02:02:00.000Z'),
+      queryJournal: async request => { upperBounds.push(request.until); return []; }
+    });
+    expect(upperBounds).toEqual(['2026-11-13T00:01:00.000Z', '2026-11-13T00:01:00.000Z']);
   });
 
   it('a late result enriches its own history entry without replacing a newer top-level abnormal', async () => {

@@ -1,7 +1,8 @@
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
+import Database from 'better-sqlite3';
 import { redactCredentialText } from '@dutydeck/shared';
 import { writeFileAtomicSync } from './atomic-file.js';
 
@@ -25,6 +26,8 @@ export interface ServeRunLifecycle {
   database?: string;
   unit?: string;
   boot?: string;
+  /** 首次确认该代死亡的时间；固定后不允许后续富集扩大 journal 窗口。 */
+  journalUntil?: string;
 }
 export interface CleanExitRecord {
   runId: string;
@@ -106,7 +109,8 @@ function asLifecycle(value: unknown): ServeRunLifecycle | undefined {
     runId: parsed.runId, pid: parsed.pid, startedAt: parsed.startedAt,
     version: typeof parsed.version === 'string' ? parsed.version : '', phase: parsed.phase === 'running' ? 'running' : 'starting',
     ...(typeof parsed.database === 'string' ? { database: parsed.database } : {}),
-    ...(typeof parsed.unit === 'string' ? { unit: parsed.unit } : {}), ...(typeof parsed.boot === 'string' ? { boot: parsed.boot } : {})
+    ...(typeof parsed.unit === 'string' ? { unit: parsed.unit } : {}), ...(typeof parsed.boot === 'string' ? { boot: parsed.boot } : {}),
+    ...(typeof parsed.journalUntil === 'string' && Number.isFinite(Date.parse(parsed.journalUntil)) ? { journalUntil: parsed.journalUntil } : {})
   };
 }
 
@@ -141,50 +145,24 @@ function defaultPidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH'; }
 }
 
-const lockPause = new Int32Array(new SharedArrayBuffer(4));
-interface LockObservation { dev: number; ino: number; mtimeMs: number; owner?: string }
-function observeLock(lock: string): LockObservation | undefined {
-  try {
-    const info = statSync(lock);
-    try { return { dev: info.dev, ino: info.ino, mtimeMs: info.mtimeMs, owner: readFileSync(join(lock, 'owner'), 'utf8') }; }
-    catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT' ? { dev: info.dev, ino: info.ino, mtimeMs: info.mtimeMs } : undefined; }
-  } catch { return undefined; }
-}
-/** 先把候选移到唯一隔离名，再复核 inode 与 owner；替换过的新锁绝不删除。 */
-function reclaimStaleLock(lock: string, observed: LockObservation): void {
-  const quarantine = `${lock}.stale.${process.pid}.${randomUUID()}`;
-  try { renameSync(lock, quarantine); } catch { return; }
-  const moved = observeLock(quarantine);
-  if (!moved || moved.dev !== observed.dev || moved.ino !== observed.ino || moved.owner !== observed.owner) {
-    try { renameSync(quarantine, lock); } catch { /* 原位置已有新锁时保留隔离目录，不删除任何新锁。 */ }
-    return;
-  }
-  rmSync(quarantine, { recursive: true, force: true });
-}
-/** 有界跨进程锁；读改写必须在同一临界区，不能两个 PID 各自 rename 覆盖历史。 */
+/** SQLite 写事务提供跨进程临界区；进程死亡由 OS/SQLite 释放，不回收旧版 .lock 目录。 */
 function withRecordLock(file: string, action: () => void): boolean {
-  const lock = `${file}.lock`;
-  const ownerToken = `${process.pid}:${randomUUID()}`;
-  const deadline = Date.now() + 2_000;
-  for (;;) {
-    try {
-      mkdirSync(lock, { mode: 0o700 });
-      try { writeFileSync(join(lock, 'owner'), ownerToken, { mode: 0o600, flag: 'wx' }); }
-      catch (error) { rmSync(lock, { recursive: true, force: true }); throw error; }
-      break;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      const observed = observeLock(lock);
-      const ownerPid = Number(observed?.owner?.split(':')[0]);
-      if (observed && Date.now() - observed.mtimeMs > 1_000 && (!observed.owner || !ownerPid || !defaultPidAlive(ownerPid))) reclaimStaleLock(lock, observed);
-      if (Date.now() >= deadline) return false;
-      Atomics.wait(lockPause, 0, 0, 10);
+  const mutex = new Database(`${file}.mutex.sqlite`, { timeout: 2_000 });
+  let inTransaction = false;
+  try {
+    mutex.exec('BEGIN IMMEDIATE');
+    inTransaction = true;
+    action();
+    mutex.exec('COMMIT');
+    inTransaction = false;
+    return true;
+  } catch (error) {
+    if (inTransaction) {
+      try { mutex.exec('ROLLBACK'); } catch { /* close 仍会回滚。 */ }
     }
-  }
-  try { action(); return true; }
-  finally {
-    // 只有仍持有同一个 owner token 才释放，避免误删已替换的新锁。
-    try { if (readFileSync(join(lock, 'owner'), 'utf8') === ownerToken) rmSync(lock, { recursive: true, force: true }); } catch { /* 已被 stale 清理或替换。 */ }
+    throw error;
+  } finally {
+    mutex.close();
   }
 }
 
@@ -267,6 +245,14 @@ function storeLifecycle(document: AbnormalExitDocument, run: ServeRunLifecycle):
   document.lifecycleRuns = runs.slice(-lifecycleHistoryLimit);
 }
 
+function fixJournalWindow(document: AbnormalExitDocument, run: ServeRunLifecycle, now: Date): ServeRunLifecycle {
+  const bounded = run.journalUntil ? run : { ...run, journalUntil: now.toISOString() };
+  storeLifecycle(document, bounded);
+  const current = asLifecycle(document.lifecycle);
+  if (current && runKey(current) === runKey(bounded)) document.lifecycle = bounded;
+  return bounded;
+}
+
 function storeCleanExit(document: AbnormalExitDocument, clean: CleanExitRecord): void {
   const records = allCleanExits(document).filter(candidate => runKey(candidate) !== runKey(clean));
   records.push(clean);
@@ -325,8 +311,9 @@ export function beginServeRun(databaseUrl: string | undefined, input: {
     const preserveLiveCurrent = current && lifecycleBelongsTo(current, databaseUrl) && !hasCleanExit(document, current) && isAlive(current);
     for (const previous of candidates) {
       if (hasCleanExit(document, previous) || isAlive(previous)) continue;
-      previousRuns.push(previous);
-      appendUncleanExit(document, previous, now, input.version);
+      const bounded = fixJournalWindow(document, previous, now);
+      previousRuns.push(bounded);
+      appendUncleanExit(document, bounded, now, input.version);
     }
     storeLifecycle(document, lifecycle);
     // 存活代仍占据单数展示；B 可新增 starting，但不抹掉数组里的 A。
@@ -343,6 +330,7 @@ export function markServeRunning(databaseUrl: string | undefined, lifecycle: Ser
     ...(usableDatabase(databaseUrl) ? { database: canonical(databaseUrl) } : {})
   };
   const previousRuns: ServeRunLifecycle[] = [];
+  const now = dependencies.now ?? new Date();
   updateDocument(databaseUrl, document => {
     const candidates = allLifecycles(document).filter(run => lifecycleBelongsTo(run, databaseUrl) && run.runId !== running.runId);
     const alive = new Map<string, boolean>();
@@ -354,8 +342,9 @@ export function markServeRunning(databaseUrl: string | undefined, lifecycle: Ser
     // startLocalServer 成功已经证明 B 取得数据库所有权；旧代是否存活只决定能否补记异常，不否决本次发布。
     for (const previous of candidates) {
       if (hasCleanExit(document, previous) || isAlive(previous)) continue;
-      previousRuns.push(previous);
-      appendUncleanExit(document, previous, dependencies.now ?? new Date(), running.version);
+      const bounded = fixJournalWindow(document, previous, now);
+      previousRuns.push(bounded);
+      appendUncleanExit(document, bounded, now, running.version);
     }
     storeLifecycle(document, running);
     document.lifecycle = running;
@@ -423,13 +412,23 @@ export async function enrichAbnormalExitFromJournal(databaseUrl: string | undefi
 } = {}): Promise<void> {
   if (!usableDatabase(databaseUrl) || !run.unit || !run.boot || !lifecycleBelongsTo(run, databaseUrl)) return;
   const now = dependencies.now ?? new Date();
+  let bounded = run.journalUntil ? run : { ...run, journalUntil: now.toISOString() };
+  if (!run.journalUntil) {
+    // 旧文件没有上界时，只在首次富集退回 now，并在查询前固定，避免并发或重试扩大窗口。
+    updateDocument(databaseUrl, document => {
+      const stored = allLifecycles(document).find(candidate => candidate.runId === run.runId && lifecycleBelongsTo(candidate, databaseUrl));
+      if (!stored) return;
+      if (stored.journalUntil) bounded = { ...run, journalUntil: stored.journalUntil };
+      else fixJournalWindow(document, stored, now);
+    });
+  }
   try {
-    const entries = await (dependencies.queryJournal ?? defaultJournalQuery)({ unit: run.unit, boot: run.boot, pid: run.pid, startedAt: run.startedAt, until: now.toISOString() });
-    const at = exactSigkill(entries, run, now.getTime());
+    const entries = await (dependencies.queryJournal ?? defaultJournalQuery)({ unit: bounded.unit!, boot: bounded.boot!, pid: bounded.pid, startedAt: bounded.startedAt, until: bounded.journalUntil! });
+    const at = exactSigkill(entries, bounded, Date.parse(bounded.journalUntil!));
     if (at === undefined) return;
     updateDocument(databaseUrl, document => {
-      if (hasCleanExit(document, run)) return;
-      const belongsToRun = (record: AbnormalExitRecord) => record.runId === run.runId && Boolean(record.database && canonical(record.database) === canonical(run.database!));
+      if (hasCleanExit(document, bounded)) return;
+      const belongsToRun = (record: AbnormalExitRecord) => record.runId === bounded.runId && Boolean(record.database && canonical(record.database) === canonical(bounded.database!));
       const enrich = (record: AbnormalExitRecord): AbnormalExitRecord => belongsToRun(record)
         ? { ...record, at: new Date(at).toISOString(), error: 'Process was killed by SIGKILL (matched systemd journal exit record)', signal: 'SIGKILL', source: 'systemd-journal' }
         : record;
