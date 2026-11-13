@@ -18,6 +18,16 @@
 
 ## FAQ <a id="faq"></a>
 
+**Startup reports `DATABASE_SCHEMA_TOO_NEW`, or a backup reports a schema mismatch?** The two versions in the error are the database's actual schema and the maximum supported by this build. Copy the complete read-only command with the actual path from the error; do not point `--database` at another instance:
+
+```bash
+dutydeck database execution-status --database /path/to/runtime/dutydeck.db
+```
+
+It does not repair, migrate or downgrade the database. Prefer a Dutydeck build that supports the schema. Only after stopping every writer and checking the backup timestamp should you consider restoring it into a separate new directory for inspection. Restoring loses writes made after the backup; switching to older code does not roll back the database.
+
+**Why does doctor say the cause is pending enrichment after SIGKILL?** A killed process cannot run an exit handler, so the next generation first records an abnormal exit because the previous generation has no `clean-exit` marker. On Linux/systemd it queries a bounded journal asynchronously and adds `SIGKILL` only when unit, boot, PID and start time align exactly. A missing, inaccessible, timed-out or ambiguous journal leaves the basic record intact and never blocks readiness. Clean stops and planned restarts create no abnormal record, and a previous PID that is still alive is not reported as crashed. Only the latest 10 records are retained; launchd enrichment is not supported in this release.
+
 **The bot doesn't react in Lark?** Run `dutydeck doctor` (it checks the Lark listener and each default Agent's `--version`); make sure the app has the Bot capability and a long-connection event subscription (`im.message.receive_v1`); in groups, `@` the bot unless the topic is already owned (levels above "mention only").
 
 **The long connection dropped and never came back?** The Lark SDK reconnects on its own first. If a reconnect stays stuck (e.g. a proxy accepts the connection but never answers) for more than 10 minutes, Dutydeck rebuilds just that long connection without touching running sessions, and rebuilds it again after the same interval if it is still stuck. Set the interval with the daemon environment variable `DUTYDECK_LARK_RECONNECT_STALL_MS` (milliseconds, minimum 60 seconds, `0` turns it off). When `doctor` says "Dutydeck 已在 … 重建长连接，仍未恢复" (the long connection was rebuilt at … and has not recovered yet), check the network and proxy path to the Lark Open Platform.
@@ -56,3 +66,5 @@ A long folder that breaks mid-word onto several lines of the trust page is still
 **How should scheduler counts and duration logs for a slow work item be read?** While an earlier tick is still making progress, later one-second callbacks are skipped rather than wrapped again. Logs therefore record real progress and its duration, not a stack of wrappers; this is not a throughput claim. After a rejected tick, a later normal tick can continue. Direct calls to the same tick still share the original Promise, and persistent state and recovery semantics are unchanged.
 
 **No UTF-8 locale on the host?** Dutydeck forces every tmux client it launches to use UTF-8 (`-u`), so terminal sessions are still detected correctly and Chinese or other non-ASCII text is not replaced with underscores because of the host locale.
+
+**`doctor` reports `lark.exposure`, or its listener address is unknown?** The finding becomes warn/fail only when non-loopback unauthenticated access, runnable full trust, broad high-risk scope and weak risk control coincide. Follow the report: use `dutydeck setup --local-only`, set an access password and re-enable authentication, or run the suggested `dutydeck settings bot set <appId> permissionMode=ask fullTrustConfirmed=false`. To retain full trust, run `dutydeck settings bot install-hook <appId>` before enabling `riskControlMode=enforced` and narrowing the high-risk list. A list does not restrict execution under `off`, and `guidance` is not enforcement. For an unknown address, `LISTEN_*` or unit `TriggeredBy` proves only the activation relationship, not the inherited descriptor's address, so this finding skips rather than treating the `.env` host as fact. Check the socket unit's `ListenStream=` against the service `--host` / `--port`, then rerun `dutydeck doctor`. Reverse proxies, firewalls and port forwarding are outside this observation.

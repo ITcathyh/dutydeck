@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
 import Database from 'better-sqlite3';
 import { createRepositories } from './index.js';
+import { migrations } from './migrations.js';
 import { openDatabaseControl } from './database-control.js';
 import { currentProcessIdentity, observeProcess } from './process-identity.js';
 import { lazyBundleForTest } from '../../../tests/support/bundle-for-test.js';
@@ -175,8 +176,18 @@ it('never upgrades on request and rejects incompatible control or future busines
   expect(() => createRepositories(path)).toThrow('DATABASE_CONTROL_VERSION_UNSUPPORTED');
   raw.prepare('UPDATE dutydeck_control SET protocol = 1').run();
   raw.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (999, ?)').run(new Date().toISOString());
-  expect(() => createRepositories(path)).toThrow('DATABASE_SCHEMA_TOO_NEW');
   raw.close();
+  const supported = migrations.at(-1)!.version;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let message = '';
+    try { createRepositories(path); } catch (error) { message = (error as Error).message; }
+    expect(message).toMatch(/^DATABASE_SCHEMA_TOO_NEW/);
+    expect(message).toContain('999');
+    expect(message).toContain(String(supported));
+    expect(message).toContain(`dutydeck database execution-status --database ${path}`);
+    expect(message).toMatch(/backup.*(loses|discards)|writes.*backup/i);
+    expect(message).toMatch(/older code.*not.*rollback/i);
+  }
 });
 
 it('closes a failed business repository construction before releasing its reserved access', () => {

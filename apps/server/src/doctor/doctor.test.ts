@@ -427,6 +427,16 @@ describe('daemon.status —— 上一次异常退出', () => {
     expect(olderProcess.detail).toContain('；2 小时前异常退出（运行中崩溃：DUTYDECK_AGENTS_JSON is invalid），详情看 journalctl');
   });
 
+  it('把精确 journal 富集的 SIGKILL 显示为附加线索，不改变顶层类型或检查级别', async () => {
+    const check = await daemonCheck({
+      at: new Date(Date.now() - 2 * hour).toISOString(), kind: 'fatal', error: 'Process was killed by SIGKILL',
+      signal: 'SIGKILL', source: 'systemd-journal', runId: 'run-killed'
+    });
+    expect(check.level).toBe('ok');
+    expect(check.detail).toContain('运行中崩溃：Process was killed by SIGKILL（SIGKILL，systemd-journal）');
+    expect(check.detail).toContain('已自动恢复');
+  });
+
   it('超过 7 天的记录不显示', async () => {
     expect(await daemonCheck({ at: new Date(Date.now() - 8 * 24 * hour).toISOString() })).toEqual(await healthy());
   });

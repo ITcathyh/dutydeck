@@ -25,6 +25,7 @@ import { checkWatchFindings } from '../watch.js';
  * 一次，结果由 config 与 agents 两项检查共享；端口探测带超时，绝不挂住。
  */
 import { constants, existsSync, readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { access as fsAccess, stat as fsStat } from 'node:fs/promises';
 import { userInfo } from 'node:os';
 import { dirname, resolve } from 'node:path';
@@ -59,6 +60,7 @@ import {
   checkLark,
   checkLarkListener,
   checkLarkMemory,
+  checkLarkExposure,
   checkNodeVersion,
   checkRunAsRoot,
   checkPlatformPickers,
@@ -79,7 +81,9 @@ import type {
   DoctorConfig,
   DoctorDependencies,
   DoctorOptions,
-  DoctorReport
+  DoctorReport,
+  DoctorSocketActivationObservation,
+  DoctorSocketActivationProbeInput
 } from './types.js';
 
 export type {
@@ -98,6 +102,37 @@ export { REQUIRED_NODE_VERSION } from './checks.js';
 
 const DEFAULT_PORT_PROBE_TIMEOUT_MS = 1_000;
 const DEFAULT_AGENT_PROBE_TIMEOUT_MS = 5_000;
+
+type SystemdTriggeredByProbe = (unit: string) => { status: number | null; stdout: string };
+
+const showSystemdTriggeredBy: SystemdTriggeredByProbe = unit => {
+  const result = spawnSync('systemctl', ['--user', 'show', unit, '--property=TriggeredBy'], {
+    encoding: 'utf8', timeout: 1_000, maxBuffer: 16 * 1024
+  });
+  return { status: result.status, stdout: result.stdout ?? '' };
+};
+
+/**
+ * 只认当前进程的 LISTEN_* 或运行中 daemon 记录的 systemd unit。TriggeredBy 能证明
+ * socket 激活关系，不能证明 fd 的实际地址；后者不可知时保留 unknown host，由组合检查降级。
+ */
+export function observeSocketActivation(
+  input: DoctorSocketActivationProbeInput,
+  showUnit: SystemdTriggeredByProbe = showSystemdTriggeredBy
+): DoctorSocketActivationObservation {
+  const listenFds = Number(input.env.LISTEN_FDS);
+  if (input.env.LISTEN_PID === String(input.processPid) && Number.isSafeInteger(listenFds) && listenFds > 0) {
+    return { status: 'active', source: 'process', reason: 'address-unavailable' };
+  }
+  if (!input.running || input.record?.supervisor !== 'systemd') return { status: 'inactive' };
+  const unit = input.record.systemdUnit;
+  if (!unit) return { status: 'unknown', reason: 'unit-unavailable' };
+  const shown = showUnit(unit);
+  if (shown.status !== 0) return { status: 'unknown', reason: 'unit-unavailable' };
+  const triggeredBy = shown.stdout.split('\n').find(line => line.startsWith('TriggeredBy='))?.slice('TriggeredBy='.length) ?? '';
+  if (!triggeredBy.split(/\s+/).some(name => name.endsWith('.socket'))) return { status: 'inactive' };
+  return { status: 'active', source: 'unit', reason: 'address-unavailable' };
+}
 
 /** 动态 import autostart 模块：它可能尚未落地，缺失时该项降级为 skip。 */
 async function loadAutostartStatus(): Promise<DoctorAutostartResult | undefined> {
@@ -244,7 +279,7 @@ export async function runDoctor(
   try {
     // 配置库按 daemon 的取法以根目录为基准：loadConfig 以 DUTYDECK_DEFAULT_CWD（Agent 默认目录）为基准，
     // 两者不同时（比如 DEFAULT_CWD 设成 HOME）会报出一个 daemon 从不打开的路径。
-    config = dependencies.config ?? (() => { const loaded = loadConfigWithDiagnostics(env, PTY_AGENT_CONTRIBUTIONS); return { ...loaded.config, databaseUrl: daemonDatabasePath(daemonRoot(), env.DUTYDECK_DATABASE_URL), droppedAgents: loaded.droppedAgents }; })();
+    config = dependencies.config ?? (() => { const loaded = loadConfigWithDiagnostics(env, PTY_AGENT_CONTRIBUTIONS); return { ...loaded.config, ...(env.DUTYDECK_LOCAL_ONLY !== undefined ? { localOnly: env.DUTYDECK_LOCAL_ONLY === 'true' } : {}), databaseUrl: daemonDatabasePath(daemonRoot(), env.DUTYDECK_DATABASE_URL), droppedAgents: loaded.droppedAgents }; })();
     checks.push(checkConfig(config));
   } catch (error) {
     // 配置坏了也要把体检跑完：这正是用户最需要诊断的时候。
@@ -253,6 +288,7 @@ export async function runDoctor(
       host: env.DUTYDECK_HOST ?? '127.0.0.1',
       port: Number(env.DUTYDECK_PORT) || 4310,
       authEnabled: env.DUTYDECK_AUTH !== 'false',
+      ...(env.DUTYDECK_LOCAL_ONLY !== undefined ? { localOnly: env.DUTYDECK_LOCAL_ONLY === 'true' } : {}),
       databaseUrl: daemonDatabasePath(daemonRoot(), env.DUTYDECK_DATABASE_URL),
       agents: []
     };
@@ -360,6 +396,27 @@ export async function runDoctor(
     mode,
     present: Boolean(probe.values?.[AUTH_TOKEN_CONFIG_KEY]?.trim()),
     ...(databaseUnreadable ? { unknown: true } : {})
+  }));
+
+  // ---- 8b. 网络与机器人权限的暴露组合 ----
+  const socket = await Promise.resolve((dependencies.socketActivationProbe ?? observeSocketActivation)({
+    env,
+    processPid: process.pid,
+    running: status.running,
+    ...(record ? { record } : {})
+  })).catch((): DoctorSocketActivationObservation => ({ status: 'unknown', reason: 'unit-unavailable' }));
+  const runningHost = status.running && record?.host !== undefined ? record.host : undefined;
+  const exposureHost = socket.status === 'active' ? socket.host : socket.status === 'unknown' ? undefined : runningHost ?? config.host;
+  const localOnly = config.localOnly ?? (env.DUTYDECK_LOCAL_ONLY === undefined ? undefined : env.DUTYDECK_LOCAL_ONLY === 'true');
+  checks.push(await checkLarkExposure({
+    ...(exposureHost !== undefined ? { host: exposureHost } : {}),
+    hostSource: socket.status === 'active' ? 'socket' : runningHost !== undefined ? 'runtime' : 'config',
+    ...(localOnly !== undefined ? { localOnly } : {}),
+    authEnabled: status.running && record?.authEnabled !== undefined ? record.authEnabled : config.authEnabled,
+    socket,
+    unavailable: databaseUnreadable,
+    ...(databaseUnreadable ? {} : probe.values?.[larkBotsConfigKey] ? { rawBots: probe.values[larkBotsConfigKey] } : {}),
+    listenerDisabled
   }));
 
   // ---- 9. 端口 ----

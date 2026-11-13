@@ -23,6 +23,10 @@
 
 - **慢工作项调度日志（EV6-02）**：上一轮 tick 未完成时，每秒回调直接跳过，不再叠加 wrapper；日志次数和 duration 只反映真实推进，可能比以前更少，不表示吞吐提升。直接调用 tick 仍共享 Promise，工作项时序、持久状态和恢复语义不变。
 
+- **异常退出历史与回滚**：`last-abnormal-exit.json` 新增最近 10 条 `history`，以及各按 runId+database 去重、各保留最近 10 代的 `lifecycleRuns`/`cleanExits`；单数 `lifecycle`/`clean-exit` 保留当前代兼容展示，顶层仍是最近一条旧枚举 `fatal|startup`，旧程序仍能读取顶层异常；但旧程序再次写异常文件会丢掉新增 history 和生命周期/干净退出元数据，不能据此恢复历史。Linux/systemd 可在精确匹配退出记录后补充 SIGKILL；launchd 富集尚未验证，不声明支持。
+- **schema 过新错误更可行动**：`DATABASE_SCHEMA_TOO_NEW` 和备份版本不匹配错误会列出数据库版本、程序支持版本及带实际路径的只读 `dutydeck database execution-status --database <数据库路径>`。打开仍会被拒绝，不自动迁移或降级；切回旧代码不是数据库回滚，使用备份恢复会丢备份后的写入。
+- **doctor 暴露组合检查（CT6-10）**：新增 `lark.exposure`，把监听地址、显式 local-only、local/token/open 认证、socket 激活、完全信任、高危用户范围与风控模式放在同一项判断。只有非回环无认证叠加可运行完全信任、广范围高危用户和弱风控时才新增 warn/fail；正常配置不新增失败。报告只含非机密的范围与数量，不自动修改 `.env`、unit 或机器人配置。socket 实际地址不可知或机器人配置不可读时降级为 skip，不猜测；既有 `access.posture` 等检查及回滚行为不变。
+
 - **tmux 会话生命周期**：Linux 上 tmux socket 文件被清理但旧 server 仍在时，启动会拒绝另建同名 server，并提示用 `SIGUSR1` 重建 socket 或结束旧 server；不会再让两个 CLI 接管同一会话。启用 `remain-on-exit` 时，下次启动会回收 Dutydeck 自有且全部 pane 已退出的死会话，仍有 pane 运行的会话保留。非 Linux 行为不变。
 
 - **飞书会话提醒在原消息撤回后改为新发**：排队受阻、排队超时取消、结果未知这类会话提醒要回复的原消息已被撤回时，从丢失改为在原会话（群或私聊）里新发一条，服务日志记一条「回复会话提醒失败，回退为会话内发送」告警。定时任务的提醒与同一计划的其他投递一致，仍不改发；超时这类结果未知的失败也不改发。不需要配置。

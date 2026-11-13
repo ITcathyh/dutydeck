@@ -10,7 +10,7 @@ import { WATCH_PREFIX } from '../watch.js';
  *   · 每个 fail / warn 必须带 remedy，有可执行动作时必须带 command。
  *   · 任何字段都不得包含机密（app secret、access token）。
  */
-import { larkBotEntryError, larkBotsConfigKey, larkExecutionConfirmed, larkMemoryEnabled, publicLarkConfigs, type StoredLarkConfig } from '../lark/config.js';
+import { larkBotEntryError, larkBotsConfigKey, larkConfigBlockingError, larkExecutionConfirmed, larkMemoryEnabled, publicLarkConfigs, readLarkConfigs, type StoredLarkConfig } from '../lark/config.js';
 import { AUTH_TOKEN_CONFIG_KEY } from '../auth/auth.js';
 import { isRuntimeModelAlias, modelHasPrice, type UsagePricing } from '../usage-ledger.js';
 import { larkMemoryErrorLabel } from '../lark/memory.js';
@@ -23,6 +23,7 @@ import type {
   DoctorConfig,
   DoctorDaemonRecord,
   DoctorDaemonStatus,
+  LarkExposureObservation,
   PortProbeOutcome
 } from './types.js';
 import type { EnvLocation } from '../env-location.js';
@@ -1034,4 +1035,70 @@ export function summarize(checks: readonly DoctorCheck[]): { ok: number; warn: n
     else if (check.level === 'skip') summary.skip += 1;
   }
   return summary;
+}
+
+// ─── 12. lark.exposure ───────────────────────────────────────────────────────
+
+/**
+ * 网络与机器人权限必须组合判断：open 本身已由 access.posture 报告，这里只在它叠加
+ * 可监听的 full-trust、广范围高危用户和弱风控时新增 warn/fail，避免重复单项告警。
+ */
+export async function checkLarkExposure(observation: LarkExposureObservation): Promise<DoctorCheck> {
+  const { host, socket } = observation;
+  const mode: AccessMode | 'unknown' = host === undefined
+    ? 'unknown'
+    : host === '127.0.0.1' || host === '::1' ? 'local' : observation.authEnabled ? 'token' : 'open';
+  const socketText = socket.status === 'active'
+    ? socket.source === 'unit' ? 'socket=unit（TriggeredBy）' : socket.source === 'process' ? 'socket=process（LISTEN_*）' : 'socket=unknown（有激活证据）'
+    : socket.status === 'unknown' ? 'socket=未知' : 'socket=未激活';
+  const network = `监听=${host ?? '实际监听地址未知'}（${observation.hostSource}）；local-only=${observation.localOnly === undefined ? '未知' : observation.localOnly ? '开启' : '关闭'}；认证=${mode}（开关${observation.authEnabled ? '开' : '关'}）；${socketText}`;
+  const base = { id: 'lark.exposure', label: '网络与机器人暴露组合' } as const;
+  if (observation.unavailable) return { ...base, level: 'skip', detail: `${network}；机器人权限未知（数据库不可读）` };
+
+  let parsed: unknown;
+  try { parsed = observation.rawBots ? JSON.parse(observation.rawBots) : undefined; } catch { parsed = undefined; }
+  if (!Array.isArray(parsed)) return { ...base, level: 'skip', detail: `${network}；机器人权限未知（没有可解析的机器人配置）` };
+  const repository = { get: async () => observation.rawBots } as unknown as Parameters<typeof readLarkConfigs>[0];
+  // readOnly 复用运行时的同一份归一化，但禁止旧记录迁移写回；无效用户和空白邮箱在这里清空。
+  const usable = await readLarkConfigs(repository, { readOnly: true });
+  if (usable.length !== parsed.length) return { ...base, level: 'skip', detail: `${network}；机器人权限未知（存在无效配置，详见飞书配置检查）` };
+  const bots = publicLarkConfigs(usable, { listeningDisabled: observation.listenerDisabled }).bots;
+  if (bots.length === 0) return { ...base, level: 'skip', detail: `${network}；未配置机器人，无权限组合可判` };
+
+  const projections = bots.map((bot, index) => {
+    const blocked = larkConfigBlockingError(usable[index]!) !== undefined;
+    const listening = !blocked && !observation.listenerDisabled && bot.listening && bot.setupComplete;
+    const fullTrust = listening && bot.permissionMode === 'full-trust';
+    const userCount = bot.highRiskAllowedUsers.length;
+    const emailCount = bot.highRiskAllowedEmails.length;
+    const riskControlMode = bot.riskControlMode;
+    // off 不生成风险策略，已填写的高危名单也不会限制执行；guidance 只注入提醒。
+    const broad = riskControlMode === 'off' || userCount + emailCount === 0;
+    const weak = riskControlMode !== 'enforced';
+    const dangerous = mode === 'open' && fullTrust && broad && weak;
+    const scopeNote = riskControlMode === 'off' && userCount + emailCount > 0 ? '，off 下名单不限制执行' : '';
+    const listeningNote = blocked ? '（配置受阻，未形成监听权限）' : listening ? '' : '（未形成监听权限）';
+    return {
+      appId: bot.appId,
+      dangerous,
+      off: riskControlMode === 'off',
+      text: `${bot.appId}：permissionMode=${bot.permissionMode ?? 'full-trust'}${listeningNote}；高危范围=${broad ? '全部' : '指定'}（ID ${userCount}、邮箱 ${emailCount}${scopeNote}）；riskControlMode=${riskControlMode}`
+    };
+  });
+  const detail = `${network}；${projections.map(bot => bot.text).join('；')}；边界=不包含反向代理或防火墙后的其他访问路径`;
+  if (host === undefined) return { ...base, level: 'skip', detail: `${detail}；socket 已激活或 unit 状态不可读时，不从环境配置猜实际监听地址` };
+
+  const dangerous = projections.filter(bot => bot.dangerous);
+  if (dangerous.length === 0) return { ...base, level: 'ok', detail };
+  const first = dangerous[0]!;
+  const commandAppId = /^[A-Za-z0-9_-]+$/.test(first.appId) ? first.appId : '<应用ID>';
+  return {
+    ...base,
+    level: dangerous.some(bot => bot.off) ? 'fail' : 'warn',
+    detail,
+    remedy: `非回环无认证、完全信任、广范围高危用户与弱风控同时成立，远程请求可能驱动本机高权限操作。doctor 只报告，不会自动修改 .env、unit 或机器人配置。可执行下方命令改为逐项审批（若 Agent 不支持，换用支持的 Agent）；也可运行 dutydeck setup --local-only 只监听本机，或设置访问密码并重新开启认证。保留完全信任时，先运行 dutydeck settings bot install-hook ${commandAppId}，再把 riskControlMode 设为 enforced 并配置 highRiskAllowedUsers/highRiskAllowedEmails。`,
+    command: `dutydeck settings bot set ${commandAppId} permissionMode=ask fullTrustConfirmed=false`,
+    verify: 'dutydeck doctor --json',
+    link: 'docs/zh/cli.md#doctor-exposure'
+  };
 }

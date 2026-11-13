@@ -19,6 +19,20 @@
 
 ## 常见问题与排障 (FAQ) <a id="faq"></a>
 
+### 启动报 `DATABASE_SCHEMA_TOO_NEW`，或备份提示版本不匹配？
+
+错误中的两个版本分别是数据库实际 schema 和当前程序支持的上限。复制错误里带实际路径的完整命令检查，不要把 `--database` 换成别的实例：
+
+```bash
+dutydeck database execution-status --database /path/to/runtime/dutydeck.db
+```
+
+它只读，不修复或降级数据库。优先换用支持该 schema 的 Dutydeck。只有停止所有写入方并确认备份时间后，才考虑把备份恢复到独立新目录核对；恢复会丢备份后的写入，切回旧代码本身不会回滚数据库。
+
+### 服务被 SIGKILL 后，doctor 为什么说“原因待富集”？
+
+SIGKILL 无法执行进程内退出处理，所以下一代先根据上一代缺少 `clean-exit` 标记写基础异常。Linux/systemd 下会异步查有界 journal，只有同一 unit、boot、PID 与启动时间精确对齐才补 `SIGKILL`；journal 不存在、无权限、超时或归属不唯一时保留基础记录，不阻塞服务就绪。干净停止和计划重启不写异常，上一代 PID 仍存活也不报崩溃。文件只留最近 10 条；launchd 富集本轮不支持。
+
 ### Q1: 在飞书给机器人发消息，没有反应，也没贴 `👌`？
 1. 运行 `dutydeck doctor`，看「飞书监听」一栏是否正常。
 2. 到飞书开放平台检查应用是否开启了 **「机器人能力」**，事件订阅方式为 **长连接**（已订阅 `im.message.receive_v1`）。
@@ -87,3 +101,7 @@
 
 ### Q16: 宿主没有 UTF-8 locale 会怎样？
 - Dutydeck 会强制其发起的 tmux 客户端使用 UTF-8（`-u`）；即使宿主没有 UTF-8 locale，也能正确识别终端会话，中文等非 ASCII 字符不会因此被显示为下划线。
+
+### Q17: `doctor` 的 `lark.exposure` 报警或显示监听地址未知？
+- **报警**：只有非回环无认证、可运行的完全信任机器人、广范围高危用户和弱风控同时出现时，这项才升级为 warn/fail。按报告选择：用 `dutydeck setup --local-only` 收口监听；设置访问密码并重新开启认证；或用报告给出的 `dutydeck settings bot set <appId> permissionMode=ask fullTrustConfirmed=false` 降低权限。保留完全信任时，先 `dutydeck settings bot install-hook <appId>`，再启用 `riskControlMode=enforced` 并缩小高危名单。`off` 下即使配置了高危名单也不会限制执行，`guidance` 也不是强制拦截。
+- **地址未知**：socket 激活的 `LISTEN_*` 或 unit `TriggeredBy` 只能证明激活关系，不能证明继承 fd 的实际地址。此时本项降级为 skip，不会把 `.env` 里的 host 当成实际监听；请核对 `.socket` 的 `ListenStream=` 与服务 `--host` / `--port`，再重跑 `dutydeck doctor`。反向代理、防火墙和端口转发不在这项观测范围内。

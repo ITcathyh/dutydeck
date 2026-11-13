@@ -34,7 +34,7 @@ import { armShutdownDeadline } from './shutdown-phases.js';
 import { runNpmForDutydeckUpdate, updateDutydeck } from './update.js';
 import { runDeploy, runDeployPrune, type DeployPruneResult, type DeployResult } from './daemon/deploy.js';
 import { loadConfig, resolveDatabaseUrl } from '@dutydeck/config';
-import { recordAbnormalExit } from './abnormal-exit.js';
+import { beginServeRun, enrichAbnormalExitFromJournal, markServeRunning, recordAbnormalExit, recordCleanExit, type ServeRunLifecycle } from './abnormal-exit.js';
 import { createRepositories } from '@dutydeck/storage';
 import { runAuthPasswordSetCommand, runAuthTokenCommand, runShareKeyRotateCommand } from './auth/auth.js';
 import { readPasswordInput } from './auth/password-input.js';
@@ -80,6 +80,14 @@ async function serve(options: CliOptions, onReady?: () => void) {
   // 异常退出记录只写到本次 serve 的数据库目录（与 startLocalServer 同一取法），不走 daemon 目录的 last-daemon-dir 回退。
   let databaseUrl: string | undefined;
   try { databaseUrl = resolveDatabaseUrl(environmentFromCli(options)); } catch { databaseUrl = undefined; }
+  const daemonState = readDaemonStatus(resolveDaemonDir());
+  const unit = daemonState?.pid === process.pid && daemonState.supervisor === 'systemd' ? daemonState.systemdUnit : undefined;
+  const started = beginServeRun(databaseUrl, { version: packageJson.version, ...(unit ? { unit } : {}) });
+  let serveRun: ServeRunLifecycle = started.lifecycle;
+  for (const previousRun of started.previousRuns ?? (started.previousRun ? [started.previousRun] : [])) void enrichAbnormalExitFromJournal(databaseUrl, previousRun);
+  const abnormal = (kind: 'fatal' | 'startup', exitCode: number, error: unknown, signal?: string) => {
+    recordAbnormalExit(databaseUrl, { kind, exitCode, error, version: packageJson.version, lifecycle: serveRun, source: 'process', ...(signal ? { signal } : {}) });
+  };
   // Observe fatal errors without installing a recovery handler. Continuing
   // after an uncaught exception can leave the DB, PTY, and session queues in an
   // unknown state; Node must retain its default non-zero exit behavior so the
@@ -93,10 +101,14 @@ async function serve(options: CliOptions, onReady?: () => void) {
     if (plugins.length) process.stderr.write(`Fatal error stack includes in-process plugin code: ${plugins.join(', ')}. Plugin providers run inside the daemon; fix or disable the plugin (dutydeck plugin disable <name>).\n`);
     const quarantined = quarantineCrashedPlugins(plugins, origin);
     if (quarantined.length) process.stderr.write(`Quarantined plugins: ${quarantined.join(', ')}. They will not load on the next start; after fixing, run dutydeck plugin enable <name> and restart.\n`);
-    recordAbnormalExit(databaseUrl, { kind: 'fatal', exitCode: 1, error, version: packageJson.version });
+    abnormal('fatal', 1, error);
   });
   // 启动完成前没有可关闭的服务；停止信号照常立即退出，但先删掉正在加载的插件标记，免得被当成插件卡死而隔离。
-  const startupSignal = (signal: NodeJS.Signals) => { releaseProviderLoadingMarkers(); process.exit(128 + (signal === 'SIGINT' ? 2 : 15)); };
+  const startupSignal = (signal: NodeJS.Signals) => {
+    recordCleanExit(databaseUrl, serveRun, { reason: 'stopped', signal });
+    releaseProviderLoadingMarkers();
+    process.exit(128 + (signal === 'SIGINT' ? 2 : 15));
+  };
   process.on('SIGINT', startupSignal); process.on('SIGTERM', startupSignal);
   const { startLocalServer } = await import('./service.js');
   const { dutydeckGroupToolsCommand } = await import('./lark/agent-tools.js');
@@ -104,10 +116,13 @@ async function serve(options: CliOptions, onReady?: () => void) {
   try {
     service = await startLocalServer({ env: environmentFromCli(options), groupToolsCommand: dutydeckGroupToolsCommand(fileURLToPath(import.meta.url)) });
   } catch (error) {
-    recordAbnormalExit(databaseUrl, { kind: 'startup', exitCode: 1, error, version: packageJson.version });
+    abnormal('startup', 1, error);
     throw error;
   }
   databaseUrl = service.config.databaseUrl;
+  const running = markServeRunning(databaseUrl, serveRun);
+  serveRun = running.lifecycle;
+  for (const previousRun of running.previousRuns ?? (running.previousRun ? [running.previousRun] : [])) void enrichAbnormalExitFromJournal(databaseUrl, previousRun);
   process.off('SIGINT', startupSignal); process.off('SIGTERM', startupSignal);
   const address = service.config.host === '0.0.0.0'
     ? `http://127.0.0.1:${service.config.port} (LAN access enabled; other devices can use this computer's LAN IP)`
@@ -118,18 +133,24 @@ async function serve(options: CliOptions, onReady?: () => void) {
   const shutdown = async (signal: NodeJS.Signals) => {
     if (closing) {
       process.stderr.write(`Received ${signal} again; forcing exit. 未完成的停服阶段：${service.shutdownPhases.unfinished().join('、')}\n`);
+      abnormal('fatal', 130, `Forced shutdown after a second ${signal}`, signal);
       process.exit(130);
     }
     closing = true;
     process.stdout.write('Shutting down Dutydeck… Press Ctrl-C again to force exit.\n');
-    const cancelHardStop = armShutdownDeadline(() => service.shutdownPhases, line => process.stderr.write(line), code => process.exit(code));
+    const cancelHardStop = armShutdownDeadline(() => service.shutdownPhases, line => process.stderr.write(line), code => {
+      abnormal('fatal', code, 'Shutdown deadline exceeded', signal);
+      process.exit(code);
+    });
     try {
       await service.close();
       cancelHardStop();
+      recordCleanExit(databaseUrl, serveRun, { reason: 'stopped', signal });
       process.exit(0);
     } catch (error) {
       cancelHardStop();
       process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+      abnormal('fatal', 1, error, signal);
       process.exit(1);
     }
   };

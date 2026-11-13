@@ -40,7 +40,15 @@ dutydeck update
 dutydeck doctor
 ```
 
-服务启动失败或运行中崩溃时，会在数据库所在目录写一份 `last-abnormal-exit.json`（时间、类型、退出码、脱敏后的错误首行、版本和数据库路径）；数据库目录还不存在时不写，也不会写到 `last-daemon-dir` 指向的其他实例。`dutydeck doctor` 读到 7 天内、且属于同一个数据库的记录时，在「守护进程」一项后面接一句「X 小时前异常退出（…）」：当前实例已就绪且是之后启动的，写「已自动恢复」，否则提示去看 journalctl。这一项的级别不变，没有记录时输出和以前一样。
+服务启动失败或运行中崩溃时，会在数据库所在目录写一份 `last-abnormal-exit.json`（时间、类型、退出码、脱敏后的错误首行、版本和数据库路径）；数据库目录还不存在时不写，也不会写到 `last-daemon-dir` 指向的其他实例。顶层仍是最近一条 `fatal|startup` 异常，可选 `history` 只保留最近 10 条并按 `runId` 去重；`lifecycle`/`clean-exit` 保留当前代兼容展示，`lifecycleRuns`/`cleanExits` 则按 runId+database 去重、各保留最近 10 条，记录各代 PID、启动时间、unit/boot 和干净停止，避免同目录多库或重叠启动互相覆盖；迟到旧代只写自己的 `cleanExits`，不改当前单数展示，干净退出不覆盖最近异常。上一代没有干净标记且已不在运行时，下一代先记「原因待 journal 富集」；Linux systemd 下只在同一 unit、boot、PID 和启动时间都能对齐退出记录时补 SIGKILL，查询有界且不阻塞就绪，查不到或没有权限时保留基础记录。上一代仍在运行不会报历史崩溃；launchd 富集本轮不支持。`dutydeck doctor` 读到 7 天内、且属于同一个数据库的记录时，在「守护进程」一项后面接一句「X 小时前异常退出（…）」：当前实例已就绪且是之后启动的，写「已自动恢复」，否则提示去看 journalctl。这一项的级别不变，没有记录时输出和以前一样。
+
+### doctor 暴露组合检查<a id="doctor-exposure"></a>
+
+`lark.exposure` 在同一项里组合监听地址、显式 `local-only`、认证模式、socket 激活、机器人 `permissionMode` / `fullTrustConfirmed`、高危用户范围和 `riskControlMode`。监听与认证优先取运行中守护进程的记录；认证模式按实际语义显示为 `local`、`token` 或 `open`，不是只显示一个布尔值。`local-only` 保留本次 doctor 能看到的显式配置事实，不从解析后的 `127.0.0.1` 反推；另一个 shell 看不到 daemon 的启动参数时显示「未知」，不会误写成「关闭」。socket 激活只认当前进程的 `LISTEN_PID` / `LISTEN_FDS` 或运行中 systemd unit 的 `TriggeredBy`；这些事实不能证明继承 fd 的实际地址时，该项降级为「实际监听地址未知」，不会拿 `.env` 的 host 猜成回环或通配地址。
+
+机器人部分只把已开启监听、默认 Agent 已配置且执行模式已确认的条目算作可运行权限；旧记录仅写 `fullTrustConfirmed=true` 时仍按完全信任处理。高危名单先按运行时同一只读归一化路径清理无效用户和空白邮箱，再显示「全部 / 指定」及 ID、邮箱数量，不输出 openId、姓名、邮箱、App Secret 或访问令牌。`off` 不执行高危名单，即使填了名单也按广范围处理；`guidance` 只提醒，`enforced` 才是强制拦截。只有「非回环 `open` + 可运行的完全信任机器人 + 广范围高危用户 + 弱风控」同时成立时，本项才升级：`off` 为 fail，`guidance` 为 warn。强制风控、较窄的 guidance 名单、token/local，或机器人不是完全信任时，本项不新增告警；既有 `access.posture` 等检查不变。数据库或机器人配置不可读时降级为 skip，不重复报错。
+
+命中危险组合时会给出 remedy 和可复制命令，例如 `dutydeck settings bot set <appId> permissionMode=ask fullTrustConfirmed=false`，或改用 `dutydeck setup --local-only`；保留完全信任时，先运行 `dutydeck settings bot install-hook <appId>`，再设置 `riskControlMode=enforced` 并配置 `highRiskAllowedUsers` / `highRiskAllowedEmails`。doctor 只报告，不自动修改 `.env`、unit 或机器人配置。结论只覆盖它能观测的监听地址，不假定反向代理、防火墙或端口转发后的其他访问路径已经安全或已经验证。
 
 `restart` 先暂停领取新任务。已提交成功、恢复日志与原轮身份可验证的 `full-trust` tmux 任务继续在原 CLI 进程里运行，新服务接回同一轮，不重发输入；其余任务继续等待结束。ACP、普通 PTY、Herdr、提交中、缺少恢复日志或身份，以及待审批或高危权限门禁未授权的任务都不会跳过等待。systemd 只在当前 `KillMode=process` 时保留任务；其他值或读不到时全量等待。旧服务不支持恢复计数、排空失败或租约续期失败时也全量等待。`--drain-timeout` 控制等待上限，`--force` 保留原来的强制重启行为，当前 Agent 自己的会话仍自动排除。`deploy` 使用同一保留策略，ACP 等不可保留的任务仍等待结束。
 
@@ -138,6 +146,14 @@ dutydeck backup restore --archive /path/to/backups/snapshot-1 --target /path/to/
 ```
 
 三条命令均输出 JSON，必须显式提供路径，不从 `.env` 或 daemon 记录猜测源实例。源数据库须直接位于数据目录中且已升级到当前 schema；有活跃使用者时拒绝备份。输出和恢复目标目录必须不存在、父目录必须存在；备份放在源数据目录之外，恢复不覆盖已有目录。
+
+启动报 `DATABASE_SCHEMA_TOO_NEW` 时，错误会给出数据库版本和程序支持版本，并打印带实际路径的只读检查命令：
+
+```bash
+dutydeck database execution-status --database /path/to/runtime/dutydeck.db
+```
+
+该命令只读，不迁移、不降级，也不要求先能正常打开服务；`--database` 必须显式提供。应换用支持该 schema 的 Dutydeck，或在停止所有写入方后，用确认过时间的备份恢复到另一个新目录核对：`dutydeck backup restore --archive <备份目录> --target <新的恢复目录>`。**使用备份会丢备份后的全部写入；切回旧代码不是数据库回滚。**
 
 备份包含 SQLite 主数据、插件非秘密配置 / 绑定 / 锁文件、引用的不可变插件包，以及冻结数据库引用的产物快照。持有数据库和插件写锁期间复制，并检查组件哈希、快照大小、schema、SQLite 完整性和外键；缺少引用的产物快照或内容不一致会失败。清单列出缺失及排除项。备份目录为 0700、文件为 0600；完整数据库可能含仍可用于源实例的认证令牌、分享签名密钥及敏感正文；归档没有额外加密，不是无密钥备份。
 
