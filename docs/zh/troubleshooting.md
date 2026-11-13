@@ -55,3 +55,6 @@
 ### Q8: 报 tmux socket 被删、原终端仍在运行，无法启动会话？
 - **原因**：Linux 上 `/tmp` 清理了 tmux socket 文件，但原 tmux server 和 pane 仍在；Dutydeck 会拒绝再启动一个同名 server，避免同一会话同时跑两个 CLI。
 - **处理**：按 tmux 手册向原 server 进程发送 `SIGUSR1` 重建 socket，或结束原 tmux server 后重新发送消息。可把 `TMUX_TMPDIR` 指到不会被清理的目录，或让 `systemd-tmpfiles` 排除 tmux 目录。非 Linux 不做这项内核检查，行为保持原样。开启 `remain-on-exit` 时，Dutydeck 下次启动会回收自己留下且所有 pane 都已退出的死会话；仍有运行中 pane 的会话会保留。
+
+### Q9: 宿主没有 UTF-8 locale 会怎样？
+- Dutydeck 会强制其发起的 tmux 客户端使用 UTF-8（`-u`）；即使宿主没有 UTF-8 locale，也能正确识别终端会话，中文等非 ASCII 字符不会因此被显示为下划线。

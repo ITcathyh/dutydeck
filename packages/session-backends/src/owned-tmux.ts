@@ -51,7 +51,7 @@ async function tmux(path: string, args: string[]): Promise<string> {
   const env = { ...process.env, LC_ALL: 'C' };
   delete (env as NodeJS.ProcessEnv).TMUX;
   delete (env as NodeJS.ProcessEnv).TMUX_TMPDIR;
-  return (await runCommand('tmux', ['-S', path, ...args], {
+  return (await runCommand('tmux', ['-u', '-S', path, ...args], {
     timeout: 3_000, env,
   })).trim();
 }

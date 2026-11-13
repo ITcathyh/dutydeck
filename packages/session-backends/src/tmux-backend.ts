@@ -250,7 +250,7 @@ function classifyFailure(err: unknown, op: string): TmuxError {
 
 /** Run a tmux command, capturing stdout. Throws a typed TmuxError on failure. */
 async function runTmux(args: string[], opts: { input?: string; timeout?: number; cwd?: string } = {}): Promise<string> {
-  try { return await runCommand('tmux', args, { ...opts, env: tmuxClientEnv(), maxBuffer: 16 * 1024 * 1024 }); }
+  try { return await runCommand('tmux', ['-u', ...args], { ...opts, env: tmuxClientEnv(), maxBuffer: 16 * 1024 * 1024 }); }
   catch (err) { throw classifyFailure(err, `tmux ${args[0] ?? 'client'}`); }
 }
 
@@ -339,7 +339,7 @@ function pollPanes(poller: PanePoller): void {
   if (poller.inFlight || poller.subscribers.size === 0) return;
   poller.inFlight = true;
   const targets = [...poller.subscribers];
-  void runCommand('tmux', ['list-panes', '-a', '-F', PANE_FORMAT], { env: poller.env, timeout: 3000 })
+  void runCommand('tmux', ['-u', 'list-panes', '-a', '-F', PANE_FORMAT], { env: poller.env, timeout: 3000 })
     .then(stdout => paneSessions(stdout), (error: unknown) => classifyPaneFailure(error))
     .then(result => {
       for (const [watch, { sessionName, deliver }] of targets) {
@@ -747,7 +747,7 @@ export class TmuxBackend implements SessionBackend {
   /** A missing socket file is 'missing' unless the kernel proves the old server still listens on that path. */
   private static async hasSession(name: string): Promise<{ probe: SessionProbe; orphanedSocket?: string }> {
     try {
-      await runCommand('tmux', ['has-session', '-t', name], { env: tmuxClientEnv(), timeout: 3000 });
+      await runCommand('tmux', ['-u', 'has-session', '-t', name], { env: tmuxClientEnv(), timeout: 3000 });
       return { probe: 'exists' };
     } catch (error) {
       const failure = error as { signal?: string; status?: number; stderr?: string };

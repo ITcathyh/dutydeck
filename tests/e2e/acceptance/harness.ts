@@ -209,7 +209,7 @@ export async function launchIsolatedTestServer(
       }
 
       try {
-        execFileSync(tmuxBin, ['-S', socket, 'kill-server'], { stdio: 'ignore' });
+        execFileSync(tmuxBin, ['-u', '-S', socket, 'kill-server'], { stdio: 'ignore' });
       } catch {}
 
       try {

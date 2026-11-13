@@ -12,7 +12,7 @@ function deferred<T>() { let resolve!: (value: T) => void; const promise = new P
 
 it.each(['detach', 'interrupt', 'kill'] as const)('revokes tmux paste after %s during load-buffer and deletes that buffer', async cancel => {
   const load = deferred<string>(), calls: string[][] = [];
-  command.mockImplementation((_bin, args) => { calls.push(args); return args[0] === 'load-buffer' ? load.promise : Promise.resolve(''); });
+  command.mockImplementation((_bin, args) => { expect(args[0]).toBe('-u'); args = args.slice(1); calls.push(args); return args[0] === 'load-buffer' ? load.promise : Promise.resolve(''); });
   const backend = new TmuxBackend('fixture');
   (backend as any).started = true;
   const writing = backend.write('synthetic\ninput');
@@ -25,7 +25,7 @@ it.each(['detach', 'interrupt', 'kill'] as const)('revokes tmux paste after %s d
 });
 it('keeps an uncancelled tmux paste ordered and cleans it through -d', async () => {
   const calls: string[][] = [];
-  command.mockImplementation((_bin, args) => { calls.push(args); return Promise.resolve(''); });
+  command.mockImplementation((_bin, args) => { expect(args[0]).toBe('-u'); args = args.slice(1); calls.push(args); return Promise.resolve(''); });
   const backend = new TmuxBackend('fixture'); (backend as any).started = true;
   expect(await backend.write('one\ntwo')).toBe(true);
   expect(calls.map(args => args[0])).toEqual(['load-buffer', 'paste-buffer']);
