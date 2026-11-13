@@ -1,6 +1,6 @@
 import { isBackgroundFollowup, isChildDiagnostic, terminalTaskStatuses, type AgentEvent, type VerificationResponse, type VerificationStatus } from '@dutydeck/shared';
 import type { StoredLarkConfig } from './config.js';
-import { boundLarkCardElements, LarkServiceError } from './service.js';
+import { boundLarkCardElements, LarkServiceError, type LarkCardService } from './service.js';
 import { redactTraceText, sensitiveTraceKey } from './secret-redaction.js';
 import { collapsiblePanel, escapeCardInline, neutralizeCardTags, textFence } from './card-elements.js';
 import { repairCardStrongPunctuation } from './card-strong-punctuation.js';
@@ -207,8 +207,9 @@ const fenced = (value: unknown) => {
 
 const truncate = (value: unknown, limit: number) => {
   const text = (typeof value === 'string' ? value : JSON.stringify(value, null, 2) ?? '').trim();
-  if (text.length <= limit) return text;
-  return `${text.slice(0, limit).trimEnd()}\n…（内容过长，已截断）`;
+  const characters = Array.from(text);
+  if (characters.length <= limit) return text;
+  return `${characters.slice(0, limit).join('').trimEnd()}\n…（内容过长，已截断）`;
 };
 const redactTraceValue = (value: unknown, seen = new WeakSet<object>(), depth = 0): unknown => {
   if (typeof value === 'string') return redactTraceText(value);
@@ -1280,6 +1281,18 @@ export const renderLarkProcessElements = (events: AgentEvent[], config: Pick<Sto
 
 export const renderLarkResultElements = (events: AgentEvent[], options: { state?: string; agentName?: string } = {}) =>
   renderLarkCardElements(events, { hideTraceOnComplete: true }, true, 'result', options);
+
+/** 主动取消的操作者名称只用于当次终态卡；机器人、系统身份与查询失败都保留旧文案。 */
+export async function larkCancellationActorLabel(
+  service: Pick<LarkCardService, 'getContactUser'>, actorId: string | undefined
+): Promise<string | undefined> {
+  const id = actorId?.trim();
+  if (!id?.startsWith('ou_')) return undefined;
+  try {
+    const name = (await service.getContactUser(id, 'open_id'))?.name?.trim();
+    return name ? `由 ${name} 取消` : undefined;
+  } catch { return undefined; }
+}
 
 export function renderLarkResultTextElements(text: string): LarkCardElement[] {
   const finalText = redactTraceText(text).trim();

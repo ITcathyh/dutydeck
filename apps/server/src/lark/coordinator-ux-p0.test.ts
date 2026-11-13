@@ -148,6 +148,7 @@ async function harness(
     update: vi.fn(async ({ beforeSend, ...input }: any) => { await beforeSend?.(); cards.set(input.messageId, structuredClone(input)); return { messageId: input.messageId }; }),
     addReaction: vi.fn(async (messageId: string, emojiType = 'OK') => ({ messageId, reactionId: `reaction_${messageId}_${emojiType}` })),
     deleteReaction: vi.fn(async () => {}), getUserEmails: vi.fn(async (_openIds?: string[]) => [] as string[]),
+    getContactUser: vi.fn(async (_id: string, _idType: 'open_id' | 'union_id'): Promise<{ openId: string; name?: string } | undefined> => undefined),
     listChatMembers: vi.fn(async () => ({ items: [{ memberId: 'ou_alice' }, { memberId: 'ou_bob' }], hasMore: false })),
     listChatMessages: vi.fn(async () => ({ items: [] as any[], hasMore: false })),
     getMessage: vi.fn(async (id: string) => ({ messageId: id, chatId: 'oc_group', threadId: 'omt_topic', messageType: 'text', rawContent: JSON.stringify({ text: '已核实的引用材料' }), sender: { type: 'user' }, mentions: [] })),
@@ -319,6 +320,42 @@ describe('P0-1 他人操作二次确认 / overflow 门 / 行内审批反伪造',
     const selfSessionId = h.interrupt.mock.calls[1]![0];
     expect(h.interrupt.mock.calls[1]![2]).toBe('ou_alice');
     expect(selfSessionId).toBeTruthy();
+  });
+
+  it('取消结果卡显示实际中断人并冻结名称，心跳与旧卡重绘不重复查询', async () => {
+    const h = await harness('permission', { managedGroup: true });
+    h.service.getContactUser.mockImplementation(async (id: string) => id === 'ou_bob' ? { openId: id, name: 'Bob' } : { openId: id, name: 'Alice' });
+    const bot = (await h.groupManager!.groups()).groups[0]!.bots[0]!;
+    const bob = (await h.groupManager!.members(h.config.appId, 'oc_group')).members.find(member => member.openId === 'ou_bob')!;
+    await h.repos.roleAssignments.create({ id: 'bob_cancel_admin', channelBotId: bot.binding!.channelBotId,
+      groupBindingId: bot.binding!.id, principalId: bob.principalId, role: 'admin', operateScope: 'none',
+      actionGates: { terminalWrite: false, highRisk: false, groupToolsSend: false } });
+    await h.coordinator.handle(event('om_cancel_actor', 'Alice 发起的任务'), h.config);
+    await vi.waitFor(async () => expect((await h.interactions()).some(item => item.kind === 'permission' && item.state === 'pending')).toBe(true));
+    const value = { action: 'interrupt', task_id: 'om_cancel_actor', turn: '1' };
+    const context = { messageId: 'om_card_cancel_actor', chatId: 'oc_group' };
+    expect(await h.coordinator.handleAction(value, 'ou_bob', context)).toMatchObject({ type: 'warning' });
+    expect(await h.coordinator.handleAction(value, 'ou_bob', context)).toMatchObject({ type: 'success' });
+    await h.waitDelivered(1);
+
+    expect(h.service.getContactUser).toHaveBeenCalledExactlyOnceWith('ou_bob', 'open_id');
+    expect(h.service.getContactUser).not.toHaveBeenCalledWith('ou_alice', 'open_id');
+    const sent = [...h.service.send.mock.calls, ...h.service.reply.mock.calls].map(([input]) => input).find(input => input.cardKind === 'result' && input.taskId === 'om_cancel_actor')!;
+    expect(sent).toMatchObject({ state: 'interrupted', statusLabel: '由 Bob 取消' });
+    expect(JSON.stringify(buildLarkCard(sent))).toContain('由 Bob 取消');
+    expect(JSON.stringify(buildLarkCard(sent))).not.toContain('由 Alice 取消');
+    expect(callbackValues(buildLarkCard(sent)).filter(item => JSON.stringify(item).includes('Bob'))).toEqual([]);
+
+    const task = (h.coordinator as any).tasks.get('om_cancel_actor');
+    expect(task.finalCardInput).toMatchObject({ statusLabel: '由 Bob 取消' });
+    await (h.coordinator as any).refreshResultVerification(task, h.config);
+    expect(h.service.getContactUser).toHaveBeenCalledOnce();
+    expect(h.service.update.mock.calls.at(-1)![0]).toMatchObject({ taskId: 'om_cancel_actor', statusLabel: '由 Bob 取消' });
+
+    const restored = await (h.coordinator as any).restoreVerifyCardAction('om_cancel_actor', 1, { messageId: task.finalMessageId, chatId: 'oc_group' });
+    await (h.coordinator as any).refreshResultVerification(restored, h.config);
+    expect(h.service.getContactUser).toHaveBeenCalledOnce();
+    expect(h.service.update.mock.calls.at(-1)![0]).toMatchObject({ taskId: 'om_cancel_actor', statusLabel: '由 Bob 取消' });
   });
 
   it('overflow 只放行 reject+option=reject，其余点选与伪造卡一律拒绝且不触达执行端', async () => {
