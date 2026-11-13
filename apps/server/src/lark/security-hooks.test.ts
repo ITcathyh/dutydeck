@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { AgentConfig } from '@dutydeck/shared';
-import { installLarkHook, larkHookStatus, processGuardedAgent } from './security-hooks.js';
+import { installLarkHook, larkHookStatus, processGuardedAgent, upgradeInstalledLarkHook } from './security-hooks.js';
 
 vi.mock('./codex-hook-readiness.js', () => ({ codexHookReadiness: async () => ({ nativeReady: false }) }));
 
@@ -36,6 +36,20 @@ describe('Lark Agent security hooks', () => {
     expect(JSON.stringify(hooks)).toContain('dutydeck-lark-high-risk-guard-codex.mjs');
     await installLarkHook('codex', workspace);
     expect(JSON.parse(await readFile(join(workspace, '.codex', 'hooks.json'), 'utf8')).hooks.PreToolUse).toHaveLength(2);
+  });
+
+  it('repairs a custom Codex guard through its declared adapter without treating an untrusted hook as ready', async () => {
+    const workspace = await mkdtemp(join(tmpdir(), 'dutydeck-hook-')); workspaces.push(workspace);
+    const agent = { id: 'custom-codex', adapterId: 'codex', protocol: 'acp' as const };
+    await installLarkHook('codex', workspace);
+    const script = join(workspace, '.dutydeck/security/dutydeck-lark-high-risk-guard-codex.mjs');
+    const original = await readFile(script, 'utf8');
+    await writeFile(script, original + '\n// changed');
+    expect(await larkHookStatus(agent.id, workspace, agent)).toMatchObject({ installed: false });
+    await upgradeInstalledLarkHook(agent.id, workspace, agent);
+    expect(await readFile(script, 'utf8')).toBe(original);
+    expect(await larkHookStatus(agent.id, workspace, agent)).toMatchObject({ agentId: agent.id, installed: true, nativeReady: false, trustRequired: true });
+    expect(await larkHookStatus('codex', workspace, { id: 'codex', adapterId: 'unsupported' })).toMatchObject({ supported: false });
   });
 
   it('blocks matching tool input and allows authorized or safe input', async () => {
