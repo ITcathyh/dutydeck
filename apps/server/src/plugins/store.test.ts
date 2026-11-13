@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createCliUi } from '../cli-ui.js';
 import { runPluginCli } from './cli.js';
+import { loadPluginDirectory } from './manifest.js';
 import { parsePluginSource, PluginStore, type PluginTrustPrompt } from './store.js';
 import { writePlugin } from './scenario-fixtures.test-helpers.js';
 
@@ -254,6 +255,42 @@ describe('PluginStore', () => {
     expect(confirm).not.toHaveBeenCalled();
   });
 
+  it('redacts changed hook commands when an update also adds a provider', async () => {
+    const source = join(temp, 'provider-review');
+    const secret = 'update-provider-secret-canary';
+    await writePlugin(source, {
+      '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'provider-review', version: '1.0.0' }),
+      'hooks/hooks.json': JSON.stringify({ 'task.completed': [{ command: 'old-hook-command', timeout: 1000 }] })
+    });
+    await store.install(source, { yes: true });
+    const original = store.get('provider-review');
+    await writePlugin(source, {
+      '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'provider-review', version: '2.0.0', providers: 'provider.mjs' }),
+      'provider.mjs': 'export default () => {};',
+      'hooks/hooks.json': JSON.stringify({ 'task.completed': [{ command: ['node', 'hook.mjs', secret], timeout: 1000 }] })
+    });
+
+    const confirm = vi.fn(async () => false);
+    await expect(store.update('provider-review', { confirm })).rejects.toMatchObject({ code: 'PLUGIN_TRUST_DECLINED' });
+    const prompt = confirm.mock.calls[0]![0];
+    expect(prompt.capabilities).toEqual(['providers']);
+    expect(prompt.details).toEqual([]);
+    expect(prompt.changes).toEqual([
+      { kind: 'hook', name: 'task.completed', before: expect.stringMatching(/^[0-9a-f]{64}$/), after: expect.stringMatching(/^[0-9a-f]{64}$/) }
+    ]);
+    expect(JSON.stringify(prompt)).not.toContain(secret);
+
+    const nonInteractive = await store.update('provider-review').then(
+      () => { throw new Error('expected PLUGIN_TRUST_REQUIRED'); },
+      error => error as Error
+    );
+    expect(nonInteractive).toMatchObject({ code: 'PLUGIN_TRUST_REQUIRED', message: expect.stringContaining('需要信任以下能力：providers') });
+    expect(nonInteractive.message).toContain('hook task.completed');
+    expect(nonInteractive.message).toMatch(/[0-9a-f]{64} → [0-9a-f]{64}/);
+    expect(nonInteractive.message).not.toContain(secret);
+    expect(store.get('provider-review')).toEqual(original);
+  });
+
   it('reports same-version local content replacement as changed', async () => {
     const source = join(temp, 'local');
     await writePlugin(source, declarative('local'));
@@ -264,6 +301,31 @@ describe('PluginStore', () => {
     expect(await readFile(join(store.artifactDir('local', store.get('local').candidate), 'commands/summary.md'), 'utf8')).toBe('new contents');
     await store.activate('local');
     expect(await readFile(join(store.pluginDir('local'), 'commands/summary.md'), 'utf8')).toBe('new contents');
+  });
+
+  it.each(['directory', 'manifest', 'hooks'] as const)('repairs a candidate with damaged %s using the active review base', async damage => {
+    const source = join(temp, 'recovery');
+    await writePlugin(source, declarative('recovery', '1.0.0'));
+    await store.install(source);
+    const original = store.get('recovery');
+    const activeRoot = store.pluginDir('recovery');
+    await writePlugin(source, { ...declarative('recovery', '2.0.0'), 'commands/summary.md': 'recovered command' });
+    const staged = await store.update('recovery', { yes: true });
+    const candidate = staged.entry.candidate!;
+    const candidateRoot = store.artifactDir('recovery', candidate);
+
+    if (damage === 'directory') await rm(candidateRoot, { recursive: true, force: true });
+    if (damage === 'manifest') await writePlugin(candidateRoot, { '.dutydeck-plugin/plugin.json': '{' });
+    if (damage === 'hooks') await writePlugin(candidateRoot, { 'hooks/hooks.json': '{' });
+
+    const repaired = await store.update('recovery', { yes: true });
+    expect(repaired.entry.active).toEqual(original.active);
+    expect(repaired.entry.candidate?.id).toBe(candidate.id);
+    expect(store.pluginDir('recovery')).toBe(activeRoot);
+    const loaded = await loadPluginDirectory(candidateRoot);
+    expect(loaded.manifest.version).toBe('2.0.0');
+    expect(loaded.commands).toEqual([expect.objectContaining({ name: 'summary', template: 'recovered command' })]);
+    expect(await readFile(join(activeRoot, 'commands/summary.md'), 'utf8')).toBe('总结 $ARGUMENTS');
   });
 
   it('installs an npm package from a local tarball source and records its version', async () => {

@@ -337,8 +337,8 @@ export class PluginStore {
     const prompt: PluginTrustPrompt = {
       plugin: plugin.manifest.name,
       capabilities: added,
-      // 仅为命令 diff 确认时不回显完整新命令；新增能力仍保留原来的完整确认信息。
-      details: added.length ? trustDetails(plugin) : [],
+      // update 有执行摘要时不再回显完整新命令；新 install 仍保留原来的完整确认信息。
+      details: !changes.length && added.length ? trustDetails(plugin) : [],
       ...(changes.length ? { changes } : {})
     };
     if (!options.confirm) {
@@ -386,7 +386,10 @@ export class PluginStore {
       if (staged.plugin.manifest.name !== name) throw new PluginStoreError('PLUGIN_NAME_CHANGED', `来源里的插件名变成了 ${staged.plugin.manifest.name}，不会覆盖 ${name}`);
       const activePlugin = await loadPluginDirectory(this.artifactDir(name, this.activeArtifact(current)));
       const changes = pluginCommandChanges(activePlugin, staged.plugin);
-      const reviewBase = current.candidate ? await loadPluginDirectory(this.artifactDir(name, current.candidate)) : activePlugin;
+      // 只有候选的读取/解析失败可回退；活动版本损坏仍在上面抛出，persistArtifact 随后只修复候选。
+      const reviewBase = current.candidate
+        ? await loadPluginDirectory(this.artifactDir(name, current.candidate)).catch(() => activePlugin)
+        : activePlugin;
       const reviewChanges = pluginCommandChanges(reviewBase, staged.plugin);
       await this.confirmTrust(staged.plugin, [...current.trustedCapabilities, ...(current.candidate?.trustedCapabilities ?? [])], options, reviewChanges);
       return await this.withStoreLock(async () => {
