@@ -4,7 +4,9 @@ import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import { RelayAskBroker, type RelayAskChoice } from '@dutydeck/relay';
+import { createRepositories } from '@dutydeck/storage';
 import { createCliAdapter } from '@dutydeck/cli-adapters';
+import { createRelayAskStore } from './relay-ask-store.js';
 import { readNativeAskPayload, runNativeAskHook } from './native-ask-hook.js';
 import { targetGuard } from '../../../tests/support/target-server.js';
 import { lazyBundleForTest } from '../../../tests/support/bundle-for-test.js';
@@ -29,9 +31,11 @@ afterEach(async () => {
 describe('native Claude questions over the session relay', () => {
   it('executes the generated native hook as a real subprocess and returns exact answers to Claude', async () => {
     const received: any[] = [];
+    const storedAskIds: string[] = [];
+    const repositories = createRepositories(':memory:');
     const broker = new RelayAskBroker({ publish: async (_session, event) => {
       if (event.kind === 'ask') await broker.answer(event.askId!, event.multiple ? '代码、文档' : '稍后再继续');
-    } });
+    } }, createRelayAskStore(repositories.config));
     const guard = targetGuard(request => request.method === 'POST' && request.url === '/api/relay/sessions/self/ask');
     guards.push(guard);
     const server = createServer(async (request, response) => {
@@ -41,13 +45,14 @@ describe('native Claude questions over the session relay', () => {
       let body: any;
       try { body = JSON.parse(Buffer.concat(chunks).toString()); } catch { request.socket.destroy(); return; }
       received.push({ url: request.url, token: request.headers.authorization, ...body });
-      const result = await broker.register({ sessionId: 'ses_native', question: body.question,
+      const result = await broker.register({ sessionId: 'ses_native', question: body.question, questionBody: body.questionBody,
         choices: body.choices as RelayAskChoice[], multiple: body.multiple });
+      storedAskIds.push(result.askId);
       response.setHeader('content-type', 'application/json');
       response.end(JSON.stringify(result));
     });
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
-    cleanup.push(async () => { await broker.close(); await new Promise<void>(resolve => server.close(() => resolve())); });
+    cleanup.push(async () => { await broker.close(); await broker.flush(); repositories.close(); await new Promise<void>(resolve => server.close(() => resolve())); });
     const port = (server.address() as { port: number }).port;
     const hookEnv = { ...env, dutydeck_relay_url: `http://127.0.0.1:${port}/api/relay`,
       dutydeck_relay_command: `'${process.execPath}' '${await bundledCli.path()}'` };
@@ -70,12 +75,18 @@ describe('native Claude questions over the session relay', () => {
       },
     } });
     expect(received).toEqual([
-      { url: '/api/relay/sessions/self/ask', token: 'Bearer fixture-token', requestId: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/), question: '要检查哪些项？\n代码：检查实现\n文档：检查说明', questionBody: '要检查哪些项？',
-        choices: [{ label: '代码' }, { label: '文档' }], multiple: true },
+      { url: '/api/relay/sessions/self/ask', token: 'Bearer fixture-token', requestId: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/), question: '要检查哪些项？', questionBody: '要检查哪些项？',
+        choices: [{ label: '代码', description: '检查实现' }, { label: '文档', description: '检查说明' }], multiple: true },
       { url: '/api/relay/sessions/self/ask', token: 'Bearer fixture-token', requestId: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/), question: '下一步？', questionBody: '下一步？',
         choices: [{ label: '继续' }, { label: '暂停' }] },
     ]);
     expect(received[0].requestId).not.toBe(received[1].requestId);
+    expect(storedAskIds.map(id => broker.get(id))).toMatchObject([
+      { status: 'answered', question: '要检查哪些项？',
+        choices: [{ label: '代码', description: '检查实现' }, { label: '文档', description: '检查说明' }] },
+      { status: 'answered', question: '下一步？', choices: [{ label: '继续' }, { label: '暂停' }] }
+    ]);
+    expect(broker.get(storedAskIds[0]!)!.question).not.toContain('检查实现');
     expect(broker.listPending()).toHaveLength(0);
   });
 

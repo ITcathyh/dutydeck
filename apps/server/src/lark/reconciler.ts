@@ -19,6 +19,7 @@ import {
   isLarkCardContentRejected,
   isLarkMessageRateLimit,
   isLarkMessageUnupdatable,
+  larkCancellationActorLabel,
   larkRateLimitBackoffMs,
   patchRejectedCardDelta,
   renderLarkProcessElements,
@@ -484,8 +485,14 @@ export async function performLarkCardReconcile(input: {
             ...(decoration?.elements ?? []),
             ...(!receiptOnly && completed && input.resultElements ? await input.resultElements(mapping, persisted, '', { finalOutput, groupMention: Boolean(mention) }) : []),
             ...(mention ? [{ tag: 'markdown', element_id: 'group_mention', content: mention }] : [])];
+          const cancellationStatusLabel = !receiptOnly && (state === 'interrupted' || state === 'cancelled') && runtimeTask.interruptedByActor
+            ? persisted.final_card_input
+              ? typeof persisted.final_card_input.statusLabel === 'string' ? persisted.final_card_input.statusLabel : undefined
+              : await larkCancellationActorLabel(service, runtimeTask.interruptedByActor)
+            : undefined;
           finalCardInput = {
             ...cardContext, permissionMode: larkPermissionMode(config), state, cardKind: 'result',
+            ...(cancellationStatusLabel ? { statusLabel: cancellationStatusLabel } : {}),
             taskId: mapping.externalId, taskName: persisted.task_name,
             elapsedSeconds, sessionId: mapping.sessionId, turn: persisted.turn, readOnly: true,
             ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}), ...decoration?.cardInput
@@ -506,13 +513,17 @@ export async function performLarkCardReconcile(input: {
             // Read-only recovery must not claim execution decorations were published.
             finalCardInput = undefined;
           } else {
-            if (persisted.final_delivery_first_failed_at === undefined) {
-              const anchored = { ...persisted, final_delivery_first_failed_at: Date.now() };
+            const freezeCancellationInput = (state === 'interrupted' || state === 'cancelled') && runtimeTask.interruptedByActor && !persisted.final_card_input;
+            if (persisted.final_delivery_first_failed_at === undefined || freezeCancellationInput) {
+              const anchored = { ...persisted,
+                ...(persisted.final_delivery_first_failed_at === undefined ? { final_delivery_first_failed_at: Date.now() } : {}),
+                ...(freezeCancellationInput ? { final_card_input: finalCardInput as Record<string, unknown> } : {}) };
               const extra = JSON.stringify(anchored);
               if (!await cardMappings.compareAndSetExtra(mapping.id, mapping.extra, extra)) {
                 throw new LarkServiceError('LARK_WRITE_OBSOLETE', '首次投递时间写入时轮次已更新。', 409);
               }
               persisted.final_delivery_first_failed_at = anchored.final_delivery_first_failed_at;
+              persisted.final_card_input = anchored.final_card_input;
               mapping.extra = extra;
             }
             const result = await completeExplicitFinal(input.deliveryStore, service, finalContext, finalCardInput, elements, beforeSend, input.authorizeFinalRelay ?? (async () => { throw new LarkServiceError('FINAL_RELAY_REVOKED', '回传恢复缺少授权检查。', 403); })) ?? await sendLarkResult(service, {

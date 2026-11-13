@@ -5,7 +5,7 @@ import { mkdtemp, open, readFile, rename, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { larkResourceRangeBytes, readResourceError, ResourceRangeError, ResourceStreamError, validateResourceRange, writeResourceStream } from './resource-range-download.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { requestSignal, type LifecycleFetch } from '../workbench-fetch.js';
 import type { PermissionMode } from '@dutydeck/shared';
 import type { ContactIdType, ContactUser } from './owner-identity.js';
@@ -1271,6 +1271,8 @@ export class LarkCardService {
   }
 
   async send(input: LarkSendInput): Promise<LarkMessageResult> {
+    const explicitKey = input.idempotencyKey?.trim();
+    const uuid = explicitKey ? larkMessageUuid(explicitKey) : randomUUID();
     return this.withRequestBudget(async () => {
       if (input.chatId && input.receiveId) throw new LarkServiceError('CONFLICTING_RECIPIENTS', 'chatId and receiveId cannot be used together', 400);
       const chatId = input.chatId?.trim();
@@ -1279,8 +1281,7 @@ export class LarkCardService {
       const resolvedReceiveIdType = receiveIdType(chatId ? 'chat_id' : input.receiveIdType ?? this.config.defaultReceiveIdType);
       const cardInput = await this.cardInput(input);
       const fields = {
-        receive_id: receiveId, msg_type: 'interactive',
-        ...(input.idempotencyKey?.trim() ? { uuid: larkMessageUuid(input.idempotencyKey.trim()) } : {})
+        receive_id: receiveId, msg_type: 'interactive', uuid
       };
       const payload = await this.request(`/open-apis/im/v1/messages?receive_id_type=${encodeURIComponent(resolvedReceiveIdType)}`, {
         onFailure: input.onDeliveryFailure, beforeSend: input.beforeSend,
@@ -1293,6 +1294,8 @@ export class LarkCardService {
   }
 
   async reply(input: LarkReplyInput): Promise<LarkMessageResult> {
+    const explicitKey = input.idempotencyKey?.trim();
+    const uuid = explicitKey ? larkMessageUuid(explicitKey) : randomUUID();
     return this.withRequestBudget(async () => {
       const messageId = required(input.messageId, 'messageId');
       const cardInput = await this.cardInput(input);
@@ -1302,8 +1305,7 @@ export class LarkCardService {
       // 消息 om_*）时，用 replyRootId 作为 path 锚点，让卡片落在话题根下；否则回落到触发消息 messageId。
       const threadAnchor = input.replyInThread && input.replyRootId?.trim() ? input.replyRootId.trim() : messageId;
       const fields = {
-        msg_type: 'interactive', ...(input.replyInThread ? { reply_in_thread: true } : {}),
-        ...(input.idempotencyKey?.trim() ? { uuid: larkMessageUuid(input.idempotencyKey.trim()) } : {})
+        msg_type: 'interactive', ...(input.replyInThread ? { reply_in_thread: true } : {}), uuid
       };
       const payload = await this.request(`/open-apis/im/v1/messages/${encodeURIComponent(threadAnchor)}/reply`, {
         onFailure: input.onDeliveryFailure, beforeSend: input.beforeSend,
@@ -1522,10 +1524,11 @@ export class LarkCardService {
   }
 
   async sendText(input: LarkSendTextInput): Promise<LarkMessageResult> {
+    const uuid = input.idempotencyKey ? larkMessageUuid(input.idempotencyKey) : randomUUID();
     const chatId = required(input.chatId, 'chatId');
     if (!chatId.startsWith('oc_')) throw new LarkServiceError('INVALID_CHAT_ID', 'chatId must start with oc_', 400);
     const payload = await this.request('/open-apis/im/v1/messages?receive_id_type=chat_id', {
-      retry: input.retry, beforeSend: input.beforeSend, body: { receive_id: chatId, msg_type: 'text', content: JSON.stringify({ text: required(input.text, 'text') }), ...(input.idempotencyKey ? { uuid: larkMessageUuid(input.idempotencyKey) } : {}) }
+      retry: input.retry, beforeSend: input.beforeSend, body: { receive_id: chatId, msg_type: 'text', content: JSON.stringify({ text: required(input.text, 'text') }), uuid }
     });
     const messageId = payload.data?.message_id;
     if (!messageId) throw new LarkServiceError('INVALID_LARK_RESPONSE', 'Lark send response did not include message_id', 502);
@@ -1533,12 +1536,13 @@ export class LarkCardService {
   }
 
   async replyText(input: LarkReplyTextInput): Promise<LarkMessageResult> {
+    const uuid = input.idempotencyKey ? larkMessageUuid(input.idempotencyKey) : randomUUID();
     const messageId = required(input.messageId, 'messageId');
     const payload = await this.request(`/open-apis/im/v1/messages/${encodeURIComponent(messageId)}/reply`, {
       retry: input.retry, beforeSend: input.beforeSend, body: {
         msg_type: 'text', content: JSON.stringify({ text: required(input.text, 'text') }),
         ...(input.replyInThread ? { reply_in_thread: true } : {}),
-        ...(input.idempotencyKey ? { uuid: larkMessageUuid(input.idempotencyKey) } : {})
+        uuid
       }
     });
     const replyId = payload.data?.message_id;

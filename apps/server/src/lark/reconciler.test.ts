@@ -947,7 +947,8 @@ describe('performLarkCardReconcile 遵守群级呈现开关', () => {
       update: vi.fn(async (input: any) => ({ messageId: input.messageId })),
       send: vi.fn(async () => ({ messageId: 'om_final', elements: [] })),
       reply: vi.fn(async () => ({ messageId: 'om_final', elements: [] })),
-      addReaction: vi.fn(async (messageId: string, emojiType: string) => ({ messageId, reactionId: `r_${emojiType}` }))
+      addReaction: vi.fn(async (messageId: string, emojiType: string) => ({ messageId, reactionId: `r_${emojiType}` })),
+      getContactUser: vi.fn(async (_id: string, _idType: 'open_id' | 'union_id'): Promise<{ openId: string; name?: string } | undefined> => undefined)
     };
     const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
     return { cardMappings, runtime, service, log };
@@ -1154,6 +1155,55 @@ describe('performLarkCardReconcile 遵守群级呈现开关', () => {
     expect(h.service.addReaction).not.toHaveBeenCalled();
   });
 
+  it('取消终态卡按 actor 解析姓名，失败回退且旧卡对账不重复查询', async () => {
+    const cases = [
+      { key: 'alice', status: 'interrupted' as const, actor: 'ou_alice', label: '由 Alice 取消' },
+      { key: 'bob', status: 'cancelled' as const, actor: 'ou_bob', label: '由 Bob 取消' },
+      { key: 'bot', status: 'interrupted' as const, actor: 'ou_bot' },
+      { key: 'system', status: 'interrupted' as const, actor: 'installation_owner' },
+      { key: 'failure', status: 'interrupted' as const, actor: 'ou_failure' },
+      { key: 'denied', status: 'interrupted' as const, actor: 'ou_denied' },
+      { key: 'queued', status: 'cancelled' as const, actor: undefined }
+    ];
+    const tasks = Object.fromEntries(cases.map(item => {
+      const task = { ...completedTask(`ses-${item.key}`), status: item.status,
+        ...(item.actor ? { interruptedByActor: item.actor } : {}) };
+      return [task.sessionId, [task]];
+    }));
+    const mappings = cases.map(item => createMapping(`map-${item.key}`, `om_req_${item.key}`, `ses-${item.key}`, {
+      runtime_task_id: `task-ses-${item.key}`, state: 'running', turn: 1, sender_open_id: 'ou_initiator' }));
+    const h = reconcileHarness(mappings, tasks);
+    h.service.getContactUser.mockImplementation(async (id: string) => {
+      if (id === 'ou_alice') return { openId: id, name: 'Alice' };
+      if (id === 'ou_bob') return { openId: id, name: 'Bob' };
+      if (id === 'ou_initiator') return { openId: id, name: 'Initiator' };
+      if (id === 'ou_failure') throw new Error('contact unavailable');
+      if (id === 'ou_denied') throw Object.assign(new Error('contact permission denied'), { code: 41050 });
+      return undefined;
+    });
+    const reconcile = () => performLarkCardReconcile({
+      runtime: h.runtime as any, service: h.service as any, cardMappings: h.cardMappings as any, log: h.log as any,
+      config, channel: 'lark-card:cli_test', staleTurn: async () => true
+    });
+
+    expect(await reconcile()).toBe(0);
+    expect(h.service.send).toHaveBeenCalledTimes(cases.length);
+    expect(h.service.getContactUser.mock.calls.map(([id]) => id)).toEqual(['ou_alice', 'ou_bob', 'ou_bot', 'ou_failure', 'ou_denied']);
+    for (const item of cases) {
+      const sent = h.service.send.mock.calls.map(([input]) => input).find(input => input.taskId === `om_req_${item.key}`)!;
+      expect(sent.statusLabel, item.key).toBe(item.label);
+      expect(JSON.stringify(sent)).not.toContain('由 Initiator 取消');
+      const saved = JSON.parse(h.cardMappings.mappings.find(mapping => mapping.externalId === `om_req_${item.key}`)!.extra!);
+      expect(saved.final_delivery_state, item.key).toBe('delivered');
+      expect(saved.final_card_input?.statusLabel, item.key).toBe(item.label);
+    }
+
+    const lookups = h.service.getContactUser.mock.calls.length;
+    expect(await reconcile()).toBe(0);
+    expect(h.service.getContactUser).toHaveBeenCalledTimes(lookups);
+    expect(h.service.send).toHaveBeenCalledTimes(cases.length);
+  });
+
   it('用户自己取消或停下的一轮补发结果时不贴表情', async () => {
     const tasks = [
       { ...completedTask('ses-cancelled'), status: 'cancelled' as const },
@@ -1345,12 +1395,12 @@ describe('恢复异常通知与人工核验结果', () => {
 });
 
 describe('结果投递失败的对账', () => {
-  const setup = (send: () => Promise<{ messageId: string }>, task: Partial<PersistedLarkCardTask> = {}) => {
+  const setup = (send: () => Promise<{ messageId: string }>, task: Partial<PersistedLarkCardTask> = {}, runtimePatch: Record<string, unknown> = {}) => {
     const runtimeTask = { id: 'task-r', sessionId: 'ses-r', prompt: 'Prompt msg-r', status: 'completed',
-      createdAt: new Date(Date.now() - 5_000).toISOString(), updatedAt: new Date().toISOString() };
+      createdAt: new Date(Date.now() - 5_000).toISOString(), updatedAt: new Date().toISOString(), ...runtimePatch };
     const cardMappings = createMemoryChannelMappingRepo([createMapping('map-r', 'msg-r', 'ses-r', { runtime_task_id: 'task-r', progress_frozen: true, ...task })]);
     const runtime = { getTasks: vi.fn(async () => [runtimeTask]), getEvents: vi.fn(async () => [{ id: 1, type: 'text', data: { text: '结论正文' } }]) };
-    const service = { update: vi.fn(), send: vi.fn(send) };
+    const service = { update: vi.fn(), send: vi.fn(send), getContactUser: vi.fn(async (_id: string, _idType: 'open_id' | 'union_id'): Promise<{ openId: string; name?: string } | undefined> => undefined) };
     const input = { runtime: runtime as any, service: service as any, cardMappings: cardMappings as any,
       log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, config, channel: 'lark-card:cli_test' };
     return { service, input, cardMappings, persisted: () => JSON.parse(cardMappings.mappings[0]!.extra!) as PersistedLarkCardTask & Record<string, any> };
@@ -1402,6 +1452,29 @@ describe('结果投递失败的对账', () => {
       expect(delivered).toMatchObject({ final_delivery_state: 'delivered', final_message_id: 'om_final' });
       for (const key of ['final_delivery_attempts', 'final_delivery_retry_at', 'final_delivery_error', 'final_delivery_first_failed_at']) expect(delivered).not.toHaveProperty(key);
       expect(larkResultDeliveryIssues(h.cardMappings.mappings)).toEqual([]);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each([true, false])('取消人解析结果在瞬时发送失败重试间冻结（解析成功=%s）', async resolved => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      let failing = true;
+      const h = setup(async () => { if (failing) throw unavailable(); return { messageId: 'om_final' }; }, {},
+        { status: 'interrupted', interruptedByActor: 'ou_bob' });
+      h.service.getContactUser.mockImplementation(async () => {
+        if (!resolved) throw Object.assign(new Error('contact permission denied'), { code: 41050 });
+        return { openId: 'ou_bob', name: 'Bob' };
+      });
+      expect(await performLarkCardReconcile(h.input)).toBe(1);
+      expect(h.service.getContactUser).toHaveBeenCalledOnce();
+      const first = h.persisted();
+      expect(first.final_card_input?.statusLabel).toBe(resolved ? '由 Bob 取消' : undefined);
+      failing = false;
+      vi.setSystemTime(first.final_delivery_retry_at! + 1);
+      expect(await performLarkCardReconcile(h.input)).toBe(0);
+      expect(h.service.getContactUser).toHaveBeenCalledOnce();
+      expect(h.service.send).toHaveBeenCalledTimes(2);
+      expect(h.service.send.mock.calls.at(-1)![0].statusLabel).toBe(resolved ? '由 Bob 取消' : undefined);
     } finally { vi.useRealTimers(); }
   });
 

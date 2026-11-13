@@ -37,6 +37,7 @@ import {
   hasUnresolvedToolCalls,
   isLarkLauncherVersionChanged,
   LARK_LAUNCHER_RECOVERY_NOTE,
+  larkCancellationActorLabel,
   renderLarkProcessElements,
   renderLarkResultElements,
   type LarkCardElement
@@ -1512,6 +1513,11 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         // 中断时也要读：账本上记了操作人的是有人主动停下的，不贴失败表情。
         const runtimeTask = task.sessionId && task.runtimeTaskId
           ? (await this.runtime.getTasks?.(task.sessionId))?.find(item => item.id === task.runtimeTaskId) : undefined;
+        const cancellationStatusLabel = (state === 'interrupted' || state === 'cancelled') && runtimeTask?.interruptedByActor
+          ? task.finalCardInput
+            ? typeof task.finalCardInput.statusLabel === 'string' ? task.finalCardInput.statusLabel : undefined
+            : await larkCancellationActorLabel(this.service, runtimeTask.interruptedByActor)
+          : undefined;
         const finalContext = task.sessionId ? explicitFinalContext(
           { externalId: task.id, sessionId: task.sessionId }, {
             app_id: config.appId, chat_id: event.chatId, chat_type: event.chatType,
@@ -1584,6 +1590,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         // 同一轮的过程、审批与结果卡保留任务名；结论由正文和通知预览承载。
         const resultCardInput = {
           ...cardContext, cardKind: 'result' as const, ...(config.adhdMode === true ? { adhdMode: true } : {}), state, taskId: task.id, taskName: taskTitle,
+          ...(cancellationStatusLabel ? { statusLabel: cancellationStatusLabel } : {}),
           // 只有完成的结果卡是只读收据；失败、中断、取消时过程卡已收成一行，「重试」只能放在这张卡上。
           sessionId: task.sessionId, turn: currentTurn, readOnly: state === 'completed',
           elapsedSeconds: (Date.now() - task.startedAt!) / 1_000,
@@ -1596,6 +1603,8 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           }
         };
         await beforeSend();
+        // 名称解析（包括失败后的旧文案回退）随首次投递冻结，重试与重启补偿不再查通讯录。
+        if ((state === 'interrupted' || state === 'cancelled') && runtimeTask?.interruptedByActor) task.finalCardInput = resultCardInput;
         if (task.finalDeliveryFirstFailedAt === undefined) {
           task.finalDeliveryFirstFailedAt = Date.now();
           try { await this.saveCardTask(task, state); }

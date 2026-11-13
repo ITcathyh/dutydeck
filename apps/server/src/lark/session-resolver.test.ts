@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { mkdir, mkdtemp, readFile, realpath, rm, symlink } from 'node:fs/promises';
-import { createLarkCardService } from './service.js';
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { createLarkCardService, LarkServiceError } from './service.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Session } from '@dutydeck/shared';
@@ -68,6 +68,76 @@ it('marks a stalled attachment download missing instead of holding the turn fore
     expect(await pending).toContain('附件下载失败');
     expect(await pending).toContain('你无法读取该附件');
   } finally { release?.(); vi.useRealTimers(); }
+});
+
+describe('materializeLarkResources 合并转发祖先回退', () => {
+  const missingOn = (messageId: string) => new LarkServiceError(
+    'LARK_RESOURCE_DOWNLOAD_FAILED', `missing on ${messageId}`, 502, { upstreamCode: 234003 }
+  );
+
+  const runDownload = async (type: 'file' | 'image', outcomes: Record<string, 'ok' | Error>) => {
+    const attempts: string[] = [];
+    const attempt = async (messageId: string, destination?: string) => {
+      attempts.push(messageId);
+      const outcome = outcomes[messageId];
+      if (!outcome) throw new Error(`unexpected candidate ${messageId}`);
+      if (outcome instanceof Error) throw outcome;
+      if (destination) await writeFile(destination, `from ${messageId}`);
+      return destination
+        ? { contentType: 'text/plain' }
+        : { data: Buffer.from(`from ${messageId}`), contentType: 'text/plain' };
+    };
+    const service = {
+      downloadMessageResourceToFile: vi.fn((messageId: string, _key: string, destination: string) => attempt(messageId, destination)),
+      downloadMessageResource: vi.fn((messageId: string) => attempt(messageId))
+    };
+    const result = await materializeLarkResources('om_child', 'read', [{
+      key: 'resource_key', type, label: '附件', ancestorMessageIds: ['om_parent', 'om_grandparent']
+    }], service);
+    const path = result.match(/已下载到本地：(.+?)。/)?.[1];
+    return { attempts, result, saved: path ? await readFile(path, 'utf8') : undefined };
+  };
+
+  it.each(['file', 'image'] as const)('keeps the direct child first for a successful %s download', async type => {
+    const { attempts, result, saved } = await runDownload(type, { om_child: 'ok' });
+    expect(attempts).toEqual(['om_child']);
+    expect(saved).toBe('from om_child');
+    expect(result).not.toContain('下载失败');
+  });
+
+  it.each(['file', 'image'] as const)('falls back to the first verified ancestor for a %s download only after 234003', async type => {
+    const { attempts, result, saved } = await runDownload(type, { om_child: missingOn('om_child'), om_parent: 'ok' });
+    expect(attempts).toEqual(['om_child', 'om_parent']);
+    expect(saved).toBe('from om_parent');
+    expect(result).not.toContain('下载失败');
+  });
+
+  it.each(['file', 'image'] as const)('continues to later verified ancestors for a %s download after repeated 234003 errors', async type => {
+    const { attempts, result, saved } = await runDownload(type, {
+      om_child: missingOn('om_child'), om_parent: missingOn('om_parent'), om_grandparent: 'ok'
+    });
+    expect(attempts).toEqual(['om_child', 'om_parent', 'om_grandparent']);
+    expect(saved).toBe('from om_grandparent');
+    expect(result).not.toContain('下载失败');
+  });
+
+  it.each(['file', 'image'] as const)('reports the final 234003 after exhausting every %s download candidate', async type => {
+    const { attempts, result, saved } = await runDownload(type, {
+      om_child: missingOn('om_child'), om_parent: missingOn('om_parent'), om_grandparent: missingOn('om_grandparent')
+    });
+    expect(attempts).toEqual(['om_child', 'om_parent', 'om_grandparent']);
+    expect(saved).toBeUndefined();
+    expect(result).toContain('附件下载失败：missing on om_grandparent');
+  });
+
+  it.each(['file', 'image'] as const)('does not fall back after a non-234003 %s download error', async type => {
+    const denied = new LarkServiceError('LARK_RESOURCE_DOWNLOAD_FAILED', 'denied on om_parent', 502, { upstreamCode: 234002 });
+    const { attempts, result, saved } = await runDownload(type, { om_child: missingOn('om_child'), om_parent: denied });
+    expect(attempts).toEqual(['om_child', 'om_parent']);
+    expect(saved).toBeUndefined();
+    expect(result).toContain('附件下载失败：denied on om_parent');
+    expect(result).not.toContain('missing on om_child');
+  });
 });
 
 describe('materializeLarkResources 图片按文件头识别格式', () => {

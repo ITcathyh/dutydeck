@@ -310,17 +310,20 @@ describe('ADHD durable confirmation — actual Runtime and SQLite', () => {
     const retry = await h.coordinator.handleAction({ action: 'retry', task_id: 'om_queued', turn: 1 }, 'ou_alice', { messageId: 'om_queued', chatId: 'oc_group' });
     expect(retry).toMatchObject({ type: 'success', content: '已开始重试' });
   });
-  it('keeps a native question markdown intact while excluding option descriptions from the ADHD card', async () => {
+  it('keeps native question markdown intact without repeating descriptions and renders them in the ADHD option position', async () => {
     const h = await harness({ native: true });
     const question = '确认写入 A？\n\n实际目标表：[待办表](https://example.com/table)';
+    const description = '不应在卡正文里显示的说明';
     expect(h.record.question).toBe(question);
     const cardInput = h.service.reply.mock.calls.find(([input]) => input.taskId === h.record.id)![0];
     expect(cardInput.elements[0]).toEqual({ tag: 'markdown', content: question });
     const card = buildLarkCard(cardInput);
     expect(card).not.toHaveProperty('header');
-    expect(JSON.stringify(card)).not.toContain('不应在卡正文里显示的说明');
+    expect(JSON.stringify(card).split(description)).toHaveLength(2);
     expect(cardInput.elements[1]).toMatchObject({ tag: 'button', type: 'primary' });
-    expect(cardInput.elements).toHaveLength(2);
+    expect(cardInput.elements[2]).toEqual({ tag: 'div', element_id: 'workflow_answer_choice_description_0',
+      text: { tag: 'plain_text', content: description } });
+    expect(cardInput.elements).toHaveLength(3);
   });
 
   it('settles a deferred ask quietly without attributing a user interrupt, retrying or replaying the original request', async () => {

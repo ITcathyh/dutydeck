@@ -188,7 +188,22 @@ const resourceFailureGuidance = (error: unknown) => {
 
 const fallbackResourceRoot = larkResourceRoot(':memory:');
 
-export async function materializeLarkResources(messageId: string, prompt: string, resources: LarkMessageResource[], service: Pick<LarkCardService, 'downloadMessageResource' | 'downloadMessageResourceToFile'>, signal?: AbortSignal, retention: { root: string; retain(directory: string): Promise<void> } = { root: fallbackResourceRoot, retain: async () => {} }) {
+type MaterializableLarkResource = LarkMessageResource & { ancestorMessageIds?: string[] };
+
+const downloadWithLarkAncestors = async <T>(messageId: string, ancestorMessageIds: string[] | undefined, download: (candidateId: string) => Promise<T>): Promise<T> => {
+  const candidates = [...new Set([messageId, ...(ancestorMessageIds ?? [])])];
+  let lastError: unknown;
+  for (const candidateId of candidates) {
+    try { return await download(candidateId); }
+    catch (error) {
+      if (!(error instanceof LarkServiceError) || error.upstreamCode !== 234003) throw error;
+      lastError = error;
+    }
+  }
+  throw lastError;
+};
+
+export async function materializeLarkResources(messageId: string, prompt: string, resources: MaterializableLarkResource[], service: Pick<LarkCardService, 'downloadMessageResource' | 'downloadMessageResourceToFile'>, signal?: AbortSignal, retention: { root: string; retain(directory: string): Promise<void> } = { root: fallbackResourceRoot, retain: async () => {} }) {
   signal?.throwIfAborted();
   if (!resources.length) return prompt;
   await mkdir(retention.root, { recursive: true, mode: 0o700 });
@@ -207,7 +222,8 @@ export async function materializeLarkResources(messageId: string, prompt: string
           const staging = join(directory, `.download-${randomUUID()}`);
           const abort = new AbortController();
           const downloadSignal = signal ? AbortSignal.any([signal, abort.signal]) : abort.signal;
-          const download = service.downloadMessageResourceToFile(messageId, resource.key, staging, downloadSignal);
+          const download = downloadWithLarkAncestors(messageId, resource.ancestorMessageIds,
+            candidateId => service.downloadMessageResourceToFile(candidateId, resource.key, staging, downloadSignal));
           try {
             let downloaded: { contentType?: string };
             try { downloaded = await withLarkContextReadTimeout(download, '附件下载', undefined, signal); }
@@ -223,7 +239,8 @@ export async function materializeLarkResources(messageId: string, prompt: string
           } finally { await rm(staging, { force: true }); }
           continue;
         }
-        const downloaded = await withLarkContextReadTimeout(readSignal => service.downloadMessageResource(messageId, resource.key, resource.type, readSignal), '附件下载', undefined, signal);
+        const downloaded = await withLarkContextReadTimeout(readSignal => downloadWithLarkAncestors(messageId, resource.ancestorMessageIds,
+          candidateId => service.downloadMessageResource(candidateId, resource.key, resource.type, readSignal)), '附件下载', undefined, signal);
         signal?.throwIfAborted();
         // 图片按文件头识别真实格式：下载接口的 contentType 与资源自带扩展名都可能与实际字节不符。
         let fileName = safeResourceName(resource, downloaded.contentType);

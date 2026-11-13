@@ -32,6 +32,47 @@ describe('Lark card service', () => {
     service.close();
   });
 
+  it.each(['send', 'reply', 'sendText', 'replyText'] as const)('generates one UUID per independent %s call and reuses it for network retries', async method => {
+    const uuids: unknown[] = [];
+    let messageAttempts = 0;
+    const fetcher = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).includes('tenant_access_token')) return response({ code: 0, tenant_access_token: 'token', expire: 7200 });
+      messageAttempts++;
+      uuids.push(JSON.parse(String(init?.body)).uuid);
+      if (messageAttempts === 1) throw new TypeError('response lost after upstream acceptance');
+      return response({ code: 0, data: { message_id: 'om_test' } });
+    });
+    const service = createLarkCardService({
+      ...configured, LARK_APP_ID: `cli_uuid_${method}`,
+      LARK_API_RETRY_MAX_ATTEMPTS: '1', LARK_API_RETRY_BASE_MS: '1', LARK_API_RETRY_MAX_MS: '1'
+    }, fetcher as typeof fetch);
+    const input = { chatId: 'oc_test', messageId: 'om_test', state: 'completed' as const, markdown: 'same body', text: 'same body' };
+    try {
+      await service[method](input);
+      await service[method](input);
+      expect(messageAttempts).toBe(3);
+      expect(uuids[0]).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+      expect(uuids[1]).toBe(uuids[0]);
+      expect(uuids[2]).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+      expect(uuids[2]).not.toBe(uuids[0]);
+    } finally { service.close(); }
+  });
+
+  it.each(['send', 'reply', 'sendText', 'replyText'] as const)('does not turn a failed %s call into a separate independent send', async method => {
+    let messageAttempts = 0;
+    const fetcher = vi.fn(async (url: string | URL | Request) => {
+      if (String(url).includes('tenant_access_token')) return response({ code: 0, tenant_access_token: 'token', expire: 7200 });
+      messageAttempts++;
+      return response({ code: 99991663, msg: 'rejected' }, 400);
+    });
+    const service = createLarkCardService({ ...configured, LARK_APP_ID: `cli_uuid_failure_${method}`, LARK_API_RETRY_MAX_ATTEMPTS: '0' }, fetcher as typeof fetch);
+    const input = { chatId: 'oc_test', messageId: 'om_test', state: 'completed' as const, markdown: 'same body', text: 'same body' };
+    try {
+      await expect(service[method](input)).rejects.toMatchObject({ code: 'LARK_OPENAPI_ERROR' });
+      expect(messageAttempts).toBe(1);
+    } finally { service.close(); }
+  });
+
   const componentCount = (value: unknown): number => Array.isArray(value)
     ? value.reduce((sum, item) => sum + componentCount(item), 0)
     : value && typeof value === 'object'
