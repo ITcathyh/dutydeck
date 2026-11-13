@@ -55,3 +55,8 @@
 ### Q8: 报 tmux socket 被删、原终端仍在运行，无法启动会话？
 - **原因**：Linux 上 `/tmp` 清理了 tmux socket 文件，但原 tmux server 和 pane 仍在；Dutydeck 会拒绝再启动一个同名 server，避免同一会话同时跑两个 CLI。
 - **处理**：按 tmux 手册向原 server 进程发送 `SIGUSR1` 重建 socket，或结束原 tmux server 后重新发送消息。可把 `TMUX_TMPDIR` 指到不会被清理的目录，或让 `systemd-tmpfiles` 排除 tmux 目录。非 Linux 不做这项内核检查，行为保持原样。开启 `remain-on-exit` 时，Dutydeck 下次启动会回收自己留下且所有 pane 都已退出的死会话；仍有运行中 pane 的会话会保留。
+
+### Q9: 如何查看最近服务日志？为什么有些行没有显示？
+- 普通 daemon 用 `dutydeck logs`，systemd 用户实例用 `dutydeck logs --unit <unit>`；默认各取最近 50 行，可用 `-n 200` 增加行数。命令只取一次快照，不会持续等待新日志。
+- 普通行、错误行和多行堆栈都会保留。含疑似 token、密码、凭据或 Authorization 的整行会被过滤，所以原始日志里的这些行不会出现在命令输出中，原始日志不变。
+- 如果提示找不到 `journalctl`，检查 systemd 是否已安装且命令在 PATH 中；unit 不存在时先核对名称。普通 daemon 不依赖 `journalctl`，不带 `--unit` 即可读取当前 daemon 日志文件。

@@ -54,6 +54,18 @@ Codex 的 `codex` 入口默认使用终端模式，`codex-cli` 入口继续兼�
 
 `GET /api/system/activity` 的 `runningTasks` 包含正在执行主轮的会话，以及主轮已结束但仍有原生后台任务的会话；同一会话只计一次。显式加 `?restart=true` 才检查恢复证据并返回 `restartBlockers` 和 `recoverableTasks`；未进入排空时不减去可恢复任务，`excludeSessionId` 同时适用于这三个计数。
 
+### 只读日志（`logs`）<a id="logs"></a>
+
+```bash
+dutydeck logs
+dutydeck logs -n 200
+dutydeck logs --unit dutydeck.service -n 100
+```
+
+不带 `--unit` 时，命令读取当前 daemon 的 `.dutydeck/daemon/dutydeck.log`，最多读取文件末尾 256KiB，默认输出最后 50 行；`-n` 可指定 1–10000 行。带 `--unit` 时改为通过无 shell 的 `journalctl --user` 读取这个 systemd 用户实例的最近日志。两种来源都只输出一次快照，不提供 follow。
+
+普通行和错误行按原顺序保留，多行堆栈不会被压成一行。为避免把凭据带进终端记录，含 token、secret、password、credential、API key、Authorization、Bearer 等疑似秘密的整行不会输出；这不改变原始日志文件或 journal。unit 不存在、无法执行 `journalctl` 或行数无效时命令明确报错并返回非零退出码，不输出环境配置。
+
 ## 2. 版本发布与部署 (`deploy`)
 
 ```bash

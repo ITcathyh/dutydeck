@@ -11,7 +11,7 @@ import type { PullRequestCliAction, PullRequestCliInput } from './pull-request-c
 import { pluginBindingFields, agentFields, agentConfigFields, botFields, channelBotFields, fieldsHelp, groupFields, groupBindingFields, groupBindingCreateFields, type SettingsAction, type SettingsCliInput } from './settings-cli.js';
 import { agentCommandHelp } from './lark/agent-command.js';
 import { addAgentCommands } from './agent-cli.js';
-import { Option, Command } from 'commander';
+import { Option, Command, InvalidArgumentError } from 'commander';
 import { DatabaseCliError } from './database-cli-error.js';
 import type { PluginCliAction, PluginCliOptions } from './plugins/cli.js';
 
@@ -188,6 +188,11 @@ export interface DoctorCliOptions {
   json?: boolean;
 }
 
+export interface LogsCliOptions {
+  lines: number;
+  unit?: string;
+}
+
 export interface SecretValueCliOptions { valueFd?: string; database?: string }
 export interface SecretRotateCliOptions extends SecretValueCliOptions { expectedRevision: string }
 export interface SecretRemoveCliOptions { expectedRevision: string; database?: string }
@@ -236,6 +241,7 @@ export interface CliHandlers {
   daemonStop?(options: DoctorCliOptions): void | Promise<void>;
   daemonRestart?(options: CliOptions): void | Promise<void>;
   daemonStatus?(options: DoctorCliOptions): void | Promise<void>;
+  logs?(options: LogsCliOptions): void | Promise<void>;
   update?(options: UpdateCliOptions): void | Promise<void>;
   deploy?(options: DeployCliOptions): void | Promise<void>;
   deployPrune?(options: DeployPruneCliOptions): void | Promise<void>;
@@ -405,6 +411,14 @@ const databaseRetirementOptionsFrom = (options: { database?: string; hostname?: 
 };
 
 const collectDirectories = (val: string, prev: string[] = []): string[] => [...prev, val];
+
+const parseLogLines = (value: string): number => {
+  const invalid = () => new InvalidArgumentError('Line count must be an integer between 1 and 10000.');
+  if (!/^[1-9]\d*$/.test(value)) throw invalid();
+  const lines = Number(value);
+  if (!Number.isSafeInteger(lines) || lines > 10_000) throw invalid();
+  return lines;
+};
 
 /** 根命令也有 --database，写在子命令后面时可能被根命令截走。 */
 const authOptionsFrom = <T extends AuthDatabaseCliOptions>(options: T, command: Command): T => {
@@ -1326,6 +1340,13 @@ Examples:
   // Both the top-level `dutydeck start/stop/restart/status` (no prefix) and the
   // `dutydeck daemon start/.../status` group are supported and share one implementation.
   addProcessCommands(program);
+
+  program.command('logs')
+    .description('Print recent Dutydeck logs without following new output')
+    .option('-n, --lines <count>', 'Number of recent lines to print (default: 50, maximum: 10000)', parseLogLines, 50)
+    .option('--unit <unit>', 'Read this systemd user unit through journalctl instead of the daemon log file')
+    .action(options => handlers.logs?.(options));
+
   const daemon = program.command('daemon').description('Run the Dutydeck server in the background and manage it');
   addProcessCommands(daemon);
 

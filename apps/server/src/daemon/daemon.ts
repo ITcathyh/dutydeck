@@ -1,7 +1,7 @@
 import { dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync, writeFileSync } from 'node:fs';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import Database from 'better-sqlite3';
 import { rotateLogFileSync } from '../resource-retention.js';
 import { writeFileAtomicSync } from '../atomic-file.js';
@@ -400,6 +400,10 @@ const FAILURE_LINE_PATTERN = /error|EADDRINUSE|EACCES|EPERM|ENOENT|ENOTDIR|canno
  */
 const SECRET_LINE_PATTERN = /token|secret|password|passwd|credential|api[-_ ]?key|authorization|bearer/i;
 
+function isSecretLogLine(line: string): boolean {
+  return SECRET_LINE_PATTERN.test(line);
+}
+
 /** 单行上限，防止一条巨大的堆栈或 JSON 把终端糊满。 */
 const MAX_REASON_LINE = 200;
 
@@ -425,7 +429,7 @@ export function tailDaemonLog(dir: string, lines = 3, fromByte = 0): string[] {
       .split('\n')
       .map(line => line.trim())
       .filter(line => line !== '')
-      .filter(line => !SECRET_LINE_PATTERN.test(line))
+      .filter(line => !isSecretLogLine(line))
       .filter(line => FAILURE_LINE_PATTERN.test(line))
       .map(line => line.length > MAX_REASON_LINE ? `${line.slice(0, MAX_REASON_LINE)}…` : line)
       .slice(-lines);
@@ -460,6 +464,36 @@ function readLogFrom(file: string, fromByte: number): string {
   } finally {
     closeSync(fd);
   }
+}
+
+function visibleLogLines(text: string): string[] {
+  const lines = text.split('\n');
+  if (lines.at(-1) === '') lines.pop();
+  return lines.filter(line => !isSecretLogLine(line));
+}
+
+/** Read recent daemon output without the failure-only filtering used for startup errors. */
+export function readDaemonLog(dir: string, lines = 50, fromByte = 0): string[] {
+  return visibleLogLines(readLogFrom(daemonPaths(dir).logFile, fromByte)).slice(-lines);
+}
+
+/** Read a bounded journal snapshot without invoking a shell or following new entries. */
+export function readJournalctlLog(unit: string, lines = 50): string[] {
+  if (!unit.trim()) throw new Error('--unit must not be empty');
+  const args = ['--user', `--unit=${unit}`, `--lines=${lines}`, '--no-pager'];
+  const result = spawnSync('journalctl', args, { encoding: 'utf8', shell: false });
+  if (result.error) {
+    if ((result.error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error('journalctl was not found in PATH; install systemd or omit --unit to read the daemon log file');
+    }
+    throw new Error(`journalctl could not be executed: ${result.error.message}`);
+  }
+  if (result.status !== 0) {
+    const detail = (result.stderr || result.stdout).split('\n')
+      .find(line => line.trim() && !isSecretLogLine(line))?.trim();
+    throw new Error(`journalctl failed for systemd unit ${unit}${detail ? `: ${detail}` : ` (exit code ${result.status ?? 'unknown'})`}`);
+  }
+  return visibleLogLines(result.stdout);
 }
 
 /** Open a log file for append (creating parent directories), returning its numeric fd. */
