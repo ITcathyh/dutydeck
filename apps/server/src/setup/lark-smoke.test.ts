@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { StoredLarkConfig } from '@dutydeck/shared';
+import { createRepositories } from '@dutydeck/storage';
+import { larkBotsConfigKey } from '../lark/config.js';
+import { larkListenerStatusKey, type LarkListenerStatus } from '../lark/listener-status.js';
 import { offerLarkSetupSmoke, type LarkSmokeEvent } from './lark-smoke.js';
 import type { Prompter } from './prompts.js';
 
@@ -13,6 +19,10 @@ vi.mock('../daemon/command.js', () => ({
 }));
 
 const bot = { appId: 'cli_smoke', appSecret: 'secret_fixture', listening: true } as StoredLarkConfig;
+const temporaryDirectories: string[] = [];
+const listenerStatus = (pid: number): string => JSON.stringify({
+  pid, updatedAt: new Date().toISOString(), active: [], retrying: [], reconnecting: []
+} satisfies LarkListenerStatus);
 const ownerEvent: LarkSmokeEvent = {
   eventId: 'event_owner', messageId: 'message_owner', chatId: 'oc_dm', chatType: 'p2p',
   parentId: 'om_test_card', senderOpenId: 'ou_owner', senderType: 'user', content: '{"text":"done"}'
@@ -42,7 +52,10 @@ beforeEach(() => {
   daemonProbe.calls = 0;
 });
 
-afterEach(() => { vi.useRealTimers(); });
+afterEach(() => {
+  vi.useRealTimers();
+  for (const directory of temporaryDirectories.splice(0)) rmSync(directory, { recursive: true, force: true });
+});
 
 describe('offerLarkSetupSmoke', () => {
   it('defaults to No and does not start listening or send after refusal', async () => {
@@ -86,7 +99,7 @@ describe('offerLarkSetupSmoke', () => {
     const result = await pending;
     expect(result.status).toBe('unavailable');
     expect(result.message).toContain('分流正常消息');
-    expect(result.message).toContain('停止该实例后再试');
+    expect(result.message).toContain('停止同库服务后再试');
     expect(prompt.confirm).not.toHaveBeenCalled();
     expect(startListener).not.toHaveBeenCalled();
     expect(sendCard).not.toHaveBeenCalled();
@@ -106,6 +119,120 @@ describe('offerLarkSetupSmoke', () => {
     expect(result.status).toBe('unavailable');
     expect(daemonProbe.calls).toBe(2);
     expect(prompt.confirm).toHaveBeenCalledOnce();
+    expect(startListener).not.toHaveBeenCalled();
+    expect(sendCard).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['is alive', undefined],
+    ['returns EPERM', 'EPERM'],
+    ['returns an unknown error', 'EIO']
+  ])('fails closed before prompting when the listener process %s', async (_name, code) => {
+    const prompt = prompter();
+    const startListener = vi.fn(async () => vi.fn());
+    const sendCard = vi.fn();
+    const processKill = vi.fn(() => {
+      if (code) throw Object.assign(new Error(code), { code });
+    });
+    const result = await offerLarkSetupSmoke(options({ prompter: prompt }), {
+      loadBot: async () => bot,
+      readListenerStatus: async () => listenerStatus(4242),
+      processKill,
+      startListener,
+      sendCard
+    });
+    expect(result.status).toBe('unavailable');
+    expect(result.message).toContain('同库服务');
+    expect(processKill).toHaveBeenCalledWith(4242, 0);
+    expect(prompt.confirm).not.toHaveBeenCalled();
+    expect(startListener).not.toHaveBeenCalled();
+    expect(sendCard).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['malformed JSON', '{broken'],
+    ['a missing PID', '{}'],
+    ['an invalid PID', '{"pid":0}']
+  ])('fails closed before prompting for listener status with %s', async (_name, raw) => {
+    const prompt = prompter();
+    const sendCard = vi.fn();
+    const result = await offerLarkSetupSmoke(options({ prompter: prompt }), {
+      loadBot: async () => bot, readListenerStatus: async () => raw, sendCard
+    });
+    expect(result.status).toBe('unavailable');
+    expect(prompt.confirm).not.toHaveBeenCalled();
+    expect(sendCard).not.toHaveBeenCalled();
+  });
+
+  it('fails closed before prompting when the listener status cannot be read', async () => {
+    const prompt = prompter();
+    const sendCard = vi.fn();
+    const result = await offerLarkSetupSmoke(options({ prompter: prompt }), {
+      loadBot: async () => bot,
+      readListenerStatus: async () => { throw new Error('synthetic database failure'); },
+      sendCard
+    });
+    expect(result.status).toBe('unavailable');
+    expect(prompt.confirm).not.toHaveBeenCalled();
+    expect(sendCard).not.toHaveBeenCalled();
+  });
+
+  it('treats an ESRCH listener PID as stale and preserves the first-setup offer', async () => {
+    const prompt = prompter(false);
+    const startListener = vi.fn(async () => vi.fn());
+    const sendCard = vi.fn();
+    const result = await offerLarkSetupSmoke(options({ prompter: prompt }), {
+      loadBot: async () => bot,
+      readListenerStatus: async () => listenerStatus(4242),
+      processKill: () => { throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' }); },
+      startListener,
+      sendCard
+    });
+    expect(result.status).toBe('skipped');
+    expect(prompt.confirm).toHaveBeenCalledOnce();
+    expect(startListener).not.toHaveBeenCalled();
+    expect(sendCard).not.toHaveBeenCalled();
+  });
+
+  it('rechecks listener status after confirmation and refuses a same-database service that appears', async () => {
+    const prompt = prompter();
+    const startListener = vi.fn(async () => vi.fn());
+    const sendCard = vi.fn();
+    const readListenerStatus = vi.fn()
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(listenerStatus(4242));
+    const result = await offerLarkSetupSmoke(options({ prompter: prompt }), {
+      loadBot: async () => bot,
+      readListenerStatus,
+      processKill: () => {},
+      startListener,
+      sendCard
+    });
+    expect(result.status).toBe('unavailable');
+    expect(readListenerStatus).toHaveBeenCalledTimes(2);
+    expect(prompt.confirm).toHaveBeenCalledOnce();
+    expect(startListener).not.toHaveBeenCalled();
+    expect(sendCard).not.toHaveBeenCalled();
+  });
+
+  it('fails closed for a live root service recorded in a real temporary SQLite database', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'dutydeck-lark-smoke-'));
+    temporaryDirectories.push(directory);
+    const database = join(directory, 'state.db');
+    const repositories = createRepositories(database);
+    try {
+      await repositories.config.set(larkBotsConfigKey, JSON.stringify([bot]));
+      // 直接根服务没有 daemon 状态；空 active 也不能证明这个活进程以后不会加载目标 bot。
+      await repositories.config.set(larkListenerStatusKey, listenerStatus(process.pid));
+    } finally { repositories.close(); }
+    const prompt = prompter();
+    const startListener = vi.fn(async () => vi.fn());
+    const sendCard = vi.fn();
+    const result = await offerLarkSetupSmoke(options({ database, prompter: prompt }), { startListener, sendCard });
+    expect(result.status).toBe('unavailable');
+    expect(result.message).toContain('同库服务');
+    expect(daemonProbe.calls).toBe(1);
+    expect(prompt.confirm).not.toHaveBeenCalled();
     expect(startListener).not.toHaveBeenCalled();
     expect(sendCard).not.toHaveBeenCalled();
   });

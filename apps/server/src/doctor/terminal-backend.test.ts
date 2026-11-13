@@ -262,8 +262,8 @@ describe('defaultTerminalBackendProbe 假 tmux', () => {
     const create = calls[1]!;
     const sessionName = create.args[create.args.indexOf('-s') + 1];
     expect(sessionName).toBeTruthy();
-    expect(create.args.at(-1)).toBe('/bin/sleep 30');
-    expect(create.args.filter(arg => arg === '/bin/sleep 30')).toHaveLength(1);
+    expect(create.args.slice(-2)).toEqual(['/bin/sleep', '30']);
+    expect(create.args).not.toContain('/bin/sleep 30');
     expect(calls[2]!.args).toContain(`=${sessionName}`);
   });
 
@@ -308,6 +308,17 @@ function tmuxOnPath(): string | undefined {
 const realTmux = tmuxOnPath();
 const itWithRealTmux = realTmux ? it : it.skip;
 
+async function stopRealTmux(tempDir: string | undefined): Promise<void> {
+  // 测试自身的兜底也只接触同一个私有 socket；未确认退出时绝不删除 socket 根。
+  if (!tempDir || !existsSync(tempDir)) return;
+  const socket = join(tempDir, 's');
+  const env = childEnvironment({ PATH: dirname(realTmux!) }, { TMUX_TMPDIR: tempDir, HOME: tempDir, TMPDIR: tempDir, XDG_CONFIG_HOME: tempDir });
+  try {
+    await execFileAsync(realTmux!, ['-S', socket, '-f', '/dev/null', 'kill-server'], { env, shell: false, timeout: 2000, killSignal: 'SIGKILL' });
+    rmSync(tempDir, { recursive: true, force: true });
+  } catch { /* server 状态未知：保留目录，不冒充安全清理 */ }
+}
+
 describe('defaultTerminalBackendProbe 真实 tmux（私有 socket）', () => {
   itWithRealTmux('创建精确会话、核验并退出，成功后删除临时目录', async () => {
     const result = await defaultTerminalBackendProbe(5000, { PATH: dirname(realTmux!) });
@@ -318,15 +329,32 @@ describe('defaultTerminalBackendProbe 真实 tmux（私有 socket）', () => {
       expect(existsSync(result.tempDir!)).toBe(false);
       expect(checkTerminalBackend({ action: 'probe', backend: 'tmux' }, result).level).toBe('ok');
     } finally {
-      // 测试自身的兜底也只接触同一个私有 socket；未确认退出时绝不删除 socket 根。
-      if (result.tempDir && existsSync(result.tempDir)) {
-        const socket = join(result.tempDir, 's');
-        const env = childEnvironment({ PATH: dirname(realTmux!) }, { TMUX_TMPDIR: result.tempDir, HOME: result.tempDir, TMPDIR: result.tempDir, XDG_CONFIG_HOME: result.tempDir });
-        try {
-          await execFileAsync(realTmux!, ['-S', socket, '-f', '/dev/null', 'kill-server'], { env, shell: false, timeout: 2000, killSignal: 'SIGKILL' });
-          rmSync(result.tempDir, { recursive: true, force: true });
-        } catch { /* server 状态未知：保留目录，不冒充安全清理 */ }
-      }
+      await stopRealTmux(result.tempDir);
+    }
+  }, 15_000);
+
+  itWithRealTmux('多 argv 直接执行存活命令，不运行 SHELL、BASH_ENV 或 ZDOTDIR 启动脚本', async () => {
+    const fixture = temporaryDirectory('dd-terminal-shell-startup-');
+    const marker = join(fixture, 'started');
+    const shell = join(fixture, 'shell');
+    const bashEnv = join(fixture, 'bash-env');
+    const zdotdir = join(fixture, 'zdotdir');
+    mkdirSync(zdotdir);
+    writeFileSync(shell, '#!/bin/sh\nprintf \'SHELL\\n\' >> "$DOCTOR_SHELL_MARKER"\n', { mode: 0o755 });
+    writeFileSync(bashEnv, 'printf \'BASH_ENV\\n\' >> "$DOCTOR_SHELL_MARKER"\n');
+    writeFileSync(join(zdotdir, '.zshenv'), 'printf \'ZDOTDIR\\n\' >> "$DOCTOR_SHELL_MARKER"\n');
+    const result = await defaultTerminalBackendProbe(5000, {
+      PATH: dirname(realTmux!),
+      SHELL: shell,
+      BASH_ENV: bashEnv,
+      ZDOTDIR: zdotdir,
+      DOCTOR_SHELL_MARKER: marker
+    });
+    try {
+      expect(result).toMatchObject({ status: 'ok', version: expect.stringContaining('tmux') });
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      await stopRealTmux(result.tempDir);
     }
   }, 15_000);
 });

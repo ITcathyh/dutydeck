@@ -106,7 +106,8 @@ export const defaultTerminalBackendProbe: TerminalBackendProbe = async (timeoutM
     } else {
       // new-session 即使在客户端报错或超时后也可能已经启动 server，因此先标记再执行。
       serverMayExist = true;
-      const created = await runTmux(socketPath, ['new-session', '-d', '-s', sessionName, '/bin/sleep 30'], timeoutMs, env);
+      // 多 argv 让 tmux 直接 exec；单个命令字符串会经默认 shell 并加载其启动脚本。
+      const created = await runTmux(socketPath, ['new-session', '-d', '-s', sessionName, '/bin/sleep', '30'], timeoutMs, env);
       if (created.status !== 'ok') {
         primary = failedProbe(created, 'create');
       } else {
