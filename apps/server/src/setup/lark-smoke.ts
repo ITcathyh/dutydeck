@@ -5,7 +5,7 @@ import type { StoredLarkConfig } from '@dutydeck/shared';
 import { larkConfigBlockingError, readLarkConfig } from '../lark/config.js';
 import { createLarkCardService } from '../lark/service.js';
 import type { Prompter } from './prompts.js';
-import { startLarkSmokeListener } from './lark-smoke-listener.js';
+import { LarkSmokeCleanupError, startLarkSmokeListener } from './lark-smoke-listener.js';
 import { daemonStatus, type DaemonStatusInfo } from '../daemon/command.js';
 
 export interface LarkSmokeEvent {
@@ -80,6 +80,7 @@ async function sendSmokeCard(bot: StoredLarkConfig, input: { uuid: string; owner
 }
 
 const SERVICE_CONFLICT_MESSAGE = '同库服务正在运行或同库 runtime 占用无法获取；为避免分流正常消息，不启动临时监听、不发卡；停止同库服务后再试。';
+const CLEANUP_CONFLICT_MESSAGE = '飞书临时监听无法确认已关闭；为避免同库服务分流，已保留 runtime 占用和本地接收端口。请检查网络并结束当前 setup 进程后再试。';
 
 function daemonConflict(dependencies: LarkSetupSmokeDependencies): boolean {
   try { return (dependencies.daemonStatus ?? daemonStatus)().processStatus !== 'stale'; }
@@ -165,11 +166,16 @@ export async function offerLarkSetupSmoke(
   };
 
   let stop: (() => void | Promise<void>) | undefined;
+  let retainRuntime = false;
   let timer: NodeJS.Timeout | undefined;
   try {
     try {
       stop = await (dependencies.startListener ?? startLarkSmokeListener)(bot, onEvent);
-    } catch {
+    } catch (error) {
+      if (error instanceof LarkSmokeCleanupError) {
+        retainRuntime = true;
+        return { status: 'unavailable', message: CLEANUP_CONFLICT_MESSAGE };
+      }
       return { status: 'unavailable', message: '飞书临时监听启动失败，未发送测试卡；入站未验证。' };
     }
     sending = true;
@@ -198,6 +204,10 @@ export async function offerLarkSetupSmoke(
     queued.length = 0;
     if (timer) clearTimeout(timer);
     try { if (stop) await stop(); }
-    finally { runtime.close(); }
+    catch {
+      retainRuntime = true;
+      return { status: 'unavailable', message: CLEANUP_CONFLICT_MESSAGE };
+    }
+    finally { if (!retainRuntime) runtime.close(); }
   }
 }

@@ -1,4 +1,7 @@
 import type { ReplyPolish } from './reply-polish.js';
+import { Agent } from 'node:https';
+import type { Socket } from 'node:net';
+import type { ConnectionOptions } from 'node:tls';
 import { normalizeCardCallback } from './card-action-forwarding.js';
 import { runLarkEventPipeline } from './event-pipeline.js';
 import type { LarkAgentCommandHandler, LarkAgentCommands } from './agent-command.js';
@@ -53,6 +56,8 @@ const minReconnectStallMs = 60_000;
 const maxReconnectStallMs = 2_147_483_646;
 /** 拉取长连接配置的总时限，比 SDK 自带的 15 秒请求超时长，健康时不会先到。 */
 const wsConfigRequestTimeoutMs = 30_000;
+/** destroy() 之后的 close 确认上限；超时只能保留 setup 租约，不能当作已关闭。 */
+const forceCloseConfirmationTimeoutMs = 5_000;
 
 /** SDK 自己重连卡住多久后重建长连接：未设置时 10 分钟，`0` 关闭，小于 1 分钟按 1 分钟，超过计时器上限（约 24.8 天）按上限。 */
 function readReconnectStallMs(env: NodeJS.ProcessEnv, log: ListenerLog) {
@@ -77,7 +82,13 @@ function abortableWsHttp(lark: typeof Lark, clientSignal: AbortSignal) {
     if (clientSignal.aborted) abort(); else clientSignal.addEventListener('abort', abort, { once: true });
     const timer = setTimeout(() => controller.abort(new Error('Lark WebSocket config request timed out')), wsConfigRequestTimeoutMs);
     timer.unref?.();
-    try { return await lark.defaultHttpInstance.request({ ...config, signal: controller.signal }); }
+    try {
+      const response = await lark.defaultHttpInstance.request({ ...config, signal: controller.signal });
+      // An HTTP implementation may settle successfully after ignoring an abort. Never
+      // let that late response advance the SDK into WebSocket construction after stop.
+      clientSignal.throwIfAborted();
+      return response;
+    }
     finally { clearTimeout(timer); clientSignal.removeEventListener('abort', abort); }
   };
   return new Proxy({ request }, {
@@ -88,6 +99,50 @@ function abortableWsHttp(lark: typeof Lark, clientSignal: AbortSignal) {
       return typeof value === 'function' ? value.bind(shared) : value;
     }
   }) as unknown as Lark.HttpInstance;
+}
+
+/**
+ * Setup-only escape hatch for an SDK limitation: WSClient.close() cannot see a
+ * WebSocket before its 'open' event saves it. The public WSClient `agent` option
+ * lets us retain the TLS sockets from construction instead of reading SDK internals.
+ * Closing the agent also rejects any later connection attempt after an aborted config request.
+ */
+function createForceCloseTransport() {
+  // @types/node omits this long-standing public Agent method; https.Agent uses
+  // tls.connect, whose options and TLSSocket return value are described here.
+  const agent = new Agent() as Agent & {
+    createConnection(options: ConnectionOptions, callback?: (error: Error | null, socket: Socket) => void): Socket;
+  };
+  const createConnection = agent.createConnection.bind(agent);
+  const sockets = new Set<Socket>();
+  let closed = false;
+  let closing: Promise<void> | undefined;
+  agent.createConnection = (options, callback) => {
+    if (closed) throw new Error('Lark WebSocket transport is closed');
+    // https.Agent is documented to return a TLSSocket (a net.Socket subclass).
+    const socket = createConnection(options, callback) as Socket;
+    sockets.add(socket);
+    socket.once('close', () => { sockets.delete(socket); });
+    return socket;
+  };
+  const close = () => {
+    if (closing) return closing;
+    closed = true;
+    // destroy() is synchronous termination; the close events confirm that every
+    // captured transport is gone. Until then the caller must retain its lease.
+    const allClosed = Promise.all([...sockets].map(socket => new Promise<void>(resolve => {
+      socket.once('close', resolve);
+      socket.destroy();
+    }))).then(() => undefined);
+    let timer: NodeJS.Timeout | undefined;
+    const confirmationTimeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error('Lark WebSocket transport close was not confirmed within 5000ms')), forceCloseConfirmationTimeoutMs);
+      timer.unref?.();
+    });
+    closing = Promise.race([allClosed, confirmationTimeout]).finally(() => { if (timer) clearTimeout(timer); });
+    return closing;
+  };
+  return { agent, close };
 }
 
 export interface LarkRuntime {
@@ -249,6 +304,9 @@ export class LarkLongConnectionListener implements LarkListener {
   private readonly stallMs: number;
   private stallTimer?: NodeJS.Timeout;
   private clientAbort?: AbortController;
+  private clientTransport?: ReturnType<typeof createForceCloseTransport>;
+  private readonly forceTransports = new Set<ReturnType<typeof createForceCloseTransport>>();
+  private forceClose?: Promise<void>;
   private dispatcher?: Lark.EventDispatcher;
   private domain?: string;
 
@@ -259,7 +317,8 @@ export class LarkLongConnectionListener implements LarkListener {
   async start(config: StoredLarkConfig) {
     const blockingError = larkConfigBlockingError(config);
     if (blockingError) {
-      this.stop();
+      const stopping = this.stop();
+      if (stopping) await stopping;
       throw new LarkServiceError('INVALID_LARK_CONFIG', blockingError, 400);
     }
     // api-gate 是模块级单例（per-appId 限流状态必须跨会话共享），没有构造注入点。
@@ -282,14 +341,21 @@ export class LarkLongConnectionListener implements LarkListener {
       if (participationChanged) void this.options.participation?.refresh(config.appId).catch(error => this.log.warn({ error, appId: config.appId }, '默认群参与刷新失败'));
       return;
     }
-    this.stop();
+    const previousStop = this.stop();
+    if (previousStop) await previousStop;
+    this.forceTransports.clear();
+    this.clientTransport = undefined;
+    this.forceClose = undefined;
 
     const http = createWorkbenchFetch(this.options.fetcher);
     this.http = http;
     this.config = config;
     try { await this.connect(config, domain, credentials, http); }
     catch (error) {
-      if (this.http === http) this.stop();
+      if (this.http === http) {
+        const stopping = this.stop();
+        if (stopping) await stopping;
+      }
       throw error;
     }
   }
@@ -505,9 +571,10 @@ export class LarkLongConnectionListener implements LarkListener {
         })();
       }
     });
-    const { client, controller, ready, connectionFailed } = this.createClient(lark, config, domain, () => ({ identity: identityMs, recovery: recoveryMs, reconcile: reconcileMs, total: Date.now() - startedAt }));
+    const { client, controller, ready, connectionFailed, transport } = this.createClient(lark, config, domain, () => ({ identity: identityMs, recovery: recoveryMs, reconcile: reconcileMs, total: Date.now() - startedAt }));
     this.client = client;
     this.clientAbort = controller;
+    this.clientTransport = transport;
     const abortStart = () => connectionFailed(http.fetch.signal!.reason);
     http.fetch.signal!.addEventListener('abort', abortStart, { once: true });
     const connectionTimeout = setTimeout(() => connectionFailed(new Error('WebSocket connection readiness timed out')), 20_000);
@@ -537,11 +604,14 @@ export class LarkLongConnectionListener implements LarkListener {
     let connected!: () => void;
     let connectionFailed!: (error: unknown) => void;
     const ready = new Promise<void>((resolve, reject) => { connected = resolve; connectionFailed = reject; });
+    const transport = this.options.forceCloseOnStop ? createForceCloseTransport() : undefined;
+    if (transport) this.forceTransports.add(transport);
     const client: Lark.WSClient = new lark.WSClient({
       appId: config.appId,
       appSecret: config.appSecret,
       domain,
       httpInstance: abortableWsHttp(lark, controller.signal),
+      ...(transport ? { agent: transport.agent } : {}),
       loggerLevel: lark.LoggerLevel.warn,
       autoReconnect: true,
       // 握手超时：避免 TCP 已建立但 WebSocket 升级无响应时，重连循环的 connect() 永远挂起。
@@ -575,7 +645,7 @@ export class LarkLongConnectionListener implements LarkListener {
         if (this.client === client) this.connectionLost?.(error);
       }
     });
-    return { client, controller, ready, connectionFailed };
+    return { client, controller, ready, connectionFailed, transport };
   }
 
   private clientRecovered(client: Lark.WSClient) {
@@ -603,15 +673,17 @@ export class LarkLongConnectionListener implements LarkListener {
     const config = this.config, dispatcher = this.dispatcher, domain = this.domain, since = this.reconnectingSince;
     // 停用、换配置或已经恢复之后，迟到的计时器什么也不做。
     if (!this.listening || this.client !== stale || !since || !config || !dispatcher || !domain || !larkSdk) return;
-    const previous = { client: stale, abort: this.clientAbort };
+    const previous = { client: stale, abort: this.clientAbort, transport: this.clientTransport };
     // 先换成新连接再关旧的：旧连接关闭时同步或异步报出的回调都按「不是当前连接」早退。
     const next = this.createClient(larkSdk, config, domain);
     this.client = next.client;
     this.clientAbort = next.controller;
+    this.clientTransport = next.transport;
     this.rebuiltAt = new Date().toISOString();
     previous.abort?.abort(new Error('Lark WebSocket client replaced after a stalled reconnect'));
     try { previous.client.close(); }
     catch (error) { this.log.warn({ error, appId: config.appId }, '关闭卡住的飞书长连接失败'); }
+    void previous.transport?.close();
     this.log.warn({ appId: config.appId, since, stallMs: this.stallMs }, '飞书消息监听重连卡住，已重建长连接');
     this.connectionChanged?.();
     // 新连接第一次连不上时 SDK 不报 onReconnecting，这里直接计时，仍然卡住就按同一阈值再重建。
@@ -638,7 +710,8 @@ export class LarkLongConnectionListener implements LarkListener {
     }
   }
 
-  stop(options?: { force?: boolean }) {
+  stop(options?: { force?: boolean }): void | Promise<void> {
+    const force = options?.force === true || this.options.forceCloseOnStop === true;
     if (this.cardRepair) { this.cardRepair.coordinator.stop(); this.cardRepair.http.close(); this.cardRepair = undefined; }
     this.http?.close();
     this.http = undefined;
@@ -651,10 +724,14 @@ export class LarkLongConnectionListener implements LarkListener {
     this.clientAbort?.abort();
     this.clientAbort = undefined;
     // The SDK's force path terminates the socket instead of waiting for a close-handshake response.
-    if (options?.force === true || this.options.forceCloseOnStop === true) this.client?.close({ force: true });
-    else this.client?.close();
+    if (force) {
+      try { this.client?.close({ force: true }); }
+      catch (error) { this.log.warn({ error, appId: this.config?.appId }, '强制关闭飞书长连接时出现异常，继续销毁底层传输'); }
+      this.forceClose ??= Promise.all([...this.forceTransports].map(transport => transport.close())).then(() => undefined);
+    } else this.client?.close();
     this.coordinator?.stop();
     this.client = undefined;
+    this.clientTransport = undefined;
     this.coordinator = undefined;
     this.dispatcher = undefined;
     this.domain = undefined;
@@ -664,6 +741,7 @@ export class LarkLongConnectionListener implements LarkListener {
     this.listening = false;
     this.reconnectingSince = undefined;
     this.rebuiltAt = undefined;
+    return force ? this.forceClose : undefined;
   }
 }
 

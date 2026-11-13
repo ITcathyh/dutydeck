@@ -6,6 +6,14 @@ import type { LarkSmokeEvent } from './lark-smoke.js';
 
 const SMOKE_PATH = '/dutydeck-setup-smoke';
 
+/** The listener could not prove transport cleanup; callers must retain the runtime lease. */
+export class LarkSmokeCleanupError extends Error {
+  constructor(cause: unknown) {
+    super('The setup smoke listener could not confirm that its transport closed', { cause });
+    this.name = 'LarkSmokeCleanupError';
+  }
+}
+
 /** Reuse the real listener without a coordinator: forwarded events stop at this loopback receiver. */
 export async function startLarkSmokeListener(
   bot: StoredLarkConfig,
@@ -73,6 +81,10 @@ export async function startLarkSmokeListener(
   };
   const log = { info() {}, warn() {}, error() {} };
   const listener = new LarkLongConnectionListener(log, { forceCloseOnStop: true });
+  const stop = async () => {
+    await listener.stop({ force: true });
+    await closeServer();
+  };
   try {
     await listener.start({
       ...bot,
@@ -81,12 +93,12 @@ export async function startLarkSmokeListener(
       eventHandlers: [{ id: 'setup_smoke', eventTypes: ['im.message.receive_v1'], url: `http://127.0.0.1:${address.port}${SMOKE_PATH}`, token }]
     });
   } catch (error) {
-    try { await listener.stop({ force: true }); }
-    finally { await closeServer(); }
+    try { await stop(); }
+    catch (cleanupError) { throw new LarkSmokeCleanupError(new AggregateError([error, cleanupError])); }
     throw error;
   }
   return async () => {
-    try { await listener.stop({ force: true }); }
-    finally { await closeServer(); }
+    try { await stop(); }
+    catch (error) { throw new LarkSmokeCleanupError(error); }
   };
 }

@@ -3,7 +3,8 @@ import type { StoredLarkConfig } from '@dutydeck/shared';
 
 const state = vi.hoisted(() => ({
   configs: [] as StoredLarkConfig[], stops: 0, options: [] as unknown[],
-  stopOptions: [] as Array<{ force?: boolean } | undefined>, startError: undefined as Error | undefined
+  stopOptions: [] as Array<{ force?: boolean } | undefined>, startError: undefined as Error | undefined,
+  stopImplementation: undefined as (() => void | Promise<void>) | undefined
 }));
 vi.mock('../lark/listener.js', () => ({
   LarkLongConnectionListener: class {
@@ -12,11 +13,15 @@ vi.mock('../lark/listener.js', () => ({
       state.configs.push(config);
       if (state.startError) throw state.startError;
     }
-    stop(options?: { force?: boolean }) { state.stops += 1; state.stopOptions.push(options); }
+    stop(options?: { force?: boolean }) {
+      state.stops += 1;
+      state.stopOptions.push(options);
+      return state.stopImplementation?.();
+    }
   }
 }));
 
-import { startLarkSmokeListener } from './lark-smoke-listener.js';
+import { LarkSmokeCleanupError, startLarkSmokeListener } from './lark-smoke-listener.js';
 
 describe('startLarkSmokeListener', () => {
   it('forwards only the authenticated loopback message event and closes all resources', async () => {
@@ -82,5 +87,53 @@ describe('startLarkSmokeListener', () => {
       const handler = state.configs[0]!.eventHandlers![0]!;
       await expect(fetch(handler.url)).rejects.toThrow();
     } finally { state.startError = undefined; }
+  });
+
+  it('keeps loopback open until the forced listener cleanup finishes', async () => {
+    state.configs.length = 0;
+    state.options.length = 0;
+    state.stopOptions.length = 0;
+    state.stops = 0;
+    let finishStop!: () => void;
+    state.stopImplementation = () => new Promise<void>(resolve => { finishStop = resolve; });
+    try {
+      const stop = await startLarkSmokeListener(
+        { appId: 'cli_smoke', appSecret: 'secret_fixture' } as StoredLarkConfig,
+        () => {}
+      );
+      const handler = state.configs[0]!.eventHandlers![0]!;
+      const stopping = stop();
+      await Promise.resolve();
+      const stillOpen = await fetch(handler.url, { method: 'POST' });
+      expect(stillOpen.status).toBe(401);
+      finishStop();
+      await stopping;
+      await expect(fetch(handler.url)).rejects.toThrow();
+    } finally { state.stopImplementation = undefined; }
+  });
+
+  it('retains loopback when transport cleanup fails closed', async () => {
+    state.configs.length = 0;
+    state.options.length = 0;
+    state.stopOptions.length = 0;
+    state.stops = 0;
+    let attempts = 0;
+    state.stopImplementation = () => ++attempts === 1
+      ? Promise.reject(new Error('synthetic unconfirmed transport close'))
+      : Promise.resolve();
+    try {
+      const stop = await startLarkSmokeListener(
+        { appId: 'cli_smoke', appSecret: 'secret_fixture' } as StoredLarkConfig,
+        () => {}
+      );
+      const handler = state.configs[0]!.eventHandlers![0]!;
+      await expect(stop()).rejects.toBeInstanceOf(LarkSmokeCleanupError);
+      const stillOpen = await fetch(handler.url, { method: 'POST' });
+      expect(stillOpen.status).toBe(401);
+
+      // The injected listener can recover on retry; only then may loopback close.
+      await stop();
+      await expect(fetch(handler.url)).rejects.toThrow();
+    } finally { state.stopImplementation = undefined; }
   });
 });

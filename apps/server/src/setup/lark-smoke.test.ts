@@ -307,6 +307,27 @@ describe('offerLarkSetupSmoke', () => {
     ]);
   });
 
+  it('retains the runtime lease when final transport cleanup cannot be confirmed', async () => {
+    const close = vi.fn();
+    let onEvent: ((event: LarkSmokeEvent) => void) | undefined;
+    const result = await smoke({}, {
+      loadBot: async () => bot,
+      acquireRuntime: () => ({ close }),
+      startListener: async (_bot, receive) => {
+        onEvent = receive;
+        return async () => { throw new Error('synthetic unconfirmed transport close'); };
+      },
+      sendCard: async () => {
+        onEvent?.(ownerEvent);
+        return { messageId: 'om_test_card', chatId: 'oc_dm' };
+      }
+    });
+    expect(result.status).toBe('unavailable');
+    expect(result.message).toContain('保留 runtime');
+    // Only the preflight lease closed; the lease used by the listener is retained.
+    expect(close).toHaveBeenCalledOnce();
+  });
+
   it('reports send failure without claiming inbound or end-to-end verification', async () => {
     const stop = vi.fn();
     const close = vi.fn();

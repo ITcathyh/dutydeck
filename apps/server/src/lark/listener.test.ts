@@ -16,31 +16,66 @@ import { larkListenerStatusKey } from './listener-status.js';
 // 仅「监听接入层」用例需要截获 SDK 的事件注册；其余协调器用例直接构造 coordinator，
 // 不受此 mock 影响（它们传入的是手写 service 替身，永不实例化 lark.Client）。
 type MockWebSocket = {
-  readyState: 'OPEN' | 'CLOSING' | 'CLOSED';
+  readyState: 'CONNECTING' | 'OPEN' | 'CLOSING' | 'CLOSED';
   close: ReturnType<typeof vi.fn>;
   terminate: ReturnType<typeof vi.fn>;
 };
+type MockRawSocket = {
+  destroyed: boolean;
+  closeEmitted: boolean;
+  destroy: ReturnType<typeof vi.fn>;
+  finishClose(): void;
+  once(event: 'close', handler: () => void): void;
+};
 type MockWsClient = {
-  options: { onReady: () => void; onError: (error: Error) => void; onReconnecting: () => void; onReconnected: () => void; httpInstance: { request(config: Record<string, unknown>): Promise<unknown>; post(url: string, data?: unknown): Promise<unknown>; defaults: unknown } };
+  options: { onReady: () => void; onError: (error: Error) => void; onReconnecting: () => void; onReconnected: () => void; agent?: { createConnection(options: unknown): MockRawSocket }; httpInstance: { request(config: Record<string, unknown>): Promise<unknown>; post(url: string, data?: unknown): Promise<unknown>; defaults: unknown } };
   socket: MockWebSocket;
+  raw?: MockRawSocket;
+  closed: boolean;
+  createAttempt(): MockWebSocket;
+  open(evenAfterTransportDestroy?: boolean): void;
+  realisticStart(): Promise<void>;
 };
 const larkSdkHarness = vi.hoisted(() => {
   const handlers: Record<string, (event: any) => unknown> = {};
   const wsStart = vi.fn();
   const wsClose = vi.fn();
   const wsClients: MockWsClient[] = [];
-  // 未配置时 start 立即报 onReady、close 什么也不做。
+  // 未配置时 start 立即 open 并报 onReady；realisticStart 才走配置请求和外部 open。
   const behavior: { start?: (client: MockWsClient) => Promise<void> | void; close?: (client: MockWsClient) => void } = {};
   const httpRequest = vi.fn();
   const httpPost = vi.fn();
   const interceptorUse = { request: vi.fn(), response: vi.fn() };
+  const transport = { holdRawClose: false, rawSockets: [] as MockRawSocket[] };
+  const createRaw = (): MockRawSocket => {
+    const closeHandlers = new Set<() => void>();
+    const raw: MockRawSocket = {
+      destroyed: false,
+      closeEmitted: false,
+      destroy: vi.fn(),
+      finishClose: () => {
+        if (raw.closeEmitted) return;
+        raw.closeEmitted = true;
+        for (const handler of [...closeHandlers]) { closeHandlers.delete(handler); handler(); }
+      },
+      once: (event, handler) => { if (event === 'close') closeHandlers.add(handler); }
+    };
+    raw.destroy.mockImplementation(() => {
+      raw.destroyed = true;
+      if (!transport.holdRawClose) raw.finishClose();
+    });
+    transport.rawSockets.push(raw);
+    return raw;
+  };
   return {
-    handlers, wsStart, wsClose, wsClients, behavior, httpRequest, httpPost, interceptorUse,
+    handlers, wsStart, wsClose, wsClients, behavior, httpRequest, httpPost, interceptorUse, transport, createRaw,
     reset: () => {
       for (const key of Object.keys(handlers)) delete handlers[key];
       wsStart.mockClear();
       wsClose.mockClear();
       wsClients.length = 0;
+      transport.holdRawClose = false;
+      transport.rawSockets.length = 0;
       delete behavior.start;
       delete behavior.close;
       httpRequest.mockReset();
@@ -50,6 +85,9 @@ const larkSdkHarness = vi.hoisted(() => {
     }
   };
 });
+vi.mock('node:https', () => ({
+  Agent: class { createConnection() { return larkSdkHarness.createRaw(); } }
+}));
 vi.mock('@larksuiteoapi/node-sdk', () => ({
   LoggerLevel: { warn: 'warn' },
   EventDispatcher: class {
@@ -59,23 +97,61 @@ vi.mock('@larksuiteoapi/node-sdk', () => ({
     }
   },
   WSClient: class {
-    readonly socket: MockWebSocket;
-    constructor(readonly options: MockWsClient['options']) {
-      const socket: MockWebSocket = { readyState: 'OPEN', close: vi.fn(), terminate: vi.fn() };
+    socket!: MockWebSocket;
+    raw?: MockRawSocket;
+    closed = false;
+    private savedSocket?: MockWebSocket;
+    private openAttempt?: () => void;
+    constructor(readonly options: MockWsClient['options']) { larkSdkHarness.wsClients.push(this); }
+    createAttempt() {
+      if (this.socket) return this.socket;
+      const raw = this.options.agent ? this.options.agent.createConnection({}) : larkSdkHarness.createRaw();
+      this.raw = raw;
+      const socket: MockWebSocket = { readyState: 'CONNECTING', close: vi.fn(), terminate: vi.fn() };
       // 对端不回应关闭握手：普通 close 会一直停在 CLOSING，terminate 才立即结束。
       socket.close.mockImplementation(() => { socket.readyState = 'CLOSING'; });
-      socket.terminate.mockImplementation(() => { socket.readyState = 'CLOSED'; });
+      socket.terminate.mockImplementation(() => { socket.readyState = 'CLOSED'; raw.destroy(); });
+      raw.once('close', () => { socket.readyState = 'CLOSED'; });
       this.socket = socket;
-      larkSdkHarness.wsClients.push(this);
+      return socket;
+    }
+    open(evenAfterTransportDestroy = false) {
+      const socket = this.createAttempt();
+      if (this.raw?.destroyed && !evenAfterTransportDestroy) return;
+      socket.readyState = 'OPEN';
+      // SDK 1.76.0 只在这个 open 回调里 setWSInstance；此前 close 看不到 socket。
+      this.savedSocket = socket;
+      this.openAttempt?.();
+    }
+    async realisticStart() {
+      try {
+        // SDK start() 不 await 首次 reConnect；closed 检查在配置和 connect 之后。
+        await this.options.httpInstance.request({ method: 'post', url: '/callback/ws/endpoint' });
+        this.createAttempt();
+        await new Promise<void>(resolve => { this.openAttempt = resolve; });
+        if (this.closed) {
+          // SDK discardConnection：closed 后迟到的 open 已保存实例，在这里被 terminate。
+          this.savedSocket?.terminate();
+          this.savedSocket = undefined;
+          return;
+        }
+        this.options.onReady();
+      } catch { /* pullConnectConfig/WebSocket construction failures stay in SDK */ }
     }
     async start(params: unknown) {
       larkSdkHarness.wsStart(params);
       if (larkSdkHarness.behavior.start) return larkSdkHarness.behavior.start(this);
+      this.open();
       this.options.onReady();
     }
     close(params?: { force?: boolean }) {
       larkSdkHarness.wsClose(params);
-      if (params?.force) this.socket.terminate(); else this.socket.close();
+      this.closed = true;
+      const socket = this.savedSocket;
+      if (socket) {
+        if (params?.force) socket.terminate(); else socket.close();
+        this.savedSocket = undefined;
+      }
       larkSdkHarness.behavior.close?.(this);
     }
   },
@@ -176,7 +252,7 @@ describe('长连接停止', () => {
     await listener.start({ ...config, appId: `cli_close_${++sequence}` });
     return { listener, socket: larkSdkHarness.wsClients.at(-1)!.socket };
   };
-  afterEach(() => { larkSdkHarness.reset(); });
+  afterEach(() => { vi.useRealTimers(); larkSdkHarness.reset(); });
 
   it('生产 stop 保持普通关闭，setup force 可终止不回应握手的 CLOSING socket', async () => {
     larkSdkHarness.reset();
@@ -198,11 +274,104 @@ describe('长连接停止', () => {
       { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
       { env: {}, fetcher, forceCloseOnStop: true }
     );
-    larkSdkHarness.behavior.start = client => { client.options.onError(new Error('synthetic connect failure')); };
+    larkSdkHarness.behavior.start = client => { client.createAttempt(); client.options.onError(new Error('synthetic connect failure')); };
     await expect(listener.start({ ...config, appId: 'cli_close_failed' })).rejects.toThrow('synthetic connect failure');
     expect(larkSdkHarness.wsClose).toHaveBeenCalledOnce();
     expect(larkSdkHarness.wsClose).toHaveBeenCalledWith({ force: true });
     expect(larkSdkHarness.wsClients[0]!.socket.readyState).toBe('CLOSED');
+  });
+
+  const settleHandshake = async () => { for (let index = 0; index < 30; index++) await vi.advanceTimersByTimeAsync(0); };
+  const startHandshake = () => {
+    larkSdkHarness.reset();
+    vi.useFakeTimers();
+    larkSdkHarness.transport.holdRawClose = true;
+    larkSdkHarness.behavior.start = client => { void client.realisticStart(); };
+    const listener = new LarkLongConnectionListener(
+      { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      { env: {}, fetcher, forceCloseOnStop: true }
+    );
+    // Deliberately not the SDK's cli_<16 hex> shape: falling through to the real
+    // SDK must return before any network I/O instead of ever touching Feishu.
+    const outcome = listener.start({ ...config, appId: `cli_handshake_${++sequence}` }).catch(error => error as Error);
+    return { listener, outcome };
+  };
+
+  it('配置请求迟到返回时不会在已停止后新建 WebSocket', async () => {
+    let resolveConfig!: (value: unknown) => void;
+    const { outcome } = startHandshake();
+    larkSdkHarness.httpRequest.mockImplementation(() => new Promise(resolve => { resolveConfig = resolve; }));
+    await settleHandshake();
+    const client = larkSdkHarness.wsClients[0]!;
+    expect(client).toBeDefined();
+    await vi.advanceTimersByTimeAsync(20_000);
+    await settleHandshake();
+    expect(await outcome).toBeInstanceOf(Error);
+
+    resolveConfig({ code: 0 });
+    await settleHandshake();
+    expect(client.socket).toBeUndefined();
+    expect(larkSdkHarness.transport.rawSockets).toHaveLength(0);
+  });
+
+  it('CONNECTING 时销毁底层传输并等 close 后才结束启动清理', async () => {
+    const { listener, outcome } = startHandshake();
+    let settled = false;
+    void outcome.then(() => { settled = true; });
+    await settleHandshake();
+    const client = larkSdkHarness.wsClients[0]!;
+    expect(client.socket.readyState).toBe('CONNECTING');
+    const raw = client.raw!;
+
+    await vi.advanceTimersByTimeAsync(20_000);
+    await settleHandshake();
+    expect(raw.destroy).toHaveBeenCalledOnce();
+    expect(settled).toBe(false);
+    raw.finishClose();
+    expect(await outcome).toBeInstanceOf(Error);
+    // setup 外层第二次 stop 复用第一次清理，不重复 close/destroy。
+    await listener.stop({ force: true });
+    expect(raw.destroy).toHaveBeenCalledOnce();
+    expect(larkSdkHarness.wsClose).toHaveBeenCalledOnce();
+  });
+
+  it('stop 后已排队的迟到 open 在清理完成前 terminate，且不恢复 listening', async () => {
+    const { listener, outcome } = startHandshake();
+    let settled = false;
+    void outcome.then(() => { settled = true; });
+    await settleHandshake();
+    const client = larkSdkHarness.wsClients[0]!;
+    const raw = client.raw!;
+    await vi.advanceTimersByTimeAsync(20_000);
+    await settleHandshake();
+
+    // Model an open event already queued when the transport was destroyed.
+    client.open(true);
+    await settleHandshake();
+    expect(client.socket.terminate).toHaveBeenCalledOnce();
+    expect(listener.listening).toBe(false);
+    expect(settled).toBe(false);
+    raw.finishClose();
+    expect(await outcome).toBeInstanceOf(Error);
+    expect(listener.listening).toBe(false);
+  });
+
+  it('close 确认超时有界失败，不把未确认连接当作清理完成', async () => {
+    const { outcome } = startHandshake();
+    let settled = false;
+    void outcome.then(() => { settled = true; });
+    await settleHandshake();
+    const raw = larkSdkHarness.wsClients[0]!.raw!;
+    await vi.advanceTimersByTimeAsync(20_000);
+    await settleHandshake();
+    expect(raw.destroy).toHaveBeenCalledOnce();
+
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    const error = await outcome;
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toContain('close was not confirmed');
   });
 });
 
