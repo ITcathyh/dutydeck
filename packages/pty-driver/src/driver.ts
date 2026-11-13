@@ -233,6 +233,7 @@ export class PtyCliDriver implements AgentDriver {
     cancelRequested: boolean;
     timedOut: boolean;
     sent: boolean;
+    terminalWriteAttempted: boolean;
     composerWritten: boolean;
     submitted: boolean;
     terminalInterrupt?: Promise<void>;
@@ -410,7 +411,7 @@ export class PtyCliDriver implements AgentDriver {
 
   /** resume 会拆掉接线（截止计时、原生回执、转录跟踪）：轮次或提交进行中时拒绝，交给运行时等本轮结束。 */
   private assertNoActiveTurn() {
-    if (this.turnActive || this.activeSubmission) {
+    if (this.turnActive || this.activeSubmission || this.maintenanceActive || this.maintenanceUnknown) {
       throw new RuntimeError('TURN_IN_PROGRESS', 'Wait for the current response before resuming this session', 409);
     }
   }
@@ -789,6 +790,7 @@ export class PtyCliDriver implements AgentDriver {
       cancelRequested: false,
       timedOut: false,
       sent: false,
+      terminalWriteAttempted: false,
       composerWritten: false,
       submitted: false,
     };
@@ -822,7 +824,18 @@ export class PtyCliDriver implements AgentDriver {
     }, this.timings.maintenanceTimeoutMs ?? PtyCliDriver.MAINTENANCE_TIMEOUT_MS);
     timeout.unref();
     try {
-      if (!this.started) await race(this.start());
+      if (!this.started) {
+        const starting = this.start();
+        // Cancellation may win the race while a reattach-start is still wiring.
+        // Refresh only this maintenance's ownership when that exact start later
+        // succeeds; an external resume is rejected by assertNoActiveTurn().
+        void starting.then(() => {
+          if (this.maintenanceActive !== maintenance || this.stopped) return;
+          maintenance.backend = this.backend;
+          maintenance.wiringGeneration = this.wiringGeneration;
+        }, () => {});
+        await race(starting);
+      }
       if (this.stopped) throw unknown();
       maintenance.backend = this.backend;
       maintenance.wiringGeneration = this.wiringGeneration;
@@ -865,6 +878,9 @@ export class PtyCliDriver implements AgentDriver {
       return finish(outcome);
     } catch (error) {
       if (this.maintenanceUnknown) throw error;
+      // stop() owns teardown and has already made recovery impossible. Do not
+      // spend another grace period before preserving the unknown submission.
+      if (this.stopped) throw unknown();
       const interruptionRequested = maintenance.cancelRequested || maintenance.timedOut;
       // Once Enter was attempted (or the whole adapter writer fulfilled), an
       // idle screen cannot turn missing transcript evidence into safe failure.
@@ -1078,7 +1094,7 @@ export class PtyCliDriver implements AgentDriver {
   }
 
   private async requestMaintenanceInterrupt(maintenance: NonNullable<PtyCliDriver['maintenanceActive']>): Promise<void> {
-    if (!maintenance.sent || this.stopped) return;
+    if (!maintenance.terminalWriteAttempted || this.stopped) return;
     maintenance.terminalInterrupt ??= Promise.resolve()
       .then(() => maintenance.backend.interrupt())
       .catch(() => { /* The composer proof below still decides recovery. */ });
@@ -2646,6 +2662,9 @@ export class PtyCliDriver implements AgentDriver {
           this.assertMaintenanceWrite(maintenance, maintenanceInput === 'enter');
           if (maintenanceInput === 'enter') maintenance.submitted = true;
           else maintenance.composerWritten = true;
+          // Safety checks have passed and the next await can put bytes in the
+          // terminal. Only this point authorizes a later maintenance Ctrl-C.
+          maintenance.terminalWriteAttempted = true;
         }
         const result = await write();
         check();

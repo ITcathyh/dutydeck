@@ -58,6 +58,7 @@ describe('controlled real ACP native compact submission', () => {
     expect(successor.status).toBe('queued');
     await runtime.interrupt(session.id, interrupted.id);
     await vi.waitFor(async () => expect((await runtime.getTasks(session.id)).find(task => task.id === interrupted.id)?.status).toBe('interrupted'), { timeout: 8000 });
+    expect((await runtime.getEvents(session.id)).filter(event => (event.data as any)?.state === 'compaction' && (event.data as any)?.phase === 'cancelled')).toHaveLength(1);
     await vi.waitFor(async () => expect((await runtime.getTasks(session.id)).find(task => task.id === successor.id)?.status).toBe('completed'), { timeout: 8000 });
     expect(await h.prompts()).toEqual(['old context', '/compact', 'successor']);
     expect(h.repos.execution.getTaskExecution(interrupted.id)?.currentAttempt?.receipt).toBeUndefined();

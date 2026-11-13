@@ -3050,8 +3050,10 @@ export class DutydeckRuntime {
         this.mutations.check();
         const interrupted = this.bound().getPendingQueueActions(this.fence(session)).some(action => action.interrupt && action.target?.attemptId === ref.attemptId);
         if (outcome === 'cancelled' || interrupted) {
+          // PTY and ACP drivers emit their own cancelled outcome. Runtime still
+          // owns cancellation discovered only from durable interrupt intent.
+          if (outcome !== 'cancelled') await this.emit(id, 'status', { state: 'compaction', phase: 'cancelled', proactive: true });
           // The maintenance stream is quiescent; finish the logical task without submitting its user prompt.
-          await this.emit(id, 'status', { state: 'compaction', phase: 'cancelled', proactive: true });
           await this.consume(session, { type: 'completed', data: { stopReason: 'cancelled' } }, makeId('evt'));
           return false;
         }

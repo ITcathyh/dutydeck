@@ -128,7 +128,17 @@ describe('Claude maintenance compaction evidence', () => {
     await expect(current.pending).rejects.toThrow();
   });
 
-  it('does not accept another native session or a later business turn', async () => {
+  it.each(['promptId', 'uuid'] as const)('fails immediately when the compact input is missing %s', async missing => {
+    await setup([clone(successFixture[0])]);
+    const current = arm();
+    const [input] = successfulSequence();
+    delete input[missing];
+    await append(input);
+    await expect(current.pending).resolves.toBe('failed');
+    expect(current.settled()).toBe(true);
+  });
+
+  it('ignores another native session and fails immediately on a later business turn', async () => {
     await setup([clone(successFixture[0])]);
     const foreign = arm();
     await append(...successfulSequence(promptId, 'other-native-session', 'foreign'));
@@ -142,9 +152,8 @@ describe('Claude maintenance compaction evidence', () => {
     await append(input,
       { type: 'user', uuid: 'next-business', parentUuid: input.uuid, promptId: 'next-business-prompt', sessionId, timestamp: new Date().toISOString(), message: { role: 'user', content: 'next business prompt' } },
       boundary, summary);
-    expect(current.settled()).toBe(false);
-    current.controller.abort();
-    await expect(current.pending).rejects.toThrow();
+    await expect(current.pending).resolves.toBe('failed');
+    expect(current.settled()).toBe(true);
   });
 
   it('does not let a late previous-generation boundary complete the next generation', async () => {

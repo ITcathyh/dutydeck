@@ -15,6 +15,7 @@ const line = (entry: unknown) => JSON.stringify(entry) + '\n';
 const screen = (text: string) => `\x1b[2J\x1b[H${text.replaceAll('\n', '\r\n')}`;
 const idleScreen = '──────────\n❯\n──────────\n⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents';
 const busyScreen = '❯ /compact\n✻ Compacting conversation…\nesc to interrupt';
+const permissionScreen = 'Permission required\nDo you want to proceed?\n❯';
 const compactDraftScreen = '──────────\n❯ /compact  <optional custom summarization instructions>\n──────────\n⏵⏵ bypass permissions on (shift+tab to cycle)';
 const compactDraftWithStatusScreen = '──────────\n❯ /compact  <optional custom summarization instructions>\n──────────\nContext status one\nContext status two\n⏵⏵ bypass permissions on (shift+tab to cycle)';
 const idleWithStatusScreen = (status: string) => idleScreen.replace('⏵⏵ bypass', `${status}\nContext status two\n⏵⏵ bypass`);
@@ -76,7 +77,7 @@ describe('PTY Claude maintenance compaction', () => {
     driver = new PtyCliDriver({
       agent: { id: 'claude-code', name: 'fixture', command: 'unused', args: [], protocol: 'pty-cli', cwd: directory,
         env: { CLAUDE_CONFIG_DIR: directory }, permissionMode: 'full-trust', timeout: 0, capabilities: { pause: false, resume: true }, builtin: false },
-      adapter: { ...adapter, prepareInput: undefined, writeInput(_backend, prompt) { prompts.push(prompt); } },
+      adapter: { ...adapter, prepareInput: undefined, writeInput(backend, prompt) { prompts.push(prompt); return backend.write(prompt); } },
       backend, sessionId: 'ses_compact', awaitingAnswer: () => awaitingAnswer,
       timings: { maintenanceTimeoutMs: 1_000, maintenanceIdleGraceMs: 500 },
       onEvent(event) { events.push(event); }, onExit() {},
@@ -188,6 +189,21 @@ describe('PTY Claude maintenance compaction', () => {
     expect(prompts).toHaveLength(2);
   });
 
+  it('rejects resume during active and unknown maintenance before respawn', async () => {
+    const { pending } = await armCompact();
+    const respawn = vi.fn();
+    (driver as any).respawn = respawn;
+    await expect(driver.resume()).rejects.toMatchObject({ code: 'TURN_IN_PROGRESS' });
+    expect(respawn).not.toHaveBeenCalled();
+    output(screen(busyScreen));
+    await vi.advanceTimersByTimeAsync(1_601);
+    await expect(pending).rejects.toBeInstanceOf(PromptNotWrittenError);
+    expect((driver as any).maintenanceUnknown).toBe(true);
+    await expect(driver.resume()).rejects.toMatchObject({ code: 'TURN_IN_PROGRESS' });
+    expect(respawn).not.toHaveBeenCalled();
+    expect(prompts).toEqual(['/compact']);
+  });
+
   it('cancels before the command is written without interrupting the terminal', async () => {
     const source = (driver as any).transcript;
     const flush = source.flush.bind(source);
@@ -214,6 +230,7 @@ describe('PTY Claude maintenance compaction', () => {
     await vi.advanceTimersByTimeAsync(600);
     await expect(pending).resolves.toBe('cancelled');
     expect(events.filter(event => event.type === 'completed')).toHaveLength(0);
+    expect(events.filter(event => event.type === 'status' && event.data?.state === 'compaction' && event.data.phase === 'cancelled')).toHaveLength(1);
     await completeBusiness('after interrupt');
     expect(prompts).toHaveLength(2);
   });
@@ -361,6 +378,26 @@ describe('PTY Claude maintenance compaction', () => {
     });
     await expect(driver.compact!()).resolves.toBe('failed');
     expect(prompts).toEqual([]);
+  });
+
+  it('does not Ctrl-C when the first guarded key fails before any backend write', async () => {
+    const real = createCliAdapter('claude-code');
+    const writes: string[] = [];
+    (driver as any).backend.write = (data: string) => { writes.push(data); };
+    (driver as any).adapter = { ...(driver as any).adapter,
+      writeInput(backend: any, prompt: string) {
+        prompts.push(prompt);
+        (driver as any).humanWaits.add('late-human');
+        output(screen(permissionScreen));
+        return real.writeInput(backend, prompt);
+      } };
+    const { pending } = await armCompact();
+    let settled = false;
+    void pending.then(() => { settled = true; }, () => { settled = true; });
+    await advanceUntil(() => settled);
+    await expect(pending).rejects.toBeInstanceOf(PromptNotWrittenError);
+    expect(writes).toEqual([]);
+    expect(interrupts).toBe(0);
   });
 
   it.each(['background', 'hook', 'answer', 'human'] as const)('rechecks %s with the real writer between paste and final Enter', async kind => {
@@ -775,6 +812,46 @@ describe('PTY Claude maintenance compaction', () => {
     expect(prompts).toEqual(['/compact']);
     await succeedCompact('after-start');
     await expect(compacting).resolves.toBe('completed');
+  });
+
+  it.each(['unsettled', 'settled'] as const)('preserves unknown without a recovery grace after stop (%s writes)', async writes => {
+    const { pending } = await armCompact();
+    output(screen(busyScreen));
+    const maintenance = (driver as any).maintenanceActive;
+    maintenance.pending = writes === 'unsettled' ? new Promise(() => {}) : Promise.resolve();
+    maintenance.writesSettled = false;
+    const stopping = driver.stop();
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(pending).rejects.toBeInstanceOf(PromptNotWrittenError);
+    expect((driver as any).maintenanceUnknown).toBe(true);
+    expect(events.filter(event => event.type === 'status' && event.data?.state === 'compaction' && event.data.phase === 'cancelled')).toEqual([]);
+    await stopping;
+  });
+
+  it('refreshes this maintenance when a cancelled first start later succeeds', async () => {
+    const gate = deferred();
+    (driver as any).started = false;
+    vi.spyOn(driver, 'start').mockImplementation(async () => {
+      await gate.promise;
+      output(screen(idleScreen));
+      await (driver as any).snapshot.writeAndFlush('');
+      (driver as any).wiringGeneration++;
+      (driver as any).started = true;
+    });
+    const pending = driver.compact!();
+    void pending.catch(() => {});
+    await vi.advanceTimersByTimeAsync(0);
+    output(screen(busyScreen));
+    await vi.advanceTimersByTimeAsync(0);
+    await driver.interrupt();
+    gate.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(600);
+    await expect(pending).resolves.toBe('cancelled');
+    expect(prompts).toEqual([]);
+    expect(interrupts).toBe(0);
+    await completeBusiness('after reattach start cancellation');
+    expect(prompts).toHaveLength(1);
   });
 
   it('rechecks an unknown terminal and completes the next business prompt after recovery', async () => {

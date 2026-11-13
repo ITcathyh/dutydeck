@@ -729,9 +729,10 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
       if (inputText === undefined || replayedInput) return;
       const timestamp = Date.parse(entry.timestamp);
       if (!Number.isFinite(timestamp) || timestamp < wait.armedAt - 1_000) return;
-      if (inputText !== '/compact') { wait.invalidated = true; return; }
+      if (inputText !== '/compact') { wait.invalidated = true; wait.finish('failed'); return; }
       if (typeof entry.promptId !== 'string' || !entry.promptId || typeof entry.uuid !== 'string' || !entry.uuid) {
         wait.invalidated = true;
+        wait.finish('failed');
         return;
       }
       wait.promptId = entry.promptId;
@@ -764,7 +765,10 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
     if (entry.uuid === wait.inputUuid) return;
     if (claudeInputText(entry) !== undefined) {
       const timestamp = Date.parse(entry.timestamp);
-      if (Number.isFinite(timestamp) && timestamp >= wait.armedAt - 1_000) wait.invalidated = true;
+      if (Number.isFinite(timestamp) && timestamp >= wait.armedAt - 1_000) {
+        wait.invalidated = true;
+        wait.finish('failed');
+      }
     }
   }
 

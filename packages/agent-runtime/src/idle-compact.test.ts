@@ -107,6 +107,7 @@ describe('idle compaction at serialized task activation', () => {
     await h.runtime.interrupt(h.session.id, next.id);
     gate.resolve(); await h.wait(next.id, 'interrupted');
     expect(h.order).toEqual(['old', 'compact']);
+    expect((await h.runtime.getEvents(h.session.id)).filter(event => (event.data as any)?.state === 'compaction' && (event.data as any)?.phase === 'cancelled')).toHaveLength(1);
     const successor = await h.dispatch('successor', 24); await h.wait(successor.id);
     expect(h.order).toEqual(['old', 'compact', 'successor']);
   });
