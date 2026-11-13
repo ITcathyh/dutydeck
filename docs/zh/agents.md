@@ -22,7 +22,7 @@ Codex 终端 Agent 会从 `CODEX_HOME/config.toml` 读取 `[profiles.<name>]` �
 
 Dutydeck 自己生成的 Claude 凭据守卫（终端与内置 ACP）和计划守卫（终端）在官方 Claude Code **2.1.295 或更高版本**上带 `onFailure: "block"`：守卫超时或未被脚本内显式拒绝覆盖的执行失败也阻断工具调用。策略文件读取或 JSON 解析失败、计划阶段已启用但守卫脚本缺失同样按拒绝处理。Ask relay、PermissionRequest 和用户自己的 hooks 不增加这个字段。
 
-启动前探测使用与 Agent 相同的清洗后子进程环境，最多 3 秒并按可执行文件身份缓存；内置 ACP launcher 独立探测同一个实际 Claude 可执行文件，并记录每个启动句柄的实际结果。旧版、探测失败和 Seed / Relay / Genius 等未验证分支不盲目写这个字段，无保护会话仍可使用；凭据策略生效或进入 deny-all 的轮次会逐轮门禁，不能确认当前进程支持就在写入 prompt 前拒绝，并提示升级。恢复或接管终端时还核对真实设置里的守卫 marker、matcher 与 `onFailure: "block"`，旧设置形状不符时需升级并重开会话，不会静默删除守卫。
+启动前探测使用与 Agent 相同的清洗后子进程环境，最多 3 秒并按可执行文件身份缓存；内置 ACP launcher 独立探测同一个实际 Claude 可执行文件。旧版、探测失败和 Seed / Relay / Genius 等未验证分支不写这个字段，凭据策略生效或 deny-all 的轮次也照常提交，守卫超时维持原来的放行行为，显式拒绝和脚本崩溃仍由 `|| exit 2` 拦截。恢复或接管终端时，新版核对真实设置里的守卫 marker、精确 matcher、command type 与 `onFailure: "block"`；旧版按 marker、精确 matcher 和 command type 核对，不因缺少这个字段拒绝轮次。`dutydeck doctor` 的默认 Agent 可用性检查会对识别出的旧版官方 Claude Code 给出升级提醒。
 
 ## 1. 自定义 Agent (`DUTYDECK_AGENTS_JSON`)
 

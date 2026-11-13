@@ -56,7 +56,7 @@
 - **原因**：Linux 上 `/tmp` 清理了 tmux socket 文件，但原 tmux server 和 pane 仍在；Dutydeck 会拒绝再启动一个同名 server，避免同一会话同时跑两个 CLI。
 - **处理**：按 tmux 手册向原 server 进程发送 `SIGUSR1` 重建 socket，或结束原 tmux server 后重新发送消息。可把 `TMUX_TMPDIR` 指到不会被清理的目录，或让 `systemd-tmpfiles` 排除 tmux 目录。非 Linux 不做这项内核检查，行为保持原样。开启 `remain-on-exit` 时，Dutydeck 下次启动会回收自己留下且所有 pane 都已退出的死会话；仍有运行中 pane 的会话会保留。
 
-### Q9: Claude 提示需要 2.1.295+ 的 `onFailure: "block"`，或守卫读取失败？
-- **版本或分支不支持**：只有官方 Claude Code 2.1.295+ 已确认支持守卫失败阻断。旧版、版本探测失败和未验证分支可以继续跑不依赖守卫的会话；凭据策略生效或进入 deny-all 的轮次会在 prompt 写入前拒绝。升级官方 Claude Code 并重开会话，不要靠给旧版手工加字段绕过。
-- **恢复后的设置不完整**：接管旧终端时会同时检查 marker、精确 matcher 和实际 `onFailure: "block"`。升级后重开会话（飞书发 `/new`），让新设置生成；Dutydeck 不会删掉守卫来让旧会话继续。
-- **策略或脚本故障**：策略文件不存在、未启用风险策略或没有未授权匹配时照常放行；读取错误、损坏 JSON、active 计划脚本缺失或守卫超时会阻断操作。检查 `.dutydeck/security/sessions/` 的文件类型与 JSON、会话私有设置目录和机器负载。错误文本不会回显策略里的敏感值。
+### Q9: Claude 守卫超时、读取失败或恢复后提示设置不完整？
+- **守卫超时**：只有官方 Claude Code 2.1.295+ 会通过 `onFailure: "block"` 让守卫超时也阻断工具调用。旧版、版本探测失败和未验证分支的受保护轮次照常提交，超时维持原行为；显式拒绝和脚本崩溃仍由 `|| exit 2` 拦截。需要超时阻断时升级官方 Claude Code 并重开会话。
+- **恢复后的设置不完整**：新版接管终端时检查 marker、精确 matcher、command type 和实际 `onFailure: "block"`；旧版只要求真实守卫接线，不因缺少该字段拒绝轮次。新版设置形状不符时重开会话（飞书发 `/new`）生成完整设置。
+- **策略或脚本故障**：策略文件不存在、未启用风险策略或没有未授权匹配时照常放行；读取错误、损坏 JSON、active 计划脚本缺失会拒绝操作。检查 `.dutydeck/security/sessions/` 的文件类型与 JSON、会话私有设置目录和机器负载。错误文本不会回显策略里的敏感值。

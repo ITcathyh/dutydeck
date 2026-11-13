@@ -2,7 +2,7 @@
 
 > [← 返回 README](../../README.md) · [全部文档](../../README.md#docs) · [English](../en/upgrading.md)
 
-- **Claude 守卫失败改为阻断**：Dutydeck 自己的凭据与计划守卫在官方 Claude Code 2.1.295+ 上新增 `onFailure: "block"`，超时及未被现有 `|| exit 2` 覆盖的失败不再退回普通权限流程；策略读取/JSON 解析错误和 active 计划脚本缺失也会拒绝。旧版、探测失败和未验证分支不写未知字段，无保护会话不受影响，但凭据策略生效或 deny-all 的轮次会在 prompt 写入前报明确升级错误。恢复或接管的旧终端若只有 marker、没有实际 `onFailure` 形状，同样需要升级后重开会话。Ask relay、PermissionRequest 和用户 hooks 不变；没有新增设置、命令或数据库迁移。回滚到旧程序会恢复旧的超时放行行为，已生成的新设置是否被旧 Claude 接受未作为兼容保证。
+- **Claude 守卫失败阻断需要官方 Claude Code 2.1.295+**：Dutydeck 自己的凭据与计划守卫在官方 Claude Code 2.1.295+ 上新增 `onFailure: "block"`，超时及未被现有 `|| exit 2` 覆盖的失败不再退回普通权限流程；策略读取/JSON 解析错误和 active 计划脚本缺失也会拒绝。旧版、探测失败和未验证分支不写这个字段，受保护轮次照常提交，守卫超时维持原行为，显式拒绝和脚本崩溃仍由 `|| exit 2` 拦截。恢复或接管的新版终端核对 marker、精确 matcher、command type 和实际 `onFailure` 形状；旧版不因缺少该字段被判为未接线。Ask relay、PermissionRequest 和用户 hooks 不变；没有新增设置、命令或数据库迁移。
 
 - **tmux 会话生命周期**：Linux 上 tmux socket 文件被清理但旧 server 仍在时，启动会拒绝另建同名 server，并提示用 `SIGUSR1` 重建 socket 或结束旧 server；不会再让两个 CLI 接管同一会话。启用 `remain-on-exit` 时，下次启动会回收 Dutydeck 自有且全部 pane 已退出的死会话，仍有 pane 运行的会话保留。非 Linux 行为不变。
 

@@ -47,12 +47,12 @@ function readSettings(value: string, cwd: string): Record<string, unknown> {
   }
 }
 
-function hasFailClosedHook(settings: Record<string, unknown>, expectedMatcher: string, commandMarkers: string[]): boolean {
+function hasGuardHook(settings: Record<string, unknown>, expectedMatcher: string, commandMarkers: string[], failureBlockRequired: boolean): boolean {
   if (!object(settings.hooks) || !Array.isArray(settings.hooks.PreToolUse)) return false;
   return settings.hooks.PreToolUse.some(group => object(group) && group.matcher === expectedMatcher && Array.isArray(group.hooks) && group.hooks.some(hook => {
     if (!object(hook) || hook.type !== 'command' || typeof hook.command !== 'string') return false;
     const command = hook.command;
-    return commandMarkers.every(marker => command.includes(marker)) && hook.onFailure === 'block';
+    return commandMarkers.every(marker => command.includes(marker)) && (!failureBlockRequired || hook.onFailure === 'block');
   }));
 }
 
@@ -147,28 +147,28 @@ export class ClaudeSettings {
   }
 
   /**
-   * 正在跑的 CLI 有没有完整的守卫 hook：本驱动启动的看启动参数里的设置，接管的旧终端看会话目录里的每份设置。
-   * 只有路径 marker 或旧版没有 onFailure:block 的形状都不算已接线。
+   * 正在跑的 CLI 有没有守卫 hook：本驱动启动的看启动参数里的设置，接管的旧终端看会话目录里的每份设置。
+   * marker、精确 matcher 和 command type 始终核对；确认支持 onFailure:block 的官方新版还必须带这个字段。
    */
-  planGuardWired(launchArgs: string[], cwd: string): boolean {
-    return this.guardWired(launchArgs, cwd, claudePlanGuardMatcher, [join(this.directory, planGuardFile)]);
+  planGuardWired(launchArgs: string[], cwd: string, failureBlockRequired = false): boolean {
+    return this.guardWired(launchArgs, cwd, claudePlanGuardMatcher, [join(this.directory, planGuardFile)], failureBlockRequired);
   }
 
-  /** The secret guard must also carry its policy marker and onFailure:block after resume/adoption. */
-  secretGuardWired(launchArgs: string[], cwd: string): boolean {
-    return this.guardWired(launchArgs, cwd, secretGuardToolMatcher, ['secret-guard.mjs', 'DUTYDECK_POLICY_ROOT=', quote(cwd)]);
+  /** 新版恢复或接管时，凭据守卫还必须带策略 marker 和 onFailure:block。 */
+  secretGuardWired(launchArgs: string[], cwd: string, failureBlockRequired = false): boolean {
+    return this.guardWired(launchArgs, cwd, secretGuardToolMatcher, ['secret-guard.mjs', 'DUTYDECK_POLICY_ROOT=', quote(cwd)], failureBlockRequired);
   }
 
-  private guardWired(launchArgs: string[], cwd: string, expectedMatcher: string, commandMarkers: string[]): boolean {
+  private guardWired(launchArgs: string[], cwd: string, expectedMatcher: string, commandMarkers: string[], failureBlockRequired: boolean): boolean {
     if (launchArgs.length) {
       const { value } = settingsArgs(launchArgs);
       if (value === undefined) return false;
-      try { return hasFailClosedHook(readSettings(value, cwd), expectedMatcher, commandMarkers); }
+      try { return hasGuardHook(readSettings(value, cwd), expectedMatcher, commandMarkers, failureBlockRequired); }
       catch { return false; }
     }
     const settings = [...this.files].filter(path => path.endsWith('.json'));
     return settings.length > 0 && settings.every(path => {
-      try { return hasFailClosedHook(readSettings(path, cwd), expectedMatcher, commandMarkers); }
+      try { return hasGuardHook(readSettings(path, cwd), expectedMatcher, commandMarkers, failureBlockRequired); }
       catch { return false; }
     });
   }

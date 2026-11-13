@@ -310,8 +310,6 @@ export function createClaudeFamilyAdapter(id: string): CliAdapter {
       });
     },
 
-    guardFailureBlockSupported: () => guardFailureBlock,
-
     buildArgs({ sessionId, resume, resumeSessionId, nativeForkSessionId, model, permissionMode, env, planGuardCommand, cwd }: AdapterSessionContext): string[] {
       // --session-id/--resume 只接受裸 UUID：dutydeck 的 "ses_<uuid>" 剥前缀，
       // 目标步骤的 "ses_work_<hash>" 这类非 UUID id 确定性地映射成 UUID。

@@ -66,8 +66,6 @@ export interface CliAdapter {
    * env 是即将用于启动 CLI 的子进程环境（已按 child-environment 清洗）；探测结果由适配器自己缓存，buildArgs 保持同步。
    */
   prepareLaunch?(ctx: AdapterSessionContext, env: Record<string, string>): Promise<void>;
-  /** Whether this launch can fail closed when a Dutydeck guard hook itself fails. */
-  guardFailureBlockSupported?(): boolean;
   /** 构造 spawn 参数（bin 由 driver 层的 AgentConfig.command 提供，适配器不解析 bin 路径） */
   buildArgs(ctx: AdapterSessionContext): string[];
   /** 把 prompt 写进后端（paste+Enter / 分块 stdin / runner 帧，因 CLI 而异） */

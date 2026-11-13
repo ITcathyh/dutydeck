@@ -228,7 +228,7 @@ function activePolicy(root, sessionId) {
   return policy?.enabled === true && policy.authorized === false ? policy : undefined;
 }
 
-/** 是否需要完整守卫。读取或解析失败按需要保护处理，让旧版轮次门控也能 fail closed。 */
+/** 本轮策略是否要求凭据守卫。读取或解析失败按需要保护处理。 */
 export function secretGuardActive({ root, sessionId }) {
   try { return Boolean(activePolicy(root, sessionId)); }
   catch { return true; }

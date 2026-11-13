@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { ChildProcess } from 'node:child_process';
 import { basename, delimiter, dirname, join, resolve } from 'node:path';
-import { accessSync, chmodSync, constants, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { accessSync, chmodSync, constants, existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { assertNativeContextRecord, createAcpRuntime, createAgentRegistry, createRuntimeStore, type AcpPermissionDecision, type AcpPermissionRequest, type AcpRuntime, type AcpRuntimeResourceScope, type AcpRuntimeHandle, type AcpRuntimeProcessEvent, type AcpRuntimeStatus, type AcpRuntimeTurn, type AcpSessionStore } from 'acpx/runtime';
 import type { AgentConfig, AgentDriver, DriverSteeringOutcome, DriverTranscriptSourceObservation, InsightClient, NormalizedDriverEvent, PermissionMode, ToolRiskPolicy, DriverSubmission, DriverSubmissionInput, NativeContextIdentity, NativeContextExpected, NativeConfigurationRequest, NativeConfigurationProof, OperationPermit, ChildPermit } from '@dutydeck/shared';
@@ -381,8 +381,6 @@ export class AcpxAdapter implements AgentDriver {
   private readonly runtime: AcpRuntime;
   private readonly sessionStore: AcpSessionStore;
   private handle?: AcpRuntimeHandle;
-  private readonly claudeGuardCapabilities = new WeakMap<AcpRuntimeHandle, boolean>();
-  private pendingClaudeGuardReport?: string;
   private turn?: AcpRuntimeTurn;
   private readonly pendingPermissions = new Map<string, (decision: AcpPermissionDecision) => void>();
   private readonly sessionKey: string;
@@ -562,20 +560,11 @@ export class AcpxAdapter implements AgentDriver {
 
   /**
    * A Dutydeck launcher writes the Agent group it detaches into this directory, so the group stays provable and
-   * signalable when ACPX kills the launcher before the first process-tree sample. The Claude launcher also writes
-   * its one-time fail-closed capability report here. Neither report path is persisted in session options.
+   * signalable when ACPX kills the launcher before the first process-tree sample. Never persisted in session options.
    */
   private launcherReportEnvironment(): Record<string, string> {
     if (!usesDutydeckLauncher(this.launch.command)) return {};
-    const directory = privateWorkspaceDirectory(this.agent.cwd ?? process.cwd(), LAUNCHER_REPORTS);
-    const environment: Record<string, string> = { dutydeck_launcher_report: directory };
-    if (this.launch.command.includes(claudeLauncherPath())) {
-      if (this.pendingClaudeGuardReport) rmSync(this.pendingClaudeGuardReport, { force: true });
-      const report = join(directory, `claude-guard-${crypto.randomUUID()}`);
-      this.pendingClaudeGuardReport = report;
-      environment.dutydeck_claude_guard_report = report;
-    }
-    return environment;
+    return { dutydeck_launcher_report: privateWorkspaceDirectory(this.agent.cwd ?? process.cwd(), LAUNCHER_REPORTS) };
   }
   private observeProcess(event: AcpRuntimeProcessEvent) {
     if (event.phase === 'creation-started') {
@@ -753,21 +742,9 @@ export class AcpxAdapter implements AgentDriver {
       return {context:prepared.nativeContextRef,driverInstanceId:context.driverInstanceId,operationId:request.operationId,target:request.target,evidence};
     });
   }
-  private consumeClaudeGuardReport(handle: AcpRuntimeHandle): void {
-    if (!this.launch.command.includes(claudeLauncherPath())) return;
-    const report = this.pendingClaudeGuardReport;
-    if (!report) return;
-    this.pendingClaudeGuardReport = undefined;
-    let supported = false;
-    try { supported = readFileSync(report, 'utf8') === '1'; } catch {}
-    this.claudeGuardCapabilities.set(handle, supported);
-    rmSync(report, { force: true });
-  }
   private async ensureHandle() {
     this.assertActive();
     if (!this.handle) {
-      if (this.pendingClaudeGuardReport) rmSync(this.pendingClaudeGuardReport, { force: true });
-      this.pendingClaudeGuardReport = undefined;
       const record = await this.sessionStore.load(this.sessionKey);
       this.assertActive();
       const wrapped = [process.execPath, envLauncherPath(), ...acpxAgentCommand(this.agent)];
@@ -851,7 +828,7 @@ export class AcpxAdapter implements AgentDriver {
     return handle;
   }
   async start() { await this.resourceOperation(async () => { await this.ensureHandle(); }); }
-  private async sendTurn(prompt: string, submission?:DriverSubmission, maintenance = false, guardRequired = false) {
+  private async sendTurn(prompt: string, submission?:DriverSubmission, maintenance = false) {
     let compactFailed = false;
     let compactCancelled = false;
     const interruptVersion = this.interruptVersion;
@@ -862,14 +839,7 @@ export class AcpxAdapter implements AgentDriver {
       assertUninterrupted();
       if (this.turn) throw new Error('ACP turn already in progress');
       if(submission)this.options.context!.assertSubmission(submission);
-      const beforePrompt = submission || guardRequired ? () => {
-        assertUninterrupted();
-        this.consumeClaudeGuardReport(handle);
-        if (guardRequired && this.claudeGuardCapabilities.get(handle) !== true) throw Object.assign(new PromptNotWrittenError('Claude Code 2.1.295 或更高版本才能在凭据守卫失败时阻断操作。本次启动无法确认 settings 支持 onFailure:"block"；请升级官方 Claude Code 后新建会话，本轮消息尚未提交。'), { detailCode: 'PROMPT_NOT_WRITTEN' });
-        if (submission) this.options.context!.assertSubmission(submission);
-      } : undefined;
-      const turn = this.runtime.startTurn({ handle, text: prompt, mode: 'prompt', requestId: maintenance ? `compact-${crypto.randomUUID()}` : submission?.submissionId??`req-${crypto.randomUUID()}`, timeoutMs: 0,
-        ...(submission?{resourceScope:this.scope(submission.operation)}:{}), ...(beforePrompt?{beforePrompt}:{}) });
+      const turn = this.runtime.startTurn({ handle, text: prompt, mode: 'prompt', requestId: maintenance ? `compact-${crypto.randomUUID()}` : submission?.submissionId??`req-${crypto.randomUUID()}`, timeoutMs: 0,...(submission?{resourceScope:this.scope(submission.operation),beforePrompt:()=>{assertUninterrupted();this.options.context!.assertSubmission(submission);}}:{}) });
       this.turn = turn;
       this.turnCancelling = false;
       // result can reject before its event stream closes. Observe it immediately.
@@ -984,7 +954,6 @@ export class AcpxAdapter implements AgentDriver {
               this.options.onEvent({ type: 'completed', data: { stopReason: 'end_turn' } });
               return;
             }
-            if (outcome.error.detailCode === 'PROMPT_NOT_WRITTEN') throw new PromptNotWrittenError(outcome.error.message);
             throw new Error(outcome.error.message);
           }
           if (timedOut && outcome.status !== 'cancelled' && outcome.stopReason !== 'cancelled') {
@@ -1097,22 +1066,6 @@ export class AcpxAdapter implements AgentDriver {
     }
     throw unconfirmed('上一轮超时后 Agent 一直没有确认取消，系统也没能结束它，这条消息没有发出。请停止会话后再发。');
   }
-  /** Resolve live policy; the matching launch report is checked at startTurn's beforePrompt boundary. */
-  private async assertClaudeSecretGuardCapability(): Promise<boolean> {
-    if (process.platform === 'win32' || !this.launch.command.includes(claudeLauncherPath())) return false;
-    let policy = this.riskPolicy;
-    let policyUnavailable = false;
-    if (this.options.resolveRiskPolicy) {
-      try { policy = await this.whileActive(() => this.options.resolveRiskPolicy!(policy)); }
-      catch (error) {
-        if (this.stopped) throw error;
-        // The permission callback already fails closed when policy resolution
-        // fails. Treat the turn as protected for the version gate as well.
-        policyUnavailable = true;
-      }
-    }
-    return policyUnavailable || !!(policy?.enabled && !policy.authorized);
-  }
   async send(input: string|DriverSubmission) {
     const submission=typeof input==='string'?undefined:input;
     const prompt=typeof input==='string'?input:input.prompt;
@@ -1122,8 +1075,7 @@ export class AcpxAdapter implements AgentDriver {
     this.sending = true;
     try {
       await this.settlePreviousTurn();
-      const guardRequired = await this.assertClaudeSecretGuardCapability();
-      await this.sendTurn(prompt,submission,false,guardRequired);
+      await this.sendTurn(prompt,submission);
     } finally { this.sending = false; }
   }
   async compact(submission?: DriverSubmission): Promise<'completed' | 'failed' | 'unsupported' | 'cancelled'> {
@@ -1135,7 +1087,6 @@ export class AcpxAdapter implements AgentDriver {
     const interruptVersion = this.interruptVersion;
     try {
       await this.settlePreviousTurn();
-      const guardRequired = await this.assertClaudeSecretGuardCapability();
       const supported = await this.resourceOperation(async () => {
         const handle = await this.ensureHandle();
         const status = await this.runtime.getStatus?.({ handle });
@@ -1151,7 +1102,7 @@ export class AcpxAdapter implements AgentDriver {
       if (this.interruptVersion !== interruptVersion) throw new Error('Context compaction was interrupted');
       this.options.onEvent({ type: 'status', data: { state: 'compaction', phase: 'start', proactive: true } });
       try {
-        const phase = await this.sendTurn('/compact', submission, true, guardRequired);
+        const phase = await this.sendTurn('/compact', submission, true);
         const usage = await this.turnUsage(this.handle!, false);
         if (usage?.data.usageRef && usage.data.usageRef !== previousUsage?.data.usageRef) {
           if (phase === 'cancelled') this.options.onEvent(usage);
@@ -1252,9 +1203,6 @@ export class AcpxAdapter implements AgentDriver {
       // A turn may retain its client during finalization after the first close.
       if (streams.length) await closeHandles();
       this.handle = undefined;
-      // Startup and report consumption have settled; a failed launch must not leave its one-time report behind.
-      if (this.pendingClaudeGuardReport) rmSync(this.pendingClaudeGuardReport, { force: true });
-      this.pendingClaudeGuardReport = undefined;
       if (options.discardSession && this.options.context?.protocol!=='controlled-v1' && !errors.length) await observe(() => this.resetPersistentState(true));
       // Failed resource cleanup must remain visible, and its env file must remain
       // available for diagnosis/recovery. No replacement instance is authorized.

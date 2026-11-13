@@ -466,6 +466,26 @@ describe('Claude guard failure capability', () => {
     expect(existsSync(marker)).toBe(false);
   });
 
+  it('keeps the old timeout fallback while retaining the wired secret guard on old Claude', async () => {
+    const directory = temp();
+    const cwd = join(directory, 'project');
+    const bin = join(directory, 'bin');
+    const sessions = join(cwd, '.dutydeck', 'security', 'sessions');
+    mkdirSync(sessions, { recursive: true });
+    mkdirSync(bin);
+    const sessionId = 'ses_secret_timeout_old';
+    writeFileSync(join(sessions, `${sessionId}.json`), JSON.stringify({ enabled: true, authorized: false, pattern: '(a+)+$' }));
+    const command = fakeClaude(directory, '2.1.220');
+    const adapter = createClaudeFamilyAdapter('claude-code');
+    await adapter.prepareLaunch?.({ sessionId, command, cwd, permissionMode: 'full-trust' }, { ...process.env, PATH: `${directory}:${process.env.PATH ?? ''}` } as Record<string, string>);
+    const args = adapter.buildArgs({ sessionId, command, cwd, permissionMode: 'full-trust' });
+    const marker = join(directory, 'tool-ran');
+    const outcome = runHook(args, { cwd, sessionId, bin, marker });
+    expect(outcome).toMatchObject({ timedOut: true, blocked: false });
+    expect(outcome.onFailure).toBeUndefined();
+    expect(existsSync(marker)).toBe(true);
+  });
+
   it.each([
     ['2.1.220', false],
     ['2.1.295', true],
@@ -482,7 +502,7 @@ describe('Claude guard failure capability', () => {
     }
   });
 
-  it('caches the bounded capability probe for subsequent protected turns', async () => {
+  it('caches the bounded capability probe for subsequent launches', async () => {
     const directory = temp();
     const count = join(directory, 'probe-count');
     const command = join(directory, 'claude');
@@ -493,7 +513,6 @@ describe('Claude guard failure capability', () => {
     await adapter.prepareLaunch?.(context, env);
     await adapter.prepareLaunch?.(context, env);
     expect(readFileSync(count, 'utf8')).toBe('1');
-    expect(adapter.guardFailureBlockSupported?.()).toBe(true);
   });
 
   it('adds onFailure only to Dutydeck guards, not Ask or PermissionRequest hooks', async () => {

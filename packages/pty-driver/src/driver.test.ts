@@ -67,7 +67,6 @@ describe('PtyCliDriver（PtyBackend + 假 CLI 集成）', () => {
     const claude = createCliAdapter('claude-code');
     const adapter: CliAdapter = { id: 'claude-code', capabilities: {}, buildArgs: context => [fixturePath, ...claude.buildArgs(context)],
       prepareLaunch: async (context, env) => claude.prepareLaunch!({ ...context, command: claudeVersionPath }, env),
-      guardFailureBlockSupported: () => claude.guardFailureBlockSupported!(),
       ...(adapterContext ? { injectSessionContext: (context: Parameters<NonNullable<CliAdapter['injectSessionContext']>>[0]) => claude.injectSessionContext!(context) } : {}),
       writeInput: (backend, prompt) => { prompts.push(prompt); backend.write(prompt + '\n'); }, completionPattern: /MOCK DONE/ };
     const driver = new PtyCliDriver({ agent: { id: 'mock', name: 'Mock', command: process.execPath, args: [], protocol: 'pty-cli',
