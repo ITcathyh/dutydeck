@@ -37,7 +37,7 @@ it('lets Agents launched with the process guard enable enforced risk control wit
 });
 
 
-it('saves an ask/enforced bot with the discovered Codex ACP fallback while terminal Codex stays the default', async () => {
+it.each(['codex-acp', 'custom-codex'])('saves an ask/enforced bot with %s as its Codex ACP fallback', async fallbackId => {
   const workspace = await mkdtemp(join(tmpdir(), 'dutydeck-codex-acp-fallback-'));
   cleanups.push(() => rm(workspace, { recursive: true, force: true }));
   const codexPath = join(workspace, 'user-codex');
@@ -57,6 +57,7 @@ it('saves an ask/enforced bot with the discovered Codex ACP fallback while termi
   const repos = createRepositories(':memory:');
   cleanups.push(() => repos.close());
   for (const agent of config.agents) await repos.agents.save(agent);
+  if (fallbackId !== acp.id) await repos.agents.save({ ...acp, id: fallbackId, name: 'Custom Codex', adapterId: 'codex', builtin: false });
   await repos.config.set(larkBotsConfigKey, JSON.stringify([{ appId: 'cli_guarded', appSecret: 'fixture', listening: false, permissionMode: 'ask', fullTrustConfirmed: false, defaultAgentId: 'ccflash', defaultModel: 'gemini-3.8-flash-high', riskControlMode: 'enforced', workspace, revision: 7 }]));
   const app = await buildApp({} as any, { lark: { env: { DUTYDECK_DISABLE_LARK_LISTENER: 'true' }, config: repos.config, agents: repos.agents, fetcher: vi.fn(async () => { throw new Error('Unexpected network'); }) } });
   cleanups.push(() => app.close());
@@ -66,15 +67,15 @@ it('saves an ask/enforced bot with the discovered Codex ACP fallback while termi
   };
   const input = { appId: 'cli_guarded', url: 'http://127.0.0.1:4310', database: '/tmp/fixture.db' };
   const dependencies = { fetcher, readToken: () => undefined };
-  await expect(runSettingsCli('bot-set', { ...input, pairs: ['fallbackAgentId=codex-acp', 'fallbackModel=gpt-6.1-sol'] }, dependencies)).rejects.toMatchObject({ code: 'RISK_CONTROL_HOOK_NOT_READY' });
-  await runSettingsCli('bot-install-hook', { ...input, prepare: true, pairs: ['fallbackAgentId=codex-acp'] }, dependencies);
+  await expect(runSettingsCli('bot-set', { ...input, pairs: [`fallbackAgentId=${fallbackId}`, 'fallbackModel=gpt-6.1-sol'] }, dependencies)).rejects.toMatchObject({ code: 'RISK_CONTROL_HOOK_NOT_READY' });
+  await runSettingsCli('bot-install-hook', { ...input, prepare: true, pairs: [`fallbackAgentId=${fallbackId}`] }, dependencies);
   expect(await readLarkConfig(repos.config, input.appId)).toMatchObject({ revision: 7, permissionMode: 'ask', fullTrustConfirmed: false, riskControlMode: 'enforced', defaultAgentId: 'ccflash', defaultModel: 'gemini-3.8-flash-high' });
   expect(await readFile(join(workspace, '.codex/hooks.json'), 'utf8')).toContain('dutydeck-lark-high-risk-guard-codex.mjs');
-  await expect(runSettingsCli('bot-set', { ...input, pairs: ['fallbackAgentId=codex-acp', 'fallbackModel=gpt-6.1-sol'] }, dependencies)).rejects.toMatchObject({ code: 'RISK_CONTROL_HOOK_NOT_READY', message: expect.stringContaining('项目信任') });
+  await expect(runSettingsCli('bot-set', { ...input, pairs: [`fallbackAgentId=${fallbackId}`, 'fallbackModel=gpt-6.1-sol'] }, dependencies)).rejects.toMatchObject({ code: 'RISK_CONTROL_HOOK_NOT_READY', message: expect.stringContaining('项目信任') });
   await writeFile(join(codexHome, 'hooks-probe-state.json'), JSON.stringify({ projectTrusted: true }));
-  await expect(runSettingsCli('bot-set', { ...input, pairs: ['fallbackAgentId=codex-acp', 'fallbackModel=gpt-6.1-sol'] }, dependencies)).rejects.toMatchObject({ code: 'RISK_CONTROL_HOOK_NOT_READY', message: expect.stringContaining('尚未受信任') });
+  await expect(runSettingsCli('bot-set', { ...input, pairs: [`fallbackAgentId=${fallbackId}`, 'fallbackModel=gpt-6.1-sol'] }, dependencies)).rejects.toMatchObject({ code: 'RISK_CONTROL_HOOK_NOT_READY', message: expect.stringContaining('尚未受信任') });
   await writeFile(join(codexHome, 'hooks-probe-state.json'), JSON.stringify({ projectTrusted: true, hookTrustStatus: 'trusted' }));
-  expect((await app.inject({ method: 'GET', url: '/api/lark/hooks/status?appId=cli_guarded&agentId=codex-acp' })).json()).toMatchObject({ agentId: 'codex-acp', installed: true, nativeReady: true });
+  expect((await app.inject({ method: 'GET', url: `/api/lark/hooks/status?appId=cli_guarded&agentId=${fallbackId}` })).json()).toMatchObject({ agentId: fallbackId, installed: true, nativeReady: true });
   await expect(runSettingsCli('bot-set', { ...input, pairs: ['fallbackAgentId=codex', 'fallbackModel=gpt-6.1-sol'] }, dependencies)).rejects.toMatchObject({ code: 'LARK_APPROVAL_UNSUPPORTED' });
-  expect((await runSettingsCli('bot-set', { ...input, pairs: ['fallbackAgentId=codex-acp', 'fallbackModel=gpt-6.1-sol'] }, dependencies)).bot).toMatchObject({ revision: 8, fallbackAgentId: 'codex-acp', fallbackModel: 'gpt-6.1-sol', permissionMode: 'ask', fullTrustConfirmed: false, riskControlMode: 'enforced', defaultAgentId: 'ccflash', defaultModel: 'gemini-3.8-flash-high' });
+  expect((await runSettingsCli('bot-set', { ...input, pairs: [`fallbackAgentId=${fallbackId}`, 'fallbackModel=gpt-6.1-sol'] }, dependencies)).bot).toMatchObject({ revision: 8, fallbackAgentId: fallbackId, fallbackModel: 'gpt-6.1-sol', permissionMode: 'ask', fullTrustConfirmed: false, riskControlMode: 'enforced', defaultAgentId: 'ccflash', defaultModel: 'gemini-3.8-flash-high' });
 });
