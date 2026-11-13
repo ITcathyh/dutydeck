@@ -1,6 +1,7 @@
-import { readFileSync, realpathSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { accessSync, constants as fsConstants, readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { basename, delimiter, dirname, extname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
 
@@ -57,6 +58,62 @@ const agentDataName = /(?<![\w./-])(?:auth\.json|\.credentials\.json|sessions|ar
  * 凭据规则只看命令类的命令文本和文件类的路径参数，其余工具（待办、子 agent 提示等）是自然语言，不检查。
  */
 export const secretGuardToolMatcher = '.*';
+
+const CLAUDE_FAILURE_BLOCK_MIN_VERSION = [2, 1, 295];
+const claudeFailureBlockProbes = new Map();
+
+function claudeExecutableIdentity(command, env, cwd) {
+  const pathValue = env.PATH ?? '';
+  const extensions = process.platform === 'win32' && !extname(command)
+    ? ['', ...(env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';')]
+    : [''];
+  const directories = command.includes('/') || command.includes('\\') ? [''] : pathValue.split(delimiter);
+  for (const directory of directories) {
+    for (const extension of extensions) {
+      const path = resolve(cwd, directory || '.', `${command}${extension}`);
+      try {
+        const stat = statSync(path);
+        if (!stat.isFile()) continue;
+        accessSync(path, fsConstants.X_OK);
+        return JSON.stringify([path, stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs]);
+      } catch {}
+    }
+  }
+}
+
+/**
+ * Claude 2.1.295 added PreToolUse command-hook onFailure:"block". Probe the exact
+ * executable with the child's environment; errors and other Claude-family forks
+ * are not evidence of support. Cache only successful probes, keyed by executable identity.
+ */
+export function probeClaudeHookFailureBlock({ command, env, cwd = process.cwd() }) {
+  const identity = claudeExecutableIdentity(command, env, cwd);
+  if (!identity) return Promise.resolve(false);
+  const key = JSON.stringify([command, env.PATH ?? '', cwd, identity]);
+  const cached = claudeFailureBlockProbes.get(key);
+  if (cached) return cached;
+  const probe = new Promise(resolve => {
+    execFile(command, ['--version'], {
+      cwd, env: { ...env, NO_COLOR: '1' }, encoding: 'utf8', timeout: 3000,
+      killSignal: 'SIGKILL', maxBuffer: 4096, windowsHide: true,
+    }, (error, stdout, stderr) => {
+      const line = `${stdout ?? ''}\n${stderr ?? ''}`.split(/\r?\n/).map(value => value.trim()).find(Boolean) ?? '';
+      const match = /^(\d+)\.(\d+)\.(\d+) \(Claude Code\)$/.exec(line);
+      let supported = !error && match !== null;
+      if (match) {
+        for (let index = 0; index < CLAUDE_FAILURE_BLOCK_MIN_VERSION.length; index++) {
+          const actual = Number(match[index + 1]);
+          if (actual === CLAUDE_FAILURE_BLOCK_MIN_VERSION[index]) continue;
+          supported = supported && actual > CLAUDE_FAILURE_BLOCK_MIN_VERSION[index];
+          break;
+        }
+      }
+      if (supported) claudeFailureBlockProbes.set(key, probe);
+      resolve(supported);
+    });
+  });
+  return probe;
+}
 
 function homes(home) {
   const list = [home];
@@ -153,26 +210,28 @@ export function secretGuardScriptPath() {
 const policyFile = (root, sessionId) => join(root, '.dutydeck', 'security', 'sessions', `${sessionId}.json`);
 
 /**
- * 给 Agent CLI 配置的 hook 命令。先用 grep 看本轮策略里有没有未授权标记，没有就直接放行，管理员每次工具调用只多一次 grep；
- * 有标记才起 node 逐条检查，脚本跑不起来（如文件被删）时按拒绝处理，不静默放行。
+ * 给 Agent CLI 配置的 hook 命令。每次工具调用都运行同一份策略解析：文件不存在、未启用或无匹配策略放行；
+ * 其他读取、JSON 或脚本错误都退出 2，不用文本快路径猜本轮是否需要保护。
  */
 export function secretGuardHookCommand({ nodePath = process.execPath, policyRoot }) {
   const root = quote(policyRoot);
-  return `grep -qs '"authorized":false' ${root}/.dutydeck/security/sessions/"$dutydeck_session_id".json || exit 0; `
-    + `DUTYDECK_POLICY_ROOT=${root} ${quote(nodePath)} ${quote(secretGuardScriptPath())} || exit 2`;
+  return `DUTYDECK_POLICY_ROOT=${root} ${quote(nodePath)} ${quote(secretGuardScriptPath())} || exit 2`;
 }
 
-/** 本轮要拦时返回策略：风险管控开启（enabled）且发起人未获授权。读不到策略按不拦处理，和高危操作 hook 一致。 */
+/** 本轮要拦时返回策略：风险管控开启（enabled）且发起人未获授权。文件不存在放行，其他读取或解析错误向上抛出。 */
 function activePolicy(root, sessionId) {
   if (!sessionId) return undefined;
-  try {
-    const policy = JSON.parse(readFileSync(policyFile(root, sessionId), 'utf8'));
-    return policy?.enabled === true && policy.authorized === false ? policy : undefined;
-  } catch { return undefined; }
+  let raw;
+  try { raw = readFileSync(policyFile(root, sessionId), 'utf8'); }
+  catch (error) { if (error?.code === 'ENOENT') return undefined; throw error; }
+  const policy = JSON.parse(raw);
+  return policy?.enabled === true && policy.authorized === false ? policy : undefined;
 }
 
+/** 是否需要完整守卫。读取或解析失败按需要保护处理，让旧版轮次门控也能 fail closed。 */
 export function secretGuardActive({ root, sessionId }) {
-  return Boolean(activePolicy(root, sessionId));
+  try { return Boolean(activePolicy(root, sessionId)); }
+  catch { return true; }
 }
 
 const regexWorker = "const { parentPort, workerData } = require('node:worker_threads'); try { parentPort.postMessage({ matched: new RegExp(workerData.pattern, 'i').test(workerData.input) }); } catch (error) { parentPort.postMessage({ error: error instanceof Error ? error.message : String(error) }); }";
@@ -202,7 +261,13 @@ async function runHook() {
     process.exit(2);
   }
   const root = process.env.DUTYDECK_POLICY_ROOT || event?.cwd || process.cwd();
-  const policy = activePolicy(root, process.env.dutydeck_session_id);
+  let policy;
+  try { policy = activePolicy(root, process.env.dutydeck_session_id); }
+  catch {
+    process.stderr.write('Dutydeck 凭据保护无法读取本轮策略，已拦截。');
+    process.exit(2);
+    return;
+  }
   if (!policy) return;
   const finding = secretGuardFinding(event);
   const reason = finding ? secretGuardReason(finding) : await highRiskReason(policy, event);

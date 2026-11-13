@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -66,8 +66,78 @@ describe('Claude ACP launcher', () => {
     const settings = JSON.parse(child.args[1]);
     expect(settings.model).toBe('m');
     expect(settings.hooks.PreToolUse).toEqual([...JSON.parse(guard).hooks.PreToolUse, sdkHook]);
-    expect(settings.hooks.PreToolUse[0].hooks[0].command).toContain(`'${project}'/.dutydeck/security/sessions/`);
+    expect(settings.hooks.PreToolUse[0].hooks[0].command).toContain(`DUTYDECK_POLICY_ROOT='${project}'`);
   });
+  it('blocks an ACP secret-guard timeout through launcher settings only with onFailure:block', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dutydeck-claude-acp-timeout-')); dirs.push(root);
+    const project = join(root, 'project'); const bin = join(root, 'bin');
+    const sessions = join(project, '.dutydeck', 'security', 'sessions');
+    await mkdir(sessions, { recursive: true }); await mkdir(bin);
+    const sessionId = 'ses_acp_secret_timeout';
+    await writeFile(join(sessions, `${sessionId}.json`), JSON.stringify({ enabled: true, authorized: false, pattern: '(a+)+$' }));
+    const claude = join(bin, 'claude');
+    await writeFile(claude, `#!${process.execPath}\nif (process.argv.includes('--version')) process.stdout.write('2.1.295 (Claude Code)\\n');\n`, { mode: 0o755 });
+    const inspect = `process.stdout.write(JSON.stringify({ guard: process.env.dutydeck_secret_guard_settings }))`;
+    const launched = spawnSync(process.execPath, [resolve(process.cwd(), 'packages/acp-client/agents/claude-acp.mjs')], {
+      cwd: project,
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}`, DUTYDECK_CLAUDE_ACP_COMMAND: process.execPath, DUTYDECK_CLAUDE_ACP_ARGS_JSON: JSON.stringify(['-e', inspect]) },
+      encoding: 'utf8', timeout: 10_000,
+    });
+    expect(launched.status).toBe(0);
+    const guard = JSON.parse(launched.stdout).guard;
+    const marker = join(root, 'tool-ran');
+    const outcome = spawnSync(process.execPath, [resolve(process.cwd(), 'tests/fixtures/claude-hook-runner.mjs'), '--settings', guard, '--hook', 'secret-guard.mjs'], {
+      cwd: project,
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}`, dutydeck_session_id: sessionId, CLAUDE_HOOK_TEST_TOOL_MARKER: marker, CLAUDE_HOOK_TEST_TIMEOUT_MS: '40', CLAUDE_HOOK_TEST_EVENT: JSON.stringify({ tool_name: 'Bash', tool_input: { command: `${'a'.repeat(100_000)}!` } }) },
+      encoding: 'utf8', timeout: 5_000,
+    });
+    expect(outcome.error).toBeUndefined();
+    expect(JSON.parse(outcome.stdout)).toMatchObject({ timedOut: true, onFailure: 'block', blocked: true });
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it.each([
+    ['2.1.220', false],
+    ['2.1.295', true],
+  ])('probes Claude independently in the ACP launcher before writing onFailure: %s', async (version, supported) => {
+    const root = await mkdtemp(join(tmpdir(), 'dutydeck-claude-acp-version-')); dirs.push(root);
+    const bin = join(root, 'bin'); await mkdir(bin);
+    const claude = join(bin, 'claude');
+    await writeFile(claude, `#!${process.execPath}\nif (process.argv.includes('--version')) process.stdout.write(${JSON.stringify(`${version} (Claude Code)\n`)});\n`, { mode: 0o755 });
+    const inspect = `process.stdout.write(JSON.stringify({ guard: process.env.dutydeck_secret_guard_settings, report: process.env.dutydeck_claude_guard_report }))`;
+    const report = join(root, 'guard-report');
+    const launched = spawnSync(process.execPath, [resolve(process.cwd(), 'packages/acp-client/agents/claude-acp.mjs')], {
+      cwd: root,
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}`, dutydeck_claude_guard_report: report, DUTYDECK_CLAUDE_ACP_COMMAND: process.execPath, DUTYDECK_CLAUDE_ACP_ARGS_JSON: JSON.stringify(['-e', inspect]) },
+      encoding: 'utf8', timeout: 10_000,
+    });
+    expect(launched.status).toBe(0);
+    const output = JSON.parse(launched.stdout);
+    expect(output.report).toBeUndefined();
+    expect(await readFile(report, 'utf8')).toBe(supported ? '1' : '0');
+    expect((await stat(report)).mode & 0o777).toBe(0o600);
+    const settings = JSON.parse(output.guard);
+    expect(settings.hooks.PreToolUse[0].hooks[0].onFailure === 'block').toBe(supported);
+  });
+
+  it('fails launch instead of overwriting an existing guard report', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dutydeck-claude-acp-report-')); dirs.push(root);
+    const bin = join(root, 'bin'); await mkdir(bin);
+    const claude = join(bin, 'claude');
+    await writeFile(claude, `#!${process.execPath}\nif (process.argv.includes('--version')) process.stdout.write('2.1.295 (Claude Code)\\n');\n`, { mode: 0o755 });
+    const report = join(root, 'guard-report'); await writeFile(report, 'stale');
+    const marker = join(root, 'launched');
+    const inspect = `require('node:fs').writeFileSync(${JSON.stringify(marker)}, '1')`;
+    const launched = spawnSync(process.execPath, [resolve(process.cwd(), 'packages/acp-client/agents/claude-acp.mjs')], {
+      cwd: root,
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}`, dutydeck_claude_guard_report: report, DUTYDECK_CLAUDE_ACP_COMMAND: process.execPath, DUTYDECK_CLAUDE_ACP_ARGS_JSON: JSON.stringify(['-e', inspect]) },
+      encoding: 'utf8', timeout: 10_000,
+    });
+    expect(launched.status).not.toBe(0);
+    expect(existsSync(marker)).toBe(false);
+    expect(await readFile(report, 'utf8')).toBe('stale');
+  });
+
   it.each(['bearer', 'api-key'] as const)('keeps explicit %s credentials exclusive over user and project cloud settings', async mode => {
     const root = await mkdtemp(join(tmpdir(), 'dutydeck-claude-auth-')); dirs.push(root);
     await mkdir(join(root, '.claude'));

@@ -2,6 +2,8 @@
 
 > [← 返回 README](../../README.md) · [全部文档](../../README.md#docs) · [English](../en/upgrading.md)
 
+- **Claude 守卫失败改为阻断**：Dutydeck 自己的凭据与计划守卫在官方 Claude Code 2.1.295+ 上新增 `onFailure: "block"`，超时及未被现有 `|| exit 2` 覆盖的失败不再退回普通权限流程；策略读取/JSON 解析错误和 active 计划脚本缺失也会拒绝。旧版、探测失败和未验证分支不写未知字段，无保护会话不受影响，但凭据策略生效或 deny-all 的轮次会在 prompt 写入前报明确升级错误。恢复或接管的旧终端若只有 marker、没有实际 `onFailure` 形状，同样需要升级后重开会话。Ask relay、PermissionRequest 和用户 hooks 不变；没有新增设置、命令或数据库迁移。回滚到旧程序会恢复旧的超时放行行为，已生成的新设置是否被旧 Claude 接受未作为兼容保证。
+
 - **tmux 会话生命周期**：Linux 上 tmux socket 文件被清理但旧 server 仍在时，启动会拒绝另建同名 server，并提示用 `SIGUSR1` 重建 socket 或结束旧 server；不会再让两个 CLI 接管同一会话。启用 `remain-on-exit` 时，下次启动会回收 Dutydeck 自有且全部 pane 已退出的死会话，仍有 pane 运行的会话保留。非 Linux 行为不变。
 
 - **飞书会话提醒在原消息撤回后改为新发**：排队受阻、排队超时取消、结果未知这类会话提醒要回复的原消息已被撤回时，从丢失改为在原会话（群或私聊）里新发一条，服务日志记一条「回复会话提醒失败，回退为会话内发送」告警。定时任务的提醒与同一计划的其他投递一致，仍不改发；超时这类结果未知的失败也不改发。不需要配置。

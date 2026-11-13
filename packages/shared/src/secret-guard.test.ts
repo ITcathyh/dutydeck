@@ -1,9 +1,9 @@
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { protectedPathFinding, secretGuardActive, secretGuardFinding, secretGuardHookCommand, secretGuardToolMatcher } from '@dutydeck/shared/secret-guard';
+import { probeClaudeHookFailureBlock, protectedPathFinding, secretGuardActive, secretGuardFinding, secretGuardHookCommand, secretGuardToolMatcher } from '@dutydeck/shared/secret-guard';
 
 const home = '/home/alice';
 const bash = (command: string, cwd = '/work/repo') => secretGuardFinding({ tool_name: 'Bash', tool_input: { command }, cwd }, { home });
@@ -142,6 +142,45 @@ describe('secret guard', () => {
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
+  it('fails closed for policy read and parse errors without echoing sensitive contents', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dutydeck-secret-guard-read-error-'));
+    const sessions = join(root, '.dutydeck', 'security', 'sessions');
+    mkdirSync(sessions, { recursive: true });
+    const file = join(sessions, 'ses_1.json');
+    const command = secretGuardHookCommand({ nodePath: process.execPath, policyRoot: root });
+    const run = () => spawnSync('/bin/sh', ['-c', command], {
+      input: JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'pnpm test' }, cwd: '/work/repo' }),
+      encoding: 'utf8', env: { ...process.env, dutydeck_session_id: 'ses_1' },
+    });
+    try {
+      writeFileSync(file, '{"enabled":true,"secret":"synthetic-policy-secret",broken');
+      const malformed = run();
+      expect(malformed.status).toBe(2);
+      expect(`${malformed.stdout}${malformed.stderr}`).not.toContain('synthetic-policy-secret');
+      expect(secretGuardActive({ root, sessionId: 'ses_1' })).toBe(true);
+
+      rmSync(file);
+      mkdirSync(file);
+      const unreadable = run();
+      expect(unreadable.status).toBe(2);
+      expect(secretGuardActive({ root, sessionId: 'ses_1' })).toBe(true);
+
+      rmSync(file, { recursive: true });
+      expect(run()).toMatchObject({ status: 0, stdout: '' });
+
+      rmSync(sessions, { recursive: true });
+      writeFileSync(sessions, 'not a directory');
+      expect(run().status).toBe(2);
+      rmSync(sessions);
+      mkdirSync(sessions, { recursive: true });
+
+      writeFileSync(file, JSON.stringify({ enabled: true, authorized: true }));
+      expect(run()).toMatchObject({ status: 0, stdout: '' });
+      writeFileSync(file, JSON.stringify({ enabled: false, authorized: false }));
+      expect(run()).toMatchObject({ status: 0, stdout: '' });
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
   it('also enforces the high-risk pattern of the turn on every tool, failing closed on bad patterns', () => {
     const root = mkdtempSync(join(tmpdir(), 'dutydeck-secret-guard-'));
     const sessions = join(root, '.dutydeck', 'security', 'sessions');
@@ -170,6 +209,51 @@ describe('secret guard', () => {
       expect(broken).not.toContain('。。');
       policy({ enabled: true, authorized: true, pattern: '(?:^|\\s)rm\\b' });
       expect(run('Bash', { command: 'rm -rf /tmp/example' }).stdout).toBe('');
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+describe('Claude failure-block probe', () => {
+  it('caches only the same supported executable identity and re-probes downgrades and upgrades', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dutydeck-claude-probe-'));
+    const command = join(root, 'claude');
+    const count = join(root, 'count');
+    let sequence = 0;
+    const install = (version: string) => {
+      const next = join(root, `claude-${++sequence}`);
+      writeFileSync(next, `#!${process.execPath}\nif (process.argv.includes('--version')) { require('node:fs').appendFileSync(${JSON.stringify(count)}, '1'); process.stdout.write(${JSON.stringify(`${version} (Claude Code)\n`)}); }\n`, { mode: 0o755 });
+      renameSync(next, command);
+    };
+    const probe = () => probeClaudeHookFailureBlock({ command, env: { ...process.env } as Record<string, string>, cwd: root });
+    try {
+      install('2.1.295');
+      await expect(probe()).resolves.toBe(true);
+      await expect(probe()).resolves.toBe(true);
+      expect(readFileSync(count, 'utf8')).toBe('1');
+
+      install('2.1.220');
+      await expect(probe()).resolves.toBe(false);
+      expect(readFileSync(count, 'utf8')).toBe('11');
+
+      install('2.1.323');
+      await expect(probe()).resolves.toBe(true);
+      await expect(probe()).resolves.toBe(true);
+      expect(readFileSync(count, 'utf8')).toBe('111');
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('retries failed probes and executables that were initially unresolved', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dutydeck-claude-probe-retry-'));
+    const command = join(root, 'claude');
+    const options = () => ({ command, env: { ...process.env } as Record<string, string>, cwd: root });
+    try {
+      await expect(probeClaudeHookFailureBlock(options())).resolves.toBe(false);
+      writeFileSync(command, `#!${process.execPath}\nprocess.exit(1);\n`, { mode: 0o755 });
+      await expect(probeClaudeHookFailureBlock(options())).resolves.toBe(false);
+      const recovered = join(root, 'recovered');
+      writeFileSync(recovered, `#!${process.execPath}\nif (process.argv.includes('--version')) process.stdout.write('2.1.295 (Claude Code)\\n');\n`, { mode: 0o755 });
+      renameSync(recovered, command);
+      await expect(probeClaudeHookFailureBlock(options())).resolves.toBe(true);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });

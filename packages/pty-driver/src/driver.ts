@@ -1,4 +1,5 @@
 import { childEnvironment } from '@dutydeck/shared/child-environment';
+import { secretGuardActive } from '@dutydeck/shared/secret-guard';
 import {
   AGENT_IDLE_TIMEOUT,
   AGENT_LOGIN_REQUIRED,
@@ -74,6 +75,7 @@ export interface PtyCliDriverTimings extends IdleTimings {
 
 /** 计划阶段（deny-all）里 CLI 弹出的工具确认一律拒绝，不发审批卡。 */
 const planPhaseDenyReason = '先出计划阶段不执行需要确认的操作，已被 Dutydeck 拒绝。请把这一步写进计划，等用户批准后再执行。';
+const guardUpgradeMessage = 'Claude Code 2.1.295 或更高版本才能在凭据或计划守卫失败时阻断操作。当前可执行文件无法确认支持 onFailure:"block"；请升级官方 Claude Code 后重开会话，本轮消息尚未写入。';
 
 /** 会话本身的权限模式（runtime 只给终端模式注入）：任务以 deny-all 运行时 CLI 仍按它启动。 */
 const sessionPermissionMode = (env: Record<string, string>): PermissionMode =>
@@ -358,7 +360,30 @@ export class PtyCliDriver implements AgentDriver {
 
   private assertPlanGuardWired() {
     if (!this.started || this.claudeSettings.planGuardWired(this.lastArgs, this.cwd)) return;
-    throw new RuntimeError('PLAN_GUARD_UNAVAILABLE', '这个终端会话启动时还没有计划阶段拦截，没法保证计划阶段不改文件。请开新会话（飞书里发 /new）后再用先出计划。', 409);
+    throw new RuntimeError('PLAN_GUARD_UNAVAILABLE', '这个终端会话没有完整的计划阶段失败阻断（需要 Claude Code 2.1.295+ 且守卫设置含 onFailure:"block"）。请升级后开新会话（飞书里发 /new）再用先出计划。', 409);
+  }
+
+  private secretGuardRequired(): boolean {
+    return isClaudeFamilyCli(this.adapter.id) && secretGuardActive({
+      root: this.cwd, sessionId: this.agent.env.dutydeck_session_id ?? this.sessionId,
+    });
+  }
+
+  /** Recheck live policy before every protected turn, before any prompt bytes are written. */
+  private async assertProtectedTurnGuards(secretActive: boolean): Promise<void> {
+    if (!this.planGuardActive && !secretActive) return;
+    if (this.planGuardActive && !isClaudeFamilyCli(this.adapter.id)) {
+      this.assertPlanGuardWired();
+      return;
+    }
+    // Adopted panes did not pass prepareLaunch during start(); the adapter's
+    // cached probe makes this a no-op after a real launch and probes once here.
+    await this.prepareLaunch();
+    if (this.adapter.guardFailureBlockSupported?.() !== true) throw new PromptNotWrittenError(guardUpgradeMessage);
+    if (this.planGuardActive) this.assertPlanGuardWired();
+    if (secretActive && (!this.started || !this.claudeSettings.secretGuardWired(this.lastArgs, this.cwd))) {
+      throw new PromptNotWrittenError('当前终端的凭据守卫缺少 onFailure:"block"，无法在守卫失败时保证阻断。请用 Claude Code 2.1.295+ 重开会话后再发，本轮消息尚未写入。');
+    }
   }
 
   /** resume 会拆掉接线（截止计时、原生回执、转录跟踪）：轮次或提交进行中时拒绝，交给运行时等本轮结束。 */
@@ -541,7 +566,8 @@ export class PtyCliDriver implements AgentDriver {
     if (this.stopped) throw new Error('PtyCliDriver: send() called after stop()');
     if (!this.started) await this.start();
     if (this.stopped) throw new Error('Driver stopped');
-    if (this.planGuardActive) this.assertPlanGuardWired();
+    const secretActive = this.secretGuardRequired();
+    if (this.planGuardActive || secretActive) await this.assertProtectedTurnGuards(secretActive);
 
     let finalPrompt = prompt;
     let routingPrefix: string | undefined;
