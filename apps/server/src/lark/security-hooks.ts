@@ -34,8 +34,9 @@ const aliases: Record<string, HookAgentId> = {
   trae: 'trae', cursor: 'cursor', cursoragent: 'cursor', 'cursor-agent': 'cursor', pi: 'pi'
 };
 
-const adapterFor = (agentId?: string) => {
-  const normalized = agentId ? aliases[agentId.toLowerCase()] : undefined;
+const adapterFor = (agentId?: string, agent?: Pick<AgentConfig, 'adapterId'>) => {
+  const id = agent?.adapterId ?? agentId;
+  const normalized = id ? aliases[id.toLowerCase()] : undefined;
   return normalized ? adapters[normalized] : undefined;
 };
 /**
@@ -188,7 +189,7 @@ async function installedState(adapter: HookAdapter, workspace: string) {
 export async function larkHookStatus(agentId?: string, workspace?: string, agent?: Pick<AgentConfig, 'id'> & Partial<AgentConfig>): Promise<LarkHookStatus> {
   if (processGuardedAgent(agent)) return { agentId, supported: true, installed: true, writable: true, trustRequired: false };
   if (!workspace) return { agentId, supported: false, installed: false, writable: false, trustRequired: false, reason: '请先选择工作区' };
-  const adapter = adapterFor(agentId);
+  const adapter = adapterFor(agentId, agent);
   if (!adapter) return { agentId, supported: false, installed: false, writable: false, trustRequired: false, reason: `${agentId || '所选 Agent'} 暂未提供可验证的原生工具调用拦截入口` };
   const { hooksPath } = paths(adapter, workspace);
   let writable = true;
@@ -201,7 +202,7 @@ export async function larkHookStatus(agentId?: string, workspace?: string, agent
   }
   const native = adapter.id === 'codex' ? installed ? await codexHookReadiness(workspace, hookCommand(adapter, workspace), agent) : { nativeReady: false } : undefined;
   return {
-    agentId: agentId === 'codex-acp' ? agentId : adapter.id,
+    agentId: agent?.adapterId || agentId === 'codex-acp' ? agentId : adapter.id,
     supported: true,
     installed,
     writable,
@@ -259,7 +260,7 @@ async function previouslyInstalled(adapter: HookAdapter, workspace: string) {
  * 同一配置里的其他 Hook 原样保留；从没装过、工作区不可写或配置无法解析时不动，交给就绪检查报原因。
  */
 export async function upgradeInstalledLarkHook(agentId: string | undefined, workspace: string | undefined, agent?: Pick<AgentConfig, 'id'> & Partial<AgentConfig>): Promise<void> {
-  const adapter = adapterFor(agentId);
+  const adapter = adapterFor(agentId, agent);
   if (!adapter || !workspace || processGuardedAgent(agent)) return;
   if (!await previouslyInstalled(adapter, workspace) || await installedState(adapter, workspace).catch(() => false)) return;
   try { await access(workspace, constants.W_OK); } catch { return; }
@@ -272,7 +273,7 @@ export async function installLarkHook(agentId: string | undefined, workspace: st
   if (processGuardedAgent(agent)) return status;
   if (!status.supported || !workspace) throw new LarkServiceError('RISK_CONTROL_UNSUPPORTED', status.reason ?? 'Selected Agent does not support enforced risk control', 422);
   if (!status.writable) throw new LarkServiceError('HOOK_NOT_WRITABLE', status.reason ?? 'Workspace is not writable', 403);
-  const adapter = adapterFor(agentId)!;
+  const adapter = adapterFor(agentId, agent)!;
   if (adapter.kind === 'pi-extension') {
     const { scriptPath } = paths(adapter, workspace);
     await mkdir(dirname(scriptPath), { recursive: true });
