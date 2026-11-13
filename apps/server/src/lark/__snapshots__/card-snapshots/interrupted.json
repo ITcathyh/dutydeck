@@ -630,6 +630,10 @@
               "tag": "plain_text",
               "content": "排查一下今天的告警"
             },
+            "subtitle": {
+              "tag": "plain_text",
+              "content": "由 Alice 取消"
+            },
             "text_tag_list": [
               {
                 "tag": "text_tag",
