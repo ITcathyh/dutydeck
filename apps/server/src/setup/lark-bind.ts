@@ -76,9 +76,11 @@ export interface LarkBindResult {
   error?: { code: string; message: string };
 }
 
-const smokeOwnerOpenIds = new WeakMap<LarkBindResult, string>();
-/** Internal handoff only; the ID is deliberately absent from the enumerable result and JSON. */
-export const larkBindSmokeOwnerOpenId = (result: LarkBindResult): string | undefined => smokeOwnerOpenIds.get(result);
+/**
+ * A generic console login is neither a target-app owner proof nor an app-scoped open_id source.
+ * No verified owner source is available in this binding flow, so the resolver must fail closed.
+ */
+export const larkBindSmokeOwnerOpenId = (_result: LarkBindResult): string | undefined => undefined;
 
 export interface LarkBindOptions {
   appId: string;
@@ -492,7 +494,6 @@ export async function bindLarkApp(options: LarkBindOptions): Promise<LarkBindRes
       : `部分步骤未能确认，请到管理台核对后按需重跑：${resumeCommand(appId, false)}`,
     warnings,
   };
-  if (session.owner.userId.startsWith('ou_')) smokeOwnerOpenIds.set(result, session.owner.userId);
   return result;
 }
 

@@ -37,7 +37,7 @@ printf %s "$LARK_SECRET" | dutydeck setup --lark-app-id cli_xxx --lark-app-secre
 
 向导选项：`--agent <id>` 指定默认 Agent（必须是检测到的 CLI）、`--lark-app-secret-fd <fd>` 从文件描述符读 Secret、`--listen` 同时开启监听。已在运行的服务要 `dutydeck restart` 才会读到新的机器人配置。
 
-机器人配置完成后，交互式向导会另行询问是否给机器人所有者发一张带唯一编号的测试卡并等待一次私聊回复，默认选择 No。只有在这个问题里明确选择 Yes 才会外发；`--yes`、非交互模式和 `--json` 都不会自动发送。发卡成功但回复超时只表示「入站未验证」，不表示端到端通过。同库服务正在运行，或同库 runtime 占用无法获取时，向导在询问前跳过验证；明确 Yes 后会再次获取同库 runtime 租约，并在整个冒烟收发期间持有，避免第二条长连接分流正常消息；验收此功能要先停止同库服务，再在隔离环境运行。
+机器人配置完成后，当前浏览器扫码绑定只能确认控制台登录账号，不能证明该账号是目标应用所有者，也不能可靠提供该账号在目标应用下的 open_id。常规 setup 因此会提示无法确认所有者身份，不提供收发验证，也不发送测试卡；没有 owner open_id 输入 flag，不会用协作者 ID、allowedUsers 或 ID 前缀猜测。`--yes`、非交互模式和 `--json` 同样不会自动发送。
 
 如果终端提示 `dutydeck: command not found`，说明全局可执行目录不在 `PATH`。pnpm 安装可运行 `pnpm setup`，按提示把全局可执行目录加入 `PATH` 后重开终端；npm 安装可用 `npm prefix -g` 找到全局前缀并配置其可执行目录。也可以不修改 `PATH`，改用 `pnpm dlx @byted/dutydeck setup` 或 `npx @byted/dutydeck setup`。
 

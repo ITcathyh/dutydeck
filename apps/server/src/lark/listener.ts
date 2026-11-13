@@ -187,6 +187,8 @@ export interface LarkListener {
 }
 
 export interface LarkLongConnectionListenerOptions {
+  /** Setup temporary listeners only: also force termination when start() cleans up its own failed connection. */
+  forceCloseOnStop?: boolean;
   participation?: LarkGroupParticipation;
   usage?: import('../usage-ledger.js').UsageLedger;
   automation?: SessionAutomationService;
@@ -636,7 +638,7 @@ export class LarkLongConnectionListener implements LarkListener {
     }
   }
 
-  stop() {
+  stop(options?: { force?: boolean }) {
     if (this.cardRepair) { this.cardRepair.coordinator.stop(); this.cardRepair.http.close(); this.cardRepair = undefined; }
     this.http?.close();
     this.http = undefined;
@@ -648,7 +650,9 @@ export class LarkLongConnectionListener implements LarkListener {
     this.stallTimer = undefined;
     this.clientAbort?.abort();
     this.clientAbort = undefined;
-    this.client?.close();
+    // The SDK's force path terminates the socket instead of waiting for a close-handshake response.
+    if (options?.force === true || this.options.forceCloseOnStop === true) this.client?.close({ force: true });
+    else this.client?.close();
     this.coordinator?.stop();
     this.client = undefined;
     this.coordinator = undefined;

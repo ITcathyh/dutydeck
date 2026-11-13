@@ -277,6 +277,36 @@ describe('offerLarkSetupSmoke', () => {
     expect(order).toEqual(['release', 'start', 'send', 'stop', 'release']);
   });
 
+  it('waits for the whole temporary listener cleanup before releasing the runtime lease', async () => {
+    let finishStop!: () => void;
+    const stopping = new Promise<void>(resolve => { finishStop = resolve; });
+    const order: string[] = [];
+    const close = vi.fn(() => { order.push('runtime.close'); });
+    const stop = vi.fn(async () => {
+      order.push('listener-and-loopback.stop.begin');
+      await stopping;
+      order.push('listener-and-loopback.stop.end');
+    });
+    let onEvent: ((event: LarkSmokeEvent) => void) | undefined;
+    const pending = smoke({}, {
+      loadBot: async () => bot,
+      acquireRuntime: () => ({ close }),
+      startListener: async (_bot, receive) => { onEvent = receive; return stop; },
+      sendCard: async () => {
+        onEvent?.(ownerEvent);
+        return { messageId: 'om_test_card', chatId: 'oc_dm' };
+      }
+    });
+    await vi.waitFor(() => expect(stop).toHaveBeenCalledOnce());
+    const closesBeforeStopFinished = close.mock.calls.length;
+    finishStop();
+    expect((await pending).status).toBe('verified');
+    expect(closesBeforeStopFinished).toBe(1); // Only the preflight lease has closed.
+    expect(order).toEqual([
+      'runtime.close', 'listener-and-loopback.stop.begin', 'listener-and-loopback.stop.end', 'runtime.close'
+    ]);
+  });
+
   it('reports send failure without claiming inbound or end-to-end verification', async () => {
     const stop = vi.fn();
     const close = vi.fn();

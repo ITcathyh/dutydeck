@@ -15,8 +15,14 @@ import { larkListenerStatusKey } from './listener-status.js';
 
 // 仅「监听接入层」用例需要截获 SDK 的事件注册；其余协调器用例直接构造 coordinator，
 // 不受此 mock 影响（它们传入的是手写 service 替身，永不实例化 lark.Client）。
+type MockWebSocket = {
+  readyState: 'OPEN' | 'CLOSING' | 'CLOSED';
+  close: ReturnType<typeof vi.fn>;
+  terminate: ReturnType<typeof vi.fn>;
+};
 type MockWsClient = {
   options: { onReady: () => void; onError: (error: Error) => void; onReconnecting: () => void; onReconnected: () => void; httpInstance: { request(config: Record<string, unknown>): Promise<unknown>; post(url: string, data?: unknown): Promise<unknown>; defaults: unknown } };
+  socket: MockWebSocket;
 };
 const larkSdkHarness = vi.hoisted(() => {
   const handlers: Record<string, (event: any) => unknown> = {};
@@ -53,13 +59,25 @@ vi.mock('@larksuiteoapi/node-sdk', () => ({
     }
   },
   WSClient: class {
-    constructor(readonly options: MockWsClient['options']) { larkSdkHarness.wsClients.push(this); }
+    readonly socket: MockWebSocket;
+    constructor(readonly options: MockWsClient['options']) {
+      const socket: MockWebSocket = { readyState: 'OPEN', close: vi.fn(), terminate: vi.fn() };
+      // 对端不回应关闭握手：普通 close 会一直停在 CLOSING，terminate 才立即结束。
+      socket.close.mockImplementation(() => { socket.readyState = 'CLOSING'; });
+      socket.terminate.mockImplementation(() => { socket.readyState = 'CLOSED'; });
+      this.socket = socket;
+      larkSdkHarness.wsClients.push(this);
+    }
     async start(params: unknown) {
       larkSdkHarness.wsStart(params);
       if (larkSdkHarness.behavior.start) return larkSdkHarness.behavior.start(this);
       this.options.onReady();
     }
-    close() { larkSdkHarness.wsClose(); larkSdkHarness.behavior.close?.(this); }
+    close(params?: { force?: boolean }) {
+      larkSdkHarness.wsClose(params);
+      if (params?.force) this.socket.terminate(); else this.socket.close();
+      larkSdkHarness.behavior.close?.(this);
+    }
   },
   defaultHttpInstance: {
     request: (config: unknown) => larkSdkHarness.httpRequest(config),
@@ -143,6 +161,49 @@ it('coalesces concurrent listener synchronization without opening duplicate conn
     expect(start.mock.contexts[0]).toBe(start.mock.contexts[1]);
     expect(pool.activeAppIds).toEqual([config.appId]);
   } finally { release(); await Promise.allSettled([first, second]); pool.stop(); start.mockRestore(); stop.mockRestore(); }
+});
+
+describe('长连接停止', () => {
+  const fetcher = vi.fn(async (input: string | URL) => Response.json(String(input).includes('/tenant_access_token/')
+    ? { code: 0, tenant_access_token: 'fixture-token', expire: 7200 }
+    : { code: 0, bot: { open_id: 'ou_bot', app_name: 'Dutydeck' } })) as unknown as typeof fetch;
+  let sequence = 0;
+  const startListener = async (options: LarkLongConnectionListenerOptions = {}) => {
+    const listener = new LarkLongConnectionListener(
+      { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      { env: {}, fetcher, ...options }
+    );
+    await listener.start({ ...config, appId: `cli_close_${++sequence}` });
+    return { listener, socket: larkSdkHarness.wsClients.at(-1)!.socket };
+  };
+  afterEach(() => { larkSdkHarness.reset(); });
+
+  it('生产 stop 保持普通关闭，setup force 可终止不回应握手的 CLOSING socket', async () => {
+    larkSdkHarness.reset();
+    const normal = await startListener();
+    normal.listener.stop();
+    expect(normal.socket.readyState).toBe('CLOSING');
+    expect(normal.socket.terminate).not.toHaveBeenCalled();
+
+    const forced = await startListener();
+    forced.listener.stop({ force: true });
+    expect(forced.socket.readyState).toBe('CLOSED');
+    expect(forced.socket.terminate).toHaveBeenCalledOnce();
+    expect(larkSdkHarness.wsClose).toHaveBeenLastCalledWith({ force: true });
+  });
+
+  it('setup 启动失败时内部第一次清理也使用 force', async () => {
+    larkSdkHarness.reset();
+    const listener = new LarkLongConnectionListener(
+      { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      { env: {}, fetcher, forceCloseOnStop: true }
+    );
+    larkSdkHarness.behavior.start = client => { client.options.onError(new Error('synthetic connect failure')); };
+    await expect(listener.start({ ...config, appId: 'cli_close_failed' })).rejects.toThrow('synthetic connect failure');
+    expect(larkSdkHarness.wsClose).toHaveBeenCalledOnce();
+    expect(larkSdkHarness.wsClose).toHaveBeenCalledWith({ force: true });
+    expect(larkSdkHarness.wsClients[0]!.socket.readyState).toBe('CLOSED');
+  });
 });
 
 describe('Lark message coordinator', () => {

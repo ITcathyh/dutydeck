@@ -255,10 +255,10 @@ const levelOf = (result: LarkBindResult, key: LarkBindStepKey) =>
   result.steps.find(step => step.key === key)?.level;
 
 describe('bindLarkApp', () => {
-  it('keeps the owner open ID internal to the smoke handoff and out of JSON', async () => {
+  it('does not hand a generic console collaborator ou_ ID to the target-app smoke', async () => {
     const { promise } = run();
     const result = await promise;
-    expect(larkBindSmokeOwnerOpenId(result)).toBe(SECRETS.userId);
+    expect(larkBindSmokeOwnerOpenId(result)).toBeUndefined();
     expect(JSON.stringify(result)).not.toContain(SECRETS.userId);
     expect(JSON.stringify(result)).not.toContain(SECRETS.tenantId);
   });

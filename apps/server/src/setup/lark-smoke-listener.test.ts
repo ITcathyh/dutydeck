@@ -1,11 +1,18 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { StoredLarkConfig } from '@dutydeck/shared';
 
-const state = vi.hoisted(() => ({ configs: [] as StoredLarkConfig[], stops: 0 }));
+const state = vi.hoisted(() => ({
+  configs: [] as StoredLarkConfig[], stops: 0, options: [] as unknown[],
+  stopOptions: [] as Array<{ force?: boolean } | undefined>, startError: undefined as Error | undefined
+}));
 vi.mock('../lark/listener.js', () => ({
   LarkLongConnectionListener: class {
-    async start(config: StoredLarkConfig) { state.configs.push(config); }
-    stop() { state.stops += 1; }
+    constructor(_log: unknown, options?: unknown) { state.options.push(options); }
+    async start(config: StoredLarkConfig) {
+      state.configs.push(config);
+      if (state.startError) throw state.startError;
+    }
+    stop(options?: { force?: boolean }) { state.stops += 1; state.stopOptions.push(options); }
   }
 }));
 
@@ -14,6 +21,8 @@ import { startLarkSmokeListener } from './lark-smoke-listener.js';
 describe('startLarkSmokeListener', () => {
   it('forwards only the authenticated loopback message event and closes all resources', async () => {
     state.configs.length = 0;
+    state.options.length = 0;
+    state.stopOptions.length = 0;
     state.stops = 0;
     const received: unknown[] = [];
     const stop = await startLarkSmokeListener(
@@ -21,6 +30,7 @@ describe('startLarkSmokeListener', () => {
       event => received.push(event)
     );
     expect(state.configs).toHaveLength(1);
+    expect(state.options).toEqual([expect.objectContaining({ forceCloseOnStop: true })]);
     const config = state.configs[0]!;
     expect(config.welcomeEnabled).toBe(false);
     expect(config.cardActionForwarding).toBeUndefined();
@@ -53,6 +63,24 @@ describe('startLarkSmokeListener', () => {
 
     await stop();
     expect(state.stops).toBe(1);
+    expect(state.stopOptions).toEqual([{ force: true }]);
     await expect(fetch(handler.url)).rejects.toThrow();
+  });
+
+  it('forces the first cleanup and closes loopback when listener startup fails', async () => {
+    state.configs.length = 0;
+    state.options.length = 0;
+    state.stopOptions.length = 0;
+    state.stops = 0;
+    state.startError = new Error('synthetic startup failure');
+    try {
+      await expect(startLarkSmokeListener(
+        { appId: 'cli_smoke', appSecret: 'secret_fixture' } as StoredLarkConfig,
+        () => {}
+      )).rejects.toThrow('synthetic startup failure');
+      expect(state.stopOptions).toEqual([{ force: true }]);
+      const handler = state.configs[0]!.eventHandlers![0]!;
+      await expect(fetch(handler.url)).rejects.toThrow();
+    } finally { state.startError = undefined; }
   });
 });

@@ -72,7 +72,7 @@ export async function startLarkSmokeListener(
     await closed;
   };
   const log = { info() {}, warn() {}, error() {} };
-  const listener = new LarkLongConnectionListener(log);
+  const listener = new LarkLongConnectionListener(log, { forceCloseOnStop: true });
   try {
     await listener.start({
       ...bot,
@@ -81,12 +81,12 @@ export async function startLarkSmokeListener(
       eventHandlers: [{ id: 'setup_smoke', eventTypes: ['im.message.receive_v1'], url: `http://127.0.0.1:${address.port}${SMOKE_PATH}`, token }]
     });
   } catch (error) {
-    listener.stop();
-    await closeServer();
+    try { await listener.stop({ force: true }); }
+    finally { await closeServer(); }
     throw error;
   }
   return async () => {
-    listener.stop();
-    await closeServer();
+    try { await listener.stop({ force: true }); }
+    finally { await closeServer(); }
   };
 }

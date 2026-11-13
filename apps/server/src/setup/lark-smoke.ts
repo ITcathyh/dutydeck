@@ -29,6 +29,7 @@ export interface LarkSetupSmokeResult {
 interface LarkSetupSmokeOptions {
   database: string;
   appId: string;
+  /** Caller-verified owner for this app; the ou_ check below is only a shape check, not identity proof. */
   ownerOpenId?: string;
   interactive: boolean;
   assumeYes?: boolean;
