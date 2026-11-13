@@ -542,7 +542,7 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
       resolvePath,
       baselineMapping: true,
       mapEntry: (entry, baseline, position) => {
-        const backgroundChanged = this.backgroundTasks.observe(entry);
+        const backgroundChanged = this.backgroundTasks.observe(entry, position);
         const nativeInput = claudeInputText(entry) !== undefined && entry.isSidechain !== true;
         const notification = entry.turnOrigin === 'task_notification' || entry.origin?.kind === 'task-notification';
         if (nativeInput && !notification) { this.observedInputId = entry.uuid; this.memoryCalls.clear(); this.backgroundReported = false; }
@@ -736,15 +736,16 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
           // Only decode complete lines: a split UTF-8 character is reread as bytes next time.
           this.backgroundOffsets.set(sibling, { dev: stat.dev, ino: stat.ino, offset: offset + end + 1 });
           if (end < 0) continue;
+          let lineOffset = offset;
           for (const line of bytes.subarray(0, end).toString('utf8').split('\n')) {
+            const entryPosition: TranscriptPosition = { path: sibling, offset: lineOffset, dev: stat.dev, ino: stat.ino, epoch: 0 };
+            lineOffset += Buffer.byteLength(line) + 1;
             // Only these three record shapes are read below; skip parsing every other line of the sibling.
             if (!line.includes('queue-operation') && !line.includes('task_notification') && !line.includes('task-notification')) continue;
             try {
-              const entry = JSON.parse(line);
-              const content = entry.type === 'queue-operation' && entry.operation === 'enqueue' ? entry.content
-                : entry.turnOrigin === 'task_notification' ? entry.message?.content
-                : entry.attachment?.commandMode === 'task-notification' ? entry.attachment.prompt : undefined;
-              if (typeof content === 'string') this.backgroundTasks.observe({ type: 'queue-operation', operation: 'enqueue', content });
+              // Keep the native timestamp and source record: a late sibling
+              // stop belongs to its own run, not to when this scan found it.
+              this.backgroundTasks.observe(JSON.parse(line), entryPosition);
             } catch { /* Unknown records cannot change lifecycle state. */ }
           }
         }

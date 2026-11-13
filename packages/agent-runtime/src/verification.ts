@@ -492,13 +492,13 @@ export interface IsolatedCommandResult {
   interrupted: boolean;
   /** 无法启动等执行错误（已脱敏）。 */
   error?: string;
-  /** 进程组没能确认退出（已脱敏）。 */
+  /** 进程组没能确认退出，或输出管道没能在清理期限内排空（已脱敏）。 */
   cleanupError?: string;
 }
 
 /**
  * 与交付前验证同一个执行器：`/bin/sh` 在独立进程组里执行命令，环境只有 minimalToolEnvironment()，
- * 超时或中止时整组 SIGKILL，结束后也收掉后台子进程。不写验证记录、不计算仓库指纹。
+ * 超时或中止时整组 SIGKILL，主进程退出后也收掉同组后台子进程；无法有界排空的管道会报清理错误。不写验证记录、不计算仓库指纹。
  */
 export async function runIsolatedCommand(command: string, cwd: string, options: { timeoutMs: number; maxOutputBytes: number; signal?: AbortSignal }): Promise<IsolatedCommandResult> {
   const secrets = sensitiveProcessValues();
@@ -525,9 +525,12 @@ function runCommand(command: string, cwd: string, timeoutMs: number, signal: Abo
     let timedOut = false;
     let interrupted = false;
     let terminated = false;
+    let mainEndObserved = false;
     let closed = false;
     let finishing = false;
-    let cleanupTimer: ReturnType<typeof setTimeout> | undefined;
+    let settled = false;
+    let mainTimer: ReturnType<typeof setTimeout> | undefined;
+    let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
     let exitCode: number | undefined;
     let identityRun: Promise<void> | undefined;
     let spawnError: string | undefined;
@@ -545,22 +548,39 @@ function runCommand(command: string, cwd: string, timeoutMs: number, signal: Abo
     child.once('error', error => { spawnError = error.message; });
     const terminate = () => {
       terminated = true;
-      if (closed) return;
+      clearTimeout(mainTimer);
       try {
         if (process.platform !== 'win32' && child.pid) process.kill(-child.pid, 'SIGKILL');
         else child.kill('SIGKILL');
       } catch { /* Process already exited. */ }
-      // Failed signalling must still return a durable resource blocker.
-      if (!closed && !cleanupTimer) cleanupTimer = setTimeout(() => { void finish(); }, 3_000);
+      // A missing exit and close still needs a bounded resource check.
+      if (!mainEndObserved && !closed && !fallbackTimer) fallbackTimer = setTimeout(() => { void finish(); }, 3_000);
     };
-    const onAbort = () => { interrupted = true; terminate(); };
+    const onAbort = () => { if (!mainEndObserved) interrupted = true; terminate(); };
     signal.addEventListener('abort', onAbort, { once: true });
     if (signal.aborted) onAbort();
-    const timer = setTimeout(() => {
-      timedOut = true;
+    if (!terminated) {
+      mainTimer = setTimeout(() => {
+        timedOut = true;
+        terminate();
+      }, timeoutMs);
+      mainTimer.unref?.();
+    }
+    const settleMain = (code: number | null) => {
+      if (!mainEndObserved) {
+        mainEndObserved = true;
+        exitCode = code ?? undefined;
+      }
+      clearTimeout(mainTimer);
       terminate();
-    }, timeoutMs);
-    timer.unref?.();
+      void finish();
+    };
+    child.once('exit', code => { settleMain(code); });
+    child.once('close', code => {
+      closed = true;
+      // Normally exit has already settled the main process. close is only the fallback.
+      if (!mainEndObserved) settleMain(code);
+    });
     child.once('spawn', () => {
       identityRun = (async () => {
         if (!onIdentity) {
@@ -579,32 +599,43 @@ function runCommand(command: string, cwd: string, timeoutMs: number, signal: Abo
         terminate();
       });
     });
-    child.once('close', code => {
-      exitCode = code ?? undefined;
-      // Redirected background children can outlive the shell and its pipes.
-      terminate();
-      closed = true;
-      void finish();
-    });
+    const waitForPipeDrain = async () => {
+      const deadline = Date.now() + 3_000;
+      while (!closed) {
+        if (Date.now() >= deadline) return false;
+        await new Promise(done => setTimeout(done, 25));
+      }
+      return true;
+    };
     async function finish() {
-      if (finishing) return;
+      if (finishing || settled) return;
       finishing = true;
-      clearTimeout(timer);
-      clearTimeout(cleanupTimer);
+      clearTimeout(mainTimer);
+      clearTimeout(fallbackTimer);
       signal.removeEventListener('abort', onAbort);
       // Process exit can precede the identity read/commit. Keep that continuation
       // inside the tracked run so stop/shutdown cannot close storage ahead of it.
       await identityRun;
-      let cleanupError: string | undefined;
-      try {
-        if (child.pid && !await waitForProcessGroupExit(child.pid)) cleanupError = 'Verification process group did not exit; Session remains blocked';
-      } catch (error) {
-        cleanupError = `Unable to verify process group exit: ${error instanceof Error ? error.message : String(error)}`;
+      const groupCleanup = (async () => {
+        try {
+          if (child.pid && !await waitForProcessGroupExit(child.pid)) return 'Verification process group did not exit; Session remains blocked';
+        } catch (error) {
+          return `Unable to verify process group exit: ${error instanceof Error ? error.message : String(error)}`;
+        }
+        return undefined;
+      })();
+      const [groupError, drained] = await Promise.all([groupCleanup, waitForPipeDrain()]);
+      const cleanupErrors = groupError ? [groupError] : [];
+      if (!drained) {
+        child.stdin?.destroy(); child.stdout?.destroy(); child.stderr?.destroy();
+        cleanupErrors.push('Verification output pipes did not close; Session remains blocked');
       }
       const raw = Buffer.concat(chunks);
       const redacted = redact(raw, secrets);
       if (raw.length > maxOutputBytes || redacted.length > maxOutputBytes) outputTruncated = true;
       const output = redacted.subarray(0, maxOutputBytes).toString('utf8');
+      const cleanupError = cleanupErrors.length ? cleanupErrors.join('; ') : undefined;
+      settled = true;
       resolve({ ...(exitCode !== undefined ? { exitCode } : {}), output, outputTruncated, timedOut, interrupted, ...(spawnError ? { error: spawnError } : {}), ...(cleanupError ? { cleanupError } : {}) });
     }
   });
