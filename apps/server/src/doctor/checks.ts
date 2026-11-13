@@ -10,7 +10,7 @@ import { WATCH_PREFIX } from '../watch.js';
  *   · 每个 fail / warn 必须带 remedy，有可执行动作时必须带 command。
  *   · 任何字段都不得包含机密（app secret、access token）。
  */
-import { larkBotEntryError, larkBotsConfigKey, larkExecutionConfirmed, larkMemoryEnabled, publicLarkConfigs, type StoredLarkConfig } from '../lark/config.js';
+import { larkBotEntryError, larkBotsConfigKey, larkExecutionConfirmed, larkMemoryEnabled, publicLarkConfigs, readLarkConfigs, type StoredLarkConfig } from '../lark/config.js';
 import { AUTH_TOKEN_CONFIG_KEY } from '../auth/auth.js';
 import { isRuntimeModelAlias, modelHasPrice, type UsagePricing } from '../usage-ledger.js';
 import { larkMemoryErrorLabel } from '../lark/memory.js';
@@ -1043,7 +1043,7 @@ export function summarize(checks: readonly DoctorCheck[]): { ok: number; warn: n
  * 网络与机器人权限必须组合判断：open 本身已由 access.posture 报告，这里只在它叠加
  * 可监听的 full-trust、广范围高危用户和弱风控时新增 warn/fail，避免重复单项告警。
  */
-export function checkLarkExposure(observation: LarkExposureObservation): DoctorCheck {
+export async function checkLarkExposure(observation: LarkExposureObservation): Promise<DoctorCheck> {
   const { host, socket } = observation;
   const mode: AccessMode | 'unknown' = host === undefined
     ? 'unknown'
@@ -1051,34 +1051,26 @@ export function checkLarkExposure(observation: LarkExposureObservation): DoctorC
   const socketText = socket.status === 'active'
     ? socket.source === 'unit' ? 'socket=unit（TriggeredBy）' : socket.source === 'process' ? 'socket=process（LISTEN_*）' : 'socket=unknown（有激活证据）'
     : socket.status === 'unknown' ? 'socket=未知' : 'socket=未激活';
-  const network = `监听=${host ?? '实际监听地址未知'}（${observation.hostSource}）；local-only=${observation.localOnly ? '开启' : '关闭'}；认证=${mode}（开关${observation.authEnabled ? '开' : '关'}）；${socketText}`;
+  const network = `监听=${host ?? '实际监听地址未知'}（${observation.hostSource}）；local-only=${observation.localOnly === undefined ? '未知' : observation.localOnly ? '开启' : '关闭'}；认证=${mode}（开关${observation.authEnabled ? '开' : '关'}）；${socketText}`;
   const base = { id: 'lark.exposure', label: '网络与机器人暴露组合' } as const;
   if (observation.unavailable) return { ...base, level: 'skip', detail: `${network}；机器人权限未知（数据库不可读）` };
 
   let parsed: unknown;
   try { parsed = observation.rawBots ? JSON.parse(observation.rawBots) : undefined; } catch { parsed = undefined; }
   if (!Array.isArray(parsed)) return { ...base, level: 'skip', detail: `${network}；机器人权限未知（没有可解析的机器人配置）` };
-  const usable = parsed.filter(entry => larkBotEntryError(entry) === undefined
-    && Boolean(entry && typeof entry === 'object'
-      && (entry as Partial<StoredLarkConfig>).appId
-      && String((entry as Partial<StoredLarkConfig>).appSecret ?? '').trim())) as StoredLarkConfig[];
+  const repository = { get: async () => observation.rawBots } as unknown as Parameters<typeof readLarkConfigs>[0];
+  // readOnly 复用运行时的同一份归一化，但禁止旧记录迁移写回；无效用户和空白邮箱在这里清空。
+  const usable = await readLarkConfigs(repository, { readOnly: true });
   if (usable.length !== parsed.length) return { ...base, level: 'skip', detail: `${network}；机器人权限未知（存在无效配置，详见飞书配置检查）` };
   const bots = publicLarkConfigs(usable, { listeningDisabled: observation.listenerDisabled }).bots;
   if (bots.length === 0) return { ...base, level: 'skip', detail: `${network}；未配置机器人，无权限组合可判` };
 
   const projections = bots.map(bot => {
-    const listening = !observation.listenerDisabled && bot.listening && larkExecutionConfirmed(bot);
+    const listening = !observation.listenerDisabled && bot.listening && bot.setupComplete;
     const fullTrust = listening && bot.permissionMode === 'full-trust';
-    const users = Array.isArray(bot.highRiskAllowedUsers) ? bot.highRiskAllowedUsers : [];
-    const emails = Array.isArray(bot.highRiskAllowedEmails) ? bot.highRiskAllowedEmails : [];
-    const userCount = users.length;
-    const emailCount = emails.length;
-    const legacy = usable.find(entry => entry.appId === bot.appId) as unknown as { riskControlMode?: unknown; gateEnabled?: unknown; softGateEnabled?: unknown; hardGateEnabled?: unknown };
-    const riskControlMode = legacy.riskControlMode === 'off' || legacy.riskControlMode === 'guidance' || legacy.riskControlMode === 'enforced'
-      ? legacy.riskControlMode
-      : legacy.gateEnabled === false ? 'off'
-        : legacy.hardGateEnabled === true ? 'enforced'
-          : legacy.gateEnabled === true || legacy.softGateEnabled === true ? 'guidance' : 'off';
+    const userCount = bot.highRiskAllowedUsers.length;
+    const emailCount = bot.highRiskAllowedEmails.length;
+    const riskControlMode = bot.riskControlMode;
     // off 不生成风险策略，已填写的高危名单也不会限制执行；guidance 只注入提醒。
     const broad = riskControlMode === 'off' || userCount + emailCount === 0;
     const weak = riskControlMode !== 'enforced';
