@@ -49,6 +49,8 @@ export interface DoctorConfig {
   host: string;
   port: number;
   authEnabled: boolean;
+  /** 显式 DUTYDECK_LOCAL_ONLY / --local-only 事实；不能从解析后的 host 反推。 */
+  localOnly?: boolean;
   databaseUrl: string;
   acpxCommand?: string;
   agents: ReadonlyArray<{ id: string; name: string; command: string; version?: string; protocol?: string; builtin?: boolean; adapterId?: string }>;
@@ -76,6 +78,8 @@ export interface DoctorDaemonRecord {
   port?: number;
   address?: string;
   authEnabled?: boolean;
+  supervisor?: 'systemd' | 'launchd';
+  systemdUnit?: string;
 }
 
 /** daemonStatus() 的返回子集（对齐 DaemonStatusInfo）。 */
@@ -141,6 +145,38 @@ export interface DoctorAutostartResult {
   notices?: readonly string[];
 }
 
+/** socket 激活只记录可观测事实；active 没有 host 时表示实际监听地址不可知。 */
+export interface DoctorSocketActivationObservation {
+  status: 'active' | 'inactive' | 'unknown';
+  source?: 'process' | 'unit';
+  host?: string;
+  reason?: 'unit-unavailable' | 'address-unavailable';
+}
+
+export interface DoctorSocketActivationProbeInput {
+  env: NodeJS.ProcessEnv;
+  processPid: number;
+  running: boolean;
+  record?: DoctorDaemonRecord;
+}
+
+export type DoctorSocketActivationProbe = (
+  input: DoctorSocketActivationProbeInput
+) => Promise<DoctorSocketActivationObservation> | DoctorSocketActivationObservation;
+
+/** 同一项组合检查所需的全部网络与机器人观测，不携带令牌或 Secret。 */
+export interface LarkExposureObservation {
+  /** undefined 表示 socket 已激活或 unit 探测失败，实际监听地址不可知。 */
+  host?: string;
+  hostSource: 'config' | 'runtime' | 'socket';
+  localOnly: boolean;
+  authEnabled: boolean;
+  socket: DoctorSocketActivationObservation;
+  rawBots?: string;
+  unavailable?: boolean;
+  listenerDisabled: boolean;
+}
+
 /** 当前用户名探测，用于 loginctl enable-linger 提示里给出真实用户名。 */
 export interface DoctorFsStat {
   mode: number;
@@ -187,6 +223,8 @@ export interface DoctorDependencies {
   portProbe?: PortProbe;
   /** 端口探测超时（ms），默认 1000。 */
   portProbeTimeoutMs?: number;
+  /** 当前进程或运行中 systemd unit 的 socket 激活观测；真实地址未知时保留未知。 */
+  socketActivationProbe?: DoctorSocketActivationProbe;
   /** 期望的 migration 头版本；见 checks.ts 里 schema.migrations 的注释。 */
   expectedSchemaVersion?: number;
   /** 路径存在性判断，默认 fs.existsSync。 */
