@@ -5,9 +5,9 @@
 - **新增只读日志命令**：`dutydeck logs [-n N] [--unit <unit>]` 默认查看最近 50 行，行数可设为 1–10000。不带 `--unit` 时读取当前 daemon 日志文件的末尾，带 `--unit` 时通过无 shell 的流式 `journalctl --user` 子进程读取对应 systemd 用户实例，两种来源最多保留末尾 256KiB；首版不 follow。普通行、错误行和多行堆栈按原顺序输出，疑似含秘密的整行过滤，unit 不存在或尚无日志会明确报错。它不写配置、不改原始日志或数据库；回滚到旧版本只是没有该命令，已有日志不受影响。
 - **插件升级会显示执行命令变化**：`plugin update` 现在列出斜杠命令、Agent 启动配置和 hook 执行规格的标识与前后 SHA-256 摘要，JSON 结果增加 `changes`。交互终端会要求重新信任这些变化，拒绝时不写候选；非交互且未带 `--yes` 只打印变化，不新增失败，`--yes` 行为不变。仅描述变化不产生摘要，候选没有新的执行内容变化时不重复提问。活动版本仍需按原流程执行 `plugin activate`，不会在 update 中执行候选命令。
 - **`dutydeck update` 支持精确版本**：可运行 `dutydeck update 1.2.3`，版本参数与 `--dist-tag` 互斥；无参数时仍使用 `latest`。安装、版本核对或重启失败会附 `npm install --global dutydeck@<实际旧版本> && dutydeck restart` 的手工回退步骤，直接重装旧包，不依赖旧版 CLI 是否认识 `update [version]`；旧版本不能安全放入命令时则明确说明，不自动回滚。
-- **tmux 预检**：`doctor` 新增 `terminal.backend`，在独立临时 socket 上检查 tmux 命令、版本和会话建退，不碰默认 server；setup 对需要 tmux 的终端 Agent 增加一行同类警告，缺失或失败不阻止写配置。纯 ACP 与 Herdr 配置不因缺 tmux 报致命错误。
+- **tmux 预检**：`doctor` 新增 `terminal.backend`，在独立临时 socket 上检查 tmux 命令、版本和会话建退，不碰默认 server；所有调用使用 `-f /dev/null` 和私有 `XDG_CONFIG_HOME`，测试会话只运行受控命令，不加载系统或用户配置。setup 对需要 tmux 的终端 Agent 增加一行同类警告，缺失或失败不阻止写配置。纯 ACP 与 Herdr 配置不因缺 tmux 报致命错误。
 - **无机器人时的首启提示**：前台交互启动且读不到机器人配置时，监听地址下每次都会显示 setup、doctor 和实际 Web 地址，不新增展示状态配置；`--json`、非 TTY 和 daemon 子进程不显示。CLI 不在 `PATH` 时增加通用修复提示。
-- **setup 可选飞书收发验证**：机器人配置可用后，交互式向导多一个默认 No 的专用确认；只有明确 Yes 才给所有者发送带 uuid 的测试卡并限时等待私聊回复。`--yes`、非交互和 JSON 不自动外发。发送成功但未收到回复显示「入站未验证」，不算端到端通过；不创建任务、不改权限、不保存验证消息正文。
+- **setup 可选飞书收发验证**：机器人配置可用后，交互式向导多一个默认 No 的专用确认；只有明确 Yes 才给所有者发送带 uuid 的测试卡并限时等待私聊回复。`--yes`、非交互和 JSON 不自动外发。发送成功但未收到回复显示「入站未验证」，不算端到端通过；不创建任务、不改权限、不保存验证消息正文。同机 daemon 运行或状态无法核验时跳过，避免第二条长连接分流正常消息；真实验收必须先停止同库 daemon 并在隔离环境进行。
 
 - **tmux 会话生命周期**：Linux 上 tmux socket 文件被清理但旧 server 仍在时，启动会拒绝另建同名 server，并提示用 `SIGUSR1` 重建 socket 或结束旧 server；不会再让两个 CLI 接管同一会话。启用 `remain-on-exit` 时，下次启动会回收 Dutydeck 自有且全部 pane 已退出的死会话，仍有 pane 运行的会话保留。非 Linux 行为不变。
 

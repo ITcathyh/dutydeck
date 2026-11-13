@@ -1,7 +1,16 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { StoredLarkConfig } from '@dutydeck/shared';
 import { offerLarkSetupSmoke, type LarkSmokeEvent } from './lark-smoke.js';
 import type { Prompter } from './prompts.js';
+
+const daemonProbe = vi.hoisted(() => ({ statuses: ['stale'] as string[], calls: 0 }));
+vi.mock('../daemon/command.js', () => ({
+  daemonStatus: () => {
+    const status = daemonProbe.statuses[Math.min(daemonProbe.calls, daemonProbe.statuses.length - 1)] ?? 'stale';
+    daemonProbe.calls += 1;
+    return { processStatus: status };
+  }
+}));
 
 const bot = { appId: 'cli_smoke', appSecret: 'secret_fixture', listening: true } as StoredLarkConfig;
 const ownerEvent: LarkSmokeEvent = {
@@ -28,11 +37,16 @@ function options(overrides: Record<string, unknown> = {}) {
   };
 }
 
+beforeEach(() => {
+  daemonProbe.statuses = ['stale'];
+  daemonProbe.calls = 0;
+});
+
 afterEach(() => { vi.useRealTimers(); });
 
 describe('offerLarkSetupSmoke', () => {
   it('defaults to No and does not start listening or send after refusal', async () => {
-    const startListener = vi.fn();
+    const startListener = vi.fn(async () => vi.fn());
     const sendCard = vi.fn();
     const prompt = prompter(false);
     const result = await offerLarkSetupSmoke(options({ prompter: prompt }), {
@@ -59,10 +73,47 @@ describe('offerLarkSetupSmoke', () => {
     expect(sendCard).not.toHaveBeenCalled();
   });
 
+  it.each(['verified', 'unverifiable'])('fails closed before prompting when daemon status is %s', async status => {
+    vi.useFakeTimers();
+    daemonProbe.statuses = [status];
+    const prompt = prompter();
+    const startListener = vi.fn(async () => vi.fn());
+    const sendCard = vi.fn();
+    const pending = offerLarkSetupSmoke(options({ prompter: prompt }), {
+      loadBot: async () => bot, startListener, sendCard
+    });
+    await vi.advanceTimersByTimeAsync(60_000);
+    const result = await pending;
+    expect(result.status).toBe('unavailable');
+    expect(result.message).toContain('分流正常消息');
+    expect(result.message).toContain('停止该实例后再试');
+    expect(prompt.confirm).not.toHaveBeenCalled();
+    expect(startListener).not.toHaveBeenCalled();
+    expect(sendCard).not.toHaveBeenCalled();
+  });
+
+  it('rechecks after confirmation and refuses a daemon that appears before listener startup', async () => {
+    vi.useFakeTimers();
+    daemonProbe.statuses = ['stale', 'verified'];
+    const prompt = prompter();
+    const startListener = vi.fn(async () => vi.fn());
+    const sendCard = vi.fn();
+    const pending = offerLarkSetupSmoke(options({ prompter: prompt }), {
+      loadBot: async () => bot, startListener, sendCard
+    });
+    await vi.advanceTimersByTimeAsync(60_000);
+    const result = await pending;
+    expect(result.status).toBe('unavailable');
+    expect(daemonProbe.calls).toBe(2);
+    expect(prompt.confirm).toHaveBeenCalledOnce();
+    expect(startListener).not.toHaveBeenCalled();
+    expect(sendCard).not.toHaveBeenCalled();
+  });
+
   it('does not offer the smoke when the owner open ID cannot be established', async () => {
     const prompt = prompter();
     const sendCard = vi.fn();
-    const startListener = vi.fn();
+    const startListener = vi.fn(async () => vi.fn());
     const result = await offerLarkSetupSmoke(options({ ownerOpenId: undefined, prompter: prompt }), {
       loadBot: async () => bot, startListener, sendCard
     });

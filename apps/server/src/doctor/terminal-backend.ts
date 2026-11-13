@@ -23,10 +23,10 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** 每次调用都强制带同一个私有 socket；shell:false 让 argv 不经过 shell 解释。 */
+/** 每次调用都强制带同一个私有 socket 和空配置；shell:false 让 argv 不经过 shell 解释。 */
 function runTmux(socketPath: string, args: readonly string[], timeoutMs: number, env: NodeJS.ProcessEnv): Promise<TmuxRunResult> {
   return new Promise(resolve => {
-    execFile('tmux', ['-S', socketPath, ...args], {
+    execFile('tmux', ['-S', socketPath, '-f', '/dev/null', ...args], {
       env,
       shell: false,
       timeout: timeoutMs,
@@ -72,7 +72,7 @@ async function removeTemporaryDirectory(directory: string): Promise<TerminalBack
  * 真实 tmux smoke：版本、私有 socket 上创建精确会话、has-session 核验，最后 kill-server。
  *
  * 这是 doctor 中唯一允许有临时副作用的终端探针：它只接触新建 TMUX_TMPDIR 中的短 socket，
- * 不连接用户默认 server。create 一旦开始，finally 就用同一 -S 路径清理；清理失败或超时时
+ * 不读取 /etc 或用户 tmux 配置，会话只运行受控存活命令，不连接用户默认 server。create 一旦开始，finally 就用同一 -S 路径清理；清理失败或超时时
  * server 可能仍活着，所以保留 socket 根，绝不为了“打扫干净”而 unlink 活 server 的入口。
  */
 export const defaultTerminalBackendProbe: TerminalBackendProbe = async (timeoutMs, inheritedEnv = process.env) => {
@@ -89,6 +89,7 @@ export const defaultTerminalBackendProbe: TerminalBackendProbe = async (timeoutM
     TMUX_TMPDIR: directory,
     HOME: directory,
     TMPDIR: directory,
+    XDG_CONFIG_HOME: directory,
     NO_COLOR: '1'
   });
   const sessionName = `dd-doctor-${process.pid}-${randomBytes(4).toString('hex')}`;
@@ -105,7 +106,7 @@ export const defaultTerminalBackendProbe: TerminalBackendProbe = async (timeoutM
     } else {
       // new-session 即使在客户端报错或超时后也可能已经启动 server，因此先标记再执行。
       serverMayExist = true;
-      const created = await runTmux(socketPath, ['new-session', '-d', '-s', sessionName], timeoutMs, env);
+      const created = await runTmux(socketPath, ['new-session', '-d', '-s', sessionName, '/bin/sleep 30'], timeoutMs, env);
       if (created.status !== 'ok') {
         primary = failedProbe(created, 'create');
       } else {

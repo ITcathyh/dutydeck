@@ -6,6 +6,7 @@ import { larkConfigBlockingError, readLarkConfig } from '../lark/config.js';
 import { createLarkCardService } from '../lark/service.js';
 import type { Prompter } from './prompts.js';
 import { startLarkSmokeListener } from './lark-smoke-listener.js';
+import { daemonStatus, type DaemonStatusInfo } from '../daemon/command.js';
 
 export interface LarkSmokeEvent {
   eventId?: string;
@@ -40,6 +41,7 @@ interface LarkSetupSmokeDependencies {
   loadBot?: (database: string, appId: string) => Promise<StoredLarkConfig | undefined>;
   startListener?: (bot: StoredLarkConfig, onEvent: (event: LarkSmokeEvent) => void) => Promise<() => void | Promise<void>>;
   sendCard?: (bot: StoredLarkConfig, input: { uuid: string; ownerOpenId: string }) => Promise<{ messageId: string; chatId?: string }>;
+  daemonStatus?: () => Pick<DaemonStatusInfo, 'processStatus'>;
   uuid?: () => string;
 }
 
@@ -67,6 +69,13 @@ async function sendSmokeCard(bot: StoredLarkConfig, input: { uuid: string; owner
   } finally { service.close(); }
 }
 
+const DAEMON_CONFLICT_MESSAGE = '检测到 daemon 运行或无法确认其已停止；为避免分流正常消息，不启动临时监听、不发卡；停止该实例后再试。';
+
+function daemonConflict(dependencies: LarkSetupSmokeDependencies): boolean {
+  try { return (dependencies.daemonStatus ?? daemonStatus)().processStatus !== 'stale'; }
+  catch { return true; }
+}
+
 /** The only outbound consent surface: an interactive, dedicated default-No question. */
 export async function offerLarkSetupSmoke(
   options: LarkSetupSmokeOptions,
@@ -78,6 +87,7 @@ export async function offerLarkSetupSmoke(
   if (!options.ownerOpenId?.startsWith('ou_')) {
     return { status: 'unavailable', message: '无法确认机器人所有者在该应用下的 open_id，未提供收发验证，也未发送测试卡。' };
   }
+  if (daemonConflict(dependencies)) return { status: 'unavailable', message: DAEMON_CONFLICT_MESSAGE };
   let bot: StoredLarkConfig | undefined;
   try { bot = await (dependencies.loadBot ?? loadSavedBot)(options.database, options.appId); }
   catch { return { status: 'unavailable', message: '机器人配置读取失败，未提供收发验证，也未发送测试卡。' }; }
@@ -95,6 +105,7 @@ export async function offerLarkSetupSmoke(
     return { status: 'skipped', message: '已跳过飞书收发验证，未发送测试卡。' };
   }
   if (!confirmed) return { status: 'skipped', message: '已跳过飞书收发验证，未发送测试卡。' };
+  if (daemonConflict(dependencies)) return { status: 'unavailable', message: DAEMON_CONFLICT_MESSAGE };
 
   const uuid = (dependencies.uuid ?? randomUUID)();
   const seenEvents = new Set<string>();

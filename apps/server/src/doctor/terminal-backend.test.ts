@@ -188,9 +188,10 @@ function fakeTmux(mode: string): { bin: string; log: string } {
   writeFileSync(script, `#!${process.execPath}\n`
     + "const { appendFileSync } = require('node:fs');\n"
     + 'const args = process.argv.slice(2);\n'
-    + "appendFileSync(process.env.FAKE_TMUX_LOG, JSON.stringify({ args, env: { PATH: process.env.PATH, TMUX: process.env.TMUX, TMUX_PANE: process.env.TMUX_PANE, TMUX_TMPDIR: process.env.TMUX_TMPDIR, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR, DUTYDECK_DATABASE_URL: process.env.DUTYDECK_DATABASE_URL } }) + '\\n');\n"
+    + "appendFileSync(process.env.FAKE_TMUX_LOG, JSON.stringify({ args, env: { PATH: process.env.PATH, TMUX: process.env.TMUX, TMUX_PANE: process.env.TMUX_PANE, TMUX_TMPDIR: process.env.TMUX_TMPDIR, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME, DUTYDECK_DATABASE_URL: process.env.DUTYDECK_DATABASE_URL } }) + '\\n');\n"
     + "if (args[0] !== '-S' || !args[1]) process.exit(97);\n"
-    + 'const command = args[2];\n'
+    + "if (args[2] !== '-f' || args[3] !== '/dev/null') process.exit(96);\n"
+    + 'const command = args[4];\n'
     + `const mode = ${JSON.stringify(mode)};\n`
     + "if (command === '-V') { console.log('tmux fake 9.9'); process.exit(0); }\n"
     + "if (command === 'new-session' && mode === 'create-fail') { console.error('cannot create'); process.exit(1); }\n"
@@ -212,6 +213,7 @@ async function runFake(mode: string, timeoutMs = 1000) {
     TMUX_TMPDIR: '/inherited/tmp',
     HOME: '/inherited/home',
     TMPDIR: '/inherited/tmp',
+    XDG_CONFIG_HOME: '/inherited/xdg',
     DUTYDECK_DATABASE_URL: 'must-not-cross-the-boundary'
   });
   // 只有假 tmux 才把保留目录交给测试 finally 清理；它不可能连接真实 server。
@@ -245,19 +247,23 @@ describe('defaultTerminalBackendProbe 假 tmux', () => {
     expect(result.cleanup).toBeUndefined();
     expect(result.tempDir).toBeDefined();
     expect(existsSync(result.tempDir!)).toBe(false);
-    expect(calls.map(call => call.args[2])).toEqual(['-V', 'new-session', 'has-session', 'kill-server']);
+    expect(calls.map(call => call.args[4])).toEqual(['-V', 'new-session', 'has-session', 'kill-server']);
     for (const call of calls) {
       expect(call.args.slice(0, 2)).toEqual(['-S', join(result.tempDir!, 's')]);
+      expect(call.args.slice(2, 4)).toEqual(['-f', '/dev/null']);
       expect(call.env.TMUX).toBeUndefined();
       expect(call.env.TMUX_PANE).toBeUndefined();
       expect(call.env.DUTYDECK_DATABASE_URL).toBeUndefined();
       expect(call.env.TMUX_TMPDIR).toBe(result.tempDir);
       expect(call.env.HOME).toBe(result.tempDir);
       expect(call.env.TMPDIR).toBe(result.tempDir);
+      expect(call.env.XDG_CONFIG_HOME).toBe(result.tempDir);
     }
     const create = calls[1]!;
     const sessionName = create.args[create.args.indexOf('-s') + 1];
     expect(sessionName).toBeTruthy();
+    expect(create.args.at(-1)).toBe('/bin/sleep 30');
+    expect(create.args.filter(arg => arg === '/bin/sleep 30')).toHaveLength(1);
     expect(calls[2]!.args).toContain(`=${sessionName}`);
   });
 
@@ -267,7 +273,7 @@ describe('defaultTerminalBackendProbe 假 tmux', () => {
       expect(result.status).toBe('failed');
       expect(result).toMatchObject({ stage: mode === 'create-fail' ? 'create' : 'verify' });
       expect(calls.at(-1)?.args.slice(0, 2)).toEqual(['-S', join(result.tempDir!, 's')]);
-      expect(calls.at(-1)?.args[2]).toBe('kill-server');
+      expect(calls.at(-1)?.args[4]).toBe('kill-server');
       expect(existsSync(result.tempDir!)).toBe(false);
     }
   });
@@ -275,7 +281,7 @@ describe('defaultTerminalBackendProbe 假 tmux', () => {
   it('probe 超时为有界 warn，并尝试同一私有 socket 的清理', async () => {
     const { result, calls } = await runFake('create-hang');
     expect(result).toMatchObject({ status: 'timeout', stage: 'create' });
-    expect(calls.at(-1)?.args).toEqual(['-S', join(result.tempDir!, 's'), 'kill-server']);
+    expect(calls.at(-1)?.args).toEqual(['-S', join(result.tempDir!, 's'), '-f', '/dev/null', 'kill-server']);
     expect(existsSync(result.tempDir!)).toBe(false);
     expect(checkTerminalBackend({ action: 'probe', backend: 'tmux' }, result).level).toBe('warn');
   });
@@ -315,9 +321,9 @@ describe('defaultTerminalBackendProbe 真实 tmux（私有 socket）', () => {
       // 测试自身的兜底也只接触同一个私有 socket；未确认退出时绝不删除 socket 根。
       if (result.tempDir && existsSync(result.tempDir)) {
         const socket = join(result.tempDir, 's');
-        const env = childEnvironment({ PATH: dirname(realTmux!) }, { TMUX_TMPDIR: result.tempDir, HOME: result.tempDir, TMPDIR: result.tempDir });
+        const env = childEnvironment({ PATH: dirname(realTmux!) }, { TMUX_TMPDIR: result.tempDir, HOME: result.tempDir, TMPDIR: result.tempDir, XDG_CONFIG_HOME: result.tempDir });
         try {
-          await execFileAsync(realTmux!, ['-S', socket, 'kill-server'], { env, shell: false, timeout: 2000, killSignal: 'SIGKILL' });
+          await execFileAsync(realTmux!, ['-S', socket, '-f', '/dev/null', 'kill-server'], { env, shell: false, timeout: 2000, killSignal: 'SIGKILL' });
           rmSync(result.tempDir, { recursive: true, force: true });
         } catch { /* server 状态未知：保留目录，不冒充安全清理 */ }
       }

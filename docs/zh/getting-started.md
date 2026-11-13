@@ -37,7 +37,7 @@ printf %s "$LARK_SECRET" | dutydeck setup --lark-app-id cli_xxx --lark-app-secre
 
 向导选项：`--agent <id>` 指定默认 Agent（必须是检测到的 CLI）、`--lark-app-secret-fd <fd>` 从文件描述符读 Secret、`--listen` 同时开启监听。已在运行的服务要 `dutydeck restart` 才会读到新的机器人配置。
 
-机器人配置完成后，交互式向导会另行询问是否给机器人所有者发一张带唯一编号的测试卡并等待一次私聊回复，默认选择 No。只有在这个问题里明确选择 Yes 才会外发；`--yes`、非交互模式和 `--json` 都不会自动发送。发卡成功但回复超时只表示「入站未验证」，不表示端到端通过。
+机器人配置完成后，交互式向导会另行询问是否给机器人所有者发一张带唯一编号的测试卡并等待一次私聊回复，默认选择 No。只有在这个问题里明确选择 Yes 才会外发；`--yes`、非交互模式和 `--json` 都不会自动发送。发卡成功但回复超时只表示「入站未验证」，不表示端到端通过。同机 daemon 正在运行或状态无法核验时，向导在询问前跳过验证，避免第二条长连接分流正常消息；验收此功能要先停止同库 daemon，再在隔离环境运行。
 
 如果终端提示 `dutydeck: command not found`，说明全局可执行目录不在 `PATH`。pnpm 安装可运行 `pnpm setup`，按提示把全局可执行目录加入 `PATH` 后重开终端；npm 安装可用 `npm prefix -g` 找到全局前缀并配置其可执行目录。也可以不修改 `PATH`，改用 `pnpm dlx @byted/dutydeck setup` 或 `npx @byted/dutydeck setup`。
 
@@ -56,7 +56,7 @@ dutydeck doctor
 dutydeck status
 ```
 
-`doctor` 会对每个机器人的默认 Agent 执行一次 `--version`（5 秒超时，不调用模型）；当前目录没有 `.env` 时，改读 `last-daemon-dir` 记录的 daemon 目录，并说明读了哪一个。`terminal.backend` 一项还会检查 tmux 命令、版本和私有临时 socket 的创建与退出，不连接默认 tmux server；缺少 tmux 时按提示安装或修正 `PATH`，只使用 ACP 或已改用 Herdr 的配置不会因 tmux 缺失被判为致命错误。
+`doctor` 会对每个机器人的默认 Agent 执行一次 `--version`（5 秒超时，不调用模型）；当前目录没有 `.env` 时，改读 `last-daemon-dir` 记录的 daemon 目录，并说明读了哪一个。`terminal.backend` 一项还会检查 tmux 命令、版本和私有临时 socket 的创建与退出，不连接默认 tmux server；所有调用都带 `-f /dev/null`，`XDG_CONFIG_HOME` 指向私有目录，测试会话只运行受控存活命令，不加载 `/etc/tmux.conf`、XDG 配置或用户 `default-command`。缺少 tmux 时按提示安装或修正 `PATH`，只使用 ACP 或已改用 Herdr 的配置不会因 tmux 缺失被判为致命错误。
 
 启动后浏览器访问：
 - **Web 控制台**：`http://127.0.0.1:4310`（本机访问免密）
