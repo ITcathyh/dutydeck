@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { constants } from 'node:os';
 import { join } from 'node:path';
+import { pipeline } from 'node:stream/promises';
 
 const reportKey = 'dutydeck_launcher_report';
 
@@ -29,6 +30,17 @@ export function launchAgent(command, args, env, options = {}) {
     signalChild(signal);
     escalation ??= setTimeout(() => signalChild('SIGKILL'), 500);
   });
+  // Pipe endpoints isolate native writers from Node's nonblocking output fd.
+  // Forward with backpressure and keep the launcher alive until the tail drains.
+  const output = Promise.all([
+    [child.stdout, process.stdout], [child.stderr, process.stderr]
+  ].map(async ([source, target]) => {
+    if (!source) return;
+    await pipeline(source, target, { end: false });
+    // With end:false the pipeline can finish while the destination still buffers.
+    await new Promise((resolve, reject) => target.write('', error => error ? reject(error) : resolve()));
+  }));
+  void output.catch(() => process.kill(process.pid, 'SIGTERM'));
   child.once('error', error => { process.stderr.write(`${error.message}\n`); process.exitCode = 1; });
   child.once('exit', async (code, signal) => {
     clearTimeout(escalation);
@@ -38,8 +50,9 @@ export function launchAgent(command, args, env, options = {}) {
       // provable, ACPX may kill the launcher; the adapter treats that as unknown.
       while (groupAlive(child.pid)) await new Promise(resolve => setTimeout(resolve, 10));
     }
+    const drained = await output.then(() => true, () => false);
     if (report) rmSync(report, { force: true });
-    process.exit(signal ? 128 + (constants.signals[signal] ?? 1) : code ?? 1);
+    process.exit(signal ? 128 + (constants.signals[signal] ?? 1) : drained ? code ?? 1 : 1);
   });
   return child;
 }

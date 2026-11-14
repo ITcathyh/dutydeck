@@ -118,6 +118,8 @@ Lark bots can use `ask`, `approve-reads` and `full-trust`. `deny-all` is not ava
 
 For Codex ACP, every non-full-trust native turn, including restored sessions, uses `untrusted` approval, user review and a read-only sandbox. Writes and privileged commands reach Dutydeck approval instead of Codex ACP auto-review. Codex can still allow reads its native policy considers safe, so every read-only action is not guaranteed to produce an approval request; `approve-reads` also allows explicitly declared reads and searches. Explicit `full-trust` uses native full access. These child-only settings do not change global Codex configuration.
 
+Codex ACP forwards native output through separate pipes, waits for downstream readers when tool results are large, and drains remaining data before exiting. This prevents tasks from timing out after native execution has already finished, such as when reading a long document.
+
 `lark create` defaults to `ask` and refuses unsupported Agents without `--full-trust`; the Web wizard defaults to `ask` when the Agent supports approval, else `full-trust`.
 
 Lark email admission and identity lookups cache confirmed invalid, cross-app or invisible-user failures for up to 60 seconds per client, so a permission repair may take that long to be retried. Bot configuration refreshes or credential changes clear the cache. Successful identities, rate limits, server errors, network errors and timeouts are not cached; subsequent lookups still check for revoked access.
