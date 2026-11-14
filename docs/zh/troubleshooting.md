@@ -112,7 +112,7 @@ SIGKILL 无法执行进程内退出处理，所以下一代先根据上一代缺
 - **策略或脚本故障**：会话 ID 为空或策略文件不存在时由 shell 直接放行，不启动 Node；策略未启用或没有未授权匹配时同样放行。文件存在后的读取错误、损坏 JSON、active 计划脚本缺失会拒绝操作。检查 `.dutydeck/security/sessions/` 的文件类型与 JSON、会话私有设置目录和机器负载。错误文本不会回显策略里的敏感值。
 
 ### Q19: 如何查看最近服务日志？为什么有些行没有显示？
-- 普通 daemon 用 `dutydeck logs`，systemd 用户实例用 `dutydeck logs --unit <unit>`；默认各取最近 50 行，可用 `-n 200` 增加行数。命令只取一次快照，不会持续等待新日志。
+- 普通 daemon 用 `dutydeck logs`，systemd 用户实例用 `dutydeck logs --unit <unit>`；默认请求最近 50 行，可用 `-n 200` 增加请求行数。带 `--unit` 时先取原始最近 N 行，再过滤疑似秘密，所以可能少于 N 行。命令只取一次快照，不会持续等待新日志。
 - 普通行、错误行和多行堆栈都会保留。含疑似 token、密码、凭据或 Authorization 的整行会被过滤，所以原始日志里的这些行不会出现在命令输出中，原始日志不变。
 - 如果提示找不到 `journalctl`，检查 systemd 是否已安装且命令在 PATH 中；提示 unit 不存在或尚无日志时先核对名称，名称正确则说明该 unit 当前没有匹配日志。普通 daemon 不依赖 `journalctl`，不带 `--unit` 即可读取当前 daemon 日志文件。
 

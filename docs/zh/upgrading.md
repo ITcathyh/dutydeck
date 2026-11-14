@@ -30,7 +30,7 @@
 
 - **Claude 守卫失败阻断需要官方 Claude Code 2.1.295+**：Dutydeck 自己的凭据与计划守卫在官方 Claude Code 2.1.295+ 上新增 `onFailure: "block"`，超时及未被现有 `|| exit 2` 覆盖的失败不再退回普通权限流程；策略读取/JSON 解析错误和 active 计划脚本缺失也会拒绝。旧版、探测失败和未验证分支不写这个字段，受保护轮次照常提交，守卫超时维持原行为，显式拒绝和脚本崩溃仍由 `|| exit 2` 拦截。恢复或接管的新版终端核对 marker、精确 matcher、command type 和实际 `onFailure` 形状；旧版不因缺少该字段被判为未接线。Ask relay、PermissionRequest 和用户 hooks 不变；没有新增设置、命令或数据库迁移。
 
-- **新增只读日志命令**：`dutydeck logs [-n N] [--unit <unit>]` 默认查看最近 50 行，行数可设为 1–10000。不带 `--unit` 时读取当前 daemon 日志文件的末尾，带 `--unit` 时通过无 shell 的流式 `journalctl --user` 子进程读取对应 systemd 用户实例，两种来源最多保留末尾 256KiB；首版不 follow。普通行、错误行和多行堆栈按原顺序输出，疑似含秘密的整行过滤，unit 不存在或尚无日志会明确报错。它不写配置、不改原始日志或数据库；回滚到旧版本只是没有该命令，已有日志不受影响。
+- **新增只读日志命令**：`dutydeck logs [-n N] [--unit <unit>]` 默认查看最近 50 行，行数可设为 1–10000。不带 `--unit` 时读取当前 daemon 日志文件的末尾，带 `--unit` 时通过无 shell 的流式 `journalctl --user` 子进程读取对应 systemd 用户实例，两种来源最多保留末尾 256KiB；首版不 follow。带 `--unit` 时先取原始最近 N 行，再过滤疑似秘密，所以可能少于 N 行。普通行、错误行和多行堆栈按原顺序输出，疑似含秘密的整行过滤，unit 不存在或尚无日志会明确报错。它不写配置、不改原始日志或数据库；回滚到旧版本只是没有该命令，已有日志不受影响。
 - **插件升级会显示执行命令变化**：`plugin update` 现在列出斜杠命令、Agent 启动配置和 hook 执行规格的标识与前后 SHA-256 摘要，JSON 结果增加 `changes`。交互终端会要求重新信任这些变化，拒绝时不写候选；非交互且未带 `--yes` 只打印变化，不新增失败，`--yes` 行为不变。仅描述变化不产生摘要，候选没有新的执行内容变化时不重复提问。活动版本仍需按原流程执行 `plugin activate`，不会在 update 中执行候选命令。
 - **`dutydeck update` 支持精确版本**：可运行 `dutydeck update 1.2.3`，版本参数与 `--dist-tag` 互斥；无参数时仍使用 `latest`。安装、版本核对或重启失败会附 `npm install --global @byted/dutydeck@<实际旧版本> && dutydeck restart` 的手工回退步骤，直接重装旧包，不依赖旧版 CLI 是否认识 `update [version]`；旧版本不能安全放入命令时则明确说明，不自动回滚。
 - **tmux 预检**：`doctor` 新增 `terminal.backend`，在独立临时 socket 上检查 tmux 命令、版本和会话建退，不碰默认 server；所有调用使用 `-f /dev/null` 和私有 `XDG_CONFIG_HOME`，测试会话只运行受控命令，不加载系统或用户配置。setup 对需要 tmux 的终端 Agent 增加一行同类警告，缺失或失败不阻止写配置。纯 ACP 与 Herdr 配置不因缺 tmux 报致命错误。

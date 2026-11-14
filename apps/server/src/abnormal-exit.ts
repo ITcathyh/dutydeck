@@ -393,7 +393,7 @@ export async function defaultJournalQuery(request: JournalQueryRequest): Promise
     execFile('journalctl', ['--user', `--unit=${request.unit}`, '--output=json', '--no-pager', '--boot', normalizeBootId(request.boot),
       // systemd 252 不接受 toISOString；查询按秒向外放宽，exactSigkill 仍按毫秒精确归属。
       '--since', `@${Math.floor(Date.parse(request.startedAt) / 1_000) - 1}`,
-      '--until', `@${Math.ceil(Date.parse(request.until) / 1_000) + 1}`], { timeout: 2_000, maxBuffer: 1024 * 1024, killSignal: 'SIGKILL' },
+      '--until', `@${Math.ceil(Date.parse(request.until) / 1_000) + 1}`, `MAIN_PID=${request.pid}`], { timeout: 2_000, maxBuffer: 1024 * 1024, killSignal: 'SIGKILL' },
     (error, output) => error ? reject(error) : resolve(output));
   });
   return stdout.split(/\r?\n/).filter(Boolean).flatMap(line => {

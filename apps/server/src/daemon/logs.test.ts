@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync, existsSync, appendFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { bundleCliForTest } from '../../../../tests/support/bundle-for-test.js';
@@ -9,6 +9,7 @@ import { daemonPaths, pidAlive, readDaemonLog, readJournalctlLog } from './daemo
 let tmp: string;
 let cli: string;
 let cleanupCli: (() => Promise<void>) | undefined;
+const bareFixtureKey = 'sk-FIXTURE-1234567890abcdefgh';
 
 beforeAll(async () => { ({ path: cli, cleanup: cleanupCli } = await bundleCliForTest('daemon-logs')); });
 afterAll(async () => { await cleanupCli?.(); });
@@ -88,16 +89,46 @@ describe('readDaemonLog', () => {
   it('drops secret-bearing lines without dropping their ordinary and error neighbours', () => {
     const dir = writeDaemonLog([
       'ordinary before',
+      `worker rejected ${bareFixtureKey}`,
       '[dutydeck] Generated access token for remote access: fixture-token-value',
       'Authorization: Bearer fixture-bearer-value',
       'password=fixture-password-value',
       'Error: after filtered rows'
-    ].join('\n'));
+    ].join('\n') + '\n');
     const lines = readDaemonLog(dir);
     expect(lines).toEqual(['ordinary before', 'Error: after filtered rows']);
+    expect(lines.join('\n')).not.toContain(bareFixtureKey);
     expect(lines.join('\n')).not.toContain('fixture-token-value');
     expect(lines.join('\n')).not.toContain('fixture-bearer-value');
     expect(lines.join('\n')).not.toContain('fixture-password-value');
+  });
+
+  it('waits for a newline before returning a file fragment and preserves the completed line', () => {
+    const dir = writeDaemonLog('ordinary before\nunfinished ordinary');
+    const file = daemonPaths(dir).logFile;
+    expect(readDaemonLog(dir)).toEqual(['ordinary before']);
+
+    appendFileSync(file, ' completed\nnext ordinary');
+    expect(readDaemonLog(dir)).toEqual(['ordinary before', 'unfinished ordinary completed']);
+
+    appendFileSync(file, ' continues\n');
+    expect(readDaemonLog(dir)).toEqual(['ordinary before', 'unfinished ordinary completed', 'next ordinary continues']);
+  });
+
+  it('does not expose an unterminated fragment before or after a secret suffix is appended', () => {
+    const dir = writeDaemonLog('ordinary before\nordinary pending');
+    const file = daemonPaths(dir).logFile;
+    expect(readDaemonLog(dir)).toEqual(['ordinary before']);
+
+    appendFileSync(file, ' password=fixture-appended-secret');
+    let lines = readDaemonLog(dir);
+    expect(lines).toEqual(['ordinary before']);
+    expect(lines.join('\n')).not.toContain('fixture-appended-secret');
+
+    appendFileSync(file, '\n');
+    lines = readDaemonLog(dir);
+    expect(lines).toEqual(['ordinary before']);
+    expect(lines.join('\n')).not.toContain('fixture-appended-secret');
   });
 
   it('reports a missing log as not yet created and preserves other I/O errors', () => {
@@ -133,11 +164,13 @@ describe('readJournalctlLog', () => {
     const capture = join(tmp, 'argv.json');
     journalctlStub({
       capture,
-      stdout: ['ordinary before', 'token=fixture-journal-secret', 'Error: exploded', '    at fixture (fixture.js:1:1)', 'ordinary after'].join('\n') + '\n'
+      stdout: ['ordinary before', 'token=fixture-journal-secret', 'Error: exploded', '    at fixture (fixture.js:1:1)', `worker rejected ${bareFixtureKey}`, 'ordinary after'].join('\n') + '\n'
     });
-    expect(await readJournalctlLog('dutydeck-fixture.service', 3)).toEqual([
+    const lines = await readJournalctlLog('dutydeck-fixture.service', 3);
+    expect(lines).toEqual([
       'Error: exploded', '    at fixture (fixture.js:1:1)', 'ordinary after'
     ]);
+    expect(lines.join('\n')).not.toContain(bareFixtureKey);
     expect(JSON.parse(readFileSync(capture, 'utf8'))).toEqual([
       '--user', '--unit=dutydeck-fixture.service', '--lines=3', '--no-pager'
     ]);

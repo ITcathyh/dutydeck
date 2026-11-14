@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import Database from 'better-sqlite3';
 import { rotateLogFileSync } from '../resource-retention.js';
 import { writeFileAtomicSync } from '../atomic-file.js';
+import { redactCredentialText } from '@dutydeck/shared';
 import type { ProcessIdentity } from '@dutydeck/storage';
 import { childProcessIdentity, currentProcessIdentity } from '@dutydeck/storage/helpers';
 
@@ -507,14 +508,20 @@ function readLogFrom(file: string, fromByte: number): string {
 function visibleLogLines(text: string): string[] {
   const lines = text.split('\n');
   if (lines.at(-1) === '') lines.pop();
-  return lines.filter(line => !isSecretLogLine(line));
+  return lines.flatMap(line => {
+    const redacted = redactCredentialText(line);
+    return isSecretLogLine(line) || redacted !== line ? [] : [redacted];
+  });
 }
 
 /** Read recent daemon output without the failure-only filtering used for startup errors. */
 export function readDaemonLog(dir: string, lines = 50, fromByte = 0): string[] {
   const file = daemonPaths(dir).logFile;
   try {
-    return visibleLogLines(readLogFrom(file, fromByte)).slice(-lines);
+    const text = readLogFrom(file, fromByte);
+    const lastNewline = text.lastIndexOf('\n');
+    // 追加中的最后一行等换行后再判断，避免先输出普通前缀、后追加秘密。
+    return visibleLogLines(lastNewline === -1 ? '' : text.slice(0, lastNewline + 1)).slice(-lines);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       throw new Error(`daemon 日志尚未生成：${file}；请先启动 daemon，或核对 daemon 目录`);

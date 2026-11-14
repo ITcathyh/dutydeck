@@ -1,11 +1,11 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
-import { abnormalExitFileName, abnormalExitNote, beginServeRun, enrichAbnormalExitFromJournal, markServeRunning, readAbnormalExit, recordAbnormalExit, recordCleanExit, type AbnormalExitRecord, type ServeRunLifecycle } from './abnormal-exit.js';
+import { abnormalExitFileName, abnormalExitNote, beginServeRun, defaultJournalQuery, enrichAbnormalExitFromJournal, markServeRunning, readAbnormalExit, recordAbnormalExit, recordCleanExit, type AbnormalExitRecord, type ServeRunLifecycle } from './abnormal-exit.js';
 
 const roots: string[] = [];
-afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { vi.unstubAllEnvs(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 const scratch = () => { const root = mkdtempSync(join(tmpdir(), 'dutydeck-abnormal-exit-')); roots.push(root); return root; };
 const databaseIn = (root: string) => { const database = join(root, 'dutydeck.db'); writeFileSync(database, ''); return database; };
 const lifecycle = (runId: string, override: Partial<ServeRunLifecycle> = {}): ServeRunLifecycle => ({
@@ -373,6 +373,55 @@ describe('bounded systemd journal enrichment', () => {
     beginServeRun(database, lifecycle('current-run', { pid: 5432 }), { isProcessAlive: () => false });
     return { database, previous };
   }
+
+  function syntheticJournalctl(pid: number, filteredStdout: string, rawUnitStdout: string): string {
+    const root = scratch(), bin = join(root, 'bin'), capture = join(root, 'argv.json');
+    mkdirSync(bin);
+    const script = [
+      `#!${process.execPath}`,
+      `const fs = require('node:fs');`,
+      `const args = process.argv.slice(2);`,
+      `fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify(args));`,
+      `process.stdout.write(args.includes(${JSON.stringify(`MAIN_PID=${pid}`)}) ? ${JSON.stringify(filteredStdout)} : ${JSON.stringify(rawUnitStdout)});`
+    ].join('\n');
+    writeFileSync(join(bin, 'journalctl'), script, { mode: 0o755 });
+    vi.stubEnv('PATH', bin);
+    return capture;
+  }
+
+  it('filters by MAIN_PID at journalctl before maxBuffer and enriches the exact SIGKILL', async () => {
+    const { database, previous } = interrupted();
+    const expected = exitEntry(previous), filtered = `${JSON.stringify(expected)}\n`;
+    const noise = Array.from({ length: 160 }, (_, index) => JSON.stringify({ MESSAGE: `unit-noise-${index}-${'x'.repeat(8192)}` }));
+    const rawUnit = `${[...noise, JSON.stringify(expected)].join('\n')}\n`;
+    expect(Buffer.byteLength(rawUnit)).toBeGreaterThan(1024 * 1024);
+    expect(Buffer.byteLength(filtered)).toBeLessThan(1024);
+    const capture = syntheticJournalctl(previous.pid, filtered, rawUnit);
+    const request = { unit: previous.unit!, boot: previous.boot!, pid: previous.pid, startedAt: previous.startedAt, until: '2026-11-13T00:01:00.000Z' };
+
+    await expect(defaultJournalQuery(request)).resolves.toEqual([expected]);
+    expect(JSON.parse(readFileSync(capture, 'utf8'))).toEqual([
+      '--user', `--unit=${request.unit}`, '--output=json', '--no-pager', '--boot', request.boot.replaceAll('-', ''),
+      '--since', `@${Math.floor(Date.parse(request.startedAt) / 1_000) - 1}`,
+      '--until', `@${Math.ceil(Date.parse(request.until) / 1_000) + 1}`,
+      `MAIN_PID=${request.pid}`
+    ]);
+    await enrichAbnormalExitFromJournal(database, previous, { now: new Date(request.until) });
+    expect(readAbnormalExit(database)).toMatchObject({ runId: previous.runId, signal: 'SIGKILL', source: 'systemd-journal', at: '2026-11-13T00:00:05.000Z' });
+  });
+
+  it('keeps the exit pending when the PID-filtered journal has no matching exit', async () => {
+    const { database, previous } = interrupted();
+    const noise = Array.from({ length: 160 }, (_, index) => JSON.stringify({ MESSAGE: `unit-noise-${index}-${'x'.repeat(8192)}` }));
+    const rawUnit = `${noise.join('\n')}\n`;
+    expect(Buffer.byteLength(rawUnit)).toBeGreaterThan(1024 * 1024);
+    const capture = syntheticJournalctl(previous.pid, '', rawUnit);
+
+    await enrichAbnormalExitFromJournal(database, previous, { now: new Date('2026-11-13T00:01:00.000Z') });
+    expect(readAbnormalExit(database)).toMatchObject({ runId: previous.runId, source: 'lifecycle', error: expect.stringContaining('pending journal enrichment') });
+    expect(readAbnormalExit(database)?.signal).toBeUndefined();
+    expect(JSON.parse(readFileSync(capture, 'utf8'))).toContain(`MAIN_PID=${previous.pid}`);
+  });
 
   it('enriches only an exactly aligned SIGKILL and keeps the old top-level kind', async () => {
     const { database, previous } = interrupted();
