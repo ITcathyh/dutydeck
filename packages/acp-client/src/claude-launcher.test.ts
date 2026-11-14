@@ -148,6 +148,43 @@ describe('Claude ACP launcher', () => {
     expect(hook.onFailure === 'block').toBe(supported);
   }, 15_000);
 
+  it.skipIf(process.platform === 'win32')('uses the user settings executable before native fallback and below the explicit process value', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dutydeck-claude-acp-settings-executable-')); dirs.push(root);
+    const emptyPath = join(root, 'empty-path'); const configDir = join(root, 'config');
+    await mkdir(emptyPath); await mkdir(configDir);
+    const fakeClaude = name => `#!${process.execPath}\nif (process.argv.includes('--version')) process.stdout.write('2.1.295 (Claude Code)\\n'); else process.stdout.write(JSON.stringify({ name: ${JSON.stringify(name)}, args: process.argv.slice(2), executable: process.env.CLAUDE_CODE_EXECUTABLE }));\n`;
+    const settingsClaude = join(root, 'settings-claude'); const explicitClaude = join(root, 'explicit-claude');
+    await writeFile(settingsClaude, fakeClaude('settings-claude'), { mode: 0o755 });
+    await writeFile(explicitClaude, fakeClaude('explicit-claude'), { mode: 0o755 });
+    await writeFile(join(configDir, 'settings.json'), JSON.stringify({ env: { CLAUDE_CODE_EXECUTABLE: settingsClaude } }));
+    const inspect = `process.stdout.write(JSON.stringify({ guard: process.env.dutydeck_secret_guard_settings, real: process.env.dutydeck_claude_executable, childExecutable: process.env.CLAUDE_CODE_EXECUTABLE }))`;
+    const env = {
+      ...process.env, PATH: emptyPath, CLAUDE_CONFIG_DIR: configDir,
+      DUTYDECK_CLAUDE_ACP_COMMAND: process.execPath,
+      DUTYDECK_CLAUDE_ACP_ARGS_JSON: JSON.stringify(['-e', inspect]),
+    };
+    delete env.CLAUDE_CODE_EXECUTABLE;
+    const launch = extraEnv => spawnSync(process.execPath, [resolve(process.cwd(), 'packages/acp-client/agents/claude-acp.mjs')], {
+      cwd: root, env: { ...env, ...extraEnv }, encoding: 'utf8', timeout: 10_000,
+    });
+    const fromSettings = launch({});
+    expect(fromSettings.status).toBe(0);
+    const selected = JSON.parse(fromSettings.stdout);
+    expect(selected.real).toBe(settingsClaude);
+    expect(selected.childExecutable).toMatch(/claude-[\da-f]{16}\.sh$/);
+    expect(JSON.parse(selected.guard).hooks.PreToolUse).toHaveLength(1);
+    const wrapped = spawnSync(selected.childExecutable, ['--print'], {
+      cwd: root,
+      env: { ...process.env, PATH: emptyPath, dutydeck_claude_executable: selected.real, dutydeck_secret_guard_settings: selected.guard },
+      encoding: 'utf8', timeout: 10_000,
+    });
+    expect(wrapped.status).toBe(0);
+    expect(JSON.parse(wrapped.stdout)).toEqual({ name: 'settings-claude', args: ['--settings', expect.any(String), '--print'], executable: settingsClaude });
+    const fromProcess = launch({ CLAUDE_CODE_EXECUTABLE: explicitClaude });
+    expect(fromProcess.status).toBe(0);
+    expect(JSON.parse(fromProcess.stdout).real).toBe(explicitClaude);
+  }, 15_000);
+
   it.each(['bearer', 'api-key'] as const)('keeps explicit %s credentials exclusive over user and project cloud settings', async mode => {
     const root = await mkdtemp(join(tmpdir(), 'dutydeck-claude-auth-')); dirs.push(root);
     await mkdir(join(root, '.claude'));
@@ -195,13 +232,15 @@ describe('Claude ACP launcher', () => {
       DUTYDECK_DAEMON_DIR: join(root, 'elsewhere'), dutydeck_relay_token: 'other-relay', ANTHROPIC_MODEL: 'project-model'
     } }));
     const keys = ['NODE_OPTIONS', 'LD_PRELOAD', 'CLAUDE_CODE_EXECUTABLE', 'DUTYDECK_DAEMON_DIR', 'dutydeck_relay_token', 'LARK_APP_SECRET', 'ANTHROPIC_BASE_URL', 'AWS_PROFILE', 'ANTHROPIC_MODEL'];
-    const inspect = `process.stdout.write(JSON.stringify(Object.fromEntries(${JSON.stringify(keys)}.map(key => [key, process.env[key] ?? null]))))`;
+    const inspect = `process.stdout.write(JSON.stringify({ ...Object.fromEntries(${JSON.stringify(keys)}.map(key => [key, process.env[key] ?? null])), dutydeck_claude_executable: process.env.dutydeck_claude_executable }))`;
     const inherited = { ...process.env };
     for (const key of keys) delete inherited[key];
     // No Claude CLI on PATH: the SDK native fallback is wrapped; project settings cannot choose the executable.
     const result = spawnSync(process.execPath, [resolve('packages/acp-client/agents/claude-acp.mjs')], { cwd: root, env: { ...inherited, PATH: bin, CLAUDE_CONFIG_DIR: join(root, 'config'), DUTYDECK_CLAUDE_ACP_COMMAND: process.execPath, DUTYDECK_CLAUDE_ACP_ARGS_JSON: JSON.stringify(['-e', inspect]) }, encoding: 'utf8' });
     expect(result.status).toBe(0);
-    expect(JSON.parse(result.stdout)).toEqual({
+    const { dutydeck_claude_executable: realExecutable, ...launched } = JSON.parse(result.stdout);
+    expect(realExecutable).not.toBe(join(root, 'evil'));
+    expect(launched).toEqual({
       ...Object.fromEntries(keys.map(key => [key, null])), ANTHROPIC_MODEL: 'project-model',
       CLAUDE_CODE_EXECUTABLE: expect.stringMatching(/claude-[\da-f]+\.sh$/),
     });

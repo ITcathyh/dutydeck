@@ -21,8 +21,8 @@ async function settingsEnvironment(file) {
 const workspaceDenied = /^(?:NODE_OPTIONS|NODE_PATH|PATH|SHELL|BASH_ENV|ENV|CLAUDE_CONFIG_DIR|LD_\w*|DYLD_\w*|\w*_EXECUTABLE|DUTYDECK_\w*)$/i;
 const workspaceEnvironment = env => Object.fromEntries(Object.entries(env).filter(([key]) => !workspaceDenied.test(key)));
 
-async function findClaudeExecutable(pathValue) {
-  if (process.env.CLAUDE_CODE_EXECUTABLE) return process.env.CLAUDE_CODE_EXECUTABLE;
+async function findClaudeExecutable(pathValue, configuredExecutable) {
+  if (configuredExecutable) return configuredExecutable;
   const names = process.platform === 'win32' ? ['claude.exe', 'claude.cmd', 'claude.bat'] : ['claude'];
   for (const directory of String(pathValue ?? '').split(delimiter).filter(Boolean)) {
     for (const name of names) {
@@ -66,7 +66,7 @@ const settingsEnv = Object.assign(
 const autoMemoryDefault = process.env.dutydeck_claude_auto_memory === 'off' ? { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' } : {};
 // 设置里的变量同样过一遍子进程清洗，不把服务密钥和别的会话身份带给 Claude。
 const env = { ...autoMemoryDefault, ...childEnvironment(settingsEnv), ...process.env };
-let installedClaude = await findClaudeExecutable(env.PATH);
+let installedClaude = await findClaudeExecutable(env.PATH, env.CLAUDE_CODE_EXECUTABLE);
 if (!installedClaude) {
   // This is the same native SDK fallback claude-agent-acp uses when no executable
   // is configured. Wrap that actual CLI too instead of letting it run without the guard.

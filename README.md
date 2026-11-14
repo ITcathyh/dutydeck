@@ -91,7 +91,7 @@ dutydeck start && dutydeck doctor
 <td valign="top">
 ⏰ <b>一句话定时</b><br>
 说“每天 18:00 总结本群”，点启用才开始。<br>
-<sub>→ <a href="docs/zh/features.md#5-群聊协作与定时委托">群聊协作与定时委托</a></sub>
+<sub>→ <a href="docs/zh/features.md#6-群聊协作与定时委托">群聊协作与定时委托</a></sub>
 </td>
 <td valign="top">
 🔁 <b>开 PR 并跟进</b><br>
@@ -103,7 +103,7 @@ dutydeck start && dutydeck doctor
 <td valign="top">
 🧠 <b>长期记忆</b><br>
 <code>/remember</code> 手动记，也可后台自动提取。<br>
-<sub>→ <a href="docs/zh/features.md#4-跨会话长期记忆">跨会话长期记忆</a></sub>
+<sub>→ <a href="docs/zh/features.md#5-跨会话长期记忆">跨会话长期记忆</a></sub>
 </td>
 <td valign="top">
 ♻️ <b>重启不丢活</b><br>

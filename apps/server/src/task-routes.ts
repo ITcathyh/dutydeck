@@ -16,7 +16,7 @@ export function taskWaiting(permissions: PermissionRequestData[], asks: RelayAsk
       ...(p.operation ? { detail: [p.operation.command, p.operation.resource, p.operation.cwd].filter(Boolean).join('\n').slice(0, 2000) } : {}),
       options: [{ id: 'allow', label: '允许', kind: 'allow' }, { id: 'deny', label: '拒绝', kind: 'deny' }], free_text: false })),
     ...asks.filter(a => a.status === 'pending').map(a => ({ id: a.id, kind: 'question', prompt: a.question.slice(0, 500),
-      options: (a.choices ?? []).map(c => ({ id: c.value ?? c.label, label: c.label, kind: 'answer' })), free_text: true }))
+      options: (a.choices ?? []).map(c => ({ id: c.value ?? c.label, label: c.label, kind: 'answer', ...(c.description ? { description: c.description } : {}) })), free_text: true }))
   ];
 }
 export function taskStatus(session: Session, tasks: PublicTaskRecord[], waiting: unknown[]): string {

@@ -500,7 +500,7 @@ dutydeck task decide <session-id> --waiting <ask-id> --option answer --text '自
 {"archived":true}
 ```
 
-状态为 `running|waiting|queued|done|failed|stopped|unknown`，待审批/提问优先显示 `waiting`；结果待核对显示 `unknown`。`agent` 为 `claude|codex|other`；来源为 `lark|schedule|web|trigger|other`，已知时带 `origin.url`。`waiting` 中的 `question` 选项使用 `kind=answer`，`free_text` 表示是否可自由回答。问题最多 500 字、操作原文最多 2000 字，验证摘要最多 200 字。`verification.state` 为 `passed|failed|none`，过期或没有验证证据时为 `none`。`actions` 仅列当前允许且可用的动作。对话按时间升序，角色为 `user|assistant|tool|system`；工具调用与结果合并成一条摘要，不输出 thinking；单条超过 4000 字时截断并加 `…`，截断文本或省略较早条目时 `truncated=true`。
+状态为 `running|waiting|queued|done|failed|stopped|unknown`，待审批/提问优先显示 `waiting`；结果待核对显示 `unknown`。`agent` 为 `claude|codex|other`；来源为 `lark|schedule|web|trigger|other`，已知时带 `origin.url`。`waiting` 中的 `question` 选项保留 `id`、`label` 和 `kind=answer`，可选 `description` 仅用于展示，不拼入 `prompt`，也不改变作答时提交的选项值；`free_text` 表示是否可自由回答。问题最多 500 字、操作原文最多 2000 字，验证摘要最多 200 字。`verification.state` 为 `passed|failed|none`，过期或没有验证证据时为 `none`。`actions` 仅列当前允许且可用的动作。对话按时间升序，角色为 `user|assistant|tool|system`；工具调用与结果合并成一条摘要，不输出 thinking；单条超过 4000 字时截断并加 `…`，截断文本或省略较早条目时 `truncated=true`。
 
 失败形状为 `{"ok":false,"error":{"code":"already_resolved","message":"该请求已被处理"}}`：
 

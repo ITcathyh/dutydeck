@@ -27,10 +27,25 @@ describe('open task projections', () => {
     expect(taskStatus({ ...session, archivedAt: at }, [{ ...task, status }], [])).toBe('stopped');
   });
   it('projects bounded permissions and choice values', () => {
-    expect(taskWaiting([{ id: 'p', title: 'p'.repeat(600), status: 'pending', operation: { source: 'acp_tool_call', command: 'x'.repeat(3000) } }], [{ id: 'a', sessionId: 's', question: 'Choose', status: 'pending', createdAt: at, expiresAt: at, choices: [{ label: 'Yes', value: 'yes' }] }])).toMatchObject([
+    expect(taskWaiting([{ id: 'p', title: 'p'.repeat(600), status: 'pending', operation: { source: 'acp_tool_call', command: 'x'.repeat(3000) } }], [{ id: 'a', sessionId: 's', question: 'Choose', status: 'pending', createdAt: at, expiresAt: at, choices: [{ label: 'Yes', value: 'yes', description: 'Use the recommended path' }] }])).toMatchObject([
       { id: 'p', prompt: 'p'.repeat(500), detail: 'x'.repeat(2000), free_text: false, options: [{ id: 'allow' }, { id: 'deny' }] },
-      { id: 'a', kind: 'question', free_text: true, options: [{ id: 'yes', kind: 'answer' }] }
+      { id: 'a', kind: 'question', prompt: 'Choose', free_text: true, options: [{ id: 'yes', label: 'Yes', kind: 'answer', description: 'Use the recommended path' }] }
     ]);
+  });
+  it('exposes question option descriptions in task lists and waiting details without changing the answer protocol', async () => {
+    const r = runtime();
+    const ask = { id: 'a', sessionId: 's', question: 'Choose', status: 'pending', createdAt: at, expiresAt: at, choices: [{ label: 'Yes', value: 'yes', description: 'Use the recommended path' }] } as const;
+    const app = Fastify();
+    registerTaskRoutes(app, r as any, { broker: { listPending: () => [ask] } as any, filterViewable: async (_req, sessions) => sessions, authorize: async () => {}, can: async () => true, source: async () => undefined });
+    try {
+      const list = await app.inject('/api/tasks');
+      expect(list.statusCode).toBe(200);
+      const waiting = list.json().tasks[0].waiting[0];
+      expect(waiting).toEqual({ id: 'a', kind: 'question', prompt: 'Choose', options: [{ id: 'yes', label: 'Yes', kind: 'answer', description: 'Use the recommended path' }], free_text: true });
+      const detail = await app.inject('/api/sessions/s/waiting/a');
+      expect(detail.statusCode).toBe(200);
+      expect(detail.json()).toEqual(waiting);
+    } finally { await app.close(); }
   });
   it('merges tools, hides thinking/audit, deduplicates final output and truncates the newest conversation', () => {
     const event = (type: AgentEvent['type'], data: unknown, n: number): AgentEvent => ({ id: `e${n}`, sessionId: 's', taskId: 't', sequence: n, timestamp: at, type, data });
