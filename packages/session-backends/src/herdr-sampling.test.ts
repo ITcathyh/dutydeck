@@ -163,6 +163,35 @@ it('retains dirty when a frame arrives during capture and samples again on the n
   } finally { release(state); await backend.detach(); }
 });
 
+it('persists every valid snapshot while frames keep arriving during capture', async () => {
+  vi.useFakeTimers();
+  const { backend, state } = fixture(), target = controller();
+  let controlled = true;
+  const snapshots: Array<typeof state> = [], releases: Array<(value: unknown) => void> = [];
+  try {
+    await attach(backend, target);
+    const capture = vi.spyOn(backend, 'captureOwnedIdentity').mockImplementation(() => {
+      if (!controlled) return Promise.resolve(state);
+      const snapshot = structuredClone(state);
+      snapshot.identities = [...snapshot.identities, { ...state.root, pid: 102 + snapshots.length }];
+      snapshots.push(snapshot);
+      return new Promise(resolve => { releases.push(resolve); });
+    });
+    for (let round = 0; round < 3; round++) {
+      await vi.advanceTimersByTimeAsync(500); expect(capture).toHaveBeenCalledTimes(round + 1);
+      frame(target, `OUTPUT_${round}`); releases[round]!(snapshots[round]); await vi.advanceTimersByTimeAsync(0);
+      expect((backend as any).state.identities).toEqual(snapshots[round]!.identities);
+      expect(JSON.parse(io.state).identities).toEqual(snapshots[round]!.identities);
+      expect((backend as any).identityCaptureDirty).toBe(true);
+    }
+    controlled = false; await vi.advanceTimersByTimeAsync(500);
+    expect(capture).toHaveBeenCalledTimes(4); expect((backend as any).identityCaptureDirty).toBe(false);
+  } finally {
+    controlled = false; releases.forEach((release, index) => release(snapshots[index]));
+    await backend.detach();
+  }
+});
+
 it.each(['capture', 'persist'])('keeps dirty after %s failure and retries both census and persistence', async failure => {
   vi.useFakeTimers();
   const { backend, state } = fixture(), target = controller();
@@ -191,14 +220,19 @@ it('does not let an old capture clear the dirty state of a replacement attachmen
   const { backend, state } = fixture(), first = controller(), replacement = controller();
   let release!: (value: unknown) => void;
   const pending = new Promise(resolve => { release = resolve; });
+  const stale = structuredClone(state);
   try {
     await attach(backend, first);
+    const identities = structuredClone(state.identities);
+    stale.identities = [...identities, { ...state.root, pid: 199 }];
     const capture = vi.spyOn(backend, 'captureOwnedIdentity').mockImplementationOnce(() => pending).mockResolvedValue(state);
     await vi.advanceTimersByTimeAsync(500); expect(capture).toHaveBeenCalledTimes(1);
     await attach(backend, replacement); expect(capture).toHaveBeenCalledTimes(2);
-    release(state); await vi.advanceTimersByTimeAsync(0);
+    release(stale); await vi.advanceTimersByTimeAsync(0);
+    expect((backend as any).state.identities).toEqual(identities);
+    expect(JSON.parse(io.state).identities).toEqual(identities);
     expect((backend as any).identityCaptureDirty).toBe(true);
     await vi.advanceTimersByTimeAsync(500);
     expect(capture).toHaveBeenCalledTimes(3); expect((backend as any).identityCaptureDirty).toBe(false);
-  } finally { release(state); await backend.detach(); }
+  } finally { release(stale); await backend.detach(); }
 });

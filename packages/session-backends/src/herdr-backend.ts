@@ -353,13 +353,13 @@ export class HerdrBackend implements SessionBackend {
                   if (!this.identityCaptureDirty) return;
                   const frameGeneration = this.terminalFrameGeneration;
                   const snapshot = await this.captureOwnedIdentity() as State;
-                  if (this.stream !== child || this.state !== state || generation !== this.lifecycle || this.terminalFrameGeneration !== frameGeneration) return;
+                  if (this.stream !== child || this.state !== state || generation !== this.lifecycle) return;
                   if (!isDeepStrictEqual(this.state.identities, snapshot.identities)) {
                     const identities = this.state.identities;
                     this.state.identities = snapshot.identities;
                     try { this.persist(); } catch (error) { this.state.identities = identities; throw error; }
                   }
-                  this.identityCaptureDirty = false;
+                  if (this.terminalFrameGeneration === frameGeneration) this.identityCaptureDirty = false;
                 } catch { /* Unknown observations never prove exit. */ }
                 finally { polling = false; }
               }, 500); this.executionTimer.unref();
