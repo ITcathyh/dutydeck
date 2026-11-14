@@ -56,10 +56,11 @@ describe('remote access modes', () => {
       expect(response.status).toBe(200);
       const reader = response.body!.getReader();
       expect(new TextDecoder().decode((await reader.read()).value)).toContain(': connected');
-      expect(getToken).toHaveBeenCalledTimes(2);
+      // 每轮初验/复核可以按顺序尝试多个 Cookie，但只读取一次当前 token。
+      expect(getToken).toHaveBeenCalledTimes(1);
 
       await vi.advanceTimersByTimeAsync(5_000);
-      expect(getToken).toHaveBeenCalledTimes(4);
+      expect(getToken).toHaveBeenCalledTimes(2);
       runtime.emit({ sequence: 1, type: 'test', value: 'still-connected' });
       const event = await reader.read();
       expect(event.done).toBe(false);
@@ -67,7 +68,7 @@ describe('remote access modes', () => {
 
       token = 'rotated-token';
       await vi.advanceTimersByTimeAsync(5_000);
-      expect(getToken).toHaveBeenCalledTimes(6);
+      expect(getToken).toHaveBeenCalledTimes(3);
       const disconnected = await reader.read().then(result => result.done === true, () => true);
       expect(disconnected).toBe(true);
     } finally {
