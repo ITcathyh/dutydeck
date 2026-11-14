@@ -207,6 +207,7 @@ const fenced = (value: unknown) => {
 
 const truncate = (value: unknown, limit: number) => {
   const text = (typeof value === 'string' ? value : JSON.stringify(value, null, 2) ?? '').trim();
+  if (text.length <= limit) return text;
   const characters = Array.from(text);
   if (characters.length <= limit) return text;
   return `${characters.slice(0, limit).join('').trimEnd()}\n…（内容过长，已截断）`;
@@ -1292,6 +1293,15 @@ export async function larkCancellationActorLabel(
     const name = (await service.getContactUser(id, 'open_id', { sharedCircuit: false }))?.name?.trim();
     return name ? `由 ${name} 取消` : undefined;
   } catch { return undefined; }
+}
+
+export async function larkCancellationStatusLabel(
+  service: Pick<LarkCardService, 'getContactUser'>, actorId: string | undefined,
+  frozenInput: { statusLabel?: unknown } | undefined
+): Promise<string | undefined> {
+  if (!actorId) return undefined;
+  if (frozenInput) return typeof frozenInput.statusLabel === 'string' ? frozenInput.statusLabel : undefined;
+  return larkCancellationActorLabel(service, actorId);
 }
 
 export function renderLarkResultTextElements(text: string): LarkCardElement[] {

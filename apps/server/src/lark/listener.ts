@@ -1,4 +1,5 @@
 import type { ReplyPolish } from './reply-polish.js';
+import { withTimeout } from '@dutydeck/shared';
 import { Agent } from 'node:https';
 import type { Socket } from 'node:net';
 import type { ConnectionOptions } from 'node:tls';
@@ -134,12 +135,8 @@ function createForceCloseTransport() {
       socket.once('close', resolve);
       socket.destroy();
     }))).then(() => undefined);
-    let timer: NodeJS.Timeout | undefined;
-    const confirmationTimeout = new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => reject(new Error('Lark WebSocket transport close was not confirmed within 5000ms')), forceCloseConfirmationTimeoutMs);
-      timer.unref?.();
-    });
-    closing = Promise.race([allClosed, confirmationTimeout]).finally(() => { if (timer) clearTimeout(timer); });
+    closing = withTimeout(allClosed, forceCloseConfirmationTimeoutMs,
+      () => new Error('Lark WebSocket transport close was not confirmed within 5000ms'));
     return closing;
   };
   return { agent, close };

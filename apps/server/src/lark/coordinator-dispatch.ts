@@ -37,7 +37,7 @@ import {
   hasUnresolvedToolCalls,
   isLarkLauncherVersionChanged,
   LARK_LAUNCHER_RECOVERY_NOTE,
-  larkCancellationActorLabel,
+  larkCancellationStatusLabel,
   renderLarkProcessElements,
   renderLarkResultElements,
   type LarkCardElement
@@ -1514,9 +1514,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         const runtimeTask = task.sessionId && task.runtimeTaskId
           ? (await this.runtime.getTasks?.(task.sessionId))?.find(item => item.id === task.runtimeTaskId) : undefined;
         const cancellationStatusLabel = (state === 'interrupted' || state === 'cancelled') && runtimeTask?.interruptedByActor
-          ? task.finalCardInput
-            ? typeof task.finalCardInput.statusLabel === 'string' ? task.finalCardInput.statusLabel : undefined
-            : await larkCancellationActorLabel(this.service, runtimeTask.interruptedByActor)
+          ? await larkCancellationStatusLabel(this.service, runtimeTask.interruptedByActor, task.finalCardInput)
           : undefined;
         const finalContext = task.sessionId ? explicitFinalContext(
           { externalId: task.id, sessionId: task.sessionId }, {

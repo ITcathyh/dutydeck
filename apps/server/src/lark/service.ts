@@ -39,7 +39,7 @@ export type LarkReceiveIdType = (typeof larkReceiveIdTypes)[number];
 export type LarkWriteGuard = () => void | Promise<void>;
 
 /** 飞书消息 uuid 最多 50 字符；对完整长键取摘要，保留重试身份和键末尾的动作差异。 */
-function larkMessageUuid(key: string): string {
+function larkMessageUuid(key: string = randomUUID()): string {
   return key.length <= 50 ? key : `dd_${createHash('sha256').update(key).digest('hex').slice(0, 40)}`;
 }
 
@@ -1271,8 +1271,7 @@ export class LarkCardService {
   }
 
   async send(input: LarkSendInput): Promise<LarkMessageResult> {
-    const explicitKey = input.idempotencyKey?.trim();
-    const uuid = explicitKey ? larkMessageUuid(explicitKey) : randomUUID();
+    const uuid = larkMessageUuid(input.idempotencyKey?.trim() || undefined);
     return this.withRequestBudget(async () => {
       if (input.chatId && input.receiveId) throw new LarkServiceError('CONFLICTING_RECIPIENTS', 'chatId and receiveId cannot be used together', 400);
       const chatId = input.chatId?.trim();
@@ -1294,8 +1293,7 @@ export class LarkCardService {
   }
 
   async reply(input: LarkReplyInput): Promise<LarkMessageResult> {
-    const explicitKey = input.idempotencyKey?.trim();
-    const uuid = explicitKey ? larkMessageUuid(explicitKey) : randomUUID();
+    const uuid = larkMessageUuid(input.idempotencyKey?.trim() || undefined);
     return this.withRequestBudget(async () => {
       const messageId = required(input.messageId, 'messageId');
       const cardInput = await this.cardInput(input);
@@ -1524,7 +1522,7 @@ export class LarkCardService {
   }
 
   async sendText(input: LarkSendTextInput): Promise<LarkMessageResult> {
-    const uuid = input.idempotencyKey ? larkMessageUuid(input.idempotencyKey) : randomUUID();
+    const uuid = larkMessageUuid(input.idempotencyKey || undefined);
     const chatId = required(input.chatId, 'chatId');
     if (!chatId.startsWith('oc_')) throw new LarkServiceError('INVALID_CHAT_ID', 'chatId must start with oc_', 400);
     const payload = await this.request('/open-apis/im/v1/messages?receive_id_type=chat_id', {
@@ -1536,7 +1534,7 @@ export class LarkCardService {
   }
 
   async replyText(input: LarkReplyTextInput): Promise<LarkMessageResult> {
-    const uuid = input.idempotencyKey ? larkMessageUuid(input.idempotencyKey) : randomUUID();
+    const uuid = larkMessageUuid(input.idempotencyKey || undefined);
     const messageId = required(input.messageId, 'messageId');
     const payload = await this.request(`/open-apis/im/v1/messages/${encodeURIComponent(messageId)}/reply`, {
       retry: input.retry, beforeSend: input.beforeSend, body: {

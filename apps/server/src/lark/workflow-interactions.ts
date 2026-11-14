@@ -1063,14 +1063,7 @@ export class LarkWorkflowInteractions {
             elements.push(...fullTextParts);
           } else {
             // 只有问答全文确实放不下时上传；审批卡不经过这里，避免扩大命令/秘密的披露范围。
-            const attachment = await sendLarkFile(this.service, {
-              chatId: context.event.chatId, replyMessageId: larkMessageAnchor(context.event),
-              replyInThread: Boolean(context.event.threadId), allowReplyFallback: false
-            }, {
-              data: Buffer.from(askFullText(question, labels), 'utf8'),
-              filename: `question-${record.id}.txt`, idempotencyKey: `workflow_${record.id}_full`
-            }, { warn: () => undefined }, this.store, async () => { if (!await this.live(record)) throw stale(); });
-            if (!attachment.messageId) throw new Error('Question attachment delivery has no receipt');
+            await this.deliverAskFullText(record, context.event, question, labels);
             const notice: LarkCardElement = { tag: 'markdown', content: askFullTextNotice };
             let visible = labels.length;
             const excerpt = () => [questionElement(kind, question), ...(labels.length ? [choicesElement(visible)] : []), notice];
@@ -1215,29 +1208,32 @@ export class LarkWorkflowInteractions {
       ...(withFullTextNotice ? [{ tag: 'markdown', content: askFullTextNotice } as LarkCardElement] : []),
       ...(record.multiple ? [multipleChoiceForm(record, choices)] : singleChoiceElements(record, choices))];
   }
+  private async deliverAskFullText(record: LarkInteraction, event: LarkMessageEvent, question: string, labels: string[]) {
+    const attachment = await sendLarkFile(this.service, {
+      chatId: event.chatId, replyMessageId: larkMessageAnchor(event),
+      replyInThread: Boolean(event.threadId), allowReplyFallback: false
+    }, {
+      data: Buffer.from(askFullText(question, labels), 'utf8'),
+      filename: `question-${record.id}.txt`, idempotencyKey: `workflow_${record.id}_full`
+    }, { warn: () => undefined }, this.store, async () => { if (!await this.live(record)) throw stale(); });
+    if (!attachment.messageId) throw new Error('Question attachment delivery has no receipt');
+  }
   /** 长说明只在卡上节选；提交值和全文保持原样，重试沿用持久化的同一份降级元素。 */
   private async degradeConfirmation(record: LarkInteraction) {
     const full = this.confirmationElements(record);
     if (this.withinAskCardBudget(full)) return full;
     const labels = askChoiceLabels(record.durable!.choices);
-    const attachment = await sendLarkFile(this.service, {
-      chatId: record.event.chatId, replyMessageId: larkMessageAnchor(record.event),
-      replyInThread: Boolean(record.event.threadId), allowReplyFallback: false
-    }, {
-      data: Buffer.from(askFullText(record.question, labels), 'utf8'),
-      filename: `question-${record.id}.txt`, idempotencyKey: `workflow_${record.id}_full`
-    }, { warn: () => undefined }, this.store, async () => { if (!await this.live(record)) throw stale(); });
-    if (!attachment.messageId) throw new Error('Question attachment delivery has no receipt');
+    await this.deliverAskFullText(record, record.event, record.question, labels);
     const choices = record.durable!.choices;
     const withoutDescriptions = choices.map(choice => ({ ...choice, description: undefined }));
     let fitted = this.confirmationElements(record, withoutDescriptions, true);
     if (!this.withinAskCardBudget(fitted)) throw new LarkServiceError('LARK_CONFIRMATION_TOO_LARGE', '问题和选项过长，请拆成一个较短的问题。', 400);
-    const lengths = choices.map(choice => Array.from(choice.description ?? '').length);
-    let low = 0, high = Math.max(...lengths);
+    const descriptions = choices.map(choice => Array.from(choice.description ?? ''));
+    let low = 0, high = Math.max(...descriptions.map(characters => characters.length));
     while (low < high) {
       const middle = Math.ceil((low + high) / 2);
-      const excerpt = choices.map(choice => {
-        const characters = Array.from(choice.description ?? '');
+      const excerpt = choices.map((choice, index) => {
+        const characters = descriptions[index]!;
         return { ...choice, description: characters.length > middle ? `${characters.slice(0, middle).join('')}…` : choice.description };
       });
       const candidate = this.confirmationElements(record, excerpt, true);

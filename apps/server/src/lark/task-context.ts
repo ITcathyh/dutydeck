@@ -185,8 +185,7 @@ const mergeForwardChildren = (messageId: string, items: LarkChatMessage[]) => {
   return matching;
 };
 
-const mergeForwardAncestorIds = (message: LarkChatMessage, child: LarkChatMessage, items: LarkChatMessage[]) => {
-  const verifiedById = new Map(items.map(item => [item.messageId, item]));
+const mergeForwardAncestorIds = (message: LarkChatMessage, child: LarkChatMessage, verifiedById: ReadonlyMap<string, LarkChatMessage>) => {
   const ancestors: string[] = [];
   const seen = new Set([child.messageId]);
   let ancestorId: string | undefined = child.upperMessageId ?? message.messageId;
@@ -280,9 +279,12 @@ async function parseVerifiedMessage(
   // source message ID. No child is fetched here, so nested expansion remains
   // unavailable unless that child is independently authorized.
   if (message.messageType === 'merge_forward' && fetchedItems) {
+    const verifiedById = new Map(fetchedItems.map(item => [item.messageId, item]));
     for (const child of mergeForwardChildren(message.messageId, fetchedItems)) {
       const childParsed = await parseLarkMessageContent(child.messageType, child.rawContent, { messageId: child.messageId });
-      const ancestorMessageIds = mergeForwardAncestorIds(message, child, fetchedItems);
+      const ancestorMessageIds = childParsed.resources.length
+        ? mergeForwardAncestorIds(message, child, verifiedById)
+        : [];
       resources.push(...childParsed.resources.map(resource => ({
         ...resource, sourceMessageId: child.messageId,
         ...(ancestorMessageIds.length ? { ancestorMessageIds } : {})

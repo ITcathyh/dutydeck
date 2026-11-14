@@ -19,7 +19,7 @@ import {
   isLarkCardContentRejected,
   isLarkMessageRateLimit,
   isLarkMessageUnupdatable,
-  larkCancellationActorLabel,
+  larkCancellationStatusLabel,
   larkRateLimitBackoffMs,
   patchRejectedCardDelta,
   renderLarkProcessElements,
@@ -486,9 +486,7 @@ export async function performLarkCardReconcile(input: {
             ...(!receiptOnly && completed && input.resultElements ? await input.resultElements(mapping, persisted, '', { finalOutput, groupMention: Boolean(mention) }) : []),
             ...(mention ? [{ tag: 'markdown', element_id: 'group_mention', content: mention }] : [])];
           const cancellationStatusLabel = !receiptOnly && (state === 'interrupted' || state === 'cancelled') && runtimeTask.interruptedByActor
-            ? persisted.final_card_input
-              ? typeof persisted.final_card_input.statusLabel === 'string' ? persisted.final_card_input.statusLabel : undefined
-              : await larkCancellationActorLabel(service, runtimeTask.interruptedByActor)
+            ? await larkCancellationStatusLabel(service, runtimeTask.interruptedByActor, persisted.final_card_input)
             : undefined;
           finalCardInput = {
             ...cardContext, permissionMode: larkPermissionMode(config), state, cardKind: 'result',

@@ -476,7 +476,7 @@ export async function bindLarkApp(options: LarkBindOptions): Promise<LarkBindRes
   }
 
   const outcome = classify(steps, versionId);
-  const result: LarkBindResult = {
+  return {
     outcome,
     appId,
     steps,
@@ -488,7 +488,6 @@ export async function bindLarkApp(options: LarkBindOptions): Promise<LarkBindRes
       : `部分步骤未能确认，请到管理台核对后按需重跑：${resumeCommand(appId, false)}`,
     warnings,
   };
-  return result;
 }
 
 /** 建立会话；只在交互且非 json 时渲染二维码。 */
