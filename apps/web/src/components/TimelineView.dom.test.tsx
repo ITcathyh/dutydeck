@@ -5,6 +5,7 @@ import { api, type HistoryTurnPlace, type HistoryTurnSummary } from '../api';
 import { BACKGROUND_FOLLOWUP } from '@dutydeck/shared';
 import { buildTimeline, buildTimelineSections, hasAnswerSince, type TimelineEvent, type TimelineSection } from '../timeline';
 import { TimelineView } from './TimelineView';
+import * as shareView from '../share-view';
 
 const event: TimelineEvent = { id: 'e1', sequence: 1, type: 'text', timestamp: '', data: { role: 'assistant', text: '当前结果' } };
 const sections: TimelineSection[] = [{ kind: 'event', event, final: true }];
@@ -140,6 +141,7 @@ it('updates an existing turn and a new live turn without mutating retained secti
 });
 
 it('lays out every completed turn from its place, reads earlier summaries by page and lists turns only while jumping', async () => {
+  const momentWidth = vi.spyOn(shareView, 'turnMomentWidth');
   const summary = (turn: number): HistoryTurnSummary => ({ id: `p${turn}`, taskId: 't', firstSequence: 2 * turn - 1, lastSequence: 2 * turn, timestamp: '', status: 'completed',
     prompt: { text: `prompt ${turn}`, truncated: false }, output: { text: `answer ${turn}`, truncated: false }, toolCount: 0, artifactReferences: [] });
   const places: HistoryTurnPlace[] = Array.from({ length: 120 }, (_, index) => [`p${index + 1}`, 2 * index + 1, 2 * index + 2, 't', `prompt ${index + 1}`]);
@@ -151,6 +153,7 @@ it('lays out every completed turn from its place, reads earlier summaries by pag
   expect(view.container.querySelector('[data-history-summary="p120"]')).toBeTruthy();
   expect(screen.getByText('已加载 120 轮摘要、0 条原始记录')).toBeTruthy();
   expect(pages).not.toHaveBeenCalled();
+  expect(momentWidth).not.toHaveBeenCalled();
   const container = view.container.querySelector('[data-timeline-scroll]') as HTMLElement;
   Object.defineProperties(container, { scrollHeight: { configurable: true, value: 120 * 180 }, clientHeight: { value: 600 } });
   container.scrollTop = 0; fireEvent.scroll(container);

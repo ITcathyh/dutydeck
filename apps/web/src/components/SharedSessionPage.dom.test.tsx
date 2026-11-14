@@ -8,6 +8,7 @@ import { SharedSessionPage } from './SharedSessionPage';
 import { ToolCard } from './ToolCard';
 import { getTimelineReadingState } from '../timeline-reading-state';
 import { useSessionStream } from '../useSessionStream';
+import * as shareView from '../share-view';
 
 vi.mock('../useSessionStream', () => ({ useSessionStream: vi.fn() }));
 
@@ -270,6 +271,7 @@ describe('分享页结论呈现', () => {
   });
 
   it('多轮：更早的轮次按时间排在当前轮上方并收成一行，提问与标题不同时在结论卡上方引用', async () => {
+    const momentWidth = vi.spyOn(shareView, 'turnMomentWidth');
     vi.spyOn(api, 'session').mockResolvedValue({ ...session, state: 'idle' });
     vi.spyOn(api, 'tasks').mockResolvedValue([completedTask('a', '第一问', '2026-11-04T06:00:00.000Z'), completedTask('b', '第二问', '2026-11-04T07:00:00.000Z')]);
     vi.spyOn(api, 'events').mockResolvedValue([]);
@@ -279,6 +281,7 @@ describe('分享页结论呈现', () => {
     ], highWaterMark: 20, liveAfter: 20 });
     renderPage();
     const latest = await screen.findByText('第二轮结论');
+    expect(momentWidth).toHaveBeenCalledTimes(1);
     expect(screen.getByRole('heading', { name: '第一问' })).toBeTruthy();
     // 只有一轮更早轮次时直接显示那一行：时间、提问摘要和状态点。
     const earlier = screen.getByRole('button', { name: /第一问/ });
@@ -293,6 +296,7 @@ describe('分享页结论呈现', () => {
   });
 
   it('两轮及以上的更早轮次默认收成「更早 N 轮」一行，点开是紧凑行，再点一行展开结论卡', async () => {
+    const momentWidth = vi.spyOn(shareView, 'turnMomentWidth');
     vi.spyOn(api, 'session').mockResolvedValue({ ...session, state: 'idle' });
     vi.spyOn(api, 'tasks').mockResolvedValue(['m1', 'm2', 'm3'].map((id, index) => completedTask(id, `第${index + 1}问`, `2026-11-04T0${6 + index}:00:00.000Z`)));
     vi.spyOn(api, 'events').mockResolvedValue([]);
@@ -302,6 +306,7 @@ describe('分享页结论呈现', () => {
     })), highWaterMark: 30, liveAfter: 30 });
     const { container } = renderPage();
     await screen.findByText('第3轮结论');
+    expect(momentWidth).not.toHaveBeenCalled();
     const local = new Date('2026-11-04T07:00:00.000Z');
     const head = screen.getByRole('button', { name: new RegExp(`更早 2 轮 · 最近 (?:\\d+ 年 )?(?:\\d+ 月 \\d+ 日 )?${String(local.getHours()).padStart(2, '0')}:00`) });
     expect(head.getAttribute('aria-expanded')).toBe('false');
@@ -314,6 +319,7 @@ describe('分享页结论呈现', () => {
     expect(head.closest('[data-timeline-event]')).toBe(anchor);
     expect(head.getAttribute('aria-expanded')).toBe('true');
     expect(container.querySelectorAll('.share-earlier-line')).toHaveLength(2);
+    expect(momentWidth).toHaveBeenCalledTimes(2);
     fireEvent.click(screen.getByRole('button', { name: /第2问/ }));
     expect(await screen.findByText('第2轮结论')).toBeTruthy();
     expect(screen.queryByText('第1轮结论')).toBeNull();
