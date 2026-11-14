@@ -296,17 +296,20 @@ describe('dutydeck deploy', () => {
     return JSON.parse(readFileSync(join(deployments, latest, 'manifest.json'), 'utf8'));
   };
 
-  it('激活前拒绝缺失的延迟加载 chunk，current 保持指向旧版本', async () => {
+  it('激活前拒绝缺失的动态或 minified 静态 chunk，current 保持指向旧版本', async () => {
     const initial = await runDeploy({ source, runtime: bot, restart: false }, deps());
     expect(initial, initial.error).toMatchObject({ ok: true, status: 'staged' });
     const previous = realpathSync(join(releases, 'current'));
     nextCommit(source);
     const cli = join(source, 'apps/server/dist/cli.js');
-    writeFileSync(cli, `${readFileSync(cli, 'utf8')}\nif (process.argv.includes('--load-service')) await import('./chunk-deferred.js');\n`);
-    write(join(source, 'apps/server/dist/chunk-deferred.js'), 'export const deferred = true;\n');
-    rmSync(join(source, 'apps/server/dist/chunk-deferred.js'));
+    writeFileSync(cli, `${readFileSync(cli, 'utf8')}\nif (process.argv.includes('--load-service')) await import('./chunk-deferred.js');\nimport{deferred}from"./chunk-static-missing.js";\n`);
+    for (const name of ['chunk-deferred.js', 'chunk-static-missing.js']) {
+      write(join(source, 'apps/server/dist', name), 'export const deferred = true;\n');
+      rmSync(join(source, 'apps/server/dist', name));
+    }
     const result = await runDeploy({ source, runtime: bot, restart: false }, deps());
     expect(result).toMatchObject({ ok: false, status: 'failed', error: expect.stringContaining('chunk-deferred.js') });
+    expect(result.error).toContain('chunk-static-missing.js');
     expect(result.error).toContain('相对 import 闭包不完整');
     expect(realpathSync(join(releases, 'current'))).toBe(previous);
     expect(existsSync(result.release!)).toBe(false);

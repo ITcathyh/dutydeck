@@ -120,6 +120,8 @@ const mainResult = await build({
   platform: 'node',
   target: 'node22',
   sourcemap: false,
+  minify: true,
+  keepNames: true,
   metafile: true,
   plugins: [...workspacePlugins, larkRequirePlugin, lazyAcpSdkPlugin, externalPackages]
 });
@@ -153,7 +155,8 @@ writeFileSync(resolve(serverRoot, 'dist', larkShim), `import { createRequire } f
 await build({
   entryPoints: [resolve(serverRoot, 'src/plugins/activation-worker.ts')],
   outfile: resolve(serverRoot, 'dist/assets/plugin-validation/cli.js'),
-  bundle: true, format: 'esm', platform: 'node', target: 'node22', plugins: [...workspacePlugins, lazyAcpSdkPlugin, externalPackages]
+  bundle: true, format: 'esm', platform: 'node', target: 'node22', sourcemap: false, minify: true, keepNames: true,
+  plugins: [...workspacePlugins, lazyAcpSdkPlugin, externalPackages]
 });
 // Pane-resident OSC handshake relay must survive bundling and npm packaging.
 await build({
@@ -163,6 +166,9 @@ await build({
   format: 'esm',
   platform: 'node',
   target: 'node22',
+  sourcemap: false,
+  minify: true,
+  keepNames: true,
   packages: 'external',
 });
 // Bundle the analyzer and its dependencies so it can run with an empty PATH
@@ -175,6 +181,8 @@ await build({
   platform: 'node',
   target: 'node22',
   sourcemap: false,
+  minify: true,
+  keepNames: true,
   plugins: workspacePlugins
 });
 // Each process keeps its bundle's source in memory; ASCII-only source is stored at one byte per character.

@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 
-const staticImport = /\b(?:import|export)\s+(?:[^'"]*?\s+from\s*)?['"]([^'"]+)['"]/g;
+const staticImport = /\b(?:import(?!\s*[.(])|export(?!\s*\.))\s*(?:[^'"]*?\s*from\s*)?['"]([^'"]+)['"]/g;
 const dynamicImport = /\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
 
 /** Return unresolved relative static or dynamic imports, including deferred chunks. */

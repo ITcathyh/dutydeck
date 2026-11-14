@@ -66,6 +66,13 @@ it('packs every deferred chunk and resource without acpx or drizzle as productio
     const cli = join(pkg, 'dist/cli.js');
     expect(missingRelativeImports(cli)).toEqual([]);
     const source = await readFile(cli, 'utf8');
+    expect(source).toContain('"TaskCliError")');
+    const staticChunk = /\bfrom\s*['"](\.\/chunk-[^'"]+)['"]/.exec(source)?.[1];
+    expect(staticChunk).toBeDefined();
+    const staticPath = resolve(dirname(cli), staticChunk!);
+    await rename(staticPath, `${staticPath}.missing`);
+    try { expect(missingRelativeImports(cli).join('\n')).toContain(staticPath); }
+    finally { await rename(`${staticPath}.missing`, staticPath); }
     const deferred = /\bimport\s*\(\s*['"](\.\/chunk-[^'"]+)['"]\s*\)/.exec(source)?.[1];
     expect(deferred).toBeDefined();
     const deferredPath = resolve(dirname(cli), deferred!);
@@ -100,15 +107,19 @@ it('packs every deferred chunk and resource without acpx or drizzle as productio
     const version = await execFileAsync(process.execPath, [cli, '--version'], { cwd: directory, env });
     expect(version.stdout.trim()).toBe(metadata.version);
 
-    const acpChunk = [...sources].find(([path, code]) => path.includes('chunk-') && code.includes('var AcpxAdapter = class'))?.[0];
-    const storageChunk = [...sources].find(([path, code]) => path.includes('chunk-') && code.includes('function createRepositories(filename'))?.[0];
-    const builtinChunk = [...sources].find(([path, code]) => path.includes('chunk-') && code.includes('function defaultBuiltinPluginRoot()'))?.[0];
-    const insightEngineChunk = [...sources].find(([path, code]) => path.includes('chunk-') && code.includes('async function resolveSessionInsightEngine(options = {})'))?.[0];
-    const bouncingChunk = [...sources].find(([, code]) => code.includes('new URL("./assets/dutydeck-bouncing-ball.webp", import.meta.url)'))?.[0];
+    const acpChunk = [...sources].find(([, code]) => code.includes('"AcpxAdapter")'))?.[0];
+    const storageChunk = [...sources].find(([, code]) => code.includes('"createRepositories")'))?.[0];
+    const builtinChunk = [...sources].find(([, code]) => code.includes('"defaultBuiltinPluginRoot")'))?.[0];
+    const insightEngineChunk = [...sources].find(([, code]) => code.includes('"resolveSessionInsightEngine")'))?.[0];
+    const runtimeChunk = [...sources].find(([, code]) => code.includes('"RuntimeError")'))?.[0];
+    const agentErrorChunk = [...sources].find(([, code]) => code.includes('"AgentCliError")'))?.[0];
+    const bouncingChunk = [...sources].find(([, code]) => code.includes('"./assets/dutydeck-bouncing-ball.webp"') && code.includes('import.meta.url'))?.[0];
     expect(acpChunk).toBeDefined();
     expect(storageChunk).toBeDefined();
     expect(builtinChunk).toBeDefined();
     expect(insightEngineChunk).toBeDefined();
+    expect(runtimeChunk).toBeDefined();
+    expect(agentErrorChunk).toBeDefined();
     expect(bouncingChunk).toBeDefined();
     expect((await readFile(resolve(dirname(bouncingChunk!), 'assets/dutydeck-bouncing-ball.webp'))).byteLength).toBeGreaterThan(0);
     const insightEntry = resolve(dirname(insightEngineChunk!), 'assets/session-insight/cli.js');
@@ -119,9 +130,18 @@ it('packs every deferred chunk and resource without acpx or drizzle as productio
     await writeFile(join(directory, 'probe-startup.mjs'), `
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { AcpxAdapter, listAcpxBuiltinAgents, prepareAcpxAgentLaunch } from ${JSON.stringify(pathToFileURL(acpChunk!).href)};
-import { createRepositories } from ${JSON.stringify(pathToFileURL(storageChunk!).href)};
-import { listBuiltinPlugins } from ${JSON.stringify(pathToFileURL(builtinChunk!).href)};
+import * as acpExports from ${JSON.stringify(pathToFileURL(acpChunk!).href)};
+import * as storageExports from ${JSON.stringify(pathToFileURL(storageChunk!).href)};
+import * as builtinExports from ${JSON.stringify(pathToFileURL(builtinChunk!).href)};
+import * as runtimeExports from ${JSON.stringify(pathToFileURL(runtimeChunk!).href)};
+import * as agentErrorExports from ${JSON.stringify(pathToFileURL(agentErrorChunk!).href)};
+const named=(module,name)=>{const value=Object.values(module).find(candidate=>typeof candidate==='function'&&candidate.name===name);assert.ok(value,name);return value};
+const AcpxAdapter=named(acpExports,'AcpxAdapter'),listAcpxBuiltinAgents=named(acpExports,'listAcpxBuiltinAgents'),prepareAcpxAgentLaunch=named(acpExports,'prepareAcpxAgentLaunch');
+const createRepositories=named(storageExports,'createRepositories'),listBuiltinPlugins=named(builtinExports,'listBuiltinPlugins');
+const RuntimeError=named(runtimeExports,'RuntimeError'),LarkAppCreationError=named(builtinExports,'LarkAppCreationError'),AgentCliError=named(agentErrorExports,'AgentCliError');
+assert.equal(new RuntimeError('PROBE','probe').name,'RuntimeError');
+assert.equal(LarkAppCreationError.name,'LarkAppCreationError');
+assert.equal(AgentCliError.name,'AgentCliError');
 const config = { id:'pack-startup',name:'Pack startup',command:process.execPath,args:[new URL('./agent.mjs',import.meta.url).pathname],protocol:'acp',cwd:process.cwd(),env:{},permissionMode:'deny-all',timeout:10,capabilities:{pause:false,resume:true},builtin:false };
 assert.ok(listBuiltinPlugins(${JSON.stringify(builtinRoot)}).length > 0);
 for (const agent of listAcpxBuiltinAgents()) for (const arg of agent.argv) if (arg.endsWith('.mjs')) assert.ok(existsSync(arg),arg);
