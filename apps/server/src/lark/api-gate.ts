@@ -70,6 +70,8 @@ export interface LarkGateOptions {
   onFailure?: (error: unknown) => void;
   /** Local checks are outside the transport catch: they neither retry nor affect the circuit. */
   beforeAttempt?: () => void | Promise<void>;
+  /** 单条装饰性查询可豁免共享熔断检查与计数；限流、重试和退避保持不变。 */
+  sharedCircuit?: false;
 }
 
 /**
@@ -569,23 +571,24 @@ export async function executeWithLarkGate<T>(
   const config = resolveLarkGateConfig(options?.env);
   const log = options?.log ?? moduleLog;
   const signal = options?.signal;
+  const sharedCircuit = options?.sharedCircuit !== false;
   const circuit = getCircuit(appId, Date.now());
   const owner = Symbol(op);
   if (signal?.aborted) throw gateAbortError(signal);
-  if (circuit.status === 'half-open'
-    || circuit.status === 'open' && Date.now() - circuit.openedAtMs < config.circuitProbeIntervalMs) {
+  if (sharedCircuit && (circuit.status === 'half-open'
+    || circuit.status === 'open' && Date.now() - circuit.openedAtMs < config.circuitProbeIntervalMs)) {
     throw new LarkCircuitOpenError(appId, circuit.openedAtMs);
   }
-  if (circuit.status === 'open') {
+  if (sharedCircuit && circuit.status === 'open') {
     circuit.status = 'half-open';
     circuit.probe = owner;
     log.info({ appId, op }, '飞书 OpenAPI 熔断器进入半开，放行一次探测');
   }
   const generation = circuit.generation;
-  const current = () => circuit.generation === generation
+  const current = () => !sharedCircuit || circuit.generation === generation
     && (circuit.status === 'closed' || circuit.status === 'half-open' && circuit.probe === owner);
   const succeeded = () => {
-    if (!current()) return;
+    if (!sharedCircuit || !current()) return;
     circuit.consecutiveFailures = 0;
     if (circuit.probe === owner) {
       circuit.status = 'closed';
@@ -621,13 +624,13 @@ export async function executeWithLarkGate<T>(
           await sleep(backoffMs, signal);
           continue;
         }
-        if (retryable && current() && larkBusinessCode(error) !== LARK_MESSAGE_SENDING_CODE) recordTransientFailure(circuit, appId, op, config, log, Date.now());
+        if (sharedCircuit && retryable && current() && larkBusinessCode(error) !== LARK_MESSAGE_SENDING_CODE) recordTransientFailure(circuit, appId, op, config, log, Date.now());
         throw error;
       }
     }
   } finally {
     // Cancellation or a deterministic error releases the probe without claiming recovery.
-    if (circuit.generation === generation && circuit.probe === owner) {
+    if (sharedCircuit && circuit.generation === generation && circuit.probe === owner) {
       circuit.probe = undefined;
       circuit.status = 'open';
       circuit.generation++;

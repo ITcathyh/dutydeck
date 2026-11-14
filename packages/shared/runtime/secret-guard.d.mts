@@ -1,5 +1,6 @@
 export interface SecretGuardFinding { label: string; match: string }
 export const secretGuardToolMatcher: string;
+export function probeClaudeHookFailureBlock(options: { command: string; env: Record<string, string>; cwd?: string }): Promise<boolean>;
 export function protectedPathFinding(path: unknown, options?: { cwd?: string; home?: string }): SecretGuardFinding | undefined;
 export function secretGuardFinding(event: unknown, options?: { home?: string }): SecretGuardFinding | undefined;
 export function highRiskBlockedReason(reason: string): string;

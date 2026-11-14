@@ -14,6 +14,7 @@ import type { EventWindow } from './event-history';
 import { shortcutDefinitions } from './useKeyboardShortcuts';
 import { toastStore } from './useToasts';
 import { EXPERIMENTAL_STORAGE_KEY, writeExperimental } from './experimental';
+import { SEND_OPERATIONS_STORAGE_KEY } from './send-operations';
 
 vi.mock('./useSessionStream', () => ({ useSessionStream: () => ({ transport: 'open', content: 'ready' }) }));
 vi.mock('./components/TerminalView', () => ({ TerminalView: ({ sessionId }: { sessionId: string }) => <div>Terminal {sessionId}</div> }));
@@ -67,6 +68,7 @@ afterEach(() => {
   Object.keys(window.localStorage).filter(key => key.startsWith('dutydeck:view:')).forEach(key => window.localStorage.removeItem(key));
   toastStore.clear();
   window.localStorage.removeItem(EXPERIMENTAL_STORAGE_KEY);
+  window.sessionStorage.removeItem(SEND_OPERATIONS_STORAGE_KEY);
   window.history.replaceState(null, '', '/');
 });
 
@@ -696,7 +698,7 @@ describe('App 搜索、快捷键与通知接线', () => {
     expect(screen.getByText('恢复会把这条指令重新排到队列末尾，不会回到原来的位置。')).toBeTruthy();
 
     await user.click(screen.getByRole('button', { name: '重新加入队尾' }));
-    await waitFor(() => expect(send).toHaveBeenCalledWith('s1', '顺手补一个回归测试', 'queue'));
+    await waitFor(() => expect(send).toHaveBeenCalledWith('s1', '顺手补一个回归测试', 'queue', undefined, expect.stringMatching(/^[0-9a-f-]{36}$/)));
   });
 
   it('外观选择持久化到 localStorage，并写入 data-theme', async () => {
@@ -1429,7 +1431,7 @@ describe('App pending composer mutations', () => {
     const input = () => screen.getByRole('textbox', { name: '消息' }) as HTMLTextAreaElement;
     fireEvent.change(input(), { target: { value: '  first instruction  ' } });
     await userEvent.click(await screen.findByRole('button', { name: /^(发送消息|加入队列|立即插话|停止当前执行并发送)$/ }));
-    await waitFor(() => expect(send).toHaveBeenCalledWith('s1', '/file /tmp/first.ts\n\nfirst instruction', 'queue', []));
+    await waitFor(() => expect(send).toHaveBeenCalledWith('s1', '/file /tmp/first.ts\n\nfirst instruction', 'queue', [], expect.any(String)));
     if (change === 'text') fireEvent.change(input(), { target: { value: 'second unsent draft' } });
     if (change === 'references') await userEvent.click(screen.getByRole('button', { name: '移除引用 first.ts' }));
     if (change === 'new references') {
@@ -1448,6 +1450,22 @@ describe('App pending composer mutations', () => {
     await waitFor(() => expect(input().value).toBe(change === 'unchanged' ? '' : change === 'text' ? 'second unsent draft' : change === 'session' ? 'other session draft' : '  first instruction  '));
     expect(Boolean(screen.queryByRole('button', { name: '移除引用 first.ts' }))).toBe(change === 'text' || change === 'failure' || change === 'new references');
     expect(Boolean(screen.queryByRole('button', { name: '移除引用 second.ts' }))).toBe(change === 'session' || change === 'new references');
+  });
+
+  it('explains why retry cannot submit after the draft is emptied', async () => {
+    setup();
+    const send = vi.spyOn(api, 'send').mockRejectedValue(new Error('network unavailable'));
+    renderApp();
+    const input = await screen.findByRole('textbox', { name: '消息' });
+    fireEvent.change(input, { target: { value: 'retry with an empty draft later' } });
+    await userEvent.click(await screen.findByRole('button', { name: '加入队列' }));
+    await screen.findByText(/发送结果未知：network unavailable/);
+    expect(send).toHaveBeenCalledTimes(1);
+
+    fireEvent.change(input, { target: { value: '' } });
+    await userEvent.click(screen.getByRole('button', { name: '重试' }));
+    expect(await screen.findByText('请先填写消息或添加引用，再重试发送。')).toBeTruthy();
+    expect(send).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -1999,7 +2017,7 @@ describe('App plan creation channels', () => {
     expect(readComposerDraft(key).planFirst).toBe(false);
     expect((screen.getByRole('textbox', { name: '消息' }) as HTMLTextAreaElement).value).toBe('preserve plan intent');
     await userEvent.click(screen.getByRole('button', { name: '发送消息' }));
-    await waitFor(() => expect(send).toHaveBeenCalledWith('s2', 'preserve plan intent', 'queue', []));
+    await waitFor(() => expect(send).toHaveBeenCalledWith('s2', 'preserve plan intent', 'queue', [], expect.any(String)));
     expect(plan).not.toHaveBeenCalled();
     expect(screen.queryByRole('button', { name: '先出计划' })).toBeNull();
     second.client.clear();

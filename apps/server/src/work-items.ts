@@ -123,7 +123,10 @@ export class WorkItemService {
   /** Start only after Runtime recovery and application wiring are ready. */
   start() {
     if (this.closed || this.timer) return;
-    this.timer = setInterval(() => { void timeLoop('work-items.tick', this.options.log, () => this.tick()).catch(() => {}); }, 1000);
+    this.timer = setInterval(() => {
+      if (this.ticking) return;
+      void timeLoop('work-items.tick', this.options.log, () => this.tick()).catch(() => {});
+    }, 1000);
     this.timer.unref();
   }
   private get repos() {

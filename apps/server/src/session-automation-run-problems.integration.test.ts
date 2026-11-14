@@ -146,6 +146,66 @@ describe('schedule trigger errors', () => {
     expect((await f.runtime.getSession(retry.executionSessionId))?.archivedAt).toEqual(expect.any(String));
   }, 30_000);
 
+  it('keeps an Agent-environment failure enabled without replay, merges its notices, and recovers on the next normal schedule', async () => {
+    const f = await fixture();
+    const created = await f.service.createSchedule(f.parent.id, { ...scheduleInput, mode: 'fresh' }, f.owner);
+    await f.service.updateSchedule(f.parent.id, created.id, { expectedRevision: created.revision, enabled: true }, f.owner);
+    const start = vi.spyOn(f.runtime, 'startScheduleSession').mockRejectedValue(new RuntimeError('AGENT_UNAVAILABLE', 'Command not found: missing-agent', 503));
+    const streak = async () => JSON.parse((await f.repos.config.get(`session_automation/streak/${created.id}`))!);
+
+    for (const minute of [1, 2, 3]) {
+      await f.runMinute(minute, minute);
+      await vi.waitFor(() => expect(f.onScheduleProblem).toHaveBeenCalledTimes(minute));
+      expect(await f.schedule(created.id)).toMatchObject({ enabled: true });
+      expect(await f.occurrences()).toHaveLength(minute);
+      expect((await f.occurrences()).every(item => item.runStatus === 'error' && !item.id.startsWith('occ_retry_'))).toBe(true);
+      expect(start).toHaveBeenCalledTimes(minute);
+      expect(await f.sent()).toEqual([]);
+      expect(await streak()).toMatchObject({ count: minute, reasonKey: 'error:AGENT_UNAVAILABLE', occurrenceId: (await f.occurrences())[minute - 1].id });
+    }
+    expect(f.onScheduleProblem.mock.calls[0]![1].text).toContain('Agent 环境暂不可用');
+    expect(f.onScheduleProblem.mock.calls[1]![1]).toMatchObject({ messageId: 'om_notice', text: expect.stringContaining('已连续 2 次没做成') });
+    expect(f.onScheduleProblem.mock.calls[2]![1]).toMatchObject({ messageId: 'om_notice', text: expect.stringContaining('已连续 3 次没做成') });
+    expect(f.onScheduleProblem.mock.calls[2]![1].text).toContain('下次');
+    expect(f.onScheduleDisabled).not.toHaveBeenCalled();
+
+    start.mockRestore();
+    await f.runMinute(4, 4);
+    await vi.waitFor(() => expect(f.deliver).toHaveBeenCalledOnce());
+    expect((await f.occurrences())[3]).toMatchObject({ runStatus: 'completed' });
+    expect(await f.sent()).toEqual([scheduleInput.prompt]);
+    expect(await f.schedule(created.id)).toMatchObject({ enabled: true, mode: 'fresh' });
+    expect(await streak()).toMatchObject({ count: 0, occurrenceId: (await f.occurrences())[3].id });
+    expect(f.onScheduleDisabled).not.toHaveBeenCalled();
+  }, 40_000);
+
+  it('restarts the environmental streak when the trigger error reason changes', async () => {
+    const f = await fixture();
+    const created = await f.enabled();
+    let code = 'AGENT_UNAVAILABLE';
+    vi.spyOn(f.runtime, 'dispatchRequest').mockImplementation(async () => {
+      throw new RuntimeError(code, code === 'AGENT_UNAVAILABLE' ? 'Command not found: missing-agent' : 'Usage cap reached', 503);
+    });
+    const streak = async () => JSON.parse((await f.repos.config.get(`session_automation/streak/${created.id}`))!);
+    await f.runMinute(1, 1);
+    expect(await streak()).toMatchObject({ count: 1, reasonKey: 'error:AGENT_UNAVAILABLE' });
+    await f.runMinute(2, 2);
+    expect(await streak()).toMatchObject({ count: 2, reasonKey: 'error:AGENT_UNAVAILABLE' });
+    code = 'USAGE_CAP_REACHED';
+    await f.runMinute(3, 3);
+    expect(await streak()).toMatchObject({ count: 1, reasonKey: 'error:USAGE_CAP_REACHED' });
+    expect(f.onScheduleProblem.mock.calls[2]![1].messageId).toBeUndefined();
+    expect(f.onScheduleProblem.mock.calls[2]![1].text).toContain('这次没跑起来');
+    expect(await f.schedule(created.id)).toMatchObject({ enabled: true });
+    code = 'AGENT_UNAVAILABLE';
+    await f.runMinute(4, 4);
+    expect(await streak()).toMatchObject({ count: 1, reasonKey: 'error:AGENT_UNAVAILABLE' });
+    expect(f.onScheduleProblem.mock.calls[3]![1].messageId).toBeUndefined();
+    expect(f.onScheduleProblem.mock.calls[3]![1].text).toContain('这次没跑起来');
+    expect(await f.schedule(created.id)).toMatchObject({ enabled: true });
+    expect((await f.occurrences()).every(item => !item.id.startsWith('occ_retry_'))).toBe(true);
+  }, 40_000);
+
   it('retries only once: when the fresh retry is also unavailable it says so in the thread instead of looping', async () => {
     const f = await fixture();
     const created = await f.enabled();

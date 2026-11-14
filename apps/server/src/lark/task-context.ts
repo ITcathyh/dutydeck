@@ -19,7 +19,7 @@ type LarkContextSource = {
   error?: string;
 };
 
-type SourcedResource = LarkMessageResource & { sourceMessageId: string };
+type SourcedResource = LarkMessageResource & { sourceMessageId: string; ancestorMessageIds?: string[] };
 
 type ReadDocument = (url: string, signal?: AbortSignal) => Promise<{ url: string; title?: string; text: string; links?: string[]; linkTitles?: Array<{ url: string; title: string }>; linkError?: string }>;
 
@@ -185,6 +185,20 @@ const mergeForwardChildren = (messageId: string, items: LarkChatMessage[]) => {
   return matching;
 };
 
+const mergeForwardAncestorIds = (message: LarkChatMessage, child: LarkChatMessage, verifiedById: ReadonlyMap<string, LarkChatMessage>) => {
+  const ancestors: string[] = [];
+  const seen = new Set([child.messageId]);
+  let ancestorId: string | undefined = child.upperMessageId ?? message.messageId;
+  while (ancestorId && !seen.has(ancestorId)) {
+    const ancestor: LarkChatMessage | undefined = ancestorId === message.messageId ? message : verifiedById.get(ancestorId);
+    if (!ancestor) break;
+    ancestors.push(ancestorId);
+    seen.add(ancestorId);
+    ancestorId = ancestor.upperMessageId;
+  }
+  return ancestors;
+};
+
 /** 收集卡片 JSON 里所有组件 id（element_id 或字符串形式的 id）。 */
 const cardElementIds = (rawContent: string): Set<string> => {
   const ids = new Set<string>();
@@ -265,9 +279,16 @@ async function parseVerifiedMessage(
   // source message ID. No child is fetched here, so nested expansion remains
   // unavailable unless that child is independently authorized.
   if (message.messageType === 'merge_forward' && fetchedItems) {
+    const verifiedById = new Map(fetchedItems.map(item => [item.messageId, item]));
     for (const child of mergeForwardChildren(message.messageId, fetchedItems)) {
       const childParsed = await parseLarkMessageContent(child.messageType, child.rawContent, { messageId: child.messageId });
-      resources.push(...childParsed.resources.map(resource => ({ ...resource, sourceMessageId: child.messageId })));
+      const ancestorMessageIds = childParsed.resources.length
+        ? mergeForwardAncestorIds(message, child, verifiedById)
+        : [];
+      resources.push(...childParsed.resources.map(resource => ({
+        ...resource, sourceMessageId: child.messageId,
+        ...(ancestorMessageIds.length ? { ancestorMessageIds } : {})
+      })));
       messageIds.push(child.messageId);
     }
   }

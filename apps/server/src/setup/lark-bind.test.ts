@@ -262,6 +262,21 @@ it('renders the default terminal QR with the existing options on first use', asy
 });
 
 describe('bindLarkApp', () => {
+  it('does not expose generic console identity IDs in the binding result', async () => {
+    const { promise } = run();
+    const result = await promise;
+    expect(JSON.stringify(result)).not.toContain(SECRETS.userId);
+    expect(JSON.stringify(result)).not.toContain(SECRETS.tenantId);
+  });
+
+  it('does not expose an internal console user ID as an app open ID', async () => {
+    const session = connected();
+    session.owner.userId = 'user-private-id';
+    const { promise } = run({ connect: async () => session });
+    const result = await promise;
+    expect(JSON.stringify(result)).not.toContain('user-private-id');
+  });
+
   it('syncs native slash commands after configuration with the matching app credential', async () => {
     const syncSlashCommands = vi.fn(async (_input: { appId: string; appSecret: string }) => ({}));
     const { promise, configure } = run({ syncSlashCommands });

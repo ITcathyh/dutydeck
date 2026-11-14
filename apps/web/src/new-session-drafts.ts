@@ -10,6 +10,7 @@ type NewSessionDraft = {
   permissionMode: PermissionMode;
   goal: string;
   createdSession?: Session;
+  sendOperation?: { goal: string; key: string };
 };
 
 // Like management drafts, survives view unmounts for this page lifetime only.

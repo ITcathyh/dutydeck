@@ -65,7 +65,7 @@ interface InsightSourceSubscription {
 const isTaskFenceRevocation = (error: unknown): error is RuntimeError => error instanceof RuntimeError
   && (error.code === 'SESSION_AUTOMATION_TASK_REVOKED' || error.code === 'SESSION_AUTOMATION_TASK_STALE_HEAD' || error.code === 'WORK_ITEM_TASK_REVOKED');
 
-function isAttemptRef(ref: SessionFence): ref is SessionFence & AttemptRef {
+function isAttemptRef(ref: SessionFence | AttemptRef): ref is SessionFence & AttemptRef {
   return 'attemptId' in ref && 'taskId' in ref && typeof ref.attemptId === 'string' && typeof ref.taskId === 'string';
 }
 
@@ -327,6 +327,7 @@ export class DutydeckRuntime {
   private readonly sessionGenerations = new Map<string, number>();
   private readonly exitedDriverGenerations = new Map<string, number>();
   private readonly driverEventChains = new Map<string, Promise<void>>();
+  private readonly compactionCancellationVersions = new Map<string, number>();
   private readonly driverEventErrors = new Map<string, unknown>();
   /** Attempts whose last in-turn event flush has run: a later event error can no longer fail them, nor the next turn. */
   private readonly eventFlushedAttempts = new Set<string>();
@@ -607,10 +608,24 @@ export class DutydeckRuntime {
       if (page.length < 200) break;
       afterSequence = page.at(-1)!.sequence;
     }
+    const firstToolCall = new Map<string, number>();
+    // driverEventData 会把缺失 id 字符串化并加轮次前缀；这些事件仍必须作为分隔符。
+    const missingToolCallIds = new Set(['', 'undefined', 'null'].map(id => this.scopedId(ref, id)));
+    for (const [index, event] of events.entries()) {
+      if (event.type !== 'tool_call') continue;
+      const id = (event.data as { id?: unknown }).id;
+      if (typeof id === 'string' && id && !missingToolCallIds.has(id) && !firstToolCall.has(id)) firstToolCall.set(id, index);
+    }
     let finalContent = false;
     for (let index = events.length - 1; index >= 0; index--) {
       const event = events[index]!;
-      if (['thinking', 'tool_call', 'tool_result'].includes(event.type)) break;
+      if (event.type === 'thinking' || event.type === 'tool_result') break;
+      if (event.type === 'tool_call') {
+        const data = event.data as { id?: unknown; status?: ToolCallData['status'] };
+        const first = typeof data.id === 'string' && !missingToolCallIds.has(data.id) ? firstToolCall.get(data.id) : undefined;
+        if (first === undefined || first === index || settledToolStatus(data.status)) break;
+        continue;
+      }
       if (event.type === 'text' && (event.data as { role?: string })?.role !== 'user' && eventHasContent(event.data as { text?: unknown; parts?: unknown })) finalContent = true;
     }
     const confirmation = deferredConfirmationId(events, ref.taskId);
@@ -635,6 +650,9 @@ export class DutydeckRuntime {
     const lifecycle = this.lifecycle(session.id);
     return (event: NormalizedDriverEvent) => {
       if (this.shuttingDown || !this.mutations.valid(lifecycle) || this.sessionGenerations.get(session.id) !== generation) return;
+      if (event.type === 'status' && event.data?.state === 'compaction' && event.data.phase === 'cancelled') {
+        this.compactionCancellationVersions.set(session.id, (this.compactionCancellationVersions.get(session.id) ?? 0) + 1);
+      }
       // A background follow-up is a run-level event: it neither extends nor joins the active Attempt.
       const attempt = isBackgroundFollowup(event) ? undefined : this.attempts.get(session.id);
       if (attempt && !(event.type === 'status' && event.data?.state === 'prompt_assembly')) this.turnProgressAt.set(session.id, Date.now());
@@ -1889,13 +1907,15 @@ export class DutydeckRuntime {
     }
   }
 
+  private scopedId(scope: SessionFence | AttemptRef | undefined, nativeId: string): string {
+    return scope && isAttemptRef(scope) ? `turn_${digest([scope.taskId, scope.attemptId, nativeId])}` : nativeId;
+  }
   /** 驱动事件写入账本前的形态：内容归一化，轮次内的原生 id 加上轮次前缀。 */
   private driverEventData(scope: SessionFence | undefined, event: NormalizedDriverEvent) {
     let data = event.data;
     if (data && Array.isArray(data.parts)) data = { ...data, parts: normalizeEventContent(data.parts) };
     if (event.type !== 'permission_request' && event.type !== 'tool_call' && event.type !== 'tool_result') return data;
-    const scopedId = (nativeId: string) => scope && isAttemptRef(scope) ? `turn_${digest([scope.taskId, scope.attemptId, nativeId])}` : nativeId;
-    return { ...data, id: scopedId(String(data.id)), ...(data.toolCallId ? { toolCallId: scopedId(String(data.toolCallId)) } : {}) };
+    return { ...data, id: this.scopedId(scope, String(data.id)), ...(data.toolCallId ? { toolCallId: this.scopedId(scope, String(data.toolCallId)) } : {}) };
   }
   private async reviewHostPermission(session: Session, scope: SessionFence, event: NormalizedDriverEvent) {
     if (!this.options.reviewPermission || event.type !== 'permission_request' || (event.data?.status ?? 'pending') !== 'pending' || !isAttemptRef(scope)) return undefined;
@@ -3033,13 +3053,18 @@ export class DutydeckRuntime {
       const compactDue = compactHours !== undefined && Number.isFinite(previousActivity) && Date.now() - previousActivity >= compactHours * 3_600_000;
       const compact = async (submission?: import('@dutydeck/shared').DriverSubmission) => {
         if (!compactDue) return true;
+        const cancellationVersion = this.compactionCancellationVersions.get(id) ?? 0;
         const outcome = driver.compact ? await driver.compact(submission) : 'unsupported';
         if (!driver.compact) await this.emit(id, 'status', { state: 'compaction', phase: 'unsupported', proactive: true });
         this.mutations.check();
         const interrupted = this.bound().getPendingQueueActions(this.fence(session)).some(action => action.interrupt && action.target?.attemptId === ref.attemptId);
         if (outcome === 'cancelled' || interrupted) {
+          // Built-in drivers emit cancelled themselves; a custom driver may only
+          // return it. Fill in exactly when this maintenance emitted no event.
+          if ((this.compactionCancellationVersions.get(id) ?? 0) === cancellationVersion) {
+            await this.emit(id, 'status', { state: 'compaction', phase: 'cancelled', proactive: true });
+          }
           // The maintenance stream is quiescent; finish the logical task without submitting its user prompt.
-          await this.emit(id, 'status', { state: 'compaction', phase: 'cancelled', proactive: true });
           await this.consume(session, { type: 'completed', data: { stopReason: 'cancelled' } }, makeId('evt'));
           return false;
         }

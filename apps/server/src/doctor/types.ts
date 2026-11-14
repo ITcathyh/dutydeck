@@ -49,6 +49,8 @@ export interface DoctorConfig {
   host: string;
   port: number;
   authEnabled: boolean;
+  /** 显式配置可见时为 true/false；另一个 shell 看不到 daemon 启动参数时保持未知。 */
+  localOnly?: boolean;
   databaseUrl: string;
   acpxCommand?: string;
   agents: ReadonlyArray<{ id: string; name: string; command: string; version?: string; protocol?: string; builtin?: boolean; adapterId?: string }>;
@@ -65,6 +67,30 @@ export type AgentProbeResult =
 /** 无副作用的可用性探针：只执行 `<command> --version`，绝不调用模型。 */
 export type AgentProbe = (command: string, timeoutMs: number) => Promise<AgentProbeResult>;
 
+export type TerminalBackendProbeStage = 'prepare' | 'version' | 'create' | 'verify' | 'cleanup';
+
+export interface TerminalBackendCleanupIssue {
+  status: 'failed' | 'timeout';
+  detail: string;
+}
+
+/**
+ * tmux 主探测结果与独立的清理结果。清理问题不能覆盖原始失败；即使主探测 ok，
+ * 只要有 cleanup，上层也必须至少报 warn。tempDir 用于清理失败时定位私有 socket 根。
+ */
+export type TerminalBackendProbeResult = (
+  | { status: 'ok'; version: string }
+  | { status: 'not_found' }
+  | { status: 'failed'; stage: TerminalBackendProbeStage; detail: string }
+  | { status: 'timeout'; stage: Exclude<TerminalBackendProbeStage, 'prepare'>; detail: string }
+) & {
+  cleanup?: TerminalBackendCleanupIssue;
+  tempDir?: string;
+};
+
+/** 所有命令都使用私有 -S socket；env 只作为子进程输入，绝不写回 process.env。 */
+export type TerminalBackendProbe = (timeoutMs: number, env?: NodeJS.ProcessEnv) => Promise<TerminalBackendProbeResult>;
+
 /** daemon 落盘记录中体检需要的字段（对齐 DaemonState）。 */
 export interface DoctorDaemonRecord {
   pid?: number;
@@ -76,6 +102,8 @@ export interface DoctorDaemonRecord {
   port?: number;
   address?: string;
   authEnabled?: boolean;
+  supervisor?: 'systemd' | 'launchd';
+  systemdUnit?: string;
 }
 
 /** daemonStatus() 的返回子集（对齐 DaemonStatusInfo）。 */
@@ -141,6 +169,39 @@ export interface DoctorAutostartResult {
   notices?: readonly string[];
 }
 
+/** socket 激活只记录可观测事实；active 没有 host 时表示实际监听地址不可知。 */
+export interface DoctorSocketActivationObservation {
+  status: 'active' | 'inactive' | 'unknown';
+  source?: 'process' | 'unit';
+  host?: string;
+  reason?: 'unit-unavailable' | 'address-unavailable';
+}
+
+export interface DoctorSocketActivationProbeInput {
+  env: NodeJS.ProcessEnv;
+  processPid: number;
+  running: boolean;
+  record?: DoctorDaemonRecord;
+}
+
+export type DoctorSocketActivationProbe = (
+  input: DoctorSocketActivationProbeInput
+) => Promise<DoctorSocketActivationObservation> | DoctorSocketActivationObservation;
+
+/** 同一项组合检查所需的全部网络与机器人观测，不携带令牌或 Secret。 */
+export interface LarkExposureObservation {
+  /** undefined 表示 socket 已激活或 unit 探测失败，实际监听地址不可知。 */
+  host?: string;
+  hostSource: 'config' | 'runtime' | 'socket';
+  /** 缺席表示当前 doctor 无法看见显式 local-only 配置，不能报成关闭。 */
+  localOnly?: boolean;
+  authEnabled: boolean;
+  socket: DoctorSocketActivationObservation;
+  rawBots?: string;
+  unavailable?: boolean;
+  listenerDisabled: boolean;
+}
+
 /** 当前用户名探测，用于 loginctl enable-linger 提示里给出真实用户名。 */
 export interface DoctorFsStat {
   mode: number;
@@ -153,6 +214,10 @@ export interface DoctorDependencies {
   agentProbe?: AgentProbe;
   /** 单次探针超时（ms），默认 5000。 */
   agentProbeTimeoutMs?: number;
+  /** tmux 私有 socket smoke；纯 ACP、herdr 或配置不可读时不会调用。 */
+  terminalBackendProbe?: TerminalBackendProbe;
+  /** 单次 tmux 客户端调用及独立清理调用的超时（ms），默认 3000。 */
+  terminalBackendProbeTimeoutMs?: number;
   /** 渲染目标；默认 createCliUi()。 */
   ui?: CliUi;
   env?: NodeJS.ProcessEnv;
@@ -187,6 +252,8 @@ export interface DoctorDependencies {
   portProbe?: PortProbe;
   /** 端口探测超时（ms），默认 1000。 */
   portProbeTimeoutMs?: number;
+  /** 当前进程或运行中 systemd unit 的 socket 激活观测；真实地址未知时保留未知。 */
+  socketActivationProbe?: DoctorSocketActivationProbe;
   /** 期望的 migration 头版本；见 checks.ts 里 schema.migrations 的注释。 */
   expectedSchemaVersion?: number;
   /** 路径存在性判断，默认 fs.existsSync。 */

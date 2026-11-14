@@ -18,7 +18,7 @@ const tmuxDescribe = (await isTmuxAvailable()) ? describe : describe.skip;
 
 tmuxDescribe('TmuxBackend reaps its own fully dead sessions under remain-on-exit', () => {
   let root: string;
-  const tmux = (...args: string[]) => execFileSync('tmux', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  const tmux = (...args: string[]) => execFileSync('tmux', ['-u', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   const exists = (name: string) => { try { tmux('has-session', '-t', `=${name}`); return true; } catch { return false; } };
   const paneStates = (name: string) => tmux('list-panes', '-s', '-t', name, '-F', '#{pane_dead}').split('\n');
   const spawnOpts = () => ({ cwd: root, cols: 80, rows: 24, env: { HOME: root, PATH: process.env.PATH! } });
@@ -103,13 +103,13 @@ tmuxDescribe('TmuxBackend reaps its own fully dead sessions under remain-on-exit
     await deadSession(name, 'dutydeck:owned');
     const actual = vi.mocked(runCommand).getMockImplementation()!;
     vi.mocked(runCommand).mockImplementation(async (binary, args, options) => {
-      if (args[0] === 'list-panes') throw Object.assign(new Error('tmux list-panes failed'), { status: 1, signal: null, stderr: 'lost server' });
+      if (args[1] === 'list-panes') throw Object.assign(new Error('tmux list-panes failed'), { status: 1, signal: null, stderr: 'lost server' });
       return actual(binary, args, options);
     });
     try {
       expect(await TmuxBackend.reapDeadOwnedSession(name, 'dutydeck:owned')).toBe(false);
     } finally { vi.mocked(runCommand).mockImplementation(actual); }
     expect(exists(name)).toBe(true);
-    expect(vi.mocked(runCommand).mock.calls.some(([, args]) => args[0] === 'kill-session')).toBe(false);
+    expect(vi.mocked(runCommand).mock.calls.some(([, args]) => args[1] === 'kill-session')).toBe(false);
   });
 });

@@ -200,10 +200,44 @@ describe('relay ask', () => {
     const record = broker.listPending()[0]!;
     expect(record.question).toBe('选一个');
     expect(record.choices).toEqual([{ label: 'a' }, { label: 'b' }, { label: 'c', value: '123' }]);
+    expect(JSON.stringify(record.choices)).toBe('[{"label":"a"},{"label":"b"},{"label":"c","value":"123"}]');
     expect(record.multiple).toBeUndefined();
     expect(published[0]).toMatchObject({ choices: record.choices });
     await service.answer('ses_a', record.id, { answer: '123' });
     await expect(pending).resolves.toMatchObject({ status: 'answered', answer: '123' });
+  });
+
+  it('normalizes optional descriptions, treats blank ones as omitted, and bounds their length', async () => {
+    const { published, publisher } = recordingPublisher();
+    const broker = new RelayAskBroker(publisher);
+    const description = '说'.repeat(1_000);
+    const pending = broker.register({ sessionId: 'ses_a', question: '选一个', timeoutMs: 60_000, choices: [
+      { label: '甲', description: `  ${description}  ` },
+      { label: '乙', description: '   ' },
+      { label: '丙', description: null },
+      { label: '丁' }
+    ] as any });
+    await vi.waitFor(() => expect(broker.listPending()).toHaveLength(1));
+    const record = broker.listPending()[0]!;
+    expect(record.choices).toStrictEqual([
+      { label: '甲', description }, { label: '乙' }, { label: '丙' }, { label: '丁' }
+    ]);
+    expect(published[0]).toMatchObject({ choices: record.choices });
+    broker.cancelSession('ses_a');
+    await expect(pending).resolves.toMatchObject({ status: 'cancelled' });
+  });
+
+  it('rejects descriptions over 1000 characters', async () => {
+    const { published, publisher } = recordingPublisher();
+    const broker = new RelayAskBroker(publisher);
+    const pending = broker.register({ sessionId: 'ses_a', question: 'q', timeoutMs: 60_000,
+      choices: [{ label: 'x', description: 'y'.repeat(1_001) }] as any });
+    const outcome = pending.then(value => ({ value }), error => ({ error }));
+    await new Promise(resolve => setImmediate(resolve));
+    broker.close();
+    expect(await outcome).toMatchObject({ error: { code: 'RELAY_INVALID_CHOICES', statusCode: 400 } });
+    expect(broker.listPending()).toHaveLength(0);
+    expect(published).toEqual([]);
   });
 
   it('retains the question length and timeout limits at the service boundary', async () => {

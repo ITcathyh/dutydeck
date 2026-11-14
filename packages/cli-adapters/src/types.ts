@@ -28,7 +28,7 @@ export interface AdapterSessionContext {
   env?: Record<string, string>;
   /**
    * 计划阶段守卫的 hook 命令（只有 Claude 家族终端由驱动给出）。适配器把它挂成 PreToolUse hook，
-   * 守卫脚本不存在时它什么都不做；先出计划的第一阶段驱动写入脚本，写操作就被拦下。
+   * 没有 active 元数据时直接放行；先出计划的第一阶段驱动写入元数据和脚本，写操作就被拦下。
    */
   planGuardCommand?: string;
 }
@@ -66,6 +66,8 @@ export interface CliAdapter {
    * env 是即将用于启动 CLI 的子进程环境（已按 child-environment 清洗）；探测结果由适配器自己缓存，buildArgs 保持同步。
    */
   prepareLaunch?(ctx: AdapterSessionContext, env: Record<string, string>): Promise<void>;
+  /** 本次 prepareLaunch 已确认的 hook 失败阻断能力；driver 只在真实启动时读取并记录。 */
+  guardFailureBlock?(): boolean;
   /** 构造 spawn 参数（bin 由 driver 层的 AgentConfig.command 提供，适配器不解析 bin 路径） */
   buildArgs(ctx: AdapterSessionContext): string[];
   /** 把 prompt 写进后端（paste+Enter / 分块 stdin / runner 帧，因 CLI 而异） */

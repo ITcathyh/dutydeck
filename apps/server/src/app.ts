@@ -33,7 +33,7 @@ import { registerLarkRoutes, type LarkRoutesOptions } from './lark/routes.js';
 import { discoverAgentModels } from './agent-models.js';
 import { discoverSessionAgentModels } from './session-model-probe.js';
 import { registerSystemRoutes, type SystemRoutesOptions } from './system-routes.js';
-import { accessMode, isValidAccessCredential, presentedCredential, isValidSessionShareCredential, SHARE_TOKEN_QUERY_KEY, registerAuthMiddleware, registerBrowserAuthRoutes, type AuthMiddlewareOptions } from './auth/auth.js';
+import { accessMode, isValidPresentedAccessCredential, isValidSessionShareCredential, SHARE_TOKEN_QUERY_KEY, registerAuthMiddleware, registerBrowserAuthRoutes, type AuthMiddlewareOptions } from './auth/auth.js';
 import { registerTerminalRoutes, type TerminalRouteAuth, type TerminalStreamProvider } from './terminal/terminal-ws.js';
 import { isSharedInstanceRead, registerInstanceProxy, rewriteSharedSessionProxyUrl, type PeerInstance } from './instance-proxy.js';
 import { isRelayCapabilityRequest, registerRelayRoutes, type RelayRoutesOptions } from './relay-routes.js';
@@ -577,12 +577,15 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     const decision = await requireSessionExecution(request, request.params.id, 'session', 'terminal.write');
     return runtime.runVerification(request.params.id, request.body, decision?.source === 'owner' ? installationOwnerTaskActor : undefined);
   });
-  app.post<{ Params: { id: string }; Body: { prompt: string; mode?: 'queue' | 'interrupt' | 'steer'; skillRequests?: string[]; client?: string; strictSteer?: boolean } }>('/api/sessions/:id/send', async (request, reply) => {
+  app.post<{ Params: { id: string }; Body: { prompt: string; mode?: 'queue' | 'interrupt' | 'steer'; skillRequests?: string[]; client?: string; strictSteer?: boolean; idempotencyKey?: string } }>('/api/sessions/:id/send', async (request, reply) => {
     const client = taskClient(request.body);
     const prompt = request.body?.prompt?.trim();
     const requested = request.body?.mode ?? 'queue';
+    const idempotencyKey = request.body?.idempotencyKey;
     if (!prompt) throw new RuntimeError('INVALID_PROMPT', 'Prompt must not be empty', 400);
     if (requested !== 'queue' && requested !== 'interrupt' && requested !== 'steer') throw new RuntimeError('INVALID_SEND_MODE', `Unknown send mode: ${String(requested)}`, 400);
+    if (idempotencyKey !== undefined && (typeof idempotencyKey !== 'string' || !idempotencyKey.trim() || idempotencyKey.length > 128)) throw new RuntimeError('INVALID_IDEMPOTENCY_KEY', 'Idempotency key must be a non-empty string of at most 128 characters', 400);
+    if (requested === 'steer' && idempotencyKey !== undefined) throw new RuntimeError('STEER_IDEMPOTENCY_UNSUPPORTED', 'Steering does not support idempotency keys; check existing tasks before retrying', 400);
     // 插话先按排队接收（完整的任务链路），再尝试送进正在执行的那一轮；送不进去就照常排队。
     const mode = requested === 'steer' ? 'queue' : requested;
     const skillRequests = request.body.skillRequests;
@@ -594,9 +597,8 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     const pluginPrompt = options.plugins && prompt.startsWith('/')
       ? options.plugins.commands.expand(prompt, { cwd: (await runtime.getSession(request.params.id))?.cwd }) : undefined;
     const agentPrompt = pluginPrompt ?? prompt;
-    const task = decision?.source === 'owner'
-      ? await runtime.dispatch(request.params.id, prompt, mode, agentPrompt, undefined, installationOwnerTaskActor, undefined, skillRequests)
-      : await runtime.dispatch(request.params.id, prompt, mode, agentPrompt, undefined, undefined, undefined, skillRequests);
+    const actor = decision?.source === 'owner' ? installationOwnerTaskActor : undefined;
+    const task = await runtime.dispatch(request.params.id, prompt, mode, agentPrompt, undefined, actor, idempotencyKey, skillRequests);
     if (requested !== 'steer') return reply.code(202).send({ accepted: true, task });
     // 这一条已经开跑（没有排队）也算按正常新一轮处理。
     let steering: { task: unknown; outcome: string; error?: string } = { task, outcome: 'promptRequired' };
@@ -757,7 +759,6 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     // The access credential was checked once at connect; a token rotation or
     // password reset must also end streams that are already open.
     const accessAuth = !shared && options.auth && accessMode(options.auth) === 'token' ? options.auth : undefined;
-    const accessCredential = presentedCredential(request.headers);
     let accessPoll: ReturnType<typeof setInterval> | undefined;
     let accessChecking = false;
     const sharedSessionId = request.params.id;
@@ -871,7 +872,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
       // A check still unresolved a whole period later cannot prove access.
       if (accessChecking) return disconnect();
       accessChecking = true;
-      void isValidAccessCredential(accessCredential, accessAuth.getToken, accessAuth.getPasswordHash)
+      void isValidPresentedAccessCredential(request.headers, accessAuth.getToken, accessAuth.getPasswordHash)
         .then(valid => { if (!valid) disconnect(); }, disconnect)
         .finally(() => { accessChecking = false; });
     }, SESSION_STREAM_ACCESS_RECHECK_MS);

@@ -16,7 +16,7 @@ import { PlanPanel } from './components/PlanPanel';
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useIsMutating, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { BookOpen, CalendarClock, ChevronRight, Coins, MessagesSquare, PanelRightClose, PanelRightOpen, Settings2, Terminal, Users, X } from 'lucide-react';
-import { api, type RunSummary, type Session, type SteeringResult, type Task } from './api';
+import { api, ApiError, type RunSummary, type Session, type SteeringResult, type Task } from './api';
 import { useDockStore } from './store';
 import { createTimelineProjector, hasAnswerSince, pendingPermissionId } from './timeline';
 import { createRawLogProjector, hasRawText } from './raw-log';
@@ -58,6 +58,8 @@ import { taskReadingScopeKey, useTimelineDensityPreference, useViewPreference } 
 import { useExperimental } from './experimental';
 import { shortcutAvailability, useKeyboardShortcuts, workbenchViewShortcutIds } from './useKeyboardShortcuts';
 import { ShortcutHelpSheet } from './components/ShortcutHelpSheet';
+import { requestId } from './request-id';
+import { SendOperationStore } from './send-operations';
 
 // 终端与控制面都属于低频重功能，避免进入工作台首屏 chunk。
 const TerminalView = lazy(() => import('./components/TerminalView').then(module => ({ default: module.TerminalView })));
@@ -134,6 +136,10 @@ export default function App() {
   const inspectorDefaultAll = useMediaQuery('(min-width: 1880px)');
   const inspectorDefaultCompleted = useMediaQuery('(min-width: 1600px)');
   const [actionError, setActionError] = useState<string>();
+  const [sendFailure, setSendFailure] = useState<{ sessionId: string; message: string; retry: boolean }>();
+  // queue/interrupt 的未确认操作只在同一标签页内跨刷新保留，另一标签页视为新请求。
+  const sendOperations = useRef<SendOperationStore | null>(null);
+  const sendOperationStore = sendOperations.current ??= new SendOperationStore();
   const [workItemPanel, setWorkItemPanel] = useState<{ sessionId: string; itemId: string } | null>(null);
   // 路由与「可深链的浮层」是同一个东西的两半，合成一个 state：分开存会让 URL 与界面
   // 各走各的，回退键、刷新、分享链接三者立刻打架（见 app-route.ts 的说明）。
@@ -182,6 +188,7 @@ export default function App() {
     setActive(id);
     setWorkItemPanel(null);
     setActionError(undefined);
+    setSendFailure(undefined);
   }, [setActive]);
 
   /**
@@ -488,12 +495,41 @@ export default function App() {
     if (summary) setRunSummaries(current => current[activeSessionId]?.taskId === summary.taskId && current[activeSessionId]?.status === summary.status && current[activeSessionId]?.queuedCount === summary.queuedCount && current[activeSessionId]?.updatedAt === summary.updatedAt ? current : { ...current, [activeSessionId]: summary });
   }, [activeSessionId, tasks.data]);
 
-  const send = useMutation({ mutationKey: ['composer-send'], mutationFn: ({ sessionId, message, mode, skillRequests, plan }: { sessionId: string; message: string; mode: SendMode; skillRequests?: string[]; draftKey: string; submittedDraft: typeof composerDraft.draft; plan?: boolean }) => plan ? api.plan(sessionId, message) : api.send(sessionId, message, mode, skillRequests), onSuccess: (result, variables) => { acknowledgeComposerDraft(variables.draftKey, variables.submittedDraft); qc.setQueryData<Task[]>(['tasks', variables.sessionId], current => current?.some(task => task.id === result.task.id) ? current : [...(current ?? []), result.task]); void qc.invalidateQueries({ queryKey: ['tasks', variables.sessionId], exact: true }); if (result.steering && (result.task.status === 'queued' || result.steering.outcome !== 'promptRequired')) toastStore.push(steeringToast(result.steering, result.task)); }, onError: (error, variables) => { if (variables.sessionId === useDockStore.getState().activeSessionId) setActionError(error.message); } });
+  const send = useMutation({
+    mutationKey: ['composer-send'],
+    retry: false,
+    mutationFn: ({ sessionId, message, mode, skillRequests, plan, idempotencyKey }: { sessionId: string; message: string; mode: SendMode; skillRequests?: string[]; draftKey: string; submittedDraft: typeof composerDraft.draft; plan?: boolean; idempotencyKey?: string; reusedUnknownOperation: boolean }) => plan ? api.plan(sessionId, message) : mode === 'steer' ? api.send(sessionId, message, mode, skillRequests) : api.send(sessionId, message, mode, skillRequests, idempotencyKey),
+    onSuccess: (result, variables) => {
+      if (variables.idempotencyKey) sendOperationStore.delete(variables.draftKey, variables.idempotencyKey);
+      setSendFailure(current => current?.sessionId === variables.sessionId ? undefined : current);
+      acknowledgeComposerDraft(variables.draftKey, variables.submittedDraft);
+      qc.setQueryData<Task[]>(['tasks', variables.sessionId], current => current?.some(task => task.id === result.task.id) ? current : [...(current ?? []), result.task]);
+      void qc.invalidateQueries({ queryKey: ['tasks', variables.sessionId], exact: true });
+      if (result.steering && (result.task.status === 'queued' || result.steering.outcome !== 'promptRequired')) toastStore.push(steeringToast(result.steering, result.task));
+    },
+    onError: (error, variables) => {
+      if (variables.sessionId !== useDockStore.getState().activeSessionId) return;
+      const unknown = !(error instanceof ApiError) || error.status === 408 || error.status >= 500 || error.code === 'unknown_outcome' || (variables.reusedUnknownOperation && error.status === 401);
+      if (!unknown) {
+        if (variables.idempotencyKey) sendOperationStore.delete(variables.draftKey, variables.idempotencyKey);
+        setActionError(error.message);
+        return;
+      }
+      if (variables.plan) { setActionError(error.message); return; }
+      setSendFailure({
+        sessionId: variables.sessionId,
+        retry: variables.mode !== 'steer',
+        message: variables.mode === 'steer'
+          ? `插话结果未知：${error.message}。请先核对现有任务和执行记录；为避免重复执行，不会自动重发。`
+          : `发送结果未知：${error.message}。可重试同一草稿；若服务端已接受，将返回原任务，不会重复执行。`
+      });
+    }
+  });
   const cancelQueued = useMutation({ mutationFn: ({ sessionId, taskId }: { sessionId: string; taskId: string }) => api.cancelQueued(sessionId, taskId), onMutate: ({ sessionId, taskId }) => ({ prompt: qc.getQueryData<Task[]>(['tasks', sessionId])?.find(task => task.id === taskId)?.prompt }), onSuccess: (result, variables, context) => {
     qc.setQueryData<Task[]>(['tasks', variables.sessionId], current => current?.map(task => task.id === result.id ? result : task));
     // 撤销只能把指令重新排到队尾，拿不回原来的任务 ID 和位置，所以 description 必须说清楚，不假装能还原现场。
     const restorable = context?.prompt?.trim();
-    toastStore.push({ kind: 'success', key: `cancel-queued-${variables.taskId}`, title: '已取消 1 条待执行指令', description: restorable ? '恢复会把这条指令重新排到队列末尾，不会回到原来的位置。' : undefined, action: restorable ? { label: '重新加入队尾', run: () => api.send(variables.sessionId, restorable, 'queue').then(() => { void qc.invalidateQueries({ queryKey: ['tasks', variables.sessionId] }); }) } : undefined });
+    toastStore.push({ kind: 'success', key: `cancel-queued-${variables.taskId}`, title: '已取消 1 条待执行指令', description: restorable ? '恢复会把这条指令重新排到队列末尾，不会回到原来的位置。' : undefined, action: restorable ? { label: '重新加入队尾', run: () => api.send(variables.sessionId, restorable, 'queue', undefined, requestId()).then(() => { void qc.invalidateQueries({ queryKey: ['tasks', variables.sessionId] }); }) } : undefined });
   }, onError: error => { setActionError(error.message); toastStore.push({ kind: 'error', key: 'cancel-queued', title: '取消待执行指令失败', description: error.message }); } });
   const steerQueued = useMutation({ mutationFn: ({ sessionId, taskId }: { sessionId: string; taskId: string }) => api.steerQueued(sessionId, taskId), onSuccess: (_result, variables) => { setActionError(undefined); void qc.invalidateQueries({ queryKey: ['tasks', variables.sessionId] }); }, onError: error => setActionError(error.message) });
   const injectQueued = useMutation({ mutationFn: ({ sessionId, taskId }: { sessionId: string; taskId: string }) => api.injectQueued(sessionId, taskId), onSuccess: (result, variables) => { setActionError(undefined); toastStore.push(steeringToast(result, result.task)); void qc.invalidateQueries({ queryKey: ['tasks', variables.sessionId] }); }, onError: error => setActionError(error.message) });
@@ -536,7 +572,25 @@ export default function App() {
   const blockingMainQueryFailures = mainQueryFailures.filter(failure => !failure.hasData);
   const staleMainQueryFailures = mainQueryFailures.filter(failure => failure.hasData);
   const retryingMainQueries = mainQueryFailures.some(failure => failure.retrying);
-  const submit = () => { if (modelReadiness.kind !== 'ready') return; if (planFirst && active?.source === 'lark') { setActionError('飞书会话请在飞书发送 /plan；如需直接执行，请先改为普通消息。'); return; } const message = buildPrompt(prompt, composerReferences); if (message && activeSessionId) send.mutate({ sessionId: activeSessionId, message, draftKey: composerDraft.key!, submittedDraft: composerDraft.draft, mode: busyStates.has(active?.state ?? '') ? sendMode : 'queue', skillRequests: composerReferences.filter(reference => reference.kind === 'skill').map(reference => reference.value), plan: planFirst }); };
+  const submit = () => {
+    if (modelReadiness.kind !== 'ready') { setActionError(modelReadiness.reason); return; }
+    if (planFirst && active?.source === 'lark') { setActionError('飞书会话请在飞书发送 /plan；如需直接执行，请先改为普通消息。'); return; }
+    const message = buildPrompt(prompt, composerReferences);
+    if (!activeSessionId) { setActionError('请先选择要发送消息的任务。'); return; }
+    if (!message) { setActionError('请先填写消息或添加引用，再重试发送。'); return; }
+    const draftKey = composerDraft.key!;
+    const submittedDraft = composerDraft.draft;
+    const skillRequests = composerReferences.filter(reference => reference.kind === 'skill').map(reference => reference.value);
+    const snapshot = JSON.stringify({ message, skillRequests, mode: sendMode, planFirst });
+    const previous = sendOperationStore.get(draftKey, snapshot);
+    const retry = planFirst ? undefined : previous;
+    // interrupt 被接受后页面可能已经空闲；同一未知响应的重试仍须沿用最初的实际 mode。
+    const mode = retry?.mode ?? (busyStates.has(active?.state ?? '') ? sendMode : 'queue');
+    const idempotencyKey = !planFirst && mode !== 'steer' ? retry?.key ?? requestId() : undefined;
+    if (idempotencyKey && mode !== 'steer' && !retry) sendOperationStore.set(draftKey, { snapshot, mode, key: idempotencyKey });
+    setSendFailure(undefined);
+    send.mutate({ sessionId: activeSessionId, message, draftKey, submittedDraft, mode, skillRequests, plan: planFirst, idempotencyKey, reusedUnknownOperation: Boolean(retry) });
+  };
   const act = async (action: string) => { try { setActionError(undefined); await api.action(activeSessionId!, action); } catch (error) { setActionError(error instanceof Error ? error.message : String(error)); } };
 
   // 有浮层占用键盘时整套快捷键停用，避免和弹窗内的按键语义打架。
@@ -703,6 +757,7 @@ export default function App() {
         {commandCatalog?.truncated && <div className="ui-thread shrink-0 py-2"><Banner tone="info">原生命令列表未完整显示；可直接输入已知命令。</Banner></div>}
         {events.isError && <div className="ui-thread shrink-0 py-2"><Banner tone="danger">历史记录加载失败：{events.error.message}<Button size="sm" variant="secondary" onClick={() => void events.refetch()}>重试加载记录</Button></Banner></div>}
         {actionError && <div className="ui-thread shrink-0 py-2"><Banner tone="danger" onDismiss={() => setActionError(undefined)}>{actionError}</Banner></div>}
+        {sendFailure && sendFailure.sessionId === activeSessionId && <div className="ui-thread shrink-0 py-2"><Banner tone="danger" onDismiss={() => setSendFailure(undefined)} action={sendFailure.retry ? { label: '重试', busy: send.isPending, onClick: submit } : undefined}>{sendFailure.message}</Banner></div>}
         {isPtyCli && active.permissionMode === 'ask' && active.state === 'waiting_for_permission' && <div className="ui-thread shrink-0 py-2"><Banner tone="warning" action={{ label: '打开终端', onClick: () => setDetailTab('terminal') }}>{active.source === 'work_item' ? '此步骤终端只读。需要确认时，请在原飞书话题使用 /work terminal 查看并按提示输入。' : '此 CLI 的操作确认在终端中完成；若任务等待响应，请前往终端处理。'}</Banner></div>}
         <section className="flex min-h-0 min-w-0 flex-1 flex-col">{isPtyCli && (detailTab === 'terminal' || taskViews[active.id]?.terminalVisited) && <div hidden={detailTab !== 'terminal'} id="tabpanel-terminal" role="tabpanel" aria-labelledby="tab-terminal" tabIndex={0} className={detailTab === 'terminal' ? 'min-h-0 flex-1 py-3' : 'hidden'}><div className="ui-thread h-full overflow-hidden rounded-md bg-terminal-bg p-2"><LazyBoundary resetKey={active.id} fallback={<div className="grid h-full place-items-center"><Spinner label="终端加载中…"/></div>}><TerminalView sessionId={active.id} readOnly={active.source === 'work_item'} className="h-full"/></LazyBoundary></div></div>}<div hidden={detailTab !== 'timeline' && (isPtyCli || detailTab !== 'terminal')} id="tabpanel-timeline" role="tabpanel" aria-labelledby="tab-timeline" tabIndex={0} className={detailTab === 'timeline' || (!isPtyCli && detailTab === 'terminal') ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}><LazyBoundary resetKey={active.id} fallback={<div className="grid min-h-0 flex-1 place-items-center"><Spinner label="正在加载执行记录…"/></div>}><TimelineView sourceEvents={eventList} historyTurns={historyTurns} historyPlaces={historyPlaces} key={activeSessionId} readingScopeKey={taskReadingScopeKey(active.id)} visible={detailTab === 'timeline' || (!isPtyCli && detailTab === 'terminal')} hasOlder={events.data?.hasOlder} loadedEventCount={events.data?.events.length} activeSessionId={activeSessionId} eventsLoading={events.isLoading} onResolvePermission={active.source === 'work_item' ? undefined : resolveActivePermission} resolvingPermissionId={resolvePermission.isPending ? resolvePermission.variables?.permissionId : undefined} timeline={timeline} timelineSections={timelineSections} awaitingAnswer={awaitingAnswer} hasOngoingActivity={hasOngoingActivity} latestUserIndex={latestUserIndex} activeOutputLabel={activeOutputLabel} density={density} renderProgress={active.source !== 'work_item' ? emptyState => <WorkItemProgress emptyState={emptyState} session={active} agents={agents.data ?? []} onOpenItem={itemId => setWorkItemPanel({ sessionId: active.id, itemId })} onSelectSession={selectSession}/> : undefined} footer={<><UnknownTasksPanel session={active} tasks={tasks.data ?? []}/><PlanPanel session={active} tasks={tasks.data ?? []}/><VerificationSummary session={active} onOpenEvidence={openInspector}/>{active.source === 'lark' && <TurnMemoryPanel session={active}/>}</>} /></LazyBoundary></div>{(detailTab === 'changes' || taskViews[active.id]?.changesVisited) && <div hidden={detailTab !== 'changes'} id="tabpanel-changes" role="tabpanel" aria-labelledby="tab-changes" tabIndex={0} className={detailTab === 'changes' ? 'min-h-0 flex-1 overflow-auto' : 'hidden'}><LazyBoundary resetKey={active.id} fallback={<Spinner label="正在读取本轮改动…"/>}><SessionChangesPanel key={active.id} session={active} onBack={() => setDetailTab('timeline')}/></LazyBoundary></div>} {active.source === 'work_item' ? <div className="border-t border-default bg-surface px-4 py-3 text-caption text-subtle">此后台步骤由目标管理，请从原目标处理问题、授权、重试或停止。</div> : active.archivedAt ? <div className="border-t border-default bg-surface px-4 py-3 text-center text-caption text-subtle">该任务已归档，只能查看历史记录。</div> : <Composer key={active.id} planFirst={planFirst} onPlanFirstChange={value => composerDraft.update({ planFirst: value })} state={active.state} value={prompt} references={composerReferences} sending={pendingSends > 0} mode={sendMode} queuedTasks={queuedTasks} cancellingTaskId={cancelQueued.isPending ? cancelQueued.variables?.taskId : undefined} steeringTaskId={steerQueued.isPending ? steerQueued.variables?.taskId : undefined} injectingTaskId={injectQueued.isPending ? injectQueued.variables?.taskId : undefined} steerable={activeAgent?.protocol === 'acp'} blockingPermissionId={blockingPermissionId} rejectingPermission={resolvePermission.isPending} onRejectPermission={permissionId => resolvePermission.mutate({ sessionId: active.id, permissionId, approved: false })} skills={skills.data ?? []} {...{ skillCatalogStatus: { partial: skillCatalog.data?.partial ?? false, diagnostics: skillCatalog.isError ? [{ path: active.cwd, code: 'CATALOG_UNAVAILABLE', message: skillCatalog.error.message }] : skillCatalog.data?.diagnostics ?? [] } }} models={activeModels.data?.models ?? []} reasoningEfforts={activeModels.data?.reasoningEfforts ?? []} currentModel={active.model ?? activeModels.data?.defaultModel} currentReasoningEffort={active.reasoningEffort ?? activeModels.data?.defaultReasoningEffort} advertisedCommands={advertisedCommands} filePicker={Boolean(systemCapabilities.data?.filePicker)} modelReadiness={modelReadiness} switchingModel={switchModel.isPending || busyStates.has(active.state)} switchingReasoningEffort={switchReasoningEffort.isPending || busyStates.has(active.state)} refreshingModels={activeModels.isFetching || refreshModels.isPending} onChange={value => composerDraft.update({ text: value })} onReferencesChange={references => composerDraft.update({ references })} onModeChange={mode => composerDraft.update({ mode })} onSubmit={submit} onInterrupt={() => void act('interrupt')} onCancelQueued={taskId => cancelQueued.mutate({ sessionId: active.id, taskId })} onSteerQueued={taskId => steerQueued.mutate({ sessionId: active.id, taskId })} onInjectQueued={taskId => injectQueued.mutate({ sessionId: active.id, taskId })} onPickFile={async () => (await pickComposerFile.mutateAsync()).path} onModelChange={nextModel => switchModel.mutate({ sessionId: active.id, nextModel })} onReasoningEffortChange={nextReasoningEffort => switchReasoningEffort.mutate({ sessionId: active.id, nextReasoningEffort })} onRefreshModels={() => refreshModels.mutate({ agentId: active.agentId, currentModel: active.model })} session={active} onShowStatus={() => { const status = effectiveStatus(active, runSummaries[active.id]); toastStore.push({ kind: 'info', key: 'composer-status', title: `${status.label} · ${activeAgent?.name ?? active.agentId}`, description: `${sessionWorkspaceName(active)}｜${queuedTasks.length ? `待执行指令 ${queuedTasks.length} 条｜` : ''}${status.archived ? '已归档任务只读' : nextActionForState(active.state)}` }); }} onRestart={() => restart.mutate(active.id)} onCreateTask={openCreateTask} onOpenHelp={openHelp}/>}</section></div>
           {inspectorOpen && inspectorSideBySide && <aside aria-label="结果检视" className="ui-side-panel flex w-96 shrink-0 flex-col border-l border-default bg-surface"><div className="flex h-12 shrink-0 items-center border-b border-default px-4"><h2 className="text-body font-semibold">结果检视</h2><span className="ml-auto"><IconButton label="关闭结果检视" onClick={closeInspector}><X size={16}/></IconButton></span></div><div className="min-h-0 flex-1 overflow-y-auto p-4">{inspectorBody(active)}</div></aside>}

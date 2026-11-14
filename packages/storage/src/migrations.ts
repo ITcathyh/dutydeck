@@ -839,12 +839,23 @@ function applyFreshSchemaTemplate(db: Database.Database): boolean {
  * 版本号到迁移名的已记录映射；name 为 null 的行早于迁移名记录，无法核对，只能按版本号认定。
  * 迁移名不一致说明库由另一条分支的迁移序列升级过，同一版本号已执行的是别的迁移，必须拒绝继续。
  */
+function shellArgument(value: string): string {
+  return /^[A-Za-z0-9_./:@%+=,-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`
+}
+
+function schemaTooNewError(db: Database.Database, actualVersion: number): Error {
+  const supportedVersion = migrations.at(-1)!.version
+  const command = `dutydeck database execution-status --database ${shellArgument(db.name)}`
+  return new Error(`DATABASE_SCHEMA_TOO_NEW: database schema version ${actualVersion}; this build supports schema version ${supportedVersion}. Startup refuses the newer database and does not migrate or downgrade it.\nRead-only inspection:\n${command}\nUse a Dutydeck build that supports schema ${actualVersion}, or stop all writers and restore a known-good backup into a separate new directory with dutydeck backup restore --archive <backup-archive> --target <new-restored-directory>. Restoring a backup discards all writes made after that backup; switching to older code is not a database rollback.`)
+}
+
 function recordedMigrations(db: Database.Database): Map<number, string | null> {
   const named = (db.pragma('table_info(schema_migrations)') as Array<{ name: string }>).some(column => column.name === 'name')
   const rows = db.prepare(`SELECT version, ${named ? 'name' : 'NULL'} AS name FROM schema_migrations`).all() as Array<{ version: number; name: string | null }>
+  const actualVersion = Math.max(0, ...rows.map(row => row.version))
   for (const row of rows) {
     const expected = migrations.find(migration => migration.version === row.version)
-    if (!expected) throw new Error('DATABASE_SCHEMA_TOO_NEW')
+    if (!expected) throw schemaTooNewError(db, actualVersion)
     if (row.name !== null && row.name !== expected.name) {
       throw new Error(`DATABASE_SCHEMA_LINEAGE_MISMATCH: migration ${row.version} was recorded as "${row.name}" but this build expects "${expected.name}"`)
     }

@@ -4,12 +4,13 @@ import { checkWatchFindings } from '../watch.js';
  *
  * 四条硬约束（每条都对应一个真实踩坑）：
  *
- *   1. **只报不改。** 体检是诊断命令，不得因为「检查了一下」而改变磁盘状态：
- *      不建库、不建目录、不写配置、不生成令牌。因此本模块绝不调用
+ *   1. **除私有终端 smoke 外只报不改。** 体检不得因为「检查了一下」而改变持久状态：
+ *      不建库、不在数据目录建目录、不写配置、不生成令牌。因此本模块绝不调用
  *      createRepositories（会 mkdir + 建库 + 开 WAL + 可能 VACUUM 备份 + 跑迁移）、
  *      不调用 readLarkConfigs（会写回 lark.bots 做迁移）、不调用
- *      loadOrCreateAuthToken / rotateAuthToken（都会写）。唯一容许的副作用是
- *      只读打开 WAL 库时 SQLite 自建的 -wal/-shm 边车文件，见 probes.ts。
+ *      loadOrCreateAuthToken / rotateAuthToken（都会写）。常规副作用只有只读打开 WAL 库时
+ *      SQLite 自建的 -wal/-shm 边车文件，见 probes.ts；terminal.backend 另会在 /tmp 新建
+ *      私有 tmux socket 做 smoke 并清理，清理结果不确定时保留现场，见 terminal-backend.ts。
  *
  *   2. **状态不许说谎。** daemonStatus() 把死掉的 pid 折叠成 running:false，
  *      与「从未启动过」不可区分，所以额外读原始记录把两者分开。同理，端口探测
@@ -25,6 +26,7 @@ import { checkWatchFindings } from '../watch.js';
  * 一次，结果由 config 与 agents 两项检查共享；端口探测带超时，绝不挂住。
  */
 import { constants, existsSync, readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { access as fsAccess, stat as fsStat } from 'node:fs/promises';
 import { userInfo } from 'node:os';
 import { dirname, resolve } from 'node:path';
@@ -39,12 +41,14 @@ import { accessMode } from '../service.js';
 import { createCliUi, type CliUi } from '../cli-ui.js';
 import { locateEnvFile } from '../env-location.js';
 import { defaultAgentProbe, defaultDatabaseProbe, defaultPortProbe, defaultProcessUid } from './probes.js';
+import { defaultTerminalBackendProbe } from './terminal-backend.js';
 import { agentsToProbe, checkDefaultAgents, checkDroppedAgents, readDefaultAgents } from './agent-checks.js';
 import { pluginDoctorChecks } from '../plugins/doctor.js';
 import {
   AUTH_TOKEN_CONFIG_KEY,
   DOCTOR_CONFIG_KEYS,
   DOCTOR_CONFIG_PREFIXES,
+  TERMINAL_BACKEND_CONFIG_KEY,
   checkAccessPosture,
   checkAccessToken,
   checkAgentAuth,
@@ -59,15 +63,18 @@ import {
   checkLark,
   checkLarkListener,
   checkLarkMemory,
+  checkLarkExposure,
   checkNodeVersion,
   checkRunAsRoot,
   checkPlatformPickers,
   checkPort,
   checkPostureDrift,
   checkSchema,
+  checkTerminalBackend,
   checkUnpricedModels,
   larkBotsConfigKey,
   larkListenerStatusKey,
+  planTerminalBackend,
   summarize,
   type DirectoryObservation
 } from './checks.js';
@@ -79,7 +86,9 @@ import type {
   DoctorConfig,
   DoctorDependencies,
   DoctorOptions,
-  DoctorReport
+  DoctorReport,
+  DoctorSocketActivationObservation,
+  DoctorSocketActivationProbeInput
 } from './types.js';
 
 export type {
@@ -92,12 +101,64 @@ export type {
   DoctorOptions,
   DoctorReport,
   PortProbe,
-  PortProbeOutcome
+  PortProbeOutcome,
+  TerminalBackendProbe,
+  TerminalBackendProbeResult
 } from './types.js';
 export { REQUIRED_NODE_VERSION } from './checks.js';
 
 const DEFAULT_PORT_PROBE_TIMEOUT_MS = 1_000;
 const DEFAULT_AGENT_PROBE_TIMEOUT_MS = 5_000;
+const DEFAULT_TERMINAL_BACKEND_PROBE_TIMEOUT_MS = 3_000;
+
+type SystemdUnitProbe = (unit: string, properties: readonly string[]) => { status: number | null; stdout: string };
+
+const showSystemdUnit: SystemdUnitProbe = (unit, properties) => {
+  const result = spawnSync('systemctl', ['--user', 'show', unit, `--property=${properties.join(',')}`], {
+    encoding: 'utf8', timeout: 1_000, maxBuffer: 16 * 1024
+  });
+  return { status: result.status, stdout: result.stdout ?? '' };
+};
+
+function systemdProperty(stdout: string, name: string): string | undefined {
+  const prefix = `${name}=`;
+  return stdout.split('\n').find(line => line.startsWith(prefix))?.slice(prefix.length).trim();
+}
+
+/**
+ * 只认当前进程的 LISTEN_* 或 daemon 记录的 systemd unit。service 停止时 socket 仍可能持有端口，
+ * 所以 TriggeredBy 定位到的每个 socket 都要另查 ActiveState/SubState；查询与地址不可知时绝不猜。
+ */
+export function observeSocketActivation(
+  input: DoctorSocketActivationProbeInput,
+  showUnit: SystemdUnitProbe = showSystemdUnit
+): DoctorSocketActivationObservation {
+  const listenFds = Number(input.env.LISTEN_FDS);
+  if (input.env.LISTEN_PID === String(input.processPid) && Number.isSafeInteger(listenFds) && listenFds > 0) {
+    return { status: 'active', source: 'process', reason: 'address-unavailable' };
+  }
+  const unit = input.record?.systemdUnit;
+  if (!unit) return input.record?.supervisor === 'systemd' ? { status: 'unknown', reason: 'unit-unavailable' } : { status: 'inactive' };
+  const shown = showUnit(unit, ['TriggeredBy']);
+  if (shown.status !== 0) return { status: 'unknown', reason: 'unit-unavailable' };
+  const triggeredBy = systemdProperty(shown.stdout, 'TriggeredBy');
+  if (triggeredBy === undefined) return { status: 'unknown', reason: 'unit-unavailable' };
+  const sockets = triggeredBy.split(/\s+/).filter(name => name.endsWith('.socket'));
+  if (sockets.length === 0) return { status: 'inactive' };
+
+  let unknown = false;
+  for (const socket of sockets) {
+    const state = showUnit(socket, ['ActiveState', 'SubState']);
+    if (state.status !== 0) { unknown = true; continue; }
+    const activeState = systemdProperty(state.stdout, 'ActiveState');
+    const subState = systemdProperty(state.stdout, 'SubState');
+    if (activeState === 'active' && subState === 'listening') {
+      return { status: 'active', source: 'unit', reason: 'address-unavailable' };
+    }
+    if (activeState !== 'inactive' && activeState !== 'failed') unknown = true;
+  }
+  return unknown ? { status: 'unknown', reason: 'unit-unavailable' } : { status: 'inactive' };
+}
 
 /** 动态 import autostart 模块：它可能尚未落地，缺失时该项降级为 skip。 */
 async function loadAutostartStatus(): Promise<DoctorAutostartResult | undefined> {
@@ -193,6 +254,7 @@ export async function runDoctor(
   const access = dependencies.access ?? fsAccess;
   const stat = dependencies.stat ?? (async (path: string) => ({ mode: (await fsStat(path)).mode }));
   const databaseProbe = dependencies.databaseProbe ?? defaultDatabaseProbe;
+  const terminalBackendProbe = dependencies.terminalBackendProbe ?? defaultTerminalBackendProbe;
   const portProbe = dependencies.portProbe ?? defaultPortProbe;
   const portTimeout = dependencies.portProbeTimeoutMs ?? DEFAULT_PORT_PROBE_TIMEOUT_MS;
   const username = dependencies.username ?? (() => {
@@ -244,7 +306,7 @@ export async function runDoctor(
   try {
     // 配置库按 daemon 的取法以根目录为基准：loadConfig 以 DUTYDECK_DEFAULT_CWD（Agent 默认目录）为基准，
     // 两者不同时（比如 DEFAULT_CWD 设成 HOME）会报出一个 daemon 从不打开的路径。
-    config = dependencies.config ?? (() => { const loaded = loadConfigWithDiagnostics(env, PTY_AGENT_CONTRIBUTIONS); return { ...loaded.config, databaseUrl: daemonDatabasePath(daemonRoot(), env.DUTYDECK_DATABASE_URL), droppedAgents: loaded.droppedAgents }; })();
+    config = dependencies.config ?? (() => { const loaded = loadConfigWithDiagnostics(env, PTY_AGENT_CONTRIBUTIONS); return { ...loaded.config, ...(env.DUTYDECK_LOCAL_ONLY !== undefined ? { localOnly: env.DUTYDECK_LOCAL_ONLY === 'true' } : {}), databaseUrl: daemonDatabasePath(daemonRoot(), env.DUTYDECK_DATABASE_URL), droppedAgents: loaded.droppedAgents }; })();
     checks.push(checkConfig(config));
   } catch (error) {
     // 配置坏了也要把体检跑完：这正是用户最需要诊断的时候。
@@ -253,6 +315,7 @@ export async function runDoctor(
       host: env.DUTYDECK_HOST ?? '127.0.0.1',
       port: Number(env.DUTYDECK_PORT) || 4310,
       authEnabled: env.DUTYDECK_AUTH !== 'false',
+      ...(env.DUTYDECK_LOCAL_ONLY !== undefined ? { localOnly: env.DUTYDECK_LOCAL_ONLY === 'true' } : {}),
       databaseUrl: daemonDatabasePath(daemonRoot(), env.DUTYDECK_DATABASE_URL),
       agents: []
     };
@@ -290,6 +353,17 @@ export async function runDoctor(
   checks.push(checkDutydeckDir(await observeDirectory(dutydeckDir, platform, exists, access, stat)));
 
   // ---- 6. Agent ----
+  const terminalPlan = planTerminalBackend({
+    ...(configError !== undefined ? { configError } : {}),
+    database: probe,
+    backend: probe.values?.[TERMINAL_BACKEND_CONFIG_KEY],
+    agents: config.agents
+  });
+  const terminalResult = terminalPlan.action === 'probe'
+    ? Promise.resolve().then(() => terminalBackendProbe(dependencies.terminalBackendProbeTimeoutMs ?? DEFAULT_TERMINAL_BACKEND_PROBE_TIMEOUT_MS, env))
+    : undefined;
+  // 仍在原位置等待结果；若前面的 Agent 检查先失败，避免并行探针产生未处理 rejection。
+  void terminalResult?.catch(() => {});
   if (configError) {
     checks.push({ id: 'agents.detected', label: 'Agent CLI', level: 'skip', detail: '配置解析失败，未检测 Agent' });
   } else {
@@ -304,6 +378,14 @@ export async function runDoctor(
     if (targets.length > 0) progress(`检查默认 Agent 命令（--version，最多 ${Math.round(agentTimeout / 1000)} 秒）`);
     const results = new Map(await Promise.all(targets.map(async target => [target.id, await agentProbe(target.command, agentTimeout)] as const)));
     checks.push(checkDefaultAgents({ bots: defaultBots, agents: config.agents, dropped: config.droppedAgents ?? [], results, timeoutMs: agentTimeout }));
+  }
+
+  // ---- 6b. 主终端后端 ----
+  if (terminalPlan.action === 'probe') {
+    progress('用私有 socket 检查 tmux（不影响已有 tmux 会话）');
+    checks.push(checkTerminalBackend(terminalPlan, await terminalResult));
+  } else {
+    checks.push(checkTerminalBackend(terminalPlan));
   }
 
   // ---- 7. 飞书 ----
@@ -360,6 +442,27 @@ export async function runDoctor(
     mode,
     present: Boolean(probe.values?.[AUTH_TOKEN_CONFIG_KEY]?.trim()),
     ...(databaseUnreadable ? { unknown: true } : {})
+  }));
+
+  // ---- 8b. 网络与机器人权限的暴露组合 ----
+  const socket = await Promise.resolve((dependencies.socketActivationProbe ?? observeSocketActivation)({
+    env,
+    processPid: process.pid,
+    running: status.running,
+    ...(record ? { record } : {})
+  })).catch((): DoctorSocketActivationObservation => ({ status: 'unknown', reason: 'unit-unavailable' }));
+  const runningHost = status.running && record?.host !== undefined ? record.host : undefined;
+  const exposureHost = socket.status === 'active' ? socket.host : socket.status === 'unknown' ? undefined : runningHost ?? config.host;
+  const localOnly = config.localOnly ?? (env.DUTYDECK_LOCAL_ONLY === undefined ? undefined : env.DUTYDECK_LOCAL_ONLY === 'true');
+  checks.push(await checkLarkExposure({
+    ...(exposureHost !== undefined ? { host: exposureHost } : {}),
+    hostSource: socket.status === 'active' ? 'socket' : runningHost !== undefined ? 'runtime' : 'config',
+    ...(localOnly !== undefined ? { localOnly } : {}),
+    authEnabled: status.running && record?.authEnabled !== undefined ? record.authEnabled : config.authEnabled,
+    socket,
+    unavailable: databaseUnreadable,
+    ...(databaseUnreadable ? {} : probe.values?.[larkBotsConfigKey] ? { rawBots: probe.values[larkBotsConfigKey] } : {}),
+    listenerDisabled
   }));
 
   // ---- 9. 端口 ----

@@ -28,13 +28,13 @@ import { readNativeAskPayload, runNativeAskHook } from './native-ask-hook.js';
 import { runPermissionHook } from './permission-hook.js';
 import { RelayCliError } from '@dutydeck/relay';
 import { daemonRestart, daemonStart, daemonStatus, daemonStop, resolveCliDatabase, systemdRestartTarget, waitForRunningTasksDrain, type DaemonCommandResult, type DaemonStatusInfo } from './daemon/command.js';
-import { SUPERVISOR_ENV, readDaemonStatus, resolveDaemonDir } from './daemon/daemon.js';
+import { SUPERVISOR_ENV, readDaemonLog, readDaemonStatus, readJournalctlLog, resolveDaemonDir } from './daemon/daemon.js';
 import { sleep } from './daemon/time.js';
 import { armShutdownDeadline } from './shutdown-phases.js';
 import { runNpmForDutydeckUpdate, updateDutydeck } from './update.js';
 import { runDeploy, runDeployPrune, type DeployPruneResult, type DeployResult } from './daemon/deploy.js';
 import { loadConfig, resolveDatabaseUrl } from '@dutydeck/config';
-import { recordAbnormalExit } from './abnormal-exit.js';
+import { beginServeRun, enrichAbnormalExitFromJournal, markServeRunning, recordAbnormalExit, recordCleanExit, type ServeRunLifecycle } from './abnormal-exit.js';
 import { createRepositories } from '@dutydeck/storage';
 import { runAuthPasswordSetCommand, runAuthTokenCommand, runShareKeyRotateCommand } from './auth/auth.js';
 import { readPasswordInput } from './auth/password-input.js';
@@ -51,6 +51,7 @@ import { PullRequestCliError, runPullRequestCli } from './pull-request-cli.js';
 import { DatabaseCliError, runDatabaseExecutionStatus, runDatabaseRetireLegacy, runDatabaseUpgradeExecution } from './database-cli.js';
 import { IdentityPreflightCliError, runIdentityPreflightCli } from './identity-preflight-cli.js';
 import { runSetup } from './setup/setup.js';
+import { maybePrintFirstRunGuidance } from './setup/first-run.js';
 import { PromptAbortedError, PromptUnavailableError } from './setup/prompts.js';
 import { InvalidWorkingDirectoryError } from './setup/detect.js';
 import { AutostartError, autostartDisable, autostartEnable, autostartStatus } from './autostart/autostart.js';
@@ -80,6 +81,19 @@ async function serve(options: CliOptions, onReady?: () => void) {
   // 异常退出记录只写到本次 serve 的数据库目录（与 startLocalServer 同一取法），不走 daemon 目录的 last-daemon-dir 回退。
   let databaseUrl: string | undefined;
   try { databaseUrl = resolveDatabaseUrl(environmentFromCli(options)); } catch { databaseUrl = undefined; }
+  const daemonState = readDaemonStatus(resolveDaemonDir());
+  const unit = daemonState?.pid === process.pid && daemonState.supervisor === 'systemd' ? daemonState.systemdUnit : undefined;
+  const started = beginServeRun(databaseUrl, { version: packageJson.version, ...(unit ? { unit } : {}) });
+  let serveRun: ServeRunLifecycle = started.lifecycle;
+  for (const previousRun of started.previousRuns ?? (started.previousRun ? [started.previousRun] : [])) void enrichAbnormalExitFromJournal(databaseUrl, previousRun);
+  const abnormal = (kind: 'fatal' | 'startup', exitCode: number, error: unknown, signal?: string) => {
+    recordAbnormalExit(databaseUrl, { kind, exitCode, error, version: packageJson.version, lifecycle: serveRun, source: 'process', ...(signal ? { signal } : {}) });
+  };
+  const persistCleanExit = (signal: NodeJS.Signals) => {
+    if (!recordCleanExit(databaseUrl, serveRun, { reason: 'stopped', signal })) {
+      process.stderr.write('Warning: could not persist the clean-exit marker beside the database; the next start may record this run as an abnormal exit. Check the database directory and last-abnormal-exit.json.\n');
+    }
+  };
   // Observe fatal errors without installing a recovery handler. Continuing
   // after an uncaught exception can leave the DB, PTY, and session queues in an
   // unknown state; Node must retain its default non-zero exit behavior so the
@@ -93,10 +107,14 @@ async function serve(options: CliOptions, onReady?: () => void) {
     if (plugins.length) process.stderr.write(`Fatal error stack includes in-process plugin code: ${plugins.join(', ')}. Plugin providers run inside the daemon; fix or disable the plugin (dutydeck plugin disable <name>).\n`);
     const quarantined = quarantineCrashedPlugins(plugins, origin);
     if (quarantined.length) process.stderr.write(`Quarantined plugins: ${quarantined.join(', ')}. They will not load on the next start; after fixing, run dutydeck plugin enable <name> and restart.\n`);
-    recordAbnormalExit(databaseUrl, { kind: 'fatal', exitCode: 1, error, version: packageJson.version });
+    abnormal('fatal', 1, error);
   });
   // 启动完成前没有可关闭的服务；停止信号照常立即退出，但先删掉正在加载的插件标记，免得被当成插件卡死而隔离。
-  const startupSignal = (signal: NodeJS.Signals) => { releaseProviderLoadingMarkers(); process.exit(128 + (signal === 'SIGINT' ? 2 : 15)); };
+  const startupSignal = (signal: NodeJS.Signals) => {
+    persistCleanExit(signal);
+    releaseProviderLoadingMarkers();
+    process.exit(128 + (signal === 'SIGINT' ? 2 : 15));
+  };
   process.on('SIGINT', startupSignal); process.on('SIGTERM', startupSignal);
   const { startLocalServer } = await import('./service.js');
   const { dutydeckGroupToolsCommand } = await import('./lark/agent-tools.js');
@@ -104,10 +122,13 @@ async function serve(options: CliOptions, onReady?: () => void) {
   try {
     service = await startLocalServer({ env: environmentFromCli(options), groupToolsCommand: dutydeckGroupToolsCommand(fileURLToPath(import.meta.url)) });
   } catch (error) {
-    recordAbnormalExit(databaseUrl, { kind: 'startup', exitCode: 1, error, version: packageJson.version });
+    abnormal('startup', 1, error);
     throw error;
   }
   databaseUrl = service.config.databaseUrl;
+  const running = markServeRunning(databaseUrl, serveRun);
+  serveRun = running.lifecycle;
+  for (const previousRun of running.previousRuns ?? (running.previousRun ? [running.previousRun] : [])) void enrichAbnormalExitFromJournal(databaseUrl, previousRun);
   process.off('SIGINT', startupSignal); process.off('SIGTERM', startupSignal);
   const address = service.config.host === '0.0.0.0'
     ? `http://127.0.0.1:${service.config.port} (LAN access enabled; other devices can use this computer's LAN IP)`
@@ -118,23 +139,36 @@ async function serve(options: CliOptions, onReady?: () => void) {
   const shutdown = async (signal: NodeJS.Signals) => {
     if (closing) {
       process.stderr.write(`Received ${signal} again; forcing exit. 未完成的停服阶段：${service.shutdownPhases.unfinished().join('、')}\n`);
+      abnormal('fatal', 130, `Forced shutdown after a second ${signal}`, signal);
       process.exit(130);
     }
     closing = true;
     process.stdout.write('Shutting down Dutydeck… Press Ctrl-C again to force exit.\n');
-    const cancelHardStop = armShutdownDeadline(() => service.shutdownPhases, line => process.stderr.write(line), code => process.exit(code));
+    const cancelHardStop = armShutdownDeadline(() => service.shutdownPhases, line => process.stderr.write(line), code => {
+      abnormal('fatal', code, 'Shutdown deadline exceeded', signal);
+      process.exit(code);
+    });
     try {
       await service.close();
       cancelHardStop();
+      persistCleanExit(signal);
       process.exit(0);
     } catch (error) {
       cancelHardStop();
       process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+      abnormal('fatal', 1, error, signal);
       process.exit(1);
     }
   };
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
+  // Install stop handlers before this async read; otherwise an early SIGTERM kills the process without a clean exit.
+  await maybePrintFirstRunGuidance({
+    address,
+    databaseUrl: service.config.databaseUrl,
+    json: options.json,
+    isTTY: process.stdout.isTTY === true
+  });
 }
 
 async function restartWithInstalledCli(entrypoint: string, options: { force?: boolean; drainTimeout?: string } = {}) {
@@ -398,6 +432,12 @@ async function main() {
       const status = daemonStatus();
       renderDaemonResult({ action: 'status', ...status }, options.json === true);
       // status 是查询命令：不在运行不是「命令失败」，退出码保持 0。
+    },
+    logs: async options => {
+      const lines = options.unit === undefined
+        ? readDaemonLog(resolveDaemonDir(), options.lines)
+        : await readJournalctlLog(options.unit, options.lines);
+      if (lines.length) process.stdout.write(`${lines.join('\n')}\n`);
     },
     update: async options => {
       output(await updateDutydeck(packageJson.version, options, {

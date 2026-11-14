@@ -92,15 +92,17 @@ it('keeps password login after logout using real backend routes and browser API 
   const passwordHash = await hashPassword(password);
   registerBrowserAuthRoutes(app, { localOnly: false, mode: 'token', getToken: async () => 'different-access-token', getPasswordHash: async () => passwordHash });
   const remote = { remoteAddress: '203.0.113.7' } as const;
+  // Browsers omit the default port from Host; inject would otherwise send localhost:80.
+  const host = 'dashboard.example';
   try {
-    const initialLogin = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { password }, ...remote });
+    const initialLogin = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { password }, headers: { host }, ...remote });
     expect(initialLogin.statusCode).toBe(200);
     let cookie = String(initialLogin.headers['set-cookie']).split(';')[0]!;
     const requests: Array<{ url: string; body: unknown }> = [];
     vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
       const body = init?.body ? JSON.parse(String(init.body)) : undefined;
       requests.push({ url, body });
-      const result = await app.inject({ method: init?.method === 'POST' ? 'POST' : 'GET', url, headers: { cookie }, ...(body ? { payload: body } : {}), ...remote });
+      const result = await app.inject({ method: init?.method === 'POST' ? 'POST' : 'GET', url, headers: { cookie, host }, ...(body ? { payload: body } : {}), ...remote });
       if (result.headers['set-cookie']) cookie = String(result.headers['set-cookie']).split(';')[0]!;
       return new Response(result.body, { status: result.statusCode, headers: { 'content-type': 'application/json' } });
     }));

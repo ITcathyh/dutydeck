@@ -36,7 +36,7 @@ import { pinnedSessionUuid } from '@dutydeck/cli-adapters';
 import { claudeProjectDir, claudeProjectDirCandidates, type CliPathEnv } from '../cli-paths.js';
 import { byMtimeDesc, parseJsonlObjects, readHead, walkFiles } from '../session-id/fs-scan.js';
 import { buildSessionMarker, isUsableMarker } from '../session-id/marker.js';
-import { JsonlTailer, type TranscriptCursor, type TranscriptEventSource, type TranscriptPosition } from './tail.js';
+import { JsonlTailer, type TranscriptCursor, type TranscriptEventSource, type TranscriptPosition, type TranscriptCompactionObservation } from './tail.js';
 import { claudeInputText } from './input-receipt.js';
 import { userEntryMentionsMarker } from './claude-content.js';
 import { ClaudeSubagentReader } from './claude-subagents.js';
@@ -452,6 +452,18 @@ export interface ClaudeTranscriptTailerOptions {
   env?: CliPathEnv;
 }
 
+interface ClaudeCompactionWait {
+  observation: TranscriptCompactionObservation;
+  armedAt: number;
+  promptId?: string;
+  inputUuid?: string;
+  inputParentUuid?: string;
+  readonly commandUuids: Set<string>;
+  readonly boundaryUuids: Set<string>;
+  invalidated: boolean;
+  finish(outcome?: 'completed' | 'failed', error?: Error): void;
+}
+
 export class ClaudeTranscriptTailer implements TranscriptEventSource {
   private readonly tailer: JsonlTailer;
   private readonly locator?: ClaudeSessionTranscriptLocator;
@@ -496,6 +508,12 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
   private restored = false;
   /** Some usage of the turn could not be read (sub-agent files), so the reading is a lower bound. */
   private usagePartial = false;
+  private observedNativeSessionId: string | undefined;
+  private compaction: ClaudeCompactionWait | undefined;
+  /** Submitted waits retired before their input arrived still own that late input chain. */
+  private readonly retiredCompactions = new Set<ClaudeCompactionWait>();
+  /** Baseline, live and retired /compact receipts are never fresh again. */
+  private readonly compactionInputUuids = new Set<string>();
 
   constructor(opts: ClaudeTranscriptTailerOptions) {
     const explicit = opts.transcriptPath;
@@ -542,7 +560,7 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
       resolvePath,
       baselineMapping: true,
       mapEntry: (entry, baseline, position) => {
-        const backgroundChanged = this.backgroundTasks.observe(entry);
+        const backgroundChanged = this.backgroundTasks.observe(entry, position);
         const nativeInput = claudeInputText(entry) !== undefined && entry.isSidechain !== true;
         const notification = entry.turnOrigin === 'task_notification' || entry.origin?.kind === 'task-notification';
         if (nativeInput && !notification) { this.observedInputId = entry.uuid; this.memoryCalls.clear(); this.backgroundReported = false; }
@@ -653,6 +671,7 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
         }
         return backgroundChanged ? [...events ?? [], backgroundEvent] : events;
       },
+      observeEntry: (entry, baseline, position) => { this.observeCompaction(entry, baseline, position); },
       inputText: claudeInputText,
       onInputReceipt: entry => {
         this.bindInput(entry);
@@ -666,6 +685,116 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
         this.scheduledEntries.clear();
       },
     });
+  }
+
+  compactionNativeSession(): string | undefined { return this.observedNativeSessionId; }
+
+  waitForCompaction(observation: TranscriptCompactionObservation): Promise<'completed' | 'failed'> {
+    if (this.compaction) return Promise.reject(new Error('Another compaction maintenance generation is already active'));
+    if (!observation.position || observation.nativeSessionId !== this.observedNativeSessionId) {
+      return Promise.reject(new Error('Claude compaction evidence is unavailable for this native session'));
+    }
+    return new Promise((resolve, reject) => {
+      const wait: ClaudeCompactionWait = {
+        observation, armedAt: Date.now(), commandUuids: new Set(), boundaryUuids: new Set(), invalidated: false,
+        finish: (outcome, error) => {
+          if (this.retiredCompactions.delete(wait)) return;
+          if (this.compaction !== wait) return;
+          this.compaction = undefined;
+          observation.signal.removeEventListener('abort', abort);
+          if (error && !wait.promptId && observation.submitted?.() === true) this.retiredCompactions.add(wait);
+          if (error) reject(error); else resolve(outcome!);
+        },
+      };
+      const abort = () => wait.finish(undefined, observation.signal.reason instanceof Error ? observation.signal.reason : new Error('Compaction maintenance cancelled'));
+      this.compaction = wait;
+      observation.signal.addEventListener('abort', abort, { once: true });
+      if (observation.signal.aborted) abort();
+    });
+  }
+
+  /** Observe maintenance records outside the business mapper. A manual boundary
+   * succeeds only with the preceding exact input and a summary that ties its
+   * promptId back to that boundary; all three must share the native session. */
+  private observeCompaction(entry: any, baseline: boolean, position: TranscriptPosition | undefined): void {
+    const native = typeof entry?.sessionId === 'string' ? entry.sessionId : typeof entry?.session_id === 'string' ? entry.session_id : undefined;
+    if (native) this.observedNativeSessionId = native;
+    const inputText = claudeInputText(entry);
+    const compactInputUuid = inputText === '/compact' && typeof entry?.uuid === 'string' && entry.uuid ? entry.uuid : undefined;
+    const replayedInput = compactInputUuid !== undefined && this.compactionInputUuids.has(compactInputUuid);
+    if (compactInputUuid) this.compactionInputUuids.add(compactInputUuid);
+    if (baseline) return;
+    for (const wait of this.retiredCompactions) {
+      if (this.observeCompactionWait(wait, entry, position, native, inputText, replayedInput)) return;
+    }
+    if (this.compaction) this.observeCompactionWait(this.compaction, entry, position, native, inputText, replayedInput);
+  }
+
+  /** True when a retired wait claimed this input, keeping it away from the active generation. */
+  private observeCompactionWait(wait: ClaudeCompactionWait, entry: any, position: TranscriptPosition | undefined,
+    native: string | undefined, inputText: string | undefined, replayedInput: boolean): boolean {
+    if (wait.invalidated) return false;
+    const start = wait.observation.position!;
+    if (!position || position.path !== start.path || position.dev !== start.dev || position.ino !== start.ino
+      || position.epoch !== start.epoch || position.offset < start.offset || native !== wait.observation.nativeSessionId) return false;
+
+    if (!wait.promptId) {
+      if (inputText === undefined || replayedInput) return false;
+      const timestamp = Date.parse(entry.timestamp);
+      if (!Number.isFinite(timestamp) || timestamp < wait.armedAt - 1_000) return false;
+      if (inputText !== '/compact') { wait.invalidated = true; wait.finish('failed'); return false; }
+      if (typeof entry.promptId !== 'string' || !entry.promptId || typeof entry.uuid !== 'string' || !entry.uuid) {
+        wait.invalidated = true;
+        wait.finish('failed');
+        return true;
+      }
+      wait.promptId = entry.promptId;
+      wait.inputUuid = entry.uuid;
+      wait.inputParentUuid = typeof entry.parentUuid === 'string' ? entry.parentUuid : undefined;
+      return true;
+    }
+
+    if (entry.type === 'system' && entry.subtype === 'compact_boundary') {
+      if (entry.compactMetadata?.trigger === 'manual' && typeof entry.uuid === 'string'
+        && typeof wait.inputParentUuid === 'string' && entry.logicalParentUuid === wait.inputParentUuid) {
+        wait.boundaryUuids.add(entry.uuid);
+      }
+      return false;
+    }
+    if (entry.isCompactSummary === true) {
+      if (!wait.boundaryUuids.has(entry.parentUuid)) return false;
+      if (entry.promptId === wait.promptId) wait.finish('completed');
+      else if (this.retiredCompactions.has(wait) && this.compaction && !this.compaction.promptId) {
+        // A different complete summary separates the retired chain from this
+        // candidate. Return the candidate and its boundaries to the active wait.
+        this.retiredCompactions.delete(wait);
+        this.compaction.promptId = wait.promptId;
+        this.compaction.inputUuid = wait.inputUuid;
+        this.compaction.inputParentUuid = wait.inputParentUuid;
+        for (const uuid of wait.commandUuids) this.compaction.commandUuids.add(uuid);
+        for (const uuid of wait.boundaryUuids) this.compaction.boundaryUuids.add(uuid);
+      }
+      return false;
+    }
+    const content = entry.message?.content;
+    if (entry.promptId === wait.promptId && typeof content === 'string' && content.includes('<command-name>/compact</command-name>')) {
+      if (typeof entry.uuid === 'string') wait.commandUuids.add(entry.uuid);
+      return false;
+    }
+    if (entry.type === 'system' && entry.subtype === 'local_command' && wait.commandUuids.has(entry.parentUuid)
+      && typeof entry.content === 'string' && entry.content.includes('Not enough messages to compact.')) {
+      wait.finish('failed');
+      return false;
+    }
+    if (entry.uuid === wait.inputUuid) return false;
+    if (claudeInputText(entry) !== undefined) {
+      const timestamp = Date.parse(entry.timestamp);
+      if (Number.isFinite(timestamp) && timestamp >= wait.armedAt - 1_000) {
+        wait.invalidated = true;
+        wait.finish('failed');
+      }
+    }
+    return false;
   }
 
   /**
@@ -736,15 +865,16 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
           // Only decode complete lines: a split UTF-8 character is reread as bytes next time.
           this.backgroundOffsets.set(sibling, { dev: stat.dev, ino: stat.ino, offset: offset + end + 1 });
           if (end < 0) continue;
+          let lineOffset = offset;
           for (const line of bytes.subarray(0, end).toString('utf8').split('\n')) {
+            const entryPosition: TranscriptPosition = { path: sibling, offset: lineOffset, dev: stat.dev, ino: stat.ino, epoch: 0 };
+            lineOffset += Buffer.byteLength(line) + 1;
             // Only these three record shapes are read below; skip parsing every other line of the sibling.
             if (!line.includes('queue-operation') && !line.includes('task_notification') && !line.includes('task-notification')) continue;
             try {
-              const entry = JSON.parse(line);
-              const content = entry.type === 'queue-operation' && entry.operation === 'enqueue' ? entry.content
-                : entry.turnOrigin === 'task_notification' ? entry.message?.content
-                : entry.attachment?.commandMode === 'task-notification' ? entry.attachment.prompt : undefined;
-              if (typeof content === 'string') this.backgroundTasks.observe({ type: 'queue-operation', operation: 'enqueue', content });
+              // Keep the native timestamp and source record: a late sibling
+              // stop belongs to its own run, not to when this scan found it.
+              this.backgroundTasks.observe(JSON.parse(line), entryPosition);
             } catch { /* Unknown records cannot change lifecycle state. */ }
           }
         }
@@ -762,7 +892,7 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
     this.restored = true;
     this.terminalScope = false; this.turnTerminal = false; this.terminalUuids.clear(); this.restoringTurn = true;
   }
-  stop(): void { this.backgroundStopped = true; this.backgroundGeneration++; this.backgroundOffsets.clear(); if (this.backgroundTimer) clearInterval(this.backgroundTimer); this.backgroundTimer = undefined; this.tailer.stop(); }
+  stop(): void { this.compaction?.finish(undefined, new Error('Transcript stopped before compaction completed')); this.backgroundStopped = true; this.backgroundGeneration++; this.backgroundOffsets.clear(); if (this.backgroundTimer) clearInterval(this.backgroundTimer); this.backgroundTimer = undefined; this.tailer.stop(); }
   onEvent(cb: (e: NormalizedDriverEvent) => void): void { this.tailer.onEvent(cb); this.backgroundCallbacks.add(cb); }
   onProgress(cb: () => void): void { this.tailer.onProgress(cb); }
   waitForInput(prompt: string, signal: AbortSignal): Promise<void> {

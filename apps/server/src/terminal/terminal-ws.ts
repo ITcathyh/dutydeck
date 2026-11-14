@@ -3,7 +3,7 @@ import type { FastifyInstance } from 'fastify';
 import type { IncomingMessage } from 'node:http';
 import type { Socket } from 'node:net';
 import { WebSocket, WebSocketServer, type RawData } from 'ws';
-import { isLoopbackHost, isSameOriginRequest, presentedCredential, SHARE_TOKEN_QUERY_KEY } from '../auth/auth.js';
+import { isLoopbackHost, isSameOriginRequest, validatePresentedCredential, SHARE_TOKEN_QUERY_KEY } from '../auth/auth.js';
 
 /** 终端流句柄：stream + 进程退出订阅（runtime 侧从 driver onExit 合成） */
 export interface TerminalStreamHandle {
@@ -150,7 +150,7 @@ export function upgradeRejection(request: IncomingMessage, auth: TerminalRouteAu
     return request.headers.origin && !isSameOriginRequest({ origin: request.headers.origin, host: request.headers.host }, protocol) ? [403, 'Forbidden', 'origin not allowed'] : undefined;
   }
   if (request.headers.origin && !isSameOriginRequest(request.headers, protocol)) return [403, 'Forbidden', 'origin not allowed'];
-  if (!auth.check(presentedCredential(request.headers))) return [401, 'Unauthorized', 'unauthorized'];
+  if (!validatePresentedCredential(request.headers, auth.check)) return [401, 'Unauthorized', 'unauthorized'];
   return undefined;
 }
 
@@ -414,10 +414,9 @@ export function registerTerminalRoutes(app: FastifyInstance, options: TerminalRo
       if (closing || socket.destroyed) { lookup.handle.stream.dispose(); socket.destroy(); return; }
 
       clearTimeout(deadline);
-      // The handshake passed upgradeRejection; of its checks only the token comparison can change afterwards.
+      // Rebuild the ordered candidates from the original connection on every recheck.
       const auth = options.auth && terminalAccessMode(options.auth) === 'token' ? options.auth : undefined;
-      const presented = presentedCredential(request.headers);
-      const credentialValid = () => !auth || auth.check(presented);
+      const credentialValid = () => !auth || validatePresentedCredential(request.headers, auth.check);
       wss.handleUpgrade(request, socket, head, ws => {
         socket.removeListener('error', onSocketError);
         pending.delete(socket);

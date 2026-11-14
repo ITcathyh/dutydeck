@@ -310,7 +310,7 @@ async function main() {
     writeFileSync(join(binDir, 'tmux'), `#!/bin/sh\nexec ${quote(tmux)} -S ${quote(socket)} "$@"\n`, { mode: 0o755 });
     serverEnv.TMUX_TMPDIR = join(dataDir, 'tmux-tmp');
     mkdirSync(serverEnv.TMUX_TMPDIR, { recursive: true });
-    onCleanup('关闭本轮独立 tmux 服务及目标终端', () => { try { execFileSync(tmux, ['-S', socket, 'kill-server'], { stdio: 'ignore' }); } catch { /* No sessions remain. */ } });
+    onCleanup('关闭本轮独立 tmux 服务及目标终端', () => { try { execFileSync(tmux, ['-u', '-S', socket, 'kill-server'], { stdio: 'ignore' }); } catch { /* No sessions remain. */ } });
   }
 
 

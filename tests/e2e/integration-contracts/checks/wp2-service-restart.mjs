@@ -17,7 +17,7 @@ function isolatedCommand(env, command, args, options = {}) {
 }
 
 function isolatedSessions(env) {
-  const result = isolatedCommand(env, 'tmux', ['list-sessions', '-F', '#{session_name}'], {
+  const result = isolatedCommand(env, 'tmux', ['-u', 'list-sessions', '-F', '#{session_name}'], {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'ignore'],
   });
@@ -51,7 +51,7 @@ function main() {
   let testStatus = 1;
   let residue = [];
   try {
-    const tmuxVersion = isolatedCommand(env, 'tmux', ['-V'], { stdio: 'ignore' });
+    const tmuxVersion = isolatedCommand(env, 'tmux', ['-u', '-V'], { stdio: 'ignore' });
     if (tmuxVersion.status !== 0) {
       print({
         case_id: 'daemon-restart-owned-run-reattach',
@@ -91,7 +91,7 @@ function main() {
     }, process.stderr);
     return 1;
   } finally {
-    isolatedCommand(env, 'tmux', ['kill-server'], { stdio: 'ignore' });
+    isolatedCommand(env, 'tmux', ['-u', 'kill-server'], { stdio: 'ignore' });
     rmSync(privateRoot, { recursive: true, force: true });
   }
 }

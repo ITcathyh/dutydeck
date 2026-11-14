@@ -6,7 +6,8 @@ import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createCliUi } from '../cli-ui.js';
 import { runPluginCli } from './cli.js';
-import { parsePluginSource, PluginStore } from './store.js';
+import { loadPluginDirectory } from './manifest.js';
+import { parsePluginSource, PluginStore, type PluginTrustPrompt } from './store.js';
 import { writePlugin } from './scenario-fixtures.test-helpers.js';
 
 const examplePlugin = resolve(import.meta.dirname, '../../../../examples/plugins/hello');
@@ -18,6 +19,22 @@ const declarative = (name: string, version = '1.0.0') => ({
   'triggers/build.json': JSON.stringify({ auth: { type: 'token' }, target: { botAppId: 'cli_a', chatId: 'oc_b' }, prompt: '{{payload.text}}' })
 });
 const hookFiles = { 'hooks/hooks.json': JSON.stringify({ 'task.completed': [{ command: 'true', timeout: 1000 }] }) };
+
+async function stageCandidateWithSecretHook(store: PluginStore, source: string, name: string, secret: string) {
+  await writePlugin(source, {
+    '.dutydeck-plugin/plugin.json': JSON.stringify({ name, version: '1.0.0' })
+  });
+  await store.install(source);
+  await writePlugin(source, {
+    '.dutydeck-plugin/plugin.json': JSON.stringify({ name, version: '2.0.0' }),
+    'hooks/hooks.json': JSON.stringify({ 'task.completed': [{ command: ['node', 'hook.mjs', secret], timeout: 1000 }] })
+  });
+  await store.update(name, { yes: true });
+  await writePlugin(source, {
+    '.dutydeck-plugin/plugin.json': JSON.stringify({ name, version: '3.0.0', providers: 'provider.mjs' }),
+    'provider.mjs': 'export default () => {};'
+  });
+}
 
 describe('PluginStore', () => {
   let temp: string;
@@ -163,6 +180,199 @@ describe('PluginStore', () => {
     expect(again).not.toHaveBeenCalled();
   });
 
+  it('reports added, removed and changed executable command digests without exposing their contents', async () => {
+    const source = join(temp, 'review');
+    await writePlugin(source, {
+      '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'review', version: '1.0.0' }),
+      'commands/summary.md': 'old command secret',
+      'commands/remove.md': 'remove me',
+      'agents/worker.json': JSON.stringify({ id: 'worker', name: 'Worker', command: 'node', args: ['old.mjs'] }),
+      'hooks/hooks.json': JSON.stringify({ 'task.completed': [{ command: ['node', 'old-hook.mjs'], timeout: 1000 }] })
+    });
+    await store.install(source, { yes: true });
+    await writePlugin(source, {
+      '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'review', version: '2.0.0' }),
+      'commands/summary.md': 'new command secret',
+      'commands/added.md': 'added command secret',
+      'agents/worker.json': JSON.stringify({ id: 'worker', name: 'Worker', command: 'node', args: ['new.mjs', '--flag'] }),
+      'hooks/hooks.json': JSON.stringify({ 'task.completed': [{ command: ['node', 'new-hook.mjs'], timeout: 1000 }] })
+    });
+    await rm(join(source, 'commands/remove.md'));
+
+    const updated = await store.update('review', { yes: true });
+    expect(updated.changed).toBe(true);
+    expect(updated.changes).toHaveLength(5);
+    expect(updated.changes).toEqual(expect.arrayContaining([
+      { kind: 'agent', name: 'worker', before: expect.stringMatching(/^[0-9a-f]{64}$/), after: expect.stringMatching(/^[0-9a-f]{64}$/) },
+      { kind: 'hook', name: 'task.completed', before: expect.stringMatching(/^[0-9a-f]{64}$/), after: expect.stringMatching(/^[0-9a-f]{64}$/) },
+      { kind: 'command', name: 'review:summary', before: expect.stringMatching(/^[0-9a-f]{64}$/), after: expect.stringMatching(/^[0-9a-f]{64}$/) },
+      { kind: 'command', name: 'review:added', before: null, after: expect.stringMatching(/^[0-9a-f]{64}$/) },
+      { kind: 'command', name: 'review:remove', before: expect.stringMatching(/^[0-9a-f]{64}$/), after: null }
+    ]));
+    expect(JSON.stringify(updated.changes)).not.toContain('secret');
+
+    // 同一活动版本与候选的规范序列化摘要稳定，与文件键顺序和重复执行无关。
+    const again = await store.update('review', { yes: true });
+    expect(again.changed).toBe(false);
+    expect(again.changes).toEqual(updated.changes);
+  });
+
+  it('reviews every same-id agent execution when an earlier definition is added or removed', async () => {
+    const source = join(temp, 'duplicate-agents');
+    const secret = 'added-agent-command-secret';
+    await writePlugin(source, {
+      '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'duplicate-agents', version: '1.0.0' }),
+      'agents/b.json': JSON.stringify({ id: 'shared', name: 'B', command: 'node', args: ['b.mjs'] })
+    });
+    await store.install(source, { yes: true });
+
+    await writePlugin(source, {
+      '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'duplicate-agents', version: '2.0.0' }),
+      'agents/a.json': JSON.stringify({ id: 'shared', name: 'A', command: secret, args: ['a.mjs'] })
+    });
+    const added = vi.fn(async () => false);
+    await expect(store.update('duplicate-agents', { confirm: added })).rejects.toMatchObject({ code: 'PLUGIN_TRUST_DECLINED' });
+    expect(added).toHaveBeenCalledTimes(1);
+    const addition = added.mock.calls[0]![0];
+    expect(addition.details).toEqual([]);
+    expect(addition.changes).toEqual([
+      { kind: 'agent', name: 'shared', before: expect.stringMatching(/^[0-9a-f]{64}$/), after: expect.stringMatching(/^[0-9a-f]{64}$/) }
+    ]);
+    expect(addition.changes![0]!.before).not.toBe(addition.changes![0]!.after);
+    expect(JSON.stringify(addition)).not.toContain(secret);
+
+    await store.update('duplicate-agents', { confirm: async () => true });
+    await rm(join(source, 'agents/a.json'));
+    const removed = vi.fn(async () => false);
+    await expect(store.update('duplicate-agents', { confirm: removed })).rejects.toMatchObject({ code: 'PLUGIN_TRUST_DECLINED' });
+    expect(removed).toHaveBeenCalledTimes(1);
+    expect(removed.mock.calls[0]![0].changes).toEqual([
+      { kind: 'agent', name: 'shared', before: expect.stringMatching(/^[0-9a-f]{64}$/), after: expect.stringMatching(/^[0-9a-f]{64}$/) }
+    ]);
+    expect(JSON.stringify(removed.mock.calls[0]![0])).not.toContain(secret);
+  });
+
+  it('ignores description-only changes in command review digests and prompts', async () => {
+    const source = join(temp, 'descriptions');
+    await writePlugin(source, {
+      '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'descriptions', version: '1.0.0', description: 'old plugin description' }),
+      'commands/summary.md': '---\ndescription: old command description\nargument-hint: <old>\n---\nsame $ARGUMENTS'
+    });
+    await store.install(source);
+    await writePlugin(source, {
+      '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'descriptions', version: '1.0.0', description: 'new plugin description' }),
+      'commands/summary.md': '---\ndescription: new command description\nargument-hint: <new>\n---\nsame $ARGUMENTS'
+    });
+    const confirm = vi.fn(async () => true);
+    const updated = await store.update('descriptions', { confirm });
+    expect(updated.changed).toBe(true);
+    expect(updated.changes).toEqual([]);
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it('re-confirms changed commands interactively, keeps rejection atomic, and preserves non-interactive and --yes behavior', async () => {
+    const source = join(temp, 'retrust');
+    await writePlugin(source, {
+      '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'retrust', version: '1.0.0' }),
+      'commands/summary.md': 'old prompt',
+      'hooks/hooks.json': JSON.stringify({ 'task.completed': [{ command: 'old-hook-command', timeout: 1000 }] })
+    });
+    await store.install(source, { yes: true });
+    const original = store.get('retrust');
+    await writePlugin(source, {
+      'commands/summary.md': 'new prompt secret',
+      'hooks/hooks.json': JSON.stringify({ 'task.completed': [{ command: 'new-hook-command-secret', timeout: 1000 }] })
+    });
+
+    const decline = vi.fn(async () => false);
+    await expect(store.update('retrust', { confirm: decline })).rejects.toMatchObject({ code: 'PLUGIN_TRUST_DECLINED' });
+    expect(store.get('retrust')).toEqual(original);
+    expect(decline).toHaveBeenCalledWith(expect.objectContaining({ capabilities: [], details: [] }));
+    const prompt = decline.mock.calls[0]![0];
+    expect(prompt.changes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'command', name: 'retrust:summary' }),
+      expect.objectContaining({ kind: 'hook', name: 'task.completed' })
+    ]));
+    expect(JSON.stringify(prompt)).not.toContain('new-hook-command-secret');
+    expect(JSON.stringify(prompt)).not.toContain('new prompt secret');
+
+    // 只有命令变化、没有新增能力时，无 confirm 不新增失败。
+    const nonInteractive = await store.update('retrust');
+    expect(nonInteractive.changes).toHaveLength(2);
+
+    const confirm = vi.fn(async () => true);
+    const accepted = await store.update('retrust', { yes: true, confirm });
+    expect(accepted.changes).toEqual(nonInteractive.changes);
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it('redacts changed hook commands when an update also adds a provider', async () => {
+    const source = join(temp, 'provider-review');
+    const secret = 'update-provider-secret-canary';
+    await writePlugin(source, {
+      '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'provider-review', version: '1.0.0' }),
+      'hooks/hooks.json': JSON.stringify({ 'task.completed': [{ command: 'old-hook-command', timeout: 1000 }] })
+    });
+    await store.install(source, { yes: true });
+    const original = store.get('provider-review');
+    await writePlugin(source, {
+      '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'provider-review', version: '2.0.0', providers: 'provider.mjs' }),
+      'provider.mjs': 'export default () => {};',
+      'hooks/hooks.json': JSON.stringify({ 'task.completed': [{ command: ['node', 'hook.mjs', secret], timeout: 1000 }] })
+    });
+
+    const confirm = vi.fn(async () => false);
+    await expect(store.update('provider-review', { confirm })).rejects.toMatchObject({ code: 'PLUGIN_TRUST_DECLINED' });
+    const prompt = confirm.mock.calls[0]![0];
+    expect(prompt.capabilities).toEqual(['providers']);
+    expect(prompt.details).toEqual([]);
+    expect(prompt.changes).toEqual([
+      { kind: 'hook', name: 'task.completed', before: expect.stringMatching(/^[0-9a-f]{64}$/), after: expect.stringMatching(/^[0-9a-f]{64}$/) }
+    ]);
+    expect(JSON.stringify(prompt)).not.toContain(secret);
+
+    const nonInteractive = await store.update('provider-review').then(
+      () => { throw new Error('expected PLUGIN_TRUST_REQUIRED'); },
+      error => error as Error
+    );
+    expect(nonInteractive).toMatchObject({ code: 'PLUGIN_TRUST_REQUIRED', message: expect.stringContaining('需要信任以下能力：providers') });
+    expect(nonInteractive.message).toContain('hook task.completed');
+    expect(nonInteractive.message).toMatch(/[0-9a-f]{64} → [0-9a-f]{64}/);
+    expect(nonInteractive.message).not.toContain(secret);
+    expect(store.get('provider-review')).toEqual(original);
+  });
+
+  it('redacts an unchanged candidate hook when an interactive update only adds a provider', async () => {
+    const source = join(temp, 'candidate-provider');
+    const secret = 'candidate-provider-interactive-secret';
+    await stageCandidateWithSecretHook(store, source, 'candidate-provider', secret);
+    const original = store.get('candidate-provider');
+
+    const confirm = vi.fn(async () => false);
+    await expect(store.update('candidate-provider', { confirm })).rejects.toMatchObject({ code: 'PLUGIN_TRUST_DECLINED' });
+    const prompt = confirm.mock.calls[0]![0];
+    expect(prompt.capabilities).toEqual(['providers']);
+    expect(prompt.details).toEqual([]);
+    expect(prompt.changes).toBeUndefined();
+    expect(JSON.stringify(prompt)).not.toContain(secret);
+    expect(store.get('candidate-provider')).toEqual(original);
+  });
+
+  it('redacts an unchanged candidate hook from PLUGIN_TRUST_REQUIRED when an update only adds a provider', async () => {
+    const source = join(temp, 'candidate-provider');
+    const secret = 'candidate-provider-non-interactive-secret';
+    await stageCandidateWithSecretHook(store, source, 'candidate-provider', secret);
+    const original = store.get('candidate-provider');
+
+    const error = await store.update('candidate-provider').then(
+      () => { throw new Error('expected PLUGIN_TRUST_REQUIRED'); },
+      reason => reason as Error
+    );
+    expect(error).toMatchObject({ code: 'PLUGIN_TRUST_REQUIRED', message: expect.stringContaining('需要信任以下能力：providers') });
+    expect(error.message).not.toContain(secret);
+    expect(store.get('candidate-provider')).toEqual(original);
+  });
+
   it('reports same-version local content replacement as changed', async () => {
     const source = join(temp, 'local');
     await writePlugin(source, declarative('local'));
@@ -173,6 +383,31 @@ describe('PluginStore', () => {
     expect(await readFile(join(store.artifactDir('local', store.get('local').candidate), 'commands/summary.md'), 'utf8')).toBe('new contents');
     await store.activate('local');
     expect(await readFile(join(store.pluginDir('local'), 'commands/summary.md'), 'utf8')).toBe('new contents');
+  });
+
+  it.each(['directory', 'manifest', 'hooks'] as const)('repairs a candidate with damaged %s using the active review base', async damage => {
+    const source = join(temp, 'recovery');
+    await writePlugin(source, declarative('recovery', '1.0.0'));
+    await store.install(source);
+    const original = store.get('recovery');
+    const activeRoot = store.pluginDir('recovery');
+    await writePlugin(source, { ...declarative('recovery', '2.0.0'), 'commands/summary.md': 'recovered command' });
+    const staged = await store.update('recovery', { yes: true });
+    const candidate = staged.entry.candidate!;
+    const candidateRoot = store.artifactDir('recovery', candidate);
+
+    if (damage === 'directory') await rm(candidateRoot, { recursive: true, force: true });
+    if (damage === 'manifest') await writePlugin(candidateRoot, { '.dutydeck-plugin/plugin.json': '{' });
+    if (damage === 'hooks') await writePlugin(candidateRoot, { 'hooks/hooks.json': '{' });
+
+    const repaired = await store.update('recovery', { yes: true });
+    expect(repaired.entry.active).toEqual(original.active);
+    expect(repaired.entry.candidate?.id).toBe(candidate.id);
+    expect(store.pluginDir('recovery')).toBe(activeRoot);
+    const loaded = await loadPluginDirectory(candidateRoot);
+    expect(loaded.manifest.version).toBe('2.0.0');
+    expect(loaded.commands).toEqual([expect.objectContaining({ name: 'summary', template: 'recovered command' })]);
+    expect(await readFile(join(activeRoot, 'commands/summary.md'), 'utf8')).toBe('总结 $ARGUMENTS');
   });
 
   it('installs an npm package from a local tarball source and records its version', async () => {
@@ -188,11 +423,11 @@ describe('dutydeck plugin CLI', () => {
   beforeEach(async () => { temp = await mkdtemp(join(tmpdir(), 'dutydeck-plugin-cli-')); });
   afterEach(async () => { await rm(temp, { recursive: true, force: true }); });
 
-  const cli = async (action: Parameters<typeof runPluginCli>[0], args: string[], options: Parameters<typeof runPluginCli>[2] = {}) => {
+  const cli = async (action: Parameters<typeof runPluginCli>[0], args: string[], options: Parameters<typeof runPluginCli>[2] = {}, confirm: ((prompt: PluginTrustPrompt) => Promise<boolean>) | null = async () => false) => {
     let out = '';
     const ui = createCliUi({ stdout: { write: chunk => { out += chunk; } }, stderr: { write: () => {} }, color: false });
     // 只看外部插件：内置插件目录指向空目录。
-    const result = await runPluginCli(action, args, { database: join(temp, 'data/dutydeck.db'), ...options }, { ui, cwd: temp, confirm: async () => false, builtinRoot: join(temp, 'no-builtin') });
+    const result = await runPluginCli(action, args, { database: join(temp, 'data/dutydeck.db'), ...options }, { ui, cwd: temp, ...(confirm ? { confirm } : {}), builtinRoot: join(temp, 'no-builtin') });
     return { ...result, out };
   };
 
@@ -217,9 +452,27 @@ describe('dutydeck plugin CLI', () => {
     await writePlugin(join(temp, 'local'), declarative('local'));
     await cli('install', ['./local']);
     await writePlugin(join(temp, 'local'), { 'commands/summary.md': 'new contents' });
-    const result = await cli('update', ['local']);
+    const result = await cli('update', ['local'], {}, null);
     expect(result.out).toContain('dutydeck plugin activate');
     expect(result.out).not.toContain('已是最新');
+  });
+
+  it('includes command names and before/after digests in human and JSON update output without echoing command contents', async () => {
+    await writePlugin(join(temp, 'local'), declarative('local'));
+    await cli('install', ['./local']);
+    await writePlugin(join(temp, 'local'), { 'commands/summary.md': 'new command output-secret' });
+
+    const human = await cli('update', ['local'], {}, null);
+    expect(human.out).toContain('command local:summary');
+    expect(human.out).toMatch(/[0-9a-f]{64}.*[0-9a-f]{64}/);
+    expect(human.out).not.toContain('output-secret');
+
+    const machine = JSON.parse((await cli('update', ['local'], { json: true }, null)).out);
+    expect(machine.plugins).toHaveLength(1);
+    expect(machine.plugins[0].changes).toEqual([
+      { kind: 'command', name: 'local:summary', before: expect.stringMatching(/^[0-9a-f]{64}$/), after: expect.stringMatching(/^[0-9a-f]{64}$/) }
+    ]);
+    expect(JSON.stringify(machine)).not.toContain('output-secret');
   });
 
   it('validate exits non-zero and lists issues', async () => {

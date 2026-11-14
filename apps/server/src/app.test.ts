@@ -11,7 +11,8 @@ import { buildApp, createAppLogger } from './app.js';
 import { createRepositories } from '@dutydeck/storage';
 import { larkBotsConfigKey } from './lark/config.js';
 import { LoginLinkStore, signSessionShareToken } from './auth/auth.js';
-import { RuntimeError } from '@dutydeck/shared';
+import { RuntimeError, type AgentConfig, type AgentDriver } from '@dutydeck/shared';
+import { DutydeckRuntime } from '@dutydeck/runtime';
 
 vi.mock('node:fs/promises', async importOriginal => ({ ...await importOriginal<typeof import('node:fs/promises')>() }));
 
@@ -385,6 +386,68 @@ describe('HTTP API boundary', () => {
     expect(runtime.dispatch).not.toHaveBeenCalled();
   });
 
+  it('replays the accepted HTTP task for the same key and isolates different keys and actors', async () => {
+    const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' }); repositories.push(repos);
+    let stopped = false;
+    const runtime = new DutydeckRuntime(repos, {
+      cleanupIntervalMs: 0,
+      driverIdleTimeoutMs: 0,
+      probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
+      driverFactory: (_config, _protocol, emit): AgentDriver => ({
+        start: async () => {}, resume: async () => {}, interrupt: async () => {},
+        send: async () => {
+          emit({ type: 'text', data: { text: 'done' } });
+          emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+        },
+        stop: async () => { stopped = true; emit({ type: 'completed', data: { stopReason: 'cancelled' } }); },
+        isStopped: async () => stopped
+      })
+    });
+    const app = await buildApp(runtime); apps.push(app);
+    const ownerApp = await buildApp(runtime, { executionPolicy: { authorize: async (_request, _id, _boundary, action) => ({ allowed: true, action, source: 'owner' }) } }); apps.push(ownerApp);
+    const directory = await mkdtemp(join(tmpdir(), 'http-send-idempotency-')); tempDirectories.push(directory);
+    const agent: AgentConfig = { id: 'fixture', name: 'Fixture', command: 'unused', args: [], protocol: 'acp', cwd: directory, env: {}, permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
+    try {
+      await runtime.initialize([agent]);
+      const session = await runtime.start({ agentId: agent.id });
+      const post = (target: typeof app, key: string) => target.inject({ method: 'POST', url: `/api/sessions/${session.id}/send`, payload: { prompt: 'only once', mode: 'queue', idempotencyKey: key } });
+      const first = await post(app, 'http-key-1');
+      const replay = await post(app, 'http-key-1');
+      expect(first.statusCode).toBe(202);
+      expect(replay.statusCode).toBe(202);
+      expect(replay.json().task.id).toBe(first.json().task.id);
+      const differentKey = await post(app, 'http-key-2');
+      expect(differentKey.statusCode).toBe(202);
+      expect(differentKey.json().task.id).not.toBe(first.json().task.id);
+      const differentActor = await post(ownerApp, 'http-key-1');
+      expect(differentActor.statusCode).toBe(409);
+      expect(differentActor.json().error.code).toBe('TASK_IDEMPOTENCY_CONFLICT');
+      const independentActor = await post(ownerApp, 'http-key-3');
+      expect(independentActor.statusCode).toBe(202);
+      expect(independentActor.json().task.id).not.toBe(first.json().task.id);
+      expect(await runtime.getTasks(session.id)).toHaveLength(3);
+    } finally {
+      await runtime.shutdown();
+    }
+  });
+
+  it('validates idempotency keys and rejects them for steer before dispatch', async () => {
+    const task = { id: 't1', sessionId: 's1', prompt: 'hello', status: 'queued', createdAt: '', updatedAt: '' };
+    const runtime: any = { dispatch: vi.fn(async () => task) };
+    const app = await buildApp(runtime); apps.push(app);
+    for (const idempotencyKey of ['', '   ', 'x'.repeat(129), 42, null]) {
+      const response = await app.inject({ method: 'POST', url: '/api/sessions/s1/send', payload: { prompt: 'hello', idempotencyKey } });
+      expect(response.statusCode).toBe(400);
+      expect(response.json().error.code).toBe('INVALID_IDEMPOTENCY_KEY');
+    }
+    const steering = await app.inject({ method: 'POST', url: '/api/sessions/s1/send', payload: { prompt: 'hello', mode: 'steer', idempotencyKey: 'not-supported' } });
+    expect(steering.statusCode).toBe(400);
+    expect(steering.json().error.code).toBe('STEER_IDEMPOTENCY_UNSUPPORTED');
+    expect(runtime.dispatch).not.toHaveBeenCalled();
+    expect((await app.inject({ method: 'POST', url: '/api/sessions/s1/send', payload: { prompt: 'hello', mode: 'interrupt', idempotencyKey: 'valid-key' } })).statusCode).toBe(202);
+    expect(runtime.dispatch).toHaveBeenCalledWith('s1', 'hello', 'interrupt', 'hello', undefined, undefined, 'valid-key', undefined);
+  });
+
   it('validates the optional rejection reason of a permission decision before handing it to Runtime', async () => {
     const runtime: any = { resolvePermission: vi.fn(async (_id: string, permissionId: string, approved: boolean, reason?: string) => ({ id: permissionId, status: approved ? 'approved' : 'rejected', ...(reason ? { reason } : {}) })) };
     const app = await buildApp(runtime); apps.push(app);
@@ -720,7 +783,7 @@ describe('HTTP API boundary', () => {
     expect((await app.inject({ method: 'POST', url: '/api/hooks/ci', ...remote })).statusCode).not.toBe(401);
     // 浏览器认证入口公开，但只返回认证状态；登录后 cookie 才能访问业务 API。
     expect((await app.inject({ method: 'GET', url: '/api/auth/status', ...remote })).json()).toEqual({ authenticated: false, required: true });
-    const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { token: 'secret-token' }, ...remote });
+    const login = await app.inject({ method: 'POST', url: '/api/auth/login', headers: { host: 'dutydeck.test' }, payload: { token: 'secret-token' }, ...remote });
     expect(login.statusCode).toBe(200);
     expect(login.headers['set-cookie']).toContain('dutydeck_access=secret-token');
     expect((await app.inject({ method: 'GET', url: '/api/sessions', headers: { cookie: login.headers['set-cookie'] }, ...remote })).statusCode).not.toBe(401);
@@ -778,7 +841,7 @@ describe('HTTP API boundary', () => {
     for (const method of ['PUT', 'PATCH', 'DELETE'] as const) {
       expect((await app.inject({ method, url: `/api/auth/link?code=${code}`, ...remote })).statusCode).toBe(401);
     }
-    const redeemed = await app.inject({ method: 'POST', url: '/api/auth/link', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    const redeemed = await app.inject({ method: 'POST', url: '/api/auth/link', headers: { host: 'dutydeck.test', 'content-type': 'application/x-www-form-urlencoded' },
       payload: `code=${code}`, ...remote });
     expect(redeemed.statusCode).toBe(303);
     expect(redeemed.headers.location).toBe('/sessions/ses_1');

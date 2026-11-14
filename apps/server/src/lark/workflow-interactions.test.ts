@@ -686,16 +686,36 @@ describe('structured ask cards (P0-2)', () => {
     } finally { await h.cleanup(); }
   });
 
+  it('选项说明计入整卡预算，结构化控件放不下时文本回退仍保留全部说明', async () => {
+    const h = await setupHarness();
+    try {
+      const choices = Array.from({ length: 50 }, (_, index) => ({
+        label: `选项${index}`, description: `说明${index}:${'d'.repeat(400)}`
+      }));
+      const ask = await h.ask(0, choices);
+      await h.workflow.observe(ask.ctx, ask.event);
+      const card = h.cardAt(0);
+      expect(card.elements.some((element: any) => element.tag === 'button' || element.tag === 'form')).toBe(false);
+      for (const choice of choices) expect(JSON.stringify(card.elements)).toContain(choice.description);
+      expect(h.service.uploadFile).not.toHaveBeenCalled();
+    } finally { await h.cleanup(); }
+  });
+
   it.each([false, true])('完整问题和长选项共同超预算时附全文，关闭卡保留同一节选（structured=%s）', async structuredAskCards => {
     const wire = mockLark(); const h = await setupHarness(wire.service);
     try {
       const question = '中文😀'.repeat(1600) + '问题末尾禁止部署';
-      const choices = Array.from({ length: 50 }, (_, i) => ({ label: `选项${i}${'长'.repeat(180)}结尾`, value: `choice_${i}` }));
+      const choices = Array.from({ length: 50 }, (_, i) => ({
+        label: `选项${i}${'长'.repeat(180)}结尾`, value: `choice_${i}`, description: `说明${i}${'详'.repeat(20)}`
+      }));
       const ask = await h.ask(0, choices, false, question);
       await h.workflow.observe(ask.ctx, ask.event, { structuredAskCards });
       expect(wire.uploads).toHaveLength(1);
       expect(wire.uploads[0]).toContain(question);
-      for (const choice of choices) expect(wire.uploads[0]).toContain(choice.label);
+      for (const choice of choices) {
+        expect(wire.uploads[0]).toContain(choice.label);
+        expect(wire.uploads[0]).toContain(choice.description);
+      }
       expect(wire.files).toHaveLength(1);
       const record = await findRecord(h.workflow, ask.askId);
       expect(JSON.stringify(wire.cards[0])).toContain('以下是节选');
@@ -706,6 +726,56 @@ describe('structured ask cards (P0-2)', () => {
       for (const element of record.askContentElements!) expect(JSON.stringify(wire.cards.at(-1))).toContain(JSON.stringify(element).slice(1, -1));
       expect(wire.uploads).toHaveLength(1); expect(wire.files).toHaveLength(1);
     } finally { wire.service.close(); await h.cleanup(); }
+  });
+
+  it('持久确认按预算截断 50 条长说明，保留全文附件和全部可点选项', async () => {
+    const { directory, repositories } = await openDatabase();
+    const { service, reply } = makeService();
+    const workflow = new LarkWorkflowInteractions(repositories.config, makeRuntime([], []).runtime, service, undefined, async () => true, {
+      confirmationAvailable: async () => true, onConfirmation: async () => undefined
+    });
+    const choices = Array.from({ length: 50 }, (_, index) => ({
+      label: `选项${index}`, value: `choice_${index}`, description: `说明${index}:${'详'.repeat(1000)}`
+    }));
+    try {
+      for (let clicked = 0; clicked < choices.length; clicked++) {
+        const deferred = await workflow.defer(context({ taskId: `task_long_${clicked}`, event: larkMessage({ messageId: `om_long_${clicked}` }) }), {
+          sessionId: 'ses_one', question: '请选择一项', choices
+        }, { prompt: '原始请求', cwd: '/work', scopeId: 'scope' });
+        let record = (await workflow.get('app_one', deferred.askId))!;
+        expect(record).toMatchObject({ state: 'pending', cardId: expect.any(String), durable: { choices } });
+        const cardInput = reply.mock.calls.at(-1)![0];
+        expect(record.askPendingElements).toEqual(cardInput.elements);
+        const card = buildLarkCard(cardInput);
+        const buttons = card.body.elements.filter((element: any) => element.tag === 'button');
+        expect(buttons).toHaveLength(50);
+        expect(buttons.map((element: any) => element.behaviors[0].value.answer)).toEqual(choices.map(choice => choice.value));
+        expect(JSON.stringify(card)).toContain('全文附件');
+        expect(JSON.stringify(card)).not.toContain(choices[0]!.description);
+        expect(Buffer.byteLength(JSON.stringify({ msg_type: 'interactive', content: JSON.stringify(card) }), 'utf8')).toBeLessThanOrEqual(larkCardSafeLimits.bytes);
+        expect(countCardComponents(card)).toBeLessThanOrEqual(larkCardSafeLimits.components);
+        const upload = vi.mocked(service.uploadFile).mock.calls.at(-1)![0] as any;
+        const fullText = Buffer.from(upload.data).toString('utf8');
+        for (const choice of choices) {
+          expect(fullText).toContain(choice.label);
+          expect(fullText).toContain(choice.description);
+        }
+        if (clicked === 0) {
+          const snapshot = record.askPendingElements;
+          const uploads = vi.mocked(service.uploadFile).mock.calls.length;
+          await persistInteraction(repositories.config, { ...record, cardId: undefined, deliveryRetryAt: 0 });
+          await workflow.reconcile('app_one');
+          record = (await workflow.get('app_one', record.id))!;
+          expect(record.askPendingElements).toEqual(snapshot);
+          expect(reply.mock.calls.at(-1)![0].elements).toEqual(snapshot);
+          expect(service.uploadFile).toHaveBeenCalledTimes(uploads);
+        }
+        await workflow.respond(responseInput(record, { answer: choices[clicked]!.value }));
+        expect(await workflow.get('app_one', record.id)).toMatchObject({ state: 'answered', durable: { selected: [choices[clicked]!.value] } });
+      }
+      expect(service.uploadFile).toHaveBeenCalledTimes(50);
+      expect(service.replyFile).toHaveBeenCalledTimes(50);
+    } finally { workflow.close(); repositories.close(); await rm(directory, { recursive: true, force: true }); }
   });
 
   it.each(['upload', 'file', 'card'] as const)('附件或卡片失败后同 UUID 重试，已成功上传/发送的腿不重复（%s）', async failure => {
@@ -775,6 +845,8 @@ describe('structured ask cards (P0-2)', () => {
       const card = h.cardAt(0);
       const buttons = card.elements.filter((element: any) => element.tag === 'button');
       expect(buttons.map((button: any) => button.text.content)).toEqual(['跑全部测试', '直接合并']);
+      expect(card.elements.filter((element: any) => element.element_id?.startsWith('workflow_answer_choice_'))
+        .map((element: any) => element.element_id)).toEqual(['workflow_answer_choice_0', 'workflow_answer_choice_1']);
       const record = await findRecord(h.workflow, single.askId);
       expect(buttons[0]).toMatchObject({ behaviors: [{ value: { dutydeck_workflow: 'answer', request_id: record.id, generation: record.boot, answer: 'test' } }] });
       expect(buttons[1]).toMatchObject({ behaviors: [{ value: { answer: '直接合并' } }] });
@@ -810,7 +882,12 @@ describe('structured ask cards (P0-2)', () => {
       const form = h.cardAt(0).elements.find((element: any) => element.tag === 'form');
       expect(form).toBeDefined();
       const select = form.elements.find((element: any) => element.tag === 'multi_select_static');
-      expect(select).toMatchObject({ name: 'answer', options: [{ value: 'a' }, { value: 'b' }, { value: 'c' }] });
+      expect(select).toMatchObject({ name: 'answer' });
+      expect(select.options).toStrictEqual([
+        { text: { tag: 'plain_text', content: '甲' }, value: 'a' },
+        { text: { tag: 'plain_text', content: '乙' }, value: 'b' },
+        { text: { tag: 'plain_text', content: '丙' }, value: 'c' }
+      ]);
       const submit = form.elements.find((element: any) => element.tag === 'button');
       expect(submit).toMatchObject({ form_action_type: 'submit', behaviors: [{ value: { dutydeck_workflow: 'answer', multiple: true } }] });
       // form 必须位于卡片 body 根层级（JSON 2.0 不允许嵌进其它组件）
@@ -828,6 +905,39 @@ describe('structured ask cards (P0-2)', () => {
       await h.workflow.respond(responseInput(record, { selected: ['c', 'a', 'a'] }));
       // 去重后按提交顺序合并成一条答案文本
       await expect(multiple.waiting).resolves.toMatchObject({ status: 'answered', answer: 'c、a' });
+    } finally { await h.cleanup(); }
+  });
+
+  it.each([false, true])('选项说明按 plain_text 原样展示，空白说明省略且答案值不变（multiple=%s）', async multiple => {
+    const h = await setupHarness();
+    try {
+      const description = '**加粗** [链接](https://example.com) <at id=ou_nobody></at> \\ 保留';
+      const choices = [
+        { label: '甲', value: 'a', description: `  ${description}  ` },
+        { label: '乙', value: 'b', description: '   ' },
+        { label: '丙', value: 'c' }
+      ];
+      const ask = await h.ask(0, choices, multiple);
+      await h.workflow.observe(ask.ctx, ask.event, { structuredAskCards: true });
+      expect(h.broker.get(ask.askId)?.choices).toStrictEqual([
+        { label: '甲', value: 'a', description }, { label: '乙', value: 'b' }, { label: '丙', value: 'c' }
+      ]);
+      const elements = h.cardAt(0).elements;
+      if (multiple) {
+        const form = elements.find((element: any) => element.tag === 'form');
+        const select = form.elements.find((element: any) => element.tag === 'multi_select_static');
+        expect(select.options).toStrictEqual([
+          { text: { tag: 'plain_text', content: '甲' }, value: 'a', description: { tag: 'plain_text', content: description } },
+          { text: { tag: 'plain_text', content: '乙' }, value: 'b' },
+          { text: { tag: 'plain_text', content: '丙' }, value: 'c' }
+        ]);
+      } else {
+        const first = elements.findIndex((element: any) => element.element_id === 'workflow_answer_choice_0');
+        expect(elements[first + 1]).toStrictEqual({ tag: 'div', element_id: 'workflow_answer_choice_description_0',
+          text: { tag: 'plain_text', content: description } });
+        expect(elements[first + 2]).toMatchObject({ element_id: 'workflow_answer_choice_1', behaviors: [{ value: { answer: 'b' } }] });
+        expect(elements[first + 3]).toMatchObject({ element_id: 'workflow_answer_choice_2', behaviors: [{ value: { answer: 'c' } }] });
+      }
     } finally { await h.cleanup(); }
   });
 
@@ -992,8 +1102,9 @@ describe('structured ask cards (P0-2)', () => {
   it('CAS：重复回调只决议一次，第二击只拿到 stale，冻结只画一次', async () => {
     const h = await setupHarness();
     try {
-      const single = await h.ask(0, [{ label: '跑全部测试', value: 'test' }, { label: '直接合并' }]);
+      const single = await h.ask(0, [{ label: '跑全部测试', value: 'test', description: '先验证再合并' }, { label: '直接合并' }]);
       await h.workflow.observe(single.ctx, single.event, { structuredAskCards: true });
+      expect(JSON.stringify(h.cardAt(0).elements)).toContain('先验证再合并');
       const record = await findRecord(h.workflow, single.askId);
       const outcomes = await Promise.allSettled([
         h.workflow.respond(responseInput(record, { answer: 'test' })),
@@ -1007,6 +1118,7 @@ describe('structured ask cards (P0-2)', () => {
       expect(h.broker.get(single.askId)).toMatchObject({ status: 'answered' });
       // renderClosed 只画一次冻结卡，第二击不产生重复 PATCH
       expect(h.service.update).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(vi.mocked(h.service.update).mock.calls)).toContain('先验证再合并');
     } finally { await h.cleanup(); }
   });
 
@@ -1030,7 +1142,7 @@ describe('structured ask cards (P0-2)', () => {
     let deliver!: (value: { messageId: string }) => void;
     try {
       h.reply.mockImplementationOnce(() => new Promise(resolve => { deliver = resolve; }));
-      const ask = await h.ask(0, [{ label: '继续' }]);
+      const ask = await h.ask(0, [{ label: '继续', description: '保留当前上下文' }]);
       const sending = h.workflow.observe(ask.ctx, ask.event);
       await vi.waitFor(() => expect(h.reply).toHaveBeenCalledTimes(1));
       await h.workflow.expireTask(ask.ctx.appId, ask.ctx.taskId);
@@ -1038,6 +1150,20 @@ describe('structured ask cards (P0-2)', () => {
       await sending;
       expect(await findRecord(h.workflow, ask.askId)).toMatchObject({ state: 'expired', cardId: 'om_delayed_card' });
       expect(h.service.update).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_delayed_card', statusLabel: '已失效' }));
+      expect(JSON.stringify(vi.mocked(h.service.update).mock.calls)).not.toContain('callback');
+      expect(JSON.stringify(vi.mocked(h.service.update).mock.calls)).toContain('保留当前上下文');
+    } finally { await h.cleanup(); }
+  });
+
+  it('取消后重绘仍保留选项说明', async () => {
+    const h = await setupHarness();
+    try {
+      const ask = await h.ask(0, [{ label: '继续', description: '取消前可见的说明' }]);
+      await h.workflow.observe(ask.ctx, ask.event);
+      h.broker.cancelSession('ses_one', '测试取消');
+      await expect(ask.waiting).resolves.toMatchObject({ status: 'cancelled' });
+      await h.workflow.reconcile('app_one');
+      expect(JSON.stringify(vi.mocked(h.service.update).mock.calls)).toContain('取消前可见的说明');
       expect(JSON.stringify(vi.mocked(h.service.update).mock.calls)).not.toContain('callback');
     } finally { await h.cleanup(); }
   });
@@ -2542,6 +2668,46 @@ it.each(['pending', 'resolving'] as const)('restores an ordinary persistent Ask 
     const reconnected = broker.wait('ses_one', 'persistent-card');
     await workflow.respond(responseInput(old));
     expect(await reconnected).toMatchObject({ status: 'answered', answer: '可以' });
+    expect(authorize.mock.calls.some(call => call[2] === 'turn.append')).toBe(true);
+    expect(reply).not.toHaveBeenCalled();
+  } finally { workflow?.close(); broker.close(); await broker.flush(); repos.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+it('restores option descriptions in a persistent structured Ask card across boots', async () => {
+  const { directory, filename, repositories } = await openDatabase();
+  let repos = repositories;
+  let broker = new RelayAskBroker({ publish: async () => {} }, createRelayAskStore(repos.config));
+  let workflow: LarkWorkflowInteractions | undefined;
+  try {
+    const waiting = broker.register({ sessionId: 'ses_one', requestId: 'persistent-description-card', question: 'Continue?',
+      choices: [{ label: 'Continue', value: 'continue', description: 'Keep the current context' }] });
+    await vi.waitFor(() => expect(broker.listPending()).toHaveLength(1));
+    const ask = broker.listPending()[0]!;
+    const firstRuntime = makeRuntime([runningTask()], []).runtime;
+    const firstService = makeService();
+    const firstWorkflow = new LarkWorkflowInteractions(repos.config, firstRuntime, firstService.service, broker, async () => true);
+    await firstWorkflow.observe(context(), agentEvent('text', { relay: 'ask', askId: ask.id }));
+    expect(JSON.stringify(firstService.reply.mock.calls)).toContain('Keep the current context');
+    const old = (await firstWorkflow.list('app_one'))[0]!;
+    firstWorkflow.close();
+    broker.close(); await broker.flush(); await waiting; repos.close();
+    repos = createRepositories(filename);
+    broker = new RelayAskBroker({ publish: async () => {} }, createRelayAskStore(repos.config));
+    await broker.initialize();
+    expect(broker.get(ask.id)?.choices).toStrictEqual([{ label: 'Continue', value: 'continue', description: 'Keep the current context' }]);
+    const { runtime } = makeRuntime([runningTask()], []);
+    const { service, reply } = makeService();
+    const authorize = vi.fn(async (_record: LarkInteraction, _actor: string, _action: string) => true);
+    workflow = new LarkWorkflowInteractions(repos.config, runtime, service, broker, authorize);
+    await workflow.initialize('app_one');
+    expect(await workflow.list('app_one')).toEqual([expect.objectContaining({ state: 'pending', boot: old.boot, cardId: old.cardId })]);
+    await workflow.observe(context(), agentEvent('text', { relay: 'ask', askId: ask.id }));
+    expect(reply).not.toHaveBeenCalled();
+    const reconnected = broker.wait('ses_one', 'persistent-description-card');
+    await workflow.respond(responseInput(old, { answer: 'continue' }));
+    expect(await reconnected).toMatchObject({ status: 'answered', answer: 'continue' });
+    expect(JSON.stringify(service.update.mock.calls)).toContain('Keep the current context');
+    expect(JSON.stringify(service.update.mock.calls)).not.toContain('dutydeck_workflow');
     expect(authorize.mock.calls.some(call => call[2] === 'turn.append')).toBe(true);
     expect(reply).not.toHaveBeenCalled();
   } finally { workflow?.close(); broker.close(); await broker.flush(); repos.close(); await rm(directory, { recursive: true, force: true }); }

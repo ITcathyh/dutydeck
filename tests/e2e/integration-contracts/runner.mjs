@@ -239,7 +239,7 @@ function print(value) {
 }
 
 function isolatedTmuxSessions(env) {
-  const result = spawnSync('tmux', ['list-sessions', '-F', '#{session_name}'], {
+  const result = spawnSync('tmux', ['-u', 'list-sessions', '-F', '#{session_name}'], {
     cwd: repositoryRoot,
     env,
     encoding: 'utf8',
@@ -299,7 +299,7 @@ function execute(item) {
       ...(residue.length > 0 ? { reason_code: 'ISOLATED_TMUX_RESIDUE', tmux_residual_sessions: residue.length } : {}),
     };
   } finally {
-    spawnSync('tmux', ['kill-server'], { cwd: repositoryRoot, env, stdio: 'ignore' });
+    spawnSync('tmux', ['-u', 'kill-server'], { cwd: repositoryRoot, env, stdio: 'ignore' });
     rmSync(privateRoot, { recursive: true, force: true });
   }
 }

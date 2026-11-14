@@ -141,6 +141,23 @@ describe('Dutydeck CLI', () => {
     expect(unit).toHaveBeenCalledWith(expect.objectContaining({ unit: 'dutydeck-tag.service' }));
   });
 
+  it('passes an optional exact update version and keeps the default dist-tag flow unchanged', async () => {
+    const update = vi.fn();
+    await createCliProgram('0.0.6', { update }).parseAsync(['node', 'dutydeck', 'update', '1.2.3-beta.1']);
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({ version: '1.2.3-beta.1', distTag: undefined }));
+
+    const latest = vi.fn();
+    await createCliProgram('0.0.6', { update: latest }).parseAsync(['node', 'dutydeck', 'update']);
+    expect(latest).toHaveBeenCalledWith(expect.objectContaining({ version: undefined, distTag: 'latest' }));
+  });
+
+  it('rejects an exact update version combined with --dist-tag before calling the handler', async () => {
+    const update = vi.fn();
+    const program = createCliProgram('0.0.6', { update }).exitOverride().configureOutput({ writeErr: () => {} });
+    await expect(program.parseAsync(['node', 'dutydeck', 'update', '1.2.3', '--dist-tag', 'next'])).rejects.toThrow('mutually exclusive');
+    expect(update).not.toHaveBeenCalled();
+  });
+
   it('parses deploy prune options, taking --releases and --json from the parent deploy command too', async () => {
     const deployPrune = vi.fn(); const deploy = vi.fn();
     await createCliProgram('0.0.6', { deploy, deployPrune }).parseAsync(['node', 'dutydeck', 'deploy', 'prune', '--releases', '/r', '--keep', '3', '--dry-run', '--include-unmarked', '--json']);
@@ -168,6 +185,28 @@ describe('Dutydeck CLI', () => {
     const asJson = vi.fn();
     await createCliProgram('0.0.6', { doctor: asJson }).parseAsync(['node', 'dutydeck', 'doctor', '--json']);
     expect(asJson).toHaveBeenCalledWith(expect.objectContaining({ json: true }));
+  });
+
+  it('routes logs with 50 lines by default and accepts an explicit count and unit', async () => {
+    const logs = vi.fn();
+    await createCliProgram('0.0.6', { logs }).parseAsync(['node', 'dutydeck', 'logs']);
+    expect(logs).toHaveBeenLastCalledWith({ lines: 50 });
+    await createCliProgram('0.0.6', { logs }).parseAsync(['node', 'dutydeck', 'logs', '-n', '12', '--unit', 'dutydeck-fixture.service']);
+    expect(logs).toHaveBeenLastCalledWith({ lines: 12, unit: 'dutydeck-fixture.service' });
+  });
+
+  it.each(['0', '-1', '1.5', '1e2', 'not-a-number', '10001', '9007199254740992'])('rejects invalid logs line count %s before invoking the handler', async value => {
+    const logs = vi.fn();
+    const program = createCliProgram('0.0.6', { logs }).exitOverride().configureOutput({ writeErr: () => {} });
+    await expect(program.parseAsync(['node', 'dutydeck', 'logs', '-n', value])).rejects.toThrow();
+    expect(logs).not.toHaveBeenCalled();
+  });
+
+  it('does not offer follow mode for logs', async () => {
+    const logs = vi.fn();
+    const program = createCliProgram('0.0.6', { logs }).exitOverride().configureOutput({ writeErr: () => {} });
+    await expect(program.parseAsync(['node', 'dutydeck', 'logs', '--follow'])).rejects.toThrow();
+    expect(logs).not.toHaveBeenCalled();
   });
 
   it('parses the three autostart subcommands', async () => {

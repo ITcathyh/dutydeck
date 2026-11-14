@@ -45,8 +45,9 @@ describe('open task CLI', () => {
   });
 
   it('reads list/read projections with local authentication', async () => {
-    const d = deps([{ tasks: [] }, { items: [], truncated: false }]);
-    expect(await runTaskCli({ action: 'list', ...target }, d)).toEqual({ tasks: [] });
+    const list = { tasks: [{ id: 's', waiting: [{ id: 'a', kind: 'question', prompt: 'Choose', options: [{ id: 'yes', label: 'Yes', kind: 'answer', description: 'Use the recommended path' }], free_text: true }] }] };
+    const d = deps([list, { items: [], truncated: false }]);
+    expect(await runTaskCli({ action: 'list', json: true, ...target }, d)).toEqual(list);
     expect(await runTaskCli({ action: 'read', id: 's/a', limit: '3', ...target }, d)).toEqual({ items: [], truncated: false });
     expect(String(d.fetcher.mock.calls[0]![0])).toBe(`${target.url}/api/tasks?limit=50`);
     expect(String(d.fetcher.mock.calls[1]![0])).toContain('/api/tasks/s%2Fa?limit=3');

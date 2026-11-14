@@ -5,7 +5,7 @@ import { mkdtemp, open, readFile, rename, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { larkResourceRangeBytes, readResourceError, ResourceRangeError, ResourceStreamError, validateResourceRange, writeResourceStream } from './resource-range-download.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { requestSignal, type LifecycleFetch } from '../workbench-fetch.js';
 import type { PermissionMode } from '@dutydeck/shared';
 import type { ContactIdType, ContactUser } from './owner-identity.js';
@@ -39,7 +39,7 @@ export type LarkReceiveIdType = (typeof larkReceiveIdTypes)[number];
 export type LarkWriteGuard = () => void | Promise<void>;
 
 /** 飞书消息 uuid 最多 50 字符；对完整长键取摘要，保留重试身份和键末尾的动作差异。 */
-function larkMessageUuid(key: string): string {
+function larkMessageUuid(key: string = randomUUID()): string {
   return key.length <= 50 ? key : `dd_${createHash('sha256').update(key).digest('hex').slice(0, 40)}`;
 }
 
@@ -1271,6 +1271,7 @@ export class LarkCardService {
   }
 
   async send(input: LarkSendInput): Promise<LarkMessageResult> {
+    const uuid = larkMessageUuid(input.idempotencyKey?.trim() || undefined);
     return this.withRequestBudget(async () => {
       if (input.chatId && input.receiveId) throw new LarkServiceError('CONFLICTING_RECIPIENTS', 'chatId and receiveId cannot be used together', 400);
       const chatId = input.chatId?.trim();
@@ -1279,8 +1280,7 @@ export class LarkCardService {
       const resolvedReceiveIdType = receiveIdType(chatId ? 'chat_id' : input.receiveIdType ?? this.config.defaultReceiveIdType);
       const cardInput = await this.cardInput(input);
       const fields = {
-        receive_id: receiveId, msg_type: 'interactive',
-        ...(input.idempotencyKey?.trim() ? { uuid: larkMessageUuid(input.idempotencyKey.trim()) } : {})
+        receive_id: receiveId, msg_type: 'interactive', uuid
       };
       const payload = await this.request(`/open-apis/im/v1/messages?receive_id_type=${encodeURIComponent(resolvedReceiveIdType)}`, {
         onFailure: input.onDeliveryFailure, beforeSend: input.beforeSend,
@@ -1293,6 +1293,7 @@ export class LarkCardService {
   }
 
   async reply(input: LarkReplyInput): Promise<LarkMessageResult> {
+    const uuid = larkMessageUuid(input.idempotencyKey?.trim() || undefined);
     return this.withRequestBudget(async () => {
       const messageId = required(input.messageId, 'messageId');
       const cardInput = await this.cardInput(input);
@@ -1302,8 +1303,7 @@ export class LarkCardService {
       // 消息 om_*）时，用 replyRootId 作为 path 锚点，让卡片落在话题根下；否则回落到触发消息 messageId。
       const threadAnchor = input.replyInThread && input.replyRootId?.trim() ? input.replyRootId.trim() : messageId;
       const fields = {
-        msg_type: 'interactive', ...(input.replyInThread ? { reply_in_thread: true } : {}),
-        ...(input.idempotencyKey?.trim() ? { uuid: larkMessageUuid(input.idempotencyKey.trim()) } : {})
+        msg_type: 'interactive', ...(input.replyInThread ? { reply_in_thread: true } : {}), uuid
       };
       const payload = await this.request(`/open-apis/im/v1/messages/${encodeURIComponent(threadAnchor)}/reply`, {
         onFailure: input.onDeliveryFailure, beforeSend: input.beforeSend,
@@ -1522,10 +1522,11 @@ export class LarkCardService {
   }
 
   async sendText(input: LarkSendTextInput): Promise<LarkMessageResult> {
+    const uuid = larkMessageUuid(input.idempotencyKey || undefined);
     const chatId = required(input.chatId, 'chatId');
     if (!chatId.startsWith('oc_')) throw new LarkServiceError('INVALID_CHAT_ID', 'chatId must start with oc_', 400);
     const payload = await this.request('/open-apis/im/v1/messages?receive_id_type=chat_id', {
-      retry: input.retry, beforeSend: input.beforeSend, body: { receive_id: chatId, msg_type: 'text', content: JSON.stringify({ text: required(input.text, 'text') }), ...(input.idempotencyKey ? { uuid: larkMessageUuid(input.idempotencyKey) } : {}) }
+      retry: input.retry, beforeSend: input.beforeSend, body: { receive_id: chatId, msg_type: 'text', content: JSON.stringify({ text: required(input.text, 'text') }), uuid }
     });
     const messageId = payload.data?.message_id;
     if (!messageId) throw new LarkServiceError('INVALID_LARK_RESPONSE', 'Lark send response did not include message_id', 502);
@@ -1533,12 +1534,13 @@ export class LarkCardService {
   }
 
   async replyText(input: LarkReplyTextInput): Promise<LarkMessageResult> {
+    const uuid = larkMessageUuid(input.idempotencyKey || undefined);
     const messageId = required(input.messageId, 'messageId');
     const payload = await this.request(`/open-apis/im/v1/messages/${encodeURIComponent(messageId)}/reply`, {
       retry: input.retry, beforeSend: input.beforeSend, body: {
         msg_type: 'text', content: JSON.stringify({ text: required(input.text, 'text') }),
         ...(input.replyInThread ? { reply_in_thread: true } : {}),
-        ...(input.idempotencyKey ? { uuid: larkMessageUuid(input.idempotencyKey) } : {})
+        uuid
       }
     });
     const replyId = payload.data?.message_id;
@@ -1937,14 +1939,14 @@ export class LarkCardService {
   /** Configuration refreshes discard failures, including results from requests already in flight. */
   clearIdentityFailures(): void { this.identityFailures = new Map(); }
 
-  private identityRequest(path: string) {
+  private identityRequest(path: string, options: { sharedCircuit?: false } = {}) {
     return this.withRequestBudget(async signal => {
       signal.throwIfAborted();
       const failures = this.identityFailures;
       const cached = failures.get(path);
       if (cached && cached.expiresAt > Date.now()) throw cached.error;
       failures.delete(path);
-      try { return await this.request(path, { method: 'GET' }); }
+      try { return await this.request(path, { method: 'GET', ...options }); }
       catch (error) {
         // Only explicit invalid/cross-app/not-visible identity codes are definitive.
         // Permission scopes, throttling and transport failures must remain retryable.
@@ -1990,8 +1992,8 @@ export class LarkCardService {
   }
 
   /** Preserve the contact lookup's numeric-code contract while using the common HTTP path. */
-  private async contactRequest(path: string, options: { method?: string; body?: unknown }) {
-    try { return await (options.method === 'GET' ? this.identityRequest(path) : this.request(path, options)); }
+  private async contactRequest(path: string, options: { method?: string; body?: unknown; sharedCircuit?: false }) {
+    try { return await (options.method === 'GET' ? this.identityRequest(path, options) : this.request(path, options)); }
     catch (error) {
       if (error instanceof LarkServiceError && error.code === 'LARK_OPENAPI_ERROR') {
         const code = error.upstreamCode;
@@ -2006,9 +2008,9 @@ export class LarkCardService {
    * 但响应里没有 user（明确不存在 = definitive miss）；业务码非零或网络错误
    * 一律 throw（definitive 码由 owner-identity 识别，其余按 inconclusive）。
    */
-  async getContactUser(id: string, idType: ContactIdType): Promise<ContactUser | undefined> {
+  async getContactUser(id: string, idType: ContactIdType, options: { sharedCircuit?: false } = {}): Promise<ContactUser | undefined> {
     const userId = required(id, 'id');
-    const res = await this.contactRequest(`/open-apis/contact/v3/users/${encodeURIComponent(userId)}?user_id_type=${idType}`, { method: 'GET' });
+    const res = await this.contactRequest(`/open-apis/contact/v3/users/${encodeURIComponent(userId)}?user_id_type=${idType}`, { method: 'GET', ...options });
     const code = Number(res?.code ?? 0);
     if (code !== 0) {
       throw Object.assign(new Error(`Lark contact user.get failed (code: ${code})`), { code, data: res?.data });
@@ -2043,7 +2045,7 @@ export class LarkCardService {
     return hit ? String(hit.user_id) : undefined;
   }
 
-  private async tenantToken(signal?: AbortSignal) {
+  private async tenantToken(signal?: AbortSignal, sharedCircuit?: false) {
     const caller = this.budget()!;
     signal = signal ? AbortSignal.any([caller.signal, signal]) : caller.signal;
     signal.throwIfAborted();
@@ -2056,7 +2058,7 @@ export class LarkCardService {
       budgets.delete(this);
       flight.promise = requestBudgets.run(budgets, () => this.withRequestBudget(async () => {
         const payload = await this.request('/open-apis/auth/v3/tenant_access_token/internal/', {
-          token: false, signal: flight.abort.signal, body: { app_id: this.config.appId, app_secret: this.config.appSecret },
+          token: false, signal: flight.abort.signal, body: { app_id: this.config.appId, app_secret: this.config.appSecret }, sharedCircuit,
           onFailure: error => { for (const failed of flight.waiters) failed(error); }
         });
         flight.abort.signal.throwIfAborted();
@@ -2098,12 +2100,12 @@ export class LarkCardService {
     }
   }
 
-  private request(path: string, options: { method?: string; body?: unknown; token?: boolean; form?: FormData; retry?: boolean; beforeSend?: LarkWriteGuard; signal?: AbortSignal; onFailure?: (error: unknown) => void }) {
+  private request(path: string, options: { method?: string; body?: unknown; token?: boolean; form?: FormData; retry?: boolean; beforeSend?: LarkWriteGuard; signal?: AbortSignal; onFailure?: (error: unknown) => void; sharedCircuit?: false }) {
     return this.withRequestBudget(async budgetSignal => {
       const signal = options.signal ? AbortSignal.any([budgetSignal, options.signal]) : budgetSignal;
       const headers: Record<string, string> = options.form ? {} : { 'content-type': 'application/json; charset=utf-8' };
       signal.throwIfAborted();
-      if (options.token !== false) headers.authorization = `Bearer ${await this.tenantToken(signal)}`;
+      if (options.token !== false) headers.authorization = `Bearer ${await this.tenantToken(signal, options.sharedCircuit)}`;
       try {
         return await executeWithLarkGate(this.config.appId, `${options.method ?? 'POST'} ${path.split('?')[0]}`, async () => {
           const response = await this.fetch(`${this.config.baseUrl}${path}`, {
@@ -2127,7 +2129,7 @@ export class LarkCardService {
           }
           return payload;
         }, { env: options.retry === false ? { ...this.config.env, LARK_API_RETRY_MAX_ATTEMPTS: '0' } : this.config.env, signal,
-          beforeAttempt: options.beforeSend,
+          beforeAttempt: options.beforeSend, sharedCircuit: options.sharedCircuit,
           canRetry: () => this.budget()!.remaining > 0,
           onFailure: error => {
             if (options.retry !== false) this.budget()!.remaining--;

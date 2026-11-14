@@ -13,6 +13,8 @@ describe('TmuxBackend stale global environment scrubbing (unit)', () => {
     recordedCommands.length = 0;
     vi.mocked(runCommand).mockImplementation(async (file: string, args: string[]) => {
       if (file === 'tmux' && args) {
+        expect(args[0]).toBe('-u');
+        args = args.slice(1);
         let command: string[] = [];
         for (const arg of args) {
           if (arg === ';') { recordedCommands.push(command); command = []; } else command.push(arg);

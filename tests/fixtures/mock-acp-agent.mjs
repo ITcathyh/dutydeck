@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { appendFileSync } from 'node:fs';
 import readline from 'node:readline';
 
 const rl = readline.createInterface({ input: process.stdin });
@@ -6,6 +7,10 @@ const send = message => process.stdout.write(`${JSON.stringify(message)}\n`);
 const sessions = new Set();
 let reportedCost = 0;
 const pending = new Map();
+const log = (method, extra = {}) => {
+  if (process.env.mock_acp_call_log) appendFileSync(process.env.mock_acp_call_log, `${JSON.stringify({ method, pid: process.pid, ...extra })}\n`);
+};
+log('spawn');
 // A prompt held open for `_session/steering`; settled by a steer or session/cancel.
 let steerable;
 const request = (method, params) => new Promise(resolve => { const id = `mock-request-${Date.now()}`; pending.set(id, resolve); send({ jsonrpc: '2.0', id, method, params }); });
@@ -14,12 +19,14 @@ rl.on('line', async line => {
   let message;
   try { message = JSON.parse(line); } catch { return; }
   const { id, method, params = {} } = message;
+  if (method) log(method, method === 'session/prompt' ? { prompt: (params.prompt ?? []).map(p => p.text ?? '').join('') } : {});
   if (!method && pending.has(id)) { pending.get(id)(message.result); pending.delete(id); return; }
   if (method === 'initialize') {
     return send({ jsonrpc: '2.0', id, result: { protocolVersion: params.protocolVersion, agentCapabilities: { loadSession: true, promptCapabilities: { image: false, audio: false, embeddedContext: false } }, authMethods: [], agentInfo: { name: process.env.mock_acp_agent_name ?? 'Dutydeck Mock ACP', version: '1.0.0' }, ...(process.env.mock_acp_steering === '1' ? { _meta: { steering: { supported: true } } } : {}) } });
   }
   if (method === 'session/new') {
     const sessionId = `mock-${Date.now()}`; sessions.add(sessionId);
+    if (process.env.mock_acp_compact === '1') send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId, update: { sessionUpdate: 'available_commands_update', availableCommands: [{ name: 'compact', description: 'Native context compaction', input: null }] } } });
     const configOptions = process.env.MOCK_VENDOR_TOKEN
       ? [{ type: 'select', id: 'model', name: 'Model', category: 'model', currentValue: 'bridged-model', options: [{ value: 'bridged-model', name: 'Bridged Model' }] }]
       : undefined;
@@ -27,7 +34,9 @@ rl.on('line', async line => {
   }
   if (method === 'session/load' || method === 'session/resume') {
     if (process.env.mock_acp_reject_unknown_load === '1' && !sessions.has(params.sessionId)) return send({ jsonrpc: '2.0', id, error: { code: -32602, message: `Resource not found: ${params.sessionId}` } });
-    sessions.add(params.sessionId); return send({ jsonrpc: '2.0', id, result: {} });
+    sessions.add(params.sessionId);
+    if (process.env.mock_acp_compact === '1') send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: params.sessionId, update: { sessionUpdate: 'available_commands_update', availableCommands: [{ name: 'compact', description: 'Native context compaction', input: null }] } } });
+    return send({ jsonrpc: '2.0', id, result: {} });
   }
   if (method === 'session/prompt') {
     const prompt = (params.prompt ?? []).map(p => p.text ?? '').join('');

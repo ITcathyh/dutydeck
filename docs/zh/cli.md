@@ -33,14 +33,36 @@ dutydeck restart
 # 停止守护进程
 dutydeck stop
 
-# 更新全局 Dutydeck 包并自动重启
+# 更新全局 Dutydeck 包并自动重启（默认 latest）
 dutydeck update
+# 安装精确 semver；与 --dist-tag 互斥
+dutydeck update 1.2.3
+# 按 dist-tag 更新
+dutydeck update --dist-tag next
 
 # 一键诊断（端口、SQLite、Agent 可执行性与默认 Agent、飞书监听、守护进程是否以 root 运行、型号是否缺价格（机器人配置的非别名型号，以及近 30 天用量记录里没能计价的型号）、库文件空闲页等）
 dutydeck doctor
 ```
 
-服务启动失败或运行中崩溃时，会在数据库所在目录写一份 `last-abnormal-exit.json`（时间、类型、退出码、脱敏后的错误首行、版本和数据库路径）；数据库目录还不存在时不写，也不会写到 `last-daemon-dir` 指向的其他实例。`dutydeck doctor` 读到 7 天内、且属于同一个数据库的记录时，在「守护进程」一项后面接一句「X 小时前异常退出（…）」：当前实例已就绪且是之后启动的，写「已自动恢复」，否则提示去看 journalctl。这一项的级别不变，没有记录时输出和以前一样。
+`dutydeck update [version]` 的版本参数只接受精确 semver，不接受 range、tag 或选项字符串；未传版本时仍按 `latest` 或显式 `--dist-tag` 解析。安装、版本核对或重启失败时保留原错误，并追加 `npm install --global @byted/dutydeck@<实际旧版本> && dutydeck restart` 作为手工回退步骤；它直接重装旧包，不依赖旧版 CLI 是否认识 `update [version]`。旧版本缺失或不是精确 semver 时会明确说明无法安全生成命令。不会自动回滚，也不会越过部署窗口。
+
+### setup、首启与终端预检
+
+`dutydeck setup` 在检测到需要 tmux 的终端 Agent 时做一次私有 socket 预检；失败只在结果里增加一行警告，仍写入配置。预检读取 `dutydeck.terminal_backend` 时只读打开现有 SQLite，数据库不存在、`configs` 表或设置键缺失时沿用 tmux 默认值，不建库、不迁移，也不写控制表；设置值无效时提示读取失败且不执行 tmux 预检。`dutydeck doctor` 的 `terminal.backend` 检查会定位到命令缺失、版本执行失败、会话建退失败或清理失败，并给出安装或 `PATH` 修复提示；它不会自动安装 tmux，也不会连接或终止默认 tmux server。所有调用都使用 `-f /dev/null`，`XDG_CONFIG_HOME` 指向私有目录，测试会话只运行受控存活命令，不加载系统或用户 tmux 配置。纯 ACP 配置只显示终端后端说明，Herdr 配置不把 tmux 缺失当成故障。
+
+机器人配置完成后，交互式 setup 会用默认 No 的专用问题询问是否验证飞书收发；拒绝则不监听也不发送。同意并启动临时监听后，终端显示一次性 UUID，请在飞书里私聊机器人发送这段验证码。只有在有界时间内收到包含本次 UUID 的用户私聊，机器人才回复该消息并携带同一 UUID。回复被飞书接受表示「入站通过、出站已发送」，仍需你在飞书确认收到；超时则入站未验证，且不发送任何消息。`--yes`、非交互和 `--json` 不进入该验证。此流程不改变机器人权限，也不持久化用户 open_id。
+
+没有机器人配置的前台交互启动会在监听地址下显示 setup、doctor 和实际 Web 地址；每次满足条件都显示，不保存展示状态。`--json`、非 TTY 和 daemon 子进程不显示。CLI 不在 `PATH` 时会给出 pnpm/npm 通用修复入口。
+
+服务启动失败或运行中崩溃时，会在数据库所在目录写一份 `last-abnormal-exit.json`（时间、类型、退出码、脱敏后的错误首行、版本和数据库路径）；数据库目录还不存在时不写，也不会写到 `last-daemon-dir` 指向的其他实例。顶层仍是最近一条 `fatal|startup` 异常，可选 `history` 只保留最近 10 条并按 runId+database 去重；`lifecycle`/`clean-exit` 保留当前代兼容展示，`lifecycleRuns`/`cleanExits` 则按 runId+database 去重、各保留最近 10 条，记录各代 PID、启动时间、unit/boot 和干净停止，避免同目录多库或重叠启动互相覆盖；迟到旧代只写自己的 `cleanExits`，不改当前单数展示，干净退出不覆盖最近异常。上一代没有干净标记且已不在运行时，下一代先记「原因待 journal 富集」；Linux systemd 下只在同一 unit、boot、PID 和启动时间都能对齐退出记录时补 SIGKILL，查询有界且不阻塞就绪，查不到或没有权限时保留基础记录。上一代仍在运行不会报历史崩溃；launchd 富集本轮不支持。`dutydeck doctor` 读到 7 天内、且属于同一个数据库的记录时，在「守护进程」一项后面接一句「X 小时前异常退出（…）」：当前实例已就绪且是之后启动的，写「已自动恢复」，否则提示去看 journalctl。这一项的级别不变，没有记录时输出和以前一样。
+
+### doctor 暴露组合检查<a id="doctor-exposure"></a>
+
+`lark.exposure` 在同一项里组合监听地址、显式 `local-only`、认证模式、socket 激活、机器人 `permissionMode` / `fullTrustConfirmed`、高危用户范围和 `riskControlMode`。监听与认证优先取运行中守护进程的记录；认证模式按实际语义显示为 `local`、`token` 或 `open`，不是只显示一个布尔值。`local-only` 保留本次 doctor 能看到的显式配置事实，不从解析后的 `127.0.0.1` 反推；另一个 shell 看不到 daemon 的启动参数时显示「未知」，不会误写成「关闭」。socket 激活只认当前进程的 `LISTEN_PID` / `LISTEN_FDS` 或 daemon 记录中的 systemd unit；即使 service 已停止，也会通过 `TriggeredBy` 找到关联 `.socket`，并核对 `ActiveState=active` 与 `SubState=listening`，查询失败或状态不完整时按未知处理。这些事实不能证明继承 fd 的实际地址时，该项降级为「实际监听地址未知」，不会拿 `.env` 的 host 猜成回环或通配地址。
+
+机器人部分只把已开启监听、默认 Agent 已配置且执行模式已确认的条目算作可运行权限；旧记录仅写 `fullTrustConfirmed=true` 时仍按完全信任处理。高危名单先按运行时同一只读归一化路径清理无效用户和空白邮箱，再显示「全部 / 指定」及 ID、邮箱数量，不输出 openId、姓名、邮箱、App Secret 或访问令牌。单条机器人配置无效时只跳过该条并标明数量，其余有效机器人仍参与判定，危险 fail/warn 不会因此降级。`off` 不执行高危名单，即使填了名单也按广范围处理；`guidance` 只提醒，`enforced` 才是强制拦截。只有「非回环 `open` + 可运行的完全信任机器人 + 广范围高危用户 + 弱风控」同时成立时，本项才升级：`off` 为 fail，`guidance` 为 warn。强制风控、较窄的 guidance 名单、token/local，或机器人不是完全信任时，本项不新增告警；既有 `access.posture` 等检查不变。数据库不可读或整份机器人配置不可解析时降级为 skip，不重复报错。
+
+命中危险组合时会给出 remedy 和可复制命令，例如 `dutydeck settings bot set <appId> permissionMode=ask fullTrustConfirmed=false`，或改用 `dutydeck setup --local-only`；保留完全信任时，先运行 `dutydeck settings bot install-hook <appId>`，再设置 `riskControlMode=enforced` 并配置 `highRiskAllowedUsers` / `highRiskAllowedEmails`。doctor 只报告，不自动修改 `.env`、unit 或机器人配置。结论只覆盖它能观测的监听地址，不假定反向代理、防火墙或端口转发后的其他访问路径已经安全或已经验证。
 
 `restart` 先暂停领取新任务。已提交成功、恢复日志与原轮身份可验证的 `full-trust` tmux 任务继续在原 CLI 进程里运行，新服务接回同一轮，不重发输入；其余任务继续等待结束。ACP、普通 PTY、Herdr、提交中、缺少恢复日志或身份，以及待审批或高危权限门禁未授权的任务都不会跳过等待。systemd 只在当前 `KillMode=process` 时保留任务；其他值或读不到时全量等待。旧服务不支持恢复计数、排空失败或租约续期失败时也全量等待。`--drain-timeout` 控制等待上限，`--force` 保留原来的强制重启行为，当前 Agent 自己的会话仍自动排除。`deploy` 使用同一保留策略，ACP 等不可保留的任务仍等待结束。
 
@@ -53,6 +75,18 @@ Codex 的 `codex` 入口默认使用终端模式，`codex-cli` 入口继续兼�
 **守护日志轮转**：`.dutydeck/daemon/dutydeck.log` 超过 10MB 时，在新进程打开它之前轮转成 `.1`（最多保留 `.1`–`.3`）：detached 启动前，以及 `start` / `restart` / `restart --unit` / `deploy` 调用 `systemctl start` 或 `restart` 之前。旧进程停服期间的最后几行写进 `.1`。systemd 因崩溃自动重拉时不轮转，下一次 restart 或 deploy 时补上。
 
 `GET /api/system/activity` 的 `runningTasks` 包含正在执行主轮的会话，以及主轮已结束但仍有原生后台任务的会话；同一会话只计一次。显式加 `?restart=true` 才检查恢复证据并返回 `restartBlockers` 和 `recoverableTasks`；未进入排空时不减去可恢复任务，`excludeSessionId` 同时适用于这三个计数。
+
+### 只读日志（`logs`）<a id="logs"></a>
+
+```bash
+dutydeck logs
+dutydeck logs -n 200
+dutydeck logs --unit dutydeck.service -n 100
+```
+
+不带 `--unit` 时，命令读取当前 daemon 的 `.dutydeck/daemon/dutydeck.log`，最多读取文件末尾 256KiB，默认输出最后 50 行；`-n` 可指定 1–10000 行。带 `--unit` 时改为通过无 shell 的流式 `journalctl --user` 子进程读取这个 systemd 用户实例，stdout 同样只滚动保留末尾 256KiB。该模式先取原始最近 N 行，再过滤疑似秘密，所以可能少于 N 行。两种来源都只输出一次快照，不提供 follow。
+
+普通行和错误行按原顺序保留，多行堆栈不会被压成一行。为避免把凭据带进终端记录，含 token、secret、password、credential、API key、Authorization、Bearer 等疑似秘密的整行不会输出；这不改变原始日志文件或 journal。unit 不存在或尚无日志、无法执行 `journalctl` 或行数无效时命令明确报错并返回非零退出码，不输出环境配置。
 
 ## 2. 版本发布与部署 (`deploy`)
 
@@ -138,6 +172,14 @@ dutydeck backup restore --archive /path/to/backups/snapshot-1 --target /path/to/
 ```
 
 三条命令均输出 JSON，必须显式提供路径，不从 `.env` 或 daemon 记录猜测源实例。源数据库须直接位于数据目录中且已升级到当前 schema；有活跃使用者时拒绝备份。输出和恢复目标目录必须不存在、父目录必须存在；备份放在源数据目录之外，恢复不覆盖已有目录。
+
+启动报 `DATABASE_SCHEMA_TOO_NEW` 时，错误会给出数据库版本和程序支持版本，并打印带实际路径的只读检查命令：
+
+```bash
+dutydeck database execution-status --database /path/to/runtime/dutydeck.db
+```
+
+该命令只读，不迁移、不降级，也不要求先能正常打开服务；`--database` 必须显式提供。应换用支持该 schema 的 Dutydeck，或在停止所有写入方后，用确认过时间的备份恢复到另一个新目录核对：`dutydeck backup restore --archive <备份目录> --target <新的恢复目录>`。**使用备份会丢备份后的全部写入；切回旧代码不是数据库回滚。**
 
 备份包含 SQLite 主数据、插件非秘密配置 / 绑定 / 锁文件、引用的不可变插件包，以及冻结数据库引用的产物快照。持有数据库和插件写锁期间复制，并检查组件哈希、快照大小、schema、SQLite 完整性和外键；缺少引用的产物快照或内容不一致会失败。清单列出缺失及排除项。备份目录为 0700、文件为 0600；完整数据库可能含仍可用于源实例的认证令牌、分享签名密钥及敏感正文；归档没有额外加密，不是无密钥备份。
 
@@ -382,7 +424,7 @@ dutydeck schedule update schedule_xxx --session ses_xxx --at 2026-12-01T09:00   
   dutydeck auth token          # 查看当前 Token（首次使用自动生成）
   dutydeck auth token --rotate # 生成新 Token，旧的立即失效
   ```
-  退出登录后仍可直接用同一密码再次登录。轮换 Token 或重设访问密码后，凭旧凭据已打开的实时流和终端连接（包括经主服务转发到其他实例的）在 10 秒内断开。`auth` 命令写哪个库：有 `--database` 用它；否则用 `DUTYDECK_DATABASE_URL`（相对路径与 `start` 一样按 Dutydeck 根目录解析）；都没有时用进程身份核验通过、正在运行的 daemon 的库，daemon 崩溃后残留的状态文件不作数，改用根目录默认的 `.dutydeck/dutydeck.db`。输出里的 `database` 是实际写入的库。`secret` 与 `lark create` 用同一规则。
+  退出登录后仍可直接用同一密码再次登录。Host 带合法显式端口时，浏览器 Cookie 名为 `dutydeck_access_<port>`；无显式端口时仍为 `dutydeck_access`，所以同机不同端口的登录和登出不再互相覆盖。旧 Cookie 仍按 scoped → legacy 顺序逐个经本实例验证，Bearer 优先；登出清除当前端口的 scoped Cookie；显式端口下另有共享 legacy 时，只有通过本实例验证才额外清除。无显式端口时两者同名，保留旧登出语义。轮换 Token 或重设访问密码后，凭旧凭据已打开的实时流和终端连接（包括经主服务转发到其他实例的）在 10 秒内断开。`auth` 命令写哪个库：有 `--database` 用它；否则用 `DUTYDECK_DATABASE_URL`（相对路径与 `start` 一样按 Dutydeck 根目录解析）；都没有时用进程身份核验通过、正在运行的 daemon 的库，daemon 崩溃后残留的状态文件不作数，改用根目录默认的 `.dutydeck/dutydeck.db`。输出里的 `database` 是实际写入的库。`secret` 与 `lark create` 用同一规则。
 - 不要在非本机地址上用 `--no-auth`：外部人员可能借 Agent 在宿主机上执行命令。在非回环地址关闭认证会拒绝启动，除非显式加 `--unsafe-no-auth`。
 - **凭据保护**：机器人对外开放后，防止群里其他人借 Agent 套出本机的令牌、密钥和 Agent 会话记录。跟随机器人设置里的「风险控制」，只约束不在「高危操作允许名单」里的发送人和其他机器人；名单里的人照常使用，完全信任模式也不受影响。
   - 约束提示：给 Agent 加一条规则，不读取、复制、输出或发送凭据和 Agent 会话记录（如 `~/.claude`、`~/.claude.json`、`~/.codex`），被要求时一句话拒绝。
@@ -458,7 +500,7 @@ dutydeck task decide <session-id> --waiting <ask-id> --option answer --text '自
 {"archived":true}
 ```
 
-状态为 `running|waiting|queued|done|failed|stopped|unknown`，待审批/提问优先显示 `waiting`；结果待核对显示 `unknown`。`agent` 为 `claude|codex|other`；来源为 `lark|schedule|web|trigger|other`，已知时带 `origin.url`。`waiting` 中的 `question` 选项使用 `kind=answer`，`free_text` 表示是否可自由回答。问题最多 500 字、操作原文最多 2000 字，验证摘要最多 200 字。`verification.state` 为 `passed|failed|none`，过期或没有验证证据时为 `none`。`actions` 仅列当前允许且可用的动作。对话按时间升序，角色为 `user|assistant|tool|system`；工具调用与结果合并成一条摘要，不输出 thinking；单条超过 4000 字时截断并加 `…`，截断文本或省略较早条目时 `truncated=true`。
+状态为 `running|waiting|queued|done|failed|stopped|unknown`，待审批/提问优先显示 `waiting`；结果待核对显示 `unknown`。`agent` 为 `claude|codex|other`；来源为 `lark|schedule|web|trigger|other`，已知时带 `origin.url`。`waiting` 中的 `question` 选项保留 `id`、`label` 和 `kind=answer`，可选 `description` 仅用于展示，不拼入 `prompt`，也不改变作答时提交的选项值；`free_text` 表示是否可自由回答。问题最多 500 字、操作原文最多 2000 字，验证摘要最多 200 字。`verification.state` 为 `passed|failed|none`，过期或没有验证证据时为 `none`。`actions` 仅列当前允许且可用的动作。对话按时间升序，角色为 `user|assistant|tool|system`；工具调用与结果合并成一条摘要，不输出 thinking；单条超过 4000 字时截断并加 `…`，截断文本或省略较早条目时 `truncated=true`。
 
 失败形状为 `{"ok":false,"error":{"code":"already_resolved","message":"该请求已被处理"}}`：
 

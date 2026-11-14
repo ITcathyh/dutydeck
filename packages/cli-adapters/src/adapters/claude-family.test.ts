@@ -1,5 +1,8 @@
-import { readFileSync } from 'node:fs';
-import { describe, expect, it, vi } from 'vitest';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { secretGuardHookCommand, secretGuardToolMatcher } from '@dutydeck/shared/secret-guard';
 import { claudePlanGuardMatcher, createClaudeFamilyAdapter, prepareClaudeFamilyInput } from './claude-family.js';
 import type { PtyLike } from '../types.js';
@@ -412,5 +415,132 @@ describe('Claude family plan guard hook', () => {
     const matcher = new RegExp(claudePlanGuardMatcher);
     for (const tool of ['Read', 'Glob', 'Grep', 'WebFetch', 'Task', 'TodoWrite']) expect(matcher.test(tool)).toBe(false);
     for (const tool of ['Bash', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'mcp__fs__write_file', 'ReadX', 'CronCreate']) expect(matcher.test(tool)).toBe(true);
+  });
+});
+
+describe('Claude guard failure capability', () => {
+  const directories: string[] = [];
+  afterEach(() => { for (const path of directories.splice(0)) rmSync(path, { recursive: true, force: true }); });
+  const temp = () => { const path = mkdtempSync(join(tmpdir(), 'claude-guard-capability-')); directories.push(path); return path; };
+  const fakeClaude = (directory: string, version: string | undefined) => {
+    const command = join(directory, 'claude');
+    writeFileSync(command, `#!${process.execPath}\nif (process.argv.includes('--version')) process.stdout.write(${JSON.stringify(version === undefined ? '' : `${version} (Claude Code)\n`)});\n`, { mode: 0o755 });
+    chmodSync(command, 0o755);
+    return command;
+  };
+  const runHook = (args: string[], options: { cwd: string; sessionId: string; bin: string; marker: string }) => {
+    const value = args[args.indexOf('--settings') + 1]!;
+    const result = spawnSync(process.execPath, [resolve(process.cwd(), 'tests/fixtures/claude-hook-runner.mjs'), '--settings', value, '--hook', 'secret-guard.mjs'], {
+      cwd: options.cwd,
+      env: {
+        ...process.env,
+        PATH: `${options.bin}:${process.env.PATH ?? ''}`,
+        dutydeck_session_id: options.sessionId,
+        CLAUDE_HOOK_TEST_TOOL_MARKER: options.marker,
+        CLAUDE_HOOK_TEST_TIMEOUT_MS: '40',
+        CLAUDE_HOOK_TEST_EVENT: JSON.stringify({ tool_name: 'Bash', tool_input: { command: `${'a'.repeat(100_000)}!` } }),
+      },
+      encoding: 'utf8',
+      timeout: 5_000,
+    });
+    expect(result.error).toBeUndefined();
+    return JSON.parse(result.stdout);
+  };
+
+  it('blocks a secret-guard timeout through the generated PTY settings only when the capability is declared', async () => {
+    const directory = temp();
+    const cwd = join(directory, 'project');
+    const bin = join(directory, 'bin');
+    const sessions = join(cwd, '.dutydeck', 'security', 'sessions');
+    mkdirSync(sessions, { recursive: true });
+    mkdirSync(bin);
+    const sessionId = 'ses_secret_timeout';
+    writeFileSync(join(sessions, `${sessionId}.json`), JSON.stringify({ enabled: true, authorized: false, pattern: '(a+)+$' }));
+    const command = fakeClaude(directory, '2.1.295');
+    const adapter = createClaudeFamilyAdapter('claude-code');
+    await adapter.prepareLaunch?.({ sessionId, command, cwd, permissionMode: 'full-trust' }, { ...process.env, PATH: `${directory}:${process.env.PATH ?? ''}` } as Record<string, string>);
+    const args = adapter.buildArgs({ sessionId, command, cwd, permissionMode: 'full-trust' });
+    const marker = join(directory, 'tool-ran');
+    const outcome = runHook(args, { cwd, sessionId, bin, marker });
+    expect(outcome).toMatchObject({ timedOut: true, onFailure: 'block', blocked: true });
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it('keeps the old timeout fallback while retaining the wired secret guard on old Claude', async () => {
+    const directory = temp();
+    const cwd = join(directory, 'project');
+    const bin = join(directory, 'bin');
+    const sessions = join(cwd, '.dutydeck', 'security', 'sessions');
+    mkdirSync(sessions, { recursive: true });
+    mkdirSync(bin);
+    const sessionId = 'ses_secret_timeout_old';
+    writeFileSync(join(sessions, `${sessionId}.json`), JSON.stringify({ enabled: true, authorized: false, pattern: '(a+)+$' }));
+    const command = fakeClaude(directory, '2.1.220');
+    const adapter = createClaudeFamilyAdapter('claude-code');
+    await adapter.prepareLaunch?.({ sessionId, command, cwd, permissionMode: 'full-trust' }, { ...process.env, PATH: `${directory}:${process.env.PATH ?? ''}` } as Record<string, string>);
+    const args = adapter.buildArgs({ sessionId, command, cwd, permissionMode: 'full-trust' });
+    const marker = join(directory, 'tool-ran');
+    const outcome = runHook(args, { cwd, sessionId, bin, marker });
+    expect(outcome).toMatchObject({ timedOut: true, blocked: false });
+    expect(outcome.onFailure).toBeUndefined();
+    expect(existsSync(marker)).toBe(true);
+  });
+
+  it.each([
+    ['2.1.220', false],
+    ['2.1.295', true],
+    ['2.1.323', true],
+  ])('writes onFailure only for a probed supported Claude version: %s', async (version, supported) => {
+    const directory = temp();
+    const command = fakeClaude(directory, version);
+    const adapter = createClaudeFamilyAdapter('claude-code');
+    await adapter.prepareLaunch?.({ sessionId: 'ses_version', command, cwd: directory, permissionMode: 'ask' }, { ...process.env } as Record<string, string>);
+    const args = adapter.buildArgs({ sessionId: 'ses_version', command, cwd, permissionMode: 'ask', planGuardCommand: 'plan-guard' });
+    const settings = JSON.parse(args[args.indexOf('--settings') + 1]!);
+    for (const group of settings.hooks.PreToolUse) {
+      for (const hook of group.hooks) expect(hook.onFailure === 'block').toBe(supported);
+    }
+  });
+
+  it('caches the bounded capability probe for subsequent launches', async () => {
+    const directory = temp();
+    const count = join(directory, 'probe-count');
+    const command = join(directory, 'claude');
+    writeFileSync(command, `#!${process.execPath}\nif (process.argv.includes('--version')) { require('node:fs').appendFileSync(${JSON.stringify(count)}, '1'); process.stdout.write('2.1.295 (Claude Code)\\n'); }\n`, { mode: 0o755 });
+    const adapter = createClaudeFamilyAdapter('claude-code');
+    const context = { sessionId: 'ses_cached', command, cwd: directory, permissionMode: 'ask' as const };
+    const env = { ...process.env } as Record<string, string>;
+    await adapter.prepareLaunch?.(context, env);
+    await adapter.prepareLaunch?.(context, env);
+    expect(readFileSync(count, 'utf8')).toBe('1');
+  });
+
+  it('adds onFailure only to Dutydeck guards, not Ask or PermissionRequest hooks', async () => {
+    const directory = temp();
+    const command = fakeClaude(directory, '2.1.295');
+    const adapter = createClaudeFamilyAdapter('claude-code');
+    await adapter.prepareLaunch?.({ sessionId: 'ses_relay', command, cwd: directory, permissionMode: 'ask' }, { ...process.env } as Record<string, string>);
+    const env = {
+      dutydeck_session_source: 'lark', dutydeck_relay_url: 'http://localhost/api/relay',
+      dutydeck_relay_token: 'fixture-token', dutydeck_relay_command: 'relay',
+    };
+    const args = adapter.buildArgs({ sessionId: 'ses_relay', command, cwd: directory, env, permissionMode: 'ask', planGuardCommand: 'plan-guard' });
+    const settings = JSON.parse(args[args.indexOf('--settings') + 1]!);
+    expect(settings.hooks.PreToolUse.map((group: { matcher: string }) => group.hooks[0].onFailure)).toEqual(['block', undefined, 'block']);
+    expect(settings.hooks.PermissionRequest[0].hooks[0].onFailure).toBeUndefined();
+    expect(args.join(' ')).not.toContain('fixture-token');
+  });
+
+  it('does not treat an unknown fork or a failed version probe as supported', async () => {
+    for (const output of ['2.1.323 (Unknown Fork)\n', 'not a version\n']) {
+      const directory = temp();
+      const command = join(directory, 'claude');
+      writeFileSync(command, `#!${process.execPath}\nprocess.stdout.write(${JSON.stringify(output)});\n`, { mode: 0o755 });
+      const adapter = createClaudeFamilyAdapter('claude-code');
+      await adapter.prepareLaunch?.({ sessionId: 'ses_fork', command, cwd, permissionMode: 'ask' }, { ...process.env } as Record<string, string>);
+      const args = adapter.buildArgs({ sessionId: 'ses_fork', command, cwd, permissionMode: 'ask' });
+      const settings = JSON.parse(args[args.indexOf('--settings') + 1]!);
+      expect(settings.hooks.PreToolUse[0].hooks[0].onFailure).toBeUndefined();
+    }
   });
 });

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { api, eventsUrl, insightApi, setShareToken, withShareToken, type Session } from './api';
+import { api, ApiError, eventsUrl, insightApi, setShareToken, UNAUTHORIZED_EVENT, withShareToken, type Session } from './api';
 import { setInstance } from './instance';
 
 afterEach(() => vi.unstubAllGlobals());
@@ -49,6 +49,40 @@ describe('web api adapter', () => {
     vi.stubGlobal('fetch', fetcher);
     await expect(api.restart('s1')).resolves.toEqual(session);
     expect(fetcher).toHaveBeenCalledWith('/api/sessions/s1/restart', { credentials: 'same-origin', method: 'POST' });
+  });
+
+  it('forwards an optional send idempotency key without changing legacy requests', async () => {
+    const task = { id: 't1', sessionId: 's1', prompt: 'hello', status: 'queued', createdAt: '', updatedAt: '' };
+    const fetcher = vi.fn(async () => ({ ok: true, json: async () => ({ accepted: true, task }) }));
+    vi.stubGlobal('fetch', fetcher);
+    await api.send('s1', 'hello', 'interrupt', [], 'web-operation-1');
+    expect(fetcher).toHaveBeenLastCalledWith('/api/sessions/s1/send', {
+      credentials: 'same-origin', method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'hello', mode: 'interrupt', idempotencyKey: 'web-operation-1' })
+    });
+    await api.send('s1', 'hello', 'steer');
+    expect(fetcher).toHaveBeenLastCalledWith('/api/sessions/s1/send', {
+      credentials: 'same-origin', method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'hello', mode: 'steer' })
+    });
+  });
+
+  it.each([401, 403, 413])('preserves HTTP %d when the error response is not JSON', async status => {
+    const listener = vi.fn();
+    window.addEventListener(UNAUTHORIZED_EVENT, listener);
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('upstream rejected the request', {
+      status,
+      statusText: 'Upstream rejection',
+      headers: { 'content-type': 'text/plain' }
+    })));
+    try {
+      const error = await api.send('s1', 'hello', 'queue', undefined, 'web-operation-1').catch(error => error);
+      expect(error).toBeInstanceOf(ApiError);
+      expect(error).toMatchObject({ status, code: 'REQUEST_FAILED', message: 'Upstream rejection' });
+      expect(listener).toHaveBeenCalledTimes(status === 401 ? 1 : 0);
+    } finally {
+      window.removeEventListener(UNAUTHORIZED_EVENT, listener);
+    }
   });
 
   it('runs schedules with a revision and operation key, and deletes with a revision', async () => {

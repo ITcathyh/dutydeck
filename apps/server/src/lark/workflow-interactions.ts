@@ -224,16 +224,25 @@ const otherAnswerForm = (record: LarkInteraction): LarkCardElement => ({
   ]
 });
 
+const askChoiceLabels = (choices: RelayAskChoice[]) => choices.map((choice, index) =>
+  `${index + 1}. ${choice.label}${choice.description ? `\n   ${choice.description}` : ''}`);
+const askFullText = (question: string, labels: string[]) => [question, ...(labels.length ? ['可选项：', ...labels] : [])].join('\n\n');
+const askFullTextNotice = '以下是节选；完整问题和全部选项已提供为本话题的全文附件，请阅读后回答。';
+
 /** 单选：每个选项一个回调按钮，点按即提交，回调 value 复用 dutydeck_workflow 命名空间。 */
 const singleChoiceElements = (record: LarkInteraction, choices: RelayAskChoice[]): LarkCardElement[] =>
-  choices.map((choice, index) => ({
-    tag: 'button', element_id: `workflow_answer_choice_${index}`, type: record.adhdMode === true && choices.length === 1 ? 'primary' : 'default',
-    text: { tag: 'plain_text', content: choice.label },
-    behaviors: [{ type: 'callback', value: {
-      dutydeck_workflow: 'answer', request_id: record.id, generation: record.boot,
-      answer: choice.value ?? choice.label
-    } }]
-  }));
+  choices.flatMap((choice, index): LarkCardElement[] => [
+    {
+      tag: 'button', element_id: `workflow_answer_choice_${index}`, type: record.adhdMode === true && choices.length === 1 ? 'primary' : 'default',
+      text: { tag: 'plain_text', content: choice.label },
+      behaviors: [{ type: 'callback', value: {
+        dutydeck_workflow: 'answer', request_id: record.id, generation: record.boot,
+        answer: choice.value ?? choice.label
+      } }]
+    },
+    ...(choice.description ? [{ tag: 'div', element_id: `workflow_answer_choice_description_${index}`,
+      text: { tag: 'plain_text', content: choice.description } }] : [])
+  ]);
 
 /**
  * 多选：JSON 2.0 原生表单（form + multi_select_static + form_action_type:'submit' 按钮）。
@@ -245,7 +254,10 @@ const multipleChoiceForm = (record: LarkInteraction, choices: RelayAskChoice[], 
   elements: [
     { tag: 'multi_select_static', element_id: 'workflow_answer_select', name: 'answer', behaviors: [],
       placeholder: { tag: 'plain_text', content: '选择一个或多个选项' },
-      options: choices.map(choice => ({ text: { tag: 'plain_text', content: choice.label }, value: choice.value ?? choice.label })) },
+      options: choices.map(choice => ({
+        text: { tag: 'plain_text', content: choice.label }, value: choice.value ?? choice.label,
+        ...(choice.description ? { description: { tag: 'plain_text', content: choice.description } } : {})
+      })) },
     ...(withOther ? [otherAnswerInput] : []),
     { tag: 'button', element_id: 'workflow_answer_submit', type: 'primary',
       text: { tag: 'plain_text', content: '提交选择' }, form_action_type: 'submit',
@@ -1015,7 +1027,7 @@ export class LarkWorkflowInteractions {
     ];
     // 结构化问答仅在开关开启且记录本身带选项时渲染；持久记录缺 structured（升级前的卡）
     // 一律走自由文本形态，绝不让新渲染逻辑作用于旧记录。
-    // 候选按优先级排：先带「其他」输入，放不下再退回只有选项的版本。ADHD 提问卡只保留问题和按钮，不加输入。
+    // 候选按优先级排：先带「其他」输入，放不下再退回只有选项的版本。ADHD 提问卡只保留问题、选项和必要说明，不加输入。
     let structuredCandidates: { parts: LarkCardElement[]; withOther: boolean }[] = [];
     if (structuredOn && kind === 'ask') {
       if (record.structured && structuredChoices) {
@@ -1036,7 +1048,7 @@ export class LarkWorkflowInteractions {
       }
       if (kind === 'ask') {
         const questionIndex = elements.indexOf(displayedQuestion);
-        const labels = (askChoices ?? []).map((choice, index) => `${index + 1}. ${choice.label}`);
+        const labels = askChoiceLabels(askChoices ?? []);
         const choicesElement = (visible: number): LarkCardElement => ({ tag: 'div', text: { tag: 'plain_text',
           content: `可选项：\n${labels.slice(0, visible).join('\n')}${visible < labels.length ? `\n还有 ${labels.length - visible} 个选项未展示，请查看全文附件。` : ''}` } });
         const fullTextParts = labels.length ? [choicesElement(labels.length)] : [];
@@ -1051,15 +1063,8 @@ export class LarkWorkflowInteractions {
             elements.push(...fullTextParts);
           } else {
             // 只有问答全文确实放不下时上传；审批卡不经过这里，避免扩大命令/秘密的披露范围。
-            const attachment = await sendLarkFile(this.service, {
-              chatId: context.event.chatId, replyMessageId: larkMessageAnchor(context.event),
-              replyInThread: Boolean(context.event.threadId), allowReplyFallback: false
-            }, {
-              data: Buffer.from([question, ...(labels.length ? ['可选项：', ...labels] : [])].join('\n\n'), 'utf8'),
-              filename: `question-${record.id}.txt`, idempotencyKey: `workflow_${record.id}_full`
-            }, { warn: () => undefined }, this.store, async () => { if (!await this.live(record)) throw stale(); });
-            if (!attachment.messageId) throw new Error('Question attachment delivery has no receipt');
-            const notice: LarkCardElement = { tag: 'markdown', content: '以下是节选；完整问题和全部选项已提供为本话题的全文附件，请阅读后回答。' };
+            await this.deliverAskFullText(record, context.event, question, labels);
+            const notice: LarkCardElement = { tag: 'markdown', content: askFullTextNotice };
             let visible = labels.length;
             const excerpt = () => [questionElement(kind, question), ...(labels.length ? [choicesElement(visible)] : []), notice];
             // 先保留完整问题，逐个减少可见选项；问题自身超限时再按 Unicode 字符缩短。
@@ -1191,10 +1196,6 @@ export class LarkWorkflowInteractions {
     // A retry in the same original turn must not register another dependent question.
     const existing = (await this.list(context.appId)).find(record => record.durable && record.sessionId === context.sessionId && record.taskId === context.taskId);
     if (!existing && signal?.aborted) throw new LarkServiceError('LARK_CONFIRMATION_ENDED', '已结束，未执行', 409);
-    const probe: LarkInteraction = { ...context, id: this.interactionId(context, 'ask', `deferred_${context.taskId}`), boot: this.boot,
-      kind: 'ask', nativeId: '', question: input.question, structured: true, multiple: input.multiple, state: 'pending', updatedAt: new Date().toISOString(),
-      durable: { choices: input.choices, snapshot } };
-    if (!this.withinAskCardBudget(this.confirmationElements(probe))) throw new LarkServiceError('LARK_CONFIRMATION_TOO_LARGE', '问题和选项过长，请拆成一个较短的问题。', 400);
     const record = existing ?? (await this.create(context, 'ask', `deferred_${context.taskId}`, input.question, {
       adhdMode: true, structured: true, ...(input.multiple ? { multiple: true } : {}), durable: { choices: input.choices, snapshot },
       expiresAt: new Date(Date.now() + larkPermissionTimeoutMs).toISOString()
@@ -1202,17 +1203,53 @@ export class LarkWorkflowInteractions {
     if (record.state === 'pending') await this.deliverConfirmation(record).catch(error => this.log?.warn({ error, requestId: record.id }, 'Delivering durable confirmation failed; reconcile will retry'));
     return { status: 'deferred' as const, askId: record.id, reason: '确认已登记，等待用户点击后另起一轮；本轮结束，不执行依赖该确认的操作。' };
   }
-  private confirmationElements(record: LarkInteraction) {
-    return [questionElement('ask', record.question), ...(record.multiple
-      ? [multipleChoiceForm(record, record.durable!.choices)] : singleChoiceElements(record, record.durable!.choices))];
+  private confirmationElements(record: LarkInteraction, choices = record.durable!.choices, withFullTextNotice = false) {
+    return [questionElement('ask', record.question),
+      ...(withFullTextNotice ? [{ tag: 'markdown', content: askFullTextNotice } as LarkCardElement] : []),
+      ...(record.multiple ? [multipleChoiceForm(record, choices)] : singleChoiceElements(record, choices))];
+  }
+  private async deliverAskFullText(record: LarkInteraction, event: LarkMessageEvent, question: string, labels: string[]) {
+    const attachment = await sendLarkFile(this.service, {
+      chatId: event.chatId, replyMessageId: larkMessageAnchor(event),
+      replyInThread: Boolean(event.threadId), allowReplyFallback: false
+    }, {
+      data: Buffer.from(askFullText(question, labels), 'utf8'),
+      filename: `question-${record.id}.txt`, idempotencyKey: `workflow_${record.id}_full`
+    }, { warn: () => undefined }, this.store, async () => { if (!await this.live(record)) throw stale(); });
+    if (!attachment.messageId) throw new Error('Question attachment delivery has no receipt');
+  }
+  /** 长说明只在卡上节选；提交值和全文保持原样，重试沿用持久化的同一份降级元素。 */
+  private async degradeConfirmation(record: LarkInteraction) {
+    const full = this.confirmationElements(record);
+    if (this.withinAskCardBudget(full)) return full;
+    const labels = askChoiceLabels(record.durable!.choices);
+    await this.deliverAskFullText(record, record.event, record.question, labels);
+    const choices = record.durable!.choices;
+    const withoutDescriptions = choices.map(choice => ({ ...choice, description: undefined }));
+    let fitted = this.confirmationElements(record, withoutDescriptions, true);
+    if (!this.withinAskCardBudget(fitted)) throw new LarkServiceError('LARK_CONFIRMATION_TOO_LARGE', '问题和选项过长，请拆成一个较短的问题。', 400);
+    const descriptions = choices.map(choice => Array.from(choice.description ?? ''));
+    let low = 0, high = Math.max(...descriptions.map(characters => characters.length));
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2);
+      const excerpt = choices.map((choice, index) => {
+        const characters = descriptions[index]!;
+        return { ...choice, description: characters.length > middle ? `${characters.slice(0, middle).join('')}…` : choice.description };
+      });
+      const candidate = this.confirmationElements(record, excerpt, true);
+      if (this.withinAskCardBudget(candidate)) { fitted = candidate; low = middle; }
+      else high = middle - 1;
+    }
+    return fitted;
   }
   private async deliverConfirmation(record: LarkInteraction) {
     if (record.cardId || this.delivering.has(record.id) || this.closed || (record.deliveryRetryAt ?? 0) > Date.now()) return;
     this.delivering.add(record.id);
     try {
-      const elements = this.confirmationElements(record);
       const attempts = (record.deliveryAttempts ?? 0) + 1;
       record = await this.annotate(record, { deliveryAttempts: attempts, deliveryRetryAt: Date.now() + 5_000 * 2 ** (attempts - 1) });
+      const elements = record.askPendingElements ?? await this.degradeConfirmation(record);
+      if (!record.askPendingElements) record = await this.annotate(record, { askPendingElements: elements });
       const card = await this.service.reply({ messageId: larkMessageAnchor(record.event),
         ...(record.event.threadId ? { replyInThread: true } : {}), state: 'running', statusLabel: '待确认', awaitingHuman: true,
         readOnly: true, adhdMode: true, taskId: record.id, taskName: record.taskName || '待确认', permissionMode: 'ask', elements,

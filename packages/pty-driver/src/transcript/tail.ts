@@ -37,6 +37,15 @@ export interface TranscriptPosition {
   epoch: number;
 }
 
+export interface TranscriptCompactionObservation {
+  nativeSessionId: string;
+  position: TranscriptPosition | undefined;
+  generation: number;
+  signal: AbortSignal;
+  /** Final Enter was attempted, so records can still arrive after this wait retires. */
+  submitted?(): boolean;
+}
+
 /** A live source of normalized driver events, backed by a CLI transcript. */
 export interface TranscriptEventSource {
   start(): void;
@@ -50,6 +59,9 @@ export interface TranscriptEventSource {
   /** Arm after flush(), before writing. Only a new exact user record in this
    * session can confirm input; abort/stop never converts unknown into accepted. */
   waitForInput?(prompt: string, signal: AbortSignal): Promise<void>;
+  /** Maintenance-only /compact evidence; never creates or completes a business turn. */
+  compactionNativeSession?(): string | undefined;
+  waitForCompaction?(observation: TranscriptCompactionObservation): Promise<'completed' | 'failed'>;
   /** Background sub-agents the CLI reported still running when its latest
    *  turn ended. Only sources whose transcript records it (Claude) implement this. */
   pendingBackgroundWork?(): number;
@@ -108,6 +120,8 @@ export interface JsonlTailerOptions {
   validateRestorePath?: (path: string) => boolean;
   inputText?: (entry: TranscriptEntry) => string | undefined;
   inputTimestamp?: (entry: TranscriptEntry) => number;
+  /** Maintenance observation stays separate from the business event mapper. */
+  observeEntry?: (entry: TranscriptEntry, baseline: boolean, position?: TranscriptPosition) => void;
   /** Called only for a fresh exact receipt, before mapping that same record. */
   onInputReceipt?: (entry: TranscriptEntry) => void;
   /** Native tools can appear in both legacy and completed-item dialects. */
@@ -139,6 +153,7 @@ export class JsonlTailer implements TranscriptEventSource {
   private readonly validateRestorePath?: JsonlTailerOptions['validateRestorePath'];
   private readonly inputText?: JsonlTailerOptions['inputText'];
   private readonly inputTimestamp?: JsonlTailerOptions['inputTimestamp'];
+  private readonly observeEntry?: JsonlTailerOptions['observeEntry'];
   private readonly onInputReceipt?: JsonlTailerOptions['onInputReceipt'];
   private readonly deduplicateTools: boolean;
   private readonly baselineMapping: boolean;
@@ -182,6 +197,7 @@ export class JsonlTailer implements TranscriptEventSource {
     this.validateRestorePath = opts.validateRestorePath;
     this.inputText = opts.inputText;
     this.inputTimestamp = opts.inputTimestamp;
+    this.observeEntry = opts.observeEntry;
     this.onInputReceipt = opts.onInputReceipt;
     this.deduplicateTools = opts.deduplicateTools ?? false;
     this.baselineMapping = opts.baselineMapping ?? false;
@@ -542,6 +558,7 @@ export class JsonlTailer implements TranscriptEventSource {
     }
     let events: NormalizedDriverEvent[] | undefined;
     try {
+      this.observeEntry?.(entry as TranscriptEntry, baseline, position);
       events = this.mapEntry(entry as TranscriptEntry, baseline, position);
     } catch {
       return; // A mapper hiccup must not kill the loop.

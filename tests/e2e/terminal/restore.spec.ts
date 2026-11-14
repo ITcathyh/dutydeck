@@ -23,7 +23,7 @@ async function setup(page: Page, fullscreen = false) {
     backend: new TmuxBackend(name, { ownerId }), sessionId: name, onEvent() {}, onExit() {}
   });
   let driver = make();
-  const pane = () => execFileSync('tmux', ['capture-pane', '-p', '-t', name], { encoding: 'utf8' });
+  const pane = () => execFileSync('tmux', ['-u', 'capture-pane', '-p', '-t', name], { encoding: 'utf8' });
   try {
     await driver.start();
     await expect.poll(pane).toContain(fullscreen ? 'history 000' : 'READY');

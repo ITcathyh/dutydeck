@@ -7,6 +7,7 @@
  */
 import { agentProbeTarget, describeDroppedAgent, shellQuoteIfNeeded as quote, type DroppedAgent } from '@dutydeck/config';
 import type { AgentProbeResult, DoctorCheck, DoctorConfig } from './types.js';
+import { compareVersions } from './checks.js';
 
 export function checkDroppedAgents(dropped: ReadonlyArray<DroppedAgent>): DoctorCheck[] {
   return dropped.map(agent => {
@@ -47,11 +48,23 @@ export function agentsToProbe(bots: ReadonlyArray<DefaultAgentBot>, agents: Doct
 
 interface Verdict { level: 'ok' | 'warn' | 'fail'; detail: string; remedy?: string; command?: string }
 
+function oldOfficialClaude(version: string): boolean {
+  const official = /^(\d+)\.(\d+)\.(\d+) \(Claude Code\)$/.test(version);
+  return official && compareVersions(version, '2.1.295') < 0;
+}
+
 function judge(id: string, command: string, execute: boolean, result: AgentProbeResult | undefined, timeoutMs: number): Verdict {
   const run = `${quote(command)} --version`;
   if (!execute) return { level: 'ok', detail: `${id}：自定义包装命令 ${command}，未执行 --version（它可能改动本地设置），只确认命令存在` };
   switch (result?.status) {
-    case 'ok': return { level: 'ok', detail: `${id}：${command} --version → ${result.version}` };
+    case 'ok': {
+      const detail = `${id}：${command} --version → ${result.version}`;
+      if (oldOfficialClaude(result.version)) return {
+        level: 'warn', detail: `${detail}；守卫超时也阻断需要官方 Claude Code 2.1.295+，当前旧版维持原行为`,
+        remedy: '当前 Claude 仍可运行受保护轮次，但守卫超时不会由 onFailure:"block" 阻断。需要这一保护时升级官方 Claude Code 后重开会话。', command: run,
+      };
+      return { level: 'ok', detail };
+    }
     case 'not_found': return {
       level: 'fail',
       detail: `${id}：命令 ${command} 找不到`,

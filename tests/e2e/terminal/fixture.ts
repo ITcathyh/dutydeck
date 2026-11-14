@@ -20,7 +20,7 @@ export const test = base.extend<{ isolatedTerminal: void }>({
       await use();
     } finally {
       try {
-        execFileSync('tmux', ['-S', join(root, `tmux-${process.getuid!()}`, 'default'), 'kill-server'], { stdio: 'ignore' });
+        execFileSync('tmux', ['-u', '-S', join(root, `tmux-${process.getuid!()}`, 'default'), 'kill-server'], { stdio: 'ignore' });
       } catch { /* The final driver may already have stopped this private server. */ }
       for (const key of keys) {
         if (previous[key] === undefined) delete process.env[key];

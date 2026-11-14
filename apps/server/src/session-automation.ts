@@ -118,6 +118,8 @@ const STREAK_PAUSE = 3;
 const NOTICE_MAX_ATTEMPTS = 3;
 /** 会话暂不可用：这次改在干净的新会话里、同一话题重跑一次，不直接判失败。 */
 const SESSION_UNAVAILABLE_CODES = new Set(['OPERATION_REVOKED', 'DRIVER_STOP_UNVERIFIED', 'DRIVER_STOP_BLOCKED', 'SESSION_NOT_ACTIVE', 'SESSION_STOPPING', 'SESSION_RESOURCE_BLOCKED']);
+/** Agent 命令或运行环境暂不可用：本次漏跑，保留计划等下一正常日程，不换会话重放也不按连续失败停用。 */
+const ENVIRONMENT_UNAVAILABLE_CODES = new Set(['AGENT_UNAVAILABLE']);
 const RETRY_OCCURRENCE_PREFIX = 'occ_retry_';
 /**
  * 换新会话重跑前计划原来的模式：重跑要借 fresh 模式开会话，下一次触发前按这里改回去。
@@ -152,7 +154,8 @@ type PreconditionResult = Omit<PreconditionStatus, 'version' | 'skippedInARow' |
 const highRiskCommand = new RegExp(defaultHighRiskPattern, 'i');
 const errorReasons: Record<string, string> = {
   OPERATION_REVOKED: '执行会话被锁住了', DRIVER_STOP_UNVERIFIED: '执行会话上次没能确认已停下', DRIVER_STOP_BLOCKED: '执行会话上次没能确认已停下',
-  SESSION_NOT_ACTIVE: '执行会话已不可用', SESSION_STOPPING: '执行会话正在停止', SESSION_RESOURCE_BLOCKED: '执行会话的终端还没收干净'
+  SESSION_NOT_ACTIVE: '执行会话已不可用', SESSION_STOPPING: '执行会话正在停止', SESSION_RESOURCE_BLOCKED: '执行会话的终端还没收干净',
+  AGENT_UNAVAILABLE: 'Agent 环境暂不可用'
 };
 const MAX_RECORDS = 1_000;
 const CLAIM_TTL_MS = 30_000;
@@ -1998,12 +2001,18 @@ export class SessionAutomationService {
     try { sessionMaybe = schedule.mode === 'independent' || schedule.mode === 'fresh' ? await this.executionSession(schedule) : origin; }
     catch (error) {
       const accepted = occurrence.admission && this.execution.getAcceptedTask(occurrence.admission.taskId);
-      // 新会话暂时开不出来不停用计划：记为触发出错，由 followUpOccurrence 重跑一次或在原话题说明。
-      const unavailable = !accepted && error instanceof RuntimeError && SESSION_UNAVAILABLE_CODES.has(error.code);
-      if (unavailable) {
-        this.warn({ scheduleId: schedule.id, occurrenceId: occurrence.id, sessionId: schedule.executionSessionId, code: error.code }, '定时触发时执行会话暂不可用');
-        await this.noteTriggerError(schedule.id, occurrence.id, error.code);
-      } else await this.disableSchedule(scheduleStored, errorMessage(error));
+      if (error instanceof RuntimeError && ENVIRONMENT_UNAVAILABLE_CODES.has(error.code)) {
+        this.warn({ scheduleId: schedule.id, occurrenceId: occurrence.id, sessionId: schedule.executionSessionId, code: error.code }, '定时触发时 Agent 环境暂不可用');
+        // 已接受的任务仍按原账本对账；只有确认未接受才记录这次环境漏跑。
+        if (!accepted) await this.noteTriggerError(schedule.id, occurrence.id, error.code);
+      } else {
+        // 新会话暂时开不出来不停用计划：记为触发出错，由 followUpOccurrence 重跑一次或在原话题说明。
+        const unavailable = !accepted && error instanceof RuntimeError && SESSION_UNAVAILABLE_CODES.has(error.code);
+        if (unavailable) {
+          this.warn({ scheduleId: schedule.id, occurrenceId: occurrence.id, sessionId: schedule.executionSessionId, code: error.code }, '定时触发时执行会话暂不可用');
+          await this.noteTriggerError(schedule.id, occurrence.id, error.code);
+        } else await this.disableSchedule(scheduleStored, errorMessage(error));
+      }
       await this.finishOccurrence(stored, { conditionStatus: 'error', runStatus: accepted ? 'blocked' : 'error',
         ...(accepted ? { blockReason: 'admission_conflict' as const } : {}), error: errorMessage(error) });
       return;
@@ -2310,7 +2319,7 @@ export class SessionAutomationService {
     const fail = async (code: string, message: string) => {
       await this.finishOccurrence(stored, { conditionStatus: 'passed', runStatus: 'error', error: message });
       if (occurrence.triggerSource !== 'manual') {
-        await this.recordOutcome(occurrence, { key: `error:${code}`, kind: 'error', reason: message });
+        await this.recordOutcome(occurrence, { key: `error:${code}`, kind: ENVIRONMENT_UNAVAILABLE_CODES.has(code) ? 'environment' : 'error', reason: message });
         await this.advanceSchedule(schedule, occurrence.scheduledForUtc);
       }
     };
@@ -2530,9 +2539,10 @@ export class SessionAutomationService {
     const occurrence = occurrenceStored && migrateOccurrence(occurrenceStored.value);
     if (!occurrence || occurrence.runStatus !== 'error' || occurrence.taskId) return;
     const schedule = stored.value;
-    if (SESSION_UNAVAILABLE_CODES.has(code) && !occurrence.id.startsWith(RETRY_OCCURRENCE_PREFIX) && schedule.mode !== 'independent'
+    const environmentUnavailable = ENVIRONMENT_UNAVAILABLE_CODES.has(code);
+    if (!environmentUnavailable && SESSION_UNAVAILABLE_CODES.has(code) && !occurrence.id.startsWith(RETRY_OCCURRENCE_PREFIX) && schedule.mode !== 'independent'
       && schedule.enabled && !schedule.deletedAt && schedule.generation === occurrence.generation && await this.retryInFreshSession(stored, occurrence)) return;
-    await this.recordOutcome(occurrence, { key: `error:${code}`, kind: 'error', reason: errorReasons[code] ?? (occurrence.error ?? code).slice(0, 160) });
+    await this.recordOutcome(occurrence, { key: `error:${code}`, kind: environmentUnavailable ? 'environment' : 'error', reason: errorReasons[code] ?? (occurrence.error ?? code).slice(0, 160) });
   }
 
   /** 记下这次触发出错的错误码，供 followUpOccurrence 判断重跑和是否同因；同一计划只留最近一次。 */
@@ -2583,9 +2593,10 @@ export class SessionAutomationService {
 
   /**
    * 记一次触发的结果（同一触发只记一次）：成功清零；没做成且原因与上一次相同则累计，否则从 1 开始。
-   * 触发出错或第 2 次起要在原话题说明；连续 STREAK_PAUSE 次停用计划（停用告知照常发）。返回记下的状态。
+   * 触发出错或第 2 次起要在原话题说明；连续 STREAK_PAUSE 次停用计划（停用告知照常发）。
+   * 环境暂不可用只累计和提示，不因累计次数停用。返回记下的状态。
    */
-  private async recordOutcome(occurrence: SessionScheduleOccurrenceV2, problem?: { key: string; kind: 'error' | 'result'; reason: string }): Promise<RunStreak | undefined> {
+  private async recordOutcome(occurrence: SessionScheduleOccurrenceV2, problem?: { key: string; kind: 'error' | 'result' | 'environment'; reason: string }): Promise<RunStreak | undefined> {
     const key = streakKey(occurrence.scheduleId);
     for (let attempt = 0; attempt < 3; attempt++) {
       const prior = await this.readStreak(occurrence.scheduleId);
@@ -2596,9 +2607,9 @@ export class SessionAutomationService {
       const next = streakSchema.parse({ version: 1, occurrenceId: occurrence.id, count, updatedAt: now,
         ...(problem ? { reasonKey: problem.key, reason: problem.reason.trim().replace(/[。.!！;；,，\s]+$/u, '').slice(0, 300) } : {}),
         ...(same && prior!.value.messageId ? { messageId: prior!.value.messageId } : {}),
-        ...(problem && (problem.kind === 'error' || count > 1) ? { notice: { occurrenceId: occurrence.id, status: 'pending', attempts: 0, updatedAt: now } } : {}) });
+        ...(problem && (problem.kind !== 'result' || count > 1) ? { notice: { occurrenceId: occurrence.id, status: 'pending', attempts: 0, updatedAt: now } } : {}) });
       if (!await (prior ? this.replace(key, prior.raw, next) : this.createRecord(key, next))) continue;
-      if (count >= STREAK_PAUSE) {
+      if (problem?.kind !== 'environment' && count >= STREAK_PAUSE) {
         const schedule = await this.getRecord(scheduleKey(occurrence.scheduleId), readStoredSessionSchedule);
         if (schedule?.value.generation === occurrence.generation && await this.disableSchedule(schedule, `连续 ${count} 次没做成（${next.reason}）`)) {
           this.warn({ scheduleId: occurrence.scheduleId, occurrenceId: occurrence.id, reasonKey: problem!.key, count }, '定时计划连续没做成，已自动停用');

@@ -373,7 +373,7 @@ export function startServer({ port, dirs, agentsJson, onCleanup, verbose = false
   mkdirSync(serverEnv.TMPDIR, { recursive: true, mode: 0o700 });
   onCleanup('停止独立 tmux server', () => {
     const socket = join(tmuxTmpDir, `tmux-${process.getuid()}`, 'default');
-    spawnSync('tmux', ['-S', socket, 'kill-server'], { env: serverEnv, stdio: 'ignore' });
+    spawnSync('tmux', ['-u', '-S', socket, 'kill-server'], { env: serverEnv, stdio: 'ignore' });
   });
   for (const key of POLLUTING_ENV) delete serverEnv[key];
   serverEnv.NODE_ENV = 'production';

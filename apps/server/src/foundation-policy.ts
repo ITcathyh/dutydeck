@@ -10,7 +10,7 @@ import {
   type RepositoryBundle,
   type Session,
 } from '@dutydeck/shared';
-import { isLoopbackHost, presentedCredential, tokensEqual, verifyBrowserSession } from './auth/auth.js';
+import { isLoopbackHost, tokensEqual, validatePresentedCredential, verifyBrowserSession } from './auth/auth.js';
 
 export const installationOwnerPrincipalId = 'principal_installation_owner';
 export const foundationGroupBindingSessionSource = 'foundation_group_binding';
@@ -65,12 +65,23 @@ export function createInstallationPrincipalResolver(options: InstallationPrincip
       return isLoopbackHost(request.headers.host) ? installationOwner('trusted_loopback') : undefined;
     }
     if (options.mode !== 'token') return undefined;
-    const presented = presentedCredential(request.headers);
-    if (!presented) return undefined;
-    const expected = await options.getToken();
-    if (expected && tokensEqual(presented, expected)) return installationOwner('verified_access_token');
-    return presented.startsWith('pw.') && verifyBrowserSession(presented, await options.getPasswordHash?.() ?? null)
-      ? installationOwner('verified_password_session') : undefined;
+    let authentication: InstallationPrincipalAuthentication | undefined;
+    let token: Promise<string | null> | undefined;
+    let passwordHash: Promise<string | null> | undefined;
+    const valid = await validatePresentedCredential(request.headers, async presented => {
+      if (!presented) return false;
+      const expected = await (token ??= options.getToken());
+      if (expected && tokensEqual(presented, expected)) {
+        authentication = 'verified_access_token';
+        return true;
+      }
+      if (presented.startsWith('pw.') && verifyBrowserSession(presented, options.getPasswordHash ? await (passwordHash ??= options.getPasswordHash()) : null)) {
+        authentication = 'verified_password_session';
+        return true;
+      }
+      return false;
+    });
+    return valid ? installationOwner(authentication!) : undefined;
   };
 }
 

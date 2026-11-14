@@ -2,7 +2,7 @@ import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { buildDutydeckRoutingBlock } from '../shared-hints.js';
 import { pinnedSessionUuid } from '../resume-id.js';
 import { relayCommandFrom, relayEnabled, relayPermissionHookTimeoutSeconds } from '@dutydeck/relay';
-import { secretGuardHookCommand, secretGuardToolMatcher } from '@dutydeck/shared/secret-guard';
+import { probeClaudeHookFailureBlock, secretGuardHookCommand, secretGuardToolMatcher } from '@dutydeck/shared/secret-guard';
 import { delay, waitForInputEcho, waitForQuietScreen } from './input-settle.js';
 
 /**
@@ -297,9 +297,20 @@ export async function prepareClaudeFamilyInput(backend: PtyLike, ctx: AdapterSes
 
 /** 建一个 Claude 家族适配器；三者只有 id 不同。 */
 export function createClaudeFamilyAdapter(id: string): CliAdapter {
+  let guardFailureBlock = false;
   return {
     id,
     capabilities: { resume: true, nativeInputReceipt: true, ...(id === 'claude-code' ? { programStatus: true } : {}) },
+
+    async prepareLaunch(ctx: AdapterSessionContext, env: Record<string, string>): Promise<void> {
+      // Only upstream Claude Code has a verified onFailure contract. Seed,
+      // Relay, Genius and failed/unknown probes remain unprotected.
+      guardFailureBlock = id === 'claude-code' && await probeClaudeHookFailureBlock({
+        command: ctx.command || 'claude', env, cwd: ctx.cwd,
+      });
+    },
+
+    guardFailureBlock: () => guardFailureBlock,
 
     buildArgs({ sessionId, resume, resumeSessionId, nativeForkSessionId, model, permissionMode, env, planGuardCommand, cwd }: AdapterSessionContext): string[] {
       // --session-id/--resume 只接受裸 UUID：dutydeck 的 "ses_<uuid>" 剥前缀，
@@ -329,13 +340,13 @@ export function createClaudeFamilyAdapter(id: string): CliAdapter {
         const settings = index < 0 ? {} : JSON.parse(args[index + 1]!);
         const value = JSON.stringify({ ...settings, hooks: { PreToolUse: [
           // 凭据保护：非管理员发起的轮次里拒绝读写凭据和 Agent 会话记录，是否生效看会话目录下本轮的策略文件（见 @dutydeck/shared/secret-guard）。
-          ...(cwd ? [{ matcher: secretGuardToolMatcher, hooks: [{ type: 'command', command: secretGuardHookCommand({ policyRoot: cwd }), timeout: 10 }] }] : []),
+          ...(cwd ? [{ matcher: secretGuardToolMatcher, hooks: [{ type: 'command', command: secretGuardHookCommand({ policyRoot: cwd }), timeout: 10, ...(guardFailureBlock ? { onFailure: 'block' } : {}) }] }] : []),
           ...(relay ? [{
             matcher: '^AskUserQuestion$',
             hooks: [{ type: 'command', command: `${relayCommandFrom(env)} session native-ask`, timeout: 1230 }],
           }] : []),
-          // 计划阶段守卫：只读工具不过 hook，其余工具每次先看守卫脚本在不在（平时不在，只花一次 test）。
-          ...(planGuardCommand ? [{ matcher: claudePlanGuardMatcher, hooks: [{ type: 'command', command: planGuardCommand, timeout: 30 }] }] : [])],
+          // 计划阶段守卫：只读工具不过 hook，其余工具每次先看 active 元数据在不在（平时不在，只花一次 test）。
+          ...(planGuardCommand ? [{ matcher: claudePlanGuardMatcher, hooks: [{ type: 'command', command: planGuardCommand, timeout: 30, ...(guardFailureBlock ? { onFailure: 'block' } : {}) }] }] : [])],
           // 非完全信任时，Claude 原本要在终端弹出的工具确认改由 hook 交给 Dutydeck，飞书会话里变成审批卡；
           // 非飞书会话由服务端答复保留原生确认。
           ...(!relay || permissionMode === 'full-trust' ? {} : { PermissionRequest: [{

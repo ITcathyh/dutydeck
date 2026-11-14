@@ -39,7 +39,7 @@ it('starts the legacy harness in private HOME, tmux and service scope without mi
   const onCleanup = (_label: string, fn: () => unknown) => cleanup.push(fn);
   const callerSocket = join(outer, 'caller.sock');
   try {
-    expect(actual.spawnSync('tmux', ['-S', callerSocket, 'new-session', '-d', '-s', 'caller', 'sleep 120'], { env: { ...process.env, TMUX: '' } }).status).toBe(0);
+    expect(actual.spawnSync('tmux', ['-u', '-S', callerSocket, 'new-session', '-d', '-s', 'caller', 'sleep 120'], { env: { ...process.env, TMUX: '' } }).status).toBe(0);
     const dirs = createDataDir({ onCleanup, prefix: 'dutydeck-harness-private-' });
     const portProbe = createServer();
     await new Promise<void>(resolve => portProbe.listen(0, '127.0.0.1', resolve));
@@ -59,18 +59,18 @@ it('starts the legacy harness in private HOME, tmux and service scope without mi
     expect(existsSync(join(dirs.dataDir, 'dutydeck.db'))).toBe(true);
     expect(existsSync(join(outer, 'caller.db'))).toBe(false);
     const privateSocket = join(dirs.dataDir, 'tmux-tmp', `tmux-${process.getuid!()}`, 'default');
-    expect(actual.spawnSync('tmux', ['-S', privateSocket, 'new-session', '-d', '-s', 'fixture', 'sleep 120'], { env: childEnv }).status).toBe(0);
+    expect(actual.spawnSync('tmux', ['-u', '-S', privateSocket, 'new-session', '-d', '-s', 'fixture', 'sleep 120'], { env: childEnv }).status).toBe(0);
     for (const fn of cleanup.splice(0).reverse()) await fn();
-    expect(actual.spawnSync('tmux', ['-S', privateSocket, 'has-session', '-t', 'fixture']).status).not.toBe(0);
-    expect(actual.spawnSync('tmux', ['-S', callerSocket, 'has-session', '-t', 'caller']).status).toBe(0);
+    expect(actual.spawnSync('tmux', ['-u', '-S', privateSocket, 'has-session', '-t', 'fixture']).status).not.toBe(0);
+    expect(actual.spawnSync('tmux', ['-u', '-S', callerSocket, 'has-session', '-t', 'caller']).status).toBe(0);
     const { spawnSync } = await import('node:child_process');
     const tmuxCleanup = vi.mocked(spawnSync).mock.calls.find(([command]) => command === 'tmux');
-    expect(tmuxCleanup?.[1]).toEqual(['-S', join(dirs.dataDir, 'tmux-tmp', `tmux-${process.getuid!()}`, 'default'), 'kill-server']);
+    expect(tmuxCleanup?.[1]).toEqual(['-u', '-S', join(dirs.dataDir, 'tmux-tmp', `tmux-${process.getuid!()}`, 'default'), 'kill-server']);
     expect(existsSync(dirs.dataDir)).toBe(false);
     expect(readFileSync(join(legacy, 'fixture-marker'), 'utf8')).toBe('caller-owned fixture');
   } finally {
     for (const fn of cleanup.reverse()) await fn();
-    actual.spawnSync('tmux', ['-S', callerSocket, 'kill-server'], { stdio: 'ignore' });
+    actual.spawnSync('tmux', ['-u', '-S', callerSocket, 'kill-server'], { stdio: 'ignore' });
     rmSync(outer, { recursive: true, force: true });
   }
 }, 45_000);

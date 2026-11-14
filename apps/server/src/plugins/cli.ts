@@ -12,7 +12,7 @@ import { listBuiltinPlugins } from './builtin.js';
 import { PluginHost } from './host.js';
 import { loadPluginDirectory, pluginDeclaredCapabilities, pluginPermissionFootprint, PluginValidationError, strictPluginIssues, type LoadedPlugin } from './manifest.js';
 import { quarantineDetail, quarantineRemedy } from './quarantine.js';
-import { PluginStore, PluginStoreError, treeDigest, withPluginSourceRoot, type PluginLockEntry, type PluginTrustPrompt } from './store.js';
+import { PluginStore, PluginStoreError, describePluginCommandChange, treeDigest, withPluginSourceRoot, type PluginLockEntry, type PluginTrustPrompt } from './store.js';
 
 export type PluginCliAction = 'install' | 'uninstall' | 'enable' | 'disable' | 'list' | 'update' | 'activate' | 'rollback' | 'status' | 'validate' | 'inspect' | 'test' | 'init' | 'trigger-token' | 'config';
 
@@ -48,7 +48,11 @@ export function pluginDataDir(database: string | undefined, env: NodeJS.ProcessE
 /** 只有终端交互时才能确认；管道或脚本里必须显式 --yes。 */
 export async function confirmOnTerminal(prompt: PluginTrustPrompt): Promise<boolean> {
   if (!process.stdin.isTTY || !process.stderr.isTTY) return false;
-  process.stderr.write(`插件 ${prompt.plugin} 需要信任以下能力：${prompt.capabilities.join('、')}\n${prompt.details.map(line => `  ${line}`).join('\n')}\n`);
+  const heading = prompt.capabilities.length
+    ? `插件 ${prompt.plugin} 需要信任以下能力：${prompt.capabilities.join('、')}`
+    : `插件 ${prompt.plugin} 的执行命令发生变化，需要重新信任`;
+  const changes = (prompt.changes ?? []).map(change => `命令变化 ${describePluginCommandChange(change)}`);
+  process.stderr.write(`${heading}\n${[...prompt.details, ...changes].map(line => `  ${line}`).join('\n')}\n`);
   const readline = createInterface({ input: process.stdin, output: process.stderr });
   try { return /^y(es)?$/i.test((await readline.question('信任并继续？[y/N] ')).trim()); }
   finally { readline.close(); }
@@ -201,6 +205,7 @@ export async function runPluginCli(action: PluginCliAction, args: string[], opti
     else {
       for (const result of results) {
         ui.status(result.changed ? 'done' : 'ok', result.changed ? `已准备插件候选 ${result.entry.name}` : `插件 ${result.entry.name} 已是最新`, result.entry.candidate?.version ?? describeSource(result.entry));
+        for (const change of result.changes) ui.hint(`命令变化 ${describePluginCommandChange(change)}`);
         warnScenarioIssues(result.entry.name, result.scenarioIssues ?? []);
       }
       if (results.some(result => result.changed)) ui.hint('活动版本未改变。运行 dutydeck plugin status <name> 检查切换条件，再 dutydeck plugin activate <name>；成功后启动服务。');
