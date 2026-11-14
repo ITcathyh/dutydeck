@@ -832,7 +832,9 @@ export class PtyCliDriver implements AgentDriver {
         // Refresh only this maintenance's ownership when that exact start later
         // succeeds; an external resume is rejected by assertNoActiveTurn().
         void starting.then(() => {
-          if (this.maintenanceActive !== maintenance || this.stopped) return;
+          const owned = this.maintenanceActive === maintenance || !this.maintenanceActive
+            && this.maintenanceUnknown && this.maintenanceUnknownRecovery === maintenance;
+          if (this.stopped || !owned) return;
           maintenance.backend = this.backend;
           maintenance.wiringGeneration = this.wiringGeneration;
         }, () => {});
@@ -852,6 +854,7 @@ export class PtyCliDriver implements AgentDriver {
       if (!position || !nativeSessionId) return finish('failed');
       const observation = transcript.waitForCompaction({
         nativeSessionId, position, generation: maintenance.generation, signal: maintenance.controller.signal,
+        submitted: () => maintenance.submitted,
       });
       void observation.catch(() => {});
       // Arming the observer does not grant write authority: background work,
@@ -1752,6 +1755,7 @@ export class PtyCliDriver implements AgentDriver {
         this.noteInput();
         const backend = this.backend;
         if (this.stopped) throw new DriverDetachedError();
+        if (this.maintenanceActive || this.maintenanceUnknown) throw new PromptNotWrittenError(maintenancePromptNotWritten);
         this.terminalWrites++;
         try {
           const result = await backend.write(data);
@@ -2177,6 +2181,9 @@ export class PtyCliDriver implements AgentDriver {
 
     if (this.transcript) {
       this.transcript.onEvent(e => {
+        // Proactive maintenance finishes only after terminal recovery; its
+        // transcript boundary is evidence, not a second completion event.
+        if (this.maintenanceActive && e.type === 'status' && e.data?.state === 'compaction' && e.data.phase === 'completed') return;
         // A background follow-up neither proves nor answers the active turn.
         if (isBackgroundFollowup(e)) { this.emitEvent(e); return; }
         this.noteTurnProgress(e);

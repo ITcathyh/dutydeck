@@ -71,13 +71,14 @@ describe('Claude maintenance compaction evidence', () => {
     await tailer.flush();
   }
 
-  function arm(native = sessionId) {
+  function arm(native = sessionId, submitted: () => boolean = () => false) {
     const controller = new AbortController();
     const pending = tailer!.waitForCompaction!({
       nativeSessionId: native,
       position: tailer!.captureWatermark!(),
       generation: ++generation,
       signal: controller.signal,
+      submitted,
     });
     let settled = false;
     void pending.then(() => { settled = true; }, () => { settled = true; });
@@ -224,6 +225,30 @@ describe('Claude maintenance compaction evidence', () => {
     expect(second.settled()).toBe(false);
     second.controller.abort();
     await expect(second.pending).rejects.toThrow();
+  });
+
+  it('reserves a late first input chain for the submitted generation that retired unobserved', async () => {
+    await setup([clone(successFixture[0])]);
+    const first = arm(sessionId, () => true);
+    first.controller.abort();
+    await expect(first.pending).rejects.toThrow();
+
+    const second = arm();
+    await append(...successfulSequence('first-prompt', sessionId, 'first-unobserved'));
+    expect(second.settled()).toBe(false);
+    await append(...successfulSequence('second-prompt', sessionId, 'second-observed'));
+    await expect(second.pending).resolves.toBe('completed');
+  });
+
+  it('does not reserve the next input for a generation cancelled before submission', async () => {
+    await setup([clone(successFixture[0])]);
+    const first = arm();
+    first.controller.abort();
+    await expect(first.pending).rejects.toThrow();
+
+    const second = arm();
+    await append(...successfulSequence('second-prompt', sessionId, 'second-after-prewrite-cancel'));
+    await expect(second.pending).resolves.toBe('completed');
   });
 
   it('ignores an explicit failure belonging to another prompt', async () => {

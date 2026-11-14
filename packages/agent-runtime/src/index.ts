@@ -327,6 +327,7 @@ export class DutydeckRuntime {
   private readonly sessionGenerations = new Map<string, number>();
   private readonly exitedDriverGenerations = new Map<string, number>();
   private readonly driverEventChains = new Map<string, Promise<void>>();
+  private readonly compactionCancellationVersions = new Map<string, number>();
   private readonly driverEventErrors = new Map<string, unknown>();
   /** Attempts whose last in-turn event flush has run: a later event error can no longer fail them, nor the next turn. */
   private readonly eventFlushedAttempts = new Set<string>();
@@ -649,6 +650,9 @@ export class DutydeckRuntime {
     const lifecycle = this.lifecycle(session.id);
     return (event: NormalizedDriverEvent) => {
       if (this.shuttingDown || !this.mutations.valid(lifecycle) || this.sessionGenerations.get(session.id) !== generation) return;
+      if (event.type === 'status' && event.data?.state === 'compaction' && event.data.phase === 'cancelled') {
+        this.compactionCancellationVersions.set(session.id, (this.compactionCancellationVersions.get(session.id) ?? 0) + 1);
+      }
       // A background follow-up is a run-level event: it neither extends nor joins the active Attempt.
       const attempt = isBackgroundFollowup(event) ? undefined : this.attempts.get(session.id);
       if (attempt && !(event.type === 'status' && event.data?.state === 'prompt_assembly')) this.turnProgressAt.set(session.id, Date.now());
@@ -3045,14 +3049,17 @@ export class DutydeckRuntime {
       const compactDue = compactHours !== undefined && Number.isFinite(previousActivity) && Date.now() - previousActivity >= compactHours * 3_600_000;
       const compact = async (submission?: import('@dutydeck/shared').DriverSubmission) => {
         if (!compactDue) return true;
+        const cancellationVersion = this.compactionCancellationVersions.get(id) ?? 0;
         const outcome = driver.compact ? await driver.compact(submission) : 'unsupported';
         if (!driver.compact) await this.emit(id, 'status', { state: 'compaction', phase: 'unsupported', proactive: true });
         this.mutations.check();
         const interrupted = this.bound().getPendingQueueActions(this.fence(session)).some(action => action.interrupt && action.target?.attemptId === ref.attemptId);
         if (outcome === 'cancelled' || interrupted) {
-          // PTY and ACP drivers emit their own cancelled outcome. Runtime still
-          // owns cancellation discovered only from durable interrupt intent.
-          if (outcome !== 'cancelled') await this.emit(id, 'status', { state: 'compaction', phase: 'cancelled', proactive: true });
+          // Built-in drivers emit cancelled themselves; a custom driver may only
+          // return it. Fill in exactly when this maintenance emitted no event.
+          if ((this.compactionCancellationVersions.get(id) ?? 0) === cancellationVersion) {
+            await this.emit(id, 'status', { state: 'compaction', phase: 'cancelled', proactive: true });
+          }
           // The maintenance stream is quiescent; finish the logical task without submitting its user prompt.
           await this.consume(session, { type: 'completed', data: { stopReason: 'cancelled' } }, makeId('evt'));
           return false;

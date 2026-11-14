@@ -170,6 +170,21 @@ describe('PTY Claude maintenance compaction', () => {
     expect(events.filter(event => event.type === 'completed')).toHaveLength(1);
   });
 
+  it('emits proactive completion only at finish and preserves external boundary events', async () => {
+    const { pending } = await armCompact();
+    await succeedCompact('unique-finish');
+    await expect(pending).resolves.toBe('completed');
+    expect(events.filter(event => event.type === 'status' && event.data?.state === 'compaction').map(event => event.data)).toEqual([
+      { state: 'compaction', phase: 'start', proactive: true, maintenanceGeneration: 1 },
+      { state: 'compaction', phase: 'completed', proactive: true, maintenanceGeneration: 1 },
+    ]);
+    events.length = 0;
+    await append(...sequence(successFixture, 'external-after-finish'));
+    expect(events.filter(event => event.type === 'status' && event.data?.state === 'compaction').map(event => event.data)).toEqual([
+      { state: 'compaction', phase: 'completed' },
+    ]);
+  });
+
   it('continues the business prompt after explicit empty-context failure', async () => {
     const { pending } = await armCompact();
     await append(...sequence(emptyFixture, 'empty'));
@@ -188,6 +203,43 @@ describe('PTY Claude maintenance compaction', () => {
     await expect(first).resolves.toBe('completed');
     await completeBusiness('after ownership');
     expect(prompts).toHaveLength(2);
+  });
+
+  it('rejects raw terminal business and control writes during active maintenance', async () => {
+    const { pending } = await armCompact();
+    const raw: string[] = [];
+    const backend = (driver as any).backend;
+    const originalWrite = backend.write.bind(backend);
+    backend.write = (data: string) => { raw.push(data); return originalWrite(data); };
+    const terminal = driver.createTerminalStream();
+    await expectMaintenanceRejected(terminal.write('manual business prompt\r'));
+    await expectMaintenanceRejected(terminal.write('\x03'));
+    expect(raw).toEqual([]);
+    expect(interrupts).toBe(0);
+    await succeedCompact('raw-input-active');
+    await expect(pending).resolves.toBe('completed');
+    await terminal.write('after compact\r');
+    expect(raw).toEqual(['after compact\r']);
+    terminal.dispose();
+  });
+
+  it('rejects raw terminal writes until unknown maintenance has recovered', async () => {
+    await makeUnknown();
+    const raw: string[] = [];
+    const backend = (driver as any).backend;
+    const originalWrite = backend.write.bind(backend);
+    backend.write = (data: string) => { raw.push(data); return originalWrite(data); };
+    const terminal = driver.createTerminalStream();
+    const interruptCount = interrupts;
+    await expectMaintenanceRejected(terminal.write('manual business prompt\r'));
+    expect(raw).toEqual([]);
+    expect(interrupts).toBe(interruptCount);
+    output(screen(idleScreen));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(driver.isIdle()).toBe(true);
+    await terminal.write('after recovery\r');
+    expect(raw).toEqual(['after recovery\r']);
+    terminal.dispose();
   });
 
   it('rejects resume during active and unknown maintenance before respawn', async () => {
@@ -931,6 +983,39 @@ describe('PTY Claude maintenance compaction', () => {
     expect(prompts).toHaveLength(1);
   });
 
+  it('refreshes unknown recovery when a cancelled first start later succeeds', async () => {
+    const gate = deferred();
+    (driver as any).started = false;
+    vi.spyOn(driver, 'start').mockImplementation(async () => {
+      await gate.promise;
+      output(screen(idleScreen));
+      await (driver as any).snapshot.writeAndFlush('');
+      (driver as any).wiringGeneration++;
+      (driver as any).started = true;
+    });
+    const pending = driver.compact!();
+    void pending.catch(() => {});
+    await vi.advanceTimersByTimeAsync(0);
+    output(screen(busyScreen));
+    await vi.advanceTimersByTimeAsync(0);
+    await driver.interrupt();
+    await vi.advanceTimersByTimeAsync(600);
+    await expect(pending).rejects.toBeInstanceOf(PromptNotWrittenError);
+    expect((driver as any).maintenanceUnknown).toBe(true);
+    expect((driver as any).maintenanceActive).toBeUndefined();
+    gate.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect((driver as any).maintenanceUnknownRecovery.wiringGeneration).toBe(1);
+    await completeBusiness('after late start unknown recovery');
+    expect((driver as any).maintenanceUnknown).toBe(false);
+    expect(driver.isIdle()).toBe(true);
+    const compacting = driver.compact!();
+    void compacting.catch(() => {});
+    await advanceUntil(() => prompts.length === 2);
+    await succeedCompact('after-late-start-unknown');
+    await expect(compacting).resolves.toBe('completed');
+  });
+
   it('rechecks an unknown terminal and completes the next business prompt after recovery', async () => {
     await makeUnknown();
     output(screen(idleScreen));
@@ -999,6 +1084,26 @@ describe('PTY Claude maintenance compaction', () => {
     expect(clears).toBe(0);
     expect((driver as any).maintenanceUnknown).toBe(true);
     expect(prompts).toEqual(['/compact']);
+  });
+
+  it('does not adopt a previous generation input first observed after rearming', async () => {
+    await makeUnknown();
+    (driver as any).timings.maintenanceTimeoutMs = 10_000;
+    output(screen(idleScreen));
+    const second = driver.compact!();
+    void second.catch(() => {});
+    let settled = false;
+    void second.then(() => { settled = true; }, () => { settled = true; });
+    await advanceUntil(() => prompts.length === 2);
+    const late = sequence(successFixture, 'unobserved-old-input');
+    late[0].promptId = late[2].promptId = 'unobserved-old-prompt';
+    await append(...late);
+    expect(settled).toBe(false);
+    expect(events.filter(event => event.type === 'status' && event.data?.state === 'compaction'
+      && event.data.maintenanceGeneration === 2 && event.data.phase === 'completed')).toEqual([]);
+    await append(...sequence(successFixture, 'actual-new-input'));
+    await advanceUntil(() => settled);
+    await expect(second).resolves.toBe('completed');
   });
 
   it('starts a new compact generation after recovery without adopting late old evidence', async () => {

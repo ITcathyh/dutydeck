@@ -42,6 +42,8 @@ export interface TranscriptCompactionObservation {
   position: TranscriptPosition | undefined;
   generation: number;
   signal: AbortSignal;
+  /** Final Enter was attempted, so records can still arrive after this wait retires. */
+  submitted?(): boolean;
 }
 
 /** A live source of normalized driver events, backed by a CLI transcript. */

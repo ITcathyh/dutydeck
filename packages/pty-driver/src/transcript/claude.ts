@@ -510,6 +510,8 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
   private usagePartial = false;
   private observedNativeSessionId: string | undefined;
   private compaction: ClaudeCompactionWait | undefined;
+  /** Submitted waits retired before their input arrived still own that late input chain. */
+  private readonly retiredCompactions = new Set<ClaudeCompactionWait>();
   /** Baseline, live and retired /compact receipts are never fresh again. */
   private readonly compactionInputUuids = new Set<string>();
 
@@ -696,9 +698,11 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
       const wait: ClaudeCompactionWait = {
         observation, armedAt: Date.now(), commandUuids: new Set(), boundaryUuids: new Set(), invalidated: false,
         finish: (outcome, error) => {
+          if (this.retiredCompactions.delete(wait)) return;
           if (this.compaction !== wait) return;
           this.compaction = undefined;
           observation.signal.removeEventListener('abort', abort);
+          if (error && !wait.promptId && observation.submitted?.() === true) this.retiredCompactions.add(wait);
           if (error) reject(error); else resolve(outcome!);
         },
       };
@@ -719,26 +723,35 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
     const compactInputUuid = inputText === '/compact' && typeof entry?.uuid === 'string' && entry.uuid ? entry.uuid : undefined;
     const replayedInput = compactInputUuid !== undefined && this.compactionInputUuids.has(compactInputUuid);
     if (compactInputUuid) this.compactionInputUuids.add(compactInputUuid);
-    const wait = this.compaction;
-    if (baseline || !wait || wait.invalidated) return;
+    if (baseline) return;
+    for (const wait of this.retiredCompactions) {
+      if (this.observeCompactionWait(wait, entry, position, native, inputText, replayedInput)) return;
+    }
+    if (this.compaction) this.observeCompactionWait(this.compaction, entry, position, native, inputText, replayedInput);
+  }
+
+  /** True when a retired wait claimed this input, keeping it away from the active generation. */
+  private observeCompactionWait(wait: ClaudeCompactionWait, entry: any, position: TranscriptPosition | undefined,
+    native: string | undefined, inputText: string | undefined, replayedInput: boolean): boolean {
+    if (wait.invalidated) return false;
     const start = wait.observation.position!;
     if (!position || position.path !== start.path || position.dev !== start.dev || position.ino !== start.ino
-      || position.epoch !== start.epoch || position.offset < start.offset || native !== wait.observation.nativeSessionId) return;
+      || position.epoch !== start.epoch || position.offset < start.offset || native !== wait.observation.nativeSessionId) return false;
 
     if (!wait.promptId) {
-      if (inputText === undefined || replayedInput) return;
+      if (inputText === undefined || replayedInput) return false;
       const timestamp = Date.parse(entry.timestamp);
-      if (!Number.isFinite(timestamp) || timestamp < wait.armedAt - 1_000) return;
-      if (inputText !== '/compact') { wait.invalidated = true; wait.finish('failed'); return; }
+      if (!Number.isFinite(timestamp) || timestamp < wait.armedAt - 1_000) return false;
+      if (inputText !== '/compact') { wait.invalidated = true; wait.finish('failed'); return false; }
       if (typeof entry.promptId !== 'string' || !entry.promptId || typeof entry.uuid !== 'string' || !entry.uuid) {
         wait.invalidated = true;
         wait.finish('failed');
-        return;
+        return true;
       }
       wait.promptId = entry.promptId;
       wait.inputUuid = entry.uuid;
       wait.inputParentUuid = typeof entry.parentUuid === 'string' ? entry.parentUuid : undefined;
-      return;
+      return true;
     }
 
     if (entry.type === 'system' && entry.subtype === 'compact_boundary') {
@@ -746,23 +759,34 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
         && typeof wait.inputParentUuid === 'string' && entry.logicalParentUuid === wait.inputParentUuid) {
         wait.boundaryUuids.add(entry.uuid);
       }
-      return;
+      return false;
     }
     if (entry.isCompactSummary === true) {
-      if (wait.boundaryUuids.has(entry.parentUuid) && entry.promptId === wait.promptId) wait.finish('completed');
-      return;
+      if (!wait.boundaryUuids.has(entry.parentUuid)) return false;
+      if (entry.promptId === wait.promptId) wait.finish('completed');
+      else if (this.retiredCompactions.has(wait) && this.compaction && !this.compaction.promptId) {
+        // A different complete summary separates the retired chain from this
+        // candidate. Return the candidate and its boundaries to the active wait.
+        this.retiredCompactions.delete(wait);
+        this.compaction.promptId = wait.promptId;
+        this.compaction.inputUuid = wait.inputUuid;
+        this.compaction.inputParentUuid = wait.inputParentUuid;
+        for (const uuid of wait.commandUuids) this.compaction.commandUuids.add(uuid);
+        for (const uuid of wait.boundaryUuids) this.compaction.boundaryUuids.add(uuid);
+      }
+      return false;
     }
     const content = entry.message?.content;
     if (entry.promptId === wait.promptId && typeof content === 'string' && content.includes('<command-name>/compact</command-name>')) {
       if (typeof entry.uuid === 'string') wait.commandUuids.add(entry.uuid);
-      return;
+      return false;
     }
     if (entry.type === 'system' && entry.subtype === 'local_command' && wait.commandUuids.has(entry.parentUuid)
       && typeof entry.content === 'string' && entry.content.includes('Not enough messages to compact.')) {
       wait.finish('failed');
-      return;
+      return false;
     }
-    if (entry.uuid === wait.inputUuid) return;
+    if (entry.uuid === wait.inputUuid) return false;
     if (claudeInputText(entry) !== undefined) {
       const timestamp = Date.parse(entry.timestamp);
       if (Number.isFinite(timestamp) && timestamp >= wait.armedAt - 1_000) {
@@ -770,6 +794,7 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
         wait.finish('failed');
       }
     }
+    return false;
   }
 
   /**

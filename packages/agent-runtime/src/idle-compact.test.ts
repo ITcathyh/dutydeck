@@ -8,7 +8,7 @@ const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const close of cleanups.splice(0).reverse()) await close(); vi.useRealTimers(); });
 const agent: AgentConfig = { id: 'mock', name: 'Mock', command: 'unused', args: [], protocol: 'acp', cwd: '/tmp', env: {}, permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
 function deferred() { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done; }); return { promise, resolve }; }
-async function fixture(compact?: AgentDriver['compact']) {
+async function fixture(compact?: AgentDriver['compact'], emitCancellation = false) {
   vi.useFakeTimers({ toFake: ['Date'] });
   vi.setSystemTime(new Date('2026-10-01T00:00:00Z'));
   const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
@@ -17,7 +17,12 @@ async function fixture(compact?: AgentDriver['compact']) {
   const runtime = new DutydeckRuntime(repos, { driverIdleTimeoutMs: 0, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: (_agent, _protocol, emit) => {
     driver = { start: async () => {}, resume: async () => {}, stop: async () => {}, interrupt: async () => {}, isStopped: async () => true, setModel: async () => {},
       send: vi.fn(async input => { order.push(typeof input === 'string' ? input : input.prompt); emit({ type: 'text', data: { text: 'done' } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } }); }),
-      ...(compact ? { compact: vi.fn(async submission => { order.push('compact'); return compact(submission); }) } : {}) };
+      ...(compact ? { compact: vi.fn(async submission => {
+        order.push('compact');
+        const outcome = await compact(submission);
+        if (emitCancellation && outcome === 'cancelled') emit({ type: 'status', data: { state: 'compaction', phase: 'cancelled', proactive: true } });
+        return outcome;
+      }) } : {}) };
     return driver;
   } });
   await runtime.initialize([agent]);
@@ -97,6 +102,19 @@ describe('idle compaction at serialized task activation', () => {
     const next = await h.dispatch('after recovery', 24);
     await h.wait(next.id);
     expect(h.order).toEqual(['old', 'compact', 'compact', 'after recovery']);
+  });
+  it.each([false, true])('emits exactly one compaction cancellation (driver emits: %s)', async driverEmits => {
+    const h = await fixture(async () => 'cancelled', driverEmits);
+    vi.setSystemTime(new Date('2026-10-02T01:00:00Z'));
+    const next = await h.dispatch('must not send', 24);
+    await h.wait(next.id, 'interrupted');
+    expect(h.order).toEqual(['old', 'compact']);
+    expect((await h.runtime.getEvents(h.session.id)).filter(event => (event.data as any)?.state === 'compaction' && (event.data as any)?.phase === 'cancelled')).toHaveLength(1);
+    const attempt = h.repos.execution.getTaskExecution(next.id)?.currentAttempt;
+    expect(attempt?.receipt).toBeUndefined();
+    expect(attempt).toMatchObject({
+      settlement: { kind: 'driver_result', outcome: 'interrupted', stopReason: 'cancelled', complete: true },
+    });
   });
   it('honors durable interrupt intent between compact and the real prompt', async () => {
     const gate = deferred();
