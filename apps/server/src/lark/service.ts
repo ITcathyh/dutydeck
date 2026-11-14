@@ -1941,14 +1941,14 @@ export class LarkCardService {
   /** Configuration refreshes discard failures, including results from requests already in flight. */
   clearIdentityFailures(): void { this.identityFailures = new Map(); }
 
-  private identityRequest(path: string) {
+  private identityRequest(path: string, options: { sharedCircuit?: false } = {}) {
     return this.withRequestBudget(async signal => {
       signal.throwIfAborted();
       const failures = this.identityFailures;
       const cached = failures.get(path);
       if (cached && cached.expiresAt > Date.now()) throw cached.error;
       failures.delete(path);
-      try { return await this.request(path, { method: 'GET' }); }
+      try { return await this.request(path, { method: 'GET', ...options }); }
       catch (error) {
         // Only explicit invalid/cross-app/not-visible identity codes are definitive.
         // Permission scopes, throttling and transport failures must remain retryable.
@@ -1994,8 +1994,8 @@ export class LarkCardService {
   }
 
   /** Preserve the contact lookup's numeric-code contract while using the common HTTP path. */
-  private async contactRequest(path: string, options: { method?: string; body?: unknown }) {
-    try { return await (options.method === 'GET' ? this.identityRequest(path) : this.request(path, options)); }
+  private async contactRequest(path: string, options: { method?: string; body?: unknown; sharedCircuit?: false }) {
+    try { return await (options.method === 'GET' ? this.identityRequest(path, options) : this.request(path, options)); }
     catch (error) {
       if (error instanceof LarkServiceError && error.code === 'LARK_OPENAPI_ERROR') {
         const code = error.upstreamCode;
@@ -2010,9 +2010,9 @@ export class LarkCardService {
    * 但响应里没有 user（明确不存在 = definitive miss）；业务码非零或网络错误
    * 一律 throw（definitive 码由 owner-identity 识别，其余按 inconclusive）。
    */
-  async getContactUser(id: string, idType: ContactIdType): Promise<ContactUser | undefined> {
+  async getContactUser(id: string, idType: ContactIdType, options: { sharedCircuit?: false } = {}): Promise<ContactUser | undefined> {
     const userId = required(id, 'id');
-    const res = await this.contactRequest(`/open-apis/contact/v3/users/${encodeURIComponent(userId)}?user_id_type=${idType}`, { method: 'GET' });
+    const res = await this.contactRequest(`/open-apis/contact/v3/users/${encodeURIComponent(userId)}?user_id_type=${idType}`, { method: 'GET', ...options });
     const code = Number(res?.code ?? 0);
     if (code !== 0) {
       throw Object.assign(new Error(`Lark contact user.get failed (code: ${code})`), { code, data: res?.data });
@@ -2047,7 +2047,7 @@ export class LarkCardService {
     return hit ? String(hit.user_id) : undefined;
   }
 
-  private async tenantToken(signal?: AbortSignal) {
+  private async tenantToken(signal?: AbortSignal, sharedCircuit?: false) {
     const caller = this.budget()!;
     signal = signal ? AbortSignal.any([caller.signal, signal]) : caller.signal;
     signal.throwIfAborted();
@@ -2060,7 +2060,7 @@ export class LarkCardService {
       budgets.delete(this);
       flight.promise = requestBudgets.run(budgets, () => this.withRequestBudget(async () => {
         const payload = await this.request('/open-apis/auth/v3/tenant_access_token/internal/', {
-          token: false, signal: flight.abort.signal, body: { app_id: this.config.appId, app_secret: this.config.appSecret },
+          token: false, signal: flight.abort.signal, body: { app_id: this.config.appId, app_secret: this.config.appSecret }, sharedCircuit,
           onFailure: error => { for (const failed of flight.waiters) failed(error); }
         });
         flight.abort.signal.throwIfAborted();
@@ -2102,12 +2102,12 @@ export class LarkCardService {
     }
   }
 
-  private request(path: string, options: { method?: string; body?: unknown; token?: boolean; form?: FormData; retry?: boolean; beforeSend?: LarkWriteGuard; signal?: AbortSignal; onFailure?: (error: unknown) => void }) {
+  private request(path: string, options: { method?: string; body?: unknown; token?: boolean; form?: FormData; retry?: boolean; beforeSend?: LarkWriteGuard; signal?: AbortSignal; onFailure?: (error: unknown) => void; sharedCircuit?: false }) {
     return this.withRequestBudget(async budgetSignal => {
       const signal = options.signal ? AbortSignal.any([budgetSignal, options.signal]) : budgetSignal;
       const headers: Record<string, string> = options.form ? {} : { 'content-type': 'application/json; charset=utf-8' };
       signal.throwIfAborted();
-      if (options.token !== false) headers.authorization = `Bearer ${await this.tenantToken(signal)}`;
+      if (options.token !== false) headers.authorization = `Bearer ${await this.tenantToken(signal, options.sharedCircuit)}`;
       try {
         return await executeWithLarkGate(this.config.appId, `${options.method ?? 'POST'} ${path.split('?')[0]}`, async () => {
           const response = await this.fetch(`${this.config.baseUrl}${path}`, {
@@ -2131,7 +2131,7 @@ export class LarkCardService {
           }
           return payload;
         }, { env: options.retry === false ? { ...this.config.env, LARK_API_RETRY_MAX_ATTEMPTS: '0' } : this.config.env, signal,
-          beforeAttempt: options.beforeSend,
+          beforeAttempt: options.beforeSend, sharedCircuit: options.sharedCircuit,
           canRetry: () => this.budget()!.remaining > 0,
           onFailure: error => {
             if (options.retry !== false) this.budget()!.remaining--;

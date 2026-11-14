@@ -728,6 +728,56 @@ describe('structured ask cards (P0-2)', () => {
     } finally { wire.service.close(); await h.cleanup(); }
   });
 
+  it('持久确认按预算截断 50 条长说明，保留全文附件和全部可点选项', async () => {
+    const { directory, repositories } = await openDatabase();
+    const { service, reply } = makeService();
+    const workflow = new LarkWorkflowInteractions(repositories.config, makeRuntime([], []).runtime, service, undefined, async () => true, {
+      confirmationAvailable: async () => true, onConfirmation: async () => undefined
+    });
+    const choices = Array.from({ length: 50 }, (_, index) => ({
+      label: `选项${index}`, value: `choice_${index}`, description: `说明${index}:${'详'.repeat(1000)}`
+    }));
+    try {
+      for (let clicked = 0; clicked < choices.length; clicked++) {
+        const deferred = await workflow.defer(context({ taskId: `task_long_${clicked}`, event: larkMessage({ messageId: `om_long_${clicked}` }) }), {
+          sessionId: 'ses_one', question: '请选择一项', choices
+        }, { prompt: '原始请求', cwd: '/work', scopeId: 'scope' });
+        let record = (await workflow.get('app_one', deferred.askId))!;
+        expect(record).toMatchObject({ state: 'pending', cardId: expect.any(String), durable: { choices } });
+        const cardInput = reply.mock.calls.at(-1)![0];
+        expect(record.askPendingElements).toEqual(cardInput.elements);
+        const card = buildLarkCard(cardInput);
+        const buttons = card.body.elements.filter((element: any) => element.tag === 'button');
+        expect(buttons).toHaveLength(50);
+        expect(buttons.map((element: any) => element.behaviors[0].value.answer)).toEqual(choices.map(choice => choice.value));
+        expect(JSON.stringify(card)).toContain('全文附件');
+        expect(JSON.stringify(card)).not.toContain(choices[0]!.description);
+        expect(Buffer.byteLength(JSON.stringify({ msg_type: 'interactive', content: JSON.stringify(card) }), 'utf8')).toBeLessThanOrEqual(larkCardSafeLimits.bytes);
+        expect(countCardComponents(card)).toBeLessThanOrEqual(larkCardSafeLimits.components);
+        const upload = vi.mocked(service.uploadFile).mock.calls.at(-1)![0] as any;
+        const fullText = Buffer.from(upload.data).toString('utf8');
+        for (const choice of choices) {
+          expect(fullText).toContain(choice.label);
+          expect(fullText).toContain(choice.description);
+        }
+        if (clicked === 0) {
+          const snapshot = record.askPendingElements;
+          const uploads = vi.mocked(service.uploadFile).mock.calls.length;
+          await persistInteraction(repositories.config, { ...record, cardId: undefined, deliveryRetryAt: 0 });
+          await workflow.reconcile('app_one');
+          record = (await workflow.get('app_one', record.id))!;
+          expect(record.askPendingElements).toEqual(snapshot);
+          expect(reply.mock.calls.at(-1)![0].elements).toEqual(snapshot);
+          expect(service.uploadFile).toHaveBeenCalledTimes(uploads);
+        }
+        await workflow.respond(responseInput(record, { answer: choices[clicked]!.value }));
+        expect(await workflow.get('app_one', record.id)).toMatchObject({ state: 'answered', durable: { selected: [choices[clicked]!.value] } });
+      }
+      expect(service.uploadFile).toHaveBeenCalledTimes(50);
+      expect(service.replyFile).toHaveBeenCalledTimes(50);
+    } finally { workflow.close(); repositories.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
   it.each(['upload', 'file', 'card'] as const)('附件或卡片失败后同 UUID 重试，已成功上传/发送的腿不重复（%s）', async failure => {
     const wire = mockLark(); const h = await setupHarness(wire.service);
     const date = vi.spyOn(Date, 'now'); const initial = Date.now();

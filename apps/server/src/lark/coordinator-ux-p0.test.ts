@@ -338,7 +338,7 @@ describe('P0-1 他人操作二次确认 / overflow 门 / 行内审批反伪造',
     expect(await h.coordinator.handleAction(value, 'ou_bob', context)).toMatchObject({ type: 'success' });
     await h.waitDelivered(1);
 
-    expect(h.service.getContactUser).toHaveBeenCalledExactlyOnceWith('ou_bob', 'open_id');
+    expect(h.service.getContactUser).toHaveBeenCalledExactlyOnceWith('ou_bob', 'open_id', { sharedCircuit: false });
     expect(h.service.getContactUser).not.toHaveBeenCalledWith('ou_alice', 'open_id');
     const sent = [...h.service.send.mock.calls, ...h.service.reply.mock.calls].map(([input]) => input).find(input => input.cardKind === 'result' && input.taskId === 'om_cancel_actor')!;
     expect(sent).toMatchObject({ state: 'interrupted', statusLabel: '由 Bob 取消' });

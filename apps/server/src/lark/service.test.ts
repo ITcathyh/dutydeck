@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { boundLarkCardElements, buildLarkCard, createLarkCardService, larkCardSafeLimits, larkCardSnapshotLimits, larkCardStates, larkConfigurationStatus, larkIdentityPermissionHelp, LarkServiceError, loadLarkBotConfig } from './service.js';
+import { larkCancellationActorLabel } from './card-renderer.js';
 
 const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 // Every service here shares the per-app token bucket for cli_test; LARK_API_QPS lifts the default 15 QPS so tests do not queue on it (the gate itself is covered by api-gate.test.ts).
@@ -698,6 +699,84 @@ describe('Lark card service', () => {
     await expect(service.getUserEmails('ou_sender')).resolves.toEqual(['user@example.com', 'staff@company.com']);
     expect(fetcher.mock.calls[1]?.[0]).toContain('/open-apis/bot/v3/info');
     expect(fetcher.mock.calls[2]?.[0]).toContain('/open-apis/contact/v3/users/ou_sender?user_id_type=open_id');
+  });
+
+  it('共享电路打开时取消人姓名查询仍只回退，结果卡发送仍参与熔断', async () => {
+    let contactCalls = 0;
+    let resultCalls = 0;
+    const fetcher = vi.fn(async (url: string | URL | Request) => {
+      const path = String(url);
+      if (path.includes('/auth/v3/tenant_access_token/')) return response({ code: 0, tenant_access_token: 'token', expire: 7200 });
+      if (path.includes('/contact/v3/users/ou_actor')) { contactCalls++; return response({ code: 99992000, msg: 'synthetic unavailable' }, 503); }
+      if (path.includes('/im/v1/messages')) { resultCalls++; return response({ code: 99992000, msg: 'synthetic unavailable' }, 503); }
+      throw new Error(`Unexpected synthetic Lark request: ${path}`);
+    });
+    const service = createLarkCardService({ ...configured, LARK_APP_ID: 'cli_cancel_lookup_open',
+      LARK_API_RETRY_MAX_ATTEMPTS: '0', LARK_API_CIRCUIT_FAILURE_THRESHOLD: '5' }, fetcher as typeof fetch);
+    try {
+      for (let index = 0; index < 5; index++) {
+        await expect(service.send({ chatId: 'oc_group', state: 'interrupted', markdown: 'stop', idempotencyKey: `trip_${index}` }))
+          .rejects.toMatchObject({ code: 'LARK_OPENAPI_ERROR' });
+      }
+      await expect(larkCancellationActorLabel(service, 'ou_actor')).resolves.toBeUndefined();
+      expect(contactCalls).toBe(1);
+      await expect(service.send({ chatId: 'oc_group', state: 'interrupted', markdown: 'stop', idempotencyKey: 'result_open' }))
+        .rejects.toMatchObject({ code: 'LARK_CIRCUIT_OPEN' });
+      expect(resultCalls).toBe(5);
+    } finally { service.close(); }
+  });
+
+  it.each(['serial', 'concurrent'] as const)('取消人姓名查询的 5 次 503 不阻断后续结果卡（%s）', async mode => {
+    let contactCalls = 0;
+    let resultCalls = 0;
+    const fetcher = vi.fn(async (url: string | URL | Request) => {
+      const path = String(url);
+      if (path.includes('/auth/v3/tenant_access_token/')) return response({ code: 0, tenant_access_token: 'token', expire: 7200 });
+      if (path.includes('/contact/v3/users/ou_actor')) { contactCalls++; return response({ code: 99992000, msg: 'synthetic unavailable' }, 503); }
+      if (path.includes('/im/v1/messages')) { resultCalls++; return response({ code: 0, data: { message_id: 'om_result' } }); }
+      throw new Error(`Unexpected synthetic Lark request: ${path}`);
+    });
+    const service = createLarkCardService({ ...configured, LARK_APP_ID: `cli_cancel_lookup_${mode}`,
+      LARK_API_RETRY_MAX_ATTEMPTS: '0', LARK_API_CIRCUIT_FAILURE_THRESHOLD: '5' }, fetcher as typeof fetch);
+    try {
+      const lookups = Array.from({ length: 5 }, () => () => larkCancellationActorLabel(service, 'ou_actor'));
+      const labels: Array<string | undefined> = [];
+      if (mode === 'concurrent') labels.push(...await Promise.all(lookups.map(lookup => lookup())));
+      else for (const lookup of lookups) labels.push(await lookup());
+      expect(labels).toEqual(Array.from({ length: 5 }, () => undefined));
+      expect(contactCalls).toBe(5);
+      await expect(service.send({ chatId: 'oc_group', state: 'interrupted', markdown: 'stop', idempotencyKey: `result_${mode}` }))
+        .resolves.toMatchObject({ messageId: 'om_result' });
+      expect(resultCalls).toBe(1);
+    } finally { service.close(); }
+  });
+
+  it('取消人姓名查询保留串行重试和确定性 4xx 语义', async () => {
+    let contactCalls = 0;
+    let deterministic = false;
+    const fetcher = vi.fn(async (url: string | URL | Request) => {
+      const path = String(url);
+      if (path.includes('/auth/v3/tenant_access_token/')) return response({ code: 0, tenant_access_token: 'token', expire: 7200 });
+      if (path.includes('/contact/v3/users/ou_actor')) {
+        contactCalls++;
+        if (deterministic) return response({ code: 99992402, msg: 'synthetic bad request' }, 400);
+        return contactCalls === 1 ? response({ code: 99992000, msg: 'synthetic unavailable' }, 503)
+          : response({ code: 0, data: { user: { open_id: 'ou_actor', name: 'Alice' } } });
+      }
+      if (path.includes('/im/v1/messages')) return response({ code: 0, data: { message_id: 'om_result' } });
+      throw new Error(`Unexpected synthetic Lark request: ${path}`);
+    });
+    const service = createLarkCardService({ ...configured, LARK_APP_ID: 'cli_cancel_lookup_retry',
+      LARK_API_RETRY_MAX_ATTEMPTS: '1', LARK_API_RETRY_BASE_MS: '1', LARK_API_RETRY_MAX_MS: '1' }, fetcher as typeof fetch);
+    try {
+      await expect(larkCancellationActorLabel(service, 'ou_actor')).resolves.toBe('由 Alice 取消');
+      expect(contactCalls).toBe(2);
+      deterministic = true;
+      await expect(larkCancellationActorLabel(service, 'ou_actor')).resolves.toBeUndefined();
+      expect(contactCalls).toBe(3);
+      await expect(service.send({ chatId: 'oc_group', state: 'interrupted', markdown: 'stop', idempotencyKey: 'result_deterministic' }))
+        .resolves.toMatchObject({ messageId: 'om_result' });
+    } finally { service.close(); }
   });
 
   it('preflights contact data scope and the email field before enabling identity gates', async () => {

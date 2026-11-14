@@ -1289,7 +1289,7 @@ export async function larkCancellationActorLabel(
   const id = actorId?.trim();
   if (!id?.startsWith('ou_')) return undefined;
   try {
-    const name = (await service.getContactUser(id, 'open_id'))?.name?.trim();
+    const name = (await service.getContactUser(id, 'open_id', { sharedCircuit: false }))?.name?.trim();
     return name ? `由 ${name} 取消` : undefined;
   } catch { return undefined; }
 }
