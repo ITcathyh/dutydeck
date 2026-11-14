@@ -190,12 +190,12 @@ it.each(['queue', 'steer'] as const)('shows a new %s acknowledgement immediately
   expect(screen.getByRole('button', { name: `取消排队：${queued.prompt}` })).toBeTruthy();
 });
 
-it('reuses a UUID only for the same unknown queue submission and rotates it after acceptance or editing', async () => {
+it('reuses a UUID for the same unknown queue submission, including a no-op mode selection, and rotates it after acceptance or editing', async () => {
   unrelatedApi();
   ControlledEventSource.instances = [];
   vi.stubGlobal('EventSource', ControlledEventSource);
   window.history.replaceState(null, '', '/sessions/s1');
-  const session: Session = { id: 's1', agentId: 'codex', state: 'idle', cwd: '/tmp/isolated-workspace', permissionMode: 'full-trust', runId: 'run-s1', createdAt: at(0), updatedAt: at(0) };
+  const session: Session = { id: 's1', agentId: 'codex', state: 'thinking', cwd: '/tmp/isolated-workspace', permissionMode: 'full-trust', runId: 'run-s1', createdAt: at(0), updatedAt: at(0) };
   let serverTasks: Task[] = [];
   const sendBodies: Array<Record<string, unknown>> = [];
   const unknownAttempts = new Set([1, 4]);
@@ -219,12 +219,15 @@ it('reuses a UUID only for the same unknown queue submission and rotates it afte
   client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: 1, retryDelay: 1 } } });
   render(<QueryClientProvider client={client}><App/></QueryClientProvider>);
   const input = await screen.findByRole('textbox', { name: '消息' });
-  const submit = () => screen.getByRole('button', { name: /^(发送消息|加入队列|立即插话|停止当前执行并发送)$/ });
+  const submit = () => screen.getByRole('button', { name: '加入队列' });
   await waitFor(() => expect(client!.isFetching()).toBe(0));
 
   fireEvent.change(input, { target: { value: 'repeatable instruction' } });
   await userEvent.click(submit());
-  await userEvent.click(await screen.findByRole('button', { name: '重试' }));
+  await screen.findByRole('button', { name: '重试' });
+  await userEvent.click(screen.getByRole('button', { name: '排队' }));
+  await userEvent.click(screen.getByRole('button', { name: '排队发送' }));
+  await userEvent.click(screen.getByRole('button', { name: '重试' }));
   await waitFor(() => expect(sendBodies).toHaveLength(2));
   await waitFor(() => expect((input as HTMLTextAreaElement).value).toBe(''));
   expect(sendBodies[0]?.idempotencyKey).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
@@ -256,6 +259,78 @@ it('reuses a UUID only for the same unknown queue submission and rotates it afte
   await waitFor(() => expect(sendBodies).toHaveLength(7));
   await waitFor(() => expect((input as HTMLTextAreaElement).value).toBe(''));
   expect(sendBodies[6]?.idempotencyKey).not.toBe(sendBodies[5]?.idempotencyKey);
+});
+
+it.each([401, 408])('keeps the same key when a retry after a network failure returns HTTP %d', async status => {
+  unrelatedApi();
+  ControlledEventSource.instances = [];
+  vi.stubGlobal('EventSource', ControlledEventSource);
+  window.history.replaceState(null, '', '/sessions/s1');
+  const session: Session = { id: 's1', agentId: 'codex', state: 'idle', cwd: '/tmp/isolated-workspace', permissionMode: 'full-trust', runId: 'run-s1', createdAt: at(0), updatedAt: at(0) };
+  const sendBodies: Array<Record<string, unknown>> = [];
+  vi.stubGlobal('fetch', vi.fn(async (input: string, init?: RequestInit) => {
+    const url = new URL(input, 'http://localhost');
+    if (url.pathname === '/api/sessions') return response([session]);
+    if (url.pathname === '/api/sessions/summaries' || url.pathname === '/api/sessions/s1/tasks' || url.pathname === '/api/sessions/s1/events') return response([]);
+    if (url.pathname === '/api/sessions/s1/send') {
+      sendBodies.push(JSON.parse(String(init?.body)));
+      if (sendBodies.length === 1) throw new TypeError('response lost');
+      if (sendBodies.length === 2) return response({ error: { code: status === 401 ? 'UNAUTHORIZED' : 'REQUEST_TIMEOUT', message: 'retry response may be lost' } }, status);
+      return response({ accepted: true, task: queued }, 202);
+    }
+    throw new Error(`Unexpected fetch ${input}`);
+  }));
+  client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={client}><App/></QueryClientProvider>);
+  const input = await screen.findByRole('textbox', { name: '消息' });
+  await waitFor(() => expect(client!.isFetching()).toBe(0));
+
+  fireEvent.change(input, { target: { value: 'retry after an uncertain HTTP response' } });
+  await userEvent.click(screen.getByRole('button', { name: '发送消息' }));
+  await screen.findByText(/发送结果未知/);
+  await userEvent.click(screen.getByRole('button', { name: '重试' }));
+  await waitFor(() => expect(sendBodies).toHaveLength(2));
+  await userEvent.click(await screen.findByRole('button', { name: '重试' }));
+  await waitFor(() => expect(sendBodies).toHaveLength(3));
+  await waitFor(() => expect((input as HTMLTextAreaElement).value).toBe(''));
+  expect(sendBodies[0]?.idempotencyKey).toEqual(expect.any(String));
+  expect(sendBodies.map(body => body.idempotencyKey)).toEqual([sendBodies[0]!.idempotencyKey, sendBodies[0]!.idempotencyKey, sendBodies[0]!.idempotencyKey]);
+});
+
+it('treats a first HTTP 401 as a definite rejection and clears its operation key', async () => {
+  unrelatedApi();
+  ControlledEventSource.instances = [];
+  vi.stubGlobal('EventSource', ControlledEventSource);
+  window.history.replaceState(null, '', '/sessions/s1');
+  const session: Session = { id: 's1', agentId: 'codex', state: 'idle', cwd: '/tmp/isolated-workspace', permissionMode: 'full-trust', runId: 'run-s1', createdAt: at(0), updatedAt: at(0) };
+  const sendBodies: Array<Record<string, unknown>> = [];
+  vi.stubGlobal('fetch', vi.fn(async (input: string, init?: RequestInit) => {
+    const url = new URL(input, 'http://localhost');
+    if (url.pathname === '/api/sessions') return response([session]);
+    if (url.pathname === '/api/sessions/summaries' || url.pathname === '/api/sessions/s1/tasks' || url.pathname === '/api/sessions/s1/events') return response([]);
+    if (url.pathname === '/api/sessions/s1/send') {
+      sendBodies.push(JSON.parse(String(init?.body)));
+      if (sendBodies.length === 1) return response({ error: { code: 'UNAUTHORIZED', message: 'Authentication required' } }, 401);
+      return response({ accepted: true, task: queued }, 202);
+    }
+    throw new Error(`Unexpected fetch ${input}`);
+  }));
+  client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={client}><App/></QueryClientProvider>);
+  const input = await screen.findByRole('textbox', { name: '消息' });
+  await waitFor(() => expect(client!.isFetching()).toBe(0));
+
+  fireEvent.change(input, { target: { value: 'first request is rejected' } });
+  await userEvent.click(screen.getByRole('button', { name: '发送消息' }));
+  await waitFor(() => expect(client!.isMutating()).toBe(0));
+  expect(screen.getByText('Authentication required')).toBeTruthy();
+  expect(screen.queryByText(/发送结果未知/)).toBeNull();
+  expect(screen.queryByRole('button', { name: '重试' })).toBeNull();
+
+  await userEvent.click(screen.getByRole('button', { name: '发送消息' }));
+  await waitFor(() => expect(sendBodies).toHaveLength(2));
+  await waitFor(() => expect((input as HTMLTextAreaElement).value).toBe(''));
+  expect(sendBodies[1]?.idempotencyKey).not.toBe(sendBodies[0]?.idempotencyKey);
 });
 
 it('does not generate a retry key or automatically retry steer after an unknown response', async () => {

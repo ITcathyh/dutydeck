@@ -497,7 +497,7 @@ export default function App() {
   const send = useMutation({
     mutationKey: ['composer-send'],
     retry: false,
-    mutationFn: ({ sessionId, message, mode, skillRequests, plan, idempotencyKey }: { sessionId: string; message: string; mode: SendMode; skillRequests?: string[]; draftKey: string; submittedDraft: typeof composerDraft.draft; plan?: boolean; idempotencyKey?: string }) => plan ? api.plan(sessionId, message) : mode === 'steer' ? api.send(sessionId, message, mode, skillRequests) : api.send(sessionId, message, mode, skillRequests, idempotencyKey),
+    mutationFn: ({ sessionId, message, mode, skillRequests, plan, idempotencyKey }: { sessionId: string; message: string; mode: SendMode; skillRequests?: string[]; draftKey: string; submittedDraft: typeof composerDraft.draft; plan?: boolean; idempotencyKey?: string; reusedUnknownOperation: boolean }) => plan ? api.plan(sessionId, message) : mode === 'steer' ? api.send(sessionId, message, mode, skillRequests) : api.send(sessionId, message, mode, skillRequests, idempotencyKey),
     onSuccess: (result, variables) => {
       if (variables.idempotencyKey) sendOperations.current.delete(variables.draftKey, variables.idempotencyKey);
       setSendFailure(current => current?.sessionId === variables.sessionId ? undefined : current);
@@ -508,7 +508,7 @@ export default function App() {
     },
     onError: (error, variables) => {
       if (variables.sessionId !== useDockStore.getState().activeSessionId) return;
-      const unknown = !(error instanceof ApiError) || error.status >= 500 || error.code === 'unknown_outcome';
+      const unknown = !(error instanceof ApiError) || error.status === 408 || error.status >= 500 || error.code === 'unknown_outcome' || (variables.reusedUnknownOperation && error.status === 401);
       if (!unknown) {
         if (variables.idempotencyKey) sendOperations.current.delete(variables.draftKey, variables.idempotencyKey);
         setActionError(error.message);
@@ -580,7 +580,7 @@ export default function App() {
     const draftKey = composerDraft.key!;
     const submittedDraft = composerDraft.draft;
     const skillRequests = composerReferences.filter(reference => reference.kind === 'skill').map(reference => reference.value);
-    const snapshot = JSON.stringify({ message, skillRequests, submittedDraft });
+    const snapshot = JSON.stringify({ message, skillRequests, mode: sendMode, planFirst });
     const previous = sendOperations.current.get(draftKey, snapshot);
     const retry = !planFirst && previous?.snapshot === snapshot ? previous : undefined;
     // interrupt 被接受后页面可能已经空闲；同一未知响应的重试仍须沿用最初的实际 mode。
@@ -588,7 +588,7 @@ export default function App() {
     const idempotencyKey = !planFirst && mode !== 'steer' ? retry?.key ?? requestId() : undefined;
     if (idempotencyKey && mode !== 'steer' && !retry) sendOperations.current.set(draftKey, { snapshot, mode, key: idempotencyKey });
     setSendFailure(undefined);
-    send.mutate({ sessionId: activeSessionId, message, draftKey, submittedDraft, mode, skillRequests, plan: planFirst, idempotencyKey });
+    send.mutate({ sessionId: activeSessionId, message, draftKey, submittedDraft, mode, skillRequests, plan: planFirst, idempotencyKey, reusedUnknownOperation: Boolean(retry) });
   };
   const act = async (action: string) => { try { setActionError(undefined); await api.action(activeSessionId!, action); } catch (error) { setActionError(error instanceof Error ? error.message : String(error)); } };
 

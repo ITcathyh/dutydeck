@@ -248,7 +248,16 @@ export const withShareToken = (url: string) => shareToken ? `${url}${url.include
 export class ApiError extends Error {
   constructor(message: string, public readonly code: string, public readonly status: number, public readonly current?: unknown) { super(message); this.name = 'ApiError'; }
 }
-const json = async <T,>(url: string, init?: RequestInit, instance?: string | null): Promise<T> => { const targetUrl = instance === undefined ? instanceApiUrl(url) : instance === null ? url : `/api/instances/${encodeURIComponent(instance)}${url.slice(4)}`; const response = await fetch(withShareToken(targetUrl), { credentials: 'same-origin', ...init }); const data = await response.json(); if (!response.ok) { if (response.status === 401 && typeof window !== 'undefined') window.dispatchEvent(new Event(UNAUTHORIZED_EVENT)); throw new ApiError(data.error?.message ?? response.statusText, data.error?.code ?? 'REQUEST_FAILED', response.status, data.current); } return data; };
+const json = async <T,>(url: string, init?: RequestInit, instance?: string | null): Promise<T> => {
+  const targetUrl = instance === undefined ? instanceApiUrl(url) : instance === null ? url : `/api/instances/${encodeURIComponent(instance)}${url.slice(4)}`;
+  const response = await fetch(withShareToken(targetUrl), { credentials: 'same-origin', ...init });
+  if (!response.ok) {
+    if (response.status === 401 && typeof window !== 'undefined') window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+    const data = await response.json().catch(() => undefined);
+    throw new ApiError(data?.error?.message ?? response.statusText, data?.error?.code ?? 'REQUEST_FAILED', response.status, data?.current);
+  }
+  return response.json();
+};
 /** JSON 写请求：method + JSON 请求体。 */
 const send = <T,>(method: string, url: string, body: unknown) => json<T>(url, { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
 const botAgentPath = (id: string, appId?: string) => appId

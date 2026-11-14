@@ -6,7 +6,7 @@ type StorageLike = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 type StoredOperation = SendOperation & { draftKey: string };
 
 const browserStorage = (): StorageLike | null => {
-  try { return typeof localStorage === 'undefined' ? null : localStorage; }
+  try { return typeof sessionStorage === 'undefined' ? null : sessionStorage; }
   catch { return null; }
 };
 
@@ -25,20 +25,21 @@ function parseOperations(raw: string | null): StoredOperation[] {
   return operations;
 }
 
-/** Durable when possible; a failed storage read/write falls back to this page's memory. */
+/** Persists across reloads in this tab; failed storage access falls back to this page's memory. */
 export class SendOperationStore {
   private memory: StoredOperation[] = [];
   private storageFailed = false;
 
-  constructor(private readonly storage: StorageLike | null = browserStorage()) {}
-
-  private read(): StoredOperation[] {
-    if (!this.storage || this.storageFailed) return [...this.memory];
+  constructor(private readonly storage: StorageLike | null = browserStorage()) {
+    if (!this.storage) return;
     try {
       this.memory = parseOperations(this.storage.getItem(SEND_OPERATIONS_STORAGE_KEY));
     } catch {
       this.storageFailed = true;
     }
+  }
+
+  private read(): StoredOperation[] {
     return [...this.memory];
   }
 

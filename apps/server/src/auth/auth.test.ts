@@ -614,6 +614,25 @@ describe('port-scoped access cookies', () => {
       await other.close();
     }
   });
+
+  it('logout reads the token once for repeated invalid legacy cookies and does not clear them', async () => {
+    const getToken = vi.fn(async () => TOKEN_A);
+    const app = Fastify();
+    const auth: AuthMiddlewareOptions = { mode: 'token', localOnly: false, getToken };
+    registerBrowserAuthRoutes(app, auth);
+    registerAuthMiddleware(app, { ...auth, exempt: (_method, pathname) => pathname === '/api/auth/logout' });
+    const host = '127.0.0.1:4310';
+    const cookie = Array.from({ length: 60 }, () => `${AUTH_COOKIE_NAME}=invalid`).join('; ');
+    try {
+      const response = await app.inject({ method: 'POST', url: '/api/auth/logout', headers: { host, cookie } });
+      expect(response.statusCode).toBe(200);
+      expect(getToken).toHaveBeenCalledTimes(1);
+      expect(String(response.headers['set-cookie'])).toMatch(new RegExp(`^${AUTH_COOKIE_NAME}_4310=;.*Max-Age=0$`));
+      expect(String(response.headers['set-cookie'])).not.toContain(`${AUTH_COOKIE_NAME}=;`);
+    } finally {
+      await app.close();
+    }
+  });
 });
 
 describe('browser auth routes', () => {

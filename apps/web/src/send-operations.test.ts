@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SEND_OPERATIONS_STORAGE_KEY, SendOperationStore, type SendOperation } from './send-operations';
 
 const operation = (key: string, snapshot = `snapshot-${key}`): SendOperation => ({ snapshot, mode: 'queue', key });
@@ -13,38 +13,53 @@ function memoryStorage() {
 }
 
 describe('SendOperationStore', () => {
-  it('recovers after recreation and rereads another tab accepting the operation', () => {
-    const storage = memoryStorage();
-    const firstTab = new SendOperationStore(storage);
-    const secondTab = new SendOperationStore(storage);
-    firstTab.set('draft', operation('request-1', 'snapshot'));
-    expect(secondTab.get('draft', 'snapshot')).toEqual(operation('request-1', 'snapshot'));
+  afterEach(() => vi.unstubAllGlobals());
 
-    secondTab.delete('draft', 'another-request');
-    expect(firstTab.get('draft', 'snapshot')).toEqual(operation('request-1', 'snapshot'));
-    secondTab.delete('draft', 'request-1');
-    expect(firstTab.get('draft', 'snapshot')).toBeUndefined();
-    expect(storage.getItem.mock.calls.length).toBeGreaterThan(2);
+  it('uses session storage and recovers the same draft retry after a same-tab reload', () => {
+    const local = memoryStorage();
+    const session = memoryStorage();
+    vi.stubGlobal('localStorage', local);
+    vi.stubGlobal('sessionStorage', session);
+    const beforeReload = new SendOperationStore();
+    beforeReload.set('draft', operation('request-1', 'snapshot'));
+    const afterReload = new SendOperationStore();
+
+    expect(afterReload.get('draft', 'snapshot')).toEqual(operation('request-1', 'snapshot'));
+    expect(afterReload.get('draft', 'snapshot')?.key).toBe('request-1');
+    expect(session.setItem).toHaveBeenCalledWith(SEND_OPERATIONS_STORAGE_KEY, expect.any(String));
+    expect(local.setItem).not.toHaveBeenCalled();
   });
 
-  it('keeps different snapshots from two tabs through an interleaved accept and delete', () => {
-    const storage = memoryStorage();
-    const firstTab = new SendOperationStore(storage);
-    const secondTab = new SendOperationStore(storage);
-    const first = operation('request-a', 'snapshot-a');
-    const second = operation('request-b', 'snapshot-b');
+  it('treats another tab as a new request and never shares or deletes its operation', () => {
+    const firstTab = new SendOperationStore(memoryStorage());
+    const secondTab = new SendOperationStore(memoryStorage());
+    const first = operation('request-a', 'snapshot');
+    const second = operation('request-b', 'snapshot');
     firstTab.set('draft', first);
+
+    expect(secondTab.get('draft', 'snapshot')).toBeUndefined();
     secondTab.set('draft', second);
-
-    expect(firstTab.get('draft', 'snapshot-a')).toEqual(first);
-    expect(secondTab.get('draft', 'snapshot-b')).toEqual(second);
-    secondTab.delete('draft', 'not-request-b');
-    expect(firstTab.get('draft', 'snapshot-a')).toEqual(first);
-    expect(secondTab.get('draft', 'snapshot-b')).toEqual(second);
-
+    expect(firstTab.get('draft', 'snapshot')).toEqual(first);
+    expect(secondTab.get('draft', 'snapshot')).toEqual(second);
     secondTab.delete('draft', 'request-b');
-    expect(firstTab.get('draft', 'snapshot-a')).toEqual(first);
-    expect(secondTab.get('draft', 'snapshot-b')).toBeUndefined();
+    expect(firstTab.get('draft', 'snapshot')).toEqual(first);
+  });
+
+  it('keeps different drafts and edited snapshots independent', () => {
+    const store = new SendOperationStore(memoryStorage());
+    const first = operation('request-a', 'snapshot-a');
+    const otherDraft = operation('request-b', 'snapshot-a');
+    const edited = operation('request-c', 'snapshot-edited');
+    store.set('draft-a', first);
+    store.set('draft-b', otherDraft);
+    store.set('draft-a', edited);
+
+    expect(store.get('draft-a', 'snapshot-a')).toEqual(first);
+    expect(store.get('draft-b', 'snapshot-a')).toEqual(otherDraft);
+    expect(store.get('draft-a', 'snapshot-edited')).toEqual(edited);
+    store.delete('draft-a', 'request-a');
+    expect(store.get('draft-b', 'snapshot-a')).toEqual(otherDraft);
+    expect(store.get('draft-a', 'snapshot-edited')).toEqual(edited);
   });
 
   it('keeps retrying with the in-memory operation when storage writes fail', () => {

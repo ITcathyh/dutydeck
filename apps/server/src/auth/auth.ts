@@ -662,8 +662,7 @@ export function registerBrowserAuthRoutes(app: FastifyInstance, options: AuthMid
     // A legacy cookie belongs to another instance until this instance's own verifier accepts it.
     // Without an explicit port the selected name already is the legacy cookie, so preserve old logout behavior.
     if (required && scoped !== AUTH_COOKIE_NAME
-      && await validatePresentedCredential({ cookie: request.headers.cookie }, presented =>
-        isValidAccessCredential(presented, options.getToken, async () => passwordHash))) {
+      && await isValidPresentedAccessCredential({ cookie: request.headers.cookie }, options.getToken, async () => passwordHash)) {
       names.push(AUTH_COOKIE_NAME);
     }
     const cookies = names.map(name => cookieAttributes(request, true, name));
