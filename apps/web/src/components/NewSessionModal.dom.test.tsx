@@ -43,7 +43,7 @@ describe('NewSessionModal create → dispatch', () => {
     await waitFor(() => expect(onCreated).toHaveBeenCalledWith(session, task));
     expect(create).toHaveBeenCalledWith({ agentId: 'codex', permissionMode: 'ask', workspaceMode: 'worktree' });
     expect(create).toHaveBeenCalledTimes(1);
-    expect(send).toHaveBeenCalledWith('s1', '修复登录超时', 'queue');
+    expect(send).toHaveBeenCalledWith('s1', '修复登录超时', 'queue', undefined, expect.stringMatching(/^[0-9a-f-]{36}$/));
   });
 
   it.each(['codex', 'claude-code'])('submits the Agent selected by its source card: %s', async initialAgentId => {
@@ -82,7 +82,7 @@ describe('NewSessionModal create → dispatch', () => {
     expect((screen.getByRole('button', { name: '创建并执行' }) as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it('派发失败后重试复用已创建 Session，避免重复创建', async () => {
+  it('派发结果未知后重试复用已创建 Session 和同一幂等键', async () => {
     const user = userEvent.setup(); const onCreated = vi.fn();
     vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
     const create = vi.spyOn(api, 'create').mockResolvedValue(session);
@@ -96,8 +96,39 @@ describe('NewSessionModal create → dispatch', () => {
     await waitFor(() => expect(onCreated).toHaveBeenCalledWith(session, task));
     expect(create).toHaveBeenCalledTimes(1);
     expect(send).toHaveBeenCalledTimes(2);
+    const idempotencyKey = send.mock.calls[0]?.[4];
+    expect(idempotencyKey).toMatch(/^[0-9a-f-]{36}$/);
+    expect(send).toHaveBeenNthCalledWith(1, 's1', '修复登录超时', 'queue', undefined, idempotencyKey);
+    expect(send).toHaveBeenNthCalledWith(2, 's1', '修复登录超时', 'queue', undefined, idempotencyKey);
   });
 
+  it('目标正文变化或发送成功后换键，已创建 Session 的重试仍不重复创建', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    const create = vi.spyOn(api, 'create').mockResolvedValue(session);
+    const send = vi.spyOn(api, 'send').mockRejectedValueOnce(new Error('网络断开')).mockResolvedValue({ accepted: true, task });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    render(<QueryClientProvider client={client}><NewSessionModal open onClose={() => {}} onCreated={() => {}} agents={[agent]}/></QueryClientProvider>);
+    await typeInto(user, screen.getByLabelText('任务目标'), '第一个目标');
+    await user.click(screen.getByRole('button', { name: '创建并执行' }));
+    await screen.findByRole('alert');
+    const firstKey = send.mock.calls[0]?.[4];
+
+    fireEvent.change(screen.getByLabelText('任务目标'), { target: { value: '修改后的目标' } });
+    await user.click(screen.getByRole('button', { name: '重试发送' }));
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(2));
+    const changedGoalKey = send.mock.calls[1]?.[4];
+    expect(changedGoalKey).toMatch(/^[0-9a-f-]{36}$/);
+    expect(changedGoalKey).not.toBe(firstKey);
+    expect(create).toHaveBeenCalledTimes(1);
+
+    await typeInto(user, screen.getByLabelText('任务目标'), '成功后的新目标');
+    await user.click(screen.getByRole('button', { name: '创建并执行' }));
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(3));
+    expect(send.mock.calls[2]?.[4]).toMatch(/^[0-9a-f-]{36}$/);
+    expect(send.mock.calls[2]?.[4]).not.toBe(changedGoalKey);
+    expect(create).toHaveBeenCalledTimes(2);
+  });
   it('没有 Agent 时不会发送无效创建请求，并引导到添加方法', async () => {
     const onOpenAgentSetup = vi.fn();
     const create = vi.spyOn(api, 'create');
@@ -214,7 +245,7 @@ describe('NewSessionModal pending exits', () => {
     expect(create).toHaveBeenCalledOnce();
     expect(create).toHaveBeenCalledWith({ agentId: 'codex', permissionMode: 'ask', workspaceMode: 'worktree' });
     expect(send).toHaveBeenCalledOnce();
-    expect(send).toHaveBeenCalledWith(session.id, task.prompt, 'queue');
+    expect(send).toHaveBeenCalledWith(session.id, task.prompt, 'queue', undefined, expect.stringMatching(/^[0-9a-f-]{36}$/));
   });
 
   it.each([
@@ -332,6 +363,8 @@ describe('new task draft continuity', () => {
     reopened.unmount();
     expect(create).toHaveBeenCalledOnce();
     expect(send).toHaveBeenCalledTimes(2);
+    expect(send.mock.calls[1]?.[4]).toBe(send.mock.calls[0]?.[4]);
+    expect(send.mock.calls[0]?.[4]).toMatch(/^[0-9a-f-]{36}$/);
     expect(newSessionDrafts.size).toBe(0);
   });
 

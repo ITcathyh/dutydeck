@@ -87,7 +87,7 @@ test.afterEach(async ({}, testInfo) => {
   await instance?.cleanup();
 });
 
-test('queue: server accepted then response lost, browser retry reuses the task', async ({ page }, testInfo) => {
+test('queue: server accepted then response lost, reload and normal send reuse the task', async ({ page }, testInfo) => {
   const sessionId = await createSession();
   const prompt = 'QUEUE_ACCEPTED_RESPONSE_LOSS_ONCE';
   await openSession(page, sessionId);
@@ -104,7 +104,10 @@ test('queue: server accepted then response lost, browser retry reuses the task',
   expect(first.responseBody).toMatchObject({ accepted: true, task: { id: expect.any(String) } });
   expect(first.request).toMatchObject({ prompt, mode: 'queue' });
   expect(first.request.idempotencyKey).toMatch(/^[0-9a-f-]{36}$/);
-  await page.getByRole('button', { name: '重试', exact: true }).click();
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await expect(message).toBeVisible();
+  await expect(message).toHaveValue(prompt);
+  await page.getByRole('button', { name: '发送消息', exact: true }).click();
   await expect.poll(() => proxy.exchanges.length).toBe(2);
   expect(browserFailures).toHaveLength(1);
   const second = proxy.exchanges[1]!;

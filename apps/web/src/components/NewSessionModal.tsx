@@ -9,6 +9,7 @@ import { AgentSelect, CompactSelect } from './CompactSelect';
 import { DirectoryPicker } from './DirectoryPicker';
 import { currentInstance } from '../instance';
 import { newSessionDrafts } from '../new-session-drafts';
+import { requestId } from '../request-id';
 
 export type NewSessionModalProps = {
   open: boolean;
@@ -67,8 +68,9 @@ export function NewSessionModal({ open, onClose, onOpenAgentSetup, onCreated, on
   const [fullTrustConfirmed, setFullTrustConfirmed] = useState(Boolean(draft?.createdSession));
   const [goal, setGoal] = useState(draft?.goal ?? '');
   const [createdSession, setCreatedSession] = useState<Session | undefined>(draft?.createdSession);
-  const latestDraft = useRef({ agentId, cwd, workspaceMode, model, codexProfile, reasoningEffort, permissionMode, goal, createdSession });
-  latestDraft.current = { agentId, cwd, workspaceMode, model, codexProfile, reasoningEffort, permissionMode, goal, createdSession };
+  const [sendOperation, setSendOperation] = useState(() => draft?.sendOperation?.goal === (draft?.goal ?? '').trim() ? draft?.sendOperation : undefined);
+  const latestDraft = useRef({ agentId, cwd, workspaceMode, model, codexProfile, reasoningEffort, permissionMode, goal, createdSession, sendOperation });
+  latestDraft.current = { agentId, cwd, workspaceMode, model, codexProfile, reasoningEffort, permissionMode, goal, createdSession, sendOperation };
   useEffect(() => () => {
     if (!completed.current) newSessionDrafts.set(draftKey, latestDraft.current);
   }, [draftKey]);
@@ -90,14 +92,17 @@ export function NewSessionModal({ open, onClose, onOpenAgentSetup, onCreated, on
       const session = createdSession ?? await api.create({ agentId, permissionMode, workspaceMode, ...(cwd ? { cwd } : {}), ...(model ? { model } : {}), ...(codexProfile ? { codexProfile } : {}), ...(reasoningEffort ? { reasoningEffort } : {}) });
       if (!createdSession) setCreatedSession(session);
       if (mode === 'schedule') return { session, task: undefined };
-      const result = await api.send(session.id, goal.trim(), 'queue');
+      const submittedGoal = goal.trim();
+      const operation = sendOperation?.goal === submittedGoal ? sendOperation : { goal: submittedGoal, key: requestId() };
+      if (operation !== sendOperation) setSendOperation(operation);
+      const result = await api.send(session.id, submittedGoal, 'queue', undefined, operation.key);
       return { session, task: result.task };
     },
     onSuccess: ({ session, task }) => {
       void qc.invalidateQueries({ queryKey: ['sessions'] });
       if (task) qc.setQueryData<Task[]>(['tasks', session.id], [task]);
       completed.current = true; newSessionDrafts.delete(draftKey);
-      setCreatedSession(undefined); setGoal('');
+      setCreatedSession(undefined); setGoal(''); setSendOperation(undefined);
       if (task) onCreated?.(session, task);
       else onSessionCreated?.(session);
     }
@@ -130,7 +135,7 @@ export function NewSessionModal({ open, onClose, onOpenAgentSetup, onCreated, on
       <Dialog.Body>
         <div className="space-y-4">
           {mode === 'task' && <Field label="任务目标">
-            <Textarea autoFocus required aria-label="任务目标" value={goal} disabled={create.isPending} onChange={event => setGoal(event.target.value)} rows={3} placeholder="例如：修复登录超时问题，补齐回归测试并通过构建" className="resize-y"/>
+            <Textarea autoFocus required aria-label="任务目标" value={goal} disabled={create.isPending} onChange={event => { setGoal(event.target.value); setSendOperation(undefined); }} rows={3} placeholder="例如：修复登录超时问题，补齐回归测试并通过构建" className="resize-y"/>
           </Field>}
           <DirectoryPicker
             value={cwd}

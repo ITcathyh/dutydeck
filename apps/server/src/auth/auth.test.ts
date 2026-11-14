@@ -7,7 +7,6 @@ import {
   AUTH_TOKEN_CONFIG_KEY,
   AUTH_COOKIE_NAME,
   accessCookieNameForRequest,
-  extractCookie,
   extractBearerToken,
   generateAuthToken,
   getAuthToken,
@@ -16,6 +15,7 @@ import {
   hashPassword,
   isSameOriginRequest,
   issueBrowserSession,
+  isValidPresentedAccessCredential,
   loadOrCreateAuthToken,
   loadOrCreateShareLinkSecret,
   LOGIN_LINK_TTL_MS,
@@ -181,13 +181,6 @@ describe('extractBearerToken', () => {
   });
 });
 
-describe('extractCookie', () => {
-  it('matches the exact cookie name and preserves a base64url token', () => {
-    expect(extractCookie(`theme=dark; ${AUTH_COOKIE_NAME}=abc_123-XYZ; other=value`)).toBe('abc_123-XYZ');
-    expect(extractCookie(`${AUTH_COOKIE_NAME}_old=wrong`)).toBeUndefined();
-  });
-});
-
 describe('access cookie naming and ordered validation', () => {
   it.each([
     ['dutydeck.test', AUTH_COOKIE_NAME],
@@ -262,6 +255,32 @@ describe('access cookie naming and ordered validation', () => {
     const check = vi.fn((presented: string | undefined) => presented === 'good');
     expect(validatePresentedCredential({ authorization: 'Bearer bad', cookie: `${AUTH_COOKIE_NAME}=good` }, check)).toBe(false);
     expect(check.mock.calls).toEqual([['bad']]);
+  });
+
+  it('reads the access token once while trying multiple invalid cookie candidates', async () => {
+    const getToken = vi.fn(async () => 'expected-token');
+    const getPasswordHash = vi.fn(async () => null);
+    const valid = await isValidPresentedAccessCredential({
+      host: 'dutydeck.test',
+      cookie: `${AUTH_COOKIE_NAME}=bad-1; ${AUTH_COOKIE_NAME}=bad-2; ${AUTH_COOKIE_NAME}=expected-token`
+    }, getToken, getPasswordHash);
+    expect(valid).toBe(true);
+    expect(getToken).toHaveBeenCalledTimes(1);
+    expect(getPasswordHash).not.toHaveBeenCalled();
+  });
+
+  it('reads the token and password hash at most once across password-session candidates', async () => {
+    const storedHash = 'stored-password-hash';
+    const validSession = issueBrowserSession(storedHash);
+    const getToken = vi.fn(async () => null);
+    const getPasswordHash = vi.fn(async () => storedHash);
+    const valid = await isValidPresentedAccessCredential({
+      host: 'dutydeck.test',
+      cookie: `${AUTH_COOKIE_NAME}=pw.invalid.bad; ${AUTH_COOKIE_NAME}=pw.also.invalid; ${AUTH_COOKIE_NAME}=${validSession}`
+    }, getToken, getPasswordHash);
+    expect(valid).toBe(true);
+    expect(getToken).toHaveBeenCalledTimes(1);
+    expect(getPasswordHash).toHaveBeenCalledTimes(1);
   });
 });
 

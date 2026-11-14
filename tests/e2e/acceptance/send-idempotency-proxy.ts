@@ -28,7 +28,6 @@ export async function startAcceptedResponseLossProxy(targetPort: number) {
         catch { request.socket.destroy(); return; }
       }
       const shouldDrop = isSend && dropNextSend;
-      if (shouldDrop) dropNextSend = false;
       const upstream = http.request({
         hostname: '127.0.0.1',
         port: targetPort,
@@ -62,7 +61,10 @@ export async function startAcceptedResponseLossProxy(targetPort: number) {
             // Once response bytes arrive Chromium does not transparently replay POST. A truncated JSON body
             // still leaves the Web mutation outcome unknown, while a bare TCP reset can trigger a network retry.
             response.writeHead(202, { 'content-type': 'application/json; charset=utf-8', 'transfer-encoding': 'chunked' });
-            response.write('{', () => response.socket?.destroy());
+            response.write('{', () => {
+              dropNextSend = false;
+              response.socket?.destroy();
+            });
             upstreamResponse.destroy();
             return;
           }

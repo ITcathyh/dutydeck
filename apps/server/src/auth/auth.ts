@@ -265,11 +265,6 @@ function extractCookieValues(cookieHeader: string | undefined, name: string): st
   return values;
 }
 
-/** Read one exact cookie without decoding arbitrary user-controlled values. */
-export function extractCookie(cookieHeader: string | undefined, name = AUTH_COOKIE_NAME): string | undefined {
-  return extractCookieValues(cookieHeader, name)[0] || undefined;
-}
-
 /** A port is scoped only when it was explicitly present in the raw, valid Host value. */
 function explicitHostPort(rawHost: string | undefined): string | undefined {
   const host = rawHost?.trim();
@@ -343,7 +338,11 @@ export function isValidPresentedAccessCredential(
   getToken: () => Promise<string | null>,
   getPasswordHash?: () => Promise<string | null>,
 ): Promise<boolean> {
-  return validatePresentedCredential(headers, presented => isValidAccessCredential(presented, getToken, getPasswordHash));
+  let token: Promise<string | null> | undefined;
+  let passwordHash: Promise<string | null> | undefined;
+  const readToken = () => token ??= getToken();
+  const readPasswordHash = () => passwordHash ??= getPasswordHash!();
+  return validatePresentedCredential(headers, presented => isValidAccessCredential(presented, readToken, getPasswordHash ? readPasswordHash : undefined));
 }
 
 /** 一次性登录链接的有效期 */

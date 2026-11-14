@@ -14,6 +14,7 @@ import type { EventWindow } from './event-history';
 import { shortcutDefinitions } from './useKeyboardShortcuts';
 import { toastStore } from './useToasts';
 import { EXPERIMENTAL_STORAGE_KEY, writeExperimental } from './experimental';
+import { SEND_OPERATIONS_STORAGE_KEY } from './send-operations';
 
 vi.mock('./useSessionStream', () => ({ useSessionStream: () => ({ transport: 'open', content: 'ready' }) }));
 vi.mock('./components/TerminalView', () => ({ TerminalView: ({ sessionId }: { sessionId: string }) => <div>Terminal {sessionId}</div> }));
@@ -67,6 +68,7 @@ afterEach(() => {
   Object.keys(window.localStorage).filter(key => key.startsWith('dutydeck:view:')).forEach(key => window.localStorage.removeItem(key));
   toastStore.clear();
   window.localStorage.removeItem(EXPERIMENTAL_STORAGE_KEY);
+  window.localStorage.removeItem(SEND_OPERATIONS_STORAGE_KEY);
   window.history.replaceState(null, '', '/');
 });
 
@@ -1448,6 +1450,22 @@ describe('App pending composer mutations', () => {
     await waitFor(() => expect(input().value).toBe(change === 'unchanged' ? '' : change === 'text' ? 'second unsent draft' : change === 'session' ? 'other session draft' : '  first instruction  '));
     expect(Boolean(screen.queryByRole('button', { name: '移除引用 first.ts' }))).toBe(change === 'text' || change === 'failure' || change === 'new references');
     expect(Boolean(screen.queryByRole('button', { name: '移除引用 second.ts' }))).toBe(change === 'session' || change === 'new references');
+  });
+
+  it('explains why retry cannot submit after the draft is emptied', async () => {
+    setup();
+    const send = vi.spyOn(api, 'send').mockRejectedValue(new Error('network unavailable'));
+    renderApp();
+    const input = await screen.findByRole('textbox', { name: '消息' });
+    fireEvent.change(input, { target: { value: 'retry with an empty draft later' } });
+    await userEvent.click(await screen.findByRole('button', { name: '加入队列' }));
+    await screen.findByText(/发送结果未知：network unavailable/);
+    expect(send).toHaveBeenCalledTimes(1);
+
+    fireEvent.change(input, { target: { value: '' } });
+    await userEvent.click(screen.getByRole('button', { name: '重试' }));
+    expect(await screen.findByText('请先填写消息或添加引用，再重试发送。')).toBeTruthy();
+    expect(send).toHaveBeenCalledTimes(1);
   });
 });
 

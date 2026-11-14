@@ -59,6 +59,7 @@ import { useExperimental } from './experimental';
 import { shortcutAvailability, useKeyboardShortcuts, workbenchViewShortcutIds } from './useKeyboardShortcuts';
 import { ShortcutHelpSheet } from './components/ShortcutHelpSheet';
 import { requestId } from './request-id';
+import { SendOperationStore } from './send-operations';
 
 // 终端与控制面都属于低频重功能，避免进入工作台首屏 chunk。
 const TerminalView = lazy(() => import('./components/TerminalView').then(module => ({ default: module.TerminalView })));
@@ -136,8 +137,8 @@ export default function App() {
   const inspectorDefaultCompleted = useMediaQuery('(min-width: 1600px)');
   const [actionError, setActionError] = useState<string>();
   const [sendFailure, setSendFailure] = useState<{ sessionId: string; message: string; retry: boolean }>();
-  // 每个草稿只保留最后一次未确认的 queue/interrupt 操作；完整草稿快照不同就换 UUID。
-  const sendOperations = useRef(new Map<string, { snapshot: string; mode: 'queue' | 'interrupt'; key: string }>());
+  // queue/interrupt 的未确认操作跨刷新保留；每次读写都先看另一标签页发布的最新记录。
+  const sendOperations = useRef(new SendOperationStore());
   const [workItemPanel, setWorkItemPanel] = useState<{ sessionId: string; itemId: string } | null>(null);
   // 路由与「可深链的浮层」是同一个东西的两半，合成一个 state：分开存会让 URL 与界面
   // 各走各的，回退键、刷新、分享链接三者立刻打架（见 app-route.ts 的说明）。
@@ -499,7 +500,7 @@ export default function App() {
     mutationFn: ({ sessionId, message, mode, skillRequests, plan, idempotencyKey }: { sessionId: string; message: string; mode: SendMode; skillRequests?: string[]; draftKey: string; submittedDraft: typeof composerDraft.draft; plan?: boolean; idempotencyKey?: string }) => plan ? api.plan(sessionId, message) : mode === 'steer' ? api.send(sessionId, message, mode, skillRequests) : api.send(sessionId, message, mode, skillRequests, idempotencyKey),
     onSuccess: (result, variables) => {
       const operation = sendOperations.current.get(variables.draftKey);
-      if (variables.idempotencyKey && operation?.key === variables.idempotencyKey) sendOperations.current.delete(variables.draftKey);
+      if (variables.idempotencyKey && operation?.key === variables.idempotencyKey) sendOperations.current.delete(variables.draftKey, variables.idempotencyKey);
       setSendFailure(current => current?.sessionId === variables.sessionId ? undefined : current);
       acknowledgeComposerDraft(variables.draftKey, variables.submittedDraft);
       qc.setQueryData<Task[]>(['tasks', variables.sessionId], current => current?.some(task => task.id === result.task.id) ? current : [...(current ?? []), result.task]);
@@ -511,7 +512,7 @@ export default function App() {
       const unknown = !(error instanceof ApiError) || error.status >= 500 || error.code === 'unknown_outcome';
       if (!unknown) {
         const operation = sendOperations.current.get(variables.draftKey);
-        if (variables.idempotencyKey && operation?.key === variables.idempotencyKey) sendOperations.current.delete(variables.draftKey);
+        if (variables.idempotencyKey && operation?.key === variables.idempotencyKey) sendOperations.current.delete(variables.draftKey, variables.idempotencyKey);
         setActionError(error.message);
         return;
       }
@@ -573,10 +574,11 @@ export default function App() {
   const staleMainQueryFailures = mainQueryFailures.filter(failure => failure.hasData);
   const retryingMainQueries = mainQueryFailures.some(failure => failure.retrying);
   const submit = () => {
-    if (modelReadiness.kind !== 'ready') return;
+    if (modelReadiness.kind !== 'ready') { setActionError(modelReadiness.reason); return; }
     if (planFirst && active?.source === 'lark') { setActionError('飞书会话请在飞书发送 /plan；如需直接执行，请先改为普通消息。'); return; }
     const message = buildPrompt(prompt, composerReferences);
-    if (!message || !activeSessionId) return;
+    if (!activeSessionId) { setActionError('请先选择要发送消息的任务。'); return; }
+    if (!message) { setActionError('请先填写消息或添加引用，再重试发送。'); return; }
     const draftKey = composerDraft.key!;
     const submittedDraft = composerDraft.draft;
     const skillRequests = composerReferences.filter(reference => reference.kind === 'skill').map(reference => reference.value);
@@ -586,14 +588,7 @@ export default function App() {
     // interrupt 被接受后页面可能已经空闲；同一未知响应的重试仍须沿用最初的实际 mode。
     const mode = retry?.mode ?? (busyStates.has(active?.state ?? '') ? sendMode : 'queue');
     const idempotencyKey = !planFirst && mode !== 'steer' ? retry?.key ?? requestId() : undefined;
-    if (idempotencyKey && mode !== 'steer' && !retry) {
-      sendOperations.current.delete(draftKey);
-      sendOperations.current.set(draftKey, { snapshot, mode, key: idempotencyKey });
-      if (sendOperations.current.size > 32) {
-        const oldest = sendOperations.current.keys().next().value;
-        if (oldest !== undefined) sendOperations.current.delete(oldest);
-      }
-    }
+    if (idempotencyKey && mode !== 'steer' && !retry) sendOperations.current.set(draftKey, { snapshot, mode, key: idempotencyKey });
     setSendFailure(undefined);
     send.mutate({ sessionId: activeSessionId, message, draftKey, submittedDraft, mode, skillRequests, plan: planFirst, idempotencyKey });
   };
