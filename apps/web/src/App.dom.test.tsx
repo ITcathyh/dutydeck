@@ -68,7 +68,7 @@ afterEach(() => {
   Object.keys(window.localStorage).filter(key => key.startsWith('dutydeck:view:')).forEach(key => window.localStorage.removeItem(key));
   toastStore.clear();
   window.localStorage.removeItem(EXPERIMENTAL_STORAGE_KEY);
-  window.localStorage.removeItem(SEND_OPERATIONS_STORAGE_KEY);
+  window.sessionStorage.removeItem(SEND_OPERATIONS_STORAGE_KEY);
   window.history.replaceState(null, '', '/');
 });
 

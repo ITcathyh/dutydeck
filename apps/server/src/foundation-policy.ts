@@ -66,14 +66,16 @@ export function createInstallationPrincipalResolver(options: InstallationPrincip
     }
     if (options.mode !== 'token') return undefined;
     let authentication: InstallationPrincipalAuthentication | undefined;
+    let token: Promise<string | null> | undefined;
+    let passwordHash: Promise<string | null> | undefined;
     const valid = await validatePresentedCredential(request.headers, async presented => {
       if (!presented) return false;
-      const expected = await options.getToken();
+      const expected = await (token ??= options.getToken());
       if (expected && tokensEqual(presented, expected)) {
         authentication = 'verified_access_token';
         return true;
       }
-      if (presented.startsWith('pw.') && verifyBrowserSession(presented, await options.getPasswordHash?.() ?? null)) {
+      if (presented.startsWith('pw.') && verifyBrowserSession(presented, options.getPasswordHash ? await (passwordHash ??= options.getPasswordHash()) : null)) {
         authentication = 'verified_password_session';
         return true;
       }

@@ -107,14 +107,15 @@ test('用户气泡在 360px 窄屏折行，正文和复制结果不变，代码�
     const pre = codeBubble.locator('pre');
     await expect(pre).toBeVisible();
     await expect(pre.locator('code')).toHaveText(code);
-    expect(await pre.evaluate(element => ({
+    const preMetrics = await pre.evaluate(element => ({
       clientWidth: element.clientWidth,
       scrollWidth: element.scrollWidth,
       overflowX: getComputedStyle(element).overflowX,
       ownWrap: getComputedStyle(element).overflowWrap,
       descendantsKeepNormal: Array.from(element.querySelectorAll('*')).every(child => getComputedStyle(child).overflowWrap === 'normal')
-    }))).toMatchObject({ overflowX: 'auto', ownWrap: 'normal', descendantsKeepNormal: true });
-    expect(await pre.evaluate(element => element.scrollWidth > element.clientWidth)).toBe(true);
+    }));
+    expect(preMetrics).toMatchObject({ overflowX: 'auto', ownWrap: 'normal', descendantsKeepNormal: true });
+    expect(preMetrics.scrollWidth).toBeGreaterThan(preMetrics.clientWidth);
     const codeLine = pre.locator('code > span');
     await expect(codeLine).toHaveCount(1);
     const codeLineMetrics = await codeLine.evaluate(element => ({

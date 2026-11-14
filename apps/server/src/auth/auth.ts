@@ -312,16 +312,10 @@ export function presentedCredentialCandidates(headers: AccessCredentialHeaders):
 const isPromise = (value: boolean | Promise<boolean>): value is Promise<boolean> =>
   typeof (value as Promise<boolean>).then === 'function';
 
-/**
- * Validate candidates in order against this instance. A synchronous validator stays synchronous;
- * an asynchronous validator is awaited before trying the next value. An invalid Bearer never falls
- * back to cookies, while an invalid cookie cannot shadow a later valid value.
- */
-export function validatePresentedCredential(headers: AccessCredentialHeaders, isValid: (presented: string | undefined) => boolean): boolean;
-export function validatePresentedCredential(headers: AccessCredentialHeaders, isValid: (presented: string | undefined) => Promise<boolean>): Promise<boolean>;
-export function validatePresentedCredential(headers: AccessCredentialHeaders, isValid: (presented: string | undefined) => boolean | Promise<boolean>): boolean | Promise<boolean>;
-export function validatePresentedCredential(headers: AccessCredentialHeaders, isValid: (presented: string | undefined) => boolean | Promise<boolean>): boolean | Promise<boolean> {
-  const candidates = presentedCredentialCandidates(headers);
+function validateCredentialCandidates(
+  candidates: string[],
+  isValid: (presented: string | undefined) => boolean | Promise<boolean>,
+): boolean | Promise<boolean> {
   if (!candidates.length) return isValid(undefined);
   const visit = (index: number): boolean | Promise<boolean> => {
     if (index >= candidates.length) return false;
@@ -332,9 +326,20 @@ export function validatePresentedCredential(headers: AccessCredentialHeaders, is
   return visit(0);
 }
 
-/** Validate all request candidates with the existing access-token/password-session verifier. */
-export function isValidPresentedAccessCredential(
-  headers: AccessCredentialHeaders,
+/**
+ * Validate candidates in order against this instance. A synchronous validator stays synchronous;
+ * an asynchronous validator is awaited before trying the next value. An invalid Bearer never falls
+ * back to cookies, while an invalid cookie cannot shadow a later valid value.
+ */
+export function validatePresentedCredential(headers: AccessCredentialHeaders, isValid: (presented: string | undefined) => boolean): boolean;
+export function validatePresentedCredential(headers: AccessCredentialHeaders, isValid: (presented: string | undefined) => Promise<boolean>): Promise<boolean>;
+export function validatePresentedCredential(headers: AccessCredentialHeaders, isValid: (presented: string | undefined) => boolean | Promise<boolean>): boolean | Promise<boolean>;
+export function validatePresentedCredential(headers: AccessCredentialHeaders, isValid: (presented: string | undefined) => boolean | Promise<boolean>): boolean | Promise<boolean> {
+  return validateCredentialCandidates(presentedCredentialCandidates(headers), isValid);
+}
+
+async function isValidAccessCredentialCandidates(
+  candidates: string[],
   getToken: () => Promise<string | null>,
   getPasswordHash?: () => Promise<string | null>,
 ): Promise<boolean> {
@@ -342,7 +347,16 @@ export function isValidPresentedAccessCredential(
   let passwordHash: Promise<string | null> | undefined;
   const readToken = () => token ??= getToken();
   const readPasswordHash = () => passwordHash ??= getPasswordHash!();
-  return validatePresentedCredential(headers, presented => isValidAccessCredential(presented, readToken, getPasswordHash ? readPasswordHash : undefined));
+  return validateCredentialCandidates(candidates, presented => isValidAccessCredential(presented, readToken, getPasswordHash ? readPasswordHash : undefined));
+}
+
+/** Validate all request candidates with the existing access-token/password-session verifier. */
+export function isValidPresentedAccessCredential(
+  headers: AccessCredentialHeaders,
+  getToken: () => Promise<string | null>,
+  getPasswordHash?: () => Promise<string | null>,
+): Promise<boolean> {
+  return isValidAccessCredentialCandidates(presentedCredentialCandidates(headers), getToken, getPasswordHash);
 }
 
 /** 一次性登录链接的有效期 */
@@ -546,11 +560,11 @@ export function registerAuthMiddleware(app: FastifyInstance, options: AuthMiddle
     if (hasShare) return checkShare();
     if (options.exempt?.(request.method, matchedPathname(request))) return;
     const bearer = extractBearerToken(request.headers.authorization);
-    const cookieCandidates = bearer ? [] : presentedCredentialCandidates(request.headers);
-    if (!bearer && cookieCandidates.length > 0 && !isSameOriginRequest(request.headers, request.protocol)) {
+    const candidates = bearer ? [bearer] : presentedCredentialCandidates(request.headers);
+    if (!bearer && candidates.length > 0 && !isSameOriginRequest(request.headers, request.protocol)) {
       return reply.code(403).send({ error: { code: 'ORIGIN_NOT_ALLOWED', message: 'Request origin does not match Dutydeck' } });
     }
-    if (!await isValidPresentedAccessCredential(request.headers, options.getToken, options.getPasswordHash)) {
+    if (!await isValidAccessCredentialCandidates(candidates, options.getToken, options.getPasswordHash)) {
       return reply.code(401).send(UNAUTHORIZED_PAYLOAD);
     }
   });

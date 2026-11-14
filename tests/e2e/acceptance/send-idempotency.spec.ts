@@ -116,87 +116,89 @@ async function cleanupAfterTest(
   }
 }
 
-test.beforeEach(async () => {
-  instance = await launchInstance();
-  proxy = await startAcceptedResponseLossProxy(instance.port);
-});
-
-test.afterEach(async ({}, testInfo) => {
-  await cleanupAfterTest(testInfo, instance, proxy);
-});
-
-test('queue: server accepted then response lost, reload and normal send reuse the task', async ({ page }, testInfo) => {
-  const sessionId = await createSession();
-  const prompt = 'QUEUE_ACCEPTED_RESPONSE_LOSS_ONCE';
-  await openSession(page, sessionId);
-  const browserFailures = captureSendFailures(page, sessionId);
-  const message = page.getByRole('textbox', { name: '消息', exact: true });
-  await message.fill(prompt);
-  await page.getByRole('button', { name: '发送消息', exact: true }).click();
-
-  await expect.poll(() => proxy.exchanges[0]?.dropped ?? false).toBe(true);
-  await expect.poll(() => browserFailures.length).toBe(1);
-  expect(browserFailures[0]).toContain('ERR_INCOMPLETE_CHUNKED_ENCODING');
-  const first = proxy.exchanges[0]!;
-  expect(first.responseStatus).toBe(202);
-  expect(first.responseBody).toMatchObject({ accepted: true, task: { id: expect.any(String) } });
-  expect(first.request).toMatchObject({ prompt, mode: 'queue' });
-  expect(first.request.idempotencyKey).toMatch(/^[0-9a-f-]{36}$/);
-  await page.reload({ waitUntil: 'domcontentloaded' });
-  await expect(message).toBeVisible();
-  await expect(message).toHaveValue(prompt);
-  await page.getByRole('button', { name: '发送消息', exact: true }).click();
-  await expect.poll(() => proxy.exchanges.length).toBe(2);
-  expect(browserFailures).toHaveLength(1);
-  const second = proxy.exchanges[1]!;
-  expect(second.dropped).toBe(false);
-  expect(second.request.idempotencyKey).toBe(first.request.idempotencyKey);
-  expect(second.responseBody.task.id).toBe(first.responseBody.task.id);
-  await expect(message).toHaveValue('');
-
-  await expectFinishedPrompt(sessionId, prompt, 1);
-  await expectSingleVisibleUserInstruction(page, prompt);
-  await testInfo.attach('queue-accepted-response-loss.json', {
-    body: JSON.stringify({ exchanges: proxy.exchanges, browserFailures, persisted: persistedPromptCounts(sessionId, prompt), realPromptCalls: realPromptCallCount(instance, prompt) }, null, 2),
-    contentType: 'application/json'
+test.describe('accepted response loss', () => {
+  test.beforeEach(async () => {
+    instance = await launchInstance();
+    proxy = await startAcceptedResponseLossProxy(instance.port);
   });
-});
 
-test('interrupt: server accepted then response lost, browser retry reuses the task after the session became idle', async ({ page }, testInfo) => {
-  const sessionId = await createSession();
-  const waiting = await instance.request('POST', `/api/sessions/${sessionId}/send`, { prompt: 'wait for steering', mode: 'queue' });
-  expect(waiting.status, waiting.text).toBe(202);
-  await expect.poll(async () => (await instance.request('GET', `/api/sessions/${sessionId}`)).json.state, { intervals: TASK_POLL_INTERVALS }).toBe('thinking');
-  const prompt = 'INTERRUPT_ACCEPTED_RESPONSE_LOSS_ONCE';
-  await openSession(page, sessionId);
-  const browserFailures = captureSendFailures(page, sessionId);
-  const message = page.getByRole('textbox', { name: '消息', exact: true });
-  await message.fill(prompt);
-  await page.getByRole('button', { name: '排队', exact: true }).click();
-  await page.getByRole('button', { name: '停止当前执行并发送', exact: true }).click();
-  await page.getByRole('button', { name: '停止当前执行并发送', exact: true }).click();
+  test.afterEach(async ({}, testInfo) => {
+    await cleanupAfterTest(testInfo, instance, proxy);
+  });
 
-  await expect.poll(() => proxy.exchanges[0]?.dropped ?? false).toBe(true);
-  await expect.poll(() => browserFailures.length).toBe(1);
-  expect(browserFailures[0]).toContain('ERR_INCOMPLETE_CHUNKED_ENCODING');
-  const first = proxy.exchanges[0]!;
-  expect(first.responseStatus).toBe(202);
-  expect(first.responseBody).toMatchObject({ accepted: true, task: { id: expect.any(String) } });
-  expect(first.request).toMatchObject({ prompt, mode: 'interrupt' });
-  await expect.poll(async () => (await instance.request('GET', `/api/sessions/${sessionId}`)).json.state, { intervals: TASK_POLL_INTERVALS }).toBe('idle');
-  await page.getByRole('button', { name: '重试', exact: true }).click();
-  await expect.poll(() => proxy.exchanges.length).toBe(2);
-  expect(browserFailures).toHaveLength(1);
-  const second = proxy.exchanges[1]!;
-  expect(second.request).toMatchObject({ prompt, mode: 'interrupt', idempotencyKey: first.request.idempotencyKey });
-  expect(second.responseBody.task.id).toBe(first.responseBody.task.id);
-  await expect(message).toHaveValue('');
+  test('queue: server accepted then response lost, reload and normal send reuse the task', async ({ page }, testInfo) => {
+    const sessionId = await createSession();
+    const prompt = 'QUEUE_ACCEPTED_RESPONSE_LOSS_ONCE';
+    await openSession(page, sessionId);
+    const browserFailures = captureSendFailures(page, sessionId);
+    const message = page.getByRole('textbox', { name: '消息', exact: true });
+    await message.fill(prompt);
+    await page.getByRole('button', { name: '发送消息', exact: true }).click();
 
-  await expectFinishedPrompt(sessionId, prompt, 2);
-  await expectSingleVisibleUserInstruction(page, prompt);
-  await testInfo.attach('interrupt-accepted-response-loss.json', {
-    body: JSON.stringify({ exchanges: proxy.exchanges, browserFailures, persisted: persistedPromptCounts(sessionId, prompt), realPromptCalls: realPromptCallCount(instance, prompt) }, null, 2),
-    contentType: 'application/json'
+    await expect.poll(() => proxy.exchanges[0]?.dropped ?? false).toBe(true);
+    await expect.poll(() => browserFailures.length).toBe(1);
+    expect(browserFailures[0]).toContain('ERR_INCOMPLETE_CHUNKED_ENCODING');
+    const first = proxy.exchanges[0]!;
+    expect(first.responseStatus).toBe(202);
+    expect(first.responseBody).toMatchObject({ accepted: true, task: { id: expect.any(String) } });
+    expect(first.request).toMatchObject({ prompt, mode: 'queue' });
+    expect(first.request.idempotencyKey).toMatch(/^[0-9a-f-]{36}$/);
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await expect(message).toBeVisible();
+    await expect(message).toHaveValue(prompt);
+    await page.getByRole('button', { name: '发送消息', exact: true }).click();
+    await expect.poll(() => proxy.exchanges.length).toBe(2);
+    expect(browserFailures).toHaveLength(1);
+    const second = proxy.exchanges[1]!;
+    expect(second.dropped).toBe(false);
+    expect(second.request.idempotencyKey).toBe(first.request.idempotencyKey);
+    expect(second.responseBody.task.id).toBe(first.responseBody.task.id);
+    await expect(message).toHaveValue('');
+
+    await expectFinishedPrompt(sessionId, prompt, 1);
+    await expectSingleVisibleUserInstruction(page, prompt);
+    await testInfo.attach('queue-accepted-response-loss.json', {
+      body: JSON.stringify({ exchanges: proxy.exchanges, browserFailures, persisted: persistedPromptCounts(sessionId, prompt), realPromptCalls: realPromptCallCount(instance, prompt) }, null, 2),
+      contentType: 'application/json'
+    });
+  });
+
+  test('interrupt: server accepted then response lost, browser retry reuses the task after the session became idle', async ({ page }, testInfo) => {
+    const sessionId = await createSession();
+    const waiting = await instance.request('POST', `/api/sessions/${sessionId}/send`, { prompt: 'wait for steering', mode: 'queue' });
+    expect(waiting.status, waiting.text).toBe(202);
+    await expect.poll(async () => (await instance.request('GET', `/api/sessions/${sessionId}`)).json.state, { intervals: TASK_POLL_INTERVALS }).toBe('thinking');
+    const prompt = 'INTERRUPT_ACCEPTED_RESPONSE_LOSS_ONCE';
+    await openSession(page, sessionId);
+    const browserFailures = captureSendFailures(page, sessionId);
+    const message = page.getByRole('textbox', { name: '消息', exact: true });
+    await message.fill(prompt);
+    await page.getByRole('button', { name: '排队', exact: true }).click();
+    await page.getByRole('button', { name: '停止当前执行并发送', exact: true }).click();
+    await page.getByRole('button', { name: '停止当前执行并发送', exact: true }).click();
+
+    await expect.poll(() => proxy.exchanges[0]?.dropped ?? false).toBe(true);
+    await expect.poll(() => browserFailures.length).toBe(1);
+    expect(browserFailures[0]).toContain('ERR_INCOMPLETE_CHUNKED_ENCODING');
+    const first = proxy.exchanges[0]!;
+    expect(first.responseStatus).toBe(202);
+    expect(first.responseBody).toMatchObject({ accepted: true, task: { id: expect.any(String) } });
+    expect(first.request).toMatchObject({ prompt, mode: 'interrupt' });
+    await expect.poll(async () => (await instance.request('GET', `/api/sessions/${sessionId}`)).json.state, { intervals: TASK_POLL_INTERVALS }).toBe('idle');
+    await page.getByRole('button', { name: '重试', exact: true }).click();
+    await expect.poll(() => proxy.exchanges.length).toBe(2);
+    expect(browserFailures).toHaveLength(1);
+    const second = proxy.exchanges[1]!;
+    expect(second.request).toMatchObject({ prompt, mode: 'interrupt', idempotencyKey: first.request.idempotencyKey });
+    expect(second.responseBody.task.id).toBe(first.responseBody.task.id);
+    await expect(message).toHaveValue('');
+
+    await expectFinishedPrompt(sessionId, prompt, 2);
+    await expectSingleVisibleUserInstruction(page, prompt);
+    await testInfo.attach('interrupt-accepted-response-loss.json', {
+      body: JSON.stringify({ exchanges: proxy.exchanges, browserFailures, persisted: persistedPromptCounts(sessionId, prompt), realPromptCalls: realPromptCallCount(instance, prompt) }, null, 2),
+      contentType: 'application/json'
+    });
   });
 });
 

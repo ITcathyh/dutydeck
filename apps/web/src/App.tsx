@@ -137,8 +137,9 @@ export default function App() {
   const inspectorDefaultCompleted = useMediaQuery('(min-width: 1600px)');
   const [actionError, setActionError] = useState<string>();
   const [sendFailure, setSendFailure] = useState<{ sessionId: string; message: string; retry: boolean }>();
-  // queue/interrupt 的未确认操作跨刷新保留；每次读写都先看另一标签页发布的最新记录。
-  const sendOperations = useRef(new SendOperationStore());
+  // queue/interrupt 的未确认操作只在同一标签页内跨刷新保留，另一标签页视为新请求。
+  const sendOperations = useRef<SendOperationStore | null>(null);
+  const sendOperationStore = sendOperations.current ??= new SendOperationStore();
   const [workItemPanel, setWorkItemPanel] = useState<{ sessionId: string; itemId: string } | null>(null);
   // 路由与「可深链的浮层」是同一个东西的两半，合成一个 state：分开存会让 URL 与界面
   // 各走各的，回退键、刷新、分享链接三者立刻打架（见 app-route.ts 的说明）。
@@ -499,7 +500,7 @@ export default function App() {
     retry: false,
     mutationFn: ({ sessionId, message, mode, skillRequests, plan, idempotencyKey }: { sessionId: string; message: string; mode: SendMode; skillRequests?: string[]; draftKey: string; submittedDraft: typeof composerDraft.draft; plan?: boolean; idempotencyKey?: string; reusedUnknownOperation: boolean }) => plan ? api.plan(sessionId, message) : mode === 'steer' ? api.send(sessionId, message, mode, skillRequests) : api.send(sessionId, message, mode, skillRequests, idempotencyKey),
     onSuccess: (result, variables) => {
-      if (variables.idempotencyKey) sendOperations.current.delete(variables.draftKey, variables.idempotencyKey);
+      if (variables.idempotencyKey) sendOperationStore.delete(variables.draftKey, variables.idempotencyKey);
       setSendFailure(current => current?.sessionId === variables.sessionId ? undefined : current);
       acknowledgeComposerDraft(variables.draftKey, variables.submittedDraft);
       qc.setQueryData<Task[]>(['tasks', variables.sessionId], current => current?.some(task => task.id === result.task.id) ? current : [...(current ?? []), result.task]);
@@ -510,7 +511,7 @@ export default function App() {
       if (variables.sessionId !== useDockStore.getState().activeSessionId) return;
       const unknown = !(error instanceof ApiError) || error.status === 408 || error.status >= 500 || error.code === 'unknown_outcome' || (variables.reusedUnknownOperation && error.status === 401);
       if (!unknown) {
-        if (variables.idempotencyKey) sendOperations.current.delete(variables.draftKey, variables.idempotencyKey);
+        if (variables.idempotencyKey) sendOperationStore.delete(variables.draftKey, variables.idempotencyKey);
         setActionError(error.message);
         return;
       }
@@ -581,12 +582,12 @@ export default function App() {
     const submittedDraft = composerDraft.draft;
     const skillRequests = composerReferences.filter(reference => reference.kind === 'skill').map(reference => reference.value);
     const snapshot = JSON.stringify({ message, skillRequests, mode: sendMode, planFirst });
-    const previous = sendOperations.current.get(draftKey, snapshot);
-    const retry = !planFirst && previous?.snapshot === snapshot ? previous : undefined;
+    const previous = sendOperationStore.get(draftKey, snapshot);
+    const retry = planFirst ? undefined : previous;
     // interrupt 被接受后页面可能已经空闲；同一未知响应的重试仍须沿用最初的实际 mode。
     const mode = retry?.mode ?? (busyStates.has(active?.state ?? '') ? sendMode : 'queue');
     const idempotencyKey = !planFirst && mode !== 'steer' ? retry?.key ?? requestId() : undefined;
-    if (idempotencyKey && mode !== 'steer' && !retry) sendOperations.current.set(draftKey, { snapshot, mode, key: idempotencyKey });
+    if (idempotencyKey && mode !== 'steer' && !retry) sendOperationStore.set(draftKey, { snapshot, mode, key: idempotencyKey });
     setSendFailure(undefined);
     send.mutate({ sessionId: activeSessionId, message, draftKey, submittedDraft, mode, skillRequests, plan: planFirst, idempotencyKey, reusedUnknownOperation: Boolean(retry) });
   };

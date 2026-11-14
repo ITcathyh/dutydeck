@@ -597,9 +597,8 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     const pluginPrompt = options.plugins && prompt.startsWith('/')
       ? options.plugins.commands.expand(prompt, { cwd: (await runtime.getSession(request.params.id))?.cwd }) : undefined;
     const agentPrompt = pluginPrompt ?? prompt;
-    const task = decision?.source === 'owner'
-      ? await runtime.dispatch(request.params.id, prompt, mode, agentPrompt, undefined, installationOwnerTaskActor, idempotencyKey, skillRequests)
-      : await runtime.dispatch(request.params.id, prompt, mode, agentPrompt, undefined, undefined, idempotencyKey, skillRequests);
+    const actor = decision?.source === 'owner' ? installationOwnerTaskActor : undefined;
+    const task = await runtime.dispatch(request.params.id, prompt, mode, agentPrompt, undefined, actor, idempotencyKey, skillRequests);
     if (requested !== 'steer') return reply.code(202).send({ accepted: true, task });
     // 这一条已经开跑（没有排队）也算按正常新一轮处理。
     let steering: { task: unknown; outcome: string; error?: string } = { task, outcome: 'promptRequired' };
