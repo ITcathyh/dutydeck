@@ -1335,6 +1335,8 @@ export class DutydeckRuntime {
     await this.mutations.write(id, async () => this.localResources.gone(driver, 'terminal-attach-found-no-pane'));
   }
   getEvents(id: string, after = 0) { return this.repos.events.list(id, after); }
+  /** Internal input for the external task-detail projection; other consumers retain the full event stream. */
+  getTaskConversationEvents(id: string) { return this.repos.events.listTaskConversation?.(id) ?? this.getEvents(id); }
   /** Event count and activity times of one execution attempt of this Session, read through the attempt index. */
   async getAttemptActivity(id: string, attemptId: string): Promise<AttemptActivity> { return this.repos.execution.getAttemptActivity(id, attemptId); }
   /** Tool call and result events of one execution attempt of this Session, read through the attempt index. */

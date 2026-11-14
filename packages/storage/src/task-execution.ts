@@ -112,7 +112,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
   const resourceById = cached('SELECT json FROM driver_resources WHERE id=?');
   const resourcesBySession = cached('SELECT json FROM driver_resources WHERE session_id=? ORDER BY rowid');
   const resource = (resourceId: string) => readResource(resourceById.get(resourceId));
-  const resources = (sessionId: string) => resourcesBySession.all(sessionId).map(row => readResource(row)!);
+  const resources = (sessionId: string, stored?: unknown[]) => (stored ?? resourcesBySession.all(sessionId)).map(row => readResource(row)!);
   const assertChecks = (sessionId: string, checks: ResourceCheckRef[]) => {
     for (const check of checks) {
       const r = resource(check.resourceId);
@@ -138,9 +138,10 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     if (observation?.state === 'gone') return true;
     return Boolean(owner && sameController(r.holder ?? r.controller, owner) && r.stage === 'created' && r.identity && observation?.state === 'live');
   };
-  const externalBlockers = (sessionId: string): ExecutionBlocker[] => {
+  const externalBlockers = (sessionId: string, stored?: Array<{ key: string; value: string }>): ExecutionBlocker[] => {
     const result: ExecutionBlocker[] = [];
-    for (const row of cached("SELECT key,value FROM configs WHERE key IN (?,?) OR (key>=? AND key<?)").all(`runtime_driver_stop_block:${sessionId}`, `runtime_workspace:${sessionId}`, `runtime_verification:${sessionId}:`, `runtime_verification:${sessionId};`) as Array<{ key: string; value: string }>) {
+    const rows = stored ?? cached("SELECT key,value FROM configs WHERE key IN (?,?) OR (key>=? AND key<?)").all(`runtime_driver_stop_block:${sessionId}`, `runtime_workspace:${sessionId}`, `runtime_verification:${sessionId}:`, `runtime_verification:${sessionId};`) as Array<{ key: string; value: string }>;
+    for (const row of rows) {
       if (row.key === `runtime_driver_stop_block:${sessionId}` && row.value === '') continue;
       try {
         const v = JSON.parse(row.value);
@@ -223,10 +224,6 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     // 飞书记忆作业只写自己的记忆目录：不参与仓库互斥，只和在同一目录里执行的会话（包括其他记忆作业）互斥。
     const memory = (id: string) => (cached('SELECT source FROM sessions WHERE id=?').get(id) as {source:string|null}|undefined)?.source === 'lark-memory';
     const selfMemory = memory(sessionId);
-    const admissionExternal = (id: string): ExecutionBlocker[] => {
-      const configuration = cached('SELECT value FROM configs WHERE key=?').get(`runtime_driver_configuration:${id}`) as {value:string}|undefined;
-      return [...externalBlockers(id),...(configuration?.value ? [{code:'DRIVER_CONFIGURATION_UNKNOWN',sessionId:id}] : [])];
-    };
     const candidates = cached(`SELECT DISTINCT session_id FROM task_attempts WHERE state IN ('preparing','active','reconcile_required','legacy_unresolved')
       UNION SELECT session_id FROM tasks WHERE status='reconcile_required'
       ${preparation ? "UNION SELECT session_id FROM tasks WHERE status='queued'" : ''}
@@ -236,28 +233,72 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
       UNION SELECT substr(key,length('runtime_driver_configuration:')+1) AS session_id FROM configs WHERE key LIKE 'runtime_driver_configuration:%' AND value!=''
       UNION SELECT id AS session_id FROM sessions WHERE id IN (SELECT substr(key,length('runtime_driver_stop_block:')+1) FROM configs WHERE key LIKE 'runtime_driver_stop_block:%' AND value!='')
       UNION SELECT id AS session_id FROM sessions s WHERE EXISTS (SELECT 1 FROM configs WHERE key>=('runtime_verification:'||s.id||':') AND key<('runtime_verification:'||s.id||';'))`).all() as Array<{session_id:string}>;
-    for (const {session_id: otherId} of candidates) {
-      if (otherId === sessionId) continue;
-      const directoryOnly = selfMemory || memory(otherId);
-      const unresolved = cached(`SELECT task_id AS taskId,id AS attemptId FROM task_attempts WHERE session_id=? AND state IN ('preparing','active','reconcile_required','legacy_unresolved') LIMIT 1`).get(otherId) as {taskId:string;attemptId:string}|undefined;
-      const queued = preparation && cached("SELECT id FROM tasks WHERE session_id=? AND status='queued' LIMIT 1").get(otherId) as {id:string}|undefined;
-      const unknown = unresolvedUnknownTask(otherId);
-      const steering = steeringBlockers(otherId);
-      const unsafe = resources(otherId).filter(r => !resourceSafe(r) && !retiredLegacyResourceSafe(r) && !idleResourceSafe(r,checks,owner));
-      const external = admissionExternal(otherId);
-      if (!unresolved && !queued && !unknown && !steering.length && !unsafe.length && !external.length) continue;
-      let other: ExecutionWorkspaceIdentity;
-      try { other = workspaceIdentity(otherId, freeze); }
-      catch {
-        const frozen = cached('SELECT value FROM configs WHERE key=?').get(`runtime_execution_workspace:${otherId}`) as {value:string}|undefined;
-        let knownKey: string | undefined, knownPath: string | undefined;
-        try { const known = frozen ? JSON.parse(frozen.value) : undefined; knownKey = known?.key; knownPath = known?.cwd?.path; } catch { /* Corrupt identity remains unknown. */ }
-        if (directoryOnly ? knownPath && knownPath !== identity.cwd.path : knownKey && knownKey !== identity.key) continue;
-        result.push({code:'WORKSPACE_RESOURCE_UNVERIFIABLE',sessionId:otherId});continue;
+    // Keep only raw rows for a bounded candidate chunk. Parsing and validation still happen below,
+    // in candidate order and before any workspace comparison can discard that candidate.
+    for (let offset = 0; offset < candidates.length; offset += 32) {
+      const chunk = candidates.slice(offset,offset + 32).map(row => row.session_id);
+      const ids = chunk.filter(otherId => otherId !== sessionId);
+      if (!ids.length) continue;
+      const placeholders = ids.map(() => '?').join(',');
+      const sources = new Map((cached(`SELECT id,source FROM sessions WHERE id IN (${placeholders})`).all(...ids) as Array<{id:string;source:string|null}>).map(row => [row.id,row.source]));
+      const unresolvedBySession = new Map<string,{taskId:string;attemptId:string}>();
+      for (const row of cached(`SELECT session_id,task_id AS taskId,id AS attemptId FROM task_attempts WHERE session_id IN (${placeholders}) AND state IN ('preparing','active','reconcile_required','legacy_unresolved')`).all(...ids) as Array<{session_id:string;taskId:string;attemptId:string}>) {
+        if (!unresolvedBySession.has(row.session_id)) unresolvedBySession.set(row.session_id,{taskId:row.taskId,attemptId:row.attemptId});
       }
-      if (directoryOnly ? other.cwd.path !== identity.cwd.path : other.key !== identity.key) continue;
-      if (unresolved || queued || unknown || steering.length) result.push({code:'WORKSPACE_EXECUTION_BUSY',sessionId:otherId,...(unresolved ? {taskId:unresolved.taskId,attemptId:unresolved.attemptId} : unknown ? {taskId:unknown.id} : queued ? {taskId:queued.id} : {taskId:steering[0]!.taskId})});
-      result.push(...unsafe.map(r => ({code:'WORKSPACE_PHYSICAL_RESOURCE_UNSAFE',sessionId:otherId,resourceId:r.resourceId})),...external);
+      const queuedBySession = new Map<string,{id:string}>(), unknownBySession = new Map<string,{id:string}>();
+      for (const row of cached(`SELECT t.session_id,t.id,t.status,a.id AS attempt_id,a.state FROM tasks t
+        LEFT JOIN task_attempts a ON a.id=t.current_attempt_id AND a.task_id=t.id
+        WHERE t.session_id IN (${placeholders}) AND t.status IN ('queued','reconcile_required')`).all(...ids) as Array<{session_id:string;id:string;status:string;attempt_id:string|null;state:string|null}>) {
+        if (row.status === 'queued' && !queuedBySession.has(row.session_id)) queuedBySession.set(row.session_id,{id:row.id});
+        if (row.status === 'reconcile_required' && (!row.attempt_id || row.state !== 'settled') && !unknownBySession.has(row.session_id)) unknownBySession.set(row.session_id,{id:row.id});
+      }
+      const steeringBySession = new Map<string,ExecutionBlocker[]>();
+      for (const row of cached(`SELECT session_id,task_id FROM task_steering_operations WHERE session_id IN (${placeholders}) AND state IN ('pending','unknown')`).all(...ids) as Array<{session_id:string;task_id:string}>) {
+        const values = steeringBySession.get(row.session_id) ?? [];
+        values.push({code:'STEERING_DELIVERY_UNKNOWN',sessionId:row.session_id,taskId:row.task_id});steeringBySession.set(row.session_id,values);
+      }
+      const resourcesBySession = new Map<string,unknown[]>();
+      for (const row of cached(`SELECT session_id,json FROM driver_resources WHERE session_id IN (${placeholders}) ORDER BY rowid`).all(...ids) as Array<{session_id:string;json:string}>) {
+        const values = resourcesBySession.get(row.session_id) ?? [];values.push(row);resourcesBySession.set(row.session_id,values);
+      }
+      const exactConfigs = cached(`SELECT key,value FROM configs WHERE key IN (${ids.map(() => '?,?,?').join(',')})`).all(...ids.flatMap(id => [
+        `runtime_driver_stop_block:${id}`,`runtime_workspace:${id}`,`runtime_driver_configuration:${id}`
+      ])) as Array<{key:string;value:string}>;
+      const verificationConfigs = cached(`SELECT key,value FROM configs WHERE ${ids.map(() => '(key>=? AND key<?)').join(' OR ')}`).all(...ids.flatMap(id => [
+        `runtime_verification:${id}:`,`runtime_verification:${id};`
+      ])) as Array<{key:string;value:string}>;
+      const configsBySession = new Map<string,Array<{key:string;value:string}>>();
+      for (const row of [...exactConfigs,...verificationConfigs]) for (const id of ids) {
+        if ([`runtime_driver_stop_block:${id}`,`runtime_workspace:${id}`,`runtime_driver_configuration:${id}`].includes(row.key) || row.key.startsWith(`runtime_verification:${id}:`)) {
+          const values = configsBySession.get(id) ?? [];values.push(row);configsBySession.set(id,values);
+        }
+      }
+      for (const otherId of chunk) {
+        if (otherId === sessionId) continue;
+        const directoryOnly = selfMemory || sources.get(otherId) === 'lark-memory';
+        const unresolved = unresolvedBySession.get(otherId);
+        const queued = preparation ? queuedBySession.get(otherId) : undefined;
+        const unknown = unknownBySession.get(otherId);
+        const steering = steeringBySession.get(otherId) ?? [];
+        const unsafe = resources(otherId,resourcesBySession.get(otherId) ?? []).filter(r => !resourceSafe(r) && !retiredLegacyResourceSafe(r) && !idleResourceSafe(r,checks,owner));
+        const storedConfigs = configsBySession.get(otherId) ?? [];
+        const configuration = storedConfigs.find(row => row.key === `runtime_driver_configuration:${otherId}`);
+        const externalRows = storedConfigs.filter(row => row.key === `runtime_driver_stop_block:${otherId}` || row.key === `runtime_workspace:${otherId}` || row.key.startsWith(`runtime_verification:${otherId}:`));
+        const external = [...externalBlockers(otherId,externalRows),...(configuration?.value ? [{code:'DRIVER_CONFIGURATION_UNKNOWN',sessionId:otherId}] : [])];
+        if (!unresolved && !queued && !unknown && !steering.length && !unsafe.length && !external.length) continue;
+        let other: ExecutionWorkspaceIdentity;
+        try { other = workspaceIdentity(otherId, freeze); }
+        catch {
+          const frozen = cached('SELECT value FROM configs WHERE key=?').get(`runtime_execution_workspace:${otherId}`) as {value:string}|undefined;
+          let knownKey: string | undefined, knownPath: string | undefined;
+          try { const known = frozen ? JSON.parse(frozen.value) : undefined; knownKey = known?.key; knownPath = known?.cwd?.path; } catch { /* Corrupt identity remains unknown. */ }
+          if (directoryOnly ? knownPath && knownPath !== identity.cwd.path : knownKey && knownKey !== identity.key) continue;
+          result.push({code:'WORKSPACE_RESOURCE_UNVERIFIABLE',sessionId:otherId});continue;
+        }
+        if (directoryOnly ? other.cwd.path !== identity.cwd.path : other.key !== identity.key) continue;
+        if (unresolved || queued || unknown || steering.length) result.push({code:'WORKSPACE_EXECUTION_BUSY',sessionId:otherId,...(unresolved ? {taskId:unresolved.taskId,attemptId:unresolved.attemptId} : unknown ? {taskId:unknown.id} : queued ? {taskId:queued.id} : {taskId:steering[0]!.taskId})});
+        result.push(...unsafe.map(r => ({code:'WORKSPACE_PHYSICAL_RESOURCE_UNSAFE',sessionId:otherId,resourceId:r.resourceId})),...external);
+      }
     }
     return result;
   };
