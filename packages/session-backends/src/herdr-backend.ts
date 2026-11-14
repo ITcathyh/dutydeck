@@ -59,6 +59,8 @@ export class HerdrBackend implements SessionBackend {
   private disconnectCallbacks: Array<(error: Error) => void> = [];
   private captures: PhysicalProcessIdentity[] = [];
   private executionTimer?: NodeJS.Timeout;
+  private identityCaptureDirty = true;
+  private terminalFrameGeneration = 0;
   private naturalExit?: Promise<boolean>;
   /** ownedProcesses verdicts from clean reads, keyed by processVerdictKey; reset when the launch marker changes. */
   private processVerdicts = new Map<string, PhysicalProcessIdentity | 'foreign'>();
@@ -302,6 +304,7 @@ export class HerdrBackend implements SessionBackend {
 
     this.size = { cols: opts.cols, rows: opts.rows };
     this.initialScreen = undefined;
+    this.identityCaptureDirty = true;
     const child = spawn(this.options.binary, ['--session', this.sessionName, 'terminal', 'session', 'control', state.pane!.terminal_id, '--cols', String(opts.cols), '--rows', String(opts.rows)], {
       env: this.environment, stdio: 'pipe',
     });
@@ -336,6 +339,7 @@ export class HerdrBackend implements SessionBackend {
           const frame = JSON.parse(line);
           if (frame.type === 'terminal.frame') {
             const data = Buffer.from(frame.bytes, 'base64').toString('utf8');
+            if (data) { this.identityCaptureDirty = true; this.terminalFrameGeneration++; }
             this.size = { cols: frame.width, rows: frame.height };
             if (!this.initialScreen) {
               this.initialScreen = { data, ...this.size };
@@ -346,10 +350,16 @@ export class HerdrBackend implements SessionBackend {
                 polling = true;
                 try {
                   if (await this.finishNaturalExit()) return;
+                  if (!this.identityCaptureDirty) return;
+                  const frameGeneration = this.terminalFrameGeneration;
                   const snapshot = await this.captureOwnedIdentity() as State;
-                  if (this.stream !== child || this.state !== state || generation !== this.lifecycle) return;
-                  if (isDeepStrictEqual(this.state.identities, snapshot.identities)) return;
-                  this.state.identities = snapshot.identities; this.persist();
+                  if (this.stream !== child || this.state !== state || generation !== this.lifecycle || this.terminalFrameGeneration !== frameGeneration) return;
+                  if (!isDeepStrictEqual(this.state.identities, snapshot.identities)) {
+                    const identities = this.state.identities;
+                    this.state.identities = snapshot.identities;
+                    try { this.persist(); } catch (error) { this.state.identities = identities; throw error; }
+                  }
+                  this.identityCaptureDirty = false;
                 } catch { /* Unknown observations never prove exit. */ }
                 finally { polling = false; }
               }, 500); this.executionTimer.unref();

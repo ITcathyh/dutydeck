@@ -235,6 +235,8 @@ describe.skipIf(process.env.DUTYDECK_TEST_HERDR !== 'true')('Herdr lifecycle rac
       const oldIdentity = childProcessIdentity(oldGeneration.pid!);
       (await current.write('exit\n'));
       await expect.poll(async () => (await current.isStopped())).toBe(true);
+      // A stopped receipt can precede the asynchronous natural-exit detach; do not race its lifecycle fence with the next capture.
+      await expect.poll(() => (current as any).executionTimer === undefined).toBe(true);
       const nextProof = (await current.captureOwnedIdentity());
       expect((await current.verifyOwnedIdentity(nextProof))).toBe(true);
       expect((await current.verifyOwnedIdentity({ ...(nextProof as object), launch_id: originalLaunch }))).toBe(false);
