@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import * as fs from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { discoverSkills, isPathInside } from './skill-catalog.js';
+import { discoverSkills, isPathInside, skillFrontmatter } from './skill-catalog.js';
 
 vi.mock('node:fs/promises', async original => {
   const actual = await original<typeof import('node:fs/promises')>();
@@ -25,6 +26,18 @@ describe('skill-catalog', () => {
 
   afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  });
+
+  describe('lazy YAML loading', () => {
+    it('does not load YAML without non-empty frontmatter, then parses on first use', () => {
+      const require = createRequire(import.meta.url), modulePath = require.resolve('yaml');
+      expect(require.cache[modulePath]).toBeUndefined();
+      expect(skillFrontmatter('# plain markdown')).toEqual({});
+      expect(skillFrontmatter('---\n\n---\nbody')).toEqual({});
+      expect(require.cache[modulePath]).toBeUndefined();
+      expect(skillFrontmatter('---\nname: first-use\n---\nbody')).toEqual({ name: 'first-use' });
+      expect(require.cache[modulePath]).toBeDefined();
+    });
   });
 
   describe('isPathInside', () => {

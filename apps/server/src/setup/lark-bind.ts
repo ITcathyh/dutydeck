@@ -23,7 +23,6 @@
  *    只代表「提交成功」，不代表「已发布」——版本可能还在管理台等审核。所以 publish
  *    步骤一律报「已提交发布」，并附一条让用户去管理台确认的 warning。
  */
-import QRCode from 'qrcode';
 import type { CliUi } from '../cli-ui.js';
 import {
   LARK_COMMON_TENANT_SCOPES,
@@ -98,6 +97,7 @@ export interface LarkBindOptions {
 
 /** 默认二维码渲染：终端字符画，写 stderr。~17 行的 utf8 块，够手机扫。 */
 export async function renderQrToTerminal(payload: string): Promise<string> {
+  const { default: QRCode } = await import('qrcode');
   return await QRCode.toString(payload, { type: 'terminal', small: true });
 }
 

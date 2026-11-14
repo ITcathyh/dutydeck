@@ -313,6 +313,8 @@ export function TimelineView({ fullWidth = false, variant, header, aside, onScro
   const earlierLast = share ? turns.at(-2) : undefined;
   const earlierLastAt = useMemo(() => earlierLast && (earlierLast.summary?.timestamp ?? liveTurnFacts(earlierLast.sections, false).startedAt), [earlierLast]);
   const earlierPlaces = useMemo(() => {
+    if (share && !earlierOpen && turns.length > 2) return new Map<string, EarlierPlace>([[turns[0]!.id,
+      { index: 0, count: turns.length - 1, lastAt: earlierLastAt, width: 'clock', open: earlierOpen, onToggle: setEarlierOpen }]]);
     const earlier = share ? turns.slice(0, -1) : [];
     const widths = new Set(earlier.map(turn => turnMomentWidth(turn.summary?.timestamp ?? liveTurnFacts(turn.sections, false).startedAt)));
     const width = widths.has('year') ? 'year' : widths.has('day') ? 'day' : 'clock';

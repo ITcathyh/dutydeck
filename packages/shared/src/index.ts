@@ -289,6 +289,8 @@ export interface AgentEvent<T = unknown> {
   data: T;
   raw?: string;
 }
+/** Internal task-detail input; text carries the unfiltered stream predecessor's task identity. */
+export type TaskConversationEvent = AgentEvent & { previousTaskId?: string | null };
 
 export interface Session {
   id: string;
@@ -445,6 +447,8 @@ export interface EventRepository {
   highWaterMark(sessionId: string): number;
   append(event: AgentEvent): Promise<void>;
   list(sessionId: string, afterSequence?: number): Promise<AgentEvent[]>;
+  /** Only the external task-detail conversation projection; unrelated event consumers keep list/listWindow. */
+  listTaskConversation?(sessionId: string): Promise<TaskConversationEvent[]>;
   listRecent(sessionId: string, limit: number): Promise<AgentEvent[]>;
   getLatestPermissionRequest(sessionId: string, taskId: string, nativeId: string): Promise<AgentEvent | undefined>;
   getDeferredConfirmationId(sessionId: string, taskId: string): Promise<string | undefined>;

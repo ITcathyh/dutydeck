@@ -16,7 +16,7 @@ import { and, asc, desc, eq, gt, lt, sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { chmodSync, closeSync, constants, existsSync, mkdirSync, openSync } from 'node:fs';
 import { basename, dirname } from 'node:path';
-import type { AgentConfig, AgentEvent, RepositoryBundle, RepositoryOpenOptions, Session, TaskRecord } from '@dutydeck/shared';
+import type { AgentConfig, AgentEvent, RepositoryBundle, RepositoryOpenOptions, Session, TaskConversationEvent, TaskRecord } from '@dutydeck/shared';
 import { agentConfigs, channelMappings, configs, errors, events, machines, permissionRequests, projects, sessions, tasks, toolCalls } from './schema.js';
 import { deferredConfirmationId, RuntimeError, watchFindingSchema } from '@dutydeck/shared';
 import { createTaskExecutionRepository } from './task-execution.js';
@@ -296,9 +296,10 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
         return (cachedStatement(sqlite, 'SELECT * FROM tasks WHERE session_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 2').all(sessionId) as TaskRowLike[]).map(decodeTask).reverse();
       },
       async listLatestPerSession() {
-        return (cachedStatement(sqlite, `SELECT t.* FROM tasks t JOIN (
-          SELECT rowid AS rid, ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY created_at DESC, rowid DESC) AS rn FROM tasks
-        ) latest ON t.rowid = latest.rid WHERE latest.rn = 1`).all() as TaskRowLike[]).map(decodeTask);
+        return (cachedStatement(sqlite, `WITH ids AS (SELECT DISTINCT session_id FROM tasks)
+          SELECT t.* FROM ids JOIN tasks t ON t.rowid = (
+            SELECT rowid FROM tasks WHERE session_id=ids.session_id ORDER BY created_at DESC,rowid DESC LIMIT 1
+          )`).all() as TaskRowLike[]).map(decodeTask);
       },
       async enqueue(task, position) {
         if (task.status !== 'queued') {
@@ -400,6 +401,19 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
       async append(e) { legacyWrite(() => insertEvent().run({ id: e.id, sessionId: e.sessionId, sequence: e.sequence, type: e.type, timestamp: e.timestamp, data: JSON.stringify(e.data),
         raw: e.raw ?? null, taskId: e.taskId ?? null, attemptId: e.attemptId ?? null, settlementId: e.settlementId ?? null })); },
       async list(sessionId, afterSequence = 0) { return eventsAfter().all({ sessionId, afterSequence }).map(decodeEvent); },
+      async listTaskConversation(sessionId) {
+        const rows = cachedStatement(sqlite, `SELECT e.id,e.session_id AS sessionId,e.sequence,e.type,e.timestamp,e.data,
+          e.task_id AS taskId,e.attempt_id AS attemptId,e.settlement_id AS settlementId,
+          CASE WHEN e.type='text' THEN (
+            SELECT json_array(p.task_id) FROM events p INDEXED BY events_session_seq
+            WHERE p.session_id=e.session_id AND p.sequence>0 AND p.sequence<e.sequence ORDER BY p.sequence DESC LIMIT 1
+          ) END AS previous_task
+          FROM events e INDEXED BY events_session_seq_type WHERE e.session_id=? AND e.sequence>0 AND e.type IN ('task','text','completed','tool_call','tool_result') ORDER BY e.sequence`).all(sessionId) as Array<Record<string, any> & { previous_task: string | null }>;
+        return rows.map(({ previous_task, ...row }) => ({
+          ...row, data: JSON.parse(row.data),
+          ...(row.type === 'text' ? { previousTaskId: previous_task === null ? undefined : (JSON.parse(previous_task) as [string | null])[0] } : {})
+        })) as TaskConversationEvent[];
+      },
       async getDeferredConfirmationId(sessionId, taskId) {
         const row = deferredConfirmation().get({ sessionId, taskId });
         return deferredConfirmationId(row ? [decodeEvent(row)] : [], taskId);

@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto';
 import type { AgentRepository, ConfigRepository, LarkAppCreationJob } from '@dutydeck/shared';
 import type { ProcessIdentity } from '@dutydeck/storage';
 import { currentProcessIdentity, observeProcess } from '@dutydeck/storage/helpers';
-import QRCode from 'qrcode';
 import { LARK_APP_ICON_BASE64 } from './app-icon.js';
 import { readLarkConfig, saveLarkConfig } from './config.js';
 import { configureLarkOpenPlatformApp, isValidLarkAppId, larkSlashCommandDefinitions, LarkOpenPlatformConfigurationError } from './open-platform-configurator.js';
@@ -215,7 +214,10 @@ export class LarkAppCreationJobManager {
         fetchImpl: this.options.fetcher,
         onQrUpdate: async update => {
           if (await this.cancelled(id)) return;
-          const qrDataUrl = await (this.options.qrDataUrl ?? (payload => QRCode.toDataURL(payload)))(update.qrPayload);
+          const qrDataUrl = await (this.options.qrDataUrl ?? (async payload => {
+            const { default: QRCode } = await import('qrcode');
+            return QRCode.toDataURL(payload);
+          }))(update.qrPayload);
           if (await this.cancelled(id)) return;
           await this.update(id, { status: 'waiting_for_scan', qrDataUrl, scanConfirmed: update.status === 'scan_confirmed' });
         },

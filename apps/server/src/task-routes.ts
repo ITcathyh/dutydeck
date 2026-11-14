@@ -3,7 +3,7 @@ import { inferAcpInsightClient } from '@dutydeck/acp-client';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import type { RelayAskBroker, RelayAskRecord } from '@dutydeck/relay';
-import { RuntimeError, type AgentEvent, type PermissionRequestData, type PolicyAction, type Session, type SessionSourceContext, type PublicTaskRecord } from '@dutydeck/shared';
+import { RuntimeError, type PermissionRequestData, type PolicyAction, type Session, type SessionSourceContext, type PublicTaskRecord, type TaskConversationEvent } from '@dutydeck/shared';
 
 export function taskLimit(value: string | undefined, fallback: number): number {
   const n = value === undefined ? fallback : Number(value);
@@ -28,7 +28,7 @@ export function taskStatus(session: Session, tasks: PublicTaskRecord[], waiting:
   const latest = tasks.at(-1)?.status ?? session.state;
   return ({ completed: 'done', failed: 'failed', interrupted: 'stopped', cancelled: 'stopped', stopped: 'stopped' } as Record<string, string>)[latest] ?? 'unknown';
 }
-export function taskConversation(events: AgentEvent[], tasks: PublicTaskRecord[], limit: number) {
+export function taskConversation(events: TaskConversationEvent[], tasks: PublicTaskRecord[], limit: number) {
   const items: Array<{ role: string; text: string; at: string }> = [];
   const prompts = new Set<string>();
   const tools = new Map<string, { role: string; text: string; at: string }>();
@@ -48,7 +48,8 @@ export function taskConversation(events: AgentEvent[], tasks: PublicTaskRecord[]
         prompts.add(taskId);
       }
       const previous = items.at(-1);
-      if (role === 'assistant' && !d.relay && previous?.role === 'assistant' && ordered[index - 1]?.taskId === event.taskId) previous.text += d.text;
+      const previousTaskId = 'previousTaskId' in event ? event.previousTaskId : ordered[index - 1]?.taskId;
+      if (role === 'assistant' && !d.relay && previous?.role === 'assistant' && previousTaskId === event.taskId) previous.text += d.text;
       else items.push({ role, text: d.text, at: event.timestamp });
       finals.add(`${event.taskId ?? ''}\0${items.at(-1)!.text}`);
     } else if (event.type === 'completed') {
@@ -164,7 +165,8 @@ export function registerTaskRoutes(app: FastifyInstance, runtime: DutydeckRuntim
     const limit = taskLimit(request.query.limit, 40);
     await options.authorize(request, request.params.id, 'session', 'task.view_result');
     if (!await runtime.getSession(request.params.id)) throw new RuntimeError('not_found', 'Task not found', 404);
-    return taskConversation(await runtime.getEvents(request.params.id), await runtime.getTasks(request.params.id), limit);
+    const events = runtime.getTaskConversationEvents ? runtime.getTaskConversationEvents(request.params.id) : runtime.getEvents(request.params.id);
+    return taskConversation(await events, await runtime.getTasks(request.params.id), limit);
   });
   app.get<{ Params: { id: string; waitingId: string } }>('/api/sessions/:id/waiting/:waitingId', async request => {
     const { id, waitingId } = request.params;

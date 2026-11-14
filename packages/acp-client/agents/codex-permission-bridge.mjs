@@ -15,7 +15,9 @@ delete env.dutydeck_codex_permission_mode;
 const args = process.argv.slice(2);
 if (!args.includes('app-server')) launchAgent(executable, args, env);
 else {
-  const child = launchAgent(executable, args, env, { stdio: ['pipe', 'inherit', 'inherit'] });
+  // An inherited Node stdout can be nonblocking. Native Codex then loses its
+  // protocol writer on EAGAIN when a large tool result fills the socket.
+  const child = launchAgent(executable, args, env, { stdio: ['pipe', 'pipe', 'pipe'] });
   // codex-acp supplies its own policy on every turn, overriding native config.
   // Apply the administrator's policy at the final native protocol boundary,
   // including resumed threads. Safe native reads remain subject to Codex's

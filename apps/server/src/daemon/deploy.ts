@@ -13,6 +13,7 @@ import type { DeployCliOptions, DeployPruneCliOptions } from '../cli-program.js'
 import { defaultDaemonDir, pidAlive } from './daemon.js';
 import { DRAIN_INTERVAL_MS, drainRuntime, healthCheckUrl, systemdServiceControl, unitRuntime, waitForServiceHealth, type DaemonCommandDeps, type DrainResult, type RuntimeEndpoint, type ServiceControl, type UnitRuntime } from './command.js';
 import { writeFileAtomicSync } from '../atomic-file.js';
+import { missingRelativeImports } from './import-closure.mjs';
 
 /**
  * `dutydeck deploy`：把一个已构建好的检出目录做成不可变的发布目录，排空后切换 `current` 并重启，
@@ -245,9 +246,11 @@ function copyRelease(build: BuiltCheckout, release: string): void {
   }
 }
 
-/** 用目标 node 在发布目录里跑一次 `--version`（加载全部外部依赖），再真的打开一次 SQLite。 */
+/** 激活前递归核对静态与动态相对 import，再用目标 node 试加载入口并打开 SQLite。 */
 function trialLoad(execPath: string, release: string, version: string, deps: DeployDeps): string | undefined {
   const cli = join(release, 'dist', 'cli.js');
+  const missing = missingRelativeImports(cli);
+  if (missing.length) return `发布目录的相对 import 闭包不完整：${missing.join('、')}`;
   const probe = spawnSync(execPath, [cli, '--version'], { cwd: release, encoding: 'utf8', timeout: 60_000 });
   if (probe.status !== 0 || probe.stdout.trim() !== version) {
     const detail = (probe.stderr || probe.stdout || '').trim().split('\n').at(-1) || probe.error?.message || `退出码 ${probe.status ?? '未知'}`;

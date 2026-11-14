@@ -9,11 +9,13 @@
  * [baseY, baseY + rows), which keeps text consistent for alt-screen CLIs
  * (Claude Code) where scrollback isn't meaningful.
  */
-import xtermHeadless, { type ITerminalAddon } from '@xterm/headless';
-import { SerializeAddon } from '@xterm/addon-serialize';
+import type { ITerminalAddon, Terminal } from '@xterm/headless';
+import type { SerializeAddon } from '@xterm/addon-serialize';
 import type { TerminalScreen } from '@dutydeck/shared';
+import { createRequire } from 'node:module';
 
-const { Terminal } = xtermHeadless;
+const require = createRequire(import.meta.url);
+type HeadlessTerminal = InstanceType<typeof Terminal>;
 
 /** Strip box-drawing characters and collapse runs of spaces. */
 function cleanBoxDrawing(line: string): string {
@@ -46,7 +48,7 @@ const DEFAULT_ROWS = 30;
  * card text should show CLI output, not the live cursor reflection.
  */
 function readViewportText(
-  terminal: InstanceType<typeof Terminal>,
+  terminal: HeadlessTerminal,
   opts: { filter: boolean; readCols?: number; preserveStructure?: boolean },
 ): string {
   const buffer = terminal.buffer.active;
@@ -83,8 +85,8 @@ function readViewportText(
  * (`await new Promise(r => setTimeout(r, 0))`) after the final write.
  */
 export class TerminalSnapshot {
-  private terminal: InstanceType<typeof Terminal>;
-  private readonly serializer = new SerializeAddon();
+  private terminal: HeadlessTerminal;
+  private readonly serializer: SerializeAddon;
   private sgrMouse = false;
   private cursorVisible = true;
   /** Bumped whenever the buffer may have changed; text reads are cached per revision. */
@@ -94,6 +96,9 @@ export class TerminalSnapshot {
   private readonly invalidate = () => { this.revision++; };
 
   constructor(cols: number = DEFAULT_COLS, rows: number = DEFAULT_ROWS) {
+    const { Terminal } = require('@xterm/headless') as typeof import('@xterm/headless');
+    const { SerializeAddon } = require('@xterm/addon-serialize') as typeof import('@xterm/addon-serialize');
+    this.serializer = new SerializeAddon();
     this.terminal = new Terminal({ cols, rows, scrollback: 5000, allowProposedApi: true });
     // The addon uses the shared buffer API; its typings require browser-only members.
     this.terminal.loadAddon(this.serializer as unknown as ITerminalAddon);
@@ -211,7 +216,7 @@ export class TerminalSnapshot {
    *  Mutate it only through this class so cached screen text stays current.
    *  Register only synchronous parser handlers: an async handler pauses parsing
    *  mid-chunk without a write callback or onWriteParsed, leaving the cache stale. */
-  get xterm(): InstanceType<typeof Terminal> { return this.terminal; }
+  get xterm(): HeadlessTerminal { return this.terminal; }
 
   dispose(): void {
     this.terminal.dispose();
