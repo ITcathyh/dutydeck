@@ -47,7 +47,7 @@ export class ClaudeBackgroundTasks {
       const toolUseId = /<tool-use-id>([^<]+)<\/tool-use-id>/.exec(notificationText)?.[1]?.trim();
       if (state) for (const id of ids) {
         const task = this.tasks.get(id);
-        if (task && (!toolUseId || task.toolUseId === toolUseId)) this.settle(task, state, atMs, position);
+        if (task && (!toolUseId || task.toolUseId === toolUseId)) this.settle(task, state, atMs, position, false, notificationText);
       }
     } else if (claudeInputText(entry) !== undefined && !entry.isMeta) {
       this.inputId = entry.uuid; this.notification = false; this.ended = false;
@@ -112,10 +112,10 @@ export class ClaudeBackgroundTasks {
     return this.tasks.size > 0 && before !== JSON.stringify(this.snapshot());
   }
 
-  private settle(task: Task, state: string, atMs: number | undefined, position: TranscriptPosition | undefined, allAgentGenerations = false): void {
+  private settle(task: Task, state: string, atMs: number | undefined, position: TranscriptPosition | undefined, allAgentGenerations = false, notificationText?: string): void {
     const run = this.runs.get(task.id);
     if (!run) return;
-    const notificationKey = task.kind === 'agent' && !allAgentGenerations ? JSON.stringify([task.id, state, atMs]) : undefined;
+    const notificationKey = task.kind === 'agent' && !allAgentGenerations ? JSON.stringify([task.id, state, atMs, notificationText]) : undefined;
     if (notificationKey && this.settledNotifications.has(notificationKey)) return;
     if (allAgentGenerations) {
       if (run.active.length === 0) return;

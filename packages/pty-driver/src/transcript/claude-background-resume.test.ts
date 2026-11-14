@@ -20,9 +20,9 @@ function toolRecords(name: string, result: any, second: number | undefined, id =
 const launchRecords = (second: number | undefined = 0) => toolRecords('Agent', { isAsync: true, agentId }, second, 'agent-launch');
 const resumeRecords = (second: number | undefined, field: 'resumedAgentId' | 'revivedAgentId' = 'resumedAgentId') =>
   toolRecords('SendMessage', { success: true, [field]: agentId }, second);
-const noticeRecord = (second: number | undefined, toolUseId = 'agent-launch') => ({
+const noticeRecord = (second: number | undefined, toolUseId = 'agent-launch', result?: string) => ({
   type: 'queue-operation', operation: 'enqueue', timestamp: at(second),
-  content: `<task-notification><task-id>${agentId}</task-id><tool-use-id>${toolUseId}</tool-use-id><status>completed</status></task-notification>`,
+  content: `<task-notification><task-id>${agentId}</task-id><tool-use-id>${toolUseId}</tool-use-id><status>completed</status>${result === undefined ? '' : `<result>${result}</result>`}</task-notification>`,
 });
 const mainEndRecords = (second: number) => [
   { type: 'assistant', uuid: `main-end-${second}`, timestamp: at(second), message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: 'waiting' }] } },
@@ -245,6 +245,30 @@ describe('ClaudeTranscriptTailer resumed agent recovery', () => {
     expect(tailer.pendingBackgroundWork()).toBe(1);
 
     appendFileSync(sibling, jsonl([noticeRecord(30)]));
+    await tailer.flush();
+    expect(tailer.pendingBackgroundWork()).toBe(0);
+  });
+
+  it('settles distinct same-timestamp results but not a mirrored completion replay', async () => {
+    root = mkdtempSync(join(tmpdir(), 'dd-bg-resume-distinct-results-'));
+    const path = join(root, 'main.jsonl');
+    const running = [...launchRecords(0), noticeRecord(10), ...resumeRecords(20), ...resumeRecords(30), ...mainEndRecords(31)];
+    writeFileSync(path, jsonl(running));
+    tailer = new ClaudeTranscriptTailer({ cwd: root, transcriptPath: path });
+    await tailer.flush();
+    expect(tailer.pendingBackgroundWork()).toBe(1);
+
+    const first = noticeRecord(35, 'agent-launch', 'first generation result');
+    appendFileSync(path, jsonl([first]));
+    await tailer.flush();
+    expect(tailer.pendingBackgroundWork()).toBe(1);
+
+    const sibling = join(root, 'after-clear.jsonl');
+    writeFileSync(sibling, jsonl([first]));
+    await tailer.flush();
+    expect(tailer.pendingBackgroundWork()).toBe(1);
+
+    appendFileSync(sibling, jsonl([noticeRecord(35, 'agent-launch', 'second generation result')]));
     await tailer.flush();
     expect(tailer.pendingBackgroundWork()).toBe(0);
   });
