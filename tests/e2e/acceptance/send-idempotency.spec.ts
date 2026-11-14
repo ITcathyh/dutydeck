@@ -1,4 +1,8 @@
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type Page, type TestInfo } from '@playwright/test';
+import { execFileSync } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import { launchIsolatedTestServer, REPO_ROOT, TASK_POLL_INTERVALS, type TestServerInstance } from './harness.js';
@@ -7,23 +11,62 @@ import { startAcceptedResponseLossProxy } from './send-idempotency-proxy.js';
 const storageRequire = createRequire(resolve(REPO_ROOT, 'packages/storage/package.json'));
 const Database = storageRequire('better-sqlite3');
 
+type AcceptedResponseLossProxy = Awaited<ReturnType<typeof startAcceptedResponseLossProxy>>;
 let instance: TestServerInstance;
-let proxy: Awaited<ReturnType<typeof startAcceptedResponseLossProxy>>;
+let proxy: AcceptedResponseLossProxy;
+
+function realPromptCallCount(targetInstance: TestServerInstance, prompt: string) {
+  const callLog = join(targetInstance.dataDir, 'mock-acp-calls.jsonl');
+  if (!existsSync(callLog)) return 0;
+  const entries = readFileSync(callLog, 'utf8').split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line) as { method?: string; prompt?: string });
+  return entries.filter(entry => entry.method === 'session/prompt' && entry.prompt?.endsWith(prompt)).length;
+}
 
 function persistedPromptCounts(sessionId: string, prompt: string) {
   const db = new Database(join(instance.dataDir, 'dutydeck.db'), { readonly: true });
   try {
-    const tasks = db.prepare('SELECT id FROM tasks WHERE session_id = ? AND prompt = ?').all(sessionId, prompt);
+    const tasks = db.prepare('SELECT id, status FROM tasks WHERE session_id = ? AND prompt = ?').all(sessionId, prompt) as Array<{ id: string; status: string }>;
     const totalTasks = db.prepare('SELECT count(*) AS count FROM tasks WHERE session_id = ?').get(sessionId).count as number;
     const rows = db.prepare("SELECT data FROM events WHERE session_id = ? AND type = 'text'").all(sessionId) as Array<{ data: string }>;
     const userEvents = rows.filter(row => {
       const data = JSON.parse(row.data);
       return data.role === 'user' && data.text === prompt;
     });
-    return { tasks: tasks.length, userEvents: userEvents.length, totalTasks };
+    return { tasks: tasks.length, userEvents: userEvents.length, totalTasks, taskStatuses: tasks.map(task => task.status) };
   } finally {
     db.close();
   }
+}
+
+async function expectFinishedPrompt(sessionId: string, prompt: string, totalTasks: number) {
+  await expect.poll(async () => {
+    const response = await instance.request('GET', `/api/sessions/${sessionId}`);
+    expect(response.status, response.text).toBe(200);
+    return { state: response.json.state, ...persistedPromptCounts(sessionId, prompt) };
+  }, { intervals: TASK_POLL_INTERVALS }).toEqual({ state: 'idle', tasks: 1, userEvents: 1, totalTasks, taskStatuses: ['completed'] });
+  expect(realPromptCallCount(instance, prompt)).toBe(1);
+}
+
+async function launchInstance() {
+  return launchIsolatedTestServer({
+    prefix: 'dutydeck-send-idempotency-',
+    beforeLaunch: ({ sourceRepo, dataDir }) => {
+      return {
+        agents: [{
+          id: 'send-idempotency-acp',
+          name: 'Send idempotency ACP fixture',
+          command: process.execPath,
+          args: [join(REPO_ROOT, 'tests/fixtures/mock-acp-agent.mjs')],
+          protocol: 'acp',
+          cwd: sourceRepo,
+          permissionMode: 'full-trust',
+          timeout: 60,
+          builtin: false,
+          env: { mock_acp_call_log: join(dataDir, 'mock-acp-calls.jsonl') }
+        }]
+      };
+    }
+  });
 }
 
 async function createSession() {
@@ -55,36 +98,31 @@ function captureSendFailures(page: Page, sessionId: string) {
   return failures;
 }
 
-test.beforeEach(async () => {
-  instance = await launchIsolatedTestServer({
-    prefix: 'dutydeck-send-idempotency-',
-    beforeLaunch: ({ sourceRepo }) => {
-      return {
-        agents: [{
-          id: 'send-idempotency-acp',
-          name: 'Send idempotency ACP fixture',
-          command: process.execPath,
-          args: [join(REPO_ROOT, 'tests/fixtures/mock-acp-agent.mjs')],
-          protocol: 'acp',
-          cwd: sourceRepo,
-          permissionMode: 'full-trust',
-          timeout: 60,
-          builtin: false,
-          env: {}
-        }]
-      };
+async function cleanupAfterTest(
+  testInfo: Pick<TestInfo, 'status' | 'expectedStatus' | 'attach'>,
+  currentInstance?: TestServerInstance,
+  currentProxy?: AcceptedResponseLossProxy
+) {
+  try {
+    if (testInfo.status !== testInfo.expectedStatus) {
+      if (currentInstance) await testInfo.attach('isolated-server.log', { body: currentInstance.serverLog.join(''), contentType: 'text/plain' });
+      if (currentProxy) await testInfo.attach('send-exchanges.json', { body: JSON.stringify(currentProxy.exchanges, null, 2), contentType: 'application/json' });
     }
-  });
+  } catch {
+    // Diagnostics must not replace the test failure that triggered this cleanup.
+  } finally {
+    try { await currentProxy?.close(); }
+    finally { await currentInstance?.cleanup(); }
+  }
+}
+
+test.beforeEach(async () => {
+  instance = await launchInstance();
   proxy = await startAcceptedResponseLossProxy(instance.port);
 });
 
 test.afterEach(async ({}, testInfo) => {
-  if (testInfo.status !== testInfo.expectedStatus) {
-    await testInfo.attach('isolated-server.log', { body: instance.serverLog.join(''), contentType: 'text/plain' });
-    await testInfo.attach('send-exchanges.json', { body: JSON.stringify(proxy.exchanges, null, 2), contentType: 'application/json' });
-  }
-  await proxy?.close();
-  await instance?.cleanup();
+  await cleanupAfterTest(testInfo, instance, proxy);
 });
 
 test('queue: server accepted then response lost, reload and normal send reuse the task', async ({ page }, testInfo) => {
@@ -116,10 +154,10 @@ test('queue: server accepted then response lost, reload and normal send reuse th
   expect(second.responseBody.task.id).toBe(first.responseBody.task.id);
   await expect(message).toHaveValue('');
 
-  await expect.poll(() => persistedPromptCounts(sessionId, prompt), { intervals: TASK_POLL_INTERVALS }).toEqual({ tasks: 1, userEvents: 1, totalTasks: 1 });
+  await expectFinishedPrompt(sessionId, prompt, 1);
   await expectSingleVisibleUserInstruction(page, prompt);
   await testInfo.attach('queue-accepted-response-loss.json', {
-    body: JSON.stringify({ exchanges: proxy.exchanges, browserFailures, persisted: persistedPromptCounts(sessionId, prompt) }, null, 2),
+    body: JSON.stringify({ exchanges: proxy.exchanges, browserFailures, persisted: persistedPromptCounts(sessionId, prompt), realPromptCalls: realPromptCallCount(instance, prompt) }, null, 2),
     contentType: 'application/json'
   });
 });
@@ -154,10 +192,53 @@ test('interrupt: server accepted then response lost, browser retry reuses the ta
   expect(second.responseBody.task.id).toBe(first.responseBody.task.id);
   await expect(message).toHaveValue('');
 
-  await expect.poll(() => persistedPromptCounts(sessionId, prompt), { intervals: TASK_POLL_INTERVALS }).toEqual({ tasks: 1, userEvents: 1, totalTasks: 2 });
+  await expectFinishedPrompt(sessionId, prompt, 2);
   await expectSingleVisibleUserInstruction(page, prompt);
   await testInfo.attach('interrupt-accepted-response-loss.json', {
-    body: JSON.stringify({ exchanges: proxy.exchanges, browserFailures, persisted: persistedPromptCounts(sessionId, prompt) }, null, 2),
+    body: JSON.stringify({ exchanges: proxy.exchanges, browserFailures, persisted: persistedPromptCounts(sessionId, prompt), realPromptCalls: realPromptCallCount(instance, prompt) }, null, 2),
     contentType: 'application/json'
   });
+});
+
+test('partial proxy startup failure preserves the original failure and cleans the private server and socket', async () => {
+  const partialInstance = await launchInstance();
+  let partialProxy: AcceptedResponseLossProxy | undefined;
+  const blocker = http.createServer();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      blocker.once('error', reject);
+      blocker.listen(0, '127.0.0.1', () => resolve());
+    });
+    execFileSync(join(partialInstance.binDir, 'tmux'), ['new-session', '-d', '-s', 'send-idempotency-cleanup'], { stdio: 'ignore' });
+    expect(existsSync(partialInstance.socket)).toBe(true);
+    await expect((async () => {
+      partialProxy = await startAcceptedResponseLossProxy(partialInstance.port, (blocker.address() as AddressInfo).port);
+    })()).rejects.toMatchObject({ code: 'EADDRINUSE' });
+    expect(partialProxy).toBeUndefined();
+    blocker.closeAllConnections();
+    await new Promise<void>(resolve => blocker.close(() => resolve()));
+
+    let attachmentAttempts = 0;
+    await cleanupAfterTest({
+      status: 'failed',
+      expectedStatus: 'passed',
+      attach: async () => { attachmentAttempts++; throw new Error('injected attachment failure'); }
+    }, partialInstance, partialProxy);
+    expect(attachmentAttempts).toBe(1);
+    expect(partialInstance.server.exitCode ?? partialInstance.server.signalCode).not.toBeNull();
+    await expect(partialInstance.request('GET', '/health')).rejects.toThrow();
+    expect(existsSync(partialInstance.dataDir)).toBe(false);
+    expect(existsSync(partialInstance.socket)).toBe(false);
+  } finally {
+    try { await partialProxy?.close(); }
+    finally {
+      try { await partialInstance.cleanup(); }
+      finally {
+        if (blocker.listening) {
+          blocker.closeAllConnections();
+          await new Promise<void>(resolve => blocker.close(() => resolve()));
+        }
+      }
+    }
+  }
 });

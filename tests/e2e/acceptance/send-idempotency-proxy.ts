@@ -10,7 +10,7 @@ export type SendExchange = {
 };
 
 /** Buffer only send responses; all other responses (including SSE) stream normally. */
-export async function startAcceptedResponseLossProxy(targetPort: number) {
+export async function startAcceptedResponseLossProxy(targetPort: number, listenPort = 0) {
   const exchanges: SendExchange[] = [];
   const sockets = new Set<net.Socket>();
   let dropNextSend = true;
@@ -27,7 +27,6 @@ export async function startAcceptedResponseLossProxy(targetPort: number) {
         try { parsedRequest = JSON.parse(body.toString('utf8')) as Record<string, unknown>; }
         catch { request.socket.destroy(); return; }
       }
-      const shouldDrop = isSend && dropNextSend;
       const upstream = http.request({
         hostname: '127.0.0.1',
         port: targetPort,
@@ -56,13 +55,13 @@ export async function startAcceptedResponseLossProxy(targetPort: number) {
             dropped: false
           };
           exchanges.push(exchange);
-          if (shouldDrop && exchange.responseStatus === 202 && parsedResponse?.accepted === true && parsedResponse.task?.id) {
+          if (dropNextSend && exchange.responseStatus === 202 && parsedResponse?.accepted === true && parsedResponse.task?.id) {
+            dropNextSend = false;
             exchange.dropped = true;
             // Once response bytes arrive Chromium does not transparently replay POST. A truncated JSON body
             // still leaves the Web mutation outcome unknown, while a bare TCP reset can trigger a network retry.
             response.writeHead(202, { 'content-type': 'application/json; charset=utf-8', 'transfer-encoding': 'chunked' });
             response.write('{', () => {
-              dropNextSend = false;
               response.socket?.destroy();
             });
             upstreamResponse.destroy();
@@ -89,7 +88,7 @@ export async function startAcceptedResponseLossProxy(targetPort: number) {
   });
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => resolve());
+    server.listen(listenPort, '127.0.0.1', () => resolve());
   });
   const port = (server.address() as AddressInfo).port;
   return {
