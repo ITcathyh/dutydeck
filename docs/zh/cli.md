@@ -48,7 +48,7 @@ dutydeck doctor
 
 ### setup、首启与终端预检
 
-`dutydeck setup` 在检测到需要 tmux 的终端 Agent 时做一次私有 socket 预检；失败只在结果里增加一行警告，仍写入配置。`dutydeck doctor` 的 `terminal.backend` 检查会定位到命令缺失、版本执行失败、会话建退失败或清理失败，并给出安装或 `PATH` 修复提示；它不会自动安装 tmux，也不会连接或终止默认 tmux server。所有调用都使用 `-f /dev/null`，`XDG_CONFIG_HOME` 指向私有目录，测试会话只运行受控存活命令，不加载系统或用户 tmux 配置。纯 ACP 配置只显示终端后端说明，Herdr 配置不把 tmux 缺失当成故障。
+`dutydeck setup` 在检测到需要 tmux 的终端 Agent 时做一次私有 socket 预检；失败只在结果里增加一行警告，仍写入配置。预检读取 `dutydeck.terminal_backend` 时只读打开现有 SQLite，数据库不存在、`configs` 表或设置键缺失时沿用 tmux 默认值，不建库、不迁移，也不写控制表；设置值无效时提示读取失败且不执行 tmux 预检。`dutydeck doctor` 的 `terminal.backend` 检查会定位到命令缺失、版本执行失败、会话建退失败或清理失败，并给出安装或 `PATH` 修复提示；它不会自动安装 tmux，也不会连接或终止默认 tmux server。所有调用都使用 `-f /dev/null`，`XDG_CONFIG_HOME` 指向私有目录，测试会话只运行受控存活命令，不加载系统或用户 tmux 配置。纯 ACP 配置只显示终端后端说明，Herdr 配置不把 tmux 缺失当成故障。
 
 机器人配置完成后，交互式 setup 会用默认 No 的专用问题询问是否验证飞书收发；拒绝则不监听也不发送。同意并启动临时监听后，终端显示一次性 UUID，请在飞书里私聊机器人发送这段验证码。只有在有界时间内收到包含本次 UUID 的用户私聊，机器人才回复该消息并携带同一 UUID。回复被飞书接受表示「入站通过、出站已发送」，仍需你在飞书确认收到；超时则入站未验证，且不发送任何消息。`--yes`、非交互和 `--json` 不进入该验证。此流程不改变机器人权限，也不持久化用户 open_id。
 
@@ -58,9 +58,9 @@ dutydeck doctor
 
 ### doctor 暴露组合检查<a id="doctor-exposure"></a>
 
-`lark.exposure` 在同一项里组合监听地址、显式 `local-only`、认证模式、socket 激活、机器人 `permissionMode` / `fullTrustConfirmed`、高危用户范围和 `riskControlMode`。监听与认证优先取运行中守护进程的记录；认证模式按实际语义显示为 `local`、`token` 或 `open`，不是只显示一个布尔值。`local-only` 保留本次 doctor 能看到的显式配置事实，不从解析后的 `127.0.0.1` 反推；另一个 shell 看不到 daemon 的启动参数时显示「未知」，不会误写成「关闭」。socket 激活只认当前进程的 `LISTEN_PID` / `LISTEN_FDS` 或运行中 systemd unit 的 `TriggeredBy`；这些事实不能证明继承 fd 的实际地址时，该项降级为「实际监听地址未知」，不会拿 `.env` 的 host 猜成回环或通配地址。
+`lark.exposure` 在同一项里组合监听地址、显式 `local-only`、认证模式、socket 激活、机器人 `permissionMode` / `fullTrustConfirmed`、高危用户范围和 `riskControlMode`。监听与认证优先取运行中守护进程的记录；认证模式按实际语义显示为 `local`、`token` 或 `open`，不是只显示一个布尔值。`local-only` 保留本次 doctor 能看到的显式配置事实，不从解析后的 `127.0.0.1` 反推；另一个 shell 看不到 daemon 的启动参数时显示「未知」，不会误写成「关闭」。socket 激活只认当前进程的 `LISTEN_PID` / `LISTEN_FDS` 或 daemon 记录中的 systemd unit；即使 service 已停止，也会通过 `TriggeredBy` 找到关联 `.socket`，并核对 `ActiveState=active` 与 `SubState=listening`，查询失败或状态不完整时按未知处理。这些事实不能证明继承 fd 的实际地址时，该项降级为「实际监听地址未知」，不会拿 `.env` 的 host 猜成回环或通配地址。
 
-机器人部分只把已开启监听、默认 Agent 已配置且执行模式已确认的条目算作可运行权限；旧记录仅写 `fullTrustConfirmed=true` 时仍按完全信任处理。高危名单先按运行时同一只读归一化路径清理无效用户和空白邮箱，再显示「全部 / 指定」及 ID、邮箱数量，不输出 openId、姓名、邮箱、App Secret 或访问令牌。`off` 不执行高危名单，即使填了名单也按广范围处理；`guidance` 只提醒，`enforced` 才是强制拦截。只有「非回环 `open` + 可运行的完全信任机器人 + 广范围高危用户 + 弱风控」同时成立时，本项才升级：`off` 为 fail，`guidance` 为 warn。强制风控、较窄的 guidance 名单、token/local，或机器人不是完全信任时，本项不新增告警；既有 `access.posture` 等检查不变。数据库或机器人配置不可读时降级为 skip，不重复报错。
+机器人部分只把已开启监听、默认 Agent 已配置且执行模式已确认的条目算作可运行权限；旧记录仅写 `fullTrustConfirmed=true` 时仍按完全信任处理。高危名单先按运行时同一只读归一化路径清理无效用户和空白邮箱，再显示「全部 / 指定」及 ID、邮箱数量，不输出 openId、姓名、邮箱、App Secret 或访问令牌。单条机器人配置无效时只跳过该条并标明数量，其余有效机器人仍参与判定，危险 fail/warn 不会因此降级。`off` 不执行高危名单，即使填了名单也按广范围处理；`guidance` 只提醒，`enforced` 才是强制拦截。只有「非回环 `open` + 可运行的完全信任机器人 + 广范围高危用户 + 弱风控」同时成立时，本项才升级：`off` 为 fail，`guidance` 为 warn。强制风控、较窄的 guidance 名单、token/local，或机器人不是完全信任时，本项不新增告警；既有 `access.posture` 等检查不变。数据库不可读或整份机器人配置不可解析时降级为 skip，不重复报错。
 
 命中危险组合时会给出 remedy 和可复制命令，例如 `dutydeck settings bot set <appId> permissionMode=ask fullTrustConfirmed=false`，或改用 `dutydeck setup --local-only`；保留完全信任时，先运行 `dutydeck settings bot install-hook <appId>`，再设置 `riskControlMode=enforced` 并配置 `highRiskAllowedUsers` / `highRiskAllowedEmails`。doctor 只报告，不自动修改 `.env`、unit 或机器人配置。结论只覆盖它能观测的监听地址，不假定反向代理、防火墙或端口转发后的其他访问路径已经安全或已经验证。
 

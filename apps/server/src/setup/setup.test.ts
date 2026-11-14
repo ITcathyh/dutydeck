@@ -8,8 +8,10 @@ import { closeSync, openSync, writeFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
+import { migrations } from '../../../../packages/storage/src/migrations.js';
 import { createCliUi, symbolFor } from '../cli-ui.js';
 import type { DetectedAgent } from './detect.js';
 import { saveBot as saveRealBot, type ExistingBot, type SaveBotInput, type SaveBotResult } from './bot-store.js';
@@ -18,7 +20,7 @@ import { readExistingConfig, type WriteEnvResult } from './env-file.js';
 import type { LarkBindOptions, LarkBindResult } from './lark-bind.js';
 import { offerLarkSetupSmoke } from './lark-smoke.js';
 import type { TerminalBackendProbe } from '../doctor/types.js';
-import { PromptUnavailableError, type AskOptions, type Prompter } from './prompts.js';
+import { PromptAbortedError, PromptUnavailableError, type AskOptions, type Prompter } from './prompts.js';
 import { runSetup, type SetupDependencies } from './setup.js';
 
 const tempDirs: string[] = [];
@@ -28,6 +30,27 @@ async function makeTempDir(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'dutydeck-setup-'));
   tempDirs.push(dir);
   return dir;
+}
+
+function createSchemaV1Database(path: string, options: { configs?: boolean; terminalBackend?: string } = {}): void {
+  const db = new Database(path);
+  try {
+    db.exec('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)');
+    migrations.find(migration => migration.version === 1)!.up(db);
+    if (options.configs === false) db.exec('DROP TABLE configs');
+    db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (1, ?)').run('2026-01-01T00:00:00.000Z');
+    if (options.terminalBackend !== undefined) {
+      db.prepare('INSERT INTO configs (key, value) VALUES (?, ?)').run('dutydeck.terminal_backend', options.terminalBackend);
+    }
+  } finally { db.close(); }
+}
+
+function expectOnlySchemaV1(path: string): void {
+  const db = new Database(path, { readonly: true, fileMustExist: true });
+  try {
+    expect(db.prepare('SELECT version FROM schema_migrations').all()).toEqual([{ version: 1 }]);
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE name IN ('dutydeck_control', 'dutydeck_access')").all()).toEqual([]);
+  } finally { db.close(); }
 }
 
 function setIsTTY(value: boolean | undefined): void {
@@ -489,6 +512,63 @@ describe('runSetup', () => {
     const herdr = harness({ cwd: dir, agents: [terminal], readTerminalBackend: async () => 'herdr' });
     expect((await runSetup({ cwd: dir, port: '4310', skipLark: true, yes: true }, herdr.deps)).ok).toBe(true);
     expect(herdr.terminalBackendProbe).not.toHaveBeenCalled();
+  });
+
+  it.each(['invalid-cwd', 'cancel'] as const)('keeps a real schema v1 database untouched when setup later fails (%s)', async scenario => {
+    const dir = await makeTempDir();
+    const terminal = { ...AGENT, protocol: 'pty-cli' as const, adapterId: 'claude-code' };
+    const prompter: Prompter | undefined = scenario === 'cancel' ? {
+      ...strictPrompter(), interactive: true,
+      async ask<T>(): Promise<T> { throw new PromptAbortedError(); }
+    } : undefined;
+    const { deps, writeEnv, terminalBackendProbe } = harness({ cwd: dir, agents: [terminal], ...(prompter ? { prompter } : {}) });
+    createSchemaV1Database(deps.database!);
+    expectOnlySchemaV1(deps.database!);
+    delete deps.readTerminalBackend;
+    if (scenario === 'cancel') setIsTTY(true);
+
+    const result = await runSetup({
+      cwd: scenario === 'invalid-cwd' ? join(dir, 'missing') : undefined,
+      port: '4310', skipLark: true, yes: scenario === 'invalid-cwd'
+    }, deps);
+
+    expect(result.ok).toBe(false);
+    expect(result.error?.code).toBe(scenario === 'cancel' ? 'SETUP_ABORTED' : 'SETUP_FAILED');
+    expect(terminalBackendProbe).toHaveBeenCalledOnce();
+    expect(writeEnv).toHaveBeenCalledTimes(0);
+    expectOnlySchemaV1(deps.database!);
+  });
+
+  it('uses the tmux default without creating configs in a legacy schema that lacks the table', async () => {
+    const dir = await makeTempDir();
+    const terminal = { ...AGENT, protocol: 'pty-cli' as const, adapterId: 'claude-code' };
+    const { deps, terminalBackendProbe } = harness({ cwd: dir, agents: [terminal] });
+    createSchemaV1Database(deps.database!, { configs: false });
+    delete deps.readTerminalBackend;
+
+    const result = await runSetup({ cwd: dir, port: '4310', skipLark: true, yes: true }, deps);
+
+    expect(result.ok).toBe(true);
+    expect(terminalBackendProbe).toHaveBeenCalledOnce();
+    expectOnlySchemaV1(deps.database!);
+  });
+
+  it.each([
+    { stored: 'herdr', warning: false },
+    { stored: 'invalid-backend', warning: true }
+  ])('validates a real persisted terminal backend without migrating schema v1 (%s)', async ({ stored, warning }) => {
+    const dir = await makeTempDir();
+    const terminal = { ...AGENT, protocol: 'pty-cli' as const, adapterId: 'claude-code' };
+    const { deps, terminalBackendProbe } = harness({ cwd: dir, agents: [terminal] });
+    createSchemaV1Database(deps.database!, { terminalBackend: stored });
+    delete deps.readTerminalBackend;
+
+    const result = await runSetup({ cwd: dir, port: '4310', skipLark: true, yes: true }, deps);
+
+    expect(result.ok).toBe(true);
+    expect(terminalBackendProbe).not.toHaveBeenCalled();
+    expect(result.warnings.some(item => item.includes('终端后端设置读取失败'))).toBe(warning);
+    expectOnlySchemaV1(deps.database!);
   });
 });
 

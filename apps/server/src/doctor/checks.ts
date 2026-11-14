@@ -1162,7 +1162,7 @@ export async function checkLarkExposure(observation: LarkExposureObservation): P
     ? 'unknown'
     : host === '127.0.0.1' || host === '::1' ? 'local' : observation.authEnabled ? 'token' : 'open';
   const socketText = socket.status === 'active'
-    ? socket.source === 'unit' ? 'socket=unit（TriggeredBy）' : socket.source === 'process' ? 'socket=process（LISTEN_*）' : 'socket=unknown（有激活证据）'
+    ? socket.source === 'unit' ? 'socket=unit（TriggeredBy + ActiveState/SubState）' : socket.source === 'process' ? 'socket=process（LISTEN_*）' : 'socket=unknown（有激活证据）'
     : socket.status === 'unknown' ? 'socket=未知' : 'socket=未激活';
   const network = `监听=${host ?? '实际监听地址未知'}（${observation.hostSource}）；local-only=${observation.localOnly === undefined ? '未知' : observation.localOnly ? '开启' : '关闭'}；认证=${mode}（开关${observation.authEnabled ? '开' : '关'}）；${socketText}`;
   const base = { id: 'lark.exposure', label: '网络与机器人暴露组合' } as const;
@@ -1174,9 +1174,10 @@ export async function checkLarkExposure(observation: LarkExposureObservation): P
   const repository = { get: async () => observation.rawBots } as unknown as Parameters<typeof readLarkConfigs>[0];
   // readOnly 复用运行时的同一份归一化，但禁止旧记录迁移写回；无效用户和空白邮箱在这里清空。
   const usable = await readLarkConfigs(repository, { readOnly: true });
-  if (usable.length !== parsed.length) return { ...base, level: 'skip', detail: `${network}；机器人权限未知（存在无效配置，详见飞书配置检查）` };
+  const invalidCount = parsed.length - usable.length;
+  const invalidNote = invalidCount > 0 ? `；${invalidCount} 个无效机器人条目已跳过（详见飞书配置检查）` : '';
   const bots = publicLarkConfigs(usable, { listeningDisabled: observation.listenerDisabled }).bots;
-  if (bots.length === 0) return { ...base, level: 'skip', detail: `${network}；未配置机器人，无权限组合可判` };
+  if (bots.length === 0) return { ...base, level: 'skip', detail: `${network}；未配置可评估的有效机器人${invalidNote}` };
 
   const projections = bots.map((bot, index) => {
     const blocked = larkConfigBlockingError(usable[index]!) !== undefined;
@@ -1198,7 +1199,7 @@ export async function checkLarkExposure(observation: LarkExposureObservation): P
       text: `${bot.appId}：permissionMode=${bot.permissionMode ?? 'full-trust'}${listeningNote}；高危范围=${broad ? '全部' : '指定'}（ID ${userCount}、邮箱 ${emailCount}${scopeNote}）；riskControlMode=${riskControlMode}`
     };
   });
-  const detail = `${network}；${projections.map(bot => bot.text).join('；')}；边界=不包含反向代理或防火墙后的其他访问路径`;
+  const detail = `${network}；${projections.map(bot => bot.text).join('；')}；边界=不包含反向代理或防火墙后的其他访问路径${invalidNote}`;
   if (host === undefined) return { ...base, level: 'skip', detail: `${detail}；socket 已激活或 unit 状态不可读时，不从环境配置猜实际监听地址` };
 
   const dangerous = projections.filter(bot => bot.dangerous);

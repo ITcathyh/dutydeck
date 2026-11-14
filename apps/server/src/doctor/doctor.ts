@@ -111,35 +111,53 @@ const DEFAULT_PORT_PROBE_TIMEOUT_MS = 1_000;
 const DEFAULT_AGENT_PROBE_TIMEOUT_MS = 5_000;
 const DEFAULT_TERMINAL_BACKEND_PROBE_TIMEOUT_MS = 3_000;
 
-type SystemdTriggeredByProbe = (unit: string) => { status: number | null; stdout: string };
+type SystemdUnitProbe = (unit: string, properties: readonly string[]) => { status: number | null; stdout: string };
 
-const showSystemdTriggeredBy: SystemdTriggeredByProbe = unit => {
-  const result = spawnSync('systemctl', ['--user', 'show', unit, '--property=TriggeredBy'], {
+const showSystemdUnit: SystemdUnitProbe = (unit, properties) => {
+  const result = spawnSync('systemctl', ['--user', 'show', unit, `--property=${properties.join(',')}`], {
     encoding: 'utf8', timeout: 1_000, maxBuffer: 16 * 1024
   });
   return { status: result.status, stdout: result.stdout ?? '' };
 };
 
+function systemdProperty(stdout: string, name: string): string | undefined {
+  const prefix = `${name}=`;
+  return stdout.split('\n').find(line => line.startsWith(prefix))?.slice(prefix.length).trim();
+}
+
 /**
- * 只认当前进程的 LISTEN_* 或运行中 daemon 记录的 systemd unit。TriggeredBy 能证明
- * socket 激活关系，不能证明 fd 的实际地址；后者不可知时保留 unknown host，由组合检查降级。
+ * 只认当前进程的 LISTEN_* 或 daemon 记录的 systemd unit。service 停止时 socket 仍可能持有端口，
+ * 所以 TriggeredBy 定位到的每个 socket 都要另查 ActiveState/SubState；查询与地址不可知时绝不猜。
  */
 export function observeSocketActivation(
   input: DoctorSocketActivationProbeInput,
-  showUnit: SystemdTriggeredByProbe = showSystemdTriggeredBy
+  showUnit: SystemdUnitProbe = showSystemdUnit
 ): DoctorSocketActivationObservation {
   const listenFds = Number(input.env.LISTEN_FDS);
   if (input.env.LISTEN_PID === String(input.processPid) && Number.isSafeInteger(listenFds) && listenFds > 0) {
     return { status: 'active', source: 'process', reason: 'address-unavailable' };
   }
-  if (!input.running || input.record?.supervisor !== 'systemd') return { status: 'inactive' };
-  const unit = input.record.systemdUnit;
-  if (!unit) return { status: 'unknown', reason: 'unit-unavailable' };
-  const shown = showUnit(unit);
+  const unit = input.record?.systemdUnit;
+  if (!unit) return input.record?.supervisor === 'systemd' ? { status: 'unknown', reason: 'unit-unavailable' } : { status: 'inactive' };
+  const shown = showUnit(unit, ['TriggeredBy']);
   if (shown.status !== 0) return { status: 'unknown', reason: 'unit-unavailable' };
-  const triggeredBy = shown.stdout.split('\n').find(line => line.startsWith('TriggeredBy='))?.slice('TriggeredBy='.length) ?? '';
-  if (!triggeredBy.split(/\s+/).some(name => name.endsWith('.socket'))) return { status: 'inactive' };
-  return { status: 'active', source: 'unit', reason: 'address-unavailable' };
+  const triggeredBy = systemdProperty(shown.stdout, 'TriggeredBy');
+  if (triggeredBy === undefined) return { status: 'unknown', reason: 'unit-unavailable' };
+  const sockets = triggeredBy.split(/\s+/).filter(name => name.endsWith('.socket'));
+  if (sockets.length === 0) return { status: 'inactive' };
+
+  let unknown = false;
+  for (const socket of sockets) {
+    const state = showUnit(socket, ['ActiveState', 'SubState']);
+    if (state.status !== 0) { unknown = true; continue; }
+    const activeState = systemdProperty(state.stdout, 'ActiveState');
+    const subState = systemdProperty(state.stdout, 'SubState');
+    if (activeState === 'active' && subState === 'listening') {
+      return { status: 'active', source: 'unit', reason: 'address-unavailable' };
+    }
+    if (activeState !== 'inactive' && activeState !== 'failed') unknown = true;
+  }
+  return unknown ? { status: 'unknown', reason: 'unit-unavailable' } : { status: 'inactive' };
 }
 
 /** 动态 import autostart 模块：它可能尚未落地，缺失时该项降级为 skip。 */

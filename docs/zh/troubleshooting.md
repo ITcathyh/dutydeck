@@ -103,8 +103,8 @@ SIGKILL 无法执行进程内退出处理，所以下一代先根据上一代缺
 - Dutydeck 会强制其发起的 tmux 客户端使用 UTF-8（`-u`）；即使宿主没有 UTF-8 locale，也能正确识别终端会话，中文等非 ASCII 字符不会因此被显示为下划线。
 
 ### Q17: `doctor` 的 `lark.exposure` 报警或显示监听地址未知？
-- **报警**：只有非回环无认证、可运行的完全信任机器人、广范围高危用户和弱风控同时出现时，这项才升级为 warn/fail。按报告选择：用 `dutydeck setup --local-only` 收口监听；设置访问密码并重新开启认证；或用报告给出的 `dutydeck settings bot set <appId> permissionMode=ask fullTrustConfirmed=false` 降低权限。保留完全信任时，先 `dutydeck settings bot install-hook <appId>`，再启用 `riskControlMode=enforced` 并缩小高危名单。`off` 下即使配置了高危名单也不会限制执行，`guidance` 也不是强制拦截。
-- **地址未知**：socket 激活的 `LISTEN_*` 或 unit `TriggeredBy` 只能证明激活关系，不能证明继承 fd 的实际地址。此时本项降级为 skip，不会把 `.env` 里的 host 当成实际监听；请核对 `.socket` 的 `ListenStream=` 与服务 `--host` / `--port`，再重跑 `dutydeck doctor`。反向代理、防火墙和端口转发不在这项观测范围内。
+- **报警**：只有非回环无认证、可运行的完全信任机器人、广范围高危用户和弱风控同时出现时，这项才升级为 warn/fail。按报告选择：用 `dutydeck setup --local-only` 收口监听；设置访问密码并重新开启认证；或用报告给出的 `dutydeck settings bot set <appId> permissionMode=ask fullTrustConfirmed=false` 降低权限。保留完全信任时，先 `dutydeck settings bot install-hook <appId>`，再启用 `riskControlMode=enforced` 并缩小高危名单。`off` 下即使配置了高危名单也不会限制执行，`guidance` 也不是强制拦截。单条无效机器人配置只跳过该条并标明数量，其他有效机器人仍参与判定，不会把已有的危险 fail/warn 变成 skip；无效条目本身按「飞书配置」检查修复。
+- **地址未知**：socket 激活的 `LISTEN_*` 或 unit `TriggeredBy` 只能证明激活关系，不能证明继承 fd 的实际地址。即使 service 已停止，doctor 也会通过 `TriggeredBy` 找到关联 `.socket`，再核对 `ActiveState=active` 与 `SubState=listening`；查询失败或状态不完整同样按未知处理。此时本项降级为 skip，不会把 `.env` 里的 host 当成实际监听；请核对 `.socket` 的 `ListenStream=` 与服务 `--host` / `--port`，再重跑 `dutydeck doctor`。反向代理、防火墙和端口转发不在这项观测范围内。
 
 ### Q18: Claude 守卫超时、读取失败或恢复后提示设置不完整？
 - **守卫超时**：只有官方 Claude Code 2.1.295+ 会通过 `onFailure: "block"` 让守卫超时也阻断工具调用。旧版、版本探测失败和未验证分支的受保护轮次照常提交，超时维持原行为；显式拒绝和脚本崩溃仍由 `|| exit 2` 拦截。需要超时阻断时升级官方 Claude Code 并重开会话。
@@ -118,6 +118,7 @@ SIGKILL 无法执行进程内退出处理，所以下一代先根据上一代缺
 
 ### Q20: `doctor` 的 `terminal.backend` 检查失败？
 - 先看失败阶段：找不到命令时装 tmux 或修正 `PATH`；`tmux -V` 失败时检查二进制是否可执行、是否与本机架构匹配；创建或核验私有会话失败时检查临时目录权限和 tmux server 日志。检查只使用独立临时 socket，所有调用带 `-f /dev/null`，`XDG_CONFIG_HOME` 指向私有目录，测试会话只运行受控命令，不读取系统或用户 tmux 配置，也不会连接或结束你的默认 tmux server、自动安装软件。
+- setup 的同类预检只读获取 `dutydeck.terminal_backend`，不会为了读取设置而建库、迁移旧库或写控制表；数据库、`configs` 表或键不存在时沿用 tmux 默认值。即使后续工作目录校验失败或用户取消，旧库 schema 也保持不变。
 - 只配置 ACP 或已经选择 Herdr 时，tmux 缺失不是致命故障；需要 tmux 的 `pty-cli` 终端 Agent 才依赖这项检查。
 
 ### Q21: setup 的飞书收发验证超时或失败？

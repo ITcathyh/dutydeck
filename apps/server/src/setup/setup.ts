@@ -26,8 +26,9 @@ import { readDaemonStatus, resolveDaemonDir } from '../daemon/daemon.js';
 import { readSecretValue } from '../secret-cli.js';
 import { BotSetupApprovalError, readBot, saveBot, type ReadBot, type SaveBot, type SaveBotResult } from './bot-store.js';
 import { defaultTerminalBackendProbe } from '../doctor/terminal-backend.js';
+import { defaultDatabaseProbe } from '../doctor/probes.js';
 import type { TerminalBackendProbeResult } from '../doctor/types.js';
-import { createRepositories } from '@dutydeck/storage';
+import { terminalBackendSchema, terminalSettingsKey } from '../terminal-settings.js';
 
 export interface SetupCliOptions {
   /** 非交互确认；也是跳过危险确认（发布飞书版本）的唯一方式。 */
@@ -136,10 +137,9 @@ function maskedView(entries: Map<string, string>): Array<[string, string]> {
 }
 
 async function readSetupTerminalBackend(database: string): Promise<'tmux' | 'herdr'> {
-  if (!existsSync(database)) return 'tmux';
-  const repositories = createRepositories(database);
-  try { return await repositories.config.get('dutydeck.terminal_backend') === 'herdr' ? 'herdr' : 'tmux'; }
-  finally { repositories.close(); }
+  const probe = await defaultDatabaseProbe(database, [terminalSettingsKey]);
+  if (probe.error) throw new Error(probe.error);
+  return terminalBackendSchema.parse(probe.values?.[terminalSettingsKey] ?? 'tmux');
 }
 
 function terminalBackendWarning(result: TerminalBackendProbeResult): string | undefined {

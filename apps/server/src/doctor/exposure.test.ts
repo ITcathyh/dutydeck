@@ -47,6 +47,9 @@ interface Scenario {
   listenerDisabled?: boolean;
   runningHost?: string;
   runningAuthEnabled?: boolean;
+  running?: boolean;
+  systemdUnit?: string;
+  socketActivationProbe?: DoctorDependencies['socketActivationProbe'];
   socket?: { status: 'active' | 'inactive' | 'unknown'; source?: 'process' | 'unit'; host?: string; reason?: string };
 }
 
@@ -66,14 +69,15 @@ async function exposure(scenario: Scenario = {}): Promise<{ check: DoctorCheck |
     getuid: () => 1000,
     processUid: () => 1000,
     config: { ...baseConfig, host, authEnabled, ...(scenario.localOnly !== undefined ? { localOnly: scenario.localOnly } : {}) },
-    daemonStatus: () => ({ running: true, pid: 4242, ready: true, address: 'http://127.0.0.1:4310', authEnabled }),
+    daemonStatus: () => ({ running: scenario.running ?? true, pid: 4242, ready: scenario.running ?? true, address: 'http://127.0.0.1:4310', authEnabled }),
     daemonRecord: () => ({
       pid: 4242,
-      ready: true,
+      ready: scenario.running ?? true,
       host: scenario.runningHost ?? host,
       port: 4310,
       authEnabled: scenario.runningAuthEnabled ?? authEnabled,
-      database: baseConfig.databaseUrl
+      database: baseConfig.databaseUrl,
+      ...(scenario.systemdUnit ? { supervisor: 'systemd' as const, systemdUnit: scenario.systemdUnit } : {})
     }),
     daemonLogFile: '/tmp/dutydeck-exposure-test/.dutydeck/daemon/dutydeck.log',
     databaseProbe: () => scenario.databaseError
@@ -87,7 +91,7 @@ async function exposure(scenario: Scenario = {}): Promise<{ check: DoctorCheck |
     stat: async () => ({ mode: 0o40700 }),
     autostartStatus: async () => ({ state: { platform: 'linux', supported: true, enabled: true, lingerEnabled: true } }),
     pluginChecks: async () => [],
-    socketActivationProbe: async () => scenario.socket ?? { status: 'inactive' }
+    socketActivationProbe: scenario.socketActivationProbe ?? (async () => scenario.socket ?? { status: 'inactive' })
   } as DoctorDependencies;
   const report = await runDoctor({ json: true }, dependencies);
   const check = report.checks.find(candidate => candidate.id === 'lark.exposure');
@@ -122,6 +126,20 @@ describe('lark.exposure —— 网络与机器人权限组合', () => {
     expect(check?.remedy).toContain('不会自动修改');
     expect(check?.command).toBe('dutydeck settings bot set cli_exposure permissionMode=ask fullTrustConfirmed=false');
     expect(check?.verify).toBe('dutydeck doctor --json');
+  });
+
+  it('单条无效机器人配置不掩盖另一条有效机器人的高危 fail', async () => {
+    const invalid = bot({
+      appId: 'cli_invalid',
+      defaultAgentWeights: [{ agentId: 'claude', weight: 1, extra: true }]
+    });
+    const { check, serialized } = await exposure({ rawBots: JSON.stringify([invalid, bot({ appId: 'cli_valid' })]) });
+
+    expect(check?.level).toBe('fail');
+    expect(check?.detail).toContain('1 个无效机器人条目已跳过');
+    expect(check?.detail).toContain('cli_valid：permissionMode=full-trust');
+    expect(check?.command).toBe('dutydeck settings bot set cli_valid permissionMode=ask fullTrustConfirmed=false');
+    expect(serialized).not.toContain(SECRET);
   });
 
   it('同样的危险组合在 guidance 下标为 warn，而不是把提醒当成强制拦截', async () => {
@@ -264,6 +282,26 @@ describe('lark.exposure —— 网络与机器人权限组合', () => {
     expect(check?.detail).toContain('实际监听地址未知');
   });
 
+  it.each(['active', 'unknown'] as const)('service 停止但 systemd socket %s 时，不按回环配置报安全', async socketState => {
+    const calls: string[] = [];
+    const { check } = await exposure({
+      host: '127.0.0.1',
+      running: false,
+      systemdUnit: 'dutydeck.service',
+      socketActivationProbe: input => observeSocketActivation(input, unit => {
+        calls.push(unit);
+        if (unit === 'dutydeck.service') return { status: 0, stdout: 'TriggeredBy=dutydeck.socket\n' };
+        if (socketState === 'unknown') return { status: 1, stdout: '' };
+        return { status: 0, stdout: 'ActiveState=active\nSubState=listening\n' };
+      })
+    });
+
+    expect(calls).toEqual(['dutydeck.service', 'dutydeck.socket']);
+    expect(check?.level).toBe('skip');
+    expect(check?.detail).toContain('实际监听地址未知');
+    expect(check?.detail).toContain(socketState === 'active' ? 'socket=unit' : 'socket=未知');
+  });
+
   it('数据库不可读或机器人配置损坏时不重复报错，也不假装权限已知', async () => {
     expect((await exposure({ databaseError: true })).check?.level).toBe('skip');
     expect((await exposure({ rawBots: '{broken' })).check?.level).toBe('skip');
@@ -291,13 +329,19 @@ describe('socket 激活观测边界', () => {
     expect(observeSocketActivation({ env: {}, processPid: 100, running: true, record: { pid: 200 } })).toEqual({ status: 'inactive' });
   });
 
-  it('运行中 unit 的 TriggeredBy 只证明激活关系，不伪造成实际监听地址', () => {
+  it('TriggeredBy 只定位 socket，另查 ActiveState 与 SubState 才判定正在监听', () => {
     const record = { pid: 200, supervisor: 'systemd' as const, systemdUnit: 'dutydeck.service' };
+    const calls: string[] = [];
     const active = observeSocketActivation(
       { env: {}, processPid: 100, running: true, record },
-      unit => ({ status: 0, stdout: unit === 'dutydeck.service' ? 'TriggeredBy=dutydeck.socket\n' : '' })
+      (unit, properties) => {
+        calls.push(`${unit}:${properties.join(',')}`);
+        if (unit === 'dutydeck.service') return { status: 0, stdout: 'TriggeredBy=dutydeck.socket\n' };
+        return { status: 0, stdout: 'ActiveState=active\nSubState=listening\n' };
+      }
     );
     expect(active).toEqual({ status: 'active', source: 'unit', reason: 'address-unavailable' });
+    expect(calls).toEqual(['dutydeck.service:TriggeredBy', 'dutydeck.socket:ActiveState,SubState']);
     expect(observeSocketActivation(
       { env: {}, processPid: 100, running: true, record },
       () => ({ status: 0, stdout: 'TriggeredBy=\n' })
@@ -306,5 +350,30 @@ describe('socket 激活观测边界', () => {
       { env: {}, processPid: 100, running: true, record },
       () => ({ status: 1, stdout: '' })
     )).toEqual({ status: 'unknown', reason: 'unit-unavailable' });
+  });
+
+  it('service 已停止也查询记录的 socket；查询失败返回 unknown', () => {
+    const record = { pid: 200, supervisor: 'systemd' as const, systemdUnit: 'dutydeck.service' };
+    const input = { env: {}, processPid: 100, running: false, record };
+    const active = observeSocketActivation(input, unit => unit === 'dutydeck.service'
+      ? { status: 0, stdout: 'TriggeredBy=dutydeck.socket\n' }
+      : { status: 0, stdout: 'ActiveState=active\nSubState=listening\n' });
+    expect(active).toEqual({ status: 'active', source: 'unit', reason: 'address-unavailable' });
+
+    const unknown = observeSocketActivation(input, unit => unit === 'dutydeck.service'
+      ? { status: 0, stdout: 'TriggeredBy=dutydeck.socket\n' }
+      : { status: 1, stdout: '' });
+    expect(unknown).toEqual({ status: 'unknown', reason: 'unit-unavailable' });
+  });
+
+  it('socket 明确未激活才是 inactive，状态缺失或矛盾时不猜', () => {
+    const record = { pid: 200, supervisor: 'systemd' as const, systemdUnit: 'dutydeck.service' };
+    const observe = (socketOutput: string) => observeSocketActivation(
+      { env: {}, processPid: 100, running: false, record },
+      unit => ({ status: 0, stdout: unit === 'dutydeck.service' ? 'TriggeredBy=dutydeck.socket\n' : socketOutput })
+    );
+    expect(observe('ActiveState=inactive\nSubState=dead\n')).toEqual({ status: 'inactive' });
+    expect(observe('ActiveState=active\n')).toEqual({ status: 'unknown', reason: 'unit-unavailable' });
+    expect(observe('ActiveState=active\nSubState=dead\n')).toEqual({ status: 'unknown', reason: 'unit-unavailable' });
   });
 });
