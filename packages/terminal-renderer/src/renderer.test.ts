@@ -5,6 +5,7 @@
  * Run: pnpm vitest run packages/terminal-renderer
  */
 import { describe, it, expect } from 'vitest';
+import { createRequire } from 'node:module';
 import { TerminalSnapshot } from './index.js';
 
 /** xterm's write() is async; flush a macrotask so the buffer catches up. */
@@ -13,6 +14,17 @@ async function flush(): Promise<void> {
 }
 
 describe('TerminalSnapshot', () => {
+  it('loads xterm and the serializer only when the first snapshot is constructed', () => {
+    const require = createRequire(import.meta.url);
+    const headless = require.resolve('@xterm/headless'), serialize = require.resolve('@xterm/addon-serialize');
+    expect(require.cache[headless]).toBeUndefined();
+    expect(require.cache[serialize]).toBeUndefined();
+    const snap = new TerminalSnapshot();
+    expect(require.cache[headless]).toBeDefined();
+    expect(require.cache[serialize]).toBeDefined();
+    snap.dispose();
+  });
+
   it('defaults to 120x30', () => {
     const snap = new TerminalSnapshot();
     expect(snap.xterm.cols).toBe(120);

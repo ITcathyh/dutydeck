@@ -14,7 +14,7 @@ import type {
   ConnectedOpenPlatformSession,
 } from '../lark/open-platform-session.js';
 import type { Prompter } from './prompts.js';
-import { bindLarkApp, type LarkBindResult, type LarkBindStepKey } from './lark-bind.js';
+import { bindLarkApp, renderQrToTerminal, type LarkBindResult, type LarkBindStepKey } from './lark-bind.js';
 
 const APP_ID = 'cli_dutydeck_test';
 
@@ -253,6 +253,13 @@ function run(overrides: Parameters<typeof bindLarkApp>[0] extends infer T
 
 const levelOf = (result: LarkBindResult, key: LarkBindStepKey) =>
   result.steps.find(step => step.key === key)?.level;
+
+it('renders the default terminal QR with the existing options on first use', async () => {
+  const payload = 'https://example.invalid/qr-login?token=fixture';
+  const rendered = await renderQrToTerminal(payload);
+  const { default: QRCode } = await import('qrcode');
+  expect(rendered).toBe(await QRCode.toString(payload, { type: 'terminal', small: true }));
+});
 
 describe('bindLarkApp', () => {
   it('syncs native slash commands after configuration with the matching app credential', async () => {
