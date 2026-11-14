@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto';
-import QRCode from 'qrcode';
 import {
   configureLarkOpenPlatformApp,
   isValidLarkAppId,
@@ -76,11 +75,14 @@ export class OpenPlatformConfigurationJobManager {
     this.connect = options.connect ?? connectLarkOpenPlatformSession;
     this.configure = options.configure ?? configureLarkOpenPlatformApp;
     this.syncSlashCommands = options.syncSlashCommands;
-    this.qrDataUrl = options.qrDataUrl ?? (payload => QRCode.toDataURL(payload, {
-      errorCorrectionLevel: 'M',
-      margin: 2,
-      width: 320,
-    }));
+    this.qrDataUrl = options.qrDataUrl ?? (async payload => {
+      const { default: QRCode } = await import('qrcode');
+      return QRCode.toDataURL(payload, {
+        errorCorrectionLevel: 'M',
+        margin: 2,
+        width: 320,
+      });
+    });
     this.now = options.now ?? (() => new Date());
     this.retainedJobLimit = Math.max(1, options.retainedJobLimit ?? 100);
   }

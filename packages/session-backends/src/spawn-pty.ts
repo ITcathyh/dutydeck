@@ -1,13 +1,16 @@
 // Exit drain adapted from botmux 8c8f232305 (MIT); see THIRD_PARTY_NOTICES.md.
-import * as pty from 'node-pty';
+import type * as pty from 'node-pty';
 import { readSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import type { Readable } from 'node:stream';
+
+const require = createRequire(import.meta.url);
 
 /** node-pty 1.2 Unix uses a nonblocking tty.ReadStream. libuv can end it on
  * POLLHUP after a short read while the master still has queued bytes. Keep
  * node-pty's decoder and event ordering; only drain at its teardown boundary. */
 export const spawnPty: typeof pty.spawn = (file, args, options) => {
-  const terminal = pty.spawn(file, args, options);
+  const terminal = (require('node-pty') as typeof pty).spawn(file, args, options);
   if (process.platform === 'win32') return terminal;
   const unix = terminal as pty.IPty & { _socket?: Readable; fd?: number };
   const socket = unix._socket, fd = unix.fd;

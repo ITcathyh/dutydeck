@@ -296,6 +296,34 @@ describe('dutydeck deploy', () => {
     return JSON.parse(readFileSync(join(deployments, latest, 'manifest.json'), 'utf8'));
   };
 
+  it('激活前拒绝缺失的延迟加载 chunk，current 保持指向旧版本', async () => {
+    const initial = await runDeploy({ source, runtime: bot, restart: false }, deps());
+    expect(initial, initial.error).toMatchObject({ ok: true, status: 'staged' });
+    const previous = realpathSync(join(releases, 'current'));
+    nextCommit(source);
+    const cli = join(source, 'apps/server/dist/cli.js');
+    writeFileSync(cli, `${readFileSync(cli, 'utf8')}\nif (process.argv.includes('--load-service')) await import('./chunk-deferred.js');\n`);
+    write(join(source, 'apps/server/dist/chunk-deferred.js'), 'export const deferred = true;\n');
+    rmSync(join(source, 'apps/server/dist/chunk-deferred.js'));
+    const result = await runDeploy({ source, runtime: bot, restart: false }, deps());
+    expect(result).toMatchObject({ ok: false, status: 'failed', error: expect.stringContaining('chunk-deferred.js') });
+    expect(result.error).toContain('相对 import 闭包不完整');
+    expect(realpathSync(join(releases, 'current'))).toBe(previous);
+    expect(existsSync(result.release!)).toBe(false);
+    expect(service.ran).toEqual([]);
+  });
+
+  it('staged release 不复制已改为开发依赖的 acpx 和 drizzle-orm', async () => {
+    const manifestPath = join(source, 'apps/server/package.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    manifest.devDependencies = { ...manifest.devDependencies, acpx: '0.13.0', 'drizzle-orm': '0.44.2' };
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+    const result = await runDeploy({ source, runtime: bot, restart: false }, deps());
+    expect(result, result.error).toMatchObject({ ok: true, status: 'staged' });
+    expect(existsSync(join(result.release!, 'node_modules/acpx'))).toBe(false);
+    expect(existsSync(join(result.release!, 'node_modules/drizzle-orm'))).toBe(false);
+  });
+
   it.each(['SIGINT', 'SIGTERM', 'SIGHUP'] as const)('排空后被 %s 打断：写失败清单、立即退出排空再退出进程', async signal => {
     const deploying = await owner('abort');
     await deploying.wait('locked'); // 已排空，卡在备份里

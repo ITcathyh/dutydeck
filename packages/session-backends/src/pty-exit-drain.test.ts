@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { PtyBackend } from './pty-backend.js';
 import { spawnPty } from './spawn-pty.js';
@@ -14,6 +15,14 @@ function stall(pid: number) {
   while (Date.now() < deadline) { try { process.kill(pid, 0); } catch { break; } }
 }
 describe.skipIf(process.platform === 'win32')('PTY exit drain', () => {
+  it('loads node-pty only when the first terminal is spawned', () => {
+    const require = createRequire(import.meta.url), modulePath = require.resolve('node-pty');
+    expect(require.cache[modulePath]).toBeUndefined();
+    const terminal = spawnPty('/bin/sh', ['-c', 'exit 0'], {});
+    expect(require.cache[modulePath]).toBeDefined();
+    terminal.kill();
+  });
+
   it('delivers the exact exit burst before the real backend exit callback', async () => {
     const cwd = mkdtempSync(join(tmpdir(), 'dd-pty-tail-'));
     const backend = new PtyBackend();

@@ -113,6 +113,23 @@ describe('OpenPlatformConfigurationJobManager', () => {
     expect(configure).toHaveBeenCalledOnce();
   });
 
+  it('renders the real default QR with the existing image options on first use', async () => {
+    let manager: OpenPlatformConfigurationJobManager;
+    const rawQrPayload = 'fixture-qr-login-payload';
+    const connect = vi.fn(async (options: ConnectOpenPlatformSessionOptions) => {
+      await options.onQrUpdate?.({ qrPayload: rawQrPayload, status: 'waiting_for_scan' });
+      const waiting = manager.getActiveForApp('cli_real_qr');
+      const { default: QRCode } = await import('qrcode');
+      expect(waiting?.qrDataUrl).toBe(await QRCode.toDataURL(rawQrPayload, {
+        errorCorrectionLevel: 'M', margin: 2, width: 320,
+      }));
+      return connected();
+    });
+    manager = new OpenPlatformConfigurationJobManager({ connect, configure: vi.fn(async () => result) });
+    const started = manager.start('cli_real_qr');
+    expect(await manager.wait(started.id)).toMatchObject({ status: 'completed' });
+  });
+
   it('reuses the same active app job so publish is not duplicated', async () => {
     const release = deferred<void>();
     const connect = vi.fn(async () => {

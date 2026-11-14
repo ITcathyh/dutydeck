@@ -1,10 +1,12 @@
 import { constants } from 'node:fs';
+import { createRequire } from 'node:module';
 import { readBoundedBytes } from './bounded-file.js';
-import { parseDocument } from 'yaml';
 import { RuntimeError } from '@dutydeck/shared';
 import { open, opendir, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+
+const require = createRequire(import.meta.url);
 
 export interface PluginSkillRoot { path: string; plugin?: string; version?: string; root?: string; resources?: Record<string, Array<{ path: string; maxBytes: number }>> }
 
@@ -114,6 +116,7 @@ export function skillFrontmatter(markdown: string): { name?: string; description
   const text = markdown.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/)?.[1];
   if (/^---\r?\n/.test(markdown) && text === undefined) throw new RuntimeError('SKILL_METADATA_INVALID', 'Skill YAML frontmatter is incomplete', 400);
   if (!text) return {};
+  const { parseDocument } = require('yaml') as typeof import('yaml');
   const document = parseDocument(text, { uniqueKeys: true });
   if (document.errors.length) throw new RuntimeError('SKILL_METADATA_INVALID', 'Invalid skill YAML frontmatter', 400);
   const value = document.toJS({ maxAliasCount: 0 }) as unknown;

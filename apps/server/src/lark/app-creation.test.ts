@@ -65,6 +65,21 @@ it('creates once, durably saves credentials privately and configures creator vis
   expect(h.connect).toHaveBeenCalledOnce();
 });
 
+it('renders the real default QR on the first app-creation scan', async () => {
+  const h = harness();
+  const manager = new LarkAppCreationJobManager({ ...h.options, qrDataUrl: undefined });
+  h.connect.mockImplementation(async options => {
+    await options?.onQrUpdate?.({ status: 'waiting_for_scan', qrPayload: 'app-creation-qr-fixture' });
+    const waiting = await manager.get(id);
+    const { default: QRCode } = await import('qrcode');
+    expect(waiting?.qrDataUrl).toBe(await QRCode.toDataURL('app-creation-qr-fixture'));
+    return h.connected;
+  });
+  await manager.start(id, 'My Bot');
+  await manager.wait(id);
+  expect(await manager.get(id)).toMatchObject({ status: 'completed' });
+});
+
 it('distinguishes a confirmed scan followed by a session failure from icon upload failure', async () => {
   const login = harness();
   login.connect.mockImplementation(async options => {

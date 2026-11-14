@@ -5,6 +5,7 @@ import { basename, dirname, isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 import { asciiBundle } from './ascii-bundle.mjs';
+import { missingRelativeImports } from '../src/daemon/import-closure.mjs';
 
 const serverRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const workspaceRoot = resolve(serverRoot, '../..');
@@ -107,17 +108,46 @@ rmSync(resolve(serverRoot, 'dist'), { recursive: true, force: true });
 if (!existsSync(resolve(webDist, 'index.html'))) throw new Error('Web UI is not built. Run pnpm --dir apps/web build first.');
 rmSync(publicDir, { recursive: true, force: true });
 cpSync(webDist, publicDir, { recursive: true });
-await build({
+const mainResult = await build({
   entryPoints: [resolve(serverRoot, 'src/cli.ts')],
-  outfile: resolve(serverRoot, 'dist/cli.js'),
+  outdir: resolve(serverRoot, 'dist'),
+  entryNames: 'cli',
+  chunkNames: 'chunk-[hash]',
+  splitting: true,
+  absWorkingDir: workspaceRoot,
   bundle: true,
   format: 'esm',
   platform: 'node',
   target: 'node22',
   sourcemap: false,
+  metafile: true,
   plugins: [...workspacePlugins, larkRequirePlugin, lazyAcpSdkPlugin, externalPackages]
 });
-if ((await readFile(resolve(serverRoot, 'dist/cli.js'), 'utf8')).includes(`from "${acpSdk}"`)) throw new Error(`dist/cli.js still imports ${acpSdk} at startup`);
+const cliPath = resolve(serverRoot, 'dist/cli.js');
+const outputs = new Map(Object.entries(mainResult.metafile.outputs).map(([path, output]) => [resolve(workspaceRoot, path), output]));
+const startupOnly = /(?:^|[\\/])(?:fastify|pino|ws|@xterm[\\/](?:headless|addon-serialize)|mdast-util-from-markdown)(?:[\\/]|$)/;
+const visited = new Set();
+const checkStartupGraph = path => {
+  if (visited.has(path)) return;
+  visited.add(path);
+  const output = outputs.get(path);
+  if (!output) throw new Error(`Missing metafile output for ${path}`);
+  for (const input of Object.keys(output.inputs)) {
+    if (startupOnly.test(input)) throw new Error(`Startup static graph contains ${input}`);
+  }
+  for (const imported of output.imports) {
+    if (imported.kind === 'dynamic-import') continue;
+    if (startupOnly.test(imported.path)) throw new Error(`Startup static graph imports ${imported.path} from ${path}`);
+    if (imported.external) continue;
+    const target = imported.path.startsWith('.') ? resolve(dirname(path), imported.path) : resolve(workspaceRoot, imported.path);
+    if (outputs.has(target)) checkStartupGraph(target);
+  }
+};
+checkStartupGraph(cliPath);
+const mainBundles = [...outputs.keys()].filter(path => path.endsWith('.js'));
+for (const bundle of mainBundles) {
+  if ((await readFile(bundle, 'utf8')).includes(`from "${acpSdk}"`)) throw new Error(`${bundle} still imports ${acpSdk} at startup`);
+}
 writeFileSync(resolve(serverRoot, 'dist', larkShim), `import { createRequire } from 'node:module';\nconst lark = createRequire(import.meta.url)(${JSON.stringify(larkSdk)});\nexport default lark;\nexport const { ${larkExports.join(', ')} } = lark;\n`);
 // Isolated plugin activation uses the same Host registries after installation, without tsx.
 await build({
@@ -148,7 +178,9 @@ await build({
   plugins: workspacePlugins
 });
 // Each process keeps its bundle's source in memory; ASCII-only source is stored at one byte per character.
-for (const bundle of ['dist/cli.js', 'dist/assets/plugin-validation/cli.js', 'dist/assets/session-insight/cli.js', 'dist/program-status-relay.js']) asciiBundle(resolve(serverRoot, bundle));
+for (const bundle of [...mainBundles, ...['dist/assets/plugin-validation/cli.js', 'dist/assets/session-insight/cli.js', 'dist/program-status-relay.js'].map(path => resolve(serverRoot, path))]) asciiBundle(bundle);
+const missingChunks = missingRelativeImports(cliPath);
+if (missingChunks.length) throw new Error(`dist/cli.js has missing relative imports:\n${missingChunks.join('\n')}`);
 const agentsDir = resolve(serverRoot, 'dist/agents');
 mkdirSync(agentsDir, { recursive: true });
 cpSync(resolve(workspaceRoot, 'packages/acp-client/agents/claude-acp.mjs'), resolve(agentsDir, 'claude-acp.mjs'));
