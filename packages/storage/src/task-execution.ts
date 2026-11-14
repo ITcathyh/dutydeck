@@ -239,18 +239,28 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
       const chunk = candidates.slice(offset,offset + 32).map(row => row.session_id);
       const ids = chunk.filter(otherId => otherId !== sessionId);
       if (!ids.length) continue;
-      const placeholders = ids.map(() => '?').join(',');
+      const placeholders = ids.map(() => '?').join(','), idValues = ids.map(() => '(?)').join(',');
       const sources = new Map((cached(`SELECT id,source FROM sessions WHERE id IN (${placeholders})`).all(...ids) as Array<{id:string;source:string|null}>).map(row => [row.id,row.source]));
       const unresolvedBySession = new Map<string,{taskId:string;attemptId:string}>();
-      for (const row of cached(`SELECT session_id,task_id AS taskId,id AS attemptId FROM task_attempts WHERE session_id IN (${placeholders}) AND state IN ('preparing','active','reconcile_required','legacy_unresolved')`).all(...ids) as Array<{session_id:string;taskId:string;attemptId:string}>) {
-        if (!unresolvedBySession.has(row.session_id)) unresolvedBySession.set(row.session_id,{taskId:row.taskId,attemptId:row.attemptId});
+      for (const row of cached(`WITH ids(session_id) AS (VALUES ${idValues})
+        SELECT a.session_id,a.task_id AS taskId,a.id AS attemptId FROM ids JOIN task_attempts a ON a.rowid=(
+          SELECT rowid FROM task_attempts WHERE session_id=ids.session_id AND state IN ('preparing','active','reconcile_required','legacy_unresolved') LIMIT 1
+        )`).all(...ids) as Array<{session_id:string;taskId:string;attemptId:string}>) {
+        unresolvedBySession.set(row.session_id,{taskId:row.taskId,attemptId:row.attemptId});
       }
       const queuedBySession = new Map<string,{id:string}>(), unknownBySession = new Map<string,{id:string}>();
-      for (const row of cached(`SELECT t.session_id,t.id,t.status,a.id AS attempt_id,a.state FROM tasks t
-        LEFT JOIN task_attempts a ON a.id=t.current_attempt_id AND a.task_id=t.id
-        WHERE t.session_id IN (${placeholders}) AND t.status IN ('queued','reconcile_required')`).all(...ids) as Array<{session_id:string;id:string;status:string;attempt_id:string|null;state:string|null}>) {
-        if (row.status === 'queued' && !queuedBySession.has(row.session_id)) queuedBySession.set(row.session_id,{id:row.id});
-        if (row.status === 'reconcile_required' && (!row.attempt_id || row.state !== 'settled') && !unknownBySession.has(row.session_id)) unknownBySession.set(row.session_id,{id:row.id});
+      const taskRows = cached(`WITH ids(session_id) AS (VALUES ${idValues})
+        SELECT ids.session_id,'unknown' AS kind,u.id FROM ids JOIN tasks u ON u.rowid=(
+          SELECT t.rowid FROM tasks t LEFT JOIN task_attempts a ON a.id=t.current_attempt_id AND a.task_id=t.id
+            WHERE t.session_id=ids.session_id AND t.status='reconcile_required' AND (a.id IS NULL OR a.state!='settled') LIMIT 1
+        )`).all(...ids) as Array<{session_id:string;kind:'unknown'|'queued';id:string}>;
+      if (preparation) taskRows.push(...cached(`WITH ids(session_id) AS (VALUES ${idValues})
+        SELECT ids.session_id,'queued' AS kind,q.id FROM ids JOIN tasks q ON q.rowid=(
+          SELECT rowid FROM tasks WHERE session_id=ids.session_id AND status='queued' LIMIT 1
+        )`).all(...ids) as Array<{session_id:string;kind:'unknown'|'queued';id:string}>);
+      for (const row of taskRows) {
+        if (row.kind === 'queued') queuedBySession.set(row.session_id,{id:row.id});
+        else unknownBySession.set(row.session_id,{id:row.id});
       }
       const steeringBySession = new Map<string,ExecutionBlocker[]>();
       for (const row of cached(`SELECT session_id,task_id FROM task_steering_operations WHERE session_id IN (${placeholders}) AND state IN ('pending','unknown')`).all(...ids) as Array<{session_id:string;task_id:string}>) {

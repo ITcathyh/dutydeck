@@ -311,6 +311,8 @@ it('preserves multi-row blocker ownership and order across candidate chunks', ()
   const insertTask=sql.prepare('INSERT INTO tasks(id,session_id,prompt,status,current_attempt_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?)');
   const insertAttempt=sql.prepare('INSERT INTO task_attempts(id,task_id,session_id,run_id,number,revision,state,submission_state,json) VALUES(?,?,?,?,?,?,?,?,?)');
   const insertSteering=sql.prepare('INSERT INTO task_steering_operations(id,session_id,run_id,task_id,state,revision,json) VALUES(?,?,?,?,?,?,?)');
+  const statement=Object.getPrototypeOf(sql.prepare('SELECT 1')),originalAll=statement.all,batches:Array<{phase:string;source:string;rows:number}>=[];
+  let phase='read';
   try {
     sql.transaction(()=>{for(let i=0;i<40;i++) {
       const id=`candidate-${String(i).padStart(2,'0')}`,runId=`run-${i}`,group=i%5;
@@ -348,30 +350,55 @@ it('preserves multi-row blocker ownership and order across candidate chunks', ()
         ...(unresolved?{taskId:unresolved.taskId,attemptId:unresolved.attemptId}:unknown?{taskId:unknown.id}:{taskId:steering[0]!.task_id})}]:[];
     });
     expect(expected).toHaveLength(32);
+    statement.all=function(...args:unknown[]) { const rows=originalAll.apply(this,args);if(this.source.includes('WITH ids(session_id)'))batches.push({phase,source:this.source,rows:rows.length});return rows; };
     expect(h.repos.execution.getTaskExecution(task.id)?.blockers).toEqual(expected);
     expect(h.repos.execution.getSessionExecutions(target.sessionId)[0]?.blockers).toEqual(expected);
+    phase='claim';
     let claimError:any;try{h.x.claimNext(target);}catch(error){claimError=error;}
     expect(claimError).toMatchObject({code:'WORKSPACE_RESOURCE_BLOCKED'});
     expect(JSON.parse(claimError.message)).toEqual(expected);
+    phase='prepare';
     expect(h.x.canPrepareWorkspace(h.root)).toBe(false);
+    expect(batches.length).toBeGreaterThan(0);
+    expect(batches.every(row=>row.rows<=32)).toBe(true);
+    expect(batches.filter(row=>row.phase!=='prepare'&&row.source.includes("SELECT ids.session_id,'queued' AS kind"))).toEqual([]);
+    expect(batches.some(row=>row.phase==='prepare'&&row.source.includes("SELECT ids.session_id,'queued' AS kind"))).toBe(true);
+    phase='direct';
 
     for(const offset of [0,32]) {
-      const ids=Array.from({length:32},(_,i)=>offset+i).filter(i=>i<40).map(i=>`candidate-${String(i).padStart(2,'0')}`),marks=ids.map(()=>'?').join(',');
-      const rows=sql.prepare(`SELECT t.session_id,t.id,t.status,a.id AS attempt_id,a.state FROM tasks t
-        LEFT JOIN task_attempts a ON a.id=t.current_attempt_id AND a.task_id=t.id
-        WHERE t.session_id IN (${marks}) AND t.status IN ('queued','reconcile_required')`).all(...ids) as Array<{session_id:string;id:string;status:string}>;
-      for(const id of ids.filter((_,i)=>(offset+i)%5===2)) {
-        const original=sql.prepare("SELECT id FROM tasks WHERE session_id=? AND status='queued' LIMIT 1").get(id) as {id:string};
-        expect(rows.find(row=>row.session_id===id&&row.status==='queued')?.id).toBe(original.id);
+      const ids=Array.from({length:32},(_,i)=>offset+i).filter(i=>i<40).map(i=>`candidate-${String(i).padStart(2,'0')}`),values=ids.map(()=>'(?)').join(',');
+      const rows=sql.prepare(`WITH ids(session_id) AS (VALUES ${values})
+        SELECT ids.session_id,'unknown' AS kind,u.id FROM ids JOIN tasks u ON u.rowid=(
+          SELECT t.rowid FROM tasks t LEFT JOIN task_attempts a ON a.id=t.current_attempt_id AND a.task_id=t.id
+            WHERE t.session_id=ids.session_id AND t.status='reconcile_required' AND (a.id IS NULL OR a.state!='settled') LIMIT 1
+        )`).all(...ids) as Array<{session_id:string;kind:'unknown'|'queued';id:string}>;
+      rows.push(...sql.prepare(`WITH ids(session_id) AS (VALUES ${values})
+        SELECT ids.session_id,'queued' AS kind,q.id FROM ids JOIN tasks q ON q.rowid=(
+          SELECT rowid FROM tasks WHERE session_id=ids.session_id AND status='queued' LIMIT 1
+        )`).all(...ids) as Array<{session_id:string;kind:'unknown'|'queued';id:string}>);
+      expect(rows.length).toBeLessThanOrEqual(ids.length*2);
+      for(const [index,id] of ids.entries()) {
+        const originalUnknown=sql.prepare(`SELECT t.id FROM tasks t LEFT JOIN task_attempts a ON a.id=t.current_attempt_id AND a.task_id=t.id
+          WHERE t.session_id=? AND t.status='reconcile_required' AND (a.id IS NULL OR a.state!='settled') LIMIT 1`).get(id) as {id:string}|undefined;
+        expect(rows.find(row=>row.session_id===id&&row.kind==='unknown')?.id).toBe(originalUnknown?.id);
+        if((offset+index)%5===2) {
+          const original=sql.prepare("SELECT id FROM tasks WHERE session_id=? AND status='queued' LIMIT 1").get(id) as {id:string};
+          expect(rows.find(row=>row.session_id===id&&row.kind==='queued')?.id).toBe(original.id);
+        }
       }
     }
-    const ids=Array.from({length:32},(_,i)=>`candidate-${String(i).padStart(2,'0')}`),marks=ids.map(()=>'?').join(',');
+    const ids=Array.from({length:32},(_,i)=>`candidate-${String(i).padStart(2,'0')}`),marks=ids.map(()=>'?').join(','),values=ids.map(()=>'(?)').join(',');
     for(const [query,index] of [
-      [`SELECT session_id,task_id AS taskId,id AS attemptId FROM task_attempts WHERE session_id IN (${marks}) AND state IN ('preparing','active','reconcile_required','legacy_unresolved')`,'task_attempts_session_state'],
-      [`SELECT t.session_id,t.id,t.status,a.id AS attempt_id,a.state FROM tasks t LEFT JOIN task_attempts a ON a.id=t.current_attempt_id AND a.task_id=t.id WHERE t.session_id IN (${marks}) AND t.status IN ('queued','reconcile_required')`,'tasks_session_created'],
+      [`WITH ids(session_id) AS (VALUES ${values}) SELECT a.session_id,a.task_id AS taskId,a.id AS attemptId FROM ids JOIN task_attempts a ON a.rowid=(SELECT rowid FROM task_attempts WHERE session_id=ids.session_id AND state IN ('preparing','active','reconcile_required','legacy_unresolved') LIMIT 1)`,'task_attempts_session_state'],
+      [`WITH ids(session_id) AS (VALUES ${values}) SELECT ids.session_id,'unknown' AS kind,u.id FROM ids JOIN tasks u ON u.rowid=(SELECT t.rowid FROM tasks t LEFT JOIN task_attempts a ON a.id=t.current_attempt_id AND a.task_id=t.id WHERE t.session_id=ids.session_id AND t.status='reconcile_required' AND (a.id IS NULL OR a.state!='settled') LIMIT 1)`,'tasks_session_created'],
+      [`WITH ids(session_id) AS (VALUES ${values}) SELECT ids.session_id,'queued' AS kind,q.id FROM ids JOIN tasks q ON q.rowid=(SELECT rowid FROM tasks WHERE session_id=ids.session_id AND status='queued' LIMIT 1)`,'tasks_session_created'],
       [`SELECT session_id,task_id FROM task_steering_operations WHERE session_id IN (${marks}) AND state IN ('pending','unknown')`,'task_steering_session_state']
-    ])expect(JSON.stringify(sql.prepare('EXPLAIN QUERY PLAN '+query).all(...ids))).toContain(index);
-  } finally {sql.close();}
+    ]) {
+      const plan=JSON.stringify(sql.prepare('EXPLAIN QUERY PLAN '+query).all(...ids));
+      expect(plan).toContain(index);
+      if(index!=='task_steering_session_state')expect(plan).toContain('CORRELATED');
+    }
+  } finally {statement.all=originalAll;sql.close();}
 });
 
 it('keeps malformed verification evidence scoped to its actual repository instead of skipping it or blocking unrelated work',async()=>{
