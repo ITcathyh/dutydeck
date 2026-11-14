@@ -11,6 +11,14 @@ import { planGuardScript } from './plan-guard.js';
 export const claudeAdapters: ReadonlySet<string> = new Set(['claude-code', 'seed', 'relay', 'genius']);
 const planGuardFile = 'plan-guard.mjs';
 const planGuardActiveFile = 'plan-guard-active';
+const launchGuardFile = 'launch-guard.json';
+
+interface LaunchGuardWiring {
+  id: string;
+  failureBlock: boolean;
+  planGuard: boolean;
+  secretGuard: boolean;
+}
 
 function settingsArgs(args: string[]): { rest: string[]; value?: string } {
   const rest: string[] = [];
@@ -60,6 +68,7 @@ function hasGuardHook(settings: Record<string, unknown>, expectedMatcher: string
 export class ClaudeSettings {
   private readonly directory: string;
   private readonly files = new Set<string>();
+  private launchGuard?: LaunchGuardWiring;
 
   constructor(private readonly adapterId: string, sessionId: string) {
     const key = createHash('sha256').update(sessionId).digest('hex');
@@ -67,7 +76,10 @@ export class ClaudeSettings {
     if (claudeAdapters.has(adapterId)) {
       try {
         this.assertPrivateDirectory();
-        for (const file of readdirSync(this.directory)) this.files.add(join(this.directory, file));
+        for (const file of readdirSync(this.directory)) {
+          if (file !== launchGuardFile) this.files.add(join(this.directory, file));
+        }
+        this.launchGuard = this.readLaunchGuard();
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     }
   }
@@ -146,8 +158,31 @@ export class ClaudeSettings {
     this.files.add(activePath);
   }
 
+  /** 真实 spawn/respawn 后记录本次进程实际加载的设置与启动探测结果；之后的轮次不再探测磁盘 CLI。 */
+  recordLaunch(launchArgs: string[], cwd: string, failureBlock: boolean): void {
+    if (!claudeAdapters.has(this.adapterId)) return;
+    const { value } = settingsArgs(launchArgs);
+    const settings = value === undefined ? undefined : readSettings(value, cwd);
+    const wired = (matcher: string, markers: string[]) => settings !== undefined && hasGuardHook(settings, matcher, markers, failureBlock);
+    this.launchGuard = {
+      id: randomUUID(),
+      failureBlock,
+      planGuard: wired(claudePlanGuardMatcher, [join(this.directory, planGuardFile)]),
+      secretGuard: wired(secretGuardToolMatcher, ['secret-guard.mjs', 'DUTYDECK_POLICY_ROOT=', quote(cwd)]),
+    };
+    try { mkdirSync(this.directory, { mode: 0o700 }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+    this.assertPrivateDirectory();
+    writeFileSync(join(this.directory, launchGuardFile), JSON.stringify(this.launchGuard), { mode: 0o600 });
+  }
+
+  /** 接管时只认上次真实启动留下的记录；没有记录或记录损坏都不能证明旧进程的配置。 */
+  launchGuardWiring(): Readonly<LaunchGuardWiring> | undefined {
+    return this.launchGuard;
+  }
+
   /**
-   * 正在跑的 CLI 有没有守卫 hook：本驱动启动的看启动参数里的设置，接管的旧终端看会话目录里的每份设置。
+   * 正在跑的 CLI 有没有守卫 hook：核对本次启动参数里的设置。
    * marker、精确 matcher 和 command type 始终核对；确认支持 onFailure:block 的官方新版还必须带这个字段。
    */
   planGuardWired(launchArgs: string[], cwd: string, failureBlockRequired = false): boolean {
@@ -160,17 +195,11 @@ export class ClaudeSettings {
   }
 
   private guardWired(launchArgs: string[], cwd: string, expectedMatcher: string, commandMarkers: string[], failureBlockRequired: boolean): boolean {
-    if (launchArgs.length) {
-      const { value } = settingsArgs(launchArgs);
-      if (value === undefined) return false;
-      try { return hasGuardHook(readSettings(value, cwd), expectedMatcher, commandMarkers, failureBlockRequired); }
-      catch { return false; }
-    }
-    const settings = [...this.files].filter(path => path.endsWith('.json'));
-    return settings.length > 0 && settings.every(path => {
-      try { return hasGuardHook(readSettings(path, cwd), expectedMatcher, commandMarkers, failureBlockRequired); }
-      catch { return false; }
-    });
+    if (!launchArgs.length) return false;
+    const { value } = settingsArgs(launchArgs);
+    if (value === undefined) return false;
+    try { return hasGuardHook(readSettings(value, cwd), expectedMatcher, commandMarkers, failureBlockRequired); }
+    catch { return false; }
   }
 
   cleanup(): void {
@@ -179,8 +208,21 @@ export class ClaudeSettings {
     // files this driver created or adopted, never the replacement's settings.
     for (const path of this.files) rmSync(path, { force: true });
     this.files.clear();
+    if (this.launchGuard && this.readLaunchGuard()?.id === this.launchGuard.id) {
+      rmSync(join(this.directory, launchGuardFile), { force: true });
+    }
+    this.launchGuard = undefined;
     try { rmdirSync(this.directory); }
     catch (error) { if (!['ENOENT', 'ENOTEMPTY'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error; }
+  }
+
+  private readLaunchGuard(): LaunchGuardWiring | undefined {
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(join(this.directory, launchGuardFile), 'utf8'));
+      if (!object(parsed) || typeof parsed.id !== 'string' || !parsed.id
+        || typeof parsed.failureBlock !== 'boolean' || typeof parsed.planGuard !== 'boolean' || typeof parsed.secretGuard !== 'boolean') return undefined;
+      return { id: parsed.id, failureBlock: parsed.failureBlock, planGuard: parsed.planGuard, secretGuard: parsed.secretGuard };
+    } catch { return undefined; }
   }
 
   private assertPrivateDirectory(): void {

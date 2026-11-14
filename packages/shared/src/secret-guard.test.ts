@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -139,6 +139,40 @@ describe('secret guard', () => {
       expect(spawnSync('/bin/sh', ['-c', command], { input: 'not json', encoding: 'utf8', env: { ...process.env, dutydeck_session_id: 'ses_1' } }).status).toBe(2);
       expect(secretGuardActive({ root, sessionId: 'ses_1' })).toBe(true);
       expect(secretGuardActive({ root, sessionId: 'ses_2' })).toBe(false);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('skips Node for a missing policy or empty session, but still blocks an existing malformed policy', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dutydeck-secret-guard-fast-path-'));
+    const sessions = join(root, '.dutydeck', 'security', 'sessions');
+    mkdirSync(sessions, { recursive: true });
+    const count = join(root, 'node-count');
+    const node = join(root, 'counting-node');
+    writeFileSync(node, `#!/bin/sh\nprintf 1 >> ${JSON.stringify(count)}\nexec ${JSON.stringify(process.execPath)} "$@"\n`, { mode: 0o755 });
+    const command = secretGuardHookCommand({ nodePath: node, policyRoot: root });
+    const run = (dutydeck_session_id: string) => spawnSync('/bin/sh', ['-c', command], {
+      input: JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'cat ~/.codex/auth.json' }, cwd: '/work/repo' }),
+      encoding: 'utf8', env: { ...process.env, HOME: home, dutydeck_session_id },
+    });
+    try {
+      expect(run('ses_1')).toMatchObject({ status: 0, stdout: '' });
+      expect.soft(existsSync(count), 'a missing policy must not start Node').toBe(false);
+      rmSync(count, { force: true });
+      rmSync(sessions, { recursive: true });
+      expect(run('ses_2')).toMatchObject({ status: 0, stdout: '' });
+      expect.soft(existsSync(count), 'a missing policy directory must not start Node').toBe(false);
+      rmSync(count, { force: true });
+      mkdirSync(sessions, { recursive: true });
+
+      writeFileSync(join(sessions, '.json'), 'broken');
+      expect(run('')).toMatchObject({ status: 0, stdout: '' });
+      expect.soft(existsSync(count), 'an empty session id must not start Node').toBe(false);
+      rmSync(join(sessions, '.json'));
+      rmSync(count, { force: true });
+
+      writeFileSync(join(sessions, 'ses_1.json'), 'broken');
+      expect(run('ses_1').status).toBe(2);
+      expect(readFileSync(count, 'utf8')).toBe('1');
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 

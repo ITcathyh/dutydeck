@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -439,12 +439,23 @@ describe('PTY driver plan phase', () => {
 });
 
 describe('PTY Claude guard version compatibility', () => {
-  function capabilityFixture(version: string, permissionMode: PermissionMode = 'ask') {
+  function capabilityFixture(version: string, permissionMode: PermissionMode = 'ask', options: { stripFailureBlock?: boolean; historicalSettings?: boolean; secretGuardDefect?: 'hook' | 'marker' | 'matcher' | 'type' } = {}) {
     const cwd = temp();
     const command = join(cwd, 'claude');
-    const output = version === 'probe-failure' ? 'process.exit(1);' : `process.stdout.write(${JSON.stringify(version)});`;
-    writeFileSync(command, `#!${process.execPath}\nif (process.argv.includes('--version')) { ${output} }\n`, { mode: 0o755 });
+    const probeCount = join(cwd, 'probe-count');
+    const program = (value: string) => value === 'probe-failure' ? 'process.exit(1);' : `process.stdout.write(${JSON.stringify(value)});`;
+    writeFileSync(command, `#!${process.execPath}\nif (process.argv.includes('--version')) { require('node:fs').appendFileSync(${JSON.stringify(probeCount)}, '1'); ${program(version)} }\n`, { mode: 0o755 });
+    let sequence = 0;
+    const install = (nextVersion: string) => {
+      const next = join(cwd, `claude-${++sequence}`);
+      writeFileSync(next, `#!${process.execPath}\nif (process.argv.includes('--version')) { require('node:fs').appendFileSync(${JSON.stringify(probeCount)}, '1'); ${program(nextVersion)} }\n`, { mode: 0o755 });
+      renameSync(next, command);
+    };
     const sessionId = `ses_${randomUUID()}`;
+    if (options.historicalSettings) {
+      const history = new ClaudeSettings('claude-code', sessionId);
+      history.args(['--settings', '{"theme":"dark"}'], ['--settings', '{"env":{"HISTORICAL":"yes"}}'], cwd);
+    }
     const spawned = { args: [] as string[] };
     const prompts: string[] = [];
     const backend: SessionBackend = {
@@ -455,6 +466,26 @@ describe('PTY Claude guard version compatibility', () => {
       ...claude,
       capabilities: {},
       prepareInput: undefined,
+      buildArgs: options.stripFailureBlock || options.secretGuardDefect ? context => {
+        const args = claude.buildArgs(context);
+        const index = args.indexOf('--settings');
+        if (index >= 0) {
+          const value = JSON.parse(args[index + 1]!);
+          if (options.stripFailureBlock) {
+            for (const group of value.hooks.PreToolUse) for (const hook of group.hooks) delete hook.onFailure;
+          }
+          if (options.secretGuardDefect) {
+            const groups = value.hooks.PreToolUse;
+            const secret = groups.findIndex((group: { hooks: { command: string }[] }) => group.hooks[0]!.command.includes('secret-guard.mjs'));
+            if (options.secretGuardDefect === 'hook') groups.splice(secret, 1);
+            if (options.secretGuardDefect === 'marker') groups[secret].hooks[0].command = groups[secret].hooks[0].command.replace('secret-guard.mjs', 'other-guard.mjs');
+            if (options.secretGuardDefect === 'matcher') groups[secret].matcher = '^Bash$';
+            if (options.secretGuardDefect === 'type') groups[secret].hooks[0].type = 'http';
+          }
+          args[index + 1] = JSON.stringify(value);
+        }
+        return args;
+      } : claude.buildArgs,
       writeInput: (_backend, prompt) => { prompts.push(prompt); throw new Error('fixture reached prompt write'); },
     };
     const agent: AgentConfig = {
@@ -462,10 +493,17 @@ describe('PTY Claude guard version compatibility', () => {
       env: { dutydeck_session_id: sessionId }, permissionMode, timeout: 60,
       capabilities: { pause: false, resume: true }, builtin: false,
     };
-    const driver = new PtyCliDriver({ agent, adapter, backend, sessionId, onEvent() {}, onExit() {} });
+    const makeDriver = () => new PtyCliDriver({ agent, adapter, backend, sessionId, onEvent() {}, onExit() {} });
+    const driver = makeDriver();
     cleanups.push(() => driver.stop());
+    const adopt = () => {
+      const adopted = makeDriver();
+      cleanups.push(() => adopted.stop());
+      (adopted as unknown as { started: boolean }).started = true;
+      return adopted;
+    };
     const policy = join(cwd, '.dutydeck', 'security', 'sessions', `${sessionId}.json`);
-    return { driver, command, cwd, sessionId, spawned, prompts, policy, internals: driver as unknown as { lastArgs: string[] } };
+    return { driver, adopt, command, install, probeCount, cwd, sessionId, spawned, prompts, policy, internals: driver as unknown as { lastArgs: string[] } };
   }
 
   const hooks = (args: string[]) => {
@@ -529,38 +567,72 @@ describe('PTY Claude guard version compatibility', () => {
   });
 
   it.each(['hook', 'marker', 'matcher', 'type'])('rejects an old adopted terminal with the wrong secret guard %s', async defect => {
-    const { driver, prompts, spawned, policy, internals } = capabilityFixture('2.1.220 (Claude Code)\n');
-    await driver.start();
+    const { driver: launched, prompts, policy, adopt } = capabilityFixture('2.1.220 (Claude Code)\n', 'ask', { secretGuardDefect: defect as 'hook' | 'marker' | 'matcher' | 'type' });
+    await launched.start();
+    const driver = adopt();
     mkdirSync(dirname(policy), { recursive: true });
     writeFileSync(policy, JSON.stringify({ enabled: true, authorized: false }));
-    const settingsPath = spawned.args[spawned.args.indexOf('--settings') + 1]!;
-    const settingsValue = JSON.parse(readFileSync(settingsPath, 'utf8'));
-    const groups = settingsValue.hooks.PreToolUse;
-    const index = groups.findIndex((group: { hooks: { command: string }[] }) => group.hooks[0]!.command.includes('secret-guard.mjs'));
-    if (defect === 'hook') groups.splice(index, 1);
-    if (defect === 'marker') groups[index].hooks[0].command = groups[index].hooks[0].command.replace('secret-guard.mjs', 'other-guard.mjs');
-    if (defect === 'matcher') groups[index].matcher = '^Bash$';
-    if (defect === 'type') groups[index].hooks[0].type = 'http';
-    writeFileSync(settingsPath, JSON.stringify(settingsValue));
-    internals.lastArgs = [];
     await expect(driver.send('adopted without valid secret guard')).rejects.toMatchObject({ code: 'PROMPT_NOT_WRITTEN' });
     expect(prompts).toHaveLength(0);
   });
 
   it('allows a protected turn on a supported Claude and rejects adopted settings missing onFailure', async () => {
-    const { driver, prompts, policy, spawned } = capabilityFixture('2.1.295 (Claude Code)\n');
+    const { driver, prompts, policy } = capabilityFixture('2.1.295 (Claude Code)\n');
     await driver.start();
     mkdirSync(dirname(policy), { recursive: true });
     writeFileSync(policy, JSON.stringify({ enabled: true, authorized: false }));
     await expect(driver.send('protected')).rejects.toThrow('fixture reached prompt write');
     expect(prompts).toHaveLength(1);
 
-    const settingsPath = spawned.args[spawned.args.indexOf('--settings') + 1]!;
-    const settingsValue = JSON.parse(readFileSync(settingsPath, 'utf8'));
-    for (const group of settingsValue.hooks.PreToolUse) for (const hook of group.hooks) delete hook.onFailure;
-    writeFileSync(settingsPath, JSON.stringify(settingsValue));
-    (driver as unknown as { lastArgs: string[] }).lastArgs = [];
-    await expect(driver.send('adopted without onFailure')).rejects.toMatchObject({ code: 'PROMPT_NOT_WRITTEN' });
+    const missing = capabilityFixture('2.1.295 (Claude Code)\n', 'ask', { stripFailureBlock: true });
+    await missing.driver.start();
+    const adopted = missing.adopt();
+    mkdirSync(dirname(missing.policy), { recursive: true });
+    writeFileSync(missing.policy, JSON.stringify({ enabled: true, authorized: false }));
+    await expect(adopted.send('adopted without onFailure')).rejects.toMatchObject({ code: 'PROMPT_NOT_WRITTEN' });
+    expect(missing.prompts).toHaveLength(0);
+  });
+
+  it('does not reject an old running process when the on-disk CLI upgrades', async () => {
+    const { driver, prompts, policy, install, probeCount } = capabilityFixture('2.1.220 (Claude Code)\n');
+    await driver.start();
+    install('2.1.323 (Claude Code)\n');
+    mkdirSync(dirname(policy), { recursive: true });
+    writeFileSync(policy, JSON.stringify({ enabled: true, authorized: false }));
+    await expect(driver.send('still the old process')).rejects.toThrow('fixture reached prompt write');
     expect(prompts).toHaveLength(1);
+    expect(readFileSync(probeCount, 'utf8')).toBe('1');
+  });
+
+  it('does not trust missing onFailure evidence when the on-disk CLI downgrades', async () => {
+    const { driver, prompts, policy, install, probeCount } = capabilityFixture('2.1.295 (Claude Code)\n', 'ask', { stripFailureBlock: true });
+    await driver.start();
+    install('2.1.220 (Claude Code)\n');
+    mkdirSync(dirname(policy), { recursive: true });
+    writeFileSync(policy, JSON.stringify({ enabled: true, authorized: false }));
+    await expect(driver.send('unsupported settings must stay rejected')).rejects.toMatchObject({ code: 'PROMPT_NOT_WRITTEN' });
+    expect(prompts).toHaveLength(0);
+    expect(readFileSync(probeCount, 'utf8')).toBe('1');
+  });
+
+  it('ignores unloaded historical settings when adopting the recorded launch', async () => {
+    const { driver: launched, prompts, policy, adopt } = capabilityFixture('2.1.295 (Claude Code)\n', 'ask', { historicalSettings: true });
+    await launched.start();
+    const driver = adopt();
+    mkdirSync(dirname(policy), { recursive: true });
+    writeFileSync(policy, JSON.stringify({ enabled: true, authorized: false }));
+    await expect(driver.send('only the loaded settings matter')).rejects.toThrow('fixture reached prompt write');
+    expect(prompts).toHaveLength(1);
+  });
+
+  it('records a failed startup probe without retrying it on later protected sends', async () => {
+    const { driver, prompts, policy, probeCount } = capabilityFixture('probe-failure');
+    await driver.start();
+    mkdirSync(dirname(policy), { recursive: true });
+    writeFileSync(policy, JSON.stringify({ enabled: true, authorized: false }));
+    await expect(driver.send('first protected send')).rejects.toThrow('fixture reached prompt write');
+    await expect(driver.send('second protected send')).rejects.toThrow('fixture reached prompt write');
+    expect(prompts).toHaveLength(2);
+    expect(readFileSync(probeCount, 'utf8')).toBe('1');
   });
 });

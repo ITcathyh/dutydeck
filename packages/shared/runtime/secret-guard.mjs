@@ -211,12 +211,15 @@ export function secretGuardScriptPath() {
 const policyFile = (root, sessionId) => join(root, '.dutydeck', 'security', 'sessions', `${sessionId}.json`);
 
 /**
- * 给 Agent CLI 配置的 hook 命令。每次工具调用都运行同一份策略解析：文件不存在、未启用或无匹配策略放行；
- * 其他读取、JSON 或脚本错误都退出 2，不用文本快路径猜本轮是否需要保护。
+ * 给 Agent CLI 配置的 hook 命令。会话 id 为空或本轮策略文件不存在时，shell 直接放行，不启动 Node；
+ * 文件存在才由 Node 解析并检查，读取、JSON 或脚本错误都退出 2，不用 enabled:false 等文本快路径猜策略。
+ * 策略目录本身不是目录时也让 Node 按读取错误拒绝，不把这种异常当成普通的缺文件。
  */
 export function secretGuardHookCommand({ nodePath = process.execPath, policyRoot }) {
   const root = quote(policyRoot);
-  return `DUTYDECK_POLICY_ROOT=${root} ${quote(nodePath)} ${quote(secretGuardScriptPath())} || exit 2`;
+  const sessions = `${root}/.dutydeck/security/sessions`;
+  return `[ -z "$dutydeck_session_id" ] && exit 0; [ -e ${sessions}/"$dutydeck_session_id".json ] || { [ -e ${sessions} ] && [ ! -d ${sessions} ]; } || exit 0; `
+    + `DUTYDECK_POLICY_ROOT=${root} ${quote(nodePath)} ${quote(secretGuardScriptPath())} || exit 2`;
 }
 
 /** 本轮要拦时返回策略：风险管控开启（enabled）且发起人未获授权。文件不存在放行，其他读取或解析错误向上抛出。 */

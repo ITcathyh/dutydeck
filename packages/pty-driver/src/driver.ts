@@ -1,5 +1,5 @@
 import { childEnvironment } from '@dutydeck/shared/child-environment';
-import { probeClaudeHookFailureBlock, secretGuardActive } from '@dutydeck/shared/secret-guard';
+import { secretGuardActive } from '@dutydeck/shared/secret-guard';
 import {
   AGENT_IDLE_TIMEOUT,
   AGENT_LOGIN_REQUIRED,
@@ -386,8 +386,8 @@ export class PtyCliDriver implements AgentDriver {
     this.planGuardActive = false;
   }
 
-  private assertPlanGuardWired(failureBlockRequired = false) {
-    if (!this.started || this.claudeSettings.planGuardWired(this.lastArgs, this.cwd, failureBlockRequired)) return;
+  private assertPlanGuardWired(failureBlockRequired = this.claudeSettings.launchGuardWiring()?.failureBlock ?? false) {
+    if (!this.started || this.claudeSettings.launchGuardWiring()?.planGuard) return;
     if (failureBlockRequired) throw new RuntimeError('PLAN_GUARD_UNAVAILABLE', '这个终端会话的计划守卫缺少 onFailure:"block"。请开新会话（飞书里发 /new）再用先出计划。', 409);
     throw new RuntimeError('PLAN_GUARD_UNAVAILABLE', '这个终端会话启动时还没有计划阶段拦截，没法保证计划阶段不改文件。请开新会话（飞书里发 /new）后再用先出计划。', 409);
   }
@@ -398,13 +398,12 @@ export class PtyCliDriver implements AgentDriver {
     });
   }
 
-  /** 受保护轮次仍核对真实接线；只有确认支持 onFailure:block 的官方新版才要求这个字段。 */
-  private async assertGuardWiring(secretActive: boolean): Promise<void> {
-    const failureBlockRequired = this.adapter.id === 'claude-code' && await probeClaudeHookFailureBlock({
-      command: this.agent.command, env: this.spawnEnv(), cwd: this.cwd,
-    });
+  /** 受保护轮次只核对真实启动时记录的设置与能力，不重新探测可能已经升级的磁盘 CLI。 */
+  private assertGuardWiring(secretActive: boolean): void {
+    const launch = this.claudeSettings.launchGuardWiring();
+    const failureBlockRequired = launch?.failureBlock ?? false;
     if (this.planGuardActive) this.assertPlanGuardWired(failureBlockRequired);
-    if (secretActive && (!this.started || !this.claudeSettings.secretGuardWired(this.lastArgs, this.cwd, failureBlockRequired))) {
+    if (secretActive && (!this.started || !launch?.secretGuard)) {
       throw new PromptNotWrittenError(failureBlockRequired
         ? '当前终端的凭据守卫缺少 onFailure:"block"，无法在守卫失败时保证阻断。请重开会话后再发，本轮消息尚未写入。'
         : '当前终端没有完整的凭据守卫接线。请重开会话后再发，本轮消息尚未写入。');
@@ -482,6 +481,7 @@ export class PtyCliDriver implements AgentDriver {
       await this.backend.spawn(this.agent.command, this.lastArgs, {
         cwd: this.cwd, cols: DEFAULT_COLS, rows: DEFAULT_ROWS, env: spawnEnv, programStatus: this.usesProgramStatus,
       });
+      this.claudeSettings.recordLaunch(this.lastArgs, this.cwd, this.adapter.guardFailureBlock?.() ?? false);
       check();
       this.recordTranscriptLaunch(spawnEnv);
       (await this.wire(this.backend));
@@ -510,6 +510,7 @@ export class PtyCliDriver implements AgentDriver {
       env: spawnEnv,
       programStatus: this.usesProgramStatus,
     });
+    this.claudeSettings.recordLaunch(this.lastArgs, this.cwd, this.adapter.guardFailureBlock?.() ?? false);
     check();
     this.recordTranscriptLaunch(spawnEnv);
     (await this.wire(this.backend));
@@ -600,7 +601,7 @@ export class PtyCliDriver implements AgentDriver {
     }
     if (this.stopped) throw new Error('Driver stopped');
     const secretActive = this.secretGuardRequired();
-    if (this.planGuardActive || secretActive) await this.assertGuardWiring(secretActive);
+    if (this.planGuardActive || secretActive) this.assertGuardWiring(secretActive);
 
     let finalPrompt = prompt;
     let routingPrefix: string | undefined;
@@ -2790,6 +2791,7 @@ export class PtyCliDriver implements AgentDriver {
         env: respawnEnv,
         programStatus: this.usesProgramStatus,
       });
+      this.claudeSettings.recordLaunch(this.lastArgs, this.cwd, this.adapter.guardFailureBlock?.() ?? false);
       if (this.superseded(backend, generation)) throw new Error('PTY respawn cancelled by lifecycle change');
     } catch (error) {
       if (backend instanceof HerdrBackend && this.superseded(backend, generation)) {
