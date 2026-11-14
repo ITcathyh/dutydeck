@@ -65,7 +65,7 @@ interface InsightSourceSubscription {
 const isTaskFenceRevocation = (error: unknown): error is RuntimeError => error instanceof RuntimeError
   && (error.code === 'SESSION_AUTOMATION_TASK_REVOKED' || error.code === 'SESSION_AUTOMATION_TASK_STALE_HEAD' || error.code === 'WORK_ITEM_TASK_REVOKED');
 
-function isAttemptRef(ref: SessionFence): ref is SessionFence & AttemptRef {
+function isAttemptRef(ref: SessionFence | AttemptRef): ref is SessionFence & AttemptRef {
   return 'attemptId' in ref && 'taskId' in ref && typeof ref.attemptId === 'string' && typeof ref.taskId === 'string';
 }
 
@@ -610,7 +610,7 @@ export class DutydeckRuntime {
     }
     const firstToolCall = new Map<string, number>();
     // driverEventData 会把缺失 id 字符串化并加轮次前缀；这些事件仍必须作为分隔符。
-    const missingToolCallIds = new Set(['', 'undefined', 'null'].map(id => `turn_${digest([ref.taskId, ref.attemptId, id])}`));
+    const missingToolCallIds = new Set(['', 'undefined', 'null'].map(id => this.scopedId(ref, id)));
     for (const [index, event] of events.entries()) {
       if (event.type !== 'tool_call') continue;
       const id = (event.data as { id?: unknown }).id;
@@ -1905,13 +1905,15 @@ export class DutydeckRuntime {
     }
   }
 
+  private scopedId(scope: SessionFence | AttemptRef | undefined, nativeId: string): string {
+    return scope && isAttemptRef(scope) ? `turn_${digest([scope.taskId, scope.attemptId, nativeId])}` : nativeId;
+  }
   /** 驱动事件写入账本前的形态：内容归一化，轮次内的原生 id 加上轮次前缀。 */
   private driverEventData(scope: SessionFence | undefined, event: NormalizedDriverEvent) {
     let data = event.data;
     if (data && Array.isArray(data.parts)) data = { ...data, parts: normalizeEventContent(data.parts) };
     if (event.type !== 'permission_request' && event.type !== 'tool_call' && event.type !== 'tool_result') return data;
-    const scopedId = (nativeId: string) => scope && isAttemptRef(scope) ? `turn_${digest([scope.taskId, scope.attemptId, nativeId])}` : nativeId;
-    return { ...data, id: scopedId(String(data.id)), ...(data.toolCallId ? { toolCallId: scopedId(String(data.toolCallId)) } : {}) };
+    return { ...data, id: this.scopedId(scope, String(data.id)), ...(data.toolCallId ? { toolCallId: this.scopedId(scope, String(data.toolCallId)) } : {}) };
   }
   private async reviewHostPermission(session: Session, scope: SessionFence, event: NormalizedDriverEvent) {
     if (!this.options.reviewPermission || event.type !== 'permission_request' || (event.data?.status ?? 'pending') !== 'pending' || !isAttemptRef(scope)) return undefined;

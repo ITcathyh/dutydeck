@@ -241,8 +241,8 @@ export class PtyCliDriver implements AgentDriver {
     pending?: Promise<unknown>;
     writesSettled?: boolean;
   } | undefined;
-  private maintenanceUnknown = false;
   private maintenanceUnknownRecovery: NonNullable<PtyCliDriver['maintenanceActive']> | undefined;
+  private get maintenanceUnknown(): boolean { return this.maintenanceUnknownRecovery !== undefined; }
   private maintenanceExitResolve: (() => void) | undefined;
   private readonly maintenanceExit = new Promise<false>(resolve => { this.maintenanceExitResolve = () => resolve(false); });
   private maintenanceGeneration = 0;
@@ -810,7 +810,6 @@ export class PtyCliDriver implements AgentDriver {
       return outcome;
     };
     const unknown = (): PromptNotWrittenError => {
-      this.maintenanceUnknown = true;
       this.maintenanceUnknownRecovery = maintenance;
       return new PromptNotWrittenError(maintenancePromptNotWritten);
     };
@@ -870,12 +869,7 @@ export class PtyCliDriver implements AgentDriver {
       maintenance.submitted = true;
       const outcome = await race(observation);
       let recovered = await race(this.recoverCompletedMaintenance(maintenance));
-      let interruptedRecovery = false;
-      if (!recovered) {
-        interruptedRecovery = true;
-        recovered = await race(this.recoverInterruptedMaintenance(maintenance));
-      }
-      if ((maintenance.cancelRequested || maintenance.timedOut) && !interruptedRecovery) {
+      if (!recovered || maintenance.cancelRequested || maintenance.timedOut) {
         recovered = await race(this.recoverInterruptedMaintenance(maintenance));
       }
       if (!recovered) throw unknown();
@@ -1082,7 +1076,6 @@ export class PtyCliDriver implements AgentDriver {
       const recovered = await this.recoverInterruptedMaintenance(maintenance, false);
       if (!recovered || this.maintenanceUnknownRecovery !== maintenance || this.maintenanceActive !== maintenance
         || this.turnActive || this.activeSubmission) return false;
-      this.maintenanceUnknown = false;
       this.maintenanceUnknownRecovery = undefined;
       return true;
     } finally {
@@ -1098,7 +1091,6 @@ export class PtyCliDriver implements AgentDriver {
     const recovered = this.maintenanceInterruptedTerminalRecovered(maintenance);
     if (this.maintenanceActive === maintenance) this.maintenanceActive = undefined;
     if (!recovered) return false;
-    this.maintenanceUnknown = false;
     this.maintenanceUnknownRecovery = undefined;
     return true;
   }

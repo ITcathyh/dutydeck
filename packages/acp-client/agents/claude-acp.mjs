@@ -73,12 +73,12 @@ if (!installedClaude) {
   const { claudeCliPath } = await import('@agentclientprotocol/claude-agent-acp/dist/acp-agent.js');
   installedClaude = await claudeCliPath();
 }
-if (installedClaude && process.platform !== 'win32') {
+if (process.platform !== 'win32') {
   const guarded = await guardedExecutable(installedClaude, env);
   env.dutydeck_claude_executable = installedClaude;
   env.dutydeck_secret_guard_settings = guarded.settings;
   env.CLAUDE_CODE_EXECUTABLE = guarded.file;
-} else if (installedClaude) env.CLAUDE_CODE_EXECUTABLE = installedClaude;
+} else env.CLAUDE_CODE_EXECUTABLE = installedClaude;
 const bundledClaudeAcp = fileURLToPath(import.meta.resolve('@agentclientprotocol/claude-agent-acp/dist/index.js'));
 const command = process.env.DUTYDECK_CLAUDE_ACP_COMMAND || process.execPath;
 const args = process.env.DUTYDECK_CLAUDE_ACP_ARGS_JSON

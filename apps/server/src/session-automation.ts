@@ -2001,11 +2001,10 @@ export class SessionAutomationService {
     try { sessionMaybe = schedule.mode === 'independent' || schedule.mode === 'fresh' ? await this.executionSession(schedule) : origin; }
     catch (error) {
       const accepted = occurrence.admission && this.execution.getAcceptedTask(occurrence.admission.taskId);
-      const environmentUnavailable = error instanceof RuntimeError && ENVIRONMENT_UNAVAILABLE_CODES.has(error.code);
-      if (environmentUnavailable) {
-        this.warn({ scheduleId: schedule.id, occurrenceId: occurrence.id, sessionId: schedule.executionSessionId, code: errorCode(error) }, '定时触发时 Agent 环境暂不可用');
+      if (error instanceof RuntimeError && ENVIRONMENT_UNAVAILABLE_CODES.has(error.code)) {
+        this.warn({ scheduleId: schedule.id, occurrenceId: occurrence.id, sessionId: schedule.executionSessionId, code: error.code }, '定时触发时 Agent 环境暂不可用');
         // 已接受的任务仍按原账本对账；只有确认未接受才记录这次环境漏跑。
-        if (!accepted) await this.noteTriggerError(schedule.id, occurrence.id, errorCode(error));
+        if (!accepted) await this.noteTriggerError(schedule.id, occurrence.id, error.code);
       } else {
         // 新会话暂时开不出来不停用计划：记为触发出错，由 followUpOccurrence 重跑一次或在原话题说明。
         const unavailable = !accepted && error instanceof RuntimeError && SESSION_UNAVAILABLE_CODES.has(error.code);
