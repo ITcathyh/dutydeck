@@ -150,3 +150,55 @@ it('a clean foreground stop does not create an abnormal record on the next start
   second.child.kill('SIGTERM');
   expect(await second.exited).toEqual({ code: 0, signal: null });
 }, 90_000);
+
+it.each([
+  { handler: 1, stage: 'startup', phase: 'starting', exitCode: 143 },
+  { handler: 2, stage: 'normal shutdown', phase: 'running', exitCode: 0 }
+])('warns when the $stage clean-exit marker cannot be persisted without changing the exit code', async ({ handler, phase, exitCode }) => {
+  const root = mkdtempSync(join(tmpdir(), 'dutydeck-clean-exit-write-failure-')); roots.push(root);
+  const scratch = join(root, 'scratch'); mkdirSync(join(scratch, 'data'), { recursive: true });
+  const database = join(scratch, 'data', 'dutydeck.db');
+  const diagnostic = join(scratch, 'data', 'last-abnormal-exit.json');
+  const faultReady = join(root, 'fault-ready');
+  const preload = join(root, 'clean-exit-write-failure.mjs');
+  writeFileSync(preload, `import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
+const originalOn = process.on;
+let sigtermHandlers = 0;
+process.on = function (event, listener) {
+  const result = originalOn.call(this, event, listener);
+  if (event === 'SIGTERM') {
+    sigtermHandlers++;
+    if (sigtermHandlers === Number(process.env.CLEAN_EXIT_FAULT_HANDLER)) {
+      const file = process.env.CLEAN_EXIT_FAULT_FILE;
+      renameSync(file, file + '.saved');
+      mkdirSync(file);
+      writeFileSync(process.env.CLEAN_EXIT_FAULT_READY, 'ready');
+    }
+  }
+  return result;
+};
+`);
+  const child = spawn(process.execPath, ['--import', preload, cli, '--local-only', '--port', String(await freePort()), '--no-lark-listen'], {
+    cwd: scratch, stdio: ['ignore', 'pipe', 'pipe'],
+    env: {
+      HOME: root, PATH: process.env.PATH, DUTYDECK_DATABASE_URL: database, DUTYDECK_DEFAULT_CWD: scratch,
+      DUTYDECK_AGENTS_JSON: '[]', DUTYDECK_DISABLE_LARK_LISTENER: 'true',
+      CLEAN_EXIT_FAULT_HANDLER: String(handler), CLEAN_EXIT_FAULT_FILE: diagnostic, CLEAN_EXIT_FAULT_READY: faultReady
+    }
+  });
+  children.add(child);
+  const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => child.once('exit', (code, signal) => resolve({ code, signal })));
+  let stdout = '', stderr = '';
+  child.stdout.on('data', chunk => { stdout += chunk; });
+  child.stderr.on('data', chunk => { stderr += chunk; });
+  await expect.poll(() => existsSync(faultReady), { timeout: 30_000, interval: 10 }).toBe(true);
+  child.kill('SIGTERM');
+  expect(await exited, `${stdout}\n${stderr}`).toEqual({ code: exitCode, signal: null });
+  expect(stderr).toContain('Warning: could not persist the clean-exit marker beside the database');
+  expect(stderr).toContain('the next start may record this run as an abnormal exit');
+
+  const saved = JSON.parse(readFileSync(`${diagnostic}.saved`, 'utf8'));
+  expect(saved.lifecycle).toMatchObject({ phase });
+  expect(saved.cleanExits).toBeUndefined();
+  expect(saved['clean-exit']).toBeUndefined();
+}, 90_000);

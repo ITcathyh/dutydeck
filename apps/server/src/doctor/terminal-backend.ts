@@ -26,7 +26,7 @@ function errorText(error: unknown): string {
 /** 每次调用都强制带同一个私有 socket 和空配置；shell:false 让 argv 不经过 shell 解释。 */
 function runTmux(socketPath: string, args: readonly string[], timeoutMs: number, env: NodeJS.ProcessEnv): Promise<TmuxRunResult> {
   return new Promise(resolve => {
-    execFile('tmux', ['-S', socketPath, '-f', '/dev/null', ...args], {
+    execFile('tmux', ['-u', '-S', socketPath, '-f', '/dev/null', ...args], {
       env,
       shell: false,
       timeout: timeoutMs,

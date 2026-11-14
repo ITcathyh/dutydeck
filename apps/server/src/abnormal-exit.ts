@@ -129,11 +129,13 @@ function appendRecord(document: AbnormalExitDocument, record: AbnormalExitRecord
   const history = (Array.isArray(document.history) ? document.history.map(asRecord).filter((entry): entry is AbnormalExitRecord => Boolean(entry)) : []);
   const top = asRecord(document);
   if (top) {
-    const index = history.findIndex(entry => top.runId ? entry.runId === top.runId : sameLegacyRecord(entry, top));
+    const index = history.findIndex(entry => top.runId
+      ? entry.runId === top.runId && canonical(entry.database) === canonical(top.database)
+      : sameLegacyRecord(entry, top));
     if (index >= 0) history[index] = top;
     else history.push(top);
   }
-  const deduplicated = history.filter(entry => !record.runId || entry.runId !== record.runId);
+  const deduplicated = history.filter(entry => !record.runId || entry.runId !== record.runId || canonical(entry.database) !== canonical(record.database));
   deduplicated.push(record);
   // 顶层只描述这一条异常；文档级 history/lifecycle/clean-exit 与其他未知元数据保留。
   for (const key of ['at', 'kind', 'exitCode', 'error', 'version', 'database', 'runId', 'pid', 'startedAt', 'unit', 'boot', 'phase', 'signal', 'source']) delete document[key];
@@ -364,11 +366,12 @@ export function markServeRunning(databaseUrl: string | undefined, lifecycle: Ser
   return transition(running, previousRuns);
 }
 
-/** 迟到旧代只写自己的 cleanExits；只有当前代才更新单数 clean-exit 展示。 */
+/** 迟到旧代只写自己的 cleanExits；只有当前代才更新单数 clean-exit 展示。返回 owned clean marker 是否真正持久化。 */
 export function recordCleanExit(databaseUrl: string | undefined, lifecycle: ServeRunLifecycle, input: {
   reason: CleanExitRecord['reason']; signal?: string; now?: Date;
-}): void {
-  updateDocument(databaseUrl, document => {
+}): boolean {
+  let recorded = false;
+  const updated = updateDocument(databaseUrl, document => {
     const owned = allLifecycles(document).find(run => run.runId === lifecycle.runId && lifecycleBelongsTo(run, databaseUrl));
     if (!owned) return;
     const record: CleanExitRecord = {
@@ -380,7 +383,9 @@ export function recordCleanExit(databaseUrl: string | undefined, lifecycle: Serv
     storeCleanExit(document, record);
     const current = asLifecycle(document.lifecycle);
     if (current?.runId === owned.runId && lifecycleBelongsTo(current, databaseUrl)) document['clean-exit'] = record;
+    recorded = true;
   });
+  return updated && recorded;
 }
 
 export async function defaultJournalQuery(request: JournalQueryRequest): Promise<Array<Record<string, unknown>>> {

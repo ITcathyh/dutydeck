@@ -46,7 +46,7 @@ export default defineConfig({
     artifactDir,
     gitSha,
     gitDirty,
-    boundary: 'mock CLI (Claude Code v2.1.267) & synthetic transports; real Chromium, Fastify HTTP, SQLite, Git worktrees and DutydeckRuntime',
+    boundary: 'mock CLI (Claude Code interactive output/banner v2.1.267; --version probe reports v2.1.295) & synthetic transports; real Chromium, Fastify HTTP, SQLite, Git worktrees and DutydeckRuntime',
     createdAt: new Date().toISOString()
   },
   reporter: [

@@ -34,7 +34,7 @@ it('merges read-modify-write updates from two PIDs without losing either history
   for (const label of ['left', 'right']) for (let index = 0; index < 5; index++) {
     expect(document.history.some((entry: any) => entry.runId === `${label}-${index}`)).toBe(true);
   }
-  expect(['fatal', 'startup']).toContain(document.kind);
+  expect(document.kind).toBe('fatal');
 }, 30_000);
 
 it('keeps one write from each of three real processes in the same critical section protocol', async () => {

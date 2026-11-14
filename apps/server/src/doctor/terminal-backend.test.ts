@@ -189,9 +189,10 @@ function fakeTmux(mode: string): { bin: string; log: string } {
     + "const { appendFileSync } = require('node:fs');\n"
     + 'const args = process.argv.slice(2);\n'
     + "appendFileSync(process.env.FAKE_TMUX_LOG, JSON.stringify({ args, env: { PATH: process.env.PATH, TMUX: process.env.TMUX, TMUX_PANE: process.env.TMUX_PANE, TMUX_TMPDIR: process.env.TMUX_TMPDIR, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME, DUTYDECK_DATABASE_URL: process.env.DUTYDECK_DATABASE_URL } }) + '\\n');\n"
-    + "if (args[0] !== '-S' || !args[1]) process.exit(97);\n"
-    + "if (args[2] !== '-f' || args[3] !== '/dev/null') process.exit(96);\n"
-    + 'const command = args[4];\n'
+    + "if (args[0] !== '-u') process.exit(98);\n"
+    + "if (args[1] !== '-S' || !args[2]) process.exit(97);\n"
+    + "if (args[3] !== '-f' || args[4] !== '/dev/null') process.exit(96);\n"
+    + 'const command = args[5];\n'
     + `const mode = ${JSON.stringify(mode)};\n`
     + "if (command === '-V') { console.log('tmux fake 9.9'); process.exit(0); }\n"
     + "if (command === 'new-session' && mode === 'create-fail') { console.error('cannot create'); process.exit(1); }\n"
@@ -241,16 +242,16 @@ describe('defaultTerminalBackendProbe 假 tmux', () => {
     expect(existsSync(result.tempDir!)).toBe(false);
   });
 
-  it('所有 argv 都带私有 -S，精确核验会话，清洗继承环境并正常清理', async () => {
+  it('所有 argv 都带 -u 和私有 -S，精确核验会话，清洗继承环境并正常清理', async () => {
     const { result, calls } = await runFake('success');
     expect(result).toMatchObject({ status: 'ok', version: 'tmux fake 9.9' });
     expect(result.cleanup).toBeUndefined();
     expect(result.tempDir).toBeDefined();
     expect(existsSync(result.tempDir!)).toBe(false);
-    expect(calls.map(call => call.args[4])).toEqual(['-V', 'new-session', 'has-session', 'kill-server']);
+    expect(calls.map(call => call.args[5])).toEqual(['-V', 'new-session', 'has-session', 'kill-server']);
     for (const call of calls) {
-      expect(call.args.slice(0, 2)).toEqual(['-S', join(result.tempDir!, 's')]);
-      expect(call.args.slice(2, 4)).toEqual(['-f', '/dev/null']);
+      expect(call.args.slice(0, 3)).toEqual(['-u', '-S', join(result.tempDir!, 's')]);
+      expect(call.args.slice(3, 5)).toEqual(['-f', '/dev/null']);
       expect(call.env.TMUX).toBeUndefined();
       expect(call.env.TMUX_PANE).toBeUndefined();
       expect(call.env.DUTYDECK_DATABASE_URL).toBeUndefined();
@@ -272,8 +273,8 @@ describe('defaultTerminalBackendProbe 假 tmux', () => {
       const { result, calls } = await runFake(mode);
       expect(result.status).toBe('failed');
       expect(result).toMatchObject({ stage: mode === 'create-fail' ? 'create' : 'verify' });
-      expect(calls.at(-1)?.args.slice(0, 2)).toEqual(['-S', join(result.tempDir!, 's')]);
-      expect(calls.at(-1)?.args[4]).toBe('kill-server');
+      expect(calls.at(-1)?.args.slice(0, 3)).toEqual(['-u', '-S', join(result.tempDir!, 's')]);
+      expect(calls.at(-1)?.args[5]).toBe('kill-server');
       expect(existsSync(result.tempDir!)).toBe(false);
     }
   });
@@ -281,7 +282,7 @@ describe('defaultTerminalBackendProbe 假 tmux', () => {
   it('probe 超时为有界 warn，并尝试同一私有 socket 的清理', async () => {
     const { result, calls } = await runFake('create-hang');
     expect(result).toMatchObject({ status: 'timeout', stage: 'create' });
-    expect(calls.at(-1)?.args).toEqual(['-S', join(result.tempDir!, 's'), '-f', '/dev/null', 'kill-server']);
+    expect(calls.at(-1)?.args).toEqual(['-u', '-S', join(result.tempDir!, 's'), '-f', '/dev/null', 'kill-server']);
     expect(existsSync(result.tempDir!)).toBe(false);
     expect(checkTerminalBackend({ action: 'probe', backend: 'tmux' }, result).level).toBe('warn');
   });

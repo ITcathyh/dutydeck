@@ -89,6 +89,11 @@ async function serve(options: CliOptions, onReady?: () => void) {
   const abnormal = (kind: 'fatal' | 'startup', exitCode: number, error: unknown, signal?: string) => {
     recordAbnormalExit(databaseUrl, { kind, exitCode, error, version: packageJson.version, lifecycle: serveRun, source: 'process', ...(signal ? { signal } : {}) });
   };
+  const persistCleanExit = (signal: NodeJS.Signals) => {
+    if (!recordCleanExit(databaseUrl, serveRun, { reason: 'stopped', signal })) {
+      process.stderr.write('Warning: could not persist the clean-exit marker beside the database; the next start may record this run as an abnormal exit. Check the database directory and last-abnormal-exit.json.\n');
+    }
+  };
   // Observe fatal errors without installing a recovery handler. Continuing
   // after an uncaught exception can leave the DB, PTY, and session queues in an
   // unknown state; Node must retain its default non-zero exit behavior so the
@@ -106,7 +111,7 @@ async function serve(options: CliOptions, onReady?: () => void) {
   });
   // 启动完成前没有可关闭的服务；停止信号照常立即退出，但先删掉正在加载的插件标记，免得被当成插件卡死而隔离。
   const startupSignal = (signal: NodeJS.Signals) => {
-    recordCleanExit(databaseUrl, serveRun, { reason: 'stopped', signal });
+    persistCleanExit(signal);
     releaseProviderLoadingMarkers();
     process.exit(128 + (signal === 'SIGINT' ? 2 : 15));
   };
@@ -146,7 +151,7 @@ async function serve(options: CliOptions, onReady?: () => void) {
     try {
       await service.close();
       cancelHardStop();
-      recordCleanExit(databaseUrl, serveRun, { reason: 'stopped', signal });
+      persistCleanExit(signal);
       process.exit(0);
     } catch (error) {
       cancelHardStop();

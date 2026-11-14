@@ -214,7 +214,7 @@ describe('secret guard', () => {
 });
 
 describe('Claude failure-block probe', () => {
-  it('caches only the same supported executable identity and re-probes downgrades and upgrades', async () => {
+  it('caches supported and unsupported official versions by executable identity and re-probes downgrades and upgrades', async () => {
     const root = mkdtempSync(join(tmpdir(), 'dutydeck-claude-probe-'));
     const command = join(root, 'claude');
     const count = join(root, 'count');
@@ -233,6 +233,7 @@ describe('Claude failure-block probe', () => {
 
       install('2.1.220');
       await expect(probe()).resolves.toBe(false);
+      await expect(probe()).resolves.toBe(false);
       expect(readFileSync(count, 'utf8')).toBe('11');
 
       install('2.1.323');
@@ -245,11 +246,14 @@ describe('Claude failure-block probe', () => {
   it('retries failed probes and executables that were initially unresolved', async () => {
     const root = mkdtempSync(join(tmpdir(), 'dutydeck-claude-probe-retry-'));
     const command = join(root, 'claude');
+    const count = join(root, 'count');
     const options = () => ({ command, env: { ...process.env } as Record<string, string>, cwd: root });
     try {
       await expect(probeClaudeHookFailureBlock(options())).resolves.toBe(false);
-      writeFileSync(command, `#!${process.execPath}\nprocess.exit(1);\n`, { mode: 0o755 });
+      writeFileSync(command, `#!${process.execPath}\nrequire('node:fs').appendFileSync(${JSON.stringify(count)}, '1');\nprocess.exit(1);\n`, { mode: 0o755 });
       await expect(probeClaudeHookFailureBlock(options())).resolves.toBe(false);
+      await expect(probeClaudeHookFailureBlock(options())).resolves.toBe(false);
+      expect(readFileSync(count, 'utf8')).toBe('11');
       const recovered = join(root, 'recovered');
       writeFileSync(recovered, `#!${process.execPath}\nif (process.argv.includes('--version')) process.stdout.write('2.1.295 (Claude Code)\\n');\n`, { mode: 0o755 });
       renameSync(recovered, command);

@@ -31,7 +31,7 @@ dutydeck database execution-status --database /path/to/runtime/dutydeck.db
 
 ### 服务被 SIGKILL 后，doctor 为什么说“原因待富集”？
 
-SIGKILL 无法执行进程内退出处理，所以下一代先根据上一代缺少 `clean-exit` 标记写基础异常。Linux/systemd 下会异步查有界 journal，只有同一 unit、boot、PID 与启动时间精确对齐才补 `SIGKILL`；journal 不存在、无权限、超时或归属不唯一时保留基础记录，不阻塞服务就绪。干净停止和计划重启不写异常，上一代 PID 仍存活也不报崩溃。文件只留最近 10 条；launchd 富集本轮不支持。
+SIGKILL 无法执行进程内退出处理，所以下一代先根据上一代缺少 `clean-exit` 标记写基础异常。Linux/systemd 下会异步查有界 journal，只有同一 unit、boot、PID 与启动时间精确对齐才补 `SIGKILL`；journal 不存在、无权限、超时或归属不唯一时保留基础记录，不阻塞服务就绪。干净停止和计划重启在干净标记写成功时不写异常；若该标记写失败，进程会向 stderr 输出明确警告且保持原退出码，下一代仍可能按缺少干净标记保守补记异常，请检查数据库目录和 `last-abnormal-exit.json` 的类型、权限与可写性。上一代 PID 仍存活也不报崩溃。文件只留最近 10 条；launchd 富集本轮不支持。
 
 ### Q1: 在飞书给机器人发消息，没有反应，也没贴 `👌`？
 1. 运行 `dutydeck doctor`，看「飞书监听」一栏是否正常。

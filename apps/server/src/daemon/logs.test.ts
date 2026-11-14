@@ -1,10 +1,17 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { daemonPaths, readDaemonLog, readJournalctlLog } from './daemon.js';
+import { bundleCliForTest } from '../../../../tests/support/bundle-for-test.js';
+import { daemonPaths, pidAlive, readDaemonLog, readJournalctlLog } from './daemon.js';
 
 let tmp: string;
+let cli: string;
+let cleanupCli: (() => Promise<void>) | undefined;
+
+beforeAll(async () => { ({ path: cli, cleanup: cleanupCli } = await bundleCliForTest('daemon-logs')); });
+afterAll(async () => { await cleanupCli?.(); });
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'dutydeck-logs-'));
@@ -22,15 +29,18 @@ function writeDaemonLog(text: string): string {
   return dir;
 }
 
-function journalctlStub(options: { stdout?: string; stderr?: string; status?: number; capture: string }): string {
+function journalctlStub(options: { stdout?: string; stderr?: string; status?: number; capture: string; hang?: boolean; pidFile?: string }): string {
   const bin = join(tmp, 'bin');
   mkdirSync(bin, { recursive: true });
   const script = [
     `#!${process.execPath}`,
     `require('node:fs').writeFileSync(${JSON.stringify(options.capture)}, JSON.stringify(process.argv.slice(2)));`,
-    `process.stdout.write(${JSON.stringify(options.stdout ?? '')}, () => {`,
-    `  process.stderr.write(${JSON.stringify(options.stderr ?? '')}, () => process.exit(${options.status ?? 0}));`,
-    '});'
+    ...(options.pidFile ? [`require('node:fs').writeFileSync(${JSON.stringify(options.pidFile)}, String(process.pid));`] : []),
+    ...(options.hang ? ['setInterval(() => {}, 1000);'] : [
+      `process.stdout.write(${JSON.stringify(options.stdout ?? '')}, () => {`,
+      `  process.stderr.write(${JSON.stringify(options.stderr ?? '')}, () => process.exit(${options.status ?? 0}));`,
+      '});'
+    ])
   ].join('\n');
   writeFileSync(join(bin, 'journalctl'), script, { mode: 0o755 });
   vi.stubEnv('PATH', bin);
@@ -88,6 +98,33 @@ describe('readDaemonLog', () => {
     expect(lines.join('\n')).not.toContain('fixture-token-value');
     expect(lines.join('\n')).not.toContain('fixture-bearer-value');
     expect(lines.join('\n')).not.toContain('fixture-password-value');
+  });
+
+  it('reports a missing log as not yet created and preserves other I/O errors', () => {
+    const dir = join(tmp, 'missing-daemon');
+    expect(() => readDaemonLog(dir)).toThrow(`daemon 日志尚未生成：${daemonPaths(dir).logFile}`);
+
+    mkdirSync(daemonPaths(dir).logFile, { recursive: true });
+    let failure: unknown;
+    try { readDaemonLog(dir); } catch (error) { failure = error; }
+    expect((failure as NodeJS.ErrnoException).code).toBe('EISDIR');
+    expect((failure as Error).message).not.toContain('日志尚未生成');
+  });
+});
+
+describe('logs CLI', () => {
+  it('surfaces the missing daemon log error from an isolated working directory', () => {
+    const daemonDir = join(tmp, 'isolated-daemon');
+    const result = spawnSync(process.execPath, [cli, 'logs'], {
+      cwd: tmp,
+      encoding: 'utf8',
+      timeout: 15_000,
+      env: { HOME: tmp, PATH: process.env.PATH ?? '', DUTYDECK_DAEMON_DIR: daemonDir }
+    });
+    expect(result.status, result.stderr).toBe(1);
+    expect(result.stderr).toContain('daemon 日志尚未生成');
+    expect(result.stderr).toContain(daemonPaths(daemonDir).logFile);
+    expect(result.stderr).toContain('核对 daemon 目录');
   });
 });
 
@@ -170,6 +207,20 @@ describe('readJournalctlLog', () => {
     vi.stubEnv('PATH', join(tmp, 'empty-path'));
     await expect(Promise.resolve().then(() => readJournalctlLog('dutydeck.service'))).rejects.toThrow(/journalctl.*(not found|无法执行)/i);
   });
+
+  it('kills a journalctl that never exits and rejects with a bounded timeout', async () => {
+    const capture = join(tmp, 'argv.json');
+    const pidFile = join(tmp, 'journalctl.pid');
+    journalctlStub({ capture, hang: true, pidFile });
+    const startedAt = Date.now();
+    await expect(readJournalctlLog('dutydeck-hung.service')).rejects.toThrow(
+      'journalctl timed out after 5000ms for systemd unit dutydeck-hung.service; the process was killed'
+    );
+    expect(Date.now() - startedAt).toBeLessThan(12_000);
+    const pid = Number(readFileSync(pidFile, 'utf8'));
+    expect(Number.isSafeInteger(pid)).toBe(true);
+    await vi.waitFor(() => { expect(pidAlive(pid)).toBe(false); }, { timeout: 2_000, interval: 20 });
+  }, 15_000);
 
   it('keeps the unit attached as one value so it cannot become an option or shell command', async () => {
     const capture = join(tmp, 'argv.json');

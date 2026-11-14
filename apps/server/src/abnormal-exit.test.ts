@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { abnormalExitFileName, abnormalExitNote, beginServeRun, enrichAbnormalExitFromJournal, markServeRunning, readAbnormalExit, recordAbnormalExit, recordCleanExit, type AbnormalExitRecord, type ServeRunLifecycle } from './abnormal-exit.js';
@@ -110,11 +110,36 @@ describe('serve lifecycle and bounded abnormal history', () => {
   it.each(['stopped', 'planned-restart'] as const)('does not turn a %s generation into an abnormal exit', reason => {
     const root = scratch(), database = databaseIn(root), first = beginServeRun(database, lifecycle('clean-run')).lifecycle;
     markServeRunning(database, first);
-    recordCleanExit(database, first, { reason, signal: 'SIGTERM' });
+    expect(recordCleanExit(database, first, { reason, signal: 'SIGTERM' })).toBe(true);
     const second = beginServeRun(database, lifecycle('next-run'), { isProcessAlive: () => { throw new Error('a clean generation must not need a PID probe'); } });
     expect(second.previousRun).toBeUndefined();
     expect(readAbnormalExit(database)).toBeUndefined();
     expect(documentIn(database)['clean-exit']).toMatchObject({ runId: 'clean-run', reason, signal: 'SIGTERM' });
+  });
+
+  it('returns false when the owned clean marker cannot be persisted and keeps conservative next-start recovery', () => {
+    const root = scratch(), database = databaseIn(root);
+    const first = beginServeRun(database, lifecycle('clean-write-failed')).lifecycle;
+    markServeRunning(database, first);
+    expect(documentIn(database).lifecycle).toMatchObject({ runId: 'clean-write-failed', phase: 'running' });
+
+    const file = join(root, abnormalExitFileName), saved = join(root, 'saved-abnormal-exit.json');
+    renameSync(file, saved);
+    mkdirSync(file);
+    let persisted: boolean | undefined;
+    try {
+      persisted = recordCleanExit(database, first, { reason: 'stopped', signal: 'SIGTERM' });
+    } finally {
+      rmSync(file, { recursive: true, force: true });
+      renameSync(saved, file);
+    }
+    expect(persisted).toBe(false);
+    expect(documentIn(database).cleanExits).toBeUndefined();
+    expect(documentIn(database)['clean-exit']).toBeUndefined();
+
+    const second = beginServeRun(database, lifecycle('after-clean-write-failure'), { isProcessAlive: () => false });
+    expect(second.previousRun?.runId).toBe('clean-write-failed');
+    expect(readAbnormalExit(database)).toMatchObject({ runId: 'clean-write-failed', kind: 'fatal', source: 'lifecycle' });
   });
 
   it('only lets the current runId mark a clean exit and does not report a previous PID that is still alive', () => {
@@ -225,6 +250,27 @@ describe('lifecycle ownership regressions', () => {
     const document = documentIn(b);
     expect(document.lifecycle).toMatchObject({ runId: 'run-b', database: b });
     expect(document.kind).toBeUndefined();
+  });
+
+  it('keeps same-runId history for two databases across record filtering and top-record merging', () => {
+    const root = scratch(), a = join(root, 'a.db'), b = join(root, 'b.db'), c = join(root, 'c.db');
+    writeFileSync(a, ''); writeFileSync(b, ''); writeFileSync(c, '');
+    recordAbnormalExit(a, { kind: 'fatal', exitCode: 1, error: 'A failure', version: '1', lifecycle: lifecycle('shared-run', { database: a, pid: 1001 }) });
+    recordAbnormalExit(b, { kind: 'fatal', exitCode: 1, error: 'B failure', version: '1', lifecycle: lifecycle('shared-run', { database: b, pid: 1002 }) });
+    expect(documentIn(a).history).toEqual([
+      expect.objectContaining({ database: a, runId: 'shared-run', error: 'A failure' }),
+      expect.objectContaining({ database: b, runId: 'shared-run', error: 'B failure' })
+    ]);
+
+    // 顶层 B 合回 history 时也必须找到 B，不能覆盖同 runId 的 A。
+    recordAbnormalExit(c, { kind: 'startup', exitCode: 1, error: 'C failure', version: '1' });
+    const document = documentIn(a);
+    expect(document.history).toEqual([
+      expect.objectContaining({ database: a, runId: 'shared-run', error: 'A failure' }),
+      expect.objectContaining({ database: b, runId: 'shared-run', error: 'B failure' }),
+      expect.objectContaining({ database: c, error: 'C failure' })
+    ]);
+    expect(document).toMatchObject({ database: c, error: 'C failure', kind: 'startup' });
   });
 
   it('returns every dead unclean generation for asynchronous journal enrichment', () => {

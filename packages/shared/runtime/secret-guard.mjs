@@ -84,7 +84,8 @@ function claudeExecutableIdentity(command, env, cwd) {
 /**
  * Claude 2.1.295 added PreToolUse command-hook onFailure:"block". Probe the exact
  * executable with the child's environment; errors and other Claude-family forks
- * are not evidence of support. Cache only successful probes, keyed by executable identity.
+ * are not evidence of support. Cache recognized official Claude Code versions,
+ * whether supported or not, keyed by executable identity; never cache failures.
  */
 export function probeClaudeHookFailureBlock({ command, env, cwd = process.cwd() }) {
   const identity = claudeExecutableIdentity(command, env, cwd);
@@ -108,7 +109,7 @@ export function probeClaudeHookFailureBlock({ command, env, cwd = process.cwd() 
           break;
         }
       }
-      if (supported) claudeFailureBlockProbes.set(key, probe);
+      if (!error && match) claudeFailureBlockProbes.set(key, probe);
       resolve(supported);
     });
   });

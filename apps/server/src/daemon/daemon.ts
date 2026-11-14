@@ -512,8 +512,18 @@ function visibleLogLines(text: string): string[] {
 
 /** Read recent daemon output without the failure-only filtering used for startup errors. */
 export function readDaemonLog(dir: string, lines = 50, fromByte = 0): string[] {
-  return visibleLogLines(readLogFrom(daemonPaths(dir).logFile, fromByte)).slice(-lines);
+  const file = daemonPaths(dir).logFile;
+  try {
+    return visibleLogLines(readLogFrom(file, fromByte)).slice(-lines);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error(`daemon 日志尚未生成：${file}；请先启动 daemon，或核对 daemon 目录`);
+    }
+    throw error;
+  }
 }
+
+const journalctlTimeoutMs = 5_000;
 
 /** Read a bounded journal snapshot without invoking a shell or following new entries. */
 export async function readJournalctlLog(unit: string, lines = 50): Promise<string[]> {
@@ -527,26 +537,50 @@ export async function readJournalctlLog(unit: string, lines = 50): Promise<strin
   const stdout = rollingTail();
   const stderr = rollingTail();
   return new Promise<string[]>((resolve, reject) => {
-    child.stdout.on('data', (chunk: Buffer) => stdout.append(chunk));
-    child.stderr.on('data', (chunk: Buffer) => stderr.append(chunk));
+    let settled = false;
+    const onStdout = (chunk: Buffer) => stdout.append(chunk);
+    const onStderr = (chunk: Buffer) => stderr.append(chunk);
+    const cleanup = () => {
+      clearTimeout(timer);
+      child.stdout.off('data', onStdout);
+      child.stderr.off('data', onStderr);
+    };
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const timer = setTimeout(() => {
+      if (settled) return;
+      child.kill('SIGKILL');
+      child.stdout.destroy();
+      child.stderr.destroy();
+      fail(new Error(`journalctl timed out after ${journalctlTimeoutMs}ms for systemd unit ${unit}; the process was killed`));
+    }, journalctlTimeoutMs);
+    child.stdout.on('data', onStdout);
+    child.stderr.on('data', onStderr);
     child.once('error', error => {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        reject(new Error('journalctl was not found in PATH; install systemd or omit --unit to read the daemon log file'));
+        fail(new Error('journalctl was not found in PATH; install systemd or omit --unit to read the daemon log file'));
       } else {
-        reject(new Error(`journalctl could not be executed: ${error.message}`));
+        fail(new Error(`journalctl could not be executed: ${error.message}`));
       }
     });
     child.once('close', status => {
+      if (settled) return;
       const output = stdout.text();
       if (status !== 0) {
         const detail = visibleLogLines(stderr.text() || output).find(line => line.trim())?.trim();
-        reject(new Error(`journalctl failed for systemd unit ${unit}${detail ? `: ${detail}` : ` (exit code ${status ?? 'unknown'})`}`));
+        fail(new Error(`journalctl failed for systemd unit ${unit}${detail ? `: ${detail}` : ` (exit code ${status ?? 'unknown'})`}`));
         return;
       }
       if (output.trim() === '-- No entries --') {
-        reject(new Error('unit 不存在或尚无日志，请核对 unit'));
+        fail(new Error('unit 不存在或尚无日志，请核对 unit'));
         return;
       }
+      settled = true;
+      cleanup();
       resolve(visibleLogLines(output).slice(-lines));
     });
   });
