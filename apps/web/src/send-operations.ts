@@ -10,8 +10,8 @@ const browserStorage = (): StorageLike | null => {
   catch { return null; }
 };
 
-function parseOperations(raw: string | null): Map<string, SendOperation> {
-  const operations = new Map<string, SendOperation>();
+function parseOperations(raw: string | null): StoredOperation[] {
+  const operations: StoredOperation[] = [];
   if (!raw) return operations;
   try {
     const stored: unknown = JSON.parse(raw);
@@ -19,7 +19,7 @@ function parseOperations(raw: string | null): Map<string, SendOperation> {
     for (const value of stored.slice(-MAX_SEND_OPERATIONS)) {
       const item = value as Partial<StoredOperation> | null;
       if (!item || typeof item.draftKey !== 'string' || typeof item.snapshot !== 'string' || !['queue', 'interrupt'].includes(String(item.mode)) || typeof item.key !== 'string') continue;
-      operations.set(item.draftKey, { snapshot: item.snapshot, mode: item.mode as SendOperation['mode'], key: item.key });
+      operations.push({ draftKey: item.draftKey, snapshot: item.snapshot, mode: item.mode as SendOperation['mode'], key: item.key });
     }
   } catch { /* Malformed storage contains no recoverable operation. */ }
   return operations;
@@ -27,49 +27,49 @@ function parseOperations(raw: string | null): Map<string, SendOperation> {
 
 /** Durable when possible; a failed storage read/write falls back to this page's memory. */
 export class SendOperationStore {
-  private memory = new Map<string, SendOperation>();
+  private memory: StoredOperation[] = [];
   private storageFailed = false;
 
   constructor(private readonly storage: StorageLike | null = browserStorage()) {}
 
-  private read(): Map<string, SendOperation> {
-    if (!this.storage || this.storageFailed) return new Map(this.memory);
+  private read(): StoredOperation[] {
+    if (!this.storage || this.storageFailed) return [...this.memory];
     try {
       this.memory = parseOperations(this.storage.getItem(SEND_OPERATIONS_STORAGE_KEY));
     } catch {
       this.storageFailed = true;
     }
-    return new Map(this.memory);
+    return [...this.memory];
   }
 
-  private write(operations: Map<string, SendOperation>) {
+  private write(operations: StoredOperation[]) {
     this.memory = operations;
     if (!this.storage || this.storageFailed) return;
     try {
-      const stored: StoredOperation[] = [...operations].map(([draftKey, operation]) => ({ draftKey, ...operation }));
-      if (stored.length) this.storage.setItem(SEND_OPERATIONS_STORAGE_KEY, JSON.stringify(stored));
+      if (operations.length) this.storage.setItem(SEND_OPERATIONS_STORAGE_KEY, JSON.stringify(operations));
       else this.storage.removeItem(SEND_OPERATIONS_STORAGE_KEY);
     } catch {
       this.storageFailed = true;
     }
   }
 
-  get(draftKey: string): SendOperation | undefined {
-    return this.read().get(draftKey);
+  get(draftKey: string, snapshot: string): SendOperation | undefined {
+    const operation = this.read().reverse().find(item => item.draftKey === draftKey && item.snapshot === snapshot);
+    return operation && { snapshot: operation.snapshot, mode: operation.mode, key: operation.key };
   }
 
   set(draftKey: string, operation: SendOperation) {
-    const operations = this.read();
-    operations.delete(draftKey);
-    operations.set(draftKey, operation);
-    while (operations.size > MAX_SEND_OPERATIONS) operations.delete(operations.keys().next().value!);
+    const operations = this.read().filter(item => item.draftKey !== draftKey || item.snapshot !== operation.snapshot);
+    operations.push({ draftKey, ...operation });
+    while (operations.length > MAX_SEND_OPERATIONS) operations.shift();
     this.write(operations);
   }
 
   delete(draftKey: string, key: string) {
     const operations = this.read();
-    if (operations.get(draftKey)?.key !== key) return;
-    operations.delete(draftKey);
+    const index = operations.findIndex(item => item.draftKey === draftKey && item.key === key);
+    if (index < 0) return;
+    operations.splice(index, 1);
     this.write(operations);
   }
 }

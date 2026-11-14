@@ -499,8 +499,7 @@ export default function App() {
     retry: false,
     mutationFn: ({ sessionId, message, mode, skillRequests, plan, idempotencyKey }: { sessionId: string; message: string; mode: SendMode; skillRequests?: string[]; draftKey: string; submittedDraft: typeof composerDraft.draft; plan?: boolean; idempotencyKey?: string }) => plan ? api.plan(sessionId, message) : mode === 'steer' ? api.send(sessionId, message, mode, skillRequests) : api.send(sessionId, message, mode, skillRequests, idempotencyKey),
     onSuccess: (result, variables) => {
-      const operation = sendOperations.current.get(variables.draftKey);
-      if (variables.idempotencyKey && operation?.key === variables.idempotencyKey) sendOperations.current.delete(variables.draftKey, variables.idempotencyKey);
+      if (variables.idempotencyKey) sendOperations.current.delete(variables.draftKey, variables.idempotencyKey);
       setSendFailure(current => current?.sessionId === variables.sessionId ? undefined : current);
       acknowledgeComposerDraft(variables.draftKey, variables.submittedDraft);
       qc.setQueryData<Task[]>(['tasks', variables.sessionId], current => current?.some(task => task.id === result.task.id) ? current : [...(current ?? []), result.task]);
@@ -511,8 +510,7 @@ export default function App() {
       if (variables.sessionId !== useDockStore.getState().activeSessionId) return;
       const unknown = !(error instanceof ApiError) || error.status >= 500 || error.code === 'unknown_outcome';
       if (!unknown) {
-        const operation = sendOperations.current.get(variables.draftKey);
-        if (variables.idempotencyKey && operation?.key === variables.idempotencyKey) sendOperations.current.delete(variables.draftKey, variables.idempotencyKey);
+        if (variables.idempotencyKey) sendOperations.current.delete(variables.draftKey, variables.idempotencyKey);
         setActionError(error.message);
         return;
       }
@@ -583,7 +581,7 @@ export default function App() {
     const submittedDraft = composerDraft.draft;
     const skillRequests = composerReferences.filter(reference => reference.kind === 'skill').map(reference => reference.value);
     const snapshot = JSON.stringify({ message, skillRequests, submittedDraft });
-    const previous = sendOperations.current.get(draftKey);
+    const previous = sendOperations.current.get(draftKey, snapshot);
     const retry = !planFirst && previous?.snapshot === snapshot ? previous : undefined;
     // interrupt 被接受后页面可能已经空闲；同一未知响应的重试仍须沿用最初的实际 mode。
     const mode = retry?.mode ?? (busyStates.has(active?.state ?? '') ? sendMode : 'queue');
