@@ -60,3 +60,41 @@ it('refuses to launch native Codex without an explicit Dutydeck policy', async (
   expect(await new Promise<number | null>(resolveExit => bridge.once('exit', resolveExit))).toBe(2);
   expect(stderr).toContain('CODEX_APPROVAL_POLICY_REQUIRED');
 });
+
+it('drains large native stdout and stderr through a slow reader before exiting', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'dd-codex-wire-output-'));
+  const executable = join(cwd, 'native-codex');
+  const ready = join(cwd, 'ready');
+  const stdout = JSON.stringify({ text: '字'.repeat(350_000), tail: 'stdout-complete' }) + '\n';
+  const stderr = '诊断'.repeat(100_000) + '\nstderr-complete\n';
+  await writeFile(executable, `#!${process.execPath}
+import { writeFileSync, writeSync } from 'node:fs';
+writeFileSync(process.env.ready_file, 'ready');
+for (const [fd, text] of [[1, JSON.stringify({text:'字'.repeat(350000),tail:'stdout-complete'})+'\\n'], [2, '诊断'.repeat(100000)+'\\nstderr-complete\\n']]) {
+  const data = Buffer.from(text);
+  for (let offset = 0; offset < data.length;) offset += writeSync(fd, data, offset);
+}
+process.exit(0);
+`);
+  await chmod(executable, 0o755);
+  const bridge = spawn(process.execPath, [resolve('packages/acp-client/agents/codex-permission-bridge.mjs'), 'app-server'], {
+    env: { ...process.env, dutydeck_codex_executable: executable, dutydeck_codex_permission_mode: 'full-trust', ready_file: ready }, stdio: ['pipe', 'pipe', 'pipe']
+  });
+  const closed = new Promise<number | null>((resolveClose, reject) => { bridge.once('error', reject); bridge.once('close', resolveClose); });
+  const out: Buffer[] = [], err: Buffer[] = [];
+  try {
+    await expect.poll(() => readFile(ready, 'utf8').catch(() => ''), { timeout: 10_000 }).toBe('ready');
+    for (const [stream, chunks] of [[bridge.stdout, out], [bridge.stderr, err]] as const) {
+      stream.on('data', chunk => { chunks.push(chunk); stream.pause(); setTimeout(() => stream.resume(), 5); });
+    }
+    bridge.stdin.end();
+    expect(await closed, Buffer.concat(err).toString()).toBe(0);
+    expect(Buffer.concat(out).byteLength).toBe(Buffer.byteLength(stdout));
+    expect(Buffer.concat(out).equals(Buffer.from(stdout))).toBe(true);
+    expect(Buffer.concat(err).byteLength).toBe(Buffer.byteLength(stderr));
+    expect(Buffer.concat(err).equals(Buffer.from(stderr))).toBe(true);
+  } finally {
+    if (bridge.exitCode === null) { bridge.kill('SIGTERM'); await closed; }
+    await rm(cwd, { recursive: true, force: true });
+  }
+}, 20_000);
