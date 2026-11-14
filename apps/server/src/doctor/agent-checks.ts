@@ -7,6 +7,7 @@
  */
 import { agentProbeTarget, describeDroppedAgent, shellQuoteIfNeeded as quote, type DroppedAgent } from '@dutydeck/config';
 import type { AgentProbeResult, DoctorCheck, DoctorConfig } from './types.js';
+import { compareVersions } from './checks.js';
 
 export function checkDroppedAgents(dropped: ReadonlyArray<DroppedAgent>): DoctorCheck[] {
   return dropped.map(agent => {
@@ -48,14 +49,8 @@ export function agentsToProbe(bots: ReadonlyArray<DefaultAgentBot>, agents: Doct
 interface Verdict { level: 'ok' | 'warn' | 'fail'; detail: string; remedy?: string; command?: string }
 
 function oldOfficialClaude(version: string): boolean {
-  const match = /^(\d+)\.(\d+)\.(\d+) \(Claude Code\)$/.exec(version);
-  if (!match) return false;
-  const minimum = [2, 1, 295];
-  for (let index = 0; index < minimum.length; index++) {
-    const difference = Number(match[index + 1]) - minimum[index]!;
-    if (difference !== 0) return difference < 0;
-  }
-  return false;
+  const official = /^(\d+)\.(\d+)\.(\d+) \(Claude Code\)$/.test(version);
+  return official && compareVersions(version, '2.1.295') < 0;
 }
 
 function judge(id: string, command: string, execute: boolean, result: AgentProbeResult | undefined, timeoutMs: number): Verdict {

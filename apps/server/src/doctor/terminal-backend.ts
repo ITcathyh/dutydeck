@@ -4,6 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { childEnvironment } from '@dutydeck/shared/child-environment';
+import { errorMessage } from '@dutydeck/shared';
 import type {
   TerminalBackendCleanupIssue,
   TerminalBackendProbe,
@@ -17,10 +18,6 @@ type TmuxRunResult =
 
 function firstLine(text: string): string | undefined {
   return text.split(/\r?\n/).map(line => line.trim()).find(Boolean)?.slice(0, 300);
-}
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 /** 每次调用都强制带同一个私有 socket 和空配置；shell:false 让 argv 不经过 shell 解释。 */
@@ -64,7 +61,7 @@ async function removeTemporaryDirectory(directory: string): Promise<TerminalBack
     await rm(directory, { recursive: true, force: true });
     return undefined;
   } catch (error) {
-    return { status: 'failed', detail: `删除私有临时目录失败：${errorText(error)}` };
+    return { status: 'failed', detail: `删除私有临时目录失败：${errorMessage(error)}` };
   }
 }
 
@@ -81,7 +78,7 @@ export const defaultTerminalBackendProbe: TerminalBackendProbe = async (timeoutM
     // Unix socket 路径长度有限；macOS 的 os.tmpdir() 往往过深，类 Unix 统一用短的 /tmp。
     directory = await mkdtemp(join(process.platform === 'win32' ? tmpdir() : '/tmp', 'ddtb-'));
   } catch (error) {
-    return { status: 'failed', stage: 'prepare', detail: `创建私有临时目录失败：${errorText(error)}` };
+    return { status: 'failed', stage: 'prepare', detail: `创建私有临时目录失败：${errorMessage(error)}` };
   }
 
   const socketPath = join(directory, 's');

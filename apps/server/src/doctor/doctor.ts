@@ -353,6 +353,17 @@ export async function runDoctor(
   checks.push(checkDutydeckDir(await observeDirectory(dutydeckDir, platform, exists, access, stat)));
 
   // ---- 6. Agent ----
+  const terminalPlan = planTerminalBackend({
+    ...(configError !== undefined ? { configError } : {}),
+    database: probe,
+    backend: probe.values?.[TERMINAL_BACKEND_CONFIG_KEY],
+    agents: config.agents
+  });
+  const terminalResult = terminalPlan.action === 'probe'
+    ? Promise.resolve().then(() => terminalBackendProbe(dependencies.terminalBackendProbeTimeoutMs ?? DEFAULT_TERMINAL_BACKEND_PROBE_TIMEOUT_MS, env))
+    : undefined;
+  // 仍在原位置等待结果；若前面的 Agent 检查先失败，避免并行探针产生未处理 rejection。
+  void terminalResult?.catch(() => {});
   if (configError) {
     checks.push({ id: 'agents.detected', label: 'Agent CLI', level: 'skip', detail: '配置解析失败，未检测 Agent' });
   } else {
@@ -370,16 +381,9 @@ export async function runDoctor(
   }
 
   // ---- 6b. 主终端后端 ----
-  const terminalPlan = planTerminalBackend({
-    ...(configError !== undefined ? { configError } : {}),
-    database: probe,
-    backend: probe.values?.[TERMINAL_BACKEND_CONFIG_KEY],
-    agents: config.agents
-  });
   if (terminalPlan.action === 'probe') {
-    const timeout = dependencies.terminalBackendProbeTimeoutMs ?? DEFAULT_TERMINAL_BACKEND_PROBE_TIMEOUT_MS;
     progress('用私有 socket 检查 tmux（不影响已有 tmux 会话）');
-    checks.push(checkTerminalBackend(terminalPlan, await terminalBackendProbe(timeout, env)));
+    checks.push(checkTerminalBackend(terminalPlan, await terminalResult));
   } else {
     checks.push(checkTerminalBackend(terminalPlan));
   }

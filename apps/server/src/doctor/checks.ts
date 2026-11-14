@@ -28,6 +28,7 @@ import type {
   TerminalBackendProbeResult
 } from './types.js';
 import type { EnvLocation } from '../env-location.js';
+import { terminalSettingsKey } from '../terminal-settings.js';
 
 /** workspace 根 package.json 的 engines.node。 */
 export const REQUIRED_NODE_VERSION = '22.12.0';
@@ -35,7 +36,7 @@ export const REQUIRED_NODE_VERSION = '22.12.0';
 export { larkBotsConfigKey, AUTH_TOKEN_CONFIG_KEY, larkListenerStatusKey };
 
 /** 主终端后端设置；缺键与数据库尚不存在时都按产品默认 tmux。 */
-export const TERMINAL_BACKEND_CONFIG_KEY = 'dutydeck.terminal_backend';
+export const TERMINAL_BACKEND_CONFIG_KEY = terminalSettingsKey;
 
 /** 体检需要从 configs 表读的键。都是「读」，绝不写。 */
 export const DOCTOR_CONFIG_KEYS = [larkBotsConfigKey, AUTH_TOKEN_CONFIG_KEY, larkListenerStatusKey, TERMINAL_BACKEND_CONFIG_KEY] as const;

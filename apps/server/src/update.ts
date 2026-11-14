@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
+import { errorMessage } from '@dutydeck/shared';
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_PACKAGE_NAME = 'dutydeck';
@@ -70,7 +71,7 @@ const rollbackGuidance = (packageName: string, previousVersion: unknown): string
 };
 
 const withRollbackGuidance = (error: unknown, packageName: string, previousVersion: unknown): Error => {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   const wrapped = new Error(`${message}\n${rollbackGuidance(packageName, previousVersion)}`, { cause: error });
   if (error instanceof Error) {
     wrapped.name = error.name;
@@ -118,28 +119,15 @@ export async function updateDutydeck(
   if (!options.force) {
     await dependencies.drain?.({ drainTimeout: options.drainTimeout });
   }
-  try {
-    await dependencies.runNpm(['install', '--global', `${packageName}@${selector}`]);
-  } catch (error) {
-    throw withRollbackGuidance(error, packageName, currentVersion);
-  }
   let version: string;
   try {
+    await dependencies.runNpm(['install', '--global', `${packageName}@${selector}`]);
     version = installedVersion(await dependencies.runNpm(['list', '--global', packageName, '--depth=0', '--json']), packageName);
     if (version !== targetVersion) {
       throw new Error(`Dutydeck update verification failed: ${selector} resolved to ${targetVersion}, but npm installed ${version}. The service was not restarted.`);
     }
-  } catch (error) {
-    throw withRollbackGuidance(error, packageName, currentVersion);
-  }
-  let globalRoot: string;
-  try {
-    globalRoot = (await dependencies.runNpm(['root', '--global'])).trim();
+    const globalRoot = (await dependencies.runNpm(['root', '--global'])).trim();
     if (!globalRoot) throw new Error('npm did not report its global package directory. The service was not restarted.');
-  } catch (error) {
-    throw withRollbackGuidance(error, packageName, currentVersion);
-  }
-  try {
     await dependencies.restart(resolve(globalRoot, packageName, 'dist/cli.js'), {
       force: options.force,
       drainTimeout: options.drainTimeout

@@ -187,7 +187,8 @@ async function runTest() {
   await page.getByText(REPLY).first().waitFor({ timeout: 15_000 });
   assert.equal(await page.getByLabel('访问令牌').count(), 0, 'login gate must be gone after redeeming the link');
   // Hosts with an explicit port get a port-scoped access cookie.
-  const cookieName = new URL(base).port ? `dutydeck_access_${new URL(base).port}` : 'dutydeck_access';
+  const port = new URL(base).port;
+  const cookieName = port ? `dutydeck_access_${port}` : 'dutydeck_access';
   const cookie = (await context.cookies(base)).find(item => item.name === cookieName);
   assert(cookie?.httpOnly && cookie.sameSite === 'Strict' && cookie.value === TOKEN, 'redeemed cookie must match /api/auth/login');
   passed('确认页点按钮后跳到该会话页并直接显示内容，cookie 与 /api/auth/login 相同');

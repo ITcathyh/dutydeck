@@ -395,7 +395,7 @@ export class PluginStore {
       const reviewBase = current.candidate
         ? await loadPluginDirectory(this.artifactDir(name, current.candidate)).catch(() => activePlugin)
         : activePlugin;
-      const reviewChanges = pluginCommandChanges(reviewBase, staged.plugin);
+      const reviewChanges = reviewBase === activePlugin ? changes : pluginCommandChanges(reviewBase, staged.plugin);
       await this.confirmTrust(staged.plugin, [...current.trustedCapabilities, ...(current.candidate?.trustedCapabilities ?? [])], options, reviewChanges, 'update');
       return await this.withStoreLock(async () => {
         const lock = this.readLock();

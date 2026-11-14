@@ -5,6 +5,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import Database from 'better-sqlite3';
 import { redactCredentialText } from '@dutydeck/shared';
 import { writeFileAtomicSync } from './atomic-file.js';
+import { pidAlive } from './daemon/daemon.js';
 
 /**
  * 上一次异常退出的本地记录：放在本次 serve 打开的数据库所在目录，并记下数据库实路径。
@@ -141,10 +142,6 @@ function appendRecord(document: AbnormalExitDocument, record: AbnormalExitRecord
   for (const key of ['at', 'kind', 'exitCode', 'error', 'version', 'database', 'runId', 'pid', 'startedAt', 'unit', 'boot', 'phase', 'signal', 'source']) delete document[key];
   Object.assign(document, record);
   document.history = deduplicated.slice(-abnormalHistoryLimit);
-}
-
-function defaultPidAlive(pid: number): boolean {
-  try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH'; }
 }
 
 /** SQLite 写事务提供跨进程临界区；进程死亡由 OS/SQLite 释放，不回收旧版 .lock 目录。 */
@@ -318,7 +315,7 @@ export function beginServeRun(databaseUrl: string | undefined, input: {
     const alive = new Map<string, boolean>();
     const isAlive = (run: ServeRunLifecycle) => {
       if (!alive.has(run.runId)) alive.set(run.runId, Boolean((!run.boot || !lifecycle.boot || normalizeBootId(run.boot) === normalizeBootId(lifecycle.boot))
-        && (dependencies.isProcessAlive ?? defaultPidAlive)(run.pid)));
+        && (dependencies.isProcessAlive ?? pidAlive)(run.pid)));
       return alive.get(run.runId)!;
     };
     const current = asLifecycle(document.lifecycle);
@@ -350,7 +347,7 @@ export function markServeRunning(databaseUrl: string | undefined, lifecycle: Ser
     const alive = new Map<string, boolean>();
     const isAlive = (run: ServeRunLifecycle) => {
       if (!alive.has(run.runId)) alive.set(run.runId, Boolean((!run.boot || !running.boot || normalizeBootId(run.boot) === normalizeBootId(running.boot))
-        && (dependencies.isProcessAlive ?? defaultPidAlive)(run.pid)));
+        && (dependencies.isProcessAlive ?? pidAlive)(run.pid)));
       return alive.get(run.runId)!;
     };
     // startLocalServer 成功已经证明 B 取得数据库所有权；旧代是否存活只决定能否补记异常，不否决本次发布。
