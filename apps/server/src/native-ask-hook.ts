@@ -34,6 +34,7 @@ export async function runNativeAskHook(payload: unknown, options: RelayClientOpt
         return deny('选项文案无效，请用 session ask 重新提问。');
       }
       const description = typeof option.description === 'string' ? option.description.trim() : '';
+      if (description.length > 1_000) return deny('选项说明格式错误：不能超过 1000 字符。请缩短说明后重新提问，不要重复提交原请求或代替用户选择。');
       choices.push({ label: option.label, ...(description ? { description } : {}) });
     }
     if (new Set(choices.map(choice => choice.label.trim())).size !== choices.length

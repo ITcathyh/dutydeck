@@ -683,7 +683,7 @@ export class LarkLongConnectionListener implements LarkListener {
     previous.abort?.abort(new Error('Lark WebSocket client replaced after a stalled reconnect'));
     try { previous.client.close(); }
     catch (error) { this.log.warn({ error, appId: config.appId }, '关闭卡住的飞书长连接失败'); }
-    void previous.transport?.close();
+    void previous.transport?.close().catch(error => this.log.warn({ error, appId: config.appId }, '关闭卡住的飞书底层传输失败'));
     this.log.warn({ appId: config.appId, since, stallMs: this.stallMs }, '飞书消息监听重连卡住，已重建长连接');
     this.connectionChanged?.();
     // 新连接第一次连不上时 SDK 不报 onReconnecting，这里直接计时，仍然卡住就按同一阈值再重建。

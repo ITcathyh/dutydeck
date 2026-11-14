@@ -117,6 +117,30 @@ describe('native Claude questions over the session relay', () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 
+  it('accepts a 1000-character description and rejects 1001 as a correctable format error before sending', async () => {
+    const base = payload.tool_input.questions[1]!;
+    const withDescription = (description: string) => ({ ...payload, tool_input: {
+      questions: [{ ...base, options: [{ label: '继续', description }] }]
+    } });
+    const fetcher = vi.fn(async (_url: any, _init?: any) => new Response(JSON.stringify({ status: 'answered', answer: '继续' }), { status: 200 }));
+    const description = '说'.repeat(1_000);
+    const accepted = JSON.parse(await runNativeAskHook(withDescription(description), { env, fetcher }));
+    expect(accepted.hookSpecificOutput.permissionDecision).toBe('allow');
+    expect(fetcher).toHaveBeenCalledOnce();
+    const request = JSON.parse(fetcher.mock.calls[0]![1].body);
+    expect(request.questionBody).toBe('下一步？');
+    expect(request.choices).toEqual([{ label: '继续', description }]);
+
+    fetcher.mockClear();
+    const rejected = JSON.parse(await runNativeAskHook(withDescription('说'.repeat(1_001)), { env, fetcher }));
+    expect(rejected.hookSpecificOutput.permissionDecision).toBe('deny');
+    expect(rejected.hookSpecificOutput.permissionDecisionReason).toContain('1000');
+    expect(rejected.hookSpecificOutput.permissionDecisionReason).toContain('缩短');
+    expect(rejected.hookSpecificOutput.permissionDecisionReason).toContain('不要重复提交原请求');
+    expect(rejected.hookSpecificOutput.permissionDecisionReason).not.toContain('稍后重试');
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
   it('bounds stdin and preserves questions with a prototype-like title', async () => {
     await expect(readNativeAskPayload(Readable.from([Buffer.alloc(1024 * 1024 + 1)]))).rejects.toThrow('too large');
     const native = { ...payload, tool_input: { questions: [{ ...payload.tool_input.questions[0], question: '__proto__' }] } };

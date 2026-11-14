@@ -3024,7 +3024,7 @@ describe('长连接重连卡住后的重建', () => {
   let appSeq = 0;
   const stallConfig = () => ({ ...config, appId: `cli_stall_${++appSeq}` });
 
-  const startStalled = async (env: NodeJS.ProcessEnv = {}) => {
+  const startStalled = async (env: NodeJS.ProcessEnv = {}, forceCloseOnStop = false) => {
     larkSdkHarness.reset();
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
     const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
@@ -3032,7 +3032,7 @@ describe('长连接重连卡住后的重建', () => {
     const connectionLost = vi.fn();
     const connectionChanged = vi.fn();
     const listener = new LarkLongConnectionListener(log, {
-      env, fetcher: larkFetcher as any, chatModeResolver: async () => 'group',
+      env, fetcher: larkFetcher as any, chatModeResolver: async () => 'group', forceCloseOnStop,
       participation: participation as unknown as LarkLongConnectionListenerOptions['participation']
     }, connectionLost, connectionChanged);
     const botConfig = stallConfig();
@@ -3090,6 +3090,35 @@ describe('长连接重连卡住后的重建', () => {
     } finally {
       delete larkSdkHarness.behavior.close;
       listener.stop();
+    }
+  });
+
+  it('旧传输 close 超时只告警且没有未处理 rejection，后续 force stop 仍上报失败', async () => {
+    const { listener, log, appId, clients } = await startStalled({}, true);
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    let stopped = false;
+    try {
+      larkSdkHarness.transport.holdRawClose = true;
+      clients[0]!.options.onReconnecting();
+      await vi.advanceTimersByTimeAsync(pastStall);
+      expect(clients).toHaveLength(2);
+      expect(clients[0]!.raw!.destroy).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(5_000);
+      await new Promise(resolve => setImmediate(resolve));
+      expect(unhandled).toEqual([]);
+      expect(log.warn).toHaveBeenCalledWith({
+        appId, error: expect.objectContaining({ message: expect.stringContaining('close was not confirmed') })
+      }, '关闭卡住的飞书底层传输失败');
+
+      const stopping = listener.stop({ force: true }) as Promise<void>;
+      stopped = true;
+      await expect(stopping).rejects.toThrow('close was not confirmed');
+      expect(listener.listening).toBe(false);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+      if (!stopped) await (listener.stop({ force: true }) as Promise<void>).catch(() => {});
     }
   });
 

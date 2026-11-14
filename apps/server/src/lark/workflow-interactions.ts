@@ -1022,7 +1022,7 @@ export class LarkWorkflowInteractions {
     ];
     // 结构化问答仅在开关开启且记录本身带选项时渲染；持久记录缺 structured（升级前的卡）
     // 一律走自由文本形态，绝不让新渲染逻辑作用于旧记录。
-    // 候选按优先级排：先带「其他」输入，放不下再退回只有选项的版本。ADHD 提问卡只保留问题和按钮，不加输入。
+    // 候选按优先级排：先带「其他」输入，放不下再退回只有选项的版本。ADHD 提问卡只保留问题、选项和必要说明，不加输入。
     let structuredCandidates: { parts: LarkCardElement[]; withOther: boolean }[] = [];
     if (structuredOn && kind === 'ask') {
       if (record.structured && structuredChoices) {
