@@ -624,6 +624,41 @@ describe('PTY Claude maintenance compaction', () => {
     await expect(pending).resolves.toBe('cancelled');
   });
 
+  it('settles compact and interrupt without timers when the process exits with a backend interrupt pending', async () => {
+    const { pending } = await armCompact();
+    expect((driver as any).maintenanceActive.terminalWriteAttempted).toBe(true);
+    (driver as any).backend.interrupt = () => { interrupts++; return new Promise<void>(() => {}); };
+    output(screen(busyScreen));
+    const interrupting = driver.interrupt();
+    let interruptSettled = false, compactSettled = false;
+    void interrupting.then(() => { interruptSettled = true; });
+    void pending.then(() => { compactSettled = true; }, () => { compactSettled = true; });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(interrupts).toBe(1);
+    expect(interruptSettled).toBe(false);
+    expect(compactSettled).toBe(false);
+    exit(0);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(interruptSettled).toBe(true);
+    expect(compactSettled).toBe(true);
+    await expect(interrupting).resolves.toBeUndefined();
+    await expect(pending).rejects.toBeInstanceOf(PromptNotWrittenError);
+  });
+
+  it('does not call a queued maintenance interrupt after the process exits', async () => {
+    const { pending } = await armCompact();
+    const maintenance = (driver as any).maintenanceActive;
+    expect(maintenance.terminalWriteAttempted).toBe(true);
+    const stoppedAtCall: boolean[] = [];
+    (driver as any).backend.interrupt = () => { stoppedAtCall.push((driver as any).stopped); };
+    const recovering = (driver as any).recoverInterruptedMaintenance(maintenance) as Promise<boolean>;
+    exit(0);
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(recovering).resolves.toBe(false);
+    expect(stoppedAtCall).toEqual([]);
+    await expect(pending).rejects.toBeInstanceOf(PromptNotWrittenError);
+  });
+
   it('honors cancellation during post-outcome recovery and awaits the shared interrupt', async () => {
     const { pending } = await armCompact();
     output(screen(busyScreen));

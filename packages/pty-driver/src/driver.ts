@@ -1102,9 +1102,12 @@ export class PtyCliDriver implements AgentDriver {
   private async requestMaintenanceInterrupt(maintenance: NonNullable<PtyCliDriver['maintenanceActive']>): Promise<void> {
     if (!maintenance.terminalWriteAttempted || this.stopped) return;
     maintenance.terminalInterrupt ??= Promise.resolve()
-      .then(() => maintenance.backend.interrupt())
+      .then(() => {
+        if (this.stopped) return;
+        return maintenance.backend.interrupt();
+      })
       .catch(() => { /* The composer proof below still decides recovery. */ });
-    await maintenance.terminalInterrupt;
+    await Promise.race([maintenance.terminalInterrupt, this.maintenanceExit]);
   }
 
   private recordPrompt(prompt: string, stage: 'pty_routing' | 'pty_input') {
