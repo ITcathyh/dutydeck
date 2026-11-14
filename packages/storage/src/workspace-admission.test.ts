@@ -275,6 +275,105 @@ it('treats a retained fresh schedule session like the current one only while its
   expect(()=>cancel(previous,h.repos.execution.getTaskExecution(kept.id)!.task)).toThrow(invalid);
 });
 
+it('validates chunk boundaries before workspace filtering and sees external configuration commits', async () => {
+  const h=fixture(),target=h.session('target',h.root),task=h.accept(target),sql=new Database(h.path);
+  const at=new Date().toISOString(),insertSession=sql.prepare('INSERT INTO sessions(id,agent_id,state,cwd,run_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?)');
+  const insertResource=sql.prepare('INSERT INTO driver_resources(id,session_id,run_id,revision,json) VALUES(?,?,?,?,?)');
+  const safe=(index:number)=>{
+    const sessionId=`history-${String(index).padStart(3,'0')}`,runId=`run-${index}`;
+    return {sessionId,runId,resourceId:`resource-${index}`,kind:'local_only',revision:2,controller:{accessId:'history',instanceId:'history',generation:1},stage:'not_created',observations:[],createdAt:at};
+  };
+  try {
+    sql.transaction(()=>{for(let index=0;index<100;index++) {
+      const value=safe(index),cwd=index===40?h.root:join(h.root,`unrelated-${index}`);
+      insertSession.run(value.sessionId,'fixture','idle',cwd,value.runId,at,at);insertResource.run(value.resourceId,value.sessionId,value.runId,2,JSON.stringify(value));
+    }})();
+    expect(h.repos.execution.getTaskExecution(task.id)?.blockers).toEqual([]);
+    for(const index of [0,40,99]) {
+      const value=safe(index);sql.prepare('UPDATE driver_resources SET json=? WHERE id=?').run('{}',value.resourceId);
+      for(const read of [()=>h.repos.execution.getTaskExecution(task.id),()=>h.repos.execution.getSessionExecutions(target.sessionId),()=>h.x.claimNext(target)]) {
+        expect(read).toThrow(expect.objectContaining({code:'EXECUTION_INVALID_INPUT'}));
+      }
+      sql.prepare('UPDATE driver_resources SET json=? WHERE id=?').run(JSON.stringify(value),value.resourceId);
+    }
+    const key='runtime_verification:history-040:external';
+    sql.prepare('INSERT INTO configs(key,value) VALUES(?,?)').run(key,'{invalid');
+    expect(h.repos.execution.getTaskExecution(task.id)?.blockers).toContainEqual({code:'RESOURCE_EVIDENCE_INVALID',sessionId:'history-040',detail:key});
+    expect(()=>h.x.claimNext(target)).toThrow(expect.objectContaining({code:'WORKSPACE_RESOURCE_BLOCKED'}));
+    sql.prepare('UPDATE configs SET value=? WHERE key=?').run(JSON.stringify({sessionId:'history-040',status:'passed'}),key);
+    expect(h.x.claimNext(target)?.attempt).toBeDefined();
+  } finally {sql.close();}
+});
+
+it('preserves multi-row blocker ownership and order across candidate chunks', () => {
+  const h=fixture(),target=h.session('target',h.root),task=h.accept(target),sql=new Database(h.path),at=new Date().toISOString();
+  const insertSession=sql.prepare('INSERT INTO sessions(id,agent_id,state,cwd,run_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?)');
+  const insertTask=sql.prepare('INSERT INTO tasks(id,session_id,prompt,status,current_attempt_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?)');
+  const insertAttempt=sql.prepare('INSERT INTO task_attempts(id,task_id,session_id,run_id,number,revision,state,submission_state,json) VALUES(?,?,?,?,?,?,?,?,?)');
+  const insertSteering=sql.prepare('INSERT INTO task_steering_operations(id,session_id,run_id,task_id,state,revision,json) VALUES(?,?,?,?,?,?,?)');
+  try {
+    sql.transaction(()=>{for(let i=0;i<40;i++) {
+      const id=`candidate-${String(i).padStart(2,'0')}`,runId=`run-${i}`,group=i%5;
+      insertSession.run(id,'fixture','idle',h.root,runId,at,at);
+      if(group===0||group===1) {
+        if(group===0) {
+          insertTask.run(`active-task-${i}`,id,'active','running',`active-attempt-${i}`,at,at);
+          insertAttempt.run(`active-attempt-${i}`,`active-task-${i}`,id,runId,1,1,'active','acknowledged','{}');
+        }
+        for(const [n,suffix] of ['z','a','m'].entries()) {
+          const taskId=`legacy-task-${i}-${suffix}`,attemptId=`legacy-attempt-${i}-${suffix}`;
+          insertTask.run(taskId,id,'legacy','running',attemptId,at,at);
+          insertAttempt.run(attemptId,taskId,id,runId,n+2,1,'legacy_unresolved','legacy_unknown','{}');
+        }
+      } else if(group===2) {
+        for(const n of [2,0,1])insertTask.run(`queued-task-${i}-${n}`,id,'queued','queued',null,String(n+1),String(n+1));
+      } else if(group===3) {
+        for(const n of [2,0,1])insertTask.run(`unknown-task-${i}-${n}`,id,'unknown','reconcile_required',`missing-attempt-${i}-${n}`,String(n+1),String(n+1));
+      } else {
+        for(const [n,state] of ['pending','unknown','pending'].entries()) {
+          const taskId=`steering-task-${i}-${n}`;insertTask.run(taskId,id,'steering','cancelled',null,at,at);
+          insertSteering.run(`steering-${i}-${n}`,id,runId,taskId,state,1,'{}');
+        }
+      }
+    }})();
+    const candidates=(sql.prepare(`SELECT DISTINCT session_id FROM task_attempts WHERE state IN ('preparing','active','reconcile_required','legacy_unresolved')
+      UNION SELECT session_id FROM tasks WHERE status='reconcile_required'
+      UNION SELECT session_id FROM task_steering_operations WHERE state IN ('pending','unknown')`).all() as Array<{session_id:string}>).map(row=>row.session_id);
+    const expected=candidates.flatMap(id=>{
+      const unresolved=sql.prepare(`SELECT task_id AS taskId,id AS attemptId FROM task_attempts WHERE session_id=? AND state IN ('preparing','active','reconcile_required','legacy_unresolved') LIMIT 1`).get(id) as {taskId:string;attemptId:string}|undefined;
+      const unknown=sql.prepare(`SELECT t.id FROM tasks t LEFT JOIN task_attempts a ON a.id=t.current_attempt_id AND a.task_id=t.id
+        WHERE t.session_id=? AND t.status='reconcile_required' AND (a.id IS NULL OR a.state!='settled') LIMIT 1`).get(id) as {id:string}|undefined;
+      const steering=sql.prepare("SELECT task_id FROM task_steering_operations WHERE session_id=? AND state IN ('pending','unknown')").all(id) as Array<{task_id:string}>;
+      return unresolved||unknown||steering.length?[{code:'WORKSPACE_EXECUTION_BUSY',sessionId:id,
+        ...(unresolved?{taskId:unresolved.taskId,attemptId:unresolved.attemptId}:unknown?{taskId:unknown.id}:{taskId:steering[0]!.task_id})}]:[];
+    });
+    expect(expected).toHaveLength(32);
+    expect(h.repos.execution.getTaskExecution(task.id)?.blockers).toEqual(expected);
+    expect(h.repos.execution.getSessionExecutions(target.sessionId)[0]?.blockers).toEqual(expected);
+    let claimError:any;try{h.x.claimNext(target);}catch(error){claimError=error;}
+    expect(claimError).toMatchObject({code:'WORKSPACE_RESOURCE_BLOCKED'});
+    expect(JSON.parse(claimError.message)).toEqual(expected);
+    expect(h.x.canPrepareWorkspace(h.root)).toBe(false);
+
+    for(const offset of [0,32]) {
+      const ids=Array.from({length:32},(_,i)=>offset+i).filter(i=>i<40).map(i=>`candidate-${String(i).padStart(2,'0')}`),marks=ids.map(()=>'?').join(',');
+      const rows=sql.prepare(`SELECT t.session_id,t.id,t.status,a.id AS attempt_id,a.state FROM tasks t
+        LEFT JOIN task_attempts a ON a.id=t.current_attempt_id AND a.task_id=t.id
+        WHERE t.session_id IN (${marks}) AND t.status IN ('queued','reconcile_required')`).all(...ids) as Array<{session_id:string;id:string;status:string}>;
+      for(const id of ids.filter((_,i)=>(offset+i)%5===2)) {
+        const original=sql.prepare("SELECT id FROM tasks WHERE session_id=? AND status='queued' LIMIT 1").get(id) as {id:string};
+        expect(rows.find(row=>row.session_id===id&&row.status==='queued')?.id).toBe(original.id);
+      }
+    }
+    const ids=Array.from({length:32},(_,i)=>`candidate-${String(i).padStart(2,'0')}`),marks=ids.map(()=>'?').join(',');
+    for(const [query,index] of [
+      [`SELECT session_id,task_id AS taskId,id AS attemptId FROM task_attempts WHERE session_id IN (${marks}) AND state IN ('preparing','active','reconcile_required','legacy_unresolved')`,'task_attempts_session_state'],
+      [`SELECT t.session_id,t.id,t.status,a.id AS attempt_id,a.state FROM tasks t LEFT JOIN task_attempts a ON a.id=t.current_attempt_id AND a.task_id=t.id WHERE t.session_id IN (${marks}) AND t.status IN ('queued','reconcile_required')`,'tasks_session_created'],
+      [`SELECT session_id,task_id FROM task_steering_operations WHERE session_id IN (${marks}) AND state IN ('pending','unknown')`,'task_steering_session_state']
+    ])expect(JSON.stringify(sql.prepare('EXPLAIN QUERY PLAN '+query).all(...ids))).toContain(index);
+  } finally {sql.close();}
+});
+
 it('keeps malformed verification evidence scoped to its actual repository instead of skipping it or blocking unrelated work',async()=>{
   const h=fixture(),cwd=h.repo('repo'),origin=h.session('origin',cwd),target=h.session('target',cwd),unrelated=h.session('other',h.repo('other-repo'));
   h.accept(target);h.accept(unrelated);
