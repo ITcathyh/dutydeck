@@ -20,7 +20,7 @@ import { createPrompter, PromptAbortedError, PromptUnavailableError, type Prompt
 import { detectAgents, validateWorkingDirectory, type DetectedAgent } from './detect.js';
 import { isSecretKey, MANAGED_KEYS, maskSecret, readExistingConfig, writeEnvFile, type WriteEnvResult } from './env-file.js';
 import { bindLarkApp, renderLarkBindResult, type LarkBindResult } from './lark-bind.js';
-import { offerLarkSetupSmoke, type LarkSetupSmokeResult } from './lark-smoke.js';
+import type { offerLarkSetupSmoke, LarkSetupSmokeResult } from './lark-smoke.js';
 import { isValidLarkAppId } from '../lark/open-platform-configurator.js';
 import { readDaemonStatus, resolveDaemonDir } from '../daemon/daemon.js';
 import { readSecretValue } from '../secret-cli.js';
@@ -425,7 +425,8 @@ export async function runSetup(options: SetupCliOptions = {}, dependencies: Setu
     let smokeResult: LarkSetupSmokeResult | undefined;
     if (interactive && !assumeYes && botResult?.hasSecret && botResult.defaultAgentId) {
       try {
-        smokeResult = await (dependencies.smoke ?? offerLarkSetupSmoke)({
+        // Loaded on demand: the smoke pulls in the Lark listener, which must stay off the CLI startup graph.
+        smokeResult = await (dependencies.smoke ?? (await import('./lark-smoke.js')).offerLarkSetupSmoke)({
           database: databasePath(), appId: botResult.appId,
           interactive, assumeYes, json, prompter,
           onVerificationCode: uuid => ui.notice(`飞书收发验证的一次性验证码：${uuid}\n请在飞书里私聊机器人发送这段验证码。`)
