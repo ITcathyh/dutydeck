@@ -56,6 +56,7 @@ function sequence(fixture: any[], suffix = 'current') {
 describe('PTY Claude maintenance compaction', () => {
   let directory: string, transcript: string, driver: PtyCliDriver;
   let output: (data: string) => void;
+  let exit: (code: number | null) => void;
   let events: NormalizedDriverEvent[], prompts: string[];
   let interrupts: number;
   let awaitingAnswer: boolean;
@@ -71,7 +72,7 @@ describe('PTY Claude maintenance compaction', () => {
     const backend: SessionBackend = {
       kind: 'pty', spawn() {}, write() {}, resize() {}, kill() {},
       interrupt() { interrupts++; },
-      onData(callback) { output = callback; }, onExit() {},
+      onData(callback) { output = callback; }, onExit(callback) { exit = callback; },
     };
     const adapter = createCliAdapter('claude-code');
     driver = new PtyCliDriver({
@@ -812,6 +813,47 @@ describe('PTY Claude maintenance compaction', () => {
     expect(prompts).toEqual(['/compact']);
     await succeedCompact('after-start');
     await expect(compacting).resolves.toBe('completed');
+  });
+
+  it('settles an armed observer as unknown when the process exits before the command write', async () => {
+    const source = (driver as any).transcript;
+    const wait = source.waitForCompaction?.bind(source);
+    expect(wait).toBeTypeOf('function');
+    vi.spyOn(source, 'waitForCompaction').mockImplementationOnce((request: unknown) => {
+      const observation = wait(request);
+      exit(0);
+      return observation;
+    });
+    const pending = driver.compact!();
+    void pending.catch(() => {});
+    let settled = false;
+    void pending.then(() => { settled = true; }, () => { settled = true; });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).toBe(true);
+    await expect(pending).rejects.toBeInstanceOf(PromptNotWrittenError);
+    expect((driver as any).maintenanceUnknown).toBe(true);
+    expect(prompts).toEqual([]);
+    expect(interrupts).toBe(0);
+    expect(events.filter(event => event.type === 'status' && event.data?.state === 'compaction' && event.data?.proactive === true && event.data.phase === 'completed')).toEqual([]);
+  });
+
+  it('settles post-observation recovery as unknown when the process exits', async () => {
+    const recovering = vi.spyOn(driver as any, 'recoverCompletedMaintenance');
+    const { pending } = await armCompact();
+    let settled = false;
+    void pending.then(() => { settled = true; }, () => { settled = true; });
+    output(screen(busyScreen));
+    await succeedCompact('exit-during-recovery');
+    expect(recovering).toHaveBeenCalledTimes(1);
+    expect(settled).toBe(false);
+    exit(0);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).toBe(true);
+    await expect(pending).rejects.toBeInstanceOf(PromptNotWrittenError);
+    expect((driver as any).maintenanceUnknown).toBe(true);
+    expect(prompts).toEqual(['/compact']);
+    expect(interrupts).toBe(0);
+    expect(events.filter(event => event.type === 'status' && event.data?.state === 'compaction' && event.data?.proactive === true && event.data.phase === 'completed')).toEqual([]);
   });
 
   it.each(['unsettled', 'settled'] as const)('preserves unknown without a recovery grace after stop (%s writes)', async writes => {

@@ -243,6 +243,8 @@ export class PtyCliDriver implements AgentDriver {
   } | undefined;
   private maintenanceUnknown = false;
   private maintenanceUnknownRecovery: NonNullable<PtyCliDriver['maintenanceActive']> | undefined;
+  private maintenanceExitResolve: (() => void) | undefined;
+  private readonly maintenanceExit = new Promise<false>(resolve => { this.maintenanceExitResolve = () => resolve(false); });
   private maintenanceGeneration = 0;
   private static readonly MAINTENANCE_TIMEOUT_MS = 5 * 60_000;
   private static readonly MAINTENANCE_IDLE_GRACE_MS = 15_000;
@@ -1014,7 +1016,7 @@ export class PtyCliDriver implements AgentDriver {
         timer = setTimeout(() => resolve(false), graceMs);
         timer.unref();
       });
-      return await Promise.race([pending.then(() => true, () => true), expired]);
+      return await Promise.race([pending.then(() => true, () => true), expired, this.maintenanceExit]);
     } finally {
       if (timer) clearTimeout(timer);
     }
@@ -1032,7 +1034,8 @@ export class PtyCliDriver implements AgentDriver {
       if (recovered) return true;
       const remaining = deadline - Date.now();
       if (remaining <= 0) return false;
-      await new Promise<void>(resolve => { const timer = setTimeout(resolve, Math.min(50, remaining)); timer.unref(); });
+      await Promise.race([new Promise<void>(resolve => { const timer = setTimeout(resolve, Math.min(50, remaining)); timer.unref(); }), this.maintenanceExit]);
+      if (this.stopped) return false;
     }
   }
 
@@ -1040,10 +1043,11 @@ export class PtyCliDriver implements AgentDriver {
     const graceMs = this.timings.maintenanceIdleGraceMs ?? PtyCliDriver.MAINTENANCE_IDLE_GRACE_MS;
     const interrupting = interrupt ? this.requestMaintenanceInterrupt(maintenance) : Promise.resolve();
     if (!await this.settleMaintenanceWrites(maintenance)) {
-      await interrupting;
+      await Promise.race([interrupting, this.maintenanceExit]);
       return false;
     }
-    await interrupting;
+    await Promise.race([interrupting, this.maintenanceExit]);
+    if (this.stopped) return false;
     const deadline = Date.now() + graceMs;
     let cleanupAttempted = false;
     for (;;) {
@@ -1052,12 +1056,14 @@ export class PtyCliDriver implements AgentDriver {
       // only after that activity clears, and is revalidated by the write guard.
       if (!cleanupAttempted && this.maintenanceComposerIsOwned(maintenance, true)) {
         cleanupAttempted = true;
-        try { await this.submissionBackend(maintenance, 'maintenance-cleanup').write('\x15'); } catch { /* Recovery below remains the only proof. */ }
+        try { await Promise.race([this.submissionBackend(maintenance, 'maintenance-cleanup').write('\x15'), this.maintenanceExit]); } catch { /* Recovery below remains the only proof. */ }
+        if (this.stopped) return false;
         continue;
       }
       const remaining = deadline - Date.now();
       if (remaining <= 0) return false;
-      await new Promise<void>(resolve => { const timer = setTimeout(resolve, Math.min(50, remaining)); timer.unref(); });
+      await Promise.race([new Promise<void>(resolve => { const timer = setTimeout(resolve, Math.min(50, remaining)); timer.unref(); }), this.maintenanceExit]);
+      if (this.stopped) return false;
     }
   }
 
@@ -2418,6 +2424,12 @@ export class PtyCliDriver implements AgentDriver {
     if (this.exitReported) return;
     this.exitReported = true;
     this.stopped = true;
+    const exitError = new Error(`Agent exited with code ${code}`);
+    this.maintenanceExitResolve?.();
+    if (this.maintenanceActive) {
+      this.maintenanceActive.cancelError ??= exitError;
+      this.maintenanceActive.controller.abort(exitError);
+    }
     this.transcriptVerification?.controller.abort();
     const exitingBackend = this.backend;
     await this.transcript?.flush().catch(() => {});
@@ -2434,7 +2446,6 @@ export class PtyCliDriver implements AgentDriver {
       this.turnResolve = null;
       this.turnReject = null;
     }
-    const exitError = new Error(`Agent exited with code ${code}`);
     this.cancelActiveSubmission(exitError);
     this.turnWriteReject = null;
     this.exitCallback(code);
