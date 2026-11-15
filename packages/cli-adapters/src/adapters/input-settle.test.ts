@@ -190,6 +190,55 @@ describe('Claude composer ownership around the first terminal write', () => {
     return backend;
   }
 
+  it('accepts a minimal ordinary prompt before and after a bare-PTY paste', async () => {
+    const initial = 'Claude Code v2.1.267 (mock)\r\n❯ \r\n';
+    const backend = bare(initial);
+    backend.onWrite = data => {
+      if (data.includes('business body')) backend.screen = `${initial}....\r\n`;
+    };
+    const pending = writeClaudeFamilyInput(backend, 'business body');
+    void pending.catch(() => {});
+    await finish(pending);
+    expect(backend.writes).toEqual(['\x1b[200~business body\x1b[201~', '\r']);
+  });
+
+  it('accepts its own single-line draft on a minimal resumed screen', async () => {
+    const initial = 'Claude Code v2.1.267 (mock)\n✳ Worked for 1s\n❯';
+    const backend = new ComposerBackend(initial);
+    backend.onWrite = data => {
+      if (data === 'business body') backend.screen = 'Claude Code v2.1.267 (mock)\n✳ Worked for 1s\n❯ business body';
+    };
+    const pending = writeClaudeFamilyInput(backend, 'business body');
+    void pending.catch(() => {});
+    await finish(pending);
+    expect(backend.writes).toEqual(['business body', 'Enter']);
+  });
+
+  it.each([
+    ['human draft', 'Claude Code v2.1.267 (mock)\n❯ unfinished human draft'],
+    ['slash palette', 'Claude Code v2.1.267 (mock)\n❯\n/compact  Free up context'],
+    ['historical prompt', 'Claude Code v2.1.267 (mock)\n❯ old request\nprevious answer'],
+  ])('rejects a minimal %s without writing', async (_name, screen) => {
+    const backend = new ComposerBackend(screen);
+    const pending = writeClaudeFamilyInput(backend, 'business body');
+    void pending.catch(() => {});
+    await vi.advanceTimersByTimeAsync(15_000);
+    await expect(pending).rejects.toBeInstanceOf(PromptNotWrittenError);
+    expect(backend.writes).toEqual([]);
+  });
+
+  it('turns a foreign minimal draft after a bare-PTY paste into unknown without final Enter', async () => {
+    const backend = bare('Claude Code v2.1.267 (mock)\n❯');
+    backend.onWrite = data => {
+      if (data.includes('business body')) backend.screen = 'Claude Code v2.1.267 (mock)\n❯ foreign draft';
+    };
+    const pending = writeClaudeFamilyInput(backend, 'business body');
+    void pending.catch(() => {});
+    await vi.advanceTimersByTimeAsync(15_000);
+    await expect(pending).rejects.toMatchObject({ name: 'DriverRecoveryError', code: 'DRIVER_INPUT_UNCONFIRMED' });
+    expect(backend.writes).toEqual(['\x1b[200~business body\x1b[201~']);
+  });
+
   it.each([
     ['ordinary empty composer', box()],
     ['native placeholder', box('Try "refactor <filepath>"')],
