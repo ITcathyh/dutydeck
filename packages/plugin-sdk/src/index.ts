@@ -235,6 +235,10 @@ export interface PluginToolAction {
 
 export type PluginPermissionEffect = 'read' | 'write' | 'external_write';
 export type PluginFilesystemPermission = 'workspace_read' | 'workspace_write' | 'plugin_data';
+/**
+ * Host compatibility declaration. `channels` is metadata only and does not affect loading.
+ * Installation selects the active artifact and enabled state; bindings and scope control availability.
+ */
 export interface PluginHostDeclaration { api: string; channels?: Array<'web' | 'lark' | 'cli' | 'mcp'> }
 export type PluginDependencies = Readonly<Record<string, string>>;
 export interface PluginPermissionsDeclaration {
