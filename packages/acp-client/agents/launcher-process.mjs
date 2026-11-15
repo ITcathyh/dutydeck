@@ -17,6 +17,7 @@ export function launchAgent(command, args, env, options = {}) {
   });
   const report = ownGroup && child.pid ? reportGroup(process.env[reportKey], child.pid) : undefined;
   let escalation;
+  let drainTimedOut = false;
   const signalChild = signal => {
     if (!child.pid) return;
     try {
@@ -40,17 +41,32 @@ export function launchAgent(command, args, env, options = {}) {
     // With end:false the pipeline can finish while the destination still buffers.
     await new Promise((resolve, reject) => target.write('', error => error ? reject(error) : resolve()));
   }));
-  void output.catch(() => process.kill(process.pid, 'SIGTERM'));
+  void output.catch(() => { if (!drainTimedOut) process.kill(process.pid, 'SIGTERM'); });
   child.once('error', error => { process.stderr.write(`${error.message}\n`); process.exitCode = 1; });
   child.once('exit', async (code, signal) => {
     clearTimeout(escalation);
-    if (ownGroup) {
-      signalChild('SIGKILL');
-      // A normal launcher exit certifies group cleanup. If this never becomes
-      // provable, ACPX may kill the launcher; the adapter treats that as unknown.
-      while (groupAlive(child.pid)) await new Promise(resolve => setTimeout(resolve, 10));
-    }
-    const drained = await output.then(() => true, () => false);
+    // One budget covers both group cleanup and output drain. Before the main
+    // child exits there is no timer, so slow-but-normal agents are unaffected.
+    const deadline = setTimeout(() => {
+      drainTimedOut = true;
+      // Only these launcher-owned sources are destroyed. The shared output
+      // targets remain writable for this diagnostic and for their other users.
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      if (report) rmSync(report, { force: true });
+      process.stderr.write('Agent post-exit cleanup timed out after 5000ms; drained=false\n');
+      process.exit(1);
+    }, 5000);
+    let drained = false;
+    try {
+      if (ownGroup) {
+        signalChild('SIGKILL');
+        // A normal launcher exit certifies group cleanup. The shared deadline
+        // bounds this proof as well as the output drain that follows it.
+        while (groupAlive(child.pid)) await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      drained = await output.then(() => true, () => false);
+    } finally { clearTimeout(deadline); }
     if (report) rmSync(report, { force: true });
     process.exit(signal ? 128 + (constants.signals[signal] ?? 1) : drained ? code ?? 1 : 1);
   });

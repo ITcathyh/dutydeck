@@ -1,4 +1,5 @@
 import { expect, it, vi } from 'vitest';
+import { DriverRecoveryError, PromptNotWrittenError } from '@dutydeck/shared';
 import { createCliAdapter } from './factory.js';
 import { isInputReady } from './adapters/screen-ready-helper.js';
 import { readFileSync } from 'node:fs';
@@ -27,5 +28,87 @@ it.each(['codex', 'traex'])('%s pastes one normalized message and preserves Unic
     await vi.advanceTimersByTimeAsync(1000); await pending;
     expect(writes).toEqual(['中文👩‍💻\u200c\u200b\nsecond\nthird']); expect(keys).toEqual(['Enter']);
     expect(adapter.capabilities.nativeInputReceipt).toBe(true);
+  } finally { vi.useRealTimers(); }
+});
+
+const traexQuestion = 'Question 1/1 (1 unanswered)\nWhich database should the new service use?\n❯ 1. PostgreSQL (Recommended)\n  2. SQLite';
+
+it('TraeX reports not-written when the native question page arrives before paste', async () => {
+  vi.useFakeTimers();
+  try {
+    let reads = 0;
+    const writes: string[] = [], keys: string[] = [];
+    const pending = createCliAdapter('traex').writeInput({
+      readScreen: () => ++reads === 1 ? traexReady : traexQuestion,
+      write(data) { writes.push(data); }, pasteText(text) { writes.push(text); }, sendSpecialKeys(...value) { keys.push(...value); },
+    }, 'do not paste');
+    const outcome = pending.then(() => undefined, error => error);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(await outcome).toBeInstanceOf(PromptNotWrittenError);
+    expect(reads).toBe(2);
+    expect(writes).toEqual([]);
+    expect(keys).toEqual([]);
+  } finally { vi.useRealTimers(); }
+});
+
+it('TraeX leaves a pasted prompt unconfirmed instead of answering a native question', async () => {
+  vi.useFakeTimers();
+  try {
+    let screen = traexReady, reads = 0;
+    const writes: string[] = [], keys: string[] = [];
+    const pending = createCliAdapter('traex').writeInput({
+      readScreen: () => { reads++; return screen; },
+      write(data) { writes.push(data); },
+      pasteText(text) { writes.push(text); screen = traexQuestion; },
+      sendSpecialKeys(...value) { keys.push(...value); },
+    }, 'paste but do not answer');
+    const outcome = pending.then(() => undefined, error => error);
+    await vi.advanceTimersByTimeAsync(1000);
+    const error = await outcome;
+    expect(error).toBeInstanceOf(DriverRecoveryError);
+    expect(error).toMatchObject({
+      name: 'DriverRecoveryError', code: 'DRIVER_INPUT_UNCONFIRMED',
+    });
+    expect(reads).toBe(3);
+    expect(writes).toEqual(['paste but do not answer']);
+    expect(keys).toEqual([]);
+  } finally { vi.useRealTimers(); }
+});
+
+it('TraeX waits through a resume redraw before the authoritative paste check', async () => {
+  vi.useFakeTimers();
+  try {
+    const screens = [traexReady, 'Resuming session…', traexReady];
+    let reads = 0;
+    const writes: string[] = [], keys: string[] = [];
+    const pending = createCliAdapter('traex').writeInput({
+      readScreen: () => screens[Math.min(reads++, screens.length - 1)]!,
+      write(data) { writes.push(data); }, pasteText(text) { writes.push(text); }, sendSpecialKeys(...value) { keys.push(...value); },
+    }, 'resume once');
+    const outcome = pending.then(() => undefined, error => error);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(await outcome).toBeUndefined();
+    expect(writes).toEqual(['resume once']);
+    expect(keys).toEqual(['Enter']);
+    expect(reads).toBeGreaterThanOrEqual(4);
+  } finally { vi.useRealTimers(); }
+});
+
+it.each([
+  'Question 1/1 (1 unanswered)\nWhich database should we use?\nNo numeric options are visible',
+  'Assistant reply: Question 1/1 (1 unanswered) is an example, not a dialog\n1. This is prose, not a native option',
+  `${traexQuestion}\nWorked for 1s\n❯ ordinary composer content\nContext 92% left`,
+])('TraeX still submits when the screen has no complete native question structure', async screenAfterPaste => {
+  vi.useFakeTimers();
+  try {
+    let screen = traexReady;
+    const keys: string[] = [];
+    const pending = createCliAdapter('traex').writeInput({
+      readScreen: () => screen,
+      write() {}, pasteText() { screen = screenAfterPaste; }, sendSpecialKeys(...value) { keys.push(...value); },
+    }, 'ordinary input');
+    await vi.advanceTimersByTimeAsync(1000);
+    await pending;
+    expect(keys).toEqual(['Enter']);
   } finally { vi.useRealTimers(); }
 });
