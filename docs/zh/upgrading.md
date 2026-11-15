@@ -4,6 +4,8 @@
 
 - **新版 Claude 粘贴不可见字符兼容**：Claude family 输入在写入终端前按 Claude 同一规则清理会触发人工复核的不可见码点，Dutydeck 的不可信边界转义也改用可见空格；合法 emoji 组合和文字组合序列保留。清理只作用于终端实际输入及对应原生回执，不改变任务保存的提示词、账本记录或其他 Agent。若已写入后仍出现 `Removed … invisible character · review and press Enter to send`，Dutydeck 不会自动再按 Enter 或重发，结果未知时会提示打开终端人工确认。
 
+- **Claude 业务正文写入前复核空输入框**：屏幕静止后、首个业务字节前会核对底部完整空框，普通提示符、原生占位提示、权限栏和最多两行 statusLine 不受影响。重启后残留的人工草稿、未提交 `/compact` 或 slash 菜单会让本轮按未写入失败，处理后可重发，不再把业务正文拼到草稿后。任何 chunk、软换行或 Enter 已尝试后的外来变化仍按结果未知处理，不自动清空、再按 Enter 或重发；无新持久字段或迁移。tmux 读屏与写入非原子，不承诺排除所有其他终端同时写入。
+
 - **setup 终端预检不再迁移旧数据库**：检测终端 Agent 后，读取 `dutydeck.terminal_backend` 改为只读 SQLite 查询，不再打开仓储层。已有库不会因此跑 migration、写控制表或改变 schema 版本；后续 `--cwd` 校验失败或用户取消也保持原库不变。数据库、`configs` 表或设置键缺失时沿用 tmux 默认值，无效设置提示读取失败并跳过 tmux 预检。没有新增命令、设置或数据库迁移。
 - **doctor 逐条隔离无效机器人配置**：`lark.exposure` 遇到单条无效配置时只跳过该条并报告数量，继续评估其余有效机器人；非回环无认证、完全信任、广范围高危和风控关闭等危险组合仍按原规则 fail/warn，不再被同数组里的坏条目整体降为 skip。整份配置不可解析时仍降级，修复指引继续由「飞书配置」检查给出。
 - **doctor 核对停止 service 的 socket 实际状态**：daemon 记录中有 systemd unit 时，即使 service 当前未运行，也会通过 `TriggeredBy` 找到关联 `.socket`，再查询 `ActiveState` 与 `SubState`；只有 `active + listening` 才记为正在监听。查询失败、属性缺失或状态矛盾时返回 unknown，`lark.exposure` 降级为 skip，不再按 `.env` 的回环地址猜安全。socket 实际地址仍需用 `ListenStream=` 人工核对。

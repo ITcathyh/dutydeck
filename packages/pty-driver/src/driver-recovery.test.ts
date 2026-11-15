@@ -131,19 +131,28 @@ tmuxDescribe('PtyCliDriver in-flight tmux turn recovery', () => {
         // This case tests transport rejection after readiness, so render an
         // initialized composer in the real pane instead of a shell prompt.
         agent.args = ['-c', "printf '%s\\n' 'TraeX' '❯ Ask TraeCode CLI' 'Context 100% left'; sleep 30"];
+      } else if (adapterId === 'claude-code') {
+        agent.args = ['-c', "printf '%s\\n' '──────────' '❯' '──────────' '? for shortcuts'; sleep 30"];
       }
       const events: NormalizedDriverEvent[] = [];
       const driver = new PtyCliDriver({ agent, adapter, backend, onEvent(event) { events.push(event); }, onExit() {}, sessionId });
       try {
         await driver.start();
         if (adapterId === 'traex') await waitFor(async () => expect(await backend.captureCurrentScreen()).toContain('Context 100% left'));
+        if (adapterId === 'claude-code') await waitFor(async () => expect(await backend.captureCurrentScreen()).toContain('? for shortcuts'));
         await driver.checkpoint();
         // Paste-capable adapters submit through pasteText; either is the literal input transport.
         const writes = vi.spyOn(backend, 'write');
         const pastes = vi.spyOn(backend, 'pasteText');
         const enters = vi.spyOn(backend, 'sendSpecialKeys');
         if (method === 'write') { writes.mockResolvedValue(false); pastes.mockResolvedValue(false); }
-        else enters.mockResolvedValue(false);
+        else {
+          if (adapterId === 'claude-code') {
+            const echoed = async () => { (driver as any).lastOutputAt = Date.now(); return true; };
+            writes.mockImplementation(echoed); pastes.mockImplementation(echoed);
+          }
+          enters.mockResolvedValue(false);
+        }
         const metadata = vi.spyOn(backend, 'setDutydeckMetadata');
         const sent = driver.send('fixture prompt').then(() => undefined, error => error);
         let timer: NodeJS.Timeout | undefined;

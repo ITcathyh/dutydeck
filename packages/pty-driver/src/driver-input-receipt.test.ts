@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCliAdapter, pinnedSessionUuid } from '@dutydeck/cli-adapters';
 import type { NormalizedDriverEvent } from '@dutydeck/shared';
-import { DriverRecoveryError, wrapUntrusted } from '@dutydeck/shared';
+import { DriverRecoveryError, PromptNotWrittenError, wrapUntrusted } from '@dutydeck/shared';
 import { taskReportHint } from '@dutydeck/relay';
 import type { SessionBackend } from '@dutydeck/session-backends';
 import { PtyCliDriver } from './driver.js';
@@ -380,4 +380,68 @@ it('explains a Claude invisible-character review hold as unknown without another
   });
   expect(prompts).toHaveLength(1);
   expect(phases()).toEqual(['pending', 'unknown']);
+});
+
+it('refuses a recovered compact draft at the real writer without appending business input', async () => {
+  const target = (driver as any).backend;
+  const writes: string[] = [];
+  target.write = (data: string) => { writes.push(data); };
+  target.captureCurrentScreen = () => '──────────\n❯ /compact\n──────────\n? for shortcuts';
+  const real = createCliAdapter('claude-code');
+  (driver as any).adapter = { ...real, prepareInput: undefined,
+    writeInput(backend: any, prompt: string) { prompts.push(prompt); return real.writeInput(backend, prompt); } };
+  await (driver as any).markTmuxReattached();
+  const pending = driver.send('business body'); void pending.catch(() => {});
+  await vi.advanceTimersByTimeAsync(15_000);
+  await expect(pending).rejects.toBeInstanceOf(PromptNotWrittenError);
+  expect(writes).toEqual([]); expect(prompts).toHaveLength(1);
+});
+
+it('maps a post-write recognition rejection by the recorded attempt phase, not its message', async () => {
+  const target = (driver as any).backend;
+  let phaseAtWrite: boolean | undefined;
+  target.write = () => { phaseAtWrite = (driver as any).activeSubmission?.terminalWriteAttempted; };
+  (driver as any).adapter = { ...(driver as any).adapter, prepareInput: undefined,
+    async writeInput(backend: any) { await backend.write('partial'); throw new PromptNotWrittenError('screen changed'); } };
+  const pending = driver.send('business body'); void pending.catch(() => {});
+  await vi.advanceTimersByTimeAsync(1_000);
+  await expect(pending).rejects.toMatchObject({ name: 'DriverRecoveryError', code: 'DRIVER_INPUT_UNCONFIRMED' });
+  expect(phaseAtWrite).toBe(true); expect(prompts).toHaveLength(0);
+});
+
+it('uses the rendered Herdr viewport instead of ANSI management output for composer recognition', async () => {
+  const target = (driver as any).backend;
+  target.kind = 'herdr';
+  target.captureCurrentScreen = () => '\u001b[38;2;177;185;249m❯ /compact\u001b[0m';
+  const writes: string[] = [];
+  target.write = (data: string) => { writes.push(data); return false; };
+  const real = createCliAdapter('claude-code');
+  (driver as any).adapter = { ...real, prepareInput: undefined };
+  output(screen('──────────\n❯\n──────────\n? for shortcuts'));
+  await vi.advanceTimersByTimeAsync(250);
+  const pending = driver.send('business body'); void pending.catch(() => {});
+  await vi.advanceTimersByTimeAsync(1_000);
+  await expect(pending).rejects.toThrow('backend rejected input');
+  expect(writes).toHaveLength(1);
+});
+
+it.each(['stop', 'detach'] as const)('cancels a pending pre-write screen read on %s without terminal bytes', async action => {
+  const target = (driver as any).backend;
+  const writes: string[] = [];
+  target.write = (data: string) => { writes.push(data); };
+  let release!: () => void, reading!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const read = new Promise<void>(resolve => { reading = resolve; });
+  target.captureCurrentScreen = () => { reading(); return gate.then(() => '──────────\n❯\n──────────\n? for shortcuts'); };
+  const real = createCliAdapter('claude-code');
+  (driver as any).adapter = { ...real, prepareInput: undefined };
+  const pending = driver.send('business body'); void pending.catch(() => {});
+  await vi.advanceTimersByTimeAsync(1_000); await read;
+  if (action === 'detach') {
+    await driver.prepareForDaemonShutdown();
+    vi.spyOn((driver as any), 'persistentBackend').mockReturnValue({ detach() {}, setDutydeckMetadata() {} });
+  }
+  const stopping = driver.stop(); release();
+  await expect(pending).rejects.toThrow(action === 'detach' ? 'Driver detached' : 'Driver stopped');
+  await stopping; expect(writes).toEqual([]);
 });

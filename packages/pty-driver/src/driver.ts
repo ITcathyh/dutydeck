@@ -365,7 +365,7 @@ export class PtyCliDriver implements AgentDriver {
   /** The adapter can await between paste chunks and its final Enter. Every
    * write travels through this identity-bound guard so a detached driver
    * cannot leave a delayed submit key in a surviving tmux pane. */
-  private activeSubmission: { cancelError?: Error; pending?: Promise<unknown>; receiptAbort?: AbortController } | undefined;
+  private activeSubmission: { cancelError?: Error; pending?: Promise<unknown>; receiptAbort?: AbortController; businessInputStarted?: boolean; terminalWriteAttempted?: boolean } | undefined;
   /** Maintenance is deliberately not a business turn. Its object identity is
    * the ownership fence across async flushes, cancellation and reconnects. */
   private maintenanceActive: {
@@ -775,7 +775,7 @@ export class PtyCliDriver implements AgentDriver {
     const writeCancelled = new Promise<never>((_, reject) => {
       this.turnWriteReject = rejectWrite = reject;
     });
-    const submission: { cancelError?: Error; pending?: Promise<unknown>; receiptAbort?: AbortController } = {};
+    const submission: { cancelError?: Error; pending?: Promise<unknown>; receiptAbort?: AbortController; businessInputStarted?: boolean; terminalWriteAttempted?: boolean } = {};
     this.activeSubmission = submission;
     const inputBackend = this.backend, generation = this.wiringGeneration;
     const check = () => {
@@ -847,6 +847,7 @@ export class PtyCliDriver implements AgentDriver {
       }
       // Register the completion waiter before writeInput: an in-memory/mock
       // backend may synchronously emit a completion marker from write().
+      submission.businessInputStarted = true;
       await Promise.race([this.adapter.writeInput(this.submissionBackend(submission), finalPrompt), writeCancelled]);
       await Promise.race([submission.pending, writeCancelled]);
       check();
@@ -893,7 +894,10 @@ export class PtyCliDriver implements AgentDriver {
         if (!this.turnActive) { this.firstPromptSent = true; return completion!; }
       }
       this.firstPromptSent = true;
-    } catch (err) {
+    } catch (caught) {
+      const err = submission.businessInputStarted && submission.terminalWriteAttempted && caught instanceof PromptNotWrittenError
+        ? new DriverRecoveryError('Claude 输入框在首个业务字节写入后无法复核；提交结果未知，原进程已保留，未自动重发', 'DRIVER_INPUT_UNCONFIRMED')
+        : caught;
       if (receiptPending && this.wiringGeneration === generation && this.activeSubmission === submission) {
         this.emitEvent({ type: 'status', data: { state: 'input_receipt', phase: 'unknown' } });
       }
@@ -2802,7 +2806,7 @@ export class PtyCliDriver implements AgentDriver {
   /** Wrap the intentionally-small adapter PTY surface per submission. The
    * real Claude adapter awaits between its bracketed paste and Enter, so
    * checking only before writeInput is insufficient after daemon detach. */
-  private submissionBackend(submission: { cancelError?: Error; pending?: Promise<unknown>; writesSettled?: boolean; wiringGeneration?: number; composerWritten?: boolean; submitted?: boolean }, owner: 'turn' | 'maintenance' | 'maintenance-cleanup' = 'turn'): PtyLike {
+  private submissionBackend(submission: { cancelError?: Error; pending?: Promise<unknown>; writesSettled?: boolean; wiringGeneration?: number; composerWritten?: boolean; submitted?: boolean; businessInputStarted?: boolean; terminalWriteAttempted?: boolean }, owner: 'turn' | 'maintenance' | 'maintenance-cleanup' = 'turn'): PtyLike {
     const target = this.backend as SessionBackend & Partial<PtyLike>;
     const check = () => {
       if (owner !== 'maintenance-cleanup' && submission.cancelError) throw submission.cancelError;
@@ -2810,7 +2814,7 @@ export class PtyCliDriver implements AgentDriver {
       const active = owner === 'turn' ? this.activeSubmission === submission : this.maintenanceActive === submission;
       if (!active || this.backend !== target || owner !== 'turn' && this.wiringGeneration !== submission.wiringGeneration) throw new Error('PtyCliDriver: submission is no longer active');
     };
-    const guarded = <T>(write: () => T | Promise<T>, maintenanceInput?: 'text' | 'enter'): Promise<T> => {
+    const guarded = <T>(write: () => T | Promise<T>, maintenanceInput?: 'text' | 'enter', terminalInput = false): Promise<T> => {
       this.noteInput();
       check();
       const previous = submission.pending ?? Promise.resolve();
@@ -2832,9 +2836,10 @@ export class PtyCliDriver implements AgentDriver {
           // terminal. Only this point authorizes a later maintenance Ctrl-C.
           maintenance.terminalWriteAttempted = true;
         }
+        if (owner === 'turn' && terminalInput && submission.businessInputStarted) submission.terminalWriteAttempted = true;
         const result = await write();
         check();
-        if (result === false) throw new DriverRecoveryError('PTY backend rejected input; original process preserved');
+        if (result === false) throw new DriverRecoveryError('PTY backend rejected input; original process preserved', 'DRIVER_INPUT_UNCONFIRMED');
         return result;
       });
       submission.pending = operation;
@@ -2847,15 +2852,15 @@ export class PtyCliDriver implements AgentDriver {
       return operation;
     };
     const proxy: PtyLike = {
-      write: data => guarded(() => target.write(data), owner === 'maintenance' ? data === '\r' ? 'enter' : 'text' : undefined),
+      write: data => guarded(() => target.write(data), owner === 'maintenance' ? data === '\r' ? 'enter' : 'text' : undefined, true),
       lastOutputAt: () => { check(); return this.lastOutputAt; },
       processKey: target,
-      // tmux can capture the pane through its management client. Prefer that authoritative
-      // current render over its asynchronous pipe-pane/socket mirror while a
-      // startup dialog is deciding whether it may accept any input.
+      // tmux captures a plain current pane through its management client; prefer
+      // it over the asynchronous pipe-pane mirror. Herdr management output can
+      // retain ANSI SGR bytes, so its already-rendered viewport is authoritative.
       readScreen: () => guarded(async () => {
-        if (target.captureCurrentScreen) return await target.captureCurrentScreen() ?? '';
-        if (this.adapter.id !== 'codex') return this.snapshot?.viewportText() ?? '';
+        if (target.kind !== 'herdr' && target.captureCurrentScreen) return await target.captureCurrentScreen() ?? '';
+        if (this.adapter.id !== 'codex') return this.snapshot?.viewportText({ preserveStructure: true }) ?? '';
         const snapshot = this.snapshot;
         for (let attempt = 0; snapshot && attempt < 3; attempt++) {
           const revision = this.screenRevision;
@@ -2866,10 +2871,12 @@ export class PtyCliDriver implements AgentDriver {
         return '';
       }),
     };
-    if (target.sendText) proxy.sendText = text => guarded(() => target.sendText!(text), owner === 'maintenance' ? 'text' : undefined);
-    if (target.sendSpecialKeys) proxy.sendSpecialKeys = (...keys) => guarded(() => target.sendSpecialKeys!(...keys), owner === 'maintenance' ? keys.includes('Enter') ? 'enter' : 'text' : undefined);
-    if (target.pasteText) proxy.pasteText = text => guarded(() => target.pasteText!(text), owner === 'maintenance' ? 'text' : undefined);
-    return proxy;
+    if (target.sendText) proxy.sendText = text => guarded(() => target.sendText!(text), owner === 'maintenance' ? 'text' : undefined, true);
+    if (target.sendSpecialKeys) proxy.sendSpecialKeys = (...keys) => guarded(() => target.sendSpecialKeys!(...keys), owner === 'maintenance' ? keys.includes('Enter') ? 'enter' : 'text' : undefined, true);
+    if (target.pasteText) proxy.pasteText = text => guarded(() => target.pasteText!(text), owner === 'maintenance' ? 'text' : undefined, true);
+    // The Claude writer owns business composer checks. Compact keeps its more
+    // specific activity, ownership and cleanup guards in this driver.
+    return Object.assign(proxy, { dutydeckInputKind: owner === 'turn' ? 'business' : 'maintenance' });
   }
 
   /** The driver stopped, or the backend/wiring this async step started on was replaced. */
