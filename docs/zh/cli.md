@@ -94,6 +94,23 @@ dutydeck logs --unit dutydeck.service -n 100
 
 普通行和错误行按原顺序保留，多行堆栈不会被压成一行。为避免把凭据带进终端记录，含 token、secret、password、credential、API key、Authorization、Bearer 等疑似秘密的整行不会输出；这不改变原始日志文件或 journal。unit 不存在或尚无日志、无法执行 `journalctl` 或行数无效时命令明确报错并返回非零退出码，不输出环境配置。
 
+### 同机静态 peer 实例<a id="static-peers"></a>
+
+主服务可以把同机其他 Dutydeck 实例登记为静态 peer。每个 peer 先用自己的数据库与端口以 `--local-only` 启动，再把它的地址写进**主服务**的 `.env`：
+
+```bash
+# peer 示例（两个实例分别使用自己的数据目录与端口）
+dutydeck --local-only --port 4311 --database /path/to/peer-a/dutydeck.db --no-lark-listen
+dutydeck --local-only --port 4312 --database /path/to/peer-b/dutydeck.db --no-lark-listen
+
+# 主服务 .env：单行 JSON；id 用小写字母、数字和连字符
+DUTYDECK_INSTANCES_JSON='[{"id":"peer-a","name":"Peer A","url":"http://127.0.0.1:4311"},{"id":"peer-b","name":"Peer B","url":"http://127.0.0.1:4312"}]'
+```
+
+地址必须使用 `http:` URL；peer 必须是本机 `--local-only` HTTP 服务，因为主服务转发时会去掉自己的 Cookie、Authorization、Origin 等请求头，不能把这套转发当成远程认证代理。主服务通过 `/api/instances/<id>/...` 转发到对应 peer 的 `/api/...`，实例列表可从 `/api/instances` 查看。
+
+这份列表只在主服务组装时读取一次。新增、删除 peer 或修改地址后，要重启主服务才会生效；peer 自己的地址或数据库变化也要同步改这里。它是静态配置，不做动态发现，也不会因健康检查失败自动摘除实例；peer 暂时不可用时请求会报错，但配置仍保留。
+
 ## 2. 版本发布与部署 (`deploy`)
 
 ```bash

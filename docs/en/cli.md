@@ -130,6 +130,23 @@ If the default log file does not exist (ENOENT), the error keeps its full path a
 
 Ordinary and error lines retain their original order, and multiline stacks are not flattened. To keep credentials out of terminal records, any line containing a suspected secret such as token, secret, password, credential, API key, Authorization or Bearer is omitted. This does not change the original log file or journal. A unit that does not exist or has no matching log entries, unavailable `journalctl`, or an invalid line count produces a clear error and a non-zero exit code; environment configuration is not printed.
 
+### Static peer instances on one host<a id="static-peers"></a>
+
+A primary service can register other Dutydeck instances on the same host as static peers. Start each peer with its own database and port in `--local-only` mode, then add its address to the **primary service's** `.env`:
+
+```bash
+# Peer examples: each instance has its own data directory and port
+dutydeck --local-only --port 4311 --database /path/to/peer-a/dutydeck.db --no-lark-listen
+dutydeck --local-only --port 4312 --database /path/to/peer-b/dutydeck.db --no-lark-listen
+
+# Primary service .env: one-line JSON; ids use lowercase letters, digits and hyphens
+DUTYDECK_INSTANCES_JSON='[{"id":"peer-a","name":"Peer A","url":"http://127.0.0.1:4311"},{"id":"peer-b","name":"Peer B","url":"http://127.0.0.1:4312"}]'
+```
+
+Peer addresses must be `http:` URLs, and each peer must be a local `--local-only` HTTP service. The primary service removes its own Cookie, Authorization, Origin and related headers before forwarding, so this is not an authenticated remote proxy. `/api/instances/<id>/...` on the primary forwards to `/api/...` on the selected peer; `/api/instances` lists the configured peers.
+
+The primary reads this list once while assembling the service. Restart the primary after adding or removing a peer or changing an address; update this setting as well when a peer's own address changes. The list is static: there is no dynamic discovery or health-based removal. Requests fail while a peer is unavailable, but its configured entry remains.
+
 Use `channel-bot` for the draft bots shown in the experimental “Groups & permissions” page. Its argument is the internal `id` returned by `list`, not the Lark App ID:
 
 ```bash
