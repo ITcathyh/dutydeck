@@ -92,7 +92,7 @@ describe('PTY launch observations at the real spawn boundary', () => {
       adapter: makeAdapter('codex', script),
       backend: new PtyBackend(),
       onEvent() {}, onExit() {},
-      sessionId: 'ses_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      sessionId: 'ses_319f47ac-83e1-7a2c-b62d-4dd7e98db401',
     });
     driver.subscribeTranscriptSource(o => observations.push(o));
     await driver.start();
@@ -119,7 +119,7 @@ describe('PTY launch observations at the real spawn boundary', () => {
       adapter: makeAdapter('codex', script),
       backend: new PtyBackend(),
       onEvent() {}, onExit() {},
-      sessionId: 'ses_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      sessionId: 'ses_319f47ac-83e1-7a2c-b62d-4dd7e98db401',
     });
     driver.subscribeTranscriptSource(o => observations.push(o));
     await driver.start();
@@ -146,7 +146,7 @@ describe('PTY launch observations at the real spawn boundary', () => {
       adapter: makeAdapter('claude-code', script),
       backend: new PtyBackend(),
       onEvent() {}, onExit() {},
-      sessionId: 'ses_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      sessionId: 'ses_319f47ac-83e1-7a2c-b62d-4dd7e98db401',
     });
     driver.subscribeTranscriptSource(o => observations.push(o));
     await driver.start();
@@ -165,7 +165,7 @@ describe('PTY launch observations at the real spawn boundary', () => {
     const { script } = writeIdleScript(cwd);
     const dataRoot = join(cwd, 'codex-root');
     const root = join(dataRoot, 'sessions'); mkdirSync(root, { recursive: true });
-    const sessionId = 'ses_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    const sessionId = 'ses_319f47ac-83e1-7a2c-b62d-4dd7e98db401';
     const nativeSessionId = '11111111-1111-4111-8111-111111111111';
     const path = join(root, `rollout-now-${nativeSessionId}.jsonl`);
     writeFileSync(path, JSON.stringify({ type: 'session_meta', payload: { id: nativeSessionId, cwd } }) + '\n'
@@ -213,7 +213,7 @@ describe('PTY launch observations at the real spawn boundary', () => {
       adapter: makeAdapter('codex', '/unused'),
       backend: new TmuxBackend(tmuxName, { ownerId: 'insight-test' }),
       onEvent() {}, onExit() {},
-      sessionId: 'ses_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      sessionId: 'ses_319f47ac-83e1-7a2c-b62d-4dd7e98db401',
     });
     driver.subscribeTranscriptSource(o => observations.push(o));
     try {
@@ -233,7 +233,7 @@ describe('PTY launch observations at the real spawn boundary', () => {
       adapter: makeAdapter('gemini', script),
       backend: new PtyBackend(),
       onEvent() {}, onExit() {},
-      sessionId: 'ses_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      sessionId: 'ses_319f47ac-83e1-7a2c-b62d-4dd7e98db401',
     });
     driver.subscribeTranscriptSource(o => observations.push(o));
     await driver.start();
@@ -247,7 +247,7 @@ describe.each([['sync', verifyLaunchedTranscript], ['async', verifyLaunchedTrans
   beforeEach(() => { cwd = mkdtempSync(join(tmpdir(), 'dd-insight-id-')); });
   afterEach(() => rmSync(cwd, { recursive: true, force: true }));
 
-  const sessionA = 'ses_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+  const sessionA = 'ses_319f47ac-83e1-7a2c-b62d-4dd7e98db401';
   const sessionB = 'ses_bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee';
 
   it('two same-cwd sessions never cross native ids, and a bare pinned file stays unverified', async () => {
@@ -482,7 +482,7 @@ describe('driver appends content-verified identity through the real transcript p
   beforeEach(() => { vi.useFakeTimers(); });
   afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
-  const sessionId = 'ses_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+  const sessionId = 'ses_319f47ac-83e1-7a2c-b62d-4dd7e98db401';
   const nativeId = pinnedSessionUuid(sessionId);
 
   async function startDriver(adapterOverrides: Partial<CliAdapter> = {}) {

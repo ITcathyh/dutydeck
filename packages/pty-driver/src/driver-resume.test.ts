@@ -49,7 +49,7 @@ function waitFor(predicate: () => boolean, timeoutMs = 30_000, intervalMs = 20):
   }, timeoutMs, intervalMs) as Promise<void>;
 }
 
-const SESSION_ID = 'ses_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+const SESSION_ID = 'ses_119f47ac-83e1-7a2c-b62d-4dd7e98db401';
 
 let tempRoots: string[] = [];
 const savedEnv: Record<string, string | undefined> = {};

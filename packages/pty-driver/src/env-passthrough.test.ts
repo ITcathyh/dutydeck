@@ -47,7 +47,7 @@ import { resolveClaudeTranscriptPath } from './transcript/claude.js';
 import { createTranscriptTailer } from './transcript/index.js';
 import { ClaudeTranscriptTailer } from './transcript/claude.js';
 
-const SESSION_ID = 'ses_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+const SESSION_ID = 'ses_219f47ac-83e1-7a2c-b62d-4dd7e98db401';
 const SESSION_UUID = SESSION_ID.replace(/^ses_/, '');
 
 let tempRoots: string[] = [];

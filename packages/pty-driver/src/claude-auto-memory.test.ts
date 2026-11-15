@@ -16,7 +16,7 @@ const savedTmuxDirectory = process.env.TMUX_TMPDIR;
 beforeEach(() => { const dir = mkdtempSync(join(tmpdir(), 'dd-auto-memory-tmux-')); roots.push(dir); process.env.TMUX_TMPDIR = dir; });
 afterEach(() => { if (savedTmuxDirectory === undefined) delete process.env.TMUX_TMPDIR; else process.env.TMUX_TMPDIR = savedTmuxDirectory; });
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
-const sessionId = 'ses_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+const sessionId = 'ses_419f47ac-83e1-7a2c-b62d-4dd7e98db401';
 const nativeId = sessionId.slice(4);
 
 describe('Claude auto memory marker on terminal relaunch', () => {
