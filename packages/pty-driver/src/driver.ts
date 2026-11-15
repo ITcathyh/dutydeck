@@ -467,7 +467,7 @@ export class PtyCliDriver implements AgentDriver {
     this.stoppedCallback = opts.onStopped;
     this.backend = opts.backend ?? new PtyBackend();
     this.cwd = opts.agent.cwd ?? process.cwd();
-    this.claudeSettings = new ClaudeSettings(this.adapter.id, this.sessionId);
+    this.claudeSettings = new ClaudeSettings(this.adapter.id, this.sessionId, this.cwd);
     this.planGuardSupported = isClaudeFamilyCli(this.adapter.id);
     this.planGuardActive = opts.agent.permissionMode === 'deny-all';
     this.spawnPermissionMode = this.planGuardActive ? sessionPermissionMode(opts.agent.env) : opts.agent.permissionMode;
