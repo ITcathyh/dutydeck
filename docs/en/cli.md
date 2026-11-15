@@ -124,6 +124,8 @@ dutydeck logs --unit dutydeck.service -n 100
 
 Without `--unit`, the command reads the current daemon's `.dutydeck/daemon/dutydeck.log`, reading at most the last 256KiB and printing the last 50 lines by default. Use `-n` to request 1–10000 lines. With `--unit`, it instead runs a streaming `journalctl --user` child process without a shell and retains only the last 256KiB of stdout. In this mode, the command asks `journalctl` for the most recent N unfiltered lines, then filters suspected secrets, so fewer than N lines may be printed. Both sources produce a one-time snapshot; follow mode is not available.
 
+If the default log file does not exist (ENOENT), the error keeps its full path and adds the next step: inspect the startup terminal for a foreground root command, or use `journalctl --user -u <unit>` for the corresponding systemd unit; `dutydeck logs --unit <unit>` is the equivalent CLI route. Other read errors are unchanged.
+
 Ordinary and error lines retain their original order, and multiline stacks are not flattened. To keep credentials out of terminal records, any line containing a suspected secret such as token, secret, password, credential, API key, Authorization or Bearer is omitted. This does not change the original log file or journal. A unit that does not exist or has no matching log entries, unavailable `journalctl`, or an invalid line count produces a clear error and a non-zero exit code; environment configuration is not printed.
 
 Use `channel-bot` for the draft bots shown in the experimental “Groups & permissions” page. Its argument is the internal `id` returned by `list`, not the Lark App ID:

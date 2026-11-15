@@ -524,7 +524,7 @@ export function readDaemonLog(dir: string, lines = 50, fromByte = 0): string[] {
     return visibleLogLines(lastNewline === -1 ? '' : text.slice(0, lastNewline + 1)).slice(-lines);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      throw new Error(`daemon 日志尚未生成：${file}；请先启动 daemon，或核对 daemon 目录`);
+      throw new Error(`daemon 日志尚未生成：${file}；前台服务请查看启动终端，systemd 托管服务请用 journalctl --user -u <unit> 查看对应 unit 的日志；请先启动 daemon，或核对 daemon 目录`);
     }
     throw error;
   }
