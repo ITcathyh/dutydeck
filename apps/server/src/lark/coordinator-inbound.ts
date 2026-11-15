@@ -1620,7 +1620,12 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
           const steering = await this.runtime.injectQueued(sessionId, target.id, event.senderOpenId);
           const echo = escapeLarkPromptEcho(larkCommandEcho(displayedPrompt, 120));
           if (steering.task.status === 'reconcile_required') await replyCard('/queue 插话结果未知', `**${larkSteeringUnknownNote}**\n\n${echo}`, { failed: true });
-          else if (steering.outcome === 'injected' || steering.outcome === 'startedNewTurn') await replyCard('已插话', `**${steeringOutcomeText(steering.outcome)}**\n\n${echo}`);
+          else if (steering.outcome === 'injected' || steering.outcome === 'startedNewTurn') {
+            const running = steering.outcome === 'injected'
+              ? (await this.runtime.getTasks!(sessionId)).find(task => task.status === 'running') : undefined;
+            const pendingPermission = running ? await this.hasPendingSteeringPermission(sessionId, running.id) : false;
+            await replyCard('已插话', `**${steeringOutcomeText(steering.outcome, pendingPermission)}**\n\n${echo}`);
+          }
           else if (steering.task.status !== 'queued') await replyCard('/queue 状态已变化', `**这条指令已不在队列中，请通过 \`/status\` 核对最新执行记录。**\n\n${echo}`, { failed: true });
           else await replyCard('/queue 未插话', `**${steeringOutcomeText(steering.outcome)}第 ${index} 条指令仍在排队，顺序没有改动。**\n\n要尽快执行可用 \`/queue top ${index}\` 提到队首。\n\n${echo}`, { failed: true });
         } else {

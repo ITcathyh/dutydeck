@@ -33,6 +33,7 @@ import { formatRolePrompt } from './role-format.js';
 import { boundLarkCardElements, larkIdentityPermissionHelp, LarkServiceError } from './service.js';
 import {
   loadLarkTaskEvents,
+  eventsForRuntimeTask,
   steeringOutcomeText,
   hasUnresolvedToolCalls,
   isLarkLauncherVersionChanged,
@@ -174,6 +175,27 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       ? undefined : this.requesterOnlyReason(config, requester, '中断正在执行的这一轮', true);
   }
 
+  /** 只有 injected 刚返回时查询；live pending 必须仍属于被插话的当前任务。 */
+  protected async hasPendingSteeringPermission(sessionId: string, taskId: string): Promise<boolean> {
+    try {
+      const pending = (await this.runtime.getPendingPermissions?.(sessionId) ?? []).filter(permission => permission.status === 'pending');
+      if (!pending.length) return false;
+      if (this.runtime.getLatestPermissionRequest) {
+        const receipts = await Promise.all(pending.map(permission => this.runtime.getLatestPermissionRequest!(sessionId, taskId, permission.id)));
+        return receipts.some(event => event?.type === 'permission_request' && (event.data as any)?.status === 'pending');
+      }
+      if (!this.runtime.getEvents) return false;
+      const events = eventsForRuntimeTask(await this.runtime.getEvents(sessionId), taskId);
+      return pending.some(permission => {
+        const latest = events.filter(event => event.type === 'permission_request' && (event.data as any)?.id === permission.id).at(-1);
+        return (latest?.data as any)?.status === 'pending';
+      });
+    } catch (error) {
+      this.log.warn({ error, sessionId, taskId }, '读取插话后的实时审批状态失败，保留原插话说明');
+      return false;
+    }
+  }
+
   /**
    * 把一条排队中的内容提前，/steer 与排队卡的两个插队按钮共用。
    * mode：steer 先试插话、送不进去再提到队首；inject 只试插话；promote 只提到队首并中断正在执行的那一轮。
@@ -193,7 +215,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     // 插话与提升本身 fail closed：判不了就都不做。提升带中断（promoteQueued 的 interrupt），所以要过与 /cancel 同一道中断门。
     const allowed = target.status === 'queued' && ahead.length > 0
       && await this.currentTurnInterruptDenial(config, event, sessionId).then(denial => !denial, () => false);
-    const running = ahead.some(item => item.status === 'running');
+    const running = ahead.find(item => item.status === 'running');
     // 派发到插话之间这几秒，这条可能已经自己开跑或被取消：按它此刻的状态写，不说成插话或提升失败。
     const movedNote = async () => {
       const status = (await this.runtime.getTasks?.(sessionId).catch(() => undefined))?.find(item => item.id === target.id)?.status;
@@ -211,7 +233,9 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       : undefined;
     if (steering && 'task' in steering && (steering.task?.status === 'reconcile_required' || steering.outcome === 'failed' && !steering.task)) return { note: unknownNote };
     // 没过中断门时没有尝试插话，原因由下面的门分支写。
-    const reason = steering ? steeringOutcomeText(steering.outcome)
+    const pendingPermission = steering?.outcome === 'injected' && running
+      ? await this.hasPendingSteeringPermission(sessionId, running.id) : false;
+    const reason = steering ? steeringOutcomeText(steering.outcome, pendingPermission)
       : mode === 'promote' ? '' : !this.runtime.injectQueued ? '当前 Agent 不支持插话。' : !running ? '当前没有正在执行的一轮可以插话。' : '';
     if (steering?.outcome === 'injected' || steering?.outcome === 'startedNewTurn') return { steered: steering.outcome, note: reason };
     if (steering?.outcome === 'failed' && 'task' in steering && steering.task?.status !== 'queued') return { note: '插话请求未确认，这条内容已不在队列中，请通过 `/status` 核对最新执行记录。' };

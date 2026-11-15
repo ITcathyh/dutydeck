@@ -166,6 +166,8 @@ dutydeck agent --turn "$TURN" group send '可检索摘要' --final --card-file /
 | `/grant` / `/revoke` | `/grant @成员` | 把本群对话权限开放给全部成员或加入名单 / 收回 |
 | `/repair` | `/repair` | 诊断并补齐飞书应用权限、事件订阅和卡片回调（执行前二次确认，确认后才提交发布） |
 
+插话回执只说明内容已送进正在执行的这一轮。若生成即时回执时当前任务仍有审批待处理，回执会明确提醒：Agent 有没有读到，以它后续的回复为准。审批已经处理时不追加这句；终态卡和重启对账也不会根据历史审批补写等待警告。
+
 `/repair` 尝试提交发布请求后，若请求或结果核验失败，卡片会显示「发布结果待确认」，不把它当作确定未发布；请先到开放平台核对该版本状态，确认前不要重复执行 `/repair`。尚未提交发布时失败，卡片会明确说明。
 
 `/remember` 和 `/memory` 管的是 Dutydeck 的会话记忆，按 `groupMemoryScope` 分池。Claude Code 自带的 auto memory 按工作目录保存、不分群；不想让它在各群之间串用，就在机器人设置的记忆分区把「Claude 自带记忆（群聊）」设为关闭（`dutydeck settings bot set <appId> claudeAutoMemory=off`）。它只作用于群聊里的 Claude Code 会话，范围和优先级见 [features.md](features.md)。

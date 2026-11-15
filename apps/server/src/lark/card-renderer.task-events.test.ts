@@ -1,9 +1,26 @@
 import { expect, it } from 'vitest';
 import { BACKGROUND_FOLLOWUP, type AgentEvent } from '@dutydeck/shared';
-import { eventsForRuntimeTask, loadLarkTaskEvents, renderLarkProcessElements, renderLarkRecordExport, renderLarkResultElements } from './card-renderer.js';
+import { eventsForRuntimeTask, loadLarkTaskEvents, renderLarkProcessElements, renderLarkRecordExport, renderLarkResultElements, steeringOutcomeText } from './card-renderer.js';
 
 const at = '2026-10-08T07:44:07.000Z';
 const task = (id: string, status: string): AgentEvent => ({ type: 'task', data: { task: { id, status } }, timestamp: at } as AgentEvent);
+
+it.each([
+  ['injected', '已把这条内容送进正在执行的这一轮，Agent 会在这一轮里接着处理，回复出现在那一轮的结果里。'],
+  ['startedNewTurn', 'Agent 已用这条内容另起了一轮；那一轮不在 Dutydeck 的执行记录里，结果不会回到这张卡片。'],
+  ['promptRequired', '正在执行的那一轮此刻接不了插话（还没交给 Agent，或已经结束）。'],
+  ['unsupported', '当前 Agent 不支持插话。'],
+  ['incompatible', '这条内容的执行设置（权限模式、模型或高危操作策略）与正在执行的那一轮不同，不能插话。'],
+  ['failed', 'Agent 没有接受插话。']
+])('steeringOutcomeText(%s) 缺省与显式无 pending 都保留旧文案', (outcome, expected) => {
+  expect(steeringOutcomeText(outcome)).toBe(expected);
+  expect(steeringOutcomeText(outcome, false)).toBe(expected);
+});
+
+it('只有即时 injected 且当前任务仍有 pending 时换成不承诺已读的文案', () => {
+  expect(steeringOutcomeText('injected', true)).toBe('已送进正在执行的这一轮；这一轮还有审批没处理，Agent 有没有读到以它后续的回复为准。');
+  expect(steeringOutcomeText('startedNewTurn', true)).toBe('Agent 已用这条内容另起了一轮；那一轮不在 Dutydeck 的执行记录里，结果不会回到这张卡片。');
+});
 
 it('提交前就失败的轮次只取它自己的事件，不把以前的轮次当成这一轮', () => {
   const events = [

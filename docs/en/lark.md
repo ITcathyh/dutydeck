@@ -130,6 +130,8 @@ Matches `/help` (6 per page by default; plugin commands are listed on the last p
 | `/grant`, `/revoke` | `/grant @member` | Open or close group chat permission |
 | `/repair` | `/repair` | Diagnose and fill missing Lark app scopes, events and card callbacks (asks to confirm; submits publication only after confirmation) |
 
+A steering receipt only confirms that the content entered the running turn's input. If the current task still has a pending approval when the immediate receipt is generated, the receipt explicitly says to use the Agent's later reply to determine whether it read the input. This sentence is omitted once the approval is resolved; terminal cards and restart reconciliation do not infer a waiting warning from historical approvals.
+
 After `/repair` attempts publication, a failed request or result check shows “发布结果待确认” (publication outcome unconfirmed), rather than claiming nothing was published. Check that version on the open platform before repeating `/repair`. A failure before publication was submitted is stated separately.
 
 `/remember` and `/memory` manage Dutydeck's session memory, pooled by `groupMemoryScope`. Claude Code's own auto memory is stored per working directory, not per group; to keep it from carrying over between groups, set "Claude 自带记忆（群聊）" (Claude auto memory in group chats) to off in the memory section of bot settings (`dutydeck settings bot set <appId> claudeAutoMemory=off`). It applies only to Claude Code sessions in group chats; see [features.md](features.md) for the scope and precedence.
