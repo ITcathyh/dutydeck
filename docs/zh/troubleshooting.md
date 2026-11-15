@@ -29,6 +29,12 @@ dutydeck database execution-status --database /path/to/runtime/dutydeck.db
 
 它只读，不修复或降级数据库。优先换用支持该 schema 的 Dutydeck。只有停止所有写入方并确认备份时间后，才考虑把备份恢复到独立新目录核对；恢复会丢备份后的写入，切回旧代码本身不会回滚数据库。
 
+### Web 能打开，status / doctor 却说服务未运行或端口被其他进程占用？
+
+直接运行根命令的前台服务，以及某些由外部托管的入口，可能没有 daemon 状态记录。新版 `status` 和 `doctor` 会在**当前配置端口**依次短超时请求 `/health` 与 `/health/ready`：前者必须是 `ok===true` 的 JSON，后者还必须有布尔 `ready` 和字符串数组 `pending`；不跟随重定向。两者都符合时才显示未登记前台服务及地址，端口检查也不再把它当成其他进程。`ready=false` 表示服务已识别但尚未就绪，不会改写旧的 daemon `ready` 字段。
+
+这项识别只是保守的结构检查，不是身份认证。HTML、通用 `{ "ok": true }`、结构不符、连接拒绝或超时都保持原诊断；已有登记、残留或损坏状态记录时也不做这项探测。服务确实只是临时 `--port` 启动、而当前 CLI 配置的是另一个端口时，请用启动时的同一配置运行 `status`。未登记进程的飞书连接状态无法由 daemon 记录核验，请查看它的启动终端，不要再启动第二个实例。
+
 ### 服务被 SIGKILL 后，doctor 为什么说“原因待富集”？
 
 SIGKILL 无法执行进程内退出处理，所以下一代先根据上一代缺少 `clean-exit` 标记写基础异常。Linux/systemd 下会异步查有界 journal，只有同一 unit、boot、PID 与启动时间精确对齐才补 `SIGKILL`；journal 不存在、无权限、超时或归属不唯一时保留基础记录，不阻塞服务就绪。干净停止和计划重启在干净标记写成功时不写异常；若该标记写失败，进程会向 stderr 输出明确警告且保持原退出码，下一代仍可能按缺少干净标记保守补记异常，请检查数据库目录和 `last-abnormal-exit.json` 的类型、权限与可写性。上一代 PID 仍存活也不报崩溃。文件只留最近 10 条；launchd 富集本轮不支持。

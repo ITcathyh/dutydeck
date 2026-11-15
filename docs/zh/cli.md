@@ -44,6 +44,8 @@ dutydeck update --dist-tag next
 dutydeck doctor
 ```
 
+没有 daemon 状态记录时，`dutydeck status` 与 `dutydeck doctor` 会在当前配置的主机、端口上短超时检查 `/health` 和 `/health/ready`，不跟随重定向。只有两个响应都符合 Dutydeck 的健康结构，才报告「未登记前台服务」；`status --json` 相应增加可选字段 `unregisteredForeground: { address, ready }`，原有 `running`、`processStatus`、`ready` 等字段保持原值。未就绪时只设置新字段里的 `ready=false`。识别不到时维持原诊断；探测只覆盖 CLI 当前配置端口，不知道另一个 shell 临时传入的 `--port`。doctor 会把已识别服务占用的配置端口视为自身占用；未登记进程没有可核验的飞书连接记录，因此只提示查看启动终端，不建议重复 `dutydeck start`。
+
 `dutydeck update [version]` 的版本参数只接受精确 semver，不接受 range、tag 或选项字符串；未传版本时仍按 `latest` 或显式 `--dist-tag` 解析。安装、版本核对或重启失败时保留原错误，并追加 `npm install --global @byted/dutydeck@<实际旧版本> && dutydeck restart` 作为手工回退步骤；它直接重装旧包，不依赖旧版 CLI 是否认识 `update [version]`。旧版本缺失或不是精确 semver 时会明确说明无法安全生成命令。不会自动回滚，也不会越过部署窗口。
 
 ### setup、首启与终端预检

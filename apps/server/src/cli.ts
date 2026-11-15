@@ -27,7 +27,7 @@ import { acknowledgeDeferredAsk, askOutput, runSessionAsk, runSessionAskResult, 
 import { readNativeAskPayload, runNativeAskHook } from './native-ask-hook.js';
 import { runPermissionHook } from './permission-hook.js';
 import { RelayCliError } from '@dutydeck/relay';
-import { daemonRestart, daemonStart, daemonStatus, daemonStop, resolveCliDatabase, systemdRestartTarget, waitForRunningTasksDrain, type DaemonCommandResult, type DaemonStatusInfo } from './daemon/command.js';
+import { daemonRestart, daemonStart, daemonStatus, daemonStatusWithForeground, daemonStop, resolveCliDatabase, systemdRestartTarget, waitForRunningTasksDrain, type DaemonCommandResult, type DaemonStatusInfo } from './daemon/command.js';
 import { SUPERVISOR_ENV, readDaemonLog, readDaemonStatus, readJournalctlLog, resolveDaemonDir } from './daemon/daemon.js';
 import { sleep } from './daemon/time.js';
 import { armShutdownDeadline } from './shutdown-phases.js';
@@ -235,6 +235,12 @@ function renderDaemonResult(result: DaemonCommandResult | (DaemonStatusInfo & { 
     if (result.processStatus === 'unverifiable') {
       ui.status('warn', '守护进程身份无法验证', result.error);
       ui.hint('请人工核对记录的 PID 和进程归属；身份确认前不会自动启停。');
+    } else if ('unregisteredForeground' in result && result.unregisteredForeground) {
+      const foreground = result.unregisteredForeground;
+      ui.status(foreground.ready ? 'ok' : 'warn',
+        foreground.ready ? '未登记前台服务正在运行' : '未登记前台服务尚未就绪', foreground.address);
+      ui.hint(`在浏览器打开：${foreground.address}`);
+      ui.hint('该进程没有 daemon 状态记录；运行日志请查看它的启动终端。');
     } else if (running) {
       ui.status('ok', '守护进程正在运行', detail || undefined);
       if (result.logFile) ui.hint(`日志：${result.logFile}`);
@@ -428,8 +434,8 @@ async function main() {
       renderDaemonResult(result, options.json === true);
       if (!result.ok) process.exitCode = 1;
     },
-    daemonStatus: options => {
-      const status = daemonStatus();
+    daemonStatus: async options => {
+      const status = await daemonStatusWithForeground();
       renderDaemonResult({ action: 'status', ...status }, options.json === true);
       // status 是查询命令：不在运行不是「命令失败」，退出码保持 0。
     },

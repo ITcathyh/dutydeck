@@ -109,12 +109,14 @@ export interface DoctorDaemonRecord {
 /** daemonStatus() 的返回子集（对齐 DaemonStatusInfo）。 */
 export interface DoctorDaemonStatus {
   running: boolean;
+  processStatus?: 'verified' | 'stale' | 'unverifiable';
   pid?: number;
   address?: string;
   logFile?: string;
   startedAt?: string;
   ready?: boolean;
   authEnabled?: boolean;
+  unregisteredForeground?: { address: string; ready: boolean };
 }
 
 /**
@@ -234,6 +236,8 @@ export interface DoctorDependencies {
   processUid?: (pid: number) => number | undefined;
   /** daemonStatus() 的注入点。 */
   daemonStatus?: () => DoctorDaemonStatus;
+  /** 无 daemon 记录时对配置地址做双健康端点探测；测试可注入拒绝或非法实现。 */
+  unregisteredForegroundProbe?: (address: string) => Promise<{ address: string; ready: boolean } | undefined>;
   /**
    * 原始 daemon 记录读取。必须与 daemonStatus 分开注入：daemonStatus 会把
    * 死掉的 pid 折叠成 running:false，与「从未启动过」不可区分。

@@ -1237,6 +1237,11 @@ async function unitRestart(unit: string, options: CliOptions, deps: DaemonComman
   return { ok: true, action: 'restart', running: true, pid: healthy.pid, address: target.endpoint.address, authEnabled, authentication: authEnabled ? 'required' : 'disabled', state: 'restarted' };
 }
 
+export interface UnregisteredForeground {
+  address: string;
+  ready: boolean;
+}
+
 export interface DaemonStatusInfo {
   running: boolean;
   processStatus: DaemonProcessStatus;
@@ -1248,6 +1253,7 @@ export interface DaemonStatusInfo {
   ready?: boolean;
   authEnabled?: boolean;
   authentication?: 'required' | 'disabled';
+  unregisteredForeground?: UnregisteredForeground;
 }
 
 /** `dutydeck status`: report whether a daemon is alive and where. */
@@ -1269,6 +1275,51 @@ export function daemonStatus(): DaemonStatusInfo {
     authEnabled: alive ? authEnabled : undefined,
     authentication: alive ? (authEnabled ? 'required' : 'disabled') : undefined
   };
+}
+
+const FOREGROUND_PROBE_TIMEOUT_MS = 500;
+
+/**
+ * 保守识别没有 daemon 状态记录的前台服务。两个端点都必须直接返回约定 JSON；
+ * 不跟随重定向，任何网络、状态或结构错误都只表示“没有识别到”，不改写旧状态。
+ */
+export async function probeUnregisteredForeground(address: string, deps: Pick<DaemonCommandDeps, 'fetch' | 'requestTimeoutMs'> = {}): Promise<UnregisteredForeground | undefined> {
+  const fetcher = deps.fetch ?? fetch;
+  const requestTimeoutMs = deps.requestTimeoutMs ?? FOREGROUND_PROBE_TIMEOUT_MS;
+  const request = async (path: string): Promise<unknown> => {
+    const response = await fetcher(new URL(path, address).toString(), {
+      headers: { Accept: 'application/json' },
+      redirect: 'error',
+      signal: AbortSignal.timeout(requestTimeoutMs)
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return await response.json();
+  };
+  try {
+    const health = await request('/health') as { ok?: unknown } | undefined;
+    if (health?.ok !== true) return undefined;
+    const readiness = await request('/health/ready') as { ok?: unknown; ready?: unknown; pending?: unknown } | undefined;
+    if (readiness?.ok !== true || typeof readiness.ready !== 'boolean'
+      || !Array.isArray(readiness.pending) || !readiness.pending.every(item => typeof item === 'string')) return undefined;
+    return { address, ready: readiness.ready };
+  } catch {
+    return undefined;
+  }
+}
+
+/** CLI status 的异步增强：只有明确没有 daemon 记录时才探测配置端口。 */
+export async function daemonStatusWithForeground(env: NodeJS.ProcessEnv = process.env, deps: Pick<DaemonCommandDeps, 'fetch' | 'requestTimeoutMs'> = {}): Promise<DaemonStatusInfo> {
+  const status = daemonStatus();
+  const inspection = inspectDaemon(resolveDaemonDir(process.cwd(), env.HOME));
+  if (inspection.status !== 'stale' || inspection.reason !== 'No daemon recorded') return status;
+  const config = appConfigSchema.pick({ host: true, port: true }).safeParse({
+    host: env.DUTYDECK_LOCAL_ONLY === 'true' ? '127.0.0.1' : env.DUTYDECK_HOST,
+    port: env.DUTYDECK_PORT ? Number(env.DUTYDECK_PORT) : undefined
+  });
+  if (!config.success) return status;
+  const address = localLoopbackUrl(config.data.host, config.data.port);
+  const unregisteredForeground = await probeUnregisteredForeground(address, deps);
+  return unregisteredForeground ? { ...status, unregisteredForeground } : status;
 }
 
 function authEnabledFromCli(options: CliOptions, env: NodeJS.ProcessEnv): boolean {
