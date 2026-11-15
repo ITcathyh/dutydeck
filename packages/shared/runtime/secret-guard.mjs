@@ -211,15 +211,35 @@ export function secretGuardScriptPath() {
 const policyFile = (root, sessionId) => join(root, '.dutydeck', 'security', 'sessions', `${sessionId}.json`);
 
 /**
- * 给 Agent CLI 配置的 hook 命令。会话 id 为空或本轮策略文件不存在时，shell 直接放行，不启动 Node；
- * 文件存在才由 Node 解析并检查，读取、JSON 或脚本错误都退出 2，不用 enabled:false 等文本快路径猜策略。
- * 策略目录本身不是目录时也让 Node 按读取错误拒绝，不把这种异常当成普通的缺文件。
+ * 给 Agent CLI 配置的 hook 命令。会话 id 为空时 shell 直接放行，不启动 Node。
+ * 沿目标路径逐级检查，只有之前的祖先都可读、可进入且当前组件确实不存在时才按 ENOENT 快放；
+ * EACCES、ENOTDIR、不可读/不可进入、悬空或不可解析的符号链接和任何不确定状态都交给 Node，只有 Node 读到的 ENOENT 才放行。
+ * 文件存在时由 Node 解析并检查，读取、JSON 或脚本错误都退出 2，不用 enabled:false 等文本快路径猜策略，也不缓存结果。
  */
 export function secretGuardHookCommand({ nodePath = process.execPath, policyRoot }) {
   const root = quote(policyRoot);
-  const sessions = `${root}/.dutydeck/security/sessions`;
-  return `[ -z "$dutydeck_session_id" ] && exit 0; [ -e ${sessions}/"$dutydeck_session_id".json ] || { [ -e ${sessions} ] && [ ! -d ${sessions} ]; } || exit 0; `
-    + `DUTYDECK_POLICY_ROOT=${root} ${quote(nodePath)} ${quote(secretGuardScriptPath())} || exit 2`;
+  const sessions = quote(join(policyRoot, '.dutydeck', 'security', 'sessions'));
+  const target = `${sessions}/"$dutydeck_session_id".json`;
+  const traverse = [
+    '[ -z "$dutydeck_session_id" ] && exit 0;',
+    `dutydeck_guard_path=${target};`,
+    'case $dutydeck_guard_path in /*) dutydeck_guard_rest=${dutydeck_guard_path#/}; dutydeck_guard_current= ;; *) dutydeck_guard_rest=$dutydeck_guard_path; dutydeck_guard_current=$PWD ;; esac;',
+    'while [ -n "$dutydeck_guard_rest" ]; do',
+    'case $dutydeck_guard_rest in */*) dutydeck_guard_component=${dutydeck_guard_rest%%/*}; dutydeck_guard_rest=${dutydeck_guard_rest#*/} ;; *) dutydeck_guard_component=$dutydeck_guard_rest; dutydeck_guard_rest= ;; esac;',
+    '[ -n "$dutydeck_guard_component" ] || continue;',
+    'dutydeck_guard_current=$dutydeck_guard_current/$dutydeck_guard_component;',
+    '[ -e "$dutydeck_guard_current" ]; dutydeck_guard_status=$?;',
+    'if [ "$dutydeck_guard_status" -eq 0 ]; then',
+    '[ -z "$dutydeck_guard_rest" ] && break;',
+    'if [ ! -d "$dutydeck_guard_current" ] || [ ! -r "$dutydeck_guard_current" ] || [ ! -x "$dutydeck_guard_current" ]; then break; fi;',
+    'elif [ "$dutydeck_guard_status" -ne 1 ]; then break;',
+    'else',
+    '[ -L "$dutydeck_guard_current" ]; dutydeck_guard_status=$?;',
+    'if [ "$dutydeck_guard_status" -ne 1 ]; then break; else exit 0; fi;',
+    'fi;',
+    'done;',
+  ].join(' ');
+  return `${traverse} DUTYDECK_POLICY_ROOT=${root} ${quote(nodePath)} ${quote(secretGuardScriptPath())} || exit 2`;
 }
 
 /** 本轮要拦时返回策略：风险管控开启（enabled）且发起人未获授权。文件不存在放行，其他读取或解析错误向上抛出。 */

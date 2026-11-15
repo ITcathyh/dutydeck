@@ -1,5 +1,5 @@
-import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -174,6 +174,167 @@ describe('secret guard', () => {
       expect(run('ses_1').status).toBe(2);
       expect(readFileSync(count, 'utf8')).toBe('1');
     } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('proves ENOENT component by component and sends every uncertain path through Node', () => {
+    const sensitiveEvent = { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'cat ~/.codex/auth.json' }, cwd: '/work/repo' };
+    const active = { enabled: true, authorized: false };
+    const policySecret = 'synthetic-policy-secret';
+    const permissionStatus = process.getuid?.() === 0 ? 0 : 2;
+    const withFixture = (label: string, createSessions: boolean, body: (fixture: {
+      root: string;
+      sessions: string;
+      run: (sessionId?: string) => SpawnSyncReturns<string>;
+      nodeStarts: () => number;
+      resetNode: () => void;
+      writePolicy: (value: string) => void;
+    }) => void) => {
+      const container = mkdtempSync(join(tmpdir(), `dutydeck-secret-guard-${label}-`));
+      const root = join(container, 'policy-root');
+      mkdirSync(root);
+      const sessions = join(root, '.dutydeck', 'security', 'sessions');
+      if (createSessions) mkdirSync(sessions, { recursive: true });
+      const count = join(container, 'node-count');
+      const node = join(container, 'counting-node');
+      writeFileSync(node, `#!/bin/sh\nprintf 1 >> ${JSON.stringify(count)}\nexec ${JSON.stringify(process.execPath)} "$@"\n`, { mode: 0o755 });
+      const command = secretGuardHookCommand({ nodePath: node, policyRoot: root });
+      const run = (dutydeck_session_id = 'ses_1') => spawnSync('/bin/sh', ['-c', command], {
+        input: JSON.stringify(sensitiveEvent), encoding: 'utf8',
+        // An absolute Node path and an empty PATH prove that the fast path uses no other executables.
+        env: { ...process.env, PATH: '', HOME: home, dutydeck_session_id },
+      });
+      const fixture = {
+        root, sessions, run,
+        nodeStarts: () => existsSync(count) ? readFileSync(count, 'utf8').length : 0,
+        resetNode: () => rmSync(count, { force: true }),
+        writePolicy: (value: string) => {
+          mkdirSync(sessions, { recursive: true });
+          writeFileSync(join(sessions, 'ses_1.json'), value);
+        },
+      };
+      try { body(fixture); }
+      finally {
+        for (const path of [root, join(root, '.dutydeck'), join(root, '.dutydeck', 'security'), sessions]) {
+          try { chmodSync(path, 0o700); } catch {}
+        }
+        rmSync(container, { recursive: true, force: true });
+      }
+    };
+    const expectDenied = (result: SpawnSyncReturns<string>) => {
+      expect(result.status).toBe(0);
+      expect(JSON.parse(result.stdout).hookSpecificOutput.permissionDecision).toBe('deny');
+    };
+
+    withFixture('missing-components', false, fixture => {
+      for (const directory of ['.dutydeck', '.dutydeck/security', '.dutydeck/security/sessions']) {
+        expect(fixture.run()).toMatchObject({ status: 0, stdout: '' });
+        expect(fixture.nodeStarts(), `${directory} must not start Node while its parent is missing`).toBe(0);
+        fixture.resetNode();
+        mkdirSync(join(fixture.root, directory));
+      }
+      expect(fixture.run()).toMatchObject({ status: 0, stdout: '' });
+      expect(fixture.nodeStarts(), 'a missing target must not start Node').toBe(0);
+      fixture.resetNode();
+
+      writeFileSync(join(fixture.sessions, '.json'), 'broken');
+      expect(fixture.run('')).toMatchObject({ status: 0, stdout: '' });
+      expect(fixture.nodeStarts(), 'an empty session id must not start Node even when .json exists').toBe(0);
+      fixture.resetNode();
+      rmSync(join(fixture.sessions, '.json'));
+
+      for (const policy of [{ enabled: true, authorized: true }, { enabled: false, authorized: false }]) {
+        fixture.writePolicy(JSON.stringify(policy));
+        expect(fixture.run()).toMatchObject({ status: 0, stdout: '' });
+        expect(fixture.nodeStarts(), 'disabled and admin policies must be evaluated by Node').toBe(1);
+        fixture.resetNode();
+      }
+      fixture.writePolicy(`{"enabled":true,"secret":"${policySecret}",broken`);
+      const malformed = fixture.run();
+      expect(malformed.status).toBe(2);
+      expect(fixture.nodeStarts()).toBe(1);
+      expect(`${malformed.stdout}${malformed.stderr}`).not.toContain(policySecret);
+      fixture.resetNode();
+
+      rmSync(join(fixture.sessions, 'ses_1.json'));
+      expect(fixture.run()).toMatchObject({ status: 0, stdout: '' });
+      expect(fixture.nodeStarts(), 'a missing policy must not be cached').toBe(0);
+      fixture.resetNode();
+      fixture.writePolicy(JSON.stringify(active));
+      expectDenied(fixture.run());
+      expect(fixture.nodeStarts(), 'creating a policy after a miss must enable the guard').toBe(1);
+    });
+
+    for (const ancestor of ['.', '.dutydeck', '.dutydeck/security', '.dutydeck/security/sessions']) {
+      for (const mode of [0o000, 0o300, 0o400]) {
+        withFixture(`mode-${mode.toString(8)}`, true, fixture => {
+          fixture.writePolicy(JSON.stringify({ ...active, secret: policySecret }));
+          chmodSync(join(fixture.root, ancestor), mode);
+          const result = fixture.run();
+          const expectedStatus = process.getuid?.() === 0 || mode === 0o300 ? 0 : 2;
+          expect(result.status, `${ancestor} mode ${mode.toString(8)}`).toBe(expectedStatus);
+          expect(fixture.nodeStarts(), `${ancestor} mode ${mode.toString(8)} must reach Node`).toBe(1);
+          expect(`${result.stdout}${result.stderr}`).not.toContain(policySecret);
+          if (expectedStatus === 0) expectDenied(result);
+        });
+      }
+      withFixture('not-directory', true, fixture => {
+        const path = join(fixture.root, ancestor);
+        rmSync(path, { recursive: true, force: true });
+        writeFileSync(path, policySecret);
+        const result = fixture.run();
+        expect(result.status, `${ancestor} as a file`).toBe(2);
+        expect(fixture.nodeStarts(), `${ancestor} as a file must reach Node`).toBe(1);
+        expect(`${result.stdout}${result.stderr}`).not.toContain(policySecret);
+      });
+    }
+
+    withFixture('target-directory', true, fixture => {
+      mkdirSync(join(fixture.sessions, 'ses_1.json'));
+      expect(fixture.run().status).toBe(2);
+      expect(fixture.nodeStarts()).toBe(1);
+    });
+    withFixture('target-unreadable', true, fixture => {
+      fixture.writePolicy(JSON.stringify({ ...active, secret: policySecret }));
+      chmodSync(join(fixture.sessions, 'ses_1.json'), 0o000);
+      const result = fixture.run();
+      expect(result.status).toBe(permissionStatus);
+      expect(fixture.nodeStarts()).toBe(1);
+      expect(`${result.stdout}${result.stderr}`).not.toContain(policySecret);
+      if (permissionStatus === 0) expectDenied(result);
+    });
+    withFixture('target-dangling-symlink', true, fixture => {
+      symlinkSync('missing-policy-target', join(fixture.sessions, 'ses_1.json'));
+      expect(fixture.run()).toMatchObject({ status: 0, stdout: '' });
+      expect(fixture.nodeStarts(), 'a dangling target symlink must reach Node').toBe(1);
+    });
+    withFixture('target-symlink-loop', true, fixture => {
+      symlinkSync('ses_1.json', join(fixture.sessions, 'ses_1.json'));
+      expect(fixture.run().status).toBe(2);
+      expect(fixture.nodeStarts(), 'an unresolvable target symlink must reach Node').toBe(1);
+    });
+    withFixture('ancestor-dangling-symlink', false, fixture => {
+      mkdirSync(join(fixture.root, '.dutydeck'));
+      symlinkSync('missing-security', join(fixture.root, '.dutydeck', 'security'));
+      expect(fixture.run()).toMatchObject({ status: 0, stdout: '' });
+      expect(fixture.nodeStarts(), 'a dangling ancestor symlink must reach Node').toBe(1);
+    });
+    withFixture('ancestor-symlink-loop', false, fixture => {
+      mkdirSync(join(fixture.root, '.dutydeck'));
+      symlinkSync('security', join(fixture.root, '.dutydeck', 'security'));
+      expect(fixture.run().status).toBe(2);
+      expect(fixture.nodeStarts(), 'an unresolvable ancestor symlink must reach Node').toBe(1);
+    });
+    withFixture('valid-ancestor-symlink', false, fixture => {
+      mkdirSync(join(fixture.root, '.dutydeck'));
+      mkdirSync(join(fixture.root, 'linked', 'sessions'), { recursive: true });
+      symlinkSync('../linked', join(fixture.root, '.dutydeck', 'security'));
+      expect(fixture.run()).toMatchObject({ status: 0, stdout: '' });
+      expect(fixture.nodeStarts(), 'a resolvable directory symlink with a missing target remains a fast miss').toBe(0);
+      fixture.resetNode();
+      writeFileSync(join(fixture.root, 'linked', 'sessions', 'ses_1.json'), JSON.stringify(active));
+      expectDenied(fixture.run());
+      expect(fixture.nodeStarts()).toBe(1);
+    });
   });
 
   it('fails closed for policy read and parse errors without echoing sensitive contents', () => {
