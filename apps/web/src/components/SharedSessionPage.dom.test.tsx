@@ -525,7 +525,8 @@ describe('分享页结论呈现', () => {
     vi.spyOn(api, 'session').mockResolvedValue({ ...session, state: 'idle', sourceContext });
     vi.spyOn(api, 'tasks').mockResolvedValue([completedTask('bg', '跑一下构建', '2026-11-04T06:37:00.000Z')]);
     vi.spyOn(api, 'events').mockResolvedValue([
-      { id: 'bg-f', sequence: 11, type: 'text', timestamp: '2026-11-04T06:50:00.000Z', data: { role: 'assistant', text: 'Build finished in the background.', origin: BACKGROUND_FOLLOWUP } }
+      { id: 'bg-f', sequence: 11, type: 'text', timestamp: '2026-11-04T06:50:00.000Z', data: { role: 'assistant', text: 'Build finished in the background.', origin: BACKGROUND_FOLLOWUP } },
+      { id: 'bg-status', sequence: 12, type: 'status', timestamp: '2026-11-04T06:50:01.000Z', data: { state: 'background_work', count: 1, mainTurnEnded: true, tasks: [{ id: 'native-background', kind: 'agent', state: 'running' }] } }
     ]);
     vi.mocked(api.sessionHistory).mockResolvedValue({ turns: [summaryTurn('bg', '跑一下构建', '构建已启动', '2026-11-04T06:37:00.000Z')], highWaterMark: 10, liveAfter: 10 });
     const { container } = renderPage();
@@ -533,6 +534,7 @@ describe('分享页结论呈现', () => {
     await waitFor(() => expect(container.querySelector('.share-hero .share-status-label')?.textContent).toBe('已完成'));
     expect(screen.getAllByRole('button', { name: '复制结论' }).length).toBeGreaterThan(0);
     expect(document.body.textContent).not.toContain('Build finished in the background.');
+    expect(document.body.textContent).not.toContain('后台子任务运行中');
     expect(container.querySelectorAll('[data-timeline-turn]')).toHaveLength(1);
   });
 
