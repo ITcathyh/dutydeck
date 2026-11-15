@@ -145,6 +145,21 @@ export function checkDaemon(observation: DaemonObservation): DoctorCheck {
     return { id: 'daemon.status', label: '守护进程', level: 'ok', detail: detail || '运行中' };
   }
 
+  if (status.unregisteredForeground) {
+    const foreground = status.unregisteredForeground;
+    if (!foreground.ready) {
+      return {
+        id: 'daemon.status',
+        label: 'Dutydeck 服务',
+        level: 'warn',
+        detail: `未登记前台服务已响应但尚未就绪（${foreground.address}）`,
+        remedy: '服务已经监听配置端口，但就绪检查仍有未完成项。稍等后重跑体检；若一直未就绪，请查看该进程的启动终端。',
+        verify: 'dutydeck status'
+      };
+    }
+    return { id: 'daemon.status', label: 'Dutydeck 服务', level: 'ok', detail: `未登记前台服务正在运行（${foreground.address}）` };
+  }
+
   // 有记录、有 pid，但进程已经不在 —— 崩了或被杀了，绝不能和「没启动」混为一谈。
   if (recordedPid !== undefined && recordedPid > 0) {
     return {
@@ -580,6 +595,8 @@ export interface LarkListenerObservation {
   status?: string;
   /** 正在运行的守护进程 pid，用来认出上一个进程留下的旧状态。 */
   pid?: number;
+  /** 已识别未登记前台服务，但它没有可核验的 daemon 监听状态。 */
+  unregisteredForeground?: boolean;
   now: Date;
 }
 
@@ -601,6 +618,16 @@ export function checkLarkListener(botCount: number, daemonRunning: boolean, list
   }
   if (botCount === 0) {
     return { id: 'lark.listener', label: '飞书监听', level: 'skip', detail: '未配置飞书，无需监听' };
+  }
+  if (observation.unregisteredForeground) {
+    return {
+      id: 'lark.listener',
+      label: '飞书监听',
+      level: 'warn',
+      detail: '已配置飞书；未登记进程，连接状态无法由 daemon 记录核验',
+      remedy: '请在该前台进程的启动终端核对飞书监听日志。本检查不会据此判断已经连接或连接失败。',
+      verify: 'dutydeck status'
+    };
   }
   if (!daemonRunning) {
     return {
@@ -901,6 +928,8 @@ export interface PortObservation {
   outcome: PortProbeOutcome;
   /** 占用者是不是我们自己的守护进程。 */
   ownDaemon: boolean;
+  /** 占用者是不是刚通过双健康端点识别的未登记前台服务。 */
+  ownForeground?: boolean;
 }
 
 /** 查占用者的命令按平台给：Linux 上 lsof 常常没装。 */
@@ -911,10 +940,13 @@ function holderCommand(port: number, platform: string): string {
 }
 
 export function checkPort(observation: PortObservation, platform: string): DoctorCheck {
-  const { host, port, outcome, ownDaemon } = observation;
+  const { host, port, outcome, ownDaemon, ownForeground } = observation;
   if (outcome === 'occupied' && ownDaemon) {
     // 占用者就是我们自己 —— 这正是健康状态，不是冲突。
     return { id: 'port.conflict', label: '端口占用', level: 'ok', detail: `${port} 由本机 Dutydeck 守护进程占用（就是它自己）` };
+  }
+  if (outcome === 'occupied' && ownForeground) {
+    return { id: 'port.conflict', label: '端口占用', level: 'ok', detail: `${port} 由未登记 Dutydeck 前台服务占用` };
   }
   if (outcome === 'occupied') {
     return {

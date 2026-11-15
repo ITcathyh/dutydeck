@@ -133,7 +133,10 @@ describe('readDaemonLog', () => {
 
   it('reports a missing log as not yet created and preserves other I/O errors', () => {
     const dir = join(tmp, 'missing-daemon');
-    expect(() => readDaemonLog(dir)).toThrow(`daemon 日志尚未生成：${daemonPaths(dir).logFile}`);
+    let missing: unknown;
+    try { readDaemonLog(dir); } catch (error) { missing = error; }
+    expect(missing).toBeInstanceOf(Error);
+    expect((missing as Error).message).toBe(`daemon 日志尚未生成：${daemonPaths(dir).logFile}；前台服务请查看启动终端，systemd 托管服务请用 journalctl --user -u <unit> 查看对应 unit 的日志；请先启动 daemon，或核对 daemon 目录`);
 
     mkdirSync(daemonPaths(dir).logFile, { recursive: true });
     let failure: unknown;
@@ -155,6 +158,8 @@ describe('logs CLI', () => {
     expect(result.status, result.stderr).toBe(1);
     expect(result.stderr).toContain('daemon 日志尚未生成');
     expect(result.stderr).toContain(daemonPaths(daemonDir).logFile);
+    expect(result.stderr).toContain('前台服务请查看启动终端');
+    expect(result.stderr).toContain('journalctl --user -u <unit>');
     expect(result.stderr).toContain('核对 daemon 目录');
   });
 });

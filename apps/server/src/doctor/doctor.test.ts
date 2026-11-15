@@ -1,5 +1,5 @@
 import { WATCH_PREFIX, watchFingerprint } from '../watch.js';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync, chmodSync, mkdirSync, existsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -66,6 +66,7 @@ function deps(overrides: Partial<DoctorDependencies> = {}): DoctorDependencies {
     daemonStatus: () => ({ running: true, pid: 4242, ready: true, address: 'http://127.0.0.1:4310', authEnabled: true }),
     daemonRecord: () => ({ pid: 4242, ready: true, host: '127.0.0.1', port: 4310, authEnabled: true, database: baseConfig.databaseUrl }),
     daemonLogFile: '/tmp/dutydeck-fixture/.dutydeck/daemon/dutydeck.log',
+    unregisteredForegroundProbe: async () => undefined,
     databaseProbe: () => ({ exists: true, appliedVersion: 14, values: { [AUTH_TOKEN_CONFIG_KEY]: FIXTURE_TOKEN } }),
     expectedSchemaVersion: 14,
     agentProbe: async () => ({ status: 'ok' as const, version: 'stub 1.0.0' }),
@@ -377,6 +378,51 @@ describe('daemon.status —— 状态不许说谎', () => {
     })), 'daemon.status')!;
     expect(check.level).toBe('warn');
     expect(check.remedy).toBeTruthy();
+  });
+
+  it('未登记前台服务替换原 daemon.status，不增加检查或重复建议 start', async () => {
+    const stopped = deps({
+      daemonStatus: () => ({ running: false, processStatus: 'stale', ready: false }),
+      daemonRecord: () => undefined,
+      portProbe: async () => 'free'
+    });
+    const baseline = await runDoctor({ json: true }, stopped);
+    const probe = vi.fn(async (address: string) => ({ address, ready: true }));
+    const report = await runDoctor({ json: true }, deps({
+      daemonStatus: () => ({ running: false, processStatus: 'stale', ready: false }),
+      daemonRecord: () => undefined,
+      unregisteredForegroundProbe: probe,
+      portProbe: async () => 'occupied',
+      processUid: () => { throw new Error('未登记进程不能使用 daemon 身份'); }
+    }));
+    expect(probe).toHaveBeenCalledWith('http://127.0.0.1:4310');
+    expect(report.checks.map(check => check.id)).toEqual(baseline.checks.map(check => check.id));
+    expect(report.checks.filter(check => check.id === 'daemon.status')).toHaveLength(1);
+    expect(find(report, 'daemon.status')).toMatchObject({ level: 'ok', detail: expect.stringContaining('未登记前台服务') });
+    expect(find(report, 'port.conflict')).toMatchObject({ level: 'ok', detail: expect.stringContaining('未登记') });
+    expect(JSON.stringify(report)).not.toContain('"command":"dutydeck start"');
+  });
+
+  it('未登记前台尚未就绪仍不指向 start，探测拒绝保持原状态', async () => {
+    const base = {
+      daemonStatus: () => ({ running: false, processStatus: 'stale' as const, ready: false }),
+      daemonRecord: () => undefined,
+      portProbe: async () => 'occupied' as const
+    };
+    const unready = find(await runDoctor({ json: true }, deps({
+      ...base,
+      unregisteredForegroundProbe: async (address: string) => ({ address, ready: false })
+    })), 'daemon.status')!;
+    expect(unready.level).toBe('warn');
+    expect(unready.detail).toContain('尚未就绪');
+    expect(unready.command).not.toBe('dutydeck start');
+
+    const rejected = await runDoctor({ json: true }, deps({
+      ...base,
+      unregisteredForegroundProbe: async () => { throw new Error('probe failed'); }
+    }));
+    expect(find(rejected, 'daemon.status')).toMatchObject({ level: 'warn', command: 'dutydeck start' });
+    expect(find(rejected, 'port.conflict')?.level).toBe('fail');
   });
 });
 
@@ -708,6 +754,20 @@ describe('lark', () => {
     expect(check.level).toBe('warn');
     expect(check.detail).toMatch(/不可能是活的|未运行/);
     expect(check.command).toBe('dutydeck start');
+  });
+
+  it('未登记前台服务的飞书连接状态未知，不重复建议 start 也不冒充已连接', async () => {
+    const withForeground = withBots([bot()]);
+    const check = find(await runDoctor({ json: true }, {
+      ...withForeground,
+      daemonStatus: () => ({ running: false, processStatus: 'stale', ready: false }),
+      daemonRecord: () => undefined,
+      unregisteredForegroundProbe: async (address: string) => ({ address, ready: true })
+    }), 'lark.listener')!;
+    expect(check.level).toBe('warn');
+    expect(check.detail).toContain('未登记进程，连接状态无法由 daemon 记录核验');
+    expect(check.command).not.toBe('dutydeck start');
+    expect(check.detail).not.toContain('已连上');
   });
 
   describe('应该监听与实际连上的对比', () => {

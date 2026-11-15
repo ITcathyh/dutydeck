@@ -34,12 +34,13 @@ import { parseEnv } from 'node:util';
 import { loadConfigWithDiagnostics } from '@dutydeck/config';
 import { errorMessage } from '@dutydeck/shared';
 import { PTY_AGENT_CONTRIBUTIONS } from '@dutydeck/pty-driver/support';
-import { daemonDatabasePath, daemonStatus } from '../daemon/command.js';
+import { daemonDatabasePath, daemonStatus, probeUnregisteredForeground } from '../daemon/command.js';
 import { daemonPaths, readDaemonStatus, resolveDaemonDir } from '../daemon/daemon.js';
 import { abnormalExitNote, readAbnormalExit } from '../abnormal-exit.js';
 import { accessMode } from '../service.js';
 import { createCliUi, type CliUi } from '../cli-ui.js';
 import { locateEnvFile } from '../env-location.js';
+import { localLoopbackUrl } from '../local-api-url.js';
 import { defaultAgentProbe, defaultDatabaseProbe, defaultPortProbe, defaultProcessUid } from './probes.js';
 import { defaultTerminalBackendProbe } from './terminal-backend.js';
 import { agentsToProbe, checkDefaultAgents, checkDroppedAgents, readDefaultAgents } from './agent-checks.js';
@@ -271,7 +272,7 @@ export async function runDoctor(
 
   // ---- 2. 守护进程 ----
   progress('检查守护进程状态');
-  const status = dependencies.daemonStatus
+  let status = dependencies.daemonStatus
     ? dependencies.daemonStatus()
     : daemonStatus();
   // root 检查看守护进程：Agent 继承的是它的身份。读不到守护进程的 uid 时才退回当前命令的。
@@ -329,6 +330,22 @@ export async function runDoctor(
       command: configError.includes('DUTYDECK_AGENTS_JSON') ? `grep -n DUTYDECK_AGENTS_JSON ${envFile}` : `ls -l ${envFile}`,
       verify: 'dutydeck doctor'
     });
+  }
+
+  // 配置确定后，只在没有 daemon 记录时探测配置端口；在原位置替换检查，检查数量与顺序不变。
+  // root 检查已经使用原始 status，下面的 abnormal-exit 也继续只看登记的 daemon 生命周期。
+  if (!record && !status.unregisteredForeground && status.processStatus !== 'unverifiable') {
+    try {
+      const probe = dependencies.unregisteredForegroundProbe ?? probeUnregisteredForeground;
+      const unregisteredForeground = await probe(localLoopbackUrl(config.host, config.port));
+      if (unregisteredForeground) {
+        status = { ...status, unregisteredForeground };
+        const index = checks.findIndex(check => check.id === 'daemon.status');
+        if (index >= 0) checks[index] = checkDaemon({ status, ...(logFile ? { logFile } : {}) });
+      }
+    } catch {
+      // 诊断探针自身失败不等于服务状态发生变化，保留原始检查。
+    }
   }
 
   // ---- 4. 数据库 + 迁移 ----
@@ -400,6 +417,7 @@ export async function runDoctor(
     ...(probe.values?.[larkBotsConfigKey] ? { raw: probe.values[larkBotsConfigKey] } : {}),
     ...(probe.values?.[larkListenerStatusKey] ? { status: probe.values[larkListenerStatusKey] } : {}),
     ...(status.pid ?? record?.pid ? { pid: status.pid ?? record?.pid } : {}),
+    ...(status.unregisteredForeground ? { unregisteredForeground: true } : {}),
     now: new Date()
   }));
   checks.push(checkLarkMemory(
@@ -477,7 +495,7 @@ export async function runDoctor(
   const outcome = await portProbe(probeHost, probePort, portTimeout);
   // 占用者是不是我们自己：进程在跑 + 记录的端口就是这个端口。
   const ownDaemon = status.running && (record?.port === probePort || status.address?.includes(`:${probePort}`) === true);
-  checks.push(checkPort({ host: probeHost, port: probePort, outcome, ownDaemon }, platform));
+  checks.push(checkPort({ host: probeHost, port: probePort, outcome, ownDaemon, ownForeground: status.unregisteredForeground !== undefined }, platform));
 
   // ---- 10. 平台能力 ----
   checks.push(checkPlatformPickers(platform));

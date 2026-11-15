@@ -572,6 +572,142 @@ describe('restart 前等待正在执行的任务结束（drain）', () => {
     expect(process.env.DUTYDECK_DAEMON_RESTART_DRAINED).toBeUndefined();
   });
 
+  // ── update 排水文案：操作名贯穿所有分支，默认 restart/deploy 逐字不变 ──────
+
+  const withoutRestartWording = (text: string) => {
+    expect(text).not.toContain('重启');
+    expect(text).not.toContain('dutydeck restart --force');
+  };
+
+  it('update 零任务不等待，初始有任务时等待与后续执行都写更新', async () => {
+    const daemon = idleProcess(), state = daemonState(daemon, 'update-zero', false);
+    writeState(dir, state);
+    const idle = daemonApi([0]);
+    const zero = await waitForRunningTasksDrain(dir, state, {}, { fetch: idle.fetch, info: vi.fn(), warn: vi.fn() }, undefined, 'update');
+    expect(zero).toMatchObject({ ok: true });
+    expect(idle.activity()).toBe(1);
+
+    const api = daemonApi([1, 0]);
+    const info = vi.fn(), warn = vi.fn();
+    writeState(dir, state);
+    const result = await waitForRunningTasksDrain(dir, state, {}, { fetch: api.fetch, sleep: vi.fn(), info, warn }, undefined, 'update');
+    expect(result).toMatchObject({ ok: true });
+    const text = [...info.mock.calls, ...warn.mock.calls].map(call => call[0]).join('\n');
+    expect(text).toContain('等它们结束后再更新');
+    expect(text).toContain('dutydeck update --force 立即更新');
+    expect(text).toContain('更新后由新进程执行');
+    withoutRestartWording(text);
+  });
+
+  it('update 可恢复任务提示更新后接回，查询仍使用原 restart 协议参数', async () => {
+    const daemon = idleProcess(), state = daemonState(daemon, 'update-recoverable', false);
+    writeState(dir, state);
+    const counts = [1, 0];
+    const fetcher = vi.fn(async (url: string) => ({ ok: true, status: 200, json: async () => {
+      if (new URL(url).pathname === '/api/system/drain') return { draining: true };
+      const restartBlockers = counts.shift()!;
+      return { runningTasks: restartBlockers + 1, restartBlockers, recoverableTasks: 1 };
+    } }) as Response);
+    const info = vi.fn();
+    const result = await waitForRunningTasksDrain(dir, state, {}, { fetch: fetcher, sleep: vi.fn(), info, warn: vi.fn() }, undefined, 'update');
+    expect(result).toMatchObject({ ok: true });
+    const text = info.mock.calls.map(call => call[0]).join('\n');
+    expect(text).toContain('更新后接回原轮');
+    withoutRestartWording(text);
+    const activityUrls = fetcher.mock.calls.map(([url]) => new URL(url)).filter(url => url.pathname === '/api/system/activity');
+    expect(activityUrls.every(url => url.searchParams.get('restart') === 'true')).toBe(true);
+  });
+
+  it.each(['query', 'address'])('update 在 %s 无法确认任务时拒绝更新并建议自身 force', async failure => {
+    const daemon = idleProcess();
+    const state = daemonState(daemon, `update-${failure}`, false, failure === 'address' ? 'http://192.0.2.1:4310' : undefined);
+    writeState(dir, state);
+    const api = daemonApi([], { activityStatus: 500 });
+    const result = await waitForRunningTasksDrain(dir, state, {}, {
+      fetch: api.fetch, info: vi.fn(), warn: vi.fn(), localAddresses: () => []
+    }, undefined, 'update');
+    expect(result).toMatchObject({ ok: false });
+    const error = !result.ok ? result.error : '';
+    expect(error).toContain('已拒绝更新');
+    expect(error).toContain('dutydeck update --force');
+    withoutRestartWording(error);
+  });
+
+  it('update 超时与非法等待时间都建议 dutydeck update --force', async () => {
+    const daemon = idleProcess(), state = daemonState(daemon, 'update-timeout', false);
+    writeState(dir, state);
+    const api = daemonApi([1, 1]);
+    let clock = 0;
+    const info = vi.fn();
+    const result = await waitForRunningTasksDrain(dir, state, { drainTimeout: '1' }, {
+      fetch: api.fetch, sleep: async () => { clock += 2_000; }, now: () => clock, info, warn: vi.fn()
+    }, undefined, 'update');
+    expect(result).toMatchObject({ ok: false });
+    const error = !result.ok ? result.error : '';
+    expect(error).toContain('请使用 dutydeck update --force 强制更新');
+    withoutRestartWording([...info.mock.calls.map(call => call[0]), error].join('\n'));
+
+    const invalid = await waitForRunningTasksDrain(dir, state, { drainTimeout: '0' }, { fetch: vi.fn() }, undefined, 'update');
+    expect(invalid).toMatchObject({ ok: false });
+    const invalidError = !invalid.ok ? invalid.error : '';
+    expect(invalidError).toContain('立即更新，请用 dutydeck update --force');
+    withoutRestartWording(invalidError);
+  });
+
+  it.each(['stale', 'unverifiable'])('update 在 %s 状态跳过等待时仍写更新', async kind => {
+    const daemon = idleProcess();
+    const state = kind === 'stale'
+      ? { pid: 2 ** 22 + 12345, ready: true, startedAt: kind, cwd: tmp, address: 'http://127.0.0.1:4391' }
+      : { ...daemonState(daemon, kind, false), processIdentity: undefined };
+    writeState(dir, state);
+    const warn = vi.fn(), fetcher = vi.fn();
+    const result = await waitForRunningTasksDrain(dir, state, {}, { fetch: fetcher, warn, info: vi.fn() }, undefined, 'update');
+    expect(result).toEqual({ ok: true });
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledOnce();
+    expect(warn.mock.calls[0]![0]).toContain('继续执行更新');
+    withoutRestartWording(warn.mock.calls[0]![0]);
+  });
+
+  it('update --force 仍直接放行且不查询', async () => {
+    const fetcher = vi.fn(), warn = vi.fn(), info = vi.fn();
+    const result = await waitForRunningTasksDrain(dir, undefined, { force: true }, { fetch: fetcher, warn, info }, undefined, 'update');
+    expect(result).toEqual({ ok: true });
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalled();
+    expect(info).not.toHaveBeenCalled();
+  });
+
+  it('restart 与 deploy 默认进度、拒绝和超时文案逐字不变', async () => {
+    const daemon = idleProcess(), state = daemonState(daemon, 'legacy-wording', false);
+    writeState(dir, state);
+    for (const operation of ['restart', 'deploy'] as const) {
+      const initialApi = daemonApi([1, 0]);
+      const info = vi.fn();
+      const initial = operation === 'restart'
+        ? await waitForRunningTasksDrain(dir, state, {}, { fetch: initialApi.fetch, sleep: vi.fn(), info, warn: vi.fn() })
+        : await drainRuntime(state, {}, { fetch: initialApi.fetch, sleep: vi.fn(), info, warn: vi.fn() });
+      expect(initial).toMatchObject({ ok: true });
+      expect(info).toHaveBeenCalledWith('有 1 个任务正在执行，等它们结束后再重启（最长 900 秒；加 --force 立即重启）。等待期间新消息照常排队，重启后由新进程执行');
+
+      const api = daemonApi([1, 1]);
+      let clock = 0;
+      const timedOut = operation === 'restart'
+        ? await waitForRunningTasksDrain(dir, state, { drainTimeout: '1' }, { fetch: api.fetch, sleep: async () => { clock += 2_000; }, now: () => clock, info: vi.fn(), warn: vi.fn() })
+        : await drainRuntime(state, { drainTimeout: '1' }, { fetch: api.fetch, sleep: async () => { clock += 2_000; }, now: () => clock, info: vi.fn(), warn: vi.fn() });
+      expect(timedOut).toEqual({
+        ok: false, runningTasks: 1,
+        error: '等待正在执行的任务结束超时（1 秒），旧服务仍在运行（当前仍有 1 个任务正在执行）。若确认可以中断这些任务，请使用 dutydeck restart --force 强制重启。'
+      });
+    }
+
+    const refused = await drainRuntime({ address: 'http://192.0.2.1:4310', authEnabled: false }, {}, { localAddresses: () => [] });
+    expect(refused).toEqual({
+      ok: false, runningTasks: 0,
+      error: '守护进程监听地址（http://192.0.2.1:4310）不可用于本机查询，无法确认是否有任务正在执行，已拒绝重启，旧服务仍在运行。若确认可以中断正在执行的任务，加 --force 跳过等待。'
+    });
+  });
+
   // ── restart --unit：直接 serve 的 bot 运行时 ───────────────────────────────
 
   /** 起一个假的运行时 API：排空、任务数、健康检查三个接口。 */

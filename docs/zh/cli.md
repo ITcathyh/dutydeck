@@ -44,7 +44,11 @@ dutydeck update --dist-tag next
 dutydeck doctor
 ```
 
+没有 daemon 状态记录时，`dutydeck status` 与 `dutydeck doctor` 会在当前配置的主机、端口上短超时检查 `/health` 和 `/health/ready`，不跟随重定向。只有两个响应都符合 Dutydeck 的健康结构，才报告「未登记前台服务」；`status --json` 相应增加可选字段 `unregisteredForeground: { address, ready }`，原有 `running`、`processStatus`、`ready` 等字段保持原值。未就绪时只设置新字段里的 `ready=false`。识别不到时维持原诊断；探测只覆盖 CLI 当前配置端口，不知道另一个 shell 临时传入的 `--port`。doctor 会把已识别服务占用的配置端口视为自身占用；未登记进程没有可核验的飞书连接记录，因此只提示查看启动终端，不建议重复 `dutydeck start`。
+
 `dutydeck update [version]` 的版本参数只接受精确 semver，不接受 range、tag 或选项字符串；未传版本时仍按 `latest` 或显式 `--dist-tag` 解析。安装、版本核对或重启失败时保留原错误，并追加 `npm install --global @byted/dutydeck@<实际旧版本> && dutydeck restart` 作为手工回退步骤；它直接重装旧包，不依赖旧版 CLI 是否认识 `update [version]`。旧版本缺失或不是精确 semver 时会明确说明无法安全生成命令。不会自动回滚，也不会越过部署窗口。
+
+`update` 在安装前排空正在执行的任务时，等待、状态无法核验、可恢复任务、查询失败与超时提示都明确写「更新」；需要跳过等待时使用 `dutydeck update --force`，不是 `restart --force`。等待条件、排水顺序与可恢复任务保留策略和重启相同；`restart` / `deploy` 的原有进度与错误文案不变。
 
 ### setup、首启与终端预检
 
@@ -86,7 +90,26 @@ dutydeck logs --unit dutydeck.service -n 100
 
 不带 `--unit` 时，命令读取当前 daemon 的 `.dutydeck/daemon/dutydeck.log`，最多读取文件末尾 256KiB，默认输出最后 50 行；`-n` 可指定 1–10000 行。带 `--unit` 时改为通过无 shell 的流式 `journalctl --user` 子进程读取这个 systemd 用户实例，stdout 同样只滚动保留末尾 256KiB。该模式先取原始最近 N 行，再过滤疑似秘密，所以可能少于 N 行。两种来源都只输出一次快照，不提供 follow。
 
+如果默认日志文件尚不存在（ENOENT），命令会保留其完整路径并提示下一步：前台根命令启动的服务看启动终端，systemd 托管服务用 `journalctl --user -u <unit>` 查看对应 unit 的日志；也可以直接用 `dutydeck logs --unit <unit>`。其他读取错误不因这条提示改变。
+
 普通行和错误行按原顺序保留，多行堆栈不会被压成一行。为避免把凭据带进终端记录，含 token、secret、password、credential、API key、Authorization、Bearer 等疑似秘密的整行不会输出；这不改变原始日志文件或 journal。unit 不存在或尚无日志、无法执行 `journalctl` 或行数无效时命令明确报错并返回非零退出码，不输出环境配置。
+
+### 同机静态 peer 实例<a id="static-peers"></a>
+
+主服务可以把同机其他 Dutydeck 实例登记为静态 peer。每个 peer 先用自己的数据库与端口以 `--local-only` 启动，再把它的地址写进**主服务**的 `.env`：
+
+```bash
+# peer 示例（两个实例分别使用自己的数据目录与端口）
+dutydeck --local-only --port 4311 --database /path/to/peer-a/dutydeck.db --no-lark-listen
+dutydeck --local-only --port 4312 --database /path/to/peer-b/dutydeck.db --no-lark-listen
+
+# 主服务 .env：单行 JSON；id 用小写字母、数字和连字符
+DUTYDECK_INSTANCES_JSON='[{"id":"peer-a","name":"Peer A","url":"http://127.0.0.1:4311"},{"id":"peer-b","name":"Peer B","url":"http://127.0.0.1:4312"}]'
+```
+
+地址必须使用 `http:` URL；peer 必须是本机 `--local-only` HTTP 服务，因为主服务转发时会去掉自己的 Cookie、Authorization、Origin 等请求头，不能把这套转发当成远程认证代理。主服务通过 `/api/instances/<id>/...` 转发到对应 peer 的 `/api/...`，实例列表可从 `/api/instances` 查看。
+
+这份列表只在主服务组装时读取一次。新增、删除 peer 或修改地址后，要重启主服务才会生效；peer 自己的地址或数据库变化也要同步改这里。它是静态配置，不做动态发现，也不会因健康检查失败自动摘除实例；peer 暂时不可用时请求会报错，但配置仍保留。
 
 ## 2. 版本发布与部署 (`deploy`)
 

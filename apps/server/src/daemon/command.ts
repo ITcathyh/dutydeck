@@ -163,13 +163,18 @@ export type DrainResult = {
   queryRunningTasks?: () => Promise<{ ok: true; runningTasks: number } | { ok: false; error: string }>;
 } | { ok: false; error: string; runningTasks: number };
 
-const invalidDrainTimeout = (options: Pick<CliOptions, 'drainTimeout'>): DrainResult => ({
+type DrainOperation = 'restart' | 'update';
+
+const invalidDrainTimeout = (options: Pick<CliOptions, 'drainTimeout'>, operation: DrainOperation = 'restart'): DrainResult => ({
   ok: false, runningTasks: 0,
-  error: `--drain-timeout 只接受正整数秒数（收到 ${JSON.stringify(options.drainTimeout)}）。要跳过等待立即重启，请用 dutydeck restart --force。旧服务仍在运行，没有停止任何进程。`
+  error: operation === 'update'
+    ? `--drain-timeout 只接受正整数秒数（收到 ${JSON.stringify(options.drainTimeout)}）。要跳过等待立即更新，请用 dutydeck update --force。旧服务仍在运行，没有停止任何进程。`
+    : `--drain-timeout 只接受正整数秒数（收到 ${JSON.stringify(options.drainTimeout)}）。要跳过等待立即重启，请用 dutydeck restart --force。旧服务仍在运行，没有停止任何进程。`
 });
 
-const refuseWithoutStatus = (reason: string) =>
-  `${reason}，无法确认是否有任务正在执行，已拒绝重启，旧服务仍在运行。若确认可以中断正在执行的任务，加 --force 跳过等待。`;
+const refuseWithoutStatus = (reason: string, operation: DrainOperation = 'restart') => operation === 'update'
+  ? `${reason}，无法确认是否有任务正在执行，已拒绝更新，旧服务仍在运行。若确认可以中断正在执行的任务，请用 dutydeck update --force 跳过等待。`
+  : `${reason}，无法确认是否有任务正在执行，已拒绝重启，旧服务仍在运行。若确认可以中断正在执行的任务，加 --force 跳过等待。`;
 
 /**
  * 重启前等待守护进程中正在执行的任务结束（drain）。
@@ -182,7 +187,8 @@ export async function waitForRunningTasksDrain(
   state: DaemonState | undefined,
   options: CliOptions,
   deps: DaemonCommandDeps,
-  allowRecoverable = state?.supervisor !== 'systemd'
+  allowRecoverable = state?.supervisor !== 'systemd',
+  operation: DrainOperation = 'restart'
 ): Promise<DrainResult> {
   if (options.force) return { ok: true };
   // detached restart 会再拉起一个执行 `daemon restart` 的后台子进程；父进程已等过，
@@ -195,18 +201,18 @@ export async function waitForRunningTasksDrain(
 
   const warn = deps.warn ?? defaultWarn;
   const timeoutSeconds = parseDrainTimeoutSeconds(options.drainTimeout);
-  if (timeoutSeconds === undefined) return invalidDrainTimeout(options);
+  if (timeoutSeconds === undefined) return invalidDrainTimeout(options, operation);
 
   const inspection = inspectDaemon(dir);
   if (inspection.status === 'stale') {
-    warn('守护进程未运行，跳过任务等待，继续执行重启。');
+    warn(`守护进程未运行，跳过任务等待，继续执行${operation === 'update' ? '更新' : '重启'}。`);
     return { ok: true };
   }
   if (inspection.status === 'unverifiable') {
-    warn('守护进程身份无法验证，跳过任务等待，继续执行重启。');
+    warn(`守护进程身份无法验证，跳过任务等待，继续执行${operation === 'update' ? '更新' : '重启'}。`);
     return { ok: true };
   }
-  return await holdAndWait(state, timeoutSeconds, deps, allowRecoverable);
+  return await holdAndWait(state, timeoutSeconds, deps, allowRecoverable, operation);
 }
 
 /** deploy 默认全量排空；restart 只有确认 tmux 能存活时才显式允许恢复。地址和数据库由调用方给出。 */
@@ -224,14 +230,15 @@ export async function drainRuntime(endpoint: RuntimeEndpoint, options: Pick<CliO
  * - 超时仍有任务、或等待中被 Ctrl-C：退出排空，旧进程照常服务。
  * 服务不支持排空（旧版本返回 404）时只告警，照旧等待。
  */
-async function holdAndWait(endpoint: RuntimeEndpoint | undefined, timeoutSeconds: number, deps: DaemonCommandDeps, allowRecoverable: boolean): Promise<DrainResult> {
+async function holdAndWait(endpoint: RuntimeEndpoint | undefined, timeoutSeconds: number, deps: DaemonCommandDeps, allowRecoverable: boolean, operation: DrainOperation = 'restart'): Promise<DrainResult> {
   const warn = deps.warn ?? defaultWarn;
   const info = deps.info ?? defaultInfo;
+  const action = operation === 'update' ? '更新' : '重启';
 
   const localAddresses = deps.localAddresses ?? (() => Object.values(networkInterfaces()).flatMap(entries => entries?.map(entry => entry.address) ?? []));
   const parsedUrl = resolveLocalUrl(endpoint?.address, localAddresses);
   if (!parsedUrl) {
-    return { ok: false, runningTasks: 0, error: refuseWithoutStatus(`守护进程监听地址（${endpoint?.address ?? '未记录'}）不可用于本机查询`) };
+    return { ok: false, runningTasks: 0, error: refuseWithoutStatus(`守护进程监听地址（${endpoint?.address ?? '未记录'}）不可用于本机查询`, operation) };
   }
 
   // 在 dutydeck 托管的 Agent 里执行 restart 时，Agent 自己那轮必然 running；
@@ -281,10 +288,10 @@ async function holdAndWait(endpoint: RuntimeEndpoint | undefined, timeoutSeconds
     const validCount = (count: unknown): count is number => typeof count === 'number' && Number.isSafeInteger(count) && count >= 0;
     if (recoverableDrain && ('restartBlockers' in data || 'recoverableTasks' in data)) {
       if (!validCount(data.restartBlockers) || !validCount(data.recoverableTasks)
-        || data.restartBlockers + data.recoverableTasks !== data.runningTasks) return { ok: false, error: '接口返回重启计数格式错误' };
+        || data.restartBlockers + data.recoverableTasks !== data.runningTasks) return { ok: false, error: `接口返回${action}计数格式错误` };
       if (reportedRecoverable !== data.recoverableTasks) {
         reportedRecoverable = data.recoverableTasks;
-        if (data.recoverableTasks) info(`${data.recoverableTasks} 个已验证可恢复的 tmux 任务将保留，重启后接回原轮。`);
+        if (data.recoverableTasks) info(`${data.recoverableTasks} 个已验证可恢复的 tmux 任务将保留，${action}后接回原轮。`);
       }
       return { ok: true, runningTasks: data.restartBlockers };
     }
@@ -309,10 +316,10 @@ async function holdAndWait(endpoint: RuntimeEndpoint | undefined, timeoutSeconds
   };
 
   const initial = await queryRunningTasks();
-  if (!initial.ok) return await refuse(refuseWithoutStatus(`查询正在执行的任务数失败（${initial.error}）`), 0);
+  if (!initial.ok) return await refuse(refuseWithoutStatus(`查询正在执行的任务数失败（${initial.error}）`, operation), 0);
   if (initial.runningTasks === 0) return { ok: true, release, renew, queryRunningTasks };
 
-  info(`有 ${initial.runningTasks} 个任务正在执行，等它们结束后再重启（最长 ${timeoutSeconds} 秒；加 --force 立即重启）${hold.ok ? '。等待期间新消息照常排队，重启后由新进程执行' : ''}`);
+  info(`有 ${initial.runningTasks} 个任务正在执行，等它们结束后再${action}（最长 ${timeoutSeconds} 秒；${operation === 'update' ? '请用 dutydeck update --force' : '加 --force'} 立即${action}）${hold.ok ? `。等待期间新消息照常排队，${action}后由新进程执行` : ''}`);
 
   const sleeper = deps.sleep ?? sleep;
   const timer = deps.now ?? Date.now;
@@ -331,11 +338,11 @@ async function holdAndWait(endpoint: RuntimeEndpoint | undefined, timeoutSeconds
         if (!renewed.ok || renewed.data?.draining !== true) recoverableDrain = false;
       }
       const current = await queryRunningTasks();
-      if (!current.ok) return await refuse(refuseWithoutStatus(`查询正在执行的任务数失败（${current.error}）`), currentRunning);
+      if (!current.ok) return await refuse(refuseWithoutStatus(`查询正在执行的任务数失败（${current.error}）`, operation), currentRunning);
       currentRunning = current.runningTasks;
       if (currentRunning === 0) break;
       if (timer() >= deadline) {
-        return await refuse(`等待正在执行的任务结束超时（${timeoutSeconds} 秒），旧服务仍在运行（当前仍有 ${currentRunning} 个任务正在执行）。若确认可以中断这些任务，请使用 dutydeck restart --force 强制重启。`, currentRunning);
+        return await refuse(`等待正在执行的任务结束超时（${timeoutSeconds} 秒），旧服务仍在运行（当前仍有 ${currentRunning} 个任务正在执行）。若确认可以中断这些任务，请使用 ${operation === 'update' ? 'dutydeck update --force' : 'dutydeck restart --force'} 强制${action}。`, currentRunning);
       }
     }
   } finally {
@@ -1237,6 +1244,11 @@ async function unitRestart(unit: string, options: CliOptions, deps: DaemonComman
   return { ok: true, action: 'restart', running: true, pid: healthy.pid, address: target.endpoint.address, authEnabled, authentication: authEnabled ? 'required' : 'disabled', state: 'restarted' };
 }
 
+export interface UnregisteredForeground {
+  address: string;
+  ready: boolean;
+}
+
 export interface DaemonStatusInfo {
   running: boolean;
   processStatus: DaemonProcessStatus;
@@ -1248,6 +1260,7 @@ export interface DaemonStatusInfo {
   ready?: boolean;
   authEnabled?: boolean;
   authentication?: 'required' | 'disabled';
+  unregisteredForeground?: UnregisteredForeground;
 }
 
 /** `dutydeck status`: report whether a daemon is alive and where. */
@@ -1269,6 +1282,51 @@ export function daemonStatus(): DaemonStatusInfo {
     authEnabled: alive ? authEnabled : undefined,
     authentication: alive ? (authEnabled ? 'required' : 'disabled') : undefined
   };
+}
+
+const FOREGROUND_PROBE_TIMEOUT_MS = 500;
+
+/**
+ * 保守识别没有 daemon 状态记录的前台服务。两个端点都必须直接返回约定 JSON；
+ * 不跟随重定向，任何网络、状态或结构错误都只表示“没有识别到”，不改写旧状态。
+ */
+export async function probeUnregisteredForeground(address: string, deps: Pick<DaemonCommandDeps, 'fetch' | 'requestTimeoutMs'> = {}): Promise<UnregisteredForeground | undefined> {
+  const fetcher = deps.fetch ?? fetch;
+  const requestTimeoutMs = deps.requestTimeoutMs ?? FOREGROUND_PROBE_TIMEOUT_MS;
+  const request = async (path: string): Promise<unknown> => {
+    const response = await fetcher(new URL(path, address).toString(), {
+      headers: { Accept: 'application/json' },
+      redirect: 'error',
+      signal: AbortSignal.timeout(requestTimeoutMs)
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return await response.json();
+  };
+  try {
+    const health = await request('/health') as { ok?: unknown } | undefined;
+    if (health?.ok !== true) return undefined;
+    const readiness = await request('/health/ready') as { ok?: unknown; ready?: unknown; pending?: unknown } | undefined;
+    if (readiness?.ok !== true || typeof readiness.ready !== 'boolean'
+      || !Array.isArray(readiness.pending) || !readiness.pending.every(item => typeof item === 'string')) return undefined;
+    return { address, ready: readiness.ready };
+  } catch {
+    return undefined;
+  }
+}
+
+/** CLI status 的异步增强：只有明确没有 daemon 记录时才探测配置端口。 */
+export async function daemonStatusWithForeground(env: NodeJS.ProcessEnv = process.env, deps: Pick<DaemonCommandDeps, 'fetch' | 'requestTimeoutMs'> = {}): Promise<DaemonStatusInfo> {
+  const status = daemonStatus();
+  const inspection = inspectDaemon(resolveDaemonDir(process.cwd(), env.HOME));
+  if (inspection.status !== 'stale' || inspection.reason !== 'No daemon recorded') return status;
+  const config = appConfigSchema.pick({ host: true, port: true }).safeParse({
+    host: env.DUTYDECK_LOCAL_ONLY === 'true' ? '127.0.0.1' : env.DUTYDECK_HOST,
+    port: env.DUTYDECK_PORT ? Number(env.DUTYDECK_PORT) : undefined
+  });
+  if (!config.success) return status;
+  const address = localLoopbackUrl(config.data.host, config.data.port);
+  const unregisteredForeground = await probeUnregisteredForeground(address, deps);
+  return unregisteredForeground ? { ...status, unregisteredForeground } : status;
 }
 
 function authEnabledFromCli(options: CliOptions, env: NodeJS.ProcessEnv): boolean {

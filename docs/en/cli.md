@@ -20,6 +20,8 @@ ADHD Lark structured confirmations retain their existing 24-hour card, same-sess
 
 `dutydeck update [version]` accepts only an exact semver, not a range, tag, or option string. Without the argument it still resolves `latest` or an explicit `--dist-tag`. Installation, verification, and restart errors keep their original prefix and append `npm install --global @byted/dutydeck@<actual previous version> && dutydeck restart` as the manual rollback steps. This reinstalls the old package directly and does not depend on the old CLI understanding `update [version]`. If the previous version is missing or is not an exact semver, the error says that no safe command can be generated. Dutydeck never rolls back automatically or bypasses the deployment window.
 
+During the pre-install task drain, every `update` progress, unverifiable-state, recoverable-task, query-failure and timeout message describes an update. To skip that wait, use `dutydeck update --force`, not `restart --force`. The wait conditions, drain order and recoverable-task preservation policy are the same as for restart; existing `restart` / `deploy` progress and error wording is unchanged.
+
 ```bash
 # Daemon
 dutydeck start [--cwd /path] [--port 4310] [--host 0.0.0.0]
@@ -76,6 +78,8 @@ dutydeck auth token [--rotate]            # token for CLI/scripts/API
 dutydeck auth share-key rotate
 ```
 
+When no daemon state record exists, `dutydeck status` and `dutydeck doctor` probe `/health` and `/health/ready` on the configured host and port with short timeouts and do not follow redirects. They report an “unregistered foreground service” only when both responses match Dutydeck's health structures. `status --json` then adds the optional `unregisteredForeground: { address, ready }` field while the existing `running`, `processStatus`, `ready` and other fields retain their original values. An unready service sets only the new field's `ready=false`. An unrecognized response leaves the original diagnosis unchanged. The probe covers only the CLI's configured port; it cannot discover a temporary `--port` passed in another shell. Doctor treats the occupied configured port as belonging to the identified service. Because an unregistered process has no verifiable daemon Lark-listener record, doctor points to its startup terminal instead of recommending another `dutydeck start`.
+
 ### Setup, first start and terminal preflight
 
 When `dutydeck setup` detects a terminal Agent that needs tmux, it runs a private-socket preflight. A failure adds one warning to the result but does not prevent the configuration from being written. To read `dutydeck.terminal_backend`, preflight opens the existing SQLite database read-only. A missing database, `configs` table or setting key uses the tmux default; preflight never creates or migrates the database or writes control tables. An invalid setting produces a read warning and skips the tmux probe. Doctor's `terminal.backend` check distinguishes a missing command, a version failure, session create/verify failure and cleanup failure, with installation or `PATH` remedies. It never installs tmux and never connects to or stops the default tmux server. Every invocation uses `-f /dev/null`, `XDG_CONFIG_HOME` is private, and the test session runs only a controlled keep-alive command, so system and user tmux configuration is not loaded. ACP-only configurations receive only an informational terminal-backend note; Herdr configurations do not treat missing tmux as a failure.
@@ -122,7 +126,26 @@ dutydeck logs --unit dutydeck.service -n 100
 
 Without `--unit`, the command reads the current daemon's `.dutydeck/daemon/dutydeck.log`, reading at most the last 256KiB and printing the last 50 lines by default. Use `-n` to request 1–10000 lines. With `--unit`, it instead runs a streaming `journalctl --user` child process without a shell and retains only the last 256KiB of stdout. In this mode, the command asks `journalctl` for the most recent N unfiltered lines, then filters suspected secrets, so fewer than N lines may be printed. Both sources produce a one-time snapshot; follow mode is not available.
 
+If the default log file does not exist (ENOENT), the error keeps its full path and adds the next step: inspect the startup terminal for a foreground root command, or use `journalctl --user -u <unit>` for the corresponding systemd unit; `dutydeck logs --unit <unit>` is the equivalent CLI route. Other read errors are unchanged.
+
 Ordinary and error lines retain their original order, and multiline stacks are not flattened. To keep credentials out of terminal records, any line containing a suspected secret such as token, secret, password, credential, API key, Authorization or Bearer is omitted. This does not change the original log file or journal. A unit that does not exist or has no matching log entries, unavailable `journalctl`, or an invalid line count produces a clear error and a non-zero exit code; environment configuration is not printed.
+
+### Static peer instances on one host<a id="static-peers"></a>
+
+A primary service can register other Dutydeck instances on the same host as static peers. Start each peer with its own database and port in `--local-only` mode, then add its address to the **primary service's** `.env`:
+
+```bash
+# Peer examples: each instance has its own data directory and port
+dutydeck --local-only --port 4311 --database /path/to/peer-a/dutydeck.db --no-lark-listen
+dutydeck --local-only --port 4312 --database /path/to/peer-b/dutydeck.db --no-lark-listen
+
+# Primary service .env: one-line JSON; ids use lowercase letters, digits and hyphens
+DUTYDECK_INSTANCES_JSON='[{"id":"peer-a","name":"Peer A","url":"http://127.0.0.1:4311"},{"id":"peer-b","name":"Peer B","url":"http://127.0.0.1:4312"}]'
+```
+
+Peer addresses must be `http:` URLs, and each peer must be a local `--local-only` HTTP service. The primary service removes its own Cookie, Authorization, Origin and related headers before forwarding, so this is not an authenticated remote proxy. `/api/instances/<id>/...` on the primary forwards to `/api/...` on the selected peer; `/api/instances` lists the configured peers.
+
+The primary reads this list once while assembling the service. Restart the primary after adding or removing a peer or changing an address; update this setting as well when a peer's own address changes. The list is static: there is no dynamic discovery or health-based removal. Requests fail while a peer is unavailable, but its configured entry remains.
 
 Use `channel-bot` for the draft bots shown in the experimental “Groups & permissions” page. Its argument is the internal `id` returned by `list`, not the Lark App ID:
 
