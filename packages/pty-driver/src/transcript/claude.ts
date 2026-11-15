@@ -900,7 +900,7 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
             try {
               // Keep the native timestamp and source record: a late sibling
               // stop belongs to its own run, not to when this scan found it.
-              this.backgroundTasks.observe(JSON.parse(line), entryPosition);
+              this.backgroundTasks.observeLifecycle(JSON.parse(line), entryPosition);
             } catch { /* Unknown records cannot change lifecycle state. */ }
           }
         }

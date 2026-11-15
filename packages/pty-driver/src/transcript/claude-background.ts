@@ -5,6 +5,18 @@ type MirrorSlot = { key: string; generation?: Generation };
 
 const MIRROR_SLOTS_MAX = 20_000;
 
+function taskNotificationText(entry: any): string | undefined {
+  const content = entry?.message?.content;
+  return entry?.type === 'queue-operation' && entry.operation === 'enqueue' ? entry.content
+    : entry?.attachment?.type === 'queued_command' && entry.attachment.commandMode === 'task-notification' ? entry.attachment.prompt
+    : entry?.turnOrigin === 'task_notification' || entry?.origin?.kind === 'task-notification'
+      ? typeof content === 'string' ? content : content?.filter?.((block: any) => block.type === 'text').map((block: any) => block.text).join('\n') : undefined;
+}
+
+function taskNotificationIds(text: string): string[] {
+  return [...text.matchAll(/<task-id>([^<]+)<\/task-id>/g)].map(match => match[1]!.trim());
+}
+
 /** Native Claude task lifecycle metadata; tool-result prose is never a launch receipt. */
 export class ClaudeBackgroundTasks {
   private readonly calls = new Map<string, { name: string; originInputId?: string }>();
@@ -21,6 +33,21 @@ export class ClaudeBackgroundTasks {
   private ended = false;
 
   observe(entry: any, position?: TranscriptPosition): boolean {
+    return this.observeEntry(entry, position, false);
+  }
+
+  /** A sibling transcript can prove only lifecycle for identities already owned here. */
+  observeLifecycle(entry: any, position?: TranscriptPosition): boolean {
+    if (!['queue-operation', 'user', 'attachment'].includes(entry?.type)) return false;
+    const text = taskNotificationText(entry);
+    if (typeof text !== 'string' || !text.trimStart().startsWith('<task-notification>')) return false;
+    const state = /<status>(completed|failed|killed|stopped)<\/status>/.exec(text)?.[1];
+    const toolUseId = /<tool-use-id>([^<]+)<\/tool-use-id>/.exec(text)?.[1]?.trim();
+    if (!state || !toolUseId || !taskNotificationIds(text).some(id => this.tasks.get(id)?.toolUseId === toolUseId)) return false;
+    return this.observeEntry(entry, position, true);
+  }
+
+  private observeEntry(entry: any, position: TranscriptPosition | undefined, lifecycleOnly: boolean): boolean {
     if (entry?.isSidechain === true) return false;
     // A physical replay is not a new launch. Include the record because a
     // truncated sibling can legitimately reuse an offset for different bytes.
@@ -36,15 +63,14 @@ export class ClaudeBackgroundTasks {
     const content = entry.message?.content;
     // A late notification can interleave with an already accepted input.
     // Parent ancestry takes precedence over the last no-parent legacy record.
-    if (this.inputEntries.has(entry.parentUuid)) this.notification = false;
-    else if (this.notificationEntries.has(entry.parentUuid)) this.notification = true;
-    const notificationText = entry.type === 'queue-operation' && entry.operation === 'enqueue' ? entry.content
-      : entry.attachment?.type === 'queued_command' && entry.attachment.commandMode === 'task-notification' ? entry.attachment.prompt
-      : entry.turnOrigin === 'task_notification' || entry.origin?.kind === 'task-notification'
-        ? typeof content === 'string' ? content : content?.filter?.((block: any) => block.type === 'text').map((block: any) => block.text).join('\n') : undefined;
+    if (!lifecycleOnly) {
+      if (this.inputEntries.has(entry.parentUuid)) this.notification = false;
+      else if (this.notificationEntries.has(entry.parentUuid)) this.notification = true;
+    }
+    const notificationText = taskNotificationText(entry);
     if (typeof notificationText === 'string' && notificationText.trimStart().startsWith('<task-notification>')) {
-      const ids = [...notificationText.matchAll(/<task-id>([^<]+)<\/task-id>/g)].map(match => match[1]!.trim());
-      if (entry.type === 'user') this.notification = ids.some(id => {
+      const ids = taskNotificationIds(notificationText);
+      if (!lifecycleOnly && entry.type === 'user') this.notification = ids.some(id => {
         const task = this.tasks.get(id);
         return task && (this.ended || task.originInputId !== this.inputId);
       });
@@ -53,7 +79,7 @@ export class ClaudeBackgroundTasks {
       const nativeSessionId = typeof entry.sessionId === 'string' && entry.sessionId ? entry.sessionId
         : typeof entry.session_id === 'string' && entry.session_id ? entry.session_id : undefined;
       const sourceShape = entry.type === 'queue-operation' ? 'queue' : entry.type === 'user' ? 'user' : 'attachment';
-      if (state) for (const id of ids) {
+      if (state) for (const id of lifecycleOnly ? ids.filter(id => this.tasks.get(id)?.toolUseId === toolUseId) : ids) {
         const mirrorKey = nativeSessionId && toolUseId && id
           ? JSON.stringify([nativeSessionId, id, toolUseId, state, notificationText]) : undefined;
         const fingerprint = JSON.stringify([nativeSessionId, sourceShape, id, toolUseId, state, atMs, notificationText]);
@@ -75,19 +101,19 @@ export class ClaudeBackgroundTasks {
         // Every eligible queue enqueue owns one slot, including no-op and late replay.
         if (entry.type === 'queue-operation' && mirrorKey) this.addMirrorSlot(mirrorKey, generation);
       }
-    } else if (claudeInputText(entry) !== undefined && !entry.isMeta) {
+    } else if (!lifecycleOnly && claudeInputText(entry) !== undefined && !entry.isMeta) {
       this.inputId = entry.uuid; this.notification = false; this.ended = false;
       this.inputEntries.clear();
     }
-    if (typeof entry.uuid === 'string') {
+    if (!lifecycleOnly && typeof entry.uuid === 'string') {
       if (this.notification) this.notificationEntries.add(entry.uuid);
       else this.inputEntries.add(entry.uuid);
     }
-    if (entry.type === 'assistant' && Array.isArray(content) && !this.notification) {
+    if (!lifecycleOnly && entry.type === 'assistant' && Array.isArray(content) && !this.notification) {
       for (const block of content) if (block.type === 'tool_use' && typeof block.id === 'string') this.calls.set(block.id, { name: block.name, originInputId: this.inputId });
       if (entry.message?.stop_reason === 'end_turn' && content.some((block: any) => block.type === 'text' && block.text?.trim())) this.ended = true;
     }
-    if (entry.type === 'user' && Array.isArray(content)) {
+    if (!lifecycleOnly && entry.type === 'user' && Array.isArray(content)) {
       const result = entry.toolUseResult;
       for (const block of content) {
         const call = this.calls.get(block.tool_use_id);
