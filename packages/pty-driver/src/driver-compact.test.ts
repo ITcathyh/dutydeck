@@ -223,6 +223,122 @@ describe('PTY Claude maintenance compaction', () => {
     terminal.dispose();
   });
 
+  function holdRawWrite() {
+    const gate = deferred();
+    const backend = (driver as any).backend;
+    const original = backend.write.bind(backend);
+    backend.write = (data: string) => data === 'manual business' ? gate.promise : original(data);
+    const terminal = driver.createTerminalStream();
+    const manual = terminal.write('manual business');
+    return { gate, terminal, manual };
+  }
+
+  it('waits for an existing raw write, rejects new raw input, then compacts once', async () => {
+    (driver as any).timings.maintenanceTimeoutMs = 10_000;
+    const held = holdRawWrite();
+    expect((driver as any).terminalWrites).toBe(1);
+    const pending = driver.compact!(); void pending.catch(() => {});
+    await vi.advanceTimersByTimeAsync(100);
+    expect(prompts).toEqual([]);
+    await expectMaintenanceRejected(held.terminal.write('new business must wait'));
+    held.gate.resolve(); await held.manual;
+    await advanceUntil(() => prompts.length === 1);
+    await succeedCompact('after-existing-raw-write');
+    await expect(pending).resolves.toBe('completed');
+    expect(prompts).toEqual(['/compact']);
+    expect((driver as any).terminalWrites).toBe(0);
+    held.terminal.dispose();
+  });
+
+  it('times out before compact is written and keeps the unknown fence until the old raw write settles', async () => {
+    (driver as any).timings.maintenanceTimeoutMs = 1_000;
+    (driver as any).timings.maintenanceIdleGraceMs = 300;
+    const held = holdRawWrite();
+    const pending = driver.compact!(); void pending.catch(() => {});
+    await vi.advanceTimersByTimeAsync(400);
+    await expectMaintenanceRejected(pending);
+    expect(prompts).toEqual([]);
+    expect((driver as any).maintenanceUnknown).toBe(true);
+    await expectMaintenanceRejected(held.terminal.write('still fenced'));
+    held.gate.resolve(); await held.manual;
+    output(screen(idleScreen)); await vi.advanceTimersByTimeAsync(0);
+    expect(driver.isIdle()).toBe(true);
+    expect((driver as any).maintenanceUnknown).toBe(false);
+    held.terminal.dispose();
+  });
+
+  it.each(['stop', 'detach'] as const)('interrupts a compact waiting for raw input on %s without writing the command', async action => {
+    const held = holdRawWrite();
+    const pending = driver.compact!(); void pending.catch(() => {});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(prompts).toEqual([]);
+    if (action === 'detach') {
+      await driver.prepareForDaemonShutdown();
+      vi.spyOn((driver as any), 'persistentBackend').mockReturnValue({ detach() {}, setDutydeckMetadata() {} });
+    }
+    const stopping = driver.stop();
+    held.gate.resolve();
+    await expect(pending).rejects.toBeInstanceOf(PromptNotWrittenError);
+    await expect(held.manual).rejects.toThrow();
+    await stopping;
+    expect(prompts).toEqual([]);
+    held.terminal.dispose();
+  });
+
+  it('cancels before the compact paste while preserving recovery until the old raw write settles', async () => {
+    const held = holdRawWrite();
+    const pending = driver.compact!(); void pending.catch(() => {});
+    await vi.advanceTimersByTimeAsync(0);
+    await driver.interrupt();
+    expect(prompts).toEqual([]);
+    expect(interrupts).toBe(0);
+    held.gate.resolve(); await held.manual;
+    await vi.advanceTimersByTimeAsync(600);
+    await expect(pending).resolves.toBe('cancelled');
+    expect(prompts).toEqual([]);
+    held.terminal.dispose();
+  });
+
+  it('rechecks an in-flight raw write immediately before the final Enter', async () => {
+    (driver as any).timings.maintenanceTimeoutMs = 10_000;
+    const writes: string[] = [];
+    (driver as any).backend.write = (data: string) => { writes.push(data); if (data === '\r') output(screen(idleScreen)); };
+    (driver as any).adapter = { ...(driver as any).adapter, async writeInput(backend: any, prompt: string) {
+      prompts.push(prompt);
+      await backend.write(prompt);
+      output(screen(compactDraftScreen)); await vi.advanceTimersByTimeAsync(0);
+      (driver as any).terminalWrites++;
+      setTimeout(() => { (driver as any).terminalWrites--; }, 300);
+      await backend.write('\r');
+    } };
+    const { pending } = await armCompact();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(writes).toEqual(['/compact']);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(writes).toEqual(['/compact', '\r']);
+    await succeedCompact('final-enter-raw-recheck');
+    await expect(pending).resolves.toBe('completed');
+  });
+
+  it('keeps maintenance unknown when the final Enter raw-write wait times out', async () => {
+    (driver as any).timings.maintenanceTimeoutMs = 1_000;
+    (driver as any).timings.maintenanceIdleGraceMs = 300;
+    const writes: string[] = [];
+    (driver as any).backend.write = (data: string) => { writes.push(data); };
+    (driver as any).adapter = { ...(driver as any).adapter, async writeInput(backend: any, prompt: string) {
+      prompts.push(prompt);
+      await backend.write(prompt);
+      output(screen(compactDraftScreen)); await vi.advanceTimersByTimeAsync(0);
+      (driver as any).terminalWrites++;
+      await backend.write('\r');
+    } };
+    const { pending } = await armCompact();
+    await expectMaintenanceRejected(pending);
+    expect(writes).toEqual(['/compact']);
+    expect((driver as any).maintenanceUnknown).toBe(true);
+    (driver as any).terminalWrites--;
+  });
+
   it('rejects raw terminal writes until unknown maintenance has recovered', async () => {
     await makeUnknown();
     const raw: string[] = [];

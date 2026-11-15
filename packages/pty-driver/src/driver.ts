@@ -380,6 +380,7 @@ export class PtyCliDriver implements AgentDriver {
     composerWritten: boolean;
     submitted: boolean;
     terminalInterrupt?: Promise<void>;
+    terminalWriteConflict?: boolean;
     cancelError?: Error;
     pending?: Promise<unknown>;
     writesSettled?: boolean;
@@ -982,6 +983,10 @@ export class PtyCliDriver implements AgentDriver {
     }, this.timings.maintenanceTimeoutMs ?? PtyCliDriver.MAINTENANCE_TIMEOUT_MS);
     timeout.unref();
     try {
+      if (!await race(this.waitForMaintenanceRawWrites(maintenance))) {
+        maintenance.terminalWriteConflict = true;
+        throw new Error('Existing terminal input did not settle before compaction');
+      }
       if (!this.started) {
         const starting = this.start();
         // Cancellation may win the race while a reattach-start is still wiring.
@@ -1033,6 +1038,7 @@ export class PtyCliDriver implements AgentDriver {
       if (maintenance.timedOut) return finish('failed');
       return finish(outcome);
     } catch (error) {
+      if (maintenance.terminalWriteConflict) throw unknown();
       if (this.maintenanceUnknown) throw error;
       // stop() owns teardown and has already made recovery impossible. Do not
       // spend another grace period before preserving the unknown submission.
@@ -1068,12 +1074,12 @@ export class PtyCliDriver implements AgentDriver {
   }
 
   private maintenanceSafetyClear(): boolean {
-    return !this.hasBackgroundWork() && this.hookPermissions.size === 0 && this.humanWaits.size === 0 && !this.awaitingAnswer?.();
+    return this.terminalWrites === 0 && !this.hasBackgroundWork() && this.hookPermissions.size === 0 && this.humanWaits.size === 0 && !this.awaitingAnswer?.();
   }
 
   private maintenanceTerminalRecovered(maintenance: NonNullable<PtyCliDriver['maintenanceActive']>): boolean {
     return this.maintenanceActive === maintenance && !this.stopped && this.backend === maintenance.backend
-      && this.wiringGeneration === maintenance.wiringGeneration && this.terminalIsIdle();
+      && this.wiringGeneration === maintenance.wiringGeneration && this.terminalWrites === 0 && this.terminalIsIdle();
   }
 
   private maintenanceStatusEvidenceLines(lines: string[]): string[] {
@@ -1104,7 +1110,7 @@ export class PtyCliDriver implements AgentDriver {
   private maintenanceInterruptedTerminalRecovered(maintenance: NonNullable<PtyCliDriver['maintenanceActive']>): boolean {
     const screen = this.snapshot?.viewportText({ preserveStructure: true });
     if (!screen || this.maintenanceActive !== maintenance || this.stopped || this.backend !== maintenance.backend
-      || this.wiringGeneration !== maintenance.wiringGeneration || this.turnActive || this.activeSubmission) return false;
+      || this.wiringGeneration !== maintenance.wiringGeneration || this.turnActive || this.activeSubmission || this.terminalWrites > 0) return false;
     // Background/hook/answer/human waits are pre-write gates only. Compaction
     // activity is different: Enter has been sent, so the composer is not safe
     // until Claude has actually left that activity and shown an empty composer.
@@ -1157,6 +1163,22 @@ export class PtyCliDriver implements AgentDriver {
       if (!this.maintenanceComposerIsOwned(maintenance)) throw new Error('Compaction input blocked: the owned composer changed');
     } else if (!this.maintenanceTerminalRecovered(maintenance)) {
       throw new Error('Compaction input blocked: the terminal is not writable');
+    }
+  }
+
+  private async waitForMaintenanceRawWrites(maintenance: NonNullable<PtyCliDriver['maintenanceActive']>): Promise<boolean> {
+    const deadline = Date.now() + (this.timings.maintenanceIdleGraceMs ?? PtyCliDriver.MAINTENANCE_IDLE_GRACE_MS);
+    for (;;) {
+      if (maintenance.controller.signal.aborted) {
+        const reason = maintenance.controller.signal.reason;
+        throw reason instanceof Error ? reason : new Error('Compaction maintenance cancelled');
+      }
+      if (this.maintenanceActive !== maintenance || this.stopped || this.backend !== maintenance.backend
+        || this.wiringGeneration !== maintenance.wiringGeneration) return false;
+      if (this.terminalWrites === 0) return true;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return false;
+      await new Promise<void>(resolve => { const timer = setTimeout(resolve, Math.min(25, remaining)); timer.unref(); });
     }
   }
 
@@ -2829,6 +2851,10 @@ export class PtyCliDriver implements AgentDriver {
         }
         if (owner === 'maintenance' && maintenanceInput) {
           const maintenance = submission as NonNullable<PtyCliDriver['maintenanceActive']>;
+          if (maintenanceInput === 'enter' && !await this.waitForMaintenanceRawWrites(maintenance)) {
+            maintenance.terminalWriteConflict = true;
+            throw new Error('Terminal input remained in flight before the compaction Enter');
+          }
           this.assertMaintenanceWrite(maintenance, maintenanceInput === 'enter');
           if (maintenanceInput === 'enter') maintenance.submitted = true;
           else maintenance.composerWritten = true;
