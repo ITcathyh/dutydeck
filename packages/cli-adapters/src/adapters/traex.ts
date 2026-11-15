@@ -1,8 +1,9 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
+import { DriverRecoveryError, PromptNotWrittenError } from '@dutydeck/shared';
 import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
-import { pollScreenReady } from './screen-ready-helper.js';
+import { isInputReady, pollScreenReady } from './screen-ready-helper.js';
 import { buildCwdTrustArgs } from './cwd-trust.js';
-import { pasteAndSubmit } from './input-settle.js';
+import { pasteAndSubmit, delay } from './input-settle.js';
 import { isTraexBusyScreen } from './traex-footer.js';
 
 /**
@@ -77,6 +78,46 @@ const TRAEX_STATIC_BUSY_PATTERN = new RegExp(
   'i',
 );
 
+/** Match the active native question page, not a historical page above a composer. */
+function isTraexQuestionScreen(screen: string): boolean {
+  const lines = screen.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').split(/\r?\n/).map(line => line.trim());
+  let header = -1;
+  for (let index = lines.length - 1; index >= 0; index--) {
+    if (/^Question [1-9]\d*\/[1-9]\d* \(\d+ unanswered\)$/.test(lines[index]!)) { header = index; break; }
+  }
+  if (header < 0) return false;
+  let options = 0;
+  for (const line of lines.slice(header + 1)) {
+    // A later composer proves that this question is only scrollback.
+    if (/^[›❯»>](?!\s*\d+\.)/.test(line)) return false;
+    if (/^(?:[›❯»>]\s*)?\d+\.\s+\S+/.test(line)) options++;
+  }
+  return options > 0;
+}
+
+function readFailure(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** Return only after the latest authoritative read proves a writable composer. */
+async function confirmTraexComposer(backend: PtyLike): Promise<void> {
+  if (!backend.readScreen) throw new PromptNotWrittenError('TraeX screen reader is unavailable; prompt was not written');
+  const deadline = Date.now() + 30_000;
+  for (;;) {
+    let screen: string;
+    try { screen = await backend.readScreen(); }
+    catch (error) {
+      throw new PromptNotWrittenError(`TraeX screen could not be verified before paste; prompt was not written: ${readFailure(error)}`);
+    }
+    if (isTraexQuestionScreen(screen)) {
+      throw new PromptNotWrittenError('TraeX has a native question waiting for an answer; prompt was not written');
+    }
+    if (isInputReady(screen, 'TraeX', TRAEX_ACTIVE_BUSY_PATTERN)) return;
+    if (Date.now() >= deadline) throw new PromptNotWrittenError('TraeX has no ready composer; prompt was not written');
+    await delay(100);
+  }
+}
+
 export function createTraexAdapter(): CliAdapter {
   return {
     id: 'traex',
@@ -130,7 +171,21 @@ export function createTraexAdapter(): CliAdapter {
       await pollScreenReady(backend, 'TraeX', { busyPattern: TRAEX_ACTIVE_BUSY_PATTERN });
       prompt = prompt.replace(/\r\n?/g, '\n');
       // 与 Codex 相同的 bracketed-paste 策略：多行消息不能被内嵌 \n 拆成多个 turn。
-      await pasteAndSubmit(backend, prompt);
+      await pasteAndSubmit(backend, prompt, {
+        beforePaste: () => confirmTraexComposer(backend),
+        beforeEnter: async () => {
+          let screen: string;
+          try {
+            if (!backend.readScreen) throw new Error('terminal screen reader unavailable');
+            screen = await backend.readScreen();
+          } catch (error) {
+            throw new DriverRecoveryError(`TraeX screen could not be verified after paste; Enter was not sent and the prompt was not resent: ${readFailure(error)}`, 'DRIVER_INPUT_UNCONFIRMED');
+          }
+          if (isTraexQuestionScreen(screen)) {
+            throw new DriverRecoveryError('TraeX showed a native question after paste; Enter was not sent and the prompt was not resent', 'DRIVER_INPUT_UNCONFIRMED');
+          }
+        },
+      });
     },
 
     /** 与 codex 同源：自己铸 rollout id。收到 dutydeck 的 `ses_<uuid>` 说明反查

@@ -51,12 +51,19 @@ export async function waitForInputEcho(backend: PtyLike, since: number): Promise
  * bracketed paste 写入 prompt（后端有 pasteText 就用它，tmux 侧是 load-buffer + paste-buffer -p -r），等 settleMs
  * 再发 Enter。内嵌的 \n 保持为内容，随后的 Enter 才是提交。waitForEcho 为真时等完 settleMs 再等回显稳定。
  */
-export async function pasteAndSubmit(backend: PtyLike, prompt: string, { settleMs = 200, waitForEcho = false }: { settleMs?: number; waitForEcho?: boolean } = {}): Promise<void> {
+export async function pasteAndSubmit(backend: PtyLike, prompt: string, { settleMs = 200, waitForEcho = false, beforePaste, beforeEnter }: {
+  settleMs?: number;
+  waitForEcho?: boolean;
+  beforePaste?: () => void | Promise<void>;
+  beforeEnter?: () => void | Promise<void>;
+} = {}): Promise<void> {
+  if (beforePaste) await beforePaste();
   const typedAt = Date.now();
   if (backend.pasteText) await backend.pasteText(prompt);
   else await backend.write('\x1b[200~' + prompt + '\x1b[201~');
   await delay(settleMs);
   if (waitForEcho) await waitForInputEcho(backend, typedAt);
+  if (beforeEnter) await beforeEnter();
   if (backend.sendSpecialKeys) await backend.sendSpecialKeys('Enter');
   else await backend.write('\r');
 }
