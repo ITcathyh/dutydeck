@@ -110,7 +110,9 @@ export async function writeClaudeFamilyInput(backend: PtyLike, prompt: string): 
       }
       return;
     }
-    if (!ownedComposerAtBottom(lines, expectedDraft, prompt)) {
+    const owned = ownedComposerAtBottom(lines, expectedDraft, prompt)
+      || (!(backend.sendText && backend.sendSpecialKeys) && ownedRawPasteAtBottom(lines, expectedDraft));
+    if (!owned) {
       throw new DriverRecoveryError('Claude 输入框在本次写入后发生变化；提交结果未知，原进程已保留，未自动重发', 'DRIVER_INPUT_UNCONFIRMED');
     }
   };
@@ -225,6 +227,18 @@ function ownedComposerAtBottom(lines: string[], expected: string, fullPrompt: st
     }
   }
   return false;
+}
+
+function ownedRawPasteAtBottom(lines: string[], expected: string): boolean {
+  const endMarker = '^[[201~';
+  if (!lines.at(-1)?.endsWith(endMarker)) return false;
+  let observed = lines.join('\n').slice(0, -endMarker.length);
+  const startMarker = '^[[200~';
+  const start = observed.lastIndexOf(startMarker);
+  if (start >= 0) observed = observed.slice(start + startMarker.length);
+  const canonical = (text: string) => text.replace(/\s/g, '');
+  const actualText = canonical(observed);
+  return actualText.length > 0 && canonical(expected).endsWith(actualText);
 }
 
 function isComposerScreen(screen: string): boolean {

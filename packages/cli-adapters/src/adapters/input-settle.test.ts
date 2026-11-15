@@ -305,4 +305,28 @@ describe('Claude composer ownership around the first terminal write', () => {
     await finish(writeClaudeFamilyInput(pasted, 'first\nsecond'));
     expect(pasted.writes).toEqual(['\x1b[200~first\nsecond\x1b[201~', '\r']);
   });
+
+  it('accepts a bare-PTY viewport filled by its own long paste tail', async () => {
+    const visibleTail = 'last routing line\n# Skill: acceptance-skill\nPath: /tmp/skill/SKILL.md\n\nVERIFY_CLAUDE_SKILL_DELIVERY';
+    const prompt = `a long routing prefix that scrolled away\n${visibleTail}`;
+    const backend = bare();
+    // The wrapped viewport is an exact suffix after whitespace canonicalization.
+    backend.onWrite = data => {
+      if (data.includes(prompt)) backend.screen = `last routing line\n# Skill: acceptance-skill\nPath: /tmp/skill/\nSKILL.md\nVERIFY_CLAUDE_SKILL_DELIVERY^[[201~`;
+    };
+    await finish(writeClaudeFamilyInput(backend, prompt));
+    expect(backend.writes).toEqual([`\x1b[200~${prompt}\x1b[201~`, '\r']);
+  });
+
+  it('rejects foreign text after the bare-PTY paste end marker', async () => {
+    const backend = bare();
+    backend.onWrite = data => {
+      if (data.includes('business body')) backend.screen = 'business body^[[201~\nforeign draft';
+    };
+    const pending = writeClaudeFamilyInput(backend, 'business body');
+    void pending.catch(() => {});
+    await vi.advanceTimersByTimeAsync(15_000);
+    await expect(pending).rejects.toMatchObject({ name: 'DriverRecoveryError', code: 'DRIVER_INPUT_UNCONFIRMED' });
+    expect(backend.writes).toEqual(['\x1b[200~business body\x1b[201~']);
+  });
 });
