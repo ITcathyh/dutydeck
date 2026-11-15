@@ -455,11 +455,13 @@ export interface ClaudeTranscriptTailerOptions {
 interface ClaudeCompactionWait {
   observation: TranscriptCompactionObservation;
   armedAt: number;
+  phase: 'pre-write' | 'sent-unobserved' | 'input-observed' | 'boundary-observed' | 'completed' | 'failed' | 'cancelled' | 'timeout';
   promptId?: string;
   inputUuid?: string;
   inputParentUuid?: string;
   readonly commandUuids: Set<string>;
   readonly boundaryUuids: Set<string>;
+  readonly summaryUuids: Set<string>;
   invalidated: boolean;
   finish(outcome?: 'completed' | 'failed', error?: Error): void;
 }
@@ -696,13 +698,21 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
     }
     return new Promise((resolve, reject) => {
       const wait: ClaudeCompactionWait = {
-        observation, armedAt: Date.now(), commandUuids: new Set(), boundaryUuids: new Set(), invalidated: false,
+        observation, armedAt: Date.now(), phase: observation.submitted?.() === true ? 'sent-unobserved' : 'pre-write',
+        commandUuids: new Set(), boundaryUuids: new Set(), summaryUuids: new Set(), invalidated: false,
         finish: (outcome, error) => {
-          if (this.retiredCompactions.delete(wait)) return;
+          // A retired Promise has already rejected. Keep only its structural
+          // ownership evidence so late records and redraws stay out of newer generations.
+          if (this.retiredCompactions.has(wait)) return;
           if (this.compaction !== wait) return;
           this.compaction = undefined;
           observation.signal.removeEventListener('abort', abort);
-          if (error && !wait.promptId && observation.submitted?.() === true) this.retiredCompactions.add(wait);
+          if (error) {
+            wait.phase = error.name === 'TimeoutError' ? 'timeout' : 'cancelled';
+            if (wait.promptId || observation.submitted?.() === true) this.retiredCompactions.add(wait);
+          } else {
+            wait.phase = outcome!;
+          }
           if (error) reject(error); else resolve(outcome!);
         },
       };
@@ -724,25 +734,43 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
     const replayedInput = compactInputUuid !== undefined && this.compactionInputUuids.has(compactInputUuid);
     if (compactInputUuid) this.compactionInputUuids.add(compactInputUuid);
     if (baseline) return;
-    for (const wait of this.retiredCompactions) {
-      if (this.observeCompactionWait(wait, entry, position, native, inputText, replayedInput)) return;
+    const retired = [...this.retiredCompactions];
+    // When ancestry is shared, let the active generation claim its first
+    // boundary and its exact-prompt summary before older ambiguous records.
+    if (this.compaction?.promptId && ((entry.type === 'system' && entry.subtype === 'compact_boundary' && this.compaction.boundaryUuids.size === 0)
+      || (entry.isCompactSummary === true && entry.promptId === this.compaction.promptId && this.compaction.boundaryUuids.has(entry.parentUuid)))) {
+      if (this.observeCompactionWait(this.compaction, entry, position, native, inputText, replayedInput)) return;
+    }
+    for (const [index, wait] of retired.entries()) {
+      const nextArmedAt = retired[index + 1]?.armedAt ?? this.compaction?.armedAt;
+      if (this.observeCompactionWait(wait, entry, position, native, inputText, replayedInput, nextArmedAt)) return;
     }
     if (this.compaction) this.observeCompactionWait(this.compaction, entry, position, native, inputText, replayedInput);
   }
 
-  /** True when a retired wait claimed this input, keeping it away from the active generation. */
+  /** True when this wait claimed the record, keeping it away from later generations. */
   private observeCompactionWait(wait: ClaudeCompactionWait, entry: any, position: TranscriptPosition | undefined,
-    native: string | undefined, inputText: string | undefined, replayedInput: boolean): boolean {
+    native: string | undefined, inputText: string | undefined, replayedInput: boolean, nextArmedAt?: number): boolean {
     if (wait.invalidated) return false;
     const start = wait.observation.position!;
     if (!position || position.path !== start.path || position.dev !== start.dev || position.ino !== start.ino
       || position.epoch !== start.epoch || position.offset < start.offset || native !== wait.observation.nativeSessionId) return false;
+    const retired = this.retiredCompactions.has(wait);
 
     if (!wait.promptId) {
       if (inputText === undefined || replayedInput) return false;
       const timestamp = Date.parse(entry.timestamp);
-      if (!Number.isFinite(timestamp) || timestamp < wait.armedAt - 1_000) return false;
-      if (inputText !== '/compact') { wait.invalidated = true; wait.finish('failed'); return false; }
+      if (!Number.isFinite(timestamp) || timestamp < wait.armedAt - 1_000
+        || (nextArmedAt !== undefined && timestamp >= nextArmedAt)) return false;
+      if (inputText !== '/compact') {
+        if (!retired) { wait.invalidated = true; wait.finish('failed'); }
+        return false;
+      }
+      if (!retired && timestamp <= wait.armedAt && [...this.retiredCompactions].some(candidate => !candidate.promptId
+        && !candidate.invalidated && candidate.observation.nativeSessionId === native && timestamp >= candidate.armedAt - 1_000)) {
+        // Equal timestamps cannot distinguish a delayed old input from the new one.
+        return false;
+      }
       if (typeof entry.promptId !== 'string' || !entry.promptId || typeof entry.uuid !== 'string' || !entry.uuid) {
         wait.invalidated = true;
         wait.finish('failed');
@@ -751,43 +779,41 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
       wait.promptId = entry.promptId;
       wait.inputUuid = entry.uuid;
       wait.inputParentUuid = typeof entry.parentUuid === 'string' ? entry.parentUuid : undefined;
+      wait.phase = 'input-observed';
       return true;
     }
 
+    if (entry.uuid === wait.inputUuid) return true;
     if (entry.type === 'system' && entry.subtype === 'compact_boundary') {
+      if (typeof entry.uuid === 'string' && wait.boundaryUuids.has(entry.uuid)) return true;
       if (entry.compactMetadata?.trigger === 'manual' && typeof entry.uuid === 'string'
         && typeof wait.inputParentUuid === 'string' && entry.logicalParentUuid === wait.inputParentUuid) {
         wait.boundaryUuids.add(entry.uuid);
+        wait.phase = 'boundary-observed';
+        return true;
       }
       return false;
     }
     if (entry.isCompactSummary === true) {
+      if (typeof entry.uuid === 'string' && wait.summaryUuids.has(entry.uuid)) return true;
       if (!wait.boundaryUuids.has(entry.parentUuid)) return false;
+      if (typeof entry.uuid === 'string') wait.summaryUuids.add(entry.uuid);
       if (entry.promptId === wait.promptId) wait.finish('completed');
-      else if (this.retiredCompactions.has(wait) && this.compaction && !this.compaction.promptId) {
-        // A different complete summary separates the retired chain from this
-        // candidate. Return the candidate and its boundaries to the active wait.
-        this.retiredCompactions.delete(wait);
-        this.compaction.promptId = wait.promptId;
-        this.compaction.inputUuid = wait.inputUuid;
-        this.compaction.inputParentUuid = wait.inputParentUuid;
-        for (const uuid of wait.commandUuids) this.compaction.commandUuids.add(uuid);
-        for (const uuid of wait.boundaryUuids) this.compaction.boundaryUuids.add(uuid);
-      }
-      return false;
+      return true;
     }
     const content = entry.message?.content;
+    if (typeof entry.uuid === 'string' && wait.commandUuids.has(entry.uuid)) return true;
     if (entry.promptId === wait.promptId && typeof content === 'string' && content.includes('<command-name>/compact</command-name>')) {
       if (typeof entry.uuid === 'string') wait.commandUuids.add(entry.uuid);
-      return false;
+      return true;
     }
-    if (entry.type === 'system' && entry.subtype === 'local_command' && wait.commandUuids.has(entry.parentUuid)
-      && typeof entry.content === 'string' && entry.content.includes('Not enough messages to compact.')) {
-      wait.finish('failed');
-      return false;
+    if (entry.type === 'system' && entry.subtype === 'local_command' && wait.commandUuids.has(entry.parentUuid)) {
+      if (typeof entry.content === 'string' && entry.content.includes('Not enough messages to compact.')) wait.finish('failed');
+      return true;
     }
-    if (entry.uuid === wait.inputUuid) return false;
-    if (claudeInputText(entry) !== undefined) {
+    // Another input belongs to a newer business or maintenance generation. It
+    // invalidates the active wait as before, but never erases retired ownership.
+    if (!retired && claudeInputText(entry) !== undefined) {
       const timestamp = Date.parse(entry.timestamp);
       if (Number.isFinite(timestamp) && timestamp >= wait.armedAt - 1_000) {
         wait.invalidated = true;
