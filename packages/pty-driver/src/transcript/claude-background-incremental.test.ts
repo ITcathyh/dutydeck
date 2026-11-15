@@ -28,8 +28,10 @@ function fixture() {
   writeFileSync(main, records.slice(0, 7).map(entry => JSON.stringify(entry) + '\n').join(''));
   tailer = new ClaudeTranscriptTailer({ cwd: root, transcriptPath: main });
   io.path = join(root, 'sibling.jsonl'); io.bytes = 0; io.fail = false; io.truncate = false;
-  const id = records.find(entry => entry.toolUseResult?.isAsync)?.toolUseResult.agentId;
-  const notice = (task = id) => JSON.stringify({ type: 'queue-operation', operation: 'enqueue', content: `<task-notification><task-id>${task}</task-id><summary>完成 😀</summary><status>completed</status></task-notification>` }) + '\n';
+  const launch = records.find(entry => entry.toolUseResult?.isAsync);
+  const id = launch.toolUseResult.agentId;
+  const toolUseId = launch.message.content[0].tool_use_id;
+  const notice = (task = id) => JSON.stringify({ type: 'queue-operation', operation: 'enqueue', content: `<task-notification><task-id>${task}</task-id><tool-use-id>${task === id ? toolUseId : 'unrelated-tool'}</tool-use-id><summary>完成 😀</summary><status>completed</status></task-notification>` }) + '\n';
   return { main, notice };
 }
 afterEach(() => { tailer?.stop(); expect(io.fds.size).toBe(0); if (root) rmSync(root, { recursive: true, force: true }); vi.restoreAllMocks(); });

@@ -230,11 +230,13 @@ describe('Claude maintenance compaction evidence', () => {
   it('reserves a late first input chain for the submitted generation that retired unobserved', async () => {
     await setup([clone(successFixture[0])]);
     const first = arm(sessionId, () => true);
+    const late = successfulSequence('first-prompt', sessionId, 'first-unobserved');
+    late[0].timestamp = new Date(Date.now() - 10).toISOString();
     first.controller.abort();
     await expect(first.pending).rejects.toThrow();
 
     const second = arm();
-    await append(...successfulSequence('first-prompt', sessionId, 'first-unobserved'));
+    await append(...late);
     expect(second.settled()).toBe(false);
     await append(...successfulSequence('second-prompt', sessionId, 'second-observed'));
     await expect(second.pending).resolves.toBe('completed');
@@ -260,5 +262,90 @@ describe('Claude maintenance compaction evidence', () => {
     expect(current.settled()).toBe(false);
     current.controller.abort();
     await expect(current.pending).rejects.toThrow();
+  });
+
+  it.each([
+    { stage: 'input', reason: undefined },
+    { stage: 'boundary', reason: new DOMException('Compaction maintenance timed out', 'TimeoutError') },
+  ])('keeps late records from a retired $stage-observed generation away from the active one', async ({ stage, reason }) => {
+    await setup([clone(successFixture[0])]);
+    const first = arm(sessionId, () => true);
+    const previous = successfulSequence('retired-prompt', sessionId, `retired-${stage}`);
+    await append(previous[0]);
+    if (stage === 'boundary') await append(previous[1]);
+    first.controller.abort(reason);
+    await expect(first.pending).rejects.toThrow();
+
+    const current = arm();
+    const command = clone(emptyFixture[2]);
+    command.parentUuid = previous[0].uuid;
+    command.uuid = `retired-command-${stage}`;
+    command.promptId = 'retired-prompt';
+    command.sessionId = command.session_id = sessionId;
+    command.timestamp = new Date().toISOString();
+    const local = clone(emptyFixture[3]);
+    local.parentUuid = command.uuid;
+    local.uuid = `retired-local-${stage}`;
+    local.sessionId = local.session_id = sessionId;
+    await append(command, local, previous[1], previous[2], previous[2]);
+    expect(current.settled()).toBe(false);
+
+    await append(...successfulSequence('active-prompt', sessionId, `active-${stage}`));
+    expect(current.settled()).toBe(true);
+    await expect(current.pending).resolves.toBe('completed');
+    await expect(first.pending).rejects.toThrow();
+  });
+
+  it('does not transfer a retired summary prompt into a generation without its own input', async () => {
+    await setup([clone(successFixture[0])]);
+    const first = arm(sessionId, () => true);
+    const previous = successfulSequence('retired-summary-prompt', sessionId, 'retired-summary');
+    previous[0].timestamp = new Date(Date.now() - 10).toISOString();
+    first.controller.abort();
+    await expect(first.pending).rejects.toThrow();
+
+    const current = arm();
+    await append(previous[0], previous[1]);
+    previous[2].promptId = 'different-summary-prompt';
+    await append(previous[2], previous[2]);
+    expect(current.settled()).toBe(false);
+    await append(...successfulSequence('own-active-prompt', sessionId, 'own-active'));
+    expect(current.settled()).toBe(true);
+    await expect(current.pending).resolves.toBe('completed');
+  });
+
+  it('uses transcript time to give the active generation its own input before a late retired chain', async () => {
+    await setup([clone(successFixture[0])]);
+    const first = arm(sessionId, () => true);
+    const previous = successfulSequence('older-retired-prompt', sessionId, 'older-retired');
+    previous[0].timestamp = new Date(Date.now() - 10).toISOString();
+    first.controller.abort();
+    await expect(first.pending).rejects.toThrow();
+
+    const current = arm();
+    const own = successfulSequence('newer-active-prompt', sessionId, 'newer-active');
+    own[0].timestamp = new Date(Date.now() + 10).toISOString();
+    await append(own[0]);
+    await append(...previous);
+    expect(current.settled()).toBe(false);
+    await append(own[1], own[2]);
+    expect(current.settled()).toBe(true);
+    await expect(current.pending).resolves.toBe('completed');
+  });
+
+  it('leaves a normal business prompt outside the retired compact chain', async () => {
+    await setup([clone(successFixture[0])]);
+    const first = arm(sessionId, () => true);
+    const previous = successfulSequence('retired-before-business', sessionId, 'retired-before-business');
+    await append(previous[0]);
+    first.controller.abort();
+    await expect(first.pending).rejects.toThrow();
+
+    const current = arm();
+    await append({ type: 'user', uuid: 'ordinary-business', parentUuid: previous[0].uuid, promptId: 'ordinary-business-prompt', sessionId, timestamp: new Date().toISOString(), message: { role: 'user', content: 'ordinary business prompt' } });
+    await expect(current.pending).resolves.toBe('failed');
+    const next = arm();
+    await append(...successfulSequence('after-business', sessionId, 'after-business'));
+    await expect(next.pending).resolves.toBe('completed');
   });
 });

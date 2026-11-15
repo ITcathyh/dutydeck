@@ -1096,6 +1096,7 @@ describe('PTY Claude maintenance compaction', () => {
     void second.then(() => { settled = true; }, () => { settled = true; });
     await advanceUntil(() => prompts.length === 2);
     const late = sequence(successFixture, 'unobserved-old-input');
+    late[0].timestamp = new Date(Date.now() - 10).toISOString();
     late[0].promptId = late[2].promptId = 'unobserved-old-prompt';
     await append(...late);
     expect(settled).toBe(false);
@@ -1117,6 +1118,7 @@ describe('PTY Claude maintenance compaction', () => {
     await advanceUntil(() => prompts.length === 2);
     const late = sequence(successFixture, 'late-old');
     const current = sequence(successFixture, 'independent-new-generation');
+    current[0].timestamp = new Date(Date.now() + 10).toISOString();
     current[0].promptId = 'new-generation-prompt-id';
     current[2].promptId = 'new-generation-prompt-id';
     await append(current[0]);
@@ -1144,6 +1146,7 @@ describe('PTY Claude maintenance compaction', () => {
     await advanceUntil(() => prompts.length === 2);
     const late = sequence(successFixture, 'late-old-after-new-boundary');
     const current = sequence(successFixture, 'new-boundary-before-old-boundary');
+    current[0].timestamp = new Date(Date.now() + 10).toISOString();
     current[0].promptId = 'new-boundary-prompt-id';
     current[2].promptId = 'new-boundary-prompt-id';
     await append(current[0], current[1]);
