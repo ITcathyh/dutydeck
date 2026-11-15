@@ -48,6 +48,8 @@ dutydeck doctor
 
 `dutydeck update [version]` 的版本参数只接受精确 semver，不接受 range、tag 或选项字符串；未传版本时仍按 `latest` 或显式 `--dist-tag` 解析。安装、版本核对或重启失败时保留原错误，并追加 `npm install --global @byted/dutydeck@<实际旧版本> && dutydeck restart` 作为手工回退步骤；它直接重装旧包，不依赖旧版 CLI 是否认识 `update [version]`。旧版本缺失或不是精确 semver 时会明确说明无法安全生成命令。不会自动回滚，也不会越过部署窗口。
 
+`update` 在安装前排空正在执行的任务时，等待、状态无法核验、可恢复任务、查询失败与超时提示都明确写「更新」；需要跳过等待时使用 `dutydeck update --force`，不是 `restart --force`。等待条件、排水顺序与可恢复任务保留策略和重启相同；`restart` / `deploy` 的原有进度与错误文案不变。
+
 ### setup、首启与终端预检
 
 `dutydeck setup` 在检测到需要 tmux 的终端 Agent 时做一次私有 socket 预检；失败只在结果里增加一行警告，仍写入配置。预检读取 `dutydeck.terminal_backend` 时只读打开现有 SQLite，数据库不存在、`configs` 表或设置键缺失时沿用 tmux 默认值，不建库、不迁移，也不写控制表；设置值无效时提示读取失败且不执行 tmux 预检。`dutydeck doctor` 的 `terminal.backend` 检查会定位到命令缺失、版本执行失败、会话建退失败或清理失败，并给出安装或 `PATH` 修复提示；它不会自动安装 tmux，也不会连接或终止默认 tmux server。所有调用都使用 `-f /dev/null`，`XDG_CONFIG_HOME` 指向私有目录，测试会话只运行受控存活命令，不加载系统或用户 tmux 配置。纯 ACP 配置只显示终端后端说明，Herdr 配置不把 tmux 缺失当成故障。

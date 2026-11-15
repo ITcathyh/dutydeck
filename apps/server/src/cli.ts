@@ -205,7 +205,7 @@ async function restartWithInstalledCli(entrypoint: string, options: { force?: bo
 async function drainBeforeUpdate(options: { drainTimeout?: string }): Promise<void> {
   const dir = resolveDaemonDir();
   const state = readDaemonStatus(dir);
-  const result = await waitForRunningTasksDrain(dir, state, { drainTimeout: options.drainTimeout }, {});
+  const result = await waitForRunningTasksDrain(dir, state, { drainTimeout: options.drainTimeout }, {}, state?.supervisor !== 'systemd', 'update');
   if (!result.ok) throw new Error(result.error);
 }
 

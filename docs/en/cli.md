@@ -20,6 +20,8 @@ ADHD Lark structured confirmations retain their existing 24-hour card, same-sess
 
 `dutydeck update [version]` accepts only an exact semver, not a range, tag, or option string. Without the argument it still resolves `latest` or an explicit `--dist-tag`. Installation, verification, and restart errors keep their original prefix and append `npm install --global @byted/dutydeck@<actual previous version> && dutydeck restart` as the manual rollback steps. This reinstalls the old package directly and does not depend on the old CLI understanding `update [version]`. If the previous version is missing or is not an exact semver, the error says that no safe command can be generated. Dutydeck never rolls back automatically or bypasses the deployment window.
 
+During the pre-install task drain, every `update` progress, unverifiable-state, recoverable-task, query-failure and timeout message describes an update. To skip that wait, use `dutydeck update --force`, not `restart --force`. The wait conditions, drain order and recoverable-task preservation policy are the same as for restart; existing `restart` / `deploy` progress and error wording is unchanged.
+
 ```bash
 # Daemon
 dutydeck start [--cwd /path] [--port 4310] [--host 0.0.0.0]

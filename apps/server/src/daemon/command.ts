@@ -163,13 +163,18 @@ export type DrainResult = {
   queryRunningTasks?: () => Promise<{ ok: true; runningTasks: number } | { ok: false; error: string }>;
 } | { ok: false; error: string; runningTasks: number };
 
-const invalidDrainTimeout = (options: Pick<CliOptions, 'drainTimeout'>): DrainResult => ({
+type DrainOperation = 'restart' | 'update';
+
+const invalidDrainTimeout = (options: Pick<CliOptions, 'drainTimeout'>, operation: DrainOperation = 'restart'): DrainResult => ({
   ok: false, runningTasks: 0,
-  error: `--drain-timeout 只接受正整数秒数（收到 ${JSON.stringify(options.drainTimeout)}）。要跳过等待立即重启，请用 dutydeck restart --force。旧服务仍在运行，没有停止任何进程。`
+  error: operation === 'update'
+    ? `--drain-timeout 只接受正整数秒数（收到 ${JSON.stringify(options.drainTimeout)}）。要跳过等待立即更新，请用 dutydeck update --force。旧服务仍在运行，没有停止任何进程。`
+    : `--drain-timeout 只接受正整数秒数（收到 ${JSON.stringify(options.drainTimeout)}）。要跳过等待立即重启，请用 dutydeck restart --force。旧服务仍在运行，没有停止任何进程。`
 });
 
-const refuseWithoutStatus = (reason: string) =>
-  `${reason}，无法确认是否有任务正在执行，已拒绝重启，旧服务仍在运行。若确认可以中断正在执行的任务，加 --force 跳过等待。`;
+const refuseWithoutStatus = (reason: string, operation: DrainOperation = 'restart') => operation === 'update'
+  ? `${reason}，无法确认是否有任务正在执行，已拒绝更新，旧服务仍在运行。若确认可以中断正在执行的任务，请用 dutydeck update --force 跳过等待。`
+  : `${reason}，无法确认是否有任务正在执行，已拒绝重启，旧服务仍在运行。若确认可以中断正在执行的任务，加 --force 跳过等待。`;
 
 /**
  * 重启前等待守护进程中正在执行的任务结束（drain）。
@@ -182,7 +187,8 @@ export async function waitForRunningTasksDrain(
   state: DaemonState | undefined,
   options: CliOptions,
   deps: DaemonCommandDeps,
-  allowRecoverable = state?.supervisor !== 'systemd'
+  allowRecoverable = state?.supervisor !== 'systemd',
+  operation: DrainOperation = 'restart'
 ): Promise<DrainResult> {
   if (options.force) return { ok: true };
   // detached restart 会再拉起一个执行 `daemon restart` 的后台子进程；父进程已等过，
@@ -195,18 +201,18 @@ export async function waitForRunningTasksDrain(
 
   const warn = deps.warn ?? defaultWarn;
   const timeoutSeconds = parseDrainTimeoutSeconds(options.drainTimeout);
-  if (timeoutSeconds === undefined) return invalidDrainTimeout(options);
+  if (timeoutSeconds === undefined) return invalidDrainTimeout(options, operation);
 
   const inspection = inspectDaemon(dir);
   if (inspection.status === 'stale') {
-    warn('守护进程未运行，跳过任务等待，继续执行重启。');
+    warn(`守护进程未运行，跳过任务等待，继续执行${operation === 'update' ? '更新' : '重启'}。`);
     return { ok: true };
   }
   if (inspection.status === 'unverifiable') {
-    warn('守护进程身份无法验证，跳过任务等待，继续执行重启。');
+    warn(`守护进程身份无法验证，跳过任务等待，继续执行${operation === 'update' ? '更新' : '重启'}。`);
     return { ok: true };
   }
-  return await holdAndWait(state, timeoutSeconds, deps, allowRecoverable);
+  return await holdAndWait(state, timeoutSeconds, deps, allowRecoverable, operation);
 }
 
 /** deploy 默认全量排空；restart 只有确认 tmux 能存活时才显式允许恢复。地址和数据库由调用方给出。 */
@@ -224,14 +230,15 @@ export async function drainRuntime(endpoint: RuntimeEndpoint, options: Pick<CliO
  * - 超时仍有任务、或等待中被 Ctrl-C：退出排空，旧进程照常服务。
  * 服务不支持排空（旧版本返回 404）时只告警，照旧等待。
  */
-async function holdAndWait(endpoint: RuntimeEndpoint | undefined, timeoutSeconds: number, deps: DaemonCommandDeps, allowRecoverable: boolean): Promise<DrainResult> {
+async function holdAndWait(endpoint: RuntimeEndpoint | undefined, timeoutSeconds: number, deps: DaemonCommandDeps, allowRecoverable: boolean, operation: DrainOperation = 'restart'): Promise<DrainResult> {
   const warn = deps.warn ?? defaultWarn;
   const info = deps.info ?? defaultInfo;
+  const action = operation === 'update' ? '更新' : '重启';
 
   const localAddresses = deps.localAddresses ?? (() => Object.values(networkInterfaces()).flatMap(entries => entries?.map(entry => entry.address) ?? []));
   const parsedUrl = resolveLocalUrl(endpoint?.address, localAddresses);
   if (!parsedUrl) {
-    return { ok: false, runningTasks: 0, error: refuseWithoutStatus(`守护进程监听地址（${endpoint?.address ?? '未记录'}）不可用于本机查询`) };
+    return { ok: false, runningTasks: 0, error: refuseWithoutStatus(`守护进程监听地址（${endpoint?.address ?? '未记录'}）不可用于本机查询`, operation) };
   }
 
   // 在 dutydeck 托管的 Agent 里执行 restart 时，Agent 自己那轮必然 running；
@@ -281,10 +288,10 @@ async function holdAndWait(endpoint: RuntimeEndpoint | undefined, timeoutSeconds
     const validCount = (count: unknown): count is number => typeof count === 'number' && Number.isSafeInteger(count) && count >= 0;
     if (recoverableDrain && ('restartBlockers' in data || 'recoverableTasks' in data)) {
       if (!validCount(data.restartBlockers) || !validCount(data.recoverableTasks)
-        || data.restartBlockers + data.recoverableTasks !== data.runningTasks) return { ok: false, error: '接口返回重启计数格式错误' };
+        || data.restartBlockers + data.recoverableTasks !== data.runningTasks) return { ok: false, error: `接口返回${action}计数格式错误` };
       if (reportedRecoverable !== data.recoverableTasks) {
         reportedRecoverable = data.recoverableTasks;
-        if (data.recoverableTasks) info(`${data.recoverableTasks} 个已验证可恢复的 tmux 任务将保留，重启后接回原轮。`);
+        if (data.recoverableTasks) info(`${data.recoverableTasks} 个已验证可恢复的 tmux 任务将保留，${action}后接回原轮。`);
       }
       return { ok: true, runningTasks: data.restartBlockers };
     }
@@ -309,10 +316,10 @@ async function holdAndWait(endpoint: RuntimeEndpoint | undefined, timeoutSeconds
   };
 
   const initial = await queryRunningTasks();
-  if (!initial.ok) return await refuse(refuseWithoutStatus(`查询正在执行的任务数失败（${initial.error}）`), 0);
+  if (!initial.ok) return await refuse(refuseWithoutStatus(`查询正在执行的任务数失败（${initial.error}）`, operation), 0);
   if (initial.runningTasks === 0) return { ok: true, release, renew, queryRunningTasks };
 
-  info(`有 ${initial.runningTasks} 个任务正在执行，等它们结束后再重启（最长 ${timeoutSeconds} 秒；加 --force 立即重启）${hold.ok ? '。等待期间新消息照常排队，重启后由新进程执行' : ''}`);
+  info(`有 ${initial.runningTasks} 个任务正在执行，等它们结束后再${action}（最长 ${timeoutSeconds} 秒；${operation === 'update' ? '请用 dutydeck update --force' : '加 --force'} 立即${action}）${hold.ok ? `。等待期间新消息照常排队，${action}后由新进程执行` : ''}`);
 
   const sleeper = deps.sleep ?? sleep;
   const timer = deps.now ?? Date.now;
@@ -331,11 +338,11 @@ async function holdAndWait(endpoint: RuntimeEndpoint | undefined, timeoutSeconds
         if (!renewed.ok || renewed.data?.draining !== true) recoverableDrain = false;
       }
       const current = await queryRunningTasks();
-      if (!current.ok) return await refuse(refuseWithoutStatus(`查询正在执行的任务数失败（${current.error}）`), currentRunning);
+      if (!current.ok) return await refuse(refuseWithoutStatus(`查询正在执行的任务数失败（${current.error}）`, operation), currentRunning);
       currentRunning = current.runningTasks;
       if (currentRunning === 0) break;
       if (timer() >= deadline) {
-        return await refuse(`等待正在执行的任务结束超时（${timeoutSeconds} 秒），旧服务仍在运行（当前仍有 ${currentRunning} 个任务正在执行）。若确认可以中断这些任务，请使用 dutydeck restart --force 强制重启。`, currentRunning);
+        return await refuse(`等待正在执行的任务结束超时（${timeoutSeconds} 秒），旧服务仍在运行（当前仍有 ${currentRunning} 个任务正在执行）。若确认可以中断这些任务，请使用 ${operation === 'update' ? 'dutydeck update --force' : 'dutydeck restart --force'} 强制${action}。`, currentRunning);
       }
     }
   } finally {
