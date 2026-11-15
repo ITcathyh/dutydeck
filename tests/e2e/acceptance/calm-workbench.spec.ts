@@ -235,6 +235,53 @@ test.describe('Calm Workbench browser acceptance', () => {
     await noOverflow(page);
   });
 
+  test('native background status stays above the main timeline and disappears after completion', async ({ page }, info) => {
+    await open(page, alpha);
+    await expect(page.getByRole('status').filter({ hasText: '后台子任务运行中' })).toHaveCount(0);
+    await page.screenshot({ animations: 'disabled', path: info.outputPath('timeline-without-background.png') });
+
+    let backgroundCount = 2;
+    let backgroundSequence: number | undefined;
+    await page.route(`**/api/sessions/${alpha}/events*`, async route => {
+      const response = await route.fetch();
+      const events = await response.json() as Array<Record<string, unknown> & { sequence: number }>;
+      const url = new URL(route.request().url());
+      const after = Number(url.searchParams.get('after') ?? 0);
+      const before = Number(url.searchParams.get('before') ?? Number.MAX_SAFE_INTEGER);
+      backgroundSequence ??= Math.max(after, ...events.map(event => event.sequence)) + 1;
+      const includeBackground = backgroundSequence > after && backgroundSequence < before;
+      await route.fulfill({ response, json: [...events, ...(includeBackground ? [{
+        id: 'browser-native-background', sequence: backgroundSequence, timestamp: '2026-11-15T00:00:00.000Z', type: 'status',
+        data: { state: 'background_work', count: backgroundCount, mainTurnEnded: true, tasks: backgroundCount ? [
+          { id: 'native-agent', toolUseId: 'native-tool', originInputId: 'native-input', kind: 'agent', state: 'running' },
+          { id: 'native-monitor', toolUseId: 'monitor-tool', originInputId: 'native-input', kind: 'monitor', state: 'running' }
+        ] : [] }
+      }] : [])] });
+    });
+    await page.reload();
+    const background = page.getByRole('status').filter({ hasText: '主回合已结束 · 后台子任务运行中（2）' });
+    await expect(background).toHaveCount(1);
+    expect(await background.evaluate(element => {
+      const panel = element.closest('#tabpanel-timeline');
+      const timeline = panel?.querySelector('[data-timeline-scroll]');
+      return element.parentElement === panel && panel?.firstElementChild === element
+        && Boolean(timeline && (element.compareDocumentPosition(timeline) & Node.DOCUMENT_POSITION_FOLLOWING));
+    })).toBe(true);
+    await page.screenshot({ animations: 'disabled', path: info.outputPath('timeline-with-background.png') });
+
+    await page.getByRole('button', { name: '结果检视', exact: true }).click();
+    const inspector = page.getByRole('complementary', { name: '结果检视', exact: true });
+    await inspector.locator('summary').filter({ hasText: '详细用量与后台状态' }).click();
+    await expect(inspector.getByRole('status').filter({ hasText: '后台子任务运行中' })).toHaveCount(0);
+    await expect(background).toHaveCount(1);
+    await inspector.getByRole('button', { name: '关闭结果检视', exact: true }).click();
+
+    backgroundCount = 0;
+    await page.reload();
+    await expect(page.getByRole('tab', { name: '对话', exact: true })).toBeVisible();
+    await expect(page.getByRole('status').filter({ hasText: '后台子任务运行中' })).toHaveCount(0);
+  });
+
   test('a 384px result inspector keeps real context and quota labels readable', async ({ page }, info) => {
     const id = await create('calm-acp', 'report usage rate limits');
     const usageResponse = await instance.request('GET', `/api/sessions/${id}/usage`);
