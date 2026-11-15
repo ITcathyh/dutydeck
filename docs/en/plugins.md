@@ -4,66 +4,163 @@
 
 A plugin adds commands, agents, skills, external triggers, hooks, CI providers, controlled result tools and scenario packs. The core has no platform-specific code; GitHub and configurable code-host CI support and alert triage are plugins.
 
+## Directory layout
+
 ```text
 my-plugin/
-├── .dutydeck-plugin/plugin.json   manifest (required, strictly validated)
+├── .dutydeck-plugin/plugin.json   manifest (required)
 ├── commands/*.md                  slash commands (prompt template or read-only query mapping)
 ├── agents/*.json                  agent definitions (same shape as one DUTYDECK_AGENTS_JSON entry)
 ├── skills/                        skills directory
 ├── triggers/<id>.json             external triggers
-├── hooks/hooks.json               hooks
+├── hooks/hooks.json               hook configuration
 ├── scenarios/*.json               scenario packs
-└── index.mjs                      providers entry (CI providers, scenario pack providers, in-process hooks)
+└── index.mjs                      providers entry (CI providers, scenario providers, in-process hooks)
 ```
 
-`plugin.json` fields: `name` (kebab-case, ≤ 64), `version`, `description`, `apiVersion`, `host`/`dependencies`, `permissions` (`secrets`, `network`, `filesystem`, `effects`), declarative Web `slots` (`settings`, `command_palette`, `task_panel`, `result_card`), `commands` / `agents` / `skills` / `triggers` (directories), `hooks` (file), `providers` (ESM entry, no default), `scenarios` (directory, default `scenarios/`), `userConfig` (`{ <snake_case key>: { description, sensitive? } }`). Paths must stay inside the plugin. Provider module loading and registration share a 15-second deadline; a timeout skips that plugin and ignores later registrations.
+`plugin.json` is strictly validated; errors identify the file and field. Fields:
 
-**Trust.** `agents`, `hooks:<event>` and `providers` execute code or commands and must be confirmed at install (non-interactive installs need `--yes`). The daemon loads only enabled plugins whose required capabilities are all confirmed. `plugin update` re-confirms newly added capabilities as before. It also prints the command identifier and before/after SHA-256 digests whenever a slash-command template or query mapping, Agent launch configuration, or hook execution specification differs from the active version; full replacement commands are not echoed. An interactive terminal asks again before staging those changes, and declining leaves the plugin unchanged. A non-interactive update without `--yes` only prints the changes and does not gain a new failure; `--yes` behaves as before. Description and argument-hint-only edits are excluded, and an unchanged existing candidate is not prompted for again. JSON output exposes the same records in `changes`. npm sources are packed with `--ignore-scripts`.
+| Field | Meaning |
+|---|---|
+| `name` | Required, kebab-case, at most 64 characters |
+| `version`, `description` | Optional |
+| `commands` / `agents` / `skills` / `triggers` | Directories, defaulting to `commands/`, `agents/`, `skills/`, `triggers/`; a missing default path means the component is absent |
+| `hooks` | Hook configuration file, default `hooks/hooks.json` |
+| `providers` | ESM entry file; no default |
+| `scenarios` | Scenario-pack directory, default `scenarios/`; a missing default path means there are no packs |
+| `userConfig` | `{ <snake_case key>: { description, sensitive? } }`, installation-level plugin configuration |
 
-**Scopes** (`--scope`): `global` (default), `bot:<appId>` (only that bot's sessions; not effective in Web sessions, which have no bot), `workspace:<absolute path>` (sessions whose cwd is under it). Triggers check this scope too: the bot workspace before starting a new session, or the actual cwd of a reused session. Both the scope root and target directory are resolved through symlinks and compared by real path; aliases pointing inside the scope are allowed. A missing, unresolvable or out-of-scope directory prevents session creation and dispatch. Agents are always merged globally.
+Paths must stay inside the plugin directory. An explicitly declared path that does not exist is an error.
 
-**Built-in plugins** <a id="builtin-plugins"></a>. Plugins shipped with Dutydeck live in `builtin-plugins/` (`dist/builtin-plugins` once packaged) and load before installed plugins. There is one today: `alarm`, which provides alert triage and same-alert-rule correlation (group usage is under Group participation). Built-in plugins need no trust confirmation, are always enabled with `global` scope, cannot be uninstalled, and show as 「内置」 (built-in) in `plugin list`. An external plugin with the same name is refused at install, and one already installed is not loaded (`plugin list` and `doctor` say so). A scenario pack in an external plugin that reuses a built-in pack id is skipped; the rest of that plugin still loads.
+`host.api` is checked for host compatibility. `host.channels` currently only declares metadata and does not participate in loading decisions. The installation record selects the `active` artifact and its `enabled` state determines whether it loads; all capabilities that require trust must still be confirmed. `binding` and the installation `scope` determine the groups, projects and calls where the loaded plugin is available.
 
-**Commands.** `/<plugin>:<name>` always works; `/<name>` works if not ambiguous. Names that clash with built-ins are rejected, and agent-native names such as `compact`, `clear`, `init`, `review` only work as `/<plugin>:<name>`.
+## Seven component types
+
+| Component | Purpose | Trust confirmation required |
+|---|---|---|
+| commands | By default, `/<name>` expands to a prompt template and `$ARGUMENTS` is replaced with the arguments. A command can instead map explicitly to a public read-only query without starting an Agent. `/<plugin>:<name>` always works; `/<name>` works when unambiguous. Names that clash with built-in commands are rejected. Agent-native names such as `compact`, `clear`, `init` and `review` only work as `/<plugin>:<name>` | No |
+| agents | Registers Agents before merging `DUTYDECK_AGENTS_JSON`; the environment wins for the same id, and built-in Agents cannot be replaced. Definitions carry an origin marker and disappear after the plugin is disabled or uninstalled and the host restarts | **Yes** |
+| skills | Loaded as one skills root | No |
+| triggers | An external system starts one task over HTTP (see below) | No |
+| hooks | Runs your commands at task lifecycle points (see below) | **Yes**, separately by event, such as `hooks:task.received` |
+| providers | The entry module exports `register(api)` to register CI providers, scenario providers or in-process hooks. Module loading and registration share a 15-second deadline; a timeout skips that plugin and ignores later registrations | **Yes** |
+| scenarios | Scenario packs handle kinds of group messages according to declarative rules (see [Writing a scenario pack](#scenario-packs)). A pack is JSON and executes no code; any provider it references is confirmed with `providers` | No |
 
 A direct read-only command uses `query` and `argument` in its file frontmatter, and its SDK query must explicitly declare `commandOutput: 'chat'`. After configuring and granting the [fake-ticket example](../../examples/plugins/fake-ticket/README.md), send `/fake-ticket:ticket-status T-1` in Lark to receive only title and status without an Agent session. The host requires a trusted human inbound event, an enabled binding and matching actor, tool, read-effect and exact-resource grants, rechecked before delivery. Chat permission alone grants no business-data access. Only queries explicitly declaring output safe for everyone in the originating chat are accepted; private results use controlled exports, and write actions cannot be mapped. Duplicate events and unknown execution after a restart are never automatically replayed. Existing prompt commands and queries without chat-output opt-in retain their behavior; see the [Plugin SDK](../../packages/plugin-sdk/README.md).
 
-**CLI**
+## Trust confirmation
+
+`agents`, `hooks`, `providers` and `service` execute code or commands and must be confirmed at install. The daemon loads only **enabled plugins whose required capabilities are all confirmed**.
+
+- An interactive terminal lists the capabilities and asks. A non-interactive install requires `--yes`; otherwise it refuses and lists the capabilities that need confirmation.
+- `plugin update` re-confirms only **newly added** capabilities under the original rule. When a slash-command template or query mapping, Agent launch configuration or hook execution specification differs from the active version, the output lists the command identifier and before/after SHA-256 digests, not the full replacement command. An interactive terminal treats those execution changes as capabilities requiring renewed trust and asks again; declining does not write the candidate. A non-interactive update without `--yes` only prints the changes and gains no new failure; `--yes` behaves as before. Description-only and argument-hint-only edits do not count as execution changes, and an existing candidate with no new execution changes is not prompted for again. JSON output exposes the same digests in `changes`.
+- npm sources are packed with `--ignore-scripts`, so prepare and other package scripts do not execute before confirmation.
+
+## Scopes
+
+`--scope` determines where a plugin applies:
+
+- `global` (default): applies everywhere.
+- `bot:<appId>`: applies only to that bot's sessions; a trigger's target bot must also be that bot. Web sessions have no bot, so bot-scoped commands, skills and hooks do not apply there.
+- `workspace:<absolute path>`: applies only when the session working directory is under that path. Triggers check this scope too: the bot workspace before starting a new session, or the actual cwd of a reused session. Both the scope root and target directory are resolved through symlinks and compared by real path; aliases pointing inside the scope are allowed. A missing, unresolvable or out-of-scope directory prevents session creation and dispatch.
+- Agents are not scope-limited; they are merged globally.
+
+## Built-in plugins <a id="builtin-plugins"></a>
+
+Plugins shipped with Dutydeck live in `builtin-plugins/` (`dist/builtin-plugins` once packaged). The daemon loads them before installed plugins. There is one today: `alarm`, which provides alert triage and same-alert-rule correlation; see [Group participation](lark.md#3-group-participation) for group usage.
+
+- Built-in plugins need no trust confirmation, always have `global` scope, stay enabled and cannot be uninstalled. `plugin list` marks them as 「内置」 (built-in).
+- An external plugin with the same name is refused at install; one already installed is not loaded, and `plugin list` and `doctor` report the conflict.
+- A scenario pack in an external plugin that reuses a built-in pack id is skipped; the rest of that plugin still loads, so it cannot take over an existing confirmed group binding.
+
+## CLI
 
 ```bash
 dutydeck plugin install <source> [--scope global|bot:<appId>|workspace:<path>] [--yes] [--json]
-dutydeck plugin list | validate <dir> [--strict] | inspect <dir|tarball|source> --json | test <dir|tarball|source> | init <name> [--dir <dir>]
-dutydeck plugin config <plugin> <key> --value <v>                      # non-sensitive
+dutydeck plugin list [--json]
+dutydeck plugin validate <dir> [--strict]
+dutydeck plugin inspect <dir|tarball|source> --json
+dutydeck plugin test <dir|tarball|source>
+dutydeck plugin init <name> [--dir <dir>]
+dutydeck plugin config <plugin> <key> --value <value>                 # non-sensitive
 printf %s "$SECRET" | dutydeck plugin config <plugin> <key> --value-fd 0   # sensitive values only via fd
 dutydeck plugin trigger-token <plugin>/<trigger> [--rotate]
-dutydeck plugin update [name] [--yes]  # stage a candidate only
+dutydeck plugin update [name] [--yes]       # stage a candidate only
 dutydeck plugin status <name> [--json]
-dutydeck plugin activate <name> [--json] | rollback <name> [--json]
-dutydeck plugin enable <name> | disable <name> | uninstall <name>
+dutydeck plugin activate <name> [--json]    # activate a candidate offline
+dutydeck plugin rollback <name> [--json]    # restore the previous version offline
+dutydeck plugin enable <name>
+dutydeck plugin disable <name>
+dutydeck plugin uninstall <name>
 ```
 
-`plugin validate` also checks scenario packs (format, template variables, regexes, parameters) and reports file and field. `plugin validate --strict` checks host compatibility, permission declarations, skill references and resource limits. `plugin inspect` prints capabilities, permission footprint and a content digest without installing; `plugin test` runs an isolated Host fixture. `install` and `update` do not fail on scenario pack problems but list the packs that will not load and why.
+- `<source>` is a local directory, `git+https://…`, `git@…`, `file://…` (`#ref` pins a branch, tag or commit), or `npm:name@version`. Git sources are pinned by commit SHA.
+- `plugin update` stages an immutable candidate only; the active Host's provider, hook and skill paths always point to the original artifact, and restarting does not activate a candidate. If a candidate is modified, drain and stop the service, run `plugin update` again from the same source to repair it, then activate it. Damaged active or previous artifacts are never overwritten in place. Internal relative symlinks are supported; external, absolute or unresolvable links are rejected during installation and updates. Content digests detect changes without a version bump; unchanged content does not produce another candidate. Concurrent mutations are serialized by the store lock. At startup the daemon waits up to 30 seconds for the plugin store lock (longer than one `plugin activate` isolated validation). If the lock is still busy, `plugins.lock.json` is corrupt, or the `.hosts/` lease cannot be written, the daemon still starts but **loads only built-in plugins and no external plugin at all**: the log records a warning naming the failing file, plugin diagnostics list the reason, and the `dutydeck doctor` "plugin store" check fails. Sessions bound to an external plugin refuse new tasks. Fix the cause and restart the daemon to load external plugins again. Stopped or exited leases of the same database in `.hosts/` are removed at the next startup; unparsable leases are kept and still block activation until fixed by hand.
+- `plugin status` distinguishes the selected artifact, candidate, previous artifact, actual live Host generation and switch blockers. Activation and rollback use offline checks: first finish or cancel unfinished tasks and reconcile this plugin's pending actions on the current version. Run `dutydeck stop`; for systemd-managed instances, use `systemctl --user stop <unit>` for every instance sharing this plugin directory. Then run `plugin activate` or `plugin rollback`, followed by `dutydeck start` / `systemctl --user start <unit>`. Live Hosts, recoverable tasks and this plugin's unknown actions block switching. Dead process leases are recognized, but a dead daemon does not prove its tmux tasks ended. Unfinished legacy tasks without verifiable plugin dependencies conservatively block switching; terminal history and unrelated plugin actions do not.
+- Activation imports and registers trusted providers in a terminable Node process with a temporary data directory and minimal environment. This is not a sandbox for malicious code. The active artifact remains available for rollback; there is no per-session multiversion provider dispatch or automatic private-data rollback. Installation and enable/disable changes still require a new Host; uninstall also requires no active consumers.
+- `plugin validate` also checks scenario packs (format, template variables, regexes and parameters) and reports file and field. `plugin validate --strict` additionally checks host compatibility, permission declarations, skill references and resource boundaries. `plugin inspect <dir|tarball|source> --json` prints capabilities, permission footprint and a digest; `plugin test <dir|tarball|source>` verifies registration in an isolated Host fixture. `install` and `update` do not fail on scenario pack problems but list the packs that will not load and why.
+- Data lives under `plugins/` next to the database: `plugins.lock.json` (source, pinned version, scope and confirmed capabilities), immutable `.artifacts/<name>/<content-digest>/`, `.hosts/` (Host generations and database records; the legacy `<name>/` layout remains compatible), and `.data/<name>/` (the plugin's writable directory). `.trigger-tokens.json` and `.config.json` have mode 0600; sensitive configuration is stored in the local secret store.
 
-Sources: a local directory, `git+https://…`, `git@…`, `file://…` (`#ref` pins a branch, tag or commit; git sources are pinned by SHA), or `npm:name@version`. `plugin update` stages an immutable candidate; the live Host keeps its provider, hook and skill paths on the original artifact. Restarting does not activate a candidate.  If a candidate is modified, drain and stop the service, run `plugin update` again from the same source, then activate it. Damaged active or previous artifacts are never overwritten in place. Internal relative symlinks are supported; external, absolute or unresolvable links are rejected during installation and updates. Content digests detect changes without a version bump; unchanged content does not produce another candidate. Concurrent mutations are serialized by the store lock. At startup the daemon waits up to 30 seconds for the plugin store lock (longer than one `plugin activate` isolated validation). If the lock is still busy, `plugins.lock.json` is corrupt, or the `.hosts/` lease cannot be written, the daemon still starts but **loads only built-in plugins and no external plugin at all**: the log records a warning naming the failing file, plugin diagnostics list the reason, and the `dutydeck doctor` "plugin store" check fails. Sessions bound to an external plugin refuse new tasks. Fix the cause and restart the daemon to load external plugins again. Stopped or exited leases of the same database in `.hosts/` are removed at the next startup; unparsable leases are kept and still block activation until fixed by hand.
+## External triggers
 
-`plugin status` distinguishes the selected artifact, candidate, previous artifact, actual live Host generation and switch blockers. To activate or roll back, first finish or cancel unfinished tasks and reconcile this plugin's pending actions on the current version. Run `dutydeck stop`; for systemd-managed instances, use `systemctl --user stop <unit>` for every instance sharing this plugin directory. Run `plugin activate <name>` or `plugin rollback <name>`, then `dutydeck start` / `systemctl --user start <unit>`. Live Hosts, recoverable tasks and this plugin's unknown actions block switching. Dead process leases are recognized, but a dead daemon does not prove its tmux tasks ended. Unfinished legacy tasks without verifiable plugin dependencies conservatively block switching; terminal history and unrelated plugin actions do not.
+A trigger lets an external system (monitoring, CI or a script) make one HTTP request that starts a task in a specified group for a specified bot. See the runnable `examples/plugins/hello` example.
 
-Activation imports and registers trusted providers in a terminable Node process with a temporary data directory and minimal environment. This is not a sandbox for malicious code. Previous artifacts remain available for rollback; there is no per-session multiversion provider dispatch or automatic private-data rollback. Installation and enable/disable changes still require a new Host; uninstall also requires no active consumers. Data lives under `plugins/` next to the database: `plugins.lock.json`, immutable `.artifacts/<name>/<content-digest>/`, `.hosts/` generation/database records, `.data/<name>/`, and 0600 `.trigger-tokens.json` / `.config.json`. Legacy `<name>/` roots remain compatible and are not moved during an update.
+`triggers/<id>.json`:
 
-Plugin installation unpacks artifacts without running npm install. Runtime imports of `definePlugin` or third-party libraries must be bundled into the provider entry before publishing, for example `esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.mjs`. Include `dist` and `.dutydeck-plugin` in npm files; do not mark `@dutydeck/plugin-sdk` external. Type-only SDK imports need no runtime dependency. Acceptance covers an independently installed SDK, bundling, packing, deleting the author directory, and loading and calling the result through the real Host.
+```json
+{
+  "auth": { "type": "token", "header": "x-dutydeck-token" },
+  "target": { "botAppId": "{{config.bot_app_id}}", "chatId": "{{config.chat_id}}", "session": "new" },
+  "prompt": "An external system sent a ping. Reply briefly and repeat its message:\n{{payload.message}}",
+  "dedupeKey": "{{payload.id}}",
+  "maxConcurrent": 2
+}
+```
 
-Workspace binding edits resolve aliases and symlinks on the target server, preserve saved configuration and revisions, and can locate disabled bindings for re-enablement. The CLI does not resolve server paths on its own filesystem.
+- Address: `POST /api/plugins/<plugin>/triggers/<id>`. No Web login; authentication uses the trigger's own token or signature.
+- Authentication is `token` (a token in a request header, optionally prefixed with `Bearer `) or `hmac-sha256`. HMAC requests must also include a timestamp header (default `x-dutydeck-timestamp`, Unix seconds), a one-time nonce header (default `x-dutydeck-nonce`) and the signature header. The signature is `HMAC-SHA256(secret, timestamp + "\\n" + nonce + "\\n" + SHA256(rawBody))`, in hex with an optional `sha256=` prefix. Timestamps are accepted within 300 seconds by default and a nonce can be used once. Use `dutydeck plugin trigger-token <plugin>/<id>` to read a token or `--rotate` to replace it immediately. Concurrent creation or rotation of tokens for different triggers preserves each successful change.
+- `target` values may use `{{config.<key>}}` to reference plugin configuration; the trigger is unavailable until all required values are set. `session` is `new` (a new session every time) or `reuse`.
+- Responses: `202 {runId, sessionId, taskId, statusUrl}` accepted; `200 {duplicate:true, runId}` duplicate event; `400` body is not JSON; `401` invalid token, signature or timestamp, or reused nonce; `404` unknown trigger or disabled plugin; `413` body over 1 MiB; `429` over `maxConcurrent`; `502` delivery failed (the dedupe record is revoked, so retry). With the same authentication, query `GET .../runs/<runId>` or cancel a still-queued run not yet submitted to the Agent with `POST .../cancel`. HMAC status and cancel requests sign an empty body with a fresh nonce used once. A run that has started stays running; cancellation cannot undo an external side effect already sent.
+- The unified task entry is also available: `POST /api/plugin-triggers/v1/runs?plugin=<plugin>&triggerId=<trigger>`; status and cancellation use `/api/plugin-triggers/v1/runs/<runId>` and `/cancel` with those query parameters. Both the `Idempotency-Key` request header and the manifest's `idempotencyKey` template participate in 24-hour dedupe. `dryRun=true` validates authentication and templates without starting a task.
+- Dedupe lasts 24 hours and survives restarts. The key is the rendered `dedupeKey`, or the entire request body when omitted. `maxConcurrent` defaults to 4 and ranges from 1 to 32. Active tasks and work items that still hold a concurrency slot, including those awaiting first confirmation, keep their run records beyond 24 hours and remain queryable and counted after a restart. Expired finished records are removed. Dedupe expiry does not cancel an old run; the same event can create a new run in the next window subject to concurrency limits.
+- `{{payload.a.b}}` in a template reads a request-body field and `{{payload}}` reads the whole body. Every value entering the prompt is wrapped as **untrusted data** with a random boundary and a 20,000-character limit per value. Templates cannot read authentication headers, `authorization` or `cookie`.
+- Task results are sent to the target group as text, up to 8,000 characters.
+- **Starting a work-item template:** replace `prompt` with `workTemplate` (exactly one of the two) to open a work item from a saved template instead of sending a prompt:
+
+  ```json
+  "workTemplate": { "session": "{{config.template_session}}", "id": "{{config.template_id}}", "version": 2, "goal": "Handle alert: {{payload.title}}" }
+  ```
+
+  `session` is the session that saved the template; `id` and `version` are listed under `templates` in `GET /api/sessions/<session>/work-items` (an Agent in the session can also use `dutydeck work templates --turn "$TURN"`). All three accept `{{config.<key>}}`; `version` is a number or a config value that resolves to a positive integer. A template starts only in the session that saved it, and that session must be the Lark session of the `target` bot in `target.chatId`; `target.session` is not used. The work item starts as the installation owner and keeps the template's confirmation rule (in a Lark group it runs only after someone confirms it in the group); its result is delivered through the work item's own delivery to that session's original thread. `goal` renders like `prompt`, with external values wrapped as untrusted data.
+  - Acceptance returns `202 {runId, sessionId, workItemId, awaitingConfirmation, statusUrl}`. A missing template or version, a missing session or one outside the target chat, a disallowed scope, an inactive session or an unconfirmed delivery location returns `422 PLUGIN_TRIGGER_TEMPLATE_UNAVAILABLE` with the reason code in `cause` (for example `WORK_TEMPLATE_NOT_FOUND`). No work item is created and the dedupe record is revoked, so the same event can be resent after the configuration is fixed.
+  - Run status follows the work item: `queued` while awaiting confirmation, `running` while executing or waiting for a person, then `succeeded`, `failed` or `cancelled`, and `unknown` while a result awaits reconciliation. Work items awaiting confirmation, running, waiting or awaiting reconciliation count toward `maxConcurrent`. `cancel` only cancels a work item awaiting its first confirmation with no step attempts; started work (including work with a plan revision awaiting confirmation) stays `running` and is stopped from the work item. A failed work item with a pending revision also reports `running` and keeps its slot; one that receives the revision only after failing takes its slot back on the next trigger request, for runs recorded within 24 hours of the trigger. A triggered work item is not attributed to the turn currently running in the template session: it does not inherit that turn's risk policy or count toward its usage.
+
+```bash
+dutydeck plugin install examples/plugins/hello --yes
+dutydeck plugin config hello bot_app_id --value cli_xxx
+dutydeck plugin config hello chat_id --value oc_xxx
+dutydeck plugin trigger-token hello/ping        # save the token
+dutydeck restart
+curl -X POST http://127.0.0.1:4310/api/plugins/hello/triggers/ping \
+  -H 'content-type: application/json' -H "x-dutydeck-token: $TOKEN" \
+  -d '{"id":"1","message":"hi"}'
+```
 
 ## Business query and action tools
 
 Trusted providers register `api.registerQuery` / `api.registerAction` using the public `@dutydeck/plugin-sdk`. Each tool declares a serializable JSON Schema, compatibility version and resource selector. The supported schema subset is object, array, string, number, integer and boolean with the SDK's listed bounds; objects must reject additional properties. Queries return model-visible JSON; actions return short receipts. Private files use the separate controlled-result interface below.
 
-Installation and enablement require a separate Bot/group or exact workspace binding, plus explicit installation-owner grants. Business configuration cannot increase permission. Grants match toolId, bindingId, trusted actor, effect, resource and invoke/reconcile operation; default is deny. Resource `*` explicitly grants every resource for that tool.
+Installation and enablement require a separate Bot/group or exact workspace binding, plus explicit installation-owner grants. Business configuration cannot increase permission. Grants match toolId, bindingId, trusted actor, effect, resource and invoke/reconcile operation; default is deny. Resource `*` explicitly grants every resource for that tool. For example:
 
 ```bash
 dutydeck tool-grant set --database /path/to/dutydeck.db --json '{"id":"ticket-close","toolId":"fake-ticket/close","bindingId":"<binding ID>","actor":{"kind":"installation_owner","id":"installation_owner"},"effects":["write"],"resources":["ticket:T-1"],"operations":["invoke","reconcile"]}'
 dutydeck tool-grant list --database /path/to/dutydeck.db
 dutydeck tool-grant revoke ticket-close --database /path/to/dutydeck.db
+```
+
+Lark actors use `{"kind":"channel","appId":"cli_xxx","id":"ou_xxx"}`. Web tasks use the authenticated installation owner. The host derives actor/session/task/attempt from persisted tasks; request arguments and MCP `_meta` cannot override them. `cwd` is the actual worktree, while `workspaceRoot` selects the original project's binding. Web identities have no synthetic chatId.
+
+```bash
 # Within the active task, reuse the host's complete command prefix and TURN
 dutydeck tool list --turn "$TURN"
 dutydeck tool list --summary --turn "$TURN"
@@ -83,9 +180,7 @@ dutydeck tool reconcile <actionId> --turn "$TURN"
 
 The manual is UTF-8 text in the package; `maxBytes` is 1–65536, defaulting to 16384. It does not replace required SOPs or `skillResources`.
 
-Lark actors use `{"kind":"channel","appId":"cli_xxx","id":"ou_xxx"}`. Web tasks use the authenticated installation owner. The host derives actor/session/task/attempt from persisted tasks; request arguments and MCP `_meta` cannot override them. `cwd` is the actual worktree, while `workspaceRoot` selects the original project's binding. Web identities have no synthetic chatId.
-
-HTTP exposes `/api/plugin-tools/list`, `/summary`, `/describe`, `/manual`, `/call` and `/reconcile`. The MCP Streamable HTTP tools endpoint `/api/plugin-tools/mcp` supports initialize, ping, tools/list and tools/call, without resources or sampling. Both require a session relay Bearer and `x-dutydeck-tool-turn`. MCP names are `plugin__tool`, with `{input,callId}` arguments; `dutydeck_reconcile` checks an actionId. JSON-RPC ids correlate requests only. Grant management at `/api/plugins/tool-grants` requires installation-owner authorization.
+HTTP exposes `/api/plugin-tools/list`, `/summary`, `/describe`, `/manual`, `/call` and `/reconcile`. The MCP Streamable HTTP tools endpoint `/api/plugin-tools/mcp` supports initialize, ping, tools/list and tools/call, without resources or sampling. Both require a session relay Bearer and `x-dutydeck-tool-turn`. MCP names are `plugin__tool`, with `{input,callId}` arguments; `dutydeck_reconcile` checks an actionId. JSON-RPC ids correlate requests only, not idempotency keys. Grant management at `/api/plugins/tool-grants` requires installation-owner authorization.
 
 The host namespaces action IDs by tool, session, task and stable callId. Retries retain arguments and callId. Duplicates return ledger state; timeouts and lost responses become unknown and are never automatically reexecuted. Reconciliation checks both the original actor's current invoke permission and the current operator's reconcile permission. Incompatible binding revisions or handler versions leave the action unresolved. Plugins must observe AbortSignal and pass actionId to the external system for idempotency; a host timeout cannot prove external effects were cancelled. Plugin code is trusted and runs without a process sandbox.
 
@@ -93,7 +188,7 @@ See the packaged [fake-ticket example](../../examples/plugins/fake-ticket/README
 
 ## Package bindings, skills and author SDK
 
-Installation controls code and maximum scope. A binding selects configuration for each group or project at call time. Control Center → 插件与技能 (Plugins and skills) edits, disables and explains saved bindings; `dutydeck settings` uses the same validation:
+Installation controls code and maximum scope. A binding selects configuration for each group or project at call time. Control Center → 插件与技能 (Plugins and skills) edits, disables and explains saved bindings; the CLI uses the same validation:
 
 ```bash
 dutydeck settings plugin-binding list
@@ -104,9 +199,9 @@ dutydeck settings plugin-binding explain team-faq --app cli_bot --chat oc_a
 dutydeck settings plugin-binding set team-faq --app cli_bot --chat oc_a enabled=false --expected-revision 1
 ```
 
-A group binding replaces the entire Bot default binding; missing fields use manifest defaults only. Web bindings match a canonical project directory exactly, including the trusted source directory of a managed worktree. Bot/group calls never fall back to a workspace binding. Saves compare revisions. Each controlled call resolves the current binding; old secret accessors reject changed or disabled bindings. Management requires installation administrator access and rejects task credentials.
+A group binding replaces the entire Bot default binding; missing fields use manifest defaults only. Web bindings match a canonical project directory exactly. When editing through the CLI, the target server resolves workspace aliases, including symlinks, and preserves saved configuration and revisions; disabled bindings can be re-enabled. A managed worktree uses the trusted session's original project directory. Bot/group calls never fall back to a workspace binding. Saves compare revisions, and the next controlled call resolves the new binding. An old call's secret accessor rejects changed or disabled bindings. Management APIs require installation administrator access and reject task credentials.
 
-Manifests may declare `apiVersion: 1` (unsupported versions are rejected) and `bindingConfig`. Supported types are `string`, `number`, `integer`, `boolean`, `string_list`, and `secret`, with applicable `required/default/enum/min/max` constraints. The binding page renders Web slot elements as a bounded preview; actions stay disabled without task context and never execute plugin scripts or arbitrary URLs. Invalid values, defaults and enum types are rejected. Credentials are stored separately and created through hidden local input or an inherited file descriptor:
+Manifests may declare `apiVersion: 1` (unsupported versions are rejected), `host`/`dependencies`, `permissions` (`secrets/network/filesystem/effects` are audit declarations only), and declarative Web `slots` (`settings`, `command_palette`, `task_panel`, `result_card`; elements are limited to text, status, tables and actions targeting registered commands or tools). The binding page renders these elements as a bounded preview; actions stay disabled without task context and never execute plugin scripts or arbitrary URLs. `bindingConfig` supports `string`, `number`, `integer`, `boolean`, `string_list` and `secret`, with applicable `required/default/enum/min/max` constraints. Ordinary values and secret references are stored separately; invalid values, defaults and enum types are rejected. Credentials are created only through hidden local input or a file descriptor:
 
 ```bash
 dutydeck settings plugin-binding secret-set my-plugin group-a --value-fd 0
@@ -114,13 +209,15 @@ dutydeck settings plugin-binding secret-set my-plugin group-a --value-fd 0
 dutydeck settings plugin-binding set my-plugin --app cli_bot --chat oc_a 'secrets={"token":"plugin.my-plugin.group-a"}'
 ```
 
-References belong to one plugin. To rotate, create a new reference and revision-update the binding. Scenario `context` / `match` and business tools receive host-injected `bindingId`, `revision`, immutable `config`, and `getSecret(key)` at call time. Undeclared secret keys are rejected; explanations and snapshots never contain values. Legacy `api.config`, hooks, Agent and CI retain installation-level behavior; the panel labels Agent/CI as legacy-global.
+References belong to one plugin. To rotate, create a new reference and revision-update the binding instead of overwriting the old reference. A provider's `context` / `match` and business tools receive host-injected `bindingId`, `revision`, immutable `config`, and `getSecret(key)` at call time. Undeclared secret keys are rejected; explanations and task snapshots never contain secret values. Legacy `api.config` remains installation-level string configuration; legacy hooks, Agent and CI retain installation-level behavior, and the panel labels Agent/CI as legacy-global capabilities.
 
-Skills use stable `package/skill-directory` references and standard YAML multiline descriptions. Ambiguous legacy `/skills name` directives require a specific reference or path. Catalog and delivery both enforce current package, Bot/group binding and workspace scope. A manifest's `requiredSkills` plus the selected binding's `skills` apply to each task. Scenario `skills` are frozen only for the selected scenario, covering model decisions/replies/actions and direct bot messages; unselected scenario SOPs are excluded. Catalog scans isolate malformed entries and show diagnostics and incomplete results. An unrelated bad entry does not block a valid selection; an explicitly selected or required invalid Skill still rejects the task, and an incomplete catalog cannot silently resolve an ambiguous name.
+Skills use stable `package/skill-directory` references and standard YAML multiline descriptions in `SKILL.md`. Ambiguous legacy `/skills name` directives require a specific reference or path. Plugin, Bot/group binding and workspace scope constrain both catalog discovery and actual reads; disabling prevents reads even through an explicit reference. A manifest's `requiredSkills` plus the selected binding's `skills` are shared SOPs for every task. Scenario `skills` are frozen only after that scenario is selected, covering model decisions/replies/actions and direct bot messages; unselected scenario SOPs are excluded. Catalog scans isolate malformed entries and show diagnostics and incomplete results. An unrelated bad entry does not block a valid selection; an explicitly selected or required invalid Skill still rejects the task, and an incomplete catalog cannot silently resolve an ambiguous name.
 
-The host inlines required SOPs and bounded text declared in `skillResources`, including readonly tasks: 128 KiB per skill, 64 KiB per resource (16 KiB default), 512 KiB total. Escaping links and non-text resources are rejected. After `task.beforeRun`, removed legacy content is marked `replaced`; removing required SOPs rejects the task. Historical records without a status remain unverified. Freezing text does not freeze scripts, provider processes or all executable code.
+The host inlines required SOPs and bounded text declared in `skillResources`, including readonly backends: at most 128 KiB per skill, 64 KiB per resource (16 KiB default), and 512 KiB total. Escaping links and non-text resources are rejected. Final content is checked and frozen after `task.beforeRun`: skills replaced by legacy hooks are marked `replaced`, and removing required SOPs rejects the task. Historical records without a status remain "unverified" and cannot prove final delivery. Freezing body and reference snapshots does not freeze scripts, provider processes or all executable code.
 
-The independent `@dutydeck/plugin-sdk` exports `definePlugin`, binding/scenario types, query/action contracts, CI provider types and controlled result-tool types without server or private shared dependencies. Packaging tests install its tarball into an empty directory, compile a third-party TypeScript plugin and import it at runtime. `plugins/team-faq` is a real `npm pack` sample containing its manifest, provider, scenarios, SOP and references; tests remove the source directory and exercise two group bindings through the installed tarball. See [team-faq usage](../../plugins/team-faq/README.md).
+Plugin installation unpacks artifacts without running npm install. Runtime imports of `definePlugin` or third-party libraries must be bundled into the provider entry before publishing, for example `esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.mjs`. Include `dist` and `.dutydeck-plugin` in npm files; do not mark `@dutydeck/plugin-sdk` external. Type-only SDK imports need no runtime dependency. Acceptance covers an independently installed SDK, bundling, packing, deleting the author directory, and loading and calling the result through the real Host.
+
+The independent `@dutydeck/plugin-sdk` exports `definePlugin`, `PluginBindingContext`, scenario, query/action, CI provider and controlled result-tool author types without server or private shared dependencies. Packaging tests install its tarball into an empty directory, compile a third-party TypeScript plugin and import it at runtime. `plugins/team-faq` is a real `npm pack` sample containing its manifest, provider, scenarios, SOP and references; tests remove the source directory and exercise two group bindings through the installed tarball. See [team-faq usage](../../plugins/team-faq/README.md).
 
 ### Packaging a Leader guide as a plugin skill <a id="leader-guide"></a>
 
@@ -170,68 +267,158 @@ Notices use the original task location, the same provider UUID and durable confi
 
 These guarantees cover the controlled host API path. Trusted plugins run as in-process JavaScript; this cannot prevent a malicious trusted plugin printing secrets or another process with the same OS UID reading host files. Instances with separate databases must use the Web address holding the result; there is no cross-instance proxy. Real Feishu OAuth/redirect configuration and production connectivity are **unverified** by this isolated validation and require operator setup and verification.
 
-## External triggers
+## Hook protocol
 
-`POST /api/plugins/<plugin>/triggers/<id>`, no Web login, authenticated by the trigger's own `token` header or `hmac-sha256`. HMAC requests must include a timestamp header (default `x-dutydeck-timestamp`, Unix seconds), a one-time nonce header (default `x-dutydeck-nonce`) and the signature header; the signature is `HMAC-SHA256(secret, timestamp + "\\n" + nonce + "\\n" + SHA256(rawBody))`, in hex with an optional `sha256=` prefix. Timestamps are accepted within 300 seconds by default and a nonce can be used once. Responses: `202 {runId, sessionId, taskId, statusUrl}`, `200 {duplicate:true, runId}`, `400` not JSON, `401` bad token/signature/timestamp or reused nonce, `404` unknown trigger or disabled plugin, `413` body over 1 MiB, `429` over `maxConcurrent` (default 4, 1 to 32), `502` delivery failed (the dedupe record is revoked, so retry). Query `GET .../runs/<runId>` or cancel a still-queued run not yet submitted to the Agent with `POST .../cancel`; HMAC status and cancel requests sign an empty body and use a fresh nonce once. Cancellation cannot undo an external side effect already sent. Dedupe lasts 24 hours and survives restarts. Active tasks and work items that hold a concurrency slot, including those awaiting first confirmation, keep their run records beyond 24 hours and remain queryable and counted after a restart. Expired finished records are removed. Dedupe expiry does not cancel an old run; the same event can create a new run in the next window subject to concurrency limits. Template values in the prompt are wrapped as untrusted data; templates cannot read auth headers, `authorization` or `cookie`. See `examples/plugins/hello`:
-The same contract is available through `POST /api/plugin-triggers/v1/runs?plugin=<plugin>&triggerId=<trigger>`; status and cancellation use `/api/plugin-triggers/v1/runs/<runId>` and `/cancel` with those query parameters. `Idempotency-Key` and the manifest's `idempotencyKey` template participate in the 24-hour dedupe window, and `dryRun=true` validates authentication and rendering without starting a task. See `examples/plugins/hello`:
-
-**Starting a work-item template.** Replace `prompt` with `workTemplate` (exactly one of the two) to open a work item from a saved template instead of sending a prompt:
+`hooks/hooks.json` lists commands by event:
 
 ```json
-"workTemplate": { "session": "{{config.template_session}}", "id": "{{config.template_id}}", "version": 2, "goal": "Handle alert: {{payload.title}}" }
+{
+  "task.received": [
+    { "command": ["node", "hooks/log-event.mjs"], "timeout": 5000 }
+  ]
+}
 ```
 
-`session` is the session that saved the template; `id` and `version` are listed under `templates` in `GET /api/sessions/<session>/work-items` (an agent in the session can also use `dutydeck work templates --turn "$TURN"`). All three accept `{{config.<key>}}`; `version` is a number or a config value that resolves to a positive integer. A template starts only in the session that saved it, and that session must be the Lark session of the `target` bot in `target.chatId`; `target.session` is not used. The work item starts as the installation owner and keeps the template's confirmation rule (in a Lark group it runs only after someone confirms it in the group); its result is delivered through the work item's own delivery to that session's thread. `goal` renders like `prompt`, with external values wrapped as untrusted data. Acceptance returns `202 {runId, sessionId, workItemId, awaitingConfirmation, statusUrl}`. A missing template or version, a missing session or one outside the target chat, a disallowed scope, an inactive session or an unconfirmed delivery location returns `422 PLUGIN_TRIGGER_TEMPLATE_UNAVAILABLE` with the reason code in `cause` (for example `WORK_TEMPLATE_NOT_FOUND`); no work item is created and the dedupe record is revoked, so the same event can be resent after the configuration is fixed. Run status follows the work item: `queued` while awaiting confirmation, `running` while executing or waiting for a person, then `succeeded`, `failed` or `cancelled`, and `unknown` while a result awaits reconciliation. Work items awaiting confirmation, running, waiting or awaiting reconciliation count toward `maxConcurrent`. `cancel` only cancels a work item awaiting its first confirmation with no step attempts; started work (including work with a plan revision awaiting confirmation) stays `running` and is stopped from the work item; a failed work item with a pending revision also reports `running` and keeps its slot, and one that receives the revision only after failing takes its slot back on the next trigger request (for runs recorded within the last 24 hours). A triggered work item is not attributed to the turn currently running in the template session: it does not inherit that turn's risk policy or count toward its usage.
+- `command`: a string runs through `/bin/sh -c`; an array executes directly. The working directory is the plugin root. `timeout` is required, from 100 to 600000 ms. `onFailure` is `ignore` (default) or `block`. `matcher` is an optional regular expression (see the table for its target); installation rejects patterns vulnerable to catastrophic backtracking.
+- **Input:** stdin receives one JSON object: `{ event, plugin, eventId?, bindingRevision?, actor?, botAppId?, chatId?, sessionId?, taskId?, attemptId?, cwd?, payload }`. `eventId`, `actor` and `bindingRevision` are host-generated and cannot be overridden by a plugin. Session/task/attempt identities available from task and tool entry points are also passed at the top level.
+- **Environment:** only basic variables such as `PATH`, `HOME`, temporary directories, locale and timezone are inherited, plus `DUTYDECK_PLUGIN_NAME`, `DUTYDECK_PLUGIN_ROOT`, `DUTYDECK_PLUGIN_DATA`, non-sensitive `DUTYDECK_PLUGIN_CONFIG_<KEY>` and `DUTYDECK_HOOK_EVENT`. Secrets are available only through binding accessors.
+- **Output:** exit 0 allows; stdout may be JSON containing `decision` (`allow` / `deny` / `ask`), `reason`, `additionalContext` and `updatedPrompt`. Exit 2 blocks, with stderr as the reason. Other non-zero exits and timeouts are non-blocking errors, or blocking with `onFailure: block`. A timeout kills the whole process group and returns immediately. Stdout is limited to 64 KiB and treated as absent beyond that; stderr is limited to 8 KiB.
+- **Ordering:** plugins run by plugin name, then declaration order. `deny` takes effect immediately and stops; otherwise `ask` takes precedence over `allow` when results are merged.
+- **In-process hooks:** handlers registered with `api.registerHookHandler(event, handler, { timeout?, matcher? })` receive `(input, { signal })`. After the timeout (10 seconds by default), the host stops waiting and aborts `signal`; handlers should pass it to requests they start and stop background work promptly.
 
-Use `dutydeck plugin trigger-token <plugin>/<id>` to read a token or add `--rotate` to replace it immediately. Concurrent creation or rotation of tokens for different triggers preserves each successful change.
+| Event | When it runs | Payload | `matcher` target | Effective output |
+|---|---|---|---|---|
+| `task.received` | On task ingress (Web, Lark, automation and triggers) | source, namespace, key, prompt, mode, actor | Session source | `deny` rejects the task (403 `PLUGIN_HOOK_DENIED`) |
+| `task.beforeRun` | Before task start, after skills processing and before prompt freezing | source, prompt, skills | Session source | `deny` rejects; `additionalContext` appends; `updatedPrompt` replaces |
+| `tool.beforeCall` | After business-tool authorization and before the actual call | tool, input, resource, actor | Tool name | `deny` blocks; identity is stamped by the host |
+| `permission.request` | Before an approval request is sent | Complete permission request | Request title | `allow` / `deny` decides directly without human approval; any other result, or failure to write the substitute approval record, falls back to human approval |
+| `task.completed` | Asynchronously after task settlement | status, prompt, source; taskId at top level | status | None |
+| `verification.completed` | Asynchronously after verification finishes | Verification result plus source | status | None |
+| `notify` | Before CI notices and trigger results are sent | `ci_notice` (title, text, failed) or `trigger_result` (taskId, status, text) | kind | `deny` suppresses delivery |
+| `delivery.completed` | After a business-tool call completes (succeeded, failed, unknown or rejected by a gate) | tool, status, actionId when available | kind | Asynchronous observation only |
 
-```bash
-dutydeck plugin install examples/plugins/hello --yes
-dutydeck plugin config hello bot_app_id --value cli_xxx
-dutydeck plugin config hello chat_id --value oc_xxx
-dutydeck plugin trigger-token hello/ping
-dutydeck restart
-curl -X POST http://127.0.0.1:4310/api/plugins/hello/triggers/ping \
-  -H 'content-type: application/json' -H "x-dutydeck-token: $TOKEN" \
-  -d '{"id":"1","message":"hi"}'
-```
+Group collaboration's decision, response-generation and memory sessions also pass through `task.received` and `task.beforeRun`, with their owning bot's `botAppId`, so `bot:<appId>` hooks apply to them; memory sessions have no `chatId`. For these three session kinds, `task.beforeRun` honors only `deny`: `additionalContext` and `updatedPrompt` are ignored with a warning. `permission.request` likewise honors only `deny`; `allow` is ignored with a warning and the original human approval flow continues regardless of plugin scope. Their `task.completed` (and `verification.completed` where applicable) also carries `botAppId`, so bot-scoped hooks receive it. Use payload `source` (`lark-decision`, `lark-response`, `lark-memory`) to distinguish them.
 
-**Hooks.** Each hook has `command` (string via `/bin/sh -c`, or an argv array; cwd is the plugin root), required `timeout` (100 to 600000 ms), `onFailure` (`ignore` default, or `block`) and optional `matcher` regex. stdin gets `{ event, plugin, eventId?, bindingRevision?, actor?, botAppId?, chatId?, sessionId?, taskId?, attemptId?, cwd?, payload }`; `eventId`, `actor` and `bindingRevision` are host-generated and cannot be overridden by a plugin. Exit 0 allows (stdout may be JSON with `decision` allow/deny/ask, `reason`, `additionalContext`, `updatedPrompt`); exit 2 blocks with stderr as the reason; other non-zero exits or timeouts are non-blocking errors (blocking with `onFailure: block`). The process group is killed on timeout. Hook processes inherit only basic `PATH`/`HOME`/temporary/locale variables plus explicit non-sensitive plugin metadata and config. In-process handlers registered with `api.registerHookHandler(event, handler, { timeout?, matcher? })` receive `(input, { signal })`; after the timeout (10 s by default) the host stops waiting and aborts `signal`, so pass it to any request the handler starts. Events include `tool.beforeCall` (deny can gate a tool after host authorization) and `delivery.completed` (observation), in addition to task, permission and notification events. A `permission.request` allow/deny decides without a human approval card; any other result, or a decision whose approval record cannot be written, falls back to human approval. Group collaboration's decision, response-generation and memory sessions also pass through `task.received` and `task.beforeRun` with their bot's `botAppId`, so `bot:<appId>` hooks apply to them.
+Currently `notify` covers only CI notices and trigger results; Lark task result cards do not pass through it.
 
-**CI providers.** `/ci`, auto follow-up, Web "wait for CI", the scheduled-task condition and `POST /api/hooks/<provider id>` all go through CI provider plugins. With none installed, Lark `/ci` says it is not configured and the Web shows "no CI plugin installed". A provider registers via `api.registerCiProvider` with `id`, `displayName`, `matchRepository`, `getPipelineStatus`, `getFailureLogs`, optional PR methods used by `/pr` (`createPullRequest`, `listReviewComments`, `postComment`, and `getPullRequest(repository, number)` returning `{ state: 'open'|'closed'|'merged', headSha?, headBranch?, baseBranch?, headRepository?, title?, url? }`, which is how a merged or closed PR is noticed; only providers that return both `headBranch` and `headRepository` support claiming an existing PR with `/pr follow`; a `headRepository` different from the workspace repository is rejected as a fork, and a missing one is rejected because a fork cannot be ruled out; without it only the webhook's merge_request event can stop follow-up, otherwise polling continues until the round limit or a manual stop) and an optional `webhook: { verify, parse }` (see `packages/shared/src/plugins.ts`). The host gives every asynchronous provider call (pipeline status, failure logs, PR methods, `webhook.verify` / `parse`) a total time limit, 25 seconds by default. A provider can ask for more per method with `callTimeoutMs: { <method>: ms }` (for example paginated comments); the host clamps it between 1 second and its own ceiling: `getPipelineStatus` at most 25 seconds (CI waits poll under a 30-second lease), everything else at most 120 seconds (PR follow-up polls every 2 minutes). A timeout counts as a failed call and logs a warning: that polling round is skipped and retried next round without holding up other scheduled tasks. Every method receives a trailing `{ signal }` argument that is aborted on timeout; pass it to `fetch` and stop further pages. A timed-out `createPullRequest` or `postComment` may still have taken effect; the host does not retry it and the error asks you to check the platform first. Each `CiReviewComment` returned by `listReviewComments` carries `trusted`, `isBot` and `authorAssociation`; **comments without `trusted: true` are never handled automatically**, they only produce a "needs your decision" card. The github plugin sets `trusted` when `author_association` is OWNER, MEMBER or COLLABORATOR and the author is not a Bot. The `id` returned by `postComment` must use the same format as the ids from `listReviewComments`, otherwise Dutydeck's own reply is treated as a new comment.
+## CI providers
 
-After webhook verification, the host atomically saves the normalized event and the IDs of subscriptions matched at receipt time before returning `accepted`. After a restart, only targets not yet admitted are processed. Persisted repair or continuation tasks use the existing execution ledger; recovery does not replay the whole event or add newer subscriptions. Provider availability, subscriptions, sessions and task authorization are checked again. Cancelled or invalid targets do not execute. A full subscription pipeline queue leaves the event pending for a later maintenance tick.
+The core routes `/ci`, automatic follow-up, Web "wait for CI", scheduled-task conditions and `POST /api/hooks/<provider id>` through CI provider plugins. **With no CI plugin installed**, Lark `/ci` replies "not configured" with installation instructions, the Web shows "no CI plugin installed", and ordinary scheduled tasks are unaffected.
 
-Reusing an event ID with different content within the deduplication retention period returns a conflict. Pending admissions survive the deduplication TTL; completed records can be removed after expiry, so deduplication does not extend beyond record cleanup. Plugin triggers retain their existing deduplication semantics, and `/pr` follow-up remains a best-effort notification; neither is covered by this durable admission guarantee.
+A provider registers through `api.registerCiProvider(provider)` in the `providers` entry. Interface (types in `packages/shared/src/plugins.ts`):
 
-Bundled (install from a source checkout; the npm package does not include them):
+- `id`, `displayName` (required; shown in cards, prompts and the Web), and optional `changeRequestLabel(n)`;
+- `matchRepository(remoteUrl)`: return the repository (`{owner, name, slug}`) when the remote belongs to this provider, otherwise `undefined`;
+- `getPipelineStatus(query)` for polling and `getFailureLogs(repository, runId)` for supplemental failure logs;
+- Every asynchronous host call (pipeline status, failure logs, PR methods, `webhook.verify` / `parse`) has a total deadline, 25 seconds by default. A provider can request more per method with `callTimeoutMs: { <method>: ms }` (for example paginated comments); the host clamps it between 1 second and its own ceiling: `getPipelineStatus` at most 25 seconds (CI waits poll under a 30-second lease), everything else at most 120 seconds (PR follow-up polls every 2 minutes). A timeout counts as a failed call and logs a warning: that polling round is skipped and retried next round without holding up other scheduled tasks. Every method receives a trailing `{ signal }` argument that is aborted on timeout; pass it to `fetch` and stop further pages. A timed-out `createPullRequest` or `postComment` may still have taken effect; the host does not retry it and the error asks you to check the platform first;
+- Optional PR methods used by `/pr` and Web "open PR": `createPullRequest`, `listReviewComments`, `postComment`, and `getPullRequest(repository, number)`, returning `{ state: 'open' | 'closed' | 'merged', headSha?, headBranch?, baseBranch?, headRepository?, title?, url? }` to discover merged or closed PRs. Only providers returning both `headBranch` and `headRepository` support claiming an existing PR with `/pr follow`. A `headRepository` different from the workspace repository is rejected as a fork; a missing one is rejected because a fork cannot be ruled out. Without `getPullRequest`, only the webhook's merge_request event can discover a merge or close; with neither, follow-up polls until the round limit or a manual stop. Each `CiReviewComment` returned by `listReviewComments` carries `trusted`, `isBot` and `authorAssociation`: **comments without `trusted: true` are never handled automatically**, they only produce a "needs your decision" card. The github plugin sets `trusted` when `author_association` is OWNER, MEMBER or COLLABORATOR and the author is not a Bot. The `id` returned by `postComment` must use the same format as the corresponding comment's `id` from `listReviewComments`, otherwise Dutydeck's own reply is treated as a new comment;
+- Optional `webhook: { verify(req), parse(req) }`: `verify` may return `signedAt`, which the host uses for a five-minute replay window; `parse` returns a normalized `CiWebhookEvent` and throws `statusCode: 400` for a bad body. `timeIsAdvisory: true` means `occurredAt` is used only for ordering, not replay-window checks. If an optional method is absent, its corresponding capability is unavailable.
 
-- `plugins/github`: Actions status and failure logs, PR create/state/comments (used by `/pr`), optional webhook `POST /api/hooks/github`. Config: `github.token` (optional for waiting on public repos; required to open PRs and post comments, with pull-requests read/write permission, plus Actions read for private repos), `github.webhook_secret` (optional; enables the webhook). Pushing uses your local git credentials, not this token.
-- `plugins/codebase`: configurable code-host pipeline/MR webhook `POST /api/hooks/codebase`. Config: `codebase.host` (optional, defaults to `git.example.com`) and `codebase.webhook_secret` (optional secret).
+After webhook verification, the host saves the normalized event and the IDs of subscriptions matched at receipt time in one database transaction before returning `accepted`. If processing exits partway, restart handles only subscriptions not yet admitted. Persisted repair or continuation tasks use the existing execution ledger; recovery does not replay the whole event or add newer subscriptions. Provider availability, subscriptions, sessions and task authorization are checked again. Cancelled or invalid targets do not execute. A full subscription pipeline queue leaves the event pending for a later maintenance round.
+
+Reusing an event ID with different content within the deduplication retention period returns a conflict. Pending admissions are not deleted when the dedupe TTL expires; admitted completed records can be removed after expiry, so deduplication does not extend beyond record cleanup. Plugin-trigger dedupe-only records retain their existing semantics, and `/pr` follow-up remains a best-effort notification; neither is covered by this durable admission guarantee.
+
+The repository includes two CI plugins (install from a source checkout; the npm package does not include them):
+
+| Plugin | Provides | Configuration |
+|---|---|---|
+| `plugins/github` | GitHub Actions status and failure logs (failed jobs and steps, last 3,000 log characters); PR creation, state and comment read/write for `/pr` and Web "open PR"; optional webhook `POST /api/hooks/github` (`X-Hub-Signature-256`) | `github.token` (optional; required for private repositories and PR operations, unnecessary when only waiting on public builds), `github.webhook_secret` (optional; enables the webhook when set) |
+| `plugins/codebase` | Configurable code-host pipeline and MR webhook `POST /api/hooks/codebase`; also an example CI webhook plugin | `codebase.host` (optional, defaults to `git.example.com`), `codebase.webhook_secret` (optional, sensitive) |
 
 ```bash
 dutydeck plugin install ./plugins/github --yes
-printf %s "$TOKEN" | dutydeck plugin config github token --value-fd 0
+printf %s "$TOKEN"  | dutydeck plugin config github token --value-fd 0
+printf %s "$SECRET" | dutydeck plugin config github webhook_secret --value-fd 0
 dutydeck restart
 ```
 
-The scheduled-task condition is `ci_new_failure` (the old `github_new_failure` still reads and works). `GET /api/sessions/:id/automation/ci-providers` lists loaded providers. Auto-fix limits: 3 rounds per incident, stop when the same error fingerprint appears twice, commit SHA checked before pushing, no merge or force-push.
+Configurable code-host CI example:
 
-**Writing a scenario pack** <a id="scenario-packs"></a>. A scenario pack tells the bot how to handle one kind of group message, for example starting a triage task when a source bot posts an alert. Each pack is one JSON file in the plugin's `scenarios/` directory; `packages/shared/src/scenarios.ts` is the authoritative schema. Examples: `builtin-plugins/alarm` (`direct` mode with a correlation provider) and `plugins/team-faq` (`model` mode with a context provider). A pack declares parameters (`integer`, `string_list`, `bot_list`; confirmed when enabled in the group and editable on the Web), the trigger, the execution instruction, the phrases and confirmation-card text for turning it on and off in the group, a `/status` line, "why no reply" explanations and Web text. Pack ids are kebab-case, at most 32 characters. A pack `version` is semver: within the same major version, existing group bindings keep working and parameters the pack adds take the pack defaults; when the major version changes, existing bindings must be confirmed again in the group, and enable confirmation cards sent before the upgrade no longer work, so say it again.
+```bash
+dutydeck plugin install ./plugins/codebase --yes
+dutydeck plugin config codebase host --value git.example.com
+printf %s "$SECRET" | dutydeck plugin config codebase webhook_secret --value-fd 0
+dutydeck restart
+```
 
-- `direct` mode is triggered only by bot messages. A match skips the decision model; dedupe and the hourly cap decide whether to start a task, which runs in the name of the person who confirmed in the group, through the same path as an @ to the bot. The contract is enforced, and leaving something out only gets you the default, never "unlimited": only the source bots listed in the `bot_list` parameter named by `trigger.sourceBotsParam` (with `role: "source"`), never the bot itself (other `role: "source"` parameters only keep those bots from counting as bots that answer, and never trigger); a requester is required (enabling only happens through the in-group confirmation card; the Web can only edit a confirmed binding), so a `direct` pack must declare `phrases` with non-empty `enable` and `disable` or it fails validation; `trigger.filter.keywordsAnyParam` names a `string_list` parameter, and a message whose text contains none of its keywords is recorded as filtered and starts nothing (an empty list filters nothing); `trigger.filter` is `direct`-only, a `model` pack that declares it fails validation, and `model` packs select messages with `trigger.match`; `dedupe` is either the core `source_text_v1` (source plus text with links, numbers, long hex strings and whitespace removed, so changing times, values and instance ids still count as the same alert) or the pack's own provider, with a 1–168 hour dedupe window parameter and a 1–30 hourly cap parameter; in multi-bot groups only the responder acts; every outcome (started, filtered, duplicate, over the cap, not the responder, no requester, abstained on error) is recorded so "why no reply" can find it.
-- `model` mode is triggered by human messages, only at the `selective` and `eager` levels; messages that @ the bot or reply to it don't go through packs. A match goes to the participation decision model with the pack's guidance and context. The guidance is part of the decision prompt and the provider's `context` is attached as untrusted material, at most `decisionChars` characters; when the decision is to answer, the reply or task gets the same context (at most `maxChars` characters) and `execution.instruction`, without calling the provider again. A matched pack counts as the bot's scope, so a `selective` bot without a scope that is not the responder can still answer such messages; the other side is that matched messages are judged by scope too, so the `eager` "answer by default" and the single-human-group default no longer apply to them directly, and role scope and scenario eligibility are evaluated independently: either can qualify the message. A scenario abstaining does not cancel eligibility from the role scope or a message clearly addressing the bot. With Team FAQ as the only basis, a keyword match without runbook coverage still goes unanswered; the guidance only says when to answer and cannot loosen the core rules. When several `model` packs match one message, only the first by pack id is used. Before replying or starting the task, the bot checks again that the pack is still on in the group and sends nothing if it was turned off. Enabling needs no requester, so it can be done directly from the Web or with `scenarios=`; the in-group phrases post a confirmation card with no parameters to fill in.
+Opening a PR requires `github.token` (write operations need a token) with pull-request read/write permission; reading Actions builds in private repositories also needs Actions read permission. Pushing uses local git credentials, not this token. See each plugin directory's `README.md` for signatures, tokens, `X-Dutydeck-Event-Id` and other details. Without a GitHub webhook, polling waits for builds; with one, `/ci wait` and `/ci fix` wait for GitHub to push events instead.
 
-A pack may declare `topicOwnership: { "sourceTopics": "neutral" }` (used by `alarm`): in multi-bot groups a topic opened under a message from a source bot does not count as another bot's topic; the bot stays out only when another bot has already posted there or the topic cannot be read in full. This does not guarantee that only one bot answers.
+Related behavior:
 
-Providers are registered in `register(api)` with `api.registerScenarioProvider(provider)`: `match` (extra matching or a dedupe key), `correlationKey` (the key for finding an earlier turn) and `context` (context for `model` mode). They are plugin code and are confirmed together with `providers`. Every call has a deadline (`match` 500 ms, 1 s in total for one correlation round, `context` 5 s by default and at most 15 s); late results are discarded. A pack whose provider is not registered is skipped.
+- The scheduled-task condition "run when CI has a new failed build" is `ci_new_failure`; the old `github_new_failure` remains readable and accepted.
+- `GET /api/sessions/:id/automation/ci-providers` lists loaded CI providers.
+- Lark `/ci` works with any CI plugin installed. With the github plugin installed but no token, public repositories can still be waited on.
+- `/pr` works with any CI plugin implementing `createPullRequest`. A webhook provider's merge_request merge or close event stops PR follow-up immediately, and a pipeline event triggers an immediate check.
 
-Regexes in triggers and phrases allow only the `i`, `m`, `s`, `u` flags (the host adds `g` for capture-all) and at most 1000 characters of source. They run in an isolated host thread with a 200 ms limit per run, on at most the first 4000 characters of input. `validate` only warns about patterns that may backtrack catastrophically; safety comes from isolation and the timeout.
+## Writing a scenario pack <a id="scenario-packs"></a>
 
-Text fields accept `{variable}` and one level of conditionals `{variable?when set:when empty}`, and each position allows a fixed set of variables: `execution.instruction` and `execution.intro` take `{source}` (the source bot's name; a `model` instruction takes none); `correlation.prompt` takes `{date}`; `correlation.cardLine` takes `{date}`, `{headline}`, `{url}`; `confirm.enableSummary`, `disableSummary` and `enabledResult` take `{summary}` and the parameters; `status.summary` takes the parameters; `explain.*` takes `{time}`, `{reason}`, `{snippet}`; `web.description` takes `{requesterId}` and the parameters. Titles, nouns, decision guidance, parameter labels and `reasons` are literal text. Message text and model output never go into an instruction position: the source message and the earlier conclusion follow the instruction as untrusted material, and the source bot's name has line breaks and bracket characters removed before it is inserted.
+A scenario pack tells the bot how to handle one kind of group message, for example starting a triage task when a source bot posts an alert. Each pack is one JSON file in the plugin's `scenarios/` directory; `packages/shared/src/scenarios.ts` is the authoritative schema for its format and field limits. Examples: `builtin-plugins/alarm` (`direct` mode with a correlation provider) and `plugins/team-faq` (`model` mode with a context provider).
 
-On errors a pack abstains rather than guessing. A pack that fails validation is skipped while the rest of the plugin loads, and `plugin list` and `doctor` show why; a pack whose provider is missing or whose id clashes is also skipped, with the reason in the daemon log. A regex or provider error or timeout at run time makes that pack abstain for that message; `direct` records an abstained outcome and starts nothing. For `model`, when the context provider times out, fails, returns a malformed result, or returns no material while `missing` is not empty, the message is decided again as if the pack were not there; the decision record keeps the reason, `/status` counts it as context failed, and "why no reply" explains it. When one message matches several `direct` packs, only the first by pack id is handled.
+A pack declares parameters (confirmed when enabled in the group and editable on the Web; types are `integer`, `string_list`, `bot_list`), the trigger, execution instruction, group on/off phrases and confirmation-card text, a `/status` line, "why no reply" explanations and Web text. Pack ids are kebab-case, at most 32 characters.
 
-**Upgrading from env-based CI.** `DUTYDECK_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN` and `DUTYDECK_CODEBASE_WEBHOOK_SECRET` no longer work. Install the plugin, set `github.token` / `github.webhook_secret` / `codebase.host` / `codebase.webhook_secret` (use `--value-fd 0` for secrets), and `dutydeck restart`. Otherwise old waits and `github_new_failure` schedules stop working, the Web shows "no CI plugin installed", and `/api/hooks/codebase` returns 404. There is no automatic migration.
+A pack `version` is semver. Within the same major version, existing group bindings keep working and parameters the pack adds take the pack defaults. When the major version changes, existing bindings must be confirmed again in the group, and enable confirmation cards sent before the upgrade no longer work, so say it again.
 
-**Security.** Only install plugins you trust; agents, hooks and providers run on your machine. **Provider code runs inside the daemon process with the daemon's trust level**; there is no sandbox. If a timer, connection or callback it leaves behind after `register(api)` throws an unhandled exception or rejection, the whole daemon exits with Node's default behavior (systemd restarts it, but only eligible tasks survive a restart). The `Fatal …` crash log is followed by a line naming plugins whose code appears in the stack, and those external plugins are **quarantined**: they do not load on the next start. A daemon killed or restarted while it was stuck loading a plugin's providers also quarantines that plugin on the next start. Quarantined plugins show up in plugin diagnostics, `dutydeck plugin status/list` and `dutydeck doctor` (fail); after fixing or reviewing, run `dutydeck plugin enable <name>` and restart (`activate`, `rollback` and `uninstall` also clear it). Built-in plugins are never quarantined. Hook processes and plugin services are separate processes and cannot take the daemon down. Hook processes receive an allowlisted base environment and non-sensitive declared config; secrets are available through binding accessors. **Expose trigger URLs only over HTTPS or an internal network**: HMAC requests use a short-lived timestamp and one-time nonce; token requests still rely on transport protection. Untrusted wrapping reduces prompt-injection risk but does not eliminate it; don't point an external trigger at a `full-trust` bot.
+**Two modes**
+
+- `direct`: triggered only by bot messages. A match skips the decision model; dedupe and the hourly cap decide whether to start a task, which runs in the name of the person who confirmed in the group, through the same path as an @ to the bot. These are mandatory contracts; omitting them only selects defaults, never "unlimited":
+  - Only source bots listed in the `bot_list` parameter named by `trigger.sourceBotsParam` (`role: "source"`) trigger the pack, never the bot itself. Other `role: "source"` parameters only keep those bots from counting as bots that answer; they do not trigger.
+  - A requester is required: enabling only happens through the in-group confirmation card, and the Web can only edit a confirmed binding. Therefore a `direct` pack must declare `phrases` with non-empty `enable` and `disable` or it fails validation.
+  - `trigger.filter.keywordsAnyParam` names a `string_list` parameter; a message whose text contains none of its keywords is recorded as filtered and starts nothing. An empty list filters nothing. `trigger.filter` is `direct`-only: a `model` pack that declares it fails validation, and `model` packs select messages with `trigger.match`.
+  - `dedupe` is either the core `source_text_v1` (source plus text with links, numbers, long hex strings and whitespace removed, so changing times, values and instance ids still count as the same alert) or the pack's own provider. The dedupe-window parameter is 1–168 hours and the hourly-cap parameter is 1–30.
+  - In multi-bot groups only the responder acts. Every outcome (started, filtered, duplicate, over the cap, not the responder, no requester, abstained on error) is recorded so "why no reply" can find it.
+- `model`: triggered by human messages, only at the `selective` and `eager` levels; messages that @ the bot or reply to it do not go through packs. A match goes to the participation decision model with the pack's guidance and context:
+  - The guidance is part of the decision prompt, and the provider's `context` is attached as untrusted material, at most `decisionChars` characters. When the decision is to answer, the reply or task gets the same context (at most `maxChars` characters) and `execution.instruction`, without calling the provider again.
+  - A matched pack counts as the bot's scope, so a `selective` bot without a scope that is not the responder can still answer such messages. Conversely, matched messages are judged by scope too: the `eager` "answer by default" and single-human-group default no longer apply directly. Role scope and scenario eligibility are evaluated independently; either can qualify the message. A scenario abstaining does not cancel eligibility from the role scope or a message clearly addressing the bot. With Team FAQ as the only basis, a keyword match without runbook coverage still goes unanswered. The guidance only says when to answer and cannot loosen the core rules.
+  - When several `model` packs match one message, only the first by pack id is used.
+  - After deciding and before replying or starting the task, the bot checks again that the pack is still on in the group and sends nothing if it was turned off.
+  - Enabling needs no requester and can be done directly from the Web or with `scenarios=`. The in-group phrases post a confirmation card with no parameters to fill in.
+
+A pack may declare `topicOwnership: { "sourceTopics": "neutral" }` (used by `alarm`): in multi-bot groups, a topic opened under a source bot's message does not count as another bot's topic. The bot stays out only when another bot has already posted there or the topic cannot be read completely or fails to load. This does not guarantee that only one bot answers.
+
+**Providers and trust**
+
+A pack can reference providers registered by its plugin in `register(api)` with `api.registerScenarioProvider(provider)`: `match` (extra matching or a dedupe key), `correlationKey` (the key for finding an earlier turn) and `context` (context for `model` mode). Providers are plugin code and are confirmed together with `providers`. Every call has a deadline (`match` 500 ms, 1 second total for one correlation round, `context` 5 seconds by default and at most 15 seconds); late results are discarded. A pack whose provider is not registered is skipped.
+
+**Regular expressions**
+
+Regexes in triggers and group on/off phrases allow only the `i`, `m`, `s`, `u` flags (the host adds `g` for capture-all) and at most 1,000 characters of source. They run in an isolated host thread with a 200 ms limit per run, on at most the first 4,000 characters of input. `validate` only warns about patterns that may backtrack catastrophically; safety comes from isolated execution and the timeout.
+
+**Template variables**
+
+Text fields accept `{variable}` and one level of conditionals `{variable?when set:when empty}`. Each position allows a fixed set of variables; anything else fails validation:
+
+| Position | Available variables |
+|---|---|
+| `execution.instruction`, `execution.intro` | `{source}` (source bot name; a `model` instruction takes none) |
+| `correlation.prompt` | `{date}` |
+| `correlation.cardLine` | `{date}`, `{headline}`, `{url}` |
+| `confirm.enableSummary`, `disableSummary`, `enabledResult` | `{summary}` and parameters |
+| `status.summary` | Parameters |
+| `explain.*` | `{time}`, `{reason}`, `{snippet}` |
+| `web.description` | `{requesterId}` and parameters |
+
+Titles, nouns, decision guidance, parameter descriptions, `reasons` and similar fields are literal text and cannot contain variables. Message text and model output never go into an instruction position: the source message and earlier conclusion follow the instruction as untrusted material, and the source bot's name has line breaks and bracket characters removed before it is inserted.
+
+**On errors**
+
+A pack that fails JSON validation is skipped while the rest of the plugin loads, and `plugin list` and `doctor` show why. A pack whose provider is missing or whose id clashes is also skipped, with the reason in the daemon log. A regex or provider error or timeout at run time makes that pack abstain for that message: `direct` records an abstained outcome and starts nothing. For `model`, when the context provider times out, fails, returns a malformed result, or returns no material while `missing` is not empty, the message is decided again as if the pack were not there; the decision record keeps the reason, `/status` counts it as context failed, and "why no reply" explains it. When one message matches several `direct` packs, only the first by pack id is handled.
+
+# Upgrade note: migrating CI environment variables to plugins
+
+Deployments that previously configured CI with environment variables must migrate: **these variables no longer work after upgrading**: `DUTYDECK_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`, `DUTYDECK_CODEBASE_WEBHOOK_SECRET`. After upgrading:
+
+1. Run `dutydeck plugin install ./plugins/github --yes` (or `./plugins/codebase`);
+2. Use `dutydeck plugin config …` to restore the token, code host or webhook secret (`github.token`, `github.webhook_secret`, `codebase.host`, `codebase.webhook_secret`; use `--value-fd 0` for sensitive values);
+3. Run `dutydeck restart`.
+
+Otherwise old wait subscriptions and `github_new_failure` schedules stop working, the Web shows "no CI plugin installed", and `/api/hooks/codebase` returns 404 (the codebase plugin now provides it and must be installed). Old subscription data remains readable, and old subscriptions without a provider field are treated as GitHub. There is no automatic migration.
+
+## Security notes
+
+- Install plugins only from sources you trust. `agents`, `hooks`, `providers` and `service` execute commands on your machine; installation confirmation is not a formality.
+- **Provider code runs inside the daemon process with the daemon's trust level**; there is no sandbox. If a timer, connection or callback it leaves behind after `register(api)` throws an unhandled exception or rejection, the whole daemon exits with Node's default behavior (systemd restarts it, but only eligible tasks survive a restart). The `Fatal …` crash log is followed by a line naming plugins whose code appears in the stack, and those external plugins are **quarantined**: the entire package does not load on the next start. A daemon killed or restarted while stuck loading a plugin's providers also quarantines that plugin on the next start. Quarantined plugins appear in plugin diagnostics, `dutydeck plugin status/list` and `dutydeck doctor` (fail). After fixing or reviewing, run `dutydeck plugin enable <name>` to clear quarantine and restart (`activate`, `rollback` and `uninstall` also clear it). Built-in plugins are never quarantined. Hook subprocesses and plugin services are separate processes and cannot take the daemon down when they crash.
+- Hook subprocesses inherit only the base environment; plugin secrets are supplied through binding accessors and never enter the hook environment.
+- **Expose trigger URLs only over HTTPS or an internal network.** HMAC requests carry a short-lived timestamp and one-time nonce; token requests still rely on transport protection. External material is wrapped as untrusted data, but that cannot eliminate prompt injection; do not point an external trigger at a `full-trust` bot.
+- Trigger prompt templates wrap external data as untrusted content. This reduces prompt-injection risk but cannot guarantee the Agent will not be induced. Triggered sessions inherit the bot's permission mode, so do not configure a `full-trust` bot for an external-facing trigger.
+- Git sources are pinned by commit SHA; newly added capabilities in `plugin update` require renewed confirmation.
+- If a triggered session's bot is in `ask` mode, approval cards may appear only on the Web and not necessarily in Lark (**unverified**).

@@ -32,6 +32,8 @@ my-plugin/
 
 路径必须在插件目录内；显式声明了但不存在算错误。
 
+`host.api` 用于宿主兼容性检查；`host.channels` 目前只声明元数据，不参与加载决策。实际加载由安装记录中选定的 `active` 包及 `enabled` 状态决定，需确认能力仍须全部已确认；`binding` 与安装时的 `scope` 决定已加载插件在哪些群、项目或调用中生效。
+
 ## 七类组件
 
 | 组件 | 作用 | 需要信任确认 |
@@ -48,7 +50,7 @@ my-plugin/
 
 ## 信任确认
 
-agents、hooks、providers 会执行代码或命令，安装时要确认。daemon 只加载**已启用、且所有需确认能力都已确认**的插件。
+agents、hooks、providers、service 会执行代码或命令，安装时要确认。daemon 只加载**已启用、且所有需确认能力都已确认**的插件。
 
 - 交互终端里会列出能力并询问；非交互环境必须加 `--yes`，否则拒绝并列出要确认的能力。
 - `plugin update` 时只有**新增**的能力按原规则重新确认。斜杠命令模板或查询映射、Agent 启动配置、hook 执行规格相对活动版本有变化时，输出会列出命令标识和前后 SHA-256 摘要，不回显完整新命令；交互终端会把这些变化当作需要重新信任的能力再问一次，拒绝则不写候选。非交互且未带 `--yes` 时只打印变化，不新增失败；`--yes` 行为不变。仅描述或参数提示变化不算执行内容变化；现有候选没有新的执行内容变化时不重复提问。JSON 结果的 `changes` 字段包含同一组摘要。
@@ -76,7 +78,9 @@ agents、hooks、providers 会执行代码或命令，安装时要确认。daemo
 ```bash
 dutydeck plugin install <来源> [--scope global|bot:<appId>|workspace:<路径>] [--yes] [--json]
 dutydeck plugin list [--json]
-dutydeck plugin validate <目录>
+dutydeck plugin validate <目录> [--strict]
+dutydeck plugin inspect <目录|tarball|来源> --json
+dutydeck plugin test <目录|tarball|来源>
 dutydeck plugin init <名字> [--dir <目录>]
 dutydeck plugin config <插件> <键> --value <值>          # 非敏感值
 printf %s "$SECRET" | dutydeck plugin config <插件> <键> --value-fd 0   # 敏感值只能这样传
@@ -411,7 +415,7 @@ dutydeck restart
 
 ## 安全说明
 
-- 只装可信来源的插件。agents、hooks、providers 会在你的机器上执行命令，安装时的确认不是形式。
+- 只装可信来源的插件。agents、hooks、providers、service 会在你的机器上执行命令，安装时的确认不是形式。
 - **providers 代码和 daemon 同进程、同信任级别**，没有沙箱。它在 `register(api)` 里留下的定时器、连接或回调如果抛出未处理的异常或拒绝，整个 daemon 会按 Node 默认行为退出（受 systemd 托管时会被重新拉起，但重启时只有满足条件的任务能保住）。崩溃日志 `Fatal …` 之后会多一行指出错误栈里出现的插件名，这些外部插件同时被**隔离**：下次启动整包不加载；daemon 在加载某个插件的 providers 时卡死后被杀或重启，下次启动也会隔离它。被隔离的插件在插件诊断、`dutydeck plugin status/list` 和 `dutydeck doctor`（fail）里标出；修复或确认后运行 `dutydeck plugin enable <名字>` 解除隔离再重启（`activate`、`rollback`、`uninstall` 也会清除）。内置插件不隔离。hook 子进程和插件服务是独立进程，崩溃不会带倒 daemon。
 - hook 子进程只继承基础环境变量；插件秘密通过 binding accessor 提供，不进入 hook 环境。
 - **触发器地址只走 HTTPS 或内网。** HMAC 请求带短时有效的时间戳和一次性 nonce；token 请求仍依赖传输层保护。外部材料会被包成不可信数据，但这不能消除提示词注入风险；不要把外部触发器指向 `full-trust` 机器人。
