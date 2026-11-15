@@ -22,7 +22,7 @@ Codex 终端 Agent 会从 `CODEX_HOME/config.toml` 读取 `[profiles.<name>]` �
 
 Dutydeck 自己生成的 Claude 凭据守卫（终端与内置 ACP）和计划守卫（终端）在官方 Claude Code **2.1.295 或更高版本**上带 `onFailure: "block"`：守卫超时或未被脚本内显式拒绝覆盖的执行失败也阻断工具调用。会话 ID 为空时，凭据守卫由 shell 直接放行，不启动 Node；策略路径则逐级检查，只有之前的祖先均可读、可进入且第一处失败可证明为 `ENOENT` 时才由 shell 快放。`EACCES`、`ENOTDIR`、祖先不可读或不可进入、悬空或不可解析的符号链接及其他不确定状态都进入 Node；Node 只对读取时的 `ENOENT` 放行，其他读取或 JSON 解析失败按拒绝处理，不缓存“无策略”结果。计划阶段已启用但守卫脚本缺失同样按拒绝处理。Ask relay、PermissionRequest 和用户自己的 hooks 不增加这个字段。
 
-启动前探测使用与 Agent 相同的清洗后子进程环境，最多 3 秒并按可执行文件身份缓存；内置 ACP launcher 独立探测同一个实际 Claude 可执行文件。旧版、探测失败和 Seed / Relay / Genius 等未验证分支不写这个字段，凭据策略生效或 deny-all 的轮次也照常提交，守卫超时维持原来的放行行为，显式拒绝和脚本崩溃仍由 `|| exit 2` 拦截。每次真正拉起或重拉终端 Claude（包括恢复会话）时，Dutydeck 记录本次实际设置里的守卫 marker、精确 matcher、command type、`onFailure: "block"` 和当时的探测结果；受保护轮次不再探测磁盘 CLI。服务重启后接管仍在运行的终端只认这份启动记录，不扫描未加载的历史设置；旧版或探测失败的启动记录不要求 `onFailure: "block"`。磁盘 CLI 后续升降级不改变已运行进程的判定；没有启动记录或记录损坏时无法证明旧进程配置，受保护发送保持拒绝，需重开会话。`dutydeck doctor` 的默认 Agent 可用性检查会对识别出的旧版官方 Claude Code 给出升级提醒。
+启动前探测使用与 Agent 相同的清洗后子进程环境，最多 3 秒并按可执行文件身份缓存；内置 ACP launcher 独立探测同一个实际 Claude 可执行文件。旧版、探测失败和 Seed / Relay / Genius 等未验证分支不写这个字段，凭据策略生效或 deny-all 的轮次也照常提交，守卫超时维持原来的放行行为，显式拒绝和脚本崩溃仍由 `|| exit 2` 拦截。每次真正拉起或重拉终端 Claude（包括恢复会话）时，Dutydeck 记录本次实际设置里的守卫 marker、精确 matcher、command type、`onFailure: "block"` 和当时的探测结果；受保护轮次不再探测磁盘 CLI。服务重启后接管仍在运行的终端优先使用这份启动记录；仅当记录不存在时，才检查接管前会话私有目录已有的 JSON 设置，至少一份且每份都可读、结构合法，并满足所请求守卫的精确 matcher、command type 和 marker，才按旧版规则继续（不要求 `onFailure: "block"`）。inline-only、空快照或任一份快照不符都拒绝；记录本身损坏、字段非法或不可读时不能使用快照回退。磁盘 CLI 后续升降级不改变已运行进程的判定；不降低新启动的 `onFailure: "block"` 要求。`dutydeck doctor` 的默认 Agent 可用性检查会对识别出的旧版官方 Claude Code 给出升级提醒。
 
 ## 1. 自定义 Agent (`DUTYDECK_AGENTS_JSON`)
 

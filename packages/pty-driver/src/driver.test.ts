@@ -207,6 +207,28 @@ describe('PtyCliDriver（PtyBackend + 假 CLI 集成）', () => {
     expect(stopped).toBe(true);
     await waitFor('onExit after stop', () => exitCode !== undefined);
   }, 30_000);
+
+  it('leaves invisible codepoints in non-Claude prompts unchanged', async () => {
+    const prompts: string[] = [];
+    const events: NormalizedDriverEvent[] = [];
+    const adapter: CliAdapter = {
+      id: 'mock-cli', capabilities: {}, buildArgs: () => [fixturePath],
+      writeInput: (backend, prompt) => { prompts.push(prompt); backend.write(prompt + '\n'); }, completionPattern: /MOCK DONE/,
+    };
+    const driver = new PtyCliDriver({
+      agent: { id: 'mock-agent', name: 'Mock', command: process.execPath, args: [], protocol: 'pty-cli', cwd: dir,
+        env: {}, permissionMode: 'full-trust', timeout: 600, capabilities: { pause: false, resume: false }, builtin: false },
+      adapter, backend: new PtyBackend(), onEvent: event => events.push(event), onExit: () => {}, sessionId: 'non-claude-invisible-session',
+    });
+    try {
+      await driver.start();
+      await waitFor('ready', () => events.some(event => event.type === 'raw_terminal' && String(event.data?.text).includes('MOCK READY')));
+      const prompt = '用户正文​‍﻿ ❤️ é';
+      await driver.send(prompt);
+      await waitFor('completed', () => events.some(event => event.type === 'completed'));
+      expect(prompts[0]!.endsWith(prompt)).toBe(true);
+    } finally { await driver.stop(); }
+  }, 30_000);
 });
 
 describe('PTY_AGENT_CONTRIBUTIONS', () => {

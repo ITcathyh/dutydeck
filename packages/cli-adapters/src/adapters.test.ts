@@ -902,7 +902,9 @@ describe('全适配器横切契约', () => {
         const adapter = createCliAdapter(id);
         const writes: string[] = [];
         const pending = adapter.writeInput({ write: data => { writes.push(data); return true; },
-          readScreen: () => 'TraeX\n❯ Ask TraeCode CLI\nContext 100% left' }, 'hello');
+          readScreen: () => ['claude-code', 'seed', 'relay', 'genius'].includes(id)
+            ? '──────────\n❯\n──────────\n? for shortcuts'
+            : 'TraeX\n❯ Ask TraeCode CLI\nContext 100% left' }, 'hello');
         await vi.runAllTimersAsync();
         await pending;
         const joined = writes.join('');

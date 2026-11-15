@@ -266,7 +266,7 @@ export function untrustedNotice(source: string): string {
 export function wrapUntrusted(source: string, text: string): string {
   const safeSource = untrustedSource(source);
   const clipped = text.length > untrustedValueLimit ? `${text.slice(0, untrustedValueLimit)}\n…[已截断，原长 ${text.length} 字符]` : text;
-  const escaped = clipped.replace(/<<<(\/?)UNTRUSTED_DATA/gi, '<<​<$1UNTRUSTED_DATA');
+  const escaped = clipped.replace(/<<<(\/?)UNTRUSTED_DATA/gi, '<< <$1UNTRUSTED_DATA');
   const id = Array.from(globalThis.crypto.getRandomValues(new Uint8Array(8)), byte => byte.toString(16).padStart(2, '0')).join('');
   return [
     untrustedNotice(source),

@@ -503,7 +503,9 @@ describe('PTY Claude guard version compatibility', () => {
       return adopted;
     };
     const policy = join(cwd, '.dutydeck', 'security', 'sessions', `${sessionId}.json`);
-    return { driver, adopt, command, install, probeCount, cwd, sessionId, spawned, prompts, policy, internals: driver as unknown as { lastArgs: string[] } };
+    const claudeSettings = (driver as unknown as { claudeSettings: ClaudeSettings }).claudeSettings;
+    const settingsDirectory = dirname(claudeSettings.planGuardCommand().match(/'([^']+plan-guard\.mjs)'/)![1]!);
+    return { driver, adopt, command, install, probeCount, cwd, sessionId, spawned, prompts, policy, launchRecord: join(settingsDirectory, 'launch-guard.json'), internals: driver as unknown as { lastArgs: string[] } };
   }
 
   const hooks = (args: string[]) => {
@@ -623,6 +625,36 @@ describe('PTY Claude guard version compatibility', () => {
     writeFileSync(policy, JSON.stringify({ enabled: true, authorized: false }));
     await expect(driver.send('only the loaded settings matter')).rejects.toThrow('fixture reached prompt write');
     expect(prompts).toHaveLength(1);
+  });
+
+  it('adopts pre-record legacy settings through deny-all round trips and repeated reattach', async () => {
+    const { driver: launched, prompts, policy, adopt, launchRecord } = capabilityFixture('2.1.220 (Claude Code)\n');
+    await launched.start();
+    rmSync(launchRecord);
+    mkdirSync(dirname(policy), { recursive: true });
+    writeFileSync(policy, JSON.stringify({ enabled: true, authorized: false }));
+
+    const first = adopt();
+    first.setPermissionMode!('deny-all');
+    first.setPermissionMode!('ask');
+    first.setPermissionMode!('deny-all');
+    await expect(first.send('first adopted legacy turn')).rejects.toThrow('fixture reached prompt write');
+    const second = adopt();
+    second.setPermissionMode!('deny-all');
+    await expect(second.send('second adopted legacy turn')).rejects.toThrow('fixture reached prompt write');
+    expect(prompts).toHaveLength(2);
+  });
+
+  it('rejects a corrupt launch record during driver adoption even when snapshots are wired', async () => {
+    const { driver: launched, prompts, policy, adopt, launchRecord } = capabilityFixture('2.1.220 (Claude Code)\n');
+    await launched.start();
+    writeFileSync(launchRecord, '{');
+    const adopted = adopt();
+    expect(() => adopted.setPermissionMode!('deny-all')).toThrow(expect.objectContaining({ code: 'PLAN_GUARD_UNAVAILABLE' }));
+    mkdirSync(dirname(policy), { recursive: true });
+    writeFileSync(policy, JSON.stringify({ enabled: true, authorized: false }));
+    await expect(adopted.send('corrupt launch record')).rejects.toMatchObject({ code: 'PROMPT_NOT_WRITTEN' });
+    expect(prompts).toHaveLength(0);
   });
 
   it('records a failed startup probe without retrying it on later protected sends', async () => {

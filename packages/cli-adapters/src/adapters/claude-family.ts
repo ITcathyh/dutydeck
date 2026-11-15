@@ -2,6 +2,7 @@ import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { buildDutydeckRoutingBlock } from '../shared-hints.js';
 import { pinnedSessionUuid } from '../resume-id.js';
 import { relayCommandFrom, relayEnabled, relayPermissionHookTimeoutSeconds } from '@dutydeck/relay';
+import { DriverRecoveryError, PromptNotWrittenError } from '@dutydeck/shared';
 import { probeClaudeHookFailureBlock, secretGuardHookCommand, secretGuardToolMatcher } from '@dutydeck/shared/secret-guard';
 import { delay, waitForInputEcho, waitForQuietScreen } from './input-settle.js';
 
@@ -92,6 +93,36 @@ export async function writeClaudeFamilyInput(backend: PtyLike, prompt: string): 
   const typedAt = Date.now();
   const throttleMs = isFirstWrite ? 80 : 30;
   const tick = () => delay(throttleMs);
+  let writeAttempted = false;
+  let expectedDraft = '';
+  const businessInput = (backend as PtyLike & { dutydeckInputKind?: 'business' | 'maintenance' }).dutydeckInputKind !== 'maintenance';
+  const checkComposer = async () => {
+    if (!businessInput) return;
+    if (!backend.readScreen) {
+      if (writeAttempted) throw new DriverRecoveryError('Claude 输入框在本次写入后无法复核；提交结果未知，原进程已保留', 'DRIVER_INPUT_UNCONFIRMED');
+      throw new PromptNotWrittenError('Claude 写入前需要读取当前输入框；本条消息没有写入。');
+    }
+    const screen = await backend.readScreen();
+    const lines = screenLines(screen);
+    if (!writeAttempted) {
+      if (!emptyComposerAtBottom(lines)) {
+        throw new PromptNotWrittenError('Claude 当前输入框不是空白，可能有人工草稿、/compact 或 slash 菜单；本条消息没有写入，请处理后重发。');
+      }
+      return;
+    }
+    const owned = ownedComposerAtBottom(lines, expectedDraft, prompt)
+      || (!(backend.sendText && backend.sendSpecialKeys) && ownedRawPasteAtBottom(lines, expectedDraft));
+    if (!owned) {
+      throw new DriverRecoveryError('Claude 输入框在本次写入后发生变化；提交结果未知，原进程已保留，未自动重发', 'DRIVER_INPUT_UNCONFIRMED');
+    }
+  };
+  const write = async (operation: () => void | boolean | Promise<void | boolean>, typed = '') => {
+    // 读屏兑现后不再插入等待；下一次 await 已经是实际终端写入。
+    await checkComposer();
+    writeAttempted = true;
+    await operation();
+    expectedDraft += typed;
+  };
 
   if (backend.sendText && backend.sendSpecialKeys) {
     // tmux：逐行、按字节分块键入；换行用 '\' + Enter（Claude 家族的
@@ -101,25 +132,26 @@ export async function writeClaudeFamilyInput(backend: PtyLike, prompt: string): 
       const line = lines[i];
       if (line && line.length > 0) {
         for (const chunk of chunkTextByUtf8Bytes(line)) {
-          (await backend.sendText(chunk));
+          await write(() => backend.sendText!(chunk), chunk);
           await tick();
         }
       }
       if (i < lines.length - 1) {
-        (await backend.sendText('\\'));
+        await write(() => backend.sendText!('\\'));
         await tick();
-        (await backend.sendSpecialKeys('Enter'));
+        await write(() => backend.sendSpecialKeys!('Enter'));
+        expectedDraft += '\n';
         await tick();
       }
     }
   } else {
     // 裸 PTY：bracketed paste 标记自己包，多行内容不会被拆成多次提交。
-    (await backend.write(BRACKETED_PASTE_START + prompt + BRACKETED_PASTE_END));
+    await write(() => backend.write(BRACKETED_PASTE_START + prompt + BRACKETED_PASTE_END), prompt);
   }
   await delay(500);
   await waitForInputEcho(backend, typedAt);
-  if (backend.sendSpecialKeys) (await backend.sendSpecialKeys('Enter'));
-  else (await backend.write('\r'));
+  if (backend.sendSpecialKeys) await write(() => backend.sendSpecialKeys!('Enter'));
+  else await write(() => backend.write('\r'));
 }
 
 /**
@@ -149,9 +181,9 @@ const emptyComposerLine = (lines: string[], index: number) => lines[index] === '
     && lines[index + 1] === lines[index - 1]);
 /**
  * 输入框下方的权限模式状态栏：⏵⏵ bypass permissions / auto mode / accept edits、⏸ manual / plan mode、? for shortcuts。
- * 右侧可能并排「Not logged in · Run /login」「new task? /clear to save …」。
+ * 右侧可能并排「Not logged in · Run /login」「new task? /clear to save …」；粘贴后还可能出现瞬时的 paste again to expand。
  */
-const MODE_FOOTER_RE = /^(?:(?:⏵⏵|⏸) [a-z ]+ on\b|\? for shortcuts\b)/;
+const MODE_FOOTER_RE = /^(?:(?:⏵⏵|⏸) [a-z ]+ on\b|\? for shortcuts\b|paste again to expand\b)/;
 /**
  * 屏幕底部是当前的空输入框：分隔线、空的 ❯、同样的分隔线，之后可有最多两行自定义 statusLine，再接权限模式状态栏及最多一行 ✔ 通知。
  * 只认底部这一个框，历史里的 ❯、没提交的草稿、页脚之后的正文都不算。
@@ -168,6 +200,45 @@ function emptyComposerAtBottom(lines: string[]): boolean {
     return lines.slice(border + 1, footer).every(line => !/[❯›]|^(?:Permission required|Do you want to (?:proceed|allow)|Select an option|Enter to (?:select|confirm)|Accessing workspace:|Quick safety check:|Security guide)\b/i.test(line));
   }
   return false;
+}
+
+function ownedComposerAtBottom(lines: string[], expected: string, fullPrompt: string): boolean {
+  const footer = /^✔ /.test(lines.at(-1) ?? '') ? lines.length - 2 : lines.length - 1;
+  if (footer < 3 || !MODE_FOOTER_RE.test(lines[footer]!)) return false;
+  for (let statusRows = 0; statusRows <= 2; statusRows++) {
+    const bottom = footer - statusRows - 1;
+    if (bottom < 2 || !/^─{8,}$/.test(lines[bottom]!)) continue;
+    for (let top = bottom - 2; top >= 0; top--) {
+      if (lines[top] !== lines[bottom] || !/^❯(?:\s|$)/.test(lines[top + 1] ?? '')) continue;
+      if (!lines.slice(bottom + 1, footer).every(line => !/[❯›]|^(?:Permission required|Do you want to (?:proceed|allow)|Select an option|Enter to (?:select|confirm)|Accessing workspace:|Quick safety check:|Security guide)\b/i.test(line))) return false;
+      const draft = lines.slice(top + 1, bottom);
+      draft[0] = draft[0]!.replace(/^❯\s*/, '');
+      let observed = draft.join('\n');
+      // These are renderer hints, not text that Dutydeck typed.
+      if (/^Try "[^"\r\n]+"$/.test(observed)) observed = '';
+      if (expected === '/compact' && observed === '/compact  <optional custom summarization instructions>') observed = '/compact';
+      if ((fullPrompt.includes('\n') || Buffer.byteLength(fullPrompt, 'utf8') > CLAUDE_INPUT_CHUNK_BYTES)
+        && /^\[Pasted text #\d+(?: \+\d+ lines)?\]$/.test(observed)) return true;
+      const canonical = (text: string) => text.replace(/\\(?=\n)/g, '').replace(/\s/g, '');
+      const actualText = canonical(observed), expectedText = canonical(expected);
+      // capture-pane may lag the last chunk. A strict prefix can only be our
+      // stale echo; extra or foreign text means the composer is no longer ours.
+      return actualText === expectedText || expectedText.startsWith(actualText);
+    }
+  }
+  return false;
+}
+
+function ownedRawPasteAtBottom(lines: string[], expected: string): boolean {
+  const endMarker = '^[[201~';
+  if (!lines.at(-1)?.endsWith(endMarker)) return false;
+  let observed = lines.join('\n').slice(0, -endMarker.length);
+  const startMarker = '^[[200~';
+  const start = observed.lastIndexOf(startMarker);
+  if (start >= 0) observed = observed.slice(start + startMarker.length);
+  const canonical = (text: string) => text.replace(/\s/g, '');
+  const actualText = canonical(observed);
+  return actualText.length > 0 && canonical(expected).endsWith(actualText);
 }
 
 function isComposerScreen(screen: string): boolean {

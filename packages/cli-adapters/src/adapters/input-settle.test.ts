@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { DriverRecoveryError, PromptNotWrittenError } from '@dutydeck/shared';
 import { writeClaudeFamilyInput } from './claude-family.js';
 import { createCodexAdapter } from './codex.js';
 import { INPUT_ECHO_SETTLE_MS, INPUT_ECHO_TIMEOUT_MS, INPUT_QUIET_MS, INPUT_QUIET_TIMEOUT_MS } from './input-settle.js';
@@ -17,6 +18,7 @@ class EchoingBackend implements PtyLike {
     this.processKey = processKey;
   }
   lastOutputAt(): number { return this.outputAt; }
+  readScreen(): string { return '──────────\n❯\n──────────\n? for shortcuts'; }
   write(data: string): void { this.record(data); }
   sendText(text: string): void { this.record(text); }
   sendSpecialKeys(...keys: string[]): void { this.record(keys.join('+')); }
@@ -143,7 +145,8 @@ describe('user input waits for a quiet screen and its echo', () => {
 
   it('keeps the previous timing on a backend without an output clock', async () => {
     const writes: string[] = [];
-    const claude = writeClaudeFamilyInput({ write: data => { writes.push(data); } }, 'hello');
+    const readScreen = () => '──────────\n❯\n──────────\n? for shortcuts';
+    const claude = writeClaudeFamilyInput({ write: data => { writes.push(data); }, readScreen }, 'hello');
     await vi.advanceTimersByTimeAsync(700);
     await claude;
     expect(writes.at(-1)).toBe('\r');
@@ -151,5 +154,179 @@ describe('user input waits for a quiet screen and its echo', () => {
     await vi.advanceTimersByTimeAsync(200);
     await codex;
     expect(writes.at(-1)).toBe('\r');
+  });
+});
+
+describe('Claude composer ownership around the first terminal write', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  const box = (draft = '', status: string[] = []) => [
+    '──────────', `❯${draft ? ` ${draft}` : ''}`, '──────────', ...status, '? for shortcuts',
+  ].join('\n');
+  const palette = `${box('/compact')}\n/compact  Free up context\n/clear  Clear conversation`;
+
+  class ComposerBackend implements PtyLike {
+    readonly processKey = {};
+    readonly writes: string[] = [];
+    outputAt = Date.now() - 60_000;
+    onWrite?: (data: string) => void;
+    constructor(public screen = box()) {}
+    readScreen(): string { return this.screen; }
+    lastOutputAt(): number { return this.outputAt; }
+    write(data: string): void { this.record(data); }
+    sendText(data: string): void { this.record(data); }
+    sendSpecialKeys(...keys: string[]): void { for (const key of keys) this.record(key); }
+    private record(data: string): void { this.writes.push(data); this.onWrite?.(data); }
+  }
+
+  async function finish(pending: Promise<void>): Promise<void> {
+    await vi.advanceTimersByTimeAsync(15_000);
+    await pending;
+  }
+  function bare(screen?: string): ComposerBackend {
+    const backend = new ComposerBackend(screen);
+    Object.assign(backend, { sendText: undefined, sendSpecialKeys: undefined });
+    return backend;
+  }
+
+  it.each([
+    ['ordinary empty composer', box()],
+    ['native placeholder', box('Try "refactor <filepath>"')],
+    ['permission footer', box().replace('? for shortcuts', '⏵⏵ bypass permissions on (shift+tab to cycle)')],
+    ['two statusLine rows', box('', ['Context 18%', 'custom status'])],
+    ['transient paste expansion hint', box().replace('? for shortcuts', 'paste again to expand')],
+  ])('accepts the %s immediately before writing', async (_name, screen) => {
+    const backend = new ComposerBackend(screen);
+    await finish(writeClaudeFamilyInput(backend, 'business body'));
+    expect(backend.writes).toEqual(['business body', 'Enter']);
+  });
+
+  it.each([
+    ['human draft', box('unfinished human draft')],
+    ['compact draft', box('/compact')],
+    ['slash palette', palette],
+    ['historical prompt only', '❯ old request\nprevious answer'],
+  ])('rejects %s after the quiet wait without writing business bytes', async (_name, screen) => {
+    const backend = new ComposerBackend(screen);
+    const pending = writeClaudeFamilyInput(backend, 'business body');
+    void pending.catch(() => {});
+    await vi.advanceTimersByTimeAsync(15_000);
+    await expect(pending).rejects.toBeInstanceOf(PromptNotWrittenError);
+    expect(backend.writes).toEqual([]);
+  });
+
+  it.each(['/compact', 'unfinished human draft'])('notices %s appearing during the quiet wait', async draft => {
+    const backend = new ComposerBackend();
+    backend.outputAt = Date.now();
+    setTimeout(() => { backend.screen = box(draft); backend.outputAt = Date.now(); }, 400);
+    const pending = writeClaudeFamilyInput(backend, 'business body');
+    void pending.catch(() => {});
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(pending).rejects.toBeInstanceOf(PromptNotWrittenError);
+    expect(backend.writes).toEqual([]);
+  });
+
+  it('requires a current screen reader instead of submitting blindly', async () => {
+    const writes: string[] = [];
+    const pending = writeClaudeFamilyInput({ write(data) { writes.push(data); } }, 'business body');
+    void pending.catch(() => {});
+    await vi.advanceTimersByTimeAsync(15_000);
+    await expect(pending).rejects.toBeInstanceOf(PromptNotWrittenError);
+    expect(writes).toEqual([]);
+  });
+
+  it('turns a foreign composer after the first tmux chunk into unknown and stops later chunks', async () => {
+    const backend = new ComposerBackend();
+    backend.onWrite = data => {
+      if (data === 'first') { backend.onWrite = undefined; backend.screen = palette; }
+    };
+    const pending = writeClaudeFamilyInput(backend, 'first\nsecond');
+    void pending.catch(() => {});
+    await vi.advanceTimersByTimeAsync(15_000);
+    await expect(pending).rejects.toMatchObject({ name: 'DriverRecoveryError', code: 'DRIVER_INPUT_UNCONFIRMED' });
+    expect(backend.writes).toEqual(['first']);
+  });
+
+  it('turns a foreign composer after a soft newline into unknown without typing the next line', async () => {
+    const backend = new ComposerBackend();
+    backend.onWrite = data => {
+      if (data === 'Enter') { backend.onWrite = undefined; backend.screen = box('/compact'); }
+    };
+    const pending = writeClaudeFamilyInput(backend, 'first\nsecond');
+    void pending.catch(() => {});
+    await vi.advanceTimersByTimeAsync(15_000);
+    await expect(pending).rejects.toBeInstanceOf(DriverRecoveryError);
+    expect(backend.writes).toEqual(['first', '\\', 'Enter']);
+  });
+
+  it('turns a slash palette after a bare-PTY paste into unknown without final Enter', async () => {
+    const backend = bare();
+    backend.onWrite = data => {
+      if (data.includes('business body')) { backend.onWrite = undefined; backend.screen = palette; }
+    };
+    const pending = writeClaudeFamilyInput(backend, 'business body');
+    void pending.catch(() => {});
+    await vi.advanceTimersByTimeAsync(15_000);
+    await expect(pending).rejects.toMatchObject({ name: 'DriverRecoveryError', code: 'DRIVER_INPUT_UNCONFIRMED' });
+    expect(backend.writes).toEqual(['\x1b[200~business body\x1b[201~']);
+  });
+
+  it('accepts Claude collapsing its own in-progress multiline chunks into a paste summary', async () => {
+    const backend = new ComposerBackend();
+    backend.onWrite = () => { backend.screen = box('[Pasted text #1 +1 lines]').replace('? for shortcuts', 'paste again to expand'); };
+    await finish(writeClaudeFamilyInput(backend, 'first\nsecond'));
+    expect(backend.writes).toEqual(['first', '\\', 'Enter', 'second', 'Enter']);
+  });
+
+  it('accepts its own chunked multiline echo and submits exactly once', async () => {
+    const backend = new ComposerBackend();
+    let draft = '';
+    backend.onWrite = data => {
+      if (data === 'Enter' && draft) { draft += '\n'; backend.screen = box(draft); }
+      else if (data !== 'Enter' && data !== '\\') { draft += data; backend.screen = box(draft); }
+    };
+    await finish(writeClaudeFamilyInput(backend, 'first\nsecond'));
+    expect(backend.writes).toEqual(['first', '\\', 'Enter', 'second', 'Enter']);
+  });
+
+  it('accepts the compact placeholder and a multiline paste summary as its own echo', async () => {
+    const compact = new ComposerBackend();
+    compact.onWrite = data => {
+      if (data === '/compact') compact.screen = box('/compact  <optional custom summarization instructions>');
+    };
+    await finish(writeClaudeFamilyInput(compact, '/compact'));
+    expect(compact.writes).toEqual(['/compact', 'Enter']);
+
+    const pasted = bare();
+    pasted.onWrite = data => {
+      if (data.includes('first\nsecond')) pasted.screen = box('[Pasted text #1 +1 lines]');
+    };
+    await finish(writeClaudeFamilyInput(pasted, 'first\nsecond'));
+    expect(pasted.writes).toEqual(['\x1b[200~first\nsecond\x1b[201~', '\r']);
+  });
+
+  it('accepts a bare-PTY viewport filled by its own long paste tail', async () => {
+    const visibleTail = 'last routing line\n# Skill: acceptance-skill\nPath: /tmp/skill/SKILL.md\n\nVERIFY_CLAUDE_SKILL_DELIVERY';
+    const prompt = `a long routing prefix that scrolled away\n${visibleTail}`;
+    const backend = bare();
+    // The wrapped viewport is an exact suffix after whitespace canonicalization.
+    backend.onWrite = data => {
+      if (data.includes(prompt)) backend.screen = `last routing line\n# Skill: acceptance-skill\nPath: /tmp/skill/\nSKILL.md\nVERIFY_CLAUDE_SKILL_DELIVERY^[[201~`;
+    };
+    await finish(writeClaudeFamilyInput(backend, prompt));
+    expect(backend.writes).toEqual([`\x1b[200~${prompt}\x1b[201~`, '\r']);
+  });
+
+  it('rejects foreign text after the bare-PTY paste end marker', async () => {
+    const backend = bare();
+    backend.onWrite = data => {
+      if (data.includes('business body')) backend.screen = 'business body^[[201~\nforeign draft';
+    };
+    const pending = writeClaudeFamilyInput(backend, 'business body');
+    void pending.catch(() => {});
+    await vi.advanceTimersByTimeAsync(15_000);
+    await expect(pending).rejects.toMatchObject({ name: 'DriverRecoveryError', code: 'DRIVER_INPUT_UNCONFIRMED' });
+    expect(backend.writes).toEqual(['\x1b[200~business body\x1b[201~']);
   });
 });

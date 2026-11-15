@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { claudePlanGuardMatcher, createCliAdapter } from '@dutydeck/cli-adapters';
@@ -19,7 +19,7 @@ const fixture = (adapterId = 'claude-code') => {
   const cwd = mkdtempSync(join(tmpdir(), 'claude-settings-test-'));
   directories.push(cwd);
   const sessionId = randomUUID();
-  const helper = new ClaudeSettings(adapterId, sessionId);
+  const helper = new ClaudeSettings(adapterId, sessionId, cwd);
   settings.push(helper);
   const generated = createCliAdapter(adapterId).buildArgs({ sessionId, permissionMode: 'full-trust' });
   return { cwd, helper, generated, sessionId };
@@ -242,7 +242,7 @@ describe('Claude settings composition', () => {
     const { cwd, helper, generated, sessionId } = fixture();
     const user = ['--settings', '{"env":{"TOKEN":"fixture-secret"}}'];
     const oldPath = helper.args(user, generated, cwd).at(-1)!;
-    const replacement = new ClaudeSettings('claude-code', sessionId);
+    const replacement = new ClaudeSettings('claude-code', sessionId, cwd);
     settings.push(replacement);
     const newPath = replacement.args(user, generated, cwd).at(-1)!;
     helper.cleanup();
@@ -388,6 +388,89 @@ describe('Claude settings composition', () => {
     } finally {
       await driver.stop();
     }
+  });
+});
+
+const settingsDirectory = (helper: ClaudeSettings) => dirname(helper.planGuardCommand().match(/'([^']+plan-guard\.mjs)'/)![1]!);
+const launchGuardPath = (helper: ClaudeSettings) => join(settingsDirectory(helper), 'launch-guard.json');
+
+describe('Claude launch guard recovery', () => {
+  it('uses every pre-existing JSON snapshot only when the launch record is missing', () => {
+    const { cwd, helper, sessionId } = fixture();
+    const generated = createCliAdapter('claude-code').buildArgs({ sessionId, permissionMode: 'full-trust', cwd, planGuardCommand: helper.planGuardCommand() });
+    directories.push(settingsDirectory(helper));
+    helper.setPlanGuard(true);
+    const first = helper.args(['--settings', '{"theme":"dark"}'], generated, cwd).at(-1)!;
+    const second = helper.args(['--settings', '{"theme":"dark"}'], generated, cwd).at(-1)!;
+    expect(first.endsWith('.json')).toBe(true);
+    expect(second.endsWith('.json')).toBe(true);
+
+    const adopted = new ClaudeSettings('claude-code', sessionId, cwd);
+    settings.push(adopted);
+    expect(adopted.launchGuardWiring()).toMatchObject({ failureBlock: false, planGuard: true, secretGuard: true });
+
+    const mixed = JSON.parse(readFileSync(second, 'utf8'));
+    mixed.hooks.PreToolUse = mixed.hooks.PreToolUse.filter((group: { matcher: string }) => group.matcher !== secretGuardToolMatcher);
+    writeFileSync(second, JSON.stringify(mixed));
+    const separate = new ClaudeSettings('claude-code', sessionId, cwd);
+    settings.push(separate);
+    expect(separate.launchGuardWiring()).toMatchObject({ failureBlock: false, planGuard: true, secretGuard: false });
+
+    const wrongMarker = JSON.parse(readFileSync(first, 'utf8'));
+    const secret = wrongMarker.hooks.PreToolUse.find((group: { matcher: string }) => group.matcher === secretGuardToolMatcher);
+    secret.hooks[0].command = secret.hooks[0].command.replaceAll(cwd, join(cwd, 'other'));
+    writeFileSync(second, JSON.stringify(wrongMarker));
+    const wrongPolicyRoot = new ClaudeSettings('claude-code', sessionId, cwd);
+    settings.push(wrongPolicyRoot);
+    expect(wrongPolicyRoot.launchGuardWiring()).toMatchObject({ planGuard: true, secretGuard: false });
+
+    writeFileSync(join(settingsDirectory(helper), 'broken.json'), '{');
+    const invalidSnapshot = new ClaudeSettings('claude-code', sessionId, cwd);
+    settings.push(invalidSnapshot);
+    expect(invalidSnapshot.launchGuardWiring()).toBeUndefined();
+  });
+
+  it('keeps inline-only launches unverifiable without inventing a snapshot', () => {
+    const { helper } = fixture();
+    expect(helper.launchGuardWiring()).toBeUndefined();
+  });
+
+  it('prefers a valid launch record over historical snapshots', () => {
+    const { cwd, helper, sessionId } = fixture();
+    const generated = createCliAdapter('claude-code').buildArgs({ sessionId, permissionMode: 'full-trust', cwd, planGuardCommand: helper.planGuardCommand() });
+    const snapshot = helper.args(['--settings', '{"theme":"dark"}'], generated, cwd).at(-1)!;
+    helper.recordLaunch(['--settings', '{}'], cwd, false);
+    writeFileSync(snapshot, '{');
+    const adopted = new ClaudeSettings('claude-code', sessionId, cwd);
+    settings.push(adopted);
+    expect(adopted.launchGuardWiring()).toMatchObject({ failureBlock: false, planGuard: false, secretGuard: false });
+  });
+
+  it.each(['malformed', 'fields', 'unreadable', 'directory'] as const)('rejects an invalid launch record even with valid snapshots: %s', kind => {
+    const { cwd, helper, sessionId } = fixture();
+    const generated = createCliAdapter('claude-code').buildArgs({ sessionId, permissionMode: 'full-trust', cwd, planGuardCommand: helper.planGuardCommand() });
+    directories.push(settingsDirectory(helper));
+    helper.args(['--settings', '{"theme":"dark"}'], generated, cwd);
+    const record = launchGuardPath(helper);
+    if (kind === 'malformed') writeFileSync(record, '{');
+    if (kind === 'fields') writeFileSync(record, JSON.stringify({ id: 'old', failureBlock: 'yes', planGuard: true, secretGuard: true }));
+    if (kind === 'unreadable') { writeFileSync(record, '{}'); chmodSync(record, 0); }
+    if (kind === 'directory') mkdirSync(record);
+    const adopted = new ClaudeSettings('claude-code', sessionId, cwd);
+    settings.push(adopted);
+    expect(adopted.launchGuardWiring()).toBeUndefined();
+  });
+
+  it('does not remove a replacement launch record during late cleanup', () => {
+    const { cwd, helper, generated, sessionId } = fixture();
+    const args = helper.args(['--settings', '{"theme":"dark"}'], generated, cwd);
+    helper.recordLaunch(args, cwd, false);
+    const replacement = new ClaudeSettings('claude-code', sessionId, cwd);
+    settings.push(replacement);
+    replacement.recordLaunch(args, cwd, false);
+    const record = readFileSync(launchGuardPath(helper), 'utf8');
+    helper.cleanup();
+    expect(readFileSync(launchGuardPath(replacement), 'utf8')).toBe(record);
   });
 });
 

@@ -20,6 +20,10 @@ interface LaunchGuardWiring {
   secretGuard: boolean;
 }
 
+type LaunchGuardRecord =
+  | { state: 'valid'; wiring: LaunchGuardWiring }
+  | { state: 'missing' | 'invalid' };
+
 function settingsArgs(args: string[]): { rest: string[]; value?: string } {
   const rest: string[] = [];
   let value: string | undefined;
@@ -68,18 +72,27 @@ function hasGuardHook(settings: Record<string, unknown>, expectedMatcher: string
 export class ClaudeSettings {
   private readonly directory: string;
   private readonly files = new Set<string>();
+  private readonly snapshots: (Record<string, unknown> | undefined)[] = [];
   private launchGuard?: LaunchGuardWiring;
 
-  constructor(private readonly adapterId: string, sessionId: string) {
+  constructor(private readonly adapterId: string, sessionId: string, private readonly cwd = process.cwd()) {
     const key = createHash('sha256').update(sessionId).digest('hex');
     this.directory = join(tmpdir(), `dutydeck-claude-settings-${process.getuid?.() ?? 'user'}-${key}`);
     if (claudeAdapters.has(adapterId)) {
       try {
         this.assertPrivateDirectory();
         for (const file of readdirSync(this.directory)) {
-          if (file !== launchGuardFile) this.files.add(join(this.directory, file));
+          if (file === launchGuardFile) continue;
+          const path = join(this.directory, file);
+          this.files.add(path);
+          if (file.endsWith('.json')) {
+            try { this.snapshots.push(readSettings(path, this.directory)); }
+            catch { this.snapshots.push(undefined); }
+          }
         }
-        this.launchGuard = this.readLaunchGuard();
+        const launch = this.readLaunchGuard();
+        if (launch.state === 'valid') this.launchGuard = launch.wiring;
+        else if (launch.state === 'missing') this.launchGuard = this.snapshotLaunchGuard();
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     }
   }
@@ -176,7 +189,7 @@ export class ClaudeSettings {
     writeFileSync(join(this.directory, launchGuardFile), JSON.stringify(this.launchGuard), { mode: 0o600 });
   }
 
-  /** 接管时只认上次真实启动留下的记录；没有记录或记录损坏都不能证明旧进程的配置。 */
+  /** 接管时优先认上次真实启动记录；仅记录不存在时，才使用构造前已有 JSON 的保守校验。 */
   launchGuardWiring(): Readonly<LaunchGuardWiring> | undefined {
     return this.launchGuard;
   }
@@ -208,7 +221,8 @@ export class ClaudeSettings {
     // files this driver created or adopted, never the replacement's settings.
     for (const path of this.files) rmSync(path, { force: true });
     this.files.clear();
-    if (this.launchGuard && this.readLaunchGuard()?.id === this.launchGuard.id) {
+    const recorded = this.readLaunchGuard();
+    if (this.launchGuard && recorded.state === 'valid' && recorded.wiring.id === this.launchGuard.id) {
       rmSync(join(this.directory, launchGuardFile), { force: true });
     }
     this.launchGuard = undefined;
@@ -216,13 +230,27 @@ export class ClaudeSettings {
     catch (error) { if (!['ENOENT', 'ENOTEMPTY'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error; }
   }
 
-  private readLaunchGuard(): LaunchGuardWiring | undefined {
+  private snapshotLaunchGuard(): LaunchGuardWiring | undefined {
+    if (!this.snapshots.length || this.snapshots.some(settings => settings === undefined)) return undefined;
+    const snapshots = this.snapshots as Record<string, unknown>[];
+    return {
+      id: randomUUID(),
+      failureBlock: false,
+      planGuard: snapshots.every(settings => hasGuardHook(settings, claudePlanGuardMatcher, [join(this.directory, planGuardFile)], false)),
+      secretGuard: snapshots.every(settings => hasGuardHook(settings, secretGuardToolMatcher, ['secret-guard.mjs', 'DUTYDECK_POLICY_ROOT=', quote(this.cwd)], false)),
+    };
+  }
+
+  private readLaunchGuard(): LaunchGuardRecord {
+    let value: string;
+    try { value = readFileSync(join(this.directory, launchGuardFile), 'utf8'); }
+    catch (error) { return { state: (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : 'invalid' }; }
     try {
-      const parsed: unknown = JSON.parse(readFileSync(join(this.directory, launchGuardFile), 'utf8'));
+      const parsed: unknown = JSON.parse(value);
       if (!object(parsed) || typeof parsed.id !== 'string' || !parsed.id
-        || typeof parsed.failureBlock !== 'boolean' || typeof parsed.planGuard !== 'boolean' || typeof parsed.secretGuard !== 'boolean') return undefined;
-      return { id: parsed.id, failureBlock: parsed.failureBlock, planGuard: parsed.planGuard, secretGuard: parsed.secretGuard };
-    } catch { return undefined; }
+        || typeof parsed.failureBlock !== 'boolean' || typeof parsed.planGuard !== 'boolean' || typeof parsed.secretGuard !== 'boolean') return { state: 'invalid' };
+      return { state: 'valid', wiring: { id: parsed.id, failureBlock: parsed.failureBlock, planGuard: parsed.planGuard, secretGuard: parsed.secretGuard } };
+    } catch { return { state: 'invalid' }; }
   }
 
   private assertPrivateDirectory(): void {
