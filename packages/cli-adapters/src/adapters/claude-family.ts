@@ -105,12 +105,13 @@ export async function writeClaudeFamilyInput(backend: PtyLike, prompt: string): 
     const screen = await backend.readScreen();
     const lines = screenLines(screen);
     if (!writeAttempted) {
-      if (!emptyComposerAtBottom(lines)) {
+      if (!emptyComposerAtBottom(lines) && !emptyMinimalComposer(lines)) {
         throw new PromptNotWrittenError('Claude 当前输入框不是空白，可能有人工草稿、/compact 或 slash 菜单；本条消息没有写入，请处理后重发。');
       }
       return;
     }
     const owned = ownedComposerAtBottom(lines, expectedDraft, prompt)
+      || ownedMinimalComposer(lines, expectedDraft)
       || (!(backend.sendText && backend.sendSpecialKeys) && ownedRawPasteAtBottom(lines, expectedDraft));
     if (!owned) {
       throw new DriverRecoveryError('Claude 输入框在本次写入后发生变化；提交结果未知，原进程已保留，未自动重发', 'DRIVER_INPUT_UNCONFIRMED');
@@ -200,6 +201,28 @@ function emptyComposerAtBottom(lines: string[]): boolean {
     return lines.slice(border + 1, footer).every(line => !/[❯›]|^(?:Permission required|Do you want to (?:proceed|allow)|Select an option|Enter to (?:select|confirm)|Accessing workspace:|Quick safety check:|Security guide)\b/i.test(line));
   }
   return false;
+}
+
+function minimalComposer(lines: string[]): { observed: string; trailing: string[] } | undefined {
+  if (!/^Claude Code v\d/.test(lines[0] ?? '')) return undefined;
+  const prompt = lines.findIndex((line, index) => index > 0 && /^❯(?:\s|$)/.test(line));
+  if (prompt < 1 || !lines.slice(1, prompt).every(line => CLAUDE_FAMILY_COMPLETION_RE.test(line))) return undefined;
+  return { observed: lines[prompt]!.replace(/^❯\s*/, ''), trailing: lines.slice(prompt + 1) };
+}
+
+function emptyMinimalComposer(lines: string[]): boolean {
+  const minimal = minimalComposer(lines);
+  return minimal?.observed === '' && minimal.trailing.length === 0;
+}
+
+function ownedMinimalComposer(lines: string[], expected: string): boolean {
+  const minimal = minimalComposer(lines);
+  // Minimal captures use dots for byte-progress echo. Any textual output,
+  // menu, second prompt or foreign suffix remains an unknown submission.
+  if (!minimal || !minimal.trailing.every(line => /^\.+$/.test(line))) return false;
+  const canonical = (text: string) => text.replace(/\s/g, '');
+  const actualText = canonical(minimal.observed), expectedText = canonical(expected);
+  return actualText === expectedText || expectedText.startsWith(actualText);
 }
 
 function ownedComposerAtBottom(lines: string[], expected: string, fullPrompt: string): boolean {
