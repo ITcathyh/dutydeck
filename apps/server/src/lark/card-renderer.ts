@@ -1,4 +1,4 @@
-import { isBackgroundFollowup, isChildDiagnostic, terminalTaskStatuses, type AgentEvent, type VerificationResponse, type VerificationStatus } from '@dutydeck/shared';
+import { appendEventContent, isBackgroundFollowup, isChildDiagnostic, terminalTaskStatuses, type AgentEvent, type VerificationResponse, type VerificationStatus } from '@dutydeck/shared';
 import type { StoredLarkConfig } from './config.js';
 import { boundLarkCardElements, LarkServiceError, type LarkCardService } from './service.js';
 import { redactTraceText, sensitiveTraceKey } from './secret-redaction.js';
@@ -90,6 +90,9 @@ function compactTraceEntries(events: AgentEvent[]): TraceEntry[] {
     const role = data.role ?? 'assistant';
     if ((event.type === 'text' || event.type === 'thinking') && previous?.type === event.type && (previous.data.role ?? 'assistant') === role
       && previous.data.nativeTurnId === data.nativeTurnId && previous.data.nativeSource === data.nativeSource) {
+      if (previous.data.parts || data.parts) previous.data.parts = appendEventContent(
+        previous.data.parts ?? [{ type: 'text' as const, text: previous.data.text ?? '' }],
+        data.parts ?? [{ type: 'text' as const, text: data.text ?? '' }]);
       previous.data.text = `${previous.data.text ?? ''}${data.text ?? ''}`;
       continue;
     }
@@ -1187,7 +1190,12 @@ export function renderLarkCardElements(
   const finalMessage = finalMessageIndex >= 0 && finalFollowsActivity ? entries[finalMessageIndex] : undefined;
   const idleTimeout = view === 'result' ? larkIdleTimeout(events) : undefined;
   const preservedMemoryText = completed ? memoryFinalText(events, entries) : undefined;
-  const finalText = view === 'result' ? redactTraceText(preservedMemoryText ?? String(finalMessage?.data.text ?? '')).trim() : truncateTrace(preservedMemoryText ?? finalMessage?.data.text, 6_000);
+  const finalRawText = view === 'result' ? redactTraceText(preservedMemoryText ?? String(finalMessage?.data.text ?? '')).trim() : truncateTrace(preservedMemoryText ?? finalMessage?.data.text, 6_000);
+  const finalImageCount = finalMessage?.data.parts?.filter((part: any) => part?.type === 'image').length ?? 0;
+  const finalText = finalImageCount
+    ? finalRawText ? `${finalRawText}\n\n另有 ${finalImageCount} 个图片结果未随卡投递，请在 Web 工作台查看图片详情或引用。`
+      : `Agent 返回了 ${finalImageCount} 个图片结果；飞书卡片不附带图片，请在 Web 工作台查看图片详情或引用。`
+    : finalRawText;
   const activityEntries = entries.filter(entry => entry !== finalMessage || !finalFollowsActivity);
   const permissionEntries = activityEntries.filter(entry => entry.type === 'permission_request');
   const errorEntries = activityEntries.filter(entry => entry.type === 'error');
