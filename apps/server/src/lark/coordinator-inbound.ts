@@ -1621,8 +1621,12 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
           const echo = escapeLarkPromptEcho(larkCommandEcho(displayedPrompt, 120));
           if (steering.task.status === 'reconcile_required') await replyCard('/queue 插话结果未知', `**${larkSteeringUnknownNote}**\n\n${echo}`, { failed: true });
           else if (steering.outcome === 'injected' || steering.outcome === 'startedNewTurn') {
-            const running = steering.outcome === 'injected'
-              ? (await this.runtime.getTasks!(sessionId)).find(task => task.status === 'running') : undefined;
+            let running: TaskRecord | undefined;
+            if (steering.outcome === 'injected') try {
+              running = (await this.runtime.getTasks!(sessionId)).find(task => task.status === 'running');
+            } catch (error) {
+              this.log.warn({ error, sessionId }, '读取插话后的当前任务失败，保留原插话说明');
+            }
             const pendingPermission = running ? await this.hasPendingSteeringPermission(sessionId, running.id) : false;
             await replyCard('已插话', `**${steeringOutcomeText(steering.outcome, pendingPermission)}**\n\n${echo}`);
           }

@@ -448,6 +448,32 @@ describe('排队卡：当前这一轮被审批挡住', () => {
     expect(h.markdownOf(receipt)).not.toContain(pendingInjectedNote);
   });
 
+  it('injected 成功后 running 诊断查询失败，仍按旧文案正常回执', async () => {
+    const steer = vi.fn(async (_prompt: string) => 'injected' as const);
+    const h = await harness({ steer });
+    await h.dispatch('om_1', '第一件事');
+    await vi.waitFor(() => expect(h.prompts).toHaveLength(1));
+    await h.dispatch('om_2', '第二件事');
+    let injected = false;
+    const injectQueued = h.runtime.injectQueued.bind(h.runtime);
+    vi.spyOn(h.runtime, 'injectQueued').mockImplementation(async (...args) => {
+      const result = await injectQueued(...args);
+      expect(result.outcome).toBe('injected');
+      injected = true;
+      return result;
+    });
+    const getTasks = h.runtime.getTasks.bind(h.runtime);
+    vi.spyOn(h.runtime, 'getTasks').mockImplementation(async (...args) => {
+      if (injected) throw new Error('running diagnostic unavailable');
+      return getTasks(...args);
+    });
+    await h.coordinator.handle(event('om_queue_steer', '/queue steer 1'), h.config);
+    const receipt = h.receiptNamed('已插话');
+    expect(h.markdownOf(receipt)).toContain(legacyInjectedNote);
+    expect(h.markdownOf(receipt)).not.toContain(pendingInjectedNote);
+    expect(h.receiptNamed('/queue 执行失败')).toBeUndefined();
+  });
+
   it('无关任务 pending 和其他 outcome 都不改变既有回执', async () => {
     const steer = vi.fn(async (_prompt: string) => 'injected' as const);
     const h = await harness({ steer });
