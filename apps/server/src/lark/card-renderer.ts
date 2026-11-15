@@ -1,4 +1,4 @@
-import { isBackgroundFollowup, isChildDiagnostic, terminalTaskStatuses, type AgentEvent, type VerificationResponse, type VerificationStatus } from '@dutydeck/shared';
+import { appendEventContent, isBackgroundFollowup, isChildDiagnostic, terminalTaskStatuses, type AgentEvent, type VerificationResponse, type VerificationStatus } from '@dutydeck/shared';
 import type { StoredLarkConfig } from './config.js';
 import { boundLarkCardElements, LarkServiceError, type LarkCardService } from './service.js';
 import { redactTraceText, sensitiveTraceKey } from './secret-redaction.js';
@@ -90,6 +90,9 @@ function compactTraceEntries(events: AgentEvent[]): TraceEntry[] {
     const role = data.role ?? 'assistant';
     if ((event.type === 'text' || event.type === 'thinking') && previous?.type === event.type && (previous.data.role ?? 'assistant') === role
       && previous.data.nativeTurnId === data.nativeTurnId && previous.data.nativeSource === data.nativeSource) {
+      if (previous.data.parts || data.parts) previous.data.parts = appendEventContent(
+        previous.data.parts ?? [{ type: 'text' as const, text: previous.data.text ?? '' }],
+        data.parts ?? [{ type: 'text' as const, text: data.text ?? '' }]);
       previous.data.text = `${previous.data.text ?? ''}${data.text ?? ''}`;
       continue;
     }
@@ -192,13 +195,15 @@ export function larkTaskSteering(events: AgentEvent[], taskId: string): string |
 }
 
 /** 插话结果的人话说明：卡面与回执只写实际发生了什么。 */
-export const steeringOutcomeText = (outcome: string) => ({
-  injected: '已把这条内容送进正在执行的这一轮，Agent 会在这一轮里接着处理，回复出现在那一轮的结果里。',
-  startedNewTurn: 'Agent 已用这条内容另起了一轮；那一轮不在 Dutydeck 的执行记录里，结果不会回到这张卡片。',
-  promptRequired: '正在执行的那一轮此刻接不了插话（还没交给 Agent，或已经结束）。',
-  unsupported: '当前 Agent 不支持插话。',
-  incompatible: '这条内容的执行设置（权限模式、模型或高危操作策略）与正在执行的那一轮不同，不能插话。'
-} as Record<string, string>)[outcome] ?? 'Agent 没有接受插话。';
+export const steeringOutcomeText = (outcome: string, pendingPermission = false) => pendingPermission && outcome === 'injected'
+  ? '已送进正在执行的这一轮；这一轮还有审批没处理，Agent 有没有读到以它后续的回复为准。'
+  : ({
+    injected: '已把这条内容送进正在执行的这一轮，Agent 会在这一轮里接着处理，回复出现在那一轮的结果里。',
+    startedNewTurn: 'Agent 已用这条内容另起了一轮；那一轮不在 Dutydeck 的执行记录里，结果不会回到这张卡片。',
+    promptRequired: '正在执行的那一轮此刻接不了插话（还没交给 Agent，或已经结束）。',
+    unsupported: '当前 Agent 不支持插话。',
+    incompatible: '这条内容的执行设置（权限模式、模型或高危操作策略）与正在执行的那一轮不同，不能插话。'
+  } as Record<string, string>)[outcome] ?? 'Agent 没有接受插话。';
 
 const fenced = (value: unknown) => {
   if (value === undefined) return '';
@@ -1185,7 +1190,12 @@ export function renderLarkCardElements(
   const finalMessage = finalMessageIndex >= 0 && finalFollowsActivity ? entries[finalMessageIndex] : undefined;
   const idleTimeout = view === 'result' ? larkIdleTimeout(events) : undefined;
   const preservedMemoryText = completed ? memoryFinalText(events, entries) : undefined;
-  const finalText = view === 'result' ? redactTraceText(preservedMemoryText ?? String(finalMessage?.data.text ?? '')).trim() : truncateTrace(preservedMemoryText ?? finalMessage?.data.text, 6_000);
+  const finalRawText = view === 'result' ? redactTraceText(preservedMemoryText ?? String(finalMessage?.data.text ?? '')).trim() : truncateTrace(preservedMemoryText ?? finalMessage?.data.text, 6_000);
+  const finalImageCount = finalMessage?.data.parts?.filter((part: any) => part?.type === 'image').length ?? 0;
+  const finalText = finalImageCount
+    ? finalRawText ? `${finalRawText}\n\n另有 ${finalImageCount} 个图片结果未随卡投递，请在 Web 工作台查看图片详情或引用。`
+      : `Agent 返回了 ${finalImageCount} 个图片结果；飞书卡片不附带图片，请在 Web 工作台查看图片详情或引用。`
+    : finalRawText;
   const activityEntries = entries.filter(entry => entry !== finalMessage || !finalFollowsActivity);
   const permissionEntries = activityEntries.filter(entry => entry.type === 'permission_request');
   const errorEntries = activityEntries.filter(entry => entry.type === 'error');

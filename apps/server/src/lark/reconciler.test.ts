@@ -1392,6 +1392,33 @@ describe('恢复异常通知与人工核验结果', () => {
       }
     } finally { repos.close(); }
   });
+
+  it('reconciles a mixed text/image ACP result with the same note and no image delivery', async () => {
+    const repos = createRepositories(':memory:');
+    try {
+      const mapping = createMapping('image-map', 'om_request', 'session', { runtime_task_id: 'task', progress_frozen: true, reply_message_id: 'om_request' });
+      const cardMappings = createMemoryChannelMappingRepo([mapping]);
+      const events = [
+        { id: 'prompt', type: 'text', taskId: 'task', data: { role: 'user', text: 'Prompt', taskId: 'task' } },
+        { id: 'text', type: 'text', taskId: 'task', data: { text: '报告正文' } },
+        { id: 'image', type: 'text', taskId: 'task', data: { text: '', parts: [{ type: 'image', mimeType: 'image/png', uri: 'file:///work/chart.png' }] } }
+      ];
+      const runtime = { getTasks: async () => [{ id: 'task', status: 'completed', updatedAt: new Date().toISOString() }],
+        getEvents: async () => events,
+        getTaskRecovery: async () => ({ status: 'completed', blockers: [] }) };
+      const service = { update: vi.fn(), reply: vi.fn(async (_input: any) => ({ messageId: 'om_result' })), send: vi.fn(),
+        uploadFile: vi.fn(), replyFile: vi.fn(), sendFile: vi.fn() };
+      await performLarkCardReconcile({ runtime: runtime as any, service: service as any, cardMappings: cardMappings as any,
+        log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, config, channel: 'lark-card:cli_test', deliveryStore: repos.config });
+      const delivered = service.reply.mock.calls[0]![0] as any;
+      expect(delivered.elements.find((element: any) => element.element_id === 'final_output')?.content)
+        .toBe('报告正文\n\n另有 1 个图片结果未随卡投递，请在 Web 工作台查看图片详情或引用。');
+      expect(service.uploadFile).not.toHaveBeenCalled();
+      expect(service.replyFile).not.toHaveBeenCalled();
+      expect(service.sendFile).not.toHaveBeenCalled();
+      expect(service.send).not.toHaveBeenCalled();
+    } finally { repos.close(); }
+  });
 });
 
 describe('结果投递失败的对账', () => {

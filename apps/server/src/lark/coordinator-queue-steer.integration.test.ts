@@ -164,6 +164,8 @@ async function harness(options: { configPatch?: Partial<StoredLarkConfig>; steer
 
 const promoteLabel = '中断当前这一轮，先做这条';
 const injectLabel = '插进当前这一轮';
+const legacyInjectedNote = '已把这条内容送进正在执行的这一轮，Agent 会在这一轮里接着处理，回复出现在那一轮的结果里。';
+const pendingInjectedNote = '已送进正在执行的这一轮；这一轮还有审批没处理，Agent 有没有读到以它后续的回复为准。';
 
 describe('排队卡：紧排在正在执行的那一轮后面', () => {
   it('接受后的排队 PATCH 失败仍保留任务归属，之后正常交付独立结果', async () => {
@@ -288,6 +290,13 @@ describe('排队卡：当前这一轮被审批挡住', () => {
     expect(record).toBeDefined();
     return record!;
   });
+  const mockPendingFor = async (h: Awaited<ReturnType<typeof harness>>, prompt: string) => {
+    const current = (await h.runtimeTask(prompt))!;
+    vi.spyOn(h.runtime, 'getPendingPermissions').mockReturnValue([{ id: 'native_current', title: '当前任务审批', status: 'pending' }]);
+    vi.spyOn(h.runtime, 'getLatestPermissionRequest').mockImplementation(async (_sessionId, taskId, nativeId) => taskId === current.id
+      ? { type: 'permission_request', taskId, data: { id: nativeId, title: '当前任务审批', status: 'pending' } } as any : undefined);
+    return current;
+  };
   /** 排队卡上审批按钮的回调值。 */
   const approvalValue = (card: any, action: 'approve' | 'reject') => {
     const actions = card.elements.find((element: any) => element.element_id === 'queued_approval_actions');
@@ -392,6 +401,99 @@ describe('排队卡：当前这一轮被审批挡住', () => {
     const card = await h.waitCard('om_2', '审批没有成功，这条确认消息已取消，请重新点按钮或重新发送。');
     expect(card).toMatchObject({ state: 'cancelled', statusLabel: '审批没有成功' });
     expect(h.resolvePermission).not.toHaveBeenCalled();
+  });
+
+  it('当前任务仍有审批时，steerQueuedTurn 的派发 note 不承诺 Agent 已读', async () => {
+    const steer = vi.fn(async (_prompt: string) => 'injected' as const);
+    const h = await harness({ steer });
+    await h.dispatch('om_1', '第一件事');
+    await vi.waitFor(() => expect(h.prompts).toHaveLength(1));
+    await h.dispatch('om_2', '顺便看下日志');
+    await mockPendingFor(h, '第一件事');
+    const target = (await h.runtimeTask('顺便看下日志'))!;
+    const steering = await (h.coordinator as any).steerQueuedTurn(h.config, event('om_steer', '/steer 顺便看下日志'), await h.sessionId(), target, 'inject');
+    expect(steering).toEqual({ steered: 'injected', note: pendingInjectedNote });
+  });
+
+  it('/queue steer 的即时回执只在当前任务仍有审批时换成不承诺已读的文案', async () => {
+    const steer = vi.fn(async (_prompt: string) => 'injected' as const);
+    const h = await harness({ steer });
+    await h.dispatch('om_1', '第一件事');
+    await vi.waitFor(() => expect(h.prompts).toHaveLength(1));
+    await h.dispatch('om_2', '顺便看下日志');
+    await mockPendingFor(h, '第一件事');
+    await h.coordinator.handle(event('om_queue_steer', '/queue steer 1'), h.config);
+    const receipt = h.receiptNamed('已插话');
+    expect(h.markdownOf(receipt)).toContain(pendingInjectedNote);
+    expect(h.markdownOf(receipt)).not.toContain(legacyInjectedNote);
+  });
+
+  it('injected 返回后审批已解决时，/queue steer 逐字保留旧回执', async () => {
+    const steer = vi.fn(async (_prompt: string) => 'injected' as const);
+    const h = await harness({ steer });
+    await h.dispatch('om_1', '第一件事');
+    await vi.waitFor(() => expect(h.prompts).toHaveLength(1));
+    await h.dispatch('om_2', '顺便看下日志');
+    let pending = [{ id: 'native_current', title: '当前任务审批', status: 'pending' as const }];
+    vi.spyOn(h.runtime, 'getPendingPermissions').mockImplementation(() => pending);
+    const injectQueued = h.runtime.injectQueued.bind(h.runtime);
+    vi.spyOn(h.runtime, 'injectQueued').mockImplementation(async (...args) => {
+      const result = await injectQueued(...args);
+      pending = [];
+      return result;
+    });
+    await h.coordinator.handle(event('om_queue_steer', '/queue steer 1'), h.config);
+    const receipt = h.receiptNamed('已插话');
+    expect(h.markdownOf(receipt)).toContain(legacyInjectedNote);
+    expect(h.markdownOf(receipt)).not.toContain(pendingInjectedNote);
+  });
+
+  it('injected 成功后 running 诊断查询失败，仍按旧文案正常回执', async () => {
+    const steer = vi.fn(async (_prompt: string) => 'injected' as const);
+    const h = await harness({ steer });
+    await h.dispatch('om_1', '第一件事');
+    await vi.waitFor(() => expect(h.prompts).toHaveLength(1));
+    await h.dispatch('om_2', '第二件事');
+    let injected = false;
+    const injectQueued = h.runtime.injectQueued.bind(h.runtime);
+    vi.spyOn(h.runtime, 'injectQueued').mockImplementation(async (...args) => {
+      const result = await injectQueued(...args);
+      expect(result.outcome).toBe('injected');
+      injected = true;
+      return result;
+    });
+    const getTasks = h.runtime.getTasks.bind(h.runtime);
+    vi.spyOn(h.runtime, 'getTasks').mockImplementation(async (...args) => {
+      if (injected) throw new Error('running diagnostic unavailable');
+      return getTasks(...args);
+    });
+    await h.coordinator.handle(event('om_queue_steer', '/queue steer 1'), h.config);
+    const receipt = h.receiptNamed('已插话');
+    expect(h.markdownOf(receipt)).toContain(legacyInjectedNote);
+    expect(h.markdownOf(receipt)).not.toContain(pendingInjectedNote);
+    expect(h.receiptNamed('/queue 执行失败')).toBeUndefined();
+  });
+
+  it('无关任务 pending 和其他 outcome 都不改变既有回执', async () => {
+    const steer = vi.fn(async (_prompt: string) => 'injected' as const);
+    const h = await harness({ steer });
+    await h.dispatch('om_1', '第一件事');
+    await vi.waitFor(() => expect(h.prompts).toHaveLength(1));
+    await h.dispatch('om_2', '第二件事');
+    vi.spyOn(h.runtime, 'getPendingPermissions').mockReturnValue([{ id: 'unrelated', title: '其他任务审批', status: 'pending' }]);
+    await h.coordinator.handle(event('om_queue_steer', '/queue steer 1'), h.config);
+    expect(h.markdownOf(h.receiptNamed('已插话'))).toContain(legacyInjectedNote);
+    expect(h.markdownOf(h.receiptNamed('已插话'))).not.toContain(pendingInjectedNote);
+
+    const other = await harness({ steer: vi.fn(async (_prompt: string) => 'startedNewTurn' as const) });
+    await other.dispatch('om_1', '第一件事');
+    await vi.waitFor(() => expect(other.prompts).toHaveLength(1));
+    await other.dispatch('om_2', '第二件事');
+    await mockPendingFor(other, '第一件事');
+    await other.coordinator.handle(event('om_queue_steer', '/queue steer 1'), other.config);
+    const receipt = other.receiptNamed('已插话');
+    expect(other.markdownOf(receipt)).toContain('Agent 已用这条内容另起了一轮；那一轮不在 Dutydeck 的执行记录里，结果不会回到这张卡片。');
+    expect(other.markdownOf(receipt)).not.toContain(pendingInjectedNote);
   });
 });
 

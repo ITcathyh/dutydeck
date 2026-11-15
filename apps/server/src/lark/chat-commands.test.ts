@@ -401,7 +401,8 @@ describe('Agent 支持插话时送进正在执行的这一轮', () => {
       await restored.initializeWorkflows(h.config);
       await restored.reconcile(h.config);
       const result = h.cards.filter(card => card.cardKind === 'result' && card.taskId === 'om_2').at(-1);
-      expect(h.markdownOf(result)).toContain('已把这条内容送进正在执行的这一轮');
+      expect(h.markdownOf(result)).toContain('已把这条内容送进正在执行的这一轮，Agent 会在这一轮里接着处理，回复出现在那一轮的结果里。');
+      expect(h.markdownOf(result)).not.toContain('这一轮还有审批没处理');
       expect(h.markdownOf(result)).not.toContain('结果不完整');
     } finally { restored.stop(); }
   });

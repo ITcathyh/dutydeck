@@ -38,6 +38,8 @@ Ordinary card sends, replies and updates use a conservative local budget of 24 K
 
 **Attachments and delivery.** Markdown and structured images in cards share a deduplicated limit of 4 images. Only real Markdown image syntax with a valid Lark `img_key` is read; code examples and ordinary image URLs do not trigger downloads.
 
+Final image results returned by an Agent through ACP are not attached to the Lark result card. An image-only result states the image count; a mixed text/image result keeps the original text and adds how many images were not delivered with the card. Open the Web console for image details or references. URI-only images and images whose MIME type cannot be previewed also count, but the Web console is not guaranteed to display the image itself. Images from another turn or blocked by later tool activity do not count toward the current final result.
+
 Lark files fall back to Range downloads with the same bot identity only after an explicit platform size-limit response. Files stream to disk in chunks of at most 32 MB, with a **512 MiB local per-file limit** chosen by Dutydeck, not a Lark platform limit. Images do not use Range. Permission and restricted-message errors are not bypassed; failed, cancelled or timed-out downloads do not give the Agent partial files. The existing request deadline still applies (15 seconds by default); slow large files may need to be provided as smaller files.
 
 Files and images in a merged forward are downloaded with the direct child message ID first. Only upstream business code `234003` advances through ancestor message IDs in verified merge parent-child order. Any other error retains the existing failure handling. Candidates never expand to unauthorized messages, and text attribution and nested-expansion limits stay unchanged. A duplicate resource keeps the source of its first child message.
@@ -129,6 +131,8 @@ Matches `/help` (6 per page by default; plugin commands are listed on the last p
 | `/work` | `/work research <goal>` | Goals, agent assignment, reusable workflows; revised goals show 计划已修订（vN） on the card, and pending Agent revisions are handled with 确认修订 / 放弃修订; a text confirmation (of a new plan or of a revision) must carry the digest shown on the card, `/work confirm <goal id> <digest>` (the card shows the first 12 characters; at least 12 are required), and is refused if it no longer matches the pending content; the error does not show the digest, so copy the command from the latest card; when an Agent edits an unconfirmed plan, a new confirmation card is posted |
 | `/grant`, `/revoke` | `/grant @member` | Open or close group chat permission |
 | `/repair` | `/repair` | Diagnose and fill missing Lark app scopes, events and card callbacks (asks to confirm; submits publication only after confirmation) |
+
+A steering receipt only confirms that the content entered the running turn's input. If the current task still has a pending approval when the immediate receipt is generated, the receipt explicitly says to use the Agent's later reply to determine whether it read the input. This sentence is omitted once the approval is resolved; terminal cards and restart reconciliation do not infer a waiting warning from historical approvals.
 
 After `/repair` attempts publication, a failed request or result check shows “发布结果待确认” (publication outcome unconfirmed), rather than claiming nothing was published. Check that version on the open platform before repeating `/repair`. A failure before publication was submitted is stated separately.
 
