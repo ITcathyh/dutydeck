@@ -93,10 +93,29 @@ describe('ClaudeTranscriptTailer lifecycle-only sibling records', () => {
     expect(tailer!.pendingBackgroundWork()).toBe(0);
   });
 
-  it('ignores a sibling notification missing its tool use id', async () => {
+  it('accepts a legacy known-task notification without a tool use id', async () => {
     await setup([...launchRecords(), { type: 'system', subtype: 'turn_duration', uuid: 'duration', timestamp: at(11), sessionId: native }]);
     await appendSibling(queueNotice('agent-1', ''));
+    expect(tailer!.pendingBackgroundWork()).toBe(0);
+  });
+
+  it('rejects a present but mismatched tool use id and an unknown task', async () => {
+    await setup([...launchRecords(), { type: 'system', subtype: 'turn_duration', uuid: 'duration', timestamp: at(11), sessionId: native }]);
+    await appendSibling(userNotice('agent-1', 'other-tool'));
+    await appendSibling(userNotice('unknown-agent', 'unknown-tool'));
     expect(tailer!.pendingBackgroundWork()).toBe(1);
+  });
+
+  it('does not guess a legacy notification naming multiple known tasks', async () => {
+    await setup([
+      ...launchRecords(), ...launchRecords('agent-2', 'agent-launch-2'),
+      { type: 'system', subtype: 'turn_duration', uuid: 'duration', timestamp: at(11), sessionId: native },
+    ]);
+    await appendSibling({
+      type: 'user', uuid: 'ambiguous-legacy', timestamp: at(21), sessionId: native, turnOrigin: 'task_notification',
+      message: { role: 'user', content: '<task-notification><task-id>agent-1</task-id><task-id>agent-2</task-id><status>completed</status></task-notification>' },
+    });
+    expect(tailer!.pendingBackgroundWork()).toBe(2);
   });
 
   it('does not reserve mirror evidence for an unknown sibling task', async () => {

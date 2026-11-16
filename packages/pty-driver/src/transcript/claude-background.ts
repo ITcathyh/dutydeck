@@ -1,9 +1,46 @@
 type Task = { id: string; toolUseId: string; kind: 'agent' | 'shell' | 'monitor'; originInputId?: string; state: string; expiresAt?: number };
 type Generation = { sinceMs?: number; resumed: boolean };
-type Run = { sinceMs?: number; endedAtMs?: number; endPosition?: TranscriptPosition; active: Generation[] };
-type MirrorSlot = { key: string; generation?: Generation };
+type Run = { sinceMs?: number; endedAtMs?: number; endPosition?: TranscriptPosition; active: Generation[]; notices: NoticeIndex };
+type NoticeShape = 'queue' | 'user' | 'attachment';
+type NoticeOccurrence = { id: number; mask: number; natives: Set<string>; lineage: string };
+type NoticeBucket = { pending: number; missing: Map<string, Map<number, NoticeOccurrence>>[] };
+type NoticeIndex = { buckets: Map<string, NoticeBucket>; seen: Set<string>; nextId: number; pending: number };
 
-const MIRROR_SLOTS_MAX = 20_000;
+const NOTICE_INDEX_MAX = 20_000;
+const ORPHAN_NOTICES_MAX = 20_000;
+const shapes: NoticeShape[] = ['queue', 'user', 'attachment'];
+const shapeBit = (shape: NoticeShape) => 1 << shapes.indexOf(shape);
+
+function emptyNoticeIndex(): NoticeIndex {
+  return { buckets: new Map(), seen: new Set(), nextId: 0, pending: 0 };
+}
+
+function noticeLineage(natives: Set<string>): string {
+  return natives.size === 1 ? natives.values().next().value! : `\0${JSON.stringify([...natives].sort())}`;
+}
+
+function addCandidate(bucket: NoticeBucket, occurrence: NoticeOccurrence, shape: NoticeShape): void {
+  const groups = bucket.missing[shapes.indexOf(shape)]!;
+  let queue = groups.get(occurrence.lineage);
+  if (!queue) { queue = new Map(); groups.set(occurrence.lineage, queue); }
+  queue.set(occurrence.id, occurrence);
+}
+
+function removeCandidate(bucket: NoticeBucket, occurrence: NoticeOccurrence, shape: NoticeShape): void {
+  const groups = bucket.missing[shapes.indexOf(shape)]!;
+  const queue = groups.get(occurrence.lineage);
+  if (!queue) return;
+  queue.delete(occurrence.id);
+  if (queue.size === 0) groups.delete(occurrence.lineage);
+}
+
+function createOccurrence(index: NoticeIndex, bucket: NoticeBucket, shape: NoticeShape, nativeKey: string): NoticeOccurrence {
+  const occurrence: NoticeOccurrence = { id: index.nextId++, mask: shapeBit(shape), natives: new Set([nativeKey]), lineage: nativeKey };
+  for (const other of shapes) if (other !== shape) addCandidate(bucket, occurrence, other);
+  bucket.pending++;
+  index.pending++;
+  return occurrence;
+}
 
 function taskNotificationText(entry: any): string | undefined {
   const content = entry?.message?.content;
@@ -23,9 +60,8 @@ export class ClaudeBackgroundTasks {
   private readonly tasks = new Map<string, Task>();
   private readonly runs = new Map<string, Run>();
   private readonly observedPositions = new Set<string>();
-  private readonly settledNotifications = new Set<string>();
-  private readonly mirrorSlots: MirrorSlot[] = [];
-  private mirrorOverflow = false;
+  private readonly orphanNotices = new Map<string, NoticeIndex>();
+  private orphanNoticeWeight = 0;
   private inputId?: string;
   private readonly inputEntries = new Set<string>();
   private readonly notificationEntries = new Set<string>();
@@ -43,7 +79,9 @@ export class ClaudeBackgroundTasks {
     if (typeof text !== 'string' || !text.trimStart().startsWith('<task-notification>')) return false;
     const state = /<status>(completed|failed|killed|stopped)<\/status>/.exec(text)?.[1];
     const toolUseId = /<tool-use-id>([^<]+)<\/tool-use-id>/.exec(text)?.[1]?.trim();
-    if (!state || !toolUseId || !taskNotificationIds(text).some(id => this.tasks.get(id)?.toolUseId === toolUseId)) return false;
+    const ids = taskNotificationIds(text);
+    const task = ids.length === 1 ? this.tasks.get(ids[0]!) : undefined;
+    if (!state || !task || (toolUseId !== undefined && task.toolUseId !== toolUseId)) return false;
     return this.observeEntry(entry, position, true);
   }
 
@@ -78,28 +116,20 @@ export class ClaudeBackgroundTasks {
       const toolUseId = /<tool-use-id>([^<]+)<\/tool-use-id>/.exec(notificationText)?.[1]?.trim();
       const nativeSessionId = typeof entry.sessionId === 'string' && entry.sessionId ? entry.sessionId
         : typeof entry.session_id === 'string' && entry.session_id ? entry.session_id : undefined;
-      const sourceShape = entry.type === 'queue-operation' ? 'queue' : entry.type === 'user' ? 'user' : 'attachment';
-      if (state) for (const id of lifecycleOnly ? ids.filter(id => this.tasks.get(id)?.toolUseId === toolUseId) : ids) {
-        const mirrorKey = nativeSessionId && toolUseId && id
-          ? JSON.stringify([nativeSessionId, id, toolUseId, state, notificationText]) : undefined;
-        const fingerprint = JSON.stringify([nativeSessionId, sourceShape, id, toolUseId, state, atMs, notificationText]);
-        if (entry.type === 'user' && mirrorKey && this.consumeMirrorSlot(mirrorKey)) {
-          // The queue already settled (or deliberately did not settle) this exact notice.
-          this.rememberNotification(fingerprint);
-          continue;
-        }
-        // Once evidence has been evicted, an unmatched user may be an old mirror.
-        // Keep the generation running rather than guessing that it is a new result.
-        if (entry.type === 'user' && this.mirrorOverflow) continue;
+      const sourceShape: NoticeShape = entry.type === 'queue-operation' ? 'queue' : entry.type === 'user' ? 'user' : 'attachment';
+      if (state) for (const id of ids) {
         const task = this.tasks.get(id);
-        let generation: Generation | undefined;
-        if (task && (!toolUseId || task.toolUseId === toolUseId)
-          && (task.kind !== 'agent' || !this.settledNotifications.has(fingerprint))) {
-          generation = this.settle(task, state, atMs, position, false);
-          if (generation && task.kind === 'agent') this.rememberNotification(fingerprint);
+        const run = task ? this.runs.get(id) : undefined;
+        if (lifecycleOnly && (!task || !run)) continue;
+        const canonicalKey = createHash('sha256').update(JSON.stringify([toolUseId ?? null, state, notificationText])).digest('base64');
+        const observationKey = createHash('sha256').update(JSON.stringify([sourceShape, toolUseId ?? null, state, atMs ?? null, notificationText])).digest('base64');
+        const outcome = run ? this.observeNotice(run.notices, canonicalKey, observationKey, sourceShape, nativeSessionId ?? '')
+          : this.observeOrphanNotice(id, canonicalKey, observationKey, sourceShape, nativeSessionId ?? '');
+        // A first, unambiguous observation may settle one generation. Mirrors,
+        // same-shape replays and ambiguous owners only add structural evidence.
+        if (outcome === 'new' && task && run && (!toolUseId || task.toolUseId === toolUseId)) {
+          this.settle(task, state, atMs, position, false);
         }
-        // Every eligible queue enqueue owns one slot, including no-op and late replay.
-        if (entry.type === 'queue-operation' && mirrorKey) this.addMirrorSlot(mirrorKey, generation);
       }
     } else if (!lifecycleOnly && claudeInputText(entry) !== undefined && !entry.isMeta) {
       this.inputId = entry.uuid; this.notification = false; this.ended = false;
@@ -133,7 +163,7 @@ export class ClaudeBackgroundTasks {
         }
         if (task?.id) {
           const existing = this.tasks.get(task.id);
-          const run = this.runs.get(task.id) ?? { active: [] };
+          const run = this.runs.get(task.id) ?? { active: [], notices: this.adoptOrphanNotices(task.id) };
           if (resumed) {
             // Every accepted resume adds a generation and must be strictly
             // newer than both the latest start and latest end.
@@ -164,24 +194,67 @@ export class ClaudeBackgroundTasks {
     return this.tasks.size > 0 && before !== JSON.stringify(this.snapshot());
   }
 
-  private addMirrorSlot(key: string, generation: Generation | undefined): void {
-    this.mirrorSlots.push({ key, generation });
-    if (this.mirrorSlots.length > MIRROR_SLOTS_MAX) {
-      this.mirrorSlots.shift();
-      this.mirrorOverflow = true;
+  private observeNotice(index: NoticeIndex, key: string, observation: string, shape: NoticeShape, nativeKey: string,
+    orphan = false): 'new' | 'mirror' | 'replay' | 'ambiguous' | 'saturated' {
+    const replay = index.seen.has(observation);
+    if (!replay && index.seen.size >= NOTICE_INDEX_MAX) return 'saturated';
+    let bucket = index.buckets.get(key);
+    const groups = bucket?.missing[shapes.indexOf(shape)];
+    const exact = groups?.get(nativeKey);
+    const only = groups?.size === 1 ? groups.values().next().value! : undefined;
+    const candidates = exact?.size ? exact : only;
+    if (!replay && index.pending >= NOTICE_INDEX_MAX && !candidates) return 'saturated';
+    if (replay && index.pending >= NOTICE_INDEX_MAX) return 'saturated';
+    if (!replay) {
+      index.seen.add(observation);
+      if (orphan) this.orphanNoticeWeight++;
     }
+    if (!bucket) {
+      bucket = { pending: 0, missing: [new Map(), new Map(), new Map()] };
+      index.buckets.set(key, bucket);
+    }
+    if (!replay && candidates) {
+      const occurrence = candidates.values().next().value!;
+      removeCandidate(bucket, occurrence, shape);
+      occurrence.mask |= shapeBit(shape);
+      occurrence.natives.add(nativeKey);
+      const lineage = noticeLineage(occurrence.natives);
+      if (lineage !== occurrence.lineage) {
+        for (const other of shapes) if ((occurrence.mask & shapeBit(other)) === 0) removeCandidate(bucket, occurrence, other);
+        occurrence.lineage = lineage;
+        for (const other of shapes) if ((occurrence.mask & shapeBit(other)) === 0) addCandidate(bucket, occurrence, other);
+      }
+      if (occurrence.mask === 7) {
+        bucket.pending--; index.pending--;
+        if (orphan) this.orphanNoticeWeight--;
+        if (bucket.pending === 0) index.buckets.delete(key);
+      }
+      return 'mirror';
+    }
+    createOccurrence(index, bucket, shape, nativeKey);
+    if (orphan) this.orphanNoticeWeight++;
+    return replay ? 'replay' : groups?.size && !candidates ? 'ambiguous' : 'new';
   }
 
-  private consumeMirrorSlot(key: string): boolean {
-    const index = this.mirrorSlots.findIndex(slot => slot.key === key);
-    if (index < 0) return false;
-    this.mirrorSlots.splice(index, 1);
-    return true;
+  private observeOrphanNotice(id: string, key: string, observation: string, shape: NoticeShape, nativeKey: string): 'new' | 'mirror' | 'replay' | 'ambiguous' | 'saturated' {
+    let index = this.orphanNotices.get(id);
+    if (!index) {
+      if (this.orphanNoticeWeight >= ORPHAN_NOTICES_MAX) return 'saturated';
+      index = emptyNoticeIndex();
+      this.orphanNotices.set(id, index);
+    }
+    // Unknown-task compatibility is bounded without evicting old evidence. A
+    // task launch adopts its index; known runs never share this global limit.
+    if (this.orphanNoticeWeight >= ORPHAN_NOTICES_MAX) return 'saturated';
+    return this.observeNotice(index, key, observation, shape, nativeKey, true);
   }
 
-  private rememberNotification(fingerprint: string): void {
-    this.settledNotifications.add(fingerprint);
-    while (this.settledNotifications.size > 20_000) this.settledNotifications.delete(this.settledNotifications.values().next().value!);
+  private adoptOrphanNotices(id: string): NoticeIndex {
+    const orphan = this.orphanNotices.get(id);
+    if (!orphan) return emptyNoticeIndex();
+    this.orphanNoticeWeight -= orphan.seen.size + orphan.pending;
+    this.orphanNotices.delete(id);
+    return orphan;
   }
 
   private settle(task: Task, state: string, atMs: number | undefined, position: TranscriptPosition | undefined, allAgentGenerations = false): Generation | undefined {
