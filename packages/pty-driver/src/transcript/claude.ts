@@ -809,7 +809,7 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
     if (inputText === undefined || replayedInput) return;
     const timestamp = Date.parse(entry.timestamp);
     if (inputText !== '/compact') {
-      if (this.compaction && Number.isFinite(timestamp) && timestamp >= this.compaction.armedAt - 1_000) {
+      if (this.compaction && this.compactionRecordInGeneration(this.compaction, position, native, timestamp)) {
         this.compaction.finish('failed');
       }
       return;

@@ -77,11 +77,11 @@ describe('Claude maintenance compaction evidence', () => {
     await tailer.flush();
   }
 
-  function arm(native = sessionId, submitted: () => boolean = () => false) {
+  function arm(native = sessionId, submitted: () => boolean = () => false, position = tailer!.captureWatermark!()) {
     const controller = new AbortController();
     const pending = tailer!.waitForCompaction!({
       nativeSessionId: native,
-      position: tailer!.captureWatermark!(),
+      position,
       generation: ++generation,
       signal: controller.signal,
       submitted,
@@ -143,6 +143,32 @@ describe('Claude maintenance compaction evidence', () => {
     await append(input);
     await expect(current.pending).resolves.toBe('failed');
     expect(current.settled()).toBe(true);
+  });
+
+  it.each(['native session', 'transcript position'] as const)('ignores a recent business input from another %s', async identity => {
+    await setup([clone(successFixture[0])]);
+    const position = tailer!.captureWatermark!()!;
+    const current = arm(sessionId, () => false, identity === 'transcript position'
+      ? { ...position, path: join(directory!, 'another-session.jsonl') }
+      : position);
+    await append({
+      type: 'user', uuid: `foreign-business-${identity}`, parentUuid: 'leaf', promptId: 'foreign-business-prompt',
+      sessionId: identity === 'native session' ? 'other-native-session' : sessionId,
+      timestamp: new Date().toISOString(), message: { role: 'user', content: 'foreign business prompt' },
+    });
+    expect(current.settled()).toBe(false);
+    current.controller.abort();
+    await expect(current.pending).rejects.toThrow();
+  });
+
+  it('fails on ordinary business input in the same transcript generation', async () => {
+    await setup([clone(successFixture[0])]);
+    const current = arm();
+    await append({
+      type: 'user', uuid: 'same-generation-business', parentUuid: 'leaf', promptId: 'same-generation-business-prompt',
+      sessionId, timestamp: new Date().toISOString(), message: { role: 'user', content: 'same-generation business prompt' },
+    });
+    await expect(current.pending).resolves.toBe('failed');
   });
 
   it('ignores another native session and fails immediately on a later business turn', async () => {
