@@ -842,6 +842,15 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
 
   private canClaimCompactionInput(wait: ClaudeCompactionEvidence, entry: any, position: TranscriptPosition | undefined,
     native: string | undefined, timestamp: number): boolean {
+    if (wait === this.compaction && timestamp <= wait.armedAt) {
+      for (const retired of this.retiredCompactions.values()) {
+        if (!retired.promptId && retired.nativeSessionId === native && timestamp >= retired.armedAt - 1_000) {
+          // An input at the rearming millisecond may be delayed old evidence.
+          // Leave it unowned rather than letting the active generation adopt it.
+          return false;
+        }
+      }
+    }
     return !wait.promptId && this.compactionRecordInGeneration(wait, position, native, timestamp);
   }
 
