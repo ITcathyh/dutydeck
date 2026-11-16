@@ -41,7 +41,8 @@ import {
   larkCancellationStatusLabel,
   renderLarkProcessElements,
   renderLarkResultElements,
-  type LarkCardElement
+  type LarkCardElement,
+  type SteeringPermissionStatus
 } from './card-renderer.js';
 import { deliverLarkStatusReaction, isLarkFinalContentAuditRejected, larkCompletionReactionOnly, larkResultKey, larkSilentResultAnchor, sendLarkResult } from './result-delivery.js';
 import { larkRedispatchAgentNote, larkRedispatchCardNote } from './turn-redispatch.js';
@@ -175,24 +176,46 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       ? undefined : this.requesterOnlyReason(config, requester, '中断正在执行的这一轮', true);
   }
 
-  /** 只有 injected 刚返回时查询；live pending 必须仍属于被插话的当前任务。 */
-  protected async hasPendingSteeringPermission(sessionId: string, taskId: string): Promise<boolean> {
+  /** 只有 injected 刚返回时查询；新 runtime 只查实际 target，旧 runtime 缺 target 时仅复用已核验仍是同一轮的快照。 */
+  protected async steeringPermissionStatus(
+    sessionId: string,
+    target: { taskId: string; attemptId: string } | undefined,
+    fallbackTarget?: TaskRecord
+  ): Promise<SteeringPermissionStatus> {
+    let taskId = target?.taskId;
     try {
-      const pending = (await this.runtime.getPendingPermissions?.(sessionId) ?? []).filter(permission => permission.status === 'pending');
-      if (!pending.length) return false;
-      if (this.runtime.getLatestPermissionRequest) {
-        const receipts = await Promise.all(pending.map(permission => this.runtime.getLatestPermissionRequest!(sessionId, taskId, permission.id)));
-        return receipts.some(event => event?.type === 'permission_request' && (event.data as any)?.status === 'pending');
+      if (!taskId) {
+        if (!fallbackTarget || !this.runtime.getTasks) return 'unknown';
+        const current = (await this.runtime.getTasks(sessionId)).find(task => task.id === fallbackTarget.id
+          && task.status === 'running' && task.currentAttemptId === fallbackTarget.currentAttemptId);
+        if (!current) return 'unknown';
+        taskId = current.id;
       }
-      if (!this.runtime.getEvents) return false;
+      if (!this.runtime.getPendingPermissions) return 'unknown';
+      const pending = (await this.runtime.getPendingPermissions(sessionId)).filter(permission => permission.status === 'pending');
+      if (!pending.length) return 'confirmed-none';
+      if (this.runtime.getLatestPermissionRequest) {
+        for (const permission of pending) {
+          const event = await this.runtime.getLatestPermissionRequest(sessionId, taskId, permission.id);
+          if (event?.type === 'permission_request' && (event.data as any)?.status === 'pending') return 'confirmed-pending';
+        }
+        return 'confirmed-none';
+      }
+      if (!this.runtime.getEvents) return 'unknown';
       const events = eventsForRuntimeTask(await this.runtime.getEvents(sessionId), taskId);
-      return pending.some(permission => {
-        const latest = events.filter(event => event.type === 'permission_request' && (event.data as any)?.id === permission.id).at(-1);
-        return (latest?.data as any)?.status === 'pending';
-      });
+      const pendingIds = new Set(pending.map(permission => permission.id));
+      const latest = new Map<string, string>();
+      for (const event of events) {
+        if (event.type !== 'permission_request') continue;
+        const data = event.data as any;
+        if (!data || typeof data !== 'object' || typeof data.id !== 'string' || typeof data.status !== 'string') return 'unknown';
+        if (pendingIds.has(data.id)) latest.set(data.id, data.status);
+      }
+      for (const permission of pending) if (latest.get(permission.id) === 'pending') return 'confirmed-pending';
+      return 'confirmed-none';
     } catch (error) {
-      this.log.warn({ error, sessionId, taskId }, '读取插话后的实时审批状态失败，保留原插话说明');
-      return false;
+      this.log.warn({ error, sessionId, taskId: taskId ?? fallbackTarget?.id }, '读取插话后的实时审批状态失败，审批状态按未知处理');
+      return 'unknown';
     }
   }
 
@@ -233,9 +256,12 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       : undefined;
     if (steering && 'task' in steering && (steering.task?.status === 'reconcile_required' || steering.outcome === 'failed' && !steering.task)) return { note: unknownNote };
     // 没过中断门时没有尝试插话，原因由下面的门分支写。
-    const pendingPermission = steering?.outcome === 'injected' && running
-      ? await this.hasPendingSteeringPermission(sessionId, running.id) : false;
-    const reason = steering ? steeringOutcomeText(steering.outcome, pendingPermission)
+    const steeringTarget = steering && 'target' in steering
+      ? steering.target as { taskId: string; attemptId: string } | undefined : undefined;
+    const permissionStatus: SteeringPermissionStatus = steering?.outcome === 'injected'
+      ? await this.steeringPermissionStatus(sessionId, steeringTarget, running)
+      : 'confirmed-none';
+    const reason = steering ? steeringOutcomeText(steering.outcome, permissionStatus)
       : mode === 'promote' ? '' : !this.runtime.injectQueued ? '当前 Agent 不支持插话。' : !running ? '当前没有正在执行的一轮可以插话。' : '';
     if (steering?.outcome === 'injected' || steering?.outcome === 'startedNewTurn') return { steered: steering.outcome, note: reason };
     if (steering?.outcome === 'failed' && 'task' in steering && steering.task?.status !== 'queued') return { note: '插话请求未确认，这条内容已不在队列中，请通过 `/status` 核对最新执行记录。' };

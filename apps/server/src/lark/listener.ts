@@ -175,7 +175,7 @@ export interface LarkRuntime {
   /** 把排队中的一轮提到队首（会中断当前正在执行的那一轮）。/queue top 与 /steer 的唯一原语。 */
   steerQueued?(id: string, taskId: string, actorId?: string): Promise<unknown>;
   /** ACP 插话结果包含持久任务状态；reconcile_required 表示投递未知，不能自动重发。 */
-  injectQueued?(id: string, taskId: string, actorId?: string, operationId?: string, expectedTarget?: { taskId: string; attemptId?: string }): Promise<{ task: TaskRecord; outcome: string; error?: string }>;
+  injectQueued?(id: string, taskId: string, actorId?: string, operationId?: string, expectedTarget?: { taskId: string; attemptId?: string }): Promise<{ task: TaskRecord; outcome: string; error?: string; target?: { taskId: string; attemptId: string } }>;
   /** 平台验证记录，最新在前，含代码指纹与 stale 判定。 */
   getVerifications?(id: string): Promise<VerificationResponse[]>;
   runVerification?(id: string, input: VerificationCommandInput, actorId?: string): Promise<VerificationResponse>;

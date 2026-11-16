@@ -1,4 +1,4 @@
-import { appendEventContent, isBackgroundFollowup, isChildDiagnostic, terminalTaskStatuses, type AgentEvent, type VerificationResponse, type VerificationStatus } from '@dutydeck/shared';
+import { isBackgroundFollowup, isChildDiagnostic, terminalTaskStatuses, type AgentEvent, type VerificationResponse, type VerificationStatus } from '@dutydeck/shared';
 import type { StoredLarkConfig } from './config.js';
 import { boundLarkCardElements, LarkServiceError, type LarkCardService } from './service.js';
 import { redactTraceText, sensitiveTraceKey } from './secret-redaction.js';
@@ -70,6 +70,8 @@ function compactTraceEntries(events: AgentEvent[]): TraceEntry[] {
   const result: TraceEntry[] = [];
   const tools = new Map<string, TraceEntry>();
   const permissions = new Map<string, TraceEntry>();
+  // 只在第一次合并时复制原事件数组；后续追加写自有缓冲，避免每个 chunk 全量复制。
+  const partBuffers = new WeakMap<TraceEntry, any[]>();
   const capacityRetried = new Set(events.filter(event => event.type === 'status' && (event.data as any)?.state === 'capacity_retry').map(event => (event.data as any).causeAttemptId).filter((value): value is string => typeof value === 'string'));
   for (let event of events) {
     if (event.type === 'error' && event.attemptId && capacityRetried.has(event.attemptId) && (event.data as any)?.code === 'codex_capacity') continue;
@@ -90,9 +92,20 @@ function compactTraceEntries(events: AgentEvent[]): TraceEntry[] {
     const role = data.role ?? 'assistant';
     if ((event.type === 'text' || event.type === 'thinking') && previous?.type === event.type && (previous.data.role ?? 'assistant') === role
       && previous.data.nativeTurnId === data.nativeTurnId && previous.data.nativeSource === data.nativeSource) {
-      if (previous.data.parts || data.parts) previous.data.parts = appendEventContent(
-        previous.data.parts ?? [{ type: 'text' as const, text: previous.data.text ?? '' }],
-        data.parts ?? [{ type: 'text' as const, text: data.text ?? '' }]);
+      if (previous.data.parts || data.parts) {
+        let parts = partBuffers.get(previous);
+        if (!parts) {
+          parts = [...(Array.isArray(previous.data.parts) ? previous.data.parts : [{ type: 'text', text: previous.data.text ?? '' }])];
+          partBuffers.set(previous, parts);
+        }
+        const incoming = Array.isArray(data.parts) ? data.parts : [{ type: 'text', text: data.text ?? '' }];
+        for (const part of incoming) {
+          const last = parts.at(-1);
+          if (part?.type === 'text' && last?.type === 'text') parts[parts.length - 1] = { type: 'text', text: last.text + part.text };
+          else parts.push(part);
+        }
+        previous.data.parts = parts;
+      }
       previous.data.text = `${previous.data.text ?? ''}${data.text ?? ''}`;
       continue;
     }
@@ -194,9 +207,13 @@ export function larkTaskSteering(events: AgentEvent[], taskId: string): string |
   return settled ? String((settled.data as any).steering.outcome) : undefined;
 }
 
+export type SteeringPermissionStatus = 'confirmed-none' | 'confirmed-pending' | 'unknown';
+
 /** 插话结果的人话说明：卡面与回执只写实际发生了什么。 */
-export const steeringOutcomeText = (outcome: string, pendingPermission = false) => pendingPermission && outcome === 'injected'
-  ? '已送进正在执行的这一轮；这一轮还有审批没处理，Agent 有没有读到以它后续的回复为准。'
+export const steeringOutcomeText = (outcome: string, permissionStatus: SteeringPermissionStatus = 'confirmed-none') => outcome === 'injected' && permissionStatus !== 'confirmed-none'
+  ? permissionStatus === 'confirmed-pending'
+    ? '已送进正在执行的这一轮；这一轮还有审批没处理，Agent 有没有读到以它后续的回复为准。'
+    : '已送进正在执行的这一轮；审批状态暂时没读到，Agent 有没有读到以后续回复为准。'
   : ({
     injected: '已把这条内容送进正在执行的这一轮，Agent 会在这一轮里接着处理，回复出现在那一轮的结果里。',
     startedNewTurn: 'Agent 已用这条内容另起了一轮；那一轮不在 Dutydeck 的执行记录里，结果不会回到这张卡片。',
@@ -1191,11 +1208,18 @@ export function renderLarkCardElements(
   const idleTimeout = view === 'result' ? larkIdleTimeout(events) : undefined;
   const preservedMemoryText = completed ? memoryFinalText(events, entries) : undefined;
   const finalRawText = view === 'result' ? redactTraceText(preservedMemoryText ?? String(finalMessage?.data.text ?? '')).trim() : truncateTrace(preservedMemoryText ?? finalMessage?.data.text, 6_000);
-  const finalImageCount = finalMessage?.data.parts?.filter((part: any) => part?.type === 'image').length ?? 0;
-  const finalText = finalImageCount
+  const finalParts = Array.isArray(finalMessage?.data.parts) ? finalMessage.data.parts : [];
+  const finalImageCount = finalParts.filter((part: any) => part?.type === 'image').length;
+  const finalDroppedImageCount = finalParts.filter((part: any) => part?.type === 'unsupported' && part.originalType === 'image' && part.reason === 'content_budget').length;
+  const retainedFinalText = finalImageCount
     ? finalRawText ? `${finalRawText}\n\n另有 ${finalImageCount} 个图片结果未随卡投递，请在 Web 工作台查看图片详情或引用。`
       : `Agent 返回了 ${finalImageCount} 个图片结果；飞书卡片不附带图片，请在 Web 工作台查看图片详情或引用。`
     : finalRawText;
+  const droppedImageText = finalDroppedImageCount
+    ? retainedFinalText ? `另有 ${finalDroppedImageCount} 个图片结果超过保存上限，图片内容未保留。`
+      : `Agent 返回了 ${finalDroppedImageCount} 个图片结果，但图片超过保存上限，图片内容未保留。`
+    : '';
+  const finalText = [retainedFinalText, droppedImageText].filter(Boolean).join('\n\n');
   const activityEntries = entries.filter(entry => entry !== finalMessage || !finalFollowsActivity);
   const permissionEntries = activityEntries.filter(entry => entry.type === 'permission_request');
   const errorEntries = activityEntries.filter(entry => entry.type === 'error');
