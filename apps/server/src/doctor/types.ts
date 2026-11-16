@@ -42,6 +42,10 @@ export interface DoctorReport {
 export interface DoctorOptions {
   /** 机器消费模式：只输出单行 JSON，不产出任何人类可读文本。 */
   json?: boolean;
+  /** 与根 serve/status 相同的地址覆盖；显式 flags 优先于进程环境与服务根 .env。 */
+  host?: string;
+  localOnly?: boolean;
+  port?: string;
 }
 
 /** 体检关心的 AppConfig 子集；避免让测试构造完整的 AppConfig。 */

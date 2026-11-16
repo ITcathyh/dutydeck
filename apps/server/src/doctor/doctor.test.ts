@@ -403,6 +403,24 @@ describe('daemon.status —— 状态不许说谎', () => {
     expect(JSON.stringify(report)).not.toContain('"command":"dutydeck start"');
   });
 
+  it('doctor 的 local-only 与 port flags 覆盖不同环境地址', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dutydeck-doctor-flags-'));
+    try {
+      const { config: _config, ...rest } = deps({
+        daemonStatus: () => ({ running: false, processStatus: 'stale', ready: false }),
+        daemonRecord: () => undefined
+      });
+      const probe = vi.fn(async (address: string) => ({ address, ready: true }));
+      await runDoctor({ json: true, localOnly: true, port: '14404' }, {
+        ...rest,
+        cwd: dir,
+        env: { DUTYDECK_HOST: '192.0.2.123', DUTYDECK_PORT: '14405', DUTYDECK_AGENTS_JSON: '[{' },
+        unregisteredForegroundProbe: probe
+      });
+      expect(probe).toHaveBeenCalledWith('http://127.0.0.1:14404');
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
   it('未登记前台尚未就绪仍不指向 start，探测拒绝保持原状态', async () => {
     const base = {
       daemonStatus: () => ({ running: false, processStatus: 'stale' as const, ready: false }),
@@ -445,6 +463,29 @@ describe('daemon.status —— 上一次异常退出', () => {
     try { return find(await runDoctor({ json: true }, dependencies), 'daemon.status')!; } finally { rmSync(dir, { recursive: true, force: true }); }
   }
   const healthy = async () => find(await runDoctor({ json: true }, deps()), 'daemon.status')!;
+
+  it('健康前台不追加无法关联代际的 daemon 异常恢复或 journalctl 指引', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dutydeck-doctor-foreground-abnormal-'));
+    const database = join(dir, 'dutydeck.db');
+    try {
+      writeFileSync(join(dir, 'last-abnormal-exit.json'), JSON.stringify({
+        kind: 'startup', exitCode: 1, error: 'previous foreground failed', version: '1.0.0', database,
+        at: new Date(Date.now() - 60_000).toISOString()
+      }));
+      const report = await runDoctor({ json: true }, deps({
+        config: { ...baseConfig, databaseUrl: database },
+        daemonStatus: () => ({ running: false, processStatus: 'stale', ready: false }),
+        daemonRecord: () => undefined,
+        unregisteredForegroundProbe: async (address: string) => ({ address, ready: true }),
+        databaseProbe: () => ({ exists: true, appliedVersion: 14, values: {} })
+      }));
+      const check = find(report, 'daemon.status')!;
+      expect(check.level).toBe('ok');
+      expect(check.detail).toContain('未登记前台服务正在运行');
+      expect(check.detail).not.toContain('异常退出');
+      expect(check.detail).not.toContain('journalctl');
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
 
   it('没有记录时输出逐字不变', async () => {
     const check = await daemonCheck(undefined);
@@ -505,6 +546,23 @@ describe('database.reachable / schema.migrations', () => {
     expect(probed).toBe(1);
     // 库不可读时迁移检查降级 skip，不瞎猜版本
     expect(level(report, 'schema.migrations')).toBe('skip');
+  });
+
+  it('健康前台的当前配置库缺失时不建议 start，并说明实际库可能不同', async () => {
+    const report = await runDoctor({ json: true }, deps({
+      daemonStatus: () => ({ running: false, processStatus: 'stale', ready: false }),
+      daemonRecord: () => undefined,
+      unregisteredForegroundProbe: async (address: string) => ({ address, ready: true }),
+      databaseProbe: () => ({ exists: false })
+    }));
+    const check = find(report, 'database.reachable')!;
+    expect(check.level).toBe('warn');
+    expect(check.detail).toContain('当前配置库');
+    expect(check.detail).toContain('实际使用的数据库可能不同');
+    expect(check.remedy).toContain('原启动终端');
+    expect(check.command).toBeUndefined();
+    expect(JSON.stringify(report)).not.toContain('"command":"dutydeck start"');
+    expect(report.next).not.toBe('dutydeck start');
   });
 
   it('打开失败为 fail，remedy 提到路径与权限', async () => {
@@ -770,6 +828,33 @@ describe('lark', () => {
     expect(check.detail).not.toContain('已连上');
   });
 
+  it('前台 listenerDisabled 保留警告，但 remedy 回原终端调整原参数', async () => {
+    const base = withBots([bot()]);
+    const check = find(await runDoctor({ json: true }, {
+      ...base,
+      env: { DUTYDECK_DISABLE_LARK_LISTENER: 'true' },
+      daemonStatus: () => ({ running: false, processStatus: 'stale', ready: false }),
+      daemonRecord: () => undefined,
+      unregisteredForegroundProbe: async (address: string) => ({ address, ready: true })
+    }), 'lark.listener')!;
+    expect(check.level).toBe('warn');
+    expect(check.detail).toContain('DUTYDECK_DISABLE_LARK_LISTENER');
+    expect(check.remedy).toContain('原启动终端');
+    expect(check.command).toBeUndefined();
+    expect(check.remedy).not.toContain('dutydeck restart');
+  });
+
+  it('前台唯一机器人明确不监听时零预期监听走 skip', async () => {
+    const base = withBots([bot({ listening: false })]);
+    const check = find(await runDoctor({ json: true }, {
+      ...base,
+      daemonStatus: () => ({ running: false, processStatus: 'stale', ready: false }),
+      daemonRecord: () => undefined,
+      unregisteredForegroundProbe: async (address: string) => ({ address, ready: true })
+    }), 'lark.listener')!;
+    expect(check).toMatchObject({ level: 'skip', detail: '没有开启监听的机器人' });
+  });
+
   describe('应该监听与实际连上的对比', () => {
     const listenerStatus = (patch: Record<string, unknown> = {}) => JSON.stringify({ pid: 4242, updatedAt: new Date().toISOString(), active: [], retrying: [], reconnecting: [], ...patch });
     const observe = (bots: unknown[], status?: string) => runDoctor({ json: true }, deps({
@@ -1016,6 +1101,20 @@ describe('access.posture / access.token', () => {
       expect(check.remedy, host).toBeTruthy();
       expect(check.command, host).toBeTruthy();
     }
+  });
+
+  it('无认证前台保留警告，但只在原启动终端加 --auth，不给出无效 restart', async () => {
+    const check = find(await runDoctor({ json: true }, deps({
+      config: { ...baseConfig, authEnabled: false },
+      daemonStatus: () => ({ running: false, processStatus: 'stale', ready: false }),
+      daemonRecord: () => undefined,
+      unregisteredForegroundProbe: async (address: string) => ({ address, ready: true })
+    })), 'access.posture')!;
+    expect(check.level).toBe('warn');
+    expect(check.remedy).toContain('原启动终端');
+    expect(check.remedy).toContain('--auth');
+    expect(check.command).toBeUndefined();
+    expect(check.remedy).not.toContain('dutydeck restart');
   });
 
   it('认证开启为 ok；远程场景提到 dutydeck auth token', async () => {

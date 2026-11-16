@@ -153,18 +153,30 @@ export function inspectDaemonState(state: DaemonState | undefined): DaemonInspec
   }
 }
 
-export function inspectDaemon(dir = defaultDaemonDir()): DaemonInspection {
+export interface DaemonRecordedInspection {
+  state?: DaemonState;
+  inspection: DaemonInspection;
+}
+
+/** 状态记录与进程身份检查共享一次文件读取，避免调用方拼到两个代际。 */
+export function readDaemonInspection(dir = defaultDaemonDir()): DaemonRecordedInspection {
   try {
     const raw = readFileSync(join(dir, STATE_FILE), 'utf8').trim();
-    if (!raw) return inspectDaemonState(undefined);
+    if (!raw) return { inspection: inspectDaemonState(undefined) };
     const state = JSON.parse(raw) as DaemonState;
-    if (!state || typeof state !== 'object') return { status: 'unverifiable', reason: 'Malformed daemon state' };
-    return inspectDaemonState(state);
+    if (!state || typeof state !== 'object') return { inspection: { status: 'unverifiable', reason: 'Malformed daemon state' } };
+    return { state, inspection: inspectDaemonState(state) };
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'ENOENT'
-      ? { status: 'stale', reason: 'No daemon recorded' }
-      : { status: 'unverifiable', reason: 'Cannot read daemon state' };
+    return {
+      inspection: (error as NodeJS.ErrnoException).code === 'ENOENT'
+        ? { status: 'stale', reason: 'No daemon recorded' }
+        : { status: 'unverifiable', reason: 'Cannot read daemon state' }
+    };
   }
+}
+
+export function inspectDaemon(dir = defaultDaemonDir()): DaemonInspection {
+  return readDaemonInspection(dir).inspection;
 }
 
 /** Only remove the generation inspected by this operation. */
@@ -186,8 +198,8 @@ export function clearGeneration(dir: string, expected?: DaemonState): boolean {
  *    later start from silently creating a second database under another cwd.
  * 3. The current working directory's daemon directory on the very first run.
  */
-export function resolveDaemonDir(cwd = process.cwd(), home = process.env.HOME ?? homedir()): string {
-  if (process.env.DUTYDECK_DAEMON_DIR) return resolve(process.env.DUTYDECK_DAEMON_DIR);
+export function resolveDaemonDir(cwd = process.cwd(), home = process.env.HOME ?? homedir(), env: NodeJS.ProcessEnv = process.env): string {
+  if (env.DUTYDECK_DAEMON_DIR) return resolve(env.DUTYDECK_DAEMON_DIR);
   const localDir = defaultDaemonDir(cwd);
   if (readDaemonStatus(localDir)?.botProcess || readDaemonStatus(localDir)?.botAppId) return localDir;
   const localInspection = inspectDaemon(localDir);
@@ -524,7 +536,7 @@ export function readDaemonLog(dir: string, lines = 50, fromByte = 0): string[] {
     return visibleLogLines(lastNewline === -1 ? '' : text.slice(0, lastNewline + 1)).slice(-lines);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      throw new Error(`daemon 日志尚未生成：${file}；前台服务请查看启动终端，systemd 托管服务请用 journalctl --user -u <unit> 查看对应 unit 的日志；请先启动 daemon，或核对 daemon 目录`);
+      throw new Error(`daemon 日志尚未生成：${file}；若你以前台方式运行，请查看原启动终端，不要另起第二个实例；若你预期的是 daemon，请先核对 daemon 目录，确认服务未运行后再执行 dutydeck start；systemd 托管服务请用 journalctl --user -u <unit> 查看对应 unit 的日志`);
     }
     throw error;
   }

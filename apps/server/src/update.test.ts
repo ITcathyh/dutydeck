@@ -36,6 +36,18 @@ describe('Dutydeck updater', () => {
     expect(restart).not.toHaveBeenCalled();
   });
 
+  it('runs the foreground preflight before any npm call even with --force', async () => {
+    const runNpm = vi.fn();
+    const restart = vi.fn();
+    const drain = vi.fn();
+    const preflight = vi.fn(async () => { throw new Error('未登记前台无法接管'); });
+    await expect(updateDutydeck('0.1.22', { version: '1.2.3', force: true }, { runNpm, restart, drain, preflight })).rejects.toThrow('未登记前台无法接管');
+    expect(preflight).toHaveBeenCalledOnce();
+    expect(runNpm).not.toHaveBeenCalled();
+    expect(drain).not.toHaveBeenCalled();
+    expect(restart).not.toHaveBeenCalled();
+  });
+
   it('skips the pre-install drain with --force but still installs and restarts', async () => {
     const runNpm = vi.fn()
       .mockResolvedValueOnce('"0.1.23"')

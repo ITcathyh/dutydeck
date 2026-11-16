@@ -25,6 +25,8 @@ export interface DutydeckUpdateResult {
 
 export interface DutydeckUpdateDependencies {
   runNpm(args: string[]): Promise<string>;
+  /** 在任何 npm 调用前识别无法安全接管的运行形态；--force 也不跳过这项安全检查。 */
+  preflight?(): Promise<void>;
   /**
    * 安装前先等待正在执行的任务结束；超时/失败时应 reject，由调用方放弃本次 update。
    * 只在未传 --force 时调用。返回 Promise 即代表可以安全停服。
@@ -112,6 +114,7 @@ export async function updateDutydeck(
   const exactVersion = options.version === undefined ? undefined : normalizeExactVersion(options.version);
   const distTag = exactVersion === undefined ? normalizeDistTag(options.distTag) : undefined;
   const selector = exactVersion ?? distTag!;
+  await dependencies.preflight?.();
   const targetVersion = exactVersion ?? publishedVersion(await dependencies.runNpm(['view', `${packageName}@${distTag}`, 'version', '--json']));
   // 安装前先等正在执行的任务结束：一旦 npm install -g 落盘，磁盘上就是新版文件，
   // 此时再因超时放弃会留下「包是新的、服务还是旧的」。drain 失败/超时直接抛出，不安装、不重启。

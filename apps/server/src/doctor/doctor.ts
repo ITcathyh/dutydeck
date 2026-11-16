@@ -25,21 +25,21 @@ import { checkWatchFindings } from '../watch.js';
  * 快：loadConfig 会 spawn 每个已知 Agent CLI 探版本（秒级），全流程只允许调用
  * 一次，结果由 config 与 agents 两项检查共享；端口探测带超时，绝不挂住。
  */
-import { constants, existsSync, readFileSync } from 'node:fs';
+import { constants, existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { access as fsAccess, stat as fsStat } from 'node:fs/promises';
 import { userInfo } from 'node:os';
 import { dirname, resolve } from 'node:path';
-import { parseEnv } from 'node:util';
 import { loadConfigWithDiagnostics } from '@dutydeck/config';
 import { errorMessage } from '@dutydeck/shared';
 import { PTY_AGENT_CONTRIBUTIONS } from '@dutydeck/pty-driver/support';
-import { daemonDatabasePath, daemonStatus, probeUnregisteredForeground } from '../daemon/command.js';
+import { daemonDatabasePath, daemonStatusSnapshot, probeUnregisteredForeground } from '../daemon/command.js';
 import { daemonPaths, readDaemonStatus, resolveDaemonDir } from '../daemon/daemon.js';
 import { abnormalExitNote, readAbnormalExit } from '../abnormal-exit.js';
 import { accessMode } from '../service.js';
 import { createCliUi, type CliUi } from '../cli-ui.js';
-import { locateEnvFile } from '../env-location.js';
+import { environmentWithServiceRoot, locateEnvFile } from '../env-location.js';
+import { environmentFromCli } from '../cli-program.js';
 import { localLoopbackUrl } from '../local-api-url.js';
 import { defaultAgentProbe, defaultDatabaseProbe, defaultPortProbe, defaultProcessUid } from './probes.js';
 import { defaultTerminalBackendProbe } from './terminal-backend.js';
@@ -246,7 +246,8 @@ export async function runDoctor(
   options: DoctorOptions = {},
   dependencies: DoctorDependencies = {}
 ): Promise<DoctorReport> {
-  let env = dependencies.env ?? process.env;
+  const cwd = dependencies.cwd ?? process.cwd();
+  let env = environmentFromCli(options, dependencies.env ?? process.env);
   const json = options.json === true;
   const ui = dependencies.ui ?? createCliUi({ env });
   const platform = dependencies.platform ?? process.platform;
@@ -270,37 +271,38 @@ export async function runDoctor(
   // ---- 1. Node 版本 ----
   checks.push(checkNodeVersion(nodeVersion));
 
-  // ---- 2. 守护进程 ----
+  // ---- 2. 守护进程：目录、记录与状态来自同一次快照 ----
   progress('检查守护进程状态');
+  const snapshot = dependencies.daemonStatus ? undefined : daemonStatusSnapshot(env, cwd);
+  const daemonDir = snapshot?.dir ?? resolveDaemonDir(cwd, env.HOME, env);
   let status = dependencies.daemonStatus
     ? dependencies.daemonStatus()
-    : daemonStatus();
+    : snapshot!.status;
+  const record = dependencies.daemonRecord
+    ? dependencies.daemonRecord()
+    : snapshot?.state ?? readDaemonStatus(daemonDir);
+  const logFile = dependencies.daemonLogFile
+    ?? (dependencies.daemonRecord ? undefined : daemonPaths(daemonDir).logFile);
   // root 检查看守护进程：Agent 继承的是它的身份。读不到守护进程的 uid 时才退回当前命令的。
   const daemonUid = status.running && status.pid ? (dependencies.processUid ?? defaultProcessUid)(status.pid) : undefined;
   const rootCheck = daemonUid !== undefined
     ? checkRunAsRoot({ subject: 'daemon', uid: daemonUid, pid: status.pid })
     : checkRunAsRoot({ subject: 'command', uid: dependencies.getuid ? dependencies.getuid() : process.getuid?.() });
   if (rootCheck) checks.push(rootCheck);
-  const record = dependencies.daemonRecord
-    ? dependencies.daemonRecord()
-    : readDaemonStatus(resolveDaemonDir());
-  const logFile = dependencies.daemonLogFile
-    ?? (dependencies.daemonRecord ? undefined : daemonPaths(resolveDaemonDir()).logFile);
   checks.push(checkDaemon({ status, ...(record ? { record } : {}), ...(logFile ? { logFile } : {}) }));
 
   // ---- 3. .env 定位 + 配置解析（loadConfig 只允许调用一次） ----
-  // 注入了 env 的调用方自己负责环境；真实运行时才按「当前目录 → daemon 根目录」找 .env。
+  // 当前目录没有 .env 时才补读同一实例服务根；显式 flags / env 始终覆盖文件。
   const envLocation = dependencies.envLocation
-    ?? (dependencies.env ? undefined : locateEnvFile({ cwd: dependencies.cwd ?? process.cwd(), home: process.env.HOME }));
-  let envReadError: string | undefined;
-  if (envLocation?.source === 'daemon-root' && envLocation.file) {
-    // 与 loadEnvFile 同一语义：进程环境变量优先，.env 只补缺。
-    try { env = { ...parseEnv(readFileSync(envLocation.file, 'utf8')), ...env }; }
-    catch (error) { envReadError = error instanceof Error ? error.message : String(error); }
-  }
+    ?? (dependencies.env ? undefined : locateEnvFile({ cwd, home: env.HOME, env, daemonDir: () => daemonDir }));
+  const rootedEnvironment = envLocation
+    ? environmentWithServiceRoot(env, { cwd, daemonDir, location: envLocation })
+    : { env, readError: undefined };
+  env = rootedEnvironment.env;
+  const envReadError = rootedEnvironment.readError;
   if (envLocation) checks.push(checkEnvFile(envLocation, envReadError));
 
-  const daemonRoot = () => envLocation?.daemonRoot ?? resolve(resolveDaemonDir(dependencies.cwd ?? process.cwd(), process.env.HOME), '../..');
+  const daemonRoot = () => envLocation?.daemonRoot ?? resolve(daemonDir, '../..');
   progress('解析配置（首次会探测各 Agent CLI 版本，可能需要几秒）');
   let config: DoctorConfig;
   let configError: string | undefined;
@@ -313,7 +315,7 @@ export async function runDoctor(
     // 配置坏了也要把体检跑完：这正是用户最需要诊断的时候。
     configError = error instanceof Error ? error.message : String(error);
     config = {
-      host: env.DUTYDECK_HOST ?? '127.0.0.1',
+      host: env.DUTYDECK_LOCAL_ONLY === 'true' ? '127.0.0.1' : env.DUTYDECK_HOST ?? '127.0.0.1',
       port: Number(env.DUTYDECK_PORT) || 4310,
       authEnabled: env.DUTYDECK_AUTH !== 'false',
       ...(env.DUTYDECK_LOCAL_ONLY !== undefined ? { localOnly: env.DUTYDECK_LOCAL_ONLY === 'true' } : {}),
@@ -352,14 +354,16 @@ export async function runDoctor(
   // 库路径以守护进程记录为准，与 cli.ts 的取法一致（它才是真正在用的那个库）。
   const databaseUrl = record?.database ?? config.databaseUrl;
   // 上一次异常退出：只认同一个库目录里、记录的就是这个库的文件；不新增检查项，只在 daemon.status 的 detail 后面接一句，级别不变。
-  const abnormalExit = abnormalExitNote(readAbnormalExit(databaseUrl), { running: status.running, ...(status.ready !== undefined ? { ready: status.ready } : {}), ...(status.startedAt ?? record?.startedAt ? { startedAt: status.startedAt ?? record?.startedAt } : {}) });
+  const abnormalExit = status.unregisteredForeground
+    ? undefined
+    : abnormalExitNote(readAbnormalExit(databaseUrl), { running: status.running, ...(status.ready !== undefined ? { ready: status.ready } : {}), ...(status.startedAt ?? record?.startedAt ? { startedAt: status.startedAt ?? record?.startedAt } : {}) });
   if (abnormalExit) {
     const index = checks.findIndex(check => check.id === 'daemon.status');
     if (index >= 0) checks[index] = { ...checks[index]!, detail: `${checks[index]!.detail}；${abnormalExit}` };
   }
   progress(`只读探测数据库 ${databaseUrl}`);
   const probe: DatabaseProbeResult = await databaseProbe(databaseUrl, DOCTOR_CONFIG_KEYS, DOCTOR_CONFIG_PREFIXES);
-  checks.push(checkDatabase(databaseUrl, probe));
+  checks.push(checkDatabase(databaseUrl, probe, { unregisteredForeground: status.unregisteredForeground !== undefined }));
   const freelist = checkDatabaseFreelist(probe);
   if (freelist) checks.push(freelist);
   const expectedSchemaVersion = dependencies.expectedSchemaVersion ?? await resolveExpectedSchemaVersion();
@@ -451,7 +455,8 @@ export async function runDoctor(
     // 只有进程真的在跑时，落盘记录里的 host/port/auth 才代表「现在的行为」。
     ...(status.running && record?.host !== undefined ? { runningHost: record.host } : {}),
     ...(status.running && record?.port !== undefined ? { runningPort: record.port } : {}),
-    ...(status.running && record?.authEnabled !== undefined ? { runningAuthEnabled: record.authEnabled } : {})
+    ...(status.running && record?.authEnabled !== undefined ? { runningAuthEnabled: record.authEnabled } : {}),
+    ...(status.unregisteredForeground ? { unregisteredForeground: true } : {})
   };
   checks.push(checkAccessPosture(posture));
   const drift = checkPostureDrift(posture);

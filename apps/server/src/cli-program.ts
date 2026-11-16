@@ -127,7 +127,7 @@ export interface AgentGroupCliOptions {
   image?: boolean;
 }
 
-export interface UpdateCliOptions {
+export interface UpdateCliOptions extends CliOptions {
   version?: string;
   distTag?: string;
   force?: boolean;
@@ -234,14 +234,14 @@ export interface CliHandlers {
   agent?(operation: string, args: unknown[], options: Record<string, unknown>): void | Promise<void>;
   serve?(options: CliOptions): void | Promise<void>;
   setup?(options: SetupCliProgramOptions): void | Promise<void>;
-  doctor?(options: DoctorCliOptions): void | Promise<void>;
+  doctor?(options: CliOptions): void | Promise<void>;
   autostartEnable?(): void | Promise<void>;
   autostartDisable?(): void | Promise<void>;
   autostartStatus?(options: DoctorCliOptions): void | Promise<void>;
   daemonStart?(options: CliOptions): void | Promise<void>;
   daemonStop?(options: DoctorCliOptions): void | Promise<void>;
   daemonRestart?(options: CliOptions): void | Promise<void>;
-  daemonStatus?(options: DoctorCliOptions): void | Promise<void>;
+  daemonStatus?(options: CliOptions): void | Promise<void>;
   logs?(options: LogsCliOptions): void | Promise<void>;
   update?(options: UpdateCliOptions): void | Promise<void>;
   deploy?(options: DeployCliOptions): void | Promise<void>;
@@ -506,7 +506,7 @@ Examples:
   program.command('doctor')
     .description('Diagnose the local environment and configuration; every failure prints a fix')
     .option('--json', 'Emit machine-readable diagnostics as a single JSON line')
-    .action(options => handlers.doctor?.(options))
+    .action((options, command) => handlers.doctor?.(serverOptionsFrom(options, command)))
     .addHelpText('after', `
 Exit codes:
   0    所有检查通过（可能含警告）
@@ -1178,7 +1178,7 @@ Examples:
     .option('--drain-timeout <seconds>', 'Maximum seconds to wait for running tasks before aborting restart (default: 900)')
     .action((version: string | undefined, options, command: Command) => {
       if (version !== undefined && command.getOptionValueSource('distTag') === 'cli') throw new Error('The exact update version and --dist-tag are mutually exclusive.');
-      return handlers.update?.({ ...options, distTag: version === undefined ? options.distTag : undefined, version });
+      return handlers.update?.({ ...serverOptionsFrom(options, command), distTag: version === undefined ? options.distTag : undefined, version });
     });
 
   const backup = program.command('backup').description('Offline portable backups and quarantined restore into a new directory; external credential files are excluded; the full database may contain authentication tokens, signing keys and private content');
@@ -1338,7 +1338,7 @@ Examples:
     parent.command('status')
       .description('Show whether the background Dutydeck server is running')
       .option('--json', 'Print the result as a single line of JSON')
-      .action(options => handlers.daemonStatus?.(options));
+      .action((options, command) => handlers.daemonStatus?.(serverOptionsFrom(options, command)));
   };
 
   // Both the top-level `dutydeck start/stop/restart/status` (no prefix) and the

@@ -19,6 +19,7 @@ import {
   defaultDaemonDir,
   isDaemonChild,
   readDaemonStatus,
+  readDaemonInspection,
   readLastDaemonDir,
   resolveDaemonDir,
   rotateDaemonLog,
@@ -41,6 +42,8 @@ import { homedir } from 'node:os';
 import { isAbsolute, resolve } from 'node:path';
 import { parseEnv } from 'node:util';
 import { localLoopbackUrl } from '../local-api-url.js';
+import { environmentWithServiceRoot } from '../env-location.js';
+import { DUTYDECK_PRODUCT, DUTYDECK_PRODUCT_HEADER } from '../health-identity.js';
 
 export interface DaemonCommandResult {
   ok: boolean;
@@ -163,18 +166,24 @@ export type DrainResult = {
   queryRunningTasks?: () => Promise<{ ok: true; runningTasks: number } | { ok: false; error: string }>;
 } | { ok: false; error: string; runningTasks: number };
 
-type DrainOperation = 'restart' | 'update';
+type DrainOperation = 'restart' | 'update' | 'deploy';
+
+const drainAction = (operation: DrainOperation) => operation === 'update' ? '更新' : operation === 'deploy' ? '部署' : '重启';
 
 const invalidDrainTimeout = (options: Pick<CliOptions, 'drainTimeout'>, operation: DrainOperation = 'restart'): DrainResult => ({
   ok: false, runningTasks: 0,
   error: operation === 'update'
     ? `--drain-timeout 只接受正整数秒数（收到 ${JSON.stringify(options.drainTimeout)}）。要跳过等待立即更新，请用 dutydeck update --force。旧服务仍在运行，没有停止任何进程。`
-    : `--drain-timeout 只接受正整数秒数（收到 ${JSON.stringify(options.drainTimeout)}）。要跳过等待立即重启，请用 dutydeck restart --force。旧服务仍在运行，没有停止任何进程。`
+    : operation === 'deploy'
+      ? `--drain-timeout 只接受正整数秒数（收到 ${JSON.stringify(options.drainTimeout)}）。要跳过等待，请重新执行原 dutydeck deploy 命令并加 --force。旧服务仍在运行，没有停止任何进程。`
+      : `--drain-timeout 只接受正整数秒数（收到 ${JSON.stringify(options.drainTimeout)}）。要跳过等待立即重启，请用 dutydeck restart --force。旧服务仍在运行，没有停止任何进程。`
 });
 
 const refuseWithoutStatus = (reason: string, operation: DrainOperation = 'restart') => operation === 'update'
   ? `${reason}，无法确认是否有任务正在执行，已拒绝更新，旧服务仍在运行。若确认可以中断正在执行的任务，请用 dutydeck update --force 跳过等待。`
-  : `${reason}，无法确认是否有任务正在执行，已拒绝重启，旧服务仍在运行。若确认可以中断正在执行的任务，加 --force 跳过等待。`;
+  : operation === 'deploy'
+    ? `${reason}，无法确认是否有任务正在执行，已拒绝部署，旧服务仍在运行。若确认可以中断正在执行的任务，请重新执行原 dutydeck deploy 命令并加 --force。`
+    : `${reason}，无法确认是否有任务正在执行，已拒绝重启，旧服务仍在运行。若确认可以中断正在执行的任务，加 --force 跳过等待。`;
 
 /**
  * 重启前等待守护进程中正在执行的任务结束（drain）。
@@ -205,22 +214,22 @@ export async function waitForRunningTasksDrain(
 
   const inspection = inspectDaemon(dir);
   if (inspection.status === 'stale') {
-    warn(`守护进程未运行，跳过任务等待，继续执行${operation === 'update' ? '更新' : '重启'}。`);
+    warn(`守护进程未运行，跳过任务等待，继续执行${drainAction(operation)}。`);
     return { ok: true };
   }
   if (inspection.status === 'unverifiable') {
-    warn(`守护进程身份无法验证，跳过任务等待，继续执行${operation === 'update' ? '更新' : '重启'}。`);
+    warn(`守护进程身份无法验证，跳过任务等待，继续执行${drainAction(operation)}。`);
     return { ok: true };
   }
   return await holdAndWait(state, timeoutSeconds, deps, allowRecoverable, operation);
 }
 
 /** deploy 默认全量排空；restart 只有确认 tmux 能存活时才显式允许恢复。地址和数据库由调用方给出。 */
-export async function drainRuntime(endpoint: RuntimeEndpoint, options: Pick<CliOptions, 'force' | 'drainTimeout'>, deps: DaemonCommandDeps, allowRecoverable = false): Promise<DrainResult> {
+export async function drainRuntime(endpoint: RuntimeEndpoint, options: Pick<CliOptions, 'force' | 'drainTimeout'>, deps: DaemonCommandDeps, allowRecoverable = false, operation: 'restart' | 'deploy' = 'restart'): Promise<DrainResult> {
   if (options.force) return { ok: true };
   const timeoutSeconds = parseDrainTimeoutSeconds(options.drainTimeout);
-  if (timeoutSeconds === undefined) return invalidDrainTimeout(options);
-  return await holdAndWait(endpoint, timeoutSeconds, deps, allowRecoverable);
+  if (timeoutSeconds === undefined) return invalidDrainTimeout(options, operation);
+  return await holdAndWait(endpoint, timeoutSeconds, deps, allowRecoverable, operation);
 }
 
 /**
@@ -233,7 +242,7 @@ export async function drainRuntime(endpoint: RuntimeEndpoint, options: Pick<CliO
 async function holdAndWait(endpoint: RuntimeEndpoint | undefined, timeoutSeconds: number, deps: DaemonCommandDeps, allowRecoverable: boolean, operation: DrainOperation = 'restart'): Promise<DrainResult> {
   const warn = deps.warn ?? defaultWarn;
   const info = deps.info ?? defaultInfo;
-  const action = operation === 'update' ? '更新' : '重启';
+  const action = drainAction(operation);
 
   const localAddresses = deps.localAddresses ?? (() => Object.values(networkInterfaces()).flatMap(entries => entries?.map(entry => entry.address) ?? []));
   const parsedUrl = resolveLocalUrl(endpoint?.address, localAddresses);
@@ -342,7 +351,12 @@ async function holdAndWait(endpoint: RuntimeEndpoint | undefined, timeoutSeconds
       currentRunning = current.runningTasks;
       if (currentRunning === 0) break;
       if (timer() >= deadline) {
-        return await refuse(`等待正在执行的任务结束超时（${timeoutSeconds} 秒），旧服务仍在运行（当前仍有 ${currentRunning} 个任务正在执行）。若确认可以中断这些任务，请使用 ${operation === 'update' ? 'dutydeck update --force' : 'dutydeck restart --force'} 强制${action}。`, currentRunning);
+        const guidance = operation === 'update'
+          ? '请使用 dutydeck update --force 强制更新。'
+          : operation === 'deploy'
+            ? '请重新执行原 dutydeck deploy 命令并加 --force。'
+            : '请使用 dutydeck restart --force 强制重启。';
+        return await refuse(`等待正在执行的任务结束超时（${timeoutSeconds} 秒），旧服务仍在运行（当前仍有 ${currentRunning} 个任务正在执行）。若确认可以中断这些任务，${guidance}`, currentRunning);
       }
     }
   } finally {
@@ -1263,43 +1277,64 @@ export interface DaemonStatusInfo {
   unregisteredForeground?: UnregisteredForeground;
 }
 
-/** `dutydeck status`: report whether a daemon is alive and where. */
-export function daemonStatus(): DaemonStatusInfo {
-  const dir = resolveDaemonDir();
-  const state = readDaemonStatus(dir);
-  const inspection = inspectDaemon(dir);
+export interface DaemonStatusSnapshot {
+  dir: string;
+  state?: DaemonState;
+  inspection: DaemonInspection;
+  status: DaemonStatusInfo;
+}
+
+/** 同一实例目录、同一次进程检查产生 status 与原始记录，调用方不再拼两个快照。 */
+export function daemonStatusSnapshot(env: NodeJS.ProcessEnv = process.env, cwd = process.cwd()): DaemonStatusSnapshot {
+  const dir = resolveDaemonDir(cwd, env.HOME ?? homedir(), env);
+  const { state, inspection } = readDaemonInspection(dir);
   const alive = inspection.status === 'verified';
   const authEnabled = state?.authEnabled !== false;
   return {
-    running: alive,
-    processStatus: inspection.status,
-    error: inspection.status === 'unverifiable' ? unverifiedResult('status', inspection).error : undefined,
-    pid: inspection.status !== 'stale' ? inspection.pid : undefined,
-    address: alive ? state?.address : undefined,
-    logFile: alive ? daemonPaths(dir).logFile : undefined,
-    startedAt: alive ? state?.startedAt : undefined,
-    ready: alive ? state?.ready : false,
-    authEnabled: alive ? authEnabled : undefined,
-    authentication: alive ? (authEnabled ? 'required' : 'disabled') : undefined
+    dir,
+    ...(state ? { state } : {}),
+    inspection,
+    status: {
+      running: alive,
+      processStatus: inspection.status,
+      error: inspection.status === 'unverifiable' ? unverifiedResult('status', inspection).error : undefined,
+      pid: inspection.status !== 'stale' ? inspection.pid : undefined,
+      address: alive ? state?.address : undefined,
+      logFile: alive ? daemonPaths(dir).logFile : undefined,
+      startedAt: alive ? state?.startedAt : undefined,
+      ready: alive ? state?.ready : false,
+      authEnabled: alive ? authEnabled : undefined,
+      authentication: alive ? (authEnabled ? 'required' : 'disabled') : undefined
+    }
   };
 }
 
+/** `dutydeck status`: report whether a daemon is alive and where. */
+export function daemonStatus(env: NodeJS.ProcessEnv = process.env, cwd = process.cwd()): DaemonStatusInfo {
+  return daemonStatusSnapshot(env, cwd).status;
+}
+
 const FOREGROUND_PROBE_TIMEOUT_MS = 500;
+type ForegroundProbeDeps = Pick<DaemonCommandDeps, 'fetch' | 'requestTimeoutMs' | 'localAddresses'>;
 
 /**
- * 保守识别没有 daemon 状态记录的前台服务。两个端点都必须直接返回约定 JSON；
- * 不跟随重定向，任何网络、状态或结构错误都只表示“没有识别到”，不改写旧状态。
+ * 保守识别没有 daemon 状态记录的前台服务。两个端点都必须直接返回稳定产品 header 和约定 JSON；
+ * 不跟随重定向，任何网络、身份、状态或结构错误都只表示“没有识别到”，不改写旧状态。
  */
-export async function probeUnregisteredForeground(address: string, deps: Pick<DaemonCommandDeps, 'fetch' | 'requestTimeoutMs'> = {}): Promise<UnregisteredForeground | undefined> {
+export async function probeUnregisteredForeground(address: string, deps: ForegroundProbeDeps = {}): Promise<UnregisteredForeground | undefined> {
+  const localAddresses = deps.localAddresses ?? (() => Object.values(networkInterfaces()).flatMap(entries => entries?.map(entry => entry.address) ?? []));
+  const parsed = resolveLocalUrl(address, localAddresses);
+  if (!parsed) return undefined;
   const fetcher = deps.fetch ?? fetch;
   const requestTimeoutMs = deps.requestTimeoutMs ?? FOREGROUND_PROBE_TIMEOUT_MS;
   const request = async (path: string): Promise<unknown> => {
-    const response = await fetcher(new URL(path, address).toString(), {
+    const response = await fetcher(new URL(path, parsed).toString(), {
       headers: { Accept: 'application/json' },
       redirect: 'error',
       signal: AbortSignal.timeout(requestTimeoutMs)
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    if (response.headers.get(DUTYDECK_PRODUCT_HEADER) !== DUTYDECK_PRODUCT) throw new Error('Not a Dutydeck health response');
     return await response.json();
   };
   try {
@@ -1314,19 +1349,28 @@ export async function probeUnregisteredForeground(address: string, deps: Pick<Da
   }
 }
 
-/** CLI status 的异步增强：只有明确没有 daemon 记录时才探测配置端口。 */
-export async function daemonStatusWithForeground(env: NodeJS.ProcessEnv = process.env, deps: Pick<DaemonCommandDeps, 'fetch' | 'requestTimeoutMs'> = {}): Promise<DaemonStatusInfo> {
-  const status = daemonStatus();
-  const inspection = inspectDaemon(resolveDaemonDir(process.cwd(), env.HOME));
-  if (inspection.status !== 'stale' || inspection.reason !== 'No daemon recorded') return status;
+/** CLI status 的异步增强：只有明确没有 daemon 记录时才探测同一实例的本机配置端口。 */
+export async function daemonStatusWithForeground(env: NodeJS.ProcessEnv = process.env, deps: ForegroundProbeDeps = {}): Promise<DaemonStatusInfo> {
+  const snapshot = daemonStatusSnapshot(env);
+  if (snapshot.status.processStatus !== 'stale' || snapshot.inspection.reason !== 'No daemon recorded') return snapshot.status;
+  const effectiveEnv = environmentWithServiceRoot(env, { daemonDir: snapshot.dir }).env;
   const config = appConfigSchema.pick({ host: true, port: true }).safeParse({
-    host: env.DUTYDECK_LOCAL_ONLY === 'true' ? '127.0.0.1' : env.DUTYDECK_HOST,
-    port: env.DUTYDECK_PORT ? Number(env.DUTYDECK_PORT) : undefined
+    host: effectiveEnv.DUTYDECK_LOCAL_ONLY === 'true' ? '127.0.0.1' : effectiveEnv.DUTYDECK_HOST,
+    port: effectiveEnv.DUTYDECK_PORT ? Number(effectiveEnv.DUTYDECK_PORT) : undefined
   });
-  if (!config.success) return status;
+  if (!config.success) return snapshot.status;
   const address = localLoopbackUrl(config.data.host, config.data.port);
   const unregisteredForeground = await probeUnregisteredForeground(address, deps);
-  return unregisteredForeground ? { ...status, unregisteredForeground } : status;
+  return unregisteredForeground ? { ...snapshot.status, unregisteredForeground } : snapshot.status;
+}
+
+/** 未登记前台没有可核验的排水/接管通道；调用方必须在写安装或另起 daemon 前拒绝。 */
+export async function unregisteredForegroundRefusal(operation: 'restart' | 'update', env: NodeJS.ProcessEnv = process.env, deps: ForegroundProbeDeps = {}): Promise<string | undefined> {
+  const status = await daemonStatusWithForeground(env, deps);
+  const foreground = status.unregisteredForeground;
+  if (!foreground) return undefined;
+  const target = operation === 'update' ? '在安装前拒绝更新' : '拒绝重启，未启动新的 daemon';
+  return `检测到未登记前台 Dutydeck 服务（${foreground.address}），无法可靠排水或接管，已${target}。请在原启动终端按 Ctrl-C 停服，再重新执行原 dutydeck ${operation} 命令；需要调整参数时，请在原终端用原启动参数修改后启动。`;
 }
 
 function authEnabledFromCli(options: CliOptions, env: NodeJS.ProcessEnv): boolean {

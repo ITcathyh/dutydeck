@@ -54,6 +54,7 @@ import { registerWorkspaceApprovalRoutes, type WorkspaceApprovalRouteOptions } f
 import { registerSessionInsightRoutes, type SessionInsightRouteOptions } from './session-insight-routes.js';
 import { isPluginTriggerRequest, registerPluginRoutes, type PluginRouteOptions } from './plugins/routes.js';
 import { registerTurnDiffRoutes, type TurnDiffRouteOptions } from './turn-diff-routes.js';
+import { DUTYDECK_PRODUCT, DUTYDECK_PRODUCT_HEADER } from './health-identity.js';
 
 const installationOwnerActor: ExecutionActor = { kind: 'installation_owner', id: installationOwnerTaskActor };
 const contentTypes: Record<string, string> = {
@@ -226,11 +227,15 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     reply.code(500).send({ error: { code: 'INTERNAL_ERROR', message: error.message } });
   });
 
-  app.get('/health', async () => ({ ok: true }));
+  app.get('/health', async (_request, reply) => {
+    void reply.header(DUTYDECK_PRODUCT_HEADER, DUTYDECK_PRODUCT);
+    return { ok: true };
+  });
   // 就绪：启动时要建立的外部入口（飞书长连接）都已有结果。部署与重启等它再认定新进程接管了服务。
   // 路由在 lark 路由注册前声明，只在请求时读取检查函数。
   let readinessChecks: Array<() => string | undefined> = [];
-  app.get('/health/ready', async () => {
+  app.get('/health/ready', async (_request, reply) => {
+    void reply.header(DUTYDECK_PRODUCT_HEADER, DUTYDECK_PRODUCT);
     const pending = readinessChecks.map(check => check()).filter((reason): reason is string => reason !== undefined);
     return { ok: true, ready: pending.length === 0, pending };
   });

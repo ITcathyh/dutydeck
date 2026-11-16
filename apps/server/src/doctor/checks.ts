@@ -246,9 +246,19 @@ export function checkEnvFile(location: EnvLocation, readError?: string): DoctorC
 
 // ─── 4. database.reachable / schema.migrations ───────────────────────────────
 
-export function checkDatabase(path: string, probe: DatabaseProbeResult): DoctorCheck {
+export function checkDatabase(path: string, probe: DatabaseProbeResult, observation: { unregisteredForeground?: boolean } = {}): DoctorCheck {
   if (!probe.exists) {
     // 刻意不建库：诊断命令建出一个空库，会让「还没初始化」变成「已初始化但没数据」。
+    if (observation.unregisteredForeground) {
+      return {
+        id: 'database.reachable',
+        label: '本地数据库',
+        level: 'warn',
+        detail: `当前配置库尚未初始化（${path} 不存在）；未登记前台实际使用的数据库可能不同`,
+        remedy: '请在原启动终端核对前台进程的 --database 与 DUTYDECK_DATABASE_URL。这个路径只代表本次 doctor 的配置，不能据此断定前台实际数据库未初始化。',
+        verify: 'dutydeck status'
+      };
+    }
     return {
       id: 'database.reachable',
       label: '本地数据库',
@@ -605,14 +615,22 @@ export interface LarkListenerObservation {
  * 必须出现在守护进程上报的已连接列表里，否则报失败并写出最近一次错误和下次重连时间。
  */
 export function checkLarkListener(botCount: number, daemonRunning: boolean, listenerDisabled: boolean, observation: LarkListenerObservation): DoctorCheck {
+  let parsed: unknown;
+  try { parsed = JSON.parse(observation.raw ?? '[]'); } catch { parsed = undefined; }
+  // lark.bots 坏掉由 lark.config 报 fail；缺凭据的条目不会被加载，也不算应该监听。
+  const expected = (Array.isArray(parsed) ? parsed as Array<Partial<StoredLarkConfig> | null> : [])
+    .filter((bot): bot is Partial<StoredLarkConfig> & { appId: string } => Boolean(bot && typeof bot.appId === 'string' && bot.appId
+      && String(bot.appSecret ?? '').trim() && bot.listening === true && larkExecutionConfirmed(bot)));
   if (listenerDisabled) {
     return {
       id: 'lark.listener',
       label: '飞书监听',
       level: 'warn',
       detail: '本进程环境里 DUTYDECK_DISABLE_LARK_LISTENER=true，监听已关闭',
-      remedy: '环境变量 DUTYDECK_DISABLE_LARK_LISTENER=true 会让本进程完全不建立飞书长连接（等价于 --no-lark-listen）。要恢复监听，去掉该变量后重启守护进程。',
-      command: 'unset DUTYDECK_DISABLE_LARK_LISTENER && dutydeck restart',
+      remedy: observation.unregisteredForeground
+        ? '请在原启动终端按 Ctrl-C 停止该前台进程，去掉原环境里的 DUTYDECK_DISABLE_LARK_LISTENER 或原命令里的 --no-lark-listen，再按其余原参数重新启动。'
+        : '环境变量 DUTYDECK_DISABLE_LARK_LISTENER=true 会让本进程完全不建立飞书长连接（等价于 --no-lark-listen）。要恢复监听，去掉该变量后重启守护进程。',
+      ...(observation.unregisteredForeground ? {} : { command: 'unset DUTYDECK_DISABLE_LARK_LISTENER && dutydeck restart' }),
       verify: 'dutydeck doctor --json'
     };
   }
@@ -620,6 +638,7 @@ export function checkLarkListener(botCount: number, daemonRunning: boolean, list
     return { id: 'lark.listener', label: '飞书监听', level: 'skip', detail: '未配置飞书，无需监听' };
   }
   if (observation.unregisteredForeground) {
+    if (!expected.length) return { id: 'lark.listener', label: '飞书监听', level: 'skip', detail: '没有开启监听的机器人' };
     return {
       id: 'lark.listener',
       label: '飞书监听',
@@ -640,12 +659,6 @@ export function checkLarkListener(botCount: number, daemonRunning: boolean, list
       verify: 'dutydeck status'
     };
   }
-  let parsed: unknown;
-  try { parsed = JSON.parse(observation.raw ?? '[]'); } catch { parsed = undefined; }
-  // lark.bots 坏掉由 lark.config 报 fail；缺凭据的条目不会被加载，也不算应该监听。
-  const expected = (Array.isArray(parsed) ? parsed as Array<Partial<StoredLarkConfig> | null> : [])
-    .filter((bot): bot is Partial<StoredLarkConfig> & { appId: string } => Boolean(bot && typeof bot.appId === 'string' && bot.appId
-      && String(bot.appSecret ?? '').trim() && bot.listening === true && larkExecutionConfirmed(bot)));
   if (!expected.length) return { id: 'lark.listener', label: '飞书监听', level: 'skip', detail: '没有开启监听的机器人' };
   let status: Partial<LarkListenerStatus> | undefined;
   try { status = observation.status ? JSON.parse(observation.status) as Partial<LarkListenerStatus> : undefined; } catch { status = undefined; }
@@ -820,6 +833,8 @@ export interface PostureObservation {
   runningHost?: string;
   runningPort?: number;
   runningAuthEnabled?: boolean;
+  /** 已识别前台；认证调整只能回到原启动终端，daemon 命令不会改变它。 */
+  unregisteredForeground?: boolean;
 }
 
 export function checkAccessPosture(observation: PostureObservation): DoctorCheck {
@@ -831,8 +846,10 @@ export function checkAccessPosture(observation: PostureObservation): DoctorCheck
       label: '访问姿态',
       level: 'fail',
       detail: `认证已关闭且监听在 ${host}:${port}（非仅本机）——同网络任何人都能打开终端并驱动 Agent`,
-      remedy: `这等于把本机 shell 和所有 Agent 的控制权敞开给整个网络，没有 --unsafe-no-auth 时服务会拒绝启动。二选一：设置访问密码并重新开启访问认证（去掉 --no-auth 或 .env 里的 DUTYDECK_AUTH=false），或改回只监听本机（dutydeck setup --local-only）。`,
-      command: 'dutydeck auth password set',
+      remedy: observation.unregisteredForeground
+        ? '这等于把本机 shell 和所有 Agent 的控制权敞开给整个网络。请在原启动终端按 Ctrl-C 停止该进程，再用原启动参数开启认证或改回 --local-only；本次 doctor 无法核验原进程的实际认证参数。'
+        : '这等于把本机 shell 和所有 Agent 的控制权敞开给整个网络，没有 --unsafe-no-auth 时服务会拒绝启动。二选一：设置访问密码并重新开启访问认证（去掉 --no-auth 或 .env 里的 DUTYDECK_AUTH=false），或改回只监听本机（dutydeck setup --local-only）。',
+      ...(observation.unregisteredForeground ? {} : { command: 'dutydeck auth password set' }),
       verify: 'dutydeck doctor --json'
     };
   }
@@ -842,8 +859,10 @@ export function checkAccessPosture(observation: PostureObservation): DoctorCheck
       label: '访问姿态',
       level: 'warn',
       detail: `认证已关闭，但只监听 ${host}（仅本机可达）`,
-      remedy: '当前只有本机能连，风险有限；但本机上的任何进程/用户都能无凭据操作 Dutydeck。若这台机器不是你独占的，请开启访问认证。',
-      command: 'dutydeck restart --auth',
+      remedy: observation.unregisteredForeground
+        ? '当前只有本机能连，风险有限；但本机上的任何进程/用户都能无凭据操作 Dutydeck。请在原启动终端按 Ctrl-C 停止该进程，再用原启动参数加 --auth 重新启动；本次 doctor 无法核验原进程的实际认证参数。'
+        : '当前只有本机能连，风险有限；但本机上的任何进程/用户都能无凭据操作 Dutydeck。若这台机器不是你独占的，请开启访问认证。',
+      ...(observation.unregisteredForeground ? {} : { command: 'dutydeck restart --auth' }),
       verify: 'dutydeck doctor --json'
     };
   }
