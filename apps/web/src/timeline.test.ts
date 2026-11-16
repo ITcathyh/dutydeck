@@ -622,3 +622,12 @@ it('retains a legacy long data.text message when a later delta first introduces 
   const [merged] = buildTimeline([event(1, 'text', { text: legacy }), event(2, 'text', { text: 'tail', parts: [{ type: 'text', text: 'tail' }] })]);
   expect(merged?.data.parts).toEqual([{ type: 'text', text: legacy + 'tail' }]);
 });
+
+it('treats non-array persisted parts as no structured content and retains legal data.text', () => {
+  const [merged] = buildTimeline([
+    event(1, 'text', { text: '合法', parts: { unexpected: true } }),
+    event(2, 'text', { text: '正文', parts: { unexpected: true } })
+  ]);
+  expect(merged?.data.text).toBe('合法正文');
+  expect(merged?.data.parts).toEqual([]);
+});

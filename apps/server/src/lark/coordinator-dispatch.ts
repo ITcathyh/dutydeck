@@ -183,6 +183,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     fallbackTarget?: TaskRecord
   ): Promise<SteeringPermissionStatus> {
     let taskId = target?.taskId;
+    let attemptId = target?.attemptId;
     try {
       if (!taskId) {
         if (!fallbackTarget || !this.runtime.getTasks) return 'unknown';
@@ -190,28 +191,40 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           && task.status === 'running' && task.currentAttemptId === fallbackTarget.currentAttemptId);
         if (!current) return 'unknown';
         taskId = current.id;
+        attemptId = current.currentAttemptId;
       }
       if (!this.runtime.getPendingPermissions) return 'unknown';
       const pending = (await this.runtime.getPendingPermissions(sessionId)).filter(permission => permission.status === 'pending');
       if (!pending.length) return 'confirmed-none';
+      if (!attemptId) return 'unknown';
       if (this.runtime.getLatestPermissionRequest) {
+        let attemptUnknown = false;
         for (const permission of pending) {
           const event = await this.runtime.getLatestPermissionRequest(sessionId, taskId, permission.id);
-          if (event?.type === 'permission_request' && (event.data as any)?.status === 'pending') return 'confirmed-pending';
+          if (!event) continue;
+          if (event.type !== 'permission_request' || event.attemptId !== attemptId) {
+            attemptUnknown = true;
+            continue;
+          }
+          if ((event.data as any)?.status === 'pending') return 'confirmed-pending';
         }
-        return 'confirmed-none';
+        return attemptUnknown ? 'unknown' : 'confirmed-none';
       }
       if (!this.runtime.getEvents) return 'unknown';
       const events = eventsForRuntimeTask(await this.runtime.getEvents(sessionId), taskId);
       const pendingIds = new Set(pending.map(permission => permission.id));
       const latest = new Map<string, string>();
+      const otherAttempts = new Set<string>();
       for (const event of events) {
         if (event.type !== 'permission_request') continue;
         const data = event.data as any;
         if (!data || typeof data !== 'object' || typeof data.id !== 'string' || typeof data.status !== 'string') return 'unknown';
-        if (pendingIds.has(data.id)) latest.set(data.id, data.status);
+        if (!pendingIds.has(data.id)) continue;
+        if (event.attemptId === attemptId) latest.set(data.id, data.status);
+        else otherAttempts.add(data.id);
       }
       for (const permission of pending) if (latest.get(permission.id) === 'pending') return 'confirmed-pending';
+      for (const permission of pending) if (!latest.has(permission.id) && otherAttempts.has(permission.id)) return 'unknown';
       return 'confirmed-none';
     } catch (error) {
       this.log.warn({ error, sessionId, taskId: taskId ?? fallbackTarget?.id }, '读取插话后的实时审批状态失败，审批状态按未知处理');

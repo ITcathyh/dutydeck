@@ -295,7 +295,7 @@ describe('排队卡：当前这一轮被审批挡住', () => {
     const current = (await h.runtimeTask(prompt))!;
     vi.spyOn(h.runtime, 'getPendingPermissions').mockReturnValue([{ id: 'native_current', title: '当前任务审批', status: 'pending' }]);
     vi.spyOn(h.runtime, 'getLatestPermissionRequest').mockImplementation(async (_sessionId, taskId, nativeId) => taskId === current.id
-      ? { type: 'permission_request', taskId, data: { id: nativeId, title: '当前任务审批', status: 'pending' } } as any : undefined);
+      ? { type: 'permission_request', taskId, attemptId: current.currentAttemptId, data: { id: nativeId, title: '当前任务审批', status: 'pending' } } as any : undefined);
     return current;
   };
   /** 排队卡上审批按钮的回调值。 */
