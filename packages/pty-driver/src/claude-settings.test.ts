@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { claudePlanGuardMatcher, createCliAdapter } from '@dutydeck/cli-adapters';
@@ -18,7 +18,7 @@ afterEach(() => {
 const fixture = (adapterId = 'claude-code') => {
   const cwd = mkdtempSync(join(tmpdir(), 'claude-settings-test-'));
   directories.push(cwd);
-  const sessionId = randomUUID();
+  const sessionId = `ses_${randomUUID()}`;
   const helper = new ClaudeSettings(adapterId, sessionId, cwd);
   settings.push(helper);
   const generated = createCliAdapter(adapterId).buildArgs({ sessionId, permissionMode: 'full-trust' });
@@ -395,39 +395,17 @@ const settingsDirectory = (helper: ClaudeSettings) => dirname(helper.planGuardCo
 const launchGuardPath = (helper: ClaudeSettings) => join(settingsDirectory(helper), 'launch-guard.json');
 
 describe('Claude launch guard recovery', () => {
-  it('uses every pre-existing JSON snapshot only when the launch record is missing', () => {
+  it('refuses a missing launch record instead of treating historical snapshots as live wiring proof', () => {
     const { cwd, helper, sessionId } = fixture();
     const generated = createCliAdapter('claude-code').buildArgs({ sessionId, permissionMode: 'full-trust', cwd, planGuardCommand: helper.planGuardCommand() });
     directories.push(settingsDirectory(helper));
     helper.setPlanGuard(true);
-    const first = helper.args(['--settings', '{"theme":"dark"}'], generated, cwd).at(-1)!;
-    const second = helper.args(['--settings', '{"theme":"dark"}'], generated, cwd).at(-1)!;
-    expect(first.endsWith('.json')).toBe(true);
-    expect(second.endsWith('.json')).toBe(true);
+    helper.args(['--settings', '{"theme":"dark"}'], generated, cwd);
+    helper.args(['--settings', '{"theme":"dark"}'], generated, cwd);
 
     const adopted = new ClaudeSettings('claude-code', sessionId, cwd);
     settings.push(adopted);
-    expect(adopted.launchGuardWiring()).toMatchObject({ failureBlock: false, planGuard: true, secretGuard: true });
-
-    const mixed = JSON.parse(readFileSync(second, 'utf8'));
-    mixed.hooks.PreToolUse = mixed.hooks.PreToolUse.filter((group: { matcher: string }) => group.matcher !== secretGuardToolMatcher);
-    writeFileSync(second, JSON.stringify(mixed));
-    const separate = new ClaudeSettings('claude-code', sessionId, cwd);
-    settings.push(separate);
-    expect(separate.launchGuardWiring()).toMatchObject({ failureBlock: false, planGuard: true, secretGuard: false });
-
-    const wrongMarker = JSON.parse(readFileSync(first, 'utf8'));
-    const secret = wrongMarker.hooks.PreToolUse.find((group: { matcher: string }) => group.matcher === secretGuardToolMatcher);
-    secret.hooks[0].command = secret.hooks[0].command.replaceAll(cwd, join(cwd, 'other'));
-    writeFileSync(second, JSON.stringify(wrongMarker));
-    const wrongPolicyRoot = new ClaudeSettings('claude-code', sessionId, cwd);
-    settings.push(wrongPolicyRoot);
-    expect(wrongPolicyRoot.launchGuardWiring()).toMatchObject({ planGuard: true, secretGuard: false });
-
-    writeFileSync(join(settingsDirectory(helper), 'broken.json'), '{');
-    const invalidSnapshot = new ClaudeSettings('claude-code', sessionId, cwd);
-    settings.push(invalidSnapshot);
-    expect(invalidSnapshot.launchGuardWiring()).toBeUndefined();
+    expect(adopted.launchGuardWiring()).toBeUndefined();
   });
 
   it('keeps inline-only launches unverifiable without inventing a snapshot', () => {
@@ -446,7 +424,7 @@ describe('Claude launch guard recovery', () => {
     expect(adopted.launchGuardWiring()).toMatchObject({ failureBlock: false, planGuard: false, secretGuard: false });
   });
 
-  it.each(['malformed', 'fields', 'unreadable', 'directory'] as const)('rejects an invalid launch record even with valid snapshots: %s', kind => {
+  it.each(['malformed', 'fields', 'unreadable', 'directory', 'symlink', 'dangling'] as const)('rejects an invalid launch record even with valid snapshots: %s', kind => {
     const { cwd, helper, sessionId } = fixture();
     const generated = createCliAdapter('claude-code').buildArgs({ sessionId, permissionMode: 'full-trust', cwd, planGuardCommand: helper.planGuardCommand() });
     directories.push(settingsDirectory(helper));
@@ -456,6 +434,11 @@ describe('Claude launch guard recovery', () => {
     if (kind === 'fields') writeFileSync(record, JSON.stringify({ id: 'old', failureBlock: 'yes', planGuard: true, secretGuard: true }));
     if (kind === 'unreadable') { writeFileSync(record, '{}'); chmodSync(record, 0); }
     if (kind === 'directory') mkdirSync(record);
+    if (kind === 'symlink' || kind === 'dangling') {
+      const target = join(settingsDirectory(helper), `${kind}-target.json`);
+      if (kind === 'symlink') writeFileSync(target, JSON.stringify({ id: 'linked', failureBlock: false, planGuard: true, secretGuard: true }));
+      symlinkSync(target, record);
+    }
     const adopted = new ClaudeSettings('claude-code', sessionId, cwd);
     settings.push(adopted);
     expect(adopted.launchGuardWiring()).toBeUndefined();

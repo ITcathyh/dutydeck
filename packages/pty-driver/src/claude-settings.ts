@@ -72,10 +72,9 @@ function hasGuardHook(settings: Record<string, unknown>, expectedMatcher: string
 export class ClaudeSettings {
   private readonly directory: string;
   private readonly files = new Set<string>();
-  private readonly snapshots: (Record<string, unknown> | undefined)[] = [];
   private launchGuard?: LaunchGuardWiring;
 
-  constructor(private readonly adapterId: string, sessionId: string, private readonly cwd = process.cwd()) {
+  constructor(private readonly adapterId: string, sessionId: string, _cwd = process.cwd()) {
     const key = createHash('sha256').update(sessionId).digest('hex');
     this.directory = join(tmpdir(), `dutydeck-claude-settings-${process.getuid?.() ?? 'user'}-${key}`);
     if (claudeAdapters.has(adapterId)) {
@@ -83,16 +82,10 @@ export class ClaudeSettings {
         this.assertPrivateDirectory();
         for (const file of readdirSync(this.directory)) {
           if (file === launchGuardFile) continue;
-          const path = join(this.directory, file);
-          this.files.add(path);
-          if (file.endsWith('.json')) {
-            try { this.snapshots.push(readSettings(path, this.directory)); }
-            catch { this.snapshots.push(undefined); }
-          }
+          this.files.add(join(this.directory, file));
         }
         const launch = this.readLaunchGuard();
         if (launch.state === 'valid') this.launchGuard = launch.wiring;
-        else if (launch.state === 'missing') this.launchGuard = this.snapshotLaunchGuard();
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     }
   }
@@ -189,7 +182,7 @@ export class ClaudeSettings {
     writeFileSync(join(this.directory, launchGuardFile), JSON.stringify(this.launchGuard), { mode: 0o600 });
   }
 
-  /** 接管时优先认上次真实启动记录；仅记录不存在时，才使用构造前已有 JSON 的保守校验。 */
+  /** 接管只认上次真实启动记录；缺失或损坏记录不能由历史 settings 证明存活进程的实参。 */
   launchGuardWiring(): Readonly<LaunchGuardWiring> | undefined {
     return this.launchGuard;
   }
@@ -230,20 +223,13 @@ export class ClaudeSettings {
     catch (error) { if (!['ENOENT', 'ENOTEMPTY'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error; }
   }
 
-  private snapshotLaunchGuard(): LaunchGuardWiring | undefined {
-    if (!this.snapshots.length || this.snapshots.some(settings => settings === undefined)) return undefined;
-    const snapshots = this.snapshots as Record<string, unknown>[];
-    return {
-      id: randomUUID(),
-      failureBlock: false,
-      planGuard: snapshots.every(settings => hasGuardHook(settings, claudePlanGuardMatcher, [join(this.directory, planGuardFile)], false)),
-      secretGuard: snapshots.every(settings => hasGuardHook(settings, secretGuardToolMatcher, ['secret-guard.mjs', 'DUTYDECK_POLICY_ROOT=', quote(this.cwd)], false)),
-    };
-  }
-
   private readLaunchGuard(): LaunchGuardRecord {
+    const path = join(this.directory, launchGuardFile);
     let value: string;
-    try { value = readFileSync(join(this.directory, launchGuardFile), 'utf8'); }
+    try {
+      if (!lstatSync(path).isFile()) return { state: 'invalid' };
+      value = readFileSync(path, 'utf8');
+    }
     catch (error) { return { state: (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : 'invalid' }; }
     try {
       const parsed: unknown = JSON.parse(value);

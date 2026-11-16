@@ -23,7 +23,7 @@ beforeEach(async () => {
   driver = new PtyCliDriver({
     agent: { id: 'claude-code', name: 'Claude', command: 'unused', args: [], protocol: 'pty-cli', cwd: directory, env: { CLAUDE_CONFIG_DIR: directory },
       permissionMode: 'full-trust', timeout: 60, capabilities: { pause: false, resume: true }, builtin: false },
-    adapter: { ...createCliAdapter('claude-code'), writeInput(_backend, prompt) {
+    adapter: { ...createCliAdapter('claude-code'), prepareInput: undefined, writeInput(_backend, prompt) {
       submitted = true;
       appendFileSync(transcript, JSON.stringify({ type: 'user', timestamp: new Date().toISOString(), message: { role: 'user', content: prompt } }) + '\n');
     } },

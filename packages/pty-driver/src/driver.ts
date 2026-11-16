@@ -23,7 +23,7 @@ import {
   type TerminalStream,
 } from '@dutydeck/shared';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '@dutydeck/cli-adapters';
-import { buildDutydeckRoutingBlock } from '@dutydeck/cli-adapters';
+import { buildDutydeckRoutingBlock, ownedClaudeComposer } from '@dutydeck/cli-adapters';
 import { ProgramStatusFramingStream, captureOwnedTmuxIdentity, captureOwnedTmuxAbsence, stopOwnedTmux, processIdentityKey, verifyOwnedTmuxExit, verifyOwnedTmuxAbsence, PtyBackend, TmuxBackend, HerdrBackend, orphanedTmuxSocketMessage, type SessionBackend, type ProcessProbe, type OwnedTmuxIdentity, type OwnedTmuxExitProof, type OwnedTmuxAbsence } from '@dutydeck/session-backends';
 import { TerminalSnapshot } from '@dutydeck/terminal-renderer';
 import { IdleDetector, type IdleTimings } from './idle-detector.js';
@@ -119,9 +119,20 @@ const matches = (regex: RegExp, cp: number | undefined) => cp !== undefined && r
 const scriptLetter = (regex: RegExp, cp: number | undefined) => matches(letter, cp) && matches(regex, cp);
 
 /** Equivalent to Claude's paste sanitizer, without its diagnostic counters. */
-function claudeSafePrompt(text: string): string {
-  const chars = Array.from(text.normalize('NFC'));
+export function claudeSafePrompt(text: string): string {
+  const normalized = text.normalize('NFC');
+  const chars = Array.from(normalized);
+  const originalMarkerStarts = new Set<number>();
+  const marker = /<<<(\/?)UNTRUSTED_DATA/gi;
+  const markerUtf16Starts = new Set(Array.from(normalized.matchAll(marker), match => match.index));
+  let normalizedUtf16 = 0;
+  for (let index = 0; index < chars.length; index++) {
+    if (markerUtf16Starts.has(normalizedUtf16)) originalMarkerStarts.add(index);
+    normalizedUtf16 += chars[index]!.length;
+  }
+  const preservedMarkerOffsets = new Set<number>();
   const output: string[] = [];
+  let outputLength = 0;
   const previous: number[] = [];
   let lastWasHidden = false;
   let lineStart = 0;
@@ -142,13 +153,22 @@ function claudeSafePrompt(text: string): string {
     return false;
   };
   const priorMatch = (regex: RegExp) => previous.length > 0 && !lastWasHidden && matches(regex, prior());
+  let scriptCacheLine = -1;
+  const scriptCache = new Map<RegExp, boolean>();
   const lineHasScript = (regex: RegExp) => {
+    if (scriptCacheLine !== lineStart) { scriptCacheLine = lineStart; scriptCache.clear(); }
+    const cached = scriptCache.get(regex);
+    if (cached !== undefined) return cached;
     for (let index = lineStart; index < chars.length; index++) {
       const cp = chars[index]!.codePointAt(0)!;
-      if (claudeLineBreak(cp)) return false;
+      if (claudeLineBreak(cp)) break;
       if ((cp >= 1424 && cp <= 2303 || cp >= 64285 && cp <= 65023 || cp >= 65136 && cp <= 65279
-        || cp >= 67584 && cp <= 69631 || cp >= 124928 && cp <= 126975) && scriptLetter(regex, cp)) return true;
+        || cp >= 67584 && cp <= 69631 || cp >= 124928 && cp <= 126975) && scriptLetter(regex, cp)) {
+        scriptCache.set(regex, true);
+        return true;
+      }
     }
+    scriptCache.set(regex, false);
     return false;
   };
   const ambiguousBidi = (next: number | undefined) => {
@@ -209,6 +229,7 @@ function claudeSafePrompt(text: string): string {
   };
 
   for (let index = 0; index < chars.length; index++) {
+    if (originalMarkerStarts.has(index)) preservedMarkerOffsets.add(outputLength);
     const char = chars[index]!;
     const cp = char.codePointAt(0)!;
     if (cp === 127988) {
@@ -216,20 +237,29 @@ function claudeSafePrompt(text: string): string {
       const abbreviation = tags.every(tag => tag >= 917601 && tag <= 917626)
         ? tags.map(tag => String.fromCharCode(tag - 917504)).join('') : '';
       if (['gbeng', 'gbsct', 'gbwls'].includes(abbreviation) && chars[index + 6]?.codePointAt(0) === 917631) {
-        for (const kept of chars.slice(index, index + 7)) { output.push(kept); push(kept.codePointAt(0)!, kept !== char); }
+        for (const kept of chars.slice(index, index + 7)) { output.push(kept); outputLength += kept.length; push(kept.codePointAt(0)!, kept !== char); }
         index += 6;
         continue;
       }
     }
     if (claudeLineBreak(cp)) {
       if (cp === 13 && chars[index + 1]?.codePointAt(0) === 10) index++;
-      output.push('\n'); push(10); lineStart = index + 1;
+      output.push('\n'); outputLength++; push(10); lineStart = index + 1;
       continue;
     }
-    if (!claudeInvisible(cp)) { output.push(char); push(cp); continue; }
-    if (conditionalKeep(index, cp)) { output.push(char); push(cp, true); }
+    if (!claudeInvisible(cp)) { output.push(char); outputLength += char.length; push(cp); continue; }
+    if (conditionalKeep(index, cp)) { output.push(char); outputLength += char.length; push(cp, true); }
   }
-  return output.join('');
+  let result = output.join('');
+  const reconstructed: number[] = [];
+  for (const match of result.matchAll(/<<<(\/?)UNTRUSTED_DATA/gi)) {
+    if (!preservedMarkerOffsets.has(match.index)) reconstructed.push(match.index);
+  }
+  for (let index = reconstructed.length - 1; index >= 0; index--) {
+    const offset = reconstructed[index]! + 2;
+    result = `${result.slice(0, offset)} ${result.slice(offset)}`;
+  }
+  return result;
 }
 
 /** 屏幕行和提示词按同一口径比较：框线当空白，连续空白折成一个。 */
@@ -365,7 +395,7 @@ export class PtyCliDriver implements AgentDriver {
   /** The adapter can await between paste chunks and its final Enter. Every
    * write travels through this identity-bound guard so a detached driver
    * cannot leave a delayed submit key in a surviving tmux pane. */
-  private activeSubmission: { cancelError?: Error; pending?: Promise<unknown>; receiptAbort?: AbortController; businessInputStarted?: boolean; terminalWriteAttempted?: boolean } | undefined;
+  private activeSubmission: { cancelError?: Error; pending?: Promise<unknown>; receiptAbort?: AbortController; businessInputStarted?: boolean; terminalWriteAttempted?: boolean; submitted?: boolean } | undefined;
   /** Maintenance is deliberately not a business turn. Its object identity is
    * the ownership fence across async flushes, cancellation and reconnects. */
   private maintenanceActive: {
@@ -447,6 +477,7 @@ export class PtyCliDriver implements AgentDriver {
   private idleCpuFence?: DriverIdleCpuProof;
   private inputRevision = 0;
   private terminalWrites = 0;
+  private rawWriteBarrier: { outputRevision: number } | undefined;
   private lastInputAt = Date.now();
   private sampleClaudeNativeSession?: (forceDiscovery?: boolean) => import('./claude-native-session.js').ClaudeNativeSession | undefined;
 
@@ -747,7 +778,7 @@ export class PtyCliDriver implements AgentDriver {
     const secretActive = this.secretGuardRequired();
     if (this.planGuardActive || secretActive) this.assertGuardWiring(secretActive);
 
-    let finalPrompt = prompt;
+    let finalPrompt = terminalSafePrompt(prompt);
     let routingPrefix: string | undefined;
     const isFirstPrompt = !this.firstPromptSent;
     if (isFirstPrompt) {
@@ -763,20 +794,21 @@ export class PtyCliDriver implements AgentDriver {
       // 必须在首轮就注入，resume 时才有东西可查。见 session-id/marker.ts。
       const marker = buildSessionMarker(this.sessionId);
       const prefix = block ? `${block.replace(/\n$/, '')}\n${marker}` : marker;
-      routingPrefix = `${prefix}\n`;
-      finalPrompt = `${routingPrefix}${finalPrompt}`;
+      routingPrefix = terminalSafePrompt(`${prefix}\n`);
     }
-    finalPrompt = terminalSafePrompt(finalPrompt);
-    routingPrefix = routingPrefix === undefined ? undefined : terminalSafePrompt(routingPrefix);
     if (claudeAdapters.has(this.adapter.id)) {
       finalPrompt = claudeSafePrompt(finalPrompt);
       routingPrefix = routingPrefix === undefined ? undefined : claudeSafePrompt(routingPrefix);
     }
+    if (claudeAdapters.has(this.adapter.id) && prompt.length > 0 && finalPrompt.length === 0) {
+      throw new PromptNotWrittenError('Claude 输入在清理不可见字符后为空；没有写入终端，也没有创建回执等待。');
+    }
+    if (routingPrefix !== undefined) finalPrompt = `${routingPrefix}${finalPrompt}`;
     let rejectWrite!: (error: Error) => void;
     const writeCancelled = new Promise<never>((_, reject) => {
       this.turnWriteReject = rejectWrite = reject;
     });
-    const submission: { cancelError?: Error; pending?: Promise<unknown>; receiptAbort?: AbortController; businessInputStarted?: boolean; terminalWriteAttempted?: boolean } = {};
+    const submission: { cancelError?: Error; pending?: Promise<unknown>; receiptAbort?: AbortController; businessInputStarted?: boolean; terminalWriteAttempted?: boolean; submitted?: boolean } = {};
     this.activeSubmission = submission;
     const inputBackend = this.backend, generation = this.wiringGeneration;
     const check = () => {
@@ -851,6 +883,7 @@ export class PtyCliDriver implements AgentDriver {
       submission.businessInputStarted = true;
       await Promise.race([this.adapter.writeInput(this.submissionBackend(submission), finalPrompt), writeCancelled]);
       await Promise.race([submission.pending, writeCancelled]);
+      submission.submitted = true;
       check();
       if (routingPrefix !== undefined) this.recordPrompt(routingPrefix, 'pty_routing');
       this.recordPrompt(finalPrompt, 'pty_input');
@@ -1073,18 +1106,23 @@ export class PtyCliDriver implements AgentDriver {
     return this.maintenanceTerminalRecovered(maintenance) && this.maintenanceSafetyClear();
   }
 
+  private rawInputRecovered(): boolean {
+    const barrier = this.rawWriteBarrier;
+    return !barrier || this.screenRevision > barrier.outputRevision && Date.now() - this.lastOutputAt >= 500;
+  }
+
   private maintenanceSafetyClear(): boolean {
-    return this.terminalWrites === 0 && !this.hasBackgroundWork() && this.hookPermissions.size === 0 && this.humanWaits.size === 0 && !this.awaitingAnswer?.();
+    return this.terminalWrites === 0 && this.rawInputRecovered() && !this.hasBackgroundWork() && this.hookPermissions.size === 0 && this.humanWaits.size === 0 && !this.awaitingAnswer?.();
   }
 
   private maintenanceTerminalRecovered(maintenance: NonNullable<PtyCliDriver['maintenanceActive']>): boolean {
     return this.maintenanceActive === maintenance && !this.stopped && this.backend === maintenance.backend
-      && this.wiringGeneration === maintenance.wiringGeneration && this.terminalWrites === 0 && this.terminalIsIdle();
+      && this.wiringGeneration === maintenance.wiringGeneration && this.terminalWrites === 0 && this.rawInputRecovered() && this.terminalIsIdle();
   }
 
   private maintenanceStatusEvidenceLines(lines: string[]): string[] {
     const footer = /^✔ /.test(lines.at(-1) ?? '') ? lines.length - 2 : lines.length - 1;
-    if (!/^(?:(?:⏵⏵|⏸) [a-z ]+ on\b|\? for shortcuts\b)/.test(lines[footer] ?? '')) return lines;
+    if (!/^(?:(?:⏵⏵|⏸) [a-z ]+ on\b|\? for shortcuts\b|paste again to expand\b)/.test(lines[footer] ?? '')) return lines;
     for (let statusRows = 0; statusRows <= 2; statusRows++) {
       const border = footer - statusRows - 1;
       if (border >= 2 && /^─{8,}$/.test(lines[border] ?? '') && lines[border - 2] === lines[border]
@@ -1107,10 +1145,10 @@ export class PtyCliDriver implements AgentDriver {
     return false;
   }
 
-  private maintenanceInterruptedTerminalRecovered(maintenance: NonNullable<PtyCliDriver['maintenanceActive']>): boolean {
-    const screen = this.snapshot?.viewportText({ preserveStructure: true });
+  private maintenanceInterruptedTerminalRecovered(maintenance: NonNullable<PtyCliDriver['maintenanceActive']>, freshScreen?: string): boolean {
+    const screen = freshScreen ?? this.snapshot?.viewportText({ preserveStructure: true, joinWrapped: true, includeScrollback: true });
     if (!screen || this.maintenanceActive !== maintenance || this.stopped || this.backend !== maintenance.backend
-      || this.wiringGeneration !== maintenance.wiringGeneration || this.turnActive || this.activeSubmission || this.terminalWrites > 0) return false;
+      || this.wiringGeneration !== maintenance.wiringGeneration || this.turnActive || this.activeSubmission || this.terminalWrites > 0 || !this.rawInputRecovered()) return false;
     // Background/hook/answer/human waits are pre-write gates only. Compaction
     // activity is different: Enter has been sent, so the composer is not safe
     // until Claude has actually left that activity and shown an empty composer.
@@ -1119,44 +1157,25 @@ export class PtyCliDriver implements AgentDriver {
     return this.adapter.isIdleScreen?.(screen) === true;
   }
 
-  /** Match the complete bottom composer, not a historical /compact line. The
-   * shape mirrors Claude's empty-composer recognition without changing G2. */
-  private maintenanceComposerIsOwned(maintenance: NonNullable<PtyCliDriver['maintenanceActive']>, interrupted = false): boolean {
+  /** Recovery and cleanup use the same composer parser as the real writer. */
+  private maintenanceComposerIsOwned(maintenance: NonNullable<PtyCliDriver['maintenanceActive']>, interrupted = false, freshScreen?: string): boolean {
     if (!maintenance.composerWritten || this.maintenanceActive !== maintenance || this.backend !== maintenance.backend
       || this.wiringGeneration !== maintenance.wiringGeneration) return false;
-    const lines = this.snapshot?.viewportText({ preserveStructure: true })
-      .replace(/\r/g, '').split('\n').map(line => line.trim()).filter(Boolean) ?? [];
-    const footer = /^✔ /.test(lines.at(-1) ?? '') ? lines.length - 2 : lines.length - 1;
-    let owned = false;
-    if (footer >= 3 && /^(?:(?:⏵⏵|⏸) [a-z ]+ on\b|\? for shortcuts\b)/.test(lines[footer] ?? '')) {
-      for (let statusRows = 0; statusRows <= 2; statusRows++) {
-        const border = footer - statusRows - 1;
-        if (border < 2 || !/^─{8,}$/.test(lines[border] ?? '') || lines[border - 2] !== lines[border]
-          || !/^❯\s+\/compact(?:\s+<optional custom summarization instructions>)?$/.test(lines[border - 1] ?? '')) continue;
-        owned = lines.slice(border + 1, footer).every(line => !/[❯›]|^(?:Permission required|Do you want to (?:proceed|allow)|Select an option|Enter to (?:select|confirm)|Accessing workspace:|Quick safety check:|Security guide)\b/i.test(line));
-        break;
-      }
-    }
-    // Claude 2.1.220 opens its slash-command palette after the paste. The
-    // built-in description is the bottom composer's evidence in this shape.
-    if (!owned) {
-      for (let border = lines.length - 3; border >= 2; border--) {
-        if (!/^─{8,}$/.test(lines[border] ?? '') || lines[border - 2] !== lines[border]
-          || !/^❯\s+\/compact(?:\s+<optional custom summarization instructions>)?$/.test(lines[border - 1] ?? '')
-          || !/^\/compact\s+Free up context by summarizing the conversation so far$/.test(lines[border + 1] ?? '')) continue;
-        owned = lines.slice(border + 2).every(line => !/[❯›]/.test(line));
-        break;
-      }
-    }
-    if (!owned) return false;
+    const screen = freshScreen ?? this.snapshot?.viewportText({ preserveStructure: true, joinWrapped: true, includeScrollback: true }) ?? '';
+    if (!ownedClaudeComposer(screen, '/compact', true)) return false;
+    const lines = screen.replace(/\r/g, '').split('\n').map(line => line.trim()).filter(Boolean);
     if (this.maintenanceStatusBlocks(lines, interrupted)) return false;
     return interrupted || !this.screenWaitsForHuman();
   }
 
-  private assertMaintenanceWrite(maintenance: NonNullable<PtyCliDriver['maintenanceActive']>, finalEnter: boolean): void {
+  private async assertMaintenanceWrite(maintenance: NonNullable<PtyCliDriver['maintenanceActive']>, finalEnter: boolean): Promise<void> {
     if (!this.maintenanceSafetyClear()) throw new Error('Compaction submission blocked by new terminal work or a human wait');
     if (finalEnter) {
-      if (!this.maintenanceComposerIsOwned(maintenance)) throw new Error('Compaction final Enter blocked: the current composer is not the owned /compact draft');
+      const screen = await this.readSubmissionScreen(maintenance.backend as SessionBackend & Partial<PtyLike>, true);
+      const lines = screen.replace(/\r/g, '').split('\n').map(line => line.trim()).filter(Boolean);
+      if (!ownedClaudeComposer(screen, '/compact', true) || this.maintenanceStatusBlocks(lines, false) || this.screenWaitsForHuman()) {
+        throw new Error('Compaction final Enter blocked: the current composer is not the owned /compact draft');
+      }
       return;
     }
     if (maintenance.composerWritten) {
@@ -1166,19 +1185,25 @@ export class PtyCliDriver implements AgentDriver {
     }
   }
 
-  private async waitForMaintenanceRawWrites(maintenance: NonNullable<PtyCliDriver['maintenanceActive']>): Promise<boolean> {
+  private async waitForMaintenanceRawWrites(maintenance: NonNullable<PtyCliDriver['maintenanceActive']>, checkCancellation = true): Promise<boolean> {
     const deadline = Date.now() + (this.timings.maintenanceIdleGraceMs ?? PtyCliDriver.MAINTENANCE_IDLE_GRACE_MS);
     for (;;) {
-      if (maintenance.controller.signal.aborted) {
+      if (checkCancellation && maintenance.controller.signal.aborted) {
         const reason = maintenance.controller.signal.reason;
         throw reason instanceof Error ? reason : new Error('Compaction maintenance cancelled');
       }
       if (this.maintenanceActive !== maintenance || this.stopped || this.backend !== maintenance.backend
         || this.wiringGeneration !== maintenance.wiringGeneration) return false;
-      if (this.terminalWrites === 0) return true;
+      if (this.terminalWrites === 0 && this.rawInputRecovered()) {
+        this.rawWriteBarrier = undefined;
+        return true;
+      }
       const remaining = deadline - Date.now();
-      if (remaining <= 0) return false;
-      await new Promise<void>(resolve => { const timer = setTimeout(resolve, Math.min(25, remaining)); timer.unref(); });
+      // An unresolved backend write retains its bounded wait. Once it has
+      // settled, fresh output plus quiet is bounded by maintenance's own
+      // deadline; an earlier raw-idle deadline must not discard that evidence.
+      if (this.terminalWrites > 0 && remaining <= 0) return false;
+      await new Promise<void>(resolve => { const timer = setTimeout(resolve, Math.min(25, Math.max(1, remaining))); timer.unref(); });
     }
   }
 
@@ -1223,14 +1248,18 @@ export class PtyCliDriver implements AgentDriver {
       return false;
     }
     await Promise.race([interrupting, this.maintenanceExit]);
+    if (!await this.waitForMaintenanceRawWrites(maintenance, false)) return false;
     if (this.stopped) return false;
     const deadline = Date.now() + graceMs;
     let cleanupAttempted = false;
     for (;;) {
-      if (this.maintenanceInterruptedTerminalRecovered(maintenance)) return true;
+      let screen = '';
+      try { screen = await this.readSubmissionScreen(maintenance.backend as SessionBackend & Partial<PtyLike>, true); }
+      catch { /* A missing or failed fresh capture is not recovery evidence. */ }
+      if (this.maintenanceInterruptedTerminalRecovered(maintenance, screen)) return true;
       // Polling continues while compaction is active. Ctrl-U is considered
       // only after that activity clears, and is revalidated by the write guard.
-      if (!cleanupAttempted && this.maintenanceComposerIsOwned(maintenance, true)) {
+      if (!cleanupAttempted && this.maintenanceComposerIsOwned(maintenance, true, screen)) {
         cleanupAttempted = true;
         try { await Promise.race([this.submissionBackend(maintenance, 'maintenance-cleanup').write('\x15'), this.maintenanceExit]); } catch { /* Recovery below remains the only proof. */ }
         if (this.stopped) return false;
@@ -1416,9 +1445,9 @@ export class PtyCliDriver implements AgentDriver {
     return !this.maintenanceActive && this.terminalIsIdle();
   }
 
-  private terminalIsIdle(): boolean {
+  private terminalIsIdle(requireRawRecovery = true): boolean {
     const screen = this.snapshot?.viewportText({ preserveStructure: true });
-    if (this.stopped || this.turnActive || this.activeSubmission || !screen || !this.adapter.isIdleScreen) return false;
+    if (this.stopped || this.turnActive || this.activeSubmission || (requireRawRecovery && !this.rawInputRecovered()) || !screen || !this.adapter.isIdleScreen) return false;
     const { screenActivityPattern: activity, backgroundWaitPattern: background, completionPattern: completion, screenCancelledPattern: cancelled } = this.adapter;
     const statusLine = screen.split('\n').reverse().find(line => activity?.test(line) || background?.test(line) || completion?.test(line) || cancelled?.test(line));
     if (statusLine && (activity?.test(statusLine) || background?.test(statusLine))) return false;
@@ -1683,7 +1712,7 @@ export class PtyCliDriver implements AgentDriver {
   idleCpuProof(): DriverIdleCpuProof | undefined {
     if (process.platform !== 'linux' || this.stopped || this.detachedForShutdown || this.detachOnStop
       || !this.idleCpuProcess || !this.idleCpuIdentity || !this.idleCpuRoot || !this.processProbe
-      || this.terminalWrites > 0 || !this.isIdle() || this.hasBackgroundWork() || this.hookPermissions.size || this.humanWaits.size
+      || this.terminalWrites > 0 || this.maintenanceActive || this.maintenanceUnknown || !this.terminalIsIdle(false) || this.hasBackgroundWork() || this.hookPermissions.size || this.humanWaits.size
       || this.awaitingAnswer?.() || this.backendPid?.backend !== this.backend) return undefined;
     if (this.processProbe.observe(this.idleCpuRoot) !== 'alive') return undefined;
     if (this.backend instanceof TmuxBackend && (!this.tmuxIdentity
@@ -1927,11 +1956,16 @@ export class PtyCliDriver implements AgentDriver {
         const backend = this.backend;
         if (this.stopped) throw new DriverDetachedError();
         if (this.maintenanceActive || this.maintenanceUnknown) throw new PromptNotWrittenError(maintenancePromptNotWritten);
+        if (this.activeSubmission && !this.activeSubmission.submitted) {
+          throw new PromptNotWrittenError('Another terminal submission owns the input window until its final Enter');
+        }
+        const outputRevision = this.screenRevision;
         this.terminalWrites++;
         try {
           const result = await backend.write(data);
           if (this.stopped || this.backend !== backend) throw new DriverDetachedError();
           if (result === false) throw new DriverRecoveryError('Terminal input was not confirmed');
+          this.rawWriteBarrier = { outputRevision };
         } finally { this.terminalWrites--; }
       },
       resize: async (cols, rows) => {
@@ -2825,8 +2859,48 @@ export class PtyCliDriver implements AgentDriver {
     this.scheduleRawTerminal();
   }
 
+  private async readSubmissionScreen(target: SessionBackend & Partial<PtyLike>, requireInputCursor = false): Promise<string> {
+    if (target.captureCurrentScreen) {
+      const captured = requireInputCursor && claudeAdapters.has(this.adapter.id) && target.captureInputSubmissionScreen
+        ? await target.captureInputSubmissionScreen()
+        : await target.captureCurrentScreen(true);
+      if (captured === undefined || captured === null) return '';
+      if (target.kind !== 'herdr') return captured;
+      const size = await target.getPaneSize?.() ?? { cols: this.snapshot?.xterm.cols ?? DEFAULT_COLS, rows: this.snapshot?.xterm.rows ?? DEFAULT_ROWS };
+      const renderer = new TerminalSnapshot(size.cols, size.rows);
+      try {
+        await renderer.writeAndFlush(`\x1bc${captured}`);
+        return renderer.viewportText({ preserveStructure: true, joinWrapped: true, includeScrollback: true });
+      } finally { renderer.dispose(); }
+    }
+    const snapshot = this.snapshot;
+    for (let attempt = 0; snapshot && attempt < 3; attempt++) {
+      const revision = this.screenRevision;
+      await snapshot.writeAndFlush('');
+      if (this.snapshot !== snapshot || this.backend !== target) return '';
+      if (revision === this.screenRevision) return snapshot.viewportText({ preserveStructure: this.adapter.id !== 'codex', joinWrapped: true, includeScrollback: true });
+    }
+    return '';
+  }
+
+  private async beginExpandedSubmissionInput(target: SessionBackend & Partial<PtyLike>): Promise<() => Promise<void>> {
+    const size = await target.getPaneSize?.();
+    if (!size || size.rows >= 200) return async () => {};
+    await target.resize(size.cols, 200);
+    this.snapshot?.resize(size.cols, 200);
+    await new Promise<void>(resolve => setTimeout(resolve, 100));
+    let restored = false;
+    return async () => {
+      if (restored) return;
+      restored = true;
+      await target.resize(size.cols, size.rows);
+      this.snapshot?.resize(size.cols, size.rows);
+      await new Promise<void>(resolve => setTimeout(resolve, 100));
+    };
+  }
+
   /** Wrap the intentionally-small adapter PTY surface per submission. The
-   * real Claude adapter awaits between its bracketed paste and Enter, so
+   * real Claude adapter awaits between its keyed chunks and Enter, so
    * checking only before writeInput is insufficient after daemon detach. */
   private submissionBackend(submission: { cancelError?: Error; pending?: Promise<unknown>; writesSettled?: boolean; wiringGeneration?: number; composerWritten?: boolean; submitted?: boolean; businessInputStarted?: boolean; terminalWriteAttempted?: boolean }, owner: 'turn' | 'maintenance' | 'maintenance-cleanup' = 'turn'): PtyLike {
     const target = this.backend as SessionBackend & Partial<PtyLike>;
@@ -2836,7 +2910,7 @@ export class PtyCliDriver implements AgentDriver {
       const active = owner === 'turn' ? this.activeSubmission === submission : this.maintenanceActive === submission;
       if (!active || this.backend !== target || owner !== 'turn' && this.wiringGeneration !== submission.wiringGeneration) throw new Error('PtyCliDriver: submission is no longer active');
     };
-    const guarded = <T>(write: () => T | Promise<T>, maintenanceInput?: 'text' | 'enter', terminalInput = false): Promise<T> => {
+    const guarded = <T>(write: () => T | Promise<T>, maintenanceInput?: 'text' | 'enter', terminalInput = false, finalEnter = false): Promise<T> => {
       this.noteInput();
       check();
       const previous = submission.pending ?? Promise.resolve();
@@ -2845,9 +2919,13 @@ export class PtyCliDriver implements AgentDriver {
       const predecessor = owner === 'maintenance-cleanup' ? previous.catch(() => {}) : previous;
       const operation = predecessor.then(async () => {
         check();
-        if (owner === 'maintenance-cleanup'
-          && !this.maintenanceComposerIsOwned(submission as NonNullable<PtyCliDriver['maintenanceActive']>, true)) {
-          throw new Error('Compaction cleanup blocked: the current composer is no longer the owned /compact draft');
+        if (owner === 'maintenance-cleanup') {
+          let screen = '';
+          try { screen = await this.readSubmissionScreen(target, true); }
+          catch { /* Cleanup requires fresh ownership evidence too. */ }
+          if (!this.maintenanceComposerIsOwned(submission as NonNullable<PtyCliDriver['maintenanceActive']>, true, screen)) {
+            throw new Error('Compaction cleanup blocked: the current composer is no longer the owned /compact draft');
+          }
         }
         if (owner === 'maintenance' && maintenanceInput) {
           const maintenance = submission as NonNullable<PtyCliDriver['maintenanceActive']>;
@@ -2855,7 +2933,7 @@ export class PtyCliDriver implements AgentDriver {
             maintenance.terminalWriteConflict = true;
             throw new Error('Terminal input remained in flight before the compaction Enter');
           }
-          this.assertMaintenanceWrite(maintenance, maintenanceInput === 'enter');
+          await this.assertMaintenanceWrite(maintenance, maintenanceInput === 'enter');
           if (maintenanceInput === 'enter') maintenance.submitted = true;
           else maintenance.composerWritten = true;
           // Safety checks have passed and the next await can put bytes in the
@@ -2865,7 +2943,8 @@ export class PtyCliDriver implements AgentDriver {
         if (owner === 'turn' && terminalInput && submission.businessInputStarted) submission.terminalWriteAttempted = true;
         const result = await write();
         check();
-        if (result === false) throw new DriverRecoveryError('PTY backend rejected input; original process preserved', 'DRIVER_INPUT_UNCONFIRMED');
+        if (result === false) throw new DriverRecoveryError('PTY backend rejected input; original process preserved', 'DRIVER_RESULT_UNKNOWN');
+        if (owner === 'turn' && finalEnter) submission.submitted = true;
         return result;
       });
       submission.pending = operation;
@@ -2878,27 +2957,21 @@ export class PtyCliDriver implements AgentDriver {
       return operation;
     };
     const proxy: PtyLike = {
-      write: data => guarded(() => target.write(data), owner === 'maintenance' ? data === '\r' ? 'enter' : 'text' : undefined, true),
+      write: data => guarded(() => target.write(data), owner === 'maintenance' ? data === '\r' ? 'enter' : 'text' : undefined, true, owner === 'turn' && data === '\r' && !claudeAdapters.has(this.adapter.id)),
+      submitInput: () => guarded(() => target.sendSpecialKeys ? target.sendSpecialKeys!('Enter') : target.write('\r'), owner === 'maintenance' ? 'enter' : undefined, true, owner === 'turn'),
       lastOutputAt: () => { check(); return this.lastOutputAt; },
       processKey: target,
-      // tmux captures a plain current pane through its management client; prefer
-      // it over the asynchronous pipe-pane mirror. Herdr management output can
-      // retain ANSI SGR bytes, so its already-rendered viewport is authoritative.
-      readScreen: () => guarded(async () => {
-        if (target.kind !== 'herdr' && target.captureCurrentScreen) return await target.captureCurrentScreen() ?? '';
-        if (this.adapter.id !== 'codex') return this.snapshot?.viewportText({ preserveStructure: true }) ?? '';
-        const snapshot = this.snapshot;
-        for (let attempt = 0; snapshot && attempt < 3; attempt++) {
-          const revision = this.screenRevision;
-          await snapshot.writeAndFlush(''); check();
-          if (this.snapshot !== snapshot) return '';
-          if (revision === this.screenRevision) return snapshot.viewportText();
-        }
-        return '';
-      }),
+      // Input authorization always uses a fresh management read where the
+      // backend offers one. Herdr ANSI is rendered before parsing, never
+      // replaced by the asynchronous mirror.
+      readScreen: () => guarded(() => this.readSubmissionScreen(target,
+        owner === 'maintenance-cleanup' || Boolean(submission.terminalWriteAttempted || submission.composerWritten))),
     };
+    if (target.kind === 'tmux' && target.getPaneSize) {
+      proxy.beginExpandedInput = () => guarded(() => this.beginExpandedSubmissionInput(target));
+    }
     if (target.sendText) proxy.sendText = text => guarded(() => target.sendText!(text), owner === 'maintenance' ? 'text' : undefined, true);
-    if (target.sendSpecialKeys) proxy.sendSpecialKeys = (...keys) => guarded(() => target.sendSpecialKeys!(...keys), owner === 'maintenance' ? keys.includes('Enter') ? 'enter' : 'text' : undefined, true);
+    if (target.sendSpecialKeys) proxy.sendSpecialKeys = (...keys) => guarded(() => target.sendSpecialKeys!(...keys), owner === 'maintenance' ? keys.includes('Enter') ? 'enter' : 'text' : undefined, true, owner === 'turn' && keys.includes('Enter') && !claudeAdapters.has(this.adapter.id));
     if (target.pasteText) proxy.pasteText = text => guarded(() => target.pasteText!(text), owner === 'maintenance' ? 'text' : undefined, true);
     // The Claude writer owns business composer checks. Compact keeps its more
     // specific activity, ownership and cleanup guards in this driver.

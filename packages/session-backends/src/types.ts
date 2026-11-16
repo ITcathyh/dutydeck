@@ -48,8 +48,10 @@ export interface SessionBackend {
    * implement it — a pty child cannot survive its backend.
    */
   detach?(): void | Promise<void>;
-  /** tmux: capture-pane snapshot; pty: null */
-  captureCurrentScreen?(): string | null | Promise<string | null>;
+  /** tmux: capture-pane snapshot; pty: null. Submission reads may request bounded scrollback. */
+  captureCurrentScreen?(includeScrollback?: boolean): string | null | Promise<string | null>;
+  /** Fresh post-write input proof with cursor/terminal-padding metadata when the backend supports it. */
+  captureInputSubmissionScreen?(): string | null | Promise<string | null>;
   /** Atomically restore a snapshot followed by new pipe increments. */
   resyncOutput?(onBoundary?: () => void): Promise<string | null>;
   onOutputGap?(cb: (droppedBytes: number) => void): void;

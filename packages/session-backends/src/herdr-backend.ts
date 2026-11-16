@@ -435,7 +435,12 @@ export class HerdrBackend implements SessionBackend {
     await this.attach(this.size, onBoundary ?? (() => {}));
     return this.initialScreen?.data ?? null;
   }
-  async captureCurrentScreen(): Promise<string> { const state = (await this.checked()); return (await this.cli(['pane', 'read', state.pane!.pane_id, '--source', 'visible', '--ansi'])); }
+  async captureCurrentScreen(includeScrollback = false): Promise<string> {
+    const state = (await this.checked());
+    return this.cli(includeScrollback
+      ? ['pane', 'read', state.pane!.pane_id, '--source', 'recent-unwrapped', '--lines', '200', '--ansi']
+      : ['pane', 'read', state.pane!.pane_id, '--source', 'visible', '--ansi']);
+  }
   getPaneSize(): { cols: number; rows: number } { return this.size; }
   getPid(): number | null { return this.state?.root?.pid ?? null; }
   onData(cb: (data: string) => void): void { this.output.onData(cb); }

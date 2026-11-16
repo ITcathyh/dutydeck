@@ -62,6 +62,7 @@ describe('PTY completion while Claude background agents are still running', () =
         capabilities: { pause: false, resume: true }, builtin: false },
       adapter: {
         ...createCliAdapter('claude-code'),
+        prepareInput: undefined,
         writeInput(target, prompt) {
           submitted = true;
           submittedOutputAt = target.lastOutputAt?.();

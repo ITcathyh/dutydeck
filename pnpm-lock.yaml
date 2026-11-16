@@ -279,6 +279,9 @@ importers:
       '@dutydeck/shared':
         specifier: workspace:*
         version: link:../shared
+      '@xterm/headless':
+        specifier: ^6.0.0
+        version: 6.0.0
     devDependencies:
       '@types/node':
         specifier: 22.15.30

@@ -38,9 +38,13 @@ export interface PtyLike {
   write(data: string): void | boolean | Promise<void | boolean>;
   /** 当前终端已渲染的完整屏幕。仅需要在启动交互前确认状态的适配器使用。 */
   readScreen?(): string | Promise<string>;
+  /** Reserve a bounded input viewport before the first byte; returns the restore hook. */
+  beginExpandedInput?(): Promise<() => Promise<void>>;
   sendText?(text: string): void | boolean | Promise<void | boolean>;
   sendSpecialKeys?(...keys: string[]): void | boolean | Promise<void | boolean>;
   pasteText?(text: string): void | boolean | Promise<void | boolean>;
+  /** Final submission Enter, distinct from a multiline soft-newline Enter. */
+  submitInput?(): void | boolean | Promise<void | boolean>;
   /** 后端最近一次输出屏幕数据的时间（Date.now() 毫秒）。写入用户消息前据此等屏幕静止、写入后确认回显。 */
   lastOutputAt?(): number;
   /** 同一 CLI 进程的各次写入共用的身份。driver 每次提交都新建 PtyLike 包装，适配器按进程记状态（如首写）时用它，不要用包装对象本身。 */

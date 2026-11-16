@@ -49,7 +49,7 @@ const TRAEX_COMPOSER = new RegExp(
 // Codex 允许用空白隔开的 `⚠ N warning(s) · f2 to view`。
 const TRAEX_ACCESS_FOOTER = /(?:\s+☢ Full Access \(shift\+tab to cycle\) · ← for agents)?/;
 // TraeX 0.210.1 renders these controls on their own row below model/path.
-const TRAEX_CONTROLS_FOOTER = /^☢ Full Access \(shift\+tab to cycle\) · \? for shortcuts · ← for agents$/;
+const TRAEX_CONTROLS_FOOTER = /^☢ Full Access \(shift\+tab to cycle\) · (?:\? for shortcuts · )?← for agents$/;
 const CODEX_WARNING_FOOTER = /(?:\s+⚠ \d+ warnings? · f2 to view)?/;
 // Codex 0.164.0 can omit both context usage and the workspace from its footer.
 const CODEX_WEEKLY_FOOTER = new RegExp(
@@ -107,20 +107,31 @@ function isInitializedFooter(line: string, cli: 'Codex' | 'TraeX'): boolean {
 }
 
 /** readScreen is a rendered viewport, not a raw PTY transcript. */
-export function isInputReady(screen: string, cli: 'Codex' | 'TraeX', busyPattern?: RegExp): boolean {
+export function isInputReady(screen: string, cli: 'Codex' | 'TraeX', busyPattern?: RegExp, expectedDraft?: string): boolean {
   if (cli === 'TraeX' && isTraexBusyScreen(screen)) return false;
   const rows = screen.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').split(/\r?\n/);
   const lines = rows.map(line => line.trim()).filter(Boolean);
   if (lines.some(line => LOADING.test(line) || (cli === 'TraeX' ? STARTUP_PENDING : PENDING).test(line)
-    || /^[›»❯]\s*\d+\./.test(line) || (cli !== 'TraeX' && busyPattern?.test(line)))) return false;
+    || (cli !== 'TraeX' && busyPattern?.test(line)))) return false;
 
   const composerRows = cli === 'TraeX' ? rows : lines;
   let prompt = composerRows.length - 1;
   while (prompt >= 0 && !/^[›»❯](?:\s|$)/.test(composerRows[prompt]!)) prompt--;
-  if (prompt < 0 || !(cli === 'Codex' ? CODEX_COMPOSER : TRAEX_COMPOSER).test(composerRows[prompt]!.trimEnd())) return false;
-  const footer = composerRows.slice(prompt + 1).map(line => line.trim()).filter(Boolean);
+  if (prompt < 0 || /^[›»❯]\s*\d+\./.test(composerRows[prompt]!)) return false;
+  let composerStart = prompt;
+  let composerEnd = prompt + 1;
+  if (expectedDraft !== undefined) {
+    const expectedRows = expectedDraft.split('\n');
+    composerEnd = prompt + expectedRows.length;
+    if (composerEnd > composerRows.length) return false;
+    const actual = composerRows.slice(prompt, composerEnd)
+      .map((line, index) => index === 0 ? line.replace(/^[›❯]\s*/, '') : cli === 'TraeX' ? line.replace(/^  /, '') : line)
+      .join('\n');
+    if (actual !== expectedDraft) return false;
+  } else if (!(cli === 'Codex' ? CODEX_COMPOSER : TRAEX_COMPOSER).test(composerRows[prompt]!.trimEnd())) return false;
+  const footer = composerRows.slice(composerEnd).map(line => line.trim()).filter(Boolean);
   if (footer.some(line => !isInitializedFooter(line, cli) && !(cli === 'TraeX' && TRAEX_CONTROLS_FOOTER.test(line)) && !DECORATION.test(line))) return false;
-  const banner = composerRows.slice(0, prompt).map(line => line.trim());
+  const banner = composerRows.slice(0, composerStart).map(line => line.trim());
   return footer.some(line => isInitializedFooter(line, cli)) || LOADED_BANNER.test(banner.join('\n'))
     || banner.some(line => (cli === 'Codex' ? CODEX_BANNER : TRAEX_BANNER).test(line));
 }

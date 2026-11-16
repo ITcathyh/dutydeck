@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { randomUUID } from 'node:crypto';
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -7,6 +8,7 @@ import { PromptNotWrittenError, type NormalizedDriverEvent } from '@dutydeck/sha
 import type { SessionBackend } from '@dutydeck/session-backends';
 import { PtyCliDriver } from './driver.js';
 
+const dutydeckSessionId = `ses_${randomUUID()}`;
 const sessionId = '11111111-1111-4111-8111-111111111111';
 const promptId = '22222222-2222-4222-8222-222222222222';
 const successFixture = readFileSync(new URL('./transcript/fixtures/claude-compact-2.1.220.jsonl', import.meta.url), 'utf8').trim().split('\n').map(line => JSON.parse(line));
@@ -18,6 +20,11 @@ const busyScreen = '❯ /compact\n✻ Compacting conversation…\nesc to interru
 const permissionScreen = 'Permission required\nDo you want to proceed?\n❯';
 const compactDraftScreen = '──────────\n❯ /compact  <optional custom summarization instructions>\n──────────\n⏵⏵ bypass permissions on (shift+tab to cycle)';
 const compactDraftWithStatusScreen = '──────────\n❯ /compact  <optional custom summarization instructions>\n──────────\nContext status one\nContext status two\n⏵⏵ bypass permissions on (shift+tab to cycle)';
+const compactCommandMenu = [
+  '  ❯ /compact                    Free up context by summarizing the conversation so far',
+  '    /autocompact                Set how full the context gets before auto-summarizing',
+  '──────────', '❯ /compact ', '──────────', '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+].join('\n');
 const idleWithStatusScreen = (status: string) => idleScreen.replace('⏵⏵ bypass', `${status}\nContext status two\n⏵⏵ bypass`);
 const maintenanceNotWrittenMessage = '上下文压缩还没结束，或无法确认终端已恢复，本条消息没有写入。请稍后重发；一直这样请发 /new 开新会话。';
 function deferred() {
@@ -66,7 +73,7 @@ describe('PTY Claude maintenance compaction', () => {
     directory = mkdtempSync(join(tmpdir(), 'dd-driver-compact-'));
     const project = join(directory, 'projects', realpathSync(directory).replace(/[^A-Za-z0-9-]/g, '-'));
     mkdirSync(project, { recursive: true });
-    transcript = join(project, `${pinnedSessionUuid('ses_compact')}.jsonl`);
+    transcript = join(project, `${pinnedSessionUuid(dutydeckSessionId)}.jsonl`);
     writeFileSync(transcript, line({ type: 'mode', mode: 'normal', sessionId, uuid: 'leaf', timestamp: new Date().toISOString() }));
     events = []; prompts = []; interrupts = 0; awaitingAnswer = false;
     const backend: SessionBackend = {
@@ -79,7 +86,7 @@ describe('PTY Claude maintenance compaction', () => {
       agent: { id: 'claude-code', name: 'fixture', command: 'unused', args: [], protocol: 'pty-cli', cwd: directory,
         env: { CLAUDE_CONFIG_DIR: directory }, permissionMode: 'full-trust', timeout: 0, capabilities: { pause: false, resume: true }, builtin: false },
       adapter: { ...adapter, prepareInput: undefined, writeInput(backend, prompt) { prompts.push(prompt); return backend.write(prompt); } },
-      backend, sessionId: 'ses_compact', awaitingAnswer: () => awaitingAnswer,
+      backend, sessionId: dutydeckSessionId, awaitingAnswer: () => awaitingAnswer,
       timings: { maintenanceTimeoutMs: 1_000, maintenanceIdleGraceMs: 500 },
       onEvent(event) { events.push(event); }, onExit() {},
     });
@@ -116,6 +123,12 @@ describe('PTY Claude maintenance compaction', () => {
     expect(accept()).toBe(true);
   }
 
+  async function currentScreen(): Promise<string> {
+    const reading = (driver as any).readSubmissionScreen((driver as any).backend);
+    await vi.advanceTimersByTimeAsync(10);
+    return reading;
+  }
+
   async function append(...entries: unknown[]) {
     appendFileSync(transcript, entries.map(line).join(''));
     await vi.advanceTimersByTimeAsync(350);
@@ -125,13 +138,14 @@ describe('PTY Claude maintenance compaction', () => {
     await append(...sequence(successFixture, suffix));
   }
 
-  async function completeBusiness(text: string) {
+  async function completeBusiness(text: string, inputSettled?: () => boolean) {
     const count = prompts.length;
     const pending = driver.send(text);
     void pending.catch(() => {});
     for (let index = 0; index < 100 && prompts.length === count; index++) await vi.advanceTimersByTimeAsync(1);
     expect(prompts.length).toBe(count + 1);
     const prompt = prompts.at(-1)!;
+    if (inputSettled) await advanceUntil(inputSettled);
     await append(
       { type: 'user', uuid: `business-${count}`, parentUuid: 'leaf', promptId: `business-prompt-${count}`, sessionId, timestamp: new Date().toISOString(), message: { role: 'user', content: prompt } },
       { type: 'assistant', uuid: `answer-${count}`, parentUuid: `business-${count}`, sessionId, message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: `answer to ${text}` }] } },
@@ -242,6 +256,7 @@ describe('PTY Claude maintenance compaction', () => {
     expect(prompts).toEqual([]);
     await expectMaintenanceRejected(held.terminal.write('new business must wait'));
     held.gate.resolve(); await held.manual;
+    output(screen(idleScreen)); await vi.advanceTimersByTimeAsync(600);
     await advanceUntil(() => prompts.length === 1);
     await succeedCompact('after-existing-raw-write');
     await expect(pending).resolves.toBe('completed');
@@ -261,7 +276,7 @@ describe('PTY Claude maintenance compaction', () => {
     expect((driver as any).maintenanceUnknown).toBe(true);
     await expectMaintenanceRejected(held.terminal.write('still fenced'));
     held.gate.resolve(); await held.manual;
-    output(screen(idleScreen)); await vi.advanceTimersByTimeAsync(0);
+    output(screen(idleScreen)); await vi.advanceTimersByTimeAsync(600);
     expect(driver.isIdle()).toBe(true);
     expect((driver as any).maintenanceUnknown).toBe(false);
     held.terminal.dispose();
@@ -293,6 +308,7 @@ describe('PTY Claude maintenance compaction', () => {
     expect(prompts).toEqual([]);
     expect(interrupts).toBe(0);
     held.gate.resolve(); await held.manual;
+    output(screen(idleScreen));
     await vi.advanceTimersByTimeAsync(600);
     await expect(pending).resolves.toBe('cancelled');
     expect(prompts).toEqual([]);
@@ -385,6 +401,7 @@ describe('PTY Claude maintenance compaction', () => {
     await driver.interrupt();
     release();
     vi.spyOn(source, 'flush').mockImplementation(flush);
+    await vi.advanceTimersByTimeAsync(20);
     await expect(pending).resolves.toBe('cancelled');
     expect(prompts).toEqual([]);
     expect(interrupts).toBe(0);
@@ -743,7 +760,8 @@ describe('PTY Claude maintenance compaction', () => {
     const { pending } = await armCompact();
     await advanceUntil(() => writes.some(data => data.includes('/compact')));
     await vi.advanceTimersByTimeAsync(0);
-    expect((driver as any).maintenanceComposerIsOwned((driver as any).maintenanceActive)).toBe(true);
+    const visible = await currentScreen();
+    expect((driver as any).maintenanceComposerIsOwned((driver as any).maintenanceActive, false, visible)).toBe(true);
     paste.resolve();
     await advanceUntil(() => writes.includes('\r'));
     await succeedCompact('command-palette');
@@ -788,6 +806,7 @@ describe('PTY Claude maintenance compaction', () => {
     await vi.advanceTimersByTimeAsync(600);
     expect(settled).toBe(false);
     interrupted.resolve();
+    await vi.advanceTimersByTimeAsync(20);
     await interrupting;
     await expect(pending).resolves.toBe('cancelled');
   });
@@ -842,6 +861,7 @@ describe('PTY Claude maintenance compaction', () => {
     await vi.advanceTimersByTimeAsync(600);
     expect(settled).toBe(false);
     interrupted.resolve();
+    await vi.advanceTimersByTimeAsync(20);
     await interrupting;
     await expect(pending).resolves.toBe('cancelled');
   });
@@ -927,6 +947,7 @@ describe('PTY Claude maintenance compaction', () => {
     output(screen('──────────\n❯ /clear\n──────────\n⏵⏵ bypass permissions on (shift+tab to cycle)'));
     await vi.advanceTimersByTimeAsync(0);
     predecessor.resolve();
+    await vi.advanceTimersByTimeAsync(20);
     await expect(cleanup).rejects.toThrow('composer');
     expect(clears).toBe(0);
     await driver.interrupt();
@@ -986,6 +1007,8 @@ describe('PTY Claude maintenance compaction', () => {
     const { pending } = await armCompact();
     await advanceUntil(() => writes.some(data => data.includes('/compact')));
     await vi.advanceTimersByTimeAsync(0);
+    const visible = await currentScreen();
+    expect((driver as any).maintenanceComposerIsOwned((driver as any).maintenanceActive, false, visible)).toBe(true);
     paste.reject(new Error('paste failed before Enter'));
     let settled = false;
     void pending.then(() => { settled = true; }, () => { settled = true; });
@@ -1284,6 +1307,94 @@ describe('PTY Claude maintenance compaction', () => {
     await expectMaintenanceRejected(driver.send('must not cross wiring ownership'));
     expect((driver as any).maintenanceUnknown).toBe(true);
     expect(prompts).toEqual(['/compact']);
+  });
+
+  it('requires fresh output and quiet after raw input before writing compact', async () => {
+    (driver as any).timings.maintenanceTimeoutMs = 10_000;
+    const held = holdRawWrite();
+    const pending = driver.compact!(); void pending.catch(() => {});
+    await vi.advanceTimersByTimeAsync(100);
+    held.gate.resolve(); await held.manual;
+    await vi.advanceTimersByTimeAsync(600);
+    expect(prompts).toEqual([]);
+    output(screen(idleScreen));
+    await vi.advanceTimersByTimeAsync(600);
+    await advanceUntil(() => prompts.length === 1);
+    await succeedCompact('fresh-raw-output');
+    await expect(pending).resolves.toBe('completed');
+    held.terminal.dispose();
+  });
+
+  it('does not clear unknown maintenance from an idle screen that predates raw input', async () => {
+    (driver as any).timings.maintenanceTimeoutMs = 1_000;
+    (driver as any).timings.maintenanceIdleGraceMs = 300;
+    const held = holdRawWrite();
+    const pending = driver.compact!(); void pending.catch(() => {});
+    await vi.advanceTimersByTimeAsync(400);
+    await expectMaintenanceRejected(pending);
+    held.gate.resolve(); await held.manual;
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(driver.isIdle()).toBe(false);
+    expect((driver as any).maintenanceUnknown).toBe(true);
+    output(screen(idleScreen));
+    await vi.advanceTimersByTimeAsync(600);
+    expect(driver.isIdle()).toBe(true);
+    held.terminal.dispose();
+  });
+
+  it('uses the same minimal composer contract for compact and the next business turn', async () => {
+    (driver as any).timings.maintenanceTimeoutMs = 10_000;
+    const minimal = (draft: string) => `Claude Code v2.1.267 (mock)\n✳ Worked for 1s\n❯${draft ? ` ${draft}` : ''}`;
+    const writes = useRealWriter(data => {
+      if (data.includes('/compact')) output(screen(minimal('/compact')));
+      else if (data !== '\r' && data !== '\x15') output(screen(minimal(data)));
+      if (data === '\r') output(screen(minimal('')));
+    });
+    const { pending } = await armCompact();
+    await advanceUntil(() => writes.includes('\r'));
+    await succeedCompact('minimal-composer');
+    await expect(pending).resolves.toBe('completed');
+    (driver as any).firstPromptSent = true;
+    await completeBusiness('after minimal compact', () => writes.filter(data => data === '\r').length >= 2);
+  });
+
+  it('accepts the Claude 2.1.295 compact menu above the owned composer in both final Enter guards', async () => {
+    (driver as any).timings.maintenanceTimeoutMs = 10_000;
+    let current = idleScreen;
+    (driver as any).backend.captureCurrentScreen = () => current;
+    const writes = useRealWriter(data => {
+      if (data === '/compact') { current = compactCommandMenu; output(screen(current)); }
+      else if (data !== '\r' && data !== '\x15') { current = idleScreen.replace('❯', `❯ ${data}`); output(screen(current)); }
+      if (data === '\r') { current = idleScreen; output(screen(current)); }
+    });
+    const { pending } = await armCompact();
+    await advanceUntil(() => writes.includes('\r'));
+    await succeedCompact('aligned-compact-menu');
+    await expect(pending).resolves.toBe('completed');
+  });
+
+  it('blocks final Enter when the aligned compact menu description changes', async () => {
+    (driver as any).timings.maintenanceTimeoutMs = 1_000;
+    let current = idleScreen;
+    (driver as any).backend.captureCurrentScreen = () => current;
+    const writes = useRealWriter(data => {
+      if (data === '/compact') { current = compactCommandMenu.replace('Free up context', 'Free up context!'); output(screen(current)); }
+    });
+    const { pending } = await armCompact();
+    await expectMaintenanceRejected(pending);
+    expect(writes).toEqual(['/compact']);
+  });
+
+  it('accepts the owned compact composer with the paste-again footer', async () => {
+    (driver as any).timings.maintenanceTimeoutMs = 10_000;
+    const writes = useRealWriter(data => {
+      if (data.includes('/compact')) output(screen(compactDraftScreen.replace('⏵⏵ bypass permissions on (shift+tab to cycle)', 'paste again to expand')));
+      if (data === '\r') output(screen(idleScreen));
+    });
+    const { pending } = await armCompact();
+    await advanceUntil(() => writes.includes('\r'));
+    await succeedCompact('paste-again-footer');
+    await expect(pending).resolves.toBe('completed');
   });
 
   it('leaves other CLI families unsupported without writing a slash command', async () => {

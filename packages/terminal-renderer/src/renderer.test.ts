@@ -170,3 +170,21 @@ it('never serves screen text from before a parsed write or resize', async () => 
     expect(snap.viewportText()).toBe('x'.repeat(20) + '\ntail');
   } finally { snap.dispose(); }
 });
+
+it('includes scrollback when a complete composer extends beyond the viewport', async () => {
+  const snap = new TerminalSnapshot(20, 4);
+  try {
+    await snap.writeAndFlush('──────────\r\n❯ first\r\nsecond\r\n──────────\r\n? for shortcuts');
+    expect(snap.viewportText({ preserveStructure: true })).toBe('❯ first\nsecond\n──────────\n? for shortcuts');
+    expect(snap.viewportText({ preserveStructure: true, includeScrollback: true })).toBe('──────────\n❯ first\nsecond\n──────────\n? for shortcuts');
+  } finally { snap.dispose(); }
+});
+
+it('joins only xterm-wrapped rows for logical composer recognition', async () => {
+  const snap = new TerminalSnapshot(20, 4);
+  try {
+    await snap.writeAndFlush('❯ ' + 'x'.repeat(18) + 'tail\r\nnext hard line');
+    expect(snap.viewportText({ preserveStructure: true })).toContain('x'.repeat(18) + '\ntail');
+    expect(snap.viewportText({ preserveStructure: true, joinWrapped: true })).toBe('❯ ' + 'x'.repeat(18) + 'tail\nnext hard line');
+  } finally { snap.dispose(); }
+});

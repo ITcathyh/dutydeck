@@ -31,6 +31,7 @@ import { OutputHandoff } from './output-handoff.js';
 import { TmuxCapture, cleanAbandonedTmuxCapture } from './tmux-capture.js';
 import { statStart } from './proc-stat.js';
 import { unixSocketState } from './unix-socket.js';
+import { stripVTControlCharacters } from 'node:util';
 import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
@@ -382,6 +383,30 @@ export interface TmuxBackendOptions {
   ownerId?: string;
 }
 
+/**
+ * Clean a submission capture without confusing terminal padding with input.
+ * -J preserves trailing spaces. Non-cursor rows therefore lose right padding;
+ * the ANSI cursor row keeps every character before the reverse-video cursor.
+ */
+export function cleanTmuxSubmissionCapture(partialAnsi: string, fullCapture: string, requireCursor = true): string | null {
+  const rows = (capture: string) => (capture.endsWith('\n') ? capture.slice(0, -1) : capture).split('\n');
+  const partialRows = rows(partialAnsi);
+  const fullRows = rows(fullCapture);
+  const cursorRow = partialRows.length - 1;
+  if (cursorRow < 0 || cursorRow >= fullRows.length) return null;
+  const cursor = /\x1b\[7m (?:\x1b\[0m|$)/.exec(partialRows[cursorRow]!);
+  if (!cursor) return requireCursor ? null : fullCapture;
+  const beforeCursor = stripVTControlCharacters(partialRows[cursorRow]!.slice(0, cursor.index));
+  const afterCursor = stripVTControlCharacters(partialRows[cursorRow]!.slice(cursor.index + cursor[0].length));
+  if (!/^ *$/.test(afterCursor)) return null;
+  const capturedRow = fullRows[cursorRow]!;
+  if (!capturedRow.startsWith(beforeCursor) || !/^ +$/.test(capturedRow.slice(beforeCursor.length))) return null;
+  for (let index = 0; index < fullRows.length; index++) {
+    fullRows[index] = index === cursorRow ? beforeCursor : fullRows[index]!.replace(/ +$/, '');
+  }
+  return fullRows.join('\n') + (fullCapture.endsWith('\n') ? '\n' : '');
+}
+
 export class TmuxBackend implements SessionBackend {
   readonly kind = 'tmux' as const;
 
@@ -654,10 +679,36 @@ export class TmuxBackend implements SessionBackend {
     return this.initialScreen?.data ?? null;
   }
 
-  async captureCurrentScreen(): Promise<string | null> {
+  async captureCurrentScreen(includeScrollback = false): Promise<string | null> {
+    if (this.exited) return null;
+    if (includeScrollback) return this.captureSubmissionScreen(false);
+    try {
+      return await runTmux(['capture-pane', '-p', '-J', '-t', this.sessionName]);
+    } catch {
+      return null;
+    }
+  }
+
+  captureInputSubmissionScreen(): Promise<string | null> {
+    return this.captureSubmissionScreen(true);
+  }
+
+  private async captureSubmissionScreen(requireCursor: boolean): Promise<string | null> {
     if (this.exited) return null;
     try {
-      return (await runTmux(['capture-pane', '-p', '-t', this.sessionName]));
+      const cursor = (await runTmux(['display-message', '-p', '-t', this.sessionName, '#{cursor_y} #{cursor_flag}'])).trim();
+      const [cursorY, cursorFlag] = cursor.split(/\s+/).map(Number);
+      if (!Number.isInteger(cursorY) || cursorY! < 0 || (cursorFlag !== 0 && cursorFlag !== 1)) return null;
+      const marker = randomBytes(16).toString('hex');
+      const separator = `\n${marker}\n`;
+      const captured = await runTmux([
+        'capture-pane', '-p', '-e', '-J', '-S', '-200', '-E', String(cursorY), '-t', this.sessionName, ';',
+        'display-message', '-p', marker, ';',
+        'capture-pane', '-p', '-J', '-S', '-200', '-t', this.sessionName,
+      ]);
+      const boundary = captured.indexOf(separator);
+      if (boundary < 0) return null;
+      return cleanTmuxSubmissionCapture(captured.slice(0, boundary + 1), captured.slice(boundary + separator.length), requireCursor);
     } catch {
       return null;
     }

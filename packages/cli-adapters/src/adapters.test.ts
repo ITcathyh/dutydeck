@@ -901,10 +901,20 @@ describe('全适配器横切契约', () => {
       for (const id of EXPECTED_IDS) {
         const adapter = createCliAdapter(id);
         const writes: string[] = [];
-        const pending = adapter.writeInput({ write: data => { writes.push(data); return true; },
-          readScreen: () => ['claude-code', 'seed', 'relay', 'genius'].includes(id)
-            ? '──────────\n❯\n──────────\n? for shortcuts'
-            : 'TraeX\n❯ Ask TraeCode CLI\nContext 100% left' }, 'hello');
+        let draft = '';
+        const claudeFamily = ['claude-code', 'seed', 'relay', 'genius'].includes(id);
+        const pending = adapter.writeInput({ write: data => {
+          writes.push(data);
+          if (claudeFamily && data !== '\r') draft += data;
+          if (id === 'traex') {
+            const pasted = /^\x1b\[200~([\s\S]*)\x1b\[201~$/.exec(data)?.[1];
+            if (pasted !== undefined) draft = pasted;
+          }
+          return true;
+        },
+          readScreen: () => claudeFamily
+            ? `──────────\n❯${draft ? ` ${draft}` : ''}\n──────────\n? for shortcuts`
+            : `TraeX\n❯ ${draft || 'Ask TraeCode CLI'}\nContext 100% left` }, 'hello');
         await vi.runAllTimersAsync();
         await pending;
         const joined = writes.join('');

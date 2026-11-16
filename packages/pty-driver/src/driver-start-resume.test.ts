@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, utimesSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -16,7 +16,7 @@ const savedTmuxDirectory = process.env.TMUX_TMPDIR;
 beforeEach(() => { const dir = mkdtempSync(join(tmpdir(), 'dd-start-tmux-')); roots.push(dir); process.env.TMUX_TMPDIR = dir; });
 afterEach(() => { if (savedTmuxDirectory === undefined) delete process.env.TMUX_TMPDIR; else process.env.TMUX_TMPDIR = savedTmuxDirectory; });
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
-const sessionId = 'ses_019f47ac-83e1-7a2c-b62d-4dd7e98db401';
+const sessionId = `ses_${randomUUID()}`;
 const nativeId = sessionId.slice(4);
 
 describe('start reconnects durable native history only with session evidence', () => {

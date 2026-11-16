@@ -168,7 +168,6 @@ export function createTraexAdapter(): CliAdapter {
     },
 
     async writeInput(backend: PtyLike, prompt: string): Promise<void> {
-      await pollScreenReady(backend, 'TraeX', { busyPattern: TRAEX_ACTIVE_BUSY_PATTERN });
       prompt = prompt.replace(/\r\n?/g, '\n');
       // 与 Codex 相同的 bracketed-paste 策略：多行消息不能被内嵌 \n 拆成多个 turn。
       await pasteAndSubmit(backend, prompt, {
@@ -181,8 +180,9 @@ export function createTraexAdapter(): CliAdapter {
           } catch (error) {
             throw new DriverRecoveryError(`TraeX screen could not be verified after paste; Enter was not sent and the prompt was not resent: ${readFailure(error)}`, 'DRIVER_INPUT_UNCONFIRMED');
           }
-          if (isTraexQuestionScreen(screen)) {
-            throw new DriverRecoveryError('TraeX showed a native question after paste; Enter was not sent and the prompt was not resent', 'DRIVER_INPUT_UNCONFIRMED');
+          if (!isInputReady(screen, 'TraeX', TRAEX_ACTIVE_BUSY_PATTERN, prompt)) {
+            const reason = isTraexQuestionScreen(screen) ? 'a native question' : 'a native menu or a different composer';
+            throw new DriverRecoveryError(`TraeX showed ${reason} after paste; Enter was not sent and the prompt was not resent`, 'DRIVER_INPUT_UNCONFIRMED');
           }
         },
       });

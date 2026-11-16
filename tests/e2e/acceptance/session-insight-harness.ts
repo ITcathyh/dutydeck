@@ -103,7 +103,7 @@ if (client === 'claude') {
 } else {
   process.stdout.write(
     'TraeX\\r\\n' +
-    'Context 100% left\\r\\n\\u203a Ask Trae to do anything\\r\\n'
+    '\\u203a Ask Trae to do anything\\r\\nContext 100% left\\r\\n'
   );
 }
 
@@ -113,6 +113,13 @@ let composedPrompt = '';
 let bracketedPaste = false;
 const pasteStart = '\\u001b[200~';
 const pasteEnd = '\\u001b[201~';
+const renderComposer = text => {
+  if (client === 'claude') {
+    process.stdout.write('\\u001b[2J\\u001b[HClaude Code v2.1.288 (mock)\\r\\n────────────────────────\\r\\n\\u276f ' + text.split('\\n').join('\\r\\n') + '\\r\\n────────────────────────\\r\\n⏵⏵ bypass permissions on (shift to cycle)\\u001b[7m \\u001b[0m');
+  } else if (client === 'traex') {
+    process.stdout.write('\\u001b[2J\\u001b[HTraeX\\r\\n\\u203a ' + text.split('\\n').join('\\r\\n  ') + '\\u001b7\\r\\nContext 100% left\\u001b8\\u001b[7m \\u001b[0m');
+  }
+};
 
 function claudeTranscriptPath() {
   const dataDir = process.env.CLAUDE_CONFIG_DIR;
@@ -159,10 +166,15 @@ function submitPrompt(rawPrompt) {
   }
   const label = client === 'codex' ? 'Codex' : 'Trae';
   setTimeout(() => {
-    process.stdout.write('\\r\\nCONTROLLED_TASK_DONE\\r\\nContext 99% left\\r\\n\\u203a Ask ' + label + ' to do anything\\r\\n');
+    if (client === 'traex') {
+      process.stdout.write('\\r\\nCONTROLLED_TASK_DONE\\r\\n\\u001b[2J\\u001b[HTraeX\\r\\n\\u203a Ask Trae to do anything\\r\\nContext 99% left\\r\\n');
+    } else {
+      process.stdout.write('\\r\\nCONTROLLED_TASK_DONE\\r\\nContext 99% left\\r\\n\\u203a Ask ' + label + ' to do anything\\r\\n');
+    }
   }, 200);
 }
 
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', chunk => {
   buffer += chunk;
@@ -183,15 +195,20 @@ process.stdin.on('data', chunk => {
       bracketedPaste = true;
       continue;
     }
-    if (!lineBreak) return;
+    if (!lineBreak) { renderComposer(composedPrompt + buffer); return; }
     composedPrompt += buffer.slice(0, lineBreak.index);
     const delimiter = lineBreak[0];
     buffer = buffer.slice(lineBreak.index + delimiter.length);
     if ((delimiter === '\\r' && buffer.startsWith('\\n')) || (delimiter === '\\n' && buffer.startsWith('\\r'))) buffer = buffer.slice(1);
-    if (composedPrompt.endsWith('\\\\')) { composedPrompt = composedPrompt.slice(0, -1) + '\\n'; continue; }
+    if (composedPrompt.endsWith('\\\\')) {
+      composedPrompt = composedPrompt.slice(0, -1) + '\\n';
+      renderComposer(composedPrompt);
+      continue;
+    }
     const prompt = composedPrompt;
     composedPrompt = '';
     submitPrompt(prompt);
+    if (!buffer) return;
   }
 });
 process.stdin.resume();

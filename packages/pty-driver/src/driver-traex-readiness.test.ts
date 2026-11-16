@@ -9,12 +9,19 @@ import { tmpdir } from 'node:os';
 const ready = 'TraeX\n❯ Ask TraeCode CLI\nContext 100% left';
 let driver: PtyCliDriver, output: (data: string) => void, writes: string[], screen: string, directory: string;
 let prepare: ReturnType<typeof vi.fn>;
-const paint = (text: string) => output(`\x1b[2J\x1b[H${text.replaceAll('\n', '\r\n')}`);
+const paint = (text: string) => { screen = text; output(`\x1b[2J\x1b[H${text.replaceAll('\n', '\r\n')}`); };
 beforeEach(async () => {
   vi.useFakeTimers(); writes = []; screen = ready; directory = mkdtempSync(join(tmpdir(), 'dd-traex-ready-'));
   const adapter = createTraexAdapter(); prepare = vi.fn(adapter.prepareInput);
   const backend: SessionBackend = { kind: 'pty', spawn() {}, resize() {}, kill() {}, onExit() {}, interrupt() {},
-    onData(cb) { output = cb; }, write(data) { writes.push(data); return true; } };
+    onData(cb) { output = cb; }, captureCurrentScreen() { return screen; }, write(data) {
+      writes.push(data);
+      if (data.startsWith('\x1b[200~')) {
+        screen = ready.replace('❯ Ask TraeCode CLI', `❯ ${data.slice(6, -6).split('\n').join('\n  ')}`); paint(screen);
+      }
+      if (data === '\r') { screen = ready; paint(screen); }
+      return true;
+    } };
   driver = new PtyCliDriver({
     agent: { id: 'traex', name: 'fixture', command: 'unused', args: [], protocol: 'pty-cli', cwd: directory, env: { TRAE_HOME: directory },
       permissionMode: 'full-trust', timeout: 0, capabilities: { pause: false, resume: true }, builtin: false },
@@ -27,7 +34,7 @@ beforeEach(async () => {
 });
 afterEach(async () => { await driver.stop(); vi.useRealTimers(); rmSync(directory, { recursive: true, force: true }); });
 async function firstTurn() {
-  const pending = driver.send('first'); await vi.advanceTimersByTimeAsync(250);
+  const pending = driver.send('first'); await vi.advanceTimersByTimeAsync(1_000);
   expect(writes).toHaveLength(2); expect(writes[0]).toMatch(/^\x1b\[200~[\s\S]*first\x1b\[201~$/); expect(writes[1]).toBe('\r');
   // The scoped screen reader comes from the real driver snapshot.
   await finish(pending); writes = [];
@@ -40,6 +47,22 @@ async function finish(pending: Promise<void>) {
   expect((driver as unknown as { turnActive: boolean }).turnActive).toBe(false);
   await pending;
 }
+it('uses a fresh management capture instead of requiring Claude cursor evidence', async () => {
+  const backend = (driver as any).backend;
+  backend.kind = 'tmux';
+  const strict = vi.fn(() => null);
+  const current = vi.fn(() => screen);
+  backend.captureInputSubmissionScreen = strict;
+  backend.captureCurrentScreen = current;
+  const pending = driver.send('first');
+  void pending.catch(() => {});
+  await vi.advanceTimersByTimeAsync(1_000);
+  expect(writes).toHaveLength(2);
+  expect(writes[1]).toBe('\r');
+  await finish(pending);
+  expect(strict).not.toHaveBeenCalled();
+  expect(current).toHaveBeenCalled();
+});
 it.each(['Queued for next turn', '⠋ Queued for next turn', 'Queued for capacity', 'esc to interrupt', '❯ 1. Choose mode', '❯ unsent manual draft'])
 ('holds the real second submission with %s and submits once after ready', async busy => {
   await firstTurn(); paint(busy.startsWith('❯') ? ready.replace('❯ Ask TraeCode CLI', busy) : `${busy}\n${ready}`);

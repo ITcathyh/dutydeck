@@ -141,6 +141,9 @@ tmuxDescribe('PtyCliDriver in-flight tmux turn recovery', () => {
         if (adapterId === 'traex') await waitFor(async () => expect(await backend.captureCurrentScreen()).toContain('Context 100% left'));
         if (adapterId === 'claude-code') await waitFor(async () => expect(await backend.captureCurrentScreen()).toContain('? for shortcuts'));
         await driver.checkpoint();
+        // Exercise the final single-line Enter, not the separately covered
+        // first-turn routing prefix and its soft-newline transport.
+        (driver as any).firstPromptSent = true;
         // Paste-capable adapters submit through pasteText; either is the literal input transport.
         const writes = vi.spyOn(backend, 'write');
         const pastes = vi.spyOn(backend, 'pasteText');
@@ -148,8 +151,19 @@ tmuxDescribe('PtyCliDriver in-flight tmux turn recovery', () => {
         if (method === 'write') { writes.mockResolvedValue(false); pastes.mockResolvedValue(false); }
         else {
           if (adapterId === 'claude-code') {
-            const echoed = async () => { (driver as any).lastOutputAt = Date.now(); return true; };
+            let draft = '';
+            const echoed = async (data: string) => { draft += data; (driver as any).lastOutputAt = Date.now(); return true; };
             writes.mockImplementation(echoed); pastes.mockImplementation(echoed);
+            const rendered = async () => `──────────\n❯${draft ? ` ${draft}` : ''}\n──────────\n? for shortcuts`;
+            vi.spyOn(backend, 'captureCurrentScreen').mockImplementation(rendered);
+            vi.spyOn(backend, 'captureInputSubmissionScreen').mockImplementation(rendered);
+          } else if (adapterId === 'traex') {
+            let draft = '';
+            const echoed = async (data: string) => { draft += data; (driver as any).lastOutputAt = Date.now(); return true; };
+            writes.mockImplementation(echoed); pastes.mockImplementation(echoed);
+            const rendered = async () => `TraeX\n❯ ${draft || 'Ask TraeCode CLI'}\nContext 100% left`;
+            vi.spyOn(backend, 'captureCurrentScreen').mockImplementation(rendered);
+            vi.spyOn(backend, 'captureInputSubmissionScreen').mockImplementation(rendered);
           }
           enters.mockResolvedValue(false);
         }

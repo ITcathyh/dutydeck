@@ -49,7 +49,7 @@ const DEFAULT_ROWS = 30;
  */
 function readViewportText(
   terminal: HeadlessTerminal,
-  opts: { filter: boolean; readCols?: number; preserveStructure?: boolean },
+  opts: { filter: boolean; readCols?: number; preserveStructure?: boolean; joinWrapped?: boolean; includeScrollback?: boolean },
 ): string {
   const buffer = terminal.buffer.active;
   const readCols = Math.min(opts.readCols ?? SNAPSHOT_COLS, terminal.cols);
@@ -57,14 +57,16 @@ function readViewportText(
   const rows = terminal.rows;
   const endY = baseY + rows;
 
+  const startY = opts.includeScrollback ? 0 : baseY;
   const lines: string[] = [];
-  for (let y = baseY; y < endY; y++) {
+  for (let y = startY; y < endY; y++) {
     const line = buffer.getLine(y);
     if (!line) continue;
     const raw = line.translateToString(true, 0, readCols);
     const s = opts.preserveStructure ? raw : cleanBoxDrawing(raw);
     if (opts.filter && (BARE_PROMPT_RE.test(s) || INPUT_ECHO_RE.test(s))) continue;
-    lines.push(s);
+    if (opts.joinWrapped && !opts.filter && line.isWrapped && lines.length > 0) lines[lines.length - 1] += s;
+    else lines.push(s);
   }
 
   if (opts.filter) {
@@ -189,8 +191,9 @@ export class TerminalSnapshot {
    * decision from the screen currently visible to the user. preserveStructure
    * also keeps box borders and spacing for structural composer recognition.
    */
-  viewportText(options: { preserveStructure?: boolean } = {}): string {
-    return this.cached(options.preserveStructure ? 'structure' : 'viewport', () => readViewportText(this.terminal, { filter: false, ...options }));
+  viewportText(options: { preserveStructure?: boolean; joinWrapped?: boolean; includeScrollback?: boolean } = {}): string {
+    const key = `${options.preserveStructure ? 'structure' : 'viewport'}${options.joinWrapped ? '-logical' : ''}${options.includeScrollback ? '-scrollback' : ''}`;
+    return this.cached(key, () => readViewportText(this.terminal, { filter: false, ...options }));
   }
 
   /** Last non-empty logical line, joining physical rows wrapped by xterm. */

@@ -627,7 +627,7 @@ describe('PTY Claude guard version compatibility', () => {
     expect(prompts).toHaveLength(1);
   });
 
-  it('adopts pre-record legacy settings through deny-all round trips and repeated reattach', async () => {
+  it('rejects a missing legacy launch record through deny-all round trips and repeated reattach', async () => {
     const { driver: launched, prompts, policy, adopt, launchRecord } = capabilityFixture('2.1.220 (Claude Code)\n');
     await launched.start();
     rmSync(launchRecord);
@@ -635,14 +635,12 @@ describe('PTY Claude guard version compatibility', () => {
     writeFileSync(policy, JSON.stringify({ enabled: true, authorized: false }));
 
     const first = adopt();
-    first.setPermissionMode!('deny-all');
-    first.setPermissionMode!('ask');
-    first.setPermissionMode!('deny-all');
-    await expect(first.send('first adopted legacy turn')).rejects.toThrow('fixture reached prompt write');
+    expect(() => first.setPermissionMode!('deny-all')).toThrow(expect.objectContaining({ code: 'PLAN_GUARD_UNAVAILABLE' }));
+    await expect(first.send('first missing-record turn')).rejects.toMatchObject({ code: 'PROMPT_NOT_WRITTEN' });
     const second = adopt();
-    second.setPermissionMode!('deny-all');
-    await expect(second.send('second adopted legacy turn')).rejects.toThrow('fixture reached prompt write');
-    expect(prompts).toHaveLength(2);
+    expect(() => second.setPermissionMode!('deny-all')).toThrow(expect.objectContaining({ code: 'PLAN_GUARD_UNAVAILABLE' }));
+    await expect(second.send('second missing-record turn')).rejects.toMatchObject({ code: 'PROMPT_NOT_WRITTEN' });
+    expect(prompts).toHaveLength(0);
   });
 
   it('rejects a corrupt launch record during driver adoption even when snapshots are wired', async () => {

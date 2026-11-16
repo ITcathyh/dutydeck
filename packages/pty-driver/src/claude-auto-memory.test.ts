@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,7 +17,7 @@ const savedTmuxDirectory = process.env.TMUX_TMPDIR;
 beforeEach(() => { const dir = mkdtempSync(join(tmpdir(), 'dd-auto-memory-tmux-')); roots.push(dir); process.env.TMUX_TMPDIR = dir; });
 afterEach(() => { if (savedTmuxDirectory === undefined) delete process.env.TMUX_TMPDIR; else process.env.TMUX_TMPDIR = savedTmuxDirectory; });
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
-const sessionId = 'ses_419f47ac-83e1-7a2c-b62d-4dd7e98db401';
+const sessionId = `ses_${randomUUID()}`;
 const nativeId = sessionId.slice(4);
 
 describe('Claude auto memory marker on terminal relaunch', () => {

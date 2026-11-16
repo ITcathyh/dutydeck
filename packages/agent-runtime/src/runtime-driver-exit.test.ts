@@ -18,6 +18,7 @@ async function fixture(options: { authorizeTask?: NonNullable<ConstructorParamet
   const cli = join(cwd, 'cli.mjs');
   writeFileSync(cli, `
 process.stdin.setRawMode(true);
+process.on('SIGUSR2', () => process.exit(0));
 process.stdout.write('READY\\n');
 process.stdin.on('data', data => {
   const input = data.toString();
@@ -50,11 +51,12 @@ process.stdin.on('data', data => {
     env: {}, permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true } });
   await runtime.initialize([agent]);
   const session = await runtime.start({ agentId: agent.id });
-  const exit = async (code: number) => {
+  const exit = async (code: number, signal = false) => {
     let observed = false;
     const unsubscribe = runtime.onDriverExit(session.id, () => { observed = true; });
     const stream = drivers.at(-1)!.createTerminalStream!();
-    await stream.write(`EXIT:${code}\n`);
+    if (signal) process.kill(drivers.at(-1)!.processIds()[0]!, 'SIGUSR2');
+    else await stream.write(`EXIT:${code}\n`);
     await vi.waitFor(() => expect(observed).toBe(true));
     unsubscribe(); stream.dispose();
   };
@@ -127,7 +129,7 @@ it('retains an already submitted turn as unknown and never replays it after exit
   h.writeInput.mockImplementation(() => new Promise((_resolve, fail) => { reject = fail; }));
   const pending = h.runtime.send(h.session.id, 'uncertain input');
   await vi.waitFor(() => expect(h.writeInput).toHaveBeenCalledOnce());
-  await h.exit(0);
+  await h.exit(0, true);
   reject(new Error('exited'));
   const task = await pending;
   const before = h.repos.execution.getTaskExecution(task.id)!;

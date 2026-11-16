@@ -53,7 +53,10 @@ it('holds both TraeX preparation and writeInput during geometry busy, then unloc
   vi.useFakeTimers();
   try {
     let screen = footer('❖ Working… (1s • esc to interrupt)'); const writes: string[] = [];
-    const backend = { readScreen: () => screen, write(data: string) { writes.push(data); } };
+    const backend = { readScreen: () => screen, write(data: string) {
+      writes.push(data);
+      if (data === '\x1b[200~next\nline\x1b[201~') screen = footer('  Worked for 1s', '────────────', '❯ next\nline');
+    } };
     const prepared = traex.prepareInput!(backend, { sessionId: 'fixture' });
     const pending = traex.writeInput(backend, 'next\nline');
     await vi.advanceTimersByTimeAsync(1000); expect(writes).toEqual([]);
@@ -133,4 +136,30 @@ it('accepts the captured 0.210.1 TraeX controls row while preserving footer and 
   expect(isInputReady(screen.replace('← for agents', 'unknown control'), 'TraeX')).toBe(false);
   expect(isInputReady(screen.replace('❯ Implement {feature}', '❯ 1. Yes, continue'), 'TraeX')).toBe(false);
   expect(isInputReady(screen.replace('\n❯', '\n❖ Working… (8s • esc to interrupt)\n\n❯'), 'TraeX')).toBe(false);
+});
+
+it('removes only the two native TraeX continuation-indent spaces from an owned draft', () => {
+  const border = '─'.repeat(120);
+  const screen = [
+    'TraeX', border, '› first', '    user indented', '  last', border,
+    '  GPT-6-Astra xhigh · /tmp/workspace · Context 100% left',
+    '  ☢ Full Access (shift+tab to cycle) · ← for agents',
+  ].join('\n');
+  expect(isInputReady(screen, 'TraeX', traex.busyPattern, 'first\n  user indented\nlast')).toBe(true);
+  expect(isInputReady(screen, 'TraeX', traex.busyPattern, 'first\nuser indented\nlast')).toBe(false);
+  expect(isInputReady(screen, 'TraeX', traex.busyPattern, 'first\n  user indented')).toBe(false);
+});
+
+it('accepts the 0.213.1 owned composer without a shortcuts segment in its controls row', () => {
+  const border = '─'.repeat(120);
+  const screen = [
+    'TraeX', '⚠ `--dangerously-bypass-hook-trust` is enabled.', '', border,
+    '› actual draft', border,
+    '  GPT-6-Astra xhigh · /tmp/workspace · Context 100% left',
+    '  ☢ Full Access (shift+tab to cycle) · ← for agents',
+  ].join('\n');
+  expect(isInputReady(screen, 'TraeX', traex.busyPattern, 'actual draft')).toBe(true);
+  expect(isInputReady(screen, 'TraeX', traex.busyPattern, 'different draft')).toBe(false);
+  expect(isInputReady(screen.replace('actual draft', '1. Yes, continue'), 'TraeX', traex.busyPattern, 'actual draft')).toBe(false);
+  expect(isInputReady(screen.replace('← for agents', 'unknown control'), 'TraeX', traex.busyPattern, 'actual draft')).toBe(false);
 });

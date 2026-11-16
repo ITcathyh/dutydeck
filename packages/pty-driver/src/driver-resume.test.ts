@@ -13,6 +13,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
 import { execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -49,7 +50,7 @@ function waitFor(predicate: () => boolean, timeoutMs = 30_000, intervalMs = 20):
   }, timeoutMs, intervalMs) as Promise<void>;
 }
 
-const SESSION_ID = 'ses_119f47ac-83e1-7a2c-b62d-4dd7e98db401';
+const SESSION_ID = `ses_${randomUUID()}`;
 
 let tempRoots: string[] = [];
 const savedEnv: Record<string, string | undefined> = {};

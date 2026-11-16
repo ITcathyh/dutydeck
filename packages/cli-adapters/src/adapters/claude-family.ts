@@ -4,7 +4,10 @@ import { pinnedSessionUuid } from '../resume-id.js';
 import { relayCommandFrom, relayEnabled, relayPermissionHookTimeoutSeconds } from '@dutydeck/relay';
 import { DriverRecoveryError, PromptNotWrittenError } from '@dutydeck/shared';
 import { probeClaudeHookFailureBlock, secretGuardHookCommand, secretGuardToolMatcher } from '@dutydeck/shared/secret-guard';
-import { delay, waitForInputEcho, waitForQuietScreen } from './input-settle.js';
+import { delay, INPUT_ECHO_TIMEOUT_MS, waitForInputEcho, waitForQuietScreen } from './input-settle.js';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
 
 /**
  * Claude Code 家族共用实现（claude-code / seed / relay）。
@@ -44,9 +47,6 @@ export const CLAUDE_FAMILY_COMPLETION_RE =
 const CLAUDE_FAMILY_BACKGROUND_WAIT_RE =
   /^\s*[✳✻]\s*Waiting for \d+ (?:background agents?|dynamic workflows?)(?: and \d+ dynamic workflows?)? to finish\b/;
 
-const BRACKETED_PASTE_START = '\x1b[200~';
-const BRACKETED_PASTE_END = '\x1b[201~';
-
 /** 单次 send-keys 的最大 UTF-8 字节数：整行一次发会触发 Claude 家族的
  *  paste-burst 检测，所以每行都按小 chunk 分块键入。 */
 export const CLAUDE_INPUT_CHUNK_BYTES = 96;
@@ -73,21 +73,33 @@ export function chunkTextByUtf8Bytes(text: string, maxBytes: number = CLAUDE_INP
   return chunks;
 }
 
-/** 已接收过首次写入的 CLI 进程（按 processKey，没有就按后端对象）。首次写入落在
- *  Ink 启动渲染期，需要更长的 settle 和节流；同一进程跨适配器实例、跨多次提交共享
- *  warmup 状态。 */
+/** 已接收过首次成功写入的 CLI 进程（按 processKey，没有就按后端对象）。 */
 const firstWriteSeen = new WeakSet<object>();
 
 /** Claude 家族的输入时序：分块键入 + soft-newline，最后一个 Enter 才提交。 */
 export async function writeClaudeFamilyInput(backend: PtyLike, prompt: string): Promise<void> {
   prompt = prompt.replace(/\r\n?/g, '\n');
+  if (prompt.trim().length === 0) {
+    throw new PromptNotWrittenError('Claude 输入为空或只有空白；没有写入终端，也没有发送 Enter。');
+  }
+  // After a soft newline Claude pads the previous row to the terminal width.
+  // trailing whitespace on that row cannot be distinguished from the padding
+  // in a fresh final read, so reject it before the first business byte.
+  if (/[ \t]+\n/.test(prompt)) {
+    throw new PromptNotWrittenError('Claude 硬换行前的尾随空白无法在最终输入视图中完整核对；本条消息没有写入。');
+  }
+  const restoreViewport = await backend.beginExpandedInput?.();
+  try {
+    await writeClaudeFamilyInputBody(backend, prompt);
+  } finally {
+    await restoreViewport?.();
+  }
+}
+
+async function writeClaudeFamilyInputBody(backend: PtyLike, prompt: string): Promise<void> {
   const processKey = backend.processKey ?? backend;
   const isFirstWrite = !firstWriteSeen.has(processKey);
-  if (isFirstWrite) {
-    firstWriteSeen.add(processKey);
-    // 首次写入落在 Ink 启动渲染期，先等队列稳定。
-    await delay(200);
-  }
+  if (isFirstWrite) await delay(200);
   // CLI 还在输出时键入会和它的重绘交错：先等屏幕静止，回显稳定后再提交。
   await waitForQuietScreen(backend);
   const typedAt = Date.now();
@@ -95,64 +107,68 @@ export async function writeClaudeFamilyInput(backend: PtyLike, prompt: string): 
   const tick = () => delay(throttleMs);
   let writeAttempted = false;
   let expectedDraft = '';
-  const businessInput = (backend as PtyLike & { dutydeckInputKind?: 'business' | 'maintenance' }).dutydeckInputKind !== 'maintenance';
-  const checkComposer = async () => {
-    if (!businessInput) return;
+  const checkComposer = async (final = false) => {
     if (!backend.readScreen) {
       if (writeAttempted) throw new DriverRecoveryError('Claude 输入框在本次写入后无法复核；提交结果未知，原进程已保留', 'DRIVER_INPUT_UNCONFIRMED');
       throw new PromptNotWrittenError('Claude 写入前需要读取当前输入框；本条消息没有写入。');
     }
-    const screen = await backend.readScreen();
-    const lines = screenLines(screen);
+    const read = async () => {
+      try { return await backend.readScreen!(); }
+      catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        if (writeAttempted) throw new DriverRecoveryError(`Claude 输入框在本次写入后无法复核；提交结果未知，原进程已保留：${detail}`, 'DRIVER_INPUT_UNCONFIRMED');
+        throw new PromptNotWrittenError(`Claude 写入前无法读取当前输入框；本条消息没有写入：${detail}`);
+      }
+    };
+    let screen = await read();
     if (!writeAttempted) {
-      if (!emptyComposerAtBottom(lines) && !emptyMinimalComposer(lines)) {
+      if (!emptyClaudeComposer(screen)) {
         throw new PromptNotWrittenError('Claude 当前输入框不是空白，可能有人工草稿、/compact 或 slash 菜单；本条消息没有写入，请处理后重发。');
       }
       return;
     }
-    const owned = ownedComposerAtBottom(lines, expectedDraft, prompt)
-      || ownedMinimalComposer(lines, expectedDraft)
-      || (!(backend.sendText && backend.sendSpecialKeys) && ownedRawPasteAtBottom(lines, expectedDraft));
+    let owned = await ownedClaudeComposerWithWrap(screen, expectedDraft, final);
+    const deadline = Date.now() + INPUT_ECHO_TIMEOUT_MS;
+    while (final && !owned && Date.now() < deadline) {
+      await delay(50);
+      screen = await read();
+      owned = await ownedClaudeComposerWithWrap(screen, expectedDraft, final);
+    }
     if (!owned) {
       throw new DriverRecoveryError('Claude 输入框在本次写入后发生变化；提交结果未知，原进程已保留，未自动重发', 'DRIVER_INPUT_UNCONFIRMED');
     }
   };
-  const write = async (operation: () => void | boolean | Promise<void | boolean>, typed = '') => {
-    // 读屏兑现后不再插入等待；下一次 await 已经是实际终端写入。
-    await checkComposer();
+  const write = async (operation: () => void | boolean | Promise<void | boolean>, typed = '', final = false) => {
+    await checkComposer(final);
     writeAttempted = true;
-    await operation();
+    const result = await operation();
+    if (result !== false) firstWriteSeen.add(processKey);
     expectedDraft += typed;
   };
+  const text = (value: string) => backend.sendText ? backend.sendText(value) : backend.write(value);
+  const enter = () => backend.sendSpecialKeys ? backend.sendSpecialKeys('Enter') : backend.write('\r');
+  const submit = () => backend.submitInput ? backend.submitInput() : enter();
 
-  if (backend.sendText && backend.sendSpecialKeys) {
-    // tmux：逐行、按字节分块键入；换行用 '\' + Enter（Claude 家族的
-    // soft-newline，内容留在输入框不提交），最后一个 Enter 才是提交。
-    const lines = prompt.split('\n');
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      if (line && line.length > 0) {
-        for (const chunk of chunkTextByUtf8Bytes(line)) {
-          await write(() => backend.sendText!(chunk), chunk);
-          await tick();
-        }
-      }
-      if (i < lines.length - 1) {
-        await write(() => backend.sendText!('\\'));
-        await tick();
-        await write(() => backend.sendSpecialKeys!('Enter'));
-        expectedDraft += '\n';
-        await tick();
-      }
+  // 实测 Claude 2.1.295：分块键入不会折叠成无法归属的 paste 摘要；
+  // 多行用反斜杠 + Enter 留在 composer，最后一次 Enter 才提交。
+  const lines = prompt.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    for (const chunk of chunkTextByUtf8Bytes(line)) {
+      await write(() => text(chunk), chunk);
+      await tick();
     }
-  } else {
-    // 裸 PTY：bracketed paste 标记自己包，多行内容不会被拆成多次提交。
-    await write(() => backend.write(BRACKETED_PASTE_START + prompt + BRACKETED_PASTE_END), prompt);
+    if (i < lines.length - 1) {
+      await write(() => text('\\'), '\\');
+      await tick();
+      await write(enter);
+      expectedDraft += '\n';
+      await tick();
+    }
   }
   await delay(500);
   await waitForInputEcho(backend, typedAt);
-  if (backend.sendSpecialKeys) await write(() => backend.sendSpecialKeys!('Enter'));
-  else await write(() => backend.write('\r'));
+  await write(submit, '', true);
 }
 
 /**
@@ -174,7 +190,13 @@ export function pushClaudeFamilyBypassArgs(args: string[], permissionMode: Adapt
   );
 }
 
-const screenLines = (screen: string) => screen.replace(/\r/g, '').split('\n').map(line => line.trim()).filter(Boolean);
+const screenRows = (screen: string) => {
+  const rows = screen.replace(/\r/g, '').split('\n');
+  while (rows.length > 0 && rows[0]!.trim().length === 0) rows.shift();
+  while (rows.length > 0 && rows.at(-1)!.trim().length === 0) rows.pop();
+  return rows;
+};
+const screenLines = (screen: string) => screenRows(screen).map(line => line.trim());
 // 2.1.287 paints an empty composer's hint as `❯ Try "…"`. Require
 // its complete matching box, so arbitrary drafts/history are not readiness.
 const emptyComposerLine = (lines: string[], index: number) => lines[index] === '❯'
@@ -215,17 +237,27 @@ function emptyMinimalComposer(lines: string[]): boolean {
   return minimal?.observed === '' && minimal.trailing.length === 0;
 }
 
-function ownedMinimalComposer(lines: string[], expected: string): boolean {
+function ownedMinimalComposer(lines: string[], expected: string, final: boolean, rows = lines): boolean {
   const minimal = minimalComposer(lines);
-  // Minimal captures use dots for byte-progress echo. Any textual output,
-  // menu, second prompt or foreign suffix remains an unknown submission.
-  if (!minimal || !minimal.trailing.every(line => /^\.+$/.test(line))) return false;
-  const canonical = (text: string) => text.replace(/\s/g, '');
-  const actualText = canonical(minimal.observed), expectedText = canonical(expected);
-  return actualText === expectedText || expectedText.startsWith(actualText);
+  if (!minimal) return false;
+  const prompt = lines.findIndex((line, index) => index > 0 && /^❯(?:\s|$)/.test(line));
+  const observed = rows[prompt]!.replace(/^❯[  ]?/, '');
+  const trailing = rows.slice(prompt + 1);
+  const canonical = (text: string) => text.replace(/\\(?=\n)/g, '');
+  let actual: string;
+  if (trailing.every(line => /^\.+$/.test(line))) actual = observed;
+  else {
+    // Minimal custom backends expose physical rows but no wrap metadata. Only
+    // a single logical input line may be rejoined; hard newlines stay semantic.
+    if (expected.includes('\n')) return false;
+    actual = [observed, ...trailing].join('');
+  }
+  if (!final && actual === ' ') actual = '';
+  const actualText = canonical(actual), expectedText = canonical(expected);
+  return actualText === expectedText || !final && expectedText.startsWith(actualText);
 }
 
-function ownedComposerAtBottom(lines: string[], expected: string, fullPrompt: string): boolean {
+function ownedComposerAtBottom(lines: string[], expected: string, final: boolean, rows = lines, wrapWidths?: number[]): boolean {
   const footer = /^✔ /.test(lines.at(-1) ?? '') ? lines.length - 2 : lines.length - 1;
   if (footer < 3 || !MODE_FOOTER_RE.test(lines[footer]!)) return false;
   for (let statusRows = 0; statusRows <= 2; statusRows++) {
@@ -234,34 +266,113 @@ function ownedComposerAtBottom(lines: string[], expected: string, fullPrompt: st
     for (let top = bottom - 2; top >= 0; top--) {
       if (lines[top] !== lines[bottom] || !/^❯(?:\s|$)/.test(lines[top + 1] ?? '')) continue;
       if (!lines.slice(bottom + 1, footer).every(line => !/[❯›]|^(?:Permission required|Do you want to (?:proceed|allow)|Select an option|Enter to (?:select|confirm)|Accessing workspace:|Quick safety check:|Security guide)\b/i.test(line))) return false;
-      const draft = lines.slice(top + 1, bottom);
-      draft[0] = draft[0]!.replace(/^❯\s*/, '');
+      const draft = rows.slice(top + 1, bottom);
+      draft[0] = draft[0]!.replace(/^❯[  ]?/, '');
+      const nativeContinuationIndent = rows[top + 1]!.startsWith('❯ ');
+      if (nativeContinuationIndent) {
+        for (let index = 1; index < draft.length; index++) draft[index] = draft[index]!.replace(/^  /, '');
+      }
       let observed = draft.join('\n');
       // These are renderer hints, not text that Dutydeck typed.
       if (/^Try "[^"\r\n]+"$/.test(observed)) observed = '';
       if (expected === '/compact' && observed === '/compact  <optional custom summarization instructions>') observed = '/compact';
-      if ((fullPrompt.includes('\n') || Buffer.byteLength(fullPrompt, 'utf8') > CLAUDE_INPUT_CHUNK_BYTES)
-        && /^\[Pasted text #\d+(?: \+\d+ lines)?\]$/.test(observed)) return true;
-      const canonical = (text: string) => text.replace(/\\(?=\n)/g, '').replace(/\s/g, '');
+      // Only the soft-newline marker is presentation syntax. Spaces, tabs and
+      // hard newlines are semantic and must survive the comparison unchanged.
+      const canonical = (text: string) => text.replace(/\\(?=\n)/g, '');
+      if (!final && observed === ' ') observed = '';
       const actualText = canonical(observed), expectedText = canonical(expected);
-      // capture-pane may lag the last chunk. A strict prefix can only be our
-      // stale echo; extra or foreign text means the composer is no longer ours.
-      return actualText === expectedText || expectedText.startsWith(actualText);
+      // Intermediate reads may lag a chunk. The final Enter requires the
+      // complete owned draft: never an empty/prefix/suffix/paste-summary guess.
+      if (!(wrapWidths && nativeContinuationIndent && draft.length > 1)
+        && (actualText === expectedText || !final && expectedText.startsWith(actualText))) return true;
+      if (wrapWidths && nativeContinuationIndent && draft.length > 1) {
+        const widths = wrapWidths.slice(top + 1, bottom);
+        const wrapColumn = (wrapWidths[top] ?? 0) - 2;
+        let wrapped = draft[0]!;
+        for (let index = 1; index < draft.length; index++) {
+          wrapped += (widths[index - 1]! >= wrapColumn ? '' : '\n') + draft[index];
+        }
+        const wrappedText = canonical(wrapped);
+        if (wrappedText === expectedText || !final && expectedText.startsWith(wrappedText)) return true;
+      }
     }
   }
   return false;
 }
 
-function ownedRawPasteAtBottom(lines: string[], expected: string): boolean {
-  const endMarker = '^[[201~';
-  if (!lines.at(-1)?.endsWith(endMarker)) return false;
-  let observed = lines.join('\n').slice(0, -endMarker.length);
-  const startMarker = '^[[200~';
-  const start = observed.lastIndexOf(startMarker);
-  if (start >= 0) observed = observed.slice(start + startMarker.length);
-  const canonical = (text: string) => text.replace(/\s/g, '');
-  const actualText = canonical(observed);
-  return actualText.length > 0 && canonical(expected).endsWith(actualText);
+function ownedCompactPaletteAtBottom(lines: string[]): boolean {
+  for (let border = lines.length - 3; border >= 2; border--) {
+    if (!/^─{8,}$/.test(lines[border] ?? '') || lines[border - 2] !== lines[border]
+      || !/^❯\s+\/compact(?:\s+<optional custom summarization instructions>)?$/.test(lines[border - 1] ?? '')
+      || !/^\/compact\s+Free up context by summarizing the conversation so far$/.test(lines[border + 1] ?? '')) continue;
+    return lines.slice(border + 2).every(line => !/[❯›]/.test(line));
+  }
+  return false;
+}
+
+function ownedCompactCommandMenuAtBottom(lines: string[]): boolean {
+  const footer = /^✔ /.test(lines.at(-1) ?? '') ? lines.length - 2 : lines.length - 1;
+  if (!MODE_FOOTER_RE.test(lines[footer] ?? '')) return false;
+  let selected = -1;
+  for (let index = lines.length - 1; index >= 0; index--) {
+    if (/^❯ \/compact +Free up context by summarizing the conversation so far$/.test(lines[index] ?? '')) { selected = index; break; }
+  }
+  if (selected < 0 || !/^\/autocompact +Set how full the context gets before auto-summarizing$/.test(lines[selected + 1] ?? '')) return false;
+  if (lines.slice(selected + 2, footer).every(line => line.length === 0)) return true;
+  // Claude 2.1.295 keeps the owned composer below its aligned command menu.
+  // Accept that exact box, not a trimmed draft or an arbitrary status/menu row.
+  return selected + 5 === footer
+    && /^─{8,}$/.test(lines[selected + 2] ?? '')
+    && lines[selected + 4] === lines[selected + 2]
+    && /^❯[  ]?\/compact$/.test(lines[selected + 3] ?? '');
+}
+
+/** Shared business/maintenance composer contract for Claude writers and driver guards. */
+export function ownedClaudeComposer(screen: string, expected: string, final = true, wrapWidths?: number[]): boolean {
+  const rows = screenRows(screen);
+  const lines = rows.map(line => line.trim());
+  return ownedComposerAtBottom(lines, expected, final, rows, wrapWidths)
+    || ownedMinimalComposer(lines, expected, final, rows)
+    || expected === '/compact' && (ownedCompactPaletteAtBottom(lines) || ownedCompactCommandMenuAtBottom(lines));
+}
+
+/** Measure native physical rows before accepting hard newlines or full-width wraps. */
+export async function ownedClaudeComposerWithWrap(screen: string, expected: string, final = true): Promise<boolean> {
+  const rows = screenRows(screen);
+  if (rows.length === 0) return false;
+  const synchronous = ownedClaudeComposer(screen, expected, final);
+  if (synchronous && !expected.includes('\n')) return true;
+  const nativeComposer = rows.some(row => row.startsWith('❯ '));
+  if (!nativeComposer) return synchronous;
+  const { Terminal } = require('@xterm/headless') as typeof import('@xterm/headless');
+  const terminal = new Terminal({
+    cols: Math.max(2, ...rows.map(row => row.length * 2 + 2)),
+    rows: rows.length,
+    scrollback: 0,
+    allowProposedApi: true,
+  });
+  try {
+    await new Promise<void>(resolve => terminal.write(rows.join('\r\n'), resolve));
+    const widths = rows.map((_, index) => {
+      const line = terminal.buffer.active.getLine(index);
+      let width = 0;
+      if (line) {
+        for (let column = 0; column < line.length; column++) {
+          const cell = line.getCell(column);
+          if (cell && cell.getChars().length > 0) width = column + cell.getWidth();
+        }
+      }
+      return width;
+    });
+    return ownedClaudeComposer(screen, expected, final, widths);
+  } finally {
+    terminal.dispose();
+  }
+}
+
+export function emptyClaudeComposer(screen: string): boolean {
+  const lines = screenLines(screen);
+  return emptyComposerAtBottom(lines) || emptyMinimalComposer(lines);
 }
 
 function isComposerScreen(screen: string): boolean {
@@ -476,7 +587,7 @@ export function createClaudeFamilyAdapter(id: string): CliAdapter {
     screenActivityPattern: /^\s*[*·✢✳✶✻✽]\s+\p{L}[\p{L} '-]*(?:…|\.{3})(?:[ \t].*)?$/u,
     backgroundWaitPattern: CLAUDE_FAMILY_BACKGROUND_WAIT_RE,
     readyPattern: /❯/,
-    isIdleScreen: screen => emptyComposerAtBottom(screenLines(screen)),
+    isIdleScreen: screen => emptyClaudeComposer(screen),
     // 回复行「⎿  Not logged in · Please run /login」与状态栏右侧「Not logged in · Run /login」。
     screenLoginRequiredPattern: /\bNot logged in · (?:Please run|Run) \/login\b/,
   };

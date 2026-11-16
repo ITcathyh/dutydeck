@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DriverRecoveryError, PromptNotWrittenError } from '@dutydeck/shared';
-import { writeClaudeFamilyInput } from './claude-family.js';
+import { ownedClaudeComposer, ownedClaudeComposerWithWrap, writeClaudeFamilyInput } from './claude-family.js';
 import { createCodexAdapter } from './codex.js';
 import { INPUT_ECHO_SETTLE_MS, INPUT_ECHO_TIMEOUT_MS, INPUT_QUIET_MS, INPUT_QUIET_TIMEOUT_MS } from './input-settle.js';
 import type { PtyLike } from '../types.js';
@@ -12,13 +12,14 @@ class EchoingBackend implements PtyLike {
   echoDelayMs = 0;
   readonly processKey: object;
   readonly writes: Array<{ at: number; data: string }> = [];
+  private draft = '';
 
   constructor(outputAt: number, processKey: object = {}) {
     this.outputAt = outputAt;
     this.processKey = processKey;
   }
   lastOutputAt(): number { return this.outputAt; }
-  readScreen(): string { return '──────────\n❯\n──────────\n? for shortcuts'; }
+  readScreen(): string { return `──────────\n❯${this.draft ? ` ${this.draft}` : ''}\n──────────\n? for shortcuts`; }
   write(data: string): void { this.record(data); }
   sendText(text: string): void { this.record(text); }
   sendSpecialKeys(...keys: string[]): void { this.record(keys.join('+')); }
@@ -26,8 +27,12 @@ class EchoingBackend implements PtyLike {
   private record(data: string): void {
     this.writes.push({ at: Date.now(), data });
     if (!this.echo) return;
-    if (this.echoDelayMs === 0) this.outputAt = Date.now();
-    else setTimeout(() => { this.outputAt = Date.now(); }, this.echoDelayMs);
+    const echo = () => {
+      this.draft = data === 'Enter' || data === '\r' ? '' : this.draft + data;
+      this.outputAt = Date.now();
+    };
+    if (this.echoDelayMs === 0) echo();
+    else setTimeout(echo, this.echoDelayMs);
   }
 }
 
@@ -99,13 +104,16 @@ describe('user input waits for a quiet screen and its echo', () => {
     expect(enter.at - typed.at).toBe(80 + 500 + INPUT_ECHO_TIMEOUT_MS);
   });
 
-  it('submits after the echo timeout when nothing is echoed', async () => {
+  it('does not submit after the echo timeout without a complete owned composer', async () => {
     const start = Date.now();
     const backend = new EchoingBackend(start - 60_000);
     backend.echo = false;
-    await run(writeClaudeFamilyInput(backend, 'hello'));
+    const pending = writeClaudeFamilyInput(backend, 'hello');
+    const outcome = pending.then(() => undefined, error => error);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(await outcome).toMatchObject({ name: 'DriverRecoveryError', code: 'DRIVER_INPUT_UNCONFIRMED' });
     expect(backend.writes[0]!.at - start).toBe(200);
-    expect(backend.writes.at(-1)!.at - backend.writes[0]!.at).toBe(80 + 500 + INPUT_ECHO_TIMEOUT_MS);
+    expect(backend.writes.map(write => write.data)).toEqual(['hello']);
   });
 
   it('Claude warms up once per CLI process, not once per submission wrapper', async () => {
@@ -145,9 +153,13 @@ describe('user input waits for a quiet screen and its echo', () => {
 
   it('keeps the previous timing on a backend without an output clock', async () => {
     const writes: string[] = [];
-    const readScreen = () => '──────────\n❯\n──────────\n? for shortcuts';
-    const claude = writeClaudeFamilyInput({ write: data => { writes.push(data); }, readScreen }, 'hello');
-    await vi.advanceTimersByTimeAsync(700);
+    let draft = '';
+    const readScreen = () => `──────────\n❯${draft ? ` ${draft}` : ''}\n──────────\n? for shortcuts`;
+    const claude = writeClaudeFamilyInput({ write: data => {
+      writes.push(data);
+      draft = data === '\r' ? '' : draft + data;
+    }, readScreen }, 'hello');
+    await vi.advanceTimersByTimeAsync(800);
     await claude;
     expect(writes.at(-1)).toBe('\r');
     const codex = Promise.resolve(createCodexAdapter().writeInput({ write: data => { writes.push(data); } }, 'hi'));
@@ -164,7 +176,7 @@ describe('Claude composer ownership around the first terminal write', () => {
   const box = (draft = '', status: string[] = []) => [
     '──────────', `❯${draft ? ` ${draft}` : ''}`, '──────────', ...status, '? for shortcuts',
   ].join('\n');
-  const palette = `${box('/compact')}\n/compact  Free up context\n/clear  Clear conversation`;
+  const palette = '──────────\n❯ /compact\n──────────\n/compact  Free up context by summarizing the conversation so far\n/clear  Clear conversation';
 
   class ComposerBackend implements PtyLike {
     readonly processKey = {};
@@ -190,16 +202,16 @@ describe('Claude composer ownership around the first terminal write', () => {
     return backend;
   }
 
-  it('accepts a minimal ordinary prompt before and after a bare-PTY paste', async () => {
+  it('accepts a minimal ordinary prompt before and after bare-PTY keyed input', async () => {
     const initial = 'Claude Code v2.1.267 (mock)\r\n❯ \r\n';
     const backend = bare(initial);
     backend.onWrite = data => {
-      if (data.includes('business body')) backend.screen = `${initial}....\r\n`;
+      if (data === 'business body') backend.screen = 'Claude Code v2.1.267 (mock)\n❯ business body';
     };
     const pending = writeClaudeFamilyInput(backend, 'business body');
     void pending.catch(() => {});
     await finish(pending);
-    expect(backend.writes).toEqual(['\x1b[200~business body\x1b[201~', '\r']);
+    expect(backend.writes).toEqual(['business body', '\r']);
   });
 
   it('accepts its own single-line draft on a minimal resumed screen', async () => {
@@ -236,7 +248,7 @@ describe('Claude composer ownership around the first terminal write', () => {
     void pending.catch(() => {});
     await vi.advanceTimersByTimeAsync(15_000);
     await expect(pending).rejects.toMatchObject({ name: 'DriverRecoveryError', code: 'DRIVER_INPUT_UNCONFIRMED' });
-    expect(backend.writes).toEqual(['\x1b[200~business body\x1b[201~']);
+    expect(backend.writes).toEqual(['business body']);
   });
 
   it.each([
@@ -247,6 +259,9 @@ describe('Claude composer ownership around the first terminal write', () => {
     ['transient paste expansion hint', box().replace('? for shortcuts', 'paste again to expand')],
   ])('accepts the %s immediately before writing', async (_name, screen) => {
     const backend = new ComposerBackend(screen);
+    backend.onWrite = data => {
+      if (data === 'business body') backend.screen = screen.replace(/^❯.*$/m, '❯ business body');
+    };
     await finish(writeClaudeFamilyInput(backend, 'business body'));
     expect(backend.writes).toEqual(['business body', 'Enter']);
   });
@@ -318,14 +333,19 @@ describe('Claude composer ownership around the first terminal write', () => {
     void pending.catch(() => {});
     await vi.advanceTimersByTimeAsync(15_000);
     await expect(pending).rejects.toMatchObject({ name: 'DriverRecoveryError', code: 'DRIVER_INPUT_UNCONFIRMED' });
-    expect(backend.writes).toEqual(['\x1b[200~business body\x1b[201~']);
+    expect(backend.writes).toEqual(['business body']);
   });
 
-  it('accepts Claude collapsing its own in-progress multiline chunks into a paste summary', async () => {
+  it('rejects a paste summary even when it follows Dutydeck multiline chunks', async () => {
     const backend = new ComposerBackend();
-    backend.onWrite = () => { backend.screen = box('[Pasted text #1 +1 lines]').replace('? for shortcuts', 'paste again to expand'); };
-    await finish(writeClaudeFamilyInput(backend, 'first\nsecond'));
-    expect(backend.writes).toEqual(['first', '\\', 'Enter', 'second', 'Enter']);
+    backend.onWrite = data => {
+      if (data === 'first') backend.screen = box('[Pasted text #1 +1 lines]').replace('? for shortcuts', 'paste again to expand');
+    };
+    const pending = writeClaudeFamilyInput(backend, 'first\nsecond');
+    const outcome = pending.then(() => undefined, error => error);
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(await outcome).toMatchObject({ name: 'DriverRecoveryError', code: 'DRIVER_INPUT_UNCONFIRMED' });
+    expect(backend.writes).toEqual(['first']);
   });
 
   it('accepts its own chunked multiline echo and submits exactly once', async () => {
@@ -335,11 +355,11 @@ describe('Claude composer ownership around the first terminal write', () => {
       if (data === 'Enter' && draft) { draft += '\n'; backend.screen = box(draft); }
       else if (data !== 'Enter' && data !== '\\') { draft += data; backend.screen = box(draft); }
     };
-    await finish(writeClaudeFamilyInput(backend, 'first\nsecond'));
-    expect(backend.writes).toEqual(['first', '\\', 'Enter', 'second', 'Enter']);
+    await finish(writeClaudeFamilyInput(backend, 'first\n\nsecond'));
+    expect(backend.writes).toEqual(['first', '\\', 'Enter', '\\', 'Enter', 'second', 'Enter']);
   });
 
-  it('accepts the compact placeholder and a multiline paste summary as its own echo', async () => {
+  it('accepts the compact placeholder but rejects a multiline paste summary', async () => {
     const compact = new ComposerBackend();
     compact.onWrite = data => {
       if (data === '/compact') compact.screen = box('/compact  <optional custom summarization instructions>');
@@ -349,33 +369,246 @@ describe('Claude composer ownership around the first terminal write', () => {
 
     const pasted = bare();
     pasted.onWrite = data => {
-      if (data.includes('first\nsecond')) pasted.screen = box('[Pasted text #1 +1 lines]');
+      if (data === 'first') pasted.screen = box('[Pasted text #1 +1 lines]');
     };
-    await finish(writeClaudeFamilyInput(pasted, 'first\nsecond'));
-    expect(pasted.writes).toEqual(['\x1b[200~first\nsecond\x1b[201~', '\r']);
+    const pending = writeClaudeFamilyInput(pasted, 'first\nsecond');
+    const outcome = pending.then(() => undefined, error => error);
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(await outcome).toMatchObject({ name: 'DriverRecoveryError', code: 'DRIVER_INPUT_UNCONFIRMED' });
+    expect(pasted.writes).toEqual(['first']);
   });
 
-  it('accepts a bare-PTY viewport filled by its own long paste tail', async () => {
-    const visibleTail = 'last routing line\n# Skill: acceptance-skill\nPath: /tmp/skill/SKILL.md\n\nVERIFY_CLAUDE_SKILL_DELIVERY';
-    const prompt = `a long routing prefix that scrolled away\n${visibleTail}`;
-    const backend = bare();
-    // The wrapped viewport is an exact suffix after whitespace canonicalization.
+  it('reserves and restores the expanded input viewport around a successful write', async () => {
+    const backend = new ComposerBackend();
+    let draft = '';
+    let begins = 0, restores = 0;
+    Object.assign(backend, { beginExpandedInput: async () => { begins++; return async () => { restores++; }; } });
     backend.onWrite = data => {
-      if (data.includes(prompt)) backend.screen = `last routing line\n# Skill: acceptance-skill\nPath: /tmp/skill/\nSKILL.md\nVERIFY_CLAUDE_SKILL_DELIVERY^[[201~`;
+      if (data === 'Enter' && draft) draft += '\n';
+      else if (data !== 'Enter') draft += data;
+      backend.screen = box(draft);
     };
-    await finish(writeClaudeFamilyInput(backend, prompt));
-    expect(backend.writes).toEqual([`\x1b[200~${prompt}\x1b[201~`, '\r']);
+    await finish(writeClaudeFamilyInput(backend, 'first\nsecond'));
+    expect({ begins, restores }).toEqual({ begins: 1, restores: 1 });
+    expect(backend.writes).toEqual(['first', '\\', 'Enter', 'second', 'Enter']);
   });
 
-  it('rejects foreign text after the bare-PTY paste end marker', async () => {
+  it('restores the viewport after an unconfirmed write without retrying it', async () => {
+    const backend = new ComposerBackend();
+    let restores = 0;
+    Object.assign(backend, { beginExpandedInput: async () => async () => { restores++; } });
+    backend.onWrite = () => { backend.onWrite = undefined; backend.screen = box('foreign'); };
+    const pending = writeClaudeFamilyInput(backend, 'business body');
+    const outcome = pending.then(() => undefined, error => error);
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(await outcome).toMatchObject({ name: 'DriverRecoveryError', code: 'DRIVER_INPUT_UNCONFIRMED' });
+    expect(restores).toBe(1);
+    expect(backend.writes).toEqual(['business body']);
+  });
+
+  it('rejects a bare-PTY viewport containing only the owned long input tail', async () => {
+    const visibleTail = 'VERIFY_CLAUDE_SKILL_DELIVERY';
+    const prompt = `a long routing prefix that scrolled away ${visibleTail}`;
     const backend = bare();
     backend.onWrite = data => {
-      if (data.includes('business body')) backend.screen = 'business body^[[201~\nforeign draft';
+      if (data === prompt) backend.screen = box(visibleTail);
+    };
+    const pending = writeClaudeFamilyInput(backend, prompt);
+    const outcome = pending.then(() => undefined, error => error);
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(await outcome).toMatchObject({ name: 'DriverRecoveryError', code: 'DRIVER_INPUT_UNCONFIRMED' });
+    expect(backend.writes).toEqual([prompt]);
+  });
+
+  it('rejects foreign text after the bare-PTY keyed echo', async () => {
+    const backend = bare();
+    backend.onWrite = data => {
+      if (data === 'business body') backend.screen = box('business body\nforeign draft');
     };
     const pending = writeClaudeFamilyInput(backend, 'business body');
     void pending.catch(() => {});
     await vi.advanceTimersByTimeAsync(15_000);
     await expect(pending).rejects.toMatchObject({ name: 'DriverRecoveryError', code: 'DRIVER_INPUT_UNCONFIRMED' });
-    expect(backend.writes).toEqual(['\x1b[200~business body\x1b[201~']);
+    expect(backend.writes).toEqual(['business body']);
+  });
+
+  it('polls fresh final evidence when the first final read still shows the old empty composer', async () => {
+    const backend = new ComposerBackend();
+    backend.onWrite = data => {
+      if (data === 'business body') {
+        backend.screen = box();
+        setTimeout(() => { backend.screen = box(data); }, 600);
+      }
+    };
+    await finish(writeClaudeFamilyInput(backend, 'business body'));
+    expect(backend.writes).toEqual(['business body', 'Enter']);
+  });
+
+  it('accepts exact semantic leading and trailing whitespace', async () => {
+    const prompt = '  business body \t';
+    const backend = new ComposerBackend();
+    backend.onWrite = data => { if (data === prompt) backend.screen = box(prompt); };
+    await finish(writeClaudeFamilyInput(backend, prompt));
+    expect(backend.writes).toEqual([prompt, 'Enter']);
+  });
+
+  it('accepts the native non-breaking prompt separator without trimming the draft', async () => {
+    const prompt = '  business body ';
+    const backend = new ComposerBackend();
+    backend.onWrite = data => { if (data === prompt) backend.screen = box(prompt).replace('❯ ', '❯ '); };
+    await finish(writeClaudeFamilyInput(backend, prompt));
+    expect(backend.writes).toEqual([prompt, 'Enter']);
+  });
+
+  it('removes only the two native continuation-indent spaces', () => {
+    expect(ownedClaudeComposer(box('first\n  second').replace('❯ ', '❯ '), 'first\nsecond', true)).toBe(true);
+    expect(ownedClaudeComposer(box('first\n    second').replace('❯ ', '❯ '), 'first\n  second', true)).toBe(true);
+    expect(ownedClaudeComposer(box('first\n    second').replace('❯ ', '❯ '), 'first\nsecond', true)).toBe(false);
+  });
+
+  it('joins only full-width native physical rows, including wide characters', async () => {
+    vi.useRealTimers();
+    const asciiWrap = box('abcdef\n  gh').replace('❯ ', '❯ ');
+    expect(await ownedClaudeComposerWithWrap(asciiWrap, 'abcdefgh', true)).toBe(true);
+    expect(await ownedClaudeComposerWithWrap(asciiWrap, 'abcdef\ngh', true)).toBe(false);
+    expect(await ownedClaudeComposerWithWrap(box('abc\n  gh').replace('❯ ', '❯ '), 'abc\ngh', true)).toBe(true);
+    expect(await ownedClaudeComposerWithWrap(box('一二三\n  四').replace('❯ ', '❯ '), '一二三四', true)).toBe(true);
+  });
+
+  it('treats the native empty NBSP composer as an intermediate lag, never a final draft', () => {
+    const screen = box().replace('❯', '❯ ');
+    expect(ownedClaudeComposer(screen, 'business body', false)).toBe(true);
+    expect(ownedClaudeComposer(screen, 'business body', true)).toBe(false);
+  });
+
+  it.each(['', ' \t'])('rejects an empty or whitespace-only prompt without writing: %j', async prompt => {
+    const backend = new ComposerBackend();
+    const pending = writeClaudeFamilyInput(backend, prompt);
+    await expect(pending).rejects.toBeInstanceOf(PromptNotWrittenError);
+    expect(backend.writes).toEqual([]);
+  });
+
+  it('rejects unverifiable trailing whitespace before a hard newline without writing', async () => {
+    const backend = new ComposerBackend();
+    const pending = writeClaudeFamilyInput(backend, 'first  \nsecond');
+    await expect(pending).rejects.toBeInstanceOf(PromptNotWrittenError);
+    expect(backend.writes).toEqual([]);
+  });
+
+  it.each([
+    ['empty', 'business body', box()],
+    ['strict prefix', 'business body', box('business')],
+    ['semantic whitespace removed', 'business body', box('businessbody')],
+    ['semantic blank line removed', 'first\n\nsecond', box('first\nsecond')],
+    ['semantic blank line added', 'first\nsecond', box('first\n\nsecond')],
+    ['leading whitespace stripped', '  business body', box('business body')],
+    ['leading whitespace added', 'business body', box('  business body')],
+    ['trailing whitespace stripped', 'business body  ', box('business body')],
+    ['trailing whitespace added', 'business body', box('business body  ')],
+    ['suffix only', 'business body', box('body')],
+    ['foreign paste summary', 'first\nsecond', box('[Pasted text #7 +2 lines]')],
+  ])('rejects an %s composer instead of guessing ownership before final Enter', async (_name, prompt, visible) => {
+    const backend = bare();
+    backend.onWrite = () => { backend.onWrite = undefined; backend.screen = visible; };
+    const pending = writeClaudeFamilyInput(backend, prompt);
+    const outcome = pending.then(() => undefined, error => error);
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(await outcome).toMatchObject({ name: 'DriverRecoveryError', code: 'DRIVER_INPUT_UNCONFIRMED' });
+    expect(backend.writes.at(-1)).not.toBe('\r');
+  });
+
+  it('accepts only the exact business /compact palette produced by its own draft', async () => {
+    const backend = bare();
+    backend.onWrite = () => { backend.onWrite = undefined; backend.screen = palette; };
+    await finish(writeClaudeFamilyInput(backend, '/compact'));
+    expect(backend.writes.at(-1)).toBe('\r');
+  });
+
+  it('accepts only the exact native compact command menu', () => {
+    const menu = [
+      'previous answer', '',
+      '❯ /compact Free up context by summarizing the conversation so far',
+      '/autocompact Set how full the context gets before auto-summarizing',
+      '', '⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n');
+    expect(ownedClaudeComposer(menu, '/compact', true)).toBe(true);
+    expect(ownedClaudeComposer(menu.replace('Free up context', 'Free up context!'), '/compact', true)).toBe(false);
+    expect(ownedClaudeComposer(menu.replace('❯ /compact', '❯ /autocompact'), '/compact', true)).toBe(false);
+    expect(ownedClaudeComposer(menu.replace('/autocompact', '/clear'), '/compact', true)).toBe(false);
+  });
+
+  it('accepts the Claude 2.1.295 aligned compact menu above its owned composer', async () => {
+    const border = '─'.repeat(120);
+    const menu = [
+      '  ❯ /compact                    Free up context by summarizing the conversation so far',
+      '    /autocompact                Set how full the context gets before auto-summarizing',
+      border, '❯ /compact ', border, '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n');
+    const backend = bare();
+    backend.onWrite = () => { backend.onWrite = undefined; backend.screen = menu; };
+    await finish(writeClaudeFamilyInput(backend, '/compact'));
+    expect(backend.writes).toEqual(['/compact', '\r']);
+    expect(ownedClaudeComposer(menu.replace('Free up context', 'Free up context!'), '/compact', true)).toBe(false);
+    expect(ownedClaudeComposer(menu.replace('❯ /compact', '❯ /clear'), '/compact', true)).toBe(false);
+    expect(ownedClaudeComposer(menu.replace('/autocompact', '/clear'), '/compact', true)).toBe(false);
+  });
+
+  it('classifies custom screen read failures by the first real write', async () => {
+    for (const afterWrite of [false, true]) {
+      const writes: string[] = [];
+      let reads = 0;
+      const pending = writeClaudeFamilyInput({
+        processKey: {}, lastOutputAt: () => Date.now() - 60_000,
+        readScreen: () => { if (afterWrite && reads++ > 0) throw new Error('EIO'); if (!afterWrite) throw new Error('EIO'); return box(); },
+        write(data) { writes.push(data); },
+      }, 'business body');
+      const outcome = pending.then(() => undefined, error => error);
+      await vi.advanceTimersByTimeAsync(15_000);
+      const error = await outcome;
+      expect(error).toBeInstanceOf(afterWrite ? DriverRecoveryError : PromptNotWrittenError);
+      expect(writes.length > 0).toBe(afterWrite);
+      expect(writes.at(-1)).not.toBe('\r');
+    }
+  });
+
+  it('keeps first-write warmup until a real backend write succeeds', async () => {
+    const processKey = {};
+    const rejected = new EchoingBackend(Date.now() - 60_000, processKey);
+    rejected.readScreen = () => box('human draft');
+    const first = writeClaudeFamilyInput(rejected, 'business body');
+    const firstOutcome = first.then(() => undefined, error => error);
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(await firstOutcome).toBeInstanceOf(PromptNotWrittenError);
+
+    const start = Date.now();
+    const second = new EchoingBackend(start - 60_000, processKey);
+    await run(writeClaudeFamilyInput(second, 'business body'));
+    expect(second.writes[0]!.at - start).toBe(200);
+  });
+
+  it('accepts exact single-line text continued across minimal renderer rows', async () => {
+    const prompt = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'.repeat(3);
+    const backend = new ComposerBackend('Claude Code v2.1.267 (mock)\n❯');
+    let draft = '';
+    backend.onWrite = data => {
+      if (data === 'Enter') return;
+      draft += data;
+      const rows = (`❯ ${draft}`).match(/.{1,24}/g) ?? [];
+      backend.screen = `Claude Code v2.1.267 (mock)\n${rows.join('\n')}`;
+    };
+    await finish(writeClaudeFamilyInput(backend, prompt));
+    expect(backend.writes.at(-1)).toBe('Enter');
+  });
+
+  it('counts the explicit soft-newline marker as its own visible input', async () => {
+    const backend = new ComposerBackend();
+    let draft = '';
+    backend.onWrite = data => {
+      if (data === '\\') { draft += '\\'; backend.screen = box(draft); return; }
+      if (data === 'Enter' && draft.endsWith('\\')) { draft = `${draft.slice(0, -1)}\n`; backend.screen = box(draft); return; }
+      if (data !== 'Enter') { draft += data; backend.screen = box(draft); }
+    };
+    await finish(writeClaudeFamilyInput(backend, 'first\n\nsecond'));
+    expect(backend.writes).toEqual(['first', '\\', 'Enter', '\\', 'Enter', 'second', 'Enter']);
   });
 });

@@ -11,18 +11,22 @@ const ready = 'TraeX\n  Worked for 1s\n────────────\n❯
 const busy = ready.replace('  Worked for 1s', '❖ Working… (1s • esc to interrupt)');
 const line = (record: unknown) => JSON.stringify(record) + '\n';
 let directory: string, path: string, driver: PtyCliDriver, output: (data: string) => void, writes: string[], events: NormalizedDriverEvent[];
-let turn: number, prompt: string;
-const paint = (screen: string) => output(`\x1b[2J\x1b[H${screen.replaceAll('\n', '\r\n')}`);
+let turn: number, prompt: string, currentScreen: string;
+const paint = (screen: string) => { currentScreen = screen; output(`\x1b[2J\x1b[H${screen.replaceAll('\n', '\r\n')}`); };
 const append = (type: string, fields: Record<string, unknown> = {}) => appendFileSync(path, line({ type: 'event_msg', timestamp: new Date().toISOString(), payload: { type, turn_id: `turn-${turn}`, ...fields } }));
 beforeEach(async () => {
-  vi.useFakeTimers(); directory = mkdtempSync(join(tmpdir(), 'dd-traex-footer-')); writes = []; events = []; turn = 0; prompt = '';
+  vi.useFakeTimers(); directory = mkdtempSync(join(tmpdir(), 'dd-traex-footer-')); writes = []; events = []; turn = 0; prompt = ''; currentScreen = ready;
   const day = join(directory, 'cli', 'sessions', '2026', '10', '15'); mkdirSync(day, { recursive: true });
   path = join(day, `rollout-2026-10-15T10-00-00-${thread}.jsonl`); writeFileSync(path, line({ type: 'session_meta', payload: { id: thread, cwd: directory } }));
   writeFileSync(join(directory, 'cli', 'history.jsonl'), '');
-  const backend: SessionBackend = { kind: 'pty', spawn() {}, resize() {}, kill() {}, interrupt() {}, onExit() {}, onData(cb) { output = cb; }, write(data) {
+  const backend: SessionBackend = { kind: 'pty', spawn() {}, resize() {}, kill() {}, interrupt() {}, onExit() {}, onData(cb) { output = cb; }, captureCurrentScreen() { return currentScreen; }, write(data) {
     writes.push(data);
-    if (data.startsWith('\x1b[200~')) prompt = data.slice(6, -6);
+    if (data.startsWith('\x1b[200~')) {
+      prompt = data.slice(6, -6);
+      paint(ready.replace('❯ Ask TraeCode CLI', `❯ ${prompt.split('\n').join('\n  ')}`));
+    }
     if (data === '\r') {
+      paint(ready);
       turn++; appendFileSync(join(directory, 'cli', 'history.jsonl'), line({ session_id: thread, ts: Date.now() / 1000, text: prompt }));
       append('task_started'); append('user_message', { message: prompt });
     }

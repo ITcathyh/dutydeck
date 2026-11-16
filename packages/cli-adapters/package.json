@@ -7,6 +7,6 @@
   "types": "./dist/index.d.ts",
   "exports": { ".": { "types": "./dist/index.d.ts", "development": "./src/index.ts", "import": "./dist/index.js" } },
   "scripts": { "build": "tsc -p tsconfig.json", "typecheck": "tsc -p tsconfig.json --noEmit" },
-  "dependencies": { "@dutydeck/shared": "workspace:*", "@dutydeck/relay": "workspace:*" },
+  "dependencies": { "@dutydeck/shared": "workspace:*", "@dutydeck/relay": "workspace:*", "@xterm/headless": "^6.0.0" },
   "devDependencies": { "typescript": "5.8.3", "@types/node": "22.15.30" }
 }
