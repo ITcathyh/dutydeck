@@ -1,7 +1,7 @@
 import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { probeClaudeHookFailureBlock, protectedPathFinding, secretGuardActive, secretGuardFinding, secretGuardHookCommand, secretGuardToolMatcher } from '@dutydeck/shared/secret-guard';
 
@@ -335,6 +335,89 @@ describe('secret guard', () => {
       expectDenied(fixture.run());
       expect(fixture.nodeStarts()).toBe(1);
     });
+  });
+
+  it('normalizes policy roots and sends abnormal session ids and paths through Node fail-closed', () => {
+    const container = mkdtempSync(join(tmpdir(), 'dutydeck-secret-guard-normalization-'));
+    const root = join(container, 'policy-root');
+    const sessions = join(root, '.dutydeck', 'security', 'sessions');
+    mkdirSync(sessions, { recursive: true });
+    writeFileSync(join(sessions, 'ses_1.json'), JSON.stringify({ enabled: true, authorized: false }));
+    const count = join(container, 'node-count');
+    const node = join(container, 'counting-node');
+    writeFileSync(node, `#!/bin/sh\nprintf 1 >> ${JSON.stringify(count)}\nexec ${JSON.stringify(process.execPath)} "$@"\n`, { mode: 0o755 });
+    const event = JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'cat ~/.codex/auth.json' }, cwd: '/work/repo' });
+    const run = (command: string, dutydeck_session_id: string, cwd?: string) => spawnSync('/bin/sh', ['-c', command], {
+      input: event, encoding: 'utf8', cwd, env: { ...process.env, PATH: '', HOME: home, dutydeck_session_id },
+    });
+    const nodeStarts = () => existsSync(count) ? readFileSync(count, 'utf8').length : 0;
+    const resetNode = () => rmSync(count, { force: true });
+    const runFromBlocked = (command: string, dutydeck_session_id: string, directory: string) => {
+      const bootstrap = `
+        const { chmodSync } = require('node:fs');
+        const { spawnSync } = require('node:child_process');
+        process.chdir(process.argv[1]);
+        chmodSync('.', 0);
+        const result = spawnSync('/bin/sh', ['-c', process.argv[2]], {
+          input: process.argv[3], encoding: 'utf8',
+          env: { ...process.env, PATH: '', HOME: process.env.HOME, dutydeck_session_id: process.argv[4] },
+        });
+        process.stdout.write(JSON.stringify({ status: result.status, stdout: result.stdout, stderr: result.stderr, error: result.error?.code }));
+      `;
+      const outer = spawnSync(process.execPath, ['-e', bootstrap, directory, command, event, dutydeck_session_id], { encoding: 'utf8', env: { ...process.env, HOME: home } });
+      expect(outer.status).toBe(0);
+      return JSON.parse(outer.stdout) as SpawnSyncReturns<string>;
+    };
+    const command = secretGuardHookCommand({ nodePath: node, policyRoot: root });
+    const previous = process.cwd();
+    const blocked = join(container, 'blocked');
+    mkdirSync(blocked);
+    try {
+      for (const sessionId of ['missing/../ses_1', '../ses_1', '/absolute/ses_1', 'ses/1', '.', '..', 'ses 1', 'ses_é', 'x'.repeat(129), 'x'.repeat(256)]) {
+        const result = run(command, sessionId);
+        expect(result.status, `abnormal session ${sessionId}`).toBe(2);
+        expect(nodeStarts(), `abnormal session ${sessionId} must reach Node`).toBe(1);
+        expect(result.stdout).toBe('');
+        resetNode();
+      }
+
+      expect(run(command, 'x'.repeat(128))).toMatchObject({ status: 0, stdout: '' });
+      expect(nodeStarts(), 'a conservative 128-byte component with a complete sessions directory remains a fast miss').toBe(0);
+      rmSync(sessions, { recursive: true });
+      expect(run(command, 'ses_missing')).toMatchObject({ status: 0, stdout: '' });
+      expect(nodeStarts(), 'an earliest missing directory remains a fast miss').toBe(0);
+      mkdirSync(sessions, { recursive: true });
+      writeFileSync(join(sessions, 'ses_1.json'), JSON.stringify({ enabled: true, authorized: false }));
+
+      const longRoot = secretGuardHookCommand({ nodePath: node, policyRoot: join(root, 'r'.repeat(256)) });
+      expect(run(longRoot, '')).toMatchObject({ status: 0, stdout: '' });
+      expect(nodeStarts(), 'an empty session id remains a shell-only allow even for an abnormal root').toBe(0);
+      expect(run(longRoot, 'ses_1').status).toBe(2);
+      expect(nodeStarts(), 'an overlong policy-root component must reach Node').toBe(1);
+      resetNode();
+
+      process.chdir(root);
+      const relativeRoot = secretGuardHookCommand({ nodePath: node, policyRoot: '.' });
+      process.chdir(previous);
+      const denied = run(relativeRoot, 'ses_1', root);
+      expect(denied.status).toBe(0);
+      expect(JSON.parse(denied.stdout).hookSpecificOutput.permissionDecision).toBe('deny');
+      resetNode();
+
+      const fromBlocked = runFromBlocked(relativeRoot, 'ses_1', blocked);
+      expect(fromBlocked.status).toBe(0);
+      expect(JSON.parse(fromBlocked.stdout).hookSpecificOutput.permissionDecision).toBe('deny');
+      expect(nodeStarts(), 'the normalized absolute root must be evaluated by Node').toBe(1);
+      resetNode();
+
+      const normalizedRelative = secretGuardHookCommand({ nodePath: node, policyRoot: relative(previous, root) });
+      expect(run(normalizedRelative, 'ses_missing')).toMatchObject({ status: 0, stdout: '' });
+      expect(nodeStarts(), 'a normal relative root is absolutized without adding Node to a common miss').toBe(0);
+    } finally {
+      process.chdir(previous);
+      chmodSync(blocked, 0o700);
+      rmSync(container, { recursive: true, force: true });
+    }
   });
 
   it('fails closed for policy read and parse errors without echoing sensitive contents', () => {

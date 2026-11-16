@@ -20,7 +20,7 @@ Codex 终端 Agent 会从 `CODEX_HOME/config.toml` 读取 `[profiles.<name>]` �
 
 ### Claude 凭据与计划守卫的失败阻断
 
-Dutydeck 自己生成的 Claude 凭据守卫（终端与内置 ACP）和计划守卫（终端）在官方 Claude Code **2.1.295 或更高版本**上带 `onFailure: "block"`：守卫超时或未被脚本内显式拒绝覆盖的执行失败也阻断工具调用。会话 ID 为空时，凭据守卫由 shell 直接放行，不启动 Node；策略路径则逐级检查，只有之前的祖先均可读、可进入且第一处失败可证明为 `ENOENT` 时才由 shell 快放。`EACCES`、`ENOTDIR`、祖先不可读或不可进入、悬空或不可解析的符号链接及其他不确定状态都进入 Node；Node 只对读取时的 `ENOENT` 放行，其他读取或 JSON 解析失败按拒绝处理，不缓存“无策略”结果。计划阶段已启用但守卫脚本缺失同样按拒绝处理。Ask relay、PermissionRequest 和用户自己的 hooks 不增加这个字段。
+Dutydeck 自己生成的 Claude 凭据守卫（终端与内置 ACP）和计划守卫（终端）在官方 Claude Code **2.1.295 或更高版本**上带 `onFailure: "block"`：守卫超时或未被脚本内显式拒绝覆盖的执行失败也阻断工具调用。会话 ID 为空时，凭据守卫由 shell 直接放行，不启动 Node；对正常的单组件会话 ID 和已绝对规范化的策略根，策略路径逐级检查，只有之前的祖先均可读、可进入且第一处失败可证明为 `ENOENT` 时才由 shell 快放。含 slash、`..` 等异常会话 ID、超过保守长度的 ID 或路径、异常 policyRoot 和不可证明的 cwd 状态都进入 Node fail closed，不把 `test` 的其他错误当成文件不存在。`EACCES`、`ENOTDIR`、祖先不可读或不可进入、悬空或不可解析的符号链接及其他不确定状态同样进入 Node；Node 只对合法会话 ID 读取时的 `ENOENT` 放行，其他读取或 JSON 解析失败按拒绝处理，不缓存“无策略”结果。计划阶段已启用但守卫脚本缺失同样按拒绝处理。Ask relay、PermissionRequest 和用户自己的 hooks 不增加这个字段。
 
 启动前探测使用与 Agent 相同的清洗后子进程环境，最多 3 秒并按可执行文件身份缓存；内置 ACP launcher 独立探测同一个实际 Claude 可执行文件。旧版、探测失败和 Seed / Relay / Genius 等未验证分支不写这个字段，凭据策略生效或 deny-all 的轮次也照常提交，守卫超时维持原来的放行行为，显式拒绝和脚本崩溃仍由 `|| exit 2` 拦截。每次真正拉起或重拉终端 Claude（包括恢复会话）时，Dutydeck 记录本次实际设置里的守卫 marker、精确 matcher、command type、`onFailure: "block"` 和当时的探测结果；受保护轮次不再探测磁盘 CLI。服务重启后接管仍在运行的终端优先使用这份启动记录；仅当记录不存在时，才检查接管前会话私有目录已有的 JSON 设置，至少一份且每份都可读、结构合法，并满足所请求守卫的精确 matcher、command type 和 marker，才按旧版规则继续（不要求 `onFailure: "block"`）。inline-only、空快照或任一份快照不符都拒绝；记录本身损坏、字段非法或不可读时不能使用快照回退。磁盘 CLI 后续升降级不改变已运行进程的判定；不降低新启动的 `onFailure: "block"` 要求。`dutydeck doctor` 的默认 Agent 可用性检查会对识别出的旧版官方 Claude Code 给出升级提醒。
 
@@ -165,7 +165,7 @@ env GIT_ALLOW_PROTOCOL= git --no-pager --no-optional-locks -c core.fsmonitor=fal
 
 Codex ACP 的非完全信任会话在每轮原生请求（包括恢复后）使用 `untrusted` 审批策略、用户审查和只读沙箱，写入或提权命令先交给 Dutydeck 审批；不会使用 Codex ACP 的自动审查。Codex 原生策略仍可直接放行其判定安全的读取，因此不保证每个只读动作都产生审批请求；`approve-reads` 也会放行执行端明确声明的读取和搜索。`full-trust` 明确使用原生完全访问策略。上述设置只作用于该子进程，不修改全局 Codex 配置。
 
-Codex ACP 通过独立管道转发原生输出，读取长文档等大结果时会等待下游读取，退出前传完剩余数据，避免原生进程已完成而任务仍等待到超时。
+Codex ACP 通过独立管道转发原生输出，读取长文档等大结果时会等待下游读取。主 Agent 退出后，正常 stdout/stderr 目的地背压没有 5 秒截断期限：已读尾部会等目的地恢复并完整写完，再按原有退出码或信号语义收尾，持久 ACP 会话身份不变。只有遗留源描述符或自有进程组退出无法证明时才有界失败；诊断分别给出 `sourcesClosed`、`destinationFlushed`、`groupExited`，正常目的地背压不算遗留源。此时 launcher 保留会话工作区 `.dutydeck/launchers/` 下的 report，ACP adapter 将对应进程树纳入后续收养和停止，证明退出后才删除 report。普通 Agent 非零退出没有这份内部 cleanup-unknown 标记，即使数值与内部保留码相同也不会误走该路径。
 
 默认值按入口略有不同：`lark create` 默认 `ask`，所选 Agent 不支持审批时必须加 `--full-trust`；Web 向导里，所选 Agent 支持审批则默认 `ask`，否则默认 `full-trust`。
 
