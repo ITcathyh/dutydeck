@@ -452,19 +452,29 @@ export interface ClaudeTranscriptTailerOptions {
   env?: CliPathEnv;
 }
 
-interface ClaudeCompactionWait {
-  observation: TranscriptCompactionObservation;
+interface ClaudeCompactionEvidence {
+  nativeSessionId: string;
+  position: TranscriptPosition;
   armedAt: number;
-  phase: 'pre-write' | 'sent-unobserved' | 'input-observed' | 'boundary-observed' | 'completed' | 'failed' | 'cancelled' | 'timeout';
+  nextArmedAt?: number;
   promptId?: string;
-  inputUuid?: string;
   inputParentUuid?: string;
+  readonly boundaryUuids?: Set<string>;
+}
+
+interface ClaudeCompactionWait extends ClaudeCompactionEvidence {
+  observation: TranscriptCompactionObservation;
   readonly commandUuids: Set<string>;
   readonly boundaryUuids: Set<string>;
-  readonly summaryUuids: Set<string>;
-  invalidated: boolean;
   finish(outcome?: 'completed' | 'failed', error?: Error): void;
 }
+
+interface RetiredCompaction extends ClaudeCompactionEvidence {
+  generation: number;
+}
+
+const RETIRED_COMPACTIONS_MAX = 64;
+const COMPACTION_EVIDENCE_IDS_MAX = 20_000;
 
 export class ClaudeTranscriptTailer implements TranscriptEventSource {
   private readonly tailer: JsonlTailer;
@@ -512,10 +522,13 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
   private usagePartial = false;
   private observedNativeSessionId: string | undefined;
   private compaction: ClaudeCompactionWait | undefined;
-  /** Submitted waits retired before their input arrived still own that late input chain. */
-  private readonly retiredCompactions = new Set<ClaudeCompactionWait>();
+  /** Retired waits retain only the structural evidence needed to isolate a late input/boundary. */
+  private readonly retiredCompactions = new Map<number, RetiredCompaction>();
   /** Baseline, live and retired /compact receipts are never fresh again. */
   private readonly compactionInputUuids = new Set<string>();
+  /** A boundary has exactly one owner; null is a retired or completed tombstone. */
+  private readonly compactionBoundaryOwners = new Map<string, ClaudeCompactionWait | null>();
+  private compactionEvidenceSaturated = false;
 
   constructor(opts: ClaudeTranscriptTailerOptions) {
     const explicit = opts.transcriptPath;
@@ -685,6 +698,7 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
         this.terminalPosition = undefined; this.recoveredInput = false;
         this.inputUuid = undefined; this.inputEntries.clear(); this.receiptEntry = undefined; this.restoringTurn = false;
         this.scheduledEntries.clear();
+        this.resetCompactionEvidence();
       },
     });
   }
@@ -693,25 +707,30 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
 
   waitForCompaction(observation: TranscriptCompactionObservation): Promise<'completed' | 'failed'> {
     if (this.compaction) return Promise.reject(new Error('Another compaction maintenance generation is already active'));
+    if (this.compactionEvidenceSaturated || this.retiredCompactions.size >= RETIRED_COMPACTIONS_MAX) {
+      return Promise.reject(new Error('Claude compaction evidence capacity exhausted; start a new session before compacting'));
+    }
     if (!observation.position || observation.nativeSessionId !== this.observedNativeSessionId) {
       return Promise.reject(new Error('Claude compaction evidence is unavailable for this native session'));
     }
+    const armedAt = Date.now();
+    for (const retired of this.retiredCompactions.values()) retired.nextArmedAt ??= armedAt;
     return new Promise((resolve, reject) => {
       const wait: ClaudeCompactionWait = {
-        observation, armedAt: Date.now(), phase: observation.submitted?.() === true ? 'sent-unobserved' : 'pre-write',
-        commandUuids: new Set(), boundaryUuids: new Set(), summaryUuids: new Set(), invalidated: false,
+        observation, nativeSessionId: observation.nativeSessionId, position: observation.position!, armedAt,
+        commandUuids: new Set(), boundaryUuids: new Set(),
         finish: (outcome, error) => {
-          // A retired Promise has already rejected. Keep only its structural
-          // ownership evidence so late records and redraws stay out of newer generations.
-          if (this.retiredCompactions.has(wait)) return;
           if (this.compaction !== wait) return;
           this.compaction = undefined;
           observation.signal.removeEventListener('abort', abort);
-          if (error) {
-            wait.phase = error.name === 'TimeoutError' ? 'timeout' : 'cancelled';
-            if (wait.promptId || observation.submitted?.() === true) this.retiredCompactions.add(wait);
-          } else {
-            wait.phase = outcome!;
+          for (const uuid of wait.boundaryUuids) this.compactionBoundaryOwners.set(uuid, null);
+          if (error && (wait.promptId || observation.submitted?.() === true) && wait.boundaryUuids.size === 0) {
+            if (this.retiredCompactions.size >= RETIRED_COMPACTIONS_MAX) this.compactionEvidenceSaturated = true;
+            else this.retiredCompactions.set(observation.generation, {
+              generation: observation.generation, nativeSessionId: wait.nativeSessionId, position: wait.position,
+              armedAt: wait.armedAt, nextArmedAt: wait.nextArmedAt, promptId: wait.promptId,
+              inputParentUuid: wait.inputParentUuid,
+            });
           }
           if (error) reject(error); else resolve(outcome!);
         },
@@ -723,104 +742,121 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
     });
   }
 
-  /** Observe maintenance records outside the business mapper. A manual boundary
-   * succeeds only with the preceding exact input and a summary that ties its
-   * promptId back to that boundary; all three must share the native session. */
+  /** Maintenance records are claimed by one generation. Ambiguous structural
+   * evidence stays unowned and the active driver wait retains its normal timeout. */
   private observeCompaction(entry: any, baseline: boolean, position: TranscriptPosition | undefined): void {
     const native = typeof entry?.sessionId === 'string' ? entry.sessionId : typeof entry?.session_id === 'string' ? entry.session_id : undefined;
     if (native) this.observedNativeSessionId = native;
     const inputText = claudeInputText(entry);
     const compactInputUuid = inputText === '/compact' && typeof entry?.uuid === 'string' && entry.uuid ? entry.uuid : undefined;
     const replayedInput = compactInputUuid !== undefined && this.compactionInputUuids.has(compactInputUuid);
-    if (compactInputUuid) this.compactionInputUuids.add(compactInputUuid);
+    if (compactInputUuid && !replayedInput) {
+      if (this.compactionInputUuids.size >= COMPACTION_EVIDENCE_IDS_MAX) {
+        this.compactionEvidenceSaturated = true;
+        if (!baseline) this.compaction?.finish('failed');
+      } else this.compactionInputUuids.add(compactInputUuid);
+    }
+    if (baseline && entry?.type === 'system' && entry.subtype === 'compact_boundary' && typeof entry.uuid === 'string') {
+      if (!this.compactionBoundaryOwners.has(entry.uuid)) {
+        if (this.compactionBoundaryOwners.size >= COMPACTION_EVIDENCE_IDS_MAX) this.compactionEvidenceSaturated = true;
+        else this.compactionBoundaryOwners.set(entry.uuid, null);
+      }
+    }
     if (baseline) return;
-    const retired = [...this.retiredCompactions];
-    // When ancestry is shared, let the active generation claim its first
-    // boundary and its exact-prompt summary before older ambiguous records.
-    if (this.compaction?.promptId && ((entry.type === 'system' && entry.subtype === 'compact_boundary' && this.compaction.boundaryUuids.size === 0)
-      || (entry.isCompactSummary === true && entry.promptId === this.compaction.promptId && this.compaction.boundaryUuids.has(entry.parentUuid)))) {
-      if (this.observeCompactionWait(this.compaction, entry, position, native, inputText, replayedInput)) return;
+
+    // A summary is structural evidence, never a newer business input. Its
+    // parent boundary alone determines ownership; promptId must match as well.
+    if (entry.isCompactSummary === true) {
+      const owner = typeof entry.parentUuid === 'string' ? this.compactionBoundaryOwners.get(entry.parentUuid) : undefined;
+      if (owner && owner === this.compaction && entry.promptId === owner.promptId) owner.finish('completed');
+      return;
     }
-    for (const [index, wait] of retired.entries()) {
-      const nextArmedAt = retired[index + 1]?.armedAt ?? this.compaction?.armedAt;
-      if (this.observeCompactionWait(wait, entry, position, native, inputText, replayedInput, nextArmedAt)) return;
+
+    if (entry.type === 'system' && entry.subtype === 'compact_boundary') {
+      if (entry.compactMetadata?.trigger !== 'manual' || typeof entry.uuid !== 'string' || this.compactionBoundaryOwners.has(entry.uuid)) return;
+      const candidates: ClaudeCompactionEvidence[] = [];
+      if (this.compaction && this.canClaimCompactionBoundary(this.compaction, entry, position, native)) candidates.push(this.compaction);
+      for (const retired of this.retiredCompactions.values()) {
+        if (this.canClaimCompactionBoundary(retired, entry, position, native)) candidates.push(retired);
+      }
+      if (candidates.length !== 1) return;
+      const owner = candidates[0]!;
+      if (this.compactionBoundaryOwners.size >= COMPACTION_EVIDENCE_IDS_MAX) {
+        this.compactionEvidenceSaturated = true;
+        if (owner === this.compaction) this.compaction?.finish('failed');
+        return;
+      }
+      if (owner === this.compaction) {
+        this.compaction!.boundaryUuids.add(entry.uuid);
+        this.compactionBoundaryOwners.set(entry.uuid, this.compaction!);
+      } else {
+        this.compactionBoundaryOwners.set(entry.uuid, null);
+        this.retiredCompactions.delete((owner as RetiredCompaction).generation);
+      }
+      return;
     }
-    if (this.compaction) this.observeCompactionWait(this.compaction, entry, position, native, inputText, replayedInput);
+
+    const content = entry.message?.content;
+    if (typeof content === 'string' && content.includes('<command-name>/compact</command-name>')) {
+      if (this.compaction?.promptId === entry.promptId && typeof entry.uuid === 'string') this.compaction!.commandUuids.add(entry.uuid);
+      return;
+    }
+    if (entry.type === 'system' && entry.subtype === 'local_command' && this.compaction?.commandUuids.has(entry.parentUuid)) {
+      if (typeof entry.content === 'string' && entry.content.includes('Not enough messages to compact.')) this.compaction!.finish('failed');
+      return;
+    }
+
+    if (inputText === undefined || replayedInput) return;
+    const timestamp = Date.parse(entry.timestamp);
+    if (inputText !== '/compact') {
+      if (this.compaction && Number.isFinite(timestamp) && timestamp >= this.compaction.armedAt - 1_000) {
+        this.compaction.finish('failed');
+      }
+      return;
+    }
+    const candidates: ClaudeCompactionEvidence[] = [];
+    if (this.compaction && this.canClaimCompactionInput(this.compaction, entry, position, native, timestamp)) candidates.push(this.compaction);
+    for (const retired of this.retiredCompactions.values()) {
+      if (this.canClaimCompactionInput(retired, entry, position, native, timestamp)) candidates.push(retired);
+    }
+    if (candidates.length !== 1) return;
+    const owner = candidates[0]!;
+    if (typeof entry.promptId !== 'string' || !entry.promptId || typeof entry.uuid !== 'string' || !entry.uuid) {
+      if (owner === this.compaction) {
+        this.compaction!.finish('failed');
+      } else this.retiredCompactions.delete((owner as RetiredCompaction).generation);
+      return;
+    }
+    owner.promptId = entry.promptId;
+    owner.inputParentUuid = typeof entry.parentUuid === 'string' ? entry.parentUuid : undefined;
   }
 
-  /** True when this wait claimed the record, keeping it away from later generations. */
-  private observeCompactionWait(wait: ClaudeCompactionWait, entry: any, position: TranscriptPosition | undefined,
-    native: string | undefined, inputText: string | undefined, replayedInput: boolean, nextArmedAt?: number): boolean {
-    if (wait.invalidated) return false;
-    const start = wait.observation.position!;
-    if (!position || position.path !== start.path || position.dev !== start.dev || position.ino !== start.ino
-      || position.epoch !== start.epoch || position.offset < start.offset || native !== wait.observation.nativeSessionId) return false;
-    const retired = this.retiredCompactions.has(wait);
+  private compactionRecordInGeneration(wait: ClaudeCompactionEvidence, position: TranscriptPosition | undefined,
+    native: string | undefined, timestamp: number): boolean {
+    const start = wait.position;
+    return !!position && position.path === start.path && position.dev === start.dev && position.ino === start.ino
+      && position.epoch === start.epoch && position.offset >= start.offset && native === wait.nativeSessionId
+      && Number.isFinite(timestamp) && timestamp >= wait.armedAt - 1_000
+      && (wait.nextArmedAt === undefined || timestamp < wait.nextArmedAt);
+  }
 
-    if (!wait.promptId) {
-      if (inputText === undefined || replayedInput) return false;
-      const timestamp = Date.parse(entry.timestamp);
-      if (!Number.isFinite(timestamp) || timestamp < wait.armedAt - 1_000
-        || (nextArmedAt !== undefined && timestamp >= nextArmedAt)) return false;
-      if (inputText !== '/compact') {
-        if (!retired) { wait.invalidated = true; wait.finish('failed'); }
-        return false;
-      }
-      if (!retired && timestamp <= wait.armedAt && [...this.retiredCompactions].some(candidate => !candidate.promptId
-        && !candidate.invalidated && candidate.observation.nativeSessionId === native && timestamp >= candidate.armedAt - 1_000)) {
-        // Equal timestamps cannot distinguish a delayed old input from the new one.
-        return false;
-      }
-      if (typeof entry.promptId !== 'string' || !entry.promptId || typeof entry.uuid !== 'string' || !entry.uuid) {
-        wait.invalidated = true;
-        wait.finish('failed');
-        return true;
-      }
-      wait.promptId = entry.promptId;
-      wait.inputUuid = entry.uuid;
-      wait.inputParentUuid = typeof entry.parentUuid === 'string' ? entry.parentUuid : undefined;
-      wait.phase = 'input-observed';
-      return true;
-    }
+  private canClaimCompactionInput(wait: ClaudeCompactionEvidence, entry: any, position: TranscriptPosition | undefined,
+    native: string | undefined, timestamp: number): boolean {
+    return !wait.promptId && this.compactionRecordInGeneration(wait, position, native, timestamp);
+  }
 
-    if (entry.uuid === wait.inputUuid) return true;
-    if (entry.type === 'system' && entry.subtype === 'compact_boundary') {
-      if (typeof entry.uuid === 'string' && wait.boundaryUuids.has(entry.uuid)) return true;
-      if (entry.compactMetadata?.trigger === 'manual' && typeof entry.uuid === 'string'
-        && typeof wait.inputParentUuid === 'string' && entry.logicalParentUuid === wait.inputParentUuid) {
-        wait.boundaryUuids.add(entry.uuid);
-        wait.phase = 'boundary-observed';
-        return true;
-      }
-      return false;
-    }
-    if (entry.isCompactSummary === true) {
-      if (typeof entry.uuid === 'string' && wait.summaryUuids.has(entry.uuid)) return true;
-      if (!wait.boundaryUuids.has(entry.parentUuid)) return false;
-      if (typeof entry.uuid === 'string') wait.summaryUuids.add(entry.uuid);
-      if (entry.promptId === wait.promptId) wait.finish('completed');
-      return true;
-    }
-    const content = entry.message?.content;
-    if (typeof entry.uuid === 'string' && wait.commandUuids.has(entry.uuid)) return true;
-    if (entry.promptId === wait.promptId && typeof content === 'string' && content.includes('<command-name>/compact</command-name>')) {
-      if (typeof entry.uuid === 'string') wait.commandUuids.add(entry.uuid);
-      return true;
-    }
-    if (entry.type === 'system' && entry.subtype === 'local_command' && wait.commandUuids.has(entry.parentUuid)) {
-      if (typeof entry.content === 'string' && entry.content.includes('Not enough messages to compact.')) wait.finish('failed');
-      return true;
-    }
-    // Another input belongs to a newer business or maintenance generation. It
-    // invalidates the active wait as before, but never erases retired ownership.
-    if (!retired && claudeInputText(entry) !== undefined) {
-      const timestamp = Date.parse(entry.timestamp);
-      if (Number.isFinite(timestamp) && timestamp >= wait.armedAt - 1_000) {
-        wait.invalidated = true;
-        wait.finish('failed');
-      }
-    }
-    return false;
+  private canClaimCompactionBoundary(wait: ClaudeCompactionEvidence, entry: any, position: TranscriptPosition | undefined,
+    native: string | undefined): boolean {
+    const alreadyHasBoundary = (wait.boundaryUuids?.size ?? 0) > 0;
+    return !!wait.promptId && typeof wait.inputParentUuid === 'string' && entry.logicalParentUuid === wait.inputParentUuid
+      && !alreadyHasBoundary && this.compactionRecordInGeneration(wait, position, native, Date.parse(entry.timestamp));
+  }
+
+  private resetCompactionEvidence(): void {
+    this.retiredCompactions.clear();
+    this.compactionInputUuids.clear();
+    this.compactionBoundaryOwners.clear();
+    this.compactionEvidenceSaturated = false;
   }
 
   /**

@@ -11,13 +11,19 @@ const successFixture = readFileSync(new URL('./fixtures/claude-compact-2.1.220.j
 const emptyFixture = readFileSync(new URL('./fixtures/claude-compact-empty-2.1.220.jsonl', import.meta.url), 'utf8').trim().split('\n').map(line => JSON.parse(line));
 const clone = <T>(value: T): T => structuredClone(value);
 
+function retimeSequence<T extends any[]>(sequence: T, inputAt: number): T {
+  sequence[0].timestamp = new Date(inputAt).toISOString();
+  sequence[1].timestamp = new Date(inputAt + 1_000).toISOString();
+  sequence[2].timestamp = new Date(inputAt + 2_000).toISOString();
+  return sequence;
+}
+
 function successfulSequence(id = promptId, native = sessionId, suffix = 'current') {
   const [, input, boundary, summary] = clone(successFixture);
   input.parentUuid = `leaf-${suffix}`;
   input.uuid = `input-${suffix}`;
   input.promptId = id;
   input.sessionId = native;
-  input.timestamp = new Date().toISOString();
   boundary.logicalParentUuid = input.parentUuid;
   boundary.uuid = `boundary-${suffix}`;
   boundary.sessionId = native;
@@ -25,7 +31,7 @@ function successfulSequence(id = promptId, native = sessionId, suffix = 'current
   summary.uuid = `summary-${suffix}`;
   summary.promptId = id;
   summary.sessionId = summary.session_id = native;
-  return [input, boundary, summary];
+  return retimeSequence([input, boundary, summary], Date.now());
 }
 
 function emptySequence(id = promptId, native = sessionId, suffix = 'empty') {
@@ -172,6 +178,46 @@ describe('Claude maintenance compaction evidence', () => {
     await expect(second.pending).resolves.toBe('completed');
   });
 
+  it('does not let the active generation claim an older boundary that arrives after its input', async () => {
+    await setup([clone(successFixture[0])]);
+    const previous = successfulSequence('previous-prompt', sessionId, 'previous-before-current');
+    retimeSequence(previous, Date.now() - 5_000);
+    const currentSequence = successfulSequence('current-prompt', sessionId, 'current-after-previous');
+    previous[0].parentUuid = currentSequence[0].parentUuid;
+    previous[1].logicalParentUuid = currentSequence[0].parentUuid;
+    const first = arm();
+    await append(previous[0]);
+    first.controller.abort();
+    await expect(first.pending).rejects.toThrow();
+
+    const current = arm();
+    await append(currentSequence[0]);
+    await append(previous[1], previous[2]);
+    expect(current.settled()).toBe(false);
+    await append(currentSequence[1], currentSequence[2]);
+    await expect(current.pending).resolves.toBe('completed');
+  });
+
+  it('leaves a boundary unowned when active and retired generation intervals overlap', async () => {
+    await setup([clone(successFixture[0])]);
+    const previous = successfulSequence('overlap-previous', sessionId, 'overlap-previous');
+    const currentSequence = successfulSequence('overlap-current', sessionId, 'overlap-current');
+    previous[0].parentUuid = currentSequence[0].parentUuid;
+    previous[1].logicalParentUuid = currentSequence[0].parentUuid;
+    const first = arm();
+    await append(previous[0]);
+    first.controller.abort();
+    await expect(first.pending).rejects.toThrow();
+
+    const current = arm();
+    await append(currentSequence[0]);
+    currentSequence[1].timestamp = new Date(Date.now() - 500).toISOString();
+    await append(currentSequence[1], currentSequence[2]);
+    expect(current.settled()).toBe(false);
+    current.controller.abort();
+    await expect(current.pending).rejects.toThrow();
+  });
+
   it('keeps the current boundary valid when an older boundary and summary arrive later', async () => {
     await setup([clone(successFixture[0])]);
     const previous = successfulSequence('previous-prompt', sessionId, 'previous-late');
@@ -231,7 +277,7 @@ describe('Claude maintenance compaction evidence', () => {
     await setup([clone(successFixture[0])]);
     const first = arm(sessionId, () => true);
     const late = successfulSequence('first-prompt', sessionId, 'first-unobserved');
-    late[0].timestamp = new Date(Date.now() - 10).toISOString();
+    retimeSequence(late, Date.now() - 10);
     first.controller.abort();
     await expect(first.pending).rejects.toThrow();
 
@@ -300,7 +346,7 @@ describe('Claude maintenance compaction evidence', () => {
     await setup([clone(successFixture[0])]);
     const first = arm(sessionId, () => true);
     const previous = successfulSequence('retired-summary-prompt', sessionId, 'retired-summary');
-    previous[0].timestamp = new Date(Date.now() - 10).toISOString();
+    retimeSequence(previous, Date.now() - 10);
     first.controller.abort();
     await expect(first.pending).rejects.toThrow();
 
@@ -318,13 +364,13 @@ describe('Claude maintenance compaction evidence', () => {
     await setup([clone(successFixture[0])]);
     const first = arm(sessionId, () => true);
     const previous = successfulSequence('older-retired-prompt', sessionId, 'older-retired');
-    previous[0].timestamp = new Date(Date.now() - 10).toISOString();
+    retimeSequence(previous, Date.now() - 10);
     first.controller.abort();
     await expect(first.pending).rejects.toThrow();
 
     const current = arm();
     const own = successfulSequence('newer-active-prompt', sessionId, 'newer-active');
-    own[0].timestamp = new Date(Date.now() + 10).toISOString();
+    retimeSequence(own, Date.now() + 10);
     await append(own[0]);
     await append(...previous);
     expect(current.settled()).toBe(false);
@@ -347,5 +393,17 @@ describe('Claude maintenance compaction evidence', () => {
     const next = arm();
     await append(...successfulSequence('after-business', sessionId, 'after-business'));
     await expect(next.pending).resolves.toBe('completed');
+  });
+
+  it('fails new maintenance explicitly instead of growing retired evidence without bound', async () => {
+    await setup([clone(successFixture[0])]);
+    for (let index = 0; index < 64; index++) {
+      const retired = arm(sessionId, () => true);
+      retired.controller.abort();
+      await expect(retired.pending).rejects.toThrow();
+    }
+    const saturated = arm();
+    await append(...successfulSequence('after-evidence-cap', sessionId, 'after-evidence-cap'));
+    await expect(saturated.pending).rejects.toThrow(/compaction evidence capacity/);
   });
 });
