@@ -1603,6 +1603,8 @@ it('adds no background status when no native background work is active', async (
   renderApp();
   const tabpanel = await screen.findByRole('tabpanel', { name: '对话' });
   await screen.findByLabelText('Codex 执行过程');
+  expect(within(tabpanel).getByText('current business request')).toBeTruthy();
+  expect(screen.getByRole('button', { name: '查看验证证据' })).toBeTruthy();
   expect(screen.queryByText(/后台子任务运行中|后台任务详情/)).toBeNull();
   expect(tabpanel.querySelector('[data-timeline-scroll]')).not.toBeNull();
 });
