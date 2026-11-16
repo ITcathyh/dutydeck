@@ -19,6 +19,7 @@ import type {
 } from './types.js';
 import { checkLarkMemory, larkBotsConfigKey, larkListenerStatusKey } from './checks.js';
 import { AUTH_TOKEN_CONFIG_KEY } from '../auth/auth.js';
+import { defaultDaemonDir, writeState } from '../daemon/daemon.js';
 
 /**
  * 体检模块的测试。每个外部读取都注入，因此本文件：
@@ -370,6 +371,40 @@ describe('daemon.status —— 状态不许说谎', () => {
     // 两种情况必须给出不同的说明，否则用户分不清「崩了」和「还没开始」
     expect(stale.detail).not.toBe(never.detail);
     expect(stale.verify).not.toBe(never.verify);
+  });
+
+  it('snapshot 之后写入的新 state 不得拼入本次 doctor', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dutydeck-doctor-snapshot-'));
+    const daemonDir = defaultDaemonDir(root);
+    const probed: string[] = [];
+    try {
+      const { daemonStatus: _status, daemonRecord: _record, ...rest } = deps({
+        cwd: root,
+        env: { HOME: root, DUTYDECK_DAEMON_DIR: daemonDir },
+        databaseProbe: path => {
+          probed.push(path);
+          return { exists: true, appliedVersion: 14, values: {} };
+        }
+      });
+      const dependencies: DoctorDependencies = rest;
+      // 现有可选依赖的求值发生在 snapshot 之后：此刻写入新一代，旧实现会被 fallback 再次读到。
+      Object.defineProperty(dependencies, 'daemonRecord', {
+        configurable: true,
+        get: () => {
+          writeState(daemonDir, {
+            pid: 777_001, ready: true, startedAt: 'new-generation', cwd: root,
+            database: '/tmp/new-generation-doctor.db'
+          });
+          return undefined;
+        }
+      });
+
+      const report = await runDoctor({ json: true }, dependencies);
+      const daemon = find(report, 'daemon.status')!;
+      expect(daemon.detail).toBe('未运行');
+      expect(daemon.detail).not.toContain('777001');
+      expect(probed).toEqual([baseConfig.databaseUrl]);
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
   it('运行中但 ready:false 为 warn', async () => {
