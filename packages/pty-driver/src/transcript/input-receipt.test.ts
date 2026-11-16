@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { JsonlTailer } from './tail.js';
 import { CodexInputReceipt } from './codex-input-receipt.js';
-import { claudeInputText, codexInputText, normalizeInputText } from './input-receipt.js';
+import { claudeInputText, codexInputText, normalizeInputText, traexInputMatches } from './input-receipt.js';
 
 const directory = mkdtempSync(join(tmpdir(), 'dd-native-receipt-'));
 const sources: { stop(): void }[] = [];
@@ -22,6 +22,27 @@ it('keeps legal Unicode, narrows line endings, and excludes assistant/tool/sidec
   expect(claudeInputText({ type: 'assistant', message: { role: 'assistant', content: text } })).toBeUndefined();
   expect(claudeInputText({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', content: text }] } })).toBeUndefined();
   expect(codexInputText({ type: 'event_msg', payload: { type: 'item_completed', item: { type: 'UserMessage', content: [{ type: 'text', text }] } } })).toBe(text);
+});
+
+it('matches TraeX receipts exactly or after removing only a nonempty leading space/tab run', () => {
+  expect(traexInputMatches('question', 'question')).toBe(true);
+  expect(traexInputMatches('question\r\nsecond', ' \tquestion\nsecond')).toBe(true);
+  expect(traexInputMatches('question\r\n\tsecond', ' \tquestion\n\tsecond')).toBe(true);
+  expect(traexInputMatches('question', '\t  question')).toBe(true);
+  for (const [actual, expected] of [
+    ['question', ' question '],
+    ['prefix question', ' question'],
+    ['question suffix', ' question'],
+    ['question  second', ' question second'],
+    ['question second', ' question\tsecond'],
+    ['questionsecond', ' question second'],
+    ['question', ' question\n'],
+    ['question', ' question\nsecond'],
+    ['question\n', ' question'],
+    ['\tquestion', ' question'],
+    ['', ' \t'],
+    [' ', ' \t'],
+  ]) expect(traexInputMatches(actual, expected), JSON.stringify([actual, expected])).toBe(false);
 });
 
 it('requires a new full user record, ignores history, partial pre-waterline records and prefix collisions', async () => {
@@ -90,6 +111,26 @@ it('binds shared history to native session and second-resolution time; missing t
   ].map(line).join(''));
   await history.flush(); expect(confirmed).toBe(false);
   appendFileSync(historyPath, line({ session_id: 'native-one', ts: Math.floor(Date.now() / 1000), text: 'ok' }));
+  await history.flush(); await pending; expect(confirmed).toBe(true);
+});
+
+it('keeps TraeX leading normalization inside native history session and timestamp constraints', async () => {
+  const historyPath = join(directory, 'traex-leading-history.jsonl'), rolloutPath = join(directory, 'traex-leading-rollout.jsonl');
+  writeFileSync(historyPath, ''); writeFileSync(rolloutPath, '');
+  const history = new CodexInputReceipt(historyPath, () => 'native-traex');
+  const rollout = new JsonlTailer({ resolvePath: () => rolloutPath, mapEntry: () => undefined, inputText: codexInputText });
+  sources.push(history, rollout); await history.flush(); await rollout.flush();
+  let confirmed = false;
+  const pending = history.waitForInput(rollout, ' \tok', new AbortController().signal, traexInputMatches).then(() => { confirmed = true; });
+  const now = Math.floor(Date.now() / 1000);
+  appendFileSync(historyPath, [
+    { session_id: 'sibling', ts: now, text: 'ok' },
+    { session_id: 'native-traex', text: 'ok' },
+    { session_id: 'native-traex', ts: now, text: 'okay' },
+    { session_id: 'native-traex', ts: now, text: '' },
+  ].map(line).join(''));
+  await history.flush(); expect(confirmed).toBe(false);
+  appendFileSync(historyPath, line({ session_id: 'native-traex', ts: now, text: 'ok' }));
   await history.flush(); await pending; expect(confirmed).toBe(true);
 });
 

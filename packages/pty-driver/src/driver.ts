@@ -1202,7 +1202,7 @@ export class PtyCliDriver implements AgentDriver {
       // An unresolved backend write retains its bounded wait. Once it has
       // settled, fresh output plus quiet is bounded by maintenance's own
       // deadline; an earlier raw-idle deadline must not discard that evidence.
-      if (this.terminalWrites > 0 && remaining <= 0) return false;
+      if (remaining <= 0) return false;
       await new Promise<void>(resolve => { const timer = setTimeout(resolve, Math.min(25, Math.max(1, remaining))); timer.unref(); });
     }
   }
@@ -1960,12 +1960,12 @@ export class PtyCliDriver implements AgentDriver {
           throw new PromptNotWrittenError('Another terminal submission owns the input window until its final Enter');
         }
         const outputRevision = this.screenRevision;
+        this.rawWriteBarrier = { outputRevision: Math.max(this.rawWriteBarrier?.outputRevision ?? 0, outputRevision) };
         this.terminalWrites++;
         try {
           const result = await backend.write(data);
           if (this.stopped || this.backend !== backend) throw new DriverDetachedError();
           if (result === false) throw new DriverRecoveryError('Terminal input was not confirmed');
-          this.rawWriteBarrier = { outputRevision };
         } finally { this.terminalWrites--; }
       },
       resize: async (cols, rows) => {
@@ -2892,17 +2892,21 @@ export class PtyCliDriver implements AgentDriver {
   }
 
   private async beginExpandedSubmissionInput(target: SessionBackend & Partial<PtyLike>): Promise<() => Promise<void>> {
+    const snapshot = this.snapshot, generation = this.wiringGeneration;
+    const current = () => this.backend === target && this.snapshot === snapshot && this.wiringGeneration === generation;
     const size = await target.getPaneSize?.();
     if (!size || size.rows >= 200) return async () => {};
     await target.resize(size.cols, 200);
-    this.snapshot?.resize(size.cols, 200);
+    if (current()) snapshot?.resize(size.cols, 200);
     await new Promise<void>(resolve => setTimeout(resolve, 100));
     let restored = false;
     return async () => {
       if (restored) return;
       restored = true;
+      if (!current()) return;
       await target.resize(size.cols, size.rows);
-      this.snapshot?.resize(size.cols, size.rows);
+      if (!current()) return;
+      snapshot?.resize(size.cols, size.rows);
       await new Promise<void>(resolve => setTimeout(resolve, 100));
     };
   }
@@ -2965,7 +2969,7 @@ export class PtyCliDriver implements AgentDriver {
       return operation;
     };
     const proxy: PtyLike = {
-      write: data => guarded(() => target.write(data), owner === 'maintenance' ? data === '\r' ? 'enter' : 'text' : undefined, true, owner === 'turn' && data === '\r' && !claudeAdapters.has(this.adapter.id)),
+      write: data => guarded(() => target.write(data), owner === 'maintenance' ? data === '\r' ? 'enter' : 'text' : undefined, true),
       submitInput: () => guarded(() => target.sendSpecialKeys ? target.sendSpecialKeys!('Enter') : target.write('\r'), owner === 'maintenance' ? 'enter' : undefined, true, owner === 'turn'),
       lastOutputAt: () => { check(); return this.lastOutputAt; },
       processKey: target,
@@ -2980,7 +2984,7 @@ export class PtyCliDriver implements AgentDriver {
       proxy.beginExpandedInput = () => guarded(() => this.beginExpandedSubmissionInput(target));
     }
     if (target.sendText) proxy.sendText = text => guarded(() => target.sendText!(text), owner === 'maintenance' ? 'text' : undefined, true);
-    if (target.sendSpecialKeys) proxy.sendSpecialKeys = (...keys) => guarded(() => target.sendSpecialKeys!(...keys), owner === 'maintenance' ? keys.includes('Enter') ? 'enter' : 'text' : undefined, true, owner === 'turn' && keys.includes('Enter') && !claudeAdapters.has(this.adapter.id));
+    if (target.sendSpecialKeys) proxy.sendSpecialKeys = (...keys) => guarded(() => target.sendSpecialKeys!(...keys), owner === 'maintenance' ? keys.includes('Enter') ? 'enter' : 'text' : undefined, true);
     if (target.pasteText) proxy.pasteText = text => guarded(() => target.pasteText!(text), owner === 'maintenance' ? 'text' : undefined, true);
     // The Claude writer owns business composer checks. Compact keeps its more
     // specific activity, ownership and cleanup guards in this driver.

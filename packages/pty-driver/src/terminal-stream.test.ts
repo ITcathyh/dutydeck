@@ -138,4 +138,56 @@ describe('terminal initial screen', () => {
     } finally { flush.mockRestore(); }
   });
 
+  it('keeps the newest output revision when concurrent raw writes finish out of order', async () => {
+    const { driver, backend } = fixture();
+    await driver.start();
+    let finishA!: () => void, finishB!: () => void;
+    backend.write = (data: string) => new Promise<void>(resolve => {
+      if (data === 'A') finishA = resolve; else finishB = resolve;
+    });
+    const terminal = driver.createTerminalStream();
+    (driver as any).screenRevision = 10;
+    const a = terminal.write('A');
+    (driver as any).screenRevision = 11;
+    const b = terminal.write('B');
+    finishB(); await b;
+    finishA(); await a;
+    expect((driver as any).rawWriteBarrier.outputRevision).toBe(11);
+    terminal.dispose();
+  });
+
+  it.each(['generation', 'replacement'] as const)('ignores an expired expanded-viewport restore after %s changes', async staleBy => {
+    const { driver, backend } = fixture();
+    await driver.start();
+    vi.useFakeTimers();
+    const target = backend as SessionBackend & { getPaneSize(): Promise<{ cols: number; rows: number }> };
+    target.getPaneSize = async () => ({ cols: 80, rows: 24 });
+    target.resize = vi.fn(async () => {});
+    const snapshot = (driver as any).snapshot;
+    const originalResize = vi.spyOn(snapshot, 'resize');
+    try {
+      const expanding = (driver as any).beginExpandedSubmissionInput(target);
+      await vi.advanceTimersByTimeAsync(100);
+      const restore = await expanding;
+      const replacement = { ...target, resize: vi.fn(async () => {}) };
+      const replacementSnapshot = { resize: vi.fn() };
+      (driver as any).wiringGeneration++;
+      if (staleBy === 'replacement') {
+        (driver as any).backend = replacement;
+        (driver as any).snapshot = replacementSnapshot;
+      }
+      await restore();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(target.resize).toHaveBeenCalledTimes(1);
+      expect(originalResize).toHaveBeenCalledTimes(1);
+      expect(replacement.resize).not.toHaveBeenCalled();
+      expect(replacementSnapshot.resize).not.toHaveBeenCalled();
+    } finally {
+      (driver as any).backend = backend;
+      (driver as any).snapshot = snapshot;
+      originalResize.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
 });

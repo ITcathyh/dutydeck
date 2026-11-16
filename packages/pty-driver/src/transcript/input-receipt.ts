@@ -1,8 +1,19 @@
 /** Native user records only: tool results, scaffolding and assistant output
  * cannot acknowledge a terminal submission. The submitted body stays exact
- * apart from line endings; Claude's native paste envelope is removed at receipt. */
+ * apart from line endings, Claude's native paste envelope, and the explicitly
+ * scoped TraeX normalization below. */
 export function normalizeInputText(text: string): string {
   return text.replace(/\r\n?/g, '\n');
+}
+
+/** TraeX 0.213.1 removes only the leading space/tab run from persisted user
+ * input. The exact form remains preferred; the fallback never trims the native
+ * record, accepts an empty remainder, or changes any other whitespace. */
+export function traexInputMatches(text: string, prompt: string): boolean {
+  const actual = normalizeInputText(text), expected = normalizeInputText(prompt);
+  if (actual === expected) return true;
+  const remainder = expected.replace(/^[ \t]+/, '');
+  return remainder.length > 0 && remainder.length !== expected.length && actual === remainder;
 }
 
 function contentText(content: unknown, textTypes = ['text', 'input_text']): string | undefined {

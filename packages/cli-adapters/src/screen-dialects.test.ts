@@ -150,6 +150,23 @@ it('removes only the two native TraeX continuation-indent spaces from an owned d
   expect(isInputReady(screen, 'TraeX', traex.busyPattern, 'first\n  user indented')).toBe(false);
 });
 
+it('preserves semantic first-line and continuation whitespace after native separators', () => {
+  const border = '─'.repeat(120);
+  const screen = [
+    'TraeX', border, '›  first', '   second', border,
+    '  GPT-6-Astra xhigh · /tmp/workspace · Context 100% left',
+    '  ☢ Full Access (shift+tab to cycle) · ← for agents',
+  ].join('\n');
+  // TraeX 0.213.1 renders each input tab as exactly one composer space.
+  expect(isInputReady(screen, 'TraeX', traex.busyPattern, ' first\n\tsecond')).toBe(true);
+  for (const wrong of ['first\n\tsecond', '  first\n\tsecond', ' first\nsecond', ' first\n\tsecond ', ' first\n\tsecond extra']) {
+    expect(isInputReady(screen, 'TraeX', traex.busyPattern, wrong), JSON.stringify(wrong)).toBe(false);
+  }
+  expect(isInputReady(screen.replace('   second', '  second'), 'TraeX', traex.busyPattern, ' first\n\tsecond')).toBe(false);
+  expect(isInputReady(screen.replace('first', 'firs'), 'TraeX', traex.busyPattern, ' first\n\tsecond')).toBe(false);
+  expect(isInputReady(screen.replace('first', 'first middle'), 'TraeX', traex.busyPattern, ' first  middle\n\tsecond')).toBe(false);
+});
+
 it('accepts the 0.213.1 owned composer without a shortcuts segment in its controls row', () => {
   const border = '─'.repeat(120);
   const screen = [
