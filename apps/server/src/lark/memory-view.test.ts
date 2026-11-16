@@ -438,8 +438,9 @@ describe('stableMemoryCommand', () => {
       await mkdir(join(releases, '20261006-abc123', 'dist'), { recursive: true });
       await mkdir(join(releases, '20261001-old999', 'dist'), { recursive: true });
       await symlink(join(releases, '20261006-abc123'), join(releases, 'current'));
-      const command = (release: string) => `'/usr/bin/node' '${releases}/${release}/dist/cli.js'`;
+      const command = (release: string, entry = 'cli.js') => `'/usr/bin/node' '${releases}/${release}/dist/${entry}'`;
       expect(stableMemoryCommand(command('20261006-abc123'))).toBe(`'/usr/bin/node' '${releases}/current/dist/cli.js'`);
+      expect(stableMemoryCommand(command('20261006-abc123', 'internal-agent-cli.js'))).toBe(`'/usr/bin/node' '${releases}/current/dist/internal-agent-cli.js'`);
       expect(stableMemoryCommand(command('20261001-old999'))).toBe(command('20261001-old999'));
       expect(stableMemoryCommand(command('current'))).toBe(command('current'));
       expect(stableMemoryCommand('dutydeck')).toBe('dutydeck');

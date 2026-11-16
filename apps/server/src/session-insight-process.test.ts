@@ -170,6 +170,13 @@ if (mode === 'success') {
     expect(result.files[0].sha256).toBe(validRequest.files[0].sha256);
   });
 
+  it.each(['engineVersion', 'parserVersion', 'metricVersion'] as const)('rejects a tampered analysis result %s', async field => {
+    const mismatched: AnalyzeFilesResult = JSON.parse(JSON.stringify(goldenResult));
+    mismatched[field] = `tampered-${field}`;
+    await setFakeEngineConfig({ mode: 'success', resultJson: JSON.stringify(mismatched) });
+    await expect(runInsightProcess(baseOpts() as any)).rejects.toMatchObject({ code: 'INSIGHT_VERSION_MISMATCH' });
+  });
+
   it('ignores parent PATH, Node options and credentials while keeping private HOME and TMPDIR', async () => {
     const previous = {
       PATH: process.env.PATH,

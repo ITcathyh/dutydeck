@@ -37,19 +37,45 @@ it.each(['off', 'diagnose', 'retire'] as const)('supports %s independently of th
   expect(h.log.warn.mock.calls.filter(([data]) => data.code === 'IDLE_CPU_HIGH')).toHaveLength(action === 'off' ? 0 : 1);
   if (action === 'retire') { expect(h.runtime.getDriver(h.session.id)).toBeUndefined(); expect((await h.runtime.send(h.session.id, 'second')).status).toBe('completed'); }
 });
-it.each(['background', 'ask', 'notIdle', 'unprepared', 'unknownDriver', 'queue', 'unknown', 'permission', 'prepareInput', 'prepareQueue', 'prepareChild', 'finalInput'] as const)('does not retire with %s', async block => {
+it('rechecks task existence at each fence without constructing execution projections', async () => {
+  const h = await fixture('diagnose');
+  const projection = vi.spyOn(h.repos.execution, 'getSessionExecutions');
+  const existence = vi.spyOn(h.repos.execution, 'hasQueuedOrRunningTasks');
+  try {
+    for (let i = 0; i <= 3; i++) await h.sample(i);
+    expect(existence).toHaveBeenCalledTimes(8);
+    expect(projection).not.toHaveBeenCalled();
+  } finally { vi.restoreAllMocks(); }
+});
+it.each(['background', 'ask', 'notIdle', 'unprepared', 'unknownDriver', 'queue', 'running', 'unknown', 'unresolvedAttempt', 'permission', 'sessionQueue', 'prepareInput', 'prepareQueue', 'prepareChild', 'finalInput'] as const)('does not retire with %s', async block => {
   const h = await fixture();
   for (let i = 0; i <= 2; i++) await h.sample(i);
   const driver = h.drivers[0]!;
+  const enqueue = async (prompt: string) => { h.runtime.setQueueHeld(true); await h.runtime.dispatch(h.session.id, prompt); };
   if (block === 'background') h.state.background = true;
   if (block === 'ask') h.state.ask = true;
   if (block === 'notIdle') h.state.idle = false;
   if (block === 'unprepared') h.state.prepared = false;
   if (block === 'unknownDriver') driver.idleCpuProof = undefined;
-  if (block === 'queue') { h.runtime.setQueueHeld(true); await h.runtime.dispatch(h.session.id, 'queued'); }
+  if (block === 'queue') await enqueue('queued');
+  if (block === 'running') {
+    await enqueue('running');
+    const claimed = (h.runtime as any).bound().claimNext({ sessionId: h.session.id, runId: h.session.runId });
+    expect(claimed?.task.status).toBe('running');
+  }
   if (block === 'unknown') vi.spyOn(h.repos.execution, 'getUnresolvedTasks').mockReturnValue([{ id: 'unknown', status: 'reconcile_required' }]);
+  if (block === 'unresolvedAttempt') vi.spyOn(h.repos.execution, 'getUnresolvedTasks').mockReturnValue([{ id: 'terminal', status: 'cancelled' }]);
   if (block === 'permission') vi.spyOn(h.runtime as any, 'permissionsForSession').mockReturnValue([{}]);
-  if (block === 'prepareQueue') driver.prepareForIdleRetirement = async () => { h.runtime.setQueueHeld(true); await h.runtime.dispatch(h.session.id, 'arrived during prepare'); return true; };
+  if (block === 'sessionQueue') {
+    const read = h.repos.sessions.get.bind(h.repos.sessions);
+    let enqueued = false;
+    vi.spyOn(h.repos.sessions, 'get').mockImplementation(async id => {
+      const current = await read(id);
+      if (!enqueued && id === h.session.id) { enqueued = true; await enqueue('arrived after session read'); }
+      return current;
+    });
+  }
+  if (block === 'prepareQueue') driver.prepareForIdleRetirement = async () => { await enqueue('arrived during prepare'); return true; };
   if (block === 'prepareChild') driver.prepareForIdleRetirement = async () => { driver.idleCpuProof = () => undefined; return true; };
   if (block === 'prepareInput') driver.prepareForIdleRetirement = async () => { h.state.input++; return true; };
   if (block === 'finalInput') driver.beginIdleCpuRetirement = () => { h.state.input++; return false; };

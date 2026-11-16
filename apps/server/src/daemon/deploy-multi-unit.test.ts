@@ -21,6 +21,10 @@ it.each([false, true])('首次顺序部署共享 current 的两个 unit：第二
   write(join(source, 'apps/server/package.json'), JSON.stringify({ name: '@byted/dutydeck', version: '1.0.0', type: 'module', dependencies: { 'better-sqlite3': '12.11.1' } }));
   for (const output of BUILD_OUTPUTS) {
     if (output === 'dist/cli.js') continue;
+    if (output === 'dist/internal-agent-cli.js') {
+      write(join(source, 'apps/server', output), "if (process.argv[2] === 'agent' && process.argv.includes('--help')) { console.log('QUICKSTART'); process.exit(0); } process.exit(1);\n");
+      continue;
+    }
     if (output === 'dist/builtin-plugins') mkdirSync(join(source, 'apps/server', output), { recursive: true });
     else write(join(source, 'apps/server', output), output === 'public/index.html' ? '<html/>' : '');
   }

@@ -91,6 +91,7 @@ interface Harness {
   /** fake engine：默认成功；可替换为抛错/挂起。 */
   setRunner(runner: InsightEngineRunner['runInsightProcess']): void;
   setEngine(engine: ResolvedEngine): void;
+  setEngineResolver(resolver: () => Promise<ResolvedEngine>): void;
   /** 等待 service 内队列排空（作业落终态）。 */
   settled(): Promise<void>;
   /** 在 sourceRoot 下建一个真实日志文件，返回 {path, name}。 */
@@ -177,6 +178,7 @@ function makeHarness(options: Pick<SessionInsightServiceOptions, 'getCurrentFing
     execArgv: [],
     versions: VERSIONS
   };
+  let engineResolver: () => Promise<ResolvedEngine> = async () => engine;
   let runnerImpl: InsightEngineRunner['runInsightProcess'] = async ({ request }) => ({
     schemaVersion: 1,
     requestId: request.requestId,
@@ -198,7 +200,7 @@ function makeHarness(options: Pick<SessionInsightServiceOptions, 'getCurrentFing
       getAcceptedTask: id => repos.execution.getAcceptedTask(id),
       readTransaction: work => repos.insight.readTransaction(work)
     },
-    resolveEngine: async () => engine,
+    resolveEngine: () => engineResolver(),
     engineRunner: { runInsightProcess: opts => runnerImpl(opts) },
     ...options
   });
@@ -245,6 +247,7 @@ function makeHarness(options: Pick<SessionInsightServiceOptions, 'getCurrentFing
     setResolverResult: impl => { resolverImpl = impl; },
     setRunner: r => { runnerImpl = r; },
     setEngine: e => { engine = e; },
+    setEngineResolver: resolver => { engineResolver = resolver; },
     async settled(sessionId = 's1') {
       // 真实墙钟 + 小间隔轮询该 session 终态，高并发测试套下避免固定 tick 空转过早超时。
       const deadline = Date.now() + 5000;
@@ -865,6 +868,36 @@ describe('SessionInsightService lifecycle', () => {
     const tmpBase = join(h.dataDir, 'insight-tmp');
     const remaining = (await import('node:fs/promises')).readdir(tmpBase).catch(() => [] as string[]);
     expect((await remaining).length).toBe(0);
+  });
+
+  it('waits for a cold locator on close, then cancels at the checkpoint without analyzing', async () => {
+    const h = makeHarness();
+    h.createSession('s1');
+    const p = h.writeLog('cold-locator.jsonl', '{"line":1}');
+    h.setResolverResult(() => ({
+      sources: [h._matchedSource('k1', p, 'primary')], primarySourceKey: 'k1'
+    }));
+    let locatorStarted!: () => void, releaseLocator!: () => void;
+    const started = new Promise<void>(resolve => { locatorStarted = resolve; });
+    const gate = new Promise<void>(resolve => { releaseLocator = resolve; });
+    h.setEngineResolver(async () => {
+      locatorStarted();
+      await gate;
+      return { status: 'available', entrypoint: join(h.dataDir, 'cold-engine'), execArgv: [], versions: VERSIONS };
+    });
+    let runnerCalled = false;
+    h.setRunner(async () => { runnerCalled = true; throw new Error('cancelled locator must not start analysis'); });
+
+    await h.service.refresh('s1');
+    await started;
+    let closed = false;
+    const closing = h.service.close().then(() => { closed = true; });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(closed).toBe(false);
+    releaseLocator();
+    await closing;
+    expect(runnerCalled).toBe(false);
+    expect(h.repos.insight.getState('s1').state).toBe('cancelled');
   });
 
   it('close before initialize is safe and idempotent', async () => {

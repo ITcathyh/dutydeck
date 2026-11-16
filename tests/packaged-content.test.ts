@@ -64,7 +64,9 @@ it('packs every deferred chunk and resource without acpx or drizzle as productio
     for (const name of ['acpx', 'drizzle-orm']) expect(await stat(join(pkg, 'node_modules', name)).catch(() => undefined)).toBeUndefined();
 
     const cli = join(pkg, 'dist/cli.js');
+    const internalAgentCli = join(pkg, 'dist/internal-agent-cli.js');
     expect(missingRelativeImports(cli)).toEqual([]);
+    expect(missingRelativeImports(internalAgentCli)).toEqual([]);
     const source = await readFile(cli, 'utf8');
     expect(source).toContain('"TaskCliError")');
     const staticChunk = /\bfrom\s*['"](\.\/chunk-[^'"]+)['"]/.exec(source)?.[1];
@@ -106,6 +108,9 @@ it('packs every deferred chunk and resource without acpx or drizzle as productio
     const env = { PATH: process.env.PATH, HOME: directory };
     const version = await execFileAsync(process.execPath, [cli, '--version'], { cwd: directory, env });
     expect(version.stdout.trim()).toBe(metadata.version);
+    const agentHelp = await execFileAsync(process.execPath, [internalAgentCli, 'agent', '--help'], { cwd: directory, env });
+    expect(agentHelp.stdout.startsWith('QUICKSTART')).toBe(true);
+    expect(agentHelp.stderr).toBe('');
 
     const acpChunk = [...sources].find(([, code]) => code.includes('"AcpxAdapter")'))?.[0];
     const storageChunk = [...sources].find(([, code]) => code.includes('"createRepositories")'))?.[0];

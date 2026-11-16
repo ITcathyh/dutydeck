@@ -151,6 +151,10 @@ function buildCheckout(root: string) {
   link('../../../node_modules/.pnpm/dev-only@1.0.0/node_modules/dev-only', join(server, 'node_modules', 'dev-only'));
   for (const output of BUILD_OUTPUTS) {
     if (output === 'dist/cli.js') continue;
+    if (output === 'dist/internal-agent-cli.js') {
+      write(join(server, output), "if (process.argv[2] === 'agent' && process.argv.includes('--help')) { console.log('QUICKSTART'); process.exit(0); } process.exit(1);\n");
+      continue;
+    }
     if (output === 'dist/builtin-plugins') mkdirSync(join(server, output), { recursive: true });
     else write(join(server, output), output === 'public/index.html' ? '<html></html>' : '');
   }

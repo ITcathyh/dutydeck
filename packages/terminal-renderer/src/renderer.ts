@@ -89,7 +89,7 @@ export class TerminalSnapshot {
   private readonly serializer: SerializeAddon;
   private sgrMouse = false;
   private cursorVisible = true;
-  /** Bumped whenever the buffer may have changed; text reads are cached per revision. */
+  /** Bumped whenever the buffer may have changed; snapshots and text reads are cached per revision. */
   private revision = 0;
   private cacheRevision = -1;
   private readonly textCache = new Map<string, string>();
@@ -102,9 +102,9 @@ export class TerminalSnapshot {
     this.terminal = new Terminal({ cols, rows, scrollback: 5000, allowProposedApi: true });
     // The addon uses the shared buffer API; its typings require browser-only members.
     this.terminal.loadAddon(this.serializer as unknown as ITerminalAddon);
-    // Parsing and resizing are the only buffer mutations. A write's own
-    // callback runs right after its chunk is parsed, before onWriteParsed.
-    this.terminal.onWriteParsed(this.invalidate);
+    // Write callbacks invalidate at their own parse boundary. Do not invalidate
+    // from onWriteParsed: capture's empty barrier fires it after the callback
+    // and would discard the just-filled cache without changing the screen.
     this.terminal.onResize(this.invalidate);
     // SerializeAddon restores tracking, but omits the SGR mouse encoding.
     for (const final of ['h', 'l']) {
@@ -149,7 +149,7 @@ export class TerminalSnapshot {
   /** Capture at a parsed-write boundary, before later queued writes are parsed. */
   capture(callback: (screen: TerminalScreen) => void): void {
     this.terminal.write('', () => callback({
-      data: this.serializer.serialize() + (this.sgrMouse ? '\x1b[?1006h' : '')
+      data: this.cached('serialize', () => this.serializer.serialize()) + (this.sgrMouse ? '\x1b[?1006h' : '')
         + (this.cursorVisible ? '' : '\x1b[?25l'),
       cols: this.terminal.cols, rows: this.terminal.rows
     }));
@@ -219,6 +219,7 @@ export class TerminalSnapshot {
   get xterm(): HeadlessTerminal { return this.terminal; }
 
   dispose(): void {
+    this.textCache.clear();
     this.terminal.dispose();
   }
 }

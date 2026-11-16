@@ -109,9 +109,12 @@ if (!existsSync(resolve(webDist, 'index.html'))) throw new Error('Web UI is not 
 rmSync(publicDir, { recursive: true, force: true });
 cpSync(webDist, publicDir, { recursive: true });
 const mainResult = await build({
-  entryPoints: [resolve(serverRoot, 'src/cli.ts')],
+  entryPoints: {
+    cli: resolve(serverRoot, 'src/cli.ts'),
+    'internal-agent-cli': resolve(serverRoot, 'src/internal-agent-cli.ts')
+  },
   outdir: resolve(serverRoot, 'dist'),
-  entryNames: 'cli',
+  entryNames: '[name]',
   chunkNames: 'chunk-[hash]',
   splitting: true,
   absWorkingDir: workspaceRoot,
@@ -126,6 +129,7 @@ const mainResult = await build({
   plugins: [...workspacePlugins, larkRequirePlugin, lazyAcpSdkPlugin, externalPackages]
 });
 const cliPath = resolve(serverRoot, 'dist/cli.js');
+const internalAgentCliPath = resolve(serverRoot, 'dist/internal-agent-cli.js');
 const outputs = new Map(Object.entries(mainResult.metafile.outputs).map(([path, output]) => [resolve(workspaceRoot, path), output]));
 const startupOnly = /(?:^|[\\/])(?:fastify|pino|ws|@xterm[\\/](?:headless|addon-serialize)|mdast-util-from-markdown)(?:[\\/]|$)/;
 const visited = new Set();
@@ -146,6 +150,7 @@ const checkStartupGraph = path => {
   }
 };
 checkStartupGraph(cliPath);
+checkStartupGraph(internalAgentCliPath);
 const mainBundles = [...outputs.keys()].filter(path => path.endsWith('.js'));
 for (const bundle of mainBundles) {
   if ((await readFile(bundle, 'utf8')).includes(`from "${acpSdk}"`)) throw new Error(`${bundle} still imports ${acpSdk} at startup`);
@@ -187,8 +192,8 @@ await build({
 });
 // Each process keeps its bundle's source in memory; ASCII-only source is stored at one byte per character.
 for (const bundle of [...mainBundles, ...['dist/assets/plugin-validation/cli.js', 'dist/assets/session-insight/cli.js', 'dist/program-status-relay.js'].map(path => resolve(serverRoot, path))]) asciiBundle(bundle);
-const missingChunks = missingRelativeImports(cliPath);
-if (missingChunks.length) throw new Error(`dist/cli.js has missing relative imports:\n${missingChunks.join('\n')}`);
+const missingChunks = [cliPath, internalAgentCliPath].flatMap(entry => missingRelativeImports(entry));
+if (missingChunks.length) throw new Error(`CLI entry has missing relative imports:\n${missingChunks.join('\n')}`);
 const agentsDir = resolve(serverRoot, 'dist/agents');
 mkdirSync(agentsDir, { recursive: true });
 cpSync(resolve(workspaceRoot, 'packages/acp-client/agents/claude-acp.mjs'), resolve(agentsDir, 'claude-acp.mjs'));

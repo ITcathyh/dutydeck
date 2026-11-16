@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { randomUUID } from 'node:crypto';
 import { runTaskCli, taskError, TaskCliError } from './task-cli.js';
 import { runLarkDisposition } from './lark-disposition-cli.js';
 import { createBackup, inspectBackup, restoreBackup } from './backup.js';
@@ -12,7 +11,6 @@ import { SessionNamesCliError, runSessionNamesCli } from './session-names-cli.js
 import { runCollaboration } from './collaboration-cli.js';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { spawn } from 'node:child_process';
-import { loadEnvFile } from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { createCliProgram, environmentFromCli, type CliOptions } from './cli-program.js';
 import { runLarkSend, runLarkUpdate } from './lark/cli.js';
@@ -23,9 +21,7 @@ import { runWorkCommand } from './work-item-cli.js';
 import { AgentCliError, agentCliErrorBody, runAgentCli } from './agent-cli.js';
 import { AgentGroupToolCliError, runAgentCommand, runGroupBots, runGroupHandoff, runGroupMembers, runGroupMessage, runGroupMessages, runGroupPeers, runGroupReplyAgent, runGroupSelf, runGroupSend, runGroupSendFile, runGroupTeamSearch, runGroupWait, runHistoryList, runHistoryShow } from './lark/agent-tools-cli.js';
 import { runMemoryAdd, runMemoryList, runMemoryRemove, runMemorySearch, runMemoryShow } from './lark/memory-cli.js';
-import { acknowledgeDeferredAsk, askOutput, runSessionAsk, runSessionAskResult, runSessionAskWait, runSessionSend, runSessionReport } from './relay-cli.js';
-import { readNativeAskPayload, runNativeAskHook } from './native-ask-hook.js';
-import { runPermissionHook } from './permission-hook.js';
+import { createSessionRelayCliHandlers } from './session-relay-cli.js';
 import { RelayCliError } from '@dutydeck/relay';
 import { daemonRestart, daemonStart, daemonStatus, daemonStop, resolveCliDatabase, systemdRestartTarget, waitForRunningTasksDrain, type DaemonCommandResult, type DaemonStatusInfo } from './daemon/command.js';
 import { SUPERVISOR_ENV, readDaemonLog, readDaemonStatus, readJournalctlLog, resolveDaemonDir } from './daemon/daemon.js';
@@ -56,26 +52,14 @@ import { PromptAbortedError, PromptUnavailableError } from './setup/prompts.js';
 import { InvalidWorkingDirectoryError } from './setup/detect.js';
 import { AutostartError, autostartDisable, autostartEnable, autostartStatus } from './autostart/autostart.js';
 import { createCliUi } from './cli-ui.js';
-import { adoptLegacyEnv, migrateLegacyBrandDirs } from './legacy-brand.js';
+import { prepareCliEnvironment } from './cli-environment.js';
 import { runPluginCli } from './plugins/cli.js';
 
 let openCliInvocation = false;
 
 const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { name: string; version: string };
 
-// 文件不存在是正常的（没有 .env）；存在却读不了/解析失败不能静默，否则配置悄悄失效。
-const isolatedBackupCommand = process.argv[2] === 'backup';
-try { if (!isolatedBackupCommand) loadEnvFile(); } catch (error) {
-  if ((error as NodeJS.ErrnoException).code !== 'ENOENT') process.stderr.write(`警告：无法读取 ${process.cwd()}/.env，其中的配置没有生效：${error instanceof Error ? error.message : String(error)}\n`);
-}
-
-// 先把旧状态目录就位，再接管环境变量——否则无从判断变量里改写后的路径是否真的存在。
-const legacyState = isolatedBackupCommand ? { migrated: [], skipped: [] } : migrateLegacyBrandDirs();
-for (const dir of legacyState.migrated) process.stderr.write(`已接管 dockmux 时期的状态目录：${dir}\n`);
-for (const dir of legacyState.skipped) {
-  process.stderr.write(`未接管 ${dir}：同级已有 .dutydeck，两份状态都留着，请自行确认用哪一份。\n`);
-}
-if (!isolatedBackupCommand) adoptLegacyEnv();
+prepareCliEnvironment();
 
 async function serve(options: CliOptions, onReady?: () => void) {
   // 异常退出记录只写到本次 serve 的数据库目录（与 startLocalServer 同一取法），不走 daemon 目录的 last-daemon-dir 回退。
@@ -120,7 +104,7 @@ async function serve(options: CliOptions, onReady?: () => void) {
   const { dutydeckGroupToolsCommand } = await import('./lark/agent-tools.js');
   let service: Awaited<ReturnType<typeof startLocalServer>>;
   try {
-    service = await startLocalServer({ env: environmentFromCli(options), groupToolsCommand: dutydeckGroupToolsCommand(fileURLToPath(import.meta.url)) });
+    service = await startLocalServer({ env: environmentFromCli(options), groupToolsCommand: dutydeckGroupToolsCommand(fileURLToPath(new URL(import.meta.url.endsWith('.ts') ? './internal-agent-cli.ts' : './internal-agent-cli.js', import.meta.url))) });
   } catch (error) {
     abnormal('startup', 1, error);
     throw error;
@@ -558,40 +542,7 @@ async function main() {
     scheduleRequest: async input => { output(await runScheduleRequest(input)); },
     pullRequest: async (action, argument, input) => { output(await runPullRequestCli(action, argument, input)); },
     sessionHerdr: async args => { await runHerdrCli(args); },
-    sessionReport: async options => { output(await runSessionReport(options)); },
-    sessionSend: async text => { output(await runSessionSend(text)); },
-    sessionNativeAsk: async () => {
-      const result = await runNativeAskHook(await readNativeAskPayload(process.stdin));
-      if (result) {
-        await new Promise<void>((resolve, reject) => process.stdout.write(`${result}\n`, error => error ? reject(error) : resolve()));
-        const deferred = /^deferred:([a-zA-Z0-9_-]+) /.exec(JSON.parse(result).stopReason ?? '');
-        if (deferred) await acknowledgeDeferredAsk(deferred[1]!, {}, false);
-      }
-    },
-    sessionPermissionHook: async () => {
-      // 读不懂 stdin 也要交回明确裁决：hook 只挂在 PermissionRequest 上，当成无法识别的请求拒绝。
-      const result = await runPermissionHook(await readNativeAskPayload(process.stdin).catch(() => ({ hook_event_name: 'PermissionRequest' })));
-      if (result) process.stdout.write(`${result}\n`);
-    },
-    sessionAsk: async (question, options) => {
-      // ask 有自己的 stdout/退出码契约（答案裸文本走 stdout，提示走 stderr），
-      // 不能套用通用的 output()：调用方要能 `answer=$(dutydeck session ask ...)`。
-      const requestId = options.requestId ?? randomUUID();
-      process.stderr.write(`requestId: ${requestId}\n`);
-      const result = await runSessionAsk(question, { ...options, requestId });
-      const rendered = askOutput(result, options.json === true);
-      if (rendered.stdout) await new Promise<void>((resolve, reject) => process.stdout.write(rendered.stdout, error => error ? reject(error) : resolve()));
-      if (rendered.stderr) await new Promise<void>((resolve, reject) => process.stderr.write(rendered.stderr, error => error ? reject(error) : resolve()));
-      if (result.status === 'deferred' && result.askId) await acknowledgeDeferredAsk(result.askId);
-      process.exitCode = rendered.exitCode;
-    },
-    sessionAskResult: async requestId => { output(await runSessionAskResult(requestId)); },
-    sessionAskWait: async (requestId, options) => {
-      const rendered = askOutput(await runSessionAskWait(requestId), options.json === true);
-      if (rendered.stdout) process.stdout.write(rendered.stdout);
-      if (rendered.stderr) process.stderr.write(rendered.stderr);
-      process.exitCode = rendered.exitCode;
-    },
+    ...createSessionRelayCliHandlers(),
     databaseExecutionStatus: async options => { output(await runDatabaseExecutionStatus(options)); },
     databaseUpgradeExecution: async options => { output(await runDatabaseUpgradeExecution(options)); },
     databaseRetireLegacy: async options => { output(await runDatabaseRetireLegacy(options)); },
