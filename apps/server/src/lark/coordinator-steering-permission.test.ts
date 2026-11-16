@@ -3,7 +3,7 @@ import type { AgentEvent } from '@dutydeck/shared';
 import { LarkCoordinatorDispatch } from './coordinator-dispatch.js';
 
 const at = '2026-11-16T00:00:00.000Z';
-const permission = (id: string, status: string): AgentEvent => ({ type: 'permission_request', data: { id, status }, timestamp: at } as AgentEvent);
+const permission = (id: string, status: string, attemptId = 'attempt'): AgentEvent => ({ type: 'permission_request', attemptId, data: { id, status }, timestamp: at } as AgentEvent);
 const make = (runtime: Record<string, unknown>) => {
   const coordinator = Object.create(LarkCoordinatorDispatch.prototype) as any;
   coordinator.runtime = runtime;
@@ -32,6 +32,41 @@ it('实际 target 存在但缺少 pending 诊断能力时返回 unknown，且不
   expect(status).toBe('unknown');
   expect(getLatestPermissionRequest).not.toHaveBeenCalled();
   expect(getEvents).not.toHaveBeenCalled();
+});
+
+it.each(['pending', 'approved'] as const)('索引诊断只有同 task B attempt 的 %s 证据时不归给 A，返回 unknown', async statusValue => {
+  const status = await make({
+    getPendingPermissions: () => [{ id: 'permission-1', status: 'pending' }],
+    getLatestPermissionRequest: async () => ({ ...permission('permission-1', statusValue, 'attempt-B'), taskId: 'target' })
+  }).steeringPermissionStatus('ses', { taskId: 'target', attemptId: 'attempt-A' });
+  expect(status).toBe('unknown');
+});
+
+it('fallback 只有同 task B attempt 的 pending 且没有 A 的精确证据时返回 unknown', async () => {
+  const events = [
+    { type: 'text', data: { role: 'user', taskId: 'target' }, timestamp: at } as AgentEvent,
+    permission('permission-1', 'pending', 'attempt-B'),
+    { type: 'task', data: { task: { id: 'target', status: 'completed' } }, timestamp: at } as AgentEvent
+  ];
+  const status = await make({
+    getPendingPermissions: () => [{ id: 'permission-1', status: 'pending' }],
+    getEvents: async () => events
+  }).steeringPermissionStatus('ses', { taskId: 'target', attemptId: 'attempt-A' });
+  expect(status).toBe('unknown');
+});
+
+it('fallback 有 A 已解决的精确证据时，后续 B attempt pending 不影响 confirmed-none', async () => {
+  const events = [
+    { type: 'text', data: { role: 'user', taskId: 'target' }, timestamp: at } as AgentEvent,
+    permission('permission-1', 'approved', 'attempt-A'),
+    permission('permission-1', 'pending', 'attempt-B'),
+    { type: 'task', data: { task: { id: 'target', status: 'completed' } }, timestamp: at } as AgentEvent
+  ];
+  const status = await make({
+    getPendingPermissions: () => [{ id: 'permission-1', status: 'pending' }],
+    getEvents: async () => events
+  }).steeringPermissionStatus('ses', { taskId: 'target', attemptId: 'attempt-A' });
+  expect(status).toBe('confirmed-none');
 });
 
 it('兼容 fallback 单次遍历保留最新审批事件和任务边界，不做逐 pending 全量过滤', async () => {
@@ -76,7 +111,7 @@ it.each(['throws', 'malformed'] as const)('fallback 历史为 %s 时返回 unkno
 
 it('只有旧 runtime 缺 target 时才核验并复用同一个 running，换轮或诊断失败均为 unknown', async () => {
   const fallback = { id: 'old', sessionId: 'ses', prompt: 'old', status: 'running', currentAttemptId: 'attempt-old', createdAt: at, updatedAt: at };
-  const getLatestPermissionRequest = vi.fn(async () => permission('permission-1', 'pending'));
+  const getLatestPermissionRequest = vi.fn(async () => permission('permission-1', 'pending', 'attempt-old'));
   const runtime = {
     getTasks: vi.fn(async () => [fallback]),
     getPendingPermissions: () => [{ id: 'permission-1', status: 'pending' }],

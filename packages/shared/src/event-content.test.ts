@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { eventContentLimits, eventContentText, eventHasContent, extractEventArtifactReferences, normalizeEventContent } from './event-content.js';
+import { appendEventContent, eventContentLimits, eventContentText, eventHasContent, extractEventArtifactReferences, normalizeEventContent } from './event-content.js';
 
 describe('bounded event content and evidence references', () => {
   it('preserves ACP text, images, embedded resources and links, including tool wrappers', () => {
@@ -28,6 +28,12 @@ describe('bounded event content and evidence references', () => {
     const excess = normalizeEventContent([...Array.from({ length: 1000 }, () => image), { type: 'text', text }]);
     expect(excess.at(-1)).toEqual({ type: 'text', text });
     expect(excess.filter(part => part.type !== 'text').length).toBeLessThanOrEqual(eventContentLimits.parts);
+  });
+  it('treats non-array persisted parts as no structured content without inventing parts', () => {
+    const text = { type: 'text' as const, text: '合法正文' };
+    expect(appendEventContent({ unexpected: true } as any, [text])).toEqual([text]);
+    expect(appendEventContent([text], { unexpected: true } as any)).toEqual([text]);
+    expect(appendEventContent({ unexpected: true } as any, { alsoUnexpected: true } as any)).toEqual([]);
   });
   it('only attributes successful structured tool output or explicit assistant attachments to trusted event identities', () => {
     const event = { id: 'event-1', taskId: 'task-1', attemptId: 'attempt-1', sequence: 10, type: 'tool_result', data: { taskId: 'forged', status: 'completed', parts: [{ type: 'resource', resource: { uri: 'file:///work/report.html', text: 'SECRET_BODY', blob: 'SECRET_BYTES' } }] } };

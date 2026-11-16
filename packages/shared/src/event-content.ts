@@ -69,8 +69,8 @@ export function normalizeEventContent(value: unknown): EventContentPart[] {
 export function appendEventContent(previous: readonly EventContentPart[], current: readonly EventContentPart[]): EventContentPart[] {
   // These are accepted event parts. The single-event persistence budget must not
   // truncate an accumulated answer or a legacy data.text message.
-  const result = [...previous];
-  for (const part of current) {
+  const result = Array.isArray(previous) ? [...previous] : [];
+  for (const part of Array.isArray(current) ? current : []) {
     const last = result.at(-1);
     if (part.type === 'text' && last?.type === 'text') result[result.length - 1] = { type: 'text', text: last.text + part.text };
     else result.push(part);
