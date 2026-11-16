@@ -1,5 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { EventEmitter } from 'node:events';
+import type { ChildProcess } from 'node:child_process';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -63,6 +65,30 @@ async function stopAndRemove(adapter: AcpxAdapter, cwd: string, owned: ProcessId
     for (const identity of owned) killOwnedGroup(identity);
     await rm(cwd, { recursive: true, force: true });
   }
+}
+
+function failedTurn(error: Error, gate?: Promise<void>) {
+  return {
+    result: Promise.resolve({ status: 'failed', error: { message: error.message } }),
+    events: { async *[Symbol.asyncIterator]() { if (gate) await gate; throw error; } },
+    cancel: vi.fn(async () => undefined),
+  };
+}
+
+async function injectCleanupUnknown(adapter: AcpxAdapter, cwd: string) {
+  const identity = currentIdentity(process.pid);
+  expect(identity).toBeDefined();
+  const reports = join(cwd, '.dutydeck', 'launchers');
+  await mkdir(reports, { recursive: true });
+  await writeFile(join(reports, `${identity!.pid}.${identity!.start}`), 'dutydeck_cleanup_unknown {"sourcesClosed":true,"destinationFlushed":true,"groupExited":false}\n');
+  const child = new EventEmitter() as ChildProcess;
+  Object.assign(child, { pid: process.pid, spawnargs: (adapter as any).launch.command, exitCode: 120, signalCode: null });
+  (adapter as any).observeProcess({ phase: 'spawned', kind: 'agent', child });
+}
+
+function discardInjectedTrees(adapter: AcpxAdapter) {
+  for (const tree of (adapter as any).unconfirmedTrees) tree.discardReport();
+  (adapter as any).unconfirmedTrees.clear();
 }
 
 it.skipIf(process.platform !== 'linux')('delivers the complete ACP tail after a 6.5 second destination pause and preserves exit 7', async () => {
@@ -150,6 +176,50 @@ it.skipIf(process.platform !== 'linux')('retains cleanup-unknown reports for rea
     throw error;
   }
 }, 30_000);
+
+it.skipIf(process.platform !== 'linux')('binds cleanup-unknown to its active turn and never to later turns', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'dd-acpx-cleanup-turn-ownership-'));
+  const sessionKey = 'launcher-cleanup-turn-ownership-persistent';
+  const events: any[] = [];
+  const adapter = new AcpxAdapter(agentConfig(cwd, 'turn-ownership'), { sessionKey, onEvent: event => events.push(event) });
+  const runtime = (adapter as any).runtime;
+  vi.spyOn(runtime, 'ensureSession').mockResolvedValue({ sessionKey });
+  vi.spyOn(runtime, 'close').mockResolvedValue(undefined);
+  vi.spyOn(runtime, 'getStatus').mockResolvedValue(undefined);
+  let releaseA!: () => void;
+  const gateA = new Promise<void>(resolve => { releaseA = resolve; });
+  const turnA = failedTurn(new Error('A transport failed'), gateA);
+  const realBError = new Error('B supplier rejected the request');
+  const turnB = failedTurn(realBError);
+  const turnC = {
+    result: Promise.resolve({ status: 'completed', stopReason: 'end_turn' }),
+    events: { async *[Symbol.asyncIterator]() {} },
+    cancel: vi.fn(async () => undefined),
+  };
+  vi.spyOn(runtime, 'startTurn').mockReturnValueOnce(turnA).mockReturnValueOnce(turnB).mockReturnValueOnce(turnC);
+  try {
+    await adapter.start();
+    const sendingA = adapter.send('A');
+    void sendingA.catch(() => {});
+    await expect.poll(() => (adapter as any).turn).toBe(turnA);
+    await injectCleanupUnknown(adapter, cwd);
+    releaseA();
+    await expect(sendingA).rejects.toMatchObject({ code: ACP_LAUNCHER_CLEANUP_UNKNOWN });
+
+    const retainedAfterA = (adapter as any).unconfirmedTrees.size;
+    await injectCleanupUnknown(adapter, cwd);
+    expect((adapter as any).turn).toBeUndefined();
+    expect((adapter as any).unconfirmedTrees.size).toBe(retainedAfterA + 1);
+    await expect(adapter.send('B')).rejects.toBe(realBError);
+    await expect(adapter.send('C')).resolves.toBeUndefined();
+    expect(events.filter(event => event.data?.code === ACP_LAUNCHER_CLEANUP_UNKNOWN)).toHaveLength(2);
+    expect(events.filter(event => event.type === 'completed')).toHaveLength(1);
+  } finally {
+    releaseA();
+    discardInjectedTrees(adapter);
+    await stopAndRemove(adapter, cwd);
+  }
+}, 20_000);
 
 it.skipIf(process.platform !== 'linux').each([1, 120])('does not confuse an ordinary agent exit %s with cleanup-unknown', async exitCode => {
   const cwd = await mkdtemp(join(tmpdir(), `dd-acpx-normal-exit-${exitCode}-`));

@@ -417,7 +417,7 @@ export class AcpxAdapter implements AgentDriver {
   private readonly agentChildren = new Map<ChildProcess, AgentProcessTree>();
   /** Trees of launchers killed by a signal or reporting unproven cleanup; reports stay until the tree exits. */
   private readonly unconfirmedTrees = new Set<AgentProcessTree>();
-  private launcherCleanupError?: AcpxLauncherCleanupUnknownError;
+  private launcherCleanupError?: { turn: AcpRuntimeTurn; failure: AcpxLauncherCleanupUnknownError };
   private idleWatch?: { refresh(): void; clear(): void };
   private readonly cpu = new ProcessTreeCpu();
   private stopResourcesSettled = false;
@@ -602,7 +602,7 @@ export class AcpxAdapter implements AgentDriver {
       child.off('exit', exited); child.off('error', failed);
       if (cleanupUnknown) {
         const failure = new AcpxLauncherCleanupUnknownError();
-        this.launcherCleanupError ??= failure;
+        if (this.turn) this.launcherCleanupError ??= { turn: this.turn, failure };
         if (!this.stopped) {
           try { this.options.onEvent({ type: 'error', data: { message: failure.message, code: failure.code } }); }
           catch { /* The thrown request error remains machine-readable. */ }
@@ -989,13 +989,10 @@ export class AcpxAdapter implements AgentDriver {
             this.options.onEvent({ type: 'completed', data: { stopReason: timedOut ? 'idle_timeout' : outcome.stopReason ?? outcome.status } });
           }
         } catch (error) {
-          if (this.launcherCleanupError) {
-            const failure = this.launcherCleanupError;
-            this.launcherCleanupError = undefined;
-            throw failure;
-          }
+          if (this.launcherCleanupError?.turn === turn) throw this.launcherCleanupError.failure;
           throw error;
         } finally {
+          if (this.launcherCleanupError?.turn === turn) this.launcherCleanupError = undefined;
           finished = true;
           for (const resolve of this.pendingPermissions.values()) resolve({ outcome: 'reject_once' });
           this.pendingPermissions.clear();
