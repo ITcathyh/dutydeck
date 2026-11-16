@@ -66,6 +66,19 @@ it.each([false, true])('rejects foreign, assistant, model-injected and empty inp
   await h.source.flush(); await receipt; expect(h.source.hasTurnTerminal()).toBe(true);
 });
 
+it('accepts only TraeX-native removal of leading space and tab at the receipt boundary', async () => {
+  const h = await fixture(false);
+  let confirmed = false;
+  const pending = h.source.waitForInput(' \tquestion\n\tsecond line', new AbortController().signal).then(() => { confirmed = true; });
+  const input = (text: string) => mutation({ type: 'UserMessage', content: [{ type: 'Text', text }] });
+  for (const invalid of ['question\nsecond line', 'question  second line', 'prefix question\n\tsecond line', 'question\n\tsecond line suffix', 'question\tsecond line', '']) {
+    appendFileSync(h.path, line(input(invalid))); await h.source.flush();
+  }
+  expect(confirmed).toBe(false);
+  appendFileSync(h.path, line(input('question\r\n\tsecond line'))); await h.source.flush();
+  await pending; expect(confirmed).toBe(true);
+});
+
 it('keeps Codex input recognition restricted to its own text block dialect', () => {
   for (const type of ['Text', 'output_text']) {
     expect(codexInputText({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type, text: 'question' }] } })).toBeUndefined();

@@ -394,8 +394,10 @@ export function cleanTmuxSubmissionCapture(partialAnsi: string, fullCapture: str
   const fullRows = rows(fullCapture);
   const cursorRow = partialRows.length - 1;
   if (cursorRow < 0 || cursorRow >= fullRows.length) return null;
-  const cursor = /\x1b\[7m (?:\x1b\[0m|$)/.exec(partialRows[cursorRow]!);
-  if (!cursor) return requireCursor ? null : fullCapture;
+  const cursor = /\x1b\[([0-9;]*)m (?:\x1b\[([0-9;]*)m|$)/.exec(partialRows[cursorRow]!);
+  const sgrIncludes = (parameters: string | undefined, code: number) => parameters?.split(';').includes(String(code)) ?? false;
+  if (!cursor || !sgrIncludes(cursor[1], 7)
+    || cursor[2] !== undefined && !sgrIncludes(cursor[2], 0) && !sgrIncludes(cursor[2], 27)) return requireCursor ? null : fullCapture;
   const beforeCursor = stripVTControlCharacters(partialRows[cursorRow]!.slice(0, cursor.index));
   const afterCursor = stripVTControlCharacters(partialRows[cursorRow]!.slice(cursor.index + cursor[0].length));
   if (!/^ *$/.test(afterCursor)) return null;

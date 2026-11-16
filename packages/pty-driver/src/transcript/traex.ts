@@ -8,7 +8,7 @@ import { resolveNewestRollout } from './codex.js';
 import { CodexInputReceipt } from './codex-input-receipt.js';
 import { CodexToolProjection } from './codex-tools.js';
 import { NativeTurn } from './native-turn.js';
-import { traexInputText } from './input-receipt.js';
+import { traexInputMatches, traexInputText } from './input-receipt.js';
 import { nextTraexSegment, traexSegments } from './traex-segments.js';
 import { mapTraexRecord, traexEntries, TraexMessageProjection } from './traex-records.js';
 
@@ -100,6 +100,6 @@ export class TraexTranscriptTailer implements TranscriptEventSource {
   waitForInput(prompt: string, signal: AbortSignal): Promise<void> {
     this.locator?.wake();
     this.turn.arm(signal);
-    return this.inputReceipt ? this.inputReceipt.waitForInput(this.tailer, prompt, signal) : this.tailer.waitForInput(prompt, signal);
+    return this.inputReceipt ? this.inputReceipt.waitForInput(this.tailer, prompt, signal, traexInputMatches) : this.tailer.waitForInput(prompt, signal, traexInputMatches);
   }
 }

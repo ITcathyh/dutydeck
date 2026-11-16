@@ -478,7 +478,7 @@ describe('PTY Claude guard version compatibility', () => {
             const groups = value.hooks.PreToolUse;
             const secret = groups.findIndex((group: { hooks: { command: string }[] }) => group.hooks[0]!.command.includes('secret-guard.mjs'));
             if (options.secretGuardDefect === 'hook') groups.splice(secret, 1);
-            if (options.secretGuardDefect === 'marker') groups[secret].hooks[0].command = groups[secret].hooks[0].command.replace('secret-guard.mjs', 'other-guard.mjs');
+            if (options.secretGuardDefect === 'marker') groups[secret].hooks[0].command = groups[secret].hooks[0].command.replaceAll('secret-guard.mjs', 'other-guard.mjs');
             if (options.secretGuardDefect === 'matcher') groups[secret].matcher = '^Bash$';
             if (options.secretGuardDefect === 'type') groups[secret].hooks[0].type = 'http';
           }

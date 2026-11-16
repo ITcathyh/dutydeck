@@ -37,6 +37,19 @@ describe('tmux submission cursor capture', () => {
       .toBe('❯ draft\n');
   });
 
+  it.each([
+    ['1;7', '27'],
+    ['0;7', '0'],
+    ['1;0;7', '0;27'],
+  ])('accepts reverse video SGR %s with reset SGR %s', (video, reset) => {
+    expect(cleanTmuxSubmissionCapture(`❯ draft\x1b[${video}m \x1b[${reset}m\n`, '❯ draft \n'))
+      .toBe('❯ draft\n');
+  });
+
+  it('still requires reverse video rather than an unrelated SGR cursor-shaped row', () => {
+    expect(cleanTmuxSubmissionCapture('❯ draft\x1b[1;27m \x1b[0m\n', '❯ draft \n')).toBeNull();
+  });
+
   it('fails closed without a cursor or when text follows it', () => {
     expect(cleanTmuxSubmissionCapture('❯ draft\n', '❯ draft \n')).toBeNull();
     expect(cleanTmuxSubmissionCapture('startup menu\n', 'startup menu\n', false)).toBe('startup menu\n');

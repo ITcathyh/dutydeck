@@ -257,6 +257,7 @@ describe('PTY Claude maintenance compaction', () => {
 
   it('waits for an existing raw write, rejects new raw input, then compacts once', async () => {
     (driver as any).timings.maintenanceTimeoutMs = 10_000;
+    (driver as any).timings.maintenanceIdleGraceMs = 1_000;
     const held = holdRawWrite();
     expect((driver as any).terminalWrites).toBe(1);
     const pending = driver.compact!(); void pending.catch(() => {});
@@ -361,6 +362,24 @@ describe('PTY Claude maintenance compaction', () => {
     expect(writes).toEqual(['/compact']);
     expect((driver as any).maintenanceUnknown).toBe(true);
     (driver as any).terminalWrites--;
+  });
+
+  it.each(['success', 'false', 'reject'] as const)('does not compact on old idle after a %s raw write without fresh output', async outcome => {
+    const terminal = driver.createTerminalStream();
+    const target = (driver as any).backend;
+    const original = target.write.bind(target);
+    target.write = (data: string) => data === 'manual'
+      ? outcome === 'false' ? false : outcome === 'reject' ? Promise.reject(new Error('write failed')) : true
+      : original(data);
+    const manual = terminal.write('manual');
+    if (outcome === 'success') await expect(manual).resolves.toBeUndefined();
+    else await expect(manual).rejects.toThrow();
+    expect((driver as any).rawWriteBarrier.outputRevision).toBe((driver as any).screenRevision);
+    const pending = driver.compact!();
+    await expectMaintenanceRejected(pending);
+    expect(prompts).toEqual([]);
+    expect((driver as any).maintenanceUnknown).toBe(true);
+    terminal.dispose();
   });
 
   it('rejects raw terminal writes until unknown maintenance has recovered', async () => {
@@ -1321,11 +1340,12 @@ describe('PTY Claude maintenance compaction', () => {
 
   it('requires fresh output and quiet after raw input before writing compact', async () => {
     (driver as any).timings.maintenanceTimeoutMs = 10_000;
+    (driver as any).timings.maintenanceIdleGraceMs = 1_000;
     const held = holdRawWrite();
     const pending = driver.compact!(); void pending.catch(() => {});
     await vi.advanceTimersByTimeAsync(100);
     held.gate.resolve(); await held.manual;
-    await vi.advanceTimersByTimeAsync(600);
+    await vi.advanceTimersByTimeAsync(100);
     expect(prompts).toEqual([]);
     output(screen(idleScreen));
     await vi.advanceTimersByTimeAsync(600);

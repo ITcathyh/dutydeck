@@ -125,9 +125,10 @@ export function isInputReady(screen: string, cli: 'Codex' | 'TraeX', busyPattern
     composerEnd = prompt + expectedRows.length;
     if (composerEnd > composerRows.length) return false;
     const actual = composerRows.slice(prompt, composerEnd)
-      .map((line, index) => index === 0 ? line.replace(/^[›❯]\s*/, '') : cli === 'TraeX' ? line.replace(/^  /, '') : line)
+      .map((line, index) => index === 0 ? line.replace(/^[›❯] ?/, '') : cli === 'TraeX' ? line.replace(/^  /, '') : line)
       .join('\n');
-    if (actual !== expectedDraft) return false;
+    // TraeX 0.213.1 displays each input tab as one space; actual stays exact.
+    if (actual !== (cli === 'TraeX' ? expectedDraft.replaceAll('\t', ' ') : expectedDraft)) return false;
   } else if (!(cli === 'Codex' ? CODEX_COMPOSER : TRAEX_COMPOSER).test(composerRows[prompt]!.trimEnd())) return false;
   const footer = composerRows.slice(composerEnd).map(line => line.trim()).filter(Boolean);
   if (footer.some(line => !isInitializedFooter(line, cli) && !(cli === 'TraeX' && TRAEX_CONTROLS_FOOTER.test(line)) && !DECORATION.test(line))) return false;

@@ -1,4 +1,4 @@
-import { JsonlTailer } from './tail.js';
+import { JsonlTailer, type InputTextMatcher } from './tail.js';
 import { existsSync } from 'node:fs';
 
 /** history.jsonl is shared. An exact prompt alone is insufficient: its native
@@ -27,12 +27,12 @@ export class CodexInputReceipt {
     }
   }
   stop(): void { this.history.stop(); }
-  waitForInput(rollout: JsonlTailer, prompt: string, signal: AbortSignal): Promise<void> {
+  waitForInput(rollout: JsonlTailer, prompt: string, signal: AbortSignal, inputMatch?: InputTextMatcher): Promise<void> {
     const controller = new AbortController();
     const abort = () => controller.abort(signal.reason);
     if (signal.aborted) abort(); else signal.addEventListener('abort', abort, { once: true });
     return Promise.race([
-      rollout.waitForInput(prompt, controller.signal), this.history.waitForInput(prompt, controller.signal),
+      rollout.waitForInput(prompt, controller.signal, inputMatch), this.history.waitForInput(prompt, controller.signal, inputMatch),
     ]).finally(() => {
       signal.removeEventListener('abort', abort);
       controller.abort(new Error('Native input receipt observed or retired'));

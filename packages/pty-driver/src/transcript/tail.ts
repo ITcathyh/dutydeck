@@ -56,8 +56,8 @@ export interface TranscriptEventSource {
   onEvent(cb: (e: NormalizedDriverEvent) => void): void;
   /** New complete records, including held errors that publish no event. */
   onProgress?(cb: () => void): void;
-  /** Arm after flush(), before writing. Only a new exact user record in this
-   * session can confirm input; abort/stop never converts unknown into accepted. */
+  /** Arm after flush(), before writing. Only a new authorized user record in
+   * this session can confirm input; abort/stop never converts unknown into accepted. */
   waitForInput?(prompt: string, signal: AbortSignal): Promise<void>;
   /** Maintenance-only /compact evidence; never creates or completes a business turn. */
   compactionNativeSession?(): string | undefined;
@@ -98,6 +98,7 @@ export interface TranscriptEventSource {
 
 /** Loose shape of a parsed JSONL entry — mappers narrow per CLI schema. */
 export type TranscriptEntry = any;
+export type InputTextMatcher = (text: string, prompt: string) => boolean;
 
 export interface JsonlTailerOptions {
   /** Resolve the file to tail. Called on the first tick (until a file is
@@ -158,7 +159,7 @@ export class JsonlTailer implements TranscriptEventSource {
   private readonly deduplicateTools: boolean;
   private readonly baselineMapping: boolean;
   private readonly toolEvents = new Set<string>();
-  private readonly receipts = new Set<{ prompt: string; path?: string; offset: number; since: number; finish(error?: Error): void }>();
+  private readonly receipts = new Set<{ prompt: string; path?: string; offset: number; since: number; inputMatch?: InputTextMatcher; finish(error?: Error): void }>();
   private readonly callbacks = new Set<(e: NormalizedDriverEvent) => void>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private currentPath: string | undefined;
@@ -203,10 +204,10 @@ export class JsonlTailer implements TranscriptEventSource {
     this.baselineMapping = opts.baselineMapping ?? false;
   }
 
-  waitForInput(prompt: string, signal: AbortSignal): Promise<void> {
+  waitForInput(prompt: string, signal: AbortSignal, inputMatch?: InputTextMatcher): Promise<void> {
     return new Promise((resolve, reject) => {
       const receipt = {
-        prompt: normalizeInputText(prompt), path: this.currentPath, offset: this.offset, since: Date.now(),
+        prompt: normalizeInputText(prompt), path: this.currentPath, offset: this.offset, since: Date.now(), inputMatch,
         finish: (error?: Error) => {
           this.receipts.delete(receipt); signal.removeEventListener('abort', abort);
           if (error) reject(error); else resolve();
@@ -549,7 +550,7 @@ export class JsonlTailer implements TranscriptEventSource {
             // Without an initial file waterline a late resolver might have
             // found old history. Only a fresh timestamp can prove receipt.
             && (Number.isFinite(timestamp) ? timestamp >= receipt.since - 1000 : receipt.path !== undefined)
-            && text === receipt.prompt) {
+            && (receipt.inputMatch ? receipt.inputMatch(text, receipt.prompt) : text === receipt.prompt)) {
             this.onInputReceipt?.(entry);
             receipt.finish();
           }

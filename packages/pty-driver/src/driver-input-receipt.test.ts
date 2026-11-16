@@ -423,6 +423,33 @@ it('keeps the legacy backend rejection reason while reserving input-unconfirmed 
   await expect(pending).rejects.toMatchObject({ name: 'DriverRecoveryError', code: 'DRIVER_RESULT_UNKNOWN' });
 });
 
+it('keeps the raw gate through non-Claude preparation and soft Enter keys until the writer returns', async () => {
+  const target = (driver as any).backend;
+  const writes: string[] = [];
+  target.write = (data: string) => { writes.push(data); };
+  target.sendSpecialKeys = (key: string) => { writes.push(`key:${key}`); };
+  const terminal = driver.createTerminalStream();
+  const cursor = createCliAdapter('cursor');
+  let prepared = false, writerReturned = false;
+  (driver as any).adapter = { ...cursor,
+    async prepareInput(backend: any) { await backend.sendSpecialKeys('Enter'); prepared = true; },
+    async writeInput(backend: any) {
+      expect(prepared).toBe(true);
+      await expect(terminal.write('blocked after preparation')).rejects.toBeInstanceOf(PromptNotWrittenError);
+      await backend.write('first');
+      await backend.write('\r');
+      await expect(terminal.write('blocked after soft newline')).rejects.toBeInstanceOf(PromptNotWrittenError);
+      writerReturned = true;
+    } };
+  const pending = driver.send('first'); void pending.catch(() => {});
+  await vi.advanceTimersByTimeAsync(10);
+  expect(writerReturned).toBe(true);
+  await terminal.write('manual after writer');
+  expect(writes).toEqual(['key:Enter', 'first', '\r', 'manual after writer']);
+  await driver.stop(); await expect(pending).rejects.toThrow('Driver stopped');
+  terminal.dispose();
+});
+
 it('excludes Dutydeck raw writes through the final Enter, then permits manual control', async () => {
   const target = (driver as any).backend;
   const writes: string[] = [];
