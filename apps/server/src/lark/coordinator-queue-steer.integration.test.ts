@@ -30,7 +30,7 @@ const event = (id: string, text: string, patch: Partial<LarkMessageEvent> = {}):
 /** 白名单里登记了显示名：拒绝文案据此写出发起人是谁。 */
 const named: Partial<StoredLarkConfig> = { allowedUsers: [{ openId: 'ou_alice', name: 'Alice' }, { openId: 'ou_bob', name: 'Bob' }] };
 
-async function harness(options: { configPatch?: Partial<StoredLarkConfig>; steer?: AgentDriver['steer']; permissionPrompt?: string; automation?: unknown } = {}) {
+async function harness(options: { configPatch?: Partial<StoredLarkConfig>; steer?: AgentDriver['steer']; permissionPrompt?: string; automation?: unknown; hold?: (prompt: string) => Promise<void> | undefined } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-queue-steer-'));
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   let release: (() => void) | undefined;
@@ -59,8 +59,8 @@ async function harness(options: { configPatch?: Partial<StoredLarkConfig>; steer
             await Promise.race([new Promise<void>(done => { approval = done; }), aborted]);
             if (mine !== current) return;
           }
-          // 所有轮次都挂在同一道闸门上，后续消息才会真的排队；释放闸门后所有轮次立刻收口。
-          await Promise.race([gate, aborted]);
+          // 所有轮次默认挂在同一道闸门上，后续消息才会真的排队；按轮次覆盖可构造 A→B 翻页竞态。
+          await Promise.race([options.hold?.(prompt) ?? gate, aborted]);
           if (mine !== current) return;
           emit({ type: 'text', data: { text: '已处理。' } });
           emit({ type: 'completed', data: { stopReason: 'end_turn' } });
@@ -166,6 +166,7 @@ const promoteLabel = '中断当前这一轮，先做这条';
 const injectLabel = '插进当前这一轮';
 const legacyInjectedNote = '已把这条内容送进正在执行的这一轮，Agent 会在这一轮里接着处理，回复出现在那一轮的结果里。';
 const pendingInjectedNote = '已送进正在执行的这一轮；这一轮还有审批没处理，Agent 有没有读到以它后续的回复为准。';
+const unknownInjectedNote = '已送进正在执行的这一轮；审批状态暂时没读到，Agent 有没有读到以后续回复为准。';
 
 describe('排队卡：紧排在正在执行的那一轮后面', () => {
   it('接受后的排队 PATCH 失败仍保留任务归属，之后正常交付独立结果', async () => {
@@ -448,7 +449,7 @@ describe('排队卡：当前这一轮被审批挡住', () => {
     expect(h.markdownOf(receipt)).not.toContain(pendingInjectedNote);
   });
 
-  it('injected 成功后 running 诊断查询失败，仍按旧文案正常回执', async () => {
+  it('injected 成功后审批诊断查询失败，回执如实说明状态未知且不改变成功结算', async () => {
     const steer = vi.fn(async (_prompt: string) => 'injected' as const);
     const h = await harness({ steer });
     await h.dispatch('om_1', '第一件事');
@@ -462,14 +463,16 @@ describe('排队卡：当前这一轮被审批挡住', () => {
       injected = true;
       return result;
     });
-    const getTasks = h.runtime.getTasks.bind(h.runtime);
-    vi.spyOn(h.runtime, 'getTasks').mockImplementation(async (...args) => {
-      if (injected) throw new Error('running diagnostic unavailable');
-      return getTasks(...args);
+    vi.spyOn(h.runtime, 'getLatestPermissionRequest').mockImplementation(async () => {
+      expect(injected).toBe(true);
+      throw new Error('permission diagnostic unavailable');
     });
+    // 即使当前没有 pending，也让诊断本身失败，验证异常不能折叠成 confirmed-none。
+    vi.spyOn(h.runtime, 'getPendingPermissions').mockReturnValue([{ id: 'native_current', title: '当前任务审批', status: 'pending' }]);
     await h.coordinator.handle(event('om_queue_steer', '/queue steer 1'), h.config);
     const receipt = h.receiptNamed('已插话');
-    expect(h.markdownOf(receipt)).toContain(legacyInjectedNote);
+    expect(h.markdownOf(receipt)).toContain(unknownInjectedNote);
+    expect(h.markdownOf(receipt)).not.toContain(legacyInjectedNote);
     expect(h.markdownOf(receipt)).not.toContain(pendingInjectedNote);
     expect(h.receiptNamed('/queue 执行失败')).toBeUndefined();
   });
@@ -494,6 +497,107 @@ describe('排队卡：当前这一轮被审批挡住', () => {
     const receipt = other.receiptNamed('已插话');
     expect(other.markdownOf(receipt)).toContain('Agent 已用这条内容另起了一轮；那一轮不在 Dutydeck 的执行记录里，结果不会回到这张卡片。');
     expect(other.markdownOf(receipt)).not.toContain(pendingInjectedNote);
+  });
+
+  const invokeSteeringEntry = async (h: Awaited<ReturnType<typeof harness>>, entry: 'dispatch' | 'queue') => {
+    const target = (await h.runtimeTask('task-C'))!;
+    const inject = h.runtime.injectQueued.bind(h.runtime);
+    let injected = false;
+    vi.spyOn(h.runtime, 'injectQueued').mockImplementation(async (...args) => {
+      const result = await inject(...args);
+      injected = true;
+      return result;
+    });
+    // /queue steer 旧实现会在注入后另查 running。让它失效，防止把“碰巧查到同一个任务”当成 target 修复。
+    const getTasks = h.runtime.getTasks.bind(h.runtime);
+    const postInjectionTasks = vi.spyOn(h.runtime, 'getTasks').mockImplementation(async (...args) => {
+      if (injected) throw new Error('post-injection running diagnostic unavailable');
+      return getTasks(...args);
+    });
+    try {
+      if (entry === 'queue') {
+        await h.coordinator.handle(event('om_queue_steer', '/queue steer 2'), h.config);
+        return { taskId: target.id, note: h.markdownOf(h.receiptNamed('已插话')) };
+      }
+      const steering = await (h.coordinator as any).steerQueuedTurn(h.config, event('om_steer', '/steer task-C'), await h.sessionId(), target, 'inject');
+      return { taskId: target.id, note: String(steering.note) };
+    } finally {
+      postInjectionTasks.mockRestore();
+    }
+  };
+
+  const flipFromAToB = async (h: Awaited<ReturnType<typeof harness>>, releaseA: () => void, waitForApproval: boolean) => {
+    vi.spyOn(h.coordinator as any, 'currentTurnInterruptDenial').mockImplementation(async () => {
+      releaseA();
+      await vi.waitFor(async () => expect((await h.runtimeTask('task-B'))?.status).toBe('running'));
+      await vi.waitFor(() => expect(h.prompts.some(prompt => prompt.includes('task-B'))).toBe(true));
+      if (waitForApproval) await vi.waitFor(async () => expect(h.runtime.getPendingPermissions(await h.sessionId())).toHaveLength(1));
+      return undefined;
+    });
+  };
+
+  it.each(['dispatch', 'queue'] as const)('A→B 翻页后实际注入 B，%s 只查询 B 的待审批', async entry => {
+    let releaseA!: () => void, releaseB!: () => void;
+    const gateA = new Promise<void>(resolve => { releaseA = resolve; });
+    const gateB = new Promise<void>(resolve => { releaseB = resolve; });
+    const steer = vi.fn(async (_prompt: string) => 'injected' as const);
+    const h = await harness({ steer, permissionPrompt: 'task-B', hold: prompt => prompt.includes('task-A') ? gateA : prompt.includes('task-B') ? gateB : undefined });
+    cleanups.push(async () => {
+      releaseA(); releaseB();
+      const session = await h.sessionId();
+      for (const permission of h.runtime.getPendingPermissions(session)) await h.runtime.resolvePermission(session, permission.id, true);
+    });
+    await h.dispatch('om_1', 'task-A');
+    await vi.waitFor(() => expect(h.prompts).toHaveLength(1));
+    await h.dispatch('om_2', 'task-B', 'ou_bob');
+    await h.dispatch('om_3', 'task-C');
+    const a = (await h.runtimeTask('task-A'))!, b = (await h.runtimeTask('task-B'))!;
+    const receiptQueries: string[] = [];
+    const latest = h.runtime.getLatestPermissionRequest.bind(h.runtime);
+    vi.spyOn(h.runtime, 'getLatestPermissionRequest').mockImplementation(async (...args) => {
+      receiptQueries.push(args[1]);
+      return latest(...args);
+    });
+    await flipFromAToB(h, releaseA, true);
+    const { taskId, note } = await invokeSteeringEntry(h, entry);
+    const operation = h.repos.execution.getTaskExecution(taskId)!.steering!;
+    expect(operation.target.taskId).toBe(b.id);
+    expect(operation.target.taskId).not.toBe(a.id);
+    expect(receiptQueries.length).toBeGreaterThan(0);
+    expect(new Set(receiptQueries)).toEqual(new Set([b.id]));
+    expect(note).toContain(pendingInjectedNote);
+    expect(note).not.toContain(legacyInjectedNote);
+    expect(note).not.toContain(unknownInjectedNote);
+  });
+
+  it.each(['dispatch', 'queue'] as const)('A→B 翻页后 B 没有待审批，%s 不读取 A 的旧审批而误加警告', async entry => {
+    let releaseA!: () => void, releaseB!: () => void;
+    const gateA = new Promise<void>(resolve => { releaseA = resolve; });
+    const gateB = new Promise<void>(resolve => { releaseB = resolve; });
+    const steer = vi.fn(async (_prompt: string) => 'injected' as const);
+    const h = await harness({ steer, hold: prompt => prompt.includes('task-A') ? gateA : prompt.includes('task-B') ? gateB : undefined });
+    cleanups.push(() => { releaseA(); releaseB(); });
+    await h.dispatch('om_1', 'task-A');
+    await vi.waitFor(() => expect(h.prompts).toHaveLength(1));
+    await h.dispatch('om_2', 'task-B', 'ou_bob');
+    await h.dispatch('om_3', 'task-C');
+    const a = (await h.runtimeTask('task-A'))!, b = (await h.runtimeTask('task-B'))!;
+    const receiptQueries: string[] = [];
+    vi.spyOn(h.runtime, 'getPendingPermissions').mockReturnValue([{ id: 'stale-A', title: 'A 的旧审批', status: 'pending' }]);
+    vi.spyOn(h.runtime, 'getLatestPermissionRequest').mockImplementation(async (_sessionId, taskId) => {
+      receiptQueries.push(taskId);
+      return taskId === a.id ? { type: 'permission_request', taskId, data: { id: 'stale-A', status: 'pending' } } as any : undefined;
+    });
+    await flipFromAToB(h, releaseA, false);
+    const { taskId, note } = await invokeSteeringEntry(h, entry);
+    const projection = h.repos.execution.getTaskExecution(taskId)!;
+    expect(projection.steering, JSON.stringify({ note, status: projection.task.status })).toBeDefined();
+    const operation = projection.steering!;
+    expect(operation.target.taskId).toBe(b.id);
+    expect(receiptQueries).toEqual([b.id]);
+    expect(note).toContain(legacyInjectedNote);
+    expect(note).not.toContain(pendingInjectedNote);
+    expect(note).not.toContain(unknownInjectedNote);
   });
 });
 

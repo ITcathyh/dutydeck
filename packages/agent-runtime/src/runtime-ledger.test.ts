@@ -701,9 +701,14 @@ describe('Runtime uses the execution ledger', () => {
     const first = await h.runtime.dispatch(h.session.id, 'first'); await entered.promise;
     const second = await h.runtime.dispatch(h.session.id, 'second');
     const steer = vi.fn(async (_prompt: string) => outcome); h.driver().steer = steer;
+    const expectedTarget = h.repos.execution.getTaskExecution(first.id)!.currentAttempt!;
     const result = await h.runtime.injectQueued(h.session.id, second.id, 'installation_owner', 'fixed-steering');
-    expect(result).toMatchObject({ outcome, task: { id: second.id, status: 'completed' } });
+    expect(result).toMatchObject({ outcome, task: { id: second.id, status: 'completed' },
+      target: { taskId: first.id, attemptId: expectedTarget.attemptId } });
     expect(steer).toHaveBeenCalledWith('second');
+    await expect(h.runtime.injectQueued(h.session.id, second.id, 'installation_owner', 'fixed-steering'))
+      .resolves.toMatchObject({ outcome, target: result.target });
+    expect(steer).toHaveBeenCalledTimes(1);
     expect(h.repos.execution.getTaskExecution(second.id)?.attempts).toEqual([]);
     const marker = (await h.runtime.getEvents(h.session.id)).find(event => event.type === 'text' && (event.data as { steering?: unknown }).steering);
     expect(marker?.data).toMatchObject({ role: 'user', text: 'second', taskId: second.id, steering: { outcome, target: { taskId: first.id } } });
@@ -726,6 +731,7 @@ describe('Runtime uses the execution ledger', () => {
     if (steer) h.driver().steer = steer;
     const result = await h.runtime.injectQueued(h.session.id, second.id, 'installation_owner');
     expect(result).toMatchObject({ outcome, task: { id: second.id, status: 'queued' } });
+    expect(result.target).toEqual(h.repos.execution.getTaskExecution(second.id)?.steering?.target);
     expect(h.sent).toEqual(['first']);
     gate.resolve(); await vi.waitFor(() => expect(h.repos.execution.getTaskExecution(second.id)?.task.status).toBe('completed'));
     expect(h.sent).toEqual(['first', 'second']);
@@ -771,8 +777,9 @@ describe('Runtime uses the execution ledger', () => {
     const first=await h.runtime.dispatch(h.session.id,'first'); await entered.promise;
     const second=await h.runtime.dispatch(h.session.id,'second');
     h.driver().steer=failure==='sync throw' ? ()=>{sideEffects++;throw new Error('connection lost after delivery');} : async()=>{sideEffects++;throw new Error('connection lost after delivery');};
-    await expect(h.runtime.injectQueued(h.session.id,second.id,'installation_owner','once')).resolves.toMatchObject({outcome:'failed',task:{status:'reconcile_required'}});
-    await expect(h.runtime.injectQueued(h.session.id,second.id,'installation_owner','once')).resolves.toMatchObject({outcome:'failed',task:{status:'reconcile_required'}});
+    const delivered = await h.runtime.injectQueued(h.session.id,second.id,'installation_owner','once');
+    expect(delivered).toMatchObject({outcome:'failed',task:{status:'reconcile_required'},target:h.repos.execution.getTaskExecution(second.id)?.steering?.target});
+    await expect(h.runtime.injectQueued(h.session.id,second.id,'installation_owner','once')).resolves.toMatchObject({outcome:'failed',task:{status:'reconcile_required'},target:delivered.target});
     gate.resolve(); await vi.waitFor(()=>expect(h.repos.execution.getTaskExecution(first.id)?.task.status).toBe('completed'));
     expect(sideEffects).toBe(1); expect(h.sent).toEqual(['first']);
     expect(h.repos.execution.getTaskExecution(second.id)).toMatchObject({attempts:[],steering:{state:'unknown'}});

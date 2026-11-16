@@ -231,7 +231,13 @@ const recoveryOwner: ExecutionActor = { kind: 'installation_owner', id: 'install
 export type SteeringOutcome = DriverSteeringOutcome | 'incompatible' | 'failed';
 /** The acknowledgement deadline does not cancel remote delivery or permit replay. */
 const STEERING_TIMEOUT_MS = 30_000;
-export interface SteeringResult { task: PublicTaskRecord; outcome: SteeringOutcome; error?: string }
+export interface SteeringResult {
+  task: PublicTaskRecord;
+  outcome: SteeringOutcome;
+  error?: string;
+  /** 持久化 steering operation 的真实投递目标；未建立 operation 时不伪造。 */
+  target?: AttemptRef;
+}
 /**
  * 一轮后面有人排队、驱动事件与终端输出（PTY 的屏幕变化以 raw_terminal 事件到达）都静默这么久、受管进程树 CPU 也不活跃时，
  * 提示这一轮可能卡住。Claude Code 干活时每秒都在刷新计时，长工具也有输出或心跳，3 分钟毫无动静且不占 CPU 已不正常；与 HappyClaw 的判定阈值相同。
@@ -3617,13 +3623,18 @@ export class DutydeckRuntime {
       const {session,driver} = await this.active(id);
       await this.authorize(id,actorId);
       const projection = this.repos.execution.getTaskExecution(taskId);
+      const result = (projection: TaskExecutionProjection, outcome: SteeringOutcome, error?: string): SteeringResult => {
+        const target = projection.steering?.operationId === operationId ? projection.steering.target : undefined;
+        return { task: this.publicTask(projection.task), outcome,
+          ...(target ? { target: { taskId: target.taskId, attemptId: target.attemptId } } : {}),
+          ...(error ? { error } : {}) };
+      };
       if (projection?.task.sessionId === id && projection.steering?.operationId === operationId) {
-        const operation = projection.steering;
-        return {task:this.publicTask(projection.task),outcome:operation.outcome ?? 'failed'};
+        return result(projection, projection.steering.outcome ?? 'failed');
       }
       const task = projection?.task;
       if (!task || task.sessionId !== id || task.status !== 'queued') throw new RuntimeError('QUEUED_TASK_NOT_FOUND','Queued task is missing',404);
-      const skipped = (outcome: SteeringOutcome, error?: string): SteeringResult => ({task:this.publicTask(this.repos.execution.getTaskExecution(taskId)!.task),outcome,...(error ? {error} : {})});
+      const skipped = (outcome: SteeringOutcome, error?: string): SteeringResult => result(this.repos.execution.getTaskExecution(taskId)!, outcome, error);
       if (!driver?.steer || this.repos.execution.getAcceptedTask(taskId)?.request?.namespace !== steerableTaskNamespace) return skipped('unsupported');
       const running = () => {
         const ref = this.attempts.has(id) ? this.attemptRefs.get(this.attempts.get(id)!) : undefined;

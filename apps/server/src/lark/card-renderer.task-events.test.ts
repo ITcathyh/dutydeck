@@ -1,4 +1,4 @@
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import { BACKGROUND_FOLLOWUP, type AgentEvent } from '@dutydeck/shared';
 import { eventsForRuntimeTask, loadLarkTaskEvents, renderLarkProcessElements, renderLarkRecordExport, renderLarkResultElements, steeringOutcomeText } from './card-renderer.js';
 
@@ -14,12 +14,14 @@ it.each([
   ['failed', 'Agent 没有接受插话。']
 ])('steeringOutcomeText(%s) 缺省与显式无 pending 都保留旧文案', (outcome, expected) => {
   expect(steeringOutcomeText(outcome)).toBe(expected);
-  expect(steeringOutcomeText(outcome, false)).toBe(expected);
+  expect(steeringOutcomeText(outcome, 'confirmed-none')).toBe(expected);
 });
 
-it('只有即时 injected 且当前任务仍有 pending 时换成不承诺已读的文案', () => {
-  expect(steeringOutcomeText('injected', true)).toBe('已送进正在执行的这一轮；这一轮还有审批没处理，Agent 有没有读到以它后续的回复为准。');
-  expect(steeringOutcomeText('startedNewTurn', true)).toBe('Agent 已用这条内容另起了一轮；那一轮不在 Dutydeck 的执行记录里，结果不会回到这张卡片。');
+it('只有即时 injected 且确认当前任务仍有 pending 时换成审批等待文案，未知状态不冒充已确认', () => {
+  expect(steeringOutcomeText('injected', 'confirmed-pending')).toBe('已送进正在执行的这一轮；这一轮还有审批没处理，Agent 有没有读到以它后续的回复为准。');
+  expect(steeringOutcomeText('injected', 'unknown')).toBe('已送进正在执行的这一轮；审批状态暂时没读到，Agent 有没有读到以后续回复为准。');
+  expect(steeringOutcomeText('startedNewTurn', 'confirmed-pending')).toBe('Agent 已用这条内容另起了一轮；那一轮不在 Dutydeck 的执行记录里，结果不会回到这张卡片。');
+  expect(steeringOutcomeText('startedNewTurn', 'unknown')).toBe('Agent 已用这条内容另起了一轮；那一轮不在 Dutydeck 的执行记录里，结果不会回到这张卡片。');
 });
 
 let contentSequence = 0;
@@ -29,6 +31,9 @@ const assistant = (data: Record<string, any>): AgentEvent => ({
 const image = (patch: Record<string, unknown> = {}) => ({ type: 'image', mimeType: 'image/png', data: 'YWJj', ...patch });
 const pureImageText = (count: number) => `Agent 返回了 ${count} 个图片结果；飞书卡片不附带图片，请在 Web 工作台查看图片详情或引用。`;
 const mixedImageText = (count: number) => `另有 ${count} 个图片结果未随卡投递，请在 Web 工作台查看图片详情或引用。`;
+const droppedImage = () => ({ type: 'unsupported', originalType: 'image', reason: 'content_budget' });
+const pureDroppedImageText = (count: number) => `Agent 返回了 ${count} 个图片结果，但图片超过保存上限，图片内容未保留。`;
+const mixedDroppedImageText = (count: number) => `另有 ${count} 个图片结果超过保存上限，图片内容未保留。`;
 const finalContent = (events: AgentEvent[]) => renderLarkResultElements(events).find(element => element.element_id === 'final_output')?.content;
 
 it.each<[string, AgentEvent[], string, number]>([
@@ -42,6 +47,53 @@ it.each<[string, AgentEvent[], string, number]>([
 ])('ACP 最终结果保留 parts 并统计图片：%s', (_name, events, text, count) => {
   expect(finalContent(events)).toBe(text ? `${text}\n\n${mixedImageText(count)}` : pureImageText(count));
   expect(renderLarkResultElements(events).some(element => element.element_id === 'result_missing')).toBe(false);
+});
+
+it('非数组 parts 不拖垮合法正文，相邻合并也不修改原事件', () => {
+  const single = assistant({ text: '合法最终正文', parts: { unexpected: true } });
+  expect(finalContent([single])).toBe('合法最终正文');
+  expect(single.data.parts).toEqual({ unexpected: true });
+
+  const adjacent = [
+    assistant({ text: '前', parts: { unexpected: true } }),
+    assistant({ text: '中', parts: [image()] }),
+    assistant({ text: '后', parts: { unexpected: true } })
+  ];
+  const before = structuredClone(adjacent);
+  expect(finalContent(adjacent)).toBe(`前中后\n\n${mixedImageText(1)}`);
+  expect(adjacent).toEqual(before);
+});
+
+it.each<[string, AgentEvent[], string]>([
+  ['纯丢弃图片', [assistant({ text: '', parts: [droppedImage(), droppedImage()] })], pureDroppedImageText(2)],
+  ['正文与丢弃图片', [assistant({ text: '结论', parts: [{ type: 'text', text: '结论' }, droppedImage()] })], `结论\n\n${mixedDroppedImageText(1)}`],
+  ['有效图片与丢弃图片', [assistant({ text: '', parts: [image(), droppedImage()] })], `${pureImageText(1)}\n\n${mixedDroppedImageText(1)}`],
+  ['正文、有效图片与丢弃图片', [assistant({ text: '结论', parts: [{ type: 'text', text: '结论' }, image(), droppedImage()] })], `结论\n\n${mixedImageText(1)}\n\n${mixedDroppedImageText(1)}`]
+])('超预算图片如实说明未保留：%s', (_name, events, expected) => {
+  const rendered = renderLarkResultElements(events);
+  expect(finalContent(events)).toBe(expected);
+  expect(rendered.some(element => element.element_id === 'result_missing')).toBe(false);
+  expect(JSON.stringify(rendered)).not.toContain('Agent 未返回最终输出');
+  if (!events[0]!.data.parts.some((part: any) => part.type === 'image')) expect(JSON.stringify(rendered)).not.toContain('Web');
+});
+
+it('parts 合并的迭代工作量随 chunk 数线性增长，且不写回原数组', () => {
+  const count = 2_000;
+  const events = Array.from({ length: count }, () => assistant({ text: '', parts: [{ ...image(), complexityMarker: true }] }));
+  const before = structuredClone(events);
+  const originalIterator = Array.prototype[Symbol.iterator];
+  let iteratedParts = 0;
+  const iterator = vi.spyOn(Array.prototype, Symbol.iterator).mockImplementation(function (this: any[]) {
+    if (this[0]?.complexityMarker) iteratedParts += this.length;
+    return originalIterator.call(this);
+  });
+  try {
+    expect(finalContent(events)).toBe(pureImageText(count));
+  } finally {
+    iterator.mockRestore();
+  }
+  expect(iteratedParts).toBeLessThanOrEqual(3 * count);
+  expect(events).toEqual(before);
 });
 
 it('文字与非图片 part 保留原文，不追加图片说明', () => {
