@@ -34,7 +34,8 @@ const mixedImageText = (count: number) => `另有 ${count} 个图片结果未随
 const droppedImage = () => ({ type: 'unsupported', originalType: 'image', reason: 'content_budget' });
 const pureDroppedImageText = (count: number) => `Agent 返回了 ${count} 个图片结果，但图片超过保存上限，图片内容未保留。`;
 const mixedDroppedImageText = (count: number) => `另有 ${count} 个图片结果超过保存上限，图片内容未保留。`;
-const finalContent = (events: AgentEvent[]) => renderLarkResultElements(events).find(element => element.element_id === 'final_output')?.content;
+const finalOutput = (events: AgentEvent[]) => renderLarkResultElements(events).find(element => element.element_id === 'final_output');
+const finalContent = (events: AgentEvent[]) => finalOutput(events)?.content;
 
 it.each<[string, AgentEvent[], string, number]>([
   ['text→image', [assistant({ text: '结论' }), assistant({ text: '', parts: [image()] })], '结论', 1],
@@ -231,7 +232,6 @@ it('后台任务结束后的回答不算这一轮的进展、结论或导出内�
   ] as AgentEvent[];
   const scoped = eventsForRuntimeTask(turn([followup]), 'task_bg');
   expect(scoped).toEqual(eventsForRuntimeTask(turn([]), 'task_bg'));
-  const finalOutput = (events: AgentEvent[]) => renderLarkResultElements(events).find(element => element.element_id === 'final_output');
   expect(finalOutput(scoped)).toEqual(finalOutput(eventsForRuntimeTask(turn([]), 'task_bg')));
   expect(JSON.stringify(finalOutput(scoped))).toContain('本轮回答');
   const exported = renderLarkRecordExport(turn([followup]));

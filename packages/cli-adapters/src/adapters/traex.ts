@@ -1,5 +1,5 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
-import { DriverRecoveryError, PromptNotWrittenError } from '@dutydeck/shared';
+import { DriverRecoveryError, errorMessage, PromptNotWrittenError } from '@dutydeck/shared';
 import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
 import { isInputReady, pollScreenReady } from './screen-ready-helper.js';
 import { buildCwdTrustArgs } from './cwd-trust.js';
@@ -95,10 +95,6 @@ function isTraexQuestionScreen(screen: string): boolean {
   return options > 0;
 }
 
-function readFailure(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 /** Return only after the latest authoritative read proves a writable composer. */
 async function confirmTraexComposer(backend: PtyLike): Promise<void> {
   if (!backend.readScreen) throw new PromptNotWrittenError('TraeX screen reader is unavailable; prompt was not written');
@@ -107,7 +103,7 @@ async function confirmTraexComposer(backend: PtyLike): Promise<void> {
     let screen: string;
     try { screen = await backend.readScreen(); }
     catch (error) {
-      throw new PromptNotWrittenError(`TraeX screen could not be verified before paste; prompt was not written: ${readFailure(error)}`);
+      throw new PromptNotWrittenError(`TraeX screen could not be verified before paste; prompt was not written: ${errorMessage(error)}`);
     }
     if (isTraexQuestionScreen(screen)) {
       throw new PromptNotWrittenError('TraeX has a native question waiting for an answer; prompt was not written');
@@ -178,7 +174,7 @@ export function createTraexAdapter(): CliAdapter {
             if (!backend.readScreen) throw new Error('terminal screen reader unavailable');
             screen = await backend.readScreen();
           } catch (error) {
-            throw new DriverRecoveryError(`TraeX screen could not be verified after paste; Enter was not sent and the prompt was not resent: ${readFailure(error)}`, 'DRIVER_INPUT_UNCONFIRMED');
+            throw new DriverRecoveryError(`TraeX screen could not be verified after paste; Enter was not sent and the prompt was not resent: ${errorMessage(error)}`, 'DRIVER_INPUT_UNCONFIRMED');
           }
           if (!isInputReady(screen, 'TraeX', TRAEX_ACTIVE_BUSY_PATTERN, prompt)) {
             const reason = isTraexQuestionScreen(screen) ? 'a native question' : 'a native menu or a different composer';

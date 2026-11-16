@@ -2,7 +2,7 @@ import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { buildDutydeckRoutingBlock } from '../shared-hints.js';
 import { pinnedSessionUuid } from '../resume-id.js';
 import { relayCommandFrom, relayEnabled, relayPermissionHookTimeoutSeconds } from '@dutydeck/relay';
-import { DriverRecoveryError, PromptNotWrittenError } from '@dutydeck/shared';
+import { DriverRecoveryError, errorMessage, PromptNotWrittenError } from '@dutydeck/shared';
 import { probeClaudeHookFailureBlock, secretGuardHookCommand, secretGuardToolMatcher } from '@dutydeck/shared/secret-guard';
 import { delay, INPUT_ECHO_TIMEOUT_MS, waitForInputEcho, waitForQuietScreen } from './input-settle.js';
 import { createRequire } from 'node:module';
@@ -115,7 +115,7 @@ async function writeClaudeFamilyInputBody(backend: PtyLike, prompt: string): Pro
     const read = async () => {
       try { return await backend.readScreen!(); }
       catch (error) {
-        const detail = error instanceof Error ? error.message : String(error);
+        const detail = errorMessage(error);
         if (writeAttempted) throw new DriverRecoveryError(`Claude 输入框在本次写入后无法复核；提交结果未知，原进程已保留：${detail}`, 'DRIVER_INPUT_UNCONFIRMED');
         throw new PromptNotWrittenError(`Claude 写入前无法读取当前输入框；本条消息没有写入：${detail}`);
       }
@@ -237,13 +237,14 @@ function emptyMinimalComposer(lines: string[]): boolean {
   return minimal?.observed === '' && minimal.trailing.length === 0;
 }
 
+const canonical = (text: string) => text.replace(/\\(?=\n)/g, '');
+
 function ownedMinimalComposer(lines: string[], expected: string, final: boolean, rows = lines): boolean {
   const minimal = minimalComposer(lines);
   if (!minimal) return false;
   const prompt = lines.findIndex((line, index) => index > 0 && /^❯(?:\s|$)/.test(line));
   const observed = rows[prompt]!.replace(/^❯[  ]?/, '');
   const trailing = rows.slice(prompt + 1);
-  const canonical = (text: string) => text.replace(/\\(?=\n)/g, '');
   let actual: string;
   if (trailing.every(line => /^\.+$/.test(line))) actual = observed;
   else {
@@ -278,7 +279,6 @@ function ownedComposerAtBottom(lines: string[], expected: string, final: boolean
       if (expected === '/compact' && observed === '/compact  <optional custom summarization instructions>') observed = '/compact';
       // Only the soft-newline marker is presentation syntax. Spaces, tabs and
       // hard newlines are semantic and must survive the comparison unchanged.
-      const canonical = (text: string) => text.replace(/\\(?=\n)/g, '');
       if (!final && observed === ' ') observed = '';
       const actualText = canonical(observed), expectedText = canonical(expected);
       // Intermediate reads may lag a chunk. The final Enter requires the

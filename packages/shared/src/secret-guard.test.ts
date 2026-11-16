@@ -176,55 +176,58 @@ describe('secret guard', () => {
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
-  it('proves ENOENT component by component and sends every uncertain path through Node', () => {
-    const sensitiveEvent = { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'cat ~/.codex/auth.json' }, cwd: '/work/repo' };
-    const active = { enabled: true, authorized: false };
-    const policySecret = 'synthetic-policy-secret';
-    const permissionStatus = process.getuid?.() === 0 ? 0 : 2;
-    const withFixture = (label: string, createSessions: boolean, body: (fixture: {
-      root: string;
-      sessions: string;
-      run: (sessionId?: string) => SpawnSyncReturns<string>;
-      nodeStarts: () => number;
-      resetNode: () => void;
-      writePolicy: (value: string) => void;
-    }) => void) => {
-      const container = mkdtempSync(join(tmpdir(), `dutydeck-secret-guard-${label}-`));
-      const root = join(container, 'policy-root');
-      mkdirSync(root);
-      const sessions = join(root, '.dutydeck', 'security', 'sessions');
-      if (createSessions) mkdirSync(sessions, { recursive: true });
-      const count = join(container, 'node-count');
-      const node = join(container, 'counting-node');
-      writeFileSync(node, `#!/bin/sh\nprintf 1 >> ${JSON.stringify(count)}\nexec ${JSON.stringify(process.execPath)} "$@"\n`, { mode: 0o755 });
-      const command = secretGuardHookCommand({ nodePath: node, policyRoot: root });
-      const run = (dutydeck_session_id = 'ses_1') => spawnSync('/bin/sh', ['-c', command], {
-        input: JSON.stringify(sensitiveEvent), encoding: 'utf8',
-        // An absolute Node path and an empty PATH prove that the fast path uses no other executables.
-        env: { ...process.env, PATH: '', HOME: home, dutydeck_session_id },
-      });
-      const fixture = {
-        root, sessions, run,
-        nodeStarts: () => existsSync(count) ? readFileSync(count, 'utf8').length : 0,
-        resetNode: () => rmSync(count, { force: true }),
-        writePolicy: (value: string) => {
-          mkdirSync(sessions, { recursive: true });
-          writeFileSync(join(sessions, 'ses_1.json'), value);
-        },
-      };
-      try { body(fixture); }
-      finally {
-        for (const path of [root, join(root, '.dutydeck'), join(root, '.dutydeck', 'security'), sessions]) {
-          try { chmodSync(path, 0o700); } catch {}
-        }
-        rmSync(container, { recursive: true, force: true });
+  const sensitiveEvent = { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'cat ~/.codex/auth.json' }, cwd: '/work/repo' };
+  const active = { enabled: true, authorized: false };
+  const policySecret = 'synthetic-policy-secret';
+  const permissionStatus = process.getuid?.() === 0 ? 0 : 2;
+  type GuardFixture = {
+    container: string;
+    node: string;
+    root: string;
+    sessions: string;
+    run: (sessionId?: string, command?: string, cwd?: string) => SpawnSyncReturns<string>;
+    nodeStarts: () => number;
+    resetNode: () => void;
+    writePolicy: (value: string) => void;
+  };
+  const withFixture = (label: string, createSessions: boolean, body: (fixture: GuardFixture) => void) => {
+    const container = mkdtempSync(join(tmpdir(), `dutydeck-secret-guard-${label}-`));
+    const root = join(container, 'policy-root');
+    mkdirSync(root);
+    const sessions = join(root, '.dutydeck', 'security', 'sessions');
+    if (createSessions) mkdirSync(sessions, { recursive: true });
+    const count = join(container, 'node-count');
+    const node = join(container, 'counting-node');
+    writeFileSync(node, `#!/bin/sh\nprintf 1 >> ${JSON.stringify(count)}\nexec ${JSON.stringify(process.execPath)} "$@"\n`, { mode: 0o755 });
+    const defaultCommand = secretGuardHookCommand({ nodePath: node, policyRoot: root });
+    const run = (dutydeck_session_id = 'ses_1', command = defaultCommand, cwd?: string) => spawnSync('/bin/sh', ['-c', command], {
+      input: JSON.stringify(sensitiveEvent), encoding: 'utf8', cwd,
+      // An absolute Node path and an empty PATH prove that the fast path uses no other executables.
+      env: { ...process.env, PATH: '', HOME: home, dutydeck_session_id },
+    });
+    const fixture = {
+      container, node, root, sessions, run,
+      nodeStarts: () => existsSync(count) ? readFileSync(count, 'utf8').length : 0,
+      resetNode: () => rmSync(count, { force: true }),
+      writePolicy: (value: string) => {
+        mkdirSync(sessions, { recursive: true });
+        writeFileSync(join(sessions, 'ses_1.json'), value);
+      },
+    };
+    try { body(fixture); }
+    finally {
+      for (const path of [root, join(root, '.dutydeck'), join(root, '.dutydeck', 'security'), sessions]) {
+        try { chmodSync(path, 0o700); } catch {}
       }
-    };
-    const expectDenied = (result: SpawnSyncReturns<string>) => {
-      expect(result.status).toBe(0);
-      expect(JSON.parse(result.stdout).hookSpecificOutput.permissionDecision).toBe('deny');
-    };
+      rmSync(container, { recursive: true, force: true });
+    }
+  };
+  const expectDenied = (result: SpawnSyncReturns<string>) => {
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout).hookSpecificOutput.permissionDecision).toBe('deny');
+  };
 
+  it('proves missing components component by component and does not cache a missing policy', () => {
     withFixture('missing-components', false, fixture => {
       for (const directory of ['.dutydeck', '.dutydeck/security', '.dutydeck/security/sessions']) {
         expect(fixture.run()).toMatchObject({ status: 0, stdout: '' });
@@ -263,67 +266,96 @@ describe('secret guard', () => {
       expectDenied(fixture.run());
       expect(fixture.nodeStarts(), 'creating a policy after a miss must enable the guard').toBe(1);
     });
+  });
 
-    for (const ancestor of ['.', '.dutydeck', '.dutydeck/security', '.dutydeck/security/sessions']) {
-      for (const mode of [0o000, 0o300, 0o400]) {
-        withFixture(`mode-${mode.toString(8)}`, true, fixture => {
-          fixture.writePolicy(JSON.stringify({ ...active, secret: policySecret }));
-          chmodSync(join(fixture.root, ancestor), mode);
-          const result = fixture.run();
-          const expectedStatus = process.getuid?.() === 0 || mode === 0o300 ? 0 : 2;
-          expect(result.status, `${ancestor} mode ${mode.toString(8)}`).toBe(expectedStatus);
-          expect(fixture.nodeStarts(), `${ancestor} mode ${mode.toString(8)} must reach Node`).toBe(1);
-          expect(`${result.stdout}${result.stderr}`).not.toContain(policySecret);
-          if (expectedStatus === 0) expectDenied(result);
-        });
-      }
-      withFixture('not-directory', true, fixture => {
-        const path = join(fixture.root, ancestor);
-        rmSync(path, { recursive: true, force: true });
-        writeFileSync(path, policySecret);
+  const ancestors = ['.', '.dutydeck', '.dutydeck/security', '.dutydeck/security/sessions'];
+  it.each(ancestors.flatMap(ancestor => [0o000, 0o300, 0o400].map(mode => ({ ancestor, mode, modeLabel: mode.toString(8) }))))(
+    'ancestor $ancestor with mode $modeLabel reaches Node',
+    ({ ancestor, mode }) => {
+      withFixture(`mode-${mode.toString(8)}`, true, fixture => {
+        fixture.writePolicy(JSON.stringify({ ...active, secret: policySecret }));
+        chmodSync(join(fixture.root, ancestor), mode);
         const result = fixture.run();
-        expect(result.status, `${ancestor} as a file`).toBe(2);
-        expect(fixture.nodeStarts(), `${ancestor} as a file must reach Node`).toBe(1);
+        const expectedStatus = process.getuid?.() === 0 || mode === 0o300 ? 0 : 2;
+        expect(result.status, `${ancestor} mode ${mode.toString(8)}`).toBe(expectedStatus);
+        expect(fixture.nodeStarts(), `${ancestor} mode ${mode.toString(8)} must reach Node`).toBe(1);
         expect(`${result.stdout}${result.stderr}`).not.toContain(policySecret);
+        if (expectedStatus === 0) expectDenied(result);
       });
-    }
-
-    withFixture('target-directory', true, fixture => {
-      mkdirSync(join(fixture.sessions, 'ses_1.json'));
-      expect(fixture.run().status).toBe(2);
-      expect(fixture.nodeStarts()).toBe(1);
-    });
-    withFixture('target-unreadable', true, fixture => {
-      fixture.writePolicy(JSON.stringify({ ...active, secret: policySecret }));
-      chmodSync(join(fixture.sessions, 'ses_1.json'), 0o000);
+    },
+  );
+  it.each(ancestors)('ancestor %s as a file reaches Node', ancestor => {
+    withFixture('not-directory', true, fixture => {
+      const path = join(fixture.root, ancestor);
+      rmSync(path, { recursive: true, force: true });
+      writeFileSync(path, policySecret);
       const result = fixture.run();
-      expect(result.status).toBe(permissionStatus);
-      expect(fixture.nodeStarts()).toBe(1);
+      expect(result.status, `${ancestor} as a file`).toBe(2);
+      expect(fixture.nodeStarts(), `${ancestor} as a file must reach Node`).toBe(1);
       expect(`${result.stdout}${result.stderr}`).not.toContain(policySecret);
-      if (permissionStatus === 0) expectDenied(result);
     });
-    withFixture('target-dangling-symlink', true, fixture => {
-      symlinkSync('missing-policy-target', join(fixture.sessions, 'ses_1.json'));
-      expect(fixture.run()).toMatchObject({ status: 0, stdout: '' });
-      expect(fixture.nodeStarts(), 'a dangling target symlink must reach Node').toBe(1);
-    });
-    withFixture('target-symlink-loop', true, fixture => {
-      symlinkSync('ses_1.json', join(fixture.sessions, 'ses_1.json'));
-      expect(fixture.run().status).toBe(2);
-      expect(fixture.nodeStarts(), 'an unresolvable target symlink must reach Node').toBe(1);
-    });
-    withFixture('ancestor-dangling-symlink', false, fixture => {
-      mkdirSync(join(fixture.root, '.dutydeck'));
-      symlinkSync('missing-security', join(fixture.root, '.dutydeck', 'security'));
-      expect(fixture.run()).toMatchObject({ status: 0, stdout: '' });
-      expect(fixture.nodeStarts(), 'a dangling ancestor symlink must reach Node').toBe(1);
-    });
-    withFixture('ancestor-symlink-loop', false, fixture => {
-      mkdirSync(join(fixture.root, '.dutydeck'));
-      symlinkSync('security', join(fixture.root, '.dutydeck', 'security'));
-      expect(fixture.run().status).toBe(2);
-      expect(fixture.nodeStarts(), 'an unresolvable ancestor symlink must reach Node').toBe(1);
-    });
+  });
+
+  it.each([
+    {
+      name: 'target is a directory', label: 'target-directory', createSessions: true,
+      body: (fixture: GuardFixture) => {
+        mkdirSync(join(fixture.sessions, 'ses_1.json'));
+        expect(fixture.run().status).toBe(2);
+        expect(fixture.nodeStarts()).toBe(1);
+      },
+    },
+    {
+      name: 'target is unreadable', label: 'target-unreadable', createSessions: true,
+      body: (fixture: GuardFixture) => {
+        fixture.writePolicy(JSON.stringify({ ...active, secret: policySecret }));
+        chmodSync(join(fixture.sessions, 'ses_1.json'), 0o000);
+        const result = fixture.run();
+        expect(result.status).toBe(permissionStatus);
+        expect(fixture.nodeStarts()).toBe(1);
+        expect(`${result.stdout}${result.stderr}`).not.toContain(policySecret);
+        if (permissionStatus === 0) expectDenied(result);
+      },
+    },
+    {
+      name: 'target is a dangling symlink', label: 'target-dangling-symlink', createSessions: true,
+      body: (fixture: GuardFixture) => {
+        symlinkSync('missing-policy-target', join(fixture.sessions, 'ses_1.json'));
+        expect(fixture.run()).toMatchObject({ status: 0, stdout: '' });
+        expect(fixture.nodeStarts(), 'a dangling target symlink must reach Node').toBe(1);
+      },
+    },
+    {
+      name: 'target is a symlink loop', label: 'target-symlink-loop', createSessions: true,
+      body: (fixture: GuardFixture) => {
+        symlinkSync('ses_1.json', join(fixture.sessions, 'ses_1.json'));
+        expect(fixture.run().status).toBe(2);
+        expect(fixture.nodeStarts(), 'an unresolvable target symlink must reach Node').toBe(1);
+      },
+    },
+    {
+      name: 'ancestor is a dangling symlink', label: 'ancestor-dangling-symlink', createSessions: false,
+      body: (fixture: GuardFixture) => {
+        mkdirSync(join(fixture.root, '.dutydeck'));
+        symlinkSync('missing-security', join(fixture.root, '.dutydeck', 'security'));
+        expect(fixture.run()).toMatchObject({ status: 0, stdout: '' });
+        expect(fixture.nodeStarts(), 'a dangling ancestor symlink must reach Node').toBe(1);
+      },
+    },
+    {
+      name: 'ancestor is a symlink loop', label: 'ancestor-symlink-loop', createSessions: false,
+      body: (fixture: GuardFixture) => {
+        mkdirSync(join(fixture.root, '.dutydeck'));
+        symlinkSync('security', join(fixture.root, '.dutydeck', 'security'));
+        expect(fixture.run().status).toBe(2);
+        expect(fixture.nodeStarts(), 'an unresolvable ancestor symlink must reach Node').toBe(1);
+      },
+    },
+  ])('uncertain path: $name', ({ label, createSessions, body }) => {
+    withFixture(label, createSessions, body);
+  });
+
+  it('keeps a resolvable ancestor symlink as a fast miss until a policy appears', () => {
     withFixture('valid-ancestor-symlink', false, fixture => {
       mkdirSync(join(fixture.root, '.dutydeck'));
       mkdirSync(join(fixture.root, 'linked', 'sessions'), { recursive: true });
@@ -338,22 +370,12 @@ describe('secret guard', () => {
   });
 
   it('normalizes policy roots and sends abnormal session ids and paths through Node fail-closed', () => {
-    const container = mkdtempSync(join(tmpdir(), 'dutydeck-secret-guard-normalization-'));
-    const root = join(container, 'policy-root');
-    const sessions = join(root, '.dutydeck', 'security', 'sessions');
-    mkdirSync(sessions, { recursive: true });
-    writeFileSync(join(sessions, 'ses_1.json'), JSON.stringify({ enabled: true, authorized: false }));
-    const count = join(container, 'node-count');
-    const node = join(container, 'counting-node');
-    writeFileSync(node, `#!/bin/sh\nprintf 1 >> ${JSON.stringify(count)}\nexec ${JSON.stringify(process.execPath)} "$@"\n`, { mode: 0o755 });
-    const event = JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'cat ~/.codex/auth.json' }, cwd: '/work/repo' });
-    const run = (command: string, dutydeck_session_id: string, cwd?: string) => spawnSync('/bin/sh', ['-c', command], {
-      input: event, encoding: 'utf8', cwd, env: { ...process.env, PATH: '', HOME: home, dutydeck_session_id },
-    });
-    const nodeStarts = () => existsSync(count) ? readFileSync(count, 'utf8').length : 0;
-    const resetNode = () => rmSync(count, { force: true });
-    const runFromBlocked = (command: string, dutydeck_session_id: string, directory: string) => {
-      const bootstrap = `
+    withFixture('normalization', true, fixture => {
+      const { container, node, root, sessions, run, nodeStarts, resetNode } = fixture;
+      writeFileSync(join(sessions, 'ses_1.json'), JSON.stringify({ enabled: true, authorized: false }));
+      const event = JSON.stringify(sensitiveEvent);
+      const runFromBlocked = (command: string, dutydeck_session_id: string, directory: string) => {
+        const bootstrap = `
         const { chmodSync } = require('node:fs');
         const { spawnSync } = require('node:child_process');
         process.chdir(process.argv[1]);
@@ -364,60 +386,60 @@ describe('secret guard', () => {
         });
         process.stdout.write(JSON.stringify({ status: result.status, stdout: result.stdout, stderr: result.stderr, error: result.error?.code }));
       `;
-      const outer = spawnSync(process.execPath, ['-e', bootstrap, directory, command, event, dutydeck_session_id], { encoding: 'utf8', env: { ...process.env, HOME: home } });
-      expect(outer.status).toBe(0);
-      return JSON.parse(outer.stdout) as SpawnSyncReturns<string>;
-    };
-    const command = secretGuardHookCommand({ nodePath: node, policyRoot: root });
-    const previous = process.cwd();
-    const blocked = join(container, 'blocked');
-    mkdirSync(blocked);
-    try {
-      for (const sessionId of ['missing/../ses_1', '../ses_1', '/absolute/ses_1', 'ses/1', '.', '..', 'ses 1', 'ses_é', 'x'.repeat(129), 'x'.repeat(256)]) {
-        const result = run(command, sessionId);
-        expect(result.status, `abnormal session ${sessionId}`).toBe(2);
-        expect(nodeStarts(), `abnormal session ${sessionId} must reach Node`).toBe(1);
-        expect(result.stdout).toBe('');
+        const outer = spawnSync(process.execPath, ['-e', bootstrap, directory, command, event, dutydeck_session_id], { encoding: 'utf8', env: { ...process.env, HOME: home } });
+        expect(outer.status).toBe(0);
+        return JSON.parse(outer.stdout) as SpawnSyncReturns<string>;
+      };
+      const command = secretGuardHookCommand({ nodePath: node, policyRoot: root });
+      const previous = process.cwd();
+      const blocked = join(container, 'blocked');
+      mkdirSync(blocked);
+      try {
+        for (const sessionId of ['missing/../ses_1', '../ses_1', '/absolute/ses_1', 'ses/1', '.', '..', 'ses 1', 'ses_é', 'x'.repeat(129), 'x'.repeat(256)]) {
+          const result = run(sessionId, command);
+          expect(result.status, `abnormal session ${sessionId}`).toBe(2);
+          expect(nodeStarts(), `abnormal session ${sessionId} must reach Node`).toBe(1);
+          expect(result.stdout).toBe('');
+          resetNode();
+        }
+
+        expect(run('x'.repeat(128), command)).toMatchObject({ status: 0, stdout: '' });
+        expect(nodeStarts(), 'a conservative 128-byte component with a complete sessions directory remains a fast miss').toBe(0);
+        rmSync(sessions, { recursive: true });
+        expect(run('ses_missing', command)).toMatchObject({ status: 0, stdout: '' });
+        expect(nodeStarts(), 'an earliest missing directory remains a fast miss').toBe(0);
+        mkdirSync(sessions, { recursive: true });
+        writeFileSync(join(sessions, 'ses_1.json'), JSON.stringify({ enabled: true, authorized: false }));
+
+        const longRoot = secretGuardHookCommand({ nodePath: node, policyRoot: join(root, 'r'.repeat(256)) });
+        expect(run('', longRoot)).toMatchObject({ status: 0, stdout: '' });
+        expect(nodeStarts(), 'an empty session id remains a shell-only allow even for an abnormal root').toBe(0);
+        expect(run('ses_1', longRoot).status).toBe(2);
+        expect(nodeStarts(), 'an overlong policy-root component must reach Node').toBe(1);
         resetNode();
+
+        process.chdir(root);
+        const relativeRoot = secretGuardHookCommand({ nodePath: node, policyRoot: '.' });
+        process.chdir(previous);
+        const denied = run('ses_1', relativeRoot, root);
+        expect(denied.status).toBe(0);
+        expect(JSON.parse(denied.stdout).hookSpecificOutput.permissionDecision).toBe('deny');
+        resetNode();
+
+        const fromBlocked = runFromBlocked(relativeRoot, 'ses_1', blocked);
+        expect(fromBlocked.status).toBe(0);
+        expect(JSON.parse(fromBlocked.stdout).hookSpecificOutput.permissionDecision).toBe('deny');
+        expect(nodeStarts(), 'the normalized absolute root must be evaluated by Node').toBe(1);
+        resetNode();
+
+        const normalizedRelative = secretGuardHookCommand({ nodePath: node, policyRoot: relative(previous, root) });
+        expect(run('ses_missing', normalizedRelative)).toMatchObject({ status: 0, stdout: '' });
+        expect(nodeStarts(), 'a normal relative root is absolutized without adding Node to a common miss').toBe(0);
+      } finally {
+        process.chdir(previous);
+        chmodSync(blocked, 0o700);
       }
-
-      expect(run(command, 'x'.repeat(128))).toMatchObject({ status: 0, stdout: '' });
-      expect(nodeStarts(), 'a conservative 128-byte component with a complete sessions directory remains a fast miss').toBe(0);
-      rmSync(sessions, { recursive: true });
-      expect(run(command, 'ses_missing')).toMatchObject({ status: 0, stdout: '' });
-      expect(nodeStarts(), 'an earliest missing directory remains a fast miss').toBe(0);
-      mkdirSync(sessions, { recursive: true });
-      writeFileSync(join(sessions, 'ses_1.json'), JSON.stringify({ enabled: true, authorized: false }));
-
-      const longRoot = secretGuardHookCommand({ nodePath: node, policyRoot: join(root, 'r'.repeat(256)) });
-      expect(run(longRoot, '')).toMatchObject({ status: 0, stdout: '' });
-      expect(nodeStarts(), 'an empty session id remains a shell-only allow even for an abnormal root').toBe(0);
-      expect(run(longRoot, 'ses_1').status).toBe(2);
-      expect(nodeStarts(), 'an overlong policy-root component must reach Node').toBe(1);
-      resetNode();
-
-      process.chdir(root);
-      const relativeRoot = secretGuardHookCommand({ nodePath: node, policyRoot: '.' });
-      process.chdir(previous);
-      const denied = run(relativeRoot, 'ses_1', root);
-      expect(denied.status).toBe(0);
-      expect(JSON.parse(denied.stdout).hookSpecificOutput.permissionDecision).toBe('deny');
-      resetNode();
-
-      const fromBlocked = runFromBlocked(relativeRoot, 'ses_1', blocked);
-      expect(fromBlocked.status).toBe(0);
-      expect(JSON.parse(fromBlocked.stdout).hookSpecificOutput.permissionDecision).toBe('deny');
-      expect(nodeStarts(), 'the normalized absolute root must be evaluated by Node').toBe(1);
-      resetNode();
-
-      const normalizedRelative = secretGuardHookCommand({ nodePath: node, policyRoot: relative(previous, root) });
-      expect(run(normalizedRelative, 'ses_missing')).toMatchObject({ status: 0, stdout: '' });
-      expect(nodeStarts(), 'a normal relative root is absolutized without adding Node to a common miss').toBe(0);
-    } finally {
-      process.chdir(previous);
-      chmodSync(blocked, 0o700);
-      rmSync(container, { recursive: true, force: true });
-    }
+    });
   });
 
   it('fails closed for policy read and parse errors without echoing sensitive contents', () => {

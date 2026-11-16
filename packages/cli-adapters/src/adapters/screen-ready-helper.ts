@@ -118,7 +118,6 @@ export function isInputReady(screen: string, cli: 'Codex' | 'TraeX', busyPattern
   let prompt = composerRows.length - 1;
   while (prompt >= 0 && !/^[›»❯](?:\s|$)/.test(composerRows[prompt]!)) prompt--;
   if (prompt < 0 || /^[›»❯]\s*\d+\./.test(composerRows[prompt]!)) return false;
-  let composerStart = prompt;
   let composerEnd = prompt + 1;
   if (expectedDraft !== undefined) {
     const expectedRows = expectedDraft.split('\n');
@@ -132,7 +131,7 @@ export function isInputReady(screen: string, cli: 'Codex' | 'TraeX', busyPattern
   } else if (!(cli === 'Codex' ? CODEX_COMPOSER : TRAEX_COMPOSER).test(composerRows[prompt]!.trimEnd())) return false;
   const footer = composerRows.slice(composerEnd).map(line => line.trim()).filter(Boolean);
   if (footer.some(line => !isInitializedFooter(line, cli) && !(cli === 'TraeX' && TRAEX_CONTROLS_FOOTER.test(line)) && !DECORATION.test(line))) return false;
-  const banner = composerRows.slice(0, composerStart).map(line => line.trim());
+  const banner = composerRows.slice(0, prompt).map(line => line.trim());
   return footer.some(line => isInitializedFooter(line, cli)) || LOADED_BANNER.test(banner.join('\n'))
     || banner.some(line => (cli === 'Codex' ? CODEX_BANNER : TRAEX_BANNER).test(line));
 }

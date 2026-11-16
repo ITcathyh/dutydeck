@@ -117,18 +117,20 @@ export class ClaudeBackgroundTasks {
       const nativeSessionId = typeof entry.sessionId === 'string' && entry.sessionId ? entry.sessionId
         : typeof entry.session_id === 'string' && entry.session_id ? entry.session_id : undefined;
       const sourceShape: NoticeShape = entry.type === 'queue-operation' ? 'queue' : entry.type === 'user' ? 'user' : 'attachment';
-      if (state) for (const id of ids) {
-        const task = this.tasks.get(id);
-        const run = task ? this.runs.get(id) : undefined;
-        if (lifecycleOnly && (!task || !run)) continue;
+      if (state && ids.length > 0) {
         const canonicalKey = createHash('sha256').update(JSON.stringify([toolUseId ?? null, state, notificationText])).digest('base64');
         const observationKey = createHash('sha256').update(JSON.stringify([sourceShape, toolUseId ?? null, state, atMs ?? null, notificationText])).digest('base64');
-        const outcome = run ? this.observeNotice(run.notices, canonicalKey, observationKey, sourceShape, nativeSessionId ?? '')
-          : this.observeOrphanNotice(id, canonicalKey, observationKey, sourceShape, nativeSessionId ?? '');
-        // A first, unambiguous observation may settle one generation. Mirrors,
-        // same-shape replays and ambiguous owners only add structural evidence.
-        if (outcome === 'new' && task && run && (!toolUseId || task.toolUseId === toolUseId)) {
-          this.settle(task, state, atMs, position, false);
+        for (const id of ids) {
+          const task = this.tasks.get(id);
+          const run = task ? this.runs.get(id) : undefined;
+          if (lifecycleOnly && (!task || !run)) continue;
+          const outcome = run ? this.observeNotice(run.notices, canonicalKey, observationKey, sourceShape, nativeSessionId ?? '')
+            : this.observeOrphanNotice(id, canonicalKey, observationKey, sourceShape, nativeSessionId ?? '');
+          // A first, unambiguous observation may settle one generation. Mirrors,
+          // same-shape replays and ambiguous owners only add structural evidence.
+          if (outcome === 'new' && task && run && (!toolUseId || task.toolUseId === toolUseId)) {
+            this.settle(task, state, atMs, position, false);
+          }
         }
       }
     } else if (!lifecycleOnly && claudeInputText(entry) !== undefined && !entry.isMeta) {
