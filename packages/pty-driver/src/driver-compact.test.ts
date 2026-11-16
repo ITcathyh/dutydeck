@@ -1372,6 +1372,8 @@ describe('PTY Claude maintenance compaction', () => {
     (driver as any).timings.maintenanceTimeoutMs = 10_000;
     let current = idleScreen;
     (driver as any).backend.captureCurrentScreen = () => current;
+    (driver as any).backend.captureInputSubmissionScreen = () => null;
+    (driver as any).backend.kind = 'tmux';
     const writes = useRealWriter(data => {
       if (data === '/compact') { current = compactCommandMenu; output(screen(current)); }
       else if (data !== '\r' && data !== '\x15') { current = idleScreen.replace('❯', `❯ ${data}`); output(screen(current)); }
@@ -1387,8 +1389,24 @@ describe('PTY Claude maintenance compaction', () => {
     (driver as any).timings.maintenanceTimeoutMs = 1_000;
     let current = idleScreen;
     (driver as any).backend.captureCurrentScreen = () => current;
+    (driver as any).backend.captureInputSubmissionScreen = () => null;
+    (driver as any).backend.kind = 'tmux';
     const writes = useRealWriter(data => {
       if (data === '/compact') { current = compactCommandMenu.replace('Free up context', 'Free up context!'); output(screen(current)); }
+    });
+    const { pending } = await armCompact();
+    await expectMaintenanceRejected(pending);
+    expect(writes).toEqual(['/compact']);
+  });
+
+  it('does not downgrade an ordinary compact composer when strict capture has no cursor', async () => {
+    (driver as any).timings.maintenanceTimeoutMs = 1_000;
+    let current = idleScreen;
+    (driver as any).backend.captureCurrentScreen = () => current;
+    (driver as any).backend.captureInputSubmissionScreen = () => null;
+    (driver as any).backend.kind = 'tmux';
+    const writes = useRealWriter(data => {
+      if (data === '/compact') { current = compactDraftScreen; output(screen(current)); }
     });
     const { pending } = await armCompact();
     await expectMaintenanceRejected(pending);

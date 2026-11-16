@@ -23,7 +23,7 @@ import {
   type TerminalStream,
 } from '@dutydeck/shared';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '@dutydeck/cli-adapters';
-import { buildDutydeckRoutingBlock, ownedClaudeComposer } from '@dutydeck/cli-adapters';
+import { buildDutydeckRoutingBlock, ownedClaudeCompactMenu, ownedClaudeComposer } from '@dutydeck/cli-adapters';
 import { ProgramStatusFramingStream, captureOwnedTmuxIdentity, captureOwnedTmuxAbsence, stopOwnedTmux, processIdentityKey, verifyOwnedTmuxExit, verifyOwnedTmuxAbsence, PtyBackend, TmuxBackend, HerdrBackend, orphanedTmuxSocketMessage, type SessionBackend, type ProcessProbe, type OwnedTmuxIdentity, type OwnedTmuxExitProof, type OwnedTmuxAbsence } from '@dutydeck/session-backends';
 import { TerminalSnapshot } from '@dutydeck/terminal-renderer';
 import { IdleDetector, type IdleTimings } from './idle-detector.js';
@@ -1171,7 +1171,7 @@ export class PtyCliDriver implements AgentDriver {
   private async assertMaintenanceWrite(maintenance: NonNullable<PtyCliDriver['maintenanceActive']>, finalEnter: boolean): Promise<void> {
     if (!this.maintenanceSafetyClear()) throw new Error('Compaction submission blocked by new terminal work or a human wait');
     if (finalEnter) {
-      const screen = await this.readSubmissionScreen(maintenance.backend as SessionBackend & Partial<PtyLike>, true);
+      const screen = await this.readSubmissionScreen(maintenance.backend as SessionBackend & Partial<PtyLike>, true, true);
       const lines = screen.replace(/\r/g, '').split('\n').map(line => line.trim()).filter(Boolean);
       if (!ownedClaudeComposer(screen, '/compact', true) || this.maintenanceStatusBlocks(lines, false) || this.screenWaitsForHuman()) {
         throw new Error('Compaction final Enter blocked: the current composer is not the owned /compact draft');
@@ -2859,11 +2859,19 @@ export class PtyCliDriver implements AgentDriver {
     this.scheduleRawTerminal();
   }
 
-  private async readSubmissionScreen(target: SessionBackend & Partial<PtyLike>, requireInputCursor = false): Promise<string> {
+  private async readSubmissionScreen(target: SessionBackend & Partial<PtyLike>, requireInputCursor = false, allowCompactHiddenCursor = false): Promise<string> {
     if (target.captureCurrentScreen) {
-      const captured = requireInputCursor && claudeAdapters.has(this.adapter.id) && target.captureInputSubmissionScreen
-        ? await target.captureInputSubmissionScreen()
+      const strictCursor = requireInputCursor && claudeAdapters.has(this.adapter.id) && target.captureInputSubmissionScreen !== undefined;
+      let captured = strictCursor
+        ? await target.captureInputSubmissionScreen!()
         : await target.captureCurrentScreen(true);
+      if (strictCursor && captured === null && allowCompactHiddenCursor && target.kind === 'tmux') {
+        // Claude hides the hardware cursor on its exact slash menu. Only that
+        // native command menu may use a plain fresh capture; an ordinary
+        // composer still needs cursor evidence to preserve semantic padding.
+        captured = await target.captureCurrentScreen(true);
+        if (captured === null || !ownedClaudeCompactMenu(captured)) return '';
+      }
       if (captured === undefined || captured === null) return '';
       if (target.kind !== 'herdr') return captured;
       const size = await target.getPaneSize?.() ?? { cols: this.snapshot?.xterm.cols ?? DEFAULT_COLS, rows: this.snapshot?.xterm.rows ?? DEFAULT_ROWS };
@@ -2965,7 +2973,8 @@ export class PtyCliDriver implements AgentDriver {
       // backend offers one. Herdr ANSI is rendered before parsing, never
       // replaced by the asynchronous mirror.
       readScreen: () => guarded(() => this.readSubmissionScreen(target,
-        owner === 'maintenance-cleanup' || Boolean(submission.terminalWriteAttempted || submission.composerWritten))),
+        owner === 'maintenance-cleanup' || Boolean(submission.terminalWriteAttempted || submission.composerWritten),
+        owner === 'maintenance')),
     };
     if (target.kind === 'tmux' && target.getPaneSize) {
       proxy.beginExpandedInput = () => guarded(() => this.beginExpandedSubmissionInput(target));

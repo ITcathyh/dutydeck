@@ -327,13 +327,20 @@ function ownedCompactCommandMenuAtBottom(lines: string[]): boolean {
     && /^❯[  ]?\/compact$/.test(lines[selected + 3] ?? '');
 }
 
+/** Exact native slash-menu evidence; unlike a plain composer, its hidden cursor
+ * does not require reconstructing arbitrary user text from terminal padding. */
+export function ownedClaudeCompactMenu(screen: string): boolean {
+  const lines = screenLines(screen);
+  return ownedCompactPaletteAtBottom(lines) || ownedCompactCommandMenuAtBottom(lines);
+}
+
 /** Shared business/maintenance composer contract for Claude writers and driver guards. */
 export function ownedClaudeComposer(screen: string, expected: string, final = true, wrapWidths?: number[]): boolean {
   const rows = screenRows(screen);
   const lines = rows.map(line => line.trim());
   return ownedComposerAtBottom(lines, expected, final, rows, wrapWidths)
     || ownedMinimalComposer(lines, expected, final, rows)
-    || expected === '/compact' && (ownedCompactPaletteAtBottom(lines) || ownedCompactCommandMenuAtBottom(lines));
+    || expected === '/compact' && ownedClaudeCompactMenu(screen);
 }
 
 /** Measure native physical rows before accepting hard newlines or full-width wraps. */
