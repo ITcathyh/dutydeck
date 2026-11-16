@@ -24,9 +24,11 @@ export function readHistoryOutline(sqlite: Database.Database, sessionId: string,
     const { places, statuses } = completedPlaces(sqlite, sessionId, highWaterMark, highWaterMark);
     const selected = query.tail !== undefined ? places.slice(Math.max(0, places.length - query.tail)) : places;
     const commandCatalog = readCommandCatalog(sqlite, sessionId);
+    const backgroundWork = readLatestBackgroundWork(sqlite, sessionId);
     return { turns: selected.length ? projectTurns(sqlite, sessionId, selected, statuses) : [], highWaterMark, liveAfter: places.at(-1)?.[2] ?? 0,
       ...(query.tail !== undefined ? { places } : {}),
-      ...(commandCatalog ? { commandCatalog } : {}) };
+      ...(commandCatalog ? { commandCatalog } : {}),
+      ...(backgroundWork ? { backgroundWork } : {}) };
   })();
 }
 
@@ -238,6 +240,15 @@ function lowerBound(values: number[], value: number) {
   let low = 0, high = values.length;
   while (low < high) { const middle = (low + high) >> 1; if (values[middle]! < value) low = middle + 1; else high = middle; }
   return low;
+}
+
+function readLatestBackgroundWork(sqlite: Database.Database, sessionId: string): HistoryOutline['backgroundWork'] {
+  const row = cachedStatement(sqlite, `SELECT id,sequence,timestamp,data,task_id AS taskId,attempt_id AS attemptId FROM events INDEXED BY events_session_status
+    WHERE session_id=? AND type='status' AND CASE WHEN json_valid(data) THEN json_extract(data,'$.state') END='background_work'
+    ORDER BY sequence DESC LIMIT 1`).get(sessionId) as { id: string; sequence: number; timestamp: string; data: string; taskId: string | null; attemptId: string | null } | undefined;
+  if (!row) return undefined;
+  return { id: row.id, sequence: row.sequence, type: 'status', timestamp: row.timestamp, data: JSON.parse(row.data) as Record<string, unknown>,
+    ...(row.taskId ? { taskId: row.taskId } : {}), ...(row.attemptId ? { attemptId: row.attemptId } : {}) };
 }
 
 function readCommandCatalog(sqlite: Database.Database, sessionId: string): HistoryOutline['commandCatalog'] {

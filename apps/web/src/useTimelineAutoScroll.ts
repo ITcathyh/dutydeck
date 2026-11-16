@@ -35,6 +35,14 @@ export function useTimelineAutoScroll(scopeKey: string | undefined, contentVersi
     return () => cancelAnimationFrame(frame);
   }, [contentVersion, activityVersion, enabled]);
 
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!enabled || !container || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(followContentResize);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, [enabled, scopeKey]);
+
   const onScroll = () => {
     const container = containerRef.current;
     if (container && enabled) updateFollowing(isNearScrollBottom(container));

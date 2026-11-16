@@ -2,17 +2,19 @@
 
 > [← 返回 README](../../README.md) · [全部文档](../../README.md#docs) · [English](../en/upgrading.md)
 
-- **新版 Claude 粘贴不可见字符兼容**：Claude family 输入在写入终端前按 Claude 同一规则清理会触发人工复核的不可见码点，Dutydeck 的不可信边界转义也改用可见空格；合法 emoji 组合和文字组合序列保留。清理只作用于终端实际输入及对应原生回执，不改变任务保存的提示词、账本记录或其他 Agent。若已写入后仍出现 `Removed … invisible character · review and press Enter to send`，Dutydeck 不会自动再按 Enter 或重发，结果未知时会提示打开终端人工确认。
+- **新版 Claude 粘贴不可见字符兼容与 NFC 影响**：Claude family 输入在写入终端前按 Claude 同一规则清理会触发人工复核的不可见码点，合法 emoji 组合和文字组合序列保留。Claude 专属 sanitizer 只作用于终端实际输入及对应原生回执，不改变任务保存的提示词或账本记录，也不在其他 Agent 上运行。另一方面，共享 `wrapUntrusted` 的伪造边界 visible-space 变化会影响所有保存/派发调用方，包括其他调用它的 Agent；它只处理“原文不是 marker、经 Claude 清理后才重建”的伪造 `UNTRUSTED_DATA` 边界。Dutydeck 自己原有 marker 和伪造边界之外的普通正文不被这条规则改写；未调用 `wrapUntrusted` 的 Agent 和正文不额外处理。Claude 原生 keyed 输入还可能把 NFD 规范化成 NFC，因此终端正文及回执的码点数量和 UTF-8 字节数可能变化；存储的原始任务正文不变，这条 NFC 路径也不影响其他 Agent，但不能承诺 NFD 文件名、哈希或精确码点匹配逐字不变。若已写入后仍出现 `Removed … invisible character · review and press Enter to send`，Dutydeck 不会自动再按 Enter 或重发，结果未知时会提示打开终端人工确认。
 
 - **Claude 业务正文写入前复核空输入框**：屏幕静止后、首个业务字节前会核对底部完整空框，普通提示符、原生占位提示、权限栏和最多两行 statusLine 不受影响。重启后残留的人工草稿、未提交 `/compact` 或 slash 菜单会让本轮按未写入失败，处理后可重发，不再把业务正文拼到草稿后。任何 chunk、软换行或 Enter 已尝试后的外来变化仍按结果未知处理，不自动清空、再按 Enter 或重发；无新持久字段或迁移。tmux 读屏与写入非原子，不承诺排除所有其他终端同时写入。
+- **Claude 普通长多行输入使用 keyed 单次提交**：tmux、Herdr 和裸 PTY 上，每个逻辑行按不超过 96 个 UTF-8 字节切块且不切断 Unicode 码位；硬换行用“反斜杠 + Enter”构成 soft-newline，只有末尾显式 `submitInput()` 才是本轮最终 Enter。长多行正文不按整段括号粘贴触发新版 paste-burst 折叠，soft-newline 也不会被当成提交。
 
-- **自动 compact 与终端 raw write 互斥**：compact 在首个 await 前建立维护栅栏，有界等待已经开始的终端写入结束，期间新 raw write 按未写入拒绝，最终 Enter 前再核对。维护尚未写入时等待超时按未提交处理；`/compact` 已写入或 Enter 后发生冲突则保持维护结果未知，旧写未结算前不会放行后续输入。停止、detach 和取消可中断等待，业务正文不会自动重发；普通输入没有新增固定延迟。
+- **自动 compact 与终端 raw write 互斥**：compact 在首个 await 前建立维护栅栏，有界等待已经开始的终端写入结束，期间新 raw write 按未写入拒绝，最终 Enter 前再核对。维护尚未写入且没有冲突的等待超时按未提交处理；但与在途 raw write 冲突时，即使 `/compact` 尚未写入，也可能保留维护结果未知并阻塞后续输入，直到旧写结算且恢复得到证明。raw backend 返回只代表传输结束，还必须看到该写之后的新 output revision 并连续静止 500ms，旧 idle 不能解除 unknown。停止、detach 和取消可中断等待，业务正文不会自动重发；普通输入没有新增固定延迟。
 
 - **setup 终端预检不再迁移旧数据库**：检测终端 Agent 后，读取 `dutydeck.terminal_backend` 改为只读 SQLite 查询，不再打开仓储层。已有库不会因此跑 migration、写控制表或改变 schema 版本；后续 `--cwd` 校验失败或用户取消也保持原库不变。数据库、`configs` 表或设置键缺失时沿用 tmux 默认值，无效设置提示读取失败并跳过 tmux 预检。没有新增命令、设置或数据库迁移。
 - **doctor 逐条隔离无效机器人配置**：`lark.exposure` 遇到单条无效配置时只跳过该条并报告数量，继续评估其余有效机器人；非回环无认证、完全信任、广范围高危和风控关闭等危险组合仍按原规则 fail/warn，不再被同数组里的坏条目整体降为 skip。整份配置不可解析时仍降级，修复指引继续由「飞书配置」检查给出。
 - **doctor 核对停止 service 的 socket 实际状态**：daemon 记录中有 systemd unit 时，即使 service 当前未运行，也会通过 `TriggeredBy` 找到关联 `.socket`，再查询 `ActiveState` 与 `SubState`；只有 `active + listening` 才记为正在监听。查询失败、属性缺失或状态矛盾时返回 unknown，`lark.exposure` 降级为 skip，不再按 `.env` 的回环地址猜安全。socket 实际地址仍需用 `ListenStream=` 人工核对。
 
-- **旧 deny-all TraeX ACP 会话需要新建**：升级到包含 deny-all TraeX 原生权限限制的版本前创建的 deny-all TraeX ACP 会话，恢复时会报 `ACP_LAUNCHER_VERSION_CHANGED`，请用 `/new` 创建新会话。
+- **部分使用旧环境桥接的 TraeX ACP 会话需要新建**：只有保存环境中同时带 Dutydeck 旧桥接标记、旧 argv 指向 `env-launcher.mjs`、且恢复时 argv 已变化的相关 deny-all TraeX ACP 会话，才会报 `ACP_LAUNCHER_VERSION_CHANGED`；请用 `/new` 创建新会话。没有这些桥接条件的 clean direct-launch 旧会话走其他既有恢复路径，不承诺同一个错误码。
+- **TraeX 原生问题前后的恢复边界**：粘贴前发现输入框未就绪、出现原生追问或读屏失败时，提示词尚未写入；在终端回答或处理问题后可以安全重试。粘贴后、最终 Enter 前发现目录信任、hooks review、Question、其他编号菜单、外来草稿或未知控制行时，Dutydeck 不按 Enter，但已粘贴内容的结果未知；请先打开该会话终端核对实际草稿和执行记录，不要自动或手动直接重发同一任务。
 - **Claude 原生提问的选项说明（卡面变化）**：带 `description` 的 Claude 原生提问，卡片把说明从问题正文末尾移到对应选项下方显示，正文不再重复。说明是最长 1000 字符的可选纯文本，计入整卡长度预算，纯文本回退和全文附件里仍保留。没有说明的提问和旧记录布局不变，请求 ID、答案值和超时不变；旧程序会忽略该字段，继续显示 label/value。
 - **飞书取消/中断结果卡可显示操作者**：账本记录了主动中断操作者时，结果卡会按 open_id 解析一次成员姓名，能解析时增加「由某用户取消」。查询失败、权限不足、机器人或系统身份无法解析时保持原有卡面文案，不阻塞终态投递；没有中断操作者证据的排队取消不会猜测发起人。名称和回退结论随卡片输入冻结，发送重试、重启补偿与旧卡重绘不重复查询；卡片回调与账本字段不变，无需新增设置。
 - **Web 排队 / 立即中断的响应未知重试**：同一草稿的同一份完整提交在服务端已接受、浏览器却没收到响应时，手动重试会复用幂等键并取回原任务，不再重复执行；收到接受回执、编辑提交内容或选择「重新加入队尾」后，再次发送使用新键。`steer` 不自动重试，响应未知时先核对现有任务。旧客户端不传 `idempotencyKey` 的行为不变；给 `steer` 显式传该字段会在执行前返回 400。
@@ -33,7 +35,7 @@
 - **schema 过新错误更可行动**：`DATABASE_SCHEMA_TOO_NEW` 和备份版本不匹配错误会列出数据库版本、程序支持版本及带实际路径的只读 `dutydeck database execution-status --database <数据库路径>`。打开仍会被拒绝，不自动迁移或降级；切回旧代码不是数据库回滚，使用备份恢复会丢备份后的写入。
 - **doctor 暴露组合检查（CT6-10）**：新增 `lark.exposure`，把监听地址、显式 local-only、local/token/open 认证、socket 激活、完全信任、高危用户范围与风控模式放在同一项判断。只有非回环无认证叠加可运行完全信任、广范围高危用户和弱风控时才新增 warn/fail；正常配置不新增失败。报告只含非机密的范围与数量，不自动修改 `.env`、unit 或机器人配置。socket 实际地址不可知或机器人配置不可读时降级为 skip，不猜测；既有 `access.posture` 等检查及回滚行为不变。
 
-- **Claude 守卫按真实启动记录判定，缺策略时不再启动 Node**：每次真正拉起或重拉 Claude（包括恢复会话）时，记录本次实际设置里的守卫接线和当次能力探测结果；后续受保护轮次及服务重启后的终端接管优先使用这份记录，不再逐轮探测磁盘 CLI。磁盘 CLI 后续升级不会误拒旧进程，降级也不会让启动时缺少 `onFailure: "block"` 的进程获得错误信任；启动探测失败按该次启动记录，不在每轮重试。从旧版升级后，仍在运行但没有启动记录的终端只有在接管前已有 JSON 设置快照、且每份都可读并满足所请求守卫的精确 matcher、command type 和 marker 时才按旧版规则继续，不降低新启动的 `onFailure: "block"` 要求；inline-only、空快照、任一份快照不符，或启动记录本身损坏、字段非法、不可读，都保持拒绝，请按需重开会话（飞书发 `/new`）。另外，凭据守卫在会话 ID 为空时由 shell 直接放行，不启动 Node；本轮策略路径逐级可证明第一处失败为 `ENOENT` 时也保持零 Node 启动，但 `EACCES`、`ENOTDIR`、祖先不可读或不可进入、悬空或不可解析的符号链接及其他不确定状态都交给 Node，只有实际读取返回 `ENOENT` 才放行，其他读取错误、损坏 JSON 和脚本失败仍阻断。因此，策略目录权限损坏不再被误当成无策略放行；不缓存“无策略”结果，也没有新增设置、命令或数据库迁移。
+- **Claude 守卫只按有效启动记录恢复，缺策略时不再启动 Node**：每次真正拉起或重拉 Claude（包括恢复会话）时，记录本次实际设置里的守卫接线和当次能力探测结果。受保护轮次及服务重启后的终端接管只接受这份真实启动写入的 valid launch record：读取先 `lstat`，只接受 regular file；missing、malformed、字段不合法、不可读、symlink 和 dangling symlink 都保持拒绝，历史 settings snapshot 不能补救，也没有 `/proc` argv 收养协议。有效 record 继续恢复，旧版或探测失败的有效 record 按实际守卫接线核对，不因缺少新版字段单独拒绝；需要新记录时请重开会话（飞书发 `/new`）。另外，凭据守卫在会话 ID 为空时由 shell 直接放行，不启动 Node；本轮策略路径逐级可证明第一处失败为 `ENOENT` 时也保持零 Node 启动，但 `EACCES`、`ENOTDIR`、祖先不可读或不可进入、悬空或不可解析的符号链接及其他不确定状态都交给 Node，只有实际读取返回 `ENOENT` 才放行，其他读取错误、损坏 JSON 和脚本失败仍阻断。因此，策略目录权限损坏不再被误当成无策略放行；不缓存“无策略”结果，也没有新增设置、命令或数据库迁移。
 
 - **Claude 守卫失败阻断需要官方 Claude Code 2.1.295+**：Dutydeck 自己的凭据与计划守卫在官方 Claude Code 2.1.295+ 上新增 `onFailure: "block"`，超时及未被现有 `|| exit 2` 覆盖的失败不再退回普通权限流程；策略读取/JSON 解析错误和 active 计划脚本缺失也会拒绝。旧版、探测失败和未验证分支不写这个字段，受保护轮次照常提交，守卫超时维持原行为，显式拒绝和脚本崩溃仍由 `|| exit 2` 拦截。恢复或接管的新版终端核对 marker、精确 matcher、command type 和实际 `onFailure` 形状；旧版不因缺少该字段被判为未接线。Ask relay、PermissionRequest 和用户 hooks 不变；没有新增设置、命令或数据库迁移。
 

@@ -1,7 +1,11 @@
 import { test, expect, type Page } from '@playwright/test';
 import { readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { createRequire } from 'node:module';
 import { launchIsolatedTestServer, writeMockCli, REPO_ROOT, TASK_POLL_INTERVALS, type TestServerInstance } from './harness.js';
+
+const storageRequire = createRequire(resolve(REPO_ROOT, 'packages/storage/package.json'));
+const Database = storageRequire('better-sqlite3');
 
 // Synthetic ACP/PTY CLIs; real Chromium, HTTP, SQLite, workspace snapshots and permission decisions.
 test.describe('Calm Workbench browser acceptance', () => {
@@ -30,6 +34,17 @@ test.describe('Calm Workbench browser acceptance', () => {
       }
     }
     return id;
+  };
+
+  const appendBackground = (sessionId: string, tasks: Array<{ id: string; kind: string; state: string }>) => {
+    const db = new Database(join(instance.dataDir, 'dutydeck.db'));
+    try {
+      const sequence = (db.prepare('SELECT COALESCE(MAX(sequence),0)+1 AS sequence FROM events WHERE session_id=?').get(sessionId) as { sequence: number }).sequence;
+      const data = { state: 'background_work', count: tasks.filter(task => task.state === 'running').length, mainTurnEnded: true, tasks };
+      db.prepare('INSERT INTO events (id,session_id,sequence,type,timestamp,data,raw,task_id,attempt_id,settlement_id,source_key) VALUES (?,?,?,?,?,?,NULL,NULL,NULL,NULL,NULL)')
+        .run(`${sessionId}-browser-background-${sequence}`, sessionId, sequence, 'status', new Date().toISOString(), JSON.stringify(data));
+      return { sequence, data };
+    } finally { db.close(); }
   };
 
   test.beforeAll(async () => {
@@ -235,51 +250,77 @@ test.describe('Calm Workbench browser acceptance', () => {
     await noOverflow(page);
   });
 
-  test('native background status stays above the main timeline and disappears after completion', async ({ page }, info) => {
-    await open(page, alpha);
+  test('native background status survives real history and disappears on the live zero snapshot', async ({ page }, info) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    const id = await create('claude-code', 'Calm native background history');
+    await open(page, id);
+    const timeline = page.locator('[data-timeline-scroll]');
+    await expect(timeline).toBeVisible();
+    await expect(timeline).toHaveAttribute('data-history-complete', 'true');
     await expect(page.getByRole('status').filter({ hasText: '后台子任务运行中' })).toHaveCount(0);
     await page.screenshot({ animations: 'disabled', path: info.outputPath('timeline-without-background.png') });
 
-    let backgroundCount = 2;
-    let backgroundSequence: number | undefined;
-    await page.route(`**/api/sessions/${alpha}/events*`, async route => {
-      const response = await route.fetch();
-      const events = await response.json() as Array<Record<string, unknown> & { sequence: number }>;
-      const url = new URL(route.request().url());
-      const after = Number(url.searchParams.get('after') ?? 0);
-      const before = Number(url.searchParams.get('before') ?? Number.MAX_SAFE_INTEGER);
-      backgroundSequence ??= Math.max(after, ...events.map(event => event.sequence)) + 1;
-      const includeBackground = backgroundSequence > after && backgroundSequence < before;
-      await route.fulfill({ response, json: [...events, ...(includeBackground ? [{
-        id: 'browser-native-background', sequence: backgroundSequence, timestamp: '2026-11-15T00:00:00.000Z', type: 'status',
-        data: { state: 'background_work', count: backgroundCount, mainTurnEnded: true, tasks: backgroundCount ? [
-          { id: 'native-agent', toolUseId: 'native-tool', originInputId: 'native-input', kind: 'agent', state: 'running' },
-          { id: 'native-monitor', toolUseId: 'monitor-tool', originInputId: 'native-input', kind: 'monitor', state: 'running' }
-        ] : [] }
-      }] : [])] });
-    });
-    await page.reload();
+    const runningTasks = [
+      { id: 'native-agent', kind: 'agent', state: 'running' },
+      { id: 'native-monitor', kind: 'monitor', state: 'running' },
+      ...Array.from({ length: 998 }, (_, index) => ({ id: `native-terminal-${index}`, kind: index % 2 ? 'shell' : 'agent', state: index % 3 ? 'completed' : 'failed' }))
+    ];
+    const running = appendBackground(id, runningTasks);
     const background = page.getByRole('status').filter({ hasText: '主回合已结束 · 后台子任务运行中（2）' });
     await expect(background).toHaveCount(1);
-    expect(await background.evaluate(element => {
-      const panel = element.closest('#tabpanel-timeline');
-      const timeline = panel?.querySelector('[data-timeline-scroll]');
-      return element.parentElement === panel && panel?.firstElementChild === element
-        && Boolean(timeline && (element.compareDocumentPosition(timeline) & Node.DOCUMENT_POSITION_FOLLOWING));
-    })).toBe(true);
+    const runningHistory = await instance.request('GET', `/api/sessions/${id}/history`);
+    expect(runningHistory.status, runningHistory.text).toBe(200);
+    expect(runningHistory.json.liveAfter).toBeGreaterThanOrEqual(running.sequence);
+    expect(runningHistory.json.backgroundWork).toMatchObject({ sequence: running.sequence, data: { count: 2 } });
+    const foldedEvents = await instance.request('GET', `/api/sessions/${id}/events?after=${runningHistory.json.liveAfter}&limit=1000&direction=forward`);
+    expect(foldedEvents.json).toEqual([]);
+
+    const historyResponse = page.waitForResponse(response => new URL(response.url()).pathname === `/api/sessions/${id}/history` && response.request().method() === 'GET');
+    const eventsResponse = page.waitForResponse(response => {
+      const url = new URL(response.url());
+      return url.pathname === `/api/sessions/${id}/events` && url.searchParams.get('limit') === '1000' && response.request().method() === 'GET';
+    });
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    expect((await historyResponse).status()).toBe(200);
+    expect((await eventsResponse).status()).toBe(200);
+    await expect(timeline).toBeVisible();
+    await expect(timeline).toHaveAttribute('data-history-complete', 'true');
+    await expect(background).toHaveCount(1);
     await page.screenshot({ animations: 'disabled', path: info.outputPath('timeline-with-background.png') });
 
     await page.getByRole('button', { name: '结果检视', exact: true }).click();
     const inspector = page.getByRole('complementary', { name: '结果检视', exact: true });
-    await inspector.locator('summary').filter({ hasText: '详细用量与后台状态' }).click();
+    await inspector.locator('summary').filter({ hasText: '详细用量' }).click();
     await expect(inspector.getByRole('status').filter({ hasText: '后台子任务运行中' })).toHaveCount(0);
     await expect(background).toHaveCount(1);
     await inspector.getByRole('button', { name: '关闭结果检视', exact: true }).click();
 
-    backgroundCount = 0;
-    await page.reload();
-    await expect(page.getByRole('tab', { name: '对话', exact: true })).toBeVisible();
-    await expect(page.getByRole('status').filter({ hasText: '后台子任务运行中' })).toHaveCount(0);
+    await page.getByRole('tab', { name: '终端', exact: true }).click();
+    await expect(page.locator('.xterm')).toBeVisible();
+    await expect(background).toHaveCount(1);
+    await page.getByRole('tab', { name: '改动', exact: true }).click();
+    await expect(page.locator('#tabpanel-changes')).toBeVisible();
+    await expect(background).toHaveCount(1);
+    await page.getByRole('tab', { name: '对话', exact: true }).click();
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await background.locator('summary').click();
+    const details = background.locator('ul');
+    await expect(details.locator('li')).toHaveCount(1000);
+    const detailMetrics = await details.evaluate(element => ({ clientHeight: element.clientHeight, scrollHeight: element.scrollHeight, limit: innerHeight * 0.4 }));
+    expect(detailMetrics.clientHeight).toBeLessThanOrEqual(Math.ceil(detailMetrics.limit) + 1);
+    expect(detailMetrics.scrollHeight).toBeGreaterThan(detailMetrics.clientHeight);
+    expect(await timeline.evaluate(element => element.clientHeight)).toBeGreaterThan(0);
+    await noOverflow(page);
+
+    const zero = appendBackground(id, runningTasks.map(task => ({ ...task, state: 'completed' })));
+    await expect.poll(async () => (await instance.request('GET', `/api/sessions/${id}/history`)).json.backgroundWork?.sequence, { intervals: TASK_POLL_INTERVALS }).toBe(zero.sequence);
+    await expect(background).toHaveCount(0);
+    const completedHistory = await instance.request('GET', `/api/sessions/${id}/history`);
+    expect(completedHistory.json.liveAfter).toBeGreaterThanOrEqual(zero.sequence);
+    expect(completedHistory.json.backgroundWork.data.count).toBe(0);
+    expect(completedHistory.json.backgroundWork.data.tasks).toHaveLength(1000);
+    expect(completedHistory.json.backgroundWork.data.tasks.every((task: { state: string }) => task.state === 'completed')).toBe(true);
   });
 
   test('a 384px result inspector keeps real context and quota labels readable', async ({ page }, info) => {
@@ -292,7 +333,7 @@ test.describe('Calm Workbench browser acceptance', () => {
     await page.getByRole('button', { name: '结果检视', exact: true }).click();
     const inspector = page.getByRole('complementary', { name: '结果检视', exact: true });
     expect((await inspector.boundingBox())!.width).toBe(384);
-    await inspector.locator('summary').filter({ hasText: '详细用量与后台状态' }).click();
+    await inspector.locator('summary').filter({ hasText: '详细用量' }).click();
     const usage = inspector.getByRole('region', { name: '任务用量', exact: true });
     await expect(usage).toContainText('0.6%');
     await expect(usage).toContainText('42%');

@@ -1575,18 +1575,17 @@ it('places resumed native background lifecycle before the main timeline without 
   vi.mocked(api.tasks).mockResolvedValue([task]);
   const { client, container } = renderApp();
   const tabpanel = await screen.findByRole('tabpanel', { name: '对话' });
-  const background = await within(tabpanel).findByText('主回合已结束 · 后台子任务运行中（1）');
+  const background = await screen.findByText('主回合已结束 · 后台子任务运行中（1）');
+  const activity = await screen.findByLabelText('Codex 执行过程');
   const timeline = tabpanel.querySelector('[data-timeline-scroll]')!;
   expect(background.getAttribute('role')).toBe('status');
-  expect(background.parentElement).toBe(tabpanel);
   expect(background.compareDocumentPosition(timeline) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
   expect(screen.getAllByText('主回合已结束 · 后台子任务运行中（1）')).toHaveLength(1);
   await userEvent.click(await screen.findByRole('button', { name: '结果检视' }));
   const inspector = await screen.findByRole('dialog', { name: '结果检视' });
-  await userEvent.click(within(inspector).getByText('详细用量与后台状态'));
+  await userEvent.click(within(inspector).getByText('详细用量'));
   expect(within(inspector).queryByText('主回合已结束 · 后台子任务运行中（1）')).toBeNull();
   await userEvent.click(within(inspector).getByRole('button', { name: '关闭结果检视' }));
-  const activity = await screen.findByLabelText('Codex 执行过程');
   await userEvent.click(activity.querySelector('summary')!);
   expect(await within(activity).findByText('main round answer')).toBeTruthy();
   expect(client.getQueryData(['tasks', 's1'])).toEqual([task]);
@@ -1595,7 +1594,7 @@ it('places resumed native background lifecycle before the main timeline without 
   expect(container.querySelector('[data-timeline-scroll]')?.textContent).not.toContain('old-native-task');
 });
 
-it('keeps the timeline DOM unchanged when no native background work is active', async () => {
+it('adds no background status when no native background work is active', async () => {
   window.history.replaceState(null, '', '/sessions/no-background');
   mockAppApi({ sessions: [session('no-background')], events: [
     { id: 'input', sequence: 1, timestamp: '', type: 'text', data: { role: 'user', text: 'current business request' } },
@@ -1604,8 +1603,8 @@ it('keeps the timeline DOM unchanged when no native background work is active', 
   renderApp();
   const tabpanel = await screen.findByRole('tabpanel', { name: '对话' });
   await screen.findByLabelText('Codex 执行过程');
-  expect(screen.queryByText(/后台子任务运行中/)).toBeNull();
-  expect(tabpanel).toMatchSnapshot();
+  expect(screen.queryByText(/后台子任务运行中|后台任务详情/)).toBeNull();
+  expect(tabpanel.querySelector('[data-timeline-scroll]')).not.toBeNull();
 });
 
 
@@ -1856,7 +1855,7 @@ it.each([false, true])('preserves detailed usage and restores the evidence opene
   const opener = await screen.findByRole('button', { name: '查看验证证据' });
   await userEvent.click(opener);
   const inspector = await screen.findByRole(wide ? 'complementary' : 'dialog', { name: '结果检视' });
-  await userEvent.click(within(inspector).getByText('详细用量与后台状态'));
+  await userEvent.click(within(inspector).getByText('详细用量'));
   const usage = await within(inspector).findByRole('region', { name: '任务用量' });
   expect(within(usage).getByRole('progressbar', { name: '上下文已用' }).getAttribute('aria-valuenow')).toBe('30');
   expect(within(usage).getByRole('progressbar', { name: '5h额度已用' }).getAttribute('aria-valuenow')).toBe('10');

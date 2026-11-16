@@ -44,6 +44,37 @@ describe('TimelineView complete history', () => {
     expect(container.scrollTop).toBe(1500);
   });
 
+  it('follows sibling-driven viewport resizes only while visible and following', () => {
+    const observers: Array<{ callback: () => void; active: boolean; observed?: Element }> = [];
+    vi.stubGlobal('ResizeObserver', class {
+      private readonly registration: { callback: () => void; active: boolean; observed?: Element };
+      constructor(callback: () => void) { this.registration = { callback, active: true }; observers.push(this.registration); }
+      observe(element: Element) { this.registration.observed = element; }
+      disconnect() { this.registration.active = false; }
+    });
+    const props = { activeSessionId: 's1', eventsLoading: false, timeline: [event], timelineSections: sections, awaitingAnswer: false, hasOngoingActivity: false, latestUserIndex: -1, activeOutputLabel: 'Codex' };
+    const view = render(<TimelineView {...props}/>);
+    const container = view.container.querySelector('[data-timeline-scroll]') as HTMLElement;
+    Object.defineProperties(container, { scrollHeight: { configurable: true, value: 1200 }, clientHeight: { configurable: true, value: 500 } });
+    container.scrollTop = 700;
+    Object.defineProperty(container, 'clientHeight', { configurable: true, value: 400 });
+    act(() => { for (const observer of observers) if (observer.active) observer.callback(); });
+    expect(container.scrollTop).toBe(1200);
+
+    container.scrollTop = 100;
+    fireEvent.scroll(container);
+    act(() => { for (const observer of observers) if (observer.active) observer.callback(); });
+    expect(container.scrollTop).toBe(100);
+
+    fireEvent.click(screen.getByRole('button', { name: '回到最新消息' }));
+    container.scrollTop = 100;
+    view.rerender(<TimelineView {...props} visible={false}/>);
+    Object.defineProperty(container, 'clientHeight', { configurable: true, value: 250 });
+    act(() => { for (const observer of observers) if (observer.active) observer.callback(); });
+    expect(container.scrollTop).toBe(100);
+    expect(observers.filter(observer => observer.observed === container).every(observer => !observer.active)).toBe(true);
+  });
+
 });
 
 it('bounds rendered turns, restores disclosures after scrolling, and resets a changed session', async () => {

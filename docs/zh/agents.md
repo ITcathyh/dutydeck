@@ -22,7 +22,7 @@ Codex 终端 Agent 会从 `CODEX_HOME/config.toml` 读取 `[profiles.<name>]` �
 
 Dutydeck 自己生成的 Claude 凭据守卫（终端与内置 ACP）和计划守卫（终端）在官方 Claude Code **2.1.295 或更高版本**上带 `onFailure: "block"`：守卫超时或未被脚本内显式拒绝覆盖的执行失败也阻断工具调用。会话 ID 为空时，凭据守卫由 shell 直接放行，不启动 Node；对正常的单组件会话 ID 和已绝对规范化的策略根，策略路径逐级检查，只有之前的祖先均可读、可进入且第一处失败可证明为 `ENOENT` 时才由 shell 快放。含 slash、`..` 等异常会话 ID、超过保守长度的 ID 或路径、异常 policyRoot 和不可证明的 cwd 状态都进入 Node fail closed，不把 `test` 的其他错误当成文件不存在。`EACCES`、`ENOTDIR`、祖先不可读或不可进入、悬空或不可解析的符号链接及其他不确定状态同样进入 Node；Node 只对合法会话 ID 读取时的 `ENOENT` 放行，其他读取或 JSON 解析失败按拒绝处理，不缓存“无策略”结果。计划阶段已启用但守卫脚本缺失同样按拒绝处理。Ask relay、PermissionRequest 和用户自己的 hooks 不增加这个字段。
 
-启动前探测使用与 Agent 相同的清洗后子进程环境，最多 3 秒并按可执行文件身份缓存；内置 ACP launcher 独立探测同一个实际 Claude 可执行文件。旧版、探测失败和 Seed / Relay / Genius 等未验证分支不写这个字段，凭据策略生效或 deny-all 的轮次也照常提交，守卫超时维持原来的放行行为，显式拒绝和脚本崩溃仍由 `|| exit 2` 拦截。每次真正拉起或重拉终端 Claude（包括恢复会话）时，Dutydeck 记录本次实际设置里的守卫 marker、精确 matcher、command type、`onFailure: "block"` 和当时的探测结果；受保护轮次不再探测磁盘 CLI。服务重启后接管仍在运行的终端优先使用这份启动记录；仅当记录不存在时，才检查接管前会话私有目录已有的 JSON 设置，至少一份且每份都可读、结构合法，并满足所请求守卫的精确 matcher、command type 和 marker，才按旧版规则继续（不要求 `onFailure: "block"`）。inline-only、空快照或任一份快照不符都拒绝；记录本身损坏、字段非法或不可读时不能使用快照回退。磁盘 CLI 后续升降级不改变已运行进程的判定；不降低新启动的 `onFailure: "block"` 要求。`dutydeck doctor` 的默认 Agent 可用性检查会对识别出的旧版官方 Claude Code 给出升级提醒。
+启动前探测使用与 Agent 相同的清洗后子进程环境，最多 3 秒并按可执行文件身份缓存；内置 ACP launcher 独立探测同一个实际 Claude 可执行文件。旧版、探测失败和 Seed / Relay / Genius 等未验证分支不写这个字段，凭据策略生效或 deny-all 的轮次也照常提交，守卫超时维持原来的放行行为，显式拒绝和脚本崩溃仍由 `|| exit 2` 拦截。每次真正拉起或重拉终端 Claude（包括恢复会话）时，Dutydeck 记录本次实际设置里的守卫 marker、精确 matcher、command type、`onFailure: "block"` 和当时的探测结果；受保护轮次不再探测磁盘 CLI。服务重启后的接管只接受这份真实启动写入的 valid launch record：先 `lstat`，只接受 regular file；missing、malformed、字段不合法、不可读、symlink 和 dangling symlink 都拒绝，不能用历史 JSON settings snapshot 回退，也不从 `/proc` argv 收养。有效 record 继续恢复，旧版或探测失败的有效 record 只按真实守卫接线核对，不因缺少新版字段单独拒绝；需要新记录时请重开会话。磁盘 CLI 后续升降级不改变已运行进程的判定，新启动仍要求 `onFailure: "block"`。`dutydeck doctor` 的默认 Agent 可用性检查会对识别出的旧版官方 Claude Code 给出升级提醒。
 
 ## 1. 自定义 Agent (`DUTYDECK_AGENTS_JSON`)
 
@@ -83,10 +83,14 @@ Dutydeck 自己生成的 Claude 凭据守卫（终端与内置 ACP）和计划�
 ### 终端任务状态与恢复
 
 Claude Code 终端会话优先使用 OSC 7501 状态信号判断忙碌、等待审批和完成；信号不可用时自动回退到屏幕识别，后续有效信号可重新接管；与本轮输入绑定、且写在最新忙态信号之后的原生终态（包括守护进程重启接回的轮次），或真实审批已裁决时，可解除丢失信号留下的忙态。
+Claude family 在 tmux、Herdr 和裸 PTY 上统一使用 keyed 输入：每个逻辑行按不超过 96 个 UTF-8 字节切块，不切断 Unicode 码位；普通长多行中的硬换行以“反斜杠 + Enter”构成 soft-newline，只有末尾显式 `submitInput()` 才是本轮最终 Enter，不使用整段括号粘贴触发 paste-burst 折叠。最终 Enter 必须看到本次 Dutydeck 写入的完整草稿，普通空格、tab 和硬换行都是正文；任意 prefix/suffix、空串或 `[Pasted text #N]` 外形都不能授权提交。首个业务字节之前的人工草稿、slash 菜单、权限/信任页或读屏失败属于 not-written，处理后可重试；从第一次真实写入尝试起，后续读屏、内容或 backend 结果无法确认时均为 unknown，不自动再 Enter、清空或重发。
+Claude 自身可能先做 NFC，因此终端正文与原生回执的码点数量和 UTF-8 字节数可能变化；Dutydeck 存储的原始任务正文不变，这条 Claude 专属 sanitizer/NFC 路径也不在其他 Agent 上运行，NFD 文件名、哈希和精确码点匹配不能承诺逐字不变。共享 `wrapUntrusted` 的伪造边界 visible-space 变化会影响所有保存/派发调用方，包括其他调用它的 Agent；它只对“原文不是 marker、经 Claude 清理后才重建”的伪造 `UNTRUSTED_DATA` 边界插入可见空格。Dutydeck 自己原有 marker 和伪造边界之外的普通正文不被这条规则改写；未调用 `wrapUntrusted` 的 Agent 和正文不额外处理。该字符串保护不宣称模型一定会服从或已经遭到利用。
 
 Claude 家族终端沿用机器人的 `idleCompactEnabled` / `idleCompactHours` 设置：会话达到空闲阈值后，下一条消息先以维护输入执行原生 `/compact`，再提交这条消息。维护输入不创建业务轮次，也不产生业务 `completed`。写入前、转写追平后和最终按键前都会检查空输入框、后台工作、权限 Hook、待回答问题与人工等待；业务提交和另一次压缩不能同时取得终端所有权。
 
 主动压缩成功必须同时看到本次 `/compact` 的原生输入回执、同一原生会话的手动压缩边界，以及输入 `promptId` 和边界 UUID 都对得上的压缩摘要；旧记录、自动压缩、其他会话或后续业务轮次都不能顶替。已实测 Claude Code 2.1.220 的记录格式。明确失败（包括上下文不足）和未实测的非 Claude CLI 会继续原业务消息，非 Claude CLI 不会写入 `/compact`。取消只中断维护等待，原业务消息不写入；超时最多等 5 分钟，先中断压缩，确认输入框恢复后按失败继续原业务消息。若维护已经发出而终端恢复无法证明，原消息按“未提交”失败，不能把它当作普通的“结果未知”自动重发。之后每次发送或再次压缩都会重新确认当前终端，确认恢复后该次操作正常继续；仍无法确认时本次不写入，可稍后重发，持续如此可发 `/new` 开新会话。
+严格提交捕获通常要求明确的反显硬件光标、光标后仅有终端 padding 且 ANSI/plain 文本一致。唯一例外是精确原生 `/compact` 菜单会隐藏硬件光标：严格捕获返回空时，另一次新鲜普通 tmux capture 必须完整匹配精确底部 palette，或 Claude 2.1.295 的对齐 `/compact` + `/autocompact` 菜单与下方自有 `/compact` composer，writer 与最终 Enter 才接受该证据。普通 `/compact` composer、普通业务草稿、Herdr 和其他 Agent 不使用这个窄例外，也没有 alternate-screen 授权通道。
+compact 与 Dutydeck raw terminal write 互斥。即使在 `/compact` 写入前，与在途 raw write 冲突也可能保留维护 unknown；必须等旧写结算、看到该写之后的新 output revision 并连续静止 500ms，不能用旧 idle 解除。极端反复超时或取消导致 compact 证据容量耗尽时需要 `/new` 开新会话，不会自动重发或丢弃旧证据。
 
 终端模式（`pty-cli`）CLI 空闲时自行退出后，下一条任务会先确认旧进程已退出并退役，再按既有原生会话恢复规则重建终端；无法确认安全恢复时，该任务会以“未提交”失败。已提交但结果未知的任务仍需核对，不自动重发。
 
@@ -113,10 +117,12 @@ Codex 和 TraeX 恢复原生会话时，只使用能确认属于当前会话的�
 Codex 和 TraeX 终端任务按当前原生轮次的成功、失败或取消事件结算，部分回答不抵消随后出现的失败；取消记为中断。Codex 和 TraeX 恢复中的轮次即使尚无正文输出，只要确认了对应输入和失败或取消终态，也会按该终态结束。TraeX 可读取含大型模型目录的会话元数据，正常接收最终回答并结束任务；恢复会先读完同一会话的旧日志段，再读取新段；新版 canonical 记录保留过程、输入回执和最终回答，并去除镜像重复。
 
 TraeX 用完整终端画面区分忙碌与就绪，兼容独立一行的快捷键页脚；正文或草稿里的状态引用不作为活动页脚。Codex 支持 `›` / `»` 输入提示及 0.164.0 仅显示模型与每周剩余额度的状态栏，信任和更新菜单不视为输入就绪。Cursor 普通输入只发一次 Enter，保留多行输入和普通任务排队；不附带空输入的第二次控制动作。Claude Code、Seed、Relay 的空输入框可被识别为空闲，以便继续处理待确认任务的恢复操作；支持空输入框与权限模式栏之间最多两行自定义 `statusLine`，恢复会话后也能提交首条消息。
+TraeX 在粘贴前发现未就绪 composer、原生追问或读屏失败时，提示词尚未写入，终端处理后可以重试。粘贴后、最终 Enter 前发现目录信任、hooks review、Question、其他编号菜单、外来草稿或未知控制行时，Dutydeck 不按 Enter，但已粘贴内容结果未知；先检查该会话终端和执行记录，不要直接重发。
 
 Codex 当前父轮明确启动的直接子任务若报告额度耗尽或请求限流，Web 和飞书进度记录会显示固定诊断，不展示上游错误原文。父任务继续；Dutydeck 不因该诊断自动重试或切换账号。这是有界的尽力观察，恢复前已启动的子任务不会补报；TraeX 尚未启用此诊断。
 
 Claude 的后台 Agent、Bash 和 Monitor 按原生任务 ID 单独计数。主轮已有明确回答、且 CLI 没有继续等待子任务时可以完成，后台任务继续运行；旧版 pending 计数和明确的 Waiting 画面仍等待合并结果。晚到通知保留原输入归属，不成为下一轮回答。重启会重建后台状态，非持久 Monitor 按 CLI 期限到期；`/clear` 后旧日志仅用于核对已知后台任务的停止通知。Claude 在已知项目 memory 目录成功执行 Write/Edit 后，最终结果保留同轮正文和后记；普通业务文件或 Bash 命令不触发此规则。
+后台通知无法唯一归属、正文或记录证据有歧义时，任务继续保持运行中，Dutydeck 不猜测完成；旧版缺 tool-use-id 的通知只在 task 已知且候选唯一时兼容。
 
 Codex 明确报告模型容量已满、且本次没有业务工具或权限调用时，最多自动续跑两次，分别等待 30 秒和 90 秒，每次单独记录执行 attempt。停止或新输入取消尚未提交的续跑；每次提交重新检查原请求者的当前权限，重启保留等待时间和取消状态。提交或完成结果未知时不自动重放；429、额度、鉴权和普通服务端错误不属于模型容量错误。多步骤工作会等待这条已核验的自动重试链，成功后继续下游步骤；人工另行重跑的结果不会被自动认领。
 
@@ -165,7 +171,7 @@ env GIT_ALLOW_PROTOCOL= git --no-pager --no-optional-locks -c core.fsmonitor=fal
 
 Codex ACP 的非完全信任会话在每轮原生请求（包括恢复后）使用 `untrusted` 审批策略、用户审查和只读沙箱，写入或提权命令先交给 Dutydeck 审批；不会使用 Codex ACP 的自动审查。Codex 原生策略仍可直接放行其判定安全的读取，因此不保证每个只读动作都产生审批请求；`approve-reads` 也会放行执行端明确声明的读取和搜索。`full-trust` 明确使用原生完全访问策略。上述设置只作用于该子进程，不修改全局 Codex 配置。
 
-Codex ACP 通过独立管道转发原生输出，读取长文档等大结果时会等待下游读取。主 Agent 退出后，正常 stdout/stderr 目的地背压没有 5 秒截断期限：已读尾部会等目的地恢复并完整写完，再按原有退出码或信号语义收尾，持久 ACP 会话身份不变。只有遗留源描述符或自有进程组退出无法证明时才有界失败；诊断分别给出 `sourcesClosed`、`destinationFlushed`、`groupExited`，正常目的地背压不算遗留源。此时 launcher 保留会话工作区 `.dutydeck/launchers/` 下的 report，ACP adapter 将对应进程树纳入后续收养和停止，证明退出后才删除 report。普通 Agent 非零退出没有这份内部 cleanup-unknown 标记，即使数值与内部保留码相同也不会误走该路径。
+Codex ACP 通过独立管道转发原生输出，读取长文档等大结果时会等待下游读取。主 Agent 退出后，正常 stdout/stderr 目的地背压没有 5 秒截断期限：已读尾部会等目的地恢复并完整写完，再按原有退出码或信号语义收尾，持久 ACP 会话身份不变。只有遗留源描述符或自有进程组退出无法证明时才有界失败；诊断分别给出 `sourcesClosed`、`destinationFlushed`、`groupExited`，正常目的地背压不算遗留源。此时 launcher 保留会话工作区 `.dutydeck/launchers/` 下的 report，内部协议追加一行 `dutydeck_cleanup_unknown {"sourcesClosed":...,"destinationFlushed":...,"groupExited":...}` 并使用内部退出码 120；adapter 同时核验精确标记与退出码才把对应进程树纳入后续收养和停止，证明退出后才删除 report。普通 exit 1 或没有精确 report 标记的普通裸 exit 120 不属于 cleanup-unknown；这些内部标记不是新增任务结果枚举、设置、CLI、数据库字段或外部 launcher 协议。
 
 默认值按入口略有不同：`lark create` 默认 `ask`，所选 Agent 不支持审批时必须加 `--full-trust`；Web 向导里，所选 Agent 支持审批则默认 `ask`，否则默认 `full-trust`。
 

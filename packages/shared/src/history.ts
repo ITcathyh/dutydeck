@@ -1,4 +1,5 @@
 import type { EventArtifactReference } from './event-content.js';
+import type { AgentEvent } from './index.js';
 
 /** A disposable read projection. Its text is never a canonical event or execution receipt. */
 export interface HistoryTurnSummary {
@@ -34,6 +35,8 @@ export interface HistoryOutline {
   places?: HistoryTurnPlace[];
   highWaterMark: number;
   commandCatalog?: { sequence: number; commands: Array<{ name: string; description: string }>; truncated: boolean };
+  /** Latest native background lifecycle, even when its canonical event is inside a completed turn. */
+  backgroundWork?: Omit<AgentEvent<Record<string, unknown>>, 'sessionId' | 'raw'>;
   /** Canonical events after this point belong to the still-active suffix. */
   liveAfter: number;
 }

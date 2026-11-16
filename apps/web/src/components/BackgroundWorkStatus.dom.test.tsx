@@ -33,4 +33,26 @@ describe('BackgroundWorkStatus', () => {
     render(<BackgroundWorkStatus events={[status({ count: 1, mainTurnEnded: true }), user]}/>);
     expect(screen.getByRole('status').textContent).toBe('后台子任务运行中（1）');
   });
+
+  it('resets details when the keyed session changes', () => {
+    const { container, rerender } = render(<BackgroundWorkStatus key="a" events={[status({ count: 1, tasks: [{ id: 'task-a', kind: 'agent', state: 'running' }] })]}/>);
+    const details = container.querySelector('details')!;
+    details.open = true;
+    rerender(<BackgroundWorkStatus key="b" events={[status({ count: 1, tasks: [{ id: 'task-b', kind: 'agent', state: 'running' }] })]}/>);
+    expect(container.querySelector('details')).not.toBe(details);
+    expect(container.querySelector('details')?.open).toBe(false);
+  });
+
+  it('does not rescan an unchanged event window on a parent rerender', () => {
+    let reads = 0;
+    const source = [status({ count: 1 }), status({ count: 2 }, 2)];
+    const events = new Proxy(source, { get(target, property, receiver) {
+      if (typeof property === 'string' && /^\d+$/.test(property)) reads++;
+      return Reflect.get(target, property, receiver);
+    } });
+    const view = render(<BackgroundWorkStatus events={events}/>);
+    const initialReads = reads;
+    view.rerender(<BackgroundWorkStatus events={events}/>);
+    expect(reads).toBe(initialReads);
+  });
 });
