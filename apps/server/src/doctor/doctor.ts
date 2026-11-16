@@ -280,7 +280,7 @@ export async function runDoctor(
     : snapshot!.status;
   const record = dependencies.daemonRecord
     ? dependencies.daemonRecord()
-    : snapshot?.state ?? readDaemonStatus(daemonDir);
+    : snapshot ? snapshot.state : readDaemonStatus(daemonDir);
   const logFile = dependencies.daemonLogFile
     ?? (dependencies.daemonRecord ? undefined : daemonPaths(daemonDir).logFile);
   // root 检查看守护进程：Agent 继承的是它的身份。读不到守护进程的 uid 时才退回当前命令的。
