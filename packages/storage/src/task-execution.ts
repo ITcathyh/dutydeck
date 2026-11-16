@@ -815,6 +815,10 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
         return { task: t, currentAttempt: values.find(a => a.attemptId === t.currentAttemptId), attempts: values, steering: bySteeringTask.get(t.id), blockers: [...sharedBlockers, ...(t.status === 'queued' ? admission : []), ...inputBlockers(t)] };
       });
     }).deferred(); },
+    hasQueuedOrRunningTasks(sessionId) {
+      requireLedger();
+      return Boolean(cached("SELECT 1 FROM tasks WHERE session_id=? AND status IN ('queued','running') LIMIT 1").get(sessionId));
+    },
     getUnresolvedTasks(sessionId) {
       requireLedger();
       return cached("SELECT t.id,t.status FROM (SELECT task_id FROM task_attempts WHERE session_id=? AND state IN ('preparing','active','reconcile_required','legacy_unresolved') UNION SELECT task_id FROM task_steering_operations WHERE session_id=? AND state IN ('pending','unknown')) unresolved JOIN tasks t ON t.id=unresolved.task_id ORDER BY t.created_at,t.id")

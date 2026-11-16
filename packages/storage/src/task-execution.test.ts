@@ -99,6 +99,24 @@ describe('task execution ledger',()=>{
       expect(repos.execution.getTaskExecutionState('missing')).toBeUndefined();
     } finally {resolveWorkspace.mockRestore();}
   });
+  it('reports only queued or running tasks for idle maintenance while preserving unresolved evidence', () => {
+    const {x,repos}=ready();
+    expect(repos.execution.hasQueuedOrRunningTasks('s')).toBe(false);
+    expect(repos.execution.hasQueuedOrRunningTasks('missing')).toBe(false);
+    const queued=accepted(x).task!;
+    expect(repos.execution.hasQueuedOrRunningTasks('s')).toBe(true);
+    const claimed=x.claimNext(f)!;
+    expect(claimed.task!.status).toBe('running');
+    expect(repos.execution.hasQueuedOrRunningTasks('s')).toBe(true);
+    const active=x.markSubmissionPending(af(claimed.attempt!),intent()).attempt!;
+    const unknown=x.markReconcileRequired(af(active),{reasonId:'idle-probe-unknown',code:'DISCONNECTED',evidenceRefs:[]});
+    expect(unknown.task!.status).toBe('reconcile_required');
+    expect(repos.execution.hasQueuedOrRunningTasks('s')).toBe(false);
+    expect(repos.execution.getUnresolvedTasks('s')).toEqual([{id:queued.id,status:'reconcile_required'}]);
+    expect(x.settleAttempt(af(unknown.attempt!),'idle-probe-settled',complete()).task!.status).toBe('completed');
+    expect(repos.execution.hasQueuedOrRunningTasks('s')).toBe(false);
+    expect(repos.execution.getUnresolvedTasks('s')).toEqual([]);
+  });
   it('atomically limits work-item claims to six globally and three per work, retaining unknown and unproven stops', async () => {
     const {x,repos}=ready();
     const directory=mkdtempSync(join(tmpdir(),'work-permits-'));dirs.push(directory);
@@ -146,10 +164,13 @@ describe('task execution ledger',()=>{
     initial.x.settleAttempt(af(a),'original-finished',complete());
     const op=initial.repos.execution.getTaskExecution(second.id)!.steering!;
     expect(op).toMatchObject({state:'pending',revision:1});expect(initial.repos.execution.getTaskExecution(second.id)?.attempts).toEqual([]);
+    expect(initial.repos.execution.getUnresolvedTasks('s')).toEqual([{id:second.id,status:'reconcile_required'}]);
+    expect(initial.repos.execution.hasQueuedOrRunningTasks('s')).toBe(false);
     initial.claim!.release();initial.repos.close();opened.splice(opened.findIndex(entry=>entry.repos===initial.repos),1);
     const next=open(filename);next.claim=next.repos.control.attachRuntime('replacement');const x=next.repos.execution.bind(next.claim);
     x.resolveQueuedSteering(f,op.operationId,op.controller,'unknown');
     expect(next.repos.execution.getUnresolvedTasks('s')).toEqual([{id:second.id,status:'reconcile_required'}]);
+    expect(next.repos.execution.hasQueuedOrRunningTasks('s')).toBe(false);
     expect(()=>x.claimNext(f)).toThrow(/STEERING_DELIVERY_UNKNOWN/);
     expect(()=>x.promoteQueued(f,second.id,3,{operationId:'promote',actor:begin.actor,interrupt:false})).toThrow(/TASK_NOT_QUEUED/);
     expect(()=>x.cancelQueued(f,second.id,3,decision('cancel','cancel'))).toThrow(/TASK_NOT_QUEUED/);
@@ -201,6 +222,9 @@ describe('task execution ledger',()=>{
           expect(repos.execution.getTaskExecution(settled.taskId)?.attempts).toEqual([settled]);
           expect(repos.execution.getAttempt(af(settled))).toEqual(settled);
           expect(parse.mock.calls.length).toBeLessThan(12);
+          const parsed = parse.mock.calls.length;
+          expect(repos.execution.hasQueuedOrRunningTasks('s')).toBe(false);
+          expect(parse.mock.calls.length).toBe(parsed);
         } finally { parse.mockRestore(); }
       }
       expect(repos.execution.getSessionExecutions('s')).toHaveLength(10000);
@@ -211,6 +235,9 @@ describe('task execution ledger',()=>{
       const plan = sql.prepare("EXPLAIN QUERY PLAN SELECT 1 FROM task_attempts WHERE session_id=? AND state='legacy_unresolved' LIMIT 1").all('s');
       expect(JSON.stringify(plan)).toContain('task_attempts_session_state');
       expect(JSON.stringify(plan)).not.toContain('SCAN task_attempts');
+      const activePlan = sql.prepare("EXPLAIN QUERY PLAN SELECT 1 FROM tasks WHERE session_id=? AND status IN ('queued','running') LIMIT 1").all('s');
+      expect(JSON.stringify(activePlan)).toContain('tasks_session_created');
+      expect(JSON.stringify(activePlan)).not.toContain('SCAN tasks');
       const unresolvedPlan = sql.prepare("EXPLAIN QUERY PLAN SELECT t.id,t.status FROM (SELECT task_id FROM task_attempts WHERE session_id=? AND state IN ('preparing','active','reconcile_required','legacy_unresolved') UNION SELECT task_id FROM task_steering_operations WHERE session_id=? AND state IN ('pending','unknown')) unresolved JOIN tasks t ON t.id=unresolved.task_id ORDER BY t.created_at,t.id").all('s','s');
       expect(JSON.stringify(unresolvedPlan)).toContain('task_attempts_session_state');
       expect(JSON.stringify(unresolvedPlan)).toContain('task_steering_session_state');
@@ -220,6 +247,7 @@ describe('task execution ledger',()=>{
       sql.prepare("UPDATE task_attempts SET state='legacy_unresolved',submission_state='legacy_unknown',json=? WHERE id=?").run(JSON.stringify(legacy), legacy.attemptId);
       expect(repos.execution.getTaskExecution(settled.taskId)?.blockers).toContainEqual({ sessionId: 's', code: 'LEGACY_MULTIPLE_EXECUTIONS' });
       expect(repos.execution.getUnresolvedTasks('s')).toEqual([{ id: 'history_task_1', status: 'cancelled' }]);
+      expect(repos.execution.hasQueuedOrRunningTasks('s')).toBe(false);
     } finally { sql.close(); }
   });
 

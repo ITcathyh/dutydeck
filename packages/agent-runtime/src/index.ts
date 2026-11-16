@@ -4070,7 +4070,7 @@ export class DutydeckRuntime {
       || !!this.options.awaitingAnswer?.(id) || driver.hasBackgroundWork?.() === true
       || driver.isDetachedForShutdown?.() === true || driver.isIdle?.() !== true
       || this.repos.execution.getUnresolvedTasks(id).length > 0
-      || this.repos.execution.getSessionExecutions(id).some(value => value.task.status === 'queued' || value.task.status === 'running');
+      || this.repos.execution.hasQueuedOrRunningTasks(id);
   }
 
   private async inspectIdleCpu(id: string, driver: AgentDriver, at: number): Promise<void> {

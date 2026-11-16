@@ -117,6 +117,7 @@ export function withinDeployWindow(windows: Array<{ start: number; end: number }
 
 export const BUILD_OUTPUTS = [
   'dist/cli.js',
+  'dist/internal-agent-cli.js',
   'dist/lark-sdk.mjs',
   'dist/program-status-relay.js',
   'dist/assets/plugin-validation/cli.js',
@@ -246,15 +247,21 @@ function copyRelease(build: BuiltCheckout, release: string): void {
   }
 }
 
-/** 激活前递归核对静态与动态相对 import，再用目标 node 试加载入口并打开 SQLite。 */
+/** 激活前递归核对静态与动态相对 import，再用目标 node 试加载两个入口并打开 SQLite。 */
 function trialLoad(execPath: string, release: string, version: string, deps: DeployDeps): string | undefined {
   const cli = join(release, 'dist', 'cli.js');
-  const missing = missingRelativeImports(cli);
+  const agentCli = join(release, 'dist', 'internal-agent-cli.js');
+  const missing = [cli, agentCli].flatMap(entry => missingRelativeImports(entry));
   if (missing.length) return `发布目录的相对 import 闭包不完整：${missing.join('、')}`;
   const probe = spawnSync(execPath, [cli, '--version'], { cwd: release, encoding: 'utf8', timeout: 60_000 });
   if (probe.status !== 0 || probe.stdout.trim() !== version) {
     const detail = (probe.stderr || probe.stdout || '').trim().split('\n').at(-1) || probe.error?.message || `退出码 ${probe.status ?? '未知'}`;
     return `用 ${execPath} 试加载 ${cli} 失败：${detail}`;
+  }
+  const agentProbe = spawnSync(execPath, [agentCli, 'agent', '--help'], { cwd: release, encoding: 'utf8', timeout: 60_000 });
+  if (agentProbe.status !== 0 || !agentProbe.stdout.startsWith('QUICKSTART')) {
+    const detail = (agentProbe.stderr || agentProbe.stdout || '').trim().split('\n').at(-1) || agentProbe.error?.message || `退出码 ${agentProbe.status ?? '未知'}`;
+    return `用 ${execPath} 试加载 ${agentCli} 失败：${detail}`;
   }
   const sqlite = (deps.checkSqlite ?? checkSqliteDriver)({ execPath, resolveFrom: cli });
   return sqlite.ok ? undefined : `SQLite 预检失败：${describeSqliteDriverFailure(sqlite)}`;
@@ -842,7 +849,7 @@ async function deployLocked(options: DeployCliOptions, deps: DeployDeps, target:
     manifest.new_cli_sha256 = sha256(join(release, 'dist', 'cli.js'));
     if (previousRelease && existsSync(join(previousRelease, 'dist', 'cli.js'))) manifest.previous_cli_sha256 = sha256(join(previousRelease, 'dist', 'cli.js'));
 
-    info(`试加载：${target.execPath} ${join(release, 'dist', 'cli.js')} --version`);
+    info(`试加载：${target.execPath} ${join(release, 'dist', 'cli.js')} --version；${target.execPath} ${join(release, 'dist', 'internal-agent-cli.js')} agent --help`);
     const trial = trialLoad(target.execPath, release, build.version, deps);
     if (trial) {
       rmSync(release, { recursive: true, force: true });

@@ -107,8 +107,7 @@ describe('terminal initial screen', () => {
     expect(frames.join('')).toContain('SCREENAFTER_CAPTURE');
     gap(100);
     output('x'.repeat(300000)); resolve('OBSOLETE');
-    await Promise.resolve(); await Promise.resolve();
-    expect(calls).toBe(3);
+    await vi.waitFor(() => expect(calls).toBe(3));
     output('LATEST_TAIL'); resolve('LATEST');
     await new Promise(done => setTimeout(done, 10));
     expect(frames.slice(-2).join('')).toContain('LATESTLATEST_TAIL');

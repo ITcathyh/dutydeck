@@ -11,9 +11,12 @@ import type { PullRequestCliAction, PullRequestCliInput } from './pull-request-c
 import { pluginBindingFields, agentFields, agentConfigFields, botFields, channelBotFields, fieldsHelp, groupFields, groupBindingFields, groupBindingCreateFields, type SettingsAction, type SettingsCliInput } from './settings-cli.js';
 import { agentCommandHelp } from './lark/agent-command.js';
 import { addAgentCommands } from './agent-cli.js';
+import { addSessionRelayCommands, type SessionRelayCliHandlers } from './session-relay-cli.js';
 import { Option, Command, InvalidArgumentError } from 'commander';
 import { DatabaseCliError } from './database-cli-error.js';
 import type { PluginCliAction, PluginCliOptions } from './plugins/cli.js';
+
+export type { SessionRelayCliOptions } from './session-relay-cli.js';
 
 export interface CliOptions {
   host?: string;
@@ -134,16 +137,6 @@ export interface UpdateCliOptions extends CliOptions {
   drainTimeout?: string;
 }
 
-export interface SessionRelayCliOptions {
-  requestId?: string;
-  /** ask 超时秒数 */
-  timeout?: string;
-  /** 以 JSON 输出结果而非裸答案 */
-  json?: boolean;
-  choices?: string;
-  multiple?: boolean;
-}
-
 export interface AuthDatabaseCliOptions {
   database?: string;
 }
@@ -225,7 +218,7 @@ export interface SessionNamesCommandOptions {
 /** App Secret 只从文件描述符读入，不出现在命令行参数里。 */
 export type SettingsCommandInput = Omit<SettingsCliInput, 'appSecret' | 'apiKey'> & { appSecretFd?: string; apiKeyFd?: string };
 
-export interface CliHandlers {
+export interface CliHandlers extends SessionRelayCliHandlers {
   backup?(operation: 'create' | 'inspect' | 'restore', options: { database?: string; dataDir?: string; output?: string; archive?: string; target?: string }): void | Promise<void>;
   plugin?(action: PluginCliAction, args: string[], options: PluginCliOptions): void | Promise<void>;
   recovery?(operation: RecoveryOperation, sessionId: string, options: RecoveryCliOptions): void | Promise<void>;
@@ -291,13 +284,6 @@ export interface CliHandlers {
   scheduleRequest?(input: ScheduleRequestCliInput): void | Promise<void>;
   pullRequest?(action: PullRequestCliAction, argument: string | undefined, input: PullRequestCliInput): void | Promise<void>;
   sessionHerdr?(args: string[]): void | Promise<void>;
-  sessionReport?(options: { status: string; question?: string; summary?: string }): void | Promise<void>;
-  sessionSend?(text: string): void | Promise<void>;
-  sessionAskResult?(requestId: string, options: SessionRelayCliOptions): void | Promise<void>;
-  sessionAskWait?(requestId: string, options: SessionRelayCliOptions): void | Promise<void>;
-  sessionAsk?(question: string, options: SessionRelayCliOptions): void | Promise<void>;
-  sessionNativeAsk?(): void | Promise<void>;
-  sessionPermissionHook?(): void | Promise<void>;
   databaseExecutionStatus?(options: DatabaseExecutionStatusCliOptions): void | Promise<void>;
   databaseUpgradeExecution?(options: DatabaseUpgradeExecutionCliOptions): void | Promise<void>;
   databaseRetireLegacy?(options: DatabaseRetireLegacyCliOptions): void | Promise<void>;
@@ -1025,54 +1011,7 @@ alarm=<JSON> (the old flat alarm subscription) still works for one release and i
     .allowExcessArguments()
     .addHelpText('after', herdrHelp)
     .action((_args, _options, command) => handlers.sessionHerdr?.(command.args));
-  session.command('native-ask')
-    .description('Bridge a native Claude AskUserQuestion hook from stdin to the current session')
-    .action(() => handlers.sessionNativeAsk?.());
-  session.command('permission-hook')
-    .description('Bridge a native Claude PermissionRequest hook from stdin to Dutydeck approval')
-    .action(() => handlers.sessionPermissionHook?.());
-  session.command('send')
-    .description('Publish an in-turn progress event; presentation depends on session settings')
-    .argument('<text>', 'Message content')
-    .action(text => handlers.sessionSend?.(text));
-  session.command('report')
-    .description('报告当前任务的收尾状态；不阻塞等待回答')
-    .requiredOption('--status <status>', 'ready（完成）、waiting（等你决定）、blocked（受阻）、dropped（无需处理）')
-    .option('--question <text>', '等你决定时的一个具体问题，waiting 必填')
-    .option('--summary <text>', '一句话说明，blocked 必填原因')
-    .action(options => handlers.sessionReport?.(options));
-  session.command('ask')
-    .description('Ask the user a question and block until they answer')
-    .argument('<question>', 'Question to ask')
-    .option('--request-id <id>', 'Stable request identity; reuse only for the same question and execution attempt')
-    .option('--timeout <seconds>', 'Seconds to wait for an answer (default: 300, maximum: 86400)')
-    .option('--choices <json>', 'JSON array of {label, value?} options; card selections return value or label, text replies return verbatim')
-    .option('--multiple', 'Allow multiple selections (requires --choices)')
-    .option('--json', 'Print the full result as JSON instead of the bare answer')
-    .action((question, options) => handlers.sessionAsk?.(question, options))
-    .addHelpText('after', `
-Exit codes:
-  0    answered — the answer is printed to stdout
-  2    usage error (missing session credentials, bad arguments)
-  3    relay unavailable (server unreachable, session ended, question cancelled)
-  124  timed out with no answer
-
-Examples:
-  $ dutydeck session send "已完成迁移，正在跑回归"
-  $ answer=$(dutydeck session ask "要继续发布吗？") && echo "user said: $answer"
-  $ dutydeck session ask "选哪个方案？" --choices '[{"label":"方案甲","value":"a"},{"label":"方案乙","value":"b"}]' --timeout 60
-  $ dutydeck session ask "要检查哪些项？" --choices '[{"label":"代码"},{"label":"文档"}]' --multiple --json`);
-
-  session.command('ask-result')
-    .description('Read a saved answer and continuation state; this does not authorize execution')
-    .argument('<request-id>', 'Request identity printed by session ask')
-    .option('--json', 'Print the saved request as JSON')
-    .action((requestId, options) => handlers.sessionAskResult?.(requestId, options));
-  session.command('ask-wait')
-    .description('Wait again for the same question while its original execution attempt remains valid')
-    .argument('<request-id>', 'Request identity printed by session ask')
-    .option('--json', 'Print the full result as JSON')
-    .action((requestId, options) => handlers.sessionAskWait?.(requestId, options));
+  addSessionRelayCommands(session, handlers);
 
   // canonical 命令是 `dutydeck migrate`；`dutydeck botmux` 保留为兼容别名，二者行为完全一致。
   // 别名输出的 JSON command 字段必须保持历史值（botmux.discover/plan/archive），由 action 按 invokedAs 区分。

@@ -340,6 +340,8 @@ export interface ExecutionRepository {
   getTaskExecution(taskId: string, context?: TaskExecutionReadContext): TaskExecutionProjection | undefined;
   getAttempt(ref: AttemptRef & SessionFence): TaskAttempt | undefined;
   getSessionExecutions(sessionId: string, context?: TaskExecutionReadContext): TaskExecutionProjection[];
+  /** Whether the session currently has queued or running Tasks, without decoding execution history. */
+  hasQueuedOrRunningTasks(sessionId: string): boolean;
   getUnresolvedTasks(sessionId: string): Array<{ id: string; status: ExecutionTask['status'] }>;
   /** 所有会话里停在结果未知、等人处理的当前执行（任务与执行都是 reconcile_required）。 */
   getReconcileRequiredAttempts(): TaskAttempt[];

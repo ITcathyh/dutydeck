@@ -1,5 +1,4 @@
 import type { Command } from 'commander';
-import { executeLocalRuntimeRequest } from '../local-runtime-request.js';
 
 export function registerBusinessToolCli(program: Command) {
   const root = program.command('tool').description('Call authorized plugin business tools from the current task');
@@ -20,6 +19,7 @@ export function registerBusinessToolCli(program: Command) {
   const grants = program.command('tool-grant').description('Manage explicit business-tool permissions as installation owner');
   const target = (command: Command) => command.option('--url <url>', 'Runtime URL').option('--database <path>', 'Runtime database for target discovery');
   const manage = async (method: 'GET' | 'PUT' | 'DELETE', path: string, options: { url?: string; database?: string }, body?: unknown) => {
+    const { executeLocalRuntimeRequest } = await import('../local-runtime-request.js');
     const result = await executeLocalRuntimeRequest({ method, endpoint: path, url: options.url, database: options.database, errorSpec: { databaseRequired: 'PLUGIN_TOOL_DATABASE_REQUIRED', daemonUnavailable: 'PLUGIN_TOOL_DAEMON_UNAVAILABLE', localRuntimeRequired: 'PLUGIN_TOOL_LOCAL_RUNTIME_REQUIRED', requestFailed: 'PLUGIN_TOOL_REQUEST_FAILED' }, createError: (code, message) => new Error(`${code}: ${message}`), ...(body === undefined ? {} : { body }) });
     process.stdout.write(JSON.stringify(result) + '\n');
   };

@@ -4,9 +4,68 @@
  *
  * Run: pnpm vitest run packages/terminal-renderer
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { createRequire } from 'node:module';
+import type { TerminalScreen } from '@dutydeck/shared';
 import { TerminalSnapshot } from './index.js';
+
+type SnapshotInternals = {
+  serializer: { serialize(): string };
+  sgrMouse: boolean;
+  cursorVisible: boolean;
+  textCache: Map<string, string>;
+};
+
+function internals(snap: TerminalSnapshot): SnapshotInternals {
+  return snap as unknown as SnapshotInternals;
+}
+
+function capture(snap: TerminalSnapshot): Promise<TerminalScreen> {
+  return new Promise(resolve => snap.capture(resolve));
+}
+
+async function restoredViewport(screen: TerminalScreen): Promise<string> {
+  const restored = new TerminalSnapshot(screen.cols, screen.rows);
+  try {
+    await restored.writeAndFlush(screen.data);
+    return restored.viewportText();
+  } finally { restored.dispose(); }
+}
+
+type CaptureRecord = {
+  screen: TerminalScreen;
+  text: string;
+  viewport: string;
+  structure: string;
+  lastLine: string;
+};
+
+/** Compare capture with the previous uncached serialization at the same write boundary. */
+async function captureRecord(snap: TerminalSnapshot): Promise<CaptureRecord> {
+  const { record, uncached } = await new Promise<{
+    record: CaptureRecord;
+    uncached: TerminalScreen;
+  }>(resolve => snap.capture(screen => {
+    const state = internals(snap);
+    resolve({
+      record: {
+        screen,
+        text: snap.text(),
+        viewport: snap.viewportText(),
+        structure: snap.viewportText({ preserveStructure: true }),
+        lastLine: snap.lastLine(),
+      },
+      uncached: {
+        data: state.serializer.serialize() + (state.sgrMouse ? '\x1b[?1006h' : '')
+          + (state.cursorVisible ? '' : '\x1b[?25l'),
+        cols: snap.xterm.cols,
+        rows: snap.xterm.rows,
+      },
+    });
+  }));
+  expect(record.screen).toEqual(uncached);
+  return record;
+}
 
 /** xterm's write() is async; flush a macrotask so the buffer catches up. */
 async function flush(): Promise<void> {
@@ -187,4 +246,125 @@ it('joins only xterm-wrapped rows for logical composer recognition', async () =>
     expect(snap.viewportText({ preserveStructure: true })).toContain('x'.repeat(18) + '\ntail');
     expect(snap.viewportText({ preserveStructure: true, joinWrapped: true })).toBe('❯ ' + 'x'.repeat(18) + 'tail\nnext hard line');
   } finally { snap.dispose(); }
+});
+
+describe('TerminalSnapshot capture cache', () => {
+  it('reuses the serializer base within a revision and invalidates it on writes and resize', async () => {
+    const snap = new TerminalSnapshot(40, 4);
+    const serialize = vi.spyOn(internals(snap).serializer, 'serialize');
+    try {
+      await snap.writeAndFlush('\x1b[31mred\x1b[0m');
+      const first = await capture(snap);
+      expect(await capture(snap)).toEqual(first);
+      expect(serialize).toHaveBeenCalledTimes(1);
+
+      await snap.writeAndFlush('\x1b[32mgreen');
+      await capture(snap);
+      expect(serialize).toHaveBeenCalledTimes(2);
+
+      snap.write('!');
+      await flush();
+      await capture(snap);
+      expect(serialize).toHaveBeenCalledTimes(3);
+
+      await snap.writeAndFlush('\x1b[?1049h\x1b[H\x1b[38;2;1;2;3mALT');
+      expect((await capture(snap)).data).toContain('\x1b[?1049h');
+      expect(serialize).toHaveBeenCalledTimes(4);
+
+      await snap.writeAndFlush('\x1b[?1006h\x1b[?25l');
+      const modesMiss = await capture(snap);
+      const modesHit = await capture(snap);
+      expect(modesHit).toEqual(modesMiss);
+      expect(modesHit.data.endsWith('\x1b[?1006h\x1b[?25l')).toBe(true);
+      expect(serialize).toHaveBeenCalledTimes(5);
+
+      await snap.writeAndFlush('\x1b[?1006l\x1b[?25h\x1b[0m');
+      expect((await capture(snap)).data.endsWith('\x1b[?1006h\x1b[?25l')).toBe(false);
+      expect(serialize).toHaveBeenCalledTimes(6);
+
+      snap.resize(20, 3);
+      expect(await capture(snap)).toMatchObject({ cols: 20, rows: 3 });
+      expect(serialize).toHaveBeenCalledTimes(7);
+    } finally {
+      serialize.mockRestore();
+      snap.dispose();
+    }
+  });
+
+  it('captures queued writes at their own parsed boundaries', async () => {
+    const snap = new TerminalSnapshot(20, 3);
+    try {
+      snap.write('A');
+      const a = capture(snap);
+      snap.write('B');
+      const ab = capture(snap);
+      const [screenA, screenAB] = await Promise.all([a, ab]);
+      expect(await restoredViewport(screenA)).toBe('A');
+      expect(await restoredViewport(screenAB)).toBe('AB');
+    } finally { snap.dispose(); }
+  });
+
+  it('keeps alternating instances isolated', async () => {
+    const a = new TerminalSnapshot(20, 3);
+    const b = new TerminalSnapshot(20, 3);
+    try {
+      await a.writeAndFlush('AAAA\x1b[?1006h\x1b[?25l');
+      await b.writeAndFlush('BBBB');
+      const a1 = await capture(a);
+      const b1 = await capture(b);
+      expect(await capture(a)).toEqual(a1);
+      expect(await capture(b)).toEqual(b1);
+      expect(a1.data).not.toBe(b1.data);
+      expect(a1.data.endsWith('\x1b[?1006h\x1b[?25l')).toBe(true);
+      expect(b1.data.endsWith('\x1b[?1006h\x1b[?25l')).toBe(false);
+    } finally { a.dispose(); b.dispose(); }
+  });
+
+  it('clears cached snapshots and text on dispose', async () => {
+    const snap = new TerminalSnapshot(20, 3);
+    const cache = internals(snap).textCache;
+    await snap.writeAndFlush('content');
+    await capture(snap);
+    snap.text();
+    expect(cache.size).toBeGreaterThan(0);
+    snap.dispose();
+    expect(cache.size).toBe(0);
+  });
+
+  it('matches uncached captures and every text read across modes, alt screen and resize', async () => {
+    const snap = new TerminalSnapshot(40, 4);
+    try {
+      await snap.writeAndFlush(Array.from({ length: 12 }, (_, i) => `line-${i}-\x1b[31m红色`).join('\r\n'));
+      const initial = await captureRecord(snap);
+      expect(await captureRecord(snap)).toEqual(initial);
+
+      const modes = [
+        '\x1b[?1h', '\x1b[?66h', '\x1b[?2004h', '\x1b[4h', '\x1b[?6h',
+        '\x1b[?45h', '\x1b[?1004h', '\x1b[?7l', '\x1b[?9h', '\x1b[?1000h',
+        '\x1b[?1002h', '\x1b[?1003h', '\x1b[?1006l', '\x1b[?25h',
+        '\x1b[?1006h', '\x1b[?25l', '\x1bc',
+      ];
+      for (const mode of modes) {
+        await snap.writeAndFlush(mode);
+        await captureRecord(snap);
+      }
+
+      await snap.writeAndFlush('\x1b[?1049h\x1b[H\x1b[38;2;1;2;3mALT-界面\x1b[?1000h\x1b[?1006h\x1b[?25l');
+      const alt = await captureRecord(snap);
+      expect(await captureRecord(snap)).toEqual(alt);
+      expect(alt.screen.data).toContain('\x1b[?1049h');
+      expect(alt.screen.data.endsWith('\x1b[?1006h\x1b[?25l')).toBe(true);
+
+      await snap.writeAndFlush('\x1b[2;3H#');
+      await captureRecord(snap);
+      snap.resize(20, 3);
+      expect((await captureRecord(snap)).screen).toMatchObject({ cols: 20, rows: 3 });
+      snap.resize(60, 8);
+      expect((await captureRecord(snap)).screen).toMatchObject({ cols: 60, rows: 8 });
+      await snap.writeAndFlush('\x1b[?1049l');
+      await captureRecord(snap);
+      await snap.writeAndFlush('\x1b[4l\x1b[?6l\x1b[?45l\x1b[?1004l\x1b[?7h\x1b[?1003l\x1b[?2004l');
+      await captureRecord(snap);
+    } finally { snap.dispose(); }
+  });
 });
