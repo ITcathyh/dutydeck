@@ -129,5 +129,7 @@ export const loadTurnHistory = (sessionId: string, turn: HistoryTurnSummary, sig
 export async function loadProjectedHistory(sessionId: string, outline: HistoryOutline, signal?: AbortSignal): Promise<EventWindow> {
   const events = await loadHistoryRange(sessionId, outline.liveAfter, undefined, signal);
   if ((events.at(-1)?.sequence ?? outline.liveAfter) < outline.highWaterMark) throw new Error('活动记录尚未追平历史水位，请重试');
-  return { ...createEventWindow(events), outline, highWaterMark: Math.max(outline.highWaterMark, events.at(-1)?.sequence ?? 0) };
+  const resumed: DockEvent[] = outline.backgroundWork ? [outline.backgroundWork] : [];
+  const window = mergeReconciledEvents(createEventWindow(resumed), events);
+  return { ...window, outline, highWaterMark: Math.max(outline.highWaterMark, events.at(-1)?.sequence ?? 0) };
 }

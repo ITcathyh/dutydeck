@@ -44,11 +44,12 @@ dutydeck update --dist-tag next
 dutydeck doctor
 ```
 
-没有 daemon 状态记录时，`dutydeck status` 与 `dutydeck doctor` 会在当前配置的主机、端口上短超时检查 `/health` 和 `/health/ready`，不跟随重定向。只有两个响应都符合 Dutydeck 的健康结构，才报告「未登记前台服务」；`status --json` 相应增加可选字段 `unregisteredForeground: { address, ready }`，原有 `running`、`processStatus`、`ready` 等字段保持原值。未就绪时只设置新字段里的 `ready=false`。识别不到时维持原诊断；探测只覆盖 CLI 当前配置端口，不知道另一个 shell 临时传入的 `--port`。doctor 会把已识别服务占用的配置端口视为自身占用；未登记进程没有可核验的飞书连接记录，因此只提示查看启动终端，不建议重复 `dutydeck start`。
+没有 daemon 状态记录时，`dutydeck status` 与 `dutydeck doctor` 会在当前配置的主机、端口上短超时检查 `/health` 和 `/health/ready`，不跟随重定向。两个响应都必须成功、带 `x-dutydeck-product: dutydeck` 产品头（header 名大小写不敏感），并保持原有 JSON 结构：`/health` 为 `{"ok":true}`，`/health/ready` 为 `{"ok":true,"ready":<boolean>,"pending":<string[]>}`。只有这些都满足才报告「未登记前台服务」；旧版或其他服务只返回相同通用 JSON 而没有产品头，不会被识别，也不会消除端口冲突。`status --json` 仍只增加可选字段 `unregisteredForeground: { address, ready }`，原有 `running`、`processStatus`、`ready` 等字段保持原值。daemon 目录、原始记录与进程状态来自同一次实例快照，状态文件只读取一次。仅探测明文 HTTP 的 loopback 或本机网卡，远端 host 不发送请求。已登记、残留或不可验证记录不做这项探测。
+根 server flags 会用于这次实例寻址：显式 `dutydeck --host 127.0.0.1 --port 14310 status`、`dutydeck --local-only --port 14310 doctor` 和 `dutydeck daemon status` 都读取已接受参数；显式 flag 覆盖进程环境，`--local-only` 优先选择 `127.0.0.1`。当前目录没有 `.env` 时，status/doctor 可补读已定位实例服务根的 `.env`；当前目录已有 `.env` 时不与服务根文件混拼。人类可读 status 识别前台后仍指向原启动终端。明确识别未登记前台时，`update` 会在任何 npm 调用前拒绝，默认实例的 `restart` 也不会另起 daemon 冒充重启；请在原启动终端按 Ctrl-C，再用原参数重跑原命令。`update --force` 只跳过任务等待，不越过这个拒绝。`restart --unit <unit>` 明确操作 systemd 实例，继续既有 unit restart 逻辑，不执行默认/当前目录实例的前台预检。
 
 `dutydeck update [version]` 的版本参数只接受精确 semver，不接受 range、tag 或选项字符串；未传版本时仍按 `latest` 或显式 `--dist-tag` 解析。安装、版本核对或重启失败时保留原错误，并追加 `npm install --global @byted/dutydeck@<实际旧版本> && dutydeck restart` 作为手工回退步骤；它直接重装旧包，不依赖旧版 CLI 是否认识 `update [version]`。旧版本缺失或不是精确 semver 时会明确说明无法安全生成命令。不会自动回滚，也不会越过部署窗口。
 
-`update` 在安装前排空正在执行的任务时，等待、状态无法核验、可恢复任务、查询失败与超时提示都明确写「更新」；需要跳过等待时使用 `dutydeck update --force`，不是 `restart --force`。等待条件、排水顺序与可恢复任务保留策略和重启相同；`restart` / `deploy` 的原有进度与错误文案不变。
+`update` 在安装前排空正在执行的任务时，等待、状态无法核验、查询失败与超时提示都明确写「更新」；需要跳过等待时使用 `dutydeck update --force`，不是 `restart --force`。排水条件与提示文案和重启共用，但 **systemd 下 update 不启用 restart 的可恢复 tmux 保留路径**，这些任务须结束，或用 `--force` 越过等待；不会自动重发。`restart` / `deploy` 的原有进度、错误文案与保留策略不变，部署无法确认任务或超时时应重新执行原 `dutydeck deploy` 命令并加 `--force`。
 
 ### setup、首启与终端预检
 
@@ -99,17 +100,18 @@ dutydeck logs --unit dutydeck.service -n 100
 主服务可以把同机其他 Dutydeck 实例登记为静态 peer。每个 peer 先用自己的数据库与端口以 `--local-only` 启动，再把它的地址写进**主服务**的 `.env`：
 
 ```bash
-# peer 示例（两个实例分别使用自己的数据目录与端口）
+# 终端 1：peer A 一直保持前台运行；结束时在这个终端按 Ctrl-C
 dutydeck --local-only --port 4311 --database /path/to/peer-a/dutydeck.db --no-lark-listen
+# 终端 2：另开一个终端启动 peer B；结束时同样按 Ctrl-C
 dutydeck --local-only --port 4312 --database /path/to/peer-b/dutydeck.db --no-lark-listen
 
 # 主服务 .env：单行 JSON；id 用小写字母、数字和连字符
 DUTYDECK_INSTANCES_JSON='[{"id":"peer-a","name":"Peer A","url":"http://127.0.0.1:4311"},{"id":"peer-b","name":"Peer B","url":"http://127.0.0.1:4312"}]'
 ```
 
-地址必须使用 `http:` URL；peer 必须是本机 `--local-only` HTTP 服务，因为主服务转发时会去掉自己的 Cookie、Authorization、Origin 等请求头，不能把这套转发当成远程认证代理。主服务通过 `/api/instances/<id>/...` 转发到对应 peer 的 `/api/...`，实例列表可从 `/api/instances` 查看。
+地址必须使用 `http:` URL；peer 必须是本机 `--local-only` HTTP 服务，因为主服务转发时会去掉自己的 Cookie、Authorization、Origin 等请求头，不能把这套转发当成远程认证代理。主服务通过 `/api/instances/<id>/...` 转发到对应 peer 的 `/api/...`。`/api/instances` 只能核对已加载条目的 `id` / `name`，不返回 URL，不能用它证明新地址已生效；地址需核对主服务配置并通过已知代理请求验证。
 
-这份列表只在主服务组装时读取一次。新增、删除 peer 或修改地址后，要重启主服务才会生效；peer 自己的地址或数据库变化也要同步改这里。它是静态配置，不做动态发现，也不会因健康检查失败自动摘除实例；peer 暂时不可用时请求会报错，但配置仍保留。
+这份列表只在主服务组装时读取一次。新增、删除 peer 或修改地址后，要重启主服务才会生效；peer 自己的地址变化也要同步改这里。peer 数据库路径不在这份 JSON 中，数据库变化不要求修改主服务实例列表。它是静态配置，不做动态发现，也不会因健康检查失败自动摘除实例；peer 暂时不可用时请求会报错，但配置仍保留。
 
 ## 2. 版本发布与部署 (`deploy`)
 

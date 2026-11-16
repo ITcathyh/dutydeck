@@ -130,7 +130,7 @@ it('memoizes event derivations across input and inspection while refreshing live
   fireEvent.change(screen.getByRole('textbox', { name: '消息' }), { target: { value: 'draft remains' } });
   await userEvent.click(screen.getByRole('button', { name: '查看验证证据' }));
   const inspector = await screen.findByRole('dialog', { name: '结果检视' });
-  await userEvent.click(within(inspector).getByText('详细用量与后台状态'));
+  await userEvent.click(within(inspector).getByText('详细用量'));
   const contextMeter = () => within(inspector).getByRole('progressbar', { name: '上下文已用' }).getAttribute('aria-valuenow');
   expect(contextMeter()).toBe('30');
   await userEvent.click(within(inspector).getByText('明细'));
@@ -171,7 +171,7 @@ it('memoizes event derivations across input and inspection while refreshing live
   expect(screen.queryByRole('button', { name: /\/plugin-new/ })).toBeNull();
   await userEvent.click(screen.getByRole('button', { name: '查看验证证据' }));
   const secondInspector = await screen.findByRole('dialog', { name: '结果检视' });
-  await userEvent.click(within(secondInspector).getByText('详细用量与后台状态'));
+  await userEvent.click(within(secondInspector).getByText('详细用量'));
   expect(within(secondInspector).getByRole('progressbar', { name: '上下文已用' }).getAttribute('aria-valuenow')).toBe('20');
 });
 

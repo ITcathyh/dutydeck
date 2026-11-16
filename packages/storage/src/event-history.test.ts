@@ -79,6 +79,23 @@ it('retains a bounded latest native command catalog independently of completed c
   expect((await repos.events.listHistoryOutline!('s')).commandCatalog).toEqual({ sequence: 6, commands: [{ name: 'safe', description: 'still usable' }], truncated: true });
 });
 
+it('retains the latest native background snapshot after its canonical events enter completed history', async () => {
+  const repos = await fixture();
+  await repos.events.append(event(1, 'text', { role: 'user', text: 'instruction' }, 'a', 'attempt-a'));
+  await repos.events.append(event(2, 'text', { text: 'main answer' }, 'a', 'attempt-a'));
+  await repos.events.append(event(3, 'status', { state: 'background_work', count: 1, mainTurnEnded: true, tasks: [{ id: 'native-agent', kind: 'agent', state: 'running' }] }));
+  const running = await repos.events.listHistoryOutline!('s');
+  expect(running.liveAfter).toBe(3);
+  expect(running.backgroundWork).toMatchObject({ id: 'e3', sequence: 3, type: 'status', data: { count: 1, tasks: [{ id: 'native-agent', state: 'running' }] } });
+  expect(running.backgroundWork).not.toHaveProperty('raw');
+  expect(await repos.events.list('s', running.liveAfter)).toEqual([]);
+
+  await repos.events.append(event(4, 'status', { state: 'background_work', count: 0, mainTurnEnded: true, tasks: [{ id: 'native-agent', kind: 'agent', state: 'completed' }] }));
+  const completed = await repos.events.listHistoryOutline!('s');
+  expect(completed.liveAfter).toBe(4);
+  expect(completed.backgroundWork).toMatchObject({ sequence: 4, data: { count: 0, tasks: [{ id: 'native-agent', state: 'completed' }] } });
+});
+
 it('projects each tool call as a start offset and duration, sampling long turns while keeping the exact count', async () => {
   const at = (seconds: number) => new Date(Date.UTC(2026, 10, 4, 6, 37) + seconds * 1000).toISOString();
   const timed = (sequence: number, type: AgentEvent['type'], data: unknown, seconds: number): AgentEvent => ({ ...event(sequence, type, data, 'a', 'attempt-a'), timestamp: at(seconds) });

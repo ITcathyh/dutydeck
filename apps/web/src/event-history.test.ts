@@ -19,6 +19,18 @@ describe('projected event history', () => {
     expect(loader).toHaveBeenNthCalledWith(1, 's1', { after: completed, limit: 1000, direction: 'forward' }, undefined);
   });
 
+  it('merges the latest folded background snapshot by sequence, including a terminal zero count', async () => {
+    const background = (sequence: number, count: number) => ({ id: `background-${sequence}`, sequence, type: 'status' as const, timestamp: '', data: { state: 'background_work', count, mainTurnEnded: true, tasks: [{ id: 'native-agent', kind: 'agent', state: count ? 'running' : 'completed' }] } });
+    vi.spyOn(api, 'events').mockResolvedValue([]);
+    const running = await loadProjectedHistory('s1', { turns: [], liveAfter: 3, highWaterMark: 3, backgroundWork: background(3, 1) });
+    expect(running.events).toEqual([background(3, 1)]);
+    expect(mergeLiveEvent(running, background(4, 0)).events.at(-1)?.data.count).toBe(0);
+
+    const refreshed = await loadProjectedHistory('s1', { turns: [], liveAfter: 4, highWaterMark: 4, backgroundWork: background(4, 0) });
+    expect(refreshed.events).toEqual([background(4, 0)]);
+    expect(refreshed.events.at(-1)?.data.tasks).toHaveLength(1);
+  });
+
   it('rejects a failed active suffix instead of treating it as a complete empty history', async () => {
     vi.spyOn(api, 'events').mockRejectedValueOnce(new Error('offline'));
     await expect(loadProjectedHistory('s1', { turns: [], liveAfter: 10, highWaterMark: 11 })).rejects.toThrow('offline');

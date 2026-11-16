@@ -28,13 +28,14 @@ my-plugin/
 | `hooks` | hook 配置文件，默认 `hooks/hooks.json` |
 | `providers` | ESM 入口文件，没有默认值 |
 | `scenarios` | 场景包目录，默认 `scenarios/`；默认路径不存在就当没有 |
+| `service` | 可选独立进程服务：`{ entry, mode, args? }`；`entry` 是包内入口，`mode` 为 `manual`（默认）或 `auto`，`args` 是最多 32 个非空参数 |
 | `userConfig` | `{ <snake_case 键>: { description, sensitive? } }`，插件的配置项 |
 
 路径必须在插件目录内；显式声明了但不存在算错误。
 
 `host.api` 用于宿主兼容性检查；`host.channels` 目前只声明元数据，不参与加载决策。实际加载由安装记录中选定的 `active` 包及 `enabled` 状态决定，需确认能力仍须全部已确认；`binding` 与安装时的 `scope` 决定已加载插件在哪些群、项目或调用中生效。
 
-## 七类组件
+## 八类组件
 
 | 组件 | 作用 | 需要信任确认 |
 |---|---|---|
@@ -44,13 +45,14 @@ my-plugin/
 | triggers | 外部系统通过 HTTP 触发一次任务（见下） | 否 |
 | hooks | 在任务生命周期的几个点执行你的命令（见下） | **是**（按事件分别确认，如 `hooks:task.received`） |
 | providers | 入口模块导出 `register(api)`，注册 CI 提供方、场景包 provider 或进程内 hook；模块加载和注册合计最多等 15 秒，超时跳过这个插件，忽略后续注册 | **是** |
+| service | 以独立进程运行包内服务；`manual` 按需启动，`auto` 随 Host 启动，停止与重启按请求顺序处理 | **是** |
 | scenarios | 场景包：群里出现某类消息时按包里写好的规则处理（见[怎么写场景包](#scenario-packs)）。包本身是 JSON，不执行代码；它引用的 provider 随 providers 一起确认 | 否 |
 
 只读直查命令在命令文件 frontmatter 中使用 `query` 和 `argument`，对应查询须通过 SDK 显式声明 `commandOutput: 'chat'`。例如配置并授权 [fake-ticket](../../examples/plugins/fake-ticket/README.md) 后，飞书发送 `/fake-ticket:ticket-status T-1` 只返回标题和状态，不创建 Agent 会话。宿主要求可信真人入站、有效绑定及对应用户、工具、只读效果和精确资源的授权，并在投递前复核；能与机器人聊天不代表能读业务数据。只接受显式声明可向原聊天所有人公开输出的查询；私有结果应走受控导出，写动作不能映射。重复事件或重启后的未知执行不自动重放。旧提示词命令和未开放聊天输出的查询保持原行为；作者契约见 [Plugin SDK](../../packages/plugin-sdk/README.md)。
 
 ## 信任确认
 
-agents、hooks、providers、service 会执行代码或命令，安装时要确认。daemon 只加载**已启用、且所有需确认能力都已确认**的插件。
+agents、hooks、providers、service 会执行代码或命令，安装时要确认。daemon 只加载**已启用、且所有需确认能力都已确认**的插件。providers 的 15 秒期限只覆盖会让出事件循环的异步加载与注册；同步死循环无法由该计时器打断，必须终止进程，并依靠下次启动的隔离机制。
 
 - 交互终端里会列出能力并询问；非交互环境必须加 `--yes`，否则拒绝并列出要确认的能力。
 - `plugin update` 时只有**新增**的能力按原规则重新确认。斜杠命令模板或查询映射、Agent 启动配置、hook 执行规格相对活动版本有变化时，输出会列出命令标识和前后 SHA-256 摘要，不回显完整新命令；交互终端会把这些变化当作需要重新信任的能力再问一次，拒绝则不写候选。非交互且未带 `--yes` 时只打印变化，不新增失败；`--yes` 行为不变。仅描述或参数提示变化不算执行内容变化；现有候选没有新的执行内容变化时不重复提问。JSON 结果的 `changes` 字段包含同一组摘要。
@@ -96,10 +98,11 @@ dutydeck plugin uninstall <名字>
 
 - `<来源>`：本地目录、`git+https://…`、`git@…`、`file://…`（`#ref` 固定分支、标签或提交）、`npm:包名@版本`。git 来源按提交 SHA 固定。
 - `plugin update` 只准备不可变候选包；活动 Host 的 provider、hook 和技能路径始终指向原包，重启也不会自动激活候选。若候选包被修改，排空并停止服务后再次 `plugin update` 可从相同来源修复，再执行激活；活动或上一版本的损坏目录不会被原地覆盖。包内相对符号链接受支持；包外、绝对或无法解析的链接会拒绝安装和更新。内容摘要能识别不改版本号的变化；没有内容变化时不重复产生候选。多进程修改通过存储锁串行提交。启动时最多等 30 秒插件存储锁（盖过一次 `plugin activate` 的隔离验证）；锁仍被占用、`plugins.lock.json` 损坏或 `.hosts/` 租约写不进去时，daemon 照常启动，但**只加载内置插件，外部插件一个都不加载**：运行日志记一条带出错文件路径的警告，插件诊断列出原因，`dutydeck doctor` 的「插件库」项报 fail；绑定了外部插件的会话会拒绝新任务。按原因修复后重启 daemon 才会重新加载外部插件。`.hosts/` 里同一数据库的已停止或进程已退出的旧租约在下次启动时清掉；无法解析的租约保留，仍会阻止激活，需要人工处理。
-- `plugin status` 区分选定包、候选、上一版本、实际加载的 Host 和切换阻塞。激活/回退使用离线检查：先在当前版本完成或取消未完成任务，并核对该插件未决动作；运行 `dutydeck stop`，systemd 托管实例用 `systemctl --user stop <unit>` 停止共用插件目录的所有实例，再执行 `plugin activate` 或 `plugin rollback`，成功后 `dutydeck start` / `systemctl --user start <unit>`。存在存活 Host、待恢复任务或该插件 unknown 操作时拒绝切换；租约会识别已退出进程，但 daemon 退出不代表 tmux 任务已完成。缺少插件依赖信息的未完成旧任务会保守阻塞，已终态历史和无关插件动作不阻塞。
+- `plugin status` 区分选定包、候选、上一版本、实际加载的 Host 和切换阻塞。激活/回退使用离线检查：先在当前版本完成或取消未完成任务，并核对该插件未决动作；再停止所有共用插件目录的实例。普通实例用 `dutydeck stop`；直接管理 systemd 时先用 `systemctl --user show <unit> --property=TriggeredBy` 核对是否 socket 激活，若是，必须同时执行 `systemctl --user stop <unit>.socket <unit>`，否则下一个连接会重新拉起 Host。然后执行 `plugin activate` 或 `plugin rollback`，成功后用 `dutydeck start`，或 `systemctl --user start <unit>.socket <unit>` 恢复。存在存活 Host、待恢复任务或该插件 unknown 操作时拒绝切换；租约会识别已退出进程，但 daemon 退出不代表 tmux 任务已完成。缺少插件依赖信息的未完成旧任务会保守阻塞，已终态历史和无关插件动作不阻塞。
 - 激活会在可终止的独立 Node 进程里验证已信任 provider 的导入/注册，使用临时数据目录和最小环境；这不是恶意代码沙箱。原活动版本保留供回退，不承诺按会话运行多版 provider，也不自动回退插件私有数据。安装与启停仍需重新启动 Host；卸载同样要求没有活动消费者。
-- `plugin validate` 也校验场景包（格式、模板变量、正则、参数），出错报文件和字段；`plugin validate --strict` 进一步检查宿主兼容范围、权限声明、技能引用和资源边界。`plugin inspect <目录|tarball|来源> --json` 输出能力、权限足迹和 digest；`plugin test <目录|tarball|来源>` 在隔离 Host fixture 中验证注册结果。`install`、`update` 不因场景包的问题失败，但会列出不会加载的包和原因。
+- `plugin validate` 也校验场景包（格式、模板变量、正则、参数），出错报文件和字段；`plugin validate --strict` 进一步检查宿主兼容范围、权限声明、技能引用和资源边界。`plugin inspect <目录|tarball|来源> --json` 只检查并输出能力、权限足迹和 digest，不安装来源、不写插件安装状态；远程来源可能临时下载并在检查后清理。`plugin test <目录|tarball|来源>` 会实际执行 provider 模块及其 `register(api)`；这里的隔离只指临时 Host 数据与注册表，**不是恶意代码沙箱**，只能测试已经可信的代码。`install`、`update` 不因场景包的问题失败，但会列出不会加载的包和原因。
 - 数据放在数据库所在目录的 `plugins/` 下：`plugins.lock.json`（来源、固定版本、作用域、已确认能力）、`.artifacts/<名字>/<内容摘要>/`（不可变安装副本）、`.hosts/`（Host 代际及数据库记录；旧 `<名字>/` 布局保留兼容）、`.data/<名字>/`（插件自己的可写目录）。`.trigger-tokens.json` 和 `.config.json` 权限 0600；敏感配置存在本机密钥存储里。
+旧版独立根目录仍是 `plugins/<name>/`；`plugin update`、`activate` 和 `rollback` 不会把它移动到 `.hosts/`。
 
 ## 外部触发器
 
@@ -118,11 +121,11 @@ dutydeck plugin uninstall <名字>
 ```
 
 - 地址：`POST /api/plugins/<插件>/triggers/<id>`，免 Web 登录，靠触发器自己的令牌或签名鉴权。
-- 鉴权：`token`（请求头里带令牌，可带 `Bearer ` 前缀）或 `hmac-sha256`。HMAC 触发器还必须带时间戳头（默认 `x-dutydeck-timestamp`，Unix 秒）、一次性 nonce 头（默认 `x-dutydeck-nonce`）和签名头；签名是 `HMAC-SHA256(secret, timestamp + "\\n" + nonce + "\\n" + SHA256(rawBody))`，十六进制，可带 `sha256=` 前缀。时间戳默认允许前后 300 秒，nonce 只能使用一次。令牌用 `dutydeck plugin trigger-token <插件>/<id>` 查看或 `--rotate` 轮换，轮换立即生效。并发创建或轮换不同触发器的令牌时，各次成功操作都会保留。
+- 鉴权：`token`（请求头里带令牌，可带 `Bearer ` 前缀）或 `hmac-sha256`。HMAC 触发器还必须带时间戳头（默认 `x-dutydeck-timestamp`，Unix 秒）、一次性 nonce 头（默认 `x-dutydeck-nonce`）和签名头。签名两段伪代码为 `payload = timestamp + "\n" + nonce + "\n" + lowercaseHex(SHA256(rawBody))`、`signature = lowercaseHex(HMAC-SHA256(secret, payload))`；其中 `\n` 表示真实 LF 字节（0x0A），不是反斜杠和字母 n 两个字符，body 哈希使用小写十六进制。最终十六进制签名可带 `sha256=` 前缀。时间戳默认允许前后 300 秒，nonce 只能使用一次。令牌用 `dutydeck plugin trigger-token <插件>/<id>` 查看或 `--rotate` 轮换，轮换立即生效。并发创建或轮换不同触发器的令牌时，各次成功操作都会保留。
 - `target` 的值可以写 `{{config.<键>}}`，引用插件配置；配置没填齐时触发器不可用。`session` 为 `new`（每次新会话）或 `reuse`。
 - 返回码：`202 {runId, sessionId, taskId, statusUrl}` 已接受；`200 {duplicate:true, runId}` 重复事件；`400` 请求体不是 JSON；`401` 令牌、签名、时间戳无效或 nonce 已使用；`404` 触发器不存在或插件未启用；`413` 请求体超过 1 MiB；`429` 达到 `maxConcurrent`；`502` 投递失败（同时撤销去重记录，可重试）。可用相同鉴权请求 `GET .../runs/<runId>` 查询状态，并对仍在队列、尚未提交给 Agent 的运行 `POST .../cancel`；HMAC 查询和取消也要为零请求体生成新 nonce 和签名，nonce 只用一次；已开始执行的运行保持 running，取消不会撤回已发出的外部副作用。
-- 也可使用统一任务入口 `POST /api/plugin-triggers/v1/runs?plugin=<插件>&triggerId=<触发器>`，状态和取消地址分别是 `/api/plugin-triggers/v1/runs/<runId>` 与 `/cancel`（查询参数带回 `plugin`、`triggerId`）。请求头 `Idempotency-Key` 与清单中的 `idempotencyKey` 模板都会参与 24 小时去重；`dryRun=true` 只校验鉴权和模板，不启动任务。
-- 去重 24 小时，重启后仍有效；去重键是 `dedupeKey` 渲染结果，没写就用整个请求体。`maxConcurrent` 默认 4，范围 1 到 32。活跃任务和仍占并发名额的工作项（包括首次等确认）超过 24 小时仍保留运行记录，重启后可查询并继续占位；已结束的过期记录会清除。去重到期不等于取消旧运行，同一事件在新窗口可按并发规则产生新运行。
+- 也可使用统一任务入口 `POST /api/plugin-triggers/v1/runs?plugin=<插件>&triggerId=<触发器>`，状态和取消地址分别是 `/api/plugin-triggers/v1/runs/<runId>` 与 `/cancel`（查询参数带回 `plugin`、`triggerId`）。去重取值优先级是 `Idempotency-Key` 请求头 > 清单 `idempotencyKey` 模板 > legacy `dedupeKey` > 整个请求体；同时配置时只取最高优先级，不拼接。`dryRun=true` 只覆盖鉴权、JSON、并发/去重前置处理和模板渲染，不证明已保存模板版本、所属会话、目标或实际投递可用；实际模板仍需用受控真实触发验证。
+- 去重 24 小时，重启后仍有效；按上一条优先级选出的键渲染结果计算，没有前三种键时才用整个请求体。`maxConcurrent` 默认 4，范围 1 到 32。活跃任务和仍占并发名额的工作项（包括首次等确认）超过 24 小时仍保留运行记录，重启后可查询并继续占位；已结束的过期记录会清除。去重到期不等于取消旧运行，同一事件在新窗口可按并发规则产生新运行。
 - 模板里 `{{payload.a.b}}` 取请求体字段，`{{payload}}` 取整个请求体。进入 prompt 的每个取值都被当作**不可信数据**包裹（带随机边界，单个取值最多 2 万字符）。模板读不到鉴权头、`authorization` 和 `cookie`。
 - 任务结果以文本发回目标群，最多 8000 字符。
 - **启动工作项模板**：把 `prompt` 换成 `workTemplate`（两者只能写一个），触发时按已保存的工作项模板开一个工作项，而不是发一段提示词：
@@ -282,7 +285,7 @@ dutydeck plugin-tool call private-export/export-report --json '{"reportId":"week
 - `command`：字符串走 `/bin/sh -c`，数组直接执行；工作目录是插件根目录。`timeout` 必填，100 到 600000 毫秒。`onFailure` 为 `ignore`（默认）或 `block`。`matcher` 是可选正则（匹配对象见下表），安装时会检查不会灾难性回溯。
 - **输入**：stdin 收到一份 JSON：`{ event, plugin, eventId?, bindingRevision?, actor?, botAppId?, chatId?, sessionId?, taskId?, attemptId?, cwd?, payload }`。`eventId`、`actor` 和 `bindingRevision` 由宿主生成，插件不能覆盖；任务和工具入口能提供的 session/task/attempt 身份也在顶层传递。
 - **环境变量**：只继承 `PATH`、`HOME`、临时目录、locale、时区等基础变量，另加 `DUTYDECK_PLUGIN_NAME`、`DUTYDECK_PLUGIN_ROOT`、`DUTYDECK_PLUGIN_DATA`、非敏感的 `DUTYDECK_PLUGIN_CONFIG_<KEY>` 和 `DUTYDECK_HOOK_EVENT`；秘密只能经 binding accessor 读取。
-- **输出**：exit 0 放行，stdout 可以是 JSON：`decision`（`allow` / `deny` / `ask`）、`reason`、`additionalContext`、`updatedPrompt`。exit 2 阻断，stderr 作为原因。其他非零退出码或超时是非阻断错误；`onFailure: block` 时改为阻断。超时会杀掉整个进程组并立即返回。stdout 上限 64 KiB，超出按“没有输出”处理；stderr 上限 8 KiB。
+- **输出**：exit 0 放行，stdout 可以是 JSON：`decision`（`allow` / `deny` / `ask`）、`reason`、`additionalContext`、`updatedPrompt`。exit 2 阻断，stderr 作为原因。其他非零退出码或超时是非阻断错误；`onFailure: block` 时改为阻断。POSIX 超时会杀掉 owned process group 并立即返回；Windows 只终止直接子进程，不保证清理后代。UTF-8 解码后的 stdout 最多 65,536 个 JavaScript UTF-16 码元，stderr 最多 8,192 个码元；这不是 UTF-8 字节上限，stdout 超出按“没有输出”处理。
 - **顺序**：按插件名排序，再按声明顺序。`deny` 立即生效并结束；其余按 `ask` 优于 `allow` 合并。
 - **进程内 hook**：`api.registerHookHandler(event, handler, { timeout?, matcher? })` 注册的 handler 收到 `(input, { signal })`，超时（默认 10 秒）后宿主不再等结果并 abort `signal`；handler 应把它传给自己发起的请求，及时停下后台工作。
 
@@ -297,22 +300,22 @@ dutydeck plugin-tool call private-export/export-report --json '{"reportId":"week
 | `notify` | CI 通知和触发器结果发出之前 | `ci_notice`（title, text, failed）或 `trigger_result`（taskId, status, text） | kind | `deny` 时不发 |
 | `delivery.completed` | 业务工具调用完成后（成功、失败、未知或被 gate 拒绝） | tool, status, actionId（如有） | kind | 仅异步观察 |
 
-群协作的判定、回复生成和记忆整理这三类后台会话也经过 `task.received` 和 `task.beforeRun`，输入带所属机器人的 `botAppId`，`bot:<appId>` 作用域的 hook 对它们生效；记忆整理会话不带 `chatId`。对这三类会话，`task.beforeRun` 只认 `deny`，`additionalContext` 和 `updatedPrompt` 会被忽略并记一条警告日志；`permission.request` 也只认 `deny`，`allow` 会被忽略并记警告日志，审批照常走原流程（不论插件作用域）。这三类会话结算时的 `task.completed`（以及适用时的 `verification.completed`）同样带 `botAppId`，bot 作用域的 hook 也会收到，可以用 payload 里的 `source`（`lark-decision`、`lark-response`、`lark-memory`）区分。
+群协作的判定、回复生成、记忆整理和文字优化这四类后台会话也经过 `task.received` 和 `task.beforeRun`，输入带所属机器人的 `botAppId`，`bot:<appId>` 作用域的 hook 对它们生效；记忆整理会话不带 `chatId`。对这四类会话，`task.beforeRun` 只认 `deny`，`additionalContext` 和 `updatedPrompt` 会被忽略并记一条警告日志；`permission.request` 也只认 `deny`，`allow` 会被忽略并记警告日志，审批照常走原流程（不论插件作用域）。这四类会话结算时的 `task.completed`（以及适用时的 `verification.completed`）同样带 `botAppId`，bot 作用域的 hook 也会收到，可以用 payload 里的 `source`（`lark-decision`、`lark-response`、`lark-memory`、`lark-reply-polish`）区分。
 
 目前 `notify` 只覆盖 CI 通知和触发器结果，飞书任务结果卡的推送不经过它。
 
 ## CI 提供方
 
-核心里 `/ci`、自动续作、Web「等待 CI 完成」、定时任务条件、`POST /api/hooks/<提供方 id>` 都经 CI 提供方插件。**没装任何 CI 插件时**：飞书 `/ci` 回“未配置”并给出安装方法；Web 显示“未安装 CI 插件”；普通定时任务不受影响。
+核心里 `/ci`、自动续作、Web「等待 CI 完成」、定时任务条件、`POST /api/hooks/<提供方 id>` 都经 CI 提供方插件。**没装任何 CI 插件时**：飞书 `/ci` 回“未配置”并给出安装方法；Web 显示“未安装 CI 插件”；普通定时任务不受影响。安装任意插件不等于所有子命令可用：无 webhook 的 `/ci wait` 需要 `getPipelineStatus`，`/ci fix` 需要匹配 origin 的已配置 webhook，其他操作也按各自方法能力检查。
 
 提供方在 `providers` 入口里调用 `api.registerCiProvider(provider)` 注册。接口（类型见 `packages/shared/src/plugins.ts`）：
 
 - `id`、`displayName`（必填，出现在卡片、提示词和 Web 上）、可选 `changeRequestLabel(n)`；
 - `matchRepository(remoteUrl)`：远端地址归自己就返回仓库（`{owner, name, slug}`），否则返回 `undefined`；
-- `getPipelineStatus(query)`（轮询用）、`getFailureLogs(repository, runId)`（补失败日志）；
-- 宿主给每次异步调用（构建状态、失败日志、PR 各方法、`webhook.verify` / `parse`）都设总时限，默认 25 秒；provider 可以用 `callTimeoutMs: { <方法名>: 毫秒 }` 按方法申请更长时间（例如要逐页读的评论），宿主夹到 1 秒和自己的上限之间：`getPipelineStatus` 最多 25 秒（CI 等待的轮询租约是 30 秒），其余最多 120 秒（PR 跟进每 2 分钟看一次）。超时按这次调用失败处理并记一条警告日志：轮询这一轮跳过、下一轮再查，不会拖住其他定时任务。每个方法最后多一个参数 `{ signal }`，超时时 abort，请传给 `fetch` 等请求并停止后续分页。`createPullRequest`、`postComment` 超时不代表没执行，宿主不会自动重试，报错里会提示先到平台核对；
-- 可选 PR 方法，`/pr` 和 Web「开 PR」会实际用到：`createPullRequest`（开 PR）、`listReviewComments`（读评审意见）、`postComment`（回复），以及 `getPullRequest(repository, number)`，返回 `{ state: 'open' | 'closed' | 'merged', headSha?, headBranch?, baseBranch?, headRepository?, title?, url? }`，用来发现 PR 已合并或关闭。同时给出 `headBranch` 和 `headRepository` 的插件才支持 `/pr follow` 认领已有 PR；`headRepository` 与工作区仓库不一致时按来自 fork 拒绝认领，没给时无法排除 fork，也拒绝认领。没实现 `getPullRequest` 的插件只能靠 webhook 的 merge_request 事件发现合并或关闭；两者都没有时，跟进会一直轮询，直到达到轮次上限或有人手动停止。`listReviewComments` 返回的每条 `CiReviewComment` 带 `trusted`、`isBot`、`authorAssociation`：**不给 `trusted: true` 的评论不会被自动处理**，只会发“需要你决定”卡片。github 插件的判定是 `author_association` 为 OWNER、MEMBER、COLLABORATOR 之一且不是 Bot 账号。`postComment` 返回的 `id` 要和 `listReviewComments` 里同一条评论的 `id` 写法一致，否则会把自己的回复当成新评论；
-- 可选 `webhook: { verify(req), parse(req) }`：`verify` 可返回 `signedAt`（宿主据此做 5 分钟重放窗口）；`parse` 返回统一的 `CiWebhookEvent`，请求体有问题时抛出 `statusCode: 400`。事件里 `timeIsAdvisory: true` 表示 `occurredAt` 只用于排序，不做重放窗口检查。缺哪个可选方法，对应能力就不可用。
+- 可选 `getPipelineStatus(query)`（轮询等待）与 `getFailureLogs(repository, runId)`（补充失败日志）；缺少前者时不能轮询等待，缺少后者时没有补充失败日志，但 provider 仍可注册，其他能力按各自方法检查；
+- 宿主给每次异步调用（构建状态、失败日志、PR 各方法、`webhook.verify` / `parse`）都设总时限，默认 25 秒；provider 可以用 `callTimeoutMs: { <方法名>: 毫秒 }` 按方法申请更长时间（例如要逐页读的评论），宿主夹到 1 秒和自己的上限之间：`getPipelineStatus` 最多 25 秒（CI 等待的轮询租约是 30 秒），其余最多 120 秒（PR 跟进每 2 分钟看一次）。超时只结束本次 provider 等待并记一条警告；串行 tick 中后续订阅及后续 tick 可能因此延迟，多个超时会累积。每个方法最后多一个参数 `{ signal }`，超时时 abort，请传给 `fetch` 等请求并停止后续分页，否则后续工作仍会被占用。`createPullRequest`、`postComment` 超时不代表没执行，宿主不会自动重试，报错里会提示先到平台核对；
+- 可选 PR 方法，`/pr` 和 Web「开 PR」会实际用到：`createPullRequest`（开 PR）、`listReviewComments`（读评审意见）、`postComment`（回复），以及 `getPullRequest(repository, number)`，返回 `{ state: 'open' | 'closed' | 'merged', headSha?, headBranch?, baseBranch?, headRepository?, title?, url? }`，用来发现 PR 已合并或关闭。同时给出 `headBranch` 和 `headRepository` 的插件才支持 `/pr follow` 认领已有 PR；`headRepository` 与工作区仓库不一致时按来自 fork 拒绝认领，没给时无法排除 fork，也拒绝认领。没实现 `getPullRequest` 的插件只能靠 webhook 的 pull_request 事件发现合并或关闭；两者都没有时，跟进会一直轮询，直到达到轮次上限或有人手动停止。`listReviewComments` 返回的每条 `CiReviewComment` 带 `trusted`、`isBot`、`authorAssociation`：**不给 `trusted: true` 的评论不会被自动处理**，只会发“需要你决定”卡片。github 插件的判定是 `author_association` 为 OWNER、MEMBER、COLLABORATOR 之一且不是 Bot 账号。`postComment` 返回的 `id` 要和 `listReviewComments` 里同一条评论的 `id` 写法一致，否则会把自己的回复当成新评论；
+- 可选 `webhook: { verify(req), parse(req) }`：`verify` 可返回 `signedAt`，`parse` 返回事件的 `occurredAt` 也使用同一时间单位，二者都是 **Unix epoch 毫秒，不是秒**；宿主用 `signedAt` 做 5 分钟重放窗口。合法但不处理的事件让 `parse` 返回 `undefined`，宿主返回 202 ignored；只有请求体无效才抛 `statusCode: 400`。事件里 `timeIsAdvisory: true` 表示 `occurredAt` 只用于排序，不做重放窗口检查。缺哪个可选方法，对应能力就不可用。
 
 CI webhook 校验通过后，宿主先在同一数据库事务内保存规范化事件与当时匹配的订阅 ID，提交后才返回 `accepted`。处理途中退出时，重启只补尚未接纳的订阅；已保存的修复或续作任务沿现有任务账本恢复，不重放整条事件，也不把后建订阅加进旧事件。恢复会重查提供方、订阅、会话及任务授权；取消或失效的目标不会执行。订阅的待处理流水线队列满时，事件仍保留待接纳，后续维护轮次继续处理。
 
@@ -322,7 +325,7 @@ CI webhook 校验通过后，宿主先在同一数据库事务内保存规范化
 
 | 插件 | 提供 | 配置项 |
 |---|---|---|
-| `plugins/github` | GitHub Actions 构建状态与失败日志（取失败 job 和步骤，日志末尾 3000 字符）；PR 创建、状态读取、评论读写（供 `/pr` 和 Web「开 PR」使用）；可选 webhook `POST /api/hooks/github`（`X-Hub-Signature-256`） | `github.token`（可选，私有仓库和 PR 操作需要；公开仓库只等构建时不用）、`github.webhook_secret`（可选，填了才启用 webhook） |
+| `plugins/github` | GitHub Actions 构建状态与失败日志（取失败 job 和步骤，日志末尾 3000 字符）；PR 创建、状态读取、评论读写（供 `/pr` 和 Web「开 PR」使用）；可选 webhook `POST /api/hooks/github`（`X-Hub-Signature-256`） | `github.token`（私有仓库读取及创建 PR、发表评论等写操作需要；公开仓库的构建、PR 状态和评论读取可先匿名）、`github.webhook_secret`（可选，填了才启用 webhook） |
 | `plugins/codebase` | 可配置代码托管主机的流水线和 MR webhook `POST /api/hooks/codebase`；也是 CI webhook 插件示例 | `codebase.host`（可选，默认 `git.example.com`）、`codebase.webhook_secret`（可选，敏感值） |
 
 ```bash
@@ -341,14 +344,14 @@ printf %s "$SECRET" | dutydeck plugin config codebase webhook_secret --value-fd 
 dutydeck restart
 ```
 
-开 PR 需要 `github.token`（写操作必须有令牌），令牌要有 pull requests 读写权限；读私有仓库的 Actions 构建另需 Actions 读权限。推送本身不用这个令牌，用本机 git 凭据。签名、令牌、`X-Dutydeck-Event-Id` 等细节见各插件目录下的 `README.md`。GitHub 没配 webhook 时用轮询等构建；配了之后 `/ci wait`、`/ci fix` 改为等 GitHub 推送。
+创建 PR、发表评论等写操作需要 `github.token`，令牌要有 pull requests 读写权限；读取私有仓库的 Actions、PR 状态或评论也需要相应权限。公开仓库的构建、PR 状态和评论读取可先匿名，受限或私有资源仍需令牌。推送本身不用这个令牌，用本机 git 凭据。签名、令牌、`X-Dutydeck-Event-Id` 等细节见各插件目录下的 `README.md`。GitHub 没配 webhook 时用轮询等构建；配了之后，不带 workflow 参数的 `/ci wait` 和 `/ci fix` 改为等 GitHub 推送，显式 `/ci wait <workflow>` 仍走轮询。
 
 相关变化：
 
 - 定时任务里“CI 出现新的失败构建时执行”的条件名是 `ci_new_failure`；旧的 `github_new_failure` 仍可读、仍可传入。
 - `GET /api/sessions/:id/automation/ci-providers` 返回已加载的 CI 提供方列表。
-- 飞书 `/ci` 只要装了任一 CI 插件就可用；装了 github 插件但没填 token 时，公开仓库也能等构建。
-- `/pr` 只要有实现了 `createPullRequest` 的 CI 插件就可用。webhook 型插件的 merge_request 合并或关闭事件会让 PR 跟进立即停止，pipeline 事件会立即触发一次检查。
+- 飞书 `/ci` 由 CI provider 提供；不带 workflow 参数的 `/ci wait` 才优先使用匹配的 webhook，显式 `/ci wait <workflow>` 始终走轮询并要求 `getPipelineStatus`。`/ci fix` 需要匹配 origin 的已配置 webhook；仅支持轮询的 provider 不能让这两个操作都可用。
+- `/pr` 只要有实现了 `createPullRequest` 的 CI 插件就可用。webhook 型插件的 pull_request 合并或关闭事件会让 PR 跟进立即停止，pipeline 事件会立即触发一次检查。
 
 ## 怎么写场景包 <a id="scenario-packs"></a>
 

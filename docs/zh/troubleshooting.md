@@ -31,9 +31,10 @@ dutydeck database execution-status --database /path/to/runtime/dutydeck.db
 
 ### Web 能打开，status / doctor 却说服务未运行或端口被其他进程占用？
 
-直接运行根命令的前台服务，以及某些由外部托管的入口，可能没有 daemon 状态记录。新版 `status` 和 `doctor` 会在**当前配置端口**依次短超时请求 `/health` 与 `/health/ready`：前者必须是 `ok===true` 的 JSON，后者还必须有布尔 `ready` 和字符串数组 `pending`；不跟随重定向。两者都符合时才显示未登记前台服务及地址，端口检查也不再把它当成其他进程。`ready=false` 表示服务已识别但尚未就绪，不会改写旧的 daemon `ready` 字段。
+直接运行根命令的前台服务，以及某些由外部托管的入口，可能没有 daemon 状态记录。新版 `status` 和 `doctor` 会在**当前配置的主机和端口**依次短超时请求 `/health` 与 `/health/ready`，不跟随重定向。两个响应都必须成功并带 `x-dutydeck-product: dutydeck`，同时保持原有 JSON 结构：`ok===true`，ready 端点还必须有布尔 `ready` 和字符串数组 `pending`。只有产品头与结构都符合时才显示未登记前台服务及地址，端口检查也不再把它当成其他进程；`ready=false` 只写新字段中的未就绪，不改写旧 daemon `ready`。
 
-这项识别只是保守的结构检查，不是身份认证。HTML、通用 `{ "ok": true }`、结构不符、连接拒绝或超时都保持原诊断；已有登记、残留或损坏状态记录时也不做这项探测。服务确实只是临时 `--port` 启动、而当前 CLI 配置的是另一个端口时，请用启动时的同一配置运行 `status`。未登记进程的飞书连接状态无法由 daemon 记录核验，请查看它的启动终端，不要再启动第二个实例。
+这项识别要求 Dutydeck 产品头，不是仅凭通用 JSON 的结构猜测，也不是身份认证。HTML、没有产品头的 `{ "ok": true }`、结构不符、连接拒绝或超时都保持原诊断；已有登记、残留或损坏状态记录时不探测。仅对明文 HTTP 的 loopback 或本机网卡发请求。临时端口启动后可直接复制 `dutydeck --port 14310 status` 或 `dutydeck --local-only --port 14310 doctor`，根 `--host` / `--port` / `--local-only` 会传给 status/doctor，不再回落默认 4310。未登记进程的飞书连接状态无法由 daemon 记录核验，请查看它的启动终端，不要再启动第二个实例。
+明确识别未登记前台后，`dutydeck update` 会在任何 npm 调用前拒绝，默认实例的 `dutydeck restart` 也不会另起 daemon；`update --force` 不能越过这个拒绝。请在原启动终端按 Ctrl-C，再用原参数重跑原命令。`dutydeck restart --unit <unit>` 是显式 systemd 操作，不做这个默认/当前目录实例的前台预检。
 
 ### 服务被 SIGKILL 后，doctor 为什么说“原因待富集”？
 
@@ -64,7 +65,7 @@ SIGKILL 无法执行进程内退出处理，所以下一代先根据上一代缺
 
 ### 同机 peer 实例改了地址不生效，或暂时无法连接？
 
-- 主服务的 `DUTYDECK_INSTANCES_JSON` 只在组装服务时读取一次。新增、删除 peer 或修改 `url` 后，要重启**主服务**；只重启 peer 不会让主服务重新读取这份 JSON。用主服务的 `/api/instances` 核对当前实际加载的列表。
+- 主服务的 `DUTYDECK_INSTANCES_JSON` 只在组装服务时读取一次。新增、删除 peer 或修改 `url` 后，要重启**主服务**；只重启 peer 不会让主服务重新读取这份 JSON。`/api/instances` 只能核对当前加载条目的 `id` / `name`，不返回 URL；请核对主服务配置，并用一个已知代理请求验证新地址，不能把该列表当作地址已加载的证明。peer 数据库路径不在这份 JSON 中，数据库变化不要求修改主服务实例列表。
 - 每个 peer 都要用自己的数据库和端口，以 `--local-only` 启动，并使用 `http:` 地址，例如 `http://127.0.0.1:4311`。主服务会移除自己的登录与来源请求头再转发，因此不能把远程或需要另一套认证的地址当成这里的 peer。
 - 这是静态列表，不做动态发现或健康摘除。peer 暂时不可用时代理请求会报错，但 `/api/instances` 中仍保留该条目；恢复 peer 或修正地址并重启主服务后再试，不要期待健康检查自动改写配置。
 
@@ -120,7 +121,7 @@ SIGKILL 无法执行进程内退出处理，所以下一代先根据上一代缺
 
 ### Q18: Claude 守卫超时、读取失败或恢复后提示设置不完整？
 - **守卫超时**：只有官方 Claude Code 2.1.295+ 会通过 `onFailure: "block"` 让守卫超时也阻断工具调用。旧版、版本探测失败和未验证分支的受保护轮次照常提交，超时维持原行为；显式拒绝和脚本崩溃仍由 `|| exit 2` 拦截。需要超时阻断时升级官方 Claude Code 并重开会话。
-- **恢复后的设置不完整**：真正拉起 Claude 时会记录本次实际设置中的 marker、精确 matcher、command type、`onFailure: "block"` 和当时的能力探测结果。服务重启后接管仍在运行的终端优先使用这份启动记录，不重新探测磁盘 CLI；磁盘 CLI 后续升降级不会改变该进程的判定。旧版或探测失败的启动记录只要求真实守卫接线，不因缺少该字段拒绝轮次。仅当启动记录不存在时，才检查接管前会话私有目录已有的 JSON 设置：至少一份且每份都可读、结构合法，并满足所请求守卫的精确 matcher、command type 和 marker，才按旧版规则继续（不要求 `onFailure: "block"`）；inline-only、空快照或任一份不符合都拒绝。记录本身损坏、字段非法或不可读时不能使用快照回退，受保护发送会拒绝；此时重开会话（飞书发 `/new`）生成完整设置和记录。
+- **恢复后的设置不完整**：真正拉起 Claude 时会记录本次实际设置中的 marker、精确 matcher、command type、`onFailure: "block"` 和当时的能力探测结果。服务重启后的接管只接受这份真实启动写入的 valid launch record：先 `lstat`，只接受 regular file；missing、malformed、字段不合法、不可读、symlink 和 dangling symlink 都拒绝，历史 JSON settings snapshot 不能补救，也不从 `/proc` argv 收养。有效 record 继续恢复，旧版或探测失败的有效 record 只按真实守卫接线核对，不因缺少新版字段单独拒绝。受保护发送因记录缺失或无效而拒绝时，重开会话（飞书发 `/new`）生成完整设置和记录。
 - **策略或脚本故障**：会话 ID 为空时由 shell 直接放行，不启动 Node；合法单组件 ID 和规范策略路径下，只有可证明的 `ENOENT` 缺策略才由 shell 快放。异常 ID、超长路径、权限或符号链接等不确定状态进入 Node fail closed，不再把任意 `test` 失败或任意缺策略路径都当成快放。策略未启用或没有未授权匹配时同样放行。文件存在后的读取错误、损坏 JSON、active 计划脚本缺失会拒绝操作。检查 `.dutydeck/security/sessions/` 的文件类型与 JSON、会话私有设置目录和机器负载。错误文本不会回显策略里的敏感值。
 
 ### Q19: 如何查看最近服务日志？为什么有些行没有显示？
@@ -143,18 +144,20 @@ SIGKILL 无法执行进程内退出处理，所以下一代先根据上一代缺
 - **上下文不足等明确失败**：终端已经恢复可输入时，原业务消息会继续发送，不需要重发。其他未实测 CLI 会报告不支持主动压缩，也会继续原消息。
 - **你中断了任务**：只取消压缩等待，原业务消息不写入；后续消息在终端恢复后照常提交。
 - **压缩超过 5 分钟**：Dutydeck 先中断压缩；确认空输入框恢复后按失败处理并继续原业务消息。
-- **终端已有 raw write 尚未结束**：自动 compact 会先建立维护栅栏并有界等待，期间新 raw write 不会写入；最终 Enter 前还会再查。维护未写入时超时按未提交处理；`/compact` 已写入或 Enter 后发生冲突则保持维护未知，旧写结算前后续输入仍被挡住。停止、detach 和取消会中断等待，不会自动重发业务正文。
+- **终端已有 raw write 尚未结束**：自动 compact 会先建立维护栅栏并有界等待，期间新 raw write 不会写入；最终 Enter 前还会再查。维护未写入且没有冲突的超时按未提交处理；但与在途 raw write 冲突时，即使 `/compact` 尚未写入，也可能保留维护 unknown，旧写结算且恢复得到证明前后续输入仍被挡住。raw backend 返回只代表传输结束，必须看到该写之后的新 output revision 并连续静止 500ms，旧 idle 不能解除 unknown。停止、detach 和取消会中断等待，不会自动重发业务正文。
 - **提示压缩结果或终端恢复未知**：维护命令可能已经发出，但 Dutydeck 无法证明终端能安全接收下一条输入，所以原消息按“未提交”失败，不会标成“结果未知”，也不会自动重发。后续每次输入都会重新确认终端，确认恢复后正常继续，无需先重建会话；仍无法确认时本次不写入，请稍后重发，持续如此可发 `/new` 开新会话。可打开该会话终端，确认压缩是否结束、是否停在权限或人工确认页；不要并发另开 Claude 接管同一原生会话。
 
 ### Q23: Claude 显示 `Removed … invisible character · review and press Enter to send`，任务为什么成了结果未知？
 - 新版 Claude 会删掉粘贴里的不可见字符，并拦下第一次 Enter，等人检查。当前 Dutydeck 会在写入前按同一规则清理这些字符，合法 emoji 组合和文字组合序列保留；任务保存的原提示词不变。
+- Claude 原生 keyed 输入可能先把 NFD 规范化为 NFC，终端正文与回执的码点和 UTF-8 字节数因此可能变化；Dutydeck 保存的原始任务正文不变，这条 Claude 专属 sanitizer/NFC 路径也不在其他 Agent 上运行，NFD 文件名、哈希或精确码点匹配不能承诺逐字不变。共享 `wrapUntrusted` 的伪造边界 visible-space 变化会影响所有保存/派发调用方，包括其他调用它的 Agent；它只处理“原文不是 marker、经 Claude 清理后才重建”的伪造边界。Dutydeck 自己原有 marker 和伪造边界之外的普通正文不被这条规则改写；未调用 `wrapUntrusted` 的 Agent 和正文不额外处理。
 - 如果终端仍停在这条提示，说明输入已经写入但没有确认提交。Dutydeck 不会自动再按 Enter 或重发；打开该会话终端检查内容并人工决定是否按 Enter，不要把同一条消息再发一遍。
 
 ### Q24: 为什么 Claude 任务提示“当前输入框不是空白”或写入后结果未知？
+- Claude family 的普通长多行输入使用 keyed 单次提交：每个逻辑行按不超过 96 个 UTF-8 字节切块，硬换行以“反斜杠 + Enter”形成 soft-newline，只有最后的 `submitInput()` 是最终 Enter。soft-newline 不是提交，也不使用整段括号粘贴触发 paste-burst 折叠。
 - Dutydeck 会等 Claude 屏幕静止后、首个业务字节写入前，再确认屏幕底部是完整的空输入框。普通 `❯`、原生 `Try "…"` 占位提示、底部权限栏和最多两行 statusLine 都可正常输入；人工草稿、未提交的 `/compact`、slash 菜单或只有历史提示符的画面不算空框。此时任务没有写入，可在终端处理草稿后重发。
 - 首个 chunk、软换行或 Enter 一旦已经尝试，之后输入框无法复核或出现外来变化就按结果未知处理，不会自动再按 Enter、清空草稿或重发。请打开终端核对实际内容。tmux 管理端读屏与写入不是原子操作，这项检查不能排除所有其他终端同时写入的竞态。
 
 ### Q25: ACP Agent 已退出，为什么报 `ACP_LAUNCHER_CLEANUP_UNKNOWN` 或清理超时？
 - 正常下游慢读不是错误，也没有 5 秒截断期限。主 Agent 已退出时，stdout/stderr 尾部会等目的地恢复并完整交付，再按原退出码或信号语义结束；不要因暂停超过 5 秒就重发原任务。
 - 只有遗留源描述符或自有进程组退出无法证明时才走有界失败。诊断里的 `sourcesClosed=false` 表示还有后代持有继承的 stdout/stderr；`destinationFlushed=false` 表示异常收尾时目的地尚有未写完数据；`groupExited=false` 表示进程组退出尚未得到证明，三者不再合并成一个 `drained=false`。
-- 此时不要删除会话工作区 `.dutydeck/launchers/` 下的 report。ACP adapter 用它收养并停止仍存活的进程树，证明退出后才删除。请检查该 Agent 是否留下后台后代、继承管道或无法探测的进程组；即使 stderr 背压导致 launcher 诊断没有显示，adapter 也会用 `ACP_LAUNCHER_CLEANUP_UNKNOWN` 标识该路径。普通 Agent exit 1 或没有 report 标记的同数值退出不属于这种状态。
+- 此时不要删除会话工作区 `.dutydeck/launchers/` 下的 report。内部协议只追加一行 `dutydeck_cleanup_unknown {"sourcesClosed":...,"destinationFlushed":...,"groupExited":...}` 和内部退出码 120；adapter 同时核验精确标记与退出码才把进程树加入待确认收养，普通 exit 1 或没有该精确 report 标记的普通裸 exit 120 都不是 cleanup-unknown。ACP adapter 用保留的 report 收养并停止仍存活的进程树，证明退出后才删除。请检查该 Agent 是否留下后台后代、继承管道或无法探测的进程组；即使 stderr 背压导致 launcher 诊断没有显示，adapter 也会用 `ACP_LAUNCHER_CLEANUP_UNKNOWN` 标识该路径。这些内部标记不是新增任务结果枚举、设置、CLI、数据库字段或外部 launcher 协议。

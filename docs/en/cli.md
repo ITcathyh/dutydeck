@@ -20,7 +20,7 @@ ADHD Lark structured confirmations retain their existing 24-hour card, same-sess
 
 `dutydeck update [version]` accepts only an exact semver, not a range, tag, or option string. Without the argument it still resolves `latest` or an explicit `--dist-tag`. Installation, verification, and restart errors keep their original prefix and append `npm install --global @byted/dutydeck@<actual previous version> && dutydeck restart` as the manual rollback steps. This reinstalls the old package directly and does not depend on the old CLI understanding `update [version]`. If the previous version is missing or is not an exact semver, the error says that no safe command can be generated. Dutydeck never rolls back automatically or bypasses the deployment window.
 
-During the pre-install task drain, every `update` progress, unverifiable-state, recoverable-task, query-failure and timeout message describes an update. To skip that wait, use `dutydeck update --force`, not `restart --force`. The wait conditions, drain order and recoverable-task preservation policy are the same as for restart; existing `restart` / `deploy` progress and error wording is unchanged.
+During the pre-install task drain, every `update` progress, unverifiable-state, query-failure and timeout message describes an update. To skip that wait, use `dutydeck update --force`, not `restart --force`. Drain conditions and wording are shared with restart, but **update under systemd does not enable restart's recoverable-tmux preservation path**: those tasks must finish or be bypassed with `--force`; they are not automatically resent. Existing `restart` / `deploy` progress, errors and preservation policies are unchanged. When deploy cannot verify tasks or times out, rerun the original `dutydeck deploy` command with `--force`.
 
 ```bash
 # Daemon
@@ -78,7 +78,8 @@ dutydeck auth token [--rotate]            # token for CLI/scripts/API
 dutydeck auth share-key rotate
 ```
 
-When no daemon state record exists, `dutydeck status` and `dutydeck doctor` probe `/health` and `/health/ready` on the configured host and port with short timeouts and do not follow redirects. They report an “unregistered foreground service” only when both responses match Dutydeck's health structures. `status --json` then adds the optional `unregisteredForeground: { address, ready }` field while the existing `running`, `processStatus`, `ready` and other fields retain their original values. An unready service sets only the new field's `ready=false`. An unrecognized response leaves the original diagnosis unchanged. The probe covers only the CLI's configured port; it cannot discover a temporary `--port` passed in another shell. Doctor treats the occupied configured port as belonging to the identified service. Because an unregistered process has no verifiable daemon Lark-listener record, doctor points to its startup terminal instead of recommending another `dutydeck start`.
+When no daemon state record exists, `dutydeck status` and `dutydeck doctor` probe `/health` and `/health/ready` on the configured host and port with short timeouts and do not follow redirects. Both responses must succeed, carry the `x-dutydeck-product: dutydeck` product header (header names are case-insensitive), and retain the existing JSON shapes: `/health` returns `{"ok":true}`, while `/health/ready` returns `{"ok":true,"ready":<boolean>,"pending":<string[]>}`. Only then do they report an unregistered foreground service. An older build or another service returning the same generic JSON without the product header is not identified and does not clear a port conflict. `status --json` still adds only the optional `unregisteredForeground: { address, ready }` field while existing `running`, `processStatus`, `ready` and other fields retain their values. The daemon directory, raw record and process state come from one instance snapshot, with the state file read once. Probes use plain HTTP only for loopback or a local interface; no request is sent to a remote host. Registered, stale and unverifiable records are not probed.
+Accepted root server flags select the instance: `dutydeck --host 127.0.0.1 --port 14310 status`, `dutydeck --local-only --port 14310 doctor`, and `dutydeck daemon status` all honor those arguments. Explicit flags override the process environment, and `--local-only` prefers `127.0.0.1`. When the current directory has no `.env`, status/doctor can supplement it from the located instance's service-root `.env`; an existing current-directory `.env` is not merged with the service-root file. Human-readable status still points to the original startup terminal. Once an unregistered foreground service is identified, `update` refuses before any npm call and a default-instance `restart` does not start another daemon as a substitute. Press Ctrl-C in the original terminal and rerun the original command with its original arguments. `update --force` skips only task waiting, not this refusal. `restart --unit <unit>` explicitly targets systemd and retains the existing unit restart path without the default/current-directory foreground preflight.
 
 ### Setup, first start and terminal preflight
 
@@ -135,17 +136,18 @@ Ordinary and error lines retain their original order, and multiline stacks are n
 A primary service can register other Dutydeck instances on the same host as static peers. Start each peer with its own database and port in `--local-only` mode, then add its address to the **primary service's** `.env`:
 
 ```bash
-# Peer examples: each instance has its own data directory and port
+# Terminal 1: peer A stays in the foreground; press Ctrl-C in this terminal to stop it
 dutydeck --local-only --port 4311 --database /path/to/peer-a/dutydeck.db --no-lark-listen
+# Terminal 2: start peer B in a separate terminal; press Ctrl-C there to stop it
 dutydeck --local-only --port 4312 --database /path/to/peer-b/dutydeck.db --no-lark-listen
 
 # Primary service .env: one-line JSON; ids use lowercase letters, digits and hyphens
 DUTYDECK_INSTANCES_JSON='[{"id":"peer-a","name":"Peer A","url":"http://127.0.0.1:4311"},{"id":"peer-b","name":"Peer B","url":"http://127.0.0.1:4312"}]'
 ```
 
-Peer addresses must be `http:` URLs, and each peer must be a local `--local-only` HTTP service. The primary service removes its own Cookie, Authorization, Origin and related headers before forwarding, so this is not an authenticated remote proxy. `/api/instances/<id>/...` on the primary forwards to `/api/...` on the selected peer; `/api/instances` lists the configured peers.
+Peer addresses must be `http:` URLs, and each peer must be a local `--local-only` HTTP service. The primary service removes its own Cookie, Authorization, Origin and related headers before forwarding, so this is not an authenticated remote proxy. `/api/instances/<id>/...` on the primary forwards to `/api/...` on the selected peer. `/api/instances` only verifies loaded `id` / `name` entries and does not return URLs, so it cannot prove that a new address is active; check the primary configuration and verify a known proxied request instead.
 
-The primary reads this list once while assembling the service. Restart the primary after adding or removing a peer or changing an address; update this setting as well when a peer's own address changes. The list is static: there is no dynamic discovery or health-based removal. Requests fail while a peer is unavailable, but its configured entry remains.
+The primary reads this list once while assembling the service. Restart the primary after adding or removing a peer or changing an address; update this setting as well when a peer's own address changes. A peer database path is not part of this JSON, so a database change does not require editing the primary instance list. The list is static: there is no dynamic discovery or health-based removal. Requests fail while a peer is unavailable, but its configured entry remains.
 
 Use `channel-bot` for the draft bots shown in the experimental “Groups & permissions” page. Its argument is the internal `id` returned by `list`, not the Lark App ID:
 
