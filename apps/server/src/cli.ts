@@ -27,7 +27,7 @@ import { acknowledgeDeferredAsk, askOutput, runSessionAsk, runSessionAskResult, 
 import { readNativeAskPayload, runNativeAskHook } from './native-ask-hook.js';
 import { runPermissionHook } from './permission-hook.js';
 import { RelayCliError } from '@dutydeck/relay';
-import { daemonRestart, daemonStart, daemonStatus, daemonStatusWithForeground, daemonStop, resolveCliDatabase, systemdRestartTarget, waitForRunningTasksDrain, type DaemonCommandResult, type DaemonStatusInfo } from './daemon/command.js';
+import { daemonRestart, daemonStart, daemonStatus, daemonStatusWithForeground, daemonStop, resolveCliDatabase, systemdRestartTarget, unregisteredForegroundRefusal, waitForRunningTasksDrain, type DaemonCommandResult, type DaemonStatusInfo } from './daemon/command.js';
 import { SUPERVISOR_ENV, readDaemonLog, readDaemonStatus, readJournalctlLog, resolveDaemonDir } from './daemon/daemon.js';
 import { sleep } from './daemon/time.js';
 import { armShutdownDeadline } from './shutdown-phases.js';
@@ -430,12 +430,15 @@ async function main() {
       if (!result.ok) process.exitCode = 1;
     },
     daemonRestart: async options => {
-      const result = await daemonRestart(options, { serve: daemonServe });
+      const refusal = options.unit ? undefined : await unregisteredForegroundRefusal('restart', environmentFromCli(options));
+      const result = refusal
+        ? { ok: false, action: 'restart' as const, running: false, processStatus: 'stale' as const, error: refusal }
+        : await daemonRestart(options, { serve: daemonServe });
       renderDaemonResult(result, options.json === true);
       if (!result.ok) process.exitCode = 1;
     },
     daemonStatus: async options => {
-      const status = await daemonStatusWithForeground();
+      const status = await daemonStatusWithForeground(environmentFromCli(options));
       renderDaemonResult({ action: 'status', ...status }, options.json === true);
       // status 是查询命令：不在运行不是「命令失败」，退出码保持 0。
     },
@@ -449,6 +452,10 @@ async function main() {
       output(await updateDutydeck(packageJson.version, options, {
         packageName: packageJson.name,
         runNpm: runNpmForDutydeckUpdate,
+        preflight: async () => {
+          const refusal = await unregisteredForegroundRefusal('update', environmentFromCli(options));
+          if (refusal) throw new Error(refusal);
+        },
         drain: drainBeforeUpdate,
         restart: (entrypoint, restartOptions) => restartWithInstalledCli(entrypoint, restartOptions)
       }));

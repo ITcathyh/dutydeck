@@ -55,4 +55,14 @@ describe('/health/ready', () => {
     expect((await authed.inject({ method: 'GET', url: '/health/ready' })).statusCode).toBe(200);
     expect((await authed.inject({ method: 'GET', url: '/api/lark/status' })).statusCode).toBe(401);
   });
+
+  it('两个健康端点都带稳定产品身份，旧 JSON 字段和值不变', async () => {
+    const built = await app({ listeningDisabled: true });
+    const health = await built.inject({ method: 'GET', url: '/health' });
+    expect(health.headers['x-dutydeck-product']).toBe('dutydeck');
+    expect(health.json()).toEqual({ ok: true });
+    const readiness = await built.inject({ method: 'GET', url: '/health/ready' });
+    expect(readiness.headers['x-dutydeck-product']).toBe('dutydeck');
+    expect(readiness.json()).toEqual({ ok: true, ready: true, pending: [] });
+  });
 });

@@ -864,7 +864,7 @@ async function deployLocked(options: DeployCliOptions, deps: DeployDeps, target:
       const keepRecoverable = (deps.service ? deps.service.killMode : target.service?.killMode) === 'process';
       info(keepRecoverable ? '排空：新消息照常入队，等不可跨重启保留的任务结束…' : '排空：新消息照常入队，等正在执行的任务结束…');
       waitingForDrain = true;
-      drain = await drainRuntime(target.endpoint, options, deps, keepRecoverable);
+      drain = await drainRuntime(target.endpoint, options, deps, keepRecoverable, 'deploy');
       waitingForDrain = false;
       await haltIfAborted();
       if (!drain.ok) return finish('failed', { error: drain.error });

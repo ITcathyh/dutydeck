@@ -226,7 +226,7 @@ describe('restart 前等待正在执行的任务结束（drain）', () => {
       return { ok: true, status: 200, json: async () => ({ runningTasks: 1, restartBlockers: mode === 'lost-lease' && holds === 1 ? 1 : 0, recoverableTasks: mode === 'lost-lease' && holds === 1 ? 0 : 1 }) } as Response;
     });
     const deps = { fetch, sleep: async () => { clock += 2000; }, now: () => clock, info() {}, warn() {} };
-    const result = mode === 'deploy' ? await drainRuntime(state, { drainTimeout: '1' }, deps)
+    const result = mode === 'deploy' ? await drainRuntime(state, { drainTimeout: '1' }, deps, false, 'deploy')
       : await waitForRunningTasksDrain(dir, state, { drainTimeout: '1' }, deps);
     expect(result.ok).toBe(mode === 'detached');
     if (result.ok) await result.release?.();
@@ -678,33 +678,51 @@ describe('restart 前等待正在执行的任务结束（drain）', () => {
     expect(info).not.toHaveBeenCalled();
   });
 
-  it('restart 与 deploy 默认进度、拒绝和超时文案逐字不变', async () => {
+  it('restart 默认进度、拒绝和超时文案逐字不变', async () => {
     const daemon = idleProcess(), state = daemonState(daemon, 'legacy-wording', false);
     writeState(dir, state);
-    for (const operation of ['restart', 'deploy'] as const) {
-      const initialApi = daemonApi([1, 0]);
-      const info = vi.fn();
-      const initial = operation === 'restart'
-        ? await waitForRunningTasksDrain(dir, state, {}, { fetch: initialApi.fetch, sleep: vi.fn(), info, warn: vi.fn() })
-        : await drainRuntime(state, {}, { fetch: initialApi.fetch, sleep: vi.fn(), info, warn: vi.fn() });
-      expect(initial).toMatchObject({ ok: true });
-      expect(info).toHaveBeenCalledWith('有 1 个任务正在执行，等它们结束后再重启（最长 900 秒；加 --force 立即重启）。等待期间新消息照常排队，重启后由新进程执行');
+    const initialApi = daemonApi([1, 0]);
+    const info = vi.fn();
+    const initial = await waitForRunningTasksDrain(dir, state, {}, { fetch: initialApi.fetch, sleep: vi.fn(), info, warn: vi.fn() });
+    expect(initial).toMatchObject({ ok: true });
+    expect(info).toHaveBeenCalledWith('有 1 个任务正在执行，等它们结束后再重启（最长 900 秒；加 --force 立即重启）。等待期间新消息照常排队，重启后由新进程执行');
 
-      const api = daemonApi([1, 1]);
-      let clock = 0;
-      const timedOut = operation === 'restart'
-        ? await waitForRunningTasksDrain(dir, state, { drainTimeout: '1' }, { fetch: api.fetch, sleep: async () => { clock += 2_000; }, now: () => clock, info: vi.fn(), warn: vi.fn() })
-        : await drainRuntime(state, { drainTimeout: '1' }, { fetch: api.fetch, sleep: async () => { clock += 2_000; }, now: () => clock, info: vi.fn(), warn: vi.fn() });
-      expect(timedOut).toEqual({
-        ok: false, runningTasks: 1,
-        error: '等待正在执行的任务结束超时（1 秒），旧服务仍在运行（当前仍有 1 个任务正在执行）。若确认可以中断这些任务，请使用 dutydeck restart --force 强制重启。'
-      });
-    }
+    const api = daemonApi([1, 1]);
+    let clock = 0;
+    const timedOut = await waitForRunningTasksDrain(dir, state, { drainTimeout: '1' }, { fetch: api.fetch, sleep: async () => { clock += 2_000; }, now: () => clock, info: vi.fn(), warn: vi.fn() });
+    expect(timedOut).toEqual({
+      ok: false, runningTasks: 1,
+      error: '等待正在执行的任务结束超时（1 秒），旧服务仍在运行（当前仍有 1 个任务正在执行）。若确认可以中断这些任务，请使用 dutydeck restart --force 强制重启。'
+    });
 
     const refused = await drainRuntime({ address: 'http://192.0.2.1:4310', authEnabled: false }, {}, { localAddresses: () => [] });
     expect(refused).toEqual({
       ok: false, runningTasks: 0,
       error: '守护进程监听地址（http://192.0.2.1:4310）不可用于本机查询，无法确认是否有任务正在执行，已拒绝重启，旧服务仍在运行。若确认可以中断正在执行的任务，加 --force 跳过等待。'
+    });
+  });
+
+  it('deploy 排水写部署，超时指导重新执行原 deploy 并加 force', async () => {
+    const daemon = idleProcess(), state = daemonState(daemon, 'deploy-wording', false);
+    const initialApi = daemonApi([1, 0]);
+    const info = vi.fn();
+    const initial = await drainRuntime(state, {}, { fetch: initialApi.fetch, sleep: vi.fn(), info, warn: vi.fn() }, false, 'deploy');
+    expect(initial).toMatchObject({ ok: true });
+    expect(info).toHaveBeenCalledWith('有 1 个任务正在执行，等它们结束后再部署（最长 900 秒；加 --force 立即部署）。等待期间新消息照常排队，部署后由新进程执行');
+
+    const api = daemonApi([1, 1]);
+    let clock = 0;
+    const timedOut = await drainRuntime(state, { drainTimeout: '1' }, { fetch: api.fetch, sleep: async () => { clock += 2_000; }, now: () => clock, info: vi.fn(), warn: vi.fn() }, false, 'deploy');
+    expect(timedOut).toEqual({
+      ok: false, runningTasks: 1,
+      error: '等待正在执行的任务结束超时（1 秒），旧服务仍在运行（当前仍有 1 个任务正在执行）。若确认可以中断这些任务，请重新执行原 dutydeck deploy 命令并加 --force。'
+    });
+    expect(!timedOut.ok && timedOut.error).not.toContain('restart');
+
+    const refused = await drainRuntime({ address: 'http://192.0.2.1:4310', authEnabled: false }, {}, { localAddresses: () => [] }, false, 'deploy');
+    expect(refused).toEqual({
+      ok: false, runningTasks: 0,
+      error: '守护进程监听地址（http://192.0.2.1:4310）不可用于本机查询，无法确认是否有任务正在执行，已拒绝部署，旧服务仍在运行。若确认可以中断正在执行的任务，请重新执行原 dutydeck deploy 命令并加 --force。'
     });
   });
 

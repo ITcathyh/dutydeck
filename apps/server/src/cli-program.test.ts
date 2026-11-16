@@ -187,6 +187,22 @@ describe('Dutydeck CLI', () => {
     expect(asJson).toHaveBeenCalledWith(expect.objectContaining({ json: true }));
   });
 
+  it('passes root server flags to status, doctor and update instead of discarding them', async () => {
+    for (const args of [['status'], ['daemon', 'status']]) {
+      const daemonStatus = vi.fn();
+      await createCliProgram('0.0.6', { daemonStatus }).parseAsync(['node', 'dutydeck', '--host', '127.0.0.1', '--local-only', '--port', '14400', ...args, '--json']);
+      expect(daemonStatus).toHaveBeenCalledWith(expect.objectContaining({ host: '127.0.0.1', localOnly: true, port: '14400', json: true }));
+    }
+
+    const doctor = vi.fn();
+    await createCliProgram('0.0.6', { doctor }).parseAsync(['node', 'dutydeck', '--host', '127.0.0.1', '--local-only', '--port', '14401', 'doctor', '--json']);
+    expect(doctor).toHaveBeenCalledWith(expect.objectContaining({ host: '127.0.0.1', localOnly: true, port: '14401', json: true }));
+
+    const update = vi.fn();
+    await createCliProgram('0.0.6', { update }).parseAsync(['node', 'dutydeck', '--port', '14402', 'update', '1.2.3', '--force']);
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({ port: '14402', version: '1.2.3', force: true }));
+  });
+
   it('routes logs with 50 lines by default and accepts an explicit count and unit', async () => {
     const logs = vi.fn();
     await createCliProgram('0.0.6', { logs }).parseAsync(['node', 'dutydeck', 'logs']);
