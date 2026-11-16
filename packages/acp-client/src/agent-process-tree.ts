@@ -63,12 +63,19 @@ export class AgentProcessTree {
     if (this.ownGroup) this.groups.add(pid!);
     if (reports && this.root) this.report = join(reports, `${this.root.pid}.${this.root.start}`);
   }
-  /** Drop the launcher's report file; whatever it named stays recorded. */
+  /** Drop the launcher's report file only after the caller proves that its recorded tree exited. */
   discardReport() { if (this.report) rmSync(this.report, { force: true }); }
+  /** Reserved exit code plus the launcher's synchronous marker; either one alone is an ordinary exit. */
+  hasCleanupUnknownReport(exitCode: number | null) {
+    if (exitCode !== 120 || !this.report) return false;
+    try {
+      return /^dutydeck_cleanup_unknown \{"sourcesClosed":(?:true|false),"destinationFlushed":(?:true|false),"groupExited":(?:true|false)\}\n$/m.test(readFileSync(this.report, 'utf8'));
+    } catch { return false; }
+  }
   private adoptReported(table: ProcessTable) {
     let raw: string;
     try { raw = readFileSync(this.report!, 'utf8'); } catch { return; }
-    const match = /^(\d+) (\d+)\n$/.exec(raw);
+    const match = /^(\d+) (\d+)\n/.exec(raw);
     if (!match) return;
     const member = { pid: Number(match[1]), start: match[2]! };
     // The report lives in the workspace: only a process the launcher could have started is accepted.

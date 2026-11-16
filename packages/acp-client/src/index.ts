@@ -360,7 +360,16 @@ const stuckRetireDelay = (idleTimeoutMs: number) => Math.min(Math.max(idleTimeou
 const STOP_CANCEL_TIMEOUT_MS = 10_000;
 /** The timed-out turn never confirmed cancellation: the next prompt was not sent, and stays unsent. */
 export const ACP_CANCEL_UNCONFIRMED = 'ACP_CANCEL_UNCONFIRMED';
+const ACP_LAUNCHER_CLEANUP_UNKNOWN = 'ACP_LAUNCHER_CLEANUP_UNKNOWN';
 const IDLE_CPU_WINDOW_MS = 60_000;
+
+class AcpxLauncherCleanupUnknownError extends Error {
+  readonly code = ACP_LAUNCHER_CLEANUP_UNKNOWN;
+  constructor() {
+    super('Agent cleanup could not be confirmed; the launcher report was retained so the remaining process tree can be adopted or stopped.');
+    this.name = 'AcpxLauncherCleanupUnknownError';
+  }
+}
 
 class AcpxStoppedError extends Error {
   constructor() { super('ACP adapter is stopped'); this.name = 'AcpxStoppedError'; }
@@ -406,8 +415,9 @@ export class AcpxAdapter implements AgentDriver {
    */
   private timedOut?: { stream: Promise<void>; retireAt: number; retired?: true; unconfirmed?: true };
   private readonly agentChildren = new Map<ChildProcess, AgentProcessTree>();
-  /** Trees of launchers killed by a signal: their detached Agent may outlive them until proven gone. */
+  /** Trees of launchers killed by a signal or reporting unproven cleanup; reports stay until the tree exits. */
   private readonly unconfirmedTrees = new Set<AgentProcessTree>();
+  private launcherCleanupError?: AcpxLauncherCleanupUnknownError;
   private idleWatch?: { refresh(): void; clear(): void };
   private readonly cpu = new ProcessTreeCpu();
   private stopResourcesSettled = false;
@@ -585,10 +595,19 @@ export class AcpxAdapter implements AgentDriver {
     let sampling: NodeJS.Timeout | undefined;
     const exited = () => {
       clearInterval(sampling);
-      if (launcher && child.signalCode && tree) { tree.refresh(); this.unconfirmedTrees.add(tree); }
-      tree?.discardReport();
+      const cleanupUnknown = !!launcher && !!tree && tree.hasCleanupUnknownReport(child.exitCode);
+      if (launcher && tree && (child.signalCode || cleanupUnknown)) { tree.refresh(); this.unconfirmedTrees.add(tree); }
+      else tree?.discardReport();
       this.processes.delete(child); this.agentChildren.delete(child);
       child.off('exit', exited); child.off('error', failed);
+      if (cleanupUnknown) {
+        const failure = new AcpxLauncherCleanupUnknownError();
+        this.launcherCleanupError ??= failure;
+        if (!this.stopped) {
+          try { this.options.onEvent({ type: 'error', data: { message: failure.message, code: failure.code } }); }
+          catch { /* The thrown request error remains machine-readable. */ }
+        }
+      }
     };
     const failed = () => { if (child.pid == null) exited(); };
     this.processes.set(child, exited);
@@ -614,7 +633,7 @@ export class AcpxAdapter implements AgentDriver {
     for (const [child, exited] of this.processes) if (child.exitCode != null || child.signalCode != null) exited();
     if (this.unconfirmedTrees.size) {
       const table = scanProcesses();
-      for (const tree of this.unconfirmedTrees) if (tree.exited(table) === true) this.unconfirmedTrees.delete(tree);
+      for (const tree of this.unconfirmedTrees) if (tree.exited(table) === true) { tree.discardReport(); this.unconfirmedTrees.delete(tree); }
     }
     return this.stopped && !this.unconfirmedTrees.size && this.stopResourcesSettled && this.resourceOperations.size === 0 && this.streams.size === 0 && this.sdkCreations.size === 0 && this.processes.size === 0;
   }
@@ -969,6 +988,13 @@ export class AcpxAdapter implements AgentDriver {
             if (timedOut) reportIdleTimeout();
             this.options.onEvent({ type: 'completed', data: { stopReason: timedOut ? 'idle_timeout' : outcome.stopReason ?? outcome.status } });
           }
+        } catch (error) {
+          if (this.launcherCleanupError) {
+            const failure = this.launcherCleanupError;
+            this.launcherCleanupError = undefined;
+            throw failure;
+          }
+          throw error;
         } finally {
           finished = true;
           for (const resolve of this.pendingPermissions.values()) resolve({ outcome: 'reject_once' });

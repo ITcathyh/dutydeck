@@ -208,7 +208,11 @@ export function secretGuardScriptPath() {
   catch { return path; }
 }
 
-const policyFile = (root, sessionId) => join(root, '.dutydeck', 'security', 'sessions', `${sessionId}.json`);
+const policyFile = (root, sessionId) => join(resolve(root), '.dutydeck', 'security', 'sessions', `${sessionId}.json`);
+const safeSessionComponent = sessionId => typeof sessionId === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(sessionId);
+const shellSafePolicyRoot = root => Buffer.byteLength(root) <= 2048
+  && root.split(/[\\/]/).every(component => Buffer.byteLength(component) <= 200)
+  && !/[\u0000-\u001f\u007f]/.test(root);
 
 /**
  * 给 Agent CLI 配置的 hook 命令。会话 id 为空时 shell 直接放行，不启动 Node。
@@ -217,13 +221,20 @@ const policyFile = (root, sessionId) => join(root, '.dutydeck', 'security', 'ses
  * 文件存在时由 Node 解析并检查，读取、JSON 或脚本错误都退出 2，不用 enabled:false 等文本快路径猜策略，也不缓存结果。
  */
 export function secretGuardHookCommand({ nodePath = process.execPath, policyRoot }) {
-  const root = quote(policyRoot);
-  const sessions = quote(join(policyRoot, '.dutydeck', 'security', 'sessions'));
+  const absoluteRoot = resolve(policyRoot);
+  const root = quote(absoluteRoot);
+  const runNode = `DUTYDECK_POLICY_ROOT=${root} ${quote(nodePath)} ${quote(secretGuardScriptPath())} || exit 2`;
+  // test status 1 also covers ENAMETOOLONG and other errors. Only conservative
+  // path bounds may use the shell ENOENT shortcut; everything else reaches Node.
+  if (!shellSafePolicyRoot(absoluteRoot)) return `[ -z "$dutydeck_session_id" ] && exit 0; ${runNode}`;
+  const sessions = quote(join(absoluteRoot, '.dutydeck', 'security', 'sessions'));
   const target = `${sessions}/"$dutydeck_session_id".json`;
   const traverse = [
     '[ -z "$dutydeck_session_id" ] && exit 0;',
+    `[ "\${#dutydeck_session_id}" -gt 128 ] && { ${runNode}; };`,
+    `case $dutydeck_session_id in *[!A-Za-z0-9_-]*) ${runNode} ;; esac;`,
     `dutydeck_guard_path=${target};`,
-    'case $dutydeck_guard_path in /*) dutydeck_guard_rest=${dutydeck_guard_path#/}; dutydeck_guard_current= ;; *) dutydeck_guard_rest=$dutydeck_guard_path; dutydeck_guard_current=$PWD ;; esac;',
+    'dutydeck_guard_rest=${dutydeck_guard_path#/}; dutydeck_guard_current=;',
     'while [ -n "$dutydeck_guard_rest" ]; do',
     'case $dutydeck_guard_rest in */*) dutydeck_guard_component=${dutydeck_guard_rest%%/*}; dutydeck_guard_rest=${dutydeck_guard_rest#*/} ;; *) dutydeck_guard_component=$dutydeck_guard_rest; dutydeck_guard_rest= ;; esac;',
     '[ -n "$dutydeck_guard_component" ] || continue;',
@@ -239,12 +250,13 @@ export function secretGuardHookCommand({ nodePath = process.execPath, policyRoot
     'fi;',
     'done;',
   ].join(' ');
-  return `${traverse} DUTYDECK_POLICY_ROOT=${root} ${quote(nodePath)} ${quote(secretGuardScriptPath())} || exit 2`;
+  return `${traverse} ${runNode}`;
 }
 
 /** 本轮要拦时返回策略：风险管控开启（enabled）且发起人未获授权。文件不存在放行，其他读取或解析错误向上抛出。 */
 function activePolicy(root, sessionId) {
   if (!sessionId) return undefined;
+  if (!safeSessionComponent(sessionId)) throw new Error('invalid Dutydeck session id');
   let raw;
   try { raw = readFileSync(policyFile(root, sessionId), 'utf8'); }
   catch (error) { if (error?.code === 'ENOENT') return undefined; throw error; }
