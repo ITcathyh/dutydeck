@@ -108,6 +108,31 @@ it('keeps menu, draft, busy and unknown-footer guards with the Codex weekly-only
   expect(isInputReady(codexWeeklyScreen + 'Unknown control\n', 'Codex')).toBe(false);
 });
 
+// Captured Codex 0.169.0 viewport; the workspace path is anonymized.
+const codexControlsScreen = readFileSync(new URL('./fixtures/codex-startup/0.169.0-controls-footer.txt', import.meta.url), 'utf8');
+
+it('prepares input on the captured Codex controls footer with or without warnings', async () => {
+  for (const screen of [codexControlsScreen, codexControlsScreen.replace(/\s+⚠ 3 warnings · f2 to view/, '')]) {
+    expect(isInputReady(screen, 'Codex')).toBe(true);
+    expect(isInputReady(screen.replace('Ask Codex to do anything', 'Ask TraeCode CLI'), 'TraeX')).toBe(false);
+    const write = vi.fn(), sendSpecialKeys = vi.fn();
+    await createCodexAdapter().prepareInput!({ readScreen: () => screen, write, sendSpecialKeys }, { sessionId: 'fixture' });
+    expect(write).not.toHaveBeenCalled(); expect(sendSpecialKeys).not.toHaveBeenCalled();
+  }
+});
+
+it('keeps Codex controls from authorizing drafts, menus, pending startup or unknown footers', () => {
+  for (const prompt of ['› unsent draft', '› 1. Trust and continue', '» 1. Update now']) {
+    expect(isInputReady(codexControlsScreen.replace('› Ask Codex to do anything', prompt), 'Codex'), prompt).toBe(false);
+  }
+  for (const pending of ['Review hooks', 'Select permissions', 'Resuming session…', 'Working (esc to interrupt)', 'Queued for capacity']) {
+    expect(isInputReady(pending + '\n' + codexControlsScreen, 'Codex'), pending).toBe(false);
+  }
+  expect(isInputReady(codexControlsScreen.replace('← for agents', 'unknown control'), 'Codex')).toBe(false);
+  expect(isInputReady(codexControlsScreen + 'Approval required\n', 'Codex')).toBe(false);
+  expect(isInputReady(codexControlsScreen.replace(/^.*GPT-6-Astra xhigh.*\n/m, ''), 'Codex')).toBe(false);
+});
+
 it.each(['raw', 'keyed'] as const)('Cursor %s submits once and preserves multi-line soft newlines and the first-write settle', async mode => {
   vi.useFakeTimers();
   try {

@@ -51,6 +51,8 @@ const TRAEX_ACCESS_FOOTER = /(?:\s+☢ Full Access \(shift\+tab to cycle\) · �
 // TraeX 0.210.1 renders these controls on their own row below model/path.
 const TRAEX_CONTROLS_FOOTER = /^☢ Full Access \(shift\+tab to cycle\) · (?:\? for shortcuts · )?← for agents$/;
 const CODEX_WARNING_FOOTER = /(?:\s+⚠ \d+ warnings? · f2 to view)?/;
+// Codex 0.169.0 places agent/shortcut controls and warnings on a separate row.
+const CODEX_CONTROLS_FOOTER = new RegExp('^← for agents · \\? for shortcuts' + CODEX_WARNING_FOOTER.source + '$');
 // Codex 0.164.0 can omit both context usage and the workspace from its footer.
 const CODEX_WEEKLY_FOOTER = new RegExp(
   '^[^\\s·]+(?: [^\\s·]+)? · weekly \\d+% left' + CODEX_WARNING_FOOTER.source + '$',
@@ -130,7 +132,7 @@ export function isInputReady(screen: string, cli: 'Codex' | 'TraeX', busyPattern
     if (actual !== (cli === 'TraeX' ? expectedDraft.replaceAll('\t', ' ') : expectedDraft)) return false;
   } else if (!(cli === 'Codex' ? CODEX_COMPOSER : TRAEX_COMPOSER).test(composerRows[prompt]!.trimEnd())) return false;
   const footer = composerRows.slice(composerEnd).map(line => line.trim()).filter(Boolean);
-  if (footer.some(line => !isInitializedFooter(line, cli) && !(cli === 'TraeX' && TRAEX_CONTROLS_FOOTER.test(line)) && !DECORATION.test(line))) return false;
+  if (footer.some(line => !isInitializedFooter(line, cli) && !(cli === 'TraeX' ? TRAEX_CONTROLS_FOOTER : CODEX_CONTROLS_FOOTER).test(line) && !DECORATION.test(line))) return false;
   const banner = composerRows.slice(0, prompt).map(line => line.trim());
   return footer.some(line => isInitializedFooter(line, cli)) || LOADED_BANNER.test(banner.join('\n'))
     || banner.some(line => (cli === 'Codex' ? CODEX_BANNER : TRAEX_BANNER).test(line));

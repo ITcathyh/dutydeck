@@ -1,0 +1,10 @@
+ >_ OpenAI Codex (v0.169.0)
+ /path/to/workspace
+ permissions: YOLO mode
+
+ Tip: Use /archive to archive the current session.
+
+› Ask Codex to do anything
+
+ GPT-6-Astra xhigh · weekly 70% left
+ ← for agents · ? for shortcuts ⚠ 3 warnings · f2 to view

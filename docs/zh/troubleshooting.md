@@ -161,3 +161,7 @@ SIGKILL 无法执行进程内退出处理，所以下一代先根据上一代缺
 - 正常下游慢读不是错误，也没有 5 秒截断期限。主 Agent 已退出时，stdout/stderr 尾部会等目的地恢复并完整交付，再按原退出码或信号语义结束；不要因暂停超过 5 秒就重发原任务。
 - 只有遗留源描述符或自有进程组退出无法证明时才走有界失败。诊断里的 `sourcesClosed=false` 表示还有后代持有继承的 stdout/stderr；`destinationFlushed=false` 表示异常收尾时目的地尚有未写完数据；`groupExited=false` 表示进程组退出尚未得到证明，三者不再合并成一个 `drained=false`。
 - 此时不要删除会话工作区 `.dutydeck/launchers/` 下的 report。内部协议只追加一行 `dutydeck_cleanup_unknown {"sourcesClosed":...,"destinationFlushed":...,"groupExited":...}` 和内部退出码 120；adapter 同时核验精确标记与退出码才把进程树加入待确认收养，普通 exit 1 或没有该精确 report 标记的普通裸 exit 120 都不是 cleanup-unknown。ACP adapter 用保留的 report 收养并停止仍存活的进程树，证明退出后才删除。请检查该 Agent 是否留下后台后代、继承管道或无法探测的进程组；即使 stderr 背压导致 launcher 诊断没有显示，adapter 也会用 `ACP_LAUNCHER_CLEANUP_UNKNOWN` 标识该路径。这些内部标记不是新增任务结果枚举、设置、CLI、数据库字段或外部 launcher 协议。
+
+### Q26: Codex 已显示输入框，为什么仍报“启动尚未就绪”？
+- Codex 0.169.0 把 `← for agents · ? for shortcuts` 和警告数量移到独立底栏，旧版 Dutydeck 会误判这块已就绪画面。升级到包含该底栏兼容修复的版本后，确认原任务因“启动尚未就绪”失败，再重新发送；这类失败发生在正文写入前。
+- 当前版本识别该底栏时仍要求空输入框及已初始化的模型状态；权限菜单、未发送草稿和运行中画面仍会阻止写入。
