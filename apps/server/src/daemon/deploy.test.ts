@@ -3,11 +3,12 @@ import { DutydeckRuntime } from '@dutydeck/runtime';
 import type { AgentConfig } from '@dutydeck/shared';
 import Database from 'better-sqlite3';
 import { fork, spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
 import { constants as osConstants, tmpdir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { Worker, WorkerOptions } from 'node:worker_threads';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -15,7 +16,7 @@ import { lazyBundleForTest } from '../../../../tests/support/bundle-for-test.js'
 import type { AutostartCommandOutput } from '../autostart/autostart.js';
 import { DRAIN_INTERVAL_MS } from './command.js';
 import { splitSystemdShowStrings } from './systemd-environment.js';
-import { BUILD_OUTPUTS, parseDeployWindows, runDeploy, runDeployPrune, shanghaiMinuteOfDay, withinDeployWindow, type DeployDeps, type DeployResult } from './deploy.js';
+import { BUILD_OUTPUTS, keepProductionDependencyAsset, parseDeployWindows, runDeploy, runDeployPrune, shanghaiMinuteOfDay, withinDeployWindow, type DeployDeps, type DeployResult } from './deploy.js';
 
 // The helper runs as a bundle: through the TypeScript loader each fork paid a cold start of a second or more.
 const deployOwner = lazyBundleForTest('deploy-owner', fileURLToPath(new URL('./deploy-owner.test-helper.mjs', import.meta.url)));
@@ -75,6 +76,23 @@ function write(path: string, content: string) {
 function link(target: string, path: string) {
   mkdirSync(dirname(path), { recursive: true });
   symlinkSync(target, path);
+}
+
+interface AssetEntry { type: 'file' | 'symlink'; mode?: number; sha256?: string; target?: string }
+
+function assetManifest(root: string): Record<string, AssetEntry> {
+  const result: Record<string, AssetEntry> = {};
+  const visit = (dir: string, prefix = '') => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name), name = prefix ? `${prefix}/${entry.name}` : entry.name;
+      const stat = lstatSync(path);
+      if (stat.isDirectory()) visit(path, name);
+      else if (stat.isSymbolicLink()) result[name] = { type: 'symlink', target: readlinkSync(path) };
+      else result[name] = { type: 'file', mode: stat.mode & 0o7777, sha256: createHash('sha256').update(readFileSync(path)).digest('hex') };
+    }
+  };
+  visit(root);
+  return result;
 }
 
 function git(dir: string, ...args: string[]) {
@@ -227,6 +245,47 @@ describe('部署窗口', () => {
   });
 });
 
+describe('生产依赖资产过滤', () => {
+  it.each([
+    ['dep-a', 'index.d.ts', false],
+    ['dep-a', 'nested/index.d.cts', false],
+    ['dep-a', 'nested/index.d.mts', false],
+    ['dep-a', 'index.d.ts.map', true],
+    ['dep-a', 'index.js.map', true],
+    ['@larksuiteoapi/node-sdk', 'es/index.js', false],
+    ['@larksuiteoapi/node-sdk', 'types/runtime.js', false],
+    ['@larksuiteoapi/node-sdk', 'lib/index.js', true],
+    ['@larksuiteoapi/node-sdk', 'lib/index.js.map', true],
+    ['@larksuiteoapi/node-sdk', 'nested/es/index.js', true],
+    ['@larksuiteoapi/node-sdk', 'esque/index.js', true],
+    ['dep-a', 'es/index.js', true],
+    ['dep-a', 'types/runtime.js', true],
+    ['dep-a', 'prebuilds/win32-x64/pty.node', true],
+    ['dep-a', 'third_party/conpty/conpty.dll', true]
+  ] as const)('%s 的 %s', (packageName, path, kept) => {
+    expect(keepProductionDependencyAsset(packageName, path, 'linux', 'x64')).toBe(kept);
+  });
+
+  it.each([
+    { platform: 'linux', arch: 'x64' },
+    { platform: 'linux', arch: 'arm64' },
+    { platform: 'darwin', arch: 'arm64' },
+    { platform: 'win32', arch: 'x64' },
+    { platform: 'win32', arch: 'arm64' }
+  ] as const)('node-pty 只保留 $platform-$arch 的 prebuild，并仅在 Windows 保留 ConPTY', ({ platform, arch }) => {
+    const current = `${platform}-${arch}`;
+    for (const candidate of ['linux-x64', 'linux-arm64', 'darwin-arm64', 'win32-x64', 'win32-arm64']) {
+      expect(keepProductionDependencyAsset('node-pty', `prebuilds/${candidate}/pty.node`, platform, arch)).toBe(candidate === current);
+    }
+    expect(keepProductionDependencyAsset('node-pty', `prebuilds/${current}/spawn-helper`, platform, arch)).toBe(true);
+    expect(keepProductionDependencyAsset('node-pty', `prebuilds/${current}/conpty/OpenConsole.exe`, platform, arch)).toBe(true);
+    expect(keepProductionDependencyAsset('node-pty', 'build/Release/pty.node', platform, arch)).toBe(true);
+    expect(keepProductionDependencyAsset('node-pty', 'build/Debug/pty.node', platform, arch)).toBe(true);
+    expect(keepProductionDependencyAsset('node-pty', 'third_party/conpty/1.0/win10-x64/conpty.dll', platform, arch)).toBe(platform === 'win32');
+    expect(keepProductionDependencyAsset('node-pty', 'third_party/conpty-extra/keep', platform, arch)).toBe(true);
+  });
+});
+
 describe('dutydeck deploy', () => {
   let tmp: string;
   let source: string;
@@ -329,6 +388,89 @@ describe('dutydeck deploy', () => {
     expect(result, result.error).toMatchObject({ ok: true, status: 'staged' });
     expect(existsSync(join(result.release!, 'node_modules/acpx'))).toBe(false);
     expect(existsSync(join(result.release!, 'node_modules/drizzle-orm'))).toBe(false);
+  });
+
+  it('生产依赖只裁声明、Lark 非运行入口和非当前 node-pty 资产，其余内容及元数据不变', async () => {
+    const store = join(source, 'node_modules', '.pnpm');
+    const serverModules = join(source, 'apps', 'server', 'node_modules');
+    const manifestPath = join(source, 'apps', 'server', 'package.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    Object.assign(manifest.dependencies, { '@larksuiteoapi/node-sdk': '1.0.0', 'node-pty': '1.0.0' });
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+    const addPackage = (id: string, name: string, files: Record<string, string>) => {
+      const root = join(store, id, 'node_modules', name);
+      write(join(root, 'package.json'), JSON.stringify({ name, version: '1.0.0', main: 'lib/index.js' }));
+      for (const [path, content] of Object.entries(files)) write(join(root, path), content);
+      const linkPath = join(serverModules, name);
+      link(relative(dirname(linkPath), root), linkPath);
+    };
+    const depA = 'dep-a@1.0.0', depB = 'dep-b@1.0.0';
+    const lark = '@larksuiteoapi+node-sdk@1.0.0', larkName = '@larksuiteoapi/node-sdk';
+    const pty = 'node-pty@1.0.0', ptyName = 'node-pty';
+    const current = `${process.platform}-${process.arch}`, other = current === 'linux-x64' ? 'win32-x64' : 'linux-x64';
+    const depARoot = join(store, depA, 'node_modules', 'dep-a');
+    for (const path of ['index.d.ts', 'index.d.cts', 'index.d.mts', 'index.d.ts.map', 'index.js.map', 'nested/index.d.ts', 'es/index.js', 'types/runtime.js', 'prebuilds/win32-x64/keep', 'third_party/conpty/keep', 'bin/spawn-helper']) {
+      write(join(depARoot, path), path);
+    }
+    chmodSync(join(depARoot, 'bin/spawn-helper'), 0o755);
+    link('index.js', join(depARoot, 'alias.js'));
+    write(join(store, depB, 'node_modules', 'dep-b', 'index.d.ts'), 'declare const value: string;');
+    write(join(store, depB, 'node_modules', 'dep-b', 'index.js.map'), '{"version":3}');
+    addPackage(lark, larkName, {
+      'lib/index.js': 'module.exports = { Client: class {} };\n',
+      'lib/index.js.map': '{"version":3}',
+      'lib/index.d.ts': 'export class Client {}',
+      'es/index.js': 'export class Client {}',
+      'types/runtime.js': 'module.exports = {};',
+      'types/index.d.ts': 'export class Client {}',
+      'nested/es/keep.js': 'export const kept = true;',
+      'LICENSE': 'license'
+    });
+    addPackage(pty, ptyName, {
+      'lib/index.js': 'module.exports = {};',
+      'lib/index.js.map': '{"version":3}',
+      [`prebuilds/${current}/pty.node`]: 'current-native',
+      [`prebuilds/${current}/spawn-helper`]: 'current-helper',
+      [`prebuilds/${current}/conpty/OpenConsole.exe`]: 'current-conpty',
+      [`prebuilds/${other}/pty.node`]: 'other-native',
+      [`prebuilds/${other}/conpty/conpty.dll`]: 'other-conpty',
+      'third_party/conpty/1.0/win10-x64/conpty.dll': 'conpty-source',
+      'build/Release/pty.node': 'release-native',
+      'build/Debug/pty.node': 'debug-native',
+      'typings/node-pty.d.ts': 'export {};',
+      'LICENSE': 'license'
+    });
+    chmodSync(join(store, pty, 'node_modules', ptyName, `prebuilds/${current}/spawn-helper`), 0o755);
+
+    const ids = [depA, depB, lark, pty];
+    const inventory = (root: string) => Object.assign({}, ...ids.map(id => Object.fromEntries(
+      Object.entries(assetManifest(join(root, id))).map(([path, value]) => [`${id}/${path}`, value])
+    ))) as Record<string, AssetEntry>;
+    const baseline = inventory(store);
+    const key = (id: string, name: string, path: string) => `${id}/node_modules/${name}/${path}`;
+    const omitted = [
+      ...['index.d.ts', 'index.d.cts', 'index.d.mts', 'nested/index.d.ts'].map(path => key(depA, 'dep-a', path)),
+      key(depB, 'dep-b', 'index.d.ts'),
+      ...['lib/index.d.ts', 'es/index.js', 'types/runtime.js', 'types/index.d.ts'].map(path => key(lark, larkName, path)),
+      key(pty, ptyName, `prebuilds/${other}/pty.node`),
+      key(pty, ptyName, `prebuilds/${other}/conpty/conpty.dll`),
+      key(pty, ptyName, 'typings/node-pty.d.ts'),
+      ...(process.platform === 'win32' ? [] : [key(pty, ptyName, 'third_party/conpty/1.0/win10-x64/conpty.dll')])
+    ];
+    expect(Object.keys(baseline)).toEqual(expect.arrayContaining(omitted));
+
+    const result = await runDeploy({ source, runtime: bot, restart: false }, deps());
+
+    expect(result, result.error).toMatchObject({ ok: true, status: 'staged' });
+    const copied = inventory(join(result.release!, 'node_modules', '.pnpm'));
+    const expected = Object.fromEntries(Object.entries(baseline).filter(([path]) => !omitted.includes(path)));
+    expect(copied).toEqual(expected);
+    expect(inventory(store)).toEqual(baseline);
+    expect(lstatSync(join(result.release!, 'node_modules', '.pnpm', depA, 'node_modules', 'dep-a', 'bin', 'spawn-helper')).mode & 0o777).toBe(0o755);
+    expect(existsSync(join(result.release!, 'node_modules', '.pnpm', lark, 'node_modules', larkName, 'es'))).toBe(false);
+    expect(existsSync(join(result.release!, 'node_modules', '.pnpm', lark, 'node_modules', larkName, 'types'))).toBe(false);
+    expect(existsSync(join(result.release!, 'node_modules', '.pnpm', pty, 'node_modules', ptyName, 'prebuilds', other))).toBe(false);
+    if (process.platform !== 'win32') expect(existsSync(join(result.release!, 'node_modules', '.pnpm', pty, 'node_modules', ptyName, 'third_party', 'conpty'))).toBe(false);
   });
 
   it.each(['SIGINT', 'SIGTERM', 'SIGHUP'] as const)('排空后被 %s 打断：写失败清单、立即退出排空再退出进程', async signal => {

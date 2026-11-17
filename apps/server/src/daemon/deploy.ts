@@ -187,8 +187,20 @@ function linkedNames(modules: string): string[] {
   return names;
 }
 
+/** 只裁运行时用不到的包内资产；relativePath 是包根以下、统一使用 `/` 的相对路径。 */
+export function keepProductionDependencyAsset(packageName: string, relativePath: string, platform = process.platform, arch = process.arch): boolean {
+  if (/\.d\.[cm]?ts$/.test(relativePath)) return false;
+  if (packageName === '@larksuiteoapi/node-sdk' && /^(?:es|types)(?:\/|$)/.test(relativePath)) return false;
+  if (packageName === 'node-pty') {
+    const prebuild = /^prebuilds\/([^/]+)(?:\/|$)/.exec(relativePath);
+    if (prebuild && prebuild[1] !== `${platform}-${arch}`) return false;
+    if (platform !== 'win32' && /^third_party\/conpty(?:\/|$)/.test(relativePath)) return false;
+  }
+  return true;
+}
+
 /**
- * 按 pnpm 的隔离布局复制服务的生产依赖闭包：`.pnpm/<id>` 整目录照搬（里面的相对符号链接原样保留），
+ * 按 pnpm 的隔离布局复制服务的生产依赖闭包：`.pnpm/<id>` 里的相对符号链接原样保留，
  * 顶层 `node_modules/<name>` 与提升的 `.pnpm/node_modules/<name>` 只重建闭包内的链接。工作区包已经
  * 打进 dist/cli.js，devDependencies 不带。
  * 不用 `pnpm deploy --prod`：它会把源检出的安装状态改成 production，之后在那里跑任何 pnpm 命令都会删 devDependencies。
@@ -217,7 +229,18 @@ function copyProductionModules(build: BuiltCheckout, target: string): void {
 
   const targetStore = join(target, 'node_modules', '.pnpm');
   mkdirSync(targetStore, { recursive: true });
-  for (const id of entries) cpSync(join(store, id), join(targetStore, id), { recursive: true, verbatimSymlinks: true });
+  for (const id of entries) {
+    const source = join(store, id);
+    cpSync(source, join(targetStore, id), {
+      recursive: true, verbatimSymlinks: true,
+      filter: file => {
+        const parts = relative(source, file).split(sep).join('/').split('/');
+        if (parts[0] !== 'node_modules' || !parts[1]) return true;
+        const end = parts[1].startsWith('@') ? 3 : 2;
+        return keepProductionDependencyAsset(parts.slice(1, end).join('/'), parts.slice(end).join('/'));
+      }
+    });
+  }
   const link = (path: string, destination: string) => {
     mkdirSync(dirname(path), { recursive: true });
     symlinkSync(relative(dirname(path), destination), path);
