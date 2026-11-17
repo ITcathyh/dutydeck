@@ -82,10 +82,25 @@ export async function readArtifact(cwd: string, input: string, image: boolean, s
     if (stat.nlink !== 1) throw new AgentGroupToolError('ARTIFACT_NOT_REGULAR_FILE', '只能发送普通文件；硬链接不允许发送。', 400);
     const limit = image ? artifactImageLimit : artifactFileLimit;
     if (stat.size > limit) throw new AgentGroupToolError('ARTIFACT_TOO_LARGE', `文件超过本轮 ${image ? '图片 10 MiB' : '文件 30 MiB'} 上限。`, 413);
-    const buffer = new Uint8Array(limit + 1); let offset = 0;
+    const buffer = new Uint8Array(stat.size); let offset = 0;
     while (offset < buffer.length) { const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, offset); if (!bytesRead) break; offset += bytesRead; }
-    if (offset > limit) throw new AgentGroupToolError('ARTIFACT_TOO_LARGE', `文件超过本轮 ${image ? '图片 10 MiB' : '文件 30 MiB'} 上限。`, 413);
-    const data = buffer.slice(0, offset);
+    let data: Uint8Array;
+    if (offset < buffer.length) {
+      data = buffer.slice(0, offset);
+    } else {
+      const probe = new Uint8Array(1);
+      const { bytesRead } = await handle.read(probe, 0, 1, offset);
+      if (!bytesRead) {
+        data = buffer;
+      } else {
+        if (offset + bytesRead > limit) throw new AgentGroupToolError('ARTIFACT_TOO_LARGE', `文件超过本轮 ${image ? '图片 10 MiB' : '文件 30 MiB'} 上限。`, 413);
+        // The file grew after stat: retain the complete prefix and continue within the same bounded limit.
+        const grown = new Uint8Array(limit + 1); grown.set(buffer); grown[offset] = probe[0]!; offset += bytesRead;
+        while (offset < grown.length) { const { bytesRead } = await handle.read(grown, offset, grown.length - offset, offset); if (!bytesRead) break; offset += bytesRead; }
+        if (offset > limit) throw new AgentGroupToolError('ARTIFACT_TOO_LARGE', `文件超过本轮 ${image ? '图片 10 MiB' : '文件 30 MiB'} 上限。`, 413);
+        data = grown.slice(0, offset);
+      }
+    }
     if (!data.length) throw new AgentGroupToolError('ARTIFACT_NOT_REGULAR_FILE', '只能发送非空普通文件。', 400);
     return { data, filename: basename(canonical), fingerprint: createHash('sha256').update(data).digest('hex') };
   } finally { await handle.close(); }

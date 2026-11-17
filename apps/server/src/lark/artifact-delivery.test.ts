@@ -1,12 +1,15 @@
 import { createHash } from 'node:crypto';
-import { link, mkdtemp, mkdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { appendFile, link, mkdtemp, mkdir, rename, rm, symlink, truncate, writeFile, type FileHandle } from 'node:fs/promises';
 import { execFile as execFileCallback } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { describe, expect, it, vi } from 'vitest';
 
-const fsHook = vi.hoisted(() => ({ beforeOpen: undefined as undefined | (() => Promise<void>) }));
+const fsHook = vi.hoisted(() => ({
+  beforeOpen: undefined as undefined | (() => Promise<void>),
+  wrapOpen: undefined as undefined | ((handle: FileHandle) => FileHandle)
+}));
 vi.mock('node:fs/promises', async importOriginal => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   return {
@@ -14,7 +17,9 @@ vi.mock('node:fs/promises', async importOriginal => {
     open: async (...args: Parameters<typeof actual.open>) => {
       const beforeOpen = fsHook.beforeOpen; fsHook.beforeOpen = undefined;
       if (beforeOpen) await beforeOpen();
-      return actual.open(...args);
+      const handle = await actual.open(...args);
+      const wrapOpen = fsHook.wrapOpen; fsHook.wrapOpen = undefined;
+      return wrapOpen ? wrapOpen(handle) : handle;
     }
   };
 });
@@ -23,6 +28,47 @@ import { artifactScratchDirectory, deliverArtifact, instancePrivatePaths, readAr
 
 function configs(values = new Map<string, string>()) { return { get: async (k: string) => values.get(k), set: async (k: string, v: string) => { values.set(k, v); }, compareAndSet: async (k: string, e: string | undefined, v: string) => { if (values.get(k) !== e) return false; values.set(k, v); return true; } }; }
 const execFile = promisify(execFileCallback);
+
+function onNextOpen(wrap: (handle: FileHandle) => void) {
+  fsHook.wrapOpen = handle => { wrap(handle); return handle; };
+}
+
+function afterStat(handle: FileHandle, effect: () => Promise<void>) {
+  const stat = handle.stat.bind(handle);
+  Object.defineProperty(handle, 'stat', { value: async () => { const result = await stat(); await effect(); return result; } });
+}
+
+function shortenReads(handle: FileHandle, maxChunk: number, onRead?: () => void) {
+  const read = handle.read.bind(handle);
+  Object.defineProperty(handle, 'read', { value: (buffer: Uint8Array, offset: number, length: number, position: number) => {
+    onRead?.();
+    return read(buffer, offset, Math.min(length, maxChunk), position);
+  } });
+}
+
+function patternedBytes(size: number, seed = 0) {
+  const bytes = new Uint8Array(size);
+  for (let index = 0; index < bytes.length; index++) bytes[index] = (index + seed) % 251;
+  return bytes;
+}
+
+function expectBytes(actual: Uint8Array, expected: Uint8Array) {
+  expect(actual.byteLength).toBe(expected.byteLength);
+  expect(Buffer.from(actual.buffer, actual.byteOffset, actual.byteLength).equals(Buffer.from(expected.buffer, expected.byteOffset, expected.byteLength))).toBe(true);
+}
+
+function concatBytes(first: Uint8Array, second: Uint8Array) {
+  const bytes = new Uint8Array(first.length + second.length); bytes.set(first); bytes.set(second, first.length);
+  return bytes;
+}
+
+async function expectArtifact(cwd: string, path: string, expected: Uint8Array, image = false) {
+  const artifact = await readArtifact(cwd, path, image);
+  expectBytes(artifact.data, expected);
+  expect(artifact.data.buffer.byteLength).toBe(expected.byteLength);
+  expect(artifact.fingerprint).toBe(createHash('sha256').update(expected).digest('hex'));
+  return artifact;
+}
 
 describe('artifact delivery', () => {
   // 「范围外」选一个既不在会话目录、也不在临时目录下的位置：仓库工作目录。
@@ -38,6 +84,82 @@ describe('artifact delivery', () => {
       await symlink(join(outside, 'outside.bin'), join(cwd, 'escape'));
       await expect(readArtifact(cwd, 'escape', false)).rejects.toMatchObject({ code: 'ARTIFACT_PATH_OUT_OF_SCOPE' });
     } finally { await rm(outside, { recursive: true, force: true }); }
+  });
+
+  it('reads exact-sized stable files with one EOF probe and no full-file copy', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-artifact-')); const MiB = 1024 * 1024;
+    const cases = [
+      { size: 1 }, { size: 64 * 1024 - 1 }, { size: 64 * 1024 }, { size: 64 * 1024 + 1 },
+      { size: MiB }, { size: 10 * MiB, image: true }, { size: 30 * MiB }
+    ];
+    try {
+      for (const [index, { size, image = false }] of cases.entries()) {
+        const path = `stable-${index}.bin`; const bytes = patternedBytes(size, index); await writeFile(join(cwd, path), bytes);
+        let reads = 0;
+        onNextOpen(handle => {
+          const read = handle.read.bind(handle);
+          Object.defineProperty(handle, 'read', { value: (buffer: Uint8Array, offset: number, length: number, position: number) => {
+            reads++;
+            return read(buffer, offset, length, position);
+          } });
+        });
+        await expectArtifact(cwd, path, bytes, image);
+        expect(reads).toBe(2);
+      }
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
+
+  it('completes controlled short reads before probing EOF', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-artifact-'));
+    try {
+      const bytes = patternedBytes(64 * 1024 + 17, 3); await writeFile(join(cwd, 'short.bin'), bytes);
+      let reads = 0; onNextOpen(handle => shortenReads(handle, 997, () => { reads++; }));
+      await expectArtifact(cwd, 'short.bin', bytes);
+      expect(reads).toBe(Math.ceil(bytes.length / 997) + 1);
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
+
+  it('returns all original and appended bytes when a real file grows by one or many bytes', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-artifact-'));
+    try {
+      const original = patternedBytes(4097, 5);
+      for (const [name, growth] of [['one.bin', patternedBytes(1, 7)], ['many.bin', patternedBytes(128 * 1024 + 37, 11)]] as const) {
+        await writeFile(join(cwd, name), original);
+        onNextOpen(handle => afterStat(handle, () => appendFile(join(cwd, name), growth)));
+        await expectArtifact(cwd, name, concatBytes(original, growth));
+      }
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
+
+  it('accepts real growth to the exact limit and rejects growth beyond it', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-artifact-')); const limit = 30 * 1024 * 1024;
+    try {
+      const original = patternedBytes(4099, 13); const exactGrowth = patternedBytes(limit - original.length, 17);
+      await writeFile(join(cwd, 'exact.bin'), original);
+      onNextOpen(handle => afterStat(handle, () => appendFile(join(cwd, 'exact.bin'), exactGrowth)));
+      await expectArtifact(cwd, 'exact.bin', concatBytes(original, exactGrowth));
+      onNextOpen(handle => afterStat(handle, () => appendFile(join(cwd, 'exact.bin'), new Uint8Array([1]))));
+      await expect(readArtifact(cwd, 'exact.bin', false)).rejects.toMatchObject({ code: 'ARTIFACT_TOO_LARGE', statusCode: 413 });
+
+      const overflowGrowth = patternedBytes(limit - original.length + 1, 19); await writeFile(join(cwd, 'overflow.bin'), original);
+      onNextOpen(handle => afterStat(handle, () => appendFile(join(cwd, 'overflow.bin'), overflowGrowth)));
+      await expect(readArtifact(cwd, 'overflow.bin', false)).rejects.toMatchObject({ code: 'ARTIFACT_TOO_LARGE', statusCode: 413 });
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
+
+  it('slices real shrinkage without zero padding and rejects shrinkage to zero or an empty file', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-artifact-'));
+    try {
+      const original = patternedBytes(8192, 23); await writeFile(join(cwd, 'shorter.bin'), original);
+      onNextOpen(handle => afterStat(handle, () => truncate(join(cwd, 'shorter.bin'), 113)));
+      await expectArtifact(cwd, 'shorter.bin', original.slice(0, 113));
+
+      await writeFile(join(cwd, 'zero.bin'), original);
+      onNextOpen(handle => afterStat(handle, () => truncate(join(cwd, 'zero.bin'), 0)));
+      await expect(readArtifact(cwd, 'zero.bin', false)).rejects.toMatchObject({ code: 'ARTIFACT_NOT_REGULAR_FILE', statusCode: 400 });
+      await writeFile(join(cwd, 'empty.bin'), new Uint8Array());
+      await expect(readArtifact(cwd, 'empty.bin', false)).rejects.toMatchObject({ code: 'ARTIFACT_NOT_REGULAR_FILE', statusCode: 400 });
+    } finally { await rm(cwd, { recursive: true, force: true }); }
   });
 
   it('delivers from this session\'s own temp directory only, not other temp files or through a symlink that leaves it', async () => {
@@ -118,9 +240,9 @@ describe('artifact delivery', () => {
   });
 
   it('dedupes an unkeyed delivery within one task attempt but sends the same file again in a later attempt or task', async () => {
-    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-artifact-')); await writeFile(join(cwd, 'daily.md'), 'no new alerts'); const config = configs();
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-artifact-')); const bytes = new TextEncoder().encode('no new alerts'); await writeFile(join(cwd, 'daily.md'), bytes); const config = configs();
     let sequence = 0;
-    const client = { uploadFile: vi.fn(async (_input: { idempotencyKey: string }) => 'file_key'), uploadImage: vi.fn(), sendImage: vi.fn(), sendFile: vi.fn(async () => ({ messageId: `om_${++sequence}`, chatId: 'oc_group' })) };
+    const client = { uploadFile: vi.fn(async (_input: { data: Uint8Array; idempotencyKey: string }) => 'file_key'), uploadImage: vi.fn(), sendImage: vi.fn(), sendFile: vi.fn(async () => ({ messageId: `om_${++sequence}`, chatId: 'oc_group' })) };
     const input = { configs: config, sessionId: 'ses_turns', cwd, client, path: 'daily.md', target: { chatId: 'oc_group' }, image: false };
     const first = await deliverArtifact({ ...input, turn: { taskId: 'task-one', attemptId: 'attempt-one' } });
     await expect(deliverArtifact({ ...input, turn: { taskId: 'task-one', attemptId: 'attempt-one' } })).resolves.toMatchObject({ messageId: first.messageId, replayed: true });
@@ -128,6 +250,7 @@ describe('artifact delivery', () => {
     await expect(deliverArtifact({ ...input, turn: { taskId: 'task-two', attemptId: 'attempt-one' } })).resolves.toMatchObject({ messageId: 'om_3', replayed: false });
     expect(client.sendFile).toHaveBeenCalledTimes(3);
     expect(new Set(client.uploadFile.mock.calls.map(([call]) => call.idempotencyKey)).size).toBe(3);
+    for (const [call] of client.uploadFile.mock.calls) expectBytes(call.data, bytes);
   });
 
   it('rejects directories, FIFOs and an over-limit image without blocking or reading it all', async () => {
@@ -135,7 +258,7 @@ describe('artifact delivery', () => {
     await writeFile(join(cwd, 'image.bin'), new Uint8Array(10 * 1024 * 1024 + 1));
     await expect(readArtifact(cwd, 'directory', false)).rejects.toMatchObject({ code: 'ARTIFACT_NOT_REGULAR_FILE' });
     await expect(readArtifact(cwd, 'pipe', false)).rejects.toMatchObject({ code: 'ARTIFACT_NOT_REGULAR_FILE' });
-    await expect(readArtifact(cwd, 'image.bin', true)).rejects.toMatchObject({ code: 'ARTIFACT_TOO_LARGE' });
+    await expect(readArtifact(cwd, 'image.bin', true)).rejects.toMatchObject({ code: 'ARTIFACT_TOO_LARGE', statusCode: 413 });
   });
 
   it('derives provider UUIDs per session and makes a second repository observe the active CAS lease', async () => {
