@@ -538,6 +538,8 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
 
   it('preserves the user goal, injects sourced quote/document material once, and navigates to the original topic', async () => {
     const h = await harness();
+    h.service.getMessageItems.mockResolvedValueOnce([{ messageId: 'om_reference', chatId: 'oc_group', threadId: 'omt_topic', messageType: 'text', createTime: '1000',
+      rawContent: JSON.stringify({ text: '已核实的引用材料' }), sender: { type: 'user' }, mentions: [] }]);
     await h.coordinator.handle(event('om_task', '完成目标 https://team.feishu.cn/docx/doc1', { parentId: 'om_reference' }), h.config);
     await h.completed();
     expect(h.send.mock.calls[0]?.[0]).toContain('完成目标 https://team.feishu.cn/docx/doc1');
@@ -1349,8 +1351,8 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     const h = await harness();
     const fileMessageId = `om_workflow_file_${randomUUID()}`;
     h.send.mockImplementationOnce(() => { throw new Error('synthetic execution failure'); });
-    h.service.getMessage.mockResolvedValueOnce({ messageId: fileMessageId, chatId: 'oc_group', threadId: 'omt_topic', messageType: 'file',
-      rawContent: JSON.stringify({ file_key: 'file_reference', file_name: 'evidence.txt' }), sender: { type: 'user' }, mentions: [] });
+    h.service.getMessageItems.mockResolvedValueOnce([{ messageId: fileMessageId, chatId: 'oc_group', threadId: 'omt_topic', messageType: 'file',
+      rawContent: JSON.stringify({ file_key: 'file_reference', file_name: 'evidence.txt' }), sender: { type: 'user' }, mentions: [] }]);
     const goal = '检查证据 https://team.feishu.cn/docx/spec';
     await h.coordinator.handle(event('om_task', goal, { parentId: fileMessageId }), h.config);
     await vi.waitFor(() => expect([...h.cards.values()].some(card => card.taskId === 'om_task' && card.state === 'failed')).toBe(true));

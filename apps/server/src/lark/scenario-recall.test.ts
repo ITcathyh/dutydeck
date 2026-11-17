@@ -206,15 +206,16 @@ describe('scenario recall in a Lark turn', () => {
       header: { property: { title: { tag: 'plain_text', property: { content: rdsTitle } } } },
       body: { property: { elements: [{ tag: 'markdown', property: { content: '服务: demo.mysql.orders_shard_write' } }] } }
     }) };
+    const alertMessage = (messageId: string) => ({ messageId, chatId: 'oc_group', threadId: 'omt_0925', messageType: 'interactive', createTime: '1',
+      sender: { id: 'ou_alice', type: 'user', name: 'Alice' }, rawContent: JSON.stringify(alertCard), mentions: [], deleted: false, updated: false });
     const service = {
       send: vi.fn(createCard), reply: vi.fn(createCard), uploadFile: vi.fn(async () => 'file_mock'), replyFile: vi.fn(createCard), sendFile: vi.fn(createCard),
       update: vi.fn(async (input: any) => ({ messageId: input.messageId })), replyText: vi.fn(async () => ({ messageId: 'om_text' })), sendText: vi.fn(async () => ({ messageId: 'om_text' })),
       addReaction: vi.fn(async (messageId: string) => ({ messageId, reactionId: 'reaction_1' })), deleteReaction: vi.fn(async () => {}), listOwnReactions: vi.fn(async () => []),
       getUserEmails: vi.fn(async () => []), listChatMembers: vi.fn(async () => ({ items: [], hasMore: false })),
       listChatMessages: vi.fn(async () => ({ items: [], hasMore: false })),
-      getMessage: vi.fn(async (messageId: string) => ({ messageId, chatId: 'oc_group', threadId: 'omt_0925', messageType: 'interactive', createTime: '1',
-        sender: { id: 'ou_alice', type: 'user', name: 'Alice' }, rawContent: JSON.stringify(alertCard), mentions: [], deleted: false, updated: false })),
-      getMessageItems: vi.fn(async () => []),
+      getMessage: vi.fn(async (messageId: string) => alertMessage(messageId)),
+      getMessageItems: vi.fn(async (messageId: string) => [alertMessage(messageId)]),
       downloadMessageResource: vi.fn(async () => ({ data: new Uint8Array(), contentType: 'text/plain' })),
       readDocument: vi.fn(async (url: string) => ({ url, title: '文档', text: '文档正文' }))
     };

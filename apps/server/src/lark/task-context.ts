@@ -3,7 +3,7 @@ import { errorMessage as errorText, type PromptPart } from '@dutydeck/shared';
 import { promptDigest } from '../prompt-context.js';
 import { parseLarkMessageContent, type LarkMessageResource } from './message-content.js';
 import type { LarkMessageEvent } from './listener.js';
-import type { LarkCardService, LarkChatMessage } from './service.js';
+import { LarkServiceError, type LarkCardService, type LarkChatMessage } from './service.js';
 
 export type LarkContextCursor = {
   createTime: number;
@@ -413,7 +413,8 @@ async function collectReferencedParent(
   let items: LarkChatMessage[];
   try {
     items = await service.getMessageItems(parentId);
-    parent = items.length ? items[0]! : await service.getMessage(parentId);
+    if (!items.length) throw new LarkServiceError('LARK_MESSAGE_NOT_FOUND', `Message ${parentId} not found`, 404);
+    parent = items[0]!;
   } catch (error) {
     signal?.throwIfAborted();
     const source = appendSourceError(sources, label, error, parentId);

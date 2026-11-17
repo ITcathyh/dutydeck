@@ -26,7 +26,7 @@ const event = (id: string, text: string, patch: Partial<LarkMessageEvent> = {}):
 });
 
 describe('coordinator quote failure card notes', () => {
-  it('includes quoteFailureNote in initial card markdown and reports read failure in agentPrompt when getMessage throws', async () => {
+  it('includes quoteFailureNote in initial card markdown and reports read failure in agentPrompt when getMessageItems throws', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-quote-note-'));
     const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
 
@@ -97,10 +97,10 @@ describe('coordinator quote failure card notes', () => {
       getUserEmails: vi.fn(async () => []),
       listChatMembers: vi.fn(async () => ({ items: [], hasMore: false })),
       listChatMessages: vi.fn(async () => ({ items: [], hasMore: false })),
-      getMessage: vi.fn(async () => {
+      getMessage: vi.fn(),
+      getMessageItems: vi.fn(async () => {
         throw new Error('消息读取超时');
       }),
-      getMessageItems: vi.fn(async () => []),
       downloadMessageResource: vi.fn(async () => ({ data: new Uint8Array(), contentType: 'text/plain' })),
       readDocument: vi.fn(async (url: string) => ({ url, title: '文档', text: '文档正文' }))
     };
@@ -142,5 +142,6 @@ describe('coordinator quote failure card notes', () => {
     expect(firstReplyCall.markdown).toContain('引用的消息没有读到（读取超时），Agent 回答时看不到它。');
     // Agent 收到的 prompt 中应包含读取失败的材料说明
     await vi.waitFor(() => expect(receivedAgentPrompt).toContain('读取失败，正文未注入：消息读取超时'));
+    expect(service.getMessage).not.toHaveBeenCalled();
   });
 });
