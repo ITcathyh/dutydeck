@@ -409,17 +409,17 @@ async function collectReferencedParent(
 ) {
   const label = `引用消息 ${parentId}`;
   if (alreadyRead) return;
+  let parent: LarkChatMessage;
   let items: LarkChatMessage[];
   try {
     items = await service.getMessageItems(parentId);
-    if (!items.length) throw new Error(`Message ${parentId} not found`);
+    parent = items.length ? items[0]! : await service.getMessage(parentId);
   } catch (error) {
     signal?.throwIfAborted();
     const source = appendSourceError(sources, label, error, parentId);
     materials.addMissing(source);
     return;
   }
-  const parent = items[0]!;
   if (parent.messageId !== parentId || !sameChat(parent, event.chatId)) {
     const source = appendSourceError(sources, label, '引用消息不属于当前会话，已忽略', parentId);
     materials.addMissing(source);
