@@ -996,10 +996,22 @@ describe('SessionInsightService compare and export', () => {
     expect(report.body.length).toBeGreaterThan(0);
     expect(report.filename.endsWith('.md')).toBe(true);
 
+    const comparisonReport = await h.service.exportReport({
+      kind: 'comparison', format: 'markdown',
+      left: { sessionId: 's1', snapshotId: snap1 },
+      right: { sessionId: 's2', snapshotId: snap2 }
+    });
+    expect(comparisonReport.body).toContain(`| 快照 | ${snap1.replaceAll('_', '\\_')} | ${snap2.replaceAll('_', '\\_')} |`);
+    expect(comparisonReport.filename.endsWith('.md')).toBe(true);
+
     // s3 不拥有 snap1 → export 404。
     await expect(h.service.exportReport({
       kind: 'session', sessionId: 's3', snapshotId: snap1, format: 'markdown'
     })).rejects.toMatchObject({ code: 'INSIGHT_NOT_FOUND', statusCode: 404 });
+    h.repos.insight.prune(0);
+    await expect(h.service.exportReport({
+      kind: 'session', sessionId: 's1', snapshotId: snap1, format: 'markdown'
+    })).rejects.toMatchObject({ code: 'INSIGHT_SNAPSHOT_GONE', statusCode: 410 });
     void id1;
   });
 });

@@ -107,7 +107,7 @@ export function InboxPanel({ items, loading, failed = false, onRetry, call, onOp
         const selectable = isInboxSelectable(item);
         const previous = visible[index - 1];
         const first = previous?.kind !== item.kind;
-        const groupIds = items.filter(candidate => candidate.kind === item.kind && isInboxSelectable(candidate)).map(candidate => candidate.id);
+        const groupIds = first ? items.filter(candidate => candidate.kind === item.kind && isInboxSelectable(candidate)).map(candidate => candidate.id) : [];
         const groupSelected = groupIds.length > 0 && groupIds.every(id => selected.includes(id));
         const busy = result?.state === 'running' || result?.state === 'ok' || batching;
         const reasonAction = item.actions.find(action => action.type === 'api' && action.reasonMaxLength);

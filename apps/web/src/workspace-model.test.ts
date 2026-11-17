@@ -18,6 +18,14 @@ describe('workspace model', () => {
     expect(groups[0].sessions.map(item => item.id)).toEqual(['3', '1']);
   });
 
+  it('较旧的紧急任务排在前面时，工作区更新时间仍取最新任务并回退到创建时间', () => {
+    const latest = { ...session('latest', '/repo', 'completed', ''), createdAt: '2026-08-22T00:00:00Z' };
+    const urgent = session('urgent', '/repo', 'waiting_for_permission', '2026-08-20T00:00:00Z');
+    const [group] = groupSessionsByWorkspace([latest, urgent]);
+    expect(group.sessions.map(item => item.id)).toEqual(['urgent', 'latest']);
+    expect(group.updatedAt).toBe(latest.createdAt);
+  });
+
   it('同源的两个独立 worktree 任务归为一个项目，且实际执行目录原样保留', () => {
     const groups = groupSessionsByWorkspace([
       { ...session('one', '/home/u/.dutydeck/workspaces/ses_one', 'idle', '2026-09-14T00:00:00Z'), workspaceMode: 'worktree', workspaceSourceCwd: '/repo/project' },

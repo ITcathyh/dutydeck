@@ -3383,15 +3383,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     // 键绑定 操作人+任务+轮次+动作，60 秒内同一按钮第二次点击才真正执行，过期需重新确认。
     if (operatorOpenId && task.event.senderOpenId && operatorOpenId !== task.event.senderOpenId
       && (action === 'cancel' || action === 'interrupt' || action === 'retry')) {
-      const now = Date.now();
-      for (const [key, expiresAt] of this.foreignActionConfirmations) {
-        if (expiresAt <= now) this.foreignActionConfirmations.delete(key);
-      }
-      const confirmationKey = `${operatorOpenId}|${taskId}|${actionTurn}|${action}`;
-      if ((this.foreignActionConfirmations.get(confirmationKey) ?? 0) > now) {
-        this.foreignActionConfirmations.delete(confirmationKey);
-      } else {
-        this.foreignActionConfirmations.set(confirmationKey, now + 60_000);
+      if (!this.foreignActionConfirmed(operatorOpenId, task.event.senderOpenId, `${taskId}|${actionTurn}|${action}`)) {
         return { type: 'warning', content: '该任务由他人发起，再次点击同一按钮以确认操作' };
       }
     }

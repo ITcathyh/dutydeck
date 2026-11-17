@@ -163,7 +163,10 @@ export function groupSessionsByWorkspace(
     }
 
     const sorted = orderSessionsForWorkbench(groupSessions, view, summaries);
-    const latest = [...groupSessions].sort((left, right) => (right.updatedAt || right.createdAt).localeCompare(left.updatedAt || left.createdAt))[0];
+    let latest: Session | undefined;
+    for (const session of groupSessions) {
+      if (!latest || (session.updatedAt || session.createdAt).localeCompare(latest.updatedAt || latest.createdAt) > 0) latest = session;
+    }
     groups.push({
       id: groupSummary.id,
       cwd: groupSummary.directories.join('\n'),

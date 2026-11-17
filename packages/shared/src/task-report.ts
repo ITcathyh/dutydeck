@@ -65,7 +65,10 @@ export async function clearTaskReport(store: ConfigRepository, taskId: string, c
 }
 // tasks 按接收顺序传入；同毫秒的任务保留仓储顺序。
 export async function readSessionTaskReport(store: Pick<ConfigRepository, 'get'>, sessionId: string, tasks: ReadonlyArray<{ id: string; createdAt: string }>): Promise<TaskReport | undefined> {
-  const latest = [...tasks].sort((a, b) => a.createdAt.localeCompare(b.createdAt)).at(-1);
+  let latest: (typeof tasks)[number] | undefined;
+  for (const task of tasks) {
+    if (!latest || task.createdAt.localeCompare(latest.createdAt) >= 0) latest = task;
+  }
   if (!latest) return;
   const report = await readTaskReport(store, latest.id);
   return report?.sessionId === sessionId && !report.clearedAt ? report : undefined;

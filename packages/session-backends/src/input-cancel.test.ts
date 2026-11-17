@@ -31,6 +31,28 @@ it('keeps an uncancelled tmux paste ordered and cleans it through -d', async () 
   expect(calls.map(args => args[0])).toEqual(['load-buffer', 'paste-buffer']);
   expect(calls[1][2]).toBe(calls[0][2]); expect(calls[1]).toContain('-d');
 });
+it('revokes special keys interrupted during send without changing their argument order', async () => {
+  const sent = deferred<string>(), calls: string[][] = [];
+  command.mockImplementation((_bin, args) => {
+    calls.push(args);
+    return args.at(-1) === 'Enter' ? sent.promise : Promise.resolve('');
+  });
+  const backend = new TmuxBackend('fixture');
+  (backend as any).started = true;
+  expect(await backend.sendSpecialKeys()).toBe(false);
+  expect(calls).toEqual([]);
+  const sending = backend.sendSpecialKeys('Down', 'Enter');
+  try {
+    expect(calls).toEqual([['-u', 'send-keys', '-t', 'fixture', 'Down', 'Enter']]);
+    await backend.interrupt();
+    sent.resolve('');
+    expect(await sending).toBe(false);
+    expect(calls[1]).toEqual(['-u', 'send-keys', '-t', 'fixture', 'C-c']);
+  } finally {
+    sent.resolve('');
+    await sending;
+  }
+});
 function herdrFixture() {
   const backend = new HerdrBackend(`dutydeck-${'a'.repeat(32)}`, { binary: 'unused', stateFile: '/missing/dd-input-fixture', ownerId: 'fixture', processProbe: {} as any });
   const state = { pane: { pane_id: 'owned-pane' }, socket: '/fixture' };

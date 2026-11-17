@@ -10,6 +10,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
+import Database from 'better-sqlite3';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime, type AgentDriver } from '@dutydeck/runtime';
 import { RelayAskBroker } from '@dutydeck/relay';
@@ -198,7 +199,7 @@ async function harness(
   const waitDelivered = async (count: number) => vi.waitFor(async () => expect((await repos.channelMappings.list(channel))
     .filter(mapping => JSON.parse(mapping.extra ?? '{}').final_delivery_state === 'delivered')).toHaveLength(count));
   const releaseGate = () => release?.();
-  return { repos, runtime, broker, config, coordinator, createCoordinator, service, cards, log, send, resolvePermission, interrupt, groupManager,
+  return { cwd, repos, runtime, broker, config, coordinator, createCoordinator, service, cards, log, send, resolvePermission, interrupt, groupManager,
     interactions, storedConfig, saveConfig, channel, waitDelivered, releaseGate };
 }
 
@@ -530,8 +531,8 @@ describe('S4 文件型结果验收 reaction：先查 kv 后写、重启不重复
     const interactionList = vi.spyOn(h.repos.config, 'list');
     await (h.coordinator as any).refreshResultFeedback(h.config, record.id);
     expect(interactionList.mock.calls.filter(([prefix]) => prefix.startsWith('lark.interaction.'))).toHaveLength(0);
-    expect(get.mock.calls.filter(([channel]) => channel === h.channel)).toEqual([[h.channel, record.event.messageId]]);
-    expect(list).toHaveBeenCalledExactlyOnceWith(h.channel); // Re-read by mapping.id after the external update.
+    expect(get.mock.calls.filter(([channel]) => channel === h.channel)).toEqual([[h.channel, record.event.messageId], [h.channel, record.event.messageId]]);
+    expect(list).not.toHaveBeenCalled();
     expect(JSON.parse((await h.repos.channelMappings.get(h.channel, record.event.messageId))!.extra!).result_feedback_state).toBe('accepted');
 
     await h.repos.config.set(`lark.interaction.${h.config.appId}.${record.id}`, JSON.stringify({ ...record, state: 'needs_changes' }));
@@ -542,6 +543,27 @@ describe('S4 文件型结果验收 reaction：先查 kv 后写、重启不重复
     });
     await (h.coordinator as any).refreshResultFeedback(h.config, record.id);
     expect(JSON.parse((await h.repos.channelMappings.get(h.channel, record.event.messageId))!.extra!).result_feedback_state).toBe('concurrent-update');
+  });
+
+  it('does not overwrite a mapping recreated with the same external id during feedback refresh', async () => {
+    const { h, record } = await fileHarness();
+    h.coordinator.stop();
+    const mapping = (await h.repos.channelMappings.get(h.channel, record.event.messageId))!;
+    expect(JSON.parse(mapping.extra!).final_delivery_state).toBe('delivered');
+    const replacement = { ...mapping, id: `${mapping.id}-replacement` };
+    await h.repos.config.set(`lark.interaction.${h.config.appId}.${record.id}`, JSON.stringify({ ...record, state: 'accepted' }));
+    h.service.update.mockImplementationOnce(async (input: any) => {
+      const db = new Database(join(h.cwd, 'state.db'));
+      try { expect(db.prepare('DELETE FROM channel_mappings WHERE id = ?').run(mapping.id).changes).toBe(1); }
+      finally { db.close(); }
+      await h.repos.channelMappings.save(replacement);
+      return { messageId: input.messageId };
+    });
+    const save = vi.spyOn(h.repos.channelMappings, 'save');
+    await (h.coordinator as any).refreshResultFeedback(h.config, record.id);
+    expect(h.service.update).toHaveBeenCalled();
+    expect(save).toHaveBeenCalledExactlyOnceWith(replacement);
+    expect(await h.repos.channelMappings.get(h.channel, record.event.messageId)).toEqual(replacement);
   });
 
   it('refreshes a batch of accepted historical results without listing interactions for each result', async () => {

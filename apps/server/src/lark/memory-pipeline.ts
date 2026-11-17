@@ -575,7 +575,7 @@ export class LarkMemoryPipeline {
       // 超时先报告；仍在启动/派发/清理的操作继续占有认领，结束前不得重复开跑。
       const state = await this.options.store.getState(scope);
       if (state.running?.token !== token) throw error;
-      return await this.settle(scope, { kind, ok: false, added: 0, superseded: 0, retired: 0, retopiced: 0, rejected: 0, error: errorCode(error) }, () => ({}));
+      return await this.settleFailure(scope, kind, errorCode(error));
     } finally {
       clearTimeout(timer);
       if (operationDone) await this.release(scope, token);
@@ -802,7 +802,7 @@ export class LarkMemoryPipeline {
       if (this.runContext.getStore()?.signal.aborted) throw error;
       this.options.log.error({ error, scope, jobId: job?.id }, '记忆作业等待恢复或退避');
       if (job?.receipt) return { kind, at: this.now().toISOString(), ok: false, added: 0, superseded: 0, retired: 0, retopiced: 0, rejected: 0, error: errorCode(error) };
-      return this.settle(scope, { kind, ok: false, added: 0, superseded: 0, retired: 0, retopiced: 0, rejected: 0, error: errorCode(error) }, () => ({}));
+      return this.settleFailure(scope, kind, errorCode(error));
     }
   }
 
@@ -975,23 +975,13 @@ export class LarkMemoryPipeline {
   }
 
   /** 写 lastRun 与本类型的失败时间戳；running 由 claim 的持有者在 finally 里释放，这里不碰。 */
-  private async settle(
-    scope: LarkMemoryScope,
-    run: Omit<RunOutcome, 'at'>,
-    patch: (current: LarkMemoryState) => Partial<Omit<LarkMemoryState, 'v'>>
-  ): Promise<RunOutcome> {
+  private async settleFailure(scope: LarkMemoryScope, kind: RunOutcome['kind'], error: string): Promise<RunOutcome> {
     await this.assertClaim();
-    const lastRun: RunOutcome = { ...run, at: this.now().toISOString() };
-    await this.options.store.mutateState(scope, current => {
-      const failures = { ...(current.lastFailureAt ?? {}) };
-      if (run.ok) delete failures[run.kind];
-      else failures[run.kind] = lastRun.at;
-      return {
-        ...patch(current),
-        lastRun,
-        lastFailureAt: Object.keys(failures).length ? failures : undefined
-      };
-    });
+    const lastRun: RunOutcome = { kind, at: this.now().toISOString(), ok: false, added: 0, superseded: 0, retired: 0, retopiced: 0, rejected: 0, error };
+    await this.options.store.mutateState(scope, current => ({
+      lastRun,
+      lastFailureAt: { ...(current.lastFailureAt ?? {}), [kind]: lastRun.at }
+    }));
     return lastRun;
   }
 }

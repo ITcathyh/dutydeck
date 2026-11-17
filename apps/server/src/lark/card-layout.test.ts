@@ -116,6 +116,49 @@ describe('Lark card layout renderer->bound->build integration', () => {
     expect(completedGroup0.header.title.content).not.toContain("<font color='grey'>3s</font>");
   });
 
+  it.each([undefined, 'process'] as const)('folds only multiple current tools on %s cards', cardKind => {
+    for (const count of [0, 1, 2]) {
+      const elements = [{
+        tag: 'interactive_container', element_id: 'trace_group_0', background_style: 'current_bg', corner_radius: '8px', padding: '8px',
+        elements: [
+          { tag: 'markdown', element_id: 'current_title', content: '当前阶段' },
+          ...Array.from({ length: count }, (_, index) => ({ tag: 'markdown', element_id: `trace_tool_${index}`, content: `工具 ${index}` })),
+          { tag: 'markdown', element_id: 'current_note', content: '旁白' }
+        ]
+      }];
+      const card = buildLarkCard({ cardKind, state: 'running', elements });
+      const current = byId(card, 'trace_group_0');
+      const records = byId(current, 'current_records');
+      expect(Boolean(records)).toBe(count > 1);
+      expect(current.elements.map((el: any) => el.element_id)).toEqual(count > 1
+        ? ['current_title', 'current_note', 'current_records']
+        : ['current_title', ...(count ? ['trace_tool_0'] : []), 'current_note']);
+      if (records) {
+        expect(records.header.title.content).toBe('执行记录（2 条）');
+        expect(records.elements.map((el: any) => el.element_id)).toEqual(['trace_tool_0', 'trace_tool_1']);
+      }
+      expect(current.padding).toBe(cardKind === 'process' ? '0px' : '8px');
+      expect(current.background_style).toBe(cardKind === 'process' ? undefined : 'current_bg');
+      expect(current.corner_radius).toBe(cardKind === 'process' ? undefined : '8px');
+      expect(byId(current, 'current_title').icon?.token).toBe(cardKind === 'process' ? 'loading_outlined' : undefined);
+    }
+  });
+
+  it('keeps the last historical group first on generic cards without a current group', () => {
+    const elements = [0, 1].map(index => ({ tag: 'collapsible_panel', element_id: `trace_group_${index}`,
+      header: { title: { tag: 'markdown', content: `历史 ${index}` } },
+      elements: [0, 1].map(tool => ({ tag: 'markdown', element_id: `trace_tool_${index}_${tool}`, content: `工具 ${tool}` })) }));
+    const generic = buildLarkCard({ state: 'running', elements });
+    const process = buildLarkCard({ cardKind: 'process', state: 'running', elements });
+    expect(generic.body.elements.filter(el => String(el.element_id).startsWith('trace_group_')).map(el => el.element_id))
+      .toEqual(['trace_group_1', 'trace_group_0']);
+    for (const card of [generic, process]) {
+      expect(byId(card, 'current_records')).toBeUndefined();
+      expect(byId(card, 'current_title')).toBeUndefined();
+      for (const group of elements) expect(byId(card, String(group.element_id))).toEqual(group);
+    }
+  });
+
   it('merges consecutive terminal echo into one block instead of one fake tool per line', () => {
     const events = [
       makeEvent(1, 'text', { text: '消息量很大，继续翻页拉取。' }),

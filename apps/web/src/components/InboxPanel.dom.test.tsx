@@ -129,6 +129,25 @@ describe('InboxPanel', () => {
     expect(screen.queryByRole('button', { name: /批量/ })).toBeNull();
   });
 
+  it('折叠时全选包含全部十项，展开后勾选和取消保持一致', async () => {
+    const user = userEvent.setup();
+    const many = Array.from({ length: 10 }, (_, index) => permission(index + 1));
+    render(<InboxPanel {...props} items={many}/>);
+    expect(screen.queryByRole('checkbox', { name: '选择：权限 10' })).toBeNull();
+    await user.click(screen.getByRole('checkbox', { name: '全选权限审批' }));
+    expect(screen.getByText('已选 10 项')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: '展开全部 10 项' }));
+    expect(screen.getAllByRole('checkbox', { checked: true })).toHaveLength(11);
+    await user.click(screen.getByRole('checkbox', { name: '全选权限审批' }));
+    expect(screen.queryByRole('toolbar', { name: '批量处理' })).toBeNull();
+    expect(screen.getAllByRole('checkbox', { checked: false })).toHaveLength(11);
+    await user.click(screen.getByRole('checkbox', { name: '全选权限审批' }));
+    await user.click(screen.getByRole('button', { name: '收起' }));
+    expect(screen.getByText('已选 10 项')).toBeTruthy();
+    await user.click(screen.getByRole('checkbox', { name: '全选权限审批' }));
+    expect(screen.queryByRole('toolbar', { name: '批量处理' })).toBeNull();
+  });
+
   it('条目超过 8 条先折叠；条目被服务端移除后选择自动清掉', async () => {
     const user = userEvent.setup();
     const many = Array.from({ length: 10 }, (_, index) => permission(index + 1));

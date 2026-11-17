@@ -48,16 +48,6 @@ export function createMemoryJobRepository(db: Database.Database): MemoryJobRepos
     scopeCheck(scope);
     return decode(cachedStatement(db, 'SELECT json FROM memory_jobs WHERE id=? AND app_id=? AND pool=?').get(id, scope.appId, scope.pool));
   };
-  const save = (job: MemoryJob, expected: number) => {
-    scopeCheck(job.scope);
-    const original = get(job.scope, job.id);
-    if (!original || original.revision !== expected || original.receipt) throw new RuntimeError('MEMORY_JOB_CONFLICT', 'Memory job version changed', 409);
-    if (job.kind !== original.kind || job.mode !== original.mode || job.createdAt !== original.createdAt || job.inputDigest !== original.inputDigest || JSON.stringify(job.input) !== JSON.stringify(original.input) || job.sessionId !== original.sessionId || JSON.stringify(job.sessionInput) !== JSON.stringify(original.sessionInput) || JSON.stringify(job.versions) !== JSON.stringify(original.versions)) throw new RuntimeError('MEMORY_JOB_CONFLICT', 'Memory job frozen input changed', 409);
-    if (original.requests.some((request, index) => JSON.stringify(request) !== JSON.stringify(job.requests[index])) || job.requests.length > 2 || job.requests.some((request,index) => request.key !== `${job.id}:${index}` || request.sessionId !== job.sessionId)) throw new RuntimeError('MEMORY_JOB_CONFLICT', 'Memory request identity changed', 409);
-    const next = { ...job, revision: expected + 1 };
-    cachedStatement(db, 'UPDATE memory_jobs SET state=?,revision=?,json=? WHERE id=? AND revision=?').run(next.state, next.revision, JSON.stringify(next), next.id, expected);
-    return next;
-  };
   return {
     async enqueuePendingTurn(input) {
       return db.transaction(() => {
@@ -100,7 +90,12 @@ export function createMemoryJobRepository(db: Database.Database): MemoryJobRepos
           cachedStatement(db, 'UPDATE memory_jobs SET state=?,revision=?,json=? WHERE id=?').run(next.state, next.revision, JSON.stringify(next), next.id);
           return next;
         }
-        return save(job, expectedRevision);
+        if (!original || original.revision !== expectedRevision || original.receipt) throw new RuntimeError('MEMORY_JOB_CONFLICT', 'Memory job version changed', 409);
+        if (job.kind !== original.kind || job.mode !== original.mode || job.createdAt !== original.createdAt || job.inputDigest !== original.inputDigest || JSON.stringify(job.input) !== JSON.stringify(original.input) || job.sessionId !== original.sessionId || JSON.stringify(job.sessionInput) !== JSON.stringify(original.sessionInput) || JSON.stringify(job.versions) !== JSON.stringify(original.versions)) throw new RuntimeError('MEMORY_JOB_CONFLICT', 'Memory job frozen input changed', 409);
+        if (original.requests.some((request, index) => JSON.stringify(request) !== JSON.stringify(job.requests[index])) || job.requests.length > 2 || job.requests.some((request,index) => request.key !== `${job.id}:${index}` || request.sessionId !== job.sessionId)) throw new RuntimeError('MEMORY_JOB_CONFLICT', 'Memory request identity changed', 409);
+        const next = { ...job, revision: expectedRevision + 1 };
+        cachedStatement(db, 'UPDATE memory_jobs SET state=?,revision=?,json=? WHERE id=? AND revision=?').run(next.state, next.revision, JSON.stringify(next), next.id, expectedRevision);
+        return next;
       }).immediate();
     },
     async pruneFinished(appId, keep) {

@@ -813,10 +813,10 @@ export class SessionInsightService {
     contentType: SessionInsightReport['contentType'];
     filename: string;
   }> {
-    const collectSide = (sessionId: string, snapshotId: string) => ({
-      snapshot: this.requireSnapshot(sessionId, snapshotId),
-      events: this.collectKeyEvidence(this.requireSnapshot(sessionId, snapshotId))
-    });
+    const collectSide = (sessionId: string, snapshotId: string) => {
+      const snapshot = this.requireSnapshot(sessionId, snapshotId);
+      return { snapshot, events: this.collectKeyEvidence(snapshot) };
+    };
 
     let input: SessionInsightExportInput;
     if (request.kind === 'session') {

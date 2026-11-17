@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
-  isTerminalTaskStatus, redactCredentialText, RuntimeError, wrapUntrusted,
+  serialByKey, isTerminalTaskStatus, redactCredentialText, RuntimeError, wrapUntrusted,
   type CiFailureLog, type CiProvider, type CiRepository, type CiReviewComment, type PublicPullRequest, type PullRequestAvailability,
   type PullRequestStatus, type RepositoryBundle, type Session, type TaskRecord, type VerificationResponse
 } from '@dutydeck/shared';
@@ -206,7 +206,7 @@ export class PullRequestService {
   private readonly inflight = new Set<Promise<unknown>>();
   private readonly pendingSettlements = new Map<string, () => Promise<void>>();
   /** 每条 PR 记录在本进程内排队中的 update，见 update()。 */
-  private readonly updateQueues = new Map<string, Promise<void>>();
+  private readonly updateQueues = new Map<string, Promise<unknown>>();
   /** 正在后台跑的推送前验证，按 PR 记录编号。不放进 inflight：关闭服务时不等验证跑完（运行时会把它记为被中断，重启后重跑）。 */
   private readonly verifying = new Map<string, Promise<void>>();
   /** 验证失败卡没发出去时，下次补发的最早时间（按 PR 记录编号）；只在内存里，重启后马上补发一次。 */
@@ -257,8 +257,7 @@ export class PullRequestService {
    * 剩下的冲突来自本进程直接 save 的单次写或别的进程，重试前随机退避，避免几方同步重撞。
    */
   private update(id: string, change: (value: PullRequestRecord) => PullRequestRecord | undefined): Promise<Stored | undefined> {
-    const previous = this.updateQueues.get(id) ?? Promise.resolve();
-    const run = previous.then(async () => {
+    return serialByKey(this.updateQueues, id, async () => {
       for (let attempt = 0; attempt < UPDATE_ATTEMPTS; attempt += 1) {
         if (attempt) await sleep(UPDATE_RETRY_BASE_MS * attempt * (0.5 + Math.random()));
         const stored = await this.read(id);
@@ -270,10 +269,6 @@ export class PullRequestService {
       }
       throw new RuntimeError('PR_CONFLICT', 'PR 记录持续变化，请稍后重试。', 409);
     });
-    const settled = run.then(() => undefined, () => undefined);
-    this.updateQueues.set(id, settled);
-    void settled.then(() => { if (this.updateQueues.get(id) === settled) this.updateQueues.delete(id); });
-    return run;
   }
 
   private track<T>(operation: Promise<T>) {

@@ -2786,14 +2786,7 @@ export class DutydeckRuntime {
           const currentSession = await this.repos.sessions.get(sub.sessionId);
           if (!currentSession) return;
           // 以下内存 fence 复查到 appendObserved 位于同一同步段，中间无 await。
-          if (
-            this.shuttingDown
-            || !this.mutations.valid(sub.owner)
-            || this.sessionGenerations.get(sub.sessionId) !== sub.generation
-            || this.drivers.get(sub.sessionId) !== sub.driver
-          ) {
-            return;
-          }
+          if (!this.insightFenceLive(sub)) return;
           const observation: TranscriptSourceObservation = {
             ...raw,
             dataRoot: canonicalRoot,

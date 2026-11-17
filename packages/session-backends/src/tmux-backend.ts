@@ -556,15 +556,10 @@ export class TmuxBackend implements SessionBackend {
    * bytes. Applications in cursor-key mode distinguish these from text sent
    * through write(), which is intentionally limited to literal paste input. */
   async sendSpecialKeys(...keys: string[]): Promise<boolean> {
-    if (this.exited || !this.started || keys.length === 0) return false;
-    const generation = this.inputGeneration;
-    try {
+    if (keys.length === 0) return false;
+    return this.sendInput(async () => {
       (await runTmux(['send-keys', '-t', this.sessionName, ...keys]));
-      return this.inputValid(generation);
-    } catch (err) {
-      if (err instanceof TmuxSessionMissingError) this.handlePaneExit();
-      return false;
-    }
+    });
   }
 
   async interrupt(): Promise<void> {

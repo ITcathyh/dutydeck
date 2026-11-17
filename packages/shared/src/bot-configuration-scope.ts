@@ -340,21 +340,20 @@ function canonicalEntryJson(norm: FullTrustScopeEntry): string {
  * 按全部维度规范编码排序与去重，不得合并不同授权条目，不改变任何授权关系。
  */
 export function normalizeFullTrustScope(scope: FullTrustScopeV1): FullTrustScopeV1 {
-  const normalizedEntries: FullTrustScopeEntry[] = [];
+  const normalizedEntries = new Map<string, FullTrustScopeEntry>();
   for (const rawEntry of scope.entries) {
     const norm = normalizeScopeEntry(rawEntry);
     const json = canonicalEntryJson(norm);
-    if (!normalizedEntries.some(existing => canonicalEntryJson(existing) === json)) {
-      normalizedEntries.push(norm);
+    if (!normalizedEntries.has(json)) {
+      normalizedEntries.set(json, norm);
     }
   }
-  normalizedEntries.sort((a, b) => codeUnitCompare(canonicalEntryJson(a), canonicalEntryJson(b)));
 
   return {
     version: 1,
     channelBotId: scope.channelBotId,
     externalAppId: scope.externalAppId,
     brand: scope.brand,
-    entries: normalizedEntries
+    entries: [...normalizedEntries].sort(([left], [right]) => codeUnitCompare(left, right)).map(([, entry]) => entry)
   };
 }

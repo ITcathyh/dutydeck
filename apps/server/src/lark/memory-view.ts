@@ -71,6 +71,18 @@ export interface RenderMemoryIndexOptions {
   query?: string;
 }
 
+function renderSharedMemorySection(sharedEntries: SharedLarkMemoryEntry[], budget: number): { text: string; overBudget: boolean } {
+  const intro = '## 同群其他机器人记下的偏好\n这些条目属于其他机器人，memory show/search 查不到。';
+  const lines: string[] = [];
+  for (const item of sharedEntries) {
+    const src = sourceLabels[item.entry.source] ?? item.entry.source;
+    const line = `- [来自 ${item.botName} · ${src}] ${clipLine(item.entry.content, larkMemoryLimits.indexLineChars)}`;
+    if (`${intro}\n${[...lines, line].join('\n')}`.length <= budget) lines.push(line);
+    else break;
+  }
+  return { text: lines.length ? `${intro}\n${lines.join('\n')}` : '', overBudget: lines.length < sharedEntries.length };
+}
+
 /**
  * 渲染 MEMORY.md 索引文本：
  * 标题、统计行、各主题下的摘要行；超预算时省略并附引导行。
@@ -86,32 +98,7 @@ export function renderMemoryIndex(
   const sharedEntries = options?.sharedEntries ?? [];
 
   if (!entries.length) {
-    if (!sharedEntries.length) {
-      return { text: '', overBudget: false, omitted: 0, ids: [] };
-    }
-    const sharedIntro = '这些条目属于其他机器人，memory show/search 查不到。';
-    const sharedLines: string[] = [];
-    let overBudget = false;
-    for (const item of sharedEntries) {
-      const src = sourceLabels[item.entry.source] ?? item.entry.source;
-      const line = `- [来自 ${item.botName} · ${src}] ${clipLine(item.entry.content, larkMemoryLimits.indexLineChars)}`;
-      const candidateLines = [...sharedLines, line];
-      const candidateSection = `## 同群其他机器人记下的偏好\n${sharedIntro}\n${candidateLines.join('\n')}`;
-      if (candidateSection.length <= budget) {
-        sharedLines.push(line);
-      } else {
-        overBudget = true;
-        break;
-      }
-    }
-    if (!sharedLines.length) {
-      return { text: '', overBudget: true, omitted: 0, ids: [] };
-    }
-    const text = `## 同群其他机器人记下的偏好\n${sharedIntro}\n${sharedLines.join('\n')}`;
-    if (sharedLines.length < sharedEntries.length) {
-      overBudget = true;
-    }
-    return { text, overBudget, omitted: 0, ids: [] };
+    return { ...renderSharedMemorySection(sharedEntries, budget), omitted: 0, ids: [] };
   }
 
   const lastConsolidation = state.lastConsolidationAt
@@ -230,7 +217,7 @@ export function renderMemoryIndex(
   const omitted = entries.length - selectedIds.size;
   const selfText = formatIndexWith(selectedIds, omitted);
   // 按相关度选条目时，没入选是有意为之，不算超预算。
-  let overBudget = relevance ? selfText.length > budget : omitted > 0 || selfText.length > budget;
+  const overBudget = relevance ? selfText.length > budget : omitted > 0 || selfText.length > budget;
   const ids = [...selectedIds];
 
   if (!sharedEntries.length) {
@@ -243,31 +230,8 @@ export function renderMemoryIndex(
   }
 
   // 自己的条目未超预算，尝试在剩余预算内加入共享条目
-  const sharedIntro = '这些条目属于其他机器人，memory show/search 查不到。';
-  const sharedLines: string[] = [];
-  for (const item of sharedEntries) {
-    const src = sourceLabels[item.entry.source] ?? item.entry.source;
-    const line = `- [来自 ${item.botName} · ${src}] ${clipLine(item.entry.content, larkMemoryLimits.indexLineChars)}`;
-    const candidateLines = [...sharedLines, line];
-    const candidateSection = `## 同群其他机器人记下的偏好\n${sharedIntro}\n${candidateLines.join('\n')}`;
-    const candidateFullText = `${selfText}\n\n${candidateSection}`;
-    if (candidateFullText.length <= budget) {
-      sharedLines.push(line);
-    } else {
-      overBudget = true;
-      break;
-    }
-  }
-
-  if (!sharedLines.length) {
-    return { text: selfText, overBudget: true, omitted, ids };
-  }
-
-  if (sharedLines.length < sharedEntries.length) {
-    overBudget = true;
-  }
-  const sharedSection = `## 同群其他机器人记下的偏好\n${sharedIntro}\n${sharedLines.join('\n')}`;
-  return { text: `${selfText}\n\n${sharedSection}`, overBudget, omitted, ids };
+  const shared = renderSharedMemorySection(sharedEntries, budget - selfText.length - 2);
+  return { text: shared.text ? `${selfText}\n\n${shared.text}` : selfText, overBudget: shared.overBudget, omitted, ids };
 }
 
 /** Complete index structure, referencing the entries supplied once in the job prompt. */

@@ -93,25 +93,59 @@ describe('terminal initial screen', () => {
 
   it('recovers the snapshot-to-response window with bounded increments and visibly reports loss', async () => {
     const { driver, backend, output } = fixture();
-    let gap!: (dropped: number) => void, resolve!: (screen: string) => void, calls = 0;
+    let gap!: (dropped: number) => void, calls = 0;
+    const captureStarted: Array<() => void> = [];
+    const started = Array.from({ length: 3 }, () => new Promise<void>(resolve => { captureStarted.push(resolve); }));
+    const captures: Array<(screen: string) => void> = [];
     backend.onOutputGap = callback => { gap = callback; };
-    backend.resyncOutput = boundary => { calls++; boundary?.(); return new Promise(done => { resolve = done; }); };
+    backend.resyncOutput = boundary => {
+      const capture = calls++;
+      boundary?.();
+      return new Promise<string>(resolve => { captures[capture] = resolve; captureStarted[capture]!(); });
+    };
     await driver.start();
     const frames: string[] = [];
-    driver.createTerminalStream().onData(data => frames.push(data));
-    gap(100);
-    expect(frames[0]).toContain('terminal output exceeded its buffer');
-    // The authoritative capture has happened, but its Promise response is delayed.
-    output('AFTER_CAPTURE'); resolve('SCREEN');
-    await new Promise(done => setTimeout(done, 10));
-    expect(frames.join('')).toContain('SCREENAFTER_CAPTURE');
-    gap(100);
-    output('x'.repeat(300000)); resolve('OBSOLETE');
-    await vi.waitFor(() => expect(calls).toBe(3));
-    output('LATEST_TAIL'); resolve('LATEST');
-    await new Promise(done => setTimeout(done, 10));
-    expect(frames.slice(-2).join('')).toContain('LATESTLATEST_TAIL');
-    expect(frames.at(-1)).not.toContain('OBSOLETE');
+    let firstTailEmitted!: () => void, latestTailEmitted!: () => void;
+    const firstTail = new Promise<void>(resolve => { firstTailEmitted = resolve; });
+    const latestTail = new Promise<void>(resolve => { latestTailEmitted = resolve; });
+    driver.createTerminalStream().onData(data => {
+      frames.push(data);
+      if (data === 'AFTER_CAPTURE') firstTailEmitted();
+      if (data === 'LATEST_TAIL') latestTailEmitted();
+    });
+    const recovery = driver as unknown as { feedRecoveredScreen(screen: string): Promise<void>; refreshingScreen: boolean };
+    const feed = vi.spyOn(recovery, 'feedRecoveredScreen');
+    const finishRefresh = async (tail: Promise<void>) => {
+      await tail;
+      await feed.mock.results.at(-1)!.value;
+      // After the last tail is parsed, capture only returns through catch/finally.
+      // Let that Promise chain finish before issuing the next gap.
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(recovery.refreshingScreen).toBe(false);
+    };
+    try {
+      gap(100);
+      await started[0];
+      expect(frames[0]).toContain('terminal output exceeded its buffer');
+      // The authoritative capture has happened, but its Promise response is delayed.
+      output('AFTER_CAPTURE'); captures[0]!('SCREEN');
+      await finishRefresh(firstTail);
+      expect(frames.join('')).toContain('SCREENAFTER_CAPTURE');
+      gap(100);
+      await started[1];
+      output('x'.repeat(300000)); captures[1]!('OBSOLETE');
+      await started[2];
+      expect(calls).toBe(3);
+      output('LATEST_TAIL'); captures[2]!('LATEST');
+      await finishRefresh(latestTail);
+      expect(calls).toBe(3);
+      expect(frames.slice(-2).join('')).toContain('LATESTLATEST_TAIL');
+      expect(frames.join('')).not.toContain('OBSOLETE');
+    } finally {
+      for (const resolve of captures) resolve('');
+      await driver.stop();
+      feed.mockRestore();
+    }
   });
 
   it('does not queue repeated snapshots while the renderer is stalled', async () => {

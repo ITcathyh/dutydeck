@@ -2,7 +2,7 @@ import type { ReplyPolish } from './reply-polish.js';
 import { annotateDisposition, type Disposition } from './disposition.js';
 import type { ConfigRepository } from '@dutydeck/shared';
 import { larkMessageAnchor } from './message-anchor.js';
-import { RuntimeError, COLLABORATION_LIST_LIMIT, DECISION_BUDGET_GATE, DECISION_WINDOW_LIMIT, USAGE_CAP_GATE, countDecisionUsage, listWindowIncomplete, type ListedItems } from '@dutydeck/shared';
+import { RuntimeError, serialByKey, COLLABORATION_LIST_LIMIT, DECISION_BUDGET_GATE, DECISION_WINDOW_LIMIT, USAGE_CAP_GATE, countDecisionUsage, listWindowIncomplete, type ListedItems } from '@dutydeck/shared';
 import { BOT_LOOP_DEPTH_LIMIT, BOT_LOOP_GATE, BOT_TURN_RECORD } from '@dutydeck/shared';
 import { DECIDER_META_KEY, INTRUSIVE_FEEDBACK_PREFIX, MISSED_FEEDBACK_PREFIX, deciderMetaOf, isDecisionGate, participationLevelBehaviors, participationLevelLabels, participationLevelPhraseHint, participationLevelPhrases, participationLevels, resolveParticipation } from '@dutydeck/shared';
 import { resolveScenarioParams, scenarioBindingStatus, scenarioMajorVersion, scenarioRecordOf, scenarioSourceBots, scenarioTriggerSources, type CollaborationDuty, type ScenarioBinding, type ScenarioBotRef, type ScenarioMessage, type ScenarioPack, type UpdateCollaborationDutyInput } from '@dutydeck/shared';
@@ -654,11 +654,7 @@ export class LarkGroupParticipation {
   guardBotTurn(event: LarkMessageEvent, config: StoredLarkConfig, input: { botOpenId?: string; participationWake?: boolean }): Promise<BotTurnGate> {
     if (this.closed || event.chatType !== 'group') return Promise.resolve(undefined);
     const key = keyFor({ appId: config.appId, chatId: event.chatId });
-    const run = (this.botTurnChain.get(key) ?? Promise.resolve())
-      .catch(() => undefined)
-      .then(() => this.checkBotTurn(event, config, input));
-    this.botTurnChain.set(key, run.catch(() => undefined));
-    return this.track(() => run);
+    return this.track(() => serialByKey(this.botTurnChain, key, () => this.checkBotTurn(event, config, input)));
   }
   private async checkBotTurn(event: LarkMessageEvent, config: StoredLarkConfig, input: { botOpenId?: string; participationWake?: boolean }): Promise<BotTurnGate> {
     const scope = { appId: config.appId, chatId: event.chatId };
@@ -1023,13 +1019,11 @@ export class LarkGroupParticipation {
     if (chosen) {
       const { entry, matched } = chosen;
       const key = keyFor(scope);
-      const run = (this.scenarioChain.get(key) ?? Promise.resolve()).catch(() => undefined).then(() => runDirectScenario({
+      await serialByKey(this.scenarioChain, key, () => runDirectScenario({
         repository: this.options.repository, now: () => this.now(), dispatch: this.dispatchers.get(scope.appId), service: this.options.serviceFor(config),
         level: () => this.level(scope), ...(this.options.log ? { log: this.options.log } : {})
       }, { entry, scope, event, config, self: { appId: config.appId, ...(botOpenId ? { openId: botOpenId } : {}) }, sender: { appId, ...(event.senderOpenId ? { openId: event.senderOpenId } : {}) }, text,
         ...('dedupeKey' in matched && matched.dedupeKey ? { dedupeKey: matched.dedupeKey } : {}), ...('abstained' in matched ? { abstained: matched.abstained } : {}) }));
-      this.scenarioChain.set(key, run.catch(() => undefined));
-      await run;
     }
   }
   /** 机器人消息发送者的 app_id。实时事件只给本 App 视角的 open_id，按消息详情查一次后缓存。 */

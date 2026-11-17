@@ -124,9 +124,7 @@ export class ClaudeSettings {
         ...(hasExplicitEnv ? explicitEnv : {}),
       } } : {}),
     };
-    try { mkdirSync(this.directory, { mode: 0o700 }); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
-    this.assertPrivateDirectory();
+    this.ensurePrivateDirectory();
     const path = join(this.directory, `${randomUUID()}.json`);
     writeFileSync(path, JSON.stringify(merged), { mode: 0o600, flag: 'wx' });
     this.files.add(path);
@@ -155,9 +153,7 @@ export class ClaudeSettings {
       this.files.delete(activePath);
       return;
     }
-    try { mkdirSync(this.directory, { mode: 0o700 }); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
-    this.assertPrivateDirectory();
+    this.ensurePrivateDirectory();
     writeFileSync(path, planGuardScript(), { mode: 0o600 });
     writeFileSync(activePath, '1', { mode: 0o600 });
     this.files.add(path);
@@ -176,9 +172,7 @@ export class ClaudeSettings {
       planGuard: wired(claudePlanGuardMatcher, [join(this.directory, planGuardFile)]),
       secretGuard: wired(secretGuardToolMatcher, ['secret-guard.mjs', 'DUTYDECK_POLICY_ROOT=', quote(cwd)]),
     };
-    try { mkdirSync(this.directory, { mode: 0o700 }); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
-    this.assertPrivateDirectory();
+    this.ensurePrivateDirectory();
     writeFileSync(join(this.directory, launchGuardFile), JSON.stringify(this.launchGuard), { mode: 0o600 });
   }
 
@@ -237,6 +231,12 @@ export class ClaudeSettings {
         || typeof parsed.failureBlock !== 'boolean' || typeof parsed.planGuard !== 'boolean' || typeof parsed.secretGuard !== 'boolean') return { state: 'invalid' };
       return { state: 'valid', wiring: { id: parsed.id, failureBlock: parsed.failureBlock, planGuard: parsed.planGuard, secretGuard: parsed.secretGuard } };
     } catch { return { state: 'invalid' }; }
+  }
+
+  private ensurePrivateDirectory(): void {
+    try { mkdirSync(this.directory, { mode: 0o700 }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+    this.assertPrivateDirectory();
   }
 
   private assertPrivateDirectory(): void {

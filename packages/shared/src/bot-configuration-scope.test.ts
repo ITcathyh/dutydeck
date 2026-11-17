@@ -613,6 +613,26 @@ describe('FullTrustScope Coverage and Normalization', () => {
       expect(normalized.entries.some(e => e.operateScope === 'group_runs')).toBe(true);
     });
 
+    it('keeps entries that differ in any authorization field', () => {
+      const entries: FullTrustScopeEntry[] = [
+        baseEntry,
+        { ...baseEntry, entry: { kind: 'group', profile: 'managed_group', bindingIds: ['bind_a'] } },
+        { ...baseEntry, subject: { kind: 'human', rule: { mode: 'open' } } },
+        { ...baseEntry, actions: ['task.create'] },
+        { ...baseEntry, operateScope: 'group_runs' },
+        { ...baseEntry, executionDigest: 'f'.repeat(64) },
+        { ...baseEntry, directoryIdentityDigest: 'c'.repeat(64) },
+        ...(['terminalWrite', 'highRisk', 'groupToolsSend'] as const).map(gate => ({ ...baseEntry, gates: { ...baseEntry.gates, [gate]: true } })),
+        { ...baseEntry, expiresAt: '2026-11-01T00:00:00.000Z' },
+        { ...baseEntry, expiresAt: undefined }
+      ];
+      const normalized = normalizeFullTrustScope({ ...baseScope, entries: [...entries, baseEntry] });
+      expect(normalized.entries).toHaveLength(entries.length);
+      for (const entry of entries) {
+        expect(normalized.entries).toContainEqual(normalizeFullTrustScope({ ...baseScope, entries: [entry] }).entries[0]);
+      }
+    });
+
     it('is strictly idempotent and does not mutate input', () => {
       const originalEntries = [
         {

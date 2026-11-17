@@ -126,13 +126,10 @@ export class CollaborationEvaluation {
     let failed = 0;
     let missing = 0;
 
-    const mark = (
-      item: ReplayItemResult,
-      bucket: 'passed' | 'failed' | 'missing'
-    ): void => {
+    const mark = (item: ReplayItemResult): void => {
       results.push(item);
-      if (bucket === 'passed') passed++;
-      else if (bucket === 'failed') failed++;
+      if (item.status === 'passed') passed++;
+      else if (item.status === 'failed') failed++;
       else missing++;
     };
 
@@ -141,8 +138,7 @@ export class CollaborationEvaluation {
       const decision = await this.repository.getDecision(scope, decisionId);
       if (!decision) {
         mark(
-          { decisionId, status: 'missing', reason: `Decision '${decisionId}' not found in scope` },
-          'missing'
+          { decisionId, status: 'missing', reason: `Decision '${decisionId}' not found in scope` }
         );
         continue;
       }
@@ -158,8 +154,7 @@ export class CollaborationEvaluation {
       const rawSnapshot = decision.inputSnapshot as unknown;
       if (!rawSnapshot || typeof rawSnapshot !== 'object') {
         mark(
-          { decisionId, status: 'missing', expected, reason: 'Missing inputSnapshot in decision' },
-          'missing'
+          { decisionId, status: 'missing', expected, reason: 'Missing inputSnapshot in decision' }
         );
         continue;
       }
@@ -176,8 +171,7 @@ export class CollaborationEvaluation {
             status: 'missing',
             expected,
             reason: 'Missing settings or observations array in decision snapshot'
-          },
-          'missing'
+          }
         );
         continue;
       }
@@ -191,8 +185,7 @@ export class CollaborationEvaluation {
             status: 'missing',
             expected,
             reason: `Decision snapshot failed schema validation: ${parseResult.error.issues[0]?.message ?? 'invalid snapshot'}`
-          },
-          'missing'
+          }
         );
         continue;
       }
@@ -201,7 +194,7 @@ export class CollaborationEvaluation {
       // 4. 顶层及全部嵌套实体 scope 校验：任何跨 scope → failed，不调用 evaluate
       const crossScopeReason = findCrossScopeReason(scope, snapshot);
       if (crossScopeReason) {
-        mark({ decisionId, status: 'failed', expected, reason: crossScopeReason }, 'failed');
+        mark({ decisionId, status: 'failed', expected, reason: crossScopeReason });
         continue;
       }
 
@@ -213,21 +206,20 @@ export class CollaborationEvaluation {
             status: 'missing',
             expected,
             reason: `Snapshot contains bootstrap missing elements: ${snapshot.bootstrap.missing.join(', ')}`
-          },
-          'missing'
+          }
         );
         continue;
       }
 
       const teamGap = snapshot.teamContext?.sources.find(source => source.status !== 'complete' || source.missing.length);
       if (teamGap) {
-        mark({ decisionId, status: 'missing', expected, reason: `Team source '${teamGap.scope.chatId}' contains missing elements: ${teamGap.missing.join(', ') || teamGap.status}` }, 'missing');
+        mark({ decisionId, status: 'missing', expected, reason: `Team source '${teamGap.scope.chatId}' contains missing elements: ${teamGap.missing.join(', ') || teamGap.status}` });
         continue;
       }
       // model 场景包冻结的上下文材料：来源没取全时和 teamContext 一样记 missing，不重新调用 provider。
       const scenarioGap = snapshot.scenario?.status === 'used' ? snapshot.scenario.context?.sources.find(source => source.status !== 'complete' || source.missing.length) : undefined;
       if (scenarioGap) {
-        mark({ decisionId, status: 'missing', expected, reason: `Scenario context '${snapshot.scenario!.packId}:${scenarioGap.id}' contains missing elements: ${scenarioGap.missing.join(', ') || scenarioGap.status}` }, 'missing');
+        mark({ decisionId, status: 'missing', expected, reason: `Scenario context '${snapshot.scenario!.packId}:${scenarioGap.id}' contains missing elements: ${scenarioGap.missing.join(', ') || scenarioGap.status}` });
         continue;
       }
       const observations = [...snapshot.observations, ...(snapshot.teamContext?.observations ?? []), ...(snapshot.scenario?.status === 'used' ? snapshot.scenario.context?.observations ?? [] : [])];
@@ -242,8 +234,7 @@ export class CollaborationEvaluation {
             status: 'missing',
             expected,
             reason: `Observation '${obsWithMissing.id}' contains missing elements: ${obsWithMissing.missing.join(', ')}`
-          },
-          'missing'
+          }
         );
         continue;
       }
@@ -264,8 +255,7 @@ export class CollaborationEvaluation {
             status: 'missing',
             expected,
             reason: `Original decision evidence '${missingOriginalEvidenceId}' is missing from snapshot`
-          },
-          'missing'
+          }
         );
         continue;
       }
@@ -283,8 +273,7 @@ export class CollaborationEvaluation {
             status: 'failed',
             expected,
             reason: `Evaluation error: ${err instanceof Error ? err.message : String(err)}`
-          },
-          'failed'
+          }
         );
         continue;
       }
@@ -292,8 +281,7 @@ export class CollaborationEvaluation {
       // 7. 模型返回结果有效性：非法结果 failed
       if (!actualOutcome || typeof actualOutcome !== 'object') {
         mark(
-          { decisionId, status: 'failed', expected, reason: 'Evaluation returned invalid result' },
-          'failed'
+          { decisionId, status: 'failed', expected, reason: 'Evaluation returned invalid result' }
         );
         continue;
       }
@@ -305,8 +293,7 @@ export class CollaborationEvaluation {
             status: 'failed',
             expected,
             reason: `Evaluation returned invalid action '${String(actualOutcome.action)}'`
-          },
-          'failed'
+          }
         );
         continue;
       }
@@ -319,8 +306,7 @@ export class CollaborationEvaluation {
             expected,
             actual: actualOutcome.action,
             reason: 'Evaluation returned non-string reason'
-          },
-          'failed'
+          }
         );
         continue;
       }
@@ -333,8 +319,7 @@ export class CollaborationEvaluation {
             expected,
             actual: actualOutcome.action,
             reason: 'Evaluation did not return valid evidenceIds array'
-          },
-          'failed'
+          }
         );
         continue;
       }
@@ -348,8 +333,7 @@ export class CollaborationEvaluation {
             expected,
             actual: actualOutcome.action,
             reason: `Action '${actualOutcome.action}' has no supporting evidence`
-          },
-          'failed'
+          }
         );
         continue;
       }
@@ -364,8 +348,7 @@ export class CollaborationEvaluation {
             expected,
             actual: actualOutcome.action,
             reason: `Evidence observation '${hallucinatedEvidenceId}' not found in snapshot`
-          },
-          'failed'
+          }
         );
         continue;
       }
@@ -381,8 +364,7 @@ export class CollaborationEvaluation {
             reason: missedLabel
               ? `Action mismatch: missed decision expects a response, got 'silent' (${actualOutcome.reason})`
               : `Action mismatch: expected '${expected}', got '${actualOutcome.action}' (${actualOutcome.reason})`
-          },
-          'failed'
+          }
         );
         continue;
       }
@@ -395,8 +377,7 @@ export class CollaborationEvaluation {
           expected,
           actual: actualOutcome.action,
           reason: actualOutcome.reason
-        },
-        'passed'
+        }
       );
     }
 

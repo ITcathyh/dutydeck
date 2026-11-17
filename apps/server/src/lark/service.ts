@@ -350,6 +350,21 @@ export const splitLongResult = (text: string): [string, string] | undefined => {
   return [text.slice(0, cut), text.slice(cut)];
 };
 
+// 在组装时折叠，裁剪器仍按原有扁平结构保留最新记录；标题计数对应裁剪后的内容。
+const foldCurrentRecords = (group: Record<string, unknown> | undefined): Record<string, unknown> | undefined => {
+  if (group?.tag !== 'interactive_container' || !Array.isArray(group.elements)) return group;
+  const items = group.elements as Record<string, unknown>[];
+  const tools = items.filter(el => String(el.element_id ?? '').startsWith('trace_tool_'));
+  if (tools.length <= 1) return group;
+  return {
+    ...group,
+    elements: [
+      ...items.filter(el => !tools.includes(el)),
+      collapsiblePanel('current_records', { tag: 'markdown', content: `执行记录（${tools.length} 条）`, text_size: 'notation' }, tools)
+    ]
+  };
+};
+
 const foldLongResult = (element: Record<string, unknown>): Array<Record<string, unknown>> => {
   if (element.element_id !== 'final_output' || typeof element.content !== 'string') return [element];
   const parts = splitLongResult(element.content);
@@ -839,17 +854,7 @@ function buildDefaultLarkCard(input: LarkCardInput, requestFields?: Record<strin
       let traceSection: Record<string, unknown>[] = [];
       if (state === 'running') {
         const currentGroup = traceElements.find(el => el.tag === 'interactive_container') ?? traceElements.at(-1);
-        const currentItems = currentGroup?.tag === 'interactive_container' && Array.isArray(currentGroup.elements)
-          ? currentGroup.elements as Record<string, unknown>[] : [];
-        const currentTools = currentItems.filter(el => String(el.element_id ?? '').startsWith('trace_tool_'));
-        // 在组装时折叠，裁剪器仍按原有扁平结构保留最新记录；标题计数对应裁剪后的内容。
-        const currentStage = currentTools.length > 1 ? {
-          ...currentGroup,
-          elements: [
-            ...currentItems.filter(el => !currentTools.includes(el)),
-            collapsiblePanel('current_records', { tag: 'markdown', content: `执行记录（${currentTools.length} 条）`, text_size: 'notation' }, currentTools)
-          ]
-        } : currentGroup;
+        const currentStage = foldCurrentRecords(currentGroup);
         const historyGroups = traceElements.filter(el => el !== currentGroup);
         // 历史阶段的位置本身就说明了它们是历史，不需要一行「此前阶段」再讲一遍。
         // 位置表达不了的只有「还有多少个更早阶段没展示」，那一行由 renderer 作为
@@ -1001,15 +1006,7 @@ function buildDefaultLarkCard(input: LarkCardInput, requestFields?: Record<strin
     }
 
     const currentGroup = traceElements.find(el => el.tag === 'interactive_container');
-    const currentItems = currentGroup && Array.isArray(currentGroup.elements) ? currentGroup.elements as Record<string, unknown>[] : [];
-    const currentTools = currentItems.filter(el => String(el.element_id ?? '').startsWith('trace_tool_'));
-    const stage = currentTools.length > 1 ? {
-      ...currentGroup,
-      elements: [
-        ...currentItems.filter(el => !currentTools.includes(el)),
-        collapsiblePanel('current_records', { tag: 'markdown', content: `执行记录（${currentTools.length} 条）`, text_size: 'notation' }, currentTools)
-      ]
-    } : currentGroup;
+    const stage = foldCurrentRecords(currentGroup);
     // 当前阶段就是正文第一段，不再套一块底色（精简模式本来就没有）。
     const currentStage: Record<string, unknown> | undefined = stage && { ...stage, padding: '0px' };
     if (currentStage) {
@@ -2011,10 +2008,6 @@ export class LarkCardService {
   async getContactUser(id: string, idType: ContactIdType, options: { sharedCircuit?: false } = {}): Promise<ContactUser | undefined> {
     const userId = required(id, 'id');
     const res = await this.contactRequest(`/open-apis/contact/v3/users/${encodeURIComponent(userId)}?user_id_type=${idType}`, { method: 'GET', ...options });
-    const code = Number(res?.code ?? 0);
-    if (code !== 0) {
-      throw Object.assign(new Error(`Lark contact user.get failed (code: ${code})`), { code, data: res?.data });
-    }
     const user = res?.data?.user;
     if (!user || typeof user !== 'object') return undefined;
     return {
@@ -2036,10 +2029,6 @@ export class LarkCardService {
 
   private async batchGetId(key: { emails?: string[]; mobiles?: string[] }): Promise<string | undefined> {
     const res: { code?: number; data?: { user_list?: Array<{ user_id?: string }> } } = await this.contactRequest('/open-apis/contact/v3/users/batch_get_id?user_id_type=open_id', { body: { ...key, include_resigned: false } });
-    const code = Number(res?.code ?? 0);
-    if (code !== 0) {
-      throw Object.assign(new Error(`Lark contact batchGetId failed (code: ${code})`), { code, data: res?.data });
-    }
     const list = Array.isArray(res?.data?.user_list) ? res.data.user_list : [];
     const hit = list.find(user => typeof user?.user_id === 'string' && user.user_id);
     return hit ? String(hit.user_id) : undefined;

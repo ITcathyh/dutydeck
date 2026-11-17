@@ -5,7 +5,7 @@ import { accessSync, constants, realpathSync } from 'node:fs';
 import { delimiter, isAbsolute, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { RelayError } from '@dutydeck/relay';
-import type { Session } from '@dutydeck/shared';
+import { serialByKey, type Session } from '@dutydeck/shared';
 
 const execute = promisify(execFile);
 export const herdrSessionEnvKey = 'dutydeck_herdr_session';
@@ -52,12 +52,6 @@ export class HerdrSessions {
     if (!this.binary) return '';
     return `Herdr 侧边子任务：先看 ${command} session herdr --help 再用。你是外部 ACP/tmux 主 Agent，不伪造 HERDR_*、不用 --current、不操作用户 default session。`;
   }
-  private serial<T>(name: string, work: () => Promise<T>): Promise<T> {
-    const result = (this.tails.get(name) ?? Promise.resolve()).catch(() => {}).then(work);
-    this.tails.set(name, result);
-    void result.finally(() => { if (this.tails.get(name) === result) this.tails.delete(name); }).catch(() => {});
-    return result;
-  }
   private async call(name: string, args: string[]): Promise<HerdrResult> {
     if (!this.binary) throw new RelayError('HERDR_UNAVAILABLE', 'Herdr 未安装；普通 Dutydeck 任务不受影响。', 503);
     try {
@@ -79,7 +73,7 @@ export class HerdrSessions {
   }
   async prepare(session: Pick<Session, 'id' | 'cwd'>): Promise<HerdrScope> {
     const name = this.nameFor(session.id);
-    return this.serial(name, async () => {
+    return serialByKey(this.tails, name, async () => {
       let listing: HerdrResult;
       try { listing = await this.call(name, ['workspace', 'list']); }
       catch (error) {
@@ -116,6 +110,6 @@ export class HerdrSessions {
   }
   async stop(sessionId: string) {
     const name = this.nameFor(sessionId);
-    return this.serial(name, async () => { await this.call(name, ['session', 'stop', name, '--json']); return { session_name: name, stopped: true }; });
+    return serialByKey(this.tails, name, async () => { await this.call(name, ['session', 'stop', name, '--json']); return { session_name: name, stopped: true }; });
   }
 }

@@ -229,7 +229,8 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
     await this.service.update({ cardLinks: config.cardLinks, sessionId: mapping.sessionId, cardKind: 'result', ...(config.adhdMode === true ? { adhdMode: true } : {}), messageId: record.cardId, taskId: mapping.externalId, taskName: saved.task_name, state: 'completed', readOnly: true, elements,
       capabilities: { ...this.capabilitiesForTask(restored), ...verification.capabilities, ...await this.resultActionCapabilities(restored, config, saved.state) },
       agentName: await this.resolveSessionAgentName(config, mapping.sessionId), showAgentName: config.showAgentName === true, turn: saved.turn });
-    const current = (await this.cardMappings!.list(larkCardChannel(config.appId))).find(item => item.id === mapping.id);
+    const latest = await this.cardMappings!.get(larkCardChannel(config.appId), mapping.externalId);
+    const current = latest?.id === mapping.id ? latest : undefined;
     if (current?.extra !== mapping.extra) return;
     await this.cardMappings!.save({ ...mapping, extra: JSON.stringify({ ...saved, result_feedback_state: record.state, final_elements: elements }) });
   }

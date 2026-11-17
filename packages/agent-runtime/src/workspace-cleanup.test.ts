@@ -459,14 +459,15 @@ describe('managed workspace cleanup', () => {
     const preview = await h.runtime.getWorkspaceCleanupPreview(session.id);
     expect(preview.canClean).toBe(true);
 
-    let cleaningIntentLogged = false;
+    let cleaningStarted!: () => void;
+    const started = new Promise<void>(resolve => { cleaningStarted = resolve; });
     let releaseGate!: () => void;
     const gate = new Promise<void>(r => { releaseGate = r; });
     const originalCAS = h.repos.config.compareAndSet;
     h.repos.config.compareAndSet = async (k, e, v) => {
       const ok = await originalCAS!.call(h.repos.config, k, e, v);
       if (ok && k === `runtime_workspace:${session.id}` && JSON.parse(v).state === 'cleaning') {
-        cleaningIntentLogged = true;
+        cleaningStarted();
         await gate;
       }
       return ok;
@@ -475,13 +476,20 @@ describe('managed workspace cleanup', () => {
     const firstPromise = h.runtime.cleanWorkspace(session.id, preview.fingerprint);
     const secondPromise = h.runtime.cleanWorkspace(session.id, preview.fingerprint);
 
-    await vi.waitFor(() => expect(cleaningIntentLogged).toBe(true));
-    releaseGate();
+    try {
+      await Promise.race([started, Promise.all([firstPromise, secondPromise]).then(() => {
+        throw new Error('Cleanup settled before logging the cleaning intent');
+      })]);
+      releaseGate();
 
-    const [firstRes, secondRes] = await Promise.all([firstPromise, secondPromise]);
-    expect(firstRes).toEqual(secondRes);
-    expect(firstRes.ok).toBe(true);
-    h.repos.config.compareAndSet = originalCAS;
+      const [firstRes, secondRes] = await Promise.all([firstPromise, secondPromise]);
+      expect(firstRes).toEqual(secondRes);
+      expect(firstRes.ok).toBe(true);
+    } finally {
+      releaseGate();
+      await Promise.allSettled([firstPromise, secondPromise]);
+      h.repos.config.compareAndSet = originalCAS;
+    }
   });
 
   it('blocks startSession from using a source directory that is currently being cleaned', async () => {
@@ -496,42 +504,50 @@ describe('managed workspace cleanup', () => {
     const workspace = (await h.runtime.getWorkspace(session.id))!;
     const preview = await h.runtime.getWorkspaceCleanupPreview(session.id);
 
-    let cleaningIntentLogged = false;
+    let cleaningStarted!: () => void;
+    const started = new Promise<void>(resolve => { cleaningStarted = resolve; });
     let cleaningGate!: () => void;
     const gate = new Promise<void>(r => { cleaningGate = r; });
     const originalCAS = h.repos.config.compareAndSet;
     h.repos.config.compareAndSet = async (k, e, v) => {
       const ok = await originalCAS!.call(h.repos.config, k, e, v);
       if (ok && k === `runtime_workspace:${session.id}` && JSON.parse(v).state === 'cleaning') {
-        cleaningIntentLogged = true;
+        cleaningStarted();
         await gate;
       }
       return ok;
     };
 
     const cleanupRun = h.runtime.cleanWorkspace(session.id, preview.fingerprint);
-    await vi.waitFor(() => expect(cleaningIntentLogged).toBe(true));
+    try {
+      await Promise.race([started, cleanupRun.then(() => {
+        throw new Error('Cleanup settled before logging the cleaning intent');
+      })]);
 
-    // 尝试以正在被清理的 worktree 目录作为 sourceCwd 启动新 session
-    let reachedPrepare = false;
-    (h.runtime as any).workspaces.prepare = async () => {
-      reachedPrepare = true;
-      throw new Error('should not reach prepare');
-    };
+      // 尝试以正在被清理的 worktree 目录作为 sourceCwd 启动新 session
+      let reachedPrepare = false;
+      (h.runtime as any).workspaces.prepare = async () => {
+        reachedPrepare = true;
+        throw new Error('should not reach prepare');
+      };
 
-    await expect(h.runtime.start({
-      agentId: agent.id,
-      cwd: workspace.repoRoot!,
-      workspaceMode: 'worktree'
-    })).rejects.toMatchObject({
-      code: 'WORKSPACE_CONFLICT',
-      statusCode: 409
-    });
-    expect(reachedPrepare).toBe(false);
+      await expect(h.runtime.start({
+        agentId: agent.id,
+        cwd: workspace.repoRoot!,
+        workspaceMode: 'worktree'
+      })).rejects.toMatchObject({
+        code: 'WORKSPACE_CONFLICT',
+        statusCode: 409
+      });
+      expect(reachedPrepare).toBe(false);
 
-    cleaningGate();
-    await expect(cleanupRun).resolves.toMatchObject({ ok: true });
-    h.repos.config.compareAndSet = originalCAS;
+      cleaningGate();
+      await expect(cleanupRun).resolves.toMatchObject({ ok: true });
+    } finally {
+      cleaningGate();
+      await Promise.allSettled([cleanupRun]);
+      h.repos.config.compareAndSet = originalCAS;
+    }
   });
 
   it('recovers to cleaned when removal succeeded on disk but final record save failed', async () => {

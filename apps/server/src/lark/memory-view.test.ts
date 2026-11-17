@@ -116,6 +116,28 @@ describe('renderMemoryIndex', () => {
     expect(result.overBudget).toBe(false);
   });
 
+  it.each([false, true])('includes shared preferences at the exact budget, with self entries=%s', withSelf => {
+    const entries = withSelf ? [entry('mem_self', 'topic-a', '自己条目')] : [];
+    const sharedEntries = [{ botName: 'bot-1', entry: entry('mem_shared', 'conventions', '共享偏好') }];
+    const full = renderMemoryIndex(entries, dummyState, { sharedEntries });
+    const self = renderMemoryIndex(entries, dummyState);
+    expect(renderMemoryIndex(entries, dummyState, { sharedEntries, budget: full.text.length })).toEqual(full);
+    expect(renderMemoryIndex(entries, dummyState, { sharedEntries, budget: full.text.length - 1 }))
+      .toEqual({ ...self, overBudget: true });
+    expect(full.ids).toEqual(entries.map(item => item.id));
+    expect(full.omitted).toBe(0);
+  });
+
+  it.each([false, true])('stops at the first shared preference that does not fit, with self entries=%s', withSelf => {
+    const entries = withSelf ? [entry('mem_self', 'topic-a', '自己条目')] : [];
+    const short = { botName: 'bot-2', entry: entry('mem_short', 'conventions', '短偏好') };
+    const long = { botName: 'bot-1', entry: entry('mem_long', 'conventions', '长'.repeat(160)) };
+    const budget = renderMemoryIndex(entries, dummyState, { sharedEntries: [short] }).text.length;
+    const self = renderMemoryIndex(entries, dummyState);
+    expect(renderMemoryIndex(entries, dummyState, { budget, sharedEntries: [long, short] }))
+      .toEqual({ ...self, overBudget: true });
+  });
+
   it('preserves self entries completely when over budget and drops shared entries', () => {
     const entries = [
       entry('mem_self1', 'topic-a', '自己第一条 ' + 'a'.repeat(80)),

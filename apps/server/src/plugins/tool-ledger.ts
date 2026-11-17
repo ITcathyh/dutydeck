@@ -38,9 +38,7 @@ export class PluginToolLedger {
       updatedAt: new Date(now).toISOString()
     };
     const key = pluginToolActionPrefix + action.id;
-    const current = await this.config.get(key);
-    if (current !== JSON.stringify(action)) return undefined;
-    if (!await this.config.compareAndSet!(key, current, JSON.stringify(next))) return undefined;
+    if (!await this.config.compareAndSet!(key, JSON.stringify(action), JSON.stringify(next))) return undefined;
     return next;
   }
 
@@ -71,9 +69,7 @@ export class PluginToolLedger {
       updatedAt: new Date(now).toISOString()
     };
     const key = pluginToolActionPrefix + action.id;
-    const current = await this.config.get(key);
-    if (current !== JSON.stringify(action)) return undefined;
-    if (!await this.config.compareAndSet!(key, current, JSON.stringify(next))) return undefined;
+    if (!await this.config.compareAndSet!(key, JSON.stringify(action), JSON.stringify(next))) return undefined;
     return next;
   }
 }

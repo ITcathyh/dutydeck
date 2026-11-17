@@ -37,6 +37,14 @@ describe('task reports', () => {
     await clearTaskReport(kv, 't1');
     expect(await readSessionTaskReport(kv, 's1', tasks)).toBeUndefined();
   });
+  it('selects the newest round when tasks arrive in reverse time order', async () => {
+    const kv = store();
+    await writeTaskReport(kv, report);
+    expect(await readSessionTaskReport(kv, 's1', [
+      { id: 't1', createdAt: report.reportedAt },
+      { id: 'older', createdAt: '2026-10-31T00:00:00.000Z' }
+    ])).toEqual(report);
+  });
   it('a concurrent clear cannot overwrite a newer report', async () => {
     const kv = store(); await writeTaskReport(kv, report);
     let compared = false;

@@ -274,17 +274,8 @@ export class PersistentEventPublisher {
 
       await yieldEventLoop();
 
-      if (sortedEvents.length < PAGE_SIZE) {
-        if (sub.pendingWake) {
-          sub.pendingWake = false;
-          continue;
-        }
-        break;
-      } else {
-        if (sub.pendingWake) {
-          sub.pendingWake = false;
-        }
-      }
+      if (sortedEvents.length < PAGE_SIZE && !sub.pendingWake) break;
+      sub.pendingWake = false;
     }
   }
 

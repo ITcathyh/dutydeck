@@ -1,3 +1,5 @@
+import type { CollaborationScope, CollaborationDuty, CollaborationObservation, CollaborationBootstrap, CollaborationFollowupStep, CollaborationFollowup, CollaborationMandate, CollaborationDecision, CollaborationFeedback, CollaborationAction, CollaborationActivity } from '@dutydeck/shared';
+export type { CollaborationScope, CollaborationDuty, CollaborationObservation, CollaborationBootstrap, CollaborationFollowupStep, CollaborationFollowup, CollaborationMandate, CollaborationDecision, CollaborationFeedback, CollaborationAction, CollaborationActivity };
 import type { TaskAuthorization } from '@dutydeck/shared';
 import type { WorkspaceApprovalRule } from '@dutydeck/shared';
 export type { TaskAuthorization } from '@dutydeck/shared';
@@ -450,11 +452,6 @@ export const scheduleApi = {
 
 // ==================== Collaboration Types & API ====================
 
-export type CollaborationScope = {
-  appId: string;
-  chatId: string;
-};
-
 export type CollaborationParticipation = 'off' | 'observe' | 'selective' | 'eager';
 
 export type CollaborationSettings = {
@@ -467,15 +464,6 @@ export type CollaborationSettings = {
   maxProactivePerHour: number;
   retentionDays: number;
   policyVersion: string;
-  updatedAt: string;
-};
-
-/** 本 Bot 在群里的分工：接话人和各场景包的绑定（按包 id）。 */
-export type CollaborationDuty = {
-  scope: CollaborationScope;
-  revision: number;
-  responder?: { appId: string; name?: string; since: string };
-  scenarios?: Record<string, ScenarioBinding>;
   updatedAt: string;
 };
 
@@ -505,142 +493,9 @@ export type UpdateCollaborationDutyInput = {
   scenarios?: Record<string, { enabled: boolean; params?: Record<string, unknown> } | null>;
 };
 
-export type CollaborationObservation = {
-  id: string;
-  scope: CollaborationScope;
-  sequence: number;
-  source: string;
-  eventId: string;
-  occurredAt: string;
-  receivedAt: string;
-  senderId?: string;
-  senderKind: 'human' | 'bot' | 'system';
-  threadId?: string;
-  messageId?: string;
-  text: string;
-  refs: string[];
-  origin: 'live' | 'history' | 'external';
-  missing: string[];
-  revision: number;
-};
-
-export type CollaborationBootstrap = {
-  scope: CollaborationScope;
-  status: 'pending' | 'running' | 'complete' | 'partial' | 'failed';
-  cursor?: string;
-  lastEventAt?: string;
-  missing: string[];
-  updatedAt: string;
-};
-
-export type CollaborationFollowupStep = {
-  id: string;
-  label: string;
-  status: 'open' | 'done';
-};
-
-export type CollaborationFollowup = {
-  id: string;
-  scope: CollaborationScope;
-  revision: number;
-  goal: string;
-  status: 'open' | 'completed' | 'cancelled';
-  progress: string;
-  steps: CollaborationFollowupStep[];
-  ownerId?: string;
-  dueAt?: string;
-  result?: string;
-  sourceRefs: string[];
-  taskIds: string[];
-  externalRefs: string[];
-  fields: Record<string, string>;
-  createdBy: string;
-  updatedBy: string;
-  provenance: 'observed' | 'inferred' | 'confirmed';
-  createdAt: string;
-  updatedAt: string;
-};
-
-export type CollaborationMandate = {
-  id: string;
-  scope: CollaborationScope;
-  revision: number;
-  goal: string;
-  status: 'active' | 'paused' | 'cancelled' | 'completed';
-  requesterId: string;
-  sourceRefs: string[];
-  followupId?: string;
-  scheduleDefinitionId: string;
-  mode: 'notify' | 'agent';
-  prompt: string;
-  condition: 'always' | 'followup_open' | 'no_progress';
-  deliveryPaused: boolean;
-  catchupPolicy: 'skip' | 'coalesce';
-  lastProgressRevision?: number;
-  createdAt: string;
-  updatedAt: string;
-};
-
 export type CollaborationMandateDetail = CollaborationMandate & {
   schedule?: PublicScheduleDefinition;
   nextDueAt?: string;
-};
-
-export type CollaborationDecision = {
-  id: string;
-  scope: CollaborationScope;
-  contextRevision: number;
-  policyVersion: string;
-  action: 'silent' | 'reply' | 'act';
-  reason: string;
-  evidenceIds: string[];
-  status: 'candidate' | 'suppressed' | 'sent' | 'failed';
-  response?: string;
-  inputSnapshot: Record<string, unknown>;
-  createdAt: string;
-};
-
-export type CollaborationFeedback = {
-  id: string;
-  scope: CollaborationScope;
-  decisionId: string;
-  actorId: string;
-  correction: string;
-  expectedAction?: 'silent' | 'reply' | 'act';
-  createdAt: string;
-};
-
-export type CollaborationAction = {
-  id: string;
-  scope: CollaborationScope;
-  revision: number;
-  kind: string;
-  mandateId?: string;
-  mandateRevision?: number;
-  scheduleGeneration?: number;
-  contextRevision?: number;
-  followupRevision?: number;
-  requesterId: string;
-  inputDigest: string;
-  payload: Record<string, unknown>;
-  status: 'intent' | 'sending' | 'succeeded' | 'failed' | 'unknown' | 'suppressed';
-  receipt?: string;
-  error?: string;
-  createdAt: string;
-  updatedAt: string;
-};
-
-export type CollaborationActivity = {
-  id: string;
-  scope: CollaborationScope;
-  entityKind: 'followup' | 'mandate' | 'settings';
-  entityId: string;
-  revision: number;
-  actorId: string;
-  sourceRefs: string[];
-  provenance: 'observed' | 'inferred' | 'confirmed';
-  summary: string;
-  createdAt: string;
 };
 
 export type CollaborationSnapshot = {

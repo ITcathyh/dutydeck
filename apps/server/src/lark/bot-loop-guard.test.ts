@@ -262,6 +262,32 @@ describe('多 bot 互相 @ 的可选门禁', () => {
       h.participation.guardBotTurn(botMessage(`om_burst_${index}`, { threadId: 'omt_a' }), config, { botOpenId: 'ou_bot' })));
     expect(burst.filter(reason => reason === undefined)).toHaveLength(BOT_LOOP_DEPTH_LIMIT);
     expect(await turnRecords(h)).toHaveLength(BOT_LOOP_DEPTH_LIMIT);
+    expect((h.participation as any).botTurnChain.size).toBe(0);
+  });
+
+  it('前项记录失败会拒绝，已排队的后项仍从未提交的深度继续，完成后释放群键', async () => {
+    const h = harness();
+    let release!: () => void;
+    let started!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const entered = new Promise<void>(resolve => { started = resolve; });
+    const failure = new Error('record unavailable');
+    const record = vi.spyOn(h.repository, 'recordDecision').mockImplementationOnce(async () => {
+      started(); await gate; throw failure;
+    });
+    const first = h.participation.guardBotTurn(botMessage('om_failed'), config, { botOpenId: 'ou_bot' });
+    const second = h.participation.guardBotTurn(botMessage('om_after_failure'), config, { botOpenId: 'ou_bot' });
+    const settled = Promise.allSettled([first, second]);
+    try {
+      await entered;
+      expect(record).toHaveBeenCalledOnce();
+      expect((h.participation as any).botTurnDepth.size).toBe(0);
+      expect((h.participation as any).botTurnChain.size).toBe(1);
+      release();
+      expect(await settled).toEqual([{ status: 'rejected', reason: failure }, { status: 'fulfilled', value: undefined }]);
+      expect(await turnRecords(h)).toEqual([expect.objectContaining({ reason: '机器人触发的回合，同话题连续第 1 轮' })]);
+      expect((h.participation as any).botTurnChain.size).toBe(0);
+    } finally { release(); await settled; }
   });
 
   it('人类触发的回合把连续深度清零，机器人可以重新接话', async () => {

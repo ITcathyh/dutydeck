@@ -9,7 +9,6 @@ import {
   type LarkCredentialBundle,
 } from '@dutydeck/secret-provider';
 import {
-  LarkServiceError,
   createLarkCardService,
   type LarkApplicationIdentityCheck,
   type LarkBotInfo,
@@ -110,12 +109,6 @@ function chatType(info: LarkChatPreflightInfo): ChatPreflightEvidence['chatType'
   if (info.chatMode === 'topic_group') return 'topic_group';
   if (info.chatMode === 'group') return 'group';
   return 'unknown';
-}
-
-function upstreamHttpStatus(error: unknown): number | undefined {
-  return error instanceof LarkServiceError && Number.isInteger(error.details?.upstreamHttpStatus)
-    ? Number(error.details?.upstreamHttpStatus)
-    : undefined;
 }
 
 /**
@@ -219,7 +212,7 @@ export class LarkIdentityPreflightProbe {
       for (const binding of groupBindings) {
         let member: boolean;
         try { member = await client.checkBotInChat(binding.externalChatId); }
-        catch (error) {
+        catch {
           facts.push({
             groupBindingId: binding.id,
             chatAccessible: false,
@@ -227,9 +220,6 @@ export class LarkIdentityPreflightProbe {
             chatType: 'unknown',
             blockerCode: 'IDENTITY_PREFLIGHT_CHAT_INACCESSIBLE',
           });
-          // HTTP 403 and other inconclusive read failures are both blockers;
-          // inspect the status only to ensure it is never echoed to the DTO.
-          void upstreamHttpStatus(error);
           continue;
         }
         if (!member) {

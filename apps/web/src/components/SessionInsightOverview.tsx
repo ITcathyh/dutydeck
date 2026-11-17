@@ -122,23 +122,22 @@ export function SessionInsightOverview({ onOpenSession, onCompare }: {
   // 有界逐行提交：所选会话逐个请求，服务端 429 时该行标队列满，其余继续，不做批处理任务。
   const batchAnalyze = useMutation({
     mutationFn: async (targets: SummarySessionRow[]) => {
-      const results: Record<string, BatchRowState> = {};
       for (const row of targets) {
         setBatch(current => ({ ...current, [row.sessionId]: { kind: 'submitting' } }));
+        let result: BatchRowState;
         try {
           const response = await insightApi.refresh(row.sessionId);
-          results[row.sessionId] = response.state === 'queued'
+          result = response.state === 'queued'
             ? { kind: 'queued' }
             : { kind: 'accepted', snapshotId: response.snapshotId ?? null };
         } catch (error) {
           const code = (error as { code?: string }).code;
-          results[row.sessionId] = code === 'INSIGHT_QUEUE_FULL'
+          result = code === 'INSIGHT_QUEUE_FULL'
             ? { kind: 'queue-full' }
             : { kind: 'error', message: error instanceof Error ? error.message : '提交失败' };
         }
-        setBatch(current => ({ ...current, [row.sessionId]: results[row.sessionId]! }));
+        setBatch(current => ({ ...current, [row.sessionId]: result }));
       }
-      return results;
     },
     onSuccess: () => invalidateSummary()
   });

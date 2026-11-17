@@ -238,6 +238,70 @@ describe('告警初筛（内置告警包）', () => {
     expect(await h.participation.describe(scope)).toContain('**告警初筛**：来源 监控（cli_alarm）；级别只看 P0、P1；同一条告警 6 小时内只分析一次，每小时最多 2 条；今天分析 2 条，跳过 3 条');
   });
 
+  it('同群告警并发到达仍按每小时上限派发，最后一项完成后释放群键', async () => {
+    const h = await harness('selective');
+    await subscribe(h, { maxPerHour: 2 });
+    const dispatch = vi.fn(async () => {});
+    h.participation.setDispatcher(scope.appId, dispatch);
+    let release!: () => void;
+    let started!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const entered = new Promise<void>(resolve => { started = resolve; });
+    const readWindow = h.repository.listScenarioRecords.bind(h.repository);
+    const window = vi.spyOn(h.repository, 'listScenarioRecords').mockImplementationOnce(async (...args) => {
+      started(); await gate; return readWindow(...args);
+    });
+    const queued = vi.spyOn((h.participation as any).scenarioChain, 'set');
+    const pending = ['订单', '支付', '库存', '搜索', '物流'].map((name, index) =>
+      h.participation.handle(fromBot(`om_burst_${index}`, `【P1】${name}服务异常`, 'cli_alarm'), config, { explicit: false, botOpenId: 'ou_bot' }));
+    const settled = Promise.allSettled(pending);
+    try {
+      await entered;
+      await vi.waitFor(() => expect(queued).toHaveBeenCalledTimes(pending.length));
+      expect(window).toHaveBeenCalledOnce();
+      expect(dispatch).not.toHaveBeenCalled();
+      release();
+      expect((await settled).every(result => result.status === 'fulfilled')).toBe(true);
+      expect(dispatch).toHaveBeenCalledTimes(2);
+      const records = (await h.repository.listDecisions(scope)).map(item => scenarioRecordOf(item)?.outcome);
+      expect(records.filter(outcome => outcome === 'started')).toHaveLength(2);
+      expect(records.filter(outcome => outcome === 'rate_limited')).toHaveLength(3);
+      expect((h.participation as any).scenarioChain.size).toBe(0);
+    } finally { release(); await settled; }
+  });
+
+  it('场景窗口读取拒绝后，已排队的下一条仍能执行并释放群键', async () => {
+    const log = { warn: vi.fn() };
+    const h = await harness('selective', { log });
+    await subscribe(h);
+    const dispatch = vi.fn(async () => {});
+    h.participation.setDispatcher(scope.appId, dispatch);
+    let release!: () => void;
+    let started!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const entered = new Promise<void>(resolve => { started = resolve; });
+    const failure = new Error('scenario window unavailable');
+    const window = vi.spyOn(h.repository, 'listScenarioRecords').mockImplementationOnce(async () => {
+      started(); await gate; throw failure;
+    });
+    const queued = vi.spyOn((h.participation as any).scenarioChain, 'set');
+    const pending = ['订单', '支付'].map((name, index) =>
+      h.participation.handle(fromBot(`om_recovery_${index}`, `【P1】${name}服务异常`, 'cli_alarm'), config, { explicit: false, botOpenId: 'ou_bot' }));
+    const settled = Promise.allSettled(pending);
+    try {
+      await entered;
+      await vi.waitFor(() => expect(queued).toHaveBeenCalledTimes(2));
+      expect(window).toHaveBeenCalledOnce();
+      release();
+      expect((await settled).every(result => result.status === 'fulfilled')).toBe(true);
+      expect(log.warn).toHaveBeenCalledWith(expect.objectContaining({ error: failure, messageId: 'om_recovery_0' }), '处理机器人消息的分工失败');
+      expect(dispatch).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ messageId: 'om_recovery_1' }), config);
+      expect(await h.repository.getDecision(scope, directRecordId('alarm', scope, 'om_recovery_0'))).toBeUndefined();
+      expect(await h.repository.getDecision(scope, directRecordId('alarm', scope, 'om_recovery_1'))).toMatchObject({ status: 'sent' });
+      expect((h.participation as any).scenarioChain.size).toBe(0);
+    } finally { release(); await settled; }
+  });
+
   it('真人消息和非订阅来源的机器人消息照旧：不初筛，真人消息照常判定', async () => {
     const h = await harness('selective');
     await subscribe(h);

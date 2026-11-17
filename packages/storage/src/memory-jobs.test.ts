@@ -54,6 +54,25 @@ it('rejects missing guards, foreign config writes and unfrozen consumption', asy
   await expect(repos.memoryJobs.apply({ ...input, consumedTaskIds: ['new'] })).rejects.toMatchObject({ code: 'MEMORY_JOB_CONFLICT' });
   expect(await repos.config.get('lark.memory.other.groups')).toBeUndefined();
 });
+it('persists ordinary updates and rejects stale revisions and changed request identities', async () => {
+  const { repos, job } = await harness();
+  const request: MemoryJob['requests'][number] = { version: 1, namespace: 'runtime', key: `${job.id}:0`, sessionId: job.sessionId,
+    actor: { kind: 'installation_owner', id: 'installation_owner' }, prompt: 'Extract memory', mode: 'queue', skills: [], options: {}, sources: [], sourcePayload: null };
+  const updated = await repos.memoryJobs.update({ ...job, state: 'running', requests: [request] }, job.revision);
+  expect(updated).toEqual({ ...job, state: 'running', requests: [request], revision: 1 });
+  expect(await repos.memoryJobs.get(scope, job.id)).toEqual(updated);
+  await expect(repos.memoryJobs.update({ ...updated, state: 'failed' }, job.revision)).rejects.toMatchObject({ code: 'MEMORY_JOB_CONFLICT', message: 'Memory job version changed' });
+  for (const requests of [
+    [{ ...request, prompt: 'Changed frozen request' }],
+    [],
+    [request, { ...request, key: 'wrong-key' }],
+    [request, { ...request, key: `${job.id}:1`, sessionId: 'another-session' }],
+    [request, { ...request, key: `${job.id}:1` }, { ...request, key: `${job.id}:2` }]
+  ]) {
+    await expect(repos.memoryJobs.update({ ...updated, requests }, updated.revision)).rejects.toMatchObject({ code: 'MEMORY_JOB_CONFLICT', message: 'Memory request identity changed' });
+    expect(await repos.memoryJobs.get(scope, job.id)).toEqual(updated);
+  }
+});
 it('enforces immutable inputs and process bot boundaries', async () => {
   const { repos, job } = await harness();
   await expect(repos.memoryJobs.update({ ...job, input: {} }, 0)).rejects.toMatchObject({ code: 'MEMORY_JOB_CONFLICT' });
