@@ -91,6 +91,30 @@ function discardInjectedTrees(adapter: AcpxAdapter) {
   (adapter as any).unconfirmedTrees.clear();
 }
 
+async function stubCleanupProbe(cwd: string) {
+  const probe = join(cwd, 'group-probe.mjs');
+  await writeFile(probe, `
+    import { existsSync, writeFileSync } from 'node:fs';
+    import { join } from 'node:path';
+    if (process.argv[1]?.endsWith('/env-launcher.mjs')) {
+      const original = process.kill.bind(process);
+      process.kill = (pid, signal) => {
+        if (pid < 0 && (signal === 0 || signal === 'SIGKILL')) throw Object.assign(new Error('synthetic group proof failure'), { code: 'EPERM' });
+        return original(pid, signal);
+      };
+    }
+    if (process.argv[1]?.endsWith('/acp-launcher-contract-agent.mjs') && process.env.fixture_exit_gate === '1') {
+      const originalExit = process.exit.bind(process);
+      process.exit = code => {
+        writeFileSync(join(${JSON.stringify(cwd)}, 'agent-exit-ready'), '1');
+        while (!existsSync(join(${JSON.stringify(cwd)}, 'release-agent-exit'))) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+        originalExit(code);
+      };
+    }
+  `);
+  vi.stubEnv('NODE_OPTIONS', `${process.env.NODE_OPTIONS ?? ''} --import=${pathToFileURL(probe).href}`);
+}
+
 it.skipIf(process.platform !== 'linux')('delivers the complete ACP tail after a 6.5 second destination pause and preserves exit 7', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'dd-acpx-slow-reader-'));
   const sessionKey = 'launcher-slow-reader-persistent';
@@ -127,20 +151,11 @@ it.skipIf(process.platform !== 'linux')('delivers the complete ACP tail after a 
 
 it.skipIf(process.platform !== 'linux')('retains cleanup-unknown reports for real adapter adoption and later process-tree termination', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'dd-acpx-cleanup-unknown-'));
-  const probe = join(cwd, 'group-probe.mjs');
-  await writeFile(probe, `
-    if (process.argv[1]?.endsWith('/env-launcher.mjs')) {
-      const original = process.kill.bind(process);
-      process.kill = (pid, signal) => {
-        if (pid < 0 && (signal === 0 || signal === 'SIGKILL')) throw Object.assign(new Error('synthetic group proof failure'), { code: 'EPERM' });
-        return original(pid, signal);
-      };
-    }
-  `);
-  vi.stubEnv('NODE_OPTIONS', `${process.env.NODE_OPTIONS ?? ''} --import=${pathToFileURL(probe).href}`);
+  await stubCleanupProbe(cwd);
   const sessionKey = 'launcher-cleanup-unknown-persistent';
   const events: any[] = [];
-  const adapter = new AcpxAdapter(agentConfig(cwd, 'cleanup-unknown'), { sessionKey, onEvent: event => events.push(event) });
+  const config = agentConfig(cwd, 'cleanup-unknown');
+  const adapter = new AcpxAdapter({ ...config, env: { ...config.env, fixture_exit_gate: '1' } }, { sessionKey, onEvent: event => events.push(event) });
   let survivor: ProcessIdentity | undefined;
   try {
     await adapter.start();
@@ -149,9 +164,16 @@ it.skipIf(process.platform !== 'linux')('retains cleanup-unknown reports for rea
     void sending.catch(() => {});
     await expect.poll(async () => (await calls(cwd)).some(call => call.method === 'cleanup-ready')).toBe(true);
     await writeFile(join(cwd, 'start-cleanup'), '1');
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 6_500);
+    await expect.poll(() => existsSync(join(cwd, 'agent-exit-ready'))).toBe(true);
     survivor = (await calls(cwd)).find(call => call.method === 'survivor');
     expect(identityAlive(survivor!)).toBe(true);
+    // Keep the original leader alive while the real tree records this survivor.
+    // That PID/start/PGID observation, not the numeric group alone, proves
+    // continuity after the leader exits and the launcher report arrives late.
+    const sampledTree = [...(adapter as any).agentChildren.values()][0];
+    expect(sampledTree.refresh(scanProcesses())).toBe(true);
+    await writeFile(join(cwd, 'release-agent-exit'), '1');
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 6_500);
     await expect(sending).rejects.toMatchObject({ code: ACP_LAUNCHER_CLEANUP_UNKNOWN });
     expect(launcherExit).toMatchObject({ code: 120, signal: null });
     expect(events).toContainEqual(expect.objectContaining({ type: 'error', data: expect.objectContaining({ code: ACP_LAUNCHER_CLEANUP_UNKNOWN }) }));
@@ -160,6 +182,7 @@ it.skipIf(process.platform !== 'linux')('retains cleanup-unknown reports for rea
     expect(reports).toHaveLength(1);
     expect(readFileSync(join(cwd, '.dutydeck', 'launchers', reports[0]!), 'utf8')).toContain('dutydeck_cleanup_unknown');
     const tree = [...(adapter as any).unconfirmedTrees][0];
+    expect(tree).toBe(sampledTree);
     expect(tree.exited(scanProcesses())).toBe(false);
     const record = await createRuntimeStore({ stateDir: join(cwd, '.dutydeck', 'acpx') }).load(sessionKey);
     expect(record?.name).toBe(sessionKey);
@@ -167,6 +190,49 @@ it.skipIf(process.platform !== 'linux')('retains cleanup-unknown reports for rea
     // This is the same adapter path used by bounded stop and stuck-turn cleanup.
     (adapter as any).endAgentProcesses();
     await expect.poll(() => identityAlive(survivor!)).toBe(false);
+    await adapter.stop();
+    await expect.poll(() => adapter.isStopped()).toBe(true);
+    expect(readdirSync(join(cwd, '.dutydeck', 'launchers'))).toEqual([]);
+    await rm(cwd, { recursive: true, force: true });
+  } catch (error) {
+    await writeFile(join(cwd, 'release-agent-exit'), '1').catch(() => {});
+    await stopAndRemove(adapter, cwd, survivor ? [survivor] : []);
+    throw error;
+  }
+}, 30_000);
+
+it.skipIf(process.platform !== 'linux')('keeps an unsampled cleanup-unknown survivor unconfirmed instead of signalling its numeric group', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'dd-acpx-cleanup-unsampled-'));
+  await stubCleanupProbe(cwd);
+  const adapter = new AcpxAdapter(agentConfig(cwd, 'cleanup-unknown'), { sessionKey: 'launcher-cleanup-unsampled', onEvent() {} });
+  let survivor: ProcessIdentity | undefined;
+  try {
+    await adapter.start();
+    const sending = adapter.send('make group cleanup unprovable');
+    void sending.catch(() => {});
+    await expect.poll(async () => (await calls(cwd)).some(call => call.method === 'cleanup-ready')).toBe(true);
+    await writeFile(join(cwd, 'start-cleanup'), '1');
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 6_500);
+    survivor = (await calls(cwd)).find(call => call.method === 'survivor');
+    expect(identityAlive(survivor!)).toBe(true);
+    await expect(sending).rejects.toMatchObject({ code: ACP_LAUNCHER_CLEANUP_UNKNOWN });
+    await expect.poll(() => (adapter as any).unconfirmedTrees.size).toBe(1);
+    const tree = [...(adapter as any).unconfirmedTrees][0];
+    expect(tree.exited(scanProcesses())).toBeUndefined();
+    expect(adapter.stopUnverifiable()).toBe(true);
+
+    // Cover both the immediate SIGTERM and the delayed SIGKILL pass. With no
+    // recorded original member, neither may target the surviving numeric PGID.
+    (adapter as any).endAgentProcesses();
+    await new Promise(resolve => setTimeout(resolve, 3_100));
+    expect(identityAlive(survivor!)).toBe(true);
+    expect(tree.exited(scanProcesses())).toBeUndefined();
+
+    // The fixture owns this exact PID/start. Clean it directly, then the same
+    // tree can prove the original group empty and release its launcher report.
+    killOwnedGroup(survivor!);
+    await expect.poll(() => identityAlive(survivor!)).toBe(false);
+    await expect.poll(() => tree.exited(scanProcesses())).toBe(true);
     await adapter.stop();
     await expect.poll(() => adapter.isStopped()).toBe(true);
     expect(readdirSync(join(cwd, '.dutydeck', 'launchers'))).toEqual([]);

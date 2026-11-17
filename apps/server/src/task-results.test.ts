@@ -311,6 +311,41 @@ describe('readAttemptResult against the real execution ledger', () => {
     } finally { db4.close(); }
     expect(thrown(() => readAttemptResult({ execution: repos.execution }, fence.sessionId, settled.taskId, settled.attemptId))).toMatchObject({ code: 'TASK_RESULT_EVENT_ORDER' });
   });
+  it('follows an automatic capacity retry after an audited manual retry without counting the manual attempt as an ordinal', () => {
+    const { repos, x, path } = open();
+    const first = claimed(repos, x);
+    x.settleAttempt(af(first), 'unknown-initial', { kind: 'manual', outcome: 'unknown', decision: { decisionId: 'unknown-initial', actor: ownerActor, action: 'confirm_result', evidenceRefs: ['operator'], resourceChecks: [] } });
+    x.retryAttempt(af(current(repos, first.taskId)), { decisionId: 'manual-before-capacity', actor: ownerActor, action: 'retry', allowDuplicateEffects: true, resourceChecks: [], evidenceRefs: ['operator'] }, []);
+    const second = x.claimNext(fence)!.attempt!;
+    const reserved = capacityRetry(repos, x, path, second);
+    expect(reserved).toMatchObject({ number: 3, automaticRetry: { ordinal: 1 } });
+    const third = x.claimNext(fence)!.attempt!;
+    textEvents(x, third, ['manual then automatic output']);
+    settleDriver(repos, x, third.taskId, utf8Digest('manual then automatic output'));
+    expect(readTaskAttemptResult({ execution: repos.execution }, 'session', first.taskId, first.attemptId))
+      .toMatchObject({ status: 'settled', result: { attemptId: third.attemptId, output: { text: 'manual then automatic output' } } });
+  });
+
+  it('counts only verified automatic edges in an automatic → manual → automatic chain and still rejects a changed ordinal', () => {
+    const { repos, x, path } = open();
+    const first = claimed(repos, x);
+    capacityRetry(repos, x, path, first);
+    const second = x.claimNext(fence)!.attempt!;
+    x.settleAttempt(af(second), 'unknown-automatic', { kind: 'manual', outcome: 'unknown', decision: { decisionId: 'unknown-automatic', actor: ownerActor, action: 'confirm_result', evidenceRefs: ['operator'], resourceChecks: [] } });
+    x.retryAttempt(af(current(repos, first.taskId)), { decisionId: 'manual-between-automatic', actor: ownerActor, action: 'retry', allowDuplicateEffects: true, resourceChecks: [], evidenceRefs: ['operator'] }, []);
+    const third = x.claimNext(fence)!.attempt!;
+    const reserved = capacityRetry(repos, x, path, third);
+    expect(reserved).toMatchObject({ number: 4, automaticRetry: { ordinal: 2 } });
+    const fourth = x.claimNext(fence)!.attempt!;
+    textEvents(x, fourth, ['mixed chain output']);
+    settleDriver(repos, x, fourth.taskId, utf8Digest('mixed chain output'));
+    const read = () => readTaskAttemptResult({ execution: repos.execution }, 'session', first.taskId, first.attemptId);
+    expect(read()).toMatchObject({ status: 'settled', result: { attemptId: fourth.attemptId, output: { text: 'mixed chain output' } } });
+    const sql = new Database(path);
+    try { sql.prepare("UPDATE task_attempts SET json=json_set(json, '$.automaticRetry.ordinal', 3) WHERE id=?").run(fourth.attemptId); }
+    finally { sql.close(); }
+    expect(thrown(read)).toMatchObject({ code: 'TASK_RESULT_RETRY_CONFLICT' });
+  });
 });
 
 it.each(['decision', 'input', 'permission', 'attempt', 'run', 'actor'] as const)('rejects corrupted manual successor %s without using currentAttempt', field => {

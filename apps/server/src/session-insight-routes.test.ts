@@ -19,6 +19,7 @@ import {
   type SessionInsightRouteOptions
 } from './session-insight-routes.js';
 import { isSharedInstanceRead } from './instance-proxy.js';
+import { buildSessionInsightSummaryResponse } from './session-insight-summary.js';
 
 // ----------------------------------------------------------------------------
 // 最小合法冻结契约 fixture（仅用于通过输出 schema 校验，非真实引擎结果）
@@ -333,6 +334,39 @@ describe('session insight strict input schemas', () => {
       url: `/api/insights/summary?workspace=${encodeURIComponent('/data00/a\r\nb')}`
     });
     expect(crlf.statusCode).toBe(400);
+  });
+
+  it('paginates maximum-length workspace and agent filters with bounded cursors', async () => {
+    const workspace = `/workspace/项目"component/${'x'.repeat(4096)}`.slice(0, 4096);
+    const agentId = `agent-"-🚀-${'x'.repeat(256)}`.slice(0, 256);
+    for (const [key, value] of [['workspace', workspace], ['agentId', agentId]] as const) {
+      const candidates = ['one', 'two'].map((sessionId, index) => ({
+        sessionId, agentId, cwd: workspace,
+        createdAt: new Date(Date.parse(DATE) + index * 1000).toISOString(), refreshState: 'idle' as const
+      }));
+      const service = makeService({
+        summary: async (query: Parameters<SessionInsightApi['summary']>[0]) => {
+          const { limit, cursor, groupBy, ...filter } = query;
+          return buildSessionInsightSummaryResponse({ candidates, filter, groupBy, limit, cursor });
+        }
+      });
+      const fastify = await allowedApp(service);
+      const query = new URLSearchParams({ limit: '1', [key]: value });
+      const first = await fastify.inject(`/api/insights/summary?${query}`);
+      expect(first.statusCode).toBe(200);
+      const cursor = first.json().nextCursor as string;
+      expect(cursor.length).toBeLessThanOrEqual(512);
+      const second = await fastify.inject(`/api/insights/summary?${query}&cursor=${encodeURIComponent(cursor)}`);
+      expect(second.statusCode).toBe(200);
+      expect(second.json().sessions.map((row: { sessionId: string }) => row.sessionId)).toEqual(['two']);
+      expect(second.json().nextCursor).toBeNull();
+      const changed = new URLSearchParams(query);
+      changed.set('groupBy', 'agent');
+      const rejected = await fastify.inject(`/api/insights/summary?${changed}&cursor=${encodeURIComponent(cursor)}`);
+      expect(rejected.statusCode).toBe(400);
+      await fastify.close();
+      app = undefined;
+    }
   });
 
   it('refresh requires an empty strict object and a uuid requestId; compare/export reject unknown fields', async () => {

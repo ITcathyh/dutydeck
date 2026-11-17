@@ -88,7 +88,7 @@ export async function pluginActivationBlockers(pluginsDir: string, plugin: strin
 }
 
 // This worker uses the actual Host registries; the packaged entry is bundled with the CLI.
-export function validateProviderRegistration(input: { root: string; dataDir: string; entry: PluginLockEntry; config: Record<string, string> }, timeout = 15_000, worker?: string): Promise<void> {
+export function validateProviderRegistration(input: { root: string; dataDir: string; entry: PluginLockEntry; config: Record<string, string>; dependencies?: Array<Pick<PluginLockEntry, 'name' | 'version'>> }, timeout = 15_000, worker?: string): Promise<void> {
   const directory = dirname(fileURLToPath(import.meta.url));
   const source = join(directory, 'activation-worker.ts');
   const args = worker ? [worker] : existsSync(source)

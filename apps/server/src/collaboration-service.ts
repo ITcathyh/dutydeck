@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { digest as executionJsonDigest } from '@dutydeck/runtime/digest';
 import { z } from 'zod';
-import { RuntimeError, countDecisionUsage, isBotTurnRecord, previewNextSchedule, scheduleDeliverySchema, scheduleTriggerSchema, serialByKey, DECISION_WINDOW_LIMIT, listWindowIncomplete, type CollaborationMandate, type CollaborationRepository, type CollaborationScope, type CollaborationSnapshot, type CreateScheduleDefinitionInput, type RepositoryBundle, type ScheduleDefinition } from '@dutydeck/shared';
+import { RuntimeError, canonicalExecutionJson, countDecisionUsage, isBotTurnRecord, previewNextSchedule, scheduleDeliverySchema, scheduleTriggerSchema, serialByKey, DECISION_WINDOW_LIMIT, listWindowIncomplete, type CollaborationMandate, type CollaborationRepository, type CollaborationScope, type CollaborationSnapshot, type CreateScheduleDefinitionInput, type RepositoryBundle, type ScheduleDefinition } from '@dutydeck/shared';
 
 export type CollaborationRepositories = Pick<RepositoryBundle, 'scheduleDefinitions' | 'scheduleGenerations' | 'scheduleOccurrences' | 'scheduleWatermarks' | 'scheduleLeases'> & { collaboration: CollaborationRepository };
 export type CollaborationAuthorization = (scope: CollaborationScope, actorId: string, action: 'read' | 'write' | 'manage' | 'execute' | 'deliver') => Promise<boolean>;
@@ -23,6 +23,7 @@ const updateMandateSchema = z.object({
   prompt: text.max(8000).optional(), deliveryPaused: z.boolean().optional(), trigger: scheduleTriggerSchema.optional(), timezone: text.optional(),
   condition: z.enum(['always','followup_open','no_progress']).optional(), catchupPolicy: z.enum(['skip','coalesce']).optional()
 }).strict().refine(value => Object.keys(value).length > 1, 'A change is required');
+type PreparedCreateMandate = z.infer<typeof createMandateSchema> & { requesterId: string; delivery: CreateScheduleDefinitionInput['delivery'] };
 const bindingSchema = z.object({ kind: z.literal('collaboration'), mandateId: text, mandateRevision: z.number().int().positive(), executionDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(), scope: z.object({ appId: text, chatId: text }).strict() }).strict();
 export function scheduleMandateBinding(schedule: ScheduleDefinition) {
   if (schedule.sourceNamespace !== 'collaboration') return undefined;
@@ -46,6 +47,8 @@ export function collaborationContextSignature(snapshot: CollaborationSnapshot): 
   return executionJsonDigest(JSON.parse(JSON.stringify({ ...context, settings: semanticSettings, mandates: semanticMandates, ...(bootstrap ? { bootstrap: semanticBootstrap } : {}) })));
 }
 const binding = (mandate: Pick<CollaborationMandate, 'id' | 'scope' | 'revision'>, digest?: string) => JSON.stringify({ kind: 'collaboration', mandateId: mandate.id, mandateRevision: mandate.revision, scope: mandate.scope, ...(digest ? { executionDigest: digest } : {}) });
+// 仓储读取会保留显式 undefined 的可选字段；它们与持久化 JSON 中省略的字段语义相同。
+const storedJson = (value: unknown) => canonicalExecutionJson(JSON.parse(JSON.stringify(value)));
 const idFor = (scope: CollaborationScope, id: string) => 'collaboration_schedule_' + createHash('sha256').update(JSON.stringify([scope, id])).digest('hex');
 const missing = () => new RuntimeError('COLLABORATION_NOT_FOUND', 'Collaboration record not found', 404);
 const conflict = () => new RuntimeError('COLLABORATION_REVISION_CONFLICT', 'The record changed; reload before updating', 409);
@@ -133,15 +136,29 @@ export class CollaborationService {
     this.nextOneOff({ id: idFor(scope, input.id), ...refs, name: input.goal.slice(0, 200), trigger: input.trigger, timezone: input.timezone, dstPolicy: { gap: 'skip', overlap: 'first' }, delivery, payloadRef: binding({ id: input.id, scope, revision: 1 }), sourceOwnership: 'dutydeck', sourceNamespace: 'collaboration', sourceScheduleRef: idFor(scope, input.id), sourceEnabled: false }, '创建');
     return { ...input, delivery };
   }
+  private async createdMandateMatches(input: PreparedCreateMandate, mandate: CollaborationMandate) {
+    if (mandate.revision !== 1 || mandate.status !== 'active' || mandate.requesterId !== input.requesterId) return undefined;
+    // requesterId is supplied separately by the service; all user-controlled fields must still match the frozen input.
+    if (mandate.goal !== input.goal || mandate.prompt !== input.prompt || mandate.mode !== input.mode || mandate.condition !== input.condition
+      || mandate.followupId !== input.followupId || mandate.deliveryPaused || mandate.catchupPolicy !== input.catchupPolicy
+      || storedJson(mandate.sourceRefs) !== storedJson(input.sourceRefs)) return undefined;
+    const schedule = await this.repositories.scheduleDefinitions.get(mandate.scheduleDefinitionId);
+    if (!schedule || !scheduleMatchesMandate(schedule, mandate) || schedule.timezone !== input.timezone
+      || storedJson(schedule.trigger) !== storedJson(input.trigger)
+      || storedJson(schedule.delivery) !== storedJson(input.delivery)) return undefined;
+    return { mandate, schedule };
+  }
   async createMandate(scope: CollaborationScope, actorId: string, body: unknown) {
     await this.require(scope, actorId, 'write');
     const input = createMandateSchema.parse(body), id = input.id;
+    const requested = { ...input, requesterId: actorId, delivery: input.delivery ?? { mode: 'chat' as const, chatRef: scope.chatId, continuation: 'chat_root' as const } };
     return serialByKey(this.locks, idFor(scope, id), async () => {
       const previous = await this.repositories.collaboration.getMandate(scope, id);
       if (previous) {
         await this.command(scope, actorId, id, 'create_mandate', input);
-        if (previous.requesterId !== actorId || previous.goal !== input.goal || previous.prompt !== input.prompt || previous.mode !== input.mode) throw conflict();
-        return { mandate: previous, schedule: await this.reconcileMandate(previous) };
+        const matched = await this.createdMandateMatches(requested, previous);
+        if (!matched) throw conflict();
+        return { mandate: previous, schedule: await this.reconcileMandate(previous, matched.schedule) };
       }
       const followup = await this.followup(scope, input.followupId);
       if (input.condition !== 'always' && !followup) throw new RuntimeError('COLLABORATION_CONDITION_INVALID', 'This condition requires a follow-up', 400);
@@ -181,10 +198,27 @@ export class CollaborationService {
     }
     return { mandate, schedule: rescheduled, input };
   }
+  private async updatedMandateMatches(input: z.infer<typeof updateMandateSchema>, mandate: CollaborationMandate) {
+    if (mandate.revision !== input.expectedRevision + 1) return undefined;
+    for (const key of ['goal', 'status', 'prompt', 'deliveryPaused', 'condition', 'catchupPolicy'] as const) {
+      if (input[key] !== undefined && mandate[key] !== input[key]) return undefined;
+    }
+    const schedule = await this.repositories.scheduleDefinitions.get(mandate.scheduleDefinitionId);
+    if (!schedule || !scheduleMatchesMandate(schedule, mandate)
+      || input.trigger !== undefined && storedJson(schedule.trigger) !== storedJson(input.trigger)
+      || input.timezone !== undefined && schedule.timezone !== input.timezone) return undefined;
+    return { mandate, schedule };
+  }
   async updateMandate(scope: CollaborationScope, actorId: string, id: string, body: unknown) {
     await this.require(scope, actorId, 'write');
     const input = updateMandateSchema.parse(body);
     return serialByKey(this.locks, idFor(scope, id), async () => {
+      const current = await this.repositories.collaboration.getMandate(scope, id);
+      if (current?.revision === input.expectedRevision + 1) {
+        if (current.requesterId !== actorId) await this.require(scope, actorId, 'manage');
+        const matched = await this.updatedMandateMatches(input, current);
+        if (matched) return { mandate: current, schedule: await this.reconcileMandate(current, matched.schedule) };
+      }
       const mandate = await this.updatable(scope, actorId, id, input);
       if (Object.keys(input).every(key => key === 'expectedRevision' || key === 'deliveryPaused')) {
         const schedule = await this.repositories.scheduleDefinitions.get(mandate.scheduleDefinitionId); if (!schedule) throw missing();

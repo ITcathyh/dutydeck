@@ -297,9 +297,12 @@ describe('registerAuthMiddleware', () => {
     return app;
   }
 
-  it('localOnly=true 无需 token，但只接受 loopback Host', async () => {
+  it('localOnly=true 无需 token，但只接受真实回环 peer 与 loopback Host/Origin', async () => {
     const app = buildApp({ getToken: async () => null, localOnly: true });
-    const response = await app.inject({ method: 'GET', url: '/api/protected', remoteAddress: '8.8.8.8' });
+    const remote = await app.inject({ method: 'GET', url: '/api/protected', remoteAddress: '8.8.8.8', headers: { host: '127.0.0.1:4310' } });
+    expect(remote.statusCode).toBe(403);
+    expect(remote.json().error.code).toBe('REMOTE_NOT_ALLOWED');
+    const response = await app.inject({ method: 'GET', url: '/api/protected', remoteAddress: '::ffff:127.0.0.1' });
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({ ok: true });
     const rebound = await app.inject({ method: 'GET', url: '/api/protected', headers: { host: 'attacker.example:4310' } });

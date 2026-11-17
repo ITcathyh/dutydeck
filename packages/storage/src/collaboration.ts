@@ -50,6 +50,7 @@ import {
   type ListedItems,
   type ListObservationsOptions,
   type ObserveCollaborationInput,
+  type ResponderAnnouncement,
   type UpdateActionInput,
   type UpdateCollaborationDutyInput,
   type UpdateCollaborationSettingsInput,
@@ -223,6 +224,7 @@ interface DutyRow {
   chat_id: string;
   revision: number;
   responder_json: string | null;
+  responder_watermark_json: string | null;
   scenarios_json: string | null;
   updated_at: string;
 }
@@ -237,9 +239,41 @@ function rowToDuty(row: DutyRow): CollaborationDuty {
     scope: { appId: row.app_id, chatId: row.chat_id },
     revision: row.revision,
     ...(row.responder_json ? { responder: JSON.parse(row.responder_json) } : {}),
+    ...(row.responder_watermark_json ? { responderWatermark: JSON.parse(row.responder_watermark_json) } : {}),
     ...(scenarios ? { scenarios } : {}),
     updatedAt: row.updated_at
   });
+}
+
+function applyResponderAnnouncement(current: CollaborationDuty | undefined, event: ResponderAnnouncement): {
+  responder: CollaborationDuty['responder'];
+  responderWatermark: ResponderAnnouncement | undefined;
+  changed: boolean;
+} {
+  const responder = current?.responder;
+  const previous = current?.responderWatermark;
+  const unchanged = { responder, responderWatermark: previous, changed: false };
+  // 没有当前接话人时，卸任没有改变用户可见状态，也不应制造水位挡住之后的正常接话。
+  if (event.kind === 'release' && !responder) return unchanged;
+  const eventAt = Date.parse(event.at);
+  const responderSince = responder ? Date.parse(responder.since) : Number.NaN;
+  // 同一 Bot 对当前接话的正常卸任可以与接话声明同毫秒；只认与当前接话记录对应的这次 claim。
+  // 反过来，release 已生效后，同时间的迟到 claim 仍会被水位挡住。
+  const currentReleaseAtSameTime = event.kind === 'release' && responder?.appId === event.appId && eventAt === responderSince
+    && (!previous || previous.kind === 'claim' && previous.appId === event.appId && Date.parse(previous.at) === responderSince);
+  if (previous?.messageId === event.messageId) return unchanged;
+  if (previous && (eventAt < Date.parse(previous.at) || eventAt === Date.parse(previous.at) && !currentReleaseAtSameTime)) return unchanged;
+  if (responder) {
+    const order = eventAt - responderSince;
+    if (order < 0 || order === 0 && !currentReleaseAtSameTime && (previous || event.kind === 'release' || responder.appId !== event.appId)) return unchanged;
+  }
+  // 别的 Bot 的卸任与当前接话人无关，也不能抬高水位、挡住当前接话人的后续声明。
+  if (event.kind === 'release' && responder && responder.appId !== event.appId) return unchanged;
+  return {
+    responder: event.kind === 'claim' ? { appId: event.appId, ...(event.name ? { name: event.name } : {}), since: event.at } : undefined,
+    responderWatermark: event,
+    changed: true
+  };
 }
 
 /** 按包合并：值为 null 删掉那个包的绑定，没传的包保持原样。 */
@@ -682,14 +716,23 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
         if (validated.expectedRevision !== revision) {
           throw new RuntimeError('COLLABORATION_REVISION_CONFLICT', `Duty revision conflict: expected ${validated.expectedRevision}, current ${revision}`, 409);
         }
-        const responder = validated.responder === undefined ? current?.responder : validated.responder ?? undefined;
+        let responder = validated.responder === undefined ? current?.responder : validated.responder ?? undefined;
+        let responderWatermark = current?.responderWatermark;
+        if (validated.responderEvent) {
+          const applied = applyResponderAnnouncement(current, validated.responderEvent);
+          if (!applied.changed && validated.scenarios === undefined) return current ?? collaborationDutySchema.parse({ scope, revision: 0, updatedAt: DEFAULT_SETTINGS_UPDATED_AT });
+          responder = applied.responder;
+          responderWatermark = applied.responderWatermark;
+        }
         const scenarios = mergeScenarios(current?.scenarios, validated.scenarios);
-        const duty = collaborationDutySchema.parse({ scope, revision: revision + 1, ...(responder ? { responder } : {}), ...(scenarios ? { scenarios } : {}), updatedAt: now() });
+        const duty = collaborationDutySchema.parse({ scope, revision: revision + 1, ...(responder ? { responder } : {}),
+          ...(responderWatermark ? { responderWatermark } : {}), ...(scenarios ? { scenarios } : {}), updatedAt: now() });
         cachedStatement(sqlite, `
-          INSERT INTO collaboration_duties (app_id, chat_id, revision, responder_json, scenarios_json, updated_by, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+          INSERT INTO collaboration_duties (app_id, chat_id, revision, responder_json, responder_watermark_json, scenarios_json, updated_by, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(app_id, chat_id) DO UPDATE SET revision = excluded.revision, responder_json = excluded.responder_json,
-            scenarios_json = excluded.scenarios_json, updated_by = excluded.updated_by, updated_at = excluded.updated_at
-        `).run(scope.appId, scope.chatId, duty.revision, responder ? JSON.stringify(responder) : null, scenarios ? JSON.stringify(scenarios) : null, actorId.slice(0, 128), duty.updatedAt);
+            responder_watermark_json = excluded.responder_watermark_json, scenarios_json = excluded.scenarios_json, updated_by = excluded.updated_by, updated_at = excluded.updated_at
+        `).run(scope.appId, scope.chatId, duty.revision, responder ? JSON.stringify(responder) : null, responderWatermark ? JSON.stringify(responderWatermark) : null,
+          scenarios ? JSON.stringify(scenarios) : null, actorId.slice(0, 128), duty.updatedAt);
         retireLegacyDutyColumns(sqlite, scope, [...Object.keys(scenarios ?? {}), ...Object.keys(validated.scenarios ?? {})]);
         recordActivity(sqlite, { id: makeId('act'), scope, entityKind: 'settings', entityId: `${scope.appId}:${scope.chatId}:duty`.slice(0, 128), revision: duty.revision,
           actorId, sourceRefs: [], provenance: 'confirmed', summary: 'Updated group duty', createdAt: duty.updatedAt });

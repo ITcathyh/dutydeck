@@ -1262,6 +1262,13 @@ describe('多机器人群的接话人', () => {
     h.participation.setDispatcher(scope.appId, (event, current) => { dispatched.push(event); return h.coordinator.adopt(event, current); });
     return dispatched;
   };
+  const restart = async (h: Awaited<ReturnType<typeof harness>>) => {
+    const participation = new LarkGroupParticipation(h.options);
+    const coordinator = new LarkMessageCoordinator(h.runtime as any, h.service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot', undefined, undefined, async () => 'group', undefined, undefined, { participation });
+    cleanups.push(async () => { coordinator.stop(); await participation.close(); });
+    await participation.recover(scope.appId);
+    return { participation, coordinator };
+  };
 
   it('多机器人群没指定接话人：没 @ 的消息不接也不调模型，@ 它照常接，/status 和「为什么没回」说明怎么指定', async () => {
     const h = await harness('eager', { canOperate: async () => true });
@@ -1299,8 +1306,38 @@ describe('多机器人群的接话人', () => {
 
     await h.coordinator.handle(atBot('om_at', '帮我看下发布单'), config);
     await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
-    await h.coordinator.handle(fromBot('om_release', responderReleaseText('bdev-flash'), 'ou_flash'), config); await h.participation.flush(scope);
+    await h.coordinator.handle(fromBot('om_release', responderReleaseText('bdev-flash'), 'ou_flash', { createTime: '1789707601000' }), config); await h.participation.flush(scope);
     expect((await h.repository.getDuty(scope)).responder).toBeUndefined();
+  });
+
+  it('同一机器人重新接话会推进水位，迟到的旧卸任和重复声明不会回退状态', async () => {
+    const h = await harness('eager');
+    Object.assign(h.service, { listChatMembers: members(3, bots), getMessage: details({ om_claim_1: 'cli_flash', om_claim_3: 'cli_flash', om_release_2: 'cli_flash' }) });
+    await h.coordinator.handle(fromBot('om_claim_1', responderClaimText('bdev-flash'), 'ou_flash', { createTime: '1789707600000' }), config); await h.participation.flush(scope);
+    await h.coordinator.handle(fromBot('om_claim_3', responderClaimText('bdev-flash'), 'ou_flash', { createTime: '1789707602000' }), config); await h.participation.flush(scope);
+    const reclaimed = await h.repository.getDuty(scope);
+    expect(reclaimed).toMatchObject({ revision: 2, responder: { appId: 'cli_flash', since: new Date(1789707602000).toISOString() }, responderWatermark: { kind: 'claim', messageId: 'om_claim_3' } });
+
+    await h.coordinator.handle(fromBot('om_release_2', responderReleaseText('bdev-flash'), 'ou_flash', { createTime: '1789707601000' }), config); await h.participation.flush(scope);
+    expect(await h.repository.getDuty(scope)).toEqual(reclaimed);
+    await h.coordinator.handle(fromBot('om_claim_3', responderClaimText('bdev-flash'), 'ou_flash', { createTime: '1789707602000' }), config); await h.participation.flush(scope);
+    expect(await h.repository.getDuty(scope)).toEqual(reclaimed);
+  });
+
+  it('卸任水位跨管理器重建保留，旧接话重放不会恢复旧接话人', async () => {
+    const h = await harness('eager');
+    Object.assign(h.service, { listChatMembers: members(3, bots), getMessage: details({ om_claim_1: 'cli_flash', om_release_2: 'cli_flash' }) });
+    await h.coordinator.handle(fromBot('om_claim_1', responderClaimText('bdev-flash'), 'ou_flash', { createTime: '1789707600000' }), config); await h.participation.flush(scope);
+    await h.coordinator.handle(fromBot('om_release_2', responderReleaseText('bdev-flash'), 'ou_flash', { createTime: '1789707601000' }), config); await h.participation.flush(scope);
+    const released = await h.repository.getDuty(scope);
+    expect(released).toMatchObject({ revision: 2, responderWatermark: { kind: 'release', messageId: 'om_release_2' } });
+    expect(released.responder).toBeUndefined();
+
+    const recovered = await restart(h);
+    await recovered.coordinator.handle(fromBot('om_claim_1', responderClaimText('bdev-flash'), 'ou_flash', { createTime: '1789707600000' }), config); await recovered.participation.flush(scope);
+    expect(await h.repository.getDuty(scope)).toEqual(released);
+    await recovered.coordinator.handle(fromBot('om_release_2', responderReleaseText('bdev-flash'), 'ou_flash', { createTime: '1789707601000' }), config); await recovered.participation.flush(scope);
+    expect(await h.repository.getDuty(scope)).toEqual(released);
   });
 
   it('@ 它说「你来接话」：确认卡确认后记成接话人并在群里声明；点名别的机器人时不发卡', async () => {

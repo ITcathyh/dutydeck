@@ -89,11 +89,13 @@ export function SessionInsightOverview({ onOpenSession, onCompare }: {
     includeArchived
   }), [groupBy, usage, agentId, workspace, from, to, includeArchived]);
 
+  const invalidDateRange = Boolean(from && to && from >= to);
   const summary = useInfiniteQuery({
     queryKey: insightQueryKeys.summary(instance, filters),
     initialPageParam: undefined as string | undefined,
     queryFn: ({ signal, pageParam }) => insightApi.summary({ ...filters, limit: 100, cursor: pageParam }, signal),
-    getNextPageParam: lastPage => lastPage.nextCursor ?? undefined
+    getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
+    enabled: !invalidDateRange
   });
 
   // 覆盖统计与分组覆盖完整候选集合（与行分页无关），取首页；会话行跨页拼接。
@@ -142,14 +144,43 @@ export function SessionInsightOverview({ onOpenSession, onCompare }: {
     onSuccess: () => invalidateSummary()
   });
 
-  if (summary.isError) return <Banner tone="danger" action={{ label: '重试', onClick: () => void summary.refetch() }}>
-    会话分析汇总读取失败：{summary.error.message}
-  </Banner>;
-  if (summary.isPending || !data) return <Spinner label="正在读取会话分析汇总…"/>;
-
-  const denominatorConsistent = data.withSnapshot + data.withoutSnapshot === data.candidateSessions;
+  const denominatorConsistent = data ? data.withSnapshot + data.withoutSnapshot === data.candidateSessions : false;
+  const filterControls = <section aria-label="汇总筛选" className="grid gap-2 sm:grid-cols-3">
+    <label className="flex flex-col gap-0.5 text-meta text-subtle">分组
+      <Select value={groupBy} onChange={event => setGroupBy(event.target.value as GroupBy)}>
+        {groupByOptions.map(option => <option key={option.id} value={option.id}>{option.label}</option>)}
+      </Select>
+    </label>
+    <label className="flex flex-col gap-0.5 text-meta text-subtle">任务用途
+      <Select value={usage} onChange={event => setUsage(event.target.value)}>
+        <option value="">全部用途</option>
+        {usageOptions.map(option => <option key={option.id} value={option.id}>{option.label}</option>)}
+      </Select>
+    </label>
+    <label className="flex flex-col gap-0.5 text-meta text-subtle">Agent ID
+      <input className="rounded-sm border border-default bg-surface px-2 py-1 text-caption" value={agentId} onChange={event => setAgentId(event.target.value)} placeholder="精确匹配"/>
+    </label>
+    <label className="flex flex-col gap-0.5 text-meta text-subtle">工作区
+      <input className="rounded-sm border border-default bg-surface px-2 py-1 text-caption" value={workspace} onChange={event => setWorkspace(event.target.value)} placeholder="workspaceSourceCwd"/>
+    </label>
+    <label className="flex flex-col gap-0.5 text-meta text-subtle">创建时间起（UTC）
+      <input type="date" className="rounded-sm border border-default bg-surface px-2 py-1 text-caption" value={from} onChange={event => setFrom(event.target.value)}/>
+    </label>
+    <label className="flex flex-col gap-0.5 text-meta text-subtle">创建时间止（UTC）
+      <input type="date" className="rounded-sm border border-default bg-surface px-2 py-1 text-caption" value={to} onChange={event => setTo(event.target.value)}/>
+    </label>
+    <label className="flex items-center gap-1.5 text-caption text-secondary">
+      <input type="checkbox" checked={includeArchived} onChange={event => setIncludeArchived(event.target.checked)}/>
+      包含已归档会话
+    </label>
+  </section>;
 
   return <div className="space-y-4">
+    {filterControls}
+    {invalidDateRange ? <Banner tone="warning">创建时间起必须早于创建时间止；相同日期也不构成有效的分析区间。</Banner>
+      : summary.isError ? <Banner tone="danger" action={{ label: '重试', onClick: () => void summary.refetch() }}>会话分析汇总读取失败：{summary.error.message}</Banner>
+        : summary.isPending || !data ? <Spinner label="正在读取会话分析汇总…"/>
+          : <>
     {/* 稳定分母：with + without 必须等于候选总数，其余维度可重叠不可相加。 */}
     <section aria-label="候选会话覆盖" className="rounded-md border border-subtle bg-muted p-3">
       <p className="text-caption font-semibold text-primary">候选会话 {data.candidateSessions.toLocaleString('zh-CN')} 个（分母来自 Dutydeck 会话目录）</p>
@@ -165,37 +196,6 @@ export function SessionInsightOverview({ onOpenSession, onCompare }: {
         已有快照 + 未分析 = {data.withSnapshot + data.withoutSnapshot}，{denominatorConsistent ? '与候选总数一致。' : '与候选总数不一致，请刷新重试。'}
         部分 / 失败 / 过期 / 未知是可重叠维度，不参与相加；未分析会话不按 0 计入指标。
       </p>
-    </section>
-
-    {/* 筛选与分组 */}
-    <section aria-label="汇总筛选" className="grid gap-2 sm:grid-cols-3">
-      <label className="flex flex-col gap-0.5 text-meta text-subtle">分组
-        <Select value={groupBy} onChange={event => setGroupBy(event.target.value as GroupBy)}>
-          {groupByOptions.map(option => <option key={option.id} value={option.id}>{option.label}</option>)}
-        </Select>
-      </label>
-      <label className="flex flex-col gap-0.5 text-meta text-subtle">任务用途
-        <Select value={usage} onChange={event => setUsage(event.target.value)}>
-          <option value="">全部用途</option>
-          {usageOptions.map(option => <option key={option.id} value={option.id}>{option.label}</option>)}
-        </Select>
-      </label>
-      <label className="flex flex-col gap-0.5 text-meta text-subtle">Agent ID
-        <input className="rounded-sm border border-default bg-surface px-2 py-1 text-caption" value={agentId} onChange={event => setAgentId(event.target.value)} placeholder="精确匹配"/>
-      </label>
-      <label className="flex flex-col gap-0.5 text-meta text-subtle">工作区
-        <input className="rounded-sm border border-default bg-surface px-2 py-1 text-caption" value={workspace} onChange={event => setWorkspace(event.target.value)} placeholder="workspaceSourceCwd"/>
-      </label>
-      <label className="flex flex-col gap-0.5 text-meta text-subtle">创建时间起（UTC）
-        <input type="date" className="rounded-sm border border-default bg-surface px-2 py-1 text-caption" value={from} onChange={event => setFrom(event.target.value)}/>
-      </label>
-      <label className="flex flex-col gap-0.5 text-meta text-subtle">创建时间止（UTC）
-        <input type="date" className="rounded-sm border border-default bg-surface px-2 py-1 text-caption" value={to} onChange={event => setTo(event.target.value)}/>
-      </label>
-      <label className="flex items-center gap-1.5 text-caption text-secondary">
-        <input type="checkbox" checked={includeArchived} onChange={event => setIncludeArchived(event.target.checked)}/>
-        包含已归档会话
-      </label>
     </section>
 
     {/* 分组行：指标只在聚合非空时展示；空分母明确为未知而非 0。 */}
@@ -317,6 +317,7 @@ export function SessionInsightOverview({ onOpenSession, onCompare }: {
         ? <p className="text-meta text-warning">已选 {selectedRows.length} 个会话，其中 {comparableSelected.length} 个有固定快照；对比需要恰好两个都有快照的会话。</p>
         : null}
     </section>
+          </>}
   </div>;
 }
 

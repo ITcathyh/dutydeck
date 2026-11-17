@@ -339,6 +339,7 @@ export class PtyCliDriver implements AgentDriver {
   private detachOnStop = false;
   private detachedForShutdown = false;
   private exitReported = false;
+  private exitDrain?: Promise<void>;
   /** 一轮任务进行中：send() 置 true，completed 发出后置 false。 */
   private turnActive = false;
   private interruptPending = false;
@@ -1775,6 +1776,9 @@ export class PtyCliDriver implements AgentDriver {
     return found && this.adapter.buildResumeCommand(found) !== null ? found : undefined;
   }
 
+  /** The current backend's complete exit tail, retained after settlement so Runtime can flush its event queue before revocation. */
+  drainExitedOutput(): Promise<void> | undefined { return this.exitDrain; }
+
   stop(options: { discardSession?: boolean } = {}): Promise<void> {
     if (this.stopping) return this.stopping;
     if (this.idleCpuFence && !this.stopped) {
@@ -2353,7 +2357,7 @@ export class PtyCliDriver implements AgentDriver {
       if (parsingBytes + bytes > 256 * 1024) { refreshAfterGap(bytes); return; }
       this.lastOutputAt = Date.now();
       this.screenRevision++;
-      this.idleDetector?.feed(data);
+      this.feedIdleDetector(data);
       const snapshot = this.snapshot;
       if (snapshot) {
         parsingBytes += bytes;
@@ -2370,7 +2374,11 @@ export class PtyCliDriver implements AgentDriver {
       // 自己提交的轮次由 noteTurnOutput 按渲染后的屏幕判定：提示词回显和重绘不算输出。
       if (this.turnActive && !this.turnEcho) this.turnHasOutput = true;
     });
-    backend.onExit(code => { void this.handleExit(code, backend); });
+    backend.onExit(code => {
+      const alreadyReported = this.exitReported;
+      const draining = this.handleExit(code, backend);
+      if (!alreadyReported && backend === this.backend) this.exitDrain = draining;
+    });
     if (backend instanceof HerdrBackend) backend.onDisconnect(error => {
       if (backend !== this.backend || this.stopped) return;
       this.cancelActiveSubmission(error);
@@ -2551,6 +2559,12 @@ export class PtyCliDriver implements AgentDriver {
       && /[❯›]|(?:yes|allow|deny|answer|waiting)/i.test(footer);
   }
 
+  /** Idle detection is advisory: a detector failure stays busy and must never discard the underlying terminal bytes. */
+  private feedIdleDetector(data: string): void {
+    try { this.idleDetector?.feed(data); }
+    catch { this.idleDetector?.dispose(); this.idleDetector = undefined; }
+  }
+
   /** 输出块很密而整屏转文本较贵，这里只服务分钟级的卡住检测：标脏后最多每 200ms 算一次，间隔内的变化由尾沿补算。 */
   private noteScreenProgress(): void {
     if (!this.turnActive || this.screenProgressTimer) return;
@@ -2645,23 +2659,32 @@ export class PtyCliDriver implements AgentDriver {
       this.maintenanceActive.controller.abort(exitError);
     }
     this.transcriptVerification?.controller.abort();
-    const exitingBackend = this.backend;
-    await this.transcript?.flush().catch(() => {});
-    if (this.backend !== exitingBackend) return;
-    this.teardownWiring();
-    if (this.backend instanceof HerdrBackend ? (await this.backend.isStopped()) : !(this.backend instanceof TmuxBackend) || (await TmuxBackend.probeSession(this.backend.sessionName)) === 'missing') {
-      this.claudeSettings.cleanup();
-    }
-    // 若本轮仍在进行，driver 退出 = 本轮失败，reject send() 的等待者。
+    // Exit is already a fact: release turn/receipt waiters before the tail
+    // barriers. The renderer drain below still owns final persistence and the
+    // public exit callback, but must not hold cancellation behind fake timers,
+    // backpressure, or a slow transcript.
     if (this.turnActive) {
       this.turnActive = false;
       this.awaitingRecoveryTranscript = false;
-      this.turnReject?.(new Error(`Agent exited with code ${code}`));
+      this.turnReject?.(exitError);
       this.turnResolve = null;
       this.turnReject = null;
     }
     this.cancelActiveSubmission(exitError);
     this.turnWriteReject = null;
+    const exitingBackend = this.backend;
+    const exitingSnapshot = this.snapshot;
+    await this.transcript?.flush().catch(() => {});
+    // xterm parses asynchronously. Drain every write accepted from this
+    // backend, then persist the final changed screen before teardown cancels
+    // the trailing timer. A replacement backend owns its own exit and screen.
+    await exitingSnapshot?.writeAndFlush('').catch(() => {});
+    if (this.backend !== exitingBackend || this.snapshot !== exitingSnapshot) return;
+    this.flushRawTerminal(exitingSnapshot);
+    this.teardownWiring();
+    if (this.backend instanceof HerdrBackend ? (await this.backend.isStopped()) : !(this.backend instanceof TmuxBackend) || (await TmuxBackend.probeSession(this.backend.sessionName)) === 'missing') {
+      this.claudeSettings.cleanup();
+    }
     this.exitCallback(code);
   }
 
@@ -2670,16 +2693,23 @@ export class PtyCliDriver implements AgentDriver {
     if (this.rawTerminalTimer) return;
     const timer = setTimeout(() => {
       this.rawTerminalTimer = undefined;
-      const text = this.snapshot?.text() ?? '';
-      if (text !== this.lastRawTerminalText) {
-        this.lastRawTerminalText = text;
-        // screen：整屏快照，新帧取代旧帧；账本只保留每轮最近几帧的内容。
-        this.emitEvent({ type: 'raw_terminal', data: { text, screen: true } });
-      }
+      this.flushRawTerminal();
       this.checkRenderedCompletion();
     }, RAW_TERMINAL_THROTTLE_MS);
     timer.unref();
     this.rawTerminalTimer = timer;
+  }
+
+  private flushRawTerminal(snapshot = this.snapshot): void {
+    if (this.rawTerminalTimer) {
+      clearTimeout(this.rawTerminalTimer);
+      this.rawTerminalTimer = undefined;
+    }
+    const text = snapshot?.text() ?? '';
+    if (text === this.lastRawTerminalText) return;
+    this.lastRawTerminalText = text;
+    // screen：整屏快照，新帧取代旧帧；账本只保留每轮最近几帧的内容。
+    this.emitEvent({ type: 'raw_terminal', data: { text, screen: true } });
   }
 
   private clearGraceRetry(): void {
@@ -2849,7 +2879,7 @@ export class PtyCliDriver implements AgentDriver {
    * machinery as pipe-pane bytes, without treating it as new PTY output. */
   private async feedRecoveredScreen(screen: string): Promise<void> {
     const snapshot = this.snapshot;
-    this.idleDetector?.feed(screen);
+    this.feedIdleDetector(screen);
     for (const cb of this.terminalSubscribers) cb(screen);
     await snapshot?.writeAndFlush(screen);
     if (this.snapshot !== snapshot || this.stopped) return;

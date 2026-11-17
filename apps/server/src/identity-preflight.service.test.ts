@@ -70,7 +70,8 @@ async function fakeLark() {
   if (!address || typeof address === 'string') throw new Error('fake server did not bind');
   const close = () => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
   closeServers.push(close);
-  return { baseUrl: `http://127.0.0.1:${address.port}`, requests, armChatBarrier, rejectAuthentication: () => { authenticationRejected = true; } };
+  return { baseUrl: `http://127.0.0.1:${address.port}`, requests, armChatBarrier,
+    rejectAuthentication: () => { authenticationRejected = true; }, acceptAuthentication: () => { authenticationRejected = false; } };
 }
 
 async function seed(database: string) {
@@ -190,6 +191,25 @@ describe('production identity preflight wiring', () => {
       current: { status: 'blocked', identityFact: { errorCode: 'IDENTITY_PREFLIGHT_REMOTE_AUTH_FAILED' }, listenerReadiness: 'blocked' },
       activationChanged: false,
     });
+
+    // 认证恢复后，以及紧接着的下一次成功重检，都要清掉 identity/chat 的旧错误；不能把历史失效带进新成功事实。
+    fake.acceptAuthentication();
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const recovered = await fetch(`${base}/api/foundation/channel-bots/bot-preflight/identity-preflight`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ groupBindingIds: ['binding-preflight'] }),
+      });
+      expect(recovered.status).toBe(200);
+      const recoveredBody = await recovered.json() as any;
+      expect(recoveredBody).toMatchObject({ status: 'passed', identityFact: { validity: 'valid' }, chatFacts: [{ fact: { validity: 'valid' } }] });
+      expect(recoveredBody.identityFact.errorCode).toBeUndefined();
+      expect(recoveredBody.chatFacts[0].fact.errorCode).toBeUndefined();
+      const currentAfterRecovery = await fetch(`${base}/api/foundation/channel-bots/bot-preflight/identity-preflight`);
+      expect(currentAfterRecovery.status).toBe(200);
+      const currentBody = await currentAfterRecovery.json() as any;
+      expect(currentBody).toMatchObject({ status: 'passed', identityFact: { validity: 'valid' }, chatFacts: [{ fact: { validity: 'valid' } }] });
+      expect(currentBody.identityFact.errorCode).toBeUndefined();
+      expect(currentBody.chatFacts[0].fact.errorCode).toBeUndefined();
+    }
 
     await closeTracked(first);
     const databaseBytes = [database, `${database}-wal`, `${database}-shm`]

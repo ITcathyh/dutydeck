@@ -143,6 +143,26 @@ describe('managed workspace cleanup', () => {
     expect(cleanedWorkspace?.cleanedAt).toBe(result.cleanedAt);
   });
 
+  it.each([
+    { label: 'plain', root: 'workspaces' },
+    { label: 'Chinese', root: '工作区' },
+    { label: 'newline', root: 'workspaces\nnewline' }
+  ])('cleans a linked worktree whose workspace root is $label', async ({ root }) => {
+    const source = repository();
+    const workspaceRoot = join(temporary('dutydeck-ws-parent-'), root);
+    const h = open(':memory:', { workspaceRoot });
+    await h.runtime.initialize([agent]);
+    const session = await h.runtime.start({ agentId: agent.id, cwd: source, workspaceMode: 'worktree' });
+    await h.runtime.archive(session.id);
+    const workspace = (await h.runtime.getWorkspace(session.id))!;
+
+    const preview = await h.runtime.getWorkspaceCleanupPreview(session.id);
+    expect(preview).toMatchObject({ canClean: true, blockers: [], path: workspace.repoRoot });
+    await expect(h.runtime.cleanWorkspace(session.id, preview.fingerprint)).resolves.toMatchObject({ ok: true, path: workspace.repoRoot });
+    expect(existsSync(workspace.repoRoot!)).toBe(false);
+    expect(existsSync(join(source, 'tracked.txt'))).toBe(true);
+  });
+
   it('rejects cleanup if tasks wrote untracked security policy files without white-listing', async () => {
     const source = repository();
     const workspaceRoot = temporary('dutydeck-ws-');

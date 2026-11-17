@@ -259,6 +259,63 @@ describe('acpx ACP boundary', () => {
     expect(JSON.stringify(persisted)).not.toContain('resolveRiskPolicy');
   });
 
+  async function stalePermissionHarness(timeout: number, sessionKey: string) {
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-stale-permission-')); dirs.push(cwd);
+    const events: any[] = [];
+    let releasePolicy!: () => void, markPolicyEntered!: () => void, policyCalls = 0;
+    const policy = new Promise<void>(resolve => { releasePolicy = resolve; });
+    const policyEntered = new Promise<void>(resolve => { markPolicyEntered = resolve; });
+    const adapter = new AcpxAdapter({ ...agentConfig(), cwd, timeout, args: [resolve(process.cwd(), 'packages/acp-client/tests/fixtures/stale-permission-agent.mjs')], env: { fixture_decisions: join(cwd, 'decisions.jsonl') } }, {
+      sessionKey, onEvent: event => events.push(event),
+      resolveRiskPolicy: () => {
+        if (++policyCalls !== 1) return Promise.resolve(undefined);
+        markPolicyEntered();
+        return policy.then(() => undefined);
+      }
+    });
+    return { adapter, events, policyEntered, releasePolicy: () => releasePolicy(), decisions: join(cwd, 'decisions.jsonl'), sessionKey, cwd };
+  }
+
+  it('fences a late permission policy callback out of a new turn and its idle timeout', async () => {
+    const h = await stalePermissionHarness(0.2, 'stale-permission-timeout');
+    try {
+      await h.adapter.start();
+      const old = h.adapter.send('old');
+      await h.policyEntered;
+      await h.adapter.interrupt(); await old;
+      const current = h.adapter.send('new silent');
+      await expect.poll(() => h.events.some(event => event.type === 'text' && event.data.text === 'new is running')).toBe(true);
+      h.releasePolicy();
+      await new Promise(resolve => setTimeout(resolve, 100));
+      expect(h.events.filter(event => event.type === 'permission_request')).toEqual([]);
+      await expect(h.adapter.resolvePermission('shared-tool', true)).resolves.toBe(false);
+      await expect(current).resolves.toBeUndefined();
+      expect(h.events).toContainEqual(expect.objectContaining({ type: 'error', data: expect.objectContaining({ code: 'AGENT_IDLE_TIMEOUT' }) }));
+      expect(h.events).toContainEqual(expect.objectContaining({ type: 'completed', data: expect.objectContaining({ stopReason: 'idle_timeout' }) }));
+      const replies = readFileSync(h.decisions, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+      expect(replies).toContainEqual(expect.objectContaining({ id: 'old-permission-rpc', result: { outcome: { outcome: 'cancelled' } } }));
+    } finally { await h.adapter.stop(); }
+    expect((await createRuntimeStore({ stateDir: join(h.cwd, '.dutydeck', 'acpx') }).load(h.sessionKey))?.name).toBe(h.sessionKey);
+  }, 20_000);
+
+  it('does not let a stale callback resolve a new permission that reuses the toolCallId', async () => {
+    const h = await stalePermissionHarness(10, 'stale-permission-reused-id');
+    try {
+      await h.adapter.start();
+      const old = h.adapter.send('old');
+      await h.policyEntered;
+      await h.adapter.interrupt(); await old;
+      const current = h.adapter.send('new permission');
+      await expect.poll(() => h.events.some(event => event.type === 'permission_request' && event.data.status === 'pending')).toBe(true);
+      h.releasePolicy();
+      await new Promise(resolve => setTimeout(resolve, 100));
+      expect(h.events.filter(event => event.type === 'permission_request' && event.data.status === 'pending')).toHaveLength(1);
+      await expect(h.adapter.resolvePermission('shared-tool', true)).resolves.toBe(true);
+      await current;
+      expect(h.events.some(event => event.type === 'text' && event.data.text === 'new permission selected')).toBe(true);
+    } finally { await h.adapter.stop(); }
+  }, 20_000);
+
   it('hard-stops an active turn even while permission is pending', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-hard-stop-')); dirs.push(cwd);
     const fixture = resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs'); const events: any[] = [];

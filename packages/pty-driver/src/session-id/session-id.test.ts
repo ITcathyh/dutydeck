@@ -362,6 +362,55 @@ describe.each([
     expect(resolveCliSessionId(adapter, { sessionId: OUR_SESSION, cwd })).toBeUndefined();
   });
 
+  it('uses a real rollout instead of an unproven first submit in a truncated history', () => {
+    const { root, cwd } = makeHome();
+    const dayDir = codexDayDir(root);
+    const entries = readFileSync(new URL(`../../../../tests/fixtures/session-insight/real-native/${adapter}.jsonl`, import.meta.url), 'utf8')
+      .trim().split('\n').map(line => JSON.parse(line));
+    const prompt = `${buildSessionMarker(OUR_SESSION)}\nOriginal task`;
+    let injected = false;
+    for (const entry of entries) {
+      if (entry.type === 'session_meta') {
+        entry.payload.id = ourCliId; entry.payload.session_id = ourCliId; entry.payload.cwd = cwd;
+      }
+      if (injected) continue;
+      if (adapter === 'codex' && entry.type === 'response_item' && entry.payload?.type === 'message' && entry.payload.role === 'user') {
+        const block = entry.payload.content?.find((item: any) => ['text', 'input_text'].includes(item.type) && typeof item.text === 'string');
+        if (block) { block.text = `${prompt}\n${block.text}`; injected = true; }
+      }
+      if (adapter === 'traex' && entry.type === 'history_mutation') {
+        for (const completion of entry.payload?.display_completions ?? []) {
+          if (completion.item?.type !== 'UserMessage') continue;
+          const block = completion.item.content?.find((item: any) => typeof item.text === 'string');
+          if (block) { completion.thread_id = ourCliId; block.text = `${prompt}\n${block.text}`; injected = true; break; }
+        }
+      }
+    }
+    expect(injected).toBe(true);
+    const rolloutPath = join(dayDir, `rollout-2026-08-30T01-00-00-${ourCliId}.jsonl`);
+    writeJsonl(rolloutPath, entries);
+
+    const historyPath = join(root, 'history.jsonl');
+    const record = (nativeId: string, text: string) => JSON.stringify({ session_id: nativeId, ts: 1794916800, text }) + '\n';
+    const firstRecords = record(ourCliId, prompt) + record(decoyCliId, 'Unrelated original task');
+    const paddingRecord = record('33333333-3333-4333-8333-333333333333', 'x'.repeat(1024));
+    const padding = paddingRecord.repeat(4_000);
+    expect(Buffer.byteLength(padding)).toBeGreaterThan(4 * 1024 * 1024);
+    const quoted = record(decoyCliId, `Explain another conversation:\n${buildSessionMarker(OUR_SESSION)}`);
+    const resolve = () => resolveCliSessionId(adapter, { sessionId: OUR_SESSION, cwd, requireMarker: true });
+
+    writeFileSync(historyPath, firstRecords + quoted);
+    expect(resolve()).toBe(ourCliId);
+    writeFileSync(historyPath, firstRecords + padding);
+    expect(resolve()).toBe(ourCliId);
+    writeFileSync(historyPath, firstRecords + padding + quoted);
+    expect(resolve()).toBe(ourCliId);
+    writeFileSync(historyPath, firstRecords + padding + record(decoyCliId, 'A prior ordinary follow-up inside the tail') + quoted);
+    expect(resolve()).toBe(ourCliId);
+    rmSync(rolloutPath);
+    expect(resolve()).toBeUndefined();
+  });
+
   it('returns undefined when nothing carries the marker', () => {
     const { root, cwd } = makeHome();
     writeJsonl(join(root, 'history.jsonl'), [

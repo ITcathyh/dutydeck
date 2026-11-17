@@ -280,7 +280,15 @@ export class PluginStore {
             const value = secrets?.read(pluginSecretKey(name, key));
             if (value !== undefined) config[key] = value;
           }
-          await validateProviderRegistration({ root, dataDir: checkDir, entry: { ...entry, enabled: true, version: artifact.version, active: artifact, trustedCapabilities: artifact.trustedCapabilities }, config }, undefined, this.validationWorker);
+          const availableBuiltins = this.builtinNames();
+          const dependencies = Object.keys(loaded.manifest.dependencies ?? {}).flatMap(dependency => {
+            if (dependency === name) return [];
+            const selected = lock.plugins[dependency];
+            if (selected?.enabled) return [{ name: dependency, ...(this.activeArtifact(selected).version ? { version: this.activeArtifact(selected).version } : {}) }];
+            // 与正常 Host 一致：builtin available 只带名称；隔离验证不加载其 provider。
+            return availableBuiltins.has(dependency) ? [{ name: dependency }] : [];
+          });
+          await validateProviderRegistration({ root, dataDir: checkDir, entry: { ...entry, enabled: true, version: artifact.version, active: artifact, trustedCapabilities: artifact.trustedCapabilities }, config, dependencies }, undefined, this.validationWorker);
         }
       } catch {
         artifact.validation = { status: 'failed', checkedAt: new Date().toISOString() }; await this.writeLock(lock);

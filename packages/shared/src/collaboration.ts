@@ -120,6 +120,16 @@ export const groupResponderSchema = z.object({
 }).strict();
 export type GroupResponder = z.infer<typeof groupResponderSchema>;
 
+/** 接话声明的持久高水位；卸任后仍保留，迟到或重放的旧声明不能恢复旧分工。 */
+export const responderAnnouncementSchema = z.object({
+  appId: z.string().trim().min(1).max(128),
+  kind: z.enum(['claim', 'release']),
+  at: z.string().datetime(),
+  messageId: z.string().min(1).max(128),
+  name: z.string().trim().max(128).optional()
+}).strict();
+export type ResponderAnnouncement = z.infer<typeof responderAnnouncementSchema>;
+
 const scenarioPackIdSchema = z.string().regex(scenarioPackIdPattern);
 
 /** 本 Bot 在群里的分工：它所知的接话人，和本群对各场景包的绑定（按包 id）。每个 Bot 实例各存一份，只管自己。 */
@@ -127,18 +137,22 @@ export const collaborationDutySchema = z.object({
   scope: collaborationScopeSchema,
   revision: z.number().int().min(0),
   responder: groupResponderSchema.optional(),
+  responderWatermark: responderAnnouncementSchema.optional(),
   scenarios: z.record(scenarioPackIdSchema, scenarioBindingSchema).optional(),
   updatedAt: z.string().datetime()
 }).strict();
 export type CollaborationDuty = z.infer<typeof collaborationDutySchema>;
 
-/** null 表示清掉，不传表示不改；scenarios 按包合并，某个包的值为 null 时删掉那个绑定。 */
+/** null 表示清掉，不传表示不改；scenarios 按包合并，某个包的值为 null 时删掉那个绑定。声明事件由仓储按当前水位原子裁决。 */
 export const updateCollaborationDutyInputSchema = z.object({
   expectedRevision: z.number().int().min(0),
   responder: groupResponderSchema.nullable().optional(),
+  responderEvent: responderAnnouncementSchema.optional(),
   scenarios: z.record(scenarioPackIdSchema, scenarioBindingSchema.nullable()).optional()
-}).strict().refine(input => input.responder !== undefined || input.scenarios !== undefined, {
+}).strict().refine(input => input.responder !== undefined || input.responderEvent !== undefined || input.scenarios !== undefined, {
   message: 'At least one field must be updated'
+}).refine(input => input.responder === undefined || input.responderEvent === undefined, {
+  message: 'Responder and responderEvent are mutually exclusive'
 });
 export type UpdateCollaborationDutyInput = z.infer<typeof updateCollaborationDutyInputSchema>;
 

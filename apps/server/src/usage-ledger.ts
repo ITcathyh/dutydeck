@@ -548,7 +548,9 @@ export async function tokenEfficiencyUsageReport(
     tasksByApp.set(job.scope.appId, ids);
   }
   const jobEntries = (await Promise.all([...tasksByApp].map(([appId, ids]) => repos.usage.listEntries(
-    { appId, ...(input.filter.since !== undefined ? { since: input.filter.since } : {}) }, [...ids]
+    { appId,
+      ...(input.filter.since !== undefined ? { since: input.filter.since } : {}),
+      ...(input.filter.until !== undefined ? { until: input.filter.until } : {}) }, [...ids]
   )))).flat();
   const selected = [...entries, ...jobEntries].filter(entry => taskIds.has(entry.taskId) || entry.rootTaskId && roots.has(entry.rootTaskId) || jobTasks.has(entry.taskId));
   const seenAttempts = new Set<string>(), seenUsage = new Set<string>();

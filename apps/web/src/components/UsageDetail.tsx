@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { usageUnknownModel, type UsageTaskRow } from '@dutydeck/shared';
 import { api, type UsageGroupResponse as UsageGroup, type UsageReportQuery, type UsageTotalsResponse as UsageTotals } from '../api';
@@ -89,44 +89,53 @@ export function UsageDetail({ botName, onOpenTask }: { botName(appId?: string): 
   const [to, setTo] = useState('');
   const [filter, setFilter] = useState<{ model: string; agentId: string; appId: string; origin: string }>({ model: '', agentId: '', appId: '', origin: '' });
   const [offset, setOffset] = useState(0);
+  const defaultRange = useRef<{ from: string; to: string } | undefined>(undefined);
+  const effectiveFrom = from || defaultRange.current?.from || '';
+  const effectiveTo = to || defaultRange.current?.to || '';
+  const invalidDateRange = Boolean(effectiveFrom && effectiveTo && effectiveFrom > effectiveTo);
   const query: UsageReportQuery = { from, to, ...filter };
-  const report = useQuery({ queryKey: ['usage-report', query], queryFn: () => api.usageReport(query), retry: false, placeholderData: previous => previous });
-  const tasks = useQuery({ queryKey: ['usage-tasks', query, offset], queryFn: () => api.usageTasks({ ...query, limit: PAGE_SIZE, offset }), retry: false, placeholderData: previous => previous });
-  const change = (patch: Partial<typeof filter>) => { setFilter(current => ({ ...current, ...patch })); setOffset(0); };
-
-  if (report.isPending) return <Spinner label="正在读取用量明细…"/>;
-  if (report.isError) return <Banner tone="danger" action={{ label: '重试', onClick: () => void report.refetch() }}>用量明细读取失败：{report.error.message}</Banner>;
+  const report = useQuery({ queryKey: ['usage-report', query], queryFn: () => api.usageReport(query), retry: false, placeholderData: previous => previous, enabled: !invalidDateRange });
+  const tasks = useQuery({ queryKey: ['usage-tasks', query, offset], queryFn: () => api.usageTasks({ ...query, limit: PAGE_SIZE, offset }), retry: false, placeholderData: previous => previous, enabled: !invalidDateRange });
+  if (report.data && !report.isPlaceholderData && !query.from && !query.to) defaultRange.current = report.data.range;
   const data = report.data;
-  const totals = data.totals as UsageTotals;
-  const unknown = unknownCount(totals);
+  const rangeFrom = from || data?.range.from || defaultRange.current?.from || '';
+  const rangeTo = to || data?.range.to || defaultRange.current?.to || '';
+  const change = (patch: Partial<typeof filter>) => { setFilter(current => ({ ...current, ...patch })); setOffset(0); };
+  const totals = data?.totals as UsageTotals;
+  const unknown = totals ? unknownCount(totals) : 0;
 
   return <div className="space-y-5">
-    <p className="text-caption text-secondary">日期按 Dutydeck 服务所在的时区切分：{data.timezone.name}（{utcOffset(data.timezone.offsetMinutes)}），与浏览器时区无关。开始日与结束日都含当天。</p>
+    {data && <p className="text-caption text-secondary">日期按 Dutydeck 服务所在的时区切分：{data.timezone.name}（{utcOffset(data.timezone.offsetMinutes)}），与浏览器时区无关。开始日与结束日都含当天。</p>}
     <form className="grid gap-3 sm:grid-cols-3" aria-label="明细筛选" onSubmit={event => event.preventDefault()}>
-      <Field label="开始日期"><Input type="date" value={from || data.range.from} max={to || data.range.to} onChange={event => { setFrom(event.target.value); setOffset(0); }}/></Field>
-      <Field label="结束日期"><Input type="date" value={to || data.range.to} min={from || data.range.from} onChange={event => { setTo(event.target.value); setOffset(0); }}/></Field>
+      <Field label="开始日期"><Input type="date" value={rangeFrom} max={rangeTo || undefined} onChange={event => { setFrom(event.target.value); setOffset(0); }}/></Field>
+      <Field label="结束日期"><Input type="date" value={rangeTo} min={rangeFrom || undefined} onChange={event => { setTo(event.target.value); setOffset(0); }}/></Field>
       <Field label="型号"><Select value={filter.model} onChange={event => change({ model: event.target.value })}>
         <option value="">全部型号</option>
-        {data.options.models.map(model => <option key={model ?? usageUnknownModel} value={model ?? usageUnknownModel}>{model ?? unknownModelLabel}</option>)}
+        {(data?.options.models ?? []).map(model => <option key={model ?? usageUnknownModel} value={model ?? usageUnknownModel}>{model ?? unknownModelLabel}</option>)}
       </Select></Field>
-      <Field label="Agent"><Select value={filter.agentId} onChange={event => change({ agentId: event.target.value })}><option value="">全部 Agent</option>{data.options.agentIds.map(id => <option key={id} value={id}>{id}</option>)}</Select></Field>
-      <Field label="机器人"><Select value={filter.appId} onChange={event => change({ appId: event.target.value })}><option value="">全部机器人</option>{data.options.appIds.map(id => <option key={id} value={id}>{botName(id)}</option>)}</Select></Field>
-      <Field label="来源"><Select value={filter.origin} onChange={event => change({ origin: event.target.value })}><option value="">全部来源</option>{data.options.origins.map(id => <option key={id} value={id}>{id}</option>)}</Select></Field>
+      <Field label="Agent"><Select value={filter.agentId} onChange={event => change({ agentId: event.target.value })}><option value="">全部 Agent</option>{(data?.options.agentIds ?? []).map(id => <option key={id} value={id}>{id}</option>)}</Select></Field>
+      <Field label="机器人"><Select value={filter.appId} onChange={event => change({ appId: event.target.value })}><option value="">全部机器人</option>{(data?.options.appIds ?? []).map(id => <option key={id} value={id}>{botName(id)}</option>)}</Select></Field>
+      <Field label="来源"><Select value={filter.origin} onChange={event => change({ origin: event.target.value })}><option value="">全部来源</option>{(data?.options.origins ?? []).map(id => <option key={id} value={id}>{id}</option>)}</Select></Field>
     </form>
-    <Card as="section" tone="muted" padding="md" className="space-y-1" aria-label="明细合计">
-      <p className="text-caption text-secondary">{data.range.from} 至 {data.range.to} 合计</p>
-      <p className="text-title font-semibold text-primary">已知费用 {usd(totals.costUsd)}</p>
-      <p className="text-caption text-secondary">{usageText(totals)}</p>
-    </Card>
-    {unknown > 0 && <Banner tone="warning">部分用量未知：{count(unknown)} 次任务的费用算不出来（{count(totals.unpriced ?? 0)} 次缺单价、{count(totals.unavailable)} 次无用量数据），没有计入上面的已知费用，也不等于 0；月度上限只按已知费用判断，可能不准。</Banner>}
-    {!totals.entries ? <EmptyState title="这个范围内没有用量记录" description="换一个日期范围或清除筛选。"/> : <>
-      <DailyTrend from={data.range.from} to={data.range.to} rows={data.daily as UsageGroup[]}/>
-      <Breakdown title="按型号" rows={data.models as UsageGroup[]} label={row => row.model ?? unknownModelLabel}/>
-      <Breakdown title="按 Agent" rows={data.agents as UsageGroup[]} label={row => row.agentId ?? '未记录'}/>
-      <Breakdown title="按机器人" rows={data.bots as UsageGroup[]} label={row => botName(row.appId)}/>
-      <Breakdown title="按来源" rows={data.origins as UsageGroup[]} label={row => row.origin ?? '未记录'}/>
-      <TaskList page={tasks.data?.tasks ?? []} total={tasks.data?.total ?? 0} offset={offset} setOffset={setOffset} loading={tasks.isPending || tasks.isFetching} botName={botName} onOpenTask={onOpenTask}/>
-    </>}
-    {tasks.isError && <Banner tone="danger" action={{ label: '重试', onClick: () => void tasks.refetch() }}>任务明细读取失败：{tasks.error.message}</Banner>}
+    {invalidDateRange ? <Banner tone="warning">开始日期不能晚于结束日期；开始日与结束日可以是同一天。</Banner>
+      : report.isError ? <Banner tone="danger" action={{ label: '重试', onClick: () => void report.refetch() }}>用量明细读取失败：{report.error.message}</Banner>
+        : !data ? <Spinner label="正在读取用量明细…"/>
+          : <>
+            <Card as="section" tone="muted" padding="md" className="space-y-1" aria-label="明细合计">
+              <p className="text-caption text-secondary">{data.range.from} 至 {data.range.to} 合计</p>
+              <p className="text-title font-semibold text-primary">已知费用 {usd(totals.costUsd)}</p>
+              <p className="text-caption text-secondary">{usageText(totals)}</p>
+            </Card>
+            {unknown > 0 && <Banner tone="warning">部分用量未知：{count(unknown)} 次任务的费用算不出来（{count(totals.unpriced ?? 0)} 次缺单价、{count(totals.unavailable)} 次无用量数据），没有计入上面的已知费用，也不等于 0；月度上限只按已知费用判断，可能不准。</Banner>}
+            {!totals.entries ? <EmptyState title="这个范围内没有用量记录" description="换一个日期范围或清除筛选。"/> : <>
+              <DailyTrend from={data.range.from} to={data.range.to} rows={data.daily as UsageGroup[]}/>
+              <Breakdown title="按型号" rows={data.models as UsageGroup[]} label={row => row.model ?? unknownModelLabel}/>
+              <Breakdown title="按 Agent" rows={data.agents as UsageGroup[]} label={row => row.agentId ?? '未记录'}/>
+              <Breakdown title="按机器人" rows={data.bots as UsageGroup[]} label={row => botName(row.appId)}/>
+              <Breakdown title="按来源" rows={data.origins as UsageGroup[]} label={row => row.origin ?? '未记录'}/>
+              <TaskList page={tasks.data?.tasks ?? []} total={tasks.data?.total ?? 0} offset={offset} setOffset={setOffset} loading={tasks.isPending || tasks.isFetching} botName={botName} onOpenTask={onOpenTask}/>
+            </>}
+            {tasks.isError && <Banner tone="danger" action={{ label: '重试', onClick: () => void tasks.refetch() }}>任务明细读取失败：{tasks.error.message}</Banner>}
+          </>}
   </div>;
 }

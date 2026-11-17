@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen, within } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { UsageGroup, UsageTotals } from '@dutydeck/shared';
@@ -116,6 +116,57 @@ describe('usage overview', () => {
     vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
     mount();
     expect(await screen.findByText(/安装管理员授权后才能查看用量汇总和设置上限/)).toBeTruthy();
+  });
+
+  it('keeps a cap amount edited while saving and clears only an unchanged successful form', async () => {
+    let current: UsageSummary = { ...summary, caps: [] };
+    vi.spyOn(api, 'usageSummary').mockImplementation(async () => current);
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    let finish!: () => void;
+    let calls = 0;
+    const save = vi.spyOn(api, 'setUsageCap').mockImplementation(async input => {
+      calls += 1;
+      if (calls === 1) await new Promise<void>(done => { finish = done; });
+      const cap = { ...input, updatedAt: '2026-09-25T00:00:00Z' };
+      current = { ...current, caps: [cap] };
+      return cap;
+    });
+    const user = userEvent.setup({ delay: null });
+    mount();
+    const caps = await screen.findByRole('region', { name: '月度成本上限' });
+    const input = within(caps).getByLabelText('每月上限（美元）');
+    await user.type(input, '20');
+    await user.click(within(caps).getByRole('button', { name: '保存上限' }));
+    await waitFor(() => expect(save).toHaveBeenCalledOnce());
+    await user.clear(input); await user.type(input, '30');
+    finish();
+    await waitFor(() => expect((within(caps).getByRole('button', { name: '保存上限' }) as HTMLButtonElement).disabled).toBe(false));
+    expect((input as HTMLInputElement).value).toBe('30');
+    expect(save.mock.calls[0]?.[0].monthlyCostUsd).toBe(20);
+    await user.click(within(caps).getByRole('button', { name: '保存上限' }));
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+    expect(save.mock.calls[1]?.[0].monthlyCostUsd).toBe(30);
+    await waitFor(() => expect((input as HTMLInputElement).value).toBe(''));
+  });
+
+  it('does not clear a different cap target opened while another save is pending', async () => {
+    vi.spyOn(api, 'usageSummary').mockResolvedValue(summary);
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [{ key: 'g1', chatId: 'oc_1', name: '研发群', bots: [{ appId: 'cli_a' }] as any }] });
+    let finish!: (value: any) => void;
+    const save = vi.spyOn(api, 'setUsageCap').mockImplementation(() => new Promise(done => { finish = done; }));
+    const user = userEvent.setup({ delay: null });
+    mount();
+    const caps = await screen.findByRole('region', { name: '月度成本上限' });
+    const input = within(caps).getByLabelText('每月上限（美元）');
+    await user.type(input, '20');
+    await user.click(within(caps).getByRole('button', { name: '保存上限' }));
+    await waitFor(() => expect(save).toHaveBeenCalledOnce());
+    await user.click(within(caps).getByRole('button', { name: '修改' }));
+    expect((input as HTMLInputElement).value).toBe('4');
+    finish({ scope: 'bot', appId: 'cli_a', monthlyCostUsd: 20, updatedAt: '2026-09-25T00:00:00Z' });
+    await screen.findByRole('button', { name: '保存上限' });
+    expect((input as HTMLInputElement).value).toBe('4');
+    expect((within(caps).getByLabelText('范围') as HTMLSelectElement).value).toBe('group');
   });
 });
 

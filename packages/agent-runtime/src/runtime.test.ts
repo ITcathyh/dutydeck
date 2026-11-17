@@ -42,6 +42,25 @@ describe('runtime lifecycle acceptance', () => {
       await expect(h.runtime.interrupt(session.id)).resolves.toMatchObject({ interrupted: false, state: 'idle' });
     } finally { gate.resolve(); await turn; await h.runtime.shutdown(); h.repos.close(); }
   });
+  it('bounds an exit drain before revoking stop ownership', async () => {
+    const h = harness();
+    await h.runtime.initialize([agent]); const session = await h.runtime.start({ agentId: agent.id });
+    const drain = deferred();
+    h.driver.drainExitedOutput = () => drain.promise;
+    vi.useFakeTimers();
+    try {
+      const stopping = h.runtime.stop(session.id);
+      const rejection = expect(stopping).rejects.toMatchObject({ code: 'DRIVER_EXIT_DRAIN_TIMEOUT' });
+      let settled = false; void stopping.then(() => { settled = true; }, () => { settled = true; });
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await rejection;
+      expect(h.driver.stop).toHaveBeenCalledTimes(1);
+    } finally {
+      drain.resolve(); vi.useRealTimers(); await h.runtime.shutdown(); h.repos.close();
+    }
+  });
   it('stores client audit separately from the event stream', async () => {
     const h = harness(); await h.runtime.initialize([agent]);
     const session = await h.runtime.start({ agentId: agent.id });

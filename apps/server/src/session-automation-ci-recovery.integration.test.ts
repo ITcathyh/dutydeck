@@ -1,10 +1,11 @@
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, writeFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
-import { agentConfigSchema, type AttemptResultV1, type Session } from '@dutydeck/shared';
+import { agentConfigSchema, canonicalExecutionJson, type AttemptResultV1, type Session } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -162,5 +163,87 @@ describe('SessionAutomation real CI recovery across a true SQLite close and a br
     const bindings = (await repos.config.list!('session_automation/task/')).filter(r => r.key.includes(taskIdAfterAccept));
     expect(bindings).toHaveLength(1);
     expect(JSON.parse(bindings[0]!.value)).toMatchObject({ schemaVersion: 2, kind: 'ci', taskId: taskIdAfterAccept, subscriptionId: sub.id });
+  }, 30_000);
+
+  it.each(['active', 'not_started', 'settled'] as const)('checks the real admission and submit boundary before applying an expired TTL: %s', async mode => {
+    const directory = await mkdtemp(join(tmpdir(), 'automation-ci-expiry-'));
+    const database = join(directory, 'state.db');
+    const repos = createRepositories(database, { newDatabaseAuthority: 'ledger_v1' });
+    const claim = repos.control.attachRuntime('ci-expiry-fixture');
+    const bound = repos.execution.bind(claim);
+    const sessionId = 'ci_expiry_session';
+    const runId = 'ci_expiry_run';
+    const source = 'cli_app:oc_owner:group';
+    let now = new Date('2026-11-17T00:00:00Z');
+    let service!: SessionAutomationService;
+    let dispatches = 0;
+    let deliveries = 0;
+    let taskId = '';
+    cleanup.push(async () => { await service.close().catch(() => {}); claim.release(); repos.close(); await rm(directory, { recursive: true, force: true }); });
+
+    await gitRepository(directory);
+    const headSha = (await run('git', ['-C', directory, 'rev-parse', 'HEAD'])).stdout.trim();
+    const timestamp = now.toISOString();
+    bound.createSession({ id: sessionId, runId, agentId: 'fixture', cwd: directory, state: 'idle', source: 'lark', sourceId: source,
+      permissionMode: 'ask', createdAt: timestamp, updatedAt: timestamp });
+    const pipelineStatus = vi.fn(async () => ciStatus(headSha, [{ id: 88, conclusion: 'success' }])) as StatusMock;
+    const providers = ciProviders(pipelineStatus);
+    const settle = () => {
+      const attempt = repos.execution.getTaskExecution(taskId)!.currentAttempt!;
+      const fence = { sessionId, runId, taskId, attemptId: attempt.attemptId, expectedRevision: attempt.revision };
+      bound.appendEvent(fence, { id: 'ci_expiry_output', type: 'text', data: { role: 'assistant', text: 'Finished CI review' } });
+      bound.settleAttempt(fence, 'ci_expiry_settlement', { kind: 'driver_result', submissionId: 'ci_expiry_submission', outcome: 'completed',
+        outputDigest: createHash('sha256').update('Finished CI review').digest('hex'), stopReason: 'end_turn', complete: true });
+    };
+    const makeService = () => new SessionAutomationService({
+      repositories: repos, clock: () => now, ciProviders: providers, authorize: async () => true,
+      deliver: async () => { deliveries++; },
+      runtime: {
+        getSession: async (id: string) => repos.sessions.get(id),
+        dispatchRequest: async (request: any) => {
+          dispatches++;
+          const input = { version: 2, prompt: request.prompt, executionContext: { agentPrompt: request.prompt, actorId: 'ou_owner' }, contentSources: [], executionOptions: { permissionMode: 'ask' } };
+          const accepted = bound.acceptTask({ sessionId, runId }, request, { ...input, digest: createHash('sha256').update(canonicalExecutionJson(input)).digest('hex') }, 'back');
+          taskId = accepted.task.id;
+          const attempt = bound.claimNext({ sessionId, runId })!.attempt!;
+          if (mode !== 'not_started') {
+            await service.authorizeTask(accepted.task, 'submit');
+            bound.markSubmissionPending({ sessionId, runId, taskId, attemptId: attempt.attemptId, expectedRevision: attempt.revision },
+              { submissionId: 'ci_expiry_submission', inputDigest: repos.execution.getAcceptedTask(taskId)!.input!.digest, resourceRefs: [], authorizationRefs: [] });
+          }
+          return { id: taskId, status: mode === 'not_started' ? 'queued' : 'running' };
+        }
+      } as unknown as DutydeckRuntime
+    });
+
+    service = makeService();
+    const subscription = await service.subscribeCi(sessionId, { ttlSeconds: 60 }, 'ou_owner');
+    const cas = repos.config.compareAndSet!.bind(repos.config);
+    vi.spyOn(repos.config, 'compareAndSet').mockImplementation(async (key, expected, value) =>
+      key === `session_automation/ci/${subscription.id}` && JSON.parse(value).status === 'accepted' ? false : cas(key, expected, value));
+    await service.tick();
+    const before = JSON.parse((await repos.config.get(`session_automation/ci/${subscription.id}`))!);
+    expect(before.status).toBe('dispatching');
+    expect(Boolean(before.taskStartedAt)).toBe(mode !== 'not_started');
+    expect(repos.execution.getTaskExecution(taskId)!.currentAttempt!.state).toBe(mode === 'not_started' ? 'preparing' : 'active');
+    expect(dispatches).toBe(1);
+    if (mode === 'settled') settle();
+
+    await service.close();
+    vi.mocked(repos.config.compareAndSet).mockImplementation(cas);
+    now = new Date('2026-11-17T00:02:00Z');
+    service = makeService();
+    await service.tick();
+    if (mode === 'active') {
+      expect(JSON.parse((await repos.config.get(`session_automation/ci/${subscription.id}`))!).status).toBe('accepted');
+      settle();
+      await service.tick();
+    }
+    const final = JSON.parse((await repos.config.get(`session_automation/ci/${subscription.id}`))!);
+    expect(final.status).toBe(mode === 'not_started' ? 'expired' : 'completed');
+    expect(deliveries).toBe(mode === 'not_started' ? 0 : 1);
+    expect(dispatches).toBe(1);
+    await service.tick();
+    expect(deliveries).toBe(mode === 'not_started' ? 0 : 1);
   }, 30_000);
 });

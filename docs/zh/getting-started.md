@@ -35,13 +35,13 @@ dutydeck setup --cwd /path/to/project --port 4310 --skip-lark --yes
 printf %s "$LARK_SECRET" | dutydeck setup --lark-app-id cli_xxx --lark-app-secret-fd 0 --agent claude --listen --yes
 ```
 
-向导选项：`--agent <id>` 指定默认 Agent（必须是检测到的 CLI）、`--lark-app-secret-fd <fd>` 从文件描述符读 Secret、`--listen` 同时开启监听。已在运行的服务要 `dutydeck restart` 才会读到新的机器人配置。
+向导选项：`--agent <id>` 指定默认 Agent（必须是检测到的 CLI）、`--lark-app-secret-fd <fd>` 从文件描述符读 Secret、`--listen` 同时开启监听。`--json` 成功或失败都恰好输出一行 JSON；飞书绑定返回失败时进程退出码非零，`error` 写明原因，`changed` / `changedKeys` 如实报告已经保留的本地配置改动。已在运行的服务要 `dutydeck restart` 才会读到新的机器人配置。
 
 机器人配置完成后，交互式 setup 会用默认 No 的专用问题询问是否验证飞书收发；拒绝则不监听也不发送。同意并启动临时监听后，终端显示一次性 UUID，请在飞书里私聊机器人发送这段验证码。只有在有界时间内收到包含本次 UUID 的用户私聊，机器人才回复该消息并携带同一 UUID。回复被飞书接受表示「入站通过、出站已发送」，仍需你在飞书确认收到；超时则入站未验证，且不发送任何消息。`--yes`、非交互和 `--json` 不进入该验证。此流程不改变机器人权限，也不持久化用户 open_id。
 
 如果终端提示 `dutydeck: command not found`，说明全局可执行目录不在 `PATH`。pnpm 安装可运行 `pnpm setup`，按提示把全局可执行目录加入 `PATH` 后重开终端；npm 安装可用 `npm prefix -g` 找到全局前缀并配置其可执行目录。也可以不修改 `PATH`，改用 `pnpm dlx @byted/dutydeck setup` 或 `npx @byted/dutydeck setup`。
 
-在已有 `.env` 的目录重跑向导时，屏幕上只显示向导自己管理的默认工作目录、端口、监听地址、仅本机开关和飞书 App ID；App Secret 只显示末 4 位，`.env` 里的其他配置（如 `DUTYDECK_AGENTS_JSON`）只列名称，不显示内容。
+在已有 `.env` 的目录重跑向导时，屏幕上只显示向导自己管理的默认工作目录、端口、监听地址、仅本机开关和飞书 App ID；App Secret 只显示末 4 位，`.env` 里的其他配置（如 `DUTYDECK_AGENTS_JSON`）只列名称，不显示内容。更新或删除某项时，同名重复键及对应的 `DOCKMUX_*` 旧名会一起处理，只保留一个有效值；手写注释和无关配置原样保留。
 
 ## 3. 启动守护进程与状态检查
 

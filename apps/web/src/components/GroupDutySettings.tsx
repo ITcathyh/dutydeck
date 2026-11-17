@@ -69,10 +69,14 @@ export function GroupDutySettings({ appId, chatId, botName, duty, scenarios, onS
   const other = duty.responder && duty.responder.appId !== appId ? duty.responder : undefined;
 
   const save = useMutation({
-    mutationFn: () => {
+    mutationFn: (submitted: Editing) => {
       // 用开始编辑时的版本核对：期间别人改过就冲突，不拿刷新后的版本替旧草稿放行。
-      const body: UpdateCollaborationDutyInput = { expectedRevision: draft?.revision ?? duty.revision };
-      if (responderChanged) body.responder = value.responder === 'self' ? 'self' : null;
+      const body: UpdateCollaborationDutyInput = { expectedRevision: submitted.revision };
+      if (submitted.value.responder !== submitted.base.responder) body.responder = submitted.value.responder === 'self' ? 'self' : null;
+      const basePack = (id: string) => submitted.base.packs[id] ?? saved.packs[id]!;
+      const packOf = (id: string) => submitted.value.packs[id] ?? basePack(id);
+      const changedParams = (id: string) => Object.keys(packOf(id).params).filter(name => packOf(id).params[name] !== basePack(id).params[name]);
+      const changedPacks = scenarios.filter(scenario => packOf(scenario.id).enabled !== basePack(scenario.id).enabled || changedParams(scenario.id).length);
       // 参数只给改动的键，服务端按包默认 → 已有绑定 → 这次的值合并。
       if (changedPacks.length) body.scenarios = Object.fromEntries(changedPacks.map(scenario => {
         const pack = packOf(scenario.id);
@@ -82,8 +86,12 @@ export function GroupDutySettings({ appId, chatId, botName, duty, scenarios, onS
       }));
       return collaborationApi.updateDuty(appId, chatId, body);
     },
-    onSuccess: async result => {
-      setDraft(null);
+    onSuccess: async (result, submitted) => {
+      setDraft(current => {
+        if (!current) return current;
+        if (JSON.stringify(current.value) === JSON.stringify(submitted.value)) return null;
+        return { ...current, revision: result.duty.revision, base: submitted.value };
+      });
       setError(null);
       setNotice(result.announced === false
         ? { tone: 'warning', text: `已保存，但群里的接话人声明没发出去，其他机器人可能还不知道。${result.duty.responder
@@ -143,7 +151,7 @@ export function GroupDutySettings({ appId, chatId, botName, duty, scenarios, onS
       })}
       <div className="flex items-center justify-end gap-2">
         <Button variant="secondary" disabled={!draft || save.isPending} onClick={() => { setDraft(null); setError(null); }}>放弃修改</Button>
-        <Button variant="primary" disabled={!(responderChanged || changedPacks.length) || blocked} loading={save.isPending} onClick={() => save.mutate()}>
+        <Button variant="primary" disabled={!(responderChanged || changedPacks.length) || blocked} loading={save.isPending} onClick={() => { if (draft) save.mutate(draft); }}>
           <Check size={14} className="mr-1.5" />
           保存分工
         </Button>

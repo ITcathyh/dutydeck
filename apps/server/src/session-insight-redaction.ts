@@ -2,9 +2,12 @@ import {
   type AnalyzeFilesResult,
   analyzeFilesResultSchema,
   type Metric,
-  SESSION_INSIGHT_LIMITS
+  SESSION_INSIGHT_LIMITS,
+  type TraceEvent
 } from '@dutydeck/shared';
 import { redactTraceText } from './lark/secret-redaction.js';
+
+export const SESSION_INSIGHT_REDACTION_VERSION = 'redaction-v2';
 
 export interface RedactionContext {
   /**
@@ -111,6 +114,20 @@ export function redactExcerpt(
   if (text === null || text === undefined) return text;
   const redacted = redactText(text, context);
   return truncateUtf8Bytes(redacted, maxBytes);
+}
+
+export function projectPersistedInsightEvent<T extends TraceEvent>(
+  event: T,
+  redactionVersion: string,
+  context?: RedactionContext
+): T {
+  const legacy = redactionVersion !== SESSION_INSIGHT_REDACTION_VERSION;
+  return {
+    ...event,
+    inputExcerpt: legacy ? null : redactExcerpt(event.inputExcerpt, context),
+    outputExcerpt: legacy ? null : redactExcerpt(event.outputExcerpt, context),
+    errorExcerpt: legacy ? null : redactExcerpt(event.errorExcerpt, context)
+  };
 }
 
 /**

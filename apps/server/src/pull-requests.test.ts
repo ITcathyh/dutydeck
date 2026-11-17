@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import type { CiPipelineStatus, CiProvider, CiReviewComment, Session, TaskRecord, VerificationResponse } from '@dutydeck/shared';
 import { RuntimeError } from '@dutydeck/shared';
+import * as safeGit from '@dutydeck/shared/safe-git';
 import { createRepositories, executionTaskId } from '@dutydeck/storage';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import { CiProviderRegistry } from './ci-providers.js';
@@ -15,6 +16,17 @@ import { assertClaimedPushTarget, assertPushTarget, redactGitOutput } from './pu
 import { PR_COMMENT_MARKER, PullRequestService, parseReviewVerdicts, pullRequestNumber, snapshotFailure } from './pull-requests.js';
 import { createTurnDiffObserver } from './turn-diff.js';
 import * as pullRequestGit from './pull-request-git.js';
+
+const spawnCounts = vi.hoisted(() => ({ pushes: 0 }));
+vi.mock('node:child_process', async importOriginal => {
+  const original = await importOriginal<typeof import('node:child_process')>();
+  const instrumented = (...args: any[]) => {
+    if (args[0] === 'git' && Array.isArray(args[1]) && args[1].includes('push')) spawnCounts.pushes++;
+    return (original.execFile as any)(...args);
+  };
+  Object.defineProperty(instrumented, Symbol.for('nodejs.util.promisify.custom'), { value: (original.execFile as any)[Symbol.for('nodejs.util.promisify.custom')] });
+  return { ...original, execFile: instrumented };
+});
 
 const run = promisify(execFile);
 const cleanups: Array<() => Promise<void>> = [];
@@ -45,7 +57,7 @@ let cleanupTemplate: (() => Promise<void>) | undefined;
 afterAll(async () => { await cleanupTemplate?.(); });
 
 /** 本地裸仓库当 origin；工作区是它的克隆，origin/HEAD 指向 main。 */
-async function fixture(options: { withoutPullRequests?: boolean; log?: { warn: (...args: any[]) => void }; verificationCommand?: string } = {}) {
+async function fixture(options: { withoutPullRequests?: boolean; log?: { warn: (...args: any[]) => void }; verificationCommand?: string | (() => Promise<string | undefined>) } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'dutydeck-pr-'));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
   const remote = join(root, 'remote.git');
@@ -121,7 +133,7 @@ async function fixture(options: { withoutPullRequests?: boolean; log?: { warn: (
         if (state.notifyFailures > 0) { state.notifyFailures -= 1; throw new Error('飞书发送失败'); }
         notices.push(notice); return `om_${notices.length}`;
       },
-      ...(options.verificationCommand ? { verificationCommand: async () => options.verificationCommand } : {}),
+      ...(options.verificationCommand ? { verificationCommand: typeof options.verificationCommand === 'function' ? options.verificationCommand : async () => options.verificationCommand as string } : {}),
       clock: () => new Date(now.value), log: options.log
     });
     cleanups.push(() => created.close());
@@ -174,12 +186,31 @@ async function fixture(options: { withoutPullRequests?: boolean; log?: { warn: (
     state.prInfo = { headSha: head, headBranch: 'feature/login', baseBranch: 'main', headRepository: 'group/repo', title: 'Login fix', url: 'https://git.example.com/group/repo/pull/12' };
     return head;
   };
-  return { config: database.config, root, remote, cwd, git, remoteGit, now, session, tasks, dispatches, state, provider, runtime, get service() { return service; }, restart, notices, turn, finishLatest, poll, write, checkout, remoteBranches, open, external };
+  return { config: database.config, root, remote, cwd, git, remoteGit, now, session, tasks, dispatches, state, provider, runtime, get service() { return service; }, restart, notices, outputs, turn, finishLatest, poll, write, checkout, remoteBranches, open, external };
 }
 
 function verificationRecord(sessionId: string, command: string, status: VerificationResponse['status'], extra: Partial<VerificationResponse> = {}): VerificationResponse {
   return { schemaVersion: 1, revision: 1, id: `ver_${Math.random().toString(36).slice(2)}`, sessionId, command, cwd: '/work', status, startedAt: '2026-10-13T08:00:00.000Z',
     completedAt: '2026-10-13T08:01:00.000Z', output: '', outputTruncated: false, stale: false, ...(status === 'passed' ? { exitCode: 0 } : {}), ...extra };
+}
+
+type PullRequestFixture = Awaited<ReturnType<typeof fixture>>;
+async function submoduleCommit(f: PullRequestFixture, content: string): Promise<string> {
+  const vendor = join(f.cwd, 'vendor');
+  await mkdir(vendor, { recursive: true });
+  const git = async (...args: string[]) => (await run('git', ['-C', vendor, ...args])).stdout.trim();
+  await git('init', '-q');
+  await git('config', 'user.email', 'sub@example.com'); await git('config', 'user.name', 'Submodule');
+  await writeFile(join(vendor, 'code.txt'), `${content}\n`);
+  await git('add', '.'); await git('commit', '-qm', `submodule ${content}`);
+  return git('rev-parse', 'HEAD');
+}
+async function trackSubmodule(f: PullRequestFixture): Promise<string> {
+  const sha = await submoduleCommit(f, 'base');
+  await f.write('.gitmodules', '[submodule "vendor"]\n\tpath = vendor\n\turl = https://example.test/vendor.git\n');
+  await f.git('add', '.'); await f.git('commit', '-qm', 'track submodule');
+  await f.git('push', '-q', 'origin', 'main'); await f.git('fetch', '-q', 'origin');
+  return sha;
 }
 
 describe('PR background tick failures', () => {
@@ -252,6 +283,42 @@ describe('开 PR：确认清单与推送', () => {
     expect(await f.checkout()).toEqual(before);
     expect(await f.service.get(proposal.id)).toMatchObject({ status: 'open', headSha: pushed, pullRequest: { number: 7 } });
     expect(f.notices.at(-1)).toMatchObject({ title: 'PR #7 已开出', actions: [{ label: '停止跟进', value: { dutydeck_pr: proposal.id, op: 'stop' } }] });
+  });
+
+  it.each(['added', 'updated', 'deleted'] as const)('子模块%s进入确认清单后，生成的提交与预览一致', async scenario => {
+    const f = await fixture();
+    let expectedSha: string | undefined;
+    if (scenario !== 'added') await trackSubmodule(f);
+    await f.turn('task_user_1', async () => {
+      if (scenario === 'deleted') await rm(join(f.cwd, 'vendor'), { recursive: true, force: true });
+      else {
+        expectedSha = await submoduleCommit(f, scenario);
+        if (scenario === 'added') await f.write('.gitmodules', '[submodule "vendor"]\n\tpath = vendor\n\turl = https://example.test/vendor.git\n');
+      }
+    });
+    const proposal = await f.service.prepare(f.session.id, { title: `Submodule ${scenario}` }, 'ou_owner');
+    expect(proposal.files).toContainEqual(expect.objectContaining({ path: 'vendor', change: scenario === 'added' ? 'added' : scenario === 'deleted' ? 'deleted' : 'modified' }));
+    const proposed = (await f.service.get(proposal.id))!;
+    expect(proposed.contents.find(item => item.path === 'vendor')).toEqual(scenario === 'deleted' ? { path: 'vendor' } : { path: 'vendor', mode: '160000', sha: expectedSha });
+
+    await f.service.confirm(proposal.id, 'ou_owner'); await f.service.idle();
+    expect((await f.service.get(proposal.id))!.status).toBe('open');
+    const tree = await f.remoteGit('ls-tree', proposal.branch, 'vendor');
+    expect(tree).toBe(scenario === 'deleted' ? '' : `160000 commit ${expectedSha}\tvendor`);
+  });
+
+  it('确认清单生成后子模块又前进时拒绝推送，不把新状态或删除带进提交', async () => {
+    const f = await fixture();
+    await trackSubmodule(f);
+    await f.turn('task_user_1', async () => { await submoduleCommit(f, 'proposal'); });
+    const proposal = await f.service.prepare(f.session.id, { title: 'Submodule drift' }, 'ou_owner');
+    await submoduleCommit(f, 'changed-after');
+
+    await f.service.confirm(proposal.id, 'ou_owner'); await f.service.idle();
+    const failed = (await f.service.get(proposal.id))!;
+    expect(failed.status).toBe('failed');
+    expect(failed.reason).toContain('vendor');
+    expect(await f.remoteBranches()).toEqual(['main']);
   });
 
   it('PR 描述写最近一次验证记录和会话编号；没有记录时写未验证，只写脱敏命令、结果、时间、是否过期', async () => {
@@ -929,6 +996,147 @@ describe('PR 跟进：停止', () => {
     expect(f.provider.postComment).toHaveBeenCalledTimes(1);
   });
 
+  it.each(['stop', 'close', 'merge', 'replace-task'] as const)('任务已完成、验证配置仍等待时发生 %s，放行后不再发起宿主推送', async action => {
+    let entered!: () => void, release!: () => void;
+    const reached = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const f = await fixture({ verificationCommand: async () => { entered(); await gate; return undefined; } });
+    const pr = await f.open();
+    f.state.pipeline = { state: 'failed', runs: [{ id: 11, name: 'test', attempt: 1, headSha: pr.headSha!, status: 'completed', result: 'failed', url: 'https://ci.example.com/11' }] };
+    await f.poll();
+    const task = f.tasks.get(f.dispatches.at(-1)!.id)!;
+    await f.turn(task.id, () => f.write('app.ts', 'export const a = 3;\n'));
+    task.status = 'completed';
+    const running = f.service.tick();
+    await reached;
+    if (action === 'stop') await f.service.cancel(f.session.id, pr.id);
+    else if (action === 'close' || action === 'merge') await f.service.onWebhookEvent('fake', { kind: 'merge_request', repository: 'group/repo', branch: pr.branch, state: action });
+    else {
+      const key = `pull_request/record/${pr.id}`, raw = (await f.config.get(key))!;
+      const latest = JSON.parse(raw);
+      expect(await f.config.compareAndSet!(key, raw, JSON.stringify({ ...latest, revision: latest.revision + 1, task: { ...latest.task, id: 'replacement-task' } }))).toBe(true);
+    }
+    expect(task.status).toBe('completed');
+    release();
+    await running; await f.service.idle();
+
+    const latest = (await f.service.get(pr.id))!;
+    expect(latest.headSha).toBe(pr.headSha);
+    expect(await f.remoteGit('rev-parse', pr.branch)).toBe(pr.headSha);
+    if (action === 'replace-task') expect(latest).toMatchObject({ status: 'open', task: { id: 'replacement-task' } });
+    else {
+      expect(latest.status).toBe(action === 'stop' ? 'stopped' : action === 'close' ? 'closed' : 'merged');
+      expect(latest.task).toBeUndefined();
+    }
+    expect(task.status).toBe('completed');
+    expect(f.runtime.runVerification).not.toHaveBeenCalled();
+  }, 30_000);
+
+  it.each(['cancel', 'close', 'merge', 'continue'] as const)('Git 配置等待后的最终归属核对：%s', async action => {
+    const f = await fixture();
+    const pr = await f.open();
+    f.state.pipeline = { state: 'failed', runs: [{ id: 12, name: 'test', attempt: 1, headSha: pr.headSha!, status: 'completed', result: 'failed', url: 'https://ci.example.com/12' }] };
+    await f.poll();
+    const task = f.tasks.get(f.dispatches.at(-1)!.id)!;
+    await f.turn(task.id, () => f.write('app.ts', 'export const a = 3;\n'));
+    task.status = 'completed';
+
+    const originalConfig = safeGit.safeGitConfigFor;
+    const originalPush = pullRequestGit.pushBranch;
+    let inPush = false;
+    const push = vi.spyOn(pullRequestGit, 'pushBranch').mockImplementation((...args) => { inPush = true; return originalPush(...args); });
+    let entered!: () => void, release!: () => void;
+    const reached = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let paused = false;
+    const config = vi.spyOn(safeGit, 'safeGitConfigFor').mockImplementation(async (...args) => {
+      const resolved = await originalConfig(...args);
+      if (!paused && inPush) { paused = true; entered(); await gate; }
+      return resolved;
+    });
+    const originalPushes = spawnCounts.pushes;
+    const pushes = () => spawnCounts.pushes - originalPushes;
+    let running: Promise<void> | undefined;
+    try {
+      running = f.service.tick();
+      await Promise.race([reached, running.then(async () => {
+        if (!paused) throw new Error(`tick 未进入 Git 配置等待：${JSON.stringify(await f.service.get(pr.id))}`);
+      })]);
+      expect(paused).toBe(true);
+      expect(pushes()).toBe(0);
+      expect(await f.remoteGit('rev-parse', pr.branch)).toBe(pr.headSha);
+
+      if (action === 'cancel') await f.service.cancel(f.session.id, pr.id);
+      else if (action !== 'continue') {
+        f.state.pr = action === 'close' ? 'closed' : 'merged';
+        await f.service.onWebhookEvent('fake', { kind: 'merge_request', repository: 'group/repo', branch: pr.branch, state: action });
+      }
+      if (action !== 'continue') {
+        const stopped = (await f.service.get(pr.id))!;
+        expect(stopped).toMatchObject({ status: action === 'cancel' ? 'stopped' : action === 'close' ? 'closed' : 'merged', headSha: pr.headSha });
+        expect(stopped.task).toBeUndefined();
+      }
+      expect(pushes()).toBe(0);
+      release();
+      await running; running = undefined;
+      await f.service.idle();
+
+      const latest = (await f.service.get(pr.id))!;
+      const remoteHead = await f.remoteGit('rev-parse', pr.branch);
+      if (action === 'continue') {
+        expect(pushes()).toBe(1);
+        expect(remoteHead).not.toBe(pr.headSha);
+        expect(await f.remoteGit('show', `${remoteHead}:app.ts`)).toBe('export const a = 3;');
+        expect(latest).toMatchObject({ status: 'open', headSha: remoteHead });
+        expect(latest.task).toBeUndefined();
+      } else {
+        expect(pushes()).toBe(0);
+        expect(remoteHead).toBe(pr.headSha);
+        expect(latest).toMatchObject({ status: action === 'cancel' ? 'stopped' : action === 'close' ? 'closed' : 'merged', headSha: pr.headSha });
+        expect(latest.task).toBeUndefined();
+      }
+      expect(task.status).toBe('completed');
+    } finally {
+      release();
+      if (running) await running;
+      config.mockRestore();
+      push.mockRestore();
+    }
+  }, 30_000);
+
+  it('评审任务没有代码改动、回复尚未发送时停止，放行后不再发 PR 评论', async () => {
+    const f = await fixture();
+    const pr = await f.open();
+    f.state.comments = [{ id: 'review:1', body: 'Please fix app.ts', trusted: true }];
+    await f.poll();
+    const task = f.tasks.get(f.dispatches.at(-1)!.id)!;
+    await f.turn(task.id, async () => {});
+    task.status = 'completed';
+    f.outputs.set(task.id, 'DUTYDECK_REVIEW c1 DONE fixed app');
+    let entered!: () => void, release!: () => void;
+    const reached = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const get = f.config.get.bind(f.config);
+    let paused = false;
+    const reading = vi.spyOn(f.config, 'get').mockImplementation(async key => {
+      const raw = await get(key);
+      if (!paused && key === `turn_diff.${f.session.id}.${task.id}`) { paused = true; entered(); await gate; }
+      return raw;
+    });
+    try {
+      const running = f.service.tick();
+      await reached;
+      await f.service.cancel(f.session.id, pr.id);
+      release();
+      await running; await f.service.idle();
+    } finally { release(); reading.mockRestore(); }
+
+    expect(f.provider.postComment).not.toHaveBeenCalled();
+    expect(await f.service.get(pr.id)).toMatchObject({ status: 'stopped', headSha: pr.headSha });
+    expect((await f.service.get(pr.id))!.task).toBeUndefined();
+    expect(task.status).toBe('completed');
+  }, 30_000);
+
   it('PR 关闭或合并后停止跟进；手动停止后还没开始的跟进任务被拒绝', async () => {
     const f = await fixture();
     const pr = await f.open();
@@ -1135,6 +1343,20 @@ describe('PR 跟进：修复轮推送前验证', () => {
   };
   const deferred = <T,>() => { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve }; };
   const settleAgain = async (f: Awaited<ReturnType<typeof fixture>>) => { await f.service.idle(); await f.service.tick(); await f.service.idle(); };
+  const recordForcedDecision = async (f: Awaited<ReturnType<typeof fixture>>, id: string) => {
+    const key = `pull_request/verify/${id}`;
+    const verify = JSON.parse((await f.config.get(key))!);
+    await f.config.set(key, JSON.stringify({ ...verify, state: 'passed', forced: true }));
+  };
+  const saveForcedDecisionWithConflict = async (f: Awaited<ReturnType<typeof fixture>>, id: string) => {
+    const compareAndSet = f.config.compareAndSet!.bind(f.config);
+    const blocked = vi.spyOn(f.config, 'compareAndSet').mockImplementation(async (key, expected, value) =>
+      key === `pull_request/record/${id}` && JSON.parse(value).status === 'open' ? false : compareAndSet(key, expected, value));
+    try { await expect(f.service.forcePush(id)).rejects.toMatchObject({ code: 'PR_CONFLICT' }); }
+    finally { blocked.mockRestore(); }
+    expect(JSON.parse((await f.config.get(`pull_request/verify/${id}`))!)).toMatchObject({ state: 'passed', forced: true });
+    expect((await f.service.get(id))!.task).toBeDefined();
+  };
 
   it('机器人没配验证命令：不跑验证，照旧直接推送，通知写明未配置验证', async () => {
     const f = await fixture();
@@ -1145,6 +1367,28 @@ describe('PR 跟进：修复轮推送前验证', () => {
     expect(await f.remoteGit('rev-parse', pr.branch)).toBe(after.headSha);
     expect(f.runtime.runVerification).not.toHaveBeenCalled();
     expect(f.notices.at(-1)!.markdown).toContain('未配置验证命令，推送前没有验证。');
+  });
+
+  it('自动修复更新子模块时保留新的 gitlink，而不是生成删除', async () => {
+    const f = await fixture();
+    await f.turn('task_user_1', async () => {
+      await submoduleCommit(f, 'initial');
+      await f.write('.gitmodules', '[submodule "vendor"]\n\tpath = vendor\n\turl = https://example.test/vendor.git\n');
+      await f.write('app.ts', 'export const a = 2;\n');
+    });
+    const proposal = await f.service.prepare(f.session.id, { title: 'Submodule follow-up' }, 'ou_owner');
+    await f.service.confirm(proposal.id, 'ou_owner'); await f.service.idle();
+    const pr = (await f.service.get(proposal.id))!;
+    f.state.pipeline = failed(pr.headSha!);
+    await f.poll();
+    let fixedSha = '';
+    await f.finishLatest(async () => { fixedSha = await submoduleCommit(f, 'fixed'); });
+
+    const after = (await f.service.get(pr.id))!;
+    expect(after.status).toBe('open');
+    expect(after.task).toBeUndefined();
+    expect(after.headSha).not.toBe(pr.headSha);
+    expect(await f.remoteGit('ls-tree', pr.branch, 'vendor')).toBe(`160000 commit ${fixedSha}\tvendor`);
   });
 
   it('验证在后台跑，期间展示为验证中、不推送；通过后才推送，通知如实写验证对象：这一轮的文件和推送内容一致，工作区别的改动也参与了验证', async () => {
@@ -1323,6 +1567,159 @@ describe('PR 跟进：修复轮推送前验证', () => {
     const pushed = (await f.service.get(pr.id))!;
     expect(await f.remoteGit('rev-parse', pr.branch)).toBe(pushed.headSha);
     expect(pushed.headSha).not.toBe(pr.headSha);
+  });
+
+  it('仍然推送已保存但 PR 记录第二次写失败：重建后重复点击只补推一次', async () => {
+    const f = await fixture({ verificationCommand: 'pnpm test' });
+    f.state.verify = async (sessionId, command) => verificationRecord(sessionId, command, 'failed', { exitCode: 1 });
+    const pr = await fixRound(f);
+    await settleAgain(f);
+    const taskId = (await f.service.get(pr.id))!.task!.id;
+    const compareAndSet = f.config.compareAndSet!.bind(f.config);
+    const blocked = vi.spyOn(f.config, 'compareAndSet').mockImplementation(async (key, expected, value) =>
+      key === `pull_request/record/${pr.id}` && JSON.parse(value).status === 'open' ? false : compareAndSet(key, expected, value));
+    await expect(f.service.forcePush(pr.id)).rejects.toMatchObject({ code: 'PR_CONFLICT' });
+    expect(JSON.parse((await f.config.get(`pull_request/verify/${pr.id}`))!)).toMatchObject({ state: 'passed', forced: true, taskId });
+    expect(await f.service.get(pr.id)).toMatchObject({ status: 'stopped', task: { id: taskId } });
+    blocked.mockRestore();
+
+    await f.restart();
+    expect(await f.service.forcePush(pr.id)).toContain('仍然推送');
+    await settleAgain(f);
+    const pushed = (await f.service.get(pr.id))!;
+    expect(pushed.status).toBe('open');
+    expect(pushed.task).toBeUndefined();
+    expect(pushed.headSha).not.toBe(pr.headSha);
+    expect(await f.remoteGit('rev-parse', pr.branch)).toBe(pushed.headSha);
+    expect(f.runtime.runVerification).toHaveBeenCalledOnce();
+    expect(await f.service.forcePush(pr.id)).toContain('已经处理过了');
+    await settleAgain(f);
+    expect(await f.remoteGit('rev-parse', pr.branch)).toBe(pushed.headSha);
+  });
+
+  it('强制继续已保存但 PR 记录仍 stopped 时，重启后的轮询自动补全并继续一次', async () => {
+    const f = await fixture({ verificationCommand: 'pnpm test' });
+    f.state.verify = async (sessionId, command) => verificationRecord(sessionId, command, 'failed', { exitCode: 1 });
+    const pr = await fixRound(f);
+    await settleAgain(f);
+    await recordForcedDecision(f, pr.id);
+    await f.restart();
+
+    await f.service.tick(); await f.service.idle();
+    const pushed = (await f.service.get(pr.id))!;
+    expect(pushed.status).toBe('open');
+    expect(pushed.task).toBeUndefined();
+    expect(pushed.headSha).not.toBe(pr.headSha);
+    expect(await f.remoteGit('rev-parse', pr.branch)).toBe(pushed.headSha);
+    await settleAgain(f);
+    expect(await f.remoteGit('rev-parse', pr.branch)).toBe(pushed.headSha);
+    expect(f.runtime.runVerification).toHaveBeenCalledOnce();
+  });
+
+  it.each(['cancel', 'close', 'replace-task'] as const)('并发%s发生在强制继续的第二写时，不复活旧任务或推送', async scenario => {
+    const f = await fixture({ verificationCommand: 'pnpm test' });
+    f.state.verify = async (sessionId, command) => verificationRecord(sessionId, command, 'failed', { exitCode: 1 });
+    const pr = await fixRound(f);
+    await settleAgain(f);
+    await recordForcedDecision(f, pr.id);
+    const compareAndSet = f.config.compareAndSet!.bind(f.config);
+    let injected = false;
+    const competing = vi.spyOn(f.config, 'compareAndSet').mockImplementation(async (key, expected, value) => {
+      if (!injected && key === `pull_request/record/${pr.id}` && JSON.parse(value).status === 'open') {
+        injected = true;
+        const current = JSON.parse(expected!);
+        const next = scenario === 'cancel'
+          ? { ...current, task: undefined, reason: '已手动停止跟进', revision: current.revision + 1 }
+          : scenario === 'close'
+            ? { ...current, status: 'closed', task: undefined, revision: current.revision + 1 }
+            : { ...current, task: { ...current.task, id: 'task_replacement' }, revision: current.revision + 1 };
+        expect(await compareAndSet(key, expected, JSON.stringify(next))).toBe(true);
+      }
+      return compareAndSet(key, expected, value);
+    });
+    try {
+      await f.service.tick(); await f.service.idle();
+    } finally { competing.mockRestore(); }
+
+    expect(injected).toBe(true);
+    const latest = (await f.service.get(pr.id))!;
+    if (scenario === 'close') expect(latest.status).toBe('closed');
+    else if (scenario === 'cancel') expect(latest.status).toBe('stopped');
+    else expect(latest).toMatchObject({ status: 'stopped', task: { id: 'task_replacement' } });
+    if (scenario !== 'replace-task') expect(latest.task).toBeUndefined();
+    expect(await f.remoteGit('rev-parse', pr.branch)).toBe(pr.headSha);
+  });
+
+  it.each(['close', 'merge'] as const)('部分 force 决定落盘后收到 %s，重建、重复点击和轮询都不推送', async action => {
+    const f = await fixture({ verificationCommand: 'pnpm test' });
+    f.state.verify = async (sessionId, command) => verificationRecord(sessionId, command, 'failed', { exitCode: 1 });
+    const pr = await fixRound(f);
+    await settleAgain(f);
+    await saveForcedDecisionWithConflict(f, pr.id);
+    f.state.pr = action === 'close' ? 'closed' : 'merged';
+    await f.service.onWebhookEvent('fake', { kind: 'merge_request', repository: 'group/repo', branch: pr.branch, state: action });
+    await f.service.idle();
+    const status = action === 'close' ? 'closed' : 'merged';
+    expect(await f.service.get(pr.id)).toMatchObject({ status, headSha: pr.headSha });
+    expect((await f.service.get(pr.id))!.task).toBeUndefined();
+
+    await f.restart();
+    expect(await f.service.forcePush(pr.id)).toContain('已经处理过了');
+    await f.service.tick(); await f.service.idle();
+    expect(await f.remoteGit('rev-parse', pr.branch)).toBe(pr.headSha);
+    expect(await f.service.get(pr.id)).toMatchObject({ status, headSha: pr.headSha });
+    await settleAgain(f);
+    expect(await f.remoteGit('rev-parse', pr.branch)).toBe(pr.headSha);
+  }, 30_000);
+
+  it.each(['close', 'cancel'] as const)('ownership 等待中发生 %s，强制继续不会越过新终态', async action => {
+    const f = await fixture({ verificationCommand: 'pnpm test' });
+    f.state.verify = async (sessionId, command) => verificationRecord(sessionId, command, 'failed', { exitCode: 1 });
+    const pr = await fixRound(f);
+    await settleAgain(f);
+    await saveForcedDecisionWithConflict(f, pr.id);
+    let entered!: () => void, release!: () => void;
+    const reached = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const list = f.config.list!.bind(f.config);
+    let paused = false;
+    const waiting = vi.spyOn(f.config, 'list').mockImplementation(async prefix => {
+      if (!paused && new Error().stack?.includes('ownsPullRequest')) { paused = true; entered(); await gate; }
+      return list(prefix);
+    });
+    let running: Promise<void> | undefined;
+    try {
+      running = f.service.tick();
+      await reached;
+      if (action === 'close') {
+        f.state.pr = 'closed';
+        await f.service.onWebhookEvent('fake', { kind: 'merge_request', repository: 'group/repo', branch: pr.branch, state: 'close' });
+      } else await f.service.cancel(f.session.id, pr.id);
+      release();
+      await running; running = undefined;
+      await f.service.idle();
+    } finally { release(); if (running) await running; waiting.mockRestore(); }
+
+    expect(paused).toBe(true);
+    expect(await f.service.get(pr.id)).toMatchObject({ status: action === 'close' ? 'closed' : 'stopped', headSha: pr.headSha });
+    expect((await f.service.get(pr.id))!.task).toBeUndefined();
+    expect(await f.remoteGit('rev-parse', pr.branch)).toBe(pr.headSha);
+  }, 30_000);
+
+  it('强制继续已经保存但 PR 归属改变时，重试和轮询都不重新打开旧记录', async () => {
+    const f = await fixture({ verificationCommand: 'pnpm test' });
+    f.state.verify = async (sessionId, command) => verificationRecord(sessionId, command, 'failed', { exitCode: 1 });
+    const pr = await fixRound(f);
+    await settleAgain(f);
+    const taskId = (await f.service.get(pr.id))!.task!.id;
+    await recordForcedDecision(f, pr.id);
+    const raw = JSON.parse((await f.config.get(`pull_request/record/${pr.id}`))!);
+    await f.config.set('pull_request/record/pr_other', JSON.stringify({ ...raw, id: 'pr_other', sessionId: 'ses_other', status: 'open', task: undefined }));
+
+    await expect(f.service.forcePush(pr.id)).rejects.toMatchObject({ code: 'PR_ALREADY_FOLLOWED' });
+    await f.service.tick(); await f.service.idle();
+    expect(await f.service.get(pr.id)).toMatchObject({ status: 'stopped', task: { id: taskId } });
+    expect(await f.remoteGit('rev-parse', pr.branch)).toBe(pr.headSha);
   });
 
   it('验证没过、等人处理期间别的会话不能认领同一个 PR；仍然推送前核对这条记录仍是唯一的跟进者', async () => {

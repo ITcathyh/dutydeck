@@ -30,9 +30,11 @@ export function SessionInsightPulseChart({ buckets }: { buckets: PulseBucket[] }
   const [bucket, setBucket] = useState<BucketKey>('total');
   const [showTable, setShowTable] = useState(false);
 
-  const { bars, max, missingTotal } = useMemo(() => {
+  const { bars, max, peakText, missingTotal } = useMemo(() => {
     const values = buckets.map(item => item.tokens[bucket].value ?? 0);
     const peak = values.reduce((max, value) => Math.max(max, value), 0);
+    // 柱高可以用 0 兜底；对外峰值只有存在已知值时才给数字，真实 0 也算已知。
+    const knownValues = buckets.map(item => item.tokens[bucket].value).filter((value): value is number => value !== null);
     const missing = buckets.reduce((sum, item) => sum + item.missingCount, 0);
     return {
       bars: buckets.map((item, index) => ({
@@ -41,6 +43,7 @@ export function SessionInsightPulseChart({ buckets }: { buckets: PulseBucket[] }
         unknown: item.tokens[bucket].value === null
       })),
       max: peak,
+      peakText: knownValues.length ? Math.max(...knownValues).toLocaleString('zh-CN') : '未知',
       missingTotal: missing
     };
   }, [buckets, bucket]);
@@ -51,8 +54,9 @@ export function SessionInsightPulseChart({ buckets }: { buckets: PulseBucket[] }
 
   const width = 720;
   const height = 160;
-  const gap = 2;
-  const barWidth = Math.max(2, width / bars.length - gap);
+  const slotWidth = width / bars.length;
+  const gap = Math.min(2, slotWidth / 4);
+  const barWidth = slotWidth - gap;
 
   return <div className="space-y-2">
     <div className="flex flex-wrap items-center gap-1" role="group" aria-label="选择 Token 分桶">
@@ -71,11 +75,11 @@ export function SessionInsightPulseChart({ buckets }: { buckets: PulseBucket[] }
         {showTable ? '隐藏数据表' : '查看数据表'}
       </button>
     </div>
-    <svg role="img" aria-label={`${bucketOptions.find(option => option.id === bucket)!.label} Token 按时间桶分布，共 ${bars.length} 个桶，峰值 ${max.toLocaleString('zh-CN')}`} viewBox={`0 0 ${width} ${height}`} className="w-full">
+    <svg role="img" aria-label={`${bucketOptions.find(option => option.id === bucket)!.label} Token 按时间桶分布，共 ${bars.length} 个桶，峰值 ${peakText}`} viewBox={`0 0 ${width} ${height}`} className="w-full">
       <line x1="0" y1={height - 0.5} x2={width} y2={height - 0.5} className="stroke-border-strong"/>
       {bars.map(({ bucket: item, value, unknown }, index) => {
         const barHeight = max > 0 ? Math.max(value > 0 ? 2 : 0, (value / max) * (height - 24)) : 0;
-        const x = index * (barWidth + gap);
+        const x = index * slotWidth + gap / 2;
         const y = height - barHeight;
         return <rect
           key={`${item.startAt}-${index}`}
@@ -91,7 +95,7 @@ export function SessionInsightPulseChart({ buckets }: { buckets: PulseBucket[] }
       })}
     </svg>
     <p className="text-caption text-subtle">
-      峰值 {max.toLocaleString('zh-CN')} token/桶；{missingTotal > 0 ? `另有 ${missingTotal.toLocaleString('zh-CN')} 个缺失样本未计入柱条；` : ''}
+      峰值 {peakText} token/桶；{missingTotal > 0 ? `另有 ${missingTotal.toLocaleString('zh-CN')} 个缺失样本未计入柱条；` : ''}
       灰色柱位表示该桶分桶值未知，不按 0 处理。脉冲只描述观察区间，不代表模型解码速度。
     </p>
     {showTable && <div className="max-h-60 overflow-auto rounded-md border border-subtle">
@@ -104,10 +108,10 @@ export function SessionInsightPulseChart({ buckets }: { buckets: PulseBucket[] }
           </tr>
         </thead>
         <tbody className="divide-y divide-subtle">
-          {bars.map(({ bucket: item, value }, index) => (
+          {bars.map(({ bucket: item }, index) => (
             <tr key={`${item.startAt}-row-${index}`}>
               <td className="px-2 py-1 text-secondary">{formatTick(item.startAt)}–{formatTick(item.endAt)}</td>
-              <td className="px-2 py-1 text-right tabular-nums">{value.toLocaleString('zh-CN')}</td>
+              <td className="px-2 py-1 text-right tabular-nums" title={metricTitle(item.tokens[bucket])}>{metricValueText(item.tokens[bucket])}</td>
               <td className="px-2 py-1 text-right tabular-nums text-subtle">{item.sampleCount} / {item.missingCount}</td>
             </tr>
           ))}

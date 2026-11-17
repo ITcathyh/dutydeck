@@ -62,3 +62,65 @@ it('renders declarative Web slot elements as a bounded preview', async()=>{
   expect(action.hasAttribute('disabled')).toBe(true);
   expect(screen.getByText(/命令：details · 受限预览/)).toBeTruthy();
 });
+
+function mountBindings() {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  render(<QueryClientProvider client={client}><PluginBindingsPanel/></QueryClientProvider>);
+}
+
+it('keeps edits typed during save and uses the returned revision for the next save', async () => {
+  vi.spyOn(pluginBindingsApi, 'list').mockResolvedValue({ bindings: [], diagnostics: [], packages: [{ name: 'sample', scope: 'global', apiVersion: 1, requiredSkills: [], legacyGlobal: [], configSchema: { note: { type: 'string', description: 'Note' } } }] });
+  let finish!: (value: any) => void;
+  let first: any;
+  const save = vi.spyOn(pluginBindingsApi, 'save').mockImplementation(input => {
+    if (save.mock.calls.length === 1) {
+      first = structuredClone(input);
+      return new Promise(done => { finish = done; });
+    }
+    return Promise.resolve({ binding: { ...input, id: 'binding', revision: 2 } });
+  });
+  mountBindings();
+  fireEvent.change(await screen.findByLabelText('插件'), { target: { value: 'sample' } });
+  fireEvent.change(screen.getByLabelText('Bot App ID'), { target: { value: 'bot-a' } });
+  fireEvent.change(screen.getByLabelText('note'), { target: { value: 'submitted' } });
+  fireEvent.click(screen.getByRole('button', { name: '保存绑定' }));
+  await waitFor(() => expect(finish).toBeTypeOf('function'));
+  fireEvent.change(screen.getByLabelText('note'), { target: { value: 'new unsaved text' } });
+  finish({ binding: { ...first, id: 'binding', revision: 1 } });
+  await waitFor(() => expect((screen.getByRole('button', { name: '保存绑定' }) as HTMLButtonElement).disabled).toBe(false));
+  expect((screen.getByLabelText('note') as HTMLInputElement).value).toBe('new unsaved text');
+  fireEvent.click(screen.getByRole('button', { name: '保存绑定' }));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+  expect(save.mock.calls[1]?.[0]).toMatchObject({ expectedRevision: 1, config: { note: 'new unsaved text' } });
+});
+
+it('does not switch back to a completed binding after another binding was opened', async () => {
+  const a = { id: 'a', plugin: 'sample', botAppId: 'bot-a', enabled: true, revision: 1, skills: [], config: { note: 'A' }, secrets: {} };
+  const b = { ...a, id: 'b', botAppId: 'bot-b', config: { note: 'B' } };
+  vi.spyOn(pluginBindingsApi, 'list').mockResolvedValue({ bindings: [a, b], diagnostics: [], packages: [{ name: 'sample', scope: 'global', apiVersion: 1, requiredSkills: [], legacyGlobal: [], configSchema: { note: { type: 'string', description: 'Note' } } }] });
+  let finish!: (value: any) => void;
+  vi.spyOn(pluginBindingsApi, 'save').mockImplementation(() => new Promise(done => { finish = done; }));
+  mountBindings();
+  fireEvent.click(await screen.findByRole('button', { name: 'sample · bot-a · r1' }));
+  fireEvent.click(screen.getByRole('button', { name: '保存绑定' }));
+  await waitFor(() => expect(finish).toBeTypeOf('function'));
+  fireEvent.click(screen.getByRole('button', { name: 'sample · bot-b · r1' }));
+  fireEvent.change(screen.getByLabelText('note'), { target: { value: 'B edited' } });
+  finish({ binding: { ...a, revision: 2 } });
+  await waitFor(() => expect((screen.getByRole('button', { name: '保存绑定' }) as HTMLButtonElement).disabled).toBe(false));
+  expect((screen.getByLabelText('Bot App ID') as HTMLInputElement).value).toBe('bot-b');
+  expect((screen.getByLabelText('note') as HTMLInputElement).value).toBe('B edited');
+});
+
+it('installs the returned revision when the submitted draft is unchanged', async () => {
+  vi.spyOn(pluginBindingsApi, 'list').mockResolvedValue({ bindings: [], diagnostics: [], packages: [{ name: 'sample', scope: 'global', apiVersion: 1, requiredSkills: [], legacyGlobal: [], configSchema: {} }] });
+  const save = vi.spyOn(pluginBindingsApi, 'save').mockImplementation(async input => ({ binding: { ...input, id: 'binding', revision: 2 } }));
+  mountBindings();
+  fireEvent.change(await screen.findByLabelText('插件'), { target: { value: 'sample' } });
+  fireEvent.change(screen.getByLabelText('Bot App ID'), { target: { value: 'bot-a' } });
+  fireEvent.click(screen.getByRole('button', { name: '保存绑定' }));
+  await waitFor(() => expect((screen.getByRole('button', { name: '保存绑定' }) as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.click(screen.getByRole('button', { name: '保存绑定' }));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+  expect(save.mock.calls[1]?.[0].expectedRevision).toBe(2);
+});

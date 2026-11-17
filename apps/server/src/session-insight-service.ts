@@ -55,7 +55,12 @@ import {
   resolveSessionInsightEngine,
   type ResolvedEngine
 } from './session-insight-engine.js';
-import { redactAnalyzeResult, type RedactionContext } from './session-insight-redaction.js';
+import {
+  projectPersistedInsightEvent,
+  redactAnalyzeResult,
+  SESSION_INSIGHT_REDACTION_VERSION,
+  type RedactionContext
+} from './session-insight-redaction.js';
 import { buildHostEvidenceSnapshot } from './session-insight-evidence.js';
 
 /** 外部 cancel/close 中止作业：状态已由取消路径落定，runJob 安静返回，不写 failed。 */
@@ -79,7 +84,7 @@ import {
 } from './session-insight-export.js';
 
 /** 脱敏投影版本：参与 cache key 与 manifest.versions，redaction 逻辑变化时必须递增。 */
-const REDACTION_VERSION = 'redaction-v1';
+const REDACTION_VERSION = SESSION_INSIGHT_REDACTION_VERSION;
 /** 固定范围口径版本，与 T4d summary.scopeVersion 默认值一致。 */
 const SCOPE_VERSION = 'primary_verified_v1';
 const SCHEMA_VERSION = 1;
@@ -752,10 +757,16 @@ export class SessionInsightService {
       throw new RuntimeError('INSIGHT_SNAPSHOT_GONE', 'Session insight snapshot is no longer available', 410);
     }
     // getSnapshot 校验 session 归属；不存在/不归属 → 404。
-    if (!this.repos.getSnapshot(sessionId, query.snapshotId)) {
+    const snapshot = this.repos.getSnapshot(sessionId, query.snapshotId);
+    if (!snapshot) {
       throw new RuntimeError('INSIGHT_NOT_FOUND', 'Session insight resource not found', 404);
     }
-    return this.repos.listEvents(query);
+    const page = this.repos.listEvents(query);
+    const context = this.buildHostRedactionContext(sessionId, '');
+    return {
+      ...page,
+      items: page.items.map(event => projectPersistedInsightEvent(event, snapshot.versions.redactionVersion, context))
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -1231,6 +1242,7 @@ export class SessionInsightService {
       ...snapshot.summary.keyEvidenceEventIds.highTokenDeltas
     ]);
     const byId = new Map<string, SessionInsightEventItem>();
+    const redactionContext = this.buildHostRedactionContext(snapshot.sessionId, '');
     let cursor: string | undefined;
     let scanned = 0;
     while (scanned < SESSION_INSIGHT_LIMITS.maxTraceEventsPerJob) {
@@ -1240,7 +1252,9 @@ export class SessionInsightService {
         limit: SESSION_INSIGHT_LIMITS.maxEventsPerPageMax
       });
       for (const item of page.items) {
-        if (wanted.has(item.eventId)) byId.set(item.eventId, item);
+        if (wanted.has(item.eventId)) {
+          byId.set(item.eventId, projectPersistedInsightEvent(item, snapshot.versions.redactionVersion, redactionContext));
+        }
       }
       scanned += page.items.length;
       if (!page.nextCursor || byId.size >= SESSION_INSIGHT_LIMITS.maxReportEvidenceCount) break;

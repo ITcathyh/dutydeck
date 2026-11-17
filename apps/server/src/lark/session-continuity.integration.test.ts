@@ -309,4 +309,25 @@ describe('意外新建会话的首卡注记', () => {
     expect(h.firstCard(next)).toBeTruthy();
     expect(h.firstCard(next)).not.toContain('已开新会话');
   });
+
+  it('/new 的同消息旧会话映射尚未投递时，新会话仍能推进归属并保存 delivered', async () => {
+    const h = await harness();
+    await h.coordinator.handle(top('om_task', '整理方案'), h.config);
+    await h.delivered('om_task');
+    const original = await h.sessionOf('om_task');
+    const source = (await h.repos.channelMappings.list(`lark-card:${h.config.appId}`)).find(item => item.externalId === 'om_task')!;
+    const saved = JSON.parse(source.extra!) as Record<string, unknown>;
+    // 全量并发下会先留下这种同消息、同轮、旧会话的未投递快照；随后公开 /new 才进入新会话。
+    for (const key of ['final_message_id', 'final_delivery_state', 'final_delivery_error', 'final_delivery_first_failed_at', 'final_elements', 'final_card_input']) delete saved[key];
+    await h.repos.channelMappings.save({ ...source, id: `lark-card:${h.config.appId}:om_new`, externalId: 'om_new',
+      extra: JSON.stringify({ ...saved, state: 'running' }) });
+
+    await h.coordinator.handle(top('om_new', '/new 下一件事'), h.config);
+
+    await h.delivered('om_new');
+    expect(await h.sessionOf('om_new')).not.toBe(original);
+    const final = JSON.parse((await h.repos.channelMappings.get(`lark-card:${h.config.appId}`, 'om_new'))!.extra!);
+    expect(final).toMatchObject({ turn: 1, state: 'completed', final_delivery_state: 'delivered' });
+    expect(final.runtime_task_id).not.toBe(saved.runtime_task_id);
+  });
 });

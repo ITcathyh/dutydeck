@@ -141,7 +141,15 @@ export function GroupPolicyModal({ open, onClose }: { open: boolean; onClose(): 
   const [collaborationTarget, setCollaborationTarget] = useState<CollaborationScopeTarget>();
   const save = useMutation({
     mutationFn: (current: Draft) => foundationApi.updateGroupBinding(current.bindingId, bindingUpdate(current)),
-    onSuccess: async () => { setDraft(undefined); setConflict(undefined); await queryClient.invalidateQueries({ queryKey: ['foundation-group-matrix'] }); },
+    onSuccess: async (result, submitted) => {
+      setDraft(current => {
+        if (!current || current.bindingId !== submitted.bindingId || current.expectedRevision !== submitted.expectedRevision) return current;
+        if (JSON.stringify(current) === JSON.stringify(submitted)) return undefined;
+        return { ...current, expectedRevision: result.revision };
+      });
+      setConflict(undefined);
+      await queryClient.invalidateQueries({ queryKey: ['foundation-group-matrix'] });
+    },
     onError: error => {
       if (error instanceof ApiError && error.code === 'FOUNDATION_REVISION_CONFLICT' && error.current) setConflict(error.current as GroupBinding);
     }

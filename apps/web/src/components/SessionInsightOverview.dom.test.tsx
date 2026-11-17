@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { SessionInsightSummaryResponse, SummaryGroupRow, SummarySessionRow } from '@dutydeck/shared';
@@ -231,6 +231,8 @@ describe('SessionInsightOverview 选择、批量有界提交与对比', () => {
     // 首次失败立即展示错误横幅与重试按钮，不卡在 Spinner
     const banner = await screen.findByRole('alert');
     expect(banner.textContent).toContain('会话分析汇总读取失败：服务暂不可用');
+    expect(screen.getByLabelText('创建时间起（UTC）')).toBeTruthy();
+    expect(screen.getByLabelText('创建时间止（UTC）')).toBeTruthy();
     expect(screen.queryByText('正在读取会话分析汇总…')).toBeNull();
     // 点击「重试」只重新查询汇总 GET，不触发 POST 分析刷新
     await user.click(within(banner).getByRole('button', { name: '重试' }));
@@ -249,5 +251,23 @@ describe('SessionInsightOverview 选择、批量有界提交与对比', () => {
     // 共享来源行带标注与该行自带的归属说明。
     expect(screen.getByText('共享来源')).toBeTruthy();
     expect(screen.getByTitle('共享来源只算一次')).toBeTruthy();
+  });
+
+  it('开始晚于结束或等于结束时保留筛选且不查询，改合法后用当前条件重试', async () => {
+    const summary = vi.spyOn(insightApi, 'summary').mockResolvedValue(summaryResponse());
+    mount();
+    await screen.findByRole('region', { name: '候选会话覆盖' });
+    fireEvent.change(screen.getByLabelText('创建时间起（UTC）'), { target: { value: '2026-11-17' } });
+    fireEvent.change(screen.getByLabelText('创建时间止（UTC）'), { target: { value: '2026-11-16' } });
+    expect(await screen.findByText(/创建时间起必须早于创建时间止/)).toBeTruthy();
+    const blockedCalls = summary.mock.calls.length;
+    expect(screen.getByLabelText('创建时间起（UTC）')).toBeTruthy();
+    expect(screen.getByLabelText('创建时间止（UTC）')).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('创建时间止（UTC）'), { target: { value: '2026-11-17' } });
+    expect(screen.getByText(/相同日期也不构成有效的分析区间/)).toBeTruthy();
+    expect(summary).toHaveBeenCalledTimes(blockedCalls);
+    fireEvent.change(screen.getByLabelText('创建时间止（UTC）'), { target: { value: '2026-11-18' } });
+    await vi.waitFor(() => expect(summary.mock.calls.length).toBeGreaterThan(blockedCalls));
+    expect(summary.mock.calls.at(-1)?.[0]).toMatchObject({ from: '2026-11-17T00:00:00.000Z', to: '2026-11-18T00:00:00.000Z' });
   });
 });

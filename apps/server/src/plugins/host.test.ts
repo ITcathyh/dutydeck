@@ -399,4 +399,45 @@ describe('scenario packs: trust boundary, builtin plugins and wiring', () => {
     expect(scenarios.applicable({ botAppId: 'cli_a' }, { demo: { ...binding, packVersion: '2.0.0' } })).toEqual([]);
     expect(scenarios.applicable({ botAppId: 'cli_a' }, { demo: { ...binding, params: { sources: [] } } })).toEqual([]);
   });
+
+  it('accepts query commands in plugin self-test without executing their query', async () => {
+    const root = resolve(import.meta.dirname, '../../../../examples/plugins/fake-ticket');
+    const fetch = vi.spyOn(globalThis, 'fetch');
+    const result = await PluginHost.testPlugin({ root, dataDir: join(temp, 'query-test') });
+    expect(result).toMatchObject({ ok: true, active: true, diagnostics: [], issues: [] });
+    expect(result.summary.commands).toContain('fake-ticket:ticket-status');
+    expect(result.summary.tools).toContain('fake-ticket/status');
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('keeps prompt expansion checks and rejects an unregistered query with redacted diagnostics', async () => {
+    const root = join(temp, 'self-test');
+    await writePlugin(root, {
+      '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'self-test', version: '1.0.0', providers: 'index.mjs' }),
+      'index.mjs': 'export default () => {};',
+      'commands/check.md': 'Check $ARGUMENTS'
+    });
+    expect((await PluginHost.testPlugin({ root, dataDir: join(temp, 'prompt-test') })).ok).toBe(true);
+    await writePlugin(root, { 'commands/check.md': '---\nquery: absent\nargument: id\n---\n' });
+    const invalid = await PluginHost.testPlugin({ root, dataDir: join(temp, 'invalid-query-test') });
+    expect(invalid.ok).toBe(false);
+    expect(invalid.active).toBe(false);
+    expect(invalid.summary.commands).toEqual([]);
+    expect(invalid.diagnostics).toEqual([{ plugin: 'self-test', message: 'PLUGIN_PROVIDER_REGISTRATION_FAILED: provider import or registration failed; check package compatibility and installation configuration' }]);
+  });
+
+  it('rejects a real Host dependency outside a complete zero-minor caret range', async () => {
+    const store = new PluginStore(dataDir, join(temp, 'no-builtins'));
+    await writePlugin(join(temp, 'dependency'), { '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'dependency', version: '0.0.4' }) });
+    await writePlugin(join(temp, 'consumer'), { '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'consumer', version: '1.0.0', dependencies: { dependency: '^0.0.3' } }) });
+    await store.install(join(temp, 'dependency'), { yes: true });
+    await store.install(join(temp, 'consumer'), { yes: true });
+    const host = await PluginHost.load({ dataDir, builtinRoot: join(temp, 'no-builtins') });
+    try {
+      expect(host.active.map(item => item.entry.name)).toEqual(['dependency']);
+      expect(host.diagnostics).toEqual([expect.objectContaining({ plugin: 'consumer', message: expect.stringContaining('0.0.4 不满足 ^0.0.3') })]);
+    } finally {
+      await host.dispose();
+    }
+  });
 });

@@ -230,18 +230,6 @@ const anyArgsPrograms = new Set(['cat', 'head', 'tail', 'wc', 'grep', 'egrep', '
   'uptime', 'realpath', 'dirname', 'basename', 'readlink', 'test', '[', 'true', 'false', 'cd', 'sleep', 'md5sum', 'sha1sum', 'sha256sum', 'seq', 'od',
   'strings']);
 
-/** git diff / log / show 和同样认 --output 的 blame / rev-list / shortlog。--output 写文件、--ext-diff 执行外部比较程序、--show-signature 执行 gpg，都不在表里。 */
-const gitHistoryOptions: OptionSpec = {
-  flags: ['-p', '-u', '--patch', '-s', '--no-patch', '--raw', '--stat', '--numstat', '--shortstat', '--summary', '--name-only', '--name-status',
-    '--check', '-M', '-C', '-R', '-w', '-b', '--ignore-all-space', '--ignore-space-change', '-W', '--function-context', '--word-diff', '--color',
-    '--no-color', '--exit-code', '--quiet', '--no-ext-diff', '--no-textconv', '--no-prefix', '-z', '--cached', '--staged', '--merge-base', '--no-index',
-    '--first-parent', '--oneline', '--graph', '--decorate', '--no-decorate', '--all', '--merges', '--no-merges', '--reverse', '--topo-order',
-    '--abbrev-commit', '--follow', '--left-right', '--parents', '--relative-date', '--pretty', '-n', '-e', '-c', '--count', '--summary'],
-  values: ['-U', '-L', '-S', '-G', '--stat', '--format', '--pretty', '--date', '--max-count', '--skip', '--since', '--after', '--until', '--before',
-    '--author', '--committer', '--grep', '--diff-filter', '--unified', '--color', '--word-diff', '--decorate', '--abbrev'],
-  numeric: true
-};
-
 const programOptions: Record<string, OptionSpec> = {
   // 不认 --pre / --pre-glob（执行预处理程序）、--hostname-bin（执行程序）、-z / --search-zip（执行解压程序）。
   rg: {
@@ -299,7 +287,7 @@ const findPredicates = new Set(['-name', '-iname', '-path', '-ipath', '-wholenam
 const gitGlobalFlags = new Set(['--no-pager', '-P', '--no-optional-locks', '--literal-pathspecs']);
 const gitGlobalValues = new Set(['-C', '--git-dir', '--work-tree']);
 /** 这些子命令没有写文件、执行程序类的参数（在临时仓库里核对过它们都不认 --output）。 */
-const readOnlyGit = new Set(['status', 'rev-parse', 'ls-files', 'ls-tree', 'describe', 'cat-file', 'merge-base', 'show-ref', 'name-rev',
+const readOnlyGit = new Set(['rev-parse', 'ls-files', 'ls-tree', 'describe', 'cat-file', 'merge-base', 'show-ref', 'name-rev',
   'count-objects', 'version']);
 
 /** 命令前的变量赋值只认不改变行为的这几个：RIPGREP_CONFIG_PATH、GIT_EXTERNAL_DIFF、LESSOPEN、PATH 一类能让只读命令执行别的程序。 */
@@ -347,7 +335,11 @@ function segmentRisk(words: string[]): string | undefined {
     const sub = args[i] ?? '';
     const rest = args.slice(i + 1);
     const label = `git ${displayName(sub)}`.trim();
-    if (['diff', 'log', 'show', 'blame', 'rev-list', 'shortlog'].includes(sub)) return optionsAllowed(rest, gitHistoryOptions) ? undefined : label;
+    if (['status', 'diff', 'log', 'show', 'blame', 'rev-list', 'shortlog'].includes(sub)) {
+      // status 的 fsmonitor、diff 的 diff driver / textconv 等仓库配置可以执行本地程序；账本没有本次运行环境已净化的证据。
+      // 参数只能关闭其中一部分路径，不能据此自动重放。
+      return label;
+    }
     // git grep -O 会用分页程序打开匹配到的文件。
     if (sub === 'grep') return rest.some(arg => /^-[^-]*O|^--open-files-in-pager/.test(arg)) ? label : undefined;
     if (readOnlyGit.has(sub)) return undefined;

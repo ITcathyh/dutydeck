@@ -31,6 +31,7 @@ function isSameOrIntersectingPath(a: string, b: string): boolean {
 }
 
 const STOP_BLOCK_PREFIX = 'runtime_driver_stop_block:';
+const EXIT_DRAIN_TIMEOUT_MS = 5_000;
 
 function nativeTargetOf(options: ExecutionOptions): Omit<ExecutionOptions, 'permissionMode'> {
   return { ...(options.model !== undefined ? { model: options.model } : {}), ...(options.reasoningEffort !== undefined ? { reasoningEffort: options.reasoningEffort } : {}) };
@@ -333,6 +334,8 @@ export class DutydeckRuntime {
   private readonly sessionGenerations = new Map<string, number>();
   private readonly exitedDriverGenerations = new Map<string, number>();
   private readonly driverEventChains = new Map<string, Promise<void>>();
+  private readonly exitedDriverDrains = new WeakMap<AgentDriver, { source: Promise<void>; settled: Promise<unknown> }>();
+  private readonly exitDrainAdmissions = new Map<string, { driver: AgentDriver; generation: number; settled: Promise<unknown> }>();
   private readonly compactionCancellationVersions = new Map<string, number>();
   private readonly driverEventErrors = new Map<string, unknown>();
   /** Attempts whose last in-turn event flush has run: a later event error can no longer fail them, nor the next turn. */
@@ -457,8 +460,20 @@ export class DutydeckRuntime {
     if (!token) { token = owner(id); this.lifecycles.set(id, token); }
     return token;
   }
+  private retireTransition(id: string) {
+    const previous = this.transitions.get(id);
+    if (!previous || previous.revoked) return;
+    let lifecycleOwnsParent = false;
+    for (let token = this.lifecycles.get(id); token; token = token.parent) if (token === previous) { lifecycleOwnsParent = true; break; }
+    const driver = this.drivers.get(id) ?? this.blockedDrivers.get(id)?.driver;
+    const source = lifecycleOwnsParent ? driver?.drainExitedOutput?.() : undefined;
+    if (!source) { previous.revoke(); return; }
+    // Only the current lifecycle's parent survives, and only until this exact
+    // exit drain has persisted or exhausted its budget. Other tokens stay fenced.
+    void this.settleExitedDriver(id, driver, source).then(() => previous.revoke());
+  }
   private transition(id: string) {
-    this.transitions.get(id)?.revoke();
+    this.retireTransition(id);
     const token = owner(id); this.transitions.set(id, token); return token;
   }
   private ownerOf(id: string) { return owner(id, this.transitions.get(id) ?? this.transition(id)); }
@@ -602,6 +617,25 @@ export class DutydeckRuntime {
     this.driverEventErrors.delete(sessionId);
     if (error) throw error;
   }
+  /** Share one bounded driver-tail and Runtime-persistence drain before either error cleanup or stop revokes ownership. */
+  private settleExitedDriver(sessionId: string, driver: AgentDriver | undefined, source = driver?.drainExitedOutput?.()): Promise<unknown> {
+    if (!driver || !source) return Promise.resolve(undefined);
+    const cached = this.exitedDriverDrains.get(driver);
+    if (cached?.source === source) return cached.settled;
+    const settled = (async () => {
+      let failure: unknown;
+      const persisted = (async () => { await source; await this.flushDriverEvents(sessionId); })();
+      try { await withTimeout(persisted, EXIT_DRAIN_TIMEOUT_MS, () => new RuntimeError('DRIVER_EXIT_DRAIN_TIMEOUT', 'Agent exit output drain timed out; late terminal events remain fenced', 409)); }
+      catch (error) { failure = error; }
+      if (failure) this.options.log?.warn({ sessionId, code: failure instanceof RuntimeError ? failure.code : 'DRIVER_EXIT_DRAIN_FAILED', error: failure }, 'Agent exit output drain did not settle');
+      return failure;
+    })();
+    this.exitedDriverDrains.set(driver, { source, settled });
+    const admission = { driver, generation: this.sessionGenerations.get(sessionId) ?? 0, settled };
+    this.exitDrainAdmissions.set(sessionId, admission);
+    void settled.then(() => { if (this.exitDrainAdmissions.get(sessionId) === admission) this.exitDrainAdmissions.delete(sessionId); });
+    return settled;
+  }
   private static isTruncatedStopReason(reason?: string) {
     return reason === 'max_tokens' || reason === 'truncated';
   }
@@ -655,7 +689,10 @@ export class DutydeckRuntime {
   private onDriverEvent(session: Session, generation: number) {
     const lifecycle = this.lifecycle(session.id);
     return (event: NormalizedDriverEvent) => {
-      if (this.shuttingDown || !this.mutations.valid(lifecycle) || this.sessionGenerations.get(session.id) !== generation) return;
+      const admission = this.exitDrainAdmissions.get(session.id);
+      const currentDriver = this.drivers.get(session.id) ?? this.blockedDrivers.get(session.id)?.driver;
+      const admittedDuringShutdown = admission && admission.driver === currentDriver && admission.generation === generation;
+      if ((this.shuttingDown && !admittedDuringShutdown) || !this.mutations.valid(lifecycle) || this.sessionGenerations.get(session.id) !== generation) return;
       if (event.type === 'status' && event.data?.state === 'compaction' && event.data.phase === 'cancelled') {
         this.compactionCancellationVersions.set(session.id, (this.compactionCancellationVersions.get(session.id) ?? 0) + 1);
       }
@@ -1801,6 +1838,27 @@ export class DutydeckRuntime {
     }
     });
   }
+  private verificationResourceBlock(id: string, own: boolean, idleChecks: ResourceCheckRef[]): string | undefined {
+    if (this.stopBlocks.has(id) || this.blockedDrivers.has(id)) return 'DRIVER_STOP_BLOCKED';
+    if (this.stopRuns.has(id) || this.retiringDrivers.has(id)) return 'DRIVER_OPERATION_BUSY';
+    const driver = this.drivers.get(id) ?? this.blockedDrivers.get(id)?.driver;
+    if (driver && this.driverOperations.get(driver)?.size) return 'DRIVER_OPERATION_BUSY';
+    const blockers = this.resourceBlockers(id, own);
+    // The second admission runs after this verification's own running record
+    // exists. That record is the hold being rechecked, not a competing run.
+    if (own) return blockers.find(block => block.code !== 'VERIFICATION_RESOURCE_UNKNOWN')?.code;
+    const resources = this.repos.execution.getResources(id);
+    const proven = new Set(idleChecks.filter(check => {
+      const resource = resources.find(value => value.resourceId === check.resourceId);
+      const last = resource?.observations.at(-1);
+      const parent = resources.find(value => value.resourceId === resource?.parentResourceId);
+      return resource && resource.revision === check.expectedRevision && last?.observationId === check.observationId && last.state === 'live'
+        && (resource.kind === 'local_only' || resource.kind === 'process' && parent?.stage === 'created'
+          && ['lifecycle', 'strict-context-restore'].includes(parent.operationScope?.kind ?? ''));
+    }).map(check => check.resourceId));
+    return blockers.find(block => block.code !== 'DRIVER_RESOURCE_UNSAFE' || !block.resourceId || !proven.has(block.resourceId))?.code;
+  }
+
   /** Verification admission follows task admission: unknown results, Agent work including native background work, and other verifications hold the directory. */
   private async assertVerificationAdmission(session: Session) {
     const root = await this.mutations.wait(() => realpath(session.cwd).catch(() => session.cwd));
@@ -1817,10 +1875,19 @@ export class DutydeckRuntime {
     if (this.drivers.get(session.id)?.hasBackgroundWork?.()) {
       throw new RuntimeError('SESSION_BUSY', 'Native background work of this Session is still running; wait for it before verification', 409);
     }
+    const idleChecks = this.idleResourceChecks();
+    const ownResourceBlock = this.verificationResourceBlock(session.id, true, idleChecks);
+    if (ownResourceBlock) {
+      throw new RuntimeError('SESSION_BUSY', `This Session has unconfirmed driver or workspace resources: ${ownResourceBlock}`, 409);
+    }
     const verifying = (id: string) => new RuntimeError('SESSION_BUSY', `Another verification is running in this workspace: ${id}`, 409);
     for (const id of shared) {
       if (this.repos.execution.getUnresolvedTasks(id).length || this.drivers.get(id)?.hasBackgroundWork?.()) {
         throw new RuntimeError('SESSION_BUSY', `Another Session is executing in this workspace: ${id}`, 409);
+      }
+      const resourceBlock = this.verificationResourceBlock(id, false, idleChecks);
+      if (resourceBlock) {
+        throw new RuntimeError('SESSION_BUSY', `Another Session has unconfirmed driver or workspace resources in this workspace: ${id}: ${resourceBlock}`, 409);
       }
       if (this.blockedVerificationSessions.has(id)) throw verifying(id);
     }
@@ -3134,9 +3201,12 @@ export class DutydeckRuntime {
       if (agentId) await this.noteAgentFailure(agentId, { message: errorMessage(error), code: (error as { code?: unknown } | undefined)?.code });
       // Stop owns revoked attempts and retains its claim until this cleanup finishes.
       if (this.mutations.valid(token)) {
-        await this.flushDriverEvents(id).catch(() => {});
+        const exitDriver = this.drivers.get(id), exitSource = exitDriver?.drainExitedOutput?.();
+        const exitDrain = exitDriver && exitSource ? this.settleExitedDriver(id, exitDriver, exitSource) : undefined;
+        if (!exitDrain) await this.flushDriverEvents(id).catch(() => {});
         this.eventFlushedAttempts.add(ref.attemptId);
         await observeEnd();
+        await (exitDrain ?? this.settleExitedDriver(id, this.drivers.get(id)));
         // 提交前失败时 Agent 没产生任何事件，原因只记在结算上；先补一条错误事件，结果卡和 Web 才写得出为什么失败。
         const unsubmitted = this.repos.execution.getTaskExecution(task.id)?.attempts.find(item => item.attemptId === ref.attemptId);
         const failureCode = (error as { code?: unknown } | undefined)?.code;
@@ -3824,10 +3894,12 @@ export class DutydeckRuntime {
     if (pending) { if (cancelQueue) this.stopIntents.get(id)!.cancelQueue = true; if (actor) this.stopIntents.get(id)!.actor = actor; return pending; }
     const intent = { cancelQueue, actor };  this.stopIntents.set(id, intent);
     const token = this.attempts.get(id), ref = token && this.attemptRefs.get(token);
-    this.lifecycle(id).revoke(); token?.revoke(); this.drains.get(id)?.revoke();
-    this.nextSessionGeneration(id);
     const driver = this.drivers.get(id) ?? this.blockedDrivers.get(id)?.driver;
+    const exitDrain = driver?.drainExitedOutput?.();
     const run = this.mutations.run(undefined, async () => {
+      const drainError = exitDrain ? await this.settleExitedDriver(id, driver, exitDrain) : undefined;
+      this.lifecycle(id).revoke(); token?.revoke(); this.drains.get(id)?.revoke();
+      this.nextSessionGeneration(id);
       // Start teardown before waiting for a turn which may be waiting on permission.
       const stopping = (async () => { await beforeResourceCleanup; await this.factoryCleanups.get(id); if (driver) await this.stopDriver(id, driver, discardSession, shutdown); })();
       void stopping.catch(() => {});
@@ -3869,6 +3941,7 @@ export class DutydeckRuntime {
       }
       if (factError) throw factError;
       if (stopError) throw stopError;
+      if (drainError) throw drainError;
       if (actorRequired) throw new RuntimeError('ACTOR_REQUIRED', 'Execution stopped; queued tasks remain until a named actor cancels them', 403);
     });
     this.stopRuns.set(id, run);
@@ -4280,6 +4353,9 @@ export class DutydeckRuntime {
     return this.shutdownRun;
   }
   private async shutdownOnce() {
+    // Admission closes below, but a current driver's already observed exit may
+    // still finish its exact task/attempt persistence before that fence applies.
+    for (const [id, driver] of this.drivers) if (driver.drainExitedOutput?.()) this.settleExitedDriver(id, driver);
     this.shuttingDown = true;
     for (const inspect of [...this.sendWaiters]) inspect();
     this.releaseInitializationCleanup?.();
@@ -4288,7 +4364,7 @@ export class DutydeckRuntime {
     if (this.cleanupTimer) clearInterval(this.cleanupTimer);
     for (const recheck of this.stopRechecks.values()) clearTimeout(recheck.timer);
     this.stopRechecks.clear();
-    for (const transition of this.transitions.values()) transition.revoke();
+    for (const id of this.transitions.keys()) this.retireTransition(id);
     const ids = new Set([...this.lifecycles.keys(), ...this.drivers.keys()]);
     try {
       for (const [id, driver] of this.drivers) {

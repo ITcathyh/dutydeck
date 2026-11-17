@@ -49,12 +49,12 @@ interface LinkedWorktreeEntry {
 }
 
 async function getLinkedWorktrees(repoDir: string): Promise<LinkedWorktreeEntry[]> {
-  const stdout = await git(repoDir, ['worktree', 'list', '--porcelain']);
-  const lines = stdout.split('\n');
+  const stdout = await gitRaw(repoDir, ['worktree', 'list', '--porcelain', '-z']);
+  const fields = stdout.split('\0');
   const result: LinkedWorktreeEntry[] = [];
   let current: Partial<LinkedWorktreeEntry> = {};
   let isFirst = true;
-  const flushCurrent = async (clear = false) => {
+  const flushCurrent = async () => {
     if (!current.path || !current.head) return;
     result.push({
       path: await canonical(current.path).catch(() => current.path!),
@@ -62,23 +62,20 @@ async function getLinkedWorktrees(repoDir: string): Promise<LinkedWorktreeEntry[
       branch: current.branch,
       isMain: current.isMain ?? false
     });
-    if (clear) current = {};
   };
 
-  for (const line of lines) {
-    if (line.startsWith('worktree ')) {
+  for (const field of fields) {
+    if (field.startsWith('worktree ')) {
       await flushCurrent();
       current = {
-        path: line.slice('worktree '.length).trim(),
+        path: field.slice('worktree '.length),
         isMain: isFirst
       };
       isFirst = false;
-    } else if (line.startsWith('HEAD ')) {
-      current.head = line.slice('HEAD '.length).trim();
-    } else if (line.startsWith('branch ')) {
-      current.branch = line.slice('branch '.length).trim().replace(/^refs\/heads\//, '');
-    } else if (line.trim() === '') {
-      await flushCurrent(true);
+    } else if (field.startsWith('HEAD ')) {
+      current.head = field.slice('HEAD '.length);
+    } else if (field.startsWith('branch ')) {
+      current.branch = field.slice('branch '.length).replace(/^refs\/heads\//, '');
     }
   }
   await flushCurrent();

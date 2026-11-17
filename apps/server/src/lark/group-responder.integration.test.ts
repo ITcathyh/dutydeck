@@ -81,7 +81,12 @@ describe('durable responder announcements', () => {
     await deliver(h, announcement(h, 'om_current_claim', 'claim', at + 1_000));
     const release = announcement(h, 'om_current_release', 'release', at + 1_000 + offset);
     await deliver(h, release);
-    expect((await h.repos.collaboration.getDuty(h.scope)).responder).toBeUndefined();
+    const released = await h.repos.collaboration.getDuty(h.scope);
+    expect(released.responder).toBeUndefined();
+    // 与正常卸任同时间的迟到 claim 不能反向恢复接话人；正常卸任和防乱序必须同时成立。
+    await deliver(h, announcement(h, 'om_same_time_late_claim', 'claim', at + 1_000 + offset));
+    expect(await h.repos.collaboration.getDuty(h.scope)).toEqual(released);
+    expect((await h.inboxRecord('om_same_time_late_claim'))?.state).toBe('ignored');
     await deliver(h, h.fromUser({ messageId: 'om_ambient', text: '今天下午三点发版' }));
     const ambient = (await h.repos.collaboration.listDecisions(h.scope)).find(item => (item.inputSnapshot as { decider?: { trigger?: { messageId?: string } } }).decider?.trigger?.messageId === 'om_ambient');
     expect(deciderMetaOf(ambient!)).toMatchObject({ kind: 'rule', rule: 'no_responder' });

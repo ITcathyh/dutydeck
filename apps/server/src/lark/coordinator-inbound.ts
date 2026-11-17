@@ -963,7 +963,15 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       if (scenario) prompt = directScenarioPrompt(scenario, prompt);
       if (inbox?.request) { prompt = inbox.request.prompt; resources = inbox.request.resources; scopeId = inbox.request.scopeId; }
       // 这条曾并入前一条排队消息：先按合并意图收口，决定执行合并后的原文还是自己的原文（见 resumeMergedInbox）。
-      if (inbox?.request && inbox.mergeFrom) prompt = await this.resumeMergedInbox(inbox);
+      // 状态暂时读不到时不创建任务；交还认领，让后续对账从同一持久合并意图重试。
+      if (inbox?.request && inbox.mergeFrom) {
+        const resumed = await this.resumeMergedInbox(inbox);
+        if (resumed === undefined) {
+          this.handledMessages.delete(event.messageId);
+          throw new Error('合并前一条的状态暂未读清，保留合并意图等待重试');
+        }
+        prompt = resumed;
+      }
       const workflowScope: { id: string; prompt?: string } = { id: scopeId };
       if (!inbox?.request && (await this.routeWorkflow(event, config, prompt, workflowScope)
         || await this.routePendingAsk(event, config, prompt, resources, workflowScope, inbox, recovering))) {
@@ -2536,15 +2544,16 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
    * PATCH 在这里完成。任何失败都如实落到卡片，绝不抛出（调用方 fire-and-forget）。
    */
   private async executeRepairFlight(config: StoredLarkConfig, appId: string, messageId: string) {
+    await this.service.update({
+      messageId, taskId: messageId, taskName: '/repair 正在执行',
+      state: 'running', readOnly: true, permissionMode: larkPermissionMode(config),
+      markdown: '**正在执行修复**\n\n正在连接飞书开放平台，增量补齐权限、事件订阅与卡片回调；完成后会在本卡回报结果，请勿重复触发。'
+    }).catch(error => this.log.warn({ error }, 'PATCH /repair 进行中状态失败'));
+    // 缓存登录态命中时不进入扫码等待；缓存失效又无人扫码时，用有界等待快速失败，
+    // 让结果卡回报「登录态过期」而不是长时间悬挂。
+    let result: Awaited<ReturnType<typeof runOpenPlatformRepair>>;
     try {
-      await this.service.update({
-        messageId, taskId: messageId, taskName: '/repair 正在执行',
-        state: 'running', readOnly: true, permissionMode: larkPermissionMode(config),
-        markdown: '**正在执行修复**\n\n正在连接飞书开放平台，增量补齐权限、事件订阅与卡片回调；完成后会在本卡回报结果，请勿重复触发。'
-      }).catch(error => this.log.warn({ error }, 'PATCH /repair 进行中状态失败'));
-      // 缓存登录态命中时不进入扫码等待；缓存失效又无人扫码时，用有界等待快速失败，
-      // 让结果卡回报「登录态过期」而不是长时间悬挂。
-      const result = await runOpenPlatformRepair(
+      result = await runOpenPlatformRepair(
         {
           connectClient: async () => connectLarkOpenPlatformSession({ maxWaitMs: 30_000 }),
           // 斜杠命令走 tenant_access_token，而 this.service 正是本机器人的客户端。
@@ -2554,13 +2563,6 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         },
         { appId, confirmed: true }
       );
-      const rendered = renderRepairResultCard(result);
-      const state = result.status === 'failed' ? 'failed' as const : 'completed' as const;
-      await this.service.update({
-        messageId, taskId: messageId, taskName: rendered.title,
-        state, readOnly: true, permissionMode: larkPermissionMode(config),
-        markdown: rendered.markdown, ...(rendered.elements.length ? { elements: rendered.elements } : {})
-      });
     } catch (error) {
       this.log.warn({ error }, '后台执行 /repair 失败');
       await this.service.update({
@@ -2568,6 +2570,22 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         state: 'failed', readOnly: true, permissionMode: larkPermissionMode(config),
         markdown: '修复执行失败，请稍后重试；本次未完成发布。'
       }).catch(() => undefined);
+      return;
+    }
+    const rendered = renderRepairResultCard(result);
+    const state = result.status === 'failed' ? 'failed' as const : 'completed' as const;
+    try {
+      await this.service.update({
+        messageId, taskId: messageId, taskName: rendered.title,
+        state, readOnly: true, permissionMode: larkPermissionMode(config),
+        markdown: rendered.markdown, ...(rendered.elements.length ? { elements: rendered.elements } : {})
+      });
+    } catch (error) {
+      // 外部修复已经有确定结果；回执失败不能改写发布事实，也不能诱导用户再次发布。
+      this.log.warn({ error, status: result.status,
+        ...('versionId' in result ? { versionId: result.versionId } : {}),
+        ...('publishAttempted' in result ? { publishAttempted: result.publishAttempted } : {})
+      }, '/repair 执行结果已产生，但结果卡投递失败');
     }
   }
 

@@ -392,7 +392,7 @@ export class AcpxAdapter implements AgentDriver {
   private readonly sessionStore: AcpSessionStore;
   private handle?: AcpRuntimeHandle;
   private turn?: AcpRuntimeTurn;
-  private readonly pendingPermissions = new Map<string, (decision: AcpPermissionDecision) => void>();
+  private readonly pendingPermissions = new Map<string, { turn: AcpRuntimeTurn | undefined; interruptVersion: number; resolve(decision: AcpPermissionDecision): void }>();
   private readonly sessionKey: string;
   private riskPolicy?: ToolRiskPolicy;
   private permissionMode: PermissionMode;
@@ -459,10 +459,14 @@ export class AcpxAdapter implements AgentDriver {
   }
 
   /** acpx answers a throwing host callback from the permission mode, which approves everything in full-trust: any failure rejects. */
+  private permissionActive(turn: AcpRuntimeTurn | undefined, interruptVersion: number) {
+    return !this.stopped && !this.turnCancelling && this.turn === turn && this.interruptVersion === interruptVersion;
+  }
   private async permissionDecision(request: AcpPermissionRequest): Promise<AcpPermissionDecision> {
-    try { return await this.decidePermission(request); }
+    const turn = this.turn, interruptVersion = this.interruptVersion;
+    try { return await this.decidePermission(request, turn, interruptVersion); }
     catch (error) {
-      if (!this.stopped && !this.turnCancelling) {
+      if (this.permissionActive(turn, interruptVersion)) {
         try {
           const toolCallId = (request.raw as any)?.toolCall?.toolCallId;
           this.options.onEvent({ type: 'permission_request', data: { id: toolCallId ?? `permission-${Date.now()}`, toolCallId, title: `权限检查异常，已拒绝操作：${errorMessage(error)}`, options: [], status: 'rejected' } });
@@ -471,8 +475,9 @@ export class AcpxAdapter implements AgentDriver {
       return { outcome: 'reject_once' };
     }
   }
-  private async decidePermission(request: AcpPermissionRequest): Promise<AcpPermissionDecision> {
-    if (this.stopped || this.turnCancelling) return { outcome: 'reject_once' };
+  private async decidePermission(request: AcpPermissionRequest, turn: AcpRuntimeTurn | undefined, interruptVersion: number): Promise<AcpPermissionDecision> {
+    const active = () => this.permissionActive(turn, interruptVersion);
+    if (!active()) return { outcome: 'reject_once' };
     const raw = request.raw as any; const id = raw.toolCall?.toolCallId ?? `permission-${Date.now()}`;
     const secrets = Object.entries({ ...process.env, ...this.agent.env }).filter(([key]) => /token|secret|password|api[_-]?key|authorization|cookie/i.test(key)).map(([, value]) => value).filter((value): value is string => Boolean(value));
     const facts = permissionFacts(raw.toolCall, secrets);
@@ -482,7 +487,7 @@ export class AcpxAdapter implements AgentDriver {
       try { riskPolicy = await this.whileActive(() => this.options.resolveRiskPolicy!(riskPolicy)); }
       catch { return { outcome: 'reject_once' }; }
     }
-    if (this.stopped || this.turnCancelling) return { outcome: 'reject_once' };
+    if (!active()) return { outcome: 'reject_once' };
     if (riskPolicy?.enabled && !riskPolicy.authorized) {
       if (candidate === undefined) {
         this.options.onEvent({ type: 'permission_request', data: { id, toolCallId: raw.toolCall?.toolCallId, title: `操作参数嵌套过深或过大，无法做高危检查，已拒绝：${facts.title}`, options: [], status: 'rejected' } });
@@ -490,13 +495,13 @@ export class AcpxAdapter implements AgentDriver {
       }
       try {
         const matches = await this.whileActive(() => testRegexWithTimeout(riskPolicy!.pattern, candidate));
-        if (this.stopped || this.turnCancelling) return { outcome: 'reject_once' };
+        if (!active()) return { outcome: 'reject_once' };
         if (matches) {
           this.options.onEvent({ type: 'permission_request', data: { id, toolCallId: raw.toolCall?.toolCallId, title: `高危操作已被 Dutydeck 拦截：${facts.title}`, options: [], status: 'rejected' } });
           return { outcome: 'reject_once' };
         }
       } catch (error) {
-        if (this.stopped || this.turnCancelling) return { outcome: 'reject_once' };
+        if (!active()) return { outcome: 'reject_once' };
         this.options.onEvent({ type: 'permission_request', data: { id, toolCallId: raw.toolCall?.toolCallId, title: `安全正则匹配异常，已拒绝操作：${errorMessage(error)}`, options: [], status: 'rejected' } });
         return { outcome: 'reject_once' };
       }
@@ -514,12 +519,14 @@ export class AcpxAdapter implements AgentDriver {
     // fetch 会把内容带到外部地址，都不算只读，照常审批。
     if (this.permissionMode === 'approve-reads' && ['read', 'search'].includes(String(raw.toolCall?.kind ?? ''))) return { outcome: 'allow_once' };
     return new Promise<AcpPermissionDecision>(resolve => {
-      this.pendingPermissions.set(id, resolve);
+      if (!active()) { resolve({ outcome: 'reject_once' }); return; }
+      const pending = { turn, interruptVersion, resolve };
+      this.pendingPermissions.set(id, pending);
       this.idleWatch?.refresh();
       try {
         this.options.onEvent({ type: 'permission_request', data: { id, toolCallId: raw.toolCall?.toolCallId, ...facts, options: (raw.options ?? []).map((option: any) => ({ id: option.optionId, label: permissionDisplayText(option.name, secrets, 100), kind: option.kind })), status: 'pending' } });
       } catch {
-        this.pendingPermissions.delete(id);
+        if (this.pendingPermissions.get(id) === pending) this.pendingPermissions.delete(id);
         this.idleWatch?.refresh();
         resolve({ outcome: 'reject_once' });
       }
@@ -993,7 +1000,7 @@ export class AcpxAdapter implements AgentDriver {
         } finally {
           if (this.launcherCleanupError?.turn === turn) this.launcherCleanupError = undefined;
           finished = true;
-          for (const resolve of this.pendingPermissions.values()) resolve({ outcome: 'reject_once' });
+          for (const pending of this.pendingPermissions.values()) pending.resolve({ outcome: 'reject_once' });
           this.pendingPermissions.clear();
           clearIdle();
           if (cancellationDeadline) clearTimeout(cancellationDeadline);
@@ -1167,7 +1174,7 @@ export class AcpxAdapter implements AgentDriver {
     this.interruptVersion++;
     this.turnCancelling = true;
     this.idleWatch?.clear();
-    for (const resolve of this.pendingPermissions.values()) resolve({ outcome: 'reject_once' });
+    for (const pending of this.pendingPermissions.values()) pending.resolve({ outcome: 'reject_once' });
     this.pendingPermissions.clear();
     await this.resourceOperation(async () => {
       const turn = this.turn;
@@ -1183,7 +1190,7 @@ export class AcpxAdapter implements AgentDriver {
     this.transcriptListeners.clear();
     this.idleWatch?.clear();
     this.revocation.abort();
-    for (const resolve of this.pendingPermissions.values()) resolve({ outcome: 'reject_once' });
+    for (const pending of this.pendingPermissions.values()) pending.resolve({ outcome: 'reject_once' });
     this.pendingPermissions.clear();
     const turn = this.turn;
     const resources = [...this.resourceOperations];
@@ -1234,7 +1241,16 @@ export class AcpxAdapter implements AgentDriver {
     })().finally(() => { clearTimeout(forced); this.stopResourcesSettled = true; }).then(resolveStop, rejectStop);
     return this.stopping;
   }
-  async resolvePermission(id: string, approved: boolean) { const resolve = this.pendingPermissions.get(id); if (this.stopped || !resolve) return false; this.pendingPermissions.delete(id); this.idleWatch?.refresh(); resolve({ outcome: approved ? 'allow_once' : 'reject_once' }); return true; }
+  async resolvePermission(id: string, approved: boolean) {
+    const pending = this.pendingPermissions.get(id);
+    if (this.stopped || !pending) return false;
+    if (!this.permissionActive(pending.turn, pending.interruptVersion)) {
+      if (this.pendingPermissions.get(id) === pending) this.pendingPermissions.delete(id);
+      this.idleWatch?.refresh();
+      return false;
+    }
+    this.pendingPermissions.delete(id); this.idleWatch?.refresh(); pending.resolve({ outcome: approved ? 'allow_once' : 'reject_once' }); return true;
+  }
   async setModel(model: string) { await this.setRuntimeOption('model', model, `Agent ${this.agent.id} does not support runtime model switching`); }
   async setReasoningEffort(reasoningEffort: string) { await this.setRuntimeOption('reasoningEffort', reasoningEffort, `Agent ${this.agent.id} does not support runtime reasoning effort switching`); }
   private async setRuntimeOption(key: 'model' | 'reasoningEffort', value: string, missing: string) {

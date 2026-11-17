@@ -260,8 +260,12 @@ function CollaborationPanelInner({ appId, chatId, groupName, botName }: Collabor
         notificationsPaused: payload.notificationsPaused,
         maxProactivePerHour: payload.maxProactivePerHour
       }),
-    onSuccess: async () => {
-      setSettingsDraft(null);
+    onSuccess: async (result, submitted) => {
+      setSettingsDraft(current => {
+        if (!current) return current;
+        if (JSON.stringify(current) === JSON.stringify(submitted)) return null;
+        return { ...current, revision: result.settings.revision, updatedAt: result.settings.updatedAt };
+      });
       setSettingsConflict(false);
       setSettingsError(null);
       setSettingsSuccess(true);

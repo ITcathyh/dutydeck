@@ -29,8 +29,8 @@ const event = (id: string, text: string, patch: Partial<LarkMessageEvent> = {}):
 
 const jsonBlock = (value: unknown) => `分析完成。\n\n\`\`\`json\n${JSON.stringify(value)}\n\`\`\``;
 
-/** 记忆会话的回复计划：文本，外加可选的延迟（用来构造超时与单飞场景）或启动失败（prompt 没写进去）。 */
-type MemoryReply = { text: string; delayMs?: number; startupError?: string };
+/** 记忆会话的回复计划：文本，外加可选的延迟或完成屏障（用来构造超时与单飞场景）或启动失败（prompt 没写进去）。 */
+type MemoryReply = { text: string; delayMs?: number; startupError?: string; completionGate?: Promise<void> };
 
 /** 记忆会话的 start 入参；用例用它断言权限模式与复用次数。 */
 type StartInput = { agentId: string; cwd?: string; model?: string; permissionMode?: PermissionMode };
@@ -63,6 +63,7 @@ async function harness(options: { now?: () => Date; timeoutMs?: number; agentMod
               const reply = respond(prompt);
               if (reply.startupError) throw new PromptNotWrittenError(reply.startupError);
               if (reply.delayMs) await new Promise(resolve => setTimeout(resolve, reply.delayMs));
+              if (reply.completionGate) await reply.completionGate;
               emit({ type: 'text', data: { text: reply.text } });
               emit({ type: 'completed', data: { stopReason: 'end_turn' } });
               return;
@@ -835,19 +836,49 @@ describe('Lark memory pipeline through the coordinator', () => {
 
   it('记忆会话超时但中断未确认：保留原任务、报告恢复所需并清掉管线 running', async () => {
     const h = await harness({ timeoutMs: 100 });
-    h.setResponder(() => ({ text: jsonBlock({ actions: [{ op: 'noop' }] }), delayMs: 400 }));
+    let releaseResponse!: () => void;
+    const completionGate = new Promise<void>(resolve => { releaseResponse = resolve; });
+    let notifyStarted!: () => void;
+    const started = new Promise<void>(resolve => { notifyStarted = resolve; });
+    h.setResponder(() => {
+      notifyStarted();
+      return { text: jsonBlock({ actions: [{ op: 'noop' }] }), completionGate };
+    });
 
     await h.coordinator.handle(event('om_remember', '/remember 这个群的回复统一用中文'), h.config);
     await vi.waitFor(() => expect(h.lastCardText()).toContain('已记住'));
 
-    const run = await h.pipeline.runConsolidation(scope);
-    expect(run).toMatchObject({ kind: 'consolidation', ok: false, error: 'MEMORY_RECOVERY_REQUIRED' });
-    expect(h.memoryInterrupt).toHaveBeenCalledTimes(1);
+    // 同时固定超时与停止核对的 100ms 收尾宽限，避免高负载下真实计时器先返回 MEMORY_RUN_TIMEOUT。
+    vi.useFakeTimers();
+    const consolidation = h.pipeline.runConsolidation(scope);
+    try {
+      await started;
+      await vi.advanceTimersByTimeAsync(100);
+      const run = await consolidation;
+      expect(run).toMatchObject({ kind: 'consolidation', ok: false, error: 'MEMORY_RECOVERY_REQUIRED' });
+      expect(h.memoryInterrupt).toHaveBeenCalledTimes(1);
 
-    const state = await h.store.getState(scope);
-    expect(state.running).toBeUndefined();
-    expect(state.lastRun).toMatchObject({ ok: false, error: 'MEMORY_RECOVERY_REQUIRED' });
-    expect(await h.store.list(scope)).toHaveLength(1);
+      // 回复被人为挡在完成事件之前，恢复判断面对的一定是原 running 任务，而不是碰巧先完成的回复。
+      const memorySession = (await h.runtime.listSessions()).find(session => session.source === 'lark-memory');
+      expect(memorySession).toBeDefined();
+      const tasks = await h.runtime.getTasks(memorySession!.id);
+      expect(tasks).toHaveLength(1);
+      expect(tasks[0]).toMatchObject({ status: 'running' });
+
+      const state = await h.store.getState(scope);
+      expect(state.running).toBeUndefined();
+      expect(state.lastRun).toMatchObject({ ok: false, error: 'MEMORY_RECOVERY_REQUIRED' });
+      expect(await h.store.list(scope)).toHaveLength(1);
+    } finally {
+      releaseResponse();
+      await consolidation.catch(() => undefined);
+      vi.useRealTimers();
+      await vi.waitFor(async () => {
+        const sessions = (await h.runtime.listSessions()).filter(session => session.source === 'lark-memory');
+        const tasks = (await Promise.all(sessions.map(session => h.runtime.getTasks(session.id)))).flat();
+        expect(tasks.every(task => task.status === 'completed')).toBe(true);
+      }, { timeout: 15_000 });
+    }
   });
 });
 

@@ -684,16 +684,20 @@ export class PullRequestService {
   async onWebhookEvent(providerId: string, event: { kind: 'pipeline' | 'merge_request'; repository: string; branch?: string; mrIid?: number; state: string }) {
     for (const item of await this.list()) {
       const value = item.value;
-      if (value.status !== 'open' || value.provider !== providerId || value.repository.slug.toLowerCase() !== event.repository.toLowerCase()) continue;
+      if (value.provider !== providerId || value.repository.slug.toLowerCase() !== event.repository.toLowerCase()) continue;
       if (!(event.branch === value.branch || (event.mrIid && event.mrIid === value.pullRequest?.number))) continue;
-      if (event.kind === 'merge_request' && (event.state === 'merge' || event.state === 'close')) await this.finish(value.id, event.state === 'merge' ? 'merged' : 'closed');
-      else if (event.kind === 'pipeline') await this.update(value.id, latest => latest.status === 'open' ? { ...latest, nextPollAt: iso(this.clock().getTime()) } : undefined);
+      if (event.kind === 'merge_request' && (event.state === 'merge' || event.state === 'close')) {
+        // 验证失败等人处理时仍持有 task；此时收到的平台终态也必须落盘，不能让稍后补全 force 决定绕过它。
+        if (value.status === 'open' || (value.status === 'stopped' && value.task)) await this.finish(value.id, event.state === 'merge' ? 'merged' : 'closed');
+      } else if (event.kind === 'pipeline' && value.status === 'open') {
+        await this.update(value.id, latest => latest.status === 'open' ? { ...latest, nextPollAt: iso(this.clock().getTime()) } : undefined);
+      }
     }
     void this.tick().catch(error => this.options.log?.warn({ error }, 'PR 跟进失败'));
   }
 
   private async finish(id: string, status: 'merged' | 'closed') {
-    const saved = await this.update(id, value => value.status === 'open' ? { ...value, status, task: undefined, reason: undefined } : undefined);
+    const saved = await this.update(id, value => value.status === 'open' || (value.status === 'stopped' && value.task) ? { ...value, status, task: undefined, reason: undefined } : undefined);
     if (saved?.value.status === status) await this.notice(saved.value, { key: `${id}:${status}`, title: `${this.label(saved.value)} ${status === 'merged' ? '已合并' : '已关闭'}`, markdown: this.summary(saved.value, statusMessages[status]) });
   }
 
@@ -964,6 +968,12 @@ export class PullRequestService {
     };
   }
 
+  /** 尚未发送的宿主写入仍归这条跟进任务所有；等待期间 stop/close/merge 或 task/HEAD 替换都会撤销它。 */
+  private async canWriteSettlement(value: PullRequestRecord, current: FollowTask): Promise<boolean> {
+    const latest = await this.read(value.id);
+    return latest?.value.status === 'open' && latest.value.task?.id === current.id && latest.value.headSha === value.headSha;
+  }
+
   /** 跟进任务结束：把这一轮的改动提交并快进推到 PR 分支，评审意见逐条回复或发卡片问人。 */
   private async settle(stored: Stored, task: TaskRecord) {
     const value = stored.value;
@@ -1010,7 +1020,7 @@ export class PullRequestService {
         const remote = await confirmedPushUrl(session.cwd, value);
         if (await remoteBranchSha(session.cwd, remote, value.branch) !== headSha) throw new Error(`远端 ${value.branch} 已不是${value.claimed ? '上次核对的' : ' DutyDeck 推送的'} ${short(headSha)}（有人推送过或分支已删除），没有推送`);
         headSha = await buildCommit(session.cwd, headSha, changes.contents, withTrailers(`${current.kind === 'ci' ? 'Fix CI' : 'Address review comments'} (DutyDeck round ${current.round})`, value.sessionId));
-        await pushBranch(session.cwd, remote, headSha, value.branch, value.target, value.claimed === true);
+        if (!await pushBranch(session.cwd, remote, headSha, value.branch, value.target, value.claimed === true, () => this.canWriteSettlement(value, current))) return;
       } catch (error) { await this.fail(value.id, `${name}的改动推送失败：${errorMessage(error)}，已停止自动跟进。`, ['open']); return; }
     }
     const ownComments: string[] = [];
@@ -1021,6 +1031,7 @@ export class PullRequestService {
       for (const comment of current.comments) {
         const verdict = verdicts.get(comment.ref);
         if (verdict?.kind === 'DONE' && provider?.postComment && value.pullRequest) {
+          if (!await this.canWriteSettlement(value, current)) return;
           const posted = await provider.postComment(value.repository, value.pullRequest.number,
             `${PR_COMMENT_MARKER}\n> ${comment.excerpt.replace(/\n/g, '\n> ')}\n\n${changes.files ? `已在 ${short(headSha)} 处理` : '已处理（没有改动代码）'}：${oneLine(verdict.text, 500)}`).catch(error => {
             this.options.log?.warn({ error, pullRequestId: value.id }, 'PR 评论回复失败');
@@ -1145,11 +1156,24 @@ export class PullRequestService {
     if (current?.value.taskId === task.id && current.value.state === 'failed') await this.writeVerify(id, current.raw, { ...current.value, cardMessageId: messageId });
   }
 
-  /** 轮询到等人处理的记录：失败卡没发出去（没有卡片消息 ID）时按间隔补发。 */
+  /** 已持久化的人工继续决定：只补全同一任务从 stopped 到 open 的第二次写入，最新记录已换任务或进入终态时不恢复。 */
+  private async resumeForcedPush(value: PullRequestRecord) {
+    const task = value.task!;
+    return this.update(value.id, latest => latest.status === 'stopped' && latest.task?.id === task.id ? { ...latest, status: 'open', reason: undefined } : undefined);
+  }
+
+  /** 轮询到等人处理的记录：已确认继续的先补全状态；失败卡没发出去（没有卡片消息 ID）时按间隔补发。 */
   private async retryAttention(value: PullRequestRecord, now: number) {
-    if (this.verifying.has(value.id) || (this.attentionRetryAt.get(value.id) ?? 0) > now) return;
+    if (this.verifying.has(value.id)) return;
     const verify = await this.readVerify(value.id);
-    if (verify?.value.taskId !== value.task!.id || verify.value.state !== 'failed' || verify.value.cardMessageId) return;
+    if (verify?.value.taskId !== value.task!.id) return;
+    if (verify.value.state === 'passed' && verify.value.forced) {
+      if (!await this.ownsPullRequest(value)) return;
+      const saved = await this.resumeForcedPush(value);
+      if (saved?.value.status === 'open' && saved.value.task?.id === value.task!.id) await this.checkTask(saved);
+      return;
+    }
+    if ((this.attentionRetryAt.get(value.id) ?? 0) > now || verify.value.state !== 'failed' || verify.value.cardMessageId) return;
     await this.needsAttention(value.id, value.task!, roundName(value.task!), verify.value);
   }
 
@@ -1167,14 +1191,17 @@ export class PullRequestService {
     if (!stored) throw new RuntimeError('PR_NOT_FOUND', '找不到这条 PR 记录。', 404);
     const verify = await this.readVerify(id);
     const task = stored.value.task;
-    if (stored.value.status !== 'stopped' || !task || verify?.value.taskId !== task.id || verify.value.state !== 'failed') return `这次验证失败已经处理过了。${this.statusText(stored.value)}`;
+    if (stored.value.status !== 'stopped' || !task || !verify || verify.value.taskId !== task.id
+      || (verify.value.state !== 'failed' && !(verify.value.state === 'passed' && verify.value.forced))) {
+      return `这次验证失败已经处理过了。${this.statusText(stored.value)}`;
+    }
     if (card && verify.value.cardMessageId && verify.value.cardMessageId !== card.messageId) throw new RuntimeError('PR_CARD_STALE', '这张卡片已失效，请在最新的卡片上操作。', 409);
     if (!await this.ownsPullRequest(stored.value)) {
       throw new RuntimeError('PR_ALREADY_FOLLOWED', `${this.label(stored.value)} 已由别的记录跟进，这一轮的改动不再推送；请在这里停止跟进。`, 409);
     }
-    if (!await this.writeVerify(id, verify.raw, { ...verify.value, state: 'passed', forced: true })) return '这次验证失败已经处理过了。';
-    const saved = await this.update(id, value => value.status === 'stopped' && value.task?.id === task.id ? { ...value, status: 'open', reason: undefined } : undefined);
-    if (saved?.value.status !== 'open') return `这次验证失败已经处理过了。${this.statusText(saved?.value ?? stored.value)}`;
+    if (verify.value.state === 'failed' && !await this.writeVerify(id, verify.raw, { ...verify.value, state: 'passed', forced: true })) return '这次验证失败已经处理过了。';
+    const saved = await this.resumeForcedPush(stored.value);
+    if (saved?.value.status !== 'open' || saved.value.task?.id !== task.id) return `这次验证失败已经处理过了。${this.statusText(saved?.value ?? stored.value)}`;
     void this.tick().catch(error => this.options.log?.warn({ error }, 'PR 跟进失败'));
     return '已确认，仍然推送这一轮的改动，推送前的其余核对照做，完成后会通知。';
   }

@@ -1,4 +1,5 @@
 import { createHash, createHmac, randomBytes, scrypt, timingSafeEqual, type ScryptOptions } from 'node:crypto';
+import { isIP } from 'node:net';
 import type { FastifyInstance, FastifyReply, FastifyRequest, RouteShorthandOptions } from 'fastify';
 import type { ConfigRepository } from '@dutydeck/shared';
 
@@ -495,6 +496,13 @@ export function isSameOriginRequest(headers: OriginHeaders, fallbackProtocol = '
   catch { return false; }
 }
 
+/** local 免认证只认真实回环 peer；Host 可以由非浏览器客户端伪造，不能代替连接地址。 */
+export function isLoopbackPeer(address: string | undefined): boolean {
+  if (!address) return false;
+  const ipv4 = address.startsWith('::ffff:') ? address.slice('::ffff:'.length) : address;
+  return address === '::1' || (isIP(ipv4) === 4 && ipv4.split('.')[0] === '127');
+}
+
 /** local-only requests may name only the loopback listener, never an attacker-controlled DNS host. */
 export function isLoopbackHost(host: string | undefined): boolean {
   if (!host) return false;
@@ -540,6 +548,9 @@ export function registerAuthMiddleware(app: FastifyInstance, options: AuthMiddle
       }
     };
     if (mode === 'local') {
+      if (!isLoopbackPeer(request.socket.remoteAddress)) {
+        return reply.code(403).send({ error: { code: 'REMOTE_NOT_ALLOWED', message: 'Local-only requests require a loopback peer' } });
+      }
       if (!isLoopbackHost(request.headers.host)) {
         return reply.code(403).send({ error: { code: 'HOST_NOT_ALLOWED', message: 'Local-only requests require a loopback Host' } });
       }

@@ -290,11 +290,12 @@ async function readHeadBytes(
   maxBytes: number,
   onIdentityRead: (bytes: number) => void,
   checkCancelled?: () => void
-): Promise<Buffer | undefined> {
+): Promise<{ data: Buffer; complete: boolean } | undefined> {
   checkCancelled?.();
   let fd: import('node:fs/promises').FileHandle | undefined;
   let bytesRead = 0;
   let readBuf: Buffer | undefined;
+  let complete = false;
   try {
     const beforeSt = await lstat(realPath);
     if (!beforeSt.isFile()) return undefined;
@@ -309,6 +310,7 @@ async function readHeadBytes(
     const buf = Buffer.alloc(Math.max(0, maxBytes));
     const res = await fd.read(buf, 0, buf.length, 0);
     bytesRead = res.bytesRead;
+    complete = bytesRead === fdSt.size;
     readBuf = buf.subarray(0, bytesRead);
   } catch {
     return undefined;
@@ -317,7 +319,7 @@ async function readHeadBytes(
   }
   checkCancelled?.();
   onIdentityRead(bytesRead);
-  return readBuf;
+  return readBuf ? { data: readBuf, complete } : undefined;
 }
 
 function completeLinePrefix(buf: Buffer): Buffer {
@@ -1087,9 +1089,9 @@ export class SessionInsightResolver {
     } catch {
       return { reason: 'path_unresolvable' };
     }
-    const raw = await readHeadBytes(real, this.limits.identityHeadBytes, ctx.onIdentityRead, ctx.checkCancelled);
-    if (!raw) return { reason: 'content_unreadable' };
-    const head = completeLinePrefix(raw);
+    const read = await readHeadBytes(real, this.limits.identityHeadBytes, ctx.onIdentityRead, ctx.checkCancelled);
+    if (!read) return { reason: 'content_unreadable' };
+    const head = completeLinePrefix(read.data);
     const lines = parseJsonlBuffer(head);
     if (lines.length === 0) return { reason: 'content_unreadable' };
     const identity = claim.client === 'claude'
@@ -1218,9 +1220,10 @@ export class SessionInsightResolver {
   }> {
     let discoveryLimited = false;
     const found: Array<{ file: VerifiedFile; claim?: StreamClaim }> = [];
-    const raw = await readHeadBytes(main.verifiedPath!, this.limits.proofScanBytes, ctx.onIdentityRead, ctx.checkCancelled);
-    if (!raw) return { discoveryLimited: false, found };
-    const lines = parseJsonlBuffer(completeLinePrefix(raw));
+    const read = await readHeadBytes(main.verifiedPath!, this.limits.proofScanBytes, ctx.onIdentityRead, ctx.checkCancelled);
+    if (!read) return { discoveryLimited: false, found };
+    discoveryLimited = !read.complete;
+    const lines = parseJsonlBuffer(completeLinePrefix(read.data));
 
     const calls = new Map<string, number>();
     const proofs = new Map<string, { callId: string; callLine: number; resultLine: number }>();
@@ -1243,7 +1246,7 @@ export class SessionInsightResolver {
         }
       }
     }
-    if (proofs.size === 0) return { discoveryLimited: false, found };
+    if (proofs.size === 0) return { discoveryLimited, found };
 
     const projectDir = join(main.approvedRoot!, 'projects', this.projectKeyOf(main));
     const nestedSubagentsDir = join(projectDir, main.expectedNativeSessionId, 'subagents');
@@ -1279,9 +1282,9 @@ export class SessionInsightResolver {
       if (!real || real === main.verifiedPath) continue;
       if (!isWithinRoot(real, main.approvedRoot!)) continue;
       // eslint-disable-next-line no-await-in-loop
-      const head = await readHeadBytes(real, this.limits.identityHeadBytes, ctx.onIdentityRead, ctx.checkCancelled);
-      if (!head) continue;
-      const identity = extractClaudeIdentity(parseJsonlBuffer(completeLinePrefix(head)));
+      const headRead = await readHeadBytes(real, this.limits.identityHeadBytes, ctx.onIdentityRead, ctx.checkCancelled);
+      if (!headRead) continue;
+      const identity = extractClaudeIdentity(parseJsonlBuffer(completeLinePrefix(headRead.data)));
       if (identity.conflictingSessionIds) continue;
       if (identity.nativeSessionId !== main.expectedNativeSessionId) continue;
       if (!identity.sidechain || identity.agentIds.size !== 1) continue;
@@ -1414,9 +1417,9 @@ export class SessionInsightResolver {
         if (resolved.some(source => source.verifiedPath === real)) continue;
         if (!isWithinRoot(real, root.path)) continue;
         // eslint-disable-next-line no-await-in-loop
-        const head = await readHeadBytes(real, this.limits.identityHeadBytes, ctx.onIdentityRead, ctx.checkCancelled);
-        if (!head) continue;
-        const identity = extractCodexFamilyIdentity(parseJsonlBuffer(completeLinePrefix(head)));
+        const headRead = await readHeadBytes(real, this.limits.identityHeadBytes, ctx.onIdentityRead, ctx.checkCancelled);
+        if (!headRead) continue;
+        const identity = extractCodexFamilyIdentity(parseJsonlBuffer(completeLinePrefix(headRead.data)));
         if (identity.conflictingSessionIds) continue;
         if (!identity.nativeSessionId || !identity.relationship) continue;
         const parentId = identity.relationship.parentNativeSessionId;

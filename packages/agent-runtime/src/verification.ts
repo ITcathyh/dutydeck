@@ -532,6 +532,8 @@ function runCommand(command: string, cwd: string, timeoutMs: number, signal: Abo
     let exitCode: number | undefined;
     let identityRun: Promise<void> | undefined;
     let spawnError: string | undefined;
+    let stdinError: string | undefined;
+    let stdinFailedBeforeMainEnd = false;
     const capture = (chunk: Buffer | string) => {
       const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       const remaining = captureLimit - bytes;
@@ -554,6 +556,14 @@ function runCommand(command: string, cwd: string, timeoutMs: number, signal: Abo
       // A missing exit and close still needs a bounded resource check.
       if (!mainEndObserved && !closed && !fallbackTimer) fallbackTimer = setTimeout(() => { void finish(); }, 3_000);
     };
+    child.stdin?.on('error', error => {
+      stdinError ??= error.message;
+      // EPIPE after a known shell exit is only the unread remainder of the
+      // script. Before that fact exists, the submitted result is unknown:
+      // stop the owned group and return the write failure instead of crashing
+      // the host or pretending that the command completed normally.
+      if (!mainEndObserved) { stdinFailedBeforeMainEnd = true; terminate(); }
+    });
     const onAbort = () => { if (!mainEndObserved) interrupted = true; terminate(); };
     signal.addEventListener('abort', onAbort, { once: true });
     if (signal.aborted) onAbort();
@@ -633,8 +643,9 @@ function runCommand(command: string, cwd: string, timeoutMs: number, signal: Abo
       if (raw.length > maxOutputBytes || redacted.length > maxOutputBytes) outputTruncated = true;
       const output = redacted.subarray(0, maxOutputBytes).toString('utf8');
       const cleanupError = cleanupErrors.length ? cleanupErrors.join('; ') : undefined;
+      const executionError = spawnError ?? (stdinFailedBeforeMainEnd && exitCode === undefined ? stdinError : undefined);
       settled = true;
-      resolve({ ...(exitCode !== undefined ? { exitCode } : {}), output, outputTruncated, timedOut, interrupted, ...(spawnError ? { error: spawnError } : {}), ...(cleanupError ? { cleanupError } : {}) });
+      resolve({ ...(exitCode !== undefined ? { exitCode } : {}), output, outputTruncated, timedOut, interrupted, ...(executionError ? { error: executionError } : {}), ...(cleanupError ? { cleanupError } : {}) });
     }
   });
 }

@@ -126,13 +126,35 @@ function exitedSinceScan(pid: number, scannedStat: string | undefined): boolean 
 }
 /** Two identities with the same key are the same physical process. */
 export const processIdentityKey = (identity: PhysicalProcessIdentity) => JSON.stringify([identity.host, identity.boot, identity.namespace, identity.pid, identity.start]);
+function validProcessIdentity(identity: PhysicalProcessIdentity): boolean {
+  return Number.isSafeInteger(identity.pid) && identity.pid > 0
+    && [identity.host, identity.boot, identity.namespace].every(value => typeof value === 'string' && value.length > 0)
+    && typeof identity.start === 'string' && /^\d+$/.test(identity.start);
+}
+/** A matching Linux Z/X entry proves this owned process exited, never that a reused PID did. */
+function observeOwnedProcess(identity: PhysicalProcessIdentity, probe: ProcessProbe): ReturnType<ProcessProbe['observe']> {
+  let observed: ReturnType<ProcessProbe['observe']>;
+  try { observed = probe.observe(identity); } catch { return 'unknown'; }
+  if (observed !== 'alive' || process.platform !== 'linux') return observed;
+  if (!validProcessIdentity(identity)) return 'unknown';
+  try {
+    const raw = readFileSync(`/proc/${identity.pid}/stat`, 'utf8');
+    if (raw.lastIndexOf(')') < 0) return 'unknown';
+    const stat = parseProcStat(raw);
+    if (!/^[A-Zt]$/.test(stat.state) || ![stat.ppid, stat.pgid, stat.session].every(value => Number.isSafeInteger(value) && value >= 0)
+      || !/^\d+$/.test(stat.start) || stat.start !== identity.start) return 'unknown';
+    if (!procStatExited(stat)) return 'alive';
+    const current = probe.identify(identity.pid);
+    return validProcessIdentity(current) && processIdentityKey(current) === processIdentityKey(identity) ? 'dead' : 'unknown';
+  } catch { return 'unknown'; }
+}
 function alive(identity: PhysicalProcessIdentity, probe: ProcessProbe): void {
   if (probe.observe(identity) !== 'alive') fail('LEGACY_TMUX_PROCESS_STATE_CHANGED');
 }
 export async function exitedWithin(items: PhysicalProcessIdentity[], probe: ProcessProbe, ms: number, pollMs = 50): Promise<boolean> {
   const deadline = Date.now() + ms;
   for (;;) {
-    if (items.every(item => probe.observe(item) === 'dead')) return true;
+    if (items.every(item => observeOwnedProcess(item, probe) === 'dead')) return true;
     if (Date.now() >= deadline) return false;
     await new Promise(resolve => setTimeout(resolve, pollMs));
   }
@@ -235,13 +257,13 @@ async function escalate(proof: OwnedTmuxExitProof, probe: ProcessProbe): Promise
   const { scope, socket, targetId, server } = proof;
   const sessionGone = async () => {
     try {
-      if (probe.observe(server) === 'dead') return true;
+      if (observeOwnedProcess(server, probe) === 'dead') return true;
       return socketCheck(scope, socket, true) && (await target(scope)) !== targetId;
     } catch { return false; }
   };
   for (const signal of ['SIGTERM', 'SIGKILL'] as const) {
     if (!(await sessionGone())) break;
-    const observed = proof.identities.map(item => ({ item, state: probe.observe(item) }));
+    const observed = proof.identities.map(item => ({ item, state: observeOwnedProcess(item, probe) }));
     if (observed.some(({ state }) => state === 'unknown')) break;
     const survivors = observed.filter(({ state }) => state === 'alive');
     if (!survivors.length) break;
@@ -250,6 +272,7 @@ async function escalate(proof: OwnedTmuxExitProof, probe: ProcessProbe): Promise
     }
     if ((await provenWithin(proof, probe, ESCALATION_GRACE_MS))) return proof;
   }
+  if (await verifyOwnedTmuxExit(proof, probe)) return proof;
   unproven(proof);
 }
 async function provenWithin(proof: OwnedTmuxExitProof, probe: ProcessProbe, ms: number): Promise<boolean> {
@@ -268,13 +291,13 @@ export async function verifyOwnedTmuxExit(proof: OwnedTmuxExitProof, probe: Proc
     if (!proof.identities.length) {
       // Nothing was alive in the panes when the identity was captured (the pane root had already exited):
       // exit is proven only by the original session being gone.
-      const server = probe.observe(proof.server);
+      const server = observeOwnedProcess(proof.server, probe);
       if (server === 'dead') return !socketCheck(proof.scope, undefined, true) || (await target(proof.scope)) === undefined;
       if (server !== 'alive' || !socketCheck(proof.scope, proof.socket, true)) return false;
       return (await target(proof.scope)) === undefined;
     }
-    if (!proof.identities.every(item => probe.observe(item) === 'dead')) return false;
-    const server = probe.observe(proof.server);
+    if (!proof.identities.every(item => observeOwnedProcess(item, probe) === 'dead')) return false;
+    const server = observeOwnedProcess(proof.server, probe);
     // A replacement server may reuse the path while the last old session is
     // closing. Exact old process identities prove exit without touching it.
     if (server === 'dead') return true;

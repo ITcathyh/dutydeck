@@ -55,3 +55,68 @@ it('never offers project memory to managed Lark background or work item sessions
     const view = mount(source); expect(screen.queryByRole('button', { name: '管理记忆' })).toBeNull(); view.unmount();
   }
 });
+
+it('keeps Lark memory edits made during save and refreshes the fingerprint for the next revision', async () => {
+  const user = userEvent.setup({ delay: null });
+  let current = { ...pool, entries: [{ ...pool.entries[0]! }] };
+  vi.spyOn(api, 'memoryPool').mockImplementation(async () => current);
+  let finish!: () => void;
+  let calls = 0;
+  const revise = vi.spyOn(api, 'reviseMemoryPool').mockImplementation(async (_session, entryId, body) => {
+    calls += 1;
+    if (calls === 1) await new Promise<void>(done => { finish = done; });
+    const previous = current.entries.find(entry => entry.id === entryId && !entry.deletedAt)!;
+    const entry = { ...previous, id: `mem_0000000${calls + 1}`, content: body.content, supersedes: [entryId] };
+    current = { ...current, fingerprint: `version-${calls + 1}`, entries: [...current.entries.map(item => item.id === entryId ? { ...item, deletedAt: '2026-09-25T00:00:00.000Z', supersededBy: entry.id } : item), entry] };
+    return { entry };
+  });
+  mount('lark');
+  await user.click(screen.getByRole('button', { name: '管理记忆' }));
+  await user.click(await screen.findByRole('button', { name: '修订' }));
+  const input = screen.getByRole('textbox', { name: '记忆正文' });
+  await user.clear(input); await user.paste('submitted');
+  await user.click(screen.getByRole('button', { name: '保存修订' }));
+  await waitFor(() => expect(revise).toHaveBeenCalledOnce());
+  await user.clear(input); await user.paste('new unsaved memory');
+  finish();
+  await screen.findByRole('button', { name: '保存修订' });
+  expect((input as HTMLTextAreaElement).value).toBe('new unsaved memory');
+  expect(current.entries.find(entry => !entry.deletedAt)!.content).toBe('submitted');
+  await user.click(screen.getByRole('button', { name: '保存修订' }));
+  await waitFor(() => expect(revise).toHaveBeenCalledTimes(2));
+  expect(revise.mock.calls[1]?.[2]).toMatchObject({ content: 'new unsaved memory', expectedFingerprint: 'version-2' });
+  await waitFor(() => expect(screen.queryByRole('textbox', { name: '记忆正文' })).toBeNull());
+});
+
+it('uses the same pending-draft protection for Web project memory', async () => {
+  const user = userEvent.setup({ delay: null });
+  let current = { ...pool, entries: [{ ...pool.entries[0]! }] };
+  vi.spyOn(api, 'projectMemories').mockResolvedValue({ projects: [{ id: 'proj_a', name: '项目A', enabled: true }] });
+  vi.spyOn(api, 'projectMemoryBinding').mockResolvedValue({ projectId: 'proj_a' });
+  vi.spyOn(api, 'projectMemory').mockImplementation(async () => ({ ...current, id: 'proj_a', name: '项目A', enabled: true }));
+  let finish!: () => void;
+  let calls = 0;
+  const write = vi.spyOn(api, 'writeProjectMemory').mockImplementation(async (_project, body, entryId) => {
+    calls += 1;
+    if (calls === 1) await new Promise<void>(done => { finish = done; });
+    const previous = current.entries.find(entry => entry.id === entryId && !entry.deletedAt)!;
+    const entry = { ...previous, id: `mem_0000000${calls + 1}`, content: body.content, supersedes: entryId ? [entryId] : undefined };
+    current = { ...current, fingerprint: `version-${calls + 1}`, entries: [...current.entries.map(item => item.id === entryId ? { ...item, deletedAt: '2026-09-25T00:00:00.000Z', supersededBy: entry.id } : item), entry] };
+    return { entry };
+  });
+  mount('web');
+  await user.click(screen.getByRole('button', { name: '管理记忆' }));
+  await user.click(await screen.findByRole('button', { name: '修订' }));
+  const input = screen.getByRole('textbox', { name: '记忆正文' });
+  await user.clear(input); await user.paste('submitted');
+  await user.click(screen.getByRole('button', { name: '保存修订' }));
+  await waitFor(() => expect(write).toHaveBeenCalledOnce());
+  await user.clear(input); await user.paste('new unsaved project memory');
+  finish();
+  await screen.findByRole('button', { name: '保存修订' });
+  expect((input as HTMLTextAreaElement).value).toBe('new unsaved project memory');
+  await user.click(screen.getByRole('button', { name: '保存修订' }));
+  await waitFor(() => expect(write).toHaveBeenCalledTimes(2));
+  expect(write.mock.calls[0]?.[0]).toBe('proj_a');
+  expect(write.mock.calls[1]?.[1]).toMatchObject({ content: 'new unsaved project memory', expectedFingerprint: 'version-2' });
+});

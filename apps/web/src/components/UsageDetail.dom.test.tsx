@@ -5,6 +5,8 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { usageUnknownModel, type UsageGroup, type UsageReport, type UsageTaskRow, type UsageTotals } from '@dutydeck/shared';
 import { api, type LarkBotConfig, type UsageSummary } from '../api';
 import { UsageOverview } from './UsageOverview';
+import { UsageDetail } from './UsageDetail';
+import { resolveUsageRange } from '../../../server/src/usage-ledger';
 
 const totals = (patch: Partial<UsageTotals> = {}): UsageTotals => ({ entries: 0, costUsd: 0, estimatedCostUsd: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, unavailable: 0, unpriced: 0, pricedEntries: 0, unknownCostEntries: 0, costCoverage: null, ...patch });
 const group = (patch: Partial<UsageGroup>): UsageGroup => ({ ...totals({ entries: 1, costUsd: 1, pricedEntries: 1, costCoverage: 1 }), ...patch });
@@ -95,6 +97,68 @@ describe('usage detail tab', () => {
     expect(within(list).queryByRole('button', { name: '下一页' })).toBeNull();
     await userEvent.setup({ delay: null }).click(within(list).getByRole('button', { name: '打开任务 task_1' }));
     expect(onOpenTask).toHaveBeenCalledWith('ses_root');
+  });
+
+  it('keeps date filters on invalid input, blocks the query, and allows an inclusive same-day range', async () => {
+    vi.spyOn(api, 'usageSummary').mockResolvedValue(summary);
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    const read = vi.spyOn(api, 'usageReport').mockResolvedValue(report);
+    const tasks = vi.spyOn(api, 'usageTasks').mockResolvedValue({ total: 1, tasks: [task({})] });
+    mount();
+    await openDetail();
+    const form = await screen.findByRole('form', { name: '明细筛选' });
+    await waitFor(() => expect(read).toHaveBeenCalledOnce());
+    expect(read.mock.calls[0]?.[0]).toMatchObject({ from: '', to: '' });
+    const readCalls = read.mock.calls.length;
+    const taskCalls = tasks.mock.calls.length;
+    fireEvent.change(within(form).getByLabelText('开始日期'), { target: { value: '2026-09-26' } });
+    expect(await screen.findByText(/开始日期不能晚于结束日期/)).toBeTruthy();
+    expect(screen.getByRole('form', { name: '明细筛选' })).toBeTruthy();
+    expect(read).toHaveBeenCalledTimes(readCalls);
+    expect(tasks).toHaveBeenCalledTimes(taskCalls);
+    fireEvent.change(within(form).getByLabelText('结束日期'), { target: { value: '2026-09-26' } });
+    await waitFor(() => expect(read.mock.calls.length).toBeGreaterThan(readCalls));
+    expect(read.mock.calls.at(-1)?.[0]).toMatchObject({ from: '2026-09-26', to: '2026-09-26' });
+  });
+
+  it('restores the real server default end date after clearing an old filtered range', async () => {
+    const now = new Date(2026, 8, 25, 12);
+    const read = vi.spyOn(api, 'usageReport').mockImplementation(async query => ({ ...report, range: resolveUsageRange(query, now) }));
+    vi.spyOn(api, 'usageTasks').mockResolvedValue({ tasks: [], total: 0 });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={client}><UsageDetail botName={() => 'Bot'}/></QueryClientProvider>);
+    await screen.findByRole('region', { name: '明细合计' });
+    const start = screen.getByLabelText('开始日期');
+    const end = screen.getByLabelText('结束日期');
+    fireEvent.change(start, { target: { value: '2026-09-01' } });
+    await waitFor(() => expect(screen.getByRole('region', { name: '明细合计' }).textContent).toContain('2026-09-01 至 2026-09-25'));
+    fireEvent.change(end, { target: { value: '2026-09-10' } });
+    await waitFor(() => expect(screen.getByRole('region', { name: '明细合计' }).textContent).toContain('2026-09-01 至 2026-09-10'));
+    fireEvent.change(start, { target: { value: '2026-09-20' } });
+    await screen.findByText(/开始日期不能晚于结束日期/);
+    const before = read.mock.calls.length;
+
+    fireEvent.change(end, { target: { value: '' } });
+    await waitFor(() => expect(read.mock.calls.length).toBeGreaterThan(before));
+    expect(read.mock.calls.at(-1)?.[0]).toMatchObject({ from: '2026-09-20', to: '' });
+    await waitFor(() => expect(screen.getByRole('region', { name: '明细合计' }).textContent).toContain('2026-09-20 至 2026-09-25'));
+    expect((end as HTMLInputElement).value).toBe('2026-09-25');
+    expect(screen.queryByText(/开始日期不能晚于结束日期/)).toBeNull();
+  });
+
+  it('keeps filters usable after a report request error', async () => {
+    vi.spyOn(api, 'usageSummary').mockResolvedValue(summary);
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    const read = vi.spyOn(api, 'usageReport').mockRejectedValueOnce(new Error('temporary outage')).mockResolvedValue(report);
+    vi.spyOn(api, 'usageTasks').mockResolvedValue({ total: 0, tasks: [] });
+    mount();
+    await openDetail();
+    expect(await screen.findByText(/用量明细读取失败：temporary outage/)).toBeTruthy();
+    const form = screen.getByRole('form', { name: '明细筛选' });
+    fireEvent.change(within(form).getByLabelText('开始日期'), { target: { value: '2026-09-23' } });
+    await screen.findByRole('region', { name: '明细合计' });
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole('form', { name: '明细筛选' })).toBeTruthy();
   });
 
   it('explains an empty range instead of drawing zeros', async () => {

@@ -17,7 +17,7 @@ import {
 } from '@dutydeck/shared';
 import { metric, object, safeToken, TokenAnalysis, PulseAnalysis, type JsonObject } from './session-insight-analyzer-tokens.js';
 
-export const SESSION_INSIGHT_ENGINE_VERSIONS: EngineVersionInfo = { schemaVersion: 1, engineVersion: 'dutydeck-ts-v1', parserVersion: 'ts-v2', metricVersion: 'v2' };
+export const SESSION_INSIGHT_ENGINE_VERSIONS: EngineVersionInfo = { schemaVersion: 1, engineVersion: 'dutydeck-ts-v1', parserVersion: 'ts-v3', metricVersion: 'v3' };
 const metricNames = ['inputUncached', 'cacheRead', 'cacheWrite', 'output', 'reasoningOutput', 'totalTracked', 'rawInput', 'rawOutput', 'rawTotal', 'peakContext', 'contextWindow', 'elapsedDurationMs', 'activeDurationMs', 'idleDurationMs', 'pairedToolDurationMs', 'userTurns', 'assistantTurns', 'toolCalls', 'toolFailures', 'toolSuccesses', 'toolUnknowns', 'toolFailureRate', 'compactionCount', 'subagentCount'] as const;
 const string = (value: unknown): string => typeof value === 'string' ? value : '';
 const turnId = (payload: JsonObject): string => string(payload.turn_id) || string(object(payload.internal_chat_message_metadata_passthrough).turn_id);
@@ -30,7 +30,11 @@ const excerpt = (value: unknown): string | null => {
   const bytes = Buffer.from(source);
   let end = Math.min(bytes.length, SESSION_INSIGHT_LIMITS.maxExcerptLengthBytes);
   while (end < bytes.length && (bytes[end]! & 0xc0) === 0x80) end--;
-  return bytes.subarray(0, end).toString('utf8');
+  const prefix = bytes.subarray(0, end).toString('utf8');
+  if (end < bytes.length && /\S$/u.test(prefix) && /^\S/u.test(bytes.subarray(end, end + 4).toString('utf8'))) {
+    return prefix.replace(/\S+$/u, '').trimEnd() || null;
+  }
+  return prefix;
 };
 
 class Warnings {
@@ -108,6 +112,8 @@ class FileAnalysis {
   readonly models = new Set<string>();
   readonly users = new Set<string>();
   readonly assistants = new Set<string>();
+  private readonly identifiedAssistantTurns = new Set<string>();
+  private readonly anonymousAssistantTurns: string[] = [];
   readonly seenUserRecords = new Set<string>();
   readonly seenBlocks = new Set<string>();
   userAnonymous = 0;
@@ -149,9 +155,15 @@ class FileAnalysis {
     else { if (this.previousTime !== null && ms - this.previousTime > 300_000) this.idle += ms - this.previousTime; this.previousTime = ms; }
   }
   private model(value: unknown): void { if (typeof value === 'string' && value.trim()) this.models.add(value); }
-  private turn(role: 'user' | 'assistant', id: string, content: unknown): void {
+  private turn(role: 'user' | 'assistant', id: string, content: unknown, nativeTurnId = ''): void {
     if (role === 'user') { if (id) this.users.add(id); else if (this.input.client !== 'claude') this.users.add(`line:${this.position.line}:${this.position.sub}`); else this.userAnonymous++; this.emit('user_message', { inputExcerpt: excerpt(content) }); }
-    else { if (id) this.assistants.add(id); this.emit('agent_message', { outputExcerpt: excerpt(content) }); }
+    else {
+      if (id) {
+        this.assistants.add(id);
+        if (nativeTurnId) this.identifiedAssistantTurns.add(nativeTurnId);
+      } else this.anonymousAssistantTurns.push(nativeTurnId);
+      this.emit('agent_message', { outputExcerpt: excerpt(content) });
+    }
   }
   private call(id: string, name: string, input: unknown, at = this.position.at, single = false): void {
     const actualId = id || `anon-${this.position.line}-${this.position.sub}`;
@@ -181,7 +193,7 @@ class FileAnalysis {
     this.position = { ...this.position, nativeId: id, at: type === 'UserMessage' ? start : end };
     this.model(item.model);
     if (type === 'UserMessage') this.turn('user', id, item.content);
-    else if (type === 'AgentMessage') this.turn('assistant', id, item.content);
+    else if (type === 'AgentMessage') this.turn('assistant', id, item.content, turnId(payload) || this.currentTurnId);
     else if (type === 'Reasoning') this.emit('reasoning');
     else if (type === 'ContextCompaction') { this.compactions++; this.emit('context_compacted'); }
     else if (type === 'SubAgentActivity') this.subagent(string(item.kind));
@@ -199,7 +211,7 @@ class FileAnalysis {
   }
   private item(payload: JsonObject): void {
     const type = string(payload.type);
-    if (type === 'message' && (payload.role === 'user' || payload.role === 'assistant')) this.turn(payload.role, string(payload.id), payload.content);
+    if (type === 'message' && (payload.role === 'user' || payload.role === 'assistant')) this.turn(payload.role, string(payload.id), payload.content, turnId(payload) || this.currentTurnId);
     else if (['function_call', 'custom_tool_call'].includes(type)) this.call(string(payload.call_id), string(payload.name) || type, payload.arguments ?? payload.input);
     else if (['function_call_output', 'custom_tool_call_output'].includes(type)) {
       let decoded: JsonObject = {};
@@ -262,8 +274,9 @@ class FileAnalysis {
       if (!contextOnly && !this.canonicalUserTurns.has(turnId(payload) || this.currentTurnId)) this.turn('user', string(payload.id), payload.message ?? payload.content);
       return;
     }
-    if (this.canonical && (kind === 'response_item' || ['user_message', 'message', 'reasoning', 'function_call', 'custom_tool_call', 'function_call_output', 'custom_tool_call_output', 'task_started'].includes(type))) return;
-    if (type === 'agent_message') this.turn('assistant', '', payload.message ?? payload.text);
+    const rawAssistant = kind === 'response_item' && type === 'message' && payload.role === 'assistant';
+    if (this.canonical && !rawAssistant && (kind === 'response_item' || ['user_message', 'message', 'reasoning', 'function_call', 'custom_tool_call', 'function_call_output', 'custom_tool_call_output', 'task_started'].includes(type))) return;
+    if (type === 'agent_message') this.turn('assistant', '', payload.message ?? payload.text, turnId(payload) || this.currentTurnId);
     else if (type === 'reasoning' || type === 'agent_reasoning_raw_content') this.emit('reasoning');
     else if (type === 'sub_agent_activity') { this.position.at = nativeTimestamp(payload.occurred_at_ms, this.position.at); this.position.nativeId = string(payload.event_id); this.subagent(string(payload.kind)); }
     else if (['exec_command_end', 'patch_apply_end', 'web_search_end'].includes(type)) this.resolve(string(payload.call_id), payload, payload.stderr || payload.aggregated_output || payload.formatted_output || payload.stdout || payload.output, nativeTimestamp(payload.completed_at_ms, this.position.at), true);
@@ -322,10 +335,14 @@ class FileAnalysis {
       if (duration !== null) { pairedDuration += duration; paired++; }
       this.emit('tool_summary', { callId: tool.id, toolName: tool.name || null, resultStatus: tool.status, durationMs: metric(duration, duration === null ? 'UNPAIRED_TOOL_CALL' : undefined, undefined, undefined, undefined, duration === null ? 'unknown' : 'observed'), inputExcerpt: tool.input, outputExcerpt: tool.output, evidenceRefs: [tool.callEvent, tool.resultEvent].filter((id): id is string => !!id) }, { ...tool.position, sub: tool.position.sub + 1_000_000 });
     }
+    let assistantAnonymous = this.assistantAnonymous;
+    for (const turn of this.anonymousAssistantTurns) {
+      if (!turn || !this.identifiedAssistantTurns.has(turn)) assistantAnonymous++;
+    }
     const turns = (set: Set<string>, anon: number) => metric(set.size + anon, anon ? 'ANONYMOUS_TURNS' : undefined, anon ? 'partial' : 'available', set.size, anon, anon ? 'derived' : 'exact');
     const elapsed = coverage.timeRange.start && coverage.timeRange.end ? Date.parse(coverage.timeRange.end) - Date.parse(coverage.timeRange.start) : null;
     const incompleteTime = coverage.missingTimestampCount > 0 || coverage.disorderedTimestampCount > 0;
-    result.metrics = { ...this.tokens.metrics(), elapsedDurationMs: metric(elapsed, elapsed === null ? 'NO_VALID_TIMESTAMPS' : undefined, undefined, undefined, undefined, 'observed'), activeDurationMs: metric(incompleteTime || elapsed === null ? null : Math.max(0, elapsed - this.idle), incompleteTime ? 'TIMESTAMP_DISORDERED' : elapsed === null ? 'NO_VALID_TIMESTAMPS' : undefined, undefined, undefined, undefined, 'observed'), idleDurationMs: metric(incompleteTime || elapsed === null ? null : this.idle, incompleteTime ? 'TIMESTAMP_DISORDERED' : elapsed === null ? 'NO_VALID_TIMESTAMPS' : undefined, undefined, undefined, undefined, 'heuristic'), pairedToolDurationMs: metric(paired ? pairedDuration : null, paired ? undefined : 'NO_PAIRED_TOOLS', undefined, undefined, undefined, 'observed'), userTurns: turns(this.users, this.userAnonymous), assistantTurns: turns(this.assistants, this.assistantAnonymous), toolCalls: metric(this.tools.size, anonymous ? 'ANONYMOUS_TOOL_CALLS' : undefined, anonymous ? 'partial' : 'available', this.tools.size - anonymous, anonymous), toolFailures: metric(failures), toolSuccesses: metric(successes), toolUnknowns: metric(unknown), toolFailureRate: metric(successes + failures ? failures / (successes + failures) : null, successes + failures ? anonymous ? 'ANONYMOUS_TOOL_CALLS' : undefined : 'NO_DETERMINABLE_CALLS', successes + failures && anonymous ? 'partial' : undefined, successes + failures, anonymous || (successes + failures ? 0 : 1), anonymous ? 'derived' : successes + failures ? 'exact' : 'unavailable'), compactionCount: metric(this.compactions), subagentCount: metric(this.subagents, this.subagents ? 'SUBAGENT_FILE_UNVERIFIED' : undefined, this.subagents ? 'partial' : 'available') };
+    result.metrics = { ...this.tokens.metrics(), elapsedDurationMs: metric(elapsed, elapsed === null ? 'NO_VALID_TIMESTAMPS' : undefined, undefined, undefined, undefined, 'observed'), activeDurationMs: metric(incompleteTime || elapsed === null ? null : Math.max(0, elapsed - this.idle), incompleteTime ? 'TIMESTAMP_DISORDERED' : elapsed === null ? 'NO_VALID_TIMESTAMPS' : undefined, undefined, undefined, undefined, 'observed'), idleDurationMs: metric(incompleteTime || elapsed === null ? null : this.idle, incompleteTime ? 'TIMESTAMP_DISORDERED' : elapsed === null ? 'NO_VALID_TIMESTAMPS' : undefined, undefined, undefined, undefined, 'heuristic'), pairedToolDurationMs: metric(paired ? pairedDuration : null, paired ? undefined : 'NO_PAIRED_TOOLS', undefined, undefined, undefined, 'observed'), userTurns: turns(this.users, this.userAnonymous), assistantTurns: turns(this.assistants, assistantAnonymous), toolCalls: metric(this.tools.size, anonymous ? 'ANONYMOUS_TOOL_CALLS' : undefined, anonymous ? 'partial' : 'available', this.tools.size - anonymous, anonymous), toolFailures: metric(failures), toolSuccesses: metric(successes), toolUnknowns: metric(unknown), toolFailureRate: metric(successes + failures ? failures / (successes + failures) : null, successes + failures ? anonymous ? 'ANONYMOUS_TOOL_CALLS' : undefined : 'NO_DETERMINABLE_CALLS', successes + failures && anonymous ? 'partial' : undefined, successes + failures, anonymous || (successes + failures ? 0 : 1), anonymous ? 'derived' : successes + failures ? 'exact' : 'unavailable'), compactionCount: metric(this.compactions), subagentCount: metric(this.subagents, this.subagents ? 'SUBAGENT_FILE_UNVERIFIED' : undefined, this.subagents ? 'partial' : 'available') };
     result.models = [...this.models].sort(); coverage.tokenSamplesAvailable = this.tokens.samples;
     return result;
   }

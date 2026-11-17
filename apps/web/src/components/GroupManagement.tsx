@@ -252,6 +252,14 @@ function ModeRadios<T extends string>({ name, value, options, onChange }: {
   );
 }
 
+function participationTargetReached(level: ParticipationLevel | 'inherit', entry: ManagedGroupBot, settings: CollaborationSettings) {
+  const override = entry.binding?.routingOverride.mentionPolicy;
+  if (level === 'inherit') return override?.mode !== 'set' && settings.inheritParticipation;
+  const fields = participationLevelFields(level);
+  return override?.mode === 'set' && override.value === fields.mentionPolicy
+    && !settings.inheritParticipation && settings.participation === fields.participation;
+}
+
 export function GroupManagement({
   selectedChatId,
   selectedAppId,
@@ -690,28 +698,85 @@ export function GroupManagement({
   const groupLevelValue: ParticipationLevel | 'inherit' | '' = !groupSettings || !activeBotEntry ? ''
     : activeBotEntry.binding?.routingOverride.mentionPolicy.mode !== 'set' && groupSettings.inheritParticipation ? 'inherit'
     : resolveParticipation({ mentionPolicy: activeBotEntry.effective?.routing.mentionPolicy.value as LarkBotConfig['mentionPolicy'], participation: groupSettings.participation }).level;
+  const showLevelSuccess = (variables: { appId: string; chatId: string; level: ParticipationLevel | 'inherit' }) => {
+    toastStore.push({ kind: 'success', key: `level-${variables.appId}-${variables.chatId}`, title: '接话方式已更新',
+      description: variables.level === 'inherit' ? '本群跟随 Bot 默认。' : `${participationLevelLabels[variables.level]}：${participationLevelBehaviors[variables.level]}。` });
+  };
   const levelMutation = useMutation({
-    mutationFn: async ({ appId, chatId, level, binding, settings }: { appId: string; chatId: string; level: ParticipationLevel | 'inherit'; binding?: GroupBinding; settings: CollaborationSettings }) => {
-      const fields = level === 'inherit' ? undefined : participationLevelFields(level);
-      const mentionPolicy: GroupBinding['routingOverride']['mentionPolicy'] = fields ? { mode: 'set', value: fields.mentionPolicy } : { mode: 'inherit' };
-      if (JSON.stringify(binding?.routingOverride.mentionPolicy ?? { mode: 'inherit' }) !== JSON.stringify(mentionPolicy)) {
-        await api.updateGroupBotBinding(appId, chatId, { expectedRevision: binding?.revision ?? 0,
-          patch: { routingOverride: { groupReplyMode: binding?.routingOverride.groupReplyMode ?? { mode: 'inherit' }, mentionPolicy } } });
+    mutationFn: async ({ appId, chatId, level, binding, settings }: { appId: string; chatId: string; groupKey?: string; level: ParticipationLevel | 'inherit'; binding?: GroupBinding; settings: CollaborationSettings }) => {
+      let routingSaved = false;
+      try {
+        const fields = level === 'inherit' ? undefined : participationLevelFields(level);
+        const mentionPolicy: GroupBinding['routingOverride']['mentionPolicy'] = fields ? { mode: 'set', value: fields.mentionPolicy } : { mode: 'inherit' };
+        if (JSON.stringify(binding?.routingOverride.mentionPolicy ?? { mode: 'inherit' }) !== JSON.stringify(mentionPolicy)) {
+          await api.updateGroupBotBinding(appId, chatId, { expectedRevision: binding?.revision ?? 0,
+            patch: { routingOverride: { groupReplyMode: binding?.routingOverride.groupReplyMode ?? { mode: 'inherit' }, mentionPolicy } } });
+          routingSaved = true;
+        }
+        await collaborationApi.updateSettings(appId, chatId, fields
+          ? { expectedRevision: settings.revision, participation: fields.participation }
+          : { expectedRevision: settings.revision, inheritParticipation: true });
+      } catch (error) {
+        throw { cause: error, routingSaved };
       }
-      await collaborationApi.updateSettings(appId, chatId, fields
-        ? { expectedRevision: settings.revision, participation: fields.participation }
-        : { expectedRevision: settings.revision, inheritParticipation: true });
     },
     onSuccess: (_result, variables) => {
       void qc.invalidateQueries({ queryKey: ['lark-management-groups'] });
       void qc.invalidateQueries({ queryKey: ['collaboration-overview', variables.appId, variables.chatId] });
-      toastStore.push({ kind: 'success', key: `level-${variables.appId}-${variables.chatId}`, title: '接话方式已更新',
-        description: variables.level === 'inherit' ? '本群跟随 Bot 默认。' : `${participationLevelLabels[variables.level]}：${participationLevelBehaviors[variables.level]}。` });
+      showLevelSuccess(variables);
     },
-    onError: (error: unknown, variables) => {
-      void qc.invalidateQueries({ queryKey: ['lark-management-groups'] });
-      void qc.invalidateQueries({ queryKey: ['collaboration-overview', variables.appId, variables.chatId] });
-      toastStore.push({ kind: 'error', key: `level-${variables.appId}-${variables.chatId}`, title: '接话方式没有改成', description: error instanceof Error ? error.message : String(error) });
+    onError: async (failure: unknown, variables) => {
+      const { cause, routingSaved } = failure as { cause: unknown; routingSaved: boolean };
+      const message = cause instanceof Error ? cause.message : String(cause);
+      if (!routingSaved) {
+        void qc.invalidateQueries({ queryKey: ['lark-management-groups'] });
+        void qc.invalidateQueries({ queryKey: ['collaboration-overview', variables.appId, variables.chatId] });
+        toastStore.push({ kind: 'error', key: `level-${variables.appId}-${variables.chatId}`, title: '接话方式没有改成', description: message });
+        return;
+      }
+      const readLatest = async () => {
+        const [latestGroups, latestOverview] = await Promise.all([
+          api.managementGroups(),
+          collaborationApi.getOverview(variables.appId, variables.chatId)
+        ]);
+        qc.setQueryData(['lark-management-groups'], latestGroups);
+        qc.setQueryData(['collaboration-overview', variables.appId, variables.chatId], latestOverview);
+        const group = latestGroups.groups.find(item => variables.groupKey ? item.key === variables.groupKey : item.chatId === variables.chatId && item.bots.some(bot => bot.appId === variables.appId));
+        const entry = group?.bots.find(bot => bot.appId === variables.appId);
+        const settings = latestOverview.snapshot.settings;
+        if (!entry) throw new Error('回读后找不到当前群与 Bot，请刷新页面核对。');
+        return { entry, settings };
+      };
+      let latest: Awaited<ReturnType<typeof readLatest>> | undefined;
+      try {
+        latest = await readLatest();
+        if (participationTargetReached(variables.level, latest.entry, latest.settings)) {
+          showLevelSuccess(variables);
+          return;
+        }
+      } catch {}
+      const actual = latest
+        ? participationLevelLabels[resolveParticipation({ mentionPolicy: latest.entry.effective?.routing.mentionPolicy.value as LarkBotConfig['mentionPolicy'], participation: latest.settings.participation }).level]
+        : '未知（回读失败，请刷新页面核对）';
+      toastStore.push({
+        kind: 'warning',
+        key: `level-${variables.appId}-${variables.chatId}`,
+        title: latest ? '接话方式只保存了一部分' : '接话方式保存结果待核对',
+        description: latest
+          ? `群级唤醒方式已保存，参与模式未保存；回读后的实际接话方式：${actual}。目标档位尚未完整生效。${message}`
+          : `群级唤醒方式已保存，参与模式的保存结果未知；回读失败，无法确认目标档位是否已生效。${message}`,
+        action: {
+          label: '基于最新版本重试',
+          run: async () => {
+            const current = await readLatest();
+            if (participationTargetReached(variables.level, current.entry, current.settings)) {
+              showLevelSuccess(variables);
+              return;
+            }
+            levelMutation.mutate({ ...variables, binding: current.entry.binding, settings: current.settings });
+          }
+        }
+      });
     }
   });
 
@@ -1090,7 +1155,7 @@ export function GroupManagement({
                         disabled={!groupSettings || isDirty || levelMutation.isPending}
                         onChange={e => {
                           if (!editingAppId || !activeChatId || !groupSettings) return;
-                          levelMutation.mutate({ appId: editingAppId, chatId: activeChatId, level: e.target.value as ParticipationLevel | 'inherit', binding: activeBotEntry.binding, settings: groupSettings });
+                          levelMutation.mutate({ appId: editingAppId, chatId: activeChatId, groupKey: activeGroupKey, level: e.target.value as ParticipationLevel | 'inherit', binding: activeBotEntry.binding, settings: groupSettings });
                         }}
                       >
                         {!groupSettings && <option value="">读取中…</option>}

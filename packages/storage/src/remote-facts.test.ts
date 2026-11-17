@@ -117,4 +117,34 @@ describe('v14 remote fact repositories', () => {
     expect(await repositories.remoteChatFacts.get('chat-remote')).toBeUndefined();
     repositories.close();
   });
+
+  it('replaces stale identity and chat errors on every successful observation, including consecutive rechecks', async () => {
+    const { repositories } = await setup();
+    await repositories.remoteIdentityFacts.upsert(identityInput());
+    await repositories.remoteChatFacts.upsert(chatInput());
+    await repositories.remoteIdentityFacts.invalidate('identity-remote', {
+      expectedRevision: 1, invalidatedAt: '2026-08-30T00:10:00.000Z', errorCode: 'IDENTITY_PREFLIGHT_REMOTE_AUTH_FAILED'
+    });
+    const recovered = await repositories.remoteIdentityFacts.upsert(identityInput(2, {
+      checkedAt: '2026-08-30T00:20:00.000Z', expiresAt: '2026-08-30T01:20:00.000Z'
+    }));
+    expect(recovered).toMatchObject({ revision: 3, errorCode: undefined });
+    const recoveredChat = await repositories.remoteChatFacts.upsert(chatInput(2, {
+      identityRevision: 3, observedAt: '2026-08-30T00:20:00.000Z', lastSuccessAt: '2026-08-30T00:20:00.000Z', expiresAt: '2026-08-30T01:20:00.000Z'
+    }));
+    expect(recoveredChat).toMatchObject({ revision: 3, errorCode: undefined, invalidatedAt: undefined });
+
+    // 身份再次成功会先让旧 chat 失效；本次 chat 成功必须清掉这个中间态，而不是继承 REMOTE_IDENTITY_RECHECKED。
+    await repositories.remoteIdentityFacts.upsert(identityInput(3, {
+      checkedAt: '2026-08-30T00:30:00.000Z', expiresAt: '2026-08-30T01:30:00.000Z'
+    }));
+    expect(await repositories.remoteChatFacts.get('chat-remote')).toMatchObject({ errorCode: 'REMOTE_IDENTITY_RECHECKED' });
+    const consecutive = await repositories.remoteChatFacts.upsert(chatInput(4, {
+      identityRevision: 4, observedAt: '2026-08-30T00:30:00.000Z', lastSuccessAt: '2026-08-30T00:30:00.000Z', expiresAt: '2026-08-30T01:30:00.000Z'
+    }));
+    expect(consecutive).toMatchObject({ revision: 5, errorCode: undefined, invalidatedAt: undefined });
+    expect(await repositories.remoteIdentityFacts.getCurrentByChannelBot('bot-remote', '2026-08-30T00:30:00.000Z')).toMatchObject({ revision: 4, errorCode: undefined });
+    expect(await repositories.remoteChatFacts.getCurrentByNaturalKey('bot-remote', 'synthetic-chat', '2026-08-30T00:30:00.000Z')).toMatchObject({ revision: 5, errorCode: undefined });
+    repositories.close();
+  });
 });

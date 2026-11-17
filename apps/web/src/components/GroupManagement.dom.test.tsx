@@ -4,9 +4,11 @@ import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { api, ApiError, collaborationApi, type Agent, type LarkBotConfig, type ManagedGroup, type CollaborationOverview } from '../api';
-import { inheritPresentationOverride, type GroupBinding, type RoleAssignment } from '@dutydeck/shared';
+import { inheritPresentationOverride, resolveGroupEffectiveConfig, type GroupBinding, type RoleAssignment } from '@dutydeck/shared';
 import { resetDrafts } from '../draft-store';
+import { toastStore } from '../useToasts';
 import { GroupManagement } from './GroupManagement';
+import { ToastViewport } from './ToastViewport';
 
 // user.type 每个字符都会触发一次整树重渲染；这里的输入不依赖逐键行为，点击聚焦后一次粘贴写入。
 async function typeInto(user: Pick<typeof userEvent, 'click' | 'paste'>, element: Element, text: string) {
@@ -15,8 +17,8 @@ async function typeInto(user: Pick<typeof userEvent, 'click' | 'paste'>, element
 }
 
 // 草稿是模块级 store（切走视图也要留住），用例之间必须显式清空，否则互相串。
-beforeEach(() => resetDrafts());
-afterEach(() => { vi.restoreAllMocks(); resetDrafts(); });
+beforeEach(() => { resetDrafts(); toastStore.clear(); });
+afterEach(() => { vi.restoreAllMocks(); resetDrafts(); toastStore.clear(); });
 
 const makeBot = (appId: string, name: string, workspace: string): LarkBotConfig => ({
   configured: true,
@@ -1017,7 +1019,7 @@ describe('GroupManagement 保存期间切换对象与继续编辑', () => {
   });
 
   describe('接话方式（参与强度）', () => {
-    const overview = (participation: 'off' | 'selective', inheritParticipation: boolean): CollaborationOverview => ({
+    const overview = (participation: CollaborationOverview['snapshot']['settings']['participation'], inheritParticipation: boolean): CollaborationOverview => ({
       snapshot: { scope: { appId: 'cli_dev', chatId: 'oc_chat_1' }, contextRevision: 1,
         settings: { scope: { appId: 'cli_dev', chatId: 'oc_chat_1' }, revision: 5, participation, inheritParticipation, instructions: '', notificationsPaused: false,
           maxProactivePerHour: 6, retentionDays: 30, policyVersion: 'v1', updatedAt: '2026-09-18T00:00:00.000Z' },
@@ -1056,6 +1058,141 @@ describe('GroupManagement 保存期间切换对象与继续编辑', () => {
       await user.click(screen.getByRole('checkbox', { name: /启用本群 Oncall 模式/ }));
       expect(level.disabled).toBe(true);
       expect(screen.getByText(/先保存或放弃本群的其他修改，再切换接话方式/)).toBeTruthy();
+    });
+
+    it('第二写已提交但响应丢失时，回读达到目标就报告成功且不提供多余重试', async () => {
+      const user = userEvent.setup();
+      stubBaseQueries();
+      const groups = structuredClone(mockGroups);
+      let current = overview('off', false);
+      vi.spyOn(api, 'managementGroups').mockImplementation(async () => ({ groups }));
+      vi.spyOn(collaborationApi, 'getOverview').mockImplementation(async () => current);
+      vi.spyOn(api, 'updateGroupBotBinding').mockImplementation(async (_app, _chat, request) => {
+        const bot = groups[0]!.bots[0]!;
+        bot.binding = { ...bot.binding!, routingOverride: request.patch.routingOverride!, revision: bot.binding!.revision + 1 };
+        bot.effective = resolveGroupEffectiveConfig(undefined, bot.binding);
+        return bot;
+      });
+      const updateSettings = vi.spyOn(collaborationApi, 'updateSettings').mockImplementation(async (_app, _chat, body) => {
+        const { expectedRevision, ...patch } = body;
+        expect(expectedRevision).toBe(current.snapshot.settings.revision);
+        current = { ...current, snapshot: { ...current.snapshot, settings: { ...current.snapshot.settings, ...patch, revision: expectedRevision + 1 } } };
+        throw new TypeError('Failed to fetch');
+      });
+      renderWithClient(<><GroupManagement selectedChatId="oc_chat_1" selectedAppId="cli_dev" onSelectGroup={() => {}} onNavigateToBot={() => {}} agents={mockAgents}/><ToastViewport/></>);
+      const level = await screen.findByRole('combobox', { name: '接话方式' }) as HTMLSelectElement;
+      await waitFor(() => expect(level.disabled).toBe(false));
+      await user.selectOptions(level, 'eager');
+      await waitFor(() => expect(level.value).toBe('eager'));
+      await waitFor(() => expect(toastStore.getSnapshot().find(item => item.key === 'level-cli_dev-oc_chat_1')).toBeTruthy());
+
+      const toast = toastStore.getSnapshot().find(item => item.key === 'level-cli_dev-oc_chat_1')!;
+      expect(toast.kind).toBe('success');
+      expect(toast.title).toBe('接话方式已更新');
+      expect(toast.description).toContain('积极');
+      expect(toast.description).not.toContain('参与模式未保存');
+      expect(toast.description).not.toContain('目标档位尚未完整生效');
+      expect(toast.action).toBeUndefined();
+      expect(updateSettings).toHaveBeenCalledOnce();
+      expect(await screen.findByText('接话方式已更新')).toBeTruthy();
+    });
+
+    it('第二写结果未知且回读失败时不谎称已经确认部分未保存', async () => {
+      const user = userEvent.setup();
+      stubBaseQueries();
+      const groups = structuredClone(mockGroups);
+      let current = overview('off', false);
+      let failReads = false;
+      vi.spyOn(api, 'managementGroups').mockImplementation(async () => {
+        if (failReads) throw new Error('readback failed');
+        return { groups };
+      });
+      vi.spyOn(collaborationApi, 'getOverview').mockImplementation(async () => {
+        if (failReads) throw new Error('readback failed');
+        return current;
+      });
+      vi.spyOn(api, 'updateGroupBotBinding').mockImplementation(async (_app, _chat, request) => {
+        const bot = groups[0]!.bots[0]!;
+        bot.binding = { ...bot.binding!, routingOverride: request.patch.routingOverride!, revision: bot.binding!.revision + 1 };
+        bot.effective = resolveGroupEffectiveConfig(undefined, bot.binding);
+        return bot;
+      });
+      const updateSettings = vi.spyOn(collaborationApi, 'updateSettings').mockImplementation(async () => {
+        failReads = true;
+        throw new TypeError('Failed to fetch');
+      });
+      renderWithClient(<><GroupManagement selectedChatId="oc_chat_1" selectedAppId="cli_dev" onSelectGroup={() => {}} onNavigateToBot={() => {}} agents={mockAgents}/><ToastViewport/></>);
+      const level = await screen.findByRole('combobox', { name: '接话方式' }) as HTMLSelectElement;
+      await waitFor(() => expect(level.disabled).toBe(false));
+      await user.selectOptions(level, 'eager');
+
+      expect(await screen.findByText('接话方式保存结果待核对')).toBeTruthy();
+      expect(screen.getByText(/参与模式的保存结果未知/)).toBeTruthy();
+      expect(screen.queryByText(/参与模式未保存/)).toBeNull();
+      expect(updateSettings).toHaveBeenCalledOnce();
+      expect(current.snapshot.settings.participation).toBe('off');
+    });
+
+    it('首写成功而第二写冲突时说明部分保存、回读实际档位，并由用户基于新 revision 重试', async () => {
+      const user = userEvent.setup();
+      stubBaseQueries();
+      const groups = structuredClone(mockGroups);
+      let current = overview('off', false);
+      vi.spyOn(api, 'managementGroups').mockImplementation(async () => ({ groups }));
+      vi.spyOn(collaborationApi, 'getOverview').mockImplementation(async () => current);
+      const saveBinding = vi.spyOn(api, 'updateGroupBotBinding').mockImplementation(async (_app, _chat, request) => {
+        const bot = groups[0]!.bots[0]!;
+        const previous = bot.binding!;
+        bot.binding = { ...previous, routingOverride: request.patch.routingOverride!, revision: previous.revision + 1 };
+        bot.effective = resolveGroupEffectiveConfig(undefined, bot.binding);
+        return bot;
+      });
+      let settingsCalls = 0;
+      const updateSettings = vi.spyOn(collaborationApi, 'updateSettings').mockImplementation(async (_app, _chat, body) => {
+        settingsCalls += 1;
+        if (settingsCalls === 1) {
+          current = { ...current, snapshot: { ...current.snapshot, settings: { ...current.snapshot.settings, revision: 6, instructions: 'another editor' } } };
+          throw new ApiError('stale collaboration revision', 'COLLABORATION_REVISION_CONFLICT', 409);
+        }
+        const { expectedRevision: _expected, ...patch } = body;
+        const settings = { ...current.snapshot.settings, ...patch, revision: 7 };
+        current = { ...current, snapshot: { ...current.snapshot, settings } };
+        return { settings };
+      });
+      renderWithClient(<><GroupManagement selectedChatId="oc_chat_1" selectedAppId="cli_dev" onSelectGroup={() => {}} onNavigateToBot={() => {}} agents={mockAgents}/><ToastViewport/></>);
+      const level = await screen.findByRole('combobox', { name: '接话方式' }) as HTMLSelectElement;
+      await waitFor(() => expect(level.disabled).toBe(false));
+      await user.selectOptions(level, 'eager');
+      expect(await screen.findByText('接话方式只保存了一部分')).toBeTruthy();
+      expect(screen.getByText(/群级唤醒方式已保存，参与模式未保存/)).toBeTruthy();
+      expect(screen.getByText(/回读后的实际接话方式：话题内免 @/)).toBeTruthy();
+      await waitFor(() => expect(level.value).toBe('topic'));
+      expect(groups[0]!.bots[0]!.binding!.routingOverride.mentionPolicy).toEqual({ mode: 'set', value: 'topic' });
+      await user.click(screen.getByRole('button', { name: '基于最新版本重试' }));
+      await waitFor(() => expect(updateSettings).toHaveBeenCalledTimes(2));
+      expect(updateSettings.mock.calls[1]?.[2]).toEqual({ expectedRevision: 6, participation: 'eager' });
+      expect(saveBinding).toHaveBeenCalledOnce();
+      expect(current.snapshot.settings.instructions).toBe('another editor');
+      expect(await screen.findByText('接话方式已更新')).toBeTruthy();
+    });
+
+    it.each(['routing', 'participation'] as const)('%s 失败且没有已确认首写时不误报部分成功', async failedStage => {
+      const user = userEvent.setup();
+      stubBaseQueries();
+      const groups = structuredClone(mockGroups);
+      if (failedStage === 'participation') groups[0]!.bots[0]!.binding = makeBinding({ routingOverride: { groupReplyMode: { mode: 'inherit' }, mentionPolicy: { mode: 'set', value: 'topic' } } });
+      vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups });
+      vi.spyOn(collaborationApi, 'getOverview').mockResolvedValue(overview('off', false));
+      const saveBinding = vi.spyOn(api, 'updateGroupBotBinding').mockRejectedValue(new Error('routing failed'));
+      const updateSettings = vi.spyOn(collaborationApi, 'updateSettings').mockRejectedValue(new Error('participation failed'));
+      renderWithClient(<><GroupManagement selectedChatId="oc_chat_1" selectedAppId="cli_dev" onSelectGroup={() => {}} onNavigateToBot={() => {}} agents={mockAgents}/><ToastViewport/></>);
+      const level = await screen.findByRole('combobox', { name: '接话方式' }) as HTMLSelectElement;
+      await waitFor(() => expect(level.disabled).toBe(false));
+      await user.selectOptions(level, 'eager');
+      expect(await screen.findByText('接话方式没有改成')).toBeTruthy();
+      expect(screen.queryByText('接话方式只保存了一部分')).toBeNull();
+      if (failedStage === 'routing') expect(updateSettings).not.toHaveBeenCalled();
+      else expect(saveBinding).not.toHaveBeenCalled();
     });
   });
 

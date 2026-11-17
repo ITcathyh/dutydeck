@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -82,6 +83,31 @@ describe('mergeEnvContent', () => {
     expect(position).toBeLessThan(lines(merged).findIndex(line => line.startsWith('UNRELATED_TOKEN=')));
     // 没有追加重复键，所以也不该出现追加区的标记。
     expect(merged).not.toContain('由 dutydeck setup 写入');
+  });
+
+  it.each([
+    ['重复当前名', 'DUTYDECK_PORT=4310\nDUTYDECK_PORT=9999\n', '14310', '14310'],
+    ['旧名在前', 'DOCKMUX_PORT=4310\nDUTYDECK_PORT=9999\n', '14310', '14310'],
+    ['旧名在后', 'DUTYDECK_PORT=9999\nDOCKMUX_PORT=4310\n', '14310', '14310'],
+    ['重复旧名', 'DOCKMUX_PORT=4310\nDOCKMUX_PORT=9999\n', '14310', '14310'],
+    ['单个当前名', 'DUTYDECK_PORT=4310\n', '14310', '14310'],
+    ['删除重复当前名', 'DUTYDECK_PORT=4310\nDUTYDECK_PORT=9999\n', undefined, null],
+    ['删除新旧混排', 'DOCKMUX_PORT=4310\nDUTYDECK_PORT=9999\nDOCKMUX_PORT=9998\n', undefined, null]
+  ] as const)('真实 Node loader 读到更新后的唯一有效值：%s', async (_name, assignments, requested, expected) => {
+    const root = await fixture();
+    const original = `# 保留这条注释\nUNRELATED_KEY=keep\n${assignments}`;
+    const merged = mergeEnvContent(original, { DUTYDECK_PORT: requested });
+    const path = join(root, '.env');
+    await writeFile(path, merged, { mode: 0o600 });
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e',
+      'import { loadEnvFile } from "node:process"; loadEnvFile(process.argv[1]); console.log(JSON.stringify({ value: process.env.DUTYDECK_PORT ?? null }));', path],
+      { cwd: root, env: {}, encoding: 'utf8' });
+    expect(child.status, child.stderr).toBe(0);
+    expect(JSON.parse(child.stdout)).toEqual({ value: expected });
+    expect(linesStartingWith(merged, 'DUTYDECK_PORT=')).toHaveLength(expected === null ? 0 : 1);
+    expect(merged).not.toContain('DOCKMUX_PORT=');
+    expect(merged).toContain('# 保留这条注释');
+    expect(merged).toContain('UNRELATED_KEY=keep');
   });
 
   it('appends new keys and drops the whole line for an undefined value', () => {

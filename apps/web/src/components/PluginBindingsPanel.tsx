@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { PluginBinding, SavePluginBinding } from '@dutydeck/shared';
 import { pluginBindingsApi } from '../api';
@@ -36,9 +36,19 @@ export function PluginBindingsPanel() {
   const queryClient = useQueryClient();
   const query = useQuery({ queryKey: ['plugin-bindings'], queryFn: pluginBindingsApi.list });
   const [draft, setDraft] = useState<SavePluginBinding>(empty);
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
   const [target, setTarget] = useState<'bot' | 'group' | 'workspace'>('bot');
   const selected = query.data?.packages.find(item => item.name === draft.plugin);
-  const save = useMutation({ mutationFn: () => pluginBindingsApi.save(draft), onSuccess: async ({ binding }) => { edit(binding); await queryClient.invalidateQueries({ queryKey: ['plugin-bindings'] }); } });
+  const save = useMutation({
+    mutationFn: (submitted: SavePluginBinding) => pluginBindingsApi.save(submitted),
+    onSuccess: async ({ binding }, submitted) => {
+      const sameTarget = (left: SavePluginBinding, right: SavePluginBinding) => left.plugin === right.plugin && left.botAppId === right.botAppId && left.chatId === right.chatId && left.workspaceRoot === right.workspaceRoot;
+      if (draftRef.current === submitted) edit(binding);
+      else setDraft(current => sameTarget(current, submitted) ? { ...current, expectedRevision: binding.revision } : current);
+      await queryClient.invalidateQueries({ queryKey: ['plugin-bindings'] });
+    }
+  });
   const preview = useMutation({ mutationFn: () => pluginBindingsApi.explain({ plugin: draft.plugin, botAppId: draft.botAppId, chatId: draft.chatId, cwd: draft.workspaceRoot }) });
   function edit(binding: PluginBinding) {
     const { id: _id, revision, ...input } = binding;
@@ -55,7 +65,7 @@ export function PluginBindingsPanel() {
     {query.data?.packages.map(item => <Card key={item.name} className="p-3"><strong>{item.name}</strong> · {item.version ?? '未声明版本'} · {item.scope}<p className="text-caption">API {item.apiVersion}{item.legacyGlobal.length ? ` · 全局兼容能力：${item.legacyGlobal.join(', ')}` : ''}</p>{item.capabilities?.length ? <p className="text-caption">能力：{item.capabilities.join('、')}</p> : null}{item.permissions && <p className="text-caption">权限足迹：{[...item.permissions.effects, ...item.permissions.network.map(value => `network:${value}`), ...item.permissions.filesystem.map(value => `fs:${value}`)].join('、') || '无'}</p>}{item.slots?.length ? <><p className="text-caption">Web 插槽（受限预览）：{item.slots.map(slot => `${slot.slot}:${slot.id}`).join('、')}</p>{item.slots.map(slot => <PluginSlotPreview key={`${slot.slot}:${slot.id}`} slot={slot}/>)}</> : null}{item.service && <p className="text-caption">服务：{item.service.mode} · {item.service.status.status}</p>}</Card>)}
     {query.data?.diagnostics.map((item, index) => <Banner key={index} tone="danger">{item.plugin}: {item.message}</Banner>)}
     <div className="flex flex-wrap gap-2">{query.data?.bindings.map(binding => <Button key={binding.id} onClick={() => edit(binding)}>{binding.plugin} · {binding.chatId ?? binding.botAppId ?? binding.workspaceRoot} · r{binding.revision}{binding.enabled ? '' : '（停用）'}</Button>)}<Button onClick={() => { setDraft(empty()); setTarget('bot'); preview.reset(); }}>新建绑定</Button></div>
-    <form className="space-y-3" onSubmit={event => { event.preventDefault(); save.mutate(); }}>
+    <form className="space-y-3" onSubmit={event => { event.preventDefault(); save.mutate(draft); }}>
       <Field label="插件"><Select aria-label="插件" value={draft.plugin} onChange={event => { setDraft({ ...empty(), plugin: event.target.value }); setTarget('bot'); }}><option value="">选择插件</option>{draft.plugin && !selected && <option value={draft.plugin}>{draft.plugin}（加载失败或未安装）</option>}{query.data?.packages.map(item => <option key={item.name} value={item.name}>{item.name}</option>)}</Select></Field>
       <Field label="绑定目标"><Select aria-label="绑定目标" value={target} onChange={event => { const next = event.target.value as typeof target; setTarget(next); setDraft({ ...draft, botAppId: next === 'workspace' ? undefined : '', chatId: next === 'group' ? '' : undefined, workspaceRoot: next === 'workspace' ? '' : undefined, expectedRevision: 0 }); }}><option value="bot">Bot 默认</option><option value="group">指定群</option><option value="workspace">Web 项目目录</option></Select></Field>
       {target === 'workspace' ? <Field label="原项目绝对目录"><Input required aria-label="原项目绝对目录" value={draft.workspaceRoot ?? ''} onChange={event => setDraft({ ...draft, workspaceRoot: event.target.value, expectedRevision: 0 })}/></Field> : <Field label="Bot App ID"><Input required aria-label="Bot App ID" value={draft.botAppId ?? ''} onChange={event => setDraft({ ...draft, botAppId: event.target.value, expectedRevision: 0 })}/></Field>}

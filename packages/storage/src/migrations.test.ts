@@ -69,7 +69,7 @@ const BUSINESS_TABLES = [
 ]
 
 const SESSION_PATCH_COLUMNS = ['reasoning_effort', 'system_prompt', 'permission_mode', 'source', 'source_id', 'archived_at']
-const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50]
+const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51]
 const temporaryDirectories: string[] = []
 const linuxIt = process.platform === 'linux' ? it : it.skip
 
@@ -930,6 +930,41 @@ describe('storage migrations', () => {
     expect(appliedVersions(migrated)).toEqual(ALL_VERSIONS)
     expect(tableNames(migrated)).toContain('collaboration_duties')
     migrated.close()
+  })
+
+  it('v51 给已有群分工补接话声明水位，重复迁移与重开数据库保持原记录和外键完整', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'collaboration-v51-'))
+    temporaryDirectories.push(directory)
+    const path = join(directory, 'v50.sqlite')
+    const db = new Database(path)
+    db.exec('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)')
+    const at = '2026-11-16T00:00:00.000Z'
+    withMigrationTransaction(db, () => {
+      for (const migration of migrations.filter(item => item.version <= 50)) { migration.up(db); db.prepare('INSERT INTO schema_migrations VALUES (?, ?)').run(migration.version, at) }
+    })
+    // 当前建表语句已包含新列；去掉它，还原真实 v50 数据库的列形态。
+    db.exec('ALTER TABLE collaboration_duties DROP COLUMN responder_watermark_json')
+    db.prepare(`INSERT INTO collaboration_duties (app_id,chat_id,revision,responder_json,alarm_json,scenarios_json,updated_by,updated_at)
+      VALUES ('cli_v50','oc_v50',3,?,'{}','{}','ou_admin',?)`).run(JSON.stringify({ appId: 'cli_flash', since: at }), at)
+    db.close()
+
+    const repos = createRepositories(path)
+    const scope = { appId: 'cli_v50', chatId: 'oc_v50' }
+    try {
+      expect(await repos.collaboration.getDuty(scope)).toMatchObject({ revision: 3, responder: { appId: 'cli_flash', since: at } })
+      expect((await repos.collaboration.getDuty(scope)).responderWatermark).toBeUndefined()
+    } finally { repos.close() }
+    const migrated = new Database(path)
+    expect(columnNames(migrated, 'collaboration_duties')).toContain('responder_watermark_json')
+    expect(appliedVersions(migrated)).toEqual(ALL_VERSIONS)
+    expect(migrated.pragma('foreign_key_check')).toEqual([])
+    runMigrations(migrated)
+    expect(appliedVersions(migrated)).toEqual(ALL_VERSIONS)
+    migrated.close()
+
+    const reopened = createRepositories(path)
+    try { expect(await reopened.collaboration.getDuty(scope)).toMatchObject({ revision: 3, responder: { appId: 'cli_flash', since: at } }) }
+    finally { reopened.close() }
   })
 
   it('v23 把旧库里 inherit-only 的群呈现覆盖升级成逐字段结构，并补齐两项 Bot 呈现默认', () => {

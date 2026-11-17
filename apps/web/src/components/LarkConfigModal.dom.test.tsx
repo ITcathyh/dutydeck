@@ -49,12 +49,12 @@ const collection = (overrides: Partial<LarkBotConfig> = {}): LarkConfig => ({
   listeningDisabled: false
 });
 
-function renderModal(config: LarkConfig = collection(), source: 'acp' | 'cli' | 'agent' | import('../api').AgentModelsResult = 'acp', target?: import('../app-route').LarkSetupTarget, field?: string) {
+function renderModal(config: LarkConfig = collection(), source: 'acp' | 'cli' | 'agent' | import('../api').AgentModelsResult = 'acp', target?: import('../app-route').LarkSetupTarget, field?: string, onClose: () => void = () => {}) {
   vi.spyOn(api, 'larkConfig').mockResolvedValue(config);
   vi.spyOn(api, 'systemCapabilities').mockResolvedValue({ platform: 'linux', directoryPicker: false, filePicker: false });
   vi.spyOn(api, 'agentModels').mockResolvedValue(typeof source === 'object' ? source : { models: [], reasoningEfforts: [], source });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-  render(<QueryClientProvider client={client}><LarkConfigModal agents={agents} target={target} field={field} onClose={() => {}}/></QueryClientProvider>);
+  render(<QueryClientProvider client={client}><LarkConfigModal agents={agents} target={target} field={field} onClose={onClose}/></QueryClientProvider>);
   return client;
 }
 
@@ -1503,4 +1503,36 @@ it('saves and resets the user-selected wording deadline from the Agent setup ste
   await user.clear(input);
   await user.click(screen.getByRole('button', { name: '完成配置' }));
   await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ replyPolishTimeoutMs: null })));
+});
+
+it('keeps Agent prompt edits made during save open and closes only after the new draft is saved', async () => {
+  const user = userEvent.setup();
+  let server = collection({ revision: 1, setupComplete: true, defaultAgentId: 'codex', permissionMode: 'ask' });
+  const onClose = vi.fn();
+  renderModal(server, 'acp', { appId: 'cli_test' }, 'preInjectPrompt', onClose);
+  vi.mocked(api.larkConfig).mockImplementation(async () => server);
+  let finish!: () => void;
+  let calls = 0;
+  const save = vi.spyOn(api, 'saveLarkConfig').mockImplementation(async input => {
+    calls += 1;
+    if (calls === 1) await new Promise<void>(done => { finish = done; });
+    server = collection({ ...server.bots[0]!, revision: server.bots[0]!.revision! + 1, preInjectPrompt: input.preInjectPrompt ?? '' });
+    return server;
+  });
+  const prompt = await screen.findByRole('textbox', { name: /预注入 Prompt/ });
+  await typeInto(user, prompt, 'submitted');
+  const complete = screen.getByRole('button', { name: '完成配置' }) as HTMLButtonElement;
+  await waitFor(() => expect(complete.disabled).toBe(false));
+  await user.click(complete);
+  await waitFor(() => expect(save).toHaveBeenCalledOnce());
+  await user.clear(prompt); await typeInto(user, prompt, 'new unsaved prompt');
+  finish();
+  await waitFor(() => expect((screen.getByRole('button', { name: '完成配置' }) as HTMLButtonElement).disabled).toBe(false));
+  expect(onClose).not.toHaveBeenCalled();
+  expect((prompt as HTMLTextAreaElement).value).toBe('new unsaved prompt');
+  expect(server.bots[0]!.preInjectPrompt).toBe('submitted');
+  await user.click(screen.getByRole('button', { name: '完成配置' }));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+  expect(save.mock.calls[1]?.[0]).toMatchObject({ expectedRevision: 2, preInjectPrompt: 'new unsaved prompt' });
+  await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
 });

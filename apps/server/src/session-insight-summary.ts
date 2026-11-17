@@ -7,6 +7,7 @@
  *   - buildSessionInsightSummaryResponse：跨会话候选目录的分组、去重、coverage 与分页。
  * 所有输出经契约 schema parse + 深度冻结；null 绝不折算成 0。
  */
+import { createHash } from 'node:crypto';
 import {
   analyzeFilesResultSchema,
   fileMetricsSchema,
@@ -294,19 +295,19 @@ function pickKeyEvidence(trace: TraceEvent[]): SessionInsightSummary['keyEvidenc
   const toolEvents = trace.filter(e =>
     (e.kind === 'tool_call' || e.kind === 'tool_result' || e.kind === 'tool_summary')
     && e.durationMs?.value !== null && e.durationMs?.value !== undefined);
-  const tokenEvents = trace.filter(e => e.tokens !== null || e.rawUsage !== null);
-  const tokenMagnitude = (e: TraceEvent): number => {
+  const tokenMagnitude = (e: TraceEvent): number | null => {
+    if (e.rawUsage?.observedDelta == null
+      && (e.rawUsage?.baselineStatus === 'unknown_baseline' || e.rawUsage?.baselineStatus === 'contradictory')) return null;
     const buckets = e.tokens ? [
       e.tokens.total, e.tokens.inputUncached, e.tokens.cacheRead, e.tokens.cacheWrite,
       e.tokens.output, e.tokens.reasoning
     ] : [];
-    const raw = e.rawUsage ? [
-      e.rawUsage.totalTokens, e.rawUsage.inputTokens, e.rawUsage.cachedInputTokens,
-      e.rawUsage.cacheCreationInputTokens, e.rawUsage.outputTokens, e.rawUsage.reasoningOutputTokens
-    ] : [];
-    const values = [...buckets, ...raw].filter((v): v is number => typeof v === 'number');
-    return values.length ? Math.max(...values) : -1;
+    const observedDelta = e.rawUsage?.dialect === 'claude_message_snapshot' ? [] : [e.rawUsage?.observedDelta];
+    const values = [...observedDelta, ...buckets]
+      .filter((v): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0);
+    return values.length ? Math.max(...values) : null;
   };
+  const tokenEvents = trace.filter(e => tokenMagnitude(e) !== null);
   const top = (events: TraceEvent[], score: (e: TraceEvent) => number): string[] =>
     [...events]
       .sort((a, b) => {
@@ -318,7 +319,7 @@ function pickKeyEvidence(trace: TraceEvent[]): SessionInsightSummary['keyEvidenc
   return {
     failures: top(failures, () => 0),
     slowCalls: top(toolEvents, e => e.durationMs?.value ?? -1),
-    highTokenDeltas: top(tokenEvents, tokenMagnitude)
+    highTokenDeltas: top(tokenEvents, e => tokenMagnitude(e) ?? -1)
   };
 }
 
@@ -570,7 +571,7 @@ export function filterSummaryCandidates(
 // ---------------------------------------------------------------------------
 
 function filterSignature(filter: SummaryCohortFilter, groupBy: SummaryGroupBy): string {
-  return JSON.stringify([
+  return createHash('sha256').update(JSON.stringify([
     filter.workspace ?? null,
     filter.agentId ?? null,
     filter.usage ?? null,
@@ -578,7 +579,7 @@ function filterSignature(filter: SummaryCohortFilter, groupBy: SummaryGroupBy): 
     filter.to ?? null,
     filter.includeArchived ?? false,
     groupBy
-  ]);
+  ])).digest('base64url');
 }
 
 function encodeCursor(createdAt: string, sessionId: string, signature: string): string {

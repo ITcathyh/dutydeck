@@ -307,7 +307,7 @@ export function createWp1aRepositories(sqlite: Database.Database): Wp1aRepositor
     if (current.revision !== input.expectedRevision) throw revisionConflict('remote_chat_fact', current.id, input.expectedRevision);
     const timestamp = new Date().toISOString();
     const { expectedRevision: _expectedRevision, ...fields } = input;
-    const next = remoteChatFactSchema.parse({ ...current, ...fields, schemaVersion: 1, revision: current.revision + 1, invalidatedAt: undefined, createdAt: current.createdAt, updatedAt: timestamp });
+    const next = remoteChatFactSchema.parse({ ...current, ...fields, errorCode: fields.errorCode, schemaVersion: 1, revision: current.revision + 1, invalidatedAt: undefined, createdAt: current.createdAt, updatedAt: timestamp });
     const result = cachedStatement(sqlite, `UPDATE remote_chat_facts SET revision = ?, membership_state = ?, chat_type = ?, display_name = ?, observed_at = ?, last_success_at = ?, error_code = ?, credential_ref_id = ?, credential_revision = ?, credential_fingerprint = ?, identity_fact_id = ?, identity_revision = ?, expires_at = ?, invalidated_at = NULL, updated_at = ? WHERE id = ? AND revision = ?`)
       .run(next.revision, next.membershipState, next.chatType, next.displayName ?? null, next.observedAt, next.lastSuccessAt ?? null, next.errorCode ?? null, next.credentialRefId, next.credentialRevision, next.credentialFingerprint, next.identityFactId, next.identityRevision, next.expiresAt, next.updatedAt, current.id, input.expectedRevision);
     if (result.changes !== 1) throw revisionConflict('remote_chat_fact', current.id, input.expectedRevision);
@@ -339,7 +339,7 @@ export function createWp1aRepositories(sqlite: Database.Database): Wp1aRepositor
     if (current.id !== input.id) throw conflict('remote_identity_fact', input.channelBotId);
     if (current.revision !== input.expectedRevision) throw revisionConflict('remote_identity_fact', current.id, input.expectedRevision);
     const { expectedRevision: _expectedRevision, ...fields } = input;
-    const next = remoteIdentityFactSchema.parse({ ...current, ...fields, revision: current.revision + 1, createdAt: current.createdAt, updatedAt: timestamp });
+    const next = remoteIdentityFactSchema.parse({ ...current, ...fields, errorCode: fields.errorCode, revision: current.revision + 1, createdAt: current.createdAt, updatedAt: timestamp });
     const result = cachedStatement(sqlite, `UPDATE remote_identity_facts SET revision = ?, credential_ref_id = ?, credential_revision = ?, credential_fingerprint = ?, app_fingerprint = ?, bot_identity_ref = ?, tenant_ref = ?, app_id_match = ?, checked_at = ?, expires_at = ?, error_code = ?, updated_at = ? WHERE id = ? AND revision = ?`)
       .run(next.revision, next.credentialRefId, next.credentialRevision, next.credentialFingerprint, next.appFingerprint, next.botIdentityRef, next.tenantRef ?? null, next.appIdMatch ? 1 : 0, next.checkedAt, next.expiresAt, next.errorCode ?? null, next.updatedAt, current.id, input.expectedRevision);
     if (result.changes !== 1) throw revisionConflict('remote_identity_fact', current.id, input.expectedRevision);

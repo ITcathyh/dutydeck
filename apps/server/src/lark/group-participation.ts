@@ -5,7 +5,7 @@ import { larkMessageAnchor } from './message-anchor.js';
 import { RuntimeError, serialByKey, COLLABORATION_LIST_LIMIT, DECISION_BUDGET_GATE, DECISION_WINDOW_LIMIT, USAGE_CAP_GATE, countDecisionUsage, listWindowIncomplete, type ListedItems } from '@dutydeck/shared';
 import { BOT_LOOP_DEPTH_LIMIT, BOT_LOOP_GATE, BOT_TURN_RECORD } from '@dutydeck/shared';
 import { DECIDER_META_KEY, INTRUSIVE_FEEDBACK_PREFIX, MISSED_FEEDBACK_PREFIX, deciderMetaOf, isDecisionGate, participationLevelBehaviors, participationLevelLabels, participationLevelPhraseHint, participationLevelPhrases, participationLevels, resolveParticipation } from '@dutydeck/shared';
-import { resolveScenarioParams, scenarioBindingStatus, scenarioMajorVersion, scenarioRecordOf, scenarioSourceBots, scenarioTriggerSources, type CollaborationDuty, type ScenarioBinding, type ScenarioBotRef, type ScenarioMessage, type ScenarioPack, type UpdateCollaborationDutyInput } from '@dutydeck/shared';
+import { resolveScenarioParams, scenarioBindingStatus, scenarioMajorVersion, scenarioRecordOf, scenarioSourceBots, scenarioTriggerSources, type CollaborationDuty, type ResponderAnnouncement, type ScenarioBinding, type ScenarioBotRef, type ScenarioMessage, type ScenarioPack } from '@dutydeck/shared';
 import { jsonSha256 as digest } from '../hash.js';
 import type { CollaborationRepository, CollaborationScope, CollaborationFollowup, CollaborationSnapshot, CollaborationObservation, CollaborationDecision, CollaborationAction, CollaborationTeamContext, CollaborationDeciderMeta, CollaborationScenarioSnapshot, CollaborationSettings, ParticipationLevel } from '@dutydeck/shared';
 import { larkMemoryEnabled, type StoredLarkConfig } from './config.js';
@@ -1042,22 +1042,27 @@ export class LarkGroupParticipation {
     }
     return appId;
   }
-  /** 别的 Bot 声明自己成为或不再是接话人。声明比本地记录还早（乱序或重放）时不回退。 */
+  /** 别的 Bot 声明自己成为或不再是接话人；仓储在同一 CAS 内核对水位并应用，重复事件不推进修订。 */
   private async syncResponder(scope: CollaborationScope, duty: CollaborationDuty, announcement: { kind: 'claim' | 'release'; name?: string }, appId: string, event: LarkMessageEvent) {
-    const repo = this.options.repository;
     const at = observationTime(event.createTime, this.now().toISOString());
-    if (announcement.kind === 'release') {
-      if (duty.responder?.appId === appId && Date.parse(duty.responder.since) <= Date.parse(at)) await repo.updateDuty(scope, { expectedRevision: duty.revision, responder: null }, `bot:${appId}`);
-      return;
-    }
-    if (duty.responder && (duty.responder.appId === appId || Date.parse(duty.responder.since) > Date.parse(at))) return;
-    await repo.updateDuty(scope, { expectedRevision: duty.revision, responder: { appId, ...(announcement.name ? { name: announcement.name } : {}), since: at } }, `bot:${appId}`);
+    await this.options.repository.updateDuty(scope, { expectedRevision: duty.revision, responderEvent: {
+      appId, kind: announcement.kind, at, messageId: event.messageId, ...(announcement.name ? { name: announcement.name } : {})
+    } }, `bot:${appId}`);
+  }
+  /** 本地操作也进入同一水位；时钟未前进时比已有声明晚 1ms，避免被自己的旧声明挡住。 */
+  private localResponderEvent(duty: CollaborationDuty, appId: string, kind: 'claim' | 'release', name?: string): ResponderAnnouncement {
+    const previous = [duty.responderWatermark?.at, duty.responder?.since].reduce((latest, value) => {
+      const parsed = value ? Date.parse(value) : 0;
+      return Number.isFinite(parsed) ? Math.max(latest, parsed) : latest;
+    }, 0);
+    const at = new Date(Math.max(this.now().getTime(), previous + 1)).toISOString();
+    return { appId, kind, at, messageId: `local:${kind}:${at}`, ...(name ? { name } : {}) };
   }
   /** 把本机器人记成接话人并在群里声明；返回声明有没有发出去。 */
   private async claimResponder(scope: CollaborationScope, config: StoredLarkConfig, actorId: string, replyTo?: { messageId: string; threadId?: string }): Promise<boolean> {
     const repo = this.options.repository;
     const duty = await repo.getDuty(scope);
-    await repo.updateDuty(scope, { expectedRevision: duty.revision, responder: { appId: scope.appId, name: botName(config), since: this.now().toISOString() } }, actorId);
+    await repo.updateDuty(scope, { expectedRevision: duty.revision, responderEvent: this.localResponderEvent(duty, scope.appId, 'claim', botName(config)) }, actorId);
     return this.announce(scope, config, responderClaimText(botName(config)), replyTo);
   }
   /**
@@ -1078,7 +1083,7 @@ export class LarkGroupParticipation {
       const takeover = config.roleScope?.trim() ? '没 @ 机器人的消息由我按负责范围判断是否接，明确叫我照常处理' : '没 @ 机器人的消息由我接';
       return announced ? `${takeover}，已在群里发了接话人声明。` : `${takeover}，但群里的声明没发出去，其他机器人可能还不知道；请稍后 @我 再说一次「你负责接话」，我会重发声明。`;
     }
-    await repo.updateDuty(record.scope, { expectedRevision: duty.revision, responder: null }, operator);
+    await repo.updateDuty(record.scope, { expectedRevision: duty.revision, responderEvent: this.localResponderEvent(duty, record.scope.appId, 'release') }, operator);
     const announced = await this.announce(record.scope, config, responderReleaseText(botName(config)), record.replyTo);
     return announced ? '我不再接没 @ 机器人的消息，已在群里发了卸任声明。' : '我不再接没 @ 机器人的消息，但卸任声明没发出去，其他机器人可能还以为由我接；需要别的机器人接时，@它 说「你负责接话」。';
   }
@@ -1111,10 +1116,13 @@ export class LarkGroupParticipation {
       throw new RuntimeError('COLLABORATION_RESPONDER_NOT_LISTENING', `本 Bot 在这个群现在是「${participationLevelLabels[level]}」，收不到没 @ 的消息，当不了接话人。请先在上面的参与模式里选「按需参与」或「积极参与」并保存设置，再把接话人设成本 Bot。`, 409);
     }
     const wasSelf = current.responder?.appId === scope.appId;
-    const responder: UpdateCollaborationDutyInput['responder'] = patch.responder === undefined ? undefined
-      : patch.responder === null ? null : wasSelf ? current.responder : { appId: scope.appId, name: botName(config), since: this.now().toISOString() };
+    // Web 显式清空本来就是空的接话人仍是一次本地设置提交；外部空卸任才由仓储按无副作用事件忽略。
+    const emptyLocalRelease = patch.responder === null && !current.responder;
+    const responderEvent = patch.responder === undefined || emptyLocalRelease ? undefined : this.localResponderEvent(current,
+      patch.responder === null ? current.responder!.appId : scope.appId,
+      patch.responder === null ? 'release' : 'claim', patch.responder === null ? undefined : botName(config));
     const scenarios = patch.scenarios && Object.fromEntries(Object.entries(patch.scenarios).map(([id, value]) => [id, value && this.webBinding(scope, config, id, value, current.scenarios?.[id])]));
-    const duty = await repo.updateDuty(scope, { expectedRevision: current.revision, ...(responder !== undefined ? { responder } : {}), ...(scenarios ? { scenarios } : {}) }, actorId);
+    const duty = await repo.updateDuty(scope, { expectedRevision: current.revision, ...(emptyLocalRelease ? { responder: null } : {}), ...(responderEvent ? { responderEvent } : {}), ...(scenarios ? { scenarios } : {}) }, actorId);
     const announced = patch.responder === 'self' && !wasSelf ? await this.announce(scope, config, responderClaimText(botName(config)))
       : patch.responder === null && wasSelf ? await this.announce(scope, config, responderReleaseText(botName(config))) : undefined;
     return { duty, ...(announced === undefined ? {} : { announced }) };

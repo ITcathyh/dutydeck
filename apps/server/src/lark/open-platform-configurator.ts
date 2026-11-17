@@ -102,7 +102,7 @@ export interface LarkOpenPlatformConfigureOptions {
   /** 回读发布状态的间隔，默认 1 秒；测试用它跳过等待。 */
   publishPollMs?: number;
   /** 每个阶段完成后回调一次；失败阶段不会回调。 */
-  onStep?: (step: LarkOpenPlatformConfigureStep, detail?: LarkOpenPlatformConfigureStepDetail) => void;
+  onStep?: (step: LarkOpenPlatformConfigureStep, detail?: LarkOpenPlatformConfigureStepDetail) => void | Promise<void>;
 }
 
 export interface LarkOpenPlatformConfigurationResult {
@@ -171,18 +171,18 @@ export async function configureLarkOpenPlatformApp(
     'scope_verification_read_failed', '回读飞书权限配置失败');
   // 回读只校验本次真正申请的 id；被跳过的 feature 权限没有 id，自然不参与校验。
   verifyRequiredScopes(scopeReadback, scopeIds);
-  onStep('scope_update', skippedScopes.length ? { skippedScopes: [...skippedScopes] } : undefined);
+  await onStep('scope_update', skippedScopes.length ? { skippedScopes: [...skippedScopes] } : undefined);
 
   await post(client, `/developers/v1/robot/switch/${appId}`, {
     clientId: appId,
     enable: true,
   }, 'robot_enable_failed', '启用飞书机器人能力失败');
-  onStep('robot_enable');
+  await onStep('robot_enable');
   await post(client, `/developers/v1/event/switch/${appId}`, {
     clientId: appId,
     eventMode: LONG_CONNECTION_MODE,
   }, 'event_mode_failed', '启用飞书长连接事件模式失败');
-  onStep('event_mode');
+  await onStep('event_mode');
 
   let eventState = parseEventState(await post(
     client,
@@ -209,7 +209,7 @@ export async function configureLarkOpenPlatformApp(
       'event_read_failed',
       '回读飞书事件订阅失败',
     ));
-    onStep('event_subscribe', { addedEvents: [...missingEvents] });
+    await onStep('event_subscribe', { addedEvents: [...missingEvents] });
   }
   if (eventState.mode !== LONG_CONNECTION_MODE || LARK_REQUIRED_EVENTS.some(name => !eventState.names.includes(name))) {
     throw new LarkOpenPlatformConfigurationError(
@@ -237,7 +237,7 @@ export async function configureLarkOpenPlatformApp(
       'callback_read_failed',
       '回读飞书回调模式失败',
     ));
-    onStep('callback_mode');
+    await onStep('callback_mode');
   }
   if (!callbackState.names.includes(REQUIRED_CALLBACK)) {
     await post(client, `/developers/v1/callback/update/${appId}`, {
@@ -253,7 +253,7 @@ export async function configureLarkOpenPlatformApp(
       'callback_read_failed',
       '回读飞书卡片回调失败',
     ));
-    onStep('callback_subscribe');
+    await onStep('callback_subscribe');
   }
   if (callbackState.mode !== LONG_CONNECTION_MODE || !callbackState.names.includes(REQUIRED_CALLBACK)) {
     throw new LarkOpenPlatformConfigurationError(
@@ -298,7 +298,7 @@ export async function configureLarkOpenPlatformApp(
       '飞书应用版本创建成功但未返回版本 ID，已停止发布',
     );
   }
-  onStep('version_create', { versionId });
+  await onStep('version_create', { versionId });
   if (options.newApp) await verifyAutomaticApproval(client, appId, versionId, visibility);
   try {
     await post(client, `/developers/v1/publish/commit/${appId}/${versionId}`, { clientId: appId },
@@ -310,28 +310,36 @@ export async function configureLarkOpenPlatformApp(
     }
     throw error;
   }
-  onStep('publish_commit', { versionId });
-  let version: unknown;
-  for (let attempt = 0; attempt < 10; attempt++) {
-    const published = await post(client, `/developers/v1/app_version/list/${appId}`, {},
-      'publish_verification_read_failed', '发布请求已提交，但回读发布状态失败，请核对该应用版本');
-    const versions = asRecord(asRecord(published).data).versions;
-    version = Array.isArray(versions) ? versions.find(item => extractVersionId(item) === versionId) : undefined;
-    // Even an automatic approval briefly reports status 1. Allow it to finish
-    // without resubmitting or reporting a human review based on that state alone.
-    if (!options.newApp || asRecord(version).versionStatus !== 1 || attempt === 9) break;
-    await sleep(options.publishPollMs ?? 1_000);
+  await onStep('publish_commit', { versionId });
+  try {
+    let version: unknown;
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const published = await post(client, `/developers/v1/app_version/list/${appId}`, {},
+        'publish_verification_read_failed', '发布请求已提交，但回读发布状态失败，请核对该应用版本');
+      const versions = asRecord(asRecord(published).data).versions;
+      version = Array.isArray(versions) ? versions.find(item => extractVersionId(item) === versionId) : undefined;
+      // Even an automatic approval briefly reports status 1. Allow it to finish
+      // without resubmitting or reporting a human review based on that state alone.
+      if (!options.newApp || asRecord(version).versionStatus !== 1 || attempt === 9) break;
+      await sleep(options.publishPollMs ?? 1_000);
+    }
+    // Console versionStatus: 2 = published, 1 = under review, 0 = not submitted.
+    // A successful commit response alone does not prove publication.
+    if (asRecord(version).versionStatus === 1) {
+      if (options.newApp) throw new LarkOpenPlatformConfigurationError('publish_verification_pending', '应用已按自动审批流程提交，尚未确认发布完成，请核对开放平台状态');
+      throw new LarkOpenPlatformConfigurationError('publish_pending_review', '应用版本已提交，正在等待飞书管理员审核');
+    }
+    if (asRecord(version).versionStatus !== 2) {
+      throw new LarkOpenPlatformConfigurationError('publish_verification_failed', '发布请求已提交，但该版本尚未确认发布，请核对开放平台状态');
+    }
+    await onStep('publish_verify', { versionId });
+  } catch (error) {
+    // commit 已成功，登录失效或回读失败都不能被上游重新归类成「可以安全再发一版」。
+    if (error instanceof LarkOpenPlatformConfigurationError) {
+      throw new LarkOpenPlatformConfigurationError(error.code, error.message, { cause: error, publishAttempted: true });
+    }
+    throw error;
   }
-  // Console versionStatus: 2 = published, 1 = under review, 0 = not submitted.
-  // A successful commit response alone does not prove publication.
-  if (asRecord(version).versionStatus === 1) {
-    if (options.newApp) throw new LarkOpenPlatformConfigurationError('publish_verification_pending', '应用已按自动审批流程提交，尚未确认发布完成，请核对开放平台状态');
-    throw new LarkOpenPlatformConfigurationError('publish_pending_review', '应用版本已提交，正在等待飞书管理员审核');
-  }
-  if (asRecord(version).versionStatus !== 2) {
-    throw new LarkOpenPlatformConfigurationError('publish_verification_failed', '发布请求已提交，但该版本尚未确认发布，请核对开放平台状态');
-  }
-  onStep('publish_verify', { versionId });
 
   return {
     status: 'ready',

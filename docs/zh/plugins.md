@@ -50,6 +50,8 @@ my-plugin/
 
 只读直查命令在命令文件 frontmatter 中使用 `query` 和 `argument`，对应查询须通过 SDK 显式声明 `commandOutput: 'chat'`。例如配置并授权 [fake-ticket](../../examples/plugins/fake-ticket/README.md) 后，飞书发送 `/fake-ticket:ticket-status T-1` 只返回标题和状态，不创建 Agent 会话。宿主要求可信真人入站、有效绑定及对应用户、工具、只读效果和精确资源的授权，并在投递前复核；能与机器人聊天不代表能读业务数据。只接受显式声明可向原聊天所有人公开输出的查询；私有结果应走受控导出，写动作不能映射。重复事件或重启后的未知执行不自动重放。旧提示词命令和未开放聊天输出的查询保持原行为；作者契约见 [Plugin SDK](../../packages/plugin-sdk/README.md)。
 
+`plugin test` 对只读直查命令只核对目标 query 是否已注册，不调用 query handler，因此不会读取外部业务数据；提示词命令仍只检查模板展开，不启动 Agent。
+
 ## 信任确认
 
 agents、hooks、providers、service 会执行代码或命令，安装时要确认。daemon 只加载**已启用、且所有需确认能力都已确认**的插件。providers 的 15 秒期限只覆盖会让出事件循环的异步加载与注册；同步死循环无法由该计时器打断，必须终止进程，并依靠下次启动的隔离机制。
@@ -99,7 +101,7 @@ dutydeck plugin uninstall <名字>
 - `<来源>`：本地目录、`git+https://…`、`git@…`、`file://…`（`#ref` 固定分支、标签或提交）、`npm:包名@版本`。git 来源按提交 SHA 固定。
 - `plugin update` 只准备不可变候选包；活动 Host 的 provider、hook 和技能路径始终指向原包，重启也不会自动激活候选。若候选包被修改，排空并停止服务后再次 `plugin update` 可从相同来源修复，再执行激活；活动或上一版本的损坏目录不会被原地覆盖。包内相对符号链接受支持；包外、绝对或无法解析的链接会拒绝安装和更新。内容摘要能识别不改版本号的变化；没有内容变化时不重复产生候选。多进程修改通过存储锁串行提交。启动时最多等 30 秒插件存储锁（盖过一次 `plugin activate` 的隔离验证）；锁仍被占用、`plugins.lock.json` 损坏或 `.hosts/` 租约写不进去时，daemon 照常启动，但**只加载内置插件，外部插件一个都不加载**：运行日志记一条带出错文件路径的警告，插件诊断列出原因，`dutydeck doctor` 的「插件库」项报 fail；绑定了外部插件的会话会拒绝新任务。按原因修复后重启 daemon 才会重新加载外部插件。`.hosts/` 里同一数据库的已停止或进程已退出的旧租约在下次启动时清掉；无法解析的租约保留，仍会阻止激活，需要人工处理。
 - `plugin status` 区分选定包、候选、上一版本、实际加载的 Host 和切换阻塞。激活/回退使用离线检查：先在当前版本完成或取消未完成任务，并核对该插件未决动作；再停止所有共用插件目录的实例。普通实例用 `dutydeck stop`；直接管理 systemd 时先用 `systemctl --user show <unit> --property=TriggeredBy` 核对是否 socket 激活，若是，必须同时执行 `systemctl --user stop <unit>.socket <unit>`，否则下一个连接会重新拉起 Host。然后执行 `plugin activate` 或 `plugin rollback`，成功后用 `dutydeck start`，或 `systemctl --user start <unit>.socket <unit>` 恢复。存在存活 Host、待恢复任务或该插件 unknown 操作时拒绝切换；租约会识别已退出进程，但 daemon 退出不代表 tmux 任务已完成。缺少插件依赖信息的未完成旧任务会保守阻塞，已终态历史和无关插件动作不阻塞。
-- 激活会在可终止的独立 Node 进程里验证已信任 provider 的导入/注册，使用临时数据目录和最小环境；这不是恶意代码沙箱。原活动版本保留供回退，不承诺按会话运行多版 provider，也不自动回退插件私有数据。安装与启停仍需重新启动 Host；卸载同样要求没有活动消费者。
+- 激活会在可终止的独立 Node 进程里验证已信任 provider 的导入/注册，使用临时数据目录和最小环境；这不是恶意代码沙箱。验证只导入候选包；候选清单的直接依赖只读取同一份锁定快照中已启用外部活动版本的名称和版本号，以及同一 builtinRoot 中可用 builtin 的名称用于兼容性检查，不导入依赖 provider，也不提供依赖目录、数据目录或凭据。原活动版本保留供回退，不承诺按会话运行多版 provider，也不自动回退插件私有数据。安装与启停仍需重新启动 Host；卸载同样要求没有活动消费者。
 - `plugin validate` 也校验场景包（格式、模板变量、正则、参数），出错报文件和字段；`plugin validate --strict` 进一步检查宿主兼容范围、权限声明、技能引用和资源边界。`plugin inspect <目录|tarball|来源> --json` 只检查并输出能力、权限足迹和 digest，不安装来源、不写插件安装状态；远程来源可能临时下载并在检查后清理。`plugin test <目录|tarball|来源>` 会实际执行 provider 模块及其 `register(api)`；这里的隔离只指临时 Host 数据与注册表，**不是恶意代码沙箱**，只能测试已经可信的代码。`install`、`update` 不因场景包的问题失败，但会列出不会加载的包和原因。
 - 数据放在数据库所在目录的 `plugins/` 下：`plugins.lock.json`（来源、固定版本、作用域、已确认能力）、`.artifacts/<名字>/<内容摘要>/`（不可变安装副本）、`.hosts/`（Host 代际及数据库记录；旧 `<名字>/` 布局保留兼容）、`.data/<名字>/`（插件自己的可写目录）。`.trigger-tokens.json` 和 `.config.json` 权限 0600；敏感配置存在本机密钥存储里。
 旧版独立根目录仍是 `plugins/<name>/`；`plugin update`、`activate` 和 `rollback` 不会把它移动到 `.hosts/`。
@@ -204,7 +206,7 @@ dutydeck settings plugin-binding set team-faq --app cli_bot --chat oc_a enabled=
 
 群绑定完整覆盖 Bot 默认绑定，未填字段只取清单默认值。Web 按规范化后的项目根目录精确匹配；CLI 编辑时由目标服务器解析工作区别名（包括符号链接），并保留已有配置和版本；停用绑定也可重新启用。托管 worktree 使用可信会话的原项目目录。带 Bot/群的请求不回退到工作区绑定。绑定更新使用版本比较，下一次受控调用重新解析；旧调用的秘密访问器发现版本变化或停用会拒绝。新管理接口只接受安装管理员，任务凭据不能改绑定。
 
-清单可声明 `apiVersion: 1`（不支持的版本拒绝加载）、`host`/`dependencies`、`permissions`（`secrets/network/filesystem/effects` 只做可审计声明）和声明式 Web `slots`（`settings`、`command_palette`、`task_panel`、`result_card`，元素只能是文本、状态、表格或指向已注册命令/工具的动作）。绑定管理页会渲染这些元素作为受限预览；动作在缺少任务上下文时保持禁用，不执行插件自带脚本或任意 URL。`bindingConfig` 支持 `string`、`number`、`integer`、`boolean`、`string_list`、`secret`，以及适用的 `required/default/enum/min/max`。普通配置与秘密引用分开保存，值、默认值和枚举类型不匹配时拒绝。秘密只能通过本地隐藏输入或文件描述符创建：
+清单可声明 `apiVersion: 1`（不支持的版本拒绝加载）、`host`/`dependencies`、`permissions`（`secrets/network/filesystem/effects` 只做可审计声明）和声明式 Web `slots`（`settings`、`command_palette`、`task_panel`、`result_card`，元素只能是文本、状态、表格或指向已注册命令/工具的动作）。依赖版本使用 semver 范围；完整的 `^0.0.3` 只兼容 `0.0.3`，不接受 `0.0.4`，`^0.0.x` 等通配范围仍按通配规则处理。绑定管理页会渲染这些元素作为受限预览；动作在缺少任务上下文时保持禁用，不执行插件自带脚本或任意 URL。`bindingConfig` 支持 `string`、`number`、`integer`、`boolean`、`string_list`、`secret`，以及适用的 `required/default/enum/min/max`。普通配置与秘密引用分开保存，值、默认值和枚举类型不匹配时拒绝。秘密只能通过本地隐藏输入或文件描述符创建：
 
 ```bash
 dutydeck settings plugin-binding secret-set my-plugin group-a --value-fd 0

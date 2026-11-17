@@ -524,7 +524,7 @@ describe('exportSessionInsightReport (T4b)', () => {
         expect(report.content).toContain('2026-09-01T01:00:00.000Z');
         expect(report.content).toContain('engine-v1');
         expect(report.content).toContain('parser-v1');
-        expect(report.content).toContain('redaction-v1');
+        expect(report.content).toContain('redaction-v2');
         expect(report.content).toContain('0 条');
       }
     });

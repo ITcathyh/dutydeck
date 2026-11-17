@@ -88,5 +88,28 @@ describe('authorized offline usage attribution', () => {
       expect(report.taskStates.map(task => task.taskId)).not.toContain(unrelatedTask);
     } finally { repos.close(); }
   });
+  it('applies both time boundaries to authorized shared-pool supplements', async () => {
+    const repos = createRepositories(':memory:');
+    try {
+      const requests = ['before', 'at-start', 'inside', 'at-end', 'after'].map(request);
+      const taskId = (value: TaskRequestV1) => executionTaskId(value.namespace, value.sessionId, value.key);
+      const rows = [
+        entry(taskId(requests[0]!), { appId: 'bot_a', sessionId: requests[0]!.sessionId, recordedAt: '2026-09-30T23:59:59.999Z', inputTokens: 100 }),
+        entry(taskId(requests[1]!), { appId: 'bot_a', sessionId: requests[1]!.sessionId, recordedAt: '2026-10-01T00:00:00.000Z', inputTokens: 20 }),
+        entry(taskId(requests[2]!), { appId: 'bot_a', sessionId: requests[2]!.sessionId, recordedAt: '2026-10-01T12:00:00.000Z', inputTokens: 30 }),
+        entry(taskId(requests[3]!), { appId: 'bot_a', sessionId: requests[3]!.sessionId, recordedAt: '2026-10-02T00:00:00.000Z', inputTokens: 40 }),
+        entry(taskId(requests[4]!), { appId: 'bot_a', sessionId: requests[4]!.sessionId, recordedAt: '2026-10-02T00:00:00.001Z', inputTokens: 50 })
+      ];
+      for (const row of rows) await repos.usage.append(row);
+      await repos.usage.append(entry('root', { appId: 'bot_a', chatId: 'oc_one', sessionId: 'root-session', inputTokens: 10 }));
+      const report = await tokenEfficiencyUsageReport(repos, {
+        rootTaskIds: ['root'],
+        filter: { appId: 'bot_a', chatId: 'oc_one', since: '2026-10-01T00:00:00.000Z', until: '2026-10-02T00:00:00.000Z' },
+        memoryJobs: [{ id: 'shared-window', scope: { appId: 'bot_a', pool: 'group' }, sessionId: requests[0]!.sessionId, requests, input: { turns: [{ taskId: 'root' }] } }]
+      });
+      expect(report.entries).toBe(3);
+      expect(report.tokens.inputTokens).toEqual({ value: 60, reportedEntries: 3, coverage: 1 });
+    } finally { repos.close(); }
+  });
 
 });

@@ -64,12 +64,14 @@ export function registerPluginBindingRoutes(app: FastifyInstance, options?: Plug
     if (!active?.plugin.service) throw new RuntimeError('PLUGIN_SERVICE_NOT_FOUND', 'Plugin has no service entrypoint', 404);
     return host.services.status(request.params.plugin);
   });
-  app.post<{ Params: { plugin: string; action: 'start' | 'stop' | 'restart' } }>('/api/plugins/:plugin/service/:action', async request => {
+  app.post<{ Params: { plugin: string; action: string } }>('/api/plugins/:plugin/service/:action', async request => {
     const host = await authorized(request);
     const active = host.active.find(item => item.entry.name === request.params.plugin);
     if (!active?.plugin.service) throw new RuntimeError('PLUGIN_SERVICE_NOT_FOUND', 'Plugin has no service entrypoint', 404);
-    if (request.params.action === 'start') return host.services.start(request.params.plugin);
-    if (request.params.action === 'stop') return host.services.stop(request.params.plugin);
+    const action = z.enum(['start', 'stop', 'restart']).safeParse(request.params.action);
+    if (!action.success) throw new RuntimeError('PLUGIN_SERVICE_ACTION_INVALID', 'Unknown plugin service action', 400);
+    if (action.data === 'start') return host.services.start(request.params.plugin);
+    if (action.data === 'stop') return host.services.stop(request.params.plugin);
     return host.services.restart(request.params.plugin);
   });
   app.put('/api/plugin-bindings', async request => {

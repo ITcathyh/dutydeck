@@ -499,11 +499,10 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
    * - 前一条还在排队：先标记、再取消它，按合并后的原文执行。
    * - 前一条已被这次合并取消（它的入站记录写着并入了这条）：按合并后的原文执行。
    * - 其余情况（已开始、已完成、被别的原因取消、找不到，或取消没成功）：这条恢复成自己的原文执行。
-   * 读取失败（runtime 的任务列表、前一条的入站记录读不到）不等于「确定不是」：按合并后的原文执行，
-   * 保留 mergeFrom、不改写这条记录。取舍是有意的：前一条这时可能已经单独执行过，内容会重复；
-   * 改回自己的原文却可能把前一条的内容永久丢掉。宁可前一条重复，不丢它的内容。
+   * 读取失败不等于「确定不是」：保留 received/mergeFrom 与全文并返回 undefined，本次不派发；
+   * 后续对账读清状态后再决定，既不重发可能已执行的前文，也不丢确实被合并取消的前文。
    */
-  protected async resumeMergedInbox(inbox: LarkInboxRecord): Promise<string> {
+  protected async resumeMergedInbox(inbox: LarkInboxRecord): Promise<string | undefined> {
     const intent = inbox.mergeFrom!;
     const request = inbox.request!;
     let merged: boolean;
@@ -522,8 +521,8 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         merged = Boolean(raw && (JSON.parse(raw) as LarkInboxRecord).mergedInto === inbox.event.messageId);
       } else merged = false;
     } catch (error) {
-      this.log.warn({ error, messageId: inbox.event.messageId }, '恢复合并时读取前一条的状态失败，按合并后的原文执行');
-      return request.prompt;
+      this.log.warn({ error, messageId: inbox.event.messageId }, '恢复合并时读取前一条的状态失败，保留合并意图并等待下次核验');
+      return undefined;
     }
     if (merged) return request.prompt;
     await this.inbox?.update(inbox, { request: { ...request, prompt: intent.ownPrompt }, mergeFrom: undefined })

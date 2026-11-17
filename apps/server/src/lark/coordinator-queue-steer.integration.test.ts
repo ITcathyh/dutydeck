@@ -755,28 +755,110 @@ describe('合并写入之后、取消前一条之前进程退出', () => {
 });
 
 describe('合并恢复时读不到前一条的状态', () => {
-  it('前一条已被合并取消、读它的入站记录出错：按合并后的原文执行，保留合并意图', async () => {
+  it('前一条已被合并取消、一次读错期间不派发；恢复读取后按合并原文执行一次', async () => {
     const h = await harness();
     await h.dispatch('om_1', '看下登录为什么失败');
     await vi.waitFor(() => expect(h.prompts).toHaveLength(1));
     await h.dispatch('om_2', '是 staging 环境');
-    // 合并停在改前一条的卡那一步（模拟进程在这里退出）：前一条已被这次合并取消，这条还没交给 runtime。
     const update = h.service.update.getMockImplementation()!;
     h.service.update.mockImplementation(async (input: any) => input.statusLabel === '已并入下一条' ? new Promise(() => {}) : update(input));
     await h.coordinator.handle(event('om_3', '日志在 /tmp/x.log'), h.config);
     await vi.waitFor(async () => expect((await h.runtimeTask('是 staging 环境'))?.status).toBe('cancelled'));
-    expect((await h.inboxRecord('om_3'))?.state).toBe('received');
-    // 重启后读前一条的入站记录出错：读不到不等于没标记。
+    expect(await h.inboxRecord('om_3')).toMatchObject({ state: 'received', mergeFrom: { messageId: 'om_2', ownPrompt: '日志在 /tmp/x.log' } });
+
     const get = h.repos.config.get.bind(h.repos.config);
-    vi.spyOn(h.repos.config, 'get').mockImplementation(async (key: string) => {
-      if (key === `lark.inbox.${h.config.appId}.om_2`) throw new Error('store unavailable');
+    let failRead = true;
+    const read = vi.spyOn(h.repos.config, 'get').mockImplementation(async (key: string) => {
+      if (failRead && key === `lark.inbox.${h.config.appId}.om_2`) throw new Error('store unavailable');
       return get(key);
     });
-    await h.restart();
+    const recovered = await h.restart();
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect(h.prompts.some(prompt => prompt.includes('日志在 /tmp/x.log'))).toBe(false);
+    expect(await h.inboxRecord('om_3')).toMatchObject({ state: 'received', mergeFrom: { messageId: 'om_2', ownPrompt: '日志在 /tmp/x.log' } });
+
+    failRead = false;
+    await (recovered as any).recoverInbound(await h.inboxRecord('om_3'), h.config);
     h.release();
-    await vi.waitFor(() => expect(h.prompts.some(prompt => prompt.includes('日志在 /tmp/x.log'))).toBe(true));
+    await vi.waitFor(() => expect(h.prompts.some(prompt => prompt.includes('日志在 /tmp/x.log'))).toBe(true), { timeout: 6_000 });
     expect(h.prompts.filter(prompt => prompt.includes('是 staging 环境'))).toEqual([expect.stringContaining('是 staging 环境\n\n日志在 /tmp/x.log')]);
-    expect((await h.inboxRecord('om_3'))?.mergeFrom).toMatchObject({ messageId: 'om_2', ownPrompt: '日志在 /tmp/x.log' });
+    expect(read).toHaveBeenCalled();
+  });
+
+  it('前一条已完成、一次状态读错期间不重发前文；恢复读取后只派自己的原文', async () => {
+    const h = await harness();
+    await h.dispatch('om_1', 'main request');
+    await vi.waitFor(() => expect(h.prompts).toHaveLength(1));
+    await h.dispatch('om_2', 'perform first write');
+    const hang = vi.spyOn(h.runtime, 'cancelQueued').mockImplementationOnce(() => new Promise(() => {}));
+    await h.coordinator.handle(event('om_3', 'perform second write'), h.config);
+    await vi.waitFor(() => expect(hang).toHaveBeenCalledTimes(1));
+    h.release();
+    await vi.waitFor(async () => expect((await h.runtimeTask('perform first write'))?.status).toBe('completed'));
+
+    const getTasks = h.runtime.getTasks.bind(h.runtime);
+    let failRead = true;
+    vi.spyOn(h.runtime, 'getTasks').mockImplementation(async (...args) => {
+      if (failRead && new Error().stack?.includes('resumeMergedInbox')) { failRead = false; throw new Error('synthetic transient storage read failure'); }
+      return getTasks(...args);
+    });
+    const recovered = await h.restart();
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect(h.prompts.some(prompt => prompt.includes('perform second write'))).toBe(false);
+    expect(h.prompts.filter(prompt => prompt.includes('perform first write'))).toHaveLength(1);
+    expect(await h.inboxRecord('om_3')).toMatchObject({ state: 'received', mergeFrom: { messageId: 'om_2', ownPrompt: 'perform second write' } });
+
+    await (recovered as any).recoverInbound(await h.inboxRecord('om_3'), h.config);
+    await vi.waitFor(() => expect(h.prompts.some(prompt => prompt.includes('perform second write'))).toBe(true), { timeout: 6_000 });
+    expect(h.prompts.filter(prompt => prompt.includes('perform first write'))).toHaveLength(1);
+    expect(h.prompts.find(prompt => prompt.includes('perform second write'))).not.toContain('perform first write');
+    expect((await h.inboxRecord('om_3'))?.mergeFrom).toBeUndefined();
+  });
+});
+
+describe('自然终态保存与公开重试的归属', () => {
+  it('Runtime interrupt 的旧终态保存晚于公开 retry 完成时，持久记录仍保留新轮次和新 runtime task', async () => {
+    const h = await harness();
+    await h.dispatch('om_natural', 'review checkpoint natural');
+    await vi.waitFor(() => expect(h.task('om_natural').state).toBe('running'));
+    const task = h.task('om_natural');
+    const oldTaskId = task.runtimeTaskId;
+    const get = h.repos.channelMappings.get.bind(h.repos.channelMappings);
+    let blocked = false;
+    let release!: () => void;
+    const barrier = new Promise<void>(resolve => { release = resolve; });
+    const spy = vi.spyOn(h.repos.channelMappings, 'get').mockImplementation(async (...args) => {
+      const stack = new Error().stack ?? '';
+      const value = await get(...args);
+      if (!blocked && args[1] === 'om_natural' && task.turn === 1 && task.finalMessageId && stack.includes('persistCardTask')) {
+        blocked = true;
+        await barrier;
+      }
+      return value;
+    });
+    try {
+      await h.runtime.interrupt(await h.sessionId(), oldTaskId, 'ou_alice');
+      await vi.waitFor(() => expect(blocked).toBe(true), { timeout: 6_000 });
+      // Runtime 的 interrupt intent 与驱动 stopReason=cancelled 都可能先成为终态；这里保护的是同一条旧终态保存，不能写死其中一个标签。
+      expect(['interrupted', 'cancelled']).toContain(task.state);
+      expect(task.finalMessageId).toBeTruthy();
+      const oldTail = task.group.tail;
+      expect(await h.coordinator.handleAction({ action: 'retry', task_id: 'om_natural', turn: '1' }, 'ou_alice')).toMatchObject({ type: 'success' });
+      await vi.waitFor(async () => expect(JSON.parse((await get(`lark-card:${h.config.appId}`, 'om_natural'))!.extra!).turn).toBe(2));
+      await vi.waitFor(() => expect(task.state).toBe('running'));
+      await task.group.tail;
+      const before = JSON.parse((await get(`lark-card:${h.config.appId}`, 'om_natural'))!.extra!);
+      expect(task.turn).toBe(2);
+      expect(before.runtime_task_id).toBe(task.runtimeTaskId);
+      expect(task.runtimeTaskId).not.toBe(oldTaskId);
+
+      release();
+      await oldTail;
+      const after = JSON.parse((await get(`lark-card:${h.config.appId}`, 'om_natural'))!.extra!);
+      expect(after).toMatchObject({ turn: 2, state: 'running', runtime_task_id: task.runtimeTaskId });
+      expect(task.turn).toBe(2);
+      expect(task.runtimeTaskId).not.toBe(oldTaskId);
+    } finally { release(); spy.mockRestore(); }
   });
 });
 

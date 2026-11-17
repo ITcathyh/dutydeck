@@ -1,8 +1,10 @@
 import { sessionPath } from '../app-route';
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { api, type MemoryManagementEntry, type Session } from '../api';
+import { api, type MemoryManagementEntry, type MemoryPoolView, type Session } from '../api';
 import { Button } from './primitives';
+
+type MemoryWriteResult = { entry: MemoryManagementEntry };
 
 /** Explicit scopes only: opening this panel does not bind or migrate anything. */
 export function MemoryManagementPanel({ session }: { session: Session }) {
@@ -21,13 +23,20 @@ export function MemoryManagementPanel({ session }: { session: Session }) {
   const refresh = async () => { await Promise.all([qc.invalidateQueries({ queryKey: ['managedMemory'] }), qc.invalidateQueries({ queryKey: ['projectMemories'] }), qc.invalidateQueries({ queryKey: ['projectMemoryBinding', session.id] }), qc.invalidateQueries({ queryKey: ['sessionMemory', session.id] })]); };
   const action = useMutation({ mutationFn: (run: () => Promise<unknown>) => run(), onSuccess: refresh });
   const save = useMutation({
-    mutationFn: async () => {
-      if (!draft) return;
-      const body = { content: draft.content, topic: draft.topic, expectedFingerprint: draft.fingerprint };
-      if (isLark) return api.reviseMemoryPool(session.id, draft.id!, body);
-      return api.writeProjectMemory(draft.projectId, body, draft.id);
+    mutationFn: async (submitted: NonNullable<typeof draft>): Promise<MemoryWriteResult> => {
+      const body = { content: submitted.content, topic: submitted.topic, expectedFingerprint: submitted.fingerprint };
+      if (isLark) return api.reviseMemoryPool(session.id, submitted.id!, body) as Promise<MemoryWriteResult>;
+      return api.writeProjectMemory(submitted.projectId, body, submitted.id) as Promise<MemoryWriteResult>;
     },
-    onSuccess: async () => { setDraft(undefined); await refresh(); },
+    onSuccess: async (result, submitted) => {
+      await refresh();
+      const latest = qc.getQueryData<MemoryPoolView>(['managedMemory', session.id, isLark ? '' : submitted.projectId, query]);
+      setDraft(current => {
+        if (!current || current.projectId !== submitted.projectId || current.id !== submitted.id || current.fingerprint !== submitted.fingerprint) return current;
+        if (JSON.stringify(current) === JSON.stringify(submitted)) return undefined;
+        return latest ? { ...current, id: result.entry.id, fingerprint: latest.fingerprint } : current;
+      });
+    },
   });
   if (!isLark && !web) return null;
   const edit = (entry?: MemoryManagementEntry) => {
@@ -60,7 +69,7 @@ export function MemoryManagementPanel({ session }: { session: Session }) {
         </li>)}</ul>
         <p className="text-subtle">{pool.data?.historyNotice}</p>
       </>}
-      {draft && <form aria-label="修订记忆" onSubmit={event => { event.preventDefault(); save.mutate(); }} className="space-y-2">
+      {draft && <form aria-label="修订记忆" onSubmit={event => { event.preventDefault(); save.mutate(draft); }} className="space-y-2">
         <textarea aria-label="记忆正文" value={draft.content} maxLength={1000} onChange={event => setDraft({ ...draft, content: event.target.value })} className="w-full rounded border border-default bg-surface p-2"/>
         <input aria-label="记忆主题" value={draft.topic} onChange={event => setDraft({ ...draft, topic: event.target.value })} className="rounded border border-default bg-surface p-1"/>
         <Button type="submit" size="sm" disabled={!draft.content.trim() || save.isPending}>保存修订</Button>{' '}<Button type="button" size="sm" onClick={() => setDraft(undefined)}>取消</Button>

@@ -489,7 +489,7 @@ process.stdout.write(marker.slice(4));
       driverIdleTimeoutMs: 0, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), ...options,
       driverFactory: (_agent, _protocol, emit, _exit, sessionId) => ({
         start: async () => {}, interrupt: async () => {}, resume: async () => {}, isStopped: async () => true,
-        stop: async () => { gates.get(sessionId!)?.(); }, hasBackgroundWork: () => background.has(sessionId!),
+        stop: async () => { gates.get(sessionId!)?.(); }, hasBackgroundWork: () => background.has(sessionId!), isIdle: () => true,
         send: async prompt => {
           sent.push(prompt);
           if (lost.has(sessionId!)) throw new Error('remote reply lost');
@@ -501,6 +501,21 @@ process.stdout.write(marker.slice(4));
     });
     repositories.push(repos); runtimes.push(runtime);
     return { repos, runtime, sent, gates, lost, background };
+  }
+  function unprovenStopRuntime(options: RuntimeOptions = {}) {
+    let stopConfirmed = false, stopCalls = 0, releaseStop = () => {};
+    let stopGate: Promise<void> | undefined;
+    const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
+    const runtime = new DutydeckRuntime(repos, {
+      driverIdleTimeoutMs: 0, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), ...options,
+      driverFactory: (_agent, _protocol, emit) => ({
+        start: async () => {}, interrupt: async () => {}, resume: async () => {}, stop: async () => { stopCalls++; await stopGate; },
+        isStopped: async () => stopConfirmed, isIdle: () => true, hasBackgroundWork: () => false,
+        send: async () => { emit({ type: 'text', data: { text: 'done' } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } }); }
+      })
+    });
+    repositories.push(repos); runtimes.push(runtime);
+    return { repos, runtime, confirmStop: () => { stopConfirmed = true; }, holdStop: () => { stopGate = new Promise<void>(resolve => { releaseStop = resolve; }); }, releaseStop: () => releaseStop(), stopCalls: () => stopCalls };
   }
   /** A command that records its own start outside the repository, then waits for an optional release file. */
   function marked(marker: string, release?: string, exitCode = 0) {
@@ -542,6 +557,55 @@ process.stdout.write(marker.slice(4));
     if (ending === 'stopped') await h.runtime.stop(b.id); else writeFileSync(release, '');
     expect(await verifying).toMatchObject({ status: ending === 'stopped' ? 'interrupted' : ending });
     await vi.waitFor(() => expect(h.sent).toContain('A after verification'));
+  });
+
+  it('blocks shell verification behind an unverified-stop sibling but admits proven idle and disjoint work', async () => {
+    const source = repository(); const h = unprovenStopRuntime();
+    try {
+      await h.runtime.initialize([agent]);
+      const original = await h.runtime.start({ agentId: agent.id, cwd: source });
+      const verifier = await h.runtime.start({ agentId: agent.id, cwd: source });
+      expect(await h.runtime.runVerification(verifier.id, { command: 'true' })).toMatchObject({ status: 'passed' });
+      await expect(h.runtime.stop(original.id, { kind: 'installation_owner', id: 'installation_owner' })).rejects.toMatchObject({ code: 'DRIVER_STOP_UNVERIFIED' });
+
+      await expect(h.runtime.runVerification(verifier.id, { command: 'printf blocked > verification-proof.txt' })).rejects.toMatchObject({ code: 'SESSION_BUSY' });
+      expect(existsSync(join(source, 'verification-proof.txt'))).toBe(false);
+      const elsewhere = await h.runtime.start({ agentId: agent.id, cwd: repository() });
+      expect(await h.runtime.runVerification(elsewhere.id, { command: 'true' })).toMatchObject({ status: 'passed' });
+
+      const queued = await h.runtime.dispatch(verifier.id, 'ordinary work waits for the same resource');
+      await vi.waitFor(() => expect(h.repos.execution.getTaskExecution(queued.id)?.blockers).toContainEqual(expect.objectContaining({ code: 'WORKSPACE_PHYSICAL_RESOURCE_UNSAFE', sessionId: original.id })));
+      expect(h.repos.execution.getTaskExecution(queued.id)).toMatchObject({ task: { status: 'queued' }, attempts: [] });
+      h.confirmStop();
+      await expect(h.runtime.stop(original.id, { kind: 'installation_owner', id: 'installation_owner' })).resolves.toBeUndefined();
+      await vi.waitFor(() => expect(h.repos.execution.getTaskExecution(queued.id)?.task.status).toBe('completed'));
+      expect(await h.runtime.runVerification(verifier.id, { command: 'true' })).toMatchObject({ status: 'passed' });
+    } finally { h.confirmStop(); }
+  });
+
+  it('applies the same unverified-stop resource gate at the second verification admission', async () => {
+    const source = repository(); let original = '', verifier = '', checks = 0, stopError: unknown;
+    let stopping: Promise<void> | undefined;
+    const h = unprovenStopRuntime({ authorizeExecution: async sessionId => {
+      if (sessionId !== verifier || ++checks !== 2) return;
+      stopping = h.runtime.stop(original, { kind: 'installation_owner', id: 'installation_owner' }).catch(error => { stopError = error; });
+      await vi.waitFor(() => expect(h.stopCalls()).toBe(1));
+    } });
+    try {
+      await h.runtime.initialize([agent]);
+      original = (await h.runtime.start({ agentId: agent.id, cwd: source })).id;
+      verifier = (await h.runtime.start({ agentId: agent.id, cwd: source })).id;
+      h.holdStop();
+      await expect(h.runtime.runVerification(verifier, { command: 'printf blocked > second-admission-proof.txt' })).rejects.toMatchObject({ code: 'SESSION_BUSY' });
+      // The command was rejected while stop was still in flight, before it had
+      // either succeeded or produced the later unverified-stop block.
+      expect(stopError).toBeUndefined();
+      expect(checks).toBe(2);
+      expect(existsSync(join(source, 'second-admission-proof.txt'))).toBe(false);
+      expect((await h.runtime.getVerifications(verifier)).map(record => record.status)).toEqual(['interrupted']);
+      h.releaseStop(); await stopping;
+      expect(stopError).toMatchObject({ code: 'DRIVER_STOP_UNVERIFIED' });
+    } finally { h.releaseStop(); h.confirmStop(); await stopping; }
   });
 
   it('rechecks other Sessions after its record holds the directory and never runs over admitted work', async () => {

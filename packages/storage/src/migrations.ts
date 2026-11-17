@@ -662,7 +662,11 @@ export const migrations: Migration[] = [
       COALESCE(task_id,json_extract(data,'$.taskId')),attempt_id,substr(json_extract(data,'$.text'),1,40),id)
       WHERE type='text' AND json_valid(data) AND json_extract(data,'$.role')='user'`);
   } },
-  { version: 50, name: 'ci_webhook_durable_admission', up: createCiWebhookAdmissionSchema }
+  { version: 50, name: 'ci_webhook_durable_admission', up: createCiWebhookAdmissionSchema },
+  // 接话人卸任后仍要保留事件水位；只加可空列，已有分工与修订不变。
+  { version: 51, name: 'collaboration_responder_watermark', up(db) {
+    if (tableExistsForMigration(db, 'collaboration_duties')) ensureColumn(db, 'collaboration_duties', 'responder_watermark_json', 'responder_watermark_json TEXT CHECK (responder_watermark_json IS NULL OR json_valid(responder_watermark_json))');
+  } }
 ]
 
 /** v38：collaboration_duties 加 scenarios_json 列，把旧的 alarm_json 转进去。 */

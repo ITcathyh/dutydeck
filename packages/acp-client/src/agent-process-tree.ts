@@ -45,13 +45,15 @@ export function processTreePids(table: ProcessTable, roots: number[]): number[] 
 }
 const key = (member: TreeMember) => `${member.pid}:${member.start}`;
 const alive = (member: TreeMember, table: ProcessTable) => { const stat = table.get(member.pid); return !!stat && !stat.zombie && stat.start === member.start; };
-const groupAlive = (pgid: number, table: ProcessTable) => [...table.values()].some(stat => stat.pgid === pgid && !stat.zombie);
+interface ObservedMember extends TreeMember { pgid: number }
+interface ProcessGroup { leader: TreeMember; proven: boolean; exited: boolean }
+type GroupState = 'live' | 'unknown' | 'exited';
 
 export class AgentProcessTree {
   private readonly root?: TreeMember;
-  private readonly members = new Map<string, TreeMember>();
-  /** Process groups led by a member (for example the Agent the env launcher detaches); they outlive a killed parent. */
-  private readonly groups = new Set<number>();
+  private readonly members = new Map<string, ObservedMember>();
+  /** Birth identity, adoption proof and a permanent exit tombstone for each numeric PGID. */
+  private readonly groups = new Map<number, ProcessGroup>();
   private readonly ownGroup: boolean;
   /** Where a Dutydeck launcher root records the Agent it detached, read even after the launcher died before any sample. */
   private readonly report?: string;
@@ -60,7 +62,7 @@ export class AgentProcessTree {
     const stat = pid ? readStat(pid) : undefined;
     if (pid && stat) this.root = { pid, start: stat.start };
     this.ownGroup = !!pid && stat?.pgid === pid;
-    if (this.ownGroup) this.groups.add(pid!);
+    if (this.ownGroup) this.groups.set(pid!, { leader: this.root!, proven: true, exited: false });
     if (reports && this.root) this.report = join(reports, `${this.root.pid}.${this.root.start}`);
   }
   /** Drop the launcher's report file only after the caller proves that its recorded tree exited. */
@@ -77,24 +79,52 @@ export class AgentProcessTree {
     try { raw = readFileSync(this.report!, 'utf8'); } catch { return; }
     const match = /^(\d+) (\d+)\n/.exec(raw);
     if (!match) return;
-    const member = { pid: Number(match[1]), start: match[2]! };
+    const member: ObservedMember = { pid: Number(match[1]), start: match[2]!, pgid: Number(match[1]) };
     // The report lives in the workspace: only a process the launcher could have started is accepted.
     if (member.pid === this.root!.pid || Number(member.start) < Number(this.root!.start)) return;
-    const stat = table.get(member.pid);
     this.members.set(key(member), member);
-    // A leader PID cannot be reused while its group has members, so a gone leader still names its live group.
-    if (stat ? stat.start === member.start : groupAlive(member.pid, table)) this.groups.add(member.pid);
+    let group = this.groups.get(member.pid);
+    if (!group) { group = { leader: member, proven: false, exited: false }; this.groups.set(member.pid, group); }
+    if (group.exited) return;
+    const stat = table.get(member.pid);
+    // A stale report alone cannot adopt a leaderless group. Its original leader
+    // or a previously observed original member must still prove continuity.
+    if ((stat && !stat.zombie && stat.start === group.leader.start && stat.pgid === member.pid) || this.hasKnownGroupMember(member.pid, table)) group.proven = true;
   }
-  /** Whether a process group led by a descendant (not the root's own group) has been recorded. */
-  hasGroups() { return [...this.groups].some(group => group !== this.root?.pid); }
+  private hasKnownGroupMember(pgid: number, table: ProcessTable) {
+    return [...this.members.values()].some(member => member.pgid === pgid && alive(member, table) && table.get(member.pid)?.pgid === pgid);
+  }
+  private groupState(pgid: number, group: ProcessGroup, table: ProcessTable): GroupState {
+    if (group.exited) return 'exited';
+    if (!table.size) return 'unknown';
+    const leader = table.get(pgid);
+    // Reusing the leader PID proves that no member of the original group survives.
+    if (leader && leader.start !== group.leader.start) { group.exited = true; return 'exited'; }
+    if ((leader && !leader.zombie && leader.start === group.leader.start && leader.pgid === pgid) || this.hasKnownGroupMember(pgid, table)) {
+      group.proven = true;
+      return 'live';
+    }
+    // A same-numbered leaderless group may be old or new. Never signal it or
+    // call it cleaned without birth-identity continuity.
+    if ([...table.values()].some(stat => stat.pgid === pgid && !stat.zombie)) return 'unknown';
+    group.exited = true;
+    return 'exited';
+  }
+  /** Whether a proven process group led by a descendant (not the root's own group) has been recorded. */
+  hasGroups() { return [...this.groups].some(([pgid, group]) => pgid !== this.root?.pid && group.proven); }
   /** Record the root's current descendants; returns false when /proc cannot be read. */
   refresh(table = scanProcesses()): boolean {
     if (!table.size || !this.root) return false;
     for (const pid of alive(this.root, table) ? processTreePids(table, [this.root.pid]) : []) {
       if (pid === this.root.pid) continue;
       const stat = table.get(pid)!;
-      this.members.set(key({ pid, start: stat.start }), { pid, start: stat.start });
-      if (stat.pgid === pid) this.groups.add(pid);
+      const member: ObservedMember = { pid, start: stat.start, pgid: stat.pgid };
+      this.members.set(key(member), member);
+      if (stat.pgid === pid) {
+        const group = this.groups.get(pid);
+        if (!group) this.groups.set(pid, { leader: member, proven: true, exited: false });
+        else if (!group.exited && group.leader.start === member.start) group.proven = true;
+      }
     }
     if (this.report) this.adoptReported(table);
     return true;
@@ -102,10 +132,11 @@ export class AgentProcessTree {
   /** Signal the root's process group when it leads one, every recorded descendant, and every recorded group. */
   signal(name: NodeJS.Signals, signalRoot: () => void, table = scanProcesses()) {
     this.refresh(table);
-    if (this.ownGroup) { try { process.kill(-this.root!.pid, name); } catch { /* Gone. */ } }
-    else signalRoot();
+    const ownGroup = this.ownGroup ? this.groups.get(this.root!.pid) : undefined;
+    if (ownGroup && this.groupState(this.root!.pid, ownGroup, table) === 'live') { try { process.kill(-this.root!.pid, name); } catch { /* Gone. */ } }
+    else if (!this.ownGroup) signalRoot();
     for (const member of this.members.values()) if (alive(member, table)) { try { process.kill(member.pid, name); } catch { /* Gone. */ } }
-    for (const group of this.groups) if (group !== this.root?.pid && groupAlive(group, table)) { try { process.kill(-group, name); } catch { /* Gone. */ } }
+    for (const [pgid, group] of this.groups) if (pgid !== this.root?.pid && this.groupState(pgid, group, table) === 'live') { try { process.kill(-pgid, name); } catch { /* Gone. */ } }
   }
   /**
    * True once every recorded descendant and every recorded process group is gone. Undefined when it cannot be
@@ -113,6 +144,13 @@ export class AgentProcessTree {
    */
   exited(table = scanProcesses()): boolean | undefined {
     if (!table.size || !this.members.size) return undefined;
-    return ![...this.members.values()].some(member => alive(member, table)) && ![...this.groups].some(group => groupAlive(group, table));
+    let live = [...this.members.values()].some(member => alive(member, table));
+    let unknown = false;
+    for (const [pgid, group] of this.groups) {
+      const state = this.groupState(pgid, group, table);
+      if (state === 'live') live = true;
+      else if (state === 'unknown') unknown = true;
+    }
+    return live ? false : unknown ? undefined : true;
   }
 }

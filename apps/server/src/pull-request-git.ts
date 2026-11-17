@@ -35,13 +35,17 @@ export function redactGitOutput(text: string) {
 /** 连远端的命令要用系统、全局配置里的凭据与 ssh 设置；仓库自己的配置归 Agent 写，其中会起程序的键一律不认。 */
 const REMOTE_COMMANDS = new Set(['push', 'fetch', 'ls-remote']);
 
-export async function git(repo: GitRepo, args: string[], options: { env?: NodeJS.ProcessEnv; input?: string; timeout?: number } = {}): Promise<string> {
+type GitOptions = { env?: NodeJS.ProcessEnv; input?: string; timeout?: number };
+
+async function runGit(repo: GitRepo, args: string[], options: GitOptions = {}, beforeStart?: () => Promise<boolean>): Promise<{ output: string; started: boolean }> {
   const prefix = 'cwd' in repo ? ['-C', repo.cwd] : ['--git-dir', repo.gitDir];
   const env = safeGitEnvironment(process.env, { GIT_OPTIONAL_LOCKS: '0', ...options.env });
   const config = REMOTE_COMMANDS.has(args[0]!)
     ? await safeGitConfigFor(prefix, { env }).catch(error => { throw new RuntimeError('PR_GIT_FAILED', `git config 失败：${redactGitOutput(errorMessage(error))}`, 500); })
     : SAFE_GIT_CONFIG;
-  return new Promise((resolve, reject) => {
+  // 最后一次授权必须晚于异步配置准备；授权返回到启动进程之间不再插入 await。
+  if (beforeStart && !await beforeStart()) return { output: '', started: false };
+  const output = await new Promise<string>((resolve, reject) => {
     const child = execFile('git', [...prefix, ...config, ...args], {
       env,
       timeout: options.timeout ?? GIT_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024, killSignal: 'SIGKILL'
@@ -51,6 +55,11 @@ export async function git(repo: GitRepo, args: string[], options: { env?: NodeJS
     });
     if (options.input !== undefined) child.stdin?.end(options.input);
   });
+  return { output, started: true };
+}
+
+export async function git(repo: GitRepo, args: string[], options: GitOptions = {}): Promise<string> {
+  return (await runGit(repo, args, options)).output;
 }
 
 const diffArgs = ['-c', 'core.quotePath=false', 'diff', '--no-color', '--no-ext-diff', '--no-textconv', '--no-renames'];
@@ -80,14 +89,18 @@ export async function diffTrees(repo: GitRepo, before: string, after: string): P
 /** 在提交说明末尾追加 git trailer `Dutydeck-Session: <会话编号>`（单独一段，`git interpret-trailers` 能解析）。不碰 git author / committer。 */
 export const withTrailers = (message: string, sessionId: string) => `${message.trimEnd()}\n\nDutydeck-Session: ${sessionId}\n`;
 
-/** 树里这些路径的模式和 blob；不在树里的路径不出现在结果里。 */
+/** 树里这些路径的模式和对象；不在树里的路径不出现在结果里，存在但不认识的项不能当成删除。 */
 export async function treeEntries(repo: GitRepo, tree: string, paths: string[]): Promise<Map<string, TreeEntry>> {
   const entries = new Map<string, TreeEntry>();
   for (let start = 0; start < paths.length; start += 200) {
     const output = await git(repo, ['--literal-pathspecs', 'ls-tree', '-r', '-z', '--full-tree', tree, '--', ...paths.slice(start, start + 200)]);
     for (const row of output.split('\0')) {
-      const match = /^(\d{6}) blob ([0-9a-f]{40,64})\t(.+)$/s.exec(row);
-      if (match) entries.set(match[3]!, { mode: match[1]!, sha: match[2]! });
+      if (!row) continue;
+      const match = /^(\d{6}) (\w+) ([0-9a-f]{40,64})\t(.+)$/s.exec(row);
+      const blob = match?.[2] === 'blob' && ['100644', '100755', '120000'].includes(match[1]!);
+      const gitlink = match?.[2] === 'commit' && match[1] === '160000';
+      if (!match || (!blob && !gitlink)) throw new RuntimeError('PR_GIT_FAILED', '读取 Git tree 时遇到不支持的条目，不能把它当作删除。', 500);
+      entries.set(match[4]!, { mode: match[1]!, sha: match[3]! });
     }
   }
   return entries;
@@ -211,8 +224,8 @@ export async function fetchBranches(cwd: string, url: string, branches: string[]
   await git({ cwd }, ['fetch', '--quiet', '--no-tags', '--no-write-fetch-head', remote.name, ...branches.map(branch => `refs/heads/${branch}`)], { env: remote.env, timeout: PUSH_TIMEOUT_MS });
 }
 
-/** 普通推送（不带 --force，refspec 不带 +）：新分支，或在已推送的提交上快进。url 是 originPushUrl 核对过的地址，不是 origin 这个名字。 */
-export async function pushBranch(cwd: string, url: string, commit: string, branch: string, target: string, claimed = false) {
+/** 普通推送（不带 --force，refspec 不带 +）：新分支，或在已推送的提交上快进。url 是 originPushUrl 核对过的地址，不是 origin 这个名字。beforePush 在异步配置准备后、启动 push 前做最后授权，返回 false 表示尚未发送。 */
+export async function pushBranch(cwd: string, url: string, commit: string, branch: string, target: string, claimed = false, beforePush?: () => Promise<boolean>) {
   if (claimed) assertClaimedPushTarget(branch, target);
   else assertPushTarget(branch, target);
   const remote = directRemote(url);
@@ -220,7 +233,8 @@ export async function pushBranch(cwd: string, url: string, commit: string, branc
   const receivePack = isLocalRemote(url)
     ? [`--receive-pack=git ${[...SAFE_GIT_CONFIG, '-c', 'receive.denyCurrentBranch=refuse'].map(shellQuote).join(' ')} receive-pack`]
     : [];
-  await git({ cwd }, ['push', '--porcelain', '--no-verify', ...receivePack, remote.name, `${commit}:refs/heads/${branch}`], { env: remote.env, timeout: PUSH_TIMEOUT_MS });
+  const { started } = await runGit({ cwd }, ['push', '--porcelain', '--no-verify', ...receivePack, remote.name, `${commit}:refs/heads/${branch}`], { env: remote.env, timeout: PUSH_TIMEOUT_MS }, beforePush);
+  return started;
 }
 
 /** 本机路径或 file:// 地址；带协议的地址和 scp 写法（host:path）都不是。 */

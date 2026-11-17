@@ -48,6 +48,7 @@ function resolveResultAttempt(repositories: AttemptResultRepositories, sessionId
   if (!attempt) fail('TASK_RESULT_ATTEMPT_MISSING', `Attempt ${attemptId} is not recorded for task ${taskId}`);
   if (attempt.taskId !== taskId || attempt.sessionId !== sessionId) fail('TASK_RESULT_SCOPE_CONFLICT', 'Attempt identity does not match the fixed task and session');
   if (attempt.number !== 1) fail('TASK_RESULT_ATTEMPT_CONFLICT', 'Only the number=1 attempt is a valid source result');
+  let automaticOrdinal = 0;
   while (retryInput) {
     const successors = projection.attempts.filter(item => item.automaticRetry?.causeAttemptId === attempt!.attemptId || item.manualRetry?.causeAttemptId === attempt!.attemptId);
     if (!successors.length) break;
@@ -73,11 +74,12 @@ function resolveResultAttempt(repositories: AttemptResultRepositories, sessionId
     }
     const retry = next.automaticRetry!;
     if (successors.length !== 1 || next.taskId !== taskId || next.sessionId !== sessionId || next.runId !== attempt.runId
-      || next.number !== attempt.number + 1 || retry.reason !== 'codex_capacity' || retry.ordinal !== next.number - 1 || retry.ordinal > 2
+      || next.number !== attempt.number + 1 || retry.reason !== 'codex_capacity' || retry.ordinal !== automaticOrdinal + 1 || retry.ordinal > 2
       || accepted?.input?.version !== 2 || accepted.input.digest !== retry.inputDigest || !accepted.request || accepted.request.actor.kind === 'unspecified'
       || attempt.state !== 'settled' || !attempt.settlementId || attempt.outcome !== 'failed' || attempt.submissionState === 'not_submitted' || attempt.settlement?.kind !== 'driver_result'
       || attempt.settlement.outcome !== 'failed' || attempt.settlement.complete !== true || attempt.settlement.submissionId !== attempt.submission?.submissionId
       || !safeCapacityFailure(execution, attempt)) fail('TASK_RESULT_RETRY_CONFLICT', 'Automatic retry does not preserve the verified task input and capacity-failure lineage');
+    automaticOrdinal = retry.ordinal;
     attempt = next;
   }
 

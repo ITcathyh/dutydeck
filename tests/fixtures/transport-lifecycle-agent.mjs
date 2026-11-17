@@ -30,7 +30,12 @@ else {
   if (process.env.lifecycle_ready_file) writeFileSync(process.env.lifecycle_ready_file, String(process.pid));
   if (process.env.lifecycle_spawn_log) appendFileSync(process.env.lifecycle_spawn_log, `${process.pid}\n`);
   if (process.env.lifecycle_ignore_sigterm === '1') process.on('SIGTERM', () => {});
-  process.on('SIGINT', () => process.stdout.write('INTERRUPTED\n'));
+  const interrupted = () => process.stdout.write('INTERRUPTED\n');
+  process.on('SIGINT', () => {
+    const delay = Number(process.env.lifecycle_interrupt_delay_ms ?? 0);
+    if (delay > 0) setTimeout(interrupted, delay);
+    else interrupted();
+  });
   readline.createInterface({ input: process.stdin }).on('line', line => {
     let message;
     try { message = JSON.parse(line); } catch { return; }

@@ -437,8 +437,16 @@ export class IdleDetector {
   }
 
   private stripAnsi(str: string): string {
+    // Cursor-forward is only spacing evidence for pattern matching. Bound the
+    // total expansion per chunk so a tiny CSI parameter cannot allocate huge
+    // strings or prevent the original PTY bytes from reaching subscribers.
+    let expansionRemaining = 64 * 1024;
     return str
-      .replace(/\x1b\[(\d*)C/g, (_m, n) => ' '.repeat(Number(n) || 1))
+      .replace(/\x1b\[(\d*)C/g, (_m, n) => {
+        const count = Math.min(Number(n) || 1, expansionRemaining);
+        expansionRemaining -= count;
+        return ' '.repeat(count);
+      })
       .replace(/\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][0-9A-B]|\x1b\[[\?]?[0-9;]*[hlmsuJ]/g, '');
   }
 }

@@ -118,10 +118,20 @@ export function ControlCenterModal({
   const [pendingLeave, setPendingLeave] = useState<(() => void) | undefined>();
   const modelDirty = Object.values(modelStates).some(state => state.dirty);
   const modelSaving = Object.values(modelStates).some(state => state.saving);
-  const reportModelState = useCallback((agentId: string, dirty: boolean, saving = false) => {
-    setModelStates(states => states[agentId]?.dirty === dirty && states[agentId]?.saving === saving ? states : { ...states, [agentId]: { dirty, saving } });
+  const reportModelState = useCallback((key: string, dirty: boolean, saving = false) => {
+    setModelStates(states => states[key]?.dirty === dirty && states[key]?.saving === saving ? states : { ...states, [key]: { dirty, saving } });
   }, []);
-  const modelCallbacks = useMemo(() => Object.fromEntries(agents.map(agent => [agent.id, (dirty: boolean, saving?: boolean) => reportModelState(agent.id, dirty, saving)])), [agents, reportModelState]);
+  const modelCallbacks = useRef(new Map<string, { model(dirty: boolean, saving?: boolean): void; profile(dirty: boolean, saving?: boolean): void }>());
+  const modelCallbacksFor = (agentId: string) => {
+    const existing = modelCallbacks.current.get(agentId);
+    if (existing) return existing;
+    const created = {
+      model: (dirty: boolean, saving = false) => reportModelState(`${agentId}:model`, dirty, saving),
+      profile: (dirty: boolean, saving = false) => reportModelState(`${agentId}:profile`, dirty, saving)
+    };
+    modelCallbacks.current.set(agentId, created);
+    return created;
+  };
   useEffect(() => {
     if (!open || !modelDirty) return;
     const beforeUnload = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ''; };
@@ -261,7 +271,7 @@ export function ControlCenterModal({
       </aside>
 
       <div className="min-h-0 overflow-y-auto p-5">
-        {activeSection === 'agents' && <AgentSection agents={agents} legacyBots={legacyBots} modelReset={modelReset} onModelDirtyChange={modelCallbacks} onCreateTask={agentId => requestLeave(() => onCreateTask(agentId))} onOpenLarkSetup={() => requestLeave(onOpenLarkSetup)}/>}
+        {activeSection === 'agents' && <AgentSection agents={agents} legacyBots={legacyBots} modelReset={modelReset} onModelDirtyChange={modelCallbacksFor} onCreateTask={agentId => requestLeave(() => onCreateTask(agentId))} onOpenLarkSetup={() => requestLeave(onOpenLarkSetup)}/>}
         {activeSection === 'lark' && <LarkSection agents={agents} legacyBots={legacyBots} larkListeningDisabled={larkListeningDisabled} larkBotsLoading={larkBotsLoading} larkBotsFailed={larkBotsFailed} larkBotsRetrying={larkBotsRetrying} onRetryLarkBots={onRetryLarkBots} capabilities={capabilities} matrix={matrix} secretRefs={secretRefs} channelBots={channelBots} availableLarkRefs={availableLarkRefs} createOpen={createOpen} setCreateOpen={setCreateOpen} displayName={displayName} setDisplayName={setDisplayName} externalAppId={externalAppId} setExternalAppId={setExternalAppId} brand={brand} setBrand={setBrand} createBot={createBot} onOpenLarkSetup={target => requestLeave(() => onOpenLarkSetup(target))}/>}
         {activeSection === 'groups' && <GroupsSection cells={cells} missingBindings={missingBindings} repositoriesWired={capabilities.data?.repositoriesWired === true} onOpenLarkSetup={() => requestLeave(onOpenLarkSetup)} onOpenGroups={() => requestLeave(onOpenGroups)}/>}
         {activeSection === 'automation' && <AutomationSection scheduleCount={scheduleCount} capabilities={scheduleCapabilities} onOpenSchedules={() => requestLeave(onOpenSchedules)}/>}
@@ -281,20 +291,21 @@ export function ControlCenterModal({
   </>;
 }
 
-function AgentSection({ agents, legacyBots, modelReset, onModelDirtyChange, onCreateTask, onOpenLarkSetup }: { agents: Agent[]; legacyBots: LarkBotConfig[]; modelReset: number; onModelDirtyChange: Record<string, (dirty: boolean, saving?: boolean) => void>; onCreateTask(agentId: string): void; onOpenLarkSetup(): void }) {
+function AgentSection({ agents, legacyBots, modelReset, onModelDirtyChange, onCreateTask, onOpenLarkSetup }: { agents: Agent[]; legacyBots: LarkBotConfig[]; modelReset: number; onModelDirtyChange(agentId: string): { model(dirty: boolean, saving?: boolean): void; profile(dirty: boolean, saving?: boolean): void }; onCreateTask(agentId: string): void; onOpenLarkSetup(): void }) {
   return <section aria-labelledby="control-agents">
     <div className="flex flex-wrap items-end justify-between gap-3"><div><h3 id="control-agents" className="text-title font-semibold text-primary">Agent</h3><p className="mt-1 text-caption text-subtle">Agent 是在这台机器上执行任务的 CLI。Dutydeck 会自动发现已安装并登录的受支持 CLI。</p></div>{statePill(agents.length ? `${agents.length} 个可用` : '尚未找到', agents.length ? 'ready' : 'blocked')}</div>
     <TerminalBackendSettings/>
     <WorkspaceApprovalRules/>
     {agents.length > 0 && <div className="mt-4 grid gap-3 sm:grid-cols-2">{agents.map(agent => {
       const boundBots = legacyBots.filter(bot => bot.defaultAgentId === agent.id);
+      const dirtyCallbacks = onModelDirtyChange(agent.id);
       return <Card key={agent.id} as="article" padding="md">
         <div className="flex items-center gap-2"><Bot size={16} className="text-action"/><h4 className="text-body font-semibold text-primary">{agent.name}</h4>{statePill('可创建任务', 'ready')}</div>
         <p className="mt-1 text-meta text-subtle">{agent.version ? `${agent.version} · ` : ''}{agent.protocol === 'pty-cli' ? '终端 CLI' : agent.protocol.toUpperCase()}</p>
         {/* 「已绑定」不是「已连接」：这里只数了 defaultAgentId 指向本 Agent 的 Bot，没有读任何监听状态。 */}
         <div className="mt-3 grid grid-cols-2 gap-2 text-caption text-secondary"><div className="rounded-md bg-muted p-2">默认权限<br/><strong className="text-primary">{permissionLabel(agent.permissionMode)}</strong></div><div className="rounded-md bg-muted p-2">飞书 Bot<br/><strong className="text-primary">{boundBots.length ? `${boundBots.length} 个已绑定` : '尚未绑定'}</strong></div></div>
-        {supportsModelServiceSettings(agent) && <AgentModelSettings key={`${agent.id}:${modelReset}`} agentId={agent.id} onDirtyChange={onModelDirtyChange[agent.id]}/>}
-        <CodexProfileSettings key={`${agent.id}:${modelReset}:codex-profile`} agent={agent} onDirtyChange={onModelDirtyChange[agent.id]}/>
+        {supportsModelServiceSettings(agent) && <AgentModelSettings key={`${agent.id}:${modelReset}`} agentId={agent.id} onDirtyChange={dirtyCallbacks.model}/>}
+        <CodexProfileSettings key={`${agent.id}:${modelReset}:codex-profile`} agent={agent} onDirtyChange={dirtyCallbacks.profile}/>
         <div className="mt-3 flex gap-2"><Button variant="primary" className="flex-1" onClick={() => onCreateTask(agent.id)}>用它创建任务</Button><Button variant="secondary" onClick={() => onOpenLarkSetup()}>{boundBots.length ? '管理 Bot' : '连接 Bot'}</Button></div>
       </Card>;
     })}</div>}

@@ -204,7 +204,11 @@ export function satisfiesVersionRange(version: string | undefined, range: string
       const target: [number, number, number] = [maj, min, pat];
       if (op === '^') {
         if (compareSemver(ver, target) < 0) return false;
-        return maj > 0 ? ver[0] === maj : minWild ? ver[0] === 0 : ver[0] === 0 && ver[1] === min;
+        if (maj > 0) return ver[0] === maj;
+        if (minWild) return ver[0] === 0;
+        if (min > 0) return ver[0] === 0 && ver[1] === min;
+        // 完整 ^0.0.patch 只兼容同一个 patch；^0.0.x 仍按 0.0.x 范围处理。
+        return !patWild ? compareSemver(ver, target) === 0 : ver[0] === 0 && ver[1] === 0;
       }
       if (op === '~') return compareSemver(ver, target) >= 0 && ver[0] === maj && (minWild || ver[1] === min);
       if (op === '>=') return compareSemver(ver, target) >= 0;

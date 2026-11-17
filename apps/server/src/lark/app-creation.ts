@@ -281,31 +281,47 @@ export class LarkAppCreationJobManager {
       retryable = false;
       message = '应用草稿已保存，但自动配置或发布未完成；请继续配置该机器人并核对开放平台状态';
       await this.update(id, { status: 'configuring' });
-      const configured = await (this.options.configure ?? configureLarkOpenPlatformApp)(client, appId, { creatorUserId: owner.userId, newApp: true });
+      const configured = await (this.options.configure ?? configureLarkOpenPlatformApp)(client, appId, {
+        creatorUserId: owner.userId,
+        newApp: true,
+        onStep: async (step, detail) => {
+          if (step === 'version_create' && detail?.versionId) await this.update(id, { versionId: detail.versionId });
+          if (step === 'publish_commit' && detail?.versionId) await this.update(id, { versionId: detail.versionId, publishAttempted: true });
+        },
+      });
       const slashCommands = await this.syncSlashCommands(appId, configured?.skippedScopes ?? []);
       await this.update(id, { status: 'completed', retryable: false, slashCommands });
     } catch (error) {
       // Never copy upstream errors: they may contain cookies, secrets or private IDs.
       if (error instanceof OpenPlatformSessionError) message = error.message;
       // 半失效登录态：缓存已被会话层删除，重试自然走扫码。
-      if (error instanceof OpenPlatformSessionExpiredError) {
+      if (error instanceof OpenPlatformSessionExpiredError && !this.jobs.get(id)?.publishAttempted) {
         message = error.message;
         retryable = true;
       }
       if (error instanceof LarkOpenPlatformConfigurationError) {
         message = `应用草稿已保存：${error.message}（${error.code}）。请继续处理该应用`;
-        // Preflight failures never submit a publication; retries reuse and verify the same draft.
-        retryable = [
-          'session_expired',
-          'scope_catalog_read_failed', 'scope_catalog_incomplete', 'scope_update_failed',
-          'scope_verification_read_failed', 'scope_verification_failed', 'robot_enable_failed',
-          'event_mode_failed', 'event_read_failed', 'event_update_failed', 'event_verification_failed',
-          'callback_read_failed', 'callback_mode_failed', 'callback_update_failed', 'callback_verification_failed',
-          'version_list_failed', 'version_list_unreadable', 'visibility_read_failed', 'visibility_unreadable',
-          'privilege_read_failed', 'privilege_update_failed', 'privilege_verification_failed',
-          'draft_read_failed', 'draft_visibility_mismatch', 'approval_prediction_failed',
-          'approval_prediction_unreadable', 'publish_requires_review',
-        ].includes(error.code);
+        const published = error.publishAttempted === true || this.jobs.get(id)?.publishAttempted === true;
+        if (published) {
+          const versionId = this.jobs.get(id)?.versionId;
+          // 提交后的统一边界不能把机器可判读的原因抹掉：自动核验超时、人工审核与状态回读失败不是同一种处理。
+          const detail = error.code === 'publish_verification_pending' ? '自动发布核验超时，尚未确认发布完成' : error.message;
+          message = `应用版本${versionId ? ` ${versionId}` : ''}已提交，发布结果待确认：${detail}（${error.code}）。请到飞书开放平台核对该版本，已禁止重复提交`;
+          retryable = false;
+        } else {
+          // Preflight failures never submit a publication; retries reuse and verify the same draft.
+          retryable = [
+            'session_expired',
+            'scope_catalog_read_failed', 'scope_catalog_incomplete', 'scope_update_failed',
+            'scope_verification_read_failed', 'scope_verification_failed', 'robot_enable_failed',
+            'event_mode_failed', 'event_read_failed', 'event_update_failed', 'event_verification_failed',
+            'callback_read_failed', 'callback_mode_failed', 'callback_update_failed', 'callback_verification_failed',
+            'version_list_failed', 'version_list_unreadable', 'visibility_read_failed', 'visibility_unreadable',
+            'privilege_read_failed', 'privilege_update_failed', 'privilege_verification_failed',
+            'draft_read_failed', 'draft_visibility_mismatch', 'approval_prediction_failed',
+            'approval_prediction_unreadable', 'publish_requires_review',
+          ].includes(error.code);
+        }
       }
       const pendingReview = error instanceof LarkOpenPlatformConfigurationError && error.code === 'publish_pending_review';
       try { await this.update(id, { status: pendingReview ? 'pending_review' : 'failed', retryable, error: pendingReview ? undefined : message }); }

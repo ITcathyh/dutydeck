@@ -2,8 +2,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { agentModelSettingsApi, foundationApi, scheduleApi, terminalSettingsApi, type FoundationCapability, type GroupMatrix, type LarkBotConfig, type ScheduleCapability } from '../api';
+import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
+import { agentConfigApi, agentModelSettingsApi, api, foundationApi, scheduleApi, terminalSettingsApi, type FoundationCapability, type GroupMatrix, type LarkBotConfig, type ScheduleCapability } from '../api';
 import { ControlCenterModal } from './ControlCenterModal';
 import { EXPERIMENTAL_STORAGE_KEY, writeExperimental } from '../experimental';
 
@@ -389,6 +389,55 @@ it('aggregates all Agent drafts and prevents leaving while a model save is pendi
   expect(screen.getByRole('alertdialog')).toBeTruthy();
   await userEvent.click(screen.getByRole('button', { name: '取消' }));
   expect((inputs[1] as HTMLInputElement).value).toBe('second draft');
+});
+
+it('keeps the model leave guard across Agent metadata refreshes', async () => {
+  mockModels();
+  const onClose = vi.fn();
+  const view = renderModal({ agents: modelAgents, onClose });
+  const input = await editModel();
+  view.rerenderModal({ agents: [{ ...modelAgents[0]!, name: 'Updated Claude Code' }], onClose });
+  await waitFor(() => expect(input.value).toBe('https://unsaved.example'));
+  const refresh = new Event('beforeunload', { cancelable: true });
+  window.dispatchEvent(refresh);
+  expect(refresh.defaultPrevented).toBe(true);
+  await userEvent.click(screen.getByRole('button', { name: '关闭设置与接入' }));
+  expect(await screen.findByRole('alertdialog')).toBeTruthy();
+  expect(onClose).not.toHaveBeenCalled();
+});
+
+it('keeps the Claude model guard after saving another Agent profile through the normal UI', async () => {
+  mockModels();
+  const claude = modelAgents[0]!;
+  let codex = { id: 'codex', name: 'Codex', protocol: 'pty-cli' as const, permissionMode: 'ask' as const, codexProfile: '' };
+  vi.spyOn(api, 'agents').mockImplementation(async () => [claude, codex]);
+  vi.spyOn(agentConfigApi, 'get').mockResolvedValue({ id: 'codex', codexProfile: '' });
+  vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], profiles: [{ id: 'work', name: 'work' }], reasoningEfforts: [] });
+  vi.spyOn(agentConfigApi, 'set').mockImplementation(async (_id, profile) => {
+    codex = { ...codex, codexProfile: profile ?? '' };
+    return codex;
+  });
+  const onClose = vi.fn();
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  function Harness() {
+    const agents = useQuery({ queryKey: ['agents'], queryFn: api.agents });
+    return <ControlCenterModal open agents={agents.data ?? []} legacyBots={[]} onClose={onClose} onCreateTask={() => {}} onOpenLarkSetup={() => {}} onOpenGroups={() => {}} onOpenSchedules={() => {}}/>;
+  }
+  render(<QueryClientProvider client={client}><Harness/></QueryClientProvider>);
+  await screen.findByText('模型服务配置');
+  const input = await editModel();
+  await userEvent.click(await screen.findByText('Codex 配置 profile'));
+  await userEvent.selectOptions(await screen.findByLabelText('Codex profile'), 'work');
+  await userEvent.click(screen.getByRole('button', { name: '保存 profile' }));
+  await screen.findByText('已保存；新建 Codex 会话时生效。');
+  await waitFor(() => expect(api.agents).toHaveBeenCalledTimes(2));
+  expect(input.value).toBe('https://unsaved.example');
+  const refresh = new Event('beforeunload', { cancelable: true });
+  window.dispatchEvent(refresh);
+  expect(refresh.defaultPrevented).toBe(true);
+  await userEvent.click(screen.getByRole('button', { name: '关闭设置与接入' }));
+  expect(await screen.findByRole('alertdialog')).toBeTruthy();
+  expect(onClose).not.toHaveBeenCalled();
 });
 
 it('guards deep-link section changes and clears discarded drafts even when an external action leaves settings mounted', async () => {

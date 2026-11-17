@@ -442,6 +442,30 @@ describe('session insight resolver — Claude 真实 fixture 主/子流', () => 
     const result = await h.resolve(sessionId, { configuredRoots: [{ client: 'claude', path: home }] });
     expect(result.sources.some(s => s.expectedStream.kind === 'subagent' && s.status === 'matched')).toBe(false);
   });
+  it('4 MiB 证明窗口未覆盖完整主文件时保留 discoveryLimited', async () => {
+    const original = readFileSync(CLAUDE_MAIN_FIXTURE, 'utf8').trim().split('\n');
+    const padding = JSON.stringify({ type: 'system', isSidechain: false, cwd: FIXTURE_CWD, sessionId: CLAUDE_NATIVE_ID, timestamp: at, content: 'x'.repeat(64 * 1024) });
+    for (const mode of ['short', 'late-proof', 'early-proof'] as const) {
+      const h = harness();
+      const sessionId = `ses_proof_window_${mode}`;
+      const runId = `run_${sessionId}`;
+      await saveAgent(h, { id: 'claude-code' });
+      createSession(h, sessionId, 'claude-code', FIXTURE_CWD, runId);
+      lifecycleDriver(h, sessionId, runId);
+      const home = setupClaudeHome(h.root, { 'subagent-worker.jsonl': CLAUDE_SUB_FIXTURE });
+      const body = mode === 'short' ? original.join('\n') + '\n'
+        : mode === 'late-proof' ? [original[0], ...Array(70).fill(padding), ...original.slice(1)].join('\n') + '\n'
+        : [...original.slice(0, 5), ...Array(70).fill(padding), ...original.slice(5)].join('\n') + '\n';
+      const mainPath = join(home, 'projects', CLAUDE_PROJECT_KEY, `${CLAUDE_NATIVE_ID}.jsonl`);
+      writeFileSync(mainPath, body);
+      if (mode !== 'short') expect(Buffer.byteLength(body)).toBeGreaterThan(4 * 1024 * 1024);
+      appendLaunchObserved(h, { sessionId, runId, client: 'claude', dataRoot: home, nativeSessionId: CLAUDE_NATIVE_ID, verifiedPath: mainPath });
+      const result = await h.resolve(sessionId, { configuredRoots: [{ client: 'claude', path: home }] });
+      const subagents = result.sources.filter(source => source.expectedStream.kind === 'subagent' && source.status === 'matched');
+      expect(result.discoveryLimited).toBe(mode !== 'short');
+      expect(subagents).toHaveLength(mode === 'late-proof' ? 0 : 1);
+    }
+  });
 });
 
 describe('session insight resolver — 历史 HOME 切换 / 内容身份 / 越根', () => {

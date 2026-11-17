@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { ConfigRepository } from '@dutydeck/shared';
 import { currentProcessIdentity } from '@dutydeck/storage/helpers';
 import { LarkAppCreationJobManager } from './app-creation.js';
-import { LarkOpenPlatformConfigurationError } from './open-platform-configurator.js';
+import { configureLarkOpenPlatformApp, LARK_COMMON_TENANT_SCOPES, LARK_REQUIRED_EVENTS, LarkOpenPlatformConfigurationError } from './open-platform-configurator.js';
 import { OpenPlatformRequestError, OpenPlatformSessionError, OpenPlatformSessionExpiredError, type ConnectedOpenPlatformSession, type ConnectOpenPlatformSessionOptions } from './open-platform-session.js';
 import { readLarkConfig, saveLarkConfig } from './config.js';
 
@@ -55,7 +55,7 @@ it('creates once, durably saves credentials privately and configures creator vis
     createAppUserCustomField: { i18n: { zh_cn: { name: 'My Bot', description: 'dutydeck bot 助手' } } }
   });
   expect(h.postForm.mock.calls[0]![1].get('uploadType')).toBe('4');
-  expect(h.configure).toHaveBeenCalledWith(h.connected.client, 'cli_created', { creatorUserId: 'private-user', newApp: true });
+  expect(h.configure).toHaveBeenCalledWith(h.connected.client, 'cli_created', { creatorUserId: 'private-user', newApp: true, onStep: expect.any(Function) });
   expect(await readLarkConfig(h.config, 'cli_created')).toMatchObject({ name: 'My Bot', appSecret: 'test-private-secret', listening: false });
   for (const value of [JSON.stringify(job), h.records.get(`lark.app_creation.${id}`)!]) {
     for (const secret of ['test-private-secret', 'private-user', 'private-tenant', 'private-qr']) expect(value).not.toContain(secret);
@@ -160,6 +160,52 @@ it('reports a half-expired console session as retryable with the re-scan message
     status: 'failed', appId: 'cli_created', retryable: true,
     error: expect.stringContaining('飞书开放平台登录已失效，请重新扫码。'),
   });
+});
+
+it('keeps the submitted version and forbids retry when the post-commit status read expires', async () => {
+  const h = harness();
+  const calls: string[] = [];
+  const versions: Array<{ versionId: string; appVersion: string; versionStatus: number }> = [];
+  let lastBody: Record<string, any> | undefined;
+  let expired = false;
+  let commits = 0;
+  h.connected.client.postJson = vi.fn(async (path: string, body?: Record<string, any>): Promise<any> => {
+    calls.push(path);
+    if (path.includes('/manifest/upsert_by_template')) return { data: { ClientID: 'cli_created' } };
+    if (path.includes('/secret/')) return { data: { secret: 'synthetic-secret' } };
+    if (path.includes('/scope/all/')) return { data: { appScopeList: LARK_COMMON_TENANT_SCOPES.map((name, index) => ({ id: `scope-${index}`, name, status: 5 })) } };
+    if (path.includes('/scope/update/') || path.includes('/robot/switch/') || path.includes('/event/switch/')) return { code: 0 };
+    if (path.includes('/event/')) return { data: { eventMode: 4, appEvents: [...LARK_REQUIRED_EVENTS] } };
+    if (path.includes('/callback/')) return { data: { callbackMode: 4, callbacks: ['card.action.trigger'] } };
+    if (path.includes('/privilege/all/')) return { data: { privileges: [] } };
+    if (path.includes('/app_version/list/')) {
+      if (commits === 1 && !expired) { expired = true; throw new OpenPlatformSessionExpiredError(); }
+      return { data: { versions: structuredClone(versions) } };
+    }
+    if (path.includes('/app_version/create/')) {
+      lastBody = body;
+      const versionId = `version-${versions.length + 1}`;
+      versions.push({ versionId, appVersion: body!.appVersion, versionStatus: 0 });
+      return { data: { versionId } };
+    }
+    if (path.includes('/app_version/detail/')) return { data: { versionId: versions.at(-1)!.versionId, versionStatus: 0,
+      visibleRange: { whiteList: lastBody!.visibleSuggest, blackList: lastBody!.blackVisibleSuggest },
+      changeAppShareConfig: { b2cShareSplitConfigSuggest: { b2cGroupChatShareEnable: false, b2cP2PChatShareEnable: false, b2cP2PChatNeedAudit: false } } } };
+    if (path.includes('/approval_nodes/get/')) return { data: { applyInstanceInfo: { applyNodes: [{ nodeName: 'automatic', nodeType: 'Auto approved', nodeUser: [] }] } } };
+    if (path.includes('/publish/commit/')) { commits++; versions.at(-1)!.versionStatus = 2; return { code: 0 }; }
+    throw new Error(`Unexpected synthetic endpoint: ${path}`);
+  });
+  const manager = new LarkAppCreationJobManager({ ...h.options, configure: configureLarkOpenPlatformApp });
+  await manager.start(id, 'Review Bot'); await manager.wait(id);
+  expect(commits).toBe(1);
+  expect(versions).toHaveLength(1);
+  expect(await manager.get(id)).toMatchObject({ status: 'failed', retryable: false, appId: 'cli_created', versionId: 'version-1', publishAttempted: true,
+    error: expect.stringContaining('发布结果待确认') });
+  await expect(manager.retry(id)).rejects.toMatchObject({ statusCode: 409 });
+  expect(await manager.start(id, 'Ignored duplicate name')).toMatchObject({ status: 'failed', versionId: 'version-1', publishAttempted: true });
+  expect(commits).toBe(1);
+  expect(versions.map(version => version.appVersion)).toEqual(['0.0.1']);
+  expect(calls.filter(path => path.includes('/manifest/upsert_by_template'))).toHaveLength(1);
 });
 
 it('does not recreate after a successful response without an app ID', async () => {

@@ -78,4 +78,31 @@ describe('group duty draft revision', () => {
     save();
     await waitFor(() => expect(update).toHaveBeenCalledWith('bot', 'group', { expectedRevision: 2, scenarios: { A: { enabled: true } } }));
   });
+
+  it('keeps parameters edited while saving and rebases the next submission on the saved draft', async () => {
+    let finish!: () => void;
+    let calls = 0;
+    let revision = 1;
+    let savedTopics: string[] = [];
+    const update = vi.spyOn(collaborationApi, 'updateDuty').mockImplementation(async () => {
+      calls += 1;
+      if (calls === 1) await new Promise<void>(done => { finish = done; });
+      revision += 1;
+      savedTopics = calls === 1 ? ['部署'] : ['部署', '回滚'];
+      return { duty: duty(revision) };
+    });
+    const view = mount(duty(1), [scenario('A', true)]);
+    view.onSaved.mockImplementation(async () => view.refresh(duty(revision), [scenario('A', true, savedTopics)]));
+    fireEvent.change(screen.getByLabelText('A 关键字'), { target: { value: '部署' } });
+    save();
+    await waitFor(() => expect(update).toHaveBeenCalledOnce());
+    fireEvent.change(screen.getByLabelText('A 关键字'), { target: { value: '部署, 回滚' } });
+    finish();
+    await waitFor(() => expect((screen.getByRole('button', { name: '保存分工' }) as HTMLButtonElement).disabled).toBe(false));
+    expect((screen.getByLabelText('A 关键字') as HTMLInputElement).value).toBe('部署, 回滚');
+    save();
+    await waitFor(() => expect(update).toHaveBeenCalledTimes(2));
+    expect(update.mock.calls[1]?.[2]).toEqual({ expectedRevision: 2, scenarios: { A: { enabled: true, params: { topics: ['部署', '回滚'] } } } });
+    await waitFor(() => expect((screen.getByRole('button', { name: '保存分工' }) as HTMLButtonElement).disabled).toBe(true));
+  });
 });

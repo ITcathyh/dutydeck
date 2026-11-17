@@ -1,6 +1,6 @@
 import { jsonSha256 as hash } from './hash.js';
-import { RuntimeError, describeScheduleTrigger, type BeginActionInput, type CollaborationMandate, type CollaborationScope, type ConfigRepository, type ScheduleDelivery } from '@dutydeck/shared';
-import type { CollaborationService } from './collaboration-service.js';
+import { RuntimeError, describeScheduleTrigger, serialByKey, type BeginActionInput, type CollaborationMandate, type CollaborationScope, type ConfigRepository, type ScheduleDelivery } from '@dutydeck/shared';
+import { scheduleMatchesMandate, type CollaborationService } from './collaboration-service.js';
 import type { LarkCardService } from './lark/service.js';
 import { renderLarkResultTextElements } from './lark/card-renderer.js';
 import { markdownElement, neutralizeCardTags } from './lark/card-elements.js';
@@ -73,6 +73,7 @@ const deliveredState = (status: DeliveredStatus) => ({ state: status === 'cancel
   ...(status === 'active' ? {} : { statusLabel: status === 'paused' ? '已暂停' : '已停止' }) });
 
 export class MandateCards {
+  private readonly locks = new Map<string, Promise<unknown>>();
   constructor(private readonly options: MandateCardOptions) {}
   private get repo() { return this.options.service.repositories.collaboration; }
   private cardKey = (scope: CollaborationScope, messageId: string) => `collaboration.mandate-card.${scope.appId}.${messageId}`;
@@ -131,7 +132,7 @@ export class MandateCards {
     const action = String(value.dutydeck_mandate), ref = typeof value.ref === 'string' ? value.ref : '';
     if (!operatorId || !context.chatId || !context.messageId || !ref) throw new RuntimeError('MANDATE_CARD_INVALID', '这张卡片已失效。', 400);
     const scope = { appId, chatId: context.chatId };
-    if (action === 'confirm' || action === 'cancel') return this.decide(scope, action, ref, operatorId, context.messageId);
+    if (action === 'confirm' || action === 'cancel') return serialByKey(this.locks, `${appId}:${context.chatId}:${ref}`, () => this.decide(scope, action, ref, operatorId, context.messageId!));
     if (action === 'pause' || action === 'resume' || action === 'stop') return this.control(scope, action, ref, operatorId, context.messageId);
     throw new RuntimeError('MANDATE_CARD_INVALID', '无法识别这个操作。', 400);
   }
@@ -148,14 +149,31 @@ export class MandateCards {
     const render = (state: 'completed' | 'interrupted' | 'failed', statusLabel: string, detail: string) => this.redraw(scope, messageId, { taskId: ref, taskName: update ? '定时任务修改确认' : '定时任务确认', state, statusLabel, elements: [...summary, { tag: 'markdown', content: detail }] });
     if (record.status === 'succeeded') return '已经确认过了。';
     if (record.status === 'suppressed') return '已经取消了。';
-    if (record.status !== 'intent') throw new RuntimeError('MANDATE_CARD_BUSY', record.status === 'sending' ? `正在${verb}，请稍候。` : `这个委托没有${verb}成功，请重新发起。`, 409);
-    if (action === 'cancel') {
-      await this.repo.updateAction(scope, ref, { expectedRevision: record.revision, status: 'suppressed' });
+    const cancelRevision = record.revision;
+    const cancel = async () => {
+      await this.repo.updateAction(scope, ref, { expectedRevision: cancelRevision, status: 'suppressed' });
       await render('interrupted', '已取消', update ? '已取消，定时任务保持原设置。' : '已取消，没有创建定时任务。');
       return '已取消。';
+    };
+    const recovering = record.status === 'sending';
+    if (recovering && action === 'cancel') {
+      if (!update && !await this.repo.getMandate(scope, (payload.input as PendingInput).id)) return cancel();
+      if (update) {
+        const input = payload.input as PendingUpdate;
+        const mandate = await this.repo.getMandate(scope, payload.mandateId!);
+        if (mandate?.revision === input.expectedRevision) {
+          const schedule = await this.options.service.repositories.scheduleDefinitions.get(mandate.scheduleDefinitionId);
+          if (schedule && scheduleMatchesMandate(schedule, mandate)) return cancel();
+          throw new RuntimeError('MANDATE_CARD_RECOVERY_CONFLICT', '上次修改已写入准备状态，不能直接当作未发生来取消；请点「确认」完成核验，之后再按最新状态调整。', 409);
+        }
+      }
     }
-    try { record = await this.repo.updateAction(scope, ref, { expectedRevision: record.revision, status: 'sending' }); }
-    catch { throw new RuntimeError('MANDATE_CARD_BUSY', '正在处理，请勿重复点击。', 409); }
+    if (!recovering) {
+      if (record.status !== 'intent') throw new RuntimeError('MANDATE_CARD_BUSY', record.status === 'sending' ? `正在${verb}，请稍候。` : `这个委托没有${verb}成功，请重新发起。`, 409);
+      if (action === 'cancel') return cancel();
+      try { record = await this.repo.updateAction(scope, ref, { expectedRevision: record.revision, status: 'sending' }); }
+      catch { throw new RuntimeError('MANDATE_CARD_BUSY', '正在处理，请勿重复点击。', 409); }
+    }
     try {
       if (update) await this.options.service.updateMandate(scope, record.requesterId, payload.mandateId!, payload.input);
       else await this.options.service.createMandate(scope, record.requesterId, payload.input);
@@ -168,7 +186,7 @@ export class MandateCards {
     await this.repo.updateAction(scope, ref, { expectedRevision: record.revision, status: 'succeeded' }).catch(error => this.warn(error, `定时任务已${verb}，确认记录未能收尾`));
     await this.options.onChange(scope).catch(error => this.warn(error, `定时任务已${verb}，调度唤醒失败`));
     await render('completed', '已确认', update ? '已确认，按新的设置执行。' : '已确认，到点会自动执行；每次产出的消息上可以暂停或停止。');
-    return `已确认，定时任务已${verb}。`;
+    return action === 'cancel' ? '已经确认过了。' : `已确认，定时任务已${verb}。`;
   }
   private async control(scope: CollaborationScope, action: 'pause' | 'resume' | 'stop', mandateId: string, operatorId: string, messageId: string) {
     const mandate = await this.repo.getMandate(scope, mandateId);

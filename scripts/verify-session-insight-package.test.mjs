@@ -23,12 +23,12 @@ test('package verifier rejects missing entrypoint, stale analyzer versions and f
     const assets = join(temporary, 'dist/assets');
     mkdirSync(join(assets, 'session-insight'), { recursive: true });
     writeFileSync(join(assets, 'THIRD_PARTY_NOTICES.md'), 'test');
-    const handshake = parserVersion => writeFileSync(join(assets, 'session-insight/cli.js'), `process.stdout.write(JSON.stringify({ schemaVersion: 1, engineVersion: "dutydeck-ts-v1", parserVersion: "${parserVersion}", metricVersion: "v2" }));`);
+    const handshake = parserVersion => writeFileSync(join(assets, 'session-insight/cli.js'), `process.stdout.write(JSON.stringify({ schemaVersion: 1, engineVersion: "dutydeck-ts-v1", parserVersion: "${parserVersion}", metricVersion: "v3" }));`);
     // A current handshake passes the version check, so the rejection must come from the fabricated analysis output.
-    handshake('ts-v2');
+    handshake('ts-v3');
     assert.throws(() => verifyPackageDirectory(temporary), error => error.name === 'ZodError' && error.issues.some(issue => issue.path[0] === 'requestId'));
     handshake('ts-v1');
-    assert.throws(() => verifyPackageDirectory(temporary), /'ts-v1' !== 'ts-v2'/);
+    assert.throws(() => verifyPackageDirectory(temporary), /'ts-v1' !== 'ts-v3'/);
   } finally {
     rmSync(temporary, { recursive: true, force: true });
   }
@@ -39,12 +39,12 @@ test('built analyzer runs after npm packing, outside the checkout and without Go
   assert.ok(existsSync(entrypoint), 'Run pnpm build before package verification tests.');
   const report = await runVerify();
   assert.equal(report.versions.engineVersion, 'dutydeck-ts-v1');
-  assert.equal(report.versions.metricVersion, 'v2');
+  assert.equal(report.versions.metricVersion, 'v3');
   assert.equal(report.runtime, 'verified with empty PATH and isolated cwd');
   assert.ok(report.bytes > 0);
   const fixture = join(root, 'tests/fixtures/session-insight/real-native/codex.jsonl');
   const sampleReport = await runVerify({ fixture });
-  assert.equal(sampleReport.versions.parserVersion, 'ts-v2');
+  assert.equal(sampleReport.versions.parserVersion, 'ts-v3');
 });
 
 test('built CLI rejects invalid requests with exit 2 and no raw error details', () => {

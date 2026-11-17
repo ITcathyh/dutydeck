@@ -130,6 +130,22 @@ describe('plugin host compatibility', () => {
     expect(satisfiesVersionRange('1.4.2', '~1.4')).toBe(true);
     expect(satisfiesVersionRange('2.0.0', '^1.0.0')).toBe(false);
   });
+
+  it('bounds a complete zero-major zero-minor caret to one patch without narrowing partial ranges', () => {
+    expect(satisfiesVersionRange('0.0.3', '^0.0.3')).toBe(true);
+    expect(satisfiesVersionRange('0.0.2', '^0.0.3')).toBe(false);
+    expect(satisfiesVersionRange('0.0.4', '^0.0.3')).toBe(false);
+    expect(satisfiesVersionRange('0.1.0', '^0.0.3')).toBe(false);
+    expect(satisfiesVersionRange('0.0.4', '^0.0.x')).toBe(true);
+    expect(satisfiesVersionRange('0.0.4', '^0.0')).toBe(true);
+    expect(satisfiesVersionRange('0.1.0', '^0.0')).toBe(false);
+    expect(satisfiesVersionRange('0.1.0', '^0')).toBe(true);
+    expect(satisfiesVersionRange('0.1.4', '^0.1.3')).toBe(true);
+    expect(satisfiesVersionRange('0.2.0', '^0.1.3')).toBe(false);
+    expect(satisfiesVersionRange('1.9.0', '^1.2.3')).toBe(true);
+    expect(satisfiesVersionRange('2.0.0', '^1.2.3')).toBe(false);
+    expect(satisfiesVersionRange('0.0.4', '>=0.0.3 <0.0.4')).toBe(false);
+  });
 });
 
 describe('loadPluginDirectory scenario packs (static stage)', () => {

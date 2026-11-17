@@ -182,6 +182,8 @@ export interface AgentDriver {
   recover?(state: DriverTurnRecovery, onAttached?: () => Promise<void>): Promise<void>;
   /** Local attachment closed for daemon shutdown; the persistent resource remains live. */
   isDetachedForShutdown?(): boolean;
+  /** Already accepted output for the current backend's exit, including its final event emission. Undefined when no exit was observed. */
+  drainExitedOutput?(): Promise<void> | undefined;
   /** 停止驱动并清理子进程。discardSession=true 时同时清除持久化会话状态。 */
   stop(options?: { discardSession?: boolean }): Promise<void>;
   /** Authoritative post-stop resource probe. True means this driver's owned

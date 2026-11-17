@@ -75,6 +75,28 @@ describe('IdleDetector: completion marker strategy', () => {
     expect(cb).toHaveBeenCalledTimes(1);
     detector.dispose();
   });
+
+  it.each(['\x1b[C', '\x1b[0C'])('treats an empty or zero cursor-forward parameter as one space: %j', sequence => {
+    const detector = new IdleDetector(makePatterns({ completionPattern: /A B$/ }));
+    const cb = vi.fn();
+    detector.onIdle(cb);
+    detector.feed(`A${sequence}B`);
+    vi.advanceTimersByTime(500);
+    expect(cb).toHaveBeenCalledTimes(1);
+    detector.dispose();
+  });
+
+  it('bounds cursor-forward expansion without losing the surrounding text', () => {
+    const detector = new IdleDetector(makePatterns({ completionPattern: /LOST-OUTPUT$/ }));
+    const cb = vi.fn();
+    detector.onIdle(cb);
+
+    const input = `A\x1b[999999999999999999C${'\x1b[100000C'.repeat(2_000)}LOST-OUTPUT`;
+    expect(() => detector.feed(input)).not.toThrow();
+    vi.advanceTimersByTime(500);
+    expect(cb).toHaveBeenCalledTimes(1);
+    detector.dispose();
+  });
 });
 
 describe('IdleDetector: quiescence strategy', () => {

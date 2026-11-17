@@ -76,6 +76,78 @@ describe('GroupPolicyModal disabled management journey', () => {
     await waitFor(() => expect(update).toHaveBeenLastCalledWith('binding-ui', expect.objectContaining({ expectedRevision: 2, oncall: false })));
   });
 
+  it('keeps policy choices made while saving and closes only after an unchanged retry succeeds', async () => {
+    vi.spyOn(foundationApi, 'capabilities').mockResolvedValue(ready);
+    vi.spyOn(foundationApi, 'groupMatrix').mockResolvedValue(matrix);
+    vi.spyOn(foundationApi, 'secretRefs').mockResolvedValue({ secretRefs: [] });
+    let stored = binding;
+    let finish!: () => void;
+    let calls = 0;
+    const update = vi.spyOn(foundationApi, 'updateGroupBinding').mockImplementation(async (_id, input) => {
+      calls += 1;
+      if (calls === 1) await new Promise<void>(done => { finish = done; });
+      const { expectedRevision: _expected, ...patch } = input;
+      stored = { ...stored, ...patch, revision: stored.revision + 1 };
+      return stored;
+    });
+    renderModal();
+    await userEvent.click(await screen.findByRole('button', { name: '编辑群策略' }));
+    await userEvent.selectOptions(screen.getByLabelText('提及策略'), 'always');
+    await userEvent.click(screen.getByRole('button', { name: '保存禁用态策略' }));
+    await waitFor(() => expect(update).toHaveBeenCalledOnce());
+    await userEvent.selectOptions(screen.getByLabelText('提及策略'), 'never');
+    finish();
+    await screen.findByRole('button', { name: '保存禁用态策略' });
+    expect((screen.getByLabelText('提及策略') as HTMLSelectElement).value).toBe('never');
+    expect(stored.routingOverride.mentionPolicy).toEqual({ mode: 'set', value: 'always' });
+    await userEvent.click(screen.getByRole('button', { name: '保存禁用态策略' }));
+    await waitFor(() => expect(update).toHaveBeenCalledTimes(2));
+    expect(update.mock.calls[1]?.[1]).toMatchObject({ expectedRevision: 2, routingOverride: expect.objectContaining({ mentionPolicy: { mode: 'set', value: 'never' } }) });
+    await waitFor(() => expect(screen.queryByLabelText('提及策略')).toBeNull());
+  });
+
+  it('keeps the second binding revision and input when the first binding response arrives late', async () => {
+    const second: GroupBinding = { ...binding, id: 'binding-other', externalChatId: 'chat-other', revision: 7 };
+    const firstCell = matrix.bots[0]!.cells[0]!;
+    const currentMatrix: GroupMatrix = { ...matrix, bots: [{ ...matrix.bots[0]!, cells: [firstCell, {
+      ...firstCell,
+      externalChatId: second.externalChatId,
+      remoteFact: { ...firstCell.remoteFact!, externalChatId: second.externalChatId, displayName: 'Second group' },
+      desiredPolicy: second
+    }] }] };
+    vi.spyOn(foundationApi, 'capabilities').mockResolvedValue(ready);
+    const matrixRead = vi.spyOn(foundationApi, 'groupMatrix').mockResolvedValue(currentMatrix);
+    vi.spyOn(foundationApi, 'secretRefs').mockResolvedValue({ secretRefs: [] });
+    let finish!: () => void;
+    const first = new Promise<void>(resolve => { finish = resolve; });
+    const update = vi.spyOn(foundationApi, 'updateGroupBinding').mockImplementation(async (id, input) => {
+      if (id === binding.id) {
+        await first;
+        return { ...binding, revision: 2 };
+      }
+      if (input.expectedRevision !== second.revision) throw new ApiError('stale revision', 'FOUNDATION_REVISION_CONFLICT', 409, second);
+      return { ...second, revision: 8 };
+    });
+    renderModal();
+    const buttons = await screen.findAllByRole('button', { name: '编辑群策略' });
+    await userEvent.click(buttons[0]!);
+    await userEvent.selectOptions(screen.getByLabelText('提及策略'), 'always');
+    await userEvent.click(screen.getByRole('button', { name: '保存禁用态策略' }));
+    await waitFor(() => expect(update).toHaveBeenCalledOnce());
+    await userEvent.click(buttons[1]!);
+    expect(screen.getByText('基于 revision 7；保存后 Bot 仍保持 disabled。')).toBeTruthy();
+    await userEvent.selectOptions(screen.getByLabelText('提及策略'), 'never');
+    const readsBeforeResponse = matrixRead.mock.calls.length;
+    finish();
+    await waitFor(() => expect(matrixRead.mock.calls.length).toBeGreaterThan(readsBeforeResponse));
+
+    expect(screen.getByText('基于 revision 7；保存后 Bot 仍保持 disabled。')).toBeTruthy();
+    expect((screen.getByLabelText('提及策略') as HTMLSelectElement).value).toBe('never');
+    await userEvent.click(screen.getByRole('button', { name: '保存禁用态策略' }));
+    await waitFor(() => expect(update).toHaveBeenCalledTimes(2));
+    expect(update.mock.calls[1]?.[1].expectedRevision).toBe(second.revision);
+  });
+
   it('selects only metadata-visible SecretRefs and never offers a credential test or value input', async () => {
     vi.spyOn(foundationApi, 'capabilities').mockResolvedValue(ready);
     vi.spyOn(foundationApi, 'groupMatrix').mockResolvedValue(matrix);

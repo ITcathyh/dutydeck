@@ -164,7 +164,7 @@ After=<unit>.socket
 写好后执行 `systemctl --user daemon-reload && systemctl --user enable <unit>.socket`，再用 `dutydeck restart --unit <unit>` 切换：systemd 停掉旧进程、拉起 `.socket`，再把它交给新进程。切换前先部署包含本功能的版本，旧版本会忽略传入的 socket、自己再绑同一端口而启动失败。启用后：
 
 - `restart`、`deploy` 只重启服务，不动 `.socket`；`dutydeck stop` 和部署回滚时的停服会连同 `.socket` 一起停，否则下一个连接会把服务重新拉起；`dutydeck start` 连同 `.socket` 一起启动。
-- systemd 传入多个 socket，或传入的端口与配置的 `--port` 不一致时，服务拒绝启动。
+- systemd 传入多个 socket，或实际地址、端口与配置的 `--host` / `--port` 不一致时，服务拒绝启动（`0.0.0.0` 与双栈 `::` 通配地址视为等价）。仅本机访问的配置即使在校验后退出前，也会按真实连接地址拒绝非回环请求，不能靠伪装 Host 绕过。
 - 传入的 socket 只由服务进程持有，不会被 tmux、Agent 等子进程继承。
 - 回退：`systemctl --user disable --now <unit>.socket`，删掉 `.socket` 文件和上面的 drop-in，`daemon-reload` 后 `systemctl --user start <unit>`，服务恢复自己绑端口。
 

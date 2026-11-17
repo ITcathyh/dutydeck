@@ -104,7 +104,12 @@ test.describe('Configuration evidence, explicit project memory and artifact snap
     await memory.getByRole('listitem').filter({ hasText: oldFact }).getByRole('button', { name: '修订', exact: true }).click();
     await memory.getByRole('textbox', { name: '记忆正文', exact: true }).fill(newFact);
     await memory.getByRole('button', { name: '保存修订', exact: true }).click();
-    await expect(memory.getByText(newFact, { exact: true })).toBeVisible();
+    await expect(memory.getByRole('textbox', { name: '记忆正文', exact: true })).toHaveCount(0);
+    const revisedEntry = memory.getByRole('listitem').filter({ hasText: newFact });
+    await expect(revisedEntry).toHaveCount(1);
+    await expect(revisedEntry.getByText(newFact, { exact: true })).toBeVisible();
+    await expect(revisedEntry).toContainText('已保存');
+    await expect(memory.getByRole('listitem').filter({ hasText: oldFact })).toContainText('已替换');
     await sendTurn(page, first.id, 'HAPPYCLAW_MEMORY_REVISED');
     expect(receivedPrompt('HAPPYCLAW_MEMORY_REVISED')).toContain(newFact);
     expect(receivedPrompt('HAPPYCLAW_MEMORY_REVISED')).not.toContain(oldFact);

@@ -652,7 +652,7 @@ describe('buildSessionInsightSummaryResponse — cohorts (design 6.1/6.2)', () =
   });
 
   it('bad cursors (garbage base64, NaN time, wrong filter signature) throw a fixed error, never 500', () => {
-    const rows = [candidate({ sessionId: 's1' })];
+    const rows = [candidate({ sessionId: 's1' }), candidate({ sessionId: 's2' })];
     const expectBad = (cursor: string) => expect(() => build(rows, { cursor })).toThrow(InsightSummaryCursorError);
     expectBad('not-base64!!!');
     expectBad(Buffer.from(JSON.stringify({ t: 'not-a-date', id: 's1', f: 'x' })).toString('base64url'));

@@ -172,7 +172,7 @@ export class PluginHost {
   }
 
   /** Used only by the trusted, isolated activation worker; no runtime lease or live dataDir. */
-  static async validatePlugin(input: { root: string; dataDir: string; entry: PluginLockEntry; config: Record<string, string> }): Promise<boolean> {
+  static async validatePlugin(input: { root: string; dataDir: string; entry: PluginLockEntry; config: Record<string, string>; dependencies?: Array<Pick<PluginLockEntry, 'name' | 'version'>> }): Promise<boolean> {
     const builtinRoot = join(input.dataDir, 'no-builtins');
     const host = new PluginHost(new PluginStore(input.dataDir, builtinRoot), builtinRoot);
     try {
@@ -198,6 +198,11 @@ export class PluginHost {
     const host = new PluginHost(new PluginStore(input.dataDir, builtinRoot), builtinRoot);
     await host.initialize([entry], { root: input.root, config });
     for (const command of plugin.commands) {
+      if (command.query) {
+        const query = host.businessTools.get(`${plugin.manifest.name}/${command.query.tool}`, {});
+        if (!query || query.kind !== 'query') issues.push({ file: `${plugin.manifest.commands ?? 'commands'}/${command.name}.md`, message: '查询命令引用的工具未在 Host 中注册' });
+        continue;
+      }
       const expanded = host.commands.expand(`/${plugin.manifest.name}:${command.name} test-arg`, {});
       if (!expanded?.trim()) issues.push({ file: `${plugin.manifest.commands ?? 'commands'}/${command.name}.md`, message: '命令模板在 Host 中未能展开' });
     }
@@ -221,7 +226,7 @@ export class PluginHost {
     };
   }
 
-  private async initialize(entries: PluginLockEntry[], validation?: { root: string; config: Record<string, string> }) {
+  private async initialize(entries: PluginLockEntry[], validation?: { root: string; config: Record<string, string>; dependencies?: Array<Pick<PluginLockEntry, 'name' | 'version'>> }) {
     const builtins = listBuiltinPlugins(this.builtinRoot);
     const builtinNames = new Set(builtins.map(item => item.name));
     const reservedScenarioIds = reservedBuiltinScenarioIds(this.builtinRoot);
@@ -229,7 +234,10 @@ export class PluginHost {
       ...builtins.map(item => ({ entry: { name: item.name, source: { kind: 'builtin', spec: item.root }, scope: 'global', enabled: true, trustedCapabilities: [] } as BuiltinPluginEntry, root: item.root, builtin: true })),
       ...entries.filter(item => item.enabled).sort((left, right) => left.name.localeCompare(right.name)).map(entry => ({ entry, root: validation?.root ?? this.store.pluginDir(entry.name, entry), builtin: false }))
     ];
-    const available = new Map(candidates.map(candidate => [candidate.entry.name, candidate.entry]));
+    const available = new Map<string, Pick<PluginLockEntry, 'name' | 'version'>>([
+      ...(validation?.dependencies ?? []).map(entry => [entry.name, entry] as const),
+      ...candidates.map(candidate => [candidate.entry.name, candidate.entry] as const)
+    ]);
     const registrations: HookRegistration[] = [];
     let secrets: LocalFilePluginSecretResolver | undefined;
     for (const { entry: candidate, root, builtin } of candidates) {

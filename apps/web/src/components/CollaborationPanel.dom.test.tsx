@@ -125,6 +125,33 @@ describe('CollaborationPanel scope 隔离与参与模式文案', () => {
 });
 
 describe('协作设置保存与版本冲突', () => {
+  it('保留提交后继续输入的指令，并基于本次返回的 revision 再保存', async () => {
+    let saved = makeSettings({ instructions: 'original' });
+    getOverview.mockImplementation(async () => makeOverview(saved));
+    let finish!: () => void;
+    let calls = 0;
+    const update = vi.spyOn(collaborationApi, 'updateSettings').mockImplementation(async (_app, _chat, body) => {
+      calls += 1;
+      if (calls === 1) await new Promise<void>(done => { finish = done; });
+      const { expectedRevision: _expected, ...patch } = body;
+      saved = { ...saved, ...patch, revision: saved.revision + 1 };
+      return { settings: saved };
+    });
+    renderPanel();
+    const input = await screen.findByLabelText('长期指令');
+    fireEvent.change(input, { target: { value: 'submitted' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存设置' }));
+    await waitFor(() => expect(update).toHaveBeenCalledOnce());
+    fireEvent.change(input, { target: { value: 'new unsaved instructions' } });
+    finish();
+    await waitFor(() => expect((screen.getByRole('button', { name: '保存设置' }) as HTMLButtonElement).disabled).toBe(false));
+    expect((input as HTMLTextAreaElement).value).toBe('new unsaved instructions');
+    fireEvent.click(screen.getByRole('button', { name: '保存设置' }));
+    await waitFor(() => expect(update).toHaveBeenCalledTimes(2));
+    expect(update.mock.calls[1]?.[2]).toMatchObject({ expectedRevision: 2, instructions: 'new unsaved instructions' });
+    await waitFor(() => expect((screen.getByRole('button', { name: '保存设置' }) as HTMLButtonElement).disabled).toBe(true));
+  });
+
   it('加载继承模式及生效值，修改指令后保存仍跟随机器人默认', async () => {
     const user = userEvent.setup();
     const settings = makeSettings({ inheritParticipation: true, participation: 'selective' });

@@ -123,12 +123,38 @@ it('keeps automatic publication timeout distinct from a human review and never r
     .finally(() => { skipped = pauses.mock.calls.filter(([, ms]) => ms === 1_000).length; pauses.mockRestore(); });
   expect(skipped).toBe(9);
   expect(result).toMatchObject({ ok: false, job: { status: 'failed', retryable: false }, error: expect.stringContaining('publish_verification_pending') });
+  expect(result.error).toContain('自动发布核验超时');
   expect(h.output()).not.toContain('正在等待飞书管理员审核');
   expect(h.syncListener).not.toHaveBeenCalled();
   expect(h.postJson.mock.calls.filter(([path]) => path.includes('/publish/commit/'))).toHaveLength(1);
   const count = h.postJson.mock.calls.length;
   expect(await runLarkCreate(undefined, { resume: result.job!.id }, h.context)).toMatchObject({ ok: false });
   expect(h.postJson).toHaveBeenCalledTimes(count);
+  expect(h.connect).toHaveBeenCalledOnce();
+});
+
+it('keeps a post-commit status read failure distinct from verification timeout and never reconnects or republishes', async () => {
+  const h = await harness();
+  const postJson = h.postJson.getMockImplementation()!;
+  let committed = false;
+  h.postJson.mockImplementation(async (path: string, body?: Record<string, unknown>) => {
+    if (path.includes('/publish/commit/')) committed = true;
+    if (committed && path.includes('/app_version/list/')) throw new Error('private-read-token');
+    return postJson(path, body);
+  });
+  const result = await runLarkCreate('Bot', { agent: 'ccflash', listen: true }, h.context);
+  expect(result).toMatchObject({ ok: false, job: { status: 'failed', retryable: false }, error: expect.stringContaining('publish_verification_read_failed') });
+  expect(result.error).toContain('回读发布状态失败');
+  expect(result.error).not.toContain('publish_verification_pending');
+  expect(result.error).not.toContain('自动发布核验超时');
+  expect(h.output()).not.toContain('正在等待飞书管理员审核');
+  expect(h.output()).not.toContain('private-read-token');
+  expect(h.syncListener).not.toHaveBeenCalled();
+  expect(h.postJson.mock.calls.filter(([path]) => path.includes('/publish/commit/'))).toHaveLength(1);
+  const count = h.postJson.mock.calls.length;
+  expect(await runLarkCreate(undefined, { resume: result.job!.id }, h.context)).toMatchObject({ ok: false });
+  expect(h.postJson).toHaveBeenCalledTimes(count);
+  expect(h.connect).toHaveBeenCalledOnce();
 });
 
 it('reads a legacy pending-review job without connecting, configuring or publishing', async () => {

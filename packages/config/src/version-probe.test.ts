@@ -5,6 +5,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { afterEach, expect, it, vi } from 'vitest';
 import { PTY_AGENT_CONTRIBUTIONS } from '../../pty-driver/src/contributions.js';
+import { bundleForTest } from '../../../tests/support/bundle-for-test.js';
 
 const cleanup: string[] = [];
 afterEach(async () => {
@@ -125,11 +126,42 @@ it('reads the same version asynchronously as synchronously from a CLI that reads
   const command = join(directory, 'stdin-cli');
   // Waits for end of input before answering; an open stdin pipe would hang it until the probe timeout.
   await writeFile(command, `#!/bin/sh\ncat >/dev/null\necho "stdin-cli 3.1.0"\n`, { mode: 0o755 });
-  // A plain Node process: inside the test worker a child's stdin pipe does not stay open, which hides the hang.
+  // Bundle the child entry once: repeatedly starting a TypeScript loader adds avoidable cold-start time.
   const script = join(directory, 'probe.mts');
-  await writeFile(script, `const config = await import(process.argv[2]);\nprocess.stdout.write(JSON.stringify({ async: await config.cliVersionAsync(process.argv[3]) ?? null, sync: config.cliVersion(process.argv[3]) ?? null }));\n`);
-  const { stdout } = await promisify(execFile)(process.execPath, ['--conditions=development', '--import', 'tsx', script, resolve('packages/config/src/index.ts'), command], { encoding: 'utf8', timeout: 20_000 });
-  expect(JSON.parse(stdout)).toEqual({ async: 'stdin-cli 3.1.0', sync: 'stdin-cli 3.1.0' });
+  await writeFile(script, `const config = await import(${JSON.stringify(resolve('packages/config/src/index.ts'))});\nprocess.stdout.write(JSON.stringify({ async: await config.cliVersionAsync(process.argv[2]) ?? null, sync: config.cliVersion(process.argv[2]) ?? null }));\n`);
+  const bundled = await bundleForTest('version-probe-stdin', script);
+  try {
+    const { stdout } = await promisify(execFile)(process.execPath, [bundled.path, command], { encoding: 'utf8', timeout: 20_000 });
+    expect(JSON.parse(stdout)).toEqual({ async: 'stdin-cli 3.1.0', sync: 'stdin-cli 3.1.0' });
+  } finally { await bundled.cleanup(); }
+}, 30_000);
+
+it('kills synchronous and asynchronous probes that ignore SIGTERM, then falls back to the next version argument', async () => {
+  const directory = await fixtureDirectory();
+  const command = join(directory, 'term-ignoring-cli');
+  const pidFile = join(directory, 'probe.pid');
+  await writeFile(command, `#!${process.execPath}\nif (process.argv[2] === '--version') {\n  require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));\n  process.on('SIGTERM', () => {});\n  setInterval(() => {}, 100);\n} else {\n  console.log('agent 1.0.0');\n}\n`, { mode: 0o755 });
+  const script = join(directory, 'bounded-probe.mts');
+  await writeFile(script, `const config = await import(${JSON.stringify(resolve('packages/config/src/index.ts'))});\nconst version = process.argv[2] === 'sync' ? config.cliVersion(process.argv[3]) : await config.cliVersionAsync(process.argv[3]);\nprocess.stdout.write(JSON.stringify({ version: version ?? null }));\n`);
+  const bundled = await bundleForTest('version-probe-kill', script);
+  try {
+    for (const mode of ['sync', 'async']) {
+      let completed = false;
+      try {
+        // An outer bound turns a regression into a test failure instead of hanging the Vitest worker.
+        const { stdout } = await promisify(execFile)(process.execPath, [bundled.path, mode, command], { encoding: 'utf8', timeout: 8_000 });
+        completed = true;
+        expect(JSON.parse(stdout), mode).toEqual({ version: 'agent 1.0.0' });
+        const pid = Number(await readFile(pidFile, 'utf8'));
+        expect(() => process.kill(pid, 0), `${mode} probe process must be reaped`).toThrow();
+      } finally {
+        if (!completed) {
+          const pid = Number(await readFile(pidFile, 'utf8').catch(() => '0'));
+          if (pid) try { process.kill(pid, 'SIGKILL'); } catch { /* already exited */ }
+        }
+      }
+    }
+  } finally { await bundled.cleanup(); }
 }, 30_000);
 
 it('runs at most four version probes at once during startup', async () => {

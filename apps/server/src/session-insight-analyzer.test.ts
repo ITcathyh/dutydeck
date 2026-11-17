@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { analyzeFilesResultSchema, SESSION_INSIGHT_LIMITS, type AnalyzeFileInput, type AnalyzeFilesRequest, type InsightClient, type StreamIdentity } from '@dutydeck/shared';
 import { analyzeSessionInsightFiles } from './session-insight-analyzer.js';
+import { buildSessionInsightSummary } from './session-insight-summary.js';
 const fixtures = resolve('tests/fixtures/session-insight');
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
@@ -31,12 +32,51 @@ async function analyze(file: AnalyzeFileInput) {
   expect(analyzeFilesResultSchema.safeParse(result).success).toBe(true);
   return result.files[0]!;
 }
+async function analyzeWithSummary(file: AnalyzeFileInput) {
+  const result = await analyzeSessionInsightFiles(request([file]));
+  const primary = result.files[0]!;
+  const summary = buildSessionInsightSummary({ sessionId: 'session', snapshotId: 'snapshot', createdAt: at(30), primarySourceKey: primary.sourceKey, result });
+  return { primary, summary };
+}
 
 describe('TypeScript session insight analyzer', () => {
   it('counts the real Codex raw/canonical input once', async () => {
     const result = await analyze(await input(join(fixtures, 'real-native/codex.jsonl'), 'codex', '01a0ffa7-270b-72f1-be55-21dde8e42935'));
     expect(result.metrics.userTurns).toMatchObject({ value: 1, evidenceCount: 1, missingCount: 0, quality: 'exact' });
     expect(result.trace.filter(event => event.kind === 'user_message').map(event => event.lineNumber)).toEqual([10]);
+    expect(result.metrics.assistantTurns).toMatchObject({ value: 2, quality: 'exact', status: 'available' });
+  });
+  it('counts supported legacy Codex replies as derived anonymous turns, not exact zero', async () => {
+    const result = await analyze(await synthetic([meta,
+      { type: 'event_msg', timestamp: at(1), payload: { type: 'agent_message', message: 'A completed assistant reply.' } }
+    ]));
+    expect(result.status).toBe('ok');
+    expect(result.trace.filter(event => event.kind === 'agent_message')).toHaveLength(1);
+    expect(result.metrics.assistantTurns).toMatchObject({ value: 1, quality: 'derived', status: 'partial', evidenceCount: 0, missingCount: 1, reasonCodes: ['ANONYMOUS_TURNS'] });
+  });
+  it('counts multiple legacy replies and id-less raw replies without inventing identities', async () => {
+    const result = await analyze(await synthetic([meta,
+      { type: 'event_msg', timestamp: at(1), payload: { type: 'agent_message', message: 'first' } },
+      { type: 'event_msg', timestamp: at(2), payload: { type: 'agent_message', message: 'second' } },
+      { type: 'response_item', timestamp: at(3), payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'third' }] } }
+    ]));
+    expect(result.metrics.assistantTurns).toMatchObject({ value: 3, quality: 'derived', status: 'partial', evidenceCount: 0, missingCount: 3 });
+  });
+  it.each([false, true])('deduplicates anonymous/canonical/raw assistant mirrors in either order: %s', async anonymousFirst => {
+    const message = 'same assistant reply';
+    const anonymous = { timestamp: at(1), type: 'event_msg', payload: { type: 'agent_message', message, turn_id: 'one' } };
+    const canonical = (id: string) => ({ timestamp: at(2), type: 'event_msg', payload: { type: 'item_completed', turn_id: 'one', item: { type: 'AgentMessage', id, content: [{ type: 'Text', text: message }] } } });
+    const raw = { timestamp: at(3), type: 'response_item', payload: { type: 'message', id: 'assistant-id', role: 'assistant', content: [{ type: 'output_text', text: message }], internal_chat_message_metadata_passthrough: { turn_id: 'one' } } };
+    const mirrors = anonymousFirst ? [anonymous, raw, canonical('assistant-id')] : [canonical('assistant-id'), raw, anonymous];
+    const result = await analyze(await synthetic([meta, ...mirrors, canonical('independent-same-text')]));
+    expect(result.metrics.assistantTurns).toMatchObject({ value: 2, quality: 'exact', status: 'available', evidenceCount: 2, missingCount: 0 });
+  });
+  it('does not merge same-text assistant replies across native turns', async () => {
+    const result = await analyze(await synthetic([meta,
+      { timestamp: at(1), type: 'event_msg', payload: { type: 'item_completed', turn_id: 'one', item: { type: 'AgentMessage', id: 'identified', content: [{ type: 'Text', text: 'same reply' }] } } },
+      { timestamp: at(2), type: 'event_msg', payload: { type: 'agent_message', turn_id: 'two', message: 'same reply' } }
+    ]));
+    expect(result.metrics.assistantTurns).toMatchObject({ value: 2, quality: 'derived', status: 'partial', evidenceCount: 1, missingCount: 1 });
   });
   it.each([false, true])('selects canonical inputs by turn regardless of mirror order: %s', async canonicalFirst => {
     const raw = (turn: string) => ({ type: 'response_item', timestamp: at(1), payload: { type: 'message', id: `raw-${turn}`, role: 'user', content: 'same input', internal_chat_message_metadata_passthrough: { turn_id: turn, content_item_kinds: ['user.text'] } } });
@@ -114,6 +154,41 @@ describe('TypeScript session insight analyzer', () => {
     const samples = result.trace.filter(event => event.kind === 'token_sample');
     expect(samples[0]!.rawUsage?.observedDelta).toBeNull();
     expect(samples.at(-1)!.rawUsage?.observedDelta).toBe(delta);
+  });
+
+  it('selects only confirmed token deltas from the real Codex sample, excluding its unknown baseline', async () => {
+    const { primary, summary } = await analyzeWithSummary(await input(join(fixtures, 'real-native/codex.jsonl'), 'codex', '01a0ffa7-270b-72f1-be55-21dde8e42935'));
+    const picked = summary.keyEvidenceEventIds.highTokenDeltas.map(id => primary.trace.find(event => event.eventId === id)!);
+    expect(picked).toHaveLength(3);
+    expect(picked.every(event => event.kind === 'token_sample')).toBe(true);
+    expect(picked.map(event => event.rawUsage?.observedDelta)).toEqual([23_210, 23_143, 23_054]);
+    const unknownBaseline = primary.trace.find(event => event.kind === 'token_sample' && event.rawUsage?.observedDelta === null)!;
+    expect(unknownBaseline.rawUsage?.baselineStatus).toBe('unknown_baseline');
+    expect(summary.keyEvidenceEventIds.highTokenDeltas).not.toContain(unknownBaseline.eventId);
+  });
+
+  it('ranks a large confirmed delta ahead of later tiny cumulative increments', async () => {
+    const values = [0, 1_000, ...Array.from({ length: 12 }, (_, index) => 1_001 + index)];
+    const file = await synthetic([meta, ...values.map((value, index) => counter({ ...zero, input_tokens: value, total_tokens: value }, index + 1))]);
+    const { primary, summary } = await analyzeWithSummary(file);
+    const picked = summary.keyEvidenceEventIds.highTokenDeltas.map(id => primary.trace.find(event => event.eventId === id)!);
+    expect(picked).toHaveLength(10);
+    expect(picked.every(event => event.kind === 'token_sample')).toBe(true);
+    expect(picked[0]!.rawUsage?.observedDelta).toBe(1_000);
+    expect(picked.slice(1).map(event => event.rawUsage?.observedDelta)).toEqual(Array(9).fill(1));
+  });
+
+  it('ranks Claude snapshots by their current delta rather than cumulative message contribution', async () => {
+    const file = await synthetic([
+      claude('message-one', { input_tokens: 100, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 10 }, 1),
+      claude('message-one', { input_tokens: 150, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 15 }, 2),
+      claude('message-two', { input_tokens: 80, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 0 }, 3)
+    ], 'claude');
+    const { primary, summary } = await analyzeWithSummary(file);
+    const picked = summary.keyEvidenceEventIds.highTokenDeltas.map(id => primary.trace.find(event => event.eventId === id)!);
+    expect(picked.map(event => event.rawUsage?.observedDelta)).toEqual([110, 80, 165]);
+    expect(picked.map(event => event.tokens?.inputUncached)).toEqual([100, 80, 50]);
+    expect(picked.map(event => event.lineNumber)).toEqual([1, 3, 2]);
   });
 
   it.each([
@@ -227,11 +302,31 @@ describe('TypeScript session insight analyzer', () => {
     expect(event.lineNumber).toBe(5);
   });
   it('caps UTF-8 excerpts by bytes while preserving complete code points', async () => {
-    const result = await analyze(await synthetic([meta, { type: 'event_msg', timestamp: at(1), payload: { type: 'agent_message', message: '中🚀'.repeat(2_000) } }]));
+    const content = Array.from({ length: 1_000 }, (_, index) => `中🚀 excerpt ${index}`).join(' ');
+    const result = await analyze(await synthetic([meta, { type: 'event_msg', timestamp: at(1), payload: { type: 'agent_message', message: content } }]));
     const value = result.trace.find(event => event.kind === 'agent_message')!.outputExcerpt!;
     expect(Buffer.byteLength(value)).toBeLessThanOrEqual(4096);
     expect(value).not.toContain('\ufffd');
     expect(value.length).toBeGreaterThan(1000);
+  });
+  it('removes a non-whitespace token cut by the excerpt boundary and hides an overlong token', async () => {
+    const fakeSecret = 'fakeCredentialAbcDef0123456789ABCDEFGHIJKLMN';
+    const content = 'x'.repeat(SESSION_INSIGHT_LIMITS.maxExcerptLengthBytes - 25) + ' ' + fakeSecret;
+    const unicodePrefix = '中🚀'.repeat(500);
+    const unicodeContent = unicodePrefix + 'x'.repeat(SESSION_INSIGHT_LIMITS.maxExcerptLengthBytes - 25 - Buffer.byteLength(unicodePrefix)) + ' ' + fakeSecret;
+    const result = await analyze(await synthetic([meta,
+      { type: 'event_msg', timestamp: at(1), payload: { type: 'agent_message', message: content } },
+      { type: 'event_msg', timestamp: at(2), payload: { type: 'agent_message', message: 'y'.repeat(5_000) } },
+      { type: 'event_msg', timestamp: at(3), payload: { type: 'agent_message', message: unicodeContent } }
+    ]));
+    const messages = result.trace.filter(event => event.kind === 'agent_message');
+    expect(messages[0]!.outputExcerpt).toBe('x'.repeat(SESSION_INSIGHT_LIMITS.maxExcerptLengthBytes - 25));
+    expect(messages[0]!.outputExcerpt).not.toContain(fakeSecret.slice(0, 24));
+    expect(messages[1]!.outputExcerpt).toBeNull();
+    expect(messages[2]!.outputExcerpt).not.toContain(fakeSecret.slice(0, 24));
+    expect(messages[2]!.outputExcerpt).toContain('中🚀');
+    expect(messages[2]!.outputExcerpt).not.toContain('�');
+    expect(Buffer.byteLength(messages[2]!.outputExcerpt!)).toBeLessThanOrEqual(4096);
   });
   it('shares trace retention independently of input order and retains late failure and large token evidence', async () => {
     const records: unknown[] = [meta, counter(zero)];

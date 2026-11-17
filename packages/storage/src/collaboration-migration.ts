@@ -188,6 +188,7 @@ export function createCollaborationDutySchema(db: Database.Database): void {
       chat_id TEXT NOT NULL,
       revision INTEGER NOT NULL CHECK (revision >= 1),
       responder_json TEXT CHECK (responder_json IS NULL OR json_valid(responder_json)),
+      responder_watermark_json TEXT CHECK (responder_watermark_json IS NULL OR json_valid(responder_watermark_json)),
       alarm_json TEXT CHECK (alarm_json IS NULL OR json_valid(alarm_json)),
       updated_by TEXT NOT NULL CHECK (length(updated_by) <= 128),
       updated_at TEXT NOT NULL,

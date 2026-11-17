@@ -31,11 +31,17 @@ export function inheritedListenOptions(fd: number): { host: string; port: number
   return { fd, host: '127.0.0.1' } as unknown as { host: string; port: number };
 }
 
-/** 继承来的 socket 必须就是配置的端口：守护状态、部署健康检查和排空都按配置的地址连。 */
+/** 继承来的 socket 必须就是配置的地址和端口：认证边界、守护状态、部署健康检查和排空都按配置计算。 */
 export function inheritedSocketMismatch(address: unknown, config: { host: string; port: number }): string | undefined {
   const bound = address && typeof address === 'object' ? address as { address?: string; port?: number } : undefined;
   if (!bound || bound.port !== config.port) {
     return `systemd 传入的监听 socket 是 ${bound ? `${bound.address}:${bound.port}` : '非 TCP 地址'}，与配置的端口 ${config.port} 不一致。让配套 .socket unit 的 ListenStream= 与 --port/--host 保持一致。`;
+  }
+  // --host 0.0.0.0 的普通监听会落到双栈 ::；反向配置也接受同一个通配语义。
+  const wildcard = new Set(['0.0.0.0', '::']);
+  const sameAddress = bound.address === config.host || (wildcard.has(bound.address ?? '') && wildcard.has(config.host));
+  if (!sameAddress) {
+    return `systemd 传入的监听 socket 地址是 ${bound.address}，与配置的 ${config.host} 不一致。让配套 .socket unit 的 ListenStream= 与 --port/--host 保持一致；仅本机访问的配置不能接受非回环 socket。`;
   }
   return undefined;
 }

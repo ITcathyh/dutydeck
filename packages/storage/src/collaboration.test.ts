@@ -145,6 +145,38 @@ describe('Collaboration Storage Repository', () => {
       }
     });
 
+    it('keeps a durable announcement watermark after release and ignores stale, duplicate, or same-time conflicting events', async () => {
+      const repos = createRepositories(':memory:');
+      try {
+        const collab = repos.collaboration;
+        const claim1 = { appId: 'cli_flash', kind: 'claim' as const, at: isoTime1, messageId: 'om_claim_1', name: 'Flash' };
+        const claim3 = { ...claim1, at: isoTime3, messageId: 'om_claim_3' };
+        const release2 = { appId: 'cli_flash', kind: 'release' as const, at: isoTime2, messageId: 'om_release_2' };
+        const release4 = { ...release2, at: '2026-09-18T13:00:00.000Z', messageId: 'om_release_4' };
+        const first = await collab.updateDuty(scopeA, { expectedRevision: 0, responderEvent: claim1 }, 'bot:cli_flash');
+        expect(first).toMatchObject({ revision: 1, responder: { appId: 'cli_flash', since: isoTime1 }, responderWatermark: claim1 });
+
+        const reclaimed = await collab.updateDuty(scopeA, { expectedRevision: 1, responderEvent: claim3 }, 'bot:cli_flash');
+        expect(reclaimed).toMatchObject({ revision: 2, responder: { since: isoTime3 }, responderWatermark: claim3 });
+        expect(await collab.updateDuty(scopeA, { expectedRevision: 2, responderEvent: release2 }, 'bot:cli_flash')).toEqual(reclaimed);
+        expect(await collab.updateDuty(scopeA, { expectedRevision: 2, responderEvent: claim3 }, 'bot:cli_flash')).toEqual(reclaimed);
+
+        const released = await collab.updateDuty(scopeA, { expectedRevision: 2, responderEvent: release4 }, 'bot:cli_flash');
+        expect(released).toMatchObject({ revision: 3, responderWatermark: release4 });
+        expect(released.responder).toBeUndefined();
+        expect(await collab.updateDuty(scopeA, { expectedRevision: 3, responderEvent: claim1 }, 'bot:cli_flash')).toEqual(released);
+        expect(await collab.updateDuty(scopeA, { expectedRevision: 3, responderEvent: release4 }, 'bot:cli_flash')).toEqual(released);
+        expect(await collab.updateDuty(scopeA, { expectedRevision: 3, responderEvent: { ...claim1, at: release4.at, messageId: 'om_same_time' } }, 'bot:cli_flash')).toEqual(released);
+
+        const claimed5 = await collab.updateDuty(scopeA, { expectedRevision: 3, responderEvent: { ...claim1, at: '2026-09-18T14:00:00.000Z', messageId: 'om_claim_5' } }, 'bot:cli_flash');
+        expect(await collab.updateDuty(scopeA, { expectedRevision: 4, responderEvent: release4 }, 'bot:cli_flash')).toEqual(claimed5);
+        expect(await collab.getDuty(scopeA)).toEqual(claimed5);
+        expect(await collab.listActivities(scopeA)).toHaveLength(4);
+      } finally {
+        repos.close();
+      }
+    });
+
     it('merges scenarios per pack: omitted packs stay, null removes one pack, all removed reads back without scenarios', async () => {
       const repos = createRepositories(':memory:');
       try {

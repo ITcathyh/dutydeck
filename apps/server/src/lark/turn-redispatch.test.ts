@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { toAcpNotifications } from '@agentclientprotocol/claude-agent-acp';
 import { normalizeAcpxEvent } from '@dutydeck/acp-client';
+import { childEnvironment } from '../../../../packages/shared/runtime/child-environment.mjs';
 import type { AgentEvent } from '@dutydeck/shared';
 import { isRestartInterruption, larkHeldReason, larkInterruptionSummary, larkLastActivityAt, larkRedispatchAgentNote, larkRedispatchCardNote, larkRedispatchedCardMarkdown, larkReplayEvidenceGap, larkReplayUnsafeReason } from './turn-redispatch.js';
 
@@ -44,17 +49,17 @@ describe('被重启切断的一轮能不能安全重投', () => {
       { ...tool('Read', { file_path: '/a' }), type: 'tool_result' }, tool('Grep', { pattern: 'x' }), tool('TodoWrite', { todos: [] }), tool('WebFetch', { url: 'https://example.com' }),
       tool("Read file '/work/a.ts'"), tool("Search for 'x' in work"), tool("List files in 'work'"),
       { id: 'text', sessionId: 'ses', sequence: 2, type: 'text', timestamp: '', data: { text: 'git push' } },
-      bash('cd /work && git status && git log --oneline -3 | head -5'),
+      bash('cd /work && git rev-parse HEAD | head -5'),
       bash("rg -n 'a|b' src 2>/dev/null | sort | uniq -c"),
       bash("sed -n '1,200p' src/index.ts; wc -l src/*.ts"),
       bash('find . -name "*.ts" -type f | head -20'),
       bash('curl -s https://example.com/api/items'),
       bash("curl -sSL -H 'Accept: application/json' https://example.com/api && curl -XGET https://example.com && curl --request HEAD https://example.com"),
       bash('curl -I https://example.com && curl -m 10 --retry 2 -A dutydeck https://example.com'),
-      bash('git -C /work diff --stat && git branch --show-current'),
+      bash('git -C /work rev-parse HEAD && git branch --show-current'),
       codex("rg -n 'foo' apps && cat README.md"),
       codex('ls -la'),
-      bash('git log --oneline -3 --format=%H -- src && git show --stat HEAD~1 && git blame -L 1,20 src/a.ts && git shortlog -sn'),
+      bash('git rev-parse HEAD && git ls-files src && git show-ref --verify refs/heads/main'),
       bash("rg -n -A3 --glob '*.ts' -e foo src | sort -k2 -n | uniq -c && LC_ALL=C sort -u a.txt && xxd -l 64 a.bin && date +%F && tree -L 2 src")
     ];
     expect(larkReplayUnsafeReason(events)).toBeUndefined();
@@ -76,6 +81,11 @@ describe('被重启切断的一轮能不能安全重投', () => {
     ['date -s 2020-01-01', '执行过 date'],
     ['find . -name a -fprint out.txt', '执行过 find'],
     ['less README.md', '执行过 less'],
+    ['git status --short', '执行过 git status'],
+    ['git diff', '执行过 git diff'],
+    ['git diff --no-ext-diff -- report.txt', '执行过 git diff'],
+    ['git diff --no-textconv -- report.txt', '执行过 git diff'],
+    ['git diff --no-ext-diff --no-textconv -- report.txt', '执行过 git diff'],
     ['git diff --output=output.patch', '执行过 git diff'],
     ['git -c diff.external=./pre.sh diff --ext-diff', '执行过 git'],
     ['git log -p --ext-diff', '执行过 git log'],
@@ -87,6 +97,10 @@ describe('被重启切断的一轮能不能安全重投', () => {
     expect(larkReplayUnsafeReason([codex(command)])).toBe(reason);
   });
 
+  it.each(['diff', 'log', 'show', 'blame', 'rev-list', 'shortlog'])('Git %s 的两个禁用参数不能证明全部仓库执行配置已净化', subcommand => {
+    expect(larkReplayUnsafeReason([bash(`git ${subcommand} --no-ext-diff --no-textconv`)])).toBe(`执行过 git ${subcommand}`);
+  });
+
   it('内置 Claude ACP 适配器产生的只读工具调用（标题形如 Read /work/alerts.md）不算外部副作用', () => {
     const read = claudeAcp('Read', { file_path: '/work/alerts.md' });
     expect(read.map(event => event.data)).toMatchObject([{ name: 'Read File' }, { name: 'Read /work/alerts.md', input: { file_path: '/work/alerts.md' } }, { name: 'tool call' }]);
@@ -94,7 +108,7 @@ describe('被重启切断的一轮能不能安全重投', () => {
       ...read, ...claudeAcp('Read', { file_path: '/repo/a.ts', offset: 10, limit: 20 }),
       ...claudeAcp('Glob', { pattern: '**/*.ts', path: '/repo' }), ...claudeAcp('Grep', { pattern: 'alert', path: '/repo', output_mode: 'content', '-n': true }),
       ...claudeAcp('WebFetch', { url: 'https://example.com', prompt: 'summary' }), ...claudeAcp('WebSearch', { query: 'dutydeck' }),
-      ...claudeAcp('Bash', { command: 'git status && git log --oneline -3', description: 'Show status' }),
+      ...claudeAcp('Bash', { command: 'git rev-parse HEAD', description: 'Show current commit' }),
       // Codex 的结果事件也只有缺省名，与开始事件同 id。
       tool("Read file '/work/a.ts'", undefined, 'tool_call', 'codex_read'), tool('tool call', undefined, 'tool_result', 'codex_read')
     ];
@@ -138,7 +152,7 @@ describe('被重启切断的一轮能不能安全重投', () => {
     [tool('mcp__lark__send_message', { text: 'hi' }), '调用过 mcp__lark__send_message'],
     [tool('tool call'), '调用过无法判断是否只读的工具']
   ])('可能对外生效的操作按不安全处理：%#', (event, reason) => {
-    expect(larkReplayUnsafeReason([bash('git status'), event])).toBe(reason);
+    expect(larkReplayUnsafeReason([bash('git rev-parse HEAD'), event])).toBe(reason);
   });
 
   it('原因里只有命令名，参数（可能带 token）不进说明', () => {
@@ -156,6 +170,52 @@ describe('被重启切断的一轮能不能安全重投', () => {
     expect(larkReplayEvidenceGap({ protocol: 'pty-cli', transcript: false }, read)).toBe(gap);
     for (const protocol of ['jsonl', 'pipe', 'pty', 'auto', undefined]) expect(larkReplayEvidenceGap({ protocol, transcript: true }, read)).toBe(gap);
     expect(larkReplayEvidenceGap(undefined, read)).toBe(gap);
+  });
+
+  it('真实 Git 的两个 diff 参数只关闭 textconv，仓库 fsmonitor 仍会执行，所以分类保持人工确认', () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'dutydeck-replay-textconv-'));
+    const env = childEnvironment({ PATH: process.env.PATH!, HOME: cwd, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0' });
+    const git = (args: string[]) => execFileSync('git', args, { cwd, env, encoding: 'utf8', timeout: 5000 });
+    const diffArgs = ['diff', '--no-ext-diff', '--no-textconv', '--', 'report.txt'];
+    const markerLines = (name: string) => readFileSync(join(cwd, name), 'utf8').trim().split('\n').filter(Boolean).length;
+    try {
+      git(['init', '--quiet']);
+      git(['config', 'user.name', 'Replay Fixture']);
+      git(['config', 'user.email', 'replay@example.invalid']);
+      git(['config', 'core.hooksPath', '/dev/null']);
+      writeFileSync(join(cwd, '.gitattributes'), 'report.txt diff=review\n');
+      writeFileSync(join(cwd, 'report.txt'), 'before\n');
+      git(['add', '.']);
+      git(['commit', '--quiet', '-m', 'fixture']);
+      writeFileSync(join(cwd, 'converter.sh'), '#!/bin/sh\nprintf "called\\n" >> textconv-marker\ncat "$1"\n', { mode: 0o700 });
+      git(['config', 'diff.review.textconv', './converter.sh']);
+      writeFileSync(join(cwd, 'report.txt'), 'after\n');
+
+      expect(git(['diff', '--', 'report.txt'])).toContain('-before');
+      expect(markerLines('textconv-marker')).toBe(2);
+      expect(larkReplayUnsafeReason([bash('git diff -- report.txt')])).toBe('执行过 git diff');
+
+      // 两个参数确实不再执行 converter，但不能据此推定其它仓库配置也不会执行程序。
+      expect(git(diffArgs)).toContain('-before');
+      expect(markerLines('textconv-marker')).toBe(2);
+      expect(larkReplayUnsafeReason([bash('git diff --no-ext-diff --no-textconv -- report.txt')])).toBe('执行过 git diff');
+
+      // 合法的 v2 hook 只写这个临时仓库的 marker，并让 Git 把整个工作区视为已刷新。
+      writeFileSync(join(cwd, 'fsmonitor.sh'), '#!/bin/sh\nprintf "called\\n" >> fsmonitor-marker\nprintf "fixture-clock\\0/\\0"\n', { mode: 0o700 });
+      git(['config', 'core.fsmonitorHookVersion', '2']);
+      git(['config', 'core.fsmonitor', './fsmonitor.sh']);
+      expect(git(diffArgs)).toContain('+after');
+      expect(markerLines('fsmonitor-marker')).toBeGreaterThan(0);
+      expect(markerLines('textconv-marker')).toBe(2);
+      expect(larkReplayUnsafeReason([bash('git diff --no-ext-diff --no-textconv -- report.txt')])).toBe('执行过 git diff');
+
+      // 对照：只移除 fsmonitor，同一条命令不再写它的 marker；账本仍没有运行时净化证据，不能放行。
+      const monitorCalls = markerLines('fsmonitor-marker');
+      git(['config', '--unset-all', 'core.fsmonitor']);
+      expect(git(diffArgs)).toContain('+after');
+      expect(markerLines('fsmonitor-marker')).toBe(monitorCalls);
+      expect(larkReplayUnsafeReason([bash('git diff --no-ext-diff --no-textconv -- report.txt')])).toBe('执行过 git diff');
+    } finally { rmSync(cwd, { recursive: true, force: true }); }
   });
 
   it('最后一次活动取这一轮最后一个事件，账本补记的 task / status 事件不算；没有事件用开始时间，都取不到返回 undefined', () => {

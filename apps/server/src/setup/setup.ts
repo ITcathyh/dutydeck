@@ -362,7 +362,7 @@ export async function runSetup(options: SetupCliOptions = {}, dependencies: Setu
         // 丢掉它们只会逼用户重头再答一遍。但要把失败如实报出来。
         if (lark.outcome === 'failed') {
           const written = writeEnv(envFile, updates);
-          return {
+          const result: SetupResult = {
             ok: false, action: 'setup', mode,
             agents: detected.map(({ id, name, version }) => ({ id, name, version })),
             defaultCwd, port, envFile, changed: written.changed, changedKeys: written.changedKeys,
@@ -370,6 +370,8 @@ export async function runSetup(options: SetupCliOptions = {}, dependencies: Setu
             next: lark.next,
             error: lark.error ?? { code: 'LARK_BIND_FAILED', message: '飞书绑定失败。' }
           };
+          if (json) ui.json(result);
+          return result;
         }
       }
 

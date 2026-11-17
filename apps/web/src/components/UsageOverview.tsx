@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { UsageBackgroundBudget, UsageCap, UsageCategory } from '@dutydeck/shared';
 import { api, type LarkBotConfig, type UsageSummaryWindow, type UsageGroupResponse as UsageGroup } from '../api';
@@ -111,8 +111,16 @@ function UsageCaps({ bots, caps, month, botName, chatName, groups }: { bots: Lar
   const appId = pickedAppId || bots[0]?.appId || '';
   const [chatId, setChatId] = useState('');
   const [amount, setAmount] = useState('');
+  const formRef = useRef({ scope, appId, chatId, amount });
+  formRef.current = { scope, appId, chatId, amount };
   const refresh = () => void qc.invalidateQueries({ queryKey: ['usage-summary'] });
-  const save = useMutation({ mutationFn: api.setUsageCap, onSuccess: () => { setAmount(''); refresh(); } });
+  const save = useMutation({
+    mutationFn: (submitted: { input: Parameters<typeof api.setUsageCap>[0]; form: { scope: UsageCap['scope']; appId: string; chatId: string; amount: string } }) => api.setUsageCap(submitted.input),
+    onSuccess: (_result, submitted) => {
+      if (JSON.stringify(formRef.current) === JSON.stringify(submitted.form)) setAmount('');
+      refresh();
+    }
+  });
   const remove = useMutation({ mutationFn: api.deleteUsageCap, onSuccess: refresh });
   // 与服务端上限判定同一口径：终端模式 Codex 的估算不计入上限。
   const used = (cap: UsageCap) => { const row = cap.scope === 'bot' ? month.bots.find(row => row.appId === cap.appId) : month.chats.find(row => row.appId === cap.appId && row.chatId === cap.chatId); return Math.max(0, (row?.costUsd ?? 0) - (row?.capExcludedCostUsd ?? 0)); };
@@ -136,7 +144,10 @@ function UsageCaps({ bots, caps, month, botName, chatName, groups }: { bots: Lar
     </ul> : <p className="text-caption text-secondary">当前没有设置上限。</p>}
     {bots.length ? <form className="grid gap-3 sm:grid-cols-2" onSubmit={event => {
       event.preventDefault();
-      if (ready) save.mutate(scope === 'bot' ? { scope, appId, monthlyCostUsd } : { scope, appId, chatId, monthlyCostUsd });
+      if (ready) {
+        const input = scope === 'bot' ? { scope, appId, monthlyCostUsd } : { scope, appId, chatId, monthlyCostUsd };
+        save.mutate({ input, form: { scope, appId, chatId, amount } });
+      }
     }}>
       <Field label="范围"><Select value={scope} onChange={event => setScope(event.target.value as UsageCap['scope'])}><option value="bot">整个机器人</option><option value="group">单个群</option></Select></Field>
       <Field label="机器人"><Select value={appId} onChange={event => { setAppId(event.target.value); setChatId(''); }}>{bots.map(bot => <option key={bot.appId} value={bot.appId}>{bot.name}</option>)}</Select></Field>

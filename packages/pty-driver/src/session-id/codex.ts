@@ -64,8 +64,9 @@ interface FileStamp { mtimeMs: number; size: number }
 /** One rollout's marker hits; without `id` it cannot own the session. */
 interface RolloutScan { id?: string; marked: boolean[] }
 /** Per-file results, each valid while its file's mtime and size are unchanged. */
+interface HistoryMatch { id: string; complete: boolean }
 interface ScanCache {
-  history?: FileStamp & { matches: Array<string | undefined> };
+  history?: FileStamp & { matches: Array<HistoryMatch | undefined> };
   rollouts: Map<string, FileStamp & { scan: RolloutScan }>;
 }
 function fileStamp(path: string): FileStamp | undefined {
@@ -113,12 +114,17 @@ function isFirstSubmit(lines: string[], index: number, nativeId: string): boolea
 }
 
 /** Read history once, retaining the newest first-submit hit for each marker format. */
-function findSessionIdsInHistory(historyPath: string, markers: Marker[], cache?: ScanCache): Array<string | undefined> {
+function findSessionIdsInHistory(historyPath: string, markers: Marker[], cache?: ScanCache): Array<HistoryMatch | undefined> {
   // Stamp before reading: an append racing the read then only costs a rescan.
-  const stamp = cache && fileStamp(historyPath);
+  const stamp = fileStamp(historyPath);
   if (cache?.history && sameStamp(stamp, cache.history)) return cache.history.matches;
-  const matches: Array<string | undefined> = markers.map(() => undefined);
+  const matches: Array<HistoryMatch | undefined> = markers.map(() => undefined);
   const lines = readTail(historyPath, HISTORY_TAIL_BYTES).split('\n');
+  // A tail window cannot prove that its first record for a native id is that
+  // session's first submit. Keep those hits only to trigger a rollout scan;
+  // never let them override a cwd-bound rollout or stand as identity proof.
+  const finalStamp = fileStamp(historyPath);
+  const complete = !!stamp && !!finalStamp && stamp.size <= HISTORY_TAIL_BYTES && finalStamp.size <= HISTORY_TAIL_BYTES;
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i]!;
     if (!markers.some(marker => line.includes(marker.text))) continue;
@@ -127,7 +133,7 @@ function findSessionIdsInHistory(historyPath: string, markers: Marker[], cache?:
     if (typeof parsed?.text !== 'string' || typeof parsed.session_id !== 'string' || !parsed.session_id) continue;
     if (!isFirstSubmit(lines, i, parsed.session_id)) continue;
     markers.forEach((marker, index) => {
-      if (!matches[index] && matchesMarker(parsed.text, marker)) matches[index] = parsed.session_id;
+      if (!matches[index] && matchesMarker(parsed.text, marker)) matches[index] = { id: parsed.session_id, complete };
     });
     if (matches[0]) break;
   }
@@ -246,12 +252,12 @@ function codexFamilyResolve(
   // Roots are resolved per call against the CHILD's env: `agent.env` may set
   // CODEX_HOME per session, so a root captured once would be wrong.
   const history = findSessionIdsInHistory(family.historyPath(env), markers, cache);
-  if (history[0]) return history[0];
+  if (history[0]?.complete) return history[0].id;
   // A legacy history hit may still be outranked by a modern rollout marker.
   if (historyOnly && !history.some(Boolean)) return undefined;
   const rollouts = findSessionIdsInRollouts(family.sessionsRoot(env), markers, cwd, env, family.inputText, cache);
   for (let index = 0; index < markers.length; index++) {
-    const found = history[index] ?? rollouts[index];
+    const found = history[index]?.complete ? history[index]!.id : rollouts[index];
     if (found) return found;
   }
   return undefined;

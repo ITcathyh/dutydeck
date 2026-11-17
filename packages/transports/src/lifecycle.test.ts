@@ -77,16 +77,25 @@ describe('JsonlTransport process lifecycle', () => {
 
   it('keeps the process alive across interrupt and allows resume/send', async () => {
     const dir = await workspace();
-    const events: string[] = [];
-    const transport = registerTransport(new JsonlTransport(config(), { onEvent: event => events.push(event.type) }));
+    const events: Array<{ type: string; text?: unknown }> = [];
+    const transport = registerTransport(new JsonlTransport(config({ env: { lifecycle_interrupt_delay_ms: '50' } }), {
+      onEvent: event => events.push({ type: event.type, text: (event.data as { text?: unknown } | undefined)?.text }),
+    }));
     await transport.start();
     await transport.send('one');
-    await vi.waitFor(() => expect(events[events.length - 1]).toBe('completed'));
+    await vi.waitFor(() => expect(events[events.length - 1]?.type).toBe('completed'));
     await transport.interrupt();
+    // SIGINT acknowledgement is terminal output too; drain the old turn before isolating the next one.
+    await vi.waitFor(() => expect(events.some(event => event.type === 'raw_terminal' && event.text === 'INTERRUPTED')).toBe(true));
     await transport.resume();
     events.length = 0;
     await transport.send('two');
-    await vi.waitFor(() => expect(events[events.length - 1]).toBe('completed'));
+    await vi.waitFor(() => expect(events[events.length - 1]?.type).toBe('completed'));
+    expect(events).toEqual([
+      { type: 'thinking', text: 'thinking' },
+      { type: 'text', text: 'echo:two' },
+      { type: 'completed', text: undefined },
+    ]);
     expect(await transport.isStopped!()).toBe(false);
     await transport.stop();
     expect(await transport.isStopped!()).toBe(true);

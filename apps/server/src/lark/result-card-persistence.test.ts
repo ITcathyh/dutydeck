@@ -272,4 +272,108 @@ describe('卡片映射的并发写', () => {
     expect(after.recovery_status_key).toBe('from_reconciler');
     expect(after.final_message_id).toBe((JSON.parse(mapping!.extra!) as PersistedLarkCardTask).final_message_id);
   });
+
+  it('同一轮但 runtime task 已换时不按字段合并覆盖新执行', async () => {
+    const h = await harness();
+    await h.coordinator.handle(event('om_1'), h.config);
+    await h.resultCard();
+    const [mapping] = await h.repos.channelMappings.list(h.channel);
+    const saved = JSON.parse(mapping!.extra!) as PersistedLarkCardTask;
+    const stale = (h.coordinator as any).restoredCardTask(h.config, mapping!, saved);
+    await h.repos.channelMappings.save({ ...mapping!, extra: JSON.stringify({ ...saved,
+      runtime_task_id: 'task_newer_same_turn', recovery_status_key: 'from_newer_task' }) });
+
+    await (h.coordinator as any).persistCardTask(stale, 'cancelled');
+
+    expect(await h.persisted()).toMatchObject({ turn: saved.turn, state: saved.state,
+      runtime_task_id: 'task_newer_same_turn', recovery_status_key: 'from_newer_task' });
+  });
+
+  it('读取失败时保留已经推进的记录，不整行覆写旧快照', async () => {
+    const h = await harness();
+    await h.coordinator.handle(event('om_1'), h.config);
+    await h.resultCard();
+    const [mapping] = await h.repos.channelMappings.list(h.channel);
+    const saved = JSON.parse(mapping!.extra!) as PersistedLarkCardTask;
+    const stale = (h.coordinator as any).restoredCardTask(h.config, mapping!, saved);
+    await h.patchPersisted({ turn: saved.turn! + 1, runtime_task_id: 'task_after_read_failure', recovery_status_key: 'newer' });
+    const before = await h.persisted();
+    const get = vi.spyOn(h.repos.channelMappings, 'get').mockRejectedValue(new Error('synthetic read failure'));
+    const save = vi.spyOn(h.repos.channelMappings, 'save');
+
+    await (h.coordinator as any).persistCardTask(stale, 'cancelled');
+
+    expect(save).not.toHaveBeenCalled();
+    expect(await h.persisted()).toEqual(before);
+    get.mockRestore();
+  });
+
+  it('CAS 冲突到上限时不退回整行覆写，当前同轮字段保持不变', async () => {
+    const h = await harness();
+    await h.coordinator.handle(event('om_1'), h.config);
+    await h.resultCard();
+    const [mapping] = await h.repos.channelMappings.list(h.channel);
+    const saved = JSON.parse(mapping!.extra!) as PersistedLarkCardTask;
+    const stale = (h.coordinator as any).restoredCardTask(h.config, mapping!, saved);
+    const compare = vi.spyOn(h.repos.channelMappings, 'compareAndSetExtra').mockResolvedValue(false);
+    const save = vi.spyOn(h.repos.channelMappings, 'save');
+
+    await (h.coordinator as any).persistCardTask(stale, 'cancelled');
+
+    expect(compare).toHaveBeenCalledTimes(5);
+    expect(save).not.toHaveBeenCalled();
+    expect(await h.persisted()).toEqual(saved);
+  });
+
+  it('整行 fallback 拒绝旧会话覆盖新会话，同时允许当前作用域在同轮合法换会话并保存终态', async () => {
+    const h = await harness();
+    await h.coordinator.handle(event('om_1'), h.config);
+    await h.resultCard();
+    const [mapping] = await h.repos.channelMappings.list(h.channel);
+    const saved = JSON.parse(mapping!.extra!) as PersistedLarkCardTask;
+    const stale = (h.coordinator as any).restoredCardTask(h.config, mapping!, saved);
+    const get = h.repos.channelMappings.get.bind(h.repos.channelMappings);
+    const compare = h.repos.channelMappings.compareAndSetExtra;
+    let release!: () => void;
+    const barrier = new Promise<void>(resolve => { release = resolve; });
+    let blocked = false;
+    const read = vi.spyOn(h.repos.channelMappings, 'get').mockImplementation(async (...args) => {
+      const row = await get(...args);
+      if (!blocked) { blocked = true; await barrier; }
+      return row;
+    });
+    const pending = (h.coordinator as any).persistCardTask(stale, 'cancelled');
+    await vi.waitFor(() => expect(blocked).toBe(true));
+    await h.repos.channelMappings.save({ ...mapping!, sessionId: 'ses_newer', extra: JSON.stringify({ ...saved,
+      turn: saved.turn! + 1, runtime_task_id: 'task_newer_session' }) });
+    h.repos.channelMappings.compareAndSetExtra = undefined as any;
+    release();
+    await pending;
+    read.mockRestore();
+    h.repos.channelMappings.compareAndSetExtra = compare;
+
+    expect(await h.persisted()).toMatchObject({ turn: saved.turn! + 1, runtime_task_id: 'task_newer_session' });
+    expect((await h.repos.channelMappings.list(h.channel))[0]?.sessionId).toBe('ses_newer');
+
+    // /new 可以在同一个任务、同一轮里结束旧会话并进入新会话；作用域明确退休了当前记录里的旧会话。
+    const legitimate = (h.coordinator as any).restoredCardTask(h.config, mapping!, saved);
+    legitimate.sessionId = 'ses_legitimate';
+    legitimate.turn = saved.turn! + 1;
+    legitimate.runtimeTaskId = 'task_legitimate';
+    legitimate.group.sessionId = 'ses_legitimate';
+    legitimate.group.retiredSessionIds = new Set(['ses_newer']);
+    legitimate.finalMessageId = 'om_legitimate_final';
+    legitimate.finalDeliveryState = 'delivered';
+    await (h.coordinator as any).persistCardTask(legitimate, 'completed');
+    expect(await h.persisted()).toMatchObject({ turn: saved.turn! + 1, state: 'completed', runtime_task_id: 'task_legitimate', final_delivery_state: 'delivered' });
+    expect((await h.repos.channelMappings.list(h.channel))[0]?.sessionId).toBe('ses_legitimate');
+    expect((await h.persisted()).earlier_message_ids ?? []).not.toContain(saved.final_message_id);
+
+    // 即使旧快照带着作用域退休证据，也不能用较旧 turn 覆盖刚保存的新会话终态。
+    stale.group.sessionId = stale.sessionId;
+    stale.group.retiredSessionIds = new Set(['ses_legitimate']);
+    await (h.coordinator as any).persistCardTask(stale, 'cancelled');
+    expect(await h.persisted()).toMatchObject({ turn: saved.turn! + 1, state: 'completed', runtime_task_id: 'task_legitimate', final_delivery_state: 'delivered' });
+    expect((await h.repos.channelMappings.list(h.channel))[0]?.sessionId).toBe('ses_legitimate');
+  });
 });

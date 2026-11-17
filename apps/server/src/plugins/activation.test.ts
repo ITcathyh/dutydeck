@@ -294,4 +294,95 @@ describe('immutable plugin activation', () => {
     await writeFile(join(source, 'provider.mjs'), 'while (true) {}');
     await expect(validateProviderRegistration({ root: source, dataDir: join(directory, 'validate'), entry: store.get('versioned'), config: {} }, 1_000, await validationWorker.path())).rejects.toThrow('超时');
   });
+
+  it('activates a provider candidate with compatible locked dependency metadata without importing the dependency', async () => {
+    const marker = join(directory, 'dependency-imported');
+    await writePlugin(join(directory, 'dependency-source'), {
+      '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'dependency', version: '1.0.0', providers: 'provider.mjs' }),
+      'provider.mjs': `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(marker)}, 'imported'); export default () => {};`
+    });
+    await store.install(join(directory, 'dependency-source'), { yes: true });
+    const consumerSource = join(directory, 'consumer-source');
+    const consumer = (version: string) => ({
+      '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'consumer', version, providers: 'provider.mjs', dependencies: { dependency: '^1.0.0' } }),
+      'provider.mjs': 'export default () => {};'
+    });
+    await writePlugin(consumerSource, consumer('1.0.0'));
+    await store.install(consumerSource, { yes: true });
+    const host = await load();
+    expect(host.active.map(item => item.entry.name)).toEqual(expect.arrayContaining(['dependency', 'consumer']));
+    expect(host.diagnostics).toEqual([]);
+    await host.dispose();
+    await rm(marker, { force: true });
+    await writePlugin(consumerSource, consumer('1.1.0'));
+    await store.update('consumer', { yes: true });
+    expect((await store.activate('consumer')).version).toBe('1.1.0');
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it.each([
+    ['alarm', '1.1.0'],
+    ['versionless', undefined]
+  ] as const)('activates a provider candidate with %s builtin name metadata without importing the builtin', async (dependency, builtinVersion) => {
+    const marker = join(directory, `${dependency}-imported`);
+    const builtinRoot = dependency === 'alarm' ? resolve(import.meta.dirname, '../../../../builtin-plugins') : join(directory, 'builtins');
+    if (dependency !== 'alarm') await writePlugin(join(builtinRoot, dependency), {
+      '.dutydeck-plugin/plugin.json': JSON.stringify({ name: dependency, providers: 'provider.mjs' }),
+      'provider.mjs': `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(marker)}, 'imported'); export default () => {};`
+    });
+    const builtinStore = new PluginStore(join(directory, `${dependency}-data`), builtinRoot, undefined, await validationWorker.path());
+    const consumerSource = join(directory, `${dependency}-consumer-source`);
+    const consumer = (version: string) => ({
+      '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'consumer', version, providers: 'provider.mjs', dependencies: { [dependency]: '*' } }),
+      'provider.mjs': 'export default () => {};'
+    });
+    await writePlugin(consumerSource, consumer('1.0.0'));
+    await builtinStore.install(consumerSource, { yes: true });
+    const host = await PluginHost.load({ dataDir: builtinStore.dataDir, builtinRoot });
+    try {
+      expect(host.diagnostics).toEqual([]);
+      expect(host.active.map(item => item.entry.name)).toEqual(expect.arrayContaining([dependency, 'consumer']));
+      expect(host.active.find(item => item.entry.name === dependency)?.entry.version).toBe(builtinVersion);
+    } finally { await host.dispose(); }
+    if (dependency !== 'alarm') expect(existsSync(marker)).toBe(true);
+    await rm(marker, { force: true });
+    await writePlugin(consumerSource, consumer('1.1.0'));
+    await builtinStore.update('consumer', { yes: true });
+    expect((await builtinStore.activate('consumer')).version).toBe('1.1.0');
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it.each(['missing', 'disabled', 'incompatible'] as const)('keeps the active provider candidate when its dependency is %s', async state => {
+    if (state !== 'missing') {
+      await writePlugin(join(directory, 'dependency-source'), {
+        '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'dependency', version: state === 'incompatible' ? '2.0.0' : '1.0.0', providers: 'provider.mjs' }),
+        'provider.mjs': 'export default () => {};'
+      });
+      await store.install(join(directory, 'dependency-source'), { yes: true });
+      if (state === 'disabled') await store.setEnabled('dependency', false);
+    }
+    const consumerSource = join(directory, 'consumer-source');
+    const consumer = (version: string) => ({
+      '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'consumer', version, providers: 'provider.mjs', dependencies: { dependency: '^1.0.0' } }),
+      'provider.mjs': 'export default () => {};'
+    });
+    await writePlugin(consumerSource, consumer('1.0.0'));
+    await store.install(consumerSource, { yes: true });
+    await writePlugin(consumerSource, consumer('1.1.0'));
+    await store.update('consumer', { yes: true });
+    await expect(store.activate('consumer')).rejects.toMatchObject({ code: 'PLUGIN_ACTIVATION_FAILED' });
+    expect(store.get('consumer').version).toBe('1.0.0');
+    expect(store.get('consumer').candidate?.validation?.status).toBe('failed');
+  });
+
+  it('keeps declarative candidate activation working with a compatible dependency', async () => {
+    await writePlugin(join(directory, 'dependency-source'), { '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'dependency', version: '1.0.0' }) });
+    await store.install(join(directory, 'dependency-source'), { yes: true });
+    const consumerSource = join(directory, 'consumer-source');
+    await writePlugin(consumerSource, { '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'consumer', version: '1.0.0', dependencies: { dependency: '^1.0.0' } }) });
+    await store.install(consumerSource, { yes: true });
+    await writePlugin(consumerSource, { '.dutydeck-plugin/plugin.json': JSON.stringify({ name: 'consumer', version: '1.1.0', dependencies: { dependency: '^1.0.0' } }) });
+    await store.update('consumer', { yes: true });
+    expect((await store.activate('consumer')).version).toBe('1.1.0');
+  });
 });

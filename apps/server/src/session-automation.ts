@@ -2822,7 +2822,7 @@ export class SessionAutomationService {
       return;
     }
     const now = this.clock();
-    if (new Date(claimed0.expiresAt) <= now) { await this.finishCi(stored, 'expired'); return; }
+    const expired = new Date(claimed0.expiresAt) <= now;
 
     // 统一来源恢复前序：先读原 admission/明确 taskId，在任何新 HEAD/材料/当前默认配置前核实际接受事实。
     if (claimed0.admission) {
@@ -2833,6 +2833,8 @@ export class SessionAutomationService {
           await this.finishCi(stored, 'blocked', 'The accepted task request conflicts with the frozen CI admission');
           return;
         }
+        // TTL 只拒绝尚未获得提交授权的工作；已开始的任务即使 accepted 回写丢失也要收尾投递。
+        if (expired && !claimed0.taskStartedAt) { await this.finishCi(stored, 'expired', 'CI continuation expired before execution'); return; }
         await this.ensureTaskBinding(claimed0.admission.taskId, {
           schemaVersion: 2,
           kind: 'ci',

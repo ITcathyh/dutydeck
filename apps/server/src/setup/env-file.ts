@@ -95,6 +95,7 @@ function managedKeyForLegacy(key: string, pending: Map<string, string | undefine
  */
 export function mergeEnvContent(original: string, updates: Record<string, string | undefined>): string {
   const pending = new Map(Object.entries(updates));
+  const written = new Set<string>();
   const lines = original === '' ? [] : original.split(/\r?\n/);
   const output: string[] = [];
 
@@ -114,12 +115,12 @@ export function mergeEnvContent(original: string, updates: Record<string, string
       continue;
     }
     const value = pending.get(managed);
-    pending.delete(managed);
-    // undefined = 删除：整行丢弃。
-    if (value !== undefined) output.push(`${managed}=${quoteIfNeeded(value)}`);
+    // 第一处就地更新；其余同名或旧名等价项全部去掉，否则 Node 最后赋值会重新启用旧值。
+    if (!written.has(managed) && value !== undefined) output.push(`${managed}=${quoteIfNeeded(value)}`);
+    written.add(managed);
   }
 
-  const additions = [...pending.entries()].filter((entry): entry is [string, string] => entry[1] !== undefined);
+  const additions = [...pending.entries()].filter((entry): entry is [string, string] => entry[1] !== undefined && !written.has(entry[0]));
   if (additions.length > 0) {
     // 与既有内容之间留一个空行，但不制造连续空行。
     while (output.length > 0 && output[output.length - 1]!.trim() === '') output.pop();

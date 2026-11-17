@@ -48,7 +48,7 @@ export function cliVersion(command: string): string | undefined {
   if (probedVersions.has(key)) return probedVersions.get(key);
   let version: string | undefined;
   for (const args of VERSION_ARGS) {
-    const result = spawnSync(command, args, { encoding: 'utf8', timeout: 1500, env: probeEnvironment() });
+    const result = spawnSync(command, args, { encoding: 'utf8', timeout: 1500, killSignal: 'SIGKILL', env: probeEnvironment() });
     const line = versionLine(result.stdout ?? '', result.stderr ?? '');
     if (result.status === 0 && line) { version = line; break; }
   }
@@ -67,7 +67,7 @@ export function cliVersionAsync(command: string): Promise<string | undefined> {
     for (const args of VERSION_ARGS) {
       const result = await new Promise<{ ok: boolean; stdout: string; stderr: string }>(done => {
         // 与 spawnSync 一样立即给 stdin 结束符：读 stdin 的 CLI 不会一直等到超时。
-        execFile(command, args, { encoding: 'utf8', timeout: 1500, env: probeEnvironment() },
+        execFile(command, args, { encoding: 'utf8', timeout: 1500, killSignal: 'SIGKILL', env: probeEnvironment() },
           (error, stdout, stderr) => done({ ok: !error, stdout: stdout ?? '', stderr: stderr ?? '' })).stdin?.end();
       });
       const line = versionLine(result.stdout, result.stderr);

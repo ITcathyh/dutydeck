@@ -188,6 +188,8 @@ export function LarkConfigModal({ agents, target, field, onLeaveGuardChange, onC
   const [pendingLeave, setPendingLeave] = useState<(() => void)>();
   const discardApproved = useRef(false);
   const draftSignature = JSON.stringify(draftValues);
+  const latestDraftSignature = useRef(draftSignature);
+  latestDraftSignature.current = draftSignature;
   useEffect(() => { discardApproved.current = false; }, [draftSignature, field]);
   const dirty = baseline !== undefined && baseline !== draftSignature;
   useEffect(() => { if (hydratedVersion) setBaseline(draftSignature); }, [hydratedVersion]);
@@ -266,26 +268,27 @@ export function LarkConfigModal({ agents, target, field, onLeaveGuardChange, onC
   }, [config.data, agents, selectedAppId, reloadVersion]);
   const inspect = useMutation({ mutationFn: () => api.inspectLarkBot({ appId: appId.trim(), appSecret: appSecret.trim() }), onSuccess: result => setField('name', result.appName) });
   const save = useMutation({
-    mutationFn: () => step === 1
+    mutationFn: (_submitted: { step: 1 | 2; values: typeof draftValues; signature: string; appId: string; restrictUsers: boolean }) => step === 1
       ? api.saveLarkConfig({ stage: 'lark', expectedRevision: draftRevision.current, ...(current ? { originalAppId: current.appId } : {}), appId: appId.trim(), ...(appSecret.trim() ? { appSecret: appSecret.trim() } : {}), workspace: workspace.trim(), workspaceAliases: workspaceAliasTable(workspaceAliasRows), verificationCommand: verificationCommand.trim(), webBaseUrl: webBaseUrl.trim(), webMobileReachable, structuredAskCards, groupCardMention, notifyMentionAction, notifyMentionDone, notifyQuietHours: notifyQuietHours.trim(), completionReactionOnly, silentProgress, urgentEnabled, urgentThresholdMs: urgentThresholdMs ?? null, urgentMaxPerHourPerChat: urgentQuota ?? null, pinLongTasks, pinAfterMs: pinAfterMs ?? null, ...allowedUsersPayload, allowedBotNames, peerBotsAllowed, pushIntervalMs, traceLimit: Number(traceLimit), compactTrace, showAgentName })
       : api.saveLarkConfig({ stage: 'agent', expectedRevision: draftRevision.current, originalAppId: current!.appId, defaultAgentId, fallbackAgentId, fallbackModel, defaultAgentWeights, defaultModel, defaultReasoningEffort, fullTrustConfirmed, permissionMode, preInjectPrompt, listening, groupToolsEnabled, groupToolsAllowSend, memoryEnabled, memoryAutoExtract, groupMemoryScope, claudeAutoMemory, memoryAgentId, memoryModel, decisionAgentId, decisionModel, busyTriage, botLoopGuard, responseAgentId, responseModel, replyPolishEnabled: draftValues.replyPolishEnabled, replyPolishAgentId: draftValues.replyPolishAgentId, replyPolishModel: draftValues.replyPolishModel, replyPolishTimeoutMs: replyPolishTimeoutValue(draftValues.replyPolishTimeoutSeconds), ...highRiskAllowedUsersPayload, highRiskPattern, riskControlMode }),
-    onSuccess: data => {
+    onSuccess: (data, submitted) => {
       setBaseline(previous => {
         const saved = previous ? JSON.parse(previous) : {};
-        for (const [key, definition] of Object.entries(botSettingFields)) if (definition.step === step) {
+        for (const [key, definition] of Object.entries(botSettingFields)) if (definition.step === submitted.step) {
           const stateKey = key === 'workspaceAliases' ? 'workspaceAliasRows' : key === 'replyPolishTimeoutMs' ? 'replyPolishTimeoutSeconds' : key;
-          if (Object.hasOwn(draftValues, stateKey)) saved[stateKey] = draftValues[stateKey as keyof typeof draftValues];
+          if (Object.hasOwn(submitted.values, stateKey)) saved[stateKey] = submitted.values[stateKey as keyof typeof submitted.values];
         }
-        if (step === 1) { saved.restrictUsers = restrictUsers; saved.appSecret = ''; }
-        return JSON.stringify({ ...draftValues, ...saved });
+        if (submitted.step === 1) { saved.restrictUsers = submitted.restrictUsers; saved.appSecret = ''; }
+        return JSON.stringify({ ...submitted.values, ...saved });
       });
-      if (step === 1 && !current) enableListeningAfterNewBot.current = true;
-      const savedId = appId.trim();
+      if (submitted.step === 1 && !current) enableListeningAfterNewBot.current = true;
+      const savedId = submitted.appId;
       draftRevision.current = data.bots.find(bot => bot.appId === savedId)?.revision ?? 1;
       qc.setQueryData(['lark-config'], data); setSelectedAppId(savedId);
-      if (step === 1) setField('appSecret', '');
+      if (submitted.step === 1) setField('appSecret', '');
       void qc.invalidateQueries({ queryKey: ['lark-hook-status', savedId] });
-      if (step === 1) setStep(2); else setCloseAfterSave(true);
+      if (submitted.step === 1) setStep(2);
+      else if (latestDraftSignature.current === submitted.signature) setCloseAfterSave(true);
     }
   });
   const installHook = useMutation({
@@ -393,7 +396,7 @@ export function LarkConfigModal({ agents, target, field, onLeaveGuardChange, onC
   return <>
   <Dialog open onClose={requestClose} label={current ? `更新飞书 Bot：${current.name}` : '绑定飞书 Bot'} size="md" closeOnEscape={dismissible} closeOnScrim={dismissible}>
     {/* <form> 插在 Dialog 与 Header/Body/Footer 之间会打断 flex 链，所以自己接上。 */}
-    <form ref={form} onSubmit={event => { event.preventDefault(); if (canSave) save.mutate(); }} className="flex min-h-0 flex-1 flex-col">
+    <form ref={form} onSubmit={event => { event.preventDefault(); if (canSave) save.mutate({ step, values: draftValues, signature: draftSignature, appId: appId.trim(), restrictUsers }); }} className="flex min-h-0 flex-1 flex-col">
       <Dialog.Header className="flex-wrap"><div className="min-w-0 flex-1"><h2 className="text-body font-semibold text-primary">{current ? `更新飞书 Bot：${current.name}` : '绑定飞书 Bot'}</h2><p className="mt-0.5 text-caption text-subtle">Bot 负责收发消息，Agent 负责执行任务</p></div><div className="order-3 mt-2 flex w-full shrink-0 items-center justify-end gap-0.5 sm:order-none sm:ml-auto sm:mt-0 sm:w-auto"><a href="https://open.larkoffice.com/app" target="_blank" rel="noreferrer" className="flex min-h-10 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 text-caption font-medium text-subtle transition-colors duration-fast ease-out hover:bg-hover hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring">飞书开发者后台<ExternalLink size={12}/></a><a href="https://open.larkoffice.com/page/launcher?from=backend_oneclick" target="_blank" rel="noreferrer" className="flex min-h-10 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 text-caption font-medium text-secondary transition-colors duration-fast ease-out hover:bg-hover hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring">快速创建应用<ExternalLink size={12}/></a></div><IconButton label="关闭" onClick={requestClose}><X size={15}/></IconButton></Dialog.Header>
       <div className="flex shrink-0 gap-1 overflow-x-auto border-b border-subtle bg-muted px-3 py-2">
         {config.data?.bots.map(bot => <button key={bot.appId} type="button" disabled={creationBusy || configurationBusy} onClick={() => requestLeave(() => { discardApproved.current = false; setSelectedAppId(bot.appId); setStep(bot.setupComplete ? 1 : 2); })} className={`flex h-10 max-w-[250px] shrink-0 items-center gap-1.5 rounded-md px-2.5 text-caption font-medium transition-colors duration-fast ease-out ${selectedAppId === bot.appId ? 'border border-default bg-surface text-primary shadow-card' : 'border border-transparent text-subtle hover:bg-hover hover:text-primary'}`}><Bot size={13} className="shrink-0"/><span title={bot.name} className="min-w-0 max-w-32 truncate">{bot.tabLabel}</span>{bot.setupComplete ? <span title="配置完成" className="shrink-0"><Badge tone="success"><Check size={9}/>已配置</Badge></span> : <span className="shrink-0"><Badge tone="warning">待配置</Badge></span>}{bot.activeListening && !config.data?.listeningDisabled && bot.listening && <span title="监听已启动" className="h-1.5 w-1.5 shrink-0 rounded-full bg-success-solid"/>}</button>)}

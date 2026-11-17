@@ -353,6 +353,26 @@ describe('runSetup', () => {
     expect(updatesOf(writeEnv)).not.toHaveProperty('LARK_APP_ID');
   });
 
+  it('emits exactly one JSON failure with the saved local changes when Lark binding returns failed', async () => {
+    const dir = await makeTempDir();
+    const failed: LarkBindResult = {
+      outcome: 'failed', appId: 'cli_x', steps: [], warnings: [],
+      next: 'dutydeck setup --lark-app-id cli_x --force-login',
+      error: { code: 'fixture_failure', message: 'fixture failed' }
+    };
+    const { deps, out, err, writeEnv } = harness({ cwd: dir, bind: async () => failed });
+
+    const result = await runSetup({ json: true, cwd: dir, port: '14310', larkAppId: 'cli_x', yes: true }, deps);
+
+    expect(result).toMatchObject({ ok: false, changed: true, error: failed.error, next: failed.next });
+    expect(result.changedKeys).toEqual(expect.arrayContaining(['DUTYDECK_DEFAULT_CWD', 'DUTYDECK_PORT']));
+    expect(result.changedKeys).not.toContain('LARK_APP_ID');
+    expect(out.read().trimEnd().split('\n')).toHaveLength(1);
+    expect(JSON.parse(out.read())).toEqual(result);
+    expect(err.read()).toBe('');
+    expect(writeEnv).toHaveBeenCalledTimes(1);
+  });
+
   it('records LARK_APP_ID after a successful bind and warns about the missing secret', async () => {
     const dir = await makeTempDir();
     const ready = larkResult({ outcome: 'ready', appId: 'cli_ok', warnings: ['请到管理台确认版本状态'] });

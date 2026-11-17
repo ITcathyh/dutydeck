@@ -202,7 +202,7 @@ export function buildSnapshot(overrides: SnapshotOverrides = {}): SessionInsight
       engineVersion: overrides.engineVersion ?? 'engine-v1',
       parserVersion: overrides.parserVersion ?? 'parser-v1',
       metricVersion,
-      redactionVersion: overrides.redactionVersion ?? 'redaction-v1'
+      redactionVersion: overrides.redactionVersion ?? 'redaction-v2'
     }
   };
 

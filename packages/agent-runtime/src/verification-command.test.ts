@@ -1,9 +1,16 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
+import { execFile, execFileSync } from 'node:child_process';
+import { promisify } from 'node:util';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseProcStat, procStatExited } from '@dutydeck/shared';
 import { runIsolatedCommand } from './verification.js';
+import { lazyBundleForTest } from '../../../tests/support/bundle-for-test.js';
+
+const stdinFixture = lazyBundleForTest('verification-stdin', join(process.cwd(), 'packages/agent-runtime/tests/fixtures/verification-stdin.mts'));
+afterAll(() => stdinFixture.cleanup());
+const execFileAsync = promisify(execFile);
 
 const directories: string[] = [];
 const ownedPids = new Set<number>();
@@ -116,4 +123,24 @@ describe.skipIf(process.platform !== 'linux')('isolated command process settleme
     expect(result.output).toBe('a'.repeat(16_384));
     expect(result.cleanupError).toBeUndefined();
   });
+
+  it('handles early-closed stdin in an independent Node process without changing other exit facts', async () => {
+    const cwd = await workspace();
+    execFileSync('git', ['-C', cwd, 'init', '-q']);
+    execFileSync('git', ['-C', cwd, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'baseline']);
+    const { stdout, stderr } = await execFileAsync(process.execPath, [await stdinFixture.path(), cwd], { timeout: 20_000, maxBuffer: 1024 * 1024 });
+    expect(stderr).toBe('');
+    const results = JSON.parse(stdout);
+    expect(results.earlyExit).toMatchObject({ exitCode: 0, timedOut: false, interrupted: false });
+    expect(results.earlyExit.error).toBeUndefined();
+    expect(results.persisted).toMatchObject({ status: 'passed', exitCode: 0 });
+    expect(results.persisted.error).toBeUndefined();
+    expect(results.normal).toMatchObject({ exitCode: 0, output: 'ok', timedOut: false, interrupted: false });
+    expect(results.failure).toMatchObject({ exitCode: 7, output: 'failed', timedOut: false, interrupted: false });
+    expect(results.spawnFailure.error).toBeTruthy();
+    expect(results.spawnFailure.exitCode).not.toBe(0);
+    expect(results.spawnFailure).toMatchObject({ timedOut: false, interrupted: false });
+    expect(results.timedOut).toMatchObject({ timedOut: true, interrupted: false });
+    expect(results.interrupted).toMatchObject({ timedOut: false, interrupted: true });
+  }, 25_000);
 });

@@ -1,10 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import type { AgentConfig, DriverFactory, NormalizedDriverEvent } from '@dutydeck/shared';
+import { childEnvironment } from '../../../../packages/shared/runtime/child-environment.mjs';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import { LarkMessageCoordinator, type PersistedLarkCardTask } from './coordinator.js';
 import type { LarkMessageEvent } from './listener.js';
@@ -69,8 +72,8 @@ const callbackValueOf = (card: any, elementId: string) => {
 };
 const callbackButtonCount = (card: any) => (JSON.stringify(buildLarkCard(card)).match(/"type":"callback"/g) ?? []).length;
 
-/** tools：第一轮在挂起前记下的工具调用；protocol / adapterId：终端模式的 Agent 与它的适配器。 */
-async function interruptedTopic({ tools = [] as NormalizedDriverEvent[], protocol = 'acp' as 'acp' | 'pty-cli', adapterId = undefined as string | undefined } = {}) {
+/** tools：第一轮在挂起前记下的工具调用；protocol / adapterId：终端模式的 Agent 与它的适配器；execute：每次真实 send 执行的本地命令。 */
+async function interruptedTopic({ tools = [] as NormalizedDriverEvent[], protocol = 'acp' as 'acp' | 'pty-cli', adapterId = undefined as string | undefined, execute = undefined as (() => void) | undefined } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-redispatch-'));
   const path = join(cwd, 'state.db');
   const agent: AgentConfig = { id: 'redispatch-fixture', name: 'Fixture', command: 'unused', args: [], protocol, ...(adapterId ? { adapterId } : {}), cwd, env: {},
@@ -89,6 +92,7 @@ async function interruptedTopic({ tools = [] as NormalizedDriverEvent[], protoco
     stop: async () => { for (const release of pending) release(); pending.clear(); },
     send: async (input: any) => {
       prompts.push({ sessionId, prompt: typeof input === 'string' ? input : input.prompt });
+      execute?.();
       if (agentState.hang) {
         for (const event of script) emit(event);
         script = [];
@@ -362,6 +366,74 @@ describe('服务重启切断的一轮自动重投（真实 Runtime + SQLite）',
     expect(await daemon.coordinator.handleAction(callbackValueOf(card, 'replay_turn'), 'ou_alice', context)).toMatchObject({ type: 'success', content: expect.stringContaining('已放弃') });
     await new Promise(resolve => setTimeout(resolve, 100));
     expect(h.prompts).toHaveLength(3);
+  });
+
+  it('普通 git diff 可能执行仓库 textconv，恢复消费者停在人工确认而不自动重投', async () => {
+    const h = await interruptedTopic({ tools: [{ type: 'tool_call', data: { id: 'call_diff', name: 'Bash', status: 'completed',
+      input: { command: 'git diff -- report.txt', description: 'Show changes' } } }] });
+    h.agentState.hang = false;
+    const daemon = await h.restart();
+    const { saved } = await h.mapping();
+    await until(() => h.lastUpdate(saved.card_message_id!)?.statusLabel === '结果未知');
+    expect(h.prompts).toHaveLength(1);
+    expect(JSON.parse(await daemon.repos.config.get('lark.redispatch.app.om_first.1') ?? '{}'))
+      .toMatchObject({ phase: 'held', redispatch: { count: 0, unsafeReason: '执行过 git diff' } });
+  });
+
+  it('显式关闭外部 diff 与 textconv 仍不能证明仓库执行配置已净化，恢复消费者停在人工确认', async () => {
+    const h = await interruptedTopic({ tools: [{ type: 'tool_call', data: { id: 'call_diff', name: 'Bash', status: 'completed',
+      input: { command: 'git diff --no-ext-diff --no-textconv -- report.txt', description: 'Show changes' } } }] });
+    h.agentState.hang = false;
+    const daemon = await h.restart();
+    const { saved } = await h.mapping();
+    await until(() => h.lastUpdate(saved.card_message_id!)?.statusLabel === '结果未知');
+    await daemon.coordinator.reconcile(h.config);
+    expect(h.prompts).toHaveLength(1);
+    expect(JSON.parse(await daemon.repos.config.get('lark.redispatch.app.om_first.1') ?? '{}'))
+      .toMatchObject({ phase: 'held', redispatch: { count: 0, unsafeReason: '执行过 git diff' } });
+  });
+
+  it('git status 执行过仓库 fsmonitor 后，真实 Runtime 与 SQLite 重开保持 held，不重复副作用', async () => {
+    const sample = await mkdtemp(join(tmpdir(), 'dutydeck-lark-status-monitor-'));
+    cleanups.push(() => rm(sample, { recursive: true, force: true }));
+    const env = childEnvironment({ PATH: process.env.PATH!, HOME: sample, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' });
+    const git = (args: string[]) => execFileSync('git', args, { cwd: sample, env, encoding: 'utf8', timeout: 5000 });
+    git(['init', '--quiet']);
+    git(['config', 'user.name', 'Replay Fixture']);
+    git(['config', 'user.email', 'replay@example.invalid']);
+    git(['config', 'core.hooksPath', '/dev/null']);
+    writeFileSync(join(sample, 'report.txt'), 'before\n');
+    git(['add', '.']);
+    git(['commit', '--quiet', '-m', 'fixture']);
+    writeFileSync(join(sample, 'report.txt'), 'after\n');
+    writeFileSync(join(sample, 'fsmonitor.sh'), '#!/bin/sh\nprintf "called\\n" >> fsmonitor-marker\nprintf "fixture-clock\\0/\\0"\n', { mode: 0o700 });
+    git(['config', 'core.fsmonitorHookVersion', '2']);
+    git(['config', 'core.fsmonitor', './fsmonitor.sh']);
+    const marker = () => existsSync(join(sample, 'fsmonitor-marker')) ? readFileSync(join(sample, 'fsmonitor-marker'), 'utf8').trim().split('\n').filter(Boolean).length : 0;
+    const command = `git -C ${sample} status --short`;
+    const h = await interruptedTopic({ tools: [{ type: 'tool_call', data: { id: 'call_status', name: 'Bash', status: 'completed',
+      input: { command, description: 'Show status' } } }], execute: () => { git(['status', '--short']); } });
+    expect(marker()).toBe(1);
+    h.agentState.hang = false;
+
+    const daemon = await h.restart();
+    const { saved } = await h.mapping();
+    await until(() => h.lastUpdate(saved.card_message_id!)?.statusLabel === '结果未知');
+    await daemon.coordinator.reconcile(h.config);
+    const recovery = async () => JSON.parse(await daemon.repos.config.get('lark.redispatch.app.om_first.1') ?? '{}');
+    // moved 会先落库、第二次 send 随后才执行；等 held 或第二次 prompt，不能拿重放尚未发生的瞬间冒充 marker 未增长。
+    await until(async () => (await recovery()).phase === 'held' || h.prompts.length === 2);
+    expect(marker()).toBe(1);
+    expect(h.prompts).toHaveLength(1);
+    expect(await recovery()).toMatchObject({ phase: 'held', redispatch: { count: 0, unsafeReason: '执行过 git status' } });
+
+    // 对照：只移除 fsmonitor，同一条命令不再写 marker；历史账本仍没有当时环境已净化的证据，重开决策保持 held。
+    git(['config', '--unset-all', 'core.fsmonitor']);
+    git(['status', '--short']);
+    expect(marker()).toBe(1);
+    await daemon.coordinator.reconcile(h.config);
+    expect(h.prompts).toHaveLength(1);
+    expect(marker()).toBe(1);
   });
 
   it('执行过 git push 的一轮标为 replay_unsafe、不自动重投；卡上说明原因，「重新执行」走现有鉴权与他人任务二次确认', async () => {
