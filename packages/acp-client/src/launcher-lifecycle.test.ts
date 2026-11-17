@@ -35,8 +35,8 @@ it.each(['environment', 'claude', 'nested', 'forced-exit'])('checks real Agent c
     env: { lifecycle_directory: cwd, dutydeck_group_tools_token: 'fixture-token', ...(kind !== 'claude' ? { VENDOR_FIXTURE: 'synthetic' } : {}) }
   }, { sessionKey, onEvent() {} });
   let pid: number | undefined;
-  // The periodic process-tree sampler never runs, as when ACPX kills the launcher before its first sample.
-  if (kind === 'forced-exit') vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+  // Freeze both interval users and the shared one-shot sampling timer before the first process-tree sample.
+  if (kind === 'forced-exit') vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] });
   try {
     await adapter.start();
     const calls = (await readFile(join(cwd, 'calls.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
@@ -47,6 +47,8 @@ it.each(['environment', 'claude', 'nested', 'forced-exit'])('checks real Agent c
       expect((adapter as any).agentChildren.get(launcher).hasGroups()).toBe(false);
       // Only the launcher's own report names the detached Agent.
       expect(readdirSync(join(cwd, '.dutydeck', 'launchers'))).toHaveLength(1);
+      // Discard the frozen timer without running it; process cleanup below uses real timers.
+      vi.useRealTimers();
       launcher.kill('SIGKILL');
       await expect.poll(() => launcher.signalCode).toBe('SIGKILL');
       await adapter.stop();

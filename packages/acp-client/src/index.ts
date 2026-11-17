@@ -11,6 +11,7 @@ import { childEnvironment } from '@dutydeck/shared/child-environment';
 import { testRegexWithTimeout } from './regex-timeout.js';
 import { PROCESS_CPU_MIN_WINDOW_MS, ProcessTreeCpu } from './process-cpu.js';
 import { AgentProcessTree, scanProcesses } from './agent-process-tree.js';
+import { agentProcessSampler } from './agent-process-sampler.js';
 import { currentReleasePath } from './release-path.js';
 import { acpDataRoot, buildLaunchObservation, buildNativeObservation, inferAcpInsightClient, resolveAcpChildEnvironment } from './transcript-source.js';
 
@@ -592,9 +593,9 @@ export class AcpxAdapter implements AgentDriver {
     if (this.processes.has(child)) return;
     const launcher = event.kind === 'agent' && !!child.spawnargs && usesDutydeckLauncher(child.spawnargs);
     const tree = event.kind === 'agent' ? new AgentProcessTree(child.pid, launcher ? join(this.agent.cwd ?? process.cwd(), '.dutydeck', LAUNCHER_REPORTS) : undefined) : undefined;
-    let sampling: NodeJS.Timeout | undefined;
+    let cancelSampling: (() => void) | undefined;
     const exited = () => {
-      clearInterval(sampling);
+      cancelSampling?.();
       const cleanupUnknown = !!launcher && !!tree && tree.hasCleanupUnknownReport(child.exitCode);
       if (launcher && tree && (child.signalCode || cleanupUnknown)) { tree.refresh(); this.unconfirmedTrees.add(tree); }
       else tree?.discardReport();
@@ -617,9 +618,7 @@ export class AcpxAdapter implements AgentDriver {
     if (launcher && tree) {
       // Record the Agent the launcher detaches into its own process group, so its exit can still be proven if the
       // launcher itself is killed (ACPX SIGKILLs it on a failed start).
-      let samples = 0;
-      sampling = setInterval(() => { if (tree.refresh() === false || tree.hasGroups() || ++samples >= 50) clearInterval(sampling); }, 100);
-      sampling.unref?.();
+      cancelSampling = agentProcessSampler.register(tree);
     }
     // acpx 真实 spawn 出 agent 进程（含 env-launcher 包装层）的边界：此刻用同构
     // 最终环境冻结非密钥 dataRoot。该事件先于 strict onPrepared 触发。
