@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
-import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
+import { nativeResumeCommand, usableResumeId } from '../resume-id.js';
 import { delay, submitPrompt } from './input-settle.js';
 
 const BRACKETED_PASTE_START = '\x1b[200~';
@@ -66,9 +66,6 @@ export function createKimiAdapter(): CliAdapter {
 
     /** Kimi 自己铸会话 id；dutydeck 的 `ses_<uuid>` 不是它的 id → null，
      *  driver 改起新会话。 */
-    buildResumeCommand(sessionId: string): string[] | null {
-      if (isDutydeckSessionId(sessionId)) return null;
-      return ['--resume', sessionId];
-    },
+    buildResumeCommand: nativeResumeCommand,
   };
 }

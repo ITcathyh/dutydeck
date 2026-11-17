@@ -134,8 +134,7 @@ describe('claude-code', () => {
     expect(adapter.completionPattern).toBeInstanceOf(RegExp);
     expect(adapter.readyPattern).toBeInstanceOf(RegExp);
     expect(adapter.capabilities.resume).toBe(true);
-    const block = adapter.injectSessionContext?.({ sessionId: SID });
-    expect(block).toContain('<dutydeck_routing>');
+    expect(adapter.injectSessionContext).toBeUndefined();
     expect(adapter.buildResumeCommand?.(SID)).toEqual(['--resume', SID]);
   });
 });
@@ -414,7 +413,7 @@ describe('grok', () => {
     expect(adapter.readyPattern).toBeInstanceOf(RegExp);
     expect(adapter.busyPattern).toBeInstanceOf(RegExp);
     expect(adapter.capabilities.resume).toBe(true);
-    expect(adapter.injectSessionContext?.({ sessionId: SID })).toContain('<dutydeck_routing>');
+    expect(adapter.injectSessionContext).toBeUndefined();
     expect(adapter.buildResumeCommand?.(SID)).toEqual(['--resume', SID]);
   });
 });

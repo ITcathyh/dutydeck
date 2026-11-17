@@ -241,8 +241,7 @@ function verificationFreshness(record: VerificationRecord, current?: string): Pi
 }
 
 export class VerificationManager {
-  private readonly controllers = new Map<AbortController, string>();
-  private readonly runs = new Map<Promise<VerificationResponse>, string>();
+  private readonly runs = new Map<Promise<VerificationResponse>, { sessionId: string; controller: AbortController }>();
 
   constructor(private readonly config: ConfigRepository, private readonly commit?: (sessionId: string, operation: () => Promise<void>) => Promise<void>) {}
 
@@ -306,22 +305,21 @@ export class VerificationManager {
 
   run(sessionId: string, cwd: string, input: VerificationCommandInput, actorId?: string, taskId?: string, beforeCommand?: () => Promise<void>, admitHeld?: () => Promise<void>): Promise<VerificationResponse> {
     const controller = new AbortController();
-    this.controllers.set(controller, sessionId);
     const run = this.execute(sessionId, cwd, input, actorId, taskId, controller.signal, beforeCommand, admitHeld);
-    this.runs.set(run, sessionId);
-    const cleanup = () => { this.controllers.delete(controller); this.runs.delete(run); };
+    this.runs.set(run, { sessionId, controller });
+    const cleanup = () => { this.runs.delete(run); };
     void run.then(cleanup, cleanup);
     return run;
   }
 
   async stop(): Promise<void> {
-    for (const controller of this.controllers.keys()) controller.abort();
+    for (const { controller } of this.runs.values()) controller.abort();
     await Promise.allSettled([...this.runs.keys()]);
   }
 
   async stopSession(sessionId: string): Promise<void> {
-    for (const [controller, id] of this.controllers) if (id === sessionId) controller.abort();
-    await Promise.allSettled([...this.runs].filter(([, id]) => id === sessionId).map(([run]) => run));
+    for (const { sessionId: id, controller } of this.runs.values()) if (id === sessionId) controller.abort();
+    await Promise.allSettled([...this.runs].filter(([, { sessionId: id }]) => id === sessionId).map(([run]) => run));
   }
 
   private async execute(sessionId: string, cwd: string, input: VerificationCommandInput, actorId: string | undefined, taskId: string | undefined, signal: AbortSignal, beforeCommand?: () => Promise<void>, admitHeld?: () => Promise<void>): Promise<VerificationResponse> {

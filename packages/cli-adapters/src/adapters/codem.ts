@@ -1,5 +1,5 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
-import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
+import { isDutydeckSessionId, nativeResumeCommand, usableResumeId } from '../resume-id.js';
 import { pasteAndSubmit } from './input-settle.js';
 
 /** CodeM's interactive terminal surface. It owns history by an explicit
@@ -23,10 +23,7 @@ export function createCodemAdapter(): CliAdapter {
       await pasteAndSubmit(backend, prompt);
     },
 
-    buildResumeCommand(sessionId: string): string[] | null {
-      if (isDutydeckSessionId(sessionId)) return null;
-      return ['--resume', sessionId];
-    },
+    buildResumeCommand: nativeResumeCommand,
 
     readyPattern: /Type a task|use \/ @ ! for commands/i,
   };

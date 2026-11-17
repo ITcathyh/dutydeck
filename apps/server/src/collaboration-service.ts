@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { digest as executionJsonDigest } from '@dutydeck/runtime/digest';
 import { z } from 'zod';
-import { RuntimeError, countDecisionUsage, isBotTurnRecord, previewNextSchedule, scheduleDeliverySchema, scheduleTriggerSchema, DECISION_WINDOW_LIMIT, listWindowIncomplete, type CollaborationMandate, type CollaborationRepository, type CollaborationScope, type CollaborationSnapshot, type CreateScheduleDefinitionInput, type RepositoryBundle, type ScheduleDefinition } from '@dutydeck/shared';
+import { RuntimeError, countDecisionUsage, isBotTurnRecord, previewNextSchedule, scheduleDeliverySchema, scheduleTriggerSchema, serialByKey, DECISION_WINDOW_LIMIT, listWindowIncomplete, type CollaborationMandate, type CollaborationRepository, type CollaborationScope, type CollaborationSnapshot, type CreateScheduleDefinitionInput, type RepositoryBundle, type ScheduleDefinition } from '@dutydeck/shared';
 
 export type CollaborationRepositories = Pick<RepositoryBundle, 'scheduleDefinitions' | 'scheduleGenerations' | 'scheduleOccurrences' | 'scheduleWatermarks' | 'scheduleLeases'> & { collaboration: CollaborationRepository };
 export type CollaborationAuthorization = (scope: CollaborationScope, actorId: string, action: 'read' | 'write' | 'manage' | 'execute' | 'deliver') => Promise<boolean>;
@@ -57,11 +57,6 @@ export class CollaborationService {
   private now() { return this.options.now?.() ?? new Date(); }
   async require(scope: CollaborationScope, actorId: string, action: Parameters<CollaborationAuthorization>[2]) {
     if (!actorId || !await this.options.authorize(scope, actorId, action)) throw new RuntimeError('COLLABORATION_FORBIDDEN', 'Current actor is not authorized', 403);
-  }
-  private async serial<T>(id: string, work: () => Promise<T>): Promise<T> {
-    const current = (this.locks.get(id) ?? Promise.resolve()).catch(() => {}).then(work);
-    this.locks.set(id, current);
-    try { return await current; } finally { if (this.locks.get(id) === current) this.locks.delete(id); }
   }
   private async command(scope: CollaborationScope, actorId: string, id: string, kind: string, input: unknown) {
     const digest = executionJsonDigest(input);
@@ -141,7 +136,7 @@ export class CollaborationService {
   async createMandate(scope: CollaborationScope, actorId: string, body: unknown) {
     await this.require(scope, actorId, 'write');
     const input = createMandateSchema.parse(body), id = input.id;
-    return this.serial(idFor(scope, id), async () => {
+    return serialByKey(this.locks, idFor(scope, id), async () => {
       const previous = await this.repositories.collaboration.getMandate(scope, id);
       if (previous) {
         await this.command(scope, actorId, id, 'create_mandate', input);
@@ -189,7 +184,7 @@ export class CollaborationService {
   async updateMandate(scope: CollaborationScope, actorId: string, id: string, body: unknown) {
     await this.require(scope, actorId, 'write');
     const input = updateMandateSchema.parse(body);
-    return this.serial(idFor(scope, id), async () => {
+    return serialByKey(this.locks, idFor(scope, id), async () => {
       const mandate = await this.updatable(scope, actorId, id, input);
       if (Object.keys(input).every(key => key === 'expectedRevision' || key === 'deliveryPaused')) {
         const schedule = await this.repositories.scheduleDefinitions.get(mandate.scheduleDefinitionId); if (!schedule) throw missing();

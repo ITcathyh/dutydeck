@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { canonicalExecutionJson, pluginResultLimits as limits, type PluginResultDelivery, type PluginResultRepository, type PluginResultReceipt, type ResultPrincipal, type PluginResultTarget } from '@dutydeck/shared';
+import { canonicalExecutionJson, pluginResultLimits as limits, withTimeout, type PluginResultDelivery, type PluginResultRepository, type PluginResultReceipt, type ResultPrincipal, type PluginResultTarget } from '@dutydeck/shared';
 import { PluginResultToolRegistry } from './result-tools.js';
 export class PluginResultError extends Error {
   constructor(public readonly code: string, public readonly statusCode = 403) { super(code); }
@@ -57,17 +57,16 @@ export class PluginResultService {
       target:authority.target,leaseToken:resultToken(),leaseUntil:now+limits.executionMs,providerKey:`private_${resultHash(id+canonicalExecutionJson(authority.target)).slice(0,40)}`,createdAt:now,expiresAt:now+limits.ttlMs },now);
     if (!reserved.acquired) { if (reserved.delivery.status==='ready') await this.deliver(reserved.delivery.id,authority.assertCurrent); return receiptFor(this.repository.get(reserved.delivery.id)!); }
     const row=reserved.delivery, abort=new AbortController();
-    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       await authority.assertCurrent();
-      const value = await Promise.race([Promise.resolve().then(()=>entry.tool.execute(parsed,{ invocationId:row.id,requester:Object.freeze({...authority.requester}),signal:abort.signal })),new Promise<never>((_,reject)=>{timer=setTimeout(()=>{abort.abort();reject(new PluginResultError('RESULT_TIMEOUT',504));},limits.executionMs);})]);
+      const value = await withTimeout(Promise.resolve().then(()=>entry.tool.execute(parsed,{ invocationId:row.id,requester:Object.freeze({...authority.requester}),signal:abort.signal })),limits.executionMs,()=>{abort.abort();return new PluginResultError('RESULT_TIMEOUT',504);});
       const files=resultFiles(value);
       await authority.assertCurrent();
       this.repository.store(row.id,row.leaseToken,files,this.now());
     } catch (error) {
       this.repository.fail(row.id,row.leaseToken,error instanceof PluginResultError ? error.code : 'RESULT_EXECUTION_FAILED');
       return receiptFor(this.repository.get(row.id)!);
-    } finally { if (timer) clearTimeout(timer); abort.abort(); }
+    } finally { abort.abort(); }
     await this.deliver(row.id,authority.assertCurrent);
     return receiptFor(this.repository.get(row.id)!);
   }

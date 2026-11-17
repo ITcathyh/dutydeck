@@ -1,5 +1,4 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
-import { buildDutydeckRoutingBlock } from '../shared-hints.js';
 import { pinnedSessionUuid } from '../resume-id.js';
 import { relayCommandFrom, relayEnabled, relayPermissionHookTimeoutSeconds } from '@dutydeck/relay';
 import { DriverRecoveryError, errorMessage, PromptNotWrittenError } from '@dutydeck/shared';
@@ -576,11 +575,6 @@ export function createClaudeFamilyAdapter(id: string): CliAdapter {
       // PlanMode 的审批 TUI 在 IM 场景无法驱动，直接禁掉。
       args.push('--disallowed-tools', 'EnterPlanMode,ExitPlanMode');
       return args;
-    },
-
-    // 会话上下文（路由块）由 driver 拼到首轮 prompt 前（契约统一走 prompt 前缀）。
-    injectSessionContext(ctx: AdapterSessionContext): string {
-      return buildDutydeckRoutingBlock(ctx.locale, ctx.env);
     },
 
     writeInput: writeClaudeFamilyInput,

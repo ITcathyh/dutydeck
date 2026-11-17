@@ -1,5 +1,5 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
-import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
+import { nativeResumeCommand, usableResumeId } from '../resume-id.js';
 import { submitPrompt } from './input-settle.js';
 
 /**
@@ -47,10 +47,7 @@ export function createCopilotAdapter(): CliAdapter {
     /** Copilot 会话完全由 CLI 自己管，dutydeck 的 sessionId 钉不成它的会话 id，
      *  且没有任何 cliSessionId 捕获机制——「缺 id」是常态。收到 dutydeck 的
      *  `ses_<uuid>` → null，driver 改起新会话（而不是拿它去撞 `--resume`）。 */
-    buildResumeCommand(sessionId: string): string[] | null {
-      if (isDutydeckSessionId(sessionId)) return null;
-      return ['--resume', sessionId];
-    },
+    buildResumeCommand: nativeResumeCommand,
 
     // 无显式完成标记、Ink 输入框提示符太通用匹配不可靠 —— 纯 quiescence 判定。
   };

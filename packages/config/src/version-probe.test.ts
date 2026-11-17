@@ -70,6 +70,27 @@ it('probes configured CLIs in parallel without blocking the event loop and retur
   expect(loaded).toEqual(loadConfigWithDiagnostics(env));
 }, 20_000);
 
+it('keeps concurrent asynchronous assembly version lookups isolated', async () => {
+  const directory = await fixtureDirectory();
+  const [codexA, codexB, customA, customB] = await Promise.all(['codex-a', 'codex-b', 'custom-a', 'custom-b'].map(name => cli(directory, name, 0.2)));
+  vi.stubEnv('PATH', '');
+  vi.resetModules();
+  const { loadConfigWithDiagnosticsAsync } = await import('./index.js');
+  const contributions = PTY_AGENT_CONTRIBUTIONS.filter(agent => ['codex', 'codex-cli'].includes(agent.id));
+  const load = (label: string, codex: string, custom: string) => loadConfigWithDiagnosticsAsync({
+    CODEX_PATH: codex,
+    DUTYDECK_DEFAULT_CWD: directory,
+    DUTYDECK_AGENTS_JSON: JSON.stringify([{ id: `custom-${label}`, name: `Custom ${label}`, command: custom, protocol: 'acp' }])
+  }, contributions);
+  const [loadedA, loadedB] = await Promise.all([load('a', codexA, customA), load('b', codexB, customB)]);
+  for (const [label, loaded, codex, custom] of [['a', loadedA, codexA, customA], ['b', loadedB, codexB, customB]] as const) {
+    for (const id of ['codex', 'codex-cli', 'codex-acp']) expect(loaded.config.agents.find(agent => agent.id === id)).toMatchObject({ version: `codex-${label} 1.2.3` });
+    expect(loaded.config.agents.find(agent => agent.id === `custom-${label}`)).toMatchObject({ version: `custom-${label} 1.2.3` });
+    expect(await invocations(codex)).toEqual(['--version', '-V', 'version']);
+    expect(await invocations(custom)).toEqual(['--version', '-V', 'version']);
+  }
+}, 20_000);
+
 it('does not execute custom terminal wrappers to read a version', async () => {
   const directory = await fixtureDirectory();
   const wrapper = await cli(directory, 'wrapper');

@@ -1,5 +1,4 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
-import { buildDutydeckRoutingBlock } from '../shared-hints.js';
 import { delay } from './input-settle.js';
 import { pushClaudeFamilyBypassArgs } from './claude-family.js';
 
@@ -22,11 +21,6 @@ export function createGeniusAdapter(): CliAdapter {
       if (model && model.trim()) args.push('--model', model.trim());
       pushClaudeFamilyBypassArgs(args, permissionMode);
       return args;
-    },
-
-    // 统一由 driver 把返回块拼到首轮 prompt 前作为会话上下文。
-    injectSessionContext(ctx: AdapterSessionContext): string {
-      return buildDutydeckRoutingBlock(ctx.locale, ctx.env);
     },
 
     async writeInput(backend: PtyLike, prompt: string): Promise<void> {

@@ -65,6 +65,11 @@ export function isDutydeckSessionId(sessionId: string): boolean {
   return DUTYDECK_SESSION_ID_RE.test(sessionId) || DUTYDECK_STABLE_SESSION_ID_RE.test(sessionId);
 }
 
+/** Resume an opaque CLI-native id with `--resume`, never Dutydeck's own id. */
+export function nativeResumeCommand(sessionId: string): string[] | null {
+  return isDutydeckSessionId(sessionId) ? null : ['--resume', sessionId];
+}
+
 /**
  * The resume id to actually use, or `undefined` when there is none usable.
  *

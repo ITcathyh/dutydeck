@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentConfig, NormalizedDriverEvent } from '@dutydeck/shared';
 import type { CliAdapter } from '@dutydeck/cli-adapters';
-import { createCliAdapter } from '@dutydeck/cli-adapters';
+import { buildDutydeckRoutingBlock, createCliAdapter } from '@dutydeck/cli-adapters';
 import { PtyBackend } from '@dutydeck/session-backends';
 import { PtyCliDriver } from './driver.js';
 import { PTY_AGENT_CONTRIBUTIONS } from './contributions.js';
@@ -67,7 +67,7 @@ describe('PtyCliDriver（PtyBackend + 假 CLI 集成）', () => {
     const claude = createCliAdapter('claude-code');
     const adapter: CliAdapter = { id: 'claude-code', capabilities: {}, buildArgs: context => [fixturePath, ...claude.buildArgs(context)],
       prepareLaunch: async (context, env) => claude.prepareLaunch!({ ...context, command: claudeVersionPath }, env),
-      ...(adapterContext ? { injectSessionContext: (context: Parameters<NonNullable<CliAdapter['injectSessionContext']>>[0]) => claude.injectSessionContext!(context) } : {}),
+      ...(adapterContext ? { injectSessionContext: (context: Parameters<NonNullable<CliAdapter['injectSessionContext']>>[0]) => buildDutydeckRoutingBlock(context.locale, context.env) } : {}),
       writeInput: (backend, prompt) => { prompts.push(prompt); backend.write(prompt + '\n'); }, completionPattern: /MOCK DONE/ };
     const driver = new PtyCliDriver({ agent: { id: 'mock', name: 'Mock', command: process.execPath, args: [], protocol: 'pty-cli',
       cwd: dir, env: { dutydeck_frozen_materials: 'true', dutydeck_session_permission_mode: 'ask', dutydeck_relay_url: 'http://127.0.0.1:1', dutydeck_relay_token: 'fixture' },
