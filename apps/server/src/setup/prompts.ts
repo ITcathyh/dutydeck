@@ -226,20 +226,21 @@ export function createPrompter(options: PrompterOptions): Prompter {
         return chosen.value;
       }
       render();
-      const validateIndex: Validator<T> = raw => {
+      const validateIndex: Validator<number> = raw => {
         const index = Number.parseInt(raw, 10);
         if (!Number.isInteger(index) || index < 1 || index > choices.length) {
           throw new Error(`请输入 1-${choices.length} 之间的编号。`);
         }
-        return choices[index - 1]!.value;
+        return index;
       };
-      return await this.ask<T>({
+      const chosenIndex = await this.ask<number>({
         question: '请选择编号',
         remedyFlag,
-        defaultValue: choices[fallback]!.value,
+        defaultValue: fallback + 1,
         defaultLabel: String(fallback + 1),
         validate: validateIndex
       });
+      return choices[chosenIndex - 1]!.value;
     },
 
     async confirm({ question, dangerous = false, defaultValue = false }) {

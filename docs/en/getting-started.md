@@ -15,7 +15,7 @@ pnpm add -g @byted/dutydeck
 dutydeck setup
 ```
 
-The wizard detects Agent CLIs, sets the default working directory and can bind a Lark bot. The default Agent and the App Secret are stored in the bot configuration (the same one the Web panel shows), not in `.env`; the secret is prompted with hidden input. When creating a bot interactively it asks whether to start listening now (default yes).
+The wizard detects Agent CLIs, sets the default working directory and can bind a Lark bot. The default Agent and the App Secret are stored in the bot configuration (the same one the Web panel shows), not in `.env`. For numbered choices, press Enter to accept the marked default or type another number to switch. The secret is prompted with hidden input. When creating a bot interactively it asks whether to start listening now (default yes).
 
 New bots use `ask`. The selected Agent must support Lark approval (ACP or Claude Code / Seed / Relay terminal mode). Otherwise, the wizard leaves the bot configuration unsaved and asks you to rerun with `--agent <id>` using an Agent with approval support; it never enables full trust automatically. Any Open Platform binding already completed remains in place.
 

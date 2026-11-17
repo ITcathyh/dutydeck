@@ -392,10 +392,55 @@ describe('choose', () => {
     prompter.close();
   });
 
-  it('stdin 关闭时交互 choose 退化到默认项的编号', async () => {
+  it('stdin 关闭时交互 choose 退化到默认项', async () => {
     const { prompter } = build({ interactive: true, closedInput: true });
-    // EOF 走 ask 的默认值分支；defaultValue 是编号 1 对应的值。
-    await expect(prompter.choose({ question: '选择后端', remedyFlag: '--backend <名称>', choices: [{ value: 1, label: '一' }, { value: 2, label: '二' }], defaultIndex: 0 })).resolves.toBe(1);
+    // EOF 走 ask 的默认值分支；value 为非序号数值，避免与 1-based 编号巧合相等
+    await expect(prompter.choose({ question: '选择后端', remedyFlag: '--backend <名称>', choices: [{ value: 10, label: '一' }, { value: 20, label: '二' }], defaultIndex: 0 })).resolves.toBe(10);
+    prompter.close();
+  });
+
+  it.each([
+    { name: '直接回车', feed: (input: PassThrough) => input.write('\n'), closedInput: false },
+    { name: '空白输入回车', feed: (input: PassThrough) => input.write('   \n'), closedInput: false },
+    { name: '预先关闭 stdin (EOF)', feed: () => {}, closedInput: true },
+    { name: '提问后关闭 stdin (EOF)', feed: (input: PassThrough) => input.end(), closedInput: false }
+  ])('字符串选项且 defaultIndex=1 时，$name 均接受默认项并显示 [2]', async ({ feed, closedInput }) => {
+    const agentChoices = [
+      { value: 'codex', label: 'Codex CLI' },
+      { value: 'claude', label: 'Claude Code' }
+    ];
+    const { prompter, input, output } = build({ interactive: true, closedInput });
+    const promise = prompter.choose({
+      question: '选择 Agent',
+      remedyFlag: '--agent <id>',
+      choices: agentChoices,
+      defaultIndex: 1
+    });
+    feed(input);
+
+    await expect(promise).resolves.toBe('claude');
+    const rendered = output.text();
+    expect(rendered).toContain('  * 2) Claude Code\n');
+    expect(rendered).toContain('请选择编号 [2]: ');
+    prompter.close();
+  });
+
+  it('选项 value 为对象引用时回车取默认项，防止泛型回退', async () => {
+    const target = { model: 'gpt-4' };
+    const choices = [
+      { value: { model: 'default' }, label: '默认模型' },
+      { value: target, label: '自定义模型' }
+    ];
+    const { prompter, input } = build({ interactive: true });
+    const promise = prompter.choose({
+      question: '选择配置',
+      remedyFlag: '--model <id>',
+      choices,
+      defaultIndex: 1
+    });
+    input.write('\n');
+
+    await expect(promise).resolves.toBe(target);
     prompter.close();
   });
 });

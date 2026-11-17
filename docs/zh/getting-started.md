@@ -21,7 +21,7 @@ dutydeck setup
 
 向导会探测本机可用的 Agent、设置默认工作目录，并可选地绑定飞书机器人。绑定时：
 
-- 默认 Agent 和 App Secret 存在机器人配置里（与 Web 面板是同一份），不写进 `.env`。交互时 App Secret 用隐藏输入。
+- 默认 Agent 和 App Secret 存在机器人配置里（与 Web 面板是同一份），不写进 `.env`。编号选择按 Enter 接受标记的默认项，输入其他编号切换；交互时 App Secret 用隐藏输入。
 - 新建机器人时会问是否立即开启监听，默认是。
 - 新建机器人的权限为 `ask`。所选 Agent 必须支持飞书审批（ACP 或 Claude Code / Seed / Relay 终端模式）；不支持时不会保存机器人配置，需换用支持审批的 Agent 后以 `--agent <id>` 重跑，向导不会自动开启完全信任。此前已完成的开放平台绑定不会回滚。
 
