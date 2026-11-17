@@ -1366,6 +1366,7 @@ export class DutydeckRuntime {
   /** Tool call and result events of one execution attempt of this Session, read through the attempt index. */
   async getAttemptToolEvents(id: string, attemptId: string): Promise<AgentEvent[]> { return this.repos.execution.getAttemptToolEvents(id, attemptId); }
   getDeferredConfirmationId(id: string, taskId: string) { return this.repos.events.getDeferredConfirmationId(id, taskId); }
+  hasPermissionRequest(id: string, nativeId: string) { return this.repos.events.hasPermissionRequest(id, nativeId); }
   getLatestPermissionRequest(id: string, taskId: string, nativeId: string) { return this.repos.events.getLatestPermissionRequest(id, taskId, nativeId); }
   getRecentEvents(id: string, limit: number) { return this.repos.events.listRecent(id, limit); }
   getHistoryOutline(id: string, query?: HistoryOutlineQuery) {

@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import type { AgentEvent } from '@dutydeck/shared';
 import { createRepositories } from './index.js';
 import { runMigrations } from './migrations.js';
@@ -37,6 +37,81 @@ it('reads only the latest matching permission event and sees external commits wi
     await writer.events.append(permission('s', 't', 5007, 'pending'));
     expect((await reader.events.getLatestPermissionRequest('s', 't', 'same-id'))?.sequence).toBe(5008);
   } finally { reader.close(); writer.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+it('checks exact string permission ids across tasks and sees external commits without caching', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'permission-event-exists-'));
+  const path = join(directory, 'state.db'), writer = createRepositories(path), reader = createRepositories(path);
+  const unicode = '审批-é-🙂';
+  try {
+    await writer.events.append(permission('s', 'task-b', 1, 'approved', 'cross-task'));
+    await writer.events.append({ ...permission('s', undefined, 0, 'rejected', 'null-task'), attemptId: 'attempt-old' });
+    await writer.events.append(permission('s', 'task-a', 2, 'pending', 'duplicate'));
+    await writer.events.append(permission('s', 'task-b', 3, 'approved', 'duplicate'));
+    await writer.events.append(permission('other-session', 'task-a', 1, 'approved', 'other-session'));
+    await writer.events.append({ ...permission('s', 'task-a', 4, 'approved', 'other-type'), type: 'text' } as AgentEvent);
+    await writer.events.append(permission('s', undefined, -1, 'approved', unicode));
+
+    expect(await reader.events.hasPermissionRequest('s', 'cross-task')).toBe(true);
+    expect(await reader.events.hasPermissionRequest('s', 'null-task')).toBe(true);
+    expect(await reader.events.hasPermissionRequest('s', 'duplicate')).toBe(true);
+    expect(await reader.events.hasPermissionRequest('s', 'other-session')).toBe(false);
+    expect(await reader.events.hasPermissionRequest('other-session', 'other-session')).toBe(true);
+    expect(await reader.events.hasPermissionRequest('s', 'other-type')).toBe(false);
+    expect(await reader.events.hasPermissionRequest('s', unicode)).toBe(true);
+    expect(await reader.events.hasPermissionRequest('s', '审批-é-🙂')).toBe(false);
+    expect(await reader.events.hasPermissionRequest('s', 'external')).toBe(false);
+    await writer.events.append(permission('s', 'new-task', 5, 'approved', 'external'));
+    expect(await reader.events.hasPermissionRequest('s', 'external')).toBe(true);
+  } finally { reader.close(); writer.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+it('rejects non-string JSON ids and ignores malformed or non-object rows', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'permission-event-json-types-'));
+  const path = join(directory, 'state.db'), repos = createRepositories(path), db = new Database(path);
+  const insert = db.prepare('INSERT INTO events (id,session_id,task_id,sequence,type,timestamp,data) VALUES (?,?,?,?,?,?,?)');
+  const cases = [
+    ['object', { value: 'x' }, '{"value":"x"}'],
+    ['array', ['x'], '["x"]'],
+    ['number', 7, '7'],
+    ['boolean-true', true, '1'],
+    ['boolean-false', false, '0'],
+    ['null', null, 'null']
+  ] as const;
+  try {
+    for (const [name, id] of cases) insert.run(`${name}-nontext`, `type-${name}`, null, 1, 'permission_request', '1', JSON.stringify({ id }));
+    for (const [name, , nativeId] of cases) expect(await repos.events.hasPermissionRequest(`type-${name}`, nativeId)).toBe(false);
+    for (const [name, , nativeId] of cases) insert.run(`${name}-text`, `type-${name}`, null, 2, 'permission_request', '2', JSON.stringify({ id: nativeId }));
+    for (const [name, , nativeId] of cases) expect(await repos.events.hasPermissionRequest(`type-${name}`, nativeId)).toBe(true);
+
+    for (const [index, data] of ['{broken', 'null', '[{"id":"valid"}]', '"valid"'].entries()) {
+      insert.run(`invalid-${index}`, 'invalid', null, index + 1, 'permission_request', String(index + 1), data);
+    }
+    expect(await repos.events.hasPermissionRequest('invalid', 'valid')).toBe(false);
+    insert.run('invalid-valid', 'invalid', null, 10, 'permission_request', '10', JSON.stringify({ id: 'valid' }));
+    expect(await repos.events.hasPermissionRequest('invalid', 'valid')).toBe(true);
+    // 定向查询忽略坏行；旧的全量读取仍会 JSON.parse 并抛错，这是明确接受的健壮性差异。
+    await expect(repos.events.list('invalid')).rejects.toThrow(SyntaxError);
+  } finally { db.close(); repos.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+it('uses the permission index session prefix for the existence query', async () => {
+  const repos = createRepositories(':memory:');
+  const prepare = vi.spyOn(Database.prototype, 'prepare');
+  try {
+    expect(await repos.events.hasPermissionRequest('s', 'missing')).toBe(false);
+    const index = prepare.mock.calls.findIndex(([query]) => String(query).includes('SELECT EXISTS') && String(query).includes('events_permission_request'));
+    expect(index).toBeGreaterThanOrEqual(0);
+    const query = String(prepare.mock.calls[index]![0]);
+    expect(query).toContain("CASE WHEN json_valid(data) THEN json_extract(data,'$.id') END=?");
+    expect(query).toContain("CASE WHEN json_valid(data) THEN json_type(data,'$.id') END='text'");
+    const database = prepare.mock.contexts[index] as Database.Database;
+    const plan = database.prepare(`EXPLAIN QUERY PLAN ${query}`).all('s', 'missing') as Array<{ detail: string }>;
+    const details = plan.map(row => row.detail).join('\n');
+    expect(details).toContain('SEARCH events USING INDEX events_permission_request (session_id=?)');
+    expect(details).not.toContain('SCAN events');
+    expect(details).not.toContain('TEMP B-TREE');
+  } finally { prepare.mockRestore(); repos.close(); }
 });
 
 it('upgrades old event rows additively and uses all lookup keys without sorting or malformed JSON failure', async () => {

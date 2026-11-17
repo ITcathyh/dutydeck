@@ -11,7 +11,7 @@ const apps: Awaited<ReturnType<typeof buildApp>>[] = [];
 afterEach(async () => { for (const app of apps.splice(0)) await app.close(); vi.useRealTimers(); });
 function runtime() {
   return { listSessions: vi.fn(async () => [session]), listAgents: vi.fn(async () => [{ id: 'mock', name: 'Mock', command: 'codex', args: [] }]), getSession: vi.fn(async () => session),
-    getTasks: vi.fn(async (_id: string) => [task]), getEvents: vi.fn(async () => []), getPendingPermissions: vi.fn((_id: string) => []), getVerifications: vi.fn(async () => []),
+    getTasks: vi.fn(async (_id: string) => [task]), getEvents: vi.fn(async () => []), hasPermissionRequest: vi.fn(async (_id: string, _nativeId: string) => false), getPendingPermissions: vi.fn((_id: string) => []), getVerifications: vi.fn(async () => []),
     getDriver: vi.fn(() => ({})), dispatch: vi.fn(async () => task), interrupt: vi.fn(async () => ({ interrupted: true })), publishSessionEvent: vi.fn(async () => {}), recordClientAudit: vi.fn(async () => {}) };
 }
 describe('open task projections', () => {
@@ -45,6 +45,8 @@ describe('open task projections', () => {
       const detail = await app.inject('/api/sessions/s/waiting/a');
       expect(detail.statusCode).toBe(200);
       expect(detail.json()).toEqual(waiting);
+      expect(r.hasPermissionRequest).not.toHaveBeenCalled();
+      expect(r.getEvents).not.toHaveBeenCalled();
     } finally { await app.close(); }
   });
   it('merges tools, hides thinking/audit, deduplicates final output and truncates the newest conversation', () => {
@@ -229,10 +231,43 @@ describe('open task projections', () => {
       expect(maxActive).toBe(4);
     } finally { await vi.runAllTimersAsync(); await request; await app.close(); }
   });
-  it('distinguishes a settled request from a missing request', async () => {
-    const r = runtime(); r.getEvents.mockResolvedValue([{ type: 'permission_request', data: { id: 'p', status: 'approved' } }] as any);
+  it('distinguishes a settled request from a missing request without listing events', async () => {
+    const r = runtime(); r.hasPermissionRequest.mockImplementation(async (_id, nativeId) => nativeId === 'p');
     const app = await buildApp(r as any); apps.push(app);
-    expect((await app.inject('/api/sessions/s/waiting/p')).json()).toMatchObject({ error: { code: 'already_resolved' } });
-    expect((await app.inject('/api/sessions/s/waiting/missing')).statusCode).toBe(404);
+    const resolved = await app.inject('/api/sessions/s/waiting/p');
+    expect(resolved.statusCode).toBe(409);
+    expect(resolved.json()).toEqual({ error: { code: 'already_resolved', message: 'This request has already been handled' } });
+    const missing = await app.inject('/api/sessions/s/waiting/missing');
+    expect(missing.statusCode).toBe(404);
+    expect(missing.json()).toEqual({ error: { code: 'not_found', message: 'Waiting request not found' } });
+    expect(r.hasPermissionRequest.mock.calls).toEqual([['s', 'p'], ['s', 'missing']]);
+    expect(r.getEvents).not.toHaveBeenCalled();
+  });
+  it('short-circuits same-session broker history and checks events for another session broker record', async () => {
+    const r = runtime(), broker = { listPending: vi.fn(() => []), get: vi.fn() };
+    const app = await buildApp(r as any, { relay: { broker } as any }); apps.push(app);
+    broker.get.mockReturnValue({ sessionId: 's' });
+    expect((await app.inject('/api/sessions/s/waiting/broker')).statusCode).toBe(409);
+    expect(r.hasPermissionRequest).not.toHaveBeenCalled();
+    broker.get.mockReturnValue({ sessionId: 'other' });
+    expect((await app.inject('/api/sessions/s/waiting/broker')).statusCode).toBe(404);
+    expect(r.hasPermissionRequest).toHaveBeenCalledExactlyOnceWith('s', 'broker');
+    expect(r.getEvents).not.toHaveBeenCalled();
+  });
+  it('authorizes waiting details before session, pending, broker and history lookups', async () => {
+    const r = runtime(), broker = { listPending: vi.fn(() => []), get: vi.fn() };
+    let allowed = false;
+    const authorize = vi.fn(async (_req, _id, _boundary, action) => ({ allowed, code: 'forbidden', reason: 'denied', action, source: 'owner' }));
+    const app = await buildApp(r as any, { relay: { broker } as any, executionPolicy: { authorize } }); apps.push(app);
+    expect((await app.inject('/api/sessions/s/waiting/p')).statusCode).toBe(403);
+    expect(r.getSession).not.toHaveBeenCalled(); expect(r.getPendingPermissions).not.toHaveBeenCalled();
+    expect(broker.listPending).not.toHaveBeenCalled(); expect(broker.get).not.toHaveBeenCalled();
+    expect(r.hasPermissionRequest).not.toHaveBeenCalled(); expect(r.getEvents).not.toHaveBeenCalled();
+    allowed = true; r.getSession.mockResolvedValueOnce(undefined);
+    const missingSession = await app.inject('/api/sessions/s/waiting/p');
+    expect(missingSession.statusCode).toBe(404);
+    expect(missingSession.json()).toEqual({ error: { code: 'not_found', message: 'Task not found' } });
+    expect(r.getPendingPermissions).not.toHaveBeenCalled(); expect(broker.get).not.toHaveBeenCalled();
+    expect(r.hasPermissionRequest).not.toHaveBeenCalled(); expect(r.getEvents).not.toHaveBeenCalled();
   });
 });

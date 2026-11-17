@@ -418,6 +418,15 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
         const row = deferredConfirmation().get({ sessionId, taskId });
         return deferredConfirmationId(row ? [decodeEvent(row)] : [], taskId);
       },
+      async hasPermissionRequest(sessionId, nativeId) {
+        const row = cachedStatement(sqlite, `SELECT EXISTS (
+          SELECT 1 FROM events INDEXED BY events_permission_request
+          WHERE session_id=? AND type='permission_request'
+            AND CASE WHEN json_valid(data) THEN json_extract(data,'$.id') END=?
+            AND CASE WHEN json_valid(data) THEN json_type(data,'$.id') END='text'
+        ) AS present`).get(sessionId, nativeId) as { present: number };
+        return row.present === 1;
+      },
       async getLatestPermissionRequest(sessionId, taskId, nativeId) {
         const row = latestPermissionRequest().get({ sessionId, taskId, nativeId });
         return row ? decodeEvent(row) : undefined;

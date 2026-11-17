@@ -450,6 +450,7 @@ export interface EventRepository {
   /** Only the external task-detail conversation projection; unrelated event consumers keep list/listWindow. */
   listTaskConversation?(sessionId: string): Promise<TaskConversationEvent[]>;
   listRecent(sessionId: string, limit: number): Promise<AgentEvent[]>;
+  hasPermissionRequest(sessionId: string, nativeId: string): Promise<boolean>;
   getLatestPermissionRequest(sessionId: string, taskId: string, nativeId: string): Promise<AgentEvent | undefined>;
   getDeferredConfirmationId(sessionId: string, taskId: string): Promise<string | undefined>;
   /** Latest context and each quota window, independent of the timeline window. */

@@ -174,7 +174,7 @@ export function registerTaskRoutes(app: FastifyInstance, runtime: DutydeckRuntim
     if (!await runtime.getSession(id)) throw new RuntimeError('not_found', 'Task not found', 404);
     const waiting = taskWaiting(await runtime.getPendingPermissions(id), options.broker?.listPending(id) ?? []).find(w => w.id === waitingId);
     if (waiting) return waiting;
-    if (options.broker?.get(waitingId)?.sessionId === id || (await runtime.getEvents(id)).some(e => e.type === 'permission_request' && (e.data as PermissionRequestData).id === waitingId)) throw new RuntimeError('already_resolved', 'This request has already been handled', 409);
+    if (options.broker?.get(waitingId)?.sessionId === id || await runtime.hasPermissionRequest(id, waitingId)) throw new RuntimeError('already_resolved', 'This request has already been handled', 409);
     throw new RuntimeError('not_found', 'Waiting request not found', 404);
   });
 }
