@@ -224,7 +224,11 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     // 飞书记忆作业只写自己的记忆目录：不参与仓库互斥，只和在同一目录里执行的会话（包括其他记忆作业）互斥。
     const memory = (id: string) => (cached('SELECT source FROM sessions WHERE id=?').get(id) as {source:string|null}|undefined)?.source === 'lark-memory';
     const selfMemory = memory(sessionId);
-    const candidates = cached(`SELECT DISTINCT session_id FROM task_attempts WHERE state IN ('preparing','active','reconcile_required','legacy_unresolved')
+    // LIKE is ASCII case-insensitive and treats '_' as a wildcard. Preserve its candidates whenever
+    // stop/verification evidence could make a LIKE-only orphan produce a blocker.
+    const requiresLikeCandidates = cached("SELECT 1 FROM configs WHERE key GLOB 'runtime_verification:*' LIMIT 1").get()
+      || cached("SELECT 1 FROM configs WHERE key GLOB 'runtime_driver_stop_block:*' AND value!='' LIMIT 1").get();
+    const candidates = (requiresLikeCandidates ? cached(`SELECT DISTINCT session_id FROM task_attempts WHERE state IN ('preparing','active','reconcile_required','legacy_unresolved')
       UNION SELECT session_id FROM tasks WHERE status='reconcile_required'
       ${preparation ? "UNION SELECT session_id FROM tasks WHERE status='queued'" : ''}
       UNION SELECT session_id FROM task_steering_operations WHERE state IN ('pending','unknown')
@@ -232,7 +236,15 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
       UNION SELECT substr(key,length('runtime_workspace:')+1) AS session_id FROM configs WHERE key LIKE 'runtime_workspace:%'
       UNION SELECT substr(key,length('runtime_driver_configuration:')+1) AS session_id FROM configs WHERE key LIKE 'runtime_driver_configuration:%' AND value!=''
       UNION SELECT id AS session_id FROM sessions WHERE id IN (SELECT substr(key,length('runtime_driver_stop_block:')+1) FROM configs WHERE key LIKE 'runtime_driver_stop_block:%' AND value!='')
-      UNION SELECT id AS session_id FROM sessions s WHERE EXISTS (SELECT 1 FROM configs WHERE key>=('runtime_verification:'||s.id||':') AND key<('runtime_verification:'||s.id||';'))`).all() as Array<{session_id:string}>;
+      UNION SELECT id AS session_id FROM sessions s WHERE EXISTS (SELECT 1 FROM configs WHERE key>=('runtime_verification:'||s.id||':') AND key<('runtime_verification:'||s.id||';'))`) : cached(`SELECT DISTINCT session_id FROM task_attempts WHERE state IN ('preparing','active','reconcile_required','legacy_unresolved')
+      UNION SELECT session_id FROM tasks WHERE status='reconcile_required'
+      ${preparation ? "UNION SELECT session_id FROM tasks WHERE status='queued'" : ''}
+      UNION SELECT session_id FROM task_steering_operations WHERE state IN ('pending','unknown')
+      UNION SELECT session_id FROM driver_resources
+      UNION SELECT substr(key,length('runtime_workspace:')+1) AS session_id FROM configs WHERE key GLOB 'runtime_workspace:*'
+      UNION SELECT substr(key,length('runtime_driver_configuration:')+1) AS session_id FROM configs WHERE key GLOB 'runtime_driver_configuration:*' AND value!=''
+      UNION SELECT id AS session_id FROM sessions WHERE id IN (SELECT substr(key,length('runtime_driver_stop_block:')+1) FROM configs WHERE key GLOB 'runtime_driver_stop_block:*' AND value!='')
+      UNION SELECT id AS session_id FROM sessions s WHERE EXISTS (SELECT 1 FROM configs WHERE key>=('runtime_verification:'||s.id||':') AND key<('runtime_verification:'||s.id||';'))`)).all() as Array<{session_id:string}>;
     // Keep only raw rows for a bounded candidate chunk. Parsing and validation still happen below,
     // in candidate order and before any workspace comparison can discard that candidate.
     for (let offset = 0; offset < candidates.length; offset += 32) {

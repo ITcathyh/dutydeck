@@ -32,6 +32,67 @@ function fixture() {
   };
   return {root,path,repos,claim,x,git,repo,session,accept};
 }
+
+// Run the current candidates and the pre-optimization LIKE candidates on the same connection and snapshot.
+// Claim side effects are inspected, then rolled back so both paths start from identical state.
+function compareCandidatePaths(h:ReturnType<typeof fixture>,target:ReturnType<typeof fixture>['session'],taskId:string,cwd:string) {
+  const sql=new Database(h.path),statement=Object.getPrototypeOf(sql.prepare('SELECT 1')),originalAll=statement.all;
+  const currentReads:Array<{source:string;ids:string[]}>=[],legacyReads:Array<{source:string;ids:string[]}>=[];
+  const legacyStatements=new Map<string,Database.Statement>();
+  let legacy=false,repositoryDb:Database.Database|undefined;
+  statement.all=function(...args:unknown[]) {
+    let receiver=this;
+    const candidate=this.source.includes('SELECT DISTINCT session_id FROM task_attempts')&&this.source.includes("UNION SELECT substr(key,length('runtime_workspace:')+1)");
+    if(!candidate)return originalAll.apply(this,args);
+    repositoryDb=this.database;
+    if(legacy&&this.source.includes("key GLOB 'runtime_workspace:*'")) {
+      const source=this.source.replace("key GLOB 'runtime_workspace:*'","key LIKE 'runtime_workspace:%'")
+        .replace("key GLOB 'runtime_driver_configuration:*'","key LIKE 'runtime_driver_configuration:%'")
+        .replace("key GLOB 'runtime_driver_stop_block:*'","key LIKE 'runtime_driver_stop_block:%'");
+      receiver=legacyStatements.get(source)??this.database.prepare(source);legacyStatements.set(source,receiver);
+    }
+    const rows=originalAll.apply(receiver,args);
+    (legacy?legacyReads:currentReads).push({source:receiver.source,ids:(rows as Array<{session_id:string}>).map(row=>row.session_id)});
+    return rows;
+  };
+  const claim=()=>{
+    const db=repositoryDb!;db.exec('SAVEPOINT candidate_path_comparison');
+    try {
+      let outcome:unknown;
+      try {
+        const value=h.x.claimNext(target);
+        outcome={taskId:value?.task.id,status:value?.task.status,attemptTaskId:value?.attempt?.taskId,attemptState:value?.attempt?.state};
+      } catch(error) { outcome={code:(error as any).code,message:(error as Error).message}; }
+      const configs=db.prepare('SELECT key,value FROM configs ORDER BY key').all();
+      return {claim:outcome,configs};
+    } finally {db.exec('ROLLBACK TO candidate_path_comparison;RELEASE candidate_path_comparison');}
+  };
+  const run=()=>({
+    blockers:h.repos.execution.getTaskExecution(taskId)?.blockers,
+    preparation:h.x.canPrepareWorkspace(cwd),
+    ...claim()
+  });
+  try {
+    const current=run();legacy=true;const previous=run();
+    expect(current.blockers).toEqual(previous.blockers);
+    expect(current.preparation).toBe(previous.preparation);
+    expect(current.claim).toEqual(previous.claim);
+    expect(current.configs).toEqual(previous.configs);
+    return {...current,reads:currentReads,legacyReads};
+  } finally {statement.all=originalAll;sql.close();}
+}
+
+function expectAdmissionResult(result:ReturnType<typeof compareCandidatePaths>,taskId:string,expected:unknown[]) {
+  expect(result.blockers).toEqual(expected);
+  if(expected.length) {
+    expect(result.claim).toMatchObject({code:'WORKSPACE_RESOURCE_BLOCKED'});
+    expect(JSON.parse((result.claim as {message:string}).message)).toEqual(expected);
+    expect(result.preparation).toBe(false);
+  } else {
+    expect(result.claim).toMatchObject({taskId,status:'running',attemptTaskId:taskId,attemptState:'preparing'});
+    expect(result.configs).toContainEqual(expect.objectContaining({key:'runtime_execution_workspace:target'}));
+  }
+}
 it('canonicalizes real Git worktrees, subdirectories and symlinks while allowing other repositories to claim', async () => {
   const h=fixture(), original=h.repo('original'), other=h.repo('other');
   const nested=join(original,'nested');mkdirSync(nested);
@@ -491,4 +552,117 @@ it.each(['pty-cli','acp'] as const)('honors the exact %s legacy retirement recei
   await repos.config.set('legacy_retirement:legacy',JSON.stringify(proof));
   expect(x.claimNext(target)?.attempt).toBeDefined();
   expect(repos.execution.getResources('legacy')).toEqual(original);
+});
+
+it.each([
+  {name:'canonical workspace recovery',key:'runtime_workspace:origin',value:JSON.stringify({state:'preparing'}),sessionId:'origin',expected:[{code:'WORKSPACE_RECOVERY_REQUIRED',sessionId:'origin'}]},
+  {name:'empty canonical workspace value',key:'runtime_workspace:origin',value:'',sessionId:'origin',expected:[{code:'WORKSPACE_RESOURCE_UNVERIFIABLE',sessionId:'origin'}]},
+  {name:'nonblocking canonical workspace value',key:'runtime_workspace:origin',value:JSON.stringify({state:'passed'}),sessionId:'origin',expected:[]},
+  {name:'orphan canonical workspace recovery',key:'runtime_workspace:ghost',value:JSON.stringify({state:'cleaning'}),expected:[{code:'WORKSPACE_RESOURCE_UNVERIFIABLE',sessionId:'ghost'}]},
+  {name:'orphan nonempty driver configuration',key:'runtime_driver_configuration:ghost',value:'{}',expected:[{code:'WORKSPACE_RESOURCE_UNVERIFIABLE',sessionId:'ghost'}]},
+  {name:'empty driver configuration',key:'runtime_driver_configuration:ghost',value:'',expected:[]},
+  {name:'mixed-case LIKE-only workspace orphan',key:'RUNTIME_WORKSPACE:ghost',value:JSON.stringify({state:'preparing'}),expected:[]},
+  {name:'underscore LIKE-only workspace orphan',key:'runtimeXworkspace:ghost',value:JSON.stringify({state:'preparing'}),expected:[]},
+  {name:'mixed-case LIKE-only driver configuration',key:'Runtime_Driver_Configuration:origin',value:'{}',sessionId:'origin',expected:[]},
+  {name:'wildcard LIKE-only driver configuration',key:'runtime/driver/configuration:origin',value:'{}',sessionId:'origin',expected:[]},
+  {name:'empty canonical stop block',key:'runtime_driver_stop_block:ghost',value:'',expected:[]},
+  {name:'orphan nonempty stop block without another candidate',key:'runtime_driver_stop_block:ghost',value:'{}',like:true,expected:[]},
+  {name:'mixed-case LIKE-only stop block',key:'RUNTIME_DRIVER_STOP_BLOCK:origin',value:'{}',sessionId:'origin',expected:[]},
+  {name:'wildcard LIKE-only stop block',key:'runtimeXdriver_stop_block:origin',value:'{}',sessionId:'origin',expected:[]},
+  {name:'mixed-case verification is not canonical evidence',key:'RUNTIME_VERIFICATION:origin:proof',value:'{invalid',sessionId:'origin',expected:[]},
+])('preserves admission for $name',({key,value,sessionId,expected})=>{
+  const h=fixture(),target=h.session('target',h.root),task=h.accept(target);if(sessionId)h.session(sessionId,h.root);
+  const sql=new Database(h.path);sql.prepare('INSERT INTO configs(key,value) VALUES(?,?)').run(key,value);sql.close();
+  const result=compareCandidatePaths(h,target,task.id,h.root);
+  expectAdmissionResult(result,task.id,expected);
+  expect(result.reads[0]?.source).toContain(`key ${key.startsWith('runtime_driver_stop_block:')&&value?"LIKE 'runtime_driver_stop_block:%'":"GLOB 'runtime_workspace:*'"}`);
+});
+
+it.each([
+  {name:'running',value:JSON.stringify({sessionId:'origin:tenant',status:'running'}),expected:[{code:'VERIFICATION_RESOURCE_UNKNOWN',sessionId:'origin:tenant'}]},
+  {name:'passed',value:JSON.stringify({sessionId:'origin:tenant',status:'passed'}),expected:[]},
+  {name:'failed',value:JSON.stringify({sessionId:'origin:tenant',status:'failed'}),expected:[]},
+  {name:'timed out',value:JSON.stringify({sessionId:'origin:tenant',status:'timed_out'}),expected:[]},
+  {name:'interrupted',value:JSON.stringify({sessionId:'origin:tenant',status:'interrupted'}),expected:[]},
+  {name:'unverified',value:JSON.stringify({sessionId:'origin:tenant',status:'unverified'}),expected:[]},
+  {name:'malformed',value:'{invalid',expected:[{code:'RESOURCE_EVIDENCE_INVALID',sessionId:'origin:tenant',detail:'runtime_verification:origin:tenant:proof'}]},
+  {name:'empty',value:'',expected:[{code:'RESOURCE_EVIDENCE_INVALID',sessionId:'origin:tenant',detail:'runtime_verification:origin:tenant:proof'}]},
+  {name:'wrong owner',value:JSON.stringify({sessionId:'other',status:'passed'}),expected:[{code:'RESOURCE_EVIDENCE_INVALID',sessionId:'origin:tenant',detail:'runtime_verification:origin:tenant:proof'}]},
+  {name:'unknown status',value:JSON.stringify({sessionId:'origin:tenant',status:'unknown'}),expected:[{code:'RESOURCE_EVIDENCE_INVALID',sessionId:'origin:tenant',detail:'runtime_verification:origin:tenant:proof'}]},
+  {name:'missing session',sessionId:'ghost',createSession:false,value:'{invalid',expected:[]},
+])('uses legacy candidates for $name verification evidence',({value,expected,...test})=>{
+  const sessionId=test.sessionId??'origin:tenant',h=fixture(),target=h.session('target',h.root),task=h.accept(target);
+  if(test.createSession!==false)h.session(sessionId,h.root);
+  const key=`runtime_verification:${sessionId}:proof`,sql=new Database(h.path);sql.prepare('INSERT INTO configs(key,value) VALUES(?,?)').run(key,value);sql.close();
+  const result=compareCandidatePaths(h,target,task.id,h.root);
+  expectAdmissionResult(result,task.id,expected);
+  expect(result.reads[0]?.source).toContain("key LIKE 'runtime_workspace:%'");
+});
+
+it.each([
+  {name:'canonical orphan stop block',orphanKey:'RUNTIME_WORKSPACE:ghost',evidenceKey:'runtime_driver_stop_block:ghost',evidenceValue:'{}'},
+  {name:'malformed verification and underscore wildcard orphan',orphanKey:'runtimeXworkspace:ghost',evidenceKey:'runtime_verification:ghost:proof',evidenceValue:'{invalid'},
+])('retains the LIKE-only orphan counterexample with a $name',({orphanKey,evidenceKey,evidenceValue})=>{
+  const h=fixture(),target=h.session('target',h.root),task=h.accept(target),sql=new Database(h.path);
+  sql.prepare('INSERT INTO configs(key,value) VALUES(?,?),(?,?)').run(orphanKey,JSON.stringify({state:'preparing'}),evidenceKey,evidenceValue);sql.close();
+  const result=compareCandidatePaths(h,target,task.id,h.root);
+  expectAdmissionResult(result,task.id,[{code:'WORKSPACE_RESOURCE_UNVERIFIABLE',sessionId:'ghost'}]);
+  expect(result.reads[0]?.source).toContain("key LIKE 'runtime_workspace:%'");
+  expect(result.legacyReads.map(read=>read.ids)).toEqual(result.reads.map(read=>read.ids));
+});
+
+it('preserves exact blocker and candidate order across 31/32/63/99 boundaries in both preparation modes',()=>{
+  const h=fixture(),target=h.session('target',h.root),task=h.accept(target),sql=new Database(h.path),at=new Date().toISOString();
+  const ids=Array.from({length:100},(_,index)=>`candidate-${String(index).padStart(3,'0')}`);
+  const insertSession=sql.prepare('INSERT INTO sessions(id,agent_id,state,cwd,run_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?)');
+  const insertConfig=sql.prepare('INSERT INTO configs(key,value) VALUES(?,?)');
+  sql.transaction(()=>{for(const [index,id] of ids.entries()) {
+    insertSession.run(id,'fixture','idle',h.root,`run-${index}`,at,at);
+    insertConfig.run(`runtime_workspace:${id}`,JSON.stringify({state:'preparing'}));
+  }})();
+  const result=compareCandidatePaths(h,target,task.id,h.root);
+  const expected=ids.map(sessionId=>({code:'WORKSPACE_RECOVERY_REQUIRED',sessionId}));
+  expectAdmissionResult(result,task.id,expected);
+  expect(result.reads[0]?.ids).toEqual(ids);
+  expect(result.reads[1]?.ids).toEqual([...ids,'target']);
+  expect(result.reads[2]?.ids).toEqual(ids);
+  expect(result.legacyReads.map(read=>read.ids)).toEqual(result.reads.map(read=>read.ids));
+  expect(result.reads.every(read=>new Set(read.ids).size===read.ids.length)).toBe(true);
+  sql.close();
+});
+
+it('sees external evidence commits and reevaluates eligibility without changing side effects',()=>{
+  const h=fixture(),origin=h.session('origin',h.root),target=h.session('target',h.root),task=h.accept(target),sql=new Database(h.path);
+  const key=`runtime_verification:${origin.sessionId}:external`;
+  let result=compareCandidatePaths(h,target,task.id,h.root);
+  expectAdmissionResult(result,task.id,[]);expect(result.reads[0]?.source).toContain("key GLOB 'runtime_workspace:*'");
+  sql.prepare('INSERT INTO configs(key,value) VALUES(?,?)').run(key,JSON.stringify({sessionId:origin.sessionId,status:'running'}));
+  result=compareCandidatePaths(h,target,task.id,h.root);
+  expectAdmissionResult(result,task.id,[{code:'VERIFICATION_RESOURCE_UNKNOWN',sessionId:origin.sessionId}]);
+  expect(result.reads[0]?.source).toContain("key LIKE 'runtime_workspace:%'");
+  sql.prepare('UPDATE configs SET value=? WHERE key=?').run(JSON.stringify({sessionId:origin.sessionId,status:'passed'}),key);
+  result=compareCandidatePaths(h,target,task.id,h.root);
+  expectAdmissionResult(result,task.id,[]);expect(result.reads[0]?.source).toContain("key LIKE 'runtime_workspace:%'");
+  sql.close();
+});
+
+it('uses bounded index probes and indexed fast branches, but retains the LIKE fallback plan',()=>{
+  const h=fixture(),target=h.session('target',h.root),task=h.accept(target),sql=new Database(h.path);
+  const fast=compareCandidatePaths(h,target,task.id,h.root),fastSource=fast.reads[0]!.source;
+  expect(fastSource).toContain("key GLOB 'runtime_workspace:*'");
+  const fastPlan=sql.prepare('EXPLAIN QUERY PLAN '+fastSource).all() as Array<{detail:string}>;
+  expect(fastPlan.filter(row=>row.detail.startsWith('SEARCH configs')).length).toBeGreaterThanOrEqual(3);
+  expect(fastPlan.filter(row=>row.detail.startsWith('SEARCH configs')).every(row=>row.detail.includes('key>? AND key<?'))).toBe(true);
+  for(const probe of [
+    "SELECT 1 FROM configs WHERE key GLOB 'runtime_verification:*' LIMIT 1",
+    "SELECT 1 FROM configs WHERE key GLOB 'runtime_driver_stop_block:*' AND value!='' LIMIT 1"
+  ])expect(JSON.stringify(sql.prepare('EXPLAIN QUERY PLAN '+probe).all())).toContain('SEARCH configs');
+  sql.prepare('INSERT INTO configs(key,value) VALUES(?,?)').run('runtime_driver_stop_block:ghost','{}');
+  const fallback=compareCandidatePaths(h,target,task.id,h.root),fallbackSource=fallback.reads[0]!.source;
+  expect(fallbackSource).toContain("key LIKE 'runtime_workspace:%'");
+  expect(fallbackSource).toBe(fastSource.replace("key GLOB 'runtime_workspace:*'","key LIKE 'runtime_workspace:%'")
+    .replace("key GLOB 'runtime_driver_configuration:*'","key LIKE 'runtime_driver_configuration:%'")
+    .replace("key GLOB 'runtime_driver_stop_block:*'","key LIKE 'runtime_driver_stop_block:%'"));
+  expect(JSON.stringify(sql.prepare('EXPLAIN QUERY PLAN '+fallbackSource).all())).toContain('SCAN configs');
+  sql.close();
 });
