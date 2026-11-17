@@ -297,9 +297,9 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
       },
       async listLatestPerSession() {
         return (cachedStatement(sqlite, `WITH ids AS (SELECT DISTINCT session_id FROM tasks)
-          SELECT t.* FROM ids JOIN tasks t ON t.rowid = (
+          SELECT t.id,t.session_id AS sessionId,t.created_at AS createdAt FROM ids JOIN tasks t ON t.rowid = (
             SELECT rowid FROM tasks WHERE session_id=ids.session_id ORDER BY created_at DESC,rowid DESC LIMIT 1
-          )`).all() as TaskRowLike[]).map(decodeTask);
+          )`).all() as Array<Pick<TaskRecord, 'id' | 'sessionId' | 'createdAt'>>);
       },
       async enqueue(task, position) {
         if (task.status !== 'queued') {

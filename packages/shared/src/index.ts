@@ -426,8 +426,8 @@ export interface TaskRepository {
   listBySession(sessionId: string): Promise<TaskRecord[]>;
   /** Last two receipts, oldest first; same-time receipts retain storage insertion order. */
   listRecentBySession?(sessionId: string): Promise<TaskRecord[]>;
-  /** Each session's last receipt, ordered like the final entry of listRecentBySession. */
-  listLatestPerSession?(): Promise<TaskRecord[]>;
+  /** Each session's last receipt reference, ordered like the final entry of listRecentBySession. */
+  listLatestPerSession?(): Promise<Array<Pick<TaskRecord, 'id' | 'sessionId' | 'createdAt'>>>;
   get?(id: string): Promise<TaskRecord | undefined>;
   create?(task: TaskRecord): Promise<boolean>;
   enqueue?(task: TaskRecord, position: 'front' | 'back'): Promise<{ task: TaskRecord; created: boolean }>;

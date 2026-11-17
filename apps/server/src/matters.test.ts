@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import { matterRelations, readSessionTaskReport, writeTaskReport, type Session, type TaskRecord } from '@dutydeck/shared';
+import { DutydeckRuntime } from '@dutydeck/runtime';
 import { MattersService } from './matters.js';
 import { buildApp } from './app.js';
 
@@ -131,5 +132,26 @@ it.each(['waiting', 'blocked'] as const)('keeps a matter open for the latest unc
     expect(await runtime.getSessionTaskReport('source')).toBeUndefined();
     expect((await app.inject(`/api/matters/${id}`)).json().status).toBe('done');
     expect((await app.inject('/api/sessions')).json().every((item: any) => item.matter.status === 'done')).toBe(true);
+  } finally { await app.close(); repos.close(); }
+});
+
+it('keeps the complete sessions response with batch reports from latest task references', async () => {
+  const repos = createRepositories(':memory:'), service = new MattersService(repos);
+  const sessions: Session[] = [{ ...session('source', 'stopped'), name: 'Source', source: 'web', model: 'model-test', permissionMode: 'ask' }];
+  await service.session('source', { title: 'pending matter' });
+  const older: TaskRecord = { id: 'older', sessionId: 'source', prompt: 'old goal', status: 'completed', createdAt: '2026-11-01T00:00:00Z', updatedAt: '2026-11-01T00:00:00Z' };
+  const latest: TaskRecord = { ...older, id: 'latest', prompt: 'latest goal', createdAt: '2026-11-01T00:01:00Z', updatedAt: '2026-11-01T00:01:00Z' };
+  await repos.tasks.save(older); await repos.tasks.save(latest);
+  await writeTaskReport(repos.config, { schemaVersion: 1, taskId: latest.id, sessionId: latest.sessionId, status: 'waiting', question: '今天发布吗？', reportedAt: '2026-11-01T00:01:00.000Z' });
+  const listLatest = vi.spyOn(repos.tasks, 'listLatestPerSession');
+  const runtime = Object.assign(Object.create(DutydeckRuntime.prototype), { repos, options: {}, listSessions: async () => sessions });
+  const app = await buildApp(runtime as any, { matters: repos.matters });
+  try {
+    const response = await app.inject('/api/sessions');
+    expect(response.statusCode).toBe(200);
+    expect(listLatest).toHaveBeenCalledOnce();
+    expect(response.json()).toEqual([{ ...sessions[0], matter: {
+      id: service.summary('source')!.id, title: 'pending matter', status: 'open', sessionIds: ['source'], supersededSessionIds: []
+    } }]);
   } finally { await app.close(); repos.close(); }
 });

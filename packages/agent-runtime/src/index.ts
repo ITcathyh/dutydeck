@@ -2040,7 +2040,7 @@ export class DutydeckRuntime {
     }
   }
 
-  async getSessionTaskReport(sessionId: string, latest?: TaskRecord[]) {
+  async getSessionTaskReport(sessionId: string, latest?: ReadonlyArray<Pick<TaskRecord, 'id' | 'createdAt'>>) {
     try {
       const tasks = latest ?? (this.repos.tasks.listRecentBySession
         ? await this.repos.tasks.listRecentBySession(sessionId) : await this.repos.tasks.listBySession(sessionId));
@@ -2048,10 +2048,10 @@ export class DutydeckRuntime {
     } catch (error) { (this.options.log ?? console).warn({ error, sessionId }, '读取会话收尾报告失败，继续处理'); }
   }
 
-  /** 批量版 getSessionTaskReport：一次查出各会话最新一条任务再读收尾报告，结果与逐个调用相同；没有报告的会话不在结果里。 */
+  /** 批量版 getSessionTaskReport：一次查出各会话最新一条任务引用再读收尾报告，结果与逐个调用相同；没有报告的会话不在结果里。 */
   async getSessionTaskReports(sessionIds: string[]): Promise<Map<string, TaskReport>> {
     const wanted = new Set(sessionIds);
-    let latest: Map<string, TaskRecord> | undefined;
+    let latest: Map<string, Pick<TaskRecord, 'id' | 'sessionId' | 'createdAt'>> | undefined;
     if (wanted.size && this.repos.tasks.listLatestPerSession) {
       try {
         latest = new Map((await this.repos.tasks.listLatestPerSession()).filter(task => wanted.has(task.sessionId)).map(task => [task.sessionId, task]));

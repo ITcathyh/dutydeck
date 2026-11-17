@@ -30,7 +30,13 @@ it('lists each session\'s last receipt in one query, matching the last entry of 
     for (const id of ['a', 'b', 'c']) await repos.tasks.save({ id, sessionId: 's', prompt: id, status: 'completed', createdAt: '2026-11-01T00:00:00.000Z', updatedAt: '2026-11-01T00:00:00.000Z' });
     await repos.tasks.save({ id: 'late', sessionId: 't', prompt: 'late', status: 'completed', createdAt: '2026-11-03T00:00:00.000Z', updatedAt: '2026-11-03T00:00:00.000Z' });
     await repos.tasks.save({ id: 'early', sessionId: 't', prompt: 'early', status: 'completed', createdAt: '2026-11-02T00:00:00.000Z', updatedAt: '2026-11-02T00:00:00.000Z' });
-    const latest = new Map((await repos.tasks.listLatestPerSession!()).map(task => [task.sessionId, task.id]));
+    const rows = await repos.tasks.listLatestPerSession!();
+    expect(rows).toHaveLength(2);
+    expect(rows).toEqual(expect.arrayContaining([
+      { id: 'c', sessionId: 's', createdAt: '2026-11-01T00:00:00.000Z' },
+      { id: 'late', sessionId: 't', createdAt: '2026-11-03T00:00:00.000Z' }
+    ]));
+    const latest = new Map(rows.map(task => [task.sessionId, task.id]));
     expect(latest).toEqual(new Map([['s', 'c'], ['t', 'late']]));
     for (const sessionId of ['s', 't']) expect((await repos.tasks.listRecentBySession!(sessionId)).at(-1)?.id).toBe(latest.get(sessionId));
   } finally { repos.close(); }
@@ -50,7 +56,14 @@ it('keeps latest receipt edge cases and external commits without a global window
     await save('meaningful', 'blank', 'real', 'completed', '1');
     await save('blank', 'blank', '', 'queued', '2');
     const expected = new Map([['blank', 'blank'], ['orphan', 'cancelled'], ['ties', 'second-tie']]);
-    expect(new Map((await reader.tasks.listLatestPerSession!()).map(task => [task.sessionId, task.id]))).toEqual(expected);
+    const references = await reader.tasks.listLatestPerSession!();
+    expect(references).toHaveLength(3);
+    expect(references).toEqual(expect.arrayContaining([
+      { id: 'blank', sessionId: 'blank', createdAt: '2' },
+      { id: 'cancelled', sessionId: 'orphan', createdAt: '2' },
+      { id: 'second-tie', sessionId: 'ties', createdAt: '1' }
+    ]));
+    expect(new Map(references.map(task => [task.sessionId, task.id]))).toEqual(expected);
     await save('later', 'orphan', 'later', 'failed', '3');
     expect(new Map((await reader.tasks.listLatestPerSession!()).map(task => [task.sessionId, task.id]))).toEqual(new Map([...expected].map(([sessionId, id]) => [sessionId, sessionId === 'orphan' ? 'later' : id])));
 
@@ -59,6 +72,9 @@ it('keeps latest receipt edge cases and external commits without a global window
       await verifier.tasks.listLatestPerSession!();
       const index = prepare.mock.calls.findIndex(([query]) => String(query).includes('WITH ids AS'));
       const query = String(prepare.mock.calls[index]?.[0]);
+      expect(query).toContain('SELECT t.id,t.session_id AS sessionId,t.created_at AS createdAt');
+      expect(query).toContain('ORDER BY created_at DESC,rowid DESC LIMIT 1');
+      expect(query).not.toContain('SELECT t.*');
       expect(query).not.toContain('ROW_NUMBER');
       const database = prepare.mock.contexts[index] as Database.Database;
       const plan = database.prepare('EXPLAIN QUERY PLAN ' + query).all() as Array<{ detail: string }>;
