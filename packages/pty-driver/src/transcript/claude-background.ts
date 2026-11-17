@@ -87,9 +87,11 @@ export class ClaudeBackgroundTasks {
 
   private observeEntry(entry: any, position: TranscriptPosition | undefined, lifecycleOnly: boolean): boolean {
     if (entry?.isSidechain === true) return false;
-    // A physical replay is not a new launch. Include the record because a
-    // truncated sibling can legitimately reuse an offset for different bytes.
-    const positionKey = position ? createHash('sha256').update(JSON.stringify([position, entry])).digest('base64') : undefined;
+    // Main-file offsets are immutable within an epoch. Sibling scans lack
+    // equivalent epoch semantics, so lifecycle records still include content.
+    const positionKey = position ? lifecycleOnly
+      ? `lifecycle:${createHash('sha256').update(JSON.stringify([position, entry])).digest('base64')}`
+      : `main:${position.path.length}:${position.path}:${position.dev}:${position.ino}:${position.epoch}:${position.offset}` : undefined;
     if (positionKey && this.observedPositions.has(positionKey)) return false;
     if (positionKey) {
       this.observedPositions.add(positionKey);
