@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { AgentRepository, ConfigRepository, LarkAppCreationJob } from '@dutydeck/shared';
+import { serialByKey, type AgentRepository, type ConfigRepository, type LarkAppCreationJob } from '@dutydeck/shared';
 import type { ProcessIdentity } from '@dutydeck/storage';
 import { currentProcessIdentity, observeProcess } from '@dutydeck/storage/helpers';
 import { LARK_APP_ICON_BASE64 } from './app-icon.js';
@@ -72,12 +72,6 @@ export class LarkAppCreationJobManager {
     if (!runner.heartbeatAt) return true;
     return Date.parse(runner.heartbeatAt) + runnerLeaseMs > (this.options.now?.() ?? new Date()).getTime();
   }
-  private async locked<T>(id: string, action: () => Promise<T>): Promise<T> {
-    const previous = this.locks.get(id) ?? Promise.resolve();
-    const next = previous.catch(() => {}).then(action);
-    this.locks.set(id, next);
-    try { return await next; } finally { if (this.locks.get(id) === next) this.locks.delete(id); }
-  }
   private serialize(job: StoredJob) {
     const { qrDataUrl: _qr, ...stored } = job;
     return JSON.stringify(stored);
@@ -122,7 +116,7 @@ export class LarkAppCreationJobManager {
     if (!isUuid(requestId) || typeof name !== 'string' || !name.trim() || name.trim().length > 50) {
       throw new LarkAppCreationError(400, '请提供有效的请求 ID 和 1–50 字机器人名称');
     }
-    return this.locked(requestId, async () => {
+    return serialByKey(this.locks, requestId, async () => {
       const existing = await this.load(requestId);
       if (existing) return this.publicJob(existing.job);
       const job: StoredJob = { id: requestId, name: name.trim(), status: 'preparing', retryable: false, createdAt: this.timestamp(), updatedAt: this.timestamp(), runner: this.claim() };
@@ -135,7 +129,7 @@ export class LarkAppCreationJobManager {
     });
   }
   async cancel(id: string): Promise<LarkAppCreationJob> {
-    return this.locked(id, async () => {
+    return serialByKey(this.locks, id, async () => {
       for (;;) {
         const state = await this.load(id);
         if (!state) throw new LarkAppCreationError(404, '创建任务不存在');
@@ -149,7 +143,7 @@ export class LarkAppCreationJobManager {
     });
   }
   async retry(id: string, options: { forceLogin?: boolean } = {}): Promise<LarkAppCreationJob> {
-    return this.locked(id, async () => {
+    return serialByKey(this.locks, id, async () => {
       const state = await this.load(id);
       if (!state) throw new LarkAppCreationError(404, '创建任务不存在');
       const { job, raw } = state;
@@ -172,7 +166,7 @@ export class LarkAppCreationJobManager {
     this.runs.set(id, run);
   }
   private async renew(id: string) {
-    await this.locked(id, async () => {
+    await serialByKey(this.locks, id, async () => {
       const raw = await this.options.config.get(key(id));
       if (!raw) return;
       const job = JSON.parse(raw) as StoredJob;
@@ -186,7 +180,7 @@ export class LarkAppCreationJobManager {
     return !raw || (JSON.parse(raw) as StoredJob).status === 'cancelled';
   }
   private async update(id: string, fields: Partial<LarkAppCreationJob>): Promise<boolean> {
-    return this.locked(id, async () => {
+    return serialByKey(this.locks, id, async () => {
       for (;;) {
         const state = await this.load(id);
         if (!state || state.job.status === 'cancelled') return false;

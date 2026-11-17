@@ -1,6 +1,6 @@
 import { promptDigest } from './prompt-context.js';
 import { sha256Hex as hash } from './hash.js';
-import { analyzeWorkPlanRevision, canonicalExecutionJson, errorMessage as errorText, now as time, canonicalPlanJson, createWorkItemSchema, reviseWorkPlanSchema, workRevisionConfirmationReasons, type ReviseWorkPlanInput, type WorkRevisionImpact, type WorkRevisionPreview, executionActorSchema, installationOwnerTaskActor, parseLarkSourceId, RuntimeError, timeLoop, type LoopTimingLog, taskAdmissionV1Schema, taskRequestV1Schema, workPlanSchema, workReviewVerdictSchema, type CreateWorkItemInput, type ExecutionActor, type PermissionMode, type RepositoryBundle, type Session, type TaskAdmissionV1, type TaskRecord, type TaskRequestV1, type ToolRiskPolicy, type PendingWorkRevision, type WorkItem, type WorkPlan, type WorkStep, type WorkTemplate } from '@dutydeck/shared';
+import { analyzeWorkPlanRevision, canonicalExecutionJson, errorMessage as errorText, now as time, canonicalPlanJson, createWorkItemSchema, reviseWorkPlanSchema, workRevisionConfirmationReasons, type ReviseWorkPlanInput, type WorkRevisionImpact, type WorkRevisionPreview, executionActorSchema, installationOwnerTaskActor, parseLarkSourceId, RuntimeError, serialByKey, timeLoop, type LoopTimingLog, taskAdmissionV1Schema, taskRequestV1Schema, workPlanSchema, workReviewVerdictSchema, type CreateWorkItemInput, type ExecutionActor, type PermissionMode, type RepositoryBundle, type Session, type TaskAdmissionV1, type TaskRecord, type TaskRequestV1, type ToolRiskPolicy, type PendingWorkRevision, type WorkItem, type WorkPlan, type WorkStep, type WorkTemplate } from '@dutydeck/shared';
 import { executionTaskId } from '@dutydeck/storage/helpers';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { readWorkAttemptResult } from './task-results.js';
@@ -139,12 +139,6 @@ export class WorkItemService {
     this.effects.set(key, run);
     void run.finally(() => { if (this.effects.get(key) === run) this.effects.delete(key); });
   }
-  private async serial<T>(id: string, work: () => Promise<T>): Promise<T> {
-    const previous = this.locks.get(id) ?? Promise.resolve();
-    const current = previous.catch(() => {}).then(work);
-    this.locks.set(id, current);
-    try { return await current; } finally { if (this.locks.get(id) === current) this.locks.delete(id); }
-  }
   private async read(id: string): Promise<RecordState> {
     const raw = await this.repos.config.get(PREFIX + id);
     if (!raw) throw new RuntimeError('WORK_ITEM_NOT_FOUND', 'Work item not found', 404);
@@ -278,7 +272,7 @@ export class WorkItemService {
     const gated = confirmation ?? Boolean(await this.options.requireConfirmation?.(parent));
     const actor = this.executionActor(parent, actorId!);
     const id = workItemId(parentSessionId, actorId, input.idempotencyKey);
-    return this.serial(id, async () => {
+    return serialByKey(this.locks, id, async () => {
       const existing = await this.repos.config.get(PREFIX + id);
       const inputHash = fingerprint(input);
       if (existing) {
@@ -328,7 +322,7 @@ export class WorkItemService {
    * 有待确认修订时确认的是修订：带 revisionDigest 时只认内容摘要（运行中的目标 revision 随调度变化），否则要求 revision 一致。
    */
   async confirm(parentSessionId: string, id: string, expectedRevision: number, actorId?: string, revisionDigest?: string): Promise<WorkItem> {
-    return this.serial(id, async () => {
+    return serialByKey(this.locks, id, async () => {
       const state = await this.owned(parentSessionId, id, actorId);
       const pending = this.pendingRevision(state, expectedRevision, revisionDigest);
       if (!pending && state.value.item.status !== 'awaiting_confirmation') throw new RuntimeError('WORK_ITEM_NOT_AWAITING_CONFIRMATION', 'This plan is not awaiting confirmation', 409);
@@ -361,7 +355,7 @@ export class WorkItemService {
 
   async cancel(parentSessionId: string, id: string, expectedRevision: number, actorId?: string): Promise<WorkItem> {
     // The durable intent does not wait for an in-progress driver start or send.
-    await this.serial('control:' + id, async () => {
+    await serialByKey(this.locks, 'control:' + id, async () => {
       const state = await this.owned(parentSessionId, id, actorId);
       this.revision(state, expectedRevision);
       if (['completed', 'cancelled'].includes(state.value.item.status)) return;
@@ -377,7 +371,7 @@ export class WorkItemService {
       await this.write(state);
     });
     if ((await this.read(id)).value.item.status !== 'cancelling') return this.view((await this.read(id)).value);
-    await this.serial('control:' + id, () => this.cancelChildren(id));
+    await serialByKey(this.locks, 'control:' + id, () => this.cancelChildren(id));
     return this.view((await this.read(id)).value);
   }
   private async cancelChildren(id: string) {
@@ -407,7 +401,7 @@ export class WorkItemService {
   }
   /** Serializes short permission decisions with the durable cancellation intent. */
   async withActiveStep<T>(parentSessionId: string, id: string, stepId: string, actorId: string | undefined, action: () => Promise<T>): Promise<T> {
-    return this.serial('control:' + id, async () => {
+    return serialByKey(this.locks, 'control:' + id, async () => {
       const { value } = await this.owned(parentSessionId, id, actorId);
       const step = value.item.steps.find(step => step.id === stepId);
       if (!['running', 'waiting', 'failed'].includes(value.item.status) || step?.status !== 'running') throw new RuntimeError('WORK_ITEM_TASK_REVOKED', 'Work step no longer accepts decisions', 409);
@@ -417,7 +411,7 @@ export class WorkItemService {
   }
 
   async retryStep(parentSessionId: string, id: string, stepId: string, expectedRevision: number, actorId?: string): Promise<WorkItem> {
-    return this.serial(id, async () => {
+    return serialByKey(this.locks, id, async () => {
       const state = await this.owned(parentSessionId, id, actorId); this.revision(state, expectedRevision);
       // 有待确认修订时重试会改变修订影响的前提，先确认或放弃修订。
       if (state.value.item.pendingRevision) throw new RuntimeError('WORK_ITEM_REVISION_PENDING', 'Confirm or discard the pending plan revision before retrying a step', 409);
@@ -430,7 +424,7 @@ export class WorkItemService {
   }
   async answer(parentSessionId: string, id: string, stepId: string, answer: string, expectedRevision: number, actorId?: string): Promise<WorkItem> {
     if (!answer.trim() || answer.length > 4000) throw new RuntimeError('WORK_ITEM_ANSWER_INVALID', 'Answer must contain 1–4000 characters', 400);
-    return this.serial(id, async () => {
+    return serialByKey(this.locks, id, async () => {
       const state = await this.owned(parentSessionId, id, actorId); this.revision(state, expectedRevision);
       const step = state.value.item.steps.find(step => step.id === stepId);
       if (!step || step.status !== 'waiting' || !['waiting', 'running'].includes(state.value.item.status)) throw new RuntimeError('WORK_ITEM_NOT_WAITING', 'This step is not awaiting an answer', 409);
@@ -455,7 +449,7 @@ export class WorkItemService {
    */
   async revise(parentSessionId: string, id: string, input: ReviseWorkPlanInput, actorId?: string, via: 'human' | 'agent' = 'human'): Promise<WorkItem> {
     input = reviseWorkPlanSchema.parse(input);
-    return this.serial(id, async () => {
+    return serialByKey(this.locks, id, async () => {
       const state = await this.owned(parentSessionId, id, actorId); this.revision(state, input.expectedRevision);
       const planned = await this.planRevision(state, input.plan, actorId!, via);
       const item = state.value.item;
@@ -470,7 +464,7 @@ export class WorkItemService {
   }
   /** 放弃待确认的 Agent 修订，目标按原计划继续。 */
   async discardRevision(parentSessionId: string, id: string, expectedRevision: number, actorId?: string, revisionDigest?: string): Promise<WorkItem> {
-    return this.serial(id, async () => {
+    return serialByKey(this.locks, id, async () => {
       const state = await this.owned(parentSessionId, id, actorId);
       if (!this.pendingRevision(state, expectedRevision, revisionDigest)) throw new RuntimeError('WORK_ITEM_NO_PENDING_REVISION', 'There is no plan revision awaiting confirmation', 409);
       delete state.value.item.pendingRevision;
@@ -571,7 +565,7 @@ export class WorkItemService {
     // 没被人确认过的计划不能变成模板：否则以后 /work run 只让人看到模板名，绕过了预览。
     if (value.item.status === 'awaiting_confirmation') throw new RuntimeError('WORK_TEMPLATE_UNCONFIRMED', 'Confirm the plan before saving it as a reusable template', 409);
     const id = 'template_' + hash(JSON.stringify([parentSessionId, actorId, name.trim()]));
-    return this.serial(id, async () => {
+    return serialByKey(this.locks, id, async () => {
       const records = (await this.repos.config.list!(TEMPLATES + id + ':')).map(row => JSON.parse(row.value) as StoredTemplate);
       const version = Math.max(0, ...records.map(record => record.template.version)) + 1;
       const template: WorkTemplate = { id, parentSessionId, name: name.trim(), version, plan: workPlanSchema.parse(value.item.plan), createdAt: time() };
@@ -600,7 +594,7 @@ export class WorkItemService {
     for (const id of await this.repos.workItems.listScheduledIds()) {
       if (this.closed) break;
       let driven: StoredWork | undefined;
-      try { driven = await this.serial(id, () => this.drive(id)); }
+      try { driven = await serialByKey(this.locks, id, () => this.drive(id)); }
       catch (error) {
         if (this.closed) break;
         if (error instanceof RuntimeError && error.code === 'WORK_ITEM_CONFLICT') continue;

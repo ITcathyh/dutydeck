@@ -7,7 +7,7 @@ import { childEnvironment } from '@dutydeck/shared/child-environment';
 import { promisify } from 'node:util';
 import { createAcpRuntime, createAgentRegistry, createRuntimeStore, type AcpRuntime, type AcpRuntimeEnsureInput, type AcpRuntimeHandle, type AcpRuntimeStatus } from 'acpx/runtime';
 import { acpxAgentEnvironment, acpxPermissionMode, prepareAcpxAgentLaunch } from '@dutydeck/acp-client';
-import { supportsCodexProfiles, type AgentConfig } from '@dutydeck/shared';
+import { supportsCodexProfiles, withTimeout, type AgentConfig } from '@dutydeck/shared';
 
 const run = promisify(execFile);
 const ACP_MODEL_PROBE_TIMEOUT_MS = 30_000;
@@ -22,13 +22,8 @@ export class AgentModelProbeTimeoutError extends Error {
   }
 }
 
-export async function withAgentModelProbeTimeout<T>(phase: AgentModelProbeTimeoutError['phase'], timeoutMs: number, operation: Promise<T>): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => reject(new AgentModelProbeTimeoutError(phase, timeoutMs)), timeoutMs);
-  });
-  try { return await Promise.race([operation, timeout]); }
-  finally { if (timer) clearTimeout(timer); }
+export function withAgentModelProbeTimeout<T>(phase: AgentModelProbeTimeoutError['phase'], timeoutMs: number, operation: Promise<T>): Promise<T> {
+  return withTimeout(operation, timeoutMs, () => new AgentModelProbeTimeoutError(phase, timeoutMs));
 }
 
 const cliCommands: Record<string, { command: string; args: string[]; parse(output: string): AgentModel[] }> = {

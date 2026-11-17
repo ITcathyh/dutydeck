@@ -1,5 +1,4 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
-import { buildDutydeckRoutingBlock } from '../shared-hints.js';
 import { submitPrompt } from './input-settle.js';
 
 export function createGrokAdapter(): CliAdapter {
@@ -42,11 +41,6 @@ export function createGrokAdapter(): CliAdapter {
         args.push(initialPrompt);
       }
       return args;
-    },
-
-    // 会话上下文（路由块）由 driver 拼到首轮 prompt 前（契约统一走 prompt 前缀）。
-    injectSessionContext(ctx: AdapterSessionContext): string {
-      return buildDutydeckRoutingBlock(ctx.locale, ctx.env);
     },
 
     async writeInput(backend: PtyLike, prompt: string): Promise<void> {

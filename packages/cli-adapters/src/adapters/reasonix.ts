@@ -1,5 +1,5 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
-import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
+import { nativeResumeCommand, usableResumeId } from '../resume-id.js';
 import { submitPrompt } from './input-settle.js';
 
 /**
@@ -40,9 +40,6 @@ export function createReasonixAdapter(): CliAdapter {
 
     /** Reasonix 自己铸会话 id（精简契约下 dutydeck 拿不到精确 id）；收到 dutydeck 的
      *  `ses_<uuid>` → null，driver 改起新会话。 */
-    buildResumeCommand(sessionId: string): string[] | null {
-      if (isDutydeckSessionId(sessionId)) return null;
-      return ['--resume', sessionId];
-    },
+    buildResumeCommand: nativeResumeCommand,
   };
 }

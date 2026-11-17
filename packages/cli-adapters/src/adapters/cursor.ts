@@ -1,5 +1,5 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
-import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
+import { nativeResumeCommand, usableResumeId } from '../resume-id.js';
 import { delay } from './input-settle.js';
 
 /** 已接收过首次写入的后端：首次写入落在 cursor-agent TUI 启动渲染期，
@@ -76,10 +76,7 @@ export function createCursorAdapter(): CliAdapter {
 
     /** Cursor 的 chat id 不透明、由 CLI 自己铸，dutydeck 的 sessionId 推导不出来。
      *  收到 dutydeck 的 `ses_<uuid>` → null，driver 改起新会话。 */
-    buildResumeCommand(sessionId: string): string[] | null {
-      if (isDutydeckSessionId(sessionId)) return null;
-      return ['--resume', sessionId];
-    },
+    buildResumeCommand: nativeResumeCommand,
 
     // 真实 composer 的占位符（登录/启动屏上都没有），两种状态都要匹配：
     // 会话一旦有历史，占位符就从 "Plan, search..." 切到 "Add a follow-up"。

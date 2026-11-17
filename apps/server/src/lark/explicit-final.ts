@@ -4,7 +4,7 @@ import { parseFinalCardBody, type FinalCardBody } from './final-card.js';
 import { jsonSha256 as digest } from '../hash.js';
 import { larkFailureKind } from './api-gate.js';
 import { isLarkMessageUnupdatable } from './card-renderer.js';
-import type { ConfigRepository, ChannelMapping } from '@dutydeck/shared';
+import { serialByKey, type ConfigRepository, type ChannelMapping } from '@dutydeck/shared';
 import type { PersistedLarkCardTask } from './coordinator.js';
 import { parseCardTask } from './persisted-card-task.js';
 import { isLarkFinalContentAuditRejected, recordLarkResultAuditRejection, prepareLarkResult, readConfirmedLarkResult, sendLarkResult, sendLarkDeliveryText, type DeliveryTarget } from './result-delivery.js';
@@ -37,11 +37,7 @@ export async function withExplicitFinalLock<T>(store: ConfigRepository | undefin
   if (!store) return action();
   let pending = locks.get(store);
   if (!pending) { pending = new Map(); locks.set(store, pending); }
-  const previous = pending.get(taskId) ?? Promise.resolve();
-  const run = previous.catch(() => {}).then(action);
-  pending.set(taskId, run);
-  try { return await run; }
-  finally { if (pending.get(taskId) === run) pending.delete(taskId); }
+  return serialByKey(pending, taskId, action);
 }
 
 // Routing comes only from the exact persisted mapping, never from agent text.

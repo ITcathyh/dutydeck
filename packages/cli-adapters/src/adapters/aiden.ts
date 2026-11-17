@@ -1,5 +1,4 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
-import { buildDutydeckRoutingBlock } from '../shared-hints.js';
 import { submitPrompt } from './input-settle.js';
 
 export function createAidenAdapter(): CliAdapter {
@@ -16,11 +15,6 @@ export function createAidenAdapter(): CliAdapter {
       }
       if (permissionMode === 'full-trust') args.push('--permission-mode', 'agentFull');
       return args;
-    },
-
-    // 由 driver 把返回块拼到首轮 prompt 前作为会话上下文。
-    injectSessionContext(ctx: AdapterSessionContext): string {
-      return buildDutydeckRoutingBlock(ctx.locale, ctx.env);
     },
 
     async writeInput(backend: PtyLike, prompt: string): Promise<void> {

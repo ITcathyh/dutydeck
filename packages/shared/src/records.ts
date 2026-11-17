@@ -7,6 +7,13 @@ export const asRecord = (value: unknown): Record<string, unknown> => isRecord(va
 /** Error 取 message，其余值转字符串。 */
 export function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error) }
 
+/** 同一 key 的工作依次执行；前次拒绝不阻断后续，完成后只清理仍指向本次的队列项。 */
+export async function serialByKey<K, T>(map: Map<K, Promise<unknown>>, key: K, work: () => Promise<T>): Promise<T> {
+  const current = (map.get(key) ?? Promise.resolve()).catch(() => {}).then(work);
+  map.set(key, current);
+  try { return await current; } finally { if (map.get(key) === current) map.delete(key); }
+}
+
 /** 至多 `limit` 个并发跑完 `values`，结果按输入顺序返回；任一拒绝则整体拒绝。 */
 export async function mapLimit<T, R>(values: readonly T[], limit: number, run: (value: T, index: number) => Promise<R>): Promise<R[]> {
   const out: R[] = new Array(values.length);

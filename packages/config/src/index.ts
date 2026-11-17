@@ -39,15 +39,13 @@ const probedVersions = new Map<string, string>();
 const VERSION_PROBE_CONCURRENCY = 4;
 const probingVersions = new Map<string, Promise<string | undefined>>();
 const versionKey = (command: string) => `${command}\0${process.env.PATH ?? ''}`;
+type ReadVersion = (command: string) => string | undefined;
 /** 探测执行的是 Agent 与插件命令，和 Agent 子进程走同一道环境边界：服务配置与飞书密钥不带过去。 */
 const probeEnvironment = () => ({ ...childEnvironment(process.env), NO_COLOR: '1' });
-/** loadConfigWithDiagnosticsAsync 刚异步探测的结果（含失败），只在它紧接着的同步装配期间有效，失败的命令不再用 spawnSync 重探。 */
-let prefetchedVersions: Map<string, string | undefined> | undefined;
 
 export function cliVersion(command: string): string | undefined {
   const key = versionKey(command);
   if (probedVersions.has(key)) return probedVersions.get(key);
-  if (prefetchedVersions?.has(key)) return prefetchedVersions.get(key);
   let version: string | undefined;
   for (const args of VERSION_ARGS) {
     const result = spawnSync(command, args, { encoding: 'utf8', timeout: 1500, env: probeEnvironment() });
@@ -95,7 +93,7 @@ const ptyCommand = (contribution: PtyAgentContribution, env: NodeJS.ProcessEnv) 
   (contribution.id === 'codex' || contribution.id === 'codex-cli') ? env.CODEX_PATH || contribution.command : contribution.command;
 
 const scannedBuiltinAgents = new Map<string, Array<Omit<AgentConfig, 'cwd'>>>();
-const scanBuiltinAgents = (env: NodeJS.ProcessEnv) => {
+const scanBuiltinAgents = (env: NodeJS.ProcessEnv, readVersion: ReadVersion) => {
   const cacheKey = env.CODEX_PATH ?? '';
   const cached = scannedBuiltinAgents.get(cacheKey);
   if (cached) return cached;
@@ -103,7 +101,7 @@ const scanBuiltinAgents = (env: NodeJS.ProcessEnv) => {
     const detail = agentDetails[id];
     const command = builtinProbeCommand(id, env);
     if (!detail || !command) return [];
-    const agent = { id, name: detail.name, command: argv[0]!, args: argv.slice(1), protocol: 'acp' as const, env: {}, permissionMode: 'ask' as const, timeout: 600, capabilities: { pause: false, resume: true }, builtin: true, version: cliVersion(command) };
+    const agent = { id, name: detail.name, command: argv[0]!, args: argv.slice(1), protocol: 'acp' as const, env: {}, permissionMode: 'ask' as const, timeout: 600, capabilities: { pause: false, resume: true }, builtin: true, version: readVersion(command) };
     return id === 'codex' ? [agent, { ...agent, id: 'codex-acp', name: agentDetails['codex-acp']!.name }] : [agent];
   });
   scannedBuiltinAgents.set(cacheKey, agents);
@@ -132,25 +130,27 @@ const DEFAULT_PTY_CAPABILITIES = { pause: false, resume: true } as const;
 // CLI 自更新替换可执行文件期间命令会短暂缺失，回来后下次扫描能找到，已找到的不再重复探测版本
 type PtyScanEntry = Omit<AgentConfig, 'cwd'> | undefined;
 const scannedPtyAgents = new Map<string, PtyScanEntry[]>();
-const scanPtyContribution = (contribution: PtyAgentContribution, env: NodeJS.ProcessEnv): PtyScanEntry => {
+const scanPtyContribution = (contribution: PtyAgentContribution, env: NodeJS.ProcessEnv, readVersion: ReadVersion): PtyScanEntry => {
   const command = ptyCommand(contribution, env);
   if (!commandExists(command)) return undefined;
-  return { id: contribution.id, name: contribution.name, command, args: contribution.args ?? [], protocol: 'pty-cli' as const, ...(contribution.adapterId && contribution.adapterId !== contribution.id ? { adapterId: contribution.adapterId } : {}), env: {}, permissionMode: 'ask' as const, timeout: 600, capabilities: contribution.capabilities ?? DEFAULT_PTY_CAPABILITIES, builtin: contribution.builtin ?? true, version: cliVersion(command) };
+  return { id: contribution.id, name: contribution.name, command, args: contribution.args ?? [], protocol: 'pty-cli' as const, ...(contribution.adapterId && contribution.adapterId !== contribution.id ? { adapterId: contribution.adapterId } : {}), env: {}, permissionMode: 'ask' as const, timeout: 600, capabilities: contribution.capabilities ?? DEFAULT_PTY_CAPABILITIES, builtin: contribution.builtin ?? true, version: readVersion(command) };
 };
-const scanPtyAgents = (contributions: PtyAgentContribution[], env: NodeJS.ProcessEnv): Array<Omit<AgentConfig, 'cwd'>> => {
+const scanPtyAgents = (contributions: PtyAgentContribution[], env: NodeJS.ProcessEnv, readVersion: ReadVersion): Array<Omit<AgentConfig, 'cwd'>> => {
   const cacheKey = JSON.stringify([contributions, env.CODEX_PATH]);
   const cached = scannedPtyAgents.get(cacheKey);
-  const entries = contributions.map((contribution, index) => cached?.[index] ?? scanPtyContribution(contribution, env));
+  const entries = contributions.map((contribution, index) => cached?.[index] ?? scanPtyContribution(contribution, env, readVersion));
   scannedPtyAgents.set(cacheKey, entries);
   return entries.filter((entry): entry is Omit<AgentConfig, 'cwd'> => entry !== undefined);
 };
 
-export const builtinAgents = (cwd = process.cwd(), ptyContributions: PtyAgentContribution[] = [], env: NodeJS.ProcessEnv = process.env): AgentConfig[] => {
-  const ptyAgents = scanPtyAgents(ptyContributions, env);
+const assembleBuiltinAgents = (cwd: string, ptyContributions: PtyAgentContribution[], env: NodeJS.ProcessEnv, readVersion: ReadVersion): AgentConfig[] => {
+  const ptyAgents = scanPtyAgents(ptyContributions, env, readVersion);
   const ptyIds = new Set(ptyAgents.map(agent => agent.id));
-  const acpxAgents = scanBuiltinAgents(env).filter(agent => !ptyIds.has(agent.id));
+  const acpxAgents = scanBuiltinAgents(env, readVersion).filter(agent => !ptyIds.has(agent.id));
   return [...ptyAgents, ...acpxAgents].map(agent => ({ ...agent, cwd }));
 };
+export const builtinAgents = (cwd = process.cwd(), ptyContributions: PtyAgentContribution[] = [], env: NodeJS.ProcessEnv = process.env): AgentConfig[] =>
+  assembleBuiltinAgents(cwd, ptyContributions, env, cliVersion);
 
 export interface DroppedAgent {
   id: string;
@@ -214,14 +214,14 @@ export function resolveDatabaseUrl(env: NodeJS.ProcessEnv = process.env): string
 const probesConfiguredVersion = (configured: AgentConfig) => configured.version === undefined && !(configured.protocol === 'pty-cli' && configured.adapterId);
 const configuredBuiltinIds = (ptyContributions: PtyAgentContribution[]) => new Set(['codex-acp', ...builtinAcpAgents().map(agent => agent.id), ...ptyContributions.map(agent => agent.id)]);
 
-export function loadConfigWithDiagnostics(env: NodeJS.ProcessEnv = process.env, ptyContributions: PtyAgentContribution[] = [], pluginAgents: AgentConfig[] = []): LoadedConfig {
+function assembleConfigWithDiagnostics(env: NodeJS.ProcessEnv, ptyContributions: PtyAgentContribution[], pluginAgents: AgentConfig[], readVersion: ReadVersion): LoadedConfig {
   const extra = parseAgentsJson(env.DUTYDECK_AGENTS_JSON);
   const defaultCwd = env.DUTYDECK_DEFAULT_CWD ?? process.cwd();
-  const agents = new Map(builtinAgents(defaultCwd, ptyContributions, { ...process.env, ...env }).map(agent => [agent.id, agent]));
+  const agents = new Map(assembleBuiltinAgents(defaultCwd, ptyContributions, { ...process.env, ...env }, readVersion).map(agent => [agent.id, agent]));
   const builtinIds = configuredBuiltinIds(ptyContributions);
   const register = (configured: AgentConfig, plugin = false) => {
     if (!commandExists(configured.command)) return false;
-    agents.set(configured.id, { ...configured, ...(plugin ? {} : { origin: undefined }), cwd: configured.cwd ?? defaultCwd, version: probesConfiguredVersion(configured) ? cliVersion(configured.command) : configured.version });
+    agents.set(configured.id, { ...configured, ...(plugin ? {} : { origin: undefined }), cwd: configured.cwd ?? defaultCwd, version: probesConfiguredVersion(configured) ? readVersion(configured.command) : configured.version });
     return true;
   };
   for (const agent of pluginAgents) if (!builtinIds.has(agent.id)) register(agentConfigSchema.parse(agent), true);
@@ -245,6 +245,10 @@ export function loadConfigWithDiagnostics(env: NodeJS.ProcessEnv = process.env, 
   return { config, droppedAgents };
 }
 
+export function loadConfigWithDiagnostics(env: NodeJS.ProcessEnv = process.env, ptyContributions: PtyAgentContribution[] = [], pluginAgents: AgentConfig[] = []): LoadedConfig {
+  return assembleConfigWithDiagnostics(env, ptyContributions, pluginAgents, cliVersion);
+}
+
 /**
  * 与 loadConfigWithDiagnostics 结果相同；先把它要探测版本的命令去重后异步并行探测完（最多同时 4 个），
  * 同步装配时直接用这批结果（失败也算），启动时不再用 spawnSync 逐个卡住事件循环。
@@ -260,9 +264,13 @@ export async function loadConfigWithDiagnosticsAsync(env: NodeJS.ProcessEnv = pr
   ].filter((command): command is string => Boolean(command)));
   const prefetched = new Map<string, string | undefined>();
   await mapLimit([...commands], VERSION_PROBE_CONCURRENCY, async command => { prefetched.set(versionKey(command), await cliVersionAsync(command)); });
-  prefetchedVersions = prefetched;
-  try { return loadConfigWithDiagnostics(env, ptyContributions, pluginAgents); }
-  finally { prefetchedVersions = undefined; }
+  const readVersion: ReadVersion = command => {
+    const key = versionKey(command);
+    if (probedVersions.has(key)) return probedVersions.get(key);
+    if (prefetched.has(key)) return prefetched.get(key);
+    return cliVersion(command);
+  };
+  return assembleConfigWithDiagnostics(env, ptyContributions, pluginAgents, readVersion);
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env, ptyContributions: PtyAgentContribution[] = [], pluginAgents: AgentConfig[] = []): AppConfig {

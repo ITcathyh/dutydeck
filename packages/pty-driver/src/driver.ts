@@ -782,9 +782,8 @@ export class PtyCliDriver implements AgentDriver {
     let routingPrefix: string | undefined;
     const isFirstPrompt = !this.firstPromptSent;
     if (isFirstPrompt) {
-      // 首轮 prompt 前注入路由块：适配器自带 injectSessionContext 的用它
-      // （claude-code/grok），其余用默认 DUTYDECK_SHELL_HINTS 块——教 CLI
-      // 自己正跑在无人值守桥接会话里。
+      // 首轮 prompt 前注入路由块：适配器有定制 injectSessionContext 时优先使用，
+      // 否则用默认 DUTYDECK_SHELL_HINTS 块——教 CLI 自己正跑在无人值守桥接会话里。
       const block = this.adapter.injectSessionContext
         ? this.adapter.injectSessionContext(this.sessionContext())
         : buildDutydeckRoutingBlock(this.sessionContext().locale, this.agent.env);
