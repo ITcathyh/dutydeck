@@ -86,7 +86,7 @@ describe('ClaudeBackgroundTasks bounded position keys', () => {
     expect(tracker.snapshot().count).toBe(1);
   });
 
-  it('keeps sibling content hashing independent from the main namespace', () => {
+  it('keeps sibling lifecycle hashing independent from non-lifecycle main records', () => {
     const tracker = new ClaudeBackgroundTasks();
     const shared = position(1, { path: 'sibling.jsonl', dev: 2, ino: 2 });
     const firstLaunch = launchRecords();
@@ -97,6 +97,31 @@ describe('ClaudeBackgroundTasks bounded position keys', () => {
     expect(tracker.observeLifecycle(first, shared)).toBe(true);
     expect(tracker.snapshot().count).toBe(1);
     expect(tracker.observeLifecycle(first, shared)).toBe(false);
+    expect(tracker.snapshot().count).toBe(1);
+    expect(tracker.observeLifecycle(noticeRecord('agent-2', 'agent-launch-2', 11), shared)).toBe(true);
+    expect(tracker.snapshot().count).toBe(0);
+  });
+
+  it('deduplicates a main terminal notice against its same-position lifecycle replay', () => {
+    const tracker = new ClaudeBackgroundTasks();
+    for (const [index, entry] of launchRecords().entries()) tracker.observe(entry, position(index));
+    const notice = noticeRecord();
+    const at = position(2);
+    expect(tracker.observe(notice, at)).toBe(true);
+    const completed = tracker.snapshot();
+    expect(completed.count).toBe(0);
+    const positionCount = (tracker as any).observedPositions.size;
+    expect(tracker.observeLifecycle(notice, at)).toBe(false);
+    expect((tracker as any).observedPositions.size).toBe(positionCount);
+    expect(tracker.snapshot()).toEqual(completed);
+  });
+
+  it('accepts different terminal notices at the same sibling offset', () => {
+    const tracker = new ClaudeBackgroundTasks();
+    const launches = [...launchRecords(), ...launchRecords('agent-2', 'agent-launch-2')];
+    for (const [index, entry] of launches.entries()) tracker.observe(entry, position(index));
+    const shared = position(4, { path: 'sibling.jsonl', dev: 2, ino: 2 });
+    expect(tracker.observeLifecycle(noticeRecord('agent-1', 'agent-launch', 10), shared)).toBe(true);
     expect(tracker.snapshot().count).toBe(1);
     expect(tracker.observeLifecycle(noticeRecord('agent-2', 'agent-launch-2', 11), shared)).toBe(true);
     expect(tracker.snapshot().count).toBe(0);
@@ -130,5 +155,52 @@ describe('ClaudeTranscriptTailer main-file position epochs', () => {
     appendFileSync(path, jsonl([noticeRecord('agent-1', 'agent-launch', 3)]));
     await tailer.flush();
     expect(tailer.pendingBackgroundWork()).toBe(0);
+  });
+
+  it('drains a new completion after the old main transcript becomes a sibling', async () => {
+    root = mkdtempSync(join(tmpdir(), 'dd-bg-position-switch-'));
+    const before = join(root, 'before-clear.jsonl'), after = join(root, 'after-clear.jsonl');
+    const text = '<task-notification>\n<task-id>agent-1</task-id>\n<tool-use-id>launch</tool-use-id>\n<status>completed</status>\n<result>done</result>\n</task-notification>';
+    const tool = (name: string, result: unknown, second: number, id: string) => [
+      { type: 'assistant', uuid: `${id}-call`, timestamp: at(second), sessionId: 'native-a', message: { role: 'assistant', content: [{ type: 'tool_use', id, name }] } },
+      { type: 'user', uuid: `${id}-result`, timestamp: at(second), sessionId: 'native-a', toolUseResult: result, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: '' }] } },
+    ];
+    const notices = (second: number, sessionId: string) => [
+      { type: 'queue-operation', operation: 'enqueue', timestamp: at(second), sessionId, content: text },
+      { type: 'user', uuid: `notice-${second}`, turnOrigin: 'task_notification', timestamp: at(second + 1), sessionId, message: { role: 'user', content: text } },
+    ];
+    writeFileSync(before, jsonl([
+      ...tool('Agent', { isAsync: true, agentId: 'agent-1' }, 0, 'launch'),
+      ...notices(10, 'native-a'),
+      ...tool('SendMessage', { success: true, resumedAgentId: 'agent-1' }, 20, 'resume'),
+      { ...mainEnd, timestamp: at(21), sessionId: 'native-a' },
+    ]));
+    let source = { nativeSessionId: 'native-a', path: before };
+    const events: any[] = [];
+    tailer = new ClaudeTranscriptTailer({ cwd: root, nativeSession: () => source, pollIntervalMs: 60_000 });
+    tailer.onEvent(event => events.push(event));
+    await tailer.flush();
+    const running = {
+      state: 'background_work', count: 1, mainTurnEnded: false,
+      tasks: [{ id: 'agent-1', toolUseId: 'launch', kind: 'agent', originInputId: undefined, state: 'running' }],
+    };
+    const runningEvent = { type: 'status', data: running };
+    expect(tailer.pendingBackgroundWork()).toBe(1);
+    expect(events).toEqual([runningEvent]);
+
+    writeFileSync(after, '');
+    source = { nativeSessionId: 'native-b', path: after };
+    await tailer.flush();
+    expect(tailer.pendingBackgroundWork()).toBe(1);
+    expect(events).toEqual([runningEvent]);
+
+    appendFileSync(after, jsonl(notices(30, 'native-b')));
+    await tailer.flush();
+    const completed = {
+      state: 'background_work', count: 0, mainTurnEnded: false,
+      tasks: [{ id: 'agent-1', toolUseId: 'launch', kind: 'agent', originInputId: undefined, state: 'completed' }],
+    };
+    expect(tailer.pendingBackgroundWork()).toBe(0);
+    expect(events).toEqual([runningEvent, { type: 'status', sourceId: expect.any(String), data: completed }]);
   });
 });

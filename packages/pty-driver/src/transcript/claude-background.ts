@@ -54,6 +54,14 @@ function taskNotificationIds(text: string): string[] {
   return [...text.matchAll(/<task-id>([^<]+)<\/task-id>/g)].map(match => match[1]!.trim());
 }
 
+function terminalTaskNotification(entry: any): { text: string; state: string } | undefined {
+  if (entry?.type !== 'queue-operation' && entry?.type !== 'user' && entry?.type !== 'attachment') return undefined;
+  const text = taskNotificationText(entry);
+  if (typeof text !== 'string' || !text.trimStart().startsWith('<task-notification>')) return undefined;
+  const state = /<status>(completed|failed|killed|stopped)<\/status>/.exec(text)?.[1];
+  return state ? { text, state } : undefined;
+}
+
 /** Native Claude task lifecycle metadata; tool-result prose is never a launch receipt. */
 export class ClaudeBackgroundTasks {
   private readonly calls = new Map<string, { name: string; originInputId?: string }>();
@@ -74,22 +82,21 @@ export class ClaudeBackgroundTasks {
 
   /** A sibling transcript can prove only lifecycle for identities already owned here. */
   observeLifecycle(entry: any, position?: TranscriptPosition): boolean {
-    if (!['queue-operation', 'user', 'attachment'].includes(entry?.type)) return false;
-    const text = taskNotificationText(entry);
-    if (typeof text !== 'string' || !text.trimStart().startsWith('<task-notification>')) return false;
-    const state = /<status>(completed|failed|killed|stopped)<\/status>/.exec(text)?.[1];
+    const notification = terminalTaskNotification(entry);
+    if (!notification) return false;
+    const { text, state } = notification;
     const toolUseId = /<tool-use-id>([^<]+)<\/tool-use-id>/.exec(text)?.[1]?.trim();
     const ids = taskNotificationIds(text);
     const task = ids.length === 1 ? this.tasks.get(ids[0]!) : undefined;
-    if (!state || !task || (toolUseId !== undefined && task.toolUseId !== toolUseId)) return false;
+    if (!task || (toolUseId !== undefined && task.toolUseId !== toolUseId)) return false;
     return this.observeEntry(entry, position, true);
   }
 
   private observeEntry(entry: any, position: TranscriptPosition | undefined, lifecycleOnly: boolean): boolean {
     if (entry?.isSidechain === true) return false;
-    // Main-file offsets are immutable within an epoch. Sibling scans lack
-    // equivalent epoch semantics, so lifecycle records still include content.
-    const positionKey = position ? lifecycleOnly
+    // Main-file offsets are immutable within an epoch. Terminal lifecycle
+    // notices share their content key with sibling scans; other records do not.
+    const positionKey = position ? lifecycleOnly || terminalTaskNotification(entry)
       ? `lifecycle:${createHash('sha256').update(JSON.stringify([position, entry])).digest('base64')}`
       : `main:${position.path.length}:${position.path}:${position.dev}:${position.ino}:${position.epoch}:${position.offset}` : undefined;
     if (positionKey && this.observedPositions.has(positionKey)) return false;
