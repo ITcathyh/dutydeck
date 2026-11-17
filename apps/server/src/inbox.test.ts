@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import Fastify from 'fastify';
 import { permissionRejectReasonMaxLength, type ConfigRepository, type InboxAction, type Session, type TaskRecord, type WorkItem } from '@dutydeck/shared';
+import { createRepositories } from '@dutydeck/storage';
+import { DutydeckRuntime } from '@dutydeck/runtime';
 import { signSessionShareToken } from './auth/auth.js';
 import { buildApp } from './app.js';
 import { collectInbox, registerInboxRoutes, type InboxSources } from './inbox.js';
@@ -172,12 +174,73 @@ describe('collectInbox', () => {
     expect((await collectInbox(sources(base), sessions, { actorFor: () => undefined, now: NOW })).map(item => item.id)).toEqual(['permission:s2:p2', 'permission:s1:p1']);
     expect(await collectInbox(sources(base), sessions, { actorFor: () => undefined, now: NOW, kinds: new Set(['plan']) })).toEqual([]);
   });
+
+  it('专用投影与完整任务的计划、报告、卡片、reconcile 和标题响应逐项相同', async () => {
+    const tasks: Record<string, TaskRecord[]> = {
+      s1: [task('first', 's1', { prompt: '首行🙂\n第二行', createdAt: ago(100) }), task('unknown', 's1', { status: 'reconcile_required', createdAt: ago(90), updatedAt: ago(5), executionContext: { agentPrompt: 'private' } })],
+      s2: [task('plan', 's2', { prompt: planPrompt('整理依赖'), createdAt: ago(80), updatedAt: ago(80) })],
+      s3: [task('lark-plan', 's3', { prompt: planPrompt('飞书计划'), createdAt: ago(70), updatedAt: ago(70) })]
+    };
+    const store = memoryStore({ 'task_report/plan': JSON.stringify({ schemaVersion: 1, taskId: 'plan', sessionId: 's2', status: 'waiting', question: '发布哪个版本？', reportedAt: ago(10) }) });
+    const card = { kind: 'plan', state: 'pending', sessionId: 's3', taskId: 'lark-plan', updatedAt: ago(60) } as LarkInteraction;
+    const full = sources({ store, tasks, larkCards: async () => [card] });
+    const listed = [session('s1'), session('s2'), session('s3', { source: 'lark' })], options = { actorFor: () => undefined, now: NOW };
+    const expected = await collectInbox(full, listed, options);
+    const references = Object.fromEntries(Object.entries(tasks).map(([id, records]) => [id, records.map(({ id, sessionId, prompt, status, createdAt, updatedAt }) => ({ id, sessionId, prompt, status, createdAt, updatedAt }))]));
+    const getTasks = vi.fn(full.runtime.getTasks), getInboxTasks = vi.fn(async (id: string) => references[id] ?? []);
+    const actual = await collectInbox({ ...full, runtime: { ...full.runtime, getTasks, getInboxTasks } }, listed, options);
+    expect(actual).toEqual(expected);
+    expect(actual.map(item => item.kind)).toEqual(expect.arrayContaining(['task_report', 'plan', 'reconcile']));
+    expect(actual.find(item => item.sessionId === 's1')).toMatchObject({ sessionTitle: '首行🙂 第二行' });
+    expect(getInboxTasks.mock.calls).toEqual([['s1'], ['s2'], ['s3']]);
+    expect(getTasks).not.toHaveBeenCalled();
+  });
+
+  it.each(['missing', 'rejected', 'thrown'] as const)('专用方法 %s 时逐会话回退，最终失败仍按空任务列表处理', async mode => {
+    const tasks = { s1: [task('one', 's1', { status: 'reconcile_required' })], s2: [task('two', 's2', { status: 'reconcile_required' })] };
+    const full = sources({ tasks }), listed = [session('s1'), session('s2')], options = { actorFor: () => undefined, now: NOW };
+    const expected = await collectInbox(full, listed, options);
+    const references = Object.fromEntries(Object.entries(tasks).map(([id, records]) => [id, records.map(({ id, sessionId, prompt, status, createdAt, updatedAt }) => ({ id, sessionId, prompt, status, createdAt, updatedAt }))]));
+    const getTasks = vi.fn(full.runtime.getTasks), getInboxTasks = vi.fn((id: string) => {
+      if (id === 's1') {
+        if (mode === 'thrown') throw new Error('projection unavailable');
+        return Promise.reject(new Error('projection unavailable'));
+      }
+      return Promise.resolve(references[id] ?? []);
+    });
+    const runtime = { ...full.runtime, getTasks, ...(mode === 'missing' ? {} : { getInboxTasks }) };
+    expect(await collectInbox({ ...full, runtime }, listed, options)).toEqual(expected);
+    expect(getTasks.mock.calls).toEqual(mode === 'missing' ? [['s1'], ['s2']] : [['s1']]);
+    getTasks.mockRejectedValue(new Error('full unavailable'));
+    if (mode === 'thrown') getInboxTasks.mockImplementation(() => { throw new Error('projection unavailable'); });
+    else if (mode === 'rejected') getInboxTasks.mockRejectedValue(new Error('projection unavailable'));
+    await expect(collectInbox({ ...full, runtime }, listed, options)).resolves.toEqual([]);
+  });
 });
 
 describe('GET /api/inbox', () => {
   const apps: Array<{ close(): Promise<unknown> }> = [];
   afterEach(async () => { for (const app of apps.splice(0)) await app.close(); });
   const runtime = { listSessions: async () => [session('s1'), session('s2'), session('s3', { archivedAt: ago(1) })] };
+
+  it('Web 实际 runtime 命中专用投影，通用 getTasks 仍保留 skillDeliveries', async () => {
+    const repos = createRepositories(':memory:'), listed = [session('s1')];
+    const skillDeliveries = [{ name: 'review', path: '/skills/review', source: 'workspace' as const, digest: 'digest', mode: 'prompt' as const }];
+    await repos.tasks.save(task('t1', 's1', { prompt: '核对结果', status: 'reconcile_required', executionContext: { agentPrompt: 'private', skillDeliveries } }));
+    const runtime = Object.assign(Object.create(DutydeckRuntime.prototype), { repos, options: {}, listSessions: async () => listed, getPendingPermissions: () => [] }) as DutydeckRuntime;
+    const getInboxTasks = vi.spyOn(repos.tasks, 'getInboxTasks'), listBySession = vi.spyOn(repos.tasks, 'listBySession');
+    const app = await buildApp(runtime as any); apps.push(app);
+    try {
+      const response = await app.inject('/api/inbox');
+      expect(response.statusCode).toBe(200);
+      expect(response.json().items).toHaveLength(1);
+      expect(response.json().items[0]).toMatchObject({ kind: 'reconcile', taskId: 't1', title: '核对结果', sessionTitle: '核对结果' });
+      expect(getInboxTasks).toHaveBeenCalledExactlyOnceWith('s1');
+      expect(listBySession).not.toHaveBeenCalled();
+      await expect(runtime.getTasks('s1')).resolves.toMatchObject([{ id: 't1', skillDeliveries }]);
+      expect(listBySession).toHaveBeenCalledExactlyOnceWith('s1');
+    } finally { repos.close(); }
+  });
 
   it('只返回当前请求能读的会话的条目', async () => {
     const app = Fastify(); apps.push(app);

@@ -1379,6 +1379,7 @@ export class DutydeckRuntime {
   }
   getEventWindow(id: string, options?: EventWindowOptions) { return this.repos.events.listWindow(id, options); }
   async getTasks(id: string) { return (await this.repos.tasks.listBySession(id)).map(task => this.publicTask(task)); }
+  getInboxTasks(id: string) { return this.repos.tasks.getInboxTasks?.(id) ?? this.getTasks(id); }
   async getTaskRecovery(id: string, taskId: string) { return this.readTaskRecovery(id, taskId).recovery; }
 
   private readTaskRecovery(id: string, taskId: string) {

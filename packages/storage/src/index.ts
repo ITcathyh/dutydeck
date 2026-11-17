@@ -292,6 +292,10 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
       async listBySession(sessionId) {
         return tasksBySession().all({ sessionId }).map(decodeTask);
       },
+      async getInboxTasks(sessionId) {
+        return cachedStatement(sqlite, `SELECT id,session_id AS sessionId,prompt,status,created_at AS createdAt,updated_at AS updatedAt
+          FROM tasks WHERE session_id=? ORDER BY created_at`).all(sessionId) as Array<Pick<TaskRecord, 'id' | 'sessionId' | 'prompt' | 'status' | 'createdAt' | 'updatedAt'>>;
+      },
       async listRecentBySession(sessionId) {
         return (cachedStatement(sqlite, 'SELECT * FROM tasks WHERE session_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 2').all(sessionId) as TaskRowLike[]).map(decodeTask).reverse();
       },

@@ -1462,7 +1462,12 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     await h.completed();
     const record = { ...await seedLegacyResult(h), kind: 'plan', question: '计划', cardCreatedAt: new Date(Date.now() - 5 * 60_000).toISOString(), expiresAt: new Date(Date.now() + 3_600_000).toISOString() } as LarkInteraction;
     await h.repos.config.set(`lark.interaction.${h.config.appId}.${record.id}`, JSON.stringify(record));
+    const [session] = await h.runtime.listSessions();
+    const getInboxTasks = vi.spyOn(h.repos.tasks, 'getInboxTasks'), listBySession = vi.spyOn(h.repos.tasks, 'listBySession');
     await h.coordinator.handle(event('om_tasks', '/tasks'), h.config);
+    expect(getInboxTasks).toHaveBeenCalledWith(session!.id);
+    // taskDashboardData 的任务行仍走完整 getTasks；只有待决定汇总使用投影。
+    expect(listBySession).toHaveBeenCalledWith(session!.id);
     const card = JSON.stringify([...h.cards.values()].find(item => item.taskId === 'om_tasks'));
     expect(card).toContain('**等你决定**（1）');
     expect(card).toContain('计划待批准 1');

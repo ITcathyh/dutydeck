@@ -424,6 +424,7 @@ export interface TaskRepository {
   listRunSummaries?(): Promise<RunSummary[]>;
   save(task: TaskRecord): Promise<void>;
   listBySession(sessionId: string): Promise<TaskRecord[]>;
+  getInboxTasks?(sessionId: string): Promise<Array<Pick<TaskRecord, 'id' | 'sessionId' | 'prompt' | 'status' | 'createdAt' | 'updatedAt'>>>;
   /** Last two receipts, oldest first; same-time receipts retain storage insertion order. */
   listRecentBySession?(sessionId: string): Promise<TaskRecord[]>;
   /** Each session's last receipt reference, ordered like the final entry of listRecentBySession. */

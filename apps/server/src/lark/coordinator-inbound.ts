@@ -362,7 +362,10 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     const actorId = event.senderOpenId;
     const interactions = await this.workflows?.list(config.appId).catch(() => []) ?? [];
     const items = await collectInbox({
-      runtime: { getTasks: id => this.runtime.getTasks?.(id) ?? Promise.resolve([]) },
+      runtime: {
+        getTasks: id => this.runtime.getTasks?.(id) ?? Promise.resolve([]),
+        ...(this.runtime.getInboxTasks ? { getInboxTasks: (id: string) => this.runtime.getInboxTasks!(id) } : {})
+      },
       store: this.workflowOptions.store,
       larkCards: async () => interactions,
       ...(this.workflowOptions.workbench ? { workItems: this.workflowOptions.workbench.inboxSource() } : {}),

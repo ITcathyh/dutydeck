@@ -12,8 +12,9 @@ import { planTaskOf } from './plan-mode.js';
 import { readPlanState } from './plan-routes.js';
 
 /** 汇总只读已有对象，不新建存储；每个来源缺省时对应类型不出现。 */
+type InboxTask = Pick<TaskRecord, 'id' | 'sessionId' | 'prompt' | 'status' | 'createdAt' | 'updatedAt'>;
 export interface InboxSources {
-  runtime: { getTasks(sessionId: string): Promise<TaskRecord[]>; getPendingPermissions?(sessionId: string): PermissionRequestData[] | Promise<PermissionRequestData[]> };
+  runtime: { getTasks(sessionId: string): Promise<TaskRecord[]>; getInboxTasks?(sessionId: string): Promise<InboxTask[]>; getPendingPermissions?(sessionId: string): PermissionRequestData[] | Promise<PermissionRequestData[]> };
   store?: ConfigRepository;
   asks?: (sessionId: string) => Array<{ id: string; question: string; createdAt: string }>;
   workItems?: {
@@ -69,12 +70,17 @@ export async function collectInbox(sources: InboxSources, sessions: Session[], o
     const items: InboxItem[] = [];
     const sid = session.id;
     const managed = session.source === 'work_item';
-    const tasks: TaskRecord[] = await sources.runtime.getTasks(sid).catch(() => []);
-    const taskById = new Map<string, TaskRecord>();
+    const readTasks = async (): Promise<InboxTask[]> => {
+      if (!sources.runtime.getInboxTasks) return sources.runtime.getTasks(sid);
+      try { return await sources.runtime.getInboxTasks(sid); }
+      catch { return sources.runtime.getTasks(sid); }
+    };
+    const tasks: InboxTask[] = await readTasks().catch(() => []);
+    const taskById = new Map<string, InboxTask>();
     for (const task of tasks) if (!taskById.has(task.id)) taskById.set(task.id, task);
     const sessionLarkCards = larkCardsBySession.get(sid) ?? [];
     const latestTask = sessionLarkCards.some(card => card.kind === 'plan')
-      ? tasks.reduce<TaskRecord | undefined>((last, item) => !last || Date.parse(item.createdAt) >= Date.parse(last.createdAt) ? item : last, undefined)
+      ? tasks.reduce<InboxTask | undefined>((last, item) => !last || Date.parse(item.createdAt) >= Date.parse(last.createdAt) ? item : last, undefined)
       : undefined;
     const workspace = workspaceName(sessionWorkspaceDirectory(session));
     const sessionTitle = session.name?.trim() || oneLine([...tasks].sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0]?.prompt, 60) || workspace;

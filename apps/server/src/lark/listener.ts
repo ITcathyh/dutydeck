@@ -161,6 +161,7 @@ export interface LarkRuntime {
   resolvePermission?(id: string, requestId: string, approved: boolean, reason?: string, annotation?: Pick<PermissionRequestData, 'workspaceRule'>): Promise<unknown>;
   getSessionTaskReport?(id: string): Promise<import('@dutydeck/shared').TaskReport | undefined>;
   getTasks?(id: string): Promise<TaskRecord[]>;
+  getInboxTasks?(id: string): Promise<Array<Pick<TaskRecord, 'id' | 'sessionId' | 'prompt' | 'status' | 'createdAt' | 'updatedAt'>>>;
   getTaskRecovery?(id: string, taskId: string): Promise<{ status: string; blockers: Array<{ code: string; external?: boolean }>; activeTaskId?: string; resolvedUnknown?: boolean; verifiedOutput?: { eventId: string; digest: string } }>;
   getEvents?(id: string, afterSequence?: number): Promise<AgentEvent[]>;
   /** 某一次执行（attempt）的事件数与活动时间，按 attempt 索引读，不读整段会话历史。 */
