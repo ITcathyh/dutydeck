@@ -30,13 +30,14 @@ async function harness() {
     send: vi.fn(), interrupt: vi.fn()
   };
   const createCard = vi.fn(async () => ({ messageId: `om_card_${randomUUID()}` }));
+  const quotedMessage = (id: string): LarkChatMessage => ({ messageId: id, chatId: 'oc_group', messageType: 'text',
+    rawContent: '{"text":"reference"}', sender: { type: 'user' }, mentions: [] });
   const service = {
     send: createCard, reply: createCard, update: vi.fn(async () => ({ messageId: 'om_card' })),
     addReaction: vi.fn(async () => ({ reactionId: 'reaction' })), deleteReaction: vi.fn(async () => {}),
     listChatMessages: vi.fn(async () => ({ items: [], hasMore: false })),
-    getMessage: vi.fn(async (id: string) => ({ messageId: id, chatId: 'oc_group', messageType: 'text',
-      rawContent: '{"text":"reference"}', sender: { type: 'user' }, mentions: [] })),
-    getMessageItems: vi.fn(async () => []),
+    getMessage: vi.fn(async (id: string) => quotedMessage(id)),
+    getMessageItems: vi.fn(async (id: string) => [quotedMessage(id)]),
     downloadMessageResource: vi.fn(async () => ({ data: new Uint8Array([65, 66, 67]), contentType: 'text/plain' })),
     downloadMessageResourceToFile: vi.fn(async (_messageId: string, _key: string, destination: string, signal?: AbortSignal) => {
       signal?.throwIfAborted(); await writeFile(destination, new Uint8Array([65, 66, 67])); signal?.throwIfAborted(); return { contentType: 'text/plain' };
@@ -94,8 +95,8 @@ describe('edited-message real coordinator and SQLite inbox', () => {
     expect(h.runtime.dispatch.mock.calls[0]?.[5]).toBe('ou_author');
     expect(h.service.listChatMessages).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'omt_topic' }), expect.any(AbortSignal));
     expect((h.service.listChatMessages.mock.calls[0] as unknown as [unknown, AbortSignal])[1].aborted).toBe(false);
-    expect(h.service.getMessage).toHaveBeenCalledWith('om_parent', expect.any(AbortSignal));
-    expect((h.service.getMessage.mock.calls[0] as unknown as [unknown, AbortSignal])[1].aborted).toBe(false);
+    expect(h.service.getMessageItems).toHaveBeenCalledWith('om_parent', expect.any(AbortSignal));
+    expect((h.service.getMessageItems.mock.calls[0] as unknown as [unknown, AbortSignal])[1].aborted).toBe(false);
 
     h.restart();
     await h.coordinator.initializeWorkflows(h.config);
