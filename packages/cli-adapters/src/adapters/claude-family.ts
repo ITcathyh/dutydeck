@@ -281,10 +281,14 @@ function ownedComposerAtBottom(lines: string[], expected: string, final: boolean
       // hard newlines are semantic and must survive the comparison unchanged.
       if (!final && observed === ' ') observed = '';
       const actualText = canonical(observed), expectedText = canonical(expected);
+      const matches = (actual: string) => actual === expectedText || !final && (expectedText.startsWith(actual)
+        // A soft Enter can return before Claude paints the next blank row.
+        // Only this writer's exact trailing marker may stand for that pending
+        // newline during an intermediate read; final Enter never accepts it.
+        || expected.endsWith('\\\n') && actual === canonical(expected.slice(0, -1)));
       // Intermediate reads may lag a chunk. The final Enter requires the
       // complete owned draft: never an empty/prefix/suffix/paste-summary guess.
-      if (!(wrapWidths && nativeContinuationIndent && draft.length > 1)
-        && (actualText === expectedText || !final && expectedText.startsWith(actualText))) return true;
+      if (!(wrapWidths && nativeContinuationIndent && draft.length > 1) && matches(actualText)) return true;
       if (wrapWidths && nativeContinuationIndent && draft.length > 1) {
         const widths = wrapWidths.slice(top + 1, bottom);
         const wrapColumn = (wrapWidths[top] ?? 0) - 2;
@@ -292,8 +296,7 @@ function ownedComposerAtBottom(lines: string[], expected: string, final: boolean
         for (let index = 1; index < draft.length; index++) {
           wrapped += (widths[index - 1]! >= wrapColumn ? '' : '\n') + draft[index];
         }
-        const wrappedText = canonical(wrapped);
-        if (wrappedText === expectedText || !final && expectedText.startsWith(wrappedText)) return true;
+        if (matches(canonical(wrapped))) return true;
       }
     }
   }
