@@ -466,6 +466,31 @@ describe('Claude composer ownership around the first terminal write', () => {
     expect(ownedClaudeComposer(box('first\n    second').replace('❯ ', '❯ '), 'first\nsecond', true)).toBe(false);
   });
 
+  it('accepts only the intermediate pre-repaint soft-newline row from the recorded first-turn failure', async () => {
+    vi.useRealTimers();
+    const logical = [
+      '<dutydeck_routing>',
+      '  你运行在一个 IM 桥接的会话中：用户看不到你的终端，只能看到你回传的内容。',
+      '  多行或长内容用引号 / heredoc 包裹，避免被拆成多条消息。',
+      '  需要向用户回传内容时，直接输出文本即可（本会话未启用专用回传命令）。',
+    ];
+    const expected = logical.map(line => `${line}\\\n`).join('');
+    const border = '─'.repeat(120);
+    // The fourth soft Enter has returned, but Claude has not painted its blank
+    // continuation row yet: only the last soft-newline backslash is visible.
+    const captured = [
+      border, `❯ ${logical[0]}`,
+      ...logical.slice(1, 3).map(line => `  ${line}`),
+      `  ${logical[3]}\\`,
+      border, '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n');
+    expect(await ownedClaudeComposerWithWrap(captured, expected, false)).toBe(true);
+    expect(await ownedClaudeComposerWithWrap(captured, expected, true)).toBe(false);
+    const foreign = captured.replace(`${logical[3]}\\`, `${logical[3]}\\foreign`);
+    expect(foreign).not.toBe(captured);
+    expect(await ownedClaudeComposerWithWrap(foreign, expected, false)).toBe(false);
+  });
+
   it('joins only full-width native physical rows, including wide characters', async () => {
     vi.useRealTimers();
     const asciiWrap = box('abcdef\n  gh').replace('❯ ', '❯ ');
