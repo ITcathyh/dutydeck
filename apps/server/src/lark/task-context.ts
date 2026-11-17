@@ -403,41 +403,29 @@ async function collectReferencedParent(
   service: TaskContextService,
   materials: MaterialCollector,
   sources: LarkContextSource[],
-  addRead: (messageId: string) => void,
   ingest: (message: LarkChatMessage, parsed: ParsedVerifiedMessage) => void,
   alreadyRead: boolean,
   signal?: AbortSignal
 ) {
   const label = `引用消息 ${parentId}`;
   if (alreadyRead) return;
-  let parent: LarkChatMessage;
+  let items: LarkChatMessage[];
   try {
-    parent = await service.getMessage(parentId);
+    items = await service.getMessageItems(parentId);
+    if (!items.length) throw new Error(`Message ${parentId} not found`);
   } catch (error) {
     signal?.throwIfAborted();
     const source = appendSourceError(sources, label, error, parentId);
     materials.addMissing(source);
     return;
   }
+  const parent = items[0]!;
   if (parent.messageId !== parentId || !sameChat(parent, event.chatId)) {
     const source = appendSourceError(sources, label, '引用消息不属于当前会话，已忽略', parentId);
     materials.addMissing(source);
     return;
   }
 
-  let items: LarkChatMessage[] = [];
-  let expansionError: LarkContextSource | undefined;
-  try {
-    items = await service.getMessageItems(parentId);
-  } catch (error) {
-    signal?.throwIfAborted();
-    expansionError = appendSourceError(sources, label, error, parentId);
-  }
-  if (expansionError && parent.messageType === 'merge_forward') {
-    materials.addMissing(expansionError);
-    addRead(parent.messageId);
-    return;
-  }
   const verifiedItems = items.filter(item => childInScope(item, event.chatId));
   const parsed = await parseVerifiedMessage(parent, verifiedItems.length ? verifiedItems : undefined);
   ingest(parent, parsed);
@@ -541,7 +529,7 @@ export async function collectLarkTaskContext(input: CollectLarkTaskContextInput)
 
   const parentId = trimMessageId(event.parentId);
   if (parentId) {
-    await collectReferencedParent(event, parentId, service, materials, sources, addRead, ingest, readSet.has(parentId), signal);
+    await collectReferencedParent(event, parentId, service, materials, sources, ingest, readSet.has(parentId), signal);
   }
 
   let nextCursor: LarkContextCursor | undefined = input.cursor;
