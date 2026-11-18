@@ -330,6 +330,35 @@ describe('卡片映射的并发写', () => {
     expect(await h.persisted()).toEqual(saved);
   });
 
+  it('第五次 CAS 冲突后的最终读已等于待写内容时返回 committed，不写第六次', async () => {
+    const h = await harness();
+    await h.coordinator.handle(event('om_1'), h.config);
+    await h.resultCard();
+    const [mapping] = await h.repos.channelMappings.list(h.channel);
+    const saved = JSON.parse(mapping!.extra!) as PersistedLarkCardTask;
+    const stale = (h.coordinator as any).restoredCardTask(h.config, mapping!, saved);
+    const current = { ...mapping! };
+    const realGet = h.repos.channelMappings.get.bind(h.repos.channelMappings);
+    vi.spyOn(h.repos.channelMappings, 'get').mockImplementation(async (channel, externalId) => {
+      await realGet(channel, externalId);
+      return { ...current };
+    });
+    let desired = '';
+    const compare = vi.spyOn(h.repos.channelMappings, 'compareAndSetExtra').mockImplementation(async (_id, _expected, extra) => {
+      desired = extra;
+      if (compare.mock.calls.length === 5) current.extra = extra;
+      return false;
+    });
+    const save = vi.spyOn(h.repos.channelMappings, 'save');
+
+    expect(await (h.coordinator as any).persistCardTask(stale, 'cancelled')).toBe('committed');
+
+    expect(compare).toHaveBeenCalledTimes(5);
+    expect(save).not.toHaveBeenCalled();
+    expect(current.extra).toBe(desired);
+    expect(JSON.parse(current.extra!)).toMatchObject({ state: 'cancelled', runtime_task_id: saved.runtime_task_id, turn: saved.turn });
+  });
+
   it('整行 fallback 拒绝旧会话覆盖新会话，同时允许当前作用域在同轮合法换会话并保存终态', async () => {
     const h = await harness();
     await h.coordinator.handle(event('om_1'), h.config);

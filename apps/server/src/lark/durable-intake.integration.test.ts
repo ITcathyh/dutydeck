@@ -12,7 +12,7 @@ import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import { LarkLongConnectionListener, type LarkMessageEvent } from './listener.js';
 import { LarkMessageCoordinator } from './coordinator.js';
 import { larkTurnRuntimeTaskId } from './coordinator-dispatch.js';
-import { LarkTaskInbox } from './task-inbox.js';
+import { LarkTaskInbox, type LarkInboxRecord } from './task-inbox.js';
 import { LarkGroupParticipation } from './group-participation.js';
 import type { LarkScenarioAdoption } from './scenario-direct.js';
 import { builtinScenarioRegistry } from '../plugins/builtin-scenarios.test-helpers.js';
@@ -281,9 +281,10 @@ it('silently terminates expired unrouted observations while received expiry reta
 });
 
 /** 上一个进程已写下会话与轮次（可能已派发）、还没来得及写 accepted 的入站记录。 */
-const seedSubmittedReceived = async (h: Awaited<ReturnType<typeof harness>>, messageId: string, receivedAt = new Date().toISOString()) => {
+const seedSubmittedReceived = async (h: Awaited<ReturnType<typeof harness>>, messageId: string, receivedAt = new Date().toISOString(), materials?: LarkInboxRecord['materials']) => {
   const claimed = (await new LarkTaskInbox(h.repositories.config).claim(config.appId, message({ messageId })))!;
-  await h.repositories.config.set(`lark.inbox.${config.appId}.${messageId}`, JSON.stringify({ ...claimed, receivedAt, sessionId: 'ses_durable', cardId: 'om_card', turn: 1 }));
+  await h.repositories.config.set(`lark.inbox.${config.appId}.${messageId}`, JSON.stringify({ ...claimed, receivedAt, sessionId: 'ses_durable', cardId: 'om_card', turn: 1,
+    ...(materials ? { materials } : {}) }));
   return larkTurnRuntimeTaskId('ses_durable', config.appId, messageId, 1);
 };
 const acceptedTask = (id: string, status: string) => ({ id, sessionId: 'ses_durable', prompt: 'original', status, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
@@ -294,7 +295,7 @@ it('reattaches the accepted task when a restart replay of the same turn hits TAS
   const h = await harness();
   const taskId = await seedSubmittedReceived(h, 'om_replayed');
   h.runtime.dispatch.mockRejectedValueOnce(new RuntimeError('TASK_IDEMPOTENCY_CONFLICT', 'same key carries a different request', 409));
-  Object.assign(h.runtime, { getTasks: vi.fn(async () => [acceptedTask(taskId, 'queued')]) });
+  Object.assign(h.runtime, { getTasks: vi.fn().mockResolvedValueOnce([]).mockResolvedValue([acceptedTask(taskId, 'queued')]) });
   const coordinator = h.createCoordinator({ groupManager: allowAll() }); await coordinator.initializeWorkflows(config);
   await vi.waitFor(async () => expect(await h.inbox('om_replayed')).toMatchObject({ state: 'accepted', taskId }));
   expect(h.runtime.dispatch).toHaveBeenCalledOnce();
@@ -302,27 +303,45 @@ it('reattaches the accepted task when a restart replay of the same turn hits TAS
   expect(sentCards(h)).not.toContain('"state":"failed"');
 });
 
-it('a TASK_IDEMPOTENCY_CONFLICT whose accepted task cannot be read is handed to reconciliation, not failed', async () => {
+it('an unreadable execution ledger before restart recovery stays received without dispatch or a failure receipt', async () => {
   const h = await harness();
   await seedSubmittedReceived(h, 'om_replayed');
-  h.runtime.dispatch.mockRejectedValueOnce(new RuntimeError('TASK_IDEMPOTENCY_CONFLICT', 'same key carries a different request', 409));
   Object.assign(h.runtime, { getTasks: vi.fn(async () => { throw new Error('database is locked'); }) });
   const coordinator = h.createCoordinator({ groupManager: allowAll() }); await coordinator.initializeWorkflows(config);
-  await vi.waitFor(() => expect(h.log.warn).toHaveBeenCalledWith(expect.anything(), '任务已接收，后续步骤失败，结果交给订阅与对账'));
+  await vi.waitFor(() => expect(h.log.warn).toHaveBeenCalledWith(
+    expect.objectContaining({ error: expect.any(Error), messageId: 'om_replayed' }),
+    '重启后查询入站请求的执行记录失败，保留恢复待核对'));
   expect(await h.inbox('om_replayed')).toMatchObject({ state: 'received' });
+  expect(h.runtime.dispatch).not.toHaveBeenCalled();
   expect(sentCards(h)).not.toContain('"state":"failed"');
 });
 
-it('expired received record whose turn the ledger accepted replays under the same key instead of claiming it never ran', async () => {
+it('expired received record whose turn the ledger accepted reattaches directly without dispatch or a not-run receipt', async () => {
   const h = await harness();
-  const taskId = await seedSubmittedReceived(h, 'om_expired_accepted', new Date(Date.now() - 90 * 60_000).toISOString());
-  h.runtime.dispatch.mockResolvedValueOnce({ id: taskId, sessionId: 'ses_durable', status: 'queued', queuedAhead: 0, replayed: true } as any);
+  const messageId = 'om_expired_accepted';
+  const taskId = await seedSubmittedReceived(h, messageId, new Date(Date.now() - 90 * 60_000).toISOString(),
+    { prompt: 'original', readMessageIds: [messageId] });
+  Object.assign(h.runtime, { getTasks: vi.fn(async () => [acceptedTask(taskId, 'queued')]), getEvents: vi.fn(async () => []) });
+  const coordinator = h.createCoordinator({ groupManager: allowAll() }); await coordinator.initializeWorkflows(config);
+  await vi.waitFor(async () => expect(await h.inbox(messageId)).toMatchObject({ state: 'accepted', taskId }));
+  expect(h.runtime.dispatch).not.toHaveBeenCalled();
+  expect(sentCards(h)).not.toContain('请求未执行');
+  expect(sentCards(h)).not.toContain('"state":"failed"');
+});
+
+it('unexpired received record with an exact runtime match but no frozen materials stays pending without dispatch', async () => {
+  const h = await harness();
+  const messageId = 'om_accepted_without_materials';
+  const taskId = await seedSubmittedReceived(h, messageId);
   Object.assign(h.runtime, { getTasks: vi.fn(async () => [acceptedTask(taskId, 'queued')]) });
   const coordinator = h.createCoordinator({ groupManager: allowAll() }); await coordinator.initializeWorkflows(config);
-  await vi.waitFor(async () => expect(await h.inbox('om_expired_accepted')).toMatchObject({ state: 'accepted', taskId }));
-  expect(h.runtime.dispatch).toHaveBeenCalledOnce();
-  expect(h.runtime.dispatch.mock.calls[0]?.[6]).toBe(`lark:${config.appId}:om_expired_accepted:1`);
+  await vi.waitFor(() => expect(h.log.warn).toHaveBeenCalledWith(
+    expect.objectContaining({ taskId: messageId, runtimeTaskId: taskId }), '原轮材料快照缺失，保持入站恢复待核对'));
+  expect(await h.inbox(messageId)).toMatchObject({ state: 'received' });
+  expect(h.runtime.dispatch).not.toHaveBeenCalled();
   expect(sentCards(h)).not.toContain('请求未执行');
+  expect(sentCards(h)).not.toContain('请求结果未知');
+  expect(sentCards(h)).not.toContain('"state":"failed"');
 });
 
 it.each([

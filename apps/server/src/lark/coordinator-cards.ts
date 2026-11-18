@@ -79,6 +79,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
     const result = await this.persistCardTask(task, state);
     // 任务通道派来的任务：同一处状态汇聚点顺带把进度写成飞书任务记录；状态和轮次都属于保存开始时的那一轮。
     await this.writeLarkTaskStep(task, state, turn);
+    await task.commitAccepted?.(result);
     return result;
   }
 
@@ -165,13 +166,13 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
         await mappings.save({ ...row, extra: merged });
         return 'committed';
       }
+      // 同归属的最终读已经包含待写内容时无需第六次 CAS；不同快照才算未核验。
+      if (merged === current.extra) return 'committed';
       // CAS 到上限也不能退回无条件的整行覆写；保留当前记录，下一次心跳或对账可基于新读重试。
       if (attempt >= 5) {
         this.log.warn({ taskId: task.id, turn }, '飞书卡片映射并发写冲突反复失败，保留当前记录并等待下次保存');
         return 'unverified';
       }
-      // 心跳帧多数没有新内容：合并结果与库里一致时，CAS 写入也只是原值覆盖，直接跳过。
-      if (merged === current.extra) return 'committed';
       if (task.sessionId !== sessionId || task.turn !== turn || task.runtimeTaskId !== runtimeTaskId) return 'unverified';
       if (await mappings.compareAndSetExtra(row.id, current.extra, merged)) return 'committed';
     }

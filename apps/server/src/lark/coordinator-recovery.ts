@@ -91,7 +91,26 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
 
   private async reconcileRound(config: StoredLarkConfig, cardMappings: ChannelMappingRepository, fullScan: boolean) {
     const pending = new Map<string, boolean>();
-    let unresolved = await timeLoop('lark.reconcile.cards', this.log, () => performLarkCardReconcile({
+    let unresolved = 0;
+    // received 记录可能还没有 mapping：只重试本进程已精确接回任务的接受与保存，不重新 dispatch。
+    if (this.inbox) for (const task of this.tasks.values()) {
+      if (!task.inbox || !task.runtimeTaskId || !task.commitAccepted) continue;
+      try {
+        const current = await this.inbox.reload(task.inbox);
+        if (current?.state !== 'received') continue;
+        await this.saveCardTask(task, task.state);
+        const latest = await this.inbox.reload(task.inbox);
+        if (latest?.state === 'received') {
+          unresolved++;
+          pending.set(task.id, task.state === 'queued' || task.state === 'running');
+        }
+      } catch (error) {
+        unresolved++;
+        pending.set(task.id, task.state === 'queued' || task.state === 'running');
+        this.log.warn({ error, taskId: task.id, runtimeTaskId: task.runtimeTaskId }, '已接回任务的入站接受待下轮对账');
+      }
+    }
+    unresolved += await timeLoop('lark.reconcile.cards', this.log, () => performLarkCardReconcile({
       ...(fullScan ? {} : { only: new Set(this.reconcilePending.keys()) }),
       pending,
       runtime: this.runtime,
@@ -176,8 +195,9 @@ export abstract class LarkCoordinatorRecovery extends LarkCoordinatorCards {
     return unresolved;
   }
 
-  reconcile(config: StoredLarkConfig) {
+  reconcile(config: StoredLarkConfig, fullScan = false) {
     this.reconcileConfig = config;
+    if (fullScan) this.reconcileFullScan = true;
     if (this.reconcileRun) return this.reconcileRun;
     const run = timeLoop('lark.reconcile', this.log, () => this.performReconcile(config), undefined, config.appId).finally(() => {
       if (this.reconcileRun === run) this.reconcileRun = undefined;

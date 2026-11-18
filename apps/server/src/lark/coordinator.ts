@@ -53,6 +53,8 @@ export type LarkTask = {
   inbox?: LarkInboxRecord;
   matterLineage?: LarkInboxRecord['lineage'];
   resumeTask?: TaskRecord;
+  /** Runtime 已确认的同轮接受收尾；后续 mapping 保存成功时重试，不接受后继轮。 */
+  commitAccepted?: (mapping: 'committed' | 'unverified') => Promise<void>;
   retryMaterialPrompt?: string;
   launchOptions?: LarkLaunchOptions;
   restoring?: boolean;

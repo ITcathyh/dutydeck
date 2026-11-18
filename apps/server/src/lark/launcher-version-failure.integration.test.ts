@@ -13,6 +13,7 @@ import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
 import { LARK_LAUNCHER_RECOVERY_NOTE } from './card-renderer.js';
 import { buildLarkCard } from './service.js';
+import type { LarkInboxRecord } from './task-inbox.js';
 
 /**
  * 旧会话启动器版本变化（ACP_LAUNCHER_VERSION_CHANGED）发生在任务提交前：
@@ -221,6 +222,67 @@ it('失败事件先于 dispatch 返回时先缓存，取得任务号后仍能自
   expect(h.prepared[0]).not.toBe(h.prepared[1]);
   expect(h.sent).toHaveLength(1);
   expect(h.issued.filter(input => input.cardKind === 'result')).toEqual([resultInput]);
+});
+
+it('launcher replacement 在 mapping 未确认时也把原 failed 轮次接回为可恢复 received', async () => {
+  let count = 0;
+  const h = await setup(async () => { if (++count === 1) throw new Error(LAUNCHER_ERROR); });
+  cleanups.push(() => h.teardown());
+  const id = 'om_replacement_mapping_outage';
+  const channel = 'lark-card:app';
+  const realGet = h.repos.channelMappings.get.bind(h.repos.channelMappings);
+  let failReads = false;
+  vi.spyOn(h.repos.channelMappings, 'get').mockImplementation(async (mappingChannel, externalId) => {
+    if (failReads && mappingChannel === channel && externalId === id) throw new Error('replacement mapping unavailable');
+    return realGet(mappingChannel, externalId);
+  });
+  const realDispatch = h.runtime.dispatch.bind(h.runtime);
+  let targetDispatches = 0;
+  vi.spyOn(h.runtime, 'dispatch').mockImplementation(async (...args) => {
+    const own = ++targetDispatches;
+    const accepted = await realDispatch(...args);
+    if (own === 2) failReads = true;
+    return accepted;
+  });
+  const inbox = async () => {
+    const raw = await h.repos.config.get(`lark.inbox.app.${id}`);
+    return raw ? JSON.parse(raw) as LarkInboxRecord : undefined;
+  };
+  try {
+    await h.coordinator.handle(groupMessage(id), h.config);
+    await h.until(async () => {
+      const record = await inbox();
+      return record?.state === 'received' && Boolean(record.taskId) && record.turn === 2;
+    });
+    const pending = await inbox();
+    expect(pending).toMatchObject({ state: 'received', turn: 2, taskId: expect.any(String), sessionId: expect.any(String) });
+    expect(targetDispatches).toBe(2);
+    await h.until(() => h.prepared.length === 2 && h.sent.length === 1);
+    expect(h.prepared).toHaveLength(2);
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0]!.sessionId).toBe(pending.sessionId);
+    const oldTasks = await h.runtime.getTasks(h.prepared[0]!);
+    expect(oldTasks).toHaveLength(1);
+    expect(h.repos.execution.getTaskExecution(oldTasks[0]!.id)?.currentAttempt?.submissionState).toBe('not_submitted');
+    const replacement = (await h.runtime.getTasks(pending.sessionId!)).find(task => task.id === pending.taskId)!;
+    expect(h.repos.execution.getTaskExecution(replacement.id)?.attempts).toHaveLength(1);
+    const oldMapping = await realGet(channel, id);
+    expect(JSON.parse(oldMapping!.extra!).runtime_task_id).not.toBe(replacement.id);
+    expect(h.issued.filter(input => input.taskId === id && input.cardKind === 'result')).toHaveLength(0);
+
+    failReads = false;
+    await h.coordinator.startReconciliation(h.config);
+    await h.until(async () => (await inbox())?.state === 'accepted'
+      && h.issued.some(input => input.taskId === id && input.cardKind === 'result'));
+    expect(await inbox()).toMatchObject({ state: 'accepted', turn: 2, taskId: replacement.id, sessionId: replacement.sessionId });
+    expect(JSON.parse((await realGet(channel, id))!.extra!)).toMatchObject({
+      turn: 2, runtime_task_id: replacement.id, state: 'completed', final_delivery_state: 'delivered'
+    });
+    expect(targetDispatches).toBe(2);
+    expect(h.sent).toHaveLength(1);
+    expect(h.repos.execution.getTaskExecution(replacement.id)?.attempts).toHaveLength(1);
+    expect(h.issued.filter(input => input.taskId === id && input.cardKind === 'result')).toHaveLength(1);
+  } finally { failReads = false; }
 });
 
 it('托管群已有别人的下一轮在执行时不换会话，并记录拒绝原因', async () => {
