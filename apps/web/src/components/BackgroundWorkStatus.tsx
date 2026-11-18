@@ -11,11 +11,13 @@ export const BackgroundWorkStatus = memo(function BackgroundWorkStatus({ events 
     const item = events[index]!;
     if (item.type === 'status' && item.data.state === 'background_work') { event = item; break; }
   }
-  if (!event || typeof event.data.count !== 'number' || event.data.count <= 0) return null;
+  if (!event) return null;
   const tasks = Array.isArray(event.data.tasks) ? event.data.tasks : [];
+  const count = event.data.count;
+  if (typeof count !== 'number' || !Number.isFinite(count) || count < 0 || (count === 0 && tasks.length === 0)) return null;
   const laterInput = events.some(item => item.sequence > event.sequence && item.type === 'text' && item.data.role === 'user' && !item.data.steering);
   return <div role="status" className="shrink-0 border-b border-default bg-surface px-4 py-2 text-caption text-secondary">
-    {event.data.mainTurnEnded === true && !laterInput ? '主回合已结束 · ' : ''}后台子任务运行中（{event.data.count}）
+    {event.data.mainTurnEnded === true && !laterInput ? '主回合已结束 · ' : ''}{count > 0 ? `后台子任务运行中（${count}）` : '后台子任务已结束'}
     {tasks.length > 0 && <details className="mt-1 text-subtle"><summary className="cursor-pointer">后台任务详情</summary>
       <ul className="mt-1 max-h-[40dvh] space-y-1 overflow-y-auto pr-1">{tasks.map((task: { id: string; kind: string; state: string }) => <li key={task.id}>{kindLabels[task.kind] ?? task.kind} · {stateLabels[task.state] ?? task.state} · <span className="font-mono">{task.id}</span></li>)}</ul>
     </details>}

@@ -11,7 +11,7 @@ import { Banner, Button, Field, Input, Select, Spinner, Textarea, Dialog } from 
 import { isSessionActionDisabled } from './ui';
 
 const ciLabels: Record<string, string> = { waiting: '等待构建', dispatching: '提交续作中', accepted: '已提交续作', completed: '续作已结束', cancelled: '已取消', expired: '已过期', stale_head: '提交已变化，等待停止', session_inactive: '会话已结束', revoked: '权限已撤销', error: '查询失败' };
-import { runLabels, runStateLabels } from './automation-display';
+import { occurrenceRunLabel, runStateLabels } from './automation-display';
 export { runLabels } from './automation-display';
 
 /** UTC 时间换成指定时区的 datetime-local 输入值。 */
@@ -259,7 +259,7 @@ export function SessionAutomationPanel({ session, initialScheduleId, openCreateF
       {item.disabledReason && <p className="text-warning">停用原因：{item.disabledReason === 'Session is no longer active' ? '来源任务已结束或归档' : item.disabledReason === 'Schedule authorization is no longer available' ? '计划执行权限已失效' : item.disabledReason} · {automationTime(item.disabledAt, item.timezone)}</p>}
       {item.disableNotification && <p className="text-caption text-secondary">停用告知：{({ not_requested: '无需对外告知', pending: '等待发送', sending: '发送中', delivered: '已确认发送', error: '未发送成功，等待重试', unknown: '发送结果未知，等待核对' })[item.disableNotification.status]}{item.disableNotification.error ? ` · ${item.disableNotification.error}` : ''}</p>}
       <p className="break-all text-secondary">投递位置：{scheduleDelivery(data.deliveryTargets?.[item.id], session)}</p>
-      <p className="mt-1 text-secondary">最近结果：{(() => { const latest = data.occurrences.filter(occurrence => occurrence.scheduleId === item.id).sort((a, b) => b.scheduledForUtc.localeCompare(a.scheduledForUtc))[0]; return latest ? `${runLabels[latest.runStatus] ?? latest.runStatus} · ${new Date(latest.scheduledForUtc).toLocaleString('zh-CN', { timeZone: item.timezone, hour12: false })} · ${item.timezone}` : '尚无触发记录'; })()}</p>
+      <p className="mt-1 text-secondary">最近结果：{(() => { const latest = data.occurrences.filter(occurrence => occurrence.scheduleId === item.id).sort((a, b) => b.scheduledForUtc.localeCompare(a.scheduledForUtc))[0]; return latest ? `${occurrenceRunLabel(latest)} · ${new Date(latest.scheduledForUtc).toLocaleString('zh-CN', { timeZone: item.timezone, hour12: false })} · ${item.timezone}` : '尚无触发记录'; })()}</p>
       <PlanHistory sessionId={item.sessionId} scheduleId={item.id} timezone={item.timezone}/>
       {item.trigger.kind === 'at' && <p className="text-subtle">一次计划仅自动触发一次；是否执行成功请查看触发记录。</p>}
     </div>)}

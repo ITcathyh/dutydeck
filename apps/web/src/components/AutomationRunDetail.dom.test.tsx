@@ -34,6 +34,8 @@ describe('one automation run', () => {
     await screen.findByRole('region', { name: '单次运行详情' });
     expect(read).toHaveBeenCalledExactlyOnceWith('s', 'p', 'old-run');
     expect(screen.getByText(/配置版本 2 · 当前计划版本 4/)).toBeTruthy();
+    expect(screen.getByText(/本轮已结束 · 条件：已满足/)).toBeTruthy();
+    expect(screen.getByText('是否达成目标需核对本次结果。')).toBeTruthy();
     expect(screen.getByRole('table').querySelector('thead th')?.textContent).toBe('项目');
     expect(screen.getAllByText('未记录').length).toBeGreaterThanOrEqual(3);
     await user.click(screen.getByText('本轮冻结的执行输入'));
@@ -44,6 +46,23 @@ describe('one automation run', () => {
     expect(writeText).toHaveBeenCalledWith(detail.occurrence.result!.output.text);
     expect(screen.getByRole('link', { name: '打开执行任务查看过程证据' }).getAttribute('href')).toBe('/sessions/execution');
   });
+  it('labels a template occurrence as work-item creation without claiming the work item completed', async () => {
+    const currentWorkItem = vi.spyOn(api, 'workItem');
+    mount({ ...detail, occurrence: { ...detail.occurrence, workItemId: 'work-item-1' } });
+    await screen.findByRole('region', { name: '单次运行详情' });
+    expect(screen.getByText(/工作项已创建 · 条件：已满足/)).toBeTruthy();
+    expect(screen.queryByText(/本轮已结束 · 条件/)).toBeNull();
+    expect(screen.queryByText(/已完成 · 条件/)).toBeNull();
+    expect(screen.queryByText('是否达成目标需核对本次结果。')).toBeNull();
+    expect(currentWorkItem).not.toHaveBeenCalled();
+  });
+
+  it('keeps a failed occurrence distinct from ended rounds and work-item creation', async () => {
+    mount({ ...detail, occurrence: { ...detail.occurrence, runStatus: 'failed', result: undefined } });
+    expect(await screen.findByText(/执行失败 · 条件：已满足/)).toBeTruthy();
+    expect(screen.queryByText(/本轮已结束|工作项已创建|是否达成目标需核对本次结果/)).toBeNull();
+  });
+
   it('does not fetch another run or show cached output after permission is revoked', async () => {
     const { read, client } = mount();
     await screen.findByRole('table');
@@ -65,6 +84,8 @@ describe('one automation run', () => {
     await screen.findByRole('region', { name: '结果未知：old' });
     expect(screen.queryByRole('region', { name: '结果未知：other' })).toBeNull();
     expect(screen.getByText(/结果未知不能视为未执行/)).toBeTruthy();
+    expect(screen.getByText(/执行受阻 · 条件：已满足/)).toBeTruthy();
+    expect(screen.queryByText(/本轮已结束|工作项已创建|是否达成目标需核对本次结果/)).toBeNull();
     expect(replay).not.toHaveBeenCalled();
     await userEvent.setup({ delay: null }).click(screen.getByRole('button', { name: '重新执行' }));
     expect(await screen.findByRole('alertdialog', { name: '确认重新执行？' })).toBeTruthy();
@@ -81,6 +102,7 @@ describe('one automation run', () => {
     expect(screen.getByText(/原始尝试.*结果未知/)).toBeTruthy();
     expect(screen.getByText(/人工明确重试的后继 · 来源尝试 attempt-original · 决策 decision-1/)).toBeTruthy();
     expect(screen.getByText(/后继结果不证明原始尝试未执行/)).toBeTruthy();
+    expect(screen.getByText(/后继尝试 · 已完成/)).toBeTruthy();
     expect(screen.getByText(/操作者 工作台所有者/)).toBeTruthy();
   });
 

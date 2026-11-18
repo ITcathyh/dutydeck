@@ -22,10 +22,47 @@ describe('BackgroundWorkStatus', () => {
     expect(screen.getByRole('status').textContent).toBe('后台子任务运行中（1）');
   });
 
-  it('uses the newest lifecycle snapshot and clears the display once no tasks remain', () => {
+  it('uses the newest lifecycle snapshot and retains terminal details when the count reaches zero', () => {
     const { rerender } = render(<BackgroundWorkStatus events={[status({ count: 1, mainTurnEnded: true })]}/>);
     rerender(<BackgroundWorkStatus events={[status({ count: 1, mainTurnEnded: true }), status({ count: 0, mainTurnEnded: true, tasks: [{ id: 'agent-one', kind: 'agent', state: 'completed' }] }, 2)]}/>);
+    expect(screen.getByRole('status').textContent).toContain('主回合已结束 · 后台子任务已结束');
+    expect(screen.getByText(/Agent · 已完成 ·/).textContent).toContain('agent-one');
+  });
+
+  it('shows the existing kind and state labels for mixed terminal tasks', () => {
+    render(<BackgroundWorkStatus events={[status({ count: 0, tasks: [
+      { id: 'agent-done', kind: 'agent', state: 'completed' },
+      { id: 'shell-failed', kind: 'shell', state: 'failed' },
+      { id: 'monitor-stopped', kind: 'monitor', state: 'stopped' }
+    ] })]}/>);
+    expect(screen.getByRole('status').textContent).toContain('后台子任务已结束');
+    expect(screen.getByText(/Agent · 已完成 ·/).textContent).toContain('agent-done');
+    expect(screen.getByText(/命令 · 失败 ·/).textContent).toContain('shell-failed');
+    expect(screen.getByText(/监控 · 已停止 ·/).textContent).toContain('monitor-stopped');
+  });
+
+  it('hides a zero-count snapshot with no tasks while retaining legacy positive counts', () => {
+    const { rerender } = render(<BackgroundWorkStatus events={[status({ count: 1 })]}/>);
+    expect(screen.getByRole('status').textContent).toBe('后台子任务运行中（1）');
+    rerender(<BackgroundWorkStatus events={[status({ count: 1 }), status({ count: 0, tasks: [] }, 2)]}/>);
     expect(screen.queryByRole('status')).toBeNull();
+  });
+
+  it('shows only the latest running task when the same native ID is dispatched again', () => {
+    const terminal = status({ count: 0, mainTurnEnded: true, tasks: [{ id: 'agent-one', kind: 'agent', state: 'completed' }] });
+    const { rerender } = render(<BackgroundWorkStatus events={[terminal]}/>);
+    expect(screen.getByText(/Agent · 已完成 ·/).textContent).toContain('agent-one');
+    rerender(<BackgroundWorkStatus events={[terminal, status({ count: 1, tasks: [{ id: 'agent-one', kind: 'agent', state: 'running' }] }, 2)]}/>);
+    expect(screen.getByRole('status').textContent).toContain('后台子任务运行中（1）');
+    expect(screen.getAllByText(/agent-one/)).toHaveLength(1);
+    expect(screen.getByText(/Agent · 运行中 ·/).textContent).toContain('agent-one');
+    expect(screen.queryByText(/Agent · 已完成 ·/)).toBeNull();
+  });
+
+  it('keeps terminal details after a later user input without the old main-round prefix', () => {
+    const user: DockEvent = { id: 'input', sequence: 2, timestamp: '', type: 'text', data: { role: 'user', text: 'next task' } };
+    render(<BackgroundWorkStatus events={[status({ count: 0, mainTurnEnded: true, tasks: [{ id: 'agent-one', kind: 'agent', state: 'completed' }] }), user]}/>);
+    expect(screen.getByRole('status').textContent).toBe('后台子任务已结束后台任务详情Agent · 已完成 · agent-one');
   });
 
   it('does not label a later business input as finished using an older snapshot', () => {

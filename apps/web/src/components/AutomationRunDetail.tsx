@@ -6,7 +6,7 @@ import { sessionPath } from '../app-route';
 import { MarkdownContent } from '../MarkdownContent';
 import { copyToClipboard } from '../clipboard';
 import { PlanHistory } from './AutomationHistory';
-import { automationTime, runLabels } from './automation-display';
+import { automationTime, occurrenceRunLabel } from './automation-display';
 import { UnknownTasksPanel } from './UnknownTasksPanel';
 import { Banner, Button, Spinner } from './primitives';
 
@@ -29,11 +29,12 @@ export function AutomationRunDetail({ sessionId, scheduleId, occurrenceId }: { s
   const latestAttempt = attempts.slice().sort((a, b) => b.number - a.number)[0];
   const executionLabel = occurrence.runStatus === 'accepted'
     ? latestAttempt ? latestAttempt.state === 'settled' ? '执行尝试已结束，等待计划结算' : attemptLabels[latestAttempt.state] ?? '执行状态待核实' : '已接收，尚无开始执行记录'
-    : runLabels[occurrence.runStatus] ?? occurrence.runStatus;
+    : occurrenceRunLabel(occurrence);
   return <section className="min-w-0 space-y-4" aria-label="单次运行详情">
     <h2 className="text-title font-semibold">{schedule.name} · 单次运行</h2>
     <p className="break-all text-caption text-subtle">运行 {occurrence.id} · 配置版本 {occurrence.generation} · 当前计划版本 {schedule.generation}</p>
     <p>{executionLabel} · 条件：{({ pending: '待检查', passed: '已满足', skipped: '不满足，已跳过', error: '检查失败', invalidated: '已失效' })[occurrence.conditionStatus]} · {deliveryLabels[occurrence.delivery.status] ?? occurrence.delivery.status}</p>
+    {occurrence.runStatus === 'completed' && !occurrence.workItemId && <p className="text-caption text-secondary">是否达成目标需核对本次结果。</p>}
     {occurrence.blockReason && <Banner tone="warning">本轮等待核对或恢复：{blockLabels[occurrence.blockReason] ?? occurrence.blockReason}。结果未知不能视为未执行，也不会自动重发。</Banner>}
     {occurrence.misfire && <p className="text-caption text-secondary">错过时点的持久处理决定：{({ lateness_window_expired: '超过补跑有效期，跳过不执行', missed_time_skipped: '错过时点，跳过不执行', missed_times_coalesced: '错过的多个时点合并补一次' } as Record<string, string>)[occurrence.misfire.reason] ?? (occurrence.misfire.policy === 'skip' ? '跳过，不补执行' : '合并补一次')} · 覆盖 {automationTime(occurrence.misfire.from, timezone)} 至 {automationTime(occurrence.misfire.to, timezone)}</p>}
     {occurrence.error && <p className="text-danger">{occurrence.error}</p>}

@@ -4,7 +4,7 @@ import { currentInstance } from '../instance';
 import { api } from '../api';
 import { automationRunPath } from '../app-route';
 import { Button, Spinner, Banner } from './primitives';
-import { runLabels, automationTime } from './automation-display';
+import { automationTime, occurrenceRunLabel } from './automation-display';
 export { automationTime } from './automation-display';
 
 
@@ -19,7 +19,7 @@ export function AutomationHistory({ sessionId, scheduleId, timezone }: { session
       {!history.data.total && <p className="text-caption text-secondary">此计划尚无触发记录。</p>}
       {history.data.occurrences.map(item => <div key={item.id} className="border-t border-default py-2 text-caption">
         <a className="text-link underline" href={automationRunPath(sessionId, scheduleId, item.id)}>查看本次运行 · {automationTime(item.scheduledForUtc, timezone)}</a>
-        <p>{runLabels[item.runStatus] ?? item.runStatus} · {item.delivery.status === 'delivered' ? '已确认投递' : '投递状态见详情'}</p>
+        <p>{occurrenceRunLabel(item)} · {item.delivery.status === 'delivered' ? '已确认投递' : '投递状态见详情'}</p>
         {item.error && <p className="text-danger">{item.error}</p>}
       </div>)}
       {history.data.total > 20 && <div className="flex flex-wrap items-center gap-2">

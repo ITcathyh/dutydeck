@@ -1594,6 +1594,31 @@ it('places resumed native background lifecycle before the main timeline without 
   expect(container.querySelector('[data-timeline-scroll]')?.textContent).not.toContain('old-native-task');
 });
 
+it('keeps terminal native tasks outside the next answer after a new user and assistant arrive', async () => {
+  window.history.replaceState(null, '', '/sessions/s1');
+  const events: DockEvent[] = [
+    { id: 'old-input', sequence: 1, timestamp: '', type: 'text', data: { role: 'user', text: 'old business request' } },
+    { id: 'old-answer', sequence: 2, timestamp: '', type: 'text', data: { role: 'assistant', text: 'old main answer' } },
+    { id: 'background', sequence: 3, timestamp: '', type: 'status', data: { state: 'background_work', count: 0, mainTurnEnded: true, tasks: [{ id: 'old-native-task', toolUseId: 'old-tool', originInputId: 'old-input', kind: 'agent', state: 'completed' }] } },
+    { id: 'new-input', sequence: 4, timestamp: '', type: 'text', data: { role: 'user', text: 'next business request', taskId: 'new-task' } },
+    { id: 'new-answer', sequence: 5, timestamp: '', type: 'text', data: { role: 'assistant', text: 'new current answer' } }
+  ];
+  mockAppApi({ sessions: [session('s1', 'completed')], events });
+  vi.mocked(api.tasks).mockResolvedValue([{ id: 'new-task', sessionId: 's1', prompt: 'next business request', status: 'completed', createdAt: '', updatedAt: '' }]);
+  const { container } = renderApp();
+  const tabpanel = await screen.findByRole('tabpanel', { name: '对话' });
+  const background = await screen.findByText('后台子任务已结束');
+  expect(background.getAttribute('role')).toBe('status');
+  expect(background.textContent).not.toContain('主回合已结束');
+  expect(background.textContent).toContain('old-native-task');
+  const answer = await within(tabpanel).findByText('new current answer');
+  const timeline = tabpanel.querySelector('[data-timeline-scroll]')!;
+  expect(timeline.textContent).toContain('new current answer');
+  expect(timeline.textContent).not.toContain('old-native-task');
+  expect(answer.closest('article')?.textContent).not.toContain('old-native-task');
+  expect(container.querySelector('[data-timeline-event="background"]')).toBeNull();
+});
+
 it('adds no background status when no native background work is active', async () => {
   window.history.replaceState(null, '', '/sessions/no-background');
   mockAppApi({ sessions: [session('no-background')], events: [

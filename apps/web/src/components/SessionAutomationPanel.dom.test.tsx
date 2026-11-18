@@ -15,6 +15,7 @@ async function typeInto(user: Pick<typeof userEvent, 'click' | 'paste'>, element
 
 const session: Session = { id: 's1', agentId: 'a', cwd: '/project/worktree', state: 'completed', runId: 'r', createdAt: '2026-09-12T00:00:00Z', updatedAt: '2026-09-12T00:00:00Z' };
 const schedule: PublicSessionSchedule = { schemaVersion: 1, id: 'plan1', revision: 3, generation: 1, sessionId: session.id, name: '巡检', prompt: '检查构建', trigger: { kind: 'cron', expression: '*/17 3-9 * 2,7 1-5' }, timezone: 'America/New_York', dstPolicy: { gap: 'shift_forward', overlap: 'second' }, condition: { kind: 'always' }, enabled: false, createdAt: session.createdAt, updatedAt: session.updatedAt };
+const completedOccurrence = (workItemId?: string): PublicSessionScheduleOccurrence => ({ schemaVersion: 2, id: 'o1', revision: 1, scheduleId: schedule.id, sessionId: session.id, generation: 1, scheduledForUtc: session.createdAt, conditionStatus: 'passed', runStatus: 'completed', taskId: 't1', ...(workItemId ? { workItemId } : {}), delivery: { status: 'not_requested', attempts: 0, updatedAt: session.createdAt }, createdAt: session.createdAt, updatedAt: session.updatedAt });
 const clients: QueryClient[] = [];
 afterEach(() => { setInstance(undefined); cleanup(); clients.forEach(client => client.clear()); clients.length = 0; vi.restoreAllMocks(); });
 const testCi: PublicCiProvider = { id: 'test-ci', displayName: 'Test CI', polling: true, webhook: false };
@@ -144,6 +145,7 @@ describe('session automation schedules', () => {
     await user.click(screen.getByText('历史计划 plan1 的运行记录（UTC）'));
     await screen.findByRole('link', { name: /查看本次运行/ });
     expect(screen.getByText(/执行失败/)).toBeTruthy();
+    expect(screen.queryByText(/本轮已结束|工作项已创建/)).toBeNull();
     expect(screen.getByText('执行退出')).toBeTruthy();
     expect(screen.getByRole('link', { name: /查看本次运行/ })).toBeTruthy();
   });
@@ -239,6 +241,42 @@ describe('session automation schedules', () => {
       </QueryClientProvider>
     );
     expect(screen.getByText(/所属任务：a · \/project\/worktree/)).toBeTruthy();
+  });
+});
+
+describe('occurrence result wording', () => {
+  it('labels an ordinary completed occurrence as an ended round in recent results and history', async () => {
+    const read = mount([schedule]);
+    await screen.findByText('巡检 · 已停用');
+    read.mockResolvedValue({ schedules: [schedule], subscriptions: [], occurrences: [completedOccurrence()] });
+    await clients[0]!.invalidateQueries({ queryKey: ['automation', null, session.id] });
+    expect(await screen.findByText(/最近结果：本轮已结束/)).toBeTruthy();
+    await userEvent.click(screen.getByText('此计划的运行历史'));
+    expect(await screen.findByText(/^本轮已结束 · 投递状态见详情$/)).toBeTruthy();
+    expect(screen.queryByText(/最近结果：已完成/)).toBeNull();
+  });
+
+  it('uses the occurrence work item ID for template wording without querying its current state', async () => {
+    const read = mount([schedule]);
+    await screen.findByText('巡检 · 已停用');
+    const currentWorkItem = vi.spyOn(api, 'workItem');
+    read.mockResolvedValue({ schedules: [schedule], subscriptions: [], occurrences: [completedOccurrence('work-item-1')] });
+    await clients[0]!.invalidateQueries({ queryKey: ['automation', null, session.id] });
+    expect(await screen.findByText(/最近结果：工作项已创建/)).toBeTruthy();
+    await userEvent.click(screen.getByText('此计划的运行历史'));
+    expect(await screen.findByText(/^工作项已创建 · 投递状态见详情$/)).toBeTruthy();
+    expect(screen.queryByText(/最近结果：已完成/)).toBeNull();
+    expect(screen.queryByText(/^已完成 · 投递状态见详情$/)).toBeNull();
+    expect(currentWorkItem).not.toHaveBeenCalled();
+  });
+
+  it('keeps target confirmation separate from occurrence completion wording', async () => {
+    const read = mount([schedule], [testCi], [], session, { plan1: 'completed' });
+    await screen.findByText('巡检 · 已完成（Agent 确认达成）');
+    read.mockResolvedValue({ schedules: [schedule], subscriptions: [], occurrences: [completedOccurrence()], runStates: { plan1: 'completed' } });
+    await clients[0]!.invalidateQueries({ queryKey: ['automation', null, session.id] });
+    expect(await screen.findByText('巡检 · 已完成（Agent 确认达成）')).toBeTruthy();
+    expect(await screen.findByText(/最近结果：本轮已结束/)).toBeTruthy();
   });
 });
 

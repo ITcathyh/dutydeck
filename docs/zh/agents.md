@@ -54,6 +54,22 @@ Dutydeck 自己生成的 Claude 凭据守卫（终端与内置 ACP）和计划�
 }
 ```
 
+只有确认网关部署的真实窗口较小时才修正窗口。自 Claude Code 2.1.323 起，未识别 alias 可能按 1M 处理，不要给所有网关统一设置 200K。以下片段可按各自前提并入上面的 Agent 对象。
+
+未识别、不以 `claude-` 开头、且无 `[1m]` 后缀的 200K alias，可以单独使用 `CLAUDE_CODE_MAX_CONTEXT_TOKENS`：
+
+```json
+{"model":"gateway-alias-200k","env":{"CLAUDE_CODE_MAX_CONTEXT_TOKENS":"200000"}}
+```
+
+当前 Claude Code 已能识别模型、但这个网关部署实际只接受 200K 时，改用自动压缩窗口；这不表示该模型的官方窗口就是 200K：
+
+```json
+{"model":"claude-sonnet-5-5","env":{"CLAUDE_CODE_AUTO_COMPACT_WINDOW":"200000"}}
+```
+
+适用范围见官方 [model-config](https://code.claude.com/docs/en/model-config#correct-the-window-for-a-gateway-or-custom-model-id)。对任何以 `claude-` 开头的自定义或未识别 ID，必须先查官方 `CLAUDE_CODE_MAX_CONTEXT_TOKENS` 适用表，不能套用第一例；其中 `claude-sonnet-latest` 在未识别且无 `[1m]` 时，单独使用该变量要求 Claude Code 2.1.324 或更高版本。`[1m]` 有专门规则，不能直接套用无后缀示例；不建议用 `DISABLE_COMPACT` 解决窗口不一致。这些 `env` 只影响之后新拉起的终端进程，已经运行的进程不会因此改变。
+
 > **最佳实践**：
 > - 用 `--settings` 指定独立配置文件，避免多任务并发时改动全局 `~/.claude/settings.json`。
 > - `command` 必须是二进制的绝对路径或 `PATH` 里的可执行程序，不能用 shell alias。
@@ -117,8 +133,10 @@ Codex 和 TraeX 恢复原生会话时，只使用能确认属于当前会话的�
 Codex 和 TraeX 终端任务按当前原生轮次的成功、失败或取消事件结算，部分回答不抵消随后出现的失败；取消记为中断。Codex 和 TraeX 恢复中的轮次即使尚无正文输出，只要确认了对应输入和失败或取消终态，也会按该终态结束。TraeX 可读取含大型模型目录的会话元数据，正常接收最终回答并结束任务；恢复会先读完同一会话的旧日志段，再读取新段；新版 canonical 记录保留过程、输入回执和最终回答，并去除镜像重复。
 
 TraeX 用完整终端画面区分忙碌与就绪，兼容独立一行的快捷键页脚；正文或草稿里的状态引用不作为活动页脚。Codex 支持 `›` / `»` 输入提示及 0.164.0 仅显示模型与每周剩余额度的状态栏，信任和更新菜单不视为输入就绪。Cursor 普通输入只发一次 Enter，保留多行输入和普通任务排队；不附带空输入的第二次控制动作。Claude Code、Seed、Relay 的空输入框可被识别为空闲，以便继续处理待确认任务的恢复操作；支持空输入框与权限模式栏之间最多两行自定义 `statusLine`，恢复会话后也能提交首条消息。
-TraeX 在粘贴前发现未就绪 composer、原生追问或读屏失败时，提示词尚未写入，终端处理后可以重试。粘贴后、最终 Enter 前发现目录信任、hooks review、Question、其他编号菜单、外来草稿或未知控制行时，Dutydeck 不按 Enter，但已粘贴内容结果未知；先检查该会话终端和执行记录，不要直接重发。
+TraeX fresh 首写在准备、粘贴前和最终 Enter 前，都要求页脚同时给出已解析的原生模型、目录和 Context；banner、placeholder 或只有快捷键的页面不足以证明可写。原生 resume、已完成首写的 reattach 和同会话第二轮不按 fresh 处理；恢复降级为 fresh 时重新适用。准备成功后的第二次 send 也不会因为 `inputPrepared` 已置位而绕过 fresh 门禁。
+TraeX 在准备或粘贴前发现未就绪 composer、原生追问或读屏失败时，提示词尚未写入，终端处理后可以重试。粘贴后、最终 Enter 前发现目录信任、hooks review、Question、其他编号菜单、外来草稿或未知控制行时，Dutydeck 不自动补 Enter 或重发，但已粘贴内容结果未知；先检查该会话终端和执行记录，不要直接重发。
 TraeX 最终 Enter 前会把本次完整草稿按确定的终端显示形态逐行核对：实测 0.213.1-alpha.1 将每个 tab 显示为一个空格，其他字符和语义空白仍须精确一致，不会裁剪终端草稿或接受 prefix/suffix。提交后，TraeX 原生用户记录会删除开头连续的空格/tab；Dutydeck 的 TraeX 专属回执仅在同一原生会话与水线内接受这一规范化，且剩余正文必须非空并逐字一致。因此模型不保证看到逐字保留的原前缀，其他正文不变。
+TraeX 实时记录会先校验顶层与嵌套轮次 ID 的形状；有明确实时当前锚点时，旧 user/terminal 不得确认或结算新轮次，restore baseline candidate 不算当前实时锚点。没有实时锚点的恢复仍允许第一条合法 user 改绑，旧同文 user 或旧终态的无歧义识别仍未解决；跨轮复用工具 ID 的去重问题也尚未修复。
 
 Codex 当前父轮明确启动的直接子任务若报告额度耗尽或请求限流，Web 和飞书进度记录会显示固定诊断，不展示上游错误原文。父任务继续；Dutydeck 不因该诊断自动重试或切换账号。这是有界的尽力观察，恢复前已启动的子任务不会补报；TraeX 尚未启用此诊断。
 

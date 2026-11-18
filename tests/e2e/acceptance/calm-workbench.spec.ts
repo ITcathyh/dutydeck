@@ -250,7 +250,7 @@ test.describe('Calm Workbench browser acceptance', () => {
     await noOverflow(page);
   });
 
-  test('native background status survives real history and disappears on the live zero snapshot', async ({ page }, info) => {
+  test('native background terminal tasks survive the live zero snapshot and a real history reload', async ({ page }, info) => {
     await page.setViewportSize({ width: 1440, height: 900 });
     const id = await create('claude-code', 'Calm native background history');
     await open(page, id);
@@ -315,12 +315,23 @@ test.describe('Calm Workbench browser acceptance', () => {
 
     const zero = appendBackground(id, runningTasks.map(task => ({ ...task, state: 'completed' })));
     await expect.poll(async () => (await instance.request('GET', `/api/sessions/${id}/history`)).json.backgroundWork?.sequence, { intervals: TASK_POLL_INTERVALS }).toBe(zero.sequence);
-    await expect(background).toHaveCount(0);
+    const terminalBackground = page.getByRole('status').filter({ hasText: '主回合已结束 · 后台子任务已结束' });
+    await expect(terminalBackground).toHaveCount(1);
+    await expect(terminalBackground.locator('li')).toHaveCount(1000);
+    await expect(terminalBackground.locator('li').first()).toContainText('Agent · 已完成 · native-agent');
     const completedHistory = await instance.request('GET', `/api/sessions/${id}/history`);
     expect(completedHistory.json.liveAfter).toBeGreaterThanOrEqual(zero.sequence);
     expect(completedHistory.json.backgroundWork.data.count).toBe(0);
     expect(completedHistory.json.backgroundWork.data.tasks).toHaveLength(1000);
     expect(completedHistory.json.backgroundWork.data.tasks.every((task: { state: string }) => task.state === 'completed')).toBe(true);
+
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await expect(timeline).toBeVisible();
+    await expect(timeline).toHaveAttribute('data-history-complete', 'true');
+    await expect(terminalBackground).toHaveCount(1);
+    await terminalBackground.locator('summary').click();
+    await expect(terminalBackground.locator('li')).toHaveCount(1000);
+    await expect(terminalBackground.locator('li').first()).toContainText('Agent · 已完成 · native-agent');
   });
 
   test('a 384px result inspector keeps real context and quota labels readable', async ({ page }, info) => {
