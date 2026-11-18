@@ -56,7 +56,7 @@ Dutydeck 自己生成的 Claude 凭据守卫（终端与内置 ACP）和计划�
 
 只有确认网关部署的真实窗口较小时才修正窗口。自 Claude Code 2.1.323 起，未识别 alias 可能按 1M 处理，不要给所有网关统一设置 200K。以下片段可按各自前提并入上面的 Agent 对象。
 
-未识别、不以 `claude-` 开头、且无 `[1m]` 后缀的 200K alias，可以单独使用 `CLAUDE_CODE_MAX_CONTEXT_TOKENS`：
+未识别、不以 `claude-` 开头、且模型 ID 任意位置都不含 `[1m]` 标记（不区分大小写）的 200K alias，可以单独使用 `CLAUDE_CODE_MAX_CONTEXT_TOKENS`：
 
 ```json
 {"model":"gateway-alias-200k","env":{"CLAUDE_CODE_MAX_CONTEXT_TOKENS":"200000"}}
@@ -68,7 +68,9 @@ Dutydeck 自己生成的 Claude 凭据守卫（终端与内置 ACP）和计划�
 {"model":"claude-sonnet-5-5","env":{"CLAUDE_CODE_AUTO_COMPACT_WINDOW":"200000"}}
 ```
 
-适用范围见官方 [model-config](https://code.claude.com/docs/en/model-config#correct-the-window-for-a-gateway-or-custom-model-id)。对任何以 `claude-` 开头的自定义或未识别 ID，必须先查官方 `CLAUDE_CODE_MAX_CONTEXT_TOKENS` 适用表，不能套用第一例；其中 `claude-sonnet-latest` 在未识别且无 `[1m]` 时，单独使用该变量要求 Claude Code 2.1.324 或更高版本。`[1m]` 有专门规则，不能直接套用无后缀示例；不建议用 `DISABLE_COMPACT` 解决窗口不一致。这些 `env` 只影响之后新拉起的终端进程，已经运行的进程不会因此改变。
+第二例的 `env` 会影响同一 Agent 启动的所有模型，且必须保持自动压缩启用；已通过 `DISABLE_AUTO_COMPACT=1` 等设置禁用自动压缩时，这个窗口变量不会重新启用或代替自动压缩。
+
+适用范围见官方 [model-config](https://code.claude.com/docs/en/model-config#correct-the-window-for-a-gateway-or-custom-model-id)。对任何以 `claude-` 开头的自定义或未识别 ID，必须先查官方 `CLAUDE_CODE_MAX_CONTEXT_TOKENS` 适用表，不能套用第一例；其中 `claude-sonnet-latest` 在未识别且模型 ID 任意位置不含 `[1m]`（不区分大小写）时，单独使用该变量要求 Claude Code 2.1.324 或更高版本。`[1m]` 有专门规则，模型 ID 任意位置含有该标记（不区分大小写）时不能套用第一例；不建议用 `DISABLE_COMPACT` 解决窗口不一致。修改 `DUTYDECK_AGENTS_JSON` 后，先按部署方式重启对应的 Dutydeck 实例加载新配置，再新起 Claude 终端进程；只新起终端而不重启实例仍会使用旧配置，已经运行的进程也不会因此改变。
 
 > **最佳实践**：
 > - 用 `--settings` 指定独立配置文件，避免多任务并发时改动全局 `~/.claude/settings.json`。

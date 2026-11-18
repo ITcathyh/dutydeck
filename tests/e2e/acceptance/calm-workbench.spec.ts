@@ -315,7 +315,7 @@ test.describe('Calm Workbench browser acceptance', () => {
 
     const zero = appendBackground(id, runningTasks.map(task => ({ ...task, state: 'completed' })));
     await expect.poll(async () => (await instance.request('GET', `/api/sessions/${id}/history`)).json.backgroundWork?.sequence, { intervals: TASK_POLL_INTERVALS }).toBe(zero.sequence);
-    const terminalBackground = page.getByRole('status').filter({ hasText: '主回合已结束 · 后台子任务已结束' });
+    const terminalBackground = page.getByRole('status').filter({ hasText: /^后台子任务已结束/ });
     await expect(terminalBackground).toHaveCount(1);
     await expect(terminalBackground.locator('li')).toHaveCount(1000);
     await expect(terminalBackground.locator('li').first()).toContainText('Agent · 已完成 · native-agent');

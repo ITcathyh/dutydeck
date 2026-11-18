@@ -43,7 +43,7 @@ The pre-launch probe uses the Agent's cleaned child environment, has a 3-second 
 
 Correct the context window only after confirming that the gateway deployment enforces a smaller real window. Starting with Claude Code 2.1.323, an unrecognized alias may be treated as having a 1M window; do not set every gateway to 200K. Merge either fragment into the Agent object above only when its stated conditions apply.
 
-For an unrecognized 200K alias that neither starts with `claude-` nor has a `[1m]` suffix, `CLAUDE_CODE_MAX_CONTEXT_TOKENS` can be used on its own:
+For an unrecognized 200K alias that neither starts with `claude-` nor contains a `[1m]` marker anywhere in its model ID (case-insensitive), `CLAUDE_CODE_MAX_CONTEXT_TOKENS` can be used on its own:
 
 ```json
 {"model":"gateway-alias-200k","env":{"CLAUDE_CODE_MAX_CONTEXT_TOKENS":"200000"}}
@@ -55,7 +55,9 @@ When the current Claude Code recognizes the model but this gateway deployment ac
 {"model":"claude-sonnet-5-5","env":{"CLAUDE_CODE_AUTO_COMPACT_WINDOW":"200000"}}
 ```
 
-See the official [model-config](https://code.claude.com/docs/en/model-config#correct-the-window-for-a-gateway-or-custom-model-id) for applicability. For any custom or unrecognized ID starting with `claude-`, check the official `CLAUDE_CODE_MAX_CONTEXT_TOKENS` applicability table instead of extrapolating from the first example. In particular, using that variable by itself for an unrecognized `claude-sonnet-latest` without `[1m]` requires Claude Code 2.1.324 or later. `[1m]` has separate rules, so the no-suffix examples do not apply to it. Using `DISABLE_COMPACT` to resolve a window mismatch is not recommended. These `env` values affect only terminal processes launched afterwards; they do not change processes that are already running.
+The second example's `env` applies to every model launched by that Agent and requires automatic compaction to stay enabled. If automatic compaction is disabled, including with `DISABLE_AUTO_COMPACT=1`, this window variable neither re-enables nor replaces it.
+
+See the official [model-config](https://code.claude.com/docs/en/model-config#correct-the-window-for-a-gateway-or-custom-model-id) for applicability. For any custom or unrecognized ID starting with `claude-`, check the official `CLAUDE_CODE_MAX_CONTEXT_TOKENS` applicability table instead of extrapolating from the first example. In particular, using that variable by itself for an unrecognized `claude-sonnet-latest` whose model ID contains no `[1m]` marker anywhere (case-insensitive) requires Claude Code 2.1.324 or later. `[1m]` has separate rules, so the first example does not apply whenever that marker appears anywhere in the model ID, regardless of case. Using `DISABLE_COMPACT` to resolve a window mismatch is not recommended. After editing `DUTYDECK_AGENTS_JSON`, restart the affected Dutydeck instance through its normal deployment method to load the updated configuration, then launch a fresh Claude terminal process. Launching only a new terminal without restarting the instance still uses the previous configuration, and processes that are already running remain unchanged.
 
 - Use an absolute path (or a `PATH` binary) for `command`, never a shell alias. **An agent whose command cannot be found is not registered**: `dutydeck doctor` fails and names it, and the daemon logs a warning. Invalid JSON errors name the `DUTYDECK_AGENTS_JSON` variable.
 - With the default tmux backend, an Agent's `env.PATH` (including an empty string) becomes the Agent process `PATH` unchanged, and a bare `command` is resolved through it; registration still checks the Dutydeck service's own `PATH`. When overriding `PATH`, include the directory of `command` or use an absolute `command`; otherwise the Agent can be registered but fail to start.
