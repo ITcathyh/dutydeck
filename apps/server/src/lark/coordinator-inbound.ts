@@ -240,13 +240,6 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
   private async recoverInbound(record: LarkInboxRecord, config: StoredLarkConfig) {
     if (this.stopped) return;
     const messageId = record.event.messageId;
-    let accepted: boolean | undefined = false;
-    let resumeTask: TaskRecord | undefined;
-    if (record.state === 'received' && record.sessionId && record.turn) {
-      const ownership = await this.inboundRuntimeTask(record, config);
-      accepted = ownership.accepted;
-      resumeTask = ownership.task;
-    }
     const receivedAt = record.state === 'unrouted' ? Date.parse(record.receivedAt ?? '') : Number(record.event.createTime) || Date.parse(record.receivedAt ?? '');
     if (Date.now() - receivedAt > larkRedispatchMaxAgeMs) {
       this.inboundRecoveryRetries.delete(messageId);
@@ -257,6 +250,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
           this.scheduleIgnoredPrune(config.appId);
           return;
         }
+        const accepted = await this.inboundTurnAccepted(record, config);
         if (accepted !== true) {
           const unknown = accepted === undefined;
           await this.inbox!.update(record, { state: 'failed', reason: 'backlog_expired',
@@ -275,11 +269,9 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         return;
       }
     }
-    // 未过期时账本读不清或已有 ID 冲突，保持 received 等重试；过期仍须按结果未知收口。
-    if (accepted === undefined) return;
     try {
       if (record.state === 'unrouted') await this.routeCaptured(record, config);
-      else await this.handle(record.event, config, true, false, undefined, undefined, undefined, resumeTask);
+      else await this.handle(record.event, config, true);
       this.inboundRecoveryRetries.delete(messageId);
       return;
     } catch (error) {
@@ -324,24 +316,17 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
    * 入站记录当前这一轮有没有被 runtime 接收。派发前一定先写会话和轮次，没写过就没有派发；
    * 写过时按这一轮的幂等键查执行账本。没有账本、会话或读取失败时返回 undefined（结果未知）。
    */
-  private async inboundRuntimeTask(record: LarkInboxRecord, config: StoredLarkConfig): Promise<{ accepted: true; task: TaskRecord } | { accepted: false; task?: undefined } | { accepted: undefined; task?: undefined }> {
+  private async inboundTurnAccepted(record: LarkInboxRecord, config: StoredLarkConfig): Promise<boolean | undefined> {
     const { sessionId, turn } = record;
-    if (!sessionId || !turn) return { accepted: false };
-    if (!this.runtime.dispatch || !this.runtime.getTasks) return { accepted: undefined };
-    const taskId = larkTurnRuntimeTaskId(sessionId, config.appId, record.event.messageId, turn);
-    if (record.taskId && record.taskId !== taskId) {
-      this.log.warn({ messageId: record.event.messageId, taskId: record.taskId, deterministicTaskId: taskId }, '入站记录与确定性执行 ID 冲突，保留恢复待核对');
-      return { accepted: undefined };
-    }
+    if (!sessionId || !turn) return false;
+    if (!this.runtime.dispatch || !this.runtime.getTasks) return undefined;
     try {
-      if (!await this.runtime.getSession(sessionId)) return { accepted: undefined };
-      const task = (await this.runtime.getTasks(sessionId)).find(item => item.id === taskId);
-      if (task) return { accepted: true, task };
-      // 已有真实 ID 是 runtime 曾接收的正证据；它从账本消失不能变成一次权威未执行。
-      return record.taskId ? { accepted: undefined } : { accepted: false };
+      if (!await this.runtime.getSession(sessionId)) return undefined;
+      const taskId = larkTurnRuntimeTaskId(sessionId, config.appId, record.event.messageId, turn);
+      return (await this.runtime.getTasks(sessionId)).some(task => task.id === taskId);
     } catch (error) {
-      this.log.warn({ error, messageId: record.event.messageId }, '重启后查询入站请求的执行记录失败，保留恢复待核对');
-      return { accepted: undefined };
+      this.log.warn({ error, messageId: record.event.messageId }, '重启后查询入站请求的执行记录失败，按结果未知处理');
+      return undefined;
     }
   }
 
@@ -808,7 +793,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
   }
 
   /** retrying：首卡重试重新走入站处理时传入原任务，按它触发时的 epoch 判断 /new。 */
-  async handle(event: LarkMessageEvent, config: StoredLarkConfig, recovering = false, adopted = false, retrying?: LarkTask, captured?: LarkInboxRecord, adoption?: LarkInboxAdoption, resumeTask?: TaskRecord) {
+  async handle(event: LarkMessageEvent, config: StoredLarkConfig, recovering = false, adopted = false, retrying?: LarkTask, captured?: LarkInboxRecord, adoption?: LarkInboxAdoption) {
     const note = async (reason: Disposition['reason'], detail?: string) => { if (this.workflowOptions.store) await annotateDisposition(this.workflowOptions.store, config.appId, event.messageId, { schemaVersion: 1, reason, ...(detail ? { detail: detail.slice(0, 500) } : {}) }, this.log); };
     const persisted = captured ?? await this.inbox?.lookup(config.appId, event.messageId);
     if (this.inbox && adoption?.confirmedInputDigest && (!persisted || larkConfirmationInputDigest(persisted.event) !== adoption.confirmedInputDigest)) {
@@ -1051,8 +1036,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         return;
       }
       // 空 @ 消息（仅 @ 机器人无文字）仍需创建任务，由 runTurn 拉取聊天记录做兜底意图判断。
-      const task: LarkTask = { ...(commandRoute && typeof commandRoute !== 'string' && commandRoute.lineage ? { matterLineage: commandRoute.lineage } : {}), id: event.messageId, group, event, prompt, resources, inbox, retryMaterialPrompt, launchOptions, ...(inbox?.cardId ? { cardMessageId: inbox.cardId } : {}), ...(inbox?.redispatch ? { redispatch: inbox.redispatch } : {}), ...(commandRoute && typeof commandRoute !== 'string' && commandRoute.suggestion ? { commandSuggestion: commandRoute.suggestion } : {}), ...(commandRoute && typeof commandRoute !== 'string' && commandRoute.steer ? { steer: true } : {}), config, ...(busy ? { busySupplement: busy } : {}), state: 'queued', events: [], restoring: recovering, ...(recovering ? { recovered: true } : {}), turn: (inbox?.turn ?? 1) - 1, scopeId, epoch: commandEpoch ?? retrying?.epoch ?? group.epoch ?? 0, acknowledgement,
-        ...(resumeTask ? { resumeTask, sessionId: resumeTask.sessionId, runtimeTaskId: resumeTask.id, startedAt: Date.parse(resumeTask.createdAt) } : {}) };
+      const task: LarkTask = { ...(commandRoute && typeof commandRoute !== 'string' && commandRoute.lineage ? { matterLineage: commandRoute.lineage } : {}), id: event.messageId, group, event, prompt, resources, inbox, retryMaterialPrompt, launchOptions, ...(inbox?.cardId ? { cardMessageId: inbox.cardId } : {}), ...(inbox?.redispatch ? { redispatch: inbox.redispatch } : {}), ...(commandRoute && typeof commandRoute !== 'string' && commandRoute.suggestion ? { commandSuggestion: commandRoute.suggestion } : {}), ...(commandRoute && typeof commandRoute !== 'string' && commandRoute.steer ? { steer: true } : {}), config, ...(busy ? { busySupplement: busy } : {}), state: 'queued', events: [], restoring: recovering, ...(recovering ? { recovered: true } : {}), turn: (inbox?.turn ?? 1) - 1, scopeId, epoch: commandEpoch ?? retrying?.epoch ?? group.epoch ?? 0, acknowledgement };
       this.tasks.set(task.id, task);
       handedOff = true;
       if (this.tasks.size > 5_000) this.tasks.delete(this.tasks.keys().next().value!);

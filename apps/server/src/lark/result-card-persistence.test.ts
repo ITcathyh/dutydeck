@@ -262,13 +262,11 @@ describe('卡片映射的并发写', () => {
       }
       return row;
     };
-    let persistResult: unknown;
     try {
-      persistResult = await (h.coordinator as any).persistCardTask(
+      await (h.coordinator as any).persistCardTask(
         (h.coordinator as any).restoredCardTask(h.config, mapping!, JSON.parse(mapping!.extra!)), 'completed');
     } finally { h.repos.channelMappings.get = realGet; }
 
-    expect(persistResult).toBe('committed');
     expect(injected).toBe(true);
     const after = await h.persisted();
     expect(after.recovery_status_key).toBe('from_reconciler');
@@ -285,9 +283,8 @@ describe('卡片映射的并发写', () => {
     await h.repos.channelMappings.save({ ...mapping!, extra: JSON.stringify({ ...saved,
       runtime_task_id: 'task_newer_same_turn', recovery_status_key: 'from_newer_task' }) });
 
-    const persistResult = await (h.coordinator as any).persistCardTask(stale, 'cancelled');
+    await (h.coordinator as any).persistCardTask(stale, 'cancelled');
 
-    expect(persistResult).toBe('unverified');
     expect(await h.persisted()).toMatchObject({ turn: saved.turn, state: saved.state,
       runtime_task_id: 'task_newer_same_turn', recovery_status_key: 'from_newer_task' });
   });
@@ -304,9 +301,8 @@ describe('卡片映射的并发写', () => {
     const get = vi.spyOn(h.repos.channelMappings, 'get').mockRejectedValue(new Error('synthetic read failure'));
     const save = vi.spyOn(h.repos.channelMappings, 'save');
 
-    const persistResult = await (h.coordinator as any).persistCardTask(stale, 'cancelled');
+    await (h.coordinator as any).persistCardTask(stale, 'cancelled');
 
-    expect(persistResult).toBe('unverified');
     expect(save).not.toHaveBeenCalled();
     expect(await h.persisted()).toEqual(before);
     get.mockRestore();
@@ -322,41 +318,11 @@ describe('卡片映射的并发写', () => {
     const compare = vi.spyOn(h.repos.channelMappings, 'compareAndSetExtra').mockResolvedValue(false);
     const save = vi.spyOn(h.repos.channelMappings, 'save');
 
-    const persistResult = await (h.coordinator as any).persistCardTask(stale, 'cancelled');
+    await (h.coordinator as any).persistCardTask(stale, 'cancelled');
 
-    expect(persistResult).toBe('unverified');
     expect(compare).toHaveBeenCalledTimes(5);
     expect(save).not.toHaveBeenCalled();
     expect(await h.persisted()).toEqual(saved);
-  });
-
-  it('第五次 CAS 冲突后的最终读已等于待写内容时返回 committed，不写第六次', async () => {
-    const h = await harness();
-    await h.coordinator.handle(event('om_1'), h.config);
-    await h.resultCard();
-    const [mapping] = await h.repos.channelMappings.list(h.channel);
-    const saved = JSON.parse(mapping!.extra!) as PersistedLarkCardTask;
-    const stale = (h.coordinator as any).restoredCardTask(h.config, mapping!, saved);
-    const current = { ...mapping! };
-    const realGet = h.repos.channelMappings.get.bind(h.repos.channelMappings);
-    vi.spyOn(h.repos.channelMappings, 'get').mockImplementation(async (channel, externalId) => {
-      await realGet(channel, externalId);
-      return { ...current };
-    });
-    let desired = '';
-    const compare = vi.spyOn(h.repos.channelMappings, 'compareAndSetExtra').mockImplementation(async (_id, _expected, extra) => {
-      desired = extra;
-      if (compare.mock.calls.length === 5) current.extra = extra;
-      return false;
-    });
-    const save = vi.spyOn(h.repos.channelMappings, 'save');
-
-    expect(await (h.coordinator as any).persistCardTask(stale, 'cancelled')).toBe('committed');
-
-    expect(compare).toHaveBeenCalledTimes(5);
-    expect(save).not.toHaveBeenCalled();
-    expect(current.extra).toBe(desired);
-    expect(JSON.parse(current.extra!)).toMatchObject({ state: 'cancelled', runtime_task_id: saved.runtime_task_id, turn: saved.turn });
   });
 
   it('整行 fallback 拒绝旧会话覆盖新会话，同时允许当前作用域在同轮合法换会话并保存终态', async () => {
@@ -382,7 +348,7 @@ describe('卡片映射的并发写', () => {
       turn: saved.turn! + 1, runtime_task_id: 'task_newer_session' }) });
     h.repos.channelMappings.compareAndSetExtra = undefined as any;
     release();
-    expect(await pending).toBe('unverified');
+    await pending;
     read.mockRestore();
     h.repos.channelMappings.compareAndSetExtra = compare;
 
@@ -398,7 +364,7 @@ describe('卡片映射的并发写', () => {
     legitimate.group.retiredSessionIds = new Set(['ses_newer']);
     legitimate.finalMessageId = 'om_legitimate_final';
     legitimate.finalDeliveryState = 'delivered';
-    expect(await (h.coordinator as any).persistCardTask(legitimate, 'completed')).toBe('committed');
+    await (h.coordinator as any).persistCardTask(legitimate, 'completed');
     expect(await h.persisted()).toMatchObject({ turn: saved.turn! + 1, state: 'completed', runtime_task_id: 'task_legitimate', final_delivery_state: 'delivered' });
     expect((await h.repos.channelMappings.list(h.channel))[0]?.sessionId).toBe('ses_legitimate');
     expect((await h.persisted()).earlier_message_ids ?? []).not.toContain(saved.final_message_id);
@@ -406,112 +372,8 @@ describe('卡片映射的并发写', () => {
     // 即使旧快照带着作用域退休证据，也不能用较旧 turn 覆盖刚保存的新会话终态。
     stale.group.sessionId = stale.sessionId;
     stale.group.retiredSessionIds = new Set(['ses_legitimate']);
-    expect(await (h.coordinator as any).persistCardTask(stale, 'cancelled')).toBe('unverified');
+    await (h.coordinator as any).persistCardTask(stale, 'cancelled');
     expect(await h.persisted()).toMatchObject({ turn: saved.turn! + 1, state: 'completed', runtime_task_id: 'task_legitimate', final_delivery_state: 'delivered' });
     expect((await h.repos.channelMappings.list(h.channel))[0]?.sessionId).toBe('ses_legitimate');
-  });
-
-  it('现有 extra 无法解析时返回 unverified，原始整行保持不变且不调用 save/CAS', async () => {
-    const h = await harness();
-    await h.coordinator.handle(event('om_1'), h.config);
-    await h.resultCard();
-    const [mapping] = await h.repos.channelMappings.list(h.channel);
-    const saved = JSON.parse(mapping!.extra!) as PersistedLarkCardTask;
-    const stale = (h.coordinator as any).restoredCardTask(h.config, mapping!, saved);
-    const malformed = '{"state":';
-    await h.repos.channelMappings.save({ ...mapping!, extra: malformed });
-    const before = await h.repos.channelMappings.get(h.channel, mapping!.externalId);
-    const save = vi.spyOn(h.repos.channelMappings, 'save');
-    const compare = vi.spyOn(h.repos.channelMappings, 'compareAndSetExtra');
-
-    expect(await (h.coordinator as any).persistCardTask(stale, 'cancelled')).toBe('unverified');
-
-    expect(save).not.toHaveBeenCalled();
-    expect(compare).not.toHaveBeenCalled();
-    expect(await h.repos.channelMappings.get(h.channel, mapping!.externalId)).toEqual(before);
-    expect((await h.repos.channelMappings.get(h.channel, mapping!.externalId))!.extra).toBe(malformed);
-  });
-
-  it('同归属记录已包含待写内容时返回 committed，不做重复 CAS', async () => {
-    const h = await harness();
-    await h.coordinator.handle(event('om_1'), h.config);
-    await h.resultCard();
-    const [mapping] = await h.repos.channelMappings.list(h.channel);
-    const saved = JSON.parse(mapping!.extra!) as PersistedLarkCardTask;
-    const restored = (h.coordinator as any).restoredCardTask(h.config, mapping!, saved);
-    const compare = vi.spyOn(h.repos.channelMappings, 'compareAndSetExtra');
-
-    expect(await (h.coordinator as any).persistCardTask(restored, saved.state)).toBe('committed');
-    expect(compare).not.toHaveBeenCalled();
-    expect((await h.repos.channelMappings.get(h.channel, mapping!.externalId))!.extra).toBe(mapping!.extra);
-  });
-
-  it('CAS 前发现任务轮次已推进时返回 unverified，不写入旧快照', async () => {
-    const h = await harness();
-    await h.coordinator.handle(event('om_1'), h.config);
-    await h.resultCard();
-    const [mapping] = await h.repos.channelMappings.list(h.channel);
-    const saved = JSON.parse(mapping!.extra!) as PersistedLarkCardTask;
-    const stale = (h.coordinator as any).restoredCardTask(h.config, mapping!, saved);
-    const get = h.repos.channelMappings.get.bind(h.repos.channelMappings);
-    let release!: () => void;
-    const barrier = new Promise<void>(resolve => { release = resolve; });
-    let blocked = false;
-    const read = vi.spyOn(h.repos.channelMappings, 'get').mockImplementation(async (...args) => {
-      const row = await get(...args);
-      if (!blocked) { blocked = true; await barrier; }
-      return row;
-    });
-    const compare = vi.spyOn(h.repos.channelMappings, 'compareAndSetExtra');
-    const save = vi.spyOn(h.repos.channelMappings, 'save');
-    const pending = (h.coordinator as any).persistCardTask(stale, 'cancelled');
-    try {
-      await vi.waitFor(() => expect(blocked).toBe(true));
-      stale.turn += 1;
-      release();
-      expect(await pending).toBe('unverified');
-      expect(compare).not.toHaveBeenCalled();
-      expect(save).not.toHaveBeenCalled();
-      expect(await h.persisted()).toEqual(saved);
-    } finally {
-      release();
-      read.mockRestore();
-    }
-  });
-
-  it('mapping 未确认仍写飞书任务步骤，并沿用保存开始时的轮次', async () => {
-    const h = await harness();
-    await h.coordinator.handle(event('om_1'), h.config);
-    await h.resultCard();
-    const [mapping] = await h.repos.channelMappings.list(h.channel);
-    const saved = JSON.parse(mapping!.extra!) as PersistedLarkCardTask;
-    const startedTurn = saved.turn!;
-    const task = (h.coordinator as any).restoredCardTask(h.config, mapping!, saved);
-    task.event.messageId = 'lark-task:guid_persistence';
-    h.service.callOpenApi.mockClear();
-    const read = vi.spyOn(h.repos.channelMappings, 'get').mockImplementation(async () => {
-      task.turn = startedTurn + 1;
-      throw new Error('mapping read unavailable');
-    });
-
-    expect(await (h.coordinator as any).saveCardTask(task, 'running')).toBe('unverified');
-    expect(h.service.callOpenApi).toHaveBeenCalledTimes(1);
-    expect(h.service.callOpenApi).toHaveBeenCalledWith('/open-apis/task/v2/agent_task_step_info/append_task_steps', {
-      method: 'POST',
-      body: {
-        task_guid: 'guid_persistence',
-        idempotent_key: `guid_persistence:${startedTurn}:running`,
-        task_steps: [{ content: 'Dutydeck 正在执行。' }]
-      }
-    });
-
-    const ordinary = (h.coordinator as any).restoredCardTask(h.config, mapping!, saved);
-    expect(await (h.coordinator as any).saveCardTask(ordinary, 'running')).toBe('unverified');
-    expect(h.service.callOpenApi).toHaveBeenCalledTimes(1);
-    ordinary.launcherRecoveryPending = true;
-    ordinary.runtimeTaskId = undefined;
-    expect(await (h.coordinator as any).saveCardTask(ordinary, 'running')).toBe('unverified');
-    expect(read).toHaveBeenCalledTimes(2);
-    read.mockRestore();
   });
 });

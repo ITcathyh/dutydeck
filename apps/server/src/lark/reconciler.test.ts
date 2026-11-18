@@ -954,27 +954,6 @@ describe('performLarkCardReconcile 遵守群级呈现开关', () => {
     return { cardMappings, runtime, service, log };
   };
 
-  it('合法旧 mapping 缺 runtime_task_id 时按 prompt/started_at 找回原任务并幂等交付', async () => {
-    const task = completedTask('ses-legacy');
-    const mapping = createMapping('map-legacy', 'om_req_legacy', 'ses-legacy', { state: 'running', turn: 1, prompt: task.prompt });
-    expect(JSON.parse(mapping.extra!).runtime_task_id).toBeUndefined();
-    const h = reconcileHarness([mapping], { 'ses-legacy': [task] });
-    const reconcile = () => performLarkCardReconcile({
-      runtime: h.runtime as any, service: h.service as any, cardMappings: h.cardMappings as any, log: h.log as any,
-      config, channel: 'lark-card:cli_test'
-    });
-
-    const firstUnresolved = await reconcile();
-    expect(h.log.warn.mock.calls).toEqual([]);
-    expect(firstUnresolved).toBe(0);
-    expect(JSON.parse(h.cardMappings.mappings[0]!.extra!)).toMatchObject({
-      runtime_task_id: task.id, final_delivery_state: 'delivered'
-    });
-    expect(h.service.send).toHaveBeenCalledTimes(1);
-    expect(await reconcile()).toBe(0);
-    expect(h.service.send).toHaveBeenCalledTimes(1);
-  });
-
   it('completionReactionOnly 开启时，重启补发只贴表情，不补结果卡', async () => {
     const task = completedTask('ses-react');
     const mapping = createMapping('map-react', 'om_req_react', 'ses-react', { runtime_task_id: task.id, state: 'running', turn: 1 });

@@ -41,7 +41,6 @@ import {
   larkCancellationStatusLabel,
   renderLarkProcessElements,
   renderLarkResultElements,
-  terminalTaskStates,
   type LarkCardElement,
   type SteeringPermissionStatus
 } from './card-renderer.js';
@@ -65,7 +64,7 @@ import {
 } from './session-resolver.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkGroup, LarkTaskState, LarkTask, PersistedLarkCardTask } from './coordinator.js';
-import { parseCardTask, parseOptionalCardTask } from './persisted-card-task.js';
+import { parseCardTask } from './persisted-card-task.js';
 import { larkAutoApprovalEventPrefix, type LarkInteraction } from './workflow-interactions.js';
 import { planInstructionBlock, planTaskOf, planUnsupportedReason } from '../plan-mode.js';
 import type { LarkCardCapabilities } from './card-actions.js';
@@ -1039,7 +1038,6 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     if (!await this.confirmationInputAllowed(task.inbox)) return;
     if (this.stopped) return;
     const resumeTask = task.resumeTask;
-    const resumeNeedsAcceptance = Boolean(resumeTask && task.inbox?.state === 'received');
     task.resumeTask = undefined;
     const restoring = task.restoring;
     task.restoring = false;
@@ -1296,15 +1294,10 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     await this.groupManager?.recordRun(session, config, event, task.scopeId);
     let materialPrompt = task.retryMaterialPrompt ?? prompt;
     let materialParts: PromptPart[] | undefined;
-    let contextCommit: (() => Promise<boolean>) | undefined;
-    if (this.workflowOptions.store && (!resumeTask || resumeNeedsAcceptance)) {
+    let contextCommit: (() => Promise<void>) | undefined;
+    if (this.workflowOptions.store && !resumeTask) {
       const contextKey = `lark.context.${config.appId}.${session.id}`;
       let snapshot = task.inbox?.materials;
-      if (!snapshot && resumeTask) {
-        // 尚待接受的原轮没有持久快照时不能新读一份冒充当时输入；保留 received 等人工或后续恢复核对。
-        this.log.warn({ taskId: task.id, runtimeTaskId: resumeTask.id }, '原轮材料快照缺失，保持入站恢复待核对');
-        return;
-      }
       if (!snapshot) {
         const raw = await this.workflowOptions.store.get(contextKey);
         const previous = raw ? JSON.parse(raw) : {};
@@ -1332,52 +1325,12 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       const acceptedSnapshot = snapshot!;
       contextCommit = async () => {
         const next = JSON.stringify({ cursor: acceptedSnapshot.cursor, readMessageIds: acceptedSnapshot.readMessageIds });
-        // 当前值只能是另一条已接受轮次写下的水位；它覆盖本轮回放快照时，同样证明原轮不需要回滚。
-        const coversAcceptedSnapshot = async (raw: string | undefined) => {
-          if (!raw) return false;
-          try {
-            const current = JSON.parse(raw) as { cursor?: { createTime: number; messageId: string }; readMessageIds?: string[] };
-            const before = acceptedSnapshot.cursor;
-            const after = current.cursor;
-            if (before && after) return after.createTime > before.createTime
-              || after.createTime === before.createTime && after.messageId >= before.messageId;
-            if (before || after) return false;
-            // 无游标的旧材料只能用另一个已接受入站记录证明先后；不同的 ID 列表本身不证明更新。
-            const currentId = current.readMessageIds?.at(-1);
-            const originalId = acceptedSnapshot.readMessageIds.at(-1);
-            if (!currentId || !originalId || currentId === originalId || !task.inbox) return false;
-            const later = await this.inbox?.lookup(config.appId, currentId);
-            if (later?.state !== 'accepted' || later.sessionId !== session.id) return false;
-            const currentTime = Date.parse(later.receivedAt ?? '');
-            const originalTime = Date.parse(task.inbox.receivedAt ?? '');
-            return currentTime > originalTime || currentTime === originalTime
-              && (later.receiptOrder ?? 0) >= (task.inbox.receiptOrder ?? 0);
-          } catch { return false; }
-        };
-        const current = await this.workflowOptions.store!.get(contextKey);
         // A replay may arrive after a later accepted turn. Never roll its cursor back.
-        if (current === next || await coversAcceptedSnapshot(current)) return true;
-        if (await this.workflowOptions.store!.compareAndSet!(contextKey, acceptedSnapshot.contextBefore, next)) return true;
-        return coversAcceptedSnapshot(await this.workflowOptions.store!.get(contextKey));
+        if (await this.workflowOptions.store!.get(contextKey) === next) return;
+        await this.workflowOptions.store!.compareAndSet!(contextKey, acceptedSnapshot.contextBefore, next);
       };
     }
     task.retryMaterialPrompt = materialPrompt;
-    if (resumeTask) {
-      task.startedAt ??= Date.parse(resumeTask.createdAt);
-      try {
-        const mapping = await this.cardMappings?.get(larkCardChannel(config.appId), task.id);
-        const saved = parseOptionalCardTask(mapping?.extra);
-        if (mapping && saved && mapping.sessionId === session.id && saved.runtime_task_id === resumeTask.id && (saved.turn ?? 0) === currentTurn) {
-          // 恢复原卡片、静默锚点、首次投递时间与交付回执；重放不能另起一份新证据。
-          const live = { group: task.group, event: task.event, config: task.config, inbox: task.inbox,
-            state: task.state, turn: task.turn, scopeId: task.scopeId, epoch: task.epoch,
-            acknowledgement: task.acknowledgement, contextReadAbort: task.contextReadAbort };
-          Object.assign(task, this.restoredCardTask(config, mapping, saved), live);
-        }
-      } catch (error) {
-        this.log.warn({ error, taskId: task.id, runtimeTaskId: resumeTask.id }, '恢复原轮卡片交付证据失败，等待后续保存与对账');
-      }
-    }
     const initialState = resumeTask?.status === 'running' ? 'running' : this.runtime.dispatch ? 'queued' : 'running';
     task.state = initialState;
     task.events = resumeTask
@@ -1714,14 +1667,8 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         if ((state === 'interrupted' || state === 'cancelled') && runtimeTask?.interruptedByActor) task.finalCardInput = resultCardInput;
         if (task.finalDeliveryFirstFailedAt === undefined) {
           task.finalDeliveryFirstFailedAt = Date.now();
-          try {
-            const saved = await this.saveCardTask(task, state);
-            // 有映射存储时，未核验的时间戳不能授权一次可能超出原去重窗口的自动发送。
-            if (this.cardMappings && saved !== 'committed') {
-              task.finalDeliveryFirstFailedAt = undefined;
-              throw new LarkServiceError('LARK_RESULT_FIRST_ATTEMPT_UNVERIFIED', '首次结果投递时间尚未确认保存，暂停自动发送。', 409);
-            }
-          } catch (error) { task.finalDeliveryFirstFailedAt = undefined; throw error; }
+          try { await this.saveCardTask(task, state); }
+          catch (error) { task.finalDeliveryFirstFailedAt = undefined; throw error; }
         }
         const result = await completeExplicitFinal(this.workflowOptions.store, this.service, finalContext, resultCardInput, elements, beforeSend, (scope, actorId) => this.authorizeFinalRelay(scope, actorId)) ?? await sendLarkResult(this.service, {
           chatId: event.chatId,
@@ -2127,32 +2074,6 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
             throw error;
           });
         runtimeTaskId = runtimeTask.id;
-        // dispatch 期间用户可能已经重试；只有仍可见的这一轮才能推进接受检查点和卡片归属。
-        // 已被后轮取代时，下面仍要为这个已接受的 runtime task 留下证据。
-        if (task.turn === currentTurn) {
-          task.runtimeTaskId = runtimeTask.id;
-          task.launcherRecoveryPending = false;
-          const acceptedInbox = task.inbox;
-          if (acceptedInbox && (!resumeTask || resumeNeedsAcceptance)) {
-            await this.inbox!.update(acceptedInbox, { state: 'received', sessionId: session.id, taskId: runtimeTask.id, turn: currentTurn });
-            let contextCommitted = false;
-            task.commitAccepted = async mapping => {
-              try {
-                const current = await this.inbox!.reload(acceptedInbox);
-                if (!current || current.state !== 'received' || current.sessionId !== session.id
-                  || current.turn !== currentTurn || current.taskId !== runtimeTask.id) return;
-                if (!contextCommitted) contextCommitted = await (contextCommit?.() ?? Promise.resolve(true));
-                const mappingCommitted = mapping === 'committed' || !this.cardMappings;
-                if (!contextCommitted || !mappingCommitted) { this.scheduleReconcile('steady'); return; }
-                // reload 核对身份，原认领对象上的 CAS 负责拦住核对后的并发推进；写回也会同步 task.inbox。
-                await this.inbox!.update(acceptedInbox, { state: 'accepted', taskId: runtimeTask.id });
-              } catch (error) {
-                this.log.warn({ error, runtimeTaskId }, '任务已接收，入站接受或材料水位待后续对账');
-                this.scheduleReconcile('steady');
-              }
-            };
-          }
-        }
         // 重放只能补原准备快照；pending 已清理时保留已有 usage，不能拿当前配置补旧轮。
         const usedPromptUsage = runtimeTask.replayed ? (frozenUsage && !frozenUsage.created ? frozenUsage.usage : undefined) : promptUsage;
         if (this.workflowOptions.store) {
@@ -2181,8 +2102,11 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           this.log.warn({ error, taskId: runtimeTask.id }, '任务已接收，授权依据待对账补记');
           this.scheduleReconcile();
         });
-        // 证据属于已接受的旧 runtime task；后续写入仍只属于当前可见轮次。
+        // dispatch 期间用户可能已经重试（group.tail 在 dispatch 建立订阅后就 resolve 了）。
+        // 旧轮次不得把自己的 runtime task 写成新一轮的，否则 mapping 里的任务归属就错了。
         if (task.turn !== currentTurn) return;
+        task.runtimeTaskId = runtimeTask.id;
+        task.launcherRecoveryPending = false;
         // 重放的是早先那次派发，本轮新读的记忆没有交给 Agent，记录以那一次为准。
         if (memoryTurn && !runtimeTask.replayed) {
           await this.workflowOptions.memory!.store.recordTurn(memoryTurn.scope, { taskId: runtimeTask.id, sessionId: session.id, injected: memoryTurn.ids })
@@ -2195,21 +2119,14 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           if (steering.steered) task.steered = steering.steered;
           task.steerNote = `${task.busySupplement ? '按补充当前任务处理。' : ''}${steering.note}`;
         }
-        await this.saveCardTask(task, task.state).catch(error => {
-          this.log.error({ error, runtimeTaskId }, '任务已接收，卡片映射待重启对账');
+        const mappingCommitted = await this.saveCardTask(task, task.state).then(() => true, error => {
+          this.log.error({ error, runtimeTaskId }, '任务已接收，卡片映射待重启对账'); return false;
         });
+        const contextCommitted = await (contextCommit?.() ?? Promise.resolve()).then(() => true, error => {
+          this.log.warn({ error, runtimeTaskId }, '任务已接收，材料水位待重启对账'); return false;
+        });
+        if (task.inbox && contextCommitted && mappingCommitted) await this.inbox!.update(task.inbox, { state: 'accepted', taskId: runtimeTask.id }).catch(error => this.log.error({ error, runtimeTaskId }, '任务已接收，入站记录待重启对账'));
         if (task.turn !== currentTurn) return;
-        if (runtimeTask.replayed && terminalTaskStates.has(runtimeTask.status)) {
-          // 已完成旧轮只修复映射并交给原对账链；不重新计时、验证、修复或用现场状态另发结果。
-          settled = true;
-          active = false;
-          task.state = runtimeTask.status as LarkTaskState;
-          await this.saveCardTask(task, task.state).catch(error => this.log.warn({ error, runtimeTaskId }, '恢复终态映射待对账'));
-          await this.reconcileRun?.catch(() => undefined);
-          await this.reconcile(config, true).catch(error => this.log.warn({ error, runtimeTaskId }, '恢复终态结果对账失败'));
-          cleanup();
-          return;
-        }
         // 先提交 queued UI，再消费订阅期间缓存的 running 事件，杜绝 running→queued 闪回。
         if (runtimeTask.status === 'queued' && task.state === 'queued' && !task.steered) {
           const recovery = await describeLarkTaskRecovery(this.runtime, session.id, runtimeTask.id, 'queued', runtimeTask.queuedAhead,
