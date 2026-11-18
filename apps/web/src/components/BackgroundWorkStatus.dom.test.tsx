@@ -41,6 +41,30 @@ describe('BackgroundWorkStatus', () => {
     expect(screen.getByText(/监控 · 已停止 ·/).textContent).toContain('monitor-stopped');
   });
 
+  it.each(['__proto__', 'constructor'])('renders inherited kind %s as its original text at zero count', kind => {
+    const { container } = render(<BackgroundWorkStatus events={[status({ count: 0, tasks: [
+      { id: 'special-kind', kind, state: 'completed' }
+    ] })]}/>);
+    expect(container.querySelector('li')?.textContent).toBe(`${kind} · 已完成 · special-kind`);
+  });
+
+  it.each(['__proto__', 'constructor'])('renders inherited state %s as its original text at zero count', state => {
+    const { container } = render(<BackgroundWorkStatus events={[status({ count: 0, tasks: [
+      { id: 'special-state', kind: 'agent', state }
+    ] })]}/>);
+    expect(container.querySelector('li')?.textContent).toBe(`Agent · ${state} · special-state`);
+    expect(screen.getByRole('status').textContent).toContain('后台子任务状态');
+  });
+
+  it('uses a neutral zero-count heading when any displayed row is still running', () => {
+    render(<BackgroundWorkStatus events={[status({ count: 0, tasks: [
+      { id: 'agent-done', kind: 'agent', state: 'completed' },
+      { id: 'shell-running', kind: 'shell', state: 'running' }
+    ] })]}/>);
+    expect(screen.getByRole('status').textContent).toContain('后台子任务状态');
+    expect(screen.getByRole('status').textContent).not.toContain('后台子任务已结束');
+  });
+
   it('retains valid zero-count rows and hides snapshots with no valid rows', () => {
     const { container, rerender } = render(<BackgroundWorkStatus events={[status({ count: 0, tasks: [
       null,
@@ -120,6 +144,24 @@ describe('BackgroundWorkStatus', () => {
     expect(rowRenders).toBeGreaterThan(initialRowRenders);
     expect(screen.getByText(/命令 · 失败 ·/).textContent).toContain('shell-two');
     expect(screen.queryByText(/Agent · 已完成 ·/)).toBeNull();
+  });
+
+  it('does not read sequence fields from assistant events appended after a terminal zero-count snapshot', () => {
+    const terminal = status({ count: 0, mainTurnEnded: true, tasks: [{ id: 'agent-one', kind: 'agent', state: 'completed' }] });
+    let assistantSequenceReads = 0;
+    const assistant: DockEvent = {
+      id: 'assistant',
+      get sequence() { assistantSequenceReads++; return 2; },
+      timestamp: '',
+      type: 'text',
+      data: { role: 'assistant', text: 'unrelated' }
+    };
+    const view = render(<BackgroundWorkStatus events={[terminal]}/>);
+    expect(screen.getByRole('status').textContent).toContain('后台子任务已结束');
+
+    view.rerender(<BackgroundWorkStatus events={[terminal, assistant]}/>);
+    expect(screen.getByRole('status').textContent).toContain('后台子任务已结束');
+    expect(assistantSequenceReads).toBe(0);
   });
 
   it('does not rescan an unchanged event window on a parent rerender', () => {
