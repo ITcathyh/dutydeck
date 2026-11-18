@@ -285,6 +285,89 @@ describe('排队卡：紧排在正在执行的那一轮后面', () => {
   });
 });
 
+describe('卡片映射提交状态与入站恢复', () => {
+  it('持续读取故障跨 accepted 保存时保持 received，并用同一 Runtime task 恢复且只交付一次', async () => {
+    const h = await harness();
+    const id = 'om_mapping_persistent';
+    const prompt = '持续故障仍只执行一次';
+    const channel = `lark-card:${h.config.appId}`;
+    const realGet = h.repos.channelMappings.get.bind(h.repos.channelMappings);
+    let failReads = true;
+    const read = vi.spyOn(h.repos.channelMappings, 'get').mockImplementation(async (mappingChannel, externalId) => {
+      if (failReads && mappingChannel === channel && externalId === id) throw new Error('persistent mapping read failure');
+      return realGet(mappingChannel, externalId);
+    });
+    const resultCreations = () => [...h.service.send.mock.calls, ...h.service.reply.mock.calls]
+      .map(([input]) => input).filter(input => input.taskId === id && input.cardKind === 'result');
+    try {
+      await h.coordinator.handle(event(id, prompt), h.config);
+      await h.task(id).group.tail;
+      await vi.waitFor(() => expect(h.prompts.filter(item => item.includes(prompt))).toHaveLength(1));
+      const original = await h.runtimeTask(prompt);
+      expect(original).toMatchObject({ status: 'running' });
+      const originalId = original!.id;
+      expect(h.repos.execution.getTaskExecution(originalId)?.attempts).toHaveLength(1);
+      expect(await realGet(channel, id)).toBeUndefined();
+      expect(await h.inboxRecord(id)).toMatchObject({ state: 'received' });
+
+      // 仅重建 coordinator；Runtime 与 SQLite 沿用。原执行先完成，再恢复 mapping 读取。
+      h.coordinator.stop();
+      h.release();
+      await vi.waitFor(async () => expect((await h.runtimeTask(prompt))?.status).toBe('completed'));
+      failReads = false;
+      const recovered = await h.restart();
+      await (recovered as any).tasks.get(id)?.group.tail;
+      await vi.waitFor(async () => {
+        const mapping = await h.repos.channelMappings.get(channel, id);
+        expect(JSON.parse(mapping!.extra!)).toMatchObject({ runtime_task_id: originalId, final_delivery_state: 'delivered' });
+        expect(await h.inboxRecord(id)).toMatchObject({ state: 'accepted', taskId: originalId });
+      });
+      expect(h.prompts.filter(item => item.includes(prompt))).toHaveLength(1);
+      expect(h.repos.execution.getTaskExecution(originalId)?.attempts).toHaveLength(1);
+      expect(resultCreations()).toHaveLength(1);
+
+      await (recovered as any).reconcile(h.config);
+      expect(resultCreations()).toHaveLength(1);
+      const mapping = await h.repos.channelMappings.get(channel, id);
+      expect(JSON.parse(mapping!.extra!)).toMatchObject({ runtime_task_id: originalId, final_delivery_state: 'delivered' });
+    } finally {
+      failReads = false;
+      h.release();
+      read.mockRestore();
+    }
+  });
+
+  it('派发前单次瞬时读取故障由 accepted 保存自愈，不新增 send 或 Attempt', async () => {
+    const h = await harness();
+    const id = 'om_mapping_transient';
+    const prompt = '单次故障可以自愈';
+    const channel = `lark-card:${h.config.appId}`;
+    const realGet = h.repos.channelMappings.get.bind(h.repos.channelMappings);
+    let failOnce = true;
+    const read = vi.spyOn(h.repos.channelMappings, 'get').mockImplementation(async (mappingChannel, externalId) => {
+      if (failOnce && mappingChannel === channel && externalId === id) {
+        failOnce = false;
+        throw new Error('transient mapping read failure');
+      }
+      return realGet(mappingChannel, externalId);
+    });
+    try {
+      await h.coordinator.handle(event(id, prompt), h.config);
+      await h.task(id).group.tail;
+      await vi.waitFor(() => expect(h.prompts.filter(item => item.includes(prompt))).toHaveLength(1));
+      const original = await h.runtimeTask(prompt);
+      expect(failOnce).toBe(false);
+      expect(await h.inboxRecord(id)).toMatchObject({ state: 'accepted', taskId: original!.id });
+      const mapping = await h.repos.channelMappings.get(channel, id);
+      expect(JSON.parse(mapping!.extra!)).toMatchObject({ runtime_task_id: original!.id });
+      expect(h.repos.execution.getTaskExecution(original!.id)?.attempts).toHaveLength(1);
+    } finally {
+      h.release();
+      read.mockRestore();
+    }
+  });
+});
+
 describe('排队卡：当前这一轮被审批挡住', () => {
   const waitApproval = async (h: Awaited<ReturnType<typeof harness>>) => vi.waitFor(async () => {
     const record = (await h.interactions()).find(item => item.kind === 'permission' && item.state === 'pending' && item.cardId);

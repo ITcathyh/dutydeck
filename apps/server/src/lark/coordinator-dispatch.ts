@@ -2119,7 +2119,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           if (steering.steered) task.steered = steering.steered;
           task.steerNote = `${task.busySupplement ? '按补充当前任务处理。' : ''}${steering.note}`;
         }
-        const mappingCommitted = await this.saveCardTask(task, task.state).then(() => true, error => {
+        const mappingCommitted = await this.saveCardTask(task, task.state).then(result => result === 'committed', error => {
           this.log.error({ error, runtimeTaskId }, '任务已接收，卡片映射待重启对账'); return false;
         });
         const contextCommitted = await (contextCommit?.() ?? Promise.resolve()).then(() => true, error => {
