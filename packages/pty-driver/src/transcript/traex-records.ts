@@ -43,31 +43,6 @@ export function traexEntries(entry: any, threadId?: string): any[] {
   return entries;
 }
 
-const TRAEX_TURN_METADATA = 'internal_chat_message_metadata_passthrough';
-const hasOwn = (value: any, key: string) => value !== null && typeof value === 'object'
-  && Object.prototype.hasOwnProperty.call(value, key);
-
-/** Validate and normalize the effective turn before live receipts or projection.
- * The source entry remains untouched; stateless legacy mapping keeps its contract. */
-export function adaptTraexLiveEntries(entry: any, threadId?: string): any[] {
-  const inheritedMetadata = hasOwn(entry?.payload, TRAEX_TURN_METADATA)
-    ? entry.payload[TRAEX_TURN_METADATA] : undefined;
-  const carryMetadata = entry?.type === 'history_mutation' && hasOwn(entry?.payload, TRAEX_TURN_METADATA);
-  return traexEntries(entry, threadId).flatMap(record => {
-    const source = carryMetadata && !hasOwn(record?.payload, TRAEX_TURN_METADATA)
-      ? { ...record, payload: { ...record.payload, [TRAEX_TURN_METADATA]: inheritedMetadata } } : record;
-    const p = source?.payload;
-    if (!hasOwn(p, TRAEX_TURN_METADATA)) return [source];
-    const metadata = p[TRAEX_TURN_METADATA];
-    if (metadata === null || typeof metadata !== 'object' || Array.isArray(metadata)) return [];
-    const nested = metadata.turn_id;
-    if (typeof nested !== 'string' || !nested) return [];
-    const top = typeof p.turn_id === 'string' && p.turn_id ? p.turn_id : undefined;
-    if (top && top !== nested) return [];
-    return [top === nested ? source : { ...source, payload: { ...p, turn_id: nested } }];
-  });
-}
-
 export function mapTraexRecord(entry: any): NormalizedDriverEvent[] | undefined {
   const shared = mapCodexEntry(entry);
   if (shared) return shared;
