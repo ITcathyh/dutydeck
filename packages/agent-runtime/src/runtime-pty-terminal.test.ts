@@ -145,3 +145,30 @@ it.each(['codex', 'traex'] as const)('%s waits for physical cancellation proof b
   appendFileSync(h.path, line(record('task_complete', h.turn(), { last_agent_message: 'written' })));
   expect((await next.pending).status).toBe('completed');
 });
+
+it('traex does not let an old nested reply become the Runtime result or settle an Attempt without the current terminal', async () => {
+  const h = await fixture('traex'), { pending } = await h.send();
+  const nested = (payload: Record<string, unknown>, turnId: string) => ({ type: 'response_item', payload: {
+    ...payload, internal_chat_message_metadata_passthrough: { turn_id: turnId } } });
+  appendFileSync(h.path, line(nested({ type: 'reasoning', summary: [{ type: 'summary_text', text: 'current thinking' }] }, h.turn())));
+  await vi.waitFor(async () => expect((await h.runtime.getEvents(h.session.id))
+    .some(event => event.type === 'thinking' && (event.data as any)?.text === 'current thinking')).toBe(true));
+  expect((await h.runtime.getTasks(h.session.id)).at(-1)?.status).toBe('running');
+  appendFileSync(h.path, line(nested({ type: 'message', role: 'assistant', id: 'current-reply', phase: 'final',
+    content: [{ type: 'output_text', text: 'current answer' }] }, h.turn()))
+    + line(nested({ type: 'message', role: 'assistant', id: 'old-reply',
+      content: [{ type: 'output_text', text: 'old answer' }] }, 'old-turn')));
+  h.paint('current answer\n❯ Ask TraeCode CLI\nContext 100% left');
+  await vi.waitFor(async () => expect((await h.runtime.getEvents(h.session.id))
+    .some(event => event.type === 'text' && (event.data as any)?.text === 'current answer')).toBe(true));
+  appendFileSync(h.path, line(record('task_complete', h.turn(), { last_agent_message: '' })));
+  const task = await pending;
+  expect(task.status).toBe('completed');
+  expect(h.writes).toHaveLength(1);
+  expect(h.repos.execution.getTaskExecution(task.id)?.attempts).toHaveLength(1);
+  expect(h.repos.execution.getTaskExecution(task.id)?.currentAttempt).toMatchObject({ state: 'settled', outcome: 'completed' });
+  const events = await h.runtime.getEvents(h.session.id);
+  expect(events.filter(event => event.type === 'text' && (event.data as any)?.role !== 'user')
+    .map(event => (event.data as any)?.text)).toEqual(['current answer']);
+  expect(events.filter(event => event.type === 'completed')).toHaveLength(1);
+});

@@ -106,3 +106,72 @@ it('retains the same text and item ID when they belong to a different native tur
   }
   expect(h.events.filter(e => e.type === 'text').map(e => e.data.text)).toEqual(['answer', 'answer']);
 });
+
+const nested = (entry: any, metadata: unknown) => ({ ...entry, payload: { ...entry.payload,
+  internal_chat_message_metadata_passthrough: metadata } });
+const reasoning = (text: string, turnId?: string) => ({ type: 'response_item', payload: {
+  type: 'reasoning', ...(turnId === undefined ? {} : { turn_id: turnId }), summary: [{ type: 'summary_text', text }] } });
+const directUser = (turnId?: string) => ({ type: 'event_msg', payload: { type: 'user_message',
+  ...(turnId === undefined ? {} : { turn_id: turnId }), message: 'question' } });
+
+it('validates every live output shape before NativeTurn and message/tool projection', async () => {
+  const h = await fixture(); const receipt = h.source.waitForInput('question', new AbortController().signal);
+  appendFileSync(h.path, line({ type: 'event_msg', payload: { type: 'task_started', turn_id: turn } }) + line(directUser(turn)));
+  await h.source.flush(); await receipt;
+  const records = [
+    nested(reasoning('nested current', ''), { turn_id: turn }),
+    nested(reasoning('matching current', turn), { turn_id: turn }),
+    nested(reasoning('nested old'), { turn_id: 'old-turn' }),
+    reasoning('legacy current', turn), reasoning('legacy old', 'old-turn'),
+    nested(reasoning('conflicting', turn), { turn_id: 'old-turn' }),
+    ...[{}, { turn_id: '' }, { turn_id: 7 }, null, []].map((metadata, index) => nested(reasoning(`invalid ${index}`, turn), metadata)),
+    reasoning('legacy without id'),
+  ];
+  appendFileSync(h.path, records.map(line).join('')); await h.source.flush();
+  expect(h.events.filter(e => e.type === 'thinking').map(e => e.data.text)).toEqual([
+    'nested current', 'matching current', 'legacy current', 'legacy without id',
+  ]);
+});
+
+it('does not promote an old nested phase-less reply at the current terminal', async () => {
+  const h = await fixture(); const receipt = h.source.waitForInput('question', new AbortController().signal);
+  const oldReply = nested({ type: 'response_item', payload: { type: 'message', role: 'assistant', id: 'old-message',
+    content: [{ type: 'output_text', text: 'old answer' }] } }, { turn_id: 'old-turn' });
+  appendFileSync(h.path, line({ type: 'event_msg', payload: { type: 'task_started', turn_id: turn } }) + line(directUser(turn))
+    + line(oldReply) + line(terminal()));
+  await h.source.flush(); await receipt;
+  expect(h.events.filter(e => e.type === 'text')).toEqual([]);
+  expect(h.source.hasTurnTerminal()).toBe(true);
+});
+
+it('keeps restore baseline candidates out of live ownership and rejected tool deduplication', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dd-canonical-restore-')); dirs.push(dir);
+  const path = join(dir, 'rollout.jsonl');
+  writeFileSync(path, line({ type: 'session_meta', payload: { id: thread } })
+    + line({ type: 'event_msg', payload: { type: 'task_started', turn_id: 'old-turn' } }));
+  const original = new TraexTranscriptTailer({ cwd: dir, transcriptPath: path }); sources.push(original);
+  await original.flush(); const cursor = original.checkpoint(); original.stop();
+  const restored = new TraexTranscriptTailer({ cwd: dir, transcriptPath: path }); sources.push(restored);
+  const events: NormalizedDriverEvent[] = []; restored.onEvent(e => events.push(e)); restored.restore(cursor);
+  const tool = (marker: string) => ({ type: 'response_item', payload: { type: 'function_call', call_id: 'reused-after-restore',
+    name: 'exec_command', arguments: JSON.stringify({ cmd: marker }) } });
+  appendFileSync(path, line(nested(reasoning('old thinking'), { turn_id: 'old-turn' }))
+    + line(nested(tool('old'), { turn_id: 'old-turn' }))
+    + line(nested({ type: 'response_item', payload: { type: 'message', role: 'assistant', id: 'old-reply',
+      content: [{ type: 'output_text', text: 'old final' }] } }, { turn_id: 'old-turn' })));
+  await restored.flush();
+  expect(events).toEqual([]);
+  const receipt = restored.waitForInput('question', new AbortController().signal);
+  const currentReply = nested({ type: 'response_item', payload: { type: 'message', role: 'assistant', id: 'current-reply', phase: 'final',
+    content: [{ type: 'output_text', text: 'current answer' }] } }, { turn_id: turn });
+  appendFileSync(path, line({ type: 'event_msg', payload: { type: 'task_started', turn_id: turn } }) + line(directUser(turn))
+    + line(nested(reasoning('current thinking'), { turn_id: turn })) + line(nested(tool('current'), { turn_id: turn }))
+    + line(currentReply) + line(terminal({ last_agent_message: 'current answer' })));
+  await restored.flush(); await receipt;
+  expect(events.filter(e => e.type === 'thinking').map(e => e.data.text)).toEqual(['current thinking']);
+  expect(events.filter(e => e.type === 'tool_call').map(e => e.data)).toEqual([
+    expect.objectContaining({ id: 'reused-after-restore', input: { cmd: 'current' } }),
+  ]);
+  expect(events.filter(e => e.type === 'text').map(e => e.data.text)).toEqual(['current answer']);
+  expect(restored.hasTurnTerminal()).toBe(true);
+});

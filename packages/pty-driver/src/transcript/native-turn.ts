@@ -6,6 +6,7 @@ import { codexInputText, normalizeInputText } from './input-receipt.js';
 export class NativeTurn {
   constructor(private readonly codexCapacity = false) {}
   private candidate?: string;
+  private liveCandidate?: string;
   private required = false;
   private turn?: string;
   private input?: any;
@@ -19,7 +20,7 @@ export class NativeTurn {
 
   reset(): void {
     this.detach?.(); this.detach = undefined;
-    this.candidate = this.turn = this.input = undefined; this.required = false;
+    this.candidate = this.liveCandidate = this.turn = this.input = undefined; this.required = false;
     this.scoped = this.recovering = this.recoveredInput = this.terminal = this.cancelled = false;
     this.error = undefined;
   }
@@ -38,6 +39,7 @@ export class NativeTurn {
     this.detach?.(); this.detach = undefined;
     this.input = entry; this.scoped = true; this.required = true; this.recovering = false;
     this.turn = entry.payload?.turn_id ?? this.candidate;
+    this.liveCandidate = this.turn;
     this.error = undefined; this.cancelled = this.terminal = false;
   }
   observe(entry: any, baseline = false): boolean {
@@ -45,6 +47,7 @@ export class NativeTurn {
     const id = typeof p?.turn_id === 'string' && p.turn_id ? p.turn_id : undefined;
     if (entry?.type === 'event_msg' && (p?.type === 'task_started' || p?.type === 'turn_started')) {
       this.candidate = id;
+      if (!baseline) this.liveCandidate = id;
       if (this.scoped && !this.turn && !this.terminal) this.turn = id;
     }
     const input = codexInputText(entry);
@@ -66,6 +69,7 @@ export class NativeTurn {
       if (!id || id !== this.turn) return false;
       if (this.terminal) return true;
       this.terminal = true;
+      if (this.liveCandidate === id) this.liveCandidate = undefined;
       if (p.type === 'turn_aborted') this.cancelled = true;
       else {
         this.error ??= nativeTaskError(p.error, this.codexCapacity);
@@ -75,6 +79,8 @@ export class NativeTurn {
     return true;
   }
   activeTurnId(): string | undefined { return this.scoped && !this.terminal ? this.turn : undefined; }
+  /** Only a live start or binding establishes this anchor; baseline candidates do not. */
+  liveTurnId(): string | undefined { return this.scoped && !this.terminal ? this.turn : this.liveCandidate; }
   requiresBinding(): boolean { return this.required; }
   hasRecoveredInput(): boolean { return this.recoveredInput && this.scoped; }
   hasTerminal(): boolean { return this.terminal; }

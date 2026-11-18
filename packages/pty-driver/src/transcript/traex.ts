@@ -10,7 +10,7 @@ import { CodexToolProjection } from './codex-tools.js';
 import { NativeTurn } from './native-turn.js';
 import { traexInputMatches, traexInputText } from './input-receipt.js';
 import { nextTraexSegment, traexSegments } from './traex-segments.js';
-import { mapTraexRecord, traexEntries, TraexMessageProjection } from './traex-records.js';
+import { adaptTraexLiveEntries, mapTraexRecord, traexEntries, TraexMessageProjection } from './traex-records.js';
 
 export function resolveTraexRolloutPath(cwd?: string, env?: CliPathEnv, sessionId?: string): string | undefined {
   const root = traeSessionsRoot(env);
@@ -38,6 +38,18 @@ export interface TraexTranscriptTailerOptions {
   env?: CliPathEnv;
 }
 
+function allowsTraexLiveRecord(record: any, currentTurn: string | undefined): boolean {
+  const p = record?.payload;
+  const id = typeof p?.turn_id === 'string' && p.turn_id ? p.turn_id : undefined;
+  if (record?.type === 'event_msg' && (p?.type === 'task_started' || p?.type === 'turn_started')) return true;
+  const input = traexInputText(record) !== undefined;
+  const terminal = record?.type === 'event_msg' && (p?.type === 'task_complete' || p?.type === 'turn_aborted');
+  const nested = p !== null && typeof p === 'object'
+    && Object.prototype.hasOwnProperty.call(p, 'internal_chat_message_metadata_passthrough');
+  if (nested && !input && !terminal) return currentTurn !== undefined && id === currentTurn;
+  return !(currentTurn && id && id !== currentTurn);
+}
+
 export class TraexTranscriptTailer implements TranscriptEventSource {
   readonly requiresTurnTerminal = true;
   private readonly tailer: JsonlTailer;
@@ -52,6 +64,10 @@ export class TraexTranscriptTailer implements TranscriptEventSource {
     if (opts.sessionId) this.inputReceipt = new CodexInputReceipt(traeHistoryPath(opts.env), nativeId, text => this.turn.bindHistory(text));
     const messages = new TraexMessageProjection();
     const projection = new CodexToolProjection(entry => messages.map(entry));
+    const liveEntries = (entry: any) => entry?.type === 'history_mutation' && !nativeId()
+      ? [] : adaptTraexLiveEntries(entry, nativeId());
+    const liveInput = (entry: any) => liveEntries(entry).find(record =>
+      traexInputText(record) !== undefined && allowsTraexLiveRecord(record, this.turn.liveTurnId()));
     const root = traeSessionsRoot(opts.env);
     const explicit = opts.transcriptPath;
     this.tailer = new JsonlTailer({
@@ -66,7 +82,8 @@ export class TraexTranscriptTailer implements TranscriptEventSource {
         // native thread is known. The metadata is read during baselining too.
         if (entry?.type === 'history_mutation' && !nativeId()) return undefined;
         const result: NormalizedDriverEvent[] = [];
-        for (const record of traexEntries(entry, nativeId())) {
+        for (const record of liveEntries(entry)) {
+          if (!baseline && !allowsTraexLiveRecord(record, this.turn.liveTurnId())) continue;
           const bound = this.turn.observe(record, baseline);
           if (!baseline && this.turn.requiresBinding() && !bound) continue;
           result.push(...(projection.map(record)?.filter(event => event.type !== 'error') ?? []));
@@ -74,9 +91,12 @@ export class TraexTranscriptTailer implements TranscriptEventSource {
         return result.length ? result : undefined;
       },
       resetMapping: () => { projection.reset(); messages.reset(); this.turn.reset(); },
-      inputText: entry => entry?.type === 'history_mutation' && !nativeId() ? undefined : traexInputText(entry, nativeId()),
+      inputText: entry => {
+        const input = liveInput(entry);
+        return input ? traexInputText(input) : undefined;
+      },
       onInputReceipt: entry => {
-        const input = traexEntries(entry, nativeId()).find(record => traexInputText(record) !== undefined);
+        const input = liveInput(entry);
         if (input) this.turn.bind(input);
       },
       deduplicateTools: true,
