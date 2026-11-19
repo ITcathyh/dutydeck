@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 292" width="1000" height="292" role="img" aria-label="Leader mode: you post a request in a group thread and the front agent hands it to the Leader; the Leader splits it into 3 steps per its guide and, after you click Start, assigns Workers A and B; the Leader answers Worker B's question from the guide, while a migration command that hits a high-risk rule is escalated to you; the Leader accepts the work and the result lands in the original thread">
+<defs>
+<linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#120f24"/><stop offset="1" stop-color="#0a1020"/></linearGradient>
+<linearGradient id="lead" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#3b1a7a"/><stop offset="1" stop-color="#1e1b4b"/></linearGradient>
+<filter id="glow" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="5"/></filter>
+<clipPath id="frame"><rect width="1000" height="292" rx="20"/></clipPath>
+<filter id="edge-blur" x="-5%" y="-5%" width="110%" height="110%"><feGaussianBlur stdDeviation="6"/></filter>
+<style>
+text{white-space:pre}
+.s{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif}
+.m{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono','Noto Sans Mono CJK SC',monospace}
+.pulse{transform-box:fill-box;transform-origin:center;animation:pulse 2.4s ease-in-out infinite}
+@keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.3)}}
+@media (prefers-reduced-motion:reduce){*{animation:none!important}}
+.hl0{opacity:0;animation:hl0 10s ease-in-out infinite}
+@keyframes hl0{0%,0%{opacity:0}3%,22%{opacity:1}26%,100%{opacity:0}}
+.hl1{opacity:0;animation:hl1 10s ease-in-out infinite}
+@keyframes hl1{0%,24%{opacity:0}28%,47%{opacity:1}51%,100%{opacity:0}}
+.hl2{opacity:0;animation:hl2 10s ease-in-out infinite}
+@keyframes hl2{0%,49%{opacity:0}53%,72%{opacity:1}76%,100%{opacity:0}}
+.hl3{opacity:0;animation:hl3 10s ease-in-out infinite}
+@keyframes hl3{0%,74%{opacity:0}78%,97%{opacity:1}100%,100%{opacity:0}}
+.dot{animation:dot 1.6s linear infinite}
+@keyframes dot{0%{transform:translateX(0);opacity:0}15%{opacity:1}85%{opacity:1}100%{transform:translateX(30px);opacity:0}}
+.wire{animation:dash 1.2s linear infinite}
+@keyframes dash{to{stroke-dashoffset:-20}}
+</style>
+</defs>
+<rect width="1000" height="292" rx="20" fill="url(#bg)"/>
+<g clip-path="url(#frame)"><rect x="1" y="1" width="998" height="290" rx="20" fill="none" stroke="#a78bfa" stroke-opacity=".35" stroke-width="8" filter="url(#edge-blur)"/></g>
+<rect x=".5" y=".5" width="999" height="291" rx="19.5" fill="none" stroke="#ffffff1f"/>
+<text class="s" x="30" y="32" font-size="12" font-weight="700" fill="#a9a6d6">1 · Dispatch</text>
+<text class="s" x="276" y="32" font-size="12" font-weight="700" fill="#a9a6d6">2 · Leader plans</text>
+<text class="s" x="522" y="32" font-size="12" font-weight="700" fill="#a9a6d6">3 · Workers build</text>
+<text class="s" x="768" y="32" font-size="12" font-weight="700" fill="#a9a6d6">4 · Review &amp; escalate</text>
+<g class="hl0"><rect x="25" y="45" width="212" height="222" rx="13" fill="none" stroke="#a78bfa" stroke-width="4" filter="url(#glow)"/><rect x="26.5" y="46.5" width="209" height="219" rx="11.5" fill="none" stroke="#c4b5fd" stroke-width="1.5"/></g>
+<g class="hl1"><rect x="271" y="45" width="212" height="222" rx="13" fill="none" stroke="#a78bfa" stroke-width="4" filter="url(#glow)"/><rect x="272.5" y="46.5" width="209" height="219" rx="11.5" fill="none" stroke="#c4b5fd" stroke-width="1.5"/></g>
+<g class="hl2"><rect x="517" y="45" width="212" height="222" rx="13" fill="none" stroke="#a78bfa" stroke-width="4" filter="url(#glow)"/><rect x="518.5" y="46.5" width="209" height="219" rx="11.5" fill="none" stroke="#c4b5fd" stroke-width="1.5"/></g>
+<g class="hl3"><rect x="763" y="45" width="212" height="222" rx="13" fill="none" stroke="#a78bfa" stroke-width="4" filter="url(#glow)"/><rect x="764.5" y="46.5" width="209" height="219" rx="11.5" fill="none" stroke="#c4b5fd" stroke-width="1.5"/></g>
+<rect x="28" y="48" width="206" height="216" rx="10" fill="#fff"/>
+<path d="M38 48h186a10 10 0 0 1 10 10v32H28V58a10 10 0 0 1 10-10z" fill="#3370ff"/>
+<text class="s" x="40" y="69" font-size="13" font-weight="700" fill="#fff">Group thread</text>
+<text class="s" x="40" y="84" font-size="10.5" font-weight="400" fill="#ffffffcc">You · just now</text>
+<text class="s" x="40" y="112" font-size="11.5" font-weight="400" fill="#1f2329">@bot Store order amounts</text>
+<text class="s" x="40" y="130" font-size="11.5" font-weight="400" fill="#1f2329">in cents; add a migration</text>
+<text class="s" x="40" y="148" font-size="11.5" font-weight="400" fill="#1f2329">and tests, staging first</text>
+<line x1="40" y1="170" x2="222" y2="170" stroke="#e5e6eb"/>
+<text class="s" x="40" y="190" font-size="10.5" font-weight="400" fill="#8f959e">Front agent</text>
+<text class="s" x="40" y="208" font-size="11.5" font-weight="600" fill="#3370ff">→ Hand off to the Leader</text>
+<rect x="40" y="226" width="182" height="24" rx="6" fill="#f5f3ff" stroke="#c4b5fd"/>
+<text class="s" x="50" y="242" font-size="10.5" fill="#7c3aed">guide <tspan class="m" font-weight="600">leader-guide/leader</tspan></text>
+<rect x="274" y="48" width="206" height="216" rx="10" fill="url(#lead)" stroke="#a78bfa" stroke-opacity=".7"/>
+<g transform="translate(286 58)"><circle cx="11" cy="11" r="10" fill="none" stroke="#c4b5fd" stroke-width="2"/><path d="M15 7l-2.5 5.5L7 15l2.5-5.5z" fill="#c4b5fd"/></g>
+<text class="s" x="314" y="70" font-size="14" font-weight="700" fill="#f5f3ff">Leader</text>
+<text class="s" x="314" y="86" font-size="10.5" font-weight="400" fill="#c4b5fd">Judges only, edits nothing</text>
+<line x1="274" y1="100" x2="480" y2="100" stroke="#ffffff1f"/>
+<circle cx="294" cy="120" r="8" fill="#7c3aed"/>
+<text class="s" x="294" y="124" font-size="10" font-weight="700" fill="#fff" text-anchor="middle">1</text>
+<text class="s" x="308" y="124" font-size="11.5" font-weight="400" fill="#ede9fe">Amounts in cents</text>
+<rect x="446" y="111" width="22" height="18" rx="5" fill="#60a5fa26" stroke="#60a5fa"/>
+<text class="s" x="457" y="124" font-size="10.5" font-weight="700" fill="#60a5fa" text-anchor="middle">A</text>
+<circle cx="294" cy="146" r="8" fill="#7c3aed"/>
+<text class="s" x="294" y="150" font-size="10" font-weight="700" fill="#fff" text-anchor="middle">2</text>
+<text class="s" x="308" y="150" font-size="11.5" font-weight="400" fill="#ede9fe">Migration + backfill</text>
+<rect x="446" y="137" width="22" height="18" rx="5" fill="#f59e0b26" stroke="#f59e0b"/>
+<text class="s" x="457" y="150" font-size="10.5" font-weight="700" fill="#f59e0b" text-anchor="middle">B</text>
+<circle cx="294" cy="172" r="8" fill="#7c3aed"/>
+<text class="s" x="294" y="176" font-size="10" font-weight="700" fill="#fff" text-anchor="middle">3</text>
+<text class="s" x="308" y="176" font-size="11.5" font-weight="400" fill="#ede9fe">Add unit tests</text>
+<rect x="446" y="163" width="22" height="18" rx="5" fill="#60a5fa26" stroke="#60a5fa"/>
+<text class="s" x="457" y="176" font-size="10.5" font-weight="700" fill="#60a5fa" text-anchor="middle">A</text>
+<rect x="286" y="198" width="50" height="24" rx="6" fill="#3370ff"/>
+<text class="s" x="311.0" y="214" font-size="11" font-weight="700" fill="#fff" text-anchor="middle">Start</text>
+<text class="s" x="344" y="214" font-size="10.5" font-weight="400" fill="#a9a6d6">Required in groups</text>
+<text class="s" x="286" y="246" font-size="10.5" font-weight="400" fill="#c4b5fd">Worker asks go to it first</text>
+<rect x="520" y="48" width="206" height="104" rx="10" fill="#0d1117" stroke="#30363d"/>
+<circle cx="536" cy="66" r="4" fill="#f59e0b"/>
+<text class="s" x="546" y="70" font-size="12.5" font-weight="700" fill="#e6edf3">Worker B</text>
+<text class="s" x="714" y="70" font-size="10.5" font-weight="400" fill="#8b949e" text-anchor="end">Claude Code</text>
+<rect x="532" y="80" width="182" height="22" rx="6" fill="#ffffff0f" stroke="#ffffff1a"/>
+<text class="s" x="540" y="95" font-size="11" font-weight="400" fill="#e6edf3">Q: Backfill old rows?</text>
+<text class="s" x="532" y="122" font-size="11.5" font-weight="600" fill="#c4b5fd">↳ Leader: yes, backfill</text>
+<text class="s" x="544" y="140" font-size="10.5" font-weight="400" fill="#8b949e">Basis: the Leader guide</text>
+<rect x="520" y="160" width="206" height="104" rx="10" fill="#0d1117" stroke="#30363d"/>
+<circle class="pulse" cx="536" cy="178" r="4" fill="#60a5fa"/>
+<text class="s" x="546" y="182" font-size="12.5" font-weight="700" fill="#e6edf3">Worker A</text>
+<text class="s" x="714" y="182" font-size="10.5" font-weight="400" fill="#8b949e" text-anchor="end">Codex</text>
+<text class="s" x="532" y="206" font-size="11.5" font-weight="400" fill="#e6edf3">Edit src/order.ts</text>
+<text class="s" x="714" y="206" font-size="11" font-weight="700" fill="#3fb950" text-anchor="end">+24<tspan fill="#f85149"> −9</tspan></text>
+<text class="s" x="532" y="228" font-size="11.5" font-weight="400" fill="#e6edf3">Add order.test.ts</text>
+<text class="s" x="714" y="228" font-size="11" font-weight="700" fill="#3fb950" text-anchor="end">+52</text>
+<text class="s" x="532" y="252" font-size="11.5" font-weight="600" fill="#3fb950">✓ pnpm test passed</text>
+<rect x="766" y="48" width="206" height="104" rx="10" fill="#fff"/>
+<path d="M776 48h186a10 10 0 0 1 10 10v16H766V58a10 10 0 0 1 10-10z" fill="#ff8800"/>
+<text class="s" x="778" y="66" font-size="13" font-weight="700" fill="#fff">Your call</text>
+<text class="s" x="778" y="92" font-size="11.5" font-weight="400" fill="#1f2329">Worker B wants to migrate</text>
+<text class="s" x="778" y="109" font-size="10.5" font-weight="400" fill="#8f959e">High-risk: Leader won’t approve</text>
+<rect x="778" y="118" width="66" height="22" rx="5" fill="#3370ff"/>
+<text class="s" x="811.0" y="133" font-size="11" font-weight="600" fill="#fff" text-anchor="middle">Allow once</text>
+<rect x="850" y="118" width="46" height="22" rx="5" fill="#fff" stroke="#d0d3d6"/>
+<text class="s" x="873.0" y="133" font-size="11" font-weight="400" fill="#1f2329" text-anchor="middle">Reject</text>
+<rect x="766" y="160" width="206" height="104" rx="10" fill="#fff"/>
+<path d="M776 160h186a10 10 0 0 1 10 10v16H766V170a10 10 0 0 1 10-10z" fill="#2ea121"/>
+<path transform="translate(778 165) scale(.7)" d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18z M8 12.5l3 3 5-6" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+<text class="s" x="798" y="178" font-size="13" font-weight="700" fill="#fff">Accepted</text>
+<text class="s" x="778" y="204" font-size="11.5" font-weight="600" fill="#1f2329">Leader decided 1 for you</text>
+<text class="s" x="778" y="222" font-size="10.5" font-weight="400" fill="#646a73">Backfill → yes · per guide</text>
+<rect x="778" y="234" width="182" height="22" rx="6" fill="#f0fbef" stroke="#b7e4b0"/>
+<text class="s" x="869" y="249" font-size="10.5" font-weight="600" fill="#2ea121" text-anchor="middle">0/2 repair rounds · in thread</text>
+<path d="M239 156H263" stroke="#7c3aed66" stroke-width="2"/><path class="wire" d="M239 156H263" stroke="#c4b5fd" stroke-width="2" stroke-dasharray="3 7"/><path d="M261 151l6 5-6 5" fill="none" stroke="#c4b5fd" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle class="dot" cx="239" cy="156" r="3.5" fill="#ede9fe"/>
+<path d="M485 102H509" stroke="#7c3aed66" stroke-width="2"/><path class="wire" d="M485 102H509" stroke="#c4b5fd" stroke-width="2" stroke-dasharray="3 7"/><path d="M507 97l6 5-6 5" fill="none" stroke="#c4b5fd" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle class="dot" cx="485" cy="102" r="3.5" fill="#ede9fe"/>
+<path d="M731 102H755" stroke="#7c3aed66" stroke-width="2"/><path class="wire" d="M731 102H755" stroke="#c4b5fd" stroke-width="2" stroke-dasharray="3 7"/><path d="M753 97l6 5-6 5" fill="none" stroke="#c4b5fd" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle class="dot" cx="731" cy="102" r="3.5" fill="#ede9fe"/>
+<path d="M485 210H509" stroke="#7c3aed66" stroke-width="2"/><path class="wire" d="M485 210H509" stroke="#c4b5fd" stroke-width="2" stroke-dasharray="3 7"/><path d="M507 205l6 5-6 5" fill="none" stroke="#c4b5fd" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle class="dot" cx="485" cy="210" r="3.5" fill="#ede9fe"/>
+<path d="M731 210H755" stroke="#7c3aed66" stroke-width="2"/><path class="wire" d="M731 210H755" stroke="#c4b5fd" stroke-width="2" stroke-dasharray="3 7"/><path d="M753 205l6 5-6 5" fill="none" stroke="#c4b5fd" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle class="dot" cx="731" cy="210" r="3.5" fill="#ede9fe"/>
+</svg>
