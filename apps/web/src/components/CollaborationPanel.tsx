@@ -45,7 +45,7 @@ import {
   Textarea
 } from './primitives';
 import { GroupDutySettings } from './GroupDutySettings';
-import { isImeComposing } from '../ime';
+import { imeCompositionHandlers, isImeKey } from '../ime';
 
 export type CollaborationPanelProps = {
   appId: string;
@@ -1247,8 +1247,9 @@ function CollaborationPanelInner({ appId, chatId, groupName, botName }: Collabor
                     value={newStepInput}
                     onChange={e => setNewStepInput(e.target.value)}
                     placeholder="输入步骤后回车或点添加"
+                    {...imeCompositionHandlers}
                     onKeyDown={e => {
-                      if (e.key === 'Enter' && !isImeComposing(e) && newStepInput.trim() && !isFollowupFormFrozen) {
+                      if (e.key === 'Enter' && !isImeKey(e) && newStepInput.trim() && !isFollowupFormFrozen) {
                         e.preventDefault();
                         setNewFollowupSteps([...newFollowupSteps, newStepInput.trim()]);
                         setNewStepInput('');

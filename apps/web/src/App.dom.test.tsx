@@ -1420,6 +1420,48 @@ describe('App pending composer mutations', () => {
     await userEvent.click(screen.getByRole('button', { name: '引用' }));
   }
 
+  it.each([true, false])('restores the queued text and file only after successful cancellation (%s)', async success => {
+    setup();
+    const queued = { ...queuedTask('q1'), prompt: '/file /tmp/source notes.md\n\n修正第一段' };
+    let resolve!: (value: Awaited<ReturnType<typeof api.cancelQueued>>) => void;
+    let reject!: (error: Error) => void;
+    const cancel = vi.spyOn(api, 'cancelQueued').mockImplementation(() => new Promise((done, fail) => { resolve = done; reject = fail; }));
+    const send = vi.spyOn(api, 'send').mockResolvedValue({ accepted: true, task: queuedTask('edited') });
+    const { client } = renderApp();
+    const input = await screen.findByRole<HTMLTextAreaElement>('textbox', { name: '消息' });
+    await addFile('/tmp/current.md');
+    fireEvent.change(input, { target: { value: '正在写的草稿' } });
+    vi.mocked(api.tasks).mockResolvedValue([queued]);
+    act(() => client.setQueryData(['tasks', 's1'], [queued]));
+    await userEvent.click(await screen.findByRole('button', { name: '编辑' }));
+    await waitFor(() => expect(cancel).toHaveBeenCalledWith('s1', 'q1'));
+    expect(input.value).toBe('正在写的草稿');
+    expect(screen.queryByRole('button', { name: '移除引用 source notes.md' })).toBeNull();
+    fireEvent.change(input, { target: { value: '等待期间又写了几句' } });
+    if (success) {
+      const cancelled = { ...queued, status: 'cancelled' };
+      vi.mocked(api.tasks).mockResolvedValue([cancelled]);
+      await act(async () => resolve(cancelled));
+      await waitFor(() => expect(document.activeElement).toBe(input));
+      expect(input.value).toBe('等待期间又写了几句\n\n修正第一段');
+      expect(input.selectionStart).toBe(input.value.length);
+      expect(screen.getByRole('button', { name: '移除引用 source notes.md' })).toBeTruthy();
+      expect(screen.queryByRole('button', { name: '编辑' })).toBeNull();
+    } else {
+      await act(async () => reject(new Error('这条指令已经开始执行')));
+      expect(await screen.findByText('取消待执行指令失败')).toBeTruthy();
+      expect(input.value).toBe('等待期间又写了几句');
+      expect(screen.queryByRole('button', { name: '移除引用 source notes.md' })).toBeNull();
+    }
+    expect(screen.getByRole('button', { name: '移除引用 current.md' })).toBeTruthy();
+    expect(send).not.toHaveBeenCalled();
+    if (success) {
+      fireEvent.change(input, { target: { value: '新的指令' } });
+      await userEvent.click(screen.getByRole('button', { name: '加入队列' }));
+      await waitFor(() => expect(send).toHaveBeenCalledWith('s1', '/file /tmp/current.md\n\n/file /tmp/source notes.md\n\n新的指令', 'queue', [], expect.any(String)));
+    }
+  });
+
   it.each(['text', 'references', 'new references', 'unchanged', 'failure', 'session'] as const)('preserves the appropriate draft after a delayed send: %s', async change => {
     setup();
     let resolve!: (value: Awaited<ReturnType<typeof api.send>>) => void;

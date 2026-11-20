@@ -7,6 +7,13 @@ import { Banner } from './primitives';
 import { ToolCard } from './ToolCard';
 import { EventContent } from './EventContent';
 import { PermissionCard } from './PermissionCard';
+import { formatTurnMoment } from '../share-view';
+
+export function TimelineTimestamp({ timestamp, label, className, tabIndex }: { timestamp?: string; label: string; className: string; tabIndex?: number }) {
+  const formatted = formatTurnMoment(timestamp);
+  if (!formatted) return null;
+  return <time dateTime={timestamp} aria-label={`${label} ${formatted}`} tabIndex={tabIndex} className={`ui-timeline-time absolute whitespace-nowrap text-meta tabular-nums text-subtle ${className}`}>{formatted}</time>;
+}
 
 /*
   用户气泡取 rounded-lg：单行实测 46px（py-3 上下 24 + text-body 行高 22），
@@ -19,7 +26,7 @@ import { PermissionCard } from './PermissionCard';
   飞书转来的指令常有十几行，超过 max-h-40 时先折叠，末尾渐隐并给「展开全文」。
   jsdom 里 scrollHeight 恒为 0，所以测试环境永远不折叠，不影响按文本查找。
 */
-function UserMessage({ id, text, steered = false }: { id: string; text: string; steered?: boolean }) {
+function UserMessage({ id, text, timestamp, steered = false }: { id: string; text: string; timestamp: string; steered?: boolean }) {
   const bodyRef = useRef<HTMLDivElement>(null);
   const [overflowing, setOverflowing] = useState(false);
   const [expanded, setExpanded] = useTimelineDisclosure(`user:${id}`, false);
@@ -28,10 +35,11 @@ function UserMessage({ id, text, steered = false }: { id: string; text: string; 
     if (body) setOverflowing(body.scrollHeight > body.clientHeight + 1);
   }, [text]);
   const collapsed = overflowing && !expanded;
-  return <div className="ui-timeline-item my-6 flex justify-end"><div className="min-w-0 max-w-[84%] rounded-lg rounded-br-sm border border-action-soft-hover bg-action-soft px-4 py-3 text-body text-primary [overflow-wrap:anywhere] sm:max-w-[78%]">
+  return <div className="ui-timeline-item my-6 flex justify-end"><div tabIndex={timestamp ? 0 : undefined} className="ui-timeline-time-target relative min-w-0 max-w-[84%] rounded-lg rounded-br-sm border border-action-soft-hover bg-action-soft px-4 py-3 text-body text-primary [overflow-wrap:anywhere] sm:max-w-[78%]">
     {steered && <div className="mb-1 text-caption text-subtle">插话到当前这一轮</div>}
     <div ref={bodyRef} className={expanded ? undefined : `max-h-40 overflow-hidden ${collapsed ? 'ui-fade-bottom' : ''}`}><MarkdownContent>{text}</MarkdownContent></div>
     {overflowing && <button type="button" aria-expanded={expanded} onClick={() => setExpanded(value => !value)} className="mt-1 min-h-8 text-caption font-medium text-link hover:underline">{expanded ? '收起' : '展开全文'}</button>}
+    <TimelineTimestamp timestamp={timestamp} label="发送时间" className="right-0 top-full"/>
   </div></div>;
 }
 
@@ -58,7 +66,7 @@ export function TimelineItem({ event, final = false, assistantLabel = 'Agent', o
   // 思考内容归 ActivityPanel 折叠区，不在主时间线重复出现。
   if (event.type === 'thinking') return null;
   const user = event.data.role === 'user';
-  if (user) return <UserMessage id={event.id} text={event.data.text ?? ''} steered={Boolean(event.data.steering)}/>;
+  if (user) return <UserMessage id={event.id} text={event.data.text ?? ''} timestamp={event.timestamp} steered={Boolean(event.data.steering)}/>;
   // 后台任务结束后的回答按到达时间插在时间线上，不属于任何一轮，也不显示来源任务 id。
   if (isBackgroundFollowup(event)) return <article aria-label="后台任务结果" className="assistant-output markdown ui-timeline-item my-5 max-w-[78ch] border-l-2 border-default pl-4 text-body text-primary">
     <div className="mb-1 text-caption text-subtle">后台任务结果</div>

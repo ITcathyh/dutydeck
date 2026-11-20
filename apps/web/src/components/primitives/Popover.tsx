@@ -7,6 +7,7 @@ export type PopoverPlacement = 'top-start' | 'top-end' | 'bottom-start' | 'botto
 export type PopoverProps = {
   open: boolean;
   onClose(): void;
+  onEscape?(): boolean;
   anchor: RefObject<HTMLElement | null>;
   placement?: PopoverPlacement;
   width?: number | 'anchor' | 'auto';
@@ -24,10 +25,10 @@ export type PopoverProps = {
   同样 portal 到 body：Composer 的面板锚在一个 overflow-hidden 的输入框壳里，
   就地渲染会被裁掉半截，这正是现在 5 个面板各自写 z-index 的原因。
 */
-export function Popover({ open, onClose, anchor, placement = 'bottom-start', width = 'anchor', children }: PopoverProps) {
+export function Popover({ open, onClose, onEscape, anchor, placement = 'bottom-start', width = 'anchor', children }: PopoverProps) {
   const panel = useRef<HTMLDivElement | null>(null);
   const [position, setPosition] = useState<CSSProperties>();
-  useEscapeKey(open, () => { anchor.current?.focus(); onClose(); });
+  useEscapeKey(open, () => { if (onEscape?.()) return; anchor.current?.focus(); onClose(); });
 
   // 定位要在浏览器绘制前完成，用 layout effect；useEffect 会先闪一帧在左上角。
   useLayoutEffect(() => {

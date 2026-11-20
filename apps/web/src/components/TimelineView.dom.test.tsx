@@ -206,3 +206,18 @@ it('lays out every completed turn from its place, reads earlier summaries by pag
   fireEvent.blur(picker);
   expect(picker.querySelectorAll('option')).toHaveLength(1);
 });
+it('普通回答按已有任务结束时间标注，执行中的轮次不显示结束时间', () => {
+  const sentAt = '2026-10-20T08:00:00.000Z';
+  const endedAt = '2026-10-20T08:01:00.000Z';
+  const user: TimelineEvent = { id: 'prompt', sequence: 1, type: 'text', timestamp: sentAt, data: { role: 'user', taskId: 'started', text: '指令' } };
+  const answer: TimelineEvent = { id: 'answer', sequence: 2, type: 'text', timestamp: sentAt, data: { role: 'assistant', text: '回答' } };
+  const timeline = [user, answer];
+  const task = { id: 'started', sessionId: 's1', prompt: '指令', status: 'running', createdAt: sentAt, updatedAt: sentAt };
+  const props = { activeSessionId: 'end-time', eventsLoading: false, timeline, awaitingAnswer: false, hasOngoingActivity: false, latestUserIndex: 0, activeOutputLabel: 'Agent' };
+  const view = render(<TimelineView {...props} timelineSections={buildTimelineSections(timeline, [task])}/>);
+  expect(screen.queryByLabelText(/^本轮结束时间/)).toBeNull();
+  view.rerender(<TimelineView {...props} timelineSections={buildTimelineSections(timeline, [{ ...task, status: 'completed', updatedAt: endedAt }])}/>);
+  const end = screen.getByLabelText(/^本轮结束时间/);
+  expect(end.getAttribute('datetime')).toBe(endedAt);
+  expect(screen.getByText('回答').compareDocumentPosition(end) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});

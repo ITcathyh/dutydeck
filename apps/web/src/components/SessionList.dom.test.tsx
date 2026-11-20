@@ -6,11 +6,64 @@ import type { RunSummary, Session } from '../api';
 import { workbenchViewLabels, workbenchViewOrder } from '../workspace-model';
 import { SessionList, type SessionListProps } from './SessionList';
 import { EXPERIMENTAL_STORAGE_KEY, writeExperimental } from '../experimental';
+import { setInstance } from '../instance';
+import { viewPreferenceKey } from '../view-preferences';
 
 const baseProps: SessionListProps = { open: false, onClose: () => {}, sessions: [], summaries: {}, sessionsLoading: false, agents: [], larkBots: [], view: 'all', onSelect: () => {}, onNewSession: () => {}, onOpenControlCenter: () => {}, onOpenLarkSetup: () => {}, onOpenGroups: () => {}, onOpenSchedules: () => {} };
 const originalMatchMedia = window.matchMedia;
 
 afterEach(() => { vi.restoreAllMocks(); window.localStorage.removeItem(EXPERIMENTAL_STORAGE_KEY); Object.defineProperty(window, 'matchMedia', { configurable: true, writable: true, value: originalMatchMedia }); });
+
+describe('SessionList 会话置顶', () => {
+  const name = 'pinned-sessions';
+  const rows = ['旧任务', '中间任务', '新任务'].map((title, index): Session => ({
+    id: `pin-${index}`, name: title, agentId: 'codex', cwd: '/repo/sample', state: 'idle', runId: `run-${index}`, createdAt: '', updatedAt: `2026-10-20T08:0${index}:00Z`
+  }));
+  const order = (root: HTMLElement) => [...root.querySelectorAll('.ui-session-row')].map(row => rows.find(session => row.textContent?.includes(session.name!))?.name);
+  async function togglePin(root: HTMLElement, title: string, action: string) {
+    const row = within(root).getByRole('button', { name: new RegExp(`^${title}`) }).parentElement!;
+    await userEvent.click(within(row).getByRole('button', { name: /会话操作/ }));
+    await userEvent.click(screen.getByRole('menuitem', { name: action }));
+  }
+  afterEach(() => {
+    vi.restoreAllMocks();
+    setInstance(undefined);
+    localStorage.removeItem(viewPreferenceKey(name));
+    localStorage.removeItem(viewPreferenceKey(name, 'test-instance'));
+  });
+
+  it('区分实例，归档后清除，并保留置顶项之间原有顺序', async () => {
+    const view = render(<SessionList {...baseProps} open sessions={rows}/>);
+    expect(order(view.container)).toEqual(['新任务', '中间任务', '旧任务']);
+    await togglePin(view.container, '旧任务', '置顶');
+    expect(order(view.container)).toEqual(['旧任务', '新任务', '中间任务']);
+    await togglePin(view.container, '中间任务', '置顶');
+    expect(order(view.container)).toEqual(['中间任务', '旧任务', '新任务']);
+    view.unmount();
+
+    setInstance('test-instance');
+    const other = render(<SessionList {...baseProps} open sessions={rows}/>);
+    expect(order(other.container)).toEqual(['新任务', '中间任务', '旧任务']);
+    other.unmount();
+
+    setInstance(undefined);
+    const restored = render(<SessionList {...baseProps} open sessions={rows}/>);
+    expect(order(restored.container)).toEqual(['中间任务', '旧任务', '新任务']);
+    const archived = [{ ...rows[0]!, archivedAt: rows[0]!.updatedAt }, ...rows.slice(1)];
+    restored.rerender(<SessionList {...baseProps} open sessions={archived}/>);
+    expect(JSON.parse(localStorage.getItem(viewPreferenceKey(name))!)).toEqual(['pin-1']);
+    await togglePin(restored.container, '中间任务', '取消置顶');
+    expect(order(restored.container)).toEqual(['新任务', '中间任务']);
+  });
+
+  it('浏览器禁用存储时仍可在当前页面置顶', async () => {
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('storage disabled'); });
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('storage disabled'); });
+    const view = render(<SessionList {...baseProps} open sessions={rows}/>);
+    await togglePin(view.container, '旧任务', '置顶');
+    expect(order(view.container)).toEqual(['旧任务', '新任务', '中间任务']);
+  });
+});
 
 describe('SessionList mobile accessibility', () => {
   it('移动侧栏关闭时 inert 且从可访问树隐藏，打开后恢复', () => {
@@ -505,8 +558,9 @@ describe('SessionList 导航分层与进行中实时任务', () => {
     expect(within(liveSection).getByText('进行中')).toBeTruthy();
     expect(within(liveSection).getByText('2')).toBeTruthy();
 
-    const liveButtons = within(liveSection).getAllByRole('button');
+    const liveButtons = within(liveSection).getAllByRole('button', { name: /任务 live-/ });
     expect(liveButtons).toHaveLength(2);
+    expect(within(liveSection).getAllByRole('button', { name: '会话操作' })).toHaveLength(2);
     for (const id of ['live-1', 'live-2']) expect(screen.getAllByRole('button', { name: new RegExp(`任务 ${id}`) })).toHaveLength(1);
     const project = screen.getByRole('button', { name: /^active/ }).closest('section')!;
     expect(within(project).getByRole('button', { name: /任务 idle-1/ })).toBeTruthy();

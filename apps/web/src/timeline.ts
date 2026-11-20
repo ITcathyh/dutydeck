@@ -4,9 +4,10 @@ import type { DockEvent, Task } from './api';
 
 export type TimelineEvent = DockEvent & { data: DockEvent['data'] & { role?: 'user' | 'assistant' } };
 export type TimelineActivityGroup = { id: string; label: string; events: TimelineEvent[]; startedAt: string; completedAt?: string };
-export type TimelineSection =
+export type TimelineSection = (
   | { kind: 'event'; event: TimelineEvent; final: boolean }
-  | { kind: 'activity'; id: string; groups: TimelineActivityGroup[]; hasAnswer: boolean; taskStatus: string; isLatestTurn: boolean; startedAt: string; completedAt?: string };
+  | { kind: 'activity'; id: string; groups: TimelineActivityGroup[]; hasAnswer: boolean; taskStatus: string; isLatestTurn: boolean; startedAt: string; completedAt?: string }
+) & { turnEndedAt?: string };
 
 const isActivity = (event: TimelineEvent) => event.type === 'thinking' || event.type === 'tool_call' || event.type === 'tool_result';
 // 运行时留在会话里的提醒（state=notice）在时间线上显示，其余状态事件不显示。
@@ -208,6 +209,17 @@ export function buildTimelineSections(timeline: TimelineEvent[], tasks: Task[] =
     // 插话并入了正在执行的那一轮，这一段的状态跟着那一轮走。
     const task = tasksById.get(userMessage?.data.steering?.target?.taskId ?? userMessage?.data.taskId ?? turn.find(event => event.taskId || event.data.taskId)?.taskId ?? turn.find(event => event.data.taskId)?.data.taskId);
     const terminal = task ? isTerminalTaskStatus(task.status) : turnIndex < turns.length - 1 || !latestTurn;
+    const turnEndedAt = terminal && task?.updatedAt;
+    const markTurnEnd = (sections: TimelineSection[]) => {
+      if (!turnEndedAt) return sections;
+      for (let index = sections.length - 1; index >= 0; index--) {
+        const section = sections[index]!;
+        if (section.kind === 'event' && isBackgroundFollowup(section.event)) continue;
+        sections[index] = { ...section, turnEndedAt };
+        break;
+      }
+      return sections;
+    };
     const lastActivityIndex = turn.reduce((latest, event, index) => isActivity(event) && !isChildDiagnostic(event.data) ? index : latest, -1);
     // 后台任务结束后的回答按到达时间留在时间线上，不算这一轮的结论。
     const lastAssistantTextIndex = turn.reduce((latest, event, index) => event.type === 'text' && event.data.role !== 'user' && !isBackgroundFollowup(event) ? index : latest, -1);
@@ -247,7 +259,7 @@ export function buildTimelineSections(timeline: TimelineEvent[], tasks: Task[] =
     appendPendingThinking();
     flushActivity();
     const groups = pieces.flatMap(piece => piece.kind === 'group' ? [piece.group] : []);
-    if (!groups.length) return pieces.filter((piece): piece is Extract<Piece, { kind: 'event' }> => piece.kind === 'event');
+    if (!groups.length) return markTurnEnd(pieces.filter((piece): piece is Extract<Piece, { kind: 'event' }> => piece.kind === 'event'));
     const firstGroupIndex = pieces.findIndex(piece => piece.kind === 'group');
     const lastGroup = groups.at(-1)!;
     const completedAt = terminal && task?.updatedAt
@@ -267,7 +279,7 @@ export function buildTimelineSections(timeline: TimelineEvent[], tasks: Task[] =
       if (index === firstGroupIndex) sections.push(activity);
       if (piece.kind === 'event') sections.push(piece);
     }
-    return sections;
+    return markTurnEnd(sections);
   });
 }
 
