@@ -1,6 +1,6 @@
 import { useId, useRef } from 'react';
 import { ArrowUp, ChevronDown } from 'lucide-react';
-import { isImeComposing } from '../ime';
+import { imeCompositionHandlers, isImeKey } from '../ime';
 import { isLegacyPtyAgent, type NewSessionCreation } from '../useNewSession';
 import { NewSessionFeedback, workspaceModeLabels } from './NewSessionModal';
 import { PromptTemplates } from './PromptTemplates';
@@ -41,8 +41,9 @@ export function HomeTaskComposer({ creation, onOpenSettings }: { creation: NewSe
           value={goal}
           disabled={pending}
           onChange={event => update({ goal: event.target.value })}
+          {...imeCompositionHandlers}
           onKeyDown={event => {
-            if (event.key !== 'Enter' || event.shiftKey || isImeComposing(event)) return;
+            if (event.key !== 'Enter' || event.shiftKey || isImeKey(event)) return;
             event.preventDefault();
             if (!event.repeat) submit();
           }}

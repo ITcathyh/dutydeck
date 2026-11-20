@@ -48,6 +48,9 @@ it('blocks IME confirmation and requires explicit full trust even if the Agent l
   fireEvent.keyDown(goal(), { key: 'Enter', isComposing: true });
   fireEvent.keyDown(goal(), { key: 'Enter', keyCode: 229 });
   fireEvent.keyDown(goal(), { key: 'Enter', shiftKey: true });
+  // Some browsers send one plain Enter right after the composition ends; only that one is swallowed.
+  fireEvent.compositionEnd(goal());
+  fireEvent.keyDown(goal(), { key: 'Enter' });
   expect(screen.queryByRole('dialog')).toBeNull();
   expect(create).not.toHaveBeenCalled();
   fireEvent.keyDown(goal(), { key: 'Enter' });
