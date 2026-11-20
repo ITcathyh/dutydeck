@@ -25,6 +25,7 @@ import { renderScenarioTemplate, scenarioParamValues, scenarioSummary, templateT
 import type { ScenarioRegistry } from '../plugins/scenario-registry.js';
 import { formatParticipationBehavior, formatRoleStatusLine } from './role-format.js';
 import { LarkConfirmCards, type LarkConfirmRecord } from './confirm-cards.js';
+import { ACKNOWLEDGEMENT_REACTION_EMOJI } from './reaction-records.js';
 import { boundCollaborationSnapshot } from '../collaboration-context.js';
 import { withLarkContextReadTimeout } from './context-read-timeout.js';
 import { renderGroupTaskContext, TASK_CONTEXT_WINDOW, type GroupTaskContext, type GroupTaskContextRequest } from './group-task-context.js';
@@ -1204,7 +1205,7 @@ export class LarkGroupParticipation {
     let action = begun.action;
     try {
       action = await repo.updateAction(scope, action.id, { expectedRevision: action.revision, status: 'sending' });
-      const { reactionId } = await this.options.serviceFor(config).addReaction(messageId, 'OK');
+      const { reactionId } = await this.options.serviceFor(config).addReaction(messageId, ACKNOWLEDGEMENT_REACTION_EMOJI);
       action = { ...action, receipt: reactionId };
       action = await repo.updateAction(scope, action.id, { expectedRevision: action.revision, status: 'sending', receipt: reactionId });
     } catch (error) {

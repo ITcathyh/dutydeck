@@ -197,6 +197,14 @@ Participation level (when the bot answers without an @; it never changes permiss
 
 Triage uses the group decision Agent/model (`decisionAgentId` / `decisionModel`), falling back to the memory Agent/model and then the default Agent/model. Choose a cheap, fast model in those decision settings. The classifier handles Agent view/control commands as well as requests such as “check CI every day at 9 am” and “use codex by default”. Schedule requests immediately receive an enable card while the draft stays disabled. A request to keep following something until it is done (“check this PR every 30 minutes until it is merged, stop by Friday 18:00”) becomes `schedule create --until '<condition>' --deadline <Beijing time>`; the card shows both, the Agent disables the plan with stop-self once the condition is met, and a plan still running at the deadline is disabled with a notice in the original topic (see scheduled Agent tasks in [web-console.md](web-console.md)). Bot settings immediately receive an admin confirmation card and are not saved before approval. Both cards reply to the current message using its sender’s identity, without waiting in the task queue. Progress elapsed time is shown in seconds, minutes and seconds, or hours and minutes.
 
+### Assign a task with a reaction
+
+Search for “触发表情” (Trigger emoji) in the bot settings on the web. Pick a common emoji or enter a Lark emoji code such as `THUMBSUP` (👍). You can also run `dutydeck settings bot set <App ID> reactionTriggerEmoji=THUMBSUP`. The setting is off by default. Clear the field or run `dutydeck settings bot set <App ID> reactionTriggerEmoji=` to stop new triggers. The bot's acknowledgement, completion, failure and acceptance emoji are reserved.
+
+Add the configured reaction to a text or rich-text message from a person or another app in a conversation the bot has joined. If you can start a task by @mentioning the bot there, it replies to the original message with a confirmation card in the same topic. Only you can select “开始处理” (Start) or “取消” (Cancel). Starting submits the task under your identity, just as if you had quoted the original message and @mentioned the bot. Each bot sends at most one confirmation card per person and message. The card expires after 24 hours and shows the expired state when a button is next clicked. Removing the reaction leaves the confirmation or task in place.
+
+New apps subscribe to `im.message.reaction.created_v1`. For an existing app, an admin can run `/repair` with the bot, confirm the update and wait for the new version to take effect. The admin can also add the event in the Lark Open Platform's Event Subscriptions and publish the update. The existing `im:message:readonly` scope covers both reading the source message and subscribing to this event.
+
 ### Leader mode <a id="leader-mode"></a>
 
 Leader mode hands a task to three roles in turn:

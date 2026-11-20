@@ -1,4 +1,4 @@
-// 群级变更的确认卡：机器人先回一张「把本群改成…」的卡，有权限的人点「确认」才真正改。
+// 通用确认卡：机器人先发卡，有权限的人点确认后才执行。
 //
 // 确认单存成一条 collaboration action（kind = confirm.<种类>）：状态 intent 是待确认，receipt 是卡片消息 id；
 // 点确认时先用 revision 把它抢到 sending，再执行，所以同一张卡只会生效一次。回调里只认确认单编号，
@@ -32,6 +32,9 @@ export interface LarkConfirmRequest {
 }
 export interface LarkConfirmRecord extends LarkConfirmRequest { id: string; expiresAt: string; cardMessageId?: string }
 export interface LarkConfirmHandler {
+  /** 两个按钮都仅限发起人，过期时也先检查身份。 */
+  requesterOnly?: boolean;
+  successLabel?: string;
   /** 操作人能否确认；不能时返回给操作人看的原因。 */
   authorize(record: LarkConfirmRecord, operatorOpenId: string): Promise<true | string>;
   /** 执行变更，返回写回卡片的一句结果。 */
@@ -109,6 +112,8 @@ export class LarkConfirmCards {
     }
     if (action.status !== 'intent') return { type: 'info', content: '这张卡已经处理过了。' };
     if (!operatorOpenId) return { type: 'warning', content: '无法确认你的身份，请稍后重试。' };
+    if (handler.requesterOnly && operatorOpenId !== record.requesterId) return { type: 'warning', content: '只有发起人能操作这张确认卡。' };
+    if (handler.requesterOnly && !record.cardMessageId) return { type: 'warning', content: '确认卡正在登记，请稍后重试。' };
     if (Date.parse(record.expiresAt) <= this.now().getTime()) {
       await this.finish(action, record, 'suppressed', '已过期', `${record.summary}\n\n这张卡已过期，没有改动。需要的话请重新说一次。`);
       return { type: 'warning', content: '这张确认卡已过期，没有改动。' };
@@ -126,7 +131,7 @@ export class LarkConfirmCards {
     catch { return { type: 'info', content: '这张卡已经处理过了。' }; }
     try {
       const result = await handler.apply(record, operatorOpenId);
-      await this.finish(claimed, record, 'succeeded', '已确认', result);
+      await this.finish(claimed, record, 'succeeded', handler.successLabel ?? '已确认', result);
       return { type: 'success', content: result };
     } catch (error) {
       const message = error instanceof Error ? error.message.slice(0, 500) : '未知错误';

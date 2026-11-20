@@ -126,6 +126,7 @@ async function configurationMatrix() {
     cardActionForwarding: { value: { owner: 'settings-fixture', url: 'http://127.0.0.1:14432/cards', token: 'synthetic-forward-secret', legacyActions: ['ack'] }, expected: { owner: 'settings-fixture', url: 'http://127.0.0.1:14432/cards', legacyActions: ['ack'] } },
     cardLinks: { value: [{ label: 'Open task', url: 'https://client.example.test/tasks/{sessionId}', android_url: 'client://tasks/{sessionId}' }] },
     welcomeEnabled: { value: false }, workspace: { value: workspace }, workspaceAliases: { value: { review: workspace } },
+    reactionTriggerEmoji: { value: ' THUMBSUP ', expected: 'THUMBSUP' },
     webBaseUrl: { value: ' https://deck.example.test/ ', expected: 'https://deck.example.test' }, webMobileReachable: { value: false }, displayName: { value: ' 设置验收 ', expected: '设置验收' }, brand: { value: 'lark' },
     defaultAgentId: { value: 'codex' }, fallbackAgentId: { value: 'codex-acp' }, fallbackModel: { value: ' gpt-6.1-sol ', expected: 'gpt-6.1-sol' }, defaultAgentWeights: { value: [{ agentId: 'codex', weight: 3 }, { agentId: 'claude', weight: 7 }] }, defaultModel: { value: 'project-model' }, defaultReasoningEffort: { value: 'high' },
     permissionMode: { value: 'approve-reads' }, fullTrustConfirmed: { value: true }, roleTitle: { value: ' 值班 ', expected: '值班' }, roleScope: { value: ' 配置验收 ', expected: '配置验收' }, preInjectPrompt: { value: ' 先核对证据 ', expected: '先核对证据' }, verificationCommand: { value: ' node --version ', expected: 'node --version' }, listening: { value: true },
@@ -200,6 +201,7 @@ async function configurationMatrix() {
   }
   await rejected({ idleCompactHours: 0 }, 'INVALID_LARK_CONFIG', 400);
   await rejected({ pushIntervalMs: 499 }, 'INVALID_LARK_CONFIG', 400);
+  await rejected({ reactionTriggerEmoji: 'OK' }, 'INVALID_LARK_CONFIG', 400);
   await rejected({ traceLimit: 0 }, 'INVALID_LARK_CONFIG', 400);
   await rejected({ highRiskPattern: '[' }, 'INVALID_HIGH_RISK_PATTERN', 400);
   await rejected({ permissionMode: 'full-trust', fullTrustConfirmed: false }, 'LARK_FULL_TRUST_CONFIRMATION_REQUIRED', 409);
@@ -217,11 +219,11 @@ async function configurationMatrix() {
   passed('invalid routing, full-trust consent, unsupported approval, layered prerequisites, ranges, regex and stale saves are rejected atomically');
 
   // Explicit clearing is different from omitting a field or submitting a default.
-  await set({ cardLinks: [], riskControlMode: 'off', executionMode: 'single', fallbackAgentId: '', defaultAgentWeights: [], roleTitle: '', roleScope: '', memoryAgentId: '', memoryModel: '', decisionAgentId: '', decisionModel: '', responseAgentId: '', responseModel: '', replyPolishEnabled: false, replyPolishTimeoutMs: null, replyPolishAgentId: '', replyPolishModel: '', workerAgentIds: [], leaderSkill: '', workspaceAliases: {}, urgentThresholdMs: null, urgentMaxPerHourPerChat: null, pinAfterMs: null });
+  await set({ cardLinks: [], riskControlMode: 'off', executionMode: 'single', fallbackAgentId: '', defaultAgentWeights: [], reactionTriggerEmoji: '', roleTitle: '', roleScope: '', memoryAgentId: '', memoryModel: '', decisionAgentId: '', decisionModel: '', responseAgentId: '', responseModel: '', replyPolishEnabled: false, replyPolishTimeoutMs: null, replyPolishAgentId: '', replyPolishModel: '', workerAgentIds: [], leaderSkill: '', workspaceAliases: {}, urgentThresholdMs: null, urgentMaxPerHourPerChat: null, pinAfterMs: null });
   const cleared = await bot();
   assert.deepEqual(cleared.cardLinks, [], 'clear cardLinks');
   assert.equal(cleared.replyPolishTimeoutMs, 60000);
-  for (const key of ['fallbackAgentId', 'fallbackModel', 'defaultAgentWeights', 'roleTitle', 'roleScope', 'memoryAgentId', 'memoryModel', 'decisionAgentId', 'decisionModel', 'responseAgentId', 'responseModel', 'replyPolishAgentId', 'replyPolishModel', 'leaderSkill', 'workspaceAliases', 'urgentThresholdMs', 'urgentMaxPerHourPerChat', 'pinAfterMs']) assert.equal(cleared[key], undefined, `clear ${key}`);
+  for (const key of ['fallbackAgentId', 'fallbackModel', 'defaultAgentWeights', 'reactionTriggerEmoji', 'roleTitle', 'roleScope', 'memoryAgentId', 'memoryModel', 'decisionAgentId', 'decisionModel', 'responseAgentId', 'responseModel', 'replyPolishAgentId', 'replyPolishModel', 'leaderSkill', 'workspaceAliases', 'urgentThresholdMs', 'urgentMaxPerHourPerChat', 'pinAfterMs']) assert.equal(cleared[key], undefined, `clear ${key}`);
   assert.deepEqual(cleared.workerAgentIds, []);
   await set({ permissionMode: 'ask', fullTrustConfirmed: false });
   assert.equal((await bot()).fullTrustConfirmed, false, 'explicit false revokes saved full-trust consent');
@@ -260,6 +262,7 @@ async function browserChecks() {
   await page.locator('#bot-fallback-agent').selectOption('codex-acp');
   await page.locator('#bot-fallback-model').fill('gpt-6.1-sol');
   await page.locator('#bot-p2p-mode').selectOption('chat');
+  await page.getByLabel('触发表情', { exact: true }).fill('FISTBUMP');
   await page.getByRole('checkbox', { name: 'ADHD 友好输出', exact: true }).check();
   await page.getByRole('checkbox', { name: '忙时先判断', exact: true }).check();
   await page.getByRole('checkbox', { name: '启用会话记忆', exact: true }).check();
@@ -272,9 +275,10 @@ async function browserChecks() {
   await nav('任务').click(); await openBot();
   await expect(page.getByLabel('角色名称', { exact: true })).toHaveValue('浏览器角色');
   await expect(page.locator('#bot-fallback-model')).toHaveValue('gpt-6.1-sol');
+  await expect(page.getByLabel('触发表情', { exact: true })).toHaveValue('FISTBUMP');
   await saveToApi();
   const saved = await bot();
-  const expected = { roleTitle: '浏览器角色', roleScope: '浏览器负责范围', preInjectPrompt: '浏览器证据要求', workspace: harness!.workspaces[0], fallbackAgentId: 'codex-acp', fallbackModel: 'gpt-6.1-sol', p2pMode: 'chat', adhdMode: true, busyTriage: true, idleCompactEnabled: true, idleCompactHours: 72, memoryEnabled: true, groupMemoryScope: 'shared', claudeAutoMemory: 'inherit', memoryAgentId: 'agent_two', memoryModel: 'review-model' };
+  const expected = { roleTitle: '浏览器角色', roleScope: '浏览器负责范围', preInjectPrompt: '浏览器证据要求', workspace: harness!.workspaces[0], fallbackAgentId: 'codex-acp', fallbackModel: 'gpt-6.1-sol', p2pMode: 'chat', reactionTriggerEmoji: 'FISTBUMP', adhdMode: true, busyTriage: true, idleCompactEnabled: true, idleCompactHours: 72, memoryEnabled: true, groupMemoryScope: 'shared', claudeAutoMemory: 'inherit', memoryAgentId: 'agent_two', memoryModel: 'review-model' };
   assert.deepEqual(Object.fromEntries(Object.keys(expected).map(key => [key, saved[key]])), expected);
   passed('browser detail saves role, workspace, fallback, routing and presentation drafts through real HTTP');
 
@@ -337,6 +341,7 @@ async function browserChecks() {
   await expect(dialog).toHaveCount(0);
   await page.reload(); await openBot();
   await expect(page.getByLabel('角色名称', { exact: true })).toHaveValue('并发服务端值');
+  await expect(page.getByLabel('触发表情', { exact: true })).toHaveValue('FISTBUMP');
   assert.equal((await bot()).workspace, draftWorkspace);
   assert.deepEqual(errors, []);
   passed('setup wizard saves advanced notification, verification and card settings without losing detail settings');

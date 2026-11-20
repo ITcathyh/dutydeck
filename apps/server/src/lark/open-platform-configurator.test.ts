@@ -289,7 +289,7 @@ describe('configureLarkOpenPlatformApp', () => {
       status: 'ready',
       scopeCount: 21,
       skippedScopes: [],
-      eventCount: 3,
+      eventCount: 4,
       callbackCount: 1,
       versionId: 'version-2',
     });
@@ -297,6 +297,7 @@ describe('configureLarkOpenPlatformApp', () => {
       'im.message.receive_v1',
       'im.chat.member.bot.added_v1',
       'im.message.updated_v1',
+      'im.message.reaction.created_v1',
     ]);
     expect(calls.find(call => call.path.includes('/scope/update/'))?.body).toMatchObject({
       appScopeIDs: LARK_COMMON_TENANT_SCOPES.map((_, index) => `tenant-${index + 1}`),
@@ -311,8 +312,8 @@ describe('configureLarkOpenPlatformApp', () => {
   it('adds only the missing bot.added event without resubscribing receive_v1, switches callback mode, and verifies by rereading', async () => {
     const { client, calls } = harness({
       events: [
-        { data: { eventMode: 4, appEvents: ['existing.event', 'im.message.receive_v1', 'im.message.updated_v1'] } },
-        { data: { eventMode: 4, appEvents: ['existing.event', 'im.message.receive_v1', 'im.message.updated_v1', 'im.chat.member.bot.added_v1'] } },
+        { data: { eventMode: 4, appEvents: ['existing.event', 'im.message.receive_v1', 'im.message.updated_v1', 'im.message.reaction.created_v1'] } },
+        { data: { eventMode: 4, appEvents: ['existing.event', ...LARK_REQUIRED_EVENTS] } },
       ],
       callbacks: [
         { data: { callbackMode: 1, callbacks: ['existing.callback'] } },
@@ -342,14 +343,26 @@ describe('configureLarkOpenPlatformApp', () => {
 
   it('adds only updated_v1 for an existing app and verifies the subscription readback', async () => {
     const { client, calls } = harness({ events: [
-      { data: { eventMode: 4, appEvents: ['existing.event', 'im.message.receive_v1', 'im.chat.member.bot.added_v1'] } },
+      { data: { eventMode: 4, appEvents: ['existing.event', 'im.message.receive_v1', 'im.chat.member.bot.added_v1', 'im.message.reaction.created_v1'] } },
       { data: { eventMode: 4, appEvents: ['existing.event', ...LARK_REQUIRED_EVENTS] } }
     ] });
-    await expect(configureLarkOpenPlatformApp(client, 'cli_test')).resolves.toMatchObject({ status: 'ready', eventCount: 3 });
+    await expect(configureLarkOpenPlatformApp(client, 'cli_test')).resolves.toMatchObject({ status: 'ready', eventCount: 4 });
     const updates = calls.filter(call => call.path.includes('/event/update/'));
     expect(updates).toHaveLength(1);
     expect(updates[0]!.body).toMatchObject({ operation: 'add', appEvents: ['im.message.updated_v1'] });
     expect(calls.filter(call => /\/event\/cli_test$/.test(call.path))).toHaveLength(2);
+  });
+
+  it('adds the reaction event to an existing app using its existing scopes', async () => {
+    const { client, calls } = harness({ events: [
+      { data: { eventMode: 4, appEvents: ['im.message.receive_v1', 'im.chat.member.bot.added_v1', 'im.message.updated_v1'] } },
+      { data: { eventMode: 4, appEvents: [...LARK_REQUIRED_EVENTS] } }
+    ] });
+    await expect(configureLarkOpenPlatformApp(client, 'cli_test')).resolves.toMatchObject({ status: 'ready', eventCount: 4 });
+    expect(calls.filter(call => call.path.includes('/event/update/')).map(call => call.body?.appEvents))
+      .toEqual([['im.message.reaction.created_v1']]);
+    expect(LARK_COMMON_TENANT_SCOPES).toContain('im:message:readonly');
+    expect(LARK_COMMON_TENANT_SCOPES).not.toContain('im:message.reactions:read');
   });
 
   it('submits every missing required event exactly once when the app predates all subscriptions', async () => {
@@ -360,7 +373,7 @@ describe('configureLarkOpenPlatformApp', () => {
       ],
     });
 
-    await expect(configureLarkOpenPlatformApp(client, 'cli_test')).resolves.toMatchObject({ status: 'ready', eventCount: 3 });
+    await expect(configureLarkOpenPlatformApp(client, 'cli_test')).resolves.toMatchObject({ status: 'ready', eventCount: 4 });
     const updateBodies = calls.filter(call => call.path.includes('/event/update/'));
     // 只提交一次增量 add，每个必需事件各出现一次、已有事件不重提。
     expect(updateBodies).toHaveLength(1);

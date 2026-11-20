@@ -513,10 +513,13 @@ export class LarkLongConnectionListener implements LarkListener {
           this.log.error({ error, chatId }, '处理飞书机器人入群欢迎失败');
         });
       },
-      // 入站 reaction 显式登记为 no-op：机器人自己加/撤 `OK` 回执会回流成事件，
-      // 用户手动贴表情也会。两者都不得驱动任务，也不应落到未知事件分支产生日志噪音。
-      // reaction 在本产品里只是「请求已接入」的单向回执，不是可交互的控制面。
-      'im.message.reaction.created_v1': () => undefined,
+      // 真人添加已配置的表情可以发起确认。机器人回执会回流成事件，只有 user 操作者才进入判定。
+      'im.message.reaction.created_v1': event => {
+        const { message_id: messageId, reaction_type: reaction, user_id: user } = event;
+        if (!coordinator || event.operator_type !== 'user' || !messageId || !reaction?.emoji_type || !user?.open_id || user.open_id === botOpenId) return;
+        return coordinator.handleReaction(messageId, reaction.emoji_type, user.open_id, this.config ?? config);
+      },
+      // 撤回表情不取消待确认的请求或已经开始的任务。
       'im.message.reaction.deleted_v1': () => undefined,
       // 有人入群：本产品不处理，但应用订阅了它时 SDK 会对未登记的事件逐条告警。
       'im.chat.member.user.added_v1': () => undefined,

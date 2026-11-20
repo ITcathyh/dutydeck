@@ -1537,6 +1537,20 @@ it('saves and resets the user-selected wording deadline from the Agent setup ste
   await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ replyPolishTimeoutMs: null })));
 });
 
+it('opens the reaction emoji field from settings search and saves a custom code', async () => {
+  const user = userEvent.setup();
+  const saved = collection({ setupComplete: true, defaultAgentId: 'codex', permissionMode: 'ask' });
+  const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(saved);
+  renderModal(saved, 'acp', { appId: 'cli_test' }, 'reactionTriggerEmoji');
+  const input = await screen.findByLabelText('触发表情') as HTMLInputElement;
+  await waitFor(() => expect(document.activeElement).toBe(input));
+  expect(input.value).toBe('');
+  expect(Array.from(input.list?.options ?? [], option => option.value)).toContain('THUMBSUP');
+  await typeInto(user, input, 'FISTBUMP');
+  await user.click(screen.getByRole('button', { name: '完成配置' }));
+  await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ stage: 'agent', reactionTriggerEmoji: 'FISTBUMP' })));
+});
+
 it('keeps Agent prompt edits made during save open and closes only after the new draft is saved', async () => {
   const user = userEvent.setup();
   let server = collection({ revision: 1, setupComplete: true, defaultAgentId: 'codex', permissionMode: 'ask' });

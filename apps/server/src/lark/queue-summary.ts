@@ -49,7 +49,7 @@ const normalizeLine = (value: string) => value.replace(/\s+/g, ' ').trim();
 export const escapeLarkPromptEcho = escapeCardInline;
 
 /** 按码点截断原文并补省略号：不在 emoji 代理对中间下刀；返回值原文长度 = limit + 1。 */
-const clipCodePoints = (text: string, limit: number): string => {
+export const clipCodePoints = (text: string, limit: number): string => {
   if (text.length <= limit) return text;
   let cut = limit;
   if (cut > 0) {

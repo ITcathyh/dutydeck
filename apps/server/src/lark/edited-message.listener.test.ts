@@ -114,3 +114,20 @@ describe('registered im.message.updated_v1 handler', () => {
     expect(h.handle).not.toHaveBeenCalled();
   });
 });
+
+it('routes human reaction additions only and leaves deletions silent', async () => {
+  const h = await harness();
+  await h.listener.start({ ...config, reactionTriggerEmoji: 'THUMBSUP' });
+  const trigger = vi.spyOn(LarkMessageCoordinator.prototype, 'handleReaction').mockResolvedValue();
+  const event = { message_id: 'om_edit', reaction_type: { emoji_type: 'THUMBSUP' }, user_id: { open_id: 'ou_requester' } };
+  const created = sdk.handlers['im.message.reaction.created_v1']!;
+  await sdk.handlers['im.message.reaction.deleted_v1']!({ ...event, operator_type: 'user' });
+  await created({ ...event, operator_type: 'app', app_id: config.appId });
+  await created({ ...event, operator_type: 'app', app_id: 'cli_other' });
+  await created({ ...event, operator_type: 'bot', user_id: { open_id: 'ou_bot' } });
+  await created({ ...event, operator_type: 'user', user_id: { open_id: 'ou_bot' } });
+  await created({ ...event, operator_type: 'user', user_id: { user_id: 'unresolved' } });
+  expect(trigger).not.toHaveBeenCalled();
+  await created({ ...event, operator_type: 'user' });
+  expect(trigger).toHaveBeenCalledExactlyOnceWith('om_edit', 'THUMBSUP', 'ou_requester', expect.objectContaining({ reactionTriggerEmoji: 'THUMBSUP' }));
+});

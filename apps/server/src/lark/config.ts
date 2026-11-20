@@ -7,6 +7,7 @@ import { isAbsolute } from 'node:path';
 import { hostname, userInfo } from 'node:os';
 import { LarkServiceError } from './service.js';
 import { parseLarkQuietHours } from './notify-tier.js';
+import { isReceiptReactionEmoji } from './reaction-records.js';
 import { isLarkGroupMemoryScope, normalizeLarkGroupMemoryScope, type LarkGroupMemoryScope } from './memory.js';
 
 export const isLarkClaudeAutoMemory = (value: unknown): value is LarkClaudeAutoMemory => value === 'inherit' || value === 'off';
@@ -247,6 +248,7 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
   const displayName = normalizeTrimmedString(parsed.displayName);
   const roleTitle = normalizeTrimmedString(parsed.roleTitle);
   const roleScope = normalizeTrimmedString(parsed.roleScope);
+  const reactionTriggerEmoji = normalizeTrimmedString(parsed.reactionTriggerEmoji);
   const config: StoredLarkConfig = {
     welcomeEnabled: parsed.welcomeEnabled !== false,
     ...(eventHandlersError ? { eventHandlersError } : {}),
@@ -257,6 +259,7 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
     appId: parsed.appId.trim(),
     revision: Number.isInteger(parsed.revision) && Number(parsed.revision) > 0 ? parsed.revision : 1,
     mentionPolicy: resolveParticipation({ mentionPolicy: parsed.mentionPolicy }).mentionPolicy,
+    ...(reactionTriggerEmoji && !isReceiptReactionEmoji(reactionTriggerEmoji) ? { reactionTriggerEmoji } : {}),
     defaultGroupParticipation: normalizeDefaultGroupParticipation(parsed.defaultGroupParticipation),
     appSecret: parsed.appSecret,
     ...(parsed.name?.trim() ? { name: parsed.name.trim() } : {}),
@@ -393,6 +396,7 @@ export const publicLarkConfig = (config: StoredLarkConfig, activeAppIds: Readonl
   appId: config.appId,
   revision: config.revision ?? 1,
   mentionPolicy: resolveParticipation({ mentionPolicy: config.mentionPolicy }).mentionPolicy,
+  ...(config.reactionTriggerEmoji ? { reactionTriggerEmoji: config.reactionTriggerEmoji } : {}),
   defaultGroupParticipation: normalizeDefaultGroupParticipation(config.defaultGroupParticipation),
   name: config.name ?? config.appId,
   tabLabel: duplicateNames.has((config.name ?? config.appId).toLowerCase()) ? `${config.name ?? config.appId} · ${config.appId}` : config.name ?? config.appId,
@@ -503,6 +507,13 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   const eventHandlers = input.eventHandlers === undefined ? current?.eventHandlers : parseLarkEventHandlers(input.eventHandlers, current?.eventHandlers);
   const cardActionForwarding = input.cardActionForwarding === undefined ? current?.cardActionForwarding : submittedForwarding;
   validateLarkEventConfiguration({ eventHandlers, cardActionForwarding });
+  if (input.reactionTriggerEmoji !== undefined && typeof input.reactionTriggerEmoji !== 'string') {
+    throw new LarkServiceError('INVALID_LARK_CONFIG', '触发表情必须为飞书表情类型字符串。', 400);
+  }
+  const reactionTriggerEmoji = input.reactionTriggerEmoji === undefined ? current?.reactionTriggerEmoji : input.reactionTriggerEmoji.trim();
+  if (reactionTriggerEmoji && isReceiptReactionEmoji(reactionTriggerEmoji)) {
+    throw new LarkServiceError('INVALID_LARK_CONFIG', '该表情已用于机器人的接单、完成、失败或验收回执，请选择其他表情。', 400);
+  }
   if (input.busyTriage !== undefined && typeof input.busyTriage !== 'boolean') throw new LarkServiceError('INVALID_LARK_CONFIG', 'busyTriage 必须为布尔值。', 400);
   if (input.botLoopGuard !== undefined && typeof input.botLoopGuard !== 'boolean') throw new LarkServiceError('INVALID_LARK_CONFIG', 'botLoopGuard 必须为布尔值。', 400);
   if (input.showAgentName !== undefined && typeof input.showAgentName !== 'boolean') throw new LarkServiceError('INVALID_LARK_CONFIG', 'showAgentName 必须为布尔值。', 400);
@@ -691,6 +702,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
     revision: (current?.revision ?? (current ? 1 : 0)) + 1,
     // 新建的 Bot 默认在自己接手的话题里免 @；已有 Bot 读出来时总带着自己的取值，这里不会改动它们。
     mentionPolicy: input.mentionPolicy ?? current?.mentionPolicy ?? NEW_BOT_MENTION_POLICY,
+    ...(reactionTriggerEmoji ? { reactionTriggerEmoji } : {}),
     defaultGroupParticipation: input.defaultGroupParticipation ?? current?.defaultGroupParticipation ?? 'off',
     appId,
     appSecret,

@@ -68,7 +68,7 @@ import { parseCardTask } from './persisted-card-task.js';
 import { larkAutoApprovalEventPrefix, type LarkInteraction } from './workflow-interactions.js';
 import { planInstructionBlock, planTaskOf, planUnsupportedReason } from '../plan-mode.js';
 import type { LarkCardCapabilities } from './card-actions.js';
-import { type LarkCommandPrompt, larkCardChannel, relaunchRetainedPrefix, relaunchRetainedKey, sendTaskCard, withoutLeadingBotMention } from './coordinator-core.js';
+import { type LarkCommandPrompt, larkCardChannel, larkHumanTaskAllowed, relaunchRetainedPrefix, relaunchRetainedKey, sendTaskCard, withoutLeadingBotMention } from './coordinator-core.js';
 import { LarkCoordinatorRecovery } from './coordinator-recovery.js';
 
 // 飞书消息协调器 · 派发：为一条请求找到或新建会话、交给 runtime 执行，并跟随这一轮直到终态交付。
@@ -1162,13 +1162,12 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       }
     }
     const senderOpenId = event.senderOpenId ?? '';
-    const allowedUser = allowedUsers.find(user => user.openId === senderOpenId);
     const allowedBot = allowedBots.find(bot => bot.openId === senderOpenId);
     const highRiskAllowedUser = highRiskAllowedUsers.find(user => user.openId === senderOpenId);
     const accessRestricted = allowedUsers.length > 0 || allowedEmails.length > 0;
     const allowed = config.managedGroup ? true : botSender
       ? (!accessRestricted || (peerBotsAllowed && trustedPeerBot) || Boolean(allowedBot))
-      : !accessRestricted || (allowedUsers.length ? Boolean(allowedUser) : actorEmails.some(email => allowedEmails.includes(email)));
+      : larkHumanTaskAllowed(config, senderOpenId, actorEmails);
     if (!allowed) {
       await failBeforeRun('访问被拒绝', withGroupMention('**当前账号不在机器人白名单中。**\n\n如需使用，请联系机器人管理员添加你。'), `fail_acl_${event.messageId}_${currentTurn}`, 'access_denied');
       return;

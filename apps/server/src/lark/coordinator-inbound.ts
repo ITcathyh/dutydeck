@@ -5,6 +5,7 @@ import { runAgentScheduleRequest } from '../agent-schedule-request.js';
 import { larkElapsedLabel } from './card-status.js';
 import { agentSettingsConfirmKind, parseAgentSettings, showAgentSettings } from './agent-settings.js';
 import { createHash } from 'node:crypto';
+import { jsonSha256 } from '../hash.js';
 import { describeLarkTaskRecovery, larkContinuePrompt, larkRecoveryRetainedNote, larkReliability, larkSteeringUnknownNote } from './task-recovery.js';
 import type { LarkInteraction } from './workflow-interactions.js';
 import { formatUnknownTaskTime as deadlineText } from '../task-resolution.js';
@@ -27,7 +28,7 @@ import { decideWake, isExplicitWake, wakeSignals, type WakeFacts } from './wake-
 import { directScenarioPrompt } from './scenario-direct.js';
 import { larkScenarioAdoptionOf } from './scenario-legacy.js';
 import { executeScheduleCommand, scheduleRequestCard } from './schedule-command.js';
-import { isBotSenderType } from './card-mentions.js';
+import { isBotSenderType, renderGroupMention } from './card-mentions.js';
 import { larkExecutionIdentity, larkMemoryEnabled, larkPermissionMode, readLarkConfig, saveLarkConfig, type StoredLarkConfig } from './config.js';
 import type { LarkMessageResource } from './message-content.js';
 import { LarkServiceError } from './service.js';
@@ -52,7 +53,9 @@ import {
   type LarkCommandRoute
 } from './commands.js';
 import { expandLarkPluginCommand, larkPluginCommandHelp, resolveLarkPluginQuery, callLarkPluginQuery, pluginQueryReplyText } from './plugin-commands.js';
-import { escapeLarkPromptEcho, renderQueueSummary, QUEUE_SUMMARY_MAX_ITEMS } from './queue-summary.js';
+import { clipCodePoints, escapeLarkPromptEcho, renderQueueSummary, QUEUE_SUMMARY_MAX_ITEMS } from './queue-summary.js';
+import { unwrapEditedTextContent } from './edited-message.js';
+import { withLarkContextReadTimeout } from './context-read-timeout.js';
 import { larkNotice } from './notify-tier.js';
 import { claimLarkTaskDispatches, larkTaskAgentAllowlistConfigured, larkTaskAgentGuid, releaseLarkTaskClaim } from './task-agent.js';
 import { buildRepairConfirmCard, parseRepairCardActionValue, renderRepairResultCard, runOpenPlatformRepair } from './repair.js';
@@ -62,7 +65,7 @@ import { findLarkThreadContinuation, listPersistedLarkSessions, larkSessionMatch
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkGroup, LarkTask, PersistedLarkCardTask } from './coordinator.js';
 import { parseCardTask, parseOptionalCardTask } from './persisted-card-task.js';
-import { type LarkCommandPrompt, larkCardChannel, type LarkRelaunchClaim, larkTaskTitle, sendTaskCard } from './coordinator-core.js';
+import { type LarkCommandPrompt, larkCardChannel, larkHumanTaskAllowed, type LarkRelaunchClaim, larkTaskTitle, sendTaskCard } from './coordinator-core.js';
 import { LarkCoordinatorDispatch, larkCancelledBeforeSubmit, larkTurnRuntimeTaskId } from './coordinator-dispatch.js';
 import { planPrompt } from '../plan-mode.js';
 import { planReplyAction } from './plan-flow.js';
@@ -160,6 +163,7 @@ function larkSessionConfigFailure(error: unknown, input: { command: string; labe
 
 /** 实时路径上清理已忽略入站记录的最小间隔。 */
 const LARK_IGNORED_PRUNE_INTERVAL_MS = 3_600_000;
+const reactionTaskConfirmKind = (appId: string) => `reaction_task.${appId}`;
 
 export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
   async initializeWorkflows(config: StoredLarkConfig) {
@@ -168,6 +172,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     this.registerTurnDiffReview(config.appId);
     this.registerAgentCommandConfirm(config.appId);
     this.registerAgentSettingsConfirm(config.appId);
+    this.registerReactionTaskConfirm(config.appId);
     await this.workflows?.initialize(config.appId);
     await this.recoverAutoVerifications(config).catch(error => this.log.warn({ error, appId: config.appId }, '重启后收尾自动验证失败'));
     if (this.inbox) await this.pruneIgnoredInbox(config.appId);
@@ -723,12 +728,12 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
   private readonly ignoredPrunes = new Map<string, { lastRunAt: number; pending: boolean }>();
 
   /** SDK 只等待本地接收。同群路由保持接收顺序，其他群不受慢权限查询影响。 */
-  async receive(event: LarkMessageEvent, config: StoredLarkConfig) {
+  async receive(event: LarkMessageEvent, config: StoredLarkConfig, trustedReplyMessageId?: string) {
     if (!this.inbox) {
       void this.handle(event, config).catch(error => this.log.error({ error, messageId: event.messageId }, '处理飞书消息事件失败'));
       return;
     }
-    const record = await this.inbox.capture(config.appId, event);
+    const record = await this.inbox.capture(config.appId, event, trustedReplyMessageId);
     if (!record) return;
     void this.enqueueInbound(record.event.chatId, () => this.recoverInbound(record, config))
       .catch(error => this.log.error({ error, messageId: event.messageId }, '处理已接收的飞书消息失败'));
@@ -749,6 +754,86 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       const record = await this.inbox?.capture(config.appId, event);
       if (record) return this.recoverInbound(record, config);
       return this.handle(event, config);
+    });
+  }
+
+  async handleReaction(messageId: string, emoji: string, actor: string, config: StoredLarkConfig) {
+    const { store, participation } = this.workflowOptions;
+    const confirmations = participation?.confirmations;
+    if (this.stopped || !this.inbox || !store?.compareAndSet || !confirmations || !config.listening || emoji !== config.reactionTriggerEmoji) return;
+    const dedupeKey = jsonSha256([messageId, actor]);
+    const claimKey = `lark.reaction-trigger.${config.appId}.${dedupeKey}`;
+    try {
+      if (await store.get(claimKey)) return;
+      const message = await withLarkContextReadTimeout(signal => this.service.getMessage(messageId, signal), '读取表情来源消息');
+      const { chatId, sender, messageType, threadId, rootId } = message;
+      if (message.messageId !== messageId || !chatId || message.deleted || !sender.id
+        || sender.id === config.appId || sender.id === this.botOpenId || !['text', 'post', 'rich_text'].includes(messageType)) {
+        this.log.info({ appId: config.appId, messageId, actor }, '表情来源不是可处理的文本消息');
+        return;
+      }
+      const chatType = await this.chatModeResolver?.(config.appId, chatId) === 'p2p' ? 'p2p' : 'group';
+      const current = await readLarkConfig(store, config.appId);
+      if (this.stopped || !current?.listening || current.reactionTriggerEmoji !== emoji) return;
+      if (!await this.reactionTaskAllowed(current, chatId, chatType, actor)) {
+        this.log.info({ appId: config.appId, chatId, messageId, actor }, '表情操作者没有任务创建权限');
+        return;
+      }
+      const { prompt } = await parsePrompt({
+        messageId, chatId, chatType, messageType, content: messageType === 'text' ? unwrapEditedTextContent(message.rawContent) : message.rawContent,
+        mentions: message.mentions.map(mention => ({ key: mention.key ?? '', name: mention.name ?? '' }))
+      });
+      const excerpt = escapeLarkPromptEcho(clipCodePoints(prompt.replace(/\s+/g, ' '), 199)) || '（原消息没有文字。）';
+      const requester = (chatType === 'group' ? renderGroupMention(actor) : undefined) ?? escapeLarkPromptEcho(actor);
+      const topicRoot = threadId ? rootId ?? messageId : undefined;
+      // 协作历史会清掉旧确认卡。只保留无正文的幂等键，避免清理后又为同一个人发卡。
+      if (this.stopped || !await store.compareAndSet(claimKey, undefined, '1')) return;
+      await confirmations.request({
+        kind: reactionTaskConfirmKind(config.appId), scope: { appId: config.appId, chatId }, requesterId: actor,
+        replyTo: { messageId, threadId }, dedupeKey, title: '确认处理原消息', confirmLabel: '开始处理',
+        summary: `${requester} 想让机器人处理这条消息。\n\n> ${excerpt}`,
+        payload: { chatType, ...(topicRoot ? { rootId: topicRoot } : {}) }
+      });
+    } catch (error) {
+      this.log.warn({ error, appId: config.appId, messageId, actor }, '处理飞书表情触发失败');
+    }
+  }
+
+  private async reactionTaskAllowed(config: StoredLarkConfig, chatId: string, chatType: string, actor: string) {
+    const decision = chatType === 'group' ? await this.groupManager?.authorize(config.appId, chatId, actor, 'task.create') : undefined;
+    if (decision) {
+      if (!decision.allowed) return false;
+    } else {
+      const emails = !config.allowedUsers.length && config.allowedEmails.length ? await this.service.getUserEmails(actor) : [];
+      if (!larkHumanTaskAllowed(config, actor, emails)) return false;
+    }
+    await this.requireExecution('listener', 'task.create');
+    return true;
+  }
+
+  private registerReactionTaskConfirm(appId: string) {
+    this.workflowOptions.participation?.confirmations?.register(reactionTaskConfirmKind(appId), {
+      requesterOnly: true, successLabel: '已开始',
+      authorize: async (record, actor) => {
+        const config = await readLarkConfig(this.workflowOptions.store, appId);
+        return config?.listening && await this.reactionTaskAllowed(config, record.scope.chatId, String(record.payload.chatType), actor)
+          ? true : '当前账号没有任务创建权限。';
+      },
+      apply: async (record, actor) => {
+        const config = await readLarkConfig(this.workflowOptions.store, appId);
+        if (this.stopped || !this.inbox || !record.cardMessageId || !config?.listening) throw new LarkServiceError('LARK_REACTION_TASK_UNAVAILABLE', '确认暂不可用，请稍后重试。', 409);
+        const originalId = record.replyTo.messageId;
+        const event: LarkMessageEvent = {
+          messageId: `reaction_${record.id}`, chatId: record.scope.chatId, chatType: String(record.payload.chatType),
+          ...(record.payload.rootId ? { rootId: String(record.payload.rootId) } : {}), threadId: record.replyTo.threadId, parentId: originalId,
+          createTime: String(Date.now()), messageType: 'text', senderOpenId: actor, senderType: 'user',
+          content: JSON.stringify({ text: '@_user_1 请处理我引用的这条消息。' }),
+          mentions: [{ key: '@_user_1', name: config.name || 'Dutydeck', openId: this.botOpenId, mentionedType: 'bot' }]
+        };
+        // 原消息是引用来源，确认卡是本次入站的可见锚点。不同操作者不会共用回执或覆盖原作者的群观察。
+        await this.receive(event, config, record.cardMessageId);
+        return '已开始处理，进度会发在此会话。';
+      }
     });
   }
 

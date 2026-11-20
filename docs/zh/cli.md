@@ -381,6 +381,7 @@ dutydeck settings bot set cli_xxx cardActionForwarding=null 'eventHandlers=[{"id
 | `memoryAgentId` | 跑记忆提取和整理的 Agent | 沿用 `defaultAgentId` |
 | `memoryModel` | 跑记忆提取和整理的模型 | 沿用 `defaultModel` |
 | `busyTriage` | 忙时先判断：执行中问进度由宿主直接回复，补充当前任务会尝试插话；关闭时照常排队 | `false` |
+| `reactionTriggerEmoji` | 飞书触发表情类型，例如 `THUMBSUP`。留空关闭，不可使用机器人回执表情。 | 未设置 |
 | `botLoopGuard` | 机器人互聊门禁，防止机器人之间来回对话 | `false` |
 | `decisionAgentId` | 群里判断要不要接话的 Agent | 沿用 `memoryAgentId`，再回落 `defaultAgentId` |
 | `decisionModel` | 群里判断要不要接话的模型 | 同上，沿用对应模型 |

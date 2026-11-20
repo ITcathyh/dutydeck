@@ -57,6 +57,7 @@ export const botSettingFields = {
   pinLongTasks: {label: '长任务进度卡置顶（默认关闭）', step: 1, anchor: 'lark-switch-pin'},
   peerBotsAllowed: {label: '群协作 peer 机器人默认放行', step: 1, anchor: 'lark-switch-peer-bots'},
   listening: {label: '监听飞书消息', step: 2, anchor: 'lark-switch-listening'},
+  reactionTriggerEmoji: { label: '触发表情', step: 2, anchor: 'bot-setting-reactionTriggerEmoji', keywords: '点表情 派活 emoji reaction' },
   groupToolsEnabled: {label: '启用 Agent 群协作工具', step: 2, anchor: 'lark-switch-group-tools'},
   groupToolsAllowSend: {label: '允许 Agent 发消息与 @交接', step: 2, anchor: 'lark-switch-group-send', parent: 'groupToolsEnabled'},
   busyTriage: {label: '忙时先判断', step: 2, anchor: 'lark-switch-busy-triage'},

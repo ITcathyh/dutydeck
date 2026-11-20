@@ -52,6 +52,7 @@ export type BotDraft = {
   replyPolishModel: string;
   replyPolishTimeoutSeconds: string;
   listening: boolean;
+  reactionTriggerEmoji: string;
   groupToolsEnabled: boolean;
   groupToolsAllowSend: boolean;
   memoryEnabled: boolean;

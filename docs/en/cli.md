@@ -308,6 +308,7 @@ Every key accepted by `dutydeck settings bot set <app-id> key=value ...` is list
 | `memoryAgentId` | Agent that extracts and consolidates memory | Same as `defaultAgentId` |
 | `memoryModel` | Model that extracts and consolidates memory | Same as `defaultModel` |
 | `busyTriage` | Triage while busy: progress questions are answered by the host and additions to the current task try to interject; off queues as usual | `false` |
+| `reactionTriggerEmoji` | Lark emoji code that triggers a task confirmation, such as `THUMBSUP`. Clear it to disable the trigger. The bot's receipt emoji are reserved. | Unset |
 | `botLoopGuard` | Bot loop guard that stops bots from talking to each other indefinitely | `false` |
 | `decisionAgentId` | Agent that decides whether to respond in a group | `memoryAgentId`, then `defaultAgentId` |
 | `decisionModel` | Model that decides whether to respond in a group | Same chain, using the matching model |

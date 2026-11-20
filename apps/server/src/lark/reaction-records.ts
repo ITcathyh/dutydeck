@@ -35,6 +35,13 @@ export const COMPLETION_REACTION_EMOJI = 'CheckMark';
  */
 export const FAILURE_REACTION_EMOJI = 'CrossMark';
 
+export const ACKNOWLEDGEMENT_REACTION_EMOJI = 'OK';
+
+export function isReceiptReactionEmoji(emoji: string): boolean {
+  return [ACKNOWLEDGEMENT_REACTION_EMOJI, COMPLETION_REACTION_EMOJI, FAILURE_REACTION_EMOJI, ...Object.values(ACCEPTANCE_REACTION_EMOJI)]
+    .some(receipt => receipt.toLowerCase() === emoji.toLowerCase());
+}
+
 /** 取验收决议对应的 emoji_type 短名；未知 action 返回 undefined，由调用方放弃 reaction。 */
 export function reactionEmojiForAcceptance(action: string): string | undefined {
   return (ACCEPTANCE_REACTION_EMOJI as Record<string, string>)[action];
