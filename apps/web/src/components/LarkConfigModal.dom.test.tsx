@@ -808,11 +808,43 @@ describe('LarkConfigModal explicit selection', () => {
     expect(start).toHaveBeenCalledOnce();
     expect(save).not.toHaveBeenCalled();
     expect(screen.getByRole('switch', { name: '监听飞书消息' }).getAttribute('aria-checked')).toBe('true');
+    const resultOnly = screen.getByRole('switch', { name: '群里只留结果卡' });
+    expect(resultOnly.getAttribute('aria-checked')).toBe('false');
+    await user.click(resultOnly);
+    expect(resultOnly.getAttribute('aria-checked')).toBe('true');
     await user.click(screen.getByRole('checkbox', { name: /确认飞书任务以 full-trust 运行/ }));
     await user.click(screen.getByRole('button', { name: '完成配置' }));
     await waitFor(() => expect(save).toHaveBeenCalledOnce());
-    expect(save.mock.calls[0]![0]).toMatchObject({ stage: 'agent', originalAppId: 'cli_created', fullTrustConfirmed: true, listening: true });
+    expect(save.mock.calls[0]![0]).toMatchObject({ stage: 'agent', originalAppId: 'cli_created', fullTrustConfirmed: true, listening: true, silentProgress: true });
     expect(save.mock.calls[0]![0]).not.toHaveProperty('appSecret');
+    expect(save.mock.calls[0]![0]).not.toHaveProperty('completionReactionOnly');
+  });
+
+  it.each([false, true])('手动绑定已有应用时，最后一步保存在群里静默过程卡的选择（%s）', async silentProgress => {
+    const user = userEvent.setup();
+    renderModal({ configured: false, bots: [], listeningDisabled: false }, 'acp', 'new');
+    const saved = collection({ revision: 1, defaultAgentId: 'codex', permissionMode: 'ask' });
+    const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(saved);
+    await typeInto(user, await screen.findByLabelText('App ID'), bot.appId);
+    await typeInto(user, screen.getByLabelText('App Secret'), 'fixture-secret');
+    await user.click(screen.getByRole('button', { name: '下一步' }));
+    const resultOnly = await screen.findByRole('switch', { name: '群里只留结果卡' });
+    expect(resultOnly.getAttribute('aria-checked')).toBe('false');
+    if (silentProgress) await user.click(resultOnly);
+    const finish = screen.getByRole('button', { name: '完成配置' }) as HTMLButtonElement;
+    await waitFor(() => expect(finish.disabled).toBe(false));
+    await user.click(finish);
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+    expect(save.mock.calls[0]![0]).not.toHaveProperty('silentProgress');
+    expect(save.mock.calls[1]![0]).toMatchObject({ stage: 'agent', originalAppId: bot.appId, expectedRevision: 1, silentProgress });
+    expect(save.mock.calls[1]![0]).not.toHaveProperty('completionReactionOnly');
+  });
+
+  it('从设置搜索定位已有机器人已开启的结果卡选项', async () => {
+    renderModal(collection({ setupComplete: true, silentProgress: true }), 'acp', { appId: bot.appId }, 'silentProgress');
+    const resultOnly = await screen.findByRole('switch', { name: '群里只留结果卡' });
+    await waitFor(() => expect(resultOnly.getAttribute('aria-checked')).toBe('true'));
+    expect(document.activeElement).toBe(resultOnly);
   });
 
   it('opens and focuses a separate new Bot form when the add button is clicked', async () => {

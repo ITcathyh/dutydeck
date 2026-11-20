@@ -194,10 +194,10 @@ One message, three roles in relay: the **front agent** talks to you; the **Leade
 - **Every call it made for you is on record**: "Leader decided for you" on the goal card lists each decision and its basis; disagree by saying so in the thread.
 - **The guide is a skill**: one `SKILL.md`, kept in the project, your home directory or a plugin; leave it empty to use the built-in rules.
 
-Turn it on under Web **Bot management → Execution mode** (group tools must be enabled), or:
+In the Web console, open **Bot management → Execution mode**, switch on **Leader mode**, and save. The switch fills in any missing Leader or Workers and enables group tools. You can also configure it from the CLI.
 
 ```sh
-dutydeck settings bot set <appId> executionMode=layered leaderAgentId=<agentId> workerAgentIds=<id1>,<id2>
+dutydeck settings bot set <appId> groupToolsEnabled=true executionMode=layered leaderAgentId=<agentId> workerAgentIds=<id1>,<id2>
 ```
 
 <sub>→ <a href="docs/en/lark.md#leader-mode">Leader mode in depth</a></sub>
