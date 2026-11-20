@@ -89,7 +89,7 @@ export class LarkTaskInbox {
     if (!store.compareAndSet || !store.list) throw new Error('Lark inbox requires persistent CAS and prefix listing');
   }
   /** ACK 前仅做本地 CAS；重投不能替换原文，也不能重复启动路由。写入异常直接交给 SDK。 */
-  async capture(appId: string, event: LarkMessageEvent): Promise<LarkInboxRecord | undefined> {
+  async capture(appId: string, event: LarkMessageEvent, trustedReplyMessageId?: string): Promise<LarkInboxRecord | undefined> {
     const { authorization: _untrustedAuthorization, scenario: _untrustedScenario, triage: _untrustedTriage, replyMessageId: _untrustedReplyMessageId, ...original } = event;
     const key = prefix(appId) + event.messageId;
     for (;;) {
@@ -102,7 +102,8 @@ export class LarkTaskInbox {
         }
         return undefined;
       }
-      const next: LarkInboxRecord = { ...(old ?? { appId, event: original, state: 'unrouted', receivedAt: new Date().toISOString(), receiptOrder: ++this.receiptOrder }), boot: this.boot };
+      const next: LarkInboxRecord = { ...(old ?? { appId, event: trustedReplyMessageId ? { ...original, replyMessageId: trustedReplyMessageId } : original,
+        state: 'unrouted', receivedAt: new Date().toISOString(), receiptOrder: ++this.receiptOrder }), boot: this.boot };
       if (await this.store.compareAndSet!(key, raw, JSON.stringify(next))) return next;
     }
   }

@@ -38,6 +38,7 @@ export interface StoredLarkConfig {
   welcomeEnabled?: boolean;
   revision?: number;
   mentionPolicy?: 'always' | 'topic' | 'never' | 'ambient';
+  reactionTriggerEmoji?: string;
   defaultGroupParticipation?: 'off' | 'observe' | 'selective' | 'eager';
   /** Runtime-only resolved group context; never serialized in the Bot configuration. */
   managedGroup?: { bindingId: string; revision: number; principalId?: string };
@@ -236,6 +237,7 @@ export interface PublicLarkConfig {
   welcomeEnabled: boolean;
   revision: number;
   mentionPolicy?: StoredLarkConfig['mentionPolicy'];
+  reactionTriggerEmoji?: StoredLarkConfig['reactionTriggerEmoji'];
   defaultGroupParticipation?: StoredLarkConfig['defaultGroupParticipation'];
   configured: true;
   appId: string;

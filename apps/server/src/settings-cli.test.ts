@@ -180,6 +180,21 @@ describe('settings CLI default Agent approval', () => {
 });
 
 describe('settings CLI against the real bot routes', () => {
+  it('sets, reads and clears the trigger emoji and refuses bot receipt emoji', async () => {
+    const { repos, run } = await botRuntime();
+    const bot = { appId: 'cli_a' };
+    const set = (emoji: string) => run('bot-set', { ...bot, pairs: [`reactionTriggerEmoji=${emoji}`] });
+    expect((await run('bot-show', bot) as { bot: object }).bot).not.toHaveProperty('reactionTriggerEmoji');
+    await expect(set(' THUMBSUP ')).resolves.toMatchObject({ bot: { reactionTriggerEmoji: 'THUMBSUP' } });
+    await expect(run('bot-show', bot)).resolves.toMatchObject({ bot: { reactionTriggerEmoji: 'THUMBSUP' } });
+    for (const emoji of ['OK', 'CheckMark', 'CrossMark', 'Typing']) {
+      await expect(set(emoji)).rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG', message: expect.stringContaining('回执') });
+    }
+    expect(await readLarkConfig(repos.config, bot.appId)).toMatchObject({ reactionTriggerEmoji: 'THUMBSUP' });
+    await set('');
+    expect((await run('bot-show', bot) as { bot: object }).bot).not.toHaveProperty('reactionTriggerEmoji');
+  });
+
   it('labels unknown prompt usages in prompt-history without confusing them with empty prompts', async () => {
     const { repos, run } = await botRuntime();
     await repos.config.set('bot_prompt_version/usage/unrecorded', JSON.stringify({ schemaVersion: 1, appId: 'cli_a', taskId: 'unrecorded' }));

@@ -1218,6 +1218,21 @@ it('edits a custom Claude agent gateway for an existing bot and saves its model 
 });
 
 
+it('displays a saved reaction emoji and lets the operator clear it', async () => {
+  const user = userEvent.setup();
+  const bot = { ...mockBot, reactionTriggerEmoji: 'THUMBSUP' };
+  vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [bot], listeningDisabled: false });
+  vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+  vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+  const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue({ configured: true, bots: [mockBot], listeningDisabled: false });
+  renderWithClient(<BotManagement selectedAppId={bot.appId} onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={mockAgents}/>);
+  const input = await screen.findByLabelText('触发表情') as HTMLInputElement;
+  expect(input.value).toBe('THUMBSUP');
+  await user.clear(input);
+  await user.click(screen.getByRole('button', { name: '保存配置' }));
+  await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ reactionTriggerEmoji: '' })));
+});
+
 it('defaults busy triage off and saves the enabled bot setting', async () => {
   const user = userEvent.setup();
   vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [mockBot], listeningDisabled: false });

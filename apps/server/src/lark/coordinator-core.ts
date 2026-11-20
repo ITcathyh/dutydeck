@@ -28,12 +28,20 @@ import type { LarkGroup, LarkTask } from './coordinator.js';
 import { parseCardTask } from './persisted-card-task.js';
 import { larkTaskAgentAllowlistConfigured } from './task-agent.js';
 import { loadLarkTaskEvents } from './card-renderer.js';
+import { ACKNOWLEDGEMENT_REACTION_EMOJI } from './reaction-records.js';
 
 // 飞书消息协调器 · 公共层：实例状态与构造、各层共用的权限判定和工具函数。分层说明见 coordinator.ts。
 
 export type LarkCommandPrompt = { lineage?: import('./task-inbox.js').LarkInboxRecord['lineage']; prompt: string; suggestion?: string; materialPrompt?: string; launchOptions?: LarkLaunchOptions; epoch?: number; steer?: boolean };
 
 export const larkCardChannel = (appId: string) => `lark-card:${appId}`;
+
+/** 人类任务使用显式成员名单，旧配置只有邮箱名单时才按邮箱判断。托管群由群策略判断。 */
+export function larkHumanTaskAllowed(config: StoredLarkConfig, openId: string, emails: string[]): boolean {
+  const { allowedUsers, allowedEmails } = config;
+  if (allowedUsers?.length) return allowedUsers.some(user => user.openId === openId);
+  return !allowedEmails?.length || emails.some(email => allowedEmails.includes(email));
+}
 export type LarkRelaunchAction = 'run_in_new_session' | 'rerun_in_new_session';
 /**
  * 「在新会话中执行」的持久化认领，键按 App + 原消息 + 轮次：重复点击、重复投递、重启后的重复回调读到的都是这一条。
@@ -589,7 +597,7 @@ export abstract class LarkCoordinatorCore {
           await this.clearAcknowledgementReaction({ event, acknowledgement });
           return;
         }
-        acknowledgement.reactionId = (await this.service.addReaction(larkMessageAnchor(event), 'OK')).reactionId;
+        acknowledgement.reactionId = (await this.service.addReaction(larkMessageAnchor(event), ACKNOWLEDGEMENT_REACTION_EMOJI)).reactionId;
         if (acknowledgement.clearRequested || this.stopped) await this.clearAcknowledgementReaction({ event, acknowledgement });
       } catch (error) { this.log.warn({ error, messageId: event.messageId }, '发送飞书确认表情失败，继续处理消息'); }
     })();

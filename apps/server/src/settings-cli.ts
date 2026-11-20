@@ -80,7 +80,7 @@ export const botFields = {
   permissionMode: ['ask', 'approve-reads', 'full-trust'], fullTrustConfirmed: 'boolean',
   roleTitle: 'string', roleScope: 'string',
   preInjectPrompt: 'string', verificationCommand: 'string', listening: 'boolean',
-  mentionPolicy: mentionPolicies, defaultGroupParticipation: collaborationParticipationModes,
+  mentionPolicy: mentionPolicies, defaultGroupParticipation: collaborationParticipationModes, reactionTriggerEmoji: 'string',
   p2pMode: ['chat', 'thread'], groupReplyMode: [...groupReplyModes, 'auto'],
   idleCompactEnabled: 'boolean', idleCompactHours: 'integer',
   groupToolsEnabled: 'boolean', groupToolsAllowSend: 'boolean',

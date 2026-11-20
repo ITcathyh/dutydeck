@@ -1,4 +1,5 @@
 import { ReplyPolishSettings, replyPolishTimeoutValue } from './ReplyPolishSettings';
+import { ReactionTriggerSetting } from './ReactionTriggerSetting';
 import { InboxDispositions } from './InboxDispositions';
 import { botDetailFields, focusSettingField } from '../settings-search';
 import { AgentModelSettings } from './AgentModelSettings';
@@ -71,6 +72,7 @@ function initialDraft(bot: LarkBotConfig): BotDraft {
     replyPolishModel: bot.replyPolishModel ?? '',
     replyPolishTimeoutSeconds: String((bot.replyPolishTimeoutMs ?? 60_000) / 1000),
     listening: bot.listening ?? true,
+    reactionTriggerEmoji: bot.reactionTriggerEmoji ?? '',
     groupToolsEnabled: bot.groupToolsEnabled ?? false,
     groupToolsAllowSend: bot.groupToolsAllowSend ?? false,
     memoryEnabled: bot.memoryEnabled ?? (bot.defaultGroupParticipation === 'selective'),
@@ -291,6 +293,7 @@ export function BotManagement({
       replyPolishModel: draft.replyPolishModel,
       replyPolishTimeoutMs: replyPolishTimeoutValue(draft.replyPolishTimeoutSeconds),
       listening: draft.listening,
+      reactionTriggerEmoji: draft.reactionTriggerEmoji,
       groupToolsEnabled: draft.groupToolsEnabled,
       groupToolsAllowSend: draft.groupToolsAllowSend,
       memoryEnabled: draft.memoryEnabled,
@@ -892,6 +895,7 @@ export function BotManagement({
                 </div>
 
                 <ReplyPolishSettings appId={activeAppId} agents={agents} value={currentDraft} onChange={updateCurrentDraft}/>
+                <ReactionTriggerSetting value={currentDraft.reactionTriggerEmoji} onChange={reactionTriggerEmoji => updateCurrentDraft({ reactionTriggerEmoji })}/>
 
                 <div className="space-y-3 border-t border-subtle pt-4">
                   <h4 className="text-caption font-semibold text-primary">会话记忆</h4>
