@@ -10,6 +10,9 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { deciderMetaOf, type CollaborationScenarioSnapshot } from '@dutydeck/shared';
+import { builtinScenarioRegistry } from '../plugins/builtin-scenarios.test-helpers.js';
+import { ScenarioProviderCaller } from '../plugins/scenario-providers.js';
+import { ScenarioRegistry, scenarioPackDigest } from '../plugins/scenario-registry.js';
 import { PluginHost } from '../plugins/host.js';
 import { PluginRuntimeHooks } from '../plugins/integration.js';
 import { prepareSkillPrompt } from '../skill-delivery.js';
@@ -438,6 +441,93 @@ describe('插件 hook 对群协作的后台会话', () => {
   });
 });
 
+it.each([
+  ['same source', source, 'a-alert'],
+  ['different sources', otherBot, 'alarm']
+] as const)('runs exactly one overlapping direct pack in ID order with %s', async (_label, firstSource, chosen) => {
+  const builtins = await builtinScenarioRegistry();
+  const alarm = builtins.get('alarm')!;
+  const scenarios = new ScenarioRegistry();
+  scenarios.add([...builtins.list()]);
+  const pack = { ...alarm.pack, id: 'a-alert', title: '另一套告警初筛' };
+  scenarios.add([{ ...alarm, pack, digest: scenarioPackDigest(pack) }]);
+  const h = await createAlarmHarness({ participation: 'off', scenarios });
+  cleanups.push(h.close);
+  await h.subscribe({ sources: [{ appId: source.appId }], levels: ['P0'] });
+  const duty = await h.repos.collaboration.getDuty(h.scope);
+  const binding = duty.scenarios!.alarm!;
+  await h.repos.collaboration.updateDuty(h.scope, { expectedRevision: duty.revision, scenarios: {
+    'a-alert': { ...binding, params: { ...binding.params, sources: [{ appId: firstSource.appId }] } }
+  } }, SCENARIO_REQUESTER);
+  const alert = h.fromBot(source, { messageId: 'om_overlapping', content: text(newAlert) });
+  await h.receive(alert);
+  await h.settle(alert.messageId);
+  expect(h.dispatched.map(event => event.scenario?.packId)).toEqual([chosen]);
+  expect(h.prompts).toHaveLength(1);
+});
+
+it('resolves open-ID history senders from message details once per sender, and explains unresolved senders', async () => {
+  const h = await harness({ now: T0 });
+  for (const [messageId, bot] of [['om_source_one', source], ['om_source_two', source], ['om_unknown_one', otherBot], ['om_unknown_two', otherBot]] as const) {
+    h.fromBot(bot, { messageId, content: text(`P0 ${messageId}`) });
+    h.messages.set(messageId, { ...h.messages.get(messageId)!, sender: { id: bot.openId, idType: 'open_id', type: 'app' } });
+  }
+  const getMessage = vi.spyOn(h.service, 'getMessage').mockImplementation(async id => {
+    if (id.startsWith('om_unknown')) throw new Error('message detail unavailable');
+    return { ...h.messages.get(id)!, sender: { id: source.appId, idType: 'app_id', type: 'app' } };
+  });
+  const result = await h.participation.previewScenario(h.scope, 'alarm', { params: { sources: [{ appId: source.appId }], levels: ['P0'] } });
+  expect(result).toMatchObject({ status: 'ok', matched: 2, skipped: 2, messages: [
+    { messageId: 'om_unknown_two', matched: false, detail: '无法确认这条消息的来源机器人' },
+    { messageId: 'om_unknown_one', matched: false, detail: '无法确认这条消息的来源机器人' },
+    { messageId: 'om_source_two', matched: true, detail: '命中场景规则' },
+    { messageId: 'om_source_one', matched: true, detail: '命中场景规则' }
+  ] });
+  expect(getMessage.mock.calls.map(([id]) => id)).toEqual(['om_source_one', 'om_unknown_one']);
+  expect(await h.repos.collaboration.listDecisions(h.scope)).toEqual([]);
+  expect(h.calls).toEqual([]);
+});
+
+it.each(['match', 'dedupe'] as const)('previews declarative direct rules without calling the %s provider', async use => {
+  const builtins = await builtinScenarioRegistry();
+  const alarm = builtins.get('alarm')!;
+  const scenarios = new ScenarioRegistry();
+  scenarios.add([...builtins.list()]);
+  const match = vi.fn(async () => ({ matched: false, dedupeKey: 'provider-key' }));
+  const pack = { ...alarm.pack, id: 'a-alert', title: '插件告警',
+    ...(use === 'match' ? { trigger: { ...alarm.pack.trigger, match: { ...alarm.pack.trigger.match, provider: 'stateful' } } }
+      : { dedupe: { provider: 'stateful' } }) };
+  scenarios.add([{ ...alarm, pack, digest: scenarioPackDigest(pack), providers: new Map([
+    ['stateful', new ScenarioProviderCaller('plugin-alert', { id: 'stateful', match })]
+  ]) }]);
+  const h = await createAlarmHarness({ participation: 'off', scenarios });
+  cleanups.push(h.close);
+  const params = { sources: [{ appId: source.appId }], levels: ['P0'] };
+  const duty = await h.repos.collaboration.getDuty(h.scope);
+  await h.repos.collaboration.updateDuty(h.scope, { expectedRevision: duty.revision, scenarios: {
+    'a-alert': { enabled: true, params, requesterId: SCENARIO_REQUESTER, packVersion: pack.version }
+  } }, SCENARIO_REQUESTER);
+  const alert = h.fromBot(source, { messageId: 'om_plugin_match', content: text(newAlert) });
+  h.fromBot(source, { messageId: 'om_no_keyword', content: text('P1 another alert') });
+
+  const candidate = { messageId: alert.messageId, matched: true, reason: 'participation_observes',
+    detail: '这个场景还要经插件判断，预演不调用插件' };
+  expect(await h.participation.previewScenario(h.scope, pack.id, { params })).toMatchObject({
+    status: 'ok', matched: 1, skipped: 1, messages: [{ messageId: 'om_no_keyword', matched: false }, candidate]
+  });
+  expect(await h.participation.previewScenario(h.scope, 'alarm', { params })).toMatchObject({
+    status: 'ok', matched: 1, skipped: 1, messages: [{ matched: false }, {
+      ...candidate, detail: '排在前面的场景还要经插件判断，预演不调用插件'
+    }]
+  });
+  expect(match).not.toHaveBeenCalled();
+
+  await h.receive(alert);
+  await h.settle(alert.messageId);
+  expect(match).toHaveBeenCalledOnce();
+  expect(h.dispatched.map(event => event.scenario?.packId)).toEqual(use === 'match' ? [] : [pack.id]);
+});
+
 it('previews a direct draft against the live gate without sending or reserving anything', async () => {
   const clock = { now: T0 };
   const h = await harness(clock);
@@ -514,6 +604,22 @@ it('adds bounded preview samples to the enable card and lets confirmation procee
   expect(await h.repos.collaboration.getDuty(h.scope)).toMatchObject({ scenarios: { alarm: { enabled: true } } });
 });
 
+
+it('labels direct samples that need a plugin as candidates on the enable card', async () => {
+  const h = await harness({ now: T0 });
+  const cards = new LarkConfirmCards({ repository: h.repos.collaboration, readConfig: async () => h.config, serviceFor: () => h.service });
+  cards.register('scenario:fixture', { authorize: async () => true, apply: async () => '已开启' });
+  await cards.request({ kind: 'scenario:fixture', scope: h.scope, requesterId: SCENARIO_REQUESTER, replyTo: { messageId: 'om_candidate_card' },
+    payload: { enabled: true }, title: '开启场景', summary: '确认设置',
+    preview: async () => ({ status: 'ok', mode: 'direct', limit: 50, matched: 1, skipped: 0, messages: [{
+      messageId: 'om_candidate', at: new Date(T0).toISOString(), senderKind: 'bot', excerpt: 'P0 示例', matched: true,
+      reason: 'participation_observes', detail: '这个场景还要经插件判断，预演不调用插件'
+    }] }) });
+  const card = callsTo(h, 'reply', 'om_candidate_card')[0]?.input as Parameters<typeof buildLarkCard>[0];
+  expect(card.elements?.find(el => el.element_id === 'scenario_preview_summary')?.content).toContain('符合预演条件 1 条');
+  expect(JSON.stringify(card.elements?.find(el => el.element_id === 'scenario_preview_samples')))
+    .toContain('候选 · 这个场景还要经插件判断，预演不调用插件');
+});
 
 it('trims preview examples before a large confirmation card crosses the request budget', async () => {
   const h = await harness({ now: T0 });

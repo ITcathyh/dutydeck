@@ -287,6 +287,18 @@ describe('Composer 排队任务', () => {
 
   const task = (id: string, prompt: string) => ({ id, sessionId: 's1', prompt, status: 'queued', createdAt: '', updatedAt: '' });
 
+  it('keeps Cancel available when a legacy Skill selection cannot be restored', async () => {
+    const onCancelQueued = vi.fn();
+    const onEditQueued = vi.fn();
+    render(<Composer {...baseProps} queuedTasks={[{ ...task('t1', '旧任务'), canEditQueued: false }, task('t2', '新任务')]}
+      onCancelQueued={onCancelQueued} onEditQueued={onEditQueued}/>);
+    expect(screen.getAllByRole('button', { name: '编辑' })).toHaveLength(1);
+    await userEvent.click(screen.getByRole('button', { name: '编辑' }));
+    expect(onEditQueued).toHaveBeenCalledWith('t2');
+    await userEvent.click(screen.getByRole('button', { name: '取消排队：旧任务' }));
+    expect(onCancelQueued).toHaveBeenCalledWith('t1');
+  });
+
   it('渲染排队列表与条数', () => {
     render(<Composer {...baseProps} queuedTasks={[task('t1', '第一条'), task('t2', '第二条')]}/>);
     expect(screen.getByText('待执行指令')).toBeTruthy();

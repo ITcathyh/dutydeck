@@ -385,3 +385,21 @@ it('previews unsaved FAQ parameters as candidates only and bounds paginated hist
   expect(h.dispatch).not.toHaveBeenCalled();
   expect(await h.repository.listDecisions(scope)).toEqual([]);
 });
+
+it('skips human FAQ history when the bot is denied group observation', async () => {
+  const authorize = vi.fn(async () => false);
+  const h = await harness({ extra: { authorize } });
+  const input = message('om_without_observe', '订单服务怎么发布');
+  h.service.listChatMessages.mockResolvedValue({ items: [{
+    messageId: input.messageId, chatId: scope.chatId, createTime: input.createTime,
+    messageType: input.messageType, rawContent: input.content, sender: { id: input.senderOpenId, type: 'user' },
+    mentions: [], deleted: false, updated: false
+  }], hasMore: false, pageToken: undefined });
+  const params = { topics: ['订单服务'], docs: ['orders.md'] };
+  expect(await h.participation.previewScenario(scope, 'team-faq', { params })).toMatchObject({
+    status: 'ok', matched: 0, skipped: 1, messages: [{ matched: false, reason: 'access_denied', detail: expect.stringContaining('允许它读取群聊内容') }]
+  });
+  expect(authorize).toHaveBeenCalledWith(scope, undefined, 'observe');
+  expect(h.decide).not.toHaveBeenCalled();
+  expect(h.context).not.toHaveBeenCalled();
+});

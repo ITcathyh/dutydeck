@@ -9,7 +9,7 @@ import App from './App';
 import { AuthGate } from './components/AuthGate';
 import { useDockStore } from './store';
 import { resetDrafts } from './draft-store';
-import { composerDraftKey, readComposerDraft, resetComposerDrafts } from './composer-draft';
+import { composerDraftKey, readComposerDraft, resetComposerDrafts, updateComposerDraft } from './composer-draft';
 import type { EventWindow } from './event-history';
 import { shortcutDefinitions } from './useKeyboardShortcuts';
 import { toastStore } from './useToasts';
@@ -1460,6 +1460,45 @@ describe('App pending composer mutations', () => {
       await userEvent.click(screen.getByRole('button', { name: '加入队列' }));
       await waitFor(() => expect(send).toHaveBeenCalledWith('s1', '/file /tmp/current.md\n\n/file /tmp/source notes.md\n\n新的指令', 'queue', [], expect.any(String)));
     }
+  });
+
+  it.each(['skill only', 'files and text'] as const)('restores explicit queued Skills even with %s', async kind => {
+    setup();
+    const review = '/skills/review/SKILL.md';
+    const check = '/skills/check/SKILL.md';
+    const auto = '/skills/auto/SKILL.md';
+    const skillOnly = kind === 'skill only';
+    const queued = { ...queuedTask('q1'), prompt: skillOnly ? '请按所选 Skill 执行。' : '/file /tmp/original.md\n\n原本的任务' };
+    vi.mocked(api.tasks).mockResolvedValue([queued]);
+    const cancel = vi.spyOn(api, 'cancelQueued').mockResolvedValue({
+      ...queued, status: 'cancelled', skillRequests: [review, check],
+      skillDeliveries: [
+        { name: 'review', path: review, source: 'workspace', digest: 'review', mode: 'prompt', status: 'replaced' },
+        { name: 'check', path: check, source: 'workspace', digest: 'check', mode: 'prompt' },
+        { name: 'auto', path: auto, source: 'plugin', digest: 'auto', mode: 'prompt', required: true }
+      ]
+    });
+    const send = vi.spyOn(api, 'send').mockResolvedValue({ accepted: true, task: queuedTask('edited') });
+    renderApp();
+    const input = await screen.findByRole<HTMLTextAreaElement>('textbox', { name: '消息' });
+    if (!skillOnly) act(() => updateComposerDraft(composerDraftKey('s1'), { text: '已有草稿', references: [
+      { id: `skill-${review}`, kind: 'skill', label: '已选 review', value: review }
+    ] }));
+    await userEvent.click(await screen.findByRole('button', { name: '编辑' }));
+    expect(await screen.findByRole('button', { name: '移除引用 check' })).toBeTruthy();
+    expect(cancel).toHaveBeenCalledWith('s1', 'q1');
+    expect(screen.queryByRole('button', { name: '移除引用 auto' })).toBeNull();
+    if (!skillOnly) {
+      expect(screen.getByRole('button', { name: '移除引用 已选 review' })).toBeTruthy();
+      expect(screen.queryByRole('button', { name: '移除引用 review' })).toBeNull();
+      expect(screen.getByRole('button', { name: '移除引用 original.md' })).toBeTruthy();
+      expect(input.value).toBe('已有草稿\n\n原本的任务');
+    } else {
+      expect(screen.getByRole('button', { name: '移除引用 review' })).toBeTruthy();
+    }
+    await userEvent.click(screen.getByRole('button', { name: '加入队列' }));
+    await waitFor(() => expect(send).toHaveBeenCalledWith('s1',
+      skillOnly ? queued.prompt : '/file /tmp/original.md\n\n已有草稿\n\n原本的任务', 'queue', [review, check], expect.any(String)));
   });
 
   it.each(['text', 'references', 'new references', 'unchanged', 'failure', 'session'] as const)('preserves the appropriate draft after a delayed send: %s', async change => {

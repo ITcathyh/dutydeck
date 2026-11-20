@@ -70,11 +70,8 @@ export class LarkScenarios {
     }).sort((a, b) => a.entry.pack.id < b.entry.pack.id ? -1 : a.entry.pack.id > b.entry.pack.id ? 1 : 0);
   }
 
-  /**
-   * 来源消息过不过这个包的匹配：direct 来源 → 消息类型 → 文字包含任一参数值（空列表不匹配）→ 正则 → provider，任一步不过就不匹配，不留记录。
-   * 正则或 provider 出错、超时时返回 abstained。包声明了去重 provider 时，取它 match 返回的 dedupeKey。
-   */
-  async match(entry: RegisteredScenarioPack, binding: ScenarioBinding, message: ScenarioMessage, context?: { scope: { appId: string; chatId: string }; cwd?: string }): Promise<ScenarioMatch> {
+  /** 只按包声明的来源、消息类型、关键字和正则匹配，预演与实时共用。 */
+  async matchRules(entry: RegisteredScenarioPack, binding: ScenarioBinding, message: ScenarioMessage): Promise<ScenarioMatch> {
     const { pack } = entry;
     if (pack.mode === 'direct' && !scenarioTriggerSources(pack, binding).some(source => source.appId === message.senderAppId)) {
       return { matched: false, detail: '不是这个场景的来源机器人' };
@@ -94,6 +91,15 @@ export class LarkScenarios {
         return { matched: true, abstained: `匹配正则出错：${errorText(error)}` };
       }
     }
+    return { matched: true };
+  }
+
+  /** 实时匹配在声明式规则通过后调用匹配和去重 provider。 */
+  async match(entry: RegisteredScenarioPack, binding: ScenarioBinding, message: ScenarioMessage, context?: { scope: { appId: string; chatId: string }; cwd?: string }): Promise<ScenarioMatch> {
+    const rules = await this.matchRules(entry, binding, message);
+    if (!rules.matched || 'abstained' in rules) return rules;
+    const { pack } = entry;
+    const match = pack.trigger.match;
     let dedupeKey: string | undefined;
     for (const id of new Set([match?.provider, pack.dedupe && 'provider' in pack.dedupe ? pack.dedupe.provider : undefined])) {
       if (!id) continue;

@@ -114,7 +114,7 @@ function QueuedTasks({ tasks, cancellingTaskId, steeringTaskId, injectingTaskId,
     <div className="max-h-32 overflow-y-auto">{tasks.map((task, index) => <div key={task.id || `pending-${index}`} className="group flex flex-wrap items-center gap-2 px-3.5 py-1.5 text-caption text-secondary hover:bg-hover">
       <span className="min-w-0 basis-full truncate sm:flex-1 sm:basis-auto">{task.prompt}</span>
       <span className="shrink-0 text-caption text-subtle">{blocked ? '被审批阻塞' : '排队中'}</span>
-      {onEdit && <Button size="md" variant="ghost" disabled={frozen || !task.id} onClick={() => onEdit(task.id)}>编辑</Button>}
+      {onEdit && task.canEditQueued !== false && <Button size="md" variant="ghost" disabled={frozen || !task.id} onClick={() => onEdit(task.id)}>编辑</Button>}
       {/* 「立即插话」把这条送进正在执行的那一轮，不打断它；Agent 不支持时这条仍在排队。 */}
       {onInject && <Button size="md" variant="ghost" disabled={frozen} onClick={() => onInject(task.id)}>{injectingTaskId === task.id ? '正在插话' : '立即插话'}</Button>}
       {/* 「打断当前任务并执行」会掐掉正在跑的那一步，属于契约 §9 的主要交互：40px，不走 sm 豁免。 */}

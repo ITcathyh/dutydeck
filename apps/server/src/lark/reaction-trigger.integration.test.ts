@@ -1,8 +1,9 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CollaborationAction } from '@dutydeck/shared';
+import { LarkServiceError } from './service.js';
 import { createAlarmHarness, SCENARIO_BOT, SCENARIO_MEMBER, SCENARIO_REQUESTER } from './scenario-pack.test-helpers.js';
 
 const messageId = 'om_reacted';
@@ -26,10 +27,12 @@ async function harness(options: Parameters<typeof createAlarmHarness>[0] = {}) {
 }
 
 describe('reaction task confirmation', () => {
-  it('ignores the default-off state, mismatched emoji and unknown members', async () => {
+  it('ignores the default-off state, mismatched emoji and members blocked by group policy', async () => {
     const h = await harness();
     await h.coordinator.handleReaction(messageId, emoji, SCENARIO_REQUESTER, { ...h.config, reactionTriggerEmoji: undefined });
     await h.trigger(SCENARIO_REQUESTER, 'SMILE');
+    const binding = (await h.groupManager.groupAccess(h.config.appId, h.scope.chatId))!;
+    await h.groupManager.save(h.config.appId, h.scope.chatId, { expectedRevision: binding.revision, patch: { accessOverride: { mode: 'owner_only', principalIds: [] } } });
     await h.trigger('ou_outsider');
     expect(h.outbound()).toHaveLength(0);
     expect(await h.records()).toHaveLength(0);
@@ -89,6 +92,57 @@ describe('reaction task confirmation', () => {
     expect(h.prompts).toHaveLength(1);
     expect(h.calls).toContainEqual(expect.objectContaining({ method: 'update', input: expect.objectContaining({ messageId: record.receipt, statusLabel: '已开始' }) }));
     expect(h.authorizations).toContainEqual(expect.objectContaining({ actor: SCENARIO_REQUESTER, action: 'task.create' }));
+  });
+
+  it.each(['edited', 'recalled', 'missing', 'upstream missing'] as const)('rejects a confirmation after the source is %s', async change => {
+    const h = await harness();
+    await h.trigger();
+    const [record] = await h.records();
+    const before = h.messages.get(messageId)!;
+    const revised = '补上修改后的发布说明';
+    if (change === 'missing') vi.spyOn(h.service, 'getMessage').mockRejectedValueOnce(new LarkServiceError('LARK_MESSAGE_NOT_FOUND', 'Message not found', 404));
+    else if (change === 'upstream missing') vi.spyOn(h.service, 'getMessage').mockRejectedValueOnce(new LarkServiceError('LARK_REQUEST_FAILED', 'Message not found', 400, { upstreamCode: 230001 }));
+    else h.messages.set(messageId, { ...before, ...(change === 'edited'
+      ? { rawContent: JSON.stringify({ text: revised }), updated: true } : { deleted: true }) });
+
+    const explanation = '原消息在发卡后被修改或撤回，没有开始处理。需要的话请取消表情后重新点一次。';
+    await expect(h.click(record!)).resolves.toMatchObject({ type: 'error', content: expect.stringContaining(explanation) });
+    expect((await h.records())[0]?.status).toBe('failed');
+    expect(h.calls).toContainEqual(expect.objectContaining({ method: 'update', input: expect.objectContaining({
+      messageId: record?.receipt, state: 'failed', elements: expect.arrayContaining([expect.objectContaining({ content: expect.stringContaining(explanation) })])
+    }) }));
+    expect(await h.mappings()).toEqual([]);
+    expect(h.prompts).toEqual([]);
+
+    if (change === 'edited') {
+      await Promise.all([h.trigger(), h.trigger()]);
+      const records = await h.records();
+      expect(records).toHaveLength(2);
+      const next = records.find(item => item.id !== record!.id)!;
+      expect(next.receipt).not.toBe(record?.receipt);
+      expect(JSON.stringify(h.outbound().at(-1)?.input)).toContain(revised);
+      await expect(h.click(next)).resolves.toMatchObject({ type: 'success' });
+      await expect.poll(() => h.prompts.length).toBe(1);
+      expect(h.prompts[0]).toContain(revised);
+      await h.settle((await h.mappings())[0]!.externalId);
+    }
+  });
+
+  it('accepts live reaction and confirmation actors when the group member list is unavailable', async () => {
+    const h = await harness();
+    const lookup = vi.spyOn(h.groupManager as unknown as { isMember(): Promise<boolean> }, 'isMember')
+      .mockRejectedValue(new Error('群成员列表不可用'));
+    await h.trigger();
+    const [record] = await h.records();
+    expect(record?.receipt).toBeDefined();
+    expect(lookup).not.toHaveBeenCalled();
+    await expect(h.click(record!)).resolves.toMatchObject({ type: 'success' });
+    lookup.mockRestore();
+    expect((await h.inboxRecord(`reaction_${record!.id}`))?.event).toMatchObject({ senderOpenId: SCENARIO_REQUESTER, parentId: messageId });
+    expect(h.authorizations.filter(call => call.action === 'task.create').slice(0, 2)).toEqual([
+      { actor: SCENARIO_REQUESTER, action: 'task.create', memberObserved: true },
+      { actor: SCENARIO_REQUESTER, action: 'task.create', memberObserved: true }
+    ]);
   });
 
   it('lets the current group policy block a requester whose access was revoked after the card was sent', async () => {

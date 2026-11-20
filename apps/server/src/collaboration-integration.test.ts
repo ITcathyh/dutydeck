@@ -1,9 +1,9 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import '../../../tests/support/short-acpx-reply-drain.js';
-import { agentConfigSchema, canonicalExecutionJson, installationOwnerTaskActor, RuntimeError, type AgentDriver } from '@dutydeck/shared';
+import { agentConfigSchema, canonicalExecutionJson, installationOwnerTaskActor, RuntimeError, validateScenarioPack, type AgentDriver } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime, type RuntimeOptions } from '@dutydeck/runtime';
 import { createAutomationIntegration } from './automation-integration.js';
@@ -11,10 +11,13 @@ import { CollaborationBackground } from './collaboration-background.js';
 import { ScheduleExecutor } from './schedule-executor.js';
 import { CollaborationDelivery } from './collaboration-delivery.js';
 import { createCollaborationIntegration } from './collaboration-integration.js';
+import { ScenarioRegistry, scenarioPackDigest } from './plugins/scenario-registry.js';
+import { ScenarioProviderCaller } from './plugins/scenario-providers.js';
 import { LarkGroupManager } from './lark/group-management.js';
 import { readLarkConfig, saveLarkConfig } from './lark/config.js';
 import { LarkAgentToolCapabilityRegistry, LarkAgentToolsService, type AgentGroupToolError } from './lark/agent-tools.js';
 import { LarkMessageCoordinator } from './lark/coordinator.js';
+import type { LarkChatMessage } from './lark/service.js';
 import type { LarkMessageEvent } from './lark/listener.js';
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -30,7 +33,7 @@ async function eventually(check: () => Promise<boolean>) {
   for (let count = 0; count < 100; count++) { if (await check()) return; await new Promise(resolve => setTimeout(resolve, 10)); }
   throw new Error('Condition did not converge');
 }
-async function fixture(options: { realAcp?: boolean; admitTask?: RuntimeOptions['admitTask']; members?: string[]; stopDriver?(sessionId: string): Promise<void>; controlWait?(): Promise<void> } = {}) {
+async function fixture(options: { realAcp?: boolean; scenarios?: ScenarioRegistry; admitTask?: RuntimeOptions['admitTask']; members?: string[]; stopDriver?(sessionId: string): Promise<void>; controlWait?(): Promise<void> } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'collaboration-wiring-'));
   const repos = createRepositories(join(directory, 'test.db'), { newDatabaseAuthority: 'ledger_v1' });
   const agent = agentConfigSchema.parse({ id: 'agent', name: 'Agent', command: options.realAcp ? process.execPath : 'fake', ...(options.realAcp ? { args: [resolve('tests/fixtures/mock-acp-agent.mjs')], timeout: 2 } : {}), protocol: 'acp', cwd: directory, permissionMode: 'full-trust' });
@@ -46,7 +49,7 @@ async function fixture(options: { realAcp?: boolean; admitTask?: RuntimeOptions[
     getUserEmails: async () => [],
     getChatPreflightInfo: async () => ({ name: '文档协作', description: '讨论资料进度' }),
     listMessages: vi.fn(async () => ({ items: [], hasMore: false })),
-    listChatMessages: vi.fn(async () => ({ items: [], hasMore: false })),
+    listChatMessages: vi.fn(async () => ({ items: [] as LarkChatMessage[], hasMore: false })),
     addReaction: vi.fn(async () => ({ reactionId: 'reaction' })), deleteReaction: vi.fn(async () => {}), listOwnReactions: vi.fn(async () => []),
     // 定时产出现在以带按钮的卡片发送，正文在 elements 里。
     send: vi.fn(async (_input: { chatId: string; elements?: unknown[] }) => ({ messageId: 'om_result', chatId: scope.chatId })),
@@ -81,7 +84,7 @@ async function fixture(options: { realAcp?: boolean; admitTask?: RuntimeOptions[
       } satisfies AgentDriver;
     }
   });
-  collaboration = createCollaborationIntegration({ repositories: repos, runtime, groups, workspaceRoot: directory, client: () => client as any });
+  collaboration = createCollaborationIntegration({ repositories: repos, runtime, groups, workspaceRoot: directory, client: () => client as any, scenarios: options.scenarios });
   await runtime.initialize([agent]);
   let clock = new Date();
   collaboration.scheduler.options.now = () => clock;
@@ -124,6 +127,34 @@ it('delivers a verified capacity successor once and continues future schedule oc
     await f.collaboration.scheduler.tick();
     expect(f.client.send).toHaveBeenCalledTimes(2);
   } finally { vi.useRealTimers(); }
+});
+
+it('previews model candidates against saved group read policy without refreshing or writing', async () => {
+  const scenarios = new ScenarioRegistry();
+  const pack = validateScenarioPack(JSON.parse(await readFile(resolve('plugins/team-faq/scenarios/team-faq.json'), 'utf8'))).pack!;
+  scenarios.add([{ pack, digest: scenarioPackDigest(pack), plugin: 'team-faq', builtin: false, scope: 'global',
+    providers: new Map([['runbook', new ScenarioProviderCaller('team-faq', { id: 'runbook', context: async () => ({ items: [], missing: [] }) })]]) }]);
+  const f = await fixture({ scenarios });
+  const settings = await f.repos.collaboration.getSettings(scope);
+  await f.repos.collaboration.updateSettings(scope, { expectedRevision: settings.revision, participation: 'selective' }, 'ou_alice');
+  f.client.listChatMessages.mockResolvedValue({ hasMore: false, items: [{
+    messageId: 'om_faq', chatId: scope.chatId, createTime: String(Date.now()), messageType: 'text',
+    rawContent: JSON.stringify({ text: '订单服务怎么发布？' }), sender: { type: 'user', id: 'ou_alice' },
+    mentions: [], deleted: false, updated: false
+  }] });
+  const preview = () => f.collaboration.participation.previewScenario(scope, pack.id, { params: { topics: ['订单服务'] } });
+  expect(await preview()).toMatchObject({ status: 'ok', matched: 1 });
+  await f.groups.save(scope.appId, scope.chatId, { expectedRevision: f.group.binding!.revision,
+    patch: { groupToolsOverride: { read: 'deny', discover: 'inherit', send: 'inherit' } } });
+  const refresh = vi.spyOn(f.groups, 'sync');
+  const write = vi.spyOn(f.repos.config, 'set');
+  const policy = vi.spyOn(f.groups, 'authorize');
+  expect(await preview()).toMatchObject({ status: 'ok', matched: 0, messages: [{ reason: 'access_denied' }] });
+  expect(policy).toHaveBeenCalledWith(scope.appId, scope.chatId, undefined, 'group_tools.read', undefined,
+    expect.objectContaining({ installationOwner: true, readOnly: true }));
+  expect(refresh).not.toHaveBeenCalled();
+  expect(write).not.toHaveBeenCalled();
+  expect(await f.repos.collaboration.listDecisions(scope)).toEqual([]);
 });
 
 it('previews work and collaboration independently with real group policy and no side effects', async () => {

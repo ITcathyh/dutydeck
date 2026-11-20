@@ -173,9 +173,10 @@ function previewElements(card: LarkReplyInput, preview: ScenarioPreview): LarkCa
   const elements = card.elements!;
   const summaryId = 'scenario_preview_summary';
   const panelId = 'scenario_preview_samples';
+  const hasCandidates = preview.status === 'ok' && (preview.mode === 'model' || preview.messages.some(item => item.matched && item.reason === 'participation_observes'));
   const summary = preview.status === 'unavailable' ? preview.message
     : preview.messages.length === 0 ? '群里暂无可预演的历史消息。'
-    : `按最近 ${preview.messages.length} 条消息预演：${preview.mode === 'model' ? '候选' : '会接手'} ${preview.matched} 条，${preview.mode === 'model' ? '未入选' : '不会接手'} ${preview.skipped} 条。`;
+    : `按最近 ${preview.messages.length} 条消息预演：${preview.mode === 'model' ? '候选' : hasCandidates ? '符合预演条件' : '会接手'} ${preview.matched} 条，${hasCandidates ? '未入选' : '不会接手'} ${preview.skipped} 条。`;
   const rows = preview.status === 'ok' ? [...preview.messages] : [];
   // 确保两类结果都有样例，再补最新的消息。
   const firstMatched = rows.findIndex(row => row.matched);
@@ -185,7 +186,7 @@ function previewElements(card: LarkReplyInput, preview: ScenarioPreview): LarkCa
   const summaryElement = markdownElement(summaryId, summary + (preview.status === 'ok' && preview.note ? `
 ${preview.note}` : ''));
   const sampleElements = samples.map((row, index) => {
-    const label = row.matched ? preview.status === 'ok' && preview.mode === 'model' ? '候选' : '会接手' : '跳过';
+    const label = row.matched ? row.reason === 'participation_observes' || preview.status === 'ok' && preview.mode === 'model' ? '候选' : '会接手' : '跳过';
     // 用普通文本显示群正文，防止群消息被解释成卡片链接或 @。
     return { tag: 'div', element_id: `scenario_preview_sample_${index}`, text: { tag: 'plain_text', content:
       `${row.at} · ${previewSenderLabels[row.senderKind]} · ${label} · ${neutralizeCardTags(clipCardField(row.detail, 120))}

@@ -88,13 +88,14 @@ export function createCollaborationIntegration(options: CollaborationIntegration
   };
   const scheduleAuthorize: CollaborationAuthorization = (scope, actorId, action) => authorize(scope, actorId, action, false, true);
   const previewAuthorize: CollaborationAuthorization = (scope, actorId, action) => authorize(scope, actorId, action, true);
-  const scopeGrant = async (scope: CollaborationScope, action: 'observe' | 'deliver', settingsRepository: Pick<CollaborationRepository, 'getSettings'> = repos.collaboration) => {
+  const scopeGrant = async (scope: CollaborationScope, action: 'observe' | 'deliver',
+    settings: () => CollaborationSettings | Promise<CollaborationSettings> = () => repos.collaboration.getSettings(scope), readOnly = false) => {
     try {
-      const settings = await settingsRepository.getSettings(scope);
-      if (settings.participation === 'off' || (action === 'deliver' && settings.notificationsPaused)) return false;
-      await live(scope);
+      const { participation, notificationsPaused } = await settings();
+      if (participation === 'off' || (action === 'deliver' && notificationsPaused)) return false;
+      await live(scope, readOnly);
       // The owner enabled participation either for this group or in the Bot defaults.
-      return policy(scope, installationOwnerTaskActor, action === 'observe' ? 'group_tools.read' : 'group_tools.send');
+      return policy(scope, installationOwnerTaskActor, action === 'observe' ? 'group_tools.read' : 'group_tools.send', readOnly);
     } catch { return false; }
   };
   const readConfig = async (appId: string, chatId?: string, readOnly = false) => {
@@ -131,6 +132,7 @@ export function createCollaborationIntegration(options: CollaborationIntegration
     withDelivery: (scope, actionId, send) => deliveries.run(scope, actionId, send),
     repository: roleParticipationRepo, decider, readConfig, serviceFor: client, readMemory: options.readMemory, usageRefusal: options.usageRefusal, log: options.log, scenarios: options.scenarios,
     readPreviewSettings: async scope => roleParticipationSettings(await effectiveSettings(await stored.collaboration.getSettings(scope), true)),
+    authorizePreviewObservation: (scope, settings) => scopeGrant(scope, 'observe', () => settings, true),
     readTeamContext: (scope, query) => teamContext.read(scope, query),
     authorizeTeamContext: (scope, context) => teamContext.authorize(scope, context),
     // 发起人本人能对机器人说话就能处理自己的请求；替别人确认要本群操作员或管理员（run.interrupt 的现有授权）。
@@ -148,7 +150,7 @@ export function createCollaborationIntegration(options: CollaborationIntegration
     },
     readParticipationUsage: (scope, since) => participationUsage(stored.usage, scope, since),
     authorize: async (scope, actorId, action, followup) => {
-      if (action === 'observe' || action === 'deliver') return scopeGrant(scope, action, roleParticipationRepo);
+      if (action === 'observe' || action === 'deliver') return scopeGrant(scope, action, () => roleParticipationRepo.getSettings(scope));
       if (!actorId || !followup || !await authorize(scope, actorId, 'write')) return false;
       return followup.createdBy === actorId || followup.ownerId === actorId || await authorize(scope, actorId, 'manage');
     },

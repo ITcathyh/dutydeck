@@ -31,7 +31,7 @@ import { executeScheduleCommand, scheduleRequestCard } from './schedule-command.
 import { isBotSenderType, renderGroupMention } from './card-mentions.js';
 import { larkExecutionIdentity, larkMemoryEnabled, larkPermissionMode, readLarkConfig, saveLarkConfig, type StoredLarkConfig } from './config.js';
 import type { LarkMessageResource } from './message-content.js';
-import { LarkServiceError } from './service.js';
+import { LarkServiceError, type LarkChatMessage } from './service.js';
 import { isLarkDeterministicFailure } from './api-gate.js';
 import { larkRecoveryNoticeExpired, larkRedispatchMaxAgeMs } from './turn-redispatch.js';
 import { busyProgressSummary, eventsForRuntimeTask, loadLarkTaskWindow, renderLarkResultElements, steeringOutcomeText, renderLarkRecordExport, terminalTaskStates, type LarkCardElement } from './card-renderer.js';
@@ -164,6 +164,7 @@ function larkSessionConfigFailure(error: unknown, input: { command: string; labe
 /** 实时路径上清理已忽略入站记录的最小间隔。 */
 const LARK_IGNORED_PRUNE_INTERVAL_MS = 3_600_000;
 const reactionTaskConfirmKind = (appId: string) => `reaction_task.${appId}`;
+const reactionBodyDigest = (message: LarkChatMessage) => jsonSha256([message.messageType, message.rawContent]);
 
 export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
   async initializeWorkflows(config: StoredLarkConfig) {
@@ -761,10 +762,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     const { store, participation } = this.workflowOptions;
     const confirmations = participation?.confirmations;
     if (this.stopped || !this.inbox || !store?.compareAndSet || !confirmations || !config.listening || emoji !== config.reactionTriggerEmoji) return;
-    const dedupeKey = jsonSha256([messageId, actor]);
-    const claimKey = `lark.reaction-trigger.${config.appId}.${dedupeKey}`;
     try {
-      if (await store.get(claimKey)) return;
       const message = await withLarkContextReadTimeout(signal => this.service.getMessage(messageId, signal), '读取表情来源消息');
       const { chatId, sender, messageType, threadId, rootId } = message;
       if (message.messageId !== messageId || !chatId || message.deleted || !sender.id
@@ -772,6 +770,10 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         this.log.info({ appId: config.appId, messageId, actor }, '表情来源不是可处理的文本消息');
         return;
       }
+      const bodyDigest = reactionBodyDigest(message);
+      const dedupeKey = jsonSha256([messageId, actor, bodyDigest]);
+      const claimKey = `lark.reaction-trigger.${config.appId}.${dedupeKey}`;
+      if (await store.get(claimKey)) return;
       const chatType = await this.chatModeResolver?.(config.appId, chatId) === 'p2p' ? 'p2p' : 'group';
       const current = await readLarkConfig(store, config.appId);
       if (this.stopped || !current?.listening || current.reactionTriggerEmoji !== emoji) return;
@@ -786,13 +788,13 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       const excerpt = escapeLarkPromptEcho(clipCodePoints(prompt.replace(/\s+/g, ' '), 199)) || '（原消息没有文字。）';
       const requester = (chatType === 'group' ? renderGroupMention(actor) : undefined) ?? escapeLarkPromptEcho(actor);
       const topicRoot = threadId ? rootId ?? messageId : undefined;
-      // 协作历史会清掉旧确认卡。只保留无正文的幂等键，避免清理后又为同一个人发卡。
+      // 协作历史会清掉旧确认卡。只保留无正文的幂等键，避免清理后又为同一个人、同一版正文发卡。
       if (this.stopped || !await store.compareAndSet(claimKey, undefined, '1')) return;
       await confirmations.request({
         kind: reactionTaskConfirmKind(config.appId), scope: { appId: config.appId, chatId }, requesterId: actor,
         replyTo: { messageId, threadId }, dedupeKey, title: '确认处理原消息', confirmLabel: '开始处理',
         summary: `${requester} 想让机器人处理这条消息。\n\n> ${excerpt}`,
-        payload: { chatType, ...(topicRoot ? { rootId: topicRoot } : {}) }
+        payload: { chatType, bodyDigest, ...(topicRoot ? { rootId: topicRoot } : {}) }
       });
     } catch (error) {
       this.log.warn({ error, appId: config.appId, messageId, actor }, '处理飞书表情触发失败');
@@ -800,7 +802,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
   }
 
   private async reactionTaskAllowed(config: StoredLarkConfig, chatId: string, chatType: string, actor: string) {
-    const decision = chatType === 'group' ? await this.groupManager?.authorize(config.appId, chatId, actor, 'task.create') : undefined;
+    const decision = chatType === 'group' ? await this.groupManager?.authorize(config.appId, chatId, actor, 'task.create', undefined, { memberObserved: true }) : undefined;
     if (decision) {
       if (!decision.allowed) return false;
     } else {
@@ -823,6 +825,15 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         const config = await readLarkConfig(this.workflowOptions.store, appId);
         if (this.stopped || !this.inbox || !record.cardMessageId || !config?.listening) throw new LarkServiceError('LARK_REACTION_TASK_UNAVAILABLE', '确认暂不可用，请稍后重试。', 409);
         const originalId = record.replyTo.messageId;
+        const original = await withLarkContextReadTimeout(signal => this.service.getMessage(originalId, signal), '核对表情来源消息')
+          .catch((error: unknown) => {
+            if (error instanceof LarkServiceError
+              && (error.code === 'LARK_MESSAGE_NOT_FOUND' || error.statusCode === 404 || error.upstreamCode === 230001)) return undefined;
+            throw error;
+          });
+        if (!original || original.deleted || original.messageId !== originalId || reactionBodyDigest(original) !== record.payload.bodyDigest) {
+          throw new LarkServiceError('LARK_REACTION_SOURCE_CHANGED', '原消息在发卡后被修改或撤回，没有开始处理。需要的话请取消表情后重新点一次。', 409);
+        }
         const event: LarkMessageEvent = {
           messageId: `reaction_${record.id}`, chatId: record.scope.chatId, chatType: String(record.payload.chatType),
           ...(record.payload.rootId ? { rootId: String(record.payload.rootId) } : {}), threadId: record.replyTo.threadId, parentId: originalId,

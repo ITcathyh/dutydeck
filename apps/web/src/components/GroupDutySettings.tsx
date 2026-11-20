@@ -49,15 +49,16 @@ const missingSourceParams = (scenario: CollaborationScenario, pack: PackDraft) =
   ? Object.entries(scenario.params).filter(([name, param]) => param.type === 'bot_list' && param.role === 'source' && !listItems(pack.params[name] ?? '').length).map(([name]) => name)
   : [];
 
-function ScenarioPreview({ appId, chatId, id, params }: { appId: string; chatId: string; id: string; params: Record<string, unknown> }) {
+function ScenarioPreview({ appId, chatId, id, params, draftRevision, savedRevision }: { appId: string; chatId: string; id: string; params: Record<string, unknown>; draftRevision: number; savedRevision: number }) {
   const [count, setCount] = useState(String(scenarioPreviewLimits.default));
   const limit = Number(count);
-  const key = JSON.stringify([appId, chatId, id, params, limit]);
+  const key = JSON.stringify([appId, chatId, id, params, limit, draftRevision, savedRevision]);
   const preview = useMutation({
     mutationFn: (_key: string) => collaborationApi.previewScenario(appId, chatId, id, { params, limit })
   });
   const result = preview.variables === key ? preview.data : undefined;
   const error = preview.variables === key ? preview.error : null;
+  const hasCandidates = result?.status === 'ok' && (result.mode === 'model' || result.messages.some(item => item.matched && item.reason === 'participation_observes'));
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
@@ -65,7 +66,7 @@ function ScenarioPreview({ appId, chatId, id, params }: { appId: string; chatId:
           <span>预演条数</span>
           <Input type="number" min={1} max={scenarioPreviewLimits.max} className="w-24" value={count} onChange={event => setCount(event.target.value)} />
         </label>
-        <Button variant="secondary" loading={preview.isPending} disabled={!Number.isInteger(limit) || limit < 1 || limit > scenarioPreviewLimits.max} onClick={() => preview.mutate(key)}>
+        <Button variant="secondary" loading={preview.isPending && preview.variables === key} disabled={!Number.isInteger(limit) || limit < 1 || limit > scenarioPreviewLimits.max} onClick={() => preview.mutate(key)}>
           预演
         </Button>
       </div>
@@ -74,15 +75,16 @@ function ScenarioPreview({ appId, chatId, id, params }: { appId: string; chatId:
       {result?.status === 'ok' && (
         <div className="space-y-2 rounded-lg border border-subtle p-3 text-meta" aria-live="polite">
           <p className="font-semibold text-primary">{result.messages.length
-            ? `按最近 ${result.messages.length} 条消息预演：${result.mode === 'model' ? '候选' : '会接手'} ${result.matched} 条，${result.mode === 'model' ? '未入选' : '不会接手'} ${result.skipped} 条。`
+            ? `按最近 ${result.messages.length} 条消息预演：${result.mode === 'model' ? '候选' : hasCandidates ? '符合预演条件' : '会接手'} ${result.matched} 条，${hasCandidates ? '未入选' : '不会接手'} ${result.skipped} 条。`
             : '群里暂无可预演的历史消息。'}</p>
+          <p className="text-subtle">接话人和其他场景按已保存的设置计算。</p>
           {result.note && <p className="text-subtle">{result.note}</p>}
           {result.messages.length > 0 && <ul className="divide-y divide-subtle">
             {result.messages.map(item => <li key={item.messageId} className="space-y-1 py-2">
               <div className="text-subtle">
                 <time dateTime={item.at}>{new Date(item.at).toLocaleString()}</time>
                 {' · '}{item.senderKind === 'bot' ? '机器人' : item.senderKind === 'human' ? '真人' : '未知发送者'}
-                {' · '}{item.matched ? result.mode === 'model' ? '候选' : '会接手' : '跳过'}{' · '}{item.detail}
+                {' · '}{item.matched ? item.reason === 'participation_observes' || result.mode === 'model' ? '候选' : '会接手' : '跳过'}{' · '}{item.detail}
               </div>
               <div className="break-words text-primary">{item.excerpt || '（无正文）'}</div>
             </li>)}
@@ -97,11 +99,12 @@ function ScenarioPreview({ appId, chatId, id, params }: { appId: string; chatId:
 export function GroupDutySettings({ appId, chatId, botName, duty, scenarios, onSaved }: { appId: string; chatId: string; botName?: string; duty: CollaborationDuty; scenarios: CollaborationScenario[]; onSaved(): Promise<unknown> }) {
   const saved = draftOf(duty, scenarios, appId);
   const [draft, setDraft] = useState<Editing | null>(null);
+  const [draftRevision, setDraftRevision] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ tone: 'success' | 'warning'; text: string } | null>(null);
   const base = draft?.base ?? saved;
   const value = draft?.value ?? saved;
-  const update = (patch: Partial<Draft>) => { setDraft({ revision: draft?.revision ?? duty.revision, base, value: { ...value, ...patch } }); setNotice(null); };
+  const update = (patch: Partial<Draft>) => { setDraft({ revision: draft?.revision ?? duty.revision, base, value: { ...value, ...patch } }); setDraftRevision(revision => revision + 1); setNotice(null); };
   // 编辑中概览新增了包时，草稿里还没有它，用已保存的值。
   const basePack = (id: string) => base.packs[id] ?? saved.packs[id]!;
   const packOf = (id: string) => value.packs[id] ?? basePack(id);
@@ -190,14 +193,14 @@ export function GroupDutySettings({ appId, chatId, botName, duty, scenarios, onS
                 </Field>
               ))}
             </div>
-            <ScenarioPreview appId={appId} chatId={chatId} id={scenario.id}
+            <ScenarioPreview appId={appId} chatId={chatId} id={scenario.id} draftRevision={draftRevision} savedRevision={duty.revision}
               params={Object.fromEntries(Object.entries(scenario.params).map(([name, param]) =>
                 [name, paramValue(param, pack.params[name] ?? paramText(param, scenario.binding?.params[name]), scenario.binding?.params[name])]))} />
           </div>
         );
       })}
       <div className="flex items-center justify-end gap-2">
-        <Button variant="secondary" disabled={!draft || save.isPending} onClick={() => { setDraft(null); setError(null); }}>放弃修改</Button>
+        <Button variant="secondary" disabled={!draft || save.isPending} onClick={() => { setDraft(null); setDraftRevision(revision => revision + 1); setError(null); }}>放弃修改</Button>
         <Button variant="primary" disabled={!(responderChanged || changedPacks.length) || blocked} loading={save.isPending} onClick={() => { if (draft) save.mutate(draft); }}>
           <Check size={14} className="mr-1.5" />
           保存分工

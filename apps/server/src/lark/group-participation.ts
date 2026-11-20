@@ -12,6 +12,7 @@ import { larkMemoryEnabled, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkCardService, LarkChatMessage } from './service.js';
 import { parseLarkMessageContent } from './message-content.js';
+import { readSenderAppId } from './message-sender.js';
 import { LarkContextBootstrap, observationTime } from './context-bootstrap.js';
 import { decisionInput, participationInput, parseParticipationResult, parseParticipationResponse, scenarioObservations, type ParticipationDecider, type ParticipationFacts, type ParticipationResult } from './readonly-decider.js';
 import { botNameTokens, callsBotName, compactText, decidableSender, evaluateParticipationRules, intrusionCorrection, ownedItems, participationIntentOf, participationRuleReasons, ruleContextOf, stripMentionPlaceholders, TRUSTED_BOT_REF, type ParticipationRule, type RuleFacts, type RuleVerdict } from './participation-rules.js';
@@ -40,6 +41,7 @@ export interface GroupParticipationOptions {
   authorize(scope: CollaborationScope, actorId: string | undefined, action: 'observe' | 'update' | 'deliver', followup?: CollaborationFollowup): Promise<boolean>;
   readConfig(appId: string, chatId?: string, readOnly?: boolean): Promise<StoredLarkConfig | undefined>;
   readPreviewSettings?(scope: CollaborationScope): Promise<CollaborationSettings>;
+  authorizePreviewObservation?(scope: CollaborationScope, settings: CollaborationSettings): Promise<boolean>;
   /** 规则层要读父消息和群成员，确认卡要发卡和刷新；缺这些能力时对应规则不触发、确认卡不可用。 */
   serviceFor(config: StoredLarkConfig): Pick<LarkCardService, 'listChatMessages' | 'sendText' | 'replyText' | 'addReaction' | 'deleteReaction' | 'listOwnReactions'>
     & Partial<Pick<LarkCardService, 'getMessage' | 'getBotOpenId' | 'listChatMembers' | 'reply' | 'update'>>;
@@ -1034,10 +1036,8 @@ export class LarkGroupParticipation {
     if (openId?.startsWith('cli_')) return openId;
     const key = `${config.appId}:${openId ?? ''}`;
     const cached = openId ? this.botApps.get(key) : undefined;
-    const service = this.options.serviceFor(config);
-    if (cached || !service.getMessage) return cached;
-    const sender = (await service.getMessage(larkMessageAnchor(event))).sender;
-    const appId = sender.idType === 'app_id' || sender.id?.startsWith('cli_') ? sender.id : undefined;
+    if (cached) return cached;
+    const appId = await readSenderAppId(this.options.serviceFor(config), larkMessageAnchor(event));
     if (appId && openId) {
       this.botApps.set(key, appId);
       if (this.botApps.size > 1_000) this.botApps.delete(this.botApps.keys().next().value!);
@@ -1165,7 +1165,9 @@ export class LarkGroupParticipation {
     const settings = target.entry.pack.mode === 'model'
       ? await (this.options.readPreviewSettings?.(scope) ?? this.options.repository.getSettings(scope)) : undefined;
     const modelActive = Boolean(settings && activeModes.has(resolveParticipation({ mentionPolicy: config.mentionPolicy, participation: settings.participation }).level));
-    return previewScenario({ scenarios: this.scenarios, scope, config, duty, target, modelActive, service: this.options.serviceFor(config), limit, timeoutMs });
+    const canObserve = settings && modelActive
+      ? await (this.options.authorizePreviewObservation?.(scope, settings) ?? this.options.authorize(scope, undefined, 'observe')) : false;
+    return previewScenario({ scenarios: this.scenarios, scope, config, duty, target, modelActive, canObserve, service: this.options.serviceFor(config), limit, timeoutMs });
   }
 
   /** 群设置页列出的场景包：作用域适用于本机器人的包、本群绑定和状态。 */

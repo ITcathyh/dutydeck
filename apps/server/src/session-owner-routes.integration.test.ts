@@ -8,10 +8,14 @@ const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
 /** 真实 Runtime + 账本；队列暂停领取，消息留在队列里。请求头 x-source 决定授权来源（默认本机所有者）。 */
-async function harness() {
-  const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
+async function harness(skillRequests?: string[], legacy = false) {
+  const repos = createRepositories(':memory:', { newDatabaseAuthority: legacy ? 'legacy' : 'ledger_v1' });
   const prompts: string[] = [];
   const runtime = new DutydeckRuntime(repos, {
+    prepareTaskPrompt: async (_session, prompt) => ({
+      agentPrompt: prompt,
+      skillDeliveries: [{ name: 'auto-skill', path: '/skills/auto/SKILL.md', source: 'plugin', digest: 'digest', mode: 'prompt', required: true }]
+    }),
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit) => {
       const driver: AgentDriver = { isIdle: () => true, hasBackgroundWork: () => false, start: async () => {}, resume: async () => {}, stop: async () => {}, isStopped: async () => true, interrupt: async () => {},
@@ -20,14 +24,26 @@ async function harness() {
     }
   });
   const config: AgentConfig = { id: 'agent', name: 'Agent', command: 'agent-acp', args: [], protocol: 'acp', cwd: '/tmp', env: {}, permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
+  const legacySession = { id: 'legacy_session', agentId: config.id, cwd: config.cwd!, runId: 'legacy_run', state: 'idle' as const, protocol: 'acp' as const,
+    createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+  const legacyTask = { id: 'legacy_task', sessionId: legacySession.id, prompt: '旧任务', status: 'queued',
+    createdAt: legacySession.createdAt, updatedAt: legacySession.updatedAt,
+    executionContext: { agentPrompt: '旧任务', skillDeliveries: [
+      { name: 'review', path: '/skills/review/SKILL.md', source: 'workspace' as const, digest: 'digest', mode: 'prompt' as const }
+    ] } };
+  if (legacy) {
+    await repos.sessions.save(legacySession);
+    await repos.tasks.create!(legacyTask);
+    repos.execution.upgradeLegacy();
+  }
+  runtime.setQueueHeld(true);
   await runtime.initialize([config]);
   const app = await buildApp(runtime, { executionPolicy: { authorize: async (request, _id, _boundary, action) =>
     ({ allowed: true, action, code: 'allowed', reason: '', source: (request.headers['x-source'] as 'owner' | 'group_policy' | undefined) ?? 'owner' }) } });
   cleanups.push(async () => { await app.close(); await runtime.shutdown(); repos.close(); });
-  const session = await runtime.start({ agentId: config.id });
-  const send = async (prompt: string) => (await app.inject({ method: 'POST', url: `/api/sessions/${session.id}/send`, payload: { prompt } })).json().task as { id: string };
-  runtime.setQueueHeld(true);
-  const queued = await send('queued');
+  const session = legacy ? legacySession : await runtime.start({ agentId: config.id });
+  const send = async (prompt: string) => (await app.inject({ method: 'POST', url: `/api/sessions/${session.id}/send`, payload: { prompt, skillRequests } })).json().task as { id: string };
+  const queued = legacy ? legacyTask : await send('queued');
   const status = async (taskId: string) => (await runtime.getTasks(session.id)).find(task => task.id === taskId)?.status;
   expect(await status(queued.id)).toBe('queued');
   return { app, runtime, session, queued, prompts, status };
@@ -45,6 +61,27 @@ describe('owner session routes with the real execution ledger', () => {
     expect(cancelled.statusCode).toBe(200);
     expect(cancelled.json()).toMatchObject({ id: h.queued.id, status: 'cancelled' });
     expect(await h.status(h.queued.id)).toBe('cancelled');
+    expect(h.prompts).toEqual([]);
+  });
+
+  it('returns the original selected skills from the queue ledger on cancellation', async () => {
+    const skillRequests = ['/skills/review/SKILL.md', '/skills/check/SKILL.md'];
+    const h = await harness(skillRequests);
+    const cancelled = await h.app.inject({ method: 'DELETE', url: `/api/sessions/${h.session.id}/queue/${h.queued.id}` });
+    expect(cancelled.statusCode).toBe(200);
+    expect(cancelled.json()).toMatchObject({ id: h.queued.id, status: 'cancelled', skillRequests,
+      skillDeliveries: [expect.objectContaining({ name: 'auto-skill', required: true })] });
+    expect(h.prompts).toEqual([]);
+  });
+
+  it('keeps cancellation available for migrated Skill tasks that have no original selection', async () => {
+    const h = await harness(undefined, true);
+    const sessionUrl = `/api/sessions/${h.session.id}`;
+    const listed = await h.app.inject({ method: 'GET', url: `${sessionUrl}/tasks` });
+    expect(listed.json()).toMatchObject([{ id: h.queued.id, status: 'queued', canEditQueued: false }]);
+    const cancelled = await h.app.inject({ method: 'DELETE', url: `${sessionUrl}/queue/${h.queued.id}` });
+    expect(cancelled.statusCode).toBe(200);
+    expect(cancelled.json()).toMatchObject({ id: h.queued.id, status: 'cancelled', canEditQueued: false });
     expect(h.prompts).toEqual([]);
   });
 

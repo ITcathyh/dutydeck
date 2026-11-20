@@ -193,7 +193,7 @@ export type { LarkAppCreationJob };
 export type MatterDetail = { id: string; title: string; status: 'open' | 'done' | 'cancelled'; sessions: Session[]; schedules: Array<{ id: string; name: string; enabled: boolean }>; originUrl?: string };
 export type Session = Omit<SharedSession, 'state'> & { state: string; matter?: import('@dutydeck/shared').MatterSummary; sourceContext?: SessionSourceContext };
 export type DockEvent = { taskId?: string; attemptId?: string; id: string; sequence: number; type: string; timestamp: string; data: any; raw?: string };
-export type Task = { skillDeliveries?: SkillDeliveryMetadata[]; id: string; sessionId: string; prompt: string; status: string; createdAt: string; updatedAt: string };
+export type Task = { canEditQueued?: false; skillDeliveries?: SkillDeliveryMetadata[]; id: string; sessionId: string; prompt: string; status: string; createdAt: string; updatedAt: string };
 /** 结果未知、现在可以由人处理的一轮：已知事实与三行摘要（服务端生成，与飞书提醒卡同一份文字）。 */
 export type UnknownTask = UnknownTaskFacts & { target: string; prompt: string; factLines: string[] };
 /** 插话结果：injected / startedNewTurn 已送达；moved 表示状态已变化；failed 是否需要核对以 task.status 为准，reconcile_required 不自动重发。 */
@@ -359,7 +359,7 @@ export const api = {
   setSessionModel: (id: string, model: string) => send<Session>('PATCH', `/api/sessions/${id}/config`, { model }),
   setSessionReasoningEffort: (id: string, reasoningEffort: string) => send<Session>('PATCH', `/api/sessions/${id}/config`, { reasoningEffort }),
   setSessionName: (id: string, name: string | null) => send<Session>('PATCH', `/api/sessions/${encodeURIComponent(id)}/name`, { name }),
-  cancelQueued: (id: string, taskId: string) => json<Task>(`/api/sessions/${id}/queue/${taskId}`, { method: 'DELETE' }),
+  cancelQueued: (id: string, taskId: string) => json<Task & { skillRequests?: string[] }>(`/api/sessions/${id}/queue/${taskId}`, { method: 'DELETE' }),
   steerQueued: (id: string, taskId: string) => json<Task>(`/api/sessions/${id}/queue/${taskId}/steer`, { method: 'POST' }),
   injectQueued: (id: string, taskId: string) => json<SteeringResult & { task: Task }>(`/api/sessions/${id}/queue/${taskId}/inject`, { method: 'POST' }),
   botPromptHistory: (appId: string) => json<BotPromptHistory>(`/api/lark/bots/${encodeURIComponent(appId)}/prompt-versions`),

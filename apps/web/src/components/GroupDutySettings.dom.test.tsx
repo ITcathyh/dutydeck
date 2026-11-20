@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ApiError, collaborationApi, type CollaborationDuty, type CollaborationScenario } from '../api';
 import { GroupDutySettings } from './GroupDutySettings';
@@ -131,4 +131,42 @@ it('previews edited parameters before saving and displays the full report', asyn
   fireEvent.click(screen.getByRole('button', { name: '预演' }));
   expect(await screen.findByText('无法读取群历史，请检查 im:message:readonly。')).toBeTruthy();
   expect((screen.getByRole('button', { name: '保存分工' }) as HTMLButtonElement).disabled).toBe(false);
+});
+
+it('clears the preview when the responder or another scenario draft changes', async () => {
+  const preview = vi.spyOn(collaborationApi, 'previewScenario').mockResolvedValue({
+    status: 'ok', mode: 'direct', limit: 50, matched: 1, skipped: 0,
+    messages: [{ messageId: 'one', at: now, senderKind: 'bot', excerpt: '部署通知', matched: true, reason: 'participation_observes',
+      detail: '这个场景还要经插件判断，预演不调用插件' }]
+  });
+  mount(duty(1), [scenario('A', false), scenario('B', true)]);
+  const runPreview = () => fireEvent.click(screen.getAllByRole('button', { name: '预演' })[0]!);
+  runPreview();
+  expect(await screen.findByText('部署通知')).toBeTruthy();
+  fireEvent.change(screen.getByRole('combobox', { name: '接话人' }), { target: { value: 'self' } });
+  expect(screen.queryByText('部署通知')).toBeNull();
+  fireEvent.change(screen.getByRole('combobox', { name: '接话人' }), { target: { value: 'none' } });
+  expect(screen.queryByText('部署通知')).toBeNull();
+  runPreview();
+  expect(await screen.findByText('部署通知')).toBeTruthy();
+
+  fireEvent.change(screen.getByLabelText('B 关键字'), { target: { value: '发布' } });
+  expect(screen.queryByText('部署通知')).toBeNull();
+  runPreview();
+  expect(await screen.findByText('接话人和其他场景按已保存的设置计算。')).toBeTruthy();
+  expect(screen.queryAllByText(/会接手/)).toHaveLength(0);
+  expect(preview).toHaveBeenLastCalledWith('bot', 'group', 'A', { params: { topics: [] }, limit: 50 });
+  fireEvent.click(screen.getByRole('button', { name: '放弃修改' }));
+  expect(screen.queryByText('部署通知')).toBeNull();
+});
+
+it('ignores a preview that returns after a change to a different scenario', async () => {
+  let resolve!: (result: Awaited<ReturnType<typeof collaborationApi.previewScenario>>) => void;
+  const preview = vi.spyOn(collaborationApi, 'previewScenario').mockImplementationOnce(() => new Promise(done => { resolve = done; }));
+  mount(duty(1), [scenario('A', false), scenario('B', true)]);
+  fireEvent.click(screen.getAllByRole('button', { name: '预演' })[0]!);
+  await waitFor(() => expect(preview).toHaveBeenCalledOnce());
+  fireEvent.click(screen.getByRole('checkbox', { name: 'B B' }));
+  await act(async () => resolve({ status: 'unavailable', message: '作废的预演结果' }));
+  expect(screen.queryByText('作废的预演结果')).toBeNull();
 });

@@ -1415,7 +1415,15 @@ export class DutydeckRuntime {
     return this.repos.events.listHistoryTurns(id, from, through);
   }
   getEventWindow(id: string, options?: EventWindowOptions) { return this.repos.events.listWindow(id, options); }
-  async getTasks(id: string) { return (await this.repos.tasks.listBySession(id)).map(task => this.publicTask(task)); }
+  async getTasks(id: string) {
+    return (await this.repos.tasks.listBySession(id)).map(task => {
+      const visible = this.publicTask(task);
+      if (task.status === 'queued' && visible.skillDeliveries?.length && !this.originalSkillRequests(task.id)) {
+        return { ...visible, canEditQueued: false as const };
+      }
+      return visible;
+    });
+  }
   getInboxTasks(id: string) { return this.repos.tasks.getInboxTasks?.(id) ?? this.getTasks(id); }
   async getTaskRecovery(id: string, taskId: string) { return this.readTaskRecovery(id, taskId).recovery; }
 
@@ -3647,6 +3655,11 @@ export class DutydeckRuntime {
     if (driver) await this.stopDriver(ref.sessionId, driver);
     this.scheduleQueue(ref.sessionId);
   }
+  private originalSkillRequests(taskId: string): string[] | undefined {
+    try { return this.repos.execution.getAcceptedTask(taskId)?.request?.skills; }
+    catch (error) { this.options.log?.warn({ error, taskId }, 'Could not read original Skill requests'); }
+  }
+
   async cancelQueued(id: string, taskId: string, actorId?: string, expectedRevision?: number, decisionId = makeId('cancel')) {
     this.assertReady();
     // Cancelling unsubmitted input remains safe even after a failed stop revoked
@@ -3672,7 +3685,11 @@ export class DutydeckRuntime {
       } catch {
         this.queueBlocked.add(id);
       }
-      return this.publicTask(committed.task!);
+      const task = this.publicTask(committed.task!);
+      const skillRequests = this.originalSkillRequests(task.id);
+      if (skillRequests?.length) return { ...task, skillRequests };
+      if (!skillRequests && task.skillDeliveries?.length) return { ...task, canEditQueued: false as const };
+      return task;
     });
   }
   async steerQueued(id: string, taskId: string, actorId?: string, expectedRevision?: number, operationId = makeId('promote')) {

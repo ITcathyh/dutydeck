@@ -536,10 +536,19 @@ export default function App() {
   const cancelQueued = useMutation({ mutationFn: ({ sessionId, taskId }: { sessionId: string; taskId: string; editDraftKey?: string }) => api.cancelQueued(sessionId, taskId), onMutate: ({ sessionId, taskId }) => ({ prompt: qc.getQueryData<Task[]>(['tasks', sessionId])?.find(task => task.id === taskId)?.prompt }), onSuccess: (result, variables, context) => {
     qc.setQueryData<Task[]>(['tasks', variables.sessionId], current => current?.map(task => task.id === result.id ? result : task));
     if (variables.editDraftKey) {
+      if (result.canEditQueued === false) {
+        setActionError('这条待执行指令已取消。原来选择的 Skill 无法恢复。');
+        return;
+      }
       const draft = readComposerDraft(variables.editDraftKey);
       const restored = splitPromptFileReferences(result.prompt);
       const references = new Map(draft.references.map(reference => [reference.id, reference]));
       for (const reference of restored.references) if (!references.has(reference.id)) references.set(reference.id, reference);
+      for (const value of result.skillRequests ?? []) {
+        const id = `skill-${value}`;
+        const label = result.skillDeliveries?.find(skill => skill.path === value || skill.ref === value)?.name ?? value;
+        if (!references.has(id)) references.set(id, { id, kind: 'skill', label, value });
+      }
       updateComposerDraft(variables.editDraftKey, { text: [draft.text, restored.text].filter(text => text.trim()).join('\n\n'), references: [...references.values()] });
       requestAnimationFrame(() => {
         if (useDockStore.getState().activeSessionId !== variables.sessionId) return;
@@ -550,8 +559,8 @@ export default function App() {
       return;
     }
     // 撤销只能把指令重新排到队尾，拿不回原来的任务 ID 和位置，所以 description 必须说清楚，不假装能还原现场。
-    const restorable = context?.prompt?.trim();
-    toastStore.push({ kind: 'success', key: `cancel-queued-${variables.taskId}`, title: '已取消 1 条待执行指令', description: restorable ? '恢复会把这条指令重新排到队列末尾，不会回到原来的位置。' : undefined, action: restorable ? { label: '重新加入队尾', run: () => api.send(variables.sessionId, restorable, 'queue', undefined, requestId()).then(() => { void qc.invalidateQueries({ queryKey: ['tasks', variables.sessionId] }); }) } : undefined });
+    const restorable = result.canEditQueued === false ? undefined : context?.prompt?.trim();
+    toastStore.push({ kind: 'success', key: `cancel-queued-${variables.taskId}`, title: '已取消 1 条待执行指令', description: restorable ? '恢复会把这条指令重新排到队列末尾，不会回到原来的位置。' : undefined, action: restorable ? { label: '重新加入队尾', run: () => api.send(variables.sessionId, restorable, 'queue', result.skillRequests, requestId()).then(() => { void qc.invalidateQueries({ queryKey: ['tasks', variables.sessionId] }); }) } : undefined });
   }, onError: error => { setActionError(error.message); toastStore.push({ kind: 'error', key: 'cancel-queued', title: '取消待执行指令失败', description: error.message }); } });
   const steerQueued = useMutation({ mutationFn: ({ sessionId, taskId }: { sessionId: string; taskId: string }) => api.steerQueued(sessionId, taskId), onSuccess: (_result, variables) => { setActionError(undefined); void qc.invalidateQueries({ queryKey: ['tasks', variables.sessionId] }); }, onError: error => setActionError(error.message) });
   const injectQueued = useMutation({ mutationFn: ({ sessionId, taskId }: { sessionId: string; taskId: string }) => api.injectQueued(sessionId, taskId), onSuccess: (result, variables) => { setActionError(undefined); toastStore.push(steeringToast(result, result.task)); void qc.invalidateQueries({ queryKey: ['tasks', variables.sessionId] }); }, onError: error => setActionError(error.message) });

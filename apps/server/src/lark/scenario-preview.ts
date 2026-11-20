@@ -1,5 +1,5 @@
 import { SCENARIO_RECORD, scenarioPreviewLimits, type CollaborationDuty, type CollaborationScope,
-  type ScenarioBinding, type ScenarioMessage, type ScenarioPreview, type ScenarioPreviewMessage } from '@dutydeck/shared';
+  type ScenarioBinding, type ScenarioMessage, type ScenarioPack, type ScenarioPreview, type ScenarioPreviewMessage } from '@dutydeck/shared';
 import { clipCardField } from './card-elements.js';
 import type { StoredLarkConfig } from './config.js';
 import { observationTime } from './context-bootstrap.js';
@@ -9,6 +9,7 @@ import type { LarkScenarios } from './group-scenarios.js';
 import { responderAnnouncementOf } from './group-responder.js';
 import { isLarkPermissionError, larkHistoryScopes, larkPermissionNextStep } from './history-permission.js';
 import { parseLarkMessageContent } from './message-content.js';
+import { readSenderAppId } from './message-sender.js';
 import { stripMentionPlaceholders } from './participation-rules.js';
 import { decideDirect, directReason, type DirectWindow } from './scenario-direct.js';
 import { humanScenarioMessage } from './scenario-model.js';
@@ -18,6 +19,7 @@ import { LarkServiceError, type LarkCardService, type LarkChatMessage } from './
 type ScenarioEntry = { entry: ReturnType<LarkScenarios['entries']>[number]; binding: ScenarioBinding };
 const result = (matched: boolean, reason: Disposition['reason'], detail: string) => ({ matched, reason, detail });
 const skip = (reason: Disposition['reason'], detail: string) => result(false, reason, detail);
+const needsPlugin = (pack: ScenarioPack) => Boolean(pack.trigger.match?.provider || pack.dedupe && 'provider' in pack.dedupe);
 
 export const previewSenderLabels = { human: '真人', bot: '机器人', unknown: '未知发送者' } as const;
 
@@ -59,8 +61,9 @@ export async function previewScenario(input: {
   scope: CollaborationScope;
   duty: CollaborationDuty;
   config: StoredLarkConfig;
-  service: Pick<LarkCardService, 'listChatMessages'> & Partial<Pick<LarkCardService, 'getBotOpenId'>>;
+  service: Pick<LarkCardService, 'listChatMessages'> & Partial<Pick<LarkCardService, 'getBotOpenId' | 'getMessage'>>;
   modelActive: boolean;
+  canObserve: boolean;
   limit?: number;
   timeoutMs?: number;
 }): Promise<ScenarioPreview> {
@@ -77,6 +80,7 @@ export async function previewScenario(input: {
   const earlier = open.filter(item => item.entry.pack.id < pack.id);
   const window: DirectWindow['records'][number][] = [];
   const messages: ScenarioPreviewMessage[] = [];
+  const senderApps = new Map<string, string | undefined>();
   const self: { appId: string; openId?: string } = { appId: config.appId };
   try {
     await withLarkContextReadTimeout(async signal => {
@@ -93,7 +97,7 @@ export async function previewScenario(input: {
         const base = { messageId: item.messageId, at, senderKind, excerpt } as const;
         const outcome = item.deleted ? skip('context_failed', '原消息已撤回')
           : !parsed ? skip('parsing_failed', '无法读取消息正文')
-          : await evaluate(item, senderKind, parsed.text, at);
+          : await evaluate(item, senderKind, parsed.text, at, signal);
         messages.push({ ...base, ...outcome });
       }
     }, '计算场景预演', input.timeoutMs);
@@ -102,42 +106,57 @@ export async function previewScenario(input: {
   }
   const matched = messages.filter(item => item.matched).length;
   return { status: 'ok', mode: pack.mode, limit, matched, skipped: messages.length - matched, messages: messages.reverse(),
-    note: pack.mode === 'model' ? '是否回复由模型逐条判断，预演不调用模型。' : '去重和每小时上限按本次历史样本计算。' };
+    note: pack.mode === 'model' ? '是否回复由模型逐条判断，预演不调用模型。' : needsPlugin(pack) ? undefined : '去重和每小时上限按本次历史样本计算。' };
 
-  async function evaluate(item: LarkChatMessage, kind: ScenarioPreviewMessage['senderKind'], text: string, at: string) {
+  async function evaluate(item: LarkChatMessage, kind: ScenarioPreviewMessage['senderKind'], text: string, at: string, signal: AbortSignal) {
     const sender = item.sender.id;
     if (kind === 'unknown') return skip('identity_failed', '无法确认发送人身份');
     const event = { ...item, chatId: scope.chatId, senderOpenId: kind === 'human' || item.sender.idType === 'open_id' ? sender : undefined,
       mentions: item.mentions.map(mention => ({ openId: mention.id === self.appId ? self.openId ?? self.appId : mention.id })) };
     const selfId = self.openId ?? self.appId;
     const message = humanScenarioMessage(event, text, selfId);
-    const source = kind === 'bot' && (item.sender.idType === 'app_id' || sender?.startsWith('cli_')) ? sender : undefined;
+    let source: string | undefined;
     if (sender === self.appId || self.openId && sender === self.openId) return skip('bot_message', '机器人自己的消息不触发场景');
     if (pack.mode === 'model') {
       if (kind !== 'human') return skip('bot_message', '模型场景只看真人消息');
       if (message.mentionsSelf) return skip('not_addressed', '已 @ 本机器人，按普通请求处理');
       if (!input.modelActive) return skip('not_addressed', '模型场景只在按需或积极参与时生效');
+      if (!input.canObserve) return skip('access_denied', '机器人无法旁听本群。请在机器人设置中开启「允许它读取群聊内容」，并检查本群的「读取工具 (read)」是否允许。');
     } else {
-      if (!source) return skip(kind === 'bot' ? 'bot_message' : 'not_addressed', '不是这个场景的来源机器人');
+      if (kind !== 'bot') return skip('not_addressed', '不是这个场景的来源机器人');
+      if (item.sender.idType === 'app_id' || sender?.startsWith('cli_')) source = sender;
+      else if (sender && senderApps.has(sender)) source = senderApps.get(sender);
+      else {
+        source = await readSenderAppId(service, item.messageId, signal).catch(() => undefined);
+        if (sender) senderApps.set(sender, source);
+      }
+      if (!source) return skip('identity_failed', '无法确认这条消息的来源机器人');
+      if (source === self.appId) return skip('bot_message', '机器人自己的消息不触发场景');
       if (responderAnnouncementOf(text)) return skip('command_handled', '这条消息用于同步群接话人');
       Object.assign(message, { senderKind: 'bot', senderAppId: source } satisfies Partial<ScenarioMessage>);
     }
 
-    const context = { scope, cwd: config.workspace };
-    const match = await scenarios.match(target.entry, target.binding, message, context);
+    const match = await scenarios.matchRules(target.entry, target.binding, message);
     if (!match.matched) return skip('not_addressed', match.detail);
+    let earlierNeedsPlugin = false;
     for (const other of earlier) {
-      const candidate = await scenarios.match(other.entry, other.binding, message, context);
-      if (candidate.matched && (pack.mode === 'direct' || !('abstained' in candidate))) {
-        return skip('not_addressed', `同时命中场景「${other.entry.pack.title}」，按场景顺序由它接手`);
+      const candidate = await scenarios.matchRules(other.entry, other.binding, message);
+      if (!candidate.matched || pack.mode === 'model' && 'abstained' in candidate) continue;
+      if (!('abstained' in candidate) && needsPlugin(other.entry.pack)) {
+        earlierNeedsPlugin = true;
+        continue;
       }
+      return skip('not_addressed', `同时命中场景「${other.entry.pack.title}」，按场景顺序由它接手`);
     }
     if ('abstained' in match) return skip('participation_failed', pack.mode === 'direct' ? directReason(pack, 'abstained') : '场景规则未能完成匹配');
-    if (pack.mode === 'model') return result(true, 'participation_observes', '通过场景规则，等待模型判断');
+    const pluginCandidate = needsPlugin(pack) ? '这个场景还要经插件判断，预演不调用插件'
+      : earlierNeedsPlugin ? '排在前面的场景还要经插件判断，预演不调用插件' : undefined;
+    if (pack.mode === 'model') return result(true, 'participation_observes', pluginCandidate ?? '通过场景规则，等待模型判断');
     const decision = decideDirect({ pack, binding: target.binding, self, sender: { appId: source, openId: message.senderOpenId },
-      text, responderAppId: duty.responder?.appId, window: { records: window, truncated: false }, dedupeKey: match.dedupeKey, now: Date.parse(at) });
+      text, responderAppId: duty.responder?.appId, window: { records: window, truncated: false }, now: Date.parse(at) });
     if (!decision.matched) return skip('bot_message', '不是这个场景的来源机器人');
     if (decision.outcome === 'started') {
+      if (pluginCandidate) return result(true, 'participation_observes', pluginCandidate);
       window.push({ action: 'act', status: 'candidate', createdAt: at, inputSnapshot: { gate: SCENARIO_RECORD, scenario: { packId: pack.id, dedupeKey: decision.dedupeKey } } });
       return result(true, 'participation_handled', '命中场景规则');
     }

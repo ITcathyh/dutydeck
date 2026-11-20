@@ -986,9 +986,10 @@ describe('Bot 执行方式', () => {
     expect([...leader.options].map(option => option.textContent)).toEqual(['选择 Leader Agent', 'Codex', 'Claude', 'claude-trusted（不可用，请重选）']);
   });
 
-  it('按 ID 稳定选取前 8 个 Worker，关闭模式再开启会沿用已保存的小队与指引', async () => {
+  it('跳过旧版 PTY，按 ID 稳定选取前 8 个 Worker，关闭模式再开启会沿用已保存的小队与指引', async () => {
     const user = userEvent.setup();
     const extraAgents: Agent[] = Array.from({ length: 9 }, (_, index) => ({ id: `worker-${9 - index}`, name: `Worker ${9 - index}`, protocol: 'acp', permissionMode: 'ask' }));
+    const legacy: Agent = { id: 'a-legacy', name: 'Legacy PTY', protocol: 'pty', permissionMode: 'ask' };
     let bot: LarkBotConfig = { ...mockBot, groupToolsEnabled: true };
     const config = () => ({ configured: true, bots: [bot], listeningDisabled: false });
     vi.spyOn(api, 'larkConfig').mockImplementation(async () => config());
@@ -998,7 +999,7 @@ describe('Bot 执行方式', () => {
       bot = { ...bot, revision: bot.revision! + 1, executionMode: input.executionMode, leaderAgentId: input.leaderAgentId, workerAgentIds: input.workerAgentIds, leaderSkill: input.leaderSkill };
       return config();
     });
-    renderWithClient(<BotManagement selectedAppId={bot.appId} onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={[...extraAgents, ...mockAgents]}/>);
+    renderWithClient(<BotManagement selectedAppId={bot.appId} onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={[...extraAgents, legacy, ...mockAgents]}/>);
     const mode = await screen.findByRole('switch', { name: 'Leader 模式' });
     await user.click(mode);
     expect(screen.getByText('Leader：Codex。Worker：Codex、Worker 1、Worker 2、Worker 3、Worker 4、Worker 5、Worker 6、Worker 7。')).toBeTruthy();

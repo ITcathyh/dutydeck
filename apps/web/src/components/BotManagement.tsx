@@ -253,7 +253,7 @@ export function BotManagement({
       executionMode: 'layered',
       groupToolsEnabled: true,
       leaderAgentId: currentDraft.leaderAgentId || currentDraft.defaultAgentId,
-      workerAgentIds: currentDraft.workerAgentIds.length ? currentDraft.workerAgentIds : agents.map(agent => agent.id).sort().slice(0, maxLeaderWorkers)
+      workerAgentIds: currentDraft.workerAgentIds.length ? currentDraft.workerAgentIds : agents.filter(agent => agent.protocol !== 'pty').map(agent => agent.id).sort().slice(0, maxLeaderWorkers)
     });
   };
 
