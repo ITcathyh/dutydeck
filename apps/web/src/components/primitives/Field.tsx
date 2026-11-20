@@ -1,4 +1,4 @@
-import { createContext, useContext, useId, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from 'react';
+import { createContext, useContext, useId, type ComponentPropsWithRef, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes } from 'react';
 import { cn } from './cn';
 
 export type FieldProps = {
@@ -73,7 +73,7 @@ export function Input({ className, ...rest }: InputHTMLAttributes<HTMLInputEleme
   />;
 }
 
-export function Textarea({ className, ...rest }: TextareaHTMLAttributes<HTMLTextAreaElement>) {
+export function Textarea({ className, ...rest }: ComponentPropsWithRef<'textarea'>) {
   const field = useFieldControl();
   return <textarea
     {...rest}

@@ -48,6 +48,8 @@ The `terminal.backend` doctor check also runs the tmux version command and creat
 
 Web console: `http://127.0.0.1:4310` (no login for local requests).
 
+Enter your first goal in the Overview composer (“有什么要做的？”), then press Enter or select “发送目标” (Send goal). Select the settings row below the composer to change the Agent, working directory, or permissions. If the directory is outside a Git repository, Dutydeck uses that directory directly and displays a notice.
+
 An interactive foreground start with no readable bot configuration prints `setup`, `doctor` and the actual Web address below the listening address. It does so whenever that condition holds; no “already shown” state is stored. `--json`, non-TTY output and daemon children omit the guidance.
 
 ## Development from source

@@ -1,6 +1,6 @@
 import type { PermissionMode, Session } from './api';
 
-type NewSessionDraft = {
+export type NewSessionDraft = {
   agentId: string;
   cwd: string;
   workspaceMode: 'shared' | 'worktree';

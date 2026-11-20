@@ -204,7 +204,7 @@ dutydeck settings bot set <appId> executionMode=layered leaderAgentId=<agentId> 
 
 ## 🖥️ Web Workbench <a id="web"></a>
 
-Away from Lark, open `http://127.0.0.1:4310`. **Overview** puts what needs your decision first, **Inbox** lets you approve routine requests in place, **Tasks** shows the conversation, tool calls, per-turn diffs and terminal playback (terminal-mode agents), and **Automation** manages schedules; `Ctrl-K` (`⌘K` on macOS) searches tasks and settings. Light and dark themes, and it works on a phone too. The Web UI is currently Chinese-only.
+Away from Lark, open `http://127.0.0.1:4310`. **Overview** lets you send a goal and see what needs your decision. **Inbox** lets you approve routine requests in place, **Tasks** shows the conversation, tool calls, per-turn diffs and terminal playback (terminal-mode agents), and **Automation** manages schedules; `Ctrl-K` (`⌘K` on macOS) searches tasks and settings. Light and dark themes, and it works on a phone too. The Web UI is primarily in Chinese. Overview prompt templates are also available in English.
 
 <p align="center">
   <picture>

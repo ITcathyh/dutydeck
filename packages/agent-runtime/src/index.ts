@@ -14,7 +14,7 @@ import { digest, eventJson, DriverConfigurationLedger, LocalDriverLedger, type E
 import { localOnlyDriverContext } from './driver-context.js';
 import { agentAuthFailure, agentLoginProblem, defaultAgentStatusCheck, type AgentStatusCheck, type AgentUnavailable } from './agent-availability.js';
 import { IdleCpuWindow, IDLE_CPU_MIN_IDLE_MS } from './idle-cpu.js';
-import { WorkspaceManager } from './workspace.js';
+import { isNonGitWorkspace, WorkspaceManager } from './workspace.js';
 import { cachedRepositoryFingerprint, VerificationManager } from './verification.js';
 import { owner, RevokedOperation, SessionMutations, type Owner } from './ownership.js';
 import {
@@ -2447,7 +2447,6 @@ export class DutydeckRuntime {
     const agent = await this.repos.agents.get(input.agentId);
     if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', `Unknown agent: ${input.agentId}`, 404);
     const sourceCwd = input.cwd ?? agent.cwd ?? process.cwd();
-    const workspaceMode = input.workspaceMode ?? 'shared';
     const { configured: initialConfigured, capability } = await this.newSessionCapability(agent, input);
     if (!capability.available) throw new RuntimeError('AGENT_UNAVAILABLE', capability.detail ?? 'Agent unavailable', 503);
     if (capability.protocol === 'pty') {
@@ -2460,6 +2459,10 @@ export class DutydeckRuntime {
     if (input.nativeForkSessionId && (capability.protocol !== 'pty-cli' || !supportsNativeFork(agent))) {
       throw new RuntimeError('FORK_UNSUPPORTED', 'This Agent does not support native session copying', 422);
     }
+    // Decide before writing the session or workspace intent so fallback uses a single identity.
+    const requestedMode = input.workspaceMode ?? 'shared';
+    const workspaceMode = !owned && requestedMode === 'worktree' && input.fallbackToShared === true && await isNonGitWorkspace(sourceCwd)
+      ? 'shared' : requestedMode;
     const terminalBackend = capability.protocol === 'pty-cli' ? await this.options.terminalBackend?.() ?? 'tmux' : undefined;
     const session: Session = { terminalBackend, id: owned?.id ?? makeId('ses'), agentId: agent.id, state: 'created', cwd: sourceCwd, workspaceMode, model: initialConfigured.model, codexProfile: initialConfigured.codexProfile, reasoningEffort: initialConfigured.reasoningEffort, permissionMode: initialConfigured.permissionMode, source: input.source, sourceId: input.sourceId, protocol: capability.protocol, runId: makeId('run'), createdAt: now(), updatedAt: now(), systemPrompt: agent.systemPrompt };
     return this.scoped(session.id, async () => {

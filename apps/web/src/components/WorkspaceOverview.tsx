@@ -1,7 +1,7 @@
 import { MatterDetails } from './MatterDetails';
 import { InboxPanel } from './InboxPanel';
 import { inboxCoveredSessionIds } from '../inbox-model';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { AlertTriangle, Archive, ArrowRight, CheckCircle2, ChevronRight, CircleDot, MessageSquare, Search, Plus, Radio, Settings2 } from 'lucide-react';
 import type { Agent, InboxAction, InboxItem, LarkBotConfig, RunSummary, Session } from '../api';
 import {
@@ -43,6 +43,7 @@ type OverviewProps = {
   view: WorkbenchView;
   onViewChange(view: WorkbenchView): void;
   mode?: 'home' | 'tasks';
+  homeComposer?: ReactNode;
   filters?: WorkspaceListFilters;
   onFiltersChange?(filters: WorkspaceListFilters): void;
   inbox?: WorkspaceInbox;
@@ -181,7 +182,7 @@ function LarkBotsOverview({ bots, agents, loading, agentsLoading, listeningDisab
   </Card>;
 }
 
-export function WorkspaceOverview({ sessions: rawSessions, summaries, agents, loading, agentsLoading = false, larkBots, larkBotsLoading = false, larkListeningDisabled = false, larkBotsFailed = false, larkBotsRetrying = false, onRetryLarkBots, view, onViewChange, mode = 'home', filters, onFiltersChange, inbox, onOpenChanges, onSelect, onSelectAttention, onBulkArchive, onCreate, onOpenAgentSetup, onOpenLarkSetup, onManageBots = onOpenLarkSetup }: OverviewProps) {
+export function WorkspaceOverview({ sessions: rawSessions, summaries, agents, loading, agentsLoading = false, larkBots, larkBotsLoading = false, larkListeningDisabled = false, larkBotsFailed = false, larkBotsRetrying = false, onRetryLarkBots, view, onViewChange, mode = 'home', homeComposer, filters, onFiltersChange, inbox, onOpenChanges, onSelect, onSelectAttention, onBulkArchive, onCreate, onOpenAgentSetup, onOpenLarkSetup, onManageBots = onOpenLarkSetup }: OverviewProps) {
   const sessions = useMemo(() => groupSessionsByMatter(rawSessions, summaries), [rawSessions, summaries]);
   const rawById = useMemo(() => new Map(rawSessions.map(session => [session.id, session])), [rawSessions]);
   const [matterId, setMatterId] = useState<string>();
@@ -230,6 +231,8 @@ export function WorkspaceOverview({ sessions: rawSessions, summaries, agents, lo
         </div>
         <Button variant="secondary" tone="inverse" disabled={createTask.disabled} onClick={createTask.onClick} icon={<Plus size={17}/>}>{createTask.label}</Button>
       </header>
+
+      {home && homeComposer}
 
       {!home && <>
         <div className="flex flex-wrap gap-3">

@@ -24,7 +24,9 @@ import { Composer, type SendMode } from './components/Composer';
 import { busyStates, createTaskAffordance, effectiveStatus } from './components/ui';
 import { Banner, Button, Card, Dialog, IconButton, Spinner } from './components/primitives';
 import { SessionList } from './components/SessionList';
-import { NewSessionModal } from './components/NewSessionModal';
+import { NewSessionDialog } from './components/NewSessionModal';
+import { HomeTaskComposer } from './components/HomeTaskComposer';
+import { useNewSession } from './useNewSession';
 import { SystemPromptModal } from './components/SystemPromptModal';
 import { SessionNameModal } from './components/SessionNameModal';
 import { ConfirmDialog } from './components/ConfirmDialog';
@@ -113,7 +115,6 @@ export default function App() {
   const matchesDesktop = useMediaQuery('(min-width: 768px)');
   const mobile = typeof window !== 'undefined' && typeof window.matchMedia === 'function' && !matchesDesktop;
   const [newOpen, setNewOpen] = useState(false);
-  const [newAgentId, setNewAgentId] = useState<string>();
   const rawSideBySide = useMediaQuery('(min-width: 1536px)');
   const toggleRawPanel = useCallback(() => { if (!rawVisible) captureDialogOpener(); toggleRaw(); }, [rawVisible, toggleRaw]);
   const [archiveConfirm, setArchiveConfirm] = useState(false);
@@ -281,11 +282,17 @@ export default function App() {
 
   const openSettings = (section: ControlCenterSection = 'agents') => openOverlay({ kind: 'settings', section });
   const openLarkSetup = (target?: LarkSetupTarget) => openOverlay({ kind: 'lark-setup', target });
+  const taskCreation = useNewSession({ agents: agents.data ?? [], onCreated: (session, task) => {
+    setRunSummaries(current => ({ ...current, [session.id]: { sessionId: session.id, taskId: task.id, prompt: task.prompt, status: task.status, queuedCount: task.status === 'queued' ? 1 : 0, updatedAt: task.updatedAt || task.createdAt } }));
+    selectSession(session.id);
+    setNewOpen(false);
+    setActionError(undefined);
+  } });
   const openCreateTask = () => openCreateTaskForAgent();
   const openCreateTaskForAgent = (agentId?: string) => {
-    setNewAgentId(agentId);
+    taskCreation.selectInitialAgent(agentId);
     setActionError(undefined);
-    if ((agents.data?.length ?? 0) === 0) {
+    if (!agents.data?.length && !taskCreation.draft.createdSession) {
       openSettings('agents');
       return;
     }
@@ -766,11 +773,11 @@ export default function App() {
             ? <aside aria-label="原始日志" className="ui-side-panel flex w-[420px] shrink-0 flex-col border-l border-code-border bg-code-surface text-code-header-text"><div className="flex h-11 items-center border-b border-code-border px-3 text-caption font-medium"><Terminal size={13} className="mr-2"/>原始日志<span className="ml-auto"><IconButton label="关闭原始日志" onClick={toggleRawPanel}><PanelRightClose size={14}/></IconButton></span></div><RawHistoryContent sessionId={active.id} text={raw} events={completeRawEvents} readComplete={events.loadAll} loading={events.loadingRaw} error={events.rawError} retry={() => void events.loadAll()}/></aside>
             : <Dialog open onClose={toggleRawPanel} label="原始日志" size="lg"><Dialog.Header><Terminal size={16}/><h2 className="text-title font-semibold">原始日志</h2><span className="ml-auto"><IconButton label="关闭原始日志" onClick={toggleRawPanel}><PanelRightClose size={16}/></IconButton></span></Dialog.Header><Dialog.Body className="bg-code-surface"><RawHistoryContent sessionId={active.id} text={raw} events={completeRawEvents} readComplete={events.loadAll} loading={events.loadingRaw} error={events.rawError} retry={() => void events.loadAll()}/></Dialog.Body></Dialog>)}
         </div>
-      : <WorkspaceOverview mode={primaryNav === 'tasks' ? 'tasks' : 'home'} filters={primaryNav === 'home' ? { query: '', project: '' } : { query: taskFilters.query, project: taskFilters.project }} onFiltersChange={filters => updateTaskFilters(filters)} inbox={{ items: inbox.data?.items ?? [], loading: inbox.isLoading, failed: inbox.isError, onRetry: () => void inbox.refetch(), call: api.inboxAction, onSettled: () => { void qc.invalidateQueries({ queryKey: ['inbox'] }); void qc.invalidateQueries({ queryKey: ['sessions'] }); void qc.invalidateQueries({ queryKey: ['run-summaries'] }); } }} onSelectAttention={handleSelectAttention} onOpenChanges={(id: string) => { selectSession(id); setTaskViews(current => ({ ...current, [id]: { ...current[id], tab: 'changes', changesVisited: true, inspector: false, inspectorChosen: true } })); }} sessions={visibleSessions} summaries={runSummaries} agents={agents.data ?? []} loading={sessions.isLoading} agentsLoading={agents.isLoading} larkBots={larkConfig.data?.bots ?? []} larkBotsLoading={larkConfig.isLoading} larkListeningDisabled={larkConfig.data?.listeningDisabled ?? false} larkBotsFailed={larkConfig.isError} larkBotsRetrying={larkConfig.isFetching} onRetryLarkBots={() => void larkConfig.refetch()} view={primaryNav === 'home' ? 'all' : workbenchView} onViewChange={view => { setWorkbenchView(view); setPrimaryNav('tasks'); }} onSelect={selectSession} onBulkArchive={ids => { captureDialogOpener(); bulkArchive.reset(); setBulkArchiveIds(ids); }} onCreate={openCreateTask} onOpenAgentSetup={() => openSettings('agents')} onOpenLarkSetup={() => openLarkSetup('new')} onManageBots={() => setPrimaryNav('bots')}/>}
+      : <WorkspaceOverview homeComposer={<HomeTaskComposer creation={taskCreation} onOpenSettings={openCreateTask}/>} mode={primaryNav === 'tasks' ? 'tasks' : 'home'} filters={primaryNav === 'home' ? { query: '', project: '' } : { query: taskFilters.query, project: taskFilters.project }} onFiltersChange={filters => updateTaskFilters(filters)} inbox={{ items: inbox.data?.items ?? [], loading: inbox.isLoading, failed: inbox.isError, onRetry: () => void inbox.refetch(), call: api.inboxAction, onSettled: () => { void qc.invalidateQueries({ queryKey: ['inbox'] }); void qc.invalidateQueries({ queryKey: ['sessions'] }); void qc.invalidateQueries({ queryKey: ['run-summaries'] }); } }} onSelectAttention={handleSelectAttention} onOpenChanges={(id: string) => { selectSession(id); setTaskViews(current => ({ ...current, [id]: { ...current[id], tab: 'changes', changesVisited: true, inspector: false, inspectorChosen: true } })); }} sessions={visibleSessions} summaries={runSummaries} agents={agents.data ?? []} loading={sessions.isLoading} agentsLoading={agents.isLoading} larkBots={larkConfig.data?.bots ?? []} larkBotsLoading={larkConfig.isLoading} larkListeningDisabled={larkConfig.data?.listeningDisabled ?? false} larkBotsFailed={larkConfig.isError} larkBotsRetrying={larkConfig.isFetching} onRetryLarkBots={() => void larkConfig.refetch()} view={primaryNav === 'home' ? 'all' : workbenchView} onViewChange={view => { setWorkbenchView(view); setPrimaryNav('tasks'); }} onSelect={selectSession} onBulkArchive={ids => { captureDialogOpener(); bulkArchive.reset(); setBulkArchiveIds(ids); }} onCreate={openCreateTask} onOpenAgentSetup={() => openSettings('agents')} onOpenLarkSetup={() => openLarkSetup('new')} onManageBots={() => setPrimaryNav('bots')}/>}
     </main>
     </div>
     {showTabBar && <MobileTabBar current={primaryNav} onNavigate={setPrimaryNav} inboxCount={inbox.data?.items.length ?? 0}/>}
-    {newOpen && <NewSessionModal open initialAgentId={newAgentId} onClose={() => setNewOpen(false)} onOpenAgentSetup={() => { setNewOpen(false); openSettings('agents'); }} onCreated={(session, task) => { setRunSummaries(current => ({ ...current, [session.id]: { sessionId: session.id, taskId: task.id, prompt: task.prompt, status: task.status, queuedCount: task.status === 'queued' ? 1 : 0, updatedAt: task.updatedAt || task.createdAt } })); void qc.invalidateQueries({ queryKey: ['sessions'] }); selectSession(session.id); setNewOpen(false); setActionError(undefined); }} agents={agents.data ?? []} capabilities={systemCapabilities.data}/>}
+    {newOpen && <NewSessionDialog open creation={taskCreation} onClose={() => setNewOpen(false)} onOpenAgentSetup={() => { setNewOpen(false); openSettings('agents'); }} agents={agents.data ?? []} capabilities={systemCapabilities.data}/>}
     {overlay?.kind === 'lark-setup' && <Suspense fallback={overlayFallback('正在打开 Bot 绑定向导…')}><LarkConfigModal key={overlay.target === 'new' ? 'new' : overlay.target?.appId ?? 'manage'} target={overlay.target} field={overlay.field} onLeaveGuardChange={registerSettingsLeaveGuard} agents={agents.data ?? []} onClose={() => { closeOverlay(); void qc.invalidateQueries({ queryKey: ['lark-config'] }); }}/></Suspense>}
     {overlay?.kind === 'settings' && <Suspense fallback={overlayFallback('正在打开设置与接入…')}><ControlCenterModal open onLeaveGuardChange={registerSettingsLeaveGuard} initialSection={overlay.section} field={overlay.field} agents={agents.data ?? []} legacyBots={larkConfig.data?.bots ?? []} larkListeningDisabled={larkConfig.data?.listeningDisabled ?? false} larkBotsLoading={larkConfig.isLoading} larkBotsFailed={larkConfig.isError} larkBotsRetrying={larkConfig.isFetching} onRetryLarkBots={() => void larkConfig.refetch()} authRequired={authStatus.data?.required} onClose={closeOverlay} onCreateTask={agentId => { closeOverlay(); openCreateTaskForAgent(agentId); }} onOpenLarkSetup={openLarkSetup} onOpenGroups={() => openOverlay({ kind: 'groups' })} onOpenSchedules={() => openOverlay({ kind: 'automation' })}/></Suspense>}
     {overlay?.kind === 'groups' && <Suspense fallback={overlayFallback('正在打开群配置…')}><GroupPolicyModal open onClose={closeOverlay}/></Suspense>}
