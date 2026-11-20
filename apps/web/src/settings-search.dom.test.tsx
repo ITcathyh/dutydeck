@@ -28,6 +28,17 @@ it('serializes exact field routes for browser back, forward, and reload', () => 
   }
 });
 
+it('indexes the Leader switch and result-only option with their existing field routes', () => {
+  const navigate = vi.fn();
+  const actions = settingsSearchActions([{ name: '测试助手', appId: 'cli_test' }], navigate);
+  actions.find(action => action.label === '测试助手 · Leader 模式')!.run();
+  actions.find(action => action.label === '测试助手 · 群里只留结果卡')!.run();
+  expect(navigate.mock.calls).toEqual([
+    [{ kind: 'bot-settings', appId: 'cli_test', field: 'executionMode' }],
+    [{ kind: 'lark-setup', target: { appId: 'cli_test' }, field: 'silentProgress' }]
+  ]);
+});
+
 it.each(['claude.gateway', 'custom/代理 ?#%'])('roundtrips a schema-valid Agent ID %s through search and its DOM anchor', async id => {
   const { agentConfigSchema } = await import('@dutydeck/shared');
   const { modelSettingAnchor } = await import('./settings-search');

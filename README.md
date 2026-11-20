@@ -194,10 +194,10 @@ CI、代码平台、告警初筛等外部集成以插件交付，也可以自己
 - **替你定过什么都留痕**：卡片上的「Leader 已替你定」列出每个决定和依据，不同意就在话题里直接说。
 - **指引就是一个技能**：一份 `SKILL.md`，放在项目里、用户目录或打包成插件都行；不填就用内置规则。
 
-开启：Web「机器人管理」→「执行方式」选 Leader 模式（需先开启群工具），或：
+在 Web「机器人管理」的「执行方式」打开「Leader 模式」并保存。开关会补齐尚未配置的 Leader 和 Worker，同时开启群工具。也可以用 CLI 配置。
 
 ```sh
-dutydeck settings bot set <appId> executionMode=layered leaderAgentId=<agentId> workerAgentIds=<id1>,<id2>
+dutydeck settings bot set <appId> groupToolsEnabled=true executionMode=layered leaderAgentId=<agentId> workerAgentIds=<id1>,<id2>
 ```
 
 <sub>→ <a href="docs/zh/lark.md#leader-mode">Leader 模式详解</a></sub>

@@ -110,10 +110,32 @@ function sameDraftContent(left: BotDraft, right: BotDraft): boolean {
   return JSON.stringify(strip(left)) === JSON.stringify(strip(right));
 }
 
-/** 能当 Leader 的 Agent：旧版 PTY 不行；终端模式没有 deny-all，要机器人和该 Agent 都是完全信任。与服务端保存校验一致。 */
-function leaderUsable(agent: Agent, bot: LarkBotConfig): boolean {
-  if (agent.protocol === 'pty') return false;
-  return agent.protocol !== 'pty-cli' || (agent.permissionMode === 'full-trust' && bot.permissionMode !== 'ask' && bot.permissionMode !== 'approve-reads');
+const maxLeaderWorkers = 8;
+
+function leaderUnavailableReason(agent: Agent, bot: LarkBotConfig): string | undefined {
+  if (agent.protocol === 'pty') return `${agent.name} 使用旧版 PTY。请在高级设置换一个 Leader。`;
+  if (agent.protocol !== 'pty-cli') return;
+  const trustSettings = [
+    (bot.permissionMode === 'ask' || bot.permissionMode === 'approve-reads') && '将机器人的「操作确认方式」设为完全信任',
+    agent.permissionMode !== 'full-trust' && '在 Agent 配置中将该 Agent 设为完全信任'
+  ].filter(Boolean);
+  if (trustSettings.length) return `${agent.name} 是终端 Agent。请${trustSettings.join('，并')}，或在高级设置换一个 Leader。`;
+}
+
+function leaderModeError(bot: LarkBotConfig, draft: BotDraft, agents: Agent[]): string | undefined {
+  if (draft.executionMode !== 'layered') return;
+  if (!draft.leaderAgentId) return '请在高级设置选择 Leader。首次打开时会优先使用机器人的默认 Agent。';
+  const leader = agents.find(agent => agent.id === draft.leaderAgentId);
+  if (!leader) return `Leader ${draft.leaderAgentId} 已不可用。请在高级设置换一个 Leader。`;
+  const reason = leaderUnavailableReason(leader, bot);
+  if (reason) return reason;
+  if (bot.permissionMode === 'full-trust' && !bot.fullTrustConfirmed) return '请先在机器人的「操作确认方式」确认以完全信任运行。';
+  if (!draft.groupToolsEnabled) return 'Leader 模式需要开启群工具。请在「权限与风险控制」允许它读取群聊内容。';
+  if (!draft.workerAgentIds.length || draft.workerAgentIds.length > maxLeaderWorkers) {
+    return `请在高级设置选择 1 到 ${maxLeaderWorkers} 个 Worker Agent。`;
+  }
+  const missingWorkers = draft.workerAgentIds.filter(id => !agents.some(agent => agent.id === id));
+  if (missingWorkers.length) return `Worker ${missingWorkers.join('、')} 已不可用。请在高级设置调整名单。`;
 }
 
 function formatMemoryTime(iso?: string): string {
@@ -213,6 +235,24 @@ export function BotManagement({
   const updateCurrentDraft = (patch: Partial<BotDraft>) => {
     if (!activeAppId || !currentDraft) return;
     setBotDraft(activeAppId, { ...currentDraft, ...patch });
+  };
+
+  const leaderEnabled = currentDraft?.executionMode === 'layered';
+  const leaderError = activeBot && currentDraft ? leaderModeError(activeBot, currentDraft, agents) : undefined;
+  const enableGroupToolsOnSave = currentDraft?.groupToolsEnabled && !activeBot?.groupToolsEnabled;
+  const agentName = (id: string) => agents.find(agent => agent.id === id)?.name ?? id;
+  const toggleLeaderMode = (enabled: boolean) => {
+    if (!currentDraft) return;
+    if (!enabled) {
+      updateCurrentDraft({ executionMode: 'single' });
+      return;
+    }
+    updateCurrentDraft({
+      executionMode: 'layered',
+      groupToolsEnabled: true,
+      leaderAgentId: currentDraft.leaderAgentId || currentDraft.defaultAgentId,
+      workerAgentIds: currentDraft.workerAgentIds.length ? currentDraft.workerAgentIds : agents.map(agent => agent.id).sort().slice(0, maxLeaderWorkers)
+    });
   };
 
   const resetCurrentDraft = () => {
@@ -361,7 +401,7 @@ export function BotManagement({
   /** 提交当前对象。variables 在这里定格，之后切走也不影响这次请求的归属。 */
   const idleCompactHoursValid = Boolean(currentDraft && currentDraft.idleCompactHours.trim() && Number.isSafeInteger(Number(currentDraft.idleCompactHours)) && Number(currentDraft.idleCompactHours) >= 1);
   const submitSave = () => {
-    if (!activeBot || !currentDraft || !idleCompactHoursValid) return;
+    if (!activeBot || !currentDraft || !idleCompactHoursValid || leaderError) return;
     saveMutation.mutate({ appId: activeBot.appId, draft: currentDraft, fullTrustConfirmed: activeBot.fullTrustConfirmed });
   };
 
@@ -371,7 +411,7 @@ export function BotManagement({
   const leaderSkills = useQuery({
     queryKey: ['bot-leader-skills', activeAppId, activeBot?.workspace],
     queryFn: () => api.skills(activeBot?.workspace || undefined, activeAppId!),
-    enabled: Boolean(activeAppId && currentDraft?.executionMode === 'layered'),
+    enabled: Boolean(activeAppId && leaderEnabled),
     staleTime: 60_000
   });
   const leaderSkillOptions = (leaderSkills.data ?? []).map(skill => ({ value: skill.ref ?? skill.path, name: skill.name }));
@@ -796,82 +836,85 @@ export function BotManagement({
 
                 <div className="space-y-3">
                   <div>
-                    <label className="mb-1.5 block text-caption font-medium text-secondary" htmlFor="bot-execution-mode">
-                      {botDetailFields.executionMode.label}
-                    </label>
-                    <Select
-                      id="bot-execution-mode"
-                      value={currentDraft.executionMode}
-                      onChange={e => updateCurrentDraft({ executionMode: e.target.value as BotDraft['executionMode'] })}
-                    >
-                      <option value="single">单 Agent：默认 Agent 直接完成</option>
-                      <option value="layered">Leader 模式：接待 + Leader + Worker</option>
-                    </Select>
-                    <p className="mt-1.5 text-caption text-subtle">
-                      Leader 模式在群聊和私聊都生效。默认 Agent 当「接待」，负责接话和答复；改代码、跑测试这类任务交给 Leader，Leader 按「Leader 指引」拆解并指派 Worker，Worker 中途的提问和工具授权先由 Leader 判断，只有该你定的才推给你，最后由 Leader 验收。群聊里计划要点「开始执行」才派发，私聊直接开始；每个 Worker 完成后自动停止它的会话。
+                    <div className="flex items-center gap-3">
+                      <span className="text-caption font-medium text-secondary">执行方式</span>
+                      <label className="relative ml-auto inline-flex min-h-11 cursor-pointer items-center gap-2 text-caption font-medium text-primary">
+                        {botDetailFields.executionMode.label}
+                        <input type="checkbox" role="switch" id={botDetailFields.executionMode.anchor} checked={leaderEnabled}
+                          aria-describedby={`bot-execution-mode-hint${leaderError ? ' bot-leader-error' : ''}${enableGroupToolsOnSave ? ' bot-leader-group-tools-note' : ''}`}
+                          onChange={e => toggleLeaderMode(e.target.checked)} className="peer absolute inset-0 z-10 h-full w-full cursor-pointer opacity-0"/>
+                        <span aria-hidden="true" className="relative h-5 w-9 rounded-full bg-neutral-solid transition-colors peer-checked:bg-inverse peer-checked:after:translate-x-4 peer-focus-visible:ring-2 peer-focus-visible:ring-focus-ring after:absolute after:left-0.5 after:top-0.5 after:h-4 after:w-4 after:rounded-full after:bg-surface after:shadow-card after:transition-transform"/>
+                      </label>
+                    </div>
+                    <p id="bot-execution-mode-hint" className="text-caption text-subtle">
+                      开启后，默认 Agent 负责接话，Leader 拆解任务、交给 Worker 执行并验收。群聊计划需要点「开始执行」，私聊计划直接开始。关闭时，默认 Agent 直接处理任务。
                     </p>
+                    {enableGroupToolsOnSave && <p id="bot-leader-group-tools-note" className="mt-1.5 text-caption text-secondary">保存后也会开启群工具，允许 Agent 读取群聊内容。</p>}
+                    {leaderError && <p id="bot-leader-error" role="alert" className="mt-1.5 text-caption text-warning">{leaderError}</p>}
                   </div>
-                  {currentDraft.executionMode === 'layered' && (
-                    <>
-                      <div>
-                        <label className="mb-1.5 block text-caption font-medium text-secondary" htmlFor="bot-leader-agent">
-                          {botDetailFields.leaderAgentId.label}
-                        </label>
-                        <Select
-                          id="bot-leader-agent"
-                          value={currentDraft.leaderAgentId}
-                          onChange={e => updateCurrentDraft({ leaderAgentId: e.target.value })}
-                        >
-                          <option value="">选择 Leader Agent</option>
-                          {agents.filter(agent => leaderUsable(agent, activeBot)).map(agent => (
-                            <option key={agent.id} value={agent.id}>{agent.name}</option>
-                          ))}
-                          {/* 已选的 Leader 被删或不能用时照样列出，否则下拉框显示空选项、保存却被拒。 */}
-                          {currentDraft.leaderAgentId && !agents.some(agent => agent.id === currentDraft.leaderAgentId && leaderUsable(agent, activeBot)) && (
-                            <option value={currentDraft.leaderAgentId}>{currentDraft.leaderAgentId}（不可用，请重选）</option>
-                          )}
-                        </Select>
-                        <p className="mt-1.5 text-caption text-subtle">
-                          ACP Agent 以 deny-all 规划。终端模式 Agent 以完全信任规划和验收，「不改文件」只靠提示词约束；机器人为完全信任、且该 Agent 在 DUTYDECK_AGENTS_JSON 里设为 full-trust 时才可选。
-                        </p>
-                      </div>
-                      <fieldset>
-                        <legend id={botDetailFields.workerAgentIds.anchor} tabIndex={-1} className="mb-1.5 block text-caption font-medium text-secondary">{botDetailFields.workerAgentIds.label}</legend>
-                        <div className="grid gap-2 sm:grid-cols-2">
-                          {/* 已删除的 Worker 也列出来，否则取消不掉，保存一直被拒。 */}
-                          {[...agents, ...currentDraft.workerAgentIds.filter(id => !agents.some(agent => agent.id === id)).map(id => ({ id, name: `${id}（已不存在）` }))].map(agent => (
-                            <label key={agent.id} className="flex items-center gap-2 text-caption">
-                              <input
-                                type="checkbox"
-                                checked={currentDraft.workerAgentIds.includes(agent.id)}
-                                onChange={e => updateCurrentDraft({ workerAgentIds: e.target.checked ? [...currentDraft.workerAgentIds, agent.id] : currentDraft.workerAgentIds.filter(id => id !== agent.id) })}
-                                className="rounded border-default text-action focus:ring-action"
-                              />
-                              <span>{agent.name}</span>
-                            </label>
-                          ))}
+                  {leaderEnabled && (
+                    <details key={activeBot.appId} className="rounded-lg border border-subtle p-3">
+                      <summary className="cursor-pointer text-caption font-medium text-secondary">
+                        高级设置
+                        <span className="ml-2 text-subtle">Leader：{agentName(currentDraft.leaderAgentId) || '未选择'}。Worker：{currentDraft.workerAgentIds.map(agentName).join('、') || '未选择'}。</span>
+                      </summary>
+                      <div className="mt-3 space-y-3">
+                        <div>
+                          <label className="mb-1.5 block text-caption font-medium text-secondary" htmlFor="bot-leader-agent">
+                            {botDetailFields.leaderAgentId.label}
+                          </label>
+                          <Select
+                            id="bot-leader-agent"
+                            value={currentDraft.leaderAgentId}
+                            onChange={e => updateCurrentDraft({ leaderAgentId: e.target.value })}
+                          >
+                            <option value="">选择 Leader Agent</option>
+                            {agents.filter(agent => !leaderUnavailableReason(agent, activeBot)).map(agent => (
+                              <option key={agent.id} value={agent.id}>{agent.name}</option>
+                            ))}
+                            {/* 已选的 Leader 被删或不能用时照样列出，否则下拉框显示空选项、保存却被拒。 */}
+                            {currentDraft.leaderAgentId && !agents.some(agent => agent.id === currentDraft.leaderAgentId && !leaderUnavailableReason(agent, activeBot)) && (
+                              <option value={currentDraft.leaderAgentId}>{currentDraft.leaderAgentId}（不可用，请重选）</option>
+                            )}
+                          </Select>
+                          <p className="mt-1.5 text-caption text-subtle">
+                            ACP Agent 以 deny-all 规划。终端模式 Agent 以完全信任规划和验收，「不改文件」只靠提示词约束；机器人为完全信任、且该 Agent 在 DUTYDECK_AGENTS_JSON 里设为 full-trust 时才可选。
+                          </p>
                         </div>
-                      </fieldset>
-                      <Field htmlFor={botDetailFields.leaderSkill.anchor} label={botDetailFields.leaderSkill.label} hint="技能名、「插件名/技能名」，或 SKILL.md（或它所在目录）的绝对路径；候选来自技能目录，放在别处的指引直接填绝对路径。留空使用内置规则。找不到或重名时 Leader 不会运行，并在话题里说明。">
-                        <Input
-                          list="bot-leader-skill-options"
-                          value={currentDraft.leaderSkill}
-                          onChange={e => updateCurrentDraft({ leaderSkill: e.target.value })}
-                          placeholder="可选，例如：leader"
-                          autoComplete="off"
-                        />
-                        <datalist id="bot-leader-skill-options">
-                          {leaderSkillOptions.map(skill => (
-                            <option key={skill.value} value={skill.value}>{skill.name}</option>
-                          ))}
-                        </datalist>
-                      </Field>
-                      {(!currentDraft.groupToolsEnabled || !currentDraft.leaderAgentId || !currentDraft.workerAgentIds.length) && (
-                        <p className="text-caption text-warning">
-                          Leader 模式需要选择 Leader 和至少一个 Worker，并在高级设置开启「允许它读取群聊内容」。
-                        </p>
-                      )}
-                    </>
+                        <fieldset>
+                          <legend id={botDetailFields.workerAgentIds.anchor} tabIndex={-1} className="mb-1.5 block text-caption font-medium text-secondary">{botDetailFields.workerAgentIds.label}</legend>
+                          <div className="grid gap-2 sm:grid-cols-2">
+                            {/* 已删除的 Worker 也列出来，否则取消不掉，保存一直被拒。 */}
+                            {[...agents, ...currentDraft.workerAgentIds.filter(id => !agents.some(agent => agent.id === id)).map(id => ({ id, name: `${id}（已不存在）` }))].map(agent => (
+                              <label key={agent.id} className="flex items-center gap-2 text-caption">
+                                <input
+                                  type="checkbox"
+                                  checked={currentDraft.workerAgentIds.includes(agent.id)}
+                                  disabled={currentDraft.workerAgentIds.length >= maxLeaderWorkers && !currentDraft.workerAgentIds.includes(agent.id)}
+                                  onChange={e => updateCurrentDraft({ workerAgentIds: e.target.checked ? [...currentDraft.workerAgentIds, agent.id] : currentDraft.workerAgentIds.filter(id => id !== agent.id) })}
+                                  className="rounded border-default text-action focus:ring-action"
+                                />
+                                <span>{agent.name}</span>
+                              </label>
+                            ))}
+                          </div>
+                        </fieldset>
+                        <Field htmlFor={botDetailFields.leaderSkill.anchor} label={botDetailFields.leaderSkill.label} hint="技能名、「插件名/技能名」，或 SKILL.md（或它所在目录）的绝对路径；候选来自技能目录，放在别处的指引直接填绝对路径。留空使用内置规则。找不到或重名时 Leader 不会运行，并在话题里说明。">
+                          <Input
+                            list="bot-leader-skill-options"
+                            value={currentDraft.leaderSkill}
+                            onChange={e => updateCurrentDraft({ leaderSkill: e.target.value })}
+                            placeholder="可选，例如：leader"
+                            autoComplete="off"
+                          />
+                          <datalist id="bot-leader-skill-options">
+                            {leaderSkillOptions.map(skill => (
+                              <option key={skill.value} value={skill.value}>{skill.name}</option>
+                            ))}
+                          </datalist>
+                        </Field>
+                      </div>
+                    </details>
                   )}
                 </div>
 
@@ -1197,7 +1240,7 @@ export function BotManagement({
                 className="sticky bottom-0 rounded-lg border border-default bg-surface p-4 shadow-card"
                 dirty={isDirty}
                 saving={savingThisBot}
-                saveDisabled={!idleCompactHoursValid}
+                saveDisabled={!idleCompactHoursValid || Boolean(leaderError)}
                 savedText="已保存。"
                 hint="（执行设置用于新话题，权限立即生效）"
                 saveLabel="保存配置"

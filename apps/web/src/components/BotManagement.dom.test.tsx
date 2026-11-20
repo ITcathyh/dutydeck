@@ -900,32 +900,43 @@ describe('Bot 执行方式', () => {
     { id: 'claude-trusted', name: 'Claude 完全信任', protocol: 'pty-cli', permissionMode: 'full-trust' }
   ];
 
-  it('旧配置按单 Agent 展示，切到 Leader 模式后带上 Leader 与 Worker 保存', async () => {
+  it('首次打开 Leader 模式时补齐默认队伍和群工具，仍可改选后按原字段保存', async () => {
     const user = userEvent.setup();
-    let bot: LarkBotConfig = { ...mockBot, groupToolsEnabled: true };
+    let bot: LarkBotConfig = { ...mockBot };
     vi.spyOn(api, 'larkConfig').mockImplementation(async () => ({ configured: true, bots: [bot], listeningDisabled: false }));
     vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
     vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
     const save = vi.spyOn(api, 'saveLarkConfig').mockImplementation(async () => {
-      bot = { ...bot, revision: 4, executionMode: 'layered', leaderAgentId: 'claude', workerAgentIds: ['codex'] };
+      bot = { ...bot, revision: 4, groupToolsEnabled: true, executionMode: 'layered', leaderAgentId: 'claude', workerAgentIds: ['codex'] };
       return { configured: true, bots: [bot], listeningDisabled: false };
     });
     renderWithClient(<BotManagement selectedAppId={bot.appId} onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={agents}/>);
-    const mode = await screen.findByRole('combobox', { name: '执行方式' });
-    expect((mode as HTMLSelectElement).value).toBe('single');
+    const mode = await screen.findByRole('switch', { name: 'Leader 模式' }) as HTMLInputElement;
+    expect(mode.checked).toBe(false);
     expect(screen.queryByRole('combobox', { name: 'Leader Agent' })).toBeNull();
-    await user.selectOptions(mode, 'layered');
-    expect(screen.getByText(/Leader 模式需要选择 Leader 和至少一个 Worker/)).toBeTruthy();
+    await user.click(mode);
+    expect(mode.checked).toBe(true);
+    expect(screen.getByText(/保存后也会开启群工具/)).toBeTruthy();
+    const advanced = screen.getByText('高级设置');
+    expect(advanced.closest('details')?.open).toBe(false);
+    expect(screen.getByText('Leader：Codex。Worker：Claude、Claude CLI、Claude 完全信任、Codex。')).toBeTruthy();
+    await user.click(advanced);
     // 终端模式 Agent 只有设为完全信任（且机器人是完全信任）才能当 Leader；其余仍可当 Worker。
-    expect([...(screen.getByRole('combobox', { name: 'Leader Agent' }) as HTMLSelectElement).options].map(option => option.textContent)).toEqual(['选择 Leader Agent', 'Codex', 'Claude', 'Claude 完全信任']);
-    expect(screen.getByRole('checkbox', { name: 'Claude CLI' })).toBeTruthy();
-    await user.selectOptions(screen.getByRole('combobox', { name: 'Leader Agent' }), 'claude');
-    await user.click(screen.getByRole('checkbox', { name: 'Codex' }));
-    expect(screen.queryByText(/Leader 模式需要选择 Leader 和至少一个 Worker/)).toBeNull();
+    const leader = screen.getByRole('combobox', { name: 'Leader Agent' }) as HTMLSelectElement;
+    expect([...leader.options].map(option => option.textContent)).toEqual(['选择 Leader Agent', 'Codex', 'Claude', 'Claude 完全信任']);
+    expect(leader.value).toBe('codex');
+    await user.selectOptions(leader, 'claude');
+    for (const name of ['Claude', 'Claude CLI', 'Claude 完全信任', 'Codex']) {
+      const worker = screen.getByRole('checkbox', { name }) as HTMLInputElement;
+      expect(worker.checked).toBe(true);
+      if (name !== 'Codex') await user.click(worker);
+    }
     await user.click(screen.getByRole('button', { name: '保存配置' }));
     await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({
-      executionMode: 'layered', leaderAgentId: 'claude', workerAgentIds: ['codex'], expectedRevision: 3
+      executionMode: 'layered', leaderAgentId: 'claude', workerAgentIds: ['codex'], leaderSkill: '',
+      groupToolsEnabled: true, groupToolsAllowSend: false, expectedRevision: 3
     })));
+    expect(save.mock.calls[0]![0]).not.toHaveProperty('permissionMode');
     await waitFor(() => expect(screen.queryByText(/有未保存的修改/)).toBeNull());
   });
 
@@ -935,10 +946,12 @@ describe('Bot 执行方式', () => {
     vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
     vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
     renderWithClient(<BotManagement selectedAppId={mockBot.appId} onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={agents}/>);
-    expect(((await screen.findByRole('combobox', { name: '执行方式' })) as HTMLSelectElement).value).toBe('layered');
+    const mode = await screen.findByRole('switch', { name: 'Leader 模式' }) as HTMLInputElement;
+    expect(mode.checked).toBe(true);
+    expect(screen.getByText(/Leader 模式需要开启群工具/)).toBeTruthy();
+    await user.click(screen.getByText('高级设置'));
     expect((screen.getByRole('checkbox', { name: 'Codex' }) as HTMLInputElement).checked).toBe(true);
-    expect(screen.getByText(/Leader 模式需要选择 Leader 和至少一个 Worker/)).toBeTruthy();
-    await user.selectOptions(screen.getByRole('combobox', { name: '执行方式' }), 'single');
+    await user.click(mode);
     expect(screen.queryByRole('combobox', { name: 'Leader Agent' })).toBeNull();
   });
 
@@ -950,7 +963,8 @@ describe('Bot 执行方式', () => {
     vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
     const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue({ configured: true, bots: [bot], listeningDisabled: false });
     renderWithClient(<BotManagement selectedAppId={mockBot.appId} onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={agents}/>);
-    const leader = await screen.findByRole('combobox', { name: 'Leader Agent' }) as HTMLSelectElement;
+    await user.click(await screen.findByText('高级设置'));
+    const leader = screen.getByRole('combobox', { name: 'Leader Agent' }) as HTMLSelectElement;
     expect(leader.selectedOptions[0]?.textContent).toBe('gone-leader（不可用，请重选）');
     await user.selectOptions(leader, 'claude');
     expect([...leader.options].map(option => option.value)).toEqual(['', 'codex', 'claude', 'claude-trusted']);
@@ -961,13 +975,104 @@ describe('Bot 执行方式', () => {
   });
 
   it('机器人不是完全信任时，终端模式 Agent 不能当 Leader', async () => {
+    const user = userEvent.setup();
     const bot: LarkBotConfig = { ...mockBot, permissionMode: 'ask', groupToolsEnabled: true, executionMode: 'layered', leaderAgentId: 'claude-trusted', workerAgentIds: ['codex'] };
     vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [bot], listeningDisabled: false });
     vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
     vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
     renderWithClient(<BotManagement selectedAppId={mockBot.appId} onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={agents}/>);
-    const leader = await screen.findByRole('combobox', { name: 'Leader Agent' }) as HTMLSelectElement;
+    await user.click(await screen.findByText('高级设置'));
+    const leader = screen.getByRole('combobox', { name: 'Leader Agent' }) as HTMLSelectElement;
     expect([...leader.options].map(option => option.textContent)).toEqual(['选择 Leader Agent', 'Codex', 'Claude', 'claude-trusted（不可用，请重选）']);
+  });
+
+  it('按 ID 稳定选取前 8 个 Worker，关闭模式再开启会沿用已保存的小队与指引', async () => {
+    const user = userEvent.setup();
+    const extraAgents: Agent[] = Array.from({ length: 9 }, (_, index) => ({ id: `worker-${9 - index}`, name: `Worker ${9 - index}`, protocol: 'acp', permissionMode: 'ask' }));
+    let bot: LarkBotConfig = { ...mockBot, groupToolsEnabled: true };
+    const config = () => ({ configured: true, bots: [bot], listeningDisabled: false });
+    vi.spyOn(api, 'larkConfig').mockImplementation(async () => config());
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    const save = vi.spyOn(api, 'saveLarkConfig').mockImplementation(async input => {
+      bot = { ...bot, revision: bot.revision! + 1, executionMode: input.executionMode, leaderAgentId: input.leaderAgentId, workerAgentIds: input.workerAgentIds, leaderSkill: input.leaderSkill };
+      return config();
+    });
+    renderWithClient(<BotManagement selectedAppId={bot.appId} onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={[...extraAgents, ...mockAgents]}/>);
+    const mode = await screen.findByRole('switch', { name: 'Leader 模式' });
+    await user.click(mode);
+    expect(screen.getByText('Leader：Codex。Worker：Codex、Worker 1、Worker 2、Worker 3、Worker 4、Worker 5、Worker 6、Worker 7。')).toBeTruthy();
+    await user.click(screen.getByText('高级设置'));
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Leader Agent' }), 'worker-9');
+    await user.click(screen.getByRole('checkbox', { name: 'Worker 1' }));
+    await typeInto(user, screen.getByRole('combobox', { name: 'Leader 指引' }), 'review');
+    const roster = { leaderAgentId: 'worker-9', workerAgentIds: ['codex', 'worker-2', 'worker-3', 'worker-4', 'worker-5', 'worker-6', 'worker-7'], leaderSkill: 'review' };
+    await user.click(screen.getByRole('button', { name: '保存配置' }));
+    await waitFor(() => expect(save).toHaveBeenNthCalledWith(1, expect.objectContaining({ executionMode: 'layered', ...roster })));
+    await waitFor(() => expect(screen.queryByText(/有未保存的修改/)).toBeNull());
+    await user.click(mode);
+    await user.click(screen.getByRole('button', { name: '保存配置' }));
+    await waitFor(() => expect(save).toHaveBeenNthCalledWith(2, expect.objectContaining({ executionMode: 'single', ...roster })));
+    await waitFor(() => expect(screen.queryByText(/有未保存的修改/)).toBeNull());
+    await user.click(mode);
+    expect(screen.getByText('Leader：Worker 9。Worker：Codex、Worker 2、Worker 3、Worker 4、Worker 5、Worker 6、Worker 7。')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: '保存配置' }));
+    await waitFor(() => expect(save).toHaveBeenNthCalledWith(3, expect.objectContaining({ executionMode: 'layered', ...roster })));
+  });
+
+  it.each([
+    ['claude-trusted', 'ask', /将机器人的「操作确认方式」设为完全信任/],
+    ['claude-cli', 'full-trust', /将该 Agent 设为完全信任/]
+  ] as const)('阻止不符合权限条件的默认 Leader %s 保存为开启，可在高级设置换人', async (defaultAgentId, permissionMode, reason) => {
+    const user = userEvent.setup();
+    const bot: LarkBotConfig = { ...mockBot, defaultAgentId, permissionMode };
+    const config = { configured: true, bots: [bot], listeningDisabled: false };
+    vi.spyOn(api, 'larkConfig').mockResolvedValue(config);
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(config);
+    renderWithClient(<BotManagement selectedAppId={bot.appId} onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={agents}/>);
+    await user.click(await screen.findByRole('switch', { name: 'Leader 模式' }));
+    expect(screen.getByText(reason)).toBeTruthy();
+    const submit = screen.getByRole('button', { name: '保存配置' }) as HTMLButtonElement;
+    expect(submit.disabled).toBe(true);
+    await user.click(submit);
+    expect(save).not.toHaveBeenCalled();
+    await user.click(screen.getByText('高级设置'));
+    const leader = screen.getByRole('combobox', { name: 'Leader Agent' }) as HTMLSelectElement;
+    expect(leader.value).toBe(defaultAgentId);
+    await user.selectOptions(leader, 'codex');
+    expect(submit.disabled).toBe(false);
+    await user.click(submit);
+    await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ executionMode: 'layered', leaderAgentId: 'codex', defaultAgentId })));
+    expect(save.mock.calls[0]![0]).not.toHaveProperty('permissionMode');
+  });
+
+  it('终端 Leader 已符合权限模式时，仍需用户确认机器人的完全信任设置', async () => {
+    const user = userEvent.setup();
+    const bot: LarkBotConfig = { ...mockBot, defaultAgentId: 'claude-trusted', permissionMode: 'full-trust', fullTrustConfirmed: false };
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [bot], listeningDisabled: false });
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    const save = vi.spyOn(api, 'saveLarkConfig');
+    renderWithClient(<BotManagement selectedAppId={bot.appId} onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={agents}/>);
+    await user.click(await screen.findByRole('switch', { name: 'Leader 模式' }));
+    expect(screen.getByText('请先在机器人的「操作确认方式」确认以完全信任运行。')).toBeTruthy();
+    const submit = screen.getByRole('button', { name: '保存配置' }) as HTMLButtonElement;
+    expect(submit.disabled).toBe(true);
+    await user.click(submit);
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it('从设置搜索进入已打开模式的 Leader 指引时展开并聚焦', async () => {
+    const bot: LarkBotConfig = { ...mockBot, executionMode: 'layered', groupToolsEnabled: true, leaderAgentId: 'claude', workerAgentIds: ['codex'] };
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [bot], listeningDisabled: false });
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    renderWithClient(<BotManagement selectedAppId={bot.appId} field="leaderSkill" onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={agents}/>);
+    const guide = await screen.findByRole('combobox', { name: 'Leader 指引' });
+    expect(guide.closest('details')?.open).toBe(true);
+    expect(document.activeElement).toBe(guide);
   });
 });
 
