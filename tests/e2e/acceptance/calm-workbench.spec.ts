@@ -74,6 +74,70 @@ test.describe('Calm Workbench browser acceptance', () => {
     if (info.status !== info.expectedStatus) await info.attach('isolated-server.log', { body: instance.serverLog.join(''), contentType: 'text/plain' });
   });
 
+  test('home composer at 390px shares its draft with the dialog and retries a lost send receipt without creating twice', async ({ page }) => {
+    page.setDefaultTimeout(15_000);
+    await page.setViewportSize({ width: 390, height: 844 });
+    const before = (await instance.request('GET', '/api/sessions')).json.length;
+    await page.goto(instance.baseUrl);
+    const goal = page.getByPlaceholder('有什么要做的？');
+    await expect(goal).toBeVisible();
+    await page.getByRole('button', { name: /^(修复 Bug|Fix a bug)$/ }).click();
+    await expect(goal).toHaveValue(/^(复现|Reproduce)/);
+    const prompt = 'Calm home draft\nmobile second line';
+    await goal.fill('Calm home draft');
+    await goal.press('Shift+Enter');
+    await page.keyboard.insertText('mobile second line');
+    await expect(goal).toHaveValue(prompt);
+    const options = page.getByRole('button', { name: '修改任务设置' });
+    await options.click();
+    const dialog = page.getByRole('dialog', { name: '创建新任务' });
+    await expect(dialog.getByLabel('任务目标')).toHaveValue(prompt);
+    const agentPicker = dialog.getByText('执行任务的 Agent', { exact: true }).locator('..').getByRole('button');
+    await agentPicker.click();
+    await dialog.getByRole('option', { name: /Calm ACP fixture/ }).click();
+    await dialog.getByLabel('工作目录').fill(instance.dataDir);
+    await dialog.getByRole('button', { name: /^独立 Git 工作目录/ }).click();
+    await dialog.getByRole('option', { name: /^直接使用所选目录/ }).click();
+    await dialog.getByRole('button', { name: /^直接使用所选目录/ }).click();
+    await dialog.getByRole('option', { name: /^独立 Git 工作目录/ }).click();
+    await dialog.getByRole('button', { name: '取消', exact: true }).click();
+    await expect(options).toContainText(instance.dataDir);
+    await expect(goal).toHaveValue(prompt);
+    await noOverflow(page);
+    const send = page.getByRole('button', { name: '发送目标' });
+    const bottomNav = page.getByRole('navigation', { name: '主要页面' });
+    await expect(bottomNav).toBeVisible();
+    await send.scrollIntoViewIfNeeded();
+    const sendBox = (await send.boundingBox())!;
+    expect(sendBox.y + sendBox.height).toBeLessThanOrEqual((await bottomNav.boundingBox())!.y);
+
+    const sends: Array<{ path: string; body: unknown }> = [];
+    await page.route(/\/api\/sessions\/[^/]+\/send$/, async route => {
+      sends.push({ path: new URL(route.request().url()).pathname, body: route.request().postDataJSON() });
+      const response = await route.fetch();
+      expect(response.status()).toBe(202);
+      if (sends.length === 1) await route.abort();
+      else await route.fulfill({ response });
+    });
+    await goal.press('Enter');
+    await expect(page.getByText(/再次提交只会重试发送/)).toBeVisible();
+    await expect(page.getByText('这个目录不是 Git 仓库，已改为直接使用所选目录')).toBeVisible();
+    await expect(goal).toHaveValue(prompt);
+    await options.click();
+    await expect(dialog.getByLabel('任务目标')).toHaveValue(prompt);
+    await dialog.getByRole('button', { name: '重试发送', exact: true }).click();
+    await expect(page.getByRole('tab', { name: '对话', exact: true })).toBeVisible();
+    await expect(page.getByText('这个目录不是 Git 仓库，已改为直接使用所选目录')).toBeVisible();
+    expect(sends).toHaveLength(2);
+    expect(sends[1]).toEqual(sends[0]);
+    const sessions = (await instance.request('GET', '/api/sessions')).json;
+    expect(sessions).toHaveLength(before + 1);
+    const created = sessions.find((item: { id: string }) => sends[0]!.path === `/api/sessions/${item.id}/send`);
+    expect(created).toMatchObject({ cwd: instance.dataDir, workspaceMode: 'shared', agentId: 'calm-acp', permissionMode: 'ask' });
+    const tasks = (await instance.request('GET', `/api/sessions/${created.id}/tasks`)).json;
+    expect(tasks).toEqual([expect.objectContaining({ prompt })]);
+  });
+
   test('draft text and file references survive task switches, refresh and delayed send acknowledgement', async ({ page }) => {
     await open(page, alpha);
     await message(page).fill('/file');

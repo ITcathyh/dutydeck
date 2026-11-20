@@ -348,7 +348,9 @@ export const api = {
   // 跨任务标题的最小只读契约；服务端接入前 UI 仅使用当前已加载 tasks 的真实 prompt，不伪造摘要。
   matter: (id: string) => json<MatterDetail>(`/api/matters/${encodeURIComponent(id)}`),
   runSummaries: () => json<RunSummary[]>(RUN_SUMMARY_ENDPOINT),
-  create: (body: { agentId: string; cwd?: string; model?: string; codexProfile?: string; reasoningEffort?: string; permissionMode?: PermissionMode; workspaceMode?: WorkspaceMode }) => send<Session>('POST', '/api/sessions', body),
+  create: (body: { agentId: string; cwd?: string; model?: string; codexProfile?: string; reasoningEffort?: string; permissionMode?: PermissionMode; workspaceMode?: WorkspaceMode }) => send<Session>('POST', '/api/sessions', {
+    ...body, ...(body.workspaceMode === 'worktree' ? { fallbackToShared: true } : {})
+  }),
   /** 先出计划：Agent 只调研出计划（写操作被拦），批准后才执行。 */
   plan: (id: string, prompt: string) => send<{ accepted: true; task: Task; steering?: undefined }>('POST', `/api/sessions/${id}/plan`, { prompt }),
   planState: (id: string) => json<PlanState>(`/api/sessions/${id}/plan`, { cache: 'no-store' }),

@@ -171,6 +171,40 @@ describe('managed Session workspaces', () => {
     expect(start).not.toHaveBeenCalled();
   });
 
+  it.each([false, true])('uses one shared session in a non-Git directory with fallback enabled (explicit cwd: %s)', async explicitCwd => {
+    const source = temporary('dutydeck-non-git-');
+    const workspaceRoot = temporary('dutydeck-workspaces-');
+    const start = vi.fn(async () => {});
+    const { runtime } = open(':memory:', { workspaceRoot, driverFactory: driverFactory([], start) });
+    await runtime.initialize([{ ...agent, cwd: source }]);
+
+    const session = await runtime.start({ agentId: agent.id, workspaceMode: 'worktree', fallbackToShared: true, ...(explicitCwd ? { cwd: source } : {}) });
+    expect(session).toMatchObject({ state: 'idle', cwd: source, workspaceMode: 'shared', workspaceSourceCwd: source, permissionMode: 'ask' });
+    expect(await runtime.listSessions()).toEqual([expect.objectContaining({ id: session.id, workspaceMode: 'shared' })]);
+    expect(await runtime.getWorkspace(session.id)).toMatchObject({ state: 'ready', mode: 'shared', cwd: source });
+    expect(start).toHaveBeenCalledOnce();
+    expect(readdirSync(workspaceRoot)).toEqual([]);
+  });
+
+  it('keeps worktree isolation for a Git directory and reports Git preparation errors', async () => {
+    const { runtime } = open(':memory:', { workspaceRoot: temporary('dutydeck-workspaces-') });
+    await runtime.initialize([agent]);
+    const input = { agentId: agent.id, workspaceMode: 'worktree', fallbackToShared: true } as const;
+    const source = repository(true);
+    const session = await runtime.start({ ...input, cwd: join(source, 'nested') });
+    expect(session).toMatchObject({ workspaceMode: 'worktree', workspaceSourceCwd: join(source, 'nested') });
+    expect(session.cwd).not.toBe(join(source, 'nested'));
+
+    const emptyRepo = temporary('dutydeck-git-without-commit-');
+    git(emptyRepo, 'init', '-q');
+    const brokenRepo = temporary('dutydeck-broken-gitdir-');
+    writeFileSync(join(brokenRepo, '.git'), 'gitdir: ./missing-git-dir\n');
+    for (const cwd of [emptyRepo, brokenRepo]) {
+      await expect(runtime.start({ ...input, cwd })).rejects.toMatchObject({ code: 'WORKSPACE_PREPARATION_FAILED' });
+      expect((await runtime.listSessions()).find(item => item.workspaceSourceCwd === cwd)).toMatchObject({ state: 'failed', workspaceMode: 'worktree' });
+    }
+  });
+
   it('rejects reopen when a persisted worktree branch identity changed and retains the worktree', async () => {
     const source = repository();
     const database = join(temporary('dutydeck-db-'), 'runtime.db');

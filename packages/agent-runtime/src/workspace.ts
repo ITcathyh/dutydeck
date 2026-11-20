@@ -19,9 +19,9 @@ async function git(cwd: string, args: string[], timeoutMs = 15_000): Promise<str
 /** Commands that read or check out work tree content; the repository's own filter drivers must not run for them. */
 const WORK_TREE_COMMANDS = new Set(['status', 'worktree', 'submodule']);
 
-async function gitRaw(cwd: string, args: string[], timeoutMs = 15_000): Promise<string> {
+async function gitRaw(cwd: string, args: string[], timeoutMs = 15_000, allowNonRepository = false): Promise<string> {
   try {
-    const env = { ...minimalToolEnvironment(), GIT_TERMINAL_PROMPT: '0' };
+    const env = { ...minimalToolEnvironment(), GIT_TERMINAL_PROMPT: '0', ...(allowNonRepository ? { LC_ALL: 'C' } : {}) };
     // `worktree remove` runs status inside the target work tree, which can carry its own per-worktree config.
     const location = args[0] === 'worktree' && args[1] === 'remove' ? args.at(-1)! : cwd;
     const config = WORK_TREE_COMMANDS.has(args[0]!) ? await safeGitConfigFor(['-C', location], { env, timeout: timeoutMs }) : SAFE_GIT_CONFIG;
@@ -32,9 +32,16 @@ async function gitRaw(cwd: string, args: string[], timeoutMs = 15_000): Promise<
     });
     return stdout;
   } catch (error) {
+    const failure = error as { code?: number; stderr?: string };
+    if (allowNonRepository && failure.code === 128 && /^fatal: not a git repository \(or any /.test(failure.stderr ?? '')) return '';
     const detail = error instanceof Error ? error.message : String(error);
     throw new RuntimeError('WORKSPACE_GIT_FAILED', detail, 422);
   }
+}
+
+export async function isNonGitWorkspace(cwd: string): Promise<boolean> {
+  // Any other Git error stays on the normal worktree preparation and failure path.
+  return gitRaw(cwd, ['rev-parse', '--show-toplevel'], 15_000, true).then(root => !root, () => false);
 }
 
 async function canonical(path: string): Promise<string> {
