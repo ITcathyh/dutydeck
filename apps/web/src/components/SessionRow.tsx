@@ -1,5 +1,7 @@
+import { Ellipsis, Pin, PinOff } from 'lucide-react';
 import type { Agent, RunSummary, Session } from '../api';
 import { fallbackRunTitle, sessionDisplayName } from '../run-summary';
+import { MenuButton } from './MenuButton';
 import { sidebarStatusVisual } from './ui';
 
 /** 上下文占用达到该比例后在列表项上提示，避免用户进到会话里才发现快满了。 */
@@ -11,9 +13,9 @@ export function contextBadgePercent(context: RunSummary['context']): number | un
   return percent >= CONTEXT_BADGE_THRESHOLD ? percent : undefined;
 }
 
-export type SessionRowProps = { session: Session; summary?: RunSummary; agent?: Agent; botName?: string; active: boolean; prefix?: string; onClick(): void };
+export type SessionRowProps = { session: Session; summary?: RunSummary; agent?: Agent; botName?: string; active: boolean; prefix?: string; onClick(): void; pinned?: boolean; onTogglePin?(): void };
 
-export function SessionRow({ session, summary, agent, botName, active, prefix, onClick }: SessionRowProps) {
+export function SessionRow({ session, summary, agent, botName, active, prefix, onClick, pinned, onTogglePin }: SessionRowProps) {
   // 状态和身份都保留在可访问树中，导航只显示任务名与静态状态点。
   const status = sidebarStatusVisual(session, summary);
   const title = sessionDisplayName(session, summary?.prompt, fallbackRunTitle(session.source));
@@ -22,11 +24,11 @@ export function SessionRow({ session, summary, agent, botName, active, prefix, o
     : `${agent?.name ?? session.agentId}${session.source === 'lark' ? ` · ${botName ?? '飞书'}` : ''}`;
   const contextPercent = contextBadgePercent(summary?.context);
   const contextLabel = contextPercent === undefined ? undefined : `上下文已用 ${contextPercent}%`;
-  return <button
+  const row = <button
     onClick={onClick}
     aria-current={active ? 'true' : undefined}
     title={`${prefix ? `${prefix} ` : ''}${title}｜${status.label}｜${identity}${contextLabel ? `｜${contextLabel}` : ''}`}
-    className={`ui-session-row group relative mb-0.5 flex min-h-10 w-full items-center gap-2 rounded-md border px-2.5 text-left transition-[background-color,border-color,box-shadow,transform] duration-fast active:scale-[.99] ${active ? 'border-sidebar-border bg-surface shadow-card' : 'border-transparent hover:border-sidebar-border hover:bg-sidebar-hover'}`}
+    className={`ui-session-row group relative mb-0.5 flex min-h-10 w-full min-w-0 items-center gap-2 rounded-md border px-2.5 text-left transition-[background-color,border-color,box-shadow,transform] duration-fast active:scale-[.99] ${active ? 'border-sidebar-border bg-surface shadow-card' : 'border-transparent hover:border-sidebar-border hover:bg-sidebar-hover'}`}
   >
     <span aria-hidden="true" className={`h-1.5 w-1.5 shrink-0 rounded-full ${status.pulse ? 'ui-status-pulse' : ''} ${status.dotClass}`}/>
     {prefix && <span className="sr-only">{prefix}</span>}
@@ -37,4 +39,10 @@ export function SessionRow({ session, summary, agent, botName, active, prefix, o
       <span aria-hidden="true">{contextPercent}%</span><span className="sr-only">{contextLabel}</span>
     </span>}
   </button>;
+  if (!onTogglePin) return row;
+  return <div role="group" aria-label={title} className="flex items-center">
+    {row}
+    <MenuButton label={pinned ? '会话操作（已置顶）' : '会话操作'} icon={pinned ? <Pin size={14}/> : <Ellipsis size={16}/>}
+      items={[{ id: 'pin', label: pinned ? '取消置顶' : '置顶', icon: pinned ? <PinOff size={14}/> : <Pin size={14}/>, onSelect: onTogglePin }]}/>
+  </div>;
 }

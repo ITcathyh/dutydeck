@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { CalendarClock, ChevronRight, Coins, FolderKanban, Home, Inbox, ListTodo, PanelLeftClose, PanelLeftOpen, MessagesSquare, Plus, Settings2, ShieldCheck, SlidersHorizontal, Users } from 'lucide-react';
 import type { WorkspaceOrganization } from '@dutydeck/shared';
 import type { Agent, LarkBotConfig, RunSummary, Session } from '../api';
@@ -12,6 +12,7 @@ import { RemoteAccessLogout } from './AuthGate';
 import { SessionRow } from './SessionRow';
 import { SidebarNav, type SidebarNavGroup } from './SidebarNav';
 import { useExperimental } from '../experimental';
+import { useViewPreference } from '../view-preferences';
 
 export type SessionListProps = {
   open: boolean;
@@ -56,6 +57,15 @@ export type SessionListProps = {
 };
 
 export function SessionList({ open, collapsed = false, onToggleCollapsed, onClose, sessions, summaries, sessionsLoading, agents, agentsLoading = false, larkBots, larkBotsLoading = false, larkListeningDisabled = false, larkBotsFailed = false, activeSessionId, view, onSelect, onNewSession, onOpenControlCenter, onOpenLarkSetup, onOpenGroups, onOpenSchedules, onOpenUsage, inboxCount = 0, primaryNav = 'tasks', onPrimaryNavChange, authRequired, organization, onManageWorkspaces }: SessionListProps) {
+  const [pinnedIds, setPinnedIds] = useViewPreference<string[]>('pinned-sessions', [], (value): value is string[] => Array.isArray(value) && value.every(id => typeof id === 'string'));
+  useEffect(() => {
+    if (!pinnedIds.length) return;
+    const archivedIds = new Set(sessions.filter(session => session.archivedAt).map(session => session.id));
+    if (pinnedIds.some(id => archivedIds.has(id))) setPinnedIds(current => current.filter(id => !archivedIds.has(id)));
+  }, [pinnedIds, sessions]);
+  const pinned = useMemo(() => new Set(pinnedIds), [pinnedIds]);
+  const pinRank = (session: Session) => session.archivedAt || !pinned.has(session.id) ? 1 : 0;
+  const togglePin = (id: string) => setPinnedIds(current => current.includes(id) ? current.filter(pinnedId => pinnedId !== id) : [...current, id]);
   const liveSessions = useMemo(() => {
     return sessions
       .filter(session => !session.archivedAt && (
@@ -94,6 +104,9 @@ export function SessionList({ open, collapsed = false, onToggleCollapsed, onClos
   const [experimental] = useExperimental();
   const createTask = createTaskAffordance({ agents, agentsLoading, onCreate: onNewSession, onPrepareAgents: onOpenControlCenter });
   const hiddenOnMobile = !desktop && !open;
+  const sessionRow = (session: Session, key: string) => <SessionRow key={key} session={session} summary={summaries[session.id]} agent={agents.find(item => item.id === session.agentId)}
+    botName={larkBots.find(bot => session.sourceId?.startsWith(`${bot.appId}:`))?.name} active={activeSessionId === session.id} onClick={() => { onSelect(session.id); onClose(); }}
+    pinned={pinRank(session) === 0} onTogglePin={session.archivedAt || session.source === 'work_item' ? undefined : () => togglePin(session.id)}/>;
 
   const primaryNavGroups: SidebarNavGroup[] = onPrimaryNavChange ? [{ id: 'workspace', title: '工作', items: [
     { id: 'nav-home', label: '总览', hint: '概览与最近工作', Icon: Home, active: primaryNav === 'home', onClick: () => { onPrimaryNavChange('home'); onClose(); } },
@@ -142,17 +155,7 @@ export function SessionList({ open, collapsed = false, onToggleCollapsed, onClos
             <span className="ml-auto font-mono text-meta">{liveSessions.length}</span>
           </div>
           <div className="space-y-0.5">
-            {liveSessions.map(session => (
-              <SessionRow
-                key={`live-${session.id}`}
-                session={session}
-                summary={summaries[session.id]}
-                agent={agents.find(item => item.id === session.agentId)}
-                botName={larkBots.find(bot => session.sourceId?.startsWith(`${bot.appId}:`))?.name}
-                active={activeSessionId === session.id}
-                onClick={() => { onSelect(session.id); onClose(); }}
-              />
-            ))}
+            {[...liveSessions].sort((a, b) => pinRank(a) - pinRank(b)).map(session => sessionRow(session, `live-${session.id}`))}
           </div>
         </section>}
         <div className="flex items-center px-1.5 pb-2 text-caption font-semibold text-sidebar-text-muted"><FolderKanban size={13} className="mr-2"/>项目<span className="ml-auto font-mono text-meta">{workspaces.length}</span>{onManageWorkspaces && <span className="ml-1 -mr-2"><IconButton label="整理分组" size="sm" onClick={onManageWorkspaces}><SlidersHorizontal size={13}/></IconButton></span>}</div>{sessionsLoading
@@ -171,7 +174,7 @@ export function SessionList({ open, collapsed = false, onToggleCollapsed, onClos
             <span className="min-w-0 flex-1 truncate text-caption font-semibold text-sidebar-text">{workspace.name}</span>
             <span className="ml-1 shrink-0 font-mono text-meta text-sidebar-text-muted">{workspace.sessions.length}</span>
           </button>
-          {(expanded || containsActive(workspace)) && <div className="ml-4 mt-0.5 border-l border-sidebar-border pl-1.5">{!expanded && <p className="px-2 text-meta text-sidebar-text-muted">当前任务</p>}{activeOutsideView && containsActive(workspace) && <p className="px-2 text-meta text-sidebar-text-muted">当前任务不在此筛选中</p>}{workspace.sessions.filter(session => (expanded || session.id === activeSessionId) && !liveSessionIds.has(session.id)).map(session => <SessionRow key={session.id} session={session} summary={summaries[session.id]} agent={agents.find(item => item.id === session.agentId)} botName={larkBots.find(bot => session.sourceId?.startsWith(`${bot.appId}:`))?.name} active={activeSessionId === session.id} onClick={() => { onSelect(session.id); onClose(); }}/>)}</div>}
+          {(expanded || containsActive(workspace)) && <div className="ml-4 mt-0.5 border-l border-sidebar-border pl-1.5">{!expanded && <p className="px-2 text-meta text-sidebar-text-muted">当前任务</p>}{activeOutsideView && containsActive(workspace) && <p className="px-2 text-meta text-sidebar-text-muted">当前任务不在此筛选中</p>}{workspace.sessions.filter(session => (expanded || session.id === activeSessionId) && !liveSessionIds.has(session.id)).sort((a, b) => pinRank(a) - pinRank(b)).map(session => sessionRow(session, session.id))}</div>}
         </section>;
       })
       : <div className="rounded-lg border border-dashed border-sidebar-border px-4 py-6 text-center text-caption text-sidebar-text-muted">当前视图没有任务。</div>}</div></div>

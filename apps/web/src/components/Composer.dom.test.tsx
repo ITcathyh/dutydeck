@@ -100,6 +100,19 @@ describe('Composer 发送门禁', () => {
 });
 
 describe('Composer 键盘语义', () => {
+  it('组字结束后只拦截紧跟的第一次 Enter', () => {
+    const onSubmit = vi.fn();
+    render(<Composer {...baseProps} value="输入法选词" onSubmit={onSubmit}/>);
+    const input = screen.getByRole('textbox', { name: '消息' });
+    fireEvent.compositionStart(input);
+    fireEvent.keyDown(input, { key: 'Enter', isComposing: true });
+    fireEvent.compositionEnd(input);
+    expect(fireEvent.keyDown(input, { key: 'Enter' })).toBe(false);
+    expect(onSubmit).not.toHaveBeenCalled();
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(onSubmit).toHaveBeenCalledOnce();
+  });
+
   it('Enter 提交', async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn();
@@ -225,6 +238,34 @@ describe('Composer 面板与引用', () => {
     expect((screen.getByText('Opus').closest('button') as HTMLButtonElement).disabled).toBe(true);
   });
 
+  it('九种模型时按名称或 ID 搜索，Esc 先清空，Enter 选择第一项', async () => {
+    const user = userEvent.setup();
+    const onModelChange = vi.fn();
+    const models = Array.from({ length: 9 }, (_, index) => ({ id: `model-${index}`, name: index === 1 ? 'Deep Search' : `Choice ${index}` }));
+    const { rerender } = render(<Composer {...baseProps} models={models.slice(0, 8)} onModelChange={onModelChange}/>);
+    const trigger = screen.getByTitle('切换模型');
+    await user.click(trigger);
+    expect(screen.queryByRole('searchbox')).toBeNull();
+    await user.keyboard('{Escape}');
+    rerender(<Composer {...baseProps} models={models} onModelChange={onModelChange}/>);
+    await user.click(trigger);
+    const search = screen.getByRole<HTMLInputElement>('searchbox', { name: '搜索模型' });
+    expect(document.activeElement).toBe(search);
+    await user.type(search, 'DEEP');
+    expect(screen.getByRole('button', { name: /Deep Search/ })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Choice 8/ })).toBeNull();
+    await user.keyboard('{Escape}');
+    expect(search.value).toBe('');
+    expect(screen.getByRole('button', { name: /Choice 8/ })).toBeTruthy();
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('searchbox')).toBeNull();
+    await user.click(trigger);
+    await user.type(screen.getByRole('searchbox'), 'model-8');
+    await user.keyboard('{Enter}');
+    expect(onModelChange).toHaveBeenCalledExactlyOnceWith('model-8');
+    expect(screen.queryByRole('searchbox')).toBeNull();
+  });
+
   it('模型未就绪时触发按钮的 title 变成阻塞原因，面板内展示该原因', async () => {
     const user = userEvent.setup();
     const reason = '模型加载失败，请刷新模型列表后重试';
@@ -235,6 +276,15 @@ describe('Composer 面板与引用', () => {
 });
 
 describe('Composer 排队任务', () => {
+  it('没有服务端任务 ID 的排队行不能编辑', () => {
+    const onEditQueued = vi.fn();
+    render(<Composer {...baseProps} onEditQueued={onEditQueued} queuedTasks={[{ id: '', sessionId: 's', prompt: '尚未确认的指令', status: 'queued', createdAt: '', updatedAt: '' }]}/>);
+    const edit = screen.getByRole<HTMLButtonElement>('button', { name: '编辑' });
+    expect(edit.disabled).toBe(true);
+    fireEvent.click(edit);
+    expect(onEditQueued).not.toHaveBeenCalled();
+  });
+
   const task = (id: string, prompt: string) => ({ id, sessionId: 's1', prompt, status: 'queued', createdAt: '', updatedAt: '' });
 
   it('渲染排队列表与条数', () => {

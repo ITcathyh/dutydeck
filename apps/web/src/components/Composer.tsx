@@ -1,9 +1,9 @@
-import { type KeyboardEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { type KeyboardEvent, type RefObject, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { BrainCircuit, Check, ChevronDown, CircleStop, ClipboardList, File, FolderOpen, Gauge, ListEnd, MessageSquarePlus, Plus, RefreshCw, Send, Sparkles, Square, TriangleAlert, X, Zap } from 'lucide-react';
 import type { AgentModel, Session, SkillReference, Task } from '../api';
 import { replaceSlashQuery, slashQuery, type ComposerReference, type ModelReadiness } from '../composer-utils';
 import { composerCapabilities, mergeComposerCommands, type ComposerCommandAction } from '../composer-commands';
-import { isImeComposing } from '../ime';
+import { imeCompositionHandlers, isImeKey } from '../ime';
 import { Badge, Banner, Button, IconButton, Input, Popover, Spinner, usePopoverTrigger } from './primitives';
 import { busyStates } from './ui';
 
@@ -22,15 +22,13 @@ type VisibleCommand = { name: string; description: string; action: ComposerComma
 */
 const panelTriggerClass = 'flex h-10 min-w-0 items-center gap-1.5 rounded-md px-2 text-caption text-subtle transition-colors duration-fast ease-out hover:bg-hover hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring';
 
-function useAutoResizeTextarea(value: string) {
-  const ref = useRef<HTMLTextAreaElement>(null);
+function useAutoResizeTextarea(value: string, ref: RefObject<HTMLTextAreaElement | null>) {
   useLayoutEffect(() => {
     const textarea = ref.current;
     if (!textarea) return;
     textarea.style.height = '0px';
     textarea.style.height = `${Math.min(192, Math.max(64, textarea.scrollHeight))}px`;
-  }, [value]);
-  return ref;
+  }, [value, ref]);
 }
 
 function NowStatusStrip({ state, blockingPermissionId }: { state: Session['state']; blockingPermissionId?: string }) {
@@ -99,7 +97,7 @@ function NowStatusStrip({ state, blockingPermissionId }: { state: Session['state
   return null;
 }
 
-function QueuedTasks({ tasks, cancellingTaskId, steeringTaskId, injectingTaskId, blockingPermissionId, rejectingPermission, onCancel, onSteer, onInject, onRejectPermission }: { tasks: Task[]; cancellingTaskId?: string; steeringTaskId?: string; injectingTaskId?: string; blockingPermissionId?: string; rejectingPermission?: boolean; onCancel(id: string): void; onSteer(id: string): void; onInject?(id: string): void; onRejectPermission?(permissionId: string): void }) {
+function QueuedTasks({ tasks, cancellingTaskId, steeringTaskId, injectingTaskId, blockingPermissionId, rejectingPermission, onCancel, onEdit, onSteer, onInject, onRejectPermission }: { tasks: Task[]; cancellingTaskId?: string; steeringTaskId?: string; injectingTaskId?: string; blockingPermissionId?: string; rejectingPermission?: boolean; onCancel(id: string): void; onEdit?(id: string): void; onSteer(id: string): void; onInject?(id: string): void; onRejectPermission?(permissionId: string): void }) {
   if (!tasks.length) return null;
   const frozen = Boolean(cancellingTaskId) || Boolean(steeringTaskId) || Boolean(injectingTaskId);
   // 当前一轮停在审批上时，排队的指令都要等它；这里给一个直接拒绝的入口，免得回到时间线里找那张审批卡。
@@ -113,9 +111,10 @@ function QueuedTasks({ tasks, cancellingTaskId, steeringTaskId, injectingTaskId,
       {blocked && onRejectPermission && <Button size="md" variant="ghost" loading={rejectingPermission} onClick={() => onRejectPermission(blockingPermissionId!)}>拒绝这条审批</Button>}
     </div>
     <p className="px-3.5 pt-2 text-caption text-queued">打断会停止正在进行的操作，再执行所选指令；已有改动保留。</p>
-    <div className="max-h-32 overflow-y-auto">{tasks.map(task => <div key={task.id} className="group flex flex-wrap items-center gap-2 px-3.5 py-1.5 text-caption text-secondary hover:bg-hover">
+    <div className="max-h-32 overflow-y-auto">{tasks.map((task, index) => <div key={task.id || `pending-${index}`} className="group flex flex-wrap items-center gap-2 px-3.5 py-1.5 text-caption text-secondary hover:bg-hover">
       <span className="min-w-0 basis-full truncate sm:flex-1 sm:basis-auto">{task.prompt}</span>
       <span className="shrink-0 text-caption text-subtle">{blocked ? '被审批阻塞' : '排队中'}</span>
+      {onEdit && <Button size="md" variant="ghost" disabled={frozen || !task.id} onClick={() => onEdit(task.id)}>编辑</Button>}
       {/* 「立即插话」把这条送进正在执行的那一轮，不打断它；Agent 不支持时这条仍在排队。 */}
       {onInject && <Button size="md" variant="ghost" disabled={frozen} onClick={() => onInject(task.id)}>{injectingTaskId === task.id ? '正在插话' : '立即插话'}</Button>}
       {/* 「打断当前任务并执行」会掐掉正在跑的那一步，属于契约 §9 的主要交互：40px，不走 sm 豁免。 */}
@@ -177,10 +176,11 @@ function FilePanel({ filePath, filePicker, onFilePathChange, onPickFile, onConfi
     <div className="mt-3 flex gap-2">
       <Input
         autoFocus
+        {...imeCompositionHandlers}
         aria-label="本地文件路径"
         value={filePath}
         onChange={event => onFilePathChange(event.target.value)}
-        onKeyDown={event => { if (event.key === 'Enter' && !isImeComposing(event)) { event.preventDefault(); onConfirm(); } }}
+        onKeyDown={event => { if (event.key === 'Enter' && !isImeKey(event)) { event.preventDefault(); onConfirm(); } }}
         placeholder="/Users/name/project/file.ts"
         className="min-w-0 flex-1 font-mono"
       />
@@ -190,7 +190,10 @@ function FilePanel({ filePath, filePicker, onFilePathChange, onPickFile, onConfi
   </div>;
 }
 
-function ModelsPanel({ models, currentModel, switching, refreshing, modelReadiness, onPick, onRefresh }: { models: AgentModel[]; currentModel?: string; switching: boolean; refreshing: boolean; modelReadiness: ModelReadiness; onPick(id: string): void; onRefresh(): void }) {
+function ModelsPanel({ models, currentModel, switching, refreshing, modelReadiness, search, onSearch, onPick, onRefresh }: { models: AgentModel[]; currentModel?: string; switching: boolean; refreshing: boolean; modelReadiness: ModelReadiness; search: string; onSearch(value: string): void; onPick(id: string): void; onRefresh(): void }) {
+  const searchable = models.length > 8;
+  const query = searchable ? search.trim().toLowerCase() : '';
+  const filtered = query ? models.filter(model => model.name.toLowerCase().includes(query) || model.id.toLowerCase().includes(query)) : models;
   return <div>
     <div className="flex items-center gap-2 border-b border-subtle px-3 py-2">
       <Gauge size={13} className="text-subtle"/>
@@ -200,8 +203,20 @@ function ModelsPanel({ models, currentModel, switching, refreshing, modelReadine
         ? <Spinner size="sm" label="正在刷新…"/>
         : <IconButton label="刷新模型列表" onClick={onRefresh}><RefreshCw size={14}/></IconButton>}</span>
     </div>
+    {searchable && <div className="px-2.5 pt-2">
+      <Input autoFocus type="search" aria-label="搜索模型" placeholder="搜索模型名称或 ID" value={search}
+        {...imeCompositionHandlers}
+        onChange={event => onSearch(event.target.value)}
+        onKeyDown={event => {
+          if (isImeKey(event)) { if (event.key === 'Escape') event.stopPropagation(); return; }
+          if (event.key !== 'Enter') return;
+          event.preventDefault();
+          const first = filtered.find(model => model.id !== currentModel);
+          if (!switching && first) onPick(first.id);
+        }}/>
+    </div>}
     <div className="max-h-72 overflow-y-auto p-1.5">
-      {models.map(model => <button
+      {filtered.map(model => <button
         key={model.id}
         type="button"
         disabled={switching || model.id === currentModel}
@@ -212,6 +227,7 @@ function ModelsPanel({ models, currentModel, switching, refreshing, modelReadine
         <span className="min-w-0 flex-1 truncate">{model.name}</span>
         {model.name !== model.id && <span className="ml-3 max-w-[48%] truncate font-mono text-meta text-subtle">{model.id}</span>}
       </button>)}
+      {models.length > 0 && !filtered.length && <p className="px-3 py-5 text-center text-caption text-subtle">没有匹配的模型</p>}
       {!models.length && <div className="p-1.5">{modelReadiness.kind === 'blocked'
         ? <Banner tone="danger">{modelReadiness.reason}</Banner>
         : <p className="px-3 py-5 text-center text-caption text-subtle">{modelReadiness.kind === 'ready' ? 'Agent 未提供可切换模型' : modelReadiness.reason}</p>}</div>}
@@ -250,7 +266,7 @@ function ReferenceChips({ references, onChange }: { references: ComposerReferenc
   </span>)}</div>;
 }
 
-export function Composer({ planFirst = false, onPlanFirstChange, state, session, value, references, sending, mode, queuedTasks, cancellingTaskId, steeringTaskId, injectingTaskId, steerable, blockingPermissionId, rejectingPermission, onRejectPermission, skills, skillCatalogStatus, models, reasoningEfforts, currentModel, currentReasoningEffort, advertisedCommands, filePicker, modelReadiness, switchingModel, switchingReasoningEffort, refreshingModels, onChange, onReferencesChange, onModeChange, onSubmit, onInterrupt, onCancelQueued, onSteerQueued, onInjectQueued, onPickFile, onModelChange, onReasoningEffortChange, onRefreshModels, onShowStatus, onRestart, onCreateTask, onOpenHelp }: {
+export function Composer({ planFirst = false, onPlanFirstChange, state, session, value, references, sending, mode, queuedTasks, cancellingTaskId, steeringTaskId, injectingTaskId, steerable, blockingPermissionId, rejectingPermission, onRejectPermission, skills, skillCatalogStatus, models, reasoningEfforts, currentModel, currentReasoningEffort, advertisedCommands, filePicker, modelReadiness, switchingModel, switchingReasoningEffort, refreshingModels, onChange, onReferencesChange, onModeChange, onSubmit, onInterrupt, onCancelQueued, onEditQueued, onSteerQueued, onInjectQueued, onPickFile, onModelChange, onReasoningEffortChange, onRefreshModels, onShowStatus, onRestart, onCreateTask, onOpenHelp, inputRef }: {
   state: string; session?: Pick<Session, 'state' | 'archivedAt' | 'source'>; value: string; references: ComposerReference[]; sending: boolean; mode: SendMode; queuedTasks: Task[]; cancellingTaskId?: string; steeringTaskId?: string;
   /** 先出计划：打开时这条消息让 Agent 只调研出计划，批准后才执行。未传 onPlanFirstChange 时不显示开关。 */
   planFirst?: boolean; onPlanFirstChange?(value: boolean): void;
@@ -261,16 +277,20 @@ export function Composer({ planFirst = false, onPlanFirstChange, state, session,
   skillCatalogStatus?: { partial: boolean; diagnostics: Array<{ path: string; code: string; message: string }> };
   skills: SkillReference[]; models: AgentModel[]; reasoningEfforts: AgentModel[]; currentModel?: string; currentReasoningEffort?: string; advertisedCommands: Array<{ name: string; description: string }>; filePicker: boolean; modelReadiness: ModelReadiness; switchingModel: boolean; switchingReasoningEffort: boolean; refreshingModels: boolean;
   onChange(value: string): void; onReferencesChange(value: ComposerReference[]): void; onModeChange(mode: SendMode): void; onSubmit(): void; onInterrupt(): void; onCancelQueued(taskId: string): void; onSteerQueued(taskId: string): void; onPickFile(): Promise<string | undefined>; onModelChange(model: string): void; onReasoningEffortChange(reasoningEffort: string): void; onRefreshModels(): void;
+  onEditQueued?(taskId: string): void; inputRef?: RefObject<HTMLTextAreaElement | null>;
   // 命令注册表驱动的动作。未传时对应命令不出现在面板里（见 commands 的 filter）。
   onShowStatus?(): void; onRestart?(): void; onCreateTask?(): void; onOpenHelp?(): void;
 }) {
   const [panel, setPanel] = useState<ComposerPanel>();
+  const [modelSearch, setModelSearch] = useState('');
   const [filePath, setFilePath] = useState('');
   const [modeOpen, setModeOpen] = useState(false);
   // 斜杠查询会自动弹出命令面板。用户显式收起（Escape / 点外部）后必须记住这一次已经收起过，
   // 否则关不掉：commandPanel 是从 query 推导出来的，onClose 无处落笔，下一帧照样为 true。
   const [slashDismissed, setSlashDismissed] = useState(false);
-  const textarea = useAutoResizeTextarea(value);
+  const localTextarea = useRef<HTMLTextAreaElement>(null);
+  const textarea = inputRef ?? localTextarea;
+  useAutoResizeTextarea(value, textarea);
   // 四个上方面板共用 Composer 外壳作锚点：它们本来就渲染在同一处、同一宽度。
   // 锚点包住 textarea 是刻意的——否则「输入 / 弹出面板后点一下输入框」会被 Popover 的
   // 外部点击判成关闭。
@@ -316,6 +336,7 @@ export function Composer({ planFirst = false, onPlanFirstChange, state, session,
   const modeTrigger = usePopoverTrigger(modeOpen && modeTriggerVisible, 'menu');
 
   const closePanel = () => { setPanel(undefined); setSlashDismissed(true); };
+  const openModels = () => { setModelSearch(''); setPanel('models'); };
   const removeSlash = () => onChange(replaceSlashQuery(value, '', textarea.current?.selectionStart ?? value.length));
   const chooseCommand = (command: VisibleCommand) => {
     // 不可用的命令仍然列在面板里（消失会让用户以为自己记错了），但点不动。
@@ -327,7 +348,7 @@ export function Composer({ planFirst = false, onPlanFirstChange, state, session,
       return;
     }
     removeSlash();
-    if (command.action === 'model') { setPanel('models'); return; }
+    if (command.action === 'model') { openModels(); return; }
     if (command.action === 'file' || command.action === 'reasoning') { setPanel(command.action); return; }
     // 直接执行型命令：清掉斜杠、收起面板，动作交给上层回调。
     setPanel(undefined);
@@ -346,8 +367,8 @@ export function Composer({ planFirst = false, onPlanFirstChange, state, session,
   };
   const keyboard = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     // IME 组字保护：中文输入法确认候选词时也会发 Enter。
-    if (isImeComposing(event)) return;
-    if (event.key === 'Escape' && (panel || query !== undefined)) { event.preventDefault(); closePanel(); return; }
+    if (isImeKey(event)) return;
+    if (event.key === 'Escape' && panel !== 'models' && (panel || query !== undefined)) { event.preventDefault(); closePanel(); return; }
     // Enter 落到第一个**可用**命令上：落到禁用项会让人以为按键失灵。
     if (event.key === 'Enter' && !event.shiftKey && commandPanel && (visibleCommands.some(command => command.available) || visibleSkills[0])) {
       event.preventDefault();
@@ -364,7 +385,7 @@ export function Composer({ planFirst = false, onPlanFirstChange, state, session,
   return <div className="bg-gradient-to-t from-canvas via-canvas to-transparent ui-composer-dock pt-7"><div className="ui-thread">
     {blockedPlan && <div role="alert" className="mb-2 text-caption text-secondary">这份草稿选择了先出计划。飞书会话请在飞书发送 /plan；如需直接执行，<button type="button" className="text-action underline" onClick={() => onPlanFirstChange?.(false)}>改为普通消息</button>。</div>}
     <NowStatusStrip state={state} blockingPermissionId={blockingPermissionId}/>
-    <QueuedTasks tasks={queuedTasks} cancellingTaskId={cancellingTaskId} steeringTaskId={steeringTaskId} injectingTaskId={injectingTaskId} blockingPermissionId={blockingPermissionId} rejectingPermission={rejectingPermission} onCancel={onCancelQueued} onSteer={onSteerQueued} onInject={steerable && busy ? onInjectQueued : undefined} onRejectPermission={onRejectPermission}/>
+    <QueuedTasks tasks={queuedTasks} cancellingTaskId={cancellingTaskId} steeringTaskId={steeringTaskId} injectingTaskId={injectingTaskId} blockingPermissionId={blockingPermissionId} rejectingPermission={rejectingPermission} onCancel={onCancelQueued} onEdit={onEditQueued} onSteer={onSteerQueued} onInject={steerable && busy ? onInjectQueued : undefined} onRejectPermission={onRejectPermission}/>
 
     <div ref={shell} className={`relative rounded-xl border border-default bg-surface p-2 shadow-panel ring-1 ring-inset ring-subtle backdrop-blur-sm transition-[transform,border-color,box-shadow,background-color] duration-normal ease-out focus-within:-translate-y-0.5 focus-within:border-action focus-within:bg-raised ${queuedTasks.length ? 'rounded-t-md' : ''}`}>
       {/*
@@ -388,13 +409,19 @@ export function Composer({ planFirst = false, onPlanFirstChange, state, session,
         <FilePanel filePath={filePath} filePicker={filePicker} onFilePathChange={setFilePath} onPickFile={() => void openPicker()} onConfirm={confirmFile}/>
       </Popover>
 
-      <Popover open={panel === 'models'} onClose={closePanel} anchor={shell} placement="top-start" width="anchor">
+      <Popover open={panel === 'models'} onClose={closePanel} onEscape={() => {
+        if (models.length <= 8 || !modelSearch) return false;
+        setModelSearch('');
+        return true;
+      }} anchor={shell} placement="top-start" width="anchor">
         <ModelsPanel
           models={models}
           currentModel={currentModel}
           switching={switchingModel}
           refreshing={refreshingModels}
           modelReadiness={modelReadiness}
+          search={modelSearch}
+          onSearch={setModelSearch}
           onPick={id => { onModelChange(id); setPanel(undefined); }}
           onRefresh={onRefreshModels}
         />
@@ -414,6 +441,7 @@ export function Composer({ planFirst = false, onPlanFirstChange, state, session,
       {busy && <p className={`px-2.5 py-1 text-caption ${mode === 'interrupt' ? 'text-warning' : 'text-subtle'}`}>{mode === 'interrupt' ? '将停止当前执行并发送这条指令；正在进行的操作会被打断，已有改动保留。' : mode === 'steer' && steerable ? '补充给当前这一轮；不会停止当前执行。' : '本轮完成后，按队列顺序执行。'}</p>}
       <textarea
         ref={textarea}
+        {...imeCompositionHandlers}
         aria-label="消息"
         value={value}
         onChange={event => { onChange(event.target.value); if (panel !== 'file' && panel !== 'models' && panel !== 'reasoning') setPanel(undefined); }}
@@ -438,7 +466,7 @@ export function Composer({ planFirst = false, onPlanFirstChange, state, session,
           title={modelReadiness.kind === 'ready' ? '切换模型' : modelReadiness.reason}
           aria-expanded={modelsTrigger['aria-expanded']}
           aria-haspopup={modelsTrigger['aria-haspopup']}
-          onClick={() => setPanel(panel === 'models' ? undefined : 'models')}
+          onClick={() => { if (panel === 'models') closePanel(); else openModels(); }}
           className={`${panelTriggerClass} max-w-40`}
         ><Gauge size={13}/><span className="truncate">{modelLabel}</span><ChevronDown size={12}/></button>
 

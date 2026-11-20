@@ -21,6 +21,19 @@ export function buildPrompt(message: string, references: ComposerReference[]) {
   return prompt || (references.some(reference => reference.kind === 'skill') ? '请按所选 Skill 执行。' : '');
 }
 
+export function splitPromptFileReferences(prompt: string): { text: string; references: ComposerReference[] } {
+  const references: ComposerReference[] = [];
+  let text = prompt;
+  // buildPrompt stores file references as leading paragraphs in the original prompt.
+  const fileParagraph = /^\/file ([^\r\n]+)(?:\n\n|$)/;
+  for (let match = fileParagraph.exec(text); match; match = fileParagraph.exec(text)) {
+    const value = match[1]!;
+    references.push({ id: `file-${value}`, kind: 'file', label: value.split('/').at(-1) || value, value });
+    text = text.slice(match[0].length);
+  }
+  return { text, references };
+}
+
 export function slashQuery(value: string, caret = value.length) {
   const beforeCaret = value.slice(0, caret);
   const match = beforeCaret.match(/(?:^|\s)\/([^\s/]*)$/);

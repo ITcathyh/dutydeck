@@ -7,7 +7,7 @@ import { Button, EmptyState, Skeleton } from './primitives';
 import { ActivityPanel } from './ActivityPanel';
 import { TimelineDisclosureContext } from '../timeline-disclosure';
 import { getTimelineReadingState, saveTimelineReadingState, type TimelineReadingAnchor } from '../timeline-reading-state';
-import { TimelineItem } from './TimelineItem';
+import { TimelineItem, TimelineTimestamp } from './TimelineItem';
 import { useQuery } from '@tanstack/react-query';
 import { api, type DockEvent, type HistoryTurnPlace, type HistoryTurnSummary } from '../api';
 import { HISTORY_TURN_PAGE_SIZE } from '../event-history';
@@ -79,18 +79,19 @@ function ScrollToBottomButton({ onClick }: { onClick(): void }) {
   </div>;
 }
 
-const TimelineBody = memo(function TimelineBody({ timelineSections, activeOutputLabel, onResolvePermission, resolvingPermissionId, awaitingAnswer, hasOngoingActivity, timeline, latestUserIndex, density }: Pick<TimelineViewProps, 'timelineSections' | 'activeOutputLabel' | 'onResolvePermission' | 'resolvingPermissionId' | 'awaitingAnswer' | 'hasOngoingActivity' | 'timeline' | 'latestUserIndex' | 'density'>) {
+const TimelineBody = memo(function TimelineBody({ timelineSections, activeOutputLabel, onResolvePermission, resolvingPermissionId, awaitingAnswer, hasOngoingActivity, timeline, latestUserIndex, density, showEndTime = true }: Pick<TimelineViewProps, 'timelineSections' | 'activeOutputLabel' | 'onResolvePermission' | 'resolvingPermissionId' | 'awaitingAnswer' | 'hasOngoingActivity' | 'timeline' | 'latestUserIndex' | 'density'> & { showEndTime?: boolean }) {
   return <>
-    {timelineSections.map(section => section.kind === 'event'
-      ? <div key={section.event.id} data-timeline-event={section.event.id} style={{ display: 'flow-root' }}><TimelineItem
+    {timelineSections.map(section => {
+      const endTime = showEndTime && section.turnEndedAt && <TimelineTimestamp timestamp={section.turnEndedAt} label="本轮结束时间" tabIndex={0} className="-bottom-2 left-0"/>;
+      return section.kind === 'event'
+      ? <div key={section.event.id} data-timeline-event={section.event.id} className={endTime ? 'ui-timeline-time-target relative' : undefined} style={{ display: 'flow-root' }}><TimelineItem
           event={section.event}
           final={section.final}
           assistantLabel={activeOutputLabel}
           onResolvePermission={onResolvePermission}
           resolvingPermissionId={resolvingPermissionId}
-        /></div>
-      : <ActivityPanel
-          key={`activity-${section.hasAnswer ? 'settled' : 'active'}`}
+        />{endTime}</div>
+      : <div key={`activity-${section.hasAnswer ? 'settled' : 'active'}`} className="ui-timeline-time-target relative flow-root"><ActivityPanel
           groups={section.groups}
           hasAnswer={section.hasAnswer}
           taskStatus={section.taskStatus}
@@ -99,13 +100,14 @@ const TimelineBody = memo(function TimelineBody({ timelineSections, activeOutput
           startedAt={section.startedAt}
           completedAt={section.completedAt}
           density={density}
-        />)}
+        />{endTime}</div>;
+    })}
     {awaitingAnswer && !hasOngoingActivity && <ActivityPanel groups={[]} ongoing modelLabel={activeOutputLabel} startedAt={timeline[latestUserIndex]?.timestamp} density={density}/>}
   </>;
 }, (a, b) => a.activeOutputLabel === b.activeOutputLabel && a.onResolvePermission === b.onResolvePermission
   && a.resolvingPermissionId === b.resolvingPermissionId && a.awaitingAnswer === b.awaitingAnswer
   && a.hasOngoingActivity === b.hasOngoingActivity
-  && a.density === b.density
+  && a.density === b.density && a.showEndTime === b.showEndTime
   && (!a.awaitingAnswer || a.timeline[a.latestUserIndex]?.timestamp === b.timeline[b.latestUserIndex]?.timestamp)
   && a.timelineSections.length === b.timelineSections.length && a.timelineSections.every((section, index) => section === b.timelineSections[index]));
 
@@ -421,7 +423,7 @@ function HistoryTurn({ sessionId, summary, activeOutputLabel, requestedSource }:
     return () => cancelAnimationFrame(frame);
   }, [requestedSource, detail.isSuccess, target]);
   const labels: Record<string, string> = { completed: '已完成', failed: '已失败', cancelled: '已取消', interrupted: '已中断', unverified: '结果未确认' };
-  return <section data-history-summary={summary.id} className="my-4 border-b border-default pb-4">
+  return <section data-history-summary={summary.id} className="ui-timeline-time-target relative my-4 border-b border-default pb-4">
     <div data-timeline-event={summary.id}>
       <div className="mb-2 whitespace-pre-wrap text-body text-primary">{summary.prompt.text || '历史执行记录'}{summary.prompt.truncated && <span className="text-caption text-subtle">（指令已截断，展开读取完整记录）</span>}</div>
       <div className="mb-3 text-meta text-subtle">{labels[summary.status] ?? summary.status} · {summary.toolCount} 次工具调用 · 事件 {summary.firstSequence}–{summary.lastSequence}{summary.artifactReferences.length > 0 && ` · ${summary.artifactReferences.length} 个产物引用`}{summary.artifactReferencesTruncated && '（引用清单已截断，展开查看全部）'}</div>
@@ -429,7 +431,8 @@ function HistoryTurn({ sessionId, summary, activeOutputLabel, requestedSource }:
       {(!open || !detail.isSuccess) && summary.output.truncated && <p className="text-caption text-subtle">最终输出已截断；展开可读取完整内容。</p>}
     </div>
     <button className="my-2 min-h-10 text-caption text-info" aria-expanded={open} onClick={() => setOpen(!open)}>{open ? '收起完整记录' : '展开完整记录'}</button>
-    {open && (detail.isPending ? <p role="status">正在读取完整记录…</p> : detail.isError ? <p role="alert">记录读取失败：{detail.error.message}<button onClick={() => void detail.refetch()} className="ml-2 text-info">重试</button></p> : <TimelineBody key={requested ? requestedSource?.requestId : undefined} timelineSections={timelineSections} timeline={timeline} latestUserIndex={-1} activeOutputLabel={activeOutputLabel} awaitingAnswer={false} hasOngoingActivity={false}/>)}
+    {open && (detail.isPending ? <p role="status">正在读取完整记录…</p> : detail.isError ? <p role="alert">记录读取失败：{detail.error.message}<button onClick={() => void detail.refetch()} className="ml-2 text-info">重试</button></p> : <TimelineBody key={requested ? requestedSource?.requestId : undefined} timelineSections={timelineSections} timeline={timeline} latestUserIndex={-1} activeOutputLabel={activeOutputLabel} awaitingAnswer={false} hasOngoingActivity={false} showEndTime={!summary.activity?.endedAt}/>)}
+    <TimelineTimestamp timestamp={summary.activity?.endedAt} label="本轮结束时间" tabIndex={0} className="bottom-0 right-0"/>
   </section>;
 }
 

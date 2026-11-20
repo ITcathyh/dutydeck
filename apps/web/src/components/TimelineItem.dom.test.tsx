@@ -1,5 +1,5 @@
 import { render, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { BACKGROUND_FOLLOWUP } from '@dutydeck/shared';
 import { TimelineItem } from './TimelineItem';
 import type { TimelineEvent } from '../timeline';
@@ -16,6 +16,19 @@ const event = (type: string, data: Record<string, unknown> = {}): TimelineEvent 
 });
 
 describe('TimelineItem 事件分发', () => {
+  it.each([
+    [new Date(2026, 10, 20, 9, 5), '09:05'],
+    [new Date(2026, 10, 19, 9, 5), '11 月 19 日 09:05'],
+    [new Date(2025, 10, 19, 9, 5), '2025 年 11 月 19 日 09:05']
+  ])('用本地时区标注消息发送时间 %s', (sentAt, formatted) => {
+    vi.setSystemTime(new Date(2026, 10, 20, 10));
+    try {
+      render(<TimelineItem event={{ ...event('text', { role: 'user', text: '原文' }), timestamp: sentAt.toISOString() }}/>);
+      expect(screen.getByText(formatted).getAttribute('datetime')).toBe(sentAt.toISOString());
+      expect(screen.getByText(formatted).closest('[tabindex="0"]')).toBeTruthy();
+    } finally { vi.useRealTimers(); }
+  });
+
   it('tool_call → 渲染 ToolCard（带状态文案），不是纯文本气泡', () => {
     render(<TimelineItem event={event('tool_call', { name: 'terminal', status: 'completed', input: { command: 'ls' }, startedAt: '2026-08-27T00:00:00.000Z', completedAt: '2026-08-27T00:00:01.000Z' })}/>);
     expect(screen.getByText('已完成')).toBeTruthy();

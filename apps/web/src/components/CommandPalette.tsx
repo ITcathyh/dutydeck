@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { CornerDownLeft, Search } from 'lucide-react';
 import type { Agent, RunSummary, Session } from '../api';
-import { isImeComposing } from '../ime';
+import { imeCompositionHandlers, isImeKey } from '../ime';
 import { fallbackRunTitle, sessionDisplayName } from '../run-summary';
 import { searchTasks, taskSearchTerms, type TaskSearchField, type TaskSearchMatch } from '../task-search';
 import { useDialogFocus } from '../useDialogFocus';
@@ -137,7 +137,7 @@ export function CommandPalette({ open, onClose, sessions, summaries, agents, act
   const onKeyDown = (event: KeyboardEvent<HTMLElement>) => {
     // 组字期间方向键、Home/End 选候选词，Escape 取消组字，都归输入法处理。
     // 组字时的 Escape 同样不能冒泡到下层弹层的 document 监听。
-    if (isImeComposing(event)) { if (event.key === 'Escape') event.stopPropagation(); return; }
+    if (isImeKey(event)) { if (event.key === 'Escape') event.stopPropagation(); return; }
     if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onClose(); return; }
     if (event.key === 'ArrowDown') { event.preventDefault(); move(activeIndex + 1, 1); return; }
     if (event.key === 'ArrowUp') { event.preventDefault(); move(activeIndex - 1, -1); return; }
@@ -151,7 +151,7 @@ export function CommandPalette({ open, onClose, sessions, summaries, agents, act
     : `${actionCount} 个命令，${taskCount} 个最近任务`;
 
   return <div className="ui-overlay fixed inset-0 z-dialog flex items-start justify-center bg-scrim p-4 pt-[9vh] backdrop-blur-[3px]" onMouseDown={event => { if (event.currentTarget === event.target) onClose(); }}>
-    <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="搜索任务与命令" onKeyDown={onKeyDown} className="ui-dialog flex max-h-[76dvh] w-full max-w-[640px] flex-col overflow-hidden rounded-xl border border-default bg-surface shadow-dialog">
+    <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="搜索任务与命令" {...imeCompositionHandlers} onKeyDown={onKeyDown} className="ui-dialog flex max-h-[76dvh] w-full max-w-[640px] flex-col overflow-hidden rounded-xl border border-default bg-surface shadow-dialog">
       <div className="flex items-center gap-2.5 border-b border-subtle px-4 py-3">
         <Search aria-hidden="true" size={17} className="shrink-0 text-subtle"/>
         <input

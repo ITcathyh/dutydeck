@@ -66,6 +66,36 @@ async function selectedText(locator: Locator): Promise<string> {
   });
 }
 
+test('会话时间标注在桌面悬停或聚焦时显示，触屏常显，切换时正文高度不变', async ({ page, browser }) => {
+  const instance = await launchIsolatedTestServer('dutydeck-message-time-');
+  try {
+    const sessionId = await seedCompletedSession(instance, '检查时间标注');
+    const bubble = await openUserBubble(page, instance, sessionId);
+    const sent = bubble.getByLabel(/^发送时间/);
+    const ended = page.getByLabel(/^本轮结束时间/);
+    const initial = await bubble.boundingBox();
+    await expect(sent).toHaveCSS('opacity', '0');
+    await bubble.hover();
+    await expect(sent).toHaveCSS('opacity', '1');
+    expect((await bubble.boundingBox())?.height).toBe(initial?.height);
+    await page.mouse.move(0, 0);
+    await bubble.focus();
+    await expect(sent).toHaveCSS('opacity', '1');
+    await ended.focus();
+    await expect(ended).toHaveCSS('opacity', '1');
+
+    const touch = await browser.newContext({ hasTouch: true, isMobile: true, viewport: { width: 360, height: 800 } });
+    try {
+      const touchPage = await touch.newPage();
+      const touchBubble = await openUserBubble(touchPage, instance, sessionId);
+      await touchPage.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+      await expect(touchBubble.getByLabel(/^发送时间/)).toHaveCSS('opacity', '1');
+      await expect(touchPage.getByLabel(/^本轮结束时间/)).toHaveCSS('opacity', '1');
+      await expectNoPageOverflow(touchPage);
+    } finally { await touch.close(); }
+  } finally { await instance.cleanup(); }
+});
+
 test('用户气泡在 360px 窄屏折行，正文和复制结果不变，代码块保持横向滚动', async ({ page, context }) => {
   test.setTimeout(180_000);
   const instance = await launchIsolatedTestServer('dutydeck-user-wrap-');
